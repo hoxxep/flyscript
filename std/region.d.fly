@@ -20,3 +20,7 @@ impl<region R, T> RegionList<R, T> {
 impl<region R, T> Iterable<readonly T> for RegionList<R, T> {
   function each(self: readonly Self): void uses Yield<readonly T>;
 }
+
+// Handles are `Copy`, so cloning one copies it: a `Vec<Ref<T>>` clones like any other.
+impl<region R, T extends Copy> Clone for Cell<R, T> { function clone(self: readonly Self): Self; }
+impl<region R, T> Clone for RegionList<R, T> { function clone(self: readonly Self): Self; }

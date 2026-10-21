@@ -1,0 +1,16 @@
+// expect: 6
+// expect: -3
+// A `Box` is matched as what it holds (§4.1): a boxed tree is taken apart without unboxing.
+import { println } from "std/io";
+enum E { #Num(i64), #Add(Box<E>, Box<E>), #Neg(Box<E>) }
+function eval(e: readonly E): i64 {
+  match (e) {
+    #Num(n) => n,
+    #Add(a, b) => eval(a) + eval(b),
+    #Neg(x) => match (x) { #Num(n) => -n, _ => -eval(x) },
+  }
+}
+export function main(): void uses Io {
+  println(`${eval(#Add(Box.new(#Num(1)), Box.new(#Add(Box.new(#Num(2)), Box.new(#Num(3))))))}`);
+  println(`${eval(#Neg(Box.new(#Num(3))))}`);
+}

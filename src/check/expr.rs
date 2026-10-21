@@ -1145,6 +1145,27 @@ impl<'p> Checker<'p> {
         }
     }
 
+    /// A `Box<T>`, or a borrow of one, as the `T` it holds (through the same borrow).
+    fn unbox(&self, t: &Ty) -> Ty {
+        let boxed = |t: &Ty| match self.s.resolve(t) {
+            Ty::Named(d, args) if d == self.known("Box") => match args.first() {
+                Some(GArg::Ty(inner)) => Some(inner.clone()),
+                _ => None,
+            },
+            _ => None,
+        };
+        match self.s.resolve(t) {
+            Ty::Borrow(m, inner) => match boxed(&inner) {
+                Some(x) => self.unbox(&Ty::Borrow(m, Box::new(x))),
+                None => Ty::Borrow(m, inner),
+            },
+            other => match boxed(&other) {
+                Some(x) => self.unbox(&x),
+                None => other,
+            },
+        }
+    }
+
     /// A structural union, through any borrow, less some of its tags; `None` for anything else.
     fn without_tags(&self, t: &Ty, tags: &[String]) -> Option<Ty> {
         match self.s.resolve(t) {
@@ -1545,7 +1566,10 @@ impl<'p> Checker<'p> {
         // Expected types flow into calls before the arguments are checked (§3.6) — except a
         // borrow expected of a result that is only a type variable: whether that is owned is the
         // arguments' to say, and lending fits an owned result to a borrow afterwards.
-        let lent_var = matches!((self.s.resolve(&inst.ret), expected.map(|x| self.s.resolve(x))), (Ty::Var(_), Some(Ty::Borrow(false, _))));
+        // Nor of a method's result that is only a type variable: its receiver says what it is
+        // (`types.get(n).unwrap()` gives what the map holds, lent or not).
+        let lent_var = matches!((self.s.resolve(&inst.ret), expected.map(|x| self.s.resolve(x))), (Ty::Var(_), Some(Ty::Borrow(false, _))))
+            || (recv.is_some() && matches!(self.s.resolve(&inst.ret), Ty::Var(_)));
         if let Some(x) = expected.filter(|_| !lent_var) {
             let ret = inst.ret.clone();
             if !self.try_unify(&ret, x) {
@@ -2047,6 +2071,9 @@ impl<'p> Checker<'p> {
 
     fn match_expr(&mut self, scrutinee: &Expr, arms: &[ast::MatchArm], expected: Option<&Ty>, span: Span) -> Ty {
         let st = self.expr(scrutinee, None);
+        // A `Box` is matched as what it holds, which it lends (§4.1): a tree of boxed nodes is
+        // taken apart without unboxing by hand.
+        let st = self.unbox(&st);
         // A place nothing may be moved out of is matched through a borrow of it, so its parts
         // bind as borrows, as TypeScript programmers expect (§4.1).
         let st = match (self.unmovable_place(scrutinee), self.s.resolve(&st)) {

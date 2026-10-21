@@ -471,6 +471,7 @@ impl Interp {
                 Ok(Value::Int(wrap_to(ty, r)))
             }
             "panic" => Err(panic(a(0).as_text().to_string())),
+            "Ref.clone" | "Cell.clone" | "RegionList.clone" => Ok(a(0).deref_once()),
             "Vec.pop" => {
                 let p = place_of(&a(0))?;
                 let mut out = None;

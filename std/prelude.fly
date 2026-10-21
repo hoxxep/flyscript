@@ -656,6 +656,8 @@ impl<T extends Send> Clone for Arc<T> {
 // `Ref<R, T>` is used as a `readonly T`; the compiler provides the projection.
 export struct Ref<region R, T>;
 
+// A `Ref` is `Copy`, so cloning one copies it.
+impl<region R, T> Clone for Ref<R, T> { function clone(self: readonly Self): Self; }
 export function alloc<region R, T>(v: T): Ref<R, T> uses Region<R>;
 // TypeScript's `parseInt` and `parseFloat`, without the `NaN`: decimal text, or `#None`.
 export function parseInt(s: str): Option<i64>;

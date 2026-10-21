@@ -21,6 +21,22 @@
 // expect: error at 2:1: expected int, found bool
 // expect:     f(true)
 // expect:     ^
+// expect: data List = Nil | Cons(int, List);
+// expect: def sum(l) = case l of Nil => 0 | Cons(h, t) => h + sum(t);
+// expect: sum(Cons(1, Cons(2, Cons(3, Nil))))  :  int  =  6
+// expect: data List = Nil | Cons(int, List);
+// expect: def map(f, l) = case l of Nil => Nil | Cons(h, t) => Cons(f(h), map(f, t));
+// expect: map(fn(x) => x * 10, Cons(1, Cons(2, Nil)))  :  List  =  Cons(10, Cons(20, Nil))
+// expect: data Shape = Circle(int) | Rect(int, int);
+// expect: def area(s) = case s of Circle(r) => 3 * r * r | Rect(w, h) => w * h;
+// expect: area(Rect(3, 4)) + area(Circle(2))  :  int  =  24
+// expect: data Tree = Leaf | Node(Tree, int, Tree);
+// expect: def insert(t, v) = case t of Leaf => Node(Leaf, v, Leaf) | Node(l, x, r) => if v < x then Node(insert(l, v), x, r) else Node(l, x, insert(r, v));
+// expect: def total(t) = case t of Leaf => 0 | Node(l, x, r) => total(l) + x + total(r);
+// expect: total(insert(insert(insert(Leaf, 5), 2), 8))  :  int  =  15
+// expect: error at 2:1: this `case` does not handle Blue
+// expect:     case Green of Red => 1 | Green => 2
+// expect:     ^
 // expect: error at 1:13: expected int, found bool
 // expect:     let a = 1 + true in
 // expect:                 ^
@@ -53,7 +69,7 @@ type CompileError = Problem | #Many(Vec<Problem>);
 
 // ---- Lexer ----
 
-enum Tok { #Int(i64), #Ident(String), #Let, #In, #If, #Then, #Else, #Fn, #Def, #True, #False, #LParen, #RParen, #Comma, #Semi, #Eq, #Plus, #Minus, #Star, #Less, #Arrow, #Eof }
+enum Tok { #Int(i64), #Ident(String), #Let, #In, #If, #Then, #Else, #Fn, #Def, #Data, #Case, #Of, #Bar, #True, #False, #LParen, #RParen, #Comma, #Semi, #Eq, #Plus, #Minus, #Star, #Less, #Arrow, #Eof }
 
 impl Eq for Tok;
 impl Clone for Tok;
@@ -65,7 +81,7 @@ function isAlpha(b: u8): bool { (b >= b'a' && b <= b'z') || (b >= b'A' && b <= b
 function keyword(word: str): Tok {
   match (word) {
     "let" => #Let, "in" => #In, "if" => #If, "then" => #Then, "else" => #Else,
-    "fn" => #Fn, "def" => #Def, "true" => #True, "false" => #False,
+    "fn" => #Fn, "def" => #Def, "data" => #Data, "case" => #Case, "of" => #Of, "true" => #True, "false" => #False,
     _ => #Ident(word.toString()),
   }
 }
@@ -90,7 +106,7 @@ function lex(src: str): Vec<Token> uses Fail<CompileError> {
       continue;
     }
     const tok: Tok = match (b) {
-      b'(' => #LParen, b')' => #RParen, b',' => #Comma, b';' => #Semi, b'+' => #Plus, b'*' => #Star, b'<' => #Less,
+      b'(' => #LParen, b')' => #RParen, b',' => #Comma, b';' => #Semi, b'|' => #Bar, b'+' => #Plus, b'*' => #Star, b'<' => #Less,
       b'=' => if (i + 1 < bytes.len() && bytes[i + 1] == b'>') { i += 1; #Arrow } else { #Eq },
       b'-' => #Minus,
       _ => throw #Lex { at: i, message: `unexpected character ${b}` },
@@ -115,16 +131,24 @@ enum Expr {
   #Let(String, Box<Expr>, Box<Expr>, Span),
   #Fn(Vec<String>, Box<Expr>, Span),
   #Call(Box<Expr>, Vec<Expr>, Span),
+  #Case(Box<Expr>, Vec<Arm>, Span),
 }
+
+// `Cons(h, t) => body`: a constructor and names for its fields.
+type Arm = { ctor: String; binds: Vec<String>; body: Expr; span: Span };
 
 // `def name(params) = body;`: definitions see each other, so they may recurse.
 type Def = { name: String; params: Vec<String>; body: Expr; span: Span };
-type Program = { defs: Vec<Def>; main: Expr };
+// `data List = Nil | Cons(int, List);`: a type's constructors and their fields.
+enum TypeExpr { #TInt, #TBool, #TNamed(String, Span) }
+type CtorDecl = { name: String; fields: Vec<TypeExpr>; span: Span };
+type DataDecl = { name: String; ctors: Vec<CtorDecl> };
+type Program = { datas: Vec<DataDecl>; defs: Vec<Def>; main: Expr };
 
 function spanOf(e: readonly Expr): Span {
   match (e) {
     #Int(_, s) | #Bool(_, s) | #Var(_, s) => s,
-    #Bin(_, _, _, s) | #If(_, _, _, s) | #Let(_, _, _, s) | #Fn(_, _, s) | #Call(_, _, s) => s,
+    #Bin(_, _, _, s) | #If(_, _, _, s) | #Let(_, _, _, s) | #Fn(_, _, s) | #Call(_, _, s) | #Case(_, _, s) => s,
   }
 }
 
@@ -151,7 +175,12 @@ impl Parser {
 
   function program(self: mut Self): Program uses Fail<CompileError> {
     let defs: Vec<Def> = Vec.new();
-    while (self.peek() == #Def) {
+    let datas: Vec<DataDecl> = Vec.new();
+    while (self.peek() == #Def || self.peek() == #Data) {
+      if (self.peek() == #Data) {
+        datas.push(self.data());
+        continue;
+      }
       const start = self.here().start;
       self.bump();
       const name = self.ident();
@@ -170,7 +199,34 @@ impl Parser {
     }
     const main = self.expr();
     if (self.peek() != #Eof) { throw #Parse { at: self.here().start, message: "expected the end of the program".toString() }; }
-    { defs, main }
+    { datas, defs, main }
+  }
+
+  function data(self: mut Self): DataDecl uses Fail<CompileError> {
+    self.bump();
+    const name = self.ident();
+    self.expect(#Eq, "`=`");
+    let ctors: Vec<CtorDecl> = Vec.new();
+    while (true) {
+      const span = self.here();
+      const cname = self.ident();
+      let fields: Vec<TypeExpr> = Vec.new();
+      if (self.peek() == #LParen) {
+        self.bump();
+        while (self.peek() != #RParen) {
+          const at = self.here();
+          const t = self.ident();
+          fields.push(match (t.asStr()) { "int" => #TInt, "bool" => #TBool, _ => #TNamed(t, at) });
+          if (self.peek() == #Comma) { self.bump(); }
+        }
+        self.bump();
+      }
+      ctors.push({ name: cname, fields, span });
+      if (self.peek() != #Bar) { break; }
+      self.bump();
+    }
+    self.expect(#Semi, "`;`");
+    { name, ctors }
   }
 
   function expr(self: mut Self): Expr uses Fail<CompileError> {
@@ -209,6 +265,32 @@ impl Parser {
         const body = self.expr();
         const end = spanOf(body).end;
         #Fn(params, Box.new(body), { start, end })
+      }
+      #Case => {
+        self.bump();
+        const scrutinee = self.expr();
+        self.expect(#Of, "`of`");
+        let arms: Vec<Arm> = Vec.new();
+        while (true) {
+          const span = self.here();
+          const ctor = self.ident();
+          let binds: Vec<String> = Vec.new();
+          if (self.peek() == #LParen) {
+            self.bump();
+            while (self.peek() != #RParen) {
+              binds.push(self.ident());
+              if (self.peek() == #Comma) { self.bump(); }
+            }
+            self.bump();
+          }
+          self.expect(#Arrow, "`=>`");
+          const body = self.expr();
+          arms.push({ ctor, binds, body, span });
+          if (self.peek() != #Bar) { break; }
+          self.bump();
+        }
+        const end = spanOf(arms[arms.len() - 1].body).end;
+        #Case(Box.new(scrutinee), arms, { start, end })
       }
       _ => self.binary(0),
     }
@@ -275,12 +357,23 @@ impl Parser {
 
 // A type lives in the checker's region: `Ref`s to it are `Copy`, so nothing is cloned, and a
 // variable carries its own union-find link, set once it is solved.
-enum Type<region R> { #Error, #Int, #Bool, #Var(usize, Cell<Option<Ref<Type>>>), #Fn(Ref<Ref<Type>[]>, Ref<Type>) }
+enum Type<region R> { #Error, #Int, #Bool, #Data(usize, Ref<str>), #Var(usize, Cell<Option<Ref<Type>>>), #Fn(Ref<Ref<Type>[]>, Ref<Type>) }
+
+// A constructor: its type's index, its tag (unique across the program), its fields, its type.
+type Ctor<region R> = { data: usize; tag: usize; fields: Vec<Ref<R, Type<R>>>; result: Ref<R, Type<R>> };
 
 // A type with variables quantified: each use of a `let`-bound name gets fresh copies of them.
 type Scheme<region R> = { vars: Vec<usize>; ty: Ref<R, Type<R>> };
 
-struct Checker<region R> { next: usize; scopes: Vec<HashMap<String, Scheme<R>>>; int: Ref<R, Type<R>>; bool: Ref<R, Type<R>> }
+struct Checker<region R> {
+  next: usize;
+  scopes: Vec<HashMap<String, Scheme<R>>>;
+  int: Ref<R, Type<R>>;
+  bool: Ref<R, Type<R>>;
+  ctors: HashMap<String, Ctor<R>>;
+  // Each type's constructors, by name, for the exhaustiveness of `case`.
+  ctorsOf: Vec<Vec<String>>;
+}
 
 impl<region R> Checker<R> {
   function fresh(self: mut Self): Ref<Type> uses Region<R> {
@@ -316,6 +409,7 @@ impl<region R> Checker<R> {
     const [x, y] = [Checker.resolve(a), Checker.resolve(b)];
     match ([x, y]) {
       [#Error, _] | [_, #Error] | [#Int, #Int] | [#Bool, #Bool] => {},
+      [#Data(d, _), #Data(e, _)] if d == e => {},
       [#Var(v, _), #Var(w, _)] if v == w => {},
       [#Var(v, link), _] => Checker.bind(v, link, y, span),
       [_, #Var(v, link)] => Checker.bind(v, link, x, span),
@@ -340,6 +434,7 @@ impl<region R> Checker<R> {
     match (Checker.resolve(t)) {
       #Error => `?`,
       #Int => `int`,
+      #Data(_, name) => name.toString(),
       #Bool => `bool`,
       #Var(v, _) => `t${v}`,
       #Fn(ps, r) => `(${ps.iter().map((p) => Checker.show(p)).join(", ")}) => ${Checker.show(r)}`,
@@ -371,6 +466,10 @@ impl<region R> Checker<R> {
   }
 
   function lookup(self: mut Self, name: str, span: Span): Ref<Type> uses Region<R>, Diag {
+    // A constructor is a function of its fields, or a value if it has none.
+    if (const #Some(c) = self.ctors.get(name)) {
+      return if (c.fields.len() == 0) { c.result } else { Checker.func(c.fields, c.result) };
+    }
     let i = self.scopes.len();
     while (i > 0) {
       i -= 1;
@@ -409,6 +508,30 @@ impl<region R> Checker<R> {
   // Definitions are inferred together, each seeing the others at one type while their bodies
   // are checked (no polymorphic recursion), then generalized.
   function program(self: mut Self, p: readonly Program): Ref<Type> uses Region<R>, Diag {
+    // Data types first: their constructors' fields may name any of them.
+    let types: HashMap<String, Ref<Type>> = HashMap.new();
+    for (const [i, d] of p.datas.iter().enumerate()) { types.insert(d.name.clone(), alloc(#Data(i, fmt(d.name)))); }
+    let tag: usize = 0;
+    for (const [i, d] of p.datas.iter().enumerate()) {
+      let names: Vec<String> = Vec.new();
+      for (const c of d.ctors) {
+        let fields: Vec<Ref<Type>> = Vec.new();
+        for (const f of c.fields) {
+          fields.push(match (f) {
+            #TInt => self.int,
+            #TBool => self.bool,
+            #TNamed(n, at) => match (types.get(n)) {
+              #Some(t) => t,
+              #None => { Diag.report(#Unbound { span: at, name: n.clone() }); alloc(#Error) }
+            },
+          });
+        }
+        self.ctors.insert(c.name.clone(), { data: i, tag, fields, result: types.get(d.name).unwrap() });
+        names.push(c.name.clone());
+        tag += 1;
+      }
+      self.ctorsOf.push(names);
+    }
     let globals: HashMap<String, Scheme<R>> = HashMap.new();
     let own: Vec<Ref<Type>> = Vec.new();
     for (const d of p.defs) {
@@ -474,6 +597,46 @@ impl<region R> Checker<R> {
         tb
       }
       #Fn(params, body, _) => self.function(params, body),
+      #Case(scrutinee, arms, span) => {
+        const ts = self.infer(scrutinee);
+        const result = self.fresh();
+        let seen: HashSet<String> = HashSet.new();
+        let data: Option<usize> = #None;
+        for (const arm of arms) {
+          // What the arm needs of its constructor, copied out so the table is not held while
+          // the body is checked.
+          const found: Option<[usize, Vec<Ref<Type>>, Ref<Type>]> = match (self.ctors.get(arm.ctor)) {
+            #Some(c) => #Some([c.data, c.fields.clone(), c.result]),
+            #None => #None,
+          };
+          let scope: HashMap<String, Scheme<R>> = HashMap.new();
+          match (found) {
+            #None => Diag.report(#Unbound { span: arm.span, name: arm.ctor.clone() }),
+            #Some([d, fields, ctorType]) => {
+              Checker.unify(ts, ctorType, arm.span);
+              if (fields.len() != arm.binds.len()) {
+                Diag.report(#Type { span: arm.span, message: `\`${arm.ctor}\` has ${fields.len()} fields, not ${arm.binds.len()}` });
+              }
+              for (const [b, t] of arm.binds.iter().zip(fields.iter())) { scope.insert(b.clone(), Checker.mono(t)); }
+              if (!seen.insert(arm.ctor.clone())) {
+                Diag.report(#Type { span: arm.span, message: `\`${arm.ctor}\` is matched twice` });
+              }
+              data = #Some(d);
+            }
+          }
+          self.scopes.push(scope);
+          const tb = self.infer(arm.body);
+          self.scopes.pop();
+          Checker.unify(tb, result, spanOf(arm.body));
+        }
+        if (const #Some(d) = data) {
+          const missing: Vec<String> = self.ctorsOf[d].iter().filter((c) => !seen.has(c)).cloned().collect();
+          if (missing.len() > 0) {
+            Diag.report(#Type { span, message: `this \`case\` does not handle ${missing.join(", ")}` });
+          }
+        }
+        result
+      }
       #Call(f, args, span) => {
         const tf = self.infer(f);
         let tas: Vec<Ref<Type>> = Vec.new();
@@ -490,11 +653,11 @@ impl<region R> Checker<R> {
 // ---- Code generation to a stack machine ----
 
 // Each function has a frame of its own: what it captured, then its parameters, then its `let`s.
-enum Instr { #Push(i64), #Load(usize), #Global(usize), #Store, #Drop, #Add, #Sub, #Mul, #Lt, #Jump(usize), #JumpIfFalse(usize), #MakeFn(usize, usize, usize), #Call(usize), #Ret }
+enum Instr { #Push(i64), #Load(usize), #Global(usize), #Store, #Drop, #Add, #Sub, #Mul, #Lt, #Jump(usize), #JumpIfFalse(usize), #MakeFn(usize, usize, usize), #Call(usize), #Ret, #Construct(usize, usize), #TagIs(usize), #Unpack(usize), #Unmatched }
 impl Clone for Instr;
 impl Show for Instr;
 
-struct Gen { code: Vec<Instr>; locals: Vec<String>; globals: HashMap<String, usize> }
+struct Gen { code: Vec<Instr>; locals: Vec<String>; globals: HashMap<String, usize>; ctors: HashMap<String, [usize, usize]> }
 
 // The names an expression uses that it does not bind, in order of first use.
 function freeVars(e: readonly Expr, bound: mut Vec<String>, out: mut Vec<String>): void {
@@ -521,6 +684,15 @@ function freeVars(e: readonly Expr, bound: mut Vec<String>, out: mut Vec<String>
       freeVars(f, mut bound, mut out);
       for (const a of args) { freeVars(a, mut bound, mut out); }
     }
+    #Case(scrutinee, arms, _) => {
+      freeVars(scrutinee, mut bound, mut out);
+      for (const arm of arms) {
+        const depth = bound.len();
+        for (const b of arm.binds) { bound.push(b.clone()); }
+        freeVars(arm.body, mut bound, mut out);
+        while (bound.len() > depth) { bound.pop(); }
+      }
+    }
   }
 }
 
@@ -536,7 +708,21 @@ impl Gen {
     match (e) {
       #Int(n, _) => { self.emit(#Push(n)); }
       #Bool(b, _) => { self.emit(#Push(if (b) { 1 } else { 0 })); }
-      #Var(name, _) => { const i = self.load(name); self.emit(i); }
+      #Var(name, _) => {
+        match (self.ctors.get(name)) {
+          #Some([tag, 0]) => { self.emit(#Construct(tag, 0)); }
+          // A constructor used as a value is the function that builds it.
+          #Some([tag, n]) => {
+            self.emit(#MakeFn(self.code.len() + 2, n, 0));
+            const skip = self.emit(#Jump(0));
+            for (const i of 0..n) { self.emit(#Load(i)); }
+            self.emit(#Construct(tag, n));
+            self.emit(#Ret);
+            self.code[skip] = #Jump(self.code.len());
+          }
+          #None => { const i = self.load(name); self.emit(i); }
+        }
+      }
       #Bin(op, a, b, _) => {
         self.gen(a);
         self.gen(b);
@@ -571,7 +757,7 @@ impl Gen {
         const make = self.emit(#MakeFn(0, params.len(), captures.len()));
         const skip = self.emit(#Jump(0));
         // The body's frame: its captures, then its parameters.
-        let inner = Gen { code: Vec.new(), locals: Vec.new(), globals: self.globals.clone() };
+        let inner = Gen { code: Vec.new(), locals: Vec.new(), globals: self.globals.clone(), ctors: self.ctors.clone() };
         for (const c of captures) { inner.locals.push(c.clone()); }
         for (const p of params) { inner.locals.push(p.clone()); }
         inner.code = self.code.drain().collect();
@@ -583,8 +769,49 @@ impl Gen {
       }
       #Call(f, args, _) => {
         for (const a of args) { self.gen(a); }
-        self.gen(f);
-        self.emit(#Call(args.len()));
+        // A constructor applied builds its value directly.
+        const ctor: Option<usize> = match (f) {
+          #Var(name, _) => match (self.ctors.get(name)) { #Some([tag, _]) => #Some(tag), #None => #None },
+          _ => #None,
+        };
+        match (ctor) {
+          #Some(tag) => { self.emit(#Construct(tag, args.len())); }
+          #None => {
+            self.gen(f);
+            self.emit(#Call(args.len()));
+          }
+        }
+      }
+      #Case(scrutinee, arms, _) => {
+        // The value matched is a hidden local; each arm tests its tag, then binds its fields.
+        self.gen(scrutinee);
+        self.emit(#Store);
+        self.locals.push("$case".toString());
+        const slot = self.locals.len() - 1;
+        let ends: Vec<usize> = Vec.new();
+        for (const arm of arms) {
+          const tag = match (self.ctors.get(arm.ctor)) { #Some([t, _]) => t, #None => panic("checked constructors exist") };
+          self.emit(#Load(slot));
+          self.emit(#TagIs(tag));
+          const next = self.emit(#JumpIfFalse(0));
+          self.emit(#Load(slot));
+          self.emit(#Unpack(arm.binds.len()));
+          for (const b of arm.binds) {
+            self.emit(#Store);
+            self.locals.push(b.clone());
+          }
+          self.gen(arm.body);
+          for (const _ of arm.binds) {
+            self.emit(#Drop);
+            self.locals.pop();
+          }
+          ends.push(self.emit(#Jump(0)));
+          self.code[next] = #JumpIfFalse(self.code.len());
+        }
+        self.emit(#Unmatched);
+        for (const j of ends) { self.code[j] = #Jump(self.code.len()); }
+        self.emit(#Drop);
+        self.locals.pop();
       }
     }
   }
@@ -592,7 +819,7 @@ impl Gen {
 
 // ---- The virtual machine ----
 
-enum Value { #Int(i64), #Closure(usize, usize, Vec<Value>) }
+enum Value { #Int(i64), #Closure(usize, usize, Vec<Value>), #Data(usize, Vec<Value>) }
 impl Clone for Value;
 
 type Frame = { ret: usize; locals: Vec<Value> };
@@ -601,7 +828,7 @@ function asInt(v: readonly Value): i64 {
   match (v) { #Int(n) => n, _ => panic("checked: an int") }
 }
 
-export function run(code: readonly Instr[], globals: readonly Value[]): i64 {
+export function run(code: readonly Instr[], globals: readonly Value[]): Value {
   let stack: Vec<Value> = Vec.new();
   let frames: Vec<Frame> = Vec.new();
   frames.push({ ret: code.len(), locals: Vec.new() });
@@ -643,6 +870,24 @@ export function run(code: readonly Instr[], globals: readonly Value[]): i64 {
           _ => panic("checked: a function"),
         }
       }
+      #Construct(tag, n) => {
+        let fields: Vec<Value> = Vec.new();
+        for (const _ of 0..n) { fields.push(stack.pop().unwrap()); }
+        fields.reverse();
+        stack.push(#Data(tag, fields));
+      }
+      #TagIs(tag) => {
+        const hit = match (stack.pop().unwrap()) { #Data(t, _) => t == tag, _ => false };
+        stack.push(#Int(if (hit) { 1 } else { 0 }));
+      }
+      // The fields, last first, so the `Store`s that follow bind them in order.
+      #Unpack(n) => match (stack.pop().unwrap()) {
+        #Data(_, fields) => {
+          for (const i of 0..n) { stack.push(fields[n - 1 - i].clone()); }
+        }
+        _ => panic("checked: a constructed value"),
+      },
+      #Unmatched => panic("checked: every case is handled"),
       #Ret => {
         const f = frames.pop().unwrap();
         pc = f.ret;
@@ -651,10 +896,20 @@ export function run(code: readonly Instr[], globals: readonly Value[]): i64 {
     }
     pc += 1;
   }
-  asInt(stack.pop().unwrap())
+  stack.pop().unwrap()
 }
 
-type Compiled = { code: Vec<Instr>; globals: Vec<Value>; ty: String };
+function showValue(v: readonly Value, names: readonly String[]): String {
+  match (v) {
+    #Int(n) => `${n}`,
+    #Closure(_, _, _) => `<function>`,
+    #Data(tag, fields) => if (fields.len() == 0) { names[tag].clone() } else {
+      `${names[tag]}(${fields.iter().map((f) => showValue(f, names)).join(", ")})`
+    },
+  }
+}
+
+type Compiled = { code: Vec<Instr>; globals: Vec<Value>; ty: String; ctorNames: Vec<String> };
 
 export function compile(src: str): Compiled uses Fail<CompileError> {
   let p = Parser { toks: lex(src), pos: 0 };
@@ -664,7 +919,7 @@ export function compile(src: str): Compiled uses Fail<CompileError> {
   let errors: Vec<Problem> = Vec.new();
   const ty: String = handle {
     region (R) {
-      let c: Checker<R> = Checker { next: 0, scopes: Vec.new(), int: alloc(#Int), bool: alloc(#Bool) };
+      let c: Checker<R> = Checker { next: 0, scopes: Vec.new(), int: alloc(#Int), bool: alloc(#Bool), ctors: HashMap.new(), ctorsOf: Vec.new() };
       Checker.show(c.program(prog))
     }
   } with Diag { report(e) resumes k => { errors.push(e); k() } };
@@ -672,7 +927,15 @@ export function compile(src: str): Compiled uses Fail<CompileError> {
   // Each definition's body is a function of its parameters alone, placed before `main`.
   let names: HashMap<String, usize> = HashMap.new();
   for (const [i, d] of prog.defs.iter().enumerate()) { names.insert(d.name.clone(), i); }
-  let g = Gen { code: Vec.new(), locals: Vec.new(), globals: names };
+  let ctors: HashMap<String, [usize, usize]> = HashMap.new();
+  let ctorNames: Vec<String> = Vec.new();
+  for (const d of prog.datas) {
+    for (const c of d.ctors) {
+      ctors.insert(c.name.clone(), [ctorNames.len(), c.fields.len()]);
+      ctorNames.push(c.name.clone());
+    }
+  }
+  let g = Gen { code: Vec.new(), locals: Vec.new(), globals: names, ctors };
   const skip = g.emit(#Jump(0));
   let globals: Vec<Value> = Vec.new();
   for (const d of prog.defs) {
@@ -685,7 +948,7 @@ export function compile(src: str): Compiled uses Fail<CompileError> {
   }
   g.code[skip] = #Jump(g.code.len());
   g.gen(prog.main);
-  { code: g.code, globals, ty }
+  { code: g.code, globals, ty, ctorNames }
 }
 
 // ---- Diagnostics shown against the source: line, column, the line, a caret ----
@@ -735,12 +998,17 @@ export function main(): void uses Io {
     "let id = fn(x) => x in if id(true) then id(7) else 0",
     "def compose(f, g) = fn(x) => f(g(x));\ncompose(fn(n) => n + 1, fn(n) => n * 2)(20)",
     "def f(x) = x + 1;\nf(true)",
+    "data List = Nil | Cons(int, List);\ndef sum(l) = case l of Nil => 0 | Cons(h, t) => h + sum(t);\nsum(Cons(1, Cons(2, Cons(3, Nil))))",
+    "data List = Nil | Cons(int, List);\ndef map(f, l) = case l of Nil => Nil | Cons(h, t) => Cons(f(h), map(f, t));\nmap(fn(x) => x * 10, Cons(1, Cons(2, Nil)))",
+    "data Shape = Circle(int) | Rect(int, int);\ndef area(s) = case s of Circle(r) => 3 * r * r | Rect(w, h) => w * h;\narea(Rect(3, 4)) + area(Circle(2))",
+    "data Tree = Leaf | Node(Tree, int, Tree);\ndef insert(t, v) = case t of Leaf => Node(Leaf, v, Leaf) | Node(l, x, r) => if v < x then Node(insert(l, v), x, r) else Node(l, x, insert(r, v));\ndef total(t) = case t of Leaf => 0 | Node(l, x, r) => total(l) + x + total(r);\ntotal(insert(insert(insert(Leaf, 5), 2), 8))",
+    "data Color = Red | Green | Blue;\ncase Green of Red => 1 | Green => 2",
     "let a = 1 + true in\nlet b = if 3 then 4 else false in\nnope(a)",
   ];
   for (const src of programs) {
     try {
       const c = compile(src);
-      println(`${src}  :  ${c.ty}  =  ${run(c.code, c.globals)}`);
+      println(`${src}  :  ${c.ty}  =  ${showValue(run(c.code, c.globals), c.ctorNames)}`);
     } catch (e) {
       println(`error at ${describe(src, e)}`);
     }

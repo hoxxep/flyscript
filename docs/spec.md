@@ -1,6 +1,6 @@
 # Flyscript
 
-**Language specification, version 0.45**
+**Language specification, version 0.46**
 
 *Affine values, one row calculus, handlers for everything, and `comptime`: Church on the outside, Turing on the inside.*
 
@@ -18,13 +18,15 @@ The whole language rests on five laws. Every rule in this document is a conseque
 4. **Handlers for everything.** Errors, I/O, iteration and region memory are ordinary effects with ordinary handlers. A handler may hold the rest of a computation as a one-shot continuation value; generators and tasks are both built from that one primitive.
 5. **`comptime` is the metalanguage.** Generics, reflection, layout transformation and derived interfaces are ordinary Flyscript code run by the compiler.
 
-### 0.1 Changes from 0.44
+### 0.1 Changes from 0.45
 
-0.45 gives Mini the error recovery every real compiler has: a resumptive `Diag` effect collects every type error in one pass, an `#Error` type that fits anything keeps one mistake from cascading, and the caller decides what to do with the list. Writing the code that prints one problem or many found one gap. Earlier changes are in [docs/history](history/).
+0.46 gives Mini algebraic data types: `data` declarations, constructors used as values or applied, `case` with exhaustiveness checking reported through its `Diag` effect, tags in the code generator and the machine. It now compiles list maps and a binary search tree. Earlier changes are in [docs/history](history/).
 
 | Change | Why |
 | :--- | :--- |
-| A `match` narrows: an arm that binds the whole value sees its union without the tags earlier unguarded arms matched whatever their payload (§3.2) | `match (e) { #Many(ps) => …, one => describe(one) }` would not pass `one` where a `Problem` was wanted, though it could be nothing else; TypeScript narrows there |
+| A `Box<T>` is matched as the `T` it holds, through the same borrow (§4.1) | `match (f) { #Var(name, _) => … }` on a `readonly Box<Expr>` did not check; a compiler matches boxed nodes constantly |
+| A method's result that is only a type variable is decided by its receiver, not by what is expected of it (§3.6) | `types.get(n).unwrap()` where an owned `Ref` was wanted made `unwrap`'s `T` the `Ref`, which the `Option<readonly Ref>` then did not fit |
+| `Ref`, `Cell` and `RegionList` are `Clone` — they are `Copy`, so cloning copies (§4.6) | a `Vec<Ref<Type>>` could not be cloned |
 
 
 ---
@@ -280,6 +282,7 @@ Type checking happens after `comptime` evaluation and uses bidirectional local i
 
 - Exported functions, interface methods and `extern` declarations state their parameter types, return type and effects. An exported function with no `uses` clause is pure.
 - Everything inside a body is inferred: local types, closure signatures, generic and row arguments, literal types, region arguments, and the effects of non-exported functions.
+- A method's result that is only a type variable takes its type from the receiver and the arguments, not from what is expected of it; what is expected is then met by lending or copying (`map.get(k).unwrap()`).
 - Region arguments are unification variables solved over the whole body. An allocation whose region the types leave undetermined goes to the **innermost enclosing region it does not escape from**: when a `region` block ends, each such allocation is placed in it unless that would let the data outlive the block (through the block's value or a variable declared outside it), in which case it is offered to the next enclosing region. A region argument left unconstrained outside every region defaults to the heap, where region allocation is an error, so a stray `alloc` is caught.
 - **Recursion.** A function that is called again while its effects are being inferred — itself, or through others — is assumed pure there; if its body then performs an effect, it must state its effects with `uses`.
 - **Expected types flow inward**: into blocks and their last expression, into the branches of `if`, `match`, `try`, `region` and `handle`, into a lambda's body from the function type expected of it, and into calls. A call checked against an expected type unifies the callee's instantiated return type with it *before* checking the arguments. This is how `alloc({ user, token })` in a function returning `Ref<Request>` builds a `Request` rather than an anonymous record.
@@ -304,6 +307,8 @@ Borrows are **transparent**: a borrow binding reads and writes as the value it r
 `readonly T` is `Copy`; `mut T` is not. Passing a binding of type `mut T` where a `mut` borrow is expected **reborrows** it: the binding is locked until the new borrow ends, and usable again afterwards, so `value(mut sc); sc.eat(b',')` is legal. Read where an owned value is expected, a borrow gives a copy of what it refers to, which must be `Copy`; and a `mut T` field read through a `readonly` borrow is `readonly T`.
 
 A value that is borrowed without having a place — a call's result, a template string, a literal lent as `str` — is stored in an anonymous local of the enclosing block, dropped when the block ends. So ``stringify(#Rejected { reason: `missing ${field}` })`` lends the string for the call, and ``const r = #Rejected { reason: `…` };`` holds a borrow of it while `r` is used; returning `r` is the usual error, a borrow of a local.
+
+**A match through a box.** A `Box<T>` is matched as the `T` it holds, through the same borrow: `match (node) { #Add(a, b) => … }` with `node: readonly Box<Expr>` binds `a` and `b` as borrows of the boxed `Expr`'s parts.
 
 **A match through a borrow.** A place nothing may be moved out of — reached through a borrow, or an element of a collection (`self.links[v]`) — is matched through a borrow of it, `readonly` or, through a `mut` borrow, `mut`: its parts bind as borrows, with copies for `Copy` parts, as below.
 
@@ -390,7 +395,7 @@ A region is **append-only and immutable**:
 
 - `alloc(v)` places `v` in the region and returns a `Ref<R, T>`; `fmt(s)` copies a string into it, returning a `Ref<R, str>`; `allocAll(items)` copies a list of `Copy` values into it, returning a `Ref<R, T[]>` that is indexed and sliced through the `Ref` — a node's fixed children, a function type's parameters. A `Ref<R, T>` is used exactly as a `readonly T`: field access and method calls go through it, and reading is pure.
 - The only mutable slots are `Cell<R, T>` with `T extends Copy`, whose `get` copies out and `set` copies in (a `Cell` is never borrowed), and `RegionList<R, T>`, an append-only chunked list whose elements never move. Both are handles into their region — `Copy`, like a `Ref` — and their writes are operations of `Region<R>`: mutation by effect, not by ownership. That is why `const items = RegionList.new(); items.push(x)` is legal.
-- `alloc`, `Cell.get`, `Cell.set` and `RegionList.push` perform `Region<R>`. Reading a `RegionList`'s existing elements does not: they never change.
+- `alloc`, `Cell.get`, `Cell.set` and `RegionList.push` perform `Region<R>`. `Ref`, `Cell` and `RegionList` are `Clone`, cloning being a copy. Reading a `RegionList`'s existing elements does not: they never change.
 
 ```ts
 // std/region.d.fly
