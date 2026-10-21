@@ -59,6 +59,9 @@ pub struct Checker<'p> {
     pending_targs: Vec<PendingCall>,
     /// Calls of templates, specialized once their `comptime` arguments are known.
     pending_specs: Vec<(Span, FnId, Vec<GArg>)>,
+    /// In a derivation's specialization, the type that asked for it: its private fields are
+    /// visible here (§7.3).
+    privileged: Option<DefId>,
 }
 
 /// A call's span, its generic arguments, and each (argument, bound) pair it must satisfy.
@@ -113,7 +116,9 @@ pub fn check_fn(p: &mut Program, fid: FnId) {
         bounds: scheme.tparams.iter().map(|g| (g.sym.id, g.bounds.clone())).collect(),
         pending_targs: Vec::new(),
         pending_specs: Vec::new(),
+        privileged: None,
     };
+    c.privileged = c.p.spec_requested.get(&fid).copied();
     let inferring = scheme.effects.is_none();
     c.allowed = match &scheme.effects {
         Some(e) => e.clone(),
@@ -841,8 +846,20 @@ impl<'p> Checker<'p> {
             self.err(span, format!("`#{name}` is not a tag of `{x}`"));
         }
         let payload_expected = known.flatten();
+        let whole = match (args, payload_expected.as_ref().map(|t| self.s.resolve(t))) {
+            (TagArgs::Tuple(items), Some(Ty::Tuple(ts))) => items.len() == 1 && ts.len() != 1,
+            (TagArgs::Tuple(items), Some(Ty::Record(_))) => items.len() == 1,
+            _ => false,
+        };
         let payload = match args {
             TagArgs::None => Ty::void(),
+            // `#A(x)` with `x` the whole of a larger payload (§3.2).
+            TagArgs::Tuple(items) if whole => {
+                let p = payload_expected.clone().expect("whole payload");
+                self.check(&items[0], &p);
+                self.typed.whole.insert(span);
+                p
+            }
             TagArgs::Tuple(items) => {
                 let want: Vec<Option<Ty>> = match payload_expected.as_ref().map(|t| self.s.resolve(t)) {
                     Some(Ty::Tuple(ts)) if ts.len() == items.len() => ts.into_iter().map(Some).collect(),
@@ -1002,7 +1019,7 @@ impl<'p> Checker<'p> {
     /// functions its module exports, so it can keep an invariant (§3.3).
     fn unsealed(&mut self, d: DefId, verb: &str, span: Span) {
         let def = &self.p.defs[d];
-        if def.module != self.module && !def.private.is_empty() {
+        if def.module != self.module && !def.private.is_empty() && self.privileged != Some(d) {
             let msg = format!("`{}` has private fields, so it cannot be {verb} outside its module", def.name);
             self.err(span, msg);
         }
@@ -1016,7 +1033,7 @@ impl<'p> Checker<'p> {
                     if let Some((_, ft)) = fields.iter().find(|(k, _)| k == name) {
                         let ft = ft.clone();
                         let def = &self.p.defs[*d];
-                        let hidden = def.module != self.module && def.private.iter().any(|f| f == name);
+                        let hidden = def.module != self.module && def.private.iter().any(|f| f == name) && self.privileged != Some(*d);
                         let tname = def.name.clone();
                         let params = def.params.clone();
                         if hidden {
@@ -1047,6 +1064,8 @@ impl<'p> Checker<'p> {
                     }
                 }
             }
+            // `t.[i]`: an element of a tuple, by a `comptime` index (§7.2).
+            Ty::Tuple(ts) if name.parse::<usize>().is_ok_and(|i| i < ts.len()) => return ts[name.parse::<usize>().expect("index")].clone(),
             Ty::Error => return Ty::Error,
             Ty::Var(_) => {
                 self.err(span, format!("cannot infer the type that has field `{name}`; add a type annotation"));
@@ -1707,6 +1726,10 @@ impl<'p> Checker<'p> {
                 };
                 match args {
                     TagPatArgs::None => {}
+                    // `#A(x)` binds the whole of a larger payload (§3.2).
+                    TagPatArgs::Tuple(pats) if pats.len() == 1 && matches!(self.s.resolve(&payload), Ty::Record(_)) || matches!(self.s.resolve(&payload), Ty::Tuple(ts) if ts.len() != 1 && pats.len() == 1) => {
+                        self.bind(&pats[0], &wrap(self.s.resolve(&payload)));
+                    }
                     TagPatArgs::Tuple(pats) => {
                         let parts = match self.s.resolve(&payload) {
                             Ty::Tuple(ts) if ts.len() == pats.len() => ts,

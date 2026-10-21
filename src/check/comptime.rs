@@ -145,7 +145,16 @@ impl<'p> Expand<'p> {
         match &e.kind {
             ExprKind::Ident(n) => self.ct_value(n).is_some() || (n == "Type" && self.lookup(n).is_none()),
             ExprKind::Field { target, .. } => self.is_ct(target),
-            ExprKind::Call { callee, .. } => matches!(&callee.kind, ExprKind::Field { target, .. } if self.is_ct(target)),
+            ExprKind::Call { callee, args, .. } => match &callee.kind {
+                ExprKind::Field { target, .. } => self.is_ct(target),
+                // A `comptime function` applied to `comptime` values: `payloadOf(t)`.
+                ExprKind::Ident(n) => {
+                    self.lookup(n).is_none()
+                        && matches!(self.p.lookup(self.module, n), Some(Binding::Fn(f)) if self.p.fn_decl(f).is_some_and(|d| d.sig.comptime))
+                        && args.iter().all(|a| self.is_ct(a))
+                }
+                _ => false,
+            },
             _ => false,
         }
     }
@@ -213,7 +222,7 @@ impl<'p> Expand<'p> {
                 let name = name.as_ref().map(|path| path.iter().map(|i| self.ident(i)).collect());
                 ExprKind::Record { name, fields: self.inits(fields)? }
             }
-            ExprKind::List(items) => ExprKind::List(self.exprs(items)?),
+            ExprKind::List(items) => ExprKind::List(self.list(items)?),
             ExprKind::StructType(fields) => ExprKind::StructType(self.fields(fields)?),
             ExprKind::Field { target, name } if self.is_ct(target) => {
                 let v = self.eval(target)?;
@@ -419,8 +428,49 @@ impl<'p> Expand<'p> {
     fn ct_name(&mut self, e: &Expr) -> R<String> {
         match self.eval(e)? {
             CV::Str(s) => Ok(s),
-            v => fail(e.span, format!("a computed name must be a string, not {}", v.kind())),
+            CV::Int(i) if i >= 0 => Ok(i.to_string()),
+            v => fail(e.span, format!("a computed name must be a string or a tuple index, not {}", v.kind())),
         }
+    }
+
+    /// A list literal's items: in a list, `comptime for` contributes one item per iteration, its
+    /// body, and `comptime if` the body it chooses (§7.2).
+    fn list(&mut self, items: &[Expr]) -> R<Vec<Expr>> {
+        let mut out = Vec::new();
+        for it in items {
+            let ExprKind::Comptime(inner) = &it.kind else {
+                out.push(self.expr(it)?);
+                continue;
+            };
+            match &inner.kind {
+                ExprKind::For { pat, iter, body, .. } => {
+                    for v in self.eval_list(iter)? {
+                        let depth = self.env.len();
+                        let mut binds = Vec::new();
+                        if !self.ct_match(pat, &v, &mut binds)? {
+                            return fail(pat.span, format!("`{}` does not match this pattern", v.show(self.p)));
+                        }
+                        self.env.extend(binds.into_iter().map(|(k, v)| (k, Some(v))));
+                        let b = self.block(body);
+                        self.env.truncate(depth);
+                        let b = b?;
+                        let span = b.span;
+                        out.push(Expr { kind: ExprKind::Block(b), span });
+                    }
+                }
+                ExprKind::If { cond, then, otherwise } => {
+                    if self.eval_bool(cond)? {
+                        let b = self.scoped_block(then)?;
+                        let span = b.span;
+                        out.push(Expr { kind: ExprKind::Block(b), span });
+                    } else if let Some(o) = otherwise {
+                        out.push(self.expr(o)?);
+                    }
+                }
+                _ => out.push(self.expr(it)?),
+            }
+        }
+        Ok(out)
     }
 
     fn tag_args(&mut self, a: &TagArgs) -> R<TagArgs> {

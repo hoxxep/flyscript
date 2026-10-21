@@ -118,8 +118,9 @@ impl Program {
 
     fn satisfies_depth(&self, ty: &Ty, bound: &Ty, assumed: &dyn Fn(u32) -> Vec<Ty>, depth: usize) -> bool {
         let Ty::Named(d, _) = bound else { return true };
+        let send = self.known.get("Send").copied();
         let send_params: Vec<u32> = match ty {
-            Ty::Param(s) if assumed(s.id).iter().any(|b| matches!(b, Ty::Named(x, _) if self.known.get("Send") == Some(x))) => vec![s.id],
+            Ty::Param(s) if assumed(s.id).iter().any(|b| matches!(b, Ty::Named(x, _) if self.iface_closure(*x).iter().any(|i| Some(*i) == send))) => vec![s.id],
             _ => Vec::new(),
         };
         match self.defs[*d].name.as_str() {
@@ -291,6 +292,9 @@ impl Program {
         let shown: Vec<String> = ct.iter().map(|(_, t)| format!("{}", super::types::Show(t, &*self))).collect();
         let note = format!("in `{}` for `{}`", self.fns[fid].name, shown.join(", "));
         self.spec_notes.insert(id, note.clone());
+        if let Some(d) = requested {
+            self.spec_requested.insert(id, d);
+        }
         // Errors found while expanding the body belong to this specialization too.
         let saved = self.note.replace(note);
         if let Some(mut decl) = self.fn_decl(fid) {

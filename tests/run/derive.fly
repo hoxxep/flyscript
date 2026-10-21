@@ -1,5 +1,5 @@
 // expect: {x: 1, y: 2}
-// expect: Dot Circle({x: 3, y: 4}) Named('home')
+// expect: Dot Circle({x: 3, y: 4}) Named('home') Line(({x: 0, y: 0}, {x: 5, y: 5}))
 // expect: {age: 36, name: 'ada'}
 // A derivation written in Flyscript (§7.3): a template impl over `Type.info`, requested by
 // nominal types with `impl Describe for T;` and applied to structural records directly.
@@ -27,6 +27,14 @@ impl<comptime T: Type> Describe for T {
         }
         out.push("}");
       }
+      #Tuple(items) => {
+        out.push("(");
+        comptime for (const [i, _] of items.enumerate()) {
+          comptime if (i > 0) { out.push(", "); }
+          self.[i].describe(mut out);
+        }
+        out.push(")");
+      }
       #Union(tags) | #Enum({ tags }) => match (self) {
         comptime for (const t of tags) {
           comptime if (t.payload == #None) {
@@ -44,7 +52,7 @@ impl<comptime T: Type> Describe for T {
 struct Point { x: i64; y: i64; }
 impl Describe for Point;
 
-enum Shape { #Dot, #Circle(Point), #Named(String) }
+enum Shape { #Dot, #Circle(Point), #Named(String), #Line(Point, Point) }
 impl Describe for Shape;
 
 export function main(): void uses Io {
@@ -61,6 +69,9 @@ export function main(): void uses Io {
   b.describe(mut t);
   t.push(" ");
   c.describe(mut t);
+  t.push(" ");
+  const d: Shape = #Line(Point { x: 0, y: 0 }, Point { x: 5, y: 5 });
+  d.describe(mut t);
   println(t);
   let u = String.new();
   const r = { name: String.fromStr("ada"), age: 36 as i64 };

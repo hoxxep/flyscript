@@ -396,6 +396,10 @@ impl Interp {
                 }
                 match args {
                     TagPatArgs::None => true,
+                    // `#A(x)` binds the whole of a larger payload (§3.2).
+                    TagPatArgs::Tuple(ps) if ps.len() == 1 && (matches!(*payload, Value::Record(_)) || matches!(&*payload, Value::Tuple(items) if items.len() != 1)) => {
+                        self.bind(&ps[0], &part(&place, Seg::Payload, (*payload).clone()), None, env)
+                    }
                     TagPatArgs::Tuple(ps) => {
                         let Value::Tuple(items) = *payload else { return false };
                         ps.iter().enumerate().all(|(i, p)| {
@@ -509,6 +513,9 @@ impl Interp {
             ExprKind::Tag { name, args } => {
                 let payload = match args {
                     TagArgs::None => Value::Unit,
+                    TagArgs::Tuple(items) if self.prog.typed.get(&self.lex.owner).is_some_and(|t| t.whole.contains(&e.span)) => {
+                        self.owned_all(items, env)?.into_iter().next().unwrap_or(Value::Unit)
+                    }
                     TagArgs::Tuple(items) => Value::Tuple(self.owned_all(items, env)?),
                     TagArgs::Record(fields) => self.record(fields, env)?,
                 };
@@ -820,7 +827,9 @@ impl Interp {
         // The method's own parameters follow the impl's; the call gave them after `Self` and the
         // interface's.
         let skip = 1 + self.prog.defs[iface].params.len();
-        let own = &self.prog.fns[m].scheme.tparams[self.prog.impls[imp].params.len()..];
+        // A specialization has lost the impl's `comptime` parameters.
+        let impl_params = self.prog.impls[imp].params.iter().filter(|g| !g.comptime || !self.prog.spec_of.contains_key(&m)).count();
+        let own = self.prog.fns[m].scheme.tparams.get(impl_params..).unwrap_or(&[]);
         for (g, v) in own.iter().zip(&tps[skip..]) {
             if let Some(a) = tenv.get(&v.sym.id) {
                 env.insert(g.sym.id, a.clone());

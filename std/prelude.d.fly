@@ -110,8 +110,13 @@ impl String {
   export function fromStr(s: str): String;
   export function len(self: readonly Self): usize;
   export function push(self: mut Self, s: str): void;
+  export function asStr(self: readonly Self): str from self;
+  // The string these bytes spell, if they are UTF-8.
+  export function fromUtf8(bytes: Vec<u8>): Option<String>;
 }
 impl str {
+  // Bytes `lo` to `hi`, which must fall on character boundaries.
+  export function slice(self: Self, lo: usize, hi: usize): str from self;
   export function len(self: Self): usize;
   export function toString(self: Self): String;
   export function bytes(self: Self): void uses Yield<u8>;
@@ -146,6 +151,9 @@ impl<T extends Send> Arc<T> {
 export struct Ref<region R, T>;
 
 export function alloc<region R, T>(v: T): Ref<R, T> uses Region<R>;
+// TypeScript's `parseInt` and `parseFloat`, without the `NaN`: decimal text, or `#None`.
+export function parseInt(s: str): Option<i64>;
+export function parseFloat(s: str): Option<f64>;
 export function copyUtf8<region R>(bytes: readonly u8[]): Ref<R, str> uses Region<R>, Fail<#MalformedUtf8>;
 export function fmt<region R>(s: str): Ref<R, str> uses Region<R>;
 

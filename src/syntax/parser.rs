@@ -646,9 +646,9 @@ impl<'a> Parser<'a> {
 
     fn path(&mut self) -> PResult<Vec<Ident>> {
         let mut segments = vec![self.ident()?];
-        while self.at(".") && matches!(self.tok_at(1), Tok::Ident(_)) {
+        while self.at(".") && matches!(self.tok_at(1), Tok::Ident(_) | Tok::Kw(_)) {
             self.bump();
-            segments.push(self.ident()?);
+            segments.push(self.member_name()?);
         }
         Ok(segments)
     }

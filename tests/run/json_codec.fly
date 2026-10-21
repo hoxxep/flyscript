@@ -1,0 +1,67 @@
+// expect: {"id":7,"name":"Ada","email":null,"tags":["ops","say \"hi\"\t"],"address":{"street":"1 Loop Rd","city":"Cambridge"},"role":{"Member":{"since":2019}},"score":0.5}
+// expect: {"id":7,"name":"Ada","email":null,"tags":["ops","say \"hi\"\t"],"address":{"street":"1 Loop Rd","city":"Cambridge"},"role":{"Member":{"since":2019}},"score":0.5}
+// expect: {"id":1,"name":"Béa 😀","email":null,"tags":[],"address":{"street":"Rue","city":"Paris"},"role":"Admin","score":1.25}
+// expect: missing address
+// expect: syntax error at 8
+// A JSON codec written in Flyscript (std/json.fly): `ToJson` and `FromJson` are derived over
+// `Type.info` for structs, enums and records; keys may come in any order, unknown keys are
+// skipped, an `Option` field may be left out, and \u escapes decode to UTF-8.
+import { println } from "std/io";
+import { ToJson, FromJson, JsonError, stringify, parse } from "std/json";
+
+struct Address { street: String; city: String; }
+impl ToJson for Address;
+impl FromJson for Address;
+
+enum Role { #Admin, #Member { since: i64 }, #Guest(String) }
+impl ToJson for Role;
+impl FromJson for Role;
+
+struct User {
+  id: i64;
+  name: String;
+  email: Option<String>;
+  tags: Vec<String>;
+  address: Address;
+  role: Role;
+  private score: f64;
+}
+impl ToJson for User;
+impl FromJson for User;
+
+function ada(): User {
+  let tags = Vec.new();
+  tags.push(String.fromStr("ops"));
+  tags.push(String.fromStr("say \"hi\"\t"));
+  User {
+    id: 7,
+    name: String.fromStr("Ada"),
+    email: #None,
+    tags,
+    address: Address { street: String.fromStr("1 Loop Rd"), city: String.fromStr("Cambridge") },
+    role: #Member { since: 2019 },
+    score: 0.5,
+  }
+}
+
+function show(r: Result<User, JsonError>): void uses Io {
+  match (r) {
+    #Ok(u) => println(stringify(u)),
+    #Err(e) => match (e) {
+      #Missing(f) => println(`missing ${f}`),
+      #Syntax(at) => println(`syntax error at ${at}`),
+      #Unknown(t) => println(`unknown ${t}`),
+      #Range(at) => println(`out of range at ${at}`),
+    },
+  }
+}
+
+export function main(): void uses Io {
+  const text = stringify(ada());
+  println(text);
+  show(Fail.capture(() => parse(text)));
+  // Keys in any order, unknown keys skipped, a missing optional field, escapes.
+  show(Fail.capture(() => parse(`{"role":"Admin","score":1.25,"extra":[1,{"x":null}],"id":1,"name":"B\\u00e9a \\ud83d\\ude00","tags":[],"address":{"city":"Paris","street":"Rue"}}`)));
+  show(Fail.capture(() => parse(`{"id":2,"name":"Cy","tags":[],"role":{"Guest":"x"},"score":0}`)));
+  show(Fail.capture(() => parse(`{"id":3,`)));
+}

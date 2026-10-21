@@ -8,16 +8,18 @@ use crate::diag::{Diagnostic, Span};
 use crate::syntax::ast::{self, ItemKind, TypeKind};
 use crate::syntax::{parse_declarations, parse_module};
 
-/// The standard library, compiled into the checker.
-const STD: &[(&str, &str)] = &[
-    ("std/prelude", include_str!("../../std/prelude.d.fly")),
-    ("std/region", include_str!("../../std/region.d.fly")),
-    ("std/net", include_str!("../../std/net.d.fly")),
-    ("std/io", include_str!("../../std/io.d.fly")),
-    ("std/collections", include_str!("../../std/collections.d.fly")),
-    ("std/par", include_str!("../../std/par.d.fly")),
-    ("std/layout", include_str!("../../std/layout.d.fly")),
-    ("std/sync", include_str!("../../std/sync.d.fly")),
+/// The standard library, compiled into the checker: declaration files, whose bodies are the
+/// runtime's, and modules written in Flyscript.
+const STD: &[(&str, &str, bool)] = &[
+    ("std/prelude", include_str!("../../std/prelude.d.fly"), true),
+    ("std/region", include_str!("../../std/region.d.fly"), true),
+    ("std/net", include_str!("../../std/net.d.fly"), true),
+    ("std/io", include_str!("../../std/io.d.fly"), true),
+    ("std/collections", include_str!("../../std/collections.d.fly"), true),
+    ("std/par", include_str!("../../std/par.d.fly"), true),
+    ("std/layout", include_str!("../../std/layout.d.fly"), true),
+    ("std/sync", include_str!("../../std/sync.d.fly"), true),
+    ("std/json", include_str!("../../std/json.fly"), false),
 ];
 
 pub struct Module {
@@ -165,6 +167,9 @@ pub struct Program {
     /// `Point`").
     pub spec_of: HashMap<FnId, FnId>,
     pub spec_notes: HashMap<FnId, String>,
+    /// For a derivation's specialization: the type that asked for it, whose private fields it
+    /// may use (§7.3).
+    pub spec_requested: HashMap<FnId, DefId>,
     /// While a specialization is checked: which one, for its diagnostics.
     pub note: Option<String>,
 }
@@ -176,6 +181,8 @@ pub struct Typed {
     /// Types of `Bind` patterns (by the pattern's span), including parameters' bindings.
     pub bindings: HashMap<Span, Ty>,
     pub params: Vec<(String, Ty)>,
+    /// Tag constructions `#A(x)` whose one argument is the whole of a larger payload (§3.2).
+    pub whole: std::collections::HashSet<Span>,
     /// The function each call or method call resolved to, by the call's span.
     pub calls: HashMap<Span, FnId>,
     /// Each call's generic arguments, in its scheme's parameter order (for dispatch through
@@ -235,10 +242,12 @@ impl Program {
             specs: HashMap::new(),
             spec_of: HashMap::new(),
             spec_notes: HashMap::new(),
+            spec_requested: HashMap::new(),
             note: None,
         };
-        for (name, source) in STD {
-            p.add_module(name.to_string(), format!("<{name}.d.fly>"), source.to_string(), true);
+        for (name, source, declarations) in STD {
+            let file = if *declarations { format!("<{name}.d.fly>") } else { format!("<{name}.fly>") };
+            p.add_module(name.to_string(), file, source.to_string(), true, *declarations);
         }
         let mut queue: Vec<PathBuf> = entries.iter().map(|e| normalize(e)).collect();
         while let Some(path) = queue.pop() {
@@ -253,7 +262,7 @@ impl Program {
                     continue;
                 }
             };
-            let idx = p.add_module(name, path.display().to_string(), source, false);
+            let idx = p.add_module(name, path.display().to_string(), source, false, false);
             for item in &p.modules[idx].ast.items {
                 if let ItemKind::Import { from, .. } = &item.kind
                     && is_relative(from)
@@ -266,8 +275,8 @@ impl Program {
         p
     }
 
-    fn add_module(&mut self, name: String, file: String, source: String, is_std: bool) -> usize {
-        let parsed = if is_std { parse_declarations(&source) } else { parse_module(&source) };
+    fn add_module(&mut self, name: String, file: String, source: String, is_std: bool, declarations: bool) -> usize {
+        let parsed = if declarations { parse_declarations(&source) } else { parse_module(&source) };
         let idx = self.modules.len();
         let ast = parsed.unwrap_or_else(|d| {
             self.diags.push((idx, d));

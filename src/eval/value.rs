@@ -19,6 +19,8 @@ pub enum Seg {
     Index(usize),
     /// A slice of a list or string, `lo..hi`.
     Range(usize, usize),
+    /// The whole payload of a tag (`#A(x)` binding a larger payload, §3.2).
+    Payload,
 }
 
 #[derive(Clone)]
@@ -195,6 +197,8 @@ impl Value {
 fn step(v: &Value, seg: &Seg) -> Value {
     match (v, seg) {
         (Value::Record(fs), Seg::Field(f)) => fs.get(f).cloned().unwrap_or(Value::Unit),
+        (Value::Tuple(vs), Seg::Field(f)) if f.parse::<usize>().is_ok() => vs[f.parse::<usize>().expect("index")].clone(),
+        (Value::Tag(_, payload), Seg::Payload) => (**payload).clone(),
         (Value::Tag(_, payload), _) => step(payload, seg),
         (Value::List(vs) | Value::Tuple(vs), Seg::Index(i)) => vs.get(*i).cloned().unwrap_or_else(|| panic!("index {i} out of bounds (length {})", vs.len())),
         (Value::Text(s), Seg::Index(i)) => Value::Int(*s.as_bytes().get(*i).unwrap_or_else(|| panic!("index {i} out of bounds")) as i128),
@@ -249,6 +253,8 @@ fn write_at(v: &mut Value, path: &[Seg], new: Value) {
     };
     match (v, first) {
         (Value::Record(fs), Seg::Field(f)) => write_at(fs.entry(f.clone()).or_insert(Value::Unit), rest, new),
+        (Value::Tuple(vs), Seg::Field(f)) if f.parse::<usize>().is_ok() => write_at(&mut vs[f.parse::<usize>().expect("index")], rest, new),
+        (Value::Tag(_, payload), Seg::Payload) => write_at(payload, rest, new),
         (Value::Tag(_, payload), _) => write_at(payload, path, new),
         (Value::List(vs) | Value::Tuple(vs), Seg::Index(i)) => write_at(&mut vs[*i], rest, new),
         (Value::List(vs), Seg::Range(lo, _)) => {

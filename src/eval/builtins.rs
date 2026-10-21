@@ -235,6 +235,38 @@ impl Interp {
                 set(&p, Value::text(&s));
                 Ok(Value::Unit)
             }
+            "String.asStr" => Ok(Value::Text(a(0).as_text())),
+            "String.fromUtf8" => {
+                let bytes: Vec<u8> = match a(0).deref() {
+                    Value::List(vs) => vs.iter().map(|v| v.deref().as_int() as u8).collect(),
+                    _ => Vec::new(),
+                };
+                Ok(match String::from_utf8(bytes) {
+                    Ok(s) => some(Value::text(&s)),
+                    Err(_) => none(),
+                })
+            }
+            "str.slice" => {
+                let s = a(0).as_text();
+                let (lo, hi) = (a(1).as_int() as usize, a(2).as_int() as usize);
+                match s.get(lo..hi) {
+                    Some(t) => Ok(Value::text(t)),
+                    None => Err(panic(format!("slice {lo}..{hi} is not on character boundaries of a string of {} bytes", s.len()))),
+                }
+            }
+            "parseInt" => Ok(match a(0).as_text().parse::<i64>() {
+                Ok(n) => some(Value::Int(n as i128)),
+                Err(_) => none(),
+            }),
+            "parseFloat" => {
+                let t = a(0).as_text();
+                // Decimal text only: Rust also accepts `inf` and `NaN`.
+                let decimal = t.bytes().all(|b| b.is_ascii_digit() || b"+-.eE".contains(&b)) && t.bytes().any(|b| b.is_ascii_digit());
+                Ok(match t.parse::<f64>() {
+                    Ok(x) if decimal => some(Value::Float(x)),
+                    _ => none(),
+                })
+            }
             "str.asBytes" => Ok(Value::List(a(0).as_text().bytes().map(|b| Value::Int(b as i128)).collect())),
             "str.bytes" => {
                 for b in a(0).as_text().bytes() {

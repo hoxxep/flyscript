@@ -102,14 +102,7 @@ pub fn check_function(p: &mut Program, fid: FnId) {
     let module = p.fns[fid].module;
     let ret_ty = p.fns[fid].scheme.ret.clone();
     let sources = result_sources(p, &p.fns[fid].scheme);
-    let send = p.known.get("Send").copied();
-    let send_params: Vec<u32> = p.fns[fid]
-        .scheme
-        .tparams
-        .iter()
-        .filter(|g| g.bounds.iter().any(|b| matches!(b, Ty::Named(d, _) if Some(*d) == send)))
-        .map(|g| g.sym.id)
-        .collect();
+    let send_params = send_params(p, &p.fns[fid].scheme.tparams);
     let mut o = Own {
         p,
         module,
@@ -148,7 +141,7 @@ pub fn check_function(p: &mut Program, fid: FnId) {
             let id = o.declare_var(&name, ty.clone(), true, true, usize::MAX - i);
             // A parameter whose type can hide a borrow carries one too, so a `from` that leaves
             // it out is checked against what the body returns (§4.2).
-            if o.p.class(&ty) == 2 || hides_borrows(&ty, o.p) {
+            if o.p.class(&ty) == 2 || hides_borrows(&ty, o.p, &o.send_params) {
                 o.loans.push(Loan { path: Path { root: id, fields: Vec::new() }, mutable: false, span: body.span, external: true });
                 let l = o.loans.len() - 1;
                 o.state.holds.insert(id, [l].into_iter().collect());
@@ -391,7 +384,7 @@ impl<'p> Own<'p> {
         if self.p.class(t) == 2 {
             return true;
         }
-        hides_borrows(t, self.p)
+        hides_borrows(t, self.p, &self.send_params)
     }
 
     // ---- uses of places ----
@@ -1068,21 +1061,6 @@ impl<'p> Own<'p> {
                 }
             }
         }
-        // A `mut` receiver that can hold borrows stores the arguments' borrows (`v.push(x)`).
-        let mut_receiver = scheme.as_ref().and_then(|s| s.params.first()).is_some_and(|(_, t)| matches!(t, Ty::Borrow(true, _)));
-        if has_self
-            && mut_receiver
-            && let ExprKind::Field { target, .. } = &callee.kind
-                && let Some(path) = self.place(target) {
-                    let rty = self.vars[path.root].ty.clone();
-                    if self.may_hold(&rty) {
-                        let stored: BTreeSet<LoanId> =
-                            arg_vals.iter().skip(1).flat_map(|(_, v)| v.loans.iter().copied()).collect();
-                        // Only the arguments' own borrows, not the borrow of the receiver itself.
-                        let stored: BTreeSet<LoanId> = stored.into_iter().filter(|l| self.loans[*l].path.root != path.root).collect();
-                        self.state.holds.entry(path.root).or_default().extend(stored);
-                    }
-                }
         Val { loans }
     }
 
@@ -1194,7 +1172,8 @@ fn result_sources(p: &Program, scheme: &super::env::Scheme) -> Vec<String> {
     if !scheme.ret_from.is_empty() {
         return scheme.ret_from.clone();
     }
-    let hidden = scheme.params.iter().filter(|(_, t)| hides_borrows(t, p)).map(|(n, _)| n.clone());
+    let send = send_params(p, &scheme.tparams);
+    let hidden = scheme.params.iter().filter(|(_, t)| hides_borrows(t, p, &send)).map(|(n, _)| n.clone());
     let mut sources: Vec<String> = if scheme.params.first().is_some_and(|(n, _)| n == "self") {
         vec!["self".to_string()]
     } else {
@@ -1226,16 +1205,29 @@ fn pattern_binds(p: &Pattern) -> bool {
 
 /// Types that can hold a borrow without showing it in their arguments: closures,
 /// continuations and generators, and type parameters (§4.2).
-fn hides_borrows(t: &Ty, p: &Program) -> bool {
+/// Type parameters that are `Send`, directly or through an interface that extends it
+/// (`T extends FromJson`): they range over class-1 types, so they hide no borrow (§4.4).
+fn send_params(p: &Program, tparams: &[super::env::GParam]) -> Vec<u32> {
+    let send = p.known.get("Send").copied();
+    tparams
+        .iter()
+        .filter(|g| g.bounds.iter().any(|b| matches!(b, Ty::Named(d, _) if p.iface_closure(*d).iter().any(|i| Some(*i) == send))))
+        .map(|g| g.sym.id)
+        .collect()
+}
+
+fn hides_borrows(t: &Ty, p: &Program, send: &[u32]) -> bool {
+    let rec = |t: &Ty| hides_borrows(t, p, send);
     match t {
-        Ty::Fn(_) | Ty::Param(_) | Ty::Var(_) => true,
+        Ty::Param(s) => !send.contains(&s.id),
+        Ty::Fn(_) | Ty::Var(_) => true,
         Ty::Named(d, args) => {
             matches!(p.defs[*d].name.as_str(), "Gen" | "Cont") && p.modules[p.defs[*d].module].is_std
-                || args.iter().any(|a| matches!(a, GArg::Ty(t) if hides_borrows(t, p)))
+                || args.iter().any(|a| matches!(a, GArg::Ty(t) if rec(t)))
         }
-        Ty::Tuple(ts) => ts.iter().any(|t| hides_borrows(t, p)),
-        Ty::Record(r) | Ty::Union(r) => r.labels.values().any(|t| hides_borrows(t, p)),
-        Ty::Array(t, _) | Ty::Slice(t) | Ty::Borrow(_, t) => hides_borrows(t, p),
+        Ty::Tuple(ts) => ts.iter().any(rec),
+        Ty::Record(r) | Ty::Union(r) => r.labels.values().any(rec),
+        Ty::Array(t, _) | Ty::Slice(t) | Ty::Borrow(_, t) => rec(t),
         _ => false,
     }
 }
