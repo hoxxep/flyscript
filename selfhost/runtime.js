@@ -109,6 +109,10 @@ const $rt = (() => {
 
   function iter(v) {
     if (Array.isArray(v) || v instanceof Gen || isIterator(v)) return v;
+    for (const t of userTypes(v)) {
+      const each = userMethod(t, "each");
+      if (each !== undefined) return each(v);
+    }
     if (v instanceof HashMap) return v.entries();
     if (v instanceof HashSet) return v.values();
     panic(`cannot iterate over ${show(v)}`);
@@ -179,7 +183,8 @@ const $rt = (() => {
     writeStr: (h, s) => h.bytes(Array.from(s, (c) => c.charCodeAt(0))),
     writeInt: (h, i) => { const b = []; let x = BigInt.asUintN(64, i); for (let k = 0; k < 8; k++) { b.push(Number(x & 255n)); x >>= 8n; } h.bytes(b); },
     writeBool: (h, b) => h.bytes([b ? 1 : 0]),
-    writeFloat: (h, f) => HASHER.writeStr(h, String(f)),
+    // -0.0 hashes as 0.0, as it equals it (§3.5).
+    writeFloat: (h, f) => HASHER.writeStr(h, String(f === 0 ? 0 : f)),
     finish: (h) => h.h,
   };
 
@@ -187,6 +192,8 @@ const $rt = (() => {
 
   function eq(a, b) {
     if (a === b) return true;
+    // `Eq` on floats is total: NaN equals itself (§3.5).
+    if (typeof a === "number" && typeof b === "number") return Number.isNaN(a) && Number.isNaN(b);
     if (typeof a !== "object" || typeof b !== "object" || a === null || b === null) return false;
     if (Array.isArray(a)) {
       if (!Array.isArray(b) || a.length !== b.length) return false;
@@ -219,7 +226,12 @@ const $rt = (() => {
   // -1, 0 or 1.
   function compare(a, b) {
     switch (typeof a) {
-      case "bigint": case "number": case "string": case "boolean":
+      case "number":
+        // `Ord` on floats is total: NaN orders after every number (§3.5).
+        if (Number.isNaN(a)) return Number.isNaN(b) ? 0 : 1;
+        if (Number.isNaN(b)) return -1;
+        return a < b ? -1 : a > b ? 1 : 0;
+      case "bigint": case "string": case "boolean":
         return a < b ? -1 : a > b ? 1 : 0;
     }
     if (Array.isArray(a)) {
@@ -279,8 +291,10 @@ const $rt = (() => {
 
   // A value as assigning it copies it: JavaScript shares objects, Flyscript copies `Copy` ones.
   function copy(v) {
-    if (typeof v === "object" && v !== null && !Array.isArray(v) && Object.getPrototypeOf(v) === Object.prototype) return { ...v };
-    return v;
+    if (typeof v !== "object" || v === null || Array.isArray(v) || Object.getPrototypeOf(v) !== Object.prototype) return v;
+    const out = {};
+    for (const k of Object.keys(v)) out[k] = copy(v[k]);
+    return out;
   }
 
   // ---- display ----
@@ -335,8 +349,11 @@ const $rt = (() => {
   function slice(a, lo, hi) {
     const l = Number(lo), h = hi === undefined ? a.length : Number(hi);
     if (l > h || h > a.length) panic(`range ${l}..${h} out of bounds (length ${a.length})`);
+    // A string's bounds fall between characters: not on a UTF-8 continuation byte (§3.1).
+    if (typeof a === "string" && (continuation(a, l) || continuation(a, h))) panic(`range ${l}..${h} splits a character`);
     return a.slice(l, h);
   }
+  const continuation = (s, i) => i < s.length && (s.charCodeAt(i) & 0xc0) === 0x80;
 
   const WIDTHS = { i8: [8, true], i16: [16, true], i32: [32, true], i64: [64, true], isize: [64, true],
     u8: [8, false], u16: [16, false], u32: [32, false], u64: [64, false], usize: [64, false] };
@@ -367,14 +384,20 @@ const $rt = (() => {
     slice: (s, i, j) => slice(s, i, j),
     split: (s, sep) => s.split(sep),
     trim: (s) => s.replace(/^[ \t\n\r]+|[ \t\n\r]+$/g, ""),
-    toLowerCase: (s) => s.toLowerCase(),
-    toUpperCase: (s) => s.toUpperCase(),
+    // Byte strings hold UTF-8: only ASCII letters change case.
+    toLowerCase: (s) => s.replace(/[A-Z]/g, (c) => c.toLowerCase()),
+    toUpperCase: (s) => s.replace(/[a-z]/g, (c) => c.toUpperCase()),
     cmp: (a, b) => ordering(compare(a, b)),
   };
   // Methods that change a string, given a reference to it.
   const SW = {
     push: (r, s) => { r.v = r.v + s; },
     clear: (r) => { r.v = ""; },
+  };
+  // `Option.take`, given a reference to the option: the place becomes `#None`, never the value,
+  // which others may share.
+  const OW = {
+    take: (r) => { const old = r.v; r.v = none(); return old; },
   };
 
   const A = {
@@ -422,7 +445,6 @@ const $rt = (() => {
     unwrapOr: (o, d) => (o.$tag === "Some" ? o.$ : d),
     map: (o, f) => (o.$tag === "Some" ? some(f(o.$)) : o),
     cloned: (o) => (o.$tag === "Some" ? some(clone(o.$)) : o),
-    take: (o) => { const old = { ...o }; o.$tag = "None"; delete o.$; return old; },
   };
   const R = {
     isOk: (r) => r.$tag === "Ok",
@@ -454,6 +476,7 @@ const $rt = (() => {
     min: (a, b) => (compare(b, a) < 0 ? b : a),
     max: (a, b) => (compare(b, a) > 0 ? b : a),
     get: (v) => v, into: (v) => v,
+    iter: (v) => new Gen(iter(v)[Symbol.iterator]()),
     hash: (v, h) => HASHER.writeStr(h.v, show(v)),
   };
 
@@ -500,6 +523,7 @@ const $rt = (() => {
   function callRef(r, name, ...args) {
     const v = r.v;
     if (typeof v === "string" && Object.prototype.hasOwnProperty.call(SW, name)) return SW[name](r, ...args);
+    if (v !== null && typeof v === "object" && (v.$tag === "Some" || v.$tag === "None") && Object.prototype.hasOwnProperty.call(OW, name)) return OW[name](r, ...args);
     return call(v, name, ...args);
   }
 

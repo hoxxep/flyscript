@@ -19,8 +19,9 @@ const RESERVED: str[] = ["arguments", "await", "case", "catch", "class", "debugg
   "instanceof", "interface", "let", "new", "null", "package", "private", "protected", "public", "static",
   "super", "switch", "this", "typeof", "undefined", "var", "void", "with", "yield", "NaN", "Infinity"];
 
-// Methods that change a string, which is a new value written back to the place it came from.
-const WRITEBACK: str[] = ["push", "clear"];
+// Methods that replace their receiver (a string's `push`, an option's `take`): they are given a
+// reference to the place it came from.
+const WRITEBACK: str[] = ["push", "clear", "take"];
 
 // Functions of the standard library the runtime provides under the same name.
 const BUILTINS: str[] = ["println", "min", "max", "panic", "replace", "swap", "alloc", "allocAll",
@@ -326,7 +327,8 @@ impl Gen {
     match (e) {
       #Ident(n) => self.ident(n),
       #Field(t, name) => {
-        const target = self.ex(t);
+        // Evaluated once, though a lent place is read and written by two closures.
+        const target = match (t) { #Ident(_) => self.ex(t), _ => { const v = self.ex(t); self.save(v) } };
         `${target}.${name}`
       }
       #Index(t, i) => {
