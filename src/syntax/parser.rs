@@ -505,7 +505,7 @@ impl<'a> Parser<'a> {
                 let bounds = if self.eat_kw(Kw::Extends) { self.bounds()? } else { Vec::new() };
                 members.push(InterfaceMember::AssocType { name, bounds });
             } else {
-                members.push(InterfaceMember::Method(self.sig(true)?));
+                members.push(InterfaceMember::Method(self.member_sig()?));
             }
             self.expect(";")?;
         }
@@ -533,7 +533,9 @@ impl<'a> Parser<'a> {
                 continue;
             }
             let exported = self.eat_kw(Kw::Export);
-            methods.push(Method { exported, decl: self.fn_decl()? });
+            let sig = self.member_sig()?;
+            let body = if self.declarations && self.eat(";") { None } else { Some(self.block()?) };
+            methods.push(Method { exported, decl: FnDecl { sig, body } });
         }
         self.expect("}")?;
         Ok(ImplDecl { params, interface, target, methods, assoc, derived: false })
@@ -571,15 +573,22 @@ impl<'a> Parser<'a> {
         Ok(FnDecl { sig, body })
     }
 
+    /// A method's signature: its name may be any word, reserved ones included (§2.3).
+    fn member_sig(&mut self) -> PResult<FnSig> {
+        self.sig_named(true, true)
+    }
+
     fn sig(&mut self, function_kw: bool) -> PResult<FnSig> {
+        self.sig_named(function_kw, !function_kw)
+    }
+
+    fn sig_named(&mut self, function_kw: bool, member: bool) -> PResult<FnSig> {
         let start = self.span();
         let comptime = self.eat_kw(Kw::Comptime);
-        let name = if function_kw {
+        if function_kw {
             self.expect_kw(Kw::Function)?;
-            self.ident()?
-        } else {
-            self.member_name()?
-        };
+        }
+        let name = if member { self.member_name()? } else { self.ident()? };
         let type_params = self.type_params()?;
         let params = self.params(true)?;
         self.expect(":")?;
@@ -947,6 +956,9 @@ impl<'a> Parser<'a> {
         let tok = |i: usize| &self.toks[i.min(self.toks.len() - 1)].tok;
         match tok(at + 1) {
             Tok::Ident(_) | Tok::Kw(_) if matches!(tok(at + 2), Tok::Punct(":")) => !matches!(tok(at + 1), Tok::Kw(Kw::Comptime)),
+            // A shorthand entry followed by a comma: there is no comma operator, so no block
+            // starts `{ name,` (`{ defs, main }`).
+            Tok::Ident(_) if matches!(tok(at + 2), Tok::Punct(",")) => true,
             Tok::Punct("[") => self.close_from(at + 1).is_some_and(|c| matches!(tok(c + 1), Tok::Punct(":"))),
             Tok::Kw(Kw::Comptime) if matches!(tok(at + 2), Tok::Kw(Kw::For | Kw::If)) && matches!(tok(at + 3), Tok::Punct("(")) => {
                 self.close_from(at + 3).is_some_and(|c| matches!(tok(c + 1), Tok::Punct("{")) && self.record_at(c + 1))

@@ -16,3 +16,10 @@ impl<K extends Hash & Eq, V> HashMap<K, V> {
   export function valuesMut(self: mut Self): Gen<mut V, []> from self;
   export function entries(self: readonly Self): Gen<[readonly K, readonly V], []> from self;
 }
+impl<K extends Hash & Eq & Clone, V extends Clone> Clone for HashMap<K, V> {
+  function clone(self: readonly Self): HashMap<K, V> {
+    let m: HashMap<K, V> = HashMap.new();
+    for (const [k, v] of self.entries()) { m.insert(k.clone(), v.clone()); }
+    m
+  }
+}

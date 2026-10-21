@@ -77,7 +77,8 @@ fn programs_run() {
             continue;
         }
         let (result, world) = run(checked.program, "main", Vec::new(), world);
-        let mut out = world.out.clone();
+        // What a program prints is lines; one `println` may print several.
+        let mut out: Vec<String> = world.out.iter().flat_map(|s| s.split('\n').map(String::from)).collect();
         if let Err(e) = result {
             out.push(format!("<{e}>"));
         }

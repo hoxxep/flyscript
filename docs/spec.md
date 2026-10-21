@@ -1,6 +1,6 @@
 # Flyscript
 
-**Language specification, version 0.42**
+**Language specification, version 0.43**
 
 *Affine values, one row calculus, handlers for everything, and `comptime`: Church on the outside, Turing on the inside.*
 
@@ -18,18 +18,15 @@ The whole language rests on five laws. Every rule in this document is a conseque
 4. **Handlers for everything.** Errors, I/O, iteration and region memory are ordinary effects with ordinary handlers. A handler may hold the rest of a computation as a one-shot continuation value; generators and tasks are both built from that one primitive.
 5. **`comptime` is the metalanguage.** Generics, reflection, layout transformation and derived interfaces are ordinary Flyscript code run by the compiler.
 
-### 0.1 Changes from 0.41
+### 0.1 Changes from 0.42
 
-0.42 comes from the first test of goal 6: Mini, a compiler written in Flyscript for a small functional language — lexer, recursive-descent parser, inference by unification over an arena of type variables, closure conversion, code generation for a stack machine, and the machine itself (examples/mini_compiler.fly, run as a test). Earlier changes are in [docs/history](history/).
+0.43 grows Mini (examples/mini_compiler.fly) into a compiler with the machinery a Flyscript front end needs: mutually recursive definitions in a global environment, Hindley–Milner let-polymorphism with type schemes generalized and instantiated over the union-find arena, and diagnostics rendered as line, column, source line and caret. Earlier changes are in [docs/history](history/).
 
 | Change | Why |
 | :--- | :--- |
-| Whether a type is `Copy`, `Send`, class 2, hides a borrow or runs code on drop is decided coinductively: a nominal type met again inside itself is a cycle with the property's neutral value (§4.4, §11) | the prototype unfolded recursive types to a fixed depth, exponential in their branching: Mini's `Expr` never finished checking |
-| A module may declare `Type` for itself, shadowing the comptime `Type` there (§7.1) | `Type` is the name a compiler gives its types, and the built-in made a user's `enum Type` unreachable |
-| A place nothing may be moved out of — behind a borrow, or an element of a collection — is matched through a borrow of it, so its parts bind as borrows (§4.1) | `match (self.links[v]) { #Some(t) => … }` tried to move out of the table |
-| A function whose result is a borrow lends what its body ends with, and a borrow expected of a call whose result is a bare type variable leaves the variable to the arguments (§4.2, §3.6) | `function peek(self: readonly Self): readonly Tok { self.toks[i].tok }` tried to move the token; `asInt(stack.pop().unwrap())` made `unwrap`'s `T` a borrow |
-| `for (const i of a..b)` counts from `a` up to `b`, excluded (§5.5) | a compiler loops over indices everywhere, and there was no way to |
-| A missing `clone`, `eq`, `cmp`, `hash` or `show` on a struct or enum says to ask for the derivation | it said only that there was no such method |
+| A `{` followed by a name and a comma begins a record: `{ defs, main }` (§2.3) | there is no comma operator, so it cannot be a block, but it was parsed as one |
+| A method may be named with any word, reserved ones included, as §2.3 already said: `function function(…)` in an `impl` | Mini's checker has a `function` method, and it did not parse |
+| `HashMap` is `Clone` when its keys and values are (§3.1); the hint to derive an interface is given only for a module's own structs and enums | Mini clones its global table into each function's code generator, and the hint suggested deriving `Clone` for `HashMap` |
 
 
 ---
@@ -175,7 +172,7 @@ Every comma-separated list in the grammar — parameters, arguments, type argume
 
 Three rules settle the grammar's ambiguities, all borrowed from TypeScript:
 
-- **Braces.** A `{` in expression position begins a record literal. A block appears only as the body of a block-like construct, after `=>` in a lambda or match arm, or at the start of a statement — unless the brace opens an entry (`{ a: 1 }`, `{ [k]: v }`, or a `comptime for` over entries): Flyscript has no labeled statements, so that is always a record.
+- **Braces.** A `{` in expression position begins a record literal. A block appears only as the body of a block-like construct, after `=>` in a lambda or match arm, or at the start of a statement — unless the brace opens an entry (`{ a: 1 }`, `{ [k]: v }`, a shorthand entry followed by a comma, `{ a, b }`, or a `comptime for` over entries): Flyscript has no labeled statements and no comma operator, so that is always a record. `{ a }` alone is a block; write `{ a: a }` for the record.
 - **Block-like statements.** A block-like expression at the start of a statement needs no `;` and is not continued by operators: `if (c) { … } [a, b]` is two statements. As the last item of a block it is the block's value.
 - **Contextual words.** `from`, `of`, `with`, `resumes`, `row`, `view` and `private` are keywords only where the grammar expects them. `match`, `handle`, `region` and `effect` are keywords only when followed by `(…) {`, `{`, `(Ident) {` and `Ident` respectively (and `region`, like `row`, at the start of a type parameter: `<region R>`) — shapes a call or a name never takes, since an expression statement ends with `;` — and names anywhere else, so a request handler may be called `handle`. Any reserved word may be used as a member name (`Yield.yield`, `{ default: 1 }`).
 
@@ -190,7 +187,7 @@ Three rules settle the grammar's ambiguities, all borrowed from TypeScript:
 - `T[N]` is an inline array (`Copy` if `T` is); `[a, b, c]` and `repeat(v)` build one, with `N` from context. `T[]` is a borrowed slice, always `readonly T[]` or `mut T[]`.
 - `Vec<T>`, `Box<T>`, `HashMap<K, V>` and the other owning containers are library types.
 
-**Methods.** Arrays, slices and `Vec`s share their methods, which are defined on slices and reached through lending (§4.1): `len`, `iter`, `iterMut`, `splitAt`, `last`, `includes` and `indexOf` (by `Eq`), `sort` (by `Ord`), `sortBy(cmp)` (stable, `cmp` returning `#Less`, `#Equal` or `#Greater`), `reverse`, and `join(sep)` (each element shown, strings as they are). A `Vec` also has `push`, `pop`, `insert(i, v)`, `remove(i)`, `retain(keep)` — TypeScript's `xs = xs.filter(keep)`, in place — and `drain`, which takes the elements out in order. `str` has TypeScript's string methods — `slice`, `split`, `trim`, `includes`, `startsWith`, `endsWith`, `indexOf`, `toUpperCase`, `toLowerCase`, `replaceAll` — plus `toString`, `asBytes`, and the generators `bytes()`, `lines()` and `splitWhitespace()`; a `String` lends them all, and adds `push`, `clone` and `asStr()`, which lends it as a `str` explicitly where nothing expects one. A `HashMap<K, V>` has `insert`, `get`, `getMut`, `has`, `remove` (each looked up by anything `K` lends), `len`, `sortedByValue()` (the entries, largest value first), and the generators `keys()`, `values()`, `valuesMut()` and `entries()`.
+**Methods.** Arrays, slices and `Vec`s share their methods, which are defined on slices and reached through lending (§4.1): `len`, `iter`, `iterMut`, `splitAt`, `last`, `includes` and `indexOf` (by `Eq`), `sort` (by `Ord`), `sortBy(cmp)` (stable, `cmp` returning `#Less`, `#Equal` or `#Greater`), `reverse`, and `join(sep)` (each element shown, strings as they are). A `Vec` also has `push`, `pop`, `insert(i, v)`, `remove(i)`, `retain(keep)` — TypeScript's `xs = xs.filter(keep)`, in place — and `drain`, which takes the elements out in order. `str` has TypeScript's string methods — `slice`, `split`, `trim`, `includes`, `startsWith`, `endsWith`, `indexOf`, `toUpperCase`, `toLowerCase`, `replaceAll` — plus `toString`, `asBytes`, and the generators `bytes()`, `lines()` and `splitWhitespace()`; a `String` lends them all, and adds `push`, `clone` and `asStr()`, which lends it as a `str` explicitly where nothing expects one. A `HashMap<K, V>` is `Clone` when `K` and `V` are, and has `insert`, `get`, `getMut`, `has`, `remove` (each looked up by anything `K` lends), `len`, `sortedByValue()` (the entries, largest value first), and the generators `keys()`, `values()`, `valuesMut()` and `entries()`.
 
 A tuple `[A, B]` is built with a list literal, taken apart with a pattern (`const [a, b] = t`, which takes an array of the same length apart too), and indexed by a constant, as in TypeScript: `t[0]` is a place of its own, like a field.
 

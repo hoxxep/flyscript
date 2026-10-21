@@ -2,11 +2,28 @@
 // expect: let twice = fn(f, x) => f(f(x)) in twice(fn(n) => n * 2, 5)  :  int  =  20
 // expect: if 1 < 2 then 10 else 20  :  int  =  10
 // expect: let k = 10 in let add = fn(x) => x + k in add(add(1))  :  int  =  21
-// expect: error at 26..33: expected int, found bool
-// expect: error at 13: unknown name `z`
-// expect: error at 17..21: a function cannot take itself
+// expect: error at 1:27: expected int, found bool
+// expect:     let f = fn(x) => x + 1 in f(true)
+// expect:                               ^
+// expect: error at 1:14: unknown name `z`
+// expect:     let y = 1 in z
+// expect:                  ^
+// expect: error at 1:18: a function cannot take itself
+// expect:     let g = fn(x) => x(x) in 0
+// expect:                      ^
+// expect: def fact(n) = if n < 1 then 1 else n * fact(n - 1); fact(10)  :  int  =  3628800
+// expect: def even(n) = if n < 1 then true else odd(n - 1);
+// expect: def odd(n) = if n < 1 then false else even(n - 1);
+// expect: if even(10) then 1 else 0  :  int  =  1
+// expect: let id = fn(x) => x in if id(true) then id(7) else 0  :  int  =  7
+// expect: def compose(f, g) = fn(x) => f(g(x));
+// expect: compose(fn(n) => n + 1, fn(n) => n * 2)(20)  :  int  =  41
+// expect: error at 2:1: expected int, found bool
+// expect:     f(true)
+// expect:     ^
 // Mini: a compiler for a small language, written in Flyscript as a test of goal 6.
-// source -> tokens -> AST -> types (union-find inference) -> bytecode -> run.
+// source -> tokens -> AST -> types (Hindley–Milner: union-find inference, let-polymorphism)
+// -> bytecode (closure conversion, globals for recursive definitions) -> run.
 import { println } from "std/io";
 import { HashMap } from "std/collections";
 
@@ -17,7 +34,7 @@ type CompileError = #Lex { at: usize; message: String } | #Parse { at: usize; me
 
 // ---- Lexer ----
 
-enum Tok { #Int(i64), #Ident(String), #Let, #In, #If, #Then, #Else, #Fn, #True, #False, #LParen, #RParen, #Comma, #Eq, #Plus, #Minus, #Star, #Less, #Arrow, #Eof }
+enum Tok { #Int(i64), #Ident(String), #Let, #In, #If, #Then, #Else, #Fn, #Def, #True, #False, #LParen, #RParen, #Comma, #Semi, #Eq, #Plus, #Minus, #Star, #Less, #Arrow, #Eof }
 
 impl Eq for Tok;
 impl Clone for Tok;
@@ -29,7 +46,7 @@ function isAlpha(b: u8): bool { (b >= b'a' && b <= b'z') || (b >= b'A' && b <= b
 function keyword(word: str): Tok {
   match (word) {
     "let" => #Let, "in" => #In, "if" => #If, "then" => #Then, "else" => #Else,
-    "fn" => #Fn, "true" => #True, "false" => #False,
+    "fn" => #Fn, "def" => #Def, "true" => #True, "false" => #False,
     _ => #Ident(word.toString()),
   }
 }
@@ -54,7 +71,7 @@ function lex(src: str): Vec<Token> uses Fail<CompileError> {
       continue;
     }
     const tok: Tok = match (b) {
-      b'(' => #LParen, b')' => #RParen, b',' => #Comma, b'+' => #Plus, b'*' => #Star, b'<' => #Less,
+      b'(' => #LParen, b')' => #RParen, b',' => #Comma, b';' => #Semi, b'+' => #Plus, b'*' => #Star, b'<' => #Less,
       b'=' => if (i + 1 < bytes.len() && bytes[i + 1] == b'>') { i += 1; #Arrow } else { #Eq },
       b'-' => #Minus,
       _ => throw #Lex { at: i, message: `unexpected character ${b}` },
@@ -80,6 +97,10 @@ enum Expr {
   #Fn(Vec<String>, Box<Expr>, Span),
   #Call(Box<Expr>, Vec<Expr>, Span),
 }
+
+// `def name(params) = body;`: definitions see each other, so they may recurse.
+type Def = { name: String; params: Vec<String>; body: Expr; span: Span };
+type Program = { defs: Vec<Def>; main: Expr };
 
 function spanOf(e: readonly Expr): Span {
   match (e) {
@@ -107,6 +128,30 @@ impl Parser {
     };
     self.bump();
     name
+  }
+
+  function program(self: mut Self): Program uses Fail<CompileError> {
+    let defs: Vec<Def> = Vec.new();
+    while (self.peek() == #Def) {
+      const start = self.here().start;
+      self.bump();
+      const name = self.ident();
+      self.expect(#LParen, "`(`");
+      let params: Vec<String> = Vec.new();
+      while (self.peek() != #RParen) {
+        params.push(self.ident());
+        if (self.peek() == #Comma) { self.bump(); }
+      }
+      self.bump();
+      self.expect(#Eq, "`=`");
+      const body = self.expr();
+      const end = spanOf(body).end;
+      self.expect(#Semi, "`;`");
+      defs.push({ name, params, body, span: { start, end } });
+    }
+    const main = self.expr();
+    if (self.peek() != #Eof) { throw #Parse { at: self.here().start, message: "expected the end of the program".toString() }; }
+    { defs, main }
   }
 
   function expr(self: mut Self): Expr uses Fail<CompileError> {
@@ -264,20 +309,110 @@ impl Types {
   }
 }
 
-// Scopes are a stack of maps from names to types; lookup walks it from the innermost.
-struct Checker { types: Types; scopes: Vec<HashMap<String, Type>> }
+// A type with variables quantified: each use of a `let`-bound name gets fresh copies of them.
+type Scheme = { vars: Vec<usize>; ty: Type };
+
+impl Types {
+  // The variables a type still leaves open, in order of first appearance.
+  function freeIn(self: readonly Self, t: readonly Type, out: mut Vec<usize>): void {
+    match (self.resolve(t)) {
+      #Var(v) => if (!out.includes(v)) { out.push(v); },
+      #Fn(ps, r) => {
+        for (const p of ps) { self.freeIn(p, mut out); }
+        self.freeIn(r, mut out);
+      }
+      _ => {},
+    }
+  }
+  // The type with each quantified variable replaced by its fresh copy.
+  function copy(self: readonly Self, t: readonly Type, map: readonly HashMap<usize, Type>): Type {
+    match (self.resolve(t)) {
+      #Var(v) => match (map.get(v)) { #Some(fresh) => fresh.clone(), #None => #Var(v) },
+      #Fn(ps, r) => #Fn(ps.iter().map((p) => self.copy(p, map)).collect(), Box.new(self.copy(r, map))),
+      other => other,
+    }
+  }
+}
+
+// Scopes are a stack of maps from names to schemes; lookup walks it from the innermost.
+struct Checker { types: Types; scopes: Vec<HashMap<String, Scheme>> }
 
 impl Checker {
-  function lookup(self: readonly Self, name: str, span: Span): Type uses Fail<CompileError> {
+  function lookup(self: mut Self, name: str, span: Span): Type uses Fail<CompileError> {
     let i = self.scopes.len();
     while (i > 0) {
       i -= 1;
-      match (self.scopes[i].get(name)) {
-        #Some(t) => return t.clone(),
+      const found: Option<Scheme> = match (self.scopes[i].get(name)) { #Some(s) => #Some({ vars: s.vars.clone(), ty: s.ty.clone() }), #None => #None };
+      match (found) {
+        #Some(s) => return self.instantiate(s),
         #None => {},
       }
     }
     throw #Unbound { span, name: name.toString() }
+  }
+
+  function instantiate(self: mut Self, s: Scheme): Type {
+    let map: HashMap<usize, Type> = HashMap.new();
+    for (const v of s.vars) { map.insert(v, self.types.fresh()); }
+    self.types.copy(s.ty, map)
+  }
+
+  // Quantifies the variables of `t` that no enclosing scope mentions.
+  function generalize(self: readonly Self, t: Type): Scheme {
+    let inEnv: Vec<usize> = Vec.new();
+    for (const scope of self.scopes) {
+      for (const s of scope.values()) {
+        let open: Vec<usize> = Vec.new();
+        self.types.freeIn(s.ty, mut open);
+        for (const v of open) { if (!s.vars.includes(v) && !inEnv.includes(v)) { inEnv.push(v); } }
+      }
+    }
+    let mine: Vec<usize> = Vec.new();
+    self.types.freeIn(t, mut mine);
+    mine.retain((v) => !inEnv.includes(v));
+    { vars: mine, ty: t }
+  }
+
+  function mono(t: Type): Scheme { { vars: Vec.new(), ty: t } }
+
+  // Definitions are inferred together, each seeing the others at one type while their bodies
+  // are checked (no polymorphic recursion), then generalized.
+  function program(self: mut Self, p: readonly Program): Type uses Fail<CompileError> {
+    let globals: HashMap<String, Scheme> = HashMap.new();
+    let own: Vec<Type> = Vec.new();
+    for (const d of p.defs) {
+      const t = self.types.fresh();
+      globals.insert(d.name.clone(), Checker.mono(t.clone()));
+      own.push(t);
+    }
+    self.scopes.push(globals);
+    for (const [i, d] of p.defs.iter().enumerate()) {
+      const tf = self.function(d.params, d.body);
+      self.types.unify(own[i], tf, d.span);
+    }
+    let general: HashMap<String, Scheme> = HashMap.new();
+    self.scopes.pop();
+    for (const [i, d] of p.defs.iter().enumerate()) {
+      general.insert(d.name.clone(), self.generalize(own[i].clone()));
+    }
+    self.scopes.push(general);
+    const t = self.infer(p.main);
+    self.scopes.pop();
+    t
+  }
+
+  function function(self: mut Self, params: readonly String[], body: readonly Expr): Type uses Fail<CompileError> {
+    let scope: HashMap<String, Scheme> = HashMap.new();
+    let pts: Vec<Type> = Vec.new();
+    for (const p of params) {
+      const t = self.types.fresh();
+      scope.insert(p.clone(), Checker.mono(t.clone()));
+      pts.push(t);
+    }
+    self.scopes.push(scope);
+    const tr = self.infer(body);
+    self.scopes.pop();
+    #Fn(pts, Box.new(tr))
   }
 
   function infer(self: mut Self, e: readonly Expr): Type uses Fail<CompileError> {
@@ -300,26 +435,14 @@ impl Checker {
       }
       #Let(name, value, body, _) => {
         const tv = self.infer(value);
-        let scope: HashMap<String, Type> = HashMap.new();
-        scope.insert(name.clone(), tv);
+        let scope: HashMap<String, Scheme> = HashMap.new();
+        scope.insert(name.clone(), self.generalize(tv));
         self.scopes.push(scope);
         const tb = self.infer(body);
         self.scopes.pop();
         tb
       }
-      #Fn(params, body, _) => {
-        let scope: HashMap<String, Type> = HashMap.new();
-        let pts: Vec<Type> = Vec.new();
-        for (const p of params) {
-          const t = self.types.fresh();
-          scope.insert(p.clone(), t.clone());
-          pts.push(t);
-        }
-        self.scopes.push(scope);
-        const tr = self.infer(body);
-        self.scopes.pop();
-        #Fn(pts, Box.new(tr))
-      }
+      #Fn(params, body, _) => self.function(params, body),
       #Call(f, args, span) => {
         const tf = self.infer(f);
         let tas: Vec<Type> = Vec.new();
@@ -335,11 +458,11 @@ impl Checker {
 // ---- Code generation to a stack machine ----
 
 // Each function has a frame of its own: what it captured, then its parameters, then its `let`s.
-enum Instr { #Push(i64), #Load(usize), #Store, #Drop, #Add, #Sub, #Mul, #Lt, #Jump(usize), #JumpIfFalse(usize), #MakeFn(usize, usize, usize), #Call(usize), #Ret }
+enum Instr { #Push(i64), #Load(usize), #Global(usize), #Store, #Drop, #Add, #Sub, #Mul, #Lt, #Jump(usize), #JumpIfFalse(usize), #MakeFn(usize, usize, usize), #Call(usize), #Ret }
 impl Clone for Instr;
 impl Show for Instr;
 
-struct Gen { code: Vec<Instr>; locals: Vec<String> }
+struct Gen { code: Vec<Instr>; locals: Vec<String>; globals: HashMap<String, usize> }
 
 // The names an expression uses that it does not bind, in order of first use.
 function freeVars(e: readonly Expr, bound: mut Vec<String>, out: mut Vec<String>): void {
@@ -371,16 +494,17 @@ function freeVars(e: readonly Expr, bound: mut Vec<String>, out: mut Vec<String>
 
 impl Gen {
   function emit(self: mut Self, i: Instr): usize { self.code.push(i); self.code.len() - 1 }
-  function slot(self: readonly Self, name: str): usize {
+  // A local's slot in the current frame, or a definition's index among the globals.
+  function load(self: readonly Self, name: str): Instr {
     let i = self.locals.len();
-    while (i > 0) { i -= 1; if (self.locals[i] == name) { return i; } }
-    panic("checked names resolve")
+    while (i > 0) { i -= 1; if (self.locals[i] == name) { return #Load(i); } }
+    match (self.globals.get(name)) { #Some(g) => #Global(g), #None => panic("checked names resolve") }
   }
   function gen(self: mut Self, e: readonly Expr): void {
     match (e) {
       #Int(n, _) => { self.emit(#Push(n)); }
       #Bool(b, _) => { self.emit(#Push(if (b) { 1 } else { 0 })); }
-      #Var(name, _) => { const s = self.slot(name); self.emit(#Load(s)); }
+      #Var(name, _) => { const i = self.load(name); self.emit(i); }
       #Bin(op, a, b, _) => {
         self.gen(a);
         self.gen(b);
@@ -409,11 +533,13 @@ impl Gen {
         for (const p of params) { bound.push(p.clone()); }
         let captures: Vec<String> = Vec.new();
         freeVars(body, mut bound, mut captures);
-        for (const c of captures) { const s = self.slot(c); self.emit(#Load(s)); }
+        // Definitions are globals, reached directly, not captured.
+        captures.retain((c) => self.locals.includes(c));
+        for (const c of captures) { const i = self.load(c); self.emit(i); }
         const make = self.emit(#MakeFn(0, params.len(), captures.len()));
         const skip = self.emit(#Jump(0));
         // The body's frame: its captures, then its parameters.
-        let inner = Gen { code: Vec.new(), locals: Vec.new() };
+        let inner = Gen { code: Vec.new(), locals: Vec.new(), globals: self.globals.clone() };
         for (const c of captures) { inner.locals.push(c.clone()); }
         for (const p of params) { inner.locals.push(p.clone()); }
         inner.code = self.code.drain().collect();
@@ -443,7 +569,7 @@ function asInt(v: readonly Value): i64 {
   match (v) { #Int(n) => n, _ => panic("checked: an int") }
 }
 
-export function run(code: readonly Instr[]): i64 {
+export function run(code: readonly Instr[], globals: readonly Value[]): i64 {
   let stack: Vec<Value> = Vec.new();
   let frames: Vec<Frame> = Vec.new();
   frames.push({ ret: code.len(), locals: Vec.new() });
@@ -453,6 +579,7 @@ export function run(code: readonly Instr[]): i64 {
     match (code[pc]) {
       #Push(n) => stack.push(#Int(n)),
       #Load(s) => stack.push(frames[top].locals[s].clone()),
+      #Global(g) => stack.push(globals[g].clone()),
       #Store => frames[top].locals.push(stack.pop().unwrap()),
       #Drop => { frames[top].locals.pop(); }
       #Add | #Sub | #Mul | #Lt => {
@@ -495,22 +622,55 @@ export function run(code: readonly Instr[]): i64 {
   asInt(stack.pop().unwrap())
 }
 
-export function compile(src: str): [Vec<Instr>, String] uses Fail<CompileError> {
+type Compiled = { code: Vec<Instr>; globals: Vec<Value>; ty: String };
+
+export function compile(src: str): Compiled uses Fail<CompileError> {
   let p = Parser { toks: lex(src), pos: 0 };
-  const ast = p.expr();
+  const prog = p.program();
   let c = Checker { types: Types { links: Vec.new() }, scopes: Vec.new() };
-  const t = c.infer(ast);
-  let g = Gen { code: Vec.new(), locals: Vec.new() };
-  g.gen(ast);
-  [g.code, c.types.show(t)]
+  const t = c.program(prog);
+  // Each definition's body is a function of its parameters alone, placed before `main`.
+  let names: HashMap<String, usize> = HashMap.new();
+  for (const [i, d] of prog.defs.iter().enumerate()) { names.insert(d.name.clone(), i); }
+  let g = Gen { code: Vec.new(), locals: Vec.new(), globals: names };
+  const skip = g.emit(#Jump(0));
+  let globals: Vec<Value> = Vec.new();
+  for (const d of prog.defs) {
+    const addr = g.code.len();
+    for (const param of d.params) { g.locals.push(param.clone()); }
+    g.gen(d.body);
+    g.emit(#Ret);
+    g.locals = Vec.new();
+    globals.push(#Closure(addr, d.params.len(), Vec.new()));
+  }
+  g.code[skip] = #Jump(g.code.len());
+  g.gen(prog.main);
+  { code: g.code, globals, ty: c.types.show(t) }
 }
 
-function describe(e: readonly CompileError): String {
+// ---- Diagnostics shown against the source: line, column, the line, a caret ----
+
+function render(src: str, at: usize, message: str): String {
+  let line: usize = 1;
+  let lineStart: usize = 0;
+  const bytes = src.asBytes();
+  for (const i of 0..at) {
+    if (bytes[i] == b'\n') { line += 1; lineStart = i + 1; }
+  }
+  let lineEnd = lineStart;
+  while (lineEnd < bytes.len() && bytes[lineEnd] != b'\n') { lineEnd += 1; }
+  let caret = String.new();
+  for (const _ of lineStart..at) { caret.push(" "); }
+  caret.push("^");
+  `${line}:${at - lineStart + 1}: ${message}\n    ${src.slice(lineStart, lineEnd)}\n    ${caret}`
+}
+
+function describe(src: str, e: readonly CompileError): String {
   match (e) {
-    #Lex { at, message } => `${at}: ${message}`,
-    #Parse { at, message } => `${at}: ${message}`,
-    #Type { span, message } => `${span.start}..${span.end}: ${message}`,
-    #Unbound { span, name } => `${span.start}: unknown name \`${name}\``,
+    #Lex { at, message } => render(src, at, message),
+    #Parse { at, message } => render(src, at, message),
+    #Type { span, message } => render(src, span.start, message),
+    #Unbound { span, name } => render(src, span.start, `unknown name \`${name}\``),
   }
 }
 
@@ -523,13 +683,18 @@ export function main(): void uses Io {
     "let f = fn(x) => x + 1 in f(true)",
     "let y = 1 in z",
     "let g = fn(x) => x(x) in 0",
+    "def fact(n) = if n < 1 then 1 else n * fact(n - 1); fact(10)",
+    "def even(n) = if n < 1 then true else odd(n - 1);\ndef odd(n) = if n < 1 then false else even(n - 1);\nif even(10) then 1 else 0",
+    "let id = fn(x) => x in if id(true) then id(7) else 0",
+    "def compose(f, g) = fn(x) => f(g(x));\ncompose(fn(n) => n + 1, fn(n) => n * 2)(20)",
+    "def f(x) = x + 1;\nf(true)",
   ];
   for (const src of programs) {
     try {
-      const [code, ty] = compile(src);
-      println(`${src}  :  ${ty}  =  ${run(code)}`);
+      const c = compile(src);
+      println(`${src}  :  ${c.ty}  =  ${run(c.code, c.globals)}`);
     } catch (e) {
-      println(`error at ${describe(e)}`);
+      println(`error at ${describe(src, e)}`);
     }
   }
 }

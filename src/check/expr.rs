@@ -1700,7 +1700,9 @@ impl<'p> Checker<'p> {
             // A struct or enum gets the derived interfaces only by asking (§3.5).
             let derived = [("clone", "Clone"), ("eq", "Eq"), ("cmp", "Ord"), ("hash", "Hash"), ("show", "Show")];
             let hint = match (self.strip(recv), derived.iter().find(|(m, _)| *m == name)) {
-                (Ty::Named(d, _), Some((_, iface))) if matches!(self.p.defs[d].kind, DefKind::Struct { .. } | DefKind::Enum { .. }) => {
+                (Ty::Named(d, _), Some((_, iface)))
+                    if matches!(self.p.defs[d].kind, DefKind::Struct { fields: Some(_) } | DefKind::Enum { .. }) && !self.p.modules[self.p.defs[d].module].is_std =>
+                {
                     format!(": `{}` does not implement `{iface}`; ask for it with `impl {iface} for {};`", self.p.defs[d].name, self.p.defs[d].name)
                 }
                 _ => String::new(),
