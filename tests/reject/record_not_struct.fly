@@ -1,0 +1,8 @@
+// error: a record is not a `Point`; build it as one with `Point { … }`, or give its binding the type `Point`
+// A struct is a new type (§3.3): a record literal becomes one only where the struct is expected.
+struct Point { x: f64; y: f64; }
+function takePoint(p: Point): f64 { p.x + p.y }
+export function sum(): f64 {
+  const p = { x: 1.0, y: 2.0 };
+  takePoint(p)
+}

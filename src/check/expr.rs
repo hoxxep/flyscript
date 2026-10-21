@@ -485,7 +485,16 @@ impl<'p> Checker<'p> {
         let before = self.pending_copy.len();
         if !self.lends(found, expected) {
             let (f, x) = (self.show(found), self.show(expected));
-            self.err(span, format!("expected `{x}`, found `{f}`"));
+            // A record with a struct's fields: the struct is a new type, named where it is built.
+            let hint = match (self.strip(found), self.strip(expected)) {
+                (Ty::Record(r), Ty::Named(d, _)) if matches!(&self.p.defs[d].kind, DefKind::Struct { fields: Some(fs) }
+                    if { let r = self.s.expand_row(&r); fs.len() == r.labels.len() && fs.iter().all(|(k, _)| r.labels.contains_key(k)) }) => {
+                    let n = self.p.defs[d].name.clone();
+                    format!(": a record is not a `{n}`; build it as one with `{n} {{ … }}`, or give its binding the type `{n}`")
+                }
+                _ => String::new(),
+            };
+            self.err(span, format!("expected `{x}`, found `{f}`{hint}"));
         }
         for t in self.pending_copy.drain(before..).collect::<Vec<_>>() {
             self.copies_out.push((t, span));
@@ -1206,10 +1215,20 @@ impl<'p> Checker<'p> {
             let r = self.expr(rhs, Some(&l));
             (l, self.strip(&r))
         };
-        if !self.try_unify(&l, &r) {
+        // An owner compared with what it lends is compared as that: `name == "ada"` for a
+        // `String` (§3.5).
+        let comparison = matches!(op, "==" | "!=" | "<" | ">" | "<=" | ">=");
+        let l = if self.try_unify(&l, &r) {
+            l
+        } else if comparison && self.lends(&l, &Ty::Borrow(false, Box::new(r.clone()))) {
+            r.clone()
+        } else if comparison && self.lends(&r, &Ty::Borrow(false, Box::new(l.clone()))) {
+            l
+        } else {
             let (a, b) = (self.show(&l), self.show(&r));
             self.err(span, format!("`{op}` needs operands of the same type, found `{a}` and `{b}`"));
-        }
+            l
+        };
         match op {
             "==" | "!=" => {
                 self.pending_ops.push((span, l.clone(), "Eq", "eq"));

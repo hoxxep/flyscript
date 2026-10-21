@@ -1,0 +1,3 @@
+// An owner compared with what it lends is compared as that (§3.5).
+export function isAda(name: readonly String): bool { name == "ada" || "Ada" == name }
+export function before(a: readonly String, b: str): bool { a < b }

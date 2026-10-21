@@ -430,11 +430,21 @@ impl Program {
                 }
             }
         }
-        // Pass 3: elaborate declarations, then impls, then function signatures.
+        // Pass 3: elaborate declarations, then impls, then function signatures. Aliases come
+        // first, so a declaration may use one written after it (`interface Ord` returning
+        // `Ordering`).
         for m in 0..self.modules.len() {
             let items = self.modules[m].ast.items.clone();
             for item in &items {
-                self.elaborate_def(m, item);
+                self.elaborate_params(m, item);
+            }
+        }
+        for aliases in [true, false] {
+            for m in 0..self.modules.len() {
+                let items = self.modules[m].ast.items.clone();
+                for item in items.iter().filter(|i| matches!(i.kind, ItemKind::TypeAlias(_)) == aliases) {
+                    self.elaborate_def(m, item);
+                }
             }
         }
         self.check_views();
@@ -511,7 +521,9 @@ impl Program {
         out
     }
 
-    fn elaborate_def(&mut self, m: usize, item: &ast::Item) {
+    /// A declaration's generic parameters, before any declaration's body: an alias may be
+    /// elaborated before the generic type it applies.
+    fn elaborate_params(&mut self, m: usize, item: &ast::Item) {
         let scope = TyScope { module: m, ..Default::default() };
         let (name, params) = match &item.kind {
             ItemKind::Struct(s) => (&s.name, &s.params),
@@ -522,8 +534,21 @@ impl Program {
             _ => return,
         };
         let Some(Binding::Def(id)) = self.modules[m].scope.get(&name.name).copied() else { return };
-        let gparams = self.type_params(params, &scope);
-        self.defs[id].params = gparams.clone();
+        self.defs[id].params = self.type_params(params, &scope);
+    }
+
+    fn elaborate_def(&mut self, m: usize, item: &ast::Item) {
+        let scope = TyScope { module: m, ..Default::default() };
+        let name = match &item.kind {
+            ItemKind::Struct(s) => &s.name,
+            ItemKind::Enum(e) => &e.name,
+            ItemKind::TypeAlias(a) => &a.name,
+            ItemKind::Interface(x) => &x.name,
+            ItemKind::Effect(e) => &e.name,
+            _ => return,
+        };
+        let Some(Binding::Def(id)) = self.modules[m].scope.get(&name.name).copied() else { return };
+        let gparams = self.defs[id].params.clone();
         let inner = scope.with_params(&gparams);
         match &item.kind {
             ItemKind::Struct(s) => {

@@ -1,0 +1,2 @@
+// error: this closure gives away `s`, so it can be called only once (`once`), but it is returned where it may be called again
+export function owner(s: String): () => String { () => s }

@@ -1,0 +1,8 @@
+// error: this closure changes `n`, so one caller at a time may call it (`mut`), but it is passed where it may be called by several at once
+// `par` calls its closure from many tasks at once; a closure that changes a capture is `mut` (§4.3).
+import { par } from "std/par";
+export function race(xs: mut f32[]): u64 {
+  let n: u64 = 0;
+  par(mut xs, (x, _) => { n += 1; });
+  n
+}

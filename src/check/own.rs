@@ -126,6 +126,8 @@ pub fn check_function(p: &mut Program, fid: FnId) {
         sources,
         send_params,
         collecting: true,
+        closure_modes: HashMap::new(),
+        var_modes: HashMap::new(),
     };
     // Pass 1 collects every use of every binding, with its position; pass 2 checks.
     for pass in 0..2 {
@@ -152,6 +154,10 @@ pub fn check_function(p: &mut Program, fid: FnId) {
         o.escaping = false;
         if !o.collecting {
             o.check_return(&v, body.tail.as_ref().map_or(body.span, |e| e.span));
+            if let Some(t) = &body.tail {
+                let ret = o.ret_ty.clone();
+                o.check_mode(t, &ret, "returned");
+            }
         }
     }
     o.p.note = None;
@@ -193,6 +199,10 @@ struct Own<'p> {
     /// Type parameters declared `extends Send`, by symbol id.
     send_params: Vec<u32>,
     collecting: bool,
+    /// Each closure's mode, by its span, from what its body does with its captures (§4.3), with
+    /// the capture that decided it; and the mode of bindings initialized with a closure.
+    closure_modes: HashMap<Span, (FnMode, String)>,
+    var_modes: HashMap<VarId, (FnMode, String)>,
 }
 
 impl<'p> Own<'p> {
@@ -554,6 +564,11 @@ impl<'p> Own<'p> {
                     };
                     let v = self.expr(init, how);
                     self.bind_pattern(pat, &v, *mutable);
+                    if let PatternKind::Bind(name) = &pat.kind
+                        && let Some(m) = self.closure_mode(init)
+                            && let Some(id) = self.lookup(name) {
+                                self.var_modes.insert(id, m);
+                            }
                 }
                 Stmt::Defer(e) => {
                     // A `defer` holds everything it borrows until the block ends (§5.6).
@@ -876,6 +891,8 @@ impl<'p> Own<'p> {
                 if let Some(v) = v {
                     let val = self.escape(|o| o.expr(v, Use::Move));
                     self.check_return(&val, v.span);
+                    let ret = self.ret_ty.clone();
+                    self.check_mode(v, &ret, "returned");
                 }
                 Val::default()
             }
@@ -1049,6 +1066,10 @@ impl<'p> Own<'p> {
                 None => Use::Move,
             };
             let v = self.expr(a, how);
+            if let Some((_, p)) = params.get(i) {
+                let p = p.clone();
+                self.check_mode(a, &p, "passed");
+            }
             // A value moved into a parameter that is a borrow in disguise: `readonly T` params
             // accept owned arguments by lending; nothing to do. An owned parameter fed from a
             // borrow of a non-Copy type is a move out of the borrow.
@@ -1130,7 +1151,6 @@ impl<'p> Own<'p> {
     }
 
     fn lambda(&mut self, e: &Expr, params: &[ast::Param], body: &Expr) -> Val {
-        let _ = e;
         let escapes = self.escaping;
         // Check the body first, recording how it uses each binding it captures.
         let outer: HashSet<VarId> = self.scopes.iter().flat_map(|sc| sc.values().copied()).collect();
@@ -1148,6 +1168,19 @@ impl<'p> Own<'p> {
         self.deferred = saved_deferred;
         self.state = saved_state;
         let (_, uses) = self.lambdas.pop().expect("lambda frame");
+        // The closure's mode follows from what its body does with its captures (§4.3): changing
+        // one makes it `mut`, giving one away makes it `once`.
+        let mut mode = (FnMode::Shared, String::new());
+        for (v, (how, _)) in &uses {
+            let name = self.vars[*v].name.clone();
+            let ty = self.vars[*v].ty.clone();
+            match how {
+                Use::Move if !self.p.is_copy(&ty) && !matches!(ty, Ty::Borrow(..)) => mode = (FnMode::Once, name),
+                Use::Mut if mode.0 == FnMode::Shared => mode = (FnMode::Mut, name),
+                _ => {}
+            }
+        }
+        self.closure_modes.insert(e.span, mode);
         // Then capture each binding as the body needs it: a `readonly` loan for reads, a `mut`
         // loan for changes, a move for moves (§4.3). The closure holds these loans.
         let mut loans = BTreeSet::new();
@@ -1167,6 +1200,36 @@ impl<'p> Own<'p> {
             loans.extend(val.loans);
         }
         Val { loans }
+    }
+
+    /// The mode of a closure, written in place or bound to a name.
+    fn closure_mode(&self, e: &Expr) -> Option<(FnMode, String)> {
+        match &e.kind {
+            ExprKind::Lambda { .. } => self.closure_modes.get(&e.span).cloned(),
+            ExprKind::Ident(_) => self.resolved.get(&e.span).and_then(|v| self.var_modes.get(v)).cloned(),
+            _ => None,
+        }
+    }
+
+    /// A closure goes where a function type says how often, and by how many callers at once, it
+    /// may be called: a `mut` closure where a shared one is wanted could run concurrently with
+    /// itself (`par`), and a `once` closure anywhere but a `once` place could run twice.
+    fn check_mode(&mut self, e: &Expr, want: &Ty, how: &str) {
+        let Ty::Fn(f) = want else { return };
+        let Some((mode, capture)) = self.closure_mode(e) else { return };
+        if self.collecting {
+            return;
+        }
+        let msg = match (mode, f.mode) {
+            (FnMode::Mut, FnMode::Shared) => format!(
+                "this closure changes `{capture}`, so one caller at a time may call it (`mut`), but it is {how} where it may be called by several at once"
+            ),
+            (FnMode::Once, FnMode::Shared | FnMode::Mut) => format!(
+                "this closure gives away `{capture}`, so it can be called only once (`once`), but it is {how} where it may be called again"
+            ),
+            _ => return,
+        };
+        self.err(e.span, msg);
     }
 
     /// What a function returns may hold only borrows of its sources (§4.2).

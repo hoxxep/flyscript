@@ -1,0 +1,19 @@
+// expect: false true true true
+// expect: #Add([#Num(1.5), #Num(2.0)]) true
+// Derived Eq, Ord and Hash are total on floats (NaN equals itself and orders last; -0.0 is 0.0),
+// and a Box is its contents (§3.5).
+import { println } from "std/io";
+enum Expr { #Num(f64), #Add(Box<Expr>, Box<Expr>) }
+impl Eq for Expr;
+impl Show for Expr;
+impl Clone for Expr;
+function hashOf<T extends Hash>(v: readonly T): u64 { let h = Hasher.new(); v.hash(mut h); h.finish() }
+export function main(): void uses Io {
+  const nan = 0.0 / 0.0;
+  const a = { x: nan, y: -0.0 };
+  const b = { x: nan, y: 0.0 };
+  println(`${nan == nan} ${a == b} ${hashOf(a) == hashOf(b)} ${{ v: nan } > { v: 1.0e300 }}`);
+  const e: Expr = #Add(Box.new(#Num(1.5)), Box.new(#Num(2.0)));
+  const f = e.clone();
+  println(`${e} ${e == f}`);
+}

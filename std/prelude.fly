@@ -35,7 +35,9 @@ impl Hasher {
 impl<comptime T: Type> Eq for T {
   function eq(self: readonly Self, other: readonly Self): bool {
     comptime match (Type.info(T)) {
-      #Int(_) | #Float(_) | #Bool | #Str | #Void => self == other,
+      #Int(_) | #Bool | #Str | #Void => self == other,
+      // A total equality: `NaN` equals itself, and `-0.0` equals `0.0`, as `Hash` agrees.
+      #Float(_) => self == other || self != self && other != other,
       #Record(fields) | #Struct { fields } => {
         comptime for (const f of fields) {
           if (!self.[f.name].eq(other.[f.name])) { return false; }
@@ -92,7 +94,13 @@ impl<comptime T: Type> Hash for T {
 impl<comptime T: Type> Ord for T {
   function cmp(self: readonly Self, other: readonly Self): Ordering {
     comptime match (Type.info(T)) {
-      #Int(_) | #Float(_) | #Bool | #Str => if (self < other) { #Less } else if (self == other) { #Equal } else { #Greater },
+      #Int(_) | #Bool | #Str => if (self < other) { #Less } else if (self == other) { #Equal } else { #Greater },
+      // A total order: `NaN` after every number, and equal to itself.
+      #Float(_) => {
+        if (self != self) { if (other != other) { #Equal } else { #Greater } }
+        else if (other != other) { #Less }
+        else if (self < other) { #Less } else if (self == other) { #Equal } else { #Greater }
+      }
       #Void => #Equal,
       #Record(fields) | #Struct { fields } => {
         comptime for (const f of fields) {
@@ -213,6 +221,9 @@ impl<comptime T: Type> Clone for T {
   function clone(self: readonly Self): T {
     comptime match (Type.info(T)) {
       #Int(_) | #Float(_) | #Bool | #Str | #Void => self,
+      // A `readonly` borrow is copied; a `mut` one is never duplicated.
+      #Borrow { mutable: false } => self,
+      #Borrow { mutable: true } => comptime panic("a `mut` borrow cannot be cloned"),
       #Record(fields) | #Struct { fields } => {
         { comptime for (const f of fields) { [f.name]: self.[f.name].clone(), } }
       }
@@ -286,8 +297,8 @@ export function generate<T, row E>(producer: once () => void uses Yield<T>, ...E
 
 impl<T, row E> Gen<T, E> {
   export function next(self: mut Self): Option<T> uses ...E;
-  export function map<U>(self: Self, f: (x: T) => U): Gen<U, E>;
-  export function filter(self: Self, keep: (x: readonly T) => bool): Gen<T, E>;
+  export function map<U>(self: Self, f: mut (x: T) => U): Gen<U, E>;
+  export function filter(self: Self, keep: mut (x: readonly T) => bool): Gen<T, E>;
   export function take(self: Self, n: usize): Gen<T, E>;
   export function zip<U>(self: Self, other: Gen<U, E>): Gen<[T, U], E>;
   export function enumerate(self: Self): Gen<[usize, T], E>;
@@ -408,9 +419,40 @@ impl<T> Iterable<readonly T> for Vec<T> {
 }
 impl<T> Box<T> {
   export function new(v: T): Box<T>;
+  export function get(self: readonly Self): readonly T from self;
+}
+// A box is its contents, for every derived interface.
+impl<T extends Eq> Eq for Box<T> {
+  function eq(self: readonly Self, other: readonly Self): bool { self.get().eq(other.get()) }
+}
+impl<T extends Ord> Ord for Box<T> {
+  function cmp(self: readonly Self, other: readonly Self): Ordering { self.get().cmp(other.get()) }
+}
+impl<T extends Hash> Hash for Box<T> {
+  function hash(self: readonly Self, h: mut Hasher): void { self.get().hash(mut h); }
+}
+impl<T extends Show> Show for Box<T> {
+  function show(self: readonly Self, out: mut String): void { self.get().show(mut out); }
+}
+impl<T extends Clone> Clone for Box<T> {
+  function clone(self: readonly Self): Box<T> { Box.new(self.get().clone()) }
 }
 impl<T extends Send> Arc<T> {
   export function new(v: T): Arc<T>;
+  export function get(self: readonly Self): readonly T from self;
+}
+// An `Arc` compares, hashes and shows as what it shares; cloning it shares it again.
+impl<T extends Send & Eq> Eq for Arc<T> {
+  function eq(self: readonly Self, other: readonly Self): bool { self.get().eq(other.get()) }
+}
+impl<T extends Send & Hash> Hash for Arc<T> {
+  function hash(self: readonly Self, h: mut Hasher): void { self.get().hash(mut h); }
+}
+impl<T extends Send & Show> Show for Arc<T> {
+  function show(self: readonly Self, out: mut String): void { self.get().show(mut out); }
+}
+impl<T extends Send> Clone for Arc<T> {
+  function clone(self: readonly Self): Arc<T>;
 }
 
 // ---- Regions (§4.6) ----

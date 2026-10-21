@@ -242,7 +242,11 @@ impl Interp {
             "Hasher.writeInt" | "Hasher.writeFloat" | "Hasher.writeBool" | "Hasher.writeStr" => {
                 let bytes: Vec<u8> = match a(1).deref() {
                     Value::Int(i) => (i as i64).to_le_bytes().to_vec(),
-                    Value::Float(f) => f.to_bits().to_le_bytes().to_vec(),
+                    // As `Eq` sees floats: `-0.0` is `0.0`, and every `NaN` is one value.
+                    Value::Float(f) => {
+                        let f = if f == 0.0 { 0.0 } else if f.is_nan() { f64::NAN } else { f };
+                        f.to_bits().to_le_bytes().to_vec()
+                    }
                     Value::Bool(b) => vec![b as u8],
                     other => other.as_text().as_bytes().to_vec(),
                 };
@@ -321,7 +325,8 @@ impl Interp {
                 });
                 Ok(Value::Unit)
             }
-            "Box.new" | "Arc.new" => Ok(a(0)),
+            "Box.new" | "Arc.new" | "Box.get" | "Arc.get" => Ok(a(0)),
+            "Arc.clone" => Ok(a(0).deref()),
             "HashMap.new" => Ok(Value::List(Vec::new())),
             "HashMap.insert" => {
                 let p = place_of(&a(0))?;

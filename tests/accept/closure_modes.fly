@@ -1,0 +1,13 @@
+// A closure's mode follows from its body (§4.3): sequential helpers take `mut` closures, so a
+// closure may count as it goes.
+export function doubledSum(xs: readonly i32[]): i32 {
+  let total = 0;
+  const v = xs.iter().map((x) => { total += x; x * 2 }).collect();
+  total + v.len() as i32
+}
+export function counter(): i32 {
+  let count = 0;
+  let inc = () => { count += 1; count };
+  inc() + inc()
+}
+export function owner(s: String): once () => String { () => s }

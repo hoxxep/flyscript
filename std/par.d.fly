@@ -13,3 +13,7 @@ export function parReduce<C extends ParSplit, A extends Send>(
   one: (v: C.ReadView, i: usize) => A,
   both: (a: A, b: A) => A,
 ): A;
+
+impl<T> ParSplit for T[] {
+  function len(self: readonly Self): usize;
+}
