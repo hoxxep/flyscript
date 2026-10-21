@@ -1,0 +1,10 @@
+// error: `msg` is used after this resumes the code that lent `msg`, which may end it
+// A resumptive arm may use a borrowed argument only until it resumes (§5.3).
+import { println } from "std/io";
+effect Log { log(msg: str): void; }
+export function main(): void uses Io {
+  handle {
+    const line = "hello".toString();
+    Log.log(line.asStr());
+  } with Log { log(msg) resumes k => { k(); println(msg); } }
+}

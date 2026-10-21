@@ -1,0 +1,10 @@
+// error: this value borrows `msg`, which the code that performed `ask` lent only to this arm
+// A borrowed argument cannot be the `handle`'s value: the body that lent it is gone (§5.3).
+effect Ask { ask(msg: str): void; }
+function last(): str {
+  handle {
+    const prompt = "name?".toString();
+    Ask.ask(prompt.asStr());
+    "none"
+  } with Ask { ask(msg) resumes k => { msg } }
+}

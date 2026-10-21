@@ -1216,9 +1216,25 @@ impl<'a> Parser<'a> {
             Tok::Punct("{") => ExprKind::Record { name: None, fields: self.field_inits()? },
             Tok::Kw(Kw::If) => self.if_expr()?,
             Tok::Kw(Kw::While) => {
+                let kw = self.span();
                 self.bump();
-                let cond = self.paren_expr()?;
-                ExprKind::While { cond: Box::new(cond), body: self.block()? }
+                // `while (const #Some(x) = e) { … }` loops while `e` matches.
+                if let Some((pat, scrutinee, body)) = self.let_head()? {
+                    // Each piece has a span of its own: what is recorded about it is keyed by span.
+                    let all = Span { start: kw.start, end: body.span.end };
+                    let end = Span { start: body.span.end, end: body.span.end };
+                    let head = Span { start: scrutinee.span.start, end: body.span.end };
+                    let arms = vec![
+                        MatchArm::new(pat, None, Expr { kind: ExprKind::Block(body.clone()), span: body.span }),
+                        MatchArm::new(Pattern { kind: PatternKind::Wild, span: end }, None, Expr { kind: ExprKind::Break, span: end }),
+                    ];
+                    let m = Expr { kind: ExprKind::Match { scrutinee: Box::new(scrutinee), arms }, span: head };
+                    let yes = Expr { kind: ExprKind::Bool(true), span: kw };
+                    ExprKind::While { cond: Box::new(yes), body: Block { stmts: vec![Stmt::Expr(m)], tail: None, span: all } }
+                } else {
+                    let cond = self.paren_expr()?;
+                    ExprKind::While { cond: Box::new(cond), body: self.block()? }
+                }
             }
             Tok::Kw(Kw::For) => {
                 self.bump();
@@ -1354,33 +1370,41 @@ impl<'a> Parser<'a> {
         Ok(e)
     }
 
+    /// The head and block of `if (const|let Pat = e) { … }` or its `while`, if that is next.
+    fn let_head(&mut self) -> PResult<Option<(Pattern, Expr, Block)>> {
+        if !(self.at("(") && matches!(self.tok_at(1), Tok::Kw(Kw::Const | Kw::Let))) {
+            return Ok(None);
+        }
+        self.bump();
+        let mutable = self.eat_kw(Kw::Let);
+        if !mutable {
+            self.bump();
+        }
+        let pat = self.pattern()?;
+        self.expect("=")?;
+        let scrutinee = self.expr()?;
+        self.expect(")")?;
+        let mut body = self.block()?;
+        // `let` makes the names it binds mutable in the block.
+        if mutable {
+            let mut names = Vec::new();
+            bound_names(&pat, &mut names);
+            let lets = names.into_iter().map(|(name, span)| Stmt::Let {
+                mutable: true,
+                pat: Pattern { kind: PatternKind::Bind(name.clone()), span },
+                ty: None,
+                init: Expr { kind: ExprKind::Ident(name), span },
+                span,
+            });
+            body.stmts.splice(0..0, lets);
+        }
+        Ok(Some((pat, scrutinee, body)))
+    }
+
     fn if_expr(&mut self) -> PResult<ExprKind> {
         self.expect_kw(Kw::If)?;
         // `if (const #Some(x) = e) { … } else { … }` is a two-armed `match`.
-        if self.at("(") && matches!(self.tok_at(1), Tok::Kw(Kw::Const | Kw::Let)) {
-            self.bump();
-            let mutable = self.eat_kw(Kw::Let);
-            if !mutable {
-                self.bump();
-            }
-            let pat = self.pattern()?;
-            self.expect("=")?;
-            let scrutinee = self.expr()?;
-            self.expect(")")?;
-            let mut then = self.block()?;
-            // `let` makes the names it binds mutable in the block.
-            if mutable {
-                let mut names = Vec::new();
-                bound_names(&pat, &mut names);
-                let lets = names.into_iter().map(|(name, span)| Stmt::Let {
-                    mutable: true,
-                    pat: Pattern { kind: PatternKind::Bind(name.clone()), span },
-                    ty: None,
-                    init: Expr { kind: ExprKind::Ident(name), span },
-                    span,
-                });
-                then.stmts.splice(0..0, lets);
-            }
+        if let Some((pat, scrutinee, then)) = self.let_head()? {
             let start = self.span();
             let otherwise = if self.eat_kw(Kw::Else) {
                 if self.at_kw(Kw::If) {

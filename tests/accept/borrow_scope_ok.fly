@@ -1,0 +1,14 @@
+// A borrow of an inner binding is fine while that binding lives, and an outer binding may be
+// pointed back at something that outlives it.
+import { println } from "std/io";
+export function main(): void uses Io {
+  const v = [9, 9, 9];
+  let s = v[0..1];
+  if (true) {
+    const a = [1, 2, 3];
+    s = a[0..2];
+    println(`${s.len()}`);
+    s = v[0..3];
+  }
+  println(`${s.len()}`);
+}

@@ -1,6 +1,6 @@
 # Flyscript
 
-**Language specification, version 0.29**
+**Language specification, version 0.30**
 
 *Affine values, one row calculus, handlers for everything, and `comptime`: Church on the outside, Turing on the inside.*
 
@@ -18,12 +18,22 @@ The whole language rests on five laws. Every rule in this document is a conseque
 4. **Handlers for everything.** Errors, I/O, iteration and region memory are ordinary effects with ordinary handlers. A handler may hold the rest of a computation as a one-shot continuation value; generators and tasks are both built from that one primitive.
 5. **`comptime` is the metalanguage.** Generics, reflection, layout transformation and derived interfaces are ordinary Flyscript code run by the compiler.
 
-### 0.1 Changes from 0.28
+### 0.1 Changes from 0.29
 
-0.29 corrects 0.28's continuations, after a review found them unsound (docs/reviews/2026-10-21-holistic-review-of-0-28.md), and makes them first-class in the prototype.
+0.30 closes the holes a review of 0.29 found where effects meet ownership (docs/reviews/2026-10-21-holistic-review-of-0-29.md), and one it did not: a borrow assigned to an outer binding could outlive what it borrowed.
 
 | Change | Why |
 | :--- | :--- |
+| When a block ends, nothing used afterwards may hold a borrow of its bindings; a binding assigned anew holds only the new value's borrows (§4.1) | `if (c) { const a = …; s = a[0..2]; } use(s)` was accepted, and `s` dangled |
+| An operation's arguments are lent by the code that performed it: a resumptive arm may use one that can hold a borrow only until it resumes, never past the arm; an arm that does not resume cannot use one at all (§5.3) | an abortive arm could return a `str` borrowed from the body it had just unwound, and a resumptive arm could read one after `k()` had let the body end |
+| A continuation's row `E` is what its `handle` performs — the body's unhandled effects and the arms' — not everything the code around it may (§5.2, §5.3) | a `Gen`-like value built where `Io` is allowed no longer demands `Io` of every consumer |
+| Assigning to a place drops the value it held; dropping a partly moved value drops the parts still in it (§5.6) | reassignment leaked: a `Sender` overwritten in a binding never closed its channel |
+| A call of a closure or continuation counts the callee among its result's sources (§4.2) | what it captured flows into what it returns |
+| `while (const Pattern = e)`, and its `let` form (§2.3) | the loop form of `if (const …)`, for draining a channel or a stack |
+| Every comma-separated list may end with a comma (§2.3) | as in TypeScript, and as the appendix already wrote |
+| `fmt` is listed with the region library (§4.6) | A.8 used it unexplained |
+
+--- | :--- |
 | A continuation is a `Cont<A, B, E>` again — still called `k(a)`, which performs `E` — and is not `Send` (§5.3, §4.4) | as a `once` function it was `Send`, so it could be spawned onto another task or sent through a channel, away from the fiber it belongs to |
 | A continuation that leaves its arm takes its handler along, so whatever holds it borrows everything the arms use (§5.3) | an arm that pushed into a local returned `k`, which pushed into the dead local when resumed |
 | Several `with` clauses are nested `handle`s, the first innermost (§5.2) | stated exactly, an inner arm may perform an effect an outer clause handles |
@@ -137,7 +147,7 @@ Prim        = "i8" | "i16" | "i32" | "i64" | "isize" | "u8" | "u16" | "u32" | "u
 Block       = "{" { Stmt } [ Expr ] "}" ;
 Stmt        = ( "const" | "let" ) Pattern [ ":" Type ] "=" Expr ";" | "defer" Expr ";"
             | "return" [ Expr ] ";" | "break" ";" | "continue" ";" | Expr ";" | BlockLike ;
-BlockLike   = If | IfConst | While | For | Match | Try | Region | Handle | Unsafe | Block | "comptime" ( If | Match | For ) ;
+BlockLike   = If | IfConst | While | WhileConst | For | Match | Try | Region | Handle | Unsafe | Block | "comptime" ( If | Match | For ) ;
 Expr        = … | BlockLike | Throw | Yield | Lambda | RecordLit | ListLit | "comptime" Unary
             | Expr "." "[" Expr "]" | "#" "[" Expr "]" [ TagArgs ] ;
 RecordLit   = [ Path ] "{" [ Entry { "," Entry } ] "}" ;
@@ -146,6 +156,7 @@ ListLit     = "[" [ Item { "," Item } ] "]" ;
 Item        = Expr | "comptime" ( For | If ) ;          (* one item per iteration, §7.2 *)
 Match       = "match" "(" Expr ")" "{" { MatchArm } "}" ;
 IfConst     = "if" "(" ( "const" | "let" ) Pattern "=" Expr ")" Block [ "else" ( If | IfConst | Block ) ] ;  (* a two-armed match *)
+WhileConst  = "while" "(" ( "const" | "let" ) Pattern "=" Expr ")" Block ;   (* while (true) { match (e) { Pattern => Block, _ => break } } *)
 MatchArm    = Pattern [ "if" Expr ] "=>" ( Expr "," | Block ) | Generate(MatchArm) ;
 Pattern     = PatAtom { "|" PatAtom } ;
 PatAtom     = "_" | Literal | "comptime" Unary | Ident
@@ -161,6 +172,8 @@ Handle      = "handle" Block { "with" Path [ TypeArgs ] "{" { Arm } "}" } ;   (*
 Arm         = Name "(" [ Ident { "," Ident } ] ")" [ "resumes" Ident ] "=>" ( Expr "," | Block ) ;
 Lambda      = "(" [ Params ] ")" "=>" ( Expr | Block ) ;
 ```
+
+Every comma-separated list in the grammar — parameters, arguments, type arguments, fields, entries, items, patterns, tags, arm parameters — may end with a comma.
 
 Three rules settle the grammar's ambiguities, all borrowed from TypeScript:
 
@@ -291,7 +304,7 @@ Borrows are **transparent**: a borrow binding reads and writes as the value it r
 
 A value that is borrowed without having a place — a call's result, a template string, a literal lent as `str` — is stored in an anonymous local of the enclosing block, dropped when the block ends. So ``stringify(#Rejected { reason: `missing ${field}` })`` lends the string for the call, and ``const r = #Rejected { reason: `…` };`` holds a borrow of it while `r` is used; returning `r` is the usual error, a borrow of a local.
 
-A borrow lasts until the last use of any value that holds it, not to the end of its scope. Every value carries the set of borrows it holds: a borrow taken for an argument is held by the call's result if the result can hold it (§4.2); a value bound by a pattern or assigned to a binding passes its borrows on; a binding assigned on several paths holds the union. In the example below, the `#None` arm holds no borrow of `counts`, so it may insert, while in the `#Some` arm `n` holds `counts` mutably until its last use.
+A borrow lasts until the last use of any value that holds it, not to the end of its scope. Every value carries the set of borrows it holds: a borrow taken for an argument is held by the call's result if the result can hold it (§4.2); a value bound by a pattern or assigned to a binding passes its borrows on; a binding assigned anew holds the new value's borrows only, and one assigned on several paths holds the union where they meet. A borrow cannot outlive what it borrows: when a block ends, neither its value nor any binding used afterwards may hold a borrow of a binding declared in it. So `let s = v[0..1]; if (c) { const a = [1, 2, 3]; s = a[0..2]; } use(s)` is rejected — `s` would outlive `a` — while re-pointing `s` at `v` before the block ends is fine. In a loop, the body's bindings end with each iteration. In the example below, the `#None` arm holds no borrow of `counts`, so it may insert, while in the `#Some` arm `n` holds `counts` mutably until its last use.
 
 A method call borrows its receiver in two phases: the receiver is borrowed `readonly` while the arguments are evaluated and `mut` only for the call itself, so `v.push(v.len())` is legal and `v.push({ v.clear(); 1 })` is not.
 
@@ -318,7 +331,7 @@ A class-2 value may be a parameter, a local, or a return value tied to a paramet
 - **Containers hold first-class values.** A nominal type's type parameters range over class-1 types unless the type is a `view`: `Vec<String>` and `HashMap<String, u64>` are fine, `Vec<str>` is an error that suggests `Vec<String>`. Structural types (`Option`, `Result`, tuples, records) and views (`Gen`, `Scanner`) may hold borrows.
 - **No borrow is stored through a borrow.** A `mut` borrow of a view may change its class-1 parts (`sc.pos += 1`) but cannot have a class-2 value written into it: a function that wrote its argument's borrow into a caller's `mut Option<mut T>` would keep that borrow alive after the call had released it. A local binding may still be reassigned (`s = b`), since its borrows are tracked where it lives.
 
-**Results carry their sources' borrows.** A call's result can hold the borrows of its *sources*: the parameters named in its `from` clause; without one, the receiver for a method and every borrowed argument for a free function. Arguments whose types can hide a borrow — closures, generators, type parameters — are always sources. A result whose type cannot hold a borrow at all (class 1, with no closure, continuation or type parameter once instantiated) holds nothing. So `v.len()` holds nothing; `counts.getMut(key)` holds the borrow of `counts` but not of `key`; and `generate(() => v.each())` holds the borrow of `v` for as long as the generator lives.
+**Results carry their sources' borrows.** A call's result can hold the borrows of its *sources*: the parameters named in its `from` clause; without one, the receiver for a method and every borrowed argument for a free function. Arguments whose types can hide a borrow — closures, generators, type parameters — are always sources, and so is the callee when it is a closure or continuation called as a value: what it captured may be in what it returns. A result whose type cannot hold a borrow at all (class 1, with no closure, continuation or type parameter once instantiated) holds nothing. So `v.len()` holds nothing; `counts.getMut(key)` holds the borrow of `counts` but not of `key`; and `generate(() => v.each())` holds the borrow of `v` for as long as the generator lives.
 
 ```ts
 function longer(a: str, b: str): str { if (a.len() >= b.len()) { a } else { b } }   // borrows a and b
@@ -368,12 +381,13 @@ A region is a fiber-local bump arena with lexical extent. `region (R) { … }` i
 
 A region is **append-only and immutable**:
 
-- `alloc(v)` places `v` in the region and returns a `Ref<R, T>`. A `Ref<R, T>` is used exactly as a `readonly T`: field access and method calls go through it, and reading is pure.
+- `alloc(v)` places `v` in the region and returns a `Ref<R, T>`; `fmt(s)` copies a string into it, returning a `Ref<R, str>`. A `Ref<R, T>` is used exactly as a `readonly T`: field access and method calls go through it, and reading is pure.
 - The only mutable slots are `Cell<R, T>` with `T extends Copy`, whose `get` copies out and `set` copies in (a `Cell` is never borrowed), and `RegionList<R, T>`, an append-only chunked list whose elements never move. Both are handles into their region — `Copy`, like a `Ref` — and their writes are operations of `Region<R>`: mutation by effect, not by ownership. That is why `const items = RegionList.new(); items.push(x)` is legal.
 - `alloc`, `Cell.get`, `Cell.set` and `RegionList.push` perform `Region<R>`. Reading a `RegionList`'s existing elements does not: they never change.
 
 ```ts
 // std/region.d.fly
+export function fmt<region R>(s: str): Ref<R, str> uses Region<R>;
 export struct Cell<region R, T extends Copy>;
 export struct RegionList<region R, T>;
 impl<region R, T extends Copy> Cell<R, T> {
@@ -443,7 +457,7 @@ function map<T, U, row E>(xs: readonly T[], f: (x: readonly T) => U uses ...E): 
 `handle { body } with Eff { arms }` runs `body` and intercepts its `Eff` operations. Further `with` clauses nest: `handle { body } with A { … } with B { … }` is `handle { handle { body } with A { … } } with B { … }`, so an arm of `A` may perform `B`. Each arm has one of two forms:
 
 - **Abortive** — `op(x) => armBody`. The body's frames are unwound first (running its `defer`s and destructors and releasing its borrows), then `armBody` runs and its value becomes the value of the `handle` expression. Because the body's borrows are released, the arm may use anything the body had borrowed.
-- **Resumptive** — `op(x) resumes k => armBody`. The body stays suspended, holding its borrows, and `k` is the rest of the body, a `Cont<A, B, E>`, where `A` is the operation's result type, `B` the `handle` expression's type and `E` the effects of the code around the `handle`, which resuming may perform. Calling `k(a)` resumes the body and performs `E`.
+- **Resumptive** — `op(x) resumes k => armBody`. The body stays suspended, holding its borrows, and `k` is the rest of the body, a `Cont<A, B, E>`, where `A` is the operation's result type, `B` the `handle` expression's type and `E` the `handle` expression's own row (below), which resuming may perform. Calling `k(a)` resumes the body and performs `E`.
 
 The `handle` expression evaluates to the body's value if the body completes without performing `Eff`, and otherwise to the value of the arm that handled the operation. A resumptive arm usually produces that value by resuming: `k(a)` itself evaluates to the `handle` expression's eventual value. Injecting a dependency is handling its effect:
 
@@ -452,7 +466,7 @@ effect Clock { now(): u64; }
 const d = handle { limiter.check(client) } with Clock { now() resumes k => k(t) } with Log { info(m) resumes k => { out.push(m); k() } };
 ```
 
-An arm runs in the context of the `handle` expression: its effects are those of the code around the `handle`. If the body's row is `Eff, ...E`, the `handle` expression's row is `...E` together with the arms' own effects.
+An arm runs in the context of the `handle` expression: its effects are those of the code around the `handle`. If the body's row is `Eff, ...E`, the `handle` expression's row is `...E` together with the arms' own effects. That row is inferred, never written, and is the `E` of the arms' continuations: resuming one runs the rest of the body and, through it, perhaps the arms again, and nothing else. A `region` the body opens and ends, or a `try` inside it, handles its effect there, so that effect is not in the row; one around the `handle` is, so a continuation that performs `Region<R>` cannot leave `R`.
 
 ### 5.3 Continuations
 
@@ -463,6 +477,7 @@ A `Cont<A, B, E>` is an affine value that may be stored, moved and returned like
 - Handlers are **deep**: the handler stays installed beneath the suspended computation. Operations of other effects performed while `k` runs go to the handlers around the call of `k`, which is why `E` appears in `k`'s type.
 - A continuation holds every borrow its suspended computation holds: in a resumptive arm, `k` holds the borrows the body had taken when it performed the operation. And since a handler is deep, a continuation that leaves its arm — returned, stored, passed on rather than called — takes the handler with it: whatever holds it also borrows every binding outside the `handle` that the arms use, in the strongest mode they use it. One holding a borrow is class 2 (§4.2), so a continuation can never outlive a borrow it holds, and the borrowed places stay locked while it lives.
 - Continuations are one-shot. Resuming twice would duplicate owned values and live `mut` borrows.
+- **Arguments are lent to the arm.** An operation's arguments come from the code that performed it, which may have lent them from its own locals: `Log.log(line.asStr())`. So a parameter whose type can hold a borrow is usable in a resumptive arm only until the arm calls `k` — the body may then finish and its locals end — and never past the arm: it cannot be the arm's value, nor stored where the arm's end would leave it dangling. An abortive arm runs after the body has unwound, so it cannot use such a parameter at all: an operation meant to be handled abortively takes owned arguments (`stop(why: String): never`). A continuation that leaves its arm does not extend the arguments' lives either; they end with the arm.
 - **Resuming re-enters.** `k(a)` runs the rest of the body, which may perform the same operation again and re-enter an arm of the same handler. So, for ownership, `k(a)` uses every binding from outside the `handle` that the body or any of its arms uses, in the strongest mode any of them does: an arm cannot hold a borrow of such a binding across the call.
 
 ### 5.4 Errors: `throw`, `try`, `catch`
@@ -546,6 +561,8 @@ A `Gen` owns its continuation, so dropping it runs the generator's cleanup; if t
 ### 5.6 Cleanup: `defer` and `Drop`
 
 `defer e;` (or `defer { … };`) schedules `e` to run when the enclosing block exits. Because it runs while the block is being left — perhaps by a failure — a `defer` cannot fail, yield, `return`, or `break` or `continue` a loop around it; and `Drop.drop(self: mut Self): void` has no effects. `defer`s and the destructors of the block's owned locals share one stack and run in reverse order of the points at which they were registered, whether the block exits normally, by `return`, `break`, `throw`, an abortive handler, a dropped continuation, or cancellation.
+
+Assigning to a place drops the value it held first, unless that value was moved out: `h = Holder { tx: b }` drops the old holder, closing its `Sender`. Dropping a value from which fields were moved — possible only when its type does not implement `Drop` — drops the fields still in it.
 
 Because a `defer` runs at the block's exit, it holds the borrows it needs from the point it is registered to the end of the block, including past a `return`: after `defer v.clear();`, `v` cannot be lent `readonly` or moved, so `return v[0..1]` is rejected. A `defer` may not move a binding declared outside its block. A destructor reads its whole value, which is why no field may be moved out of a type that implements `Drop` (§4.1).
 

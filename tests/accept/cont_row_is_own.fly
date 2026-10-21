@@ -1,0 +1,14 @@
+// A continuation performs what its `handle` performs, not everything the code around it may
+// (§5.3): this one's type mentions `Note` alone, though `steps` may also perform `Io`.
+import { println } from "std/io";
+effect Note { note(msg: String): void; }
+effect Tick { tick(): void; }
+enum Steps<row E> { #Done, #At(Cont<void, Steps<E>, E>) }
+function steps(): Steps<[Note]> uses Note, Io {
+  println("starting");
+  handle {
+    Note.note("one".toString());
+    Tick.tick();
+    #Done
+  } with Tick { tick() resumes k => #At(k) }
+}

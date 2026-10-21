@@ -1,0 +1,10 @@
+// error: `why` cannot be used: an arm that does not resume runs after the body has unwound
+// An operation's arguments are lent by the code that performed it; an arm that does not resume
+// runs once that code has unwound, so it cannot use one that may borrow (§5.3).
+effect Stop { stop(why: str): never; }
+function reason(): str {
+  handle {
+    const local = "lost".toString();
+    Stop.stop(local.asStr())
+  } with Stop { stop(why) => why }
+}

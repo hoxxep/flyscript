@@ -1,0 +1,9 @@
+// error: `s` borrows `a` here, and is used after `a` goes out of scope
+// A borrow stored in an outer binding cannot outlive the binding it borrows (§4.2).
+import { println } from "std/io";
+export function main(): void uses Io {
+  const v = [9, 9];
+  let s = v[0..1];
+  if (true) { const a = [1, 2, 3]; s = a[0..2]; }
+  println(`${s.len()}`);
+}

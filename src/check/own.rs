@@ -121,6 +121,9 @@ pub fn check_function(p: &mut Program, fid: FnId) {
         lambdas: Vec::new(),
         escaping: false,
         resumes: HashMap::new(),
+        cont_args: HashMap::new(),
+        dead_args: HashMap::new(),
+        lent_args: HashMap::new(),
         sites: HashMap::new(),
         ret_ty,
         sources,
@@ -195,6 +198,15 @@ struct Own<'p> {
     /// For each continuation binding, the outer bindings its handler's body and arms use, and
     /// whether any of them changes each: calling it re-enters them (§5.3).
     resumes: HashMap<VarId, Vec<(VarId, bool)>>,
+    /// For each continuation binding, its arm's parameters that may hold a borrow, with the loan
+    /// each holds on itself: they borrow from where the operation was performed, which may end
+    /// once the continuation resumes it (§5.3).
+    cont_args: HashMap<VarId, Vec<(VarId, LoanId)>>,
+    /// Parameters of arms that do not resume and may hold a borrow, with their operation: the
+    /// body they borrow from has unwound before such an arm runs (§5.3).
+    dead_args: HashMap<VarId, String>,
+    /// Arm parameters that may hold a borrow, with their operation, for diagnostics.
+    lent_args: HashMap<VarId, String>,
     /// Variable ids by declaration site, so they are the same in both passes and in every
     /// traversal of a loop body.
     sites: HashMap<(usize, String), VarId>,
@@ -452,6 +464,10 @@ impl<'p> Own<'p> {
 
     fn use_place(&mut self, e: &Expr, path: Path, how: Use) -> Val {
         let at = e.span;
+        if let Some(op) = self.dead_args.get(&path.root).cloned() {
+            let name = self.vars[path.root].name.clone();
+            self.err(at, format!("`{name}` cannot be used: an arm that does not resume runs after the body has unwound, and `{name}` may borrow from it (give `{op}` an owned parameter type, or resume)"));
+        }
         if self.captured(path.root) {
             self.record_capture(path.root, how, at);
             return Val { loans: self.state.holds.get(&path.root).cloned().unwrap_or_default() };
@@ -601,13 +617,48 @@ impl<'p> Own<'p> {
         };
         self.deferred.truncate(deferred_depth);
         self.leave();
-        // Bindings going out of scope release what they hold.
+        // Bindings going out of scope release what they hold, and must not be borrowed by
+        // anything that outlives them: the block's value, or a binding used later (§4.2).
         if let Some(scope) = self.scopes.pop() {
             for var in scope.values() {
                 self.state.holds.remove(var);
             }
+            let dying: HashSet<VarId> = scope.values().copied().collect();
+            self.check_outlives(&dying, b, &v);
         }
         v
+    }
+
+    fn check_outlives(&mut self, dying: &HashSet<VarId>, b: &ast::Block, v: &Val) {
+        if self.collecting || dying.is_empty() {
+            return;
+        }
+        let on_dying = |o: &Self, l: &LoanId| !o.loans[*l].external && dying.contains(&o.loans[*l].path.root);
+        // A function's own body is the return check's to judge.
+        if self.scopes.len() > 1
+            && let Some(tail) = &b.tail
+            && self.may_hold(&self.ty_of(tail))
+            && let Some(l) = v.loans.iter().find(|l| on_dying(self, l)).copied()
+        {
+            let root = self.loans[l].path.root;
+            let name = self.vars[root].name.clone();
+            let msg = match self.lent_args.get(&root) {
+                Some(op) => format!("this value borrows `{name}`, which the code that performed `{op}` lent only to this arm"),
+                None => format!("this value borrows `{name}`, which goes out of scope at the end of its block"),
+            };
+            self.err(tail.span, msg);
+        }
+        let end = b.span.end;
+        let holders: Vec<(VarId, BTreeSet<LoanId>)> = self.state.holds.iter().map(|(h, ls)| (*h, ls.clone())).collect();
+        for (h, ls) in holders {
+            if let Some(l) = ls.iter().find(|l| on_dying(self, l)).copied()
+                && self.live_after(h, end)
+            {
+                let loan = self.loans[l].clone();
+                let (name, holder) = (self.vars[loan.path.root].name.clone(), self.vars[h].name.clone());
+                self.err(loan.span, format!("`{holder}` borrows `{name}` here, and is used after `{name}` goes out of scope"));
+            }
+        }
     }
 
     fn bind_pattern(&mut self, pat: &Pattern, v: &Val, mutable: bool) {
@@ -785,8 +836,9 @@ impl<'p> Own<'p> {
                         }
                         let ty = self.vars[path.root].ty.clone();
                         if path.fields.is_empty() && self.may_hold(&ty) {
-                            // A binding assigned on several paths holds the union (§4.1).
-                            self.state.holds.entry(path.root).or_default().extend(v.loans.iter().copied());
+                            // A binding assigned anew holds only the new value's loans; one
+                            // assigned on several paths holds the union, where the paths join (§4.1).
+                            self.state.holds.insert(path.root, v.loans.clone());
                         } else if !path.fields.is_empty() && !v.loans.is_empty() {
                             self.state.holds.entry(path.root).or_default().extend(v.loans.iter().copied());
                         }
@@ -945,18 +997,42 @@ impl<'p> Own<'p> {
                 let mut loans = v.loans.clone();
                 for arm in arms {
                     self.scopes.push(HashMap::new());
+                    // An operation's arguments are lent by the code that performed it: one that
+                    // may hold a borrow lives only until the arm resumes or ends (§5.3).
+                    let mut lent = Vec::new();
                     for p in &arm.params {
-                        self.declare_var(&p.name, Ty::Error, false, false, p.span.start);
+                        let ty = self.typed.bindings.get(&p.span).cloned().unwrap_or(Ty::Error);
+                        let holds = self.may_hold(&ty);
+                        let id = self.declare_var(&p.name, ty, false, false, p.span.start);
+                        if !holds {
+                            continue;
+                        }
+                        if arm.resumes.is_none() {
+                            self.dead_args.insert(id, arm.op.name.clone());
+                        } else {
+                            let l = self.new_loan(Path { root: id, fields: Vec::new() }, false, p.span);
+                            self.state.holds.insert(id, [l].into_iter().collect());
+                            self.lent_args.insert(id, arm.op.name.clone());
+                            lent.push((id, l));
+                        }
                     }
                     if let Some(k) = &arm.resumes {
                         // The continuation holds whatever the body held (§5.3).
                         let id = self.declare_var(&k.name, Ty::Error, false, false, k.span.start);
                         self.state.holds.insert(id, v.loans.clone());
                         self.resumes.insert(id, reached.clone());
+                        self.cont_args.insert(id, lent);
                     }
                     // What an arm gives back is the `handle` expression's value.
-                    loans.extend(self.block(&arm.body, how).loans);
-                    self.scopes.pop();
+                    let av = self.block(&arm.body, how);
+                    loans.extend(av.loans.iter().copied());
+                    if let Some(scope) = self.scopes.pop() {
+                        for var in scope.values() {
+                            self.state.holds.remove(var);
+                        }
+                        let dying: HashSet<VarId> = scope.values().copied().collect();
+                        self.check_outlives(&dying, &arm.body, &av);
+                    }
                 }
                 // A continuation that leaves its arm takes its handler with it, so whatever has it
                 // borrows everything the handler's arms use (§5.3).
@@ -1106,6 +1182,20 @@ impl<'p> Own<'p> {
             for (v, write) in reach {
                 let path = Path { root: v, fields: Vec::new() };
                 self.access(&path, write, callee.span, &none);
+            }
+            // The operation's arguments end with the code that performed them, which resuming
+            // lets run on.
+            let k = self.place(callee).map(|p| p.root);
+            let lent = k.and_then(|k| self.cont_args.get(&k).cloned()).unwrap_or_default();
+            if !self.collecting {
+                for (param, l) in lent {
+                    let holders: Vec<VarId> = self.state.holds.iter().filter(|(_, ls)| ls.contains(&l)).map(|(h, _)| *h).collect();
+                    if let Some(h) = holders.into_iter().find(|h| self.live_after(*h, e.span.end)) {
+                        let (pn, hn) = (self.vars[param].name.clone(), self.vars[h].name.clone());
+                        let what = if pn == hn { format!("`{pn}`") } else { format!("`{hn}`, which borrows `{pn}`,") };
+                        self.err(e.span, format!("{what} is used after this resumes the code that lent `{pn}`, which may end it"));
+                    }
+                }
             }
             let v = self.expr(callee, Use::Read);
             arg_vals.push((None, v));

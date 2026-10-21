@@ -1,0 +1,23 @@
+// expect: #None
+// expect: #Some(2)
+// expect: #None
+// Assigning to a place drops the value it held first (§5.6): the first sender is dropped by the
+// assignment, so its channel ends; a field moved out and assigned anew is dropped again.
+import { println } from "std/io";
+import { channel, Sender } from "std/sync";
+struct Holder { tx: Sender<i32> }
+export function main(): void uses Io {
+  const [a, ra] = channel<i32>();
+  const [b, rb] = channel<i32>();
+  const [c, rc] = channel<i32>();
+  let h = Holder { tx: a };
+  h = Holder { tx: b };
+  println(`${ra.recv()}`);
+  h.tx.send(2);
+  println(`${rb.recv()}`);
+  const moved = h.tx;
+  moved.close();
+  h.tx = c;
+  { const gone = h; }
+  println(`${rc.recv()}`);
+}

@@ -87,12 +87,31 @@ fn mark_moved(env: &Env, name: &str, path: Vec<String>) {
     }
 }
 
-/// A binding assigned anew owns a value again.
-fn mark_assigned(env: &Env, name: &str) {
+/// The parts of binding `name` under field path `prefix` that were moved out, relative to
+/// `prefix`; the empty path if the whole of it was.
+fn moved_under(env: &Env, name: &str, prefix: &[String]) -> Vec<Vec<String>> {
     let mut e = Some(env.clone());
     while let Some(s) = e {
         if s.vars.lock().expect("env").contains_key(name) {
-            s.moved.lock().expect("env").remove(name);
+            let moved = s.moved.lock().expect("env").get(name).cloned().unwrap_or_default();
+            if moved.iter().any(|m| prefix.starts_with(m)) {
+                return vec![Vec::new()];
+            }
+            return moved.iter().filter(|m| m.starts_with(prefix)).map(|m| m[prefix.len()..].to_vec()).collect();
+        }
+        e = s.parent.clone();
+    }
+    Vec::new()
+}
+
+/// A place assigned anew owns a value again.
+fn mark_assigned(env: &Env, name: &str, prefix: &[String]) {
+    let mut e = Some(env.clone());
+    while let Some(s) = e {
+        if s.vars.lock().expect("env").contains_key(name) {
+            if let Some(moved) = s.moved.lock().expect("env").get_mut(name) {
+                moved.retain(|m| !m.starts_with(prefix));
+            }
             return;
         }
         e = s.parent.clone();
@@ -705,9 +724,18 @@ impl Interp {
                 } else {
                     binary(&op[..op.len() - 1], &get(&p).deref(), &v.deref())?
                 };
+                // The value the place held is dropped before it is overwritten (§5.6).
+                let fields = self.place_fields(target);
+                if *op == "="
+                    && let Some(t) = self.ty_of(target.span).map(|t| self.frame_ty(&t))
+                    && super::drops::needs_drop(&self.prog, &t)
+                {
+                    let moved = fields.as_ref().map(|(name, prefix)| moved_under(env, name, prefix)).unwrap_or_default();
+                    self.drop_value(get(&p), &t, &moved)?;
+                }
                 set(&p, new);
-                if let ExprKind::Ident(name) = &target.kind {
-                    mark_assigned(env, name);
+                if let Some((name, prefix)) = fields {
+                    mark_assigned(env, name, &prefix);
                 }
                 Ok(Value::Unit)
             }
@@ -1155,6 +1183,32 @@ fn cast(v: &Value, ty: &ast::Type) -> Value {
 }
 
 /// The binding an expression reads from: `x`, `x.f`, `x.f.g`.
+impl Interp {
+    /// A place as a binding and the field path below it, as the ownership pass names moves.
+    fn place_fields<'e>(&self, e: &'e Expr) -> Option<(&'e str, Vec<String>)> {
+        match &e.kind {
+            ExprKind::Ident(n) => Some((n, Vec::new())),
+            ExprKind::Field { target, name } => {
+                let (n, mut path) = self.place_fields(target)?;
+                path.push(name.name.clone());
+                Some((n, path))
+            }
+            ExprKind::Index { target, index } => {
+                let (n, mut path) = self.place_fields(target)?;
+                let mut t = self.ty_of(target.span);
+                while let Some(Ty::Borrow(_, inner)) = t {
+                    t = Some(*inner);
+                }
+                // An element of anything but a tuple is not a place moves are tracked for.
+                let (ExprKind::Int(i), Some(Ty::Tuple(_))) = (&index.kind, &t) else { return None };
+                path.push(i.clone());
+                Some((n, path))
+            }
+            _ => None,
+        }
+    }
+}
+
 fn root_name(e: &Expr) -> Option<&str> {
     match &e.kind {
         ExprKind::Ident(n) => Some(n),

@@ -1,0 +1,12 @@
+// error: `s` borrows `a` here, and is used after `a` goes out of scope
+// Each iteration's bindings end with it; a borrow carried to the next iteration would dangle.
+import { println } from "std/io";
+export function main(): void uses Io {
+  const v = [9, 9];
+  let s = v[0..1];
+  for (const i of [1, 2, 3]) {
+    println(`${s.len()}`);
+    const a = [i + 1, 2];
+    s = a[0..1];
+  }
+}

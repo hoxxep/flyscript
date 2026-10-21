@@ -26,5 +26,6 @@ Versions are pre-1.0 while the language is being designed. The specification was
 | 0.26 | Contextual `match`/`handle`/`region`/`effect`; lists default to arrays; diverging branches; failures named for what failed |
 | 0.27 | Channels close; tasks share strings; TypeScript's string methods |
 | 0.28 | Continuations called as functions; several `with` clauses; expression arm bodies; `min`/`max` |
+| 0.29 | `Cont<A, B, E>` again, not `Send`; escaping continuations borrow the arms' bindings; `defer` and `Drop` cannot fail |
 
 `review-round-*.md` are the design review rounds that produced 0.2–0.15; `programs-against-v0.13.md` is the program-writing exercise against what is now 0.13.

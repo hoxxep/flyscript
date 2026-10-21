@@ -48,6 +48,12 @@ pub struct Checker<'p> {
     /// regions that were handling `Region` at that point, innermost first. Each goes to the
     /// innermost of them that it does not escape from (§4.6), decided when that region ends.
     pending_regions: Vec<(u32, Vec<Sym>)>,
+    /// The effects performed by each `handle` being checked, innermost last, less those handled
+    /// inside it: what resuming one of its continuations performs (§5.3).
+    performed: Vec<Vec<Eff>>,
+    /// The effect rows of continuations whose `handle` is being checked, with the calls of them
+    /// to check once each row is known: the call site, and what was allowed there.
+    pending_conts: Vec<(u32, Vec<(Span, EffRow)>)>,
     /// Values read out of a borrow into an owned position: legal only for `Copy` types, which
     /// is checked once types are final (§4.1).
     copies_out: Vec<(Ty, Span)>,
@@ -116,6 +122,8 @@ pub fn check_fn(p: &mut Program, fid: FnId) {
         pending_matches: Vec::new(),
         typed: Typed::default(),
         pending_regions: Vec::new(),
+        performed: Vec::new(),
+        pending_conts: Vec::new(),
         copies_out: Vec::new(),
         pending_copy: Vec::new(),
         bounds: scheme.tparams.iter().map(|g| (g.sym.id, g.bounds.clone())).collect(),
@@ -491,6 +499,14 @@ impl<'p> Checker<'p> {
     /// Performs effects at `span`: they must fit the effects allowed here.
     fn perform(&mut self, effects: &EffRow, span: Span) {
         let allowed = self.allowed.clone();
+        // Resuming a continuation whose row is not yet known: checked when it is.
+        let row = self.s.expand_effs(effects);
+        if let (true, Tail::Var(v)) = (row.effs.is_empty(), &row.tail)
+            && let Some((_, calls)) = self.pending_conts.iter_mut().find(|(c, _)| c == v)
+        {
+            calls.push((span, allowed));
+            return;
+        }
         // Region allocations whose region is still unknown are decided later (`pending_regions`).
         let region_def = self.known("Region");
         let handled: Vec<Sym> = self
@@ -527,6 +543,9 @@ impl<'p> Checker<'p> {
                 _ => true,
             }
         });
+        if let Some(acc) = self.performed.last_mut() {
+            acc.extend(effects.effs.iter().cloned());
+        }
         if !handled.is_empty() {
             let pending = &mut self.pending_regions;
             let s = &self.s;
@@ -1616,7 +1635,8 @@ impl<'p> Checker<'p> {
         let inner_allowed = self.s.fresh_effs();
         let saved_allowed = std::mem::replace(&mut self.allowed, inner_allowed.clone());
         let ret = self.ret.clone();
-        let t = self.expr(body, Some(&ret));
+        // A closure's body performs when it is called, not here.
+        let (t, _) = self.performing(|c| c.expr(body, Some(&ret)));
         if want_ret.is_some() {
             self.coerce(&t, &ret, body.span);
         } else {
@@ -1634,11 +1654,27 @@ impl<'p> Checker<'p> {
     fn with_handler<T>(&mut self, eff: Eff, f: impl FnOnce(&mut Self) -> T) -> T {
         let outer = self.allowed.clone();
         let mut row = self.s.expand_effs(&outer);
-        row.effs.insert(0, eff);
+        row.effs.insert(0, eff.clone());
         self.allowed = row;
-        let r = f(self);
+        let (r, inside) = self.performing(f);
         self.allowed = outer;
+        // What it handles goes no further.
+        let region_def = self.known("Region");
+        let escaped: Vec<Eff> = inside
+            .into_iter()
+            .filter(|e| e.def != eff.def || (e.def == region_def && !self.s.regions_equal(&e.regions, &eff.regions)))
+            .collect();
+        if let Some(acc) = self.performed.last_mut() {
+            acc.extend(escaped);
+        }
         r
+    }
+
+    /// Runs `f`, returning the effects it performs instead of passing them on.
+    fn performing<T>(&mut self, f: impl FnOnce(&mut Self) -> T) -> (T, Vec<Eff>) {
+        self.performed.push(Vec::new());
+        let r = f(self);
+        (r, self.performed.pop().unwrap_or_default())
     }
 
     fn for_of(&mut self, pat: &Pattern, iter: &Expr, body: &ast::Block) -> Ty {
@@ -1646,12 +1682,15 @@ impl<'p> Checker<'p> {
         let isolated = self.s.fresh_effs();
         let outer = std::mem::replace(&mut self.allowed, isolated.clone());
         // A list literal iterated directly is an array, as in TypeScript (`for (const x of [a, b])`).
-        let t = if let ExprKind::List(_) = iter.kind {
-            let elem = self.s.fresh();
-            self.expr(iter, Some(&Ty::Slice(Box::new(elem))))
-        } else {
-            self.expr(iter, None)
-        };
+        // What it performs is performed below, less the items the loop takes.
+        let (t, _) = self.performing(|c| {
+            if let ExprKind::List(_) = iter.kind {
+                let elem = c.s.fresh();
+                c.expr(iter, Some(&Ty::Slice(Box::new(elem))))
+            } else {
+                c.expr(iter, None)
+            }
+        });
         self.allowed = outer;
         let yield_def = self.known("Yield");
         let mut row = self.s.expand_effs(&isolated);
@@ -1763,9 +1802,69 @@ impl<'p> Checker<'p> {
         let row = self.p.elab_effects(&[ast::RowItem::Effect(effect.clone())], &scope);
         let Some(eff) = row.effs.first().cloned() else { return Ty::Error };
         let result = expected.cloned().unwrap_or_else(|| self.s.fresh());
-        let t = self.with_handler(eff.clone(), |c| c.block(body, Some(&result)));
-        self.coerce(&t, &result, body.span);
-        let DefKind::Effect { ops } = &self.p.defs[eff.def].kind else { return result };
+        // Resuming a continuation performs what the `handle` does: what its body does but does
+        // not handle, and what its arms do (§5.3). That is known once they are checked.
+        let cont_row = self.s.fresh_effs();
+        let Tail::Var(cont_var) = cont_row.tail else { return Ty::Error };
+        self.pending_conts.push((cont_var, Vec::new()));
+        let around = self.allowed.clone();
+        let (_, inside) = self.performing(|c| c.handle_parts(body, &eff, arms, &result, &cont_row));
+        let calls = self.pending_conts.pop().map(|(_, calls)| calls).unwrap_or_default();
+        let own = self.own_row(inside, &around);
+        match self.s.expand_effs(&cont_row).tail {
+            Tail::Var(v) if v == cont_var && self.s.expand_effs(&cont_row).effs.is_empty() => self.s.bind_effs(v, own.clone()),
+            _ => {
+                if let Err(e) = self.s.eff_sub(&own, &cont_row) {
+                    let what = self.show_eff(&e);
+                    self.err(body.span, format!("resuming this `handle`'s continuation performs {what}, which its declared type does not allow"));
+                }
+            }
+        }
+        if let Some(acc) = self.performed.last_mut() {
+            acc.extend(own.effs);
+        }
+        // Now check the calls of its continuations, where they were made.
+        for (span, allowed) in calls {
+            let saved = std::mem::replace(&mut self.allowed, allowed);
+            self.performing(|c| c.perform(&cont_row, span));
+            self.allowed = saved;
+        }
+        result
+    }
+
+    /// The effects a `handle` performs, as one row: each once, failures merged, and only those
+    /// the code around it allows (anything else was handled inside it).
+    fn own_row(&mut self, inside: Vec<Eff>, around: &EffRow) -> EffRow {
+        let around = self.s.zonk_effs(around);
+        let fail_def = self.known("Fail");
+        let mut effs: Vec<Eff> = Vec::new();
+        let mut fails: BTreeMap<String, Ty> = BTreeMap::new();
+        let mut any_fail = false;
+        for e in inside {
+            let z = EffRow { effs: vec![e], tail: Tail::Closed };
+            let Some(e) = self.s.zonk_effs(&z).effs.pop() else { continue };
+            if !around.effs.iter().any(|c| c.def == e.def && self.s.regions_equal(&c.regions, &e.regions)) {
+                continue;
+            }
+            if e.def == fail_def {
+                any_fail = true;
+                if let Some(Ty::Union(r)) = e.args.first().map(|t| self.s.zonk(t)) {
+                    fails.extend(self.s.expand_row(&r).labels);
+                }
+            } else if !effs.contains(&e) {
+                effs.push(e);
+            }
+        }
+        if any_fail {
+            effs.push(Eff { def: fail_def, regions: Vec::new(), args: vec![Ty::Union(Row { labels: fails, tail: Tail::Closed })] });
+        }
+        EffRow { effs, tail: Tail::Closed }
+    }
+
+    fn handle_parts(&mut self, body: &ast::Block, eff: &Eff, arms: &[ast::HandlerArm], result: &Ty, cont_row: &EffRow) {
+        let t = self.with_handler(eff.clone(), |c| c.block(body, Some(result)));
+        self.coerce(&t, result, body.span);
+        let DefKind::Effect { ops } = &self.p.defs[eff.def].kind else { return };
         let ops = ops.clone();
         let eff_params = self.p.defs[eff.def].params.clone();
         let mut eff_args = Vec::new();
@@ -1793,19 +1892,17 @@ impl<'p> Checker<'p> {
             self.scopes.push(HashMap::new());
             for (name, (_, t)) in arm.params.iter().zip(&params) {
                 self.declare(&name.name, t.clone());
+                self.typed.bindings.insert(name.span, t.clone());
             }
             if let Some(k) = &arm.resumes {
                 // A continuation of a `void` operation takes no argument: `k()`.
-                // Resuming may perform what the code around the `handle` may.
-                let around = self.allowed.clone();
-                let cont = Ty::Named(self.known("Cont"), vec![GArg::Ty(op_ret), GArg::Ty(result.clone()), GArg::Row(around)]);
+                let cont = Ty::Named(self.known("Cont"), vec![GArg::Ty(op_ret), GArg::Ty(result.clone()), GArg::Row(cont_row.clone())]);
                 self.declare(&k.name, cont);
             }
-            let t = self.block(&arm.body, Some(&result));
-            self.coerce(&t, &result, arm.body.span);
+            let t = self.block(&arm.body, Some(result));
+            self.coerce(&t, result, arm.body.span);
             self.scopes.pop();
         }
-        result
     }
 
     // ---- match and patterns ----

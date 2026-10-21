@@ -299,6 +299,16 @@ impl Subst {
             (GArg::Ty(x), GArg::Ty(y)) => self.unify(x, y),
             (GArg::Region(x), GArg::Region(y)) => self.unify_region(x, y),
             (GArg::Row(x), GArg::Row(y)) => {
+                // A row that is only a variable becomes the other row.
+                let (ex, ey) = (self.expand_effs(x), self.expand_effs(y));
+                for (var, other) in [(&ex, &ey), (&ey, &ex)] {
+                    if let (true, Tail::Var(v)) = (var.effs.is_empty(), &var.tail) {
+                        if other.tail != Tail::Var(*v) {
+                            self.effs[*v as usize] = Some(other.clone());
+                        }
+                        return Ok(());
+                    }
+                }
                 self.eff_sub(x, y).map_err(|_| Mismatch)?;
                 self.eff_sub(y, x).map_err(|_| Mismatch)
             }
@@ -463,7 +473,12 @@ impl Subst {
         }
     }
 
-    fn regions_equal(&self, a: &[Region], b: &[Region]) -> bool {
+    /// Binds an unbound effect-row variable to `row`.
+    pub fn bind_effs(&mut self, v: u32, row: EffRow) {
+        self.effs[v as usize] = Some(row);
+    }
+
+    pub fn regions_equal(&self, a: &[Region], b: &[Region]) -> bool {
         a.len() == b.len() && a.iter().zip(b).all(|(x, y)| self.resolve_region(x) == self.resolve_region(y))
     }
 
