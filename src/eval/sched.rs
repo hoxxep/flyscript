@@ -28,6 +28,8 @@ struct Inner {
     rng: u64,
     next: u64,
     channels: HashMap<u64, VecDeque<Value>>,
+    /// Channels whose senders are done: a receiver drains them, then sees the end.
+    closed: HashSet<u64>,
 }
 
 pub struct Sched {
@@ -47,6 +49,7 @@ impl Sched {
                 rng: seed.max(1),
                 next: 1,
                 channels: HashMap::new(),
+                closed: HashSet::new(),
             }),
             turn: Condvar::new(),
         })
@@ -157,15 +160,29 @@ impl Sched {
         self.yield_now(me)
     }
 
-    pub fn recv(&self, me: u64, ch: u64) -> Result<Value, Ctl> {
+    /// The next message, or `None` once the channel is closed and drained.
+    pub fn recv(&self, me: u64, ch: u64) -> Result<Option<Value>, Ctl> {
         loop {
             {
                 let mut inner = self.inner.lock().expect("scheduler");
                 if let Some(v) = inner.channels.entry(ch).or_default().pop_front() {
-                    return Ok(v);
+                    return Ok(Some(v));
+                }
+                if inner.closed.contains(&ch) {
+                    return Ok(None);
                 }
             }
             self.block(me, Wait::Channel(ch))?;
         }
+    }
+
+    /// No more messages will be sent on `ch`: its receivers wake to drain it.
+    pub fn close(&self, me: u64, ch: u64) -> Result<(), Ctl> {
+        {
+            let mut inner = self.inner.lock().expect("scheduler");
+            inner.closed.insert(ch);
+            Self::wake(&mut inner, &Wait::Channel(ch));
+        }
+        self.yield_now(me)
     }
 }

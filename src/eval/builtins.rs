@@ -228,19 +228,28 @@ impl Interp {
                 self.sched.send(self.task, ch, a(1))?;
                 Ok(Value::Unit)
             }
-            "Pending.wait" | "Receiver.recv" => {
-                let ch = match a(0).deref() {
-                    Value::Native(_, ch) => ch,
-                    other => return Err(panic(format!("not a receiver: {}", other.show()))),
-                };
-                self.sched.recv(self.task, ch)
+            "Receiver.recv" => {
+                let ch = native(&a(0), "Receiver")?;
+                Ok(match self.sched.recv(self.task, ch)? {
+                    Some(v) => some(v),
+                    None => none(),
+                })
+            }
+            "Pending.wait" => {
+                let ch = native(&a(0), "Pending")?;
+                self.sched.recv(self.task, ch)?.ok_or_else(|| panic("the reply was dropped unsent"))
+            }
+            "Sender.close" => {
+                let ch = native(&a(0), "Sender")?;
+                self.sched.close(self.task, ch)?;
+                Ok(Value::Unit)
             }
             "Receiver.each" => {
                 let ch = native(&a(0), "Receiver")?;
-                loop {
-                    let v = self.sched.recv(self.task, ch)?;
+                while let Some(v) = self.sched.recv(self.task, ch)? {
                     self.yield_value(v)?;
                 }
+                Ok(Value::Unit)
             }
 
             // ---- strings ----
@@ -316,6 +325,21 @@ impl Interp {
                 }
                 Ok(Value::Unit)
             }
+            "str.split" => {
+                let (s, sep) = (a(0).as_text(), a(1).as_text());
+                Ok(Value::List(s.split(&*sep).map(Value::text).collect()))
+            }
+            "str.trim" => Ok(Value::text(a(0).as_text().trim())),
+            "str.includes" => Ok(Value::Bool(a(0).as_text().contains(&*a(1).as_text()))),
+            "str.startsWith" => Ok(Value::Bool(a(0).as_text().starts_with(&*a(1).as_text()))),
+            "str.endsWith" => Ok(Value::Bool(a(0).as_text().ends_with(&*a(1).as_text()))),
+            "str.indexOf" => Ok(match a(0).as_text().find(&*a(1).as_text()) {
+                Some(i) => some(Value::Int(i as i128)),
+                None => none(),
+            }),
+            "str.toUpperCase" => Ok(Value::text(&a(0).as_text().to_uppercase())),
+            "str.toLowerCase" => Ok(Value::text(&a(0).as_text().to_lowercase())),
+            "str.replaceAll" => Ok(Value::text(&a(0).as_text().replace(&*a(1).as_text(), &a(2).as_text()))),
             "str.splitWhitespace" => {
                 for w in a(0).as_text().split_whitespace() {
                     self.yield_value(Value::text(w))?;

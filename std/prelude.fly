@@ -388,6 +388,17 @@ impl str {
   export function bytes(self: Self): void uses Yield<u8>;
   export function asBytes(self: Self): readonly u8[] from self;
   export function splitWhitespace(self: Self): void uses Yield<str>;
+  // TypeScript's string methods. `split` gives owned pieces, which a `Vec` can hold; iterate
+  // `splitWhitespace` to borrow them instead.
+  export function split(self: Self, sep: str): Vec<String>;
+  export function trim(self: Self): str from self;
+  export function includes(self: Self, needle: str): bool;
+  export function startsWith(self: Self, prefix: str): bool;
+  export function endsWith(self: Self, suffix: str): bool;
+  export function indexOf(self: Self, needle: str): Option<usize>;
+  export function toUpperCase(self: Self): String;
+  export function toLowerCase(self: Self): String;
+  export function replaceAll(self: Self, from: str, to: str): String;
 }
 impl<T> T[] {
   export function len(self: readonly Self): usize;

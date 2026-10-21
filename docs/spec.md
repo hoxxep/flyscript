@@ -589,6 +589,24 @@ Io.scope((s) => {
 
 `Mutex<T>`, `Atomic*` and `Channel<T>` are library types whose operations perform `Io` (through `Io.park`). Every synchronization is therefore visible in the type, pure code cannot observe shared mutable state, and the deterministic simulator (§6.4) controls every interleaving.
 
+`channel<T>()` gives a `Sender<T>` and a `Receiver<T>`. A channel closes when its last sender is dropped, or when a sender is closed with `tx.close()`, which consumes it; its receivers then drain what was sent and see the end: `recv()` gives `#None`, and `for (const m of rx)` stops. A task that is to close a channel therefore owns its sender — calling `close` moves `tx` into the task — and a task that only borrows a sender leaves the channel open after it finishes.
+
+```ts
+const [tx, rx] = channel<Hit>();
+const bad = Io.scope((s) => {
+  const reader = s.fork(() => {
+    let bad: u32 = 0;
+    for (const line of file.lines()) {
+      try { tx.send(parseLine(line)); } catch (_) { bad += 1; }
+    }
+    tx.close();
+    bad
+  });
+  for (const hit of rx) { record(mut stats, hit); }
+  reader.join()
+});
+```
+
 ### 6.3 Cancellation and in-flight I/O
 
 When an `Io.read` or `Io.write` suspends, the buffer stays borrowed until the operation completes. If the task is cancelled while the operation is in flight, the runtime cancels it in the kernel and waits for the kernel to confirm it has released the buffer before unwinding the frame or region that owns the buffer. The same holds when a continuation holding such an operation is dropped.

@@ -8,11 +8,14 @@ export struct Pending<T>;
 
 export function channel<T>(): [Sender<T>, Receiver<T>];
 
+// A channel closes when its last sender is dropped, or when one is closed: its receivers drain
+// what was sent, then see the end (`recv` gives `#None`, and `for…of` stops).
 impl<T> Sender<T> {
   export function send(self: readonly Self, v: T): void uses Io;
+  export function close(self: Self): void uses Io;
 }
 impl<T> Receiver<T> {
-  export function recv(self: readonly Self): T uses Io;
+  export function recv(self: readonly Self): Option<T> uses Io;
 }
 impl<T> Iterable<T, [Io]> for Receiver<T> {
   function each(self: readonly Self): void uses Yield<T>, Io;

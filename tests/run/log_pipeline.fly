@@ -1,0 +1,62 @@
+// file: access.log=GET /home 200 12\nGET /api/users 200 48\nPOST /api/users 201 95\nGET /home 304 3\nGET /api/users 500 210\nbad line\nGET /home 200 15
+// expect: GET /home: 3 hits, 0 errors, avg 10ms, slowest 15ms
+// expect: GET /api/users: 2 hits, 1 errors, avg 129ms, slowest 210ms
+// expect: POST /api/users: 1 hits, 0 errors, avg 95ms, slowest 95ms
+// expect: 1 malformed
+// A log pipeline: a reader task parses lines into a channel and closes it; the scope's body
+// aggregates what arrives (§6.1, §6.2).
+import { println } from "std/io";
+import { File } from "std/io";
+import { channel } from "std/sync";
+import { HashMap } from "std/collections";
+
+type Hit = { method: String; path: String; status: u16; ms: u32 };
+
+type Stats = { count: u32; errors: u32; totalMs: u64; slowest: u32 };
+
+// Splits "GET /home 200 12" into a hit, or says why it cannot.
+function parseLine(line: str): Hit uses Fail<#Malformed(String)> {
+  const parts = line.trim().split(" ");
+  if (parts.len() != 4) { throw #Malformed(line.toString()); }
+  const status = match (parseInt(parts[2])) { #Some(n) => n as u16, #None => throw #Malformed(line.toString()) };
+  const ms = match (parseInt(parts[3])) { #Some(n) => n as u32, #None => throw #Malformed(line.toString()) };
+  { method: parts[0].toString(), path: parts[1].toString(), status, ms }
+}
+
+function record(stats: mut HashMap<String, Stats>, hit: Hit): void {
+  const key = `${hit.method} ${hit.path}`;
+  match (stats.getMut(key)) {
+    #Some(s) => {
+      s.count += 1;
+      s.totalMs += hit.ms as u64;
+      if (hit.status >= 500) { s.errors += 1; }
+      if (hit.ms > s.slowest) { s.slowest = hit.ms; }
+    },
+    #None => stats.insert(key, { count: 1, errors: if (hit.status >= 500) { 1 } else { 0 }, totalMs: hit.ms as u64, slowest: hit.ms }),
+  }
+}
+
+export function main(): void uses Io, Fail<IoErr> {
+  const [tx, rx] = channel<Hit>();
+  let stats = HashMap.new<String, Stats>();
+  // The reader runs as its own task and reports how many lines it could not parse.
+  const bad = Io.scope((s) => {
+    const reader = s.fork(() => {
+      let bad: u32 = 0;
+      let file = File.open("access.log");
+      for (const line of file.lines()) {
+        try { tx.send(parseLine(line)); } catch (_) { bad += 1; }
+      }
+      tx.close();
+      bad
+    });
+    for (const hit of rx) {
+      record(mut stats, hit);
+    }
+    reader.join()
+  });
+  for (const [route, st] of stats.entries()) {
+    println(`${route}: ${st.count} hits, ${st.errors} errors, avg ${st.totalMs / (st.count as u64)}ms, slowest ${st.slowest}ms`);
+  }
+  println(`${bad} malformed`);
+}

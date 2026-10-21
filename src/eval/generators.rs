@@ -228,7 +228,7 @@ pub fn items_of(_it: &mut Interp, v: &Value) -> Result<Pull, Ctl> {
         // A channel's receiver: each message, until the loop ends.
         Value::Native("Receiver", ch) => {
             let ch = *ch;
-            Ok(Box::new(move |it| it.sched.recv(it.task, ch).map(Some)))
+            Ok(Box::new(move |it| it.sched.recv(it.task, ch)))
         }
         other => match other.deref() {
             Value::List(vs) | Value::Tuple(vs) => Ok(snapshot(vs)),
