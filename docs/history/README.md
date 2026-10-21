@@ -28,5 +28,6 @@ Versions are pre-1.0 while the language is being designed. The specification was
 | 0.28 | Continuations called as functions; several `with` clauses; expression arm bodies; `min`/`max` |
 | 0.29 | `Cont<A, B, E>` again, not `Send`; escaping continuations borrow the arms' bindings; `defer` and `Drop` cannot fail |
 | 0.30 | Borrows cannot outlive their scope; operation arguments lent to the arm; `Cont`'s row is the `handle`'s own; assignment drops; `while (const …)` |
+| 0.31 | Copy parts bind by copy; `Box` borrows lend; literal parts lent into borrow slots; recursive aliases rejected |
 
 `review-round-*.md` are the design review rounds that produced 0.2–0.15; `programs-against-v0.13.md` is the program-writing exercise against what is now 0.13.

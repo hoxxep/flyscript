@@ -1,0 +1,13 @@
+// error: this yields a borrow of `buf`, a local of the generator, which may end before the item does
+// A yielded value is a result of its function: it may borrow what the function was given, never
+// its locals (§5.5). Otherwise `escaped = w; break;` would keep a borrow of a dropped buffer.
+import { println } from "std/io";
+function lines(): void uses Yield<str> {
+  const buf = "one two".toString();
+  for (const w of buf.splitWhitespace()) { yield w; }
+}
+export function main(): void uses Io {
+  let escaped: str = "";
+  for (const w of lines()) { escaped = w; break; }
+  println(escaped);
+}

@@ -73,7 +73,7 @@ impl Parser {
     lhs
   }
   function atom(self: mut Self): Expr uses Fail<#Unexpected> {
-    const e = match (self.peek()) {
+    const e: Expr = match (self.peek()) {
       #Some(#Num(n)) => #Lit(n),
       #Some(#Ident(name)) => #Var(name.clone()),
       #Some(#LParen) => {

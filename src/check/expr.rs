@@ -468,28 +468,6 @@ impl<'p> Checker<'p> {
                     _ => false,
                 }
             }
-            // Tags built where no type was expected make an open union; one whose tags an enum
-            // has is that enum, as if it had been expected (§3.3).
-            (Ty::Union(r), Ty::Named(d, args)) if matches!(self.p.defs[*d].kind, DefKind::Enum { .. }) => {
-                let r = self.s.expand_row(r);
-                let DefKind::Enum { tags } = &self.p.defs[*d].kind else { return false };
-                let tags = tags.clone();
-                let params = self.p.defs[*d].params.clone();
-                match r.tail {
-                    Tail::Var(v) if r.labels.keys().all(|k| tags.contains_key(k)) => {
-                        let fits = r.labels.iter().all(|(k, t)| {
-                            let want = subst_params(&tags[k], &params, args);
-                            self.lends(t, &want)
-                        });
-                        if fits {
-                            let rest = tags.keys().filter(|k| !r.labels.contains_key(*k)).map(|k| (k.clone(), subst_params(&tags[k], &params, args))).collect();
-                            self.s.bind_row(v, Row { labels: rest, tail: Tail::Closed });
-                        }
-                        fits
-                    }
-                    _ => false,
-                }
-            }
             (Ty::Named(d, _), Ty::Prim(Prim::Str)) => *d == self.known("String"),
             (Ty::Tuple(fs), Ty::Tuple(xs)) if fs.len() == xs.len() => {
                 let (fs, xs) = (fs.clone(), xs.clone());
@@ -540,13 +518,25 @@ impl<'p> Checker<'p> {
                     let n = self.p.defs[d].name.clone();
                     format!(": a record is not a `{n}`; build it as one with `{n} {{ … }}`, or give its binding the type `{n}`")
                 }
-                _ => String::new(),
+                _ => self.enum_hint(found, expected).unwrap_or_default(),
             };
             self.err(span, format!("expected `{x}`, found `{f}`{hint}"));
         }
         for t in self.pending_copy.drain(before..).collect::<Vec<_>>() {
             self.copies_out.push((t, span));
         }
+    }
+
+    /// A union of tags that an enum has is still not that enum: it must be built as one (§3.3).
+    fn enum_hint(&self, found: &Ty, expected: &Ty) -> Option<String> {
+        let (Ty::Union(r), Ty::Named(d, _)) = (self.strip(found), self.strip(expected)) else { return None };
+        let DefKind::Enum { tags } = &self.p.defs[d].kind else { return None };
+        let r = self.s.expand_row(&r);
+        if !r.labels.keys().all(|k| tags.contains_key(k)) {
+            return None;
+        }
+        let n = &self.p.defs[d].name;
+        Some(format!(": tags built where no type was expected are a union, not a `{n}`; give the binding the type `{n}` (`const e: {n} = …`) so they are built as one"))
     }
 
     /// Performs effects at `span`: they must fit the effects allowed here.
@@ -776,15 +766,10 @@ impl<'p> Checker<'p> {
                 None => result = Some(t.clone()),
                 Some(r) => {
                     let r = r.clone();
-                    if self.lends(t, &r) {
-                    } else if self.lends(&r, t) {
-                        // Tags built in earlier branches are the enum a later one gives.
-                        if matches!((self.s.resolve(&r), self.s.resolve(t)), (Ty::Union(_), Ty::Named(..))) {
-                            result = Some(t.clone());
-                        }
-                    } else {
+                    if !self.lends(t, &r) && !self.lends(&r, t) {
                         let (a, b) = (self.show(&r), self.show(t));
-                        self.err(*span, format!("branches have different types: `{a}` and `{b}`"));
+                        let hint = self.enum_hint(&r, t).or_else(|| self.enum_hint(t, &r)).unwrap_or_default();
+                        self.err(*span, format!("branches have different types: `{a}` and `{b}`{hint}"));
                     }
                 }
             }

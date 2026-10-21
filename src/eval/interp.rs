@@ -307,7 +307,15 @@ impl Interp {
 
     /// `yield v`: runs the innermost loop body here, or hands the item to a generator's consumer.
     pub fn yield_value(&mut self, v: Value) -> R {
-        let Some(pos) = self.handlers.iter().rposition(|h| matches!(h, Handler::Loop { .. } | Handler::GenYield { .. })) else {
+        // `yield` is an operation of `Yield`: a `handle` of it is a handler like the built-in ones.
+        let yield_def = self.prog.known.get("Yield").copied();
+        let user = |h: &Handler| matches!(h, Handler::User { effect, .. } if Some(*effect) == yield_def);
+        let Some(pos) = self.handlers.iter().rposition(|h| matches!(h, Handler::Loop { .. } | Handler::GenYield { .. }) || user(h)) else {
+            if let (Some(Handler::Coroutine { effect, .. }), Some(y)) = (self.handlers.first(), yield_def)
+                && *effect == y
+            {
+                return self.perform(y, "yield", vec![v]);
+            }
             if let Some(Handler::Coroutine { co, .. }) = self.handlers.first() {
                 let co = *co;
                 return super::coroutine::forward(self, co, super::coroutine::Evt::Yield(v));
@@ -315,6 +323,7 @@ impl Interp {
             return Err(panic("`yield` outside any generator"));
         };
         match self.handlers[pos].clone() {
+            Handler::User { effect, .. } => self.perform(effect, "yield", vec![v]),
             Handler::GenYield { generator } => super::generators::hand_over(self, generator, v),
             Handler::Loop { pat, body, env, lex, .. } => {
                 // The body is outside the generator: it sees the handlers outside the loop.

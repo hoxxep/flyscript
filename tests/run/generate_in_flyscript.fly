@@ -1,0 +1,45 @@
+// expect: start
+// expect: alpha
+// expect: beta
+// expect: gamma
+// expect: 3 words
+// `generate` and `Gen` as library code, as §5.5 writes them (renamed `pull` and `Pull`). The arm
+// keeps each item past itself, which `unsafe` vouches for: the `handle` body is a call of a
+// closure, with no locals of its own, and a yielded value borrows only what its function was
+// given. These items borrow `text`. Nothing runs until the first `next()`.
+import { println } from "std/io";
+view enum Step<T, row E> { #Done, #Item { item: T, rest: Cont<void, Step<T, E>, E> } }
+view enum State<T, row E> { #Fresh(once () => Step<T, E> uses ...E), #Paused(Cont<void, Step<T, E>, E>) }
+view struct Pull<T, row E> { state: Option<State<T, E>> }
+function pull<T, row E>(f: once () => void uses Yield<T>, ...E): Pull<T, E> {
+  Pull { state: #Some(#Fresh(() => handle { f(); #Done } with Yield<T> {
+    yield(item) resumes k => unsafe { #Item { item, rest: k } },
+  })) }
+}
+impl<T, row E> Pull<T, E> {
+  function next(self: mut Self): Option<T> uses ...E {
+    const step: Step<T, E> = match (self.state.take()) {
+      #Some(#Fresh(start)) => start(),
+      #Some(#Paused(k)) => k(),
+      #None => #Done,
+    };
+    match (step) {
+      #Done => #None,
+      #Item { item, rest } => { self.state = #Some(#Paused(rest)); #Some(item) },
+    }
+  }
+}
+function words(s: str): void uses Yield<str> {
+  for (const w of s.splitWhitespace()) { yield w; }
+}
+export function main(): void uses Io {
+  const text = "alpha beta gamma".toString();
+  let g = pull(() => words(text.asStr()));
+  println("start");
+  let n = 0;
+  while (const #Some(w) = g.next()) {
+    println(w);
+    n += 1;
+  }
+  println(`${n} words`);
+}

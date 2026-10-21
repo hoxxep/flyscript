@@ -23,9 +23,9 @@ export interface Ord extends Eq { function cmp(self: readonly Self, other: reado
 export type Ordering = #Less | #Equal | #Greater;
 
 // The rest of a handled computation, given to a resumptive arm (§5.3): called once, `k(a)`, to
-// resume it, which may perform `E`, the effects around its `handle`. It is bound to its task, so
-// it is not `Send`.
-export struct Cont<A, B, row E = []>;
+// resume it, which may perform `E`, what its `handle` performs. It is bound to its task, so it is
+// not `Send`, and it may hold borrows, so it is a view.
+export view struct Cont<A, B, row E = []>;
 
 export struct Hasher;
 impl Hasher {

@@ -124,6 +124,8 @@ pub fn check_function(p: &mut Program, fid: FnId) {
         cont_args: HashMap::new(),
         dead_args: HashMap::new(),
         lent_args: HashMap::new(),
+        lambda_params: HashSet::new(),
+        iterating: false,
         sites: HashMap::new(),
         ret_ty,
         sources,
@@ -207,6 +209,12 @@ struct Own<'p> {
     dead_args: HashMap<VarId, String>,
     /// Arm parameters that may hold a borrow, with their operation, for diagnostics.
     lent_args: HashMap<VarId, String>,
+    /// Closures' parameters: what a closure yields may borrow them, as a function's may borrow
+    /// its parameters.
+    lambda_params: HashSet<VarId>,
+    /// Set while a `for…of` evaluates a generator call it iterates: the items it yields carry
+    /// the call's sources' borrows, as a result would (§5.5).
+    iterating: bool,
     /// Variable ids by declaration site, so they are the same in both passes and in every
     /// traversal of a loop body.
     sites: HashMap<(usize, String), VarId>,
@@ -888,7 +896,9 @@ impl<'p> Own<'p> {
             ExprKind::For { pat, iter, body, .. } => {
                 // What the iterated value borrows stays borrowed for the whole loop (§4.1).
                 let first_loan = self.loans.len();
+                self.iterating = matches!(iter.kind, ExprKind::Call { .. });
                 let iv = self.expr(iter, Use::Read);
+                self.iterating = false;
                 let mut held = iv.loans.clone();
                 held.extend(first_loan..self.loans.len());
                 self.temps.push(held);
@@ -955,8 +965,13 @@ impl<'p> Own<'p> {
                 self.leave();
                 Val { loans: a.loans.union(&b.loans).copied().collect() }
             }
-            ExprKind::Throw(v) | ExprKind::Yield(v) => {
+            ExprKind::Throw(v) => {
                 self.expr(v, Use::Move);
+                Val::default()
+            }
+            ExprKind::Yield(v) => {
+                let val = self.escape(|o| o.expr(v, Use::Move));
+                self.check_yield(&val, v);
                 Val::default()
             }
             ExprKind::Return(v) => {
@@ -969,7 +984,15 @@ impl<'p> Own<'p> {
                 Val::default()
             }
             ExprKind::Break | ExprKind::Continue => Val::default(),
-            ExprKind::Region { body, .. } | ExprKind::Unsafe(body) => self.block(body, how),
+            ExprKind::Region { body, .. } => self.block(body, how),
+            // The one thing `unsafe` vouches for in ownership: an operation's arguments may leave
+            // their arm, because the code around keeps the continuation they borrow from from
+            // being resumed while they live (§5.5's `generate`).
+            ExprKind::Unsafe(body) => {
+                let mut v = self.block(body, how);
+                v.loans.retain(|l| !self.lent_args.contains_key(&self.loans[*l].path.root));
+                v
+            }
             ExprKind::Handle { body, arms, .. } => {
                 // The outer bindings that resuming can reach: those the body or any arm uses.
                 let mut reach: Vec<(String, Span)> = Vec::new();
@@ -1134,6 +1157,12 @@ impl<'p> Own<'p> {
 
     /// How an argument is used, given the parameter type and the argument's own type.
     fn arg_use(&self, param: &Ty, arg_ty: &Ty) -> Use {
+        // A `readonly` borrow passed where one is wanted is copied, with what it holds: nothing
+        // borrows the binding it was read from.
+        let shared = |t: &Ty| matches!(t, Ty::Borrow(false, _) | Ty::Slice(_) | Ty::Prim(Prim::Str));
+        if shared(param) && shared(arg_ty) {
+            return Use::Move;
+        }
         match param {
             Ty::Borrow(true, _) => Use::Mut,
             Ty::Borrow(false, _) | Ty::Slice(_) | Ty::Prim(Prim::Str) => Use::Read,
@@ -1166,6 +1195,7 @@ impl<'p> Own<'p> {
             }
         };
         let ret = self.ty_of(e);
+        let yields = std::mem::replace(&mut self.iterating, false);
         let mut arg_vals: Vec<(Option<String>, Val)> = Vec::new();
         let mut receiver_loan: Option<(LoanId, Path, Span)> = None;
         self.temps.push(BTreeSet::new());
@@ -1260,7 +1290,7 @@ impl<'p> Own<'p> {
         self.temps.pop();
         // The result carries its sources' borrows unless it cannot hold one (§4.2).
         let mut loans = BTreeSet::new();
-        if self.may_hold(&ret) {
+        if yields || self.may_hold(&ret) {
             let sources = scheme.as_ref().map(|s| result_sources(self.p, s));
             for (name, v) in &arg_vals {
                 let is_source = match (&sources, name) {
@@ -1326,7 +1356,8 @@ impl<'p> Own<'p> {
         let saved_deferred = std::mem::take(&mut self.deferred);
         self.scopes.push(HashMap::new());
         for p in params {
-            self.declare_var(&p.name.name, Ty::Error, true, false, p.name.span.start);
+            let id = self.declare_var(&p.name.name, Ty::Error, true, false, p.name.span.start);
+            self.lambda_params.insert(id);
         }
         self.contained(|o| o.expr(body, Use::Move));
         self.scopes.pop();
@@ -1399,6 +1430,26 @@ impl<'p> Own<'p> {
     }
 
     /// What a function returns may hold only borrows of its sources (§4.2).
+    /// A yielded value is a result of its function, handed out before it returns: it may borrow
+    /// what the function was given, never its locals, which may end before the item does (§5.5).
+    fn check_yield(&mut self, v: &Val, e: &Expr) {
+        if self.collecting || !self.may_hold(&self.ty_of(e)) {
+            return;
+        }
+        let in_lambda = !self.lambdas.is_empty();
+        for l in &v.loans {
+            let loan = self.loans[*l].clone();
+            let root = loan.path.root;
+            let given = if in_lambda { self.lambda_params.contains(&root) } else { self.vars[root].param };
+            if loan.external || given {
+                continue;
+            }
+            let name = self.vars[root].name.clone();
+            self.err(e.span, format!("this yields a borrow of `{name}`, a local of the generator, which may end before the item does: yield an owned value (`.toString()`), or borrow from a parameter"));
+            return;
+        }
+    }
+
     fn check_return(&mut self, v: &Val, span: Span) {
         if self.collecting || !self.may_hold(&self.ret_ty.clone()) {
             return;

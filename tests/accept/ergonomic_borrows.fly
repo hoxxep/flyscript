@@ -1,6 +1,6 @@
-// Three conveniences a TypeScript programmer leans on (§4.1, §3.3): a part bound through a
-// `readonly` borrow is a copy if it is `Copy`, so it holds nothing; a borrow of a `Box<T>` is a
-// borrow of the `T`; and tags built where no type was expected join an enum another branch gives.
+// Conveniences a TypeScript programmer leans on (§4.1): a class-1 part bound through a
+// `readonly` borrow is a copy, so it holds nothing; a borrow of a `Box<T>` is a borrow of the `T`;
+// and a literal's part whose slot is a borrow is lent.
 enum Node { #Leaf(i64), #Neg(Box<Node>) }
 type Tok = #Num(i64) | #Minus;
 struct Cursor { toks: Vec<Tok>, pos: usize }
@@ -21,6 +21,6 @@ function value(n: readonly Node): i64 {
   match (n) { #Leaf(v) => v, #Neg(inner) => -value(inner) }
 }
 function build(flag: bool, base: Node): Node {
-  const n = if (flag) { #Leaf(1) } else { base };
+  const n: Node = if (flag) { #Leaf(1) } else { base };
   n
 }

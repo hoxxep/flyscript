@@ -1,0 +1,10 @@
+// Items that borrow what the generator was given outlive their iteration (§5.5): the longest word
+// is kept across iterations.
+function words(s: str): void uses Yield<str> {
+  for (const w of s.splitWhitespace()) { yield w; }
+}
+export function longest(line: str): str from line {
+  let best = "";
+  for (const w of words(line)) { if (w.len() > best.len()) { best = w; } }
+  best
+}
