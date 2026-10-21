@@ -14,9 +14,20 @@ export function serve(listener: mut Listener, db: readonly Db): void uses Io, Fa
 }
 ```
 
-- **[docs/spec.md](docs/spec.md)**: the language specification (currently 1.6).
+- **[docs/spec.md](docs/spec.md)**: the language specification (currently 1.7).
 - **[examples/](examples/)**: the spec's programs, kept identical to it by a test.
 - **[docs/history/](docs/history/)**: earlier spec versions and the review rounds that shaped them.
+- **[docs/reviews/](docs/reviews/)**: independent design reviews by Gemini 4 Argon, made with `tools/second_opinion.py`.
+
+## Second opinions
+
+```sh
+gcloud auth application-default login       # once
+python3 tools/second_opinion.py ask --topic "short name" question.md [--context src/file.rs …]
+python3 tools/second_opinion.py list
+```
+
+The reviewer is instructed (tools/reviewer.md) to give verdicts, back every objection with a program, and never simply agree. It sees the whole spec and earlier reviews; answers are saved to docs/reviews/ and reused when the same question is asked against the same spec.
 
 ## Status
 

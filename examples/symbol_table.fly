@@ -16,7 +16,7 @@ impl<region R> Scope<R> {
     d
   }
   export function lookup(self: Ref<Self>, name: str): Option<Ref<Decl>> {   // pure
-    for (const b of self.names.each()) { if (b.name == name) { return #Some(b.decl); } }
+    for (const b of self.names) { if (b.name == name) { return #Some(b.decl); } }
     match (self.parent) { #Some(p) => p.lookup(name), #None => #None }
   }
 }

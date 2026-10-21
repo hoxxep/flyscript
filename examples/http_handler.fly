@@ -17,8 +17,8 @@ export function serveOne(conn: Socket, db: readonly Db): void uses Io {
       // Two concurrent lookups. `req` is immutable region data and `db` a shared
       // borrow, so both tasks may read them; a failure in either cancels the other.
       const [profile, quota] = Io.scope((s) => {
-        const p = s.spawn(() => db.fetchProfile(req.user));
-        const q = s.spawn(() => db.checkQuota(req.token));
+        const p = s.fork(() => db.fetchProfile(req.user));
+        const q = s.fork(() => db.checkQuota(req.token));
         [p.join(), q.join()]
       });
 

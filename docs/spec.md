@@ -1,6 +1,6 @@
 # Flyscript
 
-**Language specification, version 1.6**
+**Language specification, version 1.7**
 
 *Affine values, one row calculus, handlers for everything, and `comptime`: Church on the outside, Turing on the inside.*
 
@@ -18,20 +18,19 @@ The whole language rests on five laws. Every rule in this document is a conseque
 4. **Handlers for everything.** Errors, I/O, iteration and region memory are ordinary effects with ordinary handlers. A handler may hold the rest of a computation as a one-shot continuation value; generators and tasks are both built from that one primitive.
 5. **`comptime` is the metalanguage.** Generics, reflection, layout transformation and derived interfaces are ordinary Flyscript code run by the compiler.
 
-### 0.1 Changes from 1.5
+### 0.1 Changes from 1.6
 
-1.6 is a pass for simplicity and for TypeScript fidelity. Nothing below adds a concept; each item removes one or replaces it with something a TypeScript programmer already knows.
+1.7 settles the rules a type checker needs, found by writing the parser and by an independent review (docs/reviews/2026-10-21-m2-checker-design.md). The most important fix is in concurrency: 1.6 claimed that a task's isolation was proved by its type, but its signatures did not enforce it.
 
-| Change | Replaces |
+| Change | Why |
 | :--- | :--- |
-| Tag unions are written without brackets: `#A \| #B(T)` | `[ #A \| #B(T) ]`, which collided with tuple syntax |
-| `Option` and `Result` are type aliases of tag unions | nominal `enum Option` / `enum Result` |
-| `throw`, `try`/`catch` are syntax for the `Fail` effect | `Fail.raise`, and `handle … with Fail` for the common case |
-| `yield e` is syntax for the `Yield` effect | `Yield.yield(e)` |
-| A child failure cancels its scope and is rethrown from `Io.scope` (nursery semantics); a task that cannot fail is one whose type says so | ad-hoc cancellation rules and supervision questions |
-| Expression statements may discard any value | `const _ = e;` |
-| Region operations are methods: `list.push(x)`, `cell.set(v)` | `RegionList.push(list, x)`, `Region.cellSet(c, v)` |
-| Field and parameter types flow into literals: `Cell.new(0)` | `Cell.new(0 as u32)` |
+| `s.spawn(task)` takes only tasks that cannot fail and returns nothing; `s.fork(task)` returns a `Fiber` for work that can (§6.1) | 1.6 gave the scope body and every task one shared failure row, so a server could leak a task failure into its scope without a type error |
+| Effect rows are sets: region arguments are part of an effect's label, other arguments are determined by it, and repeated labels merge (§3.2) | `Region<R1>` and `Region<R2>` must coexist in one row; two `Fail`s must unify into one |
+| Handling `Fail` closes its row (§5.4) | otherwise a `catch` could never be matched exhaustively |
+| A `Ref<R, T>` is used as a `readonly T`; `Cell` and `RegionList` write through `readonly` receivers and the `Region` effect (§4.6) | region writes were effects in principle but unspecified in practice |
+| `for…of` accepts any `Iterable<T>` as well as a generator (§5.5) | iterating a slice directly is what TypeScript programmers write |
+| The standard library is written as declaration files, `.d.fly` (§8.1) | signatures need a home; TypeScript's `.d.ts` is the familiar answer |
+| Template literals are `String`; `break`, `continue`, `return` and `throw` have type `never`; tag constructions are open (§2.2, §3.2, §3.6) | each was undetermined in 1.6 |
 
 ---
 
@@ -69,7 +68,8 @@ The whole language rests on five laws. Every rule in this document is a conseque
 | `interface` + `class … implements` | `interface` + `struct` + `impl` | Data and behaviour are declared separately. Interfaces are nominal. |
 | `T \| null \| undefined` | `Option<T>` = `#Some(T) \| #None` | There is no null. |
 | `throw` / `try` / `catch` | same | Typed: a function's failures are part of its type. |
-| `function*` / `yield` / `for…of` | `yield` / `for…of` | A generator is any function that uses `Yield<T>`. |
+| `function*` / `yield` / `for…of` | `yield` / `for…of` | A generator is any function that uses `Yield<T>`; `for…of` also accepts any `Iterable<T>`. |
+| `.d.ts` declaration files | `.d.fly` declaration files | Signatures without bodies, used for the standard library. |
 | `async` / `await` | (nothing) | I/O is an effect; every function is "direct style". |
 | `import` / `export` | same | ES modules; the import graph must be acyclic. |
 | `<T extends U>` | same | Monomorphized. Bounds compose with `&`. |
@@ -77,7 +77,7 @@ The whole language rests on five laws. Every rule in this document is a conseque
 ### 2.2 Lexical rules
 
 - **Statements and blocks.** Flyscript is expression-oriented. A block `{ s1; s2; e }` evaluates to its final expression `e` when that expression has no trailing semicolon, and to `void` otherwise. `if`, `match`, `try`, `region` and `handle` are expressions. An expression statement `e;` discards its value. `return e;` returns early.
-- **Literals.** Numeric literals have no suffix; their type is solved together with the whole enclosing call or initializer from the expected type, defaulting to `i32` and `f64` only if still unconstrained. Byte literals are `b'n'`; strings are `"…"` and templates `` `…${e}…` ``.
+- **Literals.** Numeric literals have no suffix; their type is solved together with the whole enclosing call or initializer from the expected type, defaulting to `i32` and `f64` only if still unconstrained. Byte literals are `b'n'`; strings are `"…"` (type `str`) and templates `` `…${e}…` ``, which build a `String` from the `Show` of each interpolated value.
 - **Record literals.** `{ f: e, … }` builds the nominal struct named by the expected type, if there is one, and a structural record otherwise. `Point { … }` names the struct explicitly. `{ x, y }` puns field names.
 - **Generic calls.** In expression position, `f<…>(` and `x.f<…>(` are parsed as type application when the `<…>` is a balanced type-argument list followed immediately by `(`; otherwise `<` is less-than. This is TypeScript's rule.
 - **Mutable borrows are visible at the call site.** `read(mut buf)` lends `buf` mutably; `parse(buf)` lends it read-only. The one exception is a method's receiver, which is lent in whatever mode the method declares: `conn.read(mut buf)` borrows `conn` mutably.
@@ -97,7 +97,7 @@ Interface   = "interface" Ident [ TypeParams ] "{" { ( Sig | "type" Ident [ "ext
 Impl        = "impl" [ TypeParams ] Type [ "for" Type ] "{" { ["export"] Function } "}" ;
 TypeAlias   = "type" Ident [ TypeParams ] "=" Type ";" ;
 Effect      = "effect" Ident [ TypeParams ] "{" { Op ";" } "}" ;
-Op          = Name [ TypeParams ] "(" [ Params ] ")" ":" Return [ Uses ] ;
+Op          = Name [ TypeParams ] "(" [ Params ] ")" ":" Return ;   (* operations have no effects *)
 Name        = Ident | Keyword ;                     (* member names may be reserved words *)
 Function    = Sig Block ;
 Extern      = "extern" "\"C\"" Sig ";" ;
@@ -160,11 +160,13 @@ Three rules settle the grammar's ambiguities, all borrowed from TypeScript:
 
 ### 3.2 One row calculus
 
-A *row* is a finite map from labels to types, optionally ending in a row variable. Flyscript has three kinds of row, all solved by one Rémy-style unifier over label-sorted rows:
+A *row* is a finite map from labels to types, optionally ending in a row variable. Flyscript has three kinds of row, all solved by one Rémy-style unifier over label-sorted rows. They differ only in what a label is and in what happens when a label appears twice:
 
-- **Records**: `{ x: f64; y: f64; ...R }`. Physical layout is canonical (by alignment, then name), so equal record types have equal layouts.
-- **Tag unions**: `#Some(T) | #None`, `#Get { key: String } | #Put { key: String; val: String } | ...R`. Payloads are a tuple `(…)` or a record `{…}`. Tags need no declaration.
-- **Effect rows**: `uses Io, Fail<E>, ...R`.
+- **Records**: `{ x: f64; y: f64; ...R }`. A label is a field name and appears at most once; extending a row requires that its tail lack the label. Physical layout is canonical (by alignment, then name), so equal record types have equal layouts.
+- **Tag unions**: `#Some(T) | #None`, `#Get { key: String } | #Put { key: String; val: String } | ...R`. A label is a tag; payloads are a tuple `(…)` or a record `{…}`. Tags need no declaration. Two unions are joined by merging their tags, unifying the payloads of a tag present in both.
+- **Effect rows**: `uses Io, Fail<E>, Region<R>, ...R`. A label is an effect name together with its **region arguments**: `Region<R1>` and `Region<R2>` are different labels and may share a row. An effect's other type arguments are **determined by its label**, so a row holds one `Fail` and one `Yield`, and wherever two rows meet, their `Fail` payloads unify. Effect rows are sets: extending a row with a label it already contains is the identity, so `uses Io, ...E` is well formed whether or not `E` contains `Io`.
+
+Determined arguments are what make error sets compose. A block that calls `conn.read` (`Fail<IoErr | ...ρ1>`) and `parse` (`Fail<#Malformed | ...ρ2>`) has one `Fail` whose payload is the merged union `IoErr | #Malformed | ...ρ3`; no conversion code is involved.
 
 Row variables are declared `<row R>`. A function generic in a row is monomorphized per instantiation, so field offsets and tag numbers are always constants: row polymorphism gives TypeScript's flexibility at C's cost.
 
@@ -175,7 +177,12 @@ function norm<row R>(p: readonly { x: f64; y: f64; ...R }): f64 {
 norm({ x: 3, y: 4, label: "a" })   // R = { label: str }
 ```
 
-**Open failure rows.** A tag union written as the argument of `Fail` in a signature is implicitly open: `uses Fail<#Eof | #Bad>` means `uses Fail<#Eof | #Bad | ...ρ>` for a fresh `ρ`. A caller that may fail in more ways simply unifies its larger row with the callee's; error sets compose by union with no conversion code.
+**Open and closed unions.** A tag union written in a type alias or a signature is closed. Two exceptions make tag unions pleasant to use:
+
+- A *construction* is open: `#Some(x)` has type `#Some(T) | ...ρ`, so it fits any union that has a `#Some`.
+- The argument of `Fail` in a signature is open, after expanding aliases: `uses Fail<IoErr>` means `uses Fail<IoErr | ...ρ>` for a fresh `ρ`. A caller that may fail in more ways unifies its larger row with the callee's.
+
+Handling `Fail` closes the row again (§5.4), so the value caught is exactly the union the body can throw.
 
 **Standard aliases.**
 ```ts
@@ -208,7 +215,9 @@ interface Collection {
 }
 ```
 
-Declarations hold data only. Behaviour lives in `impl T { … }` (inherent methods) and `impl I for T { … }` (interface implementations). An `impl I for T` must appear in the module that declares `I` or the module that declares `T`. Calls dispatch statically through `<T extends I>`; `dyn I` is an explicit fat pointer for dynamic dispatch.
+Declarations hold data only. Behaviour lives in `impl T { … }` (inherent methods) and `impl I for T { … }` (interface implementations). An `impl I for T` must appear in the module that declares `I` or the module that declares `T`. Structural and built-in types (records, tag unions, slices, `str`) belong to no module, so only the standard library gives them inherent methods (`Option.cloned`, `str.splitWhitespace`); other code extends them through interfaces. Calls dispatch statically through `<T extends I>`; `dyn I` is an explicit fat pointer for dynamic dispatch.
+
+A method's receiver is `self: Self` (by move), `self: readonly Self`, `self: mut Self`, or, for types stored in regions, `self: Ref<R, Self>`. A function in an `impl` without `self` is called on the type: `RegionList.new()`.
 
 ### 3.5 Derived interfaces
 
@@ -221,6 +230,8 @@ Type checking happens after `comptime` evaluation and uses bidirectional local i
 - Exported functions, interface methods and `extern` declarations state their parameter types, return type and effects. An exported function with no `uses` clause is pure.
 - Everything inside a body is inferred: local types, closure signatures, generic and row arguments, literal types, region arguments, and the effects of non-exported functions.
 - Region arguments are unification variables solved over the whole body; one left unconstrained defaults to the heap.
+- **Expected types flow into calls.** A call checked against an expected type unifies the callee's instantiated return type with it *before* checking the arguments. This is how `alloc({ user, token })` in a function returning `Ref<Request>` builds a `Request` rather than an anonymous record.
+- `break`, `continue`, `return` and `throw` have type `never`, which fits any expected type.
 - There is no global Hindley–Milner inference: errors stay local, and `comptime`, regions and interfaces stay decidable.
 
 ---
@@ -301,9 +312,26 @@ A region is a fiber-local bump arena with lexical extent. `region (R) { … }` i
 
 A region is **append-only and immutable**:
 
-- `alloc(v)` places `v` in the region and returns a `Ref<R, T>`. Reading through a `Ref` is pure, and data reached through it may be borrowed `readonly`.
-- The only mutable slots are `Cell<T>` with `T extends Copy`, whose `get` copies out and `set` copies in (a `Cell` is never borrowed), and `RegionList<T>`, an append-only chunked list whose elements never move.
-- `alloc`, `Cell.set`, `Cell.get` and `RegionList.push` perform `Region<R>`.
+- `alloc(v)` places `v` in the region and returns a `Ref<R, T>`. A `Ref<R, T>` is used exactly as a `readonly T`: field access and method calls go through it, and reading is pure.
+- The only mutable slots are `Cell<R, T>` with `T extends Copy`, whose `get` copies out and `set` copies in (a `Cell` is never borrowed), and `RegionList<R, T>`, an append-only chunked list whose elements never move. Both carry their region, and their writes are operations of `Region<R>` performed through a `readonly` receiver: mutation by effect, not by ownership. That is why `const items = RegionList.new(); items.push(x)` is legal.
+- `alloc`, `Cell.get`, `Cell.set` and `RegionList.push` perform `Region<R>`. Reading a `RegionList`'s existing elements does not: they never change.
+
+```ts
+// std/region.d.fly
+export struct Cell<region R, T extends Copy>;
+export struct RegionList<region R, T>;
+impl<region R, T extends Copy> Cell<R, T> {
+  export function new(v: T): Cell<R, T>;
+  export function get(self: readonly Self): T uses Region<R>;
+  export function set(self: readonly Self, v: T): void uses Region<R>;
+}
+impl<region R, T> RegionList<R, T> {
+  export function new(): Ref<R, RegionList<R, T>> uses Region<R>;
+  export function push(self: Ref<R, Self>, v: T): void uses Region<R>;
+  export function len(self: readonly Self): usize;
+}
+impl<region R, T> Iterable<readonly T> for RegionList<R, T> { … }
+```
 
 Two rules make this sound:
 
@@ -312,7 +340,7 @@ Two rules make this sound:
 
 Because nothing in a region moves or is freed before the region ends, and the only mutation is copy-in to a `Cell` or append to a list, no borrow into region data can be invalidated. Because handlers are fiber-local, no other task can perform `Region<R>`; a `Ref<R, T>` whose referent contains no `Cell` or `RegionList` is deeply immutable and may be shared with child tasks.
 
-**Region elision.** In a declaration or block with exactly one region in scope, `Ref<T>`, `RegionList<T>` and region-generic type names take that region implicitly:
+**Region elision.** In a declaration or block with exactly one region in scope, every region-generic type written without its region argument takes that region: `Ref<T>`, `Cell<T>`, `RegionList<T>`, and user types such as `Json`. The rule applies recursively through type arguments.
 
 ```ts
 enum Json<region R> {
@@ -334,17 +362,19 @@ effect Fail<E>        { raise(err: E): never; }
 effect Yield<T>       { yield(item: T): void; }
 effect Region<region R> { /* alloc, cell get/set, list push; used through library methods */ }
 effect Io {
-  read(fd: Fd, buf: mut u8[]): usize uses Fail<IoErr>;
-  write(fd: Fd, buf: readonly u8[]): usize uses Fail<IoErr>;
+  read(fd: Fd, buf: mut u8[]): Result<usize, IoErr>;
+  write(fd: Fd, buf: readonly u8[]): Result<usize, IoErr>;
   now(): Instant;
   sleep(d: Duration): void;
   park(on: WaitKey): void;                       // the primitive under locks, channels, atomics and join
-  scope<T, row E>(body: once (s: mut Scope<E>) => T uses Io, ...E): T uses Io, ...E;
+  start(task: once () => void uses Io): TaskId;  // the primitive under Io.scope (§6.1)
 }
 type IoErr = #Reset | #TimedOut | #BrokenPipe | #NotFound | #PermissionDenied;
 ```
 
 These four are the standard effects. They are ordinary declarations; what makes them standard is only that the runtime installs root handlers for `Io` (and for the heap, which is not an effect).
+
+**Operations have no effects of their own.** An operation's handler runs where the effect is handled, not where it was performed, so an operation cannot fail at its call site by itself; one that can fail returns a `Result`, and library code turns that into a `throw` where it is called (`Socket.read` is `Io.read(…).unwrap()`). Everything richer — scopes, channels, locks — is library code over these few operations.
 
 A function's `uses` clause is a row of effects. A function with no `uses` clause is **pure**: it may allocate on the heap, open and use its own regions, and mutate its `mut` parameters, but it observes nothing and affects nothing outside its arguments and result. Higher-order functions are polymorphic in their callbacks' effects:
 
@@ -361,6 +391,8 @@ function map<T, U, row E>(xs: readonly T[], f: (x: readonly T) => U uses ...E): 
 
 The `handle` expression evaluates to the body's value if the body completes without performing `Eff`, and otherwise to the value of the arm that handled the operation. A resumptive arm usually produces that value by resuming: `k.resume(a)` itself evaluates to the `handle` expression's eventual value.
 
+An arm runs in the context of the `handle` expression: its effects are those of the code around the `handle`. If the body's row is `Eff, ...E`, the `handle` expression's row is `...E` together with the arms' own effects.
+
 ### 5.3 Continuations
 
 A `Cont<A, B, E>` is an affine value. It may be stored, moved and returned like any other.
@@ -373,7 +405,9 @@ A `Cont<A, B, E>` is an affine value. It may be stored, moved and returned like 
 
 ### 5.4 Errors: `throw`, `try`, `catch`
 
-`throw e` performs `Fail.raise(e)`. `try { body } catch (p) { handler }` is an abortive handler of `Fail`: it evaluates to the body's value, or binds the failure to `p` and evaluates to the handler's value. Since the error type is a tag union, `catch` is usually a `match`:
+`throw e` performs `Fail.raise(e)`. `try { body } catch (p) { handler }` is an abortive handler of `Fail`: it evaluates to the body's value, or binds the failure to `p` and evaluates to the handler's value.
+
+Handling `Fail` **closes** its row: any open tail left in the body's failure union is set to empty, so `p` has exactly the type of what the body can throw, and a `match` on it can be checked for exhaustiveness. Since the error type is a tag union, `catch` is usually a `match`:
 
 ```ts
 const port = try { parsePort(raw) } catch (e) {
@@ -387,7 +421,15 @@ To keep a failure as data, `Fail.capture(() => body)` returns `Result<T, E>`; `r
 
 `yield e` performs `Yield.yield(e)`. A generator is any computation that uses `Yield<T>`; nothing else marks it.
 
-`for (const x of gen) { body }` handles `Yield` around `gen`, running `body` for each item:
+`for (const x of e) { body }` handles `Yield` around a generator, running `body` for each item. If `e` is a generator call, it is the generator. Otherwise `e`'s type must implement `Iterable`, TypeScript's iteration protocol in Flyscript form, and the generator is `e.each()`:
+
+```ts
+interface Iterable<T, row E = []> {
+  function each(self: readonly Self): void uses Yield<T>, ...E;
+}
+```
+
+Slices, arrays, `Vec`, `String`'s lines, `HashMap`, `RegionList` and channels' receivers are all `Iterable`, so `for (const path of args)` needs no ceremony. Inside the loop:
 
 - reaching the end of `body`, or `continue`, resumes the generator;
 - `break` drops the continuation, so the generator unwinds and its cleanup runs, then the loop exits;
@@ -435,28 +477,34 @@ Integer division by zero, overflow in checked builds (`wrappingAdd` and friends 
 
 ### 6.1 Tasks and scopes
 
-Concurrency is structured. `Io.scope((s) => body)` opens a scope; `s.spawn(task)` starts a task in it and returns a `Fiber<T, E>`; `f.join()` waits for the result.
+Concurrency is structured. `Io.scope((s) => body)` opens a scope, and a scope starts tasks in two ways:
 
 ```ts
+function scope<T, row E>(body: once (s: mut Scope<E>) => T uses Io, ...E): T uses Io, ...E;
 interface Scope<row E> {
-  function spawn<T extends Send>(self: mut Self, task: once () => T uses Io, ...E): Fiber<T, E>;
+  // Fire and forget: the task cannot fail, so it cannot cancel the scope.
+  function spawn(self: mut Self, task: once () => void uses Io): void;
+  // Work whose result or failure the scope waits for.
+  function fork<T extends Send>(self: mut Self, task: once () => T uses Io, ...E): Fiber<T>;
 }
-interface Fiber<T, row E> {
-  function join(self: Self): T uses Io, ...E;
+interface Fiber<T> {
+  function join(self: Self): T uses Io;
 }
 ```
 
 The rules:
 
-1. **A scope owns its tasks.** `Io.scope` returns only when every task spawned in it has finished. A `Fiber` is a handle to the result, not to the task: dropping it (`s.spawn(t);` as a statement) leaves the task running.
-2. **Failure cancels the scope.** If a task fails, or panics, the scope is cancelled: the body and every other task stop at their next `Io` operation and unwind. Once all have finished, the first failure is rethrown from `Io.scope` (or the panic continues). Joining a failed task rethrows its failure at the `join`.
-3. **Captures.** A task is a `once` closure. It may move in owned `Send` values and capture `readonly` borrows of `Send` values from outside the scope; the scope outlives every task, so the borrows are safe.
-4. **Isolation is a type.** A task whose effects are only `Io` cannot fail. A server that must survive a bad connection spawns tasks that handle their own errors, and the type checker proves it:
+1. **A scope owns its tasks.** `Io.scope` returns only when every task started in it has finished. A `Fiber` is a handle to a forked task's result, not to the task: dropping it leaves the task running.
+2. **Isolation is a type.** `spawn` accepts only a task whose effects are `Io`, which cannot fail. A server that must survive a bad connection spawns its connections, and the type checker proves they cannot take the scope down: a connection handler that let an error escape would not be accepted by `spawn`.
+3. **Failure cancels the scope.** A forked task's failures share the scope's row `E`. If a forked task fails, or any task panics, the scope is cancelled: the body and every other task stop at their next `Io` operation and unwind, and once all have finished the first failure is rethrown from `Io.scope` (or the panic continues). `join` therefore never fails by itself: it returns the result, or the joiner is cancelled along with the rest of the scope.
+4. **Captures.** A task is a `once` closure. It may move in owned `Send` values and capture `readonly` borrows of `Send` values from outside the scope; the scope outlives every task, so the borrows are safe. A task's row never contains `Region<R>` for a region opened outside it, because region handlers belong to the fiber that opened them.
+
+`scope`, `spawn`, `fork` and `join` are library code over `Io.start` and `Io.park`; nursery semantics are not built into the language.
 
 ```ts
 Io.scope((s) => {
-  for (let conn of listener.accept()) {
-    s.spawn(() => serveOne(conn, db));   // serveOne: (…) => void uses Io — cannot fail the scope
+  for (const conn of listener.accept()) {
+    s.spawn(() => serveOne(conn, db));   // serveOne: (…) => void uses Io, so it cannot fail the scope
   }
 });
 ```
@@ -547,6 +595,8 @@ The view is an ordinary class-2 record (§4.2); no part of this is built into th
 
 Each `.fly` file is an ES module. Declarations are private unless exported. The import graph must be acyclic, so modules compile in parallel in dependency order.
 
+A **declaration file**, `.d.fly`, states a module's interface without its implementation, as a TypeScript `.d.ts` file does. In a declaration file, a function or method ends with `;` instead of a body, and `struct Name<…>;` declares a type whose fields are hidden. The standard library is written this way; its bodies are the runtime's.
+
 ### 8.2 Foreign code
 
 `extern "C"` declares a C function; `@layout(c)` gives a struct C layout. `T*` is a raw pointer: `Copy`, not `Send`, and readable or writable only inside `unsafe { … }` via `p.read()`, `p.write(v)` and `p.add(n)`. Calling an `extern "C"` function is `unsafe`; the usual pattern is a safe wrapper that states the function's real effects.
@@ -580,7 +630,8 @@ The rules that carry the design:
   > ─────────────────────────────────────────
   > Δ | Θ | Γ ⊢ region(ρ) { e } : τ / ε ⊣ Θ′
 - **Handle.** An abortive arm is checked under the Γ of the `handle` expression, the body's borrows having been released. In a resumptive arm, the body's borrows move into `k`, whose type records them; they are released when `k` is resumed to completion or dropped.
-- **Scope.** A task's captures must be class 1 and `Send`, or `ro` borrows of `Send` values whose paths are not under `mut` in Γ.
+- **Scope.** A task's captures must be class 1 and `Send`, or `ro` borrows of `Send` values whose paths are not under `mut` in Γ. A spawned task's row is exactly `Io`; a forked task's row is `Io` and the scope's row, less every `Region` label.
+- **Effect rows.** Rows are label-sorted maps with an optional tail. For records a label occurs once and extension requires the tail to lack it; for tag unions labels merge and their payloads unify; for effects a label is an effect name with its region arguments, its other arguments are functions of the label, and extension by a present label is the identity. Handling `Fail` sets the open tail of its payload to the empty row.
 ---
 
 ## 10. A worked example
@@ -629,8 +680,8 @@ export function serveOne(conn: Socket, db: readonly Db): void uses Io {
       // Two concurrent lookups. `req` is immutable region data and `db` a shared
       // borrow, so both tasks may read them; a failure in either cancels the other.
       const [profile, quota] = Io.scope((s) => {
-        const p = s.spawn(() => db.fetchProfile(req.user));
-        const q = s.spawn(() => db.checkQuota(req.token));
+        const p = s.fork(() => db.fetchProfile(req.user));
+        const q = s.fork(() => db.checkQuota(req.token));
         [p.join(), q.join()]
       });
 
@@ -648,7 +699,7 @@ export function serveOne(conn: Socket, db: readonly Db): void uses Io {
 }
 ```
 
-Everything here follows from the rules above: the failure row of the `try` body is the union of `parse`'s, `read`'s, the tasks', `writeStatus`'s and `#Unauthorized`; the `catch` arm may use `conn` because the body's borrow of it was released when the body unwound; and `serveOne` itself is `uses Io` only, so a server can spawn it without risking the scope (§6.1).
+Everything here follows from the rules above: the failure row of the `try` body is the union of `parse`'s, `read`'s, the forked tasks', `writeStatus`'s and `#Unauthorized`; `catch` closes that row, so `e`'s type is exactly that union; the `catch` arm may use `conn` because the body's borrow of it was released when the body unwound; and `serveOne` itself is `uses Io` only, so a server can `spawn` it (§6.1).
 
 ---
 
@@ -834,7 +885,7 @@ impl<region R> Scope<R> {
     d
   }
   export function lookup(self: Ref<Self>, name: str): Option<Ref<Decl>> {   // pure
-    for (const b of self.names.each()) { if (b.name == name) { return #Some(b.decl); } }
+    for (const b of self.names) { if (b.name == name) { return #Some(b.decl); } }
     match (self.parent) { #Some(p) => p.lookup(name), #None => #None }
   }
 }
@@ -854,7 +905,7 @@ export type Command =
 
 export function kv(inbox: readonly Receiver<Command>): void uses Io {
   let store = HashMap.new<String, String>();
-  for (const cmd of inbox.each()) {
+  for (const cmd of inbox) {
     match (cmd) {
       #Get { key, reply } => reply.send(store.get(key).cloned()),
       #Put { key, val }   => store.insert(key, val),
