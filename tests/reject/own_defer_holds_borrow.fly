@@ -1,0 +1,5 @@
+// error: `v` cannot be used here
+export function f(v: mut Vec<i32>): usize {
+  defer v.push(0);
+  v.len()
+}

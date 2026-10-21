@@ -1,0 +1,3 @@
+// error: `v` cannot be changed here
+function grow(v: mut Vec<u32>): u32 { v.push(1); 2 }
+export function f(v: mut Vec<u32>): void { v.push(grow(mut v)); }

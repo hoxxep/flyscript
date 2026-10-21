@@ -1,0 +1,4 @@
+// error: a task cannot capture `counter`
+export function f(counter: mut u32): void uses Io {
+  try { Io.scope((s) => { s.spawn(() => { counter += 1; }); }); } catch (_) {}
+}

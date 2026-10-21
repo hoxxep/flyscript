@@ -1,0 +1,9 @@
+// error: `counts` cannot be changed here
+import { HashMap } from "std/collections";
+export function f(counts: mut HashMap<String, u64>, w: str): void {
+  const opt = counts.getMut(w);
+  match (opt) {
+    #Some(n) => { counts.insert(w.toString(), 0); n += 1; },
+    #None => {},
+  }
+}

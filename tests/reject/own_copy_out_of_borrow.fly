@@ -1,0 +1,2 @@
+// error: cannot move a `String` out of a borrow
+export function f(s: readonly String): String { s }

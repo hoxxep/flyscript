@@ -1,0 +1,2 @@
+// error: cannot change `x`: it is declared `const`
+export function f(): u32 { const x: u32 = 1; x = 2; x }

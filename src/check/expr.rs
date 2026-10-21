@@ -48,6 +48,10 @@ pub struct Checker<'p> {
     /// regions that were handling `Region` at that point, innermost first. Each goes to the
     /// innermost of them that it does not escape from (§4.6), decided when that region ends.
     pending_regions: Vec<(u32, Vec<Sym>)>,
+    /// Values read out of a borrow into an owned position: legal only for `Copy` types, which
+    /// is checked once types are final (§4.1).
+    copies_out: Vec<(Ty, Span)>,
+    pending_copy: Vec<Ty>,
 }
 
 /// Checks the body of `fid`, if it has one and has not been checked.
@@ -84,6 +88,8 @@ pub fn check_fn(p: &mut Program, fid: FnId) {
         pending_matches: Vec::new(),
         typed: Typed::default(),
         pending_regions: Vec::new(),
+        copies_out: Vec::new(),
+        pending_copy: Vec::new(),
     };
     let inferring = scheme.effects.is_none();
     c.allowed = match &scheme.effects {
@@ -104,6 +110,13 @@ pub fn check_fn(p: &mut Program, fid: FnId) {
     }
     for (scrut, arms, span) in std::mem::take(&mut c.pending_matches) {
         c.exhaustive(&scrut, &arms, span);
+    }
+    for (t, span) in std::mem::take(&mut c.copies_out) {
+        let z = c.s.zonk(&t);
+        if !c.p.is_copy(&z) && !matches!(z, Ty::Var(_) | Ty::Error) {
+            let shown = format!("{}", Show(&z, &*c.p));
+            c.p.error(module, span, format!("cannot move a `{shown}` out of a borrow; it is not `Copy`"));
+        }
     }
     for (name, ty) in &scheme.params {
         c.typed.params.push((name.clone(), ty.clone()));
@@ -280,8 +293,13 @@ impl<'p> Checker<'p> {
                 self.lends(&fi, &xi)
             }
             (Ty::Borrow(_, fi), _) => {
+                // Reading out of a borrow into an owned position copies, so it must be `Copy`.
                 let fi = fi.clone();
-                self.lends(&fi, &x)
+                let ok = self.lends(&fi, &x);
+                if ok && !matches!(x, Ty::Prim(Prim::Str) | Ty::Slice(_)) {
+                    self.pending_copy.push((*fi).clone());
+                }
+                ok
             }
             (_, Ty::Borrow(_, xi)) => {
                 let xi = xi.clone();
@@ -332,9 +350,13 @@ impl<'p> Checker<'p> {
                 }
             self.s.restore(snap);
         }
+        let before = self.pending_copy.len();
         if !self.lends(found, expected) {
             let (f, x) = (self.show(found), self.show(expected));
             self.err(span, format!("expected `{x}`, found `{f}`"));
+        }
+        for t in self.pending_copy.drain(before..).collect::<Vec<_>>() {
+            self.copies_out.push((t, span));
         }
     }
 

@@ -1,0 +1,2 @@
+// The receiver is borrowed `readonly` while the arguments are evaluated (§4.1).
+export function f(v: mut Vec<usize>): void { v.push(v.len()); }

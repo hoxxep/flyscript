@@ -1,0 +1,7 @@
+// error: `a` cannot be changed here
+export function f(): usize {
+  let a = Vec.new<i32>();
+  const s: readonly i32[] = a;
+  a.push(1);
+  s.len()
+}

@@ -1,0 +1,8 @@
+// A binding moved in a loop and assigned again before the next iteration is live (§4.1).
+function take(s: String): void {}
+export function f(n: u32): void {
+  let s = String.new();
+  let i = 0;
+  while (i < n) { take(s); s = String.new(); i += 1; }
+  take(s);
+}

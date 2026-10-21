@@ -1,0 +1,6 @@
+// error: cannot move `g.data` out of a value whose type implements `Drop`
+import { println } from "std/io";
+struct Guard { data: String; }
+impl Drop for Guard { function drop(self: mut Self): void {} }
+function take(s: String): void {}
+export function f(g: Guard): void { take(g.data); }

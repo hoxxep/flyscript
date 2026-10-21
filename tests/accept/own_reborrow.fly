@@ -1,0 +1,4 @@
+// Passing a `mut` binding reborrows it; it is usable again afterwards (§4.1).
+struct Counter { n: u32; }
+function bump(c: mut Counter): void { c.n += 1; }
+export function twice(c: mut Counter): u32 { bump(mut c); bump(mut c); c.n }

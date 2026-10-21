@@ -89,6 +89,9 @@ impl Program {
             Ty::Tuple(ts) => ts.iter().map(rec).max().unwrap_or(1),
             Ty::Record(r) | Ty::Union(r) => r.labels.values().map(rec).max().unwrap_or(1),
             Ty::Array(e, _) => rec(e),
+            // A region reference points into its region, not at a loan: it is class 1 whatever it
+            // points to (§4.6).
+            Ty::Named(d, _) if self.is_known(*d, "Ref") => 1,
             Ty::Named(d, args) => {
                 let from_args = Self::arg_types(args).map(rec).max().unwrap_or(1);
                 let from_fields = self.components(*d, args).map_or(1, |cs| cs.iter().map(rec).max().unwrap_or(1));

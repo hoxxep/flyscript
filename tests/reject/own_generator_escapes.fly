@@ -1,0 +1,6 @@
+// error: the result borrows `v`, which does not outlive this function
+import { generate, Gen } from "std/iter";
+export function f(): Gen<readonly i32, []> {
+  let v = Vec.new<i32>();
+  generate(() => v.each())
+}

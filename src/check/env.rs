@@ -62,6 +62,8 @@ pub struct Scheme {
     pub ret: Ty,
     /// `None`: not declared, to be inferred from the body (non-exported functions only).
     pub effects: Option<EffRow>,
+    /// The parameter a returned borrow is tied to (`from p`), if named.
+    pub ret_from: Option<String>,
 }
 
 #[derive(Debug)]
@@ -261,7 +263,7 @@ impl Program {
                         self.fns.push(FnInfo {
                             name: f.sig.name.name.clone(),
                             module: m,
-                            scheme: Scheme { tparams: Vec::new(), params: Vec::new(), ret: Ty::Error, effects: None },
+                            scheme: Scheme { tparams: Vec::new(), params: Vec::new(), ret: Ty::Error, effects: None, ret_from: None },
                             decl: DeclRef { module: m, item: i, method: None },
                             exported: item.exported,
                             impl_id: None,
@@ -496,7 +498,7 @@ impl Program {
             .collect();
         let ret = self.elab_ty(&sig.ret.ty, &inner);
         let effects = sig.uses.as_ref().map(|row| self.elab_effects(row, &inner));
-        Scheme { tparams: all, params, ret, effects }
+        Scheme { tparams: all, params, ret, effects, ret_from: sig.ret.from.as_ref().map(|i| i.name.clone()) }
     }
 
     // ---- elaboration of types ----

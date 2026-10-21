@@ -2,6 +2,7 @@
 
 pub mod env;
 pub mod expr;
+pub mod own;
 pub mod subst;
 pub mod traits;
 pub mod types;
@@ -35,6 +36,14 @@ pub fn check_files(paths: &[PathBuf]) -> Checked {
     for fid in 0..program.fns.len() {
         if !program.modules[program.fns[fid].module].is_std {
             expr::check_fn(&mut program, fid);
+        }
+    }
+    // Ownership needs well-typed bodies.
+    if program.diags.is_empty() {
+        for fid in 0..program.fns.len() {
+            if !program.modules[program.fns[fid].module].is_std {
+                own::check_function(&mut program, fid);
+            }
         }
     }
     let errors = program
