@@ -311,6 +311,28 @@ impl<'p> Checker<'p> {
     }
 
     fn coerce(&mut self, found: &Ty, expected: &Ty, span: Span) {
+        // A function that fits except for its effects: name the effect that does not fit.
+        if let (Ty::Fn(f), Ty::Fn(x)) = (self.normalize(&self.s.resolve(found)), self.normalize(&self.s.resolve(expected))) {
+            let snap = self.s.snapshot();
+            let shapes_fit = f.params.len() == x.params.len()
+                && f.params.iter().zip(&x.params).all(|(a, b)| self.s.unify(a, b).is_ok())
+                && self.lends(&f.ret, &x.ret);
+            if shapes_fit {
+                if let Err(e) = self.s.eff_sub(&f.effects, &x.effects) {
+                    let what = self.show_eff(&e);
+                    let allowed = self.s.zonk_effs(&x.effects);
+                    let allowed = if allowed.effs.is_empty() && allowed.tail == Tail::Closed {
+                        "no effects".to_string()
+                    } else {
+                        format!("only `{}`", Show(&allowed, &*self.p))
+                    };
+                    self.s.restore(snap);
+                    self.err(span, format!("this function performs {what}, but {allowed} may be performed here"));
+                    return;
+                }
+            }
+            self.s.restore(snap);
+        }
         if !self.lends(found, expected) {
             let (f, x) = (self.show(found), self.show(expected));
             self.err(span, format!("expected `{x}`, found `{f}`"));
@@ -334,6 +356,28 @@ impl<'p> Checker<'p> {
             })
             .collect();
         let mut effects = self.s.expand_effs(effects);
+        // A failure set that is empty, or that nothing has constrained, is no failure: `Io.scope`
+        // with no fallible tasks does not make its caller fail.
+        let fail_def = self.known("Fail");
+        let allows_fail = self.s.expand_effs(&allowed).effs.iter().any(|e| e.def == fail_def);
+        let s_ref = &mut self.s;
+        effects.effs.retain(|e| {
+            if e.def != fail_def {
+                return true;
+            }
+            match e.args.first().map(|t| s_ref.resolve(t)) {
+                Some(Ty::Var(_)) if !allows_fail => {
+                    let empty = Ty::Union(Row::closed(BTreeMap::new()));
+                    let _ = s_ref.unify(&e.args[0], &empty);
+                    false
+                }
+                Some(Ty::Union(r)) => {
+                    let r = s_ref.expand_row(&r);
+                    !(r.labels.is_empty() && r.tail == Tail::Closed)
+                }
+                _ => true,
+            }
+        });
         if !handled.is_empty() {
             let pending = &mut self.pending_regions;
             let s = &self.s;

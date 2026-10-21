@@ -1,0 +1,11 @@
+// error: this function performs `Region<
+export function race(): void uses Io {
+  region (R) {
+    try {
+      Io.scope((s) => {
+        const f = s.fork(() => { const x = alloc(1); 0 });
+        f.join();
+      });
+    } catch (_) {}
+  }
+}

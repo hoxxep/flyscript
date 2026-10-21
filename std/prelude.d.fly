@@ -54,14 +54,15 @@ export interface Iterable<T, row E = []> {
 }
 
 // ---- Structured concurrency (§6.1): library code over Io.start and Io.park ----
-export struct Scope<row E>;
+// A task runs on a new fiber, where only `Io` and its scope's capture of failures are handled.
+export struct Scope<X>;
 export struct Fiber<T>;
 impl Io {
-  export function scope<T, row E>(body: once (s: mut Scope<E>) => T uses Io, ...E): T uses Io, ...E;
+  export function scope<T, X, row E>(body: once (s: mut Scope<X>) => T uses Io, ...E): T uses Io, Fail<X>, ...E;
 }
-impl<row E> Scope<E> {
+impl<X> Scope<X> {
   export function spawn(self: mut Self, task: once () => void uses Io): void;
-  export function fork<T extends Send>(self: mut Self, task: once () => T uses Io, ...E): Fiber<T>;
+  export function fork<T extends Send>(self: mut Self, task: once () => T uses Io, Fail<X>): Fiber<T>;
 }
 impl<T> Fiber<T> {
   export function join(self: Self): T uses Io;

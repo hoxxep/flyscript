@@ -1,6 +1,6 @@
 # Flyscript
 
-**Language specification, version 1.7**
+**Language specification, version 1.8**
 
 *Affine values, one row calculus, handlers for everything, and `comptime`: Church on the outside, Turing on the inside.*
 
@@ -18,12 +18,21 @@ The whole language rests on five laws. Every rule in this document is a conseque
 4. **Handlers for everything.** Errors, I/O, iteration and region memory are ordinary effects with ordinary handlers. A handler may hold the rest of a computation as a one-shot continuation value; generators and tasks are both built from that one primitive.
 5. **`comptime` is the metalanguage.** Generics, reflection, layout transformation and derived interfaces are ordinary Flyscript code run by the compiler.
 
-### 0.1 Changes from 1.6
+### 0.1 Changes from 1.7
 
-1.7 settles the rules a type checker needs, found by writing the parser and by an independent review (docs/reviews/2026-10-21-m2-checker-design.md). The most important fix is in concurrency: 1.6 claimed that a task's isolation was proved by its type, but its signatures did not enforce it.
+1.8 completes the ownership rules, prompted by an independent review of the ownership checker's design (docs/reviews/2026-10-21-m3-ownership-checker-design.md). The review showed that 1.7 let a generator or a continuation hide a borrow inside a type that looked borrow-free, and let a task perform effects whose handlers live in another fiber.
 
 | Change | Why |
 | :--- | :--- |
+| A call's result carries the borrows of its arguments unless its type cannot hold one (§4.2) | `generate(() => v.each())` has type `Gen<i32, []>`, which mentions no borrow, yet holds one of `v` |
+| A value's class follows the borrows it holds, not only its type (§4.2) | the same: a `Gen` or `Cont` holding a borrow must not be returned or stored |
+| Passing a `mut` binding reborrows it; `mut T` is not `Copy` (§4.1) | otherwise `value(mut sc); sc.eat(b',')` either moves `sc` or aliases it |
+| Borrows are tracked per value through patterns and assignments, with liveness over loops (§4.1) | a pattern variable can outlive the last mention of the value it came from |
+| A forked task performs only `Io` and failures its scope rethrows (§6.1) | a task with no captures could otherwise perform `Region<R>` of its parent's region, or a user effect whose handler is in another fiber |
+| `defer` holds its borrows to the end of its block; no partial moves out of a `Drop` type (§5.6) | `defer v.clear(); return v[0..1]` returned a dangling slice |
+| Region data is checked at `alloc` (§4.6) | the rule existed but had no checking point |
+
+--- | :--- |
 | `s.spawn(task)` takes only tasks that cannot fail and returns nothing; `s.fork(task)` returns a `Fiber` for work that can (§6.1) | 1.6 gave the scope body and every task one shared failure row, so a server could leak a task failure into its scope without a type error |
 | Effect rows are sets: region arguments are part of an effect's label, other arguments are determined by it, and repeated labels merge (§3.2) | `Region<R1>` and `Region<R2>` must coexist in one row; two `Fail`s must unify into one |
 | Handling `Fail` closes its row (§5.4) | otherwise a `catch` could never be matched exhaustively |
@@ -240,7 +249,7 @@ Type checking happens after `comptime` evaluation and uses bidirectional local i
 
 ### 4.1 Values, moves and borrows
 
-A value has one owner. Assignment and argument passing *move* a value unless its type is `Copy`; a moved-from binding is dead. At the end of its scope a live owner is dropped.
+A value has one owner. Assignment and argument passing *move* a value unless its type is `Copy`; a moved-from binding is dead until it is assigned again. Moves are tracked through branches and loops: a binding moved on any path is moved where the paths meet, and a binding used at the top of a loop must still be live at the end of the loop body. At the end of its scope a live owner is dropped. Moving a field out of a value moves only that field, unless the value's type implements `Drop`, from which no field may be moved.
 
 A **borrow** lends a value without moving it:
 
@@ -249,7 +258,11 @@ A **borrow** lends a value without moving it:
 
 Borrows are **transparent**: a borrow binding reads and writes as the value it refers to, and cannot be re-pointed. There is no dereference operator.
 
-A borrow lasts until its last use, not to the end of its scope. In the example below, the `#None` arm holds no borrow of `counts`, so it may insert.
+`readonly T` is `Copy`; `mut T` is not. Passing a binding of type `mut T` where a `mut` borrow is expected **reborrows** it: the binding is locked until the new borrow ends, and usable again afterwards, so `value(mut sc); sc.eat(b',')` is legal.
+
+A borrow lasts until the last use of any value that holds it, not to the end of its scope. Every value carries the set of borrows it holds: a borrow taken for an argument is held by the call's result if the result can hold it (§4.2); a value bound by a pattern or assigned to a binding passes its borrows on; a binding assigned on several paths holds the union. In the example below, the `#None` arm holds no borrow of `counts`, so it may insert, while in the `#Some` arm `n` holds `counts` mutably until its last use.
+
+A method call borrows its receiver in two phases: the receiver is borrowed `readonly` while the arguments are evaluated and `mut` only for the call itself, so `v.push(v.len())` is legal and `v.push({ v.clear(); 1 })` is not.
 
 **Lending.** Wherever a borrow of `U` is expected, an owner that *lends* `U` may be passed: `String` lends `str`, `Vec<T>` lends `T[]`, `Box<T>` lends `T`, and `Ref<R, T>` lends `readonly T`. Lending is the only implicit conversion. Lookups in `HashMap<K, V>` accept any `Q` that `K` lends, so a `HashMap<String, V>` is searched with a `str` without allocating.
 
@@ -267,13 +280,19 @@ Every type has a *class*, 1 or 2.
 - `readonly T`, `mut T`, `str` and `T[]` are class 2.
 - Every other type takes the maximum class of its components: fields, payloads and type arguments, structural or nominal alike. `Option<mut u64>` is class 2; so is `struct Scanner { src: readonly u8[]; pos: usize; }`.
 
+Some types can hold a borrow without showing it: closures, continuations (`Cont`, §5.3), anything built from them (`Gen`), and type parameters. A value of such a type is class 2 when it actually holds a borrow, so a closure capturing a `readonly` slice, or a generator iterating one, is class 2 although its type's arguments are all class 1.
+
 A class-2 value may be a parameter, a local, or a return value tied to a parameter. It may not be stored in a class-1 value, captured by an escaping closure, sent to another task, or returned untied. That is the only restriction, and it is what replaces lifetime parameters.
 
-**Tied returns.** A function that returns a class-2 value and takes exactly one class-2 parameter returns a view of that parameter. With several, the return names its source:
+**Results carry their arguments' borrows.** The result of a call holds every borrow its arguments hold — including borrows captured by closure arguments — unless the result's type cannot hold a borrow at all (it is class 1 and contains no closure, continuation or type parameter). So `v.len()` holds nothing, while `generate(() => v.each())` holds the borrow of `v` for as long as the generator lives.
+
+**Tied returns.** A function that returns a class-2 value and takes exactly one class-2 parameter returns a view of that parameter. With several, the return names its source, and the result then carries only that argument's borrows:
 
 ```ts
 function longer(a: str, b: str, preferA: bool): str from a { … }
 ```
+
+The body is checked against the declaration: everything the returned value borrows must come from the named parameter, never from a local.
 
 ### 4.3 Closures
 
@@ -285,7 +304,7 @@ The compiler infers each closure's mode from what it captures:
 | `mut (A) => B` | at least one `mut` borrow | many times, one caller at a time |
 | `once (A) => B` | at least one moved value | at most once |
 
-A closure that captures any class-2 value is itself class 2: it can be passed down but not returned or stored. An escaping closure captures only by move.
+A closure that captures any class-2 value is itself class 2: it can be passed down but not returned or stored. An escaping closure captures only by move. A closure that calls a captured `mut` closure is itself `mut`, and one that calls a captured `once` closure is itself `once`. A closure holds the borrows of its captures for as long as it lives.
 
 ### 4.4 Marker interfaces
 
@@ -336,7 +355,7 @@ impl<region R, T> Iterable<readonly T> for RegionList<R, T> { … }
 Two rules make this sound:
 
 1. **No escape.** `R` may not occur in the type of the region expression, in any variable assigned from outside the block, or in an unhandled effect.
-2. **No owned resources.** Region data contains only `Copy` values, `Ref`s, `Cell`s and `RegionList`s of the same region. Nothing in a region needs a destructor, so releasing the arena is constant-time.
+2. **No owned resources.** Region data contains only `Copy` values, `Ref`s, `Cell`s and `RegionList`s of the same region; this is checked wherever a value is placed in a region (`alloc`, `RegionList.push`). Nothing in a region needs a destructor, so releasing the arena is constant-time.
 
 Because nothing in a region moves or is freed before the region ends, and the only mutation is copy-in to a `Cell` or append to a list, no borrow into region data can be invalidated. Because handlers are fiber-local, no other task can perform `Region<R>`; a `Ref<R, T>` whose referent contains no `Cell` or `RegionList` is deeply immutable and may be shared with child tasks.
 
@@ -400,7 +419,7 @@ A `Cont<A, B, E>` is an affine value. It may be stored, moved and returned like 
 - `k.resume(a)` consumes `k` and runs the suspended computation until it next performs the handled effect (when the arm runs again) or finishes. Its value is the `handle` expression's value from that point.
 - Dropping `k` unwinds the suspended computation in place: its `defer`s and destructors run in reverse order, in-flight I/O is cancelled and drained (§6.3), and its stack segment is released.
 - Handlers are **deep**: the handler stays installed beneath the suspended computation. Operations of other effects performed while `k` runs go to the handlers around the `resume` call, which is why `E` appears in `resume`'s type.
-- A `Cont` is class 2 when the suspended computation holds a class-2 value, so a continuation can never outlive a borrow it holds.
+- A `Cont` holds every borrow its suspended computation holds: in a resumptive arm, `k` holds the borrows the body had taken when it performed the operation. A `Cont` holding a borrow is class 2 (§4.2), so a continuation can never outlive a borrow it holds, and the borrowed places stay locked while it lives.
 - Continuations are one-shot. Resuming twice would duplicate owned values and live `mut` borrows.
 
 ### 5.4 Errors: `throw`, `try`, `catch`
@@ -467,6 +486,8 @@ A `Gen` owns its continuation, so dropping it runs the generator's cleanup; if t
 
 `defer e;` schedules `e` to run when the enclosing block exits. `defer`s and the destructors of the block's owned locals share one stack and run in reverse order of the points at which they were registered, whether the block exits normally, by `return`, `break`, `throw`, an abortive handler, a dropped continuation, or cancellation.
 
+Because a `defer` runs at the block's exit, it holds the borrows it needs from the point it is registered to the end of the block, including past a `return`: after `defer v.clear();`, `v` cannot be lent `readonly` or moved, so `return v[0..1]` is rejected. A `defer` may not move a binding declared outside its block. A destructor reads its whole value, which is why no field may be moved out of a type that implements `Drop` (§4.1).
+
 ### 5.7 Panics
 
 Integer division by zero, overflow in checked builds (`wrappingAdd` and friends are explicit), an out-of-bounds index and heap exhaustion *panic*. A panic is not an effect and cannot be caught by a handler: it unwinds the current task, running cleanup, and fails the task's scope (§6.1); an unscoped panic terminates the process. Panics are for bugs; anticipated failure is `Fail`.
@@ -480,12 +501,12 @@ Integer division by zero, overflow in checked builds (`wrappingAdd` and friends 
 Concurrency is structured. `Io.scope((s) => body)` opens a scope, and a scope starts tasks in two ways:
 
 ```ts
-function scope<T, row E>(body: once (s: mut Scope<E>) => T uses Io, ...E): T uses Io, ...E;
-interface Scope<row E> {
+function scope<T, X, row E>(body: once (s: mut Scope<X>) => T uses Io, ...E): T uses Io, Fail<X>, ...E;
+interface Scope<X> {
   // Fire and forget: the task cannot fail, so it cannot cancel the scope.
   function spawn(self: mut Self, task: once () => void uses Io): void;
-  // Work whose result or failure the scope waits for.
-  function fork<T extends Send>(self: mut Self, task: once () => T uses Io, ...E): Fiber<T>;
+  // Work whose result or failure the scope waits for; its failures `X` are rethrown by the scope.
+  function fork<T extends Send>(self: mut Self, task: once () => T uses Io, Fail<X>): Fiber<T>;
 }
 interface Fiber<T> {
   function join(self: Self): T uses Io;
@@ -496,8 +517,9 @@ The rules:
 
 1. **A scope owns its tasks.** `Io.scope` returns only when every task started in it has finished. A `Fiber` is a handle to a forked task's result, not to the task: dropping it leaves the task running.
 2. **Isolation is a type.** `spawn` accepts only a task whose effects are `Io`, which cannot fail. A server that must survive a bad connection spawns its connections, and the type checker proves they cannot take the scope down: a connection handler that let an error escape would not be accepted by `spawn`.
-3. **Failure cancels the scope.** A forked task's failures share the scope's row `E`. If a forked task fails, or any task panics, the scope is cancelled: the body and every other task stop at their next `Io` operation and unwind, and once all have finished the first failure is rethrown from `Io.scope` (or the panic continues). `join` therefore never fails by itself: it returns the result, or the joiner is cancelled along with the rest of the scope.
-4. **Captures.** A task is a `once` closure. It may move in owned `Send` values and capture `readonly` borrows of `Send` values from outside the scope; the scope outlives every task, so the borrows are safe. A task's row never contains `Region<R>` for a region opened outside it, because region handlers belong to the fiber that opened them.
+3. **Failure cancels the scope.** A forked task's failures `X` are rethrown by `Io.scope`. If a forked task fails, or any task panics, the scope is cancelled: the body and every other task stop at their next `Io` operation and unwind, and once all have finished the first failure is rethrown from `Io.scope` (or the panic continues). `join` therefore never fails by itself: it returns the result, or the joiner is cancelled along with the rest of the scope.
+4. **A task performs only what its fiber can handle.** A task runs on a new fiber, where the only handlers are the runtime's `Io` and the scope's capture of failures, so its effects are `Io` and `Fail` and nothing else. It cannot allocate in its parent's region or perform an effect whose handler lives in the parent fiber; the body of the scope, which runs on the parent's fiber, still can.
+5. **Captures.** A task is a `once` closure. It may move in owned `Send` values and capture `readonly` borrows of `Send` values from outside the scope; the scope outlives every task, so the borrows are safe.
 
 `scope`, `spawn`, `fork` and `join` are library code over `Io.start` and `Io.park`; nursery semantics are not built into the language.
 
@@ -630,7 +652,7 @@ The rules that carry the design:
   > ─────────────────────────────────────────
   > Δ | Θ | Γ ⊢ region(ρ) { e } : τ / ε ⊣ Θ′
 - **Handle.** An abortive arm is checked under the Γ of the `handle` expression, the body's borrows having been released. In a resumptive arm, the body's borrows move into `k`, whose type records them; they are released when `k` is resumed to completion or dropped.
-- **Scope.** A task's captures must be class 1 and `Send`, or `ro` borrows of `Send` values whose paths are not under `mut` in Γ. A spawned task's row is exactly `Io`; a forked task's row is `Io` and the scope's row, less every `Region` label.
+- **Scope.** A task's captures must be class 1 and `Send`, or `ro` borrows of `Send` values whose paths are not under `mut` in Γ. A spawned task's row is exactly `Io`; a forked task's row is `Io` and `Fail<X>`, where `X` is rethrown by its scope.
 - **Effect rows.** Rows are label-sorted maps with an optional tail. For records a label occurs once and extension requires the tail to lack it; for tag unions labels merge and their payloads unify; for effects a label is an effect name with its region arguments, its other arguments are functions of the label, and extension by a present label is the identity. Handling `Fail` sets the open tail of its payload to the empty row.
 ---
 

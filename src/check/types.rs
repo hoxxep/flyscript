@@ -312,9 +312,12 @@ impl fmt::Display for Show<'_, Ty> {
 }
 
 fn show_tail(f: &mut fmt::Formatter<'_>, tail: &Tail, prefix: &str) -> fmt::Result {
+    // Row and effect variables print as `?r3` and `?e3`, distinct from type variables `?3`.
+    let kind = if prefix.ends_with('e') { "e" } else { "r" };
+    let prefix = prefix.trim_end_matches('e');
     match tail {
         Tail::Closed => Ok(()),
-        Tail::Var(v) => write!(f, "{prefix}?{v}"),
+        Tail::Var(v) => write!(f, "{prefix}?{kind}{v}"),
         Tail::Param(s) => write!(f, "{prefix}{}", s.name),
     }
 }
@@ -366,7 +369,7 @@ impl fmt::Display for Show<'_, EffRow> {
             if !self.0.effs.is_empty() {
                 write!(f, ", ")?;
             }
-            show_tail(f, &self.0.tail, "...")?;
+            show_tail(f, &self.0.tail, "...e")?;
         }
         Ok(())
     }

@@ -1,0 +1,8 @@
+// A scope whose tasks cannot fail does not make its caller fail (§6.1).
+import { Listener, Socket } from "std/net";
+function serveOne(conn: Socket): void uses Io { let c = conn; try { c.writeStatus(200, "ok"); } catch (_) {} }
+export function serve(l: mut Listener): void uses Io {
+  try {
+    Io.scope((s) => { for (const conn of l.accept()) { s.spawn(() => serveOne(conn)); } });
+  } catch (_) {}
+}

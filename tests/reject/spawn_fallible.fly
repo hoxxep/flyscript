@@ -1,4 +1,4 @@
-// error: expected `once () => void uses Io`
+// error: this function performs `Fail<
 import { Listener, Socket } from "std/net";
 function leaky(conn: Socket): void uses Io, Fail<IoErr> { let c = conn; c.writeStatus(200, "ok"); }
 export function serve(l: mut Listener): void uses Io, Fail<IoErr> {

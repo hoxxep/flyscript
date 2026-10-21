@@ -1,0 +1,9 @@
+// error: this function performs `Ask`, but only `Io, Fail<
+effect Ask { ask(): u32; }
+export function f(): u32 uses Io {
+  handle {
+    try {
+      Io.scope((s) => { const t = s.fork(() => Ask.ask()); t.join() })
+    } catch (_) { 0 }
+  } with Ask { ask() resumes k => { k(1) } }
+}
