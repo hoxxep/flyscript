@@ -1,8 +1,0 @@
-// A type function (§7.1): `comptime` code computes a record type and checks its arguments.
-comptime function Ring(T: Type, N: usize): Type {
-  comptime assert(N > 0 && (N & (N - 1)) == 0, "capacity must be a power of two");
-  struct { buf: T[N]; head: usize; tail: usize; }
-}
-type ByteRing = Ring(u8, 4);
-export function fresh(): ByteRing { { buf: [0, 0, 0, 0], head: 0, tail: 0 } }
-export function head(r: readonly ByteRing): usize { r.head + r.buf.len() }

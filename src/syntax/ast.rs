@@ -74,6 +74,9 @@ pub enum Generate<T> {
     If { cond: Expr, then: Vec<T>, otherwise: Vec<T> },
     /// `comptime match (e) { pat => { … }, … }`: the items of the first arm that matches.
     Match { scrutinee: Expr, arms: Vec<(Pattern, Vec<T>)> },
+    /// `comptime e;` among a struct's fields: run for its checks (`comptime assert(…)`),
+    /// generating nothing.
+    Do(Expr),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -207,8 +210,6 @@ pub enum FnMode {
 pub enum TypeKind {
     /// A primitive, a named type, a type parameter or an associated type (`C.View`).
     Path { segments: Vec<Ident>, args: Vec<Type> },
-    /// A `comptime` type function application: `Ring(u8, 1024)`.
-    Call { path: Vec<Ident>, args: Vec<Expr> },
     Record { fields: Vec<Field>, rest: Option<Ident> },
     Union { tags: Vec<TagDecl>, rest: Option<Ident> },
     Tuple(Vec<Type>),
@@ -295,8 +296,6 @@ pub enum ExprKind {
     Record { name: Option<Vec<Ident>>, fields: Vec<FieldInit> },
     /// `[a, b]`: a tuple or array literal, resolved by type.
     List(Vec<Expr>),
-    /// An anonymous struct type built by `comptime` code: `struct { … }`.
-    StructType(Vec<Field>),
     Field { target: Box<Expr>, name: Ident },
     /// `v.[e]`: the field named by the `comptime` string `e` (§7.2).
     FieldAt { target: Box<Expr>, name: Box<Expr> },

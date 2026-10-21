@@ -103,6 +103,8 @@ pub struct Def {
     pub view: bool,
     /// An enum's tags in declaration order, which derivations follow (`Ord`, §3.5).
     pub tag_order: Vec<String>,
+    /// A template struct's fields as written, computed per instance (§7.1).
+    pub template_fields: Option<Vec<ast::Field>>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -165,6 +167,8 @@ pub struct Program {
     pub next_synth: usize,
     /// Specializations of templates, by template and `comptime` arguments.
     pub specs: HashMap<(FnId, String), FnId>,
+    /// Template structs' fields, by struct and arguments.
+    pub instances: HashMap<(DefId, String), Vec<(String, Ty)>>,
     /// For a specialization: its template, and how diagnostics name it ("in `describe` for
     /// `Point`").
     pub spec_of: HashMap<FnId, FnId>,
@@ -250,6 +254,7 @@ impl Program {
             specs: HashMap::new(),
             spec_of: HashMap::new(),
             spec_notes: HashMap::new(),
+            instances: HashMap::new(),
             spec_requested: HashMap::new(),
             note: None,
         };
@@ -313,6 +318,59 @@ impl Program {
             return span;
         }
         self.synth.get(&span.start).copied().unwrap_or_default()
+    }
+
+    /// A struct's fields with its arguments substituted: for a template, those of the instance,
+    /// once it has been computed (`ensure_instance`).
+    /// A template struct's instance whose `comptime` code failed, already reported.
+    pub fn failed_instance(&self, d: DefId, args: &[GArg]) -> bool {
+        self.defs[d].template_fields.is_some() && args.iter().all(concrete_arg) && !self.instances.contains_key(&(d, format!("{args:?}")))
+    }
+
+    pub fn struct_fields(&self, d: DefId, args: &[GArg]) -> Option<Vec<(String, Ty)>> {
+        let def = &self.defs[d];
+        if def.template_fields.is_some() {
+            return self.instances.get(&(d, format!("{args:?}"))).cloned();
+        }
+        match &def.kind {
+            DefKind::Struct { fields: Some(fs) } => Some(fs.iter().map(|(k, t)| (k.clone(), subst_params(t, &def.params, args))).collect()),
+            _ => None,
+        }
+    }
+
+    /// Computes a template struct's fields for these arguments, if they are known (§7.1).
+    pub fn ensure_instance(&mut self, d: DefId, args: &[GArg]) {
+        let Some(fields) = self.defs[d].template_fields.clone() else { return };
+        let key = (d, format!("{args:?}"));
+        if self.instances.contains_key(&key) || args.iter().any(|a| !concrete_arg(a)) {
+            return;
+        }
+        // Registered first, so a field of the same instance's type does not recurse forever.
+        self.instances.insert(key.clone(), Vec::new());
+        let params = self.defs[d].params.clone();
+        let module = self.defs[d].module;
+        let mut env = Vec::new();
+        for (g, a) in params.iter().zip(args) {
+            match (g.comptime, a) {
+                (true, GArg::Ty(t)) => env.push((g.sym.name.clone(), super::comptime::CV::Type(t.clone()))),
+                (_, GArg::Len(Len::Known(n))) => env.push((g.sym.name.clone(), super::comptime::CV::Int(*n as i128))),
+                _ => {}
+            }
+        }
+        let Some(expanded) = super::comptime::Expand::new(self, module, None, env).struct_fields(&fields) else {
+            // Its `comptime` code failed and said why; the instance has no fields to report on.
+            self.instances.remove(&key);
+            return;
+        };
+        let scope = TyScope { module, ..Default::default() }.with_params(&params);
+        let fs: Vec<(String, Ty)> = expanded
+            .iter()
+            .map(|f| {
+                let t = self.elab_ty(&f.ty, &scope);
+                (f.name.name.clone(), subst_params(&t, &params, args))
+            })
+            .collect();
+        self.instances.insert(key, fs);
     }
 
     /// A function's declaration: its expanded body if it has one.
@@ -481,6 +539,7 @@ impl Program {
             private: Vec::new(),
             view: false,
             tag_order: Vec::new(),
+            template_fields: None,
         });
         self.defs.len() - 1
     }
@@ -555,6 +614,14 @@ impl Program {
                 self.defs[id].view = s.view;
                 self.defs[id].private =
                     s.fields.iter().flatten().filter(|f| f.private).map(|f| f.name.name.clone()).collect();
+                // A struct with a type parameter that is `comptime`, or `comptime` code among its
+                // fields, is a template: its fields are computed for each instance.
+                let generated = s.fields.iter().flatten().any(|f| f.generate.is_some() || f.computed.is_some());
+                if generated || gparams.iter().any(|g| g.comptime) {
+                    self.defs[id].template_fields = s.fields.clone();
+                    self.defs[id].kind = DefKind::Struct { fields: Some(Vec::new()) };
+                    return;
+                }
             }
             ItemKind::Enum(e) => {
                 self.defs[id].view = e.view;
@@ -791,7 +858,10 @@ impl Program {
                                 let params = self.defs[d].params.clone();
                                 subst_params(&ty, &params, &gargs)
                             }
-                            DefKind::Struct { .. } | DefKind::Enum { .. } => Ty::Named(d, gargs),
+                            DefKind::Struct { .. } | DefKind::Enum { .. } => {
+                                self.ensure_instance(d, &gargs);
+                                Ty::Named(d, gargs)
+                            }
                             DefKind::Interface { .. } | DefKind::Effect { .. } => {
                                 // Effects and interfaces are namespaces in expressions, not types.
                                 Ty::Named(d, gargs)
@@ -811,12 +881,6 @@ impl Program {
                         Ty::Error
                     }
                 }
-            }
-            // `Ring(u8, 1024)`: a `comptime function` that returns a type (§7.1).
-            TypeKind::Call { path, args } => {
-                let callee = ast::Expr { kind: ast::ExprKind::Ident(path[0].name.clone()), span: path[0].span };
-                let call = ast::Expr { kind: ast::ExprKind::Call { callee: Box::new(callee), type_args: Vec::new(), args: args.clone() }, span: t.span };
-                super::comptime::Expand::new(self, m, None, Vec::new()).type_of(&call).unwrap_or(Ty::Error)
             }
             TypeKind::Record { fields, rest } => {
                 let labels = fields.iter().map(|f| (f.name.name.clone(), self.elab_ty(&f.ty, scope))).collect();
@@ -1119,4 +1183,13 @@ pub fn subst_effs(r: &EffRow, map: &SubstMap<'_>) -> EffRow {
             tail = row.tail.clone();
         }
     EffRow { effs, tail }
+}
+
+/// Whether a generic argument is known: no parameter or inference variable in it.
+fn concrete_arg(a: &GArg) -> bool {
+    match a {
+        GArg::Ty(t) => !super::impls::contains_params(t),
+        GArg::Len(l) => matches!(l, Len::Known(_)),
+        _ => true,
+    }
 }

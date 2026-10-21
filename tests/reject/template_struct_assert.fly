@@ -1,0 +1,10 @@
+// error: capacity must be a power of two
+struct Ring<T, comptime N: usize> {
+  comptime assert(N > 0 && (N & (N - 1)) == 0, "capacity must be a power of two");
+  buf: T[N];
+  head: usize;
+  tail: usize;
+}
+type ByteRing = Ring<u8, 3>;
+export function fresh(): ByteRing { { buf: [0, 0, 0], head: 0, tail: 0 } }
+export function head(r: readonly ByteRing): usize { r.head + r.buf.len() }

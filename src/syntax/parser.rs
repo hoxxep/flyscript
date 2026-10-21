@@ -342,6 +342,16 @@ impl<'a> Parser<'a> {
     fn field_items(&mut self) -> PResult<Vec<Field>> {
         let mut fields = Vec::new();
         while !self.at("}") && !self.at("...") {
+            if self.at_kw(Kw::Comptime) && !matches!(self.tok_at(1), Tok::Kw(Kw::For | Kw::If | Kw::Match)) {
+                let start = self.span();
+                self.bump();
+                let e = self.expr()?;
+                self.expect(";")?;
+                let mut f = Field::new(Ident { name: String::new(), span: self.since(start) }, Type { kind: TypeKind::EmptyRow, span: start }, false);
+                f.generate = Some(Box::new(Generate::Do(e)));
+                fields.push(f);
+                continue;
+            }
             if self.at_kw(Kw::Comptime) {
                 let start = self.span();
                 let g = self.generate(Self::field_items)?;
@@ -803,20 +813,7 @@ impl<'a> Parser<'a> {
             }
             Tok::Ident(_) => {
                 let segments = self.path()?;
-                if self.at("(") {
-                    self.bump();
-                    let mut args = Vec::new();
-                    while !self.at(")") {
-                        args.push(self.expr()?);
-                        if !self.eat(",") {
-                            break;
-                        }
-                    }
-                    self.expect(")")?;
-                    TypeKind::Call { path: segments, args }
-                } else {
-                    TypeKind::Path { segments, args: self.type_args()? }
-                }
+                TypeKind::Path { segments, args: self.type_args()? }
             }
             Tok::Int(_) => TypeKind::Expr(Box::new(self.primary()?)),
             _ => return self.error("a type"),
@@ -1184,10 +1181,6 @@ impl<'a> Parser<'a> {
                 ExprKind::List(items)
             }
             Tok::Punct("{") => ExprKind::Record { name: None, fields: self.field_inits()? },
-            Tok::Kw(Kw::Struct) => {
-                self.bump();
-                ExprKind::StructType(self.field_list()?)
-            }
             Tok::Kw(Kw::If) => self.if_expr()?,
             Tok::Kw(Kw::While) => {
                 self.bump();

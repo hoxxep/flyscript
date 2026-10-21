@@ -159,15 +159,11 @@ impl<'p> Expand<'p> {
         }
     }
 
-    /// Evaluates a `comptime` expression that must give a type (a type function's
-    /// application); reports an error and returns `None` otherwise.
-    pub fn type_of(&mut self, e: &Expr) -> Option<Ty> {
-        let r = self.eval(e).and_then(|v| match v {
-            CV::Type(t) => Ok(t),
-            v => fail(e.span, format!("expected a type, found {}", v.kind())),
-        });
-        match r {
-            Ok(t) => Some(t),
+    /// A template struct's fields for one instance (§7.1); reports an error and returns `None`
+    /// if its `comptime` code fails.
+    pub fn struct_fields(&mut self, fields: &[Field]) -> Option<Vec<Field>> {
+        match self.fields(fields) {
+            Ok(f) => Some(f),
             Err(Stop::Error(span, msg)) => {
                 let m = self.module;
                 self.p.error(m, span, msg);
@@ -241,7 +237,6 @@ impl<'p> Expand<'p> {
                 ExprKind::Record { name, fields: self.inits(fields)? }
             }
             ExprKind::List(items) => ExprKind::List(self.list(items)?),
-            ExprKind::StructType(fields) => ExprKind::StructType(self.fields(fields)?),
             ExprKind::Field { target, name } if self.is_ct(target) => {
                 let v = self.eval(target)?;
                 if let CV::Type(t) = v {
@@ -519,6 +514,9 @@ impl<'p> Expand<'p> {
                     let chosen = if self.eval_bool(cond)? { then } else { otherwise };
                     out.extend(self.seq(chosen, generated, one)?);
                 }
+                Some(Generate::Do(e)) => {
+                    self.eval(e)?;
+                }
                 Some(Generate::Match { scrutinee, arms }) => {
                     let v = self.eval(scrutinee)?;
                     let mut matched = false;
@@ -618,7 +616,6 @@ impl<'p> Expand<'p> {
                 segments: segments.iter().map(|i| self.ident(i)).collect(),
                 args: args.iter().map(|a| self.ty(a)).collect::<R<_>>()?,
             },
-            TypeKind::Call { path, args } => TypeKind::Call { path: path.iter().map(|i| self.ident(i)).collect(), args: self.exprs(args)? },
             TypeKind::Record { fields, rest } => TypeKind::Record { fields: self.fields(fields)?, rest: rest.as_ref().map(|r| self.ident(r)) },
             TypeKind::Union { tags, rest } => TypeKind::Union {
                 tags: tags
@@ -857,13 +854,6 @@ impl<'p> Expand<'p> {
             }
             ExprKind::Comptime(x) => self.eval(x)?,
             ExprKind::TypeRef(i) => CV::Type(self.p.spliced[*i].clone()),
-            // An anonymous struct built by `comptime` code is a record type (§7.1).
-            ExprKind::StructType(fields) => {
-                let fields = self.fields(fields)?;
-                let scope = TyScope { module: self.module, ..Default::default() };
-                let labels = fields.iter().map(|f| (f.name.name.clone(), self.p.elab_ty(&f.ty, &scope))).collect();
-                CV::Type(Ty::Record(Row::closed(labels)))
-            }
             _ => return fail(e.span, "this cannot be computed at compile time"),
         })
     }
@@ -1096,8 +1086,11 @@ impl<'p> Expand<'p> {
                 let targs: Vec<CV> = args.iter().filter_map(|a| if let GArg::Ty(t) = a { Some(CV::Type(t.clone())) } else { None }).collect();
                 let opaque = || tag("Opaque", rec(vec![("name", name.clone()), ("args", CV::List(targs.clone()))]));
                 match &def.kind {
-                    DefKind::Struct { fields: Some(fs) } if def.private.is_empty() || self.privileged(*d) => {
-                        let fs: Vec<(String, Ty)> = fs.iter().map(|(k, t)| (k.clone(), super::env::subst_params(t, &def.params, args))).collect();
+                    DefKind::Struct { fields: Some(_) } if def.private.is_empty() || self.privileged(*d) => {
+                        let (d, args) = (*d, args.clone());
+                        self.p.ensure_instance(d, &args);
+                        let name = CV::Str(self.p.defs[d].name.clone());
+                        let fs = self.p.struct_fields(d, &args).unwrap_or_default();
                         tag("Struct", rec(vec![("name", name.clone()), ("fields", CV::List(fs.iter().map(|(k, t)| field((k, t))).collect()))]))
                     }
                     DefKind::Enum { tags } => {
@@ -1240,7 +1233,6 @@ pub fn block_has_comptime(b: &Block) -> bool {
 fn ty_has(t: &Type) -> bool {
     match &t.kind {
         TypeKind::Record { fields, .. } => fields.iter().any(|f| f.generate.is_some() || f.computed.is_some() || ty_has(&f.ty)),
-        TypeKind::Call { .. } => false,
         TypeKind::Path { args, .. } => args.iter().any(ty_has),
         TypeKind::Tuple(ts) => ts.iter().any(ty_has),
         TypeKind::Mut(x) | TypeKind::Readonly(x) | TypeKind::Ptr(x) => ty_has(x),

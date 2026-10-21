@@ -751,10 +751,6 @@ impl<'p> Checker<'p> {
             ExprKind::Tag { name, args } => self.tag(name, args, expected, span),
             ExprKind::Record { name, fields } => self.record(name.as_deref(), fields, expected, span),
             ExprKind::List(items) => self.list(items, expected),
-            ExprKind::StructType(_) => {
-                self.err(span, "`comptime` type construction is not supported yet");
-                Ty::Error
-            }
             ExprKind::Field { target, name } => {
                 let t = self.expr(target, None);
                 self.field(&t, &name.name, name.span)
@@ -982,13 +978,17 @@ impl<'p> Checker<'p> {
             None => expected.map(|x| self.strip(x)).filter(|t| matches!(t, Ty::Named(..) | Ty::Record(_))),
         };
         let wanted: Option<BTreeMap<String, Ty>> = match &target {
-            Some(Ty::Named(d, args)) => match &self.p.defs[*d].kind {
-                DefKind::Struct { fields: Some(fs) } => {
-                    let params = self.p.defs[*d].params.clone();
-                    Some(fs.iter().map(|(k, t)| (k.clone(), subst_params(t, &params, args))).collect())
+            Some(Ty::Named(d, args)) => {
+                let args = args.iter().map(|a| self.s.zonk_arg(a)).collect::<Vec<_>>();
+                self.p.ensure_instance(*d, &args);
+                if self.p.failed_instance(*d, &args) {
+                    for f in fields.iter().filter_map(|f| f.value.as_ref()) {
+                        self.expr(f, None);
+                    }
+                    return Ty::Error;
                 }
-                _ => None,
-            },
+                self.p.struct_fields(*d, &args).map(|fs| fs.into_iter().collect())
+            }
             Some(Ty::Record(r)) => Some(self.s.expand_row(r).labels),
             _ => None,
         };
@@ -1099,9 +1099,17 @@ impl<'p> Checker<'p> {
 
     fn field(&mut self, t: &Ty, name: &str, span: Span) -> Ty {
         let base = self.strip(t);
+        if let Ty::Named(d, args) = &base {
+            let args: Vec<GArg> = args.iter().map(|a| self.s.zonk_arg(a)).collect();
+            self.p.ensure_instance(*d, &args);
+            if self.p.failed_instance(*d, &args) {
+                return Ty::Error;
+            }
+        }
         match &base {
             Ty::Named(d, args) => match &self.p.defs[*d].kind {
-                DefKind::Struct { fields: Some(fields) } => {
+                DefKind::Struct { fields: Some(_) } => {
+                    let fields = self.p.struct_fields(*d, &args.iter().map(|a| self.s.zonk_arg(a)).collect::<Vec<_>>()).unwrap_or_default();
                     if let Some((_, ft)) = fields.iter().find(|(k, _)| k == name) {
                         let ft = ft.clone();
                         let def = &self.p.defs[*d];
@@ -1931,9 +1939,9 @@ impl<'p> Checker<'p> {
             Ty::Tuple(ts) => Some(vec![(Ctor::Tuple, ts.clone())]),
             Ty::Record(r) => Some(vec![(Ctor::Record, self.s.expand_row(r).labels.into_values().collect())]),
             Ty::Named(d, args) => match &self.p.defs[*d].kind {
-                DefKind::Struct { fields: Some(fs) } => {
-                    let params = self.p.defs[*d].params.clone();
-                    let mut fs: Vec<(String, Ty)> = fs.iter().map(|(k, t)| (k.clone(), subst_params(t, &params, args))).collect();
+                DefKind::Struct { fields: Some(_) } => {
+                    self.p.ensure_instance(*d, args);
+                    let mut fs = self.p.struct_fields(*d, args).unwrap_or_default();
                     fs.sort_by(|a, b| a.0.cmp(&b.0));
                     Some(vec![(Ctor::Record, fs.into_iter().map(|(_, t)| t).collect())])
                 }
@@ -2005,9 +2013,9 @@ impl<'p> Checker<'p> {
     fn record_labels(&mut self, t: &Ty) -> Vec<String> {
         match t {
             Ty::Record(r) => self.s.expand_row(r).labels.into_keys().collect(),
-            Ty::Named(d, _) => match &self.p.defs[*d].kind {
-                DefKind::Struct { fields: Some(fs) } => {
-                    let mut ls: Vec<String> = fs.iter().map(|(k, _)| k.clone()).collect();
+            Ty::Named(d, args) => match &self.p.defs[*d].kind {
+                DefKind::Struct { fields: Some(_) } => {
+                    let mut ls: Vec<String> = self.p.struct_fields(*d, args).unwrap_or_default().into_iter().map(|(k, _)| k).collect();
                     ls.sort();
                     ls
                 }

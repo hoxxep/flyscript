@@ -1,0 +1,30 @@
+// expect: 3 0
+// expect: #Some(7) #Some("ada")
+// Template structs: `Ring<T, comptime N>` checks its capacity, `Partial<T>` makes every field optional (§7.1).
+import { println } from "std/io";
+
+struct Ring<T, comptime N: usize> {
+  comptime assert(N > 0 && (N & (N - 1)) == 0, "capacity must be a power of two");
+  buf: T[N];
+  head: usize;
+}
+
+comptime function fieldsOf(T: Type): Field[] {
+  match (Type.info(T)) { #Struct { fields } | #Record(fields) => fields, _ => [] }
+}
+
+// Each field of T becomes an optional one.
+struct Partial<comptime T: Type> {
+  comptime for (const f of fieldsOf(T)) { [f.name]: Option<f.type>; }
+}
+
+struct User { id: i64; name: String; }
+impl Show for User;
+
+export function main(): void uses Io {
+  const r: Ring<u8, 4> = { buf: [1, 2, 3, 4], head: 0 };
+  println(`${r.buf[2]} ${r.head}`);
+  let p: Partial<User> = { id: #Some(7), name: #None };
+  p.name = #Some(String.fromStr("ada"));
+  println(`${p.id} ${p.name}`);
+}

@@ -540,7 +540,6 @@ impl Interp {
                     _ => Value::List(vs),
                 })
             }
-            ExprKind::StructType(_) => Err(panic("`comptime` types are not evaluated yet")),
             ExprKind::Field { .. } | ExprKind::Index { .. } => {
                 let p = self.place(e, env)?;
                 Ok(get(&p))

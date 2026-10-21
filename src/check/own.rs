@@ -733,7 +733,7 @@ impl<'p> Own<'p> {
             },
             ExprKind::Record { fields, .. } => self.field_inits(fields),
             ExprKind::List(items) => self.collect(items.iter()),
-            ExprKind::StructType(_) | ExprKind::Range { .. } => Val::default(),
+            ExprKind::Range { .. } => Val::default(),
             ExprKind::Unary { operand, .. } => {
                 self.expr(operand, Use::Read);
                 Val::default()
@@ -1343,13 +1343,7 @@ fn field_type(p: &Program, t: &Ty, field: &str) -> Option<Ty> {
         }
     }
     match &t {
-        Ty::Named(d, args) => match &p.defs[*d].kind {
-            super::env::DefKind::Struct { fields: Some(fields) } => fields
-                .iter()
-                .find(|(k, _)| k == field)
-                .map(|(_, ft)| super::env::subst_params(ft, &p.defs[*d].params, args)),
-            _ => None,
-        },
+        Ty::Named(d, args) => p.struct_fields(*d, args)?.into_iter().find(|(k, _)| k == field).map(|(_, t)| t),
         Ty::Record(r) => r.labels.get(field).cloned(),
         Ty::Tuple(ts) => field.parse::<usize>().ok().and_then(|i| ts.get(i).cloned()),
         _ => None,

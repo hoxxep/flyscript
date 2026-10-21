@@ -24,9 +24,7 @@ impl Program {
     fn components(&self, d: DefId, args: &[GArg]) -> Option<Vec<Ty>> {
         let params = &self.defs[d].params;
         match &self.defs[d].kind {
-            DefKind::Struct { fields: Some(fields) } => {
-                Some(fields.iter().map(|(_, t)| super::env::subst_params(t, params, args)).collect())
-            }
+            DefKind::Struct { fields: Some(_) } => Some(self.struct_fields(d, args)?.into_iter().map(|(_, t)| t).collect()),
             DefKind::Enum { tags } => Some(tags.values().map(|t| super::env::subst_params(t, params, args)).collect()),
             _ => None,
         }
