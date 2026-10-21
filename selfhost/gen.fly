@@ -150,10 +150,12 @@ impl Gen {
     #None
   }
 
+  // A type's name, where a value's could be: types are capitalized, constants are not
+  // values a module names (`BINARY` is in `names`), and locals shadow both.
   function isType(self: readonly Self, name: str): bool {
-    self.local(name).isNone() && (self.world.types.has(name) || name == "Vec" || name == "String" || name == "HashMap"
-      || name == "HashSet" || name == "Box" || name == "Arc" || name == "File" || name == "Instant" || name == "Duration"
-      || name == "Option" || name == "Result" || name == "Mutex" || name == "Hasher")
+    if (self.local(name).isSome() || self.names.has(name)) { return false; }
+    const b = name.asBytes()[0];
+    self.world.types.has(name) || (b >= b'A' && b <= b'Z')
   }
 
   // ---- whether an expression needs statements ----
@@ -458,7 +460,8 @@ impl Gen {
   function lambda(self: mut Self, params: readonly Vec<Pattern>, body: readonly Expr): String uses Fail<GenError> {
     const saved = replace(mut self.out, String.new());
     const savedIndent = replace(mut self.indent, 1);
-    const savedGen = replace(mut self.inGenerator, false);
+    const generator = Gen.yields(body);
+    const savedGen = replace(mut self.inGenerator, generator);
     self.push();
     let names: Vec<String> = Vec.new();
     let destructure: Vec<[usize, String]> = Vec.new();
@@ -481,7 +484,36 @@ impl Gen {
     self.inGenerator = savedGen;
     let close = String.new();
     for (const _ of 0..self.indent) { close.push("  "); }
-    `((${names.join(", ")}) => {\n${inner}${close}})`
+    if (generator) { `(function* (${names.join(", ")}) {\n${inner}${close}})` } else { `((${names.join(", ")}) => {\n${inner}${close}})` }
+  }
+
+  // Whether an expression yields, outside the closures in it: a closure that does is a generator.
+  function yields(e: readonly Expr): bool {
+    match (e) {
+      #Yield(_) => true,
+      #Lambda(_, _) | #Int(_) | #Float(_) | #Str(_) | #Byte(_) | #Bool(_) | #Ident(_) | #Break | #Continue | #Unsupported(_) => false,
+      #Template(parts) => parts.iter().some((p) => match (p) { #Text(_) => false, #Expr(x) => Gen.yields(x) }),
+      #Field(t, _) | #Unary(_, t) | #Cast(t, _) | #LendMut(t) | #Throw(t) => Gen.yields(t),
+      #Index(a, b) | #Binary(_, a, b) | #Assign(_, a, b) | #Range(a, b) => Gen.yields(a) || Gen.yields(b),
+      #Slice(t, lo, hi) => Gen.yields(t) || Gen.yieldsOpt(lo) || Gen.yieldsOpt(hi),
+      #Call(f, args) => Gen.yields(f) || args.iter().some((a) => Gen.yields(a)),
+      #Tag(_, args) | #List(args) => args.iter().some((a) => Gen.yields(a)),
+      #TagRecord(_, fs) | #Record(_, fs) => fs.iter().some(([_, v]) => Gen.yields(v)),
+      #Block(b) | #Unsafe(b) => Gen.blockYields(b),
+      #If(c, t, f) => Gen.yields(c) || Gen.blockYields(t) || Gen.yieldsOpt(f),
+      #While(c, b) => Gen.yields(c) || Gen.blockYields(b),
+      #For(_, it, b) => Gen.yields(it) || Gen.blockYields(b),
+      #Match(s, arms) => Gen.yields(s) || arms.iter().some((a) => Gen.yields(a.body)),
+      #Try(b, _, h) => Gen.blockYields(b) || Gen.blockYields(h),
+      #Return(v) => Gen.yieldsOpt(v),
+      #Handle(b, _, arms) => Gen.blockYields(b) || arms.iter().some((a) => Gen.blockYields(a.body)),
+    }
+  }
+  function yieldsOpt(e: readonly Option<Box<Expr>>): bool {
+    match (e) { #Some(x) => Gen.yields(x), #None => false }
+  }
+  function blockYields(b: readonly Block): bool {
+    b.stmts.iter().some((s) => match (s) { #Let(_, _, x) | #Expr(x) | #Defer(x) => Gen.yields(x) }) || Gen.yieldsOpt(b.tail)
   }
 
   // ---- patterns ----

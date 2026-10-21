@@ -54,7 +54,22 @@ const $rt = (() => {
       tagIndex.set(t, i);
     });
   }
-  function struct(name, fields) { structs.set(name, fields); }
+  function struct(name, fields) { structs.set(name, fields); shapes = undefined; }
+
+  // The structs whose fields a record has: a record a struct's type gave its type to, as
+  // `alloc({ parent, names })` builds a `Scope`, has no `$t` (compiled code has no types).
+  let shapes;
+  function structsShaped(v) {
+    if (shapes === undefined) {
+      shapes = new Map();
+      for (const [name, fields] of structs) {
+        const key = [...fields].sort().join(",");
+        if (!shapes.has(key)) shapes.set(key, []);
+        shapes.get(key).push(name);
+      }
+    }
+    return shapes.get(Object.keys(v).sort().join(",")) || [];
+  }
 
   function userMethod(type, name) {
     const own = methods.get(type);
@@ -77,6 +92,7 @@ const $rt = (() => {
         if (v === null) return [];
         if (v.$t !== undefined) return [v.$t];
         if (v.$tag !== undefined) return tagOwners.get(v.$tag) || [];
+        if (Object.getPrototypeOf(v) === Object.prototype) return structsShaped(v);
         return [];
       default: return [];
     }
@@ -148,6 +164,24 @@ const $rt = (() => {
   class File {
     constructor(text) { this.text = text; }
   }
+
+  // A region's mutable cell; copies of it are the same cell.
+  class Cell {
+    constructor(v) { this.v = v; }
+  }
+
+  // FNV-1a, 64 bits.
+  class Hasher {
+    constructor() { this.h = 0xcbf29ce484222325n; }
+    bytes(bs) { for (const b of bs) this.h = BigInt.asUintN(64, (this.h ^ BigInt(b)) * 0x100000001b3n); }
+  }
+  const HASHER = {
+    writeStr: (h, s) => h.bytes(Array.from(s, (c) => c.charCodeAt(0))),
+    writeInt: (h, i) => { const b = []; let x = BigInt.asUintN(64, i); for (let k = 0; k < 8; k++) { b.push(Number(x & 255n)); x >>= 8n; } h.bytes(b); },
+    writeBool: (h, b) => h.bytes([b ? 1 : 0]),
+    writeFloat: (h, f) => HASHER.writeStr(h, String(f)),
+    finish: (h) => h.h,
+  };
 
   // ---- generic operations: what `Eq`, `Ord`, `Clone` and `Show` derive ----
 
@@ -407,6 +441,7 @@ const $rt = (() => {
     insert: (s, v) => s.insert(v), has: (s, v) => s.has(v), remove: (s, v) => s.remove(v),
     len: (s) => s.len(), iter: (s) => new Gen(s.values()), clone: (s) => s.clone(),
   };
+  const CELL = { get: (c) => c.v, set: (c, v) => { c.v = v; }, clone: (c) => c };
   const FILE = {
     readText: (f) => f.text,
     *lines(f) { yield* S.lines(f.text); },
@@ -419,6 +454,7 @@ const $rt = (() => {
     min: (a, b) => (compare(b, a) < 0 ? b : a),
     max: (a, b) => (compare(b, a) > 0 ? b : a),
     get: (v) => v, into: (v) => v,
+    hash: (v, h) => HASHER.writeStr(h.v, show(v)),
   };
 
   function builtinTable(v) {
@@ -431,6 +467,8 @@ const $rt = (() => {
         if (v instanceof HashMap) return HM;
         if (v instanceof HashSet) return HS;
         if (v instanceof File) return FILE;
+        if (v instanceof Cell) return CELL;
+        if (v instanceof Hasher) return HASHER;
         if (v.$tag === "Some" || v.$tag === "None") return O;
         if (v.$tag === "Ok" || v.$tag === "Err") return R;
     }
@@ -475,6 +513,19 @@ const $rt = (() => {
     Arc: { new: (v) => v, get: (v) => v, clone: (v) => v },
     Option: O,
     Result: R,
+    Cell: { new: (v) => new Cell(v), ...CELL },
+    RegionList: { new: () => [], ...A },
+    Hasher: { new: () => new Hasher(), ...HASHER },
+    Fail: {
+      capture: (body) => {
+        try { return { $tag: "Ok", $: body() }; }
+        catch (e) { if (e instanceof Fail) return { $tag: "Err", $: e.value }; throw e; }
+      },
+      map: (body, wrap) => {
+        try { return body(); }
+        catch (e) { if (e instanceof Fail) throw new Fail(wrap(e.value)); throw e; }
+      },
+    },
     File: {
       open: (path) => {
         try { return new File(fs.readFileSync(Buffer.from(path, "latin1").toString("utf8")).toString("latin1")); }
@@ -511,6 +562,8 @@ const $rt = (() => {
   function parseInt(s) { return /^[+-]?\d+$/.test(s) ? some(BigInt(s)) : none(); }
   function parseFloat(s) { const f = Number(s); return s.trim() !== "" && !Number.isNaN(f) ? some(f) : none(); }
   function writeQuoted(s, out) { out.v = out.v + quoted(s); }
+  // `producer` is compiled as a generator function, since it yields.
+  const generate = (producer) => new Gen(producer());
 
   // Runs a program's `main` with the command line, as `flyc run` does.
   function start(main) {
@@ -532,6 +585,6 @@ const $rt = (() => {
     Fail, Panic, Ref, ref, method, fallback, implement, enumTags, struct, iter, range,
     eq, cmpOp, clone, copy, show, str, idx, at, slice, cast, unmatched, call, callRef, st,
     println, writeFile, min, max, panic, replace, swap, alloc, allocAll, fmt, copyUtf8,
-    parseInt, parseFloat, writeQuoted, start,
+    parseInt, parseFloat, writeQuoted, generate, start,
   };
 })();

@@ -71,8 +71,11 @@ function namesOf(l: readonly Loader, k: usize): HashMap<String, String> {
       #Const(name, _, _) => { names.insert(name.clone(), `m${k}$${name}`); }
       #Import(imported, from) => {
         if (from.startsWith("std/")) {
-          // The standard library is the runtime's.
-          for (const [name, local] of imported) { names.insert(local.clone(), `$rt.${name}`); }
+          // The standard library is the runtime's; its types are known by name.
+          for (const [name, local] of imported) {
+            const b = name.asBytes()[0];
+            if (!(b >= b'A' && b <= b'Z')) { names.insert(local.clone(), `$rt.${name}`); }
+          }
         } else {
           const j = l.index(join(dirOf(l.paths[k]), `${from}.fly`.asStr()).asStr());
           for (const [name, local] of imported) {
