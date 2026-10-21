@@ -1,0 +1,5 @@
+// error: does not declare `Fail`
+export function check(n: u32): u32 {
+  if (n == 0) { throw #Zero; }
+  n
+}

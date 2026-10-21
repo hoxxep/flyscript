@@ -118,6 +118,10 @@ pub struct Program {
     next_sym: u32,
     /// Well-known declarations the checker needs by identity.
     pub known: HashMap<&'static str, DefId>,
+    /// Effects inferred for functions declared without `uses`; `None` while being inferred.
+    pub inferred: HashMap<FnId, Option<EffRow>>,
+    /// Functions whose bodies have been checked.
+    pub checked: std::collections::HashSet<FnId>,
 }
 
 impl Names for Program {
@@ -160,6 +164,8 @@ impl Program {
             diags: Vec::new(),
             next_sym: 0,
             known: HashMap::new(),
+            inferred: HashMap::new(),
+            checked: Default::default(),
         };
         for (name, source) in STD {
             p.add_module(name.to_string(), format!("<{name}.d.fly>"), source.to_string(), true);
@@ -224,8 +230,18 @@ impl Program {
                     ItemKind::Struct(s) => (s.name.name.clone(), Binding::Def(self.placeholder(&s.name, m))),
                     ItemKind::Enum(e) => (e.name.name.clone(), Binding::Def(self.placeholder(&e.name, m))),
                     ItemKind::TypeAlias(a) => (a.name.name.clone(), Binding::Def(self.placeholder(&a.name, m))),
-                    ItemKind::Interface(x) => (x.name.name.clone(), Binding::Def(self.placeholder(&x.name, m))),
-                    ItemKind::Effect(e) => (e.name.name.clone(), Binding::Def(self.placeholder(&e.name, m))),
+                    ItemKind::Interface(x) => {
+                        let id = self.placeholder(&x.name, m);
+                        // Kinds are known before elaboration, so declarations may refer to
+                        // themselves (`effect Io { start(task: () => void uses Io) … }`).
+                        self.defs[id].kind = DefKind::Interface { methods: Vec::new(), assoc: Vec::new() };
+                        (x.name.name.clone(), Binding::Def(id))
+                    }
+                    ItemKind::Effect(e) => {
+                        let id = self.placeholder(&e.name, m);
+                        self.defs[id].kind = DefKind::Effect { ops: Vec::new() };
+                        (e.name.name.clone(), Binding::Def(id))
+                    }
                     ItemKind::Function(f) => {
                         let id = self.fns.len();
                         self.fns.push(FnInfo {

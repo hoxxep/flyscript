@@ -1,0 +1,2 @@
+// error: is neither a generator nor `Iterable`
+export function f(n: u32): void { for (const x of n) {} }

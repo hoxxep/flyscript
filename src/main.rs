@@ -2,7 +2,7 @@ use std::process::ExitCode;
 
 use flyscript::syntax::parse_module;
 
-const USAGE: &str = "usage: flyc <parse|ast> <file.fly>...";
+const USAGE: &str = "usage: flyc <parse|ast|check> <file.fly>...";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -10,9 +10,23 @@ fn main() -> ExitCode {
         eprintln!("{USAGE}");
         return ExitCode::FAILURE;
     };
-    if !matches!(command.as_str(), "parse" | "ast") || files.is_empty() {
+    if !matches!(command.as_str(), "parse" | "ast" | "check") || files.is_empty() {
         eprintln!("{USAGE}");
         return ExitCode::FAILURE;
+    }
+    if command == "check" {
+        let paths: Vec<std::path::PathBuf> = files.iter().map(std::path::PathBuf::from).collect();
+        let checked = flyscript::check::check_files(&paths);
+        for e in checked.render() {
+            eprintln!("{e}\n");
+        }
+        return if checked.errors.is_empty() {
+            println!("ok: {} file(s) checked", files.len());
+            ExitCode::SUCCESS
+        } else {
+            eprintln!("{} error(s)", checked.errors.len());
+            ExitCode::FAILURE
+        };
     }
     let mut ok = true;
     for file in files {

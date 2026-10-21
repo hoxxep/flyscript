@@ -1,0 +1,8 @@
+// error: expected `once () => void uses Io`
+import { Listener, Socket } from "std/net";
+function leaky(conn: Socket): void uses Io, Fail<IoErr> { let c = conn; c.writeStatus(200, "ok"); }
+export function serve(l: mut Listener): void uses Io, Fail<IoErr> {
+  Io.scope((s) => {
+    for (const conn of l.accept()) { s.spawn(() => leaky(conn)); }
+  });
+}

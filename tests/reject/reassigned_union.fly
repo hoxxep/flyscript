@@ -1,0 +1,12 @@
+// error: does not handle `#B`
+export function loop(n: u32): u32 {
+  let t = #A;
+  let total = 0;
+  let i = 0;
+  while (i < n) {
+    match (t) { #A => { total += 1; } }
+    t = #B;
+    i += 1;
+  }
+  total
+}

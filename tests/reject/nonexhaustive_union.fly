@@ -1,0 +1,5 @@
+// error: does not handle `#Blue`
+type Color = #Red | #Green | #Blue;
+export function name(c: Color): str {
+  match (c) { #Red => "red", #Green => "green" }
+}

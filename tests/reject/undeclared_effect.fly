@@ -1,0 +1,3 @@
+// error: effect `Io` is not declared
+import { println } from "std/io";
+export function greet(): void { println("hi"); }

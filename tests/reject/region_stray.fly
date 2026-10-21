@@ -1,0 +1,2 @@
+// error: region allocation needs an enclosing `region` block
+export function stray(): Ref<Heap, str> uses Fail<#MalformedUtf8> { copyUtf8([104, 105]) }

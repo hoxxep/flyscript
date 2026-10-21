@@ -1,0 +1,5 @@
+// error: which is not in the declared failures
+export function parse(s: str): u32 uses Fail<#Empty> {
+  if (s.len() == 0) { throw #Empty; }
+  throw #Bad
+}

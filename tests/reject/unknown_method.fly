@@ -1,0 +1,2 @@
+// error: no method `frobnicate`
+export function f(s: str): void { s.frobnicate(); }

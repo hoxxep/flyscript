@@ -1,0 +1,5 @@
+// error: `kept` would hold data from region `R`
+export function leak(): void uses Fail<#MalformedUtf8> {
+  let kept = #None;
+  region (R) { kept = #Some(copyUtf8([104, 105])); }
+}

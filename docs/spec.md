@@ -182,7 +182,7 @@ norm({ x: 3, y: 4, label: "a" })   // R = { label: str }
 - A *construction* is open: `#Some(x)` has type `#Some(T) | ...ρ`, so it fits any union that has a `#Some`.
 - The argument of `Fail` in a signature is open, after expanding aliases: `uses Fail<IoErr>` means `uses Fail<IoErr | ...ρ>` for a fresh `ρ`. A caller that may fail in more ways unifies its larger row with the callee's.
 
-Handling `Fail` closes the row again (§5.4), so the value caught is exactly the union the body can throw.
+Handling `Fail` closes the row again (§5.4), so the value caught is exactly the union the body can throw. Exhaustiveness is checked once a function's types are final; a union whose tail is still open at that point was built only from the tags the function saw, so it is closed rather than requiring a `_` arm. A union with a row-parameter tail always needs one.
 
 **Standard aliases.**
 ```ts
@@ -229,7 +229,7 @@ Type checking happens after `comptime` evaluation and uses bidirectional local i
 
 - Exported functions, interface methods and `extern` declarations state their parameter types, return type and effects. An exported function with no `uses` clause is pure.
 - Everything inside a body is inferred: local types, closure signatures, generic and row arguments, literal types, region arguments, and the effects of non-exported functions.
-- Region arguments are unification variables solved over the whole body; one left unconstrained defaults to the heap.
+- Region arguments are unification variables solved over the whole body, and a `Region<?r>` effect whose region is still unknown is solved by the innermost `region` block that handles it. A region argument left unconstrained defaults to the heap, where region allocation is an error, so a stray `alloc` is caught.
 - **Expected types flow into calls.** A call checked against an expected type unifies the callee's instantiated return type with it *before* checking the arguments. This is how `alloc({ user, token })` in a function returning `Ref<Request>` builds a `Request` rather than an anonymous record.
 - `break`, `continue`, `return` and `throw` have type `never`, which fits any expected type.
 - There is no global Hindley–Milner inference: errors stay local, and `comptime`, regions and interfaces stay decidable.

@@ -1,0 +1,4 @@
+// error: would outlive region `R`
+export function leak(): void uses Fail<#MalformedUtf8> {
+  const s = region (R) { copyUtf8([104, 105]) };
+}
