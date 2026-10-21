@@ -1,0 +1,15 @@
+// Data parallelism as library code (§6.5).
+
+export interface ParSplit {
+  type View;
+  type ReadView;
+  function len(self: readonly Self): usize;
+}
+
+export function par<C extends ParSplit>(c: mut C, f: (v: C.View, i: usize) => void): void;
+export function parReduce<C extends ParSplit, A extends Send>(
+  c: readonly C,
+  zero: A,
+  one: (v: C.ReadView, i: usize) => A,
+  both: (a: A, b: A) => A,
+): A;

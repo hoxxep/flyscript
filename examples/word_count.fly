@@ -1,4 +1,4 @@
-import { File, stdout } from "std/io";
+import { File, println } from "std/io";
 import { HashMap } from "std/collections";
 
 function words(line: str): void uses Yield<str> {
@@ -18,7 +18,7 @@ export function main(args: readonly String[]): void uses Io {
           }
         }
       }
-    } catch (e) { stdout.println(`${path}: ${e}`); }
+    } catch (e) { println(`${path}: ${e}`); }
   }
-  for (const [w, n] of counts.sortedByValue()) { stdout.println(`${n} ${w}`); }
+  for (const [w, n] of counts.sortedByValue()) { println(`${n} ${w}`); }
 }

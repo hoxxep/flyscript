@@ -1,0 +1,8 @@
+export struct File;
+
+impl File {
+  export function open(path: str): File uses Io, Fail<IoErr>;
+  export function lines(self: mut Self): void uses Io, Fail<IoErr>, Yield<String>;
+}
+
+export function println(s: str): void uses Io;

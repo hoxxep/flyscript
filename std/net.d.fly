@@ -1,0 +1,22 @@
+export struct Socket;
+export struct Listener;
+export struct Db;
+
+export type Profile = { displayName: String };
+export type Quota = { allowed: bool };
+
+impl Socket {
+  export function read(self: mut Self, buf: mut u8[]): usize uses Io, Fail<IoErr>;
+  export function writeStatus(self: mut Self, code: u16, body: str): void uses Io, Fail<IoErr>;
+  export function close(self: mut Self): void uses Io;
+}
+
+impl Listener {
+  export function bind(port: u16): Listener uses Io, Fail<IoErr>;
+  export function accept(self: mut Self): void uses Io, Fail<IoErr>, Yield<Socket>;
+}
+
+impl Db {
+  export function fetchProfile(self: readonly Self, user: str): Profile uses Io, Fail<IoErr>;
+  export function checkQuota(self: readonly Self, token: str): Quota uses Io, Fail<IoErr>;
+}

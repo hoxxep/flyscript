@@ -10,9 +10,31 @@ struct Scanner { src: readonly u8[]; pos: usize; }      // class 2: holds a borr
 
 type JsonErr = #Eof | #Unexpected(usize) | #MalformedUtf8;
 
+function isSpace(b: u8): bool { b == b' ' || b == b'\n' || b == b'\t' || b == b'\r' }
+
+impl Scanner {
+  function skipSpace(self: mut Self): void {
+    while (self.pos < self.src.len() && isSpace(self.src[self.pos])) { self.pos += 1; }
+  }
+  function eat(self: mut Self, b: u8): bool {
+    if (self.pos < self.src.len() && self.src[self.pos] == b) { self.pos += 1; true } else { false }
+  }
+  function expect(self: mut Self, word: str): void uses Fail<JsonErr> {
+    for (const b of word.bytes()) { if (!self.eat(b)) { throw #Unexpected(self.pos); } }
+  }
+  function quoted(self: mut Self): readonly u8[] from self uses Fail<JsonErr> {
+    self.pos += 1;
+    const start = self.pos;
+    while (self.pos < self.src.len() && self.src[self.pos] != b'"') { self.pos += 1; }
+    if (self.pos >= self.src.len()) { throw #Eof; }
+    self.pos += 1;
+    self.src[start..self.pos - 1]
+  }
+}
+
 function value<region R>(sc: mut Scanner): Ref<Json> uses Region<R>, Fail<JsonErr> {
   sc.skipSpace();
-  if (sc.pos >= sc.src.len) { throw #Eof; }
+  if (sc.pos >= sc.src.len()) { throw #Eof; }
   match (sc.src[sc.pos]) {
     b'n' => { sc.expect("null"); alloc(#Null) },
     b't' => { sc.expect("true"); alloc(#Bool(true)) },

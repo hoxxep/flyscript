@@ -1,0 +1,13 @@
+export struct Receiver<T>;
+export struct Sender<T>;
+export struct Reply<T>;
+
+impl<T> Iterable<T, [Io]> for Receiver<T> {
+  function each(self: readonly Self): void uses Yield<T>, Io;
+}
+impl<T> Sender<T> {
+  export function send(self: readonly Self, v: T): void uses Io;
+}
+impl<T> Reply<T> {
+  export function send(self: Self, v: T): void uses Io;
+}

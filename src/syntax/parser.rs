@@ -5,7 +5,17 @@ use crate::diag::{Diagnostic, Span};
 type PResult<T> = Result<T, Diagnostic>;
 
 pub fn parse_module(source: &str) -> PResult<Module> {
+    parse(source, false)
+}
+
+/// Parses a declaration file (`.d.fly`): functions may end in `;` and structs may be opaque.
+pub fn parse_declarations(source: &str) -> PResult<Module> {
+    parse(source, true)
+}
+
+fn parse(source: &str, declarations: bool) -> PResult<Module> {
     let mut p = Parser::new(source, lex(source)?);
+    p.declarations = declarations;
     let mut items = Vec::new();
     while !p.at_eof() {
         items.push(p.item()?);
@@ -24,6 +34,8 @@ struct Parser<'a> {
     src: &'a str,
     toks: Vec<Token>,
     pos: usize,
+    /// Parsing a `.d.fly` file.
+    declarations: bool,
 }
 
 /// Binary operators by precedence, lowest first. `as` binds tighter than all of them.
@@ -43,7 +55,7 @@ const ASSIGN: &[&str] = &["=", "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^="];
 
 impl<'a> Parser<'a> {
     fn new(src: &'a str, toks: Vec<Token>) -> Parser<'a> {
-        Parser { src, toks, pos: 0 }
+        Parser { src, toks, pos: 0, declarations: false }
     }
 
     // ---- token helpers ----
@@ -287,7 +299,7 @@ impl<'a> Parser<'a> {
         self.expect_kw(Kw::Struct)?;
         let name = self.ident()?;
         let params = self.type_params()?;
-        let fields = self.field_list()?;
+        let fields = if self.declarations && self.eat(";") { None } else { Some(self.field_list()?) };
         Ok(StructDecl { layout, name, params, fields })
     }
 
@@ -411,7 +423,7 @@ impl<'a> Parser<'a> {
 
     fn fn_decl(&mut self) -> PResult<FnDecl> {
         let sig = self.sig(true)?;
-        let body = self.block()?;
+        let body = if self.declarations && self.eat(";") { None } else { Some(self.block()?) };
         Ok(FnDecl { sig, body })
     }
 

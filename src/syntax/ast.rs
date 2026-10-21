@@ -39,7 +39,8 @@ pub struct StructDecl {
     pub layout: Option<Ident>,
     pub name: Ident,
     pub params: Vec<TypeParam>,
-    pub fields: Vec<Field>,
+    /// `None` for an opaque declaration (`struct Socket;`), allowed only in `.d.fly` files.
+    pub fields: Option<Vec<Field>>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -125,7 +126,8 @@ pub struct FnSig {
 #[derive(Clone, Debug, PartialEq)]
 pub struct FnDecl {
     pub sig: FnSig,
-    pub body: Block,
+    /// `None` for a signature ending in `;`, allowed only in `.d.fly` files.
+    pub body: Option<Block>,
 }
 
 #[derive(Clone, Debug, PartialEq)]

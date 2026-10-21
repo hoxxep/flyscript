@@ -666,7 +666,7 @@ import { Socket, Db } from "std/net";
 struct Request<region R> { user: Ref<str>; token: Ref<str>; }
 
 function parse<region R>(raw: readonly u8[]): Ref<Request> uses Region<R>, Fail<#Malformed | #MalformedUtf8> {
-  if (raw.len < 16) { throw #Malformed; }
+  if (raw.len() < 16) { throw #Malformed; }
   alloc({ user: copyUtf8(raw[0..8]), token: copyUtf8(raw[8..16]) })
 }
 
@@ -767,9 +767,31 @@ struct Scanner { src: readonly u8[]; pos: usize; }      // class 2: holds a borr
 
 type JsonErr = #Eof | #Unexpected(usize) | #MalformedUtf8;
 
+function isSpace(b: u8): bool { b == b' ' || b == b'\n' || b == b'\t' || b == b'\r' }
+
+impl Scanner {
+  function skipSpace(self: mut Self): void {
+    while (self.pos < self.src.len() && isSpace(self.src[self.pos])) { self.pos += 1; }
+  }
+  function eat(self: mut Self, b: u8): bool {
+    if (self.pos < self.src.len() && self.src[self.pos] == b) { self.pos += 1; true } else { false }
+  }
+  function expect(self: mut Self, word: str): void uses Fail<JsonErr> {
+    for (const b of word.bytes()) { if (!self.eat(b)) { throw #Unexpected(self.pos); } }
+  }
+  function quoted(self: mut Self): readonly u8[] from self uses Fail<JsonErr> {
+    self.pos += 1;
+    const start = self.pos;
+    while (self.pos < self.src.len() && self.src[self.pos] != b'"') { self.pos += 1; }
+    if (self.pos >= self.src.len()) { throw #Eof; }
+    self.pos += 1;
+    self.src[start..self.pos - 1]
+  }
+}
+
 function value<region R>(sc: mut Scanner): Ref<Json> uses Region<R>, Fail<JsonErr> {
   sc.skipSpace();
-  if (sc.pos >= sc.src.len) { throw #Eof; }
+  if (sc.pos >= sc.src.len()) { throw #Eof; }
   match (sc.src[sc.pos]) {
     b'n' => { sc.expect("null"); alloc(#Null) },
     b't' => { sc.expect("true"); alloc(#Bool(true)) },
@@ -789,7 +811,7 @@ function value<region R>(sc: mut Scanner): Ref<Json> uses Region<R>, Fail<JsonEr
 ### A.2 Word count
 
 ```ts
-import { File, stdout } from "std/io";
+import { File, println } from "std/io";
 import { HashMap } from "std/collections";
 
 function words(line: str): void uses Yield<str> {
@@ -809,9 +831,9 @@ export function main(args: readonly String[]): void uses Io {
           }
         }
       }
-    } catch (e) { stdout.println(`${path}: ${e}`); }
+    } catch (e) { println(`${path}: ${e}`); }
   }
-  for (const [w, n] of counts.sortedByValue()) { stdout.println(`${n} ${w}`); }
+  for (const [w, n] of counts.sortedByValue()) { println(`${n} ${w}`); }
 }
 ```
 *Awkward:* none. `${e}` works because tag unions derive `Show`.
@@ -920,7 +942,7 @@ export function kv(inbox: readonly Receiver<Command>): void uses Io {
 
 ```ts
 import { Listener, Db } from "std/net";
-import { serveOne } from "./handler";
+import { serveOne } from "./http_handler";
 
 export function serve(listener: mut Listener, db: readonly Db): void uses Io, Fail<IoErr> {
   Io.scope((s) => {

@@ -1,0 +1,9 @@
+// Pull iteration as library code over first-class continuations (§5.5).
+
+export struct Gen<T, row E>;
+
+export function generate<T, row E>(producer: once () => void uses Yield<T>, ...E): Gen<T, E>;
+
+impl<T, row E> Gen<T, E> {
+  export function next(self: mut Self): Option<T> uses ...E;
+}

@@ -1,0 +1,21 @@
+// Mutable slots in an append-only region (§4.6). Writes are `Region<R>` operations performed
+// through `readonly` receivers: mutation by effect, not by ownership.
+
+export struct Cell<region R, T extends Copy>;
+export struct RegionList<region R, T>;
+
+impl<region R, T extends Copy> Cell<R, T> {
+  export function new(v: T): Cell<R, T>;
+  export function get(self: readonly Self): T uses Region<R>;
+  export function set(self: readonly Self, v: T): void uses Region<R>;
+}
+
+impl<region R, T> RegionList<R, T> {
+  export function new(): Ref<R, RegionList<R, T>> uses Region<R>;
+  export function push(self: Ref<R, Self>, v: T): void uses Region<R>;
+  export function len(self: readonly Self): usize;
+}
+
+impl<region R, T> Iterable<readonly T> for RegionList<R, T> {
+  function each(self: readonly Self): void uses Yield<readonly T>;
+}

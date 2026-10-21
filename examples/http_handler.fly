@@ -3,7 +3,7 @@ import { Socket, Db } from "std/net";
 struct Request<region R> { user: Ref<str>; token: Ref<str>; }
 
 function parse<region R>(raw: readonly u8[]): Ref<Request> uses Region<R>, Fail<#Malformed | #MalformedUtf8> {
-  if (raw.len < 16) { throw #Malformed; }
+  if (raw.len() < 16) { throw #Malformed; }
   alloc({ user: copyUtf8(raw[0..8]), token: copyUtf8(raw[8..16]) })
 }
 

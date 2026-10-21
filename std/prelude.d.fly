@@ -1,0 +1,118 @@
+// The prelude: in scope in every module without an import.
+
+// ---- Marker and derived interfaces (§3.5, §4.4) ----
+// Copy, Send and LentBy are satisfied structurally by the compiler; Eq, Hash, Show and Clone
+// are derived for records, tuples and tag unions.
+export interface Copy {}
+export interface Send {}
+// `Q extends LentBy<K>` holds when K is Q or K lends Q (String lends str, Vec<T> lends T[]).
+export interface LentBy<K> {}
+export interface Drop { function drop(self: mut Self): void; }
+export interface Eq { function eq(self: readonly Self, other: readonly Self): bool; }
+export interface Hash { function hash(self: readonly Self, h: mut Hasher): void; }
+export interface Show { function show(self: readonly Self): String; }
+export interface Clone { function clone(self: readonly Self): Self; }
+export struct Hasher;
+
+// ---- Tag-union aliases (§3.2) ----
+export type Option<T> = #Some(T) | #None;
+export type Result<T, E> = #Ok(T) | #Err(E);
+
+impl<T> Option<T> {
+  export function isSome(self: readonly Self): bool;
+  export function take(self: mut Self): Option<T>;
+  export function unwrapOr(self: Self, fallback: T): T;
+}
+impl<T extends Clone> Option<readonly T> {
+  export function cloned(self: Self): Option<T>;
+}
+impl<T, E> Result<T, E> {
+  export function unwrap(self: Self): T uses Fail<E>;
+}
+
+// ---- The standard effects (§5.1) ----
+export effect Fail<E> { raise(err: E): never; }
+export effect Yield<T> { yield(item: T): void; }
+export effect Region<region R> {}
+export effect Io {
+  read(fd: u32, buf: mut u8[]): Result<usize, IoErr>;
+  write(fd: u32, buf: readonly u8[]): Result<usize, IoErr>;
+  now(): u64;
+  sleep(nanos: u64): void;
+  park(key: u64): void;
+  start(task: once () => void uses Io): u64;
+}
+export type IoErr = #Reset | #TimedOut | #BrokenPipe | #NotFound | #PermissionDenied;
+
+impl<E> Fail<E> {
+  export function capture<T>(body: once () => T uses Fail<E>): Result<T, E>;
+}
+
+// ---- Iteration (§5.5) ----
+export interface Iterable<T, row E = []> {
+  function each(self: readonly Self): void uses Yield<T>, ...E;
+}
+
+// ---- Structured concurrency (§6.1): library code over Io.start and Io.park ----
+export struct Scope<row E>;
+export struct Fiber<T>;
+impl Io {
+  export function scope<T, row E>(body: once (s: mut Scope<E>) => T uses Io, ...E): T uses Io, ...E;
+}
+impl<row E> Scope<E> {
+  export function spawn(self: mut Self, task: once () => void uses Io): void;
+  export function fork<T extends Send>(self: mut Self, task: once () => T uses Io, ...E): Fiber<T>;
+}
+impl<T> Fiber<T> {
+  export function join(self: Self): T uses Io;
+}
+
+// ---- Owned containers and strings (§3.1) ----
+export struct String;
+export struct Vec<T>;
+export struct Box<T>;
+export struct Arc<T extends Send>;
+
+impl String {
+  export function new(): String;
+  export function fromStr(s: str): String;
+  export function len(self: readonly Self): usize;
+  export function push(self: mut Self, s: str): void;
+}
+impl str {
+  export function len(self: Self): usize;
+  export function toString(self: Self): String;
+  export function bytes(self: Self): void uses Yield<u8>;
+  export function splitWhitespace(self: Self): void uses Yield<str>;
+}
+impl<T> T[] {
+  export function len(self: readonly Self): usize;
+}
+impl<T> Iterable<readonly T> for T[] {
+  function each(self: readonly Self): void uses Yield<readonly T>;
+}
+impl<T> Vec<T> {
+  export function new(): Vec<T>;
+  export function push(self: mut Self, v: T): void;
+  export function len(self: readonly Self): usize;
+}
+impl<T> Iterable<readonly T> for Vec<T> {
+  function each(self: readonly Self): void uses Yield<readonly T>;
+}
+impl<T> Box<T> {
+  export function new(v: T): Box<T>;
+}
+impl<T extends Send> Arc<T> {
+  export function new(v: T): Arc<T>;
+}
+
+// ---- Regions (§4.6) ----
+// `Ref<R, T>` is used as a `readonly T`; the compiler provides the projection.
+export struct Ref<region R, T>;
+
+export function alloc<region R, T>(v: T): Ref<R, T> uses Region<R>;
+export function copyUtf8<region R>(bytes: readonly u8[]): Ref<R, str> uses Region<R>, Fail<#MalformedUtf8>;
+export function fmt<region R>(s: str): Ref<R, str> uses Region<R>;
+
+// ---- Arrays ----
+export function repeat<T extends Copy, comptime N: usize>(v: T): T[N];
