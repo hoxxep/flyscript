@@ -1,0 +1,59 @@
+// expect: done a.com
+// expect: done b.com
+// expect: done c.com
+// expect: total 54
+// expect: pages 3
+// A concurrent fetch written as a TypeScript programmer would (§6): forked tasks that may fail,
+// a channel with a sender per task, a `Mutex` behind an `Arc`, `Fail.capture` around the scope,
+// and joining the fibers by draining them. Each task moves in what is declared inside the scope.
+import { println } from "std/io";
+import { channel, Mutex } from "std/sync";
+import { HashMap } from "std/collections";
+
+type FetchErr = #NotFound(String) | #Timeout;
+
+function fetch(url: str): String uses Io, Fail<FetchErr> {
+  Io.sleep(1000);
+  if (url.endsWith("missing")) { throw #NotFound(url.toString()); }
+  `<html>${url}</html>`
+}
+
+function wordCount(page: str): usize {
+  let n: usize = 0;
+  for (const w of page.splitWhitespace()) { n += 1; }
+  n
+}
+
+export function main(): void uses Io {
+  const urls = ["a.com", "b.com", "c.com"];
+  const counts = Arc.new(Mutex.new(HashMap.new()));
+  const [tx, rx] = channel<String>();
+  const result = Fail.capture(() => Io.scope((s) => {
+    let fibers: Vec<Fiber<usize>> = Vec.new();
+    for (const u of urls) {
+      const url = u.toString();
+      const tx2 = tx.clone();
+      const shared = counts.clone();
+      fibers.push(s.fork(() => {
+        const page = fetch(url.asStr());
+        const n = page.len();
+        shared.lock((m) => { m.insert(url.clone(), n); });
+        tx2.send(url);
+        n
+      }));
+    }
+    tx.close();
+    for (const done of rx) { println(`done ${done}`); }
+    let total: usize = 0;
+    for (const f of fibers.drain()) { total += f.join(); }
+    total
+  }));
+  match (result) {
+    #Ok(total) => {
+      println(`total ${total}`);
+      println(`pages ${counts.lock((m) => m.len())}`);
+    },
+    #Err(#NotFound(u)) => println(`missing ${u}`),
+    #Err(#Timeout) => println("timeout"),
+  }
+}

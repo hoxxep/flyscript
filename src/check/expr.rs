@@ -460,11 +460,13 @@ impl<'p> Checker<'p> {
                 }
                 ok
             }
+            // A region reference and an `Arc` lend only `readonly`.
+            (Ty::Named(d, _), Ty::Borrow(true, _)) if *d == self.known("Ref") || *d == self.known("Arc") => false,
             (_, Ty::Borrow(_, xi)) => {
                 let xi = xi.clone();
                 self.lends(&f, &xi)
             }
-            (Ty::Named(d, args), _) if *d == self.known("Ref") || *d == self.known("Box") => {
+            (Ty::Named(d, args), _) if *d == self.known("Ref") || *d == self.known("Box") || *d == self.known("Arc") => {
                 match args.last() {
                     Some(GArg::Ty(inner)) => {
                         let inner = inner.clone();

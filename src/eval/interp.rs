@@ -261,17 +261,25 @@ impl Interp {
     pub fn call_value(&mut self, f: &Value, args: Vec<Value>) -> R {
         match f.deref() {
             Value::Closure(c) => {
-                let env = new_env(None);
+                let base = new_env(None);
                 for (n, v) in &c.env {
-                    env.vars.lock().expect("env").insert(n.clone(), v.clone());
+                    base.vars.lock().expect("env").insert(n.clone(), v.clone());
                 }
-                let env = new_env(Some(env));
+                // A `once` closure's call is its end: what it owns is dropped with it (§5.6).
+                if c.once {
+                    base.owned.lock().expect("env").extend(c.owned.iter().cloned());
+                }
+                let env = new_env(Some(base.clone()));
                 for (p, a) in c.params.iter().zip(args) {
                     define(&env, p, a);
                 }
                 let frame = self.fresh_id();
                 let saved = std::mem::replace(&mut self.lex, Lex { frame, loops: Vec::new(), owner: c.owner, module: c.module, tenv: c.tenv.clone() });
                 let r = self.expr(&c.body, &env);
+                let r = match (r, self.drop_scope(&base)) {
+                    (Ok(_), Err(e)) => Err(e),
+                    (r, _) => r,
+                };
                 self.lex = saved;
                 match r {
                     Err(Ctl::Return(f, v)) if f == frame => Ok(v),
@@ -347,6 +355,31 @@ impl Interp {
     }
 
     /// Performs a user effect's operation.
+    /// `Io`'s own operations, handled by the root handler against the simulated world (§6.4).
+    /// Each is a scheduling point.
+    fn root_io(&mut self, op: &str, args: Vec<Value>) -> R {
+        self.sched.yield_now(self.task)?;
+        let mut w = self.world.lock().expect("world");
+        Ok(match op {
+            "now" => Value::Int(w.clock as i128),
+            "sleep" => {
+                w.clock += args.first().map_or(0, |n| n.as_int() as u64);
+                Value::Unit
+            }
+            "write" => {
+                let bytes: Vec<u8> = match args.get(1).map(|b| b.deref()) {
+                    Some(Value::List(vs)) => vs.iter().map(|b| b.as_int() as u8).collect(),
+                    _ => Vec::new(),
+                };
+                let n = bytes.len();
+                w.out.push(String::from_utf8_lossy(&bytes).into_owned());
+                Value::tag("Ok", Value::Tuple(vec![Value::Int(n as i128)]))
+            }
+            "read" => Value::tag("Ok", Value::Tuple(vec![Value::Int(0)])),
+            _ => Value::Unit,
+        })
+    }
+
     /// Performs `op` of `effect` as if from here (for a coroutine's driver).
     pub fn perform_op(&mut self, effect: usize, op: &str, args: Vec<Value>) -> R {
         self.perform(effect, op, args)
@@ -362,6 +395,9 @@ impl Interp {
                 } else {
                     super::coroutine::forward(self, co, super::coroutine::Evt::Perform(effect, op.to_string(), args))
                 };
+            }
+            if self.prog.known.get("Io") == Some(&effect) {
+                return self.root_io(op, args);
             }
             return Err(panic(format!("unhandled effect `{}`", self.prog.defs[effect].name)));
         };
@@ -756,17 +792,32 @@ impl Interp {
             }
             ExprKind::Range { .. } => Err(panic("a range can only index")),
             ExprKind::Lambda { params, body } => {
-                // Capture the environment's cells: borrows by reference, as checked (§4.3).
-                let mut captured = Vec::new();
-                let mut e = Some(env.clone());
-                while let Some(s) = e {
+                // What it moves in leaves its binding now, into a cell of the closure's own.
+                let moved_in = self.prog.typed.get(&self.lex.owner).and_then(|t| t.captured_moves.get(&e.span)).cloned().unwrap_or_default();
+                let mut captured: Vec<(String, Shared)> = Vec::new();
+                let mut owned = Vec::new();
+                for (name, ty) in moved_in {
+                    if let Some(cell) = lookup(env, &name) {
+                        let v = cell.lock().expect("cell").clone();
+                        captured.push((name.clone(), shared(v)));
+                        mark_moved(env, &name, Vec::new());
+                        let ty = self.frame_ty(&ty);
+                        if super::drops::needs_drop(&self.prog, &ty) {
+                            owned.push((name, ty));
+                        }
+                    }
+                }
+                // The rest it captures by reference: borrows, as checked (§4.3).
+                let mut scope = Some(env.clone());
+                while let Some(s) = scope {
                     for (k, v) in s.vars.lock().expect("env").iter() {
-                        if !captured.iter().any(|(n, _): &(String, Shared)| n == k) {
+                        if !captured.iter().any(|(n, _)| n == k) {
                             captured.push((k.clone(), v.clone()));
                         }
                     }
-                    e = s.parent.clone();
+                    scope = s.parent.clone();
                 }
+                let once = matches!(self.ty_of(e.span), Some(Ty::Fn(f)) if f.mode == crate::check::types::FnMode::Once);
                 Ok(Value::Closure(Arc::new(Closure {
                     params: params.iter().map(|p| p.name.name.clone()).collect(),
                     body: (**body).clone(),
@@ -774,6 +825,8 @@ impl Interp {
                     module: self.lex.module,
                     owner: self.lex.owner,
                     tenv: self.lex.tenv.clone(),
+                    owned,
+                    once,
                 })))
             }
             ExprKind::Block(b) => self.block(b, env),

@@ -1,0 +1,6 @@
+// error: `mut String` does not implement `Send`
+// What `lock` gives back cannot borrow the guarded state, which is unlocked once it returns (§6.2).
+import { Mutex } from "std/sync";
+export function leak(m: readonly Mutex<String>): void uses Io {
+  const s = m.lock((v) => v);
+}

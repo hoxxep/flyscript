@@ -318,9 +318,9 @@ export effect Io {
 export type IoErr = #Reset | #TimedOut | #BrokenPipe | #NotFound | #PermissionDenied;
 
 impl<E> Fail<E> {
-  export function capture<T>(body: once () => T uses Fail<E>): Result<T, E>;
+  export function capture<T, row R>(body: once () => T uses Fail<E>, ...R): Result<T, E> uses ...R;
   // Wraps one call's failures (§5.4): `Fail.map(() => fetch(u), (e) => #Http(e))`.
-  export function map<T, F>(body: once () => T uses Fail<E>, wrap: once (e: E) => F): T uses Fail<F>;
+  export function map<T, F, row R>(body: once () => T uses Fail<E>, ...R, wrap: once (e: E) => F): T uses Fail<F>, ...R;
 }
 
 // ---- Reflection (§7.2): what `Type.info` tells `comptime` code about a type ----
@@ -485,6 +485,8 @@ impl<T> Vec<T> {
   export function new(): Vec<T>;
   export function push(self: mut Self, v: T): void;
   export function pop(self: mut Self): Option<T>;
+  // Takes every element out, in order, leaving the vector empty: `for (const f of fibers.drain())`.
+  export function drain(self: mut Self): Gen<T, []>;
   export function len(self: readonly Self): usize;
   export function iter(self: readonly Self): Gen<readonly T, []>;
   export function iterMut(self: mut Self): Gen<mut T, []> from self;

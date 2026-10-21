@@ -30,6 +30,8 @@ struct Inner {
     channels: HashMap<u64, VecDeque<Value>>,
     /// Channels whose senders are done: a receiver drains them, then sees the end.
     closed: HashSet<u64>,
+    /// How many senders each channel has: it ends when the last is gone.
+    senders: HashMap<u64, usize>,
     /// Tasks whose scope was cancelled: they unwind at their next scheduling point.
     cancelled: HashSet<u64>,
 }
@@ -52,6 +54,7 @@ impl Sched {
                 next: 1,
                 channels: HashMap::new(),
                 closed: HashSet::new(),
+                senders: HashMap::new(),
                 cancelled: HashSet::new(),
             }),
             turn: Condvar::new(),
@@ -168,7 +171,12 @@ impl Sched {
         let id = inner.next;
         inner.next += 1;
         inner.channels.insert(id, VecDeque::new());
+        inner.senders.insert(id, 1);
         id
+    }
+
+    pub fn add_sender(&self, ch: u64) {
+        *self.inner.lock().expect("scheduler").senders.entry(ch).or_insert(0) += 1;
     }
 
     pub fn send(&self, me: u64, ch: u64, v: Value) -> Result<(), Ctl> {
@@ -200,8 +208,14 @@ impl Sched {
     pub fn close(&self, me: u64, ch: u64) -> Result<(), Ctl> {
         {
             let mut inner = self.inner.lock().expect("scheduler");
-            inner.closed.insert(ch);
-            Self::wake(&mut inner, &Wait::Channel(ch));
+            let left = inner.senders.get_mut(&ch).map(|n| {
+                *n = n.saturating_sub(1);
+                *n
+            });
+            if left.unwrap_or(0) == 0 {
+                inner.closed.insert(ch);
+                Self::wake(&mut inner, &Wait::Channel(ch));
+            }
         }
         self.yield_now(me)
     }

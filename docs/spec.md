@@ -1,6 +1,6 @@
 # Flyscript
 
-**Language specification, version 0.33**
+**Language specification, version 0.34**
 
 *Affine values, one row calculus, handlers for everything, and `comptime`: Church on the outside, Turing on the inside.*
 
@@ -18,12 +18,20 @@ The whole language rests on five laws. Every rule in this document is a conseque
 4. **Handlers for everything.** Errors, I/O, iteration and region memory are ordinary effects with ordinary handlers. A handler may hold the rest of a computation as a one-shot continuation value; generators and tasks are both built from that one primitive.
 5. **`comptime` is the metalanguage.** Generics, reflection, layout transformation and derived interfaces are ordinary Flyscript code run by the compiler.
 
-### 0.1 Changes from 0.32
+### 0.1 Changes from 0.33
 
-0.33 comes from writing a sales report — interfaces, a generic over a bound, a map of totals, sorting, joining — as a TypeScript programmer would.
+0.34 comes from writing a concurrent fetch — forked tasks that may fail, a channel with a sender per task, shared totals, joining every fiber — as a TypeScript programmer would. It found a hole: a task could borrow a binding declared inside its scope, which ends before the task does.
 
 | Change | Why |
 | :--- | :--- |
+| A task moves in what is declared inside its scope and borrows only what is declared outside it; a use after the move says so (§6.1) | `const tx2 = tx.clone(); s.fork(() => tx2.send(url))` in a loop lent `tx2` to a task that outlived the iteration that dropped it |
+| A closure that moves a binding in owns it from where it is made, and a `once` closure drops what it owns when its call ends (§4.3, §5.6) | the parent dropped a sender it had given to a task, and the task never dropped it |
+| `Mutex<T>` with `lock(body)`, whose body performs no effects and returns a `Send` value; `Arc<T>` lends `readonly T` (§6.2) | §6.2 named `Mutex`, but there was none |
+| `Sender` is `Clone`, and a channel ends when its last sender is gone; `close` drops one (§6.2) | one sender per task is how a fan-in is written |
+| `vec.drain()` takes the elements out in order (§5.5) | joining every fiber needs to own each one: `for (const f of fibers.drain()) { total += f.join(); }` |
+| `Fail.capture` and `Fail.map` pass on the body's other effects (§5.4) | `Fail.capture(() => Io.scope(…))` was rejected because the body performs `Io` |
+
+--- | :--- |
 | Arrays have `sort`, a stable `sortBy`, `reverse`, `join`, `includes`, `indexOf` and `last`, `Vec` has `pop`, and generators have `find`, `some`, `every`, `reduce` and `cloned`, under TypeScript's names (§5.5) | each was the first thing reached for; all but `sortBy`, `reverse` and `pop` are Flyscript in the prelude |
 | `${e}` writes a string as it is also where generic code has it as a `T` (§3.5) | `[a, b].join(", ")` over `String`s quoted them |
 | A borrow of a borrow is one borrow, `mut` only if both are (§4.1) | `every((r) => …)` over a `Gen<readonly String>` gave `r` the type `readonly readonly String`, which lending could not read |
@@ -104,6 +112,7 @@ The whole language rests on five laws. Every rule in this document is a conseque
 | `xs.sort()`, `find`, `some`, `every`, `reduce`, `join`, `includes`, `indexOf` | same names | `sort` sorts in place by `Ord`; `sortBy(cmp)` takes a comparison returning `#Less`, `#Equal` or `#Greater`. `find`, `some`, `every` and `reduce` are on generators: `xs.iter().find(p)`. |
 | `.d.ts` declaration files | `.d.fly` declaration files | Signatures without bodies, used for the standard library. |
 | `async` / `await` | (nothing) | I/O is an effect; every function is "direct style". |
+| `await Promise.all(ps)` | `Io.scope((s) => …)` | Tasks are forked in a scope, which waits for them all: `for (const f of fibers.drain()) { total += f.join(); }`. |
 | `import` / `export` | same | ES modules; the import graph must be acyclic. |
 | `<T extends U>` | same | Monomorphized. Bounds compose with `&`. |
 
@@ -368,7 +377,7 @@ The body is checked against the same rule: everything the returned value borrows
 
 ### 4.3 Closures
 
-A closure captures each binding as its body needs it, by reference: a read takes a `readonly` borrow, a change a `mut` borrow. Passing a closure as an argument is lending it: in `xs.iter().filter((x) => x > min)` the closure borrows `min`, and the resulting generator carries that borrow (§4.2), so `min` may change again once the chain is collected. A closure that *escapes* — returned, or stored in a record, tag or list by the function that creates it — instead takes ownership of what it captures, by move, so it holds no borrows; it may own only `Send` values, so every first-class closure is `Send`. Function values are affine, like any owned value: moving one moves its captures, and dropping it drops them. Its mode follows from what its body does when called:
+A closure captures each binding as its body needs it, by reference: a read takes a `readonly` borrow, a change a `mut` borrow. Passing a closure as an argument is lending it: in `xs.iter().filter((x) => x > min)` the closure borrows `min`, and the resulting generator carries that borrow (§4.2), so `min` may change again once the chain is collected. A closure that *escapes* — returned, or stored in a record, tag or list by the function that creates it — instead takes ownership of what it captures, by move where it is made, so it holds no borrows (a task moves in likewise what is declared inside its scope, §6.1); it may own only `Send` values, so every first-class closure is `Send`. Function values are affine, like any owned value: moving one moves its captures, and dropping it drops them. Its mode follows from what its body does when called:
 
 | Type | Body | Callable |
 | :--- | :--- | :--- |
@@ -518,7 +527,7 @@ const port = try { parsePort(raw) } catch (e) {
 };
 ```
 
-To keep a failure as data, `Fail.capture(() => body)` returns `Result<T, E>`; `r.unwrap()` turns it back into a failure. There is no separate error-conversion machinery: failure rows compose by union (§3.2). Because they do, a tag means the same thing wherever it comes from: two libraries that both throw `#Unknown(String)` throw one tag. A library names its failures for what failed — `std/json` throws `#MissingField`, `#UnknownTag`, `#BadJson` — so that a caller's own `#Unknown` stays its own.
+To keep a failure as data, `Fail.capture(() => body)` returns `Result<T, E>`, passing on the body's other effects; `r.unwrap()` turns it back into a failure. There is no separate error-conversion machinery: failure rows compose by union (§3.2). Because they do, a tag means the same thing wherever it comes from: two libraries that both throw `#Unknown(String)` throw one tag. A library names its failures for what failed — `std/json` throws `#MissingField`, `#UnknownTag`, `#BadJson` — so that a caller's own `#Unknown` stays its own.
 
 Tags are structural, so two libraries can use the same tag for different things (`#TimedOut(u32)` and `#TimedOut`) — and then a block calling both does not type-check, because one tag cannot carry two payloads. `Fail.map` wraps one call's failures, which both resolves the collision and records where an error came from:
 
@@ -636,7 +645,7 @@ The rules:
 3. **Failure cancels the scope.** A forked task's failures `X` are rethrown by `Io.scope`. If a forked task fails, or any task panics, the scope is cancelled: the body and every other task stop at their next `Io` operation and unwind, and once all have finished the first failure is rethrown from `Io.scope` (or the panic continues). `join` therefore never fails by itself: it returns the result, or the joiner is cancelled along with the rest of the scope.
 4. **A task performs only what its fiber can handle.** A task runs on a new fiber, where the only handlers are the runtime's `Io` and the scope's capture of failures, so its effects are `Io` and `Fail` and nothing else. It cannot allocate in its parent's region or perform an effect whose handler lives in the parent fiber.
 5. **Outer regions are frozen while tasks run.** The body of a scope runs on the parent's fiber, but like its tasks it performs only `Io` and failures: it cannot write to a region outside the scope while tasks may be reading it, nor suspend to an outer handler that could. A task or the body may still open and use regions of its own, and anything else is done before or after the scope.
-6. **Captures.** A task is a `once` closure. It may move in owned `Send` values and capture `readonly` borrows of `Send` values from outside the scope; the scope outlives every task, so the borrows are safe.
+6. **Captures.** A task is a `once` closure. What is declared outside the scope it may borrow `readonly`, since the scope outlives every task; what is declared inside the scope — a loop's `const tx2 = tx.clone()`, a buffer made for one task — it moves in, since the task may outlive it. Either way, what it captures must be `Send`. So the natural fan-out needs no ceremony, and a binding used again after a task took it is an error that says to declare it before `Io.scope`.
 
 `scope`, `spawn`, `fork` and `join` are library code over the runtime's scheduler and `Io.park`; nursery semantics are not built into the language.
 
@@ -652,7 +661,19 @@ Io.scope((s) => {
 
 `Mutex<T>`, `Atomic*` and `Channel<T>` are library types whose operations perform `Io` (through `Io.park`). Every synchronization is therefore visible in the type, pure code cannot observe shared mutable state, and the deterministic simulator (§6.4) controls every interleaving.
 
-`channel<T>()` gives a `Sender<T>` and a `Receiver<T>`. A channel closes when its last sender is dropped, or when a sender is closed with `tx.close()`, which consumes it; its receivers then drain what was sent and see the end: `recv()` gives `#None`, and `for (const m of rx)` stops. A task that is to close a channel therefore owns its sender — calling `close` moves `tx` into the task — and a task that only borrows a sender leaves the channel open after it finishes.
+`channel<T>()` gives a `Sender<T>` and a `Receiver<T>`. A `Sender` is `Clone`, one per producer. A channel ends when its last sender is gone — dropped, or closed with `tx.close()`, which consumes it — and its receivers then drain what was sent and see the end: `recv()` gives `#None`, and `for (const m of rx)` stops. A task that is to end a channel therefore owns its sender: a sender cloned inside the scope is moved into its task and dropped when the task ends.
+
+`Mutex<T>` holds state that tasks share, usually through an `Arc`: `const totals = Arc.new(Mutex.new(HashMap.new()))`, then `totals.clone()` per task. The state is reached only inside `lock`, which lends it `mut` to a body that performs no effects and gives back a `Send` value:
+
+```ts
+impl<T extends Send> Mutex<T> {
+  export function new(v: T): Mutex<T>;
+  export function lock<R extends Send>(self: readonly Self, body: once (v: mut T) => R): R uses Io;
+}
+shared.lock((m) => { m.insert(url, n); });
+```
+
+Because the body cannot perform effects, no lock is ever held across a scheduling point, so a mutex cannot be part of a deadlock cycle through I/O, and because what it returns is `Send`, nothing borrowed from the state outlives the lock.
 
 ```ts
 const [tx, rx] = channel<Hit>();

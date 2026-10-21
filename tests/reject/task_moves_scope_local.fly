@@ -1,0 +1,10 @@
+// error: `names` was moved and cannot be used here: the task at 7:13 moved it in, since it is declared inside the task's scope
+// A task borrows only what outlives its scope; what is declared inside, it moves in (§6.1).
+import { println } from "std/io";
+export function main(): void uses Io {
+  Io.scope((s) => {
+    const names = ["a".toString(), "b".toString()];
+    s.spawn(() => { println(names.join(",")); });
+    println(names.join(";"));
+  });
+}

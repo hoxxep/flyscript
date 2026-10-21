@@ -41,8 +41,12 @@ pub struct Closure {
     pub env: Vec<(String, Shared)>,
     pub module: usize,
     /// The function whose body the closure appears in, for its recorded types.
-    pub owner: usize,    /// The generic arguments of that function's frame.
+    pub owner: usize,
+    /// The generic arguments of that function's frame.
     pub tenv: super::interp::TEnv,
+    /// What it moved in and owns, with types: a `once` closure drops it when its call ends.
+    pub owned: Vec<(String, crate::check::types::Ty)>,
+    pub once: bool,
 }
 
 #[derive(Clone)]
@@ -88,6 +92,14 @@ impl Value {
 
     pub fn text(s: &str) -> Value {
         Value::Text(Arc::from(s))
+    }
+
+    /// Follows borrows only, stopping at a shared cell (a region reference or a mutex).
+    pub fn deref_once(&self) -> Value {
+        match self {
+            Value::Ptr(p) => get(p).deref_once(),
+            v => v.clone(),
+        }
     }
 
     /// Follows borrows and region references to the value they point at.

@@ -26,6 +26,8 @@ pub struct World {
     /// The seed, also used by the task scheduler.
     pub seed: u64,
     rng: u64,
+    /// Simulated time in nanoseconds: `Io.now` reads it and `Io.sleep` advances it.
+    pub clock: u64,
 }
 
 impl Default for World {
@@ -46,6 +48,7 @@ impl World {
             fault_percent: 0,
             seed,
             rng: seed.max(1),
+            clock: 0,
         }
     }
 

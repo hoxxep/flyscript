@@ -274,6 +274,27 @@ impl Interp {
                 }
                 Ok(Value::Unit)
             }
+            "Sender.clone" => {
+                let ch = native(&a(0), "Sender")?;
+                self.sched.add_sender(ch);
+                Ok(Value::Native("Sender", ch))
+            }
+            // A mutex is a cell its clones share; `lock` lends the value to the body (§6.2).
+            "Mutex.new" => Ok(Value::Ref(shared(a(0)))),
+            "Mutex.lock" => {
+                let root = match a(0).deref_once() {
+                    Value::Ref(r) => r,
+                    other => return Err(panic(format!("not a mutex: {}", other.show()))),
+                };
+                self.sched.yield_now(self.task)?;
+                self.call_value(&a(1), vec![Value::Ptr(Place { root, path: Vec::new() })])
+            }
+            "Vec.drain" => {
+                let p = place_of(&a(0))?;
+                let items = list(&get(&p));
+                set(&p, Value::List(Vec::new()));
+                Ok(gens_mod::new_gen(self, GenKind::Items { items, pos: 0 }))
+            }
             "Sender.close" | "Sender.drop" => {
                 let ch = native(&a(0), "Sender")?;
                 self.sched.close(self.task, ch)?;
@@ -444,7 +465,8 @@ impl Interp {
                 Ok(Value::Unit)
             }
             "Box.new" | "Arc.new" | "Box.get" | "Arc.get" => Ok(a(0)),
-            "Arc.clone" => Ok(a(0).deref()),
+            // The same shared value: through the borrow of the `Arc`, never into a cell it shares.
+            "Arc.clone" => Ok(a(0).deref_once()),
             "HashMap.new" => Ok(Value::List(Vec::new())),
             "HashMap.insert" => {
                 let p = place_of(&a(0))?;

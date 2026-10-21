@@ -207,6 +207,9 @@ pub struct Typed {
     /// Moves out of bindings, by the moving expression's span, with the field path moved: the
     /// evaluator's drop flags (§5.6).
     pub moves: HashMap<Span, Vec<String>>,
+    /// The bindings each closure moves in, by the closure's span: they leave their scope's
+    /// ownership when it is made.
+    pub captured_moves: HashMap<Span, Vec<(String, Ty)>>,
     /// Tag constructions `#A(x)` whose one argument is the whole of a larger payload (§3.2).
     pub whole: std::collections::HashSet<Span>,
     /// The type each part of a tag, record or list literal was checked against, by the part's
@@ -487,7 +490,7 @@ impl Program {
                 }
             }
         }
-        for name in ["Fail", "Yield", "Region", "Io", "String", "Ref", "Vec", "Iterable", "LentBy", "Copy", "Send", "Eq", "Show", "Ord", "Cont", "Box"] {
+        for name in ["Fail", "Yield", "Region", "Io", "String", "Ref", "Vec", "Iterable", "LentBy", "Copy", "Send", "Eq", "Show", "Ord", "Cont", "Box", "Arc"] {
             let prelude = self.module_named("std/prelude").expect("prelude");
             let layout = self.module_named("std/layout").expect("layout");
             let found = self.modules[prelude].exports.get(name).or_else(|| self.modules[layout].exports.get(name));

@@ -20,6 +20,16 @@ type LoanId = usize;
 /// body makes of each.
 type LambdaFrame = (HashSet<VarId>, HashMap<VarId, (Use, Span)>);
 
+/// What a closure is for, where that changes how it captures (§6.1).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Role {
+    Plain,
+    /// The body of `Io.scope`: its tasks may borrow what is outside it.
+    ScopeBody,
+    /// A task given to `spawn` or `fork`: it moves in what is declared inside its scope.
+    Task,
+}
+
 /// A position in the program's structure: the chain of enclosing constructs, each with the
 /// index of the child taken.
 type Chain = Vec<(u32, Node, u32)>;
@@ -126,6 +136,9 @@ pub fn check_function(p: &mut Program, fid: FnId) {
         lent_args: HashMap::new(),
         lambda_params: HashSet::new(),
         iterating: false,
+        next_role: Role::Plain,
+        roles: Vec::new(),
+        task_moved: HashMap::new(),
         sites: HashMap::new(),
         ret_ty,
         sources,
@@ -134,6 +147,7 @@ pub fn check_function(p: &mut Program, fid: FnId) {
         closure_modes: HashMap::new(),
         var_modes: HashMap::new(),
         moves: HashMap::new(),
+        captured_moves: HashMap::new(),
     };
     // Pass 1 collects every use of every binding, with its position; pass 2 checks.
     for pass in 0..2 {
@@ -168,8 +182,10 @@ pub fn check_function(p: &mut Program, fid: FnId) {
     }
     o.p.note = None;
     let moves = std::mem::take(&mut o.moves);
+    let captured = std::mem::take(&mut o.captured_moves);
     if let Some(t) = o.p.typed.get_mut(&fid) {
         t.moves = moves;
+        t.captured_moves = captured;
     }
 }
 
@@ -215,6 +231,11 @@ struct Own<'p> {
     /// Set while a `for…of` evaluates a generator call it iterates: the items it yields carry
     /// the call's sources' borrows, as a result would (§5.5).
     iterating: bool,
+    /// The role of the closure about to be checked, and of each being checked, innermost last.
+    next_role: Role,
+    roles: Vec<Role>,
+    /// Bindings a task moved in only because they are declared inside its scope, with where.
+    task_moved: HashMap<VarId, Span>,
     /// Variable ids by declaration site, so they are the same in both passes and in every
     /// traversal of a loop body.
     sites: HashMap<(usize, String), VarId>,
@@ -230,6 +251,8 @@ struct Own<'p> {
     var_modes: HashMap<VarId, (FnMode, String)>,
     /// Each move out of a binding: the moving expression, and the field path moved.
     moves: HashMap<Span, Vec<String>>,
+    /// The bindings each closure moves in, by the closure's span.
+    captured_moves: HashMap<Span, Vec<(String, Ty)>>,
 }
 
 impl<'p> Own<'p> {
@@ -478,6 +501,12 @@ impl<'p> Own<'p> {
         }
         if self.captured(path.root) {
             self.record_capture(path.root, how, at);
+            // The closure owns what it moved in, so a move inside its body is the closure's to
+            // record, for its drop flags.
+            let ty = self.vars[path.root].ty.clone();
+            if how == Use::Move && !self.collecting && !self.p.is_copy(&ty) && !matches!(ty, Ty::Borrow(..)) && !self.p.is_copy(&self.ty_of(e)) {
+                self.moves.insert(at, path.fields.clone());
+            }
             return Val { loans: self.state.holds.get(&path.root).cloned().unwrap_or_default() };
         }
         let ty = self.ty_of(e);
@@ -486,7 +515,14 @@ impl<'p> Own<'p> {
         if let Some(m) = self.state.moved.iter().find(|m| m.overlaps(&path) || path.overlaps(m)).cloned() {
             let name = self.path_name(&path);
             let what = if m == path { format!("`{name}` was moved") } else { format!("`{}` was moved", self.path_name(&m)) };
-            self.err(at, format!("{what} and cannot be used here"));
+            let why = match self.task_moved.get(&m.root) {
+                Some(span) => {
+                    let (line, col) = crate::diag::line_col(&self.p.modules[self.module].source, span.start);
+                    format!(": the task at {line}:{col} moved it in, since it is declared inside the task's scope (declare it before `Io.scope` to lend it to the tasks instead)")
+                }
+                None => String::new(),
+            };
+            self.err(at, format!("{what} and cannot be used here{why}"));
         }
         let held: BTreeSet<LoanId> = self.state.holds.get(&path.root).cloned().unwrap_or_default();
         match how {
@@ -1253,13 +1289,18 @@ impl<'p> Own<'p> {
                 v.loans.into_iter().filter(|l| Some(self.loans[*l].path.root) != callee_root).collect();
             arg_vals.push((None, Val { loans: held }));
         }
+        let role = self.closure_role(fid);
         for (i, a) in args.iter().enumerate() {
             let at = self.ty_of(a);
             let how = match params.get(i) {
                 Some((_, p)) => self.arg_use(p, &at),
                 None => Use::Move,
             };
+            if matches!(a.kind, ExprKind::Lambda { .. }) {
+                self.next_role = role;
+            }
             let v = self.expr(a, how);
+            self.next_role = Role::Plain;
             if let Some((_, p)) = params.get(i) {
                 let p = p.clone();
                 self.check_mode(a, &p, "passed");
@@ -1306,6 +1347,22 @@ impl<'p> Own<'p> {
     }
 
     /// A task may capture only `Send` values, moved in, or `readonly` borrows of them (§6.1).
+    /// Whether a call's closure argument is a scope's body or a task (§6.1).
+    fn closure_role(&self, fid: Option<FnId>) -> Role {
+        let Some(fid) = fid else { return Role::Plain };
+        let info = &self.p.fns[fid];
+        let on = |name: &str| info.impl_id.is_some_and(|i| matches!(&self.p.impls[i].target, Ty::Named(d, _) if self.p.defs[*d].name == name));
+        if !self.p.modules[info.module].is_std {
+            Role::Plain
+        } else if matches!(info.name.as_str(), "spawn" | "fork") && on("Scope") {
+            Role::Task
+        } else if info.name == "scope" && on("Io") {
+            Role::ScopeBody
+        } else {
+            Role::Plain
+        }
+    }
+
     fn task_captures(&mut self, fid: Option<FnId>, args: &[Expr]) {
         let Some(fid) = fid else { return };
         let info = &self.p.fns[fid];
@@ -1348,6 +1405,14 @@ impl<'p> Own<'p> {
 
     fn lambda(&mut self, e: &Expr, params: &[ast::Param], body: &Expr) -> Val {
         let escapes = self.escaping;
+        let role = std::mem::replace(&mut self.next_role, Role::Plain);
+        // A task borrows only what is outside its scope, which outlives it; what is declared
+        // inside, it moves in (§6.1).
+        let outside_scope: Option<HashSet<VarId>> = match role {
+            Role::Task => self.roles.iter().rposition(|r| *r == Role::ScopeBody).map(|i| self.lambdas[i].0.clone()).or_else(|| Some(HashSet::new())),
+            _ => None,
+        };
+        self.roles.push(role);
         // Check the body first, recording how it uses each binding it captures.
         let outer: HashSet<VarId> = self.scopes.iter().flat_map(|sc| sc.values().copied()).collect();
         self.lambdas.push((outer, HashMap::new()));
@@ -1365,6 +1430,7 @@ impl<'p> Own<'p> {
         self.deferred = saved_deferred;
         self.state = saved_state;
         let (_, uses) = self.lambdas.pop().expect("lambda frame");
+        self.roles.pop();
         // The closure's mode follows from what its body does with its captures (§4.3): changing
         // one makes it `mut`, giving one away makes it `once`.
         let mut mode = (FnMode::Shared, String::new());
@@ -1386,14 +1452,33 @@ impl<'p> Own<'p> {
         for (v, (how, span)) in captures {
             // A closure that escapes owns what it captures: a borrow is copied (with its loans),
             // a `Copy` value is copied, anything else is moved (§4.3).
-            let how = if escapes { Use::Move } else { how };
+            let how = match &outside_scope {
+                _ if escapes => Use::Move,
+                Some(outside) if !outside.contains(&v) => {
+                    if how != Use::Move {
+                        self.task_moved.insert(v, e.span);
+                    }
+                    Use::Move
+                }
+                _ => how,
+            };
             if escapes && !self.collecting && !self.sendable(v, true) {
                 let (name, shown) = (self.vars[v].name.clone(), self.show(&self.vars[v].ty.clone()));
                 self.err(span, format!("a closure that escapes owns what it captures, so it can capture only `Send` values: `{name}` is a `{shown}`"));
             }
             self.record_use(v, span);
-            let ident = Expr { kind: ExprKind::Ident(self.vars[v].name.clone()), span };
+            // The capture happens where the closure is made: a binding moved in leaves its
+            // scope's ownership then, not when the closure runs.
+            let ident = Expr { kind: ExprKind::Ident(self.vars[v].name.clone()), span: e.span };
             let val = self.use_place(&ident, Path { root: v, fields: Vec::new() }, how);
+            if self.moves.remove(&e.span).is_some() {
+                let (name, ty) = (self.vars[v].name.clone(), self.vars[v].ty.clone());
+                // A loop's body is checked twice; the closure captures once.
+                let list = self.captured_moves.entry(e.span).or_default();
+                if !list.iter().any(|(n, _)| *n == name) {
+                    list.push((name, ty));
+                }
+            }
             loans.extend(val.loans);
         }
         Val { loans }
