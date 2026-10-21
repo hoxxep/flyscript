@@ -3,6 +3,7 @@
 pub mod builtins;
 pub mod generators;
 pub mod interp;
+pub mod sched;
 pub mod value;
 pub mod world;
 

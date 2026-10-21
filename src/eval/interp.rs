@@ -94,6 +94,9 @@ pub struct Interp {
     pub scopes: Arc<Mutex<HashMap<u64, super::builtins::ScopeState>>>,
     /// The span of the call being made, so a builtin can see its expected result type.
     pub call_span: Option<Span>,
+    pub sched: Arc<super::sched::Sched>,
+    /// The task this interpreter is running (0 is the program's first task).
+    pub task: u64,
 }
 
 pub fn panic(msg: impl Into<String>) -> Ctl {
@@ -102,6 +105,7 @@ pub fn panic(msg: impl Into<String>) -> Ctl {
 
 impl Interp {
     pub fn new(prog: Arc<Program>, world: Arc<Mutex<World>>) -> Interp {
+        let seed = world.lock().expect("world").seed;
         Interp {
             prog,
             world,
@@ -111,6 +115,8 @@ impl Interp {
             gens: Arc::new(super::generators::Gens::default()),
             scopes: Arc::new(Mutex::new(HashMap::new())),
             call_span: None,
+            sched: super::sched::Sched::new(seed),
+            task: 0,
         }
     }
 
@@ -126,6 +132,8 @@ impl Interp {
             gens: self.gens.clone(),
             scopes: self.scopes.clone(),
             call_span: None,
+            sched: self.sched.clone(),
+            task: self.task,
         }
     }
 

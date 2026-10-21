@@ -13,6 +13,10 @@ use crate::check::types::{Prim, Ty};
 #[derive(Default)]
 pub struct ScopeState {
     pub failure: Option<Value>,
+    pub panic: Option<String>,
+    /// Every task started in the scope; the scope waits for all of them.
+    pub tasks: Vec<u64>,
+    /// Forked tasks' outcomes, by task.
     pub fibers: HashMap<u64, Result<Value, Value>>,
 }
 
@@ -121,44 +125,103 @@ impl Interp {
                 let sid = self.fresh_id();
                 self.scopes.lock().expect("scopes").insert(sid, ScopeState::default());
                 let r = self.call_value(&a(0), vec![Value::Native("Scope", sid)]);
-                let failure = self.scopes.lock().expect("scopes").remove(&sid).and_then(|s| s.failure);
-                match (r, failure) {
+                // A scope returns only when every task started in it has finished (§6.1).
+                let tasks = self.scopes.lock().expect("scopes").get(&sid).map(|s| s.tasks.clone()).unwrap_or_default();
+                for t in tasks {
+                    self.sched.join(self.task, t)?;
+                }
+                let st = self.scopes.lock().expect("scopes").remove(&sid).unwrap_or_default();
+                if let Some(p) = st.panic {
+                    return Err(panic(p));
+                }
+                match (r, st.failure) {
                     (Ok(_), Some(f)) => self.raise(f),
                     (r, _) => r,
                 }
             }
-            "Scope.spawn" => {
-                self.call_value(&a(1), Vec::new())?;
-                Ok(Value::Unit)
-            }
-            "Scope.fork" => {
+            "Scope.spawn" | "Scope.fork" => {
                 let sid = native(&a(0), "Scope")?;
-                let id = self.fresh_id();
-                self.handlers.push(Handler::Fail { id });
-                let r = self.call_value(&a(1), Vec::new());
-                self.handlers.pop();
-                let outcome = match r {
-                    Ok(v) => Ok(v),
-                    Err(Ctl::Unwind(h, e)) if h == id => Err(e),
-                    Err(e) => return Err(e),
-                };
-                let fid = self.fresh_id();
-                let mut scopes = self.scopes.lock().expect("scopes");
-                let st = scopes.entry(sid).or_default();
-                if let Err(e) = &outcome {
-                    st.failure.get_or_insert_with(|| e.clone());
-                }
-                st.fibers.insert(fid, outcome);
-                Ok(Value::Native("Fiber", fid))
+                let forked = key == "Scope.fork";
+                let tid = self.sched.spawn();
+                self.scopes.lock().expect("scopes").entry(sid).or_default().tasks.push(tid);
+                let mut child = self.fork_thread();
+                child.task = tid;
+                child.handlers.clear();
+                let task = a(1);
+                std::thread::spawn(move || {
+                    if child.sched.start(tid).is_err() {
+                        return;
+                    }
+                    let id = child.fresh_id();
+                    child.handlers.push(Handler::Fail { id });
+                    let r = child.call_value(&task, Vec::new());
+                    child.handlers.pop();
+                    {
+                        let mut scopes = child.scopes.lock().expect("scopes");
+                        let st = scopes.entry(sid).or_default();
+                        match r {
+                            Ok(v) => {
+                                st.fibers.insert(tid, Ok(v));
+                            }
+                            Err(Ctl::Unwind(h, e)) if h == id => {
+                                st.failure.get_or_insert_with(|| e.clone());
+                                st.fibers.insert(tid, Err(e));
+                            }
+                            Err(Ctl::Panic(m)) => {
+                                st.panic.get_or_insert(m);
+                            }
+                            Err(other) => {
+                                st.panic.get_or_insert(format!("{other:?}"));
+                            }
+                        }
+                    }
+                    child.sched.finish(tid);
+                });
+                // Starting a task is a scheduling point.
+                self.sched.yield_now(self.task)?;
+                Ok(if forked { Value::Native("Fiber", tid) } else { Value::Unit })
             }
             "Fiber.join" => {
-                let fid = native(&a(0), "Fiber")?;
-                let outcome = self.scopes.lock().expect("scopes").values().find_map(|s| s.fibers.get(&fid).cloned());
+                let tid = native(&a(0), "Fiber")?;
+                self.sched.join(self.task, tid)?;
+                let outcome = self.scopes.lock().expect("scopes").values().find_map(|s| s.fibers.get(&tid).cloned());
                 match outcome {
                     Some(Ok(v)) => Ok(v),
                     // The scope is cancelled; its first failure is rethrown (§6.1).
                     Some(Err(e)) => self.raise(e),
-                    None => Err(panic("unknown fiber")),
+                    None => Err(panic("a joined task did not finish")),
+                }
+            }
+
+            // ---- channels (§6.2) ----
+            "channel" => {
+                let ch = self.sched.channel();
+                Ok(Value::Tuple(vec![Value::Native("Sender", ch), Value::Native("Receiver", ch)]))
+            }
+            "Reply.new" => {
+                let ch = self.sched.channel();
+                Ok(Value::Tuple(vec![Value::Native("Reply", ch), Value::Native("Pending", ch)]))
+            }
+            "Sender.send" | "Reply.send" => {
+                let ch = match a(0).deref() {
+                    Value::Native(_, ch) => ch,
+                    other => return Err(panic(format!("not a sender: {}", other.show()))),
+                };
+                self.sched.send(self.task, ch, a(1))?;
+                Ok(Value::Unit)
+            }
+            "Pending.wait" | "Receiver.recv" => {
+                let ch = match a(0).deref() {
+                    Value::Native(_, ch) => ch,
+                    other => return Err(panic(format!("not a receiver: {}", other.show()))),
+                };
+                self.sched.recv(self.task, ch)
+            }
+            "Receiver.each" => {
+                let ch = native(&a(0), "Receiver")?;
+                loop {
+                    let v = self.sched.recv(self.task, ch)?;
+                    self.yield_value(v)?;
                 }
             }
 

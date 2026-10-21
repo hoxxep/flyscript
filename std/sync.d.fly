@@ -1,13 +1,28 @@
+// Channels between tasks (§6.2). Sending and receiving are `Io`: each is a scheduling point the
+// deterministic simulator controls.
+
 export struct Receiver<T>;
 export struct Sender<T>;
 export struct Reply<T>;
+export struct Pending<T>;
 
-impl<T> Iterable<T, [Io]> for Receiver<T> {
-  function each(self: readonly Self): void uses Yield<T>, Io;
-}
+export function channel<T>(): [Sender<T>, Receiver<T>];
+
 impl<T> Sender<T> {
   export function send(self: readonly Self, v: T): void uses Io;
 }
+impl<T> Receiver<T> {
+  export function recv(self: readonly Self): T uses Io;
+}
+impl<T> Iterable<T, [Io]> for Receiver<T> {
+  function each(self: readonly Self): void uses Yield<T>, Io;
+}
+
+// A one-shot reply: the requester keeps the `Pending` half and waits on it.
 impl<T> Reply<T> {
+  export function new(): [Reply<T>, Pending<T>];
   export function send(self: Self, v: T): void uses Io;
+}
+impl<T> Pending<T> {
+  export function wait(self: Self): T uses Io;
 }

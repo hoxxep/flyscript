@@ -23,6 +23,8 @@ pub struct World {
     pub quotas: HashMap<String, bool>,
     /// The chance, in percent, that an I/O operation times out.
     pub fault_percent: u64,
+    /// The seed, also used by the task scheduler.
+    pub seed: u64,
     rng: u64,
 }
 
@@ -42,6 +44,7 @@ impl World {
             profiles: HashMap::new(),
             quotas: HashMap::new(),
             fault_percent: 0,
+            seed,
             rng: seed.max(1),
         }
     }

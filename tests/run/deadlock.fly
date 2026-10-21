@@ -1,0 +1,11 @@
+// Waiting for a reply nobody will send is reported, not hung on (§6.4).
+// expect: waiting
+// expect: <panic: deadlock: every task is waiting>
+import { Reply } from "std/sync";
+import { println } from "std/io";
+
+export function main(): void uses Io {
+  const [reply, answer] = Reply.new<u32>();
+  println("waiting");
+  println(`${answer.wait()}`);
+}

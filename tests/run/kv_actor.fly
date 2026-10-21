@@ -1,0 +1,28 @@
+// The actor from A.6: a task that owns a map and serves requests from a channel.
+// expect: #Some("1")
+// expect: #None
+// expect: #Some("2")
+import { Command, kv } from "../../examples/kv_actor";
+import { channel, Reply } from "std/sync";
+import { println } from "std/io";
+
+export function main(): void uses Io {
+  const [tx, rx] = channel<Command>();
+  try {
+    Io.scope((s) => {
+      s.spawn(() => kv(rx));
+      tx.send(#Put { key: String.fromStr("a"), val: String.fromStr("1") });
+      const [r1, a1] = Reply.new<Option<String>>();
+      tx.send(#Get { key: String.fromStr("a"), reply: r1 });
+      println(`${a1.wait()}`);
+      const [r2, a2] = Reply.new<Option<String>>();
+      tx.send(#Get { key: String.fromStr("b"), reply: r2 });
+      println(`${a2.wait()}`);
+      tx.send(#Put { key: String.fromStr("a"), val: String.fromStr("2") });
+      const [r3, a3] = Reply.new<Option<String>>();
+      tx.send(#Get { key: String.fromStr("a"), reply: r3 });
+      println(`${a3.wait()}`);
+      tx.send(#Stop);
+    });
+  } catch (_) { println("scope failed"); }
+}

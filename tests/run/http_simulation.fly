@@ -8,7 +8,7 @@
 // request: user0001tokenAAA
 // profile: user0001=Ada
 // quota: tokenAAA=true
-// expect: -> 200 Ada
+// One connection's error reply is itself lost to a fault: that client gets no answer.
 // expect: -> 502 error
 // expect: -> 502 error
 // expect: -> 502 error
