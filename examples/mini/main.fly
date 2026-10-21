@@ -1,6 +1,6 @@
 // Mini: a compiler for a small functional language, written in Flyscript as a test of goal 6 (§1).
 // source -> tokens (lexer) -> syntax tree (syntax) -> types (check) -> ownership (moves)
-// -> bytecode (codegen) -> run.
+// -> comptime folding, on the machine itself (codegen) -> bytecode (codegen) -> run.
 // expect: let x = 2 in x * (3 + 4)  :  int  =  14
 // expect: let twice = fn(f, x) => f(f(x)) in twice(fn(n) => n * 2, 5)  :  int  =  20
 // expect: if 1 < 2 then 10 else 20  :  int  =  10
@@ -68,6 +68,14 @@
 // expect:     let t = T(5) in (if 1 < 2 then spend(t) else 0) + spend(t)
 // expect:                                                             ^
 // expect: let p = {x = 3, y = 4} in p.x + p.y + p.x  :  int  =  10
+// expect: def fact(n) = if n < 1 then 1 else n * fact(n - 1);
+// expect: comptime(fact(10)) + 1  :  int  =  3628801
+// expect: error at 1:10: this performs `Io`, which is not allowed here
+// expect:     comptime(print(1))
+// expect:              ^
+// expect: error at 1:23: `x` is not known at compile time
+// expect:     let x = 3 in comptime(x * 2)
+// expect:                           ^
 // expect: error at 2:1: this `case` does not handle Blue
 // expect:     case Green of Red => 1 | Green => 2
 // expect:     ^
@@ -89,11 +97,11 @@ import { Problem, CompileError, Diag } from "./lexer";
 import { parse } from "./syntax";
 import { check } from "./check";
 import { checkMoves } from "./moves";
-import { Instr, Value, generate, run, showValue } from "./codegen";
+import { Instr, Value, fold, generate, run, showValue } from "./codegen";
 
 type Compiled = { code: Vec<Instr>; globals: Vec<Value>; ty: String; ctorNames: Vec<String> };
 
-export function compile(src: str): Compiled uses Fail<CompileError> {
+export function compile(src: str): Compiled uses Fail<CompileError>, Io {
   const prog = parse(src);
   // Every type error is collected; the program is compiled only if there were none.
   let errors: Vec<Problem> = Vec.new();
@@ -104,7 +112,8 @@ export function compile(src: str): Compiled uses Fail<CompileError> {
     checked.ty
   } with Diag { report(e) resumes k => { errors.push(e); k() } };
   if (errors.len() > 0) { throw #Many(errors) }
-  const g = generate(prog);
+  // What `comptime` asks is computed now, by the machine itself, and becomes part of the code.
+  const g = generate(prog, fold(prog));
   { code: g.code, globals: g.globals, ty, ctorNames: g.ctorNames }
 }
 
@@ -184,6 +193,9 @@ export function main(): void uses Io {
     "data Token = T(int);\ndef spend(t) = case t of T(n) => n;\nlet t = T(5) in if 1 < 2 then spend(t) else 0",
     "data Token = T(int);\ndef spend(t) = case t of T(n) => n;\nlet t = T(5) in (if 1 < 2 then spend(t) else 0) + spend(t)",
     "let p = {x = 3, y = 4} in p.x + p.y + p.x",
+    "def fact(n) = if n < 1 then 1 else n * fact(n - 1);\ncomptime(fact(10)) + 1",
+    "comptime(print(1))",
+    "let x = 3 in comptime(x * 2)",
     "data Color = Red | Green | Blue;\ncase Green of Red => 1 | Green => 2",
     "let a = 1 + true in\nlet b = if 3 then 4 else false in\nnope(a)",
   ];

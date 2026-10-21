@@ -12,7 +12,7 @@ export type CompileError = Problem | #Many(Vec<Problem>);
 
 // ---- Lexer ----
 
-export enum Tok { #Int(i64), #Ident(String), #Let, #In, #If, #Then, #Else, #Fn, #Def, #Pure, #Data, #Case, #Of, #Bar, #True, #False, #LParen, #RParen, #LBrace, #RBrace, #Dot, #Comma, #Semi, #Eq, #Plus, #Minus, #Star, #Less, #Arrow, #Eof }
+export enum Tok { #Int(i64), #Ident(String), #Let, #In, #If, #Then, #Else, #Fn, #Def, #Pure, #Comptime, #Data, #Case, #Of, #Bar, #True, #False, #LParen, #RParen, #LBrace, #RBrace, #Dot, #Comma, #Semi, #Eq, #Plus, #Minus, #Star, #Less, #Arrow, #Eof }
 
 impl Eq for Tok;
 impl Clone for Tok;
@@ -24,7 +24,7 @@ export function isAlpha(b: u8): bool { (b >= b'a' && b <= b'z') || (b >= b'A' &&
 export function keyword(word: str): Tok {
   match (word) {
     "let" => #Let, "in" => #In, "if" => #If, "then" => #Then, "else" => #Else,
-    "fn" => #Fn, "def" => #Def, "pure" => #Pure, "data" => #Data, "case" => #Case, "of" => #Of, "true" => #True, "false" => #False,
+    "fn" => #Fn, "def" => #Def, "pure" => #Pure, "comptime" => #Comptime, "data" => #Data, "case" => #Case, "of" => #Of, "true" => #True, "false" => #False,
     _ => #Ident(word.toString()),
   }
 }

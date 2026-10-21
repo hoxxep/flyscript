@@ -58,6 +58,7 @@ impl Moves {
         for (const a of args) { self.expr(a); }
       }
       // Reading a field reads the record; it does not move it.
+      #Comptime(inner, _) => self.expr(inner),
       #Field(target, _, _) => match (target) {
         #Var(_, _) => {},
         other => self.expr(other),

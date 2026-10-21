@@ -48,5 +48,6 @@ Versions are pre-1.0 while the language is being designed. The specification was
 | 0.48 | Mini types records by rows; specialization keys erase regions |
 | 0.49 | Patterns match through pointers by borrow; regions may point outward; `Ref` keys maps; `Box.into` |
 | 0.50 | Mini infers effect rows; two-phase `mut` arguments; string patterns match owners |
+| 0.51 | Mini checks ownership; loop variables release their loans per iteration |
 
 `review-round-*.md` are the design review rounds that produced 0.2–0.15; `programs-against-v0.13.md` is the program-writing exercise against what is now 0.13.

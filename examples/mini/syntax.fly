@@ -18,7 +18,11 @@ export enum Expr {
   // `{x = 1, y = 2}` and `r.x`: structural records, typed by rows.
   #Record(Vec<[String, Expr]>, Span),
   #Field(Box<Expr>, String, Span),
+  // `comptime(e)`: evaluated while compiling, its value put in the code in its place.
+  #Comptime(Box<Expr>, Span),
 }
+
+impl Clone for Expr;
 
 // `Cons(h, t) => body`: a constructor and names for its fields.
 export type Arm = { ctor: String; binds: Vec<String>; body: Expr; span: Span };
@@ -35,7 +39,7 @@ export type Program = { datas: Vec<DataDecl>; defs: Vec<Def>; main: Expr };
 export function spanOf(e: readonly Expr): Span {
   match (e) {
     #Int(_, s) | #Bool(_, s) | #Var(_, s) => s,
-    #Bin(_, _, _, s) | #If(_, _, _, s) | #Let(_, _, _, s) | #Fn(_, _, s) | #Call(_, _, s) | #Case(_, _, s) | #Record(_, s) | #Field(_, _, s) => s,
+    #Bin(_, _, _, s) | #If(_, _, _, s) | #Let(_, _, _, s) | #Fn(_, _, s) | #Call(_, _, s) | #Case(_, _, s) | #Record(_, s) | #Field(_, _, s) | #Comptime(_, s) => s,
   }
 }
 
@@ -237,6 +241,13 @@ impl Parser {
       #True => #Bool(true, span),
       #False => #Bool(false, span),
       #Ident(n) => #Var(n.clone(), span),
+      #Comptime => {
+        self.bump();
+        self.expect(#LParen, "`(`");
+        const inner = self.expr();
+        if (self.peek() != #RParen) { throw #Parse { at: self.here().start, message: `expected \`)\`` }; }
+        #Comptime(Box.new(inner), { start: span.start, end: self.here().end })
+      }
       #LBrace => {
         self.bump();
         let fields: Vec<[String, Expr]> = Vec.new();

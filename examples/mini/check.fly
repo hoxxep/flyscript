@@ -42,6 +42,8 @@ export struct Checker<region R> {
   effects: Ref<R, Type<R>>;
   // Each binding's type, by where it is made (`start:name`), for the ownership pass.
   bindings: Vec<[String, Ref<R, Type<R>>]>;
+  // Inside `comptime(…)`, how many scopes enclosed it: their locals are not known yet.
+  comptimeBase: Option<usize>;
 }
 
 impl<region R> Checker<R> {
@@ -222,6 +224,12 @@ impl<region R> Checker<R> {
       // The scheme stays borrowed from `self.scopes` while `self.ids` counts on: they are
       // different fields (§4.1).
       if (const #Some(s) = self.scopes[i].get(name)) {
+        // Scope 0 holds the definitions, which exist while compiling; locals do not.
+        if (const #Some(base) = self.comptimeBase) {
+          if (i > 0 && i < base) {
+            Diag.report(#Type { span, message: `\`${name}\` is not known at compile time` });
+          }
+        }
         let map: HashMap<usize, Ref<Type>> = HashMap.new();
         for (const v of s.vars) {
           map.insert(v, Checker.var(self.ids));
@@ -369,6 +377,16 @@ impl<region R> Checker<R> {
         alloc(#Record(allocAll(fs), alloc(#Empty)))
       }
       // `r.x` asks only that `r` have an `x`: whatever else it has is the row's tail.
+      // Evaluated while compiling: it may use definitions, not locals, and perform nothing.
+      #Comptime(inner, span) => {
+        const outerBase = replace(mut self.comptimeBase, #Some(self.scopes.len()));
+        const outerEffects = replace(mut self.effects, alloc(#Empty));
+        const t = self.infer(inner);
+        self.effects = outerEffects;
+        self.comptimeBase = outerBase;
+        Checker.unify(self.ids, t, self.int, span);
+        t
+      }
       #Field(target, name, span) => {
         const tr = self.infer(target);
         const [tf, rest] = [self.fresh(), self.fresh()];
@@ -438,7 +456,7 @@ export type Checked = { ty: String; copies: HashSet<String> };
 // later passes need is copied out of it first.
 export function check(prog: readonly Program): Checked uses Diag {
   region (R) {
-    let c: Checker<R> = Checker { ids: Cell.new(0), scopes: Vec.new(), int: alloc(#Int), bool: alloc(#Bool), ctors: HashMap.new(), ctorsOf: Vec.new(), effects: alloc(#Empty), bindings: Vec.new() };
+    let c: Checker<R> = Checker { ids: Cell.new(0), scopes: Vec.new(), int: alloc(#Int), bool: alloc(#Bool), ctors: HashMap.new(), ctorsOf: Vec.new(), effects: alloc(#Empty), bindings: Vec.new(), comptimeBase: #None };
     const ty = Checker.show(c.program(prog));
     let copies: HashSet<String> = HashSet.new();
     for (const [key, t] of c.bindings) {

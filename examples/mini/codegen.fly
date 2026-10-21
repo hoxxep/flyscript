@@ -10,7 +10,7 @@ export enum Instr { #Push(i64), #Load(usize), #Global(usize), #Store, #Drop, #Ad
 impl Clone for Instr;
 impl Show for Instr;
 
-export struct Gen { code: Vec<Instr>; locals: Vec<String>; globals: HashMap<String, usize>; ctors: HashMap<String, [usize, usize]> }
+export struct Gen { code: Vec<Instr>; locals: Vec<String>; globals: HashMap<String, usize>; ctors: HashMap<String, [usize, usize]>; folded: HashMap<usize, i64> }
 
 // The names an expression uses that it does not bind, in order of first use.
 export function freeVars(e: readonly Expr, bound: mut Vec<String>, out: mut Vec<String>): void {
@@ -39,6 +39,7 @@ export function freeVars(e: readonly Expr, bound: mut Vec<String>, out: mut Vec<
     }
     #Record(fields, _) => { for (const [_, v] of fields) { freeVars(v, mut bound, mut out); } }
     #Field(target, _, _) => freeVars(target, mut bound, mut out),
+    #Comptime(inner, _) => freeVars(inner, mut bound, mut out),
     #Case(scrutinee, arms, _) => {
       freeVars(scrutinee, mut bound, mut out);
       for (const arm of arms) {
@@ -150,6 +151,11 @@ impl Gen {
           }
         }
       }
+      // A folded `comptime` is its value; one not folded yet is code like any other.
+      #Comptime(inner, span) => match (self.folded.get(span.start)) {
+        #Some(n) => { self.emit(#Push(n)); }
+        #None => self.gen(inner),
+      },
       #Record(fields, _) => {
         let names: Vec<String> = Vec.new();
         for (const [name, value] of fields) {
@@ -316,7 +322,47 @@ export function showValue(v: readonly Value, names: readonly String[]): String {
 export type Generated = { code: Vec<Instr>; globals: Vec<Value>; ctorNames: Vec<String> };
 
 // Each definition's body is a function of its parameters alone, placed before the main expression.
-export function generate(prog: readonly Program): Generated {
+export function generate(prog: readonly Program, folded: readonly HashMap<usize, i64>): Generated {
+  generateFor(prog, prog.main, folded)
+}
+
+// `comptime(…)` expressions, innermost first, each compiled against the program's definitions,
+// run on the machine, and remembered by where it is so code generation puts the value there.
+export function fold(prog: readonly Program): HashMap<usize, i64> uses Io {
+  let found: Vec<[usize, Expr]> = Vec.new();
+  for (const d of prog.defs) { comptimes(d.body, mut found); }
+  comptimes(prog.main, mut found);
+  let folded: HashMap<usize, i64> = HashMap.new();
+  for (const [at, e] of found) {
+    const g = generateFor(prog, e, folded);
+    match (run(g.code, g.globals, g.ctorNames)) {
+      #Int(n) => folded.insert(at, n),
+      _ => panic("checked: a comptime value is an int"),
+    }
+  }
+  folded
+}
+
+// The `comptime` expressions under `e`, inner ones before the ones that contain them.
+function comptimes(e: readonly Expr, out: mut Vec<[usize, Expr]>): void {
+  match (e) {
+    #Int(_, _) | #Bool(_, _) | #Var(_, _) => {},
+    #Bin(_, a, b, _) => { comptimes(a, mut out); comptimes(b, mut out); }
+    #If(c, t, f, _) => { comptimes(c, mut out); comptimes(t, mut out); comptimes(f, mut out); }
+    #Let(_, v, b, _) => { comptimes(v, mut out); comptimes(b, mut out); }
+    #Fn(_, b, _) => comptimes(b, mut out),
+    #Call(f, args, _) => { comptimes(f, mut out); for (const a of args) { comptimes(a, mut out); } }
+    #Case(s, arms, _) => { comptimes(s, mut out); for (const arm of arms) { comptimes(arm.body, mut out); } }
+    #Record(fields, _) => { for (const [_, v] of fields) { comptimes(v, mut out); } }
+    #Field(t, _, _) => comptimes(t, mut out),
+    #Comptime(inner, span) => {
+      comptimes(inner, mut out);
+      out.push([span.start, inner.get().clone()]);
+    }
+  }
+}
+
+function generateFor(prog: readonly Program, main: readonly Expr, folded: readonly HashMap<usize, i64>): Generated {
   let names: HashMap<String, usize> = HashMap.new();
   for (const [i, d] of prog.defs.iter().enumerate()) { names.insert(d.name.clone(), i); }
   let ctors: HashMap<String, [usize, usize]> = HashMap.new();
@@ -327,7 +373,7 @@ export function generate(prog: readonly Program): Generated {
       ctorNames.push(c.name.clone());
     }
   }
-  let g = Gen { code: Vec.new(), locals: Vec.new(), globals: names, ctors };
+  let g = Gen { code: Vec.new(), locals: Vec.new(), globals: names, ctors, folded: folded.clone() };
   const skip = g.emit(#Jump(0));
   let globals: Vec<Value> = Vec.new();
   for (const d of prog.defs) {
@@ -339,7 +385,7 @@ export function generate(prog: readonly Program): Generated {
     globals.push(#Closure(addr, d.params.len(), Vec.new()));
   }
   g.code[skip] = #Jump(g.code.len());
-  g.gen(prog.main);
+  g.gen(main);
   { code: g.code, globals, ctorNames }
 }
 
