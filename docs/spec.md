@@ -1,6 +1,6 @@
 # Flyscript
 
-**Language specification, version 0.37**
+**Language specification, version 0.38**
 
 *Affine values, one row calculus, handlers for everything, and `comptime`: Church on the outside, Turing on the inside.*
 
@@ -18,12 +18,16 @@ The whole language rests on five laws. Every rule in this document is a conseque
 4. **Handlers for everything.** Errors, I/O, iteration and region memory are ordinary effects with ordinary handlers. A handler may hold the rest of a computation as a one-shot continuation value; generators and tasks are both built from that one primitive.
 5. **`comptime` is the metalanguage.** Generics, reflection, layout transformation and derived interfaces are ordinary Flyscript code run by the compiler.
 
-### 0.1 Changes from 0.36
+### 0.1 Changes from 0.37
 
-0.37 continues the adversarial audit into handlers, interfaces, templates and tasks. One more escape got through, in the prototype rather than the rules: a suspended body's borrows.
+0.38 checks the specification's own examples against the prototype. Most are fragments, but two showed drift.
 
 | Change | Why |
 | :--- | :--- |
+| `Io`'s operations take and give `Fd`, `Instant`, `Duration` and `WaitKey`, which the prelude defines: `Io.sleep(Duration.ms(250))`, `Io.now().since(start)` (§5.1) | §5.1 declared them so, but the prelude used raw `u32` and `u64` nanoseconds |
+| An interface that is not imported is reported with the import that brings it in (§2.3) | `impl FromJson for T` without the import said "`FromJson` is not an interface" |
+
+--- | :--- |
 | A continuation holds every loan its body still needs after any point where it may perform the handled effect — not only what the body's value holds (§5.3) | an arm could write to `v` while the suspended body still read a slice of it, and a stored continuation let `v` change before it resumed |
 
 --- | :--- |
@@ -492,6 +496,8 @@ effect Io {
 }
 type IoErr = #Reset | #TimedOut | #BrokenPipe | #NotFound | #PermissionDenied;
 ```
+
+`Fd`, `Instant`, `Duration` and `WaitKey` are prelude structs whose fields are private. A `Duration` is built with `Duration.ms(n)`, `Duration.secs(n)` or `Duration.nanos(n)` and compared with `<`; an `Instant` means something only against another, through `later.since(earlier)`. Under the simulator (§6.4) time passes exactly as tasks sleep, so a test of a timeout runs instantly and the same way every time.
 
 These four are the standard effects. They are ordinary declarations; what makes them standard is only that the runtime installs root handlers for `Io` (and for the heap, which is not an effect).
 

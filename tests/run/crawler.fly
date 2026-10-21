@@ -13,7 +13,7 @@ import { HashMap } from "std/collections";
 type FetchErr = #NotFound(String) | #Timeout;
 
 function fetch(url: str): String uses Io, Fail<FetchErr> {
-  Io.sleep(1000);
+  Io.sleep(Duration.ms(1));
   if (url.endsWith("missing")) { throw #NotFound(url.toString()); }
   `<html>${url}</html>`
 }

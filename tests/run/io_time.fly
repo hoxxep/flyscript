@@ -1,0 +1,12 @@
+// expect: slept 250 ms
+// expect: true
+// `Io`'s clock (§5.1): `sleep` takes a `Duration`, `now` gives an `Instant`, and only the
+// difference between two instants means anything. Under the simulator, time passes exactly.
+import { println } from "std/io";
+export function main(): void uses Io {
+  const start = Io.now();
+  Io.sleep(Duration.ms(250));
+  const took = Io.now().since(start);
+  println(`slept ${took.toMs()} ms`);
+  println(`${took >= Duration.ms(250)}`);
+}

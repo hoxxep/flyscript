@@ -5,7 +5,7 @@ effect Step { pause(): void; }
 
 function run(n: u64): void uses Io, Step {
   Io.scope((s) => {
-    s.spawn(() => { Io.sleep(n); });
+    s.spawn(() => { Io.sleep(Duration.ms(n)); });
     Step.pause();
   });
 }

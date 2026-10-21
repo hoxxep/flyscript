@@ -3,7 +3,7 @@
 // before the scope waits for its tasks (§6.1).
 import { println } from "std/io";
 function helper<X>(s: mut Scope<X>, data: str): void {
-  s.spawn(() => { Io.sleep(10); println(data); });
+  s.spawn(() => { Io.sleep(Duration.ms(10)); println(data); });
 }
 export function main(): void uses Io {
   Io.scope((s) => {

@@ -810,8 +810,10 @@ impl Program {
                     let args = self.elab_args(d, args, &inner, t.span);
                     Some((d, args))
                 }
-                _ => {
-                    self.error(m, t.span, format!("`{}` is not an interface", segments[0].name));
+                found => {
+                    let name = &segments[0].name;
+                    let msg = if found.is_none() { self.unknown("interface", name) } else { format!("`{name}` is not an interface") };
+                    self.error(m, t.span, msg);
                     None
                 }
             },

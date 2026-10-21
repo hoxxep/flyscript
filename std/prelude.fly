@@ -309,12 +309,36 @@ export effect Fail<E> { raise(err: E): never; }
 export effect Yield<T> { yield(item: T): void; }
 export effect Region<region R> {}
 export effect Io {
-  read(fd: u32, buf: mut u8[]): Result<usize, IoErr>;
-  write(fd: u32, buf: readonly u8[]): Result<usize, IoErr>;
-  now(): u64;
-  sleep(nanos: u64): void;
-  park(key: u64): void;
+  read(fd: Fd, buf: mut u8[]): Result<usize, IoErr>;
+  write(fd: Fd, buf: readonly u8[]): Result<usize, IoErr>;
+  now(): Instant;
+  sleep(d: Duration): void;
+  // The primitive under locks, channels and `join`.
+  park(on: WaitKey): void;
 }
+
+// A span of time: `Io.sleep(Duration.ms(250))`.
+export struct Duration { private nanos: u64 }
+impl Duration {
+  export function nanos(n: u64): Duration { Duration { nanos: n } }
+  export function ms(n: u64): Duration { Duration { nanos: n * 1000000 } }
+  export function secs(n: u64): Duration { Duration { nanos: n * 1000000000 } }
+  export function toMs(self: readonly Self): u64 { self.nanos / 1000000 }
+  export function toNanos(self: readonly Self): u64 { self.nanos }
+}
+impl Eq for Duration;
+impl Ord for Duration;
+impl Show for Duration;
+// A point in time, as `Io.now()` reads it: only differences between two mean anything.
+export struct Instant { private nanos: u64 }
+impl Instant {
+  export function since(self: readonly Self, earlier: readonly Instant): Duration { Duration.nanos(self.nanos - earlier.nanos) }
+}
+impl Eq for Instant;
+impl Ord for Instant;
+// A file descriptor, and what a parked task waits on: handles the runtime gives out.
+export struct Fd { private n: u32 }
+export struct WaitKey { private n: u64 }
 export type IoErr = #Reset | #TimedOut | #BrokenPipe | #NotFound | #PermissionDenied;
 
 impl<E> Fail<E> {

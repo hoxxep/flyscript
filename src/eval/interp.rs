@@ -360,10 +360,16 @@ impl Interp {
     fn root_io(&mut self, op: &str, args: Vec<Value>) -> R {
         self.sched.yield_now(self.task)?;
         let mut w = self.world.lock().expect("world");
+        // `Instant` and `Duration` are structs of nanoseconds.
+        let nanos = |v: Option<&Value>| match v.map(|v| v.deref()) {
+            Some(Value::Record(fs)) => fs.get("nanos").map_or(0, |n| n.as_int() as u64),
+            Some(other) => other.as_int() as u64,
+            None => 0,
+        };
         Ok(match op {
-            "now" => Value::Int(w.clock as i128),
+            "now" => Value::Record([("nanos".to_string(), Value::Int(w.clock as i128))].into_iter().collect()),
             "sleep" => {
-                w.clock += args.first().map_or(0, |n| n.as_int() as u64);
+                w.clock += nanos(args.first());
                 Value::Unit
             }
             "write" => {
