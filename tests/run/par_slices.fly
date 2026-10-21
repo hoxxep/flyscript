@@ -1,0 +1,10 @@
+// expect: [2.0, 4.0, 6.0, 8.0, 10.0] 30.0
+// `par` and `parReduce` are library code over `ParSplit` (§6.5): a slice splits into disjoint halves.
+import { println } from "std/io";
+import { par, parReduce } from "std/par";
+export function main(): void uses Io {
+  let xs: f32[5] = [1.0, 2.0, 3.0, 4.0, 5.0];
+  par(mut xs, (x, i) => { x *= 2.0; });
+  const total = parReduce(xs, 0.0, (x, _) => x, (a, b) => a + b);
+  println(`${xs} ${total}`);
+}

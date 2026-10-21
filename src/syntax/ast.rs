@@ -121,6 +121,8 @@ pub struct ImplDecl {
     pub interface: Option<Type>,
     pub target: Type,
     pub methods: Vec<Method>,
+    /// `type View = …;`: the interface's associated types, for this type (§3.4).
+    pub assoc: Vec<(Ident, Type)>,
     /// `impl I for T;`: the type asks for the interface's derivation (§7.3).
     pub derived: bool,
 }

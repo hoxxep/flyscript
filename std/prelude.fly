@@ -50,6 +50,15 @@ impl<comptime T: Type> Eq for T {
         }
         true
       }
+      #Array(_) | #Slice(_) => {
+        if (self.len() != other.len()) { return false; }
+        let i: usize = 0;
+        while (i < self.len()) {
+          if (!self[i].eq(other[i])) { return false; }
+          i += 1;
+        }
+        true
+      }
       #Union(tags) | #Enum { tags } => match ([self, other]) {
         comptime for (const t of tags) {
           comptime match (t.payload) {
@@ -77,6 +86,14 @@ impl<comptime T: Type> Hash for T {
       }
       #Tuple(items) => {
         comptime for (const [i, _] of items.enumerate()) { self[i].hash(mut h); }
+      }
+      #Array(_) | #Slice(_) => {
+        h.writeInt(self.len() as i64);
+        let i: usize = 0;
+        while (i < self.len()) {
+          self[i].hash(mut h);
+          i += 1;
+        }
       }
       #Union(tags) | #Enum { tags } => match (self) {
         comptime for (const [i, t] of tags.enumerate()) {
@@ -115,6 +132,15 @@ impl<comptime T: Type> Ord for T {
           if (c != #Equal) { return c; }
         }
         #Equal
+      }
+      #Array(_) | #Slice(_) => {
+        let i: usize = 0;
+        while (i < self.len() && i < other.len()) {
+          const c = self[i].cmp(other[i]);
+          if (c != #Equal) { return c; }
+          i += 1;
+        }
+        self.len().cmp(other.len())
       }
       #Union(tags) | #Enum { tags } => match ([self, other]) {
         comptime for (const t of tags) {
@@ -194,6 +220,16 @@ impl<comptime T: Type> Show for T {
         comptime for (const [i, _] of items.enumerate()) {
           comptime if (i > 0) { out.push(", "); }
           self[i].show(mut out);
+        }
+        out.push("]");
+      }
+      #Array(_) | #Slice(_) => {
+        out.push("[");
+        let i: usize = 0;
+        while (i < self.len()) {
+          if (i > 0) { out.push(", "); }
+          self[i].show(mut out);
+          i += 1;
         }
         out.push("]");
       }
@@ -358,6 +394,8 @@ impl<T> T[] {
   export function iter(self: readonly Self): Gen<readonly T, []>;
   // Each element, lent `mut`: `for (const x of xs.iterMut()) { x += 1; }` updates `xs`.
   export function iterMut(self: mut Self): Gen<mut T, []> from self;
+  // Two disjoint slices, before and after element `at`.
+  export function splitAt(self: mut Self, at: usize): [mut T[], mut T[]] from self;
 }
 impl<T> Iterable<readonly T> for T[] {
   function each(self: readonly Self): void uses Yield<readonly T>;

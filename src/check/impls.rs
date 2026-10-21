@@ -82,13 +82,13 @@ impl Program {
         let ty = strip_borrows(ty);
         // Specific impls first; a template impl only for structural types, and for nominal types
         // that ask for it with `impl I for T;` (§7.3).
-        let candidates = (0..self.impls.len()).filter(|i| !self.is_template_impl(*i)).chain((0..self.impls.len()).filter(|i| self.is_template_impl(*i)));
+        let candidates = (0..self.impls.len()).filter(|i| !self.is_blanket(*i)).chain((0..self.impls.len()).filter(|i| self.is_blanket(*i)));
         for i in candidates {
             let imp = &self.impls[i];
             if imp.derived || imp.interface.as_ref().map(|(d, _)| *d) != Some(iface) {
                 continue;
             }
-            if self.is_template_impl(i) && !self.derives(iface, ty) {
+            if self.is_blanket(i) && !self.derives(iface, ty) {
                 continue;
             }
             let vars: Vec<u32> = imp.params.iter().map(|g| g.sym.id).collect();
@@ -169,15 +169,69 @@ impl Program {
         self.impls[imp].methods.iter().copied().find(|f| self.fns[*f].name == name)
     }
 
+    /// The impl that gives `base` its associated type `name`, with the arguments it matched.
+    fn assoc_impl(&self, base: &Ty, name: &str) -> Option<(usize, Binds)> {
+        let ifaces: Vec<DefId> = (0..self.defs.len())
+            .filter(|d| matches!(&self.defs[*d].kind, DefKind::Interface { assoc, .. } if assoc.iter().any(|a| a == name)))
+            .collect();
+        ifaces.into_iter().find_map(|i| self.resolve_impl(i, base))
+    }
+
+    /// `base.name` (`Soa<Particle>.View`), once `base` is known: what its impl says (§3.4).
+    pub fn assoc_type(&self, base: &Ty, name: &str) -> Option<Ty> {
+        let (imp, binds) = self.assoc_impl(base, name)?;
+        if self.is_template_impl(imp) {
+            return self.assoc_instances.get(&(imp, format!("{binds:?}"), name.to_string())).cloned();
+        }
+        let t = self.impls[imp].assoc_tys.get(name)?;
+        let map: SubstMap<'_> = binds.iter().map(|(k, v)| (*k, v)).collect();
+        Some(subst(t, &map))
+    }
+
+    /// Computes a template impl's associated type for `base`, so `assoc_type` finds it.
+    pub fn ensure_assoc(&mut self, base: &Ty, name: &str) {
+        if contains_params(base) {
+            return;
+        }
+        let Some((imp, binds)) = self.assoc_impl(base, name) else { return };
+        let key = (imp, format!("{binds:?}"), name.to_string());
+        if !self.is_template_impl(imp) || self.assoc_instances.contains_key(&key) {
+            return;
+        }
+        let Some((_, ast_ty)) = self.impls[imp].assoc.iter().find(|(n, _)| n == name).cloned() else { return };
+        let params = self.impls[imp].params.clone();
+        let module = self.impls[imp].module;
+        let env: Vec<(String, CV)> = params
+            .iter()
+            .filter(|g| g.comptime)
+            .filter_map(|g| match binds.get(&g.sym.id) {
+                Some(GArg::Ty(t)) => Some((g.sym.name.clone(), CV::Type(t.clone()))),
+                _ => None,
+            })
+            .collect();
+        let Some(expanded) = Expand::new(self, module, None, env).expand_type(&ast_ty) else { return };
+        let scope = super::env::TyScope { module, ..Default::default() }.with_params(&params);
+        let t = self.elab_ty(&expanded, &scope);
+        let map: SubstMap<'_> = binds.iter().map(|(k, v)| (*k, v)).collect();
+        let t = subst(&t, &map);
+        self.assoc_instances.insert(key, t);
+    }
+
     pub fn is_template_impl(&self, imp: usize) -> bool {
         self.impls[imp].params.iter().any(|g| g.comptime)
+    }
+
+    /// A derivation: a template impl for any type (`impl<comptime T: Type> Show for T`), as
+    /// opposed to one for a family of types (`impl<comptime T: Type> ParSplit for Soa<T>`).
+    pub fn is_blanket(&self, imp: usize) -> bool {
+        matches!(&self.impls[imp].target, Ty::Param(s) if self.impls[imp].params.iter().any(|g| g.comptime && g.sym.id == s.id))
     }
 
     /// Whether `iface`'s template impl applies to `ty`.
     fn derives(&self, iface: DefId, ty: &Ty) -> bool {
         match ty {
             // Types that belong to no module: primitives, records, tuples, tag unions (§7.3).
-            Ty::Prim(_) | Ty::Record(_) | Ty::Union(_) | Ty::Tuple(_) => true,
+            Ty::Prim(_) | Ty::Record(_) | Ty::Union(_) | Ty::Tuple(_) | Ty::Array(..) | Ty::Slice(_) => true,
             Ty::Named(d, _) => self.derive_request(iface, *d),
             _ => false,
         }

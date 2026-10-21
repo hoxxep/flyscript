@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 
 use super::value::*;
 use super::world::World;
-use crate::check::env::{Binding, DefKind, FnId, Program, SubstMap, subst_arg};
+use crate::check::env::{Binding, DefKind, FnId, Program, SubstMap, subst, subst_arg};
 use crate::check::types::{GArg, Len, Prim, Show, Ty};
 use crate::diag::Span;
 use crate::syntax::ast::{self, Expr, ExprKind, Pattern, PatternKind, Stmt, TagArgs, TagPatArgs};
@@ -821,7 +821,21 @@ impl Interp {
                             return self.perform(d, &name.name, vals);
                         }
         let f = self.expr(callee, env)?;
-        let vals = self.owned_all(args, env)?;
+        // Arguments go as the function's type says: a `mut` parameter gets a place.
+        let mut ft = self.ty_of(callee.span);
+        while let Some(Ty::Borrow(_, inner)) = ft {
+            ft = Some(*inner);
+        }
+        let vals = match ft {
+            Some(Ty::Fn(fty)) if fty.params.len() == args.len() => {
+                let mut vals = Vec::new();
+                for (a, pt) in args.iter().zip(&fty.params) {
+                    vals.push(self.arg(a, pt, env)?);
+                }
+                vals
+            }
+            _ => self.owned_all(args, env)?,
+        };
         self.call_value(&f, vals)
     }
 
@@ -877,9 +891,26 @@ impl Interp {
         Ok((m, Arc::new(env)))
     }
 
+    /// A type in this frame's terms: its generic parameters replaced by the frame's arguments,
+    /// and associated types resolved (`C.View` with `C = f32[]` is `mut f32`).
+    fn concrete(&self, t: &Ty) -> Ty {
+        let map: SubstMap<'_> = self.lex.tenv.iter().map(|(k, v)| (*k, v)).collect();
+        let t = subst(t, &map);
+        match &t {
+            Ty::Assoc(base, name) => self.prog.assoc_type(&self.concrete(base), name).map_or(t.clone(), |r| self.concrete(&r)),
+            _ => t,
+        }
+    }
+
     /// Evaluates an argument for a parameter: a place for a `mut` borrow, a value otherwise.
     fn arg(&mut self, a: &Expr, param: &Ty, env: &Env) -> R {
-        match param {
+        let mut param = self.concrete(param);
+        // A parameter still generic here takes the argument the way the argument's type says.
+        if matches!(param, Ty::Param(_) | Ty::Assoc(..))
+            && let Some(at) = self.ty_of(a.span) {
+                param = self.concrete(&at);
+            }
+        match &param {
             Ty::Borrow(true, _) => Ok(Value::Ptr(self.place(a, env)?)),
             Ty::Borrow(false, _) | Ty::Slice(_) | Ty::Prim(Prim::Str) => self.expr(a, env),
             _ => {

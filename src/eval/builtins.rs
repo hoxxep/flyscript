@@ -30,10 +30,27 @@ fn some(v: Value) -> Value {
 
 fn place_of(v: &Value) -> Result<Place, Ctl> {
     match v {
-        Value::Ptr(p) => Ok(p.clone()),
+        Value::Ptr(p) => Ok(resolve(p.clone())),
         Value::Ref(r) => Ok(Place { root: r.clone(), path: Vec::new() }),
         other => Ok(Place { root: shared(other.clone()), path: Vec::new() }),
     }
+}
+
+/// The place a borrow ultimately refers to: a binding that holds a borrow is followed to what
+/// that borrow refers to, so a view of a view is one place.
+fn resolve(mut p: Place) -> Place {
+    for _ in 0..64 {
+        let root = p.root.lock().expect("place").clone();
+        match root {
+            Value::Ptr(q) => {
+                let mut path = q.path.clone();
+                path.extend(p.path);
+                p = Place { root: q.root.clone(), path };
+            }
+            _ => break,
+        }
+    }
+    p
 }
 
 fn native(v: &Value, kind: &str) -> Result<u64, Ctl> {
@@ -63,6 +80,7 @@ impl Interp {
             Ty::Named(d, _) => self.prog.defs[*d].name.clone(),
             Ty::Prim(Prim::Str) => "str".into(),
             Ty::Slice(_) => "slice".into(),
+            Ty::Array(..) => "array".into(),
             Ty::Union(r) if r.labels.contains_key("Some") => "Option".into(),
             Ty::Union(r) if r.labels.contains_key("Ok") => "Result".into(),
             _ => "?".into(),
@@ -306,7 +324,7 @@ impl Interp {
             }
 
             // ---- collections ----
-            "slice.len" | "Vec.len" | "Soa.len" => Ok(Value::Int(list(&a(0)).len() as i128)),
+            "slice.len" | "Vec.len" => Ok(Value::Int(list(&a(0)).len() as i128)),
             "slice.iter" | "Vec.iter" => Ok(gens_mod::new_gen(self, GenKind::Items { items: list(&a(0)), pos: 0 })),
             // Each element as a place in the collection, so the loop body writes through it.
             "slice.iterMut" | "Vec.iterMut" => {
@@ -326,8 +344,8 @@ impl Interp {
                 }
                 Ok(Value::Unit)
             }
-            "Vec.new" | "Soa.new" => Ok(Value::List(Vec::new())),
-            "Vec.push" | "Soa.push" => {
+            "Vec.new" => Ok(Value::List(Vec::new())),
+            "Vec.push" => {
                 let p = place_of(&a(0))?;
                 let v = a(1);
                 update(&p, |l| {
@@ -443,24 +461,32 @@ impl Interp {
                 Ok(Value::Unit)
             }
 
-            // ---- data parallelism (§6.5), run in order ----
-            "par" => {
+            // ---- slices as `ParSplit` (§6.5): views are places in the slice ----
+            "slice.slice" | "array.slice" | "Vec.slice" => Ok(Value::Ptr(place_of(&a(0))?)),
+            "array.len" => Ok(Value::Int(list(&a(0)).len() as i128)),
+            "slice.split" | "array.split" | "Vec.split" | "slice.splitAt" => {
                 let p = place_of(&a(0))?;
                 let n = list(&Value::Ptr(p.clone())).len();
-                for i in 0..n {
+                let at = (a(1).as_int() as usize).min(n);
+                // A part of a part is one range of the original.
+                let half = |lo: usize, hi: usize| {
                     let mut q = p.clone();
-                    q.path.push(Seg::Index(i));
-                    self.call_value(&a(1), vec![Value::Ptr(q), Value::Int(i as i128)])?;
-                }
-                Ok(Value::Unit)
+                    match q.path.last_mut() {
+                        Some(Seg::Range(l0, h0)) => {
+                            let l = *l0;
+                            *l0 = l + lo;
+                            *h0 = l + hi;
+                        }
+                        _ => q.path.push(Seg::Range(lo, hi)),
+                    }
+                    Value::Ptr(q)
+                };
+                Ok(Value::Tuple(vec![half(0, at), half(at, n)]))
             }
-            "parReduce" => {
-                let mut acc = a(1);
-                for (i, item) in list(&a(0)).into_iter().enumerate() {
-                    let one = self.call_value(&a(2), vec![item, Value::Int(i as i128)])?;
-                    acc = self.call_value(&a(3), vec![acc, one])?;
-                }
-                Ok(acc)
+            "slice.viewAt" | "slice.readAt" | "array.viewAt" | "array.readAt" | "Vec.viewAt" | "Vec.readAt" => {
+                let mut p = place_of(&a(0))?;
+                p.path.push(Seg::Index(a(1).as_int() as usize));
+                Ok(Value::Ptr(p))
             }
 
             // ---- I/O against the world (§6.4) ----

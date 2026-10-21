@@ -1,0 +1,84 @@
+// Data parallelism as library code (§6.5).
+
+// A container whose elements can be worked on in parallel. `slice` lends a view of all of them,
+// `split` divides a view into two disjoint ones, and `viewAt` lends one element of a view; the
+// borrow rules prove the views disjoint, so `par` may hand them to different workers.
+export interface ParSplit {
+  type Slice;       // a splittable mutable view of a run of elements
+  type View;        // a mutable view of one element
+  type ReadView;    // a read-only view of one element
+  function len(self: readonly Self): usize;
+  function slice(self: mut Self): Self.Slice from self;
+  function split(s: Self.Slice, at: usize): [Self.Slice, Self.Slice] from s;
+  function viewAt(s: Self.Slice, i: usize): Self.View from s;
+  function readAt(self: readonly Self, i: usize): Self.ReadView from self;
+}
+
+// Runs `f` on every element. The halves of each split are independent; this prototype runs them
+// in order, and a native runtime gives them to its workers.
+export function par<C extends ParSplit>(c: mut C, f: (v: C.View, i: usize) => void): void {
+  const n = c.len();
+  each<C>(c.slice(), 0, n, f);
+}
+
+// `f` is lent, so both halves call it.
+function each<C extends ParSplit>(s: C.Slice, lo: usize, n: usize, f: readonly (v: C.View, i: usize) => void): void {
+  if (n == 1) {
+    f(C.viewAt(s, 0), lo);
+  } else if (n > 1) {
+    const half = n / 2;
+    const [a, b] = C.split(s, half);
+    each<C>(a, lo, half, f);
+    each<C>(b, lo + half, n - half, f);
+  }
+}
+
+// Folds every element with `one` and combines with `both`, which must be associative. Workers
+// share the container `readonly`; this prototype folds in order.
+export function parReduce<C extends ParSplit, A extends Send>(
+  c: readonly C,
+  zero: A,
+  one: (v: C.ReadView, i: usize) => A,
+  both: (a: A, b: A) => A,
+): A {
+  let acc = zero;
+  let i: usize = 0;
+  while (i < c.len()) {
+    acc = both(acc, one(c.readAt(i), i));
+    i += 1;
+  }
+  acc
+}
+
+impl<T> ParSplit for T[] {
+  type Slice = mut T[];
+  type View = mut T;
+  type ReadView = readonly T;
+  function len(self: readonly Self): usize;
+  function slice(self: mut Self): mut T[] from self;
+  function split(s: mut T[], at: usize): [mut T[], mut T[]] from s;
+  function viewAt(s: mut T[], i: usize): mut T from s;
+  function readAt(self: readonly Self, i: usize): readonly T from self;
+}
+
+impl<T, comptime N: usize> ParSplit for T[N] {
+  type Slice = mut T[];
+  type View = mut T;
+  type ReadView = readonly T;
+  function len(self: readonly Self): usize;
+  function slice(self: mut Self): mut T[] from self;
+  function split(s: mut T[], at: usize): [mut T[], mut T[]] from s;
+  function viewAt(s: mut T[], i: usize): mut T from s;
+  function readAt(self: readonly Self, i: usize): readonly T from self;
+}
+
+impl<T> ParSplit for Vec<T> {
+  type Slice = mut T[];
+  type View = mut T;
+  type ReadView = readonly T;
+  function len(self: readonly Self): usize;
+  function slice(self: mut Self): mut T[] from self;
+  function split(s: mut T[], at: usize): [mut T[], mut T[]] from s;
+  function viewAt(s: mut T[], i: usize): mut T from s;
+  function readAt(self: readonly Self, i: usize): readonly T from self;
+}

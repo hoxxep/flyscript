@@ -254,6 +254,12 @@ pub fn check_fn(p: &mut Program, fid: FnId) {
     if inferring {
         let mut row = c.s.zonk_effs(&c.allowed.clone());
         row.tail = Tail::Closed;
+        if !row.effs.is_empty()
+            && let Some((m, span)) = c.p.assumed_pure.get(&fid).copied() {
+                let name = c.p.fns[fid].name.clone();
+                let what = format!("{}", Show(&row, &*c.p));
+                c.p.error(m, span, format!("`{name}` calls itself and performs `{what}`, so it must declare its effects with `uses`"));
+            }
         c.p.inferred.insert(fid, Some(row));
     }
     c.p.note = saved_note;
@@ -272,9 +278,10 @@ fn fn_effects(p: &mut Program, fid: FnId, module: usize, span: Span) -> EffRow {
     }
     match p.inferred.get(&fid) {
         Some(Some(e)) => return e.clone(),
+        // A function whose effects are being inferred, called again: it is assumed pure, which
+        // its body must then bear out.
         Some(None) => {
-            let name = p.fns[fid].name.clone();
-            p.error(module, span, format!("`{name}` calls itself, so it must declare its effects with `uses`"));
+            p.assumed_pure.insert(fid, (module, span));
             return EffRow::pure();
         }
         None => {}
@@ -346,20 +353,16 @@ impl<'p> Checker<'p> {
         }
     }
 
-    /// Normalizes associated types whose base is known (`Soa<P>.View`).
+    /// Normalizes associated types whose base is known (`Soa<P>.View`), through its impl (§3.4).
     fn normalize(&self, t: &Ty) -> Ty {
         match self.s.resolve(t) {
             Ty::Assoc(base, name) => {
                 let base = self.s.resolve(&base);
-                match (&base, name.as_str()) {
-                    (Ty::Named(d, args), "View" | "ReadView") if *d == self.known("Soa") => {
-                        let Some(GArg::Ty(elem)) = args.first() else { return Ty::Error };
-                        self.soa_view(elem, name == "View")
-                    }
-                    (Ty::Slice(elem), "View") => Ty::Borrow(true, elem.clone()),
-                    (Ty::Slice(elem), "ReadView") => Ty::Borrow(false, elem.clone()),
-                    _ => Ty::Assoc(Box::new(base), name),
+                let known = self.s.zonk(&base);
+                if let Some(t) = self.p.assoc_type(&known, &name) {
+                    return self.normalize(&t);
                 }
+                Ty::Assoc(Box::new(base), name)
             }
             Ty::Fn(f) => Ty::Fn(Box::new(FnTy {
                 mode: f.mode,
@@ -369,25 +372,6 @@ impl<'p> Checker<'p> {
             })),
             Ty::Borrow(m, inner) => Ty::Borrow(m, Box::new(self.normalize(&inner))),
             t => t,
-        }
-    }
-
-    /// The view of one element of `Soa<T>`: a record of field borrows, flattened recursively (§7.2).
-    fn soa_view(&self, elem: &Ty, mutable: bool) -> Ty {
-        match self.s.resolve(elem) {
-            Ty::Named(d, args) => match &self.p.defs[d].kind {
-                DefKind::Struct { fields: Some(fields) } => {
-                    let params = self.p.defs[d].params.clone();
-                    let labels = fields
-                        .iter()
-                        .map(|(k, t)| (k.clone(), self.soa_view(&subst_params(t, &params, &args), mutable)))
-                        .collect();
-                    Ty::Record(Row::closed(labels))
-                }
-                _ => Ty::Borrow(mutable, Box::new(Ty::Named(d, args))),
-            },
-            Ty::Record(r) => Ty::Record(Row::closed(r.labels.iter().map(|(k, t)| (k.clone(), self.soa_view(t, mutable))).collect())),
-            t => Ty::Borrow(mutable, Box::new(t)),
         }
     }
 
@@ -1286,7 +1270,8 @@ impl<'p> Checker<'p> {
             _ => {}
         }
         let t = self.expr(callee, None);
-        match self.normalize(&self.s.resolve(&t)) {
+        // A function is called through a borrow of it, too.
+        match self.strip(&t) {
             Ty::Fn(f) => {
                 self.check_args(&f.params, args, span);
                 self.perform(&f.effects, span);
@@ -1301,11 +1286,30 @@ impl<'p> Checker<'p> {
         }
     }
 
+    /// Computes the associated types in `t` whose base is now known (§3.4).
+    fn ensure_assocs(&mut self, t: &Ty) {
+        match self.s.resolve(t) {
+            Ty::Assoc(base, name) => {
+                let base = self.s.zonk(&base);
+                self.p.ensure_assoc(&base, &name);
+            }
+            Ty::Fn(f) => {
+                for p in &f.params {
+                    self.ensure_assocs(p);
+                }
+                self.ensure_assocs(&f.ret);
+            }
+            Ty::Borrow(_, inner) => self.ensure_assocs(&inner),
+            _ => {}
+        }
+    }
+
     fn check_args(&mut self, params: &[Ty], args: &[Expr], span: Span) {
         if params.len() != args.len() {
             self.err(span, format!("expected {} arguments, found {}", params.len(), args.len()));
         }
         for (p, a) in params.iter().zip(args) {
+            self.ensure_assocs(p);
             let p = self.normalize(p);
             self.check(a, &p);
         }
@@ -1486,7 +1490,13 @@ impl<'p> Checker<'p> {
 
     fn find_method(&mut self, recv: &Ty, name: &str) -> Option<FnId> {
         let candidates: Vec<FnId> = (0..self.p.fns.len())
-            .filter(|f| self.p.fns[*f].name == name && self.p.fns[*f].impl_id.is_some() && self.has_self(*f) && !self.p.is_template(*f) && !self.p.spec_of.contains_key(f))
+            .filter(|f| {
+                let info = &self.p.fns[*f];
+                info.name == name
+                    && info.impl_id.is_some_and(|i| !self.p.is_blanket(i))
+                    && self.has_self(*f)
+                    && !self.p.spec_of.contains_key(f)
+            })
             .collect();
         for fid in candidates {
             let scheme = self.p.fns[fid].scheme.clone();
@@ -1505,7 +1515,7 @@ impl<'p> Checker<'p> {
         for d in ifaces {
             // The template's method: it is specialized once the receiver's type is final.
             if let Some((imp, _)) = self.p.resolve_impl(d, &recv)
-                && self.p.is_template_impl(imp) {
+                && self.p.is_blanket(imp) {
                     return self.p.impl_method(imp, name);
                 }
         }

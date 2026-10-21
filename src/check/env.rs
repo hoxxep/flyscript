@@ -16,8 +16,8 @@ const STD: &[(&str, &str)] = &[
     ("std/net.d.fly", include_str!("../../std/net.d.fly")),
     ("std/io.d.fly", include_str!("../../std/io.d.fly")),
     ("std/collections.d.fly", include_str!("../../std/collections.d.fly")),
-    ("std/par.d.fly", include_str!("../../std/par.d.fly")),
-    ("std/layout.d.fly", include_str!("../../std/layout.d.fly")),
+    ("std/par.fly", include_str!("../../std/par.fly")),
+    ("std/layout.fly", include_str!("../../std/layout.fly")),
     ("std/sync.d.fly", include_str!("../../std/sync.d.fly")),
     ("std/json.fly", include_str!("../../std/json.fly")),
 ];
@@ -132,6 +132,9 @@ pub struct FnInfo {
 pub struct Impl {
     /// `impl I for T;`: `T` asks for `I`'s derivation, the template impl of `I` (§7.3).
     pub derived: bool,
+    /// Associated types as written, and elaborated (for an impl that is not a template).
+    pub assoc: Vec<(String, ast::Type)>,
+    pub assoc_tys: HashMap<String, Ty>,
     pub module: usize,
     pub params: Vec<GParam>,
     pub target: Ty,
@@ -167,6 +170,8 @@ pub struct Program {
     pub next_synth: usize,
     /// Specializations of templates, by template and `comptime` arguments.
     pub specs: HashMap<(FnId, String), FnId>,
+    /// Template impls' associated types, by impl, arguments and name.
+    pub assoc_instances: HashMap<(usize, String, String), Ty>,
     /// Template structs' fields, by struct and arguments.
     pub instances: HashMap<(DefId, String), Vec<(String, Ty)>>,
     /// For a specialization: its template, and how diagnostics name it ("in `describe` for
@@ -176,6 +181,8 @@ pub struct Program {
     /// For a derivation's specialization: the type that asked for it, whose private fields it
     /// may use (§7.3).
     pub spec_requested: HashMap<FnId, DefId>,
+    /// Functions called while their effects were being inferred, so assumed pure there.
+    pub assumed_pure: HashMap<FnId, (usize, Span)>,
     /// While a specialization is checked: which one, for its diagnostics.
     pub note: Option<String>,
 }
@@ -255,8 +262,10 @@ impl Program {
             spec_of: HashMap::new(),
             spec_notes: HashMap::new(),
             instances: HashMap::new(),
+            assoc_instances: HashMap::new(),
             spec_requested: HashMap::new(),
             note: None,
+            assumed_pure: HashMap::new(),
         };
         for (file, source) in STD {
             let name = file.trim_end_matches(".fly").trim_end_matches(".d");
@@ -448,7 +457,7 @@ impl Program {
                 }
             }
         }
-        for name in ["Fail", "Yield", "Region", "Io", "String", "Ref", "Vec", "Soa", "Iterable", "LentBy", "Copy", "Send", "Eq", "Show", "Ord"] {
+        for name in ["Fail", "Yield", "Region", "Io", "String", "Ref", "Vec", "Iterable", "LentBy", "Copy", "Send", "Eq", "Show", "Ord"] {
             let prelude = self.module_named("std/prelude").expect("prelude");
             let layout = self.module_named("std/layout").expect("layout");
             let found = self.modules[prelude].exports.get(name).or_else(|| self.modules[layout].exports.get(name));
@@ -754,7 +763,10 @@ impl Program {
             _ => None,
         });
         let id = self.impls.len();
-        self.impls.push(Impl { derived: imp.derived, module: m, params: params.clone(), target: target.clone(), interface, methods: Vec::new() });
+        let template = params.iter().any(|g| g.comptime);
+        let assoc_tys = if template { HashMap::new() } else { imp.assoc.iter().map(|(n, t)| (n.name.clone(), self.elab_ty(t, &inner))).collect() };
+        let assoc = imp.assoc.iter().map(|(n, t)| (n.name.clone(), t.clone())).collect();
+        self.impls.push(Impl { derived: imp.derived, assoc, assoc_tys, module: m, params: params.clone(), target: target.clone(), interface, methods: Vec::new() });
         let method_scope = TyScope { self_ty: Some(target), ..inner };
         for (k, method) in imp.methods.iter().enumerate() {
             let scheme = self.elaborate_sig(&method.decl.sig, &method_scope, Some(&params));

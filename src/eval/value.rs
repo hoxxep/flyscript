@@ -257,12 +257,17 @@ fn write_at(v: &mut Value, path: &[Seg], new: Value) {
         (Value::Tag(_, payload), Seg::Payload) => write_at(payload, rest, new),
         (Value::Tag(_, payload), _) => write_at(payload, path, new),
         (Value::List(vs) | Value::Tuple(vs), Seg::Index(i)) => write_at(&mut vs[*i], rest, new),
-        (Value::List(vs), Seg::Range(lo, _)) => {
-            if let Some((Seg::Index(i), rest2)) = rest.split_first() {
-                write_at(&mut vs[lo + i], rest2, new);
-            }
-        }
+        (Value::List(vs), Seg::Range(lo, _)) => write_in_range(vs, *lo, rest, new),
         (other, seg) => panic!("cannot write {seg:?} into {}", other.show()),
+    }
+}
+
+/// Writes below a range `lo..` of a list: an element of it, or a range of the range.
+fn write_in_range(vs: &mut [Value], lo: usize, rest: &[Seg], new: Value) {
+    match rest.split_first() {
+        Some((Seg::Index(i), rest2)) => write_at(&mut vs[lo + i], rest2, new),
+        Some((Seg::Range(l2, _), rest2)) => write_in_range(vs, lo + l2, rest2, new),
+        _ => {}
     }
 }
 

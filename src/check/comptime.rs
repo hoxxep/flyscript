@@ -159,6 +159,19 @@ impl<'p> Expand<'p> {
         }
     }
 
+    /// A type with `comptime` code in it, expanded (a template impl's associated type).
+    pub fn expand_type(&mut self, t: &Type) -> Option<Type> {
+        match self.ty(t) {
+            Ok(t) => Some(t),
+            Err(Stop::Error(span, msg)) => {
+                let m = self.module;
+                self.p.error(m, span, msg);
+                None
+            }
+            Err(Stop::Return(_)) => None,
+        }
+    }
+
     /// A template struct's fields for one instance (§7.1); reports an error and returns `None`
     /// if its `comptime` code fails.
     pub fn struct_fields(&mut self, fields: &[Field]) -> Option<Vec<Field>> {

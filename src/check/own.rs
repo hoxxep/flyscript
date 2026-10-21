@@ -1016,13 +1016,23 @@ impl<'p> Own<'p> {
     fn call(&mut self, e: &Expr, callee: &Expr, args: &[Expr]) -> Val {
         let fid = self.typed.calls.get(&e.span).copied();
         let scheme = fid.map(|f| self.p.fns[f].scheme.clone());
-        // The parameters as instantiated at this call: `push(x)` on a `Vec<i64>` takes an `i64`.
+        // The parameters as instantiated at this call: `push(x)` on a `Vec<i64>` takes an `i64`;
+        // a function value's come from its type.
         let mut params: Vec<(String, Ty)> = match (&scheme, self.typed.targs.get(&e.span)) {
             (Some(s), Some(args)) if args.len() == s.tparams.len() => {
                 s.params.iter().map(|(n, t)| (n.clone(), super::env::subst_params(t, &s.tparams, args))).collect()
             }
             (Some(s), _) => s.params.clone(),
-            (None, _) => Vec::new(),
+            (None, _) => {
+                let mut t = self.ty_of(callee);
+                while let Ty::Borrow(_, inner) = t {
+                    t = *inner;
+                }
+                match t {
+                    Ty::Fn(f) => f.params.iter().map(|p| (String::new(), p.clone())).collect(),
+                    _ => Vec::new(),
+                }
+            }
         };
         let ret = self.ty_of(e);
         let mut arg_vals: Vec<(Option<String>, Val)> = Vec::new();

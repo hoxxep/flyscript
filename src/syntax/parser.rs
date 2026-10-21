@@ -499,16 +499,24 @@ impl<'a> Parser<'a> {
         let first = self.ty()?;
         let (interface, target) = if self.eat_kw(Kw::For) { (Some(first), self.ty()?) } else { (None, first) };
         if interface.is_some() && self.eat(";") {
-            return Ok(ImplDecl { params, interface, target, methods: Vec::new(), derived: true });
+            return Ok(ImplDecl { params, interface, target, methods: Vec::new(), assoc: Vec::new(), derived: true });
         }
         self.expect("{")?;
         let mut methods = Vec::new();
+        let mut assoc = Vec::new();
         while !self.at("}") {
+            if self.eat_kw(Kw::Type) {
+                let name = self.ident()?;
+                self.expect("=")?;
+                assoc.push((name, self.ty()?));
+                self.expect(";")?;
+                continue;
+            }
             let exported = self.eat_kw(Kw::Export);
             methods.push(Method { exported, decl: self.fn_decl()? });
         }
         self.expect("}")?;
-        Ok(ImplDecl { params, interface, target, methods, derived: false })
+        Ok(ImplDecl { params, interface, target, methods, assoc, derived: false })
     }
 
     fn type_alias(&mut self) -> PResult<TypeAlias> {

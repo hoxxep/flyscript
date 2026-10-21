@@ -1,0 +1,86 @@
+// Struct-of-arrays layout as library code (§7.4): one plane per field, a `Vec` for a scalar
+// field and a nested `Soa` for a struct field, with the views `par` works through (§6.5).
+
+import { ParSplit } from "std/par";
+
+comptime function fieldsOf(T: Type): Field[] {
+  match (Type.info(T)) {
+    #Struct { fields } | #Record(fields) => fields,
+    _ => panic(`${Type.name(T)} has no fields to lay out in planes`),
+  }
+}
+
+// Whether a field is laid out as planes of its own.
+comptime function nested(T: Type): bool {
+  match (Type.info(T)) {
+    #Struct(_) | #Record(_) => true,
+    _ => false,
+  }
+}
+
+comptime function firstField(T: Type): str { fieldsOf(T)[0].name }
+
+export struct Soa<comptime T: Type> {
+  comptime for (const f of fieldsOf(T)) {
+    comptime if (nested(f.type)) { [f.name]: Soa<f.type>; } else { [f.name]: Vec<f.type>; }
+  }
+}
+
+// A run of elements: a `mut` slice of each plane.
+export view struct SoaSlice<comptime T: Type> {
+  comptime for (const f of fieldsOf(T)) {
+    comptime if (nested(f.type)) { [f.name]: SoaSlice<f.type>; } else { [f.name]: mut f.type[]; }
+  }
+}
+
+// One element, as a borrow of each of its fields.
+export view struct SoaView<comptime T: Type> {
+  comptime for (const f of fieldsOf(T)) {
+    comptime if (nested(f.type)) { [f.name]: SoaView<f.type>; } else { [f.name]: mut f.type; }
+  }
+}
+export view struct SoaRead<comptime T: Type> {
+  comptime for (const f of fieldsOf(T)) {
+    comptime if (nested(f.type)) { [f.name]: SoaRead<f.type>; } else { [f.name]: readonly f.type; }
+  }
+}
+
+impl<comptime T: Type> Soa<T> {
+  export function new(): Soa<T> {
+    { comptime for (const f of fieldsOf(T)) { [f.name]: comptime if (nested(f.type)) { Soa.new() } else { Vec.new() }, } }
+  }
+  // Adds an element, field by field to its planes.
+  export function push(self: mut Self, v: T): void {
+    comptime for (const f of fieldsOf(T)) { self.[f.name].push(v.[f.name]); }
+  }
+  export function len(self: readonly Self): usize { self.[comptime firstField(T)].len() }
+}
+
+impl<comptime T: Type> SoaSlice<T> {
+  // Two disjoint runs, splitting every plane at the same element.
+  export function splitAt(self: Self, at: usize): [SoaSlice<T>, SoaSlice<T>] from self {
+    const halves = { comptime for (const f of fieldsOf(T)) { [f.name]: self.[f.name].splitAt(at), } };
+    [
+      { comptime for (const f of fieldsOf(T)) { [f.name]: halves.[f.name][0], } },
+      { comptime for (const f of fieldsOf(T)) { [f.name]: halves.[f.name][1], } },
+    ]
+  }
+  export function at(self: Self, i: usize): SoaView<T> from self {
+    { comptime for (const f of fieldsOf(T)) { [f.name]: comptime if (nested(f.type)) { self.[f.name].at(i) } else { mut self.[f.name][i] }, } }
+  }
+}
+
+impl<comptime T: Type> ParSplit for Soa<T> {
+  type Slice = SoaSlice<T>;
+  type View = SoaView<T>;
+  type ReadView = SoaRead<T>;
+  function len(self: readonly Self): usize { self.[comptime firstField(T)].len() }
+  function slice(self: mut Self): SoaSlice<T> from self {
+    { comptime for (const f of fieldsOf(T)) { [f.name]: self.[f.name].slice(), } }
+  }
+  function split(s: SoaSlice<T>, at: usize): [SoaSlice<T>, SoaSlice<T>] from s { s.splitAt(at) }
+  function viewAt(s: SoaSlice<T>, i: usize): SoaView<T> from s { s.at(i) }
+  function readAt(self: readonly Self, i: usize): SoaRead<T> from self {
+    { comptime for (const f of fieldsOf(T)) { [f.name]: self.[f.name].readAt(i), } }
+  }
+}
