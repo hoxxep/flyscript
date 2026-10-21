@@ -8,7 +8,8 @@ import { println } from "std/io";
 effect Ask { ask(): i64; }
 effect Note { note(msg: String): void; }
 effect Tick { tick(n: u32): void; }
-enum Steps { #Done, #At(u32, Cont<void, Steps>) }
+// What resuming may do is part of a continuation's type, so a stored one says it.
+enum Steps<row E> { #Done, #At(u32, Cont<void, Steps<E>, E>) }
 
 // Work after resuming: each answer is doubled on the way back out.
 function doubled(): i64 {
@@ -16,7 +17,7 @@ function doubled(): i64 {
 }
 
 // A suspended body's other effects go to the handlers around whoever resumes it.
-function noisy(): Steps uses Note {
+function noisy(): Steps<[Note]> uses Note {
   handle {
     Note.note("before".toString());
     Tick.tick(1);
@@ -27,7 +28,7 @@ function noisy(): Steps uses Note {
 }
 
 // A failure in the suspended body surfaces where it is resumed.
-function failing(): Steps uses Fail<#Boom> {
+function failing(): Steps<[Fail<#Boom>]> uses Fail<#Boom> {
   handle { Tick.tick(7); throw #Boom } with Tick { tick(n) resumes k => #At(n, k) }
 }
 

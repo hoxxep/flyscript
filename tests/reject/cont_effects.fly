@@ -1,0 +1,12 @@
+// error: effect `Note` is not declared by the enclosing function
+// Resuming runs the rest of the body, which may perform what the code around its `handle` may:
+// that is part of the continuation's type, and its caller performs it (§5.3).
+effect Note { note(msg: String): void; }
+effect Tick { tick(n: u32): void; }
+enum Steps<row E> { #Done, #At(u32, Cont<void, Steps<E>, E>) }
+function noisy(): Steps<[Note]> uses Note {
+  handle { Tick.tick(1); Note.note("after".toString()); #Done } with Tick { tick(n) resumes k => #At(n, k) }
+}
+export function main(s: Steps<[Note]>): u32 {
+  match (s) { #At(n, k) => { const rest = k(); n }, #Done => 0 }
+}

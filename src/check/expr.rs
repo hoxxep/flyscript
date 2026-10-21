@@ -1313,6 +1313,10 @@ impl<'p> Checker<'p> {
                 }
                 let params = if *a == Ty::void() { Vec::new() } else { vec![a.clone()] };
                 self.check_args(&params, args, span);
+                if let Some(GArg::Row(e)) = cargs.get(2) {
+                    let e = e.clone();
+                    self.perform(&e, span);
+                }
                 return b.clone();
             }
         match self.strip(&t) {
@@ -1792,7 +1796,9 @@ impl<'p> Checker<'p> {
             }
             if let Some(k) = &arm.resumes {
                 // A continuation of a `void` operation takes no argument: `k()`.
-                let cont = Ty::Named(self.known("Cont"), vec![GArg::Ty(op_ret), GArg::Ty(result.clone())]);
+                // Resuming may perform what the code around the `handle` may.
+                let around = self.allowed.clone();
+                let cont = Ty::Named(self.known("Cont"), vec![GArg::Ty(op_ret), GArg::Ty(result.clone()), GArg::Row(around)]);
                 self.declare(&k.name, cont);
             }
             let t = self.block(&arm.body, Some(&result));
