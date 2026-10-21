@@ -1,6 +1,6 @@
 # Flyscript
 
-**Language specification, version 0.34**
+**Language specification, version 0.35**
 
 *Affine values, one row calculus, handlers for everything, and `comptime`: Church on the outside, Turing on the inside.*
 
@@ -18,12 +18,18 @@ The whole language rests on five laws. Every rule in this document is a conseque
 4. **Handlers for everything.** Errors, I/O, iteration and region memory are ordinary effects with ordinary handlers. A handler may hold the rest of a computation as a one-shot continuation value; generators and tasks are both built from that one primitive.
 5. **`comptime` is the metalanguage.** Generics, reflection, layout transformation and derived interfaces are ordinary Flyscript code run by the compiler.
 
-### 0.1 Changes from 0.33
+### 0.1 Changes from 0.34
 
-0.34 comes from writing a concurrent fetch — forked tasks that may fail, a channel with a sender per task, shared totals, joining every fiber — as a TypeScript programmer would. It found a hole: a task could borrow a binding declared inside its scope, which ends before the task does.
+0.35 answers a review of 0.34 (docs/reviews/2026-10-21-holistic-review-of-0-34.md), which found two ways a borrow could outlive what it borrowed. One was older than generators: a result could borrow a parameter the function owned.
 
 | Change | Why |
 | :--- | :--- |
+| A result, a yielded value and a closure's result may borrow a parameter only if the parameter is itself a borrow, or through one (a view's slice); never a parameter the function owns (§4.2, §4.3, §5.5) | `function first(v: Vec<String>): str { v[0].asStr() }` returned a borrow of `v`, which the function drops; a generator could yield one and a `map` step return one |
+| A generator's items borrow what the generator holds, not the generator (§5.5) | `for (const x of self) { return #Some(x); }` in a method over an owned `Gen` was taken for a borrow of `self` |
+| A task started outside the body of its `Io.scope` — by a helper given the scope — cannot capture anything that borrows (§6.1) | the helper could lend a parameter that came from a local of the scope's body, which ends before the scope waits for its tasks |
+| `Arc<T>` is listed with the owners that lend (§4.1), and the library's methods are in the sections that define their types (§3.1, §5.5), not only here | the review found them only in this table |
+
+--- | :--- |
 | A task moves in what is declared inside its scope and borrows only what is declared outside it; a use after the move says so (§6.1) | `const tx2 = tx.clone(); s.fork(() => tx2.send(url))` in a loop lent `tx2` to a task that outlived the iteration that dropped it |
 | A closure that moves a binding in owns it from where it is made, and a `once` closure drops what it owns when its call ends (§4.3, §5.6) | the parent dropped a sender it had given to a task, and the task never dropped it |
 | `Mutex<T>` with `lock(body)`, whose body performs no effects and returns a `Send` value; `Arc<T>` lends `readonly T` (§6.2) | §6.2 named `Mutex`, but there was none |
@@ -223,6 +229,8 @@ Three rules settle the grammar's ambiguities, all borrowed from TypeScript:
 - `T[N]` is an inline array (`Copy` if `T` is); `[a, b, c]` and `repeat(v)` build one, with `N` from context. `T[]` is a borrowed slice, always `readonly T[]` or `mut T[]`.
 - `Vec<T>`, `Box<T>`, `HashMap<K, V>` and the other owning containers are library types.
 
+**Methods.** Arrays, slices and `Vec`s share their methods, which are defined on slices and reached through lending (§4.1): `len`, `iter`, `iterMut`, `splitAt`, `last`, `includes` and `indexOf` (by `Eq`), `sort` (by `Ord`), `sortBy(cmp)` (stable, `cmp` returning `#Less`, `#Equal` or `#Greater`), `reverse`, and `join(sep)` (each element shown, strings as they are). A `Vec` also has `push`, `pop` and `drain`, which takes the elements out in order. `str` has TypeScript's string methods — `slice`, `split`, `trim`, `includes`, `startsWith`, `endsWith`, `indexOf`, `toUpperCase`, `toLowerCase`, `replaceAll` — plus `toString`, `asBytes`, and the generators `bytes()` and `splitWhitespace()`; a `String` lends them all, and adds `push`. A `HashMap<K, V>` has `insert`, `get`, `getMut`, `has`, `remove` (each looked up by anything `K` lends), `len`, and the generators `keys()`, `values()`, `valuesMut()` and `entries()`.
+
 A tuple `[A, B]` is built with a list literal, taken apart with a pattern (`const [a, b] = t`, which takes an array of the same length apart too), and indexed by a constant, as in TypeScript: `t[0]` is a place of its own, like a field.
 
 Indexing an array, a slice or a `Vec` (`xs[i]`) is a place of the element type, checked against the length at run time (a panic out of bounds); assigning to it writes in place, and while it is borrowed the whole collection is. Slicing (`xs[a..b]`, either bound optional) lends `readonly T[]`, or `mut T[]` where a `mut` slice is expected; `s[a..b]` on a `str` lends a `str`, and panics unless both bounds fall on character boundaries.
@@ -343,7 +351,7 @@ A borrow lasts until the last use of any value that holds it, not to the end of 
 
 A method call borrows its receiver in two phases: the receiver is borrowed `readonly` while the arguments are evaluated and `mut` only for the call itself, so `v.push(v.len())` is legal and `v.push({ v.clear(); 1 })` is not.
 
-**Lending.** Wherever a borrow of `U` is expected, an owner that *lends* `U` may be passed: `String` lends `str`, `Vec<T>` lends `T[]`, `Box<T>` lends `T`, and `Ref<R, T>` lends `readonly T`; and a borrow of an owner lends what the owner does, so a `readonly Box<Expr>` matched out of a node is passed where `readonly Expr` is wanted. Lending is the only implicit conversion. Lookups in `HashMap<K, V>` accept any `Q` that `K` lends, so a `HashMap<String, V>` is searched with a `str` without allocating.
+**Lending.** Wherever a borrow of `U` is expected, an owner that *lends* `U` may be passed: `String` lends `str`, `Vec<T>` lends `T[]`, `Box<T>` lends `T`, and `Ref<R, T>` and `Arc<T>` lend `readonly T`; and a borrow of an owner lends what the owner does, so a `readonly Box<Expr>` matched out of a node is passed where `readonly Expr` is wanted. Lending is the only implicit conversion. Lookups in `HashMap<K, V>` accept any `Q` that `K` lends, so a `HashMap<String, V>` is searched with a `str` without allocating.
 
 ```ts
 match (counts.getMut(word)) {
@@ -373,7 +381,7 @@ function longer(a: str, b: str): str { if (a.len() >= b.len()) { a } else { b } 
 function prefix(s: str, sep: str): str from s { … }                               // borrows only s
 ```
 
-The body is checked against the same rule: everything the returned value borrows must come from a source, never from a local. Inside the body, a parameter whose type can hide a borrow carries a loan of its own, so a `from` that leaves out a type-parameter or closure argument the result actually contains is rejected there. A type parameter bounded by `Send`, directly or through an interface that extends it (`interface FromJson extends Send`), ranges over class-1 types and hides nothing: `parse<T extends FromJson>(text: str): T` returns a value its own parser decoded.
+The body is checked against the same rule: everything the returned value borrows must come from a source, never from a local — and from a parameter only if the parameter is itself a borrow, or through one (a view's slice field). A parameter the function owns is a local that arrived by move: it is dropped when the function returns, so `function first(v: Vec<String>): str { v[0].asStr() }` is rejected, and takes `v: readonly Vec<String>` instead. A closure's result obeys the same rule against the closure's parameters: `cloned().map((s) => s.asStr())` is rejected, since each `s` is an owned `String` the step drops. Inside the body, a parameter whose type can hide a borrow carries a loan of its own, so a `from` that leaves out a type-parameter or closure argument the result actually contains is rejected there. A type parameter bounded by `Send`, directly or through an interface that extends it (`interface FromJson extends Send`), ranges over class-1 types and hides nothing: `parse<T extends FromJson>(text: str): T` returns a value its own parser decoded.
 
 ### 4.3 Closures
 
@@ -542,7 +550,9 @@ It is library code: `try { f() } catch (e) { throw wrap(e) }`.
 
 `yield e` performs `Yield.yield(e)`. A generator is any computation that uses `Yield<T>`; nothing else marks it.
 
-**A yielded value is a result** of the function that yields it, handed out before the function returns: like a returned value (§4.2), it may borrow what the function was given — its parameters, or a closure's captures and parameters — and never its locals, which may end before the item does. So `function words(s: str): void uses Yield<str> { for (const w of s.splitWhitespace()) { yield w; } }` is a generator of borrows of `s`, while one that yields slices of a buffer of its own is rejected and yields `String`s instead. In return, a generator call's sources lend its items what they borrow, as a call's sources lend its result: in `for (const w of words(line))`, `w` borrows `line`, so `best = w` may outlive the iteration.
+**A yielded value is a result** of the function that yields it, handed out before the function returns: like a returned value (§4.2), it may borrow only what the function was lent — a parameter that is itself a borrow, or a closure's borrowed captures and parameters — and never a local or anything the function owns, which may end before the item does. So `function words(s: str): void uses Yield<str> { for (const w of s.splitWhitespace()) { yield w; } }` is a generator of borrows of `s`, while one that yields slices of a buffer of its own is rejected and yields `String`s instead. In return, a generator call's sources lend its items what they borrow, as a call's sources lend its result: in `for (const w of words(line))`, `w` borrows `line`, so `best = w` may outlive the iteration. Likewise the items of a `Gen` borrow what the generator holds, not the generator: a `find` that returns one of them outlives the `Gen` it consumed.
+
+A `Gen<T, E>` has `next()`, the lazy adaptors `map`, `filter`, `take`, `zip` and `enumerate`, `collect()` into a `Vec`, and, under TypeScript's names, `find`, `some`, `every` and `reduce((acc, x) => …, init)`; a `Gen<readonly T, E>` also has `cloned()`, which gives owned copies.
 
 `for (const x of e) { body }` handles `Yield` around a generator, running `body` for each item. If `e` is a generator call, it is the generator. Otherwise `e`'s type must implement `Iterable`, TypeScript's iteration protocol in Flyscript form, and the generator is `e.each()`:
 
@@ -645,7 +655,7 @@ The rules:
 3. **Failure cancels the scope.** A forked task's failures `X` are rethrown by `Io.scope`. If a forked task fails, or any task panics, the scope is cancelled: the body and every other task stop at their next `Io` operation and unwind, and once all have finished the first failure is rethrown from `Io.scope` (or the panic continues). `join` therefore never fails by itself: it returns the result, or the joiner is cancelled along with the rest of the scope.
 4. **A task performs only what its fiber can handle.** A task runs on a new fiber, where the only handlers are the runtime's `Io` and the scope's capture of failures, so its effects are `Io` and `Fail` and nothing else. It cannot allocate in its parent's region or perform an effect whose handler lives in the parent fiber.
 5. **Outer regions are frozen while tasks run.** The body of a scope runs on the parent's fiber, but like its tasks it performs only `Io` and failures: it cannot write to a region outside the scope while tasks may be reading it, nor suspend to an outer handler that could. A task or the body may still open and use regions of its own, and anything else is done before or after the scope.
-6. **Captures.** A task is a `once` closure. What is declared outside the scope it may borrow `readonly`, since the scope outlives every task; what is declared inside the scope — a loop's `const tx2 = tx.clone()`, a buffer made for one task — it moves in, since the task may outlive it. Either way, what it captures must be `Send`. So the natural fan-out needs no ceremony, and a binding used again after a task took it is an error that says to declare it before `Io.scope`.
+6. **Captures.** A task is a `once` closure. What is declared outside the scope it may borrow `readonly`, since the scope outlives every task; what is declared inside the scope — a loop's `const tx2 = tx.clone()`, a buffer made for one task — it moves in, since the task may outlive it. Either way, what it captures must be `Send`. So the natural fan-out needs no ceremony, and a binding used again after a task took it is an error that says to declare it before `Io.scope`. Only inside the body of its `Io.scope` is it known what outlives the scope: a task started elsewhere — by a helper function given `mut Scope<X>` — moves in everything it captures and cannot capture anything that borrows, since a borrowed parameter of the helper may come from a local of the scope's body, which ends before the scope waits for its tasks.
 
 `scope`, `spawn`, `fork` and `join` are library code over the runtime's scheduler and `Io.park`; nursery semantics are not built into the language.
 

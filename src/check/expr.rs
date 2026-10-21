@@ -1689,6 +1689,7 @@ impl<'p> Checker<'p> {
             if p.name.name != "_" {
                 self.declare(&p.name.name, t.clone());
             }
+            self.typed.bindings.insert(p.name.span, t.clone());
             ptys.push(t);
         }
         let saved_ret = std::mem::replace(&mut self.ret, want_ret.clone().unwrap_or_else(|| self.s.fresh()));

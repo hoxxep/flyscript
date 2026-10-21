@@ -933,11 +933,18 @@ impl<'p> Own<'p> {
                 // What the iterated value borrows stays borrowed for the whole loop (§4.1).
                 let first_loan = self.loans.len();
                 self.iterating = matches!(iter.kind, ExprKind::Call { .. });
-                let iv = self.expr(iter, Use::Read);
+                let mut iv = self.expr(iter, Use::Read);
                 self.iterating = false;
                 let mut held = iv.loans.clone();
                 held.extend(first_loan..self.loans.len());
                 self.temps.push(held);
+                // A generator's items borrow what it holds, never the generator itself: they are
+                // results of its producer (§5.5). A collection's elements borrow the collection.
+                if self.is_gen(&self.ty_of(iter))
+                    && let Some(place) = self.place(iter)
+                {
+                    iv.loans.retain(|l| *l < first_loan || self.loans[*l].path != place);
+                }
                 self.enter(Node::Loop, 0);
                 for _ in 0..2 {
                     let before = self.state.clone();
@@ -1372,6 +1379,9 @@ impl<'p> Own<'p> {
         if !is_task || self.collecting {
             return;
         }
+        // Only inside the body of its `Io.scope` is it known what outlives the scope; a task
+        // started elsewhere, by a helper given the scope, cannot borrow at all.
+        let in_body = self.roles.contains(&Role::ScopeBody);
         for a in args {
             let ExprKind::Lambda { body, params } = &a.kind else { continue };
             let bound: HashSet<String> = params.iter().map(|p| p.name.name.clone()).collect();
@@ -1379,6 +1389,12 @@ impl<'p> Own<'p> {
             free_vars(body, &bound, &mut free);
             for (name, span) in free {
                 let Some(v) = self.lookup(&name) else { continue };
+                let ty = self.vars[v].ty.clone();
+                if !in_body && (self.p.class(&ty) == 2 || matches!(ty, Ty::Fn(_))) {
+                    let shown = self.show(&ty);
+                    self.err(span, format!("a task started outside the body of its `Io.scope` cannot capture `{name}`, a `{shown}`, which borrows: nothing here says it outlives the scope (pass an owned value)"));
+                    continue;
+                }
                 if !self.sendable(v, false) {
                     let shown = self.show(&self.vars[v].ty.clone());
                     let why = if self.p.is_send_given(&self.vars[v].ty, &self.send_params) { "holds a borrow" } else { "is not `Send`" };
@@ -1420,11 +1436,25 @@ impl<'p> Own<'p> {
         let saved_temps = std::mem::take(&mut self.temps);
         let saved_deferred = std::mem::take(&mut self.deferred);
         self.scopes.push(HashMap::new());
+        let mut param_ids = Vec::new();
         for p in params {
-            let id = self.declare_var(&p.name.name, Ty::Error, true, false, p.name.span.start);
+            let ty = self.typed.bindings.get(&p.name.span).cloned().unwrap_or(Ty::Error);
+            let id = self.declare_var(&p.name.name, ty, true, false, p.name.span.start);
             self.lambda_params.insert(id);
+            param_ids.push(id);
         }
-        self.contained(|o| o.expr(body, Use::Move));
+        let result = self.contained(|o| o.expr(body, Use::Move));
+        // A closure's result may borrow a parameter that is itself a borrow, never one it owns,
+        // which it drops when it returns (§4.2).
+        if !self.collecting
+            && let Some(l) = result.loans.iter().find(|l| {
+                let loan = &self.loans[**l];
+                !loan.external && param_ids.contains(&loan.path.root) && !self.through_reference(loan)
+            })
+        {
+            let name = self.vars[self.loans[*l].path.root].name.clone();
+            self.err(body.span, format!("the closure's result borrows `{name}`, a parameter it owns and drops when it returns: return an owned value"));
+        }
         self.scopes.pop();
         self.temps = saved_temps;
         self.deferred = saved_deferred;
@@ -1526,13 +1556,44 @@ impl<'p> Own<'p> {
             let loan = self.loans[*l].clone();
             let root = loan.path.root;
             let given = if in_lambda { self.lambda_params.contains(&root) } else { self.vars[root].param };
-            if loan.external || given {
+            if loan.external || given && self.through_reference(&loan) {
                 continue;
             }
             let name = self.vars[root].name.clone();
-            self.err(e.span, format!("this yields a borrow of `{name}`, a local of the generator, which may end before the item does: yield an owned value (`.toString()`), or borrow from a parameter"));
+            let what = if given { "a parameter the generator owns, which it drops when it ends" } else { "a local of the generator, which may end before the item does" };
+            self.err(e.span, format!("this yields a borrow of `{name}`, {what}: yield an owned value (`.toString()`), or borrow from a parameter that is itself a borrow"));
             return;
         }
+    }
+
+    fn is_gen(&self, t: &Ty) -> bool {
+        let mut t = t;
+        while let Ty::Borrow(_, inner) = t {
+            t = inner;
+        }
+        matches!(t, Ty::Named(d, _) if self.p.defs[*d].name == "Gen" && self.p.modules[self.p.defs[*d].module].is_std)
+    }
+
+    /// Whether a binding of this type is a reference, so a borrow taken through it borrows what
+    /// it refers to, which outlives the binding.
+    fn is_reference(&self, t: &Ty) -> bool {
+        matches!(t, Ty::Borrow(..) | Ty::Slice(_) | Ty::Prim(Prim::Str) | Ty::Fn(_) | Ty::Error)
+    }
+
+    /// Whether a loan reaches its place through a reference — the binding, or a field on the way
+    /// (a view's slice) — so it borrows what that refers to, not the binding's own storage.
+    fn through_reference(&self, loan: &Loan) -> bool {
+        let mut t = self.vars[loan.path.root].ty.clone();
+        if self.is_reference(&t) {
+            return true;
+        }
+        for f in &loan.path.fields {
+            t = field_type(self.p, &t, f).unwrap_or(Ty::Error);
+            if self.is_reference(&t) {
+                return true;
+            }
+        }
+        false
     }
 
     fn check_return(&mut self, v: &Val, span: Span) {
@@ -1543,10 +1604,12 @@ impl<'p> Own<'p> {
             let loan = self.loans[*l].clone();
             let root = loan.path.root;
             let name = self.vars[root].name.clone();
-            if self.vars[root].param && self.sources.contains(&name) {
+            if self.vars[root].param && self.sources.contains(&name) && (loan.external || self.through_reference(&loan)) {
                 continue;
             }
-            let msg = if self.vars[root].param {
+            let msg = if self.vars[root].param && self.sources.contains(&name) {
+                format!("the result borrows `{name}`, a parameter this function owns and drops when it returns: take it as a borrow, or return an owned value")
+            } else if self.vars[root].param {
                 format!("the result borrows `{name}`, but `{name}` is not one of the result's sources (add it with `from`)")
             } else {
                 format!("the result borrows `{name}`, which does not outlive this function")

@@ -1,0 +1,13 @@
+// error: a task started outside the body of its `Io.scope` cannot capture `data`, a `str`, which borrows
+// A helper given the scope cannot tell that a borrow outlives it: the scope body's locals end
+// before the scope waits for its tasks (§6.1).
+import { println } from "std/io";
+function helper<X>(s: mut Scope<X>, data: str): void {
+  s.spawn(() => { Io.sleep(10); println(data); });
+}
+export function main(): void uses Io {
+  Io.scope((s) => {
+    const buf = "dies with the body".toString();
+    helper(mut s, buf.asStr());
+  });
+}

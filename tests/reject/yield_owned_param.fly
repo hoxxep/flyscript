@@ -1,0 +1,3 @@
+// error: this yields a borrow of `v`, a parameter the generator owns, which it drops when it ends
+// A yielded value is a result: `break` would drop `v` while the caller kept the item (§5.5).
+function words(v: Vec<String>): void uses Yield<str> { yield v[0].asStr(); }

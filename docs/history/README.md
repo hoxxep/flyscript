@@ -31,5 +31,6 @@ Versions are pre-1.0 while the language is being designed. The specification was
 | 0.31 | Copy parts bind by copy; `Box` borrows lend; literal parts lent into borrow slots; recursive aliases rejected |
 | 0.32 | A yielded value is a result; `generate` written in Flyscript with one `unsafe` arm; open unions never enums |
 | 0.33 | TypeScript's array and generator methods; strings interpolate raw in generic code; borrows of borrows collapse |
+| 0.34 | Tasks move in scope-locals; closures own what they move in; `Mutex`; cloneable senders; `drain`; `Fail.capture` passes effects on |
 
 `review-round-*.md` are the design review rounds that produced 0.2–0.15; `programs-against-v0.13.md` is the program-writing exercise against what is now 0.13.

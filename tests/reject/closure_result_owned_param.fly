@@ -1,0 +1,6 @@
+// error: the closure's result borrows `s`, a parameter it owns and drops when it returns
+// `cloned()` gives owned items; a `map` step that borrowed one would outlive it (§4.3).
+export function viaMap(): void {
+  const words = ["a".toString(), "b".toString()];
+  let g = words.iter().cloned().map((s) => s.asStr());
+}

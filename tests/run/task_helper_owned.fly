@@ -1,0 +1,13 @@
+// expect: job one
+// expect: job two
+// A helper given the scope may start tasks that own what they capture (§6.1).
+import { println } from "std/io";
+function start<X>(s: mut Scope<X>, name: String): void {
+  s.spawn(() => { println(`job ${name}`); });
+}
+export function main(): void uses Io {
+  Io.scope((s) => {
+    start(mut s, "one".toString());
+    start(mut s, "two".toString());
+  });
+}

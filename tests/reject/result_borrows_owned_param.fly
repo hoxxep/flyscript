@@ -1,0 +1,3 @@
+// error: the result borrows `v`, a parameter this function owns and drops when it returns
+// A result may borrow a parameter that is itself a borrow, never one the function owns (§4.2).
+function first(v: Vec<String>): str { v[0].asStr() }
