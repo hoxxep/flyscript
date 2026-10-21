@@ -1,0 +1,10 @@
+// error: this `match` does not handle `#Err(#Unknown(_))`
+// Exhaustiveness looks inside patterns (§3.2), and names a value the arms miss.
+type E = #Missing(String) | #Syntax(usize) | #Unknown(String);
+export function code(r: Result<i32, E>): i32 {
+  match (r) {
+    #Ok(n) => n,
+    #Err(#Missing(_)) => 1,
+    #Err(#Syntax(_)) => 2,
+  }
+}

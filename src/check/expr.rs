@@ -1780,77 +1780,258 @@ impl<'p> Checker<'p> {
     }
 
     /// Exhaustiveness for tag unions and enums, `bool`, and anything with a catch-all arm.
+    /// Whether the arms of a `match` cover every value of `scrut`, over nested patterns
+    /// (Maranget's usefulness algorithm); if not, reports a value they miss.
     fn exhaustive(&mut self, scrut: &Ty, arms: &[ast::MatchArm], span: Span) {
-        fn irrefutable(p: &Pattern) -> bool {
-            match &p.kind {
-                PatternKind::Wild | PatternKind::Bind(_) => true,
-                PatternKind::Tuple(ps) => ps.iter().all(irrefutable),
-                PatternKind::Record { fields, .. } => fields.iter().all(|(_, p)| p.as_ref().is_none_or(irrefutable)),
-                PatternKind::Or(ps) => ps.iter().any(irrefutable),
-                _ => false,
-            }
-        }
-        fn covered_tags(p: &Pattern, out: &mut Vec<String>, bools: &mut Vec<bool>) {
-            match &p.kind {
-                PatternKind::Tag { name, args } => {
-                    let full = match args {
-                        TagPatArgs::None => true,
-                        TagPatArgs::Tuple(ps) => ps.iter().all(irrefutable),
-                        TagPatArgs::Record(fs) => fs.iter().all(|(_, p)| p.as_ref().is_none_or(irrefutable)),
-                    };
-                    if full {
-                        out.push(name.clone());
-                    }
-                }
-                PatternKind::Lit(e) => {
-                    if let ExprKind::Bool(b) = e.kind {
-                        bools.push(b);
-                    }
-                }
-                PatternKind::Or(ps) => ps.iter().for_each(|p| covered_tags(p, out, bools)),
-                _ => {}
-            }
+        let st = self.strip(scrut);
+        if let Some((_, Tail::Var(_))) = self.tag_payloads(&st) {
+            // Final types: nothing can add tags now (see `pending_matches`).
+            self.s.close_union(&st);
         }
         let unguarded: Vec<&Pattern> = arms.iter().filter(|a| a.guard.is_none()).map(|a| &a.pat).collect();
-        if unguarded.iter().any(|p| irrefutable(p)) {
-            return;
-        }
-        let mut tags = Vec::new();
-        let mut bools = Vec::new();
-        for p in &unguarded {
-            covered_tags(p, &mut tags, &mut bools);
-        }
-        let st = self.strip(scrut);
-        if st == Ty::bool() {
-            if !(bools.contains(&true) && bools.contains(&false)) {
-                self.err(span, "this `match` does not cover every case of `bool`");
+        if let Some((_, Tail::Param(_))) = self.tag_payloads(&st)
+            && !unguarded.iter().any(|p| matches!(p.kind, PatternKind::Wild | PatternKind::Bind(_))) {
+                let shown = self.show(&st);
+                self.err(span, format!("this `match` needs a `_` arm: `{shown}` may hold more tags"));
+                return;
             }
-            return;
+        let rows: Vec<Vec<Pat>> = unguarded.iter().map(|p| vec![self.lower_pat(p, &st)]).collect();
+        if let Some(w) = self.missing(rows, vec![st.clone()]) {
+            let shown = w[0].show();
+            if st == Ty::bool() {
+                self.err(span, "this `match` does not cover every case of `bool`");
+            } else if shown == "_" {
+                self.err(span, "this `match` needs a `_` arm to be exhaustive");
+            } else {
+                self.err(span, format!("this `match` does not handle `{shown}`"));
+            }
         }
-        match self.tag_payloads(&st) {
-            Some((all, tail)) => {
-                if let Tail::Var(_) = tail {
-                    // Final types: nothing can add tags now (see `pending_matches`).
-                    self.s.close_union(&st);
+    }
+
+    /// The constructors of a type and the types of their fields, if there are finitely many.
+    fn ctors(&mut self, t: &Ty) -> Option<Vec<(Ctor, Vec<Ty>)>> {
+        let t = self.strip(t);
+        if t == Ty::bool() {
+            return Some(vec![(Ctor::Bool(false), Vec::new()), (Ctor::Bool(true), Vec::new())]);
+        }
+        if let Some((tags, tail)) = self.tag_payloads(&t) {
+            let tail = if let Tail::Var(_) = tail {
+                self.s.close_union(&t);
+                Tail::Closed
+            } else {
+                tail
+            };
+            if tail != Tail::Closed {
+                return None;
+            }
+            return Some(tags.into_iter().map(|(k, p)| {
+                let fields = payload_fields(&self.s.resolve(&p));
+                (Ctor::Tag(k), fields)
+            }).collect());
+        }
+        match &t {
+            Ty::Tuple(ts) => Some(vec![(Ctor::Tuple, ts.clone())]),
+            Ty::Record(r) => Some(vec![(Ctor::Record, self.s.expand_row(r).labels.into_values().collect())]),
+            Ty::Named(d, args) => match &self.p.defs[*d].kind {
+                DefKind::Struct { fields: Some(fs) } => {
+                    let params = self.p.defs[*d].params.clone();
+                    let mut fs: Vec<(String, Ty)> = fs.iter().map(|(k, t)| (k.clone(), subst_params(t, &params, args))).collect();
+                    fs.sort_by(|a, b| a.0.cmp(&b.0));
+                    Some(vec![(Ctor::Record, fs.into_iter().map(|(_, t)| t).collect())])
                 }
-                let tail = self.tag_payloads(&st).map_or(Tail::Closed, |(_, t)| t);
-                if tail != Tail::Closed {
-                    // An open union can always hold more tags; a catch-all is needed.
-                    let shown = self.show(&st);
-                    self.err(span, format!("this `match` needs a `_` arm: `{shown}` may hold more tags"));
-                    return;
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// A pattern as constructors and wildcards, for the exhaustiveness check.
+    fn lower_pat(&mut self, p: &Pattern, t: &Ty) -> Pat {
+        let t = self.strip(t);
+        match &p.kind {
+            PatternKind::Wild | PatternKind::Bind(_) => Pat::Wild,
+            PatternKind::Or(ps) => Pat::Or(ps.iter().map(|q| self.lower_pat(q, &t)).collect()),
+            PatternKind::Lit(e) => match &e.kind {
+                ExprKind::Bool(b) => Pat::Ctor(Ctor::Bool(*b), Vec::new()),
+                _ => Pat::Ctor(Ctor::Lit, Vec::new()),
+            },
+            PatternKind::Tuple(ps) => match &t {
+                Ty::Tuple(ts) if ts.len() == ps.len() => Pat::Ctor(Ctor::Tuple, ps.iter().zip(ts).map(|(q, t)| self.lower_pat(q, t)).collect()),
+                _ => Pat::Never,
+            },
+            PatternKind::Record { fields, .. } => {
+                let Some(all) = self.ctors(&t).and_then(|c| c.into_iter().next()).filter(|(c, _)| *c == Ctor::Record) else { return Pat::Never };
+                let labels = self.record_labels(&t);
+                let subs = labels
+                    .iter()
+                    .zip(all.1)
+                    .map(|(l, ft)| match fields.iter().find(|(n, _)| &n.name == l) {
+                        Some((_, Some(q))) => self.lower_pat(q, &ft),
+                        _ => Pat::Wild,
+                    })
+                    .collect();
+                Pat::Ctor(Ctor::Record, subs)
+            }
+            PatternKind::Tag { name, args } => {
+                let Some((tags, _)) = self.tag_payloads(&t) else { return Pat::Never };
+                let Some(payload) = tags.get(name).map(|p| self.s.resolve(p)) else { return Pat::Never };
+                let fields = payload_fields(&payload);
+                let subs = match (args, &payload) {
+                    (TagPatArgs::None, _) => vec![Pat::Wild; fields.len()],
+                    (TagPatArgs::Tuple(ps), Ty::Tuple(ts)) if ps.len() == ts.len() => ps.iter().zip(ts).map(|(q, t)| self.lower_pat(q, t)).collect(),
+                    // `#A(x)` with a larger payload: `x` matches the payload whole (§3.2).
+                    (TagPatArgs::Tuple(ps), _) if ps.len() == 1 => match self.lower_pat(&ps[0], &payload) {
+                        Pat::Wild => vec![Pat::Wild; fields.len()],
+                        Pat::Ctor(Ctor::Tuple | Ctor::Record, subs) => subs,
+                        _ => return Pat::Never,
+                    },
+                    (TagPatArgs::Record(fs), Ty::Record(r)) => {
+                        let labels: Vec<String> = r.labels.keys().cloned().collect();
+                        labels
+                            .iter()
+                            .zip(&fields)
+                            .map(|(l, ft)| match fs.iter().find(|(n, _)| &n.name == l) {
+                                Some((_, Some(q))) => self.lower_pat(q, ft),
+                                _ => Pat::Wild,
+                            })
+                            .collect()
+                    }
+                    _ => return Pat::Never,
+                };
+                Pat::Ctor(Ctor::Tag(name.clone()), subs)
+            }
+            PatternKind::TagAt { .. } => Pat::Never,
+        }
+    }
+
+    fn record_labels(&mut self, t: &Ty) -> Vec<String> {
+        match t {
+            Ty::Record(r) => self.s.expand_row(r).labels.into_keys().collect(),
+            Ty::Named(d, _) => match &self.p.defs[*d].kind {
+                DefKind::Struct { fields: Some(fs) } => {
+                    let mut ls: Vec<String> = fs.iter().map(|(k, _)| k.clone()).collect();
+                    ls.sort();
+                    ls
                 }
-                let missing: Vec<String> = all.keys().filter(|k| !tags.contains(k)).map(|k| format!("`#{k}`")).collect();
-                if !missing.is_empty() {
-                    self.err(span, format!("this `match` does not handle {}", missing.join(", ")));
+                _ => Vec::new(),
+            },
+            _ => Vec::new(),
+        }
+    }
+
+    /// A vector of values the rows do not match, if there is one: the usefulness of a row of
+    /// wildcards against `rows`, whose columns have types `tys`.
+    fn missing(&mut self, rows: Vec<Vec<Pat>>, tys: Vec<Ty>) -> Option<Vec<Witness>> {
+        let Some(t0) = tys.first().cloned() else {
+            return if rows.is_empty() { Some(Vec::new()) } else { None };
+        };
+        // Or-patterns in the first column become rows of their own.
+        let mut flat = Vec::new();
+        for r in rows {
+            match &r[0] {
+                Pat::Or(alts) => {
+                    for a in alts {
+                        let mut r2 = vec![a.clone()];
+                        r2.extend(r[1..].iter().cloned());
+                        flat.push(r2);
+                    }
                 }
+                _ => flat.push(r),
+            }
+        }
+        let rows = flat;
+        let rest_tys: Vec<Ty> = tys[1..].to_vec();
+        let used: Vec<Ctor> = rows.iter().filter_map(|r| if let Pat::Ctor(c, _) = &r[0] { Some(c.clone()) } else { None }).collect();
+        let default = |rows: &[Vec<Pat>]| -> Vec<Vec<Pat>> { rows.iter().filter(|r| matches!(r[0], Pat::Wild)).map(|r| r[1..].to_vec()).collect() };
+        match self.ctors(&t0) {
+            Some(all) if all.iter().all(|(c, _)| used.contains(c)) => {
+                for (c, ftys) in all {
+                    let n = ftys.len();
+                    let spec: Vec<Vec<Pat>> = rows
+                        .iter()
+                        .filter_map(|r| match &r[0] {
+                            Pat::Ctor(c2, subs) if *c2 == c => Some(subs.iter().cloned().chain(r[1..].iter().cloned()).collect()),
+                            Pat::Wild => Some(std::iter::repeat_n(Pat::Wild, n).chain(r[1..].iter().cloned()).collect()),
+                            _ => None,
+                        })
+                        .collect();
+                    let mut sub_tys = ftys.clone();
+                    sub_tys.extend(rest_tys.iter().cloned());
+                    if let Some(w) = self.missing(spec, sub_tys) {
+                        let mut out = vec![Witness::Ctor(c.clone(), w[..n].to_vec())];
+                        out.extend(w[n..].iter().cloned());
+                        return Some(out);
+                    }
+                }
+                None
+            }
+            Some(all) => {
+                let w = self.missing(default(&rows), rest_tys)?;
+                let (c, ftys) = all.into_iter().find(|(c, _)| !used.contains(c)).expect("a constructor not used");
+                let mut out = vec![Witness::Ctor(c, vec![Witness::Wild; ftys.len()])];
+                out.extend(w);
+                Some(out)
             }
             None => {
-                if !matches!(st, Ty::Error) {
-                    self.err(span, "this `match` needs a `_` arm to be exhaustive");
-                }
+                let w = self.missing(default(&rows), rest_tys)?;
+                let mut out = vec![Witness::Wild];
+                out.extend(w);
+                Some(out)
             }
         }
+    }
+}
+
+/// A pattern, for exhaustiveness: constructors applied to subpatterns, wildcards, alternatives,
+/// and patterns the check cannot use (which cover nothing, so it stays sound).
+#[derive(Clone, Debug)]
+enum Pat {
+    Wild,
+    Never,
+    Ctor(Ctor, Vec<Pat>),
+    Or(Vec<Pat>),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum Ctor {
+    Tag(String),
+    Bool(bool),
+    Tuple,
+    Record,
+    /// A number or string literal: there are always more.
+    Lit,
+}
+
+/// A value a `match` misses.
+#[derive(Clone, Debug)]
+enum Witness {
+    Wild,
+    Ctor(Ctor, Vec<Witness>),
+}
+
+impl Witness {
+    fn show(&self) -> String {
+        match self {
+            Witness::Wild => "_".into(),
+            Witness::Ctor(Ctor::Bool(b), _) => b.to_string(),
+            Witness::Ctor(Ctor::Tag(n), subs) if subs.is_empty() => format!("#{n}"),
+            Witness::Ctor(Ctor::Tag(n), subs) if subs.iter().all(|w| matches!(w, Witness::Wild)) => format!("#{n}(_)"),
+            Witness::Ctor(Ctor::Tag(n), subs) => format!("#{n}({})", subs.iter().map(|w| w.show()).collect::<Vec<_>>().join(", ")),
+            Witness::Ctor(Ctor::Tuple, subs) => format!("[{}]", subs.iter().map(|w| w.show()).collect::<Vec<_>>().join(", ")),
+            Witness::Ctor(Ctor::Record, _) => "{ … }".into(),
+            Witness::Ctor(Ctor::Lit, _) => "_".into(),
+        }
+    }
+}
+
+/// The fields of a tag's payload, as the exhaustiveness check sees them: none, the elements of a
+/// tuple, or a record's fields in label order.
+fn payload_fields(p: &Ty) -> Vec<Ty> {
+    match p {
+        Ty::Prim(Prim::Void) => Vec::new(),
+        Ty::Tuple(ts) => ts.clone(),
+        Ty::Record(r) => r.labels.values().cloned().collect(),
+        t => vec![t.clone()],
     }
 }
 

@@ -1,0 +1,7 @@
+// error: this `match` does not handle `[false, #Some(_)]`
+export function pick(p: [bool, Option<i32>]): i32 {
+  match (p) {
+    [true, #Some(n)] => n,
+    [_, #None] => 1,
+  }
+}

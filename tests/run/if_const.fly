@@ -1,0 +1,21 @@
+// expect: found at 2
+// expect: not found
+// expect: 3
+// `if (const pat = e)` runs its block when the pattern matches, binding its names there (§2.3).
+import { println } from "std/io";
+function find(xs: readonly i64[], target: i64): Option<usize> {
+  let i: usize = 0;
+  while (i < xs.len()) {
+    if (xs[i] == target) { return #Some(i); }
+    i += 1;
+  }
+  #None
+}
+export function main(): void uses Io {
+  const xs: i64[6] = [4, 8, 15, 16, 23, 42];
+  if (const #Some(i) = find(xs, 15)) { println(`found at ${i}`); }
+  if (const #Some(i) = find(xs, 7)) { println(`found at ${i}`); } else { println("not found"); }
+  const r: Result<i64, str> = #Err("bad");
+  const v = if (const #Ok(n) = r) { n } else if (const #Err(e) = r) { e.len() as i64 } else { 0 };
+  println(`${v}`);
+}

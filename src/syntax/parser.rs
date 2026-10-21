@@ -1309,6 +1309,33 @@ impl<'a> Parser<'a> {
 
     fn if_expr(&mut self) -> PResult<ExprKind> {
         self.expect_kw(Kw::If)?;
+        // `if (const #Some(x) = e) { … } else { … }` is a two-armed `match`.
+        if self.at("(") && matches!(self.tok_at(1), Tok::Kw(Kw::Const)) {
+            self.bump();
+            self.bump();
+            let pat = self.pattern()?;
+            self.expect("=")?;
+            let scrutinee = self.expr()?;
+            self.expect(")")?;
+            let then = self.block()?;
+            let start = self.span();
+            let otherwise = if self.eat_kw(Kw::Else) {
+                if self.at_kw(Kw::If) {
+                    let kind = self.if_expr()?;
+                    Expr { kind, span: self.since(start) }
+                } else {
+                    let b = self.block()?;
+                    let span = b.span;
+                    Expr { kind: ExprKind::Block(b), span }
+                }
+            } else {
+                Expr { kind: ExprKind::Block(Block { stmts: Vec::new(), tail: None, span: start }), span: start }
+            };
+            let span = then.span;
+            let rest = Pattern { kind: PatternKind::Wild, span: otherwise.span };
+            let arms = vec![MatchArm::new(pat, None, Expr { kind: ExprKind::Block(then), span }), MatchArm::new(rest, None, otherwise)];
+            return Ok(ExprKind::Match { scrutinee: Box::new(scrutinee), arms });
+        }
         let cond = self.paren_expr()?;
         let then = self.block()?;
         let otherwise = if self.eat_kw(Kw::Else) {

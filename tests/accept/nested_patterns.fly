@@ -1,0 +1,23 @@
+// Nested patterns are checked for exhaustiveness as a whole (§3.2).
+type E = #Missing(String) | #Syntax(usize) | #Unknown(String);
+export function code(r: Result<i32, E>): i32 {
+  match (r) {
+    #Ok(n) => n,
+    #Err(#Missing(_)) => 1,
+    #Err(_) => 2,
+  }
+}
+export function pick(p: [bool, Option<i32>]): i32 {
+  match (p) {
+    [true, #Some(n)] => n,
+    [false, _] => 0,
+    [_, #None] => 1,
+  }
+}
+export function sign(p: { neg: bool; zero: bool }): i32 {
+  match (p) {
+    { zero: true } => 0,
+    { neg: true, zero: false } => -1,
+    { neg: false, zero: false } => 1,
+  }
+}
