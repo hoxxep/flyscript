@@ -1,0 +1,27 @@
+// Failure sets compose by union, and `catch` sees exactly what can be thrown (§3.2, §5.4).
+function digit(b: u8): u32 uses Fail<#NotADigit(u8)> {
+  if (b < b'0' || b > b'9') { throw #NotADigit(b); }
+  (b - b'0') as u32
+}
+
+function parse(s: str): u32 uses Fail<#Empty | #NotADigit(u8) | #TooLong> {
+  if (s.len() == 0) { throw #Empty; }
+  if (s.len() > 9) { throw #TooLong; }
+  let n: u32 = 0;
+  for (const b of s.bytes()) { n = n * 10 + digit(b); }
+  n
+}
+
+export function parseOr(s: str, fallback: u32): u32 {
+  try { parse(s) } catch (e) {
+    match (e) {
+      #Empty => fallback,
+      #NotADigit(_) => fallback,
+      #TooLong => 999999999,
+    }
+  }
+}
+
+export function asResult(s: str): Result<u32, #Empty | #NotADigit(u8) | #TooLong> {
+  Fail.capture(() => parse(s))
+}

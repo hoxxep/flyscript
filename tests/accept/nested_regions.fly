@@ -1,0 +1,13 @@
+// Two regions in one row are distinct labels (§3.2); each allocation goes to the right one.
+import { RegionList } from "std/region";
+
+export function build(): usize {
+  region (Outer) {
+    const names = RegionList.new();
+    region (Inner) {
+      const scratch: Ref<Inner, u32> = alloc(7);
+      names.push(alloc(1));
+    }
+    names.len()
+  }
+}

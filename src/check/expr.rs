@@ -42,6 +42,12 @@ pub struct Checker<'p> {
     /// Exhaustiveness is checked once the body's types are final: a union still open then was
     /// built only from the tags seen, so it is closed rather than demanding a `_` arm.
     pending_matches: Vec<(Ty, Vec<ast::MatchArm>, Span)>,
+    /// What later passes need: the type of every expression and binding, and every call's target.
+    typed: Typed,
+    /// Region allocations whose region the types do not determine: the region variable, and the
+    /// regions that were handling `Region` at that point, innermost first. Each goes to the
+    /// innermost of them that it does not escape from (§4.6), decided when that region ends.
+    pending_regions: Vec<(u32, Vec<Sym>)>,
 }
 
 /// Checks the body of `fid`, if it has one and has not been checked.
@@ -76,6 +82,8 @@ pub fn check_fn(p: &mut Program, fid: FnId) {
         allowed: EffRow::pure(),
         scope,
         pending_matches: Vec::new(),
+        typed: Typed::default(),
+        pending_regions: Vec::new(),
     };
     let inferring = scheme.effects.is_none();
     c.allowed = match &scheme.effects {
@@ -89,9 +97,22 @@ pub fn check_fn(p: &mut Program, fid: FnId) {
     let t = c.block(&body, Some(&ret));
     c.coerce(&t, &ret, body.tail.as_ref().map_or(body.span, |e| e.span));
     c.s.default_literals();
+    for (var, candidates) in std::mem::take(&mut c.pending_regions) {
+        if let (Region::Var(_), Some(r)) = (c.s.resolve_region(&Region::Var(var)), candidates.first()) {
+            let _ = c.s.unify_region(&Region::Var(var), &Region::Param(r.clone()));
+        }
+    }
     for (scrut, arms, span) in std::mem::take(&mut c.pending_matches) {
         c.exhaustive(&scrut, &arms, span);
     }
+    for (name, ty) in &scheme.params {
+        c.typed.params.push((name.clone(), ty.clone()));
+    }
+    let mut typed = std::mem::take(&mut c.typed);
+    for t in typed.exprs.values_mut().chain(typed.bindings.values_mut()) {
+        *t = c.s.zonk(t);
+    }
+    c.p.typed.insert(fid, typed);
     if inferring {
         let mut row = c.s.zonk_effs(&c.allowed.clone());
         row.tail = Tail::Closed;
@@ -299,6 +320,37 @@ impl<'p> Checker<'p> {
     /// Performs effects at `span`: they must fit the effects allowed here.
     fn perform(&mut self, effects: &EffRow, span: Span) {
         let allowed = self.allowed.clone();
+        // Region allocations whose region is still unknown are decided later (`pending_regions`).
+        let region_def = self.known("Region");
+        let handled: Vec<Sym> = self
+            .s
+            .expand_effs(&allowed)
+            .effs
+            .iter()
+            .filter(|e| e.def == region_def)
+            .filter_map(|e| match e.regions.first().map(|r| self.s.resolve_region(r)) {
+                Some(Region::Param(s)) => Some(s),
+                _ => None,
+            })
+            .collect();
+        let mut effects = self.s.expand_effs(effects);
+        if !handled.is_empty() {
+            let pending = &mut self.pending_regions;
+            let s = &self.s;
+            effects.effs.retain(|e| {
+                if e.def != region_def {
+                    return true;
+                }
+                match e.regions.first().map(|r| s.resolve_region(r)) {
+                    Some(Region::Var(v)) => {
+                        pending.push((v, handled.clone()));
+                        false
+                    }
+                    _ => true,
+                }
+            });
+        }
+        let effects = &effects;
         if let Err(e) = self.s.eff_sub(effects, &allowed) {
             let what = self.show_eff(&e);
             let msg = if self.p.known.get("Fail") == Some(&e.def) {
@@ -455,6 +507,12 @@ impl<'p> Checker<'p> {
     // ---- expressions ----
 
     pub fn expr(&mut self, e: &Expr, expected: Option<&Ty>) -> Ty {
+        let t = self.expr_inner(e, expected);
+        self.typed.exprs.insert(e.span, t.clone());
+        t
+    }
+
+    fn expr_inner(&mut self, e: &Expr, expected: Option<&Ty>) -> Ty {
         let span = e.span;
         match &e.kind {
             ExprKind::Int(_) => match expected.map(|x| self.strip(x)) {
@@ -557,8 +615,13 @@ impl<'p> Checker<'p> {
             ExprKind::Yield(value) => {
                 let yield_def = self.known("Yield");
                 let declared = self.s.expand_effs(&self.allowed.clone()).effs.into_iter().find(|x| x.def == yield_def);
+                // The effect carries the declared item type, not the value's (which may be a borrow
+                // lent to it).
                 let t = match declared.as_ref().and_then(|d| d.args.first().cloned()) {
-                    Some(item) => self.check(value, &item),
+                    Some(item) => {
+                        self.check(value, &item);
+                        item
+                    }
                     None => self.expr(value, None),
                 };
                 let row = EffRow { effs: vec![self.eff("Yield", Vec::new(), vec![t])], tail: Tail::Closed };
@@ -936,6 +999,7 @@ impl<'p> Checker<'p> {
 
     fn call_fn(&mut self, fid: FnId, recv: Option<(Ty, Span)>, site: CallSite<'_>) -> Ty {
         let CallSite { explicit, args, expected, span } = site;
+        self.typed.calls.insert(span, fid);
         let scheme = self.p.fns[fid].scheme.clone();
         let effects = fn_effects(self.p, fid, self.module, span);
         let scheme = Scheme { effects: Some(effects), ..scheme };
@@ -1177,6 +1241,7 @@ impl<'p> Checker<'p> {
         let eff = self.eff("Region", vec![Region::Param(sym.clone())], Vec::new());
         let t = self.with_handler(eff, |c| c.block(body, expected));
         self.scope = saved;
+        self.settle_regions(&sym, &t);
         let z = self.s.zonk(&t);
         if mentions_region(&z, &sym) {
             let shown = self.show(&z);
@@ -1192,6 +1257,36 @@ impl<'p> Checker<'p> {
             }
         }
         t
+    }
+
+    /// Whether region `sym`'s data would outlive it: through the block's result or a variable
+    /// declared outside the block.
+    fn escapes(&self, sym: &Sym, result: &Ty) -> bool {
+        mentions_region(&self.s.zonk(result), sym)
+            || self.scopes.iter().flat_map(|sc| sc.values()).any(|l| mentions_region(&self.s.zonk(&l.ty), sym))
+    }
+
+    /// Decides the allocations pending on region `sym` as it ends: each goes here unless that
+    /// would let it escape, in which case it waits for the next enclosing region.
+    fn settle_regions(&mut self, sym: &Sym, result: &Ty) {
+        let pending = std::mem::take(&mut self.pending_regions);
+        for (var, mut candidates) in pending {
+            let undecided = matches!(self.s.resolve_region(&Region::Var(var)), Region::Var(_));
+            if !undecided {
+                continue;
+            }
+            if candidates.first() != Some(sym) {
+                self.pending_regions.push((var, candidates));
+                continue;
+            }
+            let snap = self.s.snapshot();
+            let _ = self.s.unify_region(&Region::Var(var), &Region::Param(sym.clone()));
+            if self.escapes(sym, result) && candidates.len() > 1 {
+                self.s.restore(snap);
+                candidates.remove(0);
+                self.pending_regions.push((var, candidates));
+            }
+        }
     }
 
     fn handle(&mut self, body: &ast::Block, effect: &ast::Type, arms: &[ast::HandlerArm], expected: Option<&Ty>) -> Ty {
@@ -1274,7 +1369,10 @@ impl<'p> Checker<'p> {
         };
         match &pat.kind {
             PatternKind::Wild => {}
-            PatternKind::Bind(name) => self.declare(name, t.clone()),
+            PatternKind::Bind(name) => {
+                self.typed.bindings.insert(pat.span, t.clone());
+                self.declare(name, t.clone())
+            }
             PatternKind::Lit(e) => {
                 let v = self.strip(t);
                 let lt = self.expr(e, Some(&v));

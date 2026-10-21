@@ -1,0 +1,12 @@
+// A user-defined effect with a resumptive handler (§5.2).
+effect Ask { ask(question: str): u32; }
+
+function sumOfAnswers(): u32 uses Ask {
+  Ask.ask("first") + Ask.ask("second")
+}
+
+export function withDefaults(): u32 {
+  handle { sumOfAnswers() } with Ask {
+    ask(q) resumes k => { k(21) }
+  }
+}

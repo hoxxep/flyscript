@@ -1,0 +1,14 @@
+// Generic functions and effect-polymorphic higher-order functions (§5.1).
+function twice<T, row E>(x: T, f: (v: T) => T uses ...E): T uses ...E { f(f(x)) }
+
+function emitAll(xs: readonly u32[]): void uses Yield<u32> {
+  for (const x of xs) { yield x; }
+}
+
+export function pure(): u32 { twice(5, (v) => v * 2) }
+
+export function counted(xs: readonly u32[]): u32 {
+  let total: u32 = 0;
+  for (const x of emitAll(xs)) { total += twice(x, (v) => v + 1); }
+  total
+}

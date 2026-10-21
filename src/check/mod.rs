@@ -3,6 +3,7 @@
 pub mod env;
 pub mod expr;
 pub mod subst;
+pub mod traits;
 pub mod types;
 
 use std::path::PathBuf;

@@ -122,6 +122,19 @@ pub struct Program {
     pub inferred: HashMap<FnId, Option<EffRow>>,
     /// Functions whose bodies have been checked.
     pub checked: std::collections::HashSet<FnId>,
+    /// Per checked function: final types of its expressions and bindings, for later passes.
+    pub typed: HashMap<FnId, Typed>,
+}
+
+/// The type checker's results for one function body, keyed by source span.
+#[derive(Clone, Debug, Default)]
+pub struct Typed {
+    pub exprs: HashMap<Span, Ty>,
+    /// Types of `Bind` patterns (by the pattern's span), including parameters' bindings.
+    pub bindings: HashMap<Span, Ty>,
+    pub params: Vec<(String, Ty)>,
+    /// The function each call or method call resolved to, by the call's span.
+    pub calls: HashMap<Span, FnId>,
 }
 
 impl Names for Program {
@@ -166,6 +179,7 @@ impl Program {
             known: HashMap::new(),
             inferred: HashMap::new(),
             checked: Default::default(),
+            typed: HashMap::new(),
         };
         for (name, source) in STD {
             p.add_module(name.to_string(), format!("<{name}.d.fly>"), source.to_string(), true);
