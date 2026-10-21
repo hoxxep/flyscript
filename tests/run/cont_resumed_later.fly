@@ -1,0 +1,12 @@
+// expect: 0
+// expect: 7
+// A continuation stored and resumed after its `handle` finishes the body then (§5.3).
+import { println } from "std/io";
+effect Tick { tick(): void; }
+export function main(): void uses Io {
+  let saved: Option<Cont<void, i32>> = #None;
+  let total = 0;
+  const first = handle { Tick.tick(); total += 1; 7 } with Tick { tick() resumes k => { saved = #Some(k); 0 } };
+  println(`${total}`);
+  match (saved) { #Some(k) => println(`${k()}`), #None => {} }
+}

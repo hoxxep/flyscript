@@ -140,6 +140,7 @@ pub fn check_function(p: &mut Program, fid: FnId) {
         roles: Vec::new(),
         task_moved: HashMap::new(),
         dying_holds: HashMap::new(),
+        handling: Vec::new(),
         sites: HashMap::new(),
         ret_ty,
         sources,
@@ -239,6 +240,10 @@ struct Own<'p> {
     task_moved: HashMap<VarId, Span>,
     /// What the bindings of the block being ended held.
     dying_holds: HashMap<VarId, BTreeSet<LoanId>>,
+    /// The `handle`s whose bodies are being checked, innermost last: the effect each handles,
+    /// and the loans live across any point where the body may perform it, which the body holds
+    /// while suspended there (§5.3).
+    handling: Vec<(usize, BTreeSet<LoanId>)>,
     /// Variable ids by declaration site, so they are the same in both passes and in every
     /// traversal of a loop body.
     sites: HashMap<(usize, String), VarId>,
@@ -940,7 +945,11 @@ impl<'p> Own<'p> {
                 }
                 Val::default()
             }
-            ExprKind::Call { callee, args, .. } => self.call(e, callee, args),
+            ExprKind::Call { callee, args, .. } => {
+                let v = self.call(e, callee, args);
+                self.note_perform(e);
+                v
+            }
             ExprKind::Lambda { params, body } => self.lambda(e, params, body),
             ExprKind::Block(b) => self.block(b, how),
             ExprKind::If { cond, then, otherwise } => {
@@ -1062,6 +1071,7 @@ impl<'p> Own<'p> {
             ExprKind::Yield(v) => {
                 let val = self.escape(|o| o.expr(v, Use::Move));
                 self.check_yield(&val, v);
+                self.note_perform(e);
                 Val::default()
             }
             ExprKind::Return(v) => {
@@ -1106,7 +1116,12 @@ impl<'p> Own<'p> {
                             reached.push((v, changed.contains(name)));
                         }
                 }
+                let handled = self.typed.handled.get(&e.span).copied();
+                if let Some(d) = handled {
+                    self.handling.push((d, BTreeSet::new()));
+                }
                 let v = self.block(body, how);
+                let across = if handled.is_some() { self.handling.pop().map(|f| f.1).unwrap_or_default() } else { BTreeSet::new() };
                 let mut loans = v.loans.clone();
                 for arm in arms {
                     self.scopes.push(HashMap::new());
@@ -1130,9 +1145,9 @@ impl<'p> Own<'p> {
                         }
                     }
                     if let Some(k) = &arm.resumes {
-                        // The continuation holds whatever the body held (§5.3).
+                        // The continuation holds whatever the body held where it was suspended (§5.3).
                         let id = self.declare_var(&k.name, Ty::Error, false, false, k.span.start);
-                        self.state.holds.insert(id, v.loans.clone());
+                        self.state.holds.insert(id, v.loans.union(&across).copied().collect());
                         self.resumes.insert(id, reached.clone());
                         self.cont_args.insert(id, lent);
                     }
@@ -1406,6 +1421,27 @@ impl<'p> Own<'p> {
     }
 
     /// A task may capture only `Send` values, moved in, or `readonly` borrows of them (§6.1).
+    /// At a point that may perform a handled effect, the body is suspended there while the arm
+    /// runs, holding every loan still needed afterwards.
+    fn note_perform(&mut self, e: &Expr) {
+        if self.collecting || self.handling.is_empty() {
+            return;
+        }
+        let Some(defs) = self.typed.performs.get(&e.span).cloned() else { return };
+        let live = self.live_loans(e.span.end, &BTreeSet::new());
+        for d in defs {
+            // The innermost `handle` of an effect takes it; an open row may be any of them.
+            for frame in self.handling.iter_mut().rev() {
+                if d.is_none_or(|d| d == frame.0) {
+                    frame.1.extend(live.iter().copied());
+                    if d.is_some() {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
     /// Whether a call's closure argument is a scope's body or a task (§6.1).
     fn closure_role(&self, fid: Option<FnId>) -> Role {
         let Some(fid) = fid else { return Role::Plain };

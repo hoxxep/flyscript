@@ -1,0 +1,10 @@
+// error: `v` cannot be changed here: it was lent `readonly` at 7:36
+// A stored continuation holds what its body borrowed where it was suspended (§5.3).
+effect Tick { tick(): void; }
+export function main(): void {
+  let saved: Option<Cont<void, i32>> = #None;
+  let v = [1, 2, 3];
+  const first = handle { const s = v[0..2]; Tick.tick(); s.len() as i32 } with Tick { tick() resumes k => { saved = #Some(k); 0 } };
+  v[0] = 5;
+  match (saved) { #Some(k) => { const r = k(); }, #None => {} }
+}

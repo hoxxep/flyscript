@@ -210,6 +210,11 @@ pub struct Typed {
     /// The bindings each closure moves in, by the closure's span: they leave their scope's
     /// ownership when it is made.
     pub captured_moves: HashMap<Span, Vec<(String, Ty)>>,
+    /// The effects each call, operation, `yield` or `throw` may perform, by its span; `None` in
+    /// the list stands for effects a row variable leaves open.
+    pub performs: HashMap<Span, Vec<Option<DefId>>>,
+    /// The effect each `handle` expression handles, by its span.
+    pub handled: HashMap<Span, DefId>,
     /// Tag constructions `#A(x)` whose one argument is the whole of a larger payload (§3.2).
     pub whole: std::collections::HashSet<Span>,
     /// The type each part of a tag, record or list literal was checked against, by the part's

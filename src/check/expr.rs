@@ -548,6 +548,13 @@ impl<'p> Checker<'p> {
 
     /// Performs effects at `span`: they must fit the effects allowed here.
     fn perform(&mut self, effects: &EffRow, span: Span) {
+        // What is performed here, for the ownership pass: what a suspended body holds (§5.3).
+        let row = self.s.expand_effs(effects);
+        let mut defs: Vec<Option<DefId>> = row.effs.iter().map(|e| Some(e.def)).collect();
+        if !matches!(row.tail, Tail::Closed) {
+            defs.push(None);
+        }
+        self.typed.performs.entry(span).or_default().extend(defs);
         let allowed = self.allowed.clone();
         // Resuming a continuation whose row is not yet known: checked when it is.
         let row = self.s.expand_effs(effects);
@@ -926,7 +933,7 @@ impl<'p> Checker<'p> {
             }
             ExprKind::Break | ExprKind::Continue => Ty::never(),
             ExprKind::Region { name, body } => self.region(name, body, expected, span),
-            ExprKind::Handle { body, effect, arms } => self.handle(body, effect, arms, expected),
+            ExprKind::Handle { body, effect, arms } => self.handle(body, effect, arms, expected, span),
             ExprKind::Unsafe(b) => self.block(b, expected),
             ExprKind::Comptime(inner) => self.expr(inner, expected),
         }
@@ -1858,10 +1865,11 @@ impl<'p> Checker<'p> {
         }
     }
 
-    fn handle(&mut self, body: &ast::Block, effect: &ast::Type, arms: &[ast::HandlerArm], expected: Option<&Ty>) -> Ty {
+    fn handle(&mut self, body: &ast::Block, effect: &ast::Type, arms: &[ast::HandlerArm], expected: Option<&Ty>, span: Span) -> Ty {
         let scope = self.scope.clone();
         let row = self.p.elab_effects(&[ast::RowItem::Effect(effect.clone())], &scope);
         let Some(eff) = row.effs.first().cloned() else { return Ty::Error };
+        self.typed.handled.insert(span, eff.def);
         let result = expected.cloned().unwrap_or_else(|| self.s.fresh());
         // Resuming a continuation performs what the `handle` does: what its body does but does
         // not handle, and what its arms do (§5.3). That is known once they are checked.

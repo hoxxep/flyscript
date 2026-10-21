@@ -1,0 +1,12 @@
+// error: `v` cannot be changed here: it was lent `readonly` at 8:19
+// While the body is suspended at an operation, it still holds what it borrowed: the arm cannot
+// change it before resuming (§5.3).
+effect Eff { op(): void; }
+export function main(): void {
+  let v = [1, 2];
+  handle {
+    const first = v[0..1];
+    Eff.op();
+    const n = first.len();
+  } with Eff { op() resumes k => { v[0] = 9; k() } }
+}

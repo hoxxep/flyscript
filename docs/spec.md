@@ -1,6 +1,6 @@
 # Flyscript
 
-**Language specification, version 0.36**
+**Language specification, version 0.37**
 
 *Affine values, one row calculus, handlers for everything, and `comptime`: Church on the outside, Turing on the inside.*
 
@@ -18,12 +18,15 @@ The whole language rests on five laws. Every rule in this document is a conseque
 4. **Handlers for everything.** Errors, I/O, iteration and region memory are ordinary effects with ordinary handlers. A handler may hold the rest of a computation as a one-shot continuation value; generators and tasks are both built from that one primitive.
 5. **`comptime` is the metalanguage.** Generics, reflection, layout transformation and derived interfaces are ordinary Flyscript code run by the compiler.
 
-### 0.1 Changes from 0.35
+### 0.1 Changes from 0.36
 
-0.36 comes from an adversarial audit: some twenty-five small programs that each try to make a borrow, a region reference or a destructor outlive what it uses, run against the checker. Three got through.
+0.37 continues the adversarial audit into handlers, interfaces, templates and tasks. One more escape got through, in the prototype rather than the rules: a suspended body's borrows.
 
 | Change | Why |
 | :--- | :--- |
+| A continuation holds every loan its body still needs after any point where it may perform the handled effect — not only what the body's value holds (§5.3) | an arm could write to `v` while the suspended body still read a slice of it, and a stored continuation let `v` change before it resumed |
+
+--- | :--- |
 | A closure that escapes cannot capture region data (§4.6) | `region (R) { const r = alloc(p); return () => r.x; }` returned a closure whose type, `() => f64`, does not mention `R` |
 | A task cannot change what it borrows from outside its scope (§6.1) | two tasks could each push to the same outer `Vec` |
 | A binding whose destructor runs code cannot borrow a binding declared after it in the same block (§5.6) | bindings drop in reverse order, so the destructor read a dropped value; a `Gen`'s cleanup could too |
@@ -523,7 +526,7 @@ A `Cont<A, B, E>` is an affine value that may be stored, moved and returned like
 - `k(a)` consumes `k` and runs the suspended computation until it next performs the handled effect (when the arm runs again) or finishes. Its value is the `handle` expression's value from that point.
 - Dropping `k` unwinds the suspended computation in place: its `defer`s and destructors run in reverse order, in-flight I/O is cancelled and drained (§6.3), and its stack segment is released.
 - Handlers are **deep**: the handler stays installed beneath the suspended computation. Operations of other effects performed while `k` runs go to the handlers around the call of `k`, which is why `E` appears in `k`'s type.
-- A continuation holds every borrow its suspended computation holds: in a resumptive arm, `k` holds the borrows the body had taken when it performed the operation. And since a handler is deep, a continuation that leaves its arm — returned, stored, passed on rather than called — takes the handler with it: whatever holds it also borrows every binding outside the `handle` that the arms use, in the strongest mode they use it. One holding a borrow is class 2 (§4.2), so a continuation can never outlive a borrow it holds, and the borrowed places stay locked while it lives.
+- A continuation holds every borrow its suspended computation holds: in a resumptive arm, `k` holds every borrow the body still needs after any point where it may perform the handled effect — a call, an operation, a `yield` — so the arm cannot change what the suspended body is reading. And since a handler is deep, a continuation that leaves its arm — returned, stored, passed on rather than called — takes the handler with it: whatever holds it also borrows every binding outside the `handle` that the arms use, in the strongest mode they use it. One holding a borrow is class 2 (§4.2), so a continuation can never outlive a borrow it holds, and the borrowed places stay locked while it lives.
 - Continuations are one-shot. Resuming twice would duplicate owned values and live `mut` borrows.
 - **Arguments are lent to the arm.** An operation's arguments come from the code that performed it, which may have lent them from its own locals: `Log.log(line.asStr())`. Those locals live on the suspended body, and end when `k` resumes it or is dropped. So a parameter whose type can hold a borrow is usable in a resumptive arm only until the arm calls `k`, and never past the arm: it cannot be the arm's value, nor stored where the arm's end would leave it dangling. An abortive arm runs after the body has unwound, so it cannot use such a parameter at all: an operation meant to be handled abortively takes owned arguments (`stop(why: String): never`). A continuation that leaves its arm does not extend the arguments' lives either; they end with the arm, unless the arm's value is built inside `unsafe { … }`, which vouches that nothing will resume or drop the continuation while they live. The one such arm in the standard library is `generate`'s (§5.5).
 - **Resuming re-enters.** `k(a)` runs the rest of the body, which may perform the same operation again and re-enter an arm of the same handler. So, for ownership, `k(a)` uses every binding from outside the `handle` that the body or any of its arms uses, in the strongest mode any of them does: an arm cannot hold a borrow of such a binding across the call.
