@@ -1,0 +1,6 @@
+// error: `Vault` has private fields, so it cannot be taken apart outside its module
+import { Vault } from "../support/vault";
+export function label(v: Vault): u32 {
+  const { label } = v;
+  label
+}

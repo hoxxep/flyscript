@@ -1,0 +1,2 @@
+// error: `Vec` cannot hold `str`, which borrows: it holds owned values, so use an owned `String`
+export view struct Words { all: Vec<str>; }

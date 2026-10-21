@@ -16,5 +16,6 @@ Versions are pre-1.0 while the language is being designed. The specification was
 | 0.16 | Tag unions without brackets; throw/try/catch and yield as effect syntax; nursery semantics |
 | 0.17 | The rules a type checker needs: spawn and fork, effect rows as sets, catch closes its row |
 | 0.18 | Complete ownership rules: results carry their arguments' borrows, reborrowing, tasks perform only Io and failures |
+| 0.19 | `view struct`, `from` defaults, escaping closures capture by move, region handles, iteration chains, private fields |
 
 `review-round-*.md` are the design review rounds that produced 0.2–0.15; `programs-against-v0.13.md` is the program-writing exercise against what is now 0.13.

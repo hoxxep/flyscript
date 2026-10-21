@@ -1,0 +1,2 @@
+// error: a closure that escapes owns what it captures, so it can capture only `Send` values: `x` is a `T`
+export function constant<T>(x: T): () => T { () => x }

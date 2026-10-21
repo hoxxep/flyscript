@@ -1,0 +1,15 @@
+// Escaping closures own `Send` values; lent ones borrow, so iteration chains read like TypeScript (§4.3).
+export function compose(f: (x: u32) => u32, g: (x: u32) => u32): (x: u32) => u32 {
+  (x) => g(f(x))
+}
+export function constant<T extends Send>(x: T): () => T { () => x }
+export function counter(): mut () => u64 {
+  let n = 0;
+  () => { n += 1; n }
+}
+export function bigSquares(xs: readonly i64[]): Vec<i64> {
+  let min = 10;
+  const out = xs.iter().map((x) => x * x).filter((x) => x > min).collect();
+  min = 0;
+  out
+}

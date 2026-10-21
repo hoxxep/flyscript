@@ -1,0 +1,11 @@
+// error: this function performs `Step`, but only `Io, Fail
+// A scope body cannot suspend to an outer handler while its tasks run: the handler's arm could
+// write a region the tasks are reading (§6.1).
+effect Step { pause(): void; }
+
+function run(n: u64): void uses Io, Step {
+  Io.scope((s) => {
+    s.spawn(() => { Io.sleep(n); });
+    Step.pause();
+  });
+}

@@ -1,0 +1,13 @@
+// error: cannot store a borrow in `slot`: it would outlive the call
+// A function that wrote its argument's borrow into a caller's slot would keep `a` borrowed after
+// the call released it (§4.2).
+function stuff(slot: mut Option<mut i32>, x: mut i32): void {
+  slot = #Some(x);
+}
+export function leak(): i32 {
+  let a = 1;
+  let slot: Option<mut i32> = #None;
+  stuff(mut slot, mut a);
+  a = 5;
+  match (slot) { #Some(p) => { p = 7; 0 }, #None => 0 }
+}

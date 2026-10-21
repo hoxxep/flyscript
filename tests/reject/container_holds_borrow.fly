@@ -1,0 +1,8 @@
+// error: `Vec` cannot hold `mut i32`, which borrows
+// A container releases what it holds on every change, so it holds only owned values (§4.2):
+// otherwise `push` would keep `a` borrowed after the loan had ended.
+export function stash(a: mut i32, b: mut i32): void {
+  let v = Vec.new();
+  v.push(a);
+  v.push(b);
+}

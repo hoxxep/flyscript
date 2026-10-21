@@ -479,7 +479,7 @@ impl Program {
     fn check_views(&mut self) {
         for d in 0..self.defs.len() {
             let def = &self.defs[d];
-            if def.view || self.modules[def.module].is_std {
+            if self.modules[def.module].is_std {
                 continue;
             }
             let parts: Vec<(String, Ty)> = match &def.kind {
@@ -487,6 +487,16 @@ impl Program {
                 DefKind::Enum { tags } => tags.iter().map(|(k, t)| (format!("#{k}"), t.clone())).collect(),
                 _ => continue,
             };
+            for (_, ty) in &parts {
+                if let Some((c, arg)) = self.borrow_in_container(ty) {
+                    let (module, span) = (self.defs[d].module, self.defs[d].span);
+                    let msg = super::expr::container_message(self, c, &arg);
+                    self.error(module, span, msg);
+                }
+            }
+            if self.defs[d].view {
+                continue;
+            }
             for (name, ty) in parts {
                 if self.class(&ty) == 2 {
                     let shown = format!("{}", Show(&ty, self));

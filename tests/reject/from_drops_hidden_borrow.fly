@@ -1,0 +1,9 @@
+// error: the result borrows `item`, but `item` is not one of the result's sources
+// `T` may be a borrow, so `from self` cannot leave `item` out: the caller would think `slice` was
+// released while the result still held it (§4.2).
+struct Builder { prefix: String; }
+impl Builder {
+  function wrap<T>(self: readonly Self, item: T): [readonly String, T] from self {
+    [self.prefix, item]
+  }
+}

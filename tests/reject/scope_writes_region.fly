@@ -1,4 +1,4 @@
-// error: this writes to a region outside the scope, which is not allowed here
+// error: this function performs `Region<
 import { RegionList } from "std/region";
 export function race(): void uses Io {
   region (R) {

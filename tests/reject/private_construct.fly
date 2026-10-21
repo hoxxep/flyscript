@@ -1,0 +1,3 @@
+// error: `Vault` has private fields, so it cannot be built outside its module
+import { Vault } from "../support/vault";
+export function forge(): Vault { Vault { label: 1, secret: 0 } }

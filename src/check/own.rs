@@ -107,6 +107,14 @@ pub fn check_function(p: &mut Program, fid: FnId) {
     let module = p.fns[fid].module;
     let ret_ty = p.fns[fid].scheme.ret.clone();
     let sources = result_sources(p, &p.fns[fid].scheme);
+    let send = p.known.get("Send").copied();
+    let send_params: Vec<u32> = p.fns[fid]
+        .scheme
+        .tparams
+        .iter()
+        .filter(|g| g.bounds.iter().any(|b| matches!(b, Ty::Named(d, _) if Some(*d) == send)))
+        .map(|g| g.sym.id)
+        .collect();
     let mut o = Own {
         p,
         module,
@@ -128,6 +136,7 @@ pub fn check_function(p: &mut Program, fid: FnId) {
         sites: HashMap::new(),
         ret_ty,
         sources,
+        send_params,
         collecting: true,
     };
     // Pass 1 collects every use of every binding, with its position; pass 2 checks.
@@ -142,7 +151,9 @@ pub fn check_function(p: &mut Program, fid: FnId) {
         o.deferred.clear();
         for (i, (name, ty)) in o.typed.params.clone().into_iter().enumerate() {
             let id = o.declare_var(&name, ty.clone(), true, true, usize::MAX - i);
-            if o.p.class(&ty) == 2 {
+            // A parameter whose type can hide a borrow carries one too, so a `from` that leaves
+            // it out is checked against what the body returns (§4.2).
+            if o.p.class(&ty) == 2 || hides_borrows(&ty, o.p) {
                 o.loans.push(Loan { path: Path { root: id, fields: Vec::new() }, mutable: false, span: body.span, external: true });
                 let l = o.loans.len() - 1;
                 o.state.holds.insert(id, [l].into_iter().collect());
@@ -190,6 +201,8 @@ struct Own<'p> {
     ret_ty: Ty,
     /// The parameters this function's result may borrow from (§4.2).
     sources: Vec<String>,
+    /// Type parameters declared `extends Send`, by symbol id.
+    send_params: Vec<u32>,
     collecting: bool,
 }
 
@@ -476,13 +489,14 @@ impl<'p> Own<'p> {
     }
 
     /// Mutation through `path` requires a `let` binding, or a `mut` borrow on the way (§4.1).
-    fn check_mutable(&mut self, path: &Path, e: &Expr) {
+    /// Whether `path` may be changed; true if the change writes through a `mut` borrow.
+    fn check_mutable(&mut self, path: &Path, e: &Expr) -> bool {
         let var = self.vars[path.root].clone();
         match &var.ty {
-            Ty::Borrow(true, _) => return,
+            Ty::Borrow(true, _) => return true,
             Ty::Borrow(false, _) => {
                 self.err(e.span, format!("cannot change `{}` through a `readonly` borrow", self.path_name(path)));
-                return;
+                return false;
             }
             _ => {}
         }
@@ -491,14 +505,14 @@ impl<'p> Own<'p> {
         for f in &path.fields {
             t = field_type(self.p, &t, f).unwrap_or(Ty::Error);
             match &t {
-                Ty::Borrow(true, _) => return,
+                Ty::Borrow(true, _) => return true,
                 Ty::Borrow(false, _) => {
                     self.err(e.span, format!("cannot change `{}` through a `readonly` borrow", self.path_name(path)));
-                    return;
+                    return false;
                 }
                 t if self.is_ref(t) => {
                     self.err(e.span, format!("cannot change `{}`: region data changes only through a `Cell`", self.path_name(path)));
-                    return;
+                    return false;
                 }
                 _ => {}
             }
@@ -506,6 +520,7 @@ impl<'p> Own<'p> {
         if !var.mutable {
             self.err(e.span, format!("cannot change `{}`: it is declared `const`", var.name));
         }
+        false
     }
 
     // ---- statements and blocks ----
@@ -710,7 +725,11 @@ impl<'p> Own<'p> {
                     Some(path) => {
                         self.record_base_uses(target);
                         let none = BTreeSet::new();
-                        self.check_mutable(&path, target);
+                        if self.check_mutable(&path, target) && self.p.class(&self.ty_of(value)) == 2 {
+                            // The borrow would outlive the loan the caller gave this one (§4.2).
+                            let name = self.path_name(&path);
+                            self.err(value.span, format!("cannot store a borrow in `{name}`: it would outlive the call, since `{name}` is reached through a `mut` borrow"));
+                        }
                         self.access(&path, true, target.span, &none);
                         if *op != "=" {
                             // Compound assignment reads the place first.
@@ -1084,17 +1103,25 @@ impl<'p> Own<'p> {
             free_vars(body, &bound, &mut free);
             for (name, span) in free {
                 let Some(v) = self.lookup(&name) else { continue };
-                let ty = self.vars[v].ty.clone();
-                let ok = match &ty {
-                    Ty::Borrow(false, inner) => self.p.is_send(inner),
-                    Ty::Borrow(true, _) => false,
-                    t => self.p.is_send(t) || self.p.is_copy(t) && self.p.class(t) == 1,
-                };
-                if !ok {
-                    let shown = self.show(&ty);
-                    self.err(span, format!("a task cannot capture `{name}`: `{shown}` is not `Send`"));
+                if !self.sendable(v, false) {
+                    let shown = self.show(&self.vars[v].ty.clone());
+                    let why = if self.p.is_send_given(&self.vars[v].ty, &self.send_params) { "holds a borrow" } else { "is not `Send`" };
+                    self.err(span, format!("a task cannot capture `{name}`: `{shown}` {why}"));
                 }
             }
+        }
+    }
+
+    /// Whether binding `v` may be owned by something that leaves this function's fiber: an
+    /// escaping closure (`mut` borrows, which it holds alone, allowed) or a task (§4.3, §6.1).
+    fn sendable(&self, v: VarId, mut_ok: bool) -> bool {
+        let ty = &self.vars[v].ty;
+        let send = |t: &Ty| self.p.is_send_given(t, &self.send_params);
+        match ty {
+            Ty::Borrow(m, inner) => (mut_ok || !m) && send(inner),
+            // A closure lent borrows carries them; one that escaped owns only `Send` values.
+            Ty::Fn(_) => mut_ok || self.state.holds.get(&v).is_none_or(|h| h.is_empty()),
+            t => send(t) || self.p.is_copy(t) && self.p.class(t) == 1,
         }
     }
 
@@ -1126,6 +1153,10 @@ impl<'p> Own<'p> {
             // A closure that escapes owns what it captures: a borrow is copied (with its loans),
             // a `Copy` value is copied, anything else is moved (§4.3).
             let how = if escapes { Use::Move } else { how };
+            if escapes && !self.collecting && !self.sendable(v, true) {
+                let (name, shown) = (self.vars[v].name.clone(), self.show(&self.vars[v].ty.clone()));
+                self.err(span, format!("a closure that escapes owns what it captures, so it can capture only `Send` values: `{name}` is a `{shown}`"));
+            }
             self.record_use(v, span);
             let ident = Expr { kind: ExprKind::Ident(self.vars[v].name.clone()), span };
             let val = self.use_place(&ident, Path { root: v, fields: Vec::new() }, how);
@@ -1157,13 +1188,14 @@ impl<'p> Own<'p> {
 }
 
 /// The parameters a function's result may borrow from (§4.2): those named by `from`; otherwise
-/// the receiver of a method, or every parameter of a free function; plus, always, parameters
-/// whose types can hide a borrow.
+/// the receiver of a method, or every parameter of a free function, plus parameters whose types
+/// can hide a borrow. An explicit `from` is verified against the body, so it may leave those out.
 fn result_sources(p: &Program, scheme: &super::env::Scheme) -> Vec<String> {
+    if !scheme.ret_from.is_empty() {
+        return scheme.ret_from.clone();
+    }
     let hidden = scheme.params.iter().filter(|(_, t)| hides_borrows(t, p)).map(|(n, _)| n.clone());
-    let mut sources: Vec<String> = if !scheme.ret_from.is_empty() {
-        scheme.ret_from.clone()
-    } else if scheme.params.first().is_some_and(|(n, _)| n == "self") {
+    let mut sources: Vec<String> = if scheme.params.first().is_some_and(|(n, _)| n == "self") {
         vec!["self".to_string()]
     } else {
         scheme.params.iter().map(|(n, _)| n.clone()).collect()

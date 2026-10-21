@@ -40,7 +40,6 @@ export effect Io {
   now(): u64;
   sleep(nanos: u64): void;
   park(key: u64): void;
-  start(task: once () => void uses Io): u64;
 }
 export type IoErr = #Reset | #TimedOut | #BrokenPipe | #NotFound | #PermissionDenied;
 
@@ -51,7 +50,7 @@ impl<E> Fail<E> {
 }
 
 // ---- Iteration (§5.5): generators, pull iteration and iteration chains ----
-export struct Gen<T, row E>;
+export view struct Gen<T, row E>;
 
 export function generate<T, row E>(producer: once () => void uses Yield<T>, ...E): Gen<T, E>;
 
@@ -73,13 +72,13 @@ export interface Iterable<T, row E = []> {
   function each(self: readonly Self): void uses Yield<T>, ...E;
 }
 
-// ---- Structured concurrency (§6.1): library code over Io.start and Io.park ----
+// ---- Structured concurrency (§6.1): library code over the scheduler and Io.park ----
 // A task runs on a new fiber, where only `Io` and its scope's capture of failures are handled.
 export struct Scope<X>;
 export struct Fiber<T>;
 impl Io {
-  // The body's effects are `Send`: it cannot write to an outer region while tasks run (§6.1).
-  export function scope<T, X, row E extends Send>(body: once (s: mut Scope<X>) => T uses Io, ...E): T uses Io, Fail<X>, ...E;
+  // The body, like its tasks, performs only `Io` and failures: an outer region is frozen while tasks run (§6.1).
+  export function scope<T, X>(body: once (s: mut Scope<X>) => T uses Io, Fail<X>): T uses Io, Fail<X>;
 }
 impl<X> Scope<X> {
   export function spawn(self: mut Self, task: once () => void uses Io): void;

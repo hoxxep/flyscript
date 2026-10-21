@@ -1,6 +1,6 @@
 # Flyscript
 
-**Language specification, version 0.19**
+**Language specification, version 0.20**
 
 *Affine values, one row calculus, handlers for everything, and `comptime`: Church on the outside, Turing on the inside.*
 
@@ -18,21 +18,18 @@ The whole language rests on five laws. Every rule in this document is a conseque
 4. **Handlers for everything.** Errors, I/O, iteration and region memory are ordinary effects with ordinary handlers. A handler may hold the rest of a computation as a one-shot continuation value; generators and tasks are both built from that one primitive.
 5. **`comptime` is the metalanguage.** Generics, reflection, layout transformation and derived interfaces are ordinary Flyscript code run by the compiler.
 
-### 0.1 Changes from 0.18
+### 0.1 Changes from 0.19
 
-0.19 follows an independent holistic review of 0.18 (docs/reviews/2026-10-21-holistic-review-of-0-18.md), which judged the core sound in its thesis and found two soundness holes and a set of ergonomic walls a TypeScript programmer would hit in the first week. Every change removes friction or a special case.
+0.20 closes the five interaction bugs found by an independent review of 0.19 and its running prototype (docs/reviews/2026-10-21-review-of-0-19-and-the-running-prototype.md), which otherwise judged the language ready for production services. Two of the fixes delete concepts.
 
 | Change | Why |
 | :--- | :--- |
-| `Io.scope`'s body may not perform `Region` for regions outside it, so every `Ref` is `Send` (§4.4, §6.1) | a task could iterate a `RegionList` while the parent pushed to it; and the "no mutable slot" exception to `Send` disappears |
-| `k.resume()` uses every outer binding that the handled body or any arm uses (§5.3) | a re-entered arm could take a second `mut` borrow while the first was live across `resume` |
-| `from` lists parameters; without it, a method's result carries its receiver's borrows and a function's carries its borrowed arguments' (§4.2) | `counts.getMut(key)` no longer locks `key`, and `longer(a, b)` can return either |
-| A struct or enum with a borrow field is declared `view` (§3.3) | `struct User { name: str }` was legal until it was stored, 200 lines later |
-| A closure is `once` only if its body consumes a capture; a closure that escapes captures by move (§4.3) | a reusable callback owning a `String` was impossible to write |
-| `RegionList` and `Cell` are region handles themselves (§4.6) | removes `Ref<RegionList<…>>` and the `Ref<R, Self>` receiver |
-| Iteration chains: `xs.iter().zip(ys.iter()).take(n)` (§5.5) | iterator adaptors no longer need thunks |
-| `Fail.map` wraps one call's failures (§5.4) | tags from different libraries can collide; wrapping gives them provenance |
-| Module-level `const`; `interface I extends J`; fields public unless `private` (§2.3, §3.3, §3.4) | each is needed in the first week of a real program |
+| A scope's body performs only `Io` and its failures; starting a task is internal to the library (§5.1, §6.1) | the body could suspend to an outer handler that wrote a region while tasks read it, and `Io.start` bypassed scopes entirely; the "`Send` row" concept is gone |
+| A class-2 value cannot be written through a `mut` borrow (§4.2) | a `void` function could store its argument's borrow into a caller's `Option<mut T>` after the call released it |
+| A nominal type's parameters range over class-1 types unless it is a `view` (§4.2) | `Vec<mut i32>` stored borrows in a container that releases them on every `push` |
+| Parameters whose types can hide a borrow carry their own loans in the body (§4.2) | an explicit `from` could silently drop a type parameter's borrow |
+| Function values are affine, and an escaping closure owns only `Send` values (§4.3) | a closure's type hid a non-`Send` capture from task boundaries |
+| A struct with `private` fields cannot be built or destructured outside its module (§3.3) | literals and patterns bypassed `private` |
 
 ---
 
@@ -113,7 +110,7 @@ Return      = [ "mut" | "readonly" ] Type [ "from" Ident { "," Ident } ] ;
 Uses        = "uses" Row ;
 
 TypeParams  = "<" TypeParam { "," TypeParam } ">" ;
-TypeParam   = "region" Ident | "row" Ident [ "extends" Bounds ] [ "=" Type ] | "comptime" Ident ":" Type
+TypeParam   = "region" Ident | "row" Ident [ "=" Type ] | "comptime" Ident ":" Type
             | Ident [ "extends" Bounds ] [ "=" Type ] ;
 Bounds      = Type { "&" Type } ;
 
@@ -197,7 +194,7 @@ type Result<T, E> = #Ok(T) | #Err(E);
 
 ### 3.3 Nominal types
 
-`struct` names a record and `enum` names a closed tag union. A nominal type is a *new* type: it has identity (a `Meters` is not a `Seconds`), may implement `Drop`, may carry `@layout(c)` or `@layout(packed)`, and may be recursive. Construction and matching are identical to the structural forms. Fields are public, as in TypeScript, unless marked `private`, which limits them to the declaring module.
+`struct` names a record and `enum` names a closed tag union. A nominal type is a *new* type: it has identity (a `Meters` is not a `Seconds`), may implement `Drop`, may carry `@layout(c)` or `@layout(packed)`, and may be recursive. Construction and matching are identical to the structural forms. Fields are public, as in TypeScript, unless marked `private`, which limits them to the declaring module: outside it, a struct with private fields cannot be built with a literal or taken apart with a pattern, only through the functions its module exports. That is what lets a type keep an invariant (`NonZero`).
 
 A struct or enum that holds a borrow (§4.2) must say so: `view struct Scanner { src: readonly u8[]; pos: usize; }`. A view is a temporary lens on someone else's data; it can be a local or a parameter but never stored or returned untied. Without `view`, a borrow field is an error that suggests the owned alternative (`String` for `str`, `Vec<T>` for `T[]`), so the choice is made where the type is declared, not discovered where it is first stored.
 
@@ -280,7 +277,10 @@ Every type has a *class*, 1 or 2.
 
 Some types can hold a borrow without showing it: closures, continuations (`Cont`, §5.3), anything built from them (`Gen`), and type parameters. A value of such a type is class 2 when it actually holds a borrow, so a closure capturing a `readonly` slice, or a generator iterating one, is class 2 although its type's arguments are all class 1.
 
-A class-2 value may be a parameter, a local, or a return value tied to a parameter. It may not be stored in a class-1 value, captured by an escaping closure, sent to another task, or returned untied. That is the only restriction, and it is what replaces lifetime parameters.
+A class-2 value may be a parameter, a local, or a return value tied to a parameter. It may not be stored in a class-1 value, captured by an escaping closure, sent to another task, or returned untied. That is the only restriction, and it is what replaces lifetime parameters. Two consequences are worth stating:
+
+- **Containers hold first-class values.** A nominal type's type parameters range over class-1 types unless the type is a `view`: `Vec<String>` and `HashMap<String, u64>` are fine, `Vec<str>` is an error that suggests `Vec<String>`. Structural types (`Option`, `Result`, tuples, records) and views (`Gen`, `Scanner`) may hold borrows.
+- **No borrow is stored through a borrow.** A `mut` borrow of a view may change its class-1 parts (`sc.pos += 1`) but cannot have a class-2 value written into it: a function that wrote its argument's borrow into a caller's `mut Option<mut T>` would keep that borrow alive after the call had released it. A local binding may still be reassigned (`s = b`), since its borrows are tracked where it lives.
 
 **Results carry their sources' borrows.** A call's result can hold the borrows of its *sources*: the parameters named in its `from` clause; without one, the receiver for a method and every borrowed argument for a free function. Arguments whose types can hide a borrow — closures, generators, type parameters — are always sources. A result whose type cannot hold a borrow at all (class 1, with no closure, continuation or type parameter once instantiated) holds nothing. So `v.len()` holds nothing; `counts.getMut(key)` holds the borrow of `counts` but not of `key`; and `generate(() => v.each())` holds the borrow of `v` for as long as the generator lives.
 
@@ -289,11 +289,11 @@ function longer(a: str, b: str): str { if (a.len() >= b.len()) { a } else { b } 
 function prefix(s: str, sep: str): str from s { … }                               // borrows only s
 ```
 
-The body is checked against the same rule: everything the returned value borrows must come from a source, never from a local.
+The body is checked against the same rule: everything the returned value borrows must come from a source, never from a local. Inside the body, a parameter whose type can hide a borrow carries a loan of its own, so a `from` that leaves out a type-parameter or closure argument the result actually contains is rejected there.
 
 ### 4.3 Closures
 
-A closure captures each binding as its body needs it, by reference: a read takes a `readonly` borrow, a change a `mut` borrow. A closure that *escapes* — returned, stored in a first-class value, or handed to a task — instead takes ownership of what it captures, by move, so it holds no borrows. Its mode follows from what its body does when called:
+A closure captures each binding as its body needs it, by reference: a read takes a `readonly` borrow, a change a `mut` borrow. Passing a closure as an argument is lending it: in `xs.iter().filter((x) => x > min)` the closure borrows `min`, and the resulting generator carries that borrow (§4.2), so `min` may change again once the chain is collected. A closure that *escapes* — returned, or stored in a record, tag or list by the function that creates it — instead takes ownership of what it captures, by move, so it holds no borrows; it may own only `Send` values, so every first-class closure is `Send`. Function values are affine, like any owned value: moving one moves its captures, and dropping it drops them. Its mode follows from what its body does when called:
 
 | Type | Body | Callable |
 | :--- | :--- | :--- |
@@ -308,7 +308,7 @@ So `(path) => \`${prefix}/${path}\`` returned from a function owns `prefix` and 
 The compiler derives three marker interfaces from structure:
 
 - **`Copy`**: bitwise copyable; no field owns a resource and the type has no `Drop`.
-- **`Send`**: may move to another task, and `readonly T` may be shared with other tasks. `T` is `Send` when it is class 1 and owns no raw pointer. Law 2 is what makes one marker enough: every mutation through a shared reference is an effect, and while tasks run no fiber may perform the effect that writes to an outer region (§6.1), so whatever a task can see through a `readonly` value or a `Ref` cannot change.
+- **`Send`**: may move to another task, and `readonly T` may be shared with other tasks. `T` is `Send` when it is class 1 and owns no raw pointer or runtime handle (`Gen`, `Fiber`, `Scope`); a type parameter is `Send` when declared `extends Send`. Every function value is `Send`, since an escaping closure owns only `Send` values (§4.3); a closure that holds a borrow carries it as a loan, which a task cannot take (§6.1). Law 2 is what makes one marker enough: every mutation through a shared reference is an effect, and while tasks run no fiber may perform the effect that writes to an outer region (§6.1), so whatever a task can see through a `readonly` value or a `Ref` cannot change.
 - **`Drop`**: user-implemented on nominal types; destructors run in reverse order of construction.
 
 ### 4.5 Pointers
@@ -384,14 +384,13 @@ effect Io {
   now(): Instant;
   sleep(d: Duration): void;
   park(on: WaitKey): void;                       // the primitive under locks, channels, atomics and join
-  start(task: once () => void uses Io): TaskId;  // the primitive under Io.scope (§6.1)
 }
 type IoErr = #Reset | #TimedOut | #BrokenPipe | #NotFound | #PermissionDenied;
 ```
 
 These four are the standard effects. They are ordinary declarations; what makes them standard is only that the runtime installs root handlers for `Io` (and for the heap, which is not an effect).
 
-**Operations have no effects of their own.** An operation's handler runs where the effect is handled, not where it was performed, so an operation cannot fail at its call site by itself; one that can fail returns a `Result`, and library code turns that into a `throw` where it is called (`Socket.read` is `Io.read(…).unwrap()`). Everything richer — scopes, channels, locks — is library code over these few operations.
+**Operations have no effects of their own.** An operation's handler runs where the effect is handled, not where it was performed, so an operation cannot fail at its call site by itself; one that can fail returns a `Result`, and library code turns that into a `throw` where it is called (`Socket.read` is `Io.read(…).unwrap()`). Everything richer — scopes, channels, locks — is library code over these few operations and the runtime's scheduler, whose primitive for starting a task is internal to the standard library: a task can be started only through a scope.
 
 A function's `uses` clause is a row of effects. A function with no `uses` clause is **pure**: it may allocate on the heap, open and use its own regions, and mutate its `mut` parameters, but it observes nothing and affects nothing outside its arguments and result. Higher-order functions are polymorphic in their callbacks' effects:
 
@@ -516,7 +515,7 @@ Integer division by zero, overflow in checked builds (`wrappingAdd` and friends 
 Concurrency is structured. `Io.scope((s) => body)` opens a scope, and a scope starts tasks in two ways:
 
 ```ts
-function scope<T, X, row E extends Send>(body: once (s: mut Scope<X>) => T uses Io, ...E): T uses Io, Fail<X>, ...E;
+function scope<T, X>(body: once (s: mut Scope<X>) => T uses Io, Fail<X>): T uses Io, Fail<X>;
 interface Scope<X> {
   // Fire and forget: the task cannot fail, so it cannot cancel the scope.
   function spawn(self: mut Self, task: once () => void uses Io): void;
@@ -534,10 +533,10 @@ The rules:
 2. **Isolation is a type.** `spawn` accepts only a task whose effects are `Io`, which cannot fail. A server that must survive a bad connection spawns its connections, and the type checker proves they cannot take the scope down: a connection handler that let an error escape would not be accepted by `spawn`.
 3. **Failure cancels the scope.** A forked task's failures `X` are rethrown by `Io.scope`. If a forked task fails, or any task panics, the scope is cancelled: the body and every other task stop at their next `Io` operation and unwind, and once all have finished the first failure is rethrown from `Io.scope` (or the panic continues). `join` therefore never fails by itself: it returns the result, or the joiner is cancelled along with the rest of the scope.
 4. **A task performs only what its fiber can handle.** A task runs on a new fiber, where the only handlers are the runtime's `Io` and the scope's capture of failures, so its effects are `Io` and `Fail` and nothing else. It cannot allocate in its parent's region or perform an effect whose handler lives in the parent fiber.
-5. **Outer regions are frozen while tasks run.** The body of a scope runs on the parent's fiber, but its effects must be `Send` — a row is `Send` when it contains no `Region` — so it cannot write to a region outside the scope while tasks may be reading it. A task or the body may still open and use regions of its own.
+5. **Outer regions are frozen while tasks run.** The body of a scope runs on the parent's fiber, but like its tasks it performs only `Io` and failures: it cannot write to a region outside the scope while tasks may be reading it, nor suspend to an outer handler that could. A task or the body may still open and use regions of its own, and anything else is done before or after the scope.
 6. **Captures.** A task is a `once` closure. It may move in owned `Send` values and capture `readonly` borrows of `Send` values from outside the scope; the scope outlives every task, so the borrows are safe.
 
-`scope`, `spawn`, `fork` and `join` are library code over `Io.start` and `Io.park`; nursery semantics are not built into the language.
+`scope`, `spawn`, `fork` and `join` are library code over the runtime's scheduler and `Io.park`; nursery semantics are not built into the language.
 
 ```ts
 Io.scope((s) => {
@@ -668,7 +667,7 @@ The rules that carry the design:
   > ─────────────────────────────────────────
   > Δ | Θ | Γ ⊢ region(ρ) { e } : τ / ε ⊣ Θ′
 - **Handle.** An abortive arm is checked under the Γ of the `handle` expression, the body's borrows having been released. In a resumptive arm, the body's borrows move into `k`, whose type records them; they are released when `k` is resumed to completion or dropped.
-- **Scope.** A task's captures must be class 1 and `Send`, or `ro` borrows of `Send` values whose paths are not under `mut` in Γ. A spawned task's row is exactly `Io`; a forked task's row is `Io` and `Fail<X>`, where `X` is rethrown by its scope; the scope body's row is `Send` (it contains no `Region`).
+- **Scope.** A task's captures must be class 1 and `Send`, or `ro` borrows of `Send` values whose paths are not under `mut` in Γ. A spawned task's row is exactly `Io`; a forked task's row, and the scope body's, is `Io` and `Fail<X>`, where `X` is rethrown by the scope.
 - **Effect rows.** Rows are label-sorted maps with an optional tail. For records a label occurs once and extension requires the tail to lack it; for tag unions labels merge and their payloads unify; for effects a label is an effect name with its region arguments, its other arguments are functions of the label, and extension by a present label is the identity. Handling `Fail` sets the open tail of its payload to the empty row.
 ---
 

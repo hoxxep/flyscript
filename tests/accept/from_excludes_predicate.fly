@@ -1,0 +1,15 @@
+// An explicit `from` may leave out a closure the result does not hold: the result borrows `xs`,
+// not `keep`'s captures, so `banned` is free again once `first` returns (§4.2).
+function first<T>(xs: readonly T[], keep: (x: readonly T) => bool): Option<readonly T> from xs {
+  for (const x of xs) {
+    if (keep(x)) { return #Some(x); }
+  }
+  #None
+}
+
+export function pick(xs: readonly u32[]): u32 {
+  let banned = 3;
+  const hit = first(xs, (x) => x != banned);
+  banned = 4;
+  match (hit) { #Some(x) => x + banned, #None => 0 }
+}

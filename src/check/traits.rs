@@ -103,16 +103,49 @@ impl Program {
         }
     }
 
-    /// `Send`: may move to another task, and `readonly T` may be shared with one (§4.4).
-    pub fn is_send(&self, t: &Ty) -> bool {
-        self.class(t) == 1 && self.send_depth(t, 0)
+    /// A borrow held by a nominal type that is not a `view` (§4.2): `Vec<str>`. Containers
+    /// release what they hold on every change, so their type parameters range over class-1 types.
+    pub fn borrow_in_container(&self, t: &Ty) -> Option<(DefId, Ty)> {
+        self.container_depth(t, 0)
     }
 
-    fn send_depth(&self, t: &Ty, depth: usize) -> bool {
+    fn container_depth(&self, t: &Ty, depth: usize) -> Option<(DefId, Ty)> {
+        if depth > 32 {
+            return None;
+        }
+        let rec = |t: &Ty| self.container_depth(t, depth + 1);
+        match t {
+            Ty::Borrow(_, e) | Ty::Slice(e) | Ty::Array(e, _) => rec(e),
+            Ty::Tuple(ts) => ts.iter().find_map(rec),
+            Ty::Record(r) | Ty::Union(r) => r.labels.values().find_map(rec),
+            Ty::Fn(f) => f.params.iter().chain(std::iter::once(&f.ret)).find_map(rec),
+            Ty::Named(d, args) => {
+                // A region reference is class 1 whatever it points at (§4.6).
+                if !self.defs[*d].view && !self.is_known(*d, "Ref")
+                    && let Some(a) = Self::arg_types(args).find(|a| self.class(a) == 2) {
+                        return Some((*d, a.clone()));
+                    }
+                Self::arg_types(args).find_map(rec)
+            }
+            _ => None,
+        }
+    }
+
+    /// `Send`: may move to another task, and `readonly T` may be shared with one (§4.4).
+    pub fn is_send(&self, t: &Ty) -> bool {
+        self.is_send_given(t, &[])
+    }
+
+    /// `Send`, given type parameters declared `extends Send` (by symbol id).
+    pub fn is_send_given(&self, t: &Ty, send_params: &[u32]) -> bool {
+        self.class(t) == 1 && self.send_depth(t, send_params, 0)
+    }
+
+    fn send_depth(&self, t: &Ty, send_params: &[u32], depth: usize) -> bool {
         if depth > 32 {
             return false;
         }
-        let rec = |t: &Ty| self.send_depth(t, depth + 1);
+        let rec = |t: &Ty| self.send_depth(t, send_params, depth + 1);
         match t {
             Ty::Prim(_) | Ty::Error => true,
             Ty::Tuple(ts) => ts.iter().all(rec),
@@ -126,7 +159,11 @@ impl Program {
                 }
                 Self::arg_types(args).all(rec) && self.components(*d, args).is_none_or(|cs| cs.iter().all(rec))
             }
-            Ty::Param(_) | Ty::Var(_) | Ty::Fn(_) | Ty::Assoc(..) => false,
+            // An escaping closure owns only `Send` values, and a lent one carries loans that keep
+            // it from crossing to a task (§4.3), so every function value is `Send`.
+            Ty::Fn(_) => true,
+            Ty::Param(sym) => send_params.contains(&sym.id),
+            Ty::Var(_) | Ty::Assoc(..) => false,
         }
     }
 }

@@ -1,0 +1,10 @@
+// error: a task cannot capture `bump`: `() => void` holds a borrow
+// `bump` borrows `n`, which the parent goes on to change: a task may not carry that borrow away (§6.1).
+export function race(): u64 uses Io {
+  let n = 0;
+  const bump = () => { n += 1; };
+  Io.scope((s) => {
+    s.spawn(() => { bump(); });
+  });
+  n
+}

@@ -1,0 +1,5 @@
+// error: a closure that escapes owns what it captures, so it can capture only `Send` values: `g` is a `Gen<u32, []>`
+// Function values are `Send`, so a closure's type cannot hide a value that must stay on its task (§4.3).
+export function puller(g: Gen<u32, []>): mut () => Option<u32> {
+  () => g.next()
+}

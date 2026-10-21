@@ -125,12 +125,24 @@ pub fn check_fn(p: &mut Program, fid: FnId) {
     for t in typed.exprs.values_mut().chain(typed.bindings.values_mut()) {
         *t = c.s.zonk(t);
     }
+    let mut spans: Vec<(&Span, &Ty)> = typed.exprs.iter().chain(typed.bindings.iter()).collect();
+    spans.sort_by_key(|(sp, _)| (sp.start, sp.end));
+    if let Some((span, (d, arg))) = spans.iter().find_map(|(sp, t)| c.p.borrow_in_container(t).map(|x| (**sp, x))) {
+        let msg = container_message(c.p, d, &arg);
+        c.p.error(module, span, msg);
+    }
     c.p.typed.insert(fid, typed);
     if inferring {
         let mut row = c.s.zonk_effs(&c.allowed.clone());
         row.tail = Tail::Closed;
         c.p.inferred.insert(fid, Some(row));
     }
+}
+
+pub fn container_message(p: &Program, d: DefId, arg: &Ty) -> String {
+    let shown = format!("{}", Show(arg, p));
+    let hint = if shown.contains("str") && !shown.contains("u8") { "an owned `String`" } else { "an owned value" };
+    format!("`{}` cannot hold `{shown}`, which borrows: it holds owned values, so use {hint} (§4.2)", p.defs[d].name)
 }
 
 /// Effects of a function, inferring them from its body if it declares none.
@@ -829,6 +841,9 @@ impl<'p> Checker<'p> {
             Some(Ty::Record(r)) => Some(self.s.expand_row(r).labels),
             _ => None,
         };
+        if let Some(Ty::Named(d, _)) = &target {
+            self.unsealed(*d, "built", span);
+        }
         let mut labels = BTreeMap::new();
         for f in fields {
             let want = wanted.as_ref().and_then(|w| w.get(&f.name.name).cloned());
@@ -918,6 +933,16 @@ impl<'p> Checker<'p> {
                 Ty::Array(elem, Len::Known(items.len() as u64))
             }
             _ => Ty::Tuple(items.iter().map(|it| self.expr(it, None)).collect()),
+        }
+    }
+
+    /// Outside its module, a struct with private fields is built and taken apart only by the
+    /// functions its module exports, so it can keep an invariant (§3.3).
+    fn unsealed(&mut self, d: DefId, verb: &str, span: Span) {
+        let def = &self.p.defs[d];
+        if def.module != self.module && !def.private.is_empty() {
+            let msg = format!("`{}` has private fields, so it cannot be {verb} outside its module", def.name);
+            self.err(span, msg);
         }
     }
 
@@ -1110,15 +1135,6 @@ impl<'p> Checker<'p> {
             }
         }
         self.check_args(&params, args, span);
-        for (g, a) in scheme.tparams.iter().zip(&inst.args) {
-            let wants_send = g.kind == PKind::Row && g.bounds.iter().any(|b| matches!(b, Ty::Named(d, _) if self.p.known.get("Send") == Some(d)));
-            if let (true, GArg::Row(row)) = (wants_send, a) {
-                let region = self.known("Region");
-                if self.s.expand_effs(row).effs.iter().any(|e| e.def == region) {
-                    self.err(span, "this writes to a region outside the scope, which is not allowed here: an outer region is frozen while tasks may read it (§6.1)");
-                }
-            }
-        }
         if let Some(e) = &inst.effects {
             self.perform(e, span);
         }
@@ -1493,6 +1509,9 @@ impl<'p> Checker<'p> {
                 }
             }
             PatternKind::Record { fields, .. } => {
+                if let Ty::Named(d, _) = self.strip(&inner) {
+                    self.unsealed(d, "taken apart", pat.span);
+                }
                 for (name, sub) in fields {
                     let ft = self.field(&inner, &name.name, name.span);
                     match sub {
