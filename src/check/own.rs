@@ -1003,9 +1003,9 @@ impl<'p> Own<'p> {
                 self.iterating = matches!(iter.kind, ExprKind::Call { .. });
                 let mut iv = self.expr(iter, Use::Read);
                 self.iterating = false;
-                let mut held = iv.loans.clone();
-                held.extend(first_loan..self.loans.len());
-                self.temps.push(held);
+                // What the iterated value holds stays borrowed for the whole loop; a temporary
+                // it was made from (`self.sigs[i].iter().cloned().collect()`) does not.
+                self.temps.push(iv.loans.clone());
                 // A generator's items borrow what it holds, never the generator itself: they are
                 // results of its producer (§5.5). A collection's elements borrow the collection.
                 if self.is_gen(&self.ty_of(iter))
@@ -1340,7 +1340,9 @@ impl<'p> Own<'p> {
             }
         };
         let ret = self.ty_of(e);
-        let yields = std::mem::replace(&mut self.iterating, false);
+        // Only a generator call — one whose result is `void`, its items yielded — lends its
+        // sources to its items; a call that returns a collection gives back what it returns.
+        let yields = std::mem::replace(&mut self.iterating, false) && matches!(ret, Ty::Prim(Prim::Void));
         let mut arg_vals: Vec<(Option<String>, Val)> = Vec::new();
         let mut receiver_loan: Option<(LoanId, Path, Span)> = None;
         self.temps.push(BTreeSet::new());
@@ -1433,6 +1435,12 @@ impl<'p> Own<'p> {
                 }
                 None => self.expr(a, how),
             };
+            // A value that cannot hold a borrow holds none: `self.emit(self.dicts[j])` copies
+            // the index out, and nothing of `self.dicts` stays lent across the call (§4.2).
+            let mut v = v;
+            if !self.may_hold(&at) {
+                v.loans.clear();
+            }
             self.next_role = Role::Plain;
             if let Some((_, p)) = params.get(i) {
                 let p = p.clone();

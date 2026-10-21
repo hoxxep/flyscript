@@ -31,10 +31,16 @@ export type Arm = { ctor: String; binds: Vec<String>; body: Expr; span: Span };
 // `def pure name(…)` promises the body performs no effect, which the checker holds it to.
 export type Def = { name: String; params: Vec<String>; body: Expr; span: Span; pure: bool };
 // `data List = Nil | Cons(int, List);`: a type's constructors and their fields.
-export enum TypeExpr { #TInt, #TBool, #TNamed(String, Span) }
+export enum TypeExpr { #TInt, #TBool, #TSelf, #TNamed(String, Span), #TFn(Vec<TypeExpr>, Box<TypeExpr>) }
+impl Clone for TypeExpr;
 export type CtorDecl = { name: String; fields: Vec<TypeExpr>; span: Span };
 export type DataDecl = { name: String; ctors: Vec<CtorDecl> };
-export type Program = { datas: Vec<DataDecl>; defs: Vec<Def>; main: Expr };
+// `interface Measure { size: (Self) => int; }`: methods every implementing type provides.
+export type MethodSig = { name: String; ty: TypeExpr; span: Span };
+export type InterfaceDecl = { name: String; methods: Vec<MethodSig>; span: Span };
+// `impl Measure for List { size(l) = …; }`: the methods for one type.
+export type ImplDecl = { iface: String; target: TypeExpr; methods: Vec<Def>; span: Span };
+export type Program = { datas: Vec<DataDecl>; interfaces: Vec<InterfaceDecl>; impls: Vec<ImplDecl>; defs: Vec<Def>; main: Expr };
 
 export function spanOf(e: readonly Expr): Span {
   match (e) {
@@ -67,32 +73,91 @@ impl Parser {
   function program(self: mut Self): Program uses Fail<CompileError> {
     let defs: Vec<Def> = Vec.new();
     let datas: Vec<DataDecl> = Vec.new();
-    while (self.peek() == #Def || self.peek() == #Data) {
-      if (self.peek() == #Data) {
-        datas.push(self.data());
-        continue;
+    let interfaces: Vec<InterfaceDecl> = Vec.new();
+    let impls: Vec<ImplDecl> = Vec.new();
+    while (true) {
+      match (self.peek()) {
+        #Data => datas.push(self.data()),
+        #Interface => interfaces.push(self.interface()),
+        #Impl => impls.push(self.impl()),
+        #Def => {
+          const start = self.here().start;
+          self.bump();
+          const pure = self.peek() == #Pure;
+          if (pure) { self.bump(); }
+          defs.push(self.definition(start, pure));
+        }
+        _ => break,
       }
-      const start = self.here().start;
+    }
+    const main = self.expr();
+    if (self.peek() != #Eof) { throw #Parse { at: self.here().start, message: `expected the end of the program` }; }
+    { datas, interfaces, impls, defs, main }
+  }
+
+  // `name(params) = body;`, after `def`, or as a method of an `impl`.
+  function definition(self: mut Self, start: usize, pure: bool): Def uses Fail<CompileError> {
+    const name = self.ident();
+    self.expect(#LParen, "`(`");
+    let params: Vec<String> = Vec.new();
+    while (self.peek() != #RParen) {
+      params.push(self.ident());
+      if (self.peek() == #Comma) { self.bump(); }
+    }
+    self.bump();
+    self.expect(#Eq, "`=`");
+    const body = self.expr();
+    const end = spanOf(body).end;
+    self.expect(#Semi, "`;`");
+    { name, params, body, span: { start, end }, pure }
+  }
+
+  function interface(self: mut Self): InterfaceDecl uses Fail<CompileError> {
+    const span = self.here();
+    self.bump();
+    const name = self.ident();
+    self.expect(#LBrace, "`{`");
+    let methods: Vec<MethodSig> = Vec.new();
+    while (self.peek() != #RBrace) {
+      const at = self.here();
+      const mname = self.ident();
+      self.expect(#Colon, "`:`");
+      methods.push({ name: mname, ty: self.typeExpr(), span: at });
+      self.expect(#Semi, "`;`");
+    }
+    self.bump();
+    { name, methods, span }
+  }
+
+  function impl(self: mut Self): ImplDecl uses Fail<CompileError> {
+    const span = self.here();
+    self.bump();
+    const iface = self.ident();
+    self.expect(#For, "`for`");
+    const target = self.typeExpr();
+    self.expect(#LBrace, "`{`");
+    let methods: Vec<Def> = Vec.new();
+    while (self.peek() != #RBrace) { methods.push(self.definition(self.here().start, false)); }
+    self.bump();
+    { iface, target, methods, span }
+  }
+
+  // `int`, `bool`, `Self`, a data type's name, or `(T, …) => R`.
+  function typeExpr(self: mut Self): TypeExpr uses Fail<CompileError> {
+    if (self.peek() == #LParen) {
       self.bump();
-      const pure = self.peek() == #Pure;
-      if (pure) { self.bump(); }
-      const name = self.ident();
-      self.expect(#LParen, "`(`");
-      let params: Vec<String> = Vec.new();
+      let params: Vec<TypeExpr> = Vec.new();
       while (self.peek() != #RParen) {
-        params.push(self.ident());
+        params.push(self.typeExpr());
         if (self.peek() == #Comma) { self.bump(); }
       }
       self.bump();
-      self.expect(#Eq, "`=`");
-      const body = self.expr();
-      const end = spanOf(body).end;
-      self.expect(#Semi, "`;`");
-      defs.push({ name, params, body, span: { start, end }, pure });
+      self.expect(#Arrow, "`=>`");
+      return #TFn(params, Box.new(self.typeExpr()));
     }
-    const main = self.expr();
-    if (self.peek() != #Eof) { throw #Parse { at: self.here().start, message: "expected the end of the program".toString() }; }
-    { datas, defs, main }
+    const at = self.here();
+    const t = self.ident();
+    match (t.asStr()) { "int" => #TInt, "bool" => #TBool, "Self" => #TSelf, _ => #TNamed(t, at) }
   }
 
   function data(self: mut Self): DataDecl uses Fail<CompileError> {
@@ -107,9 +172,7 @@ impl Parser {
       if (self.peek() == #LParen) {
         self.bump();
         while (self.peek() != #RParen) {
-          const at = self.here();
-          const t = self.ident();
-          fields.push(match (t.asStr()) { "int" => #TInt, "bool" => #TBool, _ => #TNamed(t, at) });
+          fields.push(self.typeExpr());
           if (self.peek() == #Comma) { self.bump(); }
         }
         self.bump();

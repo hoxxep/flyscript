@@ -1,0 +1,7 @@
+// With nothing expected, later arms are checked against the first arm's type (§3.6): `#Err` is
+// built as the `Shape` the first arm gave.
+enum Shape { #Dot, #Err }
+export function pick(s: Option<Shape>): Shape {
+  const r = match (s) { #Some(x) => x, #None => #Err };
+  r
+}

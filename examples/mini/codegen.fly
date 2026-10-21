@@ -2,15 +2,28 @@
 import { println } from "std/io";
 import { HashMap } from "std/collections";
 import { Expr, Op, Program } from "./syntax";
+import { Checked, Evidence } from "./check";
 
 // ---- Code generation to a stack machine ----
 
 // Each function has a frame of its own: what it captured, then its parameters, then its `let`s.
-export enum Instr { #Push(i64), #Load(usize), #Global(usize), #Store, #Drop, #Add, #Sub, #Mul, #Lt, #Jump(usize), #JumpIfFalse(usize), #MakeFn(usize, usize, usize), #Call(usize), #Ret, #Construct(usize, usize), #TagIs(usize), #Unpack(usize), #Unmatched, #MakeRecord(Vec<String>), #GetField(String), #Print }
+export enum Instr { #Push(i64), #Load(usize), #Global(usize), #Store, #Drop, #Add, #Sub, #Mul, #Lt, #Jump(usize), #JumpIfFalse(usize), #MakeFn(usize, usize, usize), #Call(usize), #Ret, #Construct(usize, usize), #TagIs(usize), #Unpack(usize), #Unmatched, #MakeRecord(Vec<String>), #GetField(String), #Print, #Partial(usize) }
 impl Clone for Instr;
 impl Show for Instr;
 
-export struct Gen { code: Vec<Instr>; locals: Vec<String>; globals: HashMap<String, usize>; ctors: HashMap<String, [usize, usize]>; folded: HashMap<usize, i64> }
+export struct Gen {
+  code: Vec<Instr>;
+  locals: Vec<String>;
+  globals: HashMap<String, usize>;
+  ctors: HashMap<String, [usize, usize]>;
+  folded: HashMap<usize, i64>;
+  // Dictionary passing: each impl's dictionary global, what each method use and generic use
+  // is given (by its position), and how many dictionaries each definition takes.
+  dicts: Vec<usize>;
+  methodEvidence: HashMap<usize, Evidence>;
+  dictEvidence: HashMap<usize, Vec<Evidence>>;
+  predCounts: HashMap<String, usize>;
+}
 
 // The names an expression uses that it does not bind, in order of first use.
 export function freeVars(e: readonly Expr, bound: mut Vec<String>, out: mut Vec<String>): void {
@@ -60,10 +73,34 @@ impl Gen {
     while (i > 0) { i -= 1; if (self.locals[i] == name) { return #Load(i); } }
     match (self.globals.get(name)) { #Some(g) => #Global(g), #None => panic("checked names resolve") }
   }
+  // The dictionary that evidence names: an impl's, a global; or the k-th the definition was passed.
+  function dict(self: mut Self, e: readonly Evidence): void {
+    match (e) {
+      #Impl(j) => { self.emit(#Global(self.dicts[j])); }
+      #Param(k) => { const i = self.load(`$d${k}`); self.emit(i); }
+    }
+  }
+
   function gen(self: mut Self, e: readonly Expr): void {
     match (e) {
       #Int(n, _) => { self.emit(#Push(n)); }
       #Bool(b, _) => { self.emit(#Push(if (b) { 1 } else { 0 })); }
+      // A method is read from the dictionary its use was resolved to.
+      #Var(name, span) if self.methodEvidence.has(span.start) => {
+        const ev = self.methodEvidence.get(span.start).unwrap().clone();
+        self.dict(ev);
+        self.emit(#GetField(name.clone()));
+      }
+      // A generic definition used as a value is a closure holding its dictionaries.
+      #Var(name, span) if self.dictEvidence.has(span.start) => {
+        const evs = self.dictEvidence.get(span.start).unwrap().clone();
+        const arity = match (self.predCounts.get(name)) { #Some(k) => k, #None => 0 };
+        for (const ev of evs) { self.dict(ev); }
+        const g = self.globals.get(name).unwrap();
+        // Its own parameters are not known here: the closure takes whatever it is called with.
+        self.emit(#Global(g));
+        self.emit(#Partial(arity));
+      }
       #Var(name, _) => {
         match (self.ctors.get(name)) {
           #Some([tag, 0]) => { self.emit(#Construct(tag, 0)); }
@@ -117,6 +154,10 @@ impl Gen {
         freeVars(body, mut bound, mut captures);
         // Definitions are globals, reached directly, not captured.
         captures.retain((c) => self.locals.includes(c));
+        // A closure inside a generic definition may use its dictionaries: they come along.
+        for (const l of self.locals) {
+          if (l.startsWith("$d") && !captures.includes(l)) { captures.push(l.clone()); }
+        }
         for (const c of captures) { const i = self.load(c); self.emit(i); }
         const make = self.emit(#MakeFn(0, params.len(), captures.len()));
         const skip = self.emit(#Jump(0));
@@ -133,6 +174,18 @@ impl Gen {
         self.code[skip] = #Jump(self.code.len());
       }
       #Call(f, args, _) => {
+        // A generic definition called is given its dictionaries first.
+        const evs: Vec<Evidence> = match (f) {
+          #Var(_, span) => match (self.dictEvidence.get(span.start)) { #Some(v) => v.clone(), #None => Vec.new() },
+          _ => Vec.new(),
+        };
+        if (evs.len() > 0) {
+          for (const ev of evs) { self.dict(ev); }
+          for (const a of args) { self.gen(a); }
+          if (const #Var(name, _) = f) { const g = self.globals.get(name).unwrap(); self.emit(#Global(g)); }
+          self.emit(#Call(evs.len() + args.len()));
+          return;
+        }
         for (const a of args) { self.gen(a); }
         // A constructor applied builds its value directly.
         if (const #Var("print", _) = f) {
@@ -274,6 +327,18 @@ export function run(code: readonly Instr[], globals: readonly Value[], ctorNames
         _ => panic("checked: a constructed value"),
       },
       #Unmatched => panic("checked: every case is handled"),
+      // A function with its first `k` arguments given: a closure that takes the rest.
+      #Partial(k) => match (stack.pop().unwrap()) {
+        #Closure(addr, arity, caps) => {
+          let given: Vec<Value> = Vec.new();
+          for (const _ of 0..k) { given.push(stack.pop().unwrap()); }
+          given.reverse();
+          let all = caps;
+          for (const v of given.drain()) { all.push(v); }
+          stack.push(#Closure(addr, arity - k, all));
+        }
+        _ => panic("checked: a function"),
+      },
       #Print => {
         const v = stack.pop().unwrap();
         println(`  > ${showValue(v, ctorNames)}`);
@@ -322,19 +387,19 @@ export function showValue(v: readonly Value, names: readonly String[]): String {
 export type Generated = { code: Vec<Instr>; globals: Vec<Value>; ctorNames: Vec<String> };
 
 // Each definition's body is a function of its parameters alone, placed before the main expression.
-export function generate(prog: readonly Program, folded: readonly HashMap<usize, i64>): Generated {
-  generateFor(prog, prog.main, folded)
+export function generate(prog: readonly Program, folded: readonly HashMap<usize, i64>, checked: readonly Checked): Generated {
+  generateFor(prog, prog.main, folded, checked)
 }
 
 // `comptime(…)` expressions, innermost first, each compiled against the program's definitions,
 // run on the machine, and remembered by where it is so code generation puts the value there.
-export function fold(prog: readonly Program): HashMap<usize, i64> uses Io {
+export function fold(prog: readonly Program, checked: readonly Checked): HashMap<usize, i64> uses Io {
   let found: Vec<[usize, Expr]> = Vec.new();
   for (const d of prog.defs) { comptimes(d.body, mut found); }
   comptimes(prog.main, mut found);
   let folded: HashMap<usize, i64> = HashMap.new();
   for (const [at, e] of found) {
-    const g = generateFor(prog, e, folded);
+    const g = generateFor(prog, e, folded, checked);
     match (run(g.code, g.globals, g.ctorNames)) {
       #Int(n) => folded.insert(at, n),
       _ => panic("checked: a comptime value is an int"),
@@ -362,7 +427,7 @@ function comptimes(e: readonly Expr, out: mut Vec<[usize, Expr]>): void {
   }
 }
 
-function generateFor(prog: readonly Program, main: readonly Expr, folded: readonly HashMap<usize, i64>): Generated {
+function generateFor(prog: readonly Program, main: readonly Expr, folded: readonly HashMap<usize, i64>, checked: readonly Checked): Generated {
   let names: HashMap<String, usize> = HashMap.new();
   for (const [i, d] of prog.defs.iter().enumerate()) { names.insert(d.name.clone(), i); }
   let ctors: HashMap<String, [usize, usize]> = HashMap.new();
@@ -373,17 +438,45 @@ function generateFor(prog: readonly Program, main: readonly Expr, folded: readon
       ctorNames.push(c.name.clone());
     }
   }
-  let g = Gen { code: Vec.new(), locals: Vec.new(), globals: names, ctors, folded: folded.clone() };
+  // Globals: the definitions, then each impl's methods, then each impl's dictionary.
+  let predCounts: HashMap<String, usize> = HashMap.new();
+  for (const [i, d] of prog.defs.iter().enumerate()) { predCounts.insert(d.name.clone(), checked.predCounts[i]); }
+  const methodCount = prog.impls.iter().reduce((n, imp) => n + imp.methods.len(), 0);
+  let dicts: Vec<usize> = Vec.new();
+  for (const j of 0..prog.impls.len()) { dicts.push(prog.defs.len() + methodCount + j); }
+  let g = Gen {
+    code: Vec.new(), locals: Vec.new(), globals: names, ctors, folded: folded.clone(), dicts,
+    methodEvidence: checked.methodEvidence.clone(), dictEvidence: checked.dictEvidence.clone(), predCounts,
+  };
   const skip = g.emit(#Jump(0));
   let globals: Vec<Value> = Vec.new();
   for (const d of prog.defs) {
     const addr = g.code.len();
+    // A generic definition's dictionaries come first in its frame.
+    const k = g.predCounts.get(d.name).unwrap();
+    for (const i of 0..k) { g.locals.push(`$d${i}`); }
     for (const param of d.params) { g.locals.push(param.clone()); }
     g.gen(d.body);
     g.emit(#Ret);
     g.locals = Vec.new();
-    globals.push(#Closure(addr, d.params.len(), Vec.new()));
+    globals.push(#Closure(addr, k + d.params.len(), Vec.new()));
   }
+  let methods: Vec<Vec<[String, Value]>> = Vec.new();
+  for (const imp of prog.impls) {
+    let fields: Vec<[String, Value]> = Vec.new();
+    for (const m of imp.methods) {
+      const addr = g.code.len();
+      for (const param of m.params) { g.locals.push(param.clone()); }
+      g.gen(m.body);
+      g.emit(#Ret);
+      g.locals = Vec.new();
+      const closure: Value = #Closure(addr, m.params.len(), Vec.new());
+      globals.push(closure.clone());
+      fields.push([m.name.clone(), closure]);
+    }
+    methods.push(fields);
+  }
+  for (const fields of methods.drain()) { globals.push(#Record(fields)); }
   g.code[skip] = #Jump(g.code.len());
   g.gen(main);
   { code: g.code, globals, ctorNames }

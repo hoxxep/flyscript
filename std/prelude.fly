@@ -297,6 +297,10 @@ impl<T> Option<T> {
   export function isNone(self: readonly Self): bool { !self.isSome() }
   export function take(self: mut Self): Option<T>;
   export function unwrapOr(self: Self, fallback: T): T;
+  // The value transformed, if there is one: TypeScript's `x === undefined ? undefined : f(x)`.
+  export function map<U, row E>(self: Self, f: once (v: T) => U uses ...E): Option<U> uses ...E {
+    match (self) { #Some(v) => #Some(f(v)), #None => #None }
+  }
   // The value, which must be there: `#None` is a bug, and panics (§5.7).
   export function unwrap(self: Self): T {
     match (self) { #Some(v) => v, #None => panic("unwrap of #None") }
@@ -397,6 +401,15 @@ impl<T, row E> Gen<T, E> {
   // The first item `test` accepts, if any; the rest are not produced.
   export function find(self: Self, test: mut (x: readonly T) => bool uses ...E): Option<T> uses ...E {
     for (const x of self) { if (test(x)) { return #Some(x); } }
+    #None
+  }
+  // The position of the first item `test` accepts: TypeScript's `findIndex`, without the `-1`.
+  export function findIndex(self: Self, test: mut (x: readonly T) => bool uses ...E): Option<usize> uses ...E {
+    let i: usize = 0;
+    for (const x of self) {
+      if (test(x)) { return #Some(i); }
+      i += 1;
+    }
     #None
   }
   export function some(self: Self, test: mut (x: readonly T) => bool uses ...E): bool uses ...E {

@@ -1,6 +1,6 @@
 # Flyscript
 
-**Language specification, version 0.52**
+**Language specification, version 0.53**
 
 *Affine values, one row calculus, handlers for everything, and `comptime`: Church on the outside, Turing on the inside.*
 
@@ -18,9 +18,16 @@ The whole language rests on five laws. Every rule in this document is a conseque
 4. **Handlers for everything.** Errors, I/O, iteration and region memory are ordinary effects with ordinary handlers. A handler may hold the rest of a computation as a one-shot continuation value; generators and tasks are both built from that one primitive.
 5. **`comptime` is the metalanguage.** Generics, reflection, layout transformation and derived interfaces are ordinary Flyscript code run by the compiler.
 
-### 0.1 Changes from 0.51
+### 0.1 Changes from 0.52
 
-0.52 completes Mini's mirror of Flyscript's phases with `comptime`: `comptime(e)` must perform nothing — its effect row is closed while it is checked — and may use definitions but not locals; a folding pass compiles each one against the program's definitions, runs it on Mini's own machine, and puts the value in the code where it stood, as `flyc` evaluates `comptime` with its own interpreter (§7). Mini now has, in six modules, every phase a Flyscript front end needs: parsing, inference of types and effect rows over region-allocated types, row-typed records, algebraic data types, an ownership pass, compile-time evaluation, error recovery, code generation and a machine. No language change was needed for this step. Earlier changes are in [docs/history](history/).
+0.53 gives Mini interfaces as Flyscript has them: `interface Measure { size: (Self) => int; }`, `impl Measure for List { … }`, methods resolved after inference to an impl or — in a definition generic over the type — to a dictionary the definition is passed (qualified types, compiled by dictionary passing). Earlier changes are in [docs/history](history/).
+
+| Change | Why |
+| :--- | :--- |
+| With nothing expected, a later branch of a `match` or `if` is checked against the first's type (§3.6) | `match (types.get(n)) { #Some(t) => t, #None => alloc(#Error) }` built `#Error` as a structural tag, not the `Type` the first arm gave |
+| A copied value that cannot hold a borrow holds none, so it keeps nothing lent across the call it is passed to; only a generator call's sources lend its items, and a `for…of` keeps lent only what its iterated value holds (§4.1, §4.2, §5.5) | `self.emit(#Global(self.dicts[j]))` and `for (const s of self.sigs[i].iter().cloned().collect()) { self.function(…) }` were rejected |
+| `Option.map`, and `findIndex` on generators (§3.2, §5.5) | under TypeScript's name, finding a position was missing |
+
 
 ---
 
@@ -218,7 +225,7 @@ type Option<T>    = #Some(T) | #None;
 type Result<T, E> = #Ok(T) | #Err(E);
 ```
 
-`Option<T>` has `isSome`, `isNone`, `unwrapOr(fallback)`, `unwrap()` (a `#None` is a bug, and panics), and `take()`, which through a `mut` borrow leaves `#None` behind; an `Option<readonly T>` also has `cloned()`. `Result<T, E>` has `isOk`, `isErr`, and `unwrap()`, which throws the `#Err` payload as a failure (§5.4). A record pattern names the fields it binds and ignores the rest: `#Struct { fields }` matches a `#Struct { name: str; fields: Field[] }`.
+`Option<T>` has `isSome`, `isNone`, `map(f)`, `unwrapOr(fallback)`, `unwrap()` (a `#None` is a bug, and panics), and `take()`, which through a `mut` borrow leaves `#None` behind; an `Option<readonly T>` also has `cloned()`. `Result<T, E>` has `isOk`, `isErr`, and `unwrap()`, which throws the `#Err` payload as a failure (§5.4). A record pattern names the fields it binds and ignores the rest: `#Struct { fields }` matches a `#Struct { name: str; fields: Field[] }`.
 
 **Narrowing.** In a `match` on a structural union, an arm whose pattern binds the whole value sees the union without the tags that earlier arms, unguarded, matched whatever their payload: in `match (e) { #Many(ps) => …, one => describe(one) }` with `e: Problem | #Many(Vec<Problem>)`, `one` is a `Problem`. An enum is a type of its own and is not narrowed.
 
@@ -279,6 +286,7 @@ Type checking happens after `comptime` evaluation and uses bidirectional local i
 - Region arguments are unification variables solved over the whole body. An allocation whose region the types leave undetermined goes to the **innermost enclosing region it does not escape from**: when a `region` block ends, each such allocation is placed in it unless that would let the data outlive the block (through the block's value or a variable declared outside it), in which case it is offered to the next enclosing region. A region argument left unconstrained outside every region defaults to the heap, where region allocation is an error, so a stray `alloc` is caught.
 - **Recursion.** A function that is called again while its effects are being inferred — itself, or through others — is assumed pure there; if its body then performs an effect, it must state its effects with `uses`.
 - **Expected types flow inward**: into blocks and their last expression, into the branches of `if`, `match`, `try`, `region` and `handle`, into a lambda's body from the function type expected of it, and into calls. A call checked against an expected type unifies the callee's instantiated return type with it *before* checking the arguments. This is how `alloc({ user, token })` in a function returning `Ref<Request>` builds a `Request` rather than an anonymous record.
+- With nothing expected, the branches of an `if` or `match` after the first are checked against the first's type.
 - `break`, `continue`, `return` and `throw` have type `never`, which fits any expected type.
 - There is no global Hindley–Milner inference: errors stay local, and `comptime`, regions and interfaces stay decidable.
 
@@ -517,7 +525,7 @@ It is library code: `try { f() } catch (e) { throw wrap(e) }`.
 
 **A yielded value is a result** of the function that yields it, handed out before the function returns: like a returned value (§4.2), it may borrow only what the function was lent — a parameter that is itself a borrow, or a closure's borrowed captures and parameters — and never a local or anything the function owns, which may end before the item does. So `function words(s: str): void uses Yield<str> { for (const w of s.splitWhitespace()) { yield w; } }` is a generator of borrows of `s`, while one that yields slices of a buffer of its own is rejected and yields `String`s instead. In return, a generator call's sources lend its items what they borrow, as a call's sources lend its result: in `for (const w of words(line))`, `w` borrows `line`, so `best = w` may outlive the iteration. Likewise the items of a `Gen` borrow what the generator holds, not the generator: a `find` that returns one of them outlives the `Gen` it consumed.
 
-A generator that performs nothing — a collection's `iter()`, a map's `keys()` — may be given any effect row, so it is a `Gen<T, E>` for whatever `E` its consumer needs, and the closures given to its adaptors and consumers may perform `E`: `params.iter().some((p) => occurs(v, p))` where `occurs` reads a region. A `Gen<T, E>` has `next()`, the lazy adaptors `map`, `filter`, `take`, `zip` and `enumerate`, `collect()` into a `Vec`, `join(sep)`, and, under TypeScript's names, `find`, `some`, `every` and `reduce((acc, x) => …, init)`; a `Gen<readonly T, E>` also has `cloned()`, which gives owned copies.
+A generator that performs nothing — a collection's `iter()`, a map's `keys()` — may be given any effect row, so it is a `Gen<T, E>` for whatever `E` its consumer needs, and the closures given to its adaptors and consumers may perform `E`: `params.iter().some((p) => occurs(v, p))` where `occurs` reads a region. A `Gen<T, E>` has `next()`, the lazy adaptors `map`, `filter`, `take`, `zip` and `enumerate`, `collect()` into a `Vec`, `join(sep)`, and, under TypeScript's names, `find`, `findIndex`, `some`, `every` and `reduce((acc, x) => …, init)`; a `Gen<readonly T, E>` also has `cloned()`, which gives owned copies.
 
 `for (const x of e) { body }` handles `Yield` around a generator, running `body` for each item. If `e` is a generator call, it is the generator. Otherwise `e`'s type must implement `Iterable`, TypeScript's iteration protocol in Flyscript form, and the generator is `e.each()`:
 

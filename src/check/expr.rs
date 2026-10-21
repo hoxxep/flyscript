@@ -885,7 +885,8 @@ impl<'p> Checker<'p> {
                 let a = self.block(then, expected);
                 match otherwise {
                     Some(o) => {
-                        let b = self.expr(o, expected);
+                        let first = if self.s.resolve(&a).is_never() { None } else { Some(a.clone()) };
+                        let b = self.expr(o, expected.or(first.as_ref()));
                         self.join(&[(a, then.span), (b, o.span)], expected)
                     }
                     None => Ty::void(),
@@ -2105,7 +2106,10 @@ impl<'p> Checker<'p> {
             if let Some(g) = &arm.guard {
                 self.check(g, &Ty::bool());
             }
-            let t = self.expr(&arm.body, expected);
+            // With nothing expected, a later arm is checked against what the first gave, as
+            // TypeScript does: `#None => alloc(#Error)` after `#Some(t) => t` builds a `Type` (§3.6).
+            let first = types.iter().map(|(t, _): &(Ty, Span)| t.clone()).find(|t| !self.s.resolve(t).is_never());
+            let t = self.expr(&arm.body, expected.or(first.as_ref()));
             types.push((t, arm.body.span));
             self.scopes.pop();
         }

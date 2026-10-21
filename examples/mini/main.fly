@@ -76,6 +76,20 @@
 // expect: error at 1:23: `x` is not known at compile time
 // expect:     let x = 3 in comptime(x * 2)
 // expect:                           ^
+// expect: data List = Nil | Cons(int, List);
+// expect: interface Measure { size: (Self) => int; }
+// expect: impl Measure for List { size(l) = case l of Nil => 0 | Cons(h, t) => 1 + size(t); }
+// expect: impl Measure for int { size(n) = n; }
+// expect: size(Cons(1, Cons(2, Nil))) + size(40)  :  int  =  42
+// expect: data List = Nil | Cons(int, List);
+// expect: interface Measure { size: (Self) => int; }
+// expect: impl Measure for List { size(l) = case l of Nil => 0 | Cons(h, t) => 1 + size(t); }
+// expect: impl Measure for int { size(n) = n; }
+// expect: def twice(x) = size(x) * 2;
+// expect: twice(Cons(5, Nil)) + twice(10)  :  int  =  22
+// expect: error at 3:1: `bool` does not implement `Measure`
+// expect:     size(true)
+// expect:     ^
 // expect: error at 2:1: this `case` does not handle Blue
 // expect:     case Green of Red => 1 | Green => 2
 // expect:     ^
@@ -106,15 +120,15 @@ export function compile(src: str): Compiled uses Fail<CompileError>, Io {
   // Every type error is collected; the program is compiled only if there were none.
   let errors: Vec<Problem> = Vec.new();
   // Types first, then ownership, which needs to know what is `Copy`.
-  const ty = handle {
-    const checked = check(prog);
-    checkMoves(prog, checked.copies);
-    checked.ty
+  const checked = handle {
+    const c = check(prog);
+    checkMoves(prog, c.copies.clone());
+    c
   } with Diag { report(e) resumes k => { errors.push(e); k() } };
   if (errors.len() > 0) { throw #Many(errors) }
   // What `comptime` asks is computed now, by the machine itself, and becomes part of the code.
-  const g = generate(prog, fold(prog));
-  { code: g.code, globals: g.globals, ty, ctorNames: g.ctorNames }
+  const g = generate(prog, fold(prog, checked), checked);
+  { code: g.code, globals: g.globals, ty: checked.ty, ctorNames: g.ctorNames }
 }
 
 // ---- Diagnostics shown against the source: line, column, the line, a caret ----
@@ -196,6 +210,9 @@ export function main(): void uses Io {
     "def fact(n) = if n < 1 then 1 else n * fact(n - 1);\ncomptime(fact(10)) + 1",
     "comptime(print(1))",
     "let x = 3 in comptime(x * 2)",
+    "data List = Nil | Cons(int, List);\ninterface Measure { size: (Self) => int; }\nimpl Measure for List { size(l) = case l of Nil => 0 | Cons(h, t) => 1 + size(t); }\nimpl Measure for int { size(n) = n; }\nsize(Cons(1, Cons(2, Nil))) + size(40)",
+    "data List = Nil | Cons(int, List);\ninterface Measure { size: (Self) => int; }\nimpl Measure for List { size(l) = case l of Nil => 0 | Cons(h, t) => 1 + size(t); }\nimpl Measure for int { size(n) = n; }\ndef twice(x) = size(x) * 2;\ntwice(Cons(5, Nil)) + twice(10)",
+    "interface Measure { size: (Self) => int; }\nimpl Measure for int { size(n) = n; }\nsize(true)",
     "data Color = Red | Green | Blue;\ncase Green of Red => 1 | Green => 2",
     "let a = 1 + true in\nlet b = if 3 then 4 else false in\nnope(a)",
   ];

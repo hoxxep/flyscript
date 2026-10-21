@@ -1,7 +1,8 @@
 // Mini, a compiler written in Flyscript as a test of goal 6 (§1): Hindley–Milner inference over types allocated in a region, each variable
-// carrying its own union-find link; algebraic data types; errors reported through `Diag`.
+// carrying its own union-find link; algebraic data types; interfaces resolved to impls or to
+// dictionary parameters (qualified types); errors reported through `Diag`.
 import { HashMap, HashSet } from "std/collections";
-import { Cell } from "std/region";
+import { Cell, RegionList } from "std/region";
 import { Span, Problem, Diag } from "./lexer";
 import { Expr, Op, Arm, TypeExpr, Program, spanOf } from "./syntax";
 
@@ -27,7 +28,18 @@ export type Field<region R> = { name: Ref<R, str>; ty: Ref<R, Type<R>> };
 export type Ctor<region R> = { data: usize; tag: usize; fields: Ref<R, Ref<R, Type<R>>[]>; result: Ref<R, Type<R>> };
 
 // A type with variables quantified: each use of a `let`-bound name gets fresh copies of them.
-export type Scheme<region R> = { vars: Vec<usize>; ty: Ref<R, Type<R>> };
+// A definition generic over a type that must implement an interface also says so: its
+// predicates, each an interface and a quantified variable, are dictionaries it is passed.
+export type Scheme<region R> = { vars: Vec<usize>; ty: Ref<R, Type<R>>; preds: Vec<[usize, usize]> };
+
+// "This type implements that interface", made where a method or a generic definition is used:
+// `slot` is `#None` for a method's own dictionary, `#Some(k)` for a definition's k-th predicate.
+type Constraint<region R> = { iface: usize; ty: Ref<R, Type<R>>; site: usize; owner: Option<usize>; slot: Option<usize> };
+
+// How a constraint is met: by an impl, or by the enclosing definition's k-th dictionary.
+export enum Evidence { #Impl(usize), #Param(usize) }
+impl Clone for Evidence;
+impl Eq for Evidence;
 
 export struct Checker<region R> {
   // Numbers type variables, in the region so unification can make them too.
@@ -44,6 +56,19 @@ export struct Checker<region R> {
   bindings: Vec<[String, Ref<R, Type<R>>]>;
   // Inside `comptime(…)`, how many scopes enclosed it: their locals are not known yet.
   comptimeBase: Option<usize>;
+  // Interfaces: each one's methods and their signatures, and each method's interface.
+  sigs: Vec<Vec<[String, TypeExpr]>>;
+  methodOf: HashMap<String, usize>;
+  ifaceNames: Vec<String>;
+  dataTypes: HashMap<String, Ref<R, Type<R>>>;
+  // The constraints made so far, and the definition whose body is being checked.
+  constraints: RegionList<R, Constraint<R>>;
+  owner: Cell<R, Option<usize>>;
+  // What resolving the constraints found, for code generation: each method use's dictionary,
+  // each generic use's dictionaries in predicate order, each definition's number of them.
+  methodEvidence: HashMap<usize, Evidence>;
+  dictEvidence: HashMap<usize, Vec<[usize, Evidence]>>;
+  predCounts: Vec<usize>;
 }
 
 impl<region R> Checker<R> {
@@ -218,6 +243,13 @@ impl<region R> Checker<R> {
       const a = self.fresh();
       return Checker.func([a], a, Checker.record([{ name: fmt("Io"), ty: alloc(#Performed) }], self.fresh()));
     }
+    // A method: its interface's signature, with `Self` a fresh type that must implement it.
+    if (const #Some(iface) = self.methodOf.get(name)) {
+      const me = self.fresh();
+      const sig = match (self.sigs[iface].iter().find(([n, _]) => n == name)) { #Some([_, t]) => self.toType(t, me), #None => alloc(#Error) };
+      self.constraints.push({ iface, ty: me, site: span.start, owner: self.owner.get(), slot: #None });
+      return sig;
+    }
     let i = self.scopes.len();
     while (i > 0) {
       i -= 1;
@@ -234,11 +266,42 @@ impl<region R> Checker<R> {
         for (const v of s.vars) {
           map.insert(v, Checker.var(self.ids));
         }
+        // Each predicate of a generic definition is a dictionary this use must find.
+        for (const [k, [iface, v]] of s.preds.iter().enumerate()) {
+          const ty = match (map.get(v)) { #Some(t) => t, #None => alloc(#Error) };
+          self.constraints.push({ iface, ty, site: span.start, owner: self.owner.get(), slot: #Some(k) });
+        }
         return Checker.copy(s.ty, map);
       }
     }
     Diag.report(#Unbound { span, name: name.toString() });
     alloc(#Error)
+  }
+
+  // A signature's type, with `Self` standing for `me`; a function in it may perform anything.
+  function toType(self: readonly Self, te: readonly TypeExpr, me: Ref<Type>): Ref<Type> uses Region<R>, Diag {
+    match (te) {
+      #TInt => self.int,
+      #TBool => self.bool,
+      #TSelf => me,
+      #TNamed(n, at) => match (self.dataTypes.get(n)) {
+        #Some(t) => t,
+        #None => { Diag.report(#Unbound { span: at, name: n.clone() }); alloc(#Error) }
+      },
+      #TFn(ps, r) => {
+        let params: Vec<Ref<Type>> = Vec.new();
+        for (const p of ps) { params.push(self.toType(p, me)); }
+        Checker.func(params, self.toType(r, me), self.fresh())
+      }
+    }
+  }
+
+  // The variables some constraint still mentions: a `let` does not quantify over them, since
+  // only a definition can be passed the dictionary they need.
+  function constrained(self: readonly Self): HashSet<usize> uses Region<R> {
+    let out: HashSet<usize> = HashSet.new();
+    for (const c of self.constraints) { Checker.freeIn(c.ty, mut out); }
+    out
   }
 
   // Quantifies the variables of `t` that no enclosing scope leaves open.
@@ -253,10 +316,10 @@ impl<region R> Checker<R> {
     }
     let mine: HashSet<usize> = HashSet.new();
     Checker.freeIn(t, mut mine);
-    { vars: mine.iter().filter((v) => !inEnv.has(v)).cloned().collect(), ty: t }
+    { vars: mine.iter().filter((v) => !inEnv.has(v)).cloned().collect(), ty: t, preds: Vec.new() }
   }
 
-  function mono(t: Ref<Type>): Scheme<R> { { vars: Vec.new(), ty: t } }
+  function mono(t: Ref<Type>): Scheme<R> { { vars: Vec.new(), ty: t, preds: Vec.new() } }
 
   // Definitions are inferred together, each seeing the others at one type while their bodies
   // are checked (no polymorphic recursion), then generalized.
@@ -264,26 +327,28 @@ impl<region R> Checker<R> {
     // Data types first: their constructors' fields may name any of them.
     let types: HashMap<String, Ref<Type>> = HashMap.new();
     for (const [i, d] of p.datas.iter().enumerate()) { types.insert(d.name.clone(), alloc(#Data(i, fmt(d.name)))); }
+    self.dataTypes = types.clone();
     let tag: usize = 0;
     for (const [i, d] of p.datas.iter().enumerate()) {
       let names: Vec<String> = Vec.new();
       for (const c of d.ctors) {
         let fields: Vec<Ref<Type>> = Vec.new();
-        for (const f of c.fields) {
-          fields.push(match (f) {
-            #TInt => self.int,
-            #TBool => self.bool,
-            #TNamed(n, at) => match (types.get(n)) {
-              #Some(t) => t,
-              #None => { Diag.report(#Unbound { span: at, name: n.clone() }); alloc(#Error) }
-            },
-          });
-        }
+        for (const f of c.fields) { fields.push(self.toType(f, alloc(#Error))); }
         self.ctors.insert(c.name.clone(), { data: i, tag, fields: allocAll(fields), result: types.get(d.name).unwrap() });
         names.push(c.name.clone());
         tag += 1;
       }
       self.ctorsOf.push(names);
+    }
+    // Interfaces: each method's name is in scope everywhere, typed by its signature.
+    for (const [i, iface] of p.interfaces.iter().enumerate()) {
+      let sigs: Vec<[String, TypeExpr]> = Vec.new();
+      for (const m of iface.methods) {
+        self.methodOf.insert(m.name.clone(), i);
+        sigs.push([m.name.clone(), m.ty.clone()]);
+      }
+      self.sigs.push(sigs);
+      self.ifaceNames.push(iface.name.clone());
     }
     let globals: HashMap<String, Scheme<R>> = HashMap.new();
     let own: Vec<Ref<Type>> = Vec.new();
@@ -294,6 +359,7 @@ impl<region R> Checker<R> {
     }
     self.scopes.push(globals);
     for (const [i, d] of p.defs.iter().enumerate()) {
+      self.owner.set(#Some(i));
       const tf = self.function(d.span.start, d.params, d.body);
       Checker.unify(self.ids, own[i], tf, d.span);
       // A pure definition's row is closed empty: what it would perform is reported by name.
@@ -312,16 +378,106 @@ impl<region R> Checker<R> {
       }
     }
     self.scopes.pop();
+    // Each definition quantifies its variables; a constraint of its own body on one of them is
+    // a predicate, a dictionary its callers pass.
     let general: HashMap<String, Scheme<R>> = HashMap.new();
+    let predsOf: Vec<Vec<[usize, usize]>> = Vec.new();
     for (const [i, d] of p.defs.iter().enumerate()) {
-      general.insert(d.name.clone(), self.generalize(own[i]));
+      let s = self.generalize(own[i]);
+      for (const c of self.constraints) {
+        if (c.owner != #Some(i)) { continue; }
+        if (const #Var(v, _) = Checker.resolve(c.ty)) {
+          if (s.vars.includes(v) && !s.preds.includes([c.iface, v])) { s.preds.push([c.iface, v]); }
+        }
+      }
+      predsOf.push(s.preds.clone());
+      self.predCounts.push(s.preds.len());
+      general.insert(d.name.clone(), s);
     }
     self.scopes.push(general);
+    self.owner.set(#None);
+    self.impls(p);
     // The program may perform what it likes; the runtime handles `Io`.
     self.effects = self.fresh();
     const t = self.infer(p.main);
     self.scopes.pop();
+    self.resolveConstraints(p, predsOf);
     t
+  }
+
+  // Each impl gives every method of its interface, at the signature with `Self` its type.
+  function impls(self: mut Self, p: readonly Program): void uses Region<R>, Diag {
+    for (const imp of p.impls) {
+      const found: Option<usize> = self.ifaceNames.iter().enumerate().find(([_, n]) => n == imp.iface).map(([i, _]) => i);
+      const iface = match (found) {
+        #Some(i) => i,
+        #None => { Diag.report(#Unbound { span: imp.span, name: imp.iface.clone() }); continue; }
+      };
+      const me = self.toType(imp.target, alloc(#Error));
+      for (const [name, sig] of self.sigs[iface].iter().cloned().collect()) {
+        match (imp.methods.iter().find((m) => m.name == name)) {
+          #None => Diag.report(#Type { span: imp.span, message: `this impl of \`${imp.iface}\` has no \`${name}\`` }),
+          #Some(m) => {
+            const want = self.toType(sig, me);
+            const got = self.function(m.span.start, m.params, m.body);
+            Checker.unify(self.ids, got, want, m.span);
+          }
+        }
+      }
+    }
+  }
+
+  // The type a constraint is on, as an impl is keyed: `int`, `bool` or a data type's name.
+  function implKey(t: Ref<Type>): Option<String> uses Region<R> {
+    match (Checker.resolve(t)) {
+      #Int => #Some(`int`),
+      #Bool => #Some(`bool`),
+      #Data(_, name) => #Some(name.toString()),
+      _ => #None,
+    }
+  }
+
+  // Every constraint is met by an impl of its interface for a known type, or by a dictionary
+  // the enclosing generic definition is passed.
+  function resolveConstraints(self: mut Self, p: readonly Program, predsOf: readonly Vec<[usize, usize]>[]): void uses Region<R>, Diag {
+    let implFor: HashMap<String, usize> = HashMap.new();
+    for (const [j, imp] of p.impls.iter().enumerate()) {
+      const me = self.toType(imp.target, alloc(#Error));
+      if (const #Some(key) = Checker.implKey(me)) { implFor.insert(`${imp.iface}:${key}`, j); }
+    }
+    for (const c of self.constraints) {
+      const iface = self.ifaceNames[c.iface].clone();
+      const t = Checker.resolve(c.ty);
+      const evidence: Option<Evidence> = match (t) {
+        #Error => #None,
+        #Var(v, _) => {
+          const pred = match (c.owner) {
+            #Some(i) => predsOf[i].iter().findIndex(([f, w]) => f == c.iface && w == v),
+            #None => #None,
+          };
+          match (pred) {
+            #Some(k) => #Some(#Param(k)),
+            #None => { Diag.report(#Type { span: { start: c.site, end: c.site }, message: `cannot tell which \`${iface}\` this is: nothing here fixes its type` }); #None }
+          }
+        }
+        _ => match (Checker.implKey(t)) {
+          #Some(key) => match (implFor.get(`${iface}:${key}`)) {
+            #Some(j) => #Some(#Impl(j)),
+            #None => { Diag.report(#Type { span: { start: c.site, end: c.site }, message: `\`${key}\` does not implement \`${iface}\`` }); #None }
+          },
+          #None => { Diag.report(#Type { span: { start: c.site, end: c.site }, message: `\`${Checker.show(t)}\` cannot implement \`${iface}\`` }); #None }
+        },
+      };
+      if (const #Some(e) = evidence) {
+        match (c.slot) {
+          #None => self.methodEvidence.insert(c.site, e),
+          #Some(k) => {
+            if (!self.dictEvidence.has(c.site)) { self.dictEvidence.insert(c.site, Vec.new()); }
+            self.dictEvidence.getMut(c.site).unwrap().push([k, e]);
+          }
+        }
+      }
+    }
   }
 
   function function(self: mut Self, at: usize, params: readonly String[], body: readonly Expr): Ref<Type> uses Region<R>, Diag {
@@ -364,7 +520,11 @@ impl<region R> Checker<R> {
         const tv = self.infer(value);
         self.bindings.push([`${span.start}:${name}`, tv]);
         let scope: HashMap<String, Scheme<R>> = HashMap.new();
-        scope.insert(name.clone(), self.generalize(tv));
+        // A `let` does not quantify over a variable a constraint needs (see `constrained`).
+        let s = self.generalize(tv);
+        const blocked = self.constrained();
+        s.vars.retain((v) => !blocked.has(v));
+        scope.insert(name.clone(), s);
         self.scopes.push(scope);
         const tb = self.infer(body);
         self.scopes.pop();
@@ -450,19 +610,35 @@ impl<region R> Checker<R> {
 
 // What checking gives the later passes: the program's type, shown, and which bindings hold
 // `Copy` values (numbers, booleans, functions) rather than values that move.
-export type Checked = { ty: String; copies: HashSet<String> };
+export type Checked = {
+  ty: String;
+  copies: HashSet<String>;
+  // For dictionary passing (codegen): what each method use and each generic use is given, by
+  // the position of the use, and how many dictionaries each definition takes.
+  methodEvidence: HashMap<usize, Evidence>;
+  dictEvidence: HashMap<usize, Vec<Evidence>>;
+  predCounts: Vec<usize>;
+};
 
 // The types live for the checking only: the region is released when it ends, and what the
 // later passes need is copied out of it first.
 export function check(prog: readonly Program): Checked uses Diag {
   region (R) {
-    let c: Checker<R> = Checker { ids: Cell.new(0), scopes: Vec.new(), int: alloc(#Int), bool: alloc(#Bool), ctors: HashMap.new(), ctorsOf: Vec.new(), effects: alloc(#Empty), bindings: Vec.new(), comptimeBase: #None };
+    let c: Checker<R> = Checker { ids: Cell.new(0), scopes: Vec.new(), int: alloc(#Int), bool: alloc(#Bool), ctors: HashMap.new(), ctorsOf: Vec.new(), effects: alloc(#Empty), bindings: Vec.new(), comptimeBase: #None,
+      sigs: Vec.new(), methodOf: HashMap.new(), ifaceNames: Vec.new(), dataTypes: HashMap.new(), constraints: RegionList.new(),
+      owner: Cell.new(#None), methodEvidence: HashMap.new(), dictEvidence: HashMap.new(), predCounts: Vec.new() };
     const ty = Checker.show(c.program(prog));
     let copies: HashSet<String> = HashSet.new();
     for (const [key, t] of c.bindings) {
       // An `#Error` was reported already: it moves nothing, so it causes no second error.
       if (match (Checker.resolve(t)) { #Int | #Bool | #Fn(_, _, _) | #Error => true, _ => false }) { copies.insert(key.clone()); }
     }
-    { ty, copies }
+    let dictEvidence: HashMap<usize, Vec<Evidence>> = HashMap.new();
+    for (const [site, list] of c.dictEvidence.entries()) {
+      let sorted = list.clone();
+      sorted.sortBy(([a, _], [b, _]) => a.cmp(b));
+      dictEvidence.insert(site, sorted.iter().map(([_, e]) => e.clone()).collect());
+    }
+    { ty, copies, methodEvidence: c.methodEvidence.clone(), dictEvidence, predCounts: c.predCounts.clone() }
   }
 }
