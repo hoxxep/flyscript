@@ -1,6 +1,6 @@
 # Flyscript
 
-**Language specification, version 0.22**
+**Language specification, version 0.23**
 
 *Affine values, one row calculus, handlers for everything, and `comptime`: Church on the outside, Turing on the inside.*
 
@@ -18,20 +18,19 @@ The whole language rests on five laws. Every rule in this document is a conseque
 4. **Handlers for everything.** Errors, I/O, iteration and region memory are ordinary effects with ordinary handlers. A handler may hold the rest of a computation as a one-shot continuation value; generators and tasks are both built from that one primitive.
 5. **`comptime` is the metalanguage.** Generics, reflection, layout transformation and derived interfaces are ordinary Flyscript code run by the compiler.
 
-### 0.1 Changes from 0.21
+### 0.1 Changes from 0.22
 
-0.22 adopts a review of 0.21 and of the JSON codec written against it (docs/reviews/2026-10-21-review-of-0-21-comptime-and-json.md).
+0.23 finishes Law 5's derived interfaces and adopts a holistic review of 0.22 (docs/reviews/2026-10-21-holistic-review-of-0-22.md). The review's most serious finding was in the prototype, not the text: closure modes were specified but not enforced, so `par` accepted a closure that counted into a shared variable.
 
 | Change | Why |
 | :--- | :--- |
-| An impl of an interface requires the interfaces it extends (§3.4) | `FromJson extends Send` did not stop the derivation decoding a record that borrows |
-| Derivations apply to every type that belongs to no module, primitives included (§7.3) | one template arm handles every integer width, with its range computed at compile time |
-| `comptime match` generates sequence items too (§7.2) | a tag's payload type could be tested but not taken apart where arms are generated |
-| `comptime` is a prefix operator, binding like TypeScript's `await` (§7.2) | `n > comptime (1 << bits) - 1` reads as written |
-| A tuple is indexed by a constant, `t[0]`, as in TypeScript (§3.1) | tuples had no element access short of destructuring |
-| A `{` at the start of a statement that opens an entry (`name:`, `[e]:`) is a record literal (§2.3) | Flyscript has no labeled statements, so such a brace never began a block, and `({ … })` was noise |
-| Exhaustiveness looks inside patterns and names a value the arms miss (§3.2) | `#Err(#Missing(f))` was invisible to the check |
-| `if (const pat = e) { … } else { … }` (§2.3) | a two-armed `match` for the case that matters |
+| `Eq`, `Hash`, `Show`, `Clone` and `Ord extends Eq` are prelude derivations; `==`, `<` and `` `${e}` `` call them on anything but a primitive (§3.5) | the operators and interpolation get user meaning, and a struct is compared or printed only if it asks |
+| A closure's mode is checked wherever it meets a function type (§4.3) | a `mut` closure passed to `par` raced; a `once` closure returned as `() => T` handed out one value twice |
+| Sequential library functions take `mut` closures (`Gen.map`, `Gen.filter`) (§4.3) | `xs.iter().map((x) => { total += x; … })` is what a TypeScript programmer writes |
+| Derived `Eq`, `Ord` and `Hash` are total on floats (§3.5) | `NaN` broke `Ord`'s totality, and `-0.0` hashed apart from `0.0` while comparing equal |
+| An owner compared with what it lends is compared as that (§3.5) | `name == "ada"` for a `String` |
+| A value that is borrowed without a place lives in an anonymous local of its block (§4.1) | A.9 lends temporary strings into its replies; the rule was relied on but unstated |
+| `iterMut()` lends each element `mut` (§5.5); indexing and slicing are specified (§3.1) | a loop could not update a collection in place |
 
 ---
 
@@ -177,6 +176,8 @@ Three rules settle the grammar's ambiguities, all borrowed from TypeScript:
 
 A tuple `[A, B]` is built with a list literal checked against a tuple type, taken apart with a pattern (`const [a, b] = t`), and indexed by a constant, as in TypeScript: `t[0]` is a place of its own, like a field.
 
+Indexing an array, a slice or a `Vec` (`xs[i]`) is a place of the element type, checked against the length at run time (a panic out of bounds); assigning to it writes in place, and while it is borrowed the whole collection is. Slicing (`xs[a..b]`, either bound optional) lends `readonly T[]`, or `mut T[]` where a `mut` slice is expected; `s[a..b]` on a `str` lends a `str`, and panics unless both bounds fall on character boundaries.
+
 ### 3.2 One row calculus
 
 A *row* is a finite map from labels to types, optionally ending in a row variable. Flyscript has three kinds of row, all solved by one Rémy-style unifier over label-sorted rows. They differ only in what a label is and in what happens when a label appears twice:
@@ -248,7 +249,9 @@ An interface can come with a *derivation*: an impl, written in Flyscript with `c
 
 `Ord extends Eq` is derived too, ordering by fields and then by tags, in declaration order; `type Ordering = #Less | #Equal | #Greater`.
 
-The operators use them. `==` and `!=` are built in for primitives and call `Eq.eq` on anything else, and `<`, `<=`, `>` and `>=` likewise call `Ord.cmp`; `` `${e}` `` writes a primitive or a string as it is and anything else with `Show`, which writes a value as Flyscript would (`Point { x: 1, y: 2 }`, `#Some("a")`). A struct is a new type, so it is compared or printed only if it asks: `impl Eq for Point;`.
+The derivations settle three things a derived interface must get right. On floats, `Eq`, `Ord` and `Hash` are total, so a record with a float field is a sound `HashMap` key and sorts consistently: `NaN` equals itself and orders after every number, and `-0.0` equals and hashes as `0.0` (the primitive operators on floats stay IEEE 754). `Clone` copies a `readonly` borrow and never duplicates a `mut` one. `Box<T>` and `Arc<T>` compare, order, hash and show as what they hold; cloning a `Box` clones its contents, cloning an `Arc` shares them again.
+
+The operators use them. `==` and `!=` are built in for primitives and call `Eq.eq` on anything else, and `<`, `<=`, `>` and `>=` likewise call `Ord.cmp`; an owner compared with the type it lends is compared at that type (`name == "ada"` for a `String`, `b.name == name` for a `Ref<R, str>`); `` `${e}` `` writes a primitive or a string as it is and anything else with `Show`, which writes a value as Flyscript would (`Point { x: 1, y: 2 }`, `#Some("a")`). A struct is a new type, so it is compared or printed only if it asks: `impl Eq for Point;`.
 
 ### 3.6 Inference
 
@@ -276,7 +279,9 @@ A **borrow** lends a value without moving it:
 
 Borrows are **transparent**: a borrow binding reads and writes as the value it refers to, and cannot be re-pointed. There is no dereference operator.
 
-`readonly T` is `Copy`; `mut T` is not. Passing a binding of type `mut T` where a `mut` borrow is expected **reborrows** it: the binding is locked until the new borrow ends, and usable again afterwards, so `value(mut sc); sc.eat(b',')` is legal.
+`readonly T` is `Copy`; `mut T` is not. Passing a binding of type `mut T` where a `mut` borrow is expected **reborrows** it: the binding is locked until the new borrow ends, and usable again afterwards, so `value(mut sc); sc.eat(b',')` is legal. Read where an owned value is expected, a borrow gives a copy of what it refers to, which must be `Copy`; and a `mut T` field read through a `readonly` borrow is `readonly T`.
+
+A value that is borrowed without having a place — a call's result, a template string, a literal lent as `str` — is stored in an anonymous local of the enclosing block, dropped when the block ends. So ``stringify(#Rejected { reason: `missing ${field}` })`` lends the string for the call, and ``const r = #Rejected { reason: `…` };`` holds a borrow of it while `r` is used; returning `r` is the usual error, a borrow of a local.
 
 A borrow lasts until the last use of any value that holds it, not to the end of its scope. Every value carries the set of borrows it holds: a borrow taken for an argument is held by the call's result if the result can hold it (§4.2); a value bound by a pattern or assigned to a binding passes its borrows on; a binding assigned on several paths holds the union. In the example below, the `#None` arm holds no borrow of `counts`, so it may insert, while in the `#Some` arm `n` holds `counts` mutably until its last use.
 
@@ -324,7 +329,9 @@ A closure captures each binding as its body needs it, by reference: a read takes
 | `mut (A) => B` | changes a capture, or calls a captured `mut` closure | many times, one caller at a time |
 | `once (A) => B` | consumes a capture (moves it out), or calls a captured `once` closure | at most once |
 
-So `(path) => \`${prefix}/${path}\`` returned from a function owns `prefix` and is an ordinary `(str) => String`. A closure that holds a borrow is class 2: it can be passed down but not returned or stored.
+So ``(path) => `${prefix}/${path}` `` returned from a function owns `prefix` and is an ordinary `(str) => String`. A closure that holds a borrow is class 2: it can be passed down but not returned or stored.
+
+The mode is checked wherever a closure meets a function type — an argument, a binding, a returned value: a `mut` closure cannot go where a shared one is wanted (`par` would run it on many tasks at once), and a `once` closure only where `once` is. Library functions that call their closure from one place in sequence take `mut` closures (`Gen.map`, `Gen.filter`), so `xs.iter().map((x) => { total += x; x * 2 })` may count as it goes; `par` and `parReduce` take shared ones.
 
 ### 4.4 Marker interfaces
 
@@ -518,6 +525,8 @@ impl<T, row E> Gen<T, E> {
 ```
 
 A `Gen` owns its continuation, so dropping it runs the generator's cleanup; if the generator throws, `next()` throws.
+
+`for…of` reads: it lends the collection `readonly` and yields `readonly` elements (copies, for `Copy` types). To update elements in place, iterate `xs.iterMut()`, which lends `xs` `mut` and yields `mut T` elements: `for (const x of xs.iterMut()) { x += 1; }`. The collection is locked while the loop holds its elements.
 
 ### 5.6 Cleanup: `defer` and `Drop`
 
