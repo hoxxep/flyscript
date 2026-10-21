@@ -22,5 +22,6 @@ Versions are pre-1.0 while the language is being designed. The specification was
 | 0.22 | Super-interfaces bind impls; derivations for primitives; exhaustiveness over nested patterns; `if (const pat = e)`; tuple indexing |
 | 0.23 | Derived interfaces in the prelude and the operators through them; closure modes enforced; total floats; `iterMut` |
 | 0.24 | Template structs; associated types in impls; `ParSplit` over a `Slice` view; `Soa`, `par` and `parReduce` in Flyscript |
+| 0.25 | Calls through borrows follow closure modes; associated types and template instances checked for borrows; `if (let …)` |
 
 `review-round-*.md` are the design review rounds that produced 0.2–0.15; `programs-against-v0.13.md` is the program-writing exercise against what is now 0.13.

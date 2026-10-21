@@ -1,6 +1,6 @@
 # Flyscript
 
-**Language specification, version 0.25**
+**Language specification, version 0.26**
 
 *Affine values, one row calculus, handlers for everything, and `comptime`: Church on the outside, Turing on the inside.*
 
@@ -18,19 +18,16 @@ The whole language rests on five laws. Every rule in this document is a conseque
 4. **Handlers for everything.** Errors, I/O, iteration and region memory are ordinary effects with ordinary handlers. A handler may hold the rest of a computation as a one-shot continuation value; generators and tasks are both built from that one primitive.
 5. **`comptime` is the metalanguage.** Generics, reflection, layout transformation and derived interfaces are ordinary Flyscript code run by the compiler.
 
-### 0.1 Changes from 0.24
+### 0.1 Changes from 0.25
 
-0.25 closes four soundness gaps a holistic review found at the edges of 0.24's new features (docs/reviews/2026-10-21-holistic-review-of-0-24.md), and removes the appendix's last awkward note.
+0.26 comes from writing a program rather than reviewing one: Appendix A.10, a JSON inventory service written the way a TypeScript programmer would. Each change removes a place where Flyscript surprised that programmer.
 
 | Change | Why |
 | :--- | :--- |
-| A function is called through a borrow only as its mode allows: shared through any, `mut` through `mut`, `once` never (§4.3) | a `once` closure called twice through a `readonly` borrow moved its captures out twice |
-| Associated types may hide a borrow until their base is known (§4.2) | `Vec<C.Slice>` in generic code could keep a `mut f32[]` past its loan |
-| Each instance of a template struct is checked as the struct it is (§7.1) | a non-`view` `Partial<{ name: str }>` held a borrow |
-| `ParSplit` impls require `Send` elements; `Soa<T>` requires a field (§6.5, §7.4) | `par` would hand non-`Send` elements to other workers |
-| `if (let pat = e)` binds mutable names; the pattern grammar is written out (§2.3) | `let` was refused where `for (let …)` was accepted |
-| Expected types are stated to flow into blocks, branches and lambda bodies (§3.6) | the rule was implemented but specified only for calls |
-| A.9 decodes with `try`/`catch` and `const s: Signup = parse(body)` | no type argument to spell, and no awkward note left in the appendix |
+| `match`, `handle`, `region` and `effect` are contextual words (§2.3) | `function handle(req)` and `const match = …` are too common to forbid |
+| With nothing expected, a list literal is an array if its items agree, a tuple otherwise; tuple patterns take arrays apart (§2.2, §3.1) | `const requests = [a, b, c]` was a tuple, which cannot be iterated |
+| A branch that never finishes does not meet the others (§4.1) | `if (short) { throw #Short { sku } }` made `sku` look moved after the `if` |
+| A library names its failures for what failed (§5.4) | failure rows merge by tag, so `std/json`'s `#Unknown` and the service's were one tag |
 
 ---
 
@@ -80,6 +77,7 @@ The whole language rests on five laws. Every rule in this document is a conseque
 - **Statements and blocks.** Flyscript is expression-oriented. A block `{ s1; s2; e }` evaluates to its final expression `e` when that expression has no trailing semicolon, and to `void` otherwise. `if`, `match`, `try`, `region` and `handle` are expressions. An expression statement `e;` discards its value. `return e;` returns early.
 - **Literals.** Numeric literals have no suffix; their type is solved together with the whole enclosing call or initializer from the expected type, defaulting to `i32` and `f64` only if still unconstrained. Byte literals are `b'n'`; strings are `"…"` (type `str`) and templates `` `…${e}…` ``, which build a `String` from the `Show` of each interpolated value.
 - **Record literals.** `{ f: e, … }` builds the nominal struct named by the expected type, if there is one, and a structural record otherwise. `Point { … }` names the struct explicitly. `{ x, y }` puns field names.
+- **List literals.** `[a, b, c]` builds what the expected type asks for — an array, a tuple, or a slice to lend — and with nothing expected, an array if its items have one type, as in TypeScript, and a tuple if they do not.
 - **Generic calls.** In expression position, `f<…>(` and `x.f<…>(` are parsed as type application when the `<…>` is a balanced type-argument list followed immediately by `(`; otherwise `<` is less-than. This is TypeScript's rule.
 - **Mutable borrows are visible at the call site.** `read(mut buf)` lends `buf` mutably; `parse(buf)` lends it read-only. The one exception is a method's receiver, which is lent in whatever mode the method declares: `conn.read(mut buf)` borrows `conn` mutably.
 - **Parameters bind like `let`.** An owned parameter may be mutated and lent `mut` by its function.
@@ -165,7 +163,7 @@ Three rules settle the grammar's ambiguities, all borrowed from TypeScript:
 
 - **Braces.** A `{` in expression position begins a record literal. A block appears only as the body of a block-like construct, after `=>` in a lambda or match arm, or at the start of a statement — unless the brace opens an entry (`{ a: 1 }`, `{ [k]: v }`, or a `comptime for` over entries): Flyscript has no labeled statements, so that is always a record.
 - **Block-like statements.** A block-like expression at the start of a statement needs no `;` and is not continued by operators: `if (c) { … } [a, b]` is two statements. As the last item of a block it is the block's value.
-- **Contextual words.** `from`, `of`, `with`, `resumes`, `row`, `view` and `private` are keywords only where the grammar expects them, and any reserved word may be used as a member name (`Yield.yield`, `{ default: 1 }`).
+- **Contextual words.** `from`, `of`, `with`, `resumes`, `row`, `view` and `private` are keywords only where the grammar expects them, and so are the words that begin `match (e) {`, `handle {`, `region (R) {` and `effect Name`; anywhere else they are names, so a request handler may be called `handle`. Any reserved word may be used as a member name (`Yield.yield`, `{ default: 1 }`).
 
 ---
 
@@ -178,7 +176,7 @@ Three rules settle the grammar's ambiguities, all borrowed from TypeScript:
 - `T[N]` is an inline array (`Copy` if `T` is); `[a, b, c]` and `repeat(v)` build one, with `N` from context. `T[]` is a borrowed slice, always `readonly T[]` or `mut T[]`.
 - `Vec<T>`, `Box<T>`, `HashMap<K, V>` and the other owning containers are library types.
 
-A tuple `[A, B]` is built with a list literal checked against a tuple type, taken apart with a pattern (`const [a, b] = t`), and indexed by a constant, as in TypeScript: `t[0]` is a place of its own, like a field.
+A tuple `[A, B]` is built with a list literal, taken apart with a pattern (`const [a, b] = t`, which takes an array of the same length apart too), and indexed by a constant, as in TypeScript: `t[0]` is a place of its own, like a field.
 
 Indexing an array, a slice or a `Vec` (`xs[i]`) is a place of the element type, checked against the length at run time (a panic out of bounds); assigning to it writes in place, and while it is borrowed the whole collection is. Slicing (`xs[a..b]`, either bound optional) lends `readonly T[]`, or `mut T[]` where a `mut` slice is expected; `s[a..b]` on a `str` lends a `str`, and panics unless both bounds fall on character boundaries.
 
@@ -277,7 +275,7 @@ Type checking happens after `comptime` evaluation and uses bidirectional local i
 
 ### 4.1 Values, moves and borrows
 
-A value has one owner. Assignment and argument passing *move* a value unless its type is `Copy`; a moved-from binding is dead until it is assigned again. Moves are tracked through branches and loops: a binding moved on any path is moved where the paths meet, and a binding used at the top of a loop must still be live at the end of the loop body. At the end of its scope a live owner is dropped. Moving a field out of a value moves only that field, unless the value's type implements `Drop`, from which no field may be moved.
+A value has one owner. Assignment and argument passing *move* a value unless its type is `Copy`; a moved-from binding is dead until it is assigned again. Moves are tracked through branches and loops: a binding moved on any path is moved where the paths meet — a path that throws, returns, breaks or continues does not meet the others — and a binding used at the top of a loop must still be live at the end of the loop body. At the end of its scope a live owner is dropped. Moving a field out of a value moves only that field, unless the value's type implements `Drop`, from which no field may be moved.
 
 A **borrow** lends a value without moving it:
 
