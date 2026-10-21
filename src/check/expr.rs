@@ -1270,8 +1270,18 @@ impl<'p> Checker<'p> {
             _ => {}
         }
         let t = self.expr(callee, None);
-        // A function is called through a borrow of it, too.
+        // A function is called through a borrow of it, too, as its mode allows (§4.3): a shared
+        // one through any borrow, a `mut` one through a `mut` borrow, a `once` one only by move.
+        let through = match self.s.resolve(&t) {
+            Ty::Borrow(m, _) => Some(m),
+            _ => None,
+        };
         match self.strip(&t) {
+            Ty::Fn(f) if through.is_some() && (f.mode == FnMode::Once || f.mode == FnMode::Mut && through == Some(false)) => {
+                let (mode, how) = if f.mode == FnMode::Once { ("once", "only by moving it") } else { ("mut", "only through a `mut` borrow") };
+                self.err(callee.span, format!("a `{mode}` function is called {how}"));
+                f.ret
+            }
             Ty::Fn(f) => {
                 self.check_args(&f.params, args, span);
                 self.perform(&f.effects, span);

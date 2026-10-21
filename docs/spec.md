@@ -1,6 +1,6 @@
 # Flyscript
 
-**Language specification, version 0.24**
+**Language specification, version 0.25**
 
 *Affine values, one row calculus, handlers for everything, and `comptime`: Church on the outside, Turing on the inside.*
 
@@ -18,18 +18,19 @@ The whole language rests on five laws. Every rule in this document is a conseque
 4. **Handlers for everything.** Errors, I/O, iteration and region memory are ordinary effects with ordinary handlers. A handler may hold the rest of a computation as a one-shot continuation value; generators and tasks are both built from that one primitive.
 5. **`comptime` is the metalanguage.** Generics, reflection, layout transformation and derived interfaces are ordinary Flyscript code run by the compiler.
 
-### 0.1 Changes from 0.23
+### 0.1 Changes from 0.24
 
-0.24 makes layout library code, as Law 5 has always said it is: `Soa<T>`, `par` and `parReduce` are now written in Flyscript, and the compiler knows nothing of them. Getting there removed two concepts and settled `ParSplit` after a focused review (docs/reviews/2026-10-21-parsplit-for-library-soa.md).
+0.25 closes four soundness gaps a holistic review found at the edges of 0.24's new features (docs/reviews/2026-10-21-holistic-review-of-0-24.md), and removes the appendix's last awkward note.
 
 | Change | Why |
 | :--- | :--- |
-| Template structs: a struct with a `comptime` type parameter, or `comptime` code among its fields, is computed per instance (§7.1) | `Soa<T>` and `Ring<T, comptime N>` are ordinary declarations; type-function calls (`Ring(u8, 1024)`) and `struct { … }` expressions are gone |
-| An impl gives its interface's associated types: `type View = mut T;` (§3.4) | specified since 0.13, now resolved through the impl rather than special-cased |
-| `ParSplit` splits a `Slice` view made once by `slice()`; `parReduce` reads the container shared (§6.5) | an owning container cannot be split into two `mut Self`; `parReduce` could not split a `readonly` container at all |
-| `Soa<T>`, its views, `par` and `parReduce` are library code (§6.5, §7.4) | the last built-in layout and the last built-in parallel loop |
-| A function that calls itself is assumed pure, and is an error only if its body performs effects (§3.6) | a private recursive helper had no way to say it was pure |
-| A function value is called through a borrow of it (§4.3) | a recursive helper lends its callback to both halves |
+| A function is called through a borrow only as its mode allows: shared through any, `mut` through `mut`, `once` never (§4.3) | a `once` closure called twice through a `readonly` borrow moved its captures out twice |
+| Associated types may hide a borrow until their base is known (§4.2) | `Vec<C.Slice>` in generic code could keep a `mut f32[]` past its loan |
+| Each instance of a template struct is checked as the struct it is (§7.1) | a non-`view` `Partial<{ name: str }>` held a borrow |
+| `ParSplit` impls require `Send` elements; `Soa<T>` requires a field (§6.5, §7.4) | `par` would hand non-`Send` elements to other workers |
+| `if (let pat = e)` binds mutable names; the pattern grammar is written out (§2.3) | `let` was refused where `for (let …)` was accepted |
+| Expected types are stated to flow into blocks, branches and lambda bodies (§3.6) | the rule was implemented but specified only for calls |
+| A.9 decodes with `try`/`catch` and `const s: Signup = parse(body)` | no type argument to spell, and no awkward note left in the appendix |
 
 ---
 
@@ -143,9 +144,13 @@ Entry       = FieldName [ ":" Expr ] | Generate(Entry) ;
 ListLit     = "[" [ Item { "," Item } ] "]" ;
 Item        = Expr | "comptime" ( For | If ) ;          (* one item per iteration, §7.2 *)
 Match       = "match" "(" Expr ")" "{" { MatchArm } "}" ;
-IfConst     = "if" "(" "const" Pattern "=" Expr ")" Block [ "else" ( If | IfConst | Block ) ] ;  (* a two-armed match *)
+IfConst     = "if" "(" ( "const" | "let" ) Pattern "=" Expr ")" Block [ "else" ( If | IfConst | Block ) ] ;  (* a two-armed match *)
 MatchArm    = Pattern [ "if" Expr ] "=>" ( Expr "," | Block ) | Generate(MatchArm) ;
-Pattern     = … | "#" "[" Expr "]" [ … ] | "comptime" Expr ;
+Pattern     = PatAtom { "|" PatAtom } ;
+PatAtom     = "_" | Literal | "comptime" Unary | Ident
+            | ( "#" Ident | "#" "[" Expr "]" ) [ "(" [ Pattern { "," Pattern } ] ")" | PatRecord ]
+            | [ Path ] PatRecord | "[" [ Pattern { "," Pattern } ] "]" ;
+PatRecord   = "{" [ Ident [ ":" Pattern ] { "," Ident [ ":" Pattern ] } ] "}" ;
 For         = "for" "(" ( "const" | "let" ) Pattern "of" Expr ")" Block ;
 Try         = "try" Block "catch" "(" Pattern ")" Block ;
 Throw       = "throw" Expr ;
@@ -262,7 +267,7 @@ Type checking happens after `comptime` evaluation and uses bidirectional local i
 - Everything inside a body is inferred: local types, closure signatures, generic and row arguments, literal types, region arguments, and the effects of non-exported functions.
 - Region arguments are unification variables solved over the whole body. An allocation whose region the types leave undetermined goes to the **innermost enclosing region it does not escape from**: when a `region` block ends, each such allocation is placed in it unless that would let the data outlive the block (through the block's value or a variable declared outside it), in which case it is offered to the next enclosing region. A region argument left unconstrained outside every region defaults to the heap, where region allocation is an error, so a stray `alloc` is caught.
 - **Recursion.** A function that is called again while its effects are being inferred — itself, or through others — is assumed pure there; if its body then performs an effect, it must state its effects with `uses`.
-- **Expected types flow into calls.** A call checked against an expected type unifies the callee's instantiated return type with it *before* checking the arguments. This is how `alloc({ user, token })` in a function returning `Ref<Request>` builds a `Request` rather than an anonymous record.
+- **Expected types flow inward**: into blocks and their last expression, into the branches of `if`, `match`, `try`, `region` and `handle`, into a lambda's body from the function type expected of it, and into calls. A call checked against an expected type unifies the callee's instantiated return type with it *before* checking the arguments. This is how `alloc({ user, token })` in a function returning `Ref<Request>` builds a `Request` rather than an anonymous record.
 - `break`, `continue`, `return` and `throw` have type `never`, which fits any expected type.
 - There is no global Hindley–Milner inference: errors stay local, and `comptime`, regions and interfaces stay decidable.
 
@@ -305,7 +310,7 @@ Every type has a *class*, 1 or 2.
 - `readonly T`, `mut T`, `str` and `T[]` are class 2.
 - Every other type takes the maximum class of its components: fields, payloads and type arguments, structural or nominal alike. `Option<mut u64>` is class 2; so is `view struct Scanner { src: readonly u8[]; pos: usize; }`. A region reference `Ref<R, T>` is class 1 whatever it points to: what it points at lives in the region, not on loan.
 
-Some types can hold a borrow without showing it: closures, continuations (`Cont`, §5.3), anything built from them (`Gen`), and type parameters. A value of such a type is class 2 when it actually holds a borrow, so a closure capturing a `readonly` slice, or a generator iterating one, is class 2 although its type's arguments are all class 1.
+Some types can hold a borrow without showing it: closures, continuations (`Cont`, §5.3), anything built from them (`Gen`), type parameters, and associated types until their base is known (`C.Slice`). A value of such a type is class 2 when it actually holds a borrow, so a closure capturing a `readonly` slice, or a generator iterating one, is class 2 although its type's arguments are all class 1.
 
 A class-2 value may be a parameter, a local, or a return value tied to a parameter. It may not be stored in a class-1 value, captured by an escaping closure, sent to another task, or returned untied. That is the only restriction, and it is what replaces lifetime parameters. Two consequences are worth stating:
 
@@ -333,7 +338,7 @@ A closure captures each binding as its body needs it, by reference: a read takes
 
 So ``(path) => `${prefix}/${path}` `` returned from a function owns `prefix` and is an ordinary `(str) => String`. A closure that holds a borrow is class 2: it can be passed down but not returned or stored.
 
-A function value is called through a borrow of it as well as directly, so a helper that passes its callback on lends it: `f: readonly (x: T) => void` may be given to two calls.
+A function value is called through a borrow of it as well as directly, so a helper that passes its callback on lends it: `f: readonly (x: T) => void` may be given to two calls. The borrow must fit the mode: a shared function is called through any borrow, a `mut` one only through a `mut` borrow, and a `once` one only by moving it.
 
 The mode is checked wherever a closure meets a function type — an argument, a binding, a returned value: a `mut` closure cannot go where a shared one is wanted (`par` would run it on many tasks at once), and a `once` closure only where `once` is. Library functions that call their closure from one place in sequence take `mut` closures (`Gen.map`, `Gen.filter`), so `xs.iter().map((x) => { total += x; x * 2 })` may count as it goes; `par` and `parReduce` take shared ones.
 
@@ -625,7 +630,7 @@ function parReduce<C extends ParSplit, A extends Send>(
 ): A;
 ```
 
-`par` borrows its container once into a `Slice` and divides it with `split`, which consumes a slice and returns two disjoint ones — the borrow rules prove them disjoint, so the halves can go to different workers — down to single elements, each lent to `f` by `viewAt`. `f` is shared, so it cannot change anything it captures, and has no effects: it cannot race. `parReduce` only reads, so its workers share the container `readonly` and read elements with `readAt`; `both` must be associative. Slices, arrays and `Vec`s split as `mut T[]`, with `View = mut T` and `ReadView = readonly T`; `Soa<T>` splits all its planes at once (§7.4). The prototype runs the halves in order.
+`par` borrows its container once into a `Slice` and divides it with `split`, which consumes a slice and returns two disjoint ones — the borrow rules prove them disjoint, so the halves can go to different workers — down to single elements, each lent to `f` by `viewAt`. `f` is shared, so it cannot change anything it captures, and has no effects: it cannot race. `parReduce` only reads, so its workers share the container `readonly` and read elements with `readAt`; `both` must be associative. Slices, arrays and `Vec`s split as `mut T[]`, with `View = mut T` and `ReadView = readonly T`; `Soa<T>` splits all its planes at once (§7.4). The elements go to different workers, so every impl requires them to be `Send`. The prototype runs the halves in order.
 
 ---
 
@@ -644,7 +649,7 @@ A template states its whole signature, effects included (none means pure), becau
 
 A `comptime function` runs only in the compiler: it is called from `comptime` code, never at run time. Module constants (`const SLOTS: usize = 64;`) are evaluated the same way. `Type` is a comptime-only type whose values are types.
 
-A struct is a template too when it has a `comptime` type parameter or `comptime` code among its fields: its fields are computed for each instance, `comptime` statements in its body check its arguments, and two uses with the same arguments are the same type:
+A struct is a template too when it has a `comptime` type parameter or `comptime` code among its fields: its fields are computed for each instance, `comptime` statements in its body check its arguments, and two uses with the same arguments are the same type. Each instance is checked as the struct it is, so a template not declared `view` cannot hold a borrow in any instance:
 
 ```ts
 struct Ring<T, comptime N: usize> {
@@ -710,7 +715,7 @@ A derivation requested by a struct may read and build its private fields: the au
 
 ### 7.4 Layout as a library: `Soa<T>`
 
-`Soa<T>` (`std/layout`) is a template struct that lays `T` out as planes — a `Vec` per scalar field, a nested `Soa` per struct field — with three template views: `SoaSlice<T>`, a `mut` slice of each plane; `SoaView<T>`, one element as a borrow of each field; and `SoaRead<T>`, its `readonly` counterpart:
+`Soa<T>` (`std/layout`) is a template struct that lays out a `T` with at least one field as planes — a `Vec` per scalar field, a nested `Soa` per struct field — with three template views: `SoaSlice<T>`, a `mut` slice of each plane; `SoaView<T>`, one element as a borrow of each field; and `SoaRead<T>`, its `readonly` counterpart:
 
 ```ts
 export struct Soa<comptime T: Type> {
@@ -1186,15 +1191,19 @@ import { ToJson, FromJson, JsonError, stringify, parse } from "std/json";
 struct Signup { email: String; name: String; referrer: Option<String>; }
 impl FromJson for Signup;
 
-type Reply = #Created { id: u64; name: String } | #Rejected { reason: str };
-
+// Replies are structural tags: encoded with no declaration, each borrowing its reason only
+// while `stringify` runs.
 export function respond(body: str, nextId: u64): String {
-  match (Fail.capture(() => parse<Signup>(body))) {
-    #Ok(s) => stringify(#Created { id: nextId, name: s.name }),
-    #Err(#Missing(field)) => stringify(#Rejected { reason: `missing ${field}` }),
-    #Err(#Syntax(at)) => stringify(#Rejected { reason: `not JSON at byte ${at}` }),
-    #Err(_) => stringify(#Rejected { reason: "not a signup" }),
+  try {
+    const s: Signup = parse(body);
+    stringify(#Created { id: nextId, name: s.name })
+  } catch (e) {
+    match (e) {
+      #Missing(field) => stringify(#Rejected { reason: `missing ${field}` }),
+      #Syntax(at) => stringify(#Rejected { reason: `not JSON at byte ${at}` }),
+      _ => stringify(#Rejected { reason: "not a signup" }),
+    }
   }
 }
 ```
-*Awkward:* `parse<Signup>` names its type because the closure passed to `Fail.capture` gets no expected type from the `match` around it. Each reply borrows its reason for exactly as long as `stringify` needs it, so the template strings need no `String`.
+*Awkward:* none. The binding's type tells `parse` what to decode, and the failure arm sees exactly the errors decoding can raise.

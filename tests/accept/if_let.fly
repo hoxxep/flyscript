@@ -1,0 +1,4 @@
+// `if (let pat = e)` binds mutable names, as `let` does (§2.3).
+export function bump(o: Option<i64>): i64 {
+  if (let #Some(x) = o) { x += 1; x } else { 0 }
+}

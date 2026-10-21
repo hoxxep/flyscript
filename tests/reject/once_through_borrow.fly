@@ -1,0 +1,4 @@
+// error: a `once` function is called only by moving it
+// A `once` closure gives away what it captures when called; calling it through a borrow would
+// let it be called again (§4.3).
+function callTwice(f: readonly once () => String): String { f() }

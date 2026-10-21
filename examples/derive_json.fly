@@ -3,13 +3,17 @@ import { ToJson, FromJson, JsonError, stringify, parse } from "std/json";
 struct Signup { email: String; name: String; referrer: Option<String>; }
 impl FromJson for Signup;
 
-type Reply = #Created { id: u64; name: String } | #Rejected { reason: str };
-
+// Replies are structural tags: encoded with no declaration, each borrowing its reason only
+// while `stringify` runs.
 export function respond(body: str, nextId: u64): String {
-  match (Fail.capture(() => parse<Signup>(body))) {
-    #Ok(s) => stringify(#Created { id: nextId, name: s.name }),
-    #Err(#Missing(field)) => stringify(#Rejected { reason: `missing ${field}` }),
-    #Err(#Syntax(at)) => stringify(#Rejected { reason: `not JSON at byte ${at}` }),
-    #Err(_) => stringify(#Rejected { reason: "not a signup" }),
+  try {
+    const s: Signup = parse(body);
+    stringify(#Created { id: nextId, name: s.name })
+  } catch (e) {
+    match (e) {
+      #Missing(field) => stringify(#Rejected { reason: `missing ${field}` }),
+      #Syntax(at) => stringify(#Rejected { reason: `not JSON at byte ${at}` }),
+      _ => stringify(#Rejected { reason: "not a signup" }),
+    }
   }
 }

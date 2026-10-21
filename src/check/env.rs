@@ -379,6 +379,15 @@ impl Program {
                 (f.name.name.clone(), subst_params(&t, &params, args))
             })
             .collect();
+        // Each instance is checked as the struct it is: unless declared `view`, it holds no
+        // borrow (§3.3).
+        if !self.defs[d].view
+            && let Some((name, t)) = fs.iter().find(|(_, t)| self.class(t) == 2) {
+                let shown = format!("{}", Show(&Ty::Named(d, args.to_vec()), self));
+                let ft = format!("{}", Show(t, self));
+                let span = self.defs[d].span;
+                self.error(module, span, format!("`{shown}` holds a borrow in `{name}` (`{ft}`): declare it `view struct` if it is a temporary view"));
+            }
         self.instances.insert(key, fs);
     }
 

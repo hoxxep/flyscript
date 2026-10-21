@@ -1,0 +1,9 @@
+// error: `Partial<{ name: str; }>` holds a borrow in `name` (`#None | #Some(str)`): declare it `view struct` if it is a temporary view
+// Each instance of a template struct is checked as the struct it is (§7.1).
+comptime function fieldsOf(T: Type): Field[] {
+  match (Type.info(T)) { #Struct { fields } | #Record(fields) => fields, _ => [] }
+}
+struct Partial<comptime T: Type> {
+  comptime for (const f of fieldsOf(T)) { [f.name]: Option<f.type>; }
+}
+export function empty(): Partial<{ name: str }> { { name: #None } }

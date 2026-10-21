@@ -97,6 +97,8 @@ impl Program {
                 from_args.max(from_fields)
             }
             Ty::Fn(f) => f.params.iter().chain(std::iter::once(&f.ret)).map(|_| 1).max().unwrap_or(1),
+            // `C.Slice` may be a borrow until `C` is known (§4.2).
+            Ty::Assoc(..) => 2,
             _ => 1,
         }
     }

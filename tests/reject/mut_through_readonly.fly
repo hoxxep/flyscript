@@ -1,0 +1,2 @@
+// error: a `mut` function is called only through a `mut` borrow
+function callShared(f: readonly mut () => i32): i32 { f() + f() }

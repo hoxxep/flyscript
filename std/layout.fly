@@ -21,6 +21,7 @@ comptime function nested(T: Type): bool {
 comptime function firstField(T: Type): str { fieldsOf(T)[0].name }
 
 export struct Soa<comptime T: Type> {
+  comptime assert(fieldsOf(T).len() > 0, `${Type.name(T)} has no fields to lay out in planes`);
   comptime for (const f of fieldsOf(T)) {
     comptime if (nested(f.type)) { [f.name]: Soa<f.type>; } else { [f.name]: Vec<f.type>; }
   }

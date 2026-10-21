@@ -1311,14 +1311,30 @@ impl<'a> Parser<'a> {
     fn if_expr(&mut self) -> PResult<ExprKind> {
         self.expect_kw(Kw::If)?;
         // `if (const #Some(x) = e) { … } else { … }` is a two-armed `match`.
-        if self.at("(") && matches!(self.tok_at(1), Tok::Kw(Kw::Const)) {
+        if self.at("(") && matches!(self.tok_at(1), Tok::Kw(Kw::Const | Kw::Let)) {
             self.bump();
-            self.bump();
+            let mutable = self.eat_kw(Kw::Let);
+            if !mutable {
+                self.bump();
+            }
             let pat = self.pattern()?;
             self.expect("=")?;
             let scrutinee = self.expr()?;
             self.expect(")")?;
-            let then = self.block()?;
+            let mut then = self.block()?;
+            // `let` makes the names it binds mutable in the block.
+            if mutable {
+                let mut names = Vec::new();
+                bound_names(&pat, &mut names);
+                let lets = names.into_iter().map(|(name, span)| Stmt::Let {
+                    mutable: true,
+                    pat: Pattern { kind: PatternKind::Bind(name.clone()), span },
+                    ty: None,
+                    init: Expr { kind: ExprKind::Ident(name), span },
+                    span,
+                });
+                then.stmts.splice(0..0, lets);
+            }
             let start = self.span();
             let otherwise = if self.eat_kw(Kw::Else) {
                 if self.at_kw(Kw::If) {
@@ -1507,6 +1523,35 @@ impl<'a> Parser<'a> {
         }
         self.expect("}")?;
         Ok(fields)
+    }
+}
+
+/// The names a pattern binds, with where.
+fn bound_names(p: &Pattern, out: &mut Vec<(String, Span)>) {
+    match &p.kind {
+        PatternKind::Bind(n) => out.push((n.clone(), p.span)),
+        PatternKind::Tuple(ps) | PatternKind::Or(ps) => ps.iter().for_each(|q| bound_names(q, out)),
+        PatternKind::Record { fields, .. } => {
+            for (n, q) in fields {
+                match q {
+                    Some(q) => bound_names(q, out),
+                    None => out.push((n.name.clone(), n.span)),
+                }
+            }
+        }
+        PatternKind::Tag { args, .. } | PatternKind::TagAt { args, .. } => match args {
+            TagPatArgs::None => {}
+            TagPatArgs::Tuple(ps) => ps.iter().for_each(|q| bound_names(q, out)),
+            TagPatArgs::Record(fs) => {
+                for (n, q) in fs {
+                    match q {
+                        Some(q) => bound_names(q, out),
+                        None => out.push((n.name.clone(), n.span)),
+                    }
+                }
+            }
+        },
+        _ => {}
     }
 }
 

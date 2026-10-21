@@ -1328,7 +1328,7 @@ fn hides_borrows(t: &Ty, p: &Program, send: &[u32]) -> bool {
     let rec = |t: &Ty| hides_borrows(t, p, send);
     match t {
         Ty::Param(s) => !send.contains(&s.id),
-        Ty::Fn(_) | Ty::Var(_) => true,
+        Ty::Fn(_) | Ty::Var(_) | Ty::Assoc(..) => true,
         Ty::Named(d, args) => {
             matches!(p.defs[*d].name.as_str(), "Gen" | "Cont") && p.modules[p.defs[*d].module].is_std
                 || args.iter().any(|a| matches!(a, GArg::Ty(t) if rec(t)))

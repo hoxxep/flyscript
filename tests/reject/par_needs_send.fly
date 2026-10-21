@@ -1,0 +1,4 @@
+// error: `Vec<Fiber<i32>>` does not implement `ParSplit`
+// `par` gives elements to different workers, so they must be `Send` (§6.5).
+import { par } from "std/par";
+export function touch(fs: mut Vec<Fiber<i32>>): void { par(mut fs, (f, _) => {}); }
