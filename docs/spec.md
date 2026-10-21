@@ -1,6 +1,6 @@
 # Flyscript
 
-**Language specification, version 0.35**
+**Language specification, version 0.36**
 
 *Affine values, one row calculus, handlers for everything, and `comptime`: Church on the outside, Turing on the inside.*
 
@@ -18,12 +18,17 @@ The whole language rests on five laws. Every rule in this document is a conseque
 4. **Handlers for everything.** Errors, I/O, iteration and region memory are ordinary effects with ordinary handlers. A handler may hold the rest of a computation as a one-shot continuation value; generators and tasks are both built from that one primitive.
 5. **`comptime` is the metalanguage.** Generics, reflection, layout transformation and derived interfaces are ordinary Flyscript code run by the compiler.
 
-### 0.1 Changes from 0.34
+### 0.1 Changes from 0.35
 
-0.35 answers a review of 0.34 (docs/reviews/2026-10-21-holistic-review-of-0-34.md), which found two ways a borrow could outlive what it borrowed. One was older than generators: a result could borrow a parameter the function owned.
+0.36 comes from an adversarial audit: some twenty-five small programs that each try to make a borrow, a region reference or a destructor outlive what it uses, run against the checker. Three got through.
 
 | Change | Why |
 | :--- | :--- |
+| A closure that escapes cannot capture region data (§4.6) | `region (R) { const r = alloc(p); return () => r.x; }` returned a closure whose type, `() => f64`, does not mention `R` |
+| A task cannot change what it borrows from outside its scope (§6.1) | two tasks could each push to the same outer `Vec` |
+| A binding whose destructor runs code cannot borrow a binding declared after it in the same block (§5.6) | bindings drop in reverse order, so the destructor read a dropped value; a `Gen`'s cleanup could too |
+
+--- | :--- |
 | A result, a yielded value and a closure's result may borrow a parameter only if the parameter is itself a borrow, or through one (a view's slice); never a parameter the function owns (§4.2, §4.3, §5.5) | `function first(v: Vec<String>): str { v[0].asStr() }` returned a borrow of `v`, which the function drops; a generator could yield one and a `map` step return one |
 | A generator's items borrow what the generator holds, not the generator (§5.5) | `for (const x of self) { return #Some(x); }` in a method over an owned `Gen` was taken for a borrow of `self` |
 | A task started outside the body of its `Io.scope` — by a helper given the scope — cannot capture anything that borrows (§6.1) | the helper could lend a parameter that came from a local of the scope's body, which ends before the scope waits for its tasks |
@@ -448,7 +453,7 @@ impl<region R, T> Iterable<readonly T> for RegionList<R, T> { … }
 
 Two rules make this sound:
 
-1. **No escape.** `R` may not occur in the type of the region expression, in any variable assigned from outside the block, or in an unhandled effect.
+1. **No escape.** `R` may not occur in the type of the region expression, in any variable assigned from outside the block, or in an unhandled effect. A closure's type does not say what it captured, so a closure that escapes (§4.3) may not capture region data at all; one passed down may, since it borrows the binding that holds the reference.
 2. **No owned resources.** Region data contains only `Copy` values, `Ref`s, `Cell`s and `RegionList`s of the same region; this is checked wherever a value is placed in a region (`alloc`, `RegionList.push`). Nothing in a region needs a destructor, so releasing the arena is constant-time.
 
 Because nothing in a region moves or is freed before the region ends, and the only mutation is copy-in to a `Cell` or append to a list, no borrow into region data can be invalidated. Because handlers are fiber-local, no task can perform another fiber's `Region<R>`, and while a scope's tasks run, neither can the scope's own body (§6.1): an outer region is frozen while it is shared, so every `Ref<R, T>` is `Send`.
@@ -621,6 +626,8 @@ A `Gen` owns its continuation, so dropping it runs the generator's cleanup; if t
 
 Assigning to a place drops the value it held first, unless that value was moved out: `h = Holder { tx: b }` drops the old holder, closing its `Sender`. Dropping a value from which fields were moved — possible only when its type does not implement `Drop` — drops the fields still in it.
 
+Bindings are dropped in reverse order of declaration, so a binding whose destructor runs code — its type, or a part, implements `Drop`; a `Gen` does — may not borrow a binding declared after it in the same block, which is gone by the time the destructor reads it: declare the borrowed value first.
+
 Because a `defer` runs at the block's exit, it holds the borrows it needs from the point it is registered to the end of the block, including past a `return`: after `defer v.clear();`, `v` cannot be lent `readonly` or moved, so `return v[0..1]` is rejected. A `defer` may not move a binding declared outside its block. A destructor reads its whole value, which is why no field may be moved out of a type that implements `Drop` (§4.1).
 
 ### 5.7 Panics
@@ -655,7 +662,7 @@ The rules:
 3. **Failure cancels the scope.** A forked task's failures `X` are rethrown by `Io.scope`. If a forked task fails, or any task panics, the scope is cancelled: the body and every other task stop at their next `Io` operation and unwind, and once all have finished the first failure is rethrown from `Io.scope` (or the panic continues). `join` therefore never fails by itself: it returns the result, or the joiner is cancelled along with the rest of the scope.
 4. **A task performs only what its fiber can handle.** A task runs on a new fiber, where the only handlers are the runtime's `Io` and the scope's capture of failures, so its effects are `Io` and `Fail` and nothing else. It cannot allocate in its parent's region or perform an effect whose handler lives in the parent fiber.
 5. **Outer regions are frozen while tasks run.** The body of a scope runs on the parent's fiber, but like its tasks it performs only `Io` and failures: it cannot write to a region outside the scope while tasks may be reading it, nor suspend to an outer handler that could. A task or the body may still open and use regions of its own, and anything else is done before or after the scope.
-6. **Captures.** A task is a `once` closure. What is declared outside the scope it may borrow `readonly`, since the scope outlives every task; what is declared inside the scope — a loop's `const tx2 = tx.clone()`, a buffer made for one task — it moves in, since the task may outlive it. Either way, what it captures must be `Send`. So the natural fan-out needs no ceremony, and a binding used again after a task took it is an error that says to declare it before `Io.scope`. Only inside the body of its `Io.scope` is it known what outlives the scope: a task started elsewhere — by a helper function given `mut Scope<X>` — moves in everything it captures and cannot capture anything that borrows, since a borrowed parameter of the helper may come from a local of the scope's body, which ends before the scope waits for its tasks.
+6. **Captures.** A task is a `once` closure. What is declared outside the scope it may borrow `readonly` — never `mut`, since the other tasks may be reading it — since the scope outlives every task; what is declared inside the scope — a loop's `const tx2 = tx.clone()`, a buffer made for one task — it moves in, since the task may outlive it. Either way, what it captures must be `Send`. So the natural fan-out needs no ceremony, and a binding used again after a task took it is an error that says to declare it before `Io.scope`. Only inside the body of its `Io.scope` is it known what outlives the scope: a task started elsewhere — by a helper function given `mut Scope<X>` — moves in everything it captures and cannot capture anything that borrows, since a borrowed parameter of the helper may come from a local of the scope's body, which ends before the scope waits for its tasks.
 
 `scope`, `spawn`, `fork` and `join` are library code over the runtime's scheduler and `Io.park`; nursery semantics are not built into the language.
 

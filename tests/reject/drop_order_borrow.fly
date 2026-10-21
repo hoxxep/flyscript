@@ -1,0 +1,9 @@
+// error: `h` borrows `a` here, but `a` is dropped before `h`'s destructor runs
+// Bindings drop in reverse order of declaration: a destructor cannot read a later binding (§5.6).
+view struct Holder { s: str }
+impl Drop for Holder { function drop(self: mut Self): void { const n = self.s.len(); } }
+export function main(): void {
+  let h = Holder { s: "static" };
+  const a = "dies first".toString();
+  h.s = a.asStr();
+}

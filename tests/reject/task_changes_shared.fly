@@ -1,0 +1,9 @@
+// error: a task cannot change `v`, which other tasks may be reading
+// Tasks borrow what is outside their scope `readonly` only (§6.1).
+export function main(): void uses Io {
+  let v: Vec<i32> = Vec.new();
+  Io.scope((s) => {
+    s.spawn(() => { v.push(1); });
+    s.spawn(() => { v.push(2); });
+  });
+}

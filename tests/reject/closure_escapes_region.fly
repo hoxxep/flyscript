@@ -1,0 +1,9 @@
+// error: a closure that escapes cannot capture `r`
+// A closure's type does not say which regions it holds data of, so one that escapes could outlive
+// them (§4.6).
+function mk(): () => f64 {
+  region (R) {
+    const r = alloc({ x: 1.5 });
+    return () => r.x;
+  }
+}

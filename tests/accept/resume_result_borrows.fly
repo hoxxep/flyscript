@@ -1,0 +1,8 @@
+// What resuming gives back may hold what the body held, but not the continuation it used up.
+effect Ask { ask(): str; }
+export function main(): void {
+  const r = handle {
+    const s = Ask.ask();
+    s
+  } with Ask { ask() resumes k => { const out = k("static"); out } };
+}

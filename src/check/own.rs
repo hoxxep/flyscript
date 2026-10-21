@@ -139,6 +139,7 @@ pub fn check_function(p: &mut Program, fid: FnId) {
         next_role: Role::Plain,
         roles: Vec::new(),
         task_moved: HashMap::new(),
+        dying_holds: HashMap::new(),
         sites: HashMap::new(),
         ret_ty,
         sources,
@@ -236,6 +237,8 @@ struct Own<'p> {
     roles: Vec<Role>,
     /// Bindings a task moved in only because they are declared inside its scope, with where.
     task_moved: HashMap<VarId, Span>,
+    /// What the bindings of the block being ended held.
+    dying_holds: HashMap<VarId, BTreeSet<LoanId>>,
     /// Variable ids by declaration site, so they are the same in both passes and in every
     /// traversal of a loop body.
     sites: HashMap<(usize, String), VarId>,
@@ -664,13 +667,38 @@ impl<'p> Own<'p> {
         // Bindings going out of scope release what they hold, and must not be borrowed by
         // anything that outlives them: the block's value, or a binding used later (§4.2).
         if let Some(scope) = self.scopes.pop() {
+            self.dying_holds.clear();
             for var in scope.values() {
-                self.state.holds.remove(var);
+                if let Some(ls) = self.state.holds.remove(var) {
+                    self.dying_holds.insert(*var, ls);
+                }
             }
             let dying: HashSet<VarId> = scope.values().copied().collect();
             self.check_outlives(&dying, b, &v);
         }
         v
+    }
+
+    /// Whether dropping a value of this type runs code — a `Drop` impl, here or in a part — which
+    /// may read what the value borrows.
+    fn drop_runs_code(&self, t: &Ty) -> bool {
+        fn go(p: &Program, t: &Ty, depth: usize) -> bool {
+            if depth > 16 {
+                return false;
+            }
+            match t {
+                Ty::Named(d, args) => {
+                    p.has_drop(*d)
+                        || args.iter().any(|a| matches!(a, GArg::Ty(t) if go(p, t, depth + 1)))
+                        || p.struct_fields(*d, args).unwrap_or_default().iter().any(|(_, t)| go(p, t, depth + 1))
+                }
+                Ty::Tuple(ts) => ts.iter().any(|t| go(p, t, depth + 1)),
+                Ty::Record(r) | Ty::Union(r) => r.labels.values().any(|t| go(p, t, depth + 1)),
+                Ty::Array(t, _) => go(p, t, depth + 1),
+                _ => false,
+            }
+        }
+        go(self.p, t, 0)
     }
 
     fn check_outlives(&mut self, dying: &HashSet<VarId>, b: &ast::Block, v: &Val) {
@@ -691,6 +719,25 @@ impl<'p> Own<'p> {
                 None => format!("this value borrows `{name}`, which goes out of scope at the end of its block"),
             };
             self.err(tail.span, msg);
+        }
+        // Bindings are dropped in reverse order of declaration: one whose destructor runs code
+        // must not borrow a binding declared after it, which is gone by then (§5.6).
+        let mut dying_sorted: Vec<VarId> = dying.iter().copied().collect();
+        dying_sorted.sort();
+        for &h in &dying_sorted {
+            let Some(ls) = self.dying_holds.get(&h).cloned() else { continue };
+            let moved = self.state.moved.iter().any(|m| m.root == h && m.fields.is_empty());
+            if moved || !self.drop_runs_code(&self.vars[h].ty.clone()) {
+                continue;
+            }
+            if let Some(l) = ls.iter().find(|l| {
+                let loan = &self.loans[**l];
+                !loan.external && loan.path.root > h && dying.contains(&loan.path.root)
+            }) {
+                let loan = self.loans[*l].clone();
+                let (hn, an) = (self.vars[h].name.clone(), self.vars[loan.path.root].name.clone());
+                self.err(loan.span, format!("`{hn}` borrows `{an}` here, but `{an}` is dropped before `{hn}`'s destructor runs, since it is declared after it: declare `{an}` first"));
+            }
         }
         let end = b.span.end;
         let holders: Vec<(VarId, BTreeSet<LoanId>)> = self.state.holds.iter().map(|(h, ls)| (*h, ls.clone())).collect();
@@ -1285,7 +1332,12 @@ impl<'p> Own<'p> {
                     }
                 }
             }
-            let v = self.expr(callee, Use::Read);
+            // What resuming gives back may hold what the body held, never the continuation: it
+            // is used up by the call.
+            let mut v = self.expr(callee, Use::Read);
+            if let Some(k) = k {
+                v.loans.retain(|l| self.loans[*l].path.root != k);
+            }
             arg_vals.push((None, v));
         } else if !matches!(callee.kind, ExprKind::Ident(_) | ExprKind::Field { .. }) || scheme.is_none() {
             // Calling a function value: it is used, and what it captured flows on — but not the
@@ -1495,6 +1547,16 @@ impl<'p> Own<'p> {
             if escapes && !self.collecting && !self.sendable(v, true) {
                 let (name, shown) = (self.vars[v].name.clone(), self.show(&self.vars[v].ty.clone()));
                 self.err(span, format!("a closure that escapes owns what it captures, so it can capture only `Send` values: `{name}` is a `{shown}`"));
+            } else if escapes && !self.collecting && has_region(&self.vars[v].ty) {
+                // A closure's type does not say which regions it holds data of, so one that
+                // escapes could outlive them (§4.6).
+                let (name, shown) = (self.vars[v].name.clone(), self.show(&self.vars[v].ty.clone()));
+                self.err(span, format!("a closure that escapes cannot capture `{name}`, a `{shown}`: its type does not mention the region, so it could outlive it"));
+            }
+            // A task shares what it borrows with the other tasks, so it may only read it (§6.1).
+            if role == Role::Task && how == Use::Mut && !self.collecting {
+                let name = self.vars[v].name.clone();
+                self.err(span, format!("a task cannot change `{name}`, which other tasks may be reading: share it through a `Mutex`, or move it into one task"));
             }
             self.record_use(v, span);
             // The capture happens where the closure is made: a binding moved in leaves its
@@ -1977,5 +2039,20 @@ fn count_calls(b: &ast::Block, k: &str, n: &mut usize) {
     }
     if let Some(t) = &b.tail {
         expr(t, k, n);
+    }
+}
+
+/// Whether a type holds region data: a `Ref`, `Cell` or `RegionList` of some region (§4.6).
+fn has_region(t: &Ty) -> bool {
+    match t {
+        Ty::Named(_, args) => args.iter().any(|a| match a {
+            GArg::Region(_) => true,
+            GArg::Ty(t) => has_region(t),
+            _ => false,
+        }),
+        Ty::Record(r) | Ty::Union(r) => r.labels.values().any(has_region),
+        Ty::Tuple(ts) => ts.iter().any(has_region),
+        Ty::Array(t, _) | Ty::Slice(t) | Ty::Borrow(_, t) => has_region(t),
+        _ => false,
     }
 }

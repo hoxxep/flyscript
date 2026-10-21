@@ -1,0 +1,12 @@
+// A destructor may read what was declared before it; a binding moved away is not dropped here.
+view struct Holder { s: str }
+impl Drop for Holder { function drop(self: mut Self): void { const n = self.s.len(); } }
+function consume(h: Holder): void {}
+export function main(): void {
+  const a = "declared first".toString();
+  let h = Holder { s: a.asStr() };
+  let g = Holder { s: "static" };
+  const b = "late".toString();
+  g.s = b.asStr();
+  consume(g);
+}
