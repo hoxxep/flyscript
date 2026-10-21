@@ -64,15 +64,15 @@ test("degrades gracefully under packet loss", () => {
 
 Flyscript is an early-stage language under active design, developed in the open.
 
-- **Language specification:** version 0.20, with every earlier version and the reasoning behind each change in [docs/history](docs/history/).
-- **Compiler (`flyc`):** a complete prototype front end and evaluator. `flyc check` type-, effect- and ownership-checks programs, rejecting use after move, conflicting borrows, borrows that escape through closures and generators, undeclared effects and non-exhaustive matches with precise errors. `flyc run` executes them, with effect handlers, generators and structured concurrency, against a deterministic simulated world.
+- **Language specification:** version 0.21, with every earlier version and the reasoning behind each change in [docs/history](docs/history/).
+- **Compiler (`flyc`):** a complete prototype front end and evaluator. `flyc check` type-, effect- and ownership-checks programs, rejecting use after move, conflicting borrows, borrows that escape through closures and generators, undeclared effects and non-exhaustive matches with precise errors. `flyc run` executes them, with effect handlers, generators and structured concurrency, against a deterministic simulated world. `comptime` runs too: templates specialize per type, and the standard library's JSON codec is derived over reflection in plain Flyscript, with no compiler support.
 
 Next comes code generation. Flyscript is not yet ready for production programs; it is ready for your ideas, and issues and discussion about the design are very welcome.
 
 ## Explore
 
 - [The specification](docs/spec.md) — the five laws, the type system, effects, ownership, concurrency.
-- [Example programs](examples/) — a JSON parser, a web server, a key–value actor, a browser UI, generators, parallel physics.
+- [Example programs](examples/) — a JSON parser, derived JSON encoding and decoding, a web server, a key–value actor, a browser UI, generators, parallel physics.
 
 ## Build from source
 

@@ -16,6 +16,7 @@ const PROGRAMS: &[(&str, &str)] = &[
     ("### A.6 ", "kv_actor"),
     ("### A.7 ", "server"),
     ("### A.8 ", "counter_ui"),
+    ("### A.9 ", "derive_json"),
 ];
 
 fn root() -> &'static Path {

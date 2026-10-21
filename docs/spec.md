@@ -1,6 +1,6 @@
 # Flyscript
 
-**Language specification, version 0.20**
+**Language specification, version 0.21**
 
 *Affine values, one row calculus, handlers for everything, and `comptime`: Church on the outside, Turing on the inside.*
 
@@ -18,18 +18,19 @@ The whole language rests on five laws. Every rule in this document is a conseque
 4. **Handlers for everything.** Errors, I/O, iteration and region memory are ordinary effects with ordinary handlers. A handler may hold the rest of a computation as a one-shot continuation value; generators and tasks are both built from that one primitive.
 5. **`comptime` is the metalanguage.** Generics, reflection, layout transformation and derived interfaces are ordinary Flyscript code run by the compiler.
 
-### 0.1 Changes from 0.19
+### 0.1 Changes from 0.20
 
-0.20 closes the five interaction bugs found by an independent review of 0.19 and its running prototype (docs/reviews/2026-10-21-review-of-0-19-and-the-running-prototype.md), which otherwise judged the language ready for production services. Two of the fixes delete concepts.
+0.21 makes Law 5 real. `comptime` was specified but unimplemented; it now runs, and a JSON codec with derived encoders and decoders is library code (§7.5). The design was reviewed before it was built (docs/reviews/2026-10-21-comptime-reflection-design.md), and the review's corrections are adopted.
 
 | Change | Why |
 | :--- | :--- |
-| A scope's body performs only `Io` and its failures; starting a task is internal to the library (§5.1, §6.1) | the body could suspend to an outer handler that wrote a region while tasks read it, and `Io.start` bypassed scopes entirely; the "`Send` row" concept is gone |
-| A class-2 value cannot be written through a `mut` borrow (§4.2) | a `void` function could store its argument's borrow into a caller's `Option<mut T>` after the call released it |
-| A nominal type's parameters range over class-1 types unless it is a `view` (§4.2) | `Vec<mut i32>` stored borrows in a container that releases them on every `push` |
-| Parameters whose types can hide a borrow carry their own loans in the body (§4.2) | an explicit `from` could silently drop a type parameter's borrow |
-| Function values are affine, and an escaping closure owns only `Send` values (§4.3) | a closure's type hid a non-`Send` capture from task boundaries |
-| A struct with `private` fields cannot be built or destructured outside its module (§3.3) | literals and patterns bypassed `private` |
+| `<comptime T: Type>` makes a function or impl a template, specialized and checked per type; `<T>` stays parametric (§7.1) | reflection needs code that differs per type; ordinary generics keep their one-time checking |
+| `comptime if`, `comptime match` and `comptime for` choose and repeat code, also among record fields, entries, match arms and list items; `[e]` computes a name (§7.2) | one device generates code, in the syntax it generates; TypeScript's computed keys supply the notation |
+| `impl I for T;` asks for an interface's derivation, a template impl that lives with the interface (§7.3) | derived interfaces become library code, with the orphan rule unchanged |
+| A specific impl whose head matches is chosen even if its bounds fail (§7.3) | otherwise `Option<NoJson>` would silently fall back to the union derivation |
+| `#A(x)` builds or binds the whole of a payload, whatever its shape (§3.2) | one pattern covers `#A(T)`, `#A(T, U)` and `#A { f: T }` in generated code |
+| A type parameter bounded by `Send`, directly or through an interface, hides no borrow (§4.2) | `parse<T extends FromJson>` returns a value decoded by its own parser |
+| Interfaces work as bounds: methods and static functions are called through them (`T.fromJson(p)`) (§3.4) | specified since 0.13, and now checked and dispatched |
 
 ---
 
@@ -96,7 +97,8 @@ Enum        = [ "view" ] "enum" Ident [ TypeParams ] "{" Tag { "," Tag } [ "," ]
 Layout      = "@layout" "(" ( "c" | "packed" ) ")" ;
 Const       = "const" Ident [ ":" Type ] "=" Expr ";" ;      (* evaluated at comptime *)
 Interface   = "interface" Ident [ TypeParams ] [ "extends" Bounds ] "{" { ( Sig | "type" Ident [ "extends" Bounds ] ) ";" } "}" ;
-Impl        = "impl" [ TypeParams ] Type [ "for" Type ] "{" { ["export"] Function } "}" ;
+Impl        = "impl" [ TypeParams ] Type [ "for" Type ] "{" { ["export"] Function } "}"
+            | "impl" Type "for" Type ";" ;                (* asks for the derivation, §7.3 *)
 TypeAlias   = "type" Ident [ TypeParams ] "=" Type ";" ;
 Effect      = "effect" Ident [ TypeParams ] "{" { Op ";" } "}" ;
 Op          = Name [ TypeParams ] "(" [ Params ] ")" ":" Return ;   (* operations have no effects *)
@@ -116,7 +118,11 @@ Bounds      = Type { "&" Type } ;
 
 Type        = Prim | Path [ TypeArgs ] | Path "(" Expr { "," Expr } ")" | Record | Union | Tuple | Fn
             | Type "[" [ Expr ] "]" | "mut" Type | "readonly" Type | Type "*" | "dyn" Path | "[" "]" ;
-Record      = "{" { Ident ":" Type ";" } [ "..." Ident ] "}" ;
+Record      = "{" { Field } [ "..." Ident ] "}" ;
+Field       = FieldName ":" Type ";" | Generate(Field) ;
+FieldName   = Ident | "[" Expr "]" ;                       (* computed by comptime code, §7.2 *)
+Generate(X) = "comptime" "for" "(" "const" Pattern "of" Expr ")" "{" { X } "}"
+            | "comptime" "if" "(" Expr ")" "{" { X } "}" [ "else" "{" { X } "}" ] ;
 Union       = Tag { "|" Tag } [ "|" "..." Ident ] ;
 Tag         = "#" Ident [ "(" Type { "," Type } ")" | Record ] ;
 Tuple       = "[" Type { "," Type } "]" ;
@@ -129,10 +135,16 @@ Prim        = "i8" | "i16" | "i32" | "i64" | "isize" | "u8" | "u16" | "u32" | "u
 Block       = "{" { Stmt } [ Expr ] "}" ;
 Stmt        = ( "const" | "let" ) Pattern [ ":" Type ] "=" Expr ";" | "defer" Expr ";"
             | "return" [ Expr ] ";" | "break" ";" | "continue" ";" | Expr ";" | BlockLike ;
-BlockLike   = If | While | For | Match | Try | Region | Handle | Unsafe | Block ;
-Expr        = … | BlockLike | Throw | Yield | Lambda | RecordLit | "struct" "{" { Ident ":" Type ";" } "}" ;
-RecordLit   = [ Path ] "{" [ Name [ ":" Expr ] { "," Name [ ":" Expr ] } ] "}" ;
-Match       = "match" "(" Expr ")" "{" { Pattern [ "if" Expr ] "=>" ( Expr "," | Block ) } "}" ;
+BlockLike   = If | While | For | Match | Try | Region | Handle | Unsafe | Block | "comptime" ( If | Match | For ) ;
+Expr        = … | BlockLike | Throw | Yield | Lambda | RecordLit | ListLit | "comptime" Expr
+            | Expr "." "[" Expr "]" | "#" "[" Expr "]" [ TagArgs ] | "struct" "{" { Field } "}" ;
+RecordLit   = [ Path ] "{" [ Entry { "," Entry } ] "}" ;
+Entry       = FieldName [ ":" Expr ] | Generate(Entry) ;
+ListLit     = "[" [ Item { "," Item } ] "]" ;
+Item        = Expr | "comptime" ( For | If ) ;          (* one item per iteration, §7.2 *)
+Match       = "match" "(" Expr ")" "{" { MatchArm } "}" ;
+MatchArm    = Pattern [ "if" Expr ] "=>" ( Expr "," | Block ) | Generate(MatchArm) ;
+Pattern     = … | "#" "[" Expr "]" [ … ] | "comptime" Expr ;
 For         = "for" "(" ( "const" | "let" ) Pattern "of" Expr ")" Block ;
 Try         = "try" Block "catch" "(" Pattern ")" Block ;
 Throw       = "throw" Expr ;
@@ -165,7 +177,7 @@ Three rules settle the grammar's ambiguities, all borrowed from TypeScript:
 A *row* is a finite map from labels to types, optionally ending in a row variable. Flyscript has three kinds of row, all solved by one Rémy-style unifier over label-sorted rows. They differ only in what a label is and in what happens when a label appears twice:
 
 - **Records**: `{ x: f64; y: f64; ...R }`. A label is a field name and appears at most once; extending a row requires that its tail lack the label. Physical layout is canonical (by alignment, then name), so equal record types have equal layouts.
-- **Tag unions**: `#Some(T) | #None`, `#Get { key: String } | #Put { key: String; val: String } | ...R`. A label is a tag; payloads are a tuple `(…)` or a record `{…}`. Tags need no declaration. Two unions are joined by merging their tags, unifying the payloads of a tag present in both.
+- **Tag unions**: `#Some(T) | #None`, `#Get { key: String } | #Put { key: String; val: String } | ...R`. A label is a tag; payloads are a tuple `(…)` or a record `{…}`. Tags need no declaration. Two unions are joined by merging their tags, unifying the payloads of a tag present in both. Whatever its shape, `#A(x)` builds or binds a payload whole: `#Add(pair)` where `pair: [Expr, Expr]`, `#Get(req)` where `req: { key: String }`. Code that is generated per tag (§7.2) relies on it.
 - **Effect rows**: `uses Io, Fail<E>, Region<R>, ...R`. A label is an effect name together with its **region arguments**: `Region<R1>` and `Region<R2>` are different labels and may share a row. An effect's other type arguments are **determined by its label**, so a row holds one `Fail` and one `Yield`, and wherever two rows meet, their `Fail` payloads unify. Effect rows are sets: extending a row with a label it already contains is the identity, so `uses Io, ...E` is well formed whether or not `E` contains `Io`.
 
 Determined arguments are what make error sets compose. A block that calls `conn.read` (`Fail<IoErr | ...ρ1>`) and `parse` (`Fail<#Malformed | ...ρ2>`) has one `Fail` whose payload is the merged union `IoErr | #Malformed | ...ρ3`; no conversion code is involved.
@@ -219,13 +231,15 @@ interface Collection {
 }
 ```
 
-Declarations hold data only. Behaviour lives in `impl T { … }` (inherent methods) and `impl I for T { … }` (interface implementations). An `impl I for T` must appear in the module that declares `I` or the module that declares `T`. Structural and built-in types (records, tag unions, slices, `str`) belong to no module, so only the standard library gives them inherent methods (`Option.cloned`, `str.splitWhitespace`); other code extends them through interfaces. Calls dispatch statically through `<T extends I>`; `dyn I` is an explicit fat pointer for dynamic dispatch.
+Declarations hold data only. Behaviour lives in `impl T { … }` (inherent methods) and `impl I for T { … }` (interface implementations). An `impl I for T` must appear in the module that declares `I` or the module that declares `T`. Structural and built-in types (records, tag unions, slices, `str`) belong to no module, so only the standard library gives them inherent methods (`Option.cloned`, `str.splitWhitespace`); other code extends them through interfaces. Calls dispatch statically through `<T extends I>`: a method through a value (`x.encode(out)`) and a function without `self` through the type (`T.decode(p)`, `User.decode(p)`). Each call states the bounds its type arguments must meet, checked where the types are known. `dyn I` is an explicit fat pointer for dynamic dispatch.
+
+The impl for a type is the first whose head matches it, after expanding aliases; specific impls come before an interface's derivation (§7.3).
 
 A method's receiver is a first parameter named `self`: `self: Self` (by move), `self: readonly Self` or `self: mut Self`. A function in an `impl` without `self` is called on the type: `RegionList.new()`.
 
 ### 3.5 Derived interfaces
 
-`Eq`, `Hash`, `Show` and `Clone` are derived for every record, tuple and tag union, and for any nominal type that requests them, by `comptime` reflection over its fields (§7). An error union therefore prints, compares and hashes with no code.
+An interface can come with a *derivation*: an impl, written in Flyscript with `comptime` reflection, that works for any type whose shape it can see (§7.3). Records, tuples and tag unions get it whenever they have no impl of their own; a struct or enum asks for it with `impl Eq for Point;`. `Eq`, `Hash`, `Show` and `Clone` are derived this way, so an error union prints, compares and hashes with no code, and so are `ToJson` and `FromJson` in the standard library.
 
 ### 3.6 Inference
 
@@ -289,7 +303,7 @@ function longer(a: str, b: str): str { if (a.len() >= b.len()) { a } else { b } 
 function prefix(s: str, sep: str): str from s { … }                               // borrows only s
 ```
 
-The body is checked against the same rule: everything the returned value borrows must come from a source, never from a local. Inside the body, a parameter whose type can hide a borrow carries a loan of its own, so a `from` that leaves out a type-parameter or closure argument the result actually contains is rejected there.
+The body is checked against the same rule: everything the returned value borrows must come from a source, never from a local. Inside the body, a parameter whose type can hide a borrow carries a loan of its own, so a `from` that leaves out a type-parameter or closure argument the result actually contains is rejected there. A type parameter bounded by `Send`, directly or through an interface that extends it (`interface FromJson extends Send`), ranges over class-1 types and hides nothing: `parse<T extends FromJson>(text: str): T` returns a value its own parser decoded.
 
 ### 4.3 Closures
 
@@ -593,23 +607,78 @@ function parReduce<C extends ParSplit, A extends Send>(
 
 ## 7. `comptime`
 
-### 7.1 The metalanguage
+`comptime` is the metalanguage, and it is Flyscript: the compiler runs ordinary code, on a deterministic interpreter with a step budget and no effects, to compute types, choose code and repeat it. What users call stays typed and parametric; the computing happens inside.
 
-Any function, parameter or expression marked `comptime` runs in the compiler before type checking, on a deterministic interpreter with a step budget and no effects. `Type` is a `comptime`-only type; types are values that `comptime` code inspects (`Type.fields(T)`, `Type.size(T)`, `Type.align(T)`) and builds (`Type.struct(fields)`). Generic types that need computation are written as functions:
+### 7.1 Two kinds of type parameter
+
+A type parameter is one of two kinds, and callers cannot tell them apart:
+
+- **`<T>` is parametric.** The body is checked once, against `T`'s bounds, and works for every `T` that meets them. Almost all generic code is written this way.
+- **`<comptime T: Type>` is a template parameter.** The function or impl is *specialized* for each type it is used at: its `comptime` code runs with `T` known, and the code that results is checked as if written by hand. `T` is inferred from the arguments like any other.
+
+A template states its whole signature, effects included (none means pure), because its body is checked only per specialization. An error in a specialization points into the template and names the specialization: `no method 'toJson' on 'bool' (in 'toJson' for 'Flag')`. Specializations are memoized by template and types, and registered before their bodies are expanded, so a derivation over a recursive type refers to itself.
+
+A `comptime function` runs only in the compiler: it is called from `comptime` code, never at run time. Module constants (`const SLOTS: usize = 64;`) are evaluated the same way. `Type` is a comptime-only type whose values are types; a generic type that needs computation is a `comptime function` returning one:
 
 ```ts
-comptime function Ring(comptime T: Type, comptime N: usize): Type {
+comptime function Ring(T: Type, N: usize): Type {
   comptime assert(N > 0 && (N & (N - 1)) == 0, "capacity must be a power of two");
   struct { buf: T[N]; head: usize; tail: usize; }
 }
 type ByteRing = Ring(u8, 1024);
 ```
 
-Derived interfaces (§3.5) are `comptime` functions in the standard library; user code can define its own derivations the same way.
+### 7.2 Reflection and generated code
 
-### 7.2 Layout as a library: `Soa<T>`
+**Reflection.** `Type.info(T)` describes a type, and `Type.name(T)` names it; everything else is library code over these two. The prelude declares what `Type.info` returns:
 
-`Soa<T>` is a `comptime` function that flattens `T`'s fields recursively into one contiguous, aligned allocation of planes and implements `ParSplit` with a nested view record:
+```ts
+type Field   = { name: str; type: Type };
+type TagInfo = { name: str; payload: Option<Type> };   // the one type of #A(T), or the tuple or record
+type TypeInfo =
+  | #Int { signed: bool; bits: u8 } | #Float(u8) | #Bool | #Str | #Void | #Fn
+  | #Record(Field[]) | #Tuple(Type[]) | #Union(TagInfo[])
+  | #Struct { name: str; fields: Field[] } | #Enum { name: str; tags: TagInfo[] }
+  | #Array { item: Type; len: usize } | #Slice(Type) | #Borrow { mutable: bool; type: Type }
+  | #Opaque { name: str; args: Type[] };
+```
+
+A struct's private fields are visible to reflection only from its own module, or in a derivation it asked for (§7.3); elsewhere the struct is `#Opaque`.
+
+**Generating code.** `comptime` before a construct runs it in the compiler and leaves code behind:
+
+- `comptime if (c) { … } else { … }` and `comptime match (e) { … }` keep the branch the value selects. The others are never checked, so they may mention fields the type lacks.
+- `comptime for (const x of xs) { … }` repeats its body once per element of a `comptime` list, with `x` a constant in each copy.
+- `comptime e`, for any other expression, computes `e` and leaves its value: `comptime fields.len()`, `comptime panic("…")`, `comptime assert(…)`.
+
+The same `comptime for` and `comptime if` generate the items of a sequence: the fields of a record type, the entries of a record literal, the arms of a `match`, the items of a list literal (one per iteration). A `comptime` value used at run time becomes a literal, and a `Type` value can stand wherever a type does: `Option<f.type>`, `f.type.fromJson(p)`.
+
+**Computed names.** `[e]` names something by a `comptime` string, as in TypeScript's computed keys: `v.[f.name]` reads a field (or, for an integer, a tuple element), `{ [f.name]: x }` and `{ [f.name]: T; }` build records and record types, and `#[t.name](x)` builds or matches a tag. In a pattern, `comptime e` matches the value of `e`.
+
+```ts
+function sum<comptime T: Type>(v: readonly T): f64 {
+  let total = 0.0;
+  comptime for (const f of fieldsOf(T)) { total += v.[f.name]; }
+  total
+}
+```
+
+### 7.3 Derivation
+
+A *derivation* is an impl with a template parameter. It lives with its interface, so the orphan rule is unchanged, and a type asks for it with an empty impl in its own module:
+
+```ts
+impl<comptime T: Type> Show for T { … }   // in Show's module: how to show anything visible
+impl Show for Point;                       // in Point's module: Point asks for it
+```
+
+Records, tuples and tag unions have no module, so a derivation applies to them directly whenever they have no impl of their own. The impl for a type is chosen in one step: specific impls first, by matching their heads against the type after expanding aliases, then the derivation. A specific impl whose head matches is the answer even if its bounds fail: `Option<T>` has its own JSON impl (the value or `null`), and an `Option` of something that cannot be encoded is an error, never quietly encoded as the union `{"Some": …}`.
+
+A derivation requested by a struct may read and build its private fields: the author asked for it, where the type is declared. A type that keeps an invariant in a private field writes its impl by hand instead, calling its own constructor.
+
+### 7.4 Layout as a library: `Soa<T>`
+
+`Soa<T>` is a `comptime function` that flattens `T`'s fields recursively into planes — one `Vec` per scalar field, a nested `Soa` per struct field — and implements `ParSplit` with a nested view record:
 
 ```ts
 struct Vec2 { x: f32; y: f32; }
@@ -622,7 +691,55 @@ function step(ps: mut Soa<Particle>, dt: f32): void {
 }
 ```
 
-The view is an ordinary class-2 record (§4.2); no part of this is built into the compiler.
+The view is an ordinary class-2 record (§4.2), built field by field with `comptime for` and `.[f.name]`; no part of this needs `unsafe` or is built into the language.
+
+### 7.5 A worked derivation: JSON
+
+`std/json` is a JSON codec written in Flyscript. Encoding and decoding are two interfaces, so a value that borrows (`{ status: "ok", user: req.user }`) can be encoded without being decodable:
+
+```ts
+export interface ToJson { function toJson(self: readonly Self, out: mut String): void; }
+export interface FromJson extends Send { function fromJson(p: mut JsonParser): Self uses Fail<JsonError>; }
+export function stringify<T extends ToJson>(v: readonly T): String;
+export function parse<T extends FromJson>(text: str): T uses Fail<JsonError>;
+```
+
+Primitives, `String`, `str`, `Vec<T>` and `Option<T>` have impls written by hand. Everything else is one derivation per interface; this is the whole of the decoder for records and structs:
+
+```ts
+impl<comptime T: Type> FromJson for T {
+  function fromJson(p: mut JsonParser): T uses Fail<JsonError> {
+    comptime match (Type.info(T)) {
+      #Record(fields) | #Struct { fields } => {
+        let slots: { comptime for (const f of fields) { [f.name]: Option<f.type>; } } =
+          { comptime for (const f of fields) { [f.name]: #None, } };
+        p.beginObject();
+        while (p.nextKey()) {
+          const key = p.key();
+          match (key.asStr()) {
+            comptime for (const f of fields) {
+              comptime f.name => { slots.[f.name] = #Some(f.type.fromJson(mut p)); },
+            }
+            _ => p.skip(),
+          }
+        }
+        ({
+          comptime for (const f of fields) {
+            [f.name]: match (slots.[f.name]) {
+              #Some(v) => v,
+              #None => comptime if (isOption(f.type)) { #None } else { throw #Missing(String.fromStr(f.name)) },
+            },
+          }
+        })
+      }
+      // … tuples, and tag unions as "Name" or { "Name": payload }
+      _ => comptime panic(`${Type.name(T)} cannot be decoded from JSON`),
+    }
+  }
+}
+```
+
+Keys may come in any order, unknown keys are skipped, and an `Option` field may be left out — decided per field at compile time by `isOption`, a four-line `comptime function`. Appendix A.9 uses it.
 
 ---
 
@@ -742,12 +859,13 @@ Everything here follows from the rules above: the failure row of the `try` body 
 
 ## 11. Implementation
 
-The prototype compiler, `flyc`, implements this specification except code generation and `comptime` evaluation (for which `Soa<T>` is built in).
+The prototype compiler, `flyc`, implements this specification except code generation. `Soa<T>` is still built in rather than written as a template, and the checker satisfies `Eq`, `Hash`, `Show` and `Clone` structurally until their derivations move into the prelude.
 
-1. **Parse** each module into a syntax tree; standard-library modules are `.d.fly` declaration files.
-2. **Check types and effects** bidirectionally with one row unifier for records and tag unions; effect rows are checked by subsumption into the effects allowed at each point, with region arguments as part of an effect's label and `Fail` payloads compared by union inclusion. Region arguments are solved over the body, and an undetermined allocation goes to the innermost region it does not escape from.
-3. **Check ownership** after typing: every value carries the loans it holds, loans flow through call results, patterns, assignments and captures, and a loan is live while any binding holding it may still be used, judged by reachability over the program's structure.
-4. **Evaluate** directly: abortive handlers unwind and tail-resumptive ones run where the effect is performed, so `for…of` over a generator captures no stack; a `Gen` pulled with `next()` runs on its own thread. `Io` is handled by a deterministic world (files, sockets, a database, a seeded fault schedule), which is what makes §6.4's simulation testing concrete.
+1. **Parse** each module into a syntax tree; standard-library modules are `.d.fly` declaration files, whose bodies the runtime provides, and Flyscript modules (`std/json`).
+2. **Expand** `comptime` code: a template is specialized when a call or a bound needs it, its body expanded with fresh positions in source order (each repeated copy is distinct code to the later passes) that map back to the template for diagnostics.
+3. **Check types and effects** bidirectionally with one row unifier for records and tag unions; effect rows are checked by subsumption into the effects allowed at each point, with region arguments as part of an effect's label and `Fail` payloads compared by union inclusion. Region arguments are solved over the body, and an undetermined allocation goes to the innermost region it does not escape from.
+4. **Check ownership** after typing: every value carries the loans it holds, loans flow through call results, patterns, assignments and captures, and a loan is live while any binding holding it may still be used, judged by reachability over the program's structure.
+5. **Evaluate** directly, carrying each frame's type arguments so a call through a bound runs the impl for the type it stands for: abortive handlers unwind and tail-resumptive ones run where the effect is performed, so `for…of` over a generator captures no stack; a `Gen` pulled with `next()` runs on its own thread. `Io` is handled by a deterministic world (files, sockets, a database, a seeded fault schedule), which is what makes §6.4's simulation testing concrete.
 
 A native compiler would add: **lower effects** by evidence passing (tail-resumptive handlers to direct calls, abortive `Fail` to two-register returns, stored continuations to stack switching), and **generate code** with Cranelift for debug builds and LLVM for release, emitting `noalias` and `readonly` from `mut` and `readonly`.
 
@@ -785,7 +903,7 @@ A native compiler would add: **lower effects** by evidence passing (tail-resumpt
 
 ---
 
-## Appendix: eight programs
+## Appendix: nine programs
 
 These were written to test the design, not to show it off; each ends with what still feels awkward.
 
@@ -1019,3 +1137,32 @@ export function view(m: readonly Model): void uses Dom<Msg> {
 }
 ```
 *Awkward:* none. The view streams into the host's reconciler through an effect, so no virtual-DOM tree is allocated; per-frame strings live in a region released after the frame.
+
+### A.9 Deriving JSON
+
+```ts
+import { ToJson, FromJson, JsonError, stringify, parse } from "std/json";
+
+struct Signup { email: String; name: String; referrer: Option<String>; }
+impl FromJson for Signup;
+
+// Structural, so it is encoded with no request; it borrows, so it could never be decoded.
+type Reply = #Created { id: u64; name: String } | #Rejected { reason: str };
+
+function reason(e: readonly JsonError): str {
+  match (e) {
+    #Missing(_) => "a required field is missing",
+    #Syntax(_) => "the body is not JSON",
+    _ => "the body does not describe a signup",
+  }
+}
+
+export function respond(body: str, nextId: u64): String {
+  const reply: Reply = match (Fail.capture(() => parse<Signup>(body))) {
+    #Ok(s) => #Created { id: nextId, name: s.name },
+    #Err(e) => #Rejected { reason: reason(e) },
+  };
+  stringify(reply)
+}
+```
+*Awkward:* `parse<Signup>` names its type because the closure passed to `Fail.capture` gets no expected type from the `match`. The failure arm reads well because `JsonError` is a closed union; a decoder that wanted to say *which* field was missing would match `#Missing(f)` and build a `String`, which a borrowed `reason: str` cannot hold.

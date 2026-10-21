@@ -1,0 +1,6 @@
+// error: `#None | #Some(Opaque)` does not implement `ToJson`
+// `Option<T>` has its own impl, which needs `T: ToJson`; when that fails the derivation for
+// tag unions does not step in to encode it another way (§7.3).
+import { ToJson, stringify } from "std/json";
+struct Opaque { f: () => i32; }
+export function show(v: readonly Option<Opaque>): String { stringify(v) }

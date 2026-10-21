@@ -104,9 +104,9 @@ impl Program {
                 }),
                 _ => true,
             });
-            if ok {
-                return Some((i, binds));
-            }
+            // The first impl whose head matches is the one: if its bounds fail, the type does
+            // not implement the interface, rather than falling back to a derivation (§7.3).
+            return ok.then_some((i, binds));
         }
         None
     }
