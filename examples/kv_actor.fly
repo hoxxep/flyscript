@@ -1,0 +1,18 @@
+import { Receiver, Reply } from "std/sync";
+import { HashMap } from "std/collections";
+
+export type Command =
+  | #Get { key: String; reply: Reply<Option<String>> }
+  | #Put { key: String; val: String }
+  | #Stop;
+
+export function kv(inbox: readonly Receiver<Command>): void uses Io {
+  let store = HashMap.new<String, String>();
+  for (const cmd of inbox.each()) {
+    match (cmd) {
+      #Get { key, reply } => reply.send(store.get(key).cloned()),
+      #Put { key, val }   => store.insert(key, val),
+      #Stop               => break,
+    }
+  }
+}

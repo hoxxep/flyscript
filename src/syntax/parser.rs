@@ -1,0 +1,1318 @@
+use super::ast::*;
+use super::lexer::{Kw, TemplatePart, Tok, Token, lex, lex_range};
+use crate::diag::{Diagnostic, Span};
+
+type PResult<T> = Result<T, Diagnostic>;
+
+pub fn parse_module(source: &str) -> PResult<Module> {
+    let mut p = Parser::new(source, lex(source)?);
+    let mut items = Vec::new();
+    while !p.at_eof() {
+        items.push(p.item()?);
+    }
+    Ok(Module { items })
+}
+
+pub fn parse_expr(source: &str) -> PResult<Expr> {
+    let mut p = Parser::new(source, lex(source)?);
+    let e = p.expr()?;
+    p.expect_eof()?;
+    Ok(e)
+}
+
+struct Parser<'a> {
+    src: &'a str,
+    toks: Vec<Token>,
+    pos: usize,
+}
+
+/// Binary operators by precedence, lowest first. `as` binds tighter than all of them.
+const BINARY: &[&[&str]] = &[
+    &["||"],
+    &["&&"],
+    &["==", "!=", "<", ">", "<=", ">="],
+    &["|"],
+    &["^"],
+    &["&"],
+    &["<<", ">>"],
+    &["+", "-"],
+    &["*", "/", "%"],
+];
+
+const ASSIGN: &[&str] = &["=", "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^="];
+
+impl<'a> Parser<'a> {
+    fn new(src: &'a str, toks: Vec<Token>) -> Parser<'a> {
+        Parser { src, toks, pos: 0 }
+    }
+
+    // ---- token helpers ----
+
+    fn tok(&self) -> &Tok {
+        &self.toks[self.pos].tok
+    }
+
+    fn tok_at(&self, n: usize) -> &Tok {
+        let i = (self.pos + n).min(self.toks.len() - 1);
+        &self.toks[i].tok
+    }
+
+    fn span(&self) -> Span {
+        self.toks[self.pos].span
+    }
+
+    fn prev_end(&self) -> usize {
+        if self.pos == 0 { 0 } else { self.toks[self.pos - 1].span.end }
+    }
+
+    fn since(&self, start: Span) -> Span {
+        Span::new(start.start, self.prev_end().max(start.start))
+    }
+
+    fn bump(&mut self) -> Token {
+        let t = self.toks[self.pos].clone();
+        if self.pos < self.toks.len() - 1 {
+            self.pos += 1;
+        }
+        t
+    }
+
+    fn at_eof(&self) -> bool {
+        matches!(self.tok(), Tok::Eof)
+    }
+
+    fn at(&self, p: &str) -> bool {
+        matches!(self.tok(), Tok::Punct(q) if *q == p)
+    }
+
+    fn at_n(&self, n: usize, p: &str) -> bool {
+        matches!(self.tok_at(n), Tok::Punct(q) if *q == p)
+    }
+
+    fn at_kw(&self, kw: Kw) -> bool {
+        matches!(self.tok(), Tok::Kw(k) if *k == kw)
+    }
+
+    fn at_word(&self, w: &str) -> bool {
+        matches!(self.tok(), Tok::Ident(s) if s == w)
+    }
+
+    fn eat(&mut self, p: &str) -> bool {
+        if self.at(p) {
+            self.bump();
+            true
+        } else {
+            false
+        }
+    }
+
+    fn eat_kw(&mut self, kw: Kw) -> bool {
+        if self.at_kw(kw) {
+            self.bump();
+            true
+        } else {
+            false
+        }
+    }
+
+    fn eat_word(&mut self, w: &str) -> bool {
+        if self.at_word(w) {
+            self.bump();
+            true
+        } else {
+            false
+        }
+    }
+
+    fn describe(&self) -> String {
+        match self.tok() {
+            Tok::Ident(s) => format!("`{s}`"),
+            Tok::Kw(k) => format!("`{}`", k.as_str()),
+            Tok::Int(s) | Tok::Float(s) => format!("`{s}`"),
+            Tok::Byte(_) => "a byte literal".into(),
+            Tok::Str(_) => "a string".into(),
+            Tok::Template(_) => "a template literal".into(),
+            Tok::Tag(s) => format!("`#{s}`"),
+            Tok::Punct(p) => format!("`{p}`"),
+            Tok::Eof => "end of file".into(),
+        }
+    }
+
+    fn error<T>(&self, expected: &str) -> PResult<T> {
+        Err(Diagnostic::new(self.span(), format!("expected {expected}, found {}", self.describe())))
+    }
+
+    fn expect(&mut self, p: &str) -> PResult<Span> {
+        if self.at(p) { Ok(self.bump().span) } else { self.error(&format!("`{p}`")) }
+    }
+
+    fn expect_kw(&mut self, kw: Kw) -> PResult<Span> {
+        if self.at_kw(kw) { Ok(self.bump().span) } else { self.error(&format!("`{}`", kw.as_str())) }
+    }
+
+    fn expect_word(&mut self, w: &str) -> PResult<()> {
+        if self.eat_word(w) { Ok(()) } else { self.error(&format!("`{w}`")) }
+    }
+
+    fn expect_eof(&self) -> PResult<()> {
+        if self.at_eof() { Ok(()) } else { self.error("end of input") }
+    }
+
+    fn ident(&mut self) -> PResult<Ident> {
+        match self.tok().clone() {
+            Tok::Ident(name) => {
+                let span = self.bump().span;
+                Ok(Ident { name, span })
+            }
+            _ => self.error("an identifier"),
+        }
+    }
+
+    /// A member name: as in TypeScript, reserved words are allowed after `.`, as effect
+    /// operation names and as record fields, so `Yield.yield` and `{ default: 1 }` work.
+    fn member_name(&mut self) -> PResult<Ident> {
+        match self.tok().clone() {
+            Tok::Kw(kw) => {
+                let span = self.bump().span;
+                Ok(Ident { name: kw.as_str().to_string(), span })
+            }
+            _ => self.ident(),
+        }
+    }
+
+    /// Two adjacent single-character tokens, e.g. `>` `>` read as a shift operator.
+    fn adjacent(&self, a: &str, b: &str) -> bool {
+        self.at(a) && self.at_n(1, b) && self.toks[self.pos].span.end == self.toks[self.pos + 1].span.start
+    }
+
+    /// Runs `f`, rewinding and returning `None` if it fails.
+    fn attempt<T>(&mut self, f: impl FnOnce(&mut Self) -> PResult<T>) -> Option<T> {
+        let saved = self.pos;
+        match f(self) {
+            Ok(v) => Some(v),
+            Err(_) => {
+                self.pos = saved;
+                None
+            }
+        }
+    }
+
+    /// Index of the token closing the bracket at `self.pos`, if balanced.
+    fn matching_close(&self) -> Option<usize> {
+        let mut depth = 0usize;
+        for (i, t) in self.toks.iter().enumerate().skip(self.pos) {
+            match &t.tok {
+                Tok::Punct("(" | "[" | "{") => depth += 1,
+                Tok::Punct(")" | "]" | "}") => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(i);
+                    }
+                }
+                Tok::Eof => return None,
+                _ => {}
+            }
+        }
+        None
+    }
+
+    // ---- items ----
+
+    fn item(&mut self) -> PResult<Item> {
+        let start = self.span();
+        let exported = self.eat_kw(Kw::Export);
+        let kind = match self.tok() {
+            Tok::Kw(Kw::Import) if !exported => self.import()?,
+            Tok::Punct("@") => {
+                let layout = self.layout()?;
+                ItemKind::Struct(self.struct_decl(Some(layout))?)
+            }
+            Tok::Kw(Kw::Struct) => ItemKind::Struct(self.struct_decl(None)?),
+            Tok::Kw(Kw::Enum) => ItemKind::Enum(self.enum_decl()?),
+            Tok::Kw(Kw::Interface) => ItemKind::Interface(self.interface_decl()?),
+            Tok::Kw(Kw::Impl) => ItemKind::Impl(self.impl_decl()?),
+            Tok::Kw(Kw::Type) => ItemKind::TypeAlias(self.type_alias()?),
+            Tok::Kw(Kw::Effect) => ItemKind::Effect(self.effect_decl()?),
+            Tok::Kw(Kw::Function | Kw::Comptime) => ItemKind::Function(self.fn_decl()?),
+            Tok::Kw(Kw::Extern) => {
+                self.bump();
+                match self.tok() {
+                    Tok::Str(abi) if abi == "C" => {
+                        self.bump();
+                    }
+                    _ => return self.error("`\"C\"`"),
+                }
+                let sig = self.sig(true)?;
+                self.expect(";")?;
+                ItemKind::Extern(sig)
+            }
+            _ => return self.error("a declaration"),
+        };
+        Ok(Item { exported, kind, span: self.since(start) })
+    }
+
+    fn import(&mut self) -> PResult<ItemKind> {
+        self.expect_kw(Kw::Import)?;
+        self.expect("{")?;
+        let mut names = Vec::new();
+        while !self.at("}") {
+            names.push(self.ident()?);
+            if !self.eat(",") {
+                break;
+            }
+        }
+        self.expect("}")?;
+        self.expect_word("from")?;
+        let from = match self.tok().clone() {
+            Tok::Str(s) => {
+                self.bump();
+                s
+            }
+            _ => return self.error("a module path string"),
+        };
+        self.expect(";")?;
+        Ok(ItemKind::Import { names, from })
+    }
+
+    fn layout(&mut self) -> PResult<Ident> {
+        self.expect("@")?;
+        self.expect_word("layout")?;
+        self.expect("(")?;
+        let kind = self.ident()?;
+        self.expect(")")?;
+        Ok(kind)
+    }
+
+    fn struct_decl(&mut self, layout: Option<Ident>) -> PResult<StructDecl> {
+        self.expect_kw(Kw::Struct)?;
+        let name = self.ident()?;
+        let params = self.type_params()?;
+        let fields = self.field_list()?;
+        Ok(StructDecl { layout, name, params, fields })
+    }
+
+    /// `{ name: Type; … }` with `;` or `,` separators.
+    fn field_list(&mut self) -> PResult<Vec<Field>> {
+        self.expect("{")?;
+        let mut fields = Vec::new();
+        while !self.at("}") {
+            let name = self.ident()?;
+            self.expect(":")?;
+            let ty = self.ty()?;
+            fields.push(Field { name, ty });
+            if !self.eat(";") && !self.eat(",") {
+                break;
+            }
+        }
+        self.expect("}")?;
+        Ok(fields)
+    }
+
+    fn enum_decl(&mut self) -> PResult<EnumDecl> {
+        self.expect_kw(Kw::Enum)?;
+        let name = self.ident()?;
+        let params = self.type_params()?;
+        self.expect("{")?;
+        let mut tags = Vec::new();
+        while !self.at("}") {
+            tags.push(self.tag_decl()?);
+            if !self.eat(",") {
+                break;
+            }
+        }
+        self.expect("}")?;
+        Ok(EnumDecl { name, params, tags })
+    }
+
+    fn tag_decl(&mut self) -> PResult<TagDecl> {
+        let name = match self.tok().clone() {
+            Tok::Tag(name) => Ident { name, span: self.bump().span },
+            _ => return self.error("a tag such as `#Some`"),
+        };
+        let payload = if self.at("(") {
+            self.bump();
+            let mut tys = Vec::new();
+            while !self.at(")") {
+                tys.push(self.ty()?);
+                if !self.eat(",") {
+                    break;
+                }
+            }
+            self.expect(")")?;
+            TagPayload::Tuple(tys)
+        } else if self.at("{") {
+            TagPayload::Record(self.field_list()?)
+        } else {
+            TagPayload::None
+        };
+        Ok(TagDecl { name, payload })
+    }
+
+    fn interface_decl(&mut self) -> PResult<InterfaceDecl> {
+        self.expect_kw(Kw::Interface)?;
+        let name = self.ident()?;
+        let params = self.type_params()?;
+        self.expect("{")?;
+        let mut members = Vec::new();
+        while !self.at("}") {
+            if self.eat_kw(Kw::Type) {
+                let name = self.ident()?;
+                let bounds = if self.eat_kw(Kw::Extends) { self.bounds()? } else { Vec::new() };
+                members.push(InterfaceMember::AssocType { name, bounds });
+            } else {
+                members.push(InterfaceMember::Method(self.sig(true)?));
+            }
+            self.expect(";")?;
+        }
+        self.expect("}")?;
+        Ok(InterfaceDecl { name, params, members })
+    }
+
+    fn impl_decl(&mut self) -> PResult<ImplDecl> {
+        self.expect_kw(Kw::Impl)?;
+        let params = self.type_params()?;
+        let first = self.ty()?;
+        let (interface, target) = if self.eat_kw(Kw::For) { (Some(first), self.ty()?) } else { (None, first) };
+        self.expect("{")?;
+        let mut methods = Vec::new();
+        while !self.at("}") {
+            let exported = self.eat_kw(Kw::Export);
+            methods.push(Method { exported, decl: self.fn_decl()? });
+        }
+        self.expect("}")?;
+        Ok(ImplDecl { params, interface, target, methods })
+    }
+
+    fn type_alias(&mut self) -> PResult<TypeAlias> {
+        self.expect_kw(Kw::Type)?;
+        let name = self.ident()?;
+        let params = self.type_params()?;
+        self.expect("=")?;
+        let ty = self.ty()?;
+        self.expect(";")?;
+        Ok(TypeAlias { name, params, ty })
+    }
+
+    fn effect_decl(&mut self) -> PResult<EffectDecl> {
+        self.expect_kw(Kw::Effect)?;
+        let name = self.ident()?;
+        let params = self.type_params()?;
+        self.expect("{")?;
+        let mut ops = Vec::new();
+        while !self.at("}") {
+            // Operations are written without `function`; tolerate it for symmetry with interfaces.
+            let with_kw = self.at_kw(Kw::Function);
+            ops.push(self.sig(with_kw)?);
+            self.expect(";")?;
+        }
+        self.expect("}")?;
+        Ok(EffectDecl { name, params, ops })
+    }
+
+    fn fn_decl(&mut self) -> PResult<FnDecl> {
+        let sig = self.sig(true)?;
+        let body = self.block()?;
+        Ok(FnDecl { sig, body })
+    }
+
+    fn sig(&mut self, function_kw: bool) -> PResult<FnSig> {
+        let start = self.span();
+        let comptime = self.eat_kw(Kw::Comptime);
+        let name = if function_kw {
+            self.expect_kw(Kw::Function)?;
+            self.ident()?
+        } else {
+            self.member_name()?
+        };
+        let type_params = self.type_params()?;
+        let params = self.params(true)?;
+        self.expect(":")?;
+        let ret = self.ret()?;
+        let uses = self.uses()?;
+        Ok(FnSig { comptime, name, type_params, params, ret, uses, span: self.since(start) })
+    }
+
+    fn params(&mut self, typed: bool) -> PResult<Vec<Param>> {
+        self.expect("(")?;
+        let mut params = Vec::new();
+        while !self.at(")") {
+            let comptime = self.eat_kw(Kw::Comptime);
+            let name = self.ident()?;
+            let ty = if self.eat(":") {
+                Some(self.ty()?)
+            } else if typed {
+                return self.error("`:` and a parameter type");
+            } else {
+                None
+            };
+            params.push(Param { comptime, name, ty });
+            if !self.eat(",") {
+                break;
+            }
+        }
+        self.expect(")")?;
+        Ok(params)
+    }
+
+    fn ret(&mut self) -> PResult<Return> {
+        let ty = self.ty()?;
+        let from = if self.eat_word("from") { Some(self.ident()?) } else { None };
+        Ok(Return { ty, from })
+    }
+
+    fn uses(&mut self) -> PResult<Option<Vec<RowItem>>> {
+        if !self.eat_kw(Kw::Uses) {
+            return Ok(None);
+        }
+        let mut row = vec![self.row_item()?];
+        // A comma continues the row unless it starts the next parameter (`, name:`).
+        while self.at(",") && self.row_continues() {
+            self.bump();
+            row.push(self.row_item()?);
+        }
+        Ok(Some(row))
+    }
+
+    fn row_continues(&self) -> bool {
+        match self.tok_at(1) {
+            Tok::Punct("...") => true,
+            Tok::Ident(_) => !matches!(self.tok_at(2), Tok::Punct(":")),
+            _ => false,
+        }
+    }
+
+    fn row_item(&mut self) -> PResult<RowItem> {
+        if self.eat("...") {
+            Ok(RowItem::Spread(self.ident()?))
+        } else {
+            let start = self.span();
+            let segments = self.path()?;
+            let args = self.type_args()?;
+            Ok(RowItem::Effect(Type { kind: TypeKind::Path { segments, args }, span: self.since(start) }))
+        }
+    }
+
+    fn type_params(&mut self) -> PResult<Vec<TypeParam>> {
+        if !self.eat("<") {
+            return Ok(Vec::new());
+        }
+        let mut params = Vec::new();
+        while !self.at(">") {
+            let param = if self.eat_kw(Kw::Region) {
+                let name = self.ident()?;
+                let default = if self.eat("=") { Some(self.ty()?) } else { None };
+                TypeParam::Region { name, default }
+            } else if self.at_word("row") && matches!(self.tok_at(1), Tok::Ident(_)) {
+                self.bump();
+                let name = self.ident()?;
+                let default = if self.eat("=") { Some(self.ty()?) } else { None };
+                TypeParam::Row { name, default }
+            } else if self.eat_kw(Kw::Comptime) {
+                let name = self.ident()?;
+                self.expect(":")?;
+                TypeParam::Comptime { name, ty: self.ty()? }
+            } else {
+                let name = self.ident()?;
+                let bounds = if self.eat_kw(Kw::Extends) { self.bounds()? } else { Vec::new() };
+                let default = if self.eat("=") { Some(self.ty()?) } else { None };
+                TypeParam::Type { name, bounds, default }
+            };
+            params.push(param);
+            if !self.eat(",") {
+                break;
+            }
+        }
+        self.expect(">")?;
+        Ok(params)
+    }
+
+    fn bounds(&mut self) -> PResult<Vec<Type>> {
+        let mut bounds = vec![self.ty_postfix()?];
+        while self.eat("&") {
+            bounds.push(self.ty_postfix()?);
+        }
+        Ok(bounds)
+    }
+
+    fn path(&mut self) -> PResult<Vec<Ident>> {
+        let mut segments = vec![self.ident()?];
+        while self.at(".") && matches!(self.tok_at(1), Tok::Ident(_)) {
+            self.bump();
+            segments.push(self.ident()?);
+        }
+        Ok(segments)
+    }
+
+    fn type_args(&mut self) -> PResult<Vec<Type>> {
+        if !self.eat("<") {
+            return Ok(Vec::new());
+        }
+        let mut args = Vec::new();
+        while !self.at(">") {
+            args.push(self.ty()?);
+            if !self.eat(",") {
+                break;
+            }
+        }
+        self.expect(">")?;
+        Ok(args)
+    }
+
+    // ---- types ----
+
+    fn ty(&mut self) -> PResult<Type> {
+        let start = self.span();
+        if self.at("|") || matches!(self.tok(), Tok::Tag(_)) {
+            return self.union_ty();
+        }
+        let kind = match self.tok() {
+            Tok::Kw(Kw::Mut) if self.at_n(1, "(") => {
+                self.bump();
+                return self.fn_ty(FnMode::Mut, start);
+            }
+            Tok::Kw(Kw::Once) => {
+                self.bump();
+                return self.fn_ty(FnMode::Once, start);
+            }
+            Tok::Kw(Kw::Mut) => {
+                self.bump();
+                TypeKind::Mut(Box::new(self.ty()?))
+            }
+            Tok::Kw(Kw::Readonly) => {
+                self.bump();
+                TypeKind::Readonly(Box::new(self.ty()?))
+            }
+            Tok::Punct("(") => return self.fn_ty(FnMode::Shared, start),
+            _ => return self.ty_postfix(),
+        };
+        Ok(Type { kind, span: self.since(start) })
+    }
+
+    fn fn_ty(&mut self, mode: FnMode, start: Span) -> PResult<Type> {
+        let params = self.params(false)?;
+        self.expect("=>")?;
+        let ret = Box::new(self.ret()?);
+        let uses = self.uses()?;
+        Ok(Type { kind: TypeKind::Fn { mode, params, ret, uses }, span: self.since(start) })
+    }
+
+    fn union_ty(&mut self) -> PResult<Type> {
+        let start = self.span();
+        self.eat("|");
+        let mut tags = Vec::new();
+        let mut rest = None;
+        loop {
+            if self.eat("...") {
+                rest = Some(self.ident()?);
+                break;
+            }
+            tags.push(self.tag_decl()?);
+            if !self.eat("|") {
+                break;
+            }
+        }
+        Ok(Type { kind: TypeKind::Union { tags, rest }, span: self.since(start) })
+    }
+
+    fn ty_postfix(&mut self) -> PResult<Type> {
+        let start = self.span();
+        let mut ty = self.ty_atom()?;
+        loop {
+            if self.at("[") {
+                self.bump();
+                let len = if self.at("]") { None } else { Some(Box::new(self.expr()?)) };
+                self.expect("]")?;
+                ty = Type { kind: TypeKind::Array { elem: Box::new(ty), len }, span: self.since(start) };
+            } else if self.at("*") {
+                self.bump();
+                ty = Type { kind: TypeKind::Ptr(Box::new(ty)), span: self.since(start) };
+            } else {
+                return Ok(ty);
+            }
+        }
+    }
+
+    fn ty_atom(&mut self) -> PResult<Type> {
+        let start = self.span();
+        let kind = match self.tok().clone() {
+            Tok::Punct("[") => {
+                self.bump();
+                if self.eat("]") {
+                    TypeKind::EmptyRow
+                } else {
+                    let mut tys = vec![self.ty()?];
+                    while self.eat(",") {
+                        if self.at("]") {
+                            break;
+                        }
+                        tys.push(self.ty()?);
+                    }
+                    self.expect("]")?;
+                    TypeKind::Tuple(tys)
+                }
+            }
+            Tok::Punct("{") => {
+                self.bump();
+                let mut fields = Vec::new();
+                let mut rest = None;
+                while !self.at("}") {
+                    if self.eat("...") {
+                        rest = Some(self.ident()?);
+                        self.eat(";");
+                        break;
+                    }
+                    let name = self.ident()?;
+                    self.expect(":")?;
+                    fields.push(Field { name, ty: self.ty()? });
+                    if !self.eat(";") && !self.eat(",") {
+                        break;
+                    }
+                }
+                self.expect("}")?;
+                TypeKind::Record { fields, rest }
+            }
+            Tok::Kw(Kw::Dyn) => {
+                self.bump();
+                TypeKind::Dyn(self.path()?)
+            }
+            Tok::Ident(_) => {
+                let segments = self.path()?;
+                if self.at("(") {
+                    self.bump();
+                    let mut args = Vec::new();
+                    while !self.at(")") {
+                        args.push(self.expr()?);
+                        if !self.eat(",") {
+                            break;
+                        }
+                    }
+                    self.expect(")")?;
+                    TypeKind::Call { path: segments, args }
+                } else {
+                    TypeKind::Path { segments, args: self.type_args()? }
+                }
+            }
+            Tok::Int(_) => TypeKind::Expr(Box::new(self.primary()?)),
+            _ => return self.error("a type"),
+        };
+        Ok(Type { kind, span: self.since(start) })
+    }
+
+    // ---- blocks and statements ----
+
+    fn block(&mut self) -> PResult<Block> {
+        let start = self.expect("{")?;
+        let mut stmts = Vec::new();
+        let mut tail = None;
+        while !self.at("}") {
+            if self.at_kw(Kw::Const) || self.at_kw(Kw::Let) {
+                let s = self.span();
+                let mutable = self.bump().tok == Tok::Kw(Kw::Let);
+                let pat = self.pattern_one()?;
+                let ty = if self.eat(":") { Some(self.ty()?) } else { None };
+                self.expect("=")?;
+                let init = self.expr()?;
+                self.expect(";")?;
+                stmts.push(Stmt::Let { mutable, pat, ty, init, span: self.since(s) });
+                continue;
+            }
+            if self.eat_kw(Kw::Defer) {
+                stmts.push(Stmt::Defer(self.expr()?));
+                self.expect(";")?;
+                continue;
+            }
+            let block_like = self.at_block_like();
+            let e = if block_like { self.block_like()? } else { self.expr()? };
+            if self.eat(";") {
+                stmts.push(Stmt::Expr(e));
+            } else if self.at("}") {
+                tail = Some(Box::new(e));
+            } else if block_like {
+                stmts.push(Stmt::Expr(e));
+            } else {
+                return self.error("`;` or `}`");
+            }
+        }
+        self.expect("}")?;
+        Ok(Block { stmts, tail, span: self.since(start) })
+    }
+
+    fn at_block_like(&self) -> bool {
+        matches!(
+            self.tok(),
+            Tok::Kw(Kw::If | Kw::While | Kw::For | Kw::Match | Kw::Try | Kw::Region | Kw::Handle | Kw::Unsafe)
+                | Tok::Punct("{")
+        )
+    }
+
+    /// A block-like expression in statement position: it is not continued by operators.
+    fn block_like(&mut self) -> PResult<Expr> {
+        if self.at("{") {
+            let b = self.block()?;
+            let span = b.span;
+            return Ok(Expr { kind: ExprKind::Block(b), span });
+        }
+        self.primary()
+    }
+
+    // ---- expressions ----
+
+    fn expr(&mut self) -> PResult<Expr> {
+        let start = self.span();
+        let lhs = self.range()?;
+        for op in ASSIGN {
+            if self.at(op) {
+                self.bump();
+                let value = self.expr()?;
+                return Ok(Expr {
+                    kind: ExprKind::Assign { op, target: Box::new(lhs), value: Box::new(value) },
+                    span: self.since(start),
+                });
+            }
+        }
+        Ok(lhs)
+    }
+
+    fn range(&mut self) -> PResult<Expr> {
+        let start = self.span();
+        let lo = if self.at("..") { None } else { Some(Box::new(self.binary(0)?)) };
+        if !self.eat("..") {
+            return Ok(*lo.expect("a non-range expression has a left operand"));
+        }
+        let hi = if matches!(self.tok(), Tok::Punct("]" | ")" | "," | ";" | "}")) {
+            None
+        } else {
+            Some(Box::new(self.binary(0)?))
+        };
+        Ok(Expr { kind: ExprKind::Range { lo, hi }, span: self.since(start) })
+    }
+
+    fn binary_op(&self, level: usize) -> Option<(&'static str, usize)> {
+        for &op in BINARY[level] {
+            match op {
+                "<<" if self.adjacent("<", "<") => return Some(("<<", 2)),
+                ">>" if self.adjacent(">", ">") => return Some((">>", 2)),
+                "<" | ">" if self.adjacent(op, op) => continue,
+                _ if self.at(op) => return Some((op, 1)),
+                _ => {}
+            }
+        }
+        None
+    }
+
+    fn binary(&mut self, level: usize) -> PResult<Expr> {
+        if level == BINARY.len() {
+            return self.cast();
+        }
+        let start = self.span();
+        let mut lhs = self.binary(level + 1)?;
+        while let Some((op, width)) = self.binary_op(level) {
+            for _ in 0..width {
+                self.bump();
+            }
+            let rhs = self.binary(level + 1)?;
+            lhs = Expr {
+                kind: ExprKind::Binary { op, lhs: Box::new(lhs), rhs: Box::new(rhs) },
+                span: self.since(start),
+            };
+        }
+        Ok(lhs)
+    }
+
+    fn cast(&mut self) -> PResult<Expr> {
+        let start = self.span();
+        let mut e = self.unary()?;
+        while self.eat_kw(Kw::As) {
+            let ty = self.ty_postfix()?;
+            e = Expr { kind: ExprKind::Cast { expr: Box::new(e), ty }, span: self.since(start) };
+        }
+        Ok(e)
+    }
+
+    fn unary(&mut self) -> PResult<Expr> {
+        let start = self.span();
+        let kind = match self.tok() {
+            Tok::Punct(op @ ("!" | "-" | "~")) => {
+                let op = *op;
+                self.bump();
+                ExprKind::Unary { op, operand: Box::new(self.unary()?) }
+            }
+            Tok::Kw(Kw::Mut) => {
+                self.bump();
+                ExprKind::BorrowMut(Box::new(self.unary()?))
+            }
+            Tok::Kw(Kw::Throw) => {
+                self.bump();
+                ExprKind::Throw(Box::new(self.expr()?))
+            }
+            Tok::Kw(Kw::Yield) => {
+                self.bump();
+                ExprKind::Yield(Box::new(self.expr()?))
+            }
+            Tok::Kw(Kw::Comptime) => {
+                self.bump();
+                ExprKind::Comptime(Box::new(self.expr()?))
+            }
+            Tok::Kw(Kw::Return) => {
+                self.bump();
+                let value = if matches!(self.tok(), Tok::Punct(";" | "}" | "," | ")")) {
+                    None
+                } else {
+                    Some(Box::new(self.expr()?))
+                };
+                ExprKind::Return(value)
+            }
+            _ => return self.postfix(),
+        };
+        Ok(Expr { kind, span: self.since(start) })
+    }
+
+    fn postfix(&mut self) -> PResult<Expr> {
+        let start = self.span();
+        let mut e = self.primary()?;
+        loop {
+            if self.at(".") {
+                self.bump();
+                let name = self.member_name()?;
+                e = Expr { kind: ExprKind::Field { target: Box::new(e), name }, span: self.since(start) };
+            } else if self.at("(") {
+                let args = self.args()?;
+                e = Expr {
+                    kind: ExprKind::Call { callee: Box::new(e), type_args: Vec::new(), args },
+                    span: self.since(start),
+                };
+            } else if self.at("[") {
+                self.bump();
+                let index = self.expr()?;
+                self.expect("]")?;
+                e = Expr {
+                    kind: ExprKind::Index { target: Box::new(e), index: Box::new(index) },
+                    span: self.since(start),
+                };
+            } else if self.at("<") && matches!(e.kind, ExprKind::Ident(_) | ExprKind::Field { .. }) {
+                // TypeScript's rule: `f<…>(` is a generic call when the `<…>` parses as type
+                // arguments and is followed directly by `(`; otherwise `<` is less-than.
+                let Some(type_args) = self.attempt(|p| {
+                    let args = p.type_args()?;
+                    if p.at("(") { Ok(args) } else { p.error("`(`") }
+                }) else {
+                    return Ok(e);
+                };
+                let args = self.args()?;
+                e = Expr {
+                    kind: ExprKind::Call { callee: Box::new(e), type_args, args },
+                    span: self.since(start),
+                };
+            } else {
+                return Ok(e);
+            }
+        }
+    }
+
+    fn args(&mut self) -> PResult<Vec<Expr>> {
+        self.expect("(")?;
+        let mut args = Vec::new();
+        while !self.at(")") {
+            args.push(self.expr()?);
+            if !self.eat(",") {
+                break;
+            }
+        }
+        self.expect(")")?;
+        Ok(args)
+    }
+
+    fn is_lambda(&self) -> bool {
+        self.matching_close().is_some_and(|close| matches!(self.toks[(close + 1).min(self.toks.len() - 1)].tok, Tok::Punct("=>")))
+    }
+
+    fn primary(&mut self) -> PResult<Expr> {
+        let start = self.span();
+        let kind = match self.tok().clone() {
+            Tok::Int(s) => {
+                self.bump();
+                ExprKind::Int(s)
+            }
+            Tok::Float(s) => {
+                self.bump();
+                ExprKind::Float(s)
+            }
+            Tok::Byte(b) => {
+                self.bump();
+                ExprKind::Byte(b)
+            }
+            Tok::Str(s) => {
+                self.bump();
+                ExprKind::Str(s)
+            }
+            Tok::Template(parts) => {
+                self.bump();
+                ExprKind::Template(self.template(parts)?)
+            }
+            Tok::Kw(Kw::True) => {
+                self.bump();
+                ExprKind::Bool(true)
+            }
+            Tok::Kw(Kw::False) => {
+                self.bump();
+                ExprKind::Bool(false)
+            }
+            Tok::Kw(Kw::Break) => {
+                self.bump();
+                ExprKind::Break
+            }
+            Tok::Kw(Kw::Continue) => {
+                self.bump();
+                ExprKind::Continue
+            }
+            Tok::Tag(name) => {
+                self.bump();
+                let args = if self.at("(") {
+                    TagArgs::Tuple(self.args()?)
+                } else if self.at("{") {
+                    TagArgs::Record(self.field_inits()?)
+                } else {
+                    TagArgs::None
+                };
+                ExprKind::Tag { name, args }
+            }
+            Tok::Ident(name) => {
+                // `Name { … }` is a struct literal; blocks never follow an expression directly.
+                if name.starts_with(|c: char| c.is_uppercase()) && self.at_n(1, "{") {
+                    let ident = self.ident()?;
+                    let fields = self.field_inits()?;
+                    ExprKind::Record { name: Some(vec![ident]), fields }
+                } else {
+                    self.bump();
+                    ExprKind::Ident(name)
+                }
+            }
+            Tok::Punct("(") if self.is_lambda() => {
+                let params = self.params(false)?;
+                self.expect("=>")?;
+                let body = if self.at("{") {
+                    let b = self.block()?;
+                    let span = b.span;
+                    Expr { kind: ExprKind::Block(b), span }
+                } else {
+                    self.expr()?
+                };
+                ExprKind::Lambda { params, body: Box::new(body) }
+            }
+            Tok::Punct("(") => {
+                self.bump();
+                let e = self.expr()?;
+                self.expect(")")?;
+                return Ok(e);
+            }
+            Tok::Punct("[") => {
+                self.bump();
+                let mut items = Vec::new();
+                while !self.at("]") {
+                    items.push(self.expr()?);
+                    if !self.eat(",") {
+                        break;
+                    }
+                }
+                self.expect("]")?;
+                ExprKind::List(items)
+            }
+            Tok::Punct("{") => ExprKind::Record { name: None, fields: self.field_inits()? },
+            Tok::Kw(Kw::Struct) => {
+                self.bump();
+                ExprKind::StructType(self.field_list()?)
+            }
+            Tok::Kw(Kw::If) => self.if_expr()?,
+            Tok::Kw(Kw::While) => {
+                self.bump();
+                let cond = self.paren_expr()?;
+                ExprKind::While { cond: Box::new(cond), body: self.block()? }
+            }
+            Tok::Kw(Kw::For) => {
+                self.bump();
+                self.expect("(")?;
+                let mutable = match self.tok() {
+                    Tok::Kw(Kw::Const) => false,
+                    Tok::Kw(Kw::Let) => true,
+                    _ => return self.error("`const` or `let`"),
+                };
+                self.bump();
+                let pat = self.pattern_one()?;
+                self.expect_word("of")?;
+                let iter = self.expr()?;
+                self.expect(")")?;
+                ExprKind::For { mutable, pat, iter: Box::new(iter), body: self.block()? }
+            }
+            Tok::Kw(Kw::Match) => {
+                self.bump();
+                let scrutinee = self.paren_expr()?;
+                self.expect("{")?;
+                let mut arms = Vec::new();
+                while !self.at("}") {
+                    let pat = self.pattern()?;
+                    let guard = if self.eat_kw(Kw::If) { Some(self.expr()?) } else { None };
+                    self.expect("=>")?;
+                    if self.at("{") {
+                        let b = self.block()?;
+                        let span = b.span;
+                        arms.push(MatchArm { pat, guard, body: Expr { kind: ExprKind::Block(b), span } });
+                        self.eat(",");
+                    } else {
+                        arms.push(MatchArm { pat, guard, body: self.expr()? });
+                        if !self.eat(",") {
+                            break;
+                        }
+                    }
+                }
+                self.expect("}")?;
+                ExprKind::Match { scrutinee: Box::new(scrutinee), arms }
+            }
+            Tok::Kw(Kw::Try) => {
+                self.bump();
+                let body = self.block()?;
+                self.expect_kw(Kw::Catch)?;
+                self.expect("(")?;
+                let pat = self.pattern()?;
+                self.expect(")")?;
+                ExprKind::Try { body, pat, handler: self.block()? }
+            }
+            Tok::Kw(Kw::Region) => {
+                self.bump();
+                self.expect("(")?;
+                let name = self.ident()?;
+                self.expect(")")?;
+                ExprKind::Region { name, body: self.block()? }
+            }
+            Tok::Kw(Kw::Handle) => {
+                self.bump();
+                let body = self.block()?;
+                self.expect_word("with")?;
+                let effect = self.ty_postfix()?;
+                self.expect("{")?;
+                let mut arms = Vec::new();
+                while !self.at("}") {
+                    let op = self.member_name()?;
+                    self.expect("(")?;
+                    let mut params = Vec::new();
+                    while !self.at(")") {
+                        params.push(self.ident()?);
+                        if !self.eat(",") {
+                            break;
+                        }
+                    }
+                    self.expect(")")?;
+                    let resumes = if self.eat_word("resumes") { Some(self.ident()?) } else { None };
+                    self.expect("=>")?;
+                    arms.push(HandlerArm { op, params, resumes, body: self.block()? });
+                    self.eat(",");
+                }
+                self.expect("}")?;
+                ExprKind::Handle { body, effect, arms }
+            }
+            Tok::Kw(Kw::Unsafe) => {
+                self.bump();
+                ExprKind::Unsafe(self.block()?)
+            }
+            _ => return self.error("an expression"),
+        };
+        Ok(Expr { kind, span: self.since(start) })
+    }
+
+    fn paren_expr(&mut self) -> PResult<Expr> {
+        self.expect("(")?;
+        let e = self.expr()?;
+        self.expect(")")?;
+        Ok(e)
+    }
+
+    fn if_expr(&mut self) -> PResult<ExprKind> {
+        self.expect_kw(Kw::If)?;
+        let cond = self.paren_expr()?;
+        let then = self.block()?;
+        let otherwise = if self.eat_kw(Kw::Else) {
+            let start = self.span();
+            let e = if self.at_kw(Kw::If) {
+                let kind = self.if_expr()?;
+                Expr { kind, span: self.since(start) }
+            } else {
+                let b = self.block()?;
+                let span = b.span;
+                Expr { kind: ExprKind::Block(b), span }
+            };
+            Some(Box::new(e))
+        } else {
+            None
+        };
+        Ok(ExprKind::If { cond: Box::new(cond), then, otherwise })
+    }
+
+    fn field_inits(&mut self) -> PResult<Vec<FieldInit>> {
+        self.expect("{")?;
+        let mut fields = Vec::new();
+        while !self.at("}") {
+            let name = self.member_name()?;
+            let value = if self.eat(":") { Some(self.expr()?) } else { None };
+            fields.push(FieldInit { name, value });
+            if !self.eat(",") {
+                break;
+            }
+        }
+        self.expect("}")?;
+        Ok(fields)
+    }
+
+    fn template(&mut self, parts: Vec<TemplatePart>) -> PResult<Vec<TemplatePiece>> {
+        parts
+            .into_iter()
+            .map(|part| match part {
+                TemplatePart::Lit(s) => Ok(TemplatePiece::Lit(s)),
+                TemplatePart::Expr(span) => {
+                    let mut sub = Parser::new(self.src, lex_range(self.src, span.start, span.end)?);
+                    let e = sub.expr()?;
+                    sub.expect_eof()?;
+                    Ok(TemplatePiece::Expr(e))
+                }
+            })
+            .collect()
+    }
+
+    // ---- patterns ----
+
+    fn pattern(&mut self) -> PResult<Pattern> {
+        let start = self.span();
+        let first = self.pattern_one()?;
+        if !self.at("|") {
+            return Ok(first);
+        }
+        let mut alts = vec![first];
+        while self.eat("|") {
+            alts.push(self.pattern_one()?);
+        }
+        Ok(Pattern { kind: PatternKind::Or(alts), span: self.since(start) })
+    }
+
+    fn pattern_one(&mut self) -> PResult<Pattern> {
+        let start = self.span();
+        let kind = match self.tok().clone() {
+            Tok::Ident(name) if name == "_" => {
+                self.bump();
+                PatternKind::Wild
+            }
+            Tok::Ident(name) if name.starts_with(|c: char| c.is_uppercase()) && self.at_n(1, "{") => {
+                let ident = self.ident()?;
+                PatternKind::Record { name: Some(vec![ident]), fields: self.field_pats()? }
+            }
+            Tok::Ident(name) => {
+                self.bump();
+                PatternKind::Bind(name)
+            }
+            Tok::Tag(name) => {
+                self.bump();
+                let args = if self.at("(") {
+                    self.bump();
+                    let mut pats = Vec::new();
+                    while !self.at(")") {
+                        pats.push(self.pattern()?);
+                        if !self.eat(",") {
+                            break;
+                        }
+                    }
+                    self.expect(")")?;
+                    TagPatArgs::Tuple(pats)
+                } else if self.at("{") {
+                    TagPatArgs::Record(self.field_pats()?)
+                } else {
+                    TagPatArgs::None
+                };
+                PatternKind::Tag { name, args }
+            }
+            Tok::Punct("[") => {
+                self.bump();
+                let mut pats = Vec::new();
+                while !self.at("]") {
+                    pats.push(self.pattern()?);
+                    if !self.eat(",") {
+                        break;
+                    }
+                }
+                self.expect("]")?;
+                PatternKind::Tuple(pats)
+            }
+            Tok::Punct("{") => PatternKind::Record { name: None, fields: self.field_pats()? },
+            Tok::Int(_) | Tok::Float(_) | Tok::Byte(_) | Tok::Str(_) | Tok::Kw(Kw::True | Kw::False) => {
+                PatternKind::Lit(Box::new(self.primary()?))
+            }
+            Tok::Punct("-") => PatternKind::Lit(Box::new(self.unary()?)),
+            _ => return self.error("a pattern"),
+        };
+        Ok(Pattern { kind, span: self.since(start) })
+    }
+
+    fn field_pats(&mut self) -> PResult<Vec<(Ident, Option<Pattern>)>> {
+        self.expect("{")?;
+        let mut fields = Vec::new();
+        while !self.at("}") {
+            let name = self.ident()?;
+            let pat = if self.eat(":") { Some(self.pattern()?) } else { None };
+            fields.push((name, pat));
+            if !self.eat(",") {
+                break;
+            }
+        }
+        self.expect("}")?;
+        Ok(fields)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn kind(src: &str) -> ExprKind {
+        parse_expr(src).unwrap_or_else(|d| panic!("{}", d.render("test", src))).kind
+    }
+
+    #[test]
+    fn generic_call_versus_comparison() {
+        assert!(matches!(kind("HashMap.new<String, u64>()"), ExprKind::Call { type_args, .. } if type_args.len() == 2));
+        assert!(matches!(kind("x < 0 || y > 0"), ExprKind::Binary { op: "||", .. }));
+        assert!(matches!(kind("a < b > (c)"), ExprKind::Call { .. }));
+    }
+
+    #[test]
+    fn shifts_are_adjacent_angle_brackets() {
+        assert!(matches!(kind("a >> 2"), ExprKind::Binary { op: ">>", .. }));
+        assert!(matches!(kind("a > b"), ExprKind::Binary { op: ">", .. }));
+    }
+
+    #[test]
+    fn lambdas_records_and_tags() {
+        assert!(matches!(kind("(p, _) => p.x"), ExprKind::Lambda { .. }));
+        assert!(matches!(kind("(a + b)"), ExprKind::Binary { op: "+", .. }));
+        assert!(matches!(kind("{ x, y: 2 }"), ExprKind::Record { name: None, .. }));
+        assert!(matches!(kind("#Get { key, reply }"), ExprKind::Tag { args: TagArgs::Record(_), .. }));
+        assert!(matches!(kind("Decl { name, ty: Cell.new(0) }"), ExprKind::Record { name: Some(_), .. }));
+    }
+
+    #[test]
+    fn ranges_inside_index() {
+        assert!(matches!(kind("raw[0..8]"), ExprKind::Index { .. }));
+        assert!(matches!(kind("buf[..n]"), ExprKind::Index { .. }));
+    }
+
+    #[test]
+    fn reserved_words_as_member_names() {
+        let src = "effect Yield<T> { yield(item: T): void; }";
+        parse_module(src).unwrap_or_else(|d| panic!("{}", d.render("test", src)));
+        assert!(matches!(kind("Yield.yield(x)"), ExprKind::Call { .. }));
+        assert!(matches!(kind("{ default: 1 }"), ExprKind::Record { .. }));
+    }
+
+    #[test]
+    fn type_rows_stop_at_the_next_parameter() {
+        let src = "function zip<A, row E>(a: once () => void uses Yield<A>, ...E, b: i32): void uses ...E {}";
+        let m = parse_module(src).unwrap_or_else(|d| panic!("{}", d.render("test", src)));
+        let ItemKind::Function(f) = &m.items[0].kind else { panic!() };
+        assert_eq!(f.sig.params.len(), 2);
+    }
+}

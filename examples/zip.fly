@@ -1,0 +1,21 @@
+import { generate } from "std/iter";
+
+export function zip<A, B, row E>(
+  a: once () => void uses Yield<A>, ...E,
+  b: once () => void uses Yield<B>, ...E,
+): void uses Yield<[A, B]>, ...E {
+  let ga = generate(a);
+  let gb = generate(b);
+  while (true) {
+    match ([ga.next(), gb.next()]) {
+      [#Some(x), #Some(y)] => yield [x, y],
+      _ => break,
+    }
+  }
+}
+
+export function dot(xs: readonly f64[], ys: readonly f64[]): f64 {
+  let total = 0.0;
+  for (const [x, y] of zip(() => xs.each(), () => ys.each())) { total += x * y; }
+  total
+}

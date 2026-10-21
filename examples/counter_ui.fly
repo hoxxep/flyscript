@@ -1,0 +1,24 @@
+export type Msg = #Inc | #Dec | #Reset;
+export type Model = { count: i32; clicks: u32 };
+
+export effect Dom<M> {
+  el(tag: str, attrs: readonly { key: str; val: str }[], children: () => void uses Dom<M>): void;
+  text(s: str): void;
+  onClick(m: M): void;
+}
+
+export function update(m: mut Model, msg: Msg): void {
+  m.clicks += 1;
+  match (msg) { #Inc => m.count += 1, #Dec => m.count -= 1, #Reset => m.count = 0 }
+}
+
+export function view(m: readonly Model): void uses Dom<Msg> {
+  region (R) {
+    const label = fmt(`Count: ${m.count} (${m.clicks} clicks)`);
+    Dom.el("div", [{ key: "class", val: "card" }], () => {
+      Dom.el("h1", [], () => Dom.text(label));
+      Dom.el("button", [], () => { Dom.onClick(#Dec); Dom.text("−"); });
+      Dom.el("button", [], () => { Dom.onClick(#Inc); Dom.text("+"); });
+    });
+  }
+}

@@ -1,0 +1,10 @@
+import { Listener, Db } from "std/net";
+import { serveOne } from "./handler";
+
+export function serve(listener: mut Listener, db: readonly Db): void uses Io, Fail<IoErr> {
+  Io.scope((s) => {
+    for (const conn of listener.accept()) {
+      s.spawn(() => serveOne(conn, db));
+    }
+  });
+}

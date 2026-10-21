@@ -1,0 +1,22 @@
+import { RegionList, Cell } from "std/region";
+
+export struct Decl<region R> { name: Ref<str>; ty: Cell<u32>; visiting: Cell<bool>; }
+export struct Scope<region R> {
+  parent: Option<Ref<Scope>>;
+  names: Ref<RegionList<{ name: Ref<str>; decl: Ref<Decl> }>>;
+}
+
+impl<region R> Scope<R> {
+  export function new(parent: Option<Ref<Scope>>): Ref<Scope> uses Region<R> {
+    alloc({ parent, names: RegionList.new() })
+  }
+  export function define(self: Ref<Self>, name: Ref<str>): Ref<Decl> uses Region<R> {
+    const d = alloc(Decl { name, ty: Cell.new(0), visiting: Cell.new(false) });
+    self.names.push({ name, decl: d });
+    d
+  }
+  export function lookup(self: Ref<Self>, name: str): Option<Ref<Decl>> {   // pure
+    for (const b of self.names.each()) { if (b.name == name) { return #Some(b.decl); } }
+    match (self.parent) { #Some(p) => p.lookup(name), #None => #None }
+  }
+}

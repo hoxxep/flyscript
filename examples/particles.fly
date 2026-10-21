@@ -1,0 +1,15 @@
+import { par, parReduce } from "std/par";
+import { Soa } from "std/layout";
+
+struct Vec2 { x: f32; y: f32; }
+struct Particle { pos: Vec2; vel: Vec2; mass: f32; }
+
+export function step(ps: mut Soa<Particle>, dt: f32): f32 {
+  par(mut ps, (p, _) => {
+    p.pos.x += p.vel.x * dt;
+    p.pos.y += p.vel.y * dt;
+  });
+  parReduce(ps, 0.0,
+    (p, _) => 0.5 * p.mass * (p.vel.x * p.vel.x + p.vel.y * p.vel.y),
+    (a, b) => a + b)
+}

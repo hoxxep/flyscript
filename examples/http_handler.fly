@@ -1,0 +1,36 @@
+import { Socket, Db } from "std/net";
+
+struct Request<region R> { user: Ref<str>; token: Ref<str>; }
+
+function parse<region R>(raw: readonly u8[]): Ref<Request> uses Region<R>, Fail<#Malformed | #MalformedUtf8> {
+  if (raw.len < 16) { throw #Malformed; }
+  alloc({ user: copyUtf8(raw[0..8]), token: copyUtf8(raw[8..16]) })
+}
+
+export function serveOne(conn: Socket, db: readonly Db): void uses Io {
+  try {
+    region (R) {
+      let buf: u8[512] = repeat(0);
+      const n = conn.read(mut buf);
+      const req = parse(buf[0..n]);
+
+      // Two concurrent lookups. `req` is immutable region data and `db` a shared
+      // borrow, so both tasks may read them; a failure in either cancels the other.
+      const [profile, quota] = Io.scope((s) => {
+        const p = s.spawn(() => db.fetchProfile(req.user));
+        const q = s.spawn(() => db.checkQuota(req.token));
+        [p.join(), q.join()]
+      });
+
+      if (!quota.allowed) { throw #Unauthorized; }
+      conn.writeStatus(200, profile.displayName);
+    }
+  } catch (e) {
+    const code: u16 = match (e) {
+      #Malformed | #MalformedUtf8 => 400,
+      #Unauthorized               => 401,
+      _                           => 502,
+    };
+    try { conn.writeStatus(code, "error"); } catch (_) {}
+  }
+}

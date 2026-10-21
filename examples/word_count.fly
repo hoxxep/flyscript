@@ -1,0 +1,24 @@
+import { File, stdout } from "std/io";
+import { HashMap } from "std/collections";
+
+function words(line: str): void uses Yield<str> {
+  for (const w of line.splitWhitespace()) { yield w; }
+}
+
+export function main(args: readonly String[]): void uses Io {
+  let counts = HashMap.new<String, u64>();
+  for (const path of args) {
+    try {
+      let f = File.open(path);
+      for (const line of f.lines()) {
+        for (const w of words(line)) {
+          match (counts.getMut(w)) {
+            #Some(n) => { n += 1; },
+            #None    => { counts.insert(w.toString(), 1); },
+          }
+        }
+      }
+    } catch (e) { stdout.println(`${path}: ${e}`); }
+  }
+  for (const [w, n] of counts.sortedByValue()) { stdout.println(`${n} ${w}`); }
+}

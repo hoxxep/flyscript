@@ -1,0 +1,28 @@
+import { RegionList } from "std/region";
+
+export enum Json<region R> {
+  #Null, #Bool(bool), #Num(f64), #Str(Ref<str>),
+  #Arr(Ref<RegionList<Ref<Json>>>),
+  #Obj(Ref<RegionList<{ key: Ref<str>; val: Ref<Json> }>>),
+}
+
+struct Scanner { src: readonly u8[]; pos: usize; }      // class 2: holds a borrow
+
+type JsonErr = #Eof | #Unexpected(usize) | #MalformedUtf8;
+
+function value<region R>(sc: mut Scanner): Ref<Json> uses Region<R>, Fail<JsonErr> {
+  sc.skipSpace();
+  if (sc.pos >= sc.src.len) { throw #Eof; }
+  match (sc.src[sc.pos]) {
+    b'n' => { sc.expect("null"); alloc(#Null) },
+    b't' => { sc.expect("true"); alloc(#Bool(true)) },
+    b'"' => alloc(#Str(copyUtf8(sc.quoted()))),
+    b'[' => {
+      sc.pos += 1;
+      const items = RegionList.new();
+      while (!sc.eat(b']')) { items.push(value(mut sc)); sc.eat(b','); }
+      alloc(#Arr(items))
+    },
+    _ => throw #Unexpected(sc.pos),
+  }
+}
