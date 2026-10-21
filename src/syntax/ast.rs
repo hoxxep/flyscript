@@ -213,7 +213,8 @@ pub enum TypeKind {
     /// A primitive, a named type, a type parameter or an associated type (`C.View`).
     Path { segments: Vec<Ident>, args: Vec<Type> },
     Record { fields: Vec<Field>, rest: Option<Ident> },
-    Union { tags: Vec<TagDecl>, rest: Option<Ident> },
+    /// Tags, named unions whose tags it includes (`JsonError | #Port(u16)`), and a row tail.
+    Union { tags: Vec<TagDecl>, includes: Vec<Type>, rest: Option<Ident> },
     Tuple(Vec<Type>),
     /// `[]`: the empty row, used as a row default.
     EmptyRow,

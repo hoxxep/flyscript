@@ -1,6 +1,6 @@
 # Flyscript
 
-**Language specification, version 0.40**
+**Language specification, version 0.41**
 
 *Affine values, one row calculus, handlers for everything, and `comptime`: Church on the outside, Turing on the inside.*
 
@@ -18,16 +18,15 @@ The whole language rests on five laws. Every rule in this document is a conseque
 4. **Handlers for everything.** Errors, I/O, iteration and region memory are ordinary effects with ordinary handlers. A handler may hold the rest of a computation as a one-shot continuation value; generators and tasks are both built from that one primitive.
 5. **`comptime` is the metalanguage.** Generics, reflection, layout transformation and derived interfaces are ordinary Flyscript code run by the compiler.
 
-### 0.1 Changes from 0.39
+### 0.1 Changes from 0.40
 
-0.40 comes from three programs — a todo list, text statistics, bank transfers across tasks — written from the specification alone by a reader who knew only TypeScript, then run through the prototype. One checked as written; the others stopped where the specification was silent or the language got in the way. Earlier changes are in [docs/history](history/).
+0.41 comes from a second round of programs written from the specification alone — a JSON config loader, a generic min-heap, an event-sourced account over injected effects — and makes self-hosting a goal. Earlier changes are in [docs/history](history/).
 
 | Change | Why |
 | :--- | :--- |
-| A closure's parameter may take its argument apart, as in TypeScript: `entries().map(([k, v]) => …)`, `({ name }) => name` (§2.3, §4.3) | the first thing the text-statistics program wrote, and it did not parse |
-| A tag whose payload is `void` is written bare: `#Ok` is the success of a `Result<void, E>` (§3.2) | the bank program wrote `#Ok(())`, there being nothing else to write, and `#Ok` did not fit `#Ok(T)` with `T = void` |
-| `Vec` has `insert`, `remove` and `retain` (TypeScript's `filter`, in place); `str` has `lines()`; `HashMap` lists `sortedByValue` (§3.1) | removing a todo by id needed a drained copy of the list |
-| Tasks borrow a `Mutex` declared outside their scope directly; an `Arc` is for sharing beyond the scope's lexical reach. The prelude holds `Arc`; `std/sync` holds `Mutex` and channels, and importing a prelude name says so (§6.2) | §6.2 told every task to clone an `Arc` it did not need, and nothing said where `Arc` lived |
+| A compiler for Flyscript, written in Flyscript, is a goal the language is judged by (§1) | a compiler is the canonical stress test of a systems language: recursive trees, cyclic graphs, union-find tables, string-keyed maps, heavy matching, precise diagnostics |
+| A union may include named unions: `Fail<JsonError \| #PrivilegedPort(u16)>` (§2.3, §3.2) | how a TypeScript programmer composes failures, and what §3.2's composition by union promises |
+| A matched place is moved only by the arms that take an owned part of it (§4.1) | `match (e) { #PrivilegedPort(p) => …, _ => println(`${e}`) }` was rejected: binding in one arm moved `e` for all |
 
 
 ---
@@ -41,6 +40,7 @@ The whole language rests on five laws. Every rule in this document is a conseque
 3. Safety without annotation burden: no lifetime parameters, no `async` colouring, no checked-exception boilerplate.
 4. Testability by construction: because I/O is an effect, any program can run under a deterministic simulator.
 5. A small core: features are library code over the core wherever possible.
+6. Self-hosting: Flyscript is a language its own compiler is written well in. A compiler is the hardest ordinary program — recursive trees, cyclic graphs of scopes and type variables, union-find over mutable tables, maps keyed by strings, deep matching, diagnostics that point at source — so a feature that makes it awkward is a defect of the language, not of the compiler.
 
 **Non-goals**
 
@@ -125,7 +125,8 @@ FieldName   = Ident | "[" Expr "]" ;                       (* computed by compti
 Generate(X) = "comptime" "for" "(" "const" Pattern "of" Expr ")" "{" { X } "}"
             | "comptime" "if" "(" Expr ")" "{" { X } "}" [ "else" "{" { X } "}" ]
             | "comptime" "match" "(" Expr ")" "{" { Pattern "=>" "{" { X } "}" [ "," ] } "}" ;
-Union       = Tag { "|" Tag } [ "|" "..." Ident ] ;
+Union       = Member { "|" Member } [ "|" "..." Ident ] ;
+Member      = Tag | Path [ TypeArgs ] ;                (* a named closed union, whose tags it includes *)
 Tag         = "#" Ident [ "(" Type { "," Type } ")" | Record ] ;
 Tuple       = "[" Type { "," Type } "]" ;
 Fn          = [ "mut" | "once" ] "(" [ Params ] ")" "=>" Return [ Uses ] ;
@@ -197,7 +198,7 @@ Indexing an array, a slice or a `Vec` (`xs[i]`) is a place of the element type, 
 A *row* is a finite map from labels to types, optionally ending in a row variable. Flyscript has three kinds of row, all solved by one Rémy-style unifier over label-sorted rows. They differ only in what a label is and in what happens when a label appears twice:
 
 - **Records**: `{ x: f64; y: f64; ...R }`. A label is a field name and appears at most once; extending a row requires that its tail lack the label. Physical layout is canonical (by alignment, then name), so equal record types have equal layouts.
-- **Tag unions**: `#Some(T) | #None`, `#Get { key: String } | #Put { key: String; val: String } | ...R`. A label is a tag; payloads are a tuple `(…)` or a record `{…}`, and a tag without one is written bare — including where the payload type is `void`, so `#Ok` is the success of a `Result<void, E>`. Tags need no declaration. Two unions are joined by merging their tags, unifying the payloads of a tag present in both. Whatever its shape, `#A(x)` builds or binds a payload whole: `#Add(pair)` where `pair: [Expr, Expr]`, `#Get(req)` where `req: { key: String }`. Code that is generated per tag (§7.2) relies on it.
+- **Tag unions**: `#Some(T) | #None`, `#Get { key: String } | #Put { key: String; val: String } | ...R`. A label is a tag; payloads are a tuple `(…)` or a record `{…}`, and a tag without one is written bare — including where the payload type is `void`, so `#Ok` is the success of a `Result<void, E>`. Tags need no declaration. Two unions are joined by merging their tags, unifying the payloads of a tag present in both; a union type may name another to include its tags, `JsonError | #PrivilegedPort(u16)`. Whatever its shape, `#A(x)` builds or binds a payload whole: `#Add(pair)` where `pair: [Expr, Expr]`, `#Get(req)` where `req: { key: String }`. Code that is generated per tag (§7.2) relies on it.
 - **Effect rows**: `uses Io, Fail<E>, Region<R>, ...R`. A label is an effect name together with its **region arguments**: `Region<R1>` and `Region<R2>` are different labels and may share a row. An effect's other type arguments are **determined by its label**, so a row holds one `Fail` and one `Yield`, and wherever two rows meet, their `Fail` payloads unify. Effect rows are sets: extending a row with a label it already contains is the identity, so `uses Io, ...E` is well formed whether or not `E` contains `Io`.
 
 Determined arguments are what make error sets compose. A block that calls `conn.read` (`Fail<IoErr | ...ρ1>`) and `parse` (`Fail<#Malformed | ...ρ2>`) has one `Fail` whose payload is the merged union `IoErr | #Malformed | ...ρ3`; no conversion code is involved.
@@ -303,6 +304,8 @@ Borrows are **transparent**: a borrow binding reads and writes as the value it r
 `readonly T` is `Copy`; `mut T` is not. Passing a binding of type `mut T` where a `mut` borrow is expected **reborrows** it: the binding is locked until the new borrow ends, and usable again afterwards, so `value(mut sc); sc.eat(b',')` is legal. Read where an owned value is expected, a borrow gives a copy of what it refers to, which must be `Copy`; and a `mut T` field read through a `readonly` borrow is `readonly T`.
 
 A value that is borrowed without having a place — a call's result, a template string, a literal lent as `str` — is stored in an anonymous local of the enclosing block, dropped when the block ends. So ``stringify(#Rejected { reason: `missing ${field}` })`` lends the string for the call, and ``const r = #Rejected { reason: `…` };`` holds a borrow of it while `r` is used; returning `r` is the usual error, a borrow of a local.
+
+**A match moves per arm.** Matching a place moves it only in an arm whose pattern takes an owned, non-`Copy` part; an arm that binds nothing, or only copies, reads it, so `_ => println(`${e}`)` may use what another arm would have taken.
 
 **Copy parts bind by copy.** A name bound through a `readonly` borrow — by a pattern taking apart a borrowed value, or by `const` from a borrow — binds a copy instead if its type is `Copy`. Nothing can change the original while it is lent `readonly`, so the copy is indistinguishable from the borrow. If its type is class 1 the copy holds nothing: in `while (const #Some(#Op(op)) = self.peek()) { self.pos += 1; … }`, `op` is a `u8` and `self` is free. A class-2 copy — a `str`, a slice, a `readonly T` — keeps what the value it came from held, so a `str` matched out of a `readonly Option<str>` still borrows whatever the option's string did. Likewise a `readonly` borrow passed or assigned where one is wanted is copied with what it holds; it does not borrow the binding it was read from. Through a `mut` borrow, a binding stays a borrow, so it writes in place (below). And a part of a tag, record or list literal whose slot is a borrow is lent, as an argument is: `#Some(self.toks[i])` in a function returning `Option<readonly Token>` lends the token.
 

@@ -1,0 +1,50 @@
+// A program written by a TypeScript programmer from the specification alone (0.40).
+import { println } from "std/io";
+
+struct Job {
+  priority: u32;
+  name: String;
+}
+impl Eq for Job;
+impl Ord for Job;
+impl Show for Job;
+
+struct MinHeap<T extends Ord> {
+  items: Vec<T>;
+}
+
+impl<T extends Ord> MinHeap<T> {
+  export function new(): MinHeap<T> {
+    MinHeap { items: Vec.new() }
+  }
+
+  export function len(self: readonly Self): usize {
+    self.items.len()
+  }
+
+  export function push(self: mut Self, v: T): void {
+    // Keep smallest at the back so `pop()` is O(1) without needing element swap on non-Copy T,
+    // or insert in sorted order using Vec.insert (§3.1).
+    let i: usize = 0;
+    while (i < self.items.len() && self.items[i] > v) {
+      i += 1;
+    }
+    self.items.insert(i, v);
+  }
+
+  export function pop(self: mut Self): Option<T> {
+    self.items.pop()
+  }
+}
+
+export function main(): void uses Io {
+  let q = MinHeap.new<Job>();
+  q.push(Job { priority: 30, name: "backup".toString() });
+  q.push(Job { priority: 10, name: "alert".toString() });
+  q.push(Job { priority: 20, name: "report".toString() });
+  q.push(Job { priority: 10, name: "audit".toString() });
+
+  while (const #Some(job) = q.pop()) {
+    println(`${job.priority}: ${job.name}`);
+  }
+}

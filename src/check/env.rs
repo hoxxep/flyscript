@@ -978,8 +978,23 @@ impl Program {
                 let tail = rest.as_ref().map_or(Tail::Closed, |r| self.row_tail(r, scope));
                 Ty::Record(Row { labels, tail })
             }
-            TypeKind::Union { tags, rest } => {
-                let labels = tags.iter().map(|tg| (tg.name.name.clone(), self.elab_payload(&tg.payload, scope))).collect();
+            TypeKind::Union { tags, includes, rest } => {
+                let mut labels: BTreeMap<String, Ty> = tags.iter().map(|tg| (tg.name.name.clone(), self.elab_payload(&tg.payload, scope))).collect();
+                // A named union's tags are part of this one, as rows compose (§3.2).
+                for inc in includes {
+                    match self.elab_ty(inc, scope) {
+                        Ty::Union(r) if r.tail == Tail::Closed => {
+                            for (k, v) in r.labels {
+                                if labels.get(&k).is_some_and(|w| *w != v) {
+                                    self.error(m, inc.span, format!("`#{k}` is in this union twice, carrying different payloads"));
+                                }
+                                labels.insert(k, v);
+                            }
+                        }
+                        Ty::Error => {}
+                        _ => self.error(m, inc.span, "only a closed tag union can be part of a union: an enum is a type of its own"),
+                    }
+                }
                 let tail = rest.as_ref().map_or(Tail::Closed, |r| self.row_tail(r, scope));
                 Ty::Union(Row { labels, tail })
             }

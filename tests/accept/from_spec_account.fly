@@ -1,0 +1,73 @@
+// A program written by a TypeScript programmer from the specification alone (0.40).
+import { println } from "std/io";
+
+type Event =
+  | #Deposited { at: u64; amount: i64 }
+  | #Withdrawn { at: u64; amount: i64 };
+
+type TxErr = #InvalidAmount(i64) | #InsufficientFunds { have: i64; want: i64 };
+
+effect Store {
+  append(e: Event): void;
+}
+
+effect Clock {
+  now(): u64;
+}
+
+function replay(events: readonly Event[]): i64 {
+  let balance: i64 = 0;
+  for (const e of events) {
+    match (e) {
+      #Deposited { amount } => { balance += amount; },
+      #Withdrawn { amount } => { balance -= amount; },
+    }
+  }
+  balance
+}
+
+function deposit(amount: i64): void uses Store, Clock, Fail<TxErr> {
+  if (amount <= 0) { throw #InvalidAmount(amount); }
+  const t = Clock.now();
+  Store.append(#Deposited { at: t, amount });
+}
+
+function withdraw(currentBalance: i64, amount: i64): void uses Store, Clock, Fail<TxErr> {
+  if (amount <= 0) { throw #InvalidAmount(amount); }
+  if ( currentBalance < amount ) {
+    throw #InsufficientFunds { have: currentBalance, want: amount };
+  }
+  const t = Clock.now();
+  Store.append(#Withdrawn { at: t, amount });
+}
+
+export function main(): void uses Io {
+  let log: Vec<Event> = Vec.new();
+  let tick: u64 = 100;
+
+  handle {
+    try {
+      deposit(500);
+      deposit(250);
+      withdraw(750, 300);
+      withdraw(450, 900);
+    } catch (err) {
+      println(`rejected: ${err}`);
+    }
+  } with Store {
+    append(e) resumes k => {
+      log.push(e);
+      k()
+    },
+  } with Clock {
+    now() resumes k => {
+      tick += 10;
+      k(tick)
+    },
+  };
+
+  for (const ev of log) {
+    println(`event: ${ev}`);
+  }
+  println(`balance: ${replay(log)}`);
+}

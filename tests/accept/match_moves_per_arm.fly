@@ -1,0 +1,10 @@
+// A matched place is moved only by the arms that take an owned part of it; another arm may still
+// use it whole (§4.1).
+import { println } from "std/io";
+export function main(): void uses Io {
+  const e: #Named(String) | #Code(i32) | #Other = #Named("x".toString());
+  match (e) {
+    #Named(s) => println(s),
+    _ => println(`${e}`),
+  }
+}

@@ -644,7 +644,8 @@ impl<'p> Expand<'p> {
                 args: args.iter().map(|a| self.ty(a)).collect::<R<_>>()?,
             },
             TypeKind::Record { fields, rest } => TypeKind::Record { fields: self.fields(fields)?, rest: rest.as_ref().map(|r| self.ident(r)) },
-            TypeKind::Union { tags, rest } => TypeKind::Union {
+            TypeKind::Union { tags, includes, rest } => TypeKind::Union {
+                includes: includes.iter().map(|t| self.ty(t)).collect::<R<_>>()?,
                 tags: tags
                     .iter()
                     .map(|t| {

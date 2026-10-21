@@ -880,6 +880,11 @@ impl Interp {
                             && !self.expr(g, &aenv)?.as_bool() {
                                 continue;
                             }
+                        // The arm that took an owned part of the scrutinee moved it (§5.6).
+                        if let Some(path) = self.prog.typed.get(&self.lex.owner).and_then(|t| t.moves.get(&arm.pat.span)).cloned()
+                            && let Some(name) = root_name(scrutinee) {
+                                mark_moved(env, name, path);
+                            }
                         return self.expr(&arm.body, &aenv);
                     }
                 }

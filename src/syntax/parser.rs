@@ -765,6 +765,16 @@ impl<'a> Parser<'a> {
         if self.at("|") || matches!(self.tok(), Tok::Tag(_)) {
             return self.union_ty();
         }
+        // A named union followed by `|` starts a union that includes it: `JsonError | #Port(u16)`.
+        if matches!(self.tok(), Tok::Ident(_)) {
+            let save = self.pos;
+            let first = self.ty_postfix()?;
+            if !self.at("|") {
+                return Ok(first);
+            }
+            self.pos = save;
+            return self.union_ty();
+        }
         let kind = match self.tok() {
             Tok::Kw(Kw::Mut) if self.at_n(1, "(") => {
                 self.bump();
@@ -800,18 +810,23 @@ impl<'a> Parser<'a> {
         let start = self.span();
         self.eat("|");
         let mut tags = Vec::new();
+        let mut includes = Vec::new();
         let mut rest = None;
         loop {
             if self.eat("...") {
                 rest = Some(self.ident()?);
                 break;
             }
-            tags.push(self.tag_decl()?);
+            if matches!(self.tok(), Tok::Ident(_)) {
+                includes.push(self.ty_postfix()?);
+            } else {
+                tags.push(self.tag_decl()?);
+            }
             if !self.eat("|") {
                 break;
             }
         }
-        Ok(Type { kind: TypeKind::Union { tags, rest }, span: self.since(start) })
+        Ok(Type { kind: TypeKind::Union { tags, includes, rest }, span: self.since(start) })
     }
 
     fn ty_postfix(&mut self) -> PResult<Type> {

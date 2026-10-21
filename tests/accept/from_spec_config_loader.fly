@@ -1,0 +1,40 @@
+// A program written by a TypeScript programmer from the specification alone (0.40).
+import { println } from "std/io";
+import { ToJson, FromJson, JsonError, parse, stringify } from "std/json";
+
+struct Config {
+  name: String;
+  port: u16;
+  tags: Vec<String>;
+  debug: bool;
+}
+impl FromJson for Config;
+impl ToJson for Config;
+
+function loadConfig(raw: str): Config uses Fail<JsonError | #PrivilegedPort(u16)> {
+  const cfg: Config = parse(raw);
+  if (cfg.port <= 1024) {
+    throw #PrivilegedPort(cfg.port);
+  }
+  cfg
+}
+
+function runOne(raw: str): void uses Io {
+  try {
+    const cfg = loadConfig(raw);
+    println(stringify(cfg));
+  } catch (e) {
+    match (e) {
+      #PrivilegedPort(p)   => println(`invalid port: ${p} (must be > 1024)`),
+      #MissingField(field) => println(`missing field: ${field}`),
+      #BadJson(at)         => println(`malformed JSON at byte ${at}`),
+      _                    => println(`config error: ${e}`),
+    }
+  }
+}
+
+export function main(): void uses Io {
+  runOne(`{"name": "api", "port": 8080, "tags": ["v1", "prod"], "debug": false}`);
+  runOne(`{"name": "web", "port": 80, "tags": [], "debug": true}`);
+  runOne(`{"name": "broken", "port": "not-a-port"}`);
+}

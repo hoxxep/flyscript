@@ -1015,7 +1015,18 @@ impl<'p> Own<'p> {
                 Val::default()
             }
             ExprKind::Match { scrutinee, arms } => {
-                let sv = self.contained(|o| o.expr(scrutinee, how_for_scrutinee(arms)));
+                // A place matched is moved only by the arms that take an owned part of it; the
+                // others read it, and may still use it (§4.1).
+                let place = self.place(scrutinee).filter(|_| !self.behind_reference(scrutinee));
+                let per_arm = place.is_some() && how_for_scrutinee(arms) == Use::Move;
+                let sv = if per_arm {
+                    let first = self.loans.len();
+                    let mut v = self.contained(|o| o.expr(scrutinee, Use::Read));
+                    v.loans.retain(|l| *l < first);
+                    v
+                } else {
+                    self.contained(|o| o.expr(scrutinee, how_for_scrutinee(arms)))
+                };
                 self.enter(Node::Branch, 0);
                 let before = self.state.clone();
                 let mut joined: Option<State> = None;
@@ -1023,6 +1034,11 @@ impl<'p> Own<'p> {
                 for (i, arm) in arms.iter().enumerate() {
                     self.set_child(i as u32);
                     self.state = before.clone();
+                    if per_arm && self.takes_owned(&arm.pat) {
+                        let at = Expr { kind: scrutinee.kind.clone(), span: arm.pat.span };
+                        let path = place.clone().expect("a place");
+                        self.use_place(&at, path, Use::Move);
+                    }
                     self.scopes.push(HashMap::new());
                     self.bind_pattern(&arm.pat, &sv, false);
                     if let Some(g) = &arm.guard {
@@ -1733,6 +1749,46 @@ fn result_sources(p: &Program, scheme: &super::env::Scheme) -> Vec<String> {
     };
     sources.extend(hidden);
     sources
+}
+
+impl Own<'_> {
+    /// Whether a pattern binds a part that is owned and not `Copy`, which it takes.
+    fn takes_owned(&self, p: &Pattern) -> bool {
+        let mut names = Vec::new();
+        bind_spans(p, &mut names);
+        names.iter().any(|span| match self.typed.bindings.get(span) {
+            Some(t) => !self.p.is_copy(t) && !matches!(t, Ty::Borrow(..) | Ty::Slice(_) | Ty::Prim(Prim::Str)),
+            None => true,
+        })
+    }
+}
+
+fn bind_spans(p: &Pattern, out: &mut Vec<Span>) {
+    match &p.kind {
+        PatternKind::Bind(_) => out.push(p.span),
+        PatternKind::Tuple(ps) | PatternKind::Or(ps) => ps.iter().for_each(|p| bind_spans(p, out)),
+        PatternKind::Record { fields, .. } => {
+            for (name, sub) in fields {
+                match sub {
+                    Some(p) => bind_spans(p, out),
+                    None => out.push(name.span),
+                }
+            }
+        }
+        PatternKind::Tag { args, .. } => match args {
+            TagPatArgs::None => {}
+            TagPatArgs::Tuple(ps) => ps.iter().for_each(|p| bind_spans(p, out)),
+            TagPatArgs::Record(fs) => {
+                for (name, sub) in fs {
+                    match sub {
+                        Some(p) => bind_spans(p, out),
+                        None => out.push(name.span),
+                    }
+                }
+            }
+        },
+        _ => {}
+    }
 }
 
 fn how_for_scrutinee(arms: &[ast::MatchArm]) -> Use {

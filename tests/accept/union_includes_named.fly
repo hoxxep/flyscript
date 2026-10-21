@@ -1,0 +1,7 @@
+// A named union is part of a larger one, as failure rows compose: `ParseErr | #TooBig` (§3.2).
+type ParseErr = #Empty | #NotANumber;
+function parse(s: str): u32 uses Fail<ParseErr | #TooBig(u32)> {
+  if (s.len() == 0) { throw #Empty; }
+  if (s.len() > 9) { throw #TooBig(9); }
+  7
+}
