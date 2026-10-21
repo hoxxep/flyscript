@@ -1,0 +1,130 @@
+// expect: 1 + 2 * 3 = 7.0
+// expect: (1 + 2) * x = 12.0
+// expect: 10 / (x - 4): division by zero
+// expect: y + 1: unbound variable
+// expect: 2 $ 3: bad character 36
+// expect: (1 + 2: unexpected token
+// A calculator written as a TypeScript programmer would: a tokenizer, a recursive-descent parser
+// over a peeked token, and an evaluator over boxed nodes, with failures named for what failed.
+import { println } from "std/io";
+import { HashMap } from "std/collections";
+
+type Token = #Num(f64) | #Op(u8) | #LParen | #RParen | #Ident(String);
+
+function tokenize(src: str): Vec<Token> uses Fail<#BadChar(u8)> {
+  let out: Vec<Token> = Vec.new();
+  const bytes = src.asBytes();
+  let i = 0;
+  while (i < bytes.len()) {
+    const c = bytes[i];
+    if (c == b' ') { i += 1; continue; }
+    if (c >= b'0' && c <= b'9') {
+      let n = 0.0;
+      while (i < bytes.len() && bytes[i] >= b'0' && bytes[i] <= b'9') {
+        n = n * 10.0 + ((bytes[i] - b'0') as f64);
+        i += 1;
+      }
+      out.push(#Num(n));
+      continue;
+    }
+    if (c >= b'a' && c <= b'z') {
+      const start = i;
+      while (i < bytes.len() && bytes[i] >= b'a' && bytes[i] <= b'z') { i += 1; }
+      out.push(#Ident(src.slice(start, i).toString()));
+      continue;
+    }
+    match (c) {
+      b'+' | b'-' | b'*' | b'/' => out.push(#Op(c)),
+      b'(' => out.push(#LParen),
+      b')' => out.push(#RParen),
+      _ => throw #BadChar(c),
+    }
+    i += 1;
+  }
+  out
+}
+
+enum Expr { #Lit(f64), #Var(String), #Bin(u8, Box<Expr>, Box<Expr>) }
+
+struct Parser { toks: Vec<Token>, pos: usize }
+
+impl Parser {
+  function peek(self: readonly Self): Option<readonly Token> {
+    if (self.pos < self.toks.len()) { #Some(self.toks[self.pos]) } else { #None }
+  }
+  function expr(self: mut Self): Expr uses Fail<#Unexpected> {
+    let lhs = self.term();
+    while (const #Some(#Op(op)) = self.peek()) {
+      if (op != b'+' && op != b'-') { break; }
+      self.pos += 1;
+      const rhs = self.term();
+      lhs = #Bin(op, Box.new(lhs), Box.new(rhs));
+    }
+    lhs
+  }
+  function term(self: mut Self): Expr uses Fail<#Unexpected> {
+    let lhs = self.atom();
+    while (const #Some(#Op(op)) = self.peek()) {
+      if (op != b'*' && op != b'/') { break; }
+      self.pos += 1;
+      const rhs = self.atom();
+      lhs = #Bin(op, Box.new(lhs), Box.new(rhs));
+    }
+    lhs
+  }
+  function atom(self: mut Self): Expr uses Fail<#Unexpected> {
+    const e = match (self.peek()) {
+      #Some(#Num(n)) => #Lit(n),
+      #Some(#Ident(name)) => #Var(name.clone()),
+      #Some(#LParen) => {
+        self.pos += 1;
+        const inner = self.expr();
+        match (self.peek()) { #Some(#RParen) => inner, _ => throw #Unexpected }
+      }
+      _ => throw #Unexpected,
+    };
+    self.pos += 1;
+    e
+  }
+}
+
+function evaluate(e: readonly Expr, vars: readonly HashMap<String, f64>): f64 uses Fail<#Unbound | #DivZero> {
+  match (e) {
+    #Lit(n) => n,
+    #Var(name) => match (vars.get(name)) { #Some(v) => v, #None => throw #Unbound },
+    #Bin(op, a, b) => {
+      const x = evaluate(a, vars);
+      const y = evaluate(b, vars);
+      match (op) {
+        b'+' => x + y,
+        b'-' => x - y,
+        b'*' => x * y,
+        _ => if (y == 0.0) { throw #DivZero } else { x / y },
+      }
+    }
+  }
+}
+
+function run(src: str, vars: readonly HashMap<String, f64>): f64 uses Fail<#BadChar(u8) | #Unexpected | #Unbound | #DivZero> {
+  const toks = tokenize(src);
+  let p = Parser { toks, pos: 0 };
+  const e = p.expr();
+  evaluate(e, vars)
+}
+
+export function main(): void uses Io {
+  let vars: HashMap<String, f64> = HashMap.new();
+  vars.insert("x".toString(), 4.0);
+  for (const src of ["1 + 2 * 3", "(1 + 2) * x", "10 / (x - 4)", "y + 1", "2 $ 3", "(1 + 2"]) {
+    try {
+      println(`${src} = ${run(src, vars)}`);
+    } catch (e) {
+      match (e) {
+        #BadChar(c) => println(`${src}: bad character ${c}`),
+        #Unexpected => println(`${src}: unexpected token`),
+        #Unbound => println(`${src}: unbound variable`),
+        #DivZero => println(`${src}: division by zero`),
+      }
+    }
+  }
+}

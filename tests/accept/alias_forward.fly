@@ -1,0 +1,4 @@
+// An alias may use one written after it.
+type Pair = [Coord, Coord];
+type Coord = { x: f64; y: f64 };
+export function width(p: readonly Pair): f64 { p[1].x - p[0].x }

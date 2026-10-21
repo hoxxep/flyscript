@@ -473,6 +473,11 @@ impl Subst {
         }
     }
 
+    /// Binds an unbound record- or union-row variable to `row`.
+    pub fn bind_row(&mut self, v: u32, row: Row) {
+        self.rows[v as usize] = Some(row);
+    }
+
     /// Binds an unbound effect-row variable to `row`.
     pub fn bind_effs(&mut self, v: u32, row: EffRow) {
         self.effs[v as usize] = Some(row);

@@ -57,6 +57,8 @@ pub struct Checker<'p> {
     /// Values read out of a borrow into an owned position: legal only for `Copy` types, which
     /// is checked once types are final (§4.1).
     copies_out: Vec<(Ty, Span)>,
+    /// Bindings made as `readonly` borrows: those of `Copy` types bind copies instead (§4.1).
+    copy_binds: Vec<Span>,
     pending_copy: Vec<Ty>,
     /// The bounds of the generic parameters in scope, by symbol.
     bounds: HashMap<u32, Vec<Ty>>,
@@ -125,6 +127,7 @@ pub fn check_fn(p: &mut Program, fid: FnId) {
         performed: Vec::new(),
         pending_conts: Vec::new(),
         copies_out: Vec::new(),
+        copy_binds: Vec::new(),
         pending_copy: Vec::new(),
         bounds: scheme.tparams.iter().map(|g| (g.sym.id, g.bounds.clone())).collect(),
         pending_targs: Vec::new(),
@@ -252,8 +255,19 @@ pub fn check_fn(p: &mut Program, fid: FnId) {
         c.typed.params.push((name.clone(), ty.clone()));
     }
     let mut typed = std::mem::take(&mut c.typed);
-    for t in typed.exprs.values_mut().chain(typed.bindings.values_mut()) {
+    for t in typed.exprs.values_mut().chain(typed.bindings.values_mut()).chain(typed.slots.values_mut()) {
         *t = c.s.zonk(t);
+    }
+    // A `readonly` borrow of a `Copy` value is indistinguishable from a copy, which holds nothing.
+    for span in std::mem::take(&mut c.copy_binds) {
+        if let Some(t) = typed.bindings.get_mut(&span)
+            && let Ty::Borrow(false, inner) = t.clone()
+            && settled(&inner)
+            && !matches!(*inner, Ty::Param(_))
+            && c.p.is_copy(&inner)
+        {
+            *t = *inner;
+        }
     }
     let mut spans: Vec<(&Span, &Ty)> = typed.exprs.iter().chain(typed.bindings.iter()).collect();
     spans.sort_by_key(|(sp, _)| (sp.start, sp.end));
@@ -274,6 +288,19 @@ pub fn check_fn(p: &mut Program, fid: FnId) {
         c.p.inferred.insert(fid, Some(row));
     }
     c.p.note = saved_note;
+}
+
+/// Whether a type is final: no type variable or open row left in it, so whether it is `Copy`
+/// cannot change.
+fn settled(t: &Ty) -> bool {
+    match t {
+        Ty::Var(_) | Ty::Error => false,
+        Ty::Record(r) | Ty::Union(r) => r.tail == Tail::Closed && r.labels.values().all(settled),
+        Ty::Tuple(ts) => ts.iter().all(settled),
+        Ty::Array(e, _) | Ty::Slice(e) | Ty::Borrow(_, e) => settled(e),
+        Ty::Named(_, args) => args.iter().all(|a| !matches!(a, GArg::Ty(t) if !settled(t))),
+        _ => true,
+    }
 }
 
 pub fn container_message(p: &Program, d: DefId, arg: &Ty) -> String {
@@ -432,7 +459,7 @@ impl<'p> Checker<'p> {
                 let xi = xi.clone();
                 self.lends(&f, &xi)
             }
-            (Ty::Named(d, args), _) if *d == self.known("Ref") || *d == self.p.known.get("Box").copied().unwrap_or(usize::MAX) => {
+            (Ty::Named(d, args), _) if *d == self.known("Ref") || *d == self.known("Box") => {
                 match args.last() {
                     Some(GArg::Ty(inner)) => {
                         let inner = inner.clone();
@@ -441,7 +468,33 @@ impl<'p> Checker<'p> {
                     _ => false,
                 }
             }
+            // Tags built where no type was expected make an open union; one whose tags an enum
+            // has is that enum, as if it had been expected (§3.3).
+            (Ty::Union(r), Ty::Named(d, args)) if matches!(self.p.defs[*d].kind, DefKind::Enum { .. }) => {
+                let r = self.s.expand_row(r);
+                let DefKind::Enum { tags } = &self.p.defs[*d].kind else { return false };
+                let tags = tags.clone();
+                let params = self.p.defs[*d].params.clone();
+                match r.tail {
+                    Tail::Var(v) if r.labels.keys().all(|k| tags.contains_key(k)) => {
+                        let fits = r.labels.iter().all(|(k, t)| {
+                            let want = subst_params(&tags[k], &params, args);
+                            self.lends(t, &want)
+                        });
+                        if fits {
+                            let rest = tags.keys().filter(|k| !r.labels.contains_key(*k)).map(|k| (k.clone(), subst_params(&tags[k], &params, args))).collect();
+                            self.s.bind_row(v, Row { labels: rest, tail: Tail::Closed });
+                        }
+                        fits
+                    }
+                    _ => false,
+                }
+            }
             (Ty::Named(d, _), Ty::Prim(Prim::Str)) => *d == self.known("String"),
+            (Ty::Tuple(fs), Ty::Tuple(xs)) if fs.len() == xs.len() => {
+                let (fs, xs) = (fs.clone(), xs.clone());
+                fs.iter().zip(&xs).all(|(f, x)| self.lends(f, x))
+            }
             (Ty::Array(e, _), Ty::Slice(xe)) => self.s.unify(e, xe).is_ok(),
             (Ty::Named(d, args), Ty::Slice(xe)) if *d == self.known("Vec") => match args.first() {
                 Some(GArg::Ty(e)) => self.s.unify(e, xe).is_ok(),
@@ -723,7 +776,13 @@ impl<'p> Checker<'p> {
                 None => result = Some(t.clone()),
                 Some(r) => {
                     let r = r.clone();
-                    if !self.lends(t, &r) && !self.lends(&r, t) {
+                    if self.lends(t, &r) {
+                    } else if self.lends(&r, t) {
+                        // Tags built in earlier branches are the enum a later one gives.
+                        if matches!((self.s.resolve(&r), self.s.resolve(t)), (Ty::Union(_), Ty::Named(..))) {
+                            result = Some(t.clone());
+                        }
+                    } else {
                         let (a, b) = (self.show(&r), self.show(t));
                         self.err(*span, format!("branches have different types: `{a}` and `{b}`"));
                     }
@@ -899,7 +958,8 @@ impl<'p> Checker<'p> {
                 }))
             }
             _ => {
-                self.err(span, format!("unknown name `{name}`"));
+                let msg = self.p.unknown("name", name);
+                self.err(span, msg);
                 Ty::Error
             }
         }
@@ -947,7 +1007,7 @@ impl<'p> Checker<'p> {
             // `#A(x)` with `x` the whole of a larger payload (§3.2).
             TagArgs::Tuple(items) if whole => {
                 let p = payload_expected.clone().expect("whole payload");
-                self.check(&items[0], &p);
+                self.slot(&items[0], &p);
                 self.typed.whole.insert(span);
                 p
             }
@@ -962,7 +1022,7 @@ impl<'p> Checker<'p> {
                         .zip(want)
                         .map(|(it, w)| match w {
                             Some(w) => {
-                                self.check(it, &w);
+                                self.slot(it, &w);
                                 w
                             }
                             None => self.expr(it, None),
@@ -1026,7 +1086,7 @@ impl<'p> Checker<'p> {
             }
             let t = match (&f.value, &want) {
                 (Some(v), Some(w)) => {
-                    self.check(v, w);
+                    self.slot(v, w);
                     w.clone()
                 }
                 (Some(v), None) => self.expr(v, None),
@@ -1034,6 +1094,7 @@ impl<'p> Checker<'p> {
                     let t = self.ident(&f.name.name, f.name.span);
                     if let Some(w) = w {
                         self.coerce(&t, w, f.name.span);
+                        self.typed.slots.insert(f.name.span, w.clone());
                         w.clone()
                     } else {
                         t
@@ -1078,10 +1139,17 @@ impl<'p> Checker<'p> {
                 Ty::Named(d, args)
             }
             _ => {
-                self.err(t.span, format!("unknown type `{}`", segments[0].name));
+                let msg = self.p.unknown("type", &segments[0].name);
+                self.err(t.span, msg);
                 Ty::Error
             }
         }
+    }
+
+    /// Checks a part of a literal against the type of its slot, recording that type.
+    fn slot(&mut self, e: &Expr, t: &Ty) {
+        self.check(e, t);
+        self.typed.slots.insert(e.span, t.clone());
     }
 
     fn list(&mut self, items: &[Expr], expected: Option<&Ty>) -> Ty {
@@ -1089,20 +1157,20 @@ impl<'p> Checker<'p> {
         match want {
             Some(Ty::Tuple(ts)) if ts.len() == items.len() => {
                 for (it, t) in items.iter().zip(&ts) {
-                    self.check(it, t);
+                    self.slot(it, t);
                 }
                 Ty::Tuple(ts)
             }
             Some(Ty::Array(elem, len)) => {
                 for it in items {
-                    self.check(it, &elem);
+                    self.slot(it, &elem);
                 }
                 let _ = self.s.unify_len(&len, &Len::Known(items.len() as u64));
                 Ty::Array(elem, len)
             }
             Some(Ty::Slice(elem)) => {
                 for it in items {
-                    self.check(it, &elem);
+                    self.slot(it, &elem);
                 }
                 Ty::Array(elem, Len::Known(items.len() as u64))
             }
@@ -1940,8 +2008,22 @@ impl<'p> Checker<'p> {
             PatternKind::Wild => {}
             PatternKind::TagAt { .. } => self.err(pat.span, "a computed name `[e]` belongs in code that `comptime` generates"),
             PatternKind::Bind(name) => {
+                // A `readonly` borrow of a `Copy` value binds a copy (§4.1): at once if the type
+                // is known, else once it is.
+                let t = match &resolved {
+                    Ty::Borrow(false, inner) => {
+                        let z = self.s.zonk(inner);
+                        if settled(&z) && !matches!(z, Ty::Param(_)) && self.p.is_copy(&z) {
+                            z
+                        } else {
+                            self.copy_binds.push(pat.span);
+                            t.clone()
+                        }
+                    }
+                    _ => t.clone(),
+                };
                 self.typed.bindings.insert(pat.span, t.clone());
-                self.declare(name, t.clone())
+                self.declare(name, t)
             }
             PatternKind::Lit(e) => {
                 let v = self.strip(t);
@@ -1979,7 +2061,7 @@ impl<'p> Checker<'p> {
                     let ft = self.field(&inner, &name.name, name.span);
                     match sub {
                         Some(p) => self.bind(p, &wrap(ft)),
-                        None => self.declare(&name.name, wrap(ft)),
+                        None => self.bind(&Pattern { kind: PatternKind::Bind(name.name.clone()), span: name.span }, &wrap(ft)),
                     }
                 }
             }

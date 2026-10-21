@@ -1,6 +1,6 @@
 # Flyscript
 
-**Language specification, version 0.30**
+**Language specification, version 0.31**
 
 *Affine values, one row calculus, handlers for everything, and `comptime`: Church on the outside, Turing on the inside.*
 
@@ -18,12 +18,19 @@ The whole language rests on five laws. Every rule in this document is a conseque
 4. **Handlers for everything.** Errors, I/O, iteration and region memory are ordinary effects with ordinary handlers. A handler may hold the rest of a computation as a one-shot continuation value; generators and tasks are both built from that one primitive.
 5. **`comptime` is the metalanguage.** Generics, reflection, layout transformation and derived interfaces are ordinary Flyscript code run by the compiler.
 
-### 0.1 Changes from 0.29
+### 0.1 Changes from 0.30
 
-0.30 closes the holes a review of 0.29 found where effects meet ownership (docs/reviews/2026-10-21-holistic-review-of-0-29.md), and one it did not: a borrow assigned to an outer binding could outlive what it borrowed.
+0.31 comes from writing a calculator — tokenizer, recursive-descent parser over a peeked token, evaluator over boxed nodes — the way a TypeScript programmer would, and fixing each place the language got in the way.
 
 | Change | Why |
 | :--- | :--- |
+| A part bound through a `readonly` borrow is a copy if its type is `Copy` (§4.1) | `while (const #Some(#Op(op)) = self.peek()) { self.pos += 1; … }` was rejected: `op` was a `readonly u8` that kept `self` lent |
+| A borrow of an owner that lends `U` is a borrow of `U` (§4.1) | `#Neg(inner) => -value(inner)` with `inner: readonly Box<Node>` did not check |
+| A part of a tag, record or list literal put where a borrow is wanted is lent (§4.1) | `#Some(self.toks[i])` returning `Option<readonly Token>` tried to move the token out |
+| Tags built where no type was expected become an enum another branch gives (§3.3) | `const e = match (t) { #Some(#Num(n)) => #Lit(n), #Some(#LParen) => inner, … }` did not join |
+| A type alias that refers to itself is an error that says to declare an `enum`; an alias may use one written after it (§3.3) | the recursive alias gave a baffling mismatch, and a later alias was silently opaque |
+
+--- | :--- |
 | When a block ends, nothing used afterwards may hold a borrow of its bindings; a binding assigned anew holds only the new value's borrows (§4.1) | `if (c) { const a = …; s = a[0..2]; } use(s)` was accepted, and `s` dangled |
 | An operation's arguments are lent by the code that performed it: a resumptive arm may use one that can hold a borrow only until it resumes, never past the arm; an arm that does not resume cannot use one at all (§5.3) | an abortive arm could return a `str` borrowed from the body it had just unwound, and a resumptive arm could read one after `k()` had let the body end |
 | A continuation's row `E` is what its `handle` performs — the body's unhandled effects and the arms' — not everything the code around it may (§5.2, §5.3) | a `Gen`-like value built where `Io` is allowed no longer demands `Io` of every consumer |
@@ -239,7 +246,9 @@ struct Point { x: f64; y: f64; }
 enum Expr { #Num(f64), #Add(Box<Expr>, Box<Expr>), #Neg(Box<Expr>) }
 ```
 
-**Recursion is iso-recursive**: a recursive type must pass through a nominal declaration. Structural rows are always finite, which keeps unification simple and terminating.
+**Recursion is iso-recursive**: a recursive type must pass through a nominal declaration. Structural rows are always finite, which keeps unification simple and terminating. A type alias names a structural type, so one that refers to itself is an error that says to declare an `enum` or a `struct`; aliases may otherwise refer to each other in any order.
+
+Tags built where no type is expected make an open union, as in §3.2. Where such a union meets an enum that has all its tags — a branch of an `if` or `match` whose other branch is an `Expr`, an argument or return of type `Expr` — it is that enum, as if `Expr` had been expected where the tags were built: `if (leaf) { #Num(1.0) } else { parsed }` is an `Expr`.
 
 ### 3.4 Interfaces and `impl`
 
@@ -304,11 +313,13 @@ Borrows are **transparent**: a borrow binding reads and writes as the value it r
 
 A value that is borrowed without having a place — a call's result, a template string, a literal lent as `str` — is stored in an anonymous local of the enclosing block, dropped when the block ends. So ``stringify(#Rejected { reason: `missing ${field}` })`` lends the string for the call, and ``const r = #Rejected { reason: `…` };`` holds a borrow of it while `r` is used; returning `r` is the usual error, a borrow of a local.
 
+**Copy parts bind by copy.** A name bound through a `readonly` borrow — by a pattern taking apart a borrowed value, or by `const` from a borrow — binds a copy instead if its type is `Copy`. Nothing can change the original while it is lent `readonly`, so the copy is indistinguishable from the borrow, but it holds nothing: in `while (const #Some(#Op(op)) = self.peek()) { self.pos += 1; … }`, `op` is a `u8` and `self` is free. Through a `mut` borrow, a binding stays a borrow, so it writes in place (below). And a part of a tag, record or list literal whose slot is a borrow is lent, as an argument is: `#Some(self.toks[i])` in a function returning `Option<readonly Token>` lends the token.
+
 A borrow lasts until the last use of any value that holds it, not to the end of its scope. Every value carries the set of borrows it holds: a borrow taken for an argument is held by the call's result if the result can hold it (§4.2); a value bound by a pattern or assigned to a binding passes its borrows on; a binding assigned anew holds the new value's borrows only, and one assigned on several paths holds the union where they meet. A borrow cannot outlive what it borrows: when a block ends, neither its value nor any binding used afterwards may hold a borrow of a binding declared in it. So `let s = v[0..1]; if (c) { const a = [1, 2, 3]; s = a[0..2]; } use(s)` is rejected — `s` would outlive `a` — while re-pointing `s` at `v` before the block ends is fine. In a loop, the body's bindings end with each iteration. In the example below, the `#None` arm holds no borrow of `counts`, so it may insert, while in the `#Some` arm `n` holds `counts` mutably until its last use.
 
 A method call borrows its receiver in two phases: the receiver is borrowed `readonly` while the arguments are evaluated and `mut` only for the call itself, so `v.push(v.len())` is legal and `v.push({ v.clear(); 1 })` is not.
 
-**Lending.** Wherever a borrow of `U` is expected, an owner that *lends* `U` may be passed: `String` lends `str`, `Vec<T>` lends `T[]`, `Box<T>` lends `T`, and `Ref<R, T>` lends `readonly T`. Lending is the only implicit conversion. Lookups in `HashMap<K, V>` accept any `Q` that `K` lends, so a `HashMap<String, V>` is searched with a `str` without allocating.
+**Lending.** Wherever a borrow of `U` is expected, an owner that *lends* `U` may be passed: `String` lends `str`, `Vec<T>` lends `T[]`, `Box<T>` lends `T`, and `Ref<R, T>` lends `readonly T`; and a borrow of an owner lends what the owner does, so a `readonly Box<Expr>` matched out of a node is passed where `readonly Expr` is wanted. Lending is the only implicit conversion. Lookups in `HashMap<K, V>` accept any `Q` that `K` lends, so a `HashMap<String, V>` is searched with a `str` without allocating.
 
 ```ts
 match (counts.getMut(word)) {

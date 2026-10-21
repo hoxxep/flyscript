@@ -1080,7 +1080,8 @@ impl<'p> Own<'p> {
     fn collect<'e>(&mut self, items: impl Iterator<Item = &'e Expr>) -> Val {
         let mut loans = BTreeSet::new();
         for it in items {
-            loans.extend(self.escape(|o| o.expr(it, Use::Move)).loans);
+            let how = self.slot_use(it);
+            loans.extend(self.escape(|o| o.expr(it, how)).loans);
         }
         Val { loans }
     }
@@ -1105,14 +1106,28 @@ impl<'p> Own<'p> {
         let mut loans = BTreeSet::new();
         for f in fields {
             match &f.value {
-                Some(v) => loans.extend(self.escape(|o| o.expr(v, Use::Move)).loans),
+                Some(v) => {
+                    let how = self.slot_use(v);
+                    loans.extend(self.escape(|o| o.expr(v, how)).loans)
+                }
                 None => {
                     let e = Expr { kind: ExprKind::Ident(f.name.name.clone()), span: f.name.span };
-                    loans.extend(self.expr(&e, Use::Move).loans);
+                    let how = self.slot_use(&e);
+                    loans.extend(self.expr(&e, how).loans);
                 }
             }
         }
         Val { loans }
+    }
+
+    /// How a part of a literal is used: an owned value put where a borrow is wanted is lent;
+    /// anything else, a borrow included, is passed on.
+    fn slot_use(&self, e: &Expr) -> Use {
+        let ty = self.ty_of(e);
+        match self.typed.slots.get(&e.span) {
+            Some(t) if !matches!(ty, Ty::Borrow(..) | Ty::Slice(_) | Ty::Prim(Prim::Str)) => self.arg_use(t, &ty),
+            _ => Use::Move,
+        }
     }
 
     // ---- calls ----

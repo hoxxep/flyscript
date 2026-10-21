@@ -1,0 +1,2 @@
+// error: unknown type `HashMap`: import it with `import { HashMap } from "std/collections";`
+export function main(): void { let m: HashMap<String, i32> = HashMap.new(); }

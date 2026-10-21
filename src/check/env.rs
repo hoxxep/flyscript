@@ -183,6 +183,10 @@ pub struct Program {
     pub spec_requested: HashMap<FnId, DefId>,
     /// Functions called while their effects were being inferred, so assumed pure there.
     pub assumed_pure: HashMap<FnId, (usize, Span)>,
+    /// Type aliases not yet elaborated, so one may use another written after it, and those being
+    /// elaborated, so one that refers to itself is caught.
+    pending_aliases: HashMap<DefId, (usize, ast::Item)>,
+    aliasing: Vec<DefId>,
     /// While a specialization is checked: which one, for its diagnostics.
     pub note: Option<String>,
 }
@@ -205,6 +209,9 @@ pub struct Typed {
     pub moves: HashMap<Span, Vec<String>>,
     /// Tag constructions `#A(x)` whose one argument is the whole of a larger payload (§3.2).
     pub whole: std::collections::HashSet<Span>,
+    /// The type each part of a tag, record or list literal was checked against, by the part's
+    /// span: a part put where a borrow is wanted is lent, not moved.
+    pub slots: HashMap<Span, Ty>,
     /// The function each call or method call resolved to, by the call's span.
     pub calls: HashMap<Span, FnId>,
     /// Each call's generic arguments, in its scheme's parameter order (for dispatch through
@@ -269,6 +276,8 @@ impl Program {
             spec_requested: HashMap::new(),
             note: None,
             assumed_pure: HashMap::new(),
+            pending_aliases: HashMap::new(),
+            aliasing: Vec::new(),
         };
         for (file, source) in STD {
             let name = file.trim_end_matches(".fly").trim_end_matches(".d");
@@ -413,6 +422,15 @@ impl Program {
         Sym { id: self.next_sym, name: name.to_string() }
     }
 
+    /// `name`, with where to import it from if a standard module exports it.
+    pub fn unknown(&self, what: &str, name: &str) -> String {
+        let home = self.modules.iter().find(|m| m.is_std && m.name != "std/prelude" && m.exports.contains_key(name));
+        match home {
+            Some(m) => format!("unknown {what} `{name}`: import it with `import {{ {name} }} from \"{}\";`", m.name),
+            None => format!("unknown {what} `{name}`"),
+        }
+    }
+
     pub fn module_named(&self, name: &str) -> Option<usize> {
         self.modules.iter().position(|m| m.name == name)
     }
@@ -469,7 +487,7 @@ impl Program {
                 }
             }
         }
-        for name in ["Fail", "Yield", "Region", "Io", "String", "Ref", "Vec", "Iterable", "LentBy", "Copy", "Send", "Eq", "Show", "Ord", "Cont"] {
+        for name in ["Fail", "Yield", "Region", "Io", "String", "Ref", "Vec", "Iterable", "LentBy", "Copy", "Send", "Eq", "Show", "Ord", "Cont", "Box"] {
             let prelude = self.module_named("std/prelude").expect("prelude");
             let layout = self.module_named("std/layout").expect("layout");
             let found = self.modules[prelude].exports.get(name).or_else(|| self.modules[layout].exports.get(name));
@@ -516,6 +534,15 @@ impl Program {
             let items = self.modules[m].ast.items.clone();
             for item in &items {
                 self.elaborate_params(m, item);
+            }
+        }
+        for m in 0..self.modules.len() {
+            for item in &self.modules[m].ast.items {
+                if let ItemKind::TypeAlias(a) = &item.kind
+                    && let Some(Binding::Def(id)) = self.modules[m].scope.get(&a.name.name).copied()
+                {
+                    self.pending_aliases.insert(id, (m, item.clone()));
+                }
             }
         }
         for aliases in [true, false] {
@@ -657,7 +684,15 @@ impl Program {
             ItemKind::Enum(e) => DefKind::Enum {
                 tags: e.tags.iter().map(|t| (t.name.name.clone(), self.elab_payload(&t.payload, &inner))).collect(),
             },
-            ItemKind::TypeAlias(a) => DefKind::Alias { ty: self.elab_ty(&a.ty, &inner) },
+            ItemKind::TypeAlias(a) => {
+                if self.pending_aliases.remove(&id).is_none() {
+                    return;
+                }
+                self.aliasing.push(id);
+                let ty = self.elab_ty(&a.ty, &inner);
+                self.aliasing.pop();
+                DefKind::Alias { ty }
+            }
             ItemKind::Interface(x) => {
                 let DefKind::Interface { self_sym, .. } = &self.defs[id].kind else { return };
                 let self_sym = self_sym.clone();
@@ -873,7 +908,18 @@ impl Program {
                     }
                     return Ty::Param(sym.clone());
                 }
-                match self.lookup(m, name) {
+                let found = self.lookup(m, name);
+                if let Some(Binding::Def(d)) = found {
+                    if self.aliasing.contains(&d) {
+                        let msg = format!("`{name}` refers to itself, but a type alias names a structural type, which cannot be recursive: declare it as an `enum` or a `struct` (§3.3)");
+                        self.error(m, t.span, msg);
+                        return Ty::Error;
+                    }
+                    if let Some((am, item)) = self.pending_aliases.get(&d).cloned() {
+                        self.elaborate_def(am, &item);
+                    }
+                }
+                match found {
                     Some(Binding::Def(d)) => {
                         let gargs = self.elab_args(d, args, scope, t.span);
                         match &self.defs[d].kind {
@@ -901,7 +947,8 @@ impl Program {
                         Ty::Error
                     }
                     None => {
-                        self.error(m, t.span, format!("unknown type `{name}`"));
+                        let msg = self.unknown("type", name);
+                        self.error(m, t.span, msg);
                         Ty::Error
                     }
                 }
