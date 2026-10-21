@@ -2,6 +2,8 @@
 
 **The TypeScript you already know, with the performance and safety of a systems language.**
 
+*Affine values, one row calculus, handlers for everything, and `comptime`: Church on the outside, Turing on the inside.*
+
 Flyscript compiles ahead of time to native code and WebAssembly. It has no garbage collector, no lifetime annotations and no `async`/`await`, and it is memory-safe and free of data races by construction. If you can read TypeScript, you can read Flyscript today.
 
 ```ts
@@ -16,6 +18,15 @@ export function serve(listener: mut Listener, db: readonly Db): void uses Io, Fa
   });
 }
 ```
+
+## The idea in one line
+
+*Church on the outside, Turing on the inside*: programs compose like the lambda calculus — values, functions and types that fit together cleanly — while the compiler lays them out for the machine as a C programmer would, in place and unboxed. Four ideas carry the whole language:
+
+- **Affine values.** Every value has exactly one owner, and a borrow can be passed down but never stored where it could outlive its owner. That alone gives memory safety without a collector and without lifetime annotations.
+- **One row calculus.** Records (`{ x: f64; ...R }`), tag unions (`#Ok(T) | #Err(E)`) and lists of effects (`uses Io, Fail<E>`) are the same kind of thing, checked by one mechanism. It is why functions accept any record with the fields they need, and why error types combine by union with no conversion code.
+- **Handlers for everything.** Failure, I/O, generators and memory regions are all *effects* handled by ordinary handlers. `throw`/`catch`, `yield`/`for…of`, structured concurrency and deterministic simulation are library code on one primitive.
+- **`comptime`.** Generics, derived interfaces and data layout are ordinary Flyscript run by the compiler, not a second language of macros or templates.
 
 ## Why Flyscript
 
