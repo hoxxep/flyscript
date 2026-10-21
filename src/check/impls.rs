@@ -3,7 +3,8 @@
 
 use std::collections::HashMap;
 
-use super::env::{DeclRef, DefKind, FnId, FnInfo, GParam, PKind, Program, Scheme, subst_params};
+use super::comptime::{CV, Expand};
+use super::env::{DeclRef, DefKind, FnId, FnInfo, GParam, PKind, Program, Scheme, SubstMap, subst, subst_effs, subst_params};
 use super::types::*;
 
 /// The generic arguments an impl was matched with, by parameter symbol.
@@ -16,7 +17,7 @@ impl Program {
         let iparams = self.defs[iface].params.clone();
         let bound = Ty::Named(iface, iparams.iter().map(param_arg).collect());
         for (name, scheme) in methods {
-            let mut tparams = vec![GParam { sym: self_sym.clone(), kind: PKind::Type, bounds: vec![bound.clone()], default: None }];
+            let mut tparams = vec![GParam { sym: self_sym.clone(), kind: PKind::Type, bounds: vec![bound.clone()], default: None, comptime: false }];
             tparams.extend(iparams.iter().cloned());
             tparams.extend(scheme.tparams.iter().cloned());
             let id = self.fns.len();
@@ -79,8 +80,15 @@ impl Program {
             return None;
         }
         let ty = strip_borrows(ty);
-        for (i, imp) in self.impls.iter().enumerate() {
-            if imp.interface.as_ref().map(|(d, _)| *d) != Some(iface) {
+        // Specific impls first; a template impl only for structural types, and for nominal types
+        // that ask for it with `impl I for T;` (§7.3).
+        let candidates = (0..self.impls.len()).filter(|i| !self.is_template_impl(*i)).chain((0..self.impls.len()).filter(|i| self.is_template_impl(*i)));
+        for i in candidates {
+            let imp = &self.impls[i];
+            if imp.derived || imp.interface.as_ref().map(|(d, _)| *d) != Some(iface) {
+                continue;
+            }
+            if self.is_template_impl(i) && !self.derives(iface, ty) {
                 continue;
             }
             let vars: Vec<u32> = imp.params.iter().map(|g| g.sym.id).collect();
@@ -159,6 +167,154 @@ impl Program {
     /// The method `name` of impl `imp`.
     pub fn impl_method(&self, imp: usize, name: &str) -> Option<FnId> {
         self.impls[imp].methods.iter().copied().find(|f| self.fns[*f].name == name)
+    }
+
+    pub fn is_template_impl(&self, imp: usize) -> bool {
+        self.impls[imp].params.iter().any(|g| g.comptime)
+    }
+
+    /// Whether `iface`'s template impl applies to `ty`.
+    fn derives(&self, iface: DefId, ty: &Ty) -> bool {
+        match ty {
+            Ty::Record(_) | Ty::Union(_) | Ty::Tuple(_) => true,
+            Ty::Named(d, _) => self.derive_request(iface, *d),
+            _ => false,
+        }
+    }
+
+    fn derive_request(&self, iface: DefId, d: DefId) -> bool {
+        self.impls.iter().any(|r| r.derived && r.interface.as_ref().map(|(i, _)| *i) == Some(iface) && matches!(&r.target, Ty::Named(x, _) if *x == d))
+    }
+
+    /// A function with `comptime` type parameters that has not been specialized.
+    pub fn is_template(&self, fid: FnId) -> bool {
+        !self.spec_of.contains_key(&fid) && self.fns[fid].scheme.tparams.iter().any(|g| g.comptime)
+    }
+
+    /// The `comptime` arguments of `fid` among `args`, in its parameter order.
+    pub fn comptime_args(&self, fid: FnId, args: &Binds) -> Option<Vec<(Sym, Ty)>> {
+        self.fns[fid]
+            .scheme
+            .tparams
+            .iter()
+            .filter(|g| g.comptime)
+            .map(|g| match args.get(&g.sym.id) {
+                Some(GArg::Ty(t)) => Some((g.sym.clone(), t.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The method `name` of impl `imp` matched with `binds`: for a template impl, its
+    /// specialization, which must exist.
+    pub fn method_for(&self, imp: usize, name: &str, binds: &Binds) -> Option<FnId> {
+        let m = self.impl_method(imp, name)?;
+        if !self.is_template(m) {
+            return Some(m);
+        }
+        let ct = self.comptime_args(m, binds)?;
+        self.specs.get(&(m, spec_key(&ct))).copied()
+    }
+
+    /// Like `method_for`, specializing the template impl's method if it has not been.
+    pub fn method_for_mut(&mut self, imp: usize, name: &str, binds: &Binds) -> Option<FnId> {
+        let m = self.impl_method(imp, name)?;
+        if !self.is_template(m) {
+            return Some(m);
+        }
+        let ct = self.comptime_args(m, binds)?;
+        Some(self.specialize_for(m, &ct))
+    }
+
+    /// Specializes `fid`; a template impl's method is specialized on behalf of the type that
+    /// asked for the derivation, which may then see its private fields (§7.3).
+    pub fn specialize_for(&mut self, fid: FnId, ct: &[(Sym, Ty)]) -> FnId {
+        let from_template_impl = self.fns[fid].impl_id.is_some_and(|i| self.is_template_impl(i));
+        let requested = match ct.first().map(|(_, t)| strip_borrows(t)) {
+            Some(Ty::Named(d, _)) if from_template_impl => Some(*d),
+            _ => None,
+        };
+        self.specialize(fid, ct, requested)
+    }
+
+    /// Makes sure every impl that `ty` satisfying `iface` relies on is specialized, so a call
+    /// through a bound finds it at run time.
+    pub fn ensure_impl(&mut self, iface: DefId, ty: &Ty, depth: usize) {
+        if depth > 16 || contains_params(ty) {
+            return;
+        }
+        let Some((imp, binds)) = self.resolve_impl(iface, ty) else { return };
+        if self.is_template_impl(imp) {
+            let names: Vec<String> = self.impls[imp].methods.iter().map(|f| self.fns[*f].name.clone()).collect();
+            for n in names {
+                self.method_for_mut(imp, &n, &binds);
+            }
+        }
+        let params = self.impls[imp].params.clone();
+        let args: Vec<GArg> = params.iter().map(|g| binds.get(&g.sym.id).cloned().unwrap_or_else(|| param_arg(g))).collect();
+        for (g, a) in params.iter().zip(&args) {
+            if let GArg::Ty(t) = a {
+                for b in &g.bounds {
+                    if let Ty::Named(d, _) = subst_params(b, &params, &args)
+                        && matches!(self.defs[d].kind, DefKind::Interface { .. }) {
+                            self.ensure_impl(d, t, depth + 1);
+                        }
+                }
+            }
+        }
+    }
+
+    /// The specialization of template `fid` for its `comptime` arguments (§7.1): its signature
+    /// with them substituted, and its body expanded. Memoized, and registered before its body is
+    /// expanded, so a recursive type's derivation refers to itself.
+    pub fn specialize(&mut self, fid: FnId, ct: &[(Sym, Ty)], requested: Option<DefId>) -> FnId {
+        let key = (fid, spec_key(ct));
+        if let Some(f) = self.specs.get(&key) {
+            return *f;
+        }
+        let info = &self.fns[fid];
+        let args: Vec<GArg> = ct.iter().map(|(_, t)| GArg::Ty(t.clone())).collect();
+        let map: SubstMap<'_> = ct.iter().map(|(s, _)| s.id).zip(args.iter()).collect();
+        let scheme = Scheme {
+            tparams: info.scheme.tparams.iter().filter(|g| !g.comptime).cloned().collect(),
+            params: info.scheme.params.iter().map(|(n, t)| (n.clone(), subst(t, &map))).collect(),
+            ret: subst(&info.scheme.ret, &map),
+            effects: info.scheme.effects.as_ref().map(|e| subst_effs(e, &map)),
+            ret_from: info.scheme.ret_from.clone(),
+        };
+        let spec = FnInfo { scheme, has_body: true, iface: None, name: info.name.clone(), decl: info.decl, ..*info };
+        let module = spec.module;
+        let id = self.fns.len();
+        self.fns.push(spec);
+        self.specs.insert(key, id);
+        self.spec_of.insert(id, fid);
+        let shown: Vec<String> = ct.iter().map(|(_, t)| format!("{}", super::types::Show(t, &*self))).collect();
+        let note = format!("in `{}` for `{}`", self.fns[fid].name, shown.join(", "));
+        self.spec_notes.insert(id, note.clone());
+        // Errors found while expanding the body belong to this specialization too.
+        let saved = self.note.replace(note);
+        if let Some(mut decl) = self.fn_decl(fid) {
+            let env = ct.iter().map(|(s, t)| (s.name.clone(), CV::Type(t.clone()))).collect();
+            decl.body = decl.body.as_ref().and_then(|b| Expand::new(self, module, requested, env).body(b));
+            self.bodies.insert(id, decl);
+        }
+        self.note = saved;
+        id
+    }
+}
+
+pub fn spec_key(ct: &[(Sym, Ty)]) -> String {
+    format!("{:?}", ct.iter().map(|(_, t)| t).collect::<Vec<_>>())
+}
+
+pub fn contains_params(t: &Ty) -> bool {
+    match t {
+        Ty::Param(_) | Ty::Var(_) => true,
+        Ty::Named(_, args) => args.iter().any(|a| matches!(a, GArg::Ty(t) if contains_params(t))),
+        Ty::Tuple(ts) => ts.iter().any(contains_params),
+        Ty::Record(r) | Ty::Union(r) => r.labels.values().any(contains_params),
+        Ty::Array(e, _) | Ty::Slice(e) | Ty::Borrow(_, e) => contains_params(e),
+        _ => false,
     }
 }
 

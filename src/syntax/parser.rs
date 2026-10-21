@@ -328,22 +328,81 @@ impl<'a> Parser<'a> {
     /// `{ name: Type; … }` with `;` or `,` separators.
     fn field_list(&mut self) -> PResult<Vec<Field>> {
         self.expect("{")?;
+        let fields = self.field_items()?;
+        self.expect("}")?;
+        Ok(fields)
+    }
+
+    /// Fields up to a closing `}`: `name: T`, `private name: T`, `[e]: T`, or generated ones.
+    fn field_items(&mut self) -> PResult<Vec<Field>> {
         let mut fields = Vec::new();
-        while !self.at("}") {
+        while !self.at("}") && !self.at("...") {
+            if self.at_kw(Kw::Comptime) {
+                let start = self.span();
+                let g = self.generate(Self::field_items)?;
+                let mut f = Field::new(Ident { name: String::new(), span: self.since(start) }, Type { kind: TypeKind::EmptyRow, span: start }, false);
+                f.generate = Some(Box::new(g));
+                fields.push(f);
+                if !self.eat(";") {
+                    self.eat(",");
+                }
+                continue;
+            }
             let private = self.at_word("private") && matches!(self.tok_at(1), Tok::Ident(_));
             if private {
                 self.bump();
             }
-            let name = self.ident()?;
+            let (name, computed) = self.entry_name()?;
             self.expect(":")?;
             let ty = self.ty()?;
-            fields.push(Field { name, ty, private });
+            fields.push(Field { name, ty, private, computed, generate: None });
             if !self.eat(";") && !self.eat(",") {
                 break;
             }
         }
-        self.expect("}")?;
         Ok(fields)
+    }
+
+    /// A field's name, or `[e]` for one computed by `comptime` code.
+    fn entry_name(&mut self) -> PResult<(Ident, Option<Box<Expr>>)> {
+        if self.at("[") {
+            let start = self.span();
+            self.bump();
+            let e = self.expr()?;
+            self.expect("]")?;
+            return Ok((Ident { name: String::new(), span: self.since(start) }, Some(Box::new(e))));
+        }
+        Ok((self.member_name()?, None))
+    }
+
+    /// `comptime for (const p of e) { … }` or `comptime if (c) { … } else { … }` in a sequence,
+    /// the items between the braces parsed by `items`.
+    fn generate<T>(&mut self, items: fn(&mut Self) -> PResult<Vec<T>>) -> PResult<Generate<T>> {
+        self.expect_kw(Kw::Comptime)?;
+        let group = |p: &mut Self| -> PResult<Vec<T>> {
+            p.expect("{")?;
+            let v = items(p)?;
+            p.expect("}")?;
+            Ok(v)
+        };
+        if self.eat_kw(Kw::For) {
+            self.expect("(")?;
+            if !self.eat_kw(Kw::Const) && !self.eat_kw(Kw::Let) {
+                return self.error("`const`");
+            }
+            let pat = self.pattern_one()?;
+            self.expect_word("of")?;
+            let iter = self.expr()?;
+            self.expect(")")?;
+            Ok(Generate::For { pat, iter, body: group(self)? })
+        } else if self.eat_kw(Kw::If) {
+            let cond = self.paren_expr()?;
+            let then = group(self)?;
+            let otherwise = if self.eat_kw(Kw::Else) { group(self)? } else { Vec::new() };
+            Ok(Generate::If { cond, then, otherwise })
+        } else {
+            self.error("`for` or `if` after `comptime`")
+        }
     }
 
     fn enum_decl(&mut self) -> PResult<EnumDecl> {
@@ -412,6 +471,9 @@ impl<'a> Parser<'a> {
         let params = self.type_params()?;
         let first = self.ty()?;
         let (interface, target) = if self.eat_kw(Kw::For) { (Some(first), self.ty()?) } else { (None, first) };
+        if interface.is_some() && self.eat(";") {
+            return Ok(ImplDecl { params, interface, target, methods: Vec::new(), derived: true });
+        }
         self.expect("{")?;
         let mut methods = Vec::new();
         while !self.at("}") {
@@ -419,7 +481,7 @@ impl<'a> Parser<'a> {
             methods.push(Method { exported, decl: self.fn_decl()? });
         }
         self.expect("}")?;
-        Ok(ImplDecl { params, interface, target, methods })
+        Ok(ImplDecl { params, interface, target, methods, derived: false })
     }
 
     fn type_alias(&mut self) -> PResult<TypeAlias> {
@@ -709,12 +771,11 @@ impl<'a> Parser<'a> {
                         self.eat(";");
                         break;
                     }
-                    let name = self.ident()?;
-                    self.expect(":")?;
-                    fields.push(Field { name, ty: self.ty()?, private: false });
-                    if !self.eat(";") && !self.eat(",") {
+                    let items = self.field_items()?;
+                    if items.is_empty() {
                         break;
                     }
+                    fields.extend(items);
                 }
                 self.expect("}")?;
                 TypeKind::Record { fields, rest }
@@ -790,7 +851,7 @@ impl<'a> Parser<'a> {
             self.tok(),
             Tok::Kw(Kw::If | Kw::While | Kw::For | Kw::Match | Kw::Try | Kw::Region | Kw::Handle | Kw::Unsafe)
                 | Tok::Punct("{")
-        )
+        ) || self.at_kw(Kw::Comptime) && matches!(self.tok_at(1), Tok::Kw(Kw::If | Kw::For | Kw::Match))
     }
 
     /// A block-like expression in statement position: it is not continued by operators.
@@ -799,6 +860,12 @@ impl<'a> Parser<'a> {
             let b = self.block()?;
             let span = b.span;
             return Ok(Expr { kind: ExprKind::Block(b), span });
+        }
+        if self.at_kw(Kw::Comptime) {
+            let start = self.span();
+            self.bump();
+            let e = self.primary()?;
+            return Ok(Expr { kind: ExprKind::Comptime(Box::new(e)), span: self.since(start) });
         }
         self.primary()
     }
@@ -919,7 +986,13 @@ impl<'a> Parser<'a> {
         let start = self.span();
         let mut e = self.primary()?;
         loop {
-            if self.at(".") {
+            if self.at(".") && self.at_n(1, "[") {
+                self.bump();
+                self.bump();
+                let name = self.expr()?;
+                self.expect("]")?;
+                e = Expr { kind: ExprKind::FieldAt { target: Box::new(e), name: Box::new(name) }, span: self.since(start) };
+            } else if self.at(".") {
                 self.bump();
                 let name = self.member_name()?;
                 e = Expr { kind: ExprKind::Field { target: Box::new(e), name }, span: self.since(start) };
@@ -955,6 +1028,16 @@ impl<'a> Parser<'a> {
                 return Ok(e);
             }
         }
+    }
+
+    fn tag_args(&mut self) -> PResult<TagArgs> {
+        Ok(if self.at("(") {
+            TagArgs::Tuple(self.args()?)
+        } else if self.at("{") {
+            TagArgs::Record(self.field_inits()?)
+        } else {
+            TagArgs::None
+        })
     }
 
     fn args(&mut self) -> PResult<Vec<Expr>> {
@@ -1015,14 +1098,13 @@ impl<'a> Parser<'a> {
             }
             Tok::Tag(name) => {
                 self.bump();
-                let args = if self.at("(") {
-                    TagArgs::Tuple(self.args()?)
-                } else if self.at("{") {
-                    TagArgs::Record(self.field_inits()?)
-                } else {
-                    TagArgs::None
-                };
-                ExprKind::Tag { name, args }
+                ExprKind::Tag { name, args: self.tag_args()? }
+            }
+            Tok::Punct("#[") => {
+                self.bump();
+                let name = self.expr()?;
+                self.expect("]")?;
+                ExprKind::TagAt { name: Box::new(name), args: self.tag_args()? }
             }
             Tok::Ident(name) => {
                 // `Name { … }` is a struct literal; blocks never follow an expression directly.
@@ -1095,23 +1177,7 @@ impl<'a> Parser<'a> {
                 self.bump();
                 let scrutinee = self.paren_expr()?;
                 self.expect("{")?;
-                let mut arms = Vec::new();
-                while !self.at("}") {
-                    let pat = self.pattern()?;
-                    let guard = if self.eat_kw(Kw::If) { Some(self.expr()?) } else { None };
-                    self.expect("=>")?;
-                    if self.at("{") {
-                        let b = self.block()?;
-                        let span = b.span;
-                        arms.push(MatchArm { pat, guard, body: Expr { kind: ExprKind::Block(b), span } });
-                        self.eat(",");
-                    } else {
-                        arms.push(MatchArm { pat, guard, body: self.expr()? });
-                        if !self.eat(",") {
-                            break;
-                        }
-                    }
-                }
+                let arms = self.arm_items()?;
                 self.expect("}")?;
                 ExprKind::Match { scrutinee: Box::new(scrutinee), arms }
             }
@@ -1166,6 +1232,38 @@ impl<'a> Parser<'a> {
         Ok(Expr { kind, span: self.since(start) })
     }
 
+    /// Match arms up to a closing `}`.
+    fn arm_items(&mut self) -> PResult<Vec<MatchArm>> {
+        let mut arms = Vec::new();
+        while !self.at("}") {
+            if self.at_kw(Kw::Comptime) && matches!(self.tok_at(1), Tok::Kw(Kw::For | Kw::If)) {
+                let start = self.span();
+                let g = self.generate(Self::arm_items)?;
+                let span = self.since(start);
+                let mut arm = MatchArm::new(Pattern { kind: PatternKind::Wild, span }, None, Expr { kind: ExprKind::Break, span });
+                arm.generate = Some(Box::new(g));
+                arms.push(arm);
+                self.eat(",");
+                continue;
+            }
+            let pat = self.pattern()?;
+            let guard = if self.eat_kw(Kw::If) { Some(self.expr()?) } else { None };
+            self.expect("=>")?;
+            if self.at("{") {
+                let b = self.block()?;
+                let span = b.span;
+                arms.push(MatchArm::new(pat, guard, Expr { kind: ExprKind::Block(b), span }));
+                self.eat(",");
+            } else {
+                arms.push(MatchArm::new(pat, guard, self.expr()?));
+                if !self.eat(",") {
+                    break;
+                }
+            }
+        }
+        Ok(arms)
+    }
+
     fn paren_expr(&mut self) -> PResult<Expr> {
         self.expect("(")?;
         let e = self.expr()?;
@@ -1196,16 +1294,36 @@ impl<'a> Parser<'a> {
 
     fn field_inits(&mut self) -> PResult<Vec<FieldInit>> {
         self.expect("{")?;
+        let fields = self.init_items()?;
+        self.expect("}")?;
+        Ok(fields)
+    }
+
+    /// Record-literal entries up to a closing `}`.
+    fn init_items(&mut self) -> PResult<Vec<FieldInit>> {
         let mut fields = Vec::new();
         while !self.at("}") {
-            let name = self.member_name()?;
-            let value = if self.eat(":") { Some(self.expr()?) } else { None };
-            fields.push(FieldInit { name, value });
+            if self.at_kw(Kw::Comptime) && matches!(self.tok_at(1), Tok::Kw(Kw::For | Kw::If)) {
+                let start = self.span();
+                let g = self.generate(Self::init_items)?;
+                let mut f = FieldInit::new(Ident { name: String::new(), span: self.since(start) }, None);
+                f.generate = Some(Box::new(g));
+                fields.push(f);
+                self.eat(",");
+                continue;
+            }
+            let (name, computed) = self.entry_name()?;
+            let value = if computed.is_some() || self.at(":") {
+                self.expect(":")?;
+                Some(self.expr()?)
+            } else {
+                None
+            };
+            fields.push(FieldInit { name, value, computed, generate: None });
             if !self.eat(",") {
                 break;
             }
         }
-        self.expect("}")?;
         Ok(fields)
     }
 
@@ -1256,23 +1374,20 @@ impl<'a> Parser<'a> {
             }
             Tok::Tag(name) => {
                 self.bump();
-                let args = if self.at("(") {
-                    self.bump();
-                    let mut pats = Vec::new();
-                    while !self.at(")") {
-                        pats.push(self.pattern()?);
-                        if !self.eat(",") {
-                            break;
-                        }
-                    }
-                    self.expect(")")?;
-                    TagPatArgs::Tuple(pats)
-                } else if self.at("{") {
-                    TagPatArgs::Record(self.field_pats()?)
-                } else {
-                    TagPatArgs::None
-                };
-                PatternKind::Tag { name, args }
+                PatternKind::Tag { name, args: self.tag_pat_args()? }
+            }
+            Tok::Punct("#[") => {
+                self.bump();
+                let name = self.expr()?;
+                self.expect("]")?;
+                PatternKind::TagAt { name: Box::new(name), args: self.tag_pat_args()? }
+            }
+            // A value computed by `comptime` code: `comptime f.name => …`.
+            Tok::Kw(Kw::Comptime) => {
+                let start = self.span();
+                self.bump();
+                let e = self.postfix()?;
+                PatternKind::Lit(Box::new(Expr { kind: ExprKind::Comptime(Box::new(e)), span: self.since(start) }))
             }
             Tok::Punct("[") => {
                 self.bump();
@@ -1294,6 +1409,25 @@ impl<'a> Parser<'a> {
             _ => return self.error("a pattern"),
         };
         Ok(Pattern { kind, span: self.since(start) })
+    }
+
+    fn tag_pat_args(&mut self) -> PResult<TagPatArgs> {
+        Ok(if self.at("(") {
+            self.bump();
+            let mut pats = Vec::new();
+            while !self.at(")") {
+                pats.push(self.pattern()?);
+                if !self.eat(",") {
+                    break;
+                }
+            }
+            self.expect(")")?;
+            TagPatArgs::Tuple(pats)
+        } else if self.at("{") {
+            TagPatArgs::Record(self.field_pats()?)
+        } else {
+            TagPatArgs::None
+        })
     }
 
     fn field_pats(&mut self) -> PResult<Vec<(Ident, Option<Pattern>)>> {

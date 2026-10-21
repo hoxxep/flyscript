@@ -57,6 +57,8 @@ pub struct Checker<'p> {
     /// Each call's generic arguments, and the bounds they must satisfy, checked once types are
     /// final.
     pending_targs: Vec<PendingCall>,
+    /// Calls of templates, specialized once their `comptime` arguments are known.
+    pending_specs: Vec<(Span, FnId, Vec<GArg>)>,
 }
 
 /// A call's span, its generic arguments, and each (argument, bound) pair it must satisfy.
@@ -68,18 +70,28 @@ pub fn check_fn(p: &mut Program, fid: FnId) {
         return;
     }
     p.checked.insert(fid);
+    // A template is checked in each specialization, not on its own (§7.1).
+    if p.is_template(fid) {
+        return;
+    }
     let info = &p.fns[fid];
-    let decl = info.decl;
     let module = info.module;
     let scheme = info.scheme.clone();
     let impl_target = info.impl_id.map(|i| p.impls[i].target.clone());
-    let item = &p.modules[decl.module].ast.items[decl.item];
-    let fdecl = match (&item.kind, decl.method) {
-        (ast::ItemKind::Function(f), None) => f.clone(),
-        (ast::ItemKind::Impl(imp), Some(k)) => imp.methods[k].decl.clone(),
-        _ => return,
-    };
+    let Some(mut fdecl) = p.fn_decl(fid) else { return };
+    // A `comptime function` runs only in the compiler (§7.1).
+    if fdecl.sig.comptime {
+        return;
+    }
+    // A body that uses `comptime` code is expanded first (§7.2).
+    if !p.bodies.contains_key(&fid)
+        && let Some(b) = &fdecl.body
+            && super::comptime::block_has_comptime(b) {
+                fdecl.body = super::comptime::Expand::new(p, module, None, Vec::new()).body(b);
+                p.bodies.insert(fid, fdecl.clone());
+            }
     let Some(body) = fdecl.body.clone() else { return };
+    let saved_note = std::mem::replace(&mut p.note, p.spec_notes.get(&fid).cloned());
 
     let mut scope = TyScope { module, self_ty: impl_target, ..Default::default() }.with_params(&scheme.tparams);
     let regions: Vec<&GParam> = scheme.tparams.iter().filter(|g| g.kind == PKind::Region).collect();
@@ -100,6 +112,7 @@ pub fn check_fn(p: &mut Program, fid: FnId) {
         pending_copy: Vec::new(),
         bounds: scheme.tparams.iter().map(|g| (g.sym.id, g.bounds.clone())).collect(),
         pending_targs: Vec::new(),
+        pending_specs: Vec::new(),
     };
     let inferring = scheme.effects.is_none();
     c.allowed = match &scheme.effects {
@@ -135,10 +148,27 @@ pub fn check_fn(p: &mut Program, fid: FnId) {
             if !c.p.satisfies(&t, &b, &assumed) {
                 let (ts, bs) = (format!("{}", Show(&t, &*c.p)), format!("{}", Show(&b, &*c.p)));
                 c.p.error(module, span, format!("`{ts}` does not implement `{bs}`"));
-            }
+            } else if let Ty::Named(d, _) = &b
+                && matches!(c.p.defs[*d].kind, DefKind::Interface { .. }) {
+                    c.p.ensure_impl(*d, &t, 0);
+                }
         }
         let args = args.iter().map(|a| c.s.zonk_arg(a)).collect();
         c.typed.targs.insert(span, args);
+    }
+    for (span, tfid, args) in std::mem::take(&mut c.pending_specs) {
+        let tparams = c.p.fns[tfid].scheme.tparams.clone();
+        let binds: super::impls::Binds = tparams.iter().zip(&args).map(|(g, a)| (g.sym.id, c.s.zonk_arg(a))).collect();
+        let Some(ct) = c.p.comptime_args(tfid, &binds) else { continue };
+        if let Some((s, _)) = ct.iter().find(|(_, t)| super::impls::contains_params(t)) {
+            let name = s.name.clone();
+            c.p.error(module, span, format!("the `comptime` type `{name}` must be known here; it cannot depend on a generic parameter"));
+            continue;
+        }
+        let spec = c.p.specialize_for(tfid, &ct);
+        c.typed.calls.insert(span, spec);
+        let rest: Vec<GArg> = tparams.iter().zip(&args).filter(|(g, _)| !g.comptime).map(|(_, a)| c.s.zonk_arg(a)).collect();
+        c.typed.targs.insert(span, rest);
     }
     for (name, ty) in &scheme.params {
         c.typed.params.push((name.clone(), ty.clone()));
@@ -159,6 +189,7 @@ pub fn check_fn(p: &mut Program, fid: FnId) {
         row.tail = Tail::Closed;
         c.p.inferred.insert(fid, Some(row));
     }
+    c.p.note = saved_note;
 }
 
 pub fn container_message(p: &Program, d: DefId, arg: &Ty) -> String {
@@ -614,6 +645,15 @@ impl<'p> Checker<'p> {
     fn expr_inner(&mut self, e: &Expr, expected: Option<&Ty>) -> Ty {
         let span = e.span;
         match &e.kind {
+            ExprKind::TypeRef(i) => {
+                let shown = self.show(&self.p.spliced[*i].clone());
+                self.err(span, format!("the type `{shown}` is not a value"));
+                Ty::Error
+            }
+            ExprKind::FieldAt { .. } | ExprKind::TagAt { .. } => {
+                self.err(span, "a computed name `[e]` belongs in code that `comptime` generates");
+                Ty::Error
+            }
             ExprKind::Int(_) => match expected.map(|x| self.strip(x)) {
                 Some(Ty::Prim(p)) if p.is_float() => Ty::Prim(p),
                 _ => self.s.fresh_kind(VarKind::Int),
@@ -1077,10 +1117,18 @@ impl<'p> Checker<'p> {
         match &callee.kind {
             ExprKind::Ident(name) if self.local(name).is_none() => {
                 if let Some(Binding::Fn(fid)) = self.p.lookup(self.module, name) {
+                    if self.p.fn_decl(fid).is_some_and(|d| d.sig.comptime) {
+                        self.err(span, format!("`{name}` is a `comptime function`: call it from `comptime` code"));
+                        return Ty::Error;
+                    }
                     return self.call_fn(fid, None, CallSite { explicit: &explicit, args, expected, span });
                 }
             }
             ExprKind::Field { target, name } => {
+                if let ExprKind::TypeRef(i) = &target.kind {
+                    let ty = self.p.spliced[*i].clone();
+                    return self.call_on_type(&ty, &name.name, CallSite { explicit: &explicit, args, expected, span });
+                }
                 if let ExprKind::Ident(tname) = &target.kind
                     && self.local(tname).is_none() {
                         if let Some((sym, _)) = self.scope.params.get(tname).cloned() {
@@ -1152,6 +1200,9 @@ impl<'p> Checker<'p> {
             .flatten()
             .collect();
         self.pending_targs.push((span, inst.args.clone(), bounds));
+        if self.p.is_template(fid) {
+            self.pending_specs.push((span, fid, inst.args.clone()));
+        }
         // Explicit type arguments apply to the function's own parameters, or to its impl's when
         // it has none (`HashMap.new<String, u64>()`).
         let own_types: Vec<usize> = scheme.tparams.iter().enumerate().filter(|(_, g)| g.kind == PKind::Type).map(|(i, _)| i).collect();
@@ -1235,10 +1286,13 @@ impl<'p> Checker<'p> {
         let ifaces: Vec<DefId> = self.p.iface_fns.keys().filter(|(_, n)| n == name).map(|(d, _)| *d).collect();
         for d in ifaces {
             let concrete = self.s.zonk(ty);
-            if let Some((imp, _)) = self.p.resolve_impl(d, &concrete)
-                && let Some(fid) = self.p.impl_method(imp, name) {
-                    return self.call_fn(fid, None, site);
+            if let Some((imp, binds)) = self.p.resolve_impl(d, &concrete) {
+                let fid = if self.p.is_template_impl(imp) { self.p.impl_method(imp, name) } else { self.p.method_for(imp, name, &binds) };
+                if let Some(fid) = fid {
+                    let fixed: Vec<GArg> = if self.p.is_template_impl(imp) { vec![GArg::Ty(concrete.clone())] } else { Vec::new() };
+                    return self.call_fn_fixed(fid, &fixed, None, site);
                 }
+            }
         }
         let shown = self.show(ty);
         self.err(site.span, format!("`{shown}` has no function `{name}`"));
@@ -1291,7 +1345,7 @@ impl<'p> Checker<'p> {
 
     fn find_method(&mut self, recv: &Ty, name: &str) -> Option<FnId> {
         let candidates: Vec<FnId> = (0..self.p.fns.len())
-            .filter(|f| self.p.fns[*f].name == name && self.p.fns[*f].impl_id.is_some() && self.has_self(*f))
+            .filter(|f| self.p.fns[*f].name == name && self.p.fns[*f].impl_id.is_some() && self.has_self(*f) && !self.p.is_template(*f) && !self.p.spec_of.contains_key(f))
             .collect();
         for fid in candidates {
             let scheme = self.p.fns[fid].scheme.clone();
@@ -1303,6 +1357,16 @@ impl<'p> Checker<'p> {
             if fits {
                 return Some(fid);
             }
+        }
+        // A derivation: the template impl of an interface with this method (§7.3).
+        let recv = self.s.zonk(recv);
+        let ifaces: Vec<DefId> = self.p.iface_fns.keys().filter(|(_, n)| n == name).map(|(d, _)| *d).collect();
+        for d in ifaces {
+            // The template's method: it is specialized once the receiver's type is final.
+            if let Some((imp, _)) = self.p.resolve_impl(d, &recv)
+                && self.p.is_template_impl(imp) {
+                    return self.p.impl_method(imp, name);
+                }
         }
         None
     }
@@ -1572,6 +1636,7 @@ impl<'p> Checker<'p> {
         };
         match &pat.kind {
             PatternKind::Wild => {}
+            PatternKind::TagAt { .. } => self.err(pat.span, "a computed name `[e]` belongs in code that `comptime` generates"),
             PatternKind::Bind(name) => {
                 self.typed.bindings.insert(pat.span, t.clone());
                 self.declare(name, t.clone())

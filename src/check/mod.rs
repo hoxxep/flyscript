@@ -1,6 +1,7 @@
 //! The type and effect checker (milestone 2).
 
 pub mod env;
+pub mod comptime;
 pub mod expr;
 pub mod impls;
 pub mod own;
@@ -34,17 +35,16 @@ impl Checked {
 /// Type- and effect-checks the given files and everything they import.
 pub fn check_files(paths: &[PathBuf]) -> Checked {
     let mut program = Program::load(paths);
-    for fid in 0..program.fns.len() {
-        if !program.modules[program.fns[fid].module].is_std {
-            expr::check_fn(&mut program, fid);
-        }
+    // Checking may specialize templates, adding functions to check (§7.1).
+    let mut fid = 0;
+    while fid < program.fns.len() {
+        expr::check_fn(&mut program, fid);
+        fid += 1;
     }
     // Ownership needs well-typed bodies.
     if program.diags.is_empty() {
         for fid in 0..program.fns.len() {
-            if !program.modules[program.fns[fid].module].is_std {
-                own::check_function(&mut program, fid);
-            }
+            own::check_function(&mut program, fid);
         }
     }
     let errors = program

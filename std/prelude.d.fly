@@ -49,6 +49,17 @@ impl<E> Fail<E> {
   export function map<T, F>(body: once () => T uses Fail<E>, wrap: once (e: E) => F): T uses Fail<F>;
 }
 
+// ---- Reflection (§7.2): what `Type.info` tells `comptime` code about a type ----
+export type Field = { name: str; type: Type };
+// A tag's payload: the one type of `#A(T)`, the tuple or record of a larger payload, or none.
+export type TagInfo = { name: str; payload: Option<Type> };
+export type TypeInfo =
+  | #Int { signed: bool; bits: u8 } | #Float(u8) | #Bool | #Str | #Void | #Fn
+  | #Record(Field[]) | #Tuple(Type[]) | #Union(TagInfo[])
+  | #Struct { name: str; fields: Field[] } | #Enum { name: str; tags: TagInfo[] }
+  | #Array { item: Type; len: usize } | #Slice(Type) | #Borrow { mutable: bool; type: Type }
+  | #Opaque { name: str; args: Type[] };
+
 // ---- Iteration (§5.5): generators, pull iteration and iteration chains ----
 export view struct Gen<T, row E>;
 

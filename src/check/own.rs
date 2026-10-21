@@ -96,14 +96,9 @@ impl State {
 
 pub fn check_function(p: &mut Program, fid: FnId) {
     let Some(typed) = p.typed.get(&fid).cloned() else { return };
-    let decl = p.fns[fid].decl;
-    let item = &p.modules[decl.module].ast.items[decl.item];
-    let fdecl = match (&item.kind, decl.method) {
-        (ast::ItemKind::Function(f), None) => f.clone(),
-        (ast::ItemKind::Impl(imp), Some(k)) => imp.methods[k].decl.clone(),
-        _ => return,
-    };
+    let Some(fdecl) = p.fn_decl(fid) else { return };
     let Some(body) = fdecl.body else { return };
+    p.note = p.spec_notes.get(&fid).cloned();
     let module = p.fns[fid].module;
     let ret_ty = p.fns[fid].scheme.ret.clone();
     let sources = result_sources(p, &p.fns[fid].scheme);
@@ -166,6 +161,7 @@ pub fn check_function(p: &mut Program, fid: FnId) {
             o.check_return(&v, body.tail.as_ref().map_or(body.span, |e| e.span));
         }
     }
+    o.p.note = None;
 }
 
 struct Own<'p> {
@@ -581,6 +577,7 @@ impl<'p> Own<'p> {
 
     fn bind_pattern(&mut self, pat: &Pattern, v: &Val, mutable: bool) {
         match &pat.kind {
+            PatternKind::TagAt { .. } => {}
             PatternKind::Bind(name) => {
                 let ty = self.typed.bindings.get(&pat.span).cloned().unwrap_or(Ty::Error);
                 let id = self.declare_var(name, ty.clone(), mutable, false, pat.span.start);
@@ -649,6 +646,7 @@ impl<'p> Own<'p> {
             return self.contained(|o| o.expr(e, how));
         }
         match &e.kind {
+            ExprKind::TypeRef(_) | ExprKind::FieldAt { .. } | ExprKind::TagAt { .. } => Val::default(),
             ExprKind::Ident(name) => {
                 let Some(v) = self.lookup(name) else { return Val::default() };
                 self.record_use(v, e.span);
@@ -1071,7 +1069,9 @@ impl<'p> Own<'p> {
             }
         }
         // A `mut` receiver that can hold borrows stores the arguments' borrows (`v.push(x)`).
+        let mut_receiver = scheme.as_ref().and_then(|s| s.params.first()).is_some_and(|(_, t)| matches!(t, Ty::Borrow(true, _)));
         if has_self
+            && mut_receiver
             && let ExprKind::Field { target, .. } = &callee.kind
                 && let Some(path) = self.place(target) {
                     let rty = self.vars[path.root].ty.clone();

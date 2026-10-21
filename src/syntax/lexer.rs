@@ -128,6 +128,10 @@ impl<'a> Lexer<'a> {
                     None => Tok::Ident(word.to_string()),
                 };
                 self.push(tok, start);
+            } else if c == '#' && self.src[self.pos..self.end].starts_with("#[") {
+                self.bump();
+                self.bump();
+                self.push(Tok::Punct("#["), start);
             } else if c == '#' {
                 self.bump();
                 if !self.peek().is_some_and(|c| c.is_alphabetic() || c == '_') {

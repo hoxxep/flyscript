@@ -1,0 +1,69 @@
+// expect: {x: 1, y: 2}
+// expect: Dot Circle({x: 3, y: 4}) Named('home')
+// expect: {age: 36, name: 'ada'}
+// A derivation written in Flyscript (§7.3): a template impl over `Type.info`, requested by
+// nominal types with `impl Describe for T;` and applied to structural records directly.
+import { println } from "std/io";
+
+interface Describe { function describe(self: readonly Self, out: mut String): void; }
+
+impl Describe for i64 {
+  function describe(self: readonly Self, out: mut String): void { out.push(`${self}`); }
+}
+impl Describe for String {
+  function describe(self: readonly Self, out: mut String): void { out.push("'"); out.push(self); out.push("'"); }
+}
+
+impl<comptime T: Type> Describe for T {
+  function describe(self: readonly Self, out: mut String): void {
+    comptime match (Type.info(T)) {
+      #Record(fields) | #Struct({ fields }) => {
+        out.push("{");
+        comptime for (const [i, f] of fields.enumerate()) {
+          comptime if (i > 0) { out.push(", "); }
+          out.push(f.name);
+          out.push(": ");
+          self.[f.name].describe(mut out);
+        }
+        out.push("}");
+      }
+      #Union(tags) | #Enum({ tags }) => match (self) {
+        comptime for (const t of tags) {
+          comptime if (t.payload == #None) {
+            #[t.name] => out.push(t.name),
+          } else {
+            #[t.name](x) => { out.push(t.name); out.push("("); x.describe(mut out); out.push(")"); },
+          }
+        }
+      },
+      _ => comptime panic(`${Type.name(T)} cannot be described`),
+    }
+  }
+}
+
+struct Point { x: i64; y: i64; }
+impl Describe for Point;
+
+enum Shape { #Dot, #Circle(Point), #Named(String) }
+impl Describe for Shape;
+
+export function main(): void uses Io {
+  let s = String.new();
+  const p = Point { x: 1, y: 2 };
+  p.describe(mut s);
+  println(s);
+  let t = String.new();
+  const a: Shape = #Dot;
+  const b: Shape = #Circle(Point { x: 3, y: 4 });
+  const c: Shape = #Named(String.fromStr("home"));
+  a.describe(mut t);
+  t.push(" ");
+  b.describe(mut t);
+  t.push(" ");
+  c.describe(mut t);
+  println(t);
+  let u = String.new();
+  const r = { name: String.fromStr("ada"), age: 36 as i64 };
+  r.describe(mut u);
+  println(u);
+}

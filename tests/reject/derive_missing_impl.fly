@@ -1,0 +1,20 @@
+// error: no method `describe` on `bool` (in `describe` for `Flag`)
+// A derivation is checked in each specialization; its errors point into the template and name
+// the type it was specialized for (§7.1).
+interface Describe { function describe(self: readonly Self, out: mut String): void; }
+impl Describe for i64 {
+  function describe(self: readonly Self, out: mut String): void { out.push(`${self}`); }
+}
+impl<comptime T: Type> Describe for T {
+  function describe(self: readonly Self, out: mut String): void {
+    comptime match (Type.info(T)) {
+      #Struct({ fields }) => {
+        comptime for (const f of fields) { self.[f.name].describe(mut out); }
+      }
+      _ => comptime panic(`${Type.name(T)} cannot be described`),
+    }
+  }
+}
+struct Flag { on: bool; }
+impl Describe for Flag;
+export function show(f: readonly Flag): String { let s = String.new(); f.describe(mut s); s }

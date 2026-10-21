@@ -1,0 +1,11 @@
+// error: Vault is opaque here
+// Reflection sees a struct's private fields only from its own module, or in a derivation it
+// asked for; elsewhere the struct is `#Opaque` (§7.2).
+import { Vault } from "../support/vault";
+function fieldCount<comptime T: Type>(v: readonly T): usize {
+  comptime match (Type.info(T)) {
+    #Struct({ fields }) => comptime fields.len(),
+    _ => comptime panic(`${Type.name(T)} is opaque here`),
+  }
+}
+export function n(v: readonly Vault): usize { fieldCount(v) }

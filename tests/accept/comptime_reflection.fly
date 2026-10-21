@@ -1,0 +1,30 @@
+// Template functions specialize per type; `comptime` values splice into run-time code (§7.1).
+struct Vec3 { x: f64; y: f64; z: f64; }
+
+function fieldCount<comptime T: Type>(v: readonly T): usize {
+  comptime match (Type.info(T)) {
+    #Struct({ fields }) | #Record(fields) => comptime fields.len(),
+    _ => 0,
+  }
+}
+
+comptime function fieldsOf(T: Type): Field[] {
+  match (Type.info(T)) {
+    #Struct({ fields }) | #Record(fields) => fields,
+    _ => [],
+  }
+}
+
+function sum<comptime T: Type>(v: readonly T): f64 {
+  let total = 0.0;
+  comptime for (const f of fieldsOf(T)) { total += v.[f.name]; }
+  total
+}
+
+comptime function isPowerOfTwo(n: usize): bool { n > 0 && (n & (n - 1)) == 0 }
+const SLOTS: usize = 64;
+
+export function stats(v: readonly Vec3): f64 {
+  comptime assert(isPowerOfTwo(SLOTS), "SLOTS must be a power of two");
+  sum(v) + (fieldCount(v) as f64) + (fieldCount({ a: 1, b: 2 }) as f64)
+}

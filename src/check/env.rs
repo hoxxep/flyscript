@@ -62,6 +62,9 @@ pub struct GParam {
     pub kind: PKind,
     pub bounds: Vec<Ty>,
     pub default: Option<GArg>,
+    /// `comptime T: Type`: a template parameter, whose functions are specialized for each type
+    /// they are used at (§7.1).
+    pub comptime: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -121,6 +124,8 @@ pub struct FnInfo {
 
 #[derive(Debug)]
 pub struct Impl {
+    /// `impl I for T;`: `T` asks for `I`'s derivation, the template impl of `I` (§7.3).
+    pub derived: bool,
     pub module: usize,
     pub params: Vec<GParam>,
     pub target: Ty,
@@ -146,6 +151,22 @@ pub struct Program {
     pub typed: HashMap<FnId, Typed>,
     /// Each interface method, as a function called through a bound.
     pub iface_fns: HashMap<(DefId, String), FnId>,
+    /// Types computed by `comptime` code, referred to from expanded syntax (`TypeKind::Spliced`).
+    pub spliced: Vec<Ty>,
+    /// Bodies after `comptime` expansion, for templates' specializations and for functions that
+    /// use `comptime` code.
+    pub bodies: HashMap<FnId, ast::FnDecl>,
+    /// The source position each position in expanded code came from.
+    pub synth: HashMap<usize, Span>,
+    pub next_synth: usize,
+    /// Specializations of templates, by template and `comptime` arguments.
+    pub specs: HashMap<(FnId, String), FnId>,
+    /// For a specialization: its template, and how diagnostics name it ("in `describe` for
+    /// `Point`").
+    pub spec_of: HashMap<FnId, FnId>,
+    pub spec_notes: HashMap<FnId, String>,
+    /// While a specialization is checked: which one, for its diagnostics.
+    pub note: Option<String>,
 }
 
 /// The type checker's results for one function body, keyed by source span.
@@ -207,6 +228,14 @@ impl Program {
             checked: Default::default(),
             typed: HashMap::new(),
             iface_fns: HashMap::new(),
+            spliced: Vec::new(),
+            bodies: HashMap::new(),
+            synth: HashMap::new(),
+            next_synth: super::comptime::SYNTH_BASE,
+            specs: HashMap::new(),
+            spec_of: HashMap::new(),
+            spec_notes: HashMap::new(),
+            note: None,
         };
         for (name, source) in STD {
             p.add_module(name.to_string(), format!("<{name}.d.fly>"), source.to_string(), true);
@@ -249,7 +278,38 @@ impl Program {
     }
 
     pub fn error(&mut self, module: usize, span: Span, msg: impl Into<String>) {
-        self.diags.push((module, Diagnostic::new(span, msg)));
+        let span = self.source_span(span);
+        let mut msg = msg.into();
+        if let Some(n) = &self.note {
+            msg = format!("{msg} ({n})");
+        }
+        let d = (module, Diagnostic::new(span, msg));
+        // Repeated copies of generated code report a problem once.
+        if !self.diags.contains(&d) {
+            self.diags.push(d);
+        }
+    }
+
+    /// The source position of a position, which may be in expanded code.
+    pub fn source_span(&self, span: Span) -> Span {
+        if span.start < super::comptime::SYNTH_BASE {
+            return span;
+        }
+        self.synth.get(&span.start).copied().unwrap_or_default()
+    }
+
+    /// A function's declaration: its expanded body if it has one.
+    pub fn fn_decl(&self, fid: FnId) -> Option<ast::FnDecl> {
+        if let Some(d) = self.bodies.get(&fid) {
+            return Some(d.clone());
+        }
+        let decl = self.fns[fid].decl;
+        let item = self.modules.get(decl.module)?.ast.items.get(decl.item)?;
+        match (&item.kind, decl.method) {
+            (ast::ItemKind::Function(f), None) => Some(f.clone()),
+            (ast::ItemKind::Impl(imp), Some(k)) => Some(imp.methods[k].decl.clone()),
+            _ => None,
+        }
     }
 
     pub fn fresh_sym(&mut self, name: &str) -> Sym {
@@ -374,7 +434,8 @@ impl Program {
                         let scope = TyScope { module: m, ..Default::default() };
                         let scheme = self.elaborate_sig(&f.sig, &scope, None);
                         let Some(Binding::Fn(id)) = self.modules[m].scope.get(&f.sig.name.name).copied() else { continue };
-                        if item.exported && scheme.effects.is_none() {
+                        // A template is checked only per specialization, so it states its effects (§7.1).
+                        if (item.exported || scheme.tparams.iter().any(|g| g.comptime)) && scheme.effects.is_none() {
                             self.fns[id].scheme = Scheme { effects: Some(EffRow::pure()), ..scheme };
                         } else {
                             self.fns[id].scheme = scheme;
@@ -403,14 +464,17 @@ impl Program {
     pub fn type_params(&mut self, params: &[ast::TypeParam], scope: &TyScope) -> Vec<GParam> {
         let mut out = Vec::new();
         for p in params {
-            let (name, kind) = match p {
-                ast::TypeParam::Region { name, .. } => (name, PKind::Region),
-                ast::TypeParam::Row { name, .. } => (name, PKind::Row),
-                ast::TypeParam::Comptime { name, .. } => (name, PKind::Len),
-                ast::TypeParam::Type { name, .. } => (name, PKind::Type),
+            let (name, kind, comptime) = match p {
+                ast::TypeParam::Region { name, .. } => (name, PKind::Region, false),
+                ast::TypeParam::Row { name, .. } => (name, PKind::Row, false),
+                ast::TypeParam::Comptime { name, ty } => match &ty.kind {
+                    TypeKind::Path { segments, .. } if segments.len() == 1 && segments[0].name == "Type" => (name, PKind::Type, true),
+                    _ => (name, PKind::Len, false),
+                },
+                ast::TypeParam::Type { name, .. } => (name, PKind::Type, false),
             };
             let sym = self.fresh_sym(&name.name);
-            out.push(GParam { sym, kind, bounds: Vec::new(), default: None });
+            out.push(GParam { sym, kind, bounds: Vec::new(), default: None, comptime });
         }
         // Bounds and defaults may mention earlier parameters.
         let inner = scope.with_params(&out);
@@ -582,7 +646,7 @@ impl Program {
             _ => None,
         });
         let id = self.impls.len();
-        self.impls.push(Impl { module: m, params: params.clone(), target: target.clone(), interface, methods: Vec::new() });
+        self.impls.push(Impl { derived: imp.derived, module: m, params: params.clone(), target: target.clone(), interface, methods: Vec::new() });
         let method_scope = TyScope { self_ty: Some(target), ..inner };
         for (k, method) in imp.methods.iter().enumerate() {
             let scheme = self.elaborate_sig(&method.decl.sig, &method_scope, Some(&params));
@@ -647,6 +711,7 @@ impl Program {
     pub fn elab_ty(&mut self, t: &ast::Type, scope: &TyScope) -> Ty {
         let m = scope.module;
         match &t.kind {
+            TypeKind::Spliced(i) => self.spliced[*i].clone(),
             TypeKind::Path { segments, args } if segments.len() == 2 => {
                 let base = ast::Type {
                     kind: TypeKind::Path { segments: vec![segments[0].clone()], args: Vec::new() },

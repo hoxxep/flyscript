@@ -162,14 +162,8 @@ impl Interp {
     }
 
     fn call_fn_with(&mut self, fid: FnId, args: Vec<Value>, tenv: TEnv) -> R {
-        let info = &self.prog.fns[fid];
-        let decl = info.decl;
-        let item = &self.prog.modules[decl.module].ast.items[decl.item];
-        let fdecl = match (&item.kind, decl.method) {
-            (ast::ItemKind::Function(f), None) => f.clone(),
-            (ast::ItemKind::Impl(imp), Some(k)) => imp.methods[k].decl.clone(),
-            _ => return Err(panic("not a function")),
-        };
+        let module = self.prog.fns[fid].module;
+        let Some(fdecl) = self.prog.fn_decl(fid) else { return Err(panic("not a function")) };
         let Some(body) = fdecl.body else {
             return self.builtin(fid, args);
         };
@@ -178,7 +172,7 @@ impl Interp {
             define(&env, &p.name.name, a);
         }
         let frame = self.fresh_id();
-        let saved = std::mem::replace(&mut self.lex, Lex { frame, loops: Vec::new(), owner: fid, module: decl.module, tenv });
+        let saved = std::mem::replace(&mut self.lex, Lex { frame, loops: Vec::new(), owner: fid, module, tenv });
         let r = self.block(&body, &env);
         self.lex = saved;
         match r {
@@ -362,6 +356,7 @@ impl Interp {
         };
         match &pat.kind {
             PatternKind::Wild => true,
+            PatternKind::TagAt { .. } => false,
             PatternKind::Bind(name) => {
                 define(env, name, v.clone());
                 true
@@ -481,6 +476,7 @@ impl Interp {
 
     pub fn expr(&mut self, e: &Expr, env: &Env) -> R {
         match &e.kind {
+            ExprKind::TypeRef(_) | ExprKind::FieldAt { .. } | ExprKind::TagAt { .. } => Err(panic("comptime syntax at run time")),
             ExprKind::Int(s) => Ok(match self.ty_of(e.span) {
                 Some(Ty::Prim(p)) if p.is_float() => Value::Float(s.parse().unwrap_or(0.0)),
                 _ => Value::Int(parse_int(s)),
@@ -819,7 +815,7 @@ impl Interp {
         let (imp, binds) = self.prog.resolve_impl(iface, self_ty).ok_or_else(|| {
             panic(format!("no impl of `{}` for `{}`", self.prog.defs[iface].name, Show(self_ty, &*self.prog)))
         })?;
-        let m = self.prog.impl_method(imp, &info.name).ok_or_else(|| panic(format!("impl has no `{}`", info.name)))?;
+        let m = self.prog.method_for(imp, &info.name, &binds).ok_or_else(|| panic(format!("no specialized `{}`", info.name)))?;
         let mut env: HashMap<u32, GArg> = binds;
         // The method's own parameters follow the impl's; the call gave them after `Self` and the
         // interface's.
