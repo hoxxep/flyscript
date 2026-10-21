@@ -1,0 +1,27 @@
+// expect: true false Version { major: 1, minor: 10, patch: 0 }
+// expect: true true true
+// expect: true true
+// `<`, `<=`, `>` and `>=` call `Ord.cmp` on anything but a primitive (§3.5): derived, it orders by
+// fields, then by tags, in declaration order.
+import { println } from "std/io";
+
+struct Version { major: u32; minor: u32; patch: u32; }
+impl Eq for Version;
+impl Ord for Version;
+impl Show for Version;
+
+enum Level { #Debug, #Info, #Warn(String), #Error(u32) }
+impl Eq for Level;
+impl Ord for Level;
+
+function max<T extends Ord>(a: T, b: T): T { if (a < b) { b } else { a } }
+
+export function main(): void uses Io {
+  const a = Version { major: 1, minor: 4, patch: 2 };
+  const b = Version { major: 1, minor: 10, patch: 0 };
+  println(`${a < b} ${a >= b} ${max(a, b)}`);
+  const w: Level = #Warn(String.fromStr("disk"));
+  const e: Level = #Error(2);
+  println(`${w < e} ${#Info < w} ${e > #Error(1)}`);
+  println(`${[1, "b"] < [1, "c"]} ${{ x: 2, y: 0 } > { x: 1, y: 9 }}`);
+}

@@ -1101,7 +1101,11 @@ impl<'p> Expand<'p> {
                         tag("Struct", rec(vec![("name", name.clone()), ("fields", CV::List(fs.iter().map(|(k, t)| field((k, t))).collect()))]))
                     }
                     DefKind::Enum { tags } => {
-                        let tags: Vec<(String, Ty)> = tags.iter().map(|(k, t)| (k.clone(), super::env::subst_params(t, &def.params, args))).collect();
+                        let tags: Vec<(String, Ty)> = def
+                            .tag_order
+                            .iter()
+                            .filter_map(|k| tags.get(k).map(|t| (k.clone(), super::env::subst_params(t, &def.params, args))))
+                            .collect();
                         let infos = tags.iter().map(|(k, p)| self.tag_info(k, p)).collect();
                         tag("Enum", rec(vec![("name", name.clone()), ("tags", CV::List(infos))]))
                     }

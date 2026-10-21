@@ -1,0 +1,5 @@
+// error: `Version` does not implement `Ord`: `Ord` needs `Eq`; ask for it with `impl Eq for Version;`
+// `Ord extends Eq`: asking for `Ord` without `Eq` does not give it (§3.4).
+struct Version { major: u32; minor: u32; }
+impl Ord for Version;
+export function older(a: readonly Version, b: readonly Version): bool { a < b }

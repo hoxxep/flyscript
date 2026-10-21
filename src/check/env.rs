@@ -101,6 +101,8 @@ pub struct Def {
     pub private: Vec<String>,
     /// Declared `view` (§3.3).
     pub view: bool,
+    /// An enum's tags in declaration order, which derivations follow (`Ord`, §3.5).
+    pub tag_order: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -388,7 +390,7 @@ impl Program {
                 }
             }
         }
-        for name in ["Fail", "Yield", "Region", "Io", "String", "Ref", "Vec", "Soa", "Iterable", "LentBy", "Copy", "Send", "Eq", "Show"] {
+        for name in ["Fail", "Yield", "Region", "Io", "String", "Ref", "Vec", "Soa", "Iterable", "LentBy", "Copy", "Send", "Eq", "Show", "Ord"] {
             let prelude = self.module_named("std/prelude").expect("prelude");
             let layout = self.module_named("std/layout").expect("layout");
             let found = self.modules[prelude].exports.get(name).or_else(|| self.modules[layout].exports.get(name));
@@ -468,6 +470,7 @@ impl Program {
             span: name.span,
             private: Vec::new(),
             view: false,
+            tag_order: Vec::new(),
         });
         self.defs.len() - 1
     }
@@ -528,7 +531,10 @@ impl Program {
                 self.defs[id].private =
                     s.fields.iter().flatten().filter(|f| f.private).map(|f| f.name.name.clone()).collect();
             }
-            ItemKind::Enum(e) => self.defs[id].view = e.view,
+            ItemKind::Enum(e) => {
+                self.defs[id].view = e.view;
+                self.defs[id].tag_order = e.tags.iter().map(|t| t.name.name.clone()).collect();
+            }
             _ => {}
         }
         let kind = match &item.kind {

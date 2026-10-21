@@ -183,7 +183,7 @@ impl Program {
         }
     }
 
-    fn derive_request(&self, iface: DefId, d: DefId) -> bool {
+    pub fn derive_request(&self, iface: DefId, d: DefId) -> bool {
         self.impls.iter().any(|r| r.derived && r.interface.as_ref().map(|(i, _)| *i) == Some(iface) && matches!(&r.target, Ty::Named(x, _) if *x == d))
     }
 

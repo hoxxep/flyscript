@@ -246,7 +246,9 @@ A method's receiver is a first parameter named `self`: `self: Self` (by move), `
 
 An interface can come with a *derivation*: an impl, written in Flyscript with `comptime` reflection, that works for any type whose shape it can see (§7.3). Records, tuples and tag unions get it whenever they have no impl of their own; a struct or enum asks for it with `impl Eq for Point;`. `Eq`, `Hash`, `Show` and `Clone` are derived this way in the prelude, so an error union prints, compares and hashes with no code, and so are `ToJson` and `FromJson` in the standard library.
 
-The operators use them. `==` and `!=` are built in for primitives and call `Eq.eq` on anything else; `` `${e}` `` writes a primitive or a string as it is and anything else with `Show`, which writes a value as Flyscript would (`Point { x: 1, y: 2 }`, `#Some("a")`). A struct is a new type, so it is compared or printed only if it asks: `impl Eq for Point;`.
+`Ord extends Eq` is derived too, ordering by fields and then by tags, in declaration order; `type Ordering = #Less | #Equal | #Greater`.
+
+The operators use them. `==` and `!=` are built in for primitives and call `Eq.eq` on anything else, and `<`, `<=`, `>` and `>=` likewise call `Ord.cmp`; `` `${e}` `` writes a primitive or a string as it is and anything else with `Show`, which writes a value as Flyscript would (`Point { x: 1, y: 2 }`, `#Some("a")`). A struct is a new type, so it is compared or printed only if it asks: `impl Eq for Point;`.
 
 ### 3.6 Inference
 

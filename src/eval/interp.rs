@@ -556,11 +556,24 @@ impl Interp {
                 })
             }
             ExprKind::BorrowMut(inner) => Ok(Value::Ptr(self.place(inner, env)?)),
-            ExprKind::Binary { op, lhs, rhs } if (*op == "==" || *op == "!=") && self.op_target(e.span, false).is_some() => {
+            ExprKind::Binary { op, lhs, rhs } if self.op_target(e.span, false).is_some() => {
                 let (f, tenv) = self.op_target(e.span, false).expect("an operator's method");
                 let (l, r) = (self.expr(lhs, env)?, self.expr(rhs, env)?);
-                let eq = self.call_fn_with(f, vec![l, r], tenv)?.as_bool();
-                Ok(Value::Bool(eq == (*op == "==")))
+                let v = self.call_fn_with(f, vec![l, r], tenv)?;
+                Ok(Value::Bool(match *op {
+                    "==" => v.as_bool(),
+                    "!=" => !v.as_bool(),
+                    // `Ord.cmp` gave `#Less`, `#Equal` or `#Greater`.
+                    _ => {
+                        let Value::Tag(t, _) = v.deref() else { return Err(panic("`cmp` gave no ordering")) };
+                        match *op {
+                            "<" => &*t == "Less",
+                            "<=" => &*t != "Greater",
+                            ">" => &*t == "Greater",
+                            _ => &*t != "Less",
+                        }
+                    }
+                }))
             }
             ExprKind::Binary { op, lhs, rhs } => {
                 if *op == "&&" {
@@ -945,12 +958,25 @@ pub fn binary(op: &str, a: &Value, b: &Value) -> R {
             }
         }
         (Text(x), Text(y)) if op == "+" => Value::text(&format!("{x}{y}")),
+        // Strings order by their bytes, and `false` before `true`.
+        (Text(x), Text(y)) if matches!(op, "<" | ">" | "<=" | ">=") => Bool(compare(op, x.as_bytes().cmp(y.as_bytes()))),
+        (Bool(x), Bool(y)) if matches!(op, "<" | ">" | "<=" | ">=") => Bool(compare(op, x.cmp(y))),
         _ => match op {
             "==" => Bool(a.equals(b)),
             "!=" => Bool(!a.equals(b)),
             _ => return Err(panic(format!("bad operands for {op}: {} and {}", a.show(), b.show()))),
         },
     })
+}
+
+fn compare(op: &str, o: std::cmp::Ordering) -> bool {
+    use std::cmp::Ordering::*;
+    match op {
+        "<" => o == Less,
+        ">" => o == Greater,
+        "<=" => o != Greater,
+        _ => o != Less,
+    }
 }
 
 fn cast(v: &Value, ty: &ast::Type) -> Value {

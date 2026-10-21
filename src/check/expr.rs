@@ -180,7 +180,18 @@ pub fn check_fn(p: &mut Program, fid: FnId) {
         if !c.p.satisfies(&t, &Ty::Named(d, Vec::new()), &assumed) {
             let shown = format!("{}", Show(&t, &*c.p));
             let hint = match &t {
-                Ty::Named(n, _) => format!(": ask for it with `impl {iface} for {};`", c.p.defs[*n].name),
+                Ty::Named(n, _) => {
+                    let name = c.p.defs[*n].name.clone();
+                    // Asked for, but an interface it extends is missing (`Ord` needs `Eq`).
+                    let missing = c.p.iface_closure(d).into_iter().skip(1).find(|s| !c.p.satisfies(&t, &Ty::Named(*s, Vec::new()), &assumed));
+                    match missing {
+                        Some(sup) if c.p.derive_request(d, *n) => {
+                            let sup = c.p.defs[sup].name.clone();
+                            format!(": `{iface}` needs `{sup}`; ask for it with `impl {sup} for {name};`")
+                        }
+                        _ => format!(": ask for it with `impl {iface} for {name};`"),
+                    }
+                }
                 _ => String::new(),
             };
             c.p.error(module, span, format!("`{shown}` does not implement `{iface}`{hint}"));
@@ -1182,10 +1193,19 @@ impl<'p> Checker<'p> {
             self.check(rhs, &Ty::bool());
             return Ty::bool();
         }
-        let l = self.expr(lhs, None);
-        let l = self.strip(&l);
-        let r = self.expr(rhs, Some(&l));
-        let r = self.strip(&r);
+        // A literal takes its type from the other side: `#Info < level`.
+        let literal = |e: &Expr| matches!(e.kind, ExprKind::Tag { .. } | ExprKind::Record { name: None, .. } | ExprKind::List(_));
+        let (l, r) = if literal(lhs) && !literal(rhs) {
+            let r = self.expr(rhs, None);
+            let r = self.strip(&r);
+            let l = self.expr(lhs, Some(&r));
+            (self.strip(&l), r)
+        } else {
+            let l = self.expr(lhs, None);
+            let l = self.strip(&l);
+            let r = self.expr(rhs, Some(&l));
+            (l, self.strip(&r))
+        };
         if !self.try_unify(&l, &r) {
             let (a, b) = (self.show(&l), self.show(&r));
             self.err(span, format!("`{op}` needs operands of the same type, found `{a}` and `{b}`"));
@@ -1195,7 +1215,10 @@ impl<'p> Checker<'p> {
                 self.pending_ops.push((span, l.clone(), "Eq", "eq"));
                 Ty::bool()
             }
-            "<" | ">" | "<=" | ">=" => Ty::bool(),
+            "<" | ">" | "<=" | ">=" => {
+                self.pending_ops.push((span, l.clone(), "Ord", "cmp"));
+                Ty::bool()
+            }
             _ => l,
         }
     }

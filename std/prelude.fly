@@ -17,6 +17,10 @@ export interface Hash { function hash(self: readonly Self, h: mut Hasher): void;
 // Writes the value as Flyscript would write it: strings quoted, `Point { x: 1, y: 2 }`, `#Some(3)`.
 export interface Show { function show(self: readonly Self, out: mut String): void; }
 export interface Clone { function clone(self: readonly Self): Self; }
+// A total order: `<`, `<=`, `>` and `>=` call `cmp` on anything but a primitive. Derived, it
+// orders by fields in declaration order, then by tags in declaration order.
+export interface Ord extends Eq { function cmp(self: readonly Self, other: readonly Self): Ordering; }
+export type Ordering = #Less | #Equal | #Greater;
 
 export struct Hasher;
 impl Hasher {
@@ -83,6 +87,58 @@ impl<comptime T: Type> Hash for T {
       _ => comptime panic(`${Type.name(T)} cannot be hashed`),
     }
   }
+}
+
+impl<comptime T: Type> Ord for T {
+  function cmp(self: readonly Self, other: readonly Self): Ordering {
+    comptime match (Type.info(T)) {
+      #Int(_) | #Float(_) | #Bool | #Str => if (self < other) { #Less } else if (self == other) { #Equal } else { #Greater },
+      #Void => #Equal,
+      #Record(fields) | #Struct { fields } => {
+        comptime for (const f of fields) {
+          const c = self.[f.name].cmp(other.[f.name]);
+          if (c != #Equal) { return c; }
+        }
+        #Equal
+      }
+      #Tuple(items) => {
+        comptime for (const [i, _] of items.enumerate()) {
+          const c = self[i].cmp(other[i]);
+          if (c != #Equal) { return c; }
+        }
+        #Equal
+      }
+      #Union(tags) | #Enum { tags } => match ([self, other]) {
+        comptime for (const t of tags) {
+          comptime match (t.payload) {
+            #Some(_) => { [#[t.name](a), #[t.name](b)] => a.cmp(b), }
+            #None => { [#[t.name], #[t.name]] => #Equal, }
+          }
+        }
+        _ => if (tagIndex(self) < tagIndex(other)) { #Less } else { #Greater },
+      },
+      _ => comptime panic(`${Type.name(T)} cannot be ordered`),
+    }
+  }
+}
+
+// The position of a value's tag among its type's tags, in declaration order.
+function tagIndex<comptime T: Type>(v: readonly T): usize {
+  comptime match (Type.info(T)) {
+    #Union(tags) | #Enum { tags } => match (v) {
+      comptime for (const [i, t] of tags.enumerate()) {
+        comptime match (t.payload) {
+          #Some(_) => { #[t.name](_) => comptime i, }
+          #None => { #[t.name] => comptime i, }
+        }
+      }
+    },
+    _ => 0,
+  }
+}
+
+impl Ord for String {
+  function cmp(self: readonly Self, other: readonly Self): Ordering { self.asStr().cmp(other.asStr()) }
 }
 
 // Writes a string as a quoted literal.
