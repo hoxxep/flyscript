@@ -81,6 +81,7 @@ impl Interp {
         let target = match &self.prog.impls[i].target {
             Ty::Named(d, _) => self.prog.defs[*d].name.clone(),
             Ty::Prim(Prim::Str) => "str".into(),
+            Ty::Prim(p) => p.name().into(),
             Ty::Slice(_) => "slice".into(),
             Ty::Array(..) => "array".into(),
             Ty::Union(r) if r.labels.contains_key("Some") => "Option".into(),
@@ -425,6 +426,17 @@ impl Interp {
                 Ok(Value::Unit)
             }
             "Vec.new" => Ok(Value::List(Vec::new())),
+            k if k.ends_with(".wrappingAdd") || k.ends_with(".wrappingSub") || k.ends_with(".wrappingMul") => {
+                let (ty, op) = k.split_once('.').expect("a method key");
+                let (x, y) = (a(0).as_int(), a(1).as_int());
+                let r = match op {
+                    "wrappingAdd" => x + y,
+                    "wrappingSub" => x - y,
+                    _ => x.wrapping_mul(y),
+                };
+                Ok(Value::Int(wrap_to(ty, r)))
+            }
+            "panic" => Err(panic(a(0).as_text().to_string())),
             "Vec.pop" => {
                 let p = place_of(&a(0))?;
                 let mut out = None;
@@ -767,4 +779,18 @@ fn merge_sort(it: &mut Interp, v: Vec<Value>, cmp: &Value) -> Result<Vec<Value>,
     out.extend(l);
     out.extend(r);
     Ok(out)
+}
+
+/// Wraps an integer into the range of the named type, two's complement.
+fn wrap_to(ty: &str, i: i128) -> i128 {
+    match ty {
+        "u8" => i & 0xff,
+        "u16" => i & 0xffff,
+        "u32" => i & 0xffff_ffff,
+        "u64" | "usize" => i & 0xffff_ffff_ffff_ffff,
+        "i8" => i as i8 as i128,
+        "i16" => i as i16 as i128,
+        "i32" => i as i32 as i128,
+        _ => i as i64 as i128,
+    }
 }

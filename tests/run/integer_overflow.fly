@@ -1,0 +1,16 @@
+// expect: 0
+// expect: -2147483648
+// expect: 250
+// expect: <panic: arithmetic overflow: 256 does not fit in `u8`>
+// Integer arithmetic is checked against its type: overflow panics, and wrapping is explicit (§5.7).
+import { println } from "std/io";
+export function main(): void uses Io {
+  const b: u8 = 255;
+  println(`${b.wrappingAdd(1)}`);
+  const m: i32 = 2147483647;
+  println(`${m.wrappingAdd(1)}`);
+  let c: u8 = 250;
+  println(`${c}`);
+  c += 6;
+  println(`${c}`);
+}

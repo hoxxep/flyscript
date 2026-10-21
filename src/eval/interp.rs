@@ -733,7 +733,7 @@ impl Interp {
                 let v = self.expr(operand, env)?.deref();
                 Ok(match (*op, v) {
                     ("!", Value::Bool(b)) => Value::Bool(!b),
-                    ("-", Value::Int(i)) => Value::Int(-i),
+                    ("-", Value::Int(i)) => self.checked(-i, e.span)?,
                     ("-", Value::Float(f)) => Value::Float(-f),
                     (_, v) => return Err(panic(format!("bad operand {}", v.show()))),
                 })
@@ -767,7 +767,10 @@ impl Interp {
                 }
                 let a = self.expr(lhs, env)?.deref();
                 let b = self.expr(rhs, env)?.deref();
-                binary(op, &a, &b)
+                match binary(op, &a, &b)? {
+                    Value::Int(i) => self.checked(i, e.span),
+                    v => Ok(v),
+                }
             }
             ExprKind::Assign { op, target, value } => {
                 let v = self.expr(value, env)?;
@@ -775,7 +778,10 @@ impl Interp {
                 let new = if *op == "=" {
                     if matches!(v, Value::Ptr(_)) && !self.ty_of(target.span).is_some_and(|t| matches!(t, Ty::Borrow(..))) { v.deref() } else { v }
                 } else {
-                    binary(&op[..op.len() - 1], &get(&p).deref(), &v.deref())?
+                    match binary(&op[..op.len() - 1], &get(&p).deref(), &v.deref())? {
+                        Value::Int(i) => self.checked(i, target.span)?,
+                        v => v,
+                    }
                 };
                 // The value the place held is dropped before it is overwritten (§5.6).
                 let fields = self.place_fields(target);
@@ -1227,6 +1233,21 @@ fn compare(op: &str, o: std::cmp::Ordering) -> bool {
     }
 }
 
+/// The values of an integer type.
+pub fn int_range(p: Prim) -> Option<(i128, i128)> {
+    Some(match p {
+        Prim::I8 => (i8::MIN as i128, i8::MAX as i128),
+        Prim::I16 => (i16::MIN as i128, i16::MAX as i128),
+        Prim::I32 => (i32::MIN as i128, i32::MAX as i128),
+        Prim::I64 | Prim::Isize => (i64::MIN as i128, i64::MAX as i128),
+        Prim::U8 => (0, u8::MAX as i128),
+        Prim::U16 => (0, u16::MAX as i128),
+        Prim::U32 => (0, u32::MAX as i128),
+        Prim::U64 | Prim::Usize => (0, u64::MAX as i128),
+        _ => return None,
+    })
+}
+
 fn cast(v: &Value, ty: &ast::Type) -> Value {
     let ast::TypeKind::Path { segments, .. } = &ty.kind else { return v.clone() };
     let name = segments[0].name.as_str();
@@ -1280,6 +1301,18 @@ impl Interp {
 }
 
 impl Interp {
+    /// An integer result checked against its static type: overflow panics (§5.7).
+    fn checked(&self, i: i128, span: Span) -> R {
+        let t = self.ty_of(span).map(|t| self.frame_ty(&t));
+        if let Some(Ty::Prim(p)) = t
+            && let Some((lo, hi)) = int_range(p)
+            && (i < lo || i > hi)
+        {
+            return Err(panic(format!("arithmetic overflow: {i} does not fit in `{}`", p.name())));
+        }
+        Ok(Value::Int(i))
+    }
+
     fn is_string(&self, t: &Ty) -> bool {
         match t {
             Ty::Prim(Prim::Str) => true,

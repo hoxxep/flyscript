@@ -294,15 +294,26 @@ export type Result<T, E> = #Ok(T) | #Err(E);
 
 impl<T> Option<T> {
   export function isSome(self: readonly Self): bool;
+  export function isNone(self: readonly Self): bool { !self.isSome() }
   export function take(self: mut Self): Option<T>;
   export function unwrapOr(self: Self, fallback: T): T;
+  // The value, which must be there: `#None` is a bug, and panics (§5.7).
+  export function unwrap(self: Self): T {
+    match (self) { #Some(v) => v, #None => panic("unwrap of #None") }
+  }
 }
 impl<T extends Clone> Option<readonly T> {
   export function cloned(self: Self): Option<T>;
 }
 impl<T, E> Result<T, E> {
+  // The value, or the `#Err` payload thrown (§5.4).
   export function unwrap(self: Self): T uses Fail<E>;
+  export function isOk(self: readonly Self): bool { match (self) { #Ok(_) => true, #Err(_) => false } }
+  export function isErr(self: readonly Self): bool { !self.isOk() }
 }
+
+// A bug: unwinds the task, running cleanup, and fails its scope; nothing handles it (§5.7).
+export function panic(message: str): never;
 
 // ---- The standard effects (§5.1) ----
 export effect Fail<E> { raise(err: E): never; }
@@ -316,6 +327,18 @@ export effect Io {
   // The primitive under locks, channels and `join`.
   park(on: WaitKey): void;
 }
+
+// ---- Integers: arithmetic that wraps instead of panicking on overflow (§5.7) ----
+impl i8 { export function wrappingAdd(self: Self, b: Self): Self; export function wrappingSub(self: Self, b: Self): Self; export function wrappingMul(self: Self, b: Self): Self; }
+impl i16 { export function wrappingAdd(self: Self, b: Self): Self; export function wrappingSub(self: Self, b: Self): Self; export function wrappingMul(self: Self, b: Self): Self; }
+impl i32 { export function wrappingAdd(self: Self, b: Self): Self; export function wrappingSub(self: Self, b: Self): Self; export function wrappingMul(self: Self, b: Self): Self; }
+impl i64 { export function wrappingAdd(self: Self, b: Self): Self; export function wrappingSub(self: Self, b: Self): Self; export function wrappingMul(self: Self, b: Self): Self; }
+impl isize { export function wrappingAdd(self: Self, b: Self): Self; export function wrappingSub(self: Self, b: Self): Self; export function wrappingMul(self: Self, b: Self): Self; }
+impl u8 { export function wrappingAdd(self: Self, b: Self): Self; export function wrappingSub(self: Self, b: Self): Self; export function wrappingMul(self: Self, b: Self): Self; }
+impl u16 { export function wrappingAdd(self: Self, b: Self): Self; export function wrappingSub(self: Self, b: Self): Self; export function wrappingMul(self: Self, b: Self): Self; }
+impl u32 { export function wrappingAdd(self: Self, b: Self): Self; export function wrappingSub(self: Self, b: Self): Self; export function wrappingMul(self: Self, b: Self): Self; }
+impl u64 { export function wrappingAdd(self: Self, b: Self): Self; export function wrappingSub(self: Self, b: Self): Self; export function wrappingMul(self: Self, b: Self): Self; }
+impl usize { export function wrappingAdd(self: Self, b: Self): Self; export function wrappingSub(self: Self, b: Self): Self; export function wrappingMul(self: Self, b: Self): Self; }
 
 // A span of time: `Io.sleep(Duration.ms(250))`.
 export struct Duration { private nanos: u64 }

@@ -1,6 +1,6 @@
 # Flyscript
 
-**Language specification, version 0.38**
+**Language specification, version 0.39**
 
 *Affine values, one row calculus, handlers for everything, and `comptime`: Church on the outside, Turing on the inside.*
 
@@ -18,76 +18,18 @@ The whole language rests on five laws. Every rule in this document is a conseque
 4. **Handlers for everything.** Errors, I/O, iteration and region memory are ordinary effects with ordinary handlers. A handler may hold the rest of a computation as a one-shot continuation value; generators and tasks are both built from that one primitive.
 5. **`comptime` is the metalanguage.** Generics, reflection, layout transformation and derived interfaces are ordinary Flyscript code run by the compiler.
 
-### 0.1 Changes from 0.37
+### 0.1 Changes from 0.38
 
-0.38 checks the specification's own examples against the prototype. Most are fragments, but two showed drift.
+0.39 is a consistency pass before freezing a 1.0 core, after a review that read the specification for contradictions rather than design (docs/reviews/2026-10-21-consistency-review-of-0-38.md). Earlier changes are in [docs/history](history/).
 
 | Change | Why |
 | :--- | :--- |
-| `Io`'s operations take and give `Fd`, `Instant`, `Duration` and `WaitKey`, which the prelude defines: `Io.sleep(Duration.ms(250))`, `Io.now().since(start)` (§5.1) | §5.1 declared them so, but the prelude used raw `u32` and `u64` nanoseconds |
-| An interface that is not imported is reported with the import that brings it in (§2.3) | `impl FromJson for T` without the import said "`FromJson` is not an interface" |
-
---- | :--- |
-| A continuation holds every loan its body still needs after any point where it may perform the handled effect — not only what the body's value holds (§5.3) | an arm could write to `v` while the suspended body still read a slice of it, and a stored continuation let `v` change before it resumed |
-
---- | :--- |
-| A closure that escapes cannot capture region data (§4.6) | `region (R) { const r = alloc(p); return () => r.x; }` returned a closure whose type, `() => f64`, does not mention `R` |
-| A task cannot change what it borrows from outside its scope (§6.1) | two tasks could each push to the same outer `Vec` |
-| A binding whose destructor runs code cannot borrow a binding declared after it in the same block (§5.6) | bindings drop in reverse order, so the destructor read a dropped value; a `Gen`'s cleanup could too |
-
---- | :--- |
-| A result, a yielded value and a closure's result may borrow a parameter only if the parameter is itself a borrow, or through one (a view's slice); never a parameter the function owns (§4.2, §4.3, §5.5) | `function first(v: Vec<String>): str { v[0].asStr() }` returned a borrow of `v`, which the function drops; a generator could yield one and a `map` step return one |
-| A generator's items borrow what the generator holds, not the generator (§5.5) | `for (const x of self) { return #Some(x); }` in a method over an owned `Gen` was taken for a borrow of `self` |
-| A task started outside the body of its `Io.scope` — by a helper given the scope — cannot capture anything that borrows (§6.1) | the helper could lend a parameter that came from a local of the scope's body, which ends before the scope waits for its tasks |
-| `Arc<T>` is listed with the owners that lend (§4.1), and the library's methods are in the sections that define their types (§3.1, §5.5), not only here | the review found them only in this table |
-
---- | :--- |
-| A task moves in what is declared inside its scope and borrows only what is declared outside it; a use after the move says so (§6.1) | `const tx2 = tx.clone(); s.fork(() => tx2.send(url))` in a loop lent `tx2` to a task that outlived the iteration that dropped it |
-| A closure that moves a binding in owns it from where it is made, and a `once` closure drops what it owns when its call ends (§4.3, §5.6) | the parent dropped a sender it had given to a task, and the task never dropped it |
-| `Mutex<T>` with `lock(body)`, whose body performs no effects and returns a `Send` value; `Arc<T>` lends `readonly T` (§6.2) | §6.2 named `Mutex`, but there was none |
-| `Sender` is `Clone`, and a channel ends when its last sender is gone; `close` drops one (§6.2) | one sender per task is how a fan-in is written |
-| `vec.drain()` takes the elements out in order (§5.5) | joining every fiber needs to own each one: `for (const f of fibers.drain()) { total += f.join(); }` |
-| `Fail.capture` and `Fail.map` pass on the body's other effects (§5.4) | `Fail.capture(() => Io.scope(…))` was rejected because the body performs `Io` |
-
---- | :--- |
-| Arrays have `sort`, a stable `sortBy`, `reverse`, `join`, `includes`, `indexOf` and `last`, `Vec` has `pop`, and generators have `find`, `some`, `every`, `reduce` and `cloned`, under TypeScript's names (§5.5) | each was the first thing reached for; all but `sortBy`, `reverse` and `pop` are Flyscript in the prelude |
-| `${e}` writes a string as it is also where generic code has it as a `T` (§3.5) | `[a, b].join(", ")` over `String`s quoted them |
-| A borrow of a borrow is one borrow, `mut` only if both are (§4.1) | `every((r) => …)` over a `Gen<readonly String>` gave `r` the type `readonly readonly String`, which lending could not read |
-
---- | :--- |
-| A yielded value is a result of its function: it may borrow what the function was given, never its locals (§5.5) | `for (const w of lines()) { kept = w; break; }` kept a borrow of a buffer that `break` had dropped |
-| A generator call's sources flow into its items, as into a result (§5.5) | the items of `for (const w of words(line))` borrow `line`, so `best = w` outlives the iteration |
-| `unsafe { … }` may carry an operation's arguments out of their arm; `generate` is written with it, `Step` is a `view enum` and `Cont` a view (§5.3, §5.5, §8.2) | the arm `yield(item) resumes k => #Item { item, rest: k }` keeps an item with the continuation; what makes that safe — the producer is a closure, so the body has no locals — is beyond the type rules |
-| A copy bound through a `readonly` borrow holds nothing only if its type is class 1; a class-2 copy keeps what the value it came from held (§4.1) | the 0.31 wording let a `str` matched out of a `readonly Option<str>` forget it borrowed a local |
-| Tags built where no type was expected are a union, never an enum, and the error says to annotate (§3.3) | 0.31 let one value be both a `Copy` union and an enum with a destructor |
-| A `readonly` borrow passed or assigned where one is wanted is copied with what it holds, not borrowed again (§4.1) | `best = w` made `best` borrow the loop variable `w` itself |
-| `Item = Expr \| Generate(Item)` (§2.3) | a list's items may be generated by `comptime match`, as §7.2 says |
-
---- | :--- |
-| A part bound through a `readonly` borrow is a copy if its type is `Copy` (§4.1) | `while (const #Some(#Op(op)) = self.peek()) { self.pos += 1; … }` was rejected: `op` was a `readonly u8` that kept `self` lent |
-| A borrow of an owner that lends `U` is a borrow of `U` (§4.1) | `#Neg(inner) => -value(inner)` with `inner: readonly Box<Node>` did not check |
-| A part of a tag, record or list literal put where a borrow is wanted is lent (§4.1) | `#Some(self.toks[i])` returning `Option<readonly Token>` tried to move the token out |
-| Tags built where no type was expected become an enum another branch gives (§3.3) | `const e = match (t) { #Some(#Num(n)) => #Lit(n), #Some(#LParen) => inner, … }` did not join |
-| A type alias that refers to itself is an error that says to declare an `enum`; an alias may use one written after it (§3.3) | the recursive alias gave a baffling mismatch, and a later alias was silently opaque |
-
---- | :--- |
-| When a block ends, nothing used afterwards may hold a borrow of its bindings; a binding assigned anew holds only the new value's borrows (§4.1) | `if (c) { const a = …; s = a[0..2]; } use(s)` was accepted, and `s` dangled |
-| An operation's arguments are lent by the code that performed it: a resumptive arm may use one that can hold a borrow only until it resumes, never past the arm; an arm that does not resume cannot use one at all (§5.3) | an abortive arm could return a `str` borrowed from the body it had just unwound, and a resumptive arm could read one after `k()` had let the body end |
-| A continuation's row `E` is what its `handle` performs — the body's unhandled effects and the arms' — not everything the code around it may (§5.2, §5.3) | a `Gen`-like value built where `Io` is allowed no longer demands `Io` of every consumer |
-| Assigning to a place drops the value it held; dropping a partly moved value drops the parts still in it (§5.6) | reassignment leaked: a `Sender` overwritten in a binding never closed its channel |
-| A call of a closure or continuation counts the callee among its result's sources (§4.2) | what it captured flows into what it returns |
-| `while (const Pattern = e)`, and its `let` form (§2.3) | the loop form of `if (const …)`, for draining a channel or a stack |
-| Every comma-separated list may end with a comma (§2.3) | as in TypeScript, and as the appendix already wrote |
-| `fmt` is listed with the region library (§4.6) | A.8 used it unexplained |
-
---- | :--- |
-| A continuation is a `Cont<A, B, E>` again — still called `k(a)`, which performs `E` — and is not `Send` (§5.3, §4.4) | as a `once` function it was `Send`, so it could be spawned onto another task or sent through a channel, away from the fiber it belongs to |
-| A continuation that leaves its arm takes its handler along, so whatever holds it borrows everything the arms use (§5.3) | an arm that pushed into a local returned `k`, which pushed into the dead local when resumed |
-| Several `with` clauses are nested `handle`s, the first innermost (§5.2) | stated exactly, an inner arm may perform an effect an outer clause handles |
-| The contextual words are keywords in exactly the shapes `match (…) {`, `handle {`, `region (Ident) {` and `effect Ident` (§2.3) | so a call `match(x)` never needs a lookahead guess |
-| `Drop.drop` is pure, and a `defer` cannot fail, yield, return, break or continue (§5.6) | cleanup runs while a block is being left, perhaps by a failure |
-| One conversion from `str` to `String`: `s.toString()` | `String.fromStr` was a second spelling |
-| Channels require `Send` messages (§6.2) | a message goes to another task |
+| Integer arithmetic is checked against its type: overflow panics, and `wrappingAdd`, `wrappingSub` and `wrappingMul` wrap (§5.7) | §5.7 said so, but the prototype computed in 128 bits whatever the type |
+| `panic(message)` is a prelude function; `Option` has `isNone` and `unwrap`, `Result` has `isOk` and `isErr`, and every method the examples call is listed with its type (§3.1, §3.2, §5.7) | examples called `unwrap`, `take` and `asStr`, which no normative section listed |
+| A record type's fields are separated by `;` or `,`, as in TypeScript; the grammar has `If`, `While` and `Unsafe` (§2.3) | §5.5 wrote `#Item { item: T, rest: … }`, which the grammar did not allow |
+| §9's region and class rules match §4.6 and §5.3: an escaping closure may not capture region data, and a continuation is class 2 if what it suspended holds a borrow | the calculus still had the older, weaker rules |
+| A cycle of type aliases, through any number of them, is the error; an alias may name a nominal type (§3.3) | the wording covered only an alias naming itself, and only structural aliases |
+| One name per thing: a value's *loans* are the borrows it holds (§4.1); channels are `Sender` and `Receiver` (§4.5, §6.2); `region` is also a contextual word in a type parameter list (§2.3); `fieldsOf` is shown where §7 first uses it | the same thing went by two names, or by one never defined |
 
 ---
 
@@ -178,8 +120,8 @@ Bounds      = Type { "&" Type } ;
 
 Type        = Prim | Path [ TypeArgs ] | Record | Union | Tuple | Fn
             | Type "[" [ Expr ] "]" | "mut" Type | "readonly" Type | Type "*" | "dyn" Path | "[" "]" ;
-Record      = "{" { Field } [ "..." Ident ] "}" ;
-Field       = FieldName ":" Type ";" | Generate(Field) ;
+Record      = "{" [ Field { ( ";" | "," ) Field } [ ";" | "," ] ] [ "..." Ident ] "}" ;   (* either separator, as in TypeScript *)
+Field       = FieldName ":" Type | Generate(Field) ;
 FieldName   = Ident | "[" Expr "]" ;                       (* computed by comptime code, §7.2 *)
 Generate(X) = "comptime" "for" "(" "const" Pattern "of" Expr ")" "{" { X } "}"
             | "comptime" "if" "(" Expr ")" "{" { X } "}" [ "else" "{" { X } "}" ]
@@ -194,6 +136,9 @@ Prim        = "i8" | "i16" | "i32" | "i64" | "isize" | "u8" | "u16" | "u32" | "u
             | "f32" | "f64" | "bool" | "str" | "void" | "never" | "Type" ;
 
 Block       = "{" { Stmt } [ Expr ] "}" ;
+If          = "if" "(" Expr ")" Block [ "else" ( If | IfConst | Block ) ] ;
+While       = "while" "(" Expr ")" Block ;
+Unsafe      = "unsafe" Block ;
 Stmt        = ( "const" | "let" ) Pattern [ ":" Type ] "=" Expr ";" | "defer" Expr ";"
             | "return" [ Expr ] ";" | "break" ";" | "continue" ";" | Expr ";" | BlockLike ;
 BlockLike   = If | IfConst | While | WhileConst | For | Match | Try | Region | Handle | Unsafe | Block | "comptime" ( If | Match | For ) ;
@@ -228,7 +173,7 @@ Three rules settle the grammar's ambiguities, all borrowed from TypeScript:
 
 - **Braces.** A `{` in expression position begins a record literal. A block appears only as the body of a block-like construct, after `=>` in a lambda or match arm, or at the start of a statement — unless the brace opens an entry (`{ a: 1 }`, `{ [k]: v }`, or a `comptime for` over entries): Flyscript has no labeled statements, so that is always a record.
 - **Block-like statements.** A block-like expression at the start of a statement needs no `;` and is not continued by operators: `if (c) { … } [a, b]` is two statements. As the last item of a block it is the block's value.
-- **Contextual words.** `from`, `of`, `with`, `resumes`, `row`, `view` and `private` are keywords only where the grammar expects them. `match`, `handle`, `region` and `effect` are keywords only when followed by `(…) {`, `{`, `(Ident) {` and `Ident` respectively — shapes a call or a name never takes, since an expression statement ends with `;` — and names anywhere else, so a request handler may be called `handle`. Any reserved word may be used as a member name (`Yield.yield`, `{ default: 1 }`).
+- **Contextual words.** `from`, `of`, `with`, `resumes`, `row`, `view` and `private` are keywords only where the grammar expects them. `match`, `handle`, `region` and `effect` are keywords only when followed by `(…) {`, `{`, `(Ident) {` and `Ident` respectively (and `region`, like `row`, at the start of a type parameter: `<region R>`) — shapes a call or a name never takes, since an expression statement ends with `;` — and names anywhere else, so a request handler may be called `handle`. Any reserved word may be used as a member name (`Yield.yield`, `{ default: 1 }`).
 
 ---
 
@@ -241,7 +186,7 @@ Three rules settle the grammar's ambiguities, all borrowed from TypeScript:
 - `T[N]` is an inline array (`Copy` if `T` is); `[a, b, c]` and `repeat(v)` build one, with `N` from context. `T[]` is a borrowed slice, always `readonly T[]` or `mut T[]`.
 - `Vec<T>`, `Box<T>`, `HashMap<K, V>` and the other owning containers are library types.
 
-**Methods.** Arrays, slices and `Vec`s share their methods, which are defined on slices and reached through lending (§4.1): `len`, `iter`, `iterMut`, `splitAt`, `last`, `includes` and `indexOf` (by `Eq`), `sort` (by `Ord`), `sortBy(cmp)` (stable, `cmp` returning `#Less`, `#Equal` or `#Greater`), `reverse`, and `join(sep)` (each element shown, strings as they are). A `Vec` also has `push`, `pop` and `drain`, which takes the elements out in order. `str` has TypeScript's string methods — `slice`, `split`, `trim`, `includes`, `startsWith`, `endsWith`, `indexOf`, `toUpperCase`, `toLowerCase`, `replaceAll` — plus `toString`, `asBytes`, and the generators `bytes()` and `splitWhitespace()`; a `String` lends them all, and adds `push`. A `HashMap<K, V>` has `insert`, `get`, `getMut`, `has`, `remove` (each looked up by anything `K` lends), `len`, and the generators `keys()`, `values()`, `valuesMut()` and `entries()`.
+**Methods.** Arrays, slices and `Vec`s share their methods, which are defined on slices and reached through lending (§4.1): `len`, `iter`, `iterMut`, `splitAt`, `last`, `includes` and `indexOf` (by `Eq`), `sort` (by `Ord`), `sortBy(cmp)` (stable, `cmp` returning `#Less`, `#Equal` or `#Greater`), `reverse`, and `join(sep)` (each element shown, strings as they are). A `Vec` also has `push`, `pop` and `drain`, which takes the elements out in order. `str` has TypeScript's string methods — `slice`, `split`, `trim`, `includes`, `startsWith`, `endsWith`, `indexOf`, `toUpperCase`, `toLowerCase`, `replaceAll` — plus `toString`, `asBytes`, and the generators `bytes()` and `splitWhitespace()`; a `String` lends them all, and adds `push`, `clone` and `asStr()`, which lends it as a `str` explicitly where nothing expects one. A `HashMap<K, V>` has `insert`, `get`, `getMut`, `has`, `remove` (each looked up by anything `K` lends), `len`, and the generators `keys()`, `values()`, `valuesMut()` and `entries()`.
 
 A tuple `[A, B]` is built with a list literal, taken apart with a pattern (`const [a, b] = t`, which takes an array of the same length apart too), and indexed by a constant, as in TypeScript: `t[0]` is a place of its own, like a field.
 
@@ -279,6 +224,8 @@ type Option<T>    = #Some(T) | #None;
 type Result<T, E> = #Ok(T) | #Err(E);
 ```
 
+`Option<T>` has `isSome`, `isNone`, `unwrapOr(fallback)`, `unwrap()` (a `#None` is a bug, and panics), and `take()`, which through a `mut` borrow leaves `#None` behind; an `Option<readonly T>` also has `cloned()`. `Result<T, E>` has `isOk`, `isErr`, and `unwrap()`, which throws the `#Err` payload as a failure (§5.4). A record pattern names the fields it binds and ignores the rest: `#Struct { fields }` matches a `#Struct { name: str; fields: Field[] }`.
+
 ### 3.3 Nominal types
 
 `struct` names a record and `enum` names a closed tag union. A nominal type is a *new* type: it has identity (a `Meters` is not a `Seconds`), may implement `Drop`, may carry `@layout(c)` or `@layout(packed)`, and may be recursive. Construction and matching are identical to the structural forms. Fields are public, as in TypeScript, unless marked `private`, which limits them to the declaring module: outside it, a struct with private fields cannot be built with a literal or taken apart with a pattern, only through the functions its module exports. That is what lets a type keep an invariant (`NonZero`).
@@ -290,7 +237,7 @@ struct Point { x: f64; y: f64; }
 enum Expr { #Num(f64), #Add(Box<Expr>, Box<Expr>), #Neg(Box<Expr>) }
 ```
 
-**Recursion is iso-recursive**: a recursive type must pass through a nominal declaration. Structural rows are always finite, which keeps unification simple and terminating. A type alias names a structural type, so one that refers to itself is an error that says to declare an `enum` or a `struct`; aliases may otherwise refer to each other in any order.
+**Recursion is iso-recursive**: a recursive type must pass through a nominal declaration. Structural rows are always finite, which keeps unification simple and terminating. An alias is only a name for its right-hand side, so a cycle of aliases — `type A = #A(B); type B = #B(A);`, or one alias naming itself — is an error that says to declare an `enum` or a `struct`, whose names the cycle can pass through. Otherwise aliases may refer to each other in any order, and may name nominal types (`type ByteRing = Ring<u8, 1024>`).
 
 Tags built where no type is expected make a structural union (§3.2), never an enum: a value has one type, and an enum's representation, order and destructor are its own. So `const e = if (leaf) { #Num(1.0) } else { parsed }` is an error that says to write `const e: Expr = …`, which builds the tags as an `Expr`.
 
@@ -359,7 +306,7 @@ A value that is borrowed without having a place — a call's result, a template 
 
 **Copy parts bind by copy.** A name bound through a `readonly` borrow — by a pattern taking apart a borrowed value, or by `const` from a borrow — binds a copy instead if its type is `Copy`. Nothing can change the original while it is lent `readonly`, so the copy is indistinguishable from the borrow. If its type is class 1 the copy holds nothing: in `while (const #Some(#Op(op)) = self.peek()) { self.pos += 1; … }`, `op` is a `u8` and `self` is free. A class-2 copy — a `str`, a slice, a `readonly T` — keeps what the value it came from held, so a `str` matched out of a `readonly Option<str>` still borrows whatever the option's string did. Likewise a `readonly` borrow passed or assigned where one is wanted is copied with what it holds; it does not borrow the binding it was read from. Through a `mut` borrow, a binding stays a borrow, so it writes in place (below). And a part of a tag, record or list literal whose slot is a borrow is lent, as an argument is: `#Some(self.toks[i])` in a function returning `Option<readonly Token>` lends the token.
 
-A borrow lasts until the last use of any value that holds it, not to the end of its scope. Every value carries the set of borrows it holds: a borrow taken for an argument is held by the call's result if the result can hold it (§4.2); a value bound by a pattern or assigned to a binding passes its borrows on; a binding assigned anew holds the new value's borrows only, and one assigned on several paths holds the union where they meet. A borrow cannot outlive what it borrows: when a block ends, neither its value nor any binding used afterwards may hold a borrow of a binding declared in it. So `let s = v[0..1]; if (c) { const a = [1, 2, 3]; s = a[0..2]; } use(s)` is rejected — `s` would outlive `a` — while re-pointing `s` at `v` before the block ends is fine. In a loop, the body's bindings end with each iteration. In the example below, the `#None` arm holds no borrow of `counts`, so it may insert, while in the `#Some` arm `n` holds `counts` mutably until its last use.
+A borrow lasts until the last use of any value that holds it, not to the end of its scope. Every value carries the set of borrows it holds, its *loans*: a borrow taken for an argument is held by the call's result if the result can hold it (§4.2); a value bound by a pattern or assigned to a binding passes its borrows on; a binding assigned anew holds the new value's borrows only, and one assigned on several paths holds the union where they meet. A borrow cannot outlive what it borrows: when a block ends, neither its value nor any binding used afterwards may hold a borrow of a binding declared in it. So `let s = v[0..1]; if (c) { const a = [1, 2, 3]; s = a[0..2]; } use(s)` is rejected — `s` would outlive `a` — while re-pointing `s` at `v` before the block ends is fine. In a loop, the body's bindings end with each iteration. In the example below, the `#None` arm holds no borrow of `counts`, so it may insert, while in the `#Some` arm `n` holds `counts` mutably until its last use.
 
 A method call borrows its receiver in two phases: the receiver is borrowed `readonly` while the arguments are evaluated and `mut` only for the call itself, so `v.push(v.len())` is legal and `v.push({ v.clear(); 1 })` is not.
 
@@ -425,7 +372,7 @@ The compiler derives three marker interfaces from structure:
 | :--- | :--- | :--- | :--- |
 | `Box<T>` | heap | unique | by its owner |
 | `Ref<R, T>` | region `R` | `Copy` | none, except through `Cell` and `RegionList` |
-| `Arc<T>` (`T extends Send`) | heap | atomic count | none; shared state goes through `Mutex`, `Atomic` and `Channel`, which are `Io` |
+| `Arc<T>` (`T extends Send`) | heap | atomic count | none; shared state goes through `Mutex`, `Atomic` and channels (`Sender`, `Receiver`), which are `Io` |
 | `readonly T` / `mut T` | anywhere | second-class | `mut` only |
 
 Long-lived cyclic structures outside a region use the library's `Pool<T>` with generation-checked `Handle<T>` indices.
@@ -520,6 +467,7 @@ The `handle` expression evaluates to the body's value if the body completes with
 
 ```ts
 effect Clock { now(): u64; }
+effect Log { info(msg: String): void; }
 const d = handle { limiter.check(client) } with Clock { now() resumes k => k(t) } with Log { info(m) resumes k => { out.push(m); k() } };
 ```
 
@@ -599,7 +547,7 @@ const firstEvens = xs.iter().filter((x) => x % 2 == 0).take(10).collect();
 Pull iteration is library code. `generate(f)` runs `f` under a `Yield` handler whose resumptive arm keeps each item with the continuation, and returns a `Gen<T, E>` whose `next()` resumes it. The arm is the standard library's one use of `unsafe` outside foreign code: an item past its arm is beyond what §5.3 can check, but here the `handle` body is a call of the closure `f`, with no locals of its own, and every item borrows only what `f`'s functions were given, so no item can outlive what it borrows.
 
 ```ts
-view enum Step<T, row E> { #Done, #Item { item: T, rest: Cont<void, Step<T, E>, E> } }
+view enum Step<T, row E> { #Done, #Item { item: T; rest: Cont<void, Step<T, E>, E> } }
 view enum State<T, row E> { #Fresh(once () => Step<T, E> uses ...E), #Paused(Cont<void, Step<T, E>, E>) }
 export view struct Gen<T, row E> { state: Option<State<T, E>>; }
 
@@ -641,7 +589,7 @@ Because a `defer` runs at the block's exit, it holds the borrows it needs from t
 
 ### 5.7 Panics
 
-Integer division by zero, overflow in checked builds (`wrappingAdd` and friends are explicit), an out-of-bounds index and heap exhaustion *panic*. A panic is not an effect and cannot be caught by a handler: it unwinds the current task, running cleanup, and fails the task's scope (§6.1); an unscoped panic terminates the process. Panics are for bugs; anticipated failure is `Fail`.
+Integer division by zero, integer overflow (in every build; `wrappingAdd`, `wrappingSub` and `wrappingMul` wrap instead), an out-of-bounds index, heap exhaustion and `panic(message)` *panic*; so does `unwrap()` of a `#None`. A panic is not an effect and cannot be caught by a handler: it unwinds the current task, running cleanup, and fails the task's scope (§6.1); an unscoped panic terminates the process. Panics are for bugs; anticipated failure is `Fail`.
 
 ---
 
@@ -685,7 +633,7 @@ Io.scope((s) => {
 
 ### 6.2 Shared state
 
-`Mutex<T>`, `Atomic*` and `Channel<T>` are library types whose operations perform `Io` (through `Io.park`). Every synchronization is therefore visible in the type, pure code cannot observe shared mutable state, and the deterministic simulator (§6.4) controls every interleaving.
+`Mutex<T>`, `Atomic*` and channels — a `Sender<T>` and a `Receiver<T>` — are library types whose operations perform `Io` (through `Io.park`). Every synchronization is therefore visible in the type, pure code cannot observe shared mutable state, and the deterministic simulator (§6.4) controls every interleaving.
 
 `channel<T>()` gives a `Sender<T>` and a `Receiver<T>`. A `Sender` is `Clone`, one per producer. A channel ends when its last sender is gone — dropped, or closed with `tx.close()`, which consumes it — and its receivers then drain what was sent and see the end: `recv()` gives `#None`, and `for (const m of rx)` stops. A task that is to end a channel therefore owns its sender: a sender cloned inside the scope is moved into its task and dropped when the task ends.
 
@@ -773,7 +721,7 @@ A type parameter is one of two kinds, and callers cannot tell them apart:
 
 A template states its whole signature, effects included (none means pure), because its body is checked only per specialization. An error in a specialization points into the template and names the specialization: `no method 'toJson' on 'bool' (in 'toJson' for 'Flag')`. Specializations are memoized by template and types, and registered before their bodies are expanded, so a derivation over a recursive type refers to itself.
 
-A `comptime function` runs only in the compiler: it is called from `comptime` code, never at run time. Module constants (`const SLOTS: usize = 64;`) are evaluated the same way. `Type` is a comptime-only type whose values are types.
+A `comptime function` runs only in the compiler: it is called from `comptime` code, never at run time. Module constants (`const SLOTS: usize = 64;`) are evaluated the same way. `Type` is a comptime-only, `Copy` type whose values are types.
 
 A struct is a template too when it has a `comptime` type parameter or `comptime` code among its fields: its fields are computed for each instance, `comptime` statements in its body check its arguments, and two uses with the same arguments are the same type. Each instance is checked as the struct it is, so a template not declared `view` cannot hold a borrow in any instance:
 
@@ -785,6 +733,14 @@ struct Ring<T, comptime N: usize> {
   tail: usize;
 }
 type ByteRing = Ring<u8, 1024>;
+
+// A struct's or record's fields, from reflection (§7.2); `comptime panic` is a compile error.
+comptime function fieldsOf(T: Type): Field[] {
+  match (Type.info(T)) {
+    #Struct { fields } | #Record(fields) => fields,
+    _ => comptime panic(`${Type.name(T)} has no fields`),
+  }
+}
 
 struct Partial<comptime T: Type> {                       // every field of T, made optional
   comptime for (const f of fieldsOf(T)) { [f.name]: Option<f.type>; }
@@ -948,10 +904,10 @@ Surface Flyscript elaborates into a small calculus, λ-fly, with judgments
 
 The rules that carry the design:
 
-- **Class.** class(`readonly τ`) = class(`mut τ`) = class(`str`) = class(`τ[]`) = 2. For every other type former, class is the maximum over components. A continuation's class is 2 if the frame it captures holds a class-2 value. Stores into class-1 places, escaping captures, `Send`, and untied returns require class 1.
+- **Class.** class(`readonly τ`) = class(`mut τ`) = class(`str`) = class(`τ[]`) = 2. For every other type former, class is the maximum over components. A continuation's class is 2 if what it suspended — the body, and through its handler the arms — holds a borrow; `Cont` is a view. Stores into class-1 places, escaping captures, `Send`, and untied returns require class 1, and escaping captures may not hold region data, whose region no closure type mentions.
 - **Purity.** No primitive with ε = ∅ writes memory reachable through a `ro` entry of Γ. Writes through shared references exist only as operations of `Io` or `Region`.
 - **Region.**
-  > Δ, ρ | Θ | Γ ⊢ e : τ / Region⟨ρ⟩, ε ⊣ Θ′ &nbsp;&nbsp; ρ ∉ ftv(τ, Θ′, ε)
+  > Δ, ρ | Θ | Γ ⊢ e : τ / Region⟨ρ⟩, ε ⊣ Θ′ &nbsp;&nbsp; ρ ∉ ftv(τ, Θ′, ε) &nbsp;&nbsp; no closure escaping e captures data of ρ
   > ─────────────────────────────────────────
   > Δ | Θ | Γ ⊢ region(ρ) { e } : τ / ε ⊣ Θ′
 - **Handle.** An abortive arm is checked under the Γ of the `handle` expression, the body's borrows having been released. In a resumptive arm, the body's borrows move into `k`, whose type records them; they are released when `k` is resumed to completion or dropped.

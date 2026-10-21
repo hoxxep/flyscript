@@ -35,5 +35,6 @@ Versions are pre-1.0 while the language is being designed. The specification was
 | 0.35 | No result borrows an owned parameter; `Gen` items borrow what it holds; helper-started tasks cannot borrow |
 | 0.36 | Escaping closures cannot capture region data; tasks cannot change what they borrow; drop order |
 | 0.37 | A continuation holds the loans live across every point its body may perform the effect |
+| 0.38 | `Io`'s `Fd`, `Instant`, `Duration`; unimported interfaces suggest their import |
 
 `review-round-*.md` are the design review rounds that produced 0.2–0.15; `programs-against-v0.13.md` is the program-writing exercise against what is now 0.13.
