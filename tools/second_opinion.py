@@ -205,7 +205,6 @@ def ask(args: argparse.Namespace) -> None:
         n += 1
     path.write_text(
         f"# Review: {args.topic}\n\n"
-        f"- model: {resp.get('modelVersion', MODEL)}\n"
         f"- spec: {spec_hash}\n"
         f"- request: {request_key}\n"
         f"- tokens: prompt {usage.get('promptTokenCount')}, cached {usage.get('cachedContentTokenCount', 0)}, "

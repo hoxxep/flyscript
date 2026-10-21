@@ -1,6 +1,5 @@
 # Review: m3 ownership checker design
 
-- model: gemini-4-argon
 - spec: 70400abd40ea
 - request: c020d97d10e52d83
 - tokens: prompt 26283, cached 0, answer 6823

@@ -1,6 +1,5 @@
 # Review: m2 checker design
 
-- model: gemini-4-argon
 - spec: 1d7ad675c65c
 - request: 10245315e220b2ba
 - tokens: prompt 15156, cached 0, answer 7386
