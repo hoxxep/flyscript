@@ -404,6 +404,35 @@ impl Interp {
                 Ok(Value::Unit)
             }
             "Vec.new" => Ok(Value::List(Vec::new())),
+            "Vec.pop" => {
+                let p = place_of(&a(0))?;
+                let mut out = None;
+                update(&p, |l| {
+                    if let Value::List(vs) = l {
+                        out = vs.pop();
+                    }
+                });
+                Ok(out.map_or_else(none, some))
+            }
+            "slice.reverse" => {
+                let p = place_of(&a(0))?;
+                update(&p, |l| {
+                    if let Value::List(vs) = l {
+                        vs.reverse();
+                    }
+                });
+                Ok(Value::Unit)
+            }
+            "slice.sortBy" => {
+                let p = place_of(&a(0))?;
+                let items = match get(&p).deref() {
+                    Value::List(vs) => vs,
+                    _ => return Err(panic("sortBy on something not a list")),
+                };
+                let sorted = merge_sort(self, items, &a(1))?;
+                set(&p, Value::List(sorted));
+                Ok(Value::Unit)
+            }
             "Vec.push" => {
                 let p = place_of(&a(0))?;
                 let v = a(1);
@@ -696,4 +725,24 @@ impl Value {
             v => v.clone(),
         }
     }
+}
+
+/// A stable merge sort whose comparison is Flyscript code, which may fail.
+fn merge_sort(it: &mut Interp, v: Vec<Value>, cmp: &Value) -> Result<Vec<Value>, Ctl> {
+    if v.len() <= 1 {
+        return Ok(v);
+    }
+    let mut left = v;
+    let right = left.split_off(left.len() / 2);
+    let (left, right) = (merge_sort(it, left, cmp)?, merge_sort(it, right, cmp)?);
+    let mut out = Vec::with_capacity(left.len() + right.len());
+    let (mut l, mut r) = (left.into_iter().peekable(), right.into_iter().peekable());
+    while let (Some(a), Some(b)) = (l.peek(), r.peek()) {
+        // Only a strictly smaller right element goes first, which keeps equal ones in order.
+        let less = matches!(it.call_value(cmp, vec![b.clone(), a.clone()])?.deref(), Value::Tag(t, _) if &*t == "Less");
+        out.push(if less { r.next() } else { l.next() }.expect("peeked"));
+    }
+    out.extend(l);
+    out.extend(r);
+    Ok(out)
 }

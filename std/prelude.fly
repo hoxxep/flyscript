@@ -347,6 +347,29 @@ impl<T, row E> Gen<T, E> {
   export function zip<U>(self: Self, other: Gen<U, E>): Gen<[T, U], E>;
   export function enumerate(self: Self): Gen<[usize, T], E>;
   export function collect(self: Self): Vec<T> uses ...E;
+  // The first item `test` accepts, if any; the rest are not produced.
+  export function find(self: Self, test: mut (x: readonly T) => bool): Option<T> uses ...E {
+    for (const x of self) { if (test(x)) { return #Some(x); } }
+    #None
+  }
+  export function some(self: Self, test: mut (x: readonly T) => bool): bool uses ...E {
+    for (const x of self) { if (test(x)) { return true; } }
+    false
+  }
+  export function every(self: Self, test: mut (x: readonly T) => bool): bool uses ...E {
+    for (const x of self) { if (!test(x)) { return false; } }
+    true
+  }
+  // Folds the items into one value, as TypeScript's `reduce` with an initial value.
+  export function reduce<A>(self: Self, f: mut (acc: A, x: T) => A, init: A): A uses ...E {
+    let acc = init;
+    for (const x of self) { acc = f(acc, x); }
+    acc
+  }
+}
+impl<T extends Clone, row E> Gen<readonly T, E> {
+  // Owned copies of borrowed items: `map.keys().cloned().collect()` is a `Vec<String>`.
+  export function cloned(self: Self): Gen<T, E> { self.map((x) => x.clone()) }
 }
 
 // Dropping a generator before it finishes unwinds it, running its cleanup (§5.5).
@@ -418,6 +441,42 @@ impl<T> T[] {
   export function iterMut(self: mut Self): Gen<mut T, []> from self;
   // Two disjoint slices, before and after element `at`.
   export function splitAt(self: mut Self, at: usize): [mut T[], mut T[]] from self;
+  // Sorts in place by `cmp`, stably: elements `cmp` calls equal keep their order.
+  export function sortBy(self: mut Self, cmp: mut (a: readonly T, b: readonly T) => Ordering): void;
+  export function reverse(self: mut Self): void;
+  export function last(self: readonly Self): Option<readonly T> from self {
+    if (self.len() == 0) { #None } else { #Some(self[self.len() - 1]) }
+  }
+}
+impl<T extends Ord> T[] {
+  export function sort(self: mut Self): void { self.sortBy((a, b) => a.cmp(b)) }
+}
+impl<T extends Eq> T[] {
+  export function includes(self: readonly Self, x: readonly T): bool {
+    for (const y of self) { if (y == x) { return true; } }
+    false
+  }
+  export function indexOf(self: readonly Self, x: readonly T): Option<usize> {
+    let i: usize = 0;
+    for (const y of self) {
+      if (y == x) { return #Some(i); }
+      i += 1;
+    }
+    #None
+  }
+}
+impl<T extends Show> T[] {
+  // Each element shown, with `sep` between them: `["a", "b"].join(", ")` is `"a, b"`.
+  export function join(self: readonly Self, sep: str): String {
+    let out = String.new();
+    let first = true;
+    for (const x of self) {
+      if (!first) { out.push(sep); }
+      out.push(`${x}`);
+      first = false;
+    }
+    out
+  }
 }
 impl<T> Iterable<readonly T> for T[] {
   function each(self: readonly Self): void uses Yield<readonly T>;
@@ -425,6 +484,7 @@ impl<T> Iterable<readonly T> for T[] {
 impl<T> Vec<T> {
   export function new(): Vec<T>;
   export function push(self: mut Self, v: T): void;
+  export function pop(self: mut Self): Option<T>;
   export function len(self: readonly Self): usize;
   export function iter(self: readonly Self): Gen<readonly T, []>;
   export function iterMut(self: mut Self): Gen<mut T, []> from self;

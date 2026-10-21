@@ -1,6 +1,6 @@
 # Flyscript
 
-**Language specification, version 0.32**
+**Language specification, version 0.33**
 
 *Affine values, one row calculus, handlers for everything, and `comptime`: Church on the outside, Turing on the inside.*
 
@@ -18,12 +18,17 @@ The whole language rests on five laws. Every rule in this document is a conseque
 4. **Handlers for everything.** Errors, I/O, iteration and region memory are ordinary effects with ordinary handlers. A handler may hold the rest of a computation as a one-shot continuation value; generators and tasks are both built from that one primitive.
 5. **`comptime` is the metalanguage.** Generics, reflection, layout transformation and derived interfaces are ordinary Flyscript code run by the compiler.
 
-### 0.1 Changes from 0.31
+### 0.1 Changes from 0.32
 
-0.32 answers a review of 0.31 (docs/reviews/2026-10-21-holistic-review-of-0-31.md), which found that 0.30's rule for operation arguments made §5.5's own `generate` unwritable, and that a `for…of` could keep a generator's item after the generator was gone.
+0.33 comes from writing a sales report — interfaces, a generic over a bound, a map of totals, sorting, joining — as a TypeScript programmer would.
 
 | Change | Why |
 | :--- | :--- |
+| Arrays have `sort`, a stable `sortBy`, `reverse`, `join`, `includes`, `indexOf` and `last`, `Vec` has `pop`, and generators have `find`, `some`, `every`, `reduce` and `cloned`, under TypeScript's names (§5.5) | each was the first thing reached for; all but `sortBy`, `reverse` and `pop` are Flyscript in the prelude |
+| `${e}` writes a string as it is also where generic code has it as a `T` (§3.5) | `[a, b].join(", ")` over `String`s quoted them |
+| A borrow of a borrow is one borrow, `mut` only if both are (§4.1) | `every((r) => …)` over a `Gen<readonly String>` gave `r` the type `readonly readonly String`, which lending could not read |
+
+--- | :--- |
 | A yielded value is a result of its function: it may borrow what the function was given, never its locals (§5.5) | `for (const w of lines()) { kept = w; break; }` kept a borrow of a buffer that `break` had dropped |
 | A generator call's sources flow into its items, as into a result (§5.5) | the items of `for (const w of words(line))` borrow `line`, so `best = w` outlives the iteration |
 | `unsafe { … }` may carry an operation's arguments out of their arm; `generate` is written with it, `Step` is a `view enum` and `Cont` a view (§5.3, §5.5, §8.2) | the arm `yield(item) resumes k => #Item { item, rest: k }` keeps an item with the continuation; what makes that safe — the producer is a closure, so the body has no locals — is beyond the type rules |
@@ -95,7 +100,8 @@ The whole language rests on five laws. Every rule in this document is a conseque
 | `T \| null \| undefined` | `Option<T>` = `#Some(T) \| #None` | There is no null. |
 | `throw` / `try` / `catch` | same | Typed: a function's failures are part of its type. |
 | `function*` / `yield` / `for…of` | `yield` / `for…of` | A generator is any function that uses `Yield<T>`; `for…of` also accepts any `Iterable<T>`. |
-| `xs.map(f).filter(p)` | `xs.iter().map(f).filter(p)` | Iteration chains are lazy generators (§5.5). |
+| `xs.map(f).filter(p)` | `xs.iter().map(f).filter(p)` | Iteration chains are lazy generators (§5.5); `.collect()` makes a `Vec`. |
+| `xs.sort()`, `find`, `some`, `every`, `reduce`, `join`, `includes`, `indexOf` | same names | `sort` sorts in place by `Ord`; `sortBy(cmp)` takes a comparison returning `#Less`, `#Equal` or `#Greater`. `find`, `some`, `every` and `reduce` are on generators: `xs.iter().find(p)`. |
 | `.d.ts` declaration files | `.d.fly` declaration files | Signatures without bodies, used for the standard library. |
 | `async` / `await` | (nothing) | I/O is an effect; every function is "direct style". |
 | `import` / `export` | same | ES modules; the import graph must be acyclic. |
@@ -289,7 +295,7 @@ An interface can come with a *derivation*: an impl, written in Flyscript with `c
 
 The derivations settle three things a derived interface must get right. On floats, `Eq`, `Ord` and `Hash` are total, so a record with a float field is a sound `HashMap` key and sorts consistently: `NaN` equals itself and orders after every number, and `-0.0` equals and hashes as `0.0` (the primitive operators on floats stay IEEE 754). `Clone` copies a `readonly` borrow and never duplicates a `mut` one. `Box<T>` and `Arc<T>` compare, order, hash and show as what they hold; cloning a `Box` clones its contents, cloning an `Arc` shares them again.
 
-The operators use them. `==` and `!=` are built in for primitives and call `Eq.eq` on anything else, and `<`, `<=`, `>` and `>=` likewise call `Ord.cmp`; an owner compared with the type it lends is compared at that type (`name == "ada"` for a `String`, `b.name == name` for a `Ref<R, str>`); `` `${e}` `` writes a primitive or a string as it is and anything else with `Show`, which writes a value as Flyscript would (`Point { x: 1, y: 2 }`, `#Some("a")`). A struct is a new type, so it is compared or printed only if it asks: `impl Eq for Point;`.
+The operators use them. `==` and `!=` are built in for primitives and call `Eq.eq` on anything else, and `<`, `<=`, `>` and `>=` likewise call `Ord.cmp`; an owner compared with the type it lends is compared at that type (`name == "ada"` for a `String`, `b.name == name` for a `Ref<R, str>`); `` `${e}` `` writes a primitive or a string as it is — also a `T` that is a string where the code is generic — and anything else with `Show`, which writes a value as Flyscript would (`Point { x: 1, y: 2 }`, `#Some("a")`). A struct is a new type, so it is compared or printed only if it asks: `impl Eq for Point;`.
 
 ### 3.6 Inference
 
@@ -316,7 +322,7 @@ A **borrow** lends a value without moving it:
 - `readonly T`: shared and immutable. Any number may coexist.
 - `mut T`: exclusive and mutable. While it exists, the owner is inaccessible.
 
-Borrows are **transparent**: a borrow binding reads and writes as the value it refers to, and cannot be re-pointed. There is no dereference operator.
+Borrows are **transparent**: a borrow binding reads and writes as the value it refers to, and cannot be re-pointed. There is no dereference operator, and no borrow of a borrow: lending a borrow lends what it refers to, so `readonly T` with `T` a `readonly String` is a `readonly String`, and a borrow is `mut` only if every borrow on the way is.
 
 `readonly T` is `Copy`; `mut T` is not. Passing a binding of type `mut T` where a `mut` borrow is expected **reborrows** it: the binding is locked until the new borrow ends, and usable again afterwards, so `value(mut sc); sc.eat(b',')` is legal. Read where an owned value is expected, a borrow gives a copy of what it refers to, which must be `Copy`; and a `mut T` field read through a `readonly` borrow is `readonly T`.
 

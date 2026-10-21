@@ -1,0 +1,38 @@
+// expect: 1 2 3 5 8
+// expect: 8 5 3 2 1
+// expect: bob:1 ann:2 cat:2
+// expect: north, south
+// expect: true false true
+// expect: #Some(1) #None
+// expect: sum 18.0 first #Some(5.5)
+// expect: popped #Some(8) last #Some(5)
+// The array and generator methods a TypeScript programmer reaches for (§5.5): `sort` and a stable
+// `sortBy`, `reverse`, `join`, `includes`, `indexOf`, `last`, `pop`; `find`, `some`, `every`,
+// `reduce` and `cloned` on generators. A string interpolated in generic code is written as it is.
+import { println } from "std/io";
+type Person = { name: String; age: u32 };
+export function main(): void uses Io {
+  let xs = [5, 3, 8, 1, 2];
+  xs.sort();
+  println(xs.join(" "));
+  xs.reverse();
+  println(xs.join(" "));
+  let people: Vec<Person> = Vec.new();
+  people.push({ name: "ann".toString(), age: 2 });
+  people.push({ name: "bob".toString(), age: 1 });
+  people.push({ name: "cat".toString(), age: 2 });
+  people.sortBy((a, b) => a.age.cmp(b.age));
+  println(people.iter().map((p) => `${p.name}:${p.age}`).collect().join(" "));
+  const regions = ["north".toString(), "south".toString()];
+  println(regions.join(", "));
+  println(`${xs.includes(3)} ${xs.includes(4)} ${regions.iter().every((r) => r.len() == 5)}`);
+  println(`${xs.indexOf(5)} ${xs.indexOf(9)}`);
+  const amounts = [10.0, 5.5, 2.5];
+  const sum = amounts.iter().reduce((acc, a) => acc + a, 0.0);
+  println(`sum ${sum} first ${amounts.iter().find((a) => a < 6.0).cloned()}`);
+  let v: Vec<i32> = Vec.new();
+  v.push(5);
+  v.push(8);
+  const popped = v.pop();
+  println(`popped ${popped} last ${v.last().cloned()}`);
+}

@@ -636,7 +636,9 @@ impl Interp {
                         ast::TemplatePiece::Lit(s) => out.push_str(s),
                         ast::TemplatePiece::Expr(x) => {
                             let v = self.expr(x, env)?;
-                            match self.op_target(x.span, true) {
+                            // A string is written as it is, also where generic code has it as a `T`.
+                            let string = self.ty_of(x.span).map(|t| self.frame_ty(&t)).is_some_and(|t| self.is_string(&t));
+                            match self.op_target(x.span, true).filter(|_| !string) {
                                 // `Show.show` writes it, into a string of its own.
                                 Some((f, tenv)) => {
                                     let buf = Place { root: shared(Value::text("")), path: Vec::new() };
@@ -1214,6 +1216,17 @@ impl Interp {
                 Some((n, path))
             }
             _ => None,
+        }
+    }
+}
+
+impl Interp {
+    fn is_string(&self, t: &Ty) -> bool {
+        match t {
+            Ty::Prim(Prim::Str) => true,
+            Ty::Borrow(_, inner) => self.is_string(inner),
+            Ty::Named(d, _) => self.prog.known.get("String") == Some(d),
+            _ => false,
         }
     }
 }

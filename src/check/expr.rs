@@ -408,7 +408,12 @@ impl<'p> Checker<'p> {
                 ret: self.normalize(&f.ret),
                 effects: f.effects.clone(),
             })),
-            Ty::Borrow(m, inner) => Ty::Borrow(m, Box::new(self.normalize(&inner))),
+            // A borrow of a borrow is a borrow, `mut` only if both are: `readonly T` with `T` a
+            // `readonly String` is a `readonly String`.
+            Ty::Borrow(m, inner) => match self.normalize(&inner) {
+                Ty::Borrow(m2, x) => Ty::Borrow(m && m2, x),
+                x => Ty::Borrow(m, Box::new(x)),
+            },
             t => t,
         }
     }
