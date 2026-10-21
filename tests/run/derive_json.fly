@@ -1,6 +1,6 @@
 // expect: {"Created":{"id":7,"name":"Ada"}}
-// expect: {"Rejected":{"reason":"a required field is missing"}}
-// expect: {"Rejected":{"reason":"the body is not JSON"}}
+// expect: {"Rejected":{"reason":"missing email"}}
+// expect: {"Rejected":{"reason":"not JSON at byte 9"}}
 // Appendix A.9: decoding a request and encoding a structural reply with std/json.
 import { println } from "std/io";
 import { respond } from "../../examples/derive_json";

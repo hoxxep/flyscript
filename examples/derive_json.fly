@@ -3,21 +3,13 @@ import { ToJson, FromJson, JsonError, stringify, parse } from "std/json";
 struct Signup { email: String; name: String; referrer: Option<String>; }
 impl FromJson for Signup;
 
-// Structural, so it is encoded with no request; it borrows, so it could never be decoded.
 type Reply = #Created { id: u64; name: String } | #Rejected { reason: str };
 
-function reason(e: readonly JsonError): str {
-  match (e) {
-    #Missing(_) => "a required field is missing",
-    #Syntax(_) => "the body is not JSON",
-    _ => "the body does not describe a signup",
-  }
-}
-
 export function respond(body: str, nextId: u64): String {
-  const reply: Reply = match (Fail.capture(() => parse<Signup>(body))) {
-    #Ok(s) => #Created { id: nextId, name: s.name },
-    #Err(e) => #Rejected { reason: reason(e) },
-  };
-  stringify(reply)
+  match (Fail.capture(() => parse<Signup>(body))) {
+    #Ok(s) => stringify(#Created { id: nextId, name: s.name }),
+    #Err(#Missing(field)) => stringify(#Rejected { reason: `missing ${field}` }),
+    #Err(#Syntax(at)) => stringify(#Rejected { reason: `not JSON at byte ${at}` }),
+    #Err(_) => stringify(#Rejected { reason: "not a signup" }),
+  }
 }

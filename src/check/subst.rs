@@ -428,6 +428,32 @@ impl Subst {
     }
 
     /// Closes the open tail of a tag union (handling `Fail`, §5.4).
+    /// Closes every record and union row in `t` whose tail is still a variable: once a
+    /// function's types are final, nothing can add labels to them (§3.2).
+    pub fn close_rows(&mut self, t: &Ty) {
+        match self.resolve(t) {
+            Ty::Record(r) | Ty::Union(r) => {
+                let r = self.expand_row(&r);
+                if let Tail::Var(_) = r.tail {
+                    let _ = self.bind_row_tail(&r.tail, BTreeMap::new(), Tail::Closed);
+                }
+                for t in r.labels.values() {
+                    self.close_rows(t);
+                }
+            }
+            Ty::Named(_, args) => {
+                for a in &args {
+                    if let GArg::Ty(t) = a {
+                        self.close_rows(t);
+                    }
+                }
+            }
+            Ty::Tuple(ts) => ts.iter().for_each(|t| self.close_rows(t)),
+            Ty::Array(t, _) | Ty::Slice(t) | Ty::Borrow(_, t) => self.close_rows(&t),
+            _ => {}
+        }
+    }
+
     pub fn close_union(&mut self, t: &Ty) {
         if let Ty::Union(r) = self.resolve(t) {
             let r = self.expand_row(&r);

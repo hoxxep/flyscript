@@ -147,6 +147,11 @@ pub fn check_fn(p: &mut Program, fid: FnId) {
         }
     }
     for (span, args, bounds) in std::mem::take(&mut c.pending_targs) {
+        for a in &args {
+            if let GArg::Ty(t) = a {
+                c.s.close_rows(t);
+            }
+        }
         for (t, b) in bounds {
             let (t, b) = (c.s.zonk(&t), c.s.zonk(&b));
             let assumed = |id: u32| c.bounds.get(&id).cloned().unwrap_or_default();
