@@ -109,6 +109,26 @@ impl<'a> Parser<'a> {
         matches!(self.tok(), Tok::Ident(s) if s == w)
     }
 
+    fn word_at(&self, n: usize, w: &str) -> bool {
+        matches!(self.tok_at(n), Tok::Ident(s) if s == w)
+    }
+
+    /// `match (e) {` at token `at`: the word begins a `match` only in that shape.
+    fn match_at(&self, at: usize) -> bool {
+        self.word_at(at - self.pos, "match")
+            && matches!(self.tok_at(at - self.pos + 1), Tok::Punct("("))
+            && self.close_from(at + 1).is_some_and(|c| matches!(self.toks[(c + 1).min(self.toks.len() - 1)].tok, Tok::Punct("{")))
+    }
+
+    /// `handle {` or `region (R) {`: the other contextual expression words.
+    fn at_handle(&self) -> bool {
+        self.at_word("handle") && self.at_n(1, "{")
+    }
+
+    fn at_region(&self) -> bool {
+        self.at_word("region") && self.at_n(1, "(") && matches!(self.tok_at(2), Tok::Ident(_)) && self.at_n(3, ")") && self.at_n(4, "{")
+    }
+
     fn eat(&mut self, p: &str) -> bool {
         if self.at(p) {
             self.bump();
@@ -269,7 +289,7 @@ impl<'a> Parser<'a> {
             Tok::Kw(Kw::Interface) => ItemKind::Interface(self.interface_decl()?),
             Tok::Kw(Kw::Impl) => ItemKind::Impl(self.impl_decl()?),
             Tok::Kw(Kw::Type) => ItemKind::TypeAlias(self.type_alias()?),
-            Tok::Kw(Kw::Effect) => ItemKind::Effect(self.effect_decl()?),
+            Tok::Ident(w) if w == "effect" && matches!(self.tok_at(1), Tok::Ident(_)) => ItemKind::Effect(self.effect_decl()?),
             Tok::Kw(Kw::Function | Kw::Comptime) => ItemKind::Function(self.fn_decl()?),
             Tok::Kw(Kw::Extern) => {
                 self.bump();
@@ -342,7 +362,7 @@ impl<'a> Parser<'a> {
     fn field_items(&mut self) -> PResult<Vec<Field>> {
         let mut fields = Vec::new();
         while !self.at("}") && !self.at("...") {
-            if self.at_kw(Kw::Comptime) && !matches!(self.tok_at(1), Tok::Kw(Kw::For | Kw::If | Kw::Match)) {
+            if self.at_kw(Kw::Comptime) && !matches!(self.tok_at(1), Tok::Kw(Kw::For | Kw::If)) && !self.word_at(1, "match") {
                 let start = self.span();
                 self.bump();
                 let e = self.expr()?;
@@ -415,7 +435,7 @@ impl<'a> Parser<'a> {
             let then = group(self)?;
             let otherwise = if self.eat_kw(Kw::Else) { group(self)? } else { Vec::new() };
             Ok(Generate::If { cond, then, otherwise })
-        } else if self.eat_kw(Kw::Match) {
+        } else if self.eat_word("match") {
             let scrutinee = self.paren_expr()?;
             self.expect("{")?;
             let mut arms = Vec::new();
@@ -530,7 +550,7 @@ impl<'a> Parser<'a> {
     }
 
     fn effect_decl(&mut self) -> PResult<EffectDecl> {
-        self.expect_kw(Kw::Effect)?;
+        self.expect_word("effect")?;
         let name = self.ident()?;
         let params = self.type_params()?;
         self.expect("{")?;
@@ -642,7 +662,8 @@ impl<'a> Parser<'a> {
         }
         let mut params = Vec::new();
         while !self.at(">") {
-            let param = if self.eat_kw(Kw::Region) {
+            let param = if self.at_word("region") && matches!(self.tok_at(1), Tok::Ident(_)) {
+                self.bump();
                 let name = self.ident()?;
                 let default = if self.eat("=") { Some(self.ty()?) } else { None };
                 TypeParam::Region { name, default }
@@ -889,9 +910,11 @@ impl<'a> Parser<'a> {
         }
         matches!(
             self.tok(),
-            Tok::Kw(Kw::If | Kw::While | Kw::For | Kw::Match | Kw::Try | Kw::Region | Kw::Handle | Kw::Unsafe)
-                | Tok::Punct("{")
-        ) || self.at_kw(Kw::Comptime) && matches!(self.tok_at(1), Tok::Kw(Kw::If | Kw::For | Kw::Match))
+            Tok::Kw(Kw::If | Kw::While | Kw::For | Kw::Try | Kw::Unsafe) | Tok::Punct("{")
+        ) || self.match_at(self.pos)
+            || self.at_handle()
+            || self.at_region()
+            || self.at_kw(Kw::Comptime) && (matches!(self.tok_at(1), Tok::Kw(Kw::If | Kw::For)) || self.match_at(self.pos + 1))
     }
 
     /// A block-like expression in statement position: it is not continued by operators.
@@ -1147,7 +1170,7 @@ impl<'a> Parser<'a> {
                 self.expect("]")?;
                 ExprKind::TagAt { name: Box::new(name), args: self.tag_args()? }
             }
-            Tok::Ident(name) => {
+            Tok::Ident(name) if !self.match_at(self.pos) && !self.at_region() && !self.at_handle() => {
                 // `Name { … }` is a struct literal; blocks never follow an expression directly.
                 if name.starts_with(|c: char| c.is_uppercase()) && self.at_n(1, "{") {
                     let ident = self.ident()?;
@@ -1210,7 +1233,7 @@ impl<'a> Parser<'a> {
                 self.expect(")")?;
                 ExprKind::For { mutable, pat, iter: Box::new(iter), body: self.block()? }
             }
-            Tok::Kw(Kw::Match) => {
+            Tok::Ident(w) if w == "match" && self.match_at(self.pos) => {
                 self.bump();
                 let scrutinee = self.paren_expr()?;
                 self.expect("{")?;
@@ -1227,14 +1250,14 @@ impl<'a> Parser<'a> {
                 self.expect(")")?;
                 ExprKind::Try { body, pat, handler: self.block()? }
             }
-            Tok::Kw(Kw::Region) => {
+            Tok::Ident(_) if self.at_region() => {
                 self.bump();
                 self.expect("(")?;
                 let name = self.ident()?;
                 self.expect(")")?;
                 ExprKind::Region { name, body: self.block()? }
             }
-            Tok::Kw(Kw::Handle) => {
+            Tok::Ident(_) if self.at_handle() => {
                 self.bump();
                 let body = self.block()?;
                 self.expect_word("with")?;
@@ -1273,7 +1296,7 @@ impl<'a> Parser<'a> {
     fn arm_items(&mut self) -> PResult<Vec<MatchArm>> {
         let mut arms = Vec::new();
         while !self.at("}") {
-            if self.at_kw(Kw::Comptime) && matches!(self.tok_at(1), Tok::Kw(Kw::For | Kw::If | Kw::Match)) {
+            if self.at_kw(Kw::Comptime) && (matches!(self.tok_at(1), Tok::Kw(Kw::For | Kw::If)) || self.word_at(1, "match")) {
                 let start = self.span();
                 let g = self.generate(Self::arm_items)?;
                 let span = self.since(start);
@@ -1383,7 +1406,7 @@ impl<'a> Parser<'a> {
     fn init_items(&mut self) -> PResult<Vec<FieldInit>> {
         let mut fields = Vec::new();
         while !self.at("}") {
-            if self.at_kw(Kw::Comptime) && matches!(self.tok_at(1), Tok::Kw(Kw::For | Kw::If | Kw::Match)) {
+            if self.at_kw(Kw::Comptime) && (matches!(self.tok_at(1), Tok::Kw(Kw::For | Kw::If)) || self.word_at(1, "match")) {
                 let start = self.span();
                 let g = self.generate(Self::init_items)?;
                 let mut f = FieldInit::new(Ident { name: String::new(), span: self.since(start) }, None);

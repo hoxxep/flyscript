@@ -13,8 +13,8 @@ function show(r: Result<Nums, JsonError>): void uses Io {
   match (r) {
     #Ok(n) => println(stringify(n)),
     #Err(e) => match (e) {
-      #Range(at) => println(`out of range at ${at}`),
-      #Syntax(at) => println(`syntax error at ${at}`),
+      #OutOfRange(at) => println(`out of range at ${at}`),
+      #BadJson(at) => println(`syntax error at ${at}`),
       _ => println("other"),
     },
   }

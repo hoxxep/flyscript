@@ -471,7 +471,7 @@ const port = try { parsePort(raw) } catch (e) {
 };
 ```
 
-To keep a failure as data, `Fail.capture(() => body)` returns `Result<T, E>`; `r.unwrap()` turns it back into a failure. There is no separate error-conversion machinery: failure rows compose by union (§3.2).
+To keep a failure as data, `Fail.capture(() => body)` returns `Result<T, E>`; `r.unwrap()` turns it back into a failure. There is no separate error-conversion machinery: failure rows compose by union (§3.2). Because they do, a tag means the same thing wherever it comes from: two libraries that both throw `#Unknown(String)` throw one tag. A library names its failures for what failed — `std/json` throws `#MissingField`, `#UnknownTag`, `#BadJson` — so that a caller's own `#Unknown` stays its own.
 
 Tags are structural, so two libraries can use the same tag for different things (`#TimedOut(u32)` and `#TimedOut`) — and then a block calling both does not type-check, because one tag cannot carry two payloads. `Fail.map` wraps one call's failures, which both resolves the collision and records where an error came from:
 
@@ -772,7 +772,7 @@ impl<comptime T: Type> FromJson for T {
           comptime for (const f of fields) {
             [f.name]: match (slots.[f.name]) {
               #Some(v) => v,
-              #None => comptime if (isOption(f.type)) { #None } else { throw #Missing(String.fromStr(f.name)) },
+              #None => comptime if (isOption(f.type)) { #None } else { throw #MissingField(String.fromStr(f.name)) },
             },
           }
         }
@@ -948,7 +948,7 @@ A native compiler would add: **lower effects** by evidence passing (tail-resumpt
 
 ---
 
-## Appendix: nine programs
+## Appendix: ten programs
 
 These were written to test the design, not to show it off; each ends with what still feels awkward.
 
@@ -1199,11 +1199,89 @@ export function respond(body: str, nextId: u64): String {
     stringify(#Created { id: nextId, name: s.name })
   } catch (e) {
     match (e) {
-      #Missing(field) => stringify(#Rejected { reason: `missing ${field}` }),
-      #Syntax(at) => stringify(#Rejected { reason: `not JSON at byte ${at}` }),
+      #MissingField(field) => stringify(#Rejected { reason: `missing ${field}` }),
+      #BadJson(at) => stringify(#Rejected { reason: `not JSON at byte ${at}` }),
       _ => stringify(#Rejected { reason: "not a signup" }),
     }
   }
 }
 ```
 *Awkward:* none. The binding's type tells `parse` what to decode, and the failure arm sees exactly the errors decoding can raise.
+
+### A.10 An inventory service
+
+```ts
+import { HashMap } from "std/collections";
+import { ToJson, FromJson, JsonError, stringify, parse } from "std/json";
+
+struct Item { sku: String; name: String; qty: u32; price: f64; }
+impl ToJson for Item;
+impl FromJson for Item;
+impl Show for Item;
+impl Clone for Item;
+
+type Command =
+  | #Add(Item)
+  | #Remove { sku: String; qty: u32 }
+  | #Get(String)
+  | #Report;
+
+type Problem = #Unknown(String) | #Short { sku: String; have: u32 } | #BadRequest(String);
+
+export struct Store { items: HashMap<String, Item>; log: Vec<String>; }
+
+impl Store {
+  export function new(): Store { Store { items: HashMap.new(), log: Vec.new() } }
+
+  export function apply(self: mut Self, cmd: Command): String uses Fail<Problem> {
+    match (cmd) {
+      #Add(item) => {
+        self.log.push(`add ${item.sku}`);
+        match (self.items.getMut(item.sku)) {
+          #Some(existing) => { existing.qty += item.qty; },
+          #None => { self.items.insert(item.sku.clone(), item); },
+        }
+        stringify({ ok: true })
+      }
+      #Remove { sku, qty } => {
+        match (self.items.getMut(sku)) {
+          #Some(it) => {
+            if (it.qty < qty) { throw #Short { sku, have: it.qty }; }
+            it.qty -= qty;
+          },
+          #None => throw #Unknown(sku),
+        }
+        self.log.push(`remove ${sku}`);
+        stringify({ ok: true })
+      }
+      #Get(sku) => match (self.items.get(sku)) {
+        #Some(it) => stringify(it),
+        #None => throw #Unknown(sku),
+      },
+      #Report => {
+        let total = 0.0;
+        let count: u32 = 0;
+        for (const it of self.items.values()) {
+          total += it.price * (it.qty as f64);
+          count += it.qty;
+        }
+        stringify({ items: count, value: total })
+      }
+    }
+  }
+}
+
+export function handle(store: mut Store, body: str): String {
+  try {
+    const cmd: Command = parse(body);
+    store.apply(cmd)
+  } catch (e) {
+    match (e) {
+      #Unknown(sku) => stringify({ error: `no item ${sku}` }),
+      #Short { sku, have } => stringify({ error: `only ${have} of ${sku}` }),
+      _ => stringify({ error: "bad request" }),
+    }
+  }
+}
+```
+*Awkward:* `self.items.insert(item.sku.clone(), item)` clones the key because the map owns it and `item` still holds it; a map keyed by a field of its values would need a different collection, not a different language.

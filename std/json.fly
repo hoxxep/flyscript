@@ -2,7 +2,7 @@
 // unions get them by derivation over `Type.info`, and a struct asks for them with
 // `impl ToJson for User;`. Nothing here is known to the compiler.
 
-export type JsonError = #Syntax(usize) | #Missing(String) | #Unknown(String) | #Range(usize);
+export type JsonError = #BadJson(usize) | #MissingField(String) | #UnknownTag(String) | #OutOfRange(usize);
 
 export interface ToJson {
   function toJson(self: readonly Self, out: mut String): void;
@@ -192,7 +192,7 @@ impl JsonParser {
   export function at(self: readonly Self): usize { self.pos }
 
   function expect(self: mut Self, b: u8): void uses Fail<JsonError> {
-    if (self.peek() != b) { throw #Syntax(self.pos); }
+    if (self.peek() != b) { throw #BadJson(self.pos); }
     self.pos += 1;
   }
 
@@ -215,7 +215,7 @@ impl JsonParser {
     const b = self.peek();
     if (b == b't' && self.word("true")) { true }
     else if (b == b'f' && self.word("false")) { false }
-    else { throw #Syntax(self.pos) }
+    else { throw #BadJson(self.pos) }
   }
 
   // The text of the number that comes next.
@@ -223,7 +223,7 @@ impl JsonParser {
     self.peek();
     const start = self.pos;
     while (self.pos < self.bytes.len() && isNumberByte(self.bytes[self.pos])) { self.pos += 1; }
-    if (self.pos == start) { throw #Syntax(start); }
+    if (self.pos == start) { throw #BadJson(start); }
     self.text.slice(start, self.pos)
   }
 
@@ -234,11 +234,11 @@ impl JsonParser {
     let n: u64 = 0;
     while (self.pos < self.bytes.len() && self.bytes[self.pos] >= b'0' && self.bytes[self.pos] <= b'9') {
       const d = (self.bytes[self.pos] - b'0') as u64;
-      if (n > (18446744073709551615 - d) / 10) { throw #Range(start); }
+      if (n > (18446744073709551615 - d) / 10) { throw #OutOfRange(start); }
       n = n * 10 + d;
       self.pos += 1;
     }
-    if (self.pos == start || self.pos < self.bytes.len() && isNumberByte(self.bytes[self.pos])) { throw #Syntax(start); }
+    if (self.pos == start || self.pos < self.bytes.len() && isNumberByte(self.bytes[self.pos])) { throw #BadJson(start); }
     n
   }
 
@@ -247,7 +247,7 @@ impl JsonParser {
     const start = self.pos;
     match (parseInt(self.number())) {
       #Some(n) => n,
-      #None => throw #Syntax(start),
+      #None => throw #BadJson(start),
     }
   }
 
@@ -256,7 +256,7 @@ impl JsonParser {
     const start = self.pos;
     match (parseFloat(self.number())) {
       #Some(x) => x,
-      #None => throw #Syntax(start),
+      #None => throw #BadJson(start),
     }
   }
 
@@ -264,7 +264,7 @@ impl JsonParser {
     self.expect(b'"');
     let out: Vec<u8> = Vec.new();
     while (true) {
-      if (self.pos >= self.bytes.len()) { throw #Syntax(self.pos); }
+      if (self.pos >= self.bytes.len()) { throw #BadJson(self.pos); }
       const b = self.bytes[self.pos];
       self.pos += 1;
       if (b == b'"') { break; }
@@ -272,7 +272,7 @@ impl JsonParser {
         out.push(b);
         continue;
       }
-      if (self.pos >= self.bytes.len()) { throw #Syntax(self.pos); }
+      if (self.pos >= self.bytes.len()) { throw #BadJson(self.pos); }
       const e = self.bytes[self.pos];
       self.pos += 1;
       match (e) {
@@ -283,12 +283,12 @@ impl JsonParser {
         b'f' => out.push(12),
         b'u' => self.unicode(mut out),
         b'"' | b'\\' | b'/' => out.push(e),
-        _ => throw #Syntax(self.pos - 1),
+        _ => throw #BadJson(self.pos - 1),
       }
     }
     match (String.fromUtf8(out)) {
       #Some(s) => s,
-      #None => throw #Syntax(self.pos),
+      #None => throw #BadJson(self.pos),
     }
   }
 
@@ -296,9 +296,9 @@ impl JsonParser {
     let n: u32 = 0;
     let i = 0;
     while (i < 4) {
-      if (self.pos >= self.bytes.len()) { throw #Syntax(self.pos); }
+      if (self.pos >= self.bytes.len()) { throw #BadJson(self.pos); }
       const d = hexValue(self.bytes[self.pos]);
-      if (d > 15) { throw #Syntax(self.pos); }
+      if (d > 15) { throw #BadJson(self.pos); }
       n = n * 16 + d;
       self.pos += 1;
       i += 1;
@@ -310,9 +310,9 @@ impl JsonParser {
   function unicode(self: mut Self, out: mut Vec<u8>): void uses Fail<JsonError> {
     let c = self.hex4();
     if (c >= 55296 && c < 56320) {
-      if (!self.word("\\u")) { throw #Syntax(self.pos); }
+      if (!self.word("\\u")) { throw #BadJson(self.pos); }
       const lo = self.hex4();
-      if (lo < 56320 || lo >= 57344) { throw #Syntax(self.pos); }
+      if (lo < 56320 || lo >= 57344) { throw #BadJson(self.pos); }
       c = 65536 + ((c - 55296) << 10) + (lo - 56320);
     }
     pushUtf8(mut out, c);
@@ -362,14 +362,14 @@ impl JsonParser {
       },
       b'"' => { self.string(); },
       b't' | b'f' => { self.bool(); },
-      b'n' => { if (!self.eatNull()) { throw #Syntax(self.pos); } },
+      b'n' => { if (!self.eatNull()) { throw #BadJson(self.pos); } },
       _ => { self.number(); },
     }
   }
 
   // Only whitespace may follow the value.
   export function finish(self: mut Self): void uses Fail<JsonError> {
-    if (self.peek() != 0) { throw #Syntax(self.pos); }
+    if (self.peek() != 0) { throw #BadJson(self.pos); }
   }
 }
 
@@ -411,11 +411,11 @@ impl<comptime T: Type> FromJson for T {
         const at = p.at();
         comptime if (signed) {
           const n = p.int();
-          if (n < comptime -(1 << (bits - 1)) || n > comptime (1 << (bits - 1)) - 1) { throw #Range(at); }
+          if (n < comptime -(1 << (bits - 1)) || n > comptime (1 << (bits - 1)) - 1) { throw #OutOfRange(at); }
           n as T
         } else {
           const n = p.uint();
-          if (n > comptime (1 << bits) - 1) { throw #Range(at); }
+          if (n > comptime (1 << bits) - 1) { throw #OutOfRange(at); }
           n as T
         }
       }
@@ -436,7 +436,7 @@ impl<comptime T: Type> FromJson for T {
           comptime for (const f of fields) {
             [f.name]: match (slots.[f.name]) {
               #Some(v) => v,
-              #None => comptime if (isOption(f.type)) { #None } else { throw #Missing(String.fromStr(f.name)) },
+              #None => comptime if (isOption(f.type)) { #None } else { throw #MissingField(String.fromStr(f.name)) },
             },
           }
         }
@@ -445,11 +445,11 @@ impl<comptime T: Type> FromJson for T {
         p.beginArray();
         const v: T = [
           comptime for (const t of items) {
-            if (!p.nextItem()) { throw #Syntax(p.at()); }
+            if (!p.nextItem()) { throw #BadJson(p.at()); }
             t.fromJson(mut p)
           }
         ];
-        if (p.nextItem()) { throw #Syntax(p.at()); }
+        if (p.nextItem()) { throw #BadJson(p.at()); }
         v
       }
       #Union(tags) | #Enum { tags } => {
@@ -459,11 +459,11 @@ impl<comptime T: Type> FromJson for T {
             comptime for (const t of tags) {
               comptime if (t.payload == #None) { comptime t.name => #[t.name], }
             }
-            _ => throw #Unknown(name),
+            _ => throw #UnknownTag(name),
           }
         } else {
           p.beginObject();
-          if (!p.nextKey()) { throw #Syntax(p.at()); }
+          if (!p.nextKey()) { throw #BadJson(p.at()); }
           const name = p.key();
           const v: T = match (name.asStr()) {
             comptime for (const t of tags) {
@@ -472,9 +472,9 @@ impl<comptime T: Type> FromJson for T {
                 #None => {}
               }
             }
-            _ => throw #Unknown(name),
+            _ => throw #UnknownTag(name),
           };
-          if (p.nextKey()) { throw #Syntax(p.at()); }
+          if (p.nextKey()) { throw #BadJson(p.at()); }
           v
         }
       }

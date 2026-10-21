@@ -39,14 +39,16 @@ macro_rules! keywords {
     };
 }
 
-// `from`, `of`, `with`, `resumes` and `row` are contextual and lex as identifiers.
+// `from`, `of`, `with`, `resumes`, `row`, `view`, `private`, and the words that begin `match`,
+// `handle`, `region` and `effect`, are contextual and lex as identifiers: names like `handle`
+// and `match` are too common to reserve.
 keywords! {
     As => "as", Break => "break", Catch => "catch", Comptime => "comptime", Const => "const",
-    Continue => "continue", Defer => "defer", Dyn => "dyn", Effect => "effect", Else => "else",
+    Continue => "continue", Defer => "defer", Dyn => "dyn", Else => "else",
     Enum => "enum", Export => "export", Extends => "extends", Extern => "extern", False => "false",
-    For => "for", Function => "function", Handle => "handle", If => "if", Impl => "impl",
-    Import => "import", Interface => "interface", Let => "let", Match => "match", Mut => "mut",
-    Once => "once", Readonly => "readonly", Region => "region", Return => "return",
+    For => "for", Function => "function", If => "if", Impl => "impl",
+    Import => "import", Interface => "interface", Let => "let", Mut => "mut",
+    Once => "once", Readonly => "readonly", Return => "return",
     Struct => "struct", Throw => "throw", True => "true", Try => "try", Type => "type",
     Unsafe => "unsafe", Uses => "uses", While => "while", Yield => "yield",
 }

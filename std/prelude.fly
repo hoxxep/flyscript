@@ -455,6 +455,9 @@ impl<T extends Clone> Clone for Vec<T> {
     v
   }
 }
+impl<T, comptime N: usize> Iterable<readonly T> for T[N] {
+  function each(self: readonly Self): void uses Yield<readonly T>;
+}
 impl<T> Iterable<readonly T> for Vec<T> {
   function each(self: readonly Self): void uses Yield<readonly T>;
 }

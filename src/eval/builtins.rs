@@ -338,7 +338,7 @@ impl Interp {
                     .collect();
                 Ok(gens_mod::new_gen(self, GenKind::Items { items, pos: 0 }))
             }
-            "slice.each" | "Vec.each" | "RegionList.each" => {
+            "slice.each" | "array.each" | "Vec.each" | "RegionList.each" => {
                 for item in list(&a(0)) {
                     self.yield_value(item)?;
                 }
@@ -384,6 +384,46 @@ impl Interp {
                     Some(i) => Ok(some(list(&entries[i])[1].clone())),
                     None => Ok(none()),
                 }
+            }
+            "HashMap.len" => Ok(Value::Int(list(&a(0)).len() as i128)),
+            "HashMap.has" => {
+                let key = a(1);
+                Ok(Value::Bool(list(&a(0)).iter().any(|e| list(e)[0].equals(&key))))
+            }
+            "HashMap.remove" => {
+                let p = place_of(&a(0))?;
+                let key = a(1);
+                let mut removed = none();
+                update(&p, |m| {
+                    if let Value::List(entries) = m
+                        && let Some(i) = entries.iter().position(|e| matches!(e, Value::Tuple(kv) if kv[0].equals(&key))) {
+                            removed = some(list(&entries.remove(i))[1].clone());
+                        }
+                });
+                Ok(removed)
+            }
+            "HashMap.keys" | "HashMap.values" | "HashMap.entries" | "HashMap.valuesMut" => {
+                let p = place_of(&a(0))?;
+                let entries = list(&Value::Ptr(p.clone()));
+                let key = self.builtin_key(fid);
+                let items = entries
+                    .iter()
+                    .enumerate()
+                    .map(|(i, e)| {
+                        let kv = list(e);
+                        match key.as_str() {
+                            "HashMap.keys" => kv[0].clone(),
+                            "HashMap.values" => kv[1].clone(),
+                            "HashMap.valuesMut" => {
+                                let mut q = p.clone();
+                                q.path.extend([Seg::Index(i), Seg::Index(1)]);
+                                Value::Ptr(q)
+                            }
+                            _ => Value::Tuple(vec![kv[0].clone(), kv[1].clone()]),
+                        }
+                    })
+                    .collect();
+                Ok(gens_mod::new_gen(self, GenKind::Items { items, pos: 0 }))
             }
             "HashMap.sortedByValue" => {
                 let mut entries: Vec<(Value, Value)> = list(&a(0))

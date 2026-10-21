@@ -1,0 +1,28 @@
+// expect: {"ok":true}
+// expect: {"ok":true}
+// expect: {"ok":true}
+// expect: {"error":"only 2 of a1"}
+// expect: {"sku":"a1","name":"Anvil","qty":2,"price":19.5}
+// expect: {"error":"no item zz"}
+// expect: {"items":102,"value":64.0}
+// expect: {"error":"bad request"}
+// Appendix A.10: an inventory service over JSON commands.
+import { println } from "std/io";
+import { Store, handle } from "../../examples/inventory";
+
+export function main(): void uses Io {
+  let store = Store.new();
+  const requests = [
+    `{"Add":{"sku":"a1","name":"Anvil","qty":3,"price":19.5}}`,
+    `{"Add":{"sku":"b2","name":"Bolt","qty":100,"price":0.25}}`,
+    `{"Remove":{"sku":"a1","qty":1}}`,
+    `{"Remove":{"sku":"a1","qty":5}}`,
+    `{"Get":"a1"}`,
+    `{"Get":"zz"}`,
+    `"Report"`,
+    `{"Launch":1}`,
+  ];
+  for (const r of requests) {
+    println(handle(mut store, r));
+  }
+}

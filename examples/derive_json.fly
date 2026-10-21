@@ -11,8 +11,8 @@ export function respond(body: str, nextId: u64): String {
     stringify(#Created { id: nextId, name: s.name })
   } catch (e) {
     match (e) {
-      #Missing(field) => stringify(#Rejected { reason: `missing ${field}` }),
-      #Syntax(at) => stringify(#Rejected { reason: `not JSON at byte ${at}` }),
+      #MissingField(field) => stringify(#Rejected { reason: `missing ${field}` }),
+      #BadJson(at) => stringify(#Rejected { reason: `not JSON at byte ${at}` }),
       _ => stringify(#Rejected { reason: "not a signup" }),
     }
   }

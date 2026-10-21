@@ -802,7 +802,13 @@ impl<'p> Own<'p> {
                     Some(o) => self.expr(o, how),
                     None => Val::default(),
                 };
-                self.state.join(&after_then);
+                // A branch that never finishes (it throws, returns, breaks) does not meet the other.
+                let else_diverges = otherwise.as_deref().is_some_and(diverges);
+                if else_diverges && !block_diverges(then) {
+                    self.state = after_then;
+                } else if !block_diverges(then) {
+                    self.state.join(&after_then);
+                }
                 self.leave();
                 Val { loans: a.loans.union(&b.loans).copied().collect() }
             }
@@ -858,6 +864,9 @@ impl<'p> Own<'p> {
                         for var in scope.values() {
                             self.state.holds.remove(var);
                         }
+                    }
+                    if diverges(&arm.body) {
+                        continue;
                     }
                     match &mut joined {
                         None => joined = Some(self.state.clone()),
@@ -1558,4 +1567,20 @@ fn expr_changes(e: &Expr, out: &mut HashSet<String>) {
         ExprKind::Lambda { body, .. } => expr_changes(body, out),
         _ => {}
     }
+}
+
+/// Whether an expression never finishes normally: it throws, returns, breaks or continues on
+/// every path.
+fn diverges(e: &Expr) -> bool {
+    match &e.kind {
+        ExprKind::Throw(_) | ExprKind::Return(_) | ExprKind::Break | ExprKind::Continue => true,
+        ExprKind::Block(b) | ExprKind::Unsafe(b) => block_diverges(b),
+        ExprKind::If { then, otherwise: Some(o), .. } => block_diverges(then) && diverges(o),
+        ExprKind::Match { arms, .. } => !arms.is_empty() && arms.iter().all(|a| diverges(&a.body)),
+        _ => false,
+    }
+}
+
+fn block_diverges(b: &ast::Block) -> bool {
+    b.stmts.iter().any(|s| matches!(s, Stmt::Expr(e) if diverges(e))) || b.tail.as_deref().is_some_and(diverges)
 }

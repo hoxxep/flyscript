@@ -7,4 +7,12 @@ impl<K extends Hash & Eq, V> HashMap<K, V> {
   export function get<Q extends LentBy<K>>(self: readonly Self, key: readonly Q): Option<readonly V> from self;
   export function getMut<Q extends LentBy<K>>(self: mut Self, key: readonly Q): Option<mut V> from self;
   export function sortedByValue(self: Self): Vec<[K, V]>;
+  export function len(self: readonly Self): usize;
+  export function has<Q extends LentBy<K>>(self: readonly Self, key: readonly Q): bool;
+  // The entry's value, if there was one.
+  export function remove<Q extends LentBy<K>>(self: mut Self, key: readonly Q): Option<V>;
+  export function keys(self: readonly Self): Gen<readonly K, []> from self;
+  export function values(self: readonly Self): Gen<readonly V, []> from self;
+  export function valuesMut(self: mut Self): Gen<mut V, []> from self;
+  export function entries(self: readonly Self): Gen<[readonly K, readonly V], []> from self;
 }

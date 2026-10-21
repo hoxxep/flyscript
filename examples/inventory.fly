@@ -1,0 +1,72 @@
+import { HashMap } from "std/collections";
+import { ToJson, FromJson, JsonError, stringify, parse } from "std/json";
+
+struct Item { sku: String; name: String; qty: u32; price: f64; }
+impl ToJson for Item;
+impl FromJson for Item;
+impl Show for Item;
+impl Clone for Item;
+
+type Command =
+  | #Add(Item)
+  | #Remove { sku: String; qty: u32 }
+  | #Get(String)
+  | #Report;
+
+type Problem = #Unknown(String) | #Short { sku: String; have: u32 } | #BadRequest(String);
+
+export struct Store { items: HashMap<String, Item>; log: Vec<String>; }
+
+impl Store {
+  export function new(): Store { Store { items: HashMap.new(), log: Vec.new() } }
+
+  export function apply(self: mut Self, cmd: Command): String uses Fail<Problem> {
+    match (cmd) {
+      #Add(item) => {
+        self.log.push(`add ${item.sku}`);
+        match (self.items.getMut(item.sku)) {
+          #Some(existing) => { existing.qty += item.qty; },
+          #None => { self.items.insert(item.sku.clone(), item); },
+        }
+        stringify({ ok: true })
+      }
+      #Remove { sku, qty } => {
+        match (self.items.getMut(sku)) {
+          #Some(it) => {
+            if (it.qty < qty) { throw #Short { sku, have: it.qty }; }
+            it.qty -= qty;
+          },
+          #None => throw #Unknown(sku),
+        }
+        self.log.push(`remove ${sku}`);
+        stringify({ ok: true })
+      }
+      #Get(sku) => match (self.items.get(sku)) {
+        #Some(it) => stringify(it),
+        #None => throw #Unknown(sku),
+      },
+      #Report => {
+        let total = 0.0;
+        let count: u32 = 0;
+        for (const it of self.items.values()) {
+          total += it.price * (it.qty as f64);
+          count += it.qty;
+        }
+        stringify({ items: count, value: total })
+      }
+    }
+  }
+}
+
+export function handle(store: mut Store, body: str): String {
+  try {
+    const cmd: Command = parse(body);
+    store.apply(cmd)
+  } catch (e) {
+    match (e) {
+      #Unknown(sku) => stringify({ error: `no item ${sku}` }),
+      #Short { sku, have } => stringify({ error: `only ${have} of ${sku}` }),
+      _ => stringify({ error: "bad request" }),
+    }
+  }
+}

@@ -48,10 +48,10 @@ function show(r: Result<User, JsonError>): void uses Io {
   match (r) {
     #Ok(u) => println(stringify(u)),
     #Err(e) => match (e) {
-      #Missing(f) => println(`missing ${f}`),
-      #Syntax(at) => println(`syntax error at ${at}`),
-      #Unknown(t) => println(`unknown ${t}`),
-      #Range(at) => println(`out of range at ${at}`),
+      #MissingField(f) => println(`missing ${f}`),
+      #BadJson(at) => println(`syntax error at ${at}`),
+      #UnknownTag(t) => println(`unknown ${t}`),
+      #OutOfRange(at) => println(`out of range at ${at}`),
     },
   }
 }

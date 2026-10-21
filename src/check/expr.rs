@@ -1067,7 +1067,15 @@ impl<'p> Checker<'p> {
                 }
                 Ty::Array(elem, Len::Known(items.len() as u64))
             }
-            _ => Ty::Tuple(items.iter().map(|it| self.expr(it, None)).collect()),
+            // With nothing expected, a list is an array if its items agree, as in TypeScript, and a
+            // tuple if they do not.
+            _ => {
+                let ts: Vec<Ty> = items.iter().map(|it| self.expr(it, None)).collect();
+                match ts.split_first() {
+                    Some((first, rest)) if rest.iter().all(|t| self.try_unify(first, t)) => Ty::Array(Box::new(first.clone()), Len::Known(ts.len() as u64)),
+                    _ => Ty::Tuple(ts),
+                }
+            }
         }
     }
 
@@ -1813,6 +1821,8 @@ impl<'p> Checker<'p> {
             PatternKind::Tuple(pats) => {
                 let elems: Vec<Ty> = match self.strip(&inner) {
                     Ty::Tuple(ts) if ts.len() == pats.len() => ts,
+                    // An array of the same length is taken apart the same way: `const [a, b] = xs`.
+                    Ty::Array(e, Len::Known(n)) if n as usize == pats.len() => vec![(*e).clone(); pats.len()],
                     Ty::Var(_) => {
                         let ts: Vec<Ty> = pats.iter().map(|_| self.s.fresh()).collect();
                         let _ = self.s.unify(&inner, &Ty::Tuple(ts.clone()));
@@ -1957,6 +1967,7 @@ impl<'p> Checker<'p> {
         }
         match &t {
             Ty::Tuple(ts) => Some(vec![(Ctor::Tuple, ts.clone())]),
+            Ty::Array(e, Len::Known(n)) => Some(vec![(Ctor::Tuple, vec![(**e).clone(); *n as usize])]),
             Ty::Record(r) => Some(vec![(Ctor::Record, self.s.expand_row(r).labels.into_values().collect())]),
             Ty::Named(d, args) => match &self.p.defs[*d].kind {
                 DefKind::Struct { fields: Some(_) } => {
@@ -1983,6 +1994,7 @@ impl<'p> Checker<'p> {
             },
             PatternKind::Tuple(ps) => match &t {
                 Ty::Tuple(ts) if ts.len() == ps.len() => Pat::Ctor(Ctor::Tuple, ps.iter().zip(ts).map(|(q, t)| self.lower_pat(q, t)).collect()),
+                Ty::Array(e, Len::Known(n)) if *n as usize == ps.len() => Pat::Ctor(Ctor::Tuple, ps.iter().map(|q| self.lower_pat(q, e)).collect()),
                 _ => Pat::Never,
             },
             PatternKind::Record { fields, .. } => {
