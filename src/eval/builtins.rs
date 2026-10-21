@@ -12,6 +12,8 @@ use crate::check::types::{Prim, Ty};
 /// keeps runs deterministic; a forked task's failure is rethrown by the scope.
 #[derive(Default)]
 pub struct ScopeState {
+    /// The task running the scope's body, cancelled with the rest when a task fails.
+    pub owner: u64,
     pub failure: Option<Value>,
     pub panic: Option<String>,
     /// Every task started in the scope; the scope waits for all of them.
@@ -141,13 +143,28 @@ impl Interp {
             // ---- structured concurrency ----
             "Io.scope" => {
                 let sid = self.fresh_id();
-                self.scopes.lock().expect("scopes").insert(sid, ScopeState::default());
+                self.scopes.lock().expect("scopes").insert(sid, ScopeState { owner: self.task, ..Default::default() });
                 let r = self.call_value(&a(0), vec![Value::Native("Scope", sid)]);
+                // The body unwound because a task failed: the scope rethrows that failure.
+                let r = match r {
+                    Err(Ctl::Cancelled) if self.scopes.lock().expect("scopes").get(&sid).is_some_and(|s| s.failure.is_some()) => {
+                        self.sched.uncancel(self.task);
+                        Ok(Value::Unit)
+                    }
+                    other => other,
+                };
                 // A scope returns only when every task started in it has finished (§6.1).
                 let tasks = self.scopes.lock().expect("scopes").get(&sid).map(|s| s.tasks.clone()).unwrap_or_default();
                 for t in tasks {
-                    self.sched.join(self.task, t)?;
+                    // A failing task cancels the body even while it waits here; it waits on.
+                    loop {
+                        match self.sched.join(self.task, t) {
+                            Err(Ctl::Cancelled) => self.sched.uncancel(self.task),
+                            other => break other?,
+                        }
+                    }
                 }
+                self.sched.uncancel(self.task);
                 let st = self.scopes.lock().expect("scopes").remove(&sid).unwrap_or_default();
                 if let Some(p) = st.panic {
                     return Err(panic(p));
@@ -167,13 +184,17 @@ impl Interp {
                 child.handlers.clear();
                 let task = a(1);
                 std::thread::spawn(move || {
-                    if child.sched.start(tid).is_err() {
-                        return;
-                    }
+                    // A task cancelled before it starts does not run, but still finishes.
                     let id = child.fresh_id();
-                    child.handlers.push(Handler::Fail { id });
-                    let r = child.call_value(&task, Vec::new());
-                    child.handlers.pop();
+                    let r = match child.sched.start(tid) {
+                        Ok(()) => {
+                            child.handlers.push(Handler::Fail { id });
+                            let r = child.call_value(&task, Vec::new());
+                            child.handlers.pop();
+                            r
+                        }
+                        Err(e) => Err(e),
+                    };
                     {
                         let mut scopes = child.scopes.lock().expect("scopes");
                         let st = scopes.entry(sid).or_default();
@@ -182,9 +203,17 @@ impl Interp {
                                 st.fibers.insert(tid, Ok(v));
                             }
                             Err(Ctl::Unwind(h, e)) if h == id => {
-                                st.failure.get_or_insert_with(|| e.clone());
+                                // The first failure cancels the scope: its body and other tasks.
+                                if st.failure.is_none() {
+                                    st.failure = Some(e.clone());
+                                    child.sched.cancel(st.owner);
+                                    for t in st.tasks.iter().filter(|t| **t != tid) {
+                                        child.sched.cancel(*t);
+                                    }
+                                }
                                 st.fibers.insert(tid, Err(e));
                             }
+                            Err(Ctl::Cancelled) => {}
                             Err(Ctl::Panic(m)) => {
                                 st.panic.get_or_insert(m);
                             }

@@ -1,0 +1,26 @@
+// file: good.log=GET /a 200 1\nGET /b 200 2
+// expect: 2
+// expect: missing.log: #NotFound
+// A forked task's failure cancels its scope, including a body waiting on a channel the task
+// would have fed; the scope rethrows the failure (§6.1).
+import { println } from "std/io";
+import { File } from "std/io";
+import { channel } from "std/sync";
+function count(path: str): u32 uses Io, Fail<IoErr> {
+  const [tx, rx] = channel<String>();
+  Io.scope((s) => {
+    s.fork(() => {
+      let file = File.open(path);
+      for (const line of file.lines()) { tx.send(line); }
+      tx.close();
+    });
+    let n: u32 = 0;
+    for (const _ of rx) { n += 1; }
+    n
+  })
+}
+export function main(): void uses Io {
+  for (const path of ["good.log", "missing.log"]) {
+    try { println(`${count(path)}`); } catch (e) { println(`${path}: ${e}`); }
+  }
+}

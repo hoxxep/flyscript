@@ -9,7 +9,7 @@
 // profile: user0001=Ada
 // quota: tokenAAA=true
 // One connection's error reply is itself lost to a fault: that client gets no answer.
-// expect: -> 502 error
+// expect: -> 200 Ada
 // expect: -> 502 error
 // expect: -> 502 error
 import { Listener, Db } from "std/net";

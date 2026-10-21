@@ -31,6 +31,8 @@ pub enum Ctl {
     Resume(u64, Value),
     /// A runtime error (a panic, §5.7).
     Panic(String),
+    /// The task's scope was cancelled, because another of its tasks failed (§6.1): unwind to it.
+    Cancelled,
 }
 
 pub type R = Result<Value, Ctl>;

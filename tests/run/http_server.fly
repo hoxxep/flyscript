@@ -10,8 +10,8 @@
 // quota: tokenCCC=true
 // Connections are served by concurrent tasks; the scheduler's seed fixes their interleaving.
 // expect: -> 400 error
-// expect: -> 200 Ada
 // expect: -> 502 error
+// expect: -> 200 Ada
 // expect: -> 401 error
 import { Listener, Db } from "std/net";
 import { println } from "std/io";

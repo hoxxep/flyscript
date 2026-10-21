@@ -30,6 +30,8 @@ struct Inner {
     channels: HashMap<u64, VecDeque<Value>>,
     /// Channels whose senders are done: a receiver drains them, then sees the end.
     closed: HashSet<u64>,
+    /// Tasks whose scope was cancelled: they unwind at their next scheduling point.
+    cancelled: HashSet<u64>,
 }
 
 pub struct Sched {
@@ -50,6 +52,7 @@ impl Sched {
                 next: 1,
                 channels: HashMap::new(),
                 closed: HashSet::new(),
+                cancelled: HashSet::new(),
             }),
             turn: Condvar::new(),
         })
@@ -78,7 +81,24 @@ impl Sched {
             }
             inner = self.turn.wait(inner).expect("scheduler");
         }
+        if inner.cancelled.contains(&me) {
+            return Err(Ctl::Cancelled);
+        }
         Ok(())
+    }
+
+    /// Cancels task `t`: if it is waiting, it wakes, and at its next scheduling point it unwinds.
+    pub fn cancel(&self, t: u64) {
+        let mut inner = self.inner.lock().expect("scheduler");
+        inner.cancelled.insert(t);
+        if inner.blocked.remove(&t).is_some() {
+            inner.ready.push(t);
+        }
+    }
+
+    /// Task `t` has unwound to the scope that cancelled it, and runs on.
+    pub fn uncancel(&self, t: u64) {
+        self.inner.lock().expect("scheduler").cancelled.remove(&t);
     }
 
     /// A new task, ready to run when the scheduler picks it.

@@ -1172,6 +1172,8 @@ impl<'p> Own<'p> {
         let send = |t: &Ty| self.p.is_send_given(t, &self.send_params);
         match ty {
             Ty::Borrow(m, inner) => (mut_ok || !m) && send(inner),
+            // A `str` is a `readonly` borrow of immutable bytes.
+            Ty::Prim(Prim::Str) => true,
             // A closure lent borrows carries them; one that escaped owns only `Send` values.
             Ty::Fn(_) => mut_ok || self.state.holds.get(&v).is_none_or(|h| h.is_empty()),
             t => send(t) || self.p.is_copy(t) && self.p.class(t) == 1,
