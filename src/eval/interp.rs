@@ -60,7 +60,7 @@ fn lookup(env: &Env, name: &str) -> Option<Shared> {
     None
 }
 
-fn define(env: &Env, name: &str, v: Value) {
+pub fn define(env: &Env, name: &str, v: Value) {
     env.vars.lock().expect("env").insert(name.to_string(), shared(v));
 }
 
@@ -89,6 +89,9 @@ pub enum Handler {
     User { id: u64, effect: usize, arms: Vec<ast::HandlerArm>, env: Env, lex: Lex },
     /// The bottom of a generator's thread: `yield` hands an item to the consumer.
     GenYield { generator: u64 },
+    /// The bottom of a coroutine's thread (§5.3): `effect` goes to its arms, and anything else no
+    /// handler inside takes goes to whoever resumed it.
+    Coroutine { co: u64, effect: usize },
 }
 
 pub struct Interp {
@@ -98,6 +101,7 @@ pub struct Interp {
     pub lex: Lex,
     pub ids: Arc<AtomicU64>,
     pub gens: Arc<super::generators::Gens>,
+    pub cos: Arc<super::coroutine::Cos>,
     pub scopes: Arc<Mutex<HashMap<u64, super::builtins::ScopeState>>>,
     /// The span of the call being made, so a builtin can see its expected result type.
     pub call_span: Option<Span>,
@@ -120,6 +124,7 @@ impl Interp {
             lex: Lex { frame: 0, loops: Vec::new(), owner: 0, module: 0, tenv: TEnv::default() },
             ids: Arc::new(AtomicU64::new(1)),
             gens: Arc::new(super::generators::Gens::default()),
+            cos: Arc::new(super::coroutine::Cos::default()),
             scopes: Arc::new(Mutex::new(HashMap::new())),
             call_span: None,
             sched: super::sched::Sched::new(seed),
@@ -137,6 +142,7 @@ impl Interp {
             lex: self.lex.clone(),
             ids: self.ids.clone(),
             gens: self.gens.clone(),
+            cos: self.cos.clone(),
             scopes: self.scopes.clone(),
             call_span: None,
             sched: self.sched.clone(),
@@ -206,6 +212,9 @@ impl Interp {
             }
             Value::Func(fid) => self.call_fn(fid, args),
             Value::Resume(id) => Err(Ctl::Resume(id, args.into_iter().next().unwrap_or(Value::Unit))),
+            Value::Native("Cont", co) => {
+                super::coroutine::drive(self, co, super::coroutine::Cmd::Resume(args.into_iter().next().unwrap_or(Value::Unit)))
+            }
             other => Err(panic(format!("{} is not a function", other.show()))),
         }
     }
@@ -221,6 +230,9 @@ impl Interp {
             if let Handler::GenYield { generator } = h {
                 return super::generators::fail_out(self, *generator, v);
             }
+            if let Handler::Coroutine { co, .. } = h {
+                return super::coroutine::fail(self, *co, v);
+            }
         }
         Err(panic(format!("uncaught failure: {}", v.show())))
     }
@@ -228,6 +240,10 @@ impl Interp {
     /// `yield v`: runs the innermost loop body here, or hands the item to a generator's consumer.
     pub fn yield_value(&mut self, v: Value) -> R {
         let Some(pos) = self.handlers.iter().rposition(|h| matches!(h, Handler::Loop { .. } | Handler::GenYield { .. })) else {
+            if let Some(Handler::Coroutine { co, .. }) = self.handlers.first() {
+                let co = *co;
+                return super::coroutine::forward(self, co, super::coroutine::Evt::Yield(v));
+            }
             return Err(panic("`yield` outside any generator"));
         };
         match self.handlers[pos].clone() {
@@ -254,8 +270,22 @@ impl Interp {
     }
 
     /// Performs a user effect's operation.
+    /// Performs `op` of `effect` as if from here (for a coroutine's driver).
+    pub fn perform_op(&mut self, effect: usize, op: &str, args: Vec<Value>) -> R {
+        self.perform(effect, op, args)
+    }
+
     fn perform(&mut self, effect: usize, op: &str, args: Vec<Value>) -> R {
         let Some(pos) = self.handlers.iter().rposition(|h| matches!(h, Handler::User { effect: e, .. } if *e == effect)) else {
+            // On a coroutine's thread, the effect is its handler's or its resumer's.
+            if let Some(Handler::Coroutine { co, effect: handled }) = self.handlers.first() {
+                let (co, handled) = (*co, *handled);
+                return if handled == effect {
+                    super::coroutine::op(self, co, op, args)
+                } else {
+                    super::coroutine::forward(self, co, super::coroutine::Evt::Perform(effect, op.to_string(), args))
+                };
+            }
             return Err(panic(format!("unhandled effect `{}`", self.prog.defs[effect].name)));
         };
         let Handler::User { id, arms, env, lex, .. } = self.handlers[pos].clone() else { unreachable!() };
@@ -727,6 +757,11 @@ impl Interp {
         let Some(Binding::Def(def)) = self.prog.lookup(self.lex.module, &segments[0].name) else {
             return Err(panic("unknown effect"));
         };
+        // A continuation that is kept, or resumed before more work, needs a body suspended for
+        // real (§5.3).
+        if super::coroutine::needed(arms) {
+            return super::coroutine::handle(self, body, def, arms, env);
+        }
         let id = self.fresh_id();
         self.handlers.push(Handler::User { id, effect: def, arms: arms.to_vec(), env: env.clone(), lex: self.lex.clone() });
         let r = self.block(body, env);

@@ -65,6 +65,8 @@ pub struct Checker<'p> {
     /// In a derivation's specialization, the type that asked for it: its private fields are
     /// visible here (§7.3).
     privileged: Option<DefId>,
+    /// Checking a `defer`, which cannot fail or yield (§5.6).
+    in_defer: bool,
 }
 
 /// A call's span, its generic arguments, and each (argument, bound) pair it must satisfy.
@@ -121,6 +123,7 @@ pub fn check_fn(p: &mut Program, fid: FnId) {
         pending_specs: Vec::new(),
         pending_ops: Vec::new(),
         privileged: None,
+        in_defer: false,
     };
     c.privileged = c.p.spec_requested.get(&fid).copied();
     let inferring = scheme.effects.is_none();
@@ -543,7 +546,10 @@ impl<'p> Checker<'p> {
         let effects = &effects;
         if let Err(e) = self.s.eff_sub(effects, &allowed) {
             let what = self.show_eff(&e);
-            let msg = if self.p.known.get("Fail") == Some(&e.def) {
+            let cleanup = self.in_defer && (self.p.known.get("Fail") == Some(&e.def) || self.p.known.get("Yield") == Some(&e.def));
+            let msg = if cleanup {
+                format!("a `defer` cannot perform {what}: it runs while its block is being left, perhaps by a failure")
+            } else if self.p.known.get("Fail") == Some(&e.def) {
                 let declared = self.s.expand_effs(&allowed).effs.into_iter().find(|x| x.def == e.def);
                 match declared {
                     Some(d) => format!(
@@ -641,8 +647,22 @@ impl<'p> Checker<'p> {
                     };
                     self.bind(pat, &t);
                 }
+                // Cleanup runs while unwinding, so it cannot fail, yield or leave (§5.6).
                 Stmt::Defer(e) => {
+                    let (fail, yld) = (self.known("Fail"), self.known("Yield"));
+                    let mut row = self.s.expand_effs(&self.allowed.clone());
+                    row.effs.retain(|eff| eff.def != fail && eff.def != yld);
+                    if let Tail::Var(_) = row.tail {
+                        row.tail = Tail::Closed;
+                    }
+                    let saved = std::mem::replace(&mut self.allowed, row);
+                    let was = std::mem::replace(&mut self.in_defer, true);
                     self.expr(e, None);
+                    self.in_defer = was;
+                    self.allowed = saved;
+                    if let Some(span) = leaves(e) {
+                        self.err(span, "a `defer` cannot leave its block: it runs while the block is being left");
+                    }
                 }
                 Stmt::Expr(e) => {
                     let t = self.expr(e, None);
@@ -1284,6 +1304,17 @@ impl<'p> Checker<'p> {
             Ty::Borrow(m, _) => Some(m),
             _ => None,
         };
+        // A continuation is called once, like a `once` function (§5.3).
+        if let Ty::Named(d, cargs) = self.strip(&t)
+            && d == self.known("Cont") {
+                let (Some(GArg::Ty(a)), Some(GArg::Ty(b))) = (cargs.first(), cargs.get(1)) else { return Ty::Error };
+                if through.is_some() {
+                    self.err(callee.span, "a continuation is called only by moving it");
+                }
+                let params = if *a == Ty::void() { Vec::new() } else { vec![a.clone()] };
+                self.check_args(&params, args, span);
+                return b.clone();
+            }
         match self.strip(&t) {
             Ty::Fn(f) if through.is_some() && (f.mode == FnMode::Once || f.mode == FnMode::Mut && through == Some(false)) => {
                 let (mode, how) = if f.mode == FnMode::Once { ("once", "only by moving it") } else { ("mut", "only through a `mut` borrow") };
@@ -1761,8 +1792,7 @@ impl<'p> Checker<'p> {
             }
             if let Some(k) = &arm.resumes {
                 // A continuation of a `void` operation takes no argument: `k()`.
-                let params = if op_ret == Ty::void() { Vec::new() } else { vec![op_ret] };
-                let cont = Ty::Fn(Box::new(FnTy { mode: FnMode::Once, params, ret: result.clone(), effects: EffRow::pure() }));
+                let cont = Ty::Named(self.known("Cont"), vec![GArg::Ty(op_ret), GArg::Ty(result.clone())]);
                 self.declare(&k.name, cont);
             }
             let t = self.block(&arm.body, Some(&result));
@@ -2221,5 +2251,38 @@ fn inst_record_tails(t: &Ty, tails: &HashMap<Sym, Tail>) -> Ty {
             effects: f.effects.clone(),
         })),
         t => t.clone(),
+    }
+}
+
+/// A `return`, or a `break` or `continue` of a loop around it, in an expression, outside the
+/// functions written in it.
+fn leaves(e: &Expr) -> Option<Span> {
+    leaves_in(e, 0)
+}
+
+fn leaves_in(e: &Expr, loops: usize) -> Option<Span> {
+    let block = |b: &ast::Block, loops: usize| -> Option<Span> {
+        b.stmts
+            .iter()
+            .find_map(|st| match st {
+                Stmt::Let { init, .. } => leaves_in(init, loops),
+                Stmt::Defer(x) | Stmt::Expr(x) => leaves_in(x, loops),
+            })
+            .or_else(|| b.tail.as_deref().and_then(|t| leaves_in(t, loops)))
+    };
+    match &e.kind {
+        ExprKind::Return(_) => Some(e.span),
+        ExprKind::Break | ExprKind::Continue if loops == 0 => Some(e.span),
+        ExprKind::Lambda { .. } => None,
+        ExprKind::Block(b) | ExprKind::Unsafe(b) | ExprKind::Region { body: b, .. } => block(b, loops),
+        ExprKind::If { cond, then, otherwise } => {
+            leaves_in(cond, loops).or_else(|| block(then, loops)).or_else(|| otherwise.as_deref().and_then(|o| leaves_in(o, loops)))
+        }
+        ExprKind::While { cond, body } => leaves_in(cond, loops).or_else(|| block(body, loops + 1)),
+        ExprKind::For { iter, body, .. } => leaves_in(iter, loops).or_else(|| block(body, loops + 1)),
+        ExprKind::Match { scrutinee, arms } => leaves_in(scrutinee, loops).or_else(|| arms.iter().find_map(|a| leaves_in(&a.body, loops))),
+        ExprKind::Try { body, handler, .. } => block(body, loops).or_else(|| block(handler, loops)),
+        ExprKind::Handle { body, arms, .. } => block(body, loops).or_else(|| arms.iter().find_map(|a| block(&a.body, loops))),
+        _ => super::own::children(e).into_iter().find_map(|c| leaves_in(c, loops)),
     }
 }

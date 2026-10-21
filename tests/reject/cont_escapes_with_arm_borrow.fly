@@ -1,0 +1,18 @@
+// error: the result borrows `out`, which does not outlive this function
+// A continuation that leaves its arm takes the handler with it, and the handler's arm changes
+// `out`: whatever holds the continuation borrows `out` (§5.3).
+effect Log { info(msg: String): void; }
+enum Step { #Done, #More(Cont<void, Step>) }
+function makeLogger(): Step {
+  let out: Vec<String> = Vec.new();
+  handle {
+    Log.info("first".toString());
+    Log.info("second".toString());
+    #Done
+  } with Log {
+    info(msg) resumes k => {
+      out.push(msg);
+      #More(k)
+    },
+  }
+}

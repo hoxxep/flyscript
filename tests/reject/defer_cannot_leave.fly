@@ -1,0 +1,5 @@
+// error: a `defer` cannot leave its block
+export function work(n: i32): i32 {
+  defer { if (n > 0) { return; } };
+  n
+}

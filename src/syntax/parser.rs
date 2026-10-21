@@ -869,7 +869,9 @@ impl<'a> Parser<'a> {
                 continue;
             }
             if self.eat_kw(Kw::Defer) {
-                stmts.push(Stmt::Defer(self.expr()?));
+                // `defer { … }` defers a block, `defer e` an expression.
+                let e = if self.at("{") { self.block_like()? } else { self.expr()? };
+                stmts.push(Stmt::Defer(e));
                 self.expect(";")?;
                 continue;
             }

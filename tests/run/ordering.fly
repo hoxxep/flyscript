@@ -20,7 +20,7 @@ export function main(): void uses Io {
   const a = Version { major: 1, minor: 4, patch: 2 };
   const b = Version { major: 1, minor: 10, patch: 0 };
   println(`${a < b} ${a >= b} ${max(a, b)}`);
-  const w: Level = #Warn(String.fromStr("disk"));
+  const w: Level = #Warn("disk".toString());
   const e: Level = #Error(2);
   println(`${w < e} ${#Info < w} ${e > #Error(1)}`);
   println(`${[1, "b"] < [1, "c"]} ${{ x: 2, y: 0 } > { x: 1, y: 9 }}`);

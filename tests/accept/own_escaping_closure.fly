@@ -4,7 +4,7 @@ export function makeGreeter(prefix: String): (name: str) => String {
 }
 
 export function greetTwice(): String {
-  const greet = makeGreeter(String.fromStr("Hello"));
+  const greet = makeGreeter("Hello".toString());
   greet("Ada");
   greet("Grace")
 }

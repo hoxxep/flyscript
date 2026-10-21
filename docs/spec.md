@@ -1,6 +1,6 @@
 # Flyscript
 
-**Language specification, version 0.28**
+**Language specification, version 0.29**
 
 *Affine values, one row calculus, handlers for everything, and `comptime`: Church on the outside, Turing on the inside.*
 
@@ -18,16 +18,19 @@ The whole language rests on five laws. Every rule in this document is a conseque
 4. **Handlers for everything.** Errors, I/O, iteration and region memory are ordinary effects with ordinary handlers. A handler may hold the rest of a computation as a one-shot continuation value; generators and tasks are both built from that one primitive.
 5. **`comptime` is the metalanguage.** Generics, reflection, layout transformation and derived interfaces are ordinary Flyscript code run by the compiler.
 
-### 0.1 Changes from 0.27
+### 0.1 Changes from 0.28
 
-0.28 comes from a third program, Appendix A.11: a rate limiter whose clock and log are effects, injected by a test that handles them.
+0.29 corrects 0.28's continuations, after a review found them unsound (docs/reviews/2026-10-21-holistic-review-of-0-28.md), and makes them first-class in the prototype.
 
 | Change | Why |
 | :--- | :--- |
-| A continuation is a `once` function, and calling `k(a)` resumes it (§5.2, §5.3) | `Cont<A, B, E>` and `k.resume(a)` were a second name for what a `once` function already is |
-| One `handle` may have several `with` clauses, the first innermost (§5.2) | injecting a clock and a log needed two nested handles |
-| A handler arm's body may be an expression, as a `match` arm's may (§2.3) | `now() resumes k => k(t)` |
-| `min` and `max` over `Ord` in the prelude | every program wrote them |
+| A continuation is a `Cont<A, B>` again — still called `k(a)` — and is not `Send` (§5.3, §4.4) | as a `once` function it was `Send`, so it could be spawned onto another task or sent through a channel, away from the fiber it belongs to |
+| A continuation that leaves its arm takes its handler along, so whatever holds it borrows everything the arms use (§5.3) | an arm that pushed into a local returned `k`, which pushed into the dead local when resumed |
+| Several `with` clauses are nested `handle`s, the first innermost (§5.2) | stated exactly, an inner arm may perform an effect an outer clause handles |
+| The contextual words are keywords in exactly the shapes `match (…) {`, `handle {`, `region (Ident) {` and `effect Ident` (§2.3) | so a call `match(x)` never needs a lookahead guess |
+| `Drop.drop` is pure, and a `defer` cannot fail, yield, return, break or continue (§5.6) | cleanup runs while a block is being left, perhaps by a failure |
+| One conversion from `str` to `String`: `s.toString()` | `String.fromStr` was a second spelling |
+| Channels require `Send` messages (§6.2) | a message goes to another task |
 
 ---
 
@@ -163,7 +166,7 @@ Three rules settle the grammar's ambiguities, all borrowed from TypeScript:
 
 - **Braces.** A `{` in expression position begins a record literal. A block appears only as the body of a block-like construct, after `=>` in a lambda or match arm, or at the start of a statement — unless the brace opens an entry (`{ a: 1 }`, `{ [k]: v }`, or a `comptime for` over entries): Flyscript has no labeled statements, so that is always a record.
 - **Block-like statements.** A block-like expression at the start of a statement needs no `;` and is not continued by operators: `if (c) { … } [a, b]` is two statements. As the last item of a block it is the block's value.
-- **Contextual words.** `from`, `of`, `with`, `resumes`, `row`, `view` and `private` are keywords only where the grammar expects them, and so are the words that begin `match (e) {`, `handle {`, `region (R) {` and `effect Name`; anywhere else they are names, so a request handler may be called `handle`. Any reserved word may be used as a member name (`Yield.yield`, `{ default: 1 }`).
+- **Contextual words.** `from`, `of`, `with`, `resumes`, `row`, `view` and `private` are keywords only where the grammar expects them. `match`, `handle`, `region` and `effect` are keywords only when followed by `(…) {`, `{`, `(Ident) {` and `Ident` respectively — shapes a call or a name never takes, since an expression statement ends with `;` — and names anywhere else, so a request handler may be called `handle`. Any reserved word may be used as a member name (`Yield.yield`, `{ default: 1 }`).
 
 ---
 
@@ -345,7 +348,7 @@ The mode is checked wherever a closure meets a function type — an argument, a 
 The compiler derives three marker interfaces from structure:
 
 - **`Copy`**: bitwise copyable; no field owns a resource and the type has no `Drop`.
-- **`Send`**: may move to another task, and `readonly T` may be shared with other tasks. `T` is `Send` when it is class 1 and owns no raw pointer or runtime handle (`Gen`, `Fiber`, `Scope`); a type parameter is `Send` when declared `extends Send`. Every function value is `Send`, since an escaping closure owns only `Send` values (§4.3); a closure that holds a borrow carries it as a loan, which a task cannot take (§6.1). Law 2 is what makes one marker enough: every mutation through a shared reference is an effect, and while tasks run no fiber may perform the effect that writes to an outer region (§6.1), so whatever a task can see through a `readonly` value or a `Ref` cannot change.
+- **`Send`**: may move to another task, and `readonly T` may be shared with other tasks. `T` is `Send` when it is class 1 and owns no raw pointer or runtime handle (`Cont`, `Fiber`, `Scope`, and so `Gen`, which holds a `Cont`); a type parameter is `Send` when declared `extends Send`. Every function value is `Send`, since an escaping closure owns only `Send` values (§4.3); a closure that holds a borrow carries it as a loan, which a task cannot take (§6.1). Law 2 is what makes one marker enough: every mutation through a shared reference is an effect, and while tasks run no fiber may perform the effect that writes to an outer region (§6.1), so whatever a task can see through a `readonly` value or a `Ref` cannot change.
 - **`Drop`**: user-implemented on nominal types; destructors run in reverse order of construction.
 
 ### 4.5 Pointers
@@ -437,10 +440,10 @@ function map<T, U, row E>(xs: readonly T[], f: (x: readonly T) => U uses ...E): 
 
 ### 5.2 Handlers
 
-`handle { body } with Eff { arms }` runs `body` and intercepts its `Eff` operations; further `with` clauses handle further effects, the first innermost. Each arm has one of two forms:
+`handle { body } with Eff { arms }` runs `body` and intercepts its `Eff` operations. Further `with` clauses nest: `handle { body } with A { … } with B { … }` is `handle { handle { body } with A { … } } with B { … }`, so an arm of `A` may perform `B`. Each arm has one of two forms:
 
 - **Abortive** — `op(x) => armBody`. The body's frames are unwound first (running its `defer`s and destructors and releasing its borrows), then `armBody` runs and its value becomes the value of the `handle` expression. Because the body's borrows are released, the arm may use anything the body had borrowed.
-- **Resumptive** — `op(x) resumes k => armBody`. The body stays suspended, holding its borrows, and `k` is the rest of the body as a function, `once (a: A) => B uses E`, where `A` is the operation's result type, `B` the `handle` expression's type and `E` the body's other effects. Calling `k` resumes the body.
+- **Resumptive** — `op(x) resumes k => armBody`. The body stays suspended, holding its borrows, and `k` is the rest of the body, a `Cont<A, B>`, where `A` is the operation's result type and `B` the `handle` expression's type. Calling `k(a)` resumes the body.
 
 The `handle` expression evaluates to the body's value if the body completes without performing `Eff`, and otherwise to the value of the arm that handled the operation. A resumptive arm usually produces that value by resuming: `k(a)` itself evaluates to the `handle` expression's eventual value. Injecting a dependency is handling its effect:
 
@@ -453,12 +456,12 @@ An arm runs in the context of the `handle` expression: its effects are those of 
 
 ### 5.3 Continuations
 
-A continuation is a `once` function: an affine value that may be stored, moved and returned like any other, and that is called at most once.
+A `Cont<A, B>` is an affine value that may be stored, moved and returned like any other and is called at most once, as `k(a)`, only by moving it. It belongs to the task whose stack it holds, so it is not `Send`.
 
 - `k(a)` consumes `k` and runs the suspended computation until it next performs the handled effect (when the arm runs again) or finishes. Its value is the `handle` expression's value from that point.
 - Dropping `k` unwinds the suspended computation in place: its `defer`s and destructors run in reverse order, in-flight I/O is cancelled and drained (§6.3), and its stack segment is released.
 - Handlers are **deep**: the handler stays installed beneath the suspended computation. Operations of other effects performed while `k` runs go to the handlers around the call of `k`, which is why `E` appears in `k`'s type.
-- A continuation holds every borrow its suspended computation holds: in a resumptive arm, `k` holds the borrows the body had taken when it performed the operation. One holding a borrow is class 2 (§4.2), so a continuation can never outlive a borrow it holds, and the borrowed places stay locked while it lives.
+- A continuation holds every borrow its suspended computation holds: in a resumptive arm, `k` holds the borrows the body had taken when it performed the operation. And since a handler is deep, a continuation that leaves its arm — returned, stored, passed on rather than called — takes the handler with it: whatever holds it also borrows every binding outside the `handle` that the arms use, in the strongest mode they use it. One holding a borrow is class 2 (§4.2), so a continuation can never outlive a borrow it holds, and the borrowed places stay locked while it lives.
 - Continuations are one-shot. Resuming twice would duplicate owned values and live `mut` borrows.
 - **Resuming re-enters.** `k(a)` runs the rest of the body, which may perform the same operation again and re-enter an arm of the same handler. So, for ownership, `k(a)` uses every binding from outside the `handle` that the body or any of its arms uses, in the strongest mode any of them does: an arm cannot hold a borrow of such a binding across the call.
 
@@ -520,8 +523,8 @@ const firstEvens = xs.iter().filter((x) => x % 2 == 0).take(10).collect();
 Pull iteration is library code. `generate(f)` runs `f` under a `Yield` handler whose resumptive arm stores the continuation, and returns a `Gen<T, E>` whose `next()` resumes it:
 
 ```ts
-export struct Gen<T, row E> { state: Option<once () => Step<T, E> uses ...E>; }
-type Step<T, row E> = #Done | #Item { item: T; rest: once () => Step<T, E> uses ...E };
+export struct Gen<T, row E> { state: Option<Cont<void, Step<T, E>>>; }
+type Step<T, row E> = #Done | #Item { item: T; rest: Cont<void, Step<T, E>> };
 
 impl<T, row E> Gen<T, E> {
   export function next(self: mut Self): Option<T> uses ...E {
@@ -542,7 +545,7 @@ A `Gen` owns its continuation, so dropping it runs the generator's cleanup; if t
 
 ### 5.6 Cleanup: `defer` and `Drop`
 
-`defer e;` schedules `e` to run when the enclosing block exits. `defer`s and the destructors of the block's owned locals share one stack and run in reverse order of the points at which they were registered, whether the block exits normally, by `return`, `break`, `throw`, an abortive handler, a dropped continuation, or cancellation.
+`defer e;` (or `defer { … };`) schedules `e` to run when the enclosing block exits. Because it runs while the block is being left — perhaps by a failure — a `defer` cannot fail, yield, `return`, or `break` or `continue` a loop around it; and `Drop.drop(self: mut Self): void` has no effects. `defer`s and the destructors of the block's owned locals share one stack and run in reverse order of the points at which they were registered, whether the block exits normally, by `return`, `break`, `throw`, an abortive handler, a dropped continuation, or cancellation.
 
 Because a `defer` runs at the block's exit, it holds the borrows it needs from the point it is registered to the end of the block, including past a `return`: after `defer v.clear();`, `v` cannot be lent `readonly` or moved, so `return v[0..1]` is rejected. A `defer` may not move a binding declared outside its block. A destructor reads its whole value, which is why no field may be moved out of a type that implements `Drop` (§4.1).
 
@@ -793,7 +796,7 @@ impl<comptime T: Type> FromJson for T {
           comptime for (const f of fields) {
             [f.name]: match (slots.[f.name]) {
               #Some(v) => v,
-              #None => comptime if (isOption(f.type)) { #None } else { throw #MissingField(String.fromStr(f.name)) },
+              #None => comptime if (isOption(f.type)) { #None } else { throw #MissingField(f.name.toString()) },
             },
           }
         }

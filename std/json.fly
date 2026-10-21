@@ -436,7 +436,7 @@ impl<comptime T: Type> FromJson for T {
           comptime for (const f of fields) {
             [f.name]: match (slots.[f.name]) {
               #Some(v) => v,
-              #None => comptime if (isOption(f.type)) { #None } else { throw #MissingField(String.fromStr(f.name)) },
+              #None => comptime if (isOption(f.type)) { #None } else { throw #MissingField(f.name.toString()) },
             },
           }
         }

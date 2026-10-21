@@ -5,12 +5,12 @@ import { println } from "std/io";
 
 function show<region R>(j: Ref<Json>): String {
   match (j) {
-    #Null => String.fromStr("null"),
+    #Null => "null".toString(),
     #Bool(b) => `${b}`,
     #Num(n) => `${n}`,
     #Str(s) => `"${s}"`,
     #Arr(items) => {
-      let out = String.fromStr("[");
+      let out = "[".toString();
       let first = true;
       for (const item of items) {
         if (!first) { out.push(", "); }
@@ -20,7 +20,7 @@ function show<region R>(j: Ref<Json>): String {
       out.push("]");
       out
     },
-    #Obj(_) => String.fromStr("{...}"),
+    #Obj(_) => ("{...}").toString(),
   }
 }
 

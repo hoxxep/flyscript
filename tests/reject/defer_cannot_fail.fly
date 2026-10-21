@@ -1,0 +1,7 @@
+// error: a `defer` cannot perform `Fail
+// Cleanup runs while its block is being left, perhaps by a failure: it cannot fail itself (§5.6).
+import { File } from "std/io";
+export function work(): void uses Io, Fail<IoErr> {
+  defer File.open("log");
+  File.open("data");
+}

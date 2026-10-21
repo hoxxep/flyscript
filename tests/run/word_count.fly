@@ -8,6 +8,6 @@
 import { main as count } from "../../examples/word_count";
 
 export function main(): void uses Io {
-  const files: String[3] = [String.fromStr("a.txt"), String.fromStr("missing.txt"), String.fromStr("b.txt")];
+  const files: String[3] = ["a.txt".toString(), "missing.txt".toString(), "b.txt".toString()];
   count(files);
 }

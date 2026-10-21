@@ -16,6 +16,10 @@ use super::types::*;
 use crate::diag::Span;
 use crate::syntax::ast::*;
 
+/// The methods `comptime` values have; any other method of one is a run-time call on its value
+/// (`f.name.toString()`).
+const COMPTIME_METHODS: &[&str] = &["len", "isEmpty", "enumerate", "map", "filter", "any"];
+
 /// Positions at or above this belong to expanded code.
 pub const SYNTH_BASE: usize = 1 << 40;
 
@@ -269,8 +273,9 @@ impl<'p> Expand<'p> {
             }
             ExprKind::Index { target, index } => ExprKind::Index { target: Box::new(self.expr(target)?), index: Box::new(self.expr(index)?) },
             ExprKind::Call { callee, type_args, args } => {
-                if let ExprKind::Field { target, .. } = &callee.kind
+                if let ExprKind::Field { target, name } = &callee.kind
                     && self.is_ct(target)
+                    && COMPTIME_METHODS.contains(&name.name.as_str())
                     && !matches!(self.eval(target)?, CV::Type(_))
                 {
                     // A method of a `comptime` value: computed now (`fields.len()`).
@@ -278,7 +283,16 @@ impl<'p> Expand<'p> {
                     return self.splice(&v, e.span);
                 }
                 let type_args = type_args.iter().map(|t| self.ty(t)).collect::<R<_>>()?;
-                ExprKind::Call { callee: Box::new(self.expr(callee)?), type_args, args: self.exprs(args)? }
+                // A run-time method of a `comptime` value: called on the value, spliced in.
+                let callee = match &callee.kind {
+                    ExprKind::Field { target, name } if self.is_ct(target) && !matches!(self.eval(target)?, CV::Type(_)) => {
+                        let v = self.eval(target)?;
+                        let span = self.sp(callee.span);
+                        Expr { kind: ExprKind::Field { target: Box::new(self.splice(&v, target.span)?), name: self.ident(name) }, span }
+                    }
+                    _ => self.expr(callee)?,
+                };
+                ExprKind::Call { callee: Box::new(callee), type_args, args: self.exprs(args)? }
             }
             ExprKind::Unary { op, operand } => ExprKind::Unary { op, operand: Box::new(self.expr(operand)?) },
             ExprKind::BorrowMut(x) => ExprKind::BorrowMut(Box::new(self.expr(x)?)),

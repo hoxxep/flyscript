@@ -466,7 +466,7 @@ impl Program {
                 }
             }
         }
-        for name in ["Fail", "Yield", "Region", "Io", "String", "Ref", "Vec", "Iterable", "LentBy", "Copy", "Send", "Eq", "Show", "Ord"] {
+        for name in ["Fail", "Yield", "Region", "Io", "String", "Ref", "Vec", "Iterable", "LentBy", "Copy", "Send", "Eq", "Show", "Ord", "Cont"] {
             let prelude = self.module_named("std/prelude").expect("prelude");
             let layout = self.module_named("std/layout").expect("layout");
             let found = self.modules[prelude].exports.get(name).or_else(|| self.modules[layout].exports.get(name));

@@ -1,0 +1,54 @@
+// expect: 40
+// expect: ["before", "tick 1", "between", "tick 2"]
+// expect: #Err(#Boom)
+// First-class continuations (§5.3): work after resuming, a suspended body's other effects going
+// to the handlers around its resumer, and a failure surfacing where it is resumed.
+import { println } from "std/io";
+
+effect Ask { ask(): i64; }
+effect Note { note(msg: String): void; }
+effect Tick { tick(n: u32): void; }
+enum Steps { #Done, #At(u32, Cont<void, Steps>) }
+
+// Work after resuming: each answer is doubled on the way back out.
+function doubled(): i64 {
+  handle { Ask.ask() + Ask.ask() } with Ask { ask() resumes k => k(5) * 2 }
+}
+
+// A suspended body's other effects go to the handlers around whoever resumes it.
+function noisy(): Steps uses Note {
+  handle {
+    Note.note("before".toString());
+    Tick.tick(1);
+    Note.note("between".toString());
+    Tick.tick(2);
+    #Done
+  } with Tick { tick(n) resumes k => #At(n, k) }
+}
+
+// A failure in the suspended body surfaces where it is resumed.
+function failing(): Steps uses Fail<#Boom> {
+  handle { Tick.tick(7); throw #Boom } with Tick { tick(n) resumes k => #At(n, k) }
+}
+
+export function main(): void uses Io {
+  println(`${doubled()}`);
+  let log: Vec<String> = Vec.new();
+  handle {
+    let s = noisy();
+    while (true) {
+      match (s) {
+        #Done => break,
+        #At(n, k) => { Note.note(`tick ${n}`); s = k(); },
+      }
+    }
+  } with Note { note(m) resumes k => { log.push(m); k() } };
+  println(`${log}`);
+  const r = Fail.capture(() => {
+    match (failing()) {
+      #At(n, k) => { const rest = k(); n },
+      #Done => 0,
+    }
+  });
+  println(`${r}`);
+}

@@ -11,16 +11,16 @@ export function main(): void uses Io {
   try {
     Io.scope((s) => {
       s.spawn(() => kv(rx));
-      tx.send(#Put { key: String.fromStr("a"), val: String.fromStr("1") });
+      tx.send(#Put { key: "a".toString(), val: "1".toString() });
       const [r1, a1] = Reply.new<Option<String>>();
-      tx.send(#Get { key: String.fromStr("a"), reply: r1 });
+      tx.send(#Get { key: "a".toString(), reply: r1 });
       println(`${a1.wait()}`);
       const [r2, a2] = Reply.new<Option<String>>();
-      tx.send(#Get { key: String.fromStr("b"), reply: r2 });
+      tx.send(#Get { key: "b".toString(), reply: r2 });
       println(`${a2.wait()}`);
-      tx.send(#Put { key: String.fromStr("a"), val: String.fromStr("2") });
+      tx.send(#Put { key: "a".toString(), val: "2".toString() });
       const [r3, a3] = Reply.new<Option<String>>();
-      tx.send(#Get { key: String.fromStr("a"), reply: r3 });
+      tx.send(#Get { key: "a".toString(), reply: r3 });
       println(`${a3.wait()}`);
       tx.send(#Stop);
     });

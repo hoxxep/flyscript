@@ -1,0 +1,19 @@
+// expect: 6
+import { println } from "std/io";
+// A generator by hand (§5.3): the handler stores the continuation, and the caller resumes it.
+effect Tick { tick(n: u32): void; }
+enum Steps { #Done, #At(u32, Cont<void, Steps>) }
+function ticks(): Steps {
+  handle { Tick.tick(1); Tick.tick(2); Tick.tick(3); #Done } with Tick { tick(n) resumes k => #At(n, k) }
+}
+export function main(): void uses Io {
+  let total: u32 = 0;
+  let s = ticks();
+  while (true) {
+    match (s) {
+      #Done => break,
+      #At(n, k) => { total += n; s = k(); },
+    }
+  }
+  println(`${total}`);
+}

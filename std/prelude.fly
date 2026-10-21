@@ -22,6 +22,10 @@ export interface Clone { function clone(self: readonly Self): Self; }
 export interface Ord extends Eq { function cmp(self: readonly Self, other: readonly Self): Ordering; }
 export type Ordering = #Less | #Equal | #Greater;
 
+// The rest of a handled computation, given to a resumptive arm (§5.3): called once, `k(a)`, to
+// resume it. It is bound to its task, so it is not `Send`.
+export struct Cont<A, B>;
+
 export struct Hasher;
 impl Hasher {
   export function new(): Hasher;
@@ -376,7 +380,6 @@ export struct Arc<T extends Send>;
 
 impl String {
   export function new(): String;
-  export function fromStr(s: str): String;
   export function len(self: readonly Self): usize;
   export function push(self: mut Self, s: str): void;
   export function asStr(self: readonly Self): str from self;

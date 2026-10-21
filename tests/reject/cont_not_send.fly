@@ -1,0 +1,6 @@
+// error: `Cont<void, void>` does not implement `Send`
+// A continuation is bound to its task: it cannot be sent to another (§5.3).
+import { channel } from "std/sync";
+export function leak(): void {
+  const [tx, rx] = channel<Cont<void, void>>();
+}

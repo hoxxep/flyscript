@@ -933,6 +933,7 @@ impl<'p> Own<'p> {
                         }
                 }
                 let v = self.block(body, how);
+                let mut loans = v.loans.clone();
                 for arm in arms {
                     self.scopes.push(HashMap::new());
                     for p in &arm.params {
@@ -944,10 +945,31 @@ impl<'p> Own<'p> {
                         self.state.holds.insert(id, v.loans.clone());
                         self.resumes.insert(id, reached.clone());
                     }
-                    self.block(&arm.body, how);
+                    // What an arm gives back is the `handle` expression's value.
+                    loans.extend(self.block(&arm.body, how).loans);
                     self.scopes.pop();
                 }
-                v
+                // A continuation that leaves its arm takes its handler with it, so whatever has it
+                // borrows everything the handler's arms use (§5.3).
+                if arms.iter().any(|a| a.resumes.as_ref().is_some_and(|k| escapes(&a.body, &k.name))) {
+                    let mut arm_uses: Vec<(String, Span)> = Vec::new();
+                    let mut arm_changes = HashSet::new();
+                    for arm in arms {
+                        let mut bound: HashSet<String> = arm.params.iter().map(|p| p.name.clone()).collect();
+                        if let Some(k) = &arm.resumes {
+                            bound.insert(k.name.clone());
+                        }
+                        walk_block(&arm.body, &bound, &mut arm_uses);
+                        block_changes(&arm.body, &mut arm_changes);
+                    }
+                    for (name, span) in arm_uses {
+                        if let Some(var) = self.lookup(&name) {
+                            let l = self.new_loan(Path { root: var, fields: Vec::new() }, arm_changes.contains(&name), span);
+                            loans.insert(l);
+                        }
+                    }
+                }
+                Val { loans }
             }
             ExprKind::Comptime(inner) => self.expr(inner, how),
         }
@@ -1336,13 +1358,32 @@ fn send_params(p: &Program, tparams: &[super::env::GParam]) -> Vec<u32> {
 }
 
 fn hides_borrows(t: &Ty, p: &Program, send: &[u32]) -> bool {
-    let rec = |t: &Ty| hides_borrows(t, p, send);
+    hides_depth(t, p, send, 0)
+}
+
+/// Whether a type can hold a borrow its type does not show: a closure, a continuation, a type
+/// parameter, or a type built from one — a nominal type's fields included.
+fn hides_depth(t: &Ty, p: &Program, send: &[u32], depth: usize) -> bool {
+    if depth > 8 {
+        return false;
+    }
+    let rec = |t: &Ty| hides_depth(t, p, send, depth + 1);
     match t {
         Ty::Param(s) => !send.contains(&s.id),
         Ty::Fn(_) | Ty::Var(_) | Ty::Assoc(..) => true,
         Ty::Named(d, args) => {
-            matches!(p.defs[*d].name.as_str(), "Gen" | "Cont") && p.modules[p.defs[*d].module].is_std
-                || args.iter().any(|a| matches!(a, GArg::Ty(t) if rec(t)))
+            let def = &p.defs[*d];
+            if matches!(def.name.as_str(), "Gen" | "Cont") && p.modules[def.module].is_std {
+                return true;
+            }
+            if args.iter().any(|a| matches!(a, GArg::Ty(t) if rec(t))) {
+                return true;
+            }
+            match &def.kind {
+                super::env::DefKind::Struct { .. } => p.struct_fields(*d, args).is_some_and(|fs| fs.iter().any(|(_, t)| rec(t))),
+                super::env::DefKind::Enum { tags } => tags.values().any(|t| rec(&super::env::subst_params(t, &def.params, args))),
+                _ => false,
+            }
         }
         Ty::Tuple(ts) => ts.iter().any(rec),
         Ty::Record(r) | Ty::Union(r) => r.labels.values().any(rec),
@@ -1487,7 +1528,7 @@ fn pattern_names(p: &Pattern, out: &mut HashSet<String>) {
 }
 
 /// The direct sub-expressions of an expression (not those inside blocks it owns).
-fn children(e: &Expr) -> Vec<&Expr> {
+pub(super) fn children(e: &Expr) -> Vec<&Expr> {
     match &e.kind {
         ExprKind::Field { target, .. } => vec![target],
         ExprKind::Index { target, index } => vec![target, index],
@@ -1585,4 +1626,43 @@ fn diverges(e: &Expr) -> bool {
 
 fn block_diverges(b: &ast::Block) -> bool {
     b.stmts.iter().any(|s| matches!(s, Stmt::Expr(e) if diverges(e))) || b.tail.as_deref().is_some_and(diverges)
+}
+
+/// Whether an arm lets its continuation `k` go other than by calling it: returns it, stores it,
+/// passes it on.
+fn escapes(b: &ast::Block, k: &str) -> bool {
+    let mut uses = Vec::new();
+    walk_block(b, &HashSet::new(), &mut uses);
+    let mut calls = 0;
+    count_calls(b, k, &mut calls);
+    uses.iter().filter(|(n, _)| n == k).count() > calls
+}
+
+/// How many times `k(…)` is called in a block.
+fn count_calls(b: &ast::Block, k: &str, n: &mut usize) {
+    fn expr(e: &Expr, k: &str, n: &mut usize) {
+        if let ExprKind::Call { callee, args, .. } = &e.kind {
+            if matches!(&callee.kind, ExprKind::Ident(c) if c == k) {
+                *n += 1;
+            } else {
+                expr(callee, k, n);
+            }
+            for a in args {
+                expr(a, k, n);
+            }
+            return;
+        }
+        for c in children(e) {
+            expr(c, k, n);
+        }
+    }
+    for s in &b.stmts {
+        match s {
+            Stmt::Let { init, .. } => expr(init, k, n),
+            Stmt::Defer(e) | Stmt::Expr(e) => expr(e, k, n),
+        }
+    }
+    if let Some(t) = &b.tail {
+        expr(t, k, n);
+    }
 }

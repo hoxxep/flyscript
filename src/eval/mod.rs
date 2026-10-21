@@ -1,6 +1,7 @@
 //! The evaluator (milestone 4): runs checked programs against a deterministic world.
 
 pub mod builtins;
+pub mod coroutine;
 pub mod generators;
 pub mod interp;
 pub mod sched;

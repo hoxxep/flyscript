@@ -31,14 +31,14 @@ impl FromJson for User;
 
 function ada(): User {
   let tags = Vec.new();
-  tags.push(String.fromStr("ops"));
-  tags.push(String.fromStr("say \"hi\"\t"));
+  tags.push("ops".toString());
+  tags.push(("say \"hi\"\t").toString());
   User {
     id: 7,
-    name: String.fromStr("Ada"),
+    name: "Ada".toString(),
     email: #None,
     tags,
-    address: Address { street: String.fromStr("1 Loop Rd"), city: String.fromStr("Cambridge") },
+    address: Address { street: ("1 Loop Rd").toString(), city: "Cambridge".toString() },
     role: #Member { since: 2019 },
     score: 0.5,
   }

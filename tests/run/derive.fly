@@ -63,7 +63,7 @@ export function main(): void uses Io {
   let t = String.new();
   const a: Shape = #Dot;
   const b: Shape = #Circle(Point { x: 3, y: 4 });
-  const c: Shape = #Named(String.fromStr("home"));
+  const c: Shape = #Named("home".toString());
   a.describe(mut t);
   t.push(" ");
   b.describe(mut t);
@@ -74,7 +74,7 @@ export function main(): void uses Io {
   d.describe(mut t);
   println(t);
   let u = String.new();
-  const r = { name: String.fromStr("ada"), age: 36 as i64 };
+  const r = { name: "ada".toString(), age: 36 as i64 };
   r.describe(mut u);
   println(u);
 }

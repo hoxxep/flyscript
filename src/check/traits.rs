@@ -154,7 +154,7 @@ impl Program {
             Ty::Named(d, args) => {
                 // Outer regions are frozen while tasks run (§6.1), so region data is always
                 // shareable; the runtime's own handles are not.
-                if self.def_named(*d, &["Gen", "Fiber", "Scope"]) {
+                if self.def_named(*d, &["Gen", "Fiber", "Scope", "Cont"]) {
                     return false;
                 }
                 Self::arg_types(args).all(rec) && self.components(*d, args).is_none_or(|cs| cs.iter().all(rec))

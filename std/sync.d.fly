@@ -6,7 +6,8 @@ export struct Sender<T>;
 export struct Reply<T>;
 export struct Pending<T>;
 
-export function channel<T>(): [Sender<T>, Receiver<T>];
+// What is sent goes to another task, so it must be `Send`.
+export function channel<T extends Send>(): [Sender<T>, Receiver<T>];
 
 // A channel closes when its last sender is dropped, or when one is closed: its receivers drain
 // what was sent, then see the end (`recv` gives `#None`, and `for…of` stops).

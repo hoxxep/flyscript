@@ -25,6 +25,6 @@ export function main(): void uses Io {
   const r: Ring<u8, 4> = { buf: [1, 2, 3, 4], head: 0 };
   println(`${r.buf[2]} ${r.head}`);
   let p: Partial<User> = { id: #Some(7), name: #None };
-  p.name = #Some(String.fromStr("ada"));
+  p.name = #Some("ada".toString());
   println(`${p.id} ${p.name}`);
 }
