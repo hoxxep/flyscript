@@ -1,0 +1,64 @@
+import { HashMap } from "std/collections";
+
+// The effects the business logic needs, injected by whoever runs it.
+effect Clock { now(): u64; }
+effect Log { info(msg: String): void; }
+
+type Decision = #Allow | #Deny { retryAfter: u64 };
+
+// A token bucket per client: `capacity` requests, refilled at one per `refillMs`.
+struct Limiter { capacity: u32; refillMs: u64; buckets: HashMap<String, Bucket>; }
+struct Bucket { tokens: u32; last: u64; }
+
+impl Limiter {
+  export function new(capacity: u32, refillMs: u64): Limiter {
+    Limiter { capacity, refillMs, buckets: HashMap.new() }
+  }
+
+  export function check(self: mut Self, client: str): Decision uses Clock, Log {
+    const now = Clock.now();
+    const cap = self.capacity;
+    const refill = self.refillMs;
+    match (self.buckets.getMut(client)) {
+      #Some(b) => {
+        const earned = ((now - b.last) / refill) as u32;
+        if (earned > 0) {
+          b.tokens = min(cap, b.tokens + earned);
+          b.last = b.last + (earned as u64) * refill;
+        }
+        if (b.tokens == 0) {
+          Log.info(`deny ${client}`);
+          return #Deny { retryAfter: b.last + refill - now };
+        }
+        b.tokens -= 1;
+        #Allow
+      },
+      #None => {
+        self.buckets.insert(client.toString(), { tokens: cap - 1, last: now });
+        Log.info(`new client ${client}`);
+        #Allow
+      },
+    }
+  }
+}
+
+// A test harness: time is a list of instants, and the log is collected rather than printed.
+export function simulate(times: readonly u64[], clients: readonly str[]): Vec<String> {
+  let lim = Limiter.new(2, 1000);
+  let out: Vec<String> = Vec.new();
+  let i: usize = 0;
+  while (i < times.len()) {
+    const t = times[i];
+    const who = clients[i];
+    const d = handle {
+      lim.check(who)
+    } with Clock {
+      now() resumes k => k(t),
+    } with Log {
+      info(msg) resumes k => { out.push(msg); k() },
+    };
+    out.push(match (d) { #Allow => `${t} ${who} ok`, #Deny { retryAfter } => `${t} ${who} wait ${retryAfter}` });
+    i += 1;
+  }
+  out
+}

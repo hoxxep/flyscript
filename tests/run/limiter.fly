@@ -1,0 +1,19 @@
+// expect: new client ann
+// expect: 0 ann ok
+// expect: 10 ann ok
+// expect: deny ann
+// expect: 20 ann wait 980
+// expect: new client bob
+// expect: 30 bob ok
+// expect: 1500 ann ok
+// expect: deny ann
+// expect: 1600 ann wait 400
+// Appendix A.11: effects as dependency injection; the test handles Clock and Log itself.
+import { println } from "std/io";
+import { simulate } from "../../examples/limiter";
+
+export function main(): void uses Io {
+  const times: u64[6] = [0, 10, 20, 30, 1500, 1600];
+  const clients: str[6] = ["ann", "ann", "ann", "bob", "ann", "ann"];
+  for (const line of simulate(times, clients)) { println(line); }
+}

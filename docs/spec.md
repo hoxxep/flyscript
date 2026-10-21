@@ -1,6 +1,6 @@
 # Flyscript
 
-**Language specification, version 0.27**
+**Language specification, version 0.28**
 
 *Affine values, one row calculus, handlers for everything, and `comptime`: Church on the outside, Turing on the inside.*
 
@@ -18,15 +18,16 @@ The whole language rests on five laws. Every rule in this document is a conseque
 4. **Handlers for everything.** Errors, I/O, iteration and region memory are ordinary effects with ordinary handlers. A handler may hold the rest of a computation as a one-shot continuation value; generators and tasks are both built from that one primitive.
 5. **`comptime` is the metalanguage.** Generics, reflection, layout transformation and derived interfaces are ordinary Flyscript code run by the compiler.
 
-### 0.1 Changes from 0.26
+### 0.1 Changes from 0.27
 
-0.27 comes from a second program, a log pipeline in which a reader task feeds a channel the scope's body aggregates.
+0.28 comes from a third program, Appendix A.11: a rate limiter whose clock and log are effects, injected by a test that handles them.
 
 | Change | Why |
 | :--- | :--- |
-| A channel closes when a sender is closed or its last sender dropped; `recv` gives `#None` once it is drained, and `for…of` stops (§6.2) | the spec never said, and the body's loop could not end |
-| A task may capture a `str` (§6.1) | it is a `readonly` borrow of immutable bytes, like any other a task may share |
-| `str` has TypeScript's `split`, `trim`, `includes`, `startsWith`, `endsWith`, `indexOf`, `toUpperCase`, `toLowerCase` and `replaceAll` | the first thing a TypeScript programmer reaches for; `split` gives owned pieces, which a `Vec` can hold |
+| A continuation is a `once` function, and calling `k(a)` resumes it (§5.2, §5.3) | `Cont<A, B, E>` and `k.resume(a)` were a second name for what a `once` function already is |
+| One `handle` may have several `with` clauses, the first innermost (§5.2) | injecting a clock and a log needed two nested handles |
+| A handler arm's body may be an expression, as a `match` arm's may (§2.3) | `now() resumes k => k(t)` |
+| `min` and `max` over `Ord` in the prelude | every program wrote them |
 
 ---
 
@@ -153,8 +154,8 @@ Try         = "try" Block "catch" "(" Pattern ")" Block ;
 Throw       = "throw" Expr ;
 Yield       = "yield" Expr ;
 Region      = "region" "(" Ident ")" Block ;
-Handle      = "handle" Block "with" Path [ TypeArgs ] "{" { Arm } "}" ;
-Arm         = Name "(" [ Ident { "," Ident } ] ")" [ "resumes" Ident ] "=>" Block ;
+Handle      = "handle" Block { "with" Path [ TypeArgs ] "{" { Arm } "}" } ;   (* the first `with` innermost *)
+Arm         = Name "(" [ Ident { "," Ident } ] ")" [ "resumes" Ident ] "=>" ( Expr "," | Block ) ;
 Lambda      = "(" [ Params ] ")" "=>" ( Expr | Block ) ;
 ```
 
@@ -307,7 +308,7 @@ Every type has a *class*, 1 or 2.
 - `readonly T`, `mut T`, `str` and `T[]` are class 2.
 - Every other type takes the maximum class of its components: fields, payloads and type arguments, structural or nominal alike. `Option<mut u64>` is class 2; so is `view struct Scanner { src: readonly u8[]; pos: usize; }`. A region reference `Ref<R, T>` is class 1 whatever it points to: what it points at lives in the region, not on loan.
 
-Some types can hold a borrow without showing it: closures, continuations (`Cont`, §5.3), anything built from them (`Gen`), type parameters, and associated types until their base is known (`C.Slice`). A value of such a type is class 2 when it actually holds a borrow, so a closure capturing a `readonly` slice, or a generator iterating one, is class 2 although its type's arguments are all class 1.
+Some types can hold a borrow without showing it: closures and continuations (§5.3), anything built from them (`Gen`), type parameters, and associated types until their base is known (`C.Slice`). A value of such a type is class 2 when it actually holds a borrow, so a closure capturing a `readonly` slice, or a generator iterating one, is class 2 although its type's arguments are all class 1.
 
 A class-2 value may be a parameter, a local, or a return value tied to a parameter. It may not be stored in a class-1 value, captured by an escaping closure, sent to another task, or returned untied. That is the only restriction, and it is what replaces lifetime parameters. Two consequences are worth stating:
 
@@ -436,25 +437,30 @@ function map<T, U, row E>(xs: readonly T[], f: (x: readonly T) => U uses ...E): 
 
 ### 5.2 Handlers
 
-`handle { body } with Eff { arms }` runs `body` and intercepts its `Eff` operations. Each arm has one of two forms:
+`handle { body } with Eff { arms }` runs `body` and intercepts its `Eff` operations; further `with` clauses handle further effects, the first innermost. Each arm has one of two forms:
 
 - **Abortive** — `op(x) => armBody`. The body's frames are unwound first (running its `defer`s and destructors and releasing its borrows), then `armBody` runs and its value becomes the value of the `handle` expression. Because the body's borrows are released, the arm may use anything the body had borrowed.
-- **Resumptive** — `op(x) resumes k => armBody`. The body stays suspended, holding its borrows, and `k` is the rest of the body as a value of type `Cont<A, B, E>`, where `A` is the operation's result type, `B` the `handle` expression's type and `E` the body's other effects.
+- **Resumptive** — `op(x) resumes k => armBody`. The body stays suspended, holding its borrows, and `k` is the rest of the body as a function, `once (a: A) => B uses E`, where `A` is the operation's result type, `B` the `handle` expression's type and `E` the body's other effects. Calling `k` resumes the body.
 
-The `handle` expression evaluates to the body's value if the body completes without performing `Eff`, and otherwise to the value of the arm that handled the operation. A resumptive arm usually produces that value by resuming: `k.resume(a)` itself evaluates to the `handle` expression's eventual value.
+The `handle` expression evaluates to the body's value if the body completes without performing `Eff`, and otherwise to the value of the arm that handled the operation. A resumptive arm usually produces that value by resuming: `k(a)` itself evaluates to the `handle` expression's eventual value. Injecting a dependency is handling its effect:
+
+```ts
+effect Clock { now(): u64; }
+const d = handle { limiter.check(client) } with Clock { now() resumes k => k(t) } with Log { info(m) resumes k => { out.push(m); k() } };
+```
 
 An arm runs in the context of the `handle` expression: its effects are those of the code around the `handle`. If the body's row is `Eff, ...E`, the `handle` expression's row is `...E` together with the arms' own effects.
 
 ### 5.3 Continuations
 
-A `Cont<A, B, E>` is an affine value. It may be stored, moved and returned like any other.
+A continuation is a `once` function: an affine value that may be stored, moved and returned like any other, and that is called at most once.
 
-- `k.resume(a)` consumes `k` and runs the suspended computation until it next performs the handled effect (when the arm runs again) or finishes. Its value is the `handle` expression's value from that point.
+- `k(a)` consumes `k` and runs the suspended computation until it next performs the handled effect (when the arm runs again) or finishes. Its value is the `handle` expression's value from that point.
 - Dropping `k` unwinds the suspended computation in place: its `defer`s and destructors run in reverse order, in-flight I/O is cancelled and drained (§6.3), and its stack segment is released.
-- Handlers are **deep**: the handler stays installed beneath the suspended computation. Operations of other effects performed while `k` runs go to the handlers around the `resume` call, which is why `E` appears in `resume`'s type.
-- A `Cont` holds every borrow its suspended computation holds: in a resumptive arm, `k` holds the borrows the body had taken when it performed the operation. A `Cont` holding a borrow is class 2 (§4.2), so a continuation can never outlive a borrow it holds, and the borrowed places stay locked while it lives.
+- Handlers are **deep**: the handler stays installed beneath the suspended computation. Operations of other effects performed while `k` runs go to the handlers around the call of `k`, which is why `E` appears in `k`'s type.
+- A continuation holds every borrow its suspended computation holds: in a resumptive arm, `k` holds the borrows the body had taken when it performed the operation. One holding a borrow is class 2 (§4.2), so a continuation can never outlive a borrow it holds, and the borrowed places stay locked while it lives.
 - Continuations are one-shot. Resuming twice would duplicate owned values and live `mut` borrows.
-- **Resuming re-enters.** `k.resume(a)` runs the rest of the body, which may perform the same operation again and re-enter an arm of the same handler. So, for ownership, `k.resume(a)` uses every binding from outside the `handle` that the body or any of its arms uses, in the strongest mode any of them does: an arm cannot hold a borrow of such a binding across `resume`.
+- **Resuming re-enters.** `k(a)` runs the rest of the body, which may perform the same operation again and re-enter an arm of the same handler. So, for ownership, `k(a)` uses every binding from outside the `handle` that the body or any of its arms uses, in the strongest mode any of them does: an arm cannot hold a borrow of such a binding across the call.
 
 ### 5.4 Errors: `throw`, `try`, `catch`
 
@@ -514,14 +520,14 @@ const firstEvens = xs.iter().filter((x) => x % 2 == 0).take(10).collect();
 Pull iteration is library code. `generate(f)` runs `f` under a `Yield` handler whose resumptive arm stores the continuation, and returns a `Gen<T, E>` whose `next()` resumes it:
 
 ```ts
-export struct Gen<T, row E> { state: Option<Cont<void, Step<T, E>, E>>; }
-type Step<T, row E> = #Done | #Item { item: T; rest: Cont<void, Step<T, E>, E> };
+export struct Gen<T, row E> { state: Option<once () => Step<T, E> uses ...E>; }
+type Step<T, row E> = #Done | #Item { item: T; rest: once () => Step<T, E> uses ...E };
 
 impl<T, row E> Gen<T, E> {
   export function next(self: mut Self): Option<T> uses ...E {
     match (self.state.take()) {
       #None    => #None,
-      #Some(k) => match (k.resume()) {
+      #Some(k) => match (k()) {
         #Done => #None,
         #Item { item, rest } => { self.state = #Some(rest); #Some(item) },
       },
@@ -963,7 +969,7 @@ A native compiler would add: **lower effects** by evidence passing (tail-resumpt
 
 ---
 
-## Appendix: ten programs
+## Appendix: eleven programs
 
 These were written to test the design, not to show it off; each ends with what still feels awkward.
 
@@ -1300,3 +1306,73 @@ export function handle(store: mut Store, body: str): String {
 }
 ```
 *Awkward:* `self.items.insert(item.sku.clone(), item)` clones the key because the map owns it and `item` still holds it; a map keyed by a field of its values would need a different collection, not a different language.
+
+### A.11 Effects as dependency injection
+
+```ts
+import { HashMap } from "std/collections";
+
+// The effects the business logic needs, injected by whoever runs it.
+effect Clock { now(): u64; }
+effect Log { info(msg: String): void; }
+
+type Decision = #Allow | #Deny { retryAfter: u64 };
+
+// A token bucket per client: `capacity` requests, refilled at one per `refillMs`.
+struct Limiter { capacity: u32; refillMs: u64; buckets: HashMap<String, Bucket>; }
+struct Bucket { tokens: u32; last: u64; }
+
+impl Limiter {
+  export function new(capacity: u32, refillMs: u64): Limiter {
+    Limiter { capacity, refillMs, buckets: HashMap.new() }
+  }
+
+  export function check(self: mut Self, client: str): Decision uses Clock, Log {
+    const now = Clock.now();
+    const cap = self.capacity;
+    const refill = self.refillMs;
+    match (self.buckets.getMut(client)) {
+      #Some(b) => {
+        const earned = ((now - b.last) / refill) as u32;
+        if (earned > 0) {
+          b.tokens = min(cap, b.tokens + earned);
+          b.last = b.last + (earned as u64) * refill;
+        }
+        if (b.tokens == 0) {
+          Log.info(`deny ${client}`);
+          return #Deny { retryAfter: b.last + refill - now };
+        }
+        b.tokens -= 1;
+        #Allow
+      },
+      #None => {
+        self.buckets.insert(client.toString(), { tokens: cap - 1, last: now });
+        Log.info(`new client ${client}`);
+        #Allow
+      },
+    }
+  }
+}
+
+// A test harness: time is a list of instants, and the log is collected rather than printed.
+export function simulate(times: readonly u64[], clients: readonly str[]): Vec<String> {
+  let lim = Limiter.new(2, 1000);
+  let out: Vec<String> = Vec.new();
+  let i: usize = 0;
+  while (i < times.len()) {
+    const t = times[i];
+    const who = clients[i];
+    const d = handle {
+      lim.check(who)
+    } with Clock {
+      now() resumes k => k(t),
+    } with Log {
+      info(msg) resumes k => { out.push(msg); k() },
+    };
+    out.push(match (d) { #Allow => `${t} ${who} ok`, #Deny { retryAfter } => `${t} ${who} wait ${retryAfter}` });
+    i += 1;
+  }
+  out
+}
+```
+*Awkward:* none. The limiter cannot tell a test from production: both are handlers, and neither is visible in its signature beyond `uses Clock, Log`.

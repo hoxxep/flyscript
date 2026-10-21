@@ -1259,29 +1259,50 @@ impl<'a> Parser<'a> {
             }
             Tok::Ident(_) if self.at_handle() => {
                 self.bump();
-                let body = self.block()?;
-                self.expect_word("with")?;
-                let effect = self.ty_postfix()?;
-                self.expect("{")?;
-                let mut arms = Vec::new();
-                while !self.at("}") {
-                    let op = self.member_name()?;
-                    self.expect("(")?;
-                    let mut params = Vec::new();
-                    while !self.at(")") {
-                        params.push(self.ident()?);
-                        if !self.eat(",") {
-                            break;
-                        }
+                let mut body = self.block()?;
+                // `handle { … } with A { … } with B { … }` handles `A` innermost, then `B`.
+                let mut handled = None;
+                while self.eat_word("with") {
+                    if let Some(kind) = handled.take() {
+                        let span = self.since(start);
+                        body = Block { stmts: Vec::new(), tail: Some(Box::new(Expr { kind, span })), span };
                     }
-                    self.expect(")")?;
-                    let resumes = if self.eat_word("resumes") { Some(self.ident()?) } else { None };
-                    self.expect("=>")?;
-                    arms.push(HandlerArm { op, params, resumes, body: self.block()? });
-                    self.eat(",");
+                    let effect = self.ty_postfix()?;
+                    self.expect("{")?;
+                    let mut arms = Vec::new();
+                    while !self.at("}") {
+                        let op = self.member_name()?;
+                        self.expect("(")?;
+                        let mut params = Vec::new();
+                        while !self.at(")") {
+                            params.push(self.ident()?);
+                            if !self.eat(",") {
+                                break;
+                            }
+                        }
+                        self.expect(")")?;
+                        let resumes = if self.eat_word("resumes") { Some(self.ident()?) } else { None };
+                        self.expect("=>")?;
+                        // An arm's body is a block or an expression, as in `match`.
+                        let arm_body = if self.at("{") {
+                            let b = self.block()?;
+                            self.eat(",");
+                            b
+                        } else {
+                            let e = self.expr()?;
+                            let span = e.span;
+                            self.eat(",");
+                            Block { stmts: Vec::new(), tail: Some(Box::new(e)), span }
+                        };
+                        arms.push(HandlerArm { op, params, resumes, body: arm_body });
+                    }
+                    self.expect("}")?;
+                    handled = Some(ExprKind::Handle { body: body.clone(), effect, arms });
                 }
-                self.expect("}")?;
-                ExprKind::Handle { body, effect, arms }
+                match handled {
+                    Some(kind) => kind,
+                    None => return self.error("`with`"),
+                }
             }
             Tok::Kw(Kw::Unsafe) => {
                 self.bump();

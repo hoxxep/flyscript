@@ -171,6 +171,9 @@ function tagIndex<comptime T: Type>(v: readonly T): usize {
   }
 }
 
+export function min<T extends Ord>(a: T, b: T): T { if (b < a) { b } else { a } }
+export function max<T extends Ord>(a: T, b: T): T { if (b > a) { b } else { a } }
+
 impl Ord for String {
   function cmp(self: readonly Self, other: readonly Self): Ordering { self.asStr().cmp(other.asStr()) }
 }
