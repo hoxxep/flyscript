@@ -1164,15 +1164,21 @@ impl Interp {
             && let Some(at) = self.ty_of(a.span) {
                 param = self.concrete(&at);
             }
+        // A place lent readonly is lent where it is, not copied out. Not a `Copy` value: a copied
+        // argument holds no loan (§4.4), so its source may change while it lives. A slice is a
+        // view whatever its elements.
+        let place = match &a.kind {
+            // A binding holding a handle (a region reference, a cell, a channel) is passed as the
+            // handle: its place would be what the handle points at.
+            ExprKind::Ident(n) => lookup(env, n).is_some_and(|c| !matches!(&*c.lock().expect("cell"), Value::Ref(_) | Value::Cell(_) | Value::Native(..))),
+            ExprKind::Field { .. } | ExprKind::Index { .. } => !is_range_index(a),
+            _ => false,
+        };
+        let lent = |t: &Ty| matches!(t, Ty::Slice(_)) || !self.prog.is_copy(t);
         match &param {
             Ty::Borrow(true, _) => Ok(Value::Ptr(self.place(a, env)?)),
-            // A field or element lent readonly is lent where it is, not copied out. Not a `Copy`
-            // one: a copied argument holds no loan (§4.4), so its source may change while it lives.
-            Ty::Borrow(false, inner)
-                if matches!(a.kind, ExprKind::Field { .. } | ExprKind::Index { .. }) && !is_range_index(a) && !self.prog.is_copy(inner) =>
-            {
-                Ok(Value::Ptr(self.place(a, env)?))
-            }
+            Ty::Borrow(false, inner) if place && lent(inner) => Ok(Value::Ptr(self.place(a, env)?)),
+            Ty::Slice(_) if place => Ok(Value::Ptr(self.place(a, env)?)),
             Ty::Borrow(false, _) | Ty::Slice(_) | Ty::Prim(Prim::Str) => self.expr(a, env),
             _ => {
                 let v = self.expr(a, env)?;

@@ -42,15 +42,13 @@ fn place_of(v: &Value) -> Result<Place, Ctl> {
 /// that borrow refers to, so a view of a view is one place.
 fn resolve(mut p: Place) -> Place {
     for _ in 0..64 {
-        let root = p.root.lock().expect("place").clone();
-        match root {
-            Value::Ptr(q) => {
-                let mut path = q.path.clone();
-                path.extend(p.path);
-                p = Place { root: q.root.clone(), path };
-            }
+        let next = match &*p.root.lock().expect("place") {
+            Value::Ptr(q) => q.clone(),
             _ => break,
-        }
+        };
+        let mut path = next.path;
+        path.extend(p.path);
+        p = Place { root: next.root, path };
     }
     p
 }
@@ -101,7 +99,7 @@ impl Interp {
         format!("{target}.{}", info.name)
     }
 
-    pub fn builtin(&mut self, fid: FnId, args: Vec<Value>) -> R {
+    pub fn builtin(&mut self, fid: FnId, mut args: Vec<Value>) -> R {
         let key = self.builtin_key(fid);
         let a = |i: usize| args.get(i).cloned().unwrap_or(Value::Unit);
         match key.as_str() {
@@ -325,8 +323,12 @@ impl Interp {
             "String.len" | "str.len" => Ok(Value::Int(a(0).as_text().len() as i128)),
             "String.push" => {
                 let p = place_of(&a(0))?;
-                let s = format!("{}{}", get(&p).as_text(), a(1).as_text());
-                set(&p, Value::text(&s));
+                let tail = a(1).as_text();
+                // In place, unless another value shares the string: pushing is amortized O(1).
+                update(&p, |v| match v {
+                    Value::Text(s) => std::sync::Arc::make_mut(s).push_str(&tail),
+                    other => *other = Value::text(&format!("{}{}", other.as_text(), tail)),
+                });
                 Ok(Value::Unit)
             }
             "String.asStr" => Ok(Value::Text(a(0).as_text())),
@@ -514,7 +516,7 @@ impl Interp {
             }
             "Vec.push" => {
                 let p = place_of(&a(0))?;
-                let v = a(1);
+                let v = std::mem::replace(&mut args[1], Value::Unit);
                 update(&p, |l| {
                     if let Value::List(vs) = l {
                         vs.push(v);

@@ -1,0 +1,902 @@
+// JavaScript from Flyscript's syntax tree. The output runs on `runtime.js`, which gives values
+// their representation: integers are BigInts and floats numbers, strings hold one byte per
+// character, structs are objects carrying `$t`, tags objects carrying `$tag` and their payload
+// in `$`. Code generation needs no types: what depends on one (a method's impl, `==`, display)
+// is decided by the runtime from the value.
+
+import { Type, Pattern, Part, Param, Expr, Arm, HandlerArm, Stmt, Block, Fn, Item, Module } from "./ast";
+import { HashMap, HashSet } from "std/collections";
+
+export type GenError = #GenError { message: String };
+
+// Where a statement's value goes.
+enum Dest { #Discard, #Return, #Assign(String) }
+
+type Local = { js: String; isRef: bool };
+
+const RESERVED: str[] = ["arguments", "await", "case", "catch", "class", "debugger", "default", "delete", "do",
+  "else", "enum", "eval", "export", "extends", "finally", "function", "implements", "import", "in",
+  "instanceof", "interface", "let", "new", "null", "package", "private", "protected", "public", "static",
+  "super", "switch", "this", "typeof", "undefined", "var", "void", "with", "yield", "NaN", "Infinity"];
+
+// Methods that change a string, which is a new value written back to the place it came from.
+const WRITEBACK: str[] = ["push", "clear"];
+
+// Functions of the standard library the runtime provides under the same name.
+const BUILTINS: str[] = ["println", "min", "max", "panic", "replace", "swap", "alloc", "allocAll",
+  "writeFile", "parseInt", "parseFloat", "fmt", "copyUtf8", "repeat", "writeQuoted", "generate", "channel"];
+
+const HEX: str = "0123456789abcdef";
+
+// A string as a JavaScript literal: printable ASCII as it is, every other byte escaped.
+export function quote(s: str): String {
+  const bytes = s.asBytes();
+  let out = "\"".toString();
+  let run: usize = 0;
+  let i: usize = 0;
+  while (i < bytes.len()) {
+    const b = bytes[i];
+    const plain = b >= 0x20 && b < 0x7f && b != b'"' && b != b'\\';
+    if (!plain) {
+      out.push(s.slice(run, i));
+      if (b == b'"') { out.push("\\\""); }
+      else if (b == b'\\') { out.push("\\\\"); }
+      else if (b == b'\n') { out.push("\\n"); }
+      else {
+        const h = (b >> 4) as usize;
+        const l = (b & 15) as usize;
+        out.push("\\x");
+        out.push(HEX.slice(h, h + 1));
+        out.push(HEX.slice(l, l + 1));
+      }
+      run = i + 1;
+    }
+    i += 1;
+  }
+  out.push(s.slice(run, bytes.len()));
+  out.push("\"");
+  out
+}
+
+function mangle(n: str): String {
+  if (RESERVED.includes(n)) { `${n}$` } else { n.toString() }
+}
+
+// What every module's code consults: the program's types and which functions are generators.
+export struct World {
+  types: HashSet<String>;
+  // Each struct's fields, in the order they are declared.
+  structs: HashMap<String, Vec<String>>;
+  // The JavaScript names of the generator functions, free and methods (`T$m`).
+  generators: HashSet<String>;
+  genMethods: HashSet<String>;
+}
+impl Clone for World;
+
+// The types and generators every module declares.
+export function survey(modules: readonly Module[]): World {
+  let types: HashSet<String> = HashSet.new();
+  let structs: HashMap<String, Vec<String>> = HashMap.new();
+  let generators: HashSet<String> = HashSet.new();
+  let genMethods: HashSet<String> = HashSet.new();
+  for (const [k, m] of modules.iter().enumerate()) {
+    for (const item of m.items) {
+      match (item) {
+        #Struct(name, fields, _) => { types.insert(name.clone()); structs.insert(name.clone(), fields.clone()); }
+        #Enum(name, _, _) | #Alias(name, _) | #Interface(name, _, _) | #Effect(name, _) => { types.insert(name.clone()); }
+        #Function(f) => { if (f.generator) { generators.insert(`m${k}$${f.name}`); } }
+        #Impl(_, _, methods) => {
+          for (const f of methods) { if (f.generator) { genMethods.insert(f.name.clone()); } }
+        }
+        _ => {}
+      }
+    }
+  }
+  { types, structs, generators, genMethods }
+}
+
+export struct Gen {
+  out: String;
+  indent: usize;
+  tmp: usize;
+  scopes: Vec<HashMap<String, Local>>;
+  // Module-level names: functions, constants and what is imported, as JavaScript names.
+  names: HashMap<String, String>;
+  world: World;
+  inGenerator: bool;
+}
+
+impl Gen {
+  function new(names: HashMap<String, String>, world: World): Gen {
+    Gen { out: String.new(), indent: 0, tmp: 0, scopes: Vec.new(), names, world, inGenerator: false }
+  }
+
+  function fail(self: readonly Self, message: str): never uses Fail<GenError> {
+    throw #GenError { message: message.toString() }
+  }
+
+  function line(self: mut Self, s: str): void {
+    for (const _ of 0..self.indent) { self.out.push("  "); }
+    self.out.push(s);
+    self.out.push("\n");
+  }
+
+  function fresh(self: mut Self): String {
+    self.tmp += 1;
+    `$${self.tmp}`
+  }
+
+  // ---- scopes ----
+
+  function push(self: mut Self): void { self.scopes.push(HashMap.new()); }
+  function pop(self: mut Self): void { self.scopes.pop(); }
+
+  // Declares a local, renamed if this scope already has one of its name (Flyscript shadows;
+  // JavaScript does not let a block declare a name twice).
+  function declare(self: mut Self, name: str, isRef: bool): String {
+    const top = self.scopes.len() - 1;
+    let js = mangle(name);
+    if (self.scopes[top].has(name)) { js = `${js}$${self.fresh()}`; }
+    self.scopes[top].insert(name.toString(), { js: js.clone(), isRef });
+    js
+  }
+
+  function local(self: readonly Self, name: str): Option<Local> {
+    let i = self.scopes.len();
+    while (i > 0) {
+      i -= 1;
+      if (const #Some(l) = self.scopes[i].get(name)) { return #Some(l.clone()); }
+    }
+    #None
+  }
+
+  function isType(self: readonly Self, name: str): bool {
+    self.local(name).isNone() && (self.world.types.has(name) || name == "Vec" || name == "String" || name == "HashMap"
+      || name == "HashSet" || name == "Box" || name == "Arc" || name == "File" || name == "Instant" || name == "Duration"
+      || name == "Option" || name == "Result" || name == "Mutex" || name == "Hasher")
+  }
+
+  // ---- whether an expression needs statements ----
+
+  function simple(e: readonly Expr): bool {
+    match (e) {
+      #Int(_) | #Float(_) | #Str(_) | #Byte(_) | #Bool(_) | #Ident(_) | #Lambda(_, _) => true,
+      #Template(parts) => parts.iter().every((p) => match (p) { #Text(_) => true, #Expr(x) => Gen.simple(x) }),
+      #Field(t, _) | #Unary(_, t) | #Cast(t, _) | #LendMut(t) | #Yield(t) => Gen.simple(t),
+      #Index(a, b) | #Binary(_, a, b) | #Assign(_, a, b) | #Range(a, b) => Gen.simple(a) && Gen.simple(b),
+      #Slice(t, lo, hi) => Gen.simple(t) && Gen.simpleOpt(lo) && Gen.simpleOpt(hi),
+      #Call(f, args) => Gen.simple(f) && args.iter().every((a) => Gen.simple(a)),
+      #Tag(_, args) | #List(args) => args.iter().every((a) => Gen.simple(a)),
+      #TagRecord(_, fs) | #Record(_, fs) => fs.iter().every(([_, v]) => Gen.simple(v)),
+      #Block(b) => b.stmts.len() == 0 && Gen.simpleOpt(b.tail),
+      #If(c, t, f) => Gen.simple(c) && t.stmts.len() == 0 && Gen.simpleOpt(t.tail) && Gen.simpleOpt(f),
+      _ => false,
+    }
+  }
+  function simpleOpt(e: readonly Option<Box<Expr>>): bool {
+    match (e) { #Some(x) => Gen.simple(x), #None => true }
+  }
+
+  // ---- expressions ----
+
+  // The JavaScript for an expression, after emitting what it needs done first.
+  function ex(self: mut Self, e: readonly Expr): String uses Fail<GenError> {
+    match (e) {
+      #Int(n) => `${n}n`,
+      #Float(n) => n.clone(),
+      #Str(s) => quote(s),
+      #Byte(b) => `${b}n`,
+      #Bool(b) => if (b) { "true".toString() } else { "false".toString() },
+      #Template(parts) => {
+        let out = "(\"\"".toString();
+        for (const p of parts) {
+          match (p) {
+            #Text(s) => { if (s.len() > 0) { out.push(" + "); out.push(quote(s).asStr()); } }
+            #Expr(x) => { const v = self.ex(x); out.push(` + $rt.str(${v})`); }
+          }
+        }
+        out.push(")");
+        out
+      }
+      #Ident(n) => self.ident(n),
+      #Field(t, name) => {
+        const target = self.ex(t);
+        `${target}.${name}`
+      }
+      #Index(t, i) => {
+        const [a, b] = self.pair(t, i);
+        `$rt.idx(${a}, ${b})`
+      }
+      #Slice(t, lo, hi) => {
+        const target = self.ex(t);
+        const l = match (lo) { #Some(x) => self.ex(x), #None => "0n".toString() };
+        const h = match (hi) { #Some(x) => self.ex(x), #None => "undefined".toString() };
+        `$rt.slice(${target}, ${l}, ${h})`
+      }
+      #Call(f, args) => self.call(f, args, false),
+      #Unary(op, x) => {
+        const v = self.ex(x);
+        `(${op}${v})`
+      }
+      #Binary(op, a, b) => self.binary(op, a, b),
+      #Assign(op, target, value) => {
+        const v = self.ex(value);
+        // A place assigned is a copy of it: the value may be a `Copy` struct, which JavaScript shares.
+        const copied = match (value) { #Ident(_) | #Field(_, _) | #Index(_, _) => `$rt.copy(${v})`, _ => v };
+        const place = self.place(target);
+        `(${place} ${op} ${copied})`
+      }
+      #Tag(name, args) => {
+        if (args.len() == 0) { return `{ $tag: ${quote(name)} }`; }
+        const vs = self.list(args);
+        if (args.len() == 1) { `{ $tag: ${quote(name)}, $: ${vs[0]} }` } else { `{ $tag: ${quote(name)}, $: [${vs.join(", ")}] }` }
+      }
+      #TagRecord(name, fields) => {
+        const rec = self.record(#None, fields);
+        `{ $tag: ${quote(name)}, $: ${rec} }`
+      }
+      #Record(name, fields) => self.record(name, fields),
+      #List(items) => {
+        const vs = self.list(items);
+        `[${vs.join(", ")}]`
+      }
+      #Lambda(params, body) => self.lambda(params, body),
+      #Range(a, b) => {
+        const [x, y] = self.pair(a, b);
+        `$rt.range(${x}, ${y})`
+      }
+      #Yield(x) => {
+        if (!self.inGenerator) { self.fail("`yield` outside a generator"); }
+        const v = self.ex(x);
+        `(yield ${v})`
+      }
+      #Cast(x, ty) => {
+        const v = self.ex(x);
+        `$rt.cast(${v}, ${quote(ty)})`
+      }
+      #LendMut(_) => self.fail("`mut` lends only to a call's argument"),
+      #Return(_) | #Break | #Continue | #Throw(_) => {
+        self.into(e, #Discard);
+        "undefined".toString()
+      }
+      #Block(b) if b.stmts.len() == 0 && Gen.simpleOpt(b.tail) => match (b.tail) {
+        #Some(t) => self.ex(t),
+        #None => "undefined".toString(),
+      },
+      #If(c, t, f) if Gen.simple(e) => {
+        const cond = self.ex(c);
+        const then = match (t.tail) { #Some(x) => self.ex(x), #None => "undefined".toString() };
+        const otherwise = match (f) { #Some(x) => self.ex(x), #None => "undefined".toString() };
+        `(${cond} ? ${then} : ${otherwise})`
+      }
+      #Unsupported(what) => self.fail(`${what} is not supported by this compiler`),
+      _ => {
+        const t = self.fresh();
+        self.line(`let ${t};`);
+        self.into(e, #Assign(t.clone()));
+        t
+      }
+    }
+  }
+
+  // Two operands in order: the first is saved if the second needs statements run first.
+  function pair(self: mut Self, a: readonly Expr, b: readonly Expr): [String, String] uses Fail<GenError> {
+    let x = self.ex(a);
+    if (!Gen.simple(b)) {
+      const t = self.fresh();
+      self.line(`const ${t} = ${x};`);
+      x = t;
+    }
+    const y = self.ex(b);
+    [x, y]
+  }
+
+  // Expressions in order, as `pair` keeps two.
+  function list(self: mut Self, es: readonly Vec<Expr>): Vec<String> uses Fail<GenError> {
+    let last: usize = 0;
+    for (const [i, e] of es.iter().enumerate()) { if (!Gen.simple(e)) { last = i; } }
+    let out: Vec<String> = Vec.new();
+    for (const [i, e] of es.iter().enumerate()) {
+      const v = self.ex(e);
+      out.push(if (i < last) { self.save(v) } else { v });
+    }
+    out
+  }
+
+  // A value kept in a temporary, so that what runs next cannot change it.
+  function save(self: mut Self, v: String): String {
+    const t = self.fresh();
+    self.line(`const ${t} = ${v};`);
+    t
+  }
+
+  function ident(self: mut Self, n: str): String uses Fail<GenError> {
+    if (const #Some(l) = self.local(n)) {
+      return if (l.isRef) { `${l.js}.v` } else { l.js };
+    }
+    if (const #Some(js) = self.names.get(n)) { return js.clone(); }
+    if (BUILTINS.includes(n)) { return `$rt.${n}`; }
+    self.fail(`unknown name \`${n}\``)
+  }
+
+  // The JavaScript for a place, to assign or lend.
+  function place(self: mut Self, e: readonly Expr): String uses Fail<GenError> {
+    match (e) {
+      #Ident(n) => self.ident(n),
+      #Field(t, name) => {
+        const target = self.ex(t);
+        `${target}.${name}`
+      }
+      #Index(t, i) => {
+        const [a, b] = self.pair(t, i);
+        const at = self.fresh();
+        self.line(`const ${at} = ${a};`);
+        `${at}[$rt.at(${at}, ${b})]`
+      }
+      _ => self.fail("not a place"),
+    }
+  }
+
+  // A reference to a place lent `mut`: an object whose `v` reads and writes it.
+  function lend(self: mut Self, e: readonly Expr): String uses Fail<GenError> {
+    if (const #Ident(n) = e) {
+      if (const #Some(l) = self.local(n)) { if (l.isRef) { return l.js; } }
+    }
+    const p = self.place(e);
+    `$rt.ref(() => ${p}, ($v) => ${p} = $v)`
+  }
+
+  function binary(self: mut Self, op: str, a: readonly Expr, b: readonly Expr): String uses Fail<GenError> {
+    if (op == "&&" || op == "||") {
+      const x = self.ex(a);
+      if (Gen.simple(b)) {
+        const y = self.ex(b);
+        return `(${x} ${op} ${y})`;
+      }
+      // The right operand's statements run only when it is evaluated.
+      const t = self.fresh();
+      self.line(`let ${t} = ${x};`);
+      self.line(if (op == "&&") { `if (${t}) {` } else { `if (!${t}) {` });
+      self.indent += 1;
+      const y = self.ex(b);
+      self.line(`${t} = ${y};`);
+      self.indent -= 1;
+      self.line("}");
+      return t;
+    }
+    const [x, y] = self.pair(a, b);
+    if (op == "==") { return `$rt.eq(${x}, ${y})`; }
+    if (op == "!=") { return `!$rt.eq(${x}, ${y})`; }
+    if (op == "<" || op == ">" || op == "<=" || op == ">=") { return `$rt.cmpOp(${x}, ${y}, ${quote(op)})`; }
+    `(${x} ${op} ${y})`
+  }
+
+  function record(self: mut Self, name: readonly Option<String>, fields: readonly Vec<[String, Expr]>): String uses Fail<GenError> {
+    let last: usize = 0;
+    for (const [i, [_, v]] of fields.iter().enumerate()) { if (!Gen.simple(v)) { last = i; } }
+    let vs: Vec<String> = Vec.new();
+    for (const [i, [_, v]] of fields.iter().enumerate()) {
+      const x = self.ex(v);
+      vs.push(if (i < last) { self.save(x) } else { x });
+    }
+    let entries: Vec<String> = Vec.new();
+    if (const #Some(n) = name) { entries.push(`$t: ${quote(n)}`); }
+    // A struct's fields in the order it declares them, which is the order it is shown in.
+    let order: Vec<usize> = Vec.new();
+    match (name) {
+      #Some(n) => match (self.world.structs.get(n)) {
+        #Some(declared) => {
+          for (const d of declared) {
+            if (const #Some(i) = fields.iter().findIndex(([f, _]) => f == d)) { order.push(i); }
+          }
+        }
+        #None => {}
+      },
+      #None => {}
+    }
+    if (order.len() != fields.len()) {
+      order = Vec.new();
+      for (const i of 0..fields.len()) { order.push(i); }
+    }
+    for (const i of order) {
+      const f = fields[i][0].clone();
+      if (f == "$comptime") { self.fail("a record entry generated by `comptime` code is not supported by this compiler"); }
+      entries.push(`${f}: ${vs[i]}`);
+    }
+    `{ ${entries.join(", ")} }`
+  }
+
+  function call(self: mut Self, f: readonly Expr, args: readonly Vec<Expr>, statement: bool): String uses Fail<GenError> {
+    // `T.f(…)`: a function of a type.
+    if (const #Field(target, name) = f) {
+      if (const #Ident(t) = target) {
+        if (self.isType(t)) {
+          const vs = self.args(args);
+          return `$rt.st(${quote(t)}, ${quote(name)})(${vs.join(", ")})`;
+        }
+      }
+      // A method: the runtime finds the impl from the receiver.
+      const writeback = WRITEBACK.includes(name) && match (target) { #Ident(_) | #Field(_, _) | #Index(_, _) => true, _ => false };
+      const recv = if (writeback) { self.lend(target) } else { self.ex(target) };
+      const vs = self.args(args);
+      let all: Vec<String> = Vec.new();
+      all.push(recv);
+      all.push(quote(name));
+      for (const v of vs) { all.push(v.clone()); }
+      const callee = if (writeback) { "$rt.callRef" } else { "$rt.call" };
+      const yields = statement && self.inGenerator && self.world.genMethods.has(name);
+      return `${if (yields) { "yield* " } else { "" }}${callee}(${all.join(", ")})`;
+    }
+    let generator = false;
+    const callee = match (f) {
+      #Ident(n) => {
+        const js = self.ident(n);
+        generator = self.world.generators.has(js);
+        js
+      }
+      _ => {
+        const c = self.ex(f);
+        `(${c})`
+      }
+    };
+    const vs = self.args(args);
+    const yields = statement && self.inGenerator && generator;
+    `${if (yields) { "yield* " } else { "" }}${callee}(${vs.join(", ")})`
+  }
+
+  function args(self: mut Self, args: readonly Vec<Expr>): Vec<String> uses Fail<GenError> {
+    let last: usize = 0;
+    for (const [i, a] of args.iter().enumerate()) { if (!Gen.simple(a)) { last = i; } }
+    let out: Vec<String> = Vec.new();
+    for (const [i, a] of args.iter().enumerate()) {
+      const x = match (a) { #LendMut(p) => self.lend(p), _ => self.ex(a) };
+      out.push(if (i < last) { self.save(x) } else { x });
+    }
+    out
+  }
+
+  function lambda(self: mut Self, params: readonly Vec<Pattern>, body: readonly Expr): String uses Fail<GenError> {
+    const saved = replace(mut self.out, String.new());
+    const savedIndent = replace(mut self.indent, 1);
+    const savedGen = replace(mut self.inGenerator, false);
+    self.push();
+    let names: Vec<String> = Vec.new();
+    let destructure: Vec<[usize, String]> = Vec.new();
+    for (const [i, p] of params.iter().enumerate()) {
+      match (p) {
+        #Bind(n) => names.push(self.declare(n, false)),
+        #Wild => names.push(`$_${i}`),
+        _ => {
+          const t = self.fresh();
+          names.push(t.clone());
+          destructure.push([i, t]);
+        }
+      }
+    }
+    for (const [i, t] of destructure) { self.binds(params[i], t); }
+    self.into(body, #Return);
+    self.pop();
+    const inner = replace(mut self.out, saved);
+    self.indent = savedIndent;
+    self.inGenerator = savedGen;
+    let close = String.new();
+    for (const _ of 0..self.indent) { close.push("  "); }
+    `((${names.join(", ")}) => {\n${inner}${close}})`
+  }
+
+  // ---- patterns ----
+
+  // The condition under which `subj` matches a pattern.
+  function cond(self: mut Self, p: readonly Pattern, subj: str): String uses Fail<GenError> {
+    match (p) {
+      #Wild | #Bind(_) => "true".toString(),
+      #Int(n) => `${subj} === ${n}n`,
+      #Byte(b) => `${subj} === ${b}n`,
+      #Str(s) => `$rt.eq(${subj}, ${quote(s)})`,
+      #Bool(b) => `${subj} === ${b}`,
+      #Tag(name, ps) => {
+        let parts: Vec<String> = Vec.new();
+        parts.push(`${subj}.$tag === ${quote(name)}`);
+        if (ps.len() == 1) {
+          const c = self.cond(ps[0], `${subj}.$`.asStr());
+          if (c != "true") { parts.push(c); }
+        } else {
+          for (const [i, q] of ps.iter().enumerate()) {
+            const c = self.cond(q, `${subj}.$[${i}]`.asStr());
+            if (c != "true") { parts.push(c); }
+          }
+        }
+        `(${parts.join(" && ")})`
+      }
+      #TagRecord(name, fs) => {
+        let parts: Vec<String> = Vec.new();
+        parts.push(`${subj}.$tag === ${quote(name)}`);
+        for (const [f, q] of fs) {
+          const c = self.cond(q, `${subj}.$.${f}`.asStr());
+          if (c != "true") { parts.push(c); }
+        }
+        `(${parts.join(" && ")})`
+      }
+      #Tuple(ps) => {
+        let parts: Vec<String> = Vec.new();
+        for (const [i, q] of ps.iter().enumerate()) {
+          const c = self.cond(q, `${subj}[${i}]`.asStr());
+          if (c != "true") { parts.push(c); }
+        }
+        if (parts.len() == 0) { "true".toString() } else { `(${parts.join(" && ")})` }
+      }
+      #Record(fs) => {
+        let parts: Vec<String> = Vec.new();
+        for (const [f, q] of fs) {
+          const c = self.cond(q, `${subj}.${f}`.asStr());
+          if (c != "true") { parts.push(c); }
+        }
+        if (parts.len() == 0) { "true".toString() } else { `(${parts.join(" && ")})` }
+      }
+      #Or(alts) => {
+        let parts: Vec<String> = Vec.new();
+        for (const a of alts) { parts.push(self.cond(a, subj)); }
+        `(${parts.join(" || ")})`
+      }
+      #Unsupported(what) => self.fail(`${what} is not supported by this compiler`),
+    }
+  }
+
+  function hasBinds(p: readonly Pattern): bool {
+    match (p) {
+      #Bind(_) => true,
+      #Tag(_, ps) | #Tuple(ps) | #Or(ps) => ps.iter().some((q) => Gen.hasBinds(q)),
+      #TagRecord(_, fs) | #Record(fs) => fs.iter().some(([_, q]) => Gen.hasBinds(q)),
+      _ => false,
+    }
+  }
+
+  // Declares what a pattern binds, from `subj`, which it is known to match.
+  function binds(self: mut Self, p: readonly Pattern, subj: str): void uses Fail<GenError> {
+    match (p) {
+      #Bind(n) => {
+        const js = self.declare(n, false);
+        self.line(`const ${js} = ${subj};`);
+      }
+      #Tag(_, ps) => {
+        if (ps.len() == 1) { self.binds(ps[0], `${subj}.$`.asStr()); }
+        else { for (const [i, q] of ps.iter().enumerate()) { self.binds(q, `${subj}.$[${i}]`.asStr()); } }
+      }
+      #TagRecord(_, fs) => { for (const [f, q] of fs) { self.binds(q, `${subj}.$.${f}`.asStr()); } }
+      #Tuple(ps) => { for (const [i, q] of ps.iter().enumerate()) { self.binds(q, `${subj}[${i}]`.asStr()); } }
+      #Record(fs) => { for (const [f, q] of fs) { self.binds(q, `${subj}.${f}`.asStr()); } }
+      #Or(alts) => {
+        if (!Gen.hasBinds(p)) { return; }
+        // Each alternative binds the same names: declare them, then assign from the one that matched.
+        let first: Vec<[String, String]> = Vec.new();
+        Gen.paths(alts[0], subj, mut first);
+        let js: Vec<String> = Vec.new();
+        for (const [n, _] of first) { js.push(self.declare(n, false)); }
+        self.line(`let ${js.join(", ")};`);
+        for (const [i, a] of alts.iter().enumerate()) {
+          const c = self.cond(a, subj);
+          let ps: Vec<[String, String]> = Vec.new();
+          Gen.paths(a, subj, mut ps);
+          let assigns: Vec<String> = Vec.new();
+          for (const [k, [n, _]] of first.iter().enumerate()) {
+            match (ps.iter().find(([m, _]) => m == n)) {
+              #Some([_, path]) => assigns.push(`${js[k]} = ${path};`),
+              #None => self.fail(`\`${n}\` is not bound by every alternative`),
+            }
+          }
+          self.line(`${if (i == 0) { "" } else { "else " }}if (${c}) { ${assigns.join(" ")} }`);
+        }
+      }
+      _ => {}
+    }
+  }
+
+  // What a pattern binds, each with where it is in `subj`.
+  function paths(p: readonly Pattern, subj: str, out: mut Vec<[String, String]>): void {
+    match (p) {
+      #Bind(n) => out.push([n.clone(), subj.toString()]),
+      #Tag(_, ps) => {
+        if (ps.len() == 1) { Gen.paths(ps[0], `${subj}.$`.asStr(), mut out); }
+        else { for (const [i, q] of ps.iter().enumerate()) { Gen.paths(q, `${subj}.$[${i}]`.asStr(), mut out); } }
+      }
+      #TagRecord(_, fs) => { for (const [f, q] of fs) { Gen.paths(q, `${subj}.$.${f}`.asStr(), mut out); } }
+      #Tuple(ps) => { for (const [i, q] of ps.iter().enumerate()) { Gen.paths(q, `${subj}[${i}]`.asStr(), mut out); } }
+      #Record(fs) => { for (const [f, q] of fs) { Gen.paths(q, `${subj}.${f}`.asStr(), mut out); } }
+      #Or(alts) => { if (alts.len() > 0) { Gen.paths(alts[0], subj, mut out); } }
+      _ => {}
+    }
+  }
+
+  // ---- statements ----
+
+  function deliver(self: mut Self, v: str, dest: readonly Dest): void {
+    match (dest) {
+      #Discard => { if (v != "undefined") { self.line(`${v};`); } }
+      #Return => self.line(`return ${v};`),
+      #Assign(t) => self.line(`${t} = ${v};`),
+    }
+  }
+
+  // Runs an expression as statements, sending its value to `dest`.
+  function into(self: mut Self, e: readonly Expr, dest: readonly Dest): void uses Fail<GenError> {
+    match (e) {
+      #Block(b) => {
+        self.line("{");
+        self.indent += 1;
+        self.blockInto(b, dest);
+        self.indent -= 1;
+        self.line("}");
+      }
+      #Unsafe(b) => {
+        self.line("{");
+        self.indent += 1;
+        self.blockInto(b, dest);
+        self.indent -= 1;
+        self.line("}");
+      }
+      #If(c, t, f) => {
+        const cond = self.ex(c);
+        self.line(`if (${cond}) {`);
+        self.indent += 1;
+        self.blockInto(t, dest);
+        self.indent -= 1;
+        match (f) {
+          #Some(x) => {
+            self.line("} else {");
+            self.indent += 1;
+            self.into(x, dest);
+            self.indent -= 1;
+            self.line("}");
+          }
+          #None => {
+            self.line("}");
+            if (const #Assign(t) = dest) { self.line(`else ${t} = undefined;`); }
+          }
+        }
+      }
+      #Match(scrutinee, arms) => {
+        const v = self.ex(scrutinee);
+        const s = self.fresh();
+        self.line(`const ${s} = ${v};`);
+        const label = `m${self.fresh()}`;
+        self.line(`${label}: {`);
+        self.indent += 1;
+        for (const arm of arms) {
+          const c = self.cond(arm.pat, s);
+          self.line(`if (${c}) {`);
+          self.indent += 1;
+          self.push();
+          self.binds(arm.pat, s);
+          match (arm.guard) {
+            #Some(g) => {
+              const gv = self.ex(g);
+              self.line(`if (${gv}) {`);
+              self.indent += 1;
+              self.into(arm.body, dest);
+              self.line(`break ${label};`);
+              self.indent -= 1;
+              self.line("}");
+            }
+            #None => {
+              self.into(arm.body, dest);
+              self.line(`break ${label};`);
+            }
+          }
+          self.pop();
+          self.indent -= 1;
+          self.line("}");
+        }
+        self.line(`$rt.unmatched(${s});`);
+        self.indent -= 1;
+        self.line("}");
+      }
+      #While(c, body) => {
+        if (Gen.simple(c)) {
+          const cond = self.ex(c);
+          self.line(`while (${cond}) {`);
+          self.indent += 1;
+        } else {
+          self.line("while (true) {");
+          self.indent += 1;
+          const cond = self.ex(c);
+          self.line(`if (!(${cond})) break;`);
+        }
+        self.blockInto(body, #Discard);
+        self.indent -= 1;
+        self.line("}");
+        self.deliver("undefined", dest);
+      }
+      #For(pat, iter, body) => {
+        self.push();
+        // `for (const i of a..b)`: a counted loop.
+        const counted = match (pat) {
+          #Bind(n) => match (iter) {
+            #Range(lo, hi) => {
+              const [a, b] = self.pair(lo, hi);
+              const end = self.save(b);
+              const js = self.declare(n, false);
+              self.line(`for (let ${js} = ${a}; ${js} < ${end}; ${js}++) {`);
+              true
+            }
+            _ => false,
+          },
+          _ => false,
+        };
+        if (!counted) {
+          const it = self.ex(iter);
+          const x = self.fresh();
+          self.line(`for (const ${x} of $rt.iter(${it})) {`);
+          self.indent += 1;
+          self.binds(pat, x);
+        } else {
+          self.indent += 1;
+        }
+        self.blockInto(body, #Discard);
+        self.indent -= 1;
+        self.line("}");
+        self.pop();
+        self.deliver("undefined", dest);
+      }
+      #Try(body, pat, handler) => {
+        self.line("try {");
+        self.indent += 1;
+        self.blockInto(body, dest);
+        self.indent -= 1;
+        const err = self.fresh();
+        self.line(`} catch (${err}) {`);
+        self.indent += 1;
+        self.line(`if (!(${err} instanceof $rt.Fail)) throw ${err};`);
+        self.push();
+        const c = self.cond(pat, `${err}.value`.asStr());
+        if (c != "true") { self.line(`if (!(${c})) throw ${err};`); }
+        self.binds(pat, `${err}.value`.asStr());
+        self.blockInto(handler, dest);
+        self.pop();
+        self.indent -= 1;
+        self.line("}");
+      }
+      #Return(v) => {
+        match (v) {
+          #Some(x) => {
+            if (self.inGenerator) {
+              const r = self.ex(x);
+              self.line(`return ${r};`);
+            } else {
+              self.into(x, #Return);
+            }
+          }
+          #None => self.line("return;"),
+        }
+      }
+      #Break => self.line("break;"),
+      #Continue => self.line("continue;"),
+      #Throw(x) => {
+        const v = self.ex(x);
+        self.line(`throw new $rt.Fail(${v});`);
+      }
+      #Call(f, args) => {
+        const v = self.call(f, args, true);
+        self.deliver(v, dest);
+      }
+      #Handle(_, effect, _) => self.fail(`handling \`${effect}\` is not supported by this compiler`),
+      _ => {
+        const v = self.ex(e);
+        self.deliver(v, dest);
+      }
+    }
+  }
+
+  function blockInto(self: mut Self, b: readonly Block, dest: readonly Dest): void uses Fail<GenError> {
+    self.push();
+    self.stmtsFrom(b, 0, dest);
+    self.pop();
+  }
+
+  function stmtsFrom(self: mut Self, b: readonly Block, from: usize, dest: readonly Dest): void uses Fail<GenError> {
+    let i = from;
+    while (i < b.stmts.len()) {
+      match (b.stmts[i]) {
+        #Let(mutable, pat, init) => {
+          const v = self.ex(init);
+          const copied = match (init) { #Ident(_) | #Field(_, _) | #Index(_, _) => `$rt.copy(${v})`, _ => v };
+          match (pat) {
+            #Bind(n) => {
+              const js = self.declare(n, false);
+              self.line(`${if (mutable) { "let" } else { "const" }} ${js} = ${copied};`);
+            }
+            _ => {
+              const t = self.fresh();
+              self.line(`const ${t} = ${copied};`);
+              self.binds(pat, t);
+            }
+          }
+        }
+        #Expr(e) => self.into(e, #Discard),
+        // What follows runs before the deferred expression, however the block is left.
+        #Defer(e) => {
+          self.line("try {");
+          self.indent += 1;
+          self.stmtsFrom(b, i + 1, dest);
+          self.indent -= 1;
+          self.line("} finally {");
+          self.indent += 1;
+          self.into(e, #Discard);
+          self.indent -= 1;
+          self.line("}");
+          return;
+        }
+      }
+      i += 1;
+    }
+    match (b.tail) {
+      #Some(t) => self.into(t, dest),
+      #None => self.deliver("undefined", dest),
+    }
+  }
+
+  // ---- declarations ----
+
+  function function(self: mut Self, js: str, f: readonly Fn): void uses Fail<GenError> {
+    const body = match (f.body) { #Some(b) => b, #None => return };
+    self.push();
+    let params: Vec<String> = Vec.new();
+    for (const p of f.params) {
+      const isRef = match (p.ty) { #Mut(_) => p.name != "self", _ => false };
+      params.push(self.declare(p.name, isRef));
+    }
+    self.inGenerator = f.generator;
+    self.line(`function${if (f.generator) { "*" } else { "" }} ${js}(${params.join(", ")}) {`);
+    self.indent += 1;
+    self.blockInto(body, #Return);
+    self.indent -= 1;
+    self.line("}");
+    self.inGenerator = false;
+    self.pop();
+  }
+}
+
+// A module's JavaScript. `prefix` names its functions and constants (`m3$`); `names` holds what
+// it can see by name, its own and what it imports.
+export function module(m: readonly Module, prefix: str, names: HashMap<String, String>, world: World): String uses Fail<GenError> {
+  let g = Gen.new(names, world);
+  for (const item of m.items) {
+    match (item) {
+      #Function(f) => g.function(`${prefix}${f.name}`.asStr(), f),
+      #Const(name, value, _) => {
+        g.push();
+        const v = g.ex(value);
+        g.pop();
+        g.line(`const ${prefix}${name} = ${v};`);
+      }
+      #Impl(target, iface, methods) => {
+        for (const f of methods) {
+          const js = `${target}$${f.name}`;
+          g.function(js.asStr(), f);
+          g.line(`$rt.method(${quote(target)}, ${quote(f.name)}, ${js});`);
+        }
+        if (const #Some(i) = iface) { g.line(`$rt.implement(${quote(target)}, ${quote(i)});`); }
+      }
+      #Interface(name, methods, _) => {
+        for (const f of methods) {
+          if (f.body.isSome()) {
+            const js = `${name}$$${f.name}`;
+            g.function(js.asStr(), f);
+            g.line(`$rt.fallback(${quote(name)}, ${quote(f.name)}, ${js});`);
+          }
+        }
+      }
+      #Enum(name, tags, _) => {
+        let qs: Vec<String> = Vec.new();
+        for (const t of tags) { qs.push(quote(t)); }
+        g.line(`$rt.enumTags(${quote(name)}, [${qs.join(", ")}]);`);
+      }
+      #Struct(name, fields, _) => {
+        let qs: Vec<String> = Vec.new();
+        for (const f of fields) { qs.push(quote(f)); }
+        g.line(`$rt.struct(${quote(name)}, [${qs.join(", ")}]);`);
+      }
+      _ => {}
+    }
+  }
+  g.out
+}

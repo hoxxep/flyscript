@@ -1,0 +1,121 @@
+// The compiler's driver: `main(entry, out, runtime)` compiles the program whose entry module is
+// `entry`, and every module it imports, to one JavaScript file `out` that starts with the
+// runtime from `runtime` and ends by calling the entry's `main` with the command line.
+
+import { parse, ParseError } from "./parse";
+import { LexError } from "./lex";
+import { Module, Item } from "./ast";
+import { survey, module, quote, GenError } from "./gen";
+import { File, println, writeFile } from "std/io";
+import { HashMap } from "std/collections";
+
+type CompileError = ParseError | LexError | GenError | IoErr | #Import { path: String };
+
+// The directory a path is in, with its final `/`.
+function dirOf(path: str): str {
+  const bytes = path.asBytes();
+  let i = bytes.len();
+  while (i > 0) {
+    if (bytes[i - 1] == b'/') { return path.slice(0, i); }
+    i -= 1;
+  }
+  ""
+}
+
+// `dir` and a relative path joined, with `.` and `..` resolved.
+function join(dir: str, rel: str): String {
+  let parts: Vec<String> = Vec.new();
+  const absolute = dir.startsWith("/");
+  for (const p of `${dir}${rel}`.split("/")) {
+    if (p == "" || p == ".") { continue; }
+    const up = match (parts.last()) { #Some(q) => q != "..", #None => false };
+    if (p == ".." && up) { parts.pop(); continue; }
+    parts.push(p.toString());
+  }
+  const joined = parts.join("/");
+  if (absolute) { `/${joined}` } else { joined }
+}
+
+struct Loader { paths: Vec<String>; modules: Vec<Module>; loading: Vec<String> }
+
+impl Loader {
+  // Loads a module after the modules it imports, once.
+  function load(self: mut Self, path: str): usize uses Io, Fail<CompileError> {
+    if (const #Some(i) = self.paths.iter().findIndex((p) => p.asStr() == path)) { return i; }
+    if (self.loading.iter().some((p) => p.asStr() == path)) { throw #Import { path: path.toString() }; }
+    self.loading.push(path.toString());
+    let f = File.open(path);
+    const m = parse(f.readText().asStr());
+    for (const item of m.items) {
+      if (const #Import(_, from) = item) {
+        if (!from.startsWith("std/")) { self.load(join(dirOf(path), `${from}.fly`.asStr()).asStr()); }
+      }
+    }
+    self.loading.pop();
+    self.paths.push(path.toString());
+    self.modules.push(m);
+    self.paths.len() - 1
+  }
+
+  function index(self: readonly Self, path: str): usize {
+    match (self.paths.iter().findIndex((p) => p.asStr() == path)) { #Some(i) => i, #None => 0 }
+  }
+}
+
+// What a module can see by name: its own functions and constants, and what it imports.
+function namesOf(l: readonly Loader, k: usize): HashMap<String, String> {
+  let names: HashMap<String, String> = HashMap.new();
+  for (const item of l.modules[k].items) {
+    match (item) {
+      #Function(f) => { names.insert(f.name.clone(), `m${k}$${f.name}`); }
+      #Const(name, _, _) => { names.insert(name.clone(), `m${k}$${name}`); }
+      #Import(imported, from) => {
+        if (from.startsWith("std/")) {
+          // The standard library is the runtime's.
+          for (const [name, local] of imported) { names.insert(local.clone(), `$rt.${name}`); }
+        } else {
+          const j = l.index(join(dirOf(l.paths[k]), `${from}.fly`.asStr()).asStr());
+          for (const [name, local] of imported) {
+            for (const other of l.modules[j].items) {
+              match (other) {
+                #Function(f) if f.name == name => { names.insert(local.clone(), `m${j}$${name}`); }
+                #Const(c, _, _) if c == name => { names.insert(local.clone(), `m${j}$${name}`); }
+                _ => {}
+              }
+            }
+          }
+        }
+      }
+      _ => {}
+    }
+  }
+  names
+}
+
+function compile(entry: str, out: str, runtime: str): void uses Io, Fail<CompileError> {
+  let l = Loader { paths: Vec.new(), modules: Vec.new(), loading: Vec.new() };
+  const main = l.load(entry);
+  const world = survey(l.modules);
+  let rt = File.open(runtime);
+  let js = rt.readText();
+  for (const k of 0..l.modules.len()) {
+    js.push(`\n// ${l.paths[k]}\n`);
+    js.push(module(l.modules[k], `m${k}$`.asStr(), namesOf(l, k), world.clone()).asStr());
+  }
+  js.push(`\n$rt.start(m${main}$main);\n`);
+  writeFile(out, js.asStr());
+}
+
+export function main(entry: str, out: str, runtime: str): void uses Io {
+  try {
+    compile(entry, out, runtime);
+  } catch (e) {
+    match (e) {
+      #ParseError { at, message } => println(`parse error at ${at}: ${message}`),
+      #LexError { at, message } => println(`lex error at ${at}: ${message}`),
+      #GenError { message } => println(`error: ${message}`),
+      #Import { path } => println(`error: ${path} imports itself`),
+      _ => println("error: cannot read a file"),
+    }
+  }
+}

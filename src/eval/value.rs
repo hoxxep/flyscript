@@ -56,7 +56,7 @@ pub enum Value {
     Int(i128),
     Float(f64),
     /// A string: `str` and `String` alike.
-    Text(Arc<str>),
+    Text(Arc<String>),
     Tuple(Vec<Value>),
     Record(BTreeMap<String, Value>),
     /// A tag and its payload (`Unit`, a `Tuple` or a `Record`).
@@ -91,7 +91,7 @@ impl Value {
     }
 
     pub fn text(s: &str) -> Value {
-        Value::Text(Arc::from(s))
+        Value::Text(Arc::new(s.to_string()))
     }
 
     /// Follows borrows only, stopping at a shared cell (a region reference or a mutex).
@@ -132,11 +132,11 @@ impl Value {
         matches!(self.deref(), Value::Bool(true))
     }
 
-    pub fn as_text(&self) -> Arc<str> {
+    pub fn as_text(&self) -> Arc<String> {
         match self.deref() {
             Value::Text(s) => s,
-            Value::List(bytes) => Arc::from(String::from_utf8_lossy(&bytes.iter().map(|b| b.as_int() as u8).collect::<Vec<u8>>()).as_ref()),
-            other => Arc::from(other.show().as_str()),
+            Value::List(bytes) => Arc::new(String::from_utf8_lossy(&bytes.iter().map(|b| b.as_int() as u8).collect::<Vec<u8>>()).into_owned()),
+            other => Arc::new(other.show()),
         }
     }
 
@@ -215,7 +215,7 @@ fn step(v: &Value, seg: &Seg) -> Value {
         (Value::List(vs) | Value::Tuple(vs), Seg::Index(i)) => vs.get(*i).cloned().unwrap_or_else(|| panic!("index {i} out of bounds (length {})", vs.len())),
         (Value::Text(s), Seg::Index(i)) => Value::Int(*s.as_bytes().get(*i).unwrap_or_else(|| panic!("index {i} out of bounds")) as i128),
         (Value::List(vs), Seg::Range(lo, hi)) => Value::List(vs[*lo..*hi].to_vec()),
-        (Value::Text(s), Seg::Range(lo, hi)) => Value::Text(Arc::from(&s[*lo..*hi])),
+        (Value::Text(s), Seg::Range(lo, hi)) => Value::Text(Arc::new(s[*lo..*hi].to_string())),
         (other, seg) => panic!("cannot follow {seg:?} into {}", other.show()),
     }
 }

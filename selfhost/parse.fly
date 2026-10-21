@@ -169,9 +169,10 @@ impl Parser {
       self.skipTypeParams();
       // `impl T`, or `impl I for T`: the methods belong to `T`.
       let target = self.typeName();
-      if (self.eatWord("for")) { target = self.typeName(); }
+      let iface: Option<String> = #None;
+      if (self.eatWord("for")) { iface = #Some(replace(mut target, self.typeName())); }
       let methods: Vec<Fn> = Vec.new();
-      if (self.eat(";")) { return #Impl(target, methods); }
+      if (self.eat(";")) { return #Impl(target, iface, methods); }
       self.expect("{");
       while (!self.at("}")) {
         if (self.atWord("type")) {
@@ -184,7 +185,7 @@ impl Parser {
         methods.push(self.function(fnExported));
       }
       self.expect("}");
-      return #Impl(target, methods);
+      return #Impl(target, iface, methods);
     }
     if (self.atWord("interface") || self.atWord("effect")) {
       const isEffect = self.atWord("effect");
@@ -192,8 +193,24 @@ impl Parser {
       const name = self.ident();
       self.skipTypeParams();
       while (!self.at("{")) { self.bump(); }
-      self.skipBalanced();
-      return if (isEffect) { #Effect(name, exported) } else { #Interface(name, exported) };
+      if (isEffect) {
+        self.skipBalanced();
+        return #Effect(name, exported);
+      }
+      // Its methods: those with a body are defaults for the types that implement it.
+      self.bump();
+      let methods: Vec<Fn> = Vec.new();
+      while (!self.at("}")) {
+        if (self.atWord("type")) {
+          while (!self.at(";")) { self.bump(); }
+          self.bump();
+          continue;
+        }
+        self.eatWord("export");
+        methods.push(self.function(false));
+      }
+      self.expect("}");
+      return #Interface(name, methods, exported);
     }
     if (self.atWord("extern")) {
       while (!self.at(";")) { self.bump(); }
@@ -230,9 +247,17 @@ impl Parser {
         }
       }
     }
-    if (self.eatWord("uses")) { self.skipRow(); }
+    // A function that performs `Yield` is a generator.
+    let generator = false;
+    if (self.eatWord("uses")) {
+      const from = self.pos;
+      self.skipRow();
+      for (const i of from..self.pos) {
+        if (self.toks[i].tok == #Ident("Yield".toString())) { generator = true; }
+      }
+    }
     const body = if (self.eat(";")) { #None } else { #Some(self.block()) };
-    { name, params, body, exported, span: { start, end: self.here() } }
+    { name, params, body, exported, generator, span: { start, end: self.here() } }
   }
 
   // ---- types: read only as far as code generation needs ----

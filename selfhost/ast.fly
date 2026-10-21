@@ -90,7 +90,7 @@ export enum Stmt {
 
 export type Block = { stmts: Vec<Stmt>; tail: Option<Box<Expr>> };
 
-export type Fn = { name: String; params: Vec<Param>; body: Option<Block>; exported: bool; span: Span };
+export type Fn = { name: String; params: Vec<Param>; body: Option<Block>; exported: bool; generator: bool; span: Span };
 
 export enum Item {
   #Import(Vec<[String, String]>, String),
@@ -99,9 +99,9 @@ export enum Item {
   #Enum(String, Vec<String>, bool),
   #Alias(String, bool),
   #Const(String, Expr, bool),
-  // `impl [I for] T { … }`: the type's name and its methods.
-  #Impl(String, Vec<Fn>),
-  #Interface(String, bool),
+  // `impl [I for] T { … }`: the type's name, the interface's, and the methods.
+  #Impl(String, Option<String>, Vec<Fn>),
+  #Interface(String, Vec<Fn>, bool),
   #Effect(String, bool),
 }
 
