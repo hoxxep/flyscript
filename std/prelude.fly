@@ -617,6 +617,8 @@ impl<T> Iterable<readonly T> for Vec<T> {
 impl<T> Box<T> {
   export function new(v: T): Box<T>;
   export function get(self: readonly Self): readonly T from self;
+  // What the box held, the box consumed: how a value is taken out of a box.
+  export function into(self: Self): T;
 }
 // A box is its contents, for every derived interface.
 impl<T extends Eq> Eq for Box<T> {
@@ -656,8 +658,24 @@ impl<T extends Send> Clone for Arc<T> {
 // `Ref<R, T>` is used as a `readonly T`; the compiler provides the projection.
 export struct Ref<region R, T>;
 
-// A `Ref` is `Copy`, so cloning one copies it.
+// A `Ref` is `Copy`, so cloning one copies it; otherwise it is what it points at, so region
+// strings key maps: `HashMap<Ref<R, str>, V>`, looked up by a `str`.
 impl<region R, T> Clone for Ref<R, T> { function clone(self: readonly Self): Self; }
+impl<region R, T> Ref<R, T> {
+  export function get(self: readonly Self): readonly T from self;
+}
+impl<region R, T extends Eq> Eq for Ref<R, T> {
+  function eq(self: readonly Self, other: readonly Self): bool { self.get().eq(other.get()) }
+}
+impl<region R, T extends Ord> Ord for Ref<R, T> {
+  function cmp(self: readonly Self, other: readonly Self): Ordering { self.get().cmp(other.get()) }
+}
+impl<region R, T extends Hash> Hash for Ref<R, T> {
+  function hash(self: readonly Self, h: mut Hasher): void { self.get().hash(mut h); }
+}
+impl<region R, T extends Show> Show for Ref<R, T> {
+  function show(self: readonly Self, out: mut String): void { self.get().show(mut out); }
+}
 export function alloc<region R, T>(v: T): Ref<R, T> uses Region<R>;
 // TypeScript's `parseInt` and `parseFloat`, without the `NaN`: decimal text, or `#None`.
 export function parseInt(s: str): Option<i64>;

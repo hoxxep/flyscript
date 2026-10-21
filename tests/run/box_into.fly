@@ -1,0 +1,8 @@
+// expect: hi
+// `into()` takes what a box holds, the box consumed: the way to move a value out of one (§4.1).
+import { println } from "std/io";
+enum Inner { #Text(String), #Num(i32) }
+export function main(): void uses Io {
+  const b: Box<Inner> = Box.new(#Text("hi".toString()));
+  match (b.into()) { #Text(s) => println(s), #Num(_) => {} }
+}

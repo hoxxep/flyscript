@@ -1,0 +1,12 @@
+// expect: #Some(1) #Some(1) true
+// A `Ref` is what it points at: region strings key a map, looked up by a plain `str` (§3.5, §4.6).
+import { println } from "std/io";
+import { HashMap } from "std/collections";
+export function main(): void uses Io {
+  region (R) {
+    let m: HashMap<Ref<R, str>, i32> = HashMap.new();
+    m.insert(fmt("x"), 1);
+    const k = fmt("x");
+    println(`${m.get(k)} ${m.get("x")} ${k == fmt("x")}`);
+  }
+}

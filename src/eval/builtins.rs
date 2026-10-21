@@ -472,6 +472,7 @@ impl Interp {
             }
             "panic" => Err(panic(a(0).as_text().to_string())),
             "Ref.clone" | "Cell.clone" | "RegionList.clone" => Ok(a(0).deref_once()),
+            "Ref.get" => Ok(a(0).deref()),
             "Vec.pop" => {
                 let p = place_of(&a(0))?;
                 let mut out = None;
@@ -511,7 +512,7 @@ impl Interp {
                 });
                 Ok(Value::Unit)
             }
-            "Box.new" | "Arc.new" | "Box.get" | "Arc.get" => Ok(a(0)),
+            "Box.new" | "Arc.new" | "Box.get" | "Arc.get" | "Box.into" => Ok(a(0).deref_once()),
             // The same shared value: through the borrow of the `Arc`, never into a cell it shares.
             "Arc.clone" => Ok(a(0).deref_once()),
             "HashMap.new" => Ok(Value::List(Vec::new())),

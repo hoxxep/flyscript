@@ -1,0 +1,6 @@
+// error: cannot move a `String` out of a borrow; it is not `Copy`
+// A box is matched through a `readonly` borrow of what it holds: nothing is moved out of it (§4.1).
+enum Inner { #Text(String), #Num(i32) }
+export function g(b: Box<Inner>): String {
+  match (b) { #Text(s) => s, #Num(_) => "".toString() }
+}

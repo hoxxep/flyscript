@@ -111,13 +111,14 @@ impl Gen {
         const make = self.emit(#MakeFn(0, params.len(), captures.len()));
         const skip = self.emit(#Jump(0));
         // The body's frame: its captures, then its parameters.
-        let inner = Gen { code: Vec.new(), locals: Vec.new(), globals: self.globals.clone(), ctors: self.ctors.clone() };
-        for (const c of captures) { inner.locals.push(c.clone()); }
-        for (const p of params) { inner.locals.push(p.clone()); }
-        inner.code = self.code.drain().collect();
-        inner.gen(body);
-        inner.emit(#Ret);
-        self.code = inner.code.drain().collect();
+        let frame: Vec<String> = Vec.new();
+        for (const c of captures) { frame.push(c.clone()); }
+        for (const p of params) { frame.push(p.clone()); }
+        // The body is generated with a frame of its own, the enclosing one put aside meanwhile.
+        const outer = replace(mut self.locals, frame);
+        self.gen(body);
+        self.emit(#Ret);
+        self.locals = outer;
         self.code[make] = #MakeFn(skip + 1, params.len(), captures.len());
         self.code[skip] = #Jump(self.code.len());
       }

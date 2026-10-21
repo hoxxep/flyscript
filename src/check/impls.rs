@@ -152,6 +152,11 @@ impl Program {
             return true;
         }
         match (q, k) {
+            // A pointer lends what it points at, and what that lends: a `Ref<R, str>` key is
+            // looked up by a `str`.
+            (_, Ty::Named(d, args)) if ["Ref", "Box", "Arc"].iter().any(|n| self.known.get(*n) == Some(d)) => {
+                matches!(args.last(), Some(GArg::Ty(t)) if self.lent_by(q, t))
+            }
             (Ty::Prim(Prim::Str), Ty::Named(d, _)) => self.known.get("String") == Some(d),
             (Ty::Slice(e), Ty::Named(d, args)) => {
                 self.known.get("Vec") == Some(d) && matches!(args.first(), Some(GArg::Ty(t)) if t == e.as_ref())

@@ -20,7 +20,8 @@ export enum Type<region R> {
 export type Field<region R> = { name: Ref<R, str>; ty: Ref<R, Type<R>> };
 
 // A constructor: its type's index, its tag (unique across the program), its fields, its type.
-export type Ctor<region R> = { data: usize; tag: usize; fields: Vec<Ref<R, Type<R>>>; result: Ref<R, Type<R>> };
+// Everything in it is in the region, so a `Ctor` is `Copy`: read out of the table, it holds nothing.
+export type Ctor<region R> = { data: usize; tag: usize; fields: Ref<R, Ref<R, Type<R>>[]>; result: Ref<R, Type<R>> };
 
 // A type with variables quantified: each use of a `let`-bound name gets fresh copies of them.
 export type Scheme<region R> = { vars: Vec<usize>; ty: Ref<R, Type<R>> };
@@ -37,7 +38,7 @@ export struct Checker<region R> {
 }
 
 impl<region R> Checker<R> {
-  function fresh(self: mut Self): Ref<Type> uses Region<R> {
+  function fresh(self: readonly Self): Ref<Type> uses Region<R> {
     Checker.var(self.ids)
   }
   function func(params: readonly Ref<Type>[], ret: Ref<Type>): Ref<Type> uses Region<R> {
@@ -187,7 +188,7 @@ impl<region R> Checker<R> {
     }
   }
 
-  function lookup(self: mut Self, name: str, span: Span): Ref<Type> uses Region<R>, Diag {
+  function lookup(self: readonly Self, name: str, span: Span): Ref<Type> uses Region<R>, Diag {
     // A constructor is a function of its fields, or a value if it has none.
     if (const #Some(c) = self.ctors.get(name)) {
       return if (c.fields.len() == 0) { c.result } else { Checker.func(c.fields, c.result) };
@@ -247,7 +248,7 @@ impl<region R> Checker<R> {
             },
           });
         }
-        self.ctors.insert(c.name.clone(), { data: i, tag, fields, result: types.get(d.name).unwrap() });
+        self.ctors.insert(c.name.clone(), { data: i, tag, fields: allocAll(fields), result: types.get(d.name).unwrap() });
         names.push(c.name.clone());
         tag += 1;
       }
@@ -336,17 +337,14 @@ impl<region R> Checker<R> {
         let seen: HashSet<String> = HashSet.new();
         let data: Option<usize> = #None;
         for (const arm of arms) {
-          // What the arm needs of its constructor, copied out so the table is not held while
-          // the body is checked.
-          const found: Option<[usize, Vec<Ref<Type>>, Ref<Type>]> = match (self.ctors.get(arm.ctor)) {
-            #Some(c) => #Some([c.data, c.fields.clone(), c.result]),
-            #None => #None,
-          };
+          // A `Ctor` is `Copy`, so `c` is a copy and the table is not held while the body is
+          // checked (§4.1).
           let scope: HashMap<String, Scheme<R>> = HashMap.new();
-          match (found) {
+          match (self.ctors.get(arm.ctor)) {
             #None => Diag.report(#Unbound { span: arm.span, name: arm.ctor.clone() }),
-            #Some([d, fields, ctorType]) => {
-              Checker.unify(self.ids, ts, ctorType, arm.span);
+            #Some(c) => {
+              const [d, fields] = [c.data, c.fields];
+              Checker.unify(self.ids, ts, c.result, arm.span);
               if (fields.len() != arm.binds.len()) {
                 Diag.report(#Type { span: arm.span, message: `\`${arm.ctor}\` has ${fields.len()} fields, not ${arm.binds.len()}` });
               }

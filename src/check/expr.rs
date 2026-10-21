@@ -1159,8 +1159,9 @@ impl<'p> Checker<'p> {
                 Some(x) => self.unbox(&Ty::Borrow(m, Box::new(x))),
                 None => Ty::Borrow(m, inner),
             },
+            // Nothing is moved out of a box: an owned one is matched through a `readonly` borrow.
             other => match boxed(&other) {
-                Some(x) => self.unbox(&x),
+                Some(x) => self.unbox(&Ty::Borrow(false, Box::new(x))),
                 None => other,
             },
         }
@@ -2073,7 +2074,11 @@ impl<'p> Checker<'p> {
         let st = self.expr(scrutinee, None);
         // A `Box` is matched as what it holds, which it lends (§4.1): a tree of boxed nodes is
         // taken apart without unboxing by hand.
+        let owned = !matches!(self.s.resolve(&st), Ty::Borrow(..));
         let st = self.unbox(&st);
+        if owned && matches!(st, Ty::Borrow(..)) {
+            self.typed.lent_scrutinees.insert(scrutinee.span, false);
+        }
         // A place nothing may be moved out of is matched through a borrow of it, so its parts
         // bind as borrows, as TypeScript programmers expect (§4.1).
         let st = match (self.unmovable_place(scrutinee), self.s.resolve(&st)) {

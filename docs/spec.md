@@ -1,6 +1,6 @@
 # Flyscript
 
-**Language specification, version 0.48**
+**Language specification, version 0.49**
 
 *Affine values, one row calculus, handlers for everything, and `comptime`: Church on the outside, Turing on the inside.*
 
@@ -18,13 +18,19 @@ The whole language rests on five laws. Every rule in this document is a conseque
 4. **Handlers for everything.** Errors, I/O, iteration and region memory are ordinary effects with ordinary handlers. A handler may hold the rest of a computation as a one-shot continuation value; generators and tasks are both built from that one primitive.
 5. **`comptime` is the metalanguage.** Generics, reflection, layout transformation and derived interfaces are ordinary Flyscript code run by the compiler.
 
-### 0.1 Changes from 0.47
+### 0.1 Changes from 0.48
 
-0.48 gives Mini structural records typed by rows — Rémy-style unification of field lists with variable tails, the same calculus Flyscript's own checker rests on (§3.2) — so `def getx(r) = r.x` applies to any record with an `x`. The row variables live in the region with the rest of Mini's types, numbered by a counter that is itself a region `Cell`. Earlier changes are in [docs/history](history/).
+0.49 answers an overall assessment of 0.48 with Mini read as a compiler writer would (docs/reviews/2026-10-21-final-assessment-0-48.md): it judged the core ready to freeze once three statements were tightened, and found Mini making copies the language no longer needed. Earlier changes are in [docs/history](history/).
 
 | Change | Why |
 | :--- | :--- |
-| A specialization is keyed by its `comptime` arguments with regions erased (§7.1, §11) | the derived `clone` of a record of `Ref`s, called in code generic over a region, was specialized under the region parameter and not found under the region the frame was given |
+| A box is matched through a `readonly` borrow of what it holds, also when the box is owned; nothing is moved out of a box (§4.1) | an owned `Box` was matched as an owned value, so a pattern could move a part out of it and the box's drop would drop it again |
+| A pattern matches through any pointer — `Box`, `Ref`, `Arc` — as the value it holds (§4.1) | Mini's checker matches through `Ref<Type>` on nearly every line, which only §4.6 implied |
+| Region data may hold handles into its own region or an enclosing one (§4.6) | "of the same region" forbade a function's scratch types pointing into the module's syntax tree, though an enclosing region always outlives an inner one |
+| `Ref<R, T>` compares, orders, hashes and shows as what it points at, and lends it for lookups: `HashMap<Ref<R, str>, V>` is looked up by a `str` (§3.5, §4.6) | a compiler keys its tables by region strings |
+
+Mini now does as the review said: `Ctor` holds its fields in the region, so it is `Copy` and a binding of it releases the table (no clone); the code generator puts its frame aside with `replace` rather than cloning two maps per closure.
+
 
 ---
 
@@ -269,7 +275,7 @@ An interface can come with a *derivation*: an impl, written in Flyscript with `c
 
 `Ord extends Eq` is derived too, ordering by fields and then by tags, in declaration order; `type Ordering = #Less | #Equal | #Greater`.
 
-The derivations settle three things a derived interface must get right. On floats, `Eq`, `Ord` and `Hash` are total, so a record with a float field is a sound `HashMap` key and sorts consistently: `NaN` equals itself and orders after every number, and `-0.0` equals and hashes as `0.0` (the primitive operators on floats stay IEEE 754). `Clone` copies a `readonly` borrow and never duplicates a `mut` one. `Box<T>` and `Arc<T>` compare, order, hash and show as what they hold; cloning a `Box` clones its contents, cloning an `Arc` shares them again.
+The derivations settle three things a derived interface must get right. On floats, `Eq`, `Ord` and `Hash` are total, so a record with a float field is a sound `HashMap` key and sorts consistently: `NaN` equals itself and orders after every number, and `-0.0` equals and hashes as `0.0` (the primitive operators on floats stay IEEE 754). `Clone` copies a `readonly` borrow and never duplicates a `mut` one. `Box<T>`, `Arc<T>` and `Ref<R, T>` compare, order, hash and show as what they hold, and lend it for lookups (a `HashMap<Ref<R, str>, V>` is searched with a `str`); cloning a `Box` clones its contents, cloning an `Arc` or a `Ref` shares them.
 
 The operators use them. `==` and `!=` are built in for primitives and call `Eq.eq` on anything else, and `<`, `<=`, `>` and `>=` likewise call `Ord.cmp`; an owner compared with the type it lends is compared at that type (`name == "ada"` for a `String`, `b.name == name` for a `Ref<R, str>`); `` `${e}` `` writes a primitive or a string as it is — also a `T` that is a string where the code is generic — and anything else with `Show`, which writes a value as Flyscript would (`Point { x: 1, y: 2 }`, `#Some("a")`). A struct is a new type, so it is compared or printed only if it asks: `impl Eq for Point;`.
 
@@ -305,7 +311,7 @@ Borrows are **transparent**: a borrow binding reads and writes as the value it r
 
 A value that is borrowed without having a place — a call's result, a template string, a literal lent as `str` — is stored in an anonymous local of the enclosing block, dropped when the block ends. So ``stringify(#Rejected { reason: `missing ${field}` })`` lends the string for the call, and ``const r = #Rejected { reason: `…` };`` holds a borrow of it while `r` is used; returning `r` is the usual error, a borrow of a local.
 
-**A match through a box.** A `Box<T>` is matched as the `T` it holds, through the same borrow: `match (node) { #Add(a, b) => … }` with `node: readonly Box<Expr>` binds `a` and `b` as borrows of the boxed `Expr`'s parts.
+**A match through a pointer.** A `Box<T>`, a `Ref<R, T>` or an `Arc<T>` is matched as the `T` it holds, through a borrow of it — the borrow the pointer was reached through, or `readonly` for an owned one: `match (node) { #Add(a, b) => … }` with `node: Box<Expr>` binds `a` and `b` as borrows of the boxed `Expr`'s parts. Nothing is moved out of a box by a pattern; take what it holds with `b.into()` (or clone a part) instead.
 
 **A match through a borrow.** A place nothing may be moved out of — reached through a borrow, or an element of a collection (`self.links[v]`) — is matched through a borrow of it, `readonly` or, through a `mut` borrow, `mut`: its parts bind as borrows, with copies for `Copy` parts, as below.
 
@@ -415,7 +421,7 @@ impl<region R, T> Iterable<readonly T> for RegionList<R, T> { … }
 Two rules make this sound:
 
 1. **No escape.** `R` may not occur in the type of the region expression, in any variable assigned from outside the block, or in an unhandled effect. A closure's type does not say what it captured, so a closure that escapes (§4.3) may not capture region data at all; one passed down may, since it borrows the binding that holds the reference.
-2. **No owned resources.** Region data contains only `Copy` values, `Ref`s, `Cell`s and `RegionList`s of the same region; this is checked wherever a value is placed in a region (`alloc`, `RegionList.push`). Nothing in a region needs a destructor, so releasing the arena is constant-time.
+2. **No owned resources.** Region data contains only `Copy` values, including `Ref`s, `Cell`s and `RegionList`s of the same region or of one that encloses it (which outlives it; rule 1 keeps handles to an inner region out of an outer one); this is checked wherever a value is placed in a region (`alloc`, `RegionList.push`). Nothing in a region needs a destructor, so releasing the arena is constant-time.
 
 Because nothing in a region moves or is freed before the region ends, and the only mutation is copy-in to a `Cell` or append to a list, no borrow into region data can be invalidated. Because handlers are fiber-local, no task can perform another fiber's `Region<R>`, and while a scope's tasks run, neither can the scope's own body (§6.1): an outer region is frozen while it is shared, so every `Ref<R, T>` is `Send`.
 
