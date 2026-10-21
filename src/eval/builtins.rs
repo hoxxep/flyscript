@@ -597,6 +597,20 @@ impl Interp {
 
             // ---- regions (§4.6) ----
             "alloc" => Ok(Value::Ref(shared(a(0)))),
+            "allocAll" => Ok(Value::Ref(shared(Value::List(list(&a(0)))))),
+            "replace" => {
+                let p = place_of(&a(0))?;
+                let old = get(&p);
+                set(&p, a(1));
+                Ok(old)
+            }
+            "swap" => {
+                let (p, q) = (place_of(&a(0))?, place_of(&a(1))?);
+                let (x, y) = (get(&p), get(&q));
+                set(&p, y);
+                set(&q, x);
+                Ok(Value::Unit)
+            }
             "fmt" => Ok(Value::Ref(shared(Value::Text(a(0).as_text())))),
             "copyUtf8" => {
                 let bytes: Vec<u8> = list(&a(0)).iter().map(|b| b.as_int() as u8).collect();

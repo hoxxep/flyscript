@@ -1,8 +1,10 @@
 // Mini: a compiler for a small language, written in Flyscript as a test of goal 6.
-// source -> tokens -> AST -> types (Hindley–Milner: union-find inference, let-polymorphism)
+// source -> tokens -> AST -> types (Hindley–Milner over types allocated in a region, each
+// variable carrying its own union-find link; let-polymorphism)
 // -> bytecode (closure conversion, globals for recursive definitions) -> run.
 import { println } from "std/io";
-import { HashMap } from "std/collections";
+import { HashMap, HashSet } from "std/collections";
+import { Cell } from "std/region";
 
 // ---- Diagnostics ----
 
@@ -229,148 +231,153 @@ impl Parser {
   }
 }
 
-// ---- Types: inference by unification over an arena of variables ----
+// ---- Types: inference by unification, the types themselves in a region ----
 
-enum Type { #Int, #Bool, #Var(usize), #Fn(Vec<Type>, Box<Type>) }
-impl Clone for Type;
+// A type lives in the checker's region: `Ref`s to it are `Copy`, so nothing is cloned, and a
+// variable carries its own union-find link, set once it is solved.
+enum Type<region R> { #Int, #Bool, #Var(usize, Cell<Option<Ref<Type>>>), #Fn(Ref<Ref<Type>[]>, Ref<Type>) }
 
-struct Types { links: Vec<Option<Type>> }
+// A type with variables quantified: each use of a `let`-bound name gets fresh copies of them.
+type Scheme<region R> = { vars: Vec<usize>; ty: Ref<R, Type<R>> };
 
-impl Types {
-  function fresh(self: mut Self): Type {
-    self.links.push(#None);
-    #Var(self.links.len() - 1)
+struct Checker<region R> { next: usize; scopes: Vec<HashMap<String, Scheme<R>>>; int: Ref<R, Type<R>>; bool: Ref<R, Type<R>> }
+
+impl<region R> Checker<R> {
+  function fresh(self: mut Self): Ref<Type> uses Region<R> {
+    self.next += 1;
+    alloc(#Var(self.next, Cell.new(#None)))
   }
-  // The type a variable stands for, followed to its end.
-  function resolve(self: readonly Self, t: readonly Type): Type {
+  function func(params: readonly Ref<Type>[], ret: Ref<Type>): Ref<Type> uses Region<R> {
+    alloc(#Fn(allocAll(params), ret))
+  }
+
+  // The type a variable stands for, followed to its end, compressing the path as it goes.
+  function resolve(t: Ref<Type>): Ref<Type> uses Region<R> {
     match (t) {
-      #Var(v) => match (self.links[v]) {
-        #Some(bound) => self.resolve(bound),
-        #None => #Var(v),
+      #Var(_, link) => match (link.get()) {
+        #Some(bound) => {
+          const end = Checker.resolve(bound);
+          link.set(#Some(end));
+          end
+        }
+        #None => t,
       },
-      other => other.clone(),
+      _ => t,
     }
   }
-  function occurs(self: readonly Self, v: usize, t: readonly Type): bool {
-    match (self.resolve(t)) {
-      #Var(w) => v == w,
-      #Fn(ps, r) => ps.iter().some((p) => self.occurs(v, p)) || self.occurs(v, r),
+  function occurs(v: usize, t: Ref<Type>): bool uses Region<R> {
+    match (Checker.resolve(t)) {
+      #Var(w, _) => v == w,
+      #Fn(ps, r) => ps.iter().some((p) => Checker.occurs(v, p)) || Checker.occurs(v, r),
       _ => false,
     }
   }
-  function unify(self: mut Self, a: readonly Type, b: readonly Type, span: Span): void uses Fail<CompileError> {
-    const [x, y] = [self.resolve(a), self.resolve(b)];
+  function unify(a: Ref<Type>, b: Ref<Type>, span: Span): void uses Region<R>, Fail<CompileError> {
+    const [x, y] = [Checker.resolve(a), Checker.resolve(b)];
     match ([x, y]) {
       [#Int, #Int] | [#Bool, #Bool] => {},
-      [#Var(v), #Var(w)] if v == w => {},
-      [#Var(v), t] | [t, #Var(v)] => {
-        if (self.occurs(v, t)) { throw #Type { span, message: "a function cannot take itself".toString() }; }
-        self.links[v] = #Some(t);
-      }
+      [#Var(v, _), #Var(w, _)] if v == w => {},
+      [#Var(v, link), _] => Checker.bind(v, link, y, span),
+      [_, #Var(v, link)] => Checker.bind(v, link, x, span),
       [#Fn(ps, r), #Fn(qs, s)] => {
         if (ps.len() != qs.len()) { throw #Type { span, message: `expected ${ps.len()} arguments, found ${qs.len()}` }; }
-        let i: usize = 0;
-        while (i < ps.len()) { self.unify(ps[i], qs[i], span); i += 1; }
-        self.unify(r, s, span);
+        for (const [p, q] of ps.iter().zip(qs.iter())) { Checker.unify(p, q, span); }
+        Checker.unify(r, s, span);
       }
-      [p, q] => throw #Type { span, message: `expected ${self.show(p)}, found ${self.show(q)}` },
+      _ => throw #Type { span, message: `expected ${Checker.show(x)}, found ${Checker.show(y)}` },
     }
   }
-  function show(self: readonly Self, t: readonly Type): String {
-    match (self.resolve(t)) {
-      #Int => "int".toString(),
-      #Bool => "bool".toString(),
-      #Var(v) => `t${v}`,
-      #Fn(ps, r) => `(${ps.iter().map((p) => self.show(p)).collect().join(", ")}) => ${self.show(r)}`,
+  function bind(v: usize, link: Cell<Option<Ref<Type>>>, t: Ref<Type>, span: Span): void uses Region<R>, Fail<CompileError> {
+    if (Checker.occurs(v, t)) { throw #Type { span, message: `a function cannot take itself` }; }
+    link.set(#Some(t));
+  }
+  function show(t: Ref<Type>): String uses Region<R> {
+    match (Checker.resolve(t)) {
+      #Int => `int`,
+      #Bool => `bool`,
+      #Var(v, _) => `t${v}`,
+      #Fn(ps, r) => `(${ps.iter().map((p) => Checker.show(p)).join(", ")}) => ${Checker.show(r)}`,
     }
   }
-}
 
-// A type with variables quantified: each use of a `let`-bound name gets fresh copies of them.
-type Scheme = { vars: Vec<usize>; ty: Type };
-
-impl Types {
-  // The variables a type still leaves open, in order of first appearance.
-  function freeIn(self: readonly Self, t: readonly Type, out: mut Vec<usize>): void {
-    match (self.resolve(t)) {
-      #Var(v) => if (!out.includes(v)) { out.push(v); },
+  // The variables a type still leaves open.
+  function freeIn(t: Ref<Type>, out: mut HashSet<usize>): void uses Region<R> {
+    match (Checker.resolve(t)) {
+      #Var(v, _) => { out.insert(v); }
       #Fn(ps, r) => {
-        for (const p of ps) { self.freeIn(p, mut out); }
-        self.freeIn(r, mut out);
+        for (const p of ps) { Checker.freeIn(p, mut out); }
+        Checker.freeIn(r, mut out);
       }
       _ => {},
     }
   }
   // The type with each quantified variable replaced by its fresh copy.
-  function copy(self: readonly Self, t: readonly Type, map: readonly HashMap<usize, Type>): Type {
-    match (self.resolve(t)) {
-      #Var(v) => match (map.get(v)) { #Some(fresh) => fresh.clone(), #None => #Var(v) },
-      #Fn(ps, r) => #Fn(ps.iter().map((p) => self.copy(p, map)).collect(), Box.new(self.copy(r, map))),
-      other => other,
+  function copy(t: Ref<Type>, map: readonly HashMap<usize, Ref<Type>>): Ref<Type> uses Region<R> {
+    match (Checker.resolve(t)) {
+      #Var(v, _) => match (map.get(v)) { #Some(fresh) => fresh, #None => t },
+      #Fn(ps, r) => {
+        let params: Vec<Ref<Type>> = Vec.new();
+        for (const p of ps) { params.push(Checker.copy(p, map)); }
+        Checker.func(params, Checker.copy(r, map))
+      }
+      _ => t,
     }
   }
-}
 
-// Scopes are a stack of maps from names to schemes; lookup walks it from the innermost.
-struct Checker { types: Types; scopes: Vec<HashMap<String, Scheme>> }
-
-impl Checker {
-  function lookup(self: mut Self, name: str, span: Span): Type uses Fail<CompileError> {
+  function lookup(self: mut Self, name: str, span: Span): Ref<Type> uses Region<R>, Fail<CompileError> {
     let i = self.scopes.len();
     while (i > 0) {
       i -= 1;
-      const found: Option<Scheme> = match (self.scopes[i].get(name)) { #Some(s) => #Some({ vars: s.vars.clone(), ty: s.ty.clone() }), #None => #None };
-      match (found) {
-        #Some(s) => return self.instantiate(s),
-        #None => {},
+      // The scheme stays borrowed from `self.scopes` while `self.next` changes: they are
+      // different fields (§4.1).
+      if (const #Some(s) = self.scopes[i].get(name)) {
+        let map: HashMap<usize, Ref<Type>> = HashMap.new();
+        for (const v of s.vars) {
+          self.next += 1;
+          map.insert(v, alloc(#Var(self.next, Cell.new(#None))));
+        }
+        return Checker.copy(s.ty, map);
       }
     }
     throw #Unbound { span, name: name.toString() }
   }
 
-  function instantiate(self: mut Self, s: Scheme): Type {
-    let map: HashMap<usize, Type> = HashMap.new();
-    for (const v of s.vars) { map.insert(v, self.types.fresh()); }
-    self.types.copy(s.ty, map)
-  }
-
-  // Quantifies the variables of `t` that no enclosing scope mentions.
-  function generalize(self: readonly Self, t: Type): Scheme {
-    let inEnv: Vec<usize> = Vec.new();
+  // Quantifies the variables of `t` that no enclosing scope leaves open.
+  function generalize(self: readonly Self, t: Ref<Type>): Scheme<R> uses Region<R> {
+    let inEnv: HashSet<usize> = HashSet.new();
     for (const scope of self.scopes) {
       for (const s of scope.values()) {
-        let open: Vec<usize> = Vec.new();
-        self.types.freeIn(s.ty, mut open);
-        for (const v of open) { if (!s.vars.includes(v) && !inEnv.includes(v)) { inEnv.push(v); } }
+        let open: HashSet<usize> = HashSet.new();
+        Checker.freeIn(s.ty, mut open);
+        for (const v of open.iter()) { if (!s.vars.includes(v)) { inEnv.insert(v); } }
       }
     }
-    let mine: Vec<usize> = Vec.new();
-    self.types.freeIn(t, mut mine);
-    mine.retain((v) => !inEnv.includes(v));
-    { vars: mine, ty: t }
+    let mine: HashSet<usize> = HashSet.new();
+    Checker.freeIn(t, mut mine);
+    { vars: mine.iter().filter((v) => !inEnv.has(v)).cloned().collect(), ty: t }
   }
 
-  function mono(t: Type): Scheme { { vars: Vec.new(), ty: t } }
+  function mono(t: Ref<Type>): Scheme<R> { { vars: Vec.new(), ty: t } }
 
   // Definitions are inferred together, each seeing the others at one type while their bodies
   // are checked (no polymorphic recursion), then generalized.
-  function program(self: mut Self, p: readonly Program): Type uses Fail<CompileError> {
-    let globals: HashMap<String, Scheme> = HashMap.new();
-    let own: Vec<Type> = Vec.new();
+  function program(self: mut Self, p: readonly Program): Ref<Type> uses Region<R>, Fail<CompileError> {
+    let globals: HashMap<String, Scheme<R>> = HashMap.new();
+    let own: Vec<Ref<Type>> = Vec.new();
     for (const d of p.defs) {
-      const t = self.types.fresh();
-      globals.insert(d.name.clone(), Checker.mono(t.clone()));
+      const t = self.fresh();
+      globals.insert(d.name.clone(), Checker.mono(t));
       own.push(t);
     }
     self.scopes.push(globals);
     for (const [i, d] of p.defs.iter().enumerate()) {
       const tf = self.function(d.params, d.body);
-      self.types.unify(own[i], tf, d.span);
+      Checker.unify(own[i], tf, d.span);
     }
-    let general: HashMap<String, Scheme> = HashMap.new();
     self.scopes.pop();
+    let general: HashMap<String, Scheme<R>> = HashMap.new();
     for (const [i, d] of p.defs.iter().enumerate()) {
-      general.insert(d.name.clone(), self.generalize(own[i].clone()));
+      general.insert(d.name.clone(), self.generalize(own[i]));
     }
     self.scopes.push(general);
     const t = self.infer(p.main);
@@ -378,41 +385,41 @@ impl Checker {
     t
   }
 
-  function function(self: mut Self, params: readonly String[], body: readonly Expr): Type uses Fail<CompileError> {
-    let scope: HashMap<String, Scheme> = HashMap.new();
-    let pts: Vec<Type> = Vec.new();
+  function function(self: mut Self, params: readonly String[], body: readonly Expr): Ref<Type> uses Region<R>, Fail<CompileError> {
+    let scope: HashMap<String, Scheme<R>> = HashMap.new();
+    let pts: Vec<Ref<Type>> = Vec.new();
     for (const p of params) {
-      const t = self.types.fresh();
-      scope.insert(p.clone(), Checker.mono(t.clone()));
+      const t = self.fresh();
+      scope.insert(p.clone(), Checker.mono(t));
       pts.push(t);
     }
     self.scopes.push(scope);
     const tr = self.infer(body);
     self.scopes.pop();
-    #Fn(pts, Box.new(tr))
+    Checker.func(pts, tr)
   }
 
-  function infer(self: mut Self, e: readonly Expr): Type uses Fail<CompileError> {
+  function infer(self: mut Self, e: readonly Expr): Ref<Type> uses Region<R>, Fail<CompileError> {
     match (e) {
-      #Int(_, _) => #Int,
-      #Bool(_, _) => #Bool,
+      #Int(_, _) => self.int,
+      #Bool(_, _) => self.bool,
       #Var(name, span) => self.lookup(name, span),
       #Bin(op, a, b, span) => {
         const [ta, tb] = [self.infer(a), self.infer(b)];
-        self.types.unify(ta, #Int, spanOf(a));
-        self.types.unify(tb, #Int, spanOf(b));
-        match (op) { #Lt => #Bool, _ => #Int }
+        Checker.unify(ta, self.int, spanOf(a));
+        Checker.unify(tb, self.int, spanOf(b));
+        match (op) { #Lt => self.bool, _ => self.int }
       }
       #If(c, t, f, span) => {
         const tc = self.infer(c);
-        self.types.unify(tc, #Bool, spanOf(c));
+        Checker.unify(tc, self.bool, spanOf(c));
         const [tt, tf] = [self.infer(t), self.infer(f)];
-        self.types.unify(tt, tf, span);
+        Checker.unify(tt, tf, span);
         tt
       }
       #Let(name, value, body, _) => {
         const tv = self.infer(value);
-        let scope: HashMap<String, Scheme> = HashMap.new();
+        let scope: HashMap<String, Scheme<R>> = HashMap.new();
         scope.insert(name.clone(), self.generalize(tv));
         self.scopes.push(scope);
         const tb = self.infer(body);
@@ -422,10 +429,10 @@ impl Checker {
       #Fn(params, body, _) => self.function(params, body),
       #Call(f, args, span) => {
         const tf = self.infer(f);
-        let tas: Vec<Type> = Vec.new();
+        let tas: Vec<Ref<Type>> = Vec.new();
         for (const a of args) { tas.push(self.infer(a)); }
-        const tr = self.types.fresh();
-        self.types.unify(tf, #Fn(tas, Box.new(tr.clone())), span);
+        const tr = self.fresh();
+        Checker.unify(tf, Checker.func(tas, tr), span);
         tr
       }
     }
@@ -604,8 +611,11 @@ type Compiled = { code: Vec<Instr>; globals: Vec<Value>; ty: String };
 export function compile(src: str): Compiled uses Fail<CompileError> {
   let p = Parser { toks: lex(src), pos: 0 };
   const prog = p.program();
-  let c = Checker { types: Types { links: Vec.new() }, scopes: Vec.new() };
-  const t = c.program(prog);
+  // The types live for the checking only: the region is released when it ends.
+  const ty: String = region (R) {
+    let c: Checker<R> = Checker { next: 0, scopes: Vec.new(), int: alloc(#Int), bool: alloc(#Bool) };
+    Checker.show(c.program(prog))
+  };
   // Each definition's body is a function of its parameters alone, placed before `main`.
   let names: HashMap<String, usize> = HashMap.new();
   for (const [i, d] of prog.defs.iter().enumerate()) { names.insert(d.name.clone(), i); }
@@ -622,7 +632,7 @@ export function compile(src: str): Compiled uses Fail<CompileError> {
   }
   g.code[skip] = #Jump(g.code.len());
   g.gen(prog.main);
-  { code: g.code, globals, ty: c.types.show(t) }
+  { code: g.code, globals, ty }
 }
 
 // ---- Diagnostics shown against the source: line, column, the line, a caret ----

@@ -388,30 +388,43 @@ export function generate<T, row E>(producer: once () => void uses Yield<T>, ...E
 
 impl<T, row E> Gen<T, E> {
   export function next(self: mut Self): Option<T> uses ...E;
-  export function map<U>(self: Self, f: mut (x: T) => U): Gen<U, E>;
-  export function filter(self: Self, keep: mut (x: readonly T) => bool): Gen<T, E>;
+  export function map<U>(self: Self, f: mut (x: T) => U uses ...E): Gen<U, E>;
+  export function filter(self: Self, keep: mut (x: readonly T) => bool uses ...E): Gen<T, E>;
   export function take(self: Self, n: usize): Gen<T, E>;
   export function zip<U>(self: Self, other: Gen<U, E>): Gen<[T, U], E>;
   export function enumerate(self: Self): Gen<[usize, T], E>;
   export function collect(self: Self): Vec<T> uses ...E;
   // The first item `test` accepts, if any; the rest are not produced.
-  export function find(self: Self, test: mut (x: readonly T) => bool): Option<T> uses ...E {
+  export function find(self: Self, test: mut (x: readonly T) => bool uses ...E): Option<T> uses ...E {
     for (const x of self) { if (test(x)) { return #Some(x); } }
     #None
   }
-  export function some(self: Self, test: mut (x: readonly T) => bool): bool uses ...E {
+  export function some(self: Self, test: mut (x: readonly T) => bool uses ...E): bool uses ...E {
     for (const x of self) { if (test(x)) { return true; } }
     false
   }
-  export function every(self: Self, test: mut (x: readonly T) => bool): bool uses ...E {
+  export function every(self: Self, test: mut (x: readonly T) => bool uses ...E): bool uses ...E {
     for (const x of self) { if (!test(x)) { return false; } }
     true
   }
   // Folds the items into one value, as TypeScript's `reduce` with an initial value.
-  export function reduce<A>(self: Self, f: mut (acc: A, x: T) => A, init: A): A uses ...E {
+  export function reduce<A>(self: Self, f: mut (acc: A, x: T) => A uses ...E, init: A): A uses ...E {
     let acc = init;
     for (const x of self) { acc = f(acc, x); }
     acc
+  }
+}
+impl<T extends Show, row E> Gen<T, E> {
+  // Each item shown, with `sep` between them, strings as they are: `ps.iter().map(show).join(", ")`.
+  export function join(self: Self, sep: str): String uses ...E {
+    let out = String.new();
+    let first = true;
+    for (const x of self) {
+      if (!first) { out.push(sep); }
+      out.push(`${x}`);
+      first = false;
+    }
+    out
   }
 }
 impl<T extends Clone, row E> Gen<readonly T, E> {
@@ -485,9 +498,9 @@ impl str {
 }
 impl<T> T[] {
   export function len(self: readonly Self): usize;
-  export function iter(self: readonly Self): Gen<readonly T, []>;
+  export function iter<row E>(self: readonly Self): Gen<readonly T, E>;
   // Each element, lent `mut`: `for (const x of xs.iterMut()) { x += 1; }` updates `xs`.
-  export function iterMut(self: mut Self): Gen<mut T, []> from self;
+  export function iterMut<row E>(self: mut Self): Gen<mut T, E> from self;
   // Two disjoint slices, before and after element `at`.
   export function splitAt(self: mut Self, at: usize): [mut T[], mut T[]] from self;
   // Sorts in place by `cmp`, stably: elements `cmp` calls equal keep their order.
@@ -539,11 +552,13 @@ impl<T> Vec<T> {
   export function insert(self: mut Self, i: usize, v: T): void;
   // Keeps the elements `keep` accepts, in order: TypeScript's `xs = xs.filter(keep)`, in place.
   export function retain(self: mut Self, keep: mut (x: readonly T) => bool): void;
-  // Takes every element out, in order, leaving the vector empty: `for (const f of fibers.drain())`.
-  export function drain(self: mut Self): Gen<T, []>;
+  // A generator that performs nothing may be given any row, so its consumers' closures may
+// perform what they need: `xs.iter().some((x) => check(x))` where `check` uses `Region<R>`.
+// Takes every element out, in order, leaving the vector empty: `for (const f of fibers.drain())`.
+  export function drain<row E>(self: mut Self): Gen<T, E>;
   export function len(self: readonly Self): usize;
-  export function iter(self: readonly Self): Gen<readonly T, []>;
-  export function iterMut(self: mut Self): Gen<mut T, []> from self;
+  export function iter<row E>(self: readonly Self): Gen<readonly T, E>;
+  export function iterMut<row E>(self: mut Self): Gen<mut T, E> from self;
 }
 impl Eq for String {
   function eq(self: readonly Self, other: readonly Self): bool { self.asStr() == other.asStr() }
@@ -647,6 +662,14 @@ export function parseInt(s: str): Option<i64>;
 export function parseFloat(s: str): Option<f64>;
 export function copyUtf8<region R>(bytes: readonly u8[]): Ref<R, str> uses Region<R>, Fail<#MalformedUtf8>;
 export function fmt<region R>(s: str): Ref<R, str> uses Region<R>;
+// A fixed list placed in the region: what a parser builds in a `Vec` and then never changes —
+// a call's arguments, a function's parameters — indexed and sliced through the `Ref` (§4.6).
+export function allocAll<region R, T extends Copy>(items: readonly T[]): Ref<R, T[]> uses Region<R>;
+
+// ---- Moving out of a place that must stay filled ----
+// The value at `place`, which gets `v` instead: how a pass takes a field out of `mut self`.
+export function replace<T>(place: mut T, v: T): T;
+export function swap<T>(a: mut T, b: mut T): void;
 
 // ---- Arrays ----
 export function repeat<T extends Copy, comptime N: usize>(v: T): T[N];

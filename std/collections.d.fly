@@ -11,10 +11,10 @@ impl<K extends Hash & Eq, V> HashMap<K, V> {
   export function has<Q extends LentBy<K>>(self: readonly Self, key: readonly Q): bool;
   // The entry's value, if there was one.
   export function remove<Q extends LentBy<K>>(self: mut Self, key: readonly Q): Option<V>;
-  export function keys(self: readonly Self): Gen<readonly K, []> from self;
-  export function values(self: readonly Self): Gen<readonly V, []> from self;
-  export function valuesMut(self: mut Self): Gen<mut V, []> from self;
-  export function entries(self: readonly Self): Gen<[readonly K, readonly V], []> from self;
+  export function keys<row E>(self: readonly Self): Gen<readonly K, E> from self;
+  export function values<row E>(self: readonly Self): Gen<readonly V, E> from self;
+  export function valuesMut<row E>(self: mut Self): Gen<mut V, E> from self;
+  export function entries<row E>(self: readonly Self): Gen<[readonly K, readonly V], E> from self;
 }
 impl<K extends Hash & Eq & Clone, V extends Clone> Clone for HashMap<K, V> {
   function clone(self: readonly Self): HashMap<K, V> {
@@ -22,4 +22,23 @@ impl<K extends Hash & Eq & Clone, V extends Clone> Clone for HashMap<K, V> {
     for (const [k, v] of self.entries()) { m.insert(k.clone(), v.clone()); }
     m
   }
+}
+
+// A set: a map to nothing. Membership is looked up by anything the element type lends.
+export struct HashSet<T extends Hash & Eq> { private map: HashMap<T, bool> }
+impl<T extends Hash & Eq> HashSet<T> {
+  export function new(): HashSet<T> { HashSet { map: HashMap.new() } }
+  // Whether `v` was new.
+  export function insert(self: mut Self, v: T): bool {
+    if (self.map.has(v)) { return false; }
+    self.map.insert(v, true);
+    true
+  }
+  export function has<Q extends LentBy<T>>(self: readonly Self, v: readonly Q): bool { self.map.has(v) }
+  export function remove<Q extends LentBy<T>>(self: mut Self, v: readonly Q): bool { self.map.remove(v).isSome() }
+  export function len(self: readonly Self): usize { self.map.len() }
+  export function iter<row E>(self: readonly Self): Gen<readonly T, E> from self { self.map.keys() }
+}
+impl<T extends Hash & Eq & Clone> Clone for HashSet<T> {
+  function clone(self: readonly Self): HashSet<T> { HashSet { map: self.map.clone() } }
 }

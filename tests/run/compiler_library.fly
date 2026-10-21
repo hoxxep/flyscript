@@ -1,0 +1,30 @@
+// expect: true false true 1
+// expect: 2, 4, 6
+// expect: 1 0
+// expect: 20 3
+// expect: true
+// What a compiler leans on (§3.1, §4.6, §5.5): `HashSet`, `join` on a generator, `replace` to
+// take a field out of a place that must stay filled, `allocAll` for a fixed list in a region
+// (indexed through its `Ref`), and generators whose closures perform what their caller may.
+import { println } from "std/io";
+import { HashSet } from "std/collections";
+import { Cell } from "std/region";
+struct Emit { code: Vec<i32>; locals: Vec<String> }
+function anyNegative<region R>(xs: Ref<R, i32[]>, seen: Cell<R, u32>): bool uses Region<R> {
+  xs.iter().some((x) => { seen.set(seen.get() + 1); x < 0 })
+}
+export function main(): void uses Io {
+  let s: HashSet<String> = HashSet.new();
+  println(`${s.insert("a".toString())} ${s.insert("a".toString())} ${s.has("a")} ${s.len()}`);
+  println([1, 2, 3].iter().map((x) => x * 2).join(", "));
+  let g = Emit { code: Vec.new(), locals: Vec.new() };
+  g.code.push(7);
+  const taken = replace(mut g.code, Vec.new());
+  println(`${taken.len()} ${g.code.len()}`);
+  region (R) {
+    const args = allocAll([10, 20, 30]);
+    println(`${args[1]} ${args.len()}`);
+    const seen = Cell.new(0);
+    println(`${anyNegative(allocAll([3, -1, 4]), seen) && seen.get() == 2}`);
+  }
+}

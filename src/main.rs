@@ -24,7 +24,8 @@ fn main() -> ExitCode {
             eprintln!("{e}\n");
         }
         return if checked.errors.is_empty() {
-            println!("ok: {} file(s) checked", files.len());
+            let modules = checked.program.modules.iter().filter(|m| !m.is_std).count();
+            println!("ok: {modules} module(s) checked");
             ExitCode::SUCCESS
         } else {
             eprintln!("{} error(s)", checked.errors.len());

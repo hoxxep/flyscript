@@ -1,6 +1,6 @@
 # Flyscript
 
-**Language specification, version 0.43**
+**Language specification, version 0.44**
 
 *Affine values, one row calculus, handlers for everything, and `comptime`: Church on the outside, Turing on the inside.*
 
@@ -18,15 +18,16 @@ The whole language rests on five laws. Every rule in this document is a conseque
 4. **Handlers for everything.** Errors, I/O, iteration and region memory are ordinary effects with ordinary handlers. A handler may hold the rest of a computation as a one-shot continuation value; generators and tasks are both built from that one primitive.
 5. **`comptime` is the metalanguage.** Generics, reflection, layout transformation and derived interfaces are ordinary Flyscript code run by the compiler.
 
-### 0.1 Changes from 0.42
+### 0.1 Changes from 0.43
 
-0.43 grows Mini (examples/mini_compiler.fly) into a compiler with the machinery a Flyscript front end needs: mutually recursive definitions in a global environment, Hindley–Milner let-polymorphism with type schemes generalized and instantiated over the union-find arena, and diagnostics rendered as line, column, source line and caret. Earlier changes are in [docs/history](history/).
+0.44 answers a review of Mini read as a compiler writer would (docs/reviews/2026-10-21-compiler-writing-review-0-43.md), then rewrites Mini's checker the way it suggested: types allocated in a region as `Ref<Type>`, each variable carrying its own union-find link in a `Cell`, parameter lists `allocAll`'d. The checker lost every `Box` and two thirds of its clones, and gained path compression. Earlier changes are in [docs/history](history/).
 
 | Change | Why |
 | :--- | :--- |
-| A `{` followed by a name and a comma begins a record: `{ defs, main }` (§2.3) | there is no comma operator, so it cannot be a block, but it was parsed as one |
-| A method may be named with any word, reserved ones included, as §2.3 already said: `function function(…)` in an `impl` | Mini's checker has a `function` method, and it did not parse |
-| `HashMap` is `Clone` when its keys and values are (§3.1); the hint to derive an interface is given only for a module's own structs and enums | Mini clones its global table into each function's code generator, and the hint suggested deriving `Clone` for `HashMap` |
+| Borrows are tracked per field path, as moves are, which the specification now says (§4.1) | the prototype already did, but the review took the text to forbid reading `self.scopes` while changing `self.types` |
+| A generator that performs nothing has any effect row its consumer needs — `iter()`, `keys()`, `entries()`, `drain()` return `Gen<T, E>` for a fresh `E` — and the closures given to `map`, `filter`, `find`, `some`, `every` and `reduce` may perform the generator's effects (§5.5) | `ps.iter().some((p) => occurs(v, p))` was rejected when `occurs` reads a region's `Cell` |
+| `allocAll(items)` places a fixed list in a region as a `Ref<R, T[]>`, indexed and sliced through the `Ref` (§4.6) | an AST's or a type's children are fixed once parsed, and a `RegionList` cannot be indexed |
+| `HashSet<T>`, `join(sep)` on generators, and `replace`/`swap` for taking a value out of a place that must stay filled (§3.1, §5.5) | free-variable sets were `Vec`s searched linearly; a list of types was collected only to be joined; a pass could not take its code buffer out of `mut self` |
 
 
 ---
@@ -187,7 +188,7 @@ Three rules settle the grammar's ambiguities, all borrowed from TypeScript:
 - `T[N]` is an inline array (`Copy` if `T` is); `[a, b, c]` and `repeat(v)` build one, with `N` from context. `T[]` is a borrowed slice, always `readonly T[]` or `mut T[]`.
 - `Vec<T>`, `Box<T>`, `HashMap<K, V>` and the other owning containers are library types.
 
-**Methods.** Arrays, slices and `Vec`s share their methods, which are defined on slices and reached through lending (§4.1): `len`, `iter`, `iterMut`, `splitAt`, `last`, `includes` and `indexOf` (by `Eq`), `sort` (by `Ord`), `sortBy(cmp)` (stable, `cmp` returning `#Less`, `#Equal` or `#Greater`), `reverse`, and `join(sep)` (each element shown, strings as they are). A `Vec` also has `push`, `pop`, `insert(i, v)`, `remove(i)`, `retain(keep)` — TypeScript's `xs = xs.filter(keep)`, in place — and `drain`, which takes the elements out in order. `str` has TypeScript's string methods — `slice`, `split`, `trim`, `includes`, `startsWith`, `endsWith`, `indexOf`, `toUpperCase`, `toLowerCase`, `replaceAll` — plus `toString`, `asBytes`, and the generators `bytes()`, `lines()` and `splitWhitespace()`; a `String` lends them all, and adds `push`, `clone` and `asStr()`, which lends it as a `str` explicitly where nothing expects one. A `HashMap<K, V>` is `Clone` when `K` and `V` are, and has `insert`, `get`, `getMut`, `has`, `remove` (each looked up by anything `K` lends), `len`, `sortedByValue()` (the entries, largest value first), and the generators `keys()`, `values()`, `valuesMut()` and `entries()`.
+**Methods.** Arrays, slices and `Vec`s share their methods, which are defined on slices and reached through lending (§4.1): `len`, `iter`, `iterMut`, `splitAt`, `last`, `includes` and `indexOf` (by `Eq`), `sort` (by `Ord`), `sortBy(cmp)` (stable, `cmp` returning `#Less`, `#Equal` or `#Greater`), `reverse`, and `join(sep)` (each element shown, strings as they are). A `Vec` also has `push`, `pop`, `insert(i, v)`, `remove(i)`, `retain(keep)` — TypeScript's `xs = xs.filter(keep)`, in place — and `drain`, which takes the elements out in order. `str` has TypeScript's string methods — `slice`, `split`, `trim`, `includes`, `startsWith`, `endsWith`, `indexOf`, `toUpperCase`, `toLowerCase`, `replaceAll` — plus `toString`, `asBytes`, and the generators `bytes()`, `lines()` and `splitWhitespace()`; a `String` lends them all, and adds `push`, `clone` and `asStr()`, which lends it as a `str` explicitly where nothing expects one. A `HashSet<T>` (from `std/collections`) has `insert`, `has`, `remove`, `len` and `iter()`. `replace(mut place, v)` gives back what a place held and leaves `v` there, and `swap(mut a, mut b)` exchanges two places: how a pass takes a buffer out of `mut self`. A `HashMap<K, V>` is `Clone` when `K` and `V` are, and has `insert`, `get`, `getMut`, `has`, `remove` (each looked up by anything `K` lends), `len`, `sortedByValue()` (the entries, largest value first), and the generators `keys()`, `values()`, `valuesMut()` and `entries()`.
 
 A tuple `[A, B]` is built with a list literal, taken apart with a pattern (`const [a, b] = t`, which takes an array of the same length apart too), and indexed by a constant, as in TypeScript: `t[0]` is a place of its own, like a field.
 
@@ -292,7 +293,7 @@ Type checking happens after `comptime` evaluation and uses bidirectional local i
 
 ### 4.1 Values, moves and borrows
 
-A value has one owner. Assignment and argument passing *move* a value unless its type is `Copy`; a moved-from binding is dead until it is assigned again. Moves are tracked through branches and loops: a binding moved on any path is moved where the paths meet — a path that throws, returns, breaks or continues does not meet the others — and a binding used at the top of a loop must still be live at the end of the loop body. At the end of its scope a live owner is dropped. Moving a field out of a value moves only that field, unless the value's type implements `Drop`, from which no field may be moved.
+A value has one owner. Assignment and argument passing *move* a value unless its type is `Copy`; a moved-from binding is dead until it is assigned again. Moves are tracked through branches and loops: a binding moved on any path is moved where the paths meet — a path that throws, returns, breaks or continues does not meet the others — and a binding used at the top of a loop must still be live at the end of the loop body. At the end of its scope a live owner is dropped. Moving a field out of a value moves only that field, unless the value's type implements `Drop`, from which no field may be moved. Borrows are tracked the same way, per field path: while `x.f` is borrowed, `x.g` may be read, changed or lent `mut`, so a checker reads a scheme out of `self.scopes` while it allocates in `self.types`; only `x` as a whole, and `x.f` itself, are locked. An element of a collection (`xs[i]`) borrows the whole collection.
 
 A **borrow** lends a value without moving it:
 
@@ -388,7 +389,7 @@ A region is a fiber-local bump arena with lexical extent. `region (R) { … }` i
 
 A region is **append-only and immutable**:
 
-- `alloc(v)` places `v` in the region and returns a `Ref<R, T>`; `fmt(s)` copies a string into it, returning a `Ref<R, str>`. A `Ref<R, T>` is used exactly as a `readonly T`: field access and method calls go through it, and reading is pure.
+- `alloc(v)` places `v` in the region and returns a `Ref<R, T>`; `fmt(s)` copies a string into it, returning a `Ref<R, str>`; `allocAll(items)` copies a list of `Copy` values into it, returning a `Ref<R, T[]>` that is indexed and sliced through the `Ref` — a node's fixed children, a function type's parameters. A `Ref<R, T>` is used exactly as a `readonly T`: field access and method calls go through it, and reading is pure.
 - The only mutable slots are `Cell<R, T>` with `T extends Copy`, whose `get` copies out and `set` copies in (a `Cell` is never borrowed), and `RegionList<R, T>`, an append-only chunked list whose elements never move. Both are handles into their region — `Copy`, like a `Ref` — and their writes are operations of `Region<R>`: mutation by effect, not by ownership. That is why `const items = RegionList.new(); items.push(x)` is legal.
 - `alloc`, `Cell.get`, `Cell.set` and `RegionList.push` perform `Region<R>`. Reading a `RegionList`'s existing elements does not: they never change.
 
@@ -519,7 +520,7 @@ It is library code: `try { f() } catch (e) { throw wrap(e) }`.
 
 **A yielded value is a result** of the function that yields it, handed out before the function returns: like a returned value (§4.2), it may borrow only what the function was lent — a parameter that is itself a borrow, or a closure's borrowed captures and parameters — and never a local or anything the function owns, which may end before the item does. So `function words(s: str): void uses Yield<str> { for (const w of s.splitWhitespace()) { yield w; } }` is a generator of borrows of `s`, while one that yields slices of a buffer of its own is rejected and yields `String`s instead. In return, a generator call's sources lend its items what they borrow, as a call's sources lend its result: in `for (const w of words(line))`, `w` borrows `line`, so `best = w` may outlive the iteration. Likewise the items of a `Gen` borrow what the generator holds, not the generator: a `find` that returns one of them outlives the `Gen` it consumed.
 
-A `Gen<T, E>` has `next()`, the lazy adaptors `map`, `filter`, `take`, `zip` and `enumerate`, `collect()` into a `Vec`, and, under TypeScript's names, `find`, `some`, `every` and `reduce((acc, x) => …, init)`; a `Gen<readonly T, E>` also has `cloned()`, which gives owned copies.
+A generator that performs nothing — a collection's `iter()`, a map's `keys()` — may be given any effect row, so it is a `Gen<T, E>` for whatever `E` its consumer needs, and the closures given to its adaptors and consumers may perform `E`: `params.iter().some((p) => occurs(v, p))` where `occurs` reads a region. A `Gen<T, E>` has `next()`, the lazy adaptors `map`, `filter`, `take`, `zip` and `enumerate`, `collect()` into a `Vec`, `join(sep)`, and, under TypeScript's names, `find`, `some`, `every` and `reduce((acc, x) => …, init)`; a `Gen<readonly T, E>` also has `cloned()`, which gives owned copies.
 
 `for (const x of e) { body }` handles `Yield` around a generator, running `body` for each item. If `e` is a generator call, it is the generator. Otherwise `e`'s type must implement `Iterable`, TypeScript's iteration protocol in Flyscript form, and the generator is `e.each()`:
 
