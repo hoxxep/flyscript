@@ -46,5 +46,6 @@ Versions are pre-1.0 while the language is being designed. The specification was
 | 0.46 | Mini compiles algebraic data types; `Box` matched through; receiver-decided results; handles are `Clone` |
 | 0.47 | Mini as five modules (examples/mini/); no language change needed |
 | 0.48 | Mini types records by rows; specialization keys erase regions |
+| 0.49 | Patterns match through pointers by borrow; regions may point outward; `Ref` keys maps; `Box.into` |
 
 `review-round-*.md` are the design review rounds that produced 0.2–0.15; `programs-against-v0.13.md` is the program-writing exercise against what is now 0.13.

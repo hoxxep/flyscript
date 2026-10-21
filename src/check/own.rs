@@ -1399,6 +1399,7 @@ impl<'p> Own<'p> {
             arg_vals.push((None, Val { loans: held }));
         }
         let role = self.closure_role(fid);
+        let mut mut_args: Vec<(LoanId, Path, Expr)> = Vec::new();
         for (i, a) in args.iter().enumerate() {
             let at = self.ty_of(a);
             let how = match params.get(i) {
@@ -1408,7 +1409,25 @@ impl<'p> Own<'p> {
             if matches!(a.kind, ExprKind::Lambda { .. }) {
                 self.next_role = role;
             }
-            let v = self.expr(a, how);
+            // Two phases, as for a receiver: a `mut` argument that is a place is lent `readonly`
+            // while the later arguments are evaluated, and `mut` only for the call itself, so
+            // `replace(mut self.effects, self.fresh())` holds (§4.1).
+            let target = match &a.kind {
+                ExprKind::BorrowMut(inner) => inner.as_ref(),
+                _ => a,
+            };
+            let staged = if how == Use::Mut { self.place(target).filter(|_| !self.captured(self.place(target).expect("a place").root)) } else { None };
+            let v = match &staged {
+                Some(path) => {
+                    let first = self.loans.len();
+                    let v = self.expr(target, Use::Read);
+                    if let Some(l) = (first..self.loans.len()).rev().find(|l| self.loans[*l].path == *path) {
+                        mut_args.push((l, path.clone(), target.clone()));
+                    }
+                    v
+                }
+                None => self.expr(a, how),
+            };
             self.next_role = Role::Plain;
             if let Some((_, p)) = params.get(i) {
                 let p = p.clone();
@@ -1427,6 +1446,14 @@ impl<'p> Own<'p> {
                 t.extend(v.loans.iter().copied());
             }
             arg_vals.push((params.get(i).map(|(n, _)| n.clone()), v));
+        }
+        // Phase two: each staged `mut` argument's borrow becomes `mut` for the call itself.
+        for (l, path, target) in mut_args {
+            let mut except = BTreeSet::new();
+            except.insert(l);
+            self.loans[l].mutable = true;
+            self.check_mutable(&path, &target);
+            self.access(&path, true, target.span, &except);
         }
         // Phase two: the receiver's borrow becomes `mut` for the call itself.
         if let Some((l, path, span)) = receiver_loan {

@@ -1,6 +1,6 @@
 # Flyscript
 
-**Language specification, version 0.49**
+**Language specification, version 0.50**
 
 *Affine values, one row calculus, handlers for everything, and `comptime`: Church on the outside, Turing on the inside.*
 
@@ -18,18 +18,14 @@ The whole language rests on five laws. Every rule in this document is a conseque
 4. **Handlers for everything.** Errors, I/O, iteration and region memory are ordinary effects with ordinary handlers. A handler may hold the rest of a computation as a one-shot continuation value; generators and tasks are both built from that one primitive.
 5. **`comptime` is the metalanguage.** Generics, reflection, layout transformation and derived interfaces are ordinary Flyscript code run by the compiler.
 
-### 0.1 Changes from 0.48
+### 0.1 Changes from 0.49
 
-0.49 answers an overall assessment of 0.48 with Mini read as a compiler writer would (docs/reviews/2026-10-21-final-assessment-0-48.md): it judged the core ready to freeze once three statements were tightened, and found Mini making copies the language no longer needed. Earlier changes are in [docs/history](history/).
+0.50 gives Mini Flyscript's effect rows: every function type carries the effects calling it performs, inferred with the same row unification as its records — a body's row is open, a call performs its callee's where it is made, definitions generalize over effect rows as over types, `print` performs `Io`, and `def pure` closes a definition's row and names what it would have performed. Earlier changes are in [docs/history](history/).
 
 | Change | Why |
 | :--- | :--- |
-| A box is matched through a `readonly` borrow of what it holds, also when the box is owned; nothing is moved out of a box (§4.1) | an owned `Box` was matched as an owned value, so a pattern could move a part out of it and the box's drop would drop it again |
-| A pattern matches through any pointer — `Box`, `Ref`, `Arc` — as the value it holds (§4.1) | Mini's checker matches through `Ref<Type>` on nearly every line, which only §4.6 implied |
-| Region data may hold handles into its own region or an enclosing one (§4.6) | "of the same region" forbade a function's scratch types pointing into the module's syntax tree, though an enclosing region always outlives an inner one |
-| `Ref<R, T>` compares, orders, hashes and shows as what it points at, and lends it for lookups: `HashMap<Ref<R, str>, V>` is looked up by a `str` (§3.5, §4.6) | a compiler keys its tables by region strings |
-
-Mini now does as the review said: `Ctor` holds its fields in the region, so it is `Copy` and a binding of it releases the table (no clone); the code generator puts its frame aside with `replace` rather than cloning two maps per closure.
+| Every `mut` argument is lent in two phases, as a receiver is: `readonly` while the later arguments are evaluated, `mut` for the call (§4.1) | `replace(mut self.effects, self.fresh())` — setting a field aside for a fresh value computed from `self` — was rejected |
+| A string literal pattern matches anything that lends a `str` (§3.5) | `#Var("print", _)` did not match a `#Var(String, Span)` |
 
 
 ---
@@ -277,7 +273,7 @@ An interface can come with a *derivation*: an impl, written in Flyscript with `c
 
 The derivations settle three things a derived interface must get right. On floats, `Eq`, `Ord` and `Hash` are total, so a record with a float field is a sound `HashMap` key and sorts consistently: `NaN` equals itself and orders after every number, and `-0.0` equals and hashes as `0.0` (the primitive operators on floats stay IEEE 754). `Clone` copies a `readonly` borrow and never duplicates a `mut` one. `Box<T>`, `Arc<T>` and `Ref<R, T>` compare, order, hash and show as what they hold, and lend it for lookups (a `HashMap<Ref<R, str>, V>` is searched with a `str`); cloning a `Box` clones its contents, cloning an `Arc` or a `Ref` shares them.
 
-The operators use them. `==` and `!=` are built in for primitives and call `Eq.eq` on anything else, and `<`, `<=`, `>` and `>=` likewise call `Ord.cmp`; an owner compared with the type it lends is compared at that type (`name == "ada"` for a `String`, `b.name == name` for a `Ref<R, str>`); `` `${e}` `` writes a primitive or a string as it is — also a `T` that is a string where the code is generic — and anything else with `Show`, which writes a value as Flyscript would (`Point { x: 1, y: 2 }`, `#Some("a")`). A struct is a new type, so it is compared or printed only if it asks: `impl Eq for Point;`.
+The operators use them. `==` and `!=` are built in for primitives and call `Eq.eq` on anything else, and `<`, `<=`, `>` and `>=` likewise call `Ord.cmp`; an owner compared with the type it lends is compared at that type (`name == "ada"` for a `String`, `b.name == name` for a `Ref<R, str>`), and a string literal pattern matches the same way (`#Var("print", _)` against a `#Var(String, Span)`); `` `${e}` `` writes a primitive or a string as it is — also a `T` that is a string where the code is generic — and anything else with `Show`, which writes a value as Flyscript would (`Point { x: 1, y: 2 }`, `#Some("a")`). A struct is a new type, so it is compared or printed only if it asks: `impl Eq for Point;`.
 
 ### 3.6 Inference
 
@@ -321,7 +317,7 @@ A value that is borrowed without having a place — a call's result, a template 
 
 A borrow lasts until the last use of any value that holds it, not to the end of its scope. Every value carries the set of borrows it holds, its *loans*: a borrow taken for an argument is held by the call's result if the result can hold it (§4.2); a value bound by a pattern or assigned to a binding passes its borrows on; a binding assigned anew holds the new value's borrows only, and one assigned on several paths holds the union where they meet. A borrow cannot outlive what it borrows: when a block ends, neither its value nor any binding used afterwards may hold a borrow of a binding declared in it. So `let s = v[0..1]; if (c) { const a = [1, 2, 3]; s = a[0..2]; } use(s)` is rejected — `s` would outlive `a` — while re-pointing `s` at `v` before the block ends is fine. In a loop, the body's bindings end with each iteration. In the example below, the `#None` arm holds no borrow of `counts`, so it may insert, while in the `#Some` arm `n` holds `counts` mutably until its last use.
 
-A method call borrows its receiver in two phases: the receiver is borrowed `readonly` while the arguments are evaluated and `mut` only for the call itself, so `v.push(v.len())` is legal and `v.push({ v.clear(); 1 })` is not.
+A call borrows each `mut` argument, and a method its receiver, in two phases: `readonly` while the other arguments are evaluated and `mut` only for the call itself, so `v.push(v.len())` and `replace(mut self.code, self.fresh())` are legal, while `v.push({ v.clear(); 1 })` and `both(mut v, v[0..1])` are not.
 
 **Lending.** Wherever a borrow of `U` is expected, an owner that *lends* `U` may be passed: `String` lends `str`, `Vec<T>` lends `T[]`, `Box<T>` lends `T`, and `Ref<R, T>` and `Arc<T>` lend `readonly T`; and a borrow of an owner lends what the owner does, so a `readonly Box<Expr>` matched out of a node is passed where `readonly Expr` is wanted. Lending is the only implicit conversion. Lookups in `HashMap<K, V>` accept any `Q` that `K` lends, so a `HashMap<String, V>` is searched with a `str` without allocating.
 

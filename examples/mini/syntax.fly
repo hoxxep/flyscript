@@ -24,7 +24,8 @@ export enum Expr {
 export type Arm = { ctor: String; binds: Vec<String>; body: Expr; span: Span };
 
 // `def name(params) = body;`: definitions see each other, so they may recurse.
-export type Def = { name: String; params: Vec<String>; body: Expr; span: Span };
+// `def pure name(…)` promises the body performs no effect, which the checker holds it to.
+export type Def = { name: String; params: Vec<String>; body: Expr; span: Span; pure: bool };
 // `data List = Nil | Cons(int, List);`: a type's constructors and their fields.
 export enum TypeExpr { #TInt, #TBool, #TNamed(String, Span) }
 export type CtorDecl = { name: String; fields: Vec<TypeExpr>; span: Span };
@@ -69,6 +70,8 @@ impl Parser {
       }
       const start = self.here().start;
       self.bump();
+      const pure = self.peek() == #Pure;
+      if (pure) { self.bump(); }
       const name = self.ident();
       self.expect(#LParen, "`(`");
       let params: Vec<String> = Vec.new();
@@ -81,7 +84,7 @@ impl Parser {
       const body = self.expr();
       const end = spanOf(body).end;
       self.expect(#Semi, "`;`");
-      defs.push({ name, params, body, span: { start, end } });
+      defs.push({ name, params, body, span: { start, end }, pure });
     }
     const main = self.expr();
     if (self.peek() != #Eof) { throw #Parse { at: self.here().start, message: "expected the end of the program".toString() }; }

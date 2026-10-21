@@ -1,0 +1,7 @@
+// error: `v` cannot be changed here: it was lent `readonly`
+// Two phases do not let a `mut` argument alias another argument that is still in use (§4.1).
+function both(a: mut Vec<i32>, b: readonly i32[]): void {}
+export function main(): void {
+  let v: Vec<i32> = Vec.new();
+  both(mut v, v[0..1]);
+}

@@ -13,9 +13,12 @@ import { Expr, Op, Arm, TypeExpr, Program, spanOf } from "./syntax";
 export enum Type<region R> {
   #Error, #Int, #Bool, #Data(usize, Ref<str>),
   #Var(usize, Cell<Option<Ref<Type>>>),
-  #Fn(Ref<Ref<Type>[]>, Ref<Type>),
+  // Parameters, result, and the effects calling it performs: a row like a record's (§5.1).
+  #Fn(Ref<Ref<Type>[]>, Ref<Type>, Ref<Type>),
   #Record(Ref<Field[]>, Ref<Type>),
   #Empty,
+  // What an entry of an effect row carries: rows serve records and effects alike.
+  #Performed,
 }
 export type Field<region R> = { name: Ref<R, str>; ty: Ref<R, Type<R>> };
 
@@ -35,14 +38,16 @@ export struct Checker<region R> {
   ctors: HashMap<String, Ctor<R>>;
   // Each type's constructors, by name, for the exhaustiveness of `case`.
   ctorsOf: Vec<Vec<String>>;
+  // The effects the code being checked performs: a row, open while it is inferred.
+  effects: Ref<R, Type<R>>;
 }
 
 impl<region R> Checker<R> {
   function fresh(self: readonly Self): Ref<Type> uses Region<R> {
     Checker.var(self.ids)
   }
-  function func(params: readonly Ref<Type>[], ret: Ref<Type>): Ref<Type> uses Region<R> {
-    alloc(#Fn(allocAll(params), ret))
+  function func(params: readonly Ref<Type>[], ret: Ref<Type>, effects: Ref<Type>): Ref<Type> uses Region<R> {
+    alloc(#Fn(allocAll(params), ret, effects))
   }
 
   // The type a variable stands for, followed to its end, compressing the path as it goes.
@@ -62,7 +67,7 @@ impl<region R> Checker<R> {
   function occurs(v: usize, t: Ref<Type>): bool uses Region<R> {
     match (Checker.resolve(t)) {
       #Var(w, _) => v == w,
-      #Fn(ps, r) => ps.iter().some((p) => Checker.occurs(v, p)) || Checker.occurs(v, r),
+      #Fn(ps, r, e) => ps.iter().some((p) => Checker.occurs(v, p)) || Checker.occurs(v, r) || Checker.occurs(v, e),
       #Record(fs, tail) => fs.iter().some((f) => Checker.occurs(v, f.ty)) || Checker.occurs(v, tail),
       _ => false,
     }
@@ -77,18 +82,22 @@ impl<region R> Checker<R> {
     match ([x, y]) {
       [#Error, _] | [_, #Error] | [#Int, #Int] | [#Bool, #Bool] => {},
       [#Data(d, _), #Data(e, _)] if d == e => {},
-      [#Empty, #Empty] => {},
+      [#Empty, #Empty] | [#Performed, #Performed] => {},
       [#Empty, #Record(fs, _)] | [#Record(fs, _), #Empty] => {
-        Diag.report(#Type { span, message: `the record has no field ${fs.iter().map((f) => `\`${f.name}\``).join(", ")}` });
+        const names = fs.iter().map((f) => `\`${f.name}\``).join(", ");
+        const effect = fs.iter().some((f) => match (Checker.resolve(f.ty)) { #Performed => true, _ => false });
+        const message = if (effect) { `this performs ${names}, which is not allowed here` } else { `the record has no field ${names}` };
+        Diag.report(#Type { span, message });
       }
       [#Record(_, _), #Record(_, _)] => Checker.unifyRows(ids, x, y, span),
       [#Var(v, _), #Var(w, _)] if v == w => {},
       [#Var(v, link), _] => Checker.bind(v, link, y, span),
       [_, #Var(v, link)] => Checker.bind(v, link, x, span),
-      [#Fn(ps, r), #Fn(qs, s)] => {
+      [#Fn(ps, r, e), #Fn(qs, s, f)] => {
         if (ps.len() != qs.len()) { Diag.report(#Type { span, message: `expected ${ps.len()} arguments, found ${qs.len()}` }); return; }
         for (const [p, q] of ps.iter().zip(qs.iter())) { Checker.unify(ids, p, q, span); }
         Checker.unify(ids, r, s, span);
+        Checker.unify(ids, e, f, span);
       }
       // `b` is what was expected of `a`.
       _ => Diag.report(#Type { span, message: `expected ${Checker.show(y)}, found ${Checker.show(x)}` }),
@@ -144,6 +153,7 @@ impl<region R> Checker<R> {
       #Int => `int`,
       #Data(_, name) => name.toString(),
       #Empty => `{}`,
+      #Performed => `effect`,
       #Record(_, _) => {
         const [fs, tail] = Checker.flatten(t);
         const shown = fs.iter().map((f) => `${f.name}: ${Checker.show(f.ty)}`).join(", ");
@@ -151,7 +161,11 @@ impl<region R> Checker<R> {
       }
       #Bool => `bool`,
       #Var(v, _) => `t${v}`,
-      #Fn(ps, r) => `(${ps.iter().map((p) => Checker.show(p)).join(", ")}) => ${Checker.show(r)}`,
+      #Fn(ps, r, e) => {
+        const [effects, _] = Checker.flatten(e);
+        const performs = if (effects.len() == 0) { `` } else { ` uses ${effects.iter().map((f) => f.name.toString()).join(", ")}` };
+        `(${ps.iter().map((p) => Checker.show(p)).join(", ")}) => ${Checker.show(r)}${performs}`
+      }
     }
   }
 
@@ -159,9 +173,10 @@ impl<region R> Checker<R> {
   function freeIn(t: Ref<Type>, out: mut HashSet<usize>): void uses Region<R> {
     match (Checker.resolve(t)) {
       #Var(v, _) => { out.insert(v); }
-      #Fn(ps, r) => {
+      #Fn(ps, r, e) => {
         for (const p of ps) { Checker.freeIn(p, mut out); }
         Checker.freeIn(r, mut out);
+        Checker.freeIn(e, mut out);
       }
       #Record(fs, tail) => {
         for (const f of fs) { Checker.freeIn(f.ty, mut out); }
@@ -174,10 +189,10 @@ impl<region R> Checker<R> {
   function copy(t: Ref<Type>, map: readonly HashMap<usize, Ref<Type>>): Ref<Type> uses Region<R> {
     match (Checker.resolve(t)) {
       #Var(v, _) => match (map.get(v)) { #Some(fresh) => fresh, #None => t },
-      #Fn(ps, r) => {
+      #Fn(ps, r, e) => {
         let params: Vec<Ref<Type>> = Vec.new();
         for (const p of ps) { params.push(Checker.copy(p, map)); }
-        Checker.func(params, Checker.copy(r, map))
+        Checker.func(params, Checker.copy(r, map), Checker.copy(e, map))
       }
       #Record(fs, tail) => {
         let fields: Vec<Field<R>> = Vec.new();
@@ -191,7 +206,13 @@ impl<region R> Checker<R> {
   function lookup(self: readonly Self, name: str, span: Span): Ref<Type> uses Region<R>, Diag {
     // A constructor is a function of its fields, or a value if it has none.
     if (const #Some(c) = self.ctors.get(name)) {
-      return if (c.fields.len() == 0) { c.result } else { Checker.func(c.fields, c.result) };
+      // Building a value performs nothing, so it fits any row.
+      return if (c.fields.len() == 0) { c.result } else { Checker.func(c.fields, c.result, self.fresh()) };
+    }
+    // `print` writes its argument and gives it back, performing `Io`.
+    if (name == "print") {
+      const a = self.fresh();
+      return Checker.func([a], a, Checker.record([{ name: fmt("Io"), ty: alloc(#Performed) }], self.fresh()));
     }
     let i = self.scopes.len();
     while (i > 0) {
@@ -265,6 +286,20 @@ impl<region R> Checker<R> {
     for (const [i, d] of p.defs.iter().enumerate()) {
       const tf = self.function(d.params, d.body);
       Checker.unify(self.ids, own[i], tf, d.span);
+      // A pure definition's row is closed empty: what it would perform is reported by name.
+      if (d.pure) {
+        match (Checker.resolve(tf)) {
+          #Fn(_, _, e) => {
+            const [effects, tail] = Checker.flatten(e);
+            if (effects.len() > 0) {
+              Diag.report(#Type { span: d.span, message: `\`${d.name}\` is declared pure, but it performs ${effects.iter().map((f) => f.name.toString()).join(", ")}` });
+            } else {
+              Checker.unify(self.ids, tail, alloc(#Empty), d.span);
+            }
+          }
+          _ => {},
+        }
+      }
     }
     self.scopes.pop();
     let general: HashMap<String, Scheme<R>> = HashMap.new();
@@ -272,6 +307,8 @@ impl<region R> Checker<R> {
       general.insert(d.name.clone(), self.generalize(own[i]));
     }
     self.scopes.push(general);
+    // The program may perform what it likes; the runtime handles `Io`.
+    self.effects = self.fresh();
     const t = self.infer(p.main);
     self.scopes.pop();
     t
@@ -285,10 +322,13 @@ impl<region R> Checker<R> {
       scope.insert(p.clone(), Checker.mono(t));
       pts.push(t);
     }
+    // The body's effects are its own row, open for whatever it calls.
+    const outer = replace(mut self.effects, self.fresh());
     self.scopes.push(scope);
     const tr = self.infer(body);
     self.scopes.pop();
-    Checker.func(pts, tr)
+    const performs = replace(mut self.effects, outer);
+    Checker.func(pts, tr, performs)
   }
 
   function infer(self: mut Self, e: readonly Expr): Ref<Type> uses Region<R>, Diag {
@@ -374,7 +414,8 @@ impl<region R> Checker<R> {
         for (const a of args) { tas.push(self.infer(a)); }
         const tr = self.fresh();
         // The function's own type is what the call is expected to fit.
-        Checker.unify(self.ids, Checker.func(tas, tr), tf, span);
+        // A call performs the callee's effects where it is made.
+        Checker.unify(self.ids, Checker.func(tas, tr, self.effects), tf, span);
         tr
       }
     }
@@ -385,7 +426,7 @@ impl<region R> Checker<R> {
 // The types live for the checking only: the region is released when it ends.
 export function check(prog: readonly Program): String uses Diag {
   region (R) {
-    let c: Checker<R> = Checker { ids: Cell.new(0), scopes: Vec.new(), int: alloc(#Int), bool: alloc(#Bool), ctors: HashMap.new(), ctorsOf: Vec.new() };
+    let c: Checker<R> = Checker { ids: Cell.new(0), scopes: Vec.new(), int: alloc(#Int), bool: alloc(#Bool), ctors: HashMap.new(), ctorsOf: Vec.new(), effects: alloc(#Empty) };
     Checker.show(c.program(prog))
   }
 }

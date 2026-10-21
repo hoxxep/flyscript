@@ -2149,6 +2149,10 @@ impl<'p> Checker<'p> {
             PatternKind::Lit(e) => {
                 let v = self.strip(t);
                 let lt = self.expr(e, Some(&v));
+                // A string literal matches anything that lends a `str`, as `==` compares (§3.5).
+                if matches!(self.s.resolve(&lt), Ty::Prim(Prim::Str)) && self.lends(&v, &Ty::Prim(Prim::Str)) {
+                    return;
+                }
                 if !self.try_unify(&lt, &v) {
                     let (a, b) = (self.show(&v), self.show(&lt));
                     self.err(pat.span, format!("pattern of type `{b}` cannot match `{a}`"));

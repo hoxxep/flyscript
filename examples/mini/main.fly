@@ -45,6 +45,18 @@
 // expect: error at 1:1: the record has no field `y`
 // expect:     {x = 1}.y
 // expect:     ^
+// expect:   > 41
+// expect: def log(x) = print(x) + 1;
+// expect: log(41)  :  int  =  42
+// expect: let shout = fn(x) => print(x * 10) in shout  :  (int) => int uses Io  =  <function>
+// expect: error at 1:1: `double` is declared pure, but it performs Io
+// expect:     def pure double(x) = print(x) * 2;
+// expect:     ^
+// expect: def pure twice(f, x) = f(f(x));
+// expect: twice(fn(n) => n + 1, 1)  :  int  =  3
+// expect: error at 2:1: this performs `Io`, which is not allowed here
+// expect:     twice(fn(n) => print(n), 1)
+// expect:     ^
 // expect: error at 2:1: this `case` does not handle Blue
 // expect:     case Green of Red => 1 | Green => 2
 // expect:     ^
@@ -135,13 +147,18 @@ export function main(): void uses Io {
     "def norm(p) = p.x * p.x + p.y * p.y;\nnorm({x = 3, y = 4, label = false})",
     "let move = fn(p) => {x = p.x + 1, y = p.y} in move({x = 1, y = 2})",
     "{x = 1}.y",
+    "def log(x) = print(x) + 1;\nlog(41)",
+    "let shout = fn(x) => print(x * 10) in shout",
+    "def pure double(x) = print(x) * 2;\ndouble(3)",
+    "def pure twice(f, x) = f(f(x));\ntwice(fn(n) => n + 1, 1)",
+    "def pure twice(f, x) = f(f(x));\ntwice(fn(n) => print(n), 1)",
     "data Color = Red | Green | Blue;\ncase Green of Red => 1 | Green => 2",
     "let a = 1 + true in\nlet b = if 3 then 4 else false in\nnope(a)",
   ];
   for (const src of programs) {
     try {
       const c = compile(src);
-      println(`${src}  :  ${c.ty}  =  ${showValue(run(c.code, c.globals), c.ctorNames)}`);
+      println(`${src}  :  ${c.ty}  =  ${showValue(run(c.code, c.globals, c.ctorNames), c.ctorNames)}`);
     } catch (e) {
       println(`error at ${describe(src, e)}`);
     }

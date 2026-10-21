@@ -1,0 +1,9 @@
+// A `mut` argument is lent `readonly` while the later arguments are evaluated and `mut` only for
+// the call (§4.1), as a receiver is: a pass replaces a field with something it computes from
+// itself.
+struct Pass { effects: i32; next: i32 }
+impl Pass {
+  function fresh(self: readonly Self): i32 { self.next + 1 }
+  function enter(self: mut Self): i32 { replace(mut self.effects, self.fresh()) }
+}
+export function bump(x: mut i32): i32 { replace(mut x, x + 1) }

@@ -1,0 +1,5 @@
+// A string literal pattern matches anything that lends a `str`, as `==` compares (§3.5).
+type Expr = #Var(String) | #Num(i32);
+export function isPrint(e: readonly Expr): bool {
+  if (const #Var("print") = e) { true } else { false }
+}

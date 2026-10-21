@@ -1,11 +1,12 @@
 // Mini, a compiler written in Flyscript as a test of goal 6 (§1): closure conversion, code generation for a stack machine, and the machine.
+import { println } from "std/io";
 import { HashMap } from "std/collections";
 import { Expr, Op, Program } from "./syntax";
 
 // ---- Code generation to a stack machine ----
 
 // Each function has a frame of its own: what it captured, then its parameters, then its `let`s.
-export enum Instr { #Push(i64), #Load(usize), #Global(usize), #Store, #Drop, #Add, #Sub, #Mul, #Lt, #Jump(usize), #JumpIfFalse(usize), #MakeFn(usize, usize, usize), #Call(usize), #Ret, #Construct(usize, usize), #TagIs(usize), #Unpack(usize), #Unmatched, #MakeRecord(Vec<String>), #GetField(String) }
+export enum Instr { #Push(i64), #Load(usize), #Global(usize), #Store, #Drop, #Add, #Sub, #Mul, #Lt, #Jump(usize), #JumpIfFalse(usize), #MakeFn(usize, usize, usize), #Call(usize), #Ret, #Construct(usize, usize), #TagIs(usize), #Unpack(usize), #Unmatched, #MakeRecord(Vec<String>), #GetField(String), #Print }
 impl Clone for Instr;
 impl Show for Instr;
 
@@ -74,6 +75,14 @@ impl Gen {
             self.emit(#Ret);
             self.code[skip] = #Jump(self.code.len());
           }
+          #None if name == "print" => {
+            self.emit(#MakeFn(self.code.len() + 2, 1, 0));
+            const skip = self.emit(#Jump(0));
+            self.emit(#Load(0));
+            self.emit(#Print);
+            self.emit(#Ret);
+            self.code[skip] = #Jump(self.code.len());
+          }
           #None => { const i = self.load(name); self.emit(i); }
         }
       }
@@ -125,6 +134,10 @@ impl Gen {
       #Call(f, args, _) => {
         for (const a of args) { self.gen(a); }
         // A constructor applied builds its value directly.
+        if (const #Var("print", _) = f) {
+          self.emit(#Print);
+          return;
+        }
         const ctor: Option<usize> = match (f) {
           #Var(name, _) => match (self.ctors.get(name)) { #Some([tag, _]) => #Some(tag), #None => #None },
           _ => #None,
@@ -195,7 +208,7 @@ export function asInt(v: readonly Value): i64 {
   match (v) { #Int(n) => n, _ => panic("checked: an int") }
 }
 
-export function run(code: readonly Instr[], globals: readonly Value[]): Value {
+export function run(code: readonly Instr[], globals: readonly Value[], ctorNames: readonly String[]): Value uses Io {
   let stack: Vec<Value> = Vec.new();
   let frames: Vec<Frame> = Vec.new();
   frames.push({ ret: code.len(), locals: Vec.new() });
@@ -255,6 +268,11 @@ export function run(code: readonly Instr[], globals: readonly Value[]): Value {
         _ => panic("checked: a constructed value"),
       },
       #Unmatched => panic("checked: every case is handled"),
+      #Print => {
+        const v = stack.pop().unwrap();
+        println(`  > ${showValue(v, ctorNames)}`);
+        stack.push(v);
+      }
       #MakeRecord(names) => {
         let fields: Vec<[String, Value]> = Vec.new();
         for (const name of names) { fields.push([name.clone(), #Int(0)]); }
