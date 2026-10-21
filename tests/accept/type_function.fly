@@ -4,5 +4,5 @@ comptime function Ring(T: Type, N: usize): Type {
   struct { buf: T[N]; head: usize; tail: usize; }
 }
 type ByteRing = Ring(u8, 4);
-export function fresh(): ByteRing { ({ buf: [0, 0, 0, 0], head: 0, tail: 0 }) }
+export function fresh(): ByteRing { { buf: [0, 0, 0, 0], head: 0, tail: 0 } }
 export function head(r: readonly ByteRing): usize { r.head + r.buf.len() }

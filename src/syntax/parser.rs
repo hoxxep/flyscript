@@ -211,8 +211,13 @@ impl<'a> Parser<'a> {
 
     /// Index of the token closing the bracket at `self.pos`, if balanced.
     fn matching_close(&self) -> Option<usize> {
+        self.close_from(self.pos)
+    }
+
+    /// The bracket that closes the one at token `from`.
+    fn close_from(&self, from: usize) -> Option<usize> {
         let mut depth = 0usize;
-        for (i, t) in self.toks.iter().enumerate().skip(self.pos) {
+        for (i, t) in self.toks.iter().enumerate().skip(from) {
             match &t.tok {
                 Tok::Punct("(" | "[" | "{") => depth += 1,
                 Tok::Punct(")" | "]" | "}") => {
@@ -858,7 +863,25 @@ impl<'a> Parser<'a> {
         Ok(Block { stmts, tail, span: self.since(start) })
     }
 
+    /// Whether the `{` at token `at` begins a record literal: it is followed by an entry
+    /// (`name:`, `[e]:`), or by a `comptime for` or `comptime if` whose items are entries.
+    /// Flyscript has no labeled statements, so such a brace never begins a block.
+    fn record_at(&self, at: usize) -> bool {
+        let tok = |i: usize| &self.toks[i.min(self.toks.len() - 1)].tok;
+        match tok(at + 1) {
+            Tok::Ident(_) | Tok::Kw(_) if matches!(tok(at + 2), Tok::Punct(":")) => !matches!(tok(at + 1), Tok::Kw(Kw::Comptime)),
+            Tok::Punct("[") => self.close_from(at + 1).is_some_and(|c| matches!(tok(c + 1), Tok::Punct(":"))),
+            Tok::Kw(Kw::Comptime) if matches!(tok(at + 2), Tok::Kw(Kw::For | Kw::If)) && matches!(tok(at + 3), Tok::Punct("(")) => {
+                self.close_from(at + 3).is_some_and(|c| matches!(tok(c + 1), Tok::Punct("{")) && self.record_at(c + 1))
+            }
+            _ => false,
+        }
+    }
+
     fn at_block_like(&self) -> bool {
+        if self.at("{") && self.record_at(self.pos) {
+            return false;
+        }
         matches!(
             self.tok(),
             Tok::Kw(Kw::If | Kw::While | Kw::For | Kw::Match | Kw::Try | Kw::Region | Kw::Handle | Kw::Unsafe)
@@ -1487,6 +1510,27 @@ mod tests {
         assert!(matches!(kind("{ x, y: 2 }"), ExprKind::Record { name: None, .. }));
         assert!(matches!(kind("#Get { key, reply }"), ExprKind::Tag { args: TagArgs::Record(_), .. }));
         assert!(matches!(kind("Decl { name, ty: Cell.new(0) }"), ExprKind::Record { name: Some(_), .. }));
+    }
+
+    /// The value of a block's tail: `{ { a: 1 } }` holds a record, `{ { x } }` a block.
+    fn tail(src: &str) -> ExprKind {
+        match kind(&format!("() => {src}")) {
+            ExprKind::Lambda { body, .. } => match body.kind {
+                ExprKind::Block(b) => b.tail.expect("a tail").kind,
+                other => other,
+            },
+            other => other,
+        }
+    }
+
+    #[test]
+    fn braces_at_statement_start() {
+        assert!(matches!(tail("{ { a: 1, b } }"), ExprKind::Record { .. }));
+        assert!(matches!(tail("{ { [k]: 1 } }"), ExprKind::Record { .. }));
+        assert!(matches!(tail("{ { comptime for (const f of fs) { [f.name]: 0, } } }"), ExprKind::Record { .. }));
+        assert!(matches!(tail("{ { x } }"), ExprKind::Block(_)));
+        assert!(matches!(tail("{ { comptime for (const f of fs) { f(); } } }"), ExprKind::Block(_)));
+        assert!(matches!(tail("{ { [a, b] } }"), ExprKind::Block(_)));
     }
 
     #[test]

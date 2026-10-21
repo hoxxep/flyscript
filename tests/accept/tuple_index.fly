@@ -1,0 +1,8 @@
+// Tuples are indexed by a constant, as in TypeScript; each element is a place of its own (§3.1).
+export function split(pair: [i32, String]): String {
+  const n = pair[0];
+  let s = pair[1];
+  if (n > 0) { s.push("!"); }
+  s
+}
+export function first(pairs: readonly [u8, u8]): u8 { pairs[0] + pairs[1] }

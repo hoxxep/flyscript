@@ -31,7 +31,7 @@ impl<comptime T: Type> Describe for T {
         out.push("(");
         comptime for (const [i, _] of items.enumerate()) {
           comptime if (i > 0) { out.push(", "); }
-          self.[i].describe(mut out);
+          self[i].describe(mut out);
         }
         out.push(")");
       }

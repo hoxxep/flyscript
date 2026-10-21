@@ -117,7 +117,7 @@ impl<comptime T: Type> ToJson for T {
         out.push("[");
         comptime for (const [i, _] of items.enumerate()) {
           comptime if (i > 0) { out.push(","); }
-          self.[i].toJson(mut out);
+          self[i].toJson(mut out);
         }
         out.push("]");
       }
@@ -432,14 +432,14 @@ impl<comptime T: Type> FromJson for T {
             _ => p.skip(),
           }
         }
-        ({
+        {
           comptime for (const f of fields) {
             [f.name]: match (slots.[f.name]) {
               #Some(v) => v,
               #None => comptime if (isOption(f.type)) { #None } else { throw #Missing(String.fromStr(f.name)) },
             },
           }
-        })
+        }
       }
       #Tuple(items) => {
         p.beginArray();

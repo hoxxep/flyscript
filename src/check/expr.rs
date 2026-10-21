@@ -1081,6 +1081,22 @@ impl<'p> Checker<'p> {
     fn index(&mut self, target: &Expr, index: &Expr, span: Span) -> Ty {
         let t = self.expr(target, None);
         let base = self.strip(&t);
+        // `t[0]`: a tuple's element, by a constant index, as in TypeScript (§3.1).
+        if let Ty::Tuple(ts) = &base {
+            return match &index.kind {
+                ExprKind::Int(i) => match i.parse::<usize>().ok().and_then(|i| ts.get(i)) {
+                    Some(t) => t.clone(),
+                    None => {
+                        self.err(index.span, format!("a tuple of {} has no element {i}", ts.len()));
+                        Ty::Error
+                    }
+                },
+                _ => {
+                    self.err(index.span, "a tuple is indexed by a constant: `t[0]`");
+                    Ty::Error
+                }
+            };
+        }
         let elem = match &base {
             Ty::Array(e, _) | Ty::Slice(e) => (**e).clone(),
             Ty::Prim(Prim::Str) => Ty::Prim(Prim::U8),

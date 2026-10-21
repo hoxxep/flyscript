@@ -446,8 +446,7 @@ impl<'p> Expand<'p> {
     fn ct_name(&mut self, e: &Expr) -> R<String> {
         match self.eval(e)? {
             CV::Str(s) => Ok(s),
-            CV::Int(i) if i >= 0 => Ok(i.to_string()),
-            v => fail(e.span, format!("a computed name must be a string or a tuple index, not {}", v.kind())),
+            v => fail(e.span, format!("a computed name must be a string, not {}", v.kind())),
         }
     }
 

@@ -353,11 +353,29 @@ impl<'p> Own<'p> {
                 p.fields.push(name.name.clone());
                 Some(p)
             }
-            // Indexing borrows the whole collection.
-            ExprKind::Index { target, .. } => self.place(target),
+            // Indexing borrows the whole collection; a tuple's element is a place of its own.
+            ExprKind::Index { target, index } => {
+                let mut p = self.place(target)?;
+                let mut t = self.ty_of(target);
+                while let Ty::Borrow(_, inner) = t {
+                    t = *inner;
+                }
+                if let (ExprKind::Int(i), Ty::Tuple(_)) = (&index.kind, &t) {
+                    p.fields.push(i.clone());
+                }
+                Some(p)
+            }
             ExprKind::BorrowMut(inner) => self.place(inner),
             _ => None,
         }
+    }
+
+    fn is_tuple(&self, e: &Expr) -> bool {
+        let mut t = self.ty_of(e);
+        while let Ty::Borrow(_, inner) = t {
+            t = *inner;
+        }
+        matches!(t, Ty::Tuple(_))
     }
 
     /// Whether the place is reached through a borrow or a region reference, so nothing can be
@@ -660,6 +678,14 @@ impl<'p> Own<'p> {
                     }
                 }
             }
+            // A tuple's element by a constant index is a place, like a field.
+            ExprKind::Index { target, index } if matches!(index.kind, ExprKind::Int(_)) && self.is_tuple(target) => match self.place(e) {
+                Some(path) => {
+                    self.record_base_uses(target);
+                    self.use_place(e, path, how)
+                }
+                None => self.expr(target, Use::Read),
+            },
             ExprKind::Index { target, index } => {
                 let iv = self.expr(index, Use::Move);
                 let _ = iv;
@@ -1253,6 +1279,7 @@ fn field_type(p: &Program, t: &Ty, field: &str) -> Option<Ty> {
             _ => None,
         },
         Ty::Record(r) => r.labels.get(field).cloned(),
+        Ty::Tuple(ts) => field.parse::<usize>().ok().and_then(|i| ts.get(i).cloned()),
         _ => None,
     }
 }
