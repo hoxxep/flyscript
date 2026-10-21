@@ -1,6 +1,6 @@
 # Flyscript
 
-**Language specification, version 0.26**
+**Language specification, version 0.27**
 
 *Affine values, one row calculus, handlers for everything, and `comptime`: Church on the outside, Turing on the inside.*
 
@@ -18,16 +18,15 @@ The whole language rests on five laws. Every rule in this document is a conseque
 4. **Handlers for everything.** Errors, I/O, iteration and region memory are ordinary effects with ordinary handlers. A handler may hold the rest of a computation as a one-shot continuation value; generators and tasks are both built from that one primitive.
 5. **`comptime` is the metalanguage.** Generics, reflection, layout transformation and derived interfaces are ordinary Flyscript code run by the compiler.
 
-### 0.1 Changes from 0.25
+### 0.1 Changes from 0.26
 
-0.26 comes from writing a program rather than reviewing one: Appendix A.10, a JSON inventory service written the way a TypeScript programmer would. Each change removes a place where Flyscript surprised that programmer.
+0.27 comes from a second program, a log pipeline in which a reader task feeds a channel the scope's body aggregates.
 
 | Change | Why |
 | :--- | :--- |
-| `match`, `handle`, `region` and `effect` are contextual words (§2.3) | `function handle(req)` and `const match = …` are too common to forbid |
-| With nothing expected, a list literal is an array if its items agree, a tuple otherwise; tuple patterns take arrays apart (§2.2, §3.1) | `const requests = [a, b, c]` was a tuple, which cannot be iterated |
-| A branch that never finishes does not meet the others (§4.1) | `if (short) { throw #Short { sku } }` made `sku` look moved after the `if` |
-| A library names its failures for what failed (§5.4) | failure rows merge by tag, so `std/json`'s `#Unknown` and the service's were one tag |
+| A channel closes when a sender is closed or its last sender dropped; `recv` gives `#None` once it is drained, and `for…of` stops (§6.2) | the spec never said, and the body's loop could not end |
+| A task may capture a `str` (§6.1) | it is a `readonly` borrow of immutable bytes, like any other a task may share |
+| `str` has TypeScript's `split`, `trim`, `includes`, `startsWith`, `endsWith`, `indexOf`, `toUpperCase`, `toLowerCase` and `replaceAll` | the first thing a TypeScript programmer reaches for; `split` gives owned pieces, which a `Vec` can hold |
 
 ---
 
