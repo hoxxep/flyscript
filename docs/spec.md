@@ -1,6 +1,6 @@
 # Flyscript
 
-**Language specification, version 0.50**
+**Language specification, version 0.51**
 
 *Affine values, one row calculus, handlers for everything, and `comptime`: Church on the outside, Turing on the inside.*
 
@@ -18,14 +18,13 @@ The whole language rests on five laws. Every rule in this document is a conseque
 4. **Handlers for everything.** Errors, I/O, iteration and region memory are ordinary effects with ordinary handlers. A handler may hold the rest of a computation as a one-shot continuation value; generators and tasks are both built from that one primitive.
 5. **`comptime` is the metalanguage.** Generics, reflection, layout transformation and derived interfaces are ordinary Flyscript code run by the compiler.
 
-### 0.1 Changes from 0.49
+### 0.1 Changes from 0.50
 
-0.50 gives Mini Flyscript's effect rows: every function type carries the effects calling it performs, inferred with the same row unification as its records — a body's row is open, a call performs its callee's where it is made, definitions generalize over effect rows as over types, `print` performs `Io`, and `def pure` closes a definition's row and names what it would have performed. Earlier changes are in [docs/history](history/).
+0.51 gives Mini an ownership pass, `moves.fly`, the last part of Flyscript's core it lacked: a value of a data type or a record moves when used and a binding moved cannot be used again, moves on either side of a branch counting where the paths meet, with `Copy` decided from the types the checker inferred and an `#Error` type moving nothing so one mistake is reported once. Mini is now six modules — lexer, syntax, types and effects, ownership, code generation, driver — with the phases of a Flyscript front end. Earlier changes are in [docs/history](history/).
 
 | Change | Why |
 | :--- | :--- |
-| Every `mut` argument is lent in two phases, as a receiver is: `readonly` while the later arguments are evaluated, `mut` for the call (§4.1) | `replace(mut self.effects, self.fresh())` — setting a field aside for a fresh value computed from `self` — was rejected |
-| A string literal pattern matches anything that lends a `str` (§3.5) | `#Var("print", _)` did not match a `#Var(String, Span)` |
+| A `for…of` loop's variables release what they hold when their iteration ends (§4.1) | the prototype kept a loop variable's loans past its iteration, so the next iteration could not change what the last one's variable had borrowed: Mini's ownership pass, which saves and restores move states around each `case` arm, was rejected |
 
 
 ---
@@ -39,7 +38,7 @@ The whole language rests on five laws. Every rule in this document is a conseque
 3. Safety without annotation burden: no lifetime parameters, no `async` colouring, no checked-exception boilerplate.
 4. Testability by construction: because I/O is an effect, any program can run under a deterministic simulator.
 5. A small core: features are library code over the core wherever possible.
-6. Self-hosting: Flyscript is a language its own compiler is written well in. Mini (examples/mini/) is the standing test: a compiler for a small functional language, with algebraic data types, let-polymorphism over region-allocated types, error recovery through an effect and closure conversion, which grows toward a Flyscript front end. A compiler is the hardest ordinary program — recursive trees, cyclic graphs of scopes and type variables, union-find over mutable tables, maps keyed by strings, deep matching, diagnostics that point at source — so a feature that makes it awkward is a defect of the language, not of the compiler.
+6. Self-hosting: Flyscript is a language its own compiler is written well in. Mini (examples/mini/) is the standing test: a compiler in six modules for a small functional language with algebraic data types, row-typed records, effect rows, let-polymorphism over region-allocated types, an ownership pass, error recovery through an effect, closure conversion and a virtual machine, which grows toward a Flyscript front end. A compiler is the hardest ordinary program — recursive trees, cyclic graphs of scopes and type variables, union-find over mutable tables, maps keyed by strings, deep matching, diagnostics that point at source — so a feature that makes it awkward is a defect of the language, not of the compiler.
 
 **Non-goals**
 

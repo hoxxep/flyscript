@@ -1,0 +1,107 @@
+// Mini, a compiler written in Flyscript as a test of goal 6 (§1): ownership. A value of a data type
+// or a record moves when it is used, and a binding moved cannot be used again — Flyscript's own
+// rule (§4.1), with moves on any path of a branch counting where the paths meet.
+import { HashSet } from "std/collections";
+import { Span, Diag } from "./lexer";
+import { Expr, Program } from "./syntax";
+
+type Binding = { name: String; copy: bool; moved: Option<Span> };
+
+struct Moves { copies: HashSet<String>; env: Vec<Binding> }
+
+impl Moves {
+  function bind(self: mut Self, at: usize, name: readonly String): void {
+    const copy = self.copies.has(`${at}:${name}`);
+    self.env.push({ name: name.clone(), copy, moved: #None });
+  }
+
+  // A use of a name: a value that moves is moved here, and must not have been already.
+  function use(self: mut Self, name: str, span: Span): void uses Diag {
+    let i = self.env.len();
+    while (i > 0) {
+      i -= 1;
+      if (self.env[i].name == name) {
+        if (self.env[i].copy) { return; }
+        match (self.env[i].moved) {
+          #Some(at) => Diag.report(#Moved { span, name: name.toString(), at }),
+          #None => { self.env[i].moved = #Some(span); }
+        }
+        return;
+      }
+    }
+  }
+
+  function expr(self: mut Self, e: readonly Expr): void uses Diag {
+    match (e) {
+      #Int(_, _) | #Bool(_, _) => {},
+      #Var(name, span) => self.use(name, span),
+      #Bin(_, a, b, _) => { self.expr(a); self.expr(b); }
+      #If(c, t, f, _) => {
+        self.expr(c);
+        self.branches(t, f);
+      }
+      #Let(name, value, body, span) => {
+        self.expr(value);
+        self.bind(span.start, name);
+        self.expr(body);
+        self.env.pop();
+      }
+      // A closure moves in what it uses where it is made; its parameters are its own.
+      #Fn(params, body, span) => {
+        const depth = self.env.len();
+        for (const p of params) { self.bind(span.start, p); }
+        self.expr(body);
+        while (self.env.len() > depth) { self.env.pop(); }
+      }
+      #Call(f, args, _) => {
+        self.expr(f);
+        for (const a of args) { self.expr(a); }
+      }
+      // Reading a field reads the record; it does not move it.
+      #Field(target, _, _) => match (target) {
+        #Var(_, _) => {},
+        other => self.expr(other),
+      },
+      #Record(fields, _) => { for (const [_, v] of fields) { self.expr(v); } }
+      #Case(scrutinee, arms, _) => {
+        self.expr(scrutinee);
+        const before: Vec<Option<Span>> = self.env.iter().map((b) => b.moved).collect();
+        let after: Vec<Option<Span>> = before.clone();
+        for (const arm of arms) {
+          for (const [i, m] of before.iter().enumerate()) { self.env[i].moved = m; }
+          const depth = self.env.len();
+          for (const b of arm.binds) { self.bind(arm.span.start, b); }
+          self.expr(arm.body);
+          while (self.env.len() > depth) { self.env.pop(); }
+          for (const [i, b] of self.env.iter().enumerate()) {
+            if (after[i].isNone()) { after[i] = b.moved; }
+          }
+        }
+        for (const [i, m] of after.iter().enumerate()) { self.env[i].moved = m; }
+      }
+    }
+  }
+
+  // Both branches start from the same state; a binding moved on either is moved after.
+  function branches(self: mut Self, t: readonly Expr, f: readonly Expr): void uses Diag {
+    const before: Vec<Option<Span>> = self.env.iter().map((b) => b.moved).collect();
+    self.expr(t);
+    const afterThen: Vec<Option<Span>> = self.env.iter().map((b) => b.moved).collect();
+    for (const [i, m] of before.iter().enumerate()) { self.env[i].moved = m; }
+    self.expr(f);
+    for (const [i, m] of afterThen.iter().enumerate()) {
+      if (self.env[i].moved.isNone()) { self.env[i].moved = m; }
+    }
+  }
+}
+
+// Checks every definition's body and the program's, each with its parameters bound.
+export function checkMoves(prog: readonly Program, copies: HashSet<String>): void uses Diag {
+  let m = Moves { copies, env: Vec.new() };
+  for (const d of prog.defs) {
+    for (const p of d.params) { m.bind(d.span.start, p); }
+    m.expr(d.body);
+    m.env = Vec.new();
+  }
+  m.expr(prog.main);
+}

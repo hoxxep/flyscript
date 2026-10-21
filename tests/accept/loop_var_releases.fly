@@ -1,0 +1,19 @@
+// A `for…of` variable ends with its iteration and releases what it held: the next iteration may
+// change what the last one's variable borrowed (§4.1).
+type Span = usize;
+type B = { name: String; moved: Option<Span> };
+struct M { env: Vec<B> }
+impl M {
+  function g(self: mut Self): void {}
+  function f(self: mut Self, arms: readonly i32[]): void {
+    const before: Vec<Option<Span>> = self.env.iter().map((b) => b.moved).collect();
+    let after: Vec<Option<Span>> = before.clone();
+    for (const arm of arms) {
+      for (const [i, m] of before.iter().enumerate()) { self.env[i].moved = m; }
+      self.g();
+      for (const [i, b] of self.env.iter().enumerate()) {
+        if (after[i].isNone()) { const x: Option<Span> = b.moved; after[i] = x; }
+      }
+    }
+  }
+}

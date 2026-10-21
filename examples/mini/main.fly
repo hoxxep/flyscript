@@ -1,5 +1,6 @@
 // Mini: a compiler for a small functional language, written in Flyscript as a test of goal 6 (§1).
-// source -> tokens (lexer) -> syntax tree (syntax) -> types (check) -> bytecode (codegen) -> run.
+// source -> tokens (lexer) -> syntax tree (syntax) -> types (check) -> ownership (moves)
+// -> bytecode (codegen) -> run.
 // expect: let x = 2 in x * (3 + 4)  :  int  =  14
 // expect: let twice = fn(f, x) => f(f(x)) in twice(fn(n) => n * 2, 5)  :  int  =  20
 // expect: if 1 < 2 then 10 else 20  :  int  =  10
@@ -57,6 +58,16 @@
 // expect: error at 2:1: this performs `Io`, which is not allowed here
 // expect:     twice(fn(n) => print(n), 1)
 // expect:     ^
+// expect: error at 3:34: `t` was moved at 3:23, so it cannot be used here
+// expect:     let t = T(5) in spend(t) + spend(t)
+// expect:                                      ^
+// expect: data Token = T(int);
+// expect: def spend(t) = case t of T(n) => n;
+// expect: let t = T(5) in if 1 < 2 then spend(t) else 0  :  int  =  5
+// expect: error at 3:57: `t` was moved at 3:38, so it cannot be used here
+// expect:     let t = T(5) in (if 1 < 2 then spend(t) else 0) + spend(t)
+// expect:                                                             ^
+// expect: let p = {x = 3, y = 4} in p.x + p.y + p.x  :  int  =  10
 // expect: error at 2:1: this `case` does not handle Blue
 // expect:     case Green of Red => 1 | Green => 2
 // expect:     ^
@@ -77,6 +88,7 @@ import { println } from "std/io";
 import { Problem, CompileError, Diag } from "./lexer";
 import { parse } from "./syntax";
 import { check } from "./check";
+import { checkMoves } from "./moves";
 import { Instr, Value, generate, run, showValue } from "./codegen";
 
 type Compiled = { code: Vec<Instr>; globals: Vec<Value>; ty: String; ctorNames: Vec<String> };
@@ -85,13 +97,28 @@ export function compile(src: str): Compiled uses Fail<CompileError> {
   const prog = parse(src);
   // Every type error is collected; the program is compiled only if there were none.
   let errors: Vec<Problem> = Vec.new();
-  const ty = handle { check(prog) } with Diag { report(e) resumes k => { errors.push(e); k() } };
+  // Types first, then ownership, which needs to know what is `Copy`.
+  const ty = handle {
+    const checked = check(prog);
+    checkMoves(prog, checked.copies);
+    checked.ty
+  } with Diag { report(e) resumes k => { errors.push(e); k() } };
   if (errors.len() > 0) { throw #Many(errors) }
   const g = generate(prog);
   { code: g.code, globals: g.globals, ty, ctorNames: g.ctorNames }
 }
 
 // ---- Diagnostics shown against the source: line, column, the line, a caret ----
+
+// Where a byte of the source is, as `line:column`.
+function lineCol(src: str, at: usize): String {
+  let [line, start]: [usize, usize] = [1, 0];
+  const bytes = src.asBytes();
+  for (const i of 0..at) {
+    if (bytes[i] == b'\n') { line += 1; start = i + 1; }
+  }
+  `${line}:${at - start + 1}`
+}
 
 function render(src: str, at: usize, message: str): String {
   let line: usize = 1;
@@ -114,6 +141,7 @@ function describeOne(src: str, p: readonly Problem): String {
     #Parse { at, message } => render(src, at, message),
     #Type { span, message } => render(src, span.start, message),
     #Unbound { span, name } => render(src, span.start, `unknown name \`${name}\``),
+    #Moved { span, name, at } => render(src, span.start, `\`${name}\` was moved at ${lineCol(src, at.start)}, so it cannot be used here`),
   }
 }
 
@@ -152,6 +180,10 @@ export function main(): void uses Io {
     "def pure double(x) = print(x) * 2;\ndouble(3)",
     "def pure twice(f, x) = f(f(x));\ntwice(fn(n) => n + 1, 1)",
     "def pure twice(f, x) = f(f(x));\ntwice(fn(n) => print(n), 1)",
+    "data Token = T(int);\ndef spend(t) = case t of T(n) => n;\nlet t = T(5) in spend(t) + spend(t)",
+    "data Token = T(int);\ndef spend(t) = case t of T(n) => n;\nlet t = T(5) in if 1 < 2 then spend(t) else 0",
+    "data Token = T(int);\ndef spend(t) = case t of T(n) => n;\nlet t = T(5) in (if 1 < 2 then spend(t) else 0) + spend(t)",
+    "let p = {x = 3, y = 4} in p.x + p.y + p.x",
     "data Color = Red | Green | Blue;\ncase Green of Red => 1 | Green => 2",
     "let a = 1 + true in\nlet b = if 3 then 4 else false in\nnope(a)",
   ];

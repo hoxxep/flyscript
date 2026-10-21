@@ -1019,7 +1019,12 @@ impl<'p> Own<'p> {
                     self.scopes.push(HashMap::new());
                     self.bind_pattern(pat, &iv, false);
                     self.block(body, Use::Move);
-                    self.scopes.pop();
+                    // The loop variables end with the iteration, and release what they held.
+                    if let Some(scope) = self.scopes.pop() {
+                        for var in scope.values() {
+                            self.state.holds.remove(var);
+                        }
+                    }
                     self.state.join(&before);
                 }
                 self.leave();

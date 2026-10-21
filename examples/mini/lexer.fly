@@ -7,7 +7,7 @@ export type Span = { start: usize; end: usize };
 // which fits anything, so one mistake is reported once.
 export effect Diag { report(e: Problem): void; }
 
-export type Problem = #Lex { at: usize; message: String } | #Parse { at: usize; message: String } | #Type { span: Span; message: String } | #Unbound { span: Span; name: String };
+export type Problem = #Lex { at: usize; message: String } | #Parse { at: usize; message: String } | #Type { span: Span; message: String } | #Unbound { span: Span; name: String } | #Moved { span: Span; name: String; at: Span };
 export type CompileError = Problem | #Many(Vec<Problem>);
 
 // ---- Lexer ----

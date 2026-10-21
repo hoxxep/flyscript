@@ -40,6 +40,8 @@ export struct Checker<region R> {
   ctorsOf: Vec<Vec<String>>;
   // The effects the code being checked performs: a row, open while it is inferred.
   effects: Ref<R, Type<R>>;
+  // Each binding's type, by where it is made (`start:name`), for the ownership pass.
+  bindings: Vec<[String, Ref<R, Type<R>>]>;
 }
 
 impl<region R> Checker<R> {
@@ -284,7 +286,7 @@ impl<region R> Checker<R> {
     }
     self.scopes.push(globals);
     for (const [i, d] of p.defs.iter().enumerate()) {
-      const tf = self.function(d.params, d.body);
+      const tf = self.function(d.span.start, d.params, d.body);
       Checker.unify(self.ids, own[i], tf, d.span);
       // A pure definition's row is closed empty: what it would perform is reported by name.
       if (d.pure) {
@@ -314,11 +316,12 @@ impl<region R> Checker<R> {
     t
   }
 
-  function function(self: mut Self, params: readonly String[], body: readonly Expr): Ref<Type> uses Region<R>, Diag {
+  function function(self: mut Self, at: usize, params: readonly String[], body: readonly Expr): Ref<Type> uses Region<R>, Diag {
     let scope: HashMap<String, Scheme<R>> = HashMap.new();
     let pts: Vec<Ref<Type>> = Vec.new();
     for (const p of params) {
       const t = self.fresh();
+      self.bindings.push([`${at}:${p}`, t]);
       scope.insert(p.clone(), Checker.mono(t));
       pts.push(t);
     }
@@ -349,8 +352,9 @@ impl<region R> Checker<R> {
         Checker.unify(self.ids, tt, tf, span);
         tt
       }
-      #Let(name, value, body, _) => {
+      #Let(name, value, body, span) => {
         const tv = self.infer(value);
+        self.bindings.push([`${span.start}:${name}`, tv]);
         let scope: HashMap<String, Scheme<R>> = HashMap.new();
         scope.insert(name.clone(), self.generalize(tv));
         self.scopes.push(scope);
@@ -358,7 +362,7 @@ impl<region R> Checker<R> {
         self.scopes.pop();
         tb
       }
-      #Fn(params, body, _) => self.function(params, body),
+      #Fn(params, body, span) => self.function(span.start, params, body),
       #Record(fields, _) => {
         let fs: Vec<Field<R>> = Vec.new();
         for (const [name, value] of fields) { fs.push({ name: fmt(name), ty: self.infer(value) }); }
@@ -388,7 +392,10 @@ impl<region R> Checker<R> {
               if (fields.len() != arm.binds.len()) {
                 Diag.report(#Type { span: arm.span, message: `\`${arm.ctor}\` has ${fields.len()} fields, not ${arm.binds.len()}` });
               }
-              for (const [b, t] of arm.binds.iter().zip(fields.iter())) { scope.insert(b.clone(), Checker.mono(t)); }
+              for (const [b, t] of arm.binds.iter().zip(fields.iter())) {
+                scope.insert(b.clone(), Checker.mono(t));
+                self.bindings.push([`${arm.span.start}:${b}`, t]);
+              }
               if (!seen.insert(arm.ctor.clone())) {
                 Diag.report(#Type { span: arm.span, message: `\`${arm.ctor}\` is matched twice` });
               }
@@ -423,10 +430,21 @@ impl<region R> Checker<R> {
 }
 
 
-// The types live for the checking only: the region is released when it ends.
-export function check(prog: readonly Program): String uses Diag {
+// What checking gives the later passes: the program's type, shown, and which bindings hold
+// `Copy` values (numbers, booleans, functions) rather than values that move.
+export type Checked = { ty: String; copies: HashSet<String> };
+
+// The types live for the checking only: the region is released when it ends, and what the
+// later passes need is copied out of it first.
+export function check(prog: readonly Program): Checked uses Diag {
   region (R) {
-    let c: Checker<R> = Checker { ids: Cell.new(0), scopes: Vec.new(), int: alloc(#Int), bool: alloc(#Bool), ctors: HashMap.new(), ctorsOf: Vec.new(), effects: alloc(#Empty) };
-    Checker.show(c.program(prog))
+    let c: Checker<R> = Checker { ids: Cell.new(0), scopes: Vec.new(), int: alloc(#Int), bool: alloc(#Bool), ctors: HashMap.new(), ctorsOf: Vec.new(), effects: alloc(#Empty), bindings: Vec.new() };
+    const ty = Checker.show(c.program(prog));
+    let copies: HashSet<String> = HashSet.new();
+    for (const [key, t] of c.bindings) {
+      // An `#Error` was reported already: it moves nothing, so it causes no second error.
+      if (match (Checker.resolve(t)) { #Int | #Bool | #Fn(_, _, _) | #Error => true, _ => false }) { copies.insert(key.clone()); }
+    }
+    { ty, copies }
   }
 }
