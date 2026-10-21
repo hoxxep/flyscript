@@ -1,6 +1,6 @@
 # Flyscript
 
-**Language specification, version 0.44**
+**Language specification, version 0.45**
 
 *Affine values, one row calculus, handlers for everything, and `comptime`: Church on the outside, Turing on the inside.*
 
@@ -18,16 +18,13 @@ The whole language rests on five laws. Every rule in this document is a conseque
 4. **Handlers for everything.** Errors, I/O, iteration and region memory are ordinary effects with ordinary handlers. A handler may hold the rest of a computation as a one-shot continuation value; generators and tasks are both built from that one primitive.
 5. **`comptime` is the metalanguage.** Generics, reflection, layout transformation and derived interfaces are ordinary Flyscript code run by the compiler.
 
-### 0.1 Changes from 0.43
+### 0.1 Changes from 0.44
 
-0.44 answers a review of Mini read as a compiler writer would (docs/reviews/2026-10-21-compiler-writing-review-0-43.md), then rewrites Mini's checker the way it suggested: types allocated in a region as `Ref<Type>`, each variable carrying its own union-find link in a `Cell`, parameter lists `allocAll`'d. The checker lost every `Box` and two thirds of its clones, and gained path compression. Earlier changes are in [docs/history](history/).
+0.45 gives Mini the error recovery every real compiler has: a resumptive `Diag` effect collects every type error in one pass, an `#Error` type that fits anything keeps one mistake from cascading, and the caller decides what to do with the list. Writing the code that prints one problem or many found one gap. Earlier changes are in [docs/history](history/).
 
 | Change | Why |
 | :--- | :--- |
-| Borrows are tracked per field path, as moves are, which the specification now says (§4.1) | the prototype already did, but the review took the text to forbid reading `self.scopes` while changing `self.types` |
-| A generator that performs nothing has any effect row its consumer needs — `iter()`, `keys()`, `entries()`, `drain()` return `Gen<T, E>` for a fresh `E` — and the closures given to `map`, `filter`, `find`, `some`, `every` and `reduce` may perform the generator's effects (§5.5) | `ps.iter().some((p) => occurs(v, p))` was rejected when `occurs` reads a region's `Cell` |
-| `allocAll(items)` places a fixed list in a region as a `Ref<R, T[]>`, indexed and sliced through the `Ref` (§4.6) | an AST's or a type's children are fixed once parsed, and a `RegionList` cannot be indexed |
-| `HashSet<T>`, `join(sep)` on generators, and `replace`/`swap` for taking a value out of a place that must stay filled (§3.1, §5.5) | free-variable sets were `Vec`s searched linearly; a list of types was collected only to be joined; a pass could not take its code buffer out of `mut self` |
+| A `match` narrows: an arm that binds the whole value sees its union without the tags earlier unguarded arms matched whatever their payload (§3.2) | `match (e) { #Many(ps) => …, one => describe(one) }` would not pass `one` where a `Problem` was wanted, though it could be nothing else; TypeScript narrows there |
 
 
 ---
@@ -227,6 +224,8 @@ type Result<T, E> = #Ok(T) | #Err(E);
 ```
 
 `Option<T>` has `isSome`, `isNone`, `unwrapOr(fallback)`, `unwrap()` (a `#None` is a bug, and panics), and `take()`, which through a `mut` borrow leaves `#None` behind; an `Option<readonly T>` also has `cloned()`. `Result<T, E>` has `isOk`, `isErr`, and `unwrap()`, which throws the `#Err` payload as a failure (§5.4). A record pattern names the fields it binds and ignores the rest: `#Struct { fields }` matches a `#Struct { name: str; fields: Field[] }`.
+
+**Narrowing.** In a `match` on a structural union, an arm whose pattern binds the whole value sees the union without the tags that earlier arms, unguarded, matched whatever their payload: in `match (e) { #Many(ps) => …, one => describe(one) }` with `e: Problem | #Many(Vec<Problem>)`, `one` is a `Problem`. An enum is a type of its own and is not narrowed.
 
 ### 3.3 Nominal types
 

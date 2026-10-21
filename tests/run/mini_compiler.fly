@@ -21,6 +21,18 @@
 // expect: error at 2:1: expected int, found bool
 // expect:     f(true)
 // expect:     ^
+// expect: error at 1:13: expected int, found bool
+// expect:     let a = 1 + true in
+// expect:                 ^
+// expect: error at 2:12: expected bool, found int
+// expect:     let b = if 3 then 4 else false in
+// expect:                ^
+// expect: error at 2:9: expected bool, found int
+// expect:     let b = if 3 then 4 else false in
+// expect:             ^
+// expect: error at 3:1: unknown name `nope`
+// expect:     nope(a)
+// expect:     ^
 // Mini: a compiler for a small language, written in Flyscript as a test of goal 6.
 // source -> tokens -> AST -> types (Hindley–Milner over types allocated in a region, each
 // variable carrying its own union-find link; let-polymorphism)
@@ -32,7 +44,12 @@ import { Cell } from "std/region";
 // ---- Diagnostics ----
 
 type Span = { start: usize; end: usize };
-type CompileError = #Lex { at: usize; message: String } | #Parse { at: usize; message: String } | #Type { span: Span; message: String } | #Unbound { span: Span; name: String };
+// A type error is reported and checking goes on, the bad expression taking the type `#Error`,
+// which fits anything, so one mistake is reported once.
+export effect Diag { report(e: Problem): void; }
+
+type Problem = #Lex { at: usize; message: String } | #Parse { at: usize; message: String } | #Type { span: Span; message: String } | #Unbound { span: Span; name: String };
+type CompileError = Problem | #Many(Vec<Problem>);
 
 // ---- Lexer ----
 
@@ -258,7 +275,7 @@ impl Parser {
 
 // A type lives in the checker's region: `Ref`s to it are `Copy`, so nothing is cloned, and a
 // variable carries its own union-find link, set once it is solved.
-enum Type<region R> { #Int, #Bool, #Var(usize, Cell<Option<Ref<Type>>>), #Fn(Ref<Ref<Type>[]>, Ref<Type>) }
+enum Type<region R> { #Error, #Int, #Bool, #Var(usize, Cell<Option<Ref<Type>>>), #Fn(Ref<Ref<Type>[]>, Ref<Type>) }
 
 // A type with variables quantified: each use of a `let`-bound name gets fresh copies of them.
 type Scheme<region R> = { vars: Vec<usize>; ty: Ref<R, Type<R>> };
@@ -295,27 +312,33 @@ impl<region R> Checker<R> {
       _ => false,
     }
   }
-  function unify(a: Ref<Type>, b: Ref<Type>, span: Span): void uses Region<R>, Fail<CompileError> {
+  function unify(a: Ref<Type>, b: Ref<Type>, span: Span): void uses Region<R>, Diag {
     const [x, y] = [Checker.resolve(a), Checker.resolve(b)];
     match ([x, y]) {
-      [#Int, #Int] | [#Bool, #Bool] => {},
+      [#Error, _] | [_, #Error] | [#Int, #Int] | [#Bool, #Bool] => {},
       [#Var(v, _), #Var(w, _)] if v == w => {},
       [#Var(v, link), _] => Checker.bind(v, link, y, span),
       [_, #Var(v, link)] => Checker.bind(v, link, x, span),
       [#Fn(ps, r), #Fn(qs, s)] => {
-        if (ps.len() != qs.len()) { throw #Type { span, message: `expected ${ps.len()} arguments, found ${qs.len()}` }; }
+        if (ps.len() != qs.len()) { Diag.report(#Type { span, message: `expected ${ps.len()} arguments, found ${qs.len()}` }); return; }
         for (const [p, q] of ps.iter().zip(qs.iter())) { Checker.unify(p, q, span); }
         Checker.unify(r, s, span);
       }
-      _ => throw #Type { span, message: `expected ${Checker.show(x)}, found ${Checker.show(y)}` },
+      // `b` is what was expected of `a`.
+      _ => Diag.report(#Type { span, message: `expected ${Checker.show(y)}, found ${Checker.show(x)}` }),
     }
   }
-  function bind(v: usize, link: Cell<Option<Ref<Type>>>, t: Ref<Type>, span: Span): void uses Region<R>, Fail<CompileError> {
-    if (Checker.occurs(v, t)) { throw #Type { span, message: `a function cannot take itself` }; }
+  function bind(v: usize, link: Cell<Option<Ref<Type>>>, t: Ref<Type>, span: Span): void uses Region<R>, Diag {
+    if (Checker.occurs(v, t)) {
+      Diag.report(#Type { span, message: `a function cannot take itself` });
+      link.set(#Some(alloc(#Error)));
+      return;
+    }
     link.set(#Some(t));
   }
   function show(t: Ref<Type>): String uses Region<R> {
     match (Checker.resolve(t)) {
+      #Error => `?`,
       #Int => `int`,
       #Bool => `bool`,
       #Var(v, _) => `t${v}`,
@@ -347,7 +370,7 @@ impl<region R> Checker<R> {
     }
   }
 
-  function lookup(self: mut Self, name: str, span: Span): Ref<Type> uses Region<R>, Fail<CompileError> {
+  function lookup(self: mut Self, name: str, span: Span): Ref<Type> uses Region<R>, Diag {
     let i = self.scopes.len();
     while (i > 0) {
       i -= 1;
@@ -362,7 +385,8 @@ impl<region R> Checker<R> {
         return Checker.copy(s.ty, map);
       }
     }
-    throw #Unbound { span, name: name.toString() }
+    Diag.report(#Unbound { span, name: name.toString() });
+    alloc(#Error)
   }
 
   // Quantifies the variables of `t` that no enclosing scope leaves open.
@@ -384,7 +408,7 @@ impl<region R> Checker<R> {
 
   // Definitions are inferred together, each seeing the others at one type while their bodies
   // are checked (no polymorphic recursion), then generalized.
-  function program(self: mut Self, p: readonly Program): Ref<Type> uses Region<R>, Fail<CompileError> {
+  function program(self: mut Self, p: readonly Program): Ref<Type> uses Region<R>, Diag {
     let globals: HashMap<String, Scheme<R>> = HashMap.new();
     let own: Vec<Ref<Type>> = Vec.new();
     for (const d of p.defs) {
@@ -408,7 +432,7 @@ impl<region R> Checker<R> {
     t
   }
 
-  function function(self: mut Self, params: readonly String[], body: readonly Expr): Ref<Type> uses Region<R>, Fail<CompileError> {
+  function function(self: mut Self, params: readonly String[], body: readonly Expr): Ref<Type> uses Region<R>, Diag {
     let scope: HashMap<String, Scheme<R>> = HashMap.new();
     let pts: Vec<Ref<Type>> = Vec.new();
     for (const p of params) {
@@ -422,7 +446,7 @@ impl<region R> Checker<R> {
     Checker.func(pts, tr)
   }
 
-  function infer(self: mut Self, e: readonly Expr): Ref<Type> uses Region<R>, Fail<CompileError> {
+  function infer(self: mut Self, e: readonly Expr): Ref<Type> uses Region<R>, Diag {
     match (e) {
       #Int(_, _) => self.int,
       #Bool(_, _) => self.bool,
@@ -455,7 +479,8 @@ impl<region R> Checker<R> {
         let tas: Vec<Ref<Type>> = Vec.new();
         for (const a of args) { tas.push(self.infer(a)); }
         const tr = self.fresh();
-        Checker.unify(tf, Checker.func(tas, tr), span);
+        // The function's own type is what the call is expected to fit.
+        Checker.unify(Checker.func(tas, tr), tf, span);
         tr
       }
     }
@@ -635,10 +660,15 @@ export function compile(src: str): Compiled uses Fail<CompileError> {
   let p = Parser { toks: lex(src), pos: 0 };
   const prog = p.program();
   // The types live for the checking only: the region is released when it ends.
-  const ty: String = region (R) {
-    let c: Checker<R> = Checker { next: 0, scopes: Vec.new(), int: alloc(#Int), bool: alloc(#Bool) };
-    Checker.show(c.program(prog))
-  };
+  // Every type error is collected; the program is compiled only if there were none.
+  let errors: Vec<Problem> = Vec.new();
+  const ty: String = handle {
+    region (R) {
+      let c: Checker<R> = Checker { next: 0, scopes: Vec.new(), int: alloc(#Int), bool: alloc(#Bool) };
+      Checker.show(c.program(prog))
+    }
+  } with Diag { report(e) resumes k => { errors.push(e); k() } };
+  if (errors.len() > 0) { throw #Many(errors) }
   // Each definition's body is a function of its parameters alone, placed before `main`.
   let names: HashMap<String, usize> = HashMap.new();
   for (const [i, d] of prog.defs.iter().enumerate()) { names.insert(d.name.clone(), i); }
@@ -675,12 +705,19 @@ function render(src: str, at: usize, message: str): String {
   `${line}:${at - lineStart + 1}: ${message}\n    ${src.slice(lineStart, lineEnd)}\n    ${caret}`
 }
 
-function describe(src: str, e: readonly CompileError): String {
-  match (e) {
+function describeOne(src: str, p: readonly Problem): String {
+  match (p) {
     #Lex { at, message } => render(src, at, message),
     #Parse { at, message } => render(src, at, message),
     #Type { span, message } => render(src, span.start, message),
     #Unbound { span, name } => render(src, span.start, `unknown name \`${name}\``),
+  }
+}
+
+function describe(src: str, e: readonly CompileError): String {
+  match (e) {
+    #Many(ps) => ps.iter().map((p) => describeOne(src, p)).join("\nerror at "),
+    one => describeOne(src, one),
   }
 }
 
@@ -698,6 +735,7 @@ export function main(): void uses Io {
     "let id = fn(x) => x in if id(true) then id(7) else 0",
     "def compose(f, g) = fn(x) => f(g(x));\ncompose(fn(n) => n + 1, fn(n) => n * 2)(20)",
     "def f(x) = x + 1;\nf(true)",
+    "let a = 1 + true in\nlet b = if 3 then 4 else false in\nnope(a)",
   ];
   for (const src of programs) {
     try {

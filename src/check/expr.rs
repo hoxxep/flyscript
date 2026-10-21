@@ -1145,6 +1145,22 @@ impl<'p> Checker<'p> {
         }
     }
 
+    /// A structural union, through any borrow, less some of its tags; `None` for anything else.
+    fn without_tags(&self, t: &Ty, tags: &[String]) -> Option<Ty> {
+        match self.s.resolve(t) {
+            Ty::Borrow(m, inner) => self.without_tags(&inner, tags).map(|u| Ty::Borrow(m, Box::new(u))),
+            Ty::Union(r) => {
+                let mut r = self.s.expand_row(&r);
+                if r.tail != Tail::Closed {
+                    return None;
+                }
+                r.labels.retain(|k, _| !tags.contains(k));
+                Some(Ty::Union(r))
+            }
+            _ => None,
+        }
+    }
+
     /// For a place reached through a borrow or by indexing a collection, whether it can be
     /// changed (through a `mut` borrow); `None` for anything else.
     fn unmovable_place(&self, e: &Expr) -> Option<bool> {
@@ -2041,9 +2057,19 @@ impl<'p> Checker<'p> {
             _ => st,
         };
         let mut types = Vec::new();
+        // Tags that earlier unguarded arms match whatever their payload: a later arm that binds
+        // the whole value sees the union without them, as TypeScript narrows (§3.2).
+        let mut handled: Vec<String> = Vec::new();
         for arm in arms {
             self.scopes.push(HashMap::new());
-            self.bind(&arm.pat, &st);
+            let narrowed = match &arm.pat.kind {
+                PatternKind::Bind(_) if !handled.is_empty() => self.without_tags(&st, &handled),
+                _ => None,
+            };
+            self.bind(&arm.pat, narrowed.as_ref().unwrap_or(&st));
+            if arm.guard.is_none() {
+                whole_tags(&arm.pat, &mut handled);
+            }
             if let Some(g) = &arm.guard {
                 self.check(g, &Ty::bool());
             }
@@ -2532,5 +2558,31 @@ fn leaves_in(e: &Expr, loops: usize) -> Option<Span> {
         ExprKind::Try { body, handler, .. } => block(body, loops).or_else(|| block(handler, loops)),
         ExprKind::Handle { body, arms, .. } => block(body, loops).or_else(|| arms.iter().find_map(|a| block(&a.body, loops))),
         _ => super::own::children(e).into_iter().find_map(|c| leaves_in(c, loops)),
+    }
+}
+
+/// The tags a pattern matches whatever their payload: `#A`, `#A(_, x)`, `#A { .. } | #B(y)`.
+fn whole_tags(p: &Pattern, out: &mut Vec<String>) {
+    fn irrefutable(p: &Pattern) -> bool {
+        match &p.kind {
+            PatternKind::Wild | PatternKind::Bind(_) => true,
+            PatternKind::Tuple(ps) => ps.iter().all(irrefutable),
+            PatternKind::Record { fields, .. } => fields.iter().all(|(_, p)| p.as_ref().is_none_or(irrefutable)),
+            _ => false,
+        }
+    }
+    match &p.kind {
+        PatternKind::Tag { name, args } => {
+            let whole = match args {
+                TagPatArgs::None => true,
+                TagPatArgs::Tuple(ps) => ps.iter().all(irrefutable),
+                TagPatArgs::Record(fs) => fs.iter().all(|(_, p)| p.as_ref().is_none_or(irrefutable)),
+            };
+            if whole {
+                out.push(name.clone());
+            }
+        }
+        PatternKind::Or(ps) => ps.iter().for_each(|p| whole_tags(p, out)),
+        _ => {}
     }
 }

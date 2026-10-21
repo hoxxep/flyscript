@@ -1,0 +1,11 @@
+// A binding that matches what earlier arms did not sees the union without their tags, as
+// TypeScript narrows (§3.2).
+type Problem = #Lex(usize) | #Type(usize);
+type Err = Problem | #Many(Vec<Problem>);
+function one(p: readonly Problem): usize { match (p) { #Lex(n) => n, #Type(n) => n } }
+export function all(e: readonly Err): usize {
+  match (e) {
+    #Many(ps) => ps.len(),
+    p => one(p),
+  }
+}
