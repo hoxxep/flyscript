@@ -356,6 +356,8 @@ impl str {
 impl<T> T[] {
   export function len(self: readonly Self): usize;
   export function iter(self: readonly Self): Gen<readonly T, []>;
+  // Each element, lent `mut`: `for (const x of xs.iterMut()) { x += 1; }` updates `xs`.
+  export function iterMut(self: mut Self): Gen<mut T, []> from self;
 }
 impl<T> Iterable<readonly T> for T[] {
   function each(self: readonly Self): void uses Yield<readonly T>;
@@ -365,6 +367,7 @@ impl<T> Vec<T> {
   export function push(self: mut Self, v: T): void;
   export function len(self: readonly Self): usize;
   export function iter(self: readonly Self): Gen<readonly T, []>;
+  export function iterMut(self: mut Self): Gen<mut T, []> from self;
 }
 impl Eq for String {
   function eq(self: readonly Self, other: readonly Self): bool { self.asStr() == other.asStr() }

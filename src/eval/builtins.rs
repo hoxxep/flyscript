@@ -308,6 +308,18 @@ impl Interp {
             // ---- collections ----
             "slice.len" | "Vec.len" | "Soa.len" => Ok(Value::Int(list(&a(0)).len() as i128)),
             "slice.iter" | "Vec.iter" => Ok(gens_mod::new_gen(self, GenKind::Items { items: list(&a(0)), pos: 0 })),
+            // Each element as a place in the collection, so the loop body writes through it.
+            "slice.iterMut" | "Vec.iterMut" => {
+                let p = place_of(&a(0))?;
+                let items = (0..list(&a(0)).len())
+                    .map(|i| {
+                        let mut q = p.clone();
+                        q.path.push(Seg::Index(i));
+                        Value::Ptr(q)
+                    })
+                    .collect();
+                Ok(gens_mod::new_gen(self, GenKind::Items { items, pos: 0 }))
+            }
             "slice.each" | "Vec.each" | "RegionList.each" => {
                 for item in list(&a(0)) {
                     self.yield_value(item)?;

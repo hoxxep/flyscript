@@ -748,7 +748,9 @@ impl<'p> Own<'p> {
                 Val::default()
             }
             ExprKind::Assign { op, target, value } => {
-                let v = self.expr(value, Use::Move);
+                // Into a place that is not a borrow, a borrow is read, not moved.
+                let how = self.arg_use(&self.ty_of(target), &self.ty_of(value));
+                let v = self.expr(value, how);
                 match self.place(target) {
                     Some(path) if self.captured(path.root) => {
                         self.record_base_uses(target);
@@ -1004,17 +1006,24 @@ impl<'p> Own<'p> {
         match param {
             Ty::Borrow(true, _) => Use::Mut,
             Ty::Borrow(false, _) | Ty::Slice(_) | Ty::Prim(Prim::Str) => Use::Read,
-            _ => {
-                let _ = arg_ty;
-                Use::Move
-            }
+            // A borrow read into an owned place that holds no borrow copies what it refers to
+            // (the checker has required that to be `Copy`); the borrow itself stays.
+            p if matches!(arg_ty, Ty::Borrow(..)) && !matches!(p, Ty::Param(_) | Ty::Var(_)) && self.p.class(p) == 1 => Use::Read,
+            _ => Use::Move,
         }
     }
 
     fn call(&mut self, e: &Expr, callee: &Expr, args: &[Expr]) -> Val {
         let fid = self.typed.calls.get(&e.span).copied();
         let scheme = fid.map(|f| self.p.fns[f].scheme.clone());
-        let mut params: Vec<(String, Ty)> = scheme.as_ref().map(|s| s.params.clone()).unwrap_or_default();
+        // The parameters as instantiated at this call: `push(x)` on a `Vec<i64>` takes an `i64`.
+        let mut params: Vec<(String, Ty)> = match (&scheme, self.typed.targs.get(&e.span)) {
+            (Some(s), Some(args)) if args.len() == s.tparams.len() => {
+                s.params.iter().map(|(n, t)| (n.clone(), super::env::subst_params(t, &s.tparams, args))).collect()
+            }
+            (Some(s), _) => s.params.clone(),
+            (None, _) => Vec::new(),
+        };
         let ret = self.ty_of(e);
         let mut arg_vals: Vec<(Option<String>, Val)> = Vec::new();
         let mut receiver_loan: Option<(LoanId, Path, Span)> = None;

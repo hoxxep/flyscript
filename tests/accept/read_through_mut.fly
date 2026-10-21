@@ -1,0 +1,16 @@
+// A `mut` borrow read into an owned `Copy` place copies what it refers to (§4.1).
+export function a(v: mut Vec<i64>): i64 {
+  let s: i64 = 0;
+  for (const x of v.iterMut()) { s += x; }
+  s
+}
+export function b(x: mut i64): i64 {
+  let s: i64 = 0;
+  s += x;
+  s
+}
+export function c(v: mut Vec<i64>): i64 {
+  let s: i64 = 0;
+  for (const x of v.iterMut()) { const y: i64 = x; s += y; }
+  s
+}

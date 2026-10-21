@@ -1,0 +1,16 @@
+// expect: [10, 20, 30]
+// expect: [P { x: 6, y: 2 }]
+// `iterMut` lends each element `mut`, so a loop updates a collection in place (§5.5).
+import { println } from "std/io";
+struct P { x: i64; y: i64; }
+impl Show for P;
+export function main(): void uses Io {
+  let v: Vec<i64> = Vec.new();
+  v.push(1); v.push(2); v.push(3);
+  for (const x of v.iterMut()) { x *= 10; }
+  println(`${v}`);
+  let ps: Vec<P> = Vec.new();
+  ps.push(P { x: 1, y: 2 });
+  for (const p of ps.iterMut()) { p.x += 5; }
+  println(`${ps}`);
+}

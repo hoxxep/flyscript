@@ -1,0 +1,5 @@
+// error: `v` cannot be used here: it was lent `mut`
+// While `iterMut` lends the elements, the collection itself is locked (§4.1).
+export function grow(v: mut Vec<i64>): void {
+  for (const x of v.iterMut()) { v.push(x); }
+}
