@@ -335,7 +335,7 @@ impl Program {
     fn declare(&mut self) {
         // Pass 1: names.
         for m in 0..self.modules.len() {
-            let items = std::mem::take(&mut self.modules[m].ast.items);
+            let items = self.modules[m].ast.items.clone();
             for (i, item) in items.iter().enumerate() {
                 let (name, binding) = match &item.kind {
                     ItemKind::Struct(s) => (s.name.name.clone(), Binding::Def(self.placeholder(&s.name, m))),
@@ -381,7 +381,6 @@ impl Program {
                     self.modules[m].exports.insert(name, binding);
                 }
             }
-            self.modules[m].ast.items = items;
         }
         for name in ["Fail", "Yield", "Region", "Io", "String", "Ref", "Vec", "Soa", "Iterable", "LentBy", "Copy", "Send"] {
             let prelude = self.module_named("std/prelude").expect("prelude");
@@ -400,7 +399,7 @@ impl Program {
                     self.modules[m].scope.entry(k.clone()).or_insert(*v);
                 }
             }
-            let items = std::mem::take(&mut self.modules[m].ast.items);
+            let items = self.modules[m].ast.items.clone();
             for item in &items {
                 let ItemKind::Import { names, from } = &item.kind else { continue };
                 let target = if is_relative(from) {
@@ -422,20 +421,18 @@ impl Program {
                     }
                 }
             }
-            self.modules[m].ast.items = items;
         }
         // Pass 3: elaborate declarations, then impls, then function signatures.
         for m in 0..self.modules.len() {
-            let items = std::mem::take(&mut self.modules[m].ast.items);
+            let items = self.modules[m].ast.items.clone();
             for item in &items {
                 self.elaborate_def(m, item);
             }
-            self.modules[m].ast.items = items;
         }
         self.check_views();
         self.elaborate_consts();
         for m in 0..self.modules.len() {
-            let items = std::mem::take(&mut self.modules[m].ast.items);
+            let items = self.modules[m].ast.items.clone();
             for (i, item) in items.iter().enumerate() {
                 match &item.kind {
                     ItemKind::Impl(imp) => self.elaborate_impl(m, i, imp),
@@ -453,7 +450,6 @@ impl Program {
                     _ => {}
                 }
             }
-            self.modules[m].ast.items = items;
         }
     }
 
@@ -610,12 +606,11 @@ impl Program {
     fn elaborate_consts(&mut self) {
         for c in 0..self.consts.len() {
             let m = self.consts[c].module;
-            let items = std::mem::take(&mut self.modules[m].ast.items);
+            let items = self.modules[m].ast.items.clone();
             let ann = items.iter().find_map(|it| match &it.kind {
                 ItemKind::Const { name, ty, .. } if name.name == self.consts[c].name => Some(ty.clone()),
                 _ => None,
             });
-            self.modules[m].ast.items = items;
             let scope = TyScope { module: m, ..Default::default() };
             let ty = match ann.flatten() {
                 Some(t) => self.elab_ty(&t, &scope),
@@ -780,9 +775,11 @@ impl Program {
                     }
                 }
             }
-            TypeKind::Call { path, .. } => {
-                self.error(m, t.span, format!("`comptime` type functions such as `{}` are not supported yet", path[0].name));
-                Ty::Error
+            // `Ring(u8, 1024)`: a `comptime function` that returns a type (§7.1).
+            TypeKind::Call { path, args } => {
+                let callee = ast::Expr { kind: ast::ExprKind::Ident(path[0].name.clone()), span: path[0].span };
+                let call = ast::Expr { kind: ast::ExprKind::Call { callee: Box::new(callee), type_args: Vec::new(), args: args.clone() }, span: t.span };
+                super::comptime::Expand::new(self, m, None, Vec::new()).type_of(&call).unwrap_or(Ty::Error)
             }
             TypeKind::Record { fields, rest } => {
                 let labels = fields.iter().map(|f| (f.name.name.clone(), self.elab_ty(&f.ty, scope))).collect();

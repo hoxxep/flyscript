@@ -159,6 +159,24 @@ impl<'p> Expand<'p> {
         }
     }
 
+    /// Evaluates a `comptime` expression that must give a type (a type function's
+    /// application); reports an error and returns `None` otherwise.
+    pub fn type_of(&mut self, e: &Expr) -> Option<Ty> {
+        let r = self.eval(e).and_then(|v| match v {
+            CV::Type(t) => Ok(t),
+            v => fail(e.span, format!("expected a type, found {}", v.kind())),
+        });
+        match r {
+            Ok(t) => Some(t),
+            Err(Stop::Error(span, msg)) => {
+                let m = self.module;
+                self.p.error(m, span, msg);
+                None
+            }
+            Err(Stop::Return(_)) => None,
+        }
+    }
+
     // ---- expansion ----
 
     fn block(&mut self, b: &Block) -> R<Block> {
@@ -820,6 +838,13 @@ impl<'p> Expand<'p> {
             }
             ExprKind::Comptime(x) => self.eval(x)?,
             ExprKind::TypeRef(i) => CV::Type(self.p.spliced[*i].clone()),
+            // An anonymous struct built by `comptime` code is a record type (§7.1).
+            ExprKind::StructType(fields) => {
+                let fields = self.fields(fields)?;
+                let scope = TyScope { module: self.module, ..Default::default() };
+                let labels = fields.iter().map(|f| (f.name.name.clone(), self.p.elab_ty(&f.ty, &scope))).collect();
+                CV::Type(Ty::Record(Row::closed(labels)))
+            }
             _ => return fail(e.span, "this cannot be computed at compile time"),
         })
     }
