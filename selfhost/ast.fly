@@ -1,0 +1,108 @@
+// Flyscript's syntax tree, as far as compiling to JavaScript needs it. Types are kept only where
+// code depends on them: a cast's target, a struct's name, an enum's tags, a parameter lent `mut`.
+
+import { Span, Piece } from "./lex";
+
+// A type, as written. Code generation looks only at names and at `mut`.
+export enum Type {
+  #Named(String, Vec<Type>),
+  #Mut(Box<Type>),
+  #Readonly(Box<Type>),
+  #Other,
+}
+impl Clone for Type;
+
+export enum Pattern {
+  #Wild,
+  #Bind(String),
+  #Int(String),
+  #Str(String),
+  #Bool(bool),
+  #Byte(i64),
+  // `#A`, `#A(p, …)`, `#A { f, g: p }`.
+  #Tag(String, Vec<Pattern>),
+  #TagRecord(String, Vec<[String, Pattern]>),
+  #Tuple(Vec<Pattern>),
+  // `{ f, g: p }` or `Point { … }`.
+  #Record(Vec<[String, Pattern]>),
+  #Or(Vec<Pattern>),
+  // Code `comptime` generates, which this compiler does not run.
+  #Unsupported(String),
+}
+impl Clone for Pattern;
+
+export enum Part { #Text(String), #Expr(Expr) }
+
+export type Param = { name: String; ty: Type };
+
+export enum Expr {
+  #Int(String),
+  #Float(String),
+  #Str(String),
+  #Byte(i64),
+  #Bool(bool),
+  #Template(Vec<Part>),
+  #Ident(String),
+  #Field(Box<Expr>, String),
+  #Index(Box<Expr>, Box<Expr>),
+  #Slice(Box<Expr>, Option<Box<Expr>>, Option<Box<Expr>>),
+  #Call(Box<Expr>, Vec<Expr>),
+  #Unary(String, Box<Expr>),
+  #Binary(String, Box<Expr>, Box<Expr>),
+  #Assign(String, Box<Expr>, Box<Expr>),
+  // `#A`, `#A(x, …)`, `#A { f: x }`.
+  #Tag(String, Vec<Expr>),
+  #TagRecord(String, Vec<[String, Expr]>),
+  // `{ f: x }`, or `Point { f: x }` with its struct's name.
+  #Record(Option<String>, Vec<[String, Expr]>),
+  #List(Vec<Expr>),
+  #Lambda(Vec<Pattern>, Box<Expr>),
+  #Block(Block),
+  #If(Box<Expr>, Block, Option<Box<Expr>>),
+  #While(Box<Expr>, Block),
+  #For(Pattern, Box<Expr>, Block),
+  #Range(Box<Expr>, Box<Expr>),
+  #Match(Box<Expr>, Vec<Arm>),
+  #Try(Block, Pattern, Block),
+  #Throw(Box<Expr>),
+  #Return(Option<Box<Expr>>),
+  #Break,
+  #Continue,
+  #Yield(Box<Expr>),
+  #Cast(Box<Expr>, String),
+  // `mut x`, lending a place `mut`.
+  #LendMut(Box<Expr>),
+  #Unsafe(Block),
+  // `handle { … } with E { op(x) resumes k => … }`.
+  #Handle(Block, String, Vec<HandlerArm>),
+  #Unsupported(String),
+}
+
+export type HandlerArm = { op: String; params: Vec<String>; resumes: Option<String>; body: Block };
+
+export type Arm = { pat: Pattern; guard: Option<Expr>; body: Expr };
+
+export enum Stmt {
+  #Let(bool, Pattern, Expr),
+  #Expr(Expr),
+  #Defer(Expr),
+}
+
+export type Block = { stmts: Vec<Stmt>; tail: Option<Box<Expr>> };
+
+export type Fn = { name: String; params: Vec<Param>; body: Option<Block>; exported: bool; span: Span };
+
+export enum Item {
+  #Import(Vec<[String, String]>, String),
+  #Function(Fn),
+  #Struct(String, Vec<String>, bool),
+  #Enum(String, Vec<String>, bool),
+  #Alias(String, bool),
+  #Const(String, Expr, bool),
+  // `impl [I for] T { … }`: the type's name and its methods.
+  #Impl(String, Vec<Fn>),
+  #Interface(String, bool),
+  #Effect(String, bool),
+}
+
+export type Module = { items: Vec<Item> };

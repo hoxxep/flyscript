@@ -3,6 +3,11 @@ export struct File;
 impl File {
   export function open(path: str): File uses Io, Fail<IoErr>;
   export function lines(self: mut Self): void uses Io, Fail<IoErr>, Yield<String>;
+  // The whole file, as text.
+  export function readText(self: mut Self): String uses Io, Fail<IoErr>;
 }
+
+// Writes `content` to the file at `path`, replacing what was there.
+export function writeFile(path: str, content: str): void uses Io, Fail<IoErr>;
 
 export function println(s: str): void uses Io;

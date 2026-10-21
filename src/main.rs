@@ -77,7 +77,10 @@ fn run(args: &[String]) -> ExitCode {
             Err(_) => flyscript::eval::Value::text(a),
         })
         .collect();
-    let (result, world) = flyscript::eval::run(checked.program, name, values, flyscript::eval::World::default());
+    // A program run from the command line sees the real file system.
+    let mut world = flyscript::eval::World::default();
+    world.real_fs = true;
+    let (result, world) = flyscript::eval::run(checked.program, name, values, world);
     for line in &world.out {
         println!("{line}");
     }

@@ -399,7 +399,8 @@ impl<T, row E> Gen<T, E> {
   export function enumerate(self: Self): Gen<[usize, T], E>;
   export function collect(self: Self): Vec<T> uses ...E;
   // The first item `test` accepts, if any; the rest are not produced.
-  export function find(self: Self, test: mut (x: readonly T) => bool uses ...E): Option<T> uses ...E {
+  // What it finds is one of the generator's items: it borrows what they do, not the test.
+  export function find(self: Self, test: mut (x: readonly T) => bool uses ...E): Option<T> from self uses ...E {
     for (const x of self) { if (test(x)) { return #Some(x); } }
     #None
   }

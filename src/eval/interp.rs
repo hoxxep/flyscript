@@ -250,9 +250,16 @@ impl Interp {
             }
             (r, _) => r,
         };
+        // An owned result is never a borrow: `clone` gives a `Copy` value back as `self`, which
+        // here may be a pointer into its source.
+        let owned = !matches!(self.frame_ty(&self.prog.fns[fid].scheme.ret), Ty::Borrow(..) | Ty::Param(_) | Ty::Assoc(..));
         self.lex = saved;
-        match r {
+        let r = match r {
             Err(Ctl::Return(f, v)) if f == frame => Ok(v),
+            other => other,
+        };
+        match r {
+            Ok(v @ Value::Ptr(_)) if owned => Ok(v.deref()),
             other => other,
         }
     }
@@ -609,7 +616,8 @@ impl Interp {
                     Value::Ref(r) => Ok(Place { root: r.clone(), path: Vec::new() }),
                     _ => Ok(Place { root: cell.clone(), path: Vec::new() }),
                 },
-                None => Err(panic(format!("unknown name `{name}`"))),
+                // A module's constant or function: a temporary.
+                None => Ok(Place { root: shared(self.expr(e, env)?), path: Vec::new() }),
             },
             ExprKind::Field { target, name } => {
                 let mut p = self.place(target, env)?;
@@ -1158,6 +1166,13 @@ impl Interp {
             }
         match &param {
             Ty::Borrow(true, _) => Ok(Value::Ptr(self.place(a, env)?)),
+            // A field or element lent readonly is lent where it is, not copied out. Not a `Copy`
+            // one: a copied argument holds no loan (§4.4), so its source may change while it lives.
+            Ty::Borrow(false, inner)
+                if matches!(a.kind, ExprKind::Field { .. } | ExprKind::Index { .. }) && !is_range_index(a) && !self.prog.is_copy(inner) =>
+            {
+                Ok(Value::Ptr(self.place(a, env)?))
+            }
             Ty::Borrow(false, _) | Ty::Slice(_) | Ty::Prim(Prim::Str) => self.expr(a, env),
             _ => {
                 let v = self.expr(a, env)?;
@@ -1351,4 +1366,8 @@ fn root_name(e: &Expr) -> Option<&str> {
         ExprKind::Field { target, .. } | ExprKind::Index { target, .. } => root_name(target),
         _ => None,
     }
+}
+
+fn is_range_index(e: &Expr) -> bool {
+    matches!(&e.kind, ExprKind::Index { index, .. } if matches!(index.kind, ExprKind::Range { .. }))
 }

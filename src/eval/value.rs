@@ -220,42 +220,93 @@ fn step(v: &Value, seg: &Seg) -> Value {
     }
 }
 
-/// Reads the value at a place, following borrows met along the path.
-pub fn get(p: &Place) -> Value {
-    let mut v = p.root.lock().expect("place").clone();
-    for (i, seg) in p.path.iter().enumerate() {
-        if let Value::Ptr(inner) = &v {
-            let mut q = inner.clone();
-            q.path.extend(p.path[i..].iter().cloned());
-            return get(&q);
-        }
-        if let Value::Cell(c) | Value::Ref(c) = &v {
-            let q = Place { root: c.clone(), path: p.path[i..].to_vec() };
-            return get(&q);
-        }
-        v = step(&v, seg);
+/// The place a place denotes once the borrows met along its path are followed.
+pub fn resolve(p: &Place) -> Place {
+    let next = {
+        let root = p.root.lock().expect("place");
+        redirect(&root, &p.path)
+    };
+    match next {
+        Some(q) => resolve(&q),
+        None => p.clone(),
     }
-    v
+}
+
+/// Where a path through `v` crosses into a borrow: the place it continues at.
+fn redirect(v: &Value, path: &[Seg]) -> Option<Place> {
+    let (seg, rest) = path.split_first()?;
+    match v {
+        Value::Ptr(inner) => {
+            let mut q = inner.clone();
+            q.path.extend(path.iter().cloned());
+            Some(q)
+        }
+        Value::Cell(c) | Value::Ref(c) => Some(Place { root: c.clone(), path: path.to_vec() }),
+        _ => match step_ref(v, seg) {
+            Some(next) => redirect(next, rest),
+            None => redirect(&step(v, seg), rest),
+        },
+    }
+}
+
+/// A step that stays inside `v`; `None` where the step makes a new value (a range, a byte).
+fn step_ref<'a>(v: &'a Value, seg: &Seg) -> Option<&'a Value> {
+    match (v, seg) {
+        (Value::Record(fs), Seg::Field(f)) => fs.get(f),
+        (Value::Tuple(vs), Seg::Field(f)) => vs.get(f.parse::<usize>().ok()?),
+        (Value::Tag(_, payload), Seg::Payload) => Some(payload),
+        (Value::Tag(_, payload), _) => step_ref(payload, seg),
+        (Value::List(vs) | Value::Tuple(vs), Seg::Index(i)) => vs.get(*i),
+        _ => None,
+    }
+}
+
+fn step_mut<'a>(v: &'a mut Value, seg: &Seg) -> Option<&'a mut Value> {
+    match (v, seg) {
+        (Value::Record(fs), Seg::Field(f)) => fs.get_mut(f),
+        (Value::Tuple(vs), Seg::Field(f)) => vs.get_mut(f.parse::<usize>().ok()?),
+        (Value::Tag(_, payload), Seg::Payload) => Some(payload),
+        (Value::Tag(_, payload), seg) => step_mut(payload, seg),
+        (Value::List(vs) | Value::Tuple(vs), Seg::Index(i)) => vs.get_mut(*i),
+        _ => None,
+    }
+}
+
+/// Reads the value at a place, following borrows met along the path. Only the value read is
+/// copied, not what holds it.
+pub fn get(p: &Place) -> Value {
+    let q = resolve(p);
+    let root = q.root.lock().expect("place");
+    read(&root, &q.path)
+}
+
+/// Applies `f` to the value at a place without copying it.
+pub fn view<R>(p: &Place, f: impl FnOnce(&Value) -> R) -> R {
+    let q = resolve(p);
+    let root = q.root.lock().expect("place");
+    let mut v: &Value = &root;
+    for (i, seg) in q.path.iter().enumerate() {
+        match step_ref(v, seg) {
+            Some(next) => v = next,
+            None => return f(&read(v, &q.path[i..])),
+        }
+    }
+    f(v)
+}
+
+fn read(v: &Value, path: &[Seg]) -> Value {
+    let Some((seg, rest)) = path.split_first() else { return v.clone() };
+    match step_ref(v, seg) {
+        Some(next) => read(next, rest),
+        None => read(&step(v, seg), rest),
+    }
 }
 
 /// Writes the value at a place, following borrows met along the path.
 pub fn set(p: &Place, new: Value) {
-    // Find a borrow on the way; if there is one, write through it instead.
-    let mut v = p.root.lock().expect("place").clone();
-    for (i, seg) in p.path.iter().enumerate() {
-        if let Value::Ptr(inner) = &v {
-            let mut q = inner.clone();
-            q.path.extend(p.path[i..].iter().cloned());
-            return set(&q, new);
-        }
-        if let Value::Cell(c) | Value::Ref(c) = &v {
-            let q = Place { root: c.clone(), path: p.path[i..].to_vec() };
-            return set(&q, new);
-        }
-        v = step(&v, seg);
-    }
-    let mut root = p.root.lock().expect("place");
-    write_at(&mut root, &p.path, new);
+    let q = resolve(p);
+    let mut root = q.root.lock().expect("place");
+    write_at(&mut root, &q.path, new);
 }
 
 fn write_at(v: &mut Value, path: &[Seg], new: Value) {
@@ -283,9 +334,28 @@ fn write_in_range(vs: &mut [Value], lo: usize, rest: &[Seg], new: Value) {
     }
 }
 
-/// Applies `f` to the value at a place, in place (used for `push`-like operations).
+/// Applies `f` to the value at a place, in place (used for `push`-like operations). The value is
+/// taken out while `f` runs, so that `f` may read other places in the same root.
 pub fn update(p: &Place, f: impl FnOnce(&mut Value)) {
-    let mut v = get(p);
-    f(&mut v);
-    set(p, v);
+    let q = resolve(p);
+    let taken = {
+        let mut root = q.root.lock().expect("place");
+        let mut v: Option<&mut Value> = Some(&mut root);
+        for seg in &q.path {
+            v = v.and_then(|v| step_mut(v, seg));
+        }
+        v.map(|v| std::mem::replace(v, Value::Unit))
+    };
+    match taken {
+        Some(mut v) => {
+            f(&mut v);
+            set(&q, v);
+        }
+        // Below a range: read, change and write back.
+        None => {
+            let mut v = get(&q);
+            f(&mut v);
+            set(&q, v);
+        }
+    }
 }

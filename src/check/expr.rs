@@ -882,14 +882,24 @@ impl<'p> Checker<'p> {
             ExprKind::Block(b) => self.block(b, expected),
             ExprKind::If { cond, then, otherwise } => {
                 self.check(cond, &Ty::bool());
-                let a = self.block(then, expected);
                 match otherwise {
+                    // `if (c) { #Leaf } else { node(…) }`: the tag is built as the other branch's type.
+                    Some(o) if expected.is_none() && tag_built_block(then) && !tag_built(o) => {
+                        let b = self.expr(o, None);
+                        let anchor = if self.s.resolve(&b).is_never() { None } else { Some(b.clone()) };
+                        let a = self.block(then, anchor.as_ref());
+                        self.join(&[(a, then.span), (b, o.span)], expected)
+                    }
                     Some(o) => {
+                        let a = self.block(then, expected);
                         let first = if self.s.resolve(&a).is_never() { None } else { Some(a.clone()) };
                         let b = self.expr(o, expected.or(first.as_ref()));
                         self.join(&[(a, then.span), (b, o.span)], expected)
                     }
-                    None => Ty::void(),
+                    None => {
+                        self.block(then, expected);
+                        Ty::void()
+                    }
                 }
             }
             ExprKind::While { cond, body } => {
@@ -2089,30 +2099,44 @@ impl<'p> Checker<'p> {
             }
             _ => st,
         };
-        let mut types = Vec::new();
         // Tags that earlier unguarded arms match whatever their payload: a later arm that binds
         // the whole value sees the union without them, as TypeScript narrows (§3.2).
         let mut handled: Vec<String> = Vec::new();
+        let mut before: Vec<Vec<String>> = Vec::new();
         for arm in arms {
-            self.scopes.push(HashMap::new());
-            let narrowed = match &arm.pat.kind {
-                PatternKind::Bind(_) if !handled.is_empty() => self.without_tags(&st, &handled),
-                _ => None,
-            };
-            self.bind(&arm.pat, narrowed.as_ref().unwrap_or(&st));
+            before.push(handled.clone());
             if arm.guard.is_none() {
                 whole_tags(&arm.pat, &mut handled);
             }
+        }
+        // With nothing expected, an arm is checked against what the first arm gave, as TypeScript
+        // does: `#None => alloc(#Error)` after `#Some(t) => t` builds a `Type` (§3.6). Arms whose
+        // value is a bare tag go last, so that they are built as another arm's type.
+        let mut order: Vec<usize> = (0..arms.len()).collect();
+        if expected.is_none() {
+            order.sort_by_key(|&i| tag_built(&arms[i].body));
+        }
+        let mut types: Vec<Option<(Ty, Span)>> = vec![None; arms.len()];
+        let mut first: Option<Ty> = None;
+        for i in order {
+            let arm = &arms[i];
+            self.scopes.push(HashMap::new());
+            let narrowed = match &arm.pat.kind {
+                PatternKind::Bind(_) if !before[i].is_empty() => self.without_tags(&st, &before[i]),
+                _ => None,
+            };
+            self.bind(&arm.pat, narrowed.as_ref().unwrap_or(&st));
             if let Some(g) = &arm.guard {
                 self.check(g, &Ty::bool());
             }
-            // With nothing expected, a later arm is checked against what the first gave, as
-            // TypeScript does: `#None => alloc(#Error)` after `#Some(t) => t` builds a `Type` (§3.6).
-            let first = types.iter().map(|(t, _): &(Ty, Span)| t.clone()).find(|t| !self.s.resolve(t).is_never());
             let t = self.expr(&arm.body, expected.or(first.as_ref()));
-            types.push((t, arm.body.span));
+            if first.is_none() && !self.s.resolve(&t).is_never() {
+                first = Some(t.clone());
+            }
+            types[i] = Some((t, arm.body.span));
             self.scopes.pop();
         }
+        let types: Vec<(Ty, Span)> = types.into_iter().flatten().collect();
         self.pending_matches.push((st, arms.to_vec(), span));
         self.join(&types, expected)
     }
@@ -2625,4 +2649,18 @@ fn whole_tags(p: &Pattern, out: &mut Vec<String>) {
         PatternKind::Or(ps) => ps.iter().for_each(|p| whole_tags(p, out)),
         _ => {}
     }
+}
+
+/// Whether an expression's value is built from a tag written in it, so that its type comes from
+/// what is expected of it.
+fn tag_built(e: &Expr) -> bool {
+    match &e.kind {
+        ExprKind::Tag { .. } => true,
+        ExprKind::Block(b) => tag_built_block(b),
+        _ => false,
+    }
+}
+
+fn tag_built_block(b: &ast::Block) -> bool {
+    b.tail.as_deref().is_some_and(tag_built)
 }

@@ -73,6 +73,16 @@ fn list(v: &Value) -> Vec<Value> {
     }
 }
 
+/// Applies `f` to the list a value is or lends, without copying it.
+fn with_list<R>(v: &Value, f: impl FnOnce(&[Value]) -> R) -> R {
+    match v {
+        Value::List(vs) | Value::Tuple(vs) => f(vs),
+        Value::Ptr(p) => view(p, |x| with_list(x, f)),
+        Value::Cell(c) | Value::Ref(c) => with_list(&c.lock().expect("cell"), f),
+        _ => f(&[]),
+    }
+}
+
 impl Interp {
     /// The name a builtin is known by: `Type.function`, or `function` for a free function.
     fn builtin_key(&self, fid: FnId) -> String {
@@ -439,7 +449,7 @@ impl Interp {
             }
 
             // ---- collections ----
-            "slice.len" | "Vec.len" => Ok(Value::Int(list(&a(0)).len() as i128)),
+            "slice.len" | "Vec.len" => Ok(Value::Int(with_list(&a(0), <[Value]>::len) as i128)),
             "slice.iter" | "Vec.iter" => Ok(gens_mod::new_gen(self, GenKind::Items { items: list(&a(0)), pos: 0 })),
             // Each element as a place in the collection, so the loop body writes through it.
             "slice.iterMut" | "Vec.iterMut" => {
@@ -543,10 +553,10 @@ impl Interp {
                     None => Ok(none()),
                 }
             }
-            "HashMap.len" => Ok(Value::Int(list(&a(0)).len() as i128)),
+            "HashMap.len" => Ok(Value::Int(with_list(&a(0), <[Value]>::len) as i128)),
             "HashMap.has" => {
                 let key = a(1);
-                Ok(Value::Bool(list(&a(0)).iter().any(|e| list(e)[0].equals(&key))))
+                Ok(Value::Bool(with_list(&a(0), |es| es.iter().any(|e| with_list(e, |kv| kv[0].equals(&key))))))
             }
             "HashMap.remove" => {
                 let p = place_of(&a(0))?;
@@ -641,7 +651,7 @@ impl Interp {
                     }
                 Ok(Value::Unit)
             }
-            "RegionList.len" => Ok(Value::Int(list(&a(0)).len() as i128)),
+            "RegionList.len" => Ok(Value::Int(with_list(&a(0), <[Value]>::len) as i128)),
 
             // ---- generators ----
             "generate" => Ok(gens_mod::generate(self, a(0))),
@@ -675,7 +685,7 @@ impl Interp {
 
             // ---- slices as `ParSplit` (§6.5): views are places in the slice ----
             "slice.slice" | "array.slice" | "Vec.slice" => Ok(Value::Ptr(place_of(&a(0))?)),
-            "array.len" => Ok(Value::Int(list(&a(0)).len() as i128)),
+            "array.len" => Ok(Value::Int(with_list(&a(0), <[Value]>::len) as i128)),
             "slice.split" | "array.split" | "Vec.split" | "slice.splitAt" => {
                 let p = place_of(&a(0))?;
                 let n = list(&Value::Ptr(p.clone())).len();
@@ -710,7 +720,8 @@ impl Interp {
             "File.open" => {
                 let path = a(0).as_text().to_string();
                 let mut w = self.world.lock().expect("world");
-                match w.files.get(&path).cloned() {
+                let found = w.files.get(&path).cloned().or_else(|| if w.real_fs { std::fs::read_to_string(&path).ok() } else { None });
+                match found {
                     Some(content) => {
                         let id = w.open_socket(content.into_bytes());
                         Ok(Value::Native("File", id))
@@ -720,6 +731,23 @@ impl Interp {
                         self.raise(Value::tag("NotFound", Value::Unit))
                     }
                 }
+            }
+            "File.readText" => {
+                let id = native(&a(0), "File")? as usize;
+                Ok(Value::text(&String::from_utf8_lossy(&self.world.lock().expect("world").sockets[id].input)))
+            }
+            "writeFile" => {
+                let (path, content) = (a(0).as_text().to_string(), a(1).as_text().to_string());
+                let mut w = self.world.lock().expect("world");
+                if w.real_fs {
+                    if std::fs::write(&path, &content).is_err() {
+                        drop(w);
+                        return self.raise(Value::tag("PermissionDenied", Value::Unit));
+                    }
+                } else {
+                    w.files.insert(path, content);
+                }
+                Ok(Value::Unit)
             }
             "File.lines" => {
                 let id = native(&a(0), "File")? as usize;

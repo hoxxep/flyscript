@@ -28,6 +28,9 @@ pub struct World {
     rng: u64,
     /// Simulated time in nanoseconds: `Io.now` reads it and `Io.sleep` advances it.
     pub clock: u64,
+    /// Whether files not in `files` are read from, and written to, the real file system: so
+    /// for `flyc run`, never for tests, which stay deterministic (§6.4).
+    pub real_fs: bool,
 }
 
 impl Default for World {
@@ -49,6 +52,7 @@ impl World {
             seed,
             rng: seed.max(1),
             clock: 0,
+            real_fs: false,
         }
     }
 
