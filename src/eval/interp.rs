@@ -494,7 +494,18 @@ impl Interp {
                 for p in pieces {
                     match p {
                         ast::TemplatePiece::Lit(s) => out.push_str(s),
-                        ast::TemplatePiece::Expr(x) => out.push_str(&self.expr(x, env)?.show()),
+                        ast::TemplatePiece::Expr(x) => {
+                            let v = self.expr(x, env)?;
+                            match self.op_target(x.span, true) {
+                                // `Show.show` writes it, into a string of its own.
+                                Some((f, tenv)) => {
+                                    let buf = Place { root: shared(Value::text("")), path: Vec::new() };
+                                    self.call_fn_with(f, vec![v, Value::Ptr(buf.clone())], tenv)?;
+                                    out.push_str(&get(&buf).as_text());
+                                }
+                                None => out.push_str(&v.show()),
+                            }
+                        }
                     }
                 }
                 Ok(Value::text(&out))
@@ -545,6 +556,12 @@ impl Interp {
                 })
             }
             ExprKind::BorrowMut(inner) => Ok(Value::Ptr(self.place(inner, env)?)),
+            ExprKind::Binary { op, lhs, rhs } if (*op == "==" || *op == "!=") && self.op_target(e.span, false).is_some() => {
+                let (f, tenv) = self.op_target(e.span, false).expect("an operator's method");
+                let (l, r) = (self.expr(lhs, env)?, self.expr(rhs, env)?);
+                let eq = self.call_fn_with(f, vec![l, r], tenv)?.as_bool();
+                Ok(Value::Bool(eq == (*op == "==")))
+            }
             ExprKind::Binary { op, lhs, rhs } => {
                 if *op == "&&" {
                     return Ok(Value::Bool(self.expr(lhs, env)?.as_bool() && self.expr(rhs, env)?.as_bool()));
@@ -803,6 +820,16 @@ impl Interp {
         let r = self.call_fn_with(fid, vals, tenv);
         self.call_span = saved;
         r
+    }
+
+    /// The method an operator or interpolation at `span` calls, resolved for this frame.
+    fn op_target(&self, span: Span, show: bool) -> Option<(FnId, TEnv)> {
+        let typed = self.prog.typed.get(&self.lex.owner)?;
+        let (f, args) = if show { typed.shows.get(&span)? } else { typed.ops.get(&span)? }.clone();
+        let outer: SubstMap<'_> = self.lex.tenv.iter().map(|(k, v)| (*k, v)).collect();
+        let params = &self.prog.fns[f].scheme.tparams;
+        let tenv: TEnv = Arc::new(params.iter().zip(&args).map(|(g, a)| (g.sym.id, subst_arg(a, &outer))).collect());
+        self.dispatch(f, tenv).ok()
     }
 
     /// The generic arguments `fid` is called with at `span`, in terms of the caller's.

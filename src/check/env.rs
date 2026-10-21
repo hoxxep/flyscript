@@ -8,18 +8,18 @@ use crate::diag::{Diagnostic, Span};
 use crate::syntax::ast::{self, ItemKind, TypeKind};
 use crate::syntax::{parse_declarations, parse_module};
 
-/// The standard library, compiled into the checker: declaration files, whose bodies are the
-/// runtime's, and modules written in Flyscript.
-const STD: &[(&str, &str, bool)] = &[
-    ("std/prelude", include_str!("../../std/prelude.d.fly"), true),
-    ("std/region", include_str!("../../std/region.d.fly"), true),
-    ("std/net", include_str!("../../std/net.d.fly"), true),
-    ("std/io", include_str!("../../std/io.d.fly"), true),
-    ("std/collections", include_str!("../../std/collections.d.fly"), true),
-    ("std/par", include_str!("../../std/par.d.fly"), true),
-    ("std/layout", include_str!("../../std/layout.d.fly"), true),
-    ("std/sync", include_str!("../../std/sync.d.fly"), true),
-    ("std/json", include_str!("../../std/json.fly"), false),
+/// The standard library, compiled into the checker: declaration files, and modules written in
+/// Flyscript. Either may leave out a function's body, which the runtime then provides.
+const STD: &[(&str, &str)] = &[
+    ("std/prelude.fly", include_str!("../../std/prelude.fly")),
+    ("std/region.d.fly", include_str!("../../std/region.d.fly")),
+    ("std/net.d.fly", include_str!("../../std/net.d.fly")),
+    ("std/io.d.fly", include_str!("../../std/io.d.fly")),
+    ("std/collections.d.fly", include_str!("../../std/collections.d.fly")),
+    ("std/par.d.fly", include_str!("../../std/par.d.fly")),
+    ("std/layout.d.fly", include_str!("../../std/layout.d.fly")),
+    ("std/sync.d.fly", include_str!("../../std/sync.d.fly")),
+    ("std/json.fly", include_str!("../../std/json.fly")),
 ];
 
 pub struct Module {
@@ -181,6 +181,12 @@ pub struct Typed {
     /// Types of `Bind` patterns (by the pattern's span), including parameters' bindings.
     pub bindings: HashMap<Span, Ty>,
     pub params: Vec<(String, Ty)>,
+    /// `==`, `!=` and `${e}` that call an interface's method (`Eq.eq`, `Show.show`), by the
+    /// operator's or the interpolated expression's span, with `Self`'s type (§3.5).
+    pub ops: HashMap<Span, (FnId, Vec<GArg>)>,
+    /// Likewise for `${e}`, by the interpolated expression's span (which an operator inside it
+    /// may share).
+    pub shows: HashMap<Span, (FnId, Vec<GArg>)>,
     /// Tag constructions `#A(x)` whose one argument is the whole of a larger payload (§3.2).
     pub whole: std::collections::HashSet<Span>,
     /// The function each call or method call resolved to, by the call's span.
@@ -245,9 +251,9 @@ impl Program {
             spec_requested: HashMap::new(),
             note: None,
         };
-        for (name, source, declarations) in STD {
-            let file = if *declarations { format!("<{name}.d.fly>") } else { format!("<{name}.fly>") };
-            p.add_module(name.to_string(), file, source.to_string(), true, *declarations);
+        for (file, source) in STD {
+            let name = file.trim_end_matches(".fly").trim_end_matches(".d");
+            p.add_module(name.to_string(), format!("<{file}>"), source.to_string(), true, true);
         }
         let mut queue: Vec<PathBuf> = entries.iter().map(|e| normalize(e)).collect();
         while let Some(path) = queue.pop() {
@@ -382,7 +388,7 @@ impl Program {
                 }
             }
         }
-        for name in ["Fail", "Yield", "Region", "Io", "String", "Ref", "Vec", "Soa", "Iterable", "LentBy", "Copy", "Send"] {
+        for name in ["Fail", "Yield", "Region", "Io", "String", "Ref", "Vec", "Soa", "Iterable", "LentBy", "Copy", "Send", "Eq", "Show"] {
             let prelude = self.module_named("std/prelude").expect("prelude");
             let layout = self.module_named("std/layout").expect("layout");
             let found = self.modules[prelude].exports.get(name).or_else(|| self.modules[layout].exports.get(name));

@@ -1,0 +1,372 @@
+// The prelude: in scope in every module without an import.
+
+// ---- Marker interfaces (§4.4) ----
+// Copy, Send and LentBy are satisfied structurally by the compiler.
+export interface Copy {}
+export interface Send {}
+// `Q extends LentBy<K>` holds when K is Q or K lends Q (String lends str, Vec<T> lends T[]).
+export interface LentBy<K> {}
+export interface Drop { function drop(self: mut Self): void; }
+
+// ---- Derived interfaces (§3.5) ----
+// Each is derived below, in Flyscript, for every type that belongs to no module and for structs
+// and enums that ask (`impl Eq for Point;`). `==` and `!=` call `Eq.eq` on anything but a
+// primitive, and `${e}` writes anything but a primitive or string with `Show`.
+export interface Eq { function eq(self: readonly Self, other: readonly Self): bool; }
+export interface Hash { function hash(self: readonly Self, h: mut Hasher): void; }
+// Writes the value as Flyscript would write it: strings quoted, `Point { x: 1, y: 2 }`, `#Some(3)`.
+export interface Show { function show(self: readonly Self, out: mut String): void; }
+export interface Clone { function clone(self: readonly Self): Self; }
+
+export struct Hasher;
+impl Hasher {
+  export function new(): Hasher;
+  export function writeInt(self: mut Self, v: i64): void;
+  export function writeFloat(self: mut Self, v: f64): void;
+  export function writeBool(self: mut Self, v: bool): void;
+  export function writeStr(self: mut Self, s: str): void;
+  export function finish(self: readonly Self): u64;
+}
+
+impl<comptime T: Type> Eq for T {
+  function eq(self: readonly Self, other: readonly Self): bool {
+    comptime match (Type.info(T)) {
+      #Int(_) | #Float(_) | #Bool | #Str | #Void => self == other,
+      #Record(fields) | #Struct { fields } => {
+        comptime for (const f of fields) {
+          if (!self.[f.name].eq(other.[f.name])) { return false; }
+        }
+        true
+      }
+      #Tuple(items) => {
+        comptime for (const [i, _] of items.enumerate()) {
+          if (!self[i].eq(other[i])) { return false; }
+        }
+        true
+      }
+      #Union(tags) | #Enum { tags } => match ([self, other]) {
+        comptime for (const t of tags) {
+          comptime match (t.payload) {
+            #Some(_) => { [#[t.name](a), #[t.name](b)] => a.eq(b), }
+            #None => { [#[t.name], #[t.name]] => true, }
+          }
+        }
+        _ => false,
+      },
+      _ => comptime panic(`${Type.name(T)} cannot be compared`),
+    }
+  }
+}
+
+impl<comptime T: Type> Hash for T {
+  function hash(self: readonly Self, h: mut Hasher): void {
+    comptime match (Type.info(T)) {
+      #Int(_) => h.writeInt(self as i64),
+      #Float(_) => h.writeFloat(self as f64),
+      #Bool => h.writeBool(self),
+      #Str => h.writeStr(self),
+      #Void => {}
+      #Record(fields) | #Struct { fields } => {
+        comptime for (const f of fields) { self.[f.name].hash(mut h); }
+      }
+      #Tuple(items) => {
+        comptime for (const [i, _] of items.enumerate()) { self[i].hash(mut h); }
+      }
+      #Union(tags) | #Enum { tags } => match (self) {
+        comptime for (const [i, t] of tags.enumerate()) {
+          comptime match (t.payload) {
+            #Some(_) => { #[t.name](x) => { h.writeInt(comptime i); x.hash(mut h); }, }
+            #None => { #[t.name] => h.writeInt(comptime i), }
+          }
+        }
+      },
+      _ => comptime panic(`${Type.name(T)} cannot be hashed`),
+    }
+  }
+}
+
+// Writes a string as a quoted literal.
+export function writeQuoted(s: str, out: mut String): void {
+  const bytes = s.asBytes();
+  out.push("\"");
+  let start: usize = 0;
+  let i: usize = 0;
+  while (i < bytes.len()) {
+    const b = bytes[i];
+    const esc = match (b) { b'"' => "\\\"", b'\\' => "\\\\", b'\n' => "\\n", b'\t' => "\\t", b'\r' => "\\r", _ => "" };
+    if (esc.len() > 0) {
+      out.push(s.slice(start, i));
+      out.push(esc);
+      start = i + 1;
+    }
+    i += 1;
+  }
+  out.push(s.slice(start, bytes.len()));
+  out.push("\"");
+}
+
+impl<comptime T: Type> Show for T {
+  function show(self: readonly Self, out: mut String): void {
+    comptime match (Type.info(T)) {
+      #Int(_) | #Float(_) | #Bool => out.push(`${self}`),
+      #Str => writeQuoted(self, mut out),
+      #Void => out.push("void"),
+      #Record(fields) | #Struct { fields } => {
+        comptime match (Type.info(T)) {
+          #Struct { name } => { out.push(comptime name); out.push(" "); }
+          _ => {}
+        }
+        out.push("{");
+        comptime for (const [i, f] of fields.enumerate()) {
+          out.push(comptime if (i == 0) { " " } else { ", " });
+          out.push(comptime f.name);
+          out.push(": ");
+          self.[f.name].show(mut out);
+        }
+        out.push(" }");
+      }
+      #Tuple(items) => {
+        out.push("[");
+        comptime for (const [i, _] of items.enumerate()) {
+          comptime if (i > 0) { out.push(", "); }
+          self[i].show(mut out);
+        }
+        out.push("]");
+      }
+      #Union(tags) | #Enum { tags } => match (self) {
+        comptime for (const t of tags) {
+          comptime match (t.payload) {
+            #Some(_) => {
+              #[t.name](x) => {
+                out.push(comptime `#${t.name}(`);
+                x.show(mut out);
+                out.push(")");
+              },
+            }
+            #None => { #[t.name] => out.push(comptime `#${t.name}`), }
+          }
+        }
+      },
+      #Fn => out.push("<function>"),
+      _ => out.push(comptime `<${Type.name(T)}>`),
+    }
+  }
+}
+
+impl<comptime T: Type> Clone for T {
+  function clone(self: readonly Self): T {
+    comptime match (Type.info(T)) {
+      #Int(_) | #Float(_) | #Bool | #Str | #Void => self,
+      #Record(fields) | #Struct { fields } => {
+        { comptime for (const f of fields) { [f.name]: self.[f.name].clone(), } }
+      }
+      #Tuple(items) => {
+        const v: T = [comptime for (const [i, _] of items.enumerate()) { self[i].clone() }];
+        v
+      }
+      #Union(tags) | #Enum { tags } => match (self) {
+        comptime for (const t of tags) {
+          comptime match (t.payload) {
+            #Some(_) => { #[t.name](x) => #[t.name](x.clone()), }
+            #None => { #[t.name] => #[t.name], }
+          }
+        }
+      },
+      _ => comptime panic(`${Type.name(T)} cannot be cloned`),
+    }
+  }
+}
+
+// ---- Tag-union aliases (§3.2) ----
+export type Option<T> = #Some(T) | #None;
+export type Result<T, E> = #Ok(T) | #Err(E);
+
+impl<T> Option<T> {
+  export function isSome(self: readonly Self): bool;
+  export function take(self: mut Self): Option<T>;
+  export function unwrapOr(self: Self, fallback: T): T;
+}
+impl<T extends Clone> Option<readonly T> {
+  export function cloned(self: Self): Option<T>;
+}
+impl<T, E> Result<T, E> {
+  export function unwrap(self: Self): T uses Fail<E>;
+}
+
+// ---- The standard effects (§5.1) ----
+export effect Fail<E> { raise(err: E): never; }
+export effect Yield<T> { yield(item: T): void; }
+export effect Region<region R> {}
+export effect Io {
+  read(fd: u32, buf: mut u8[]): Result<usize, IoErr>;
+  write(fd: u32, buf: readonly u8[]): Result<usize, IoErr>;
+  now(): u64;
+  sleep(nanos: u64): void;
+  park(key: u64): void;
+}
+export type IoErr = #Reset | #TimedOut | #BrokenPipe | #NotFound | #PermissionDenied;
+
+impl<E> Fail<E> {
+  export function capture<T>(body: once () => T uses Fail<E>): Result<T, E>;
+  // Wraps one call's failures (§5.4): `Fail.map(() => fetch(u), (e) => #Http(e))`.
+  export function map<T, F>(body: once () => T uses Fail<E>, wrap: once (e: E) => F): T uses Fail<F>;
+}
+
+// ---- Reflection (§7.2): what `Type.info` tells `comptime` code about a type ----
+export type Field = { name: str; type: Type };
+// A tag's payload: the one type of `#A(T)`, the tuple or record of a larger payload, or none.
+export type TagInfo = { name: str; payload: Option<Type> };
+export type TypeInfo =
+  | #Int { signed: bool; bits: u8 } | #Float(u8) | #Bool | #Str | #Void | #Fn
+  | #Record(Field[]) | #Tuple(Type[]) | #Union(TagInfo[])
+  | #Struct { name: str; fields: Field[] } | #Enum { name: str; tags: TagInfo[] }
+  | #Array { item: Type; len: usize } | #Slice(Type) | #Borrow { mutable: bool; type: Type }
+  | #Opaque { name: str; args: Type[] };
+
+// ---- Iteration (§5.5): generators, pull iteration and iteration chains ----
+export view struct Gen<T, row E>;
+
+export function generate<T, row E>(producer: once () => void uses Yield<T>, ...E): Gen<T, E>;
+
+impl<T, row E> Gen<T, E> {
+  export function next(self: mut Self): Option<T> uses ...E;
+  export function map<U>(self: Self, f: (x: T) => U): Gen<U, E>;
+  export function filter(self: Self, keep: (x: readonly T) => bool): Gen<T, E>;
+  export function take(self: Self, n: usize): Gen<T, E>;
+  export function zip<U>(self: Self, other: Gen<U, E>): Gen<[T, U], E>;
+  export function enumerate(self: Self): Gen<[usize, T], E>;
+  export function collect(self: Self): Vec<T> uses ...E;
+}
+
+impl<T, row E> Iterable<T, E> for Gen<T, E> {
+  function each(self: readonly Self): void uses Yield<T>, ...E;
+}
+
+export interface Iterable<T, row E = []> {
+  function each(self: readonly Self): void uses Yield<T>, ...E;
+}
+
+// ---- Structured concurrency (§6.1): library code over the scheduler and Io.park ----
+// A task runs on a new fiber, where only `Io` and its scope's capture of failures are handled.
+export struct Scope<X>;
+export struct Fiber<T>;
+impl Io {
+  // The body, like its tasks, performs only `Io` and failures: an outer region is frozen while tasks run (§6.1).
+  export function scope<T, X>(body: once (s: mut Scope<X>) => T uses Io, Fail<X>): T uses Io, Fail<X>;
+}
+impl<X> Scope<X> {
+  export function spawn(self: mut Self, task: once () => void uses Io): void;
+  export function fork<T extends Send>(self: mut Self, task: once () => T uses Io, Fail<X>): Fiber<T>;
+}
+impl<T> Fiber<T> {
+  export function join(self: Self): T uses Io;
+}
+
+// ---- Owned containers and strings (§3.1) ----
+export struct String;
+export struct Vec<T>;
+export struct Box<T>;
+export struct Arc<T extends Send>;
+
+impl String {
+  export function new(): String;
+  export function fromStr(s: str): String;
+  export function len(self: readonly Self): usize;
+  export function push(self: mut Self, s: str): void;
+  export function asStr(self: readonly Self): str from self;
+  // The string these bytes spell, if they are UTF-8.
+  export function fromUtf8(bytes: Vec<u8>): Option<String>;
+}
+impl str {
+  // Bytes `lo` to `hi`, which must fall on character boundaries.
+  export function slice(self: Self, lo: usize, hi: usize): str from self;
+  export function len(self: Self): usize;
+  export function toString(self: Self): String;
+  export function bytes(self: Self): void uses Yield<u8>;
+  export function asBytes(self: Self): readonly u8[] from self;
+  export function splitWhitespace(self: Self): void uses Yield<str>;
+}
+impl<T> T[] {
+  export function len(self: readonly Self): usize;
+  export function iter(self: readonly Self): Gen<readonly T, []>;
+}
+impl<T> Iterable<readonly T> for T[] {
+  function each(self: readonly Self): void uses Yield<readonly T>;
+}
+impl<T> Vec<T> {
+  export function new(): Vec<T>;
+  export function push(self: mut Self, v: T): void;
+  export function len(self: readonly Self): usize;
+  export function iter(self: readonly Self): Gen<readonly T, []>;
+}
+impl Eq for String {
+  function eq(self: readonly Self, other: readonly Self): bool { self.asStr() == other.asStr() }
+}
+impl Hash for String {
+  function hash(self: readonly Self, h: mut Hasher): void { h.writeStr(self); }
+}
+impl Show for String {
+  function show(self: readonly Self, out: mut String): void { writeQuoted(self, mut out); }
+}
+impl Clone for String {
+  function clone(self: readonly Self): String;
+}
+impl<T extends Eq> Eq for Vec<T> {
+  function eq(self: readonly Self, other: readonly Self): bool {
+    if (self.len() != other.len()) { return false; }
+    let i: usize = 0;
+    while (i < self.len()) {
+      if (!self[i].eq(other[i])) { return false; }
+      i += 1;
+    }
+    true
+  }
+}
+impl<T extends Hash> Hash for Vec<T> {
+  function hash(self: readonly Self, h: mut Hasher): void {
+    h.writeInt(self.len() as i64);
+    for (const x of self) { x.hash(mut h); }
+  }
+}
+impl<T extends Show> Show for Vec<T> {
+  function show(self: readonly Self, out: mut String): void {
+    out.push("[");
+    let first = true;
+    for (const x of self) {
+      if (!first) { out.push(", "); }
+      first = false;
+      x.show(mut out);
+    }
+    out.push("]");
+  }
+}
+impl<T extends Clone> Clone for Vec<T> {
+  function clone(self: readonly Self): Vec<T> {
+    let v = Vec.new();
+    for (const x of self) { v.push(x.clone()); }
+    v
+  }
+}
+impl<T> Iterable<readonly T> for Vec<T> {
+  function each(self: readonly Self): void uses Yield<readonly T>;
+}
+impl<T> Box<T> {
+  export function new(v: T): Box<T>;
+}
+impl<T extends Send> Arc<T> {
+  export function new(v: T): Arc<T>;
+}
+
+// ---- Regions (§4.6) ----
+// `Ref<R, T>` is used as a `readonly T`; the compiler provides the projection.
+export struct Ref<region R, T>;
+
+export function alloc<region R, T>(v: T): Ref<R, T> uses Region<R>;
+// TypeScript's `parseInt` and `parseFloat`, without the `NaN`: decimal text, or `#None`.
+export function parseInt(s: str): Option<i64>;
+export function parseFloat(s: str): Option<f64>;
+export function copyUtf8<region R>(bytes: readonly u8[]): Ref<R, str> uses Region<R>, Fail<#MalformedUtf8>;
+export function fmt<region R>(s: str): Ref<R, str> uses Region<R>;
+
+// ---- Arrays ----
+export function repeat<T extends Copy, comptime N: usize>(v: T): T[N];

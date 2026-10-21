@@ -135,10 +135,6 @@ impl Program {
                 let Some(GArg::Ty(k)) = args.first() else { return true };
                 return self.lent_by(strip_borrows(ty), strip_borrows(k));
             }
-            // Derived for every type built from parts that have them (§3.5).
-            "Eq" | "Hash" | "Show" | "Clone" if self.is_std_def(*d) && !matches!(strip_borrows(ty), Ty::Param(_)) => {
-                return !matches!(strip_borrows(ty), Ty::Fn(_));
-            }
             _ => {}
         }
         if !matches!(self.defs[*d].kind, DefKind::Interface { .. }) {

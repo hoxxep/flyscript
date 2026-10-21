@@ -236,6 +236,26 @@ impl Interp {
                 Ok(Value::Unit)
             }
             "String.asStr" => Ok(Value::Text(a(0).as_text())),
+            "String.clone" => Ok(Value::Text(a(0).as_text())),
+            // A hasher is an FNV-1a state.
+            "Hasher.new" => Ok(Value::Int(0xcbf29ce484222325)),
+            "Hasher.writeInt" | "Hasher.writeFloat" | "Hasher.writeBool" | "Hasher.writeStr" => {
+                let bytes: Vec<u8> = match a(1).deref() {
+                    Value::Int(i) => (i as i64).to_le_bytes().to_vec(),
+                    Value::Float(f) => f.to_bits().to_le_bytes().to_vec(),
+                    Value::Bool(b) => vec![b as u8],
+                    other => other.as_text().as_bytes().to_vec(),
+                };
+                let p = place_of(&a(0))?;
+                let mut h = get(&p).as_int() as u64;
+                for b in bytes {
+                    h ^= b as u64;
+                    h = h.wrapping_mul(0x100000001b3);
+                }
+                set(&p, Value::Int(h as i128));
+                Ok(Value::Unit)
+            }
+            "Hasher.finish" => Ok(Value::Int(a(0).deref().as_int() as u64 as i128)),
             "String.fromUtf8" => {
                 let bytes: Vec<u8> = match a(0).deref() {
                     Value::List(vs) => vs.iter().map(|v| v.deref().as_int() as u8).collect(),

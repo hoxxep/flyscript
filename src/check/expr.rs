@@ -59,6 +59,9 @@ pub struct Checker<'p> {
     pending_targs: Vec<PendingCall>,
     /// Calls of templates, specialized once their `comptime` arguments are known.
     pending_specs: Vec<(Span, FnId, Vec<GArg>)>,
+    /// `==`, `!=` and `${e}` on operands whose types are not yet final: each calls an
+    /// interface's method unless the operand is a primitive (§3.5).
+    pending_ops: Vec<(Span, Ty, &'static str, &'static str)>,
     /// In a derivation's specialization, the type that asked for it: its private fields are
     /// visible here (§7.3).
     privileged: Option<DefId>,
@@ -116,6 +119,7 @@ pub fn check_fn(p: &mut Program, fid: FnId) {
         bounds: scheme.tparams.iter().map(|g| (g.sym.id, g.bounds.clone())).collect(),
         pending_targs: Vec::new(),
         pending_specs: Vec::new(),
+        pending_ops: Vec::new(),
         privileged: None,
     };
     c.privileged = c.p.spec_requested.get(&fid).copied();
@@ -144,6 +148,48 @@ pub fn check_fn(p: &mut Program, fid: FnId) {
         if !c.p.is_copy(&z) && !matches!(z, Ty::Var(_) | Ty::Error) {
             let shown = format!("{}", Show(&z, &*c.p));
             c.p.error(module, span, format!("cannot move a `{shown}` out of a borrow; it is not `Copy`"));
+        }
+    }
+    for (span, t, iface, method) in std::mem::take(&mut c.pending_ops) {
+        // Through borrows and region references, which read as what they refer to.
+        let mut t = c.s.zonk(&t);
+        loop {
+            let inner = match &t {
+                Ty::Borrow(_, inner) => (**inner).clone(),
+                Ty::Named(d, args) if c.p.known.get("Ref") == Some(d) => match args.get(1) {
+                    Some(GArg::Ty(inner)) => inner.clone(),
+                    _ => break,
+                },
+                _ => break,
+            };
+            t = inner;
+        }
+        // Primitives, and strings when written into a string, are built in.
+        let builtin = match &t {
+            Ty::Prim(_) | Ty::Error | Ty::Var(_) => true,
+            Ty::Named(d, _) => iface == "Show" && c.p.known.get("String") == Some(d),
+            _ => false,
+        };
+        if builtin {
+            continue;
+        }
+        c.s.close_rows(&t);
+        let t = c.s.zonk(&t);
+        let Some(&d) = c.p.known.get(iface) else { continue };
+        let assumed = |id: u32| c.bounds.get(&id).cloned().unwrap_or_default();
+        if !c.p.satisfies(&t, &Ty::Named(d, Vec::new()), &assumed) {
+            let shown = format!("{}", Show(&t, &*c.p));
+            let hint = match &t {
+                Ty::Named(n, _) => format!(": ask for it with `impl {iface} for {};`", c.p.defs[*n].name),
+                _ => String::new(),
+            };
+            c.p.error(module, span, format!("`{shown}` does not implement `{iface}`{hint}"));
+            continue;
+        }
+        c.p.ensure_impl(d, &t, 0);
+        if let Some(&f) = c.p.iface_fns.get(&(d, method.to_string())) {
+            let table = if iface == "Show" { &mut c.typed.shows } else { &mut c.typed.ops };
+            table.insert(span, (f, vec![GArg::Ty(t)]));
         }
     }
     for (span, args, bounds) in std::mem::take(&mut c.pending_targs) {
@@ -675,7 +721,8 @@ impl<'p> Checker<'p> {
             ExprKind::Template(pieces) => {
                 for piece in pieces {
                     if let ast::TemplatePiece::Expr(x) = piece {
-                        self.expr(x, None);
+                        let t = self.expr(x, None);
+                        self.pending_ops.push((x.span, t, "Show", "show"));
                     }
                 }
                 self.string_ty()
@@ -1144,7 +1191,11 @@ impl<'p> Checker<'p> {
             self.err(span, format!("`{op}` needs operands of the same type, found `{a}` and `{b}`"));
         }
         match op {
-            "==" | "!=" | "<" | ">" | "<=" | ">=" => Ty::bool(),
+            "==" | "!=" => {
+                self.pending_ops.push((span, l.clone(), "Eq", "eq"));
+                Ty::bool()
+            }
+            "<" | ">" | "<=" | ">=" => Ty::bool(),
             _ => l,
         }
     }

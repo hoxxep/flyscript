@@ -1,0 +1,4 @@
+// error: `Point` does not implement `Eq`: ask for it with `impl Eq for Point;`
+// A struct is a new type: it is compared with `==` only if it asks for `Eq` (§3.5).
+struct Point { x: i64; y: i64; }
+export function same(a: readonly Point, b: readonly Point): bool { a == b }

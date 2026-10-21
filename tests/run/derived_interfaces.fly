@@ -1,0 +1,41 @@
+// expect: Point { x: 1, y: 2 } == Point { x: 1, y: 2 }: true
+// expect: true
+// expect: true false
+// expect: #Line([Point { x: 0, y: 0 }, Point { x: 3, y: 4 }]) true false
+// expect: { name: "ada", tags: [1, 2] } true
+// expect: ["x \"y\""]
+// Eq, Show, Clone and Hash are derivations in the prelude (§3.5): structs and enums ask for them,
+// records and unions have them, and `==` and `${e}` call them.
+import { println } from "std/io";
+
+struct Point { x: i64; y: i64; }
+impl Eq for Point;
+impl Show for Point;
+impl Clone for Point;
+impl Hash for Point;
+
+enum Shape { #Dot(Point), #Line(Point, Point), #Empty }
+impl Eq for Shape;
+impl Show for Shape;
+
+function hashOf<T extends Hash>(v: readonly T): u64 {
+  let h = Hasher.new();
+  v.hash(mut h);
+  h.finish()
+}
+
+export function main(): void uses Io {
+  const p = Point { x: 1, y: 2 };
+  const q = p.clone();
+  println(`${p} == ${q}: ${p == q}`);
+  println(`${p != Point { x: 1, y: 3 }}`);
+  println(`${hashOf(p) == hashOf(q)} ${hashOf(p) == hashOf(Point { x: 2, y: 1 })}`);
+  const a: Shape = #Line(Point { x: 0, y: 0 }, Point { x: 3, y: 4 });
+  const b: Shape = #Line(Point { x: 0, y: 0 }, Point { x: 3, y: 4 });
+  println(`${a} ${a == b} ${a == #Empty}`);
+  const r = { name: "ada", tags: [1, 2] };
+  println(`${r} ${r == { name: "ada", tags: [1, 2] }}`);
+  let names = Vec.new();
+  names.push(String.fromStr("x \"y\""));
+  println(`${names}`);
+}

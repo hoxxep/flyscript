@@ -244,7 +244,9 @@ A method's receiver is a first parameter named `self`: `self: Self` (by move), `
 
 ### 3.5 Derived interfaces
 
-An interface can come with a *derivation*: an impl, written in Flyscript with `comptime` reflection, that works for any type whose shape it can see (§7.3). Records, tuples and tag unions get it whenever they have no impl of their own; a struct or enum asks for it with `impl Eq for Point;`. `Eq`, `Hash`, `Show` and `Clone` are derived this way, so an error union prints, compares and hashes with no code, and so are `ToJson` and `FromJson` in the standard library.
+An interface can come with a *derivation*: an impl, written in Flyscript with `comptime` reflection, that works for any type whose shape it can see (§7.3). Records, tuples and tag unions get it whenever they have no impl of their own; a struct or enum asks for it with `impl Eq for Point;`. `Eq`, `Hash`, `Show` and `Clone` are derived this way in the prelude, so an error union prints, compares and hashes with no code, and so are `ToJson` and `FromJson` in the standard library.
+
+The operators use them. `==` and `!=` are built in for primitives and call `Eq.eq` on anything else; `` `${e}` `` writes a primitive or a string as it is and anything else with `Show`, which writes a value as Flyscript would (`Point { x: 1, y: 2 }`, `#Some("a")`). A struct is a new type, so it is compared or printed only if it asks: `impl Eq for Point;`.
 
 ### 3.6 Inference
 
@@ -864,9 +866,9 @@ Everything here follows from the rules above: the failure row of the `try` body 
 
 ## 11. Implementation
 
-The prototype compiler, `flyc`, implements this specification except code generation. `Soa<T>` is still built in rather than written as a template, and the checker satisfies `Eq`, `Hash`, `Show` and `Clone` structurally until their derivations move into the prelude.
+The prototype compiler, `flyc`, implements this specification except code generation. `Soa<T>` is still built in rather than written as a template.
 
-1. **Parse** each module into a syntax tree; standard-library modules are `.d.fly` declaration files, whose bodies the runtime provides, and Flyscript modules (`std/json`).
+1. **Parse** each module into a syntax tree. Standard-library modules are declaration files and Flyscript modules (the prelude's derivations, `std/json`); either may leave out a body that the runtime provides.
 2. **Expand** `comptime` code: a template is specialized when a call or a bound needs it, its body expanded with fresh positions in source order (each repeated copy is distinct code to the later passes) that map back to the template for diagnostics.
 3. **Check types and effects** bidirectionally with one row unifier for records and tag unions; effect rows are checked by subsumption into the effects allowed at each point, with region arguments as part of an effect's label and `Fail` payloads compared by union inclusion. Region arguments are solved over the body, and an undetermined allocation goes to the innermost region it does not escape from.
 4. **Check ownership** after typing: every value carries the loans it holds, loans flow through call results, patterns, assignments and captures, and a loan is live while any binding holding it may still be used, judged by reachability over the program's structure.
