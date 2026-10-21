@@ -317,8 +317,8 @@ impl<'p> Checker<'p> {
             let shapes_fit = f.params.len() == x.params.len()
                 && f.params.iter().zip(&x.params).all(|(a, b)| self.s.unify(a, b).is_ok())
                 && self.lends(&f.ret, &x.ret);
-            if shapes_fit {
-                if let Err(e) = self.s.eff_sub(&f.effects, &x.effects) {
+            if shapes_fit
+                && let Err(e) = self.s.eff_sub(&f.effects, &x.effects) {
                     let what = self.show_eff(&e);
                     let allowed = self.s.zonk_effs(&x.effects);
                     let allowed = if allowed.effs.is_empty() && allowed.tail == Tail::Closed {
@@ -330,7 +330,6 @@ impl<'p> Checker<'p> {
                     self.err(span, format!("this function performs {what}, but {allowed} may be performed here"));
                     return;
                 }
-            }
             self.s.restore(snap);
         }
         if !self.lends(found, expected) {
