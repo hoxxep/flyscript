@@ -5,7 +5,7 @@ import { Expr, Op, Program } from "./syntax";
 // ---- Code generation to a stack machine ----
 
 // Each function has a frame of its own: what it captured, then its parameters, then its `let`s.
-export enum Instr { #Push(i64), #Load(usize), #Global(usize), #Store, #Drop, #Add, #Sub, #Mul, #Lt, #Jump(usize), #JumpIfFalse(usize), #MakeFn(usize, usize, usize), #Call(usize), #Ret, #Construct(usize, usize), #TagIs(usize), #Unpack(usize), #Unmatched }
+export enum Instr { #Push(i64), #Load(usize), #Global(usize), #Store, #Drop, #Add, #Sub, #Mul, #Lt, #Jump(usize), #JumpIfFalse(usize), #MakeFn(usize, usize, usize), #Call(usize), #Ret, #Construct(usize, usize), #TagIs(usize), #Unpack(usize), #Unmatched, #MakeRecord(Vec<String>), #GetField(String) }
 impl Clone for Instr;
 impl Show for Instr;
 
@@ -36,6 +36,8 @@ export function freeVars(e: readonly Expr, bound: mut Vec<String>, out: mut Vec<
       freeVars(f, mut bound, mut out);
       for (const a of args) { freeVars(a, mut bound, mut out); }
     }
+    #Record(fields, _) => { for (const [_, v] of fields) { freeVars(v, mut bound, mut out); } }
+    #Field(target, _, _) => freeVars(target, mut bound, mut out),
     #Case(scrutinee, arms, _) => {
       freeVars(scrutinee, mut bound, mut out);
       for (const arm of arms) {
@@ -134,6 +136,18 @@ impl Gen {
           }
         }
       }
+      #Record(fields, _) => {
+        let names: Vec<String> = Vec.new();
+        for (const [name, value] of fields) {
+          self.gen(value);
+          names.push(name.clone());
+        }
+        self.emit(#MakeRecord(names));
+      }
+      #Field(target, name, _) => {
+        self.gen(target);
+        self.emit(#GetField(name.clone()));
+      }
       #Case(scrutinee, arms, _) => {
         // The value matched is a hidden local; each arm tests its tag, then binds its fields.
         self.gen(scrutinee);
@@ -171,7 +185,7 @@ impl Gen {
 
 // ---- The virtual machine ----
 
-export enum Value { #Int(i64), #Closure(usize, usize, Vec<Value>), #Data(usize, Vec<Value>) }
+export enum Value { #Int(i64), #Closure(usize, usize, Vec<Value>), #Data(usize, Vec<Value>), #Record(Vec<[String, Value]>) }
 impl Clone for Value;
 
 export type Frame = { ret: usize; locals: Vec<Value> };
@@ -240,6 +254,23 @@ export function run(code: readonly Instr[], globals: readonly Value[]): Value {
         _ => panic("checked: a constructed value"),
       },
       #Unmatched => panic("checked: every case is handled"),
+      #MakeRecord(names) => {
+        let fields: Vec<[String, Value]> = Vec.new();
+        for (const name of names) { fields.push([name.clone(), #Int(0)]); }
+        let i = names.len();
+        while (i > 0) {
+          i -= 1;
+          fields[i] = [names[i].clone(), stack.pop().unwrap()];
+        }
+        stack.push(#Record(fields));
+      }
+      #GetField(name) => match (stack.pop().unwrap()) {
+        #Record(fields) => match (fields.iter().find(([n, _]) => n == name)) {
+          #Some([_, v]) => stack.push(v.clone()),
+          #None => panic("checked: the field is there"),
+        },
+        _ => panic("checked: a record"),
+      },
       #Ret => {
         const f = frames.pop().unwrap();
         pc = f.ret;
@@ -255,6 +286,7 @@ export function showValue(v: readonly Value, names: readonly String[]): String {
   match (v) {
     #Int(n) => `${n}`,
     #Closure(_, _, _) => `<function>`,
+    #Record(fields) => `{${fields.iter().map(([n, f]) => `${n} = ${showValue(f, names)}`).join(", ")}}`,
     #Data(tag, fields) => if (fields.len() == 0) { names[tag].clone() } else {
       `${names[tag]}(${fields.iter().map((f) => showValue(f, names)).join(", ")})`
     },

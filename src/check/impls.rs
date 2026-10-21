@@ -366,8 +366,29 @@ impl Program {
     }
 }
 
+/// Specializations are keyed by their `comptime` arguments with regions erased: what generated
+/// code does never depends on which region data lives in, and at run time a region parameter
+/// stands for whichever region the frame was given.
 pub fn spec_key(ct: &[(Sym, Ty)]) -> String {
-    format!("{:?}", ct.iter().map(|(_, t)| t).collect::<Vec<_>>())
+    format!("{:?}", ct.iter().map(|(_, t)| erase_regions(t)).collect::<Vec<_>>())
+}
+
+fn erase_regions(t: &Ty) -> Ty {
+    let arg = |a: &GArg| match a {
+        GArg::Region(_) => GArg::Region(Region::Heap),
+        GArg::Ty(t) => GArg::Ty(erase_regions(t)),
+        other => other.clone(),
+    };
+    match t {
+        Ty::Named(d, args) => Ty::Named(*d, args.iter().map(arg).collect()),
+        Ty::Tuple(ts) => Ty::Tuple(ts.iter().map(erase_regions).collect()),
+        Ty::Record(r) => Ty::Record(Row { labels: r.labels.iter().map(|(k, v)| (k.clone(), erase_regions(v))).collect(), tail: r.tail.clone() }),
+        Ty::Union(r) => Ty::Union(Row { labels: r.labels.iter().map(|(k, v)| (k.clone(), erase_regions(v))).collect(), tail: r.tail.clone() }),
+        Ty::Array(e, l) => Ty::Array(Box::new(erase_regions(e)), l.clone()),
+        Ty::Slice(e) => Ty::Slice(Box::new(erase_regions(e))),
+        Ty::Borrow(m, e) => Ty::Borrow(*m, Box::new(erase_regions(e))),
+        other => other.clone(),
+    }
 }
 
 pub fn contains_params(t: &Ty) -> bool {

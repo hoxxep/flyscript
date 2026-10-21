@@ -15,6 +15,9 @@ export enum Expr {
   #Fn(Vec<String>, Box<Expr>, Span),
   #Call(Box<Expr>, Vec<Expr>, Span),
   #Case(Box<Expr>, Vec<Arm>, Span),
+  // `{x = 1, y = 2}` and `r.x`: structural records, typed by rows.
+  #Record(Vec<[String, Expr]>, Span),
+  #Field(Box<Expr>, String, Span),
 }
 
 // `Cons(h, t) => body`: a constructor and names for its fields.
@@ -31,7 +34,7 @@ export type Program = { datas: Vec<DataDecl>; defs: Vec<Def>; main: Expr };
 export function spanOf(e: readonly Expr): Span {
   match (e) {
     #Int(_, s) | #Bool(_, s) | #Var(_, s) => s,
-    #Bin(_, _, _, s) | #If(_, _, _, s) | #Let(_, _, _, s) | #Fn(_, _, s) | #Call(_, _, s) | #Case(_, _, s) => s,
+    #Bin(_, _, _, s) | #If(_, _, _, s) | #Let(_, _, _, s) | #Fn(_, _, s) | #Call(_, _, s) | #Case(_, _, s) | #Record(_, s) | #Field(_, _, s) => s,
   }
 }
 
@@ -201,7 +204,15 @@ impl Parser {
 
   function call(self: mut Self): Expr uses Fail<CompileError> {
     let f = self.atom();
-    while (self.peek() == #LParen) {
+    while (self.peek() == #LParen || self.peek() == #Dot) {
+      if (self.peek() == #Dot) {
+        self.bump();
+        const end = self.here().end;
+        const name = self.ident();
+        const span = { start: spanOf(f).start, end };
+        f = #Field(Box.new(f), name, span);
+        continue;
+      }
       self.bump();
       let args: Vec<Expr> = Vec.new();
       while (self.peek() != #RParen) {
@@ -223,6 +234,17 @@ impl Parser {
       #True => #Bool(true, span),
       #False => #Bool(false, span),
       #Ident(n) => #Var(n.clone(), span),
+      #LBrace => {
+        self.bump();
+        let fields: Vec<[String, Expr]> = Vec.new();
+        while (self.peek() != #RBrace) {
+          const name = self.ident();
+          self.expect(#Eq, "`=`");
+          fields.push([name, self.expr()]);
+          if (self.peek() == #Comma) { self.bump(); }
+        }
+        #Record(fields, { start: span.start, end: self.here().end })
+      }
       #LParen => {
         self.bump();
         const inner = self.expr();

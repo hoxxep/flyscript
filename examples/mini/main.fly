@@ -36,6 +36,15 @@
 // expect: def insert(t, v) = case t of Leaf => Node(Leaf, v, Leaf) | Node(l, x, r) => if v < x then Node(insert(l, v), x, r) else Node(l, x, insert(r, v));
 // expect: def total(t) = case t of Leaf => 0 | Node(l, x, r) => total(l) + x + total(r);
 // expect: total(insert(insert(insert(Leaf, 5), 2), 8))  :  int  =  15
+// expect: let p = {x = 3, y = 4} in p.x * p.y  :  int  =  12
+// expect: def getx(r) = r.x;
+// expect: getx({x = 1, y = true}) + getx({x = 2})  :  int  =  3
+// expect: def norm(p) = p.x * p.x + p.y * p.y;
+// expect: norm({x = 3, y = 4, label = false})  :  int  =  25
+// expect: let move = fn(p) => {x = p.x + 1, y = p.y} in move({x = 1, y = 2})  :  {x: int, y: int}  =  {x = 2, y = 2}
+// expect: error at 1:1: the record has no field `y`
+// expect:     {x = 1}.y
+// expect:     ^
 // expect: error at 2:1: this `case` does not handle Blue
 // expect:     case Green of Red => 1 | Green => 2
 // expect:     ^
@@ -121,6 +130,11 @@ export function main(): void uses Io {
     "data List = Nil | Cons(int, List);\ndef map(f, l) = case l of Nil => Nil | Cons(h, t) => Cons(f(h), map(f, t));\nmap(fn(x) => x * 10, Cons(1, Cons(2, Nil)))",
     "data Shape = Circle(int) | Rect(int, int);\ndef area(s) = case s of Circle(r) => 3 * r * r | Rect(w, h) => w * h;\narea(Rect(3, 4)) + area(Circle(2))",
     "data Tree = Leaf | Node(Tree, int, Tree);\ndef insert(t, v) = case t of Leaf => Node(Leaf, v, Leaf) | Node(l, x, r) => if v < x then Node(insert(l, v), x, r) else Node(l, x, insert(r, v));\ndef total(t) = case t of Leaf => 0 | Node(l, x, r) => total(l) + x + total(r);\ntotal(insert(insert(insert(Leaf, 5), 2), 8))",
+    "let p = {x = 3, y = 4} in p.x * p.y",
+    "def getx(r) = r.x;\ngetx({x = 1, y = true}) + getx({x = 2})",
+    "def norm(p) = p.x * p.x + p.y * p.y;\nnorm({x = 3, y = 4, label = false})",
+    "let move = fn(p) => {x = p.x + 1, y = p.y} in move({x = 1, y = 2})",
+    "{x = 1}.y",
     "data Color = Red | Green | Blue;\ncase Green of Red => 1 | Green => 2",
     "let a = 1 + true in\nlet b = if 3 then 4 else false in\nnope(a)",
   ];

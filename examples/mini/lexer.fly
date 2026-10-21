@@ -12,7 +12,7 @@ export type CompileError = Problem | #Many(Vec<Problem>);
 
 // ---- Lexer ----
 
-export enum Tok { #Int(i64), #Ident(String), #Let, #In, #If, #Then, #Else, #Fn, #Def, #Data, #Case, #Of, #Bar, #True, #False, #LParen, #RParen, #Comma, #Semi, #Eq, #Plus, #Minus, #Star, #Less, #Arrow, #Eof }
+export enum Tok { #Int(i64), #Ident(String), #Let, #In, #If, #Then, #Else, #Fn, #Def, #Data, #Case, #Of, #Bar, #True, #False, #LParen, #RParen, #LBrace, #RBrace, #Dot, #Comma, #Semi, #Eq, #Plus, #Minus, #Star, #Less, #Arrow, #Eof }
 
 impl Eq for Tok;
 impl Clone for Tok;
@@ -49,7 +49,7 @@ export function lex(src: str): Vec<Token> uses Fail<CompileError> {
       continue;
     }
     const tok: Tok = match (b) {
-      b'(' => #LParen, b')' => #RParen, b',' => #Comma, b';' => #Semi, b'|' => #Bar, b'+' => #Plus, b'*' => #Star, b'<' => #Less,
+      b'(' => #LParen, b')' => #RParen, b'{' => #LBrace, b'}' => #RBrace, b'.' => #Dot, b',' => #Comma, b';' => #Semi, b'|' => #Bar, b'+' => #Plus, b'*' => #Star, b'<' => #Less,
       b'=' => if (i + 1 < bytes.len() && bytes[i + 1] == b'>') { i += 1; #Arrow } else { #Eq },
       b'-' => #Minus,
       _ => throw #Lex { at: i, message: `unexpected character ${b}` },

@@ -1,6 +1,6 @@
 # Flyscript
 
-**Language specification, version 0.47**
+**Language specification, version 0.48**
 
 *Affine values, one row calculus, handlers for everything, and `comptime`: Church on the outside, Turing on the inside.*
 
@@ -18,12 +18,15 @@ The whole language rests on five laws. Every rule in this document is a conseque
 4. **Handlers for everything.** Errors, I/O, iteration and region memory are ordinary effects with ordinary handlers. A handler may hold the rest of a computation as a one-shot continuation value; generators and tasks are both built from that one primitive.
 5. **`comptime` is the metalanguage.** Generics, reflection, layout transformation and derived interfaces are ordinary Flyscript code run by the compiler.
 
-### 0.1 Changes from 0.46
+### 0.1 Changes from 0.47
 
-0.47 restructures Mini as a compiler is structured: five modules — `lexer`, `syntax`, `check`, `codegen` and the driver `main` — in examples/mini/, about a thousand lines. Its types, its `Diag` effect and its region-allocated checker cross module boundaries with nothing but `export` and `import`; it checked and ran unchanged on the first try. No language change was needed. Earlier changes are in [docs/history](history/).
+0.48 gives Mini structural records typed by rows — Rémy-style unification of field lists with variable tails, the same calculus Flyscript's own checker rests on (§3.2) — so `def getx(r) = r.x` applies to any record with an `x`. The row variables live in the region with the rest of Mini's types, numbered by a counter that is itself a region `Cell`. Earlier changes are in [docs/history](history/).
+
+| Change | Why |
+| :--- | :--- |
+| A specialization is keyed by its `comptime` arguments with regions erased (§7.1, §11) | the derived `clone` of a record of `Ref`s, called in code generic over a region, was specialized under the region parameter and not found under the region the frame was given |
 
 ---
-
 
 ## 1. Goals and non-goals
 
@@ -993,7 +996,7 @@ Everything here follows from the rules above: the failure row of the `try` body 
 The prototype compiler, `flyc`, implements this specification except code generation. Its evaluator runs destructors as specified, keeping a drop flag per binding at the moves the ownership pass records; a value it does not bind, such as a discarded call result, is reclaimed by the host without one.
 
 1. **Parse** each module into a syntax tree. Standard-library modules are declaration files and Flyscript modules (the prelude's derivations, `std/json`); either may leave out a body that the runtime provides.
-2. **Expand** `comptime` code: a template is specialized when a call or a bound needs it, its body expanded with fresh positions in source order (each repeated copy is distinct code to the later passes) that map back to the template for diagnostics.
+2. **Expand** `comptime` code: a template is specialized when a call or a bound needs it, once per set of `comptime` arguments with their regions erased (generated code never depends on the region data lives in), its body expanded with fresh positions in source order (each repeated copy is distinct code to the later passes) that map back to the template for diagnostics.
 3. **Check types and effects** bidirectionally with one row unifier for records and tag unions; effect rows are checked by subsumption into the effects allowed at each point, with region arguments as part of an effect's label and `Fail` payloads compared by union inclusion. Region arguments are solved over the body, and an undetermined allocation goes to the innermost region it does not escape from.
 Every property of a type that looks through its parts — `Copy`, `Send`, its class, whether it hides a borrow, whether dropping it runs code — is decided coinductively: recursion goes through nominal types (§3.3), and a nominal type met again inside itself is a cycle, taken as the property's neutral value (true for `Copy` and `Send`, class 1, hides nothing, runs nothing), so each is linear in the type's declaration rather than exponential in its branching.
 

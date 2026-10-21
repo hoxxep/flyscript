@@ -9,7 +9,15 @@ import { Expr, Op, Arm, TypeExpr, Program, spanOf } from "./syntax";
 
 // A type lives in the checker's region: `Ref`s to it are `Copy`, so nothing is cloned, and a
 // variable carries its own union-find link, set once it is solved.
-export enum Type<region R> { #Error, #Int, #Bool, #Data(usize, Ref<str>), #Var(usize, Cell<Option<Ref<Type>>>), #Fn(Ref<Ref<Type>[]>, Ref<Type>) }
+// A record is a row: some fields, then a tail that is `#Empty` or a variable standing for more.
+export enum Type<region R> {
+  #Error, #Int, #Bool, #Data(usize, Ref<str>),
+  #Var(usize, Cell<Option<Ref<Type>>>),
+  #Fn(Ref<Ref<Type>[]>, Ref<Type>),
+  #Record(Ref<Field[]>, Ref<Type>),
+  #Empty,
+}
+export type Field<region R> = { name: Ref<R, str>; ty: Ref<R, Type<R>> };
 
 // A constructor: its type's index, its tag (unique across the program), its fields, its type.
 export type Ctor<region R> = { data: usize; tag: usize; fields: Vec<Ref<R, Type<R>>>; result: Ref<R, Type<R>> };
@@ -18,7 +26,8 @@ export type Ctor<region R> = { data: usize; tag: usize; fields: Vec<Ref<R, Type<
 export type Scheme<region R> = { vars: Vec<usize>; ty: Ref<R, Type<R>> };
 
 export struct Checker<region R> {
-  next: usize;
+  // Numbers type variables, in the region so unification can make them too.
+  ids: Cell<R, usize>;
   scopes: Vec<HashMap<String, Scheme<R>>>;
   int: Ref<R, Type<R>>;
   bool: Ref<R, Type<R>>;
@@ -29,8 +38,7 @@ export struct Checker<region R> {
 
 impl<region R> Checker<R> {
   function fresh(self: mut Self): Ref<Type> uses Region<R> {
-    self.next += 1;
-    alloc(#Var(self.next, Cell.new(#None)))
+    Checker.var(self.ids)
   }
   function func(params: readonly Ref<Type>[], ret: Ref<Type>): Ref<Type> uses Region<R> {
     alloc(#Fn(allocAll(params), ret))
@@ -54,25 +62,72 @@ impl<region R> Checker<R> {
     match (Checker.resolve(t)) {
       #Var(w, _) => v == w,
       #Fn(ps, r) => ps.iter().some((p) => Checker.occurs(v, p)) || Checker.occurs(v, r),
+      #Record(fs, tail) => fs.iter().some((f) => Checker.occurs(v, f.ty)) || Checker.occurs(v, tail),
       _ => false,
     }
   }
-  function unify(a: Ref<Type>, b: Ref<Type>, span: Span): void uses Region<R>, Diag {
+  function var(ids: Cell<R, usize>): Ref<Type> uses Region<R> {
+    ids.set(ids.get() + 1);
+    alloc(#Var(ids.get(), Cell.new(#None)))
+  }
+
+  function unify(ids: Cell<R, usize>, a: Ref<Type>, b: Ref<Type>, span: Span): void uses Region<R>, Diag {
     const [x, y] = [Checker.resolve(a), Checker.resolve(b)];
     match ([x, y]) {
       [#Error, _] | [_, #Error] | [#Int, #Int] | [#Bool, #Bool] => {},
       [#Data(d, _), #Data(e, _)] if d == e => {},
+      [#Empty, #Empty] => {},
+      [#Empty, #Record(fs, _)] | [#Record(fs, _), #Empty] => {
+        Diag.report(#Type { span, message: `the record has no field ${fs.iter().map((f) => `\`${f.name}\``).join(", ")}` });
+      }
+      [#Record(_, _), #Record(_, _)] => Checker.unifyRows(ids, x, y, span),
       [#Var(v, _), #Var(w, _)] if v == w => {},
       [#Var(v, link), _] => Checker.bind(v, link, y, span),
       [_, #Var(v, link)] => Checker.bind(v, link, x, span),
       [#Fn(ps, r), #Fn(qs, s)] => {
         if (ps.len() != qs.len()) { Diag.report(#Type { span, message: `expected ${ps.len()} arguments, found ${qs.len()}` }); return; }
-        for (const [p, q] of ps.iter().zip(qs.iter())) { Checker.unify(p, q, span); }
-        Checker.unify(r, s, span);
+        for (const [p, q] of ps.iter().zip(qs.iter())) { Checker.unify(ids, p, q, span); }
+        Checker.unify(ids, r, s, span);
       }
       // `b` is what was expected of `a`.
       _ => Diag.report(#Type { span, message: `expected ${Checker.show(y)}, found ${Checker.show(x)}` }),
     }
+  }
+  // Rémy's rows: shared fields unify; each side's tail takes the fields only the other has.
+  function unifyRows(ids: Cell<R, usize>, a: Ref<Type>, b: Ref<Type>, span: Span): void uses Region<R>, Diag {
+    let [fa, ta] = Checker.flatten(a);
+    let [fb, tb] = Checker.flatten(b);
+    let onlyA: Vec<Field<R>> = Vec.new();
+    for (const f of fa) {
+      match (fb.iter().find((g) => g.name == f.name)) {
+        #Some(g) => Checker.unify(ids, f.ty, g.ty, span),
+        #None => onlyA.push(f),
+      }
+    }
+    const onlyB: Vec<Field<R>> = fb.iter().filter((g) => !fa.iter().some((f) => f.name == g.name)).cloned().collect();
+    if (onlyA.len() == 0 && onlyB.len() == 0) {
+      Checker.unify(ids, ta, tb, span);
+      return;
+    }
+    const rest = Checker.var(ids);
+    // `b` is what was expected: its tail must hold what only `a` has, and the other way round.
+    Checker.unify(ids, Checker.record(onlyA, rest), tb, span);
+    Checker.unify(ids, ta, Checker.record(onlyB, rest), span);
+  }
+  // A record's fields, following its tail through solved variables and further records.
+  function flatten(t: Ref<Type>): [Vec<Field<R>>, Ref<Type>] uses Region<R> {
+    match (Checker.resolve(t)) {
+      #Record(fs, tail) => {
+        let [more, end] = Checker.flatten(tail);
+        let all: Vec<Field<R>> = fs.iter().cloned().collect();
+        for (const f of more.drain()) { all.push(f); }
+        [all, end]
+      }
+      other => [Vec.new(), Checker.resolve(t)],
+    }
+  }
+  function record(fields: readonly Field<R>[], tail: Ref<Type>): Ref<Type> uses Region<R> {
+    if (fields.len() == 0) { tail } else { alloc(#Record(allocAll(fields), tail)) }
   }
   function bind(v: usize, link: Cell<Option<Ref<Type>>>, t: Ref<Type>, span: Span): void uses Region<R>, Diag {
     if (Checker.occurs(v, t)) {
@@ -87,6 +142,12 @@ impl<region R> Checker<R> {
       #Error => `?`,
       #Int => `int`,
       #Data(_, name) => name.toString(),
+      #Empty => `{}`,
+      #Record(_, _) => {
+        const [fs, tail] = Checker.flatten(t);
+        const shown = fs.iter().map((f) => `${f.name}: ${Checker.show(f.ty)}`).join(", ");
+        match (tail) { #Empty => `{${shown}}`, _ => `{${shown}, ...}` }
+      }
       #Bool => `bool`,
       #Var(v, _) => `t${v}`,
       #Fn(ps, r) => `(${ps.iter().map((p) => Checker.show(p)).join(", ")}) => ${Checker.show(r)}`,
@@ -101,6 +162,10 @@ impl<region R> Checker<R> {
         for (const p of ps) { Checker.freeIn(p, mut out); }
         Checker.freeIn(r, mut out);
       }
+      #Record(fs, tail) => {
+        for (const f of fs) { Checker.freeIn(f.ty, mut out); }
+        Checker.freeIn(tail, mut out);
+      }
       _ => {},
     }
   }
@@ -112,6 +177,11 @@ impl<region R> Checker<R> {
         let params: Vec<Ref<Type>> = Vec.new();
         for (const p of ps) { params.push(Checker.copy(p, map)); }
         Checker.func(params, Checker.copy(r, map))
+      }
+      #Record(fs, tail) => {
+        let fields: Vec<Field<R>> = Vec.new();
+        for (const f of fs) { fields.push({ name: f.name, ty: Checker.copy(f.ty, map) }); }
+        Checker.record(fields, Checker.copy(tail, map))
       }
       _ => t,
     }
@@ -125,13 +195,12 @@ impl<region R> Checker<R> {
     let i = self.scopes.len();
     while (i > 0) {
       i -= 1;
-      // The scheme stays borrowed from `self.scopes` while `self.next` changes: they are
+      // The scheme stays borrowed from `self.scopes` while `self.ids` counts on: they are
       // different fields (§4.1).
       if (const #Some(s) = self.scopes[i].get(name)) {
         let map: HashMap<usize, Ref<Type>> = HashMap.new();
         for (const v of s.vars) {
-          self.next += 1;
-          map.insert(v, alloc(#Var(self.next, Cell.new(#None))));
+          map.insert(v, Checker.var(self.ids));
         }
         return Checker.copy(s.ty, map);
       }
@@ -194,7 +263,7 @@ impl<region R> Checker<R> {
     self.scopes.push(globals);
     for (const [i, d] of p.defs.iter().enumerate()) {
       const tf = self.function(d.params, d.body);
-      Checker.unify(own[i], tf, d.span);
+      Checker.unify(self.ids, own[i], tf, d.span);
     }
     self.scopes.pop();
     let general: HashMap<String, Scheme<R>> = HashMap.new();
@@ -228,15 +297,15 @@ impl<region R> Checker<R> {
       #Var(name, span) => self.lookup(name, span),
       #Bin(op, a, b, span) => {
         const [ta, tb] = [self.infer(a), self.infer(b)];
-        Checker.unify(ta, self.int, spanOf(a));
-        Checker.unify(tb, self.int, spanOf(b));
+        Checker.unify(self.ids, ta, self.int, spanOf(a));
+        Checker.unify(self.ids, tb, self.int, spanOf(b));
         match (op) { #Lt => self.bool, _ => self.int }
       }
       #If(c, t, f, span) => {
         const tc = self.infer(c);
-        Checker.unify(tc, self.bool, spanOf(c));
+        Checker.unify(self.ids, tc, self.bool, spanOf(c));
         const [tt, tf] = [self.infer(t), self.infer(f)];
-        Checker.unify(tt, tf, span);
+        Checker.unify(self.ids, tt, tf, span);
         tt
       }
       #Let(name, value, body, _) => {
@@ -249,6 +318,18 @@ impl<region R> Checker<R> {
         tb
       }
       #Fn(params, body, _) => self.function(params, body),
+      #Record(fields, _) => {
+        let fs: Vec<Field<R>> = Vec.new();
+        for (const [name, value] of fields) { fs.push({ name: fmt(name), ty: self.infer(value) }); }
+        alloc(#Record(allocAll(fs), alloc(#Empty)))
+      }
+      // `r.x` asks only that `r` have an `x`: whatever else it has is the row's tail.
+      #Field(target, name, span) => {
+        const tr = self.infer(target);
+        const [tf, rest] = [self.fresh(), self.fresh()];
+        Checker.unify(self.ids, tr, Checker.record([{ name: fmt(name), ty: tf }], rest), span);
+        tf
+      }
       #Case(scrutinee, arms, span) => {
         const ts = self.infer(scrutinee);
         const result = self.fresh();
@@ -265,7 +346,7 @@ impl<region R> Checker<R> {
           match (found) {
             #None => Diag.report(#Unbound { span: arm.span, name: arm.ctor.clone() }),
             #Some([d, fields, ctorType]) => {
-              Checker.unify(ts, ctorType, arm.span);
+              Checker.unify(self.ids, ts, ctorType, arm.span);
               if (fields.len() != arm.binds.len()) {
                 Diag.report(#Type { span: arm.span, message: `\`${arm.ctor}\` has ${fields.len()} fields, not ${arm.binds.len()}` });
               }
@@ -279,7 +360,7 @@ impl<region R> Checker<R> {
           self.scopes.push(scope);
           const tb = self.infer(arm.body);
           self.scopes.pop();
-          Checker.unify(tb, result, spanOf(arm.body));
+          Checker.unify(self.ids, tb, result, spanOf(arm.body));
         }
         if (const #Some(d) = data) {
           const missing: Vec<String> = self.ctorsOf[d].iter().filter((c) => !seen.has(c)).cloned().collect();
@@ -295,7 +376,7 @@ impl<region R> Checker<R> {
         for (const a of args) { tas.push(self.infer(a)); }
         const tr = self.fresh();
         // The function's own type is what the call is expected to fit.
-        Checker.unify(Checker.func(tas, tr), tf, span);
+        Checker.unify(self.ids, Checker.func(tas, tr), tf, span);
         tr
       }
     }
@@ -306,7 +387,7 @@ impl<region R> Checker<R> {
 // The types live for the checking only: the region is released when it ends.
 export function check(prog: readonly Program): String uses Diag {
   region (R) {
-    let c: Checker<R> = Checker { next: 0, scopes: Vec.new(), int: alloc(#Int), bool: alloc(#Bool), ctors: HashMap.new(), ctorsOf: Vec.new() };
+    let c: Checker<R> = Checker { ids: Cell.new(0), scopes: Vec.new(), int: alloc(#Int), bool: alloc(#Bool), ctors: HashMap.new(), ctorsOf: Vec.new() };
     Checker.show(c.program(prog))
   }
 }
