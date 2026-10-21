@@ -1145,6 +1145,29 @@ impl<'p> Checker<'p> {
         }
     }
 
+    /// For a place reached through a borrow or by indexing a collection, whether it can be
+    /// changed (through a `mut` borrow); `None` for anything else.
+    fn unmovable_place(&self, e: &Expr) -> Option<bool> {
+        let ty_of = |x: &Expr| self.typed.exprs.get(&x.span).map(|t| self.s.resolve(t));
+        match &e.kind {
+            ExprKind::Ident(_) => match ty_of(e) {
+                Some(Ty::Borrow(m, _)) => Some(m),
+                _ => None,
+            },
+            ExprKind::Field { target, .. } => match ty_of(target) {
+                Some(Ty::Borrow(m, _)) => Some(m),
+                _ => self.unmovable_place(target),
+            },
+            ExprKind::Index { target, .. } => match ty_of(target) {
+                Some(Ty::Tuple(_)) => self.unmovable_place(target),
+                Some(Ty::Borrow(m, _)) => Some(m),
+                Some(Ty::Slice(_)) => Some(false),
+                _ => Some(self.unmovable_place(target).unwrap_or(false)),
+            },
+            _ => None,
+        }
+    }
+
     /// Checks a part of a literal against the type of its slot, recording that type.
     fn slot(&mut self, e: &Expr, t: &Ty) {
         self.check(e, t);
@@ -1503,8 +1526,11 @@ impl<'p> Checker<'p> {
                 }
             }
         }
-        if let Some(x) = expected {
-            // Expected types flow into calls before the arguments are checked (§3.6).
+        // Expected types flow into calls before the arguments are checked (§3.6) — except a
+        // borrow expected of a result that is only a type variable: whether that is owned is the
+        // arguments' to say, and lending fits an owned result to a borrow afterwards.
+        let lent_var = matches!((self.s.resolve(&inst.ret), expected.map(|x| self.s.resolve(x))), (Ty::Var(_), Some(Ty::Borrow(false, _))));
+        if let Some(x) = expected.filter(|_| !lent_var) {
             let ret = inst.ret.clone();
             if !self.try_unify(&ret, x) {
                 let _ = self.lends(&ret, x);
@@ -1671,7 +1697,15 @@ impl<'p> Checker<'p> {
         }
         let shown = self.show(recv);
         if !matches!(self.s.resolve(recv), Ty::Error) {
-            self.err(span, format!("no method `{name}` on `{shown}`"));
+            // A struct or enum gets the derived interfaces only by asking (§3.5).
+            let derived = [("clone", "Clone"), ("eq", "Eq"), ("cmp", "Ord"), ("hash", "Hash"), ("show", "Show")];
+            let hint = match (self.strip(recv), derived.iter().find(|(m, _)| *m == name)) {
+                (Ty::Named(d, _), Some((_, iface))) if matches!(self.p.defs[d].kind, DefKind::Struct { .. } | DefKind::Enum { .. }) => {
+                    format!(": `{}` does not implement `{iface}`; ask for it with `impl {iface} for {};`", self.p.defs[d].name, self.p.defs[d].name)
+                }
+                _ => String::new(),
+            };
+            self.err(span, format!("no method `{name}` on `{shown}`{hint}"));
         }
         Ty::Error
     }
@@ -1746,6 +1780,23 @@ impl<'p> Checker<'p> {
     }
 
     fn for_of(&mut self, pat: &Pattern, iter: &Expr, body: &ast::Block) -> Ty {
+        // `for (const i of 0..n)` counts from `0` up to `n`, excluded.
+        if let ExprKind::Range { lo, hi } = &iter.kind {
+            let t = self.s.fresh_kind(crate::check::subst::VarKind::Int);
+            match (lo, hi) {
+                (Some(lo), Some(hi)) => {
+                    self.check(lo, &t);
+                    self.check(hi, &t);
+                }
+                _ => self.err(iter.span, "a range iterated needs both bounds: `0..n`"),
+            }
+            self.typed.exprs.insert(iter.span, t.clone());
+            self.scopes.push(HashMap::new());
+            self.bind(pat, &t);
+            self.block(body, None);
+            self.scopes.pop();
+            return Ty::void();
+        }
         // Check the iterated expression in isolation to see whether it is a generator.
         let isolated = self.s.fresh_effs();
         let outer = std::mem::replace(&mut self.allowed, isolated.clone());
@@ -1978,6 +2029,15 @@ impl<'p> Checker<'p> {
 
     fn match_expr(&mut self, scrutinee: &Expr, arms: &[ast::MatchArm], expected: Option<&Ty>, span: Span) -> Ty {
         let st = self.expr(scrutinee, None);
+        // A place nothing may be moved out of is matched through a borrow of it, so its parts
+        // bind as borrows, as TypeScript programmers expect (§4.1).
+        let st = match (self.unmovable_place(scrutinee), self.s.resolve(&st)) {
+            (Some(m), t) if !matches!(t, Ty::Borrow(..)) => {
+                self.typed.lent_scrutinees.insert(scrutinee.span, m);
+                Ty::Borrow(m, Box::new(st))
+            }
+            _ => st,
+        };
         let mut types = Vec::new();
         for arm in arms {
             self.scopes.push(HashMap::new());

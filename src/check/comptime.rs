@@ -927,7 +927,9 @@ impl<'p> Expand<'p> {
                 None => fail(span, format!("`{n}` is a run-time value; `comptime` code cannot use it")),
             };
         }
-        if let Some(p) = Prim::from_name(n) {
+        if let Some(p) = Prim::from_name(n)
+            && (p != Prim::Type || self.p.lookup(self.module, n).is_none())
+        {
             return Ok(CV::Type(Ty::Prim(p)));
         }
         match self.p.lookup(self.module, n) {

@@ -976,7 +976,24 @@ impl Interp {
         let id = self.fresh_id();
         self.lex.loops.push(id);
         let generator = matches!(self.ty_of(iter.span), Some(Ty::Prim(Prim::Void)));
-        let r = if generator {
+        let r = if let ExprKind::Range { lo: Some(lo), hi: Some(hi) } = &iter.kind {
+            let (lo, hi) = (self.expr(lo, env)?.as_int(), self.expr(hi, env)?.as_int());
+            let mut out = Ok(Value::Unit);
+            for i in lo..hi {
+                let benv = new_env(Some(env.clone()));
+                self.bind(pat, &Value::Int(i), None, &benv);
+                match self.block(body, &benv) {
+                    Ok(_) => {}
+                    Err(Ctl::Continue(l)) if l == id => {}
+                    Err(Ctl::Break(l)) if l == id => break,
+                    Err(e) => {
+                        out = Err(e);
+                        break;
+                    }
+                }
+            }
+            out
+        } else if generator {
             // A generator: each `yield` runs the body where it is performed (tail-resumptive).
             self.handlers.push(Handler::Loop { id, pat: pat.clone(), body: body.clone(), env: env.clone(), lex: self.lex.clone() });
             let r = self.expr(iter, env);

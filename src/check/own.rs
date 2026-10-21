@@ -172,7 +172,9 @@ pub fn check_function(p: &mut Program, fid: FnId) {
             }
         }
         o.escaping = true;
-        let v = o.block(&body, Use::Move);
+        // A result that is a borrow lends what the body ends with, as an argument would (§4.2).
+        let how = o.result_use();
+        let v = o.block(&body, how);
         o.escaping = false;
         if !o.collecting {
             o.check_return(&v, body.tail.as_ref().map_or(body.span, |e| e.span));
@@ -687,23 +689,28 @@ impl<'p> Own<'p> {
     /// Whether dropping a value of this type runs code — a `Drop` impl, here or in a part — which
     /// may read what the value borrows.
     fn drop_runs_code(&self, t: &Ty) -> bool {
-        fn go(p: &Program, t: &Ty, depth: usize) -> bool {
-            if depth > 16 {
-                return false;
-            }
+        fn go(p: &Program, t: &Ty, inside: &mut Vec<Ty>) -> bool {
             match t {
                 Ty::Named(d, args) => {
-                    p.has_drop(*d)
-                        || args.iter().any(|a| matches!(a, GArg::Ty(t) if go(p, t, depth + 1)))
-                        || p.struct_fields(*d, args).unwrap_or_default().iter().any(|(_, t)| go(p, t, depth + 1))
+                    if p.has_drop(*d) {
+                        return true;
+                    }
+                    if inside.contains(t) {
+                        return false;
+                    }
+                    inside.push(t.clone());
+                    let r = args.iter().any(|a| matches!(a, GArg::Ty(t) if go(p, t, inside)))
+                        || p.struct_fields(*d, args).unwrap_or_default().iter().any(|(_, t)| go(p, t, inside));
+                    inside.pop();
+                    r
                 }
-                Ty::Tuple(ts) => ts.iter().any(|t| go(p, t, depth + 1)),
-                Ty::Record(r) | Ty::Union(r) => r.labels.values().any(|t| go(p, t, depth + 1)),
-                Ty::Array(t, _) => go(p, t, depth + 1),
+                Ty::Tuple(ts) => ts.iter().any(|t| go(p, t, inside)),
+                Ty::Record(r) | Ty::Union(r) => r.labels.values().any(|t| go(p, t, inside)),
+                Ty::Array(t, _) => go(p, t, inside),
                 _ => false,
             }
         }
-        go(self.p, t, 0)
+        go(self.p, t, &mut Vec::new())
     }
 
     fn check_outlives(&mut self, dying: &HashSet<VarId>, b: &ast::Block, v: &Val) {
@@ -889,7 +896,12 @@ impl<'p> Own<'p> {
             },
             ExprKind::Record { fields, .. } => self.field_inits(fields),
             ExprKind::List(items) => self.collect(items.iter()),
-            ExprKind::Range { .. } => Val::default(),
+            ExprKind::Range { lo, hi } => {
+                for b in lo.iter().chain(hi.iter()) {
+                    self.expr(b, Use::Read);
+                }
+                Val::default()
+            }
             ExprKind::Unary { operand, .. } => {
                 self.expr(operand, Use::Read);
                 Val::default()
@@ -1015,6 +1027,12 @@ impl<'p> Own<'p> {
                 Val::default()
             }
             ExprKind::Match { scrutinee, arms } => {
+                // A place that cannot be moved from is matched through a borrow of it: its parts
+                // bind as borrows (§4.1).
+                if let Some(m) = self.typed.lent_scrutinees.get(&scrutinee.span).copied() {
+                    let sv = self.contained(|o| o.expr(scrutinee, if m { Use::Mut } else { Use::Read }));
+                    return self.match_arms(arms, sv, how);
+                }
                 // A place matched is moved only by the arms that take an owned part of it; the
                 // others read it, and may still use it (§4.1).
                 let place = self.place(scrutinee).filter(|_| !self.behind_reference(scrutinee));
@@ -1092,7 +1110,8 @@ impl<'p> Own<'p> {
             }
             ExprKind::Return(v) => {
                 if let Some(v) = v {
-                    let val = self.escape(|o| o.expr(v, Use::Move));
+                    let how = self.result_use();
+                    let val = self.escape(|o| o.expr(v, how));
                     self.check_return(&val, v.span);
                     let ret = self.ret_ty.clone();
                     self.check_mode(v, &ret, "returned");
@@ -1752,6 +1771,49 @@ fn result_sources(p: &Program, scheme: &super::env::Scheme) -> Vec<String> {
 }
 
 impl Own<'_> {
+    /// How a function's result is taken from the expression that gives it.
+    fn result_use(&self) -> Use {
+        match &self.ret_ty {
+            Ty::Borrow(true, _) => Use::Mut,
+            Ty::Borrow(false, _) => Use::Read,
+            _ => Use::Move,
+        }
+    }
+
+    /// The arms of a `match` whose scrutinee's value is `sv`, none of which moves it.
+    fn match_arms(&mut self, arms: &[ast::MatchArm], sv: Val, how: Use) -> Val {
+        self.enter(Node::Branch, 0);
+        let before = self.state.clone();
+        let mut joined: Option<State> = None;
+        let mut out = BTreeSet::new();
+        for (i, arm) in arms.iter().enumerate() {
+            self.set_child(i as u32);
+            self.state = before.clone();
+            self.scopes.push(HashMap::new());
+            self.bind_pattern(&arm.pat, &sv, false);
+            if let Some(g) = &arm.guard {
+                self.expr(g, Use::Read);
+            }
+            let v = self.expr(&arm.body, how);
+            out.extend(v.loans);
+            if let Some(scope) = self.scopes.pop() {
+                for var in scope.values() {
+                    self.state.holds.remove(var);
+                }
+            }
+            if diverges(&arm.body) {
+                continue;
+            }
+            match &mut joined {
+                None => joined = Some(self.state.clone()),
+                Some(j) => j.join(&self.state),
+            }
+        }
+        self.state = joined.unwrap_or(before);
+        self.leave();
+        Val { loans: out }
+    }
+
     /// Whether a pattern binds a part that is owned and not `Copy`, which it takes.
     fn takes_owned(&self, p: &Pattern) -> bool {
         let mut names = Vec::new();
@@ -1825,16 +1887,14 @@ fn send_params(p: &Program, tparams: &[super::env::GParam]) -> Vec<u32> {
 }
 
 fn hides_borrows(t: &Ty, p: &Program, send: &[u32]) -> bool {
-    hides_depth(t, p, send, 0)
+    hides_in(t, p, send, &mut Vec::new())
 }
 
 /// Whether a type can hold a borrow its type does not show: a closure, a continuation, a type
 /// parameter, or a type built from one — a nominal type's fields included.
-fn hides_depth(t: &Ty, p: &Program, send: &[u32], depth: usize) -> bool {
-    if depth > 8 {
-        return false;
-    }
-    let rec = |t: &Ty| hides_depth(t, p, send, depth + 1);
+/// As the walks in `traits.rs`: a nominal type met again inside itself is a cycle, which hides
+/// nothing that the first visit did not find.
+fn hides_in(t: &Ty, p: &Program, send: &[u32], inside: &mut Vec<Ty>) -> bool {
     match t {
         Ty::Param(s) => !send.contains(&s.id),
         Ty::Fn(_) | Ty::Var(_) | Ty::Assoc(..) => true,
@@ -1843,18 +1903,22 @@ fn hides_depth(t: &Ty, p: &Program, send: &[u32], depth: usize) -> bool {
             if matches!(def.name.as_str(), "Gen" | "Cont") && p.modules[def.module].is_std {
                 return true;
             }
-            if args.iter().any(|a| matches!(a, GArg::Ty(t) if rec(t))) {
-                return true;
+            if inside.contains(t) {
+                return false;
             }
-            match &def.kind {
-                super::env::DefKind::Struct { .. } => p.struct_fields(*d, args).is_some_and(|fs| fs.iter().any(|(_, t)| rec(t))),
-                super::env::DefKind::Enum { tags } => tags.values().any(|t| rec(&super::env::subst_params(t, &def.params, args))),
-                _ => false,
-            }
+            inside.push(t.clone());
+            let r = args.iter().any(|a| matches!(a, GArg::Ty(t) if hides_in(t, p, send, inside)))
+                || match &def.kind {
+                    super::env::DefKind::Struct { .. } => p.struct_fields(*d, args).is_some_and(|fs| fs.iter().any(|(_, t)| hides_in(t, p, send, inside))),
+                    super::env::DefKind::Enum { tags } => tags.values().any(|t| hides_in(&super::env::subst_params(t, &def.params, args), p, send, inside)),
+                    _ => false,
+                };
+            inside.pop();
+            r
         }
-        Ty::Tuple(ts) => ts.iter().any(rec),
-        Ty::Record(r) | Ty::Union(r) => r.labels.values().any(rec),
-        Ty::Array(t, _) | Ty::Slice(t) | Ty::Borrow(_, t) => rec(t),
+        Ty::Tuple(ts) => ts.iter().any(|t| hides_in(t, p, send, inside)),
+        Ty::Record(r) | Ty::Union(r) => r.labels.values().any(|t| hides_in(t, p, send, inside)),
+        Ty::Array(t, _) | Ty::Slice(t) | Ty::Borrow(_, t) => hides_in(t, p, send, inside),
         _ => false,
     }
 }

@@ -215,6 +215,9 @@ pub struct Typed {
     pub performs: HashMap<Span, Vec<Option<DefId>>>,
     /// The effect each `handle` expression handles, by its span.
     pub handled: HashMap<Span, DefId>,
+    /// `match` scrutinees that are places nothing may be moved out of — behind a borrow, or an
+    /// element of a collection — matched through a borrow (`true` if `mut`), by their span.
+    pub lent_scrutinees: HashMap<Span, bool>,
     /// Tag constructions `#A(x)` whose one argument is the whole of a larger payload (§3.2).
     pub whole: std::collections::HashSet<Span>,
     /// The type each part of a tag, record or list literal was checked against, by the part's
@@ -912,7 +915,11 @@ impl Program {
             }
             TypeKind::Path { segments, args } => {
                 let name = &segments[0].name;
-                if let Some(p) = Prim::from_name(name) {
+                // `Type` is the one built-in name a module may declare for itself: a compiler
+                // written in Flyscript has a `Type` of its own (§1, goal 6).
+                if let Some(p) = Prim::from_name(name)
+                    && (p != Prim::Type || !self.modules[m].scope.contains_key(name.as_str()))
+                {
                     return Ty::Prim(p);
                 }
                 if name == "Self" {

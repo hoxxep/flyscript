@@ -1,6 +1,6 @@
 # Flyscript
 
-**Language specification, version 0.41**
+**Language specification, version 0.42**
 
 *Affine values, one row calculus, handlers for everything, and `comptime`: Church on the outside, Turing on the inside.*
 
@@ -18,15 +18,18 @@ The whole language rests on five laws. Every rule in this document is a conseque
 4. **Handlers for everything.** Errors, I/O, iteration and region memory are ordinary effects with ordinary handlers. A handler may hold the rest of a computation as a one-shot continuation value; generators and tasks are both built from that one primitive.
 5. **`comptime` is the metalanguage.** Generics, reflection, layout transformation and derived interfaces are ordinary Flyscript code run by the compiler.
 
-### 0.1 Changes from 0.40
+### 0.1 Changes from 0.41
 
-0.41 comes from a second round of programs written from the specification alone — a JSON config loader, a generic min-heap, an event-sourced account over injected effects — and makes self-hosting a goal. Earlier changes are in [docs/history](history/).
+0.42 comes from the first test of goal 6: Mini, a compiler written in Flyscript for a small functional language — lexer, recursive-descent parser, inference by unification over an arena of type variables, closure conversion, code generation for a stack machine, and the machine itself (examples/mini_compiler.fly, run as a test). Earlier changes are in [docs/history](history/).
 
 | Change | Why |
 | :--- | :--- |
-| A compiler for Flyscript, written in Flyscript, is a goal the language is judged by (§1) | a compiler is the canonical stress test of a systems language: recursive trees, cyclic graphs, union-find tables, string-keyed maps, heavy matching, precise diagnostics |
-| A union may include named unions: `Fail<JsonError \| #PrivilegedPort(u16)>` (§2.3, §3.2) | how a TypeScript programmer composes failures, and what §3.2's composition by union promises |
-| A matched place is moved only by the arms that take an owned part of it (§4.1) | `match (e) { #PrivilegedPort(p) => …, _ => println(`${e}`) }` was rejected: binding in one arm moved `e` for all |
+| Whether a type is `Copy`, `Send`, class 2, hides a borrow or runs code on drop is decided coinductively: a nominal type met again inside itself is a cycle with the property's neutral value (§4.4, §11) | the prototype unfolded recursive types to a fixed depth, exponential in their branching: Mini's `Expr` never finished checking |
+| A module may declare `Type` for itself, shadowing the comptime `Type` there (§7.1) | `Type` is the name a compiler gives its types, and the built-in made a user's `enum Type` unreachable |
+| A place nothing may be moved out of — behind a borrow, or an element of a collection — is matched through a borrow of it, so its parts bind as borrows (§4.1) | `match (self.links[v]) { #Some(t) => … }` tried to move out of the table |
+| A function whose result is a borrow lends what its body ends with, and a borrow expected of a call whose result is a bare type variable leaves the variable to the arguments (§4.2, §3.6) | `function peek(self: readonly Self): readonly Tok { self.toks[i].tok }` tried to move the token; `asInt(stack.pop().unwrap())` made `unwrap`'s `T` a borrow |
+| `for (const i of a..b)` counts from `a` up to `b`, excluded (§5.5) | a compiler loops over indices everywhere, and there was no way to |
+| A missing `clone`, `eq`, `cmp`, `hash` or `show` on a struct or enum says to ask for the derivation | it said only that there was no such method |
 
 
 ---
@@ -157,7 +160,7 @@ PatAtom     = "_" | Literal | "comptime" Unary | Ident
             | ( "#" Ident | "#" "[" Expr "]" ) [ "(" [ Pattern { "," Pattern } ] ")" | PatRecord ]
             | [ Path ] PatRecord | "[" [ Pattern { "," Pattern } ] "]" ;
 PatRecord   = "{" [ Ident [ ":" Pattern ] { "," Ident [ ":" Pattern ] } ] "}" ;
-For         = "for" "(" ( "const" | "let" ) Pattern "of" Expr ")" Block ;
+For         = "for" "(" ( "const" | "let" ) Pattern "of" ( Expr | Expr ".." Expr ) ")" Block ;   (* a range counts up, its end excluded *)
 Try         = "try" Block "catch" "(" Pattern ")" Block ;
 Throw       = "throw" Expr ;
 Yield       = "yield" Expr ;
@@ -304,6 +307,8 @@ Borrows are **transparent**: a borrow binding reads and writes as the value it r
 `readonly T` is `Copy`; `mut T` is not. Passing a binding of type `mut T` where a `mut` borrow is expected **reborrows** it: the binding is locked until the new borrow ends, and usable again afterwards, so `value(mut sc); sc.eat(b',')` is legal. Read where an owned value is expected, a borrow gives a copy of what it refers to, which must be `Copy`; and a `mut T` field read through a `readonly` borrow is `readonly T`.
 
 A value that is borrowed without having a place — a call's result, a template string, a literal lent as `str` — is stored in an anonymous local of the enclosing block, dropped when the block ends. So ``stringify(#Rejected { reason: `missing ${field}` })`` lends the string for the call, and ``const r = #Rejected { reason: `…` };`` holds a borrow of it while `r` is used; returning `r` is the usual error, a borrow of a local.
+
+**A match through a borrow.** A place nothing may be moved out of — reached through a borrow, or an element of a collection (`self.links[v]`) — is matched through a borrow of it, `readonly` or, through a `mut` borrow, `mut`: its parts bind as borrows, with copies for `Copy` parts, as below.
 
 **A match moves per arm.** Matching a place moves it only in an arm whose pattern takes an owned, non-`Copy` part; an arm that binds nothing, or only copies, reads it, so `_ => println(`${e}`)` may use what another arm would have taken.
 
@@ -527,7 +532,7 @@ interface Iterable<T, row E = []> {
 }
 ```
 
-Slices, arrays, `Vec`, `String`'s lines, `HashMap`, `RegionList` and channels' receivers are all `Iterable`, so `for (const path of args)` needs no ceremony. Inside the loop:
+Slices, arrays, `Vec`, `String`'s lines, `HashMap`, `RegionList` and channels' receivers are all `Iterable`, so `for (const path of args)` needs no ceremony. A range counts: `for (const i of 0..n)` runs `i` from `0` to `n - 1`. Inside the loop:
 
 - reaching the end of `body`, or `continue`, resumes the generator;
 - `break` drops the continuation, so the generator unwinds and its cleanup runs, then the loop exits;
@@ -724,7 +729,7 @@ A type parameter is one of two kinds, and callers cannot tell them apart:
 
 A template states its whole signature, effects included (none means pure), because its body is checked only per specialization. An error in a specialization points into the template and names the specialization: `no method 'toJson' on 'bool' (in 'toJson' for 'Flag')`. Specializations are memoized by template and types, and registered before their bodies are expanded, so a derivation over a recursive type refers to itself.
 
-A `comptime function` runs only in the compiler: it is called from `comptime` code, never at run time. Module constants (`const SLOTS: usize = 64;`) are evaluated the same way. `Type` is a comptime-only, `Copy` type whose values are types.
+A `comptime function` runs only in the compiler: it is called from `comptime` code, never at run time. Module constants (`const SLOTS: usize = 64;`) are evaluated the same way. `Type` is a comptime-only, `Copy` type whose values are types. It is the one built-in name a module may declare for itself — a compiler written in Flyscript has its own `Type` — and in such a module the built-in is not visible by that name.
 
 A struct is a template too when it has a `comptime` type parameter or `comptime` code among its fields: its fields are computed for each instance, `comptime` statements in its body check its arguments, and two uses with the same arguments are the same type. Each instance is checked as the struct it is, so a template not declared `view` cannot hold a borrow in any instance:
 
@@ -994,6 +999,8 @@ The prototype compiler, `flyc`, implements this specification except code genera
 1. **Parse** each module into a syntax tree. Standard-library modules are declaration files and Flyscript modules (the prelude's derivations, `std/json`); either may leave out a body that the runtime provides.
 2. **Expand** `comptime` code: a template is specialized when a call or a bound needs it, its body expanded with fresh positions in source order (each repeated copy is distinct code to the later passes) that map back to the template for diagnostics.
 3. **Check types and effects** bidirectionally with one row unifier for records and tag unions; effect rows are checked by subsumption into the effects allowed at each point, with region arguments as part of an effect's label and `Fail` payloads compared by union inclusion. Region arguments are solved over the body, and an undetermined allocation goes to the innermost region it does not escape from.
+Every property of a type that looks through its parts — `Copy`, `Send`, its class, whether it hides a borrow, whether dropping it runs code — is decided coinductively: recursion goes through nominal types (§3.3), and a nominal type met again inside itself is a cycle, taken as the property's neutral value (true for `Copy` and `Send`, class 1, hides nothing, runs nothing), so each is linear in the type's declaration rather than exponential in its branching.
+
 4. **Check ownership** after typing: every value carries the loans it holds, loans flow through call results, patterns, assignments and captures, and a loan is live while any binding holding it may still be used, judged by reachability over the program's structure.
 5. **Evaluate** directly, carrying each frame's type arguments so a call through a bound runs the impl for the type it stands for: abortive handlers unwind and tail-resumptive ones run where the effect is performed, so `for…of` over a generator captures no stack; a `Gen` pulled with `next()` runs on its own thread. `Io` is handled by a deterministic world (files, sockets, a database, a seeded fault schedule), which is what makes §6.4's simulation testing concrete.
 

@@ -1,0 +1,535 @@
+// expect: let x = 2 in x * (3 + 4)  :  int  =  14
+// expect: let twice = fn(f, x) => f(f(x)) in twice(fn(n) => n * 2, 5)  :  int  =  20
+// expect: if 1 < 2 then 10 else 20  :  int  =  10
+// expect: let k = 10 in let add = fn(x) => x + k in add(add(1))  :  int  =  21
+// expect: error at 26..33: expected int, found bool
+// expect: error at 13: unknown name `z`
+// expect: error at 17..21: a function cannot take itself
+// Mini: a compiler for a small language, written in Flyscript as a test of goal 6.
+// source -> tokens -> AST -> types (union-find inference) -> bytecode -> run.
+import { println } from "std/io";
+import { HashMap } from "std/collections";
+
+// ---- Diagnostics ----
+
+type Span = { start: usize; end: usize };
+type CompileError = #Lex { at: usize; message: String } | #Parse { at: usize; message: String } | #Type { span: Span; message: String } | #Unbound { span: Span; name: String };
+
+// ---- Lexer ----
+
+enum Tok { #Int(i64), #Ident(String), #Let, #In, #If, #Then, #Else, #Fn, #True, #False, #LParen, #RParen, #Comma, #Eq, #Plus, #Minus, #Star, #Less, #Arrow, #Eof }
+
+impl Eq for Tok;
+impl Clone for Tok;
+type Token = { tok: Tok; span: Span };
+
+function isDigit(b: u8): bool { b >= b'0' && b <= b'9' }
+function isAlpha(b: u8): bool { (b >= b'a' && b <= b'z') || (b >= b'A' && b <= b'Z') || b == b'_' }
+
+function keyword(word: str): Tok {
+  match (word) {
+    "let" => #Let, "in" => #In, "if" => #If, "then" => #Then, "else" => #Else,
+    "fn" => #Fn, "true" => #True, "false" => #False,
+    _ => #Ident(word.toString()),
+  }
+}
+
+function lex(src: str): Vec<Token> uses Fail<CompileError> {
+  const bytes = src.asBytes();
+  let out: Vec<Token> = Vec.new();
+  let i: usize = 0;
+  while (i < bytes.len()) {
+    const b = bytes[i];
+    const start = i;
+    if (b == b' ' || b == b'\n') { i += 1; continue; }
+    if (isDigit(b)) {
+      let n: i64 = 0;
+      while (i < bytes.len() && isDigit(bytes[i])) { n = n * 10 + ((bytes[i] - b'0') as i64); i += 1; }
+      out.push({ tok: #Int(n), span: { start, end: i } });
+      continue;
+    }
+    if (isAlpha(b)) {
+      while (i < bytes.len() && (isAlpha(bytes[i]) || isDigit(bytes[i]))) { i += 1; }
+      out.push({ tok: keyword(src.slice(start, i)), span: { start, end: i } });
+      continue;
+    }
+    const tok: Tok = match (b) {
+      b'(' => #LParen, b')' => #RParen, b',' => #Comma, b'+' => #Plus, b'*' => #Star, b'<' => #Less,
+      b'=' => if (i + 1 < bytes.len() && bytes[i + 1] == b'>') { i += 1; #Arrow } else { #Eq },
+      b'-' => #Minus,
+      _ => throw #Lex { at: i, message: `unexpected character ${b}` },
+    };
+    i += 1;
+    out.push({ tok, span: { start, end: i } });
+  }
+  out.push({ tok: #Eof, span: { start: i, end: i } });
+  out
+}
+
+// ---- AST ----
+
+enum Op { #Add, #Sub, #Mul, #Lt }
+impl Clone for Op;
+enum Expr {
+  #Int(i64, Span),
+  #Bool(bool, Span),
+  #Var(String, Span),
+  #Bin(Op, Box<Expr>, Box<Expr>, Span),
+  #If(Box<Expr>, Box<Expr>, Box<Expr>, Span),
+  #Let(String, Box<Expr>, Box<Expr>, Span),
+  #Fn(Vec<String>, Box<Expr>, Span),
+  #Call(Box<Expr>, Vec<Expr>, Span),
+}
+
+function spanOf(e: readonly Expr): Span {
+  match (e) {
+    #Int(_, s) | #Bool(_, s) | #Var(_, s) => s,
+    #Bin(_, _, _, s) | #If(_, _, _, s) | #Let(_, _, _, s) | #Fn(_, _, s) | #Call(_, _, s) => s,
+  }
+}
+
+// ---- Parser: recursive descent with precedence climbing ----
+
+struct Parser { toks: Vec<Token>; pos: usize }
+
+impl Parser {
+  function peek(self: readonly Self): readonly Tok { self.toks[self.pos].tok }
+  function here(self: readonly Self): Span { self.toks[self.pos].span }
+  function bump(self: mut Self): void { self.pos += 1; }
+  function expect(self: mut Self, want: Tok, what: str): void uses Fail<CompileError> {
+    if (self.peek() != want) { throw #Parse { at: self.here().start, message: `expected ${what}` }; }
+    self.bump();
+  }
+  function ident(self: mut Self): String uses Fail<CompileError> {
+    const name: String = match (self.peek()) {
+      #Ident(n) => n.clone(),
+      _ => throw #Parse { at: self.here().start, message: "expected a name".toString() },
+    };
+    self.bump();
+    name
+  }
+
+  function expr(self: mut Self): Expr uses Fail<CompileError> {
+    const start = self.here().start;
+    match (self.peek()) {
+      #Let => {
+        self.bump();
+        const name = self.ident();
+        self.expect(#Eq, "`=`");
+        const value = self.expr();
+        self.expect(#In, "`in`");
+        const body = self.expr();
+        const end = spanOf(body).end;
+        #Let(name, Box.new(value), Box.new(body), { start, end })
+      }
+      #If => {
+        self.bump();
+        const c = self.expr();
+        self.expect(#Then, "`then`");
+        const t = self.expr();
+        self.expect(#Else, "`else`");
+        const e = self.expr();
+        const end = spanOf(e).end;
+        #If(Box.new(c), Box.new(t), Box.new(e), { start, end })
+      }
+      #Fn => {
+        self.bump();
+        self.expect(#LParen, "`(`");
+        let params: Vec<String> = Vec.new();
+        while (self.peek() != #RParen) {
+          params.push(self.ident());
+          if (self.peek() == #Comma) { self.bump(); }
+        }
+        self.bump();
+        self.expect(#Arrow, "`=>`");
+        const body = self.expr();
+        const end = spanOf(body).end;
+        #Fn(params, Box.new(body), { start, end })
+      }
+      _ => self.binary(0),
+    }
+  }
+
+  function binary(self: mut Self, minPrec: u8): Expr uses Fail<CompileError> {
+    let lhs = self.call();
+    while (true) {
+      const op: Option<[Op, u8]> = match (self.peek()) {
+        #Less => #Some([#Lt, 1]), #Plus => #Some([#Add, 2]), #Minus => #Some([#Sub, 2]), #Star => #Some([#Mul, 3]),
+        _ => #None,
+      };
+      match (op) {
+        #Some([o, prec]) if prec >= minPrec => {
+          self.bump();
+          const rhs = self.binary(prec + 1);
+          const span = { start: spanOf(lhs).start, end: spanOf(rhs).end };
+          lhs = #Bin(o, Box.new(lhs), Box.new(rhs), span);
+        }
+        _ => break,
+      }
+    }
+    lhs
+  }
+
+  function call(self: mut Self): Expr uses Fail<CompileError> {
+    let f = self.atom();
+    while (self.peek() == #LParen) {
+      self.bump();
+      let args: Vec<Expr> = Vec.new();
+      while (self.peek() != #RParen) {
+        args.push(self.expr());
+        if (self.peek() == #Comma) { self.bump(); }
+      }
+      const end = self.here().end;
+      self.bump();
+      const span = { start: spanOf(f).start, end };
+      f = #Call(Box.new(f), args, span);
+    }
+    f
+  }
+
+  function atom(self: mut Self): Expr uses Fail<CompileError> {
+    const span = self.here();
+    const e: Expr = match (self.peek()) {
+      #Int(n) => #Int(n, span),
+      #True => #Bool(true, span),
+      #False => #Bool(false, span),
+      #Ident(n) => #Var(n.clone(), span),
+      #LParen => {
+        self.bump();
+        const inner = self.expr();
+        if (self.peek() != #RParen) { throw #Parse { at: self.here().start, message: "expected `)`".toString() }; }
+        inner
+      }
+      _ => throw #Parse { at: span.start, message: "expected an expression".toString() },
+    };
+    self.bump();
+    e
+  }
+}
+
+// ---- Types: inference by unification over an arena of variables ----
+
+enum Type { #Int, #Bool, #Var(usize), #Fn(Vec<Type>, Box<Type>) }
+impl Clone for Type;
+
+struct Types { links: Vec<Option<Type>> }
+
+impl Types {
+  function fresh(self: mut Self): Type {
+    self.links.push(#None);
+    #Var(self.links.len() - 1)
+  }
+  // The type a variable stands for, followed to its end.
+  function resolve(self: readonly Self, t: readonly Type): Type {
+    match (t) {
+      #Var(v) => match (self.links[v]) {
+        #Some(bound) => self.resolve(bound),
+        #None => #Var(v),
+      },
+      other => other.clone(),
+    }
+  }
+  function occurs(self: readonly Self, v: usize, t: readonly Type): bool {
+    match (self.resolve(t)) {
+      #Var(w) => v == w,
+      #Fn(ps, r) => ps.iter().some((p) => self.occurs(v, p)) || self.occurs(v, r),
+      _ => false,
+    }
+  }
+  function unify(self: mut Self, a: readonly Type, b: readonly Type, span: Span): void uses Fail<CompileError> {
+    const [x, y] = [self.resolve(a), self.resolve(b)];
+    match ([x, y]) {
+      [#Int, #Int] | [#Bool, #Bool] => {},
+      [#Var(v), #Var(w)] if v == w => {},
+      [#Var(v), t] | [t, #Var(v)] => {
+        if (self.occurs(v, t)) { throw #Type { span, message: "a function cannot take itself".toString() }; }
+        self.links[v] = #Some(t);
+      }
+      [#Fn(ps, r), #Fn(qs, s)] => {
+        if (ps.len() != qs.len()) { throw #Type { span, message: `expected ${ps.len()} arguments, found ${qs.len()}` }; }
+        let i: usize = 0;
+        while (i < ps.len()) { self.unify(ps[i], qs[i], span); i += 1; }
+        self.unify(r, s, span);
+      }
+      [p, q] => throw #Type { span, message: `expected ${self.show(p)}, found ${self.show(q)}` },
+    }
+  }
+  function show(self: readonly Self, t: readonly Type): String {
+    match (self.resolve(t)) {
+      #Int => "int".toString(),
+      #Bool => "bool".toString(),
+      #Var(v) => `t${v}`,
+      #Fn(ps, r) => `(${ps.iter().map((p) => self.show(p)).collect().join(", ")}) => ${self.show(r)}`,
+    }
+  }
+}
+
+// Scopes are a stack of maps from names to types; lookup walks it from the innermost.
+struct Checker { types: Types; scopes: Vec<HashMap<String, Type>> }
+
+impl Checker {
+  function lookup(self: readonly Self, name: str, span: Span): Type uses Fail<CompileError> {
+    let i = self.scopes.len();
+    while (i > 0) {
+      i -= 1;
+      match (self.scopes[i].get(name)) {
+        #Some(t) => return t.clone(),
+        #None => {},
+      }
+    }
+    throw #Unbound { span, name: name.toString() }
+  }
+
+  function infer(self: mut Self, e: readonly Expr): Type uses Fail<CompileError> {
+    match (e) {
+      #Int(_, _) => #Int,
+      #Bool(_, _) => #Bool,
+      #Var(name, span) => self.lookup(name, span),
+      #Bin(op, a, b, span) => {
+        const [ta, tb] = [self.infer(a), self.infer(b)];
+        self.types.unify(ta, #Int, spanOf(a));
+        self.types.unify(tb, #Int, spanOf(b));
+        match (op) { #Lt => #Bool, _ => #Int }
+      }
+      #If(c, t, f, span) => {
+        const tc = self.infer(c);
+        self.types.unify(tc, #Bool, spanOf(c));
+        const [tt, tf] = [self.infer(t), self.infer(f)];
+        self.types.unify(tt, tf, span);
+        tt
+      }
+      #Let(name, value, body, _) => {
+        const tv = self.infer(value);
+        let scope: HashMap<String, Type> = HashMap.new();
+        scope.insert(name.clone(), tv);
+        self.scopes.push(scope);
+        const tb = self.infer(body);
+        self.scopes.pop();
+        tb
+      }
+      #Fn(params, body, _) => {
+        let scope: HashMap<String, Type> = HashMap.new();
+        let pts: Vec<Type> = Vec.new();
+        for (const p of params) {
+          const t = self.types.fresh();
+          scope.insert(p.clone(), t.clone());
+          pts.push(t);
+        }
+        self.scopes.push(scope);
+        const tr = self.infer(body);
+        self.scopes.pop();
+        #Fn(pts, Box.new(tr))
+      }
+      #Call(f, args, span) => {
+        const tf = self.infer(f);
+        let tas: Vec<Type> = Vec.new();
+        for (const a of args) { tas.push(self.infer(a)); }
+        const tr = self.types.fresh();
+        self.types.unify(tf, #Fn(tas, Box.new(tr.clone())), span);
+        tr
+      }
+    }
+  }
+}
+
+// ---- Code generation to a stack machine ----
+
+// Each function has a frame of its own: what it captured, then its parameters, then its `let`s.
+enum Instr { #Push(i64), #Load(usize), #Store, #Drop, #Add, #Sub, #Mul, #Lt, #Jump(usize), #JumpIfFalse(usize), #MakeFn(usize, usize, usize), #Call(usize), #Ret }
+impl Clone for Instr;
+impl Show for Instr;
+
+struct Gen { code: Vec<Instr>; locals: Vec<String> }
+
+// The names an expression uses that it does not bind, in order of first use.
+function freeVars(e: readonly Expr, bound: mut Vec<String>, out: mut Vec<String>): void {
+  match (e) {
+    #Int(_, _) | #Bool(_, _) => {},
+    #Var(name, _) => {
+      if (!bound.includes(name) && !out.includes(name)) { out.push(name.clone()); }
+    }
+    #Bin(_, a, b, _) => { freeVars(a, mut bound, mut out); freeVars(b, mut bound, mut out); }
+    #If(c, t, f, _) => { freeVars(c, mut bound, mut out); freeVars(t, mut bound, mut out); freeVars(f, mut bound, mut out); }
+    #Let(name, value, body, _) => {
+      freeVars(value, mut bound, mut out);
+      bound.push(name.clone());
+      freeVars(body, mut bound, mut out);
+      bound.pop();
+    }
+    #Fn(params, body, _) => {
+      const depth = bound.len();
+      for (const p of params) { bound.push(p.clone()); }
+      freeVars(body, mut bound, mut out);
+      while (bound.len() > depth) { bound.pop(); }
+    }
+    #Call(f, args, _) => {
+      freeVars(f, mut bound, mut out);
+      for (const a of args) { freeVars(a, mut bound, mut out); }
+    }
+  }
+}
+
+impl Gen {
+  function emit(self: mut Self, i: Instr): usize { self.code.push(i); self.code.len() - 1 }
+  function slot(self: readonly Self, name: str): usize {
+    let i = self.locals.len();
+    while (i > 0) { i -= 1; if (self.locals[i] == name) { return i; } }
+    panic("checked names resolve")
+  }
+  function gen(self: mut Self, e: readonly Expr): void {
+    match (e) {
+      #Int(n, _) => { self.emit(#Push(n)); }
+      #Bool(b, _) => { self.emit(#Push(if (b) { 1 } else { 0 })); }
+      #Var(name, _) => { const s = self.slot(name); self.emit(#Load(s)); }
+      #Bin(op, a, b, _) => {
+        self.gen(a);
+        self.gen(b);
+        self.emit(match (op) { #Add => #Add, #Sub => #Sub, #Mul => #Mul, #Lt => #Lt });
+      }
+      #If(c, t, f, _) => {
+        self.gen(c);
+        const jf = self.emit(#JumpIfFalse(0));
+        self.gen(t);
+        const j = self.emit(#Jump(0));
+        self.code[jf] = #JumpIfFalse(self.code.len());
+        self.gen(f);
+        self.code[j] = #Jump(self.code.len());
+      }
+      #Let(name, value, body, _) => {
+        self.gen(value);
+        self.emit(#Store);
+        self.locals.push(name.clone());
+        self.gen(body);
+        self.locals.pop();
+        self.emit(#Drop);
+      }
+      #Fn(params, body, _) => {
+        // Closure conversion: what the body uses from outside is loaded and stored in the closure.
+        let bound: Vec<String> = Vec.new();
+        for (const p of params) { bound.push(p.clone()); }
+        let captures: Vec<String> = Vec.new();
+        freeVars(body, mut bound, mut captures);
+        for (const c of captures) { const s = self.slot(c); self.emit(#Load(s)); }
+        const make = self.emit(#MakeFn(0, params.len(), captures.len()));
+        const skip = self.emit(#Jump(0));
+        // The body's frame: its captures, then its parameters.
+        let inner = Gen { code: Vec.new(), locals: Vec.new() };
+        for (const c of captures) { inner.locals.push(c.clone()); }
+        for (const p of params) { inner.locals.push(p.clone()); }
+        inner.code = self.code.drain().collect();
+        inner.gen(body);
+        inner.emit(#Ret);
+        self.code = inner.code.drain().collect();
+        self.code[make] = #MakeFn(skip + 1, params.len(), captures.len());
+        self.code[skip] = #Jump(self.code.len());
+      }
+      #Call(f, args, _) => {
+        for (const a of args) { self.gen(a); }
+        self.gen(f);
+        self.emit(#Call(args.len()));
+      }
+    }
+  }
+}
+
+// ---- The virtual machine ----
+
+enum Value { #Int(i64), #Closure(usize, usize, Vec<Value>) }
+impl Clone for Value;
+
+type Frame = { ret: usize; locals: Vec<Value> };
+
+function asInt(v: readonly Value): i64 {
+  match (v) { #Int(n) => n, _ => panic("checked: an int") }
+}
+
+export function run(code: readonly Instr[]): i64 {
+  let stack: Vec<Value> = Vec.new();
+  let frames: Vec<Frame> = Vec.new();
+  frames.push({ ret: code.len(), locals: Vec.new() });
+  let pc: usize = 0;
+  while (pc < code.len()) {
+    const top = frames.len() - 1;
+    match (code[pc]) {
+      #Push(n) => stack.push(#Int(n)),
+      #Load(s) => stack.push(frames[top].locals[s].clone()),
+      #Store => frames[top].locals.push(stack.pop().unwrap()),
+      #Drop => { frames[top].locals.pop(); }
+      #Add | #Sub | #Mul | #Lt => {
+        const b = asInt(stack.pop().unwrap());
+        const a = asInt(stack.pop().unwrap());
+        stack.push(#Int(match (code[pc]) { #Add => a + b, #Sub => a - b, #Mul => a * b, _ => if (a < b) { 1 } else { 0 } }));
+      }
+      #Jump(t) => { pc = t; continue; }
+      #JumpIfFalse(t) => { if (asInt(stack.pop().unwrap()) == 0) { pc = t; continue; } }
+      #MakeFn(addr, arity, n) => {
+        let caps: Vec<Value> = Vec.new();
+        for (const _ of 0..n) { caps.push(#Int(0)); }
+        let i = n;
+        while (i > 0) { i -= 1; caps[i] = stack.pop().unwrap(); }
+        stack.push(#Closure(addr, arity, caps));
+      }
+      #Call(n) => {
+        match (stack.pop().unwrap()) {
+          #Closure(addr, _, caps) => {
+            let args: Vec<Value> = Vec.new();
+            for (const _ of 0..n) { args.push(stack.pop().unwrap()); }
+            args.reverse();
+            let locals = caps;
+            for (const a of args.drain()) { locals.push(a); }
+            frames.push({ ret: pc + 1, locals });
+            pc = addr;
+            continue;
+          }
+          _ => panic("checked: a function"),
+        }
+      }
+      #Ret => {
+        const f = frames.pop().unwrap();
+        pc = f.ret;
+        continue;
+      }
+    }
+    pc += 1;
+  }
+  asInt(stack.pop().unwrap())
+}
+
+export function compile(src: str): [Vec<Instr>, String] uses Fail<CompileError> {
+  let p = Parser { toks: lex(src), pos: 0 };
+  const ast = p.expr();
+  let c = Checker { types: Types { links: Vec.new() }, scopes: Vec.new() };
+  const t = c.infer(ast);
+  let g = Gen { code: Vec.new(), locals: Vec.new() };
+  g.gen(ast);
+  [g.code, c.types.show(t)]
+}
+
+function describe(e: readonly CompileError): String {
+  match (e) {
+    #Lex { at, message } => `${at}: ${message}`,
+    #Parse { at, message } => `${at}: ${message}`,
+    #Type { span, message } => `${span.start}..${span.end}: ${message}`,
+    #Unbound { span, name } => `${span.start}: unknown name \`${name}\``,
+  }
+}
+
+export function main(): void uses Io {
+  const programs = [
+    "let x = 2 in x * (3 + 4)",
+    "let twice = fn(f, x) => f(f(x)) in twice(fn(n) => n * 2, 5)",
+    "if 1 < 2 then 10 else 20",
+    "let k = 10 in let add = fn(x) => x + k in add(add(1))",
+    "let f = fn(x) => x + 1 in f(true)",
+    "let y = 1 in z",
+    "let g = fn(x) => x(x) in 0",
+  ];
+  for (const src of programs) {
+    try {
+      const [code, ty] = compile(src);
+      println(`${src}  :  ${ty}  =  ${run(code)}`);
+    } catch (e) {
+      println(`error at ${describe(e)}`);
+    }
+  }
+}

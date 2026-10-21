@@ -38,5 +38,6 @@ Versions are pre-1.0 while the language is being designed. The specification was
 | 0.38 | `Io`'s `Fd`, `Instant`, `Duration`; unimported interfaces suggest their import |
 | 0.39 | Consistency pass: checked overflow; `panic`; Option/Result methods; grammar and §9 aligned; §0.1 rebuilt |
 | 0.40 | Programs from the spec alone: destructuring closure params; bare void tags; `Vec` edits; `Mutex` borrowed by tasks |
+| 0.41 | Self-hosting is goal 6; unions include named unions; matches move per arm |
 
 `review-round-*.md` are the design review rounds that produced 0.2–0.15; `programs-against-v0.13.md` is the program-writing exercise against what is now 0.13.
