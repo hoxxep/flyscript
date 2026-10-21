@@ -80,10 +80,12 @@ pub fn generate(it: &Interp, f: Value) -> Value {
         let evt = match child.call_value(&f, Vec::new()) {
             Ok(_) => Some(Evt::Done),
             Err(Ctl::Panic(m)) if m == FAILED => None,
-            Err(Ctl::Panic(m)) if m == CANCELLED => None,
+            // Unwound because the generator was dropped: say so, so the drop can go on.
+            Err(Ctl::Panic(m)) if m == CANCELLED => Some(Evt::Done),
             Err(Ctl::Panic(m)) => Some(Evt::Panicked(m)),
             Err(other) => Some(Evt::Panicked(format!("{other:?}"))),
         };
+        child.gens.producers.lock().expect("gens").remove(&id);
         if let Some(evt) = evt {
             let _ = gen_tx.send(evt);
         }
@@ -116,6 +118,29 @@ pub fn fail_out(it: &mut Interp, generator: u64, v: Value) -> Result<Value, Ctl>
         let _ = p.to.send(Evt::Failed(v));
     }
     Err(panic(FAILED))
+}
+
+/// Drops generator `id`: a suspended producer is told to unwind, and waited for, so its cleanup
+/// runs before the program goes on; a chain drops what it pulls from.
+pub fn drop_gen(it: &mut Interp, id: u64) {
+    let kind = it.gens.consumers.lock().expect("gens").remove(&id);
+    match kind {
+        Some(GenKind::Thread { to, from, started }) => {
+            drop(to);
+            if started {
+                // The producer unwinds on its own thread; wait until it has finished.
+                while let Ok(Evt::Item(_)) = from.lock().expect("rx").recv() {}
+            }
+        }
+        Some(GenKind::Map { inner, .. } | GenKind::Filter { inner, .. } | GenKind::Take { inner, .. } | GenKind::Enumerate { inner, .. }) => {
+            drop_gen(it, inner)
+        }
+        Some(GenKind::Zip { a, b }) => {
+            drop_gen(it, a);
+            drop_gen(it, b);
+        }
+        _ => {}
+    }
 }
 
 /// `g.next()`: the next item, or `None` when the generator is done.

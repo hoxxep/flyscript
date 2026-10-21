@@ -128,6 +128,7 @@ pub fn check_function(p: &mut Program, fid: FnId) {
         collecting: true,
         closure_modes: HashMap::new(),
         var_modes: HashMap::new(),
+        moves: HashMap::new(),
     };
     // Pass 1 collects every use of every binding, with its position; pass 2 checks.
     for pass in 0..2 {
@@ -161,6 +162,10 @@ pub fn check_function(p: &mut Program, fid: FnId) {
         }
     }
     o.p.note = None;
+    let moves = std::mem::take(&mut o.moves);
+    if let Some(t) = o.p.typed.get_mut(&fid) {
+        t.moves = moves;
+    }
 }
 
 struct Own<'p> {
@@ -203,6 +208,8 @@ struct Own<'p> {
     /// the capture that decided it; and the mode of bindings initialized with a closure.
     closure_modes: HashMap<Span, (FnMode, String)>,
     var_modes: HashMap<VarId, (FnMode, String)>,
+    /// Each move out of a binding: the moving expression, and the field path moved.
+    moves: HashMap<Span, Vec<String>>,
 }
 
 impl<'p> Own<'p> {
@@ -470,6 +477,8 @@ impl<'p> Own<'p> {
                         self.err(at, format!("cannot move `{}` out of a value whose type implements `Drop`", self.path_name(&path)));
                     } else if !self.collecting {
                         self.state.moved.insert(path.clone());
+                        // Where a value leaves its binding, the evaluator stops owning it there (§5.6).
+                        self.moves.insert(at, path.fields.clone());
                     }
                 }
                 Val { loans: held }

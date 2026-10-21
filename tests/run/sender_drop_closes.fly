@@ -1,0 +1,21 @@
+// expect: 1
+// expect: 2
+// expect: 3
+// expect: done
+// A sender dropped at the end of the task that took it closes its channel (§5.6, §6.2): no
+// `close` is needed.
+import { println } from "std/io";
+import { channel } from "std/sync";
+export function main(): void uses Io {
+  const [tx, rx] = channel<i32>();
+  Io.scope((s) => {
+    s.spawn(() => {
+      const t = tx;
+      t.send(1);
+      t.send(2);
+      t.send(3);
+    });
+    for (const m of rx) { println(`${m}`); }
+  });
+  println("done");
+}

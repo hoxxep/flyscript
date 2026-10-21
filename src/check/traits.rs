@@ -12,6 +12,14 @@ impl Program {
         names.contains(&self.defs[d].name.as_str()) && self.modules[self.defs[d].module].is_std
     }
 
+    /// The `drop` method of the nominal type `d`'s `Drop` implementation.
+    pub fn drop_method(&self, d: DefId) -> Option<super::env::FnId> {
+        self.impls
+            .iter()
+            .find(|imp| matches!(&imp.target, Ty::Named(t, _) if *t == d) && imp.interface.as_ref().is_some_and(|(i, _)| self.defs[*i].name == "Drop"))
+            .and_then(|imp| imp.methods.iter().copied().find(|f| self.fns[*f].name == "drop"))
+    }
+
     /// Whether the nominal type `d` has a `Drop` implementation.
     pub fn has_drop(&self, d: DefId) -> bool {
         self.impls.iter().any(|imp| {

@@ -268,7 +268,13 @@ impl Interp {
                 let ch = native(&a(0), "Pending")?;
                 self.sched.recv(self.task, ch)?.ok_or_else(|| panic("the reply was dropped unsent"))
             }
-            "Sender.close" => {
+            "Gen.drop" => {
+                if let Ok(id) = gens_mod::gen_id(&a(0)) {
+                    gens_mod::drop_gen(self, id);
+                }
+                Ok(Value::Unit)
+            }
+            "Sender.close" | "Sender.drop" => {
                 let ch = native(&a(0), "Sender")?;
                 self.sched.close(self.task, ch)?;
                 Ok(Value::Unit)

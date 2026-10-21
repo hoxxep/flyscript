@@ -928,7 +928,7 @@ Everything here follows from the rules above: the failure row of the `try` body 
 
 ## 11. Implementation
 
-The prototype compiler, `flyc`, implements this specification except code generation, and its evaluator does not run `Drop`: values are reclaimed by the host, and a channel closes only when a sender is closed explicitly.
+The prototype compiler, `flyc`, implements this specification except code generation. Its evaluator runs destructors as specified, keeping a drop flag per binding at the moves the ownership pass records; a value it does not bind, such as a discarded call result, is reclaimed by the host without one.
 
 1. **Parse** each module into a syntax tree. Standard-library modules are declaration files and Flyscript modules (the prelude's derivations, `std/json`); either may leave out a body that the runtime provides.
 2. **Expand** `comptime` code: a template is specialized when a call or a bound needs it, its body expanded with fresh positions in source order (each repeated copy is distinct code to the later passes) that map back to the template for diagnostics.

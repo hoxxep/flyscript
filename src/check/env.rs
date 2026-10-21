@@ -200,6 +200,9 @@ pub struct Typed {
     /// Likewise for `${e}`, by the interpolated expression's span (which an operator inside it
     /// may share).
     pub shows: HashMap<Span, (FnId, Vec<GArg>)>,
+    /// Moves out of bindings, by the moving expression's span, with the field path moved: the
+    /// evaluator's drop flags (§5.6).
+    pub moves: HashMap<Span, Vec<String>>,
     /// Tag constructions `#A(x)` whose one argument is the whole of a larger payload (§3.2).
     pub whole: std::collections::HashSet<Span>,
     /// The function each call or method call resolved to, by the call's span.

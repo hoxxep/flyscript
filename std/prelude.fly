@@ -349,6 +349,10 @@ impl<T, row E> Gen<T, E> {
   export function collect(self: Self): Vec<T> uses ...E;
 }
 
+// Dropping a generator before it finishes unwinds it, running its cleanup (§5.5).
+impl<T, row E> Drop for Gen<T, E> {
+  function drop(self: mut Self): void;
+}
 impl<T, row E> Iterable<T, E> for Gen<T, E> {
   function each(self: readonly Self): void uses Yield<T>, ...E;
 }

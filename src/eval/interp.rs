@@ -41,12 +41,16 @@ pub type R = Result<Value, Ctl>;
 pub struct Scope {
     vars: Mutex<HashMap<String, Shared>>,
     parent: Option<Env>,
+    /// The bindings made here that may need dropping, in order, with their types (§5.6).
+    owned: Mutex<Vec<(String, Ty)>>,
+    /// Field paths moved out of this scope's bindings (a whole move is the empty path).
+    moved: Mutex<HashMap<String, Vec<Vec<String>>>>,
 }
 
 pub type Env = Arc<Scope>;
 
 pub fn new_env(parent: Option<Env>) -> Env {
-    Arc::new(Scope { vars: Mutex::new(HashMap::new()), parent })
+    Arc::new(Scope { vars: Mutex::new(HashMap::new()), parent, owned: Mutex::new(Vec::new()), moved: Mutex::new(HashMap::new()) })
 }
 
 fn lookup(env: &Env, name: &str) -> Option<Shared> {
@@ -62,6 +66,37 @@ fn lookup(env: &Env, name: &str) -> Option<Shared> {
 
 pub fn define(env: &Env, name: &str, v: Value) {
     env.vars.lock().expect("env").insert(name.to_string(), shared(v));
+}
+
+/// Binds `name` to an owned value of type `ty`, to be dropped when its scope ends.
+fn define_owned(env: &Env, name: &str, v: Value, ty: Ty) {
+    env.moved.lock().expect("env").remove(name);
+    env.owned.lock().expect("env").push((name.to_string(), ty));
+    define(env, name, v);
+}
+
+/// Records that `path` of binding `name` was moved out, in the scope that has the binding.
+fn mark_moved(env: &Env, name: &str, path: Vec<String>) {
+    let mut e = Some(env.clone());
+    while let Some(s) = e {
+        if s.vars.lock().expect("env").contains_key(name) {
+            s.moved.lock().expect("env").entry(name.to_string()).or_default().push(path);
+            return;
+        }
+        e = s.parent.clone();
+    }
+}
+
+/// A binding assigned anew owns a value again.
+fn mark_assigned(env: &Env, name: &str) {
+    let mut e = Some(env.clone());
+    while let Some(s) = e {
+        if s.vars.lock().expect("env").contains_key(name) {
+            s.moved.lock().expect("env").remove(name);
+            return;
+        }
+        e = s.parent.clone();
+    }
 }
 
 /// Where `break`, `continue` and `return` go, lexically.
@@ -169,19 +204,33 @@ impl Interp {
         self.call_fn_with(fid, args, TEnv::default())
     }
 
-    fn call_fn_with(&mut self, fid: FnId, args: Vec<Value>, tenv: TEnv) -> R {
+    pub fn call_fn_with(&mut self, fid: FnId, args: Vec<Value>, tenv: TEnv) -> R {
         let module = self.prog.fns[fid].module;
         let Some(fdecl) = self.prog.fn_decl(fid) else { return Err(panic("not a function")) };
         let Some(body) = fdecl.body else {
             return self.builtin(fid, args);
         };
         let env = new_env(None);
-        for (p, a) in fdecl.sig.params.iter().zip(args) {
-            define(&env, &p.name.name, a);
-        }
+        let param_tys: Vec<Ty> = self.prog.fns[fid].scheme.params.iter().map(|(_, t)| t.clone()).collect();
         let frame = self.fresh_id();
         let saved = std::mem::replace(&mut self.lex, Lex { frame, loops: Vec::new(), owner: fid, module, tenv });
+        for ((p, a), t) in fdecl.sig.params.iter().zip(args).zip(param_tys) {
+            let t = self.frame_ty(&t);
+            if super::drops::needs_drop(&self.prog, &t) {
+                define_owned(&env, &p.name.name, a, t);
+            } else {
+                define(&env, &p.name.name, a);
+            }
+        }
         let r = self.block(&body, &env);
+        // Parameters the body did not move are dropped as it returns (§5.6).
+        let r = match (r, self.drop_scope(&env)) {
+            (Ok(v), Err(e)) => {
+                let _ = v;
+                Err(e)
+            }
+            (r, _) => r,
+        };
         self.lex = saved;
         match r {
             Err(Ctl::Return(f, v)) if f == frame => Ok(v),
@@ -357,7 +406,24 @@ impl Interp {
                     result = Err(e);
                 }
         }
+        // Then the block's owned bindings that were not moved out, newest first.
+        if let Err(e) = self.drop_scope(&env)
+            && result.is_ok() {
+                result = Err(e);
+            }
         result
+    }
+
+    /// Drops the owned bindings of a scope, newest first, except what was moved out of them.
+    fn drop_scope(&mut self, env: &Env) -> Result<(), Ctl> {
+        let owned = std::mem::take(&mut *env.owned.lock().expect("env"));
+        for (name, ty) in owned.into_iter().rev() {
+            let moved = env.moved.lock().expect("env").get(&name).cloned().unwrap_or_default();
+            let Some(cell) = env.vars.lock().expect("env").get(&name).cloned() else { continue };
+            let v = cell.lock().expect("cell").clone();
+            self.drop_value(v, &ty, &moved)?;
+        }
+        Ok(())
     }
 
     /// A value bound to an owned binding is read out of any borrow it arrived as.
@@ -390,7 +456,10 @@ impl Interp {
             PatternKind::Wild => true,
             PatternKind::TagAt { .. } => false,
             PatternKind::Bind(name) => {
-                define(env, name, v.clone());
+                match self.binding_ty(pat.span).map(|t| self.frame_ty(&t)) {
+                    Some(t) if !matches!(v, Value::Ptr(_)) && super::drops::needs_drop(&self.prog, &t) => define_owned(env, name, v.clone(), t),
+                    _ => define(env, name, v.clone()),
+                }
                 true
             }
             PatternKind::Lit(e) => match self.expr(e, env) {
@@ -511,6 +580,17 @@ impl Interp {
     // ---- expressions ----
 
     pub fn expr(&mut self, e: &Expr, env: &Env) -> R {
+        let r = self.expr_inner(e, env);
+        // A value moved out of a binding is no longer the binding's to drop.
+        if r.is_ok()
+            && let Some(path) = self.prog.typed.get(&self.lex.owner).and_then(|t| t.moves.get(&e.span)).cloned()
+                && let Some(name) = root_name(e) {
+                    mark_moved(env, name, path);
+                }
+        r
+    }
+
+    fn expr_inner(&mut self, e: &Expr, env: &Env) -> R {
         match &e.kind {
             ExprKind::TypeRef(_) | ExprKind::FieldAt { .. } | ExprKind::TagAt { .. } => Err(panic("comptime syntax at run time")),
             ExprKind::Int(s) => Ok(match self.ty_of(e.span) {
@@ -626,6 +706,9 @@ impl Interp {
                     binary(&op[..op.len() - 1], &get(&p).deref(), &v.deref())?
                 };
                 set(&p, new);
+                if let ExprKind::Ident(name) = &target.kind {
+                    mark_assigned(env, name);
+                }
                 Ok(Value::Unit)
             }
             ExprKind::Cast { expr, ty } => {
@@ -1068,5 +1151,14 @@ fn cast(v: &Value, ty: &ast::Type) -> Value {
                 _ => i,
             })
         }
+    }
+}
+
+/// The binding an expression reads from: `x`, `x.f`, `x.f.g`.
+fn root_name(e: &Expr) -> Option<&str> {
+    match &e.kind {
+        ExprKind::Ident(n) => Some(n),
+        ExprKind::Field { target, .. } | ExprKind::Index { target, .. } => root_name(target),
+        _ => None,
     }
 }

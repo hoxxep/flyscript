@@ -2,6 +2,7 @@
 
 pub mod builtins;
 pub mod coroutine;
+pub mod drops;
 pub mod generators;
 pub mod interp;
 pub mod sched;

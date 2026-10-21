@@ -15,6 +15,9 @@ impl<T> Sender<T> {
   export function send(self: readonly Self, v: T): void uses Io;
   export function close(self: Self): void uses Io;
 }
+impl<T extends Send> Drop for Sender<T> {
+  function drop(self: mut Self): void;
+}
 impl<T> Receiver<T> {
   export function recv(self: readonly Self): Option<T> uses Io;
 }
