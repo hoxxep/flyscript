@@ -1,6 +1,6 @@
 # Flyscript
 
-**Language specification, version 0.23**
+**Language specification, version 0.24**
 
 *Affine values, one row calculus, handlers for everything, and `comptime`: Church on the outside, Turing on the inside.*
 
@@ -18,19 +18,18 @@ The whole language rests on five laws. Every rule in this document is a conseque
 4. **Handlers for everything.** Errors, I/O, iteration and region memory are ordinary effects with ordinary handlers. A handler may hold the rest of a computation as a one-shot continuation value; generators and tasks are both built from that one primitive.
 5. **`comptime` is the metalanguage.** Generics, reflection, layout transformation and derived interfaces are ordinary Flyscript code run by the compiler.
 
-### 0.1 Changes from 0.22
+### 0.1 Changes from 0.23
 
-0.23 finishes Law 5's derived interfaces and adopts a holistic review of 0.22 (docs/reviews/2026-10-21-holistic-review-of-0-22.md). The review's most serious finding was in the prototype, not the text: closure modes were specified but not enforced, so `par` accepted a closure that counted into a shared variable.
+0.24 makes layout library code, as Law 5 has always said it is: `Soa<T>`, `par` and `parReduce` are now written in Flyscript, and the compiler knows nothing of them. Getting there removed two concepts and settled `ParSplit` after a focused review (docs/reviews/2026-10-21-parsplit-for-library-soa.md).
 
 | Change | Why |
 | :--- | :--- |
-| `Eq`, `Hash`, `Show`, `Clone` and `Ord extends Eq` are prelude derivations; `==`, `<` and `` `${e}` `` call them on anything but a primitive (§3.5) | the operators and interpolation get user meaning, and a struct is compared or printed only if it asks |
-| A closure's mode is checked wherever it meets a function type (§4.3) | a `mut` closure passed to `par` raced; a `once` closure returned as `() => T` handed out one value twice |
-| Sequential library functions take `mut` closures (`Gen.map`, `Gen.filter`) (§4.3) | `xs.iter().map((x) => { total += x; … })` is what a TypeScript programmer writes |
-| Derived `Eq`, `Ord` and `Hash` are total on floats (§3.5) | `NaN` broke `Ord`'s totality, and `-0.0` hashed apart from `0.0` while comparing equal |
-| An owner compared with what it lends is compared as that (§3.5) | `name == "ada"` for a `String` |
-| A value that is borrowed without a place lives in an anonymous local of its block (§4.1) | A.9 lends temporary strings into its replies; the rule was relied on but unstated |
-| `iterMut()` lends each element `mut` (§5.5); indexing and slicing are specified (§3.1) | a loop could not update a collection in place |
+| Template structs: a struct with a `comptime` type parameter, or `comptime` code among its fields, is computed per instance (§7.1) | `Soa<T>` and `Ring<T, comptime N>` are ordinary declarations; type-function calls (`Ring(u8, 1024)`) and `struct { … }` expressions are gone |
+| An impl gives its interface's associated types: `type View = mut T;` (§3.4) | specified since 0.13, now resolved through the impl rather than special-cased |
+| `ParSplit` splits a `Slice` view made once by `slice()`; `parReduce` reads the container shared (§6.5) | an owning container cannot be split into two `mut Self`; `parReduce` could not split a `readonly` container at all |
+| `Soa<T>`, its views, `par` and `parReduce` are library code (§6.5, §7.4) | the last built-in layout and the last built-in parallel loop |
+| A function that calls itself is assumed pure, and is an error only if its body performs effects (§3.6) | a private recursive helper had no way to say it was pure |
+| A function value is called through a borrow of it (§4.3) | a recursive helper lends its callback to both halves |
 
 ---
 
@@ -92,12 +91,12 @@ Import      = "import" "{" ImportName { "," ImportName } "}" "from" String ";" ;
 ImportName  = Ident [ "as" Ident ] ;
 
 Decl        = Struct | Enum | Interface | Impl | TypeAlias | Effect | Function | Extern | Const ;
-Struct      = [ Layout ] [ "view" ] "struct" Ident [ TypeParams ] "{" { [ "private" ] Ident ":" Type ";" } "}" ;
+Struct      = [ Layout ] [ "view" ] "struct" Ident [ TypeParams ] "{" { [ "private" ] Field | "comptime" Expr ";" } "}" ;
 Enum        = [ "view" ] "enum" Ident [ TypeParams ] "{" Tag { "," Tag } [ "," ] "}" ;
 Layout      = "@layout" "(" ( "c" | "packed" ) ")" ;
 Const       = "const" Ident [ ":" Type ] "=" Expr ";" ;      (* evaluated at comptime *)
 Interface   = "interface" Ident [ TypeParams ] [ "extends" Bounds ] "{" { ( Sig | "type" Ident [ "extends" Bounds ] ) ";" } "}" ;
-Impl        = "impl" [ TypeParams ] Type [ "for" Type ] "{" { ["export"] Function } "}"
+Impl        = "impl" [ TypeParams ] Type [ "for" Type ] "{" { ["export"] Function | "type" Ident "=" Type ";" } "}"
             | "impl" Type "for" Type ";" ;                (* asks for the derivation, §7.3 *)
 TypeAlias   = "type" Ident [ TypeParams ] "=" Type ";" ;
 Effect      = "effect" Ident [ TypeParams ] "{" { Op ";" } "}" ;
@@ -116,7 +115,7 @@ TypeParam   = "region" Ident | "row" Ident [ "=" Type ] | "comptime" Ident ":" T
             | Ident [ "extends" Bounds ] [ "=" Type ] ;
 Bounds      = Type { "&" Type } ;
 
-Type        = Prim | Path [ TypeArgs ] | Path "(" Expr { "," Expr } ")" | Record | Union | Tuple | Fn
+Type        = Prim | Path [ TypeArgs ] | Record | Union | Tuple | Fn
             | Type "[" [ Expr ] "]" | "mut" Type | "readonly" Type | Type "*" | "dyn" Path | "[" "]" ;
 Record      = "{" { Field } [ "..." Ident ] "}" ;
 Field       = FieldName ":" Type ";" | Generate(Field) ;
@@ -138,7 +137,7 @@ Stmt        = ( "const" | "let" ) Pattern [ ":" Type ] "=" Expr ";" | "defer" Ex
             | "return" [ Expr ] ";" | "break" ";" | "continue" ";" | Expr ";" | BlockLike ;
 BlockLike   = If | IfConst | While | For | Match | Try | Region | Handle | Unsafe | Block | "comptime" ( If | Match | For ) ;
 Expr        = … | BlockLike | Throw | Yield | Lambda | RecordLit | ListLit | "comptime" Unary
-            | Expr "." "[" Expr "]" | "#" "[" Expr "]" [ TagArgs ] | "struct" "{" { Field } "}" ;
+            | Expr "." "[" Expr "]" | "#" "[" Expr "]" [ TagArgs ] ;
 RecordLit   = [ Path ] "{" [ Entry { "," Entry } ] "}" ;
 Entry       = FieldName [ ":" Expr ] | Generate(Entry) ;
 ListLit     = "[" [ Item { "," Item } ] "]" ;
@@ -239,6 +238,8 @@ interface Collection {
 
 Declarations hold data only. Behaviour lives in `impl T { … }` (inherent methods) and `impl I for T { … }` (interface implementations). An `impl I for T` must appear in the module that declares `I` or the module that declares `T`. Structural and built-in types (records, tag unions, slices, `str`) belong to no module, so only the standard library gives them inherent methods (`Option.cloned`, `str.splitWhitespace`); other code extends them through interfaces. Calls dispatch statically through `<T extends I>`: a method through a value (`x.encode(out)`) and a function without `self` through the type (`T.decode(p)`, `User.decode(p)`). Each call states the bounds its type arguments must meet, checked where the types are known. `dyn I` is an explicit fat pointer for dynamic dispatch.
 
+An interface's associated types are given by each impl (`type View = mut T;`), and `C.View` for a known `C` is whatever `C`'s impl says.
+
 The impl for a type is the first whose head matches it, after expanding aliases; specific impls come before an interface's derivation (§7.3). An impl of `I` for `T` requires `T` to satisfy every interface `I` extends: `interface FromJson extends Send` means nothing that borrows is decoded, derivation or not.
 
 A method's receiver is a first parameter named `self`: `self: Self` (by move), `self: readonly Self` or `self: mut Self`. A function in an `impl` without `self` is called on the type: `RegionList.new()`.
@@ -260,6 +261,7 @@ Type checking happens after `comptime` evaluation and uses bidirectional local i
 - Exported functions, interface methods and `extern` declarations state their parameter types, return type and effects. An exported function with no `uses` clause is pure.
 - Everything inside a body is inferred: local types, closure signatures, generic and row arguments, literal types, region arguments, and the effects of non-exported functions.
 - Region arguments are unification variables solved over the whole body. An allocation whose region the types leave undetermined goes to the **innermost enclosing region it does not escape from**: when a `region` block ends, each such allocation is placed in it unless that would let the data outlive the block (through the block's value or a variable declared outside it), in which case it is offered to the next enclosing region. A region argument left unconstrained outside every region defaults to the heap, where region allocation is an error, so a stray `alloc` is caught.
+- **Recursion.** A function that is called again while its effects are being inferred — itself, or through others — is assumed pure there; if its body then performs an effect, it must state its effects with `uses`.
 - **Expected types flow into calls.** A call checked against an expected type unifies the callee's instantiated return type with it *before* checking the arguments. This is how `alloc({ user, token })` in a function returning `Ref<Request>` builds a `Request` rather than an anonymous record.
 - `break`, `continue`, `return` and `throw` have type `never`, which fits any expected type.
 - There is no global Hindley–Milner inference: errors stay local, and `comptime`, regions and interfaces stay decidable.
@@ -330,6 +332,8 @@ A closure captures each binding as its body needs it, by reference: a read takes
 | `once (A) => B` | consumes a capture (moves it out), or calls a captured `once` closure | at most once |
 
 So ``(path) => `${prefix}/${path}` `` returned from a function owns `prefix` and is an ordinary `(str) => String`. A closure that holds a borrow is class 2: it can be passed down but not returned or stored.
+
+A function value is called through a borrow of it as well as directly, so a helper that passes its callback on lends it: `f: readonly (x: T) => void` may be given to two calls.
 
 The mode is checked wherever a closure meets a function type — an argument, a binding, a returned value: a `mut` closure cannot go where a shared one is wanted (`par` would run it on many tasks at once), and a `once` closure only where `once` is. Library functions that call their closure from one place in sequence take `mut` closures (`Gen.map`, `Gen.filter`), so `xs.iter().map((x) => { total += x; x * 2 })` may count as it goes; `par` and `parReduce` take shared ones.
 
@@ -602,15 +606,17 @@ test("handler degrades under packet loss", () => {
 
 ### 6.5 Data parallelism
 
-Parallel loops are library functions over pure closures:
+Parallel loops are library functions over pure closures (`std/par`):
 
 ```ts
 interface ParSplit {
+  type Slice;       // a splittable mutable view of a run of elements
   type View;        // a mutable view of one element
   type ReadView;    // a read-only view of one element
   function len(self: readonly Self): usize;
-  function split(self: mut Self, at: usize): [mut Self, mut Self] from self;
-  function viewAt(self: mut Self, i: usize): Self.View from self;
+  function slice(self: mut Self): Self.Slice from self;
+  function split(s: Self.Slice, at: usize): [Self.Slice, Self.Slice] from s;
+  function viewAt(s: Self.Slice, i: usize): Self.View from s;
   function readAt(self: readonly Self, i: usize): Self.ReadView from self;
 }
 function par<C extends ParSplit>(c: mut C, f: (v: C.View, i: usize) => void): void;
@@ -619,7 +625,7 @@ function parReduce<C extends ParSplit, A extends Send>(
 ): A;
 ```
 
-`f` has no effects and receives a disjoint `mut` view of one element as an argument, so it cannot race; `par` divides the work with `split`, which the borrow rules already prove disjoint. `both` must be associative. For a slice, `View = mut T` and `ReadView = readonly T`; for a struct-of-arrays container they are records of field views (§7.2).
+`par` borrows its container once into a `Slice` and divides it with `split`, which consumes a slice and returns two disjoint ones — the borrow rules prove them disjoint, so the halves can go to different workers — down to single elements, each lent to `f` by `viewAt`. `f` is shared, so it cannot change anything it captures, and has no effects: it cannot race. `parReduce` only reads, so its workers share the container `readonly` and read elements with `readAt`; `both` must be associative. Slices, arrays and `Vec`s split as `mut T[]`, with `View = mut T` and `ReadView = readonly T`; `Soa<T>` splits all its planes at once (§7.4). The prototype runs the halves in order.
 
 ---
 
@@ -636,14 +642,22 @@ A type parameter is one of two kinds, and callers cannot tell them apart:
 
 A template states its whole signature, effects included (none means pure), because its body is checked only per specialization. An error in a specialization points into the template and names the specialization: `no method 'toJson' on 'bool' (in 'toJson' for 'Flag')`. Specializations are memoized by template and types, and registered before their bodies are expanded, so a derivation over a recursive type refers to itself.
 
-A `comptime function` runs only in the compiler: it is called from `comptime` code, never at run time. Module constants (`const SLOTS: usize = 64;`) are evaluated the same way. `Type` is a comptime-only type whose values are types; a generic type that needs computation is a `comptime function` returning one:
+A `comptime function` runs only in the compiler: it is called from `comptime` code, never at run time. Module constants (`const SLOTS: usize = 64;`) are evaluated the same way. `Type` is a comptime-only type whose values are types.
+
+A struct is a template too when it has a `comptime` type parameter or `comptime` code among its fields: its fields are computed for each instance, `comptime` statements in its body check its arguments, and two uses with the same arguments are the same type:
 
 ```ts
-comptime function Ring(T: Type, N: usize): Type {
+struct Ring<T, comptime N: usize> {
   comptime assert(N > 0 && (N & (N - 1)) == 0, "capacity must be a power of two");
-  struct { buf: T[N]; head: usize; tail: usize; }
+  buf: T[N];
+  head: usize;
+  tail: usize;
 }
-type ByteRing = Ring(u8, 1024);
+type ByteRing = Ring<u8, 1024>;
+
+struct Partial<comptime T: Type> {                       // every field of T, made optional
+  comptime for (const f of fieldsOf(T)) { [f.name]: Option<f.type>; }
+}
 ```
 
 ### 7.2 Reflection and generated code
@@ -696,20 +710,28 @@ A derivation requested by a struct may read and build its private fields: the au
 
 ### 7.4 Layout as a library: `Soa<T>`
 
-`Soa<T>` is a `comptime function` that flattens `T`'s fields recursively into planes — one `Vec` per scalar field, a nested `Soa` per struct field — and implements `ParSplit` with a nested view record:
+`Soa<T>` (`std/layout`) is a template struct that lays `T` out as planes — a `Vec` per scalar field, a nested `Soa` per struct field — with three template views: `SoaSlice<T>`, a `mut` slice of each plane; `SoaView<T>`, one element as a borrow of each field; and `SoaRead<T>`, its `readonly` counterpart:
 
 ```ts
-struct Vec2 { x: f32; y: f32; }
-struct Particle { pos: Vec2; vel: Vec2; mass: f32; }
-// Soa<Particle> stores planes pos.x, pos.y, vel.x, vel.y, mass and has
-// View = { pos: { x: mut f32; y: mut f32 }; vel: { x: mut f32; y: mut f32 }; mass: mut f32 }
+export struct Soa<comptime T: Type> {
+  comptime for (const f of fieldsOf(T)) {
+    comptime if (nested(f.type)) { [f.name]: Soa<f.type>; } else { [f.name]: Vec<f.type>; }
+  }
+}
 
-function step(ps: mut Soa<Particle>, dt: f32): void {
-  par(mut ps, (p, _) => { p.pos.x += p.vel.x * dt; p.pos.y += p.vel.y * dt; });
+impl<comptime T: Type> ParSplit for Soa<T> {
+  type Slice = SoaSlice<T>;
+  type View = SoaView<T>;
+  type ReadView = SoaRead<T>;
+  function slice(self: mut Self): SoaSlice<T> from self {
+    { comptime for (const f of fieldsOf(T)) { [f.name]: self.[f.name].slice(), } }
+  }
+  function split(s: SoaSlice<T>, at: usize): [SoaSlice<T>, SoaSlice<T>] from s { s.splitAt(at) }
+  …
 }
 ```
 
-The view is an ordinary class-2 record (§4.2), built field by field with `comptime for` and `.[f.name]`; no part of this needs `unsafe` or is built into the language.
+So `Soa<Particle>` stores planes `pos.x`, `pos.y`, `vel.x`, `vel.y` and `mass`, and in `par(mut ps, (p, _) => { p.pos.x += p.vel.x * dt; })` the closure's `p` is a `SoaView<Particle>` whose `p.pos.x` is a `mut f32` into its plane. No part of this needs `unsafe` or is known to the compiler.
 
 ### 7.5 A worked derivation: JSON
 
@@ -877,7 +899,7 @@ Everything here follows from the rules above: the failure row of the `try` body 
 
 ## 11. Implementation
 
-The prototype compiler, `flyc`, implements this specification except code generation. `Soa<T>` is still built in rather than written as a template.
+The prototype compiler, `flyc`, implements this specification except code generation.
 
 1. **Parse** each module into a syntax tree. Standard-library modules are declaration files and Flyscript modules (the prelude's derivations, `std/json`); either may leave out a body that the runtime provides.
 2. **Expand** `comptime` code: a template is specialized when a call or a bound needs it, its body expanded with fresh positions in source order (each repeated copy is distinct code to the later passes) that map back to the template for diagnostics.
