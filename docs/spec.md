@@ -1,6 +1,6 @@
 # Flyscript
 
-**Language specification, version 1.8**
+**Language specification, version 0.18**
 
 *Affine values, one row calculus, handlers for everything, and `comptime`: Church on the outside, Turing on the inside.*
 
@@ -18,9 +18,9 @@ The whole language rests on five laws. Every rule in this document is a conseque
 4. **Handlers for everything.** Errors, I/O, iteration and region memory are ordinary effects with ordinary handlers. A handler may hold the rest of a computation as a one-shot continuation value; generators and tasks are both built from that one primitive.
 5. **`comptime` is the metalanguage.** Generics, reflection, layout transformation and derived interfaces are ordinary Flyscript code run by the compiler.
 
-### 0.1 Changes from 1.7
+### 0.1 Changes from 0.17
 
-1.8 completes the ownership rules, prompted by an independent review of the ownership checker's design (docs/reviews/2026-10-21-m3-ownership-checker-design.md). The review showed that 1.7 let a generator or a continuation hide a borrow inside a type that looked borrow-free, and let a task perform effects whose handlers live in another fiber.
+0.18 completes the ownership rules, prompted by an independent review of the ownership checker's design (docs/reviews/2026-10-21-m3-ownership-checker-design.md). The review showed that 0.17 let a generator or a continuation hide a borrow inside a type that looked borrow-free, and let a task perform effects whose handlers live in another fiber.
 
 | Change | Why |
 | :--- | :--- |
@@ -31,15 +31,6 @@ The whole language rests on five laws. Every rule in this document is a conseque
 | A forked task performs only `Io` and failures its scope rethrows (§6.1) | a task with no captures could otherwise perform `Region<R>` of its parent's region, or a user effect whose handler is in another fiber |
 | `defer` holds its borrows to the end of its block; no partial moves out of a `Drop` type (§5.6) | `defer v.clear(); return v[0..1]` returned a dangling slice |
 | Region data is checked at `alloc` (§4.6) | the rule existed but had no checking point |
-
---- | :--- |
-| `s.spawn(task)` takes only tasks that cannot fail and returns nothing; `s.fork(task)` returns a `Fiber` for work that can (§6.1) | 1.6 gave the scope body and every task one shared failure row, so a server could leak a task failure into its scope without a type error |
-| Effect rows are sets: region arguments are part of an effect's label, other arguments are determined by it, and repeated labels merge (§3.2) | `Region<R1>` and `Region<R2>` must coexist in one row; two `Fail`s must unify into one |
-| Handling `Fail` closes its row (§5.4) | otherwise a `catch` could never be matched exhaustively |
-| A `Ref<R, T>` is used as a `readonly T`; `Cell` and `RegionList` write through `readonly` receivers and the `Region` effect (§4.6) | region writes were effects in principle but unspecified in practice |
-| `for…of` accepts any `Iterable<T>` as well as a generator (§5.5) | iterating a slice directly is what TypeScript programmers write |
-| The standard library is written as declaration files, `.d.fly` (§8.1) | signatures need a home; TypeScript's `.d.ts` is the familiar answer |
-| Template literals are `String`; `break`, `continue`, `return` and `throw` have type `never`; tag constructions are open (§2.2, §3.2, §3.6) | each was undetermined in 1.6 |
 
 ---
 
@@ -59,7 +50,7 @@ The whole language rests on five laws. Every rule in this document is a conseque
 2. Garbage collection of any kind.
 3. Multi-shot continuations (backtracking via re-resumption).
 4. Equi-recursive structural types (recursion goes through a nominal declaration).
-5. Refinement types and automatic GPU lowering, in version 1.
+5. Refinement types and automatic GPU lowering, before 1.0.
 
 ---
 
