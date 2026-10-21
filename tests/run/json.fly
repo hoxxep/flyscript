@@ -1,0 +1,33 @@
+// expect: [true, null, "hi", [true]]
+// expect: error: #Unexpected(1)
+import { Json, parseJson } from "../../examples/json";
+import { println } from "std/io";
+
+function show<region R>(j: Ref<Json>): String {
+  match (j) {
+    #Null => String.fromStr("null"),
+    #Bool(b) => `${b}`,
+    #Num(n) => `${n}`,
+    #Str(s) => `"${s}"`,
+    #Arr(items) => {
+      let out = String.fromStr("[");
+      let first = true;
+      for (const item of items) {
+        if (!first) { out.push(", "); }
+        first = false;
+        out.push(show(item));
+      }
+      out.push("]");
+      out
+    },
+    #Obj(_) => String.fromStr("{...}"),
+  }
+}
+
+export function main(): void uses Io {
+  for (const text of ["[true, null, \"hi\", [true]]", "[?]"]) {
+    region (R) {
+      try { println(show(parseJson(text))); } catch (e) { println(`error: ${e}`); }
+    }
+  }
+}

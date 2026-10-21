@@ -1267,7 +1267,13 @@ impl<'p> Checker<'p> {
         // Check the iterated expression in isolation to see whether it is a generator.
         let isolated = self.s.fresh_effs();
         let outer = std::mem::replace(&mut self.allowed, isolated.clone());
-        let t = self.expr(iter, None);
+        // A list literal iterated directly is an array, as in TypeScript (`for (const x of [a, b])`).
+        let t = if let ExprKind::List(_) = iter.kind {
+            let elem = self.s.fresh();
+            self.expr(iter, Some(&Ty::Slice(Box::new(elem))))
+        } else {
+            self.expr(iter, None)
+        };
         self.allowed = outer;
         let yield_def = self.known("Yield");
         let mut row = self.s.expand_effs(&isolated);
@@ -1284,7 +1290,10 @@ impl<'p> Checker<'p> {
                 } else {
                     let isolated2 = self.s.fresh_effs();
                     let outer = std::mem::replace(&mut self.allowed, isolated2.clone());
-                    self.call_method(&t, iter.span, "each", CallSite { explicit: &[], args: &[], expected: None, span: iter.span });
+                    // The implicit call gets its own (zero-width) span, so it does not overwrite the
+                    // record of a call written there (`xs.iter()`).
+                    let implicit = Span::new(iter.span.end, iter.span.end);
+                    self.call_method(&t, iter.span, "each", CallSite { explicit: &[], args: &[], expected: None, span: implicit });
                     self.allowed = outer;
                     row = self.s.expand_effs(&isolated2);
                     match row.effs.iter().position(|e| e.def == yield_def) {

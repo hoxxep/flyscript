@@ -1,0 +1,19 @@
+// A cyclic structure in a region, with append-only lists and mutable cells (§4.6).
+// expect: found x
+// expect: no z
+// expect: 7
+import { Scope } from "../../examples/symbol_table";
+import { println } from "std/io";
+
+export function main(): void uses Io {
+  region (R) {
+    const global = Scope.new(#None);
+    const x = global.define(fmt("x"));
+    const inner = Scope.new(#Some(global));
+    inner.define(fmt("y"));
+    match (inner.lookup("x")) { #Some(d) => println(`found ${d.name}`), #None => println("missing x") }
+    match (inner.lookup("z")) { #Some(_) => println("found z"), #None => println("no z") }
+    x.ty.set(7);
+    println(`${x.ty.get()}`);
+  }
+}

@@ -23,7 +23,8 @@ pub struct Item {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum ItemKind {
-    Import { names: Vec<Ident>, from: String },
+    /// `import { a, b as c } from "m";`: each name, and the local name it is bound to.
+    Import { names: Vec<(Ident, Ident)>, from: String },
     /// A module-level constant, evaluated at compile time.
     Const { name: Ident, ty: Option<Type>, value: Expr },
     Struct(StructDecl),

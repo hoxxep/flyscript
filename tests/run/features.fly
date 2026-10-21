@@ -1,0 +1,27 @@
+// Typed failures, user effects, generators, escaping closures, constants and views.
+// expect: 1234
+// expect: 7
+// expect: #Err(#Empty)
+// expect: 42
+// expect: 20
+// expect: 28
+// expect: Hello, Grace
+// expect: 5
+import { parseOr, asResult } from "../accept/error_union";
+import { withDefaults } from "../accept/user_effect";
+import { pure, counted } from "../accept/generics";
+import { greetTwice } from "../accept/own_escaping_closure";
+import { walk } from "../accept/constants_and_views";
+import { println } from "std/io";
+
+export function main(): void uses Io {
+  println(`${parseOr("1234", 0)}`);
+  println(`${parseOr("12x4", 7)}`);
+  println(`${asResult("")}`);
+  println(`${withDefaults()}`);
+  println(`${pure()}`);
+  const xs: u32[3] = [5, 6, 11];
+  println(`${counted(xs)}`);
+  println(greetTwice());
+  println(`${walk("hello")}`);
+}

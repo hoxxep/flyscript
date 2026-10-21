@@ -1,3 +1,9 @@
 // `Soa<T>` is a comptime type function (§7.2). Until the comptime evaluator exists, the
 // checker provides it, together with its `ParSplit` views.
 export struct Soa<T>;
+
+impl<T> Soa<T> {
+  export function new(): Soa<T>;
+  export function push(self: mut Self, v: T): void;
+  export function len(self: readonly Self): usize;
+}

@@ -1,8 +1,8 @@
 import { par, parReduce } from "std/par";
 import { Soa } from "std/layout";
 
-struct Vec2 { x: f32; y: f32; }
-struct Particle { pos: Vec2; vel: Vec2; mass: f32; }
+export struct Vec2 { x: f32; y: f32; }
+export struct Particle { pos: Vec2; vel: Vec2; mass: f32; }
 
 export function step(ps: mut Soa<Particle>, dt: f32): f32 {
   par(mut ps, (p, _) => {

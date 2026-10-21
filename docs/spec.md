@@ -90,7 +90,8 @@ The whole language rests on five laws. Every rule in this document is a conseque
 
 ```ebnf
 Module      = { Import | ["export"] Decl } ;
-Import      = "import" "{" Ident { "," Ident } "}" "from" String ";" ;
+Import      = "import" "{" ImportName { "," ImportName } "}" "from" String ";" ;
+ImportName  = Ident [ "as" Ident ] ;
 
 Decl        = Struct | Enum | Interface | Impl | TypeAlias | Effect | Function | Extern | Const ;
 Struct      = [ Layout ] [ "view" ] "struct" Ident [ TypeParams ] "{" { [ "private" ] Ident ":" Type ";" } "}" ;
@@ -742,14 +743,14 @@ Everything here follows from the rules above: the failure row of the `try` body 
 
 ## 11. Implementation
 
-1. **Parse** each module into a syntax tree; check that imports are acyclic.
-2. **Evaluate `comptime`** on a bytecode interpreter: compute types, derive interfaces, instantiate generics and row variables, canonicalize record and tag layouts.
-3. **Check types and effects** bidirectionally with one row unifier; infer local effects, region variables and literal types.
-4. **Check ownership** on a mid-level SSA form: moves (Θ), the borrow ledger (Γ), class, tied returns, handler borrow transfer, region non-escape.
-5. **Lower effects** by evidence passing: tail-resumptive handlers (most `Yield`, all `Region`) become direct calls; abortive `Fail` handlers become two-register returns; handlers that store or delay `k` switch stack segments.
-6. **Generate code** with Cranelift for fast debug builds and LLVM for release, emitting `noalias` and `readonly` from `mut` and `readonly`. A struct-of-arrays view lowers to plane arithmetic; an affine value consumed and rebuilt at the same size reuses its allocation.
+The prototype compiler, `flyc`, implements this specification except code generation and `comptime` evaluation (for which `Soa<T>` is built in).
 
----
+1. **Parse** each module into a syntax tree; standard-library modules are `.d.fly` declaration files.
+2. **Check types and effects** bidirectionally with one row unifier for records and tag unions; effect rows are checked by subsumption into the effects allowed at each point, with region arguments as part of an effect's label and `Fail` payloads compared by union inclusion. Region arguments are solved over the body, and an undetermined allocation goes to the innermost region it does not escape from.
+3. **Check ownership** after typing: every value carries the loans it holds, loans flow through call results, patterns, assignments and captures, and a loan is live while any binding holding it may still be used, judged by reachability over the program's structure.
+4. **Evaluate** directly: abortive handlers unwind and tail-resumptive ones run where the effect is performed, so `for…of` over a generator captures no stack; a `Gen` pulled with `next()` runs on its own thread. `Io` is handled by a deterministic world (files, sockets, a database, a seeded fault schedule), which is what makes §6.4's simulation testing concrete.
+
+A native compiler would add: **lower effects** by evidence passing (tail-resumptive handlers to direct calls, abortive `Fail` to two-register returns, stored continuations to stack switching), and **generate code** with Cranelift for debug builds and LLVM for release, emitting `noalias` and `readonly` from `mut` and `readonly`.
 
 ## 12. Design notes
 
@@ -842,6 +843,11 @@ function value<region R>(sc: mut Scanner): Ref<Json> uses Region<R>, Fail<JsonEr
     _ => throw #Unexpected(sc.pos),
   }
 }
+
+export function parseJson<region R>(text: str): Ref<Json> uses Region<R>, Fail<JsonErr> {
+  let sc = Scanner { src: text.asBytes(), pos: 0 };
+  value(mut sc)
+}
 ```
 *Awkward:* nothing serious. `Ref<…>` around each recursive node is the honest cost of region allocation; lists and slots are handles and need none.
 
@@ -902,8 +908,8 @@ export function firstSums(xs: readonly i64[], n: usize): Vec<i64> {
 import { par, parReduce } from "std/par";
 import { Soa } from "std/layout";
 
-struct Vec2 { x: f32; y: f32; }
-struct Particle { pos: Vec2; vel: Vec2; mass: f32; }
+export struct Vec2 { x: f32; y: f32; }
+export struct Particle { pos: Vec2; vel: Vec2; mass: f32; }
 
 export function step(ps: mut Soa<Particle>, dt: f32): f32 {
   par(mut ps, (p, _) => {

@@ -105,6 +105,7 @@ impl str {
   export function len(self: Self): usize;
   export function toString(self: Self): String;
   export function bytes(self: Self): void uses Yield<u8>;
+  export function asBytes(self: Self): readonly u8[] from self;
   export function splitWhitespace(self: Self): void uses Yield<str>;
 }
 impl<T> T[] {

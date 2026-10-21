@@ -2,4 +2,5 @@
 
 pub mod check;
 pub mod diag;
+pub mod eval;
 pub mod syntax;

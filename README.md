@@ -65,9 +65,9 @@ test("degrades gracefully under packet loss", () => {
 Flyscript is an early-stage language under active design, developed in the open.
 
 - **Language specification:** version 0.19, with every earlier version and the reasoning behind each change in [docs/history](docs/history/).
-- **Compiler (`flyc`):** the parser handles the full grammar, and `flyc check` type-, effect- and ownership-checks programs: every example passes, and a growing suite of incorrect programs — use after move, conflicting borrows, borrows that escape through closures and generators, undeclared effects, non-exhaustive matches — is rejected with precise errors. An evaluator comes next.
+- **Compiler (`flyc`):** a complete prototype front end and evaluator. `flyc check` type-, effect- and ownership-checks programs, rejecting use after move, conflicting borrows, borrows that escape through closures and generators, undeclared effects and non-exhaustive matches with precise errors. `flyc run` executes them, with effect handlers, generators and structured concurrency, against a deterministic simulated world.
 
-It is not yet ready for real programs. It is ready for your ideas: issues and discussion about the design are very welcome.
+Next comes code generation. Flyscript is not yet ready for production programs; it is ready for your ideas, and issues and discussion about the design are very welcome.
 
 ## Explore
 
@@ -81,7 +81,8 @@ Requires a recent stable Rust toolchain.
 ```sh
 git clone https://github.com/rogersnm/flyscript && cd flyscript
 cargo test                          # run the test suite
-cargo run -- check examples/*.fly   # type- and effect-check Flyscript files
+cargo run -- check examples/*.fly   # type-, effect- and ownership-check Flyscript files
+cargo run -- run tests/run/http_server.fly   # run a program against the simulated world
 ```
 
 ## License

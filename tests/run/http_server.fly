@@ -1,0 +1,25 @@
+// The server from §6.1 and §10.2, against a simulated network and database.
+// request: user0001tokenAAA
+// request: user0002tokenBBB
+// request: short
+// request: user0003tokenCCC
+// profile: user0001=Ada
+// profile: user0002=Grace
+// quota: tokenAAA=true
+// quota: tokenBBB=false
+// quota: tokenCCC=true
+// expect: -> 200 Ada
+// expect: -> 401 error
+// expect: -> 400 error
+// expect: -> 502 error
+import { Listener, Db } from "std/net";
+import { println } from "std/io";
+import { serve } from "../../examples/server";
+
+export function main(): void uses Io {
+  try {
+    let listener = Listener.bind(8080);
+    const db = Db.connect();
+    serve(mut listener, db);
+  } catch (e) { println(`server stopped: ${e}`); }
+}

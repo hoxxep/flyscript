@@ -17,6 +17,7 @@ impl Listener {
 }
 
 impl Db {
+  export function connect(): Db uses Io, Fail<IoErr>;
   export function fetchProfile(self: readonly Self, user: str): Profile uses Io, Fail<IoErr>;
   export function checkQuota(self: readonly Self, token: str): Quota uses Io, Fail<IoErr>;
 }

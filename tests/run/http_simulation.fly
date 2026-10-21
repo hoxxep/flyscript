@@ -1,0 +1,25 @@
+// Deterministic simulation (§6.4): a quarter of I/O operations fail, the same way every run.
+// Failures surface as 502s from the handler; the server itself never stops.
+// faults: 25
+// seed: 42
+// request: user0001tokenAAA
+// request: user0001tokenAAA
+// request: user0001tokenAAA
+// request: user0001tokenAAA
+// profile: user0001=Ada
+// quota: tokenAAA=true
+// expect: -> 200 Ada
+// expect: -> 502 error
+// expect: -> 502 error
+// expect: -> 502 error
+import { Listener, Db } from "std/net";
+import { println } from "std/io";
+import { serve } from "../../examples/server";
+
+export function main(): void uses Io {
+  try {
+    let listener = Listener.bind(8080);
+    const db = Db.connect();
+    serve(mut listener, db);
+  } catch (e) { println(`server stopped: ${e}`); }
+}

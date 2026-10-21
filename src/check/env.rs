@@ -332,10 +332,10 @@ impl Program {
                     self.error(m, item.span, format!("no module `{from}`"));
                     continue;
                 };
-                for n in names {
+                for (n, local) in names {
                     match self.modules[target].exports.get(&n.name).copied() {
                         Some(b) => {
-                            self.modules[m].scope.insert(n.name.clone(), b);
+                            self.modules[m].scope.insert(local.name.clone(), b);
                         }
                         None => self.error(m, n.span, format!("module `{from}` does not export `{}`", n.name)),
                     }

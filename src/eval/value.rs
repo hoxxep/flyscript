@@ -58,8 +58,10 @@ pub enum Value {
     List(Vec<Value>),
     /// A `HashMap`, kept in insertion order.
     Map(Vec<(Value, Value)>),
-    /// A borrow, or a region reference.
+    /// A borrow: transparent, it reads and writes through to its place.
     Ptr(Place),
+    /// A region reference (§4.6): a `Copy` pointer that stays a pointer when stored or passed.
+    Ref(Shared),
     /// A mutable slot (`Cell`) or a shared container such as a channel.
     Cell(Shared),
     Closure(Arc<Closure>),
@@ -85,10 +87,11 @@ impl Value {
         Value::Text(Arc::from(s))
     }
 
-    /// Follows borrows to the value they point at.
+    /// Follows borrows and region references to the value they point at.
     pub fn deref(&self) -> Value {
         match self {
             Value::Ptr(p) => get(p).deref(),
+            Value::Ref(r) => r.lock().expect("ref").clone().deref(),
             v => v.clone(),
         }
     }
@@ -149,6 +152,7 @@ impl Value {
                 entries.iter().map(|(k, v)| format!("{}: {}", k.show_nested(), v.show_nested())).collect::<Vec<_>>().join(", ")
             ),
             Value::Ptr(p) => get(p).show(),
+            Value::Ref(r) => r.lock().expect("ref").show(),
             Value::Cell(c) => c.lock().expect("cell").show(),
             Value::Closure(_) | Value::Func(_) | Value::Resume(_) => "<function>".into(),
             Value::Native(kind, id) => format!("<{kind} {id}>"),
@@ -172,7 +176,7 @@ impl Value {
             (Value::Int(a), Value::Float(b)) | (Value::Float(b), Value::Int(a)) => a as f64 == b,
             (Value::Text(a), Value::Text(b)) => a == b,
             (Value::Text(a), Value::List(b)) | (Value::List(b), Value::Text(a)) => {
-                a.as_bytes().len() == b.len() && a.as_bytes().iter().zip(&b).all(|(x, y)| *x as i128 == y.as_int())
+                a.len() == b.len() && a.as_bytes().iter().zip(&b).all(|(x, y)| *x as i128 == y.as_int())
             }
             (Value::Tuple(a), Value::Tuple(b)) | (Value::List(a), Value::List(b)) => {
                 a.len() == b.len() && a.iter().zip(&b).all(|(x, y)| x.equals(y))
@@ -208,7 +212,7 @@ pub fn get(p: &Place) -> Value {
             q.path.extend(p.path[i..].iter().cloned());
             return get(&q);
         }
-        if let Value::Cell(c) = &v {
+        if let Value::Cell(c) | Value::Ref(c) = &v {
             let q = Place { root: c.clone(), path: p.path[i..].to_vec() };
             return get(&q);
         }
@@ -227,7 +231,7 @@ pub fn set(p: &Place, new: Value) {
             q.path.extend(p.path[i..].iter().cloned());
             return set(&q, new);
         }
-        if let Value::Cell(c) = &v {
+        if let Value::Cell(c) | Value::Ref(c) = &v {
             let q = Place { root: c.clone(), path: p.path[i..].to_vec() };
             return set(&q, new);
         }

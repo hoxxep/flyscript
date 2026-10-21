@@ -48,3 +48,8 @@ function value<region R>(sc: mut Scanner): Ref<Json> uses Region<R>, Fail<JsonEr
     _ => throw #Unexpected(sc.pos),
   }
 }
+
+export function parseJson<region R>(text: str): Ref<Json> uses Region<R>, Fail<JsonErr> {
+  let sc = Scanner { src: text.asBytes(), pos: 0 };
+  value(mut sc)
+}

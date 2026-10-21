@@ -1,0 +1,14 @@
+// Struct-of-arrays layout, a parallel update, and a parallel reduction (§6.5, §7.2).
+// expect: 2.5
+// expect: 1.0
+import { Particle, step } from "../../examples/particles";
+import { Soa } from "std/layout";
+import { println } from "std/io";
+
+export function main(): void uses Io {
+  let ps = Soa.new<Particle>();
+  ps.push({ pos: { x: 0.5, y: 2.0 }, vel: { x: 1.0, y: 0.0 }, mass: 2.0 });
+  ps.push({ pos: { x: 0.0, y: 0.0 }, vel: { x: 0.0, y: 1.0 }, mass: 3.0 });
+  println(`${step(mut ps, 0.5)}`);
+  println(`${step(mut ps, 0.5) - 1.5}`);
+}

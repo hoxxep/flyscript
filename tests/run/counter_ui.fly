@@ -1,0 +1,34 @@
+// The Elm-style UI from A.8, rendered by a handler of its `Dom` effect.
+// expect: <div>
+// expect: <h1>
+// expect: Count: 1 (3 clicks)
+// expect: </h1>
+// expect: <button>
+// expect: [click #Dec]
+// expect: −
+// expect: </button>
+// expect: <button>
+// expect: [click #Inc]
+// expect: +
+// expect: </button>
+// expect: </div>
+import { Model, Msg, Dom, update, view } from "../../examples/counter_ui";
+import { println } from "std/io";
+
+// A deep handler's arm runs outside the handler (§5.2), so each element's children are
+// rendered by handling them again.
+function render(body: () => void uses Dom<Msg>): void uses Io {
+  handle { body() } with Dom<Msg> {
+    el(tag, attrs, children) resumes k => { println(`<${tag}>`); render(children); println(`</${tag}>`); k() }
+    text(s) resumes k => { println(s); k() }
+    onClick(msg) resumes k => { println(`[click ${msg}]`); k() }
+  }
+}
+
+export function main(): void uses Io {
+  let m: Model = { count: 0, clicks: 0 };
+  update(mut m, #Inc);
+  update(mut m, #Inc);
+  update(mut m, #Dec);
+  render(() => view(m));
+}

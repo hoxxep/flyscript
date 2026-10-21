@@ -1,0 +1,16 @@
+// expect: 32.0
+// expect: [1, 3, 6]
+// expect: 0: a
+// expect: 1: b
+import { dot, firstSums } from "../../examples/iteration";
+import { println } from "std/io";
+
+export function main(): void uses Io {
+  const xs: f64[3] = [1.0, 2.0, 3.0];
+  const ys: f64[3] = [4.0, 5.0, 6.0];
+  println(`${dot(xs, ys)}`);
+  const ns: i64[4] = [1, 2, 3, 4];
+  println(`${firstSums(ns, 3)}`);
+  const letters: str[2] = ["a", "b"];
+  for (const [i, l] of letters.iter().enumerate()) { println(`${i}: ${l}`); }
+}

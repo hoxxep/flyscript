@@ -288,7 +288,9 @@ impl<'a> Parser<'a> {
         self.expect("{")?;
         let mut names = Vec::new();
         while !self.at("}") {
-            names.push(self.ident()?);
+            let name = self.ident()?;
+            let local = if self.eat_kw(Kw::As) { self.ident()? } else { name.clone() };
+            names.push((name, local));
             if !self.eat(",") {
                 break;
             }
