@@ -400,8 +400,20 @@ impl<'a> Parser<'a> {
             let then = group(self)?;
             let otherwise = if self.eat_kw(Kw::Else) { group(self)? } else { Vec::new() };
             Ok(Generate::If { cond, then, otherwise })
+        } else if self.eat_kw(Kw::Match) {
+            let scrutinee = self.paren_expr()?;
+            self.expect("{")?;
+            let mut arms = Vec::new();
+            while !self.at("}") {
+                let pat = self.pattern()?;
+                self.expect("=>")?;
+                arms.push((pat, group(self)?));
+                self.eat(",");
+            }
+            self.expect("}")?;
+            Ok(Generate::Match { scrutinee, arms })
         } else {
-            self.error("`for` or `if` after `comptime`")
+            self.error("`for`, `if` or `match` after `comptime`")
         }
     }
 
@@ -964,9 +976,10 @@ impl<'a> Parser<'a> {
                 self.bump();
                 ExprKind::Yield(Box::new(self.expr()?))
             }
+            // A prefix operator, like TypeScript's `await`: `n < comptime -(1 << b)`.
             Tok::Kw(Kw::Comptime) => {
                 self.bump();
-                ExprKind::Comptime(Box::new(self.expr()?))
+                ExprKind::Comptime(Box::new(self.unary()?))
             }
             Tok::Kw(Kw::Return) => {
                 self.bump();
@@ -1236,7 +1249,7 @@ impl<'a> Parser<'a> {
     fn arm_items(&mut self) -> PResult<Vec<MatchArm>> {
         let mut arms = Vec::new();
         while !self.at("}") {
-            if self.at_kw(Kw::Comptime) && matches!(self.tok_at(1), Tok::Kw(Kw::For | Kw::If)) {
+            if self.at_kw(Kw::Comptime) && matches!(self.tok_at(1), Tok::Kw(Kw::For | Kw::If | Kw::Match)) {
                 let start = self.span();
                 let g = self.generate(Self::arm_items)?;
                 let span = self.since(start);
@@ -1303,7 +1316,7 @@ impl<'a> Parser<'a> {
     fn init_items(&mut self) -> PResult<Vec<FieldInit>> {
         let mut fields = Vec::new();
         while !self.at("}") {
-            if self.at_kw(Kw::Comptime) && matches!(self.tok_at(1), Tok::Kw(Kw::For | Kw::If)) {
+            if self.at_kw(Kw::Comptime) && matches!(self.tok_at(1), Tok::Kw(Kw::For | Kw::If | Kw::Match)) {
                 let start = self.span();
                 let g = self.generate(Self::init_items)?;
                 let mut f = FieldInit::new(Ident { name: String::new(), span: self.since(start) }, None);

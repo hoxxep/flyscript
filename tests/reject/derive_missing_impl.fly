@@ -1,4 +1,4 @@
-// error: no method `describe` on `bool` (in `describe` for `Flag`)
+// error: bool cannot be described (in `describe` for `bool`, from `describe` for `Flag`)
 // A derivation is checked in each specialization; its errors point into the template and name
 // the type it was specialized for (§7.1).
 interface Describe { function describe(self: readonly Self, out: mut String): void; }

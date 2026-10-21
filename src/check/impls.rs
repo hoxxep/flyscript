@@ -104,9 +104,12 @@ impl Program {
                 }),
                 _ => true,
             });
+            // Implementing an interface means meeting the interfaces it extends (§3.4).
+            let supers = self.iface_closure(iface);
+            let supers_ok = supers.iter().skip(1).all(|s| self.satisfies_depth(ty, &Ty::Named(*s, Vec::new()), &|_| Vec::new(), depth + 1));
             // The first impl whose head matches is the one: if its bounds fail, the type does
             // not implement the interface, rather than falling back to a derivation (§7.3).
-            return ok.then_some((i, binds));
+            return (ok && supers_ok).then_some((i, binds));
         }
         None
     }
@@ -177,7 +180,8 @@ impl Program {
     /// Whether `iface`'s template impl applies to `ty`.
     fn derives(&self, iface: DefId, ty: &Ty) -> bool {
         match ty {
-            Ty::Record(_) | Ty::Union(_) | Ty::Tuple(_) => true,
+            // Types that belong to no module: primitives, records, tuples, tag unions (§7.3).
+            Ty::Prim(_) | Ty::Record(_) | Ty::Union(_) | Ty::Tuple(_) => true,
             Ty::Named(d, _) => self.derive_request(iface, *d),
             _ => false,
         }
@@ -290,7 +294,12 @@ impl Program {
         self.specs.insert(key, id);
         self.spec_of.insert(id, fid);
         let shown: Vec<String> = ct.iter().map(|(_, t)| format!("{}", super::types::Show(t, &*self))).collect();
-        let note = format!("in `{}` for `{}`", self.fns[fid].name, shown.join(", "));
+        let mut note = format!("in `{}` for `{}`", self.fns[fid].name, shown.join(", "));
+        // The specialization that needed this one, and so on, three deep at most.
+        if let Some(outer) = &self.note {
+            let chain: Vec<&str> = outer.split(", from ").take(2).collect();
+            note = format!("{note}, from {}", chain.join(", from ").trim_start_matches("in "));
+        }
         self.spec_notes.insert(id, note.clone());
         if let Some(d) = requested {
             self.spec_requested.insert(id, d);

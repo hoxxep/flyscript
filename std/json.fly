@@ -70,30 +70,6 @@ function escape(b: u8, out: mut String): void {
   }
 }
 
-impl ToJson for bool {
-  function toJson(self: readonly Self, out: mut String): void { out.push(`${self}`); }
-}
-impl ToJson for i32 {
-  function toJson(self: readonly Self, out: mut String): void { out.push(`${self}`); }
-}
-impl ToJson for i64 {
-  function toJson(self: readonly Self, out: mut String): void { out.push(`${self}`); }
-}
-impl ToJson for u32 {
-  function toJson(self: readonly Self, out: mut String): void { out.push(`${self}`); }
-}
-impl ToJson for u64 {
-  function toJson(self: readonly Self, out: mut String): void { out.push(`${self}`); }
-}
-impl ToJson for usize {
-  function toJson(self: readonly Self, out: mut String): void { out.push(`${self}`); }
-}
-impl ToJson for f64 {
-  function toJson(self: readonly Self, out: mut String): void { out.push(`${self}`); }
-}
-impl ToJson for str {
-  function toJson(self: readonly Self, out: mut String): void { writeString(self, mut out); }
-}
 impl ToJson for String {
   function toJson(self: readonly Self, out: mut String): void { writeString(self, mut out); }
 }
@@ -120,11 +96,13 @@ impl<T extends ToJson> ToJson for Option<T> {
   }
 }
 
-// Records and structs are objects, tuples arrays; a tag without a payload is its name, and a
-// tag with one is `{ "Name": payload }`.
+// Numbers and booleans are themselves, strings are quoted; records and structs are objects,
+// tuples arrays; a tag without a payload is its name, and a tag with one is `{ "Name": payload }`.
 impl<comptime T: Type> ToJson for T {
   function toJson(self: readonly Self, out: mut String): void {
     comptime match (Type.info(T)) {
+      #Int(_) | #Float(_) | #Bool => out.push(`${self}`),
+      #Str => writeString(self, mut out),
       #Record(fields) | #Struct { fields } => {
         out.push("{");
         comptime for (const [i, f] of fields.enumerate()) {
@@ -247,6 +225,21 @@ impl JsonParser {
     while (self.pos < self.bytes.len() && isNumberByte(self.bytes[self.pos])) { self.pos += 1; }
     if (self.pos == start) { throw #Syntax(start); }
     self.text.slice(start, self.pos)
+  }
+
+  // A non-negative integer, over the whole range of `u64`.
+  export function uint(self: mut Self): u64 uses Fail<JsonError> {
+    self.peek();
+    const start = self.pos;
+    let n: u64 = 0;
+    while (self.pos < self.bytes.len() && self.bytes[self.pos] >= b'0' && self.bytes[self.pos] <= b'9') {
+      const d = (self.bytes[self.pos] - b'0') as u64;
+      if (n > (18446744073709551615 - d) / 10) { throw #Range(start); }
+      n = n * 10 + d;
+      self.pos += 1;
+    }
+    if (self.pos == start || self.pos < self.bytes.len() && isNumberByte(self.bytes[self.pos])) { throw #Syntax(start); }
+    n
   }
 
   export function int(self: mut Self): i64 uses Fail<JsonError> {
@@ -380,47 +373,6 @@ impl JsonParser {
   }
 }
 
-impl FromJson for bool {
-  function fromJson(p: mut JsonParser): bool uses Fail<JsonError> { p.bool() }
-}
-impl FromJson for i64 {
-  function fromJson(p: mut JsonParser): i64 uses Fail<JsonError> { p.int() }
-}
-impl FromJson for i32 {
-  function fromJson(p: mut JsonParser): i32 uses Fail<JsonError> {
-    const at = p.at();
-    const n = p.int();
-    if (n < -2147483648 || n > 2147483647) { throw #Range(at); }
-    n as i32
-  }
-}
-impl FromJson for u32 {
-  function fromJson(p: mut JsonParser): u32 uses Fail<JsonError> {
-    const at = p.at();
-    const n = p.int();
-    if (n < 0 || n > 4294967295) { throw #Range(at); }
-    n as u32
-  }
-}
-impl FromJson for u64 {
-  function fromJson(p: mut JsonParser): u64 uses Fail<JsonError> {
-    const at = p.at();
-    const n = p.int();
-    if (n < 0) { throw #Range(at); }
-    n as u64
-  }
-}
-impl FromJson for usize {
-  function fromJson(p: mut JsonParser): usize uses Fail<JsonError> {
-    const at = p.at();
-    const n = p.int();
-    if (n < 0) { throw #Range(at); }
-    n as usize
-  }
-}
-impl FromJson for f64 {
-  function fromJson(p: mut JsonParser): f64 uses Fail<JsonError> { p.float() }
-}
 impl FromJson for String {
   function fromJson(p: mut JsonParser): String uses Fail<JsonError> { p.string() }
 }
@@ -441,21 +393,32 @@ impl<T extends FromJson> FromJson for Option<T> {
 // Whether a field's type is an `Option`, so its key may be left out.
 comptime function isOption(T: Type): bool {
   match (Type.info(T)) {
-    #Union(tags) => tags.len() == 2 && tags.any((t) => t.name == "None") && tags.any((t) => t.name == "Some"),
+    #Union(tags) =>
+      tags.len() == 2
+        && tags.any((t) => t.name == "None" && t.payload == #None)
+        && tags.any((t) => t.name == "Some" && t.payload != #None),
     _ => false,
-  }
-}
-
-comptime function payloadOf(t: TagInfo): Type {
-  match (t.payload) {
-    #Some(p) => p,
-    #None => panic(`#${t.name} carries nothing`),
   }
 }
 
 impl<comptime T: Type> FromJson for T {
   function fromJson(p: mut JsonParser): T uses Fail<JsonError> {
     comptime match (Type.info(T)) {
+      #Bool => p.bool(),
+      #Float(_) => p.float() as T,
+      // Any integer, checked against its range: the bounds are computed at compile time.
+      #Int { signed, bits } => {
+        const at = p.at();
+        comptime if (signed) {
+          const n = p.int();
+          if (n < comptime -(1 << (bits - 1)) || n > comptime (1 << (bits - 1)) - 1) { throw #Range(at); }
+          n as T
+        } else {
+          const n = p.uint();
+          if (n > comptime (1 << bits) - 1) { throw #Range(at); }
+          n as T
+        }
+      }
       #Record(fields) | #Struct { fields } => {
         let slots: { comptime for (const f of fields) { [f.name]: Option<f.type>; } } =
           { comptime for (const f of fields) { [f.name]: #None, } };
@@ -480,7 +443,7 @@ impl<comptime T: Type> FromJson for T {
       }
       #Tuple(items) => {
         p.beginArray();
-        const v = [
+        const v: T = [
           comptime for (const t of items) {
             if (!p.nextItem()) { throw #Syntax(p.at()); }
             t.fromJson(mut p)
@@ -504,7 +467,10 @@ impl<comptime T: Type> FromJson for T {
           const name = p.key();
           const v: T = match (name.asStr()) {
             comptime for (const t of tags) {
-              comptime if (t.payload != #None) { comptime t.name => #[t.name](payloadOf(t).fromJson(mut p)), }
+              comptime match (t.payload) {
+                #Some(P) => { comptime t.name => #[t.name](P.fromJson(mut p)), }
+                #None => {}
+              }
             }
             _ => throw #Unknown(name),
           };

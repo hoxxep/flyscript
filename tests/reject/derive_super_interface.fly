@@ -1,0 +1,4 @@
+// error: `{ name: str; }` does not implement `FromJson`
+// `FromJson extends Send`: a record that borrows cannot be decoded, even by the derivation (§3.4).
+import { FromJson, JsonError, parse } from "std/json";
+export function decode(text: str): { name: str } uses Fail<JsonError> { parse(text) }

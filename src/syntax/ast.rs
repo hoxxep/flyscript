@@ -72,6 +72,8 @@ impl Field {
 pub enum Generate<T> {
     For { pat: Pattern, iter: Expr, body: Vec<T> },
     If { cond: Expr, then: Vec<T>, otherwise: Vec<T> },
+    /// `comptime match (e) { pat => { … }, … }`: the items of the first arm that matches.
+    Match { scrutinee: Expr, arms: Vec<(Pattern, Vec<T>)> },
 }
 
 #[derive(Clone, Debug, PartialEq)]

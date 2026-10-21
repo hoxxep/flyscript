@@ -1,0 +1,28 @@
+// expect: {"big":18446744073709551615,"flag":true,"pair":[3,"x"],"ratio":0.5,"small":-128}
+// expect: out of range at 9
+// expect: out of range at 17
+// expect: syntax error at 53
+// Numbers and tuples through the derivation (§7.5): one template arm decodes every integer type,
+// with its range computed at compile time; u64 covers its whole range.
+import { println } from "std/io";
+import { JsonError, stringify, parse } from "std/json";
+
+type Nums = { small: i8; big: u64; ratio: f32; flag: bool; pair: [i32, String] };
+
+function show(r: Result<Nums, JsonError>): void uses Io {
+  match (r) {
+    #Ok(n) => println(stringify(n)),
+    #Err(e) => match (e) {
+      #Range(at) => println(`out of range at ${at}`),
+      #Syntax(at) => println(`syntax error at ${at}`),
+      _ => println("other"),
+    },
+  }
+}
+
+export function main(): void uses Io {
+  show(Fail.capture(() => parse(`{"small":-128,"big":18446744073709551615,"ratio":0.5,"flag":true,"pair":[3,"x"]}`)));
+  show(Fail.capture(() => parse(`{"small":128,"big":1,"ratio":0.5,"flag":true,"pair":[3,"x"]}`)));
+  show(Fail.capture(() => parse(`{"small":1,"big":18446744073709551616,"ratio":0.5,"flag":true,"pair":[3,"x"]}`)));
+  show(Fail.capture(() => parse(`{"small":1,"big":2,"ratio":0.5,"flag":true,"pair":[3]}`)));
+}

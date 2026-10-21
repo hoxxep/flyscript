@@ -520,6 +520,26 @@ impl<'p> Expand<'p> {
                     let chosen = if self.eval_bool(cond)? { then } else { otherwise };
                     out.extend(self.seq(chosen, generated, one)?);
                 }
+                Some(Generate::Match { scrutinee, arms }) => {
+                    let v = self.eval(scrutinee)?;
+                    let mut matched = false;
+                    for (pat, items) in arms {
+                        let depth = self.env.len();
+                        let mut binds = Vec::new();
+                        if self.ct_match(pat, &v, &mut binds)? {
+                            self.env.extend(binds.into_iter().map(|(k, v)| (k, Some(v))));
+                            let r = self.seq(items, generated, one);
+                            self.env.truncate(depth);
+                            out.extend(r?);
+                            matched = true;
+                            break;
+                        }
+                        self.env.truncate(depth);
+                    }
+                    if !matched {
+                        return fail(scrutinee.span, format!("no arm matches `{}`", v.show(self.p)));
+                    }
+                }
                 Some(Generate::For { pat, iter, body }) => {
                     for v in self.eval_list(iter)? {
                         let depth = self.env.len();
@@ -1191,6 +1211,8 @@ fn binary(op: &str, l: CV, r: CV) -> Option<CV> {
         ("%", CV::Int(a), CV::Int(b)) if b != 0 => CV::Int(a % b),
         ("&", CV::Int(a), CV::Int(b)) => CV::Int(a & b),
         ("|", CV::Int(a), CV::Int(b)) => CV::Int(a | b),
+        ("<<", CV::Int(a), CV::Int(b)) if (0..127).contains(&b) => CV::Int(a << b),
+        (">>", CV::Int(a), CV::Int(b)) if (0..127).contains(&b) => CV::Int(a >> b),
         ("<", CV::Int(a), CV::Int(b)) => CV::Bool(a < b),
         ("<=", CV::Int(a), CV::Int(b)) => CV::Bool(a <= b),
         (">", CV::Int(a), CV::Int(b)) => CV::Bool(a > b),
@@ -1215,6 +1237,7 @@ pub fn block_has_comptime(b: &Block) -> bool {
 fn ty_has(t: &Type) -> bool {
     match &t.kind {
         TypeKind::Record { fields, .. } => fields.iter().any(|f| f.generate.is_some() || f.computed.is_some() || ty_has(&f.ty)),
+        TypeKind::Call { .. } => false,
         TypeKind::Path { args, .. } => args.iter().any(ty_has),
         TypeKind::Tuple(ts) => ts.iter().any(ty_has),
         TypeKind::Mut(x) | TypeKind::Readonly(x) | TypeKind::Ptr(x) => ty_has(x),
