@@ -1,0 +1,243 @@
+// Mini, a compiler written in Flyscript as a test of goal 6 (§1): the syntax tree and a recursive-descent parser.
+import { Span, Problem, CompileError, Tok, Token, lex } from "./lexer";
+
+// ---- AST ----
+
+export enum Op { #Add, #Sub, #Mul, #Lt }
+impl Clone for Op;
+export enum Expr {
+  #Int(i64, Span),
+  #Bool(bool, Span),
+  #Var(String, Span),
+  #Bin(Op, Box<Expr>, Box<Expr>, Span),
+  #If(Box<Expr>, Box<Expr>, Box<Expr>, Span),
+  #Let(String, Box<Expr>, Box<Expr>, Span),
+  #Fn(Vec<String>, Box<Expr>, Span),
+  #Call(Box<Expr>, Vec<Expr>, Span),
+  #Case(Box<Expr>, Vec<Arm>, Span),
+}
+
+// `Cons(h, t) => body`: a constructor and names for its fields.
+export type Arm = { ctor: String; binds: Vec<String>; body: Expr; span: Span };
+
+// `def name(params) = body;`: definitions see each other, so they may recurse.
+export type Def = { name: String; params: Vec<String>; body: Expr; span: Span };
+// `data List = Nil | Cons(int, List);`: a type's constructors and their fields.
+export enum TypeExpr { #TInt, #TBool, #TNamed(String, Span) }
+export type CtorDecl = { name: String; fields: Vec<TypeExpr>; span: Span };
+export type DataDecl = { name: String; ctors: Vec<CtorDecl> };
+export type Program = { datas: Vec<DataDecl>; defs: Vec<Def>; main: Expr };
+
+export function spanOf(e: readonly Expr): Span {
+  match (e) {
+    #Int(_, s) | #Bool(_, s) | #Var(_, s) => s,
+    #Bin(_, _, _, s) | #If(_, _, _, s) | #Let(_, _, _, s) | #Fn(_, _, s) | #Call(_, _, s) | #Case(_, _, s) => s,
+  }
+}
+
+// ---- Parser: recursive descent with precedence climbing ----
+
+export struct Parser { toks: Vec<Token>; pos: usize }
+
+impl Parser {
+  function peek(self: readonly Self): readonly Tok { self.toks[self.pos].tok }
+  function here(self: readonly Self): Span { self.toks[self.pos].span }
+  function bump(self: mut Self): void { self.pos += 1; }
+  function expect(self: mut Self, want: Tok, what: str): void uses Fail<CompileError> {
+    if (self.peek() != want) { throw #Parse { at: self.here().start, message: `expected ${what}` }; }
+    self.bump();
+  }
+  function ident(self: mut Self): String uses Fail<CompileError> {
+    const name: String = match (self.peek()) {
+      #Ident(n) => n.clone(),
+      _ => throw #Parse { at: self.here().start, message: "expected a name".toString() },
+    };
+    self.bump();
+    name
+  }
+
+  function program(self: mut Self): Program uses Fail<CompileError> {
+    let defs: Vec<Def> = Vec.new();
+    let datas: Vec<DataDecl> = Vec.new();
+    while (self.peek() == #Def || self.peek() == #Data) {
+      if (self.peek() == #Data) {
+        datas.push(self.data());
+        continue;
+      }
+      const start = self.here().start;
+      self.bump();
+      const name = self.ident();
+      self.expect(#LParen, "`(`");
+      let params: Vec<String> = Vec.new();
+      while (self.peek() != #RParen) {
+        params.push(self.ident());
+        if (self.peek() == #Comma) { self.bump(); }
+      }
+      self.bump();
+      self.expect(#Eq, "`=`");
+      const body = self.expr();
+      const end = spanOf(body).end;
+      self.expect(#Semi, "`;`");
+      defs.push({ name, params, body, span: { start, end } });
+    }
+    const main = self.expr();
+    if (self.peek() != #Eof) { throw #Parse { at: self.here().start, message: "expected the end of the program".toString() }; }
+    { datas, defs, main }
+  }
+
+  function data(self: mut Self): DataDecl uses Fail<CompileError> {
+    self.bump();
+    const name = self.ident();
+    self.expect(#Eq, "`=`");
+    let ctors: Vec<CtorDecl> = Vec.new();
+    while (true) {
+      const span = self.here();
+      const cname = self.ident();
+      let fields: Vec<TypeExpr> = Vec.new();
+      if (self.peek() == #LParen) {
+        self.bump();
+        while (self.peek() != #RParen) {
+          const at = self.here();
+          const t = self.ident();
+          fields.push(match (t.asStr()) { "int" => #TInt, "bool" => #TBool, _ => #TNamed(t, at) });
+          if (self.peek() == #Comma) { self.bump(); }
+        }
+        self.bump();
+      }
+      ctors.push({ name: cname, fields, span });
+      if (self.peek() != #Bar) { break; }
+      self.bump();
+    }
+    self.expect(#Semi, "`;`");
+    { name, ctors }
+  }
+
+  function expr(self: mut Self): Expr uses Fail<CompileError> {
+    const start = self.here().start;
+    match (self.peek()) {
+      #Let => {
+        self.bump();
+        const name = self.ident();
+        self.expect(#Eq, "`=`");
+        const value = self.expr();
+        self.expect(#In, "`in`");
+        const body = self.expr();
+        const end = spanOf(body).end;
+        #Let(name, Box.new(value), Box.new(body), { start, end })
+      }
+      #If => {
+        self.bump();
+        const c = self.expr();
+        self.expect(#Then, "`then`");
+        const t = self.expr();
+        self.expect(#Else, "`else`");
+        const e = self.expr();
+        const end = spanOf(e).end;
+        #If(Box.new(c), Box.new(t), Box.new(e), { start, end })
+      }
+      #Fn => {
+        self.bump();
+        self.expect(#LParen, "`(`");
+        let params: Vec<String> = Vec.new();
+        while (self.peek() != #RParen) {
+          params.push(self.ident());
+          if (self.peek() == #Comma) { self.bump(); }
+        }
+        self.bump();
+        self.expect(#Arrow, "`=>`");
+        const body = self.expr();
+        const end = spanOf(body).end;
+        #Fn(params, Box.new(body), { start, end })
+      }
+      #Case => {
+        self.bump();
+        const scrutinee = self.expr();
+        self.expect(#Of, "`of`");
+        let arms: Vec<Arm> = Vec.new();
+        while (true) {
+          const span = self.here();
+          const ctor = self.ident();
+          let binds: Vec<String> = Vec.new();
+          if (self.peek() == #LParen) {
+            self.bump();
+            while (self.peek() != #RParen) {
+              binds.push(self.ident());
+              if (self.peek() == #Comma) { self.bump(); }
+            }
+            self.bump();
+          }
+          self.expect(#Arrow, "`=>`");
+          const body = self.expr();
+          arms.push({ ctor, binds, body, span });
+          if (self.peek() != #Bar) { break; }
+          self.bump();
+        }
+        const end = spanOf(arms[arms.len() - 1].body).end;
+        #Case(Box.new(scrutinee), arms, { start, end })
+      }
+      _ => self.binary(0),
+    }
+  }
+
+  function binary(self: mut Self, minPrec: u8): Expr uses Fail<CompileError> {
+    let lhs = self.call();
+    while (true) {
+      const op: Option<[Op, u8]> = match (self.peek()) {
+        #Less => #Some([#Lt, 1]), #Plus => #Some([#Add, 2]), #Minus => #Some([#Sub, 2]), #Star => #Some([#Mul, 3]),
+        _ => #None,
+      };
+      match (op) {
+        #Some([o, prec]) if prec >= minPrec => {
+          self.bump();
+          const rhs = self.binary(prec + 1);
+          const span = { start: spanOf(lhs).start, end: spanOf(rhs).end };
+          lhs = #Bin(o, Box.new(lhs), Box.new(rhs), span);
+        }
+        _ => break,
+      }
+    }
+    lhs
+  }
+
+  function call(self: mut Self): Expr uses Fail<CompileError> {
+    let f = self.atom();
+    while (self.peek() == #LParen) {
+      self.bump();
+      let args: Vec<Expr> = Vec.new();
+      while (self.peek() != #RParen) {
+        args.push(self.expr());
+        if (self.peek() == #Comma) { self.bump(); }
+      }
+      const end = self.here().end;
+      self.bump();
+      const span = { start: spanOf(f).start, end };
+      f = #Call(Box.new(f), args, span);
+    }
+    f
+  }
+
+  function atom(self: mut Self): Expr uses Fail<CompileError> {
+    const span = self.here();
+    const e: Expr = match (self.peek()) {
+      #Int(n) => #Int(n, span),
+      #True => #Bool(true, span),
+      #False => #Bool(false, span),
+      #Ident(n) => #Var(n.clone(), span),
+      #LParen => {
+        self.bump();
+        const inner = self.expr();
+        if (self.peek() != #RParen) { throw #Parse { at: self.here().start, message: "expected `)`".toString() }; }
+        inner
+      }
+      _ => throw #Parse { at: span.start, message: "expected an expression".toString() },
+    };
+    self.bump();
+    e
+  }
+}
+
+
+export function parse(src: str): Program uses Fail<CompileError> {
+  let p = Parser { toks: lex(src), pos: 0 };
+  p.program()
+}

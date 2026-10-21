@@ -51,9 +51,13 @@ fn examples_match_the_spec() {
 fn examples_parse() {
     for entry in fs::read_dir(root().join("examples")).unwrap() {
         let path = entry.unwrap().path();
-        let source = fs::read_to_string(&path).unwrap();
-        if let Err(d) = parse_module(&source) {
-            panic!("{}", d.render(&path.display().to_string(), &source));
+        // A directory is a program of several modules: each parses.
+        let files: Vec<_> = if path.is_dir() { fs::read_dir(&path).unwrap().map(|e| e.unwrap().path()).collect() } else { vec![path] };
+        for path in files {
+            let source = fs::read_to_string(&path).unwrap();
+            if let Err(d) = parse_module(&source) {
+                panic!("{}", d.render(&path.display().to_string(), &source));
+            }
         }
     }
 }

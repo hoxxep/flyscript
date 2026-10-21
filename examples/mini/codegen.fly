@@ -1,0 +1,294 @@
+// Mini, a compiler written in Flyscript as a test of goal 6 (§1): closure conversion, code generation for a stack machine, and the machine.
+import { HashMap } from "std/collections";
+import { Expr, Op, Program } from "./syntax";
+
+// ---- Code generation to a stack machine ----
+
+// Each function has a frame of its own: what it captured, then its parameters, then its `let`s.
+export enum Instr { #Push(i64), #Load(usize), #Global(usize), #Store, #Drop, #Add, #Sub, #Mul, #Lt, #Jump(usize), #JumpIfFalse(usize), #MakeFn(usize, usize, usize), #Call(usize), #Ret, #Construct(usize, usize), #TagIs(usize), #Unpack(usize), #Unmatched }
+impl Clone for Instr;
+impl Show for Instr;
+
+export struct Gen { code: Vec<Instr>; locals: Vec<String>; globals: HashMap<String, usize>; ctors: HashMap<String, [usize, usize]> }
+
+// The names an expression uses that it does not bind, in order of first use.
+export function freeVars(e: readonly Expr, bound: mut Vec<String>, out: mut Vec<String>): void {
+  match (e) {
+    #Int(_, _) | #Bool(_, _) => {},
+    #Var(name, _) => {
+      if (!bound.includes(name) && !out.includes(name)) { out.push(name.clone()); }
+    }
+    #Bin(_, a, b, _) => { freeVars(a, mut bound, mut out); freeVars(b, mut bound, mut out); }
+    #If(c, t, f, _) => { freeVars(c, mut bound, mut out); freeVars(t, mut bound, mut out); freeVars(f, mut bound, mut out); }
+    #Let(name, value, body, _) => {
+      freeVars(value, mut bound, mut out);
+      bound.push(name.clone());
+      freeVars(body, mut bound, mut out);
+      bound.pop();
+    }
+    #Fn(params, body, _) => {
+      const depth = bound.len();
+      for (const p of params) { bound.push(p.clone()); }
+      freeVars(body, mut bound, mut out);
+      while (bound.len() > depth) { bound.pop(); }
+    }
+    #Call(f, args, _) => {
+      freeVars(f, mut bound, mut out);
+      for (const a of args) { freeVars(a, mut bound, mut out); }
+    }
+    #Case(scrutinee, arms, _) => {
+      freeVars(scrutinee, mut bound, mut out);
+      for (const arm of arms) {
+        const depth = bound.len();
+        for (const b of arm.binds) { bound.push(b.clone()); }
+        freeVars(arm.body, mut bound, mut out);
+        while (bound.len() > depth) { bound.pop(); }
+      }
+    }
+  }
+}
+
+impl Gen {
+  function emit(self: mut Self, i: Instr): usize { self.code.push(i); self.code.len() - 1 }
+  // A local's slot in the current frame, or a definition's index among the globals.
+  function load(self: readonly Self, name: str): Instr {
+    let i = self.locals.len();
+    while (i > 0) { i -= 1; if (self.locals[i] == name) { return #Load(i); } }
+    match (self.globals.get(name)) { #Some(g) => #Global(g), #None => panic("checked names resolve") }
+  }
+  function gen(self: mut Self, e: readonly Expr): void {
+    match (e) {
+      #Int(n, _) => { self.emit(#Push(n)); }
+      #Bool(b, _) => { self.emit(#Push(if (b) { 1 } else { 0 })); }
+      #Var(name, _) => {
+        match (self.ctors.get(name)) {
+          #Some([tag, 0]) => { self.emit(#Construct(tag, 0)); }
+          // A constructor used as a value is the function that builds it.
+          #Some([tag, n]) => {
+            self.emit(#MakeFn(self.code.len() + 2, n, 0));
+            const skip = self.emit(#Jump(0));
+            for (const i of 0..n) { self.emit(#Load(i)); }
+            self.emit(#Construct(tag, n));
+            self.emit(#Ret);
+            self.code[skip] = #Jump(self.code.len());
+          }
+          #None => { const i = self.load(name); self.emit(i); }
+        }
+      }
+      #Bin(op, a, b, _) => {
+        self.gen(a);
+        self.gen(b);
+        self.emit(match (op) { #Add => #Add, #Sub => #Sub, #Mul => #Mul, #Lt => #Lt });
+      }
+      #If(c, t, f, _) => {
+        self.gen(c);
+        const jf = self.emit(#JumpIfFalse(0));
+        self.gen(t);
+        const j = self.emit(#Jump(0));
+        self.code[jf] = #JumpIfFalse(self.code.len());
+        self.gen(f);
+        self.code[j] = #Jump(self.code.len());
+      }
+      #Let(name, value, body, _) => {
+        self.gen(value);
+        self.emit(#Store);
+        self.locals.push(name.clone());
+        self.gen(body);
+        self.locals.pop();
+        self.emit(#Drop);
+      }
+      #Fn(params, body, _) => {
+        // Closure conversion: what the body uses from outside is loaded and stored in the closure.
+        let bound: Vec<String> = Vec.new();
+        for (const p of params) { bound.push(p.clone()); }
+        let captures: Vec<String> = Vec.new();
+        freeVars(body, mut bound, mut captures);
+        // Definitions are globals, reached directly, not captured.
+        captures.retain((c) => self.locals.includes(c));
+        for (const c of captures) { const i = self.load(c); self.emit(i); }
+        const make = self.emit(#MakeFn(0, params.len(), captures.len()));
+        const skip = self.emit(#Jump(0));
+        // The body's frame: its captures, then its parameters.
+        let inner = Gen { code: Vec.new(), locals: Vec.new(), globals: self.globals.clone(), ctors: self.ctors.clone() };
+        for (const c of captures) { inner.locals.push(c.clone()); }
+        for (const p of params) { inner.locals.push(p.clone()); }
+        inner.code = self.code.drain().collect();
+        inner.gen(body);
+        inner.emit(#Ret);
+        self.code = inner.code.drain().collect();
+        self.code[make] = #MakeFn(skip + 1, params.len(), captures.len());
+        self.code[skip] = #Jump(self.code.len());
+      }
+      #Call(f, args, _) => {
+        for (const a of args) { self.gen(a); }
+        // A constructor applied builds its value directly.
+        const ctor: Option<usize> = match (f) {
+          #Var(name, _) => match (self.ctors.get(name)) { #Some([tag, _]) => #Some(tag), #None => #None },
+          _ => #None,
+        };
+        match (ctor) {
+          #Some(tag) => { self.emit(#Construct(tag, args.len())); }
+          #None => {
+            self.gen(f);
+            self.emit(#Call(args.len()));
+          }
+        }
+      }
+      #Case(scrutinee, arms, _) => {
+        // The value matched is a hidden local; each arm tests its tag, then binds its fields.
+        self.gen(scrutinee);
+        self.emit(#Store);
+        self.locals.push("$case".toString());
+        const slot = self.locals.len() - 1;
+        let ends: Vec<usize> = Vec.new();
+        for (const arm of arms) {
+          const tag = match (self.ctors.get(arm.ctor)) { #Some([t, _]) => t, #None => panic("checked constructors exist") };
+          self.emit(#Load(slot));
+          self.emit(#TagIs(tag));
+          const next = self.emit(#JumpIfFalse(0));
+          self.emit(#Load(slot));
+          self.emit(#Unpack(arm.binds.len()));
+          for (const b of arm.binds) {
+            self.emit(#Store);
+            self.locals.push(b.clone());
+          }
+          self.gen(arm.body);
+          for (const _ of arm.binds) {
+            self.emit(#Drop);
+            self.locals.pop();
+          }
+          ends.push(self.emit(#Jump(0)));
+          self.code[next] = #JumpIfFalse(self.code.len());
+        }
+        self.emit(#Unmatched);
+        for (const j of ends) { self.code[j] = #Jump(self.code.len()); }
+        self.emit(#Drop);
+        self.locals.pop();
+      }
+    }
+  }
+}
+
+// ---- The virtual machine ----
+
+export enum Value { #Int(i64), #Closure(usize, usize, Vec<Value>), #Data(usize, Vec<Value>) }
+impl Clone for Value;
+
+export type Frame = { ret: usize; locals: Vec<Value> };
+
+export function asInt(v: readonly Value): i64 {
+  match (v) { #Int(n) => n, _ => panic("checked: an int") }
+}
+
+export function run(code: readonly Instr[], globals: readonly Value[]): Value {
+  let stack: Vec<Value> = Vec.new();
+  let frames: Vec<Frame> = Vec.new();
+  frames.push({ ret: code.len(), locals: Vec.new() });
+  let pc: usize = 0;
+  while (pc < code.len()) {
+    const top = frames.len() - 1;
+    match (code[pc]) {
+      #Push(n) => stack.push(#Int(n)),
+      #Load(s) => stack.push(frames[top].locals[s].clone()),
+      #Global(g) => stack.push(globals[g].clone()),
+      #Store => frames[top].locals.push(stack.pop().unwrap()),
+      #Drop => { frames[top].locals.pop(); }
+      #Add | #Sub | #Mul | #Lt => {
+        const b = asInt(stack.pop().unwrap());
+        const a = asInt(stack.pop().unwrap());
+        stack.push(#Int(match (code[pc]) { #Add => a + b, #Sub => a - b, #Mul => a * b, _ => if (a < b) { 1 } else { 0 } }));
+      }
+      #Jump(t) => { pc = t; continue; }
+      #JumpIfFalse(t) => { if (asInt(stack.pop().unwrap()) == 0) { pc = t; continue; } }
+      #MakeFn(addr, arity, n) => {
+        let caps: Vec<Value> = Vec.new();
+        for (const _ of 0..n) { caps.push(#Int(0)); }
+        let i = n;
+        while (i > 0) { i -= 1; caps[i] = stack.pop().unwrap(); }
+        stack.push(#Closure(addr, arity, caps));
+      }
+      #Call(n) => {
+        match (stack.pop().unwrap()) {
+          #Closure(addr, _, caps) => {
+            let args: Vec<Value> = Vec.new();
+            for (const _ of 0..n) { args.push(stack.pop().unwrap()); }
+            args.reverse();
+            let locals = caps;
+            for (const a of args.drain()) { locals.push(a); }
+            frames.push({ ret: pc + 1, locals });
+            pc = addr;
+            continue;
+          }
+          _ => panic("checked: a function"),
+        }
+      }
+      #Construct(tag, n) => {
+        let fields: Vec<Value> = Vec.new();
+        for (const _ of 0..n) { fields.push(stack.pop().unwrap()); }
+        fields.reverse();
+        stack.push(#Data(tag, fields));
+      }
+      #TagIs(tag) => {
+        const hit = match (stack.pop().unwrap()) { #Data(t, _) => t == tag, _ => false };
+        stack.push(#Int(if (hit) { 1 } else { 0 }));
+      }
+      // The fields, last first, so the `Store`s that follow bind them in order.
+      #Unpack(n) => match (stack.pop().unwrap()) {
+        #Data(_, fields) => {
+          for (const i of 0..n) { stack.push(fields[n - 1 - i].clone()); }
+        }
+        _ => panic("checked: a constructed value"),
+      },
+      #Unmatched => panic("checked: every case is handled"),
+      #Ret => {
+        const f = frames.pop().unwrap();
+        pc = f.ret;
+        continue;
+      }
+    }
+    pc += 1;
+  }
+  stack.pop().unwrap()
+}
+
+export function showValue(v: readonly Value, names: readonly String[]): String {
+  match (v) {
+    #Int(n) => `${n}`,
+    #Closure(_, _, _) => `<function>`,
+    #Data(tag, fields) => if (fields.len() == 0) { names[tag].clone() } else {
+      `${names[tag]}(${fields.iter().map((f) => showValue(f, names)).join(", ")})`
+    },
+  }
+}
+
+
+export type Generated = { code: Vec<Instr>; globals: Vec<Value>; ctorNames: Vec<String> };
+
+// Each definition's body is a function of its parameters alone, placed before the main expression.
+export function generate(prog: readonly Program): Generated {
+  let names: HashMap<String, usize> = HashMap.new();
+  for (const [i, d] of prog.defs.iter().enumerate()) { names.insert(d.name.clone(), i); }
+  let ctors: HashMap<String, [usize, usize]> = HashMap.new();
+  let ctorNames: Vec<String> = Vec.new();
+  for (const d of prog.datas) {
+    for (const c of d.ctors) {
+      ctors.insert(c.name.clone(), [ctorNames.len(), c.fields.len()]);
+      ctorNames.push(c.name.clone());
+    }
+  }
+  let g = Gen { code: Vec.new(), locals: Vec.new(), globals: names, ctors };
+  const skip = g.emit(#Jump(0));
+  let globals: Vec<Value> = Vec.new();
+  for (const d of prog.defs) {
+    const addr = g.code.len();
+    for (const param of d.params) { g.locals.push(param.clone()); }
+    g.gen(d.body);
+    g.emit(#Ret);
+    g.locals = Vec.new();
+    globals.push(#Closure(addr, d.params.len(), Vec.new()));
+  }
+  g.code[skip] = #Jump(g.code.len());
+  g.gen(prog.main);
+  { code: g.code, globals, ctorNames }
+}
+

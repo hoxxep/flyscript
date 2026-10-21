@@ -19,7 +19,9 @@ fn files(dir: &str) -> Vec<PathBuf> {
 #[test]
 fn examples_and_acceptance_programs_check() {
     for path in files("examples").into_iter().chain(files("tests/accept")) {
-        if path.is_dir() {
+        // A directory is a program of several modules, entered at its `main.fly`.
+        let path = if path.is_dir() { path.join("main.fly") } else { path };
+        if !path.exists() {
             continue;
         }
         let checked = check_files(std::slice::from_ref(&path));

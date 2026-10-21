@@ -67,6 +67,11 @@ fn programs_run() {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/run");
     let mut paths: Vec<_> = fs::read_dir(&dir).unwrap().map(|e| e.unwrap().path()).filter(|p| p.extension().is_some_and(|e| e == "fly")).collect();
     paths.sort();
+    // Programs of several modules in examples/, entered at their `main.fly`, run too.
+    let examples = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples");
+    let mut multi: Vec<_> = fs::read_dir(&examples).unwrap().map(|e| e.unwrap().path().join("main.fly")).filter(|p| p.exists()).collect();
+    multi.sort();
+    paths.extend(multi);
     let mut failures = Vec::new();
     for path in paths {
         let source = fs::read_to_string(&path).unwrap();

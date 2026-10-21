@@ -1,0 +1,63 @@
+// Mini, a compiler written in Flyscript as a test of goal 6 (§1): tokens, and the problems any phase reports.
+
+// ---- Diagnostics ----
+
+export type Span = { start: usize; end: usize };
+// A type error is reported and checking goes on, the bad expression taking the type `#Error`,
+// which fits anything, so one mistake is reported once.
+export effect Diag { report(e: Problem): void; }
+
+export type Problem = #Lex { at: usize; message: String } | #Parse { at: usize; message: String } | #Type { span: Span; message: String } | #Unbound { span: Span; name: String };
+export type CompileError = Problem | #Many(Vec<Problem>);
+
+// ---- Lexer ----
+
+export enum Tok { #Int(i64), #Ident(String), #Let, #In, #If, #Then, #Else, #Fn, #Def, #Data, #Case, #Of, #Bar, #True, #False, #LParen, #RParen, #Comma, #Semi, #Eq, #Plus, #Minus, #Star, #Less, #Arrow, #Eof }
+
+impl Eq for Tok;
+impl Clone for Tok;
+export type Token = { tok: Tok; span: Span };
+
+export function isDigit(b: u8): bool { b >= b'0' && b <= b'9' }
+export function isAlpha(b: u8): bool { (b >= b'a' && b <= b'z') || (b >= b'A' && b <= b'Z') || b == b'_' }
+
+export function keyword(word: str): Tok {
+  match (word) {
+    "let" => #Let, "in" => #In, "if" => #If, "then" => #Then, "else" => #Else,
+    "fn" => #Fn, "def" => #Def, "data" => #Data, "case" => #Case, "of" => #Of, "true" => #True, "false" => #False,
+    _ => #Ident(word.toString()),
+  }
+}
+
+export function lex(src: str): Vec<Token> uses Fail<CompileError> {
+  const bytes = src.asBytes();
+  let out: Vec<Token> = Vec.new();
+  let i: usize = 0;
+  while (i < bytes.len()) {
+    const b = bytes[i];
+    const start = i;
+    if (b == b' ' || b == b'\n') { i += 1; continue; }
+    if (isDigit(b)) {
+      let n: i64 = 0;
+      while (i < bytes.len() && isDigit(bytes[i])) { n = n * 10 + ((bytes[i] - b'0') as i64); i += 1; }
+      out.push({ tok: #Int(n), span: { start, end: i } });
+      continue;
+    }
+    if (isAlpha(b)) {
+      while (i < bytes.len() && (isAlpha(bytes[i]) || isDigit(bytes[i]))) { i += 1; }
+      out.push({ tok: keyword(src.slice(start, i)), span: { start, end: i } });
+      continue;
+    }
+    const tok: Tok = match (b) {
+      b'(' => #LParen, b')' => #RParen, b',' => #Comma, b';' => #Semi, b'|' => #Bar, b'+' => #Plus, b'*' => #Star, b'<' => #Less,
+      b'=' => if (i + 1 < bytes.len() && bytes[i + 1] == b'>') { i += 1; #Arrow } else { #Eq },
+      b'-' => #Minus,
+      _ => throw #Lex { at: i, message: `unexpected character ${b}` },
+    };
+    i += 1;
+    out.push({ tok, span: { start, end: i } });
+  }
+  out.push({ tok: #Eof, span: { start: i, end: i } });
+  out
+}
+

@@ -1,6 +1,6 @@
 # Flyscript
 
-**Language specification, version 0.46**
+**Language specification, version 0.47**
 
 *Affine values, one row calculus, handlers for everything, and `comptime`: Church on the outside, Turing on the inside.*
 
@@ -18,18 +18,12 @@ The whole language rests on five laws. Every rule in this document is a conseque
 4. **Handlers for everything.** Errors, I/O, iteration and region memory are ordinary effects with ordinary handlers. A handler may hold the rest of a computation as a one-shot continuation value; generators and tasks are both built from that one primitive.
 5. **`comptime` is the metalanguage.** Generics, reflection, layout transformation and derived interfaces are ordinary Flyscript code run by the compiler.
 
-### 0.1 Changes from 0.45
+### 0.1 Changes from 0.46
 
-0.46 gives Mini algebraic data types: `data` declarations, constructors used as values or applied, `case` with exhaustiveness checking reported through its `Diag` effect, tags in the code generator and the machine. It now compiles list maps and a binary search tree. Earlier changes are in [docs/history](history/).
-
-| Change | Why |
-| :--- | :--- |
-| A `Box<T>` is matched as the `T` it holds, through the same borrow (§4.1) | `match (f) { #Var(name, _) => … }` on a `readonly Box<Expr>` did not check; a compiler matches boxed nodes constantly |
-| A method's result that is only a type variable is decided by its receiver, not by what is expected of it (§3.6) | `types.get(n).unwrap()` where an owned `Ref` was wanted made `unwrap`'s `T` the `Ref`, which the `Option<readonly Ref>` then did not fit |
-| `Ref`, `Cell` and `RegionList` are `Clone` — they are `Copy`, so cloning copies (§4.6) | a `Vec<Ref<Type>>` could not be cloned |
-
+0.47 restructures Mini as a compiler is structured: five modules — `lexer`, `syntax`, `check`, `codegen` and the driver `main` — in examples/mini/, about a thousand lines. Its types, its `Diag` effect and its region-allocated checker cross module boundaries with nothing but `export` and `import`; it checked and ran unchanged on the first try. No language change was needed. Earlier changes are in [docs/history](history/).
 
 ---
+
 
 ## 1. Goals and non-goals
 
@@ -40,7 +34,7 @@ The whole language rests on five laws. Every rule in this document is a conseque
 3. Safety without annotation burden: no lifetime parameters, no `async` colouring, no checked-exception boilerplate.
 4. Testability by construction: because I/O is an effect, any program can run under a deterministic simulator.
 5. A small core: features are library code over the core wherever possible.
-6. Self-hosting: Flyscript is a language its own compiler is written well in. A compiler is the hardest ordinary program — recursive trees, cyclic graphs of scopes and type variables, union-find over mutable tables, maps keyed by strings, deep matching, diagnostics that point at source — so a feature that makes it awkward is a defect of the language, not of the compiler.
+6. Self-hosting: Flyscript is a language its own compiler is written well in. Mini (examples/mini/) is the standing test: a compiler for a small functional language, with algebraic data types, let-polymorphism over region-allocated types, error recovery through an effect and closure conversion, which grows toward a Flyscript front end. A compiler is the hardest ordinary program — recursive trees, cyclic graphs of scopes and type variables, union-find over mutable tables, maps keyed by strings, deep matching, diagnostics that point at source — so a feature that makes it awkward is a defect of the language, not of the compiler.
 
 **Non-goals**
 

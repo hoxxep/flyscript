@@ -1,0 +1,135 @@
+// Mini: a compiler for a small functional language, written in Flyscript as a test of goal 6 (§1).
+// source -> tokens (lexer) -> syntax tree (syntax) -> types (check) -> bytecode (codegen) -> run.
+// expect: let x = 2 in x * (3 + 4)  :  int  =  14
+// expect: let twice = fn(f, x) => f(f(x)) in twice(fn(n) => n * 2, 5)  :  int  =  20
+// expect: if 1 < 2 then 10 else 20  :  int  =  10
+// expect: let k = 10 in let add = fn(x) => x + k in add(add(1))  :  int  =  21
+// expect: error at 1:27: expected int, found bool
+// expect:     let f = fn(x) => x + 1 in f(true)
+// expect:                               ^
+// expect: error at 1:14: unknown name `z`
+// expect:     let y = 1 in z
+// expect:                  ^
+// expect: error at 1:18: a function cannot take itself
+// expect:     let g = fn(x) => x(x) in 0
+// expect:                      ^
+// expect: def fact(n) = if n < 1 then 1 else n * fact(n - 1); fact(10)  :  int  =  3628800
+// expect: def even(n) = if n < 1 then true else odd(n - 1);
+// expect: def odd(n) = if n < 1 then false else even(n - 1);
+// expect: if even(10) then 1 else 0  :  int  =  1
+// expect: let id = fn(x) => x in if id(true) then id(7) else 0  :  int  =  7
+// expect: def compose(f, g) = fn(x) => f(g(x));
+// expect: compose(fn(n) => n + 1, fn(n) => n * 2)(20)  :  int  =  41
+// expect: error at 2:1: expected int, found bool
+// expect:     f(true)
+// expect:     ^
+// expect: data List = Nil | Cons(int, List);
+// expect: def sum(l) = case l of Nil => 0 | Cons(h, t) => h + sum(t);
+// expect: sum(Cons(1, Cons(2, Cons(3, Nil))))  :  int  =  6
+// expect: data List = Nil | Cons(int, List);
+// expect: def map(f, l) = case l of Nil => Nil | Cons(h, t) => Cons(f(h), map(f, t));
+// expect: map(fn(x) => x * 10, Cons(1, Cons(2, Nil)))  :  List  =  Cons(10, Cons(20, Nil))
+// expect: data Shape = Circle(int) | Rect(int, int);
+// expect: def area(s) = case s of Circle(r) => 3 * r * r | Rect(w, h) => w * h;
+// expect: area(Rect(3, 4)) + area(Circle(2))  :  int  =  24
+// expect: data Tree = Leaf | Node(Tree, int, Tree);
+// expect: def insert(t, v) = case t of Leaf => Node(Leaf, v, Leaf) | Node(l, x, r) => if v < x then Node(insert(l, v), x, r) else Node(l, x, insert(r, v));
+// expect: def total(t) = case t of Leaf => 0 | Node(l, x, r) => total(l) + x + total(r);
+// expect: total(insert(insert(insert(Leaf, 5), 2), 8))  :  int  =  15
+// expect: error at 2:1: this `case` does not handle Blue
+// expect:     case Green of Red => 1 | Green => 2
+// expect:     ^
+// expect: error at 1:13: expected int, found bool
+// expect:     let a = 1 + true in
+// expect:                 ^
+// expect: error at 2:12: expected bool, found int
+// expect:     let b = if 3 then 4 else false in
+// expect:                ^
+// expect: error at 2:9: expected bool, found int
+// expect:     let b = if 3 then 4 else false in
+// expect:             ^
+// expect: error at 3:1: unknown name `nope`
+// expect:     nope(a)
+// expect:     ^
+
+import { println } from "std/io";
+import { Problem, CompileError, Diag } from "./lexer";
+import { parse } from "./syntax";
+import { check } from "./check";
+import { Instr, Value, generate, run, showValue } from "./codegen";
+
+type Compiled = { code: Vec<Instr>; globals: Vec<Value>; ty: String; ctorNames: Vec<String> };
+
+export function compile(src: str): Compiled uses Fail<CompileError> {
+  const prog = parse(src);
+  // Every type error is collected; the program is compiled only if there were none.
+  let errors: Vec<Problem> = Vec.new();
+  const ty = handle { check(prog) } with Diag { report(e) resumes k => { errors.push(e); k() } };
+  if (errors.len() > 0) { throw #Many(errors) }
+  const g = generate(prog);
+  { code: g.code, globals: g.globals, ty, ctorNames: g.ctorNames }
+}
+
+// ---- Diagnostics shown against the source: line, column, the line, a caret ----
+
+function render(src: str, at: usize, message: str): String {
+  let line: usize = 1;
+  let lineStart: usize = 0;
+  const bytes = src.asBytes();
+  for (const i of 0..at) {
+    if (bytes[i] == b'\n') { line += 1; lineStart = i + 1; }
+  }
+  let lineEnd = lineStart;
+  while (lineEnd < bytes.len() && bytes[lineEnd] != b'\n') { lineEnd += 1; }
+  let caret = String.new();
+  for (const _ of lineStart..at) { caret.push(" "); }
+  caret.push("^");
+  `${line}:${at - lineStart + 1}: ${message}\n    ${src.slice(lineStart, lineEnd)}\n    ${caret}`
+}
+
+function describeOne(src: str, p: readonly Problem): String {
+  match (p) {
+    #Lex { at, message } => render(src, at, message),
+    #Parse { at, message } => render(src, at, message),
+    #Type { span, message } => render(src, span.start, message),
+    #Unbound { span, name } => render(src, span.start, `unknown name \`${name}\``),
+  }
+}
+
+function describe(src: str, e: readonly CompileError): String {
+  match (e) {
+    #Many(ps) => ps.iter().map((p) => describeOne(src, p)).join("\nerror at "),
+    one => describeOne(src, one),
+  }
+}
+
+export function main(): void uses Io {
+  const programs = [
+    "let x = 2 in x * (3 + 4)",
+    "let twice = fn(f, x) => f(f(x)) in twice(fn(n) => n * 2, 5)",
+    "if 1 < 2 then 10 else 20",
+    "let k = 10 in let add = fn(x) => x + k in add(add(1))",
+    "let f = fn(x) => x + 1 in f(true)",
+    "let y = 1 in z",
+    "let g = fn(x) => x(x) in 0",
+    "def fact(n) = if n < 1 then 1 else n * fact(n - 1); fact(10)",
+    "def even(n) = if n < 1 then true else odd(n - 1);\ndef odd(n) = if n < 1 then false else even(n - 1);\nif even(10) then 1 else 0",
+    "let id = fn(x) => x in if id(true) then id(7) else 0",
+    "def compose(f, g) = fn(x) => f(g(x));\ncompose(fn(n) => n + 1, fn(n) => n * 2)(20)",
+    "def f(x) = x + 1;\nf(true)",
+    "data List = Nil | Cons(int, List);\ndef sum(l) = case l of Nil => 0 | Cons(h, t) => h + sum(t);\nsum(Cons(1, Cons(2, Cons(3, Nil))))",
+    "data List = Nil | Cons(int, List);\ndef map(f, l) = case l of Nil => Nil | Cons(h, t) => Cons(f(h), map(f, t));\nmap(fn(x) => x * 10, Cons(1, Cons(2, Nil)))",
+    "data Shape = Circle(int) | Rect(int, int);\ndef area(s) = case s of Circle(r) => 3 * r * r | Rect(w, h) => w * h;\narea(Rect(3, 4)) + area(Circle(2))",
+    "data Tree = Leaf | Node(Tree, int, Tree);\ndef insert(t, v) = case t of Leaf => Node(Leaf, v, Leaf) | Node(l, x, r) => if v < x then Node(insert(l, v), x, r) else Node(l, x, insert(r, v));\ndef total(t) = case t of Leaf => 0 | Node(l, x, r) => total(l) + x + total(r);\ntotal(insert(insert(insert(Leaf, 5), 2), 8))",
+    "data Color = Red | Green | Blue;\ncase Green of Red => 1 | Green => 2",
+    "let a = 1 + true in\nlet b = if 3 then 4 else false in\nnope(a)",
+  ];
+  for (const src of programs) {
+    try {
+      const c = compile(src);
+      println(`${src}  :  ${c.ty}  =  ${showValue(run(c.code, c.globals), c.ctorNames)}`);
+    } catch (e) {
+      println(`error at ${describe(src, e)}`);
+    }
+  }
+}
