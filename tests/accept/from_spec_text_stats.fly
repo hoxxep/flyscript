@@ -1,0 +1,67 @@
+// A program written by a TypeScript programmer from the specification alone (0.39), adjusted only
+// where the specification was silent.
+import { println } from "std/io";
+import { HashMap } from "std/collections";
+
+const SAMPLE: str = "the quick brown fox jumps over the lazy dog\nthe fox was very quick and the dog was lazy\nthe quick fox\n";
+
+function lines(text: str): void uses Yield<str> {
+  for (const line of text.split("\n")) {
+    const trimmed = line.trim();
+    if (trimmed.len() > 0) {
+      yield trimmed;
+    }
+  }
+}
+
+function wordsInLine(line: str): void uses Yield<str> {
+  for (const w of line.splitWhitespace()) {
+    yield w;
+  }
+}
+
+export function main(): void uses Io {
+  let counts = HashMap.new<String, u64>();
+  let lineNo: usize = 0;
+
+  for (const line of lines(SAMPLE)) {
+    lineNo += 1;
+    const wordCount = generate(() => wordsInLine(line)).reduce((n, _) => n + 1, 0 as usize);
+    println(`line ${lineNo}: ${wordCount} words`);
+
+    for (const w of wordsInLine(line)) {
+      match (counts.getMut(w)) {
+        #Some(n) => { n += 1; },
+        #None    => { counts.insert(w.toString(), 1); },
+      }
+    }
+  }
+
+  let pairs: Vec<[String, u64]> = counts
+    .entries()
+    .map(([k, v]) => [k.clone(), v])
+    .collect();
+
+  pairs.sortBy((a, b) => {
+    if (b[1] < a[1]) {
+      #Less
+    } else if (b[1] > a[1]) {
+      #Greater
+    } else if (a[0] < b[0]) {
+      #Less
+    } else if (a[0] > b[0]) {
+      #Greater
+    } else {
+      #Equal
+    }
+  });
+
+  if (const #Some(best) = pairs.iter().next()) {
+    println(`most frequent: ${best[0]} (${best[1]})`);
+  }
+
+  println("top 3:");
+  for (const [word, count] of pairs.iter().take(3)) {
+    println(`  ${word}: ${count}`);
+  }
+}

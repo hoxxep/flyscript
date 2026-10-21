@@ -530,7 +530,17 @@ impl Program {
                         Some(b) => {
                             self.modules[m].scope.insert(local.name.clone(), b);
                         }
-                        None => self.error(m, n.span, format!("module `{from}` does not export `{}`", n.name)),
+                        None => {
+                            let name = &n.name;
+                            let in_prelude = self.module_named("std/prelude").is_some_and(|p| self.modules[p].exports.contains_key(name));
+                            let home = self.modules.iter().find(|x| x.is_std && x.name != "std/prelude" && x.exports.contains_key(name)).map(|x| x.name.clone());
+                            let hint = match (in_prelude, home) {
+                                (true, _) => format!(": `{name}` is in the prelude, so it needs no import"),
+                                (false, Some(h)) => format!(": it is in `{h}`"),
+                                _ => String::new(),
+                            };
+                            self.error(m, n.span, format!("module `{from}` does not export `{name}`{hint}"))
+                        }
                     }
                 }
             }
@@ -1199,7 +1209,11 @@ pub fn subst(t: &Ty, map: &SubstMap<'_>) -> Ty {
         Ty::Named(d, args) => Ty::Named(*d, args.iter().map(|a| subst_arg(a, map)).collect()),
         Ty::Record(r) => Ty::Record(subst_row(r, map)),
         Ty::Union(r) => Ty::Union(subst_row(r, map)),
-        Ty::Tuple(ts) => Ty::Tuple(ts.iter().map(|t| subst(t, map)).collect()),
+        Ty::Tuple(ts) => match ts.iter().map(|t| subst(t, map)).collect::<Vec<_>>() {
+            // A payload of one `void` is no payload (§3.2).
+            ts if ts.len() == 1 && ts[0] == Ty::void() => Ty::void(),
+            ts => Ty::Tuple(ts),
+        },
         Ty::Array(t, l) => Ty::Array(Box::new(subst(t, map)), subst_len(l, map)),
         Ty::Slice(t) => Ty::Slice(Box::new(subst(t, map))),
         Ty::Borrow(m, t) => Ty::Borrow(*m, Box::new(subst(t, map))),

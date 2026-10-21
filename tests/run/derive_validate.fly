@@ -1,0 +1,51 @@
+// expect: ok
+// expect: name: must not be empty; age: must not be negative
+// A user-written derivation (§7.3): validation rules generated from a struct's fields by `comptime`
+// reflection, as a TypeScript schema library would declare them.
+import { println } from "std/io";
+
+// A field problem, named for what failed.
+type Problem = { field: String; message: String };
+
+// Validation: every string field must be non-empty, every number non-negative.
+interface Validate { function validate(self: readonly Self, out: mut Vec<Problem>): void; }
+
+impl<comptime T: Type> Validate for T {
+  function validate(self: readonly Self, out: mut Vec<Problem>): void {
+    comptime match (Type.info(T)) {
+      #Struct { fields } | #Record(fields) => {
+        comptime for (const f of fields) {
+          comptime if (f.type == String) {
+            if (self.[f.name].len() == 0) {
+              out.push({ field: f.name.toString(), message: "must not be empty".toString() });
+            }
+          } else {
+            comptime if (f.type == i32 || f.type == f64) {
+              if (self.[f.name] < 0) {
+                out.push({ field: f.name.toString(), message: "must not be negative".toString() });
+              }
+            }
+          }
+        }
+      }
+      _ => {}
+    }
+  }
+}
+
+struct Signup { name: String; email: String; age: i32 }
+impl Validate for Signup;
+
+export function main(): void uses Io {
+  const good = Signup { name: "Ada".toString(), email: "ada@x.io".toString(), age: 36 };
+  const bad = Signup { name: "".toString(), email: "b@x.io".toString(), age: -1 };
+  for (const s of [good, bad]) {
+    let problems: Vec<Problem> = Vec.new();
+    s.validate(mut problems);
+    if (problems.len() == 0) {
+      println("ok");
+    } else {
+      println(problems.iter().map((p) => `${p.field}: ${p.message}`).collect().join("; "));
+    }
+  }
+}

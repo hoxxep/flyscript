@@ -163,7 +163,10 @@ impl Subst {
             Ty::Named(d, args) => Ty::Named(d, args.iter().map(|a| self.zonk_arg(a)).collect()),
             Ty::Record(r) => Ty::Record(self.zonk_row(&r)),
             Ty::Union(r) => Ty::Union(self.zonk_row(&r)),
-            Ty::Tuple(ts) => Ty::Tuple(ts.iter().map(|t| self.zonk(t)).collect()),
+            Ty::Tuple(ts) => match ts.iter().map(|t| self.zonk(t)).collect::<Vec<_>>() {
+                ts if ts.len() == 1 && ts[0] == Ty::void() => Ty::void(),
+                ts => Ty::Tuple(ts),
+            },
             Ty::Array(t, l) => Ty::Array(Box::new(self.zonk(&t)), self.resolve_len(&l)),
             Ty::Slice(t) => Ty::Slice(Box::new(self.zonk(&t))),
             Ty::Borrow(m, t) => Ty::Borrow(m, Box::new(self.zonk(&t))),
@@ -260,6 +263,8 @@ impl Subst {
             (Ty::Prim(Prim::Never), _) | (_, Ty::Prim(Prim::Never)) => Ok(()),
             (Ty::Var(v), _) => self.bind_ty(*v, b.clone()),
             (_, Ty::Var(v)) => self.bind_ty(*v, a.clone()),
+            // A payload of one `void` is no payload: `#Ok` is a `Result<void, E>`'s `#Ok`.
+            (Ty::Tuple(ts), v) | (v, Ty::Tuple(ts)) if ts.len() == 1 && *v == Ty::void() => self.unify(&ts[0], v),
             (Ty::Param(x), Ty::Param(y)) if x == y => Ok(()),
             (Ty::Prim(x), Ty::Prim(y)) if x == y => Ok(()),
             (Ty::Named(d1, a1), Ty::Named(d2, a2)) if d1 == d2 && a1.len() == a2.len() => {

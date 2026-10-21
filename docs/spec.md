@@ -1,6 +1,6 @@
 # Flyscript
 
-**Language specification, version 0.39**
+**Language specification, version 0.40**
 
 *Affine values, one row calculus, handlers for everything, and `comptime`: Church on the outside, Turing on the inside.*
 
@@ -18,18 +18,17 @@ The whole language rests on five laws. Every rule in this document is a conseque
 4. **Handlers for everything.** Errors, I/O, iteration and region memory are ordinary effects with ordinary handlers. A handler may hold the rest of a computation as a one-shot continuation value; generators and tasks are both built from that one primitive.
 5. **`comptime` is the metalanguage.** Generics, reflection, layout transformation and derived interfaces are ordinary Flyscript code run by the compiler.
 
-### 0.1 Changes from 0.38
+### 0.1 Changes from 0.39
 
-0.39 is a consistency pass before freezing a 1.0 core, after a review that read the specification for contradictions rather than design (docs/reviews/2026-10-21-consistency-review-of-0-38.md). Earlier changes are in [docs/history](history/).
+0.40 comes from three programs — a todo list, text statistics, bank transfers across tasks — written from the specification alone by a reader who knew only TypeScript, then run through the prototype. One checked as written; the others stopped where the specification was silent or the language got in the way. Earlier changes are in [docs/history](history/).
 
 | Change | Why |
 | :--- | :--- |
-| Integer arithmetic is checked against its type: overflow panics, and `wrappingAdd`, `wrappingSub` and `wrappingMul` wrap (§5.7) | §5.7 said so, but the prototype computed in 128 bits whatever the type |
-| `panic(message)` is a prelude function; `Option` has `isNone` and `unwrap`, `Result` has `isOk` and `isErr`, and every method the examples call is listed with its type (§3.1, §3.2, §5.7) | examples called `unwrap`, `take` and `asStr`, which no normative section listed |
-| A record type's fields are separated by `;` or `,`, as in TypeScript; the grammar has `If`, `While` and `Unsafe` (§2.3) | §5.5 wrote `#Item { item: T, rest: … }`, which the grammar did not allow |
-| §9's region and class rules match §4.6 and §5.3: an escaping closure may not capture region data, and a continuation is class 2 if what it suspended holds a borrow | the calculus still had the older, weaker rules |
-| A cycle of type aliases, through any number of them, is the error; an alias may name a nominal type (§3.3) | the wording covered only an alias naming itself, and only structural aliases |
-| One name per thing: a value's *loans* are the borrows it holds (§4.1); channels are `Sender` and `Receiver` (§4.5, §6.2); `region` is also a contextual word in a type parameter list (§2.3); `fieldsOf` is shown where §7 first uses it | the same thing went by two names, or by one never defined |
+| A closure's parameter may take its argument apart, as in TypeScript: `entries().map(([k, v]) => …)`, `({ name }) => name` (§2.3, §4.3) | the first thing the text-statistics program wrote, and it did not parse |
+| A tag whose payload is `void` is written bare: `#Ok` is the success of a `Result<void, E>` (§3.2) | the bank program wrote `#Ok(())`, there being nothing else to write, and `#Ok` did not fit `#Ok(T)` with `T = void` |
+| `Vec` has `insert`, `remove` and `retain` (TypeScript's `filter`, in place); `str` has `lines()`; `HashMap` lists `sortedByValue` (§3.1) | removing a todo by id needed a drained copy of the list |
+| Tasks borrow a `Mutex` declared outside their scope directly; an `Arc` is for sharing beyond the scope's lexical reach. The prelude holds `Arc`; `std/sync` holds `Mutex` and channels, and importing a prelude name says so (§6.2) | §6.2 told every task to clone an `Arc` it did not need, and nothing said where `Arc` lived |
+
 
 ---
 
@@ -164,7 +163,8 @@ Yield       = "yield" Expr ;
 Region      = "region" "(" Ident ")" Block ;
 Handle      = "handle" Block { "with" Path [ TypeArgs ] "{" { Arm } "}" } ;   (* the first `with` innermost *)
 Arm         = Name "(" [ Ident { "," Ident } ] ")" [ "resumes" Ident ] "=>" ( Expr "," | Block ) ;
-Lambda      = "(" [ Params ] ")" "=>" ( Expr | Block ) ;
+Lambda      = "(" [ LambdaParam { "," LambdaParam } [ "," ] ] ")" "=>" ( Expr | Block ) ;
+LambdaParam = Param | Ident | ( "[" [ Pattern { "," Pattern } ] "]" | PatRecord ) [ ":" Type ] ;   (* `([k, v]) => …` takes its argument apart with `const` *)
 ```
 
 Every comma-separated list in the grammar — parameters, arguments, type arguments, fields, entries, items, patterns, tags, arm parameters — may end with a comma.
@@ -186,7 +186,7 @@ Three rules settle the grammar's ambiguities, all borrowed from TypeScript:
 - `T[N]` is an inline array (`Copy` if `T` is); `[a, b, c]` and `repeat(v)` build one, with `N` from context. `T[]` is a borrowed slice, always `readonly T[]` or `mut T[]`.
 - `Vec<T>`, `Box<T>`, `HashMap<K, V>` and the other owning containers are library types.
 
-**Methods.** Arrays, slices and `Vec`s share their methods, which are defined on slices and reached through lending (§4.1): `len`, `iter`, `iterMut`, `splitAt`, `last`, `includes` and `indexOf` (by `Eq`), `sort` (by `Ord`), `sortBy(cmp)` (stable, `cmp` returning `#Less`, `#Equal` or `#Greater`), `reverse`, and `join(sep)` (each element shown, strings as they are). A `Vec` also has `push`, `pop` and `drain`, which takes the elements out in order. `str` has TypeScript's string methods — `slice`, `split`, `trim`, `includes`, `startsWith`, `endsWith`, `indexOf`, `toUpperCase`, `toLowerCase`, `replaceAll` — plus `toString`, `asBytes`, and the generators `bytes()` and `splitWhitespace()`; a `String` lends them all, and adds `push`, `clone` and `asStr()`, which lends it as a `str` explicitly where nothing expects one. A `HashMap<K, V>` has `insert`, `get`, `getMut`, `has`, `remove` (each looked up by anything `K` lends), `len`, and the generators `keys()`, `values()`, `valuesMut()` and `entries()`.
+**Methods.** Arrays, slices and `Vec`s share their methods, which are defined on slices and reached through lending (§4.1): `len`, `iter`, `iterMut`, `splitAt`, `last`, `includes` and `indexOf` (by `Eq`), `sort` (by `Ord`), `sortBy(cmp)` (stable, `cmp` returning `#Less`, `#Equal` or `#Greater`), `reverse`, and `join(sep)` (each element shown, strings as they are). A `Vec` also has `push`, `pop`, `insert(i, v)`, `remove(i)`, `retain(keep)` — TypeScript's `xs = xs.filter(keep)`, in place — and `drain`, which takes the elements out in order. `str` has TypeScript's string methods — `slice`, `split`, `trim`, `includes`, `startsWith`, `endsWith`, `indexOf`, `toUpperCase`, `toLowerCase`, `replaceAll` — plus `toString`, `asBytes`, and the generators `bytes()`, `lines()` and `splitWhitespace()`; a `String` lends them all, and adds `push`, `clone` and `asStr()`, which lends it as a `str` explicitly where nothing expects one. A `HashMap<K, V>` has `insert`, `get`, `getMut`, `has`, `remove` (each looked up by anything `K` lends), `len`, `sortedByValue()` (the entries, largest value first), and the generators `keys()`, `values()`, `valuesMut()` and `entries()`.
 
 A tuple `[A, B]` is built with a list literal, taken apart with a pattern (`const [a, b] = t`, which takes an array of the same length apart too), and indexed by a constant, as in TypeScript: `t[0]` is a place of its own, like a field.
 
@@ -197,7 +197,7 @@ Indexing an array, a slice or a `Vec` (`xs[i]`) is a place of the element type, 
 A *row* is a finite map from labels to types, optionally ending in a row variable. Flyscript has three kinds of row, all solved by one Rémy-style unifier over label-sorted rows. They differ only in what a label is and in what happens when a label appears twice:
 
 - **Records**: `{ x: f64; y: f64; ...R }`. A label is a field name and appears at most once; extending a row requires that its tail lack the label. Physical layout is canonical (by alignment, then name), so equal record types have equal layouts.
-- **Tag unions**: `#Some(T) | #None`, `#Get { key: String } | #Put { key: String; val: String } | ...R`. A label is a tag; payloads are a tuple `(…)` or a record `{…}`. Tags need no declaration. Two unions are joined by merging their tags, unifying the payloads of a tag present in both. Whatever its shape, `#A(x)` builds or binds a payload whole: `#Add(pair)` where `pair: [Expr, Expr]`, `#Get(req)` where `req: { key: String }`. Code that is generated per tag (§7.2) relies on it.
+- **Tag unions**: `#Some(T) | #None`, `#Get { key: String } | #Put { key: String; val: String } | ...R`. A label is a tag; payloads are a tuple `(…)` or a record `{…}`, and a tag without one is written bare — including where the payload type is `void`, so `#Ok` is the success of a `Result<void, E>`. Tags need no declaration. Two unions are joined by merging their tags, unifying the payloads of a tag present in both. Whatever its shape, `#A(x)` builds or binds a payload whole: `#Add(pair)` where `pair: [Expr, Expr]`, `#Get(req)` where `req: { key: String }`. Code that is generated per tag (§7.2) relies on it.
 - **Effect rows**: `uses Io, Fail<E>, Region<R>, ...R`. A label is an effect name together with its **region arguments**: `Region<R1>` and `Region<R2>` are different labels and may share a row. An effect's other type arguments are **determined by its label**, so a row holds one `Fail` and one `Yield`, and wherever two rows meet, their `Fail` payloads unify. Effect rows are sets: extending a row with a label it already contains is the identity, so `uses Io, ...E` is well formed whether or not `E` contains `Io`.
 
 Determined arguments are what make error sets compose. A block that calls `conn.read` (`Fail<IoErr | ...ρ1>`) and `parse` (`Fail<#Malformed | ...ρ2>`) has one `Fail` whose payload is the merged union `IoErr | #Malformed | ...ρ3`; no conversion code is involved.
@@ -637,7 +637,7 @@ Io.scope((s) => {
 
 `channel<T>()` gives a `Sender<T>` and a `Receiver<T>`. A `Sender` is `Clone`, one per producer. A channel ends when its last sender is gone — dropped, or closed with `tx.close()`, which consumes it — and its receivers then drain what was sent and see the end: `recv()` gives `#None`, and `for (const m of rx)` stops. A task that is to end a channel therefore owns its sender: a sender cloned inside the scope is moved into its task and dropped when the task ends.
 
-`Mutex<T>` holds state that tasks share, usually through an `Arc`: `const totals = Arc.new(Mutex.new(HashMap.new()))`, then `totals.clone()` per task. The state is reached only inside `lock`, which lends it `mut` to a body that performs no effects and gives back a `Send` value:
+`Mutex<T>` (from `std/sync`) holds state that tasks share. Declared outside a scope, it is simply borrowed by the scope's tasks: `const totals = Mutex.new(HashMap.new()); Io.scope((s) => { s.spawn(() => totals.lock((m) => …)); … })`. An `Arc` (in the prelude) is for sharing beyond a scope's lexical reach — with tasks a helper starts, which may not borrow (§6.1) — and is cloned for each. The state is reached only inside `lock`, which lends it `mut` to a body that performs no effects and gives back a `Send` value:
 
 ```ts
 impl<T extends Send> Mutex<T> {

@@ -469,6 +469,8 @@ impl str {
   export function bytes(self: Self): void uses Yield<u8>;
   export function asBytes(self: Self): readonly u8[] from self;
   export function splitWhitespace(self: Self): void uses Yield<str>;
+  // Each line, without its line ending.
+  export function lines(self: Self): void uses Yield<str>;
   // TypeScript's string methods. `split` gives owned pieces, which a `Vec` can hold; iterate
   // `splitWhitespace` to borrow them instead.
   export function split(self: Self, sep: str): Vec<String>;
@@ -532,6 +534,11 @@ impl<T> Vec<T> {
   export function new(): Vec<T>;
   export function push(self: mut Self, v: T): void;
   export function pop(self: mut Self): Option<T>;
+  // The element at `i`, taken out; those after it move down. Out of bounds panics.
+  export function remove(self: mut Self, i: usize): T;
+  export function insert(self: mut Self, i: usize, v: T): void;
+  // Keeps the elements `keep` accepts, in order: TypeScript's `xs = xs.filter(keep)`, in place.
+  export function retain(self: mut Self, keep: mut (x: readonly T) => bool): void;
   // Takes every element out, in order, leaving the vector empty: `for (const f of fibers.drain())`.
   export function drain(self: mut Self): Gen<T, []>;
   export function len(self: readonly Self): usize;

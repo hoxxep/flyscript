@@ -397,6 +397,40 @@ impl Interp {
             "str.toUpperCase" => Ok(Value::text(&a(0).as_text().to_uppercase())),
             "str.toLowerCase" => Ok(Value::text(&a(0).as_text().to_lowercase())),
             "str.replaceAll" => Ok(Value::text(&a(0).as_text().replace(&*a(1).as_text(), &a(2).as_text()))),
+            "str.lines" => {
+                for l in a(0).as_text().lines() {
+                    self.yield_value(Value::text(l))?;
+                }
+                Ok(Value::Unit)
+            }
+            "Vec.remove" | "Vec.insert" => {
+                let p = place_of(&a(0))?;
+                let mut items = list(&get(&p));
+                let i = a(1).as_int() as usize;
+                let limit = if key == "Vec.remove" { items.len() } else { items.len() + 1 };
+                if i >= limit {
+                    return Err(panic(format!("index {i} out of bounds for length {}", items.len())));
+                }
+                let out = if key == "Vec.remove" {
+                    items.remove(i)
+                } else {
+                    items.insert(i, a(2));
+                    Value::Unit
+                };
+                set(&p, Value::List(items));
+                Ok(out)
+            }
+            "Vec.retain" => {
+                let p = place_of(&a(0))?;
+                let mut kept = Vec::new();
+                for v in list(&get(&p)) {
+                    if self.call_value(&a(1), vec![v.clone()])?.as_bool() {
+                        kept.push(v);
+                    }
+                }
+                set(&p, Value::List(kept));
+                Ok(Value::Unit)
+            }
             "str.splitWhitespace" => {
                 for w in a(0).as_text().split_whitespace() {
                     self.yield_value(Value::text(w))?;

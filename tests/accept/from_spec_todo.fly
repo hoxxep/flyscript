@@ -1,0 +1,86 @@
+// A program written by a TypeScript programmer from the specification alone (0.39), adjusted only
+// where the specification was silent.
+import { println } from "std/io";
+
+struct Todo {
+  id: u32;
+  title: String;
+  priority: u8;
+  done: bool;
+}
+impl Clone for Todo;
+
+type TodoErr = #NotFound(u32);
+
+struct TodoList {
+  items: Vec<Todo>;
+  nextId: u32;
+}
+
+impl TodoList {
+  function new(): TodoList {
+    TodoList { items: Vec.new(), nextId: 1 }
+  }
+
+  function add(self: mut Self, title: str, priority: u8): u32 {
+    const id = self.nextId;
+    self.nextId += 1;
+    self.items.push(Todo { id, title: title.toString(), priority, done: false });
+    id
+  }
+
+  function complete(self: mut Self, id: u32): void uses Fail<TodoErr> {
+    for (const item of self.items.iterMut()) {
+      if (item.id == id) {
+        item.done = true;
+        return;
+      }
+    }
+    throw #NotFound(id);
+  }
+
+  function remove(self: mut Self, id: u32): Todo uses Fail<TodoErr> {
+    let kept: Vec<Todo> = Vec.new();
+    let removed: Option<Todo> = #None;
+    for (const item of self.items.drain()) {
+      if (item.id == id) {
+        removed = #Some(item);
+      } else {
+        kept.push(item);
+      }
+    }
+    self.items = kept;
+    match (removed) {
+      #Some(t) => t,
+      #None    => throw #NotFound(id),
+    }
+  }
+
+  function pendingByPriority(self: readonly Self): Vec<Todo> {
+    let pending = self.items.iter().filter((t) => !t.done).cloned().collect();
+    pending.sortBy((a, b) => a.priority.cmp(b.priority));
+    pending
+  }
+}
+
+export function main(): void uses Io {
+  let list = TodoList.new();
+  const a = list.add("Write spec", 2);
+  const b = list.add("Fix borrow bug", 1);
+  const c = list.add("Ship 1.0", 3);
+
+  try {
+    list.complete(a);
+    const old = list.remove(c);
+    println(`Removed: ${old.title}`);
+    list.complete(99);
+  } catch (e) {
+    match (e) {
+      #NotFound(id) => println(`Error: no todo with id ${id}`),
+    }
+  }
+
+  for (const t of list.pendingByPriority()) {
+    println(`[p${t.priority}] #${t.id}: ${t.title} (id=${b})`);
+  }
+}

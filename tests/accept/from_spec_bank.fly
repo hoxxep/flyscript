@@ -1,0 +1,76 @@
+// A program written by a TypeScript programmer from the specification alone (0.39), adjusted only
+// where the specification was silent.
+import { println } from "std/io";
+import { HashMap } from "std/collections";
+import { Mutex } from "std/sync";
+
+type BankErr = #InsufficientFunds { fromAcct: String; needed: i64; available: i64 } | #UnknownAccount(String);
+
+type Ledger = Arc<Mutex<HashMap<String, i64>>>;
+
+function transfer(ledger: readonly Ledger, fromAcct: str, toAcct: str, amount: i64): void uses Io, Fail<BankErr> {
+  const outcome: Result<void, BankErr> = ledger.lock((accounts) => {
+    const srcBal = match (accounts.get(fromAcct)) {
+      #Some(b) => b,
+      #None    => return #Err(#UnknownAccount(fromAcct.toString())),
+    };
+    if (srcBal < amount) {
+      return #Err(#InsufficientFunds {
+        fromAcct: fromAcct.toString(),
+        needed: amount,
+        available: srcBal,
+      });
+    }
+    const dstBal = match (accounts.get(toAcct)) {
+      #Some(b) => b,
+      #None    => return #Err(#UnknownAccount(toAcct.toString())),
+    };
+    accounts.insert(fromAcct.toString(), srcBal - amount);
+    accounts.insert(toAcct.toString(), dstBal + amount);
+    #Ok
+  });
+  outcome.unwrap()
+}
+
+export function main(): void uses Io {
+  let initial = HashMap.new<String, i64>();
+  initial.insert("alice".toString(), 500);
+  initial.insert("bob".toString(), 300);
+  initial.insert("carol".toString(), 200);
+
+  const ledger = Arc.new(Mutex.new(initial));
+
+  try {
+    Io.scope((s) => {
+      const t1 = s.fork(() => {
+        transfer(ledger, "alice", "bob", 200);
+        transfer(ledger, "bob", "carol", 100);
+      });
+      const t2 = s.fork(() => {
+        transfer(ledger, "carol", "alice", 50);
+        transfer(ledger, "bob", "alice", 900);
+      });
+      t1.join();
+      t2.join();
+    });
+  } catch (e) {
+    match (e) {
+      #InsufficientFunds { fromAcct, needed, available } =>
+        println(`Transfer failed: ${fromAcct} needed ${needed}, had ${available}`),
+      #UnknownAccount(who) =>
+        println(`Transfer failed: unknown account ${who}`),
+    }
+  }
+
+  const snapshot = ledger.lock((accounts) => {
+    let out: Vec<[String, i64]> = Vec.new();
+    for (const [k, v] of accounts.entries()) {
+      out.push([k.clone(), v]);
+    }
+    out
+  });
+
+  for (const [name, bal] of snapshot) {
+    println(`${name}: ${bal}`);
+  }
+}

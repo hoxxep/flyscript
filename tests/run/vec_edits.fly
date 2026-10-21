@@ -1,0 +1,24 @@
+// expect: [1, 9, 2, 3]
+// expect: removed 9
+// expect: [2]
+// expect: one|two
+// expect: a1, b2
+// `Vec`'s `insert`, `remove` and `retain` (TypeScript's `filter`, in place), and `str.lines()` (§3.1);
+// closures take their tuple arguments apart, as in TypeScript.
+import { println } from "std/io";
+export function main(): void uses Io {
+  let v: Vec<i32> = Vec.new();
+  v.push(1); v.push(2); v.push(3);
+  v.insert(1, 9);
+  println(`${v}`);
+  println(`removed ${v.remove(1)}`);
+  v.retain((x) => x % 2 == 0);
+  println(`${v}`);
+  const text = "one\ntwo";
+  let parts: Vec<String> = Vec.new();
+  for (const l of text.lines()) { parts.push(l.toString()); }
+  const pairs = [[1, "a".toString()], [2, "b".toString()]];
+  const names = pairs.iter().map(([n, s]) => `${s}${n}`).collect();
+  println(parts.join("|"));
+  println(names.join(", "));
+}

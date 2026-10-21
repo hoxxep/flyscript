@@ -610,6 +610,40 @@ impl<'a> Parser<'a> {
         Ok(params)
     }
 
+    /// A lambda's parameters, which, as in TypeScript, may take their argument apart:
+    /// `([k, v]) => …` and `({ name }) => …` take a parameter and bind its parts with `const`.
+    fn lambda_params(&mut self) -> PResult<(Vec<Param>, Vec<Stmt>)> {
+        self.expect("(")?;
+        let mut params = Vec::new();
+        let mut unpack = Vec::new();
+        while !self.at(")") {
+            if self.at("[") || self.at("{") {
+                let pat = self.pattern()?;
+                let ty = if self.eat(":") { Some(self.ty()?) } else { None };
+                let at = Span { start: pat.span.end, end: pat.span.end };
+                let name = Ident { name: format!("${}", params.len()), span: pat.span };
+                unpack.push(Stmt::Let {
+                    mutable: false,
+                    span: pat.span,
+                    pat,
+                    ty: None,
+                    init: Expr { kind: ExprKind::Ident(name.name.clone()), span: at },
+                });
+                params.push(Param { comptime: false, name, ty });
+            } else {
+                let comptime = self.eat_kw(Kw::Comptime);
+                let name = self.ident()?;
+                let ty = if self.eat(":") { Some(self.ty()?) } else { None };
+                params.push(Param { comptime, name, ty });
+            }
+            if !self.eat(",") {
+                break;
+            }
+        }
+        self.expect(")")?;
+        Ok((params, unpack))
+    }
+
     fn ret(&mut self) -> PResult<Return> {
         let ty = self.ty()?;
         let mut from = Vec::new();
@@ -1184,14 +1218,21 @@ impl<'a> Parser<'a> {
                 }
             }
             Tok::Punct("(") if self.is_lambda() => {
-                let params = self.params(false)?;
+                let (params, unpack) = self.lambda_params()?;
                 self.expect("=>")?;
                 let body = if self.at("{") {
-                    let b = self.block()?;
+                    let mut b = self.block()?;
+                    b.stmts.splice(0..0, unpack);
                     let span = b.span;
                     Expr { kind: ExprKind::Block(b), span }
                 } else {
-                    self.expr()?
+                    let e = self.expr()?;
+                    if unpack.is_empty() {
+                        e
+                    } else {
+                        let span = e.span;
+                        Expr { kind: ExprKind::Block(Block { stmts: unpack, tail: Some(Box::new(e)), span }), span }
+                    }
                 };
                 ExprKind::Lambda { params, body: Box::new(body) }
             }
