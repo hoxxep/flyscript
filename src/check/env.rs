@@ -80,7 +80,8 @@ pub enum DefKind {
     Struct { fields: Option<Vec<(String, Ty)>> },
     Enum { tags: BTreeMap<String, Ty> },
     Alias { ty: Ty },
-    Interface { methods: Vec<(String, Scheme)>, assoc: Vec<String> },
+    /// `self_sym` is the parameter standing for `Self` in the methods' schemes.
+    Interface { methods: Vec<(String, Scheme)>, assoc: Vec<String>, self_sym: Sym, extends: Vec<Ty> },
     Effect { ops: Vec<(String, Scheme)> },
 }
 
@@ -113,6 +114,9 @@ pub struct FnInfo {
     pub exported: bool,
     pub impl_id: Option<usize>,
     pub has_body: bool,
+    /// For an interface's method called through a bound (`x.encode()` with `T extends Json`):
+    /// the interface. Its first generic parameter is `Self`, resolved to an impl when called.
+    pub iface: Option<DefId>,
 }
 
 #[derive(Debug)]
@@ -140,6 +144,8 @@ pub struct Program {
     pub checked: std::collections::HashSet<FnId>,
     /// Per checked function: final types of its expressions and bindings, for later passes.
     pub typed: HashMap<FnId, Typed>,
+    /// Each interface method, as a function called through a bound.
+    pub iface_fns: HashMap<(DefId, String), FnId>,
 }
 
 /// The type checker's results for one function body, keyed by source span.
@@ -151,6 +157,9 @@ pub struct Typed {
     pub params: Vec<(String, Ty)>,
     /// The function each call or method call resolved to, by the call's span.
     pub calls: HashMap<Span, FnId>,
+    /// Each call's generic arguments, in its scheme's parameter order (for dispatch through
+    /// bounds at run time).
+    pub targs: HashMap<Span, Vec<GArg>>,
 }
 
 impl Names for Program {
@@ -197,6 +206,7 @@ impl Program {
             inferred: HashMap::new(),
             checked: Default::default(),
             typed: HashMap::new(),
+            iface_fns: HashMap::new(),
         };
         for (name, source) in STD {
             p.add_module(name.to_string(), format!("<{name}.d.fly>"), source.to_string(), true);
@@ -266,7 +276,8 @@ impl Program {
                         let id = self.placeholder(&x.name, m);
                         // Kinds are known before elaboration, so declarations may refer to
                         // themselves (`effect Io { start(task: () => void uses Io) … }`).
-                        self.defs[id].kind = DefKind::Interface { methods: Vec::new(), assoc: Vec::new() };
+                        let self_sym = self.fresh_sym("Self");
+                        self.defs[id].kind = DefKind::Interface { methods: Vec::new(), assoc: Vec::new(), self_sym, extends: Vec::new() };
                         (x.name.name.clone(), Binding::Def(id))
                     }
                     ItemKind::Effect(e) => {
@@ -288,6 +299,7 @@ impl Program {
                             exported: item.exported,
                             impl_id: None,
                             has_body: f.body.is_some(),
+                            iface: None,
                         });
                         (f.sig.name.name.clone(), Binding::Fn(id))
                     }
@@ -453,7 +465,10 @@ impl Program {
             },
             ItemKind::TypeAlias(a) => DefKind::Alias { ty: self.elab_ty(&a.ty, &inner) },
             ItemKind::Interface(x) => {
-                let self_scope = TyScope { self_ty: Some(Ty::Param(self.fresh_sym("Self"))), ..inner.clone() };
+                let DefKind::Interface { self_sym, .. } = &self.defs[id].kind else { return };
+                let self_sym = self_sym.clone();
+                let extends = x.extends.iter().map(|t| self.elab_ty(t, &inner)).collect();
+                let self_scope = TyScope { self_ty: Some(Ty::Param(self_sym.clone())), ..inner.clone() };
                 let mut methods = Vec::new();
                 let mut assoc = Vec::new();
                 for member in &x.members {
@@ -464,7 +479,8 @@ impl Program {
                         ast::InterfaceMember::AssocType { name, .. } => assoc.push(name.name.clone()),
                     }
                 }
-                DefKind::Interface { methods, assoc }
+                self.declare_iface_fns(id, m, &methods, &self_sym);
+                DefKind::Interface { methods, assoc, self_sym, extends }
             }
             ItemKind::Effect(e) => {
                 let ops = e.ops.iter().map(|sig| (sig.name.name.clone(), self.elaborate_sig(sig, &inner, None))).collect();
@@ -581,6 +597,7 @@ impl Program {
                 exported,
                 impl_id: Some(id),
                 has_body: method.decl.body.is_some(),
+                iface: None,
             });
             self.impls[id].methods.push(fid);
         }
@@ -911,15 +928,18 @@ fn normalize(p: &Path) -> PathBuf {
     out
 }
 
+/// Arguments for generic parameters, by the parameter's symbol id.
+pub type SubstMap<'a> = HashMap<u32, &'a GArg>;
+
 /// Substitutes generic parameters by arguments.
 pub fn subst_params(t: &Ty, params: &[GParam], args: &[GArg]) -> Ty {
-    let map: HashMap<&Sym, &GArg> = params.iter().map(|p| &p.sym).zip(args).collect();
+    let map: SubstMap<'_> = params.iter().map(|p| p.sym.id).zip(args).collect();
     subst(t, &map)
 }
 
-pub fn subst(t: &Ty, map: &HashMap<&Sym, &GArg>) -> Ty {
+pub fn subst(t: &Ty, map: &SubstMap<'_>) -> Ty {
     match t {
-        Ty::Param(s) => match map.get(s) {
+        Ty::Param(s) => match map.get(&s.id) {
             Some(GArg::Ty(t)) => t.clone(),
             _ => t.clone(),
         },
@@ -941,7 +961,7 @@ pub fn subst(t: &Ty, map: &HashMap<&Sym, &GArg>) -> Ty {
     }
 }
 
-pub fn subst_arg(a: &GArg, map: &HashMap<&Sym, &GArg>) -> GArg {
+pub fn subst_arg(a: &GArg, map: &SubstMap<'_>) -> GArg {
     match a {
         GArg::Ty(t) => GArg::Ty(subst(t, map)),
         GArg::Region(r) => GArg::Region(subst_region(r, map)),
@@ -950,9 +970,9 @@ pub fn subst_arg(a: &GArg, map: &HashMap<&Sym, &GArg>) -> GArg {
     }
 }
 
-pub fn subst_region(r: &Region, map: &HashMap<&Sym, &GArg>) -> Region {
+pub fn subst_region(r: &Region, map: &SubstMap<'_>) -> Region {
     match r {
-        Region::Param(s) => match map.get(s) {
+        Region::Param(s) => match map.get(&s.id) {
             Some(GArg::Region(r)) => r.clone(),
             _ => r.clone(),
         },
@@ -960,9 +980,9 @@ pub fn subst_region(r: &Region, map: &HashMap<&Sym, &GArg>) -> Region {
     }
 }
 
-fn subst_len(l: &Len, map: &HashMap<&Sym, &GArg>) -> Len {
+fn subst_len(l: &Len, map: &SubstMap<'_>) -> Len {
     match l {
-        Len::Param(s) => match map.get(s) {
+        Len::Param(s) => match map.get(&s.id) {
             Some(GArg::Len(l)) => l.clone(),
             _ => l.clone(),
         },
@@ -970,11 +990,11 @@ fn subst_len(l: &Len, map: &HashMap<&Sym, &GArg>) -> Len {
     }
 }
 
-fn subst_row(r: &Row, map: &HashMap<&Sym, &GArg>) -> Row {
+fn subst_row(r: &Row, map: &SubstMap<'_>) -> Row {
     Row { labels: r.labels.iter().map(|(k, t)| (k.clone(), subst(t, map))).collect(), tail: r.tail.clone() }
 }
 
-pub fn subst_effs(r: &EffRow, map: &HashMap<&Sym, &GArg>) -> EffRow {
+pub fn subst_effs(r: &EffRow, map: &SubstMap<'_>) -> EffRow {
     let mut effs: Vec<Eff> = r
         .effs
         .iter()
@@ -986,7 +1006,7 @@ pub fn subst_effs(r: &EffRow, map: &HashMap<&Sym, &GArg>) -> EffRow {
         .collect();
     let mut tail = r.tail.clone();
     if let Tail::Param(s) = &r.tail
-        && let Some(GArg::Row(row)) = map.get(s) {
+        && let Some(GArg::Row(row)) = map.get(&s.id) {
             effs.extend(row.effs.iter().cloned());
             tail = row.tail.clone();
         }

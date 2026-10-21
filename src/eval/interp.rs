@@ -11,8 +11,8 @@ use std::sync::{Arc, Mutex};
 
 use super::value::*;
 use super::world::World;
-use crate::check::env::{Binding, DefKind, FnId, Program};
-use crate::check::types::{Len, Prim, Ty};
+use crate::check::env::{Binding, DefKind, FnId, Program, SubstMap, subst_arg};
+use crate::check::types::{GArg, Len, Prim, Show, Ty};
 use crate::diag::Span;
 use crate::syntax::ast::{self, Expr, ExprKind, Pattern, PatternKind, Stmt, TagArgs, TagPatArgs};
 
@@ -70,7 +70,12 @@ pub struct Lex {
     /// The function whose recorded types apply.
     pub owner: FnId,
     pub module: usize,
+    /// The generic arguments of the running function, by parameter symbol: what a call
+    /// through a bound dispatches on (§3.4).
+    pub tenv: TEnv,
 }
+
+pub type TEnv = Arc<HashMap<u32, GArg>>;
 
 #[derive(Clone)]
 pub enum Handler {
@@ -110,7 +115,7 @@ impl Interp {
             prog,
             world,
             handlers: Vec::new(),
-            lex: Lex { frame: 0, loops: Vec::new(), owner: 0, module: 0 },
+            lex: Lex { frame: 0, loops: Vec::new(), owner: 0, module: 0, tenv: TEnv::default() },
             ids: Arc::new(AtomicU64::new(1)),
             gens: Arc::new(super::generators::Gens::default()),
             scopes: Arc::new(Mutex::new(HashMap::new())),
@@ -153,6 +158,10 @@ impl Interp {
 
     /// Calls a function by id with evaluated arguments.
     pub fn call_fn(&mut self, fid: FnId, args: Vec<Value>) -> R {
+        self.call_fn_with(fid, args, TEnv::default())
+    }
+
+    fn call_fn_with(&mut self, fid: FnId, args: Vec<Value>, tenv: TEnv) -> R {
         let info = &self.prog.fns[fid];
         let decl = info.decl;
         let item = &self.prog.modules[decl.module].ast.items[decl.item];
@@ -169,7 +178,7 @@ impl Interp {
             define(&env, &p.name.name, a);
         }
         let frame = self.fresh_id();
-        let saved = std::mem::replace(&mut self.lex, Lex { frame, loops: Vec::new(), owner: fid, module: decl.module });
+        let saved = std::mem::replace(&mut self.lex, Lex { frame, loops: Vec::new(), owner: fid, module: decl.module, tenv });
         let r = self.block(&body, &env);
         self.lex = saved;
         match r {
@@ -191,7 +200,7 @@ impl Interp {
                     define(&env, p, a);
                 }
                 let frame = self.fresh_id();
-                let saved = std::mem::replace(&mut self.lex, Lex { frame, loops: Vec::new(), owner: c.owner, module: c.module });
+                let saved = std::mem::replace(&mut self.lex, Lex { frame, loops: Vec::new(), owner: c.owner, module: c.module, tenv: c.tenv.clone() });
                 let r = self.expr(&c.body, &env);
                 self.lex = saved;
                 match r {
@@ -578,6 +587,7 @@ impl Interp {
                     env: captured,
                     module: self.lex.module,
                     owner: self.lex.owner,
+                    tenv: self.lex.tenv.clone(),
                 })))
             }
             ExprKind::Block(b) => self.block(b, env),
@@ -785,10 +795,42 @@ impl Interp {
 
     /// Calls `fid`, giving builtins the call's span (for its recorded result type).
     fn call_fn_at(&mut self, fid: FnId, vals: Vec<Value>, span: Span) -> R {
+        let (fid, tenv) = self.dispatch(fid, self.callee_tenv(fid, span))?;
         let saved = self.call_span.replace(span);
-        let r = self.call_fn(fid, vals);
+        let r = self.call_fn_with(fid, vals, tenv);
         self.call_span = saved;
         r
+    }
+
+    /// The generic arguments `fid` is called with at `span`, in terms of the caller's.
+    fn callee_tenv(&self, fid: FnId, span: Span) -> TEnv {
+        let Some(args) = self.prog.typed.get(&self.lex.owner).and_then(|t| t.targs.get(&span)) else { return TEnv::default() };
+        let outer: SubstMap<'_> = self.lex.tenv.iter().map(|(k, v)| (*k, v)).collect();
+        let params = &self.prog.fns[fid].scheme.tparams;
+        Arc::new(params.iter().zip(args).map(|(g, a)| (g.sym.id, subst_arg(a, &outer))).collect())
+    }
+
+    /// A call through a bound runs the method of the impl for the type `Self` stands for.
+    fn dispatch(&self, fid: FnId, tenv: TEnv) -> Result<(FnId, TEnv), Ctl> {
+        let info = &self.prog.fns[fid];
+        let Some(iface) = info.iface else { return Ok((fid, tenv)) };
+        let tps = &info.scheme.tparams;
+        let Some(GArg::Ty(self_ty)) = tenv.get(&tps[0].sym.id) else { return Err(panic(format!("no type for `Self` in `{}`", info.name))) };
+        let (imp, binds) = self.prog.resolve_impl(iface, self_ty).ok_or_else(|| {
+            panic(format!("no impl of `{}` for `{}`", self.prog.defs[iface].name, Show(self_ty, &*self.prog)))
+        })?;
+        let m = self.prog.impl_method(imp, &info.name).ok_or_else(|| panic(format!("impl has no `{}`", info.name)))?;
+        let mut env: HashMap<u32, GArg> = binds;
+        // The method's own parameters follow the impl's; the call gave them after `Self` and the
+        // interface's.
+        let skip = 1 + self.prog.defs[iface].params.len();
+        let own = &self.prog.fns[m].scheme.tparams[self.prog.impls[imp].params.len()..];
+        for (g, v) in own.iter().zip(&tps[skip..]) {
+            if let Some(a) = tenv.get(&v.sym.id) {
+                env.insert(g.sym.id, a.clone());
+            }
+        }
+        Ok((m, Arc::new(env)))
     }
 
     /// Evaluates an argument for a parameter: a place for a `mut` borrow, a value otherwise.

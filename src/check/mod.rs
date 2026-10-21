@@ -2,6 +2,7 @@
 
 pub mod env;
 pub mod expr;
+pub mod impls;
 pub mod own;
 pub mod subst;
 pub mod traits;

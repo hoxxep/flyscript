@@ -7,3 +7,8 @@ impl<T> Soa<T> {
   export function push(self: mut Self, v: T): void;
   export function len(self: readonly Self): usize;
 }
+
+import { ParSplit } from "std/par";
+impl<T> ParSplit for Soa<T> {
+  function len(self: readonly Self): usize;
+}

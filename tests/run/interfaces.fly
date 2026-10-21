@@ -1,0 +1,25 @@
+// expect: 16
+// Interfaces as bounds (§3.4): methods and static functions called through a bound, and a
+// generic impl whose own bound dispatches again at run time.
+import { println } from "std/io";
+
+interface Size { function size(self: readonly Self): u64; function zero(): Self; }
+struct A { x: u64; }
+impl Size for A { function size(self: readonly Self): u64 { self.x } function zero(): A { A { x: 0 } } }
+impl Size for u64 { function size(self: readonly Self): u64 { self + 1 } function zero(): u64 { 0 } }
+impl<T extends Size> Size for Vec<T> {
+  function size(self: readonly Self): u64 {
+    let n: u64 = 0;
+    for (const x of self) { n += x.size(); }
+    n
+  }
+  function zero(): Vec<T> { let v = Vec.new(); v.push(T.zero()); v }
+}
+function total<T extends Size>(v: readonly T): u64 { v.size() * 2 }
+export function main(): void uses Io {
+  let v = Vec.new();
+  v.push(A { x: 3 });
+  v.push(A { x: 4 });
+  const z: Vec<u64> = Vec.zero();
+  println(`${total(v) + total(z)}`);
+}

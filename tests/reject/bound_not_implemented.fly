@@ -1,0 +1,7 @@
+// error: `B` does not implement `Size`
+interface Size { function size(self: readonly Self): u64; }
+struct A { x: u64; }
+struct B { y: u64; }
+impl Size for A { function size(self: readonly Self): u64 { self.x } }
+function twice<T extends Size>(v: readonly T): u64 { v.size() * 2 }
+export function main(): u64 { twice(A { x: 1 }) + twice(B { y: 2 }) }

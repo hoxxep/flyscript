@@ -39,7 +39,8 @@ pub struct Closure {
     pub env: Vec<(String, Shared)>,
     pub module: usize,
     /// The function whose body the closure appears in, for its recorded types.
-    pub owner: usize,
+    pub owner: usize,    /// The generic arguments of that function's frame.
+    pub tenv: super::interp::TEnv,
 }
 
 #[derive(Clone)]

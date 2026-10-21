@@ -52,7 +52,15 @@ pub struct Checker<'p> {
     /// is checked once types are final (§4.1).
     copies_out: Vec<(Ty, Span)>,
     pending_copy: Vec<Ty>,
+    /// The bounds of the generic parameters in scope, by symbol.
+    bounds: HashMap<u32, Vec<Ty>>,
+    /// Each call's generic arguments, and the bounds they must satisfy, checked once types are
+    /// final.
+    pending_targs: Vec<PendingCall>,
 }
+
+/// A call's span, its generic arguments, and each (argument, bound) pair it must satisfy.
+type PendingCall = (Span, Vec<GArg>, Vec<(Ty, Ty)>);
 
 /// Checks the body of `fid`, if it has one and has not been checked.
 pub fn check_fn(p: &mut Program, fid: FnId) {
@@ -90,6 +98,8 @@ pub fn check_fn(p: &mut Program, fid: FnId) {
         pending_regions: Vec::new(),
         copies_out: Vec::new(),
         pending_copy: Vec::new(),
+        bounds: scheme.tparams.iter().map(|g| (g.sym.id, g.bounds.clone())).collect(),
+        pending_targs: Vec::new(),
     };
     let inferring = scheme.effects.is_none();
     c.allowed = match &scheme.effects {
@@ -117,6 +127,18 @@ pub fn check_fn(p: &mut Program, fid: FnId) {
             let shown = format!("{}", Show(&z, &*c.p));
             c.p.error(module, span, format!("cannot move a `{shown}` out of a borrow; it is not `Copy`"));
         }
+    }
+    for (span, args, bounds) in std::mem::take(&mut c.pending_targs) {
+        for (t, b) in bounds {
+            let (t, b) = (c.s.zonk(&t), c.s.zonk(&b));
+            let assumed = |id: u32| c.bounds.get(&id).cloned().unwrap_or_default();
+            if !c.p.satisfies(&t, &b, &assumed) {
+                let (ts, bs) = (format!("{}", Show(&t, &*c.p)), format!("{}", Show(&b, &*c.p)));
+                c.p.error(module, span, format!("`{ts}` does not implement `{bs}`"));
+            }
+        }
+        let args = args.iter().map(|a| c.s.zonk_arg(a)).collect();
+        c.typed.targs.insert(span, args);
     }
     for (name, ty) in &scheme.params {
         c.typed.params.push((name.clone(), ty.clone()));
@@ -476,7 +498,7 @@ impl<'p> Checker<'p> {
             args.push(a.clone());
             map.insert(g.sym.clone(), a);
         }
-        let refs: HashMap<&Sym, &GArg> = map.iter().collect();
+        let refs: SubstMap<'_> = map.iter().map(|(k, v)| (k.id, v)).collect();
         let go = |t: &Ty| inst_record_tails(&subst(t, &refs), &record_tails);
         let params = scheme.params.iter().map(|(n, t)| (n.clone(), go(t))).collect();
         let ret = go(&scheme.ret);
@@ -1060,10 +1082,15 @@ impl<'p> Checker<'p> {
             }
             ExprKind::Field { target, name } => {
                 if let ExprKind::Ident(tname) = &target.kind
-                    && self.local(tname).is_none()
-                        && let Some(Binding::Def(d)) = self.p.lookup(self.module, tname) {
+                    && self.local(tname).is_none() {
+                        if let Some((sym, _)) = self.scope.params.get(tname).cloned() {
+                            let site = CallSite { explicit: &explicit, args, expected, span };
+                            return self.call_on_type(&Ty::Param(sym), &name.name, site);
+                        }
+                        if let Some(Binding::Def(d)) = self.p.lookup(self.module, tname) {
                             return self.call_static(d, &name.name, &explicit, args, expected, span);
                         }
+                    }
                 let recv = self.expr(target, None);
                 return self.call_method(&recv, target.span, &name.name, CallSite { explicit: &explicit, args, expected, span });
             }
@@ -1096,14 +1123,37 @@ impl<'p> Checker<'p> {
     }
 
     fn call_fn(&mut self, fid: FnId, recv: Option<(Ty, Span)>, site: CallSite<'_>) -> Ty {
+        self.call_fn_fixed(fid, &[], recv, site)
+    }
+
+    /// Calls `fid` with its leading generic arguments fixed: `Self` and the interface's
+    /// arguments, for a method called through a bound.
+    fn call_fn_fixed(&mut self, fid: FnId, fixed: &[GArg], recv: Option<(Ty, Span)>, site: CallSite<'_>) -> Ty {
         let CallSite { explicit, args, expected, span } = site;
         self.typed.calls.insert(span, fid);
         let scheme = self.p.fns[fid].scheme.clone();
         let effects = fn_effects(self.p, fid, self.module, span);
         let scheme = Scheme { effects: Some(effects), ..scheme };
+        let inst = self.instantiate(&scheme, &[], true);
+        for (a, f) in inst.args.iter().zip(fixed) {
+            if let (GArg::Ty(a), GArg::Ty(f)) = (a, f) {
+                let _ = self.s.unify(a, f);
+            }
+        }
+        let bounds: Vec<(Ty, Ty)> = scheme
+            .tparams
+            .iter()
+            .zip(&inst.args)
+            .skip(fixed.len())
+            .filter_map(|(g, a)| match a {
+                GArg::Ty(t) => Some(g.bounds.iter().map(|b| (t.clone(), subst_params(b, &scheme.tparams, &inst.args))).collect::<Vec<_>>()),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        self.pending_targs.push((span, inst.args.clone(), bounds));
         // Explicit type arguments apply to the function's own parameters, or to its impl's when
         // it has none (`HashMap.new<String, u64>()`).
-        let inst = self.instantiate(&scheme, &[], true);
         let own_types: Vec<usize> = scheme.tparams.iter().enumerate().filter(|(_, g)| g.kind == PKind::Type).map(|(i, _)| i).collect();
         if !explicit.is_empty() {
             let impl_params = self.p.fns[fid].impl_id.map_or(0, |i| self.p.impls[i].params.len());
@@ -1163,11 +1213,36 @@ impl<'p> Checker<'p> {
         match candidates.first() {
             Some(fid) => self.call_fn(*fid, None, CallSite { explicit, args, expected, span }),
             None => {
-                let tname = self.p.defs[def].name.clone();
-                self.err(span, format!("`{tname}` has no function `{name}`"));
-                Ty::Error
+                let args_ty = self.p.defs[def].params.iter().map(|_| GArg::Ty(self.s.fresh())).collect::<Vec<_>>();
+                let ty = self.normalize(&Ty::Named(def, self.p.defs[def].params.iter().zip(args_ty).map(|(g, a)| match g.kind {
+                    PKind::Type => a,
+                    _ => super::impls::param_arg(g),
+                }).collect()));
+                self.call_on_type(&ty, name, CallSite { explicit, args, expected, span })
             }
         }
+    }
+
+    /// `T.f(…)` for a function of an interface `T` implements, without `self` (`User.decode(p)`).
+    fn call_on_type(&mut self, ty: &Ty, name: &str, site: CallSite<'_>) -> Ty {
+        if let Ty::Param(sym) = ty
+            && let Some(bounds) = self.bounds.get(&sym.id).cloned()
+                && let Some((fid, Ty::Named(_, args))) = self.p.bound_method(&bounds, name) {
+                    let mut fixed = vec![GArg::Ty(ty.clone())];
+                    fixed.extend(args);
+                    return self.call_fn_fixed(fid, &fixed, None, site);
+                }
+        let ifaces: Vec<DefId> = self.p.iface_fns.keys().filter(|(_, n)| n == name).map(|(d, _)| *d).collect();
+        for d in ifaces {
+            let concrete = self.s.zonk(ty);
+            if let Some((imp, _)) = self.p.resolve_impl(d, &concrete)
+                && let Some(fid) = self.p.impl_method(imp, name) {
+                    return self.call_fn(fid, None, site);
+                }
+        }
+        let shown = self.show(ty);
+        self.err(site.span, format!("`{shown}` has no function `{name}`"));
+        Ty::Error
     }
 
     /// An effect operation `Eff.op(…)`: performs `Eff` with the arguments the call determines.
@@ -1198,6 +1273,22 @@ impl<'p> Checker<'p> {
     }
 
     /// The method `name` whose receiver `recv` can be lent to, if any. Changes nothing.
+    /// A method called through a bound of the receiver's type parameter: the interface method
+    /// and the fixed arguments (`Self`, then the bound's).
+    fn bound_method(&mut self, recv: &Ty, name: &str) -> Option<(FnId, Vec<GArg>)> {
+        let mut t = self.s.resolve(recv);
+        while let Ty::Borrow(_, inner) = t {
+            t = self.s.resolve(&inner);
+        }
+        let Ty::Param(sym) = &t else { return None };
+        let bounds = self.bounds.get(&sym.id)?.clone();
+        let (fid, via) = self.p.bound_method(&bounds, name)?;
+        let Ty::Named(_, args) = via else { return None };
+        let mut fixed = vec![GArg::Ty(t.clone())];
+        fixed.extend(args);
+        Some((fid, fixed))
+    }
+
     fn find_method(&mut self, recv: &Ty, name: &str) -> Option<FnId> {
         let candidates: Vec<FnId> = (0..self.p.fns.len())
             .filter(|f| self.p.fns[*f].name == name && self.p.fns[*f].impl_id.is_some() && self.has_self(*f))
@@ -1218,6 +1309,9 @@ impl<'p> Checker<'p> {
 
     fn call_method(&mut self, recv: &Ty, rspan: Span, name: &str, site: CallSite<'_>) -> Ty {
         let span = site.span;
+        if let Some((fid, fixed)) = self.bound_method(recv, name) {
+            return self.call_fn_fixed(fid, &fixed, Some((recv.clone(), rspan)), site);
+        }
         if let Some(fid) = self.find_method(recv, name) {
             return self.call_fn(fid, Some((recv.clone(), rspan)), site);
         }
