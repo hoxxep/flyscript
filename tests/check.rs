@@ -19,6 +19,9 @@ fn files(dir: &str) -> Vec<PathBuf> {
 #[test]
 fn examples_and_acceptance_programs_check() {
     for path in files("examples").into_iter().chain(files("tests/accept")) {
+        if path.is_dir() {
+            continue;
+        }
         let checked = check_files(std::slice::from_ref(&path));
         assert!(checked.errors.is_empty(), "{} should check:\n{}", path.display(), checked.render().join("\n\n"));
     }

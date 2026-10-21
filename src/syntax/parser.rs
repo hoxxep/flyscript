@@ -237,10 +237,30 @@ impl<'a> Parser<'a> {
             Tok::Kw(Kw::Import) if !exported => self.import()?,
             Tok::Punct("@") => {
                 let layout = self.layout()?;
-                ItemKind::Struct(self.struct_decl(Some(layout))?)
+                let view = self.eat_word("view");
+                ItemKind::Struct(self.struct_decl(Some(layout), view)?)
             }
-            Tok::Kw(Kw::Struct) => ItemKind::Struct(self.struct_decl(None)?),
+            Tok::Ident(w) if w == "view" && matches!(self.tok_at(1), Tok::Kw(Kw::Struct | Kw::Enum)) => {
+                self.bump();
+                if self.at_kw(Kw::Struct) {
+                    ItemKind::Struct(self.struct_decl(None, true)?)
+                } else {
+                    let mut e = self.enum_decl()?;
+                    e.view = true;
+                    ItemKind::Enum(e)
+                }
+            }
+            Tok::Kw(Kw::Struct) => ItemKind::Struct(self.struct_decl(None, false)?),
             Tok::Kw(Kw::Enum) => ItemKind::Enum(self.enum_decl()?),
+            Tok::Kw(Kw::Const) => {
+                self.bump();
+                let name = self.ident()?;
+                let ty = if self.eat(":") { Some(self.ty()?) } else { None };
+                self.expect("=")?;
+                let value = self.expr()?;
+                self.expect(";")?;
+                ItemKind::Const { name, ty, value }
+            }
             Tok::Kw(Kw::Interface) => ItemKind::Interface(self.interface_decl()?),
             Tok::Kw(Kw::Impl) => ItemKind::Impl(self.impl_decl()?),
             Tok::Kw(Kw::Type) => ItemKind::TypeAlias(self.type_alias()?),
@@ -295,12 +315,12 @@ impl<'a> Parser<'a> {
         Ok(kind)
     }
 
-    fn struct_decl(&mut self, layout: Option<Ident>) -> PResult<StructDecl> {
+    fn struct_decl(&mut self, layout: Option<Ident>, view: bool) -> PResult<StructDecl> {
         self.expect_kw(Kw::Struct)?;
         let name = self.ident()?;
         let params = self.type_params()?;
         let fields = if self.declarations && self.eat(";") { None } else { Some(self.field_list()?) };
-        Ok(StructDecl { layout, name, params, fields })
+        Ok(StructDecl { layout, view, name, params, fields })
     }
 
     /// `{ name: Type; … }` with `;` or `,` separators.
@@ -308,10 +328,14 @@ impl<'a> Parser<'a> {
         self.expect("{")?;
         let mut fields = Vec::new();
         while !self.at("}") {
+            let private = self.at_word("private") && matches!(self.tok_at(1), Tok::Ident(_));
+            if private {
+                self.bump();
+            }
             let name = self.ident()?;
             self.expect(":")?;
             let ty = self.ty()?;
-            fields.push(Field { name, ty });
+            fields.push(Field { name, ty, private });
             if !self.eat(";") && !self.eat(",") {
                 break;
             }
@@ -333,7 +357,7 @@ impl<'a> Parser<'a> {
             }
         }
         self.expect("}")?;
-        Ok(EnumDecl { name, params, tags })
+        Ok(EnumDecl { view: false, name, params, tags })
     }
 
     fn tag_decl(&mut self) -> PResult<TagDecl> {
@@ -364,6 +388,7 @@ impl<'a> Parser<'a> {
         self.expect_kw(Kw::Interface)?;
         let name = self.ident()?;
         let params = self.type_params()?;
+        let extends = if self.eat_kw(Kw::Extends) { self.bounds()? } else { Vec::new() };
         self.expect("{")?;
         let mut members = Vec::new();
         while !self.at("}") {
@@ -377,7 +402,7 @@ impl<'a> Parser<'a> {
             self.expect(";")?;
         }
         self.expect("}")?;
-        Ok(InterfaceDecl { name, params, members })
+        Ok(InterfaceDecl { name, params, extends, members })
     }
 
     fn impl_decl(&mut self) -> PResult<ImplDecl> {
@@ -468,7 +493,15 @@ impl<'a> Parser<'a> {
 
     fn ret(&mut self) -> PResult<Return> {
         let ty = self.ty()?;
-        let from = if self.eat_word("from") { Some(self.ident()?) } else { None };
+        let mut from = Vec::new();
+        if self.eat_word("from") {
+            from.push(self.ident()?);
+            // More sources, unless the comma starts the next parameter (`, name:`).
+            while self.at(",") && matches!(self.tok_at(1), Tok::Ident(_)) && !matches!(self.tok_at(2), Tok::Punct(":")) {
+                self.bump();
+                from.push(self.ident()?);
+            }
+        }
         Ok(Return { ty, from })
     }
 
@@ -517,8 +550,9 @@ impl<'a> Parser<'a> {
             } else if self.at_word("row") && matches!(self.tok_at(1), Tok::Ident(_)) {
                 self.bump();
                 let name = self.ident()?;
+                let bounds = if self.eat_kw(Kw::Extends) { self.bounds()? } else { Vec::new() };
                 let default = if self.eat("=") { Some(self.ty()?) } else { None };
-                TypeParam::Row { name, default }
+                TypeParam::Row { name, bounds, default }
             } else if self.eat_kw(Kw::Comptime) {
                 let name = self.ident()?;
                 self.expect(":")?;
@@ -675,7 +709,7 @@ impl<'a> Parser<'a> {
                     }
                     let name = self.ident()?;
                     self.expect(":")?;
-                    fields.push(Field { name, ty: self.ty()? });
+                    fields.push(Field { name, ty: self.ty()?, private: false });
                     if !self.eat(";") && !self.eat(",") {
                         break;
                     }

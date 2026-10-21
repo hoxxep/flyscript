@@ -1,0 +1,16 @@
+// error: `v` cannot be changed here
+effect Tick { tick(): void; }
+export function trigger(): usize {
+  let v = Vec.new<i32>();
+  handle {
+    Tick.tick();
+    v.push(1);
+    0
+  } with Tick {
+    tick() resumes k => {
+      const seen: readonly i32[] = v;   // a borrow of `v` …
+      const r = k();                    // … live across resuming, which changes `v`
+      r + seen.len()
+    }
+  }
+}

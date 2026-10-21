@@ -1,6 +1,6 @@
 # Flyscript
 
-**Language specification, version 0.18**
+**Language specification, version 0.19**
 
 *Affine values, one row calculus, handlers for everything, and `comptime`: Church on the outside, Turing on the inside.*
 
@@ -18,19 +18,21 @@ The whole language rests on five laws. Every rule in this document is a conseque
 4. **Handlers for everything.** Errors, I/O, iteration and region memory are ordinary effects with ordinary handlers. A handler may hold the rest of a computation as a one-shot continuation value; generators and tasks are both built from that one primitive.
 5. **`comptime` is the metalanguage.** Generics, reflection, layout transformation and derived interfaces are ordinary Flyscript code run by the compiler.
 
-### 0.1 Changes from 0.17
+### 0.1 Changes from 0.18
 
-0.18 completes the ownership rules, prompted by an independent review of the ownership checker's design (docs/reviews/2026-10-21-m3-ownership-checker-design.md). The review showed that 0.17 let a generator or a continuation hide a borrow inside a type that looked borrow-free, and let a task perform effects whose handlers live in another fiber.
+0.19 follows an independent holistic review of 0.18 (docs/reviews/2026-10-21-holistic-review-of-0-18.md), which judged the core sound in its thesis and found two soundness holes and a set of ergonomic walls a TypeScript programmer would hit in the first week. Every change removes friction or a special case.
 
 | Change | Why |
 | :--- | :--- |
-| A call's result carries the borrows of its arguments unless its type cannot hold one (§4.2) | `generate(() => v.each())` has type `Gen<i32, []>`, which mentions no borrow, yet holds one of `v` |
-| A value's class follows the borrows it holds, not only its type (§4.2) | the same: a `Gen` or `Cont` holding a borrow must not be returned or stored |
-| Passing a `mut` binding reborrows it; `mut T` is not `Copy` (§4.1) | otherwise `value(mut sc); sc.eat(b',')` either moves `sc` or aliases it |
-| Borrows are tracked per value through patterns and assignments, with liveness over loops (§4.1) | a pattern variable can outlive the last mention of the value it came from |
-| A forked task performs only `Io` and failures its scope rethrows (§6.1) | a task with no captures could otherwise perform `Region<R>` of its parent's region, or a user effect whose handler is in another fiber |
-| `defer` holds its borrows to the end of its block; no partial moves out of a `Drop` type (§5.6) | `defer v.clear(); return v[0..1]` returned a dangling slice |
-| Region data is checked at `alloc` (§4.6) | the rule existed but had no checking point |
+| `Io.scope`'s body may not perform `Region` for regions outside it, so every `Ref` is `Send` (§4.4, §6.1) | a task could iterate a `RegionList` while the parent pushed to it; and the "no mutable slot" exception to `Send` disappears |
+| `k.resume()` uses every outer binding that the handled body or any arm uses (§5.3) | a re-entered arm could take a second `mut` borrow while the first was live across `resume` |
+| `from` lists parameters; without it, a method's result carries its receiver's borrows and a function's carries its borrowed arguments' (§4.2) | `counts.getMut(key)` no longer locks `key`, and `longer(a, b)` can return either |
+| A struct or enum with a borrow field is declared `view` (§3.3) | `struct User { name: str }` was legal until it was stored, 200 lines later |
+| A closure is `once` only if its body consumes a capture; a closure that escapes captures by move (§4.3) | a reusable callback owning a `String` was impossible to write |
+| `RegionList` and `Cell` are region handles themselves (§4.6) | removes `Ref<RegionList<…>>` and the `Ref<R, Self>` receiver |
+| Iteration chains: `xs.iter().zip(ys.iter()).take(n)` (§5.5) | iterator adaptors no longer need thunks |
+| `Fail.map` wraps one call's failures (§5.4) | tags from different libraries can collide; wrapping gives them provenance |
+| Module-level `const`; `interface I extends J`; fields public unless `private` (§2.3, §3.3, §3.4) | each is needed in the first week of a real program |
 
 ---
 
@@ -65,10 +67,11 @@ The whole language rests on five laws. Every rule in this document is a conseque
 | `{ x: 1, y: 2 }` | same | A structural record. Functions accept extra fields through a row variable, not by subtyping. |
 | `{ kind: "a", … } \| { kind: "b", … }` | `#A(…) \| #B { … }` | Tag unions are first-class; no discriminant field. |
 | `[A, B]` | same | Tuples. |
-| `interface` + `class … implements` | `interface` + `struct` + `impl` | Data and behaviour are declared separately. Interfaces are nominal. |
+| `interface` + `class … implements` | `interface` + `struct` + `impl` | Data and behaviour are declared separately. Interfaces are nominal and may extend others. Fields are public unless `private`. |
 | `T \| null \| undefined` | `Option<T>` = `#Some(T) \| #None` | There is no null. |
 | `throw` / `try` / `catch` | same | Typed: a function's failures are part of its type. |
 | `function*` / `yield` / `for…of` | `yield` / `for…of` | A generator is any function that uses `Yield<T>`; `for…of` also accepts any `Iterable<T>`. |
+| `xs.map(f).filter(p)` | `xs.iter().map(f).filter(p)` | Iteration chains are lazy generators (§5.5). |
 | `.d.ts` declaration files | `.d.fly` declaration files | Signatures without bodies, used for the standard library. |
 | `async` / `await` | (nothing) | I/O is an effect; every function is "direct style". |
 | `import` / `export` | same | ES modules; the import graph must be acyclic. |
@@ -89,11 +92,12 @@ The whole language rests on five laws. Every rule in this document is a conseque
 Module      = { Import | ["export"] Decl } ;
 Import      = "import" "{" Ident { "," Ident } "}" "from" String ";" ;
 
-Decl        = Struct | Enum | Interface | Impl | TypeAlias | Effect | Function | Extern ;
-Struct      = [ Layout ] "struct" Ident [ TypeParams ] "{" { Ident ":" Type ";" } "}" ;
-Enum        = "enum" Ident [ TypeParams ] "{" Tag { "," Tag } [ "," ] "}" ;
+Decl        = Struct | Enum | Interface | Impl | TypeAlias | Effect | Function | Extern | Const ;
+Struct      = [ Layout ] [ "view" ] "struct" Ident [ TypeParams ] "{" { [ "private" ] Ident ":" Type ";" } "}" ;
+Enum        = [ "view" ] "enum" Ident [ TypeParams ] "{" Tag { "," Tag } [ "," ] "}" ;
 Layout      = "@layout" "(" ( "c" | "packed" ) ")" ;
-Interface   = "interface" Ident [ TypeParams ] "{" { ( Sig | "type" Ident [ "extends" Bounds ] ) ";" } "}" ;
+Const       = "const" Ident [ ":" Type ] "=" Expr ";" ;      (* evaluated at comptime *)
+Interface   = "interface" Ident [ TypeParams ] [ "extends" Bounds ] "{" { ( Sig | "type" Ident [ "extends" Bounds ] ) ";" } "}" ;
 Impl        = "impl" [ TypeParams ] Type [ "for" Type ] "{" { ["export"] Function } "}" ;
 TypeAlias   = "type" Ident [ TypeParams ] "=" Type ";" ;
 Effect      = "effect" Ident [ TypeParams ] "{" { Op ";" } "}" ;
@@ -104,11 +108,11 @@ Extern      = "extern" "\"C\"" Sig ";" ;
 Sig         = [ "comptime" ] "function" Ident [ TypeParams ] "(" [ Params ] ")" ":" Return [ Uses ] ;
 Params      = Param { "," Param } [ "," ] ;
 Param       = [ "comptime" ] Ident ":" [ "mut" | "readonly" ] Type ;
-Return      = [ "mut" | "readonly" ] Type [ "from" Ident ] ;
+Return      = [ "mut" | "readonly" ] Type [ "from" Ident { "," Ident } ] ;
 Uses        = "uses" Row ;
 
 TypeParams  = "<" TypeParam { "," TypeParam } ">" ;
-TypeParam   = "region" Ident | "row" Ident [ "=" Type ] | "comptime" Ident ":" Type
+TypeParam   = "region" Ident | "row" Ident [ "extends" Bounds ] [ "=" Type ] | "comptime" Ident ":" Type
             | Ident [ "extends" Bounds ] [ "=" Type ] ;
 Bounds      = Type { "&" Type } ;
 
@@ -145,7 +149,7 @@ Three rules settle the grammar's ambiguities, all borrowed from TypeScript:
 
 - **Braces.** A `{` in expression position begins a record literal. A block appears only as the body of a block-like construct, after `=>` in a lambda or match arm, or at the start of a statement.
 - **Block-like statements.** A block-like expression at the start of a statement needs no `;` and is not continued by operators: `if (c) { … } [a, b]` is two statements. As the last item of a block it is the block's value.
-- **Contextual words.** `from`, `of`, `with`, `resumes` and `row` are keywords only where the grammar expects them, and any reserved word may be used as a member name (`Yield.yield`, `{ default: 1 }`).
+- **Contextual words.** `from`, `of`, `with`, `resumes`, `row`, `view` and `private` are keywords only where the grammar expects them, and any reserved word may be used as a member name (`Yield.yield`, `{ default: 1 }`).
 
 ---
 
@@ -192,7 +196,9 @@ type Result<T, E> = #Ok(T) | #Err(E);
 
 ### 3.3 Nominal types
 
-`struct` names a record and `enum` names a closed tag union. A nominal type is a *new* type: it has identity (a `Meters` is not a `Seconds`), may keep its fields private to its module, may implement `Drop`, may carry `@layout(c)` or `@layout(packed)`, and may be recursive. Construction and matching are identical to the structural forms.
+`struct` names a record and `enum` names a closed tag union. A nominal type is a *new* type: it has identity (a `Meters` is not a `Seconds`), may implement `Drop`, may carry `@layout(c)` or `@layout(packed)`, and may be recursive. Construction and matching are identical to the structural forms. Fields are public, as in TypeScript, unless marked `private`, which limits them to the declaring module.
+
+A struct or enum that holds a borrow (§4.2) must say so: `view struct Scanner { src: readonly u8[]; pos: usize; }`. A view is a temporary lens on someone else's data; it can be a local or a parameter but never stored or returned untied. Without `view`, a borrow field is an error that suggests the owned alternative (`String` for `str`, `Vec<T>` for `T[]`), so the choice is made where the type is declared, not discovered where it is first stored.
 
 ```ts
 struct Point { x: f64; y: f64; }
@@ -203,7 +209,7 @@ enum Expr { #Num(f64), #Add(Box<Expr>, Box<Expr>), #Neg(Box<Expr>) }
 
 ### 3.4 Interfaces and `impl`
 
-Interfaces are nominal, may declare associated types, and may be generic in an effect row:
+Interfaces are nominal, may extend other interfaces (`interface Ord extends Eq`), may declare associated types, and may be generic in an effect row:
 
 ```ts
 interface Hash<row E = []> {
@@ -217,7 +223,7 @@ interface Collection {
 
 Declarations hold data only. Behaviour lives in `impl T { … }` (inherent methods) and `impl I for T { … }` (interface implementations). An `impl I for T` must appear in the module that declares `I` or the module that declares `T`. Structural and built-in types (records, tag unions, slices, `str`) belong to no module, so only the standard library gives them inherent methods (`Option.cloned`, `str.splitWhitespace`); other code extends them through interfaces. Calls dispatch statically through `<T extends I>`; `dyn I` is an explicit fat pointer for dynamic dispatch.
 
-A method's receiver is `self: Self` (by move), `self: readonly Self`, `self: mut Self`, or, for types stored in regions, `self: Ref<R, Self>`. A function in an `impl` without `self` is called on the type: `RegionList.new()`.
+A method's receiver is a first parameter named `self`: `self: Self` (by move), `self: readonly Self` or `self: mut Self`. A function in an `impl` without `self` is called on the type: `RegionList.new()`.
 
 ### 3.5 Derived interfaces
 
@@ -269,40 +275,39 @@ match (counts.getMut(word)) {
 Every type has a *class*, 1 or 2.
 
 - `readonly T`, `mut T`, `str` and `T[]` are class 2.
-- Every other type takes the maximum class of its components: fields, payloads and type arguments, structural or nominal alike. `Option<mut u64>` is class 2; so is `struct Scanner { src: readonly u8[]; pos: usize; }`.
+- Every other type takes the maximum class of its components: fields, payloads and type arguments, structural or nominal alike. `Option<mut u64>` is class 2; so is `view struct Scanner { src: readonly u8[]; pos: usize; }`. A region reference `Ref<R, T>` is class 1 whatever it points to: what it points at lives in the region, not on loan.
 
 Some types can hold a borrow without showing it: closures, continuations (`Cont`, §5.3), anything built from them (`Gen`), and type parameters. A value of such a type is class 2 when it actually holds a borrow, so a closure capturing a `readonly` slice, or a generator iterating one, is class 2 although its type's arguments are all class 1.
 
 A class-2 value may be a parameter, a local, or a return value tied to a parameter. It may not be stored in a class-1 value, captured by an escaping closure, sent to another task, or returned untied. That is the only restriction, and it is what replaces lifetime parameters.
 
-**Results carry their arguments' borrows.** The result of a call holds every borrow its arguments hold — including borrows captured by closure arguments — unless the result's type cannot hold a borrow at all (it is class 1 and contains no closure, continuation or type parameter). So `v.len()` holds nothing, while `generate(() => v.each())` holds the borrow of `v` for as long as the generator lives.
-
-**Tied returns.** A function that returns a class-2 value and takes exactly one class-2 parameter returns a view of that parameter. With several, the return names its source, and the result then carries only that argument's borrows:
+**Results carry their sources' borrows.** A call's result can hold the borrows of its *sources*: the parameters named in its `from` clause; without one, the receiver for a method and every borrowed argument for a free function. Arguments whose types can hide a borrow — closures, generators, type parameters — are always sources. A result whose type cannot hold a borrow at all (class 1, with no closure, continuation or type parameter once instantiated) holds nothing. So `v.len()` holds nothing; `counts.getMut(key)` holds the borrow of `counts` but not of `key`; and `generate(() => v.each())` holds the borrow of `v` for as long as the generator lives.
 
 ```ts
-function longer(a: str, b: str, preferA: bool): str from a { … }
+function longer(a: str, b: str): str { if (a.len() >= b.len()) { a } else { b } }   // borrows a and b
+function prefix(s: str, sep: str): str from s { … }                               // borrows only s
 ```
 
-The body is checked against the declaration: everything the returned value borrows must come from the named parameter, never from a local.
+The body is checked against the same rule: everything the returned value borrows must come from a source, never from a local.
 
 ### 4.3 Closures
 
-The compiler infers each closure's mode from what it captures:
+A closure captures each binding as its body needs it, by reference: a read takes a `readonly` borrow, a change a `mut` borrow. A closure that *escapes* — returned, stored in a first-class value, or handed to a task — instead takes ownership of what it captures, by move, so it holds no borrows. Its mode follows from what its body does when called:
 
-| Type | Captures | Callable |
+| Type | Body | Callable |
 | :--- | :--- | :--- |
-| `(A) => B` | `Copy` values and `readonly` borrows | any number of times, concurrently |
-| `mut (A) => B` | at least one `mut` borrow | many times, one caller at a time |
-| `once (A) => B` | at least one moved value | at most once |
+| `(A) => B` | only reads its captures | any number of times, concurrently |
+| `mut (A) => B` | changes a capture, or calls a captured `mut` closure | many times, one caller at a time |
+| `once (A) => B` | consumes a capture (moves it out), or calls a captured `once` closure | at most once |
 
-A closure that captures any class-2 value is itself class 2: it can be passed down but not returned or stored. An escaping closure captures only by move. A closure that calls a captured `mut` closure is itself `mut`, and one that calls a captured `once` closure is itself `once`. A closure holds the borrows of its captures for as long as it lives.
+So `(path) => \`${prefix}/${path}\`` returned from a function owns `prefix` and is an ordinary `(str) => String`. A closure that holds a borrow is class 2: it can be passed down but not returned or stored.
 
 ### 4.4 Marker interfaces
 
 The compiler derives three marker interfaces from structure:
 
 - **`Copy`**: bitwise copyable; no field owns a resource and the type has no `Drop`.
-- **`Send`**: may move to another task, and `readonly T` may be shared with other tasks. `T` is `Send` when it is class 1, owns no raw pointer, and contains no region data with a mutable slot (§4.6). Law 2 is what makes one marker enough: since every mutation through a shared reference is an effect, a `readonly` value seen by pure parallel code cannot change.
+- **`Send`**: may move to another task, and `readonly T` may be shared with other tasks. `T` is `Send` when it is class 1 and owns no raw pointer. Law 2 is what makes one marker enough: every mutation through a shared reference is an effect, and while tasks run no fiber may perform the effect that writes to an outer region (§6.1), so whatever a task can see through a `readonly` value or a `Ref` cannot change.
 - **`Drop`**: user-implemented on nominal types; destructors run in reverse order of construction.
 
 ### 4.5 Pointers
@@ -323,7 +328,7 @@ A region is a fiber-local bump arena with lexical extent. `region (R) { … }` i
 A region is **append-only and immutable**:
 
 - `alloc(v)` places `v` in the region and returns a `Ref<R, T>`. A `Ref<R, T>` is used exactly as a `readonly T`: field access and method calls go through it, and reading is pure.
-- The only mutable slots are `Cell<R, T>` with `T extends Copy`, whose `get` copies out and `set` copies in (a `Cell` is never borrowed), and `RegionList<R, T>`, an append-only chunked list whose elements never move. Both carry their region, and their writes are operations of `Region<R>` performed through a `readonly` receiver: mutation by effect, not by ownership. That is why `const items = RegionList.new(); items.push(x)` is legal.
+- The only mutable slots are `Cell<R, T>` with `T extends Copy`, whose `get` copies out and `set` copies in (a `Cell` is never borrowed), and `RegionList<R, T>`, an append-only chunked list whose elements never move. Both are handles into their region — `Copy`, like a `Ref` — and their writes are operations of `Region<R>`: mutation by effect, not by ownership. That is why `const items = RegionList.new(); items.push(x)` is legal.
 - `alloc`, `Cell.get`, `Cell.set` and `RegionList.push` perform `Region<R>`. Reading a `RegionList`'s existing elements does not: they never change.
 
 ```ts
@@ -331,14 +336,14 @@ A region is **append-only and immutable**:
 export struct Cell<region R, T extends Copy>;
 export struct RegionList<region R, T>;
 impl<region R, T extends Copy> Cell<R, T> {
-  export function new(v: T): Cell<R, T>;
-  export function get(self: readonly Self): T uses Region<R>;
-  export function set(self: readonly Self, v: T): void uses Region<R>;
+  export function new(v: T): Cell<R, T> uses Region<R>;
+  export function get(self: Self): T uses Region<R>;
+  export function set(self: Self, v: T): void uses Region<R>;
 }
 impl<region R, T> RegionList<R, T> {
-  export function new(): Ref<R, RegionList<R, T>> uses Region<R>;
-  export function push(self: Ref<R, Self>, v: T): void uses Region<R>;
-  export function len(self: readonly Self): usize;
+  export function new(): RegionList<R, T> uses Region<R>;
+  export function push(self: Self, v: T): void uses Region<R>;
+  export function len(self: Self): usize;
 }
 impl<region R, T> Iterable<readonly T> for RegionList<R, T> { … }
 ```
@@ -348,17 +353,18 @@ Two rules make this sound:
 1. **No escape.** `R` may not occur in the type of the region expression, in any variable assigned from outside the block, or in an unhandled effect.
 2. **No owned resources.** Region data contains only `Copy` values, `Ref`s, `Cell`s and `RegionList`s of the same region; this is checked wherever a value is placed in a region (`alloc`, `RegionList.push`). Nothing in a region needs a destructor, so releasing the arena is constant-time.
 
-Because nothing in a region moves or is freed before the region ends, and the only mutation is copy-in to a `Cell` or append to a list, no borrow into region data can be invalidated. Because handlers are fiber-local, no other task can perform `Region<R>`; a `Ref<R, T>` whose referent contains no `Cell` or `RegionList` is deeply immutable and may be shared with child tasks.
+Because nothing in a region moves or is freed before the region ends, and the only mutation is copy-in to a `Cell` or append to a list, no borrow into region data can be invalidated. Because handlers are fiber-local, no task can perform another fiber's `Region<R>`, and while a scope's tasks run, neither can the scope's own body (§6.1): an outer region is frozen while it is shared, so every `Ref<R, T>` is `Send`.
 
 **Region elision.** In a declaration or block with exactly one region in scope, every region-generic type written without its region argument takes that region: `Ref<T>`, `Cell<T>`, `RegionList<T>`, and user types such as `Json`. The rule applies recursively through type arguments.
 
 ```ts
 enum Json<region R> {
   #Null, #Bool(bool), #Num(f64), #Str(Ref<str>),
-  #Arr(Ref<RegionList<Ref<Json>>>),
-  #Obj(Ref<RegionList<{ key: Ref<str>; val: Ref<Json> }>>),
+  #Arr(RegionList<Ref<Json>>),
+  #Obj(RegionList<{ key: Ref<str>; val: Ref<Json> }>),
 }
 ```
+
 ---
 
 ## 5. Effects
@@ -412,6 +418,7 @@ A `Cont<A, B, E>` is an affine value. It may be stored, moved and returned like 
 - Handlers are **deep**: the handler stays installed beneath the suspended computation. Operations of other effects performed while `k` runs go to the handlers around the `resume` call, which is why `E` appears in `resume`'s type.
 - A `Cont` holds every borrow its suspended computation holds: in a resumptive arm, `k` holds the borrows the body had taken when it performed the operation. A `Cont` holding a borrow is class 2 (§4.2), so a continuation can never outlive a borrow it holds, and the borrowed places stay locked while it lives.
 - Continuations are one-shot. Resuming twice would duplicate owned values and live `mut` borrows.
+- **Resuming re-enters.** `k.resume(a)` runs the rest of the body, which may perform the same operation again and re-enter an arm of the same handler. So, for ownership, `k.resume(a)` uses every binding from outside the `handle` that the body or any of its arms uses, in the strongest mode any of them does: an arm cannot hold a borrow of such a binding across `resume`.
 
 ### 5.4 Errors: `throw`, `try`, `catch`
 
@@ -426,6 +433,15 @@ const port = try { parsePort(raw) } catch (e) {
 ```
 
 To keep a failure as data, `Fail.capture(() => body)` returns `Result<T, E>`; `r.unwrap()` turns it back into a failure. There is no separate error-conversion machinery: failure rows compose by union (§3.2).
+
+Tags are structural, so two libraries can use the same tag for different things (`#TimedOut(u32)` and `#TimedOut`) — and then a block calling both does not type-check, because one tag cannot carry two payloads. `Fail.map` wraps one call's failures, which both resolves the collision and records where an error came from:
+
+```ts
+const user = Fail.map(() => fetchUser(id), (e) => #Http(e));      // fails with #Http(HttpErr)
+const row  = Fail.map(() => queryDb(sql), (e) => #Db(e));         // fails with #Db(DbErr)
+```
+
+It is library code: `try { f() } catch (e) { throw wrap(e) }`.
 
 ### 5.5 Iteration: `yield` and `for…of`
 
@@ -450,6 +466,13 @@ function rows(db: readonly Db, sql: str): void uses Io, Fail<DbErr>, Yield<Row> 
   let cursor = db.open(sql);            // Drop closes the cursor
   while (cursor.hasNext()) { yield cursor.next(); }
 }
+```
+
+**Iteration chains.** `xs.iter()` turns any `Iterable` into a `Gen`, and a `Gen` is itself `Iterable` and has the familiar lazy adaptors — `map`, `filter`, `take`, `zip`, `enumerate` — and `collect()`. Because a generator carries the borrows of its sources (§4.2), a chain over borrowed data needs no annotations:
+
+```ts
+for (const [x, y] of xs.iter().zip(ys.iter())) { total += x * y; }
+const firstEvens = xs.iter().filter((x) => x % 2 == 0).take(10).collect();
 ```
 
 Pull iteration is library code. `generate(f)` runs `f` under a `Yield` handler whose resumptive arm stores the continuation, and returns a `Gen<T, E>` whose `next()` resumes it:
@@ -492,7 +515,7 @@ Integer division by zero, overflow in checked builds (`wrappingAdd` and friends 
 Concurrency is structured. `Io.scope((s) => body)` opens a scope, and a scope starts tasks in two ways:
 
 ```ts
-function scope<T, X, row E>(body: once (s: mut Scope<X>) => T uses Io, ...E): T uses Io, Fail<X>, ...E;
+function scope<T, X, row E extends Send>(body: once (s: mut Scope<X>) => T uses Io, ...E): T uses Io, Fail<X>, ...E;
 interface Scope<X> {
   // Fire and forget: the task cannot fail, so it cannot cancel the scope.
   function spawn(self: mut Self, task: once () => void uses Io): void;
@@ -509,8 +532,9 @@ The rules:
 1. **A scope owns its tasks.** `Io.scope` returns only when every task started in it has finished. A `Fiber` is a handle to a forked task's result, not to the task: dropping it leaves the task running.
 2. **Isolation is a type.** `spawn` accepts only a task whose effects are `Io`, which cannot fail. A server that must survive a bad connection spawns its connections, and the type checker proves they cannot take the scope down: a connection handler that let an error escape would not be accepted by `spawn`.
 3. **Failure cancels the scope.** A forked task's failures `X` are rethrown by `Io.scope`. If a forked task fails, or any task panics, the scope is cancelled: the body and every other task stop at their next `Io` operation and unwind, and once all have finished the first failure is rethrown from `Io.scope` (or the panic continues). `join` therefore never fails by itself: it returns the result, or the joiner is cancelled along with the rest of the scope.
-4. **A task performs only what its fiber can handle.** A task runs on a new fiber, where the only handlers are the runtime's `Io` and the scope's capture of failures, so its effects are `Io` and `Fail` and nothing else. It cannot allocate in its parent's region or perform an effect whose handler lives in the parent fiber; the body of the scope, which runs on the parent's fiber, still can.
-5. **Captures.** A task is a `once` closure. It may move in owned `Send` values and capture `readonly` borrows of `Send` values from outside the scope; the scope outlives every task, so the borrows are safe.
+4. **A task performs only what its fiber can handle.** A task runs on a new fiber, where the only handlers are the runtime's `Io` and the scope's capture of failures, so its effects are `Io` and `Fail` and nothing else. It cannot allocate in its parent's region or perform an effect whose handler lives in the parent fiber.
+5. **Outer regions are frozen while tasks run.** The body of a scope runs on the parent's fiber, but its effects must be `Send` — a row is `Send` when it contains no `Region` — so it cannot write to a region outside the scope while tasks may be reading it. A task or the body may still open and use regions of its own.
+6. **Captures.** A task is a `once` closure. It may move in owned `Send` values and capture `readonly` borrows of `Send` values from outside the scope; the scope outlives every task, so the borrows are safe.
 
 `scope`, `spawn`, `fork` and `join` are library code over `Io.start` and `Io.park`; nursery semantics are not built into the language.
 
@@ -606,7 +630,7 @@ The view is an ordinary class-2 record (§4.2); no part of this is built into th
 
 ### 8.1 Modules
 
-Each `.fly` file is an ES module. Declarations are private unless exported. The import graph must be acyclic, so modules compile in parallel in dependency order.
+Each `.fly` file is an ES module. Declarations are private unless exported. A module-level `const` is evaluated at compile time (`const MAX_BUF: usize = 512;`). The import graph must be acyclic, so modules compile in parallel in dependency order.
 
 A **declaration file**, `.d.fly`, states a module's interface without its implementation, as a TypeScript `.d.ts` file does. In a declaration file, a function or method ends with `;` instead of a body, and `struct Name<…>;` declares a type whose fields are hidden. The standard library is written this way; its bodies are the runtime's.
 
@@ -643,7 +667,7 @@ The rules that carry the design:
   > ─────────────────────────────────────────
   > Δ | Θ | Γ ⊢ region(ρ) { e } : τ / ε ⊣ Θ′
 - **Handle.** An abortive arm is checked under the Γ of the `handle` expression, the body's borrows having been released. In a resumptive arm, the body's borrows move into `k`, whose type records them; they are released when `k` is resumed to completion or dropped.
-- **Scope.** A task's captures must be class 1 and `Send`, or `ro` borrows of `Send` values whose paths are not under `mut` in Γ. A spawned task's row is exactly `Io`; a forked task's row is `Io` and `Fail<X>`, where `X` is rethrown by its scope.
+- **Scope.** A task's captures must be class 1 and `Send`, or `ro` borrows of `Send` values whose paths are not under `mut` in Γ. A spawned task's row is exactly `Io`; a forked task's row is `Io` and `Fail<X>`, where `X` is rethrown by its scope; the scope body's row is `Send` (it contains no `Region`).
 - **Effect rows.** Rows are label-sorted maps with an optional tail. For records a label occurs once and extension requires the tail to lack it; for tag unions labels merge and their payloads unify; for effects a label is an effect name with its region arguments, its other arguments are functions of the label, and extension by a present label is the identity. Handling `Fail` sets the open tail of its payload to the empty row.
 ---
 
@@ -772,11 +796,11 @@ import { RegionList } from "std/region";
 
 export enum Json<region R> {
   #Null, #Bool(bool), #Num(f64), #Str(Ref<str>),
-  #Arr(Ref<RegionList<Ref<Json>>>),
-  #Obj(Ref<RegionList<{ key: Ref<str>; val: Ref<Json> }>>),
+  #Arr(RegionList<Ref<Json>>),
+  #Obj(RegionList<{ key: Ref<str>; val: Ref<Json> }>),
 }
 
-struct Scanner { src: readonly u8[]; pos: usize; }      // class 2: holds a borrow
+view struct Scanner { src: readonly u8[]; pos: usize; }      // a view: it borrows the source
 
 type JsonErr = #Eof | #Unexpected(usize) | #MalformedUtf8;
 
@@ -819,7 +843,7 @@ function value<region R>(sc: mut Scanner): Ref<Json> uses Region<R>, Fail<JsonEr
   }
 }
 ```
-*Awkward:* nothing serious. `Ref<…>` around every node is the honest cost of region allocation.
+*Awkward:* nothing serious. `Ref<…>` around each recursive node is the honest cost of region allocation; lists and slots are handles and need none.
 
 ### A.2 Word count
 
@@ -851,32 +875,26 @@ export function main(args: readonly String[]): void uses Io {
 ```
 *Awkward:* none. `${e}` works because tag unions derive `Show`.
 
-### A.3 Generators: `zip`
+### A.3 Generators and iteration chains
 
 ```ts
-import { generate } from "std/iter";
-
-export function zip<A, B, row E>(
-  a: once () => void uses Yield<A>, ...E,
-  b: once () => void uses Yield<B>, ...E,
-): void uses Yield<[A, B]>, ...E {
-  let ga = generate(a);
-  let gb = generate(b);
-  while (true) {
-    match ([ga.next(), gb.next()]) {
-      [#Some(x), #Some(y)] => yield [x, y],
-      _ => break,
-    }
-  }
+// A generator is any function that yields.
+function runningSums(xs: readonly i64[]): void uses Yield<i64> {
+  let sum: i64 = 0;
+  for (const x of xs) { sum += x; yield sum; }
 }
 
 export function dot(xs: readonly f64[], ys: readonly f64[]): f64 {
   let total = 0.0;
-  for (const [x, y] of zip(() => xs.each(), () => ys.each())) { total += x * y; }
+  for (const [x, y] of xs.iter().zip(ys.iter())) { total += x * y; }
   total
 }
+
+export function firstSums(xs: readonly i64[], n: usize): Vec<i64> {
+  generate(() => runningSums(xs)).take(n).collect()
+}
 ```
-*Awkward:* passing streams as thunks (`() => xs.each()`) rather than as values. That is the price of streams being computations; `Gen` is the value form when one is wanted.
+*Awkward:* none. The chains borrow `xs` and `ys` for exactly as long as the generators live, with no annotations.
 
 ### A.4 Particles
 
@@ -907,19 +925,19 @@ import { RegionList, Cell } from "std/region";
 export struct Decl<region R> { name: Ref<str>; ty: Cell<u32>; visiting: Cell<bool>; }
 export struct Scope<region R> {
   parent: Option<Ref<Scope>>;
-  names: Ref<RegionList<{ name: Ref<str>; decl: Ref<Decl> }>>;
+  names: RegionList<{ name: Ref<str>; decl: Ref<Decl> }>;
 }
 
 impl<region R> Scope<R> {
   export function new(parent: Option<Ref<Scope>>): Ref<Scope> uses Region<R> {
     alloc({ parent, names: RegionList.new() })
   }
-  export function define(self: Ref<Self>, name: Ref<str>): Ref<Decl> uses Region<R> {
+  export function define(self: readonly Self, name: Ref<str>): Ref<Decl> uses Region<R> {
     const d = alloc(Decl { name, ty: Cell.new(0), visiting: Cell.new(false) });
     self.names.push({ name, decl: d });
     d
   }
-  export function lookup(self: Ref<Self>, name: str): Option<Ref<Decl>> {   // pure
+  export function lookup(self: readonly Self, name: str): Option<Ref<Decl>> {   // pure
     for (const b of self.names) { if (b.name == name) { return #Some(b.decl); } }
     match (self.parent) { #Some(p) => p.lookup(name), #None => #None }
   }

@@ -10,7 +10,7 @@ const PROGRAMS: &[(&str, &str)] = &[
     ("### 10.2 ", "http_handler"),
     ("### A.1 ", "json"),
     ("### A.2 ", "word_count"),
-    ("### A.3 ", "zip"),
+    ("### A.3 ", "iteration"),
     ("### A.4 ", "particles"),
     ("### A.5 ", "symbol_table"),
     ("### A.6 ", "kv_actor"),

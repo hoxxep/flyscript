@@ -57,7 +57,8 @@ impl Program {
             Ty::Array(e, _) => rec(e),
             Ty::Slice(_) => true,
             Ty::Named(d, args) => {
-                if self.is_known(*d, "Ref") || self.def_named(*d, &["Cell"]) {
+                // Region references and region handles are `Copy` (§4.6).
+                if self.is_known(*d, "Ref") || self.def_named(*d, &["Cell", "RegionList"]) {
                     return true;
                 }
                 if self.has_drop(*d) {
@@ -118,10 +119,8 @@ impl Program {
             Ty::Record(r) | Ty::Union(r) => r.labels.values().all(rec),
             Ty::Array(e, _) | Ty::Slice(e) | Ty::Borrow(_, e) => rec(e),
             Ty::Named(d, args) => {
-                // Region data is shareable only if nothing in it can change (§4.6).
-                if self.def_named(*d, &["Cell", "RegionList"]) {
-                    return false;
-                }
+                // Outer regions are frozen while tasks run (§6.1), so region data is always
+                // shareable; the runtime's own handles are not.
                 if self.def_named(*d, &["Gen", "Fiber", "Scope"]) {
                     return false;
                 }

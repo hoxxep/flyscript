@@ -105,8 +105,8 @@ pub fn check_function(p: &mut Program, fid: FnId) {
     };
     let Some(body) = fdecl.body else { return };
     let module = p.fns[fid].module;
-    let ret_from = p.fns[fid].scheme.ret_from.clone();
     let ret_ty = p.fns[fid].scheme.ret.clone();
+    let sources = result_sources(p, &p.fns[fid].scheme);
     let mut o = Own {
         p,
         module,
@@ -123,9 +123,11 @@ pub fn check_function(p: &mut Program, fid: FnId) {
         deferred: Vec::new(),
         reported: HashSet::new(),
         lambdas: Vec::new(),
+        escaping: false,
+        resumes: HashMap::new(),
         sites: HashMap::new(),
         ret_ty,
-        ret_from,
+        sources,
         collecting: true,
     };
     // Pass 1 collects every use of every binding, with its position; pass 2 checks.
@@ -146,7 +148,9 @@ pub fn check_function(p: &mut Program, fid: FnId) {
                 o.state.holds.insert(id, [l].into_iter().collect());
             }
         }
+        o.escaping = true;
         let v = o.block(&body, Use::Move);
+        o.escaping = false;
         if !o.collecting {
             o.check_return(&v, body.tail.as_ref().map_or(body.span, |e| e.span));
         }
@@ -174,11 +178,18 @@ struct Own<'p> {
     reported: HashSet<(Span, String)>,
     /// Closures being checked, innermost last.
     lambdas: Vec<LambdaFrame>,
+    /// Set while evaluating a value that escapes (returned, or stored in a first-class value): a
+    /// closure there captures by move (§4.3).
+    escaping: bool,
+    /// For each continuation binding, the outer bindings its handler's body and arms use, and
+    /// whether any of them changes each: calling it re-enters them (§5.3).
+    resumes: HashMap<VarId, Vec<(VarId, bool)>>,
     /// Variable ids by declaration site, so they are the same in both passes and in every
     /// traversal of a loop body.
     sites: HashMap<(usize, String), VarId>,
     ret_ty: Ty,
-    ret_from: Option<String>,
+    /// The parameters this function's result may borrow from (§4.2).
+    sources: Vec<String>,
     collecting: bool,
 }
 
@@ -505,6 +516,7 @@ impl<'p> Own<'p> {
         let _ = id;
         let deferred_depth = self.deferred.len();
         let mut child = 0;
+        let escaping = std::mem::replace(&mut self.escaping, false);
         for stmt in &b.stmts {
             child += 1;
             self.set_child(child);
@@ -536,6 +548,7 @@ impl<'p> Own<'p> {
         }
         child += 1;
         self.set_child(child);
+        self.escaping = escaping;
         let v = match &b.tail {
             Some(e) => self.expr(e, how),
             None => Val::default(),
@@ -602,6 +615,24 @@ impl<'p> Own<'p> {
     // ---- expressions ----
 
     fn expr(&mut self, e: &Expr, how: Use) -> Val {
+        // Only these positions pass "escaping" on to their direct value.
+        let passes_escape = matches!(
+            e.kind,
+            ExprKind::Lambda { .. }
+                | ExprKind::Block(_)
+                | ExprKind::If { .. }
+                | ExprKind::Match { .. }
+                | ExprKind::Try { .. }
+                | ExprKind::Region { .. }
+                | ExprKind::Unsafe(_)
+                | ExprKind::Return(_)
+                | ExprKind::Record { .. }
+                | ExprKind::Tag { .. }
+                | ExprKind::List(_)
+        );
+        if !passes_escape && self.escaping {
+            return self.contained(|o| o.expr(e, how));
+        }
         match &e.kind {
             ExprKind::Ident(name) => {
                 let Some(v) = self.lookup(name) else { return Val::default() };
@@ -708,7 +739,7 @@ impl<'p> Own<'p> {
             ExprKind::Lambda { params, body } => self.lambda(e, params, body),
             ExprKind::Block(b) => self.block(b, how),
             ExprKind::If { cond, then, otherwise } => {
-                self.expr(cond, Use::Read);
+                self.contained(|o| o.expr(cond, Use::Read));
                 self.enter(Node::Branch, 0);
                 let before = self.state.clone();
                 let a = self.block(then, how);
@@ -755,7 +786,7 @@ impl<'p> Own<'p> {
                 Val::default()
             }
             ExprKind::Match { scrutinee, arms } => {
-                let sv = self.expr(scrutinee, how_for_scrutinee(arms));
+                let sv = self.contained(|o| o.expr(scrutinee, how_for_scrutinee(arms)));
                 self.enter(Node::Branch, 0);
                 let before = self.state.clone();
                 let mut joined: Option<State> = None;
@@ -807,7 +838,7 @@ impl<'p> Own<'p> {
             }
             ExprKind::Return(v) => {
                 if let Some(v) = v {
-                    let val = self.expr(v, Use::Move);
+                    let val = self.escape(|o| o.expr(v, Use::Move));
                     self.check_return(&val, v.span);
                 }
                 Val::default()
@@ -815,6 +846,28 @@ impl<'p> Own<'p> {
             ExprKind::Break | ExprKind::Continue => Val::default(),
             ExprKind::Region { body, .. } | ExprKind::Unsafe(body) => self.block(body, how),
             ExprKind::Handle { body, arms, .. } => {
+                // The outer bindings that resuming can reach: those the body or any arm uses.
+                let mut reach: Vec<(String, Span)> = Vec::new();
+                walk_block(body, &HashSet::new(), &mut reach);
+                for arm in arms {
+                    let mut bound: HashSet<String> = arm.params.iter().map(|p| p.name.clone()).collect();
+                    if let Some(k) = &arm.resumes {
+                        bound.insert(k.name.clone());
+                    }
+                    walk_block(&arm.body, &bound, &mut reach);
+                }
+                let mut changed = HashSet::new();
+                block_changes(body, &mut changed);
+                for arm in arms {
+                    block_changes(&arm.body, &mut changed);
+                }
+                let mut reached: Vec<(VarId, bool)> = Vec::new();
+                for (name, _) in &reach {
+                    if let Some(v) = self.lookup(name)
+                        && !reached.iter().any(|(r, _)| *r == v) {
+                            reached.push((v, changed.contains(name)));
+                        }
+                }
                 let v = self.block(body, how);
                 for arm in arms {
                     self.scopes.push(HashMap::new());
@@ -825,6 +878,7 @@ impl<'p> Own<'p> {
                         // The continuation holds whatever the body held (§5.3).
                         let id = self.declare_var(&k.name, Ty::Error, false, false, k.span.start);
                         self.state.holds.insert(id, v.loans.clone());
+                        self.resumes.insert(id, reached.clone());
                     }
                     self.block(&arm.body, how);
                     self.scopes.pop();
@@ -855,16 +909,32 @@ impl<'p> Own<'p> {
     fn collect<'e>(&mut self, items: impl Iterator<Item = &'e Expr>) -> Val {
         let mut loans = BTreeSet::new();
         for it in items {
-            loans.extend(self.expr(it, Use::Move).loans);
+            loans.extend(self.escape(|o| o.expr(it, Use::Move)).loans);
         }
         Val { loans }
+    }
+
+    /// Evaluates something that escapes; see `escaping`.
+    fn escape(&mut self, f: impl FnOnce(&mut Self) -> Val) -> Val {
+        let saved = std::mem::replace(&mut self.escaping, true);
+        let v = f(self);
+        self.escaping = saved;
+        v
+    }
+
+    /// Evaluates something that does not escape.
+    fn contained(&mut self, f: impl FnOnce(&mut Self) -> Val) -> Val {
+        let saved = std::mem::replace(&mut self.escaping, false);
+        let v = f(self);
+        self.escaping = saved;
+        v
     }
 
     fn field_inits(&mut self, fields: &[ast::FieldInit]) -> Val {
         let mut loans = BTreeSet::new();
         for f in fields {
             match &f.value {
-                Some(v) => loans.extend(self.expr(v, Use::Move).loans),
+                Some(v) => loans.extend(self.escape(|o| o.expr(v, Use::Move)).loans),
                 None => {
                     let e = Expr { kind: ExprKind::Ident(f.name.name.clone()), span: f.name.span };
                     loans.extend(self.expr(&e, Use::Move).loans);
@@ -917,6 +987,16 @@ impl<'p> Own<'p> {
                 t.extend(v.loans.iter().copied());
             }
             arg_vals.push((Some("self".into()), v));
+        } else if let Some(reach) = self.place(callee).and_then(|p| self.resumes.get(&p.root).cloned()) {
+            // Resuming runs the rest of the body, and may re-enter the arms: it uses everything
+            // they use, so no borrow of those may be live across it (§5.3).
+            let none = BTreeSet::new();
+            for (v, write) in reach {
+                let path = Path { root: v, fields: Vec::new() };
+                self.access(&path, write, callee.span, &none);
+            }
+            let v = self.expr(callee, Use::Read);
+            arg_vals.push((None, v));
         } else if !matches!(callee.kind, ExprKind::Ident(_) | ExprKind::Field { .. }) || scheme.is_none() {
             // Calling a function value: it is used, and what it captured flows on — but not the
             // borrow taken to call it.
@@ -957,12 +1037,16 @@ impl<'p> Own<'p> {
         }
         self.task_captures(fid, args);
         self.temps.pop();
-        // The result carries its arguments' borrows unless it cannot hold one (§4.2).
+        // The result carries its sources' borrows unless it cannot hold one (§4.2).
         let mut loans = BTreeSet::new();
         if self.may_hold(&ret) {
-            let from = scheme.as_ref().and_then(|s| s.ret_from.clone());
+            let sources = scheme.as_ref().map(|s| result_sources(self.p, s));
             for (name, v) in &arg_vals {
-                if from.is_none() || name.as_deref() == from.as_deref() {
+                let is_source = match (&sources, name) {
+                    (Some(srcs), Some(n)) => srcs.contains(n),
+                    _ => true,
+                };
+                if is_source {
                     loans.extend(v.loans.iter().copied());
                 }
             }
@@ -1016,6 +1100,7 @@ impl<'p> Own<'p> {
 
     fn lambda(&mut self, e: &Expr, params: &[ast::Param], body: &Expr) -> Val {
         let _ = e;
+        let escapes = self.escaping;
         // Check the body first, recording how it uses each binding it captures.
         let outer: HashSet<VarId> = self.scopes.iter().flat_map(|sc| sc.values().copied()).collect();
         self.lambdas.push((outer, HashMap::new()));
@@ -1026,7 +1111,7 @@ impl<'p> Own<'p> {
         for p in params {
             self.declare_var(&p.name.name, Ty::Error, true, false, p.name.span.start);
         }
-        self.expr(body, Use::Move);
+        self.contained(|o| o.expr(body, Use::Move));
         self.scopes.pop();
         self.temps = saved_temps;
         self.deferred = saved_deferred;
@@ -1038,6 +1123,9 @@ impl<'p> Own<'p> {
         let mut captures: Vec<(VarId, (Use, Span))> = uses.into_iter().collect();
         captures.sort_by_key(|(_, (_, span))| span.start);
         for (v, (how, span)) in captures {
+            // A closure that escapes owns what it captures: a borrow is copied (with its loans),
+            // a `Copy` value is copied, anything else is moved (§4.3).
+            let how = if escapes { Use::Move } else { how };
             self.record_use(v, span);
             let ident = Expr { kind: ExprKind::Ident(self.vars[v].name.clone()), span };
             let val = self.use_place(&ident, Path { root: v, fields: Vec::new() }, how);
@@ -1046,34 +1134,42 @@ impl<'p> Own<'p> {
         Val { loans }
     }
 
-    /// What a function returns may hold only borrows of the parameter it is tied to (§4.2).
+    /// What a function returns may hold only borrows of its sources (§4.2).
     fn check_return(&mut self, v: &Val, span: Span) {
         if self.collecting || !self.may_hold(&self.ret_ty.clone()) {
             return;
         }
-        let params: Vec<VarId> = (0..self.vars.len()).filter(|i| self.vars[*i].param).collect();
-        let tied: Option<VarId> = match &self.ret_from {
-            Some(name) => params.iter().copied().find(|i| &self.vars[*i].name == name),
-            None => {
-                let class2: Vec<VarId> = params.iter().copied().filter(|i| self.p.class(&self.vars[*i].ty) == 2).collect();
-                if class2.len() == 1 { Some(class2[0]) } else { None }
-            }
-        };
         for l in &v.loans {
             let loan = self.loans[*l].clone();
             let root = loan.path.root;
-            if Some(root) == tied {
+            let name = self.vars[root].name.clone();
+            if self.vars[root].param && self.sources.contains(&name) {
                 continue;
             }
-            let name = self.vars[root].name.clone();
             let msg = if self.vars[root].param {
-                format!("the result borrows `{name}`, but the function's result is not tied to `{name}` (use `from {name}`)")
+                format!("the result borrows `{name}`, but `{name}` is not one of the result's sources (add it with `from`)")
             } else {
                 format!("the result borrows `{name}`, which does not outlive this function")
             };
             self.err(span, msg);
         }
     }
+}
+
+/// The parameters a function's result may borrow from (§4.2): those named by `from`; otherwise
+/// the receiver of a method, or every parameter of a free function; plus, always, parameters
+/// whose types can hide a borrow.
+fn result_sources(p: &Program, scheme: &super::env::Scheme) -> Vec<String> {
+    let hidden = scheme.params.iter().filter(|(_, t)| hides_borrows(t, p)).map(|(n, _)| n.clone());
+    let mut sources: Vec<String> = if !scheme.ret_from.is_empty() {
+        scheme.ret_from.clone()
+    } else if scheme.params.first().is_some_and(|(n, _)| n == "self") {
+        vec!["self".to_string()]
+    } else {
+        scheme.params.iter().map(|(n, _)| n.clone()).collect()
+    };
+    sources.extend(hidden);
+    sources
 }
 
 fn how_for_scrutinee(arms: &[ast::MatchArm]) -> Use {
@@ -1281,5 +1377,58 @@ fn children(e: &Expr) -> Vec<&Expr> {
             })
             .collect(),
         _ => Vec::new(),
+    }
+}
+
+/// The bindings a block assigns to or lends `mut` (by name), for the resume rule.
+fn block_changes(b: &ast::Block, out: &mut HashSet<String>) {
+    for st in &b.stmts {
+        match st {
+            Stmt::Let { init, .. } => expr_changes(init, out),
+            Stmt::Defer(e) | Stmt::Expr(e) => expr_changes(e, out),
+        }
+    }
+    if let Some(t) = &b.tail {
+        expr_changes(t, out);
+    }
+}
+
+fn expr_changes(e: &Expr, out: &mut HashSet<String>) {
+    fn root(e: &Expr) -> Option<&str> {
+        match &e.kind {
+            ExprKind::Ident(n) => Some(n),
+            ExprKind::Field { target, .. } | ExprKind::Index { target, .. } => root(target),
+            _ => None,
+        }
+    }
+    match &e.kind {
+        ExprKind::Assign { target, .. } | ExprKind::BorrowMut(target) => {
+            if let Some(r) = root(target) {
+                out.insert(r.to_string());
+            }
+        }
+        // A method call may change its receiver.
+        ExprKind::Call { callee, .. } => {
+            if let ExprKind::Field { target, .. } = &callee.kind
+                && let Some(r) = root(target) {
+                    out.insert(r.to_string());
+                }
+        }
+        _ => {}
+    }
+    for c in children(e) {
+        expr_changes(c, out);
+    }
+    match &e.kind {
+        ExprKind::Block(b) | ExprKind::Region { body: b, .. } | ExprKind::Unsafe(b) => block_changes(b, out),
+        ExprKind::If { then, .. } => block_changes(then, out),
+        ExprKind::While { body, .. } | ExprKind::For { body, .. } => block_changes(body, out),
+        ExprKind::Match { arms, .. } => arms.iter().for_each(|a| expr_changes(&a.body, out)),
+        ExprKind::Try { body, handler, .. } => {
+            block_changes(body, out);
+            block_changes(handler, out);
+        }
+        ExprKind::Lambda { body, .. } => expr_changes(body, out),
+        _ => {}
     }
 }

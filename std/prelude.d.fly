@@ -46,9 +46,29 @@ export type IoErr = #Reset | #TimedOut | #BrokenPipe | #NotFound | #PermissionDe
 
 impl<E> Fail<E> {
   export function capture<T>(body: once () => T uses Fail<E>): Result<T, E>;
+  // Wraps one call's failures (§5.4): `Fail.map(() => fetch(u), (e) => #Http(e))`.
+  export function map<T, F>(body: once () => T uses Fail<E>, wrap: once (e: E) => F): T uses Fail<F>;
 }
 
-// ---- Iteration (§5.5) ----
+// ---- Iteration (§5.5): generators, pull iteration and iteration chains ----
+export struct Gen<T, row E>;
+
+export function generate<T, row E>(producer: once () => void uses Yield<T>, ...E): Gen<T, E>;
+
+impl<T, row E> Gen<T, E> {
+  export function next(self: mut Self): Option<T> uses ...E;
+  export function map<U>(self: Self, f: (x: T) => U): Gen<U, E>;
+  export function filter(self: Self, keep: (x: readonly T) => bool): Gen<T, E>;
+  export function take(self: Self, n: usize): Gen<T, E>;
+  export function zip<U>(self: Self, other: Gen<U, E>): Gen<[T, U], E>;
+  export function enumerate(self: Self): Gen<[usize, T], E>;
+  export function collect(self: Self): Vec<T> uses ...E;
+}
+
+impl<T, row E> Iterable<T, E> for Gen<T, E> {
+  function each(self: readonly Self): void uses Yield<T>, ...E;
+}
+
 export interface Iterable<T, row E = []> {
   function each(self: readonly Self): void uses Yield<T>, ...E;
 }
@@ -58,7 +78,8 @@ export interface Iterable<T, row E = []> {
 export struct Scope<X>;
 export struct Fiber<T>;
 impl Io {
-  export function scope<T, X, row E>(body: once (s: mut Scope<X>) => T uses Io, ...E): T uses Io, Fail<X>, ...E;
+  // The body's effects are `Send`: it cannot write to an outer region while tasks run (§6.1).
+  export function scope<T, X, row E extends Send>(body: once (s: mut Scope<X>) => T uses Io, ...E): T uses Io, Fail<X>, ...E;
 }
 impl<X> Scope<X> {
   export function spawn(self: mut Self, task: once () => void uses Io): void;
@@ -88,6 +109,7 @@ impl str {
 }
 impl<T> T[] {
   export function len(self: readonly Self): usize;
+  export function iter(self: readonly Self): Gen<readonly T, []>;
 }
 impl<T> Iterable<readonly T> for T[] {
   function each(self: readonly Self): void uses Yield<readonly T>;
@@ -96,6 +118,7 @@ impl<T> Vec<T> {
   export function new(): Vec<T>;
   export function push(self: mut Self, v: T): void;
   export function len(self: readonly Self): usize;
+  export function iter(self: readonly Self): Gen<readonly T, []>;
 }
 impl<T> Iterable<readonly T> for Vec<T> {
   function each(self: readonly Self): void uses Yield<readonly T>;

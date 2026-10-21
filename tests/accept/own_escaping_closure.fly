@@ -1,0 +1,10 @@
+// A closure that escapes owns its captures, so it can be called any number of times (§4.3).
+export function makeGreeter(prefix: String): (name: str) => String {
+  (name) => `${prefix}, ${name}`
+}
+
+export function greetTwice(): String {
+  const greet = makeGreeter(String.fromStr("Hello"));
+  greet("Ada");
+  greet("Grace")
+}

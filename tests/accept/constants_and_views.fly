@@ -1,0 +1,18 @@
+// Module constants, a view struct, and public fields (§2.3, §3.3).
+const LIMIT: usize = 3;
+const GREETING = "hi";
+
+view struct Cursor { text: str; pos: usize; }
+struct Point { x: f64; y: f64; }
+
+function advance(c: mut Cursor): bool {
+  if (c.pos < c.text.len() && c.pos < LIMIT) { c.pos += 1; true } else { false }
+}
+
+export function walk(text: str): usize {
+  let c = Cursor { text, pos: 0 };
+  while (advance(mut c)) {}
+  c.pos + GREETING.len()
+}
+
+export function norm(p: Point): f64 { p.x * p.x + p.y * p.y }

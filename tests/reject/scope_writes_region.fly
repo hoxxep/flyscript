@@ -1,0 +1,14 @@
+// error: this writes to a region outside the scope, which is not allowed here
+import { RegionList } from "std/region";
+export function race(): void uses Io {
+  region (R) {
+    const list = RegionList.new();
+    list.push(1);
+    try {
+      Io.scope((s) => {
+        s.spawn(() => {});
+        list.push(2);
+      });
+    } catch (_) {}
+  }
+}

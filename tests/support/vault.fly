@@ -1,0 +1,3 @@
+// A module with a private field, used by tests/reject/private_field.fly.
+export struct Vault { label: u32; private secret: u32; }
+export function open(v: readonly Vault): u32 { v.secret + v.label }

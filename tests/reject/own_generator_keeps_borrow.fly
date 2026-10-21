@@ -1,5 +1,4 @@
 // error: `v` cannot be changed here
-import { generate } from "std/iter";
 export function f(): void {
   let v = Vec.new<i32>();
   v.push(1);

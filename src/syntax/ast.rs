@@ -24,6 +24,8 @@ pub struct Item {
 #[derive(Clone, Debug, PartialEq)]
 pub enum ItemKind {
     Import { names: Vec<Ident>, from: String },
+    /// A module-level constant, evaluated at compile time.
+    Const { name: Ident, ty: Option<Type>, value: Expr },
     Struct(StructDecl),
     Enum(EnumDecl),
     Interface(InterfaceDecl),
@@ -37,6 +39,8 @@ pub enum ItemKind {
 #[derive(Clone, Debug, PartialEq)]
 pub struct StructDecl {
     pub layout: Option<Ident>,
+    /// Declared `view`: it may hold borrows (§3.3).
+    pub view: bool,
     pub name: Ident,
     pub params: Vec<TypeParam>,
     /// `None` for an opaque declaration (`struct Socket;`), allowed only in `.d.fly` files.
@@ -47,10 +51,13 @@ pub struct StructDecl {
 pub struct Field {
     pub name: Ident,
     pub ty: Type,
+    /// `private`: visible only in the declaring module.
+    pub private: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct EnumDecl {
+    pub view: bool,
     pub name: Ident,
     pub params: Vec<TypeParam>,
     pub tags: Vec<TagDecl>,
@@ -73,6 +80,7 @@ pub enum TagPayload {
 pub struct InterfaceDecl {
     pub name: Ident,
     pub params: Vec<TypeParam>,
+    pub extends: Vec<Type>,
     pub members: Vec<InterfaceMember>,
 }
 
@@ -141,13 +149,14 @@ pub struct Param {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Return {
     pub ty: Type,
-    pub from: Option<Ident>,
+    /// The parameters a returned borrow may come from (`from a, b`); empty if not written.
+    pub from: Vec<Ident>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum TypeParam {
     Region { name: Ident, default: Option<Type> },
-    Row { name: Ident, default: Option<Type> },
+    Row { name: Ident, bounds: Vec<Type>, default: Option<Type> },
     Comptime { name: Ident, ty: Type },
     Type { name: Ident, bounds: Vec<Type>, default: Option<Type> },
 }

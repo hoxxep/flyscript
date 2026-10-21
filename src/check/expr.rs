@@ -716,6 +716,7 @@ impl<'p> Checker<'p> {
             return l.ty.clone();
         }
         match self.p.lookup(self.module, name) {
+            Some(Binding::Const(c)) => self.p.consts[c].ty.clone(),
             Some(Binding::Fn(fid)) => {
                 let scheme = self.p.fns[fid].scheme.clone();
                 let effects = fn_effects(self.p, fid, self.module, span);
@@ -926,8 +927,15 @@ impl<'p> Checker<'p> {
             Ty::Named(d, args) => match &self.p.defs[*d].kind {
                 DefKind::Struct { fields: Some(fields) } => {
                     if let Some((_, ft)) = fields.iter().find(|(k, _)| k == name) {
-                        let params = self.p.defs[*d].params.clone();
-                        return subst_params(ft, &params, args);
+                        let ft = ft.clone();
+                        let def = &self.p.defs[*d];
+                        let hidden = def.module != self.module && def.private.iter().any(|f| f == name);
+                        let tname = def.name.clone();
+                        let params = def.params.clone();
+                        if hidden {
+                            self.err(span, format!("`{name}` is a private field of `{tname}`"));
+                        }
+                        return subst_params(&ft, &params, args);
                     }
                 }
                 DefKind::Struct { fields: None } => {
@@ -1102,6 +1110,15 @@ impl<'p> Checker<'p> {
             }
         }
         self.check_args(&params, args, span);
+        for (g, a) in scheme.tparams.iter().zip(&inst.args) {
+            let wants_send = g.kind == PKind::Row && g.bounds.iter().any(|b| matches!(b, Ty::Named(d, _) if self.p.known.get("Send") == Some(d)));
+            if let (true, GArg::Row(row)) = (wants_send, a) {
+                let region = self.known("Region");
+                if self.s.expand_effs(row).effs.iter().any(|e| e.def == region) {
+                    self.err(span, "this writes to a region outside the scope, which is not allowed here: an outer region is frozen while tasks may read it (§6.1)");
+                }
+            }
+        }
         if let Some(e) = &inst.effects {
             self.perform(e, span);
         }
@@ -1391,7 +1408,9 @@ impl<'p> Checker<'p> {
                 self.declare(&name.name, t.clone());
             }
             if let Some(k) = &arm.resumes {
-                let cont = Ty::Fn(Box::new(FnTy { mode: FnMode::Once, params: vec![op_ret], ret: result.clone(), effects: EffRow::pure() }));
+                // A continuation of a `void` operation takes no argument: `k()`.
+                let params = if op_ret == Ty::void() { Vec::new() } else { vec![op_ret] };
+                let cont = Ty::Fn(Box::new(FnTy { mode: FnMode::Once, params, ret: result.clone(), effects: EffRow::pure() }));
                 self.declare(&k.name, cont);
             }
             let t = self.block(&arm.body, Some(&result));

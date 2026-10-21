@@ -1,0 +1,3 @@
+// error: `User` holds a borrow in `name` (`str`): use an owned `String`, or declare `view`
+struct User { name: str; age: u32; }
+export function age(u: User): u32 { u.age }

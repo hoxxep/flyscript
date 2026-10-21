@@ -1,0 +1,14 @@
+// A scope's body may still open and use a region of its own (§6.1).
+import { RegionList } from "std/region";
+export function local(): usize uses Io {
+  try {
+    Io.scope((s) => {
+      s.spawn(() => {});
+      region (Mine) {
+        const xs = RegionList.new();
+        xs.push(1);
+        xs.len()
+      }
+    })
+  } catch (_) { 0 }
+}

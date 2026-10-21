@@ -1,5 +1,6 @@
 // error: the result borrows `v`, which does not outlive this function
 export function f(): () => usize {
   let v = Vec.new<i32>();
-  () => v.len()
+  const count = () => v.len();      // created here, it borrows `v`
+  count                             // and so cannot be returned
 }

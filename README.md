@@ -64,7 +64,7 @@ test("degrades gracefully under packet loss", () => {
 
 Flyscript is an early-stage language under active design, developed in the open.
 
-- **Language specification:** version 0.18, with every earlier version and the reasoning behind each change in [docs/history](docs/history/).
+- **Language specification:** version 0.19, with every earlier version and the reasoning behind each change in [docs/history](docs/history/).
 - **Compiler (`flyc`):** the parser handles the full grammar, and `flyc check` type-, effect- and ownership-checks programs: every example passes, and a growing suite of incorrect programs — use after move, conflicting borrows, borrows that escape through closures and generators, undeclared effects, non-exhaustive matches — is rejected with precise errors. An evaluator comes next.
 
 It is not yet ready for real programs. It is ready for your ideas: issues and discussion about the design are very welcome.

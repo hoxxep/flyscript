@@ -15,7 +15,6 @@ const STD: &[(&str, &str)] = &[
     ("std/net", include_str!("../../std/net.d.fly")),
     ("std/io", include_str!("../../std/io.d.fly")),
     ("std/collections", include_str!("../../std/collections.d.fly")),
-    ("std/iter", include_str!("../../std/iter.d.fly")),
     ("std/par", include_str!("../../std/par.d.fly")),
     ("std/layout", include_str!("../../std/layout.d.fly")),
     ("std/sync", include_str!("../../std/sync.d.fly")),
@@ -35,6 +34,16 @@ pub struct Module {
 pub enum Binding {
     Def(DefId),
     Fn(FnId),
+    Const(usize),
+}
+
+/// A module-level constant (§8.1).
+#[derive(Debug)]
+pub struct ConstInfo {
+    pub name: String,
+    pub module: usize,
+    pub ty: Ty,
+    pub value: ast::Expr,
 }
 
 pub type FnId = usize;
@@ -62,8 +71,8 @@ pub struct Scheme {
     pub ret: Ty,
     /// `None`: not declared, to be inferred from the body (non-exported functions only).
     pub effects: Option<EffRow>,
-    /// The parameter a returned borrow is tied to (`from p`), if named.
-    pub ret_from: Option<String>,
+    /// The parameters a returned borrow may come from (`from a, b`); empty if not written.
+    pub ret_from: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -82,6 +91,10 @@ pub struct Def {
     pub params: Vec<GParam>,
     pub kind: DefKind,
     pub span: Span,
+    /// Fields visible only in the declaring module.
+    pub private: Vec<String>,
+    /// Declared `view` (§3.3).
+    pub view: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -114,6 +127,7 @@ pub struct Impl {
 pub struct Program {
     pub modules: Vec<Module>,
     pub defs: Vec<Def>,
+    pub consts: Vec<ConstInfo>,
     pub fns: Vec<FnInfo>,
     pub impls: Vec<Impl>,
     pub diags: Vec<(usize, Diagnostic)>,
@@ -174,6 +188,7 @@ impl Program {
         let mut p = Program {
             modules: Vec::new(),
             defs: Vec::new(),
+            consts: Vec::new(),
             fns: Vec::new(),
             impls: Vec::new(),
             diags: Vec::new(),
@@ -186,7 +201,7 @@ impl Program {
         for (name, source) in STD {
             p.add_module(name.to_string(), format!("<{name}.d.fly>"), source.to_string(), true);
         }
-        let mut queue: Vec<PathBuf> = entries.to_vec();
+        let mut queue: Vec<PathBuf> = entries.iter().map(|e| normalize(e)).collect();
         while let Some(path) = queue.pop() {
             let name = path.with_extension("").to_string_lossy().to_string();
             if p.modules.iter().any(|m| m.name == name) {
@@ -202,9 +217,10 @@ impl Program {
             let idx = p.add_module(name, path.display().to_string(), source, false);
             for item in &p.modules[idx].ast.items {
                 if let ItemKind::Import { from, .. } = &item.kind
-                    && let Some(rel) = from.strip_prefix("./") {
-                        queue.push(path.parent().unwrap_or(Path::new(".")).join(format!("{rel}.fly")));
-                    }
+                    && is_relative(from)
+                {
+                    queue.push(normalize(&path.parent().unwrap_or(Path::new(".")).join(format!("{from}.fly"))));
+                }
             }
         }
         p.declare();
@@ -258,12 +274,16 @@ impl Program {
                         self.defs[id].kind = DefKind::Effect { ops: Vec::new() };
                         (e.name.name.clone(), Binding::Def(id))
                     }
+                    ItemKind::Const { name, value, .. } => {
+                        self.consts.push(ConstInfo { name: name.name.clone(), module: m, ty: Ty::Error, value: value.clone() });
+                        (name.name.clone(), Binding::Const(self.consts.len() - 1))
+                    }
                     ItemKind::Function(f) => {
                         let id = self.fns.len();
                         self.fns.push(FnInfo {
                             name: f.sig.name.name.clone(),
                             module: m,
-                            scheme: Scheme { tparams: Vec::new(), params: Vec::new(), ret: Ty::Error, effects: None, ret_from: None },
+                            scheme: Scheme { tparams: Vec::new(), params: Vec::new(), ret: Ty::Error, effects: None, ret_from: Vec::new() },
                             decl: DeclRef { module: m, item: i, method: None },
                             exported: item.exported,
                             impl_id: None,
@@ -302,9 +322,9 @@ impl Program {
             let items = std::mem::take(&mut self.modules[m].ast.items);
             for item in &items {
                 let ItemKind::Import { names, from } = &item.kind else { continue };
-                let target = if let Some(rel) = from.strip_prefix("./") {
+                let target = if is_relative(from) {
                     let dir = Path::new(&self.modules[m].name).parent().unwrap_or(Path::new("")).to_path_buf();
-                    self.module_named(&dir.join(rel).to_string_lossy())
+                    self.module_named(&normalize(&dir.join(from)).to_string_lossy())
                 } else {
                     self.module_named(from)
                 };
@@ -331,6 +351,8 @@ impl Program {
             }
             self.modules[m].ast.items = items;
         }
+        self.check_views();
+        self.elaborate_consts();
         for m in 0..self.modules.len() {
             let items = std::mem::take(&mut self.modules[m].ast.items);
             for (i, item) in items.iter().enumerate() {
@@ -360,6 +382,8 @@ impl Program {
             params: Vec::new(),
             kind: DefKind::Struct { fields: None },
             span: name.span,
+            private: Vec::new(),
+            view: false,
         });
         self.defs.len() - 1
     }
@@ -384,7 +408,12 @@ impl Program {
                     gp.bounds = bounds.iter().map(|b| self.elab_ty(b, &inner)).collect();
                     gp.default = default.as_ref().map(|d| GArg::Ty(self.elab_ty(d, &inner)));
                 }
-                ast::TypeParam::Row { default: Some(d), .. } => gp.default = Some(GArg::Row(self.elab_row_type(d, &inner))),
+                ast::TypeParam::Row { default, bounds, .. } => {
+                    gp.bounds = bounds.iter().map(|b| self.elab_ty(b, &inner)).collect();
+                    if let Some(d) = default {
+                        gp.default = Some(GArg::Row(self.elab_row_type(d, &inner)));
+                    }
+                }
                 ast::TypeParam::Region { default: Some(d), .. } => gp.default = Some(GArg::Region(self.elab_region(d, &inner))),
                 _ => {}
             }
@@ -406,6 +435,15 @@ impl Program {
         let gparams = self.type_params(params, &scope);
         self.defs[id].params = gparams.clone();
         let inner = scope.with_params(&gparams);
+        match &item.kind {
+            ItemKind::Struct(s) => {
+                self.defs[id].view = s.view;
+                self.defs[id].private =
+                    s.fields.iter().flatten().filter(|f| f.private).map(|f| f.name.name.clone()).collect();
+            }
+            ItemKind::Enum(e) => self.defs[id].view = e.view,
+            _ => {}
+        }
         let kind = match &item.kind {
             ItemKind::Struct(s) => DefKind::Struct {
                 fields: s.fields.as_ref().map(|fs| fs.iter().map(|f| (f.name.name.clone(), self.elab_ty(&f.ty, &inner))).collect()),
@@ -435,6 +473,68 @@ impl Program {
             _ => return,
         };
         self.defs[id].kind = kind;
+    }
+
+    /// A nominal type that holds a borrow must be declared `view` (§3.3).
+    fn check_views(&mut self) {
+        for d in 0..self.defs.len() {
+            let def = &self.defs[d];
+            if def.view || self.modules[def.module].is_std {
+                continue;
+            }
+            let parts: Vec<(String, Ty)> = match &def.kind {
+                DefKind::Struct { fields: Some(fs) } => fs.clone(),
+                DefKind::Enum { tags } => tags.iter().map(|(k, t)| (format!("#{k}"), t.clone())).collect(),
+                _ => continue,
+            };
+            for (name, ty) in parts {
+                if self.class(&ty) == 2 {
+                    let shown = format!("{}", Show(&ty, self));
+                    let hint = if shown.contains("str") && !shown.contains("u8") {
+                        "use an owned `String`"
+                    } else {
+                        "use an owned type such as `Vec<T>`"
+                    };
+                    let (module, span, tname) = (self.defs[d].module, self.defs[d].span, self.defs[d].name.clone());
+                    self.error(
+                        module,
+                        span,
+                        format!("`{tname}` holds a borrow in `{name}` (`{shown}`): {hint}, or declare `view` if `{tname}` is a temporary view"),
+                    );
+                    break;
+                }
+            }
+        }
+    }
+
+    /// Module-level constants: their declared type, or a literal's.
+    fn elaborate_consts(&mut self) {
+        for c in 0..self.consts.len() {
+            let m = self.consts[c].module;
+            let items = std::mem::take(&mut self.modules[m].ast.items);
+            let ann = items.iter().find_map(|it| match &it.kind {
+                ItemKind::Const { name, ty, .. } if name.name == self.consts[c].name => Some(ty.clone()),
+                _ => None,
+            });
+            self.modules[m].ast.items = items;
+            let scope = TyScope { module: m, ..Default::default() };
+            let ty = match ann.flatten() {
+                Some(t) => self.elab_ty(&t, &scope),
+                None => match &self.consts[c].value.kind {
+                    ast::ExprKind::Int(_) => Ty::Prim(Prim::I32),
+                    ast::ExprKind::Float(_) => Ty::Prim(Prim::F64),
+                    ast::ExprKind::Str(_) => Ty::Prim(Prim::Str),
+                    ast::ExprKind::Bool(_) => Ty::bool(),
+                    ast::ExprKind::Byte(_) => Ty::Prim(Prim::U8),
+                    _ => {
+                        let span = self.consts[c].value.span;
+                        self.error(m, span, "give this constant a type: `const NAME: Type = …;`");
+                        Ty::Error
+                    }
+                },
+            };
+            self.consts[c].ty = ty;
+        }
     }
 
     fn elaborate_impl(&mut self, m: usize, item: usize, imp: &ast::ImplDecl) {
@@ -498,7 +598,7 @@ impl Program {
             .collect();
         let ret = self.elab_ty(&sig.ret.ty, &inner);
         let effects = sig.uses.as_ref().map(|row| self.elab_effects(row, &inner));
-        Scheme { tparams: all, params, ret, effects, ret_from: sig.ret.from.as_ref().map(|i| i.name.clone()) }
+        Scheme { tparams: all, params, ret, effects, ret_from: sig.ret.from.iter().map(|i| i.name.clone()).collect() }
     }
 
     // ---- elaboration of types ----
@@ -567,6 +667,10 @@ impl Program {
                     }
                     Some(Binding::Fn(_)) => {
                         self.error(m, t.span, format!("`{name}` is a function, not a type"));
+                        Ty::Error
+                    }
+                    Some(Binding::Const(_)) => {
+                        self.error(m, t.span, format!("`{name}` is a constant, not a type"));
                         Ty::Error
                     }
                     None => {
@@ -772,6 +876,29 @@ impl Program {
         }
         out
     }
+}
+
+fn is_relative(import: &str) -> bool {
+    import.starts_with("./") || import.starts_with("../")
+}
+
+/// Lexically normalizes a path (`a/./b/../c` → `a/c`), so one file is one module however it is
+/// reached.
+fn normalize(p: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for c in p.components() {
+        match c {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !out.pop() {
+                    out.push("..");
+                }
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
 }
 
 /// Substitutes generic parameters by arguments.

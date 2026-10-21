@@ -1,2 +1,2 @@
-// error: the result borrows `b`, but the function's result is not tied to `b`
+// error: the result borrows `b`, but `b` is not one of the result's sources
 export function pick(a: str, b: str): str from a { b }

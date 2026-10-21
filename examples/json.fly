@@ -2,11 +2,11 @@ import { RegionList } from "std/region";
 
 export enum Json<region R> {
   #Null, #Bool(bool), #Num(f64), #Str(Ref<str>),
-  #Arr(Ref<RegionList<Ref<Json>>>),
-  #Obj(Ref<RegionList<{ key: Ref<str>; val: Ref<Json> }>>),
+  #Arr(RegionList<Ref<Json>>),
+  #Obj(RegionList<{ key: Ref<str>; val: Ref<Json> }>),
 }
 
-struct Scanner { src: readonly u8[]; pos: usize; }      // class 2: holds a borrow
+view struct Scanner { src: readonly u8[]; pos: usize; }      // a view: it borrows the source
 
 type JsonErr = #Eof | #Unexpected(usize) | #MalformedUtf8;
 
