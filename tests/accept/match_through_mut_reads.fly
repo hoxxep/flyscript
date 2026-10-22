@@ -1,0 +1,23 @@
+// A `match` through a `mut` borrow lends it `mut` only if an arm changes what it binds (§4.1):
+// one that only reads its parts leaves the code around free to use what it matched.
+type Kind = #Alias(u32) | #Plain;
+struct Def { kind: Kind; uses: u32 }
+struct Table { defs: Vec<Def>; seen: u32 }
+
+impl Table {
+  function note(self: readonly Self, n: u32): u32 { n + self.seen }
+  function bump(self: mut Self, d: usize): u32 {
+    // Reads the parts it binds, and calls a `readonly` method on `self` meanwhile.
+    if (const #Alias(n) = self.defs[d].kind) { return self.note(n); }
+    // Changes a part it binds: `mut`, as before.
+    match (self.defs[d].kind) {
+      #Alias(n) => { n += 1; 1 }
+      #Plain => 0,
+    }
+  }
+}
+
+export function main(): void {
+  let t = Table { defs: [Def { kind: #Alias(1), uses: 0 }], seen: 2 };
+  const a = t.bump(0);
+}

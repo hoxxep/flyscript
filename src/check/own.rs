@@ -914,8 +914,13 @@ impl<'p> Own<'p> {
                 Val::default()
             }
             ExprKind::Assign { op, target, value } => {
-                // Into a place that is not a borrow, a borrow is read, not moved.
-                let how = self.arg_use(&self.ty_of(target), &self.ty_of(value));
+                // Into a place that is not a borrow, a borrow is read, not moved. A binding that
+                // holds a `mut` borrow is assigned through: the place is what it refers to.
+                let place_ty = match self.ty_of(target) {
+                    Ty::Borrow(true, inner) if matches!(target.kind, ExprKind::Ident(_)) => *inner,
+                    t => t,
+                };
+                let how = self.arg_use(&place_ty, &self.ty_of(value));
                 let v = self.expr(value, how);
                 match self.place(target) {
                     Some(path) if self.captured(path.root) => {
@@ -941,7 +946,9 @@ impl<'p> Own<'p> {
                             self.state.moved.retain(|m| !m.overlaps(&path));
                         }
                         let ty = self.vars[path.root].ty.clone();
-                        if path.fields.is_empty() && self.may_hold(&ty) {
+                        // Assigned through, a binding holding a `mut` borrow keeps the borrow.
+                        let through = matches!(ty, Ty::Borrow(true, _));
+                        if path.fields.is_empty() && self.may_hold(&ty) && !through {
                             // A binding assigned anew holds only the new value's loans; one
                             // assigned on several paths holds the union, where the paths join (§4.1).
                             self.state.holds.insert(path.root, v.loans.clone());
@@ -1033,6 +1040,9 @@ impl<'p> Own<'p> {
                 // A place that cannot be moved from is matched through a borrow of it: its parts
                 // bind as borrows (§4.1).
                 if let Some(m) = self.typed.lent_scrutinees.get(&scrutinee.span).copied() {
+                    // Through a `mut` borrow it is lent `mut` only if an arm changes what it binds;
+                    // reading it is all the others need, and the code around may read it too.
+                    let m = m && arms.iter().any(|a| self.arm_changes(a));
                     let sv = self.contained(|o| o.expr(scrutinee, if m { Use::Mut } else { Use::Read }));
                     return self.match_arms(arms, sv, how);
                 }
@@ -1852,6 +1862,106 @@ impl Own<'_> {
         Val { loans: out }
     }
 
+    /// Whether a match arm changes a part of the scrutinee it binds: assigns to it, lends it `mut`,
+    /// or calls a method that takes it `mut`.
+    fn arm_changes(&self, arm: &ast::MatchArm) -> bool {
+        let mut names = Vec::new();
+        bind_names(&arm.pat, &mut names);
+        let mut changed = HashSet::new();
+        if let Some(g) = &arm.guard {
+            self.changes(g, &mut changed);
+        }
+        self.changes(&arm.body, &mut changed);
+        names.iter().any(|n| changed.contains(n))
+    }
+
+    /// The bindings an expression changes, by name: what it assigns to, lends `mut`, or passes
+    /// where a `mut` borrow is taken.
+    fn changes(&self, e: &Expr, out: &mut HashSet<String>) {
+        fn root(e: &Expr) -> Option<&str> {
+            match &e.kind {
+                ExprKind::Ident(n) => Some(n),
+                ExprKind::Field { target, .. } | ExprKind::Index { target, .. } | ExprKind::BorrowMut(target) => root(target),
+                _ => None,
+            }
+        }
+        let mut changed = |x: &Expr| {
+            if let Some(r) = root(x) {
+                out.insert(r.to_string());
+            }
+        };
+        match &e.kind {
+            ExprKind::Assign { target, .. } | ExprKind::BorrowMut(target) => changed(target),
+            ExprKind::Call { callee, args, .. } => match self.typed.calls.get(&e.span).map(|f| &self.p.fns[*f].scheme.params) {
+                Some(params) => {
+                    let receiver = match &callee.kind {
+                        ExprKind::Field { target, .. } if params.first().is_some_and(|(n, _)| n == "self") => Some(&**target),
+                        _ => None,
+                    };
+                    for (x, (_, t)) in receiver.into_iter().chain(args.iter()).zip(params) {
+                        if matches!(t, Ty::Borrow(true, _)) {
+                            changed(x);
+                        }
+                    }
+                }
+                None => match self.typed.exprs.get(&callee.span) {
+                    Some(Ty::Fn(f)) => {
+                        for (x, t) in args.iter().zip(&f.params) {
+                            if matches!(t, Ty::Borrow(true, _)) {
+                                changed(x);
+                            }
+                        }
+                    }
+                    _ => args.iter().for_each(&mut changed),
+                },
+            },
+            // A match through a `mut` borrow of a binding that changes what it binds changes it.
+            ExprKind::Match { scrutinee, arms } => {
+                if self.typed.lent_scrutinees.get(&scrutinee.span) == Some(&true) && arms.iter().any(|a| self.arm_changes(a)) {
+                    changed(scrutinee);
+                }
+            }
+            _ => {}
+        }
+        for c in children(e) {
+            self.changes(c, out);
+        }
+        let block = |b: &ast::Block, out: &mut HashSet<String>| {
+            for st in &b.stmts {
+                match st {
+                    Stmt::Let { init, .. } => self.changes(init, out),
+                    Stmt::Defer(x) | Stmt::Expr(x) => self.changes(x, out),
+                }
+            }
+            if let Some(t) = &b.tail {
+                self.changes(t, out);
+            }
+        };
+        match &e.kind {
+            ExprKind::Block(b) | ExprKind::Region { body: b, .. } | ExprKind::Unsafe(b) => block(b, out),
+            ExprKind::If { then, .. } => block(then, out),
+            ExprKind::While { body, .. } | ExprKind::For { body, .. } => block(body, out),
+            ExprKind::Match { arms, .. } => {
+                for a in arms {
+                    if let Some(g) = &a.guard {
+                        self.changes(g, out);
+                    }
+                    self.changes(&a.body, out);
+                }
+            }
+            ExprKind::Try { body, handler, .. } => {
+                block(body, out);
+                block(handler, out);
+            }
+            ExprKind::Handle { body, arms, .. } => {
+                block(body, out);
+                arms.iter().for_each(|a| block(&a.body, out));
+            }
+            ExprKind::Lambda { body, .. } => self.changes(body, out),
+            _ => {}
+        }
+    }
+
     /// Whether a pattern binds a part that is owned and not `Copy`, which it takes.
     fn takes_owned(&self, p: &Pattern) -> bool {
         let mut names = Vec::new();
@@ -1860,6 +1970,28 @@ impl Own<'_> {
             Some(t) => !self.p.is_copy(t) && !matches!(t, Ty::Borrow(..) | Ty::Slice(_) | Ty::Prim(Prim::Str)),
             None => true,
         })
+    }
+}
+
+fn bind_names(p: &Pattern, out: &mut Vec<String>) {
+    let fields = |fs: &[(ast::Ident, Option<Pattern>)], out: &mut Vec<String>| {
+        for (name, sub) in fs {
+            match sub {
+                Some(p) => bind_names(p, out),
+                None => out.push(name.name.clone()),
+            }
+        }
+    };
+    match &p.kind {
+        PatternKind::Bind(n) => out.push(n.clone()),
+        PatternKind::Tuple(ps) | PatternKind::Or(ps) => ps.iter().for_each(|p| bind_names(p, out)),
+        PatternKind::Record { fields: fs, .. } => fields(fs, out),
+        PatternKind::Tag { args, .. } => match args {
+            TagPatArgs::None => {}
+            TagPatArgs::Tuple(ps) => ps.iter().for_each(|p| bind_names(p, out)),
+            TagPatArgs::Record(fs) => fields(fs, out),
+        },
+        _ => {}
     }
 }
 

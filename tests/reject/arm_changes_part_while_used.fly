@@ -1,0 +1,20 @@
+// error: `self` cannot be used here: it was lent `mut` at 9:12, and that borrow is still in use
+// An arm that changes a part it binds holds a `mut` borrow of what it matched: the code in it
+// cannot use that meanwhile (§4.1).
+type Kind = #Alias(u32) | #Plain;
+struct Table { kinds: Vec<Kind>; seen: u32 }
+impl Table {
+  function note(self: readonly Self, n: u32): u32 { n + self.seen }
+  function bump(self: mut Self, d: usize): u32 {
+    match (self.kinds[d]) {
+      #Alias(n) => {
+        n += 1;
+        const r = self.note(1);
+        n += r;
+        r
+      }
+      #Plain => 0,
+    }
+  }
+}
+export function main(): void {}

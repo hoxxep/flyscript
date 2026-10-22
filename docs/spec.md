@@ -20,10 +20,11 @@ The whole language rests on five laws. Every rule in this document is a conseque
 
 ### 0.1 Changes from 0.54
 
-0.55 follows the self-hosted compiler's typed JavaScript back end, which specializes every function for the types it is used at and runs tasks on a scheduler of its own. Earlier changes are in [docs/history](history/).
+0.55 follows the self-hosted compiler's typed JavaScript back end, which specializes every function for the types it is used at and runs tasks on a scheduler of its own, and the port of the ownership pass to Flyscript. Earlier changes are in [docs/history](history/).
 
 | Change | Why |
 | :--- | :--- |
+| A `match` through a `mut` borrow lends it `mut` only if an arm changes a part it binds (§4.1) | a compiler's `match (self.defs[d].kind)` in a `mut self` method locked `self` for arms that only read, so they could not call `readonly` methods |
 | `Scope.spawn` and `Scope.fork` use `Io` (§6.1) | starting a task is a scheduling point, an effect like any other; a back end that suspends tasks at their effects needs to see it in the type |
 
 ---
@@ -309,7 +310,7 @@ A value that is borrowed without having a place — a call's result, a template 
 
 **Through a pointer.** A field of a `Box<T>` or an `Arc<T>` is read through it, as a field of a `Ref<R, T>` is: `b.kind` with `b: Box<Expr>`. A `Box<T>`, a `Ref<R, T>` or an `Arc<T>` is matched as the `T` it holds, through a borrow of it — the borrow the pointer was reached through, or `readonly` for an owned one: `match (node) { #Add(a, b) => … }` with `node: Box<Expr>` binds `a` and `b` as borrows of the boxed `Expr`'s parts. Nothing is moved out of a box by a pattern; take what it holds with `b.into()` (or clone a part) instead.
 
-**A match through a borrow.** A place nothing may be moved out of — reached through a borrow, or an element of a collection (`self.links[v]`) — is matched through a borrow of it, `readonly` or, through a `mut` borrow, `mut`: its parts bind as borrows, with copies for `Copy` parts, as below.
+**A match through a borrow.** A place nothing may be moved out of — reached through a borrow, or an element of a collection (`self.links[v]`) — is matched through a borrow of it: its parts bind as borrows, with copies for `Copy` parts, as below. Reached through a `mut` borrow, it is lent `mut` if an arm changes a part it binds — assigns to it, lends it `mut`, or calls a method that takes it `mut` — and `readonly` otherwise, so `if (const #Alias(n) = self.defs[d].kind) { return self.resolve(n); }` reads `self` while it looks.
 
 **A match moves per arm.** Matching a place moves it only in an arm whose pattern takes an owned, non-`Copy` part; an arm that binds nothing, or only copies, reads it, so `_ => println(`${e}`)` may use what another arm would have taken.
 
