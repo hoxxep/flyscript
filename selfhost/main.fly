@@ -1,7 +1,7 @@
 // The compiler's driver: `main(entry, out, root)` checks the program whose entry module is `entry`
-// — types and effects, then ownership — and compiles it to one JavaScript file `out`, which starts
-// with the runtime and ends by calling the entry's `main` with the command line. `root` is the
-// directory that holds `std/` and `selfhost/runtime.js`.
+// — types and effects, then ownership — and compiles it to one file `out`: C if its name ends in
+// `.c`, JavaScript otherwise, starting with the runtime and ending by calling the entry's `main`
+// with the command line. `root` is the directory that holds `std/` and `selfhost/`.
 
 import { Diagnostic, render } from "./diag";
 import { Program } from "./env";

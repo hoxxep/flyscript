@@ -1470,6 +1470,14 @@ void fly_rlist_push(fly_rlist* l, const void* v) {
   l->len++;
 }
 
+void* fly_rlist_at(const fly_rlist* l, size_t i) {
+  for (fly_rchunk* c = l->first; c; c = c->next) {
+    if (i < c->len) return FLY_RCHUNK_DATA(c) + i * l->size;
+    i -= c->len;
+  }
+  fly_panic("a region list's element out of bounds");
+}
+
 // Well-formed UTF-8: no overlong forms, surrogates, or code points past U+10FFFF.
 bool fly_utf8_valid(fly_slice b) {
   const uint8_t* p = b.ptr;

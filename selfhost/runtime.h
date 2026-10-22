@@ -262,6 +262,8 @@ typedef struct { fly_arena* arena; size_t len, size; fly_rchunk *first, *last; }
 fly_rlist* fly_rlist_new(fly_arena* a, size_t size);
 bool fly_utf8_valid(fly_slice b);
 void fly_rlist_push(fly_rlist* l, const void* v);
+// The address of element `i`, which exists: chunks double, so few are passed on the way.
+void* fly_rlist_at(const fly_rlist* l, size_t i);
 // The elements of a chunk follow it.
 #define FLY_RCHUNK_DATA(c) ((uint8_t*)((c) + 1))
 

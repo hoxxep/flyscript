@@ -27,15 +27,20 @@ The last argument is the directory holding `std/` and `selfhost/`. A program's `
 | `comptime.fly` | The `comptime` interpreter: reflection, generated fields, arms and items. |
 | `check.fly`, `typecheck.fly` | Type and effect inference and checking, recording what code generation needs about every expression. |
 | `own.fly` | The ownership pass: moves, borrows, two-phase lending, what each `match` arm binds, and where values die. |
+| `ir.fly`, `lower.fly` | The core IR, and the lowering of a checked program into it, below. |
+| `c.fly`, `runtime.h`, `runtime.c` | The C back end: a printer of the IR. |
 | `js.fly`, `runtime.js` | The JavaScript back end: every generic function specialized for the types it is used at; effect handlers, generators and tasks as JavaScript generators. |
-| `c.fly`, `runtime.h`, `runtime.c` | The C back end, below. |
 | `main.fly` | The driver: check, then compile to the back end the output path names. |
+
+## The core IR
+
+Lowering starts at `main` and makes one function for each function and set of generic arguments it reaches, so every type is known. Each is lowered once into structured statements over numbered locals: every expression taken apart in evaluation order, every read a copy or a move, every borrow naming the place it lends, every conversion and every call explicit, with whether the call may fail or suspend. This is where the language's semantics are decided for every back end: evaluation order, what a pattern tests and binds, which cleanups each way out of a block runs.
+
+Ownership is lexical. Each block owns the locals it declares, the `defer`s registered in it and the region arenas it opens, and every way out of it — its end, `break`, `return`, a failure, an unwinding — runs its cleanups, the last registered first. A moved value is dead, and dropping a dead value does nothing.
 
 ## The C back end
 
-Code generation starts at `main` and makes one C function for each function and set of generic arguments it reaches, so every type is known where code is made. Values are C's own: integers, floats and structs by value; a tag union is a tag and a union of payloads, its tags numbered across the program so a narrowed union widens by copying.
-
-There is no garbage collector. A value that owns memory is dead when it is all zero bits: a move zeroes what it moves from, a drop does nothing to a dead value, and every function has one way out — for returns, failures and stopped generators alike — that drops what it still owns. `defer`s and region arenas run on the same path.
+Values are C's own: integers, floats and structs by value; a tag union is a tag and a union of payloads, its tags numbered across the program so a narrowed union widens by copying. There is no garbage collector: a value that owns memory is dead when it is all zero bits, so a move zeroes what it moves from. A block's cleanups are written out at each jump that leaves it, and failures and unwindings go from block to block through one way out each; as it prints, the back end follows which owned locals may hold a value, so each way out drops only those.
 
 Failures propagate by checked `goto` to the nearest `catch`. A `for` over a generator turns its body into a function the generator calls with each item. Effect handlers, continuations, `generate` and tasks run on fibers, stacks of their own switched by a few instructions of assembly, with the task scheduler mirroring the reference implementation's exactly, so a seed reproduces an interleaving on every implementation. Regions are bump arenas passed to the functions that allocate in them.
 

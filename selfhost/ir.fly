@@ -1,0 +1,254 @@
+// The core IR: a checked program, specialized and lowered once, which every back end prints.
+//
+// A function's body is structured statements over numbered locals. Every expression has been
+// taken apart in evaluation order: an operand is a constant or a read of a place, and anything
+// more is computed into a local first. Every type is concrete. What the surface leaves implicit is
+// explicit: a read is a copy or a move (which leaves its place dead), a borrow names the place it
+// lends, a union widened or a `String` lent as a `str` is a conversion, a call names the function
+// instance or library routine it reaches and says whether it may fail or suspend.
+//
+// Ownership is lexical. Each block owns the locals it declares and the cleanups registered in it —
+// drops, `defer`s, region arenas — and every way out of the block runs them, the last registered
+// first: its end, `break`, `continue`, `return`, a failure, an unwinding. A moved value is dead,
+// and a cleanup of a dead value does nothing, so cleanups need not know which paths moved what.
+//
+// Code that runs apart from its function in some back ends — a `defer`'s body, a `for` loop's body
+// over a generator, a `handle`'s body and arms — stays nested here, using the function's locals;
+// a back end that runs it apart captures what it uses. A closure is a function of its own, given
+// its captures.
+
+import { Span } from "./diag";
+import { Ty, FnTy, GArg } from "./types";
+import { HashMap } from "std/collections";
+
+export type Local = { name: String; ty: Ty; kind: LocalKind };
+
+export enum LocalKind {
+  #Param,
+  // A binding the program names.
+  #Binding,
+  // A value the lowering made: an intermediate result, a matched value, a loop's counter.
+  #Temp,
+  // A `defer`'s flag: set once the `defer` is reached, so leaving before it skips it.
+  #Flag,
+  // A region's arena.
+  #Arena,
+}
+
+// A place: a local, or a closure's capture, and the path from it.
+export type Place = { root: Root; path: Vec<Proj> };
+
+export enum Root {
+  #Local(usize),
+  #Capture(usize),
+}
+
+// One step along a place's path, with the type of the place it reaches.
+export type Proj = { kind: ProjKind; ty: Ty };
+
+export enum ProjKind {
+  // A struct's or record's field, or a tuple's element by its name `0`, `1`, ….
+  #Field(String),
+  // The payload of a union's tag, which the value is known to have: one value as it is, several as
+  // a tuple.
+  #Payload(String),
+  // An element of an array, a slice, a `Vec` or a `str`, checked against its length.
+  #Index(Operand),
+  // What a borrow, a `Box`, a `Ref`, an `Arc`, or a `Mutex`'s state refers to.
+  #Deref,
+}
+
+export enum Operand {
+  // A value read from its place, which still holds it: a `Copy` value, a borrow, a view.
+  #Copy(Place),
+  // A value taken from its place, which is dead afterwards.
+  #Move(Place),
+  #Const(Constant),
+}
+
+export enum Constant {
+  // An integer of the given type, as its digits.
+  #Int(String, Ty),
+  #Float(String, Ty),
+  #Str(String),
+  #Byte(u8),
+  #Bool(bool),
+  #Unit,
+  // A module-level constant, by its index in the program.
+  #Named(usize, Ty),
+  // A value of a type with nothing in it: a `never` that was never made, an empty union.
+  #Zero(Ty),
+}
+
+export enum Rvalue {
+  #Use(Operand),
+  // A borrow of a place, `mut` or not.
+  #Borrow(bool, Place),
+  // A view of what a place owns: a `String`'s text as a `str`, a `Vec`'s or an array's elements as
+  // a slice.
+  #View(Place),
+  #Unary(String, Operand),
+  // An arithmetic, comparison or bitwise operator on primitives, at the type the result is; the
+  // integer arithmetic is checked.
+  #Binary(String, Operand, Operand),
+  #Cast(Operand, Ty),
+  // Whether the union or enum value at a place has a tag.
+  #IsTag(Place, String),
+  // A value of a union or an enum: its tag, and its payload's values (none, one, or a tuple's).
+  #Tag(String, Vec<Operand>),
+  // A struct, record or tuple of the result type, from its fields' values in its fields' order.
+  #Fields(Vec<[String, Operand]>),
+  // An array or a `Vec` of the result type.
+  #List(Vec<Operand>),
+  // A value of one union as one of another with the same tags it can have: a narrowed union
+  // widened, or what a catch-all arm binds narrowed to the tags no earlier arm took.
+  #Convert(Operand),
+  #Call(Call),
+  // A closure: function `fn` of the program's closures, given its captures; and whether it is only
+  // lent to a call, so it cannot outlive the function making it.
+  #Closure(usize, Vec<Capture>, bool),
+  // A function instance as a value.
+  #FnRef(usize),
+}
+
+// What a closure captures: a value it holds (moved in, or a copy), or a place it borrows.
+export enum Capture {
+  #Value(Operand),
+  #Ref(bool, Place),
+}
+
+export type Call = {
+  callee: Callee;
+  args: Vec<Operand>;
+  // The types the callee takes its arguments as, and the arguments' own types.
+  params: Vec<Ty>;
+  argTys: Vec<Ty>;
+  ret: Ty;
+  // The regions whose arenas the callee is given, by their symbols.
+  regions: Vec<u32>;
+  // Whether it may fail, whether it may suspend (and so be cancelled or unwound), and whether it
+  // yields: to whatever the code calling it yields to.
+  fails: bool;
+  suspends: bool;
+  yields: bool;
+  span: Span;
+};
+
+export enum Callee {
+  // A function instance of the program.
+  #Inst(usize),
+  // A routine of the runtime's, by its key (`Vec_push`, `str_lines`, `Io_sleep`, …).
+  #Builtin(String),
+  // A function value; whether it is called `once`, which consumes it.
+  #Value(Operand, bool),
+}
+
+export enum Stmt {
+  // Computes a value into a local, which held nothing.
+  #Let(usize, Rvalue),
+  // Writes a value into a place, whose old value has been dropped or moved out.
+  #Store(Place, Rvalue),
+  // A place's value, dropped where it is.
+  #Drop(Place),
+  #If(Operand, Block, Block),
+  // A loop, by its label (numbered in the function): its body, run until something leaves it, and
+  // its step, run after the body and on `continue`.
+  #Loop(usize, Block, Block),
+  #Break(usize),
+  #Continue(usize),
+  #Return(Operand),
+  #Throw(Operand, Ty),
+  #Panic(String),
+  #Block(Block),
+  // A block `break` can leave, by its label: what a `match` is lowered to.
+  #Labeled(usize, Block),
+  // `try { body } catch`: a failure leaving the body is put in the local, and the handler runs.
+  #Try(Block, usize, Block),
+  // Arms a `defer` registered in the enclosing block: sets its flag.
+  #Arm(usize),
+  #Yield(Operand, Ty),
+  // A loop over a call of a generator function, by its label: the call, its yields each given to
+  // the body with the item in the local.
+  #ForGen(usize, Call, usize, Block),
+  // `region (R) { … }`: the region's symbol, the local its arena is in, and the body.
+  #Region(u32, usize, Block),
+  // An effect's operation, by the effect's definition and the operation's index: its arguments,
+  // the local its result goes to.
+  #Perform(usize, usize, Vec<Operand>, usize),
+  #Handle(Handle),
+  // `k(a)`: the continuation, its argument, and the local the body's result goes to.
+  #Resume(Operand, Option<Operand>, usize),
+}
+
+// A `handle`: the effect it handles, its body and the local the body's value is in, its arms, and
+// the local the `handle` gives its value in. The body's value, or an arm's, is the value of the
+// `handle`, or of the continuation's call that resumed the body.
+export type Handle = {
+  effect: usize;
+  body: Block;
+  value: usize;
+  arms: Vec<Arm>;
+  result: usize;
+  span: Span;
+};
+
+// An arm of a `handle`: the operation's index, the locals its arguments are bound to, its
+// continuation's local if it resumes, its body, and the local the body's value is in.
+export type Arm = { op: usize; params: Vec<usize>; cont: Option<usize>; body: Block; value: usize };
+
+// A block: the locals declared in it (those of blocks in it are theirs), its cleanups, its statements.
+export type Block = { locals: Vec<usize>; cleanups: Vec<Cleanup>; stmts: Vec<Stmt> };
+
+// What leaving a block does, for each thing registered in it.
+export enum Cleanup {
+  #Drop(usize),
+  // A `defer`: its flag, and its body.
+  #Defer(usize, Block),
+  // A region's arena, freed.
+  #Arena(usize),
+}
+
+export type Func = {
+  name: String;
+  locals: Vec<Local>;
+  params: Vec<usize>;
+  // A closure's captures: their names and types, and whether each is held by value.
+  captures: Vec<[String, Ty, bool]>;
+  ret: Ty;
+  // The regions whose arenas it is given, by their symbols.
+  regions: Vec<u32>;
+  // What it yields, if it is a generator.
+  yields: Option<Ty>;
+  // What it fails with, if it may fail.
+  fails: Option<Ty>;
+  body: Block;
+  // The local the body's value is in.
+  value: usize;
+  span: Span;
+  // The module its code came from, for diagnostics.
+  module: usize;
+};
+
+// A module-level constant's value, built of literals and other constants.
+export enum ConstValue {
+  #Lit(Constant),
+  #Unary(String, Box<ConstValue>, Ty),
+  #Binary(String, Box<ConstValue>, Box<ConstValue>, Ty),
+  // An array or slice of constants, of the given type.
+  #List(Vec<ConstValue>, Ty),
+}
+
+export enum MainArg { #Int(Ty), #Float(Ty), #Str, #Strings, #Strs }
+
+impl Clone for LocalKind;
+impl Clone for Root;
+impl Clone for ProjKind;
+impl Clone for Operand;
+impl Clone for Constant;
+impl Clone for Rvalue;
+impl Clone for Capture;
+impl Clone for Callee;
+impl Clone for Stmt;
+impl Clone for Cleanup;
+impl Clone for ConstValue;
+impl Clone for MainArg;
