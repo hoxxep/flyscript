@@ -71,7 +71,7 @@ Flyscript is an early-stage language under active design, developed in the open.
 
 - **Native code:** the same compiler compiles to C and on to a native executable, with no garbage collector and no runtime to speak of. Ownership decides where every value is freed; failures, `break` and `return` leave through a single exit that drops exactly what is still owned; effect handlers, continuations and tasks run on lightweight fibers; regions are bump arenas released in one step. Every program in the test suite runs natively exactly as it runs in `flyc`, down to how its tasks interleave, with address and undefined-behavior sanitizers watching. The compiler builds itself this way too: natively compiled, it reproduces its own C byte for byte, in about two and a half seconds.
 
-Next: one core IR under every back end, freestanding programs down to a kernel, LLVM, WebAssembly, tasks on every core, and a web framework built on all of it — see the [roadmap](docs/roadmap.md). Flyscript is not yet ready for production programs; it is ready for your ideas, and issues and discussion about the design are very welcome.
+The compiler is written in Flyscript and compiles itself — to JavaScript, to native code, and to WebAssembly — through one core IR; a small kernel written in Flyscript boots on QEMU. Next: an LLVM back end, tasks on every core, and a web framework built on all of it — see the [roadmap](docs/roadmap.md). Flyscript is not yet ready for production programs; it is ready for your ideas, and issues and discussion about the design are very welcome.
 
 ## Explore
 

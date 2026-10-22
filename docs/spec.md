@@ -915,7 +915,7 @@ A foreign call runs on the worker thread's native stack, not on the task's growa
 
 - **Native** (x86-64, AArch64): tasks are stackful fibers scheduled by the runtime over `io_uring` or `kqueue`.
 - **Freestanding** (a kernel, firmware): no operating system and no C library. The program's roots are its `export extern "C"` functions, it has no `main` and no `Io`, and it supplies three functions the runtime calls: `fly_os_alloc(size, align)` for memory, `fly_os_free(p)`, and `fly_os_panic(message, len)`, which does not return. Everything else — failures, regions, `defer`, generators, effect handlers and their fibers — works unchanged, with fiber stacks from `fly_os_alloc`.
-- **WebAssembly**: continuations lower to the stack-switching proposal (or JSPI on hosts without it); the root `Io` handler maps to the host's promises or WASI. Without threads, `par` runs sequentially with the same semantics.
+- **WebAssembly**: a program is compiled through C for WASI. A fiber — a task, a `handle`'s body, a generator — runs on a stack of its own in linear memory, so what it lent stays where it is while it is suspended, and the host switches between fibers by JavaScript promise integration (later, the stack-switching proposal). The root `Io` handler maps to WASI, or to the host's promises. Without threads, `par` runs sequentially with the same semantics.
 
 ---
 

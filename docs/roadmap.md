@@ -20,13 +20,13 @@ The foreign interface of §8.2, built for real, and what a kernel needs beyond i
 
 The proof is a small AArch64 kernel that boots under QEMU, drives a UART through volatile writes, allocates pages fallibly, and has an interrupt handler the type system keeps from sleeping.
 
-## 2. LLVM
+## 2. WebAssembly
+
+Through clang's `wasm32` target for WASI, with fibers in linear memory: each fiber keeps its own shadow stack, so a value lent `mut` across a suspension never moves, and the host switches between them by JavaScript promise integration. `Io` maps to the host: WASI, or promises in a browser. Every test program and the compiler itself run as WebAssembly.
+
+## 3. LLVM
 
 A back end that writes LLVM IR as text from the core IR, linked with the same runtime: exact integer semantics, debug information that maps to `.fly` source, and every target LLVM supports. The C back end stays as the portable, dependency-free bootstrap.
-
-## 3. WebAssembly
-
-Through LLVM's `wasm32` target and the freestanding runtime, with fibers in linear memory: each fiber keeps its own shadow stack, so a value lent `mut` across a suspension never moves. Suspension uses JavaScript promise integration where the host has it. `Io` maps to the host: promises in a browser, WASI elsewhere.
 
 ## 4. Every core
 

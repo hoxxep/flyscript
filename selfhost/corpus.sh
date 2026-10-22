@@ -1,13 +1,16 @@
 #!/bin/sh
 # Compiles each program of the run corpus with a self-hosted compiler and checks what it prints
-# against the program's `// expect:` lines: `selfhost/corpus.sh [--c] compiler.js [program.fly...]`.
+# against the program's `// expect:` lines: `selfhost/corpus.sh [--c | --wasm] compiler.js [program.fly...]`.
 # With `--c` each program is compiled to C and built with `cc`, with the address and undefined
 # behavior sanitizers, so a memory error fails the program. With `--leaks` too, a program that
 # leaks fails: on Linux the address sanitizer checks for leaks itself; where it cannot, on macOS,
 # a plain build is run under `leaks`. A program that panics exits at once, and is not checked.
+# With `--wasm` each is compiled to WebAssembly for WASI and run by `selfhost/wasm.js`.
 c=false
+wasm=false
 leaks=false
 [ "$1" = "--c" ] && { c=true; shift; }
+[ "$1" = "--wasm" ] && { wasm=true; shift; }
 [ "$1" = "--leaks" ] && { leaks=true; shift; }
 command -v leaks > /dev/null 2>&1 || leaks=false
 compiler=$1; shift
@@ -25,7 +28,10 @@ for f in "$@"; do
     printf '%b' "$text" > "$out/$name.cwd/$file"
   done
   # A program may end in a panic, which it prints; what it prints is what is compared.
-  if $c; then
+  if $wasm; then
+    sh "$root/selfhost/wasm.sh" "$compiler" "$f" "$out/$name.wasm" > "$out/$name.err" 2>&1
+    run="node --no-warnings $root/selfhost/wasm.js $out/$name.wasm"
+  elif $c; then
     node --stack-size=65500 "$compiler" "$f" "$out/$name.c" "$root" > "$out/$name.err" 2>&1 &&
       cc -std=gnu11 -g -O1 -w -fsanitize=address,undefined -fno-sanitize-recover=all -o "$out/$name.exe" "$out/$name.c" -lm >> "$out/$name.err" 2>&1
     run="$out/$name.exe"

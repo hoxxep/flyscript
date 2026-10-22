@@ -207,3 +207,43 @@ fn kernel_runs_on_qemu() {
     assert!(r.status.success(), "the kernel did not exit cleanly:\n{}{}", String::from_utf8_lossy(&r.stdout), String::from_utf8_lossy(&r.stderr));
     assert_eq!(String::from_utf8_lossy(&r.stdout), want);
 }
+
+/// Whether WebAssembly for WASI can be built here: clang, wasm-ld, and a WASI sysroot.
+fn has_wasm() -> bool {
+    let have = |tool: &str| Command::new(tool).arg("--version").output().is_ok_and(|o| o.status.success());
+    let sysroot = std::env::var("WASI_SYSROOT").map(PathBuf::from).ok().or_else(|| {
+        Command::new("brew").args(["--prefix", "wasi-libc"]).output().ok().filter(|o| o.status.success()).map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim()).join("share/wasi-sysroot"))
+    });
+    has_node() && have("clang") && have("wasm-ld") && sysroot.is_some_and(|p| p.exists())
+}
+
+/// The run suite, compiled to WebAssembly and run under WASI, prints what it expects.
+#[test]
+fn wasm_programs_run_as_expected() {
+    if !has_wasm() {
+        return;
+    }
+    let r = Command::new("sh").arg(root().join("selfhost/corpus.sh")).arg("--wasm").arg(root().join("selfhost/seed.js")).output().unwrap();
+    let report = String::from_utf8_lossy(&r.stdout);
+    let failed: Vec<&str> = report.lines().filter_map(|l| l.strip_prefix("FAIL ")).collect();
+    assert!(failed.is_empty(), "failed as WebAssembly:\n{}", failed.join("\n"));
+}
+
+/// The compiler, compiled to WebAssembly, compiles itself to the C the seed makes of it.
+#[test]
+fn compiles_itself_in_wasm() {
+    if !has_wasm() {
+        return;
+    }
+    let dir = out();
+    let wasm = dir.join("flyc.wasm");
+    let built = Command::new("sh").arg(root().join("selfhost/wasm.sh")).arg(root().join("selfhost/seed.js")).arg(root().join("selfhost/main.fly")).arg(&wasm).output().unwrap();
+    assert!(built.status.success(), "{}", String::from_utf8_lossy(&built.stderr));
+    // WASI reaches only the working directory: the compiler writes its C there.
+    let made = "target/selfhost-test/wasm-self.c";
+    let r = Command::new("node").args(["--no-warnings", "--stack-size=65500"]).arg(root().join("selfhost/wasm.js")).arg(&wasm).args(["selfhost/main.fly", made, "."]).current_dir(root()).output().unwrap();
+    assert!(r.status.success() && r.stdout.is_empty(), "{}{}", String::from_utf8_lossy(&r.stdout), String::from_utf8_lossy(&r.stderr));
+    let want = dir.join("seed-self.c");
+    compile(&root().join("selfhost/seed.js"), &root().join("selfhost/main.fly"), &want);
+    assert!(std::fs::read(root().join(made)).unwrap() == std::fs::read(&want).unwrap(), "the compiler in WebAssembly made other C than the seed");
+}

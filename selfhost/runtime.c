@@ -5,7 +5,9 @@
 #include <stdarg.h>
 #ifndef FLY_FREESTANDING
 #include <math.h>
+#ifndef __wasm__
 #include <sys/mman.h>
+#endif
 #endif
 
 void* fly_err = NULL;
@@ -805,8 +807,17 @@ __asm__(
   ".globl " FLY_SYM(fly_fiber_trampoline) "\n" FLY_SYM(fly_fiber_trampoline) ":\n"
   "  movq %rbx, %rdi\n  call " FLY_SYM(fly_fiber_start) "\n  ud2\n");
 enum { FRAME_WORDS = 8, FRAME_FIBER = 4, FRAME_RETURN = 6 };
+#elif defined(__wasm__)
+// WebAssembly cannot switch stacks itself: the host does, with JavaScript promise integration.
+// Each fiber runs as a call of `fly_fiber_run` of its own, on a shadow stack of its own in linear
+// memory, so what a suspended fiber lent stays where it is. Switching suspends the fiber leaving
+// and resumes, or starts, the other; the host keeps each fiber's stack pointer meanwhile.
+__attribute__((import_module("fly"), import_name("switch"))) void fly_host_switch(fly_fiber* from, fly_fiber* to);
+__attribute__((import_module("fly"), import_name("free"))) void fly_host_free(fly_fiber* f);
+__attribute__((export_name("fly_fiber_run"))) void fly_fiber_run(fly_fiber* f) { fly_fiber_start(f); }
+__attribute__((export_name("fly_fiber_top"))) uintptr_t fly_fiber_top(fly_fiber* f);
 #else
-#error "fibers need arm64 or x86-64"
+#error "fibers need arm64, x86-64 or WebAssembly"
 #endif
 
 static void switch_to(fly_fiber* to) {
@@ -814,11 +825,13 @@ static void switch_to(fly_fiber* to) {
   from->handlers = fly_handlers;
   fly_handlers = to->handlers;
   current = to;
-#ifdef FLY_ASAN
+#if defined(FLY_ASAN)
   void* fake = NULL;
   __sanitizer_start_switch_fiber(from->done ? NULL : &fake, to->stack, to->size);
   fly_switch(&from->sp, to->sp);
   __sanitizer_finish_switch_fiber(fake, NULL, NULL);
+#elif defined(__wasm__)
+  fly_host_switch(from, to);
 #else
   fly_switch(&from->sp, to->sp);
 #endif
@@ -863,15 +876,15 @@ static void panic_goes_on(void) {
   if (panicking) fiber_panic(panicking);
 }
 
-#ifdef FLY_FREESTANDING
+#if defined(FLY_FREESTANDING) || defined(__wasm__)
 // Stacks come from the program's memory, whole.
 #define FLY_STACK (256u << 10)
 static void* stack_new(size_t size) {
-  void* p = fly_os_alloc(size, 16);
+  void* p = malloc(size);
   if (!p) fly_panic("out of memory");
   return p;
 }
-static void stack_free(void* p, size_t size) { (void)size; fly_os_free(p); }
+static void stack_free(void* p, size_t size) { (void)size; free(p); }
 #else
 // Stacks are reserved large and committed as they are touched.
 #define FLY_STACK (64u << 20)
@@ -890,19 +903,29 @@ static fly_fiber* fiber_new(void (*entry)(void*), void* arg, fly_handler* handle
   f->entry = entry;
   f->arg = arg;
   f->handlers = handlers;
+#ifndef __wasm__
+  // Otherwise the host starts it at the top of its stack.
   uintptr_t top = ((uintptr_t)f->stack + f->size) & ~(uintptr_t)15;
   void** frame = (void**)(top - FRAME_WORDS * sizeof(void*));
   memset(frame, 0, FRAME_WORDS * sizeof(void*));
   frame[FRAME_FIBER] = f;
   frame[FRAME_RETURN] = (void*)fly_fiber_trampoline;
   f->sp = frame;
+#endif
   return f;
 }
 
 static void fiber_free(fly_fiber* f) {
+#ifdef __wasm__
+  fly_host_free(f);
+#endif
   stack_free(f->stack, f->size);
   free(f);
 }
+
+#ifdef __wasm__
+uintptr_t fly_fiber_top(fly_fiber* f) { return ((uintptr_t)f->stack + f->size) & ~(uintptr_t)15; }
+#endif
 
 // ---- handlers ----
 

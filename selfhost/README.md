@@ -46,6 +46,10 @@ Failures propagate by checked `goto` to the nearest `catch`. A `for` over a gene
 
 `corpus.sh --c --leaks` builds every test program natively with the address and undefined-behavior sanitizers and checks for leaks; each prints what the reference implementation prints.
 
+## WebAssembly
+
+`wasm.sh` compiles a program's C to WebAssembly for WASI with clang, and `wasm.js` runs it under Node. WebAssembly cannot switch stacks itself, so the host does: each fiber runs as a call of its own, with JavaScript promise integration, on a shadow stack of its own in linear memory. The compiler compiles itself as WebAssembly to the same C as anywhere else.
+
 ## The JavaScript back end
 
 Values are JavaScript's: a struct an object, a list an array, a tag `{ $tag, $ }`, a `readonly` borrow the value it lends and a `mut` borrow a reference whose `v` reads and writes the place. A block's cleanups run in a `finally`, and only what a destructor can observe is dropped. A function that may suspend is a generator, and a loop over a generator steps it, passing on what it performs besides its items.
