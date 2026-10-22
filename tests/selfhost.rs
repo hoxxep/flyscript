@@ -40,7 +40,10 @@ fn seed_reproduces_itself() {
     assert!(std::fs::read(&again).unwrap() == std::fs::read(&seed).unwrap(), "the seed is stale: run selfhost/bootstrap.sh --update-seed");
 }
 
+/// The slowest check, the interpreter running the whole compiler on itself: run it with
+/// `cargo test -- --ignored`, as before a release, or `selfhost/bootstrap.sh --from-flyc`.
 #[test]
+#[ignore = "runs the compiler in the interpreter for minutes"]
 fn flyc_builds_the_seed() {
     // The interpreter recurses as deeply as the program it runs.
     std::thread::Builder::new().stack_size(1 << 30).spawn(build_with_flyc).unwrap().join().unwrap();
