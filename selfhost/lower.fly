@@ -96,6 +96,8 @@ export function stripBorrow(t: readonly Ty): Ty {
 
 function isBorrow(t: readonly Ty): bool { match (t) { #Borrow(_, _) => true, _ => false } }
 
+function isMutBorrowTy(t: readonly Ty): bool { match (t) { #Borrow(true, _) => true, _ => false } }
+
 export function isVoidTy(t: readonly Ty): bool { match (t) { #Prim(#Void) => true, _ => false } }
 
 // Whether code made for a value of the type need not exist: nothing, or something never made.
@@ -413,6 +415,20 @@ impl Lower {
     match (self.p.fns[fid].scheme.effects) {
       #Some(e) => e.clone(),
       #None => match (self.p.inferred.get(fid)) { #Some(#Some(e)) => e.clone(), _ => pure() },
+    }
+  }
+
+  // The effects of instance `i`.
+  export function instEffects(self: readonly Self, i: usize): EffRow {
+    const fid = self.insts[i].fid;
+    substEffs(self.fnEffects(fid), substMap(self.p.fns[fid].scheme.tparams, self.insts[i].args))
+  }
+
+  // A row of `Io` alone: what the runtime's scheduling points perform.
+  function ioRow(self: readonly Self): EffRow {
+    match (self.p.defs.iter().findIndex((d) => d.name == "Io" && self.p.modules[d.module].isStd)) {
+      #Some(d) => EffRow { effs: [Eff { def: d, regions: Vec.new(), args: Vec.new() }], tail: #Closed },
+      #None => pure(),
     }
   }
 
@@ -999,11 +1015,22 @@ impl Lower {
       match (w) {
         #Prim(#Str) => { if (self.isString(h)) { return self.view(e, w); } }
         #Slice(_) => match (h) {
-          #Named(_, _) | #Array(_, _) => return self.view(e, w),
+          #Named(_, _) | #Array(_, _) => {
+            const v = self.view(e, w.clone());
+            // A view lent `mut` is a borrow of it, through which what it shows is changed.
+            if (const #Borrow(true, _) = want) {
+              const t = self.temp(w.clone());
+              self.emit(#Let(t, #Use(v)));
+              return self.value(#Borrow(true, localPlace(t)), want.clone());
+            }
+            return v;
+          }
           _ => {}
         },
         _ => {}
       }
+      // A view lent `mut` is passed on as it is lent.
+      if (isMutBorrowTy(want) && isMutBorrowTy(have)) { return self.ex(e); }
       return self.valueOf(e);
     }
     // A box lends what it holds.
@@ -1012,7 +1039,12 @@ impl Lower {
       return self.value(#Borrow(m, self.throughBoxes(p, h, w)), want.clone());
     }
     if (const #Borrow(m, _) = want) {
-      if (isBorrow(have)) { return self.ex(e); }
+      // A `mut` borrow wanted `readonly` lends what it refers to anew.
+      if (isBorrow(have) && (m || !isMutBorrowTy(have))) { return self.ex(e); }
+      if (isBorrow(have)) {
+        const p = self.place(e);
+        return self.value(#Borrow(m, p), want.clone());
+      }
       return self.borrow(e, m);
     }
     const v = self.valueOf(e);
@@ -1554,22 +1586,18 @@ impl Lower {
   function builtinCall(self: mut Self, key: str, args: Vec<Operand>, params: Vec<Ty>, ret: Ty, fails: bool, span: Span): Operand {
     const c: Call = {
       callee: #Builtin(key.toString()), args, params: params.clone(), argTys: params, ret: ret.clone(), regions: Vec.new(),
-      fails, suspends: false, yields: false, span,
+      fails, suspends: false, yields: false, row: pure(), span,
     };
     self.value(#Call(c), ret)
   }
 
   // A call of what `c` reaches, its effects as its declaration states them.
   function call0(self: mut Self, c: Callee, args: Vec<Operand>, params: Vec<Ty>, argTys: Vec<Ty>, ret: Ty, span: Span): Operand {
-    const [fails, suspends, regions]: [bool, bool, Vec<u32>] = match (c) {
-      #Inst(i) => {
-        const fid = self.insts[i].fid;
-        const row = substEffs(self.fnEffects(fid), substMap(self.p.fns[fid].scheme.tparams, self.insts[i].args));
-        [self.mayFail(row), self.suspends(row), self.regionsOf(row)]
-      }
-      _ => [false, false, Vec.new()],
+    const row: EffRow = match (c) { #Inst(i) => self.instEffects(i), _ => pure() };
+    const call: Call = {
+      callee: c, args, params, argTys, ret: ret.clone(), regions: self.regionsOf(row), fails: self.mayFail(row),
+      suspends: self.suspends(row), yields: false, row, span,
     };
-    const call: Call = { callee: c, args, params, argTys, ret: ret.clone(), regions, fails, suspends, yields: false, span };
     self.value(#Call(call), ret)
   }
 
@@ -1609,7 +1637,7 @@ impl Lower {
     if (yields && self.yields.isNone()) { return self.fail(e.span, "a closure that yields is called by a generator"); }
     const c: Call = {
       callee: #Value(f, fty.mode == #Once), args: vs, params: fty.params.clone(), argTys: fty.params.clone(), ret: fty.ret.clone(),
-      regions: Vec.new(), fails: self.mayFail(fty.effects), suspends: self.suspends(fty.effects), yields, span: e.span,
+      regions: Vec.new(), fails: self.mayFail(fty.effects), suspends: self.suspends(fty.effects), yields, row: fty.effects.clone(), span: e.span,
     };
     self.value(#Call(c), fty.ret)
   }
@@ -1646,7 +1674,7 @@ impl Lower {
     const yields = match (c) { #Inst(_) => self.yieldsOf(row).isSome(), _ => false };
     {
       callee: c, args: vs, params: ptys, argTys, ret, regions: self.regionsOf(row), fails: self.mayFail(row),
-      suspends: self.suspends(row), yields, span,
+      suspends: self.suspends(row), yields, row, span,
     }
   }
 
@@ -1690,7 +1718,7 @@ impl Lower {
     if (self.p.defs[d].name == "Io" && self.p.modules[self.p.defs[d].module].isStd) {
       const c: Call = {
         callee: #Builtin(`perform:Io:${op}`), args: vs, params: tys.clone(), argTys: tys, ret: rt.clone(), regions: Vec.new(),
-        fails: false, suspends: true, yields: false, span: e.span,
+        fails: false, suspends: true, yields: false, row: self.ioRow(), span: e.span,
       };
       return self.value(#Call(c), rt);
     }
@@ -2411,7 +2439,7 @@ impl Lower {
       const ot = optionTy(itemTy.clone());
       const c: Call = {
         callee: #Builtin("Receiver_recv".toString()), args: [#Copy(localPlace(ch))], params: [it.clone()], argTys: [it.clone()],
-        ret: ot.clone(), regions: Vec.new(), fails: false, suspends: true, yields: false, span: iter.span,
+        ret: ot.clone(), regions: Vec.new(), fails: false, suspends: true, yields: false, row: self.ioRow(), span: iter.span,
       };
       const o = self.value(#Call(c), ot.clone());
       self.nextItem(l, pat, o, ot, itemTy, body);
@@ -2609,7 +2637,8 @@ impl Lower {
     const k = self.closures.len();
     const func: Func = {
       name: `lam_${k}`, locals: replace(mut self.locals, Vec.new()), params: ps, captures: decls, ret, regions,
-      yields: self.yields.clone(), fails: self.failOf(fty.effects), body: top, value, span: e.span, module: self.module,
+      yields: self.yields.clone(), fails: self.failOf(fty.effects), row: fty.effects.clone(), once: fty.mode == #Once, body: top,
+      value, span: e.span, module: self.module,
     };
     self.restoreFn(saved);
     self.closures.push(func);
@@ -2718,7 +2747,8 @@ impl Lower {
     const top = self.popHome();
     #Some({
       name: self.insts[i].name.clone(), locals: replace(mut self.locals, Vec.new()), params: ps, captures: Vec.new(), ret,
-      regions: self.regionsOf(effs), yields: self.yieldsOf(effs), fails: self.failOf(effs), body: top, value, span: decl.sig.span,
+      regions: self.regionsOf(effs), yields: self.yieldsOf(effs), fails: self.failOf(effs), row: effs.clone(), once: false, body: top,
+      value, span: decl.sig.span,
       module: self.module,
     })
   }

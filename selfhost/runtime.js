@@ -636,7 +636,7 @@ const { $rt, $b } = (() => {
       if (r instanceof RangeRef) return;
       for (let i = 0; i < sorted.length; i++) a[i] = sorted[i];
     },
-    slice_reverse(r) { r.v = r.v.slice().reverse(); },
+    slice_reverse(r) { const a = r.v, rev = a.slice().reverse(); for (let i = 0; i < rev.length; i++) a[i] = rev[i]; },
     *slice_each(a) { for (const x of items(a)) yield new Yielded(x); },
     *array_each(a) { for (const x of a) yield new Yielded(x); },
 
@@ -909,7 +909,28 @@ const { $rt, $b } = (() => {
     }
   }
 
+  // ---- what code made from the core IR uses ----
+
+  // A value taken out of its place, which is left dead.
+  const take = (v) => v;
+  // A list lent `mut`, as a reference to its range.
+  const sliceRef = (v) => (v instanceof RangeRef || !Array.isArray(v) ? v : new RangeRef(v, 0, v.length));
+  const strCmp = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
+  // The next line, or word, of a text and what is left of it.
+  function nextLine(s) {
+    if (s.length === 0) return [undefined, s];
+    const i = s.indexOf("\n");
+    const line = i < 0 ? s : s.slice(0, i);
+    return [line.endsWith("\r") ? line.slice(0, -1) : line, i < 0 ? "" : s.slice(i + 1)];
+  }
+  function nextWord(s) {
+    const m = /^[ \t\n\r]*([^ \t\n\r]+)/.exec(s);
+    return m === null ? [undefined, ""] : [m[1], s.slice(m[0].length)];
+  }
+  const nextConnection = () => (world.incoming.length > 0 ? some({ input: world.incoming.shift(), pos: 0 }) : none());
+
   const $rt = {
+    take, sliceRef, strCmp, nextLine, nextWord, nextConnection,
     Fail, Panic, Return, YIELD, handle, run, drive, moved, isMoved, sub, unmove, panic, raise, FieldRef, indexRef, rangeRef, yielded, isYield, perform, items,
     div, rem, ndiv, nrem, bits, fmod, truncFloat, truncNum, toInt, toNum, at, idx, slice, copy, showFloat, shown, show,
     unmatched: (v) => panic(`no arm matched ${show(v)}`),

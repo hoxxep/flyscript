@@ -18,7 +18,7 @@
 // its captures.
 
 import { Span } from "./diag";
-import { Ty, FnTy, GArg } from "./types";
+import { Ty, FnTy, GArg, EffRow } from "./types";
 import { HashMap } from "std/collections";
 
 export type Local = { name: String; ty: Ty; kind: LocalKind };
@@ -131,6 +131,8 @@ export type Call = {
   fails: bool;
   suspends: bool;
   yields: bool;
+  // The effects the call performs, as the callee states them: what a back end decides more by.
+  row: EffRow;
   span: Span;
 };
 
@@ -221,6 +223,9 @@ export type Func = {
   yields: Option<Ty>;
   // What it fails with, if it may fail.
   fails: Option<Ty>;
+  // Its effects; and, for a closure, whether it is called `once`.
+  row: EffRow;
+  once: bool;
   body: Block;
   // The local the body's value is in.
   value: usize;

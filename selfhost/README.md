@@ -29,7 +29,7 @@ The last argument is the directory holding `std/` and `selfhost/`. A program's `
 | `own.fly` | The ownership pass: moves, borrows, two-phase lending, what each `match` arm binds, and where values die. |
 | `ir.fly`, `lower.fly` | The core IR, and the lowering of a checked program into it, below. |
 | `c.fly`, `runtime.h`, `runtime.c` | The C back end: a printer of the IR. |
-| `js.fly`, `runtime.js` | The JavaScript back end: every generic function specialized for the types it is used at; effect handlers, generators and tasks as JavaScript generators. |
+| `js.fly`, `runtime.js` | The JavaScript back end: a printer of the IR, with effect handlers, generators and tasks as JavaScript generators. |
 | `main.fly` | The driver: check, then compile to the back end the output path names. |
 
 ## The core IR
@@ -45,6 +45,10 @@ Values are C's own: integers, floats and structs by value; a tag union is a tag 
 Failures propagate by checked `goto` to the nearest `catch`. A `for` over a generator turns its body into a function the generator calls with each item. Effect handlers, continuations, `generate` and tasks run on fibers, stacks of their own switched by a few instructions of assembly, with the task scheduler mirroring the reference implementation's exactly, so a seed reproduces an interleaving on every implementation. Regions are bump arenas passed to the functions that allocate in them.
 
 `corpus.sh --c --leaks` builds every test program natively with the address and undefined-behavior sanitizers and checks for leaks; each prints what the reference implementation prints.
+
+## The JavaScript back end
+
+Values are JavaScript's: a struct an object, a list an array, a tag `{ $tag, $ }`, a `readonly` borrow the value it lends and a `mut` borrow a reference whose `v` reads and writes the place. A block's cleanups run in a `finally`, and only what a destructor can observe is dropped. A function that may suspend is a generator, and a loop over a generator steps it, passing on what it performs besides its items.
 
 ## Building the compiler
 
