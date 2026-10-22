@@ -49,6 +49,58 @@ pub struct Closure {
     pub once: bool,
 }
 
+/// A hash map's contents: each entry a `Tuple` of key and value, in insertion order, so that a
+/// borrow of an entry's value is a path into the map (`[Index(i), Index(1)]`), and an index from
+/// each key's structural hash to the entries with it.
+#[derive(Clone, Default)]
+pub struct Dict {
+    pub entries: Vec<Value>,
+    index: std::collections::HashMap<u64, Vec<usize>>,
+}
+
+/// An entry's key and value.
+pub fn entry(e: &Value) -> (&Value, &Value) {
+    match e {
+        Value::Tuple(kv) => (&kv[0], &kv[1]),
+        _ => panic!("a map entry is a pair"),
+    }
+}
+
+impl Dict {
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    pub fn find(&self, key: &Value) -> Option<usize> {
+        self.index.get(&key.hash_value())?.iter().copied().find(|&i| entry(&self.entries[i]).0.equals(key))
+    }
+
+    pub fn insert(&mut self, key: Value, value: Value) {
+        match self.find(&key) {
+            Some(i) => self.entries[i] = Value::Tuple(vec![key, value]),
+            None => {
+                self.index.entry(key.hash_value()).or_default().push(self.entries.len());
+                self.entries.push(Value::Tuple(vec![key, value]));
+            }
+        }
+    }
+
+    pub fn remove(&mut self, key: &Value) -> Option<Value> {
+        let i = self.find(key)?;
+        let Value::Tuple(mut kv) = self.entries.remove(i) else { return None };
+        // Later entries moved down one: index them again.
+        self.index.clear();
+        for (j, e) in self.entries.iter().enumerate() {
+            self.index.entry(entry(e).0.hash_value()).or_default().push(j);
+        }
+        kv.pop()
+    }
+}
+
 #[derive(Clone)]
 pub enum Value {
     Unit,
@@ -63,8 +115,8 @@ pub enum Value {
     Tag(Arc<str>, Box<Value>),
     /// Arrays, `Vec`s and slices.
     List(Vec<Value>),
-    /// A `HashMap`, kept in insertion order.
-    Map(Vec<(Value, Value)>),
+    /// A `HashMap`: its entries in insertion order, found by hash.
+    Map(Dict),
     /// A borrow: transparent, it reads and writes through to its place.
     Ptr(Place),
     /// A region reference (§4.6): a `Copy` pointer that stays a pointer when stored or passed.
@@ -162,9 +214,9 @@ impl Value {
                 Value::Tuple(vs) => format!("#{name}({})", vs.iter().map(|v| v.show_nested()).collect::<Vec<_>>().join(", ")),
                 other => format!("#{name} {}", other.show_nested()),
             },
-            Value::Map(entries) => format!(
+            Value::Map(d) => format!(
                 "{{ {} }}",
-                entries.iter().map(|(k, v)| format!("{}: {}", k.show_nested(), v.show_nested())).collect::<Vec<_>>().join(", ")
+                d.entries.iter().map(|e| format!("{}: {}", entry(e).0.show_nested(), entry(e).1.show_nested())).collect::<Vec<_>>().join(", ")
             ),
             Value::Ptr(p) => get(p).show(),
             Value::Ref(r) => r.lock().expect("ref").show(),
@@ -178,6 +230,62 @@ impl Value {
         match self.deref() {
             Value::Text(s) => format!("{s:?}"),
             v => v.show(),
+        }
+    }
+
+    /// A hash consistent with `equals`: equal values hash alike, through borrows.
+    pub fn hash_value(&self) -> u64 {
+        let mut h: u64 = 0xcbf29ce484222325;
+        self.hash_into(&mut h);
+        h
+    }
+
+    fn hash_into(&self, h: &mut u64) {
+        let eat = |h: &mut u64, bytes: &[u8]| {
+            for b in bytes {
+                *h = (*h ^ *b as u64).wrapping_mul(0x100000001b3);
+            }
+        };
+        match self.deref() {
+            Value::Unit => eat(h, &[0]),
+            Value::Bool(b) => eat(h, &[1, b as u8]),
+            Value::Int(i) => eat(h, &(i as i64).to_le_bytes()),
+            // An integral float equals the integer, so it hashes as one.
+            Value::Float(f) if f.fract() == 0.0 && f.abs() < 1e18 => eat(h, &(f as i64).to_le_bytes()),
+            Value::Float(f) => eat(h, &f.to_bits().to_le_bytes()),
+            // A string equals the list of its bytes, so they hash alike.
+            Value::Text(s) => {
+                eat(h, &[3]);
+                for b in s.bytes() {
+                    eat(h, &(b as i64).to_le_bytes());
+                }
+            }
+            Value::List(vs) => {
+                eat(h, &[3]);
+                for v in &vs {
+                    v.hash_into(h);
+                }
+            }
+            Value::Tuple(vs) => {
+                eat(h, &[4]);
+                for v in &vs {
+                    v.hash_into(h);
+                }
+            }
+            Value::Record(fs) => {
+                eat(h, &[5]);
+                for (k, v) in &fs {
+                    eat(h, k.as_bytes());
+                    v.hash_into(h);
+                }
+            }
+            Value::Tag(name, payload) => {
+                eat(h, &[6]);
+                eat(h, name.as_bytes());
+                payload.hash_into(h);
+            }
+            Value::Map(d) => eat(h, &(d.len() as u64).to_le_bytes()),
+            _ => eat(h, &[7]),
         }
     }
 
@@ -199,6 +307,13 @@ impl Value {
             (Value::Record(a), Value::Record(b)) => a.len() == b.len() && a.iter().all(|(k, v)| b.get(k).is_some_and(|w| v.equals(w))),
             (Value::Tag(a, p), Value::Tag(b, q)) => a == b && p.equals(&q),
             (Value::Native(k, a), Value::Native(l, b)) => k == l && a == b,
+            (Value::Map(a), Value::Map(b)) => {
+                a.len() == b.len()
+                    && a.entries.iter().all(|e| {
+                        let (k, v) = entry(e);
+                        b.find(k).is_some_and(|i| entry(&b.entries[i]).1.equals(v))
+                    })
+            }
             _ => false,
         }
     }
@@ -213,6 +328,7 @@ fn step(v: &Value, seg: &Seg) -> Value {
         (Value::Tag(_, payload), Seg::Payload) => (**payload).clone(),
         (Value::Tag(_, payload), _) => step(payload, seg),
         (Value::List(vs) | Value::Tuple(vs), Seg::Index(i)) => vs.get(*i).cloned().unwrap_or_else(|| panic!("index {i} out of bounds (length {})", vs.len())),
+        (Value::Map(d), Seg::Index(i)) => d.entries[*i].clone(),
         (Value::Text(s), Seg::Index(i)) => Value::Int(*s.as_bytes().get(*i).unwrap_or_else(|| panic!("index {i} out of bounds")) as i128),
         (Value::List(vs), Seg::Range(lo, hi)) => Value::List(vs[*lo..*hi].to_vec()),
         (Value::Text(s), Seg::Range(lo, hi)) => Value::Text(Arc::new(s[*lo..*hi].to_string())),
@@ -257,6 +373,7 @@ fn step_ref<'a>(v: &'a Value, seg: &Seg) -> Option<&'a Value> {
         (Value::Tag(_, payload), Seg::Payload) => Some(payload),
         (Value::Tag(_, payload), _) => step_ref(payload, seg),
         (Value::List(vs) | Value::Tuple(vs), Seg::Index(i)) => vs.get(*i),
+        (Value::Map(d), Seg::Index(i)) => d.entries.get(*i),
         _ => None,
     }
 }
@@ -268,6 +385,7 @@ fn step_mut<'a>(v: &'a mut Value, seg: &Seg) -> Option<&'a mut Value> {
         (Value::Tag(_, payload), Seg::Payload) => Some(payload),
         (Value::Tag(_, payload), seg) => step_mut(payload, seg),
         (Value::List(vs) | Value::Tuple(vs), Seg::Index(i)) => vs.get_mut(*i),
+        (Value::Map(d), Seg::Index(i)) => d.entries.get_mut(*i),
         _ => None,
     }
 }
@@ -320,6 +438,8 @@ fn write_at(v: &mut Value, path: &[Seg], new: Value) {
         (Value::Tag(_, payload), Seg::Payload) => write_at(payload, rest, new),
         (Value::Tag(_, payload), _) => write_at(payload, path, new),
         (Value::List(vs) | Value::Tuple(vs), Seg::Index(i)) => write_at(&mut vs[*i], rest, new),
+        // An entry's value, never its key: the index stays right.
+        (Value::Map(d), Seg::Index(i)) => write_at(&mut d.entries[*i], rest, new),
         (Value::List(vs), Seg::Range(lo, _)) => write_in_range(vs, *lo, rest, new),
         (other, seg) => panic!("cannot write {seg:?} into {}", other.show()),
     }

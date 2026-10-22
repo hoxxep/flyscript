@@ -208,7 +208,7 @@ impl Interp {
         self.ids.fetch_add(1, Ordering::Relaxed)
     }
 
-    fn ty_of(&self, span: Span) -> Option<Ty> {
+    pub(crate) fn ty_of(&self, span: Span) -> Option<Ty> {
         self.prog.typed.get(&self.lex.owner).and_then(|t| t.exprs.get(&span)).cloned()
     }
 

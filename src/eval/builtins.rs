@@ -88,6 +88,16 @@ fn with_list<R>(v: &Value, f: impl FnOnce(&[Value]) -> R) -> R {
     }
 }
 
+/// The number of entries in a map, without copying it.
+fn map_len(v: &Value) -> usize {
+    match v {
+        Value::Map(d) => d.len(),
+        Value::Ptr(p) => view(p, map_len),
+        Value::Cell(c) | Value::Ref(c) => map_len(&c.lock().expect("cell")),
+        _ => 0,
+    }
+}
+
 /// The length of a list, or of the bytes a string stands for, without copying either.
 fn len_of(v: &Value) -> usize {
     match v {
@@ -545,82 +555,88 @@ impl Interp {
             "Box.new" | "Arc.new" | "Box.get" | "Arc.get" | "Box.into" => Ok(a(0).deref_once()),
             // The same shared value: through the borrow of the `Arc`, never into a cell it shares.
             "Arc.clone" => Ok(a(0).deref_once()),
-            "HashMap.new" => Ok(Value::List(Vec::new())),
+            "HashMap.new" => Ok(Value::Map(Dict::default())),
             "HashMap.insert" => {
                 let p = place_of(&a(0))?;
-                let (k, v) = (a(1), a(2));
+                let k = std::mem::replace(&mut args[1], Value::Unit).deref();
+                let v = std::mem::replace(&mut args[2], Value::Unit);
                 update(&p, |m| {
-                    if let Value::List(entries) = m {
-                        match entries.iter_mut().find(|e| matches!(e, Value::Tuple(kv) if kv[0].equals(&k))) {
-                            Some(Value::Tuple(kv)) => kv[1] = v,
-                            _ => entries.push(Value::Tuple(vec![k, v])),
-                        }
+                    if let Value::Map(d) = m {
+                        d.insert(k, v);
                     }
                 });
                 Ok(Value::Unit)
             }
             "HashMap.get" | "HashMap.getMut" => {
                 let p = place_of(&a(0))?;
-                let key = a(1);
-                let entries = list(&Value::Ptr(p.clone()));
-                match entries.iter().position(|e| matches!(e, Value::Tuple(kv) if kv[0].equals(&key))) {
-                    Some(i) if key.deref().equals(&key) && self.builtin_key(fid) == "HashMap.getMut" => {
-                        let mut q = p.clone();
-                        q.path.extend([Seg::Index(i), Seg::Index(1)]);
-                        Ok(some(Value::Ptr(q)))
-                    }
-                    Some(i) => Ok(some(list(&entries[i])[1].clone())),
-                    None => Ok(none()),
+                let key = a(1).deref();
+                let found = view(&p, |m| match m {
+                    Value::Map(d) => d.find(&key),
+                    _ => None,
+                });
+                let Some(i) = found else { return Ok(none()) };
+                let mut q = p.clone();
+                q.path.extend([Seg::Index(i), Seg::Index(1)]);
+                // A value lent where it is, unless it is `Copy`: a copy holds no loan (§4.4), so
+                // the map may change while it lives.
+                let copy = match self.call_span.and_then(|s| self.ty_of(s)).map(|t| self.frame_ty(&t)) {
+                    Some(crate::check::types::Ty::Named(_, targs)) => match targs.first() {
+                        Some(crate::check::types::GArg::Ty(crate::check::types::Ty::Borrow(false, inner))) => self.prog.is_copy(inner),
+                        _ => false,
+                    },
+                    _ => false,
+                };
+                if self.builtin_key(fid) == "HashMap.getMut" || !copy {
+                    Ok(some(Value::Ptr(q)))
+                } else {
+                    Ok(some(get(&q)))
                 }
             }
-            "HashMap.len" => Ok(Value::Int(with_list(&a(0), <[Value]>::len) as i128)),
+            "HashMap.len" => Ok(Value::Int(map_len(&a(0)) as i128)),
             "HashMap.has" => {
-                let key = a(1);
-                Ok(Value::Bool(with_list(&a(0), |es| es.iter().any(|e| with_list(e, |kv| kv[0].equals(&key))))))
+                let key = a(1).deref();
+                let p = place_of(&a(0))?;
+                Ok(Value::Bool(view(&p, |m| matches!(m, Value::Map(d) if d.find(&key).is_some()))))
             }
             "HashMap.remove" => {
                 let p = place_of(&a(0))?;
-                let key = a(1);
+                let key = a(1).deref();
                 let mut removed = none();
                 update(&p, |m| {
-                    if let Value::List(entries) = m
-                        && let Some(i) = entries.iter().position(|e| matches!(e, Value::Tuple(kv) if kv[0].equals(&key))) {
-                            removed = some(list(&entries.remove(i))[1].clone());
+                    if let Value::Map(d) = m
+                        && let Some(v) = d.remove(&key) {
+                            removed = some(v);
                         }
                 });
                 Ok(removed)
             }
             "HashMap.keys" | "HashMap.values" | "HashMap.entries" | "HashMap.valuesMut" => {
                 let p = place_of(&a(0))?;
-                let entries = list(&Value::Ptr(p.clone()));
+                let n = view(&p, |m| match m {
+                    Value::Map(d) => d.len(),
+                    _ => 0,
+                });
                 let key = self.builtin_key(fid);
-                let items = entries
-                    .iter()
-                    .enumerate()
-                    .map(|(i, e)| {
-                        let kv = list(e);
-                        match key.as_str() {
-                            "HashMap.keys" => kv[0].clone(),
-                            "HashMap.values" => kv[1].clone(),
-                            "HashMap.valuesMut" => {
-                                let mut q = p.clone();
-                                q.path.extend([Seg::Index(i), Seg::Index(1)]);
-                                Value::Ptr(q)
-                            }
-                            _ => Value::Tuple(vec![kv[0].clone(), kv[1].clone()]),
-                        }
+                // Each item lent where it is in the map.
+                let at = |i: usize, j: usize| {
+                    let mut q = p.clone();
+                    q.path.extend([Seg::Index(i), Seg::Index(j)]);
+                    Value::Ptr(q)
+                };
+                let items = (0..n)
+                    .map(|i| match key.as_str() {
+                        "HashMap.keys" => at(i, 0),
+                        "HashMap.values" | "HashMap.valuesMut" => at(i, 1),
+                        _ => Value::Tuple(vec![at(i, 0), at(i, 1)]),
                     })
                     .collect();
                 Ok(gens_mod::new_gen(self, GenKind::Items { items, pos: 0 }))
             }
             "HashMap.sortedByValue" => {
-                let mut entries: Vec<(Value, Value)> = list(&a(0))
-                    .into_iter()
-                    .map(|e| {
-                        let kv = list(&e);
-                        (kv[0].clone(), kv[1].clone())
-                    })
-                    .collect();
+                let mut entries: Vec<(Value, Value)> = match a(0).deref() {
+                    Value::Map(d) => d.entries.iter().map(|e| (entry(e).0.clone(), entry(e).1.clone())).collect(),
+                    _ => Vec::new(),
+                };
                 entries.sort_by(|(k1, v1), (k2, v2)| {
                     v2.as_int().cmp(&v1.as_int()).then_with(|| k1.as_text().cmp(&k2.as_text()))
                 });
