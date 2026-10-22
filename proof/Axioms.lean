@@ -4,3 +4,5 @@ import FlyCore
 
 #print axioms FlyCore.Effects.sound
 #print axioms FlyCore.Effects.program_sound
+#print axioms FlyCore.Ownership.eval_ok
+#print axioms FlyCore.Ownership.program_ok

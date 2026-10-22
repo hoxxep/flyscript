@@ -1,0 +1,846 @@
+import FlyCore.OwnershipFrames
+
+/-!
+# Ownership: what a call does
+
+A call evaluates its owned arguments, binds them in fresh cells, lends its places — each a hole in
+the tree of the variable it is rooted at — runs the body, and drops the parameters it owns. The
+lemmas here follow those steps; `eval_ok` puts them together.
+-/
+
+namespace FlyCore.Ownership
+
+/-- What evaluating may give: never stuck; a value, with the activation still well formed after,
+the value owning cells no variable does, and the step accounted for. -/
+def Post (σ : Store) (E S : List Nat) (Γ' : Ctx) (env : Env) (τ : Ty) : Res × Store → Prop
+  | (.stuck, _) => False
+  | (.timeout, _) => True
+  | (.val v, σ') => ∃ E' L, Inv σ' Γ' env E' S ∧ VT σ' τ v L ∧ Disj L E' ∧ Disj L S ∧
+      Moves σ E σ' E' L
+
+/-- A function's context: its owned parameters, live, then its borrowed ones. -/
+def fnCtx (d : Fn) : Ctx :=
+  d.owns.map (fun p => (p.1, Slot.own p.2 true)) ++ d.refs.map (fun p => (p.1, Slot.ref p.2.1 p.2.2))
+
+/-- A function whose parameters are named apart and whose body has its result type. -/
+def FnOk (F : List Fn) (d : Fn) : Prop :=
+  ((d.owns.map Prod.fst) ++ (d.refs.map Prod.fst)).Nodup ∧ ∃ Γ', Typed F (fnCtx d) d.body d.ret Γ'
+
+def FnsOk (F : List Fn) : Prop := ∀ d ∈ F, FnOk F d
+
+
+/-! ## Steps that keep what they do not own -/
+
+/-- Cells that were allocated and outside the footprint are as they were. -/
+theorem Moves.keeps (h : Moves σ E σ' E' L) (hwf : WF σ) (hX : ∀ l ∈ X, σ.mem l ≠ none)
+    (hd : Disj X E) : Agree σ σ' X :=
+  fun l hl => h.frame l (hwf l (hX l hl)) (hd l hl)
+
+/-- What a step gives or leaves in its footprint is apart from cells it could not reach. -/
+theorem Moves.apart (h : Moves σ E σ' E' L) (hwf : WF σ) (hX : ∀ l ∈ X, σ.mem l ≠ none)
+    (hd : Disj X E) : Disj X E' ∧ Disj X L := by
+  refine ⟨fun l hl hl' => ?_, fun l hl hl' => ?_⟩ <;>
+  · rcases h.within l (by first | exact .inr hl' | exact .inl hl') with h' | h'
+    · exact hd l hl h'
+    · exact Nat.lt_irrefl _ (Nat.lt_of_lt_of_le (hwf l (hX l hl)) h')
+
+/-- A step widened by cells it leaves alone. -/
+theorem Moves.widen (h : Moves σ E σ' E' L) (hX : ∀ l ∈ X, σ.mem l ≠ none) (hd : Disj X E) :
+    Moves σ (X ++ E) σ' (X ++ E') L where
+  within := by
+    intro l hl
+    rcases hl with hl | hl
+    · rcases h.within l (.inl hl) with h' | h'
+      · exact .inl (List.mem_append.mpr (.inr h'))
+      · exact .inr h'
+    · rcases List.mem_append.mp hl with hl | hl
+      · exact .inl (List.mem_append.mpr (.inl hl))
+      · rcases h.within l (.inr hl) with h' | h'
+        · exact .inl (List.mem_append.mpr (.inr h'))
+        · exact .inr h'
+  next := h.next
+  wf := h.wf
+  frame := fun l hl hn => h.frame l hl (fun h' => hn (List.mem_append.mpr (.inr h')))
+  alloc := by
+    intro l
+    rw [h.alloc]
+    simp only [List.mem_append, not_or]
+    constructor
+    · rintro (⟨ha, hE⟩ | h' | h')
+      · by_cases hlX : l ∈ X
+        · exact .inr (.inl (.inl hlX))
+        · exact .inl ⟨ha, hlX, hE⟩
+      · exact .inr (.inl (.inr h'))
+      · exact .inr (.inr h')
+    · rintro (⟨ha, -, hE⟩ | (h' | h') | h')
+      · exact .inl ⟨ha, hE⟩
+      · exact .inl ⟨hX l h', hd l h'⟩
+      · exact .inr (.inl h')
+      · exact .inr (.inr h')
+
+/-- A step that only allocates: everything below `σ.next` is as it was, and the new cells join the
+footprint. -/
+theorem Moves.grow (hwf : WF σ) (hwf' : WF σ') (hn : σ.next ≤ σ'.next)
+    (hold : ∀ l, l < σ.next → σ'.mem l = σ.mem l) (hnew : ∀ l, σ.next ≤ l → l < σ'.next → σ'.mem l ≠ none)
+    (hE : ∀ l ∈ E, σ.mem l ≠ none) (hE' : ∀ l, l ∈ E' ↔ l ∈ E ∨ (σ.next ≤ l ∧ l < σ'.next)) :
+    Moves σ E σ' E' [] where
+  within := by
+    intro l hl
+    rcases hl with hl | hl
+    · simp at hl
+    · rcases (hE' l).mp hl with h | h
+      · exact .inl h
+      · exact .inr h.1
+  next := hn
+  wf := hwf'
+  frame := fun l hl _ => hold l hl
+  alloc := by
+    intro l
+    rw [hE']
+    simp only [List.not_mem_nil, or_false]
+    by_cases hl : l < σ.next
+    · rw [hold l hl]
+      constructor
+      · intro ha
+        by_cases hlE : l ∈ E
+        · exact .inr (.inl hlE)
+        · exact .inl ⟨ha, hlE⟩
+      · rintro (⟨ha, -⟩ | hlE | ⟨h, -⟩)
+        · exact ha
+        · exact hE l hlE
+        · exact absurd hl (Nat.not_lt.mpr h)
+    · have hnone : σ.mem l = none := by
+        by_cases h : σ.mem l = none
+        · exact h
+        · exact absurd (hwf l h) hl
+      have hnE : l ∉ E := fun h => hE l h hnone
+      constructor
+      · intro ha
+        exact .inr (.inr ⟨Nat.not_lt.mp hl, hwf' l ha⟩)
+      · rintro (⟨ha, -⟩ | hlE | ⟨h1, h2⟩)
+        · exact absurd hnone ha
+        · exact absurd hlE hnE
+        · exact hnew l h1 h2
+
+/-! ## Owned arguments -/
+
+/-- Values of the given types, each owning its cells. -/
+inductive Vals (σ : Store) : List Ty → List Val → List (List Nat) → Prop
+  | nil : Vals σ [] [] []
+  | cons : VT σ τ v L → Vals σ τs vs Ls → Vals σ (τ :: τs) (v :: vs) (L :: Ls)
+
+theorem Vals.frame : Vals σ τs vs Ls → Agree σ σ' Ls.flatten → Vals σ' τs vs Ls := by
+  intro h hag
+  induction h with
+  | nil => exact .nil
+  | cons hv _ ih =>
+    simp only [List.flatten_cons] at hag
+    exact .cons (hv.frame fun l hl => hag l (List.mem_append.mpr (.inl hl)))
+      (ih fun l hl => hag l (List.mem_append.mpr (.inr hl)))
+
+theorem Vals.alloc : Vals σ τs vs Ls → ∀ l ∈ Ls.flatten, σ.mem l ≠ none := by
+  intro h
+  induction h with
+  | nil => simp
+  | cons hv _ ih =>
+    intro l hl
+    rcases List.mem_append.mp (List.flatten_cons ▸ hl) with hl | hl
+    · exact hv.alloc l hl
+    · exact ih l hl
+
+theorem Vals.length : Vals σ τs vs Ls → vs.length = τs.length := by
+  intro h
+  induction h with
+  | nil => rfl
+  | cons _ _ ih => simp [ih]
+
+/-- The owned arguments, evaluated in order: never stuck; their values, each owning cells of no
+variable's and of no other value's. -/
+theorem args_ok (ihn : ∀ σ Γ env E S e τ Γ', Typed F Γ e τ Γ' → Inv σ Γ env E S → WF σ →
+      Post σ E S Γ' env τ (eval F n σ env e)) :
+    Args F Γ as τs Γ' → Inv σ Γ env E S → WF σ →
+    match evalArgs (eval F n) σ env as with
+    | (.inl vs, σ') => ∃ E' Ls, Inv σ' Γ' env E' S ∧ Vals σ' τs vs Ls ∧ Ls.flatten.Nodup ∧
+        Disj Ls.flatten E' ∧ Disj Ls.flatten S ∧ Moves σ E σ' E' Ls.flatten
+    | (.inr r, _) => r = .timeout := by
+  intro hargs
+  induction as generalizing Γ τs σ E with
+  | nil =>
+    intro hI hwf
+    cases hargs
+    simp only [evalArgs]
+    exact ⟨E, [], hI, .nil, List.nodup_nil, disj_nil_left, disj_nil_left, Moves.refl hwf hI.alloc⟩
+  | cons a as ih =>
+    intro hI hwf
+    cases hargs with
+    | cons ha hrest =>
+    simp only [evalArgs]
+    have h1 := ihn _ _ _ _ _ _ _ _ ha hI hwf
+    generalize eval F n σ env _ = r1 at h1 ⊢
+    rcases r1 with ⟨r1, σ1⟩
+    cases r1 with
+    | val v =>
+      dsimp only
+      obtain ⟨E₁, L₁, hI₁, hv₁, hd₁, hdS₁, hm₁⟩ := h1
+      have h2 := ih hrest hI₁ hm₁.wf
+      generalize evalArgs (eval F n) σ1 env _ = r2 at h2 ⊢
+      rcases r2 with ⟨r2, σ2⟩
+      cases r2 with
+      | inl vs =>
+        dsimp only
+        obtain ⟨E₂, Ls, hI₂, hvs, hn, hd₂, hdS₂, hm₂⟩ := h2
+        obtain ⟨hdE, hdL⟩ := hm₂.apart hm₁.wf hv₁.alloc hd₁
+        refine ⟨E₂, L₁ :: Ls, hI₂, .cons (hv₁.frame (hm₂.keeps hm₁.wf hv₁.alloc hd₁)) hvs, ?_, ?_, ?_, ?_⟩
+        · simp only [List.flatten_cons]
+          exact nodup_append_disj.mpr ⟨hv₁.nodup, hn, hdL⟩
+        · simp only [List.flatten_cons]
+          exact disj_append_left.mpr ⟨hdE, hd₂⟩
+        · simp only [List.flatten_cons]
+          exact disj_append_left.mpr ⟨hdS₁, hdS₂⟩
+        · simpa using hm₁.trans hm₂ hd₁ hwf
+      | inr r => exact h2
+    | stuck => simp [Post] at h1
+    | timeout => rfl
+
+/-! ## Binding the owned parameters -/
+
+def ownCtx (ps : List (Var × Ty)) : Ctx := ps.map fun p => (p.1, Slot.own p.2 true)
+
+/-- Each owned argument in a fresh cell: the cells, and what the values owned, are the footprint of
+the callee's owned parameters. -/
+theorem allocAll_ok : ∀ {σ : Store} {names : List Var} {τs vs Ls}, Vals σ τs vs Ls →
+    names.length = τs.length → WF σ → Ls.flatten.Nodup →
+    ∃ Eo, Foot (allocAll σ (names.zip vs)).2 (ownCtx (names.zip τs)) (allocAll σ (names.zip vs)).1 Eo [] ∧
+      Eo.Nodup ∧ (∀ l, l ∈ Eo ↔ l ∈ Ls.flatten ∨ (σ.next ≤ l ∧ l < (allocAll σ (names.zip vs)).2.next)) ∧
+      σ.next ≤ (allocAll σ (names.zip vs)).2.next ∧ WF (allocAll σ (names.zip vs)).2 ∧
+      (∀ l, l < σ.next → (allocAll σ (names.zip vs)).2.mem l = σ.mem l) ∧
+      (∀ l, σ.next ≤ l → l < (allocAll σ (names.zip vs)).2.next → (allocAll σ (names.zip vs)).2.mem l ≠ none) ∧
+      (allocAll σ (names.zip vs)).1.length = names.length
+  | σ, [], _, _, _, h, hl, hwf, _ => by
+    cases h with
+    | nil =>
+      refine ⟨[], .nil, List.nodup_nil, ?_, Nat.le_refl _, hwf, fun _ _ => rfl, ?_, rfl⟩
+      · intro l; simp only [List.zip_nil_left, allocAll, List.flatten_nil, List.not_mem_nil, false_or, false_iff]; omega
+      · intro l h1 h2; simp only [List.zip_nil_left, allocAll] at h2; omega
+    | cons => simp at hl
+  | σ, x :: names, _, _, _, h, hl, hwf, hn => by
+    cases h with
+    | nil => simp at hl
+    | @cons τ v L τs vs Ls hv hvs =>
+      simp only [List.flatten_cons] at hn
+      obtain ⟨hnL, hnLs, hdL⟩ := nodup_append_disj.mp hn
+      have hag : Agree σ (σ.alloc v).2 (L ++ Ls.flatten) := agree_alloc hwf (by
+        intro l hl
+        rcases List.mem_append.mp hl with hl | hl
+        · exact hv.alloc l hl
+        · exact hvs.alloc l hl)
+      have hlow : ∀ l ∈ L ++ Ls.flatten, l < σ.next := by
+        intro l hl
+        rcases List.mem_append.mp hl with hl | hl
+        · exact hwf l (hv.alloc l hl)
+        · exact hwf l (hvs.alloc l hl)
+      obtain ⟨Eo, hf, hnd, hmem, hle, hwf2, hold, hnew, hlen⟩ :=
+        allocAll_ok (σ := (σ.alloc v).2) (names := names)
+          (hvs.frame fun l hl => hag l (List.mem_append.mpr (.inr hl))) (by simpa using hl) hwf.alloc hnLs
+      simp only [List.zip_cons_cons, allocAll]
+      have hn1 : (σ.alloc v).2.next = σ.next + 1 := rfl
+      have hc : (σ.alloc v).1 = σ.next := rfl
+      rw [hc]
+      generalize hr : allocAll (σ.alloc v).2 (names.zip vs) = r at hf hmem hle hwf2 hold hnew hlen
+      obtain ⟨cells, σ2⟩ := r
+      dsimp only at hf hmem hle hwf2 hold hnew hlen ⊢
+      have hcL : σ.next ∉ L := fun h => Nat.lt_irrefl _ (hlow _ (List.mem_append.mpr (.inl h)))
+      have hLt : LT σ2 σ.next τ (σ.next :: L) := by
+        refine (LT.of_contents (by simp [Store.alloc]) (hv.frame fun l hl => hag l
+          (List.mem_append.mpr (.inl hl))) hcL).frame fun l hl => hold l ?_
+        rcases List.mem_cons.mp hl with rfl | hl
+        · rw [hn1]; omega
+        · have := hlow l (List.mem_append.mpr (.inl hl)); rw [hn1]; omega
+      have hlowE : ∀ l ∈ Eo, l ≠ σ.next ∧ l ∉ L := by
+        intro l hl
+        rcases (hmem l).mp hl with h | ⟨h, -⟩
+        · have := hlow l (List.mem_append.mpr (.inr h))
+          exact ⟨by omega, fun h' => hdL l h' h⟩
+        · rw [hn1] at h
+          exact ⟨by omega, fun h' => by have := hlow l (List.mem_append.mpr (.inl h')); omega⟩
+      refine ⟨(σ.next :: L) ++ Eo, ?_, ?_, ?_, by rw [hn1] at hle; omega, hwf2, ?_, ?_, by simp [hlen]⟩
+      · have := Foot.cons (x := x) (s := .own τ true) hLt hf
+        simpa [ownCtx, addE, addS, Slot.excl] using this
+      · refine nodup_append_disj.mpr ⟨List.nodup_cons.mpr ⟨hcL, hnL⟩, hnd, ?_⟩
+        intro l hl hl'
+        rcases List.mem_cons.mp hl with rfl | hl
+        · exact (hlowE _ hl').1 rfl
+        · exact (hlowE _ hl').2 hl
+      · intro l
+        simp only [List.mem_append, List.mem_cons, hmem, List.flatten_cons]
+        rw [hn1]
+        constructor
+        · rintro ((rfl | h) | h | ⟨h1, h2⟩)
+          · exact .inr ⟨Nat.le_refl _, by omega⟩
+          · exact .inl (.inl h)
+          · exact .inl (.inr h)
+          · exact .inr ⟨by omega, h2⟩
+        · rintro ((h | h) | ⟨h1, h2⟩)
+          · exact .inl (.inr h)
+          · exact .inr (.inl h)
+          · by_cases he : l = σ.next
+            · exact .inl (.inl he)
+            · exact .inr (.inr ⟨by omega, h2⟩)
+      · intro l hl
+        rw [hold l (by rw [hn1]; omega)]
+        simp [Store.alloc, Nat.ne_of_lt hl]
+      · intro l h1 h2
+        by_cases he : l = σ.next
+        · subst he; rw [hold _ (by rw [hn1]; omega)]; simp [Store.alloc]
+        · exact hnew l (by rw [hn1]; omega) h2
+
+/-! ## The callee's variables when it ends -/
+
+/-- A slot with its liveness forgotten: what typing a body cannot change. -/
+def Slot.shape : Slot → Slot
+  | .own τ _ => .own τ true
+  | .ref m τ => .ref m τ
+
+def shape (Γ : Ctx) : Ctx := Γ.map fun p => (p.1, p.2.shape)
+
+theorem setSlot_shape : ∀ {Γ : Ctx}, (Γ.map Prod.fst).Nodup → lookup x Γ = some s →
+    s'.shape = s.shape → shape (setSlot Γ x s') = shape Γ
+  | [], _, h, _ => by simp [lookup] at h
+  | (y, t) :: Γ, hk, hx, hs => by
+    simp only [List.map_cons] at hk
+    obtain ⟨hy, hk⟩ := List.nodup_cons.mp hk
+    by_cases hxy : x = y
+    · subst hxy
+      simp only [lookup, ↓reduceIte, Option.some.injEq] at hx
+      subst hx
+      rw [setSlot_head Γ hy]
+      simp [shape, hs]
+    · rw [setSlot_tail Γ (Ne.symm hxy)]
+      simp only [lookup, hxy, ↓reduceIte] at hx
+      have := setSlot_shape hk hx hs
+      simp only [shape, List.map_cons] at this ⊢
+      rw [this]
+
+mutual
+theorem typed_shape : Typed F Γ e τ Γ' → (Γ.map Prod.fst).Nodup → shape Γ' = shape Γ
+  | .lit, _ => rfl
+  | .read _, _ => rfl
+  | .move hx, hk => setSlot_shape hk hx rfl
+  | .add ha hb, hk => (typed_shape hb (by rw [typed_keys ha]; exact hk)).trans (typed_shape ha hk)
+  | .new ha, hk => typed_shape ha hk
+  | .let_ hx ha hb, hk => by
+    have := typed_shape hb (List.nodup_cons.mpr ⟨by rw [typed_keys ha]; exact lookup_none_keys hx,
+      by rw [typed_keys ha]; exact hk⟩)
+    simp only [shape, List.map_cons, List.cons.injEq] at this
+    exact this.2.trans (typed_shape ha hk)
+  | .write ha _, hk => typed_shape ha hk
+  | .assign ha _, hk => typed_shape ha hk
+  | .call _ hargs _ _, hk => args_shape hargs hk
+  | .seq ha hb, hk => (typed_shape hb (by rw [typed_keys ha]; exact hk)).trans (typed_shape ha hk)
+theorem args_shape : Args F Γ as τs Γ' → (Γ.map Prod.fst).Nodup → shape Γ' = shape Γ
+  | .nil, _ => rfl
+  | .cons ha hrest, hk => (args_shape hrest (by rw [typed_keys ha]; exact hk)).trans (typed_shape ha hk)
+end
+
+/-- Where the shape ends in borrows, so does the context: borrows are their own shape. -/
+theorem shape_split : ∀ (A : Ctx) {Γ : Ctx}, shape Γ = A ++ B → (∀ p ∈ B, ∃ m τ, p.2 = .ref m τ) →
+    ∃ Γa, Γ = Γa ++ B ∧ shape Γa = A
+  | [], Γ, h, hB => by
+    refine ⟨[], ?_, rfl⟩
+    simp only [List.nil_append] at h ⊢
+    subst h
+    induction Γ with
+    | nil => rfl
+    | cons p Γ ih =>
+      obtain ⟨x, s⟩ := p
+      simp only [shape, List.map_cons, List.mem_cons, forall_eq_or_imp] at hB ih ⊢
+      obtain ⟨⟨m, τ, hs⟩, hB⟩ := hB
+      cases s with
+      | own => simp [Slot.shape] at hs
+      | ref => simp only [Slot.shape]; exact congrArg _ (ih hB)
+  | a :: A, [], h, _ => by simp [shape] at h
+  | a :: A, g :: Γ, h, hB => by
+    simp only [shape, List.map_cons, List.cons_append, List.cons.injEq] at h
+    obtain ⟨Γa, rfl, hΓa⟩ := shape_split A h.2 hB
+    exact ⟨g :: Γa, rfl, by simp only [shape, List.map_cons] at hΓa ⊢; rw [hΓa, h.1]⟩
+
+/-! ## Dropping the owned parameters -/
+
+/-- Dropping the callee's owned parameters, live or moved, frees exactly their footprints. -/
+theorem dropCells_ok : ∀ {Γo : Ctx} {σ : Store} {eo : Env} {Eo So} {owns : List (Var × Ty)},
+    Foot σ Γo eo Eo So → shape Γo = ownCtx owns → Eo.Nodup →
+    So = [] ∧ ∃ σ', dropCells σ ((owns.map Prod.snd).zip (eo.map Prod.snd)) = some σ' ∧
+      σ'.next = σ.next ∧ (∀ l ∈ Eo, σ'.mem l = none) ∧ ∀ l, l ∉ Eo → σ'.mem l = σ.mem l
+  | [], σ, _, _, _, owns, h, hs, _ => by
+    cases h
+    cases owns with
+    | nil => exact ⟨rfl, σ, by simp [dropCells], rfl, by simp, fun _ _ => rfl⟩
+    | cons => simp [shape, ownCtx] at hs
+  | (z, r) :: Γo, σ, _, _, _, owns, h, hs, hn => by
+    cases h with
+    | @cons _ c M _ eo E S _ hr hrest =>
+    cases owns with
+    | nil => simp [shape, ownCtx] at hs
+    | cons o owns =>
+    simp only [shape, ownCtx, List.map_cons, List.cons.injEq, Prod.mk.injEq] at hs
+    obtain ⟨⟨-, hrs⟩, hs⟩ := hs
+    cases r with
+    | ref => simp [Slot.shape] at hrs
+    | own τ live =>
+    simp only [Slot.shape, Slot.own.injEq] at hrs
+    obtain ⟨rfl, -⟩ := hrs
+    simp only [addE, addS, Slot.excl, ↓reduceIte] at hn ⊢
+    obtain ⟨hnM, hnE, hdME⟩ := nodup_append_disj.mp hn
+    obtain ⟨σ1, hd1, hn1, hfree1, hkeep1⟩ := dropCell_own hr
+    obtain ⟨rfl, -⟩ := dropCells_ok hrest hs hnE
+    have hrest1 := hrest.frame (σ' := σ1) fun l hl => hkeep1 l fun h => hdME l h (by simpa using hl)
+    obtain ⟨-, σ', hd', hn', hfree', hkeep'⟩ := dropCells_ok hrest1 hs hnE
+    refine ⟨rfl, σ', ?_, by rw [hn', hn1], ?_, ?_⟩
+    · simp only [List.map_cons, List.zip_cons_cons, dropCells, hd1, hd']
+    · intro l hl
+      rcases List.mem_append.mp hl with hl | hl
+      · rw [hkeep' l fun h => hdME l hl h]; exact hfree1 l hl
+      · exact hfree' l hl
+    · intro l hl
+      simp only [List.mem_append, not_or] at hl
+      rw [hkeep' l hl.2, hkeep1 l hl.1]
+
+/-! ## Lending: holes in the caller's trees -/
+
+/-- A place lent: its mode and type, the variable it is rooted at, the location, the cells on the
+path to it, and the tree there. -/
+structure Hole where
+  mode : Mode
+  ty : Ty
+  root : Var
+  loc : Nat
+  path : List Nat
+  old : List Nat
+
+def HoleOk (σ : Store) (Γ : Ctx) (env : Env) (h : Hole) : Prop :=
+  ∃ s a τr, lookup h.root Γ = some s ∧ lookup h.root env = some a ∧ (h.mode = .mut → s.excl = true) ∧
+    Path σ a τr h.path h.loc h.ty ∧ LT σ a τr (h.path ++ h.old) ∧ SlotOk σ s a (h.path ++ h.old) ∧
+    LT σ h.loc h.ty h.old ∧ ∀ σ' L', LT σ' a τr L' → SlotOk σ' s a L'
+
+theorem HoleOk.entry (h : HoleOk σ Γ env hl) :
+    ∃ s a, Entry σ Γ env hl.root s a (hl.path ++ hl.old) ∧ (hl.mode = .mut → s.excl = true) :=
+  let ⟨s, a, _, hs, ha, hm, _, _, hso, _⟩ := h
+  ⟨s, a, ⟨hs, ha, hso⟩, hm⟩
+
+/-- The places a call lends denote locations, each a hole in its root's tree. -/
+theorem lends_ok : Lends Γ lent ts ys → Foot σ Γ env E S →
+    ∃ hs : List Hole, hs.map (fun h => (h.mode, h.ty)) = ts ∧ hs.map (fun h => (h.mode, h.root)) = ys ∧
+      lent.mapM (fun x => resolve σ env x.2) = some (hs.map Hole.loc) ∧ ∀ h ∈ hs, HoleOk σ Γ env h := by
+  intro hl hf
+  induction hl with
+  | nil => exact ⟨[], rfl, rfl, rfl, by simp⟩
+  | @cons p τ w y m rest ts ys hp hw _ ih =>
+    obtain ⟨hs, h1, h2, h3, h4⟩ := ih
+    obtain ⟨a, τr, Lr, P, l, s, ha, hLr, hpath, hres, -, -, hs', hso, hex, hlt⟩ := place_ok hp hf
+    obtain ⟨R, hR, rfl⟩ := path_split hpath hLr
+    refine ⟨⟨m, τ, y, l, P, R⟩ :: hs, by simp [h1], by simp [h2], ?_, ?_⟩
+    · simp [List.mapM_cons, hres, h3]
+    · intro h hh
+      rcases List.mem_cons.mp hh with rfl | hh
+      · exact ⟨s, a, τr, hs', ha, fun hm => hex (hw hm), hpath, hLr, hso, hR, hlt⟩
+      · exact h4 h hh
+
+def refCtx (refs : List (Var × Mode × Ty)) : Ctx := refs.map fun p => (p.1, Slot.ref p.2.1 p.2.2)
+
+/-- The cells of the trees lent `mut`, and of those lent `readonly`. -/
+def mutCells (ps : List (Hole × List Nat)) : List Nat :=
+  ps.flatMap fun p => if p.1.mode = .mut then p.2 else []
+
+def roCells (ps : List (Hole × List Nat)) : List Nat :=
+  ps.flatMap fun p => if p.1.mode = .mut then [] else p.2
+
+theorem mem_mutCells : l ∈ mutCells ps ↔ ∃ p ∈ ps, p.1.mode = .mut ∧ l ∈ p.2 := by
+  simp only [mutCells, List.mem_flatMap]
+  constructor
+  · rintro ⟨p, hp, hl⟩; split at hl
+    · exact ⟨p, hp, ‹_›, hl⟩
+    · simp at hl
+  · rintro ⟨p, hp, hm, hl⟩; exact ⟨p, hp, by simp [hm, hl]⟩
+
+theorem mem_roCells : l ∈ roCells ps ↔ ∃ p ∈ ps, p.1.mode = .ro ∧ l ∈ p.2 := by
+  simp only [roCells, List.mem_flatMap]
+  constructor
+  · rintro ⟨p, hp, hl⟩; split at hl
+    · simp at hl
+    · exact ⟨p, hp, by cases h : p.1.mode <;> simp_all, hl⟩
+  · rintro ⟨p, hp, hm, hl⟩; exact ⟨p, hp, by simp [hm, hl]⟩
+
+/-- The callee's borrowed parameters, bound to the holes: each holds the tree at its hole. -/
+theorem foot_refs : ∀ {refs : List (Var × Mode × Ty)} {hs : List Hole} {E S : List Nat},
+    refs.map Prod.snd = hs.map (fun h => (h.mode, h.ty)) →
+    (Foot σ (refCtx refs) ((refs.map Prod.fst).zip (hs.map Hole.loc)) E S ↔
+      ∃ ps : List (Hole × List Nat), ps.map Prod.fst = hs ∧ (∀ p ∈ ps, LT σ p.1.loc p.1.ty p.2) ∧
+        E = mutCells ps ∧ S = roCells ps)
+  | [], [], E, S, _ => by
+    constructor
+    · intro h; cases h; exact ⟨[], rfl, by simp, rfl, rfl⟩
+    · rintro ⟨ps, hps, -, rfl, rfl⟩
+      cases ps with
+      | nil => exact .nil
+      | cons => simp at hps
+  | [], _ :: _, _, _, h => by simp at h
+  | _ :: _, [], _, _, h => by simp at h
+  | (x, m, τ) :: refs, h :: hs, E, S, heq => by
+    simp only [List.map_cons, List.cons.injEq, Prod.mk.injEq] at heq
+    obtain ⟨⟨rfl, rfl⟩, heq⟩ := heq
+    simp only [refCtx, List.map_cons, List.zip_cons_cons]
+    constructor
+    · intro hf
+      cases hf with
+      | @cons _ _ L _ _ _ _ _ hs' hrest =>
+        obtain ⟨ps, h1, h2, rfl, rfl⟩ := (foot_refs heq).mp hrest
+        refine ⟨(h, L) :: ps, by simp [h1], ?_, ?_, ?_⟩
+        · intro p hp
+          rcases List.mem_cons.mp hp with rfl | hp
+          · exact hs'
+          · exact h2 p hp
+        · cases hm : h.mode <;> simp [addE, Slot.excl, mutCells, hm]
+        · cases hm : h.mode <;> simp [addS, Slot.excl, roCells, hm]
+    · rintro ⟨ps, hps, hlt, rfl, rfl⟩
+      cases ps with
+      | nil => simp at hps
+      | cons p ps =>
+        obtain ⟨hh, R⟩ := p
+        simp only [List.map_cons, List.cons.injEq] at hps
+        obtain ⟨hhe, hps⟩ := hps
+        subst hhe
+        have hrest := (foot_refs heq).mpr ⟨ps, hps, fun p hp => hlt p (List.mem_cons_of_mem _ hp), rfl, rfl⟩
+        have := Foot.cons (x := x) (s := .ref hh.mode hh.ty) (hlt _ (List.mem_cons_self ..)) hrest
+        cases hm : hh.mode <;> simpa [refCtx, addE, addS, Slot.excl, mutCells, roCells, hm] using this
+
+/-- Of two different elements of a list related pairwise by a symmetric relation, the relation
+holds. -/
+theorem pairwise_of_mem {R : α → α → Prop} (hR : ∀ a b, R a b → R b a) :
+    ∀ {l : List α}, l.Pairwise R → a ∈ l → b ∈ l → a ≠ b → R a b
+  | [], _, ha, _, _ => by simp at ha
+  | c :: l, h, ha, hb, hne => by
+    obtain ⟨hc, hl⟩ := List.pairwise_cons.mp h
+    rcases List.mem_cons.mp ha with rfl | ha'
+    · rcases List.mem_cons.mp hb with rfl | hb'
+      · exact absurd rfl hne
+      · exact hc b hb'
+    · rcases List.mem_cons.mp hb with rfl | hb'
+      · exact hR _ _ (hc a ha')
+      · exact pairwise_of_mem hR hl ha' hb' hne
+
+/-- In a list whose concatenation has no duplicates, two different elements' lists are apart. -/
+theorem flatMap_apart {f : α → List Nat} :
+    ∀ {l : List α}, (l.flatMap f).Nodup → a ∈ l → b ∈ l → a ≠ b → Disj (f a) (f b)
+  | [], _, ha, _, _ => by simp at ha
+  | c :: l, h, ha, hb, hne => by
+    simp only [List.flatMap_cons] at h
+    obtain ⟨-, hl, hd⟩ := nodup_append_disj.mp h
+    have hin : ∀ {d}, d ∈ l → ∀ x ∈ f d, x ∈ l.flatMap f := fun hd x hx => List.mem_flatMap.mpr ⟨_, hd, hx⟩
+    rcases List.mem_cons.mp ha with rfl | ha'
+    · rcases List.mem_cons.mp hb with rfl | hb'
+      · exact absurd rfl hne
+      · exact fun x hx hx' => hd x hx (hin hb' x hx')
+    · rcases List.mem_cons.mp hb with rfl | hb'
+      · exact fun x hx hx' => hd x hx' (hin ha' x hx)
+      · exact flatMap_apart hl ha' hb' hne
+
+/-- Two holes rooted at one variable are both `readonly`. -/
+def Apart (h h' : Hole) : Prop := h.root = h'.root → h.mode = .ro ∧ h'.mode = .ro
+
+theorem Apart.symm : Apart h h' → Apart h' h := fun h e => (h e.symm).symm
+
+/-- The trees as they were at the holes. -/
+def olds (hs : List Hole) : List (Hole × List Nat) := hs.map fun h => (h, h.old)
+
+theorem mem_olds_mut : l ∈ mutCells (olds hs) ↔ ∃ h ∈ hs, h.mode = .mut ∧ l ∈ h.old := by
+  rw [mem_mutCells]
+  simp only [olds, List.mem_map]
+  constructor
+  · rintro ⟨_, ⟨h, hh, rfl⟩, hm, hl⟩; exact ⟨h, hh, hm, hl⟩
+  · rintro ⟨h, hh, hm, hl⟩; exact ⟨_, ⟨h, hh, rfl⟩, hm, hl⟩
+
+theorem mem_olds_ro : l ∈ roCells (olds hs) ↔ ∃ h ∈ hs, h.mode = .ro ∧ l ∈ h.old := by
+  rw [mem_roCells]
+  simp only [olds, List.mem_map]
+  constructor
+  · rintro ⟨_, ⟨h, hh, rfl⟩, hm, hl⟩; exact ⟨h, hh, hm, hl⟩
+  · rintro ⟨h, hh, hm, hl⟩; exact ⟨_, ⟨h, hh, rfl⟩, hm, hl⟩
+
+/-- A hole's tree is in the caller's footprints, the exclusive ones if it is lent `mut`. -/
+theorem hole_in (hI : Inv σ Γ env E S) (hok : HoleOk σ Γ env h) :
+    ∀ l ∈ h.path ++ h.old, (h.mode = .mut → l ∈ E) ∧ (l ∈ E ∨ l ∈ S) := by
+  intro l hl
+  obtain ⟨s, a, he, hm⟩ := hok.entry
+  rcases hI.entry_sub he l hl with ⟨-, h1⟩ | ⟨hs, h1⟩
+  · exact ⟨fun _ => h1, .inl h1⟩
+  · exact ⟨fun h' => (by rw [hm h'] at hs; cases hs), .inr h1⟩
+
+/-- Holes rooted at different variables, one of them lent `mut`, are apart. -/
+theorem hole_apart (hI : Inv σ Γ env E S) (hok : HoleOk σ Γ env h) (hok' : HoleOk σ Γ env h')
+    (hr : h.root ≠ h'.root) (hm : h.mode = .mut) : Disj (h.path ++ h.old) (h'.path ++ h'.old) := by
+  obtain ⟨s, a, he, hx⟩ := hok.entry
+  obtain ⟨s', a', he', -⟩ := hok'.entry
+  exact hI.apart he he' hr (.inl (hx hm))
+
+/-- Two holes, one lent `mut`, are the same hole or rooted at different variables. -/
+theorem hole_root {hs : List Hole} (hpw : hs.Pairwise Apart) (hh : h ∈ hs) (hh' : h' ∈ hs)
+    (hm : h.mode = .mut) (hne : h ≠ h') : h.root ≠ h'.root :=
+  fun e => by
+    have := (pairwise_of_mem (fun _ _ => Apart.symm) hpw hh hh' hne) e
+    rw [hm] at this; cases this.1
+
+theorem olds_nodup (hI : Inv σ Γ env E S) : ∀ {hs : List Hole}, (∀ h ∈ hs, HoleOk σ Γ env h) →
+    hs.Pairwise Apart → (mutCells (olds hs)).Nodup
+  | [], _, _ => by simp [mutCells, olds]
+  | h :: hs, hholes, hpw => by
+    obtain ⟨hc, hl⟩ := List.pairwise_cons.mp hpw
+    have ih := olds_nodup hI (fun h' hh => hholes h' (List.mem_cons_of_mem _ hh)) hl
+    have hsplit : mutCells (olds (h :: hs)) = (if h.mode = .mut then h.old else []) ++ mutCells (olds hs) := by
+      simp [mutCells, olds]
+    rw [hsplit]
+    split
+    · rename_i hm
+      obtain ⟨s, a, he, -⟩ := (hholes h (List.mem_cons_self ..)).entry
+      refine nodup_append_disj.mpr ⟨(he.2.2.nodup.sublist (List.sublist_append_right _ _)), ih, ?_⟩
+      intro l hl hl'
+      obtain ⟨h', hh', -, hl'⟩ := mem_olds_mut.mp hl'
+      have hr : h.root ≠ h'.root := fun e => by have := hc h' hh' e; rw [hm] at this; cases this.1
+      exact hole_apart hI (hholes h (List.mem_cons_self ..)) (hholes h' (List.mem_cons_of_mem _ hh')) hr hm l
+        (List.mem_append.mpr (.inr hl)) (List.mem_append.mpr (.inr hl'))
+    · simpa using ih
+
+/-! ## The callee's activation -/
+
+/-- Each hole's cells were allocated before the call and are no argument's: not in the footprint of
+the callee's owned parameters. -/
+theorem hole_out {Eo Lall : List Nat} (hI : Inv σ Γ env E S) (hok : HoleOk σ Γ env h) (hwf : WF σ)
+    (hEo_in : ∀ l ∈ Eo, l ∈ Lall ∨ σ.next ≤ l) (hdL : Disj Lall E) (hdLS : Disj Lall S) :
+    ∀ l ∈ h.path ++ h.old, σ.mem l ≠ none ∧ l ∉ Eo := by
+  intro l hl
+  have hin := (hole_in hI hok l hl).2
+  have ha : σ.mem l ≠ none := by
+    rcases hin with h | h
+    · exact hI.alloc l h
+    · exact hI.allocS l h
+  refine ⟨ha, fun he => ?_⟩
+  rcases hEo_in l he with h | h
+  · rcases hin with h' | h'
+    · exact hdL l h h'
+    · exact hdLS l h h'
+  · exact Nat.lt_irrefl _ (Nat.lt_of_lt_of_le (hwf l ha) h)
+
+theorem fnCtx_eq (d : Fn) : fnCtx d = ownCtx d.owns ++ refCtx d.refs := rfl
+
+/-- The callee starts with its owned parameters' footprints, the trees lent `mut` exclusive and those
+lent `readonly` shared. -/
+theorem callee_inv {Eo Lall : List Nat} {hs : List Hole} (hI : Inv σ1 Γ₁ env E₁ S) (hholes : ∀ h ∈ hs, HoleOk σ1 Γ₁ env h)
+    (hpw : hs.Pairwise Apart) (hrefs : d.refs.map Prod.snd = hs.map fun h => (h.mode, h.ty))
+    (hkeys : ((d.owns.map Prod.fst) ++ (d.refs.map Prod.fst)).Nodup)
+    (hfo : Foot σ2 (ownCtx d.owns) cells Eo []) (hEo : Eo.Nodup)
+    (hEo_in : ∀ l ∈ Eo, l ∈ Lall ∨ σ1.next ≤ l) (hdL : Disj Lall E₁) (hdLS : Disj Lall S) (hwf : WF σ1)
+    (hold : ∀ l, l < σ1.next → σ2.mem l = σ1.mem l) :
+    Inv σ2 (fnCtx d) (cells ++ (d.refs.map Prod.fst).zip (hs.map Hole.loc))
+      (Eo ++ mutCells (olds hs)) (roCells (olds hs)) := by
+  have hout := fun h hh => hole_out hI (hholes h hh) hwf hEo_in hdL hdLS
+  have hfr := (foot_refs (σ := σ2) hrefs).mpr ⟨olds hs, by simp [olds, Function.comp_def], ?_, rfl, rfl⟩
+  · rw [fnCtx_eq]
+    refine ⟨by simpa using hfo.append hfr, ?_, ?_, ?_⟩
+    · refine nodup_append_disj.mpr ⟨hEo, olds_nodup hI hholes hpw, fun l hl hl' => ?_⟩
+      obtain ⟨h, hh, -, hl'⟩ := mem_olds_mut.mp hl'
+      exact (hout h hh l (List.mem_append.mpr (.inr hl'))).2 hl
+    · intro l hl hl'
+      obtain ⟨h, hh, hm, hl⟩ := mem_olds_ro.mp hl
+      rcases List.mem_append.mp hl' with hl' | hl'
+      · exact (hout h hh l (List.mem_append.mpr (.inr hl))).2 hl'
+      · obtain ⟨h', hh', hm', hl'⟩ := mem_olds_mut.mp hl'
+        have hne : h' ≠ h := fun e => by rw [e, hm] at hm'; cases hm'
+        exact hole_apart hI (hholes h' hh') (hholes h hh) (hole_root hpw hh' hh hm' hne) hm' l
+          (List.mem_append.mpr (.inr hl')) (List.mem_append.mpr (.inr hl))
+    · simpa [ownCtx, refCtx, List.map_map, Function.comp_def] using hkeys
+  · intro p hp
+    simp only [olds, List.mem_map] at hp
+    obtain ⟨h, hh, rfl⟩ := hp
+    obtain ⟨-, -, -, -, -, -, -, -, -, hlt, -⟩ := hholes h hh
+    exact hlt.frame fun l hl => hold l (hwf l (hout h hh l (List.mem_append.mpr (.inr hl))).1)
+
+/-! ## The caller after the call -/
+
+/-- A variable's footprint after the call: if a place rooted at it was lent `mut`, the path to the
+hole and the tree the callee left there; otherwise as it was. -/
+def fill (ps : List (Hole × List Nat)) (x : Var) (L : List Nat) : List Nat :=
+  match ps.find? (fun p => p.1.root == x && p.1.mode == .mut) with
+  | some p => p.1.path ++ p.2
+  | none => L
+
+section rebuild
+variable {σ σ' : Store} {Γ : Ctx} {env : Env} {E S : List Nat} {hs : List Hole}
+  {ps : List (Hole × List Nat)}
+
+theorem ps_pairwise (hpw : hs.Pairwise Apart) (hps : ps.map Prod.fst = hs) :
+    ps.Pairwise fun p q => Apart p.1 q.1 := by
+  rw [← hps] at hpw; exact List.pairwise_map.mp hpw
+
+theorem fill_of_mem (hpw : hs.Pairwise Apart) (hps : ps.map Prod.fst = hs) (hp : p ∈ ps)
+    (hm : p.1.mode = .mut) : fill ps p.1.root L = p.1.path ++ p.2 := by
+  unfold fill
+  split
+  · rename_i q hq
+    have hq' := List.find?_some hq
+    simp only [Bool.and_eq_true, beq_iff_eq] at hq'
+    by_cases hne : q = p
+    · rw [hne]
+    · have := pairwise_of_mem (fun _ _ => Apart.symm) (ps_pairwise hpw hps) (List.mem_of_find?_eq_some hq) hp hne hq'.1
+      rw [hq'.2] at this; cases this.1
+  · rename_i hn
+    have := List.find?_eq_none.mp hn p hp
+    simp [hm] at this
+
+theorem fill_cases (hholes : ∀ h ∈ hs, HoleOk σ Γ env h) (hps : ps.map Prod.fst = hs)
+    (he : Entry σ Γ env x s a L) :
+    (fill ps x L = L ∧ ∀ p ∈ ps, p.1.mode = .mut → p.1.root ≠ x) ∨
+    (∃ p ∈ ps, fill ps x L = p.1.path ++ p.2 ∧ p.1.root = x ∧ p.1.mode = .mut ∧
+      L = p.1.path ++ p.1.old ∧ s.excl = true) := by
+  unfold fill
+  split
+  · rename_i q hq
+    have hq' := List.find?_some hq
+    simp only [Bool.and_eq_true, beq_iff_eq] at hq'
+    have hqm := List.mem_of_find?_eq_some hq
+    obtain ⟨s', a', he', hex⟩ := (hholes q.1 (hps ▸ List.mem_map_of_mem hqm)).entry
+    rw [hq'.1] at he'
+    obtain ⟨rfl, rfl, rfl⟩ := he.det he'
+    exact .inr ⟨q, hqm, rfl, hq'.1, hq'.2, rfl, hex hq'.2⟩
+  · rename_i hn
+    refine .inl ⟨rfl, fun p hp hm hr => ?_⟩
+    have := List.find?_eq_none.mp hn p hp
+    simp [hm, hr] at this
+
+theorem path_in_X (hI : Inv σ Γ env E S) (hholes : ∀ h ∈ hs, HoleOk σ Γ env h)
+    (hpw : hs.Pairwise Apart) (hh : h ∈ hs) (hm : h.mode = .mut) :
+    ∀ l ∈ h.path, l ∈ E ∧ l ∉ mutCells (olds hs) := by
+  intro l hl
+  refine ⟨(hole_in hI (hholes h hh) l (List.mem_append.mpr (.inl hl))).1 hm, fun hM => ?_⟩
+  obtain ⟨h', hh', hm', hl'⟩ := mem_olds_mut.mp hM
+  by_cases hne : h = h'
+  · subst hne
+    obtain ⟨_, _, _, _, _, _, _, hLT, _, _, _⟩ := hholes h hh
+    exact (nodup_append_disj.mp hLT.nodup).2.2 l hl hl'
+  · exact hole_apart hI (hholes h hh) (hholes h' hh') (hole_root hpw hh hh' hm hne) hm l
+      (List.mem_append.mpr (.inl hl)) (List.mem_append.mpr (.inr hl'))
+
+theorem mem_keep {M : List Nat} : l ∈ E.filter (fun l => l ∉ M) ↔ l ∈ E ∧ l ∉ M := by
+  simp [List.mem_filter]
+
+/-- After the call, the caller's variables hold what they held but for the holes lent `mut`, which
+hold what the callee left there. -/
+theorem caller_rebuild (hI : Inv σ Γ env E S) (hholes : ∀ h ∈ hs, HoleOk σ Γ env h)
+    (hpw : hs.Pairwise Apart) (hps : ps.map Prod.fst = hs)
+    (hnew : ∀ p ∈ ps, p.1.mode = .mut → LT σ' p.1.loc p.1.ty p.2) (hMn : (mutCells ps).Nodup)
+    (hag : Agree σ σ' (E.filter (fun l => l ∉ mutCells (olds hs)) ++ S))
+    (hX : Disj (E.filter (fun l => l ∉ mutCells (olds hs))) (mutCells ps))
+    (hSX : Disj S (mutCells ps)) :
+    ∃ E', Inv σ' Γ env E' S ∧
+      ∀ l, l ∈ E' ↔ l ∈ E.filter (fun l => l ∉ mutCells (olds hs)) ∨ l ∈ mutCells ps := by
+  have hpsok : ∀ p ∈ ps, HoleOk σ Γ env p.1 := fun p hp => hholes p.1 (hps ▸ List.mem_map_of_mem hp)
+  have hpsin : ∀ p ∈ ps, p.1 ∈ hs := fun p hp => hps ▸ List.mem_map_of_mem hp
+  have hagX : ∀ l, l ∈ E → l ∉ mutCells (olds hs) → σ'.mem l = σ.mem l :=
+    fun l h1 h2 => hag l (List.mem_append.mpr (.inl (mem_keep.mpr ⟨h1, h2⟩)))
+  -- A variable none of whose places was lent `mut` keeps its footprint clear of the holes.
+  have hclear : ∀ {x s a L}, Entry σ Γ env x s a L → (∀ p ∈ ps, p.1.mode = .mut → p.1.root ≠ x) →
+      ∀ l ∈ L, l ∈ E → l ∉ mutCells (olds hs) := by
+    intro x s a L he hn l hl _ hM
+    obtain ⟨h', hh', hm', hl'⟩ := mem_olds_mut.mp hM
+    obtain ⟨p', hp', rfl⟩ := List.mem_map.mp (hps ▸ hh' : h' ∈ ps.map Prod.fst)
+    obtain ⟨s', a', he', hex'⟩ := (hpsok p' hp').entry
+    exact hI.apart he he' (fun e => hn p' hp' hm' e.symm) (.inr (hex' hm')) l hl
+      (List.mem_append.mpr (.inr hl'))
+  have hsub : ∀ {x s a L}, Entry σ Γ env x s a L → s.excl = true → ∀ l ∈ fill ps x L,
+      (l ∈ L ∧ l ∈ E.filter (fun l => l ∉ mutCells (olds hs))) ∨
+      ∃ p ∈ ps, p.1.root = x ∧ p.1.mode = .mut ∧ l ∈ p.2 := by
+    intro x s a L he hex l hl
+    rcases fill_cases hholes hps he with ⟨hf, hn⟩ | ⟨p, hp, hf, hr, hm, hL, -⟩
+    · rw [hf] at hl
+      have hE := ((hI.entry_sub he l hl).resolve_right fun h => by rw [hex] at h; cases h.1).2
+      exact .inl ⟨hl, mem_keep.mpr ⟨hE, hclear he hn l hl hE⟩⟩
+    · rw [hf] at hl
+      rcases List.mem_append.mp hl with hl | hl
+      · exact .inl ⟨hL ▸ List.mem_append.mpr (.inl hl),
+          mem_keep.mpr (path_in_X hI hholes hpw (hpsin p hp) hm l hl)⟩
+      · exact .inr ⟨p, hp, hr, hm, hl⟩
+  obtain ⟨E', hf', hn', hmem'⟩ := hI.foot.rebuild (σ' := σ') (fill ps) hI.keys
+    (by
+      intro x s a L he
+      rcases fill_cases hholes hps he with ⟨hf, hn⟩ | ⟨p, hp, hf, hr, hm, hL, hex⟩
+      · rw [hf]
+        refine ⟨he.2.2.frame fun l hl => ?_, fun _ => rfl⟩
+        rcases hI.entry_sub he l hl with ⟨-, hE⟩ | ⟨-, hS⟩
+        · exact hagX l hE (hclear he hn l hl hE)
+        · exact hag l (List.mem_append.mpr (.inr hS))
+      · rw [hf]
+        refine ⟨?_, fun h => by rw [hex] at h; cases h⟩
+        obtain ⟨s', a', τr, hs', ha', -, hpath, hLT, -, -, hlt⟩ := hpsok p hp
+        rw [hr] at hs' ha'
+        cases lookup_det he.1 hs'
+        cases lookup_det he.2.1 ha'
+        have hX' := path_in_X hI hholes hpw (hpsin p hp) hm
+        obtain ⟨hLT', -⟩ := path_join hpath hLT (fun l hl => hagX l (hX' l hl).1 (hX' l hl).2)
+          (hnew p hp hm) (fun l hl hl' => hX l (mem_keep.mpr (hX' l hl))
+            (mem_mutCells.mpr ⟨p, hp, hm, hl'⟩))
+        exact hlt σ' _ hLT')
+    (by
+      intro x s a L y t b L' hx hy hne hex hey l hl hl'
+      rcases hsub hx hex l hl with ⟨hlL, hlX⟩ | ⟨p, hp, hpr, hpm, hlp⟩ <;>
+        rcases hsub hy hey l hl' with ⟨hlL', hlX'⟩ | ⟨q, hq, hqr, hqm, hlq⟩
+      · exact hI.apart hx hy hne (.inl hex) l hlL hlL'
+      · exact hX l hlX (mem_mutCells.mpr ⟨q, hq, hqm, hlq⟩)
+      · exact hX l hlX' (mem_mutCells.mpr ⟨p, hp, hpm, hlp⟩)
+      · have hpq : p ≠ q := fun e => hne (hpr ▸ hqr ▸ e ▸ rfl)
+        have := flatMap_apart (f := fun p : Hole × List Nat => if p.1.mode = .mut then p.2 else []) hMn hp hq hpq
+        simp only [hpm, hqm, ↓reduceIte] at this
+        exact this l hlp hlq)
+  refine ⟨E', ⟨hf', hn', fun l hS hl => ?_, hI.keys⟩, fun l => ?_⟩
+  · obtain ⟨x, s, a, L, he, hex, hl⟩ := (hmem' l).mp hl
+    rcases hsub he hex l hl with ⟨-, hlX⟩ | ⟨p, hp, -, hpm, hlp⟩
+    · exact hI.disj l hS (mem_keep.mp hlX).1
+    · exact hSX l hS (mem_mutCells.mpr ⟨p, hp, hpm, hlp⟩)
+  · rw [hmem']
+    constructor
+    · rintro ⟨x, s, a, L, he, hex, hl⟩
+      rcases hsub he hex l hl with ⟨-, hlX⟩ | ⟨p, hp, -, hpm, hlp⟩
+      · exact .inl hlX
+      · exact .inr (mem_mutCells.mpr ⟨p, hp, hpm, hlp⟩)
+    · rintro (hlX | hlM)
+      · obtain ⟨hE, hnM⟩ := mem_keep.mp hlX
+        obtain ⟨x, s, a, L, he, hex, hl⟩ := (hI.foot.memE hI.keys l).mp hE
+        refine ⟨x, s, a, L, he, hex, ?_⟩
+        rcases fill_cases hholes hps he with ⟨hf, -⟩ | ⟨p, hp, hf, -, hm, hL, -⟩
+        · rw [hf]; exact hl
+        · rw [hf]
+          rw [hL] at hl
+          rcases List.mem_append.mp hl with hl | hl
+          · exact List.mem_append.mpr (.inl hl)
+          · exact absurd (mem_olds_mut.mpr ⟨p.1, hpsin p hp, hm, hl⟩) hnM
+      · obtain ⟨p, hp, hpm, hlp⟩ := mem_mutCells.mp hlM
+        obtain ⟨s, a, he, hex⟩ := (hpsok p hp).entry
+        refine ⟨p.1.root, s, a, _, he, hex hpm, ?_⟩
+        rw [fill_of_mem hpw hps hp hpm]
+        exact List.mem_append.mpr (.inr hlp)
+
+end rebuild
+
+theorem zip_fst_snd : ∀ (l : List (α × β)), (l.map Prod.fst).zip (l.map Prod.snd) = l
+  | [] => rfl
+  | p :: l => by simp [zip_fst_snd l]
+
+theorem shape_fnCtx (d : Fn) : shape (fnCtx d) = ownCtx d.owns ++ refCtx d.refs := by
+  simp [shape, fnCtx, ownCtx, refCtx, Slot.shape, Function.comp_def]
+
+theorem refCtx_refs (refs : List (Var × Mode × Ty)) : ∀ p ∈ refCtx refs, ∃ m τ, p.2 = .ref m τ := by
+  intro p hp
+  simp only [refCtx, List.mem_map] at hp
+  obtain ⟨q, -, rfl⟩ := hp
+  exact ⟨_, _, rfl⟩
+
+theorem shape_length (Γ : Ctx) : (shape Γ).length = Γ.length := by simp [shape]
+
+end FlyCore.Ownership

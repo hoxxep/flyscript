@@ -263,18 +263,17 @@ inductive PlaceTy (Γ : Ctx) : Place → Ty → Bool → Var → Prop
   | ref : lookup x Γ = some (.ref m τ) → PlaceTy Γ (.var x) τ (m == .mut) x
   | deref : PlaceTy Γ p (.box τ) w r → PlaceTy Γ (.deref p) τ w r
 
-/-- The places lent, each of the parameter's type and changeable where lent `mut`, with the
-variable each is rooted at. -/
-inductive Lends (Γ : Ctx) : List (Mode × Place) → List (Mode × Ty) → List Var → Prop
+/-- The places lent, each of the parameter's type and changeable where lent `mut`, with the mode
+each is lent in and the variable it is rooted at. -/
+inductive Lends (Γ : Ctx) : List (Mode × Place) → List (Mode × Ty) → List (Mode × Var) → Prop
   | nil : Lends Γ [] [] []
   | cons : PlaceTy Γ p τ w y → (m = .mut → w = true) → Lends Γ rest ts ys →
-      Lends Γ ((m, p) :: rest) ((m, τ) :: ts) (y :: ys)
+      Lends Γ ((m, p) :: rest) ((m, τ) :: ts) ((m, y) :: ys)
 
 /-- No variable is lent `mut` alongside another borrow of it, or of what it holds: two places rooted
 at one variable are both lent `readonly`. -/
-def Exclusive (lent : List (Mode × Place)) (roots : List Var) : Prop :=
-  ∀ i j (hi : i < lent.length) (hj : j < lent.length) (hi' : i < roots.length) (hj' : j < roots.length),
-    i ≠ j → roots[i] = roots[j] → lent[i].1 = .ro ∧ lent[j].1 = .ro
+def Exclusive (ys : List (Mode × Var)) : Prop :=
+  ys.Pairwise fun a b => a.2 = b.2 → a.1 = .ro ∧ b.1 = .ro
 
 mutual
 /-- `Typed F Γ e τ Γ'`: `e` has type `τ`, and leaves its variables as `Γ'` says — moved or not. -/
@@ -286,11 +285,11 @@ inductive Typed (F : List Fn) : Ctx → Expr → Ty → Ctx → Prop
   | add : Typed F Γ a .int Γ₁ → Typed F Γ₁ b .int Γ₂ → Typed F Γ (.add a b) .int Γ₂
   | new : Typed F Γ a τ Γ₁ → Typed F Γ (.new a) (.box τ) Γ₁
   | let_ : lookup x Γ = none → Typed F Γ a τ Γ₁ →
-      Typed F ((x, .own τ true) :: Γ₁) b τb ((x, s) :: Γ₂) → Typed F Γ (.let_ x τ a b) τb Γ₂
+      Typed F ((x, .own τ true) :: Γ₁) b τb ((x, .own τ live) :: Γ₂) → Typed F Γ (.let_ x τ a b) τb Γ₂
   | write : Typed F Γ a .int Γ₁ → PlaceTy Γ₁ p .int true r → Typed F Γ (.write p a) .int Γ₁
   | assign : Typed F Γ a τ Γ₁ → PlaceTy Γ₁ p τ true r → Typed F Γ (.assign p τ a) .int Γ₁
   | call : F[f]? = some d → Args F Γ owned (d.owns.map Prod.snd) Γ₁ →
-      Lends Γ₁ lent (d.refs.map Prod.snd) roots → Exclusive lent roots →
+      Lends Γ₁ lent (d.refs.map Prod.snd) ys → Exclusive ys →
       Typed F Γ (.call f owned lent) d.ret Γ₁
   | seq : Typed F Γ a .int Γ₁ → Typed F Γ₁ b τ Γ₂ → Typed F Γ (.seq a b) τ Γ₂
 

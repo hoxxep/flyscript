@@ -1,4 +1,4 @@
-import FlyCore.Ownership
+import FlyCore.OwnershipSound
 
 /-!
 The semantics computes what the language means, in the kernel: a program that lends and moves
@@ -37,5 +37,49 @@ def aliased : Expr :=
   .let_ "x" (.box .int) (.new (.lit 1)) (.call 0 [] [(.mut, var "x"), (.ro, deref (var "x"))])
 
 example : (eval [clobber] 20 empty [] aliased).1 = .stuck := by decide
+
+/-! The types accept `lends`, so `program_ok` covers it; they reject `aliased`. -/
+
+theorem addInto_ok : FnsOk [addInto] := by
+  intro d hd
+  simp only [List.mem_singleton] at hd
+  subst hd
+  refine ⟨by decide, _, .seq (.write (.add (.read (.deref (.ref (m := .mut) rfl))) (.read (.deref (.own rfl))))
+    (.deref (.ref (m := .mut) rfl))) (.read (.deref (.ref (m := .mut) rfl)))⟩
+
+theorem lends_typed : Typed [addInto] [] lends .int [] := by
+  have hc : Typed [addInto] [("y", .own (.box .int) true), ("x", .own (.box .int) true)]
+      (.call 0 [.move "y"] [(.mut, var "x")]) .int
+      [("y", .own (.box .int) false), ("x", .own (.box .int) true)] := by
+    have := Typed.call (F := [addInto]) (Γ := [("y", .own (.box .int) true), ("x", .own (.box .int) true)])
+      (f := 0) (d := addInto) (ys := [(.mut, "x")]) rfl
+      (.cons (.move (x := "y") rfl) .nil) (.cons (.own (by simp [lookup, setSlot])) (fun _ => rfl) .nil)
+      (by simp [Exclusive])
+    simpa [setSlot, addInto] using this
+  exact .let_ rfl (.new .lit) (.let_ rfl (.new .lit) hc)
+
+example : ∀ n, match eval [addInto] n .empty [] lends with
+    | (.stuck, _) => False
+    | (.timeout, _) => True
+    | (.val v, σ') => ∃ L, VT σ' .int v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L :=
+  program_ok addInto_ok lends_typed
+
+theorem aliased_rejected : ¬ Typed [clobber] [] aliased τ Γ' := by
+  intro h
+  cases h with
+  | let_ _ _ hb =>
+    cases hb with
+    | call hf _ hl hx =>
+      simp at hf
+      subst hf
+      cases hl with
+      | cons hp _ hl =>
+        cases hl with
+        | cons hp' _ hl =>
+          cases hl
+          cases hp
+          · cases hp' with
+            | deref hq => cases hq <;> simp_all [Exclusive]
+          · simp_all [lookup]
 
 end FlyCore.Ownership.Examples

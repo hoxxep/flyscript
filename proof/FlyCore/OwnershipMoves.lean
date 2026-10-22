@@ -12,6 +12,13 @@ result.
 
 namespace FlyCore.Ownership
 
+/-- Proves `x ∈ … ↔ x ∈ …` between lists built by `++`, `::` and `[a]`, where both sides name the
+same cells: each side is a disjunction of the same atoms. -/
+macro "mem_iff" : tactic => `(tactic| (
+  simp only [List.mem_append, List.mem_cons, List.mem_singleton, List.not_mem_nil, or_false,
+    false_or, or_assoc] <;>
+  constructor <;> intro h <;> (repeat' (refine Or.elim h (fun h => ?_) (fun h => ?_))) <;> simp [h]))
+
 structure Moves (σ : Store) (E : List Nat) (σ' : Store) (E' L : List Nat) : Prop where
   within : ∀ l, l ∈ L ∨ l ∈ E' → l ∈ E ∨ σ.next ≤ l
   next : σ.next ≤ σ'.next
@@ -175,5 +182,26 @@ theorem Moves.free (hwf : WF σ') (hnext : σ'.next = σ.next) (hE : ∀ l ∈ E
       · rw [hkeep l (fun h => hl ((hsplit l).mpr (.inr h)))]; exact h
       · rw [hkeep l (hdisj l h)]; exact hE l ((hsplit l).mpr (.inl h))
       · simp at h
+
+/-- What a step's footprint and value own may be regrouped: cells the value owned may become the
+footprint's, as when a value is bound to a variable or stored in a place. -/
+theorem Moves.relabel (h : Moves σ E σ' E' L) (hsplit : ∀ x, x ∈ E'' ∨ x ∈ L'' ↔ x ∈ E' ∨ x ∈ L) :
+    Moves σ E σ' E'' L'' where
+  within := fun l hl => h.within l ((hsplit l).mp (hl.symm)).symm
+  next := h.next
+  wf := h.wf
+  frame := h.frame
+  alloc := by
+    intro l
+    rw [h.alloc]
+    constructor
+    · rintro (h | h | h)
+      · exact .inl h
+      · exact .inr ((hsplit l).mpr (.inl h))
+      · exact .inr ((hsplit l).mpr (.inr h))
+    · rintro (h | h | h)
+      · exact .inl h
+      · exact .inr ((hsplit l).mp (.inl h))
+      · exact .inr ((hsplit l).mp (.inr h))
 
 end FlyCore.Ownership
