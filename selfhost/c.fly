@@ -3554,7 +3554,8 @@ impl C {
       const point = `fly_point(); if (fly_unwinding) { ${self.unwindAction()} } `;
       return match (op) {
         "now" => `({ ${point}(${rc}){ .nanos = fly_clock }; })`,
-        "sleep" => `({ __auto_type d_ = ${vs[0]}; ${point}fly_clock += d_.nanos; (fly_unit)0; })`,
+        // Sleeping waits for the virtual clock, which is its scheduling point.
+        "sleep" => `({ __auto_type d_ = ${vs[0]}; fly_sleep(d_.nanos); if (fly_unwinding) { ${self.unwindAction()} } (fly_unit)0; })`,
         "park" => "((fly_unit)0)".toString(),
         "write" => {
           const ok = self.tagId("Ok");

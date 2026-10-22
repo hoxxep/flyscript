@@ -439,20 +439,22 @@ impl Interp {
     /// `Io`'s own operations, handled by the root handler against the simulated world (§6.4).
     /// Each is a scheduling point.
     fn root_io(&mut self, op: &str, args: Vec<Value>) -> R {
-        self.sched.yield_now(self.task)?;
-        let mut w = self.world.lock().expect("world");
         // `Instant` and `Duration` are structs of nanoseconds.
         let nanos = |v: Option<&Value>| match v.map(|v| v.deref()) {
             Some(Value::Record(fs)) => fs.get("nanos").map_or(0, |n| n.as_int() as u64),
             Some(other) => other.as_int() as u64,
             None => 0,
         };
+        // Sleeping waits for the virtual clock, which is its scheduling point.
+        if op == "sleep" {
+            self.sched.sleep(self.task, nanos(args.first()))?;
+            return Ok(Value::Unit);
+        }
+        self.sched.yield_now(self.task)?;
+        let now = self.sched.now();
+        let mut w = self.world.lock().expect("world");
         Ok(match op {
-            "now" => Value::Record([("nanos".to_string(), Value::Int(w.clock as i128))].into_iter().collect::<BTreeMap<_, _>>().into()),
-            "sleep" => {
-                w.clock += nanos(args.first());
-                Value::Unit
-            }
+            "now" => Value::Record([("nanos".to_string(), Value::Int(now as i128))].into_iter().collect::<BTreeMap<_, _>>().into()),
             "write" => {
                 let bytes: Vec<u8> = match args.get(1).map(|b| b.deref()) {
                     Some(Value::List(vs)) => vs.iter().map(|b| b.as_int() as u8).collect(),

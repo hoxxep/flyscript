@@ -224,6 +224,7 @@ bool fly_world_quota(fly_str token);
 extern bool fly_tasks_on;
 void fly_tasks_run(void (*main)(void));
 void fly_point(void);
+void fly_sleep(uint64_t nanos);
 // A task's outcome: its value (`size` bytes), or its failure.
 int fly_spawn(int scope, void (*entry)(void* task, void* closure), void* closure, size_t size);
 void* fly_task_result(void* task);

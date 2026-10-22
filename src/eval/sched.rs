@@ -3,7 +3,9 @@
 //! Each task runs on its own thread, but only the task holding the baton executes. At each
 //! scheduling point — spawning, sending, receiving, joining — the baton passes to a task chosen
 //! by a seeded generator, so interleavings are real and a seed reproduces them exactly. A task
-//! that would block parks until woken; if no task can run, the program has deadlocked.
+//! that would block parks until woken, in the order tasks blocked; a sleeping task waits for the
+//! virtual clock, which jumps to the earliest wake time when nothing else can run. If no task can
+//! run and none sleeps, the program has deadlocked.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Condvar, Mutex};
@@ -17,12 +19,17 @@ pub enum Wait {
     Channel(u64),
     /// Task `id` finishing.
     Task(u64),
+    /// The virtual clock reaching this many nanoseconds.
+    Until(u64),
 }
 
 struct Inner {
     current: u64,
     ready: Vec<u64>,
-    blocked: HashMap<u64, Wait>,
+    /// Waiting tasks, in the order they began to wait.
+    blocked: Vec<(u64, Wait)>,
+    /// Simulated time in nanoseconds: `Io.now` reads it, and it passes only as tasks sleep.
+    clock: u64,
     finished: HashSet<u64>,
     deadlocked: bool,
     rng: u64,
@@ -47,7 +54,8 @@ impl Sched {
             inner: Mutex::new(Inner {
                 current: 0,
                 ready: Vec::new(),
-                blocked: HashMap::new(),
+                blocked: Vec::new(),
+                clock: 0,
                 finished: HashSet::new(),
                 deadlocked: false,
                 rng: seed.max(1),
@@ -61,8 +69,16 @@ impl Sched {
         })
     }
 
-    /// Hands the baton to a ready task, chosen by the seed.
+    /// Hands the baton to a ready task, chosen by the seed. With none ready, time passes to the
+    /// earliest sleeper's wake time, waking every task due then.
     fn pass(inner: &mut Inner) {
+        if inner.ready.is_empty() {
+            let due = inner.blocked.iter().filter_map(|(_, w)| if let Wait::Until(t) = w { Some(*t) } else { None }).min();
+            if let Some(t) = due {
+                inner.clock = inner.clock.max(t);
+                Self::wake(inner, &Wait::Until(t));
+            }
+        }
         if inner.ready.is_empty() {
             if !inner.blocked.is_empty() {
                 inner.deadlocked = true;
@@ -94,7 +110,8 @@ impl Sched {
     pub fn cancel(&self, t: u64) {
         let mut inner = self.inner.lock().expect("scheduler");
         inner.cancelled.insert(t);
-        if inner.blocked.remove(&t).is_some() {
+        if let Some(i) = inner.blocked.iter().position(|(b, _)| *b == t) {
+            inner.blocked.remove(i);
             inner.ready.push(t);
         }
     }
@@ -130,7 +147,7 @@ impl Sched {
     /// Parks task `me` until `wait` is satisfied.
     fn block(&self, me: u64, wait: Wait) -> Result<(), Ctl> {
         let mut inner = self.inner.lock().expect("scheduler");
-        inner.blocked.insert(me, wait);
+        inner.blocked.push((me, wait));
         Self::pass(&mut inner);
         // Nothing else can run, so nothing can ever wake this task: a deadlock, reported rather
         // than waited on.
@@ -142,11 +159,30 @@ impl Sched {
     }
 
     fn wake(inner: &mut Inner, wait: &Wait) {
-        let woken: Vec<u64> = inner.blocked.iter().filter(|(_, w)| *w == wait).map(|(t, _)| *t).collect();
-        for t in woken {
-            inner.blocked.remove(&t);
-            inner.ready.push(t);
+        let mut i = 0;
+        while i < inner.blocked.len() {
+            if inner.blocked[i].1 == *wait {
+                let (t, _) = inner.blocked.remove(i);
+                inner.ready.push(t);
+            } else {
+                i += 1;
+            }
         }
+    }
+
+    /// The virtual clock, in nanoseconds.
+    pub fn now(&self) -> u64 {
+        self.inner.lock().expect("scheduler").clock
+    }
+
+    /// Task `me` sleeps for `nanos` of virtual time: other tasks run meanwhile, and time passes
+    /// only when none can.
+    pub fn sleep(&self, me: u64, nanos: u64) -> Result<(), Ctl> {
+        if nanos == 0 {
+            return self.yield_now(me);
+        }
+        let until = self.inner.lock().expect("scheduler").clock + nanos;
+        self.block(me, Wait::Until(until))
     }
 
     /// Task `me` has finished: wake its joiners and pass the baton on.

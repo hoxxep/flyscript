@@ -974,7 +974,7 @@ bool fly_world_quota(fly_str token) {
 
 // ---- tasks ----
 
-enum { WAIT_NONE, WAIT_TASK, WAIT_CHANNEL };
+enum { WAIT_NONE, WAIT_TASK, WAIT_CHANNEL, WAIT_UNTIL };
 
 typedef struct {
   int id, scope;
@@ -987,6 +987,7 @@ typedef struct {
   fly_failure* error;
   bool started, finished, cancelled, deliver_cancel, deliver_deadlock;
   int wait_kind, wait_id;
+  uint64_t until;
 } task_t;
 
 typedef struct { uint8_t* items; size_t len, head, size; long senders; bool closed; } chan_t;
@@ -1039,8 +1040,24 @@ static bool remove_blocked(int t) {
   return false;
 }
 
-// Hands the baton to a ready task, chosen by the seed; false if none can run.
+static void wake(int kind, int id);
+static void wake_until(uint64_t t);
+
+// Hands the baton to a ready task, chosen by the seed; false if none can run. With none ready,
+// time passes to the earliest sleeper's wake time, waking every task due then.
 static bool pass(void) {
+  if (sched.nready == 0) {
+    bool any = false;
+    uint64_t due = 0;
+    for (size_t i = 0; i < sched.nblocked; i++) {
+      task_t* t = sched.tasks[sched.blocked[i]];
+      if (t->wait_kind == WAIT_UNTIL && (!any || t->until < due)) { due = t->until; any = true; }
+    }
+    if (any) {
+      if (due > fly_clock) fly_clock = due;
+      wake_until(due);
+    }
+  }
   if (sched.nready == 0) return false;
   uint64_t r = xorshift(&sched.rng);
   size_t i = (size_t)(r % sched.nready);
@@ -1054,6 +1071,18 @@ static void wake(int kind, int id) {
   for (size_t i = 0; i < sched.nblocked;) {
     task_t* t = sched.tasks[sched.blocked[i]];
     if (t->wait_kind == kind && t->wait_id == id) {
+      int me = sched.blocked[i];
+      memmove(sched.blocked + i, sched.blocked + i + 1, (sched.nblocked - i - 1) * sizeof(int));
+      sched.nblocked--;
+      push_ready(me);
+    } else i++;
+  }
+}
+
+static void wake_until(uint64_t due) {
+  for (size_t i = 0; i < sched.nblocked;) {
+    task_t* t = sched.tasks[sched.blocked[i]];
+    if (t->wait_kind == WAIT_UNTIL && t->until == due) {
       int me = sched.blocked[i];
       memmove(sched.blocked + i, sched.blocked + i + 1, (sched.nblocked - i - 1) * sizeof(int));
       sched.nblocked--;
@@ -1087,6 +1116,14 @@ static void suspend_task(int kind, int id) {
 
 void fly_point(void) {
   if (fly_tasks_on) suspend_task(WAIT_NONE, 0);
+}
+
+// Sleeping waits for the virtual clock, which passes only when no task can run.
+void fly_sleep(uint64_t nanos) {
+  if (!fly_tasks_on) { fly_clock += nanos; return; }
+  if (nanos == 0) { fly_point(); return; }
+  sched.tasks[sched.current]->until = fly_clock + nanos;
+  suspend_task(WAIT_UNTIL, 0);
 }
 
 static void block(int kind, int id) {

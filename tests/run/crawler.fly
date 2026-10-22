@@ -1,6 +1,6 @@
-// expect: done a.com
-// expect: done b.com
 // expect: done c.com
+// expect: done b.com
+// expect: done a.com
 // expect: total 54
 // expect: pages 3
 // A concurrent fetch written as a TypeScript programmer would (§6): forked tasks that may fail,

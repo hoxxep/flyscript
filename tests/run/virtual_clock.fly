@@ -1,0 +1,59 @@
+// expect: worker 1 finished job 1
+// expect: worker 1 finished job 3
+// expect: worker 0 finished job 2
+// expect: worker 0 finished job 4
+// expect: finished 4 jobs
+// expect: #Ok(4)
+// expect: worker 1 finished job 1
+// expect: worker 1 finished job 3
+// expect: finished 2 jobs
+// expect: #Err(#TooExpensive(2))
+// Tasks sleep on a virtual clock: a task waits until the clock reaches its wake time, and the
+// clock moves on only when no task can run, so short jobs finish before a long one fails (§6.4).
+import { println } from "std/io";
+import { channel, Mutex } from "std/sync";
+import { HashMap } from "std/collections";
+
+type Job = { id: u32; cost: u32 };
+type JobErr = #TooExpensive(u32);
+
+function run(job: Job): u32 uses Io, Fail<JobErr> {
+  Io.sleep(Duration.ms(job.cost as u64));
+  if (job.cost > 50) { throw #TooExpensive(job.id); }
+  job.cost * 2
+}
+
+function process(jobs: readonly Vec<Job>, workers: u32): Result<u32, JobErr> uses Io {
+  const done = Mutex.new(HashMap.new());
+  const [tx, rx] = channel<String>();
+  const result = Fail.capture(() => Io.scope((s) => {
+    for (const w of 0..workers) {
+      const tx2 = tx.clone();
+      s.fork(() => {
+        let total: u32 = 0;
+        for (const job of jobs) {
+          if (job.id % workers != w) { continue; }
+          const out = run(job);
+          done.lock((m) => { m.insert(job.id, out); });
+          tx2.send(`worker ${w} finished job ${job.id}`);
+          total += out;
+        }
+        total
+      });
+    }
+    tx.close();
+    let lines = 0;
+    for (const msg of rx) { println(msg.asStr()); lines += 1; }
+    lines as u32
+  }));
+  const finished = done.lock((m) => m.len());
+  println(`finished ${finished} jobs`);
+  result
+}
+
+export function main(): void uses Io {
+  const cheap: Vec<Job> = [{ id: 1, cost: 10 }, { id: 2, cost: 20 }, { id: 3, cost: 5 }, { id: 4, cost: 15 }];
+  println(`${process(cheap, 2)}`);
+  const bad: Vec<Job> = [{ id: 1, cost: 10 }, { id: 2, cost: 90 }, { id: 3, cost: 5 }];
+  println(`${process(bad, 2)}`);
+}

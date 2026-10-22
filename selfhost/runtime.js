@@ -423,8 +423,17 @@ const { $rt, $b } = (() => {
     on: false, current: 0, ready: [], blocked: new Map(), finished: new Set(), rng: BigInt(Math.max(1, world.seed)), next: 1,
     tasks: new Map(), channels: new Map(), closed: new Set(), senders: new Map(), cancelled: new Set(), scopes: new Map(), scopeIds: 1,
   };
-  // Hands the baton to a ready task, chosen by the seed; `false` if none can run.
+  // Hands the baton to a ready task, chosen by the seed; `false` if none can run. With none
+  // ready, time passes to the earliest sleeper's wake time, waking every task due then.
   function pass() {
+    if (sched.ready.length === 0) {
+      let due;
+      for (const w of sched.blocked.values()) if (w[0] === "until" && (due === undefined || w[1] < due)) due = w[1];
+      if (due !== undefined) {
+        if (due > clock) clock = due;
+        wake("until", due);
+      }
+    }
     if (sched.ready.length === 0) return false;
     let r = sched.rng;
     r = BigInt.asUintN(64, r ^ (r << 13n));
@@ -812,8 +821,14 @@ const { $rt, $b } = (() => {
     },
     Io_read: () => ({ $tag: "Ok", $: 0 }),
   };
-  // The root `Io` operations are scheduling points.
-  for (const op of ["Io_now", "Io_sleep", "Io_write", "Io_read"]) {
+  // The root `Io` operations are scheduling points. Sleeping waits for the virtual clock, which
+  // passes only when no task can run.
+  $b.Io_sleep$g = function* (d) {
+    if (d.nanos === 0n) yield* point();
+    else if (sched.on) yield* block(["until", clock + d.nanos]);
+    else clock += d.nanos;
+  };
+  for (const op of ["Io_now", "Io_write", "Io_read"]) {
     const f = $b[op];
     $b[op + "$g"] = function* (...args) { yield* point(); return f(...args); };
   }

@@ -29,6 +29,7 @@ The whole language rests on five laws. Every rule in this document is a conseque
 | A call's result holds a borrow of an argument's place only if its declared type can hold a borrow itself, not only through a type argument (§4.1) | `const step = match (self.state.take()) { … }` kept `self.state` lent `mut` while `step` lived, so the state could not be put back: §5.5's own `generate` was rejected |
 | A `match` arm binds by the strongest use it makes of what it binds: it takes an owned place only if it moves a part, borrows it `mut` if it changes one in place, and a guard only reads (§4.1) | matching a local `Option<String>` to read its string moved it, so it could not be matched again; a TypeScript programmer reads a value without giving it away |
 | A `match` through a `mut` borrow lends it `mut` only if an arm changes a part it binds (§4.1) | a compiler's `match (self.defs[d].kind)` in a `mut self` method locked `self` for arms that only read, so they could not call `readonly` methods |
+| A sleeping task waits for the virtual clock, which moves only when no task can run (§6.4) | each sleep advanced one shared clock, so two tasks sleeping 10 ms at once took 20 ms between them, and a long sleep could end before a short one |
 | A program's `main` takes the command line, a last parameter that is a list of strings taking every argument left (§8.1) | the spec's own word count, `main(args: readonly String[])`, could not be run as a program |
 | A condition may chain bindings and tests with `&&`: `if (const #Some(x) = o && x > 0)`, and `while` likewise (§2.1, §2.3) | the compiler written in Flyscript had 247 `if (const …)` blocks whose first statement was another test |
 | `Scope.spawn` and `Scope.fork` use `Io` (§6.1) | starting a task is a scheduling point, an effect like any other; a back end that suspends tasks at their effects needs to see it in the type |
@@ -690,7 +691,7 @@ When an `Io.read` or `Io.write` suspends, the buffer stays borrowed until the op
 
 ### 6.4 Deterministic simulation
 
-`Io` is an ordinary effect, so a test can handle it. The standard `SimIo` handler runs every task on one thread with a seeded scheduler, a virtual clock and fault injection; with the same seed, a run is reproducible exactly.
+`Io` is an ordinary effect, so a test can handle it. The standard `SimIo` handler runs every task on one thread with a seeded scheduler, a virtual clock and fault injection; with the same seed, a run is reproducible exactly. A task that sleeps waits until the clock reaches its wake time; the clock moves only when no task can run, jumping to the earliest wake time and waking every task due then, in the order they began to wait. So tasks sleeping concurrently overlap, as they would in real time, and a test of a timeout runs instantly.
 
 ```ts
 test("handler degrades under packet loss", () => {
