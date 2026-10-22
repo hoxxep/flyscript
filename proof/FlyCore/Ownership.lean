@@ -1,19 +1,25 @@
 /-!
-# Ownership
+# Ownership and effects
 
-The ownership fragment of λ-fly (spec §4, §9): a heap of cells, owned boxes that are allocated and
-freed, moves, drops at the end of a scope, assignment that drops what a place held, branches, failures
-that unwind through scopes and calls, and borrows — `readonly` and `mut` — that exist only as
-parameters, so they cannot outlive what they borrow (§4.2).
+λ-fly's core (spec §4, §5, §9): a heap of cells, owned boxes that are allocated and freed, moves,
+drops at the end of a scope, assignment that drops what a place held, branches, loops, borrows —
+`readonly` and `mut` — that exist only as parameters, so they cannot outlive what they borrow (§4.2),
+and effects: failures and user effects, performed where the code is and handled where a `handle`
+or a `try` installed a handler for them. A handler resumes the code that performed its operation,
+the arm's value the operation's result, or ends its `handle` with the arm's value, the code that
+performed it unwinding through the scopes and calls between. Handlers are deep, and an arm runs in
+the context of its `handle`: what it performs goes to the handlers around the `handle`.
 
 Every variable lives in a cell of the store; a box is a pointer to a cell holding its contents. A
 borrowed parameter is bound to the location it borrows, not to a cell of its own. A value is an
-integer, a pointer, or the mark a move leaves in a variable's cell.
+integer, a pointer, or the mark a move leaves in a variable's cell. An arm that resumes may use
+places of its `handle`'s scope, lent to it `readonly` for as long as the `handle` runs.
 
 The semantics is an interpreter with fuel, and anything no rule covers is `stuck`: reading a value
-that was moved, reaching a cell that was freed, freeing one twice. The theorems are that a
-well-typed program never gets stuck, and that when it ends, with a value or a failure, every cell it
-allocated has been freed but those of its result: each owned value is dropped exactly once.
+that was moved, reaching a cell that was freed, freeing one twice, performing an operation nothing
+handles. The theorems are that a well-typed program never gets stuck, and that when it ends, with
+a value or a failure, every cell it allocated has been freed but those of its result: each owned
+value is dropped exactly once.
 -/
 
 namespace FlyCore.Ownership
@@ -29,6 +35,14 @@ inductive Mode where
   deriving DecidableEq, Repr
 
 abbrev Var := String
+
+/-- What a row may hold: `Fail`, or a user effect by number. -/
+inductive Label where
+  | fail
+  | eff (n : Nat)
+  deriving DecidableEq, Repr
+
+abbrev Row := List Label
 
 /-- A place: a variable, or what a box at a place points to. -/
 inductive Place where
@@ -60,13 +74,33 @@ inductive Expr where
   | throw_ (a : Expr)
   /-- `try { body } catch (x) { h }`: a failure of `body` is handled by `h`, `x` its payload. -/
   | try_ (body : Expr) (x : Var) (h : Expr)
+  /-- `while (c) { body }`, while `c` is not zero. -/
+  | while_ (c body : Expr)
+  /-- `E.op(…)`: the operation of user effect `e`, with its owned arguments and its places lent. -/
+  | perform (e : Nat) (owned : List Expr) (lent : List (Mode × Place))
+  /-- `handle { body } with E { op(…) resumes k => k(arm) }`: where `body` performs the operation,
+  `arm` runs, its value the operation's result, given the operation's arguments — owned as `owns`,
+  lent as `refs` — and the places of `caps`, lent to it `readonly` for as long as the `handle`
+  runs. -/
+  | handle (body : Expr) (e : Nat) (caps : List (Var × Place)) (owns refs : List Var) (arm : Expr)
+  /-- `handle { body } with E { op(x) => h }`: where `body` performs the operation, whose argument
+  is an integer, it unwinds, and `h` gives the `handle`'s value. -/
+  | handleAbort (body : Expr) (e : Nat) (x : Var) (h : Expr)
   deriving Repr
 
-/-- A function: its owned parameters, its borrowed ones, its result, its body. -/
+/-- A user effect's operation: what it takes, owned and lent, and what it gives. -/
+structure Op where
+  owns : List Ty
+  refs : List (Mode × Ty)
+  ret : Ty
+
+/-- A function: its owned parameters, its borrowed ones, its result, the effects it may perform,
+its body. -/
 structure Fn where
   owns : List (Var × Ty)
   refs : List (Var × Mode × Ty)
   ret : Ty
+  row : Row
   body : Expr
 
 inductive Val where
@@ -130,17 +164,36 @@ def dropCells (σ : Store) : List (Ty × Nat) → Option Store
     | some σ' => dropCells σ' rest
     | none => none
 
+/-- A handler in force: one that resumes, with its arm and the places its `handle` lent it; or
+one that unwinds — an abortive arm, or a `try` — by the depth of the stack it was installed on,
+which the unwinding is aimed at. -/
+inductive Frame where
+  | resume (e : Nat) (caps : Env) (owns refs : List Var) (arm : Expr)
+  | abort (l : Label) (id : Nat)
+
+abbrev HS := List Frame
+
+def Frame.handles : Frame → Label → Bool
+  | .resume e _ _ _ _, .eff e' => e == e'
+  | .resume _ _ _ _ _, .fail => false
+  | .abort l _, l' => l == l'
+
+/-- The innermost frame handling `l`, and the frames below it: the context its arm runs in. -/
+def find (l : Label) : HS → Option (Frame × HS)
+  | [] => none
+  | f :: rest => if f.handles l then some (f, rest) else find l rest
+
 inductive Res where
   | val (v : Val)
-  /-- A failure on its way out, carrying its payload. -/
-  | fail (k : Int)
+  /-- Unwinding to the handler installed at depth `id`, with the operation's integer argument. -/
+  | abort (id : Nat) (k : Int)
   | stuck
   | timeout
   deriving DecidableEq, Repr
 
-/-- Evaluation ended, with a value or a failure: a scope it leaves drops what it owns. -/
+/-- Evaluation ended, with a value or by unwinding: a scope it leaves drops what it owns. -/
 def Res.done : Res → Bool
-  | .val _ | .fail _ => true
+  | .val _ | .abort _ _ => true
   | _ => false
 
 /-- Allocates a cell for each value, binding the names to them. -/
@@ -179,9 +232,30 @@ def leave (τ : Ty) (c : Nat) : Res × Store → Res × Store
       | none => (.stuck, σ)
     else (r, σ)
 
-def eval (F : List Fn) : Nat → Store → Env → Expr → Res × Store
-  | 0, σ, _, _ => (.timeout, σ)
-  | n + 1, σ, env, e =>
+/-- Binds a function's or an arm's owned parameters in fresh cells, runs `body` with them, the
+places lent it and those of `post` — what an arm's `handle` lent it — then drops the parameters it
+owns. -/
+def enter (ev : Store → Env → Expr → Res × Store) (σ : Store)
+    (owns : List (Var × Ty)) (vs : List Val) (refs : List Var) (ls : List Nat) (post : Env) (body : Expr) :
+    Res × Store :=
+  let (cells, σ2) := allocAll σ (owns.map Prod.fst |>.zip vs)
+  match ev σ2 (cells ++ refs.zip ls ++ post) body with
+  | (r, σ3) =>
+    if r.done then
+      match dropCells σ3 (owns.map Prod.snd |>.zip (cells.map Prod.snd)) with
+      | some σ4 => (r, σ4)
+      | none => (.stuck, σ3)
+    else (r, σ3)
+
+/-- Catches an unwinding aimed at the handler installed at depth `d`, going on with `k`. -/
+def catchAt (d : Nat) : Res × Store → (Int → Store → Res × Store) → Res × Store
+  | (.abort id k, σ), h => if id = d then h k σ else (.abort id k, σ)
+  | r, _ => r
+
+/-- The interpreter: the program's functions and operations, fuel, the handlers in force. -/
+def eval (F : List Fn) (O : List Op) : Nat → HS → Store → Env → Expr → Res × Store
+  | 0, _, σ, _, _ => (.timeout, σ)
+  | n + 1, hs, σ, env, e =>
     match e with
     | .lit k => (.val (.int k), σ)
     | .read p =>
@@ -199,28 +273,28 @@ def eval (F : List Fn) : Nat → Store → Env → Expr → Res × Store
         | _ => (.stuck, σ)
       | none => (.stuck, σ)
     | .add a b =>
-      match eval F n σ env a with
+      match eval F O n hs σ env a with
       | (.val (.int x), σ1) =>
-        match eval F n σ1 env b with
+        match eval F O n hs σ1 env b with
         | (.val (.int y), σ2) => (.val (.int (x + y)), σ2)
         | (.val _, σ2) => (.stuck, σ2)
         | r => r
       | (.val _, σ1) => (.stuck, σ1)
       | r => r
     | .new a =>
-      match eval F n σ env a with
+      match eval F O n hs σ env a with
       | (.val v, σ1) =>
         let (l, σ2) := σ1.alloc v
         (.val (.ptr l), σ2)
       | r => r
     | .let_ x τ a b =>
-      match eval F n σ env a with
+      match eval F O n hs σ env a with
       | (.val v, σ1) =>
         let (c, σ2) := σ1.alloc v
-        leave τ c (eval F n σ2 ((x, c) :: env) b)
+        leave τ c (eval F O n hs σ2 ((x, c) :: env) b)
       | r => r
     | .write p a =>
-      match eval F n σ env a with
+      match eval F O n hs σ env a with
       | (.val (.int k), σ1) =>
         match resolve σ1 env p with
         | some l =>
@@ -231,7 +305,7 @@ def eval (F : List Fn) : Nat → Store → Env → Expr → Res × Store
       | (.val _, σ1) => (.stuck, σ1)
       | r => r
     | .assign p τ a =>
-      match eval F n σ env a with
+      match eval F O n hs σ env a with
       | (.val v, σ1) =>
         match resolve σ1 env p with
         | some l =>
@@ -247,44 +321,75 @@ def eval (F : List Fn) : Nat → Store → Env → Expr → Res × Store
       match F[f]? with
       | none => (.stuck, σ)
       | some d =>
-        match evalArgs (eval F n) σ env owned (d.owns.map Prod.snd) with
+        match evalArgs (eval F O n hs) σ env owned (d.owns.map Prod.snd) with
         | (.inl vs, σ1) =>
           match lent.mapM (fun (_, p) => resolve σ1 env p) with
           | some ls =>
             if vs.length = d.owns.length ∧ ls.length = d.refs.length then
-              let (cells, σ2) := allocAll σ1 (d.owns.map Prod.fst |>.zip vs)
-              let env' := cells ++ (d.refs.map Prod.fst |>.zip ls)
-              match eval F n σ2 env' d.body with
-              | (r, σ3) =>
-                if r.done then
-                  match dropCells σ3 (d.owns.map Prod.snd |>.zip (cells.map Prod.snd)) with
-                  | some σ4 => (r, σ4)
-                  | none => (.stuck, σ3)
-                else (r, σ3)
+              enter (eval F O n hs) σ1 d.owns vs (d.refs.map Prod.fst) ls [] d.body
             else (.stuck, σ1)
           | none => (.stuck, σ1)
         | (.inr r, σ1) => (r, σ1)
     | .seq a b =>
-      match eval F n σ env a with
-      | (.val (.int _), σ1) => eval F n σ1 env b
+      match eval F O n hs σ env a with
+      | (.val (.int _), σ1) => eval F O n hs σ1 env b
       | (.val _, σ1) => (.stuck, σ1)
       | r => r
     | .ite c a b =>
-      match eval F n σ env c with
-      | (.val (.int k), σ1) => if k = 0 then eval F n σ1 env b else eval F n σ1 env a
+      match eval F O n hs σ env c with
+      | (.val (.int k), σ1) => if k = 0 then eval F O n hs σ1 env b else eval F O n hs σ1 env a
       | (.val _, σ1) => (.stuck, σ1)
       | r => r
     | .throw_ a =>
-      match eval F n σ env a with
-      | (.val (.int k), σ1) => (.fail k, σ1)
+      match eval F O n hs σ env a with
+      | (.val (.int k), σ1) =>
+        match find .fail hs with
+        | some (.abort _ id, _) => (.abort id k, σ1)
+        | _ => (.stuck, σ1)
       | (.val _, σ1) => (.stuck, σ1)
       | r => r
     | .try_ body x h =>
-      match eval F n σ env body with
-      | (.fail k, σ1) =>
+      catchAt hs.length (eval F O n (.abort .fail hs.length :: hs) σ env body) fun k σ1 =>
         let (c, σ2) := σ1.alloc (.int k)
-        leave .int c (eval F n σ2 ((x, c) :: env) h)
+        leave .int c (eval F O n hs σ2 ((x, c) :: env) h)
+    | .while_ c b =>
+      match eval F O n hs σ env c with
+      | (.val (.int k), σ1) =>
+        if k = 0 then (.val (.int 0), σ1) else
+        match eval F O n hs σ1 env b with
+        | (.val (.int _), σ2) => eval F O n hs σ2 env (.while_ c b)
+        | (.val _, σ2) => (.stuck, σ2)
+        | r => r
+      | (.val _, σ1) => (.stuck, σ1)
       | r => r
+    | .perform ef owned lent =>
+      match O[ef]? with
+      | none => (.stuck, σ)
+      | some op =>
+        match evalArgs (eval F O n hs) σ env owned op.owns with
+        | (.inl vs, σ1) =>
+          match lent.mapM (fun (_, p) => resolve σ1 env p) with
+          | some ls =>
+            match find (.eff ef) hs with
+            | some (.resume _ caps os rs arm, rest) =>
+              if vs.length = os.length ∧ ls.length = rs.length then
+                enter (eval F O n rest) σ1 (os.zip op.owns) vs rs ls caps arm
+              else (.stuck, σ1)
+            | some (.abort _ id, _) =>
+              match vs with
+              | [.int k] => (.abort id k, σ1)
+              | _ => (.stuck, σ1)
+            | none => (.stuck, σ1)
+          | none => (.stuck, σ1)
+        | (.inr r, σ1) => (r, σ1)
+    | .handle body ef caps os rs arm =>
+      match caps.mapM (fun (_, p) => resolve σ env p) with
+      | some ls => eval F O n (.resume ef (caps.map Prod.fst |>.zip ls) os rs arm :: hs) σ env body
+      | none => (.stuck, σ)
+    | .handleAbort body ef x h =>
+      catchAt hs.length (eval F O n (.abort (.eff ef) hs.length :: hs) σ env body) fun k σ1 =>
+        let (c, σ2) := σ1.alloc (.int k)
+        leave .int c (eval F O n hs σ2 ((x, c) :: env) h)
 
 
 /-! ## Types -/
@@ -329,35 +434,77 @@ at one variable are both lent `readonly`. -/
 def Exclusive (ys : List (Mode × Var)) : Prop :=
   ys.Pairwise fun a b => a.2 = b.2 → a.1 = .ro ∧ b.1 = .ro
 
+/-- A slot only read: what the code a `handle` runs sees of a place it lent its arm. -/
+def Slot.ro : Slot → Slot
+  | .own τ _ => .ref .ro τ
+  | .ref _ τ => .ref .ro τ
+
+/-- `Γ` with the variables `ys` only read. -/
+def freeze (Γ : Ctx) (ys : List Var) : Ctx :=
+  Γ.map fun (y, s) => if y ∈ ys then (y, s.ro) else (y, s)
+
+/-- `Γb`, a context of the same variables as `Γ`, with the variables `ys` as `Γ` has them. -/
+def thaw (Γ : Ctx) (ys : List Var) (Γb : Ctx) : Ctx :=
+  List.zipWith (fun p q => if p.1 ∈ ys then p else q) Γ Γb
+
+/-- The places a `handle` lends its arm, each of its type, and the variable each is rooted at. -/
+inductive Caps (Γ : Ctx) : List (Var × Place) → List Ty → List Var → Prop
+  | nil : Caps Γ [] [] []
+  | cons : PlaceTy Γ p τ w y → Caps Γ rest ts ys → Caps Γ ((x, p) :: rest) (τ :: ts) (y :: ys)
+
+/-- An arm's context: the operation's owned arguments, live, then its borrowed ones, then the
+places its `handle` lent it. -/
+def armCtx (os : List Var) (rs : List Var) (op : Op) (caps : List Var) (ts : List Ty) : Ctx :=
+  (os.zip op.owns).map (fun p => (p.1, Slot.own p.2 true)) ++ (rs.zip op.refs).map (fun p => (p.1, Slot.ref p.2.1 p.2.2)) ++
+    (caps.zip ts).map (fun p => (p.1, Slot.ref .ro p.2))
+
 mutual
-/-- `Typed F Γ e τ Γ'`: `e` has type `τ`, and leaves its variables as `Γ'` says — moved or not. -/
-inductive Typed (F : List Fn) : Ctx → Expr → Ty → Ctx → Prop
-  | lit : Typed F Γ (.lit n) .int Γ
-  | read : PlaceTy Γ p .int w r → Typed F Γ (.read p) .int Γ
+/-- `Typed F O Γ e τ Γ' r`: `e` has type `τ`, leaves its variables as `Γ'` says — moved or not —
+and performs only what the row `r` names. -/
+inductive Typed (F : List Fn) (O : List Op) : Ctx → Expr → Ty → Ctx → Row → Prop
+  | lit : Typed F O Γ (.lit n) .int Γ r
+  | read : PlaceTy Γ p .int w y → Typed F O Γ (.read p) .int Γ r
   | move : lookup x Γ = some (.own (.box τ) true) →
-      Typed F Γ (.move x) (.box τ) (setSlot Γ x (.own (.box τ) false))
-  | add : Typed F Γ a .int Γ₁ → Typed F Γ₁ b .int Γ₂ → Typed F Γ (.add a b) .int Γ₂
-  | new : Typed F Γ a τ Γ₁ → Typed F Γ (.new a) (.box τ) Γ₁
-  | let_ : lookup x Γ = none → Typed F Γ a τ Γ₁ →
-      Typed F ((x, .own τ true) :: Γ₁) b τb ((x, .own τ live) :: Γ₂) → Typed F Γ (.let_ x τ a b) τb Γ₂
-  | write : Typed F Γ a .int Γ₁ → PlaceTy Γ₁ p .int true r → Typed F Γ (.write p a) .int Γ₁
-  | assign : Typed F Γ a τ Γ₁ → PlaceTy Γ₁ p τ true r → Typed F Γ (.assign p τ a) .int Γ₁
-  | call : F[f]? = some d → Args F Γ owned (d.owns.map Prod.snd) Γ₁ →
+      Typed F O Γ (.move x) (.box τ) (setSlot Γ x (.own (.box τ) false)) r
+  | add : Typed F O Γ a .int Γ₁ r → Typed F O Γ₁ b .int Γ₂ r → Typed F O Γ (.add a b) .int Γ₂ r
+  | new : Typed F O Γ a τ Γ₁ r → Typed F O Γ (.new a) (.box τ) Γ₁ r
+  | let_ : lookup x Γ = none → Typed F O Γ a τ Γ₁ r →
+      Typed F O ((x, .own τ true) :: Γ₁) b τb ((x, .own τ live) :: Γ₂) r → Typed F O Γ (.let_ x τ a b) τb Γ₂ r
+  | write : Typed F O Γ a .int Γ₁ r → PlaceTy Γ₁ p .int true y → Typed F O Γ (.write p a) .int Γ₁ r
+  | assign : Typed F O Γ a τ Γ₁ r → PlaceTy Γ₁ p τ true y → Typed F O Γ (.assign p τ a) .int Γ₁ r
+  | call : F[f]? = some d → (∀ l ∈ d.row, l ∈ r) → Args F O Γ owned (d.owns.map Prod.snd) Γ₁ r →
       Lends Γ₁ lent (d.refs.map Prod.snd) ys → Exclusive ys →
-      Typed F Γ (.call f owned lent) d.ret Γ₁
-  | seq : Typed F Γ a .int Γ₁ → Typed F Γ₁ b τ Γ₂ → Typed F Γ (.seq a b) τ Γ₂
+      Typed F O Γ (.call f owned lent) d.ret Γ₁ r
+  | seq : Typed F O Γ a .int Γ₁ r → Typed F O Γ₁ b τ Γ₂ r → Typed F O Γ (.seq a b) τ Γ₂ r
   /-- Where the branches disagree, a variable is perhaps moved. -/
-  | ite : Typed F Γ c .int Γ₀ → Typed F Γ₀ a τ Γa → Typed F Γ₀ b τ Γb → Weaker Γ' Γa → Weaker Γ' Γb →
-      Typed F Γ (.ite c a b) τ Γ'
-  | throw_ : Typed F Γ a .int Γ₁ → Typed F Γ (.throw_ a) τ Γ₁
+  | ite : Typed F O Γ c .int Γ₀ r → Typed F O Γ₀ a τ Γa r → Typed F O Γ₀ b τ Γb r → Weaker Γ' Γa →
+      Weaker Γ' Γb → Typed F O Γ (.ite c a b) τ Γ' r
+  | throw_ : Typed F O Γ a .int Γ₁ r → Label.fail ∈ r → Typed F O Γ (.throw_ a) τ Γ₁ r
   /-- The handler starts where the body would have ended: what the body moves is perhaps moved. -/
-  | try_ : lookup x Γb = none → Typed F Γ body τ Γb →
-      Typed F ((x, .own .int true) :: Γb) h τ ((x, .own .int live) :: Γh) → Typed F Γ (.try_ body x h) τ Γh
+  | try_ : lookup x Γb = none → Typed F O Γ body τ Γb (.fail :: r) →
+      Typed F O ((x, .own .int true) :: Γb) h τ ((x, .own .int live) :: Γh) r →
+      Typed F O Γ (.try_ body x h) τ Γh r
+  /-- A loop moves nothing: each pass starts where the one before started. -/
+  | while_ : Typed F O Γ c .int Γ r → Typed F O Γ b .int Γ r → Typed F O Γ (.while_ c b) .int Γ r
+  | perform : O[e]? = some op → Label.eff e ∈ r → Args F O Γ owned op.owns Γ₁ r →
+      Lends Γ₁ lent op.refs ys → Exclusive ys → Typed F O Γ (.perform e owned lent) op.ret Γ₁ r
+  /-- The arm runs in the context of the `handle`: its row is the `handle`'s. What it is lent of
+  the `handle`'s scope the body may only read. -/
+  | handle : O[e]? = some op → os.length = op.owns.length → rs.length = op.refs.length →
+      Caps Γ caps ts ys → (os ++ rs ++ caps.map Prod.fst).Nodup →
+      Typed F O (armCtx os rs op (caps.map Prod.fst) ts) arm op.ret Γa r →
+      Typed F O (freeze Γ ys) body τ Γb (.eff e :: r) →
+      Typed F O Γ (.handle body e caps os rs arm) τ (thaw Γ ys Γb) r
+  /-- As for `try`, the arm starts where the body would have ended. -/
+  | handleAbort : O[e]? = some op → op.owns = [.int] → op.refs = [] → lookup x Γb = none →
+      Typed F O Γ body τ Γb (.eff e :: r) →
+      Typed F O ((x, .own .int true) :: Γb) h τ ((x, .own .int live) :: Γh) r →
+      Typed F O Γ (.handleAbort body e x h) τ Γh r
 
 /-- The owned arguments, in order, against the parameters' types. -/
-inductive Args (F : List Fn) : Ctx → List Expr → List Ty → Ctx → Prop
-  | nil : Args F Γ [] [] Γ
-  | cons : Typed F Γ a τ Γ₁ → Args F Γ₁ as τs Γ₂ → Args F Γ (a :: as) (τ :: τs) Γ₂
+inductive Args (F : List Fn) (O : List Op) : Ctx → List Expr → List Ty → Ctx → Row → Prop
+  | nil : Args F O Γ [] [] Γ r
+  | cons : Typed F O Γ a τ Γ₁ r → Args F O Γ₁ as τs Γ₂ r → Args F O Γ (a :: as) (τ :: τs) Γ₂ r
 
 end
 

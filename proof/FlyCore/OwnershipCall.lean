@@ -10,15 +10,22 @@ lemmas here follow those steps; `eval_ok` puts them together.
 
 namespace FlyCore.Ownership
 
-/-- What evaluating may give: never stuck; a value, with the activation still well formed after,
-the value owning cells no variable does, and the step accounted for; or a failure, everything the
-scopes it left owned dropped, the activation well formed as the expression would have left it. -/
-def Post (σ : Store) (E S : List Nat) (Γ' : Ctx) (env : Env) (τ : Ty) : Res × Store → Prop
+/-- An unwinding is aimed at a frame of the stack. -/
+def AimedIn (id : Nat) (hs : HS) : Prop := ∃ l, Frame.abort l id ∈ hs
+
+/-- Every label of the row has a handler. -/
+def Covers (hs : HS) (r : Row) : Prop := ∀ l ∈ r, ∃ p, find l hs = some p
+
+/-- What evaluating under the handlers `hs` may give: never stuck; a value, with the activation
+still well formed after, the value owning cells no variable does, and the step accounted for; or an
+unwinding aimed at one of the handlers, everything the scopes it left owned dropped, the activation
+well formed as the expression would have left it. -/
+def Post (σ : Store) (E S : List Nat) (Γ' : Ctx) (env : Env) (τ : Ty) (hs : HS) : Res × Store → Prop
   | (.stuck, _) => False
   | (.timeout, _) => True
   | (.val v, σ') => ∃ E' L, Inv σ' Γ' env E' S ∧ VT σ' τ v L ∧ Disj L E' ∧ Disj L S ∧
       Moves σ E σ' E' L
-  | (.fail _, σ') => ∃ E', Inv σ' Γ' env E' S ∧ Moves σ E σ' E' []
+  | (.abort id _, σ') => AimedIn id hs ∧ ∃ E', Inv σ' Γ' env E' S ∧ Moves σ E σ' E' []
 
 /-! ## Variables perhaps moved -/
 
@@ -73,10 +80,37 @@ theorem setSlot_weaker : ∀ {Γ : Ctx}, (Γ.map Prod.fst).Nodup → lookup x Γ
       simp only [lookup, hxy, ↓reduceIte] at hx
       exact .cons .refl (setSlot_weaker hk hx hle)
 
+theorem Weaker.cons_inv : Weaker Γb (p :: Γ) → ∃ s' Γb', Γb = (p.1, s') :: Γb' ∧ Slot.Le s' p.2 ∧ Weaker Γb' Γ := by
+  intro h
+  cases h with
+  | cons hle w => exact ⟨_, _, rfl, hle, w⟩
+
+theorem Weaker.nil_inv : Weaker Γb [] → Γb = [] := by
+  intro h
+  cases h
+  rfl
+
+/-- What a `handle`'s body leaves of a context it only read in part, given back: weaker than the
+context it started from. -/
+theorem thaw_weaker {ys : List Var} : ∀ {Γ Γb : Ctx}, Weaker Γb (freeze Γ ys) → Weaker (thaw Γ ys Γb) Γ := by
+  intro Γ
+  induction Γ with
+  | nil => intro Γb h; rw [Weaker.nil_inv h]; exact .nil
+  | cons p Γ ih =>
+    intro Γb h
+    obtain ⟨y, s⟩ := p
+    obtain ⟨s', Γb', rfl, hle, w⟩ := Weaker.cons_inv h
+    simp only [thaw, List.zipWith_cons_cons]
+    by_cases hy : y ∈ ys
+    · simp only [hy, ↓reduceIte]
+      exact .cons .refl (ih w)
+    · simp only [hy, ↓reduceIte] at hle ⊢
+      exact .cons hle (ih w)
+
 mutual
 /-- Typing only ever moves: what an expression leaves is what it found, some owned variables perhaps
 moved. -/
-theorem typed_weaker : Typed F Γ e τ Γ' → (Γ.map Prod.fst).Nodup → Weaker Γ' Γ
+theorem typed_weaker : Typed F O Γ e τ Γ' r → (Γ.map Prod.fst).Nodup → Weaker Γ' Γ
   | .lit, _ => Weaker.refl _
   | .read _, _ => Weaker.refl _
   | .move hx, hk => setSlot_weaker hk hx .forget
@@ -89,28 +123,36 @@ theorem typed_weaker : Typed F Γ e τ Γ' → (Γ.map Prod.fst).Nodup → Weake
     | cons _ w => exact w.trans (typed_weaker ha hk)
   | .write ha _, hk => typed_weaker ha hk
   | .assign ha _, hk => typed_weaker ha hk
-  | .call _ hargs _ _, hk => args_weaker hargs hk
+  | .call _ _ hargs _ _, hk => args_weaker hargs hk
   | .seq ha hb, hk => (typed_weaker hb (by rw [typed_keys ha]; exact hk)).trans (typed_weaker ha hk)
   | .ite hc ha _ wa _, hk =>
     wa.trans ((typed_weaker ha (by rw [typed_keys hc]; exact hk)).trans (typed_weaker hc hk))
-  | .throw_ ha, hk => typed_weaker ha hk
+  | .throw_ ha _, hk => typed_weaker ha hk
   | .try_ hx hb hh, hk => by
     have := typed_weaker hh (List.nodup_cons.mpr ⟨by exact lookup_none_keys hx,
       by rw [typed_keys hb]; exact hk⟩)
     cases this with
     | cons _ w => exact w.trans (typed_weaker hb hk)
-theorem args_weaker : Args F Γ as τs Γ' → (Γ.map Prod.fst).Nodup → Weaker Γ' Γ
+  | .while_ _ _, _ => Weaker.refl _
+  | .perform _ _ hargs _ _, hk => args_weaker hargs hk
+  | .handle _ _ _ _ _ _ hb, hk => thaw_weaker (typed_weaker hb (by rw [freeze_keys]; exact hk))
+  | .handleAbort _ _ _ hx hb hh, hk => by
+    have := typed_weaker hh (List.nodup_cons.mpr ⟨by exact lookup_none_keys hx,
+      by rw [typed_keys hb]; exact hk⟩)
+    cases this with
+    | cons _ w => exact w.trans (typed_weaker hb hk)
+theorem args_weaker : Args F O Γ as τs Γ' r → (Γ.map Prod.fst).Nodup → Weaker Γ' Γ
   | .nil, _ => Weaker.refl _
   | .cons ha hrest, hk => (args_weaker hrest (by rw [typed_keys ha]; exact hk)).trans (typed_weaker ha hk)
 end
 
 /-- What an expression may give, said of a context it leaves, holds of one that is weaker. -/
-theorem post_weaken {r : Res × Store} (h : Post σ E S Γ₁ env τ r) (w : Weaker Γ' Γ₁) :
-    Post σ E S Γ' env τ r := by
+theorem post_weaken {r : Res × Store} (h : Post σ E S Γ₁ env τ hs r) (w : Weaker Γ' Γ₁) :
+    Post σ E S Γ' env τ hs r := by
   rcases r with ⟨r, σ'⟩
   cases r with
   | val v => obtain ⟨E', L, hI, hv, hd, hdS, hm⟩ := h; exact ⟨E', L, hI.weaken w, hv, hd, hdS, hm⟩
-  | fail k => obtain ⟨E', hI, hm⟩ := h; exact ⟨E', hI.weaken w, hm⟩
+  | abort id k => obtain ⟨haim, E', hI, hm⟩ := h; exact ⟨haim, E', hI.weaken w, hm⟩
   | stuck => exact h
   | timeout => trivial
 
@@ -118,11 +160,189 @@ theorem post_weaken {r : Res × Store} (h : Post σ E S Γ₁ env τ r) (w : Wea
 def fnCtx (d : Fn) : Ctx :=
   d.owns.map (fun p => (p.1, Slot.own p.2 true)) ++ d.refs.map (fun p => (p.1, Slot.ref p.2.1 p.2.2))
 
-/-- A function whose parameters are named apart and whose body has its result type. -/
-def FnOk (F : List Fn) (d : Fn) : Prop :=
-  ((d.owns.map Prod.fst) ++ (d.refs.map Prod.fst)).Nodup ∧ ∃ Γ', Typed F (fnCtx d) d.body d.ret Γ'
+/-- A function whose parameters are named apart and whose body has its result type, performing
+only what its row names. -/
+def FnOk (F : List Fn) (O : List Op) (d : Fn) : Prop :=
+  ((d.owns.map Prod.fst) ++ (d.refs.map Prod.fst)).Nodup ∧ ∃ Γ', Typed F O (fnCtx d) d.body d.ret Γ' d.row
 
-def FnsOk (F : List Fn) : Prop := ∀ d ∈ F, FnOk F d
+def FnsOk (F : List Fn) (O : List Op) : Prop := ∀ d ∈ F, FnOk F O d
+
+/-! ## The handlers in force -/
+
+/-- The places a `handle` lent its arm, each holding a value of its type, and their cells. -/
+inductive CapsOk (σ : Store) : Env → List Ty → List Nat → Prop
+  | nil : CapsOk σ [] [] []
+  | cons : LT σ a τ L → CapsOk σ rest ts R → CapsOk σ ((x, a) :: rest) (τ :: ts) (L ++ R)
+
+/-- A handler stack whose frames are well formed: each unwinding one numbered by its depth; each
+resuming arm typed where it runs — its parameters, then the places its `handle` lent it, holding
+values of their types, its row covered by the frames below — and `R` the cells of those places. -/
+inductive HSOk (F : List Fn) (O : List Op) (σ : Store) : HS → List Nat → Prop
+  | nil : HSOk F O σ [] []
+  | abort : i = rest.length → (∀ e, l = .eff e → ∃ op, O[e]? = some op ∧ op.owns = [.int] ∧ op.refs = []) →
+      HSOk F O σ rest R → HSOk F O σ (.abort l i :: rest) R
+  | resume : O[e]? = some op → CapsOk σ caps ts Rc → os.length = op.owns.length →
+      rs.length = op.refs.length → (os ++ rs ++ caps.map Prod.fst).Nodup →
+      Typed F O (armCtx os rs op (caps.map Prod.fst) ts) arm op.ret Γa r → Covers rest r →
+      HSOk F O σ rest R → HSOk F O σ (.resume e caps os rs arm :: rest) (Rc ++ R)
+
+/-- Where code may run under `hs`, performing what `r` names: the handlers are well formed, handle
+every label of the row, and nothing the code may change is a cell their arms were lent. -/
+def Ready (F : List Fn) (O : List Op) (σ : Store) (E : List Nat) (hs : HS) (r : Row) : Prop :=
+  ∃ R, HSOk F O σ hs R ∧ Disj R E ∧ Covers hs r
+
+theorem CapsOk.frame : CapsOk σ caps ts R → Agree σ σ' R → CapsOk σ' caps ts R
+  | .nil, _ => .nil
+  | .cons hL hr, hag => .cons (hL.frame fun l hl => hag l (List.mem_append.mpr (.inl hl)))
+      (hr.frame fun l hl => hag l (List.mem_append.mpr (.inr hl)))
+
+theorem CapsOk.alloc : CapsOk σ caps ts R → ∀ l ∈ R, σ.mem l ≠ none
+  | .nil, _, h => by simp at h
+  | .cons hL hr, l, h => by
+    rcases List.mem_append.mp h with h | h
+    · exact hL.alloc l h
+    · exact hr.alloc l h
+
+theorem HSOk.frame : HSOk F O σ hs R → Agree σ σ' R → HSOk F O σ' hs R
+  | .nil, _ => .nil
+  | .abort hi ho hr, hag => .abort hi ho (hr.frame hag)
+  | .resume ho hc h1 h2 hn ht hcov hr, hag => .resume ho (hc.frame fun l hl => hag l (List.mem_append.mpr (.inl hl)))
+      h1 h2 hn ht hcov (hr.frame fun l hl => hag l (List.mem_append.mpr (.inr hl)))
+
+theorem HSOk.alloc : HSOk F O σ hs R → ∀ l ∈ R, σ.mem l ≠ none
+  | .nil, _, h => by simp at h
+  | .abort _ _ hr, l, h => hr.alloc l h
+  | .resume _ hc _ _ _ _ _ hr, l, h => by
+    rcases List.mem_append.mp h with h | h
+    · exact hc.alloc l h
+    · exact hr.alloc l h
+
+/-- A step that changes only what the code may change leaves the handlers as they were. -/
+theorem Ready.moves (h : Ready F O σ E hs r) (hwf : WF σ) (hm : Moves σ E σ' E' L)
+    (hX : ∀ x ∈ X, x ∈ E' ∨ x ∈ L) : Ready F O σ' X hs r := by
+  obtain ⟨R, hR, hd, hc⟩ := h
+  refine ⟨R, hR.frame fun l hl => hm.frame l (hwf l (hR.alloc l hl)) (hd l hl), ?_, hc⟩
+  intro x hx hxX
+  rcases hm.within x ((hX x hxX).symm) with h | h
+  · exact hd x hx h
+  · exact absurd (hwf x (hR.alloc x hx)) (Nat.not_lt.mpr h)
+
+/-- Ready where the cells of the handlers are as they were, and what the code may change is what
+it might, or new. -/
+theorem Ready.frame (h : Ready F O σ E hs r) (hwf : WF σ) (hkeep : ∀ l, l < σ.next → σ'.mem l = σ.mem l)
+    (hY : ∀ x ∈ Y, x ∈ E ∨ σ.next ≤ x) : Ready F O σ' Y hs r := by
+  obtain ⟨R, hR, hd, hc⟩ := h
+  refine ⟨R, hR.frame fun l hl => hkeep l (hwf l (hR.alloc l hl)), ?_, hc⟩
+  intro x hx hxY
+  rcases hY x hxY with h | h
+  · exact hd x hx h
+  · exact absurd (hwf x (hR.alloc x hx)) (Nat.not_lt.mpr h)
+
+theorem Ready.sub (h : Ready F O σ E hs r) (hX : ∀ x ∈ X, x ∈ E) : Ready F O σ X hs r := by
+  obtain ⟨R, hR, hd, hc⟩ := h
+  exact ⟨R, hR, fun x hx hxX => hd x hx (hX x hxX), hc⟩
+
+theorem Ready.row (h : Ready F O σ E hs r) (hr : ∀ l ∈ r', l ∈ r) : Ready F O σ E hs r' := by
+  obtain ⟨R, hR, hd, hc⟩ := h
+  exact ⟨R, hR, hd, fun l hl => hc l (hr l hl)⟩
+
+theorem covers_cons (f : Frame) : Covers hs r → Covers (f :: hs) r := by
+  intro h l hl
+  obtain ⟨p, hp⟩ := h l hl
+  by_cases hf : f.handles l = true
+  · exact ⟨(f, hs), by simp [find, hf]⟩
+  · exact ⟨p, by simp [find, hf, hp]⟩
+
+/-- Under an unwinding handler of `l` installed at the depth of the stack, `l` is handled too. -/
+theorem Ready.push_abort (h : Ready F O σ E hs r)
+    (hl : ∀ e, l = .eff e → ∃ op, O[e]? = some op ∧ op.owns = [.int] ∧ op.refs = []) :
+    Ready F O σ E (.abort l hs.length :: hs) (l :: r) := by
+  obtain ⟨R, hR, hd, hc⟩ := h
+  refine ⟨R, .abort rfl hl hR, hd, ?_⟩
+  intro l' hl'
+  rcases List.mem_cons.mp hl' with rfl | hl'
+  · exact ⟨(.abort l' hs.length, hs), by simp [find, Frame.handles]⟩
+  · exact covers_cons _ hc l' hl'
+
+/-- Unwinding past a handler installed at depth `c`: an unwinding aimed elsewhere is aimed below. -/
+theorem aimed_pop : AimedIn i (.abort l c :: hs) → i ≠ c → AimedIn i hs := by
+  rintro ⟨l', hl⟩ hne
+  rcases List.mem_cons.mp hl with h | h
+  · cases h; exact absurd rfl hne
+  · exact ⟨l', h⟩
+
+theorem aimed_cons : AimedIn i hs → AimedIn i (f :: hs) := fun ⟨l, h⟩ => ⟨l, List.mem_cons_of_mem _ h⟩
+
+theorem find_mem : find l hs = some (f, rest) → f ∈ hs ∧ ∀ g ∈ rest, g ∈ hs := by
+  induction hs with
+  | nil => simp [find]
+  | cons g hs ih =>
+    intro h
+    simp only [find] at h
+    split at h
+    · simp at h
+      obtain ⟨rfl, rfl⟩ := h
+      exact ⟨List.mem_cons_self .., fun x hx => List.mem_cons_of_mem _ hx⟩
+    · obtain ⟨h1, h2⟩ := ih h
+      exact ⟨List.mem_cons_of_mem _ h1, fun x hx => List.mem_cons_of_mem _ (h2 x hx)⟩
+
+theorem find_handles : find l hs = some (f, rest) → f.handles l = true := by
+  induction hs with
+  | nil => simp [find]
+  | cons g hs ih =>
+    intro h
+    simp only [find] at h
+    split at h
+    · simp at h
+      obtain ⟨rfl, rfl⟩ := h
+      assumption
+    · exact ih h
+
+/-- The frame an unwinding handler of an operation is: its operation takes an integer and lends
+nothing. -/
+theorem find_abort_op (hR : HSOk F O σ hs R) (hf : find (.eff e) hs = some (.abort l i, rest)) :
+    ∃ op, O[e]? = some op ∧ op.owns = [.int] ∧ op.refs = [] := by
+  induction hR generalizing rest with
+  | nil => simp [find] at hf
+  | abort _ ho _ ih =>
+    simp only [find] at hf
+    split at hf
+    · rename_i hh
+      simp only [Option.some.injEq, Prod.mk.injEq, Frame.abort.injEq] at hf
+      obtain ⟨⟨rfl, rfl⟩, rfl⟩ := hf
+      simp only [Frame.handles, beq_iff_eq] at hh
+      exact ho e hh
+    · exact ih hf
+  | resume _ _ _ _ _ _ _ _ ih =>
+    simp only [find] at hf
+    split at hf
+    · simp at hf
+    · exact ih hf
+
+/-- The frame a resuming handler of an operation is, with everything its arm needs to run. -/
+theorem find_resume (hR : HSOk F O σ hs R) (hf : find (.eff e) hs = some (.resume e' caps os rs arm, rest)) :
+    ∃ op ts Rc Γa r R', O[e]? = some op ∧ CapsOk σ caps ts Rc ∧ os.length = op.owns.length ∧
+      rs.length = op.refs.length ∧ (os ++ rs ++ caps.map Prod.fst).Nodup ∧
+      Typed F O (armCtx os rs op (caps.map Prod.fst) ts) arm op.ret Γa r ∧ Covers rest r ∧
+      HSOk F O σ rest R' ∧ ∀ l ∈ Rc ++ R', l ∈ R := by
+  induction hR generalizing rest with
+  | nil => simp [find] at hf
+  | abort _ _ _ ih =>
+    simp only [find] at hf
+    split at hf
+    · simp at hf
+    · exact ih hf
+  | resume ho hc hl1 hl2 hn ht hcov hr ih =>
+    simp only [find] at hf
+    split at hf
+    · rename_i hh
+      simp only [Option.some.injEq, Prod.mk.injEq, Frame.resume.injEq] at hf
+      obtain ⟨⟨rfl, rfl, rfl, rfl, rfl⟩, rfl⟩ := hf
+      simp only [Frame.handles, beq_iff_eq] at hh
+      subst hh
+      exact ⟨_, _, _, _, _, _, ho, hc, hl1, hl2, hn, ht, hcov, hr, fun l h => h⟩
+    · obtain ⟨op, ts, Rc, Γa, r, R'', a1, a2, a3, a4, a5, a6, a7, a8, a9⟩ := ih hf
+      exact ⟨op, ts, Rc, Γa, r, R'', a1, a2, a3, a4, a5, a6, a7, a8, fun l h => List.mem_append.mpr (.inr (a9 l h))⟩
 
 
 /-! ## Steps that keep what they do not own -/
@@ -252,34 +472,35 @@ theorem Vals.length : Vals σ τs vs Ls → vs.length = τs.length := by
 
 /-- The owned arguments, evaluated in order: never stuck; their values, each owning cells of no
 variable's and of no other value's; or a failure, the values before it dropped. -/
-theorem args_ok (ihn : ∀ σ Γ env E S e τ Γ', Typed F Γ e τ Γ' → Inv σ Γ env E S → WF σ →
-      Post σ E S Γ' env τ (eval F n σ env e)) :
-    Args F Γ as τs Γ' → Inv σ Γ env E S → WF σ →
-    match evalArgs (eval F n) σ env as τs with
+theorem args_ok (ihn : ∀ σ Γ env E S e τ Γ', Typed F O Γ e τ Γ' r → Inv σ Γ env E S → WF σ →
+      Ready F O σ E hs r → Post σ E S Γ' env τ hs (eval F O n hs σ env e)) :
+    Args F O Γ as τs Γ' r → Inv σ Γ env E S → WF σ → Ready F O σ E hs r →
+    match evalArgs (eval F O n hs) σ env as τs with
     | (.inl vs, σ') => ∃ E' Ls, Inv σ' Γ' env E' S ∧ Vals σ' τs vs Ls ∧ Ls.flatten.Nodup ∧
         Disj Ls.flatten E' ∧ Disj Ls.flatten S ∧ Moves σ E σ' E' Ls.flatten
-    | (.inr r, σ') => r = .timeout ∨ ∃ k, r = .fail k ∧ ∃ E', Inv σ' Γ' env E' S ∧ Moves σ E σ' E' [] := by
+    | (.inr r, σ') => r = .timeout ∨ ∃ id k, r = .abort id k ∧ AimedIn id hs ∧
+        ∃ E', Inv σ' Γ' env E' S ∧ Moves σ E σ' E' [] := by
   intro hargs
   induction as generalizing Γ τs σ E with
   | nil =>
-    intro hI hwf
+    intro hI hwf _
     cases hargs
     simp only [evalArgs]
     exact ⟨E, [], hI, .nil, List.nodup_nil, disj_nil_left, disj_nil_left, Moves.refl hwf hI.alloc⟩
   | cons a as ih =>
-    intro hI hwf
+    intro hI hwf hready
     cases hargs with
     | cons ha hrest =>
     simp only [evalArgs]
-    have h1 := ihn _ _ _ _ _ _ _ _ ha hI hwf
-    generalize eval F n σ env _ = r1 at h1 ⊢
+    have h1 := ihn _ _ _ _ _ _ _ _ ha hI hwf hready
+    generalize eval F O n hs σ env _ = r1 at h1 ⊢
     rcases r1 with ⟨r1, σ1⟩
     cases r1 with
     | val v =>
       dsimp only
       obtain ⟨E₁, L₁, hI₁, hv₁, hd₁, hdS₁, hm₁⟩ := h1
-      have h2 := ih hrest hI₁ hm₁.wf
-      generalize evalArgs (eval F n) σ1 env _ _ = r2 at h2 ⊢
+      have h2 := ih hrest hI₁ hm₁.wf (hready.moves hwf hm₁ fun x hx => .inl hx)
+      generalize evalArgs (eval F O n hs) σ1 env _ _ = r2 at h2 ⊢
       rcases r2 with ⟨r2, σ2⟩
       cases r2 with
       | inl vs =>
@@ -295,14 +516,14 @@ theorem args_ok (ihn : ∀ σ Γ env E S e τ Γ', Typed F Γ e τ Γ' → Inv �
           exact disj_append_left.mpr ⟨hdS₁, hdS₂⟩
         · simpa using hm₁.trans hm₂ hd₁ hwf
       | inr r =>
-        rcases h2 with rfl | ⟨k, rfl, E₂, hI₂, hm₂⟩
+        rcases h2 with rfl | ⟨id, k, rfl, haim, E₂, hI₂, hm₂⟩
         · exact .inl rfl
         -- A later argument failed: this one's value is dropped on the way out.
         have hv₂ := hv₁.frame (hm₂.keeps hm₁.wf hv₁.alloc hd₁)
         obtain ⟨hdE, -⟩ := hm₂.apart hm₁.wf hv₁.alloc hd₁
         obtain ⟨σ3, hdrop, hn, hfree, hkeep⟩ := drop_ok _ σ2 v L₁ hv₂
         simp only [Res.done, ↓reduceIte, hdrop]
-        refine .inr ⟨k, rfl, E₂, ⟨hI₂.foot.frame fun l hl => hkeep l fun h => ?_, hI₂.nodup, hI₂.disj,
+        refine .inr ⟨id, k, rfl, haim, E₂, ⟨hI₂.foot.frame fun l hl => hkeep l fun h => ?_, hI₂.nodup, hI₂.disj,
           hI₂.keys⟩, ?_⟩
         · rcases List.mem_append.mp hl with hl | hl
           · exact hdE l h hl
@@ -314,9 +535,9 @@ theorem args_ok (ihn : ∀ σ Γ env E S e τ Γ', Typed F Γ e τ Γ' → Inv �
                 · exact hI₂.alloc l hl
                 · exact hv₂.alloc l hl)
               (fun x => by simp) hfree hkeep hdE.symm) disj_nil_left hwf |>.relabel fun x => by simp
-    | fail k =>
-      obtain ⟨E₁, hI₁, hm₁⟩ := h1
-      exact .inr ⟨k, rfl, E₁, hI₁.weaken (args_weaker hrest (by rw [typed_keys ha]; exact hI.keys)), hm₁⟩
+    | abort id k =>
+      obtain ⟨haim, E₁, hI₁, hm₁⟩ := h1
+      exact .inr ⟨id, k, rfl, haim, E₁, hI₁.weaken (args_weaker hrest (by rw [typed_keys ha]; exact hI.keys)), hm₁⟩
     | stuck => simp [Post] at h1
     | timeout => exact .inl rfl
 
@@ -431,7 +652,7 @@ theorem Weaker.shape : Weaker Γ' Γ → shape Γ' = shape Γ
     show (_, _) :: FlyCore.Ownership.shape _ = (_, _) :: FlyCore.Ownership.shape _
     rw [hle.shape, w.shape]
 
-theorem typed_shape (h : Typed F Γ e τ Γ') (hk : (Γ.map Prod.fst).Nodup) : shape Γ' = shape Γ :=
+theorem typed_shape (h : Typed F O Γ e τ Γ' r) (hk : (Γ.map Prod.fst).Nodup) : shape Γ' = shape Γ :=
   (typed_weaker h hk).shape
 
 /-- Where the shape ends in borrows, so does the context: borrows are their own shape. -/
@@ -933,6 +1154,320 @@ theorem refCtx_refs (refs : List (Var × Mode × Ty)) : ∀ p ∈ refCtx refs, �
   obtain ⟨q, -, rfl⟩ := hp
   exact ⟨_, _, rfl⟩
 
+/-! ## A `handle`'s body: what its arm was lent, only read -/
+
+theorem thaw_cons : thaw ((x, s) :: Γ) ys ((y, s') :: Γb) = (if x ∈ ys then (x, s) else (y, s')) :: thaw Γ ys Γb := by
+  simp [thaw]
+
+theorem perm_front {A B L : List Nat} : (L ++ (A ++ B)).Perm (A ++ (L ++ B)) := by
+  rw [← List.append_assoc, ← List.append_assoc]; exact List.perm_append_comm.append_right B
+
+theorem perm_assoc {A B L : List Nat} : (L ++ (A ++ B)).Perm (L ++ A ++ B) :=
+  List.Perm.of_eq (List.append_assoc _ _ _).symm
+
+theorem SlotOk.ro {s : Slot} (h : SlotOk σ s a L) (hs : ∀ τ, s ≠ .own τ false) : SlotOk σ s.ro a L := by
+  rcases s with ⟨τ, live⟩ | ⟨m, τ⟩
+  · cases live
+    · exact absurd rfl (hs τ)
+    · exact h
+  · exact h
+
+theorem SlotOk.unro {s : Slot} (h : SlotOk σ s.ro a L) (hs : ∀ τ, s ≠ .own τ false) : SlotOk σ s a L := by
+  rcases s with ⟨τ, live⟩ | ⟨m, τ⟩
+  · cases live
+    · exact absurd rfl (hs τ)
+    · exact h
+  · exact h
+
+theorem Slot.ro_excl {s : Slot} : s.ro.excl = false := by
+  rcases s with ⟨τ, live⟩ | ⟨m, τ⟩ <;> rfl
+
+/-- A slot not changeable is its own `ro`. -/
+theorem Slot.ro_of_excl {s : Slot} (h : s.excl = false) : s.ro = s := by
+  rcases s with ⟨τ, live⟩ | ⟨m, τ⟩
+  · simp [Slot.excl] at h
+  · cases m
+    · rfl
+    · simp [Slot.excl] at h
+
+/-- Only read, a slot is weakened by nothing. -/
+theorem Slot.Le.of_ro {s s' : Slot} (h : Slot.Le s' s.ro) : s' = s.ro := by
+  rcases s with ⟨τ, live⟩ | ⟨m, τ⟩ <;> (simp only [Slot.ro] at h ⊢; cases h; rfl)
+
+/-- The variables `ys` only read, as a `handle`'s body has them: what they owned, `Fz`, is shared
+while the body runs, and given back once it ends, as it was, if nothing changed it or what the
+activation only reads. -/
+theorem Foot.handle (h : Foot σ Γ env E S) (hk : (Γ.map Prod.fst).Nodup)
+    (hok : ∀ y ∈ ys, ∀ τ, lookup y Γ ≠ some (.own τ false)) :
+    ∃ Eb Sb Fz, Foot σ (freeze Γ ys) env Eb Sb ∧ E.Perm (Eb ++ Fz) ∧ Sb.Perm (Fz ++ S) ∧
+      (∀ y s a L, Entry σ Γ env y s a L → y ∈ ys → ∀ l ∈ L, l ∈ Fz ∨ l ∈ S) ∧
+      ∀ σ' Γb Eb', Foot σ' Γb env Eb' Sb → Weaker Γb (freeze Γ ys) → Agree σ σ' (Fz ++ S) →
+        ∃ E', Foot σ' (thaw Γ ys Γb) env E' S ∧ E'.Perm (Eb' ++ Fz) := by
+  induction h with
+  | nil =>
+    refine ⟨[], [], [], .nil, .refl _, .refl _, fun y s a L he => absurd he.1 (by simp [lookup]), ?_⟩
+    intro σ' Γb Eb' hb hw _
+    rw [Weaker.nil_inv hw] at hb
+    cases hb
+    exact ⟨[], .nil, .refl _⟩
+  | @cons s a L Γ env E S x hs hrest ih =>
+    simp only [List.map_cons, List.nodup_cons] at hk
+    obtain ⟨hx, hk⟩ := hk
+    have hok' : ∀ y ∈ ys, ∀ τ, lookup y Γ ≠ some (.own τ false) := by
+      intro y hy τ h
+      by_cases hyx : y = x
+      · subst hyx; exact hx (lookup_some_keys h)
+      · exact hok y hy τ (by simp [lookup, hyx, h])
+    obtain ⟨Eb, Sb, Fz, hfb, hE, hS, hent, hthaw⟩ := ih hk hok'
+    have hfr : freeze ((x, s) :: Γ) ys = (x, if x ∈ ys then s.ro else s) :: freeze Γ ys := by
+      by_cases h : x ∈ ys <;> simp [freeze, h]
+    have hkeys' : x ∉ (freeze Γ ys).map Prod.fst := by rw [freeze_keys]; exact hx
+    -- Entries of the head and of the rest.
+    have hentry : ∀ y t b L', Entry σ ((x, s) :: Γ) ((x, a) :: env) y t b L' →
+        (y = x ∧ t = s ∧ L' = L) ∨ (y ≠ x ∧ Entry σ Γ env y t b L') := by
+      intro y t b L' he
+      rcases (entry_cons hx).mp he with ⟨rfl, rfl, rfl, hL⟩ | ⟨hne, he⟩
+      · exact .inl ⟨rfl, rfl, hL.det hs⟩
+      · exact .inr ⟨hne, he⟩
+    by_cases hxy : x ∈ ys
+    · have hsno : ∀ τ, s ≠ .own τ false := fun τ h => hok x hxy τ (by simp [lookup, h])
+      have hsro := hs.ro hsno
+      cases hex : s.excl
+      · -- Only read already: shared before and after.
+        have hro : s.ro = s := Slot.ro_of_excl hex
+        refine ⟨Eb, L ++ Sb, Fz, ?_, ?_, ?_, ?_, ?_⟩
+        · rw [hfr]; simp only [hxy, ↓reduceIte]
+          have := Foot.cons (x := x) hsro hfb
+          simpa [addE, addS, Slot.ro_excl] using this
+        · simpa [addE, hex] using hE
+        · simp only [addS, hex, Bool.false_eq_true, ↓reduceIte]
+          exact (hS.append_left L).trans perm_front
+        · intro y t b L' he hy l hl
+          rcases hentry y t b L' he with ⟨rfl, rfl, rfl⟩ | ⟨-, he⟩
+          · exact .inr (by simp [addS, hex, hl])
+          · rcases hent y t b L' he hy l hl with h | h
+            · exact .inl h
+            · exact .inr (by simp [addS, hex, h])
+        · intro σ' Γb Eb' hb hw hag
+          rw [hfr] at hw
+          obtain ⟨s', Γb', rfl, hle, hw'⟩ := Weaker.cons_inv hw
+          simp only [hxy, ↓reduceIte] at hle
+          obtain rfl := hle.of_ro
+          obtain ⟨L', Et, St, hs', hft, rfl, hSt⟩ := hb.uncons
+          simp only [addS, Slot.ro_excl, Bool.false_eq_true, ↓reduceIte] at hSt
+          have hLs : SlotOk σ' s.ro a L := hsro.frame fun l hl => hag l (by simp [addS, hex, hl])
+          obtain rfl := hLs.det hs'
+          obtain rfl := List.append_cancel_left hSt
+          obtain ⟨E', hf', hp⟩ := hthaw σ' Γb' Et hft hw' (fun l hl => hag l (by
+            rcases List.mem_append.mp hl with h | h
+            · exact List.mem_append.mpr (.inl h)
+            · exact List.mem_append.mpr (.inr (by simp [addS, hex, h]))))
+          refine ⟨E', ?_, by simpa [addE, Slot.ro_excl] using hp⟩
+          rw [thaw_cons]; simp only [hxy, ↓reduceIte]
+          simpa [addE, addS, hex, hLs.unro hsno] using Foot.cons (x := x) (hLs.unro hsno) hf'
+      · -- Changeable: shared while the body runs, and owned again after.
+        refine ⟨Eb, L ++ Sb, L ++ Fz, ?_, ?_, ?_, ?_, ?_⟩
+        · rw [hfr]; simp only [hxy, ↓reduceIte]
+          have := Foot.cons (x := x) hsro hfb
+          simpa [addE, addS, Slot.ro_excl] using this
+        · simp only [addE, hex, ↓reduceIte]
+          exact (hE.append_left L).trans perm_front
+        · simp only [addS, hex, ↓reduceIte]
+          rw [List.append_assoc]
+          exact hS.append_left L
+        · intro y t b L' he hy l hl
+          rcases hentry y t b L' he with ⟨rfl, rfl, rfl⟩ | ⟨-, he⟩
+          · exact .inl (List.mem_append.mpr (.inl hl))
+          · rcases hent y t b L' he hy l hl with h | h
+            · exact .inl (List.mem_append.mpr (.inr h))
+            · exact .inr (by simp [addS, hex, h])
+        · intro σ' Γb Eb' hb hw hag
+          rw [hfr] at hw
+          obtain ⟨s', Γb', rfl, hle, hw'⟩ := Weaker.cons_inv hw
+          simp only [hxy, ↓reduceIte] at hle
+          obtain rfl := hle.of_ro
+          obtain ⟨L', Et, St, hs', hft, rfl, hSt⟩ := hb.uncons
+          simp only [addS, Slot.ro_excl, Bool.false_eq_true, ↓reduceIte] at hSt
+          have hLs : SlotOk σ' s.ro a L := hsro.frame fun l hl => hag l (by simp [hl])
+          obtain rfl := hLs.det hs'
+          obtain rfl := List.append_cancel_left hSt
+          obtain ⟨E', hf', hp⟩ := hthaw σ' Γb' Et hft hw' (fun l hl => hag l (by
+            rcases List.mem_append.mp hl with h | h
+            · exact List.mem_append.mpr (.inl (List.mem_append.mpr (.inr h)))
+            · exact List.mem_append.mpr (.inr (by simp [addS, hex, h]))))
+          refine ⟨L ++ E', ?_, ?_⟩
+          · rw [thaw_cons]; simp only [hxy, ↓reduceIte]
+            simpa [addE, addS, hex] using Foot.cons (x := x) (hLs.unro hsno) hf'
+          · simp only [addE, Slot.ro_excl, Bool.false_eq_true, ↓reduceIte]
+            exact (hp.append_left L).trans perm_front
+    · -- Not lent to the arm: as it is.
+      refine ⟨addE s L Eb, addS s L Sb, Fz, ?_, ?_, ?_, ?_, ?_⟩
+      · rw [hfr]; simp only [hxy, ↓reduceIte]; exact .cons hs hfb
+      · cases hex : s.excl <;> simp only [addE, hex, Bool.false_eq_true, ↓reduceIte]
+        · exact hE
+        · exact (hE.append_left L).trans perm_assoc
+      · cases hex : s.excl <;> simp only [addS, hex, Bool.false_eq_true, ↓reduceIte]
+        · exact (hS.append_left L).trans perm_front
+        · exact hS
+      · intro y t b L' he hy l hl
+        rcases hentry y t b L' he with ⟨rfl, -, -⟩ | ⟨-, he⟩
+        · exact absurd hy hxy
+        · rcases hent y t b L' he hy l hl with h | h
+          · exact .inl h
+          · right; cases hex : s.excl <;> simp [addS, hex, h]
+      · intro σ' Γb Eb' hb hw hag
+        rw [hfr] at hw
+        obtain ⟨s', Γb', rfl, hle, hw'⟩ := Weaker.cons_inv hw
+        simp only [hxy, ↓reduceIte] at hle
+        obtain ⟨L', Et, St, hs', hft, rfl, hSt⟩ := hb.uncons
+        have hex' : s'.excl = s.excl := hle.excl
+        cases hex : s.excl
+        · -- Only read: the same tree as before.
+          have hle' : s = s' := by
+            cases hle with
+            | refl => rfl
+            | forget => simp [Slot.excl] at hex
+          subst hle'
+          have hLs : SlotOk σ' s a L := hs.frame fun l hl => hag l (by simp [addS, hex, hl])
+          obtain rfl := hLs.det hs'
+          simp only [addS, hex, Bool.false_eq_true, ↓reduceIte] at hSt
+          obtain rfl := List.append_cancel_left hSt
+          obtain ⟨E', hf', hp⟩ := hthaw σ' Γb' Et hft hw' (fun l hl => hag l (by
+            rcases List.mem_append.mp hl with h | h
+            · exact List.mem_append.mpr (.inl h)
+            · exact List.mem_append.mpr (.inr (by simp [addS, hex, h]))))
+          refine ⟨E', ?_, by simpa [addE, hex] using hp⟩
+          rw [thaw_cons]; simp only [hxy, ↓reduceIte]
+          simpa [addE, addS, hex] using Foot.cons (x := x) hLs hf'
+        · simp only [addS, hex, hex', ↓reduceIte] at hSt
+          subst hSt
+          obtain ⟨E', hf', hp⟩ := hthaw σ' Γb' Et hft hw' (fun l hl => hag l (by
+            rcases List.mem_append.mp hl with h | h
+            · exact List.mem_append.mpr (.inl h)
+            · exact List.mem_append.mpr (.inr (by simp [addS, hex, h]))))
+          refine ⟨L' ++ E', ?_, ?_⟩
+          · rw [thaw_cons]; simp only [hxy, ↓reduceIte]
+            simpa [addE, addS, hex, hex'] using Foot.cons (x := x) hs' hf'
+          · simp only [addE, hex', hex, ↓reduceIte]
+            exact (hp.append_left L').trans perm_assoc
+
+/-- What a step accounts for depends on the cells it may change, not on their order. -/
+theorem Moves.congr_left (h : Moves σ E σ' E' L) (hE : ∀ x, x ∈ E ↔ x ∈ E₀) : Moves σ E₀ σ' E' L where
+  within := fun l hl => (h.within l hl).imp_left (hE l).mp
+  next := h.next
+  wf := h.wf
+  frame := fun l hl hn => h.frame l hl fun h' => hn ((hE l).mp h')
+  alloc := fun l => by rw [h.alloc l, hE l]
+
+/-- The root of a place the code may reach has its value: it was not moved. -/
+theorem PlaceTy.root_live : PlaceTy Γ p τ w y → ∀ τ', lookup y Γ ≠ some (.own τ' false)
+  | .own h, τ', h' => by rw [h] at h'; cases h'
+  | .ref h, τ', h' => by rw [h] at h'; cases h'
+  | .deref hp, τ', h' => hp.root_live τ' h'
+
+theorem Caps.roots_live : Caps Γ caps ts ys → ∀ y ∈ ys, ∀ τ, lookup y Γ ≠ some (.own τ false)
+  | .nil, _, h, _ => by simp at h
+  | .cons hp hr, y, h, τ => by
+    rcases List.mem_cons.mp h with rfl | h
+    · exact hp.root_live τ
+    · exact hr.roots_live y h τ
+
+/-- The places a `handle` lends its arm, in the activation it is in: each holds a value of its
+type, whose cells are among the footprint of the variable it is rooted at. -/
+theorem caps_ok (hc : Caps Γ caps ts ys) (hf : Foot σ Γ env E S) :
+    ∃ ls Rc, caps.mapM (fun x => resolve σ env x.2) = some ls ∧ ls.length = caps.length ∧
+      CapsOk σ ((caps.map Prod.fst).zip ls) ts Rc ∧
+      ∀ l ∈ Rc, ∃ y ∈ ys, ∃ s a L, Entry σ Γ env y s a L ∧ l ∈ L := by
+  induction hc with
+  | nil => exact ⟨[], [], rfl, rfl, .nil, by simp⟩
+  | @cons p τ w y rest ts' ys' x hp _ ih =>
+    obtain ⟨ls, Rc, hmap, hlen, hcok, hin⟩ := ih
+    obtain ⟨a, τr, Lr, P, l, s, ha, hLr, hpath, hres, -, -, hs, hso, -, -⟩ := place_ok hp hf
+    obtain ⟨R, hR, rfl⟩ := path_split hpath hLr
+    refine ⟨l :: ls, R ++ Rc, by simp [List.mapM_cons, hres, hmap], by simp [hlen], .cons hR hcok, ?_⟩
+    intro l' hl'
+    rcases List.mem_append.mp hl' with h | h
+    · exact ⟨y, List.mem_cons_self .., s, a, P ++ R, ⟨hs, ha, hso⟩, List.mem_append.mpr (.inr h)⟩
+    · obtain ⟨y', hy', s', a', L', he, hl⟩ := hin l' h
+      exact ⟨y', List.mem_cons_of_mem _ hy', s', a', L', he, hl⟩
+
+theorem CapsOk.length : CapsOk σ caps ts R → caps.length = ts.length
+  | .nil => rfl
+  | .cons _ hr => by simp [hr.length]
+
+theorem lookup_freeze : lookup y (freeze Γ ys) = (lookup y Γ).map (fun s => if y ∈ ys then s.ro else s) := by
+  induction Γ with
+  | nil => rfl
+  | cons p Γ ih =>
+    obtain ⟨x, s⟩ := p
+    by_cases hyx : y = x
+    · subst hyx; by_cases hy : y ∈ ys <;> simp [freeze, lookup, hy]
+    · by_cases hx : x ∈ ys <;> simp_all [freeze, lookup]
+
+/-- A variable a `handle` lent its arm cannot be changed through in its body. -/
+theorem PlaceTy.frozen (h : PlaceTy (freeze Γ ys) p τ w y) (hy : y ∈ ys) : w = false := by
+  induction h with
+  | own hx =>
+    rw [lookup_freeze] at hx
+    simp only [Option.map_eq_some_iff, hy, ↓reduceIte] at hx
+    obtain ⟨s, -, hs⟩ := hx
+    rcases s <;> simp [Slot.ro] at hs
+  | ref hx =>
+    rw [lookup_freeze] at hx
+    simp only [Option.map_eq_some_iff, hy, ↓reduceIte] at hx
+    obtain ⟨s, -, hs⟩ := hx
+    rcases s <;> simp only [Slot.ro, Slot.ref.injEq] at hs <;> (obtain ⟨rfl, -⟩ := hs; rfl)
+  | deref _ ih => exact ih hy
+
 theorem shape_length (Γ : Ctx) : (shape Γ).length = Γ.length := by simp [shape]
+
+theorem shape_append (A B : Ctx) : shape (A ++ B) = shape A ++ shape B := by simp [shape]
+
+/-- Variables only read: what an arm's `handle` lent it. -/
+def RoCtx (Γ : Ctx) : Prop := ∀ p ∈ Γ, ∃ τ, p.2 = .ref .ro τ
+
+theorem RoCtx.shape (h : RoCtx Γ) : shape Γ = Γ := by
+  induction Γ with
+  | nil => rfl
+  | cons p Γ ih =>
+    obtain ⟨τ, hp⟩ := h p (List.mem_cons_self ..)
+    obtain ⟨x, s⟩ := p
+    simp only at hp
+    subst hp
+    simp only [FlyCore.Ownership.shape, List.map_cons, Slot.shape] at ih ⊢
+    rw [ih fun q hq => h q (List.mem_cons_of_mem _ hq)]
+
+theorem RoCtx.refs (h : RoCtx Γ) : ∀ p ∈ Γ, ∃ m τ, p.2 = .ref m τ := fun p hp => by
+  obtain ⟨τ, h⟩ := h p hp; exact ⟨_, _, h⟩
+
+/-- Variables only read own nothing that may be changed. -/
+theorem RoCtx.foot_E (h : RoCtx Γ) (hf : Foot σ Γ env E S) : E = [] := by
+  induction hf with
+  | nil => rfl
+  | @cons s a L Γ env E S x hs _ ih =>
+    obtain ⟨τ, hτ⟩ := h (x, s) (List.mem_cons_self ..)
+    simp only at hτ
+    subst hτ
+    simp only [addE, Slot.excl, Bool.false_eq_true, ↓reduceIte]
+    exact ih fun q hq => h q (List.mem_cons_of_mem _ hq)
+
+/-- The places a `handle` lent its arm, as the arm's variables. -/
+def capCtx (names : List Var) (ts : List Ty) : Ctx := (names.zip ts).map fun p => (p.1, Slot.ref .ro p.2)
+
+theorem capCtx_ro : RoCtx (capCtx names ts) := by
+  intro p hp
+  simp only [capCtx, List.mem_map] at hp
+  obtain ⟨q, -, rfl⟩ := hp
+  exact ⟨_, rfl⟩
+
+theorem CapsOk.foot : CapsOk σ caps ts R → Foot σ (capCtx (caps.map Prod.fst) ts) caps [] R
+  | .nil => .nil
+  | @CapsOk.cons _ a τ L rest ts' R' x hL hr => by
+    have := Foot.cons (s := .ref .ro τ) (x := x) (env := rest) hL hr.foot
+    simpa [capCtx, addE, addS, Slot.excl] using this
+
+theorem armCtx_eq : armCtx os rs op names ts =
+    fnCtx { owns := os.zip op.owns, refs := rs.zip op.refs, ret := op.ret, row := r, body := arm } ++ capCtx names ts := by
+  simp [armCtx, fnCtx, capCtx]
 
 end FlyCore.Ownership

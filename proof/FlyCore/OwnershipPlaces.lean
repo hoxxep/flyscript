@@ -177,8 +177,24 @@ theorem Weaker.keys : Weaker Γ' Γ → Γ'.map Prod.fst = Γ.map Prod.fst
   | .nil => rfl
   | .cons _ h => by simp [h.keys]
 
+theorem freeze_keys : (freeze Γ ys).map Prod.fst = Γ.map Prod.fst := by
+  induction Γ with
+  | nil => rfl
+  | cons p Γ ih =>
+    obtain ⟨y, s⟩ := p
+    simp only [freeze, List.map_cons] at ih ⊢
+    split <;> simp [ih]
+
+theorem thaw_keys : ∀ {Γ Γb : Ctx}, Γb.map Prod.fst = Γ.map Prod.fst → (thaw Γ ys Γb).map Prod.fst = Γ.map Prod.fst
+  | [], _, h => by simp [thaw]
+  | _ :: _, [], h => by simp at h
+  | p :: Γ, q :: Γb, h => by
+    simp only [List.map_cons, List.cons.injEq] at h
+    simp only [thaw, List.zipWith_cons_cons, List.map_cons, List.cons.injEq]
+    refine ⟨by split <;> simp [h.1], thaw_keys h.2⟩
+
 mutual
-theorem typed_keys : Typed F Γ e τ Γ' → Γ'.map Prod.fst = Γ.map Prod.fst
+theorem typed_keys : Typed F O Γ e τ Γ' r → Γ'.map Prod.fst = Γ.map Prod.fst
   | .lit => rfl
   | .read _ => rfl
   | .move _ => setSlot_keys _
@@ -190,15 +206,22 @@ theorem typed_keys : Typed F Γ e τ Γ' → Γ'.map Prod.fst = Γ.map Prod.fst
     exact this.2.trans (typed_keys ha)
   | .write ha _ => typed_keys ha
   | .assign ha _ => typed_keys ha
-  | .call _ hargs _ _ => args_keys hargs
+  | .call _ _ hargs _ _ => args_keys hargs
   | .seq ha hb => (typed_keys hb).trans (typed_keys ha)
   | .ite hc ha _ wa _ => wa.keys.trans ((typed_keys ha).trans (typed_keys hc))
-  | .throw_ ha => typed_keys ha
+  | .throw_ ha _ => typed_keys ha
   | .try_ _ hb hh => by
     have := typed_keys hh
     simp only [List.map_cons, List.cons.injEq] at this
     exact this.2.trans (typed_keys hb)
-theorem args_keys : Args F Γ as τs Γ' → Γ'.map Prod.fst = Γ.map Prod.fst
+  | .while_ _ _ => rfl
+  | .perform _ _ hargs _ _ => args_keys hargs
+  | .handle _ _ _ _ _ _ hb => thaw_keys ((typed_keys hb).trans freeze_keys)
+  | .handleAbort _ _ _ _ hb hh => by
+    have := typed_keys hh
+    simp only [List.map_cons, List.cons.injEq] at this
+    exact this.2.trans (typed_keys hb)
+theorem args_keys : Args F O Γ as τs Γ' r → Γ'.map Prod.fst = Γ.map Prod.fst
   | .nil => rfl
   | .cons ha hrest => (args_keys hrest).trans (typed_keys ha)
 end
