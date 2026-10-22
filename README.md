@@ -71,12 +71,13 @@ Flyscript is an early-stage language under active design, developed in the open.
 
 - **Native code:** the same compiler compiles to C and on to a native executable, with no garbage collector and no runtime to speak of. Ownership decides where every value is freed; failures, `break` and `return` leave through a single exit that drops exactly what is still owned; effect handlers, continuations and tasks run on lightweight fibers; regions are bump arenas released in one step. Every program in the test suite runs natively exactly as it runs in `flyc`, down to how its tasks interleave, with address and undefined-behavior sanitizers watching. The compiler builds itself this way too: natively compiled, it reproduces its own C byte for byte, in about two and a half seconds.
 
-Next comes WebAssembly. Flyscript is not yet ready for production programs; it is ready for your ideas, and issues and discussion about the design are very welcome.
+Next: one core IR under every back end, freestanding programs down to a kernel, LLVM, WebAssembly, tasks on every core, and a web framework built on all of it — see the [roadmap](docs/roadmap.md). Flyscript is not yet ready for production programs; it is ready for your ideas, and issues and discussion about the design are very welcome.
 
 ## Explore
 
 - [The specification](docs/spec.md) — the five laws, the type system, effects, ownership, concurrency.
 - [Example programs](examples/) — a JSON parser, derived JSON encoding and decoding, an inventory service, a web server, a key–value actor, a browser UI, generators, parallel physics.
+- [The roadmap](docs/roadmap.md) — what comes next, and why in that order.
 - [The self-hosted compiler](selfhost/) — a lexer, parser, type and effect checker, `comptime` interpreter, and JavaScript and C back ends, in Flyscript.
 
 ## Build from source
