@@ -912,6 +912,17 @@ impl<'p> Checker<'p> {
             ExprKind::Try { body, pat, handler } => self.try_catch(body, pat, handler, expected),
             ExprKind::Throw(value) => {
                 let t = self.expr(value, None);
+                // Failure rows compose by union (§5.4): what is thrown is a tag.
+                let not_a_tag = match self.strip(&t) {
+                    Ty::Record(_) | Ty::Tuple(_) | Ty::Array(..) | Ty::Slice(_) | Ty::Fn(_) => true,
+                    Ty::Prim(p) => p != Prim::Never,
+                    Ty::Named(d, _) => matches!(self.p.defs[d].kind, DefKind::Struct { .. }),
+                    _ => false,
+                };
+                if not_a_tag {
+                    let shown = self.show(&t);
+                    self.err(value.span, format!("a failure is a tag union (§5.4), and `{shown}` is not: throw a tag, such as `#Failed {{ … }}`"));
+                }
                 let row = EffRow { effs: vec![self.eff("Fail", Vec::new(), vec![t])], tail: Tail::Closed };
                 self.perform(&row, span);
                 Ty::never()
@@ -1269,6 +1280,14 @@ impl<'p> Checker<'p> {
 
     fn field(&mut self, t: &Ty, name: &str, span: Span) -> Ty {
         let base = self.strip(t);
+        // A box and an `Arc` are their contents' place: `b.kind` reads through `Box<Expr>`.
+        if let Ty::Named(d, args) = &base
+            && (self.p.known.get("Box") == Some(d) || self.p.known.get("Arc") == Some(d))
+            && let Some(GArg::Ty(inner)) = args.first()
+        {
+            let inner = inner.clone();
+            return self.field(&inner, name, span);
+        }
         if let Ty::Named(d, args) = &base {
             let args: Vec<GArg> = args.iter().map(|a| self.s.zonk_arg(a)).collect();
             self.p.ensure_instance(*d, &args);

@@ -1,501 +1,792 @@
-// A recursive-descent parser for Flyscript (§2.3), with the Rust prototype's rules for what is
-// ambiguous: braces, block-like statements, contextual words, `<` in a generic call.
+// The parser: Flyscript's grammar (§2.3), by recursive descent, with TypeScript's rules where it
+// is ambiguous: braces that begin records, `<` that begins type arguments, block-like statements.
 
-import { Span, Piece, Tok, Token, LexError, lex } from "./lex";
-import { Type, Pattern, Part, Param, Expr, Arm, HandlerArm, Stmt, Block, Fn, Item, Module } from "./ast";
+import { Span, Diagnostic } from "./diag";
+import { Tok, Token, TemplatePart, lex, lexRange } from "./lex";
+import {
+  Ident, Module, Item, ItemKind, StructDecl, Field, Generate, EnumDecl, TagDecl, TagPayload, InterfaceDecl,
+  InterfaceMember, ImplDecl, Method, TypeAlias, EffectDecl, FnSig, FnDecl, Param, Return, TypeParam, RowItem, Type,
+  FnMode, TypeKind, Block, Stmt, Expr, FieldInit, TagArgs, TemplatePiece, ExprKind, MatchArm, HandlerArm, Pattern,
+  PatternKind, TagPatArgs,
+} from "./ast";
 
-export type ParseError = #ParseError { at: usize; message: String };
-
+// Binary operators by precedence, lowest first. `as` binds tighter than all of them.
 const BINARY: str[][] = [["||"], ["&&"], ["==", "!=", "<", ">", "<=", ">="], ["|"], ["^"], ["&"], ["<<", ">>"], ["+", "-"], ["*", "/", "%"]];
+
 const ASSIGN: str[] = ["=", "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^="];
 
-export struct Parser { toks: Vec<Token>; pos: usize }
+export function parseModule(src: str): Module uses Fail<Diagnostic> { parse(src, false) }
+
+// A declaration file (`.d.fly`): functions may end in `;` and structs may be opaque.
+export function parseDeclarations(src: str): Module uses Fail<Diagnostic> { parse(src, true) }
+
+function parse(src: str, declarations: bool): Module uses Fail<Diagnostic> {
+  let p = Parser { src, toks: lex(src), pos: 0, declarations, nextId: 0 };
+  let items: Vec<Item> = Vec.new();
+  while (!p.atEof()) { items.push(p.item()); }
+  { items: items }
+}
+
+function mkIdent(name: str, span: Span): Ident { { name: name.toString(), span } }
+
+function isUpper(s: str): bool {
+  const b = s.asBytes();
+  b.len() > 0 && b[0] >= b'A' && b[0] <= b'Z'
+}
+
+view struct Parser { src: str; toks: Vec<Token>; pos: usize; declarations: bool; nextId: usize }
 
 impl Parser {
+  // ---- nodes ----
+
+  function expr_(self: mut Self, kind: ExprKind, span: Span): Expr {
+    self.nextId += 1;
+    { kind, span, id: self.nextId }
+  }
+  function pat_(self: mut Self, kind: PatternKind, span: Span): Pattern {
+    self.nextId += 1;
+    { kind, span, id: self.nextId }
+  }
+
   // ---- tokens ----
 
   function tok(self: readonly Self): readonly Tok { self.toks[self.pos].tok }
-  function tokAt(self: readonly Self, k: usize): readonly Tok {
-    const i = min(self.pos + k, self.toks.len() - 1);
-    self.toks[i].tok
+  function tokAt(self: readonly Self, n: usize): readonly Tok { self.toks[min(self.pos + n, self.toks.len() - 1)].tok }
+  function tokIndex(self: readonly Self, i: usize): readonly Tok { self.toks[min(i, self.toks.len() - 1)].tok }
+  function span(self: readonly Self): Span { self.toks[self.pos].span }
+  function prevEnd(self: readonly Self): usize { if (self.pos == 0) { 0 } else { self.toks[self.pos - 1].span.end } }
+  function since(self: readonly Self, start: Span): Span { { start: start.start, end: max(self.prevEnd(), start.start) } }
+
+  function bump(self: mut Self): Span {
+    const s = self.span();
+    if (self.pos < self.toks.len() - 1) { self.pos += 1; }
+    s
   }
-  function here(self: readonly Self): usize { self.toks[self.pos].span.start }
-  function bump(self: mut Self): void { if (self.pos + 1 < self.toks.len()) { self.pos += 1; } }
-  function at(self: readonly Self, p: str): bool { match (self.tok()) { #Punct(q) => q == p, _ => false } }
-  function atN(self: readonly Self, k: usize, p: str): bool { match (self.tokAt(k)) { #Punct(q) => q == p, _ => false } }
-  function word(self: readonly Self, k: usize, w: str): bool { match (self.tokAt(k)) { #Ident(n) => n == w, _ => false } }
-  function atWord(self: readonly Self, w: str): bool { self.word(0, w) }
-  function eat(self: mut Self, p: str): bool {
-    if (self.at(p)) { self.bump(); true } else { false }
+
+  function atEof(self: readonly Self): bool { self.tok() == #Eof }
+  function isPunct(t: readonly Tok, p: str): bool { match (t) { #Punct(q) => q == p, _ => false } }
+  function isKw(t: readonly Tok, k: str): bool { match (t) { #Kw(q) => q == k, _ => false } }
+  function isWord(t: readonly Tok, w: str): bool { match (t) { #Ident(q) => q == w, _ => false } }
+  function isIdent(t: readonly Tok): bool { match (t) { #Ident(_) => true, _ => false } }
+  function at(self: readonly Self, p: str): bool { Parser.isPunct(self.tok(), p) }
+  function atN(self: readonly Self, n: usize, p: str): bool { Parser.isPunct(self.tokAt(n), p) }
+  function atKw(self: readonly Self, k: str): bool { Parser.isKw(self.tok(), k) }
+  function atWord(self: readonly Self, w: str): bool { Parser.isWord(self.tok(), w) }
+  function wordAt(self: readonly Self, n: usize, w: str): bool { Parser.isWord(self.tokAt(n), w) }
+
+  // `match (e) {` at token `at`: the word begins a `match` only in that shape.
+  function matchAt(self: readonly Self, at: usize): bool {
+    Parser.isWord(self.tokIndex(at), "match") && Parser.isPunct(self.tokIndex(at + 1), "(")
+      && match (self.closeFrom(at + 1)) { #Some(c) => Parser.isPunct(self.tokIndex(c + 1), "{"), #None => false }
   }
-  function eatWord(self: mut Self, w: str): bool {
-    if (self.atWord(w)) { self.bump(); true } else { false }
+
+  // `handle {` or `region (R) {`: the other contextual expression words.
+  function atHandle(self: readonly Self): bool { self.atWord("handle") && self.atN(1, "{") }
+  function atRegion(self: readonly Self): bool {
+    self.atWord("region") && self.atN(1, "(") && Parser.isIdent(self.tokAt(2)) && self.atN(3, ")") && self.atN(4, "{")
   }
-  function fail(self: readonly Self, what: str): never uses Fail<ParseError> {
-    throw #ParseError { at: self.here(), message: `expected ${what}` }
+
+  function eat(self: mut Self, p: str): bool { if (self.at(p)) { self.bump(); true } else { false } }
+  function eatKw(self: mut Self, k: str): bool { if (self.atKw(k)) { self.bump(); true } else { false } }
+  function eatWord(self: mut Self, w: str): bool { if (self.atWord(w)) { self.bump(); true } else { false } }
+
+  function describe(self: readonly Self): String {
+    match (self.tok()) {
+      #Ident(s) | #Kw(s) | #Int(s) | #Float(s) => `\`${s}\``,
+      #Byte(_) => "a byte literal".toString(),
+      #Str(_) => "a string".toString(),
+      #Template(_) => "a template literal".toString(),
+      #Tag(s) => `\`#${s}\``,
+      #Punct(p) => `\`${p}\``,
+      #Eof => "end of file".toString(),
+    }
   }
-  function expect(self: mut Self, p: str): void uses Fail<ParseError> {
-    if (!self.eat(p)) { self.fail(`\`${p}\``); }
+
+  function error(self: readonly Self, expected: str): never uses Fail<Diagnostic> {
+    throw #Diagnostic { span: self.span(), message: `expected ${expected}, found ${self.describe()}` }
   }
-  function ident(self: mut Self): String uses Fail<ParseError> {
-    const name: String = match (self.tok()) { #Ident(n) => n.clone(), _ => self.fail("a name") };
-    self.bump();
-    name
+
+  function expect(self: mut Self, p: str): Span uses Fail<Diagnostic> {
+    if (self.at(p)) { self.bump() } else { self.error(`\`${p}\``) }
   }
-  // Whether two `<` or `>` tokens touch: then they are a shift, not two angle brackets.
+  function expectKw(self: mut Self, k: str): Span uses Fail<Diagnostic> {
+    if (self.atKw(k)) { self.bump() } else { self.error(`\`${k}\``) }
+  }
+  function expectWord(self: mut Self, w: str): void uses Fail<Diagnostic> {
+    if (!self.eatWord(w)) { self.error(`\`${w}\``); }
+  }
+  function expectEof(self: readonly Self): void uses Fail<Diagnostic> {
+    if (!self.atEof()) { self.error("end of input"); }
+  }
+
+  function ident(self: mut Self): Ident uses Fail<Diagnostic> {
+    const name: String = match (self.tok()) { #Ident(n) => n.clone(), _ => self.error("an identifier") };
+    const span = self.bump();
+    { name, span }
+  }
+
+  // A member name: as in TypeScript, reserved words are allowed after `.`, as effect operation
+  // names and as record fields, so `Yield.yield` and `{ default: 1 }` work.
+  function memberName(self: mut Self): Ident uses Fail<Diagnostic> {
+    if (const #Kw(k) = self.tok()) {
+      const name = k.clone();
+      const span = self.bump();
+      return { name, span };
+    }
+    self.ident()
+  }
+
+  // Two adjacent single-character tokens, e.g. `>` `>` read as a shift operator.
   function adjacent(self: readonly Self, a: str, b: str): bool {
     self.at(a) && self.atN(1, b) && self.toks[self.pos].span.end == self.toks[self.pos + 1].span.start
   }
-  // The position of the token closing the bracket at `from`.
+
+  // The bracket that closes the one at token `from`.
   function closeFrom(self: readonly Self, from: usize): Option<usize> {
     let depth: usize = 0;
     let i = from;
     while (i < self.toks.len()) {
       match (self.toks[i].tok) {
         #Punct(p) => {
-          if (p == "(" || p == "[" || p == "{" || p == "#[") { depth += 1; }
-          if (p == ")" || p == "]" || p == "}") {
+          if (p == "(" || p == "[" || p == "{") { depth += 1; }
+          else if (p == ")" || p == "]" || p == "}") {
             depth -= 1;
             if (depth == 0) { return #Some(i); }
           }
         }
         #Eof => return #None,
-        _ => {},
+        _ => {}
       }
       i += 1;
     }
     #None
   }
-  function punctAt(self: readonly Self, i: usize, p: str): bool {
-    match (self.toks[min(i, self.toks.len() - 1)].tok) { #Punct(q) => q == p, _ => false }
-  }
 
-  // ---- modules ----
+  // ---- items ----
 
-  function module(self: mut Self): Module uses Fail<ParseError | LexError> {
-    let items: Vec<Item> = Vec.new();
-    while (self.tok() != #Eof) {
-      if (self.at("@")) {
-        // `@layout(c)`: an attribute code generation does not need.
-        self.bump();
-        self.ident();
-        if (self.at("(")) { self.skipBalanced(); }
-        continue;
-      }
-      const exported = self.eatWord("export");
-      items.push(self.item(exported));
-    }
-    { items: items }
-  }
-
-  function item(self: mut Self, exported: bool): Item uses Fail<ParseError | LexError> {
-    if (self.eatWord("import")) {
-      self.expect("{");
-      let names: Vec<[String, String]> = Vec.new();
-      while (!self.at("}")) {
-        const name = self.ident();
-        const local = if (self.eatWord("as")) { self.ident() } else { name.clone() };
-        names.push([name, local]);
-        if (!self.eat(",")) { break; }
-      }
-      self.expect("}");
-      if (!self.eatWord("from")) { self.fail("`from`"); }
-      const from: String = match (self.tok()) { #Str(s) => s.clone(), _ => self.fail("a module path") };
+  function item(self: mut Self): Item uses Fail<Diagnostic> {
+    const start = self.span();
+    const exported = self.eatKw("export");
+    const kind: ItemKind = if (self.atKw("import") && !exported) {
+      self.importItem()
+    } else if (self.at("@")) {
+      const layout = self.layout();
+      const view = self.eatWord("view");
+      #Struct(self.structDecl(#Some(layout), view))
+    } else if (self.atWord("view") && (Parser.isKw(self.tokAt(1), "struct") || Parser.isKw(self.tokAt(1), "enum"))) {
       self.bump();
-      self.expect(";");
-      return #Import(names, from);
-    }
-    if (self.atWord("function") || (self.atWord("comptime") && self.word(1, "function"))) {
-      return #Function(self.function(exported));
-    }
-    if (self.atWord("view") && (self.word(1, "struct") || self.word(1, "enum"))) { self.bump(); }
-    if (self.atWord("struct")) {
+      if (self.atKw("struct")) {
+        #Struct(self.structDecl(#None, true))
+      } else {
+        let e = self.enumDecl();
+        e.view = true;
+        #Enum(e)
+      }
+    } else if (self.atKw("struct")) {
+      #Struct(self.structDecl(#None, false))
+    } else if (self.atKw("enum")) {
+      #Enum(self.enumDecl())
+    } else if (self.atKw("const")) {
       self.bump();
       const name = self.ident();
-      self.skipTypeParams();
-      let fields: Vec<String> = Vec.new();
-      if (self.eat(";")) { return #Struct(name, fields, exported); }
-      self.expect("{");
-      while (!self.at("}")) {
-        if (self.atWord("comptime")) {
-          // A generated field: compiled programs do not reflect.
-          self.skipUntilEntryEnd();
-          continue;
-        }
-        self.eatWord("private");
-        fields.push(self.ident());
-        self.expect(":");
-        self.skipType();
-        if (!self.eat(";")) { self.eat(","); }
-      }
-      self.expect("}");
-      return #Struct(name, fields, exported);
-    }
-    if (self.atWord("enum")) {
-      self.bump();
-      const name = self.ident();
-      self.skipTypeParams();
-      self.expect("{");
-      let tags: Vec<String> = Vec.new();
-      while (!self.at("}")) {
-        match (self.tok()) { #Tag(t) => tags.push(t.clone()), _ => self.fail("a tag") }
-        self.bump();
-        if (self.at("(") || self.at("{")) { self.skipBalanced(); }
-        if (!self.eat(",")) { break; }
-      }
-      self.expect("}");
-      return #Enum(name, tags, exported);
-    }
-    if (self.atWord("type")) {
-      self.bump();
-      const name = self.ident();
-      self.skipTypeParams();
-      self.expect("=");
-      self.skipType();
-      self.expect(";");
-      return #Alias(name, exported);
-    }
-    if (self.atWord("const")) {
-      self.bump();
-      const name = self.ident();
-      if (self.eat(":")) { self.skipType(); }
+      const ty: Option<Type> = if (self.eat(":")) { #Some(self.ty()) } else { #None };
       self.expect("=");
       const value = self.expr();
       self.expect(";");
-      return #Const(name, value, exported);
-    }
-    if (self.atWord("impl")) {
+      #Const { name, ty, value }
+    } else if (self.atKw("interface")) {
+      #Interface(self.interfaceDecl())
+    } else if (self.atKw("impl")) {
+      #Impl(self.implDecl())
+    } else if (self.atKw("type")) {
+      #TypeAlias(self.typeAlias())
+    } else if (self.atWord("effect") && Parser.isIdent(self.tokAt(1))) {
+      #Effect(self.effectDecl())
+    } else if (self.atKw("function") || self.atKw("comptime")) {
+      #Function(self.fnDecl())
+    } else if (self.atKw("extern")) {
       self.bump();
-      self.skipTypeParams();
-      // `impl T`, or `impl I for T`: the methods belong to `T`.
-      let target = self.typeName();
-      let iface: Option<String> = #None;
-      if (self.eatWord("for")) { iface = #Some(replace(mut target, self.typeName())); }
-      let methods: Vec<Fn> = Vec.new();
-      if (self.eat(";")) { return #Impl(target, iface, methods); }
-      self.expect("{");
-      while (!self.at("}")) {
-        if (self.atWord("type")) {
-          // An associated type: nothing to compile.
-          while (!self.at(";")) { self.bump(); }
-          self.bump();
-          continue;
-        }
-        const fnExported = self.eatWord("export");
-        methods.push(self.function(fnExported));
-      }
-      self.expect("}");
-      return #Impl(target, iface, methods);
-    }
-    if (self.atWord("interface") || self.atWord("effect")) {
-      const isEffect = self.atWord("effect");
-      self.bump();
-      const name = self.ident();
-      self.skipTypeParams();
-      while (!self.at("{")) { self.bump(); }
-      if (isEffect) {
-        self.skipBalanced();
-        return #Effect(name, exported);
-      }
-      // Its methods: those with a body are defaults for the types that implement it.
-      self.bump();
-      let methods: Vec<Fn> = Vec.new();
-      while (!self.at("}")) {
-        if (self.atWord("type")) {
-          while (!self.at(";")) { self.bump(); }
-          self.bump();
-          continue;
-        }
-        self.eatWord("export");
-        methods.push(self.function(false));
-      }
-      self.expect("}");
-      return #Interface(name, methods, exported);
-    }
-    if (self.atWord("extern")) {
-      while (!self.at(";")) { self.bump(); }
-      self.bump();
-      return #Alias("$extern".toString(), false);
-    }
-    self.fail("a declaration")
-  }
-
-  // `function name<…>(params): Return from … uses …` and its body, or `;` in a declaration.
-  function function(self: mut Self, exported: bool): Fn uses Fail<ParseError | LexError> {
-    const start = self.here();
-    self.eatWord("comptime");
-    if (!self.eatWord("function")) { self.fail("`function`"); }
-    const name = self.ident();
-    self.skipTypeParams();
-    self.expect("(");
-    let params: Vec<Param> = Vec.new();
-    while (!self.at(")")) {
-      self.eatWord("comptime");
-      const pname = self.ident();
-      const ty = if (self.eat(":")) { self.typeExpr() } else { #Other };
-      params.push({ name: pname, ty });
-      if (!self.eat(",")) { break; }
-    }
-    self.expect(")");
-    if (self.eat(":")) {
-      self.skipType();
-      if (self.eatWord("from")) {
-        self.ident();
-        while (self.at(",") && !self.word(2, "uses")) {
-          self.bump();
-          self.ident();
-        }
-      }
-    }
-    // A function that performs `Yield` is a generator.
-    let generator = false;
-    if (self.eatWord("uses")) {
-      const from = self.pos;
-      self.skipRow();
-      for (const i of from..self.pos) {
-        if (self.toks[i].tok == #Ident("Yield".toString())) { generator = true; }
-      }
-    }
-    const body = if (self.eat(";")) { #None } else { #Some(self.block()) };
-    { name, params, body, exported, generator, span: { start, end: self.here() } }
-  }
-
-  // ---- types: read only as far as code generation needs ----
-
-  function typeName(self: mut Self): String uses Fail<ParseError> {
-    // `T[]`, `str`, a path: the name methods are registered under.
-    if (self.at("[")) {
-      self.skipType();
-      return "$tuple".toString();
-    }
-    let name = self.ident();
-    while (self.eat(".")) { name = self.ident(); }
-    if (self.at("<")) { self.skipBalancedAngles(); }
-    if (self.at("[")) {
-      self.skipBalanced();
-      return "$slice".toString();
-    }
-    name
-  }
-
-  function typeExpr(self: mut Self): Type uses Fail<ParseError> {
-    if (self.eatWord("mut")) { return #Mut(Box.new(self.typeExpr())); }
-    if (self.eatWord("readonly")) { return #Readonly(Box.new(self.typeExpr())); }
-    const start = self.pos;
-    self.skipType();
-    match (self.toks[start].tok) {
-      #Ident(n) => #Named(n.clone(), Vec.new()),
-      _ => #Other,
-    }
-  }
-
-  function skipType(self: mut Self): void uses Fail<ParseError> {
-    self.eatWord("mut");
-    self.eatWord("readonly");
-    self.eatWord("once");
-    self.eatWord("dyn");
-    if (self.at("(")) {
-      // A function type: `(x: T, …) => R uses …`.
-      self.skipBalanced();
-      self.expect("=>");
-      self.skipType();
-      if (self.eatWord("from")) { self.ident(); }
-      if (self.eatWord("uses")) { self.skipRow(); }
-    } else if (self.at("{") || self.at("[")) {
-      self.skipBalanced();
-    } else if (self.at("|")) {
-      self.bump();
-      self.skipType();
-    } else {
       match (self.tok()) {
-        #Tag(_) => {
-          self.bump();
-          if (self.at("(") || self.at("{")) { self.skipBalanced(); }
-        }
-        #Ident(_) => {
-          self.bump();
-          while (self.eat(".")) { self.ident(); }
-          if (self.at("<")) { self.skipBalancedAngles(); }
-        }
-        #Punct(p) if p == "..." => { self.bump(); self.ident(); }
-        _ => self.fail("a type"),
+        #Str(abi) if abi == "C" => { self.bump(); }
+        _ => self.error("`\"C\"`"),
       }
-    }
-    // `T[]`, `T[N]`, `T*`, and a union's further members.
-    while (true) {
-      if (self.at("[")) {
-        self.skipBalanced();
-      } else if (self.at("*") && !self.atN(1, "(")) {
-        self.bump();
-      } else if (self.at("|") && !self.atN(1, "|")) {
-        self.bump();
-        self.skipType();
-      } else {
-        break;
-      }
-    }
+      const sig = self.sig(true);
+      self.expect(";");
+      #Extern(sig)
+    } else {
+      self.error("a declaration")
+    };
+    { exported, kind, span: self.since(start) }
   }
 
-  // An effect row: `Io, Fail<E>, ...R`.
-  function skipRow(self: mut Self): void uses Fail<ParseError> {
-    self.skipType();
-    while (self.at(",") && !self.word(2, "uses") && !self.atN(2, ":") && (self.atN(1, "...") || self.isRowItem(1))) {
-      self.bump();
-      self.skipType();
-    }
-  }
-  function isRowItem(self: readonly Self, k: usize): bool {
-    match (self.tokAt(k)) { #Ident(_) => !self.atN(k + 1, ":"), _ => false }
-  }
-
-  function skipTypeParams(self: mut Self): void uses Fail<ParseError> {
-    if (self.at("<")) { self.skipBalancedAngles(); }
-  }
-  function skipBalancedAngles(self: mut Self): void uses Fail<ParseError> {
-    let depth: usize = 0;
-    while (true) {
-      if (self.at("<")) { depth += 1; }
-      if (self.at(">")) {
-        depth -= 1;
-        if (depth == 0) { self.bump(); return; }
-      }
-      if (self.tok() == #Eof) { self.fail("`>`"); }
-      self.bump();
-    }
-  }
-  function skipBalanced(self: mut Self): void uses Fail<ParseError> {
-    match (self.closeFrom(self.pos)) {
-      #Some(c) => { self.pos = c; self.bump(); }
-      #None => self.fail("a closing bracket"),
-    }
-  }
-  function skipUntilEntryEnd(self: mut Self): void uses Fail<ParseError> {
-    while (!self.at(";") && !self.at("}")) {
-      if (self.at("{") || self.at("(") || self.at("[")) { self.skipBalanced(); } else { self.bump(); }
-    }
-    self.eat(";");
-  }
-
-  // ---- patterns ----
-
-  function pattern(self: mut Self): Pattern uses Fail<ParseError> {
-    const first = self.patternOne();
-    if (!self.at("|")) { return first; }
-    let alts: Vec<Pattern> = Vec.new();
-    alts.push(first);
-    while (self.eat("|")) { alts.push(self.patternOne()); }
-    #Or(alts)
-  }
-
-  function patternOne(self: mut Self): Pattern uses Fail<ParseError> {
-    const t = self.tok().clone();
-    match (t) {
-      #Int(n) => { self.bump(); #Int(n) }
-      #Str(s) => { self.bump(); #Str(s) }
-      #Byte(b) => { self.bump(); #Byte(b) }
-      #Punct(p) if p == "-" => {
-        self.bump();
-        match (self.tok().clone()) { #Int(n) => { self.bump(); #Int(`-${n}`) } _ => self.fail("a number") }
-      }
-      #Tag(name) => {
-        self.bump();
-        if (self.at("(")) {
-          self.bump();
-          let ps: Vec<Pattern> = Vec.new();
-          while (!self.at(")")) {
-            ps.push(self.pattern());
-            if (!self.eat(",")) { break; }
-          }
-          self.expect(")");
-          #Tag(name, ps)
-        } else if (self.at("{")) {
-          #TagRecord(name, self.fieldPatterns())
-        } else {
-          #Tag(name, Vec.new())
-        }
-      }
-      #Punct(p) if p == "#[" => {
-        self.skipComputedTag();
-        #Unsupported("a tag named by `comptime` code".toString())
-      }
-      #Punct(p) if p == "[" => {
-        self.bump();
-        let ps: Vec<Pattern> = Vec.new();
-        while (!self.at("]")) {
-          ps.push(self.pattern());
-          if (!self.eat(",")) { break; }
-        }
-        self.expect("]");
-        #Tuple(ps)
-      }
-      #Punct(p) if p == "{" => #Record(self.fieldPatterns()),
-      #Ident(n) => {
-        self.bump();
-        if (n == "_") { return #Wild; }
-        if (n == "true") { return #Bool(true); }
-        if (n == "false") { return #Bool(false); }
-        // `Point { x, y }`: a struct taken apart.
-        if (self.at("{")) { return #Record(self.fieldPatterns()); }
-        #Bind(n)
-      }
-      _ => self.fail("a pattern"),
-    }
-  }
-
-  function fieldPatterns(self: mut Self): Vec<[String, Pattern]> uses Fail<ParseError> {
+  function importItem(self: mut Self): ItemKind uses Fail<Diagnostic> {
+    self.expectKw("import");
     self.expect("{");
-    let fs: Vec<[String, Pattern]> = Vec.new();
+    let names: Vec<[Ident, Ident]> = Vec.new();
     while (!self.at("}")) {
-      if (self.at("..")) { self.bump(); continue; }
       const name = self.ident();
-      const p = if (self.eat(":")) { self.pattern() } else { #Bind(name.clone()) };
-      fs.push([name, p]);
+      const local = if (self.eatKw("as")) { self.ident() } else { name.clone() };
+      names.push([name, local]);
       if (!self.eat(",")) { break; }
     }
     self.expect("}");
-    fs
+    self.expectWord("from");
+    const from: String = match (self.tok()) { #Str(s) => s.clone(), _ => self.error("a module path string") };
+    self.bump();
+    self.expect(";");
+    #Import { names, from }
+  }
+
+  function layout(self: mut Self): Ident uses Fail<Diagnostic> {
+    self.expect("@");
+    self.expectWord("layout");
+    self.expect("(");
+    const kind = self.ident();
+    self.expect(")");
+    kind
+  }
+
+  function structDecl(self: mut Self, layout: Option<Ident>, view: bool): StructDecl uses Fail<Diagnostic> {
+    self.expectKw("struct");
+    const name = self.ident();
+    const params = self.typeParams();
+    const fields: Option<Vec<Field>> = if (self.declarations && self.eat(";")) { #None } else { #Some(self.fieldList()) };
+    { layout, view, name, params, fields }
+  }
+
+  // `{ name: Type; … }` with `;` or `,` separators.
+  function fieldList(self: mut Self): Vec<Field> uses Fail<Diagnostic> {
+    self.expect("{");
+    const fields = self.fieldItems();
+    self.expect("}");
+    fields
+  }
+
+  // Fields up to a closing `}`: `name: T`, `private name: T`, `[e]: T`, or generated ones.
+  function fieldItems(self: mut Self): Vec<Field> uses Fail<Diagnostic> {
+    let fields: Vec<Field> = Vec.new();
+    while (!self.at("}") && !self.at("...")) {
+      const generated = Parser.isKw(self.tokAt(1), "for") || Parser.isKw(self.tokAt(1), "if") || self.wordAt(1, "match");
+      if (self.atKw("comptime") && !generated) {
+        const start = self.span();
+        self.bump();
+        const e = self.expr();
+        self.expect(";");
+        fields.push(Field { name: mkIdent("", self.since(start)), ty: { kind: #EmptyRow, span: start }, private: false, computed: #None, generate: #Some(Box.new(#Do(e))) });
+        continue;
+      }
+      if (self.atKw("comptime")) {
+        const start = self.span();
+        const g = self.generate((p) => p.fieldItems());
+        fields.push(Field { name: mkIdent("", self.since(start)), ty: { kind: #EmptyRow, span: start }, private: false, computed: #None, generate: #Some(Box.new(g)) });
+        if (!self.eat(";")) { self.eat(","); }
+        continue;
+      }
+      const private = self.atWord("private") && Parser.isIdent(self.tokAt(1));
+      if (private) { self.bump(); }
+      const [name, computed] = self.entryName();
+      self.expect(":");
+      const ty = self.ty();
+      fields.push(Field { name, ty, private, computed, generate: #None });
+      if (!self.eat(";") && !self.eat(",")) { break; }
+    }
+    fields
+  }
+
+  // A field's name, or `[e]` for one computed by `comptime` code.
+  function entryName(self: mut Self): [Ident, Option<Box<Expr>>] uses Fail<Diagnostic> {
+    if (self.at("[")) {
+      const start = self.span();
+      self.bump();
+      const e = self.expr();
+      self.expect("]");
+      return [mkIdent("", self.since(start)), #Some(Box.new(e))];
+    }
+    [self.memberName(), #None]
+  }
+
+  // `comptime for (const p of e) { … }`, `comptime if (c) { … } else { … }` or `comptime match`
+  // in a sequence, the items between the braces parsed by `items`.
+  function generate<T extends Send>(self: mut Self, items: mut (p: mut Parser) => Vec<T> uses Fail<Diagnostic>): Generate<T> uses Fail<Diagnostic> {
+    self.expectKw("comptime");
+    if (self.eatKw("for")) {
+      self.expect("(");
+      if (!self.eatKw("const") && !self.eatKw("let")) { self.error("`const`"); }
+      const pat = self.patternOne();
+      self.expectWord("of");
+      const iter = self.expr();
+      self.expect(")");
+      self.expect("{");
+      const body = items(mut self);
+      self.expect("}");
+      return #For { pat, iter, body };
+    }
+    if (self.eatKw("if")) {
+      const cond = self.parenExpr();
+      self.expect("{");
+      const then = items(mut self);
+      self.expect("}");
+      let otherwise: Vec<T> = Vec.new();
+      if (self.eatKw("else")) {
+        self.expect("{");
+        otherwise = items(mut self);
+        self.expect("}");
+      }
+      return #If { cond, then, otherwise };
+    }
+    if (self.eatWord("match")) {
+      const scrutinee = self.parenExpr();
+      self.expect("{");
+      let arms: Vec<[Pattern, Vec<T>]> = Vec.new();
+      while (!self.at("}")) {
+        const pat = self.pattern();
+        self.expect("=>");
+        self.expect("{");
+        const group = items(mut self);
+        self.expect("}");
+        arms.push([pat, group]);
+        self.eat(",");
+      }
+      self.expect("}");
+      return #Match { scrutinee, arms };
+    }
+    self.error("`for`, `if` or `match` after `comptime`")
+  }
+
+  function enumDecl(self: mut Self): EnumDecl uses Fail<Diagnostic> {
+    self.expectKw("enum");
+    const name = self.ident();
+    const params = self.typeParams();
+    self.expect("{");
+    let tags: Vec<TagDecl> = Vec.new();
+    while (!self.at("}")) {
+      tags.push(self.tagDecl());
+      if (!self.eat(",")) { break; }
+    }
+    self.expect("}");
+    { view: false, name, params, tags }
+  }
+
+  function tagDecl(self: mut Self): TagDecl uses Fail<Diagnostic> {
+    const n: String = match (self.tok()) { #Tag(t) => t.clone(), _ => self.error("a tag such as `#Some`") };
+    const name = mkIdent(n.asStr(), self.bump());
+    const payload: TagPayload = if (self.at("(")) {
+      self.bump();
+      let tys: Vec<Type> = Vec.new();
+      while (!self.at(")")) {
+        tys.push(self.ty());
+        if (!self.eat(",")) { break; }
+      }
+      self.expect(")");
+      #Tuple(tys)
+    } else if (self.at("{")) {
+      #Record(self.fieldList())
+    } else {
+      #None
+    };
+    { name, payload }
+  }
+
+  function interfaceDecl(self: mut Self): InterfaceDecl uses Fail<Diagnostic> {
+    self.expectKw("interface");
+    const name = self.ident();
+    const params = self.typeParams();
+    const ext: Vec<Type> = if (self.eatKw("extends")) { self.bounds() } else { Vec.new() };
+    self.expect("{");
+    let members: Vec<InterfaceMember> = Vec.new();
+    while (!self.at("}")) {
+      if (self.eatKw("type")) {
+        const aname = self.ident();
+        const bounds: Vec<Type> = if (self.eatKw("extends")) { self.bounds() } else { Vec.new() };
+        members.push(#AssocType { name: aname, bounds });
+      } else {
+        members.push(#Method(self.memberSig()));
+      }
+      self.expect(";");
+    }
+    self.expect("}");
+    { name, params, extends: ext, members }
+  }
+
+  function implDecl(self: mut Self): ImplDecl uses Fail<Diagnostic> {
+    self.expectKw("impl");
+    const params = self.typeParams();
+    const first = self.ty();
+    let iface: Option<Type> = #None;
+    let target = first;
+    if (self.eatKw("for")) {
+      iface = #Some(replace(mut target, self.ty()));
+    }
+    let methods: Vec<Method> = Vec.new();
+    let assoc: Vec<[Ident, Type]> = Vec.new();
+    if (iface.isSome() && self.eat(";")) {
+      return { params, iface, target, methods, assoc, derived: true };
+    }
+    self.expect("{");
+    while (!self.at("}")) {
+      if (self.eatKw("type")) {
+        const aname = self.ident();
+        self.expect("=");
+        assoc.push([aname, self.ty()]);
+        self.expect(";");
+        continue;
+      }
+      const exported = self.eatKw("export");
+      const sig = self.memberSig();
+      const body: Option<Block> = if (self.declarations && self.eat(";")) { #None } else { #Some(self.block()) };
+      methods.push({ exported, decl: { sig, body } });
+    }
+    self.expect("}");
+    { params, iface, target, methods, assoc, derived: false }
+  }
+
+  function typeAlias(self: mut Self): TypeAlias uses Fail<Diagnostic> {
+    self.expectKw("type");
+    const name = self.ident();
+    const params = self.typeParams();
+    self.expect("=");
+    const ty = self.ty();
+    self.expect(";");
+    { name, params, ty }
+  }
+
+  function effectDecl(self: mut Self): EffectDecl uses Fail<Diagnostic> {
+    self.expectWord("effect");
+    const name = self.ident();
+    const params = self.typeParams();
+    self.expect("{");
+    let ops: Vec<FnSig> = Vec.new();
+    while (!self.at("}")) {
+      // Operations are written without `function`; tolerate it for symmetry with interfaces.
+      const withKw = self.atKw("function");
+      ops.push(self.sig(withKw));
+      self.expect(";");
+    }
+    self.expect("}");
+    { name, params, ops }
+  }
+
+  function fnDecl(self: mut Self): FnDecl uses Fail<Diagnostic> {
+    const sig = self.sig(true);
+    const body: Option<Block> = if (self.declarations && self.eat(";")) { #None } else { #Some(self.block()) };
+    { sig, body }
+  }
+
+  // A method's signature: its name may be any word, reserved ones included (§2.3).
+  function memberSig(self: mut Self): FnSig uses Fail<Diagnostic> { self.sigNamed(true, true) }
+
+  function sig(self: mut Self, functionKw: bool): FnSig uses Fail<Diagnostic> { self.sigNamed(functionKw, !functionKw) }
+
+  function sigNamed(self: mut Self, functionKw: bool, member: bool): FnSig uses Fail<Diagnostic> {
+    const start = self.span();
+    const isComptime = self.eatKw("comptime");
+    if (functionKw) { self.expectKw("function"); }
+    const name = if (member) { self.memberName() } else { self.ident() };
+    const typeParams = self.typeParams();
+    const params = self.params(true);
+    self.expect(":");
+    const ret = self.ret();
+    const row = self.uses();
+    { isComptime, name, typeParams, params, ret, uses: row, span: self.since(start) }
+  }
+
+  function params(self: mut Self, typed: bool): Vec<Param> uses Fail<Diagnostic> {
+    self.expect("(");
+    let out: Vec<Param> = Vec.new();
+    while (!self.at(")")) {
+      const isComptime = self.eatKw("comptime");
+      const name = self.ident();
+      const ty: Option<Type> = if (self.eat(":")) {
+        #Some(self.ty())
+      } else if (typed) {
+        self.error("`:` and a parameter type")
+      } else {
+        #None
+      };
+      out.push({ isComptime, name, ty });
+      if (!self.eat(",")) { break; }
+    }
+    self.expect(")");
+    out
+  }
+
+  // A lambda's parameters, which, as in TypeScript, may take their argument apart: `([k, v]) => …`
+  // and `({ name }) => …` take a parameter and bind its parts with `const`.
+  function lambdaParams(self: mut Self): [Vec<Param>, Vec<Stmt>] uses Fail<Diagnostic> {
+    self.expect("(");
+    let out: Vec<Param> = Vec.new();
+    let unpack: Vec<Stmt> = Vec.new();
+    while (!self.at(")")) {
+      if (self.at("[") || self.at("{")) {
+        const pat = self.pattern();
+        const ty: Option<Type> = if (self.eat(":")) { #Some(self.ty()) } else { #None };
+        const at: Span = { start: pat.span.end, end: pat.span.end };
+        const name = mkIdent(`$${out.len()}`.asStr(), pat.span);
+        const init = self.expr_(#Ident(name.name.clone()), at);
+        const span = pat.span;
+        unpack.push(#Let { mutable: false, pat, ty: #None, init, span });
+        out.push({ isComptime: false, name, ty });
+      } else {
+        const isComptime = self.eatKw("comptime");
+        const name = self.ident();
+        const ty: Option<Type> = if (self.eat(":")) { #Some(self.ty()) } else { #None };
+        out.push({ isComptime, name, ty });
+      }
+      if (!self.eat(",")) { break; }
+    }
+    self.expect(")");
+    [out, unpack]
+  }
+
+  function ret(self: mut Self): Return uses Fail<Diagnostic> {
+    const ty = self.ty();
+    let from: Vec<Ident> = Vec.new();
+    if (self.eatWord("from")) {
+      from.push(self.ident());
+      // More sources, unless the comma starts the next parameter (`, name:`).
+      while (self.at(",") && Parser.isIdent(self.tokAt(1)) && !Parser.isPunct(self.tokAt(2), ":")) {
+        self.bump();
+        from.push(self.ident());
+      }
+    }
+    { ty, from }
+  }
+
+  function uses(self: mut Self): Option<Vec<RowItem>> uses Fail<Diagnostic> {
+    if (!self.eatKw("uses")) { return #None; }
+    let row: Vec<RowItem> = Vec.new();
+    row.push(self.rowItem());
+    // A comma continues the row unless it starts the next parameter (`, name:`).
+    while (self.at(",") && self.rowContinues()) {
+      self.bump();
+      row.push(self.rowItem());
+    }
+    #Some(row)
+  }
+
+  function rowContinues(self: readonly Self): bool {
+    match (self.tokAt(1)) {
+      #Punct(p) => p == "...",
+      #Ident(_) => !self.atN(2, ":"),
+      _ => false,
+    }
+  }
+
+  function rowItem(self: mut Self): RowItem uses Fail<Diagnostic> {
+    if (self.eat("...")) { return #Spread(self.ident()); }
+    const start = self.span();
+    const segments = self.path();
+    const args = self.typeArgs();
+    #Effect({ kind: #Path { segments, args }, span: self.since(start) })
+  }
+
+  function typeParams(self: mut Self): Vec<TypeParam> uses Fail<Diagnostic> {
+    let out: Vec<TypeParam> = Vec.new();
+    if (!self.eat("<")) { return out; }
+    while (!self.at(">")) {
+      const param: TypeParam = if (self.atWord("region") && Parser.isIdent(self.tokAt(1))) {
+        self.bump();
+        const name = self.ident();
+        const default: Option<Type> = if (self.eat("=")) { #Some(self.ty()) } else { #None };
+        #Region { name, default }
+      } else if (self.atWord("row") && Parser.isIdent(self.tokAt(1))) {
+        self.bump();
+        const name = self.ident();
+        const bounds: Vec<Type> = if (self.eatKw("extends")) { self.bounds() } else { Vec.new() };
+        const default: Option<Type> = if (self.eat("=")) { #Some(self.ty()) } else { #None };
+        #Row { name, bounds, default }
+      } else if (self.eatKw("comptime")) {
+        const name = self.ident();
+        self.expect(":");
+        #Comptime { name, ty: self.ty() }
+      } else {
+        const name = self.ident();
+        const bounds: Vec<Type> = if (self.eatKw("extends")) { self.bounds() } else { Vec.new() };
+        const default: Option<Type> = if (self.eat("=")) { #Some(self.ty()) } else { #None };
+        #Type { name, bounds, default }
+      };
+      out.push(param);
+      if (!self.eat(",")) { break; }
+    }
+    self.expect(">");
+    out
+  }
+
+  function bounds(self: mut Self): Vec<Type> uses Fail<Diagnostic> {
+    let out: Vec<Type> = Vec.new();
+    out.push(self.tyPostfix());
+    while (self.eat("&")) { out.push(self.tyPostfix()); }
+    out
+  }
+
+  function path(self: mut Self): Vec<Ident> uses Fail<Diagnostic> {
+    let segments: Vec<Ident> = Vec.new();
+    segments.push(self.ident());
+    while (self.at(".") && match (self.tokAt(1)) { #Ident(_) | #Kw(_) => true, _ => false }) {
+      self.bump();
+      segments.push(self.memberName());
+    }
+    segments
+  }
+
+  function typeArgs(self: mut Self): Vec<Type> uses Fail<Diagnostic> {
+    let args: Vec<Type> = Vec.new();
+    if (!self.eat("<")) { return args; }
+    while (!self.at(">")) {
+      args.push(self.ty());
+      if (!self.eat(",")) { break; }
+    }
+    self.expect(">");
+    args
+  }
+
+  // ---- types ----
+
+  function ty(self: mut Self): Type uses Fail<Diagnostic> {
+    const start = self.span();
+    if (self.at("|") || match (self.tok()) { #Tag(_) => true, _ => false }) { return self.unionTy(); }
+    // A named union followed by `|` starts a union that includes it: `JsonError | #Port(u16)`.
+    if (Parser.isIdent(self.tok())) {
+      const save = self.pos;
+      const first = self.tyPostfix();
+      if (!self.at("|")) { return first; }
+      self.pos = save;
+      return self.unionTy();
+    }
+    if (self.atKw("mut") && self.atN(1, "(")) {
+      self.bump();
+      return self.fnTy(#Mut, start);
+    }
+    if (self.eatKw("once")) { return self.fnTy(#Once, start); }
+    if (self.eatKw("mut")) {
+      const inner = self.ty();
+      return { kind: #Mut(Box.new(inner)), span: self.since(start) };
+    }
+    if (self.eatKw("readonly")) {
+      const inner = self.ty();
+      return { kind: #Readonly(Box.new(inner)), span: self.since(start) };
+    }
+    if (self.at("(")) { return self.fnTy(#Shared, start); }
+    self.tyPostfix()
+  }
+
+  function fnTy(self: mut Self, mode: FnMode, start: Span): Type uses Fail<Diagnostic> {
+    const params = self.params(false);
+    self.expect("=>");
+    const ret = Box.new(self.ret());
+    const row = self.uses();
+    { kind: #Fn { mode, params, ret, uses: row }, span: self.since(start) }
+  }
+
+  function unionTy(self: mut Self): Type uses Fail<Diagnostic> {
+    const start = self.span();
+    self.eat("|");
+    let tags: Vec<TagDecl> = Vec.new();
+    let includes: Vec<Type> = Vec.new();
+    let rest: Option<Ident> = #None;
+    while (true) {
+      if (self.eat("...")) {
+        rest = #Some(self.ident());
+        break;
+      }
+      if (Parser.isIdent(self.tok())) { includes.push(self.tyPostfix()); } else { tags.push(self.tagDecl()); }
+      if (!self.eat("|")) { break; }
+    }
+    { kind: #Union { tags, includes, rest }, span: self.since(start) }
+  }
+
+  function tyPostfix(self: mut Self): Type uses Fail<Diagnostic> {
+    const start = self.span();
+    let ty = self.tyAtom();
+    while (true) {
+      if (self.at("[")) {
+        self.bump();
+        const len: Option<Box<Expr>> = if (self.at("]")) { #None } else { #Some(Box.new(self.expr())) };
+        self.expect("]");
+        ty = { kind: #Array { elem: Box.new(ty), len }, span: self.since(start) };
+      } else if (self.at("*")) {
+        self.bump();
+        ty = { kind: #Ptr(Box.new(ty)), span: self.since(start) };
+      } else {
+        return ty;
+      }
+    }
+    ty
+  }
+
+  function tyAtom(self: mut Self): Type uses Fail<Diagnostic> {
+    const start = self.span();
+    const kind: TypeKind = if (self.at("[")) {
+      self.bump();
+      if (self.eat("]")) {
+        #EmptyRow
+      } else {
+        let tys: Vec<Type> = Vec.new();
+        tys.push(self.ty());
+        while (self.eat(",")) {
+          if (self.at("]")) { break; }
+          tys.push(self.ty());
+        }
+        self.expect("]");
+        #Tuple(tys)
+      }
+    } else if (self.at("{")) {
+      self.bump();
+      let fields: Vec<Field> = Vec.new();
+      let rest: Option<Ident> = #None;
+      while (!self.at("}")) {
+        if (self.eat("...")) {
+          rest = #Some(self.ident());
+          self.eat(";");
+          break;
+        }
+        let items = self.fieldItems();
+        if (items.len() == 0) { break; }
+        for (const f of items.drain()) { fields.push(f); }
+      }
+      self.expect("}");
+      #Record { fields, rest }
+    } else if (self.eatKw("dyn")) {
+      #Dyn(self.path())
+    } else if (Parser.isIdent(self.tok())) {
+      const segments = self.path();
+      #Path { segments, args: self.typeArgs() }
+    } else if (match (self.tok()) { #Int(_) => true, _ => false }) {
+      #Expr(Box.new(self.primary()))
+    } else {
+      self.error("a type")
+    };
+    { kind, span: self.since(start) }
   }
 
   // ---- blocks and statements ----
 
-  function block(self: mut Self): Block uses Fail<ParseError | LexError> {
-    self.expect("{");
+  function block(self: mut Self): Block uses Fail<Diagnostic> {
+    const start = self.expect("{");
     let stmts: Vec<Stmt> = Vec.new();
     let tail: Option<Box<Expr>> = #None;
     while (!self.at("}")) {
-      if (self.atWord("const") || self.atWord("let")) {
-        const mutable = self.atWord("let");
+      if (self.atKw("const") || self.atKw("let")) {
+        const s = self.span();
+        const mutable = self.atKw("let");
         self.bump();
         const pat = self.patternOne();
-        if (self.eat(":")) { self.skipType(); }
+        const ty: Option<Type> = if (self.eat(":")) { #Some(self.ty()) } else { #None };
         self.expect("=");
         const init = self.expr();
         self.expect(";");
-        stmts.push(#Let(mutable, pat, init));
+        stmts.push(#Let { mutable, pat, ty, init, span: self.since(s) });
         continue;
       }
-      if (self.atWord("comptime") && (self.word(1, "for") || self.word(1, "if") || self.word(1, "match"))) {
-        // Code `comptime` generates.
-        self.bump();
-        self.bump();
-        if (self.at("(")) { self.skipBalanced(); }
-        self.skipBalanced();
-        while (self.eatWord("else")) {
-          if (self.eatWord("if")) { self.skipBalanced(); }
-          self.skipBalanced();
-        }
-        stmts.push(#Expr(#Unsupported("code generated by `comptime` code".toString())));
-        self.eat(";");
-        continue;
-      }
-      if (self.eatWord("defer")) {
-        const e = if (self.at("{")) { #Block(self.block()) } else { self.expr() };
+      if (self.eatKw("defer")) {
+        // `defer { … }` defers a block, `defer e` an expression.
+        const e = if (self.at("{")) { self.blockLike() } else { self.expr() };
         stmts.push(#Defer(e));
         self.expect(";");
         continue;
       }
       const blockLike = self.atBlockLike();
-      const e: Expr = if (blockLike) { self.blockLike() } else { self.expr() };
+      const e = if (blockLike) { self.blockLike() } else { self.expr() };
       if (self.eat(";")) {
         stmts.push(#Expr(e));
       } else if (self.at("}")) {
@@ -503,145 +794,188 @@ impl Parser {
       } else if (blockLike) {
         stmts.push(#Expr(e));
       } else {
-        self.fail("`;` or `}`");
+        self.error("`;` or `}`");
       }
     }
     self.expect("}");
-    { stmts, tail }
+    { stmts, tail, span: self.since(start) }
   }
 
-  // A `{` begins a record when an entry follows: Flyscript has no labeled statements and no
-  // comma operator (§2.3).
+  // Whether the `{` at token `at` begins a record literal: it is followed by an entry (`name:`,
+  // `[e]:`), or by a `comptime for` or `comptime if` whose items are entries. Flyscript has no
+  // labeled statements, so such a brace never begins a block.
   function recordAt(self: readonly Self, at: usize): bool {
-    const next = self.toks[min(at + 1, self.toks.len() - 1)].tok.clone();
+    const next = self.tokIndex(at + 1);
     match (next) {
-      #Ident(_) => self.punctAt(at + 2, ":") || self.punctAt(at + 2, ","),
+      #Ident(_) | #Kw(_) if Parser.isPunct(self.tokIndex(at + 2), ":") => !Parser.isKw(next, "comptime"),
+      // A shorthand entry followed by a comma: there is no comma operator, so no block starts
+      // `{ name,` (`{ defs, main }`).
+      #Ident(_) if Parser.isPunct(self.tokIndex(at + 2), ",") => true,
+      #Punct(p) if p == "[" => match (self.closeFrom(at + 1)) { #Some(c) => Parser.isPunct(self.tokIndex(c + 1), ":"), #None => false },
+      #Kw(k) if k == "comptime" && (Parser.isKw(self.tokIndex(at + 2), "for") || Parser.isKw(self.tokIndex(at + 2), "if")) && Parser.isPunct(self.tokIndex(at + 3), "(") => {
+        match (self.closeFrom(at + 3)) { #Some(c) => Parser.isPunct(self.tokIndex(c + 1), "{") && self.recordAt(c + 1), #None => false }
+      }
       _ => false,
     }
   }
 
-  function matchAt(self: readonly Self, k: usize): bool {
-    self.word(k, "match") && self.atN(k + 1, "(")
-      && match (self.closeFrom(self.pos + k + 1)) { #Some(c) => self.punctAt(c + 1, "{"), #None => false }
-  }
-
   function atBlockLike(self: readonly Self): bool {
-    if (self.at("{")) { return !self.recordAt(self.pos); }
-    self.atWord("if") || self.atWord("while") || self.atWord("for") || self.atWord("try") || self.atWord("unsafe")
-      || self.matchAt(0) || (self.atWord("region") && self.atN(1, "(")) || (self.atWord("handle") && self.atN(1, "{"))
+    if (self.at("{") && self.recordAt(self.pos)) { return false; }
+    self.atKw("if") || self.atKw("while") || self.atKw("for") || self.atKw("try") || self.atKw("unsafe") || self.at("{")
+      || self.matchAt(self.pos) || self.atHandle() || self.atRegion()
+      || (self.atKw("comptime") && (Parser.isKw(self.tokAt(1), "if") || Parser.isKw(self.tokAt(1), "for") || self.matchAt(self.pos + 1)))
   }
 
-  function blockLike(self: mut Self): Expr uses Fail<ParseError | LexError> {
-    if (self.at("{")) { return #Block(self.block()); }
+  // A block-like expression in statement position: it is not continued by operators.
+  function blockLike(self: mut Self): Expr uses Fail<Diagnostic> {
+    if (self.at("{")) {
+      const b = self.block();
+      const span = b.span;
+      return self.expr_(#Block(b), span);
+    }
+    if (self.atKw("comptime")) {
+      const start = self.span();
+      self.bump();
+      const e = self.primary();
+      return self.expr_(#Comptime(Box.new(e)), self.since(start));
+    }
     self.primary()
   }
 
   // ---- expressions ----
 
-  function expr(self: mut Self): Expr uses Fail<ParseError | LexError> {
+  function expr(self: mut Self): Expr uses Fail<Diagnostic> {
+    const start = self.span();
     const lhs = self.range();
     match (ASSIGN.iter().find((op) => self.at(op))) {
       #Some(op) => {
         self.bump();
         const value = self.expr();
-        #Assign(op.toString(), Box.new(lhs), Box.new(value))
+        self.expr_(#Assign { op: op.toString(), target: Box.new(lhs), value: Box.new(value) }, self.since(start))
       }
       #None => lhs,
     }
   }
 
-  function range(self: mut Self): Expr uses Fail<ParseError | LexError> {
-    const lo = self.binary(0);
-    if (!self.eat("..")) { return lo; }
-    const hi = self.binary(0);
-    #Range(Box.new(lo), Box.new(hi))
+  function range(self: mut Self): Expr uses Fail<Diagnostic> {
+    const start = self.span();
+    let lo: Option<Box<Expr>> = #None;
+    if (!self.at("..")) {
+      const l = self.binary(0);
+      if (!self.at("..")) { return l; }
+      lo = #Some(Box.new(l));
+    }
+    self.bump();
+    const closes = self.at("]") || self.at(")") || self.at(",") || self.at(";") || self.at("}");
+    const hi: Option<Box<Expr>> = if (closes) { #None } else { #Some(Box.new(self.binary(0))) };
+    self.expr_(#Range { lo, hi }, self.since(start))
   }
 
-  // The operator at `level` that is next, and how many tokens it spans.
   function binaryOp(self: readonly Self, level: usize): Option<[String, usize]> {
     for (const op of BINARY[level]) {
       if (op == "<<") { if (self.adjacent("<", "<")) { return #Some(["<<".toString(), 2]); } continue; }
       if (op == ">>") { if (self.adjacent(">", ">")) { return #Some([">>".toString(), 2]); } continue; }
       if ((op == "<" || op == ">") && self.adjacent(op, op)) { continue; }
-      // `|` and `&` alone, not the first of `||` and `&&`.
       if (self.at(op)) { return #Some([op.toString(), 1]); }
     }
     #None
   }
 
-  function binary(self: mut Self, level: usize): Expr uses Fail<ParseError | LexError> {
+  function binary(self: mut Self, level: usize): Expr uses Fail<Diagnostic> {
     if (level == BINARY.len()) { return self.cast(); }
+    const start = self.span();
     let lhs = self.binary(level + 1);
     while (const #Some([op, width]) = self.binaryOp(level)) {
       for (const _ of 0..width) { self.bump(); }
       const rhs = self.binary(level + 1);
-      lhs = #Binary(op, Box.new(lhs), Box.new(rhs));
+      lhs = self.expr_(#Binary { op, lhs: Box.new(lhs), rhs: Box.new(rhs) }, self.since(start));
     }
     lhs
   }
 
-  function cast(self: mut Self): Expr uses Fail<ParseError | LexError> {
+  function cast(self: mut Self): Expr uses Fail<Diagnostic> {
+    const start = self.span();
     let e = self.unary();
-    while (self.eatWord("as")) {
-      const target = self.typeName();
-      e = #Cast(Box.new(e), target);
+    while (self.eatKw("as")) {
+      const ty = self.tyPostfix();
+      e = self.expr_(#Cast { expr: Box.new(e), ty }, self.since(start));
     }
     e
   }
 
-  function unary(self: mut Self): Expr uses Fail<ParseError | LexError> {
+  function unary(self: mut Self): Expr uses Fail<Diagnostic> {
+    const start = self.span();
     if (self.at("!") || self.at("-") || self.at("~")) {
-      const op: String = match (self.tok()) { #Punct(p) => p.clone(), _ => "".toString() };
+      const op: String = match (self.tok()) { #Punct(p) => p.clone(), _ => String.new() };
       self.bump();
-      return #Unary(op, Box.new(self.unary()));
+      const operand = self.unary();
+      return self.expr_(#Unary { op, operand: Box.new(operand) }, self.since(start));
     }
-    if (self.eatWord("mut")) { return #LendMut(Box.new(self.unary())); }
-    if (self.eatWord("throw")) { return #Throw(Box.new(self.expr())); }
-    if (self.eatWord("yield")) { return #Yield(Box.new(self.expr())); }
-    if (self.eatWord("comptime")) { return self.unary(); }
-    if (self.eatWord("return")) {
-      if (self.at(";") || self.at("}") || self.at(",") || self.at(")")) { return #Return(#None); }
-      return #Return(#Some(Box.new(self.expr())));
+    if (self.eatKw("mut")) {
+      const inner = self.unary();
+      return self.expr_(#BorrowMut(Box.new(inner)), self.since(start));
+    }
+    if (self.eatKw("throw")) {
+      const inner = self.expr();
+      return self.expr_(#Throw(Box.new(inner)), self.since(start));
+    }
+    if (self.eatKw("yield")) {
+      const inner = self.expr();
+      return self.expr_(#Yield(Box.new(inner)), self.since(start));
+    }
+    // A prefix operator, like TypeScript's `await`: `n < comptime -(1 << b)`.
+    if (self.eatKw("comptime")) {
+      const inner = self.unary();
+      return self.expr_(#Comptime(Box.new(inner)), self.since(start));
+    }
+    if (self.eatKw("return")) {
+      const bare = self.at(";") || self.at("}") || self.at(",") || self.at(")");
+      const value: Option<Box<Expr>> = if (bare) { #None } else { #Some(Box.new(self.expr())) };
+      return self.expr_(#Return(value), self.since(start));
     }
     self.postfix()
   }
 
-  function postfix(self: mut Self): Expr uses Fail<ParseError | LexError> {
+  function postfix(self: mut Self): Expr uses Fail<Diagnostic> {
+    const start = self.span();
     let e = self.primary();
     while (true) {
       if (self.at(".") && self.atN(1, "[")) {
         self.bump();
-        self.skipBalanced();
-        e = #Unsupported("a field named by `comptime` code".toString());
+        self.bump();
+        const name = self.expr();
+        self.expect("]");
+        e = self.expr_(#FieldAt { target: Box.new(e), name: Box.new(name) }, self.since(start));
       } else if (self.at(".")) {
         self.bump();
-        const name: String = match (self.tok()) { #Ident(n) => n.clone(), _ => self.fail("a member name") };
-        self.bump();
-        e = #Field(Box.new(e), name);
+        const name = self.memberName();
+        e = self.expr_(#Field { target: Box.new(e), name }, self.since(start));
       } else if (self.at("(")) {
-        e = #Call(Box.new(e), self.args());
+        const args = self.args();
+        e = self.expr_(#Call { callee: Box.new(e), typeArgs: Vec.new(), args }, self.since(start));
       } else if (self.at("[")) {
         self.bump();
-        if (self.at("..")) {
-          self.bump();
-          const hi = if (self.at("]")) { #None } else { #Some(Box.new(self.binary(0))) };
-          self.expect("]");
-          e = #Slice(Box.new(e), #None, hi);
-          continue;
-        }
-        const index = self.binary(0);
-        if (self.eat("..")) {
-          const hi = if (self.at("]")) { #None } else { #Some(Box.new(self.binary(0))) };
-          self.expect("]");
-          e = #Slice(Box.new(e), #Some(Box.new(index)), hi);
-          continue;
-        }
+        const index = self.expr();
         self.expect("]");
-        e = #Index(Box.new(e), Box.new(index));
-      } else if (self.at("<") && self.genericCall()) {
-        // `f<T>(…)`: type arguments, which compiled code does not need.
-        self.skipBalancedAngles();
-        e = #Call(Box.new(e), self.args());
+        e = self.expr_(#Index { target: Box.new(e), index: Box.new(index) }, self.since(start));
+      } else if (self.at("<") && match (e.kind) { #Ident(_) | #Field { target: _ } => true, _ => false }) {
+        // TypeScript's rule: `f<…>(` is a generic call when the `<…>` parses as type arguments
+        // and is followed directly by `(`; otherwise `<` is less-than.
+        const saved = self.pos;
+        const typeArgs: Option<Vec<Type>> = try {
+          const ta = self.typeArgs();
+          if (self.at("(")) { #Some(ta) } else { #None }
+        } catch (_) { #None };
+        match (typeArgs) {
+          #Some(ta) => {
+            const args = self.args();
+            e = self.expr_(#Call { callee: Box.new(e), typeArgs: ta, args }, self.since(start));
+          }
+          #None => {
+            self.pos = saved;
+            return e;
+          }
+        }
       } else {
         return e;
       }
@@ -649,30 +983,11 @@ impl Parser {
     e
   }
 
-  // TypeScript's rule: `<` starts type arguments when its matching `>` is followed by `(`.
-  function genericCall(self: readonly Self): bool {
-    let depth: usize = 0;
-    let i = self.pos;
-    while (i < self.toks.len()) {
-      match (self.toks[i].tok) {
-        #Punct(p) => {
-          if (p == "<") { depth += 1; }
-          else if (p == ">") {
-            depth -= 1;
-            if (depth == 0) { return self.punctAt(i + 1, "("); }
-          } else if (p == ";" || p == "{" || p == "}" || p == "=>" || p == "&&" || p == "||" || p == "=" || p == ")") {
-            return false;
-          }
-        }
-        #Eof => return false,
-        _ => {},
-      }
-      i += 1;
-    }
-    false
+  function tagArgs(self: mut Self): TagArgs uses Fail<Diagnostic> {
+    if (self.at("(")) { #Tuple(self.args()) } else if (self.at("{")) { #Record(self.fieldInits()) } else { #None }
   }
 
-  function args(self: mut Self): Vec<Expr> uses Fail<ParseError | LexError> {
+  function args(self: mut Self): Vec<Expr> uses Fail<Diagnostic> {
     self.expect("(");
     let out: Vec<Expr> = Vec.new();
     while (!self.at(")")) {
@@ -684,65 +999,69 @@ impl Parser {
   }
 
   function isLambda(self: readonly Self): bool {
-    match (self.closeFrom(self.pos)) { #Some(c) => self.punctAt(c + 1, "=>"), #None => false }
+    match (self.closeFrom(self.pos)) { #Some(c) => Parser.isPunct(self.tokIndex(c + 1), "=>"), #None => false }
   }
 
-  function fieldInits(self: mut Self): Vec<[String, Expr]> uses Fail<ParseError | LexError> {
-    self.expect("{");
-    let fs: Vec<[String, Expr]> = Vec.new();
-    while (!self.at("}")) {
-      if (self.at("[") || self.atWord("comptime")) {
-        // An entry `comptime` code names or generates.
-        self.skipUntilEntryEnd();
-        fs.push(["$comptime".toString(), #Unsupported("a record entry generated by `comptime` code".toString())]);
-        continue;
-      }
-      const name = self.ident();
-      const value = if (self.eat(":")) { self.expr() } else { #Ident(name.clone()) };
-      fs.push([name, value]);
-      if (!self.eat(",")) { break; }
-    }
-    self.expect("}");
-    fs
-  }
-
-  function primary(self: mut Self): Expr uses Fail<ParseError | LexError> {
+  function primary(self: mut Self): Expr uses Fail<Diagnostic> {
+    const start = self.span();
     const t = self.tok().clone();
-    match (t) {
-      #Int(n) => { self.bump(); #Int(n) }
-      #Float(n) => { self.bump(); #Float(n) }
-      #Str(s) => { self.bump(); #Str(s) }
+    const kind: ExprKind = match (t) {
+      #Int(s) => { self.bump(); #Int(s) }
+      #Float(s) => { self.bump(); #Float(s) }
       #Byte(b) => { self.bump(); #Byte(b) }
-      #Template(pieces) => {
-        self.bump();
-        let parts: Vec<Part> = Vec.new();
-        for (const p of pieces) {
-          match (p) {
-            #Text(s) => parts.push(#Text(s.clone())),
-            #Code(code, _) => {
-              let sub = Parser { toks: lex(code), pos: 0 };
-              parts.push(#Expr(sub.expr()));
-            }
-          }
-        }
-        #Template(parts)
-      }
+      #Str(s) => { self.bump(); #Str(s) }
+      #Template(parts) => { self.bump(); #Template(self.template(parts)) }
+      #Kw(k) if k == "true" => { self.bump(); #Bool(true) }
+      #Kw(k) if k == "false" => { self.bump(); #Bool(false) }
+      #Kw(k) if k == "break" => { self.bump(); #Break }
+      #Kw(k) if k == "continue" => { self.bump(); #Continue }
       #Tag(name) => {
         self.bump();
-        if (self.at("(")) { #Tag(name, self.args()) }
-        else if (self.at("{") && self.recordAt(self.pos)) { #TagRecord(name, self.fieldInits()) }
-        else { #Tag(name, Vec.new()) }
+        #Tag { name, args: self.tagArgs() }
       }
       #Punct(p) if p == "#[" => {
-        self.skipComputedTag();
-        #Unsupported("a tag named by `comptime` code".toString())
+        self.bump();
+        const name = self.expr();
+        self.expect("]");
+        #TagAt { name: Box.new(name), args: self.tagArgs() }
+      }
+      #Ident(name) if !self.matchAt(self.pos) && !self.atRegion() && !self.atHandle() => {
+        // `Name { … }` is a struct literal; blocks never follow an expression directly.
+        if (isUpper(name.asStr()) && self.atN(1, "{")) {
+          let path: Vec<Ident> = Vec.new();
+          path.push(self.ident());
+          #Record { name: #Some(path), fields: self.fieldInits() }
+        } else {
+          self.bump();
+          #Ident(name)
+        }
+      }
+      #Punct(p) if p == "(" && self.isLambda() => {
+        const [params, unpack] = self.lambdaParams();
+        self.expect("=>");
+        const body: Expr = if (self.at("{")) {
+          let b = self.block();
+          let stmts = unpack;
+          for (const s of b.stmts.drain()) { stmts.push(s); }
+          b.stmts = stmts;
+          const span = b.span;
+          self.expr_(#Block(b), span)
+        } else {
+          const e = self.expr();
+          if (unpack.len() == 0) {
+            e
+          } else {
+            const span = e.span;
+            self.expr_(#Block({ stmts: unpack, tail: #Some(Box.new(e)), span }), span)
+          }
+        };
+        #Lambda { params, body: Box.new(body) }
       }
       #Punct(p) if p == "(" => {
-        if (self.isLambda()) { return self.lambda(); }
         self.bump();
         const e = self.expr();
         self.expect(")");
-        e
+        return e;
       }
       #Punct(p) if p == "[" => {
         self.bump();
@@ -754,203 +1073,391 @@ impl Parser {
         self.expect("]");
         #List(items)
       }
-      #Punct(p) if p == "{" => {
-        if (self.recordAt(self.pos) || self.atN(1, "}")) { return #Record(#None, self.fieldInits()); }
-        #Block(self.block())
-      }
-      #Ident(n) => {
-        if (n == "true") { self.bump(); return #Bool(true); }
-        if (n == "false") { self.bump(); return #Bool(false); }
-        if (n == "break") { self.bump(); return #Break; }
-        if (n == "continue") { self.bump(); return #Continue; }
-        if (n == "if") { return self.ifExpr(); }
-        if (n == "while") { return self.whileExpr(); }
-        if (n == "for") { return self.forExpr(); }
-        if (n == "try") { return self.tryExpr(); }
-        if (n == "unsafe") { self.bump(); return #Unsafe(self.block()); }
-        if (self.matchAt(0)) { return self.matchExpr(); }
-        if (n == "handle" && self.atN(1, "{")) { return self.handleExpr(); }
-        if (n == "region" && self.atN(1, "(")) {
-          // A region's arena is the garbage collector's in compiled code.
-          self.bump();
-          self.skipBalanced();
-          return #Block(self.block());
-        }
+      #Punct(p) if p == "{" => #Record { name: #None, fields: self.fieldInits() },
+      #Kw(k) if k == "if" => self.ifExpr(),
+      #Kw(k) if k == "while" => self.whileExpr(),
+      #Kw(k) if k == "for" => {
         self.bump();
-        // `Name { … }`: a struct literal.
-        if (n.startsWith(n.slice(0, 1).toUpperCase().asStr()) && n.slice(0, 1) != "_" && self.at("{") && (self.recordAt(self.pos) || self.atN(1, "}"))) {
-          return #Record(#Some(n), self.fieldInits());
-        }
-        #Ident(n)
+        self.expect("(");
+        const mutable = if (self.atKw("const")) { false } else if (self.atKw("let")) { true } else { self.error("`const` or `let`") };
+        self.bump();
+        const pat = self.patternOne();
+        self.expectWord("of");
+        const iter = self.expr();
+        self.expect(")");
+        #For { mutable, pat, iter: Box.new(iter), body: self.block() }
       }
-      _ => self.fail("an expression"),
-    }
-  }
-
-  // `#[e]`, `#[e](…)` or `#[e] { … }`.
-  function skipComputedTag(self: mut Self): void uses Fail<ParseError> {
-    self.skipBalanced();
-    if (self.at("(") || (self.at("{") && self.recordAt(self.pos))) { self.skipBalanced(); }
+      #Ident(w) if w == "match" && self.matchAt(self.pos) => {
+        self.bump();
+        const scrutinee = self.parenExpr();
+        self.expect("{");
+        const arms = self.armItems();
+        self.expect("}");
+        #Match { scrutinee: Box.new(scrutinee), arms }
+      }
+      #Kw(k) if k == "try" => {
+        self.bump();
+        const body = self.block();
+        self.expectKw("catch");
+        self.expect("(");
+        const pat = self.pattern();
+        self.expect(")");
+        #Try { body, pat, handler: self.block() }
+      }
+      #Ident(_) if self.atRegion() => {
+        self.bump();
+        self.expect("(");
+        const name = self.ident();
+        self.expect(")");
+        #Region { name, body: self.block() }
+      }
+      #Ident(_) if self.atHandle() => self.handleExpr(start),
+      #Kw(k) if k == "unsafe" => {
+        self.bump();
+        #Unsafe(self.block())
+      }
+      _ => self.error("an expression"),
+    };
+    self.expr_(kind, self.since(start))
   }
 
   // `handle { … } with A { … } with B { … }` handles `A` innermost, then `B`.
-  function handleExpr(self: mut Self): Expr uses Fail<ParseError | LexError> {
+  function handleExpr(self: mut Self, start: Span): ExprKind uses Fail<Diagnostic> {
     self.bump();
     let body = self.block();
-    let handled: Option<Expr> = #None;
+    let handled: Option<ExprKind> = #None;
     while (self.eatWord("with")) {
-      if (const #Some(inner) = handled.take()) {
-        body = { stmts: Vec.new(), tail: #Some(Box.new(inner)) };
+      if (const #Some(kind) = handled.take()) {
+        const span = self.since(start);
+        const inner = self.expr_(kind, span);
+        body = { stmts: Vec.new(), tail: #Some(Box.new(inner)), span };
       }
-      const effect = self.typeName();
+      const effect = self.tyPostfix();
       self.expect("{");
       let arms: Vec<HandlerArm> = Vec.new();
       while (!self.at("}")) {
-        const op = self.ident();
+        const op = self.memberName();
         self.expect("(");
-        let params: Vec<String> = Vec.new();
+        let params: Vec<Ident> = Vec.new();
         while (!self.at(")")) {
           params.push(self.ident());
           if (!self.eat(",")) { break; }
         }
         self.expect(")");
-        const resumes = if (self.eatWord("resumes")) { #Some(self.ident()) } else { #None };
+        const resumes: Option<Ident> = if (self.eatWord("resumes")) { #Some(self.ident()) } else { #None };
         self.expect("=>");
-        const armBody: Block = if (self.at("{")) { self.block() } else { { stmts: Vec.new(), tail: #Some(Box.new(self.expr())) } };
-        self.eat(",");
+        // An arm's body is a block or an expression, as in `match`.
+        const armBody: Block = if (self.at("{")) {
+          const b = self.block();
+          self.eat(",");
+          b
+        } else {
+          const e = self.expr();
+          const span = e.span;
+          self.eat(",");
+          { stmts: Vec.new(), tail: #Some(Box.new(e)), span }
+        };
         arms.push({ op, params, resumes, body: armBody });
       }
       self.expect("}");
-      handled = #Some(#Handle(replace(mut body, { stmts: Vec.new(), tail: #None }), effect, arms));
+      handled = #Some(#Handle { body: replace(mut body, { stmts: Vec.new(), tail: #None, span: start }), effect, arms });
     }
     match (handled) {
-      #Some(e) => e,
-      #None => self.fail("`with`"),
+      #Some(kind) => kind,
+      #None => self.error("`with`"),
     }
   }
 
-  function lambda(self: mut Self): Expr uses Fail<ParseError | LexError> {
-    self.expect("(");
-    let params: Vec<Pattern> = Vec.new();
-    while (!self.at(")")) {
-      params.push(self.patternOne());
-      if (self.eat(":")) { self.skipType(); }
-      if (!self.eat(",")) { break; }
-    }
-    self.expect(")");
-    self.expect("=>");
-    const body: Expr = if (self.at("{")) { #Block(self.block()) } else { self.expr() };
-    #Lambda(params, Box.new(body))
-  }
-
-  // `if (c) {…} else …`, and `if (const p = e) {…} else …`, which is a two-armed `match`.
-  function ifExpr(self: mut Self): Expr uses Fail<ParseError | LexError> {
-    self.bump();
-    if (self.at("(") && (self.word(1, "const") || self.word(1, "let"))) {
-      self.bump();
-      self.bump();
-      const pat = self.pattern();
-      self.expect("=");
-      const scrutinee = self.expr();
-      self.expect(")");
-      const then = self.block();
-      const otherwise: Expr = if (self.eatWord("else")) {
-        if (self.atWord("if")) { self.ifExpr() } else { #Block(self.block()) }
-      } else { #Block({ stmts: Vec.new(), tail: #None }) };
-      let arms: Vec<Arm> = Vec.new();
-      arms.push({ pat, guard: #None, body: #Block(then) });
-      arms.push({ pat: #Wild, guard: #None, body: otherwise });
-      return #Match(Box.new(scrutinee), arms);
-    }
-    self.expect("(");
-    const cond = self.expr();
-    self.expect(")");
-    const then = self.block();
-    const otherwise: Option<Box<Expr>> = if (self.eatWord("else")) {
-      #Some(Box.new(if (self.atWord("if")) { self.ifExpr() } else { #Block(self.block()) }))
-    } else { #None };
-    #If(Box.new(cond), then, otherwise)
-  }
-
-  // `while (c) {…}`, and `while (const p = e) {…}`: loop while `e` matches.
-  function whileExpr(self: mut Self): Expr uses Fail<ParseError | LexError> {
-    self.bump();
-    if (self.at("(") && (self.word(1, "const") || self.word(1, "let"))) {
-      self.bump();
-      self.bump();
-      const pat = self.pattern();
-      self.expect("=");
-      const scrutinee = self.expr();
-      self.expect(")");
-      const body = self.block();
-      let arms: Vec<Arm> = Vec.new();
-      arms.push({ pat, guard: #None, body: #Block(body) });
-      arms.push({ pat: #Wild, guard: #None, body: #Break });
-      let stmts: Vec<Stmt> = Vec.new();
-      stmts.push(#Expr(#Match(Box.new(scrutinee), arms)));
-      return #While(Box.new(#Bool(true)), { stmts, tail: #None });
-    }
-    self.expect("(");
-    const cond = self.expr();
-    self.expect(")");
-    #While(Box.new(cond), self.block())
-  }
-
-  function forExpr(self: mut Self): Expr uses Fail<ParseError | LexError> {
-    self.bump();
-    self.expect("(");
-    if (!self.eatWord("const") && !self.eatWord("let")) { self.fail("`const`"); }
-    const pat = self.pattern();
-    if (!self.eatWord("of")) { self.fail("`of`"); }
-    const iter = self.expr();
-    self.expect(")");
-    #For(pat, Box.new(iter), self.block())
-  }
-
-  function tryExpr(self: mut Self): Expr uses Fail<ParseError | LexError> {
-    self.bump();
-    const body = self.block();
-    if (!self.eatWord("catch")) { self.fail("`catch`"); }
-    self.expect("(");
-    const pat = self.pattern();
-    self.expect(")");
-    #Try(body, pat, self.block())
-  }
-
-  function matchExpr(self: mut Self): Expr uses Fail<ParseError | LexError> {
-    self.bump();
-    self.expect("(");
-    const scrutinee = self.expr();
-    self.expect(")");
-    self.expect("{");
-    let arms: Vec<Arm> = Vec.new();
+  // Match arms up to a closing `}`.
+  function armItems(self: mut Self): Vec<MatchArm> uses Fail<Diagnostic> {
+    let arms: Vec<MatchArm> = Vec.new();
     while (!self.at("}")) {
-      if (self.atWord("comptime")) {
-        // Arms `comptime` code generates.
-        self.bump();
-        while (!self.at("{")) { if (self.at("(")) { self.skipBalanced(); } else { self.bump(); } }
-        self.skipBalanced();
+      if (self.atKw("comptime") && (Parser.isKw(self.tokAt(1), "for") || Parser.isKw(self.tokAt(1), "if") || self.wordAt(1, "match"))) {
+        const start = self.span();
+        const g = self.generate((p) => p.armItems());
+        const span = self.since(start);
+        const pat = self.pat_(#Wild, span);
+        const body = self.expr_(#Break, span);
+        arms.push(MatchArm { pat, guard: #None, body, generate: #Some(Box.new(g)) });
         self.eat(",");
-        arms.push({ pat: #Unsupported("arms generated by `comptime` code".toString()), guard: #None, body: #Break });
         continue;
       }
       const pat = self.pattern();
-      const guard = if (self.eatWord("if")) { #Some(self.expr()) } else { #None };
+      const guard: Option<Expr> = if (self.eatKw("if")) { #Some(self.expr()) } else { #None };
       self.expect("=>");
-      if (self.at("{") && !self.recordAt(self.pos)) {
-        arms.push({ pat, guard, body: #Block(self.block()) });
+      if (self.at("{")) {
+        const b = self.block();
+        const span = b.span;
+        const body = self.expr_(#Block(b), span);
+        arms.push(MatchArm { pat, guard, body, generate: #None });
         self.eat(",");
       } else {
-        arms.push({ pat, guard, body: self.expr() });
+        const body = self.expr();
+        arms.push(MatchArm { pat, guard, body, generate: #None });
         if (!self.eat(",")) { break; }
       }
     }
+    arms
+  }
+
+  function parenExpr(self: mut Self): Expr uses Fail<Diagnostic> {
+    self.expect("(");
+    const e = self.expr();
+    self.expect(")");
+    e
+  }
+
+  // The head and block of `if (const|let Pat = e) { … }` or its `while`, if that is next.
+  function letHead(self: mut Self): Option<[Pattern, Expr, Block]> uses Fail<Diagnostic> {
+    if (!(self.at("(") && (Parser.isKw(self.tokAt(1), "const") || Parser.isKw(self.tokAt(1), "let")))) { return #None; }
+    self.bump();
+    const mutable = self.eatKw("let");
+    if (!mutable) { self.bump(); }
+    const pat = self.pattern();
+    self.expect("=");
+    const scrutinee = self.expr();
+    self.expect(")");
+    let body = self.block();
+    // `let` makes the names it binds mutable in the block.
+    if (mutable) {
+      let names: Vec<[String, Span]> = Vec.new();
+      boundNames(pat, mut names);
+      let stmts: Vec<Stmt> = Vec.new();
+      for (const [name, span] of names) {
+        const bind = self.pat_(#Bind(name.clone()), span);
+        const init = self.expr_(#Ident(name.clone()), span);
+        stmts.push(#Let { mutable: true, pat: bind, ty: #None, init, span });
+      }
+      for (const s of body.stmts.drain()) { stmts.push(s); }
+      body.stmts = stmts;
+    }
+    #Some([pat, scrutinee, body])
+  }
+
+  function ifExpr(self: mut Self): ExprKind uses Fail<Diagnostic> {
+    self.expectKw("if");
+    // `if (const #Some(x) = e) { … } else { … }` is a two-armed `match`.
+    if (const #Some([pat, scrutinee, then]) = self.letHead()) {
+      const start = self.span();
+      const otherwise: Expr = if (self.eatKw("else")) {
+        if (self.atKw("if")) {
+          const kind = self.ifExpr();
+          self.expr_(kind, self.since(start))
+        } else {
+          const b = self.block();
+          const span = b.span;
+          self.expr_(#Block(b), span)
+        }
+      } else {
+        self.expr_(#Block({ stmts: Vec.new(), tail: #None, span: start }), start)
+      };
+      const span = then.span;
+      const rest = self.pat_(#Wild, otherwise.span);
+      const thenExpr = self.expr_(#Block(then), span);
+      let arms: Vec<MatchArm> = Vec.new();
+      arms.push(MatchArm { pat, guard: #None, body: thenExpr, generate: #None });
+      arms.push(MatchArm { pat: rest, guard: #None, body: otherwise, generate: #None });
+      return #Match { scrutinee: Box.new(scrutinee), arms };
+    }
+    const cond = self.parenExpr();
+    const then = self.block();
+    const otherwise: Option<Box<Expr>> = if (self.eatKw("else")) {
+      const start = self.span();
+      const e: Expr = if (self.atKw("if")) {
+        const kind = self.ifExpr();
+        self.expr_(kind, self.since(start))
+      } else {
+        const b = self.block();
+        const span = b.span;
+        self.expr_(#Block(b), span)
+      };
+      #Some(Box.new(e))
+    } else { #None };
+    #If { cond: Box.new(cond), then, otherwise }
+  }
+
+  function whileExpr(self: mut Self): ExprKind uses Fail<Diagnostic> {
+    const kw = self.span();
+    self.bump();
+    // `while (const #Some(x) = e) { … }` loops while `e` matches.
+    if (const #Some([pat, scrutinee, body]) = self.letHead()) {
+      // Each piece has a span of its own, as the Rust prototype keys what it records by span.
+      const all: Span = { start: kw.start, end: body.span.end };
+      const end: Span = { start: body.span.end, end: body.span.end };
+      const head: Span = { start: scrutinee.span.start, end: body.span.end };
+      const bspan = body.span;
+      const thenExpr = self.expr_(#Block(body), bspan);
+      const wild = self.pat_(#Wild, end);
+      const brk = self.expr_(#Break, end);
+      let arms: Vec<MatchArm> = Vec.new();
+      arms.push(MatchArm { pat, guard: #None, body: thenExpr, generate: #None });
+      arms.push(MatchArm { pat: wild, guard: #None, body: brk, generate: #None });
+      const m = self.expr_(#Match { scrutinee: Box.new(scrutinee), arms }, head);
+      const yes = self.expr_(#Bool(true), kw);
+      let stmts: Vec<Stmt> = Vec.new();
+      stmts.push(#Expr(m));
+      return #While { cond: Box.new(yes), body: { stmts, tail: #None, span: all } };
+    }
+    const cond = self.parenExpr();
+    #While { cond: Box.new(cond), body: self.block() }
+  }
+
+  function fieldInits(self: mut Self): Vec<FieldInit> uses Fail<Diagnostic> {
+    self.expect("{");
+    const fields = self.initItems();
     self.expect("}");
-    #Match(Box.new(scrutinee), arms)
+    fields
+  }
+
+  // Record-literal entries up to a closing `}`.
+  function initItems(self: mut Self): Vec<FieldInit> uses Fail<Diagnostic> {
+    let fields: Vec<FieldInit> = Vec.new();
+    while (!self.at("}")) {
+      if (self.atKw("comptime") && (Parser.isKw(self.tokAt(1), "for") || Parser.isKw(self.tokAt(1), "if") || self.wordAt(1, "match"))) {
+        const start = self.span();
+        const g = self.generate((p) => p.initItems());
+        fields.push(FieldInit { name: mkIdent("", self.since(start)), value: #None, computed: #None, generate: #Some(Box.new(g)) });
+        self.eat(",");
+        continue;
+      }
+      const [name, computed] = self.entryName();
+      const value: Option<Expr> = if (computed.isSome() || self.at(":")) {
+        self.expect(":");
+        #Some(self.expr())
+      } else { #None };
+      fields.push(FieldInit { name, value, computed, generate: #None });
+      if (!self.eat(",")) { break; }
+    }
+    fields
+  }
+
+  function template(self: mut Self, parts: Vec<TemplatePart>): Vec<TemplatePiece> uses Fail<Diagnostic> {
+    let out: Vec<TemplatePiece> = Vec.new();
+    for (const part of parts) {
+      match (part) {
+        #Lit(s) => out.push(#Lit(s.clone())),
+        #Expr(span) => {
+          let sub = Parser { src: self.src, toks: lexRange(self.src, span.start, span.end), pos: 0, declarations: false, nextId: self.nextId };
+          const e = sub.expr();
+          sub.expectEof();
+          self.nextId = sub.nextId;
+          out.push(#Expr(e));
+        }
+      }
+    }
+    out
+  }
+
+  // ---- patterns ----
+
+  function pattern(self: mut Self): Pattern uses Fail<Diagnostic> {
+    const start = self.span();
+    const first = self.patternOne();
+    if (!self.at("|")) { return first; }
+    let alts: Vec<Pattern> = Vec.new();
+    alts.push(first);
+    while (self.eat("|")) { alts.push(self.patternOne()); }
+    self.pat_(#Or(alts), self.since(start))
+  }
+
+  function patternOne(self: mut Self): Pattern uses Fail<Diagnostic> {
+    const start = self.span();
+    const t = self.tok().clone();
+    const kind: PatternKind = match (t) {
+      #Ident(name) if name == "_" => { self.bump(); #Wild }
+      #Ident(name) if isUpper(name.asStr()) && self.atN(1, "{") => {
+        let path: Vec<Ident> = Vec.new();
+        path.push(self.ident());
+        #Record { name: #Some(path), fields: self.fieldPats() }
+      }
+      #Ident(name) => { self.bump(); #Bind(name) }
+      #Tag(name) => {
+        self.bump();
+        #Tag { name, args: self.tagPatArgs() }
+      }
+      #Punct(p) if p == "#[" => {
+        self.bump();
+        const name = self.expr();
+        self.expect("]");
+        #TagAt { name: Box.new(name), args: self.tagPatArgs() }
+      }
+      // A value computed by `comptime` code: `comptime f.name => …`.
+      #Kw(k) if k == "comptime" => {
+        const cstart = self.span();
+        self.bump();
+        const e = self.postfix();
+        #Lit(Box.new(self.expr_(#Comptime(Box.new(e)), self.since(cstart))))
+      }
+      #Punct(p) if p == "[" => {
+        self.bump();
+        let pats: Vec<Pattern> = Vec.new();
+        while (!self.at("]")) {
+          pats.push(self.pattern());
+          if (!self.eat(",")) { break; }
+        }
+        self.expect("]");
+        #Tuple(pats)
+      }
+      #Punct(p) if p == "{" => #Record { name: #None, fields: self.fieldPats() },
+      #Int(_) | #Float(_) | #Byte(_) | #Str(_) => #Lit(Box.new(self.primary())),
+      #Kw(k) if k == "true" || k == "false" => #Lit(Box.new(self.primary())),
+      #Punct(p) if p == "-" => #Lit(Box.new(self.unary())),
+      _ => self.error("a pattern"),
+    };
+    self.pat_(kind, self.since(start))
+  }
+
+  function tagPatArgs(self: mut Self): TagPatArgs uses Fail<Diagnostic> {
+    if (self.at("(")) {
+      self.bump();
+      let pats: Vec<Pattern> = Vec.new();
+      while (!self.at(")")) {
+        pats.push(self.pattern());
+        if (!self.eat(",")) { break; }
+      }
+      self.expect(")");
+      #Tuple(pats)
+    } else if (self.at("{")) {
+      #Record(self.fieldPats())
+    } else {
+      #None
+    }
+  }
+
+  function fieldPats(self: mut Self): Vec<[Ident, Option<Pattern>]> uses Fail<Diagnostic> {
+    self.expect("{");
+    let fields: Vec<[Ident, Option<Pattern>]> = Vec.new();
+    while (!self.at("}")) {
+      const name = self.ident();
+      const pat: Option<Pattern> = if (self.eat(":")) { #Some(self.pattern()) } else { #None };
+      fields.push([name, pat]);
+      if (!self.eat(",")) { break; }
+    }
+    self.expect("}");
+    fields
   }
 }
 
-export function parse(src: str): Module uses Fail<ParseError | LexError> {
-  let p = Parser { toks: lex(src), pos: 0 };
-  p.module()
+// The names a pattern binds, with where.
+export function boundNames(p: readonly Pattern, out: mut Vec<[String, Span]>): void {
+  match (p.kind) {
+    #Bind(n) => out.push([n.clone(), p.span]),
+    #Tuple(ps) | #Or(ps) => { for (const q of ps) { boundNames(q, mut out); } }
+    #Record { fields } => { boundFields(fields, mut out); }
+    #Tag { args } | #TagAt { args } => match (args) {
+      #None => {}
+      #Tuple(ps) => { for (const q of ps) { boundNames(q, mut out); } }
+      #Record(fs) => { boundFields(fs, mut out); }
+    },
+    _ => {}
+  }
+}
+
+function boundFields(fields: readonly Vec<[Ident, Option<Pattern>]>, out: mut Vec<[String, Span]>): void {
+  for (const [n, q] of fields) {
+    match (q) {
+      #Some(q) => boundNames(q, mut out),
+      #None => out.push([n.name.clone(), n.span]),
+    }
+  }
 }

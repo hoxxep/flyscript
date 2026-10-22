@@ -1,20 +1,26 @@
-// Flyscript's tokens. Keywords are identifiers the parser looks for, since most of Flyscript's
-// words are keywords only where the grammar expects them (§2.3).
+// Tokens. `from`, `of`, `with`, `resumes`, `row`, `view`, `private`, and the words that begin
+// `match`, `handle`, `region` and `effect`, are contextual and lex as identifiers: names like
+// `handle` and `match` are too common to reserve.
 
-export type Span = { start: usize; end: usize };
+import { Span, Diagnostic } from "./diag";
 
-// A template literal's pieces: text, and the source of each `${…}`, with where it starts.
-export enum Piece { #Text(String), #Code(String, usize) }
-impl Clone for Piece;
-impl Eq for Piece;
+export enum TemplatePart {
+  #Lit(String),
+  // The byte range of an interpolated expression's source.
+  #Expr(Span),
+}
+impl Clone for TemplatePart;
+impl Eq for TemplatePart;
 
 export enum Tok {
   #Ident(String),
+  #Kw(String),
   #Int(String),
   #Float(String),
+  #Byte(u8),
   #Str(String),
-  #Byte(i64),
-  #Template(Vec<Piece>),
+  #Template(Vec<TemplatePart>),
+  // `#Name`
   #Tag(String),
   #Punct(String),
   #Eof,
@@ -24,187 +30,293 @@ impl Eq for Tok;
 
 export type Token = { tok: Tok; span: Span };
 
-export type LexError = #LexError { at: usize; message: String };
+export const KEYWORDS: str[] = ["as", "break", "catch", "comptime", "const", "continue", "defer", "dyn", "else",
+  "enum", "export", "extends", "extern", "false", "for", "function", "if", "impl", "import", "interface", "let",
+  "mut", "once", "readonly", "return", "struct", "throw", "true", "try", "type", "unsafe", "uses", "while", "yield"];
 
-// Punctuation, longest first so that `...` is not read as `..` and `.`.
-const PUNCT: str[] = ["...", "#[", "=>", "==", "!=", "<=", ">=", "&&", "||", "+=", "-=", "*=", "/=", "%=", "..",
-  "{", "}", "(", ")", "[", "]", "<", ">", ",", ";", ":", ".", "=", "+", "-", "*", "/", "%", "!", "&", "|", "?", "@", "^", "~"];
+// Longest first. `>>` and `<<` are deliberately absent: the parser joins adjacent `<`/`>` so
+// that `Option<Ref<Scope>>` closes two type-argument lists.
+const PUNCT: str[] = ["...", "..", "=>", "==", "!=", "<=", ">=", "&&", "||", "+=", "-=", "*=", "/=", "%=", "&=", "|=",
+  "^=", "{", "}", "(", ")", "[", "]", "<", ">", ",", ";", ":", ".", "=", "+", "-", "*", "/", "%",
+  "&", "|", "^", "!", "?", "@", "~"];
 
-function isDigit(b: u8): bool { b >= b'0' && b <= b'9' }
-function isIdentStart(b: u8): bool { (b >= b'a' && b <= b'z') || (b >= b'A' && b <= b'Z') || b == b'_' || b == b'$' }
-function isIdentPart(b: u8): bool { isIdentStart(b) || isDigit(b) }
+export function lex(src: str): Vec<Token> uses Fail<Diagnostic> { lexRange(src, 0, src.len()) }
 
-// The character an escape stands for, after its backslash.
-function unescape(b: u8): str {
-  match (b) {
-    b'n' => "\n",
-    b't' => "\t",
-    b'r' => "\r",
-    b'0' => "\0",
-    b'\\' => "\\",
-    b'"' => "\"",
-    b'\'' => "'",
-    b'`' => "`",
-    b'$' => "$",
-    _ => "?",
+// Lexes `src[start..end]`, producing spans relative to the whole source.
+export function lexRange(src: str, start: usize, end: usize): Vec<Token> uses Fail<Diagnostic> {
+  let lx = Lexer { src, bytes: src.asBytes(), pos: start, end, out: Vec.new() };
+  lx.run();
+  replace(mut lx.out, Vec.new())
+}
+
+function isDigit(c: u8): bool { c >= b'0' && c <= b'9' }
+function isHex(c: u8): bool { isDigit(c) || (c >= b'a' && c <= b'f') || (c >= b'A' && c <= b'F') }
+// Bytes of non-ASCII characters count as letters.
+function isAlpha(c: u8): bool { (c >= b'a' && c <= b'z') || (c >= b'A' && c <= b'Z') || c >= 0x80 }
+function isSpace(c: u8): bool { c == b' ' || c == b'\n' || c == b'\t' || c == b'\r' }
+
+// Appends the UTF-8 encoding of a character.
+function pushChar(s: mut String, c: u32): void {
+  let bytes: Vec<u8> = Vec.new();
+  if (c < 0x80) {
+    bytes.push(c as u8);
+  } else if (c < 0x800) {
+    bytes.push((0xc0 | (c >> 6)) as u8);
+    bytes.push((0x80 | (c & 0x3f)) as u8);
+  } else if (c < 0x10000) {
+    bytes.push((0xe0 | (c >> 12)) as u8);
+    bytes.push((0x80 | ((c >> 6) & 0x3f)) as u8);
+    bytes.push((0x80 | (c & 0x3f)) as u8);
+  } else {
+    bytes.push((0xf0 | (c >> 18)) as u8);
+    bytes.push((0x80 | ((c >> 12) & 0x3f)) as u8);
+    bytes.push((0x80 | ((c >> 6) & 0x3f)) as u8);
+    bytes.push((0x80 | (c & 0x3f)) as u8);
+  }
+  match (String.fromUtf8(bytes)) {
+    #Some(t) => s.push(t.asStr()),
+    #None => {}
   }
 }
 
-export function lex(src: str): Vec<Token> uses Fail<LexError> {
-  const bytes = src.asBytes();
-  const n = bytes.len();
-  let out: Vec<Token> = Vec.new();
-  let i: usize = 0;
-  while (i < n) {
-    const b = bytes[i];
-    const start = i;
-    if (b == b' ' || b == b'\n' || b == b'\t' || b == b'\r') { i += 1; continue; }
-    // Comments.
-    if (b == b'/' && i + 1 < n && bytes[i + 1] == b'/') {
-      while (i < n && bytes[i] != b'\n') { i += 1; }
-      continue;
-    }
-    if (b == b'/' && i + 1 < n && bytes[i + 1] == b'*') {
-      i += 2;
-      while (i + 1 < n && !(bytes[i] == b'*' && bytes[i + 1] == b'/')) { i += 1; }
-      i += 2;
-      continue;
-    }
-    // A byte literal: `b'x'`.
-    if (b == b'b' && i + 1 < n && bytes[i + 1] == b'\'') {
-      i += 2;
-      let value: i64 = 0;
-      if (bytes[i] == b'\\') {
-        value = unescape(bytes[i + 1]).asBytes()[0] as i64;
-        i += 2;
-      } else {
-        value = bytes[i] as i64;
-        i += 1;
-      }
-      if (i >= n || bytes[i] != b'\'') { throw #LexError { at: start, message: `an unclosed byte literal` }; }
-      i += 1;
-      out.push({ tok: #Byte(value), span: { start, end: i } });
-      continue;
-    }
-    if (isIdentStart(b)) {
-      while (i < n && isIdentPart(bytes[i])) { i += 1; }
-      out.push({ tok: #Ident(src.slice(start, i).toString()), span: { start, end: i } });
-      continue;
-    }
-    if (isDigit(b)) {
-      let float = false;
-      if (b == b'0' && i + 1 < n && (bytes[i + 1] == b'x' || bytes[i + 1] == b'b')) {
-        i += 2;
-        while (i < n && (isIdentPart(bytes[i]))) { i += 1; }
-      } else {
-        while (i < n && (isDigit(bytes[i]) || bytes[i] == b'_')) { i += 1; }
-        // A fraction, but not a range: `1..n` is an integer and `..`.
-        if (i + 1 < n && bytes[i] == b'.' && isDigit(bytes[i + 1])) {
-          float = true;
-          i += 1;
-          while (i < n && isDigit(bytes[i])) { i += 1; }
-        }
-        if (i < n && (bytes[i] == b'e' || bytes[i] == b'E')) {
-          float = true;
-          i += 1;
-          if (i < n && (bytes[i] == b'+' || bytes[i] == b'-')) { i += 1; }
-          while (i < n && isDigit(bytes[i])) { i += 1; }
-        }
-      }
-      const text = src.slice(start, i).replaceAll("_", "");
-      out.push({ tok: if (float) { #Float(text) } else { #Int(text) }, span: { start, end: i } });
-      continue;
-    }
-    if (b == b'"') {
-      i += 1;
-      let text = String.new();
-      let run = i;
-      while (i < n && bytes[i] != b'"') {
-        if (bytes[i] == b'\\') {
-          text.push(src.slice(run, i));
-          text.push(unescape(bytes[i + 1]));
-          i += 2;
-          run = i;
-        } else {
-          i += 1;
-        }
-      }
-      if (i >= n) { throw #LexError { at: start, message: `an unclosed string` }; }
-      text.push(src.slice(run, i));
-      i += 1;
-      out.push({ tok: #Str(text), span: { start, end: i } });
-      continue;
-    }
-    if (b == b'`') {
-      i += 1;
-      let pieces: Vec<Piece> = Vec.new();
-      let text = String.new();
-      let run = i;
-      while (i < n && bytes[i] != b'`') {
-        if (bytes[i] == b'\\') {
-          text.push(src.slice(run, i));
-          text.push(unescape(bytes[i + 1]));
-          i += 2;
-          run = i;
-        } else if (bytes[i] == b'$' && i + 1 < n && bytes[i + 1] == b'{') {
-          text.push(src.slice(run, i));
-          pieces.push(#Text(replace(mut text, String.new())));
-          i += 2;
-          const codeStart = i;
-          i = matchingBrace(src, i);
-          pieces.push(#Code(src.slice(codeStart, i).toString(), codeStart));
-          i += 1;
-          run = i;
-        } else {
-          i += 1;
-        }
-      }
-      if (i >= n) { throw #LexError { at: start, message: `an unclosed template` }; }
-      text.push(src.slice(run, i));
-      pieces.push(#Text(text));
-      i += 1;
-      out.push({ tok: #Template(pieces), span: { start, end: i } });
-      continue;
-    }
-    if (b == b'#' && i + 1 < n && isIdentStart(bytes[i + 1])) {
-      i += 1;
-      while (i < n && isIdentPart(bytes[i])) { i += 1; }
-      out.push({ tok: #Tag(src.slice(start + 1, i).toString()), span: { start, end: i } });
-      continue;
-    }
-    match (PUNCT.iter().find((p) => src.slice(i, n).startsWith(p))) {
-      #Some(p) => {
-        i += p.len();
-        out.push({ tok: #Punct(p.toString()), span: { start, end: i } });
-      }
-      #None => throw #LexError { at: i, message: `an unexpected character` },
-    }
-  }
-  out.push({ tok: #Eof, span: { start: n, end: n } });
-  out
-}
+view struct Lexer { src: str; bytes: readonly u8[]; pos: usize; end: usize; out: Vec<Token> }
 
-// The position of the `}` that closes a `${`, skipping strings and nested braces inside it.
-function matchingBrace(src: str, from: usize): usize {
-  const bytes = src.asBytes();
-  let depth: usize = 0;
-  let i = from;
-  while (i < bytes.len()) {
-    const b = bytes[i];
-    if (b == b'"' || b == b'`') {
-      // A string or nested template inside the expression.
-      i += 1;
-      while (i < bytes.len() && bytes[i] != b) {
-        if (bytes[i] == b'\\') { i += 1; }
-        i += 1;
-      }
-    } else if (b == b'{') {
-      depth += 1;
-    } else if (b == b'}') {
-      if (depth == 0) { return i; }
-      depth -= 1;
-    }
-    i += 1;
+impl Lexer {
+  // The byte at the position, `0` at the end.
+  function peek(self: readonly Self): u8 { self.peekAt(0) }
+  function peekAt(self: readonly Self, n: usize): u8 {
+    if (self.pos + n < self.end) { self.bytes[self.pos + n] } else { 0 }
   }
-  i
+  function startsWith(self: readonly Self, p: str): bool {
+    const pb = p.asBytes();
+    if (self.pos + pb.len() > self.end) { return false; }
+    for (const i of 0..pb.len()) { if (self.bytes[self.pos + i] != pb[i]) { return false; } }
+    true
+  }
+
+  function err(self: readonly Self, start: usize, message: str): Diagnostic {
+    #Diagnostic { span: { start, end: max(self.pos, start + 1) }, message: message.toString() }
+  }
+
+  function push(self: mut Self, tok: Tok, start: usize): void {
+    self.out.push({ tok, span: { start, end: self.pos } });
+  }
+
+  function run(self: mut Self): void uses Fail<Diagnostic> {
+    while (true) {
+      self.skipTrivia();
+      const start = self.pos;
+      if (self.pos >= self.end) {
+        self.push(#Eof, start);
+        return;
+      }
+      const c = self.peek();
+      if (c == b'b' && self.peekAt(1) == b'\'') {
+        self.pos += 2;
+        const b = self.byteChar(start);
+        if (self.peek() != b'\'') { throw self.err(start, "unterminated byte literal"); }
+        self.pos += 1;
+        self.push(#Byte(b), start);
+      } else if (isAlpha(c) || c == b'_') {
+        const word = self.word();
+        const tok: Tok = if (KEYWORDS.includes(word.asStr())) { #Kw(word) } else { #Ident(word) };
+        self.push(tok, start);
+      } else if (c == b'#' && self.peekAt(1) == b'[') {
+        self.pos += 2;
+        self.push(#Punct("#[".toString()), start);
+      } else if (c == b'#') {
+        self.pos += 1;
+        if (!(isAlpha(self.peek()) || self.peek() == b'_')) { throw self.err(start, "expected a tag name after `#`"); }
+        const name = self.word();
+        self.push(#Tag(name), start);
+      } else if (isDigit(c)) {
+        const tok = self.number();
+        self.push(tok, start);
+      } else if (c == b'"') {
+        self.pos += 1;
+        const s = self.string(start, b'"');
+        self.push(#Str(s), start);
+      } else if (c == b'`') {
+        self.pos += 1;
+        const parts = self.template(start);
+        self.push(#Template(parts), start);
+      } else {
+        match (PUNCT.iter().find((p) => self.startsWith(p))) {
+          #Some(p) => {
+            self.pos += p.len();
+            self.push(#Punct(p.toString()), start);
+          }
+          #None => {
+            self.pos += 1;
+            throw self.err(start, `unexpected character \`${self.src.slice(start, start + 1)}\``);
+          }
+        }
+      }
+    }
+  }
+
+  function skipTrivia(self: mut Self): void uses Fail<Diagnostic> {
+    while (true) {
+      const c = self.peek();
+      if (self.pos < self.end && isSpace(c)) {
+        self.pos += 1;
+      } else if (c == b'/' && self.peekAt(1) == b'/') {
+        while (self.pos < self.end && self.peek() != b'\n') { self.pos += 1; }
+      } else if (c == b'/' && self.peekAt(1) == b'*') {
+        const start = self.pos;
+        self.pos += 2;
+        while (!(self.peek() == b'*' && self.peekAt(1) == b'/')) {
+          if (self.pos >= self.end) { throw self.err(start, "unterminated block comment"); }
+          self.pos += 1;
+        }
+        self.pos += 2;
+      } else {
+        return;
+      }
+    }
+  }
+
+  function word(self: mut Self): String {
+    const start = self.pos;
+    while (self.pos < self.end && (isAlpha(self.peek()) || isDigit(self.peek()) || self.peek() == b'_')) { self.pos += 1; }
+    self.src.slice(start, self.pos).toString()
+  }
+
+  function number(self: mut Self): Tok {
+    const start = self.pos;
+    if (self.peek() == b'0' && (self.peekAt(1) == b'x' || self.peekAt(1) == b'b' || self.peekAt(1) == b'o')) {
+      self.pos += 2;
+      while (self.pos < self.end && (isHex(self.peek()) || self.peek() == b'_')) { self.pos += 1; }
+      return #Int(self.src.slice(start, self.pos).replaceAll("_", ""));
+    }
+    self.digits();
+    let float = false;
+    // `0..8` is a range, not the float `0.` followed by `.8`.
+    if (self.peek() == b'.' && isDigit(self.peekAt(1))) {
+      float = true;
+      self.pos += 1;
+      self.digits();
+    }
+    const e = self.peek();
+    const sign = self.peekAt(1) == b'+' || self.peekAt(1) == b'-';
+    if ((e == b'e' || e == b'E') && (isDigit(self.peekAt(1)) || (sign && isDigit(self.peekAt(2))))) {
+      float = true;
+      self.pos += 1;
+      if (self.peek() == b'+' || self.peek() == b'-') { self.pos += 1; }
+      self.digits();
+    }
+    const text = self.src.slice(start, self.pos).replaceAll("_", "");
+    if (float) { #Float(text) } else { #Int(text) }
+  }
+
+  function digits(self: mut Self): void {
+    while (self.pos < self.end && (isDigit(self.peek()) || self.peek() == b'_')) { self.pos += 1; }
+  }
+
+  // The character an escape stands for, after its backslash.
+  function escape(self: mut Self, start: usize): u32 uses Fail<Diagnostic> {
+    const c = self.peek();
+    self.pos += 1;
+    if (c == b'n') { return 10; }
+    if (c == b't') { return 9; }
+    if (c == b'r') { return 13; }
+    if (c == b'0') { return 0; }
+    if (c == b'\\' || c == b'\'' || c == b'"' || c == b'`' || c == b'$') { return c as u32; }
+    if (c == b'u' && self.peek() == b'{') {
+      self.pos += 1;
+      let v: u32 = 0;
+      let n: usize = 0;
+      while (self.pos < self.end && self.peek() != b'}') {
+        const h = self.peek();
+        if (!isHex(h) || n == 6) { throw self.err(start, "invalid unicode escape"); }
+        const d = if (isDigit(h)) { h - b'0' } else if (h >= b'a') { h - b'a' + 10 } else { h - b'A' + 10 };
+        v = v * 16 + (d as u32);
+        n += 1;
+        self.pos += 1;
+      }
+      self.pos += 1;
+      if (n == 0 || v > 0x10ffff || (v >= 0xd800 && v < 0xe000)) { throw self.err(start, "invalid unicode escape"); }
+      return v;
+    }
+    throw self.err(start, "invalid escape sequence")
+  }
+
+  function byteChar(self: mut Self, start: usize): u8 uses Fail<Diagnostic> {
+    if (self.pos >= self.end) { throw self.err(start, "unterminated byte literal"); }
+    const c = self.peek();
+    self.pos += 1;
+    const v: u32 = if (c == b'\\') { self.escape(start) } else { c as u32 };
+    if (v > 0x7f) { throw self.err(start, "byte literal must be ASCII"); }
+    v as u8
+  }
+
+  function string(self: mut Self, start: usize, close: u8): String uses Fail<Diagnostic> {
+    let s = String.new();
+    let run = self.pos;
+    while (true) {
+      if (self.pos >= self.end) { throw self.err(start, "unterminated string"); }
+      const c = self.peek();
+      if (c == close) {
+        s.push(self.src.slice(run, self.pos));
+        self.pos += 1;
+        return s;
+      }
+      if (c == b'\\') {
+        s.push(self.src.slice(run, self.pos));
+        self.pos += 1;
+        pushChar(mut s, self.escape(start));
+        run = self.pos;
+      } else {
+        self.pos += 1;
+      }
+    }
+    s
+  }
+
+  function template(self: mut Self, start: usize): Vec<TemplatePart> uses Fail<Diagnostic> {
+    let parts: Vec<TemplatePart> = Vec.new();
+    let lit = String.new();
+    let run = self.pos;
+    while (true) {
+      if (self.pos >= self.end) { throw self.err(start, "unterminated template literal"); }
+      const c = self.peek();
+      if (c == b'`') {
+        lit.push(self.src.slice(run, self.pos));
+        self.pos += 1;
+        break;
+      }
+      if (c == b'\\') {
+        lit.push(self.src.slice(run, self.pos));
+        self.pos += 1;
+        pushChar(mut lit, self.escape(start));
+        run = self.pos;
+      } else if (c == b'$' && self.peekAt(1) == b'{') {
+        lit.push(self.src.slice(run, self.pos));
+        self.pos += 2;
+        parts.push(#Lit(replace(mut lit, String.new())));
+        const from = self.pos;
+        self.skipBalanced(start);
+        parts.push(#Expr({ start: from, end: self.pos - 1 }));
+        run = self.pos;
+      } else {
+        self.pos += 1;
+      }
+    }
+    parts.push(#Lit(lit));
+    parts
+  }
+
+  // Skips to just past the `}` closing an interpolation, honouring nested braces and strings.
+  function skipBalanced(self: mut Self, start: usize): void uses Fail<Diagnostic> {
+    let depth: usize = 1;
+    while (depth > 0) {
+      if (self.pos >= self.end) { throw self.err(start, "unterminated template interpolation"); }
+      const c = self.peek();
+      self.pos += 1;
+      if (c == b'{') { depth += 1; }
+      else if (c == b'}') { depth -= 1; }
+      else if (c == b'"' || c == b'\'') { self.string(start, c); }
+      else if (c == b'`') { self.template(start); }
+    }
+  }
 }

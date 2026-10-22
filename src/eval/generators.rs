@@ -257,6 +257,7 @@ pub fn items_of(_it: &mut Interp, v: &Value) -> Result<Pull, Ctl> {
         }
         other => match other.deref() {
             Value::List(vs) | Value::Tuple(vs) => Ok(snapshot(vs)),
+            Value::Text(s) => Ok(snapshot(s.bytes().map(|b| Value::Int(b as i128)).collect())),
             Value::Native("Gen", id) => Ok(Box::new(move |it| next(it, id))),
             Value::Cell(c) => {
                 let items = match &*c.lock().expect("cell") {

@@ -2,14 +2,15 @@
 // `entry`, and every module it imports, to one JavaScript file `out` that starts with the
 // runtime from `runtime` and ends by calling the entry's `main` with the command line.
 
-import { parse, ParseError } from "./parse";
-import { LexError } from "./lex";
-import { Module, Item } from "./ast";
-import { survey, module, quote, GenError } from "./gen";
+import { Diagnostic, render } from "./diag";
+import { parseModule } from "./parse";
+import { Module, Item, ItemKind } from "./ast";
+import { survey, module } from "./gen";
 import { File, println, writeFile } from "std/io";
 import { HashMap } from "std/collections";
 
-type CompileError = ParseError | LexError | GenError | IoErr | #Import { path: String };
+// What stops a compilation: a diagnostic in a module, or a module that cannot be read.
+type Stop = #Failed { path: String; diag: Diagnostic } | #Unreadable { path: String } | #Cycle { path: String };
 
 // The directory a path is in, with its final `/`.
 function dirOf(path: str): str {
@@ -36,23 +37,27 @@ function join(dir: str, rel: str): String {
   if (absolute) { `/${joined}` } else { joined }
 }
 
-struct Loader { paths: Vec<String>; modules: Vec<Module>; loading: Vec<String> }
+struct Loader { paths: Vec<String>; sources: Vec<String>; modules: Vec<Module>; loading: Vec<String> }
 
 impl Loader {
   // Loads a module after the modules it imports, once.
-  function load(self: mut Self, path: str): usize uses Io, Fail<CompileError> {
+  function load(self: mut Self, path: str): usize uses Io, Fail<Stop> {
     if (const #Some(i) = self.paths.iter().findIndex((p) => p.asStr() == path)) { return i; }
-    if (self.loading.iter().some((p) => p.asStr() == path)) { throw #Import { path: path.toString() }; }
+    if (self.loading.iter().some((p) => p.asStr() == path)) { throw #Cycle { path: path.toString() }; }
     self.loading.push(path.toString());
-    let f = File.open(path);
-    const m = parse(f.readText().asStr());
+    const src: String = try {
+      let f = File.open(path);
+      f.readText()
+    } catch (_) { throw #Unreadable { path: path.toString() } };
+    const m = try { parseModule(src.asStr()) } catch (d) { throw #Failed { path: path.toString(), diag: d } };
     for (const item of m.items) {
-      if (const #Import(_, from) = item) {
+      if (const #Import { names: _, from } = item.kind) {
         if (!from.startsWith("std/")) { self.load(join(dirOf(path), `${from}.fly`.asStr()).asStr()); }
       }
     }
     self.loading.pop();
     self.paths.push(path.toString());
+    self.sources.push(src);
     self.modules.push(m);
     self.paths.len() - 1
   }
@@ -62,29 +67,34 @@ impl Loader {
   }
 }
 
+function isUpper(s: str): bool {
+  const b = s.asBytes();
+  b.len() > 0 && b[0] >= b'A' && b[0] <= b'Z'
+}
+
 // What a module can see by name: its own functions and constants, and what it imports.
 function namesOf(l: readonly Loader, k: usize): HashMap<String, String> {
   let names: HashMap<String, String> = HashMap.new();
   for (const item of l.modules[k].items) {
-    match (item) {
-      #Function(f) => { names.insert(f.name.clone(), `m${k}$${f.name}`); }
-      #Const(name, _, _) => { names.insert(name.clone(), `m${k}$${name}`); }
-      #Import(imported, from) => {
+    match (item.kind) {
+      #Function(f) => { names.insert(f.sig.name.name.clone(), `m${k}$${f.sig.name.name}`); }
+      #Const { name, ty: _, value: _ } => { names.insert(name.name.clone(), `m${k}$${name.name}`); }
+      #Import { names: imported, from } => {
         if (from.startsWith("std/")) {
           // The standard library is the runtime's; its types are known by name.
           for (const [name, local] of imported) {
-            const b = name.asBytes()[0];
-            if (!(b >= b'A' && b <= b'Z')) { names.insert(local.clone(), `$rt.${name}`); }
+            if (!isUpper(name.name.asStr())) { names.insert(local.name.clone(), `$rt.${name.name}`); }
           }
         } else {
           const j = l.index(join(dirOf(l.paths[k]), `${from}.fly`.asStr()).asStr());
           for (const [name, local] of imported) {
             for (const other of l.modules[j].items) {
-              match (other) {
-                #Function(f) if f.name == name => { names.insert(local.clone(), `m${j}$${name}`); }
-                #Const(c, _, _) if c == name => { names.insert(local.clone(), `m${j}$${name}`); }
-                _ => {}
-              }
+              const declares = match (other.kind) {
+                #Function(f) => f.sig.name.name == name.name,
+                #Const { name: c, ty: _, value: _ } => c.name == name.name,
+                _ => false,
+              };
+              if (declares) { names.insert(local.name.clone(), `m${j}$${name.name}`); }
             }
           }
         }
@@ -95,18 +105,24 @@ function namesOf(l: readonly Loader, k: usize): HashMap<String, String> {
   names
 }
 
-function compile(entry: str, out: str, runtime: str): void uses Io, Fail<CompileError> {
-  let l = Loader { paths: Vec.new(), modules: Vec.new(), loading: Vec.new() };
+function compile(entry: str, out: str, runtime: str): void uses Io, Fail<Stop> {
+  let l = Loader { paths: Vec.new(), sources: Vec.new(), modules: Vec.new(), loading: Vec.new() };
   const main = l.load(entry);
   const world = survey(l.modules);
-  let rt = File.open(runtime);
-  let js = rt.readText();
+  const rt: String = try {
+    let f = File.open(runtime);
+    f.readText()
+  } catch (_) { throw #Unreadable { path: runtime.toString() } };
+  let js = rt;
   for (const k of 0..l.modules.len()) {
     js.push(`\n// ${l.paths[k]}\n`);
-    js.push(module(l.modules[k], `m${k}$`.asStr(), namesOf(l, k), world.clone()).asStr());
+    const code = try {
+      module(l.modules[k], `m${k}$`.asStr(), namesOf(l, k), world.clone())
+    } catch (d) { throw #Failed { path: l.paths[k].clone(), diag: d } };
+    js.push(code.asStr());
   }
   js.push(`\n$rt.start(m${main}$main);\n`);
-  writeFile(out, js.asStr());
+  try { writeFile(out, js.asStr()); } catch (_) { throw #Unreadable { path: out.toString() } };
 }
 
 export function main(entry: str, out: str, runtime: str): void uses Io {
@@ -114,11 +130,15 @@ export function main(entry: str, out: str, runtime: str): void uses Io {
     compile(entry, out, runtime);
   } catch (e) {
     match (e) {
-      #ParseError { at, message } => println(`parse error at ${at}: ${message}`),
-      #LexError { at, message } => println(`lex error at ${at}: ${message}`),
-      #GenError { message } => println(`error: ${message}`),
-      #Import { path } => println(`error: ${path} imports itself`),
-      _ => println("error: cannot read a file"),
+      #Failed { path, diag } => {
+        const src: String = try {
+          let f = File.open(path.asStr());
+          f.readText()
+        } catch (_) { String.new() };
+        println(render(diag, path.asStr(), src.asStr()).asStr());
+      }
+      #Unreadable { path } => println(`error: cannot read or write ${path}`),
+      #Cycle { path } => println(`error: ${path} imports itself`),
     }
   }
 }

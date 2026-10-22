@@ -1,13 +1,15 @@
 // JavaScript from Flyscript's syntax tree. The output runs on `runtime.js`, which gives values
 // their representation: integers are BigInts and floats numbers, strings hold one byte per
 // character, structs are objects carrying `$t`, tags objects carrying `$tag` and their payload
-// in `$`. Code generation needs no types: what depends on one (a method's impl, `==`, display)
-// is decided by the runtime from the value.
+// in `$`. What depends on a type (a method's impl, `==`, display) is decided by the runtime from
+// the value.
 
-import { Type, Pattern, Part, Param, Expr, Arm, HandlerArm, Stmt, Block, Fn, Item, Module } from "./ast";
+import { Span, Diagnostic } from "./diag";
+import {
+  Ident, Module, Item, ItemKind, Field, TagDecl, TagPayload, ImplDecl, Method, FnSig, FnDecl, Param, Type, TypeKind,
+  RowItem, Block, Stmt, Expr, ExprKind, FieldInit, TagArgs, TemplatePiece, MatchArm, Pattern, PatternKind, TagPatArgs,
+} from "./ast";
 import { HashMap, HashSet } from "std/collections";
-
-export type GenError = #GenError { message: String };
 
 // Where a statement's value goes.
 enum Dest { #Discard, #Return, #Assign(String) }
@@ -39,7 +41,9 @@ export function quote(s: str): String {
     const b = bytes[i];
     const plain = b >= 0x20 && b < 0x7f && b != b'"' && b != b'\\';
     if (!plain) {
-      out.push(s.slice(run, i));
+      // Every byte of a character beyond ASCII is escaped, so runs of plain bytes never start
+      // inside one; an empty run may.
+      if (run < i) { out.push(s.slice(run, i)); }
       if (b == b'"') { out.push("\\\""); }
       else if (b == b'\\') { out.push("\\\\"); }
       else if (b == b'\n') { out.push("\\n"); }
@@ -63,13 +67,36 @@ function mangle(n: str): String {
   if (RESERVED.includes(n)) { `${n}$` } else { n.toString() }
 }
 
+// The name an impl's methods are registered under: a type's last path segment.
+export function typeName(t: readonly Type): String {
+  match (t.kind) {
+    #Path { segments, args: _ } => segments[segments.len() - 1].name.clone(),
+    #Array { elem: _, len } => if (len.isSome()) { "$array".toString() } else { "$slice".toString() },
+    #Mut(x) | #Readonly(x) | #Ptr(x) => typeName(x),
+    #Tuple(_) => "$tuple".toString(),
+    _ => "$other".toString(),
+  }
+}
+
+// Whether a function performs `Yield`: it is then a generator.
+export function isGenerator(sig: readonly FnSig): bool {
+  match (sig.uses) {
+    #Some(row) => row.iter().some((item) => match (item) {
+      #Effect(t) => typeName(t) == "Yield",
+      #Spread(_) => false,
+    }),
+    #None => false,
+  }
+}
+
 // What every module's code consults: the program's types and which functions are generators.
 export struct World {
   types: HashSet<String>;
   // Each struct's fields, in the order they are declared.
   structs: HashMap<String, Vec<String>>;
-  // The JavaScript names of the generator functions, free and methods (`T$m`).
+  // The JavaScript names of the generator functions.
   generators: HashSet<String>;
+  // The names of generator methods.
   genMethods: HashSet<String>;
 }
 impl Clone for World;
@@ -82,12 +109,20 @@ export function survey(modules: readonly Module[]): World {
   let genMethods: HashSet<String> = HashSet.new();
   for (const [k, m] of modules.iter().enumerate()) {
     for (const item of m.items) {
-      match (item) {
-        #Struct(name, fields, _) => { types.insert(name.clone()); structs.insert(name.clone(), fields.clone()); }
-        #Enum(name, _, _) | #Alias(name, _) | #Interface(name, _, _) | #Effect(name, _) => { types.insert(name.clone()); }
-        #Function(f) => { if (f.generator) { generators.insert(`m${k}$${f.name}`); } }
-        #Impl(_, _, methods) => {
-          for (const f of methods) { if (f.generator) { genMethods.insert(f.name.clone()); } }
+      match (item.kind) {
+        #Struct(s) => {
+          types.insert(s.name.name.clone());
+          let fields: Vec<String> = Vec.new();
+          if (const #Some(fs) = s.fields) { for (const f of fs) { fields.push(f.name.name.clone()); } }
+          structs.insert(s.name.name.clone(), fields);
+        }
+        #Enum(e) => { types.insert(e.name.name.clone()); }
+        #TypeAlias(a) => { types.insert(a.name.name.clone()); }
+        #Interface(i) => { types.insert(i.name.name.clone()); }
+        #Effect(e) => { types.insert(e.name.name.clone()); }
+        #Function(f) => { if (isGenerator(f.sig)) { generators.insert(`m${k}$${f.sig.name.name}`); } }
+        #Impl(imp) => {
+          for (const m of imp.methods) { if (isGenerator(m.decl.sig)) { genMethods.insert(m.decl.sig.name.name.clone()); } }
         }
         _ => {}
       }
@@ -112,8 +147,11 @@ impl Gen {
     Gen { out: String.new(), indent: 0, tmp: 0, scopes: Vec.new(), names, world, inGenerator: false }
   }
 
-  function fail(self: readonly Self, message: str): never uses Fail<GenError> {
-    throw #GenError { message: message.toString() }
+  function fail(self: readonly Self, span: Span, message: str): never uses Fail<Diagnostic> {
+    throw #Diagnostic { span, message: message.toString() }
+  }
+  function unsupported(self: readonly Self, span: Span, what: str): never uses Fail<Diagnostic> {
+    self.fail(span, `${what} is not supported by this compiler yet`)
   }
 
   function line(self: mut Self, s: str): void {
@@ -127,6 +165,13 @@ impl Gen {
     `$${self.tmp}`
   }
 
+  // A value kept in a temporary, so that what runs next cannot change it.
+  function save(self: mut Self, v: String): String {
+    const t = self.fresh();
+    self.line(`const ${t} = ${v};`);
+    t
+  }
+
   // ---- scopes ----
 
   function push(self: mut Self): void { self.scopes.push(HashMap.new()); }
@@ -136,7 +181,7 @@ impl Gen {
   // JavaScript does not let a block declare a name twice).
   function declare(self: mut Self, name: str, isRef: bool): String {
     const top = self.scopes.len() - 1;
-    let js = mangle(name);
+    let js = if (name == "_") { self.fresh() } else { mangle(name) };
     if (self.scopes[top].has(name)) { js = `${js}$${self.fresh()}`; }
     self.scopes[top].insert(name.toString(), { js: js.clone(), isRef });
     js
@@ -151,8 +196,8 @@ impl Gen {
     #None
   }
 
-  // A type's name, where a value's could be: types are capitalized, constants are not
-  // values a module names (`BINARY` is in `names`), and locals shadow both.
+  // A type's name, where a value's could be: types are capitalized, constants are values a
+  // module names (`BINARY` is in `names`), and locals shadow both.
   function isType(self: readonly Self, name: str): bool {
     if (self.local(name).isSome() || self.names.has(name)) { return false; }
     const b = name.asBytes()[0];
@@ -162,29 +207,42 @@ impl Gen {
   // ---- whether an expression needs statements ----
 
   function simple(e: readonly Expr): bool {
-    match (e) {
-      #Int(_) | #Float(_) | #Str(_) | #Byte(_) | #Bool(_) | #Ident(_) | #Lambda(_, _) => true,
-      #Template(parts) => parts.iter().every((p) => match (p) { #Text(_) => true, #Expr(x) => Gen.simple(x) }),
-      #Field(t, _) | #Unary(_, t) | #Cast(t, _) | #LendMut(t) | #Yield(t) => Gen.simple(t),
-      #Index(a, b) | #Binary(_, a, b) | #Assign(_, a, b) | #Range(a, b) => Gen.simple(a) && Gen.simple(b),
-      #Slice(t, lo, hi) => Gen.simple(t) && Gen.simpleOpt(lo) && Gen.simpleOpt(hi),
-      #Call(f, args) => Gen.simple(f) && args.iter().every((a) => Gen.simple(a)),
-      #Tag(_, args) | #List(args) => args.iter().every((a) => Gen.simple(a)),
-      #TagRecord(_, fs) | #Record(_, fs) => fs.iter().every(([_, v]) => Gen.simple(v)),
+    match (e.kind) {
+      #Int(_) | #Float(_) | #Str(_) | #Byte(_) | #Bool(_) | #Ident(_) | #Lambda { params: _ } => true,
+      #Template(parts) => parts.iter().every((p) => match (p) { #Lit(_) => true, #Expr(x) => Gen.simple(x) }),
+      #Field { target, name: _ } => Gen.simple(target),
+      #Unary { op: _, operand } => Gen.simple(operand),
+      #Cast { expr, ty: _ } => Gen.simple(expr),
+      #BorrowMut(x) | #Yield(x) | #Comptime(x) => Gen.simple(x),
+      #Index { target, index } => Gen.simple(target) && Gen.simple(index),
+      #Binary { op: _, lhs, rhs } => Gen.simple(lhs) && Gen.simple(rhs),
+      #Assign { op: _, target, value } => Gen.simple(target) && Gen.simple(value),
+      #Range { lo, hi } => Gen.simpleOpt(lo) && Gen.simpleOpt(hi),
+      #Call { callee, typeArgs: _, args } => Gen.simple(callee) && args.iter().every((a) => Gen.simple(a)),
+      #List(items) => items.iter().every((a) => Gen.simple(a)),
+      #Tag { name: _, args } => match (args) {
+        #None => true,
+        #Tuple(es) => es.iter().every((a) => Gen.simple(a)),
+        #Record(fs) => Gen.simpleInits(fs),
+      },
+      #Record { name: _, fields } => Gen.simpleInits(fields),
       #Block(b) => b.stmts.len() == 0 && Gen.simpleOpt(b.tail),
-      #If(c, t, f) => Gen.simple(c) && t.stmts.len() == 0 && Gen.simpleOpt(t.tail) && Gen.simpleOpt(f),
+      #If { cond, then, otherwise } => Gen.simple(cond) && then.stmts.len() == 0 && Gen.simpleOpt(then.tail) && Gen.simpleOpt(otherwise),
       _ => false,
     }
   }
   function simpleOpt(e: readonly Option<Box<Expr>>): bool {
     match (e) { #Some(x) => Gen.simple(x), #None => true }
   }
+  function simpleInits(fs: readonly Vec<FieldInit>): bool {
+    fs.iter().every((f) => match (f.value) { #Some(v) => Gen.simple(v), #None => true })
+  }
 
   // ---- expressions ----
 
   // The JavaScript for an expression, after emitting what it needs done first.
-  function ex(self: mut Self, e: readonly Expr): String uses Fail<GenError> {
-    match (e) {
+  function ex(self: mut Self, e: readonly Expr): String uses Fail<Diagnostic> {
+    match (e.kind) {
       #Int(n) => `${n}n`,
       #Float(n) => n.clone(),
       #Str(s) => quote(s),
@@ -194,70 +252,70 @@ impl Gen {
         let out = "(\"\"".toString();
         for (const p of parts) {
           match (p) {
-            #Text(s) => { if (s.len() > 0) { out.push(" + "); out.push(quote(s).asStr()); } }
+            #Lit(s) => { if (s.len() > 0) { out.push(" + "); out.push(quote(s).asStr()); } }
             #Expr(x) => { const v = self.ex(x); out.push(` + $rt.str(${v})`); }
           }
         }
         out.push(")");
         out
       }
-      #Ident(n) => self.ident(n),
-      #Field(t, name) => {
-        const target = self.ex(t);
-        `${target}.${name}`
+      #Ident(n) => self.ident(n, e.span),
+      #Field { target, name } => {
+        const t = self.ex(target);
+        `${t}.${name.name}`
       }
-      #Index(t, i) => {
-        const [a, b] = self.pair(t, i);
-        `$rt.idx(${a}, ${b})`
-      }
-      #Slice(t, lo, hi) => {
-        const target = self.ex(t);
-        const l = match (lo) { #Some(x) => self.ex(x), #None => "0n".toString() };
-        const h = match (hi) { #Some(x) => self.ex(x), #None => "undefined".toString() };
-        `$rt.slice(${target}, ${l}, ${h})`
-      }
-      #Call(f, args) => self.call(f, args, false),
-      #Unary(op, x) => {
-        const v = self.ex(x);
+      #Index { target, index } => match (index.kind) {
+        #Range { lo, hi } => {
+          const t = self.ex(target);
+          const l = match (lo) { #Some(x) => self.ex(x), #None => "0n".toString() };
+          const h = match (hi) { #Some(x) => self.ex(x), #None => "undefined".toString() };
+          `$rt.slice(${t}, ${l}, ${h})`
+        }
+        _ => {
+          const [a, b] = self.pair(target, index);
+          `$rt.idx(${a}, ${b})`
+        }
+      },
+      #Call { callee, typeArgs: _, args } => self.call(callee, args, false),
+      #Unary { op, operand } => {
+        const v = self.ex(operand);
         `(${op}${v})`
       }
-      #Binary(op, a, b) => self.binary(op, a, b),
-      #Assign(op, target, value) => {
+      #Binary { op, lhs, rhs } => self.binary(op, lhs, rhs),
+      #Assign { op, target, value } => {
         const v = self.ex(value);
         // A place assigned is a copy of it: the value may be a `Copy` struct, which JavaScript shares.
-        const copied = match (value) { #Ident(_) | #Field(_, _) | #Index(_, _) => `$rt.copy(${v})`, _ => v };
+        const copied = if (Gen.isPlace(value)) { `$rt.copy(${v})` } else { v };
         const place = self.place(target);
         `(${place} ${op} ${copied})`
       }
-      #Tag(name, args) => {
-        if (args.len() == 0) { return `{ $tag: ${quote(name)} }`; }
-        const vs = self.list(args);
-        if (args.len() == 1) { `{ $tag: ${quote(name)}, $: ${vs[0]} }` } else { `{ $tag: ${quote(name)}, $: [${vs.join(", ")}] }` }
+      #Tag { name, args } => self.tag(name, args),
+      #Record { name, fields } => {
+        const n: Option<String> = match (name) { #Some(path) => #Some(path[path.len() - 1].name.clone()), #None => #None };
+        self.record(n, fields)
       }
-      #TagRecord(name, fields) => {
-        const rec = self.record(#None, fields);
-        `{ $tag: ${quote(name)}, $: ${rec} }`
-      }
-      #Record(name, fields) => self.record(name, fields),
       #List(items) => {
         const vs = self.list(items);
         `[${vs.join(", ")}]`
       }
-      #Lambda(params, body) => self.lambda(params, body),
-      #Range(a, b) => {
-        const [x, y] = self.pair(a, b);
+      #Lambda { params, body } => self.lambda(params, body),
+      #Range { lo, hi } => {
+        const x = match (lo) { #Some(v) => self.ex(v), #None => "0n".toString() };
+        const y = match (hi) { #Some(v) => self.ex(v), #None => self.unsupported(e.span, "a range without an end") };
         `$rt.range(${x}, ${y})`
       }
       #Yield(x) => {
-        if (!self.inGenerator) { self.fail("`yield` outside a generator"); }
+        if (!self.inGenerator) { self.fail(e.span, "`yield` outside a generator"); }
         const v = self.ex(x);
         `(yield ${v})`
       }
-      #Cast(x, ty) => {
-        const v = self.ex(x);
-        `$rt.cast(${v}, ${quote(ty)})`
+      #Cast { expr, ty } => {
+        const v = self.ex(expr);
+        `$rt.cast(${v}, ${quote(typeName(ty))})`
       }
-      #LendMut(_) => self.fail("`mut` lends only to a call's argument"),
+      // What `comptime` computes, the program computes as it runs: the same value.
+      #Comptime(x) => self.ex(x),
+      #BorrowMut(_) => self.fail(e.span, "`mut` lends only to a call's argument"),
       #Return(_) | #Break | #Continue | #Throw(_) => {
         self.into(e, #Discard);
         "undefined".toString()
@@ -266,13 +324,14 @@ impl Gen {
         #Some(t) => self.ex(t),
         #None => "undefined".toString(),
       },
-      #If(c, t, f) if Gen.simple(e) => {
-        const cond = self.ex(c);
-        const then = match (t.tail) { #Some(x) => self.ex(x), #None => "undefined".toString() };
-        const otherwise = match (f) { #Some(x) => self.ex(x), #None => "undefined".toString() };
-        `(${cond} ? ${then} : ${otherwise})`
+      #If { cond, then, otherwise } if Gen.simple(e) => {
+        const c = self.ex(cond);
+        const a = match (then.tail) { #Some(x) => self.ex(x), #None => "undefined".toString() };
+        const b = match (otherwise) { #Some(x) => self.ex(x), #None => "undefined".toString() };
+        `(${c} ? ${a} : ${b})`
       }
-      #Unsupported(what) => self.fail(`${what} is not supported by this compiler`),
+      #TagAt { name: _, args: _ } => self.unsupported(e.span, "a tag named by `comptime` code"),
+      #FieldAt { target: _, name: _ } => self.unsupported(e.span, "a field named by `comptime` code"),
       _ => {
         const t = self.fresh();
         self.line(`let ${t};`);
@@ -282,20 +341,20 @@ impl Gen {
     }
   }
 
+  function isPlace(e: readonly Expr): bool {
+    match (e.kind) { #Ident(_) | #Field { target: _ } | #Index { target: _ } => true, _ => false }
+  }
+
   // Two operands in order: the first is saved if the second needs statements run first.
-  function pair(self: mut Self, a: readonly Expr, b: readonly Expr): [String, String] uses Fail<GenError> {
+  function pair(self: mut Self, a: readonly Expr, b: readonly Expr): [String, String] uses Fail<Diagnostic> {
     let x = self.ex(a);
-    if (!Gen.simple(b)) {
-      const t = self.fresh();
-      self.line(`const ${t} = ${x};`);
-      x = t;
-    }
+    if (!Gen.simple(b)) { x = self.save(x); }
     const y = self.ex(b);
     [x, y]
   }
 
   // Expressions in order, as `pair` keeps two.
-  function list(self: mut Self, es: readonly Vec<Expr>): Vec<String> uses Fail<GenError> {
+  function list(self: mut Self, es: readonly Vec<Expr>): Vec<String> uses Fail<Diagnostic> {
     let last: usize = 0;
     for (const [i, e] of es.iter().enumerate()) { if (!Gen.simple(e)) { last = i; } }
     let out: Vec<String> = Vec.new();
@@ -306,51 +365,44 @@ impl Gen {
     out
   }
 
-  // A value kept in a temporary, so that what runs next cannot change it.
-  function save(self: mut Self, v: String): String {
-    const t = self.fresh();
-    self.line(`const ${t} = ${v};`);
-    t
-  }
-
-  function ident(self: mut Self, n: str): String uses Fail<GenError> {
+  function ident(self: mut Self, n: str, span: Span): String uses Fail<Diagnostic> {
     if (const #Some(l) = self.local(n)) {
       return if (l.isRef) { `${l.js}.v` } else { l.js };
     }
     if (const #Some(js) = self.names.get(n)) { return js.clone(); }
     if (BUILTINS.includes(n)) { return `$rt.${n}`; }
-    self.fail(`unknown name \`${n}\``)
+    self.fail(span, `unknown name \`${n}\``)
   }
 
   // The JavaScript for a place, to assign or lend.
-  function place(self: mut Self, e: readonly Expr): String uses Fail<GenError> {
-    match (e) {
-      #Ident(n) => self.ident(n),
-      #Field(t, name) => {
+  function place(self: mut Self, e: readonly Expr): String uses Fail<Diagnostic> {
+    match (e.kind) {
+      #Ident(n) => self.ident(n, e.span),
+      #Field { target, name } => {
         // Evaluated once, though a lent place is read and written by two closures.
-        const target = match (t) { #Ident(_) => self.ex(t), _ => { const v = self.ex(t); self.save(v) } };
-        `${target}.${name}`
+        const t = match (target.kind) { #Ident(_) => self.ex(target), _ => { const v = self.ex(target); self.save(v) } };
+        `${t}.${name.name}`
       }
-      #Index(t, i) => {
-        const [a, b] = self.pair(t, i);
-        const at = self.fresh();
-        self.line(`const ${at} = ${a};`);
+      #Index { target, index } => {
+        if (const #Range { lo: _ } = index.kind) { self.unsupported(e.span, "lending or assigning a slice"); }
+        const [a, b] = self.pair(target, index);
+        const at = self.save(a);
         `${at}[$rt.at(${at}, ${b})]`
       }
-      _ => self.fail("not a place"),
+      _ => self.fail(e.span, "this is not a place"),
     }
   }
 
   // A reference to a place lent `mut`: an object whose `v` reads and writes it.
-  function lend(self: mut Self, e: readonly Expr): String uses Fail<GenError> {
-    if (const #Ident(n) = e) {
+  function lend(self: mut Self, e: readonly Expr): String uses Fail<Diagnostic> {
+    if (const #Ident(n) = e.kind) {
       if (const #Some(l) = self.local(n)) { if (l.isRef) { return l.js; } }
     }
     const p = self.place(e);
     `$rt.ref(() => ${p}, ($v) => ${p} = $v)`
   }
 
-  function binary(self: mut Self, op: str, a: readonly Expr, b: readonly Expr): String uses Fail<GenError> {
+  function binary(self: mut Self, op: str, a: readonly Expr, b: readonly Expr): String uses Fail<Diagnostic> {
     if (op == "&&" || op == "||") {
       const x = self.ex(a);
       if (Gen.simple(b)) {
@@ -375,110 +427,108 @@ impl Gen {
     `(${x} ${op} ${y})`
   }
 
-  function record(self: mut Self, name: readonly Option<String>, fields: readonly Vec<[String, Expr]>): String uses Fail<GenError> {
+  function tag(self: mut Self, name: str, args: readonly TagArgs): String uses Fail<Diagnostic> {
+    match (args) {
+      #None => `{ $tag: ${quote(name)} }`,
+      #Tuple(es) => {
+        const vs = self.list(es);
+        if (vs.len() == 1) { `{ $tag: ${quote(name)}, $: ${vs[0]} }` } else { `{ $tag: ${quote(name)}, $: [${vs.join(", ")}] }` }
+      }
+      #Record(fields) => {
+        const rec = self.record(#None, fields);
+        `{ $tag: ${quote(name)}, $: ${rec} }`
+      }
+    }
+  }
+
+  function record(self: mut Self, name: readonly Option<String>, fields: readonly Vec<FieldInit>): String uses Fail<Diagnostic> {
     let last: usize = 0;
-    for (const [i, [_, v]] of fields.iter().enumerate()) { if (!Gen.simple(v)) { last = i; } }
+    for (const [i, f] of fields.iter().enumerate()) {
+      if (f.generate.isSome() || f.computed.isSome()) { self.unsupported(f.name.span, "a record entry `comptime` code names or generates"); }
+      match (f.value) { #Some(v) => { if (!Gen.simple(v)) { last = i; } } #None => {} }
+    }
     let vs: Vec<String> = Vec.new();
-    for (const [i, [_, v]] of fields.iter().enumerate()) {
-      const x = self.ex(v);
+    for (const [i, f] of fields.iter().enumerate()) {
+      const x = match (f.value) { #Some(v) => self.ex(v), #None => self.ident(f.name.name.asStr(), f.name.span) };
       vs.push(if (i < last) { self.save(x) } else { x });
     }
     let entries: Vec<String> = Vec.new();
     if (const #Some(n) = name) { entries.push(`$t: ${quote(n)}`); }
     // A struct's fields in the order it declares them, which is the order it is shown in.
     let order: Vec<usize> = Vec.new();
-    match (name) {
-      #Some(n) => match (self.world.structs.get(n)) {
-        #Some(declared) => {
-          for (const d of declared) {
-            if (const #Some(i) = fields.iter().findIndex(([f, _]) => f == d)) { order.push(i); }
-          }
+    if (const #Some(n) = name) {
+      if (const #Some(declared) = self.world.structs.get(n)) {
+        for (const d of declared) {
+          if (const #Some(i) = fields.iter().findIndex((f) => f.name.name == d)) { order.push(i); }
         }
-        #None => {}
-      },
-      #None => {}
+      }
     }
     if (order.len() != fields.len()) {
       order = Vec.new();
       for (const i of 0..fields.len()) { order.push(i); }
     }
-    for (const i of order) {
-      const f = fields[i][0].clone();
-      if (f == "$comptime") { self.fail("a record entry generated by `comptime` code is not supported by this compiler"); }
-      entries.push(`${f}: ${vs[i]}`);
-    }
+    for (const i of order) { entries.push(`${fields[i].name.name}: ${vs[i]}`); }
     `{ ${entries.join(", ")} }`
   }
 
-  function call(self: mut Self, f: readonly Expr, args: readonly Vec<Expr>, statement: bool): String uses Fail<GenError> {
+  function call(self: mut Self, callee: readonly Expr, args: readonly Vec<Expr>, statement: bool): String uses Fail<Diagnostic> {
     // `T.f(…)`: a function of a type.
-    if (const #Field(target, name) = f) {
-      if (const #Ident(t) = target) {
+    if (const #Field { target, name } = callee.kind) {
+      if (const #Ident(t) = target.kind) {
         if (self.isType(t)) {
           const vs = self.args(args);
-          return `$rt.st(${quote(t)}, ${quote(name)})(${vs.join(", ")})`;
+          return `$rt.st(${quote(t)}, ${quote(name.name)})(${vs.join(", ")})`;
         }
       }
       // A method: the runtime finds the impl from the receiver.
-      const writeback = WRITEBACK.includes(name) && match (target) { #Ident(_) | #Field(_, _) | #Index(_, _) => true, _ => false };
+      const m = name.name.asStr();
+      const writeback = WRITEBACK.includes(m) && Gen.isPlace(target);
       const recv = if (writeback) { self.lend(target) } else { self.ex(target) };
       const vs = self.args(args);
       let all: Vec<String> = Vec.new();
       all.push(recv);
-      all.push(quote(name));
+      all.push(quote(m));
       for (const v of vs) { all.push(v.clone()); }
-      const callee = if (writeback) { "$rt.callRef" } else { "$rt.call" };
-      const yields = statement && self.inGenerator && self.world.genMethods.has(name);
-      return `${if (yields) { "yield* " } else { "" }}${callee}(${all.join(", ")})`;
+      const fn = if (writeback) { "$rt.callRef" } else { "$rt.call" };
+      const yields = statement && self.inGenerator && self.world.genMethods.has(m);
+      return `${if (yields) { "yield* " } else { "" }}${fn}(${all.join(", ")})`;
     }
     let generator = false;
-    const callee = match (f) {
+    const f: String = match (callee.kind) {
       #Ident(n) => {
-        const js = self.ident(n);
+        const js = self.ident(n, callee.span);
         generator = self.world.generators.has(js);
         js
       }
       _ => {
-        const c = self.ex(f);
+        const c = self.ex(callee);
         `(${c})`
       }
     };
     const vs = self.args(args);
     const yields = statement && self.inGenerator && generator;
-    `${if (yields) { "yield* " } else { "" }}${callee}(${vs.join(", ")})`
+    `${if (yields) { "yield* " } else { "" }}${f}(${vs.join(", ")})`
   }
 
-  function args(self: mut Self, args: readonly Vec<Expr>): Vec<String> uses Fail<GenError> {
+  function args(self: mut Self, args: readonly Vec<Expr>): Vec<String> uses Fail<Diagnostic> {
     let last: usize = 0;
     for (const [i, a] of args.iter().enumerate()) { if (!Gen.simple(a)) { last = i; } }
     let out: Vec<String> = Vec.new();
     for (const [i, a] of args.iter().enumerate()) {
-      const x = match (a) { #LendMut(p) => self.lend(p), _ => self.ex(a) };
+      const x = match (a.kind) { #BorrowMut(p) => self.lend(p), _ => self.ex(a) };
       out.push(if (i < last) { self.save(x) } else { x });
     }
     out
   }
 
-  function lambda(self: mut Self, params: readonly Vec<Pattern>, body: readonly Expr): String uses Fail<GenError> {
+  function lambda(self: mut Self, params: readonly Vec<Param>, body: readonly Expr): String uses Fail<Diagnostic> {
     const saved = replace(mut self.out, String.new());
     const savedIndent = replace(mut self.indent, 1);
     const generator = Gen.yields(body);
     const savedGen = replace(mut self.inGenerator, generator);
     self.push();
     let names: Vec<String> = Vec.new();
-    let destructure: Vec<[usize, String]> = Vec.new();
-    for (const [i, p] of params.iter().enumerate()) {
-      match (p) {
-        #Bind(n) => names.push(self.declare(n, false)),
-        #Wild => names.push(`$_${i}`),
-        _ => {
-          const t = self.fresh();
-          names.push(t.clone());
-          destructure.push([i, t]);
-        }
-      }
-    }
-    for (const [i, t] of destructure) { self.binds(params[i], t); }
+    for (const p of params) { names.push(self.declare(p.name.name.asStr(), false)); }
     self.into(body, #Return);
     self.pop();
     const inner = replace(mut self.out, saved);
@@ -491,64 +541,70 @@ impl Gen {
 
   // Whether an expression yields, outside the closures in it: a closure that does is a generator.
   function yields(e: readonly Expr): bool {
-    match (e) {
+    match (e.kind) {
       #Yield(_) => true,
-      #Lambda(_, _) | #Int(_) | #Float(_) | #Str(_) | #Byte(_) | #Bool(_) | #Ident(_) | #Break | #Continue | #Unsupported(_) => false,
-      #Template(parts) => parts.iter().some((p) => match (p) { #Text(_) => false, #Expr(x) => Gen.yields(x) }),
-      #Field(t, _) | #Unary(_, t) | #Cast(t, _) | #LendMut(t) | #Throw(t) => Gen.yields(t),
-      #Index(a, b) | #Binary(_, a, b) | #Assign(_, a, b) | #Range(a, b) => Gen.yields(a) || Gen.yields(b),
-      #Slice(t, lo, hi) => Gen.yields(t) || Gen.yieldsOpt(lo) || Gen.yieldsOpt(hi),
-      #Call(f, args) => Gen.yields(f) || args.iter().some((a) => Gen.yields(a)),
-      #Tag(_, args) | #List(args) => args.iter().some((a) => Gen.yields(a)),
-      #TagRecord(_, fs) | #Record(_, fs) => fs.iter().some(([_, v]) => Gen.yields(v)),
+      #Lambda { params: _ } => false,
+      #Template(parts) => parts.iter().some((p) => match (p) { #Lit(_) => false, #Expr(x) => Gen.yields(x) }),
+      #Field { target, name: _ } => Gen.yields(target),
+      #Unary { op: _, operand } => Gen.yields(operand),
+      #Cast { expr, ty: _ } => Gen.yields(expr),
+      #BorrowMut(x) | #Throw(x) | #Comptime(x) => Gen.yields(x),
+      #Index { target, index } => Gen.yields(target) || Gen.yields(index),
+      #Binary { op: _, lhs, rhs } => Gen.yields(lhs) || Gen.yields(rhs),
+      #Assign { op: _, target, value } => Gen.yields(target) || Gen.yields(value),
+      #Range { lo, hi } => Gen.yieldsOpt(lo) || Gen.yieldsOpt(hi),
+      #Call { callee, typeArgs: _, args } => Gen.yields(callee) || args.iter().some((a) => Gen.yields(a)),
+      #List(items) => items.iter().some((a) => Gen.yields(a)),
+      #Tag { name: _, args } => match (args) {
+        #None => false,
+        #Tuple(es) => es.iter().some((a) => Gen.yields(a)),
+        #Record(fs) => Gen.initsYield(fs),
+      },
+      #Record { name: _, fields } => Gen.initsYield(fields),
       #Block(b) | #Unsafe(b) => Gen.blockYields(b),
-      #If(c, t, f) => Gen.yields(c) || Gen.blockYields(t) || Gen.yieldsOpt(f),
-      #While(c, b) => Gen.yields(c) || Gen.blockYields(b),
-      #For(_, it, b) => Gen.yields(it) || Gen.blockYields(b),
-      #Match(s, arms) => Gen.yields(s) || arms.iter().some((a) => Gen.yields(a.body)),
-      #Try(b, _, h) => Gen.blockYields(b) || Gen.blockYields(h),
+      #Region { name: _, body } => Gen.blockYields(body),
+      #If { cond, then, otherwise } => Gen.yields(cond) || Gen.blockYields(then) || Gen.yieldsOpt(otherwise),
+      #While { cond, body } => Gen.yields(cond) || Gen.blockYields(body),
+      #For { mutable: _, pat: _, iter, body } => Gen.yields(iter) || Gen.blockYields(body),
+      #Match { scrutinee, arms } => Gen.yields(scrutinee) || arms.iter().some((a) => Gen.yields(a.body)),
+      #Try { body, pat: _, handler } => Gen.blockYields(body) || Gen.blockYields(handler),
       #Return(v) => Gen.yieldsOpt(v),
-      #Handle(b, _, arms) => Gen.blockYields(b) || arms.iter().some((a) => Gen.blockYields(a.body)),
+      #Handle { body, effect: _, arms } => Gen.blockYields(body) || arms.iter().some((a) => Gen.blockYields(a.body)),
+      _ => false,
     }
   }
   function yieldsOpt(e: readonly Option<Box<Expr>>): bool {
     match (e) { #Some(x) => Gen.yields(x), #None => false }
   }
+  function initsYield(fs: readonly Vec<FieldInit>): bool {
+    fs.iter().some((f) => match (f.value) { #Some(v) => Gen.yields(v), #None => false })
+  }
   function blockYields(b: readonly Block): bool {
-    b.stmts.iter().some((s) => match (s) { #Let(_, _, x) | #Expr(x) | #Defer(x) => Gen.yields(x) }) || Gen.yieldsOpt(b.tail)
+    b.stmts.iter().some((s) => match (s) {
+      #Let { mutable: _, pat: _, ty: _, init, span: _ } => Gen.yields(init),
+      #Expr(x) | #Defer(x) => Gen.yields(x),
+    }) || Gen.yieldsOpt(b.tail)
   }
 
   // ---- patterns ----
 
   // The condition under which `subj` matches a pattern.
-  function cond(self: mut Self, p: readonly Pattern, subj: str): String uses Fail<GenError> {
-    match (p) {
+  function cond(self: mut Self, p: readonly Pattern, subj: str): String uses Fail<Diagnostic> {
+    match (p.kind) {
       #Wild | #Bind(_) => "true".toString(),
-      #Int(n) => `${subj} === ${n}n`,
-      #Byte(b) => `${subj} === ${b}n`,
-      #Str(s) => `$rt.eq(${subj}, ${quote(s)})`,
-      #Bool(b) => `${subj} === ${b}`,
-      #Tag(name, ps) => {
+      #Lit(e) => match (e.kind) {
+        #Int(n) => `${subj} === ${n}n`,
+        #Byte(b) => `${subj} === ${b}n`,
+        #Bool(b) => `${subj} === ${b}`,
+        _ => {
+          const v = self.ex(e);
+          `$rt.eq(${subj}, ${v})`
+        }
+      },
+      #Tag { name, args } => {
         let parts: Vec<String> = Vec.new();
         parts.push(`${subj}.$tag === ${quote(name)}`);
-        if (ps.len() == 1) {
-          const c = self.cond(ps[0], `${subj}.$`.asStr());
-          if (c != "true") { parts.push(c); }
-        } else {
-          for (const [i, q] of ps.iter().enumerate()) {
-            const c = self.cond(q, `${subj}.$[${i}]`.asStr());
-            if (c != "true") { parts.push(c); }
-          }
-        }
-        `(${parts.join(" && ")})`
-      }
-      #TagRecord(name, fs) => {
-        let parts: Vec<String> = Vec.new();
-        parts.push(`${subj}.$tag === ${quote(name)}`);
-        for (const [f, q] of fs) {
-          const c = self.cond(q, `${subj}.$.${f}`.asStr());
-          if (c != "true") { parts.push(c); }
-        }
+        self.payloadConds(args, subj, mut parts);
         `(${parts.join(" && ")})`
       }
       #Tuple(ps) => {
@@ -559,12 +615,9 @@ impl Gen {
         }
         if (parts.len() == 0) { "true".toString() } else { `(${parts.join(" && ")})` }
       }
-      #Record(fs) => {
+      #Record { name: _, fields } => {
         let parts: Vec<String> = Vec.new();
-        for (const [f, q] of fs) {
-          const c = self.cond(q, `${subj}.${f}`.asStr());
-          if (c != "true") { parts.push(c); }
-        }
+        self.fieldConds(fields, subj, mut parts);
         if (parts.len() == 0) { "true".toString() } else { `(${parts.join(" && ")})` }
       }
       #Or(alts) => {
@@ -572,72 +625,95 @@ impl Gen {
         for (const a of alts) { parts.push(self.cond(a, subj)); }
         `(${parts.join(" || ")})`
       }
-      #Unsupported(what) => self.fail(`${what} is not supported by this compiler`),
+      #TagAt { name: _, args: _ } => self.unsupported(p.span, "a tag named by `comptime` code"),
     }
   }
 
-  function hasBinds(p: readonly Pattern): bool {
-    match (p) {
-      #Bind(_) => true,
-      #Tag(_, ps) | #Tuple(ps) | #Or(ps) => ps.iter().some((q) => Gen.hasBinds(q)),
-      #TagRecord(_, fs) | #Record(fs) => fs.iter().some(([_, q]) => Gen.hasBinds(q)),
-      _ => false,
-    }
-  }
-
-  // Declares what a pattern binds, from `subj`, which it is known to match.
-  function binds(self: mut Self, p: readonly Pattern, subj: str): void uses Fail<GenError> {
-    match (p) {
-      #Bind(n) => {
-        const js = self.declare(n, false);
-        self.line(`const ${js} = ${subj};`);
-      }
-      #Tag(_, ps) => {
-        if (ps.len() == 1) { self.binds(ps[0], `${subj}.$`.asStr()); }
-        else { for (const [i, q] of ps.iter().enumerate()) { self.binds(q, `${subj}.$[${i}]`.asStr()); } }
-      }
-      #TagRecord(_, fs) => { for (const [f, q] of fs) { self.binds(q, `${subj}.$.${f}`.asStr()); } }
-      #Tuple(ps) => { for (const [i, q] of ps.iter().enumerate()) { self.binds(q, `${subj}[${i}]`.asStr()); } }
-      #Record(fs) => { for (const [f, q] of fs) { self.binds(q, `${subj}.${f}`.asStr()); } }
-      #Or(alts) => {
-        if (!Gen.hasBinds(p)) { return; }
-        // Each alternative binds the same names: declare them, then assign from the one that matched.
-        let first: Vec<[String, String]> = Vec.new();
-        Gen.paths(alts[0], subj, mut first);
-        let js: Vec<String> = Vec.new();
-        for (const [n, _] of first) { js.push(self.declare(n, false)); }
-        self.line(`let ${js.join(", ")};`);
-        for (const [i, a] of alts.iter().enumerate()) {
-          const c = self.cond(a, subj);
-          let ps: Vec<[String, String]> = Vec.new();
-          Gen.paths(a, subj, mut ps);
-          let assigns: Vec<String> = Vec.new();
-          for (const [k, [n, _]] of first.iter().enumerate()) {
-            match (ps.iter().find(([m, _]) => m == n)) {
-              #Some([_, path]) => assigns.push(`${js[k]} = ${path};`),
-              #None => self.fail(`\`${n}\` is not bound by every alternative`),
-            }
+  function payloadConds(self: mut Self, args: readonly TagPatArgs, subj: str, parts: mut Vec<String>): void uses Fail<Diagnostic> {
+    match (args) {
+      #None => {}
+      #Tuple(ps) => {
+        if (ps.len() == 1) {
+          const c = self.cond(ps[0], `${subj}.$`.asStr());
+          if (c != "true") { parts.push(c); }
+        } else {
+          for (const [i, q] of ps.iter().enumerate()) {
+            const c = self.cond(q, `${subj}.$[${i}]`.asStr());
+            if (c != "true") { parts.push(c); }
           }
-          self.line(`${if (i == 0) { "" } else { "else " }}if (${c}) { ${assigns.join(" ")} }`);
         }
       }
-      _ => {}
+      #Record(fs) => self.fieldConds(fs, `${subj}.$`.asStr(), mut parts),
+    }
+  }
+
+  function fieldConds(self: mut Self, fs: readonly Vec<[Ident, Option<Pattern>]>, subj: str, parts: mut Vec<String>): void uses Fail<Diagnostic> {
+    for (const [f, q] of fs) {
+      if (const #Some(q) = q) {
+        const c = self.cond(q, `${subj}.${f.name}`.asStr());
+        if (c != "true") { parts.push(c); }
+      }
     }
   }
 
   // What a pattern binds, each with where it is in `subj`.
   function paths(p: readonly Pattern, subj: str, out: mut Vec<[String, String]>): void {
-    match (p) {
+    match (p.kind) {
       #Bind(n) => out.push([n.clone(), subj.toString()]),
-      #Tag(_, ps) => {
-        if (ps.len() == 1) { Gen.paths(ps[0], `${subj}.$`.asStr(), mut out); }
-        else { for (const [i, q] of ps.iter().enumerate()) { Gen.paths(q, `${subj}.$[${i}]`.asStr(), mut out); } }
-      }
-      #TagRecord(_, fs) => { for (const [f, q] of fs) { Gen.paths(q, `${subj}.$.${f}`.asStr(), mut out); } }
+      #Tag { name: _, args } => match (args) {
+        #None => {}
+        #Tuple(ps) => {
+          if (ps.len() == 1) { Gen.paths(ps[0], `${subj}.$`.asStr(), mut out); }
+          else { for (const [i, q] of ps.iter().enumerate()) { Gen.paths(q, `${subj}.$[${i}]`.asStr(), mut out); } }
+        }
+        #Record(fs) => Gen.fieldPaths(fs, `${subj}.$`.asStr(), mut out),
+      },
       #Tuple(ps) => { for (const [i, q] of ps.iter().enumerate()) { Gen.paths(q, `${subj}[${i}]`.asStr(), mut out); } }
-      #Record(fs) => { for (const [f, q] of fs) { Gen.paths(q, `${subj}.${f}`.asStr(), mut out); } }
+      #Record { name: _, fields } => Gen.fieldPaths(fields, subj, mut out),
       #Or(alts) => { if (alts.len() > 0) { Gen.paths(alts[0], subj, mut out); } }
       _ => {}
+    }
+  }
+
+  function fieldPaths(fs: readonly Vec<[Ident, Option<Pattern>]>, subj: str, out: mut Vec<[String, String]>): void {
+    for (const [f, q] of fs) {
+      match (q) {
+        #Some(q) => Gen.paths(q, `${subj}.${f.name}`.asStr(), mut out),
+        #None => out.push([f.name.clone(), `${subj}.${f.name}`]),
+      }
+    }
+  }
+
+  // Declares what a pattern binds, from `subj`, which it is known to match.
+  function binds(self: mut Self, p: readonly Pattern, subj: str, mutable: bool): void uses Fail<Diagnostic> {
+    if (const #Or(alts) = p.kind) {
+      // Each alternative binds the same names: declare them, then assign from the one that matched.
+      let first: Vec<[String, String]> = Vec.new();
+      Gen.paths(alts[0], subj, mut first);
+      if (first.len() == 0) { return; }
+      let js: Vec<String> = Vec.new();
+      for (const [n, _] of first) { js.push(self.declare(n, false)); }
+      self.line(`let ${js.join(", ")};`);
+      for (const [i, a] of alts.iter().enumerate()) {
+        const c = self.cond(a, subj);
+        let ps: Vec<[String, String]> = Vec.new();
+        Gen.paths(a, subj, mut ps);
+        let assigns: Vec<String> = Vec.new();
+        for (const [k, [n, _]] of first.iter().enumerate()) {
+          match (ps.iter().find(([m, _]) => m == n)) {
+            #Some([_, path]) => assigns.push(`${js[k]} = ${path};`),
+            #None => self.fail(a.span, `\`${n}\` is not bound by every alternative`),
+          }
+        }
+        self.line(`${if (i == 0) { "" } else { "else " }}if (${c}) { ${assigns.join(" ")} }`);
+      }
+      return;
+    }
+    let ps: Vec<[String, String]> = Vec.new();
+    Gen.paths(p, subj, mut ps);
+    for (const [n, path] of ps) {
+      const js = self.declare(n, false);
+      self.line(`${if (mutable) { "let" } else { "const" }} ${js} = ${path};`);
     }
   }
 
@@ -651,30 +727,27 @@ impl Gen {
     }
   }
 
+  function blockStmt(self: mut Self, b: readonly Block, dest: readonly Dest): void uses Fail<Diagnostic> {
+    self.line("{");
+    self.indent += 1;
+    self.blockInto(b, dest);
+    self.indent -= 1;
+    self.line("}");
+  }
+
   // Runs an expression as statements, sending its value to `dest`.
-  function into(self: mut Self, e: readonly Expr, dest: readonly Dest): void uses Fail<GenError> {
-    match (e) {
-      #Block(b) => {
-        self.line("{");
+  function into(self: mut Self, e: readonly Expr, dest: readonly Dest): void uses Fail<Diagnostic> {
+    match (e.kind) {
+      #Block(b) | #Unsafe(b) => self.blockStmt(b, dest),
+      // A region's arena is the garbage collector's.
+      #Region { name: _, body } => self.blockStmt(body, dest),
+      #If { cond, then, otherwise } => {
+        const c = self.ex(cond);
+        self.line(`if (${c}) {`);
         self.indent += 1;
-        self.blockInto(b, dest);
+        self.blockInto(then, dest);
         self.indent -= 1;
-        self.line("}");
-      }
-      #Unsafe(b) => {
-        self.line("{");
-        self.indent += 1;
-        self.blockInto(b, dest);
-        self.indent -= 1;
-        self.line("}");
-      }
-      #If(c, t, f) => {
-        const cond = self.ex(c);
-        self.line(`if (${cond}) {`);
-        self.indent += 1;
-        self.blockInto(t, dest);
-        self.indent -= 1;
-        match (f) {
+        match (otherwise) {
           #Some(x) => {
             self.line("} else {");
             self.indent += 1;
@@ -688,19 +761,19 @@ impl Gen {
           }
         }
       }
-      #Match(scrutinee, arms) => {
+      #Match { scrutinee, arms } => {
         const v = self.ex(scrutinee);
-        const s = self.fresh();
-        self.line(`const ${s} = ${v};`);
+        const s = self.save(v);
         const label = `m${self.fresh()}`;
         self.line(`${label}: {`);
         self.indent += 1;
         for (const arm of arms) {
+          if (arm.generate.isSome()) { self.unsupported(arm.pat.span, "arms generated by `comptime` code"); }
           const c = self.cond(arm.pat, s);
           self.line(`if (${c}) {`);
           self.indent += 1;
           self.push();
-          self.binds(arm.pat, s);
+          self.binds(arm.pat, s, false);
           match (arm.guard) {
             #Some(g) => {
               const gv = self.ex(g);
@@ -724,28 +797,28 @@ impl Gen {
         self.indent -= 1;
         self.line("}");
       }
-      #While(c, body) => {
-        if (Gen.simple(c)) {
-          const cond = self.ex(c);
-          self.line(`while (${cond}) {`);
+      #While { cond, body } => {
+        if (Gen.simple(cond)) {
+          const c = self.ex(cond);
+          self.line(`while (${c}) {`);
           self.indent += 1;
         } else {
           self.line("while (true) {");
           self.indent += 1;
-          const cond = self.ex(c);
-          self.line(`if (!(${cond})) break;`);
+          const c = self.ex(cond);
+          self.line(`if (!(${c})) break;`);
         }
         self.blockInto(body, #Discard);
         self.indent -= 1;
         self.line("}");
         self.deliver("undefined", dest);
       }
-      #For(pat, iter, body) => {
+      #For { mutable, pat, iter, body } => {
         self.push();
         // `for (const i of a..b)`: a counted loop.
-        const counted = match (pat) {
-          #Bind(n) => match (iter) {
-            #Range(lo, hi) => {
+        const counted = match (pat.kind) {
+          #Bind(n) => match (iter.kind) {
+            #Range { lo: #Some(lo), hi: #Some(hi) } => {
               const [a, b] = self.pair(lo, hi);
               const end = self.save(b);
               const js = self.declare(n, false);
@@ -761,7 +834,7 @@ impl Gen {
           const x = self.fresh();
           self.line(`for (const ${x} of $rt.iter(${it})) {`);
           self.indent += 1;
-          self.binds(pat, x);
+          self.binds(pat, x, mutable);
         } else {
           self.indent += 1;
         }
@@ -771,7 +844,7 @@ impl Gen {
         self.pop();
         self.deliver("undefined", dest);
       }
-      #Try(body, pat, handler) => {
+      #Try { body, pat, handler } => {
         self.line("try {");
         self.indent += 1;
         self.blockInto(body, dest);
@@ -783,7 +856,7 @@ impl Gen {
         self.push();
         const c = self.cond(pat, `${err}.value`.asStr());
         if (c != "true") { self.line(`if (!(${c})) throw ${err};`); }
-        self.binds(pat, `${err}.value`.asStr());
+        self.binds(pat, `${err}.value`.asStr(), false);
         self.blockInto(handler, dest);
         self.pop();
         self.indent -= 1;
@@ -808,11 +881,11 @@ impl Gen {
         const v = self.ex(x);
         self.line(`throw new $rt.Fail(${v});`);
       }
-      #Call(f, args) => {
-        const v = self.call(f, args, true);
+      #Call { callee, typeArgs: _, args } => {
+        const v = self.call(callee, args, true);
         self.deliver(v, dest);
       }
-      #Handle(_, effect, _) => self.fail(`handling \`${effect}\` is not supported by this compiler`),
+      #Handle { body: _, effect, arms: _ } => self.unsupported(e.span, `handling \`${typeName(effect)}\``),
       _ => {
         const v = self.ex(e);
         self.deliver(v, dest);
@@ -820,28 +893,29 @@ impl Gen {
     }
   }
 
-  function blockInto(self: mut Self, b: readonly Block, dest: readonly Dest): void uses Fail<GenError> {
+  function blockInto(self: mut Self, b: readonly Block, dest: readonly Dest): void uses Fail<Diagnostic> {
     self.push();
     self.stmtsFrom(b, 0, dest);
     self.pop();
   }
 
-  function stmtsFrom(self: mut Self, b: readonly Block, from: usize, dest: readonly Dest): void uses Fail<GenError> {
+  function stmtsFrom(self: mut Self, b: readonly Block, from: usize, dest: readonly Dest): void uses Fail<Diagnostic> {
     let i = from;
     while (i < b.stmts.len()) {
       match (b.stmts[i]) {
-        #Let(mutable, pat, init) => {
+        #Let { mutable, pat, ty: _, init, span: _ } => {
           const v = self.ex(init);
-          const copied = match (init) { #Ident(_) | #Field(_, _) | #Index(_, _) => `$rt.copy(${v})`, _ => v };
-          match (pat) {
+          const copied = if (Gen.isPlace(init)) { `$rt.copy(${v})` } else { v };
+          match (pat.kind) {
             #Bind(n) => {
               const js = self.declare(n, false);
               self.line(`${if (mutable) { "let" } else { "const" }} ${js} = ${copied};`);
             }
             _ => {
-              const t = self.fresh();
-              self.line(`const ${t} = ${copied};`);
-              self.binds(pat, t);
+              const t = self.save(copied);
+              const c = self.cond(pat, t);
+              if (c != "true") { self.line(`if (!(${c})) $rt.unmatched(${t});`); }
+              self.binds(pat, t, mutable);
             }
           }
         }
@@ -870,16 +944,18 @@ impl Gen {
 
   // ---- declarations ----
 
-  function function(self: mut Self, js: str, f: readonly Fn): void uses Fail<GenError> {
+  function function(self: mut Self, js: str, f: readonly FnDecl): void uses Fail<Diagnostic> {
     const body = match (f.body) { #Some(b) => b, #None => return };
     self.push();
     let params: Vec<String> = Vec.new();
-    for (const p of f.params) {
-      const isRef = match (p.ty) { #Mut(_) => p.name != "self", _ => false };
-      params.push(self.declare(p.name, isRef));
+    for (const p of f.sig.params) {
+      // A parameter lent `mut` is a reference; `self` is the object it would refer to.
+      const isRef = match (p.ty) { #Some(t) => match (t.kind) { #Mut(_) => p.name.name != "self", _ => false }, #None => false };
+      params.push(self.declare(p.name.name.asStr(), isRef));
     }
-    self.inGenerator = f.generator;
-    self.line(`function${if (f.generator) { "*" } else { "" }} ${js}(${params.join(", ")}) {`);
+    const generator = isGenerator(f.sig);
+    self.inGenerator = generator;
+    self.line(`function${if (generator) { "*" } else { "" }} ${js}(${params.join(", ")}) {`);
     self.indent += 1;
     self.blockInto(body, #Return);
     self.indent -= 1;
@@ -887,47 +963,46 @@ impl Gen {
     self.inGenerator = false;
     self.pop();
   }
+
+  function tagsOf(tags: readonly Vec<TagDecl>): String {
+    let qs: Vec<String> = Vec.new();
+    for (const t of tags) { qs.push(quote(t.name.name)); }
+    qs.join(", ")
+  }
 }
 
 // A module's JavaScript. `prefix` names its functions and constants (`m3$`); `names` holds what
 // it can see by name, its own and what it imports.
-export function module(m: readonly Module, prefix: str, names: HashMap<String, String>, world: World): String uses Fail<GenError> {
+export function module(m: readonly Module, prefix: str, names: HashMap<String, String>, world: World): String uses Fail<Diagnostic> {
   let g = Gen.new(names, world);
   for (const item of m.items) {
-    match (item) {
-      #Function(f) => g.function(`${prefix}${f.name}`.asStr(), f),
-      #Const(name, value, _) => {
+    match (item.kind) {
+      #Function(f) => g.function(`${prefix}${f.sig.name.name}`.asStr(), f),
+      #Const { name, ty: _, value } => {
         g.push();
         const v = g.ex(value);
         g.pop();
-        g.line(`const ${prefix}${name} = ${v};`);
+        g.line(`const ${prefix}${name.name} = ${v};`);
       }
-      #Impl(target, iface, methods) => {
-        for (const f of methods) {
-          const js = `${target}$${f.name}`;
-          g.function(js.asStr(), f);
-          g.line(`$rt.method(${quote(target)}, ${quote(f.name)}, ${js});`);
+      #Impl(imp) => {
+        const target = typeName(imp.target);
+        for (const m of imp.methods) {
+          const js = `${target}$${m.decl.sig.name.name}`;
+          g.function(js.asStr(), m.decl);
+          g.line(`$rt.method(${quote(target)}, ${quote(m.decl.sig.name.name)}, ${js});`);
         }
-        if (const #Some(i) = iface) { g.line(`$rt.implement(${quote(target)}, ${quote(i)});`); }
+        if (const #Some(i) = imp.iface) { g.line(`$rt.implement(${quote(target)}, ${quote(typeName(i))});`); }
       }
-      #Interface(name, methods, _) => {
-        for (const f of methods) {
-          if (f.body.isSome()) {
-            const js = `${name}$$${f.name}`;
-            g.function(js.asStr(), f);
-            g.line(`$rt.fallback(${quote(name)}, ${quote(f.name)}, ${js});`);
-          }
+      #Enum(e) => g.line(`$rt.enumTags(${quote(e.name.name)}, [${Gen.tagsOf(e.tags)}]);`),
+      #TypeAlias(a) => {
+        if (const #Union { tags, includes: _, rest: _ } = a.ty.kind) {
+          g.line(`$rt.enumTags(${quote(a.name.name)}, [${Gen.tagsOf(tags)}]);`);
         }
       }
-      #Enum(name, tags, _) => {
+      #Struct(s) => {
         let qs: Vec<String> = Vec.new();
-        for (const t of tags) { qs.push(quote(t)); }
-        g.line(`$rt.enumTags(${quote(name)}, [${qs.join(", ")}]);`);
-      }
-      #Struct(name, fields, _) => {
-        let qs: Vec<String> = Vec.new();
-        for (const f of fields) { qs.push(quote(f)); }
-        g.line(`$rt.struct(${quote(name)}, [${qs.join(", ")}]);`);
+        if (const #Some(fs) = s.fields) { for (const f of fs) { qs.push(quote(f.name.name)); } }
+        g.line(`$rt.struct(${quote(s.name.name)}, [${qs.join(", ")}]);`);
       }
       _ => {}
     }

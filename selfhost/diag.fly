@@ -1,0 +1,45 @@
+// Diagnostics: a message about a span of a source file.
+
+// A half-open byte range into a source file.
+export type Span = { start: usize; end: usize };
+
+// A failure, so it is a tag (§5.4).
+export type Diagnostic = #Diagnostic { span: Span; message: String };
+
+export function diag(span: Span, message: str): Diagnostic { #Diagnostic { span, message: message.toString() } }
+
+// The smallest span covering both.
+export function to(a: Span, b: Span): Span { { start: min(a.start, b.start), end: max(a.end, b.end) } }
+
+// 1-based line and column (in characters) of a byte offset.
+export function lineCol(source: str, offset: usize): [usize, usize] {
+  const bytes = source.asBytes();
+  const at = min(offset, bytes.len());
+  let line: usize = 1;
+  let lineStart: usize = 0;
+  for (const i of 0..at) {
+    if (bytes[i] == b'\n') {
+      line += 1;
+      lineStart = i + 1;
+    }
+  }
+  // A character is counted at its first byte: UTF-8 continuation bytes are 10xxxxxx.
+  let col: usize = 1;
+  for (const i of lineStart..at) { if ((bytes[i] & 0xc0) != 0x80) { col += 1; } }
+  [line, col]
+}
+
+// `file:line:col: message`, then the source line and a caret under the span.
+export function render(d: readonly Diagnostic, file: str, source: str): String {
+  const #Diagnostic { span, message } = d;
+  const [line, col] = lineCol(source, span.start);
+  const lines = source.split("\n");
+  const text = if (line - 1 < lines.len()) { lines[line - 1].clone() } else { String.new() };
+  let width = if (span.end > span.start) { span.end - span.start } else { 1 };
+  const room = if (text.len() >= col) { text.len() - (col - 1) } else { 1 };
+  width = min(width, max(room, 1));
+  let out = `${file}:${line}:${col}: ${message}\n  ${text}\n  `;
+  for (const _ of 1..col) { out.push(" "); }
+  for (const _ of 0..width) { out.push("^"); }
+  out
+}

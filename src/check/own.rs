@@ -701,7 +701,6 @@ impl<'p> Own<'p> {
                     inside.push(t.clone());
                     let r = args.iter().any(|a| matches!(a, GArg::Ty(t) if go(p, t, inside)))
                         || p.struct_fields(*d, args).unwrap_or_default().iter().any(|(_, t)| go(p, t, inside));
-                    inside.pop();
                     r
                 }
                 Ty::Tuple(ts) => ts.iter().any(|t| go(p, t, inside)),
@@ -1953,7 +1952,6 @@ fn hides_in(t: &Ty, p: &Program, send: &[u32], inside: &mut Vec<Ty>) -> bool {
                     super::env::DefKind::Enum { tags } => tags.values().any(|t| hides_in(&super::env::subst_params(t, &def.params, args), p, send, inside)),
                     _ => false,
                 };
-            inside.pop();
             r
         }
         Ty::Tuple(ts) => ts.iter().any(|t| hides_in(t, p, send, inside)),

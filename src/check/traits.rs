@@ -50,9 +50,11 @@ impl Program {
         self.copy_in(t, &mut Vec::new())
     }
 
-    // Each walk below keeps the nominal types it is inside: recursion goes through them (§3.3),
-    // and meeting one again is a cycle, which is decided coinductively — as the property's neutral
-    // value — rather than by unfolding it, which is exponential in a recursive type's branching.
+    // Each walk below keeps the nominal types it has visited: recursion goes through them (§3.3).
+    // Each property is an `all`, `any` or `max` over every type reachable from the one asked
+    // about, so meeting a visited type again — on a cycle, or on another path to it — adds
+    // nothing, and is decided as the property's neutral value. Keeping only the current path
+    // instead would revisit a type once per path to it: exponential in mutually recursive types.
     fn copy_in(&self, t: &Ty, inside: &mut Vec<Ty>) -> bool {
         match t {
             Ty::Prim(_) => true,
@@ -78,7 +80,6 @@ impl Program {
                     // Opaque library types own resources unless declared otherwise.
                     None => self.def_named(*d, &["Hasher"]),
                 };
-                inside.pop();
                 r
             }
             Ty::Param(_) | Ty::Var(_) | Ty::Fn(_) | Ty::Assoc(..) => false,
@@ -109,7 +110,6 @@ impl Program {
                 if c < 2 {
                     c = c.max(self.components(*d, args).map_or(1, |cs| cs.iter().map(|x| self.class_in(x, inside)).max().unwrap_or(1)));
                 }
-                inside.pop();
                 c
             }
             Ty::Fn(_) => 1,
@@ -142,7 +142,6 @@ impl Program {
                 }
                 inside.push(t.clone());
                 let r = Self::arg_types(args).find_map(|a| self.container_in(a, inside));
-                inside.pop();
                 r
             }
             _ => None,
@@ -177,7 +176,6 @@ impl Program {
                 inside.push(t.clone());
                 let r = Self::arg_types(args).all(|a| self.send_in(a, send_params, inside))
                     && self.components(*d, args).is_none_or(|cs| cs.iter().all(|c| self.send_in(c, send_params, inside)));
-                inside.pop();
                 r
             }
             // An escaping closure owns only `Send` values, and a lent one carries loans that keep

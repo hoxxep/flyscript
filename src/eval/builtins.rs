@@ -60,9 +60,15 @@ fn native(v: &Value, kind: &str) -> Result<u64, Ctl> {
     }
 }
 
+/// A string's bytes, as `asBytes` lends them: the string itself stands for its byte slice.
+fn bytes_of(s: &str) -> Vec<Value> {
+    s.bytes().map(|b| Value::Int(b as i128)).collect()
+}
+
 fn list(v: &Value) -> Vec<Value> {
     match v.deref() {
         Value::List(vs) | Value::Tuple(vs) => vs,
+        Value::Text(s) => bytes_of(&s),
         Value::Cell(c) => match &*c.lock().expect("cell") {
             Value::List(vs) => vs.clone(),
             _ => Vec::new(),
@@ -77,7 +83,18 @@ fn with_list<R>(v: &Value, f: impl FnOnce(&[Value]) -> R) -> R {
         Value::List(vs) | Value::Tuple(vs) => f(vs),
         Value::Ptr(p) => view(p, |x| with_list(x, f)),
         Value::Cell(c) | Value::Ref(c) => with_list(&c.lock().expect("cell"), f),
+        Value::Text(s) => f(&bytes_of(s)),
         _ => f(&[]),
+    }
+}
+
+/// The length of a list, or of the bytes a string stands for, without copying either.
+fn len_of(v: &Value) -> usize {
+    match v {
+        Value::Text(s) => s.len(),
+        Value::Ptr(p) => view(p, len_of),
+        Value::Cell(c) | Value::Ref(c) => len_of(&c.lock().expect("cell")),
+        _ => with_list(v, <[Value]>::len),
     }
 }
 
@@ -387,7 +404,8 @@ impl Interp {
                     _ => none(),
                 })
             }
-            "str.asBytes" => Ok(Value::List(a(0).as_text().bytes().map(|b| Value::Int(b as i128)).collect())),
+            // The string itself: indexing it gives a byte, and its length is in bytes.
+            "str.asBytes" => Ok(Value::Text(a(0).as_text())),
             "str.bytes" => {
                 for b in a(0).as_text().bytes() {
                     self.yield_value(Value::Int(b as i128))?;
@@ -451,7 +469,7 @@ impl Interp {
             }
 
             // ---- collections ----
-            "slice.len" | "Vec.len" => Ok(Value::Int(with_list(&a(0), <[Value]>::len) as i128)),
+            "slice.len" | "Vec.len" => Ok(Value::Int(len_of(&a(0)) as i128)),
             "slice.iter" | "Vec.iter" => Ok(gens_mod::new_gen(self, GenKind::Items { items: list(&a(0)), pos: 0 })),
             // Each element as a place in the collection, so the loop body writes through it.
             "slice.iterMut" | "Vec.iterMut" => {

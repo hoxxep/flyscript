@@ -108,7 +108,7 @@ const $rt = (() => {
   const isIterator = (v) => v !== null && typeof v === "object" && typeof v.next === "function" && typeof v[Symbol.iterator] === "function";
 
   function iter(v) {
-    if (Array.isArray(v) || v instanceof Gen || isIterator(v)) return v;
+    if (Array.isArray(v) || v instanceof Gen || v instanceof Bytes || isIterator(v)) return v;
     for (const t of userTypes(v)) {
       const each = userMethod(t, "each");
       if (each !== undefined) return each(v);
@@ -169,6 +169,21 @@ const $rt = (() => {
     constructor(text) { this.text = text; }
   }
 
+  // A string's bytes, `s.asBytes()`: a view of the string, not a copy of it.
+  class Bytes {
+    constructor(s) { this.s = s; }
+    get length() { return this.s.length; }
+    *[Symbol.iterator]() { for (let i = 0; i < this.s.length; i++) yield BigInt(this.s.charCodeAt(i)); }
+    array() { return Array.from(this); }
+  }
+  const BYTES = {
+    len: (b) => BigInt(b.s.length),
+    iter: (b) => gen(b), iterMut: (b) => gen(b),
+    *each(b) { yield* b; },
+    includes: (b, x) => b.s.indexOf(String.fromCharCode(Number(x))) >= 0,
+    clone: (b) => b.array(),
+  };
+
   // A region's mutable cell; copies of it are the same cell.
   class Cell {
     constructor(v) { this.v = v; }
@@ -192,6 +207,8 @@ const $rt = (() => {
 
   function eq(a, b) {
     if (a === b) return true;
+    if (a instanceof Bytes) return eq(a.array(), b instanceof Bytes ? b.array() : b);
+    if (b instanceof Bytes) return eq(a, b.array());
     // `Eq` on floats is total: NaN equals itself (§3.5).
     if (typeof a === "number" && typeof b === "number") return Number.isNaN(a) && Number.isNaN(b);
     if (typeof a !== "object" || typeof b !== "object" || a === null || b === null) return false;
@@ -325,6 +342,7 @@ const $rt = (() => {
       }
     }
     if (Array.isArray(v)) return "[" + v.map(show).join(", ") + "]";
+    if (v instanceof Bytes) return show(v.array());
     if (v.$tag !== undefined) return v.$ === undefined ? "#" + v.$tag : "#" + v.$tag + "(" + show(v.$) + ")";
     if (v instanceof HashMap) return "{ " + [...v.m.values()].map(([k, x]) => show(k) + ": " + show(x)).join(", ") + " }";
     const fields = Object.keys(v).filter((k) => k !== "$t").map((k) => k + ": " + show(v[k]));
@@ -339,7 +357,9 @@ const $rt = (() => {
   function idx(a, i) {
     const n = Number(i);
     if (n < 0 || n >= a.length) panic(`index ${i} out of bounds (length ${a.length})`);
-    return typeof a === "string" ? BigInt(a.charCodeAt(n)) : a[n];
+    if (typeof a === "string") return BigInt(a.charCodeAt(n));
+    if (a instanceof Bytes) return BigInt(a.s.charCodeAt(n));
+    return a[n];
   }
   function at(a, i) {
     const n = Number(i);
@@ -351,6 +371,7 @@ const $rt = (() => {
     if (l > h || h > a.length) panic(`range ${l}..${h} out of bounds (length ${a.length})`);
     // A string's bounds fall between characters: not on a UTF-8 continuation byte (§3.1).
     if (typeof a === "string" && (continuation(a, l) || continuation(a, h))) panic(`range ${l}..${h} splits a character`);
+    if (a instanceof Bytes) return new Bytes(a.s.slice(l, h));
     return a.slice(l, h);
   }
   const continuation = (s, i) => i < s.length && (s.charCodeAt(i) & 0xc0) === 0x80;
@@ -372,7 +393,7 @@ const $rt = (() => {
   const S = {
     asStr: (s) => s, toString: (s) => s, clone: (s) => s,
     len: (s) => BigInt(s.length),
-    asBytes: (s) => Array.from(s, (c) => BigInt(c.charCodeAt(0))),
+    asBytes: (s) => new Bytes(s),
     *bytes(s) { for (let i = 0; i < s.length; i++) yield BigInt(s.charCodeAt(i)); },
     *lines(s) { const ls = s.split("\n"); if (ls[ls.length - 1] === "") ls.pop(); yield* ls; },
     *splitWhitespace(s) { yield* s.split(/[ \t\n\r]+/).filter((w) => w !== ""); },
@@ -491,6 +512,7 @@ const $rt = (() => {
         if (v instanceof HashSet) return HS;
         if (v instanceof File) return FILE;
         if (v instanceof Cell) return CELL;
+        if (v instanceof Bytes) return BYTES;
         if (v instanceof Hasher) return HASHER;
         if (v.$tag === "Some" || v.$tag === "None") return O;
         if (v.$tag === "Ok" || v.$tag === "Err") return R;
@@ -514,6 +536,8 @@ const $rt = (() => {
   }
 
   function call(v, name, ...args) {
+    // A closure's parameter lent `mut` without a written type arrives as a reference.
+    if (v instanceof Ref) return callRef(v, name, ...args);
     const f = find(v, name);
     if (f === undefined) panic(`no method \`${name}\` on ${show(v)}`);
     return f(v, ...args);
