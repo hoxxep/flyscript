@@ -699,9 +699,8 @@ impl<'p> Own<'p> {
                         return false;
                     }
                     inside.push(t.clone());
-                    let r = args.iter().any(|a| matches!(a, GArg::Ty(t) if go(p, t, inside)))
-                        || p.struct_fields(*d, args).unwrap_or_default().iter().any(|(_, t)| go(p, t, inside));
-                    r
+                    args.iter().any(|a| matches!(a, GArg::Ty(t) if go(p, t, inside)))
+                        || p.struct_fields(*d, args).unwrap_or_default().iter().any(|(_, t)| go(p, t, inside))
                 }
                 Ty::Tuple(ts) => ts.iter().any(|t| go(p, t, inside)),
                 Ty::Record(r) | Ty::Union(r) => r.labels.values().any(|t| go(p, t, inside)),
@@ -1946,13 +1945,12 @@ fn hides_in(t: &Ty, p: &Program, send: &[u32], inside: &mut Vec<Ty>) -> bool {
                 return false;
             }
             inside.push(t.clone());
-            let r = args.iter().any(|a| matches!(a, GArg::Ty(t) if hides_in(t, p, send, inside)))
+            args.iter().any(|a| matches!(a, GArg::Ty(t) if hides_in(t, p, send, inside)))
                 || match &def.kind {
                     super::env::DefKind::Struct { .. } => p.struct_fields(*d, args).is_some_and(|fs| fs.iter().any(|(_, t)| hides_in(t, p, send, inside))),
                     super::env::DefKind::Enum { tags } => tags.values().any(|t| hides_in(&super::env::subst_params(t, &def.params, args), p, send, inside)),
                     _ => false,
-                };
-            r
+                }
         }
         Ty::Tuple(ts) => ts.iter().any(|t| hides_in(t, p, send, inside)),
         Ty::Record(r) | Ty::Union(r) => r.labels.values().any(|t| hides_in(t, p, send, inside)),

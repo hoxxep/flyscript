@@ -75,12 +75,11 @@ impl Program {
                     return true;
                 }
                 inside.push(t.clone());
-                let r = match self.components(*d, args) {
+                match self.components(*d, args) {
                     Some(cs) => cs.iter().all(|c| self.copy_in(c, inside)),
                     // Opaque library types own resources unless declared otherwise.
                     None => self.def_named(*d, &["Hasher"]),
-                };
-                r
+                }
             }
             Ty::Param(_) | Ty::Var(_) | Ty::Fn(_) | Ty::Assoc(..) => false,
             Ty::Error => true,
@@ -141,8 +140,7 @@ impl Program {
                     return None;
                 }
                 inside.push(t.clone());
-                let r = Self::arg_types(args).find_map(|a| self.container_in(a, inside));
-                r
+                Self::arg_types(args).find_map(|a| self.container_in(a, inside))
             }
             _ => None,
         }
@@ -174,9 +172,8 @@ impl Program {
                     return true;
                 }
                 inside.push(t.clone());
-                let r = Self::arg_types(args).all(|a| self.send_in(a, send_params, inside))
-                    && self.components(*d, args).is_none_or(|cs| cs.iter().all(|c| self.send_in(c, send_params, inside)));
-                r
+                Self::arg_types(args).all(|a| self.send_in(a, send_params, inside))
+                    && self.components(*d, args).is_none_or(|cs| cs.iter().all(|c| self.send_in(c, send_params, inside)))
             }
             // An escaping closure owns only `Send` values, and a lent one carries loans that keep
             // it from crossing to a task (§4.3), so every function value is `Send`.
