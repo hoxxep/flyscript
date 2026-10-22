@@ -1,0 +1,16 @@
+// A list literal where a `Vec` is wanted builds it.
+// expect: [1, 2, 3] 3
+// expect: ["a", "b"]
+// expect: 0
+import { println } from "std/io";
+
+function total(xs: Vec<i64>): i64 { let t: i64 = 0; for (const x of xs) { t += x; } t }
+
+export function main(): void uses Io {
+  let xs: Vec<i64> = [1, 2];
+  xs.push(3);
+  println(`${xs} ${xs.len()}`);
+  const names: Vec<String> = ["a".toString(), "b".toString()];
+  println(`${names}`);
+  println(`${total([])}`);
+}

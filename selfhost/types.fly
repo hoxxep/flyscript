@@ -1,0 +1,307 @@
+// Types as the checker sees them.
+
+// A rigid type, region or row parameter: unique per declaration, with a display name.
+export type Sym = { id: u32; name: String };
+
+export enum Prim { #I8, #I16, #I32, #I64, #Isize, #U8, #U16, #U32, #U64, #Usize, #F32, #F64, #Bool, #Str, #Void, #Never, #Type }
+impl Clone for Prim;
+impl Eq for Prim;
+
+const PRIMS: str[] = ["i8", "i16", "i32", "i64", "isize", "u8", "u16", "u32", "u64", "usize", "f32", "f64", "bool", "str", "void", "never", "Type"];
+
+export function primFromName(s: str): Option<Prim> {
+  match (PRIMS.indexOf(s)) {
+    #Some(i) => #Some(primAt(i)),
+    #None => #None,
+  }
+}
+
+function primAt(i: usize): Prim {
+  match (i) {
+    0 => #I8, 1 => #I16, 2 => #I32, 3 => #I64, 4 => #Isize, 5 => #U8, 6 => #U16, 7 => #U32, 8 => #U64,
+    9 => #Usize, 10 => #F32, 11 => #F64, 12 => #Bool, 13 => #Str, 14 => #Void, 15 => #Never, _ => #Type,
+  }
+}
+
+export function primName(p: Prim): str {
+  match (p) {
+    #I8 => "i8", #I16 => "i16", #I32 => "i32", #I64 => "i64", #Isize => "isize",
+    #U8 => "u8", #U16 => "u16", #U32 => "u32", #U64 => "u64", #Usize => "usize",
+    #F32 => "f32", #F64 => "f64", #Bool => "bool", #Str => "str", #Void => "void", #Never => "never", #Type => "Type",
+  }
+}
+
+export function isInt(p: Prim): bool {
+  match (p) { #I8 | #I16 | #I32 | #I64 | #Isize | #U8 | #U16 | #U32 | #U64 | #Usize => true, _ => false }
+}
+
+export function isFloat(p: Prim): bool { match (p) { #F32 | #F64 => true, _ => false } }
+
+export enum Region { #Var(u32), #Param(Sym), #Heap }
+impl Clone for Region;
+impl Eq for Region;
+
+export enum Tail { #Closed, #Var(u32), #Param(Sym) }
+impl Clone for Tail;
+impl Eq for Tail;
+
+// A record or tag-union row, its labels sorted by name. For a union, a tag's payload is `void`
+// (none), a tuple or a record.
+export struct Row { labels: Vec<[String, Ty]>; tail: Tail }
+impl Clone for Row;
+impl Eq for Row;
+
+// One effect in a row: its declaration, its region arguments (part of its label, §3.2) and its
+// other arguments (determined by the label).
+export struct Eff { def: usize; regions: Vec<Region>; args: Vec<Ty> }
+impl Clone for Eff;
+impl Eq for Eff;
+
+// `tail`'s `#Var` indexes the effect-row variables, not the record-row variables.
+export struct EffRow { effs: Vec<Eff>; tail: Tail }
+impl Clone for EffRow;
+impl Eq for EffRow;
+
+export function pure(): EffRow { EffRow { effs: Vec.new(), tail: #Closed } }
+
+export enum FnMode { #Shared, #Mut, #Once }
+impl Clone for FnMode;
+impl Eq for FnMode;
+
+export struct FnTy { mode: FnMode; params: Vec<Ty>; ret: Ty; effects: EffRow }
+impl Clone for FnTy;
+impl Eq for FnTy;
+
+export enum Len { #Known(u64), #Var(u32), #Param(Sym) }
+impl Clone for Len;
+impl Eq for Len;
+
+// A generic argument: generic parameters are types, regions, rows or lengths.
+export enum GArg { #Ty(Ty), #Region(Region), #Row(EffRow), #Len(Len) }
+impl Clone for GArg;
+impl Eq for GArg;
+
+export enum Ty {
+  #Var(u32),
+  #Param(Sym),
+  #Prim(Prim),
+  #Named(usize, Vec<GArg>),
+  #Record(Row),
+  #Union(Row),
+  #Tuple(Vec<Ty>),
+  #Array(Box<Ty>, Len),
+  #Slice(Box<Ty>),
+  #Borrow(bool, Box<Ty>),
+  #Fn(Box<FnTy>),
+  // An associated type projection, `C.View`, normalized once `C` is known.
+  #Assoc(Box<Ty>, String),
+  // A type that has already produced an error; unifies with anything.
+  #Error,
+}
+impl Clone for Ty;
+impl Eq for Ty;
+
+export function voidTy(): Ty { #Prim(#Void) }
+export function neverTy(): Ty { #Prim(#Never) }
+export function boolTy(): Ty { #Prim(#Bool) }
+export function isNever(t: readonly Ty): bool { match (t) { #Prim(#Never) => true, _ => false } }
+export function isVoid(t: readonly Ty): bool { match (t) { #Prim(#Void) => true, _ => false } }
+
+// ---- labels: a sorted map from names to types ----
+
+export function labelIndex(labels: readonly Vec<[String, Ty]>, k: str): Option<usize> {
+  labels.iter().findIndex(([n, _]) => n == k)
+}
+
+export function labelGet(labels: readonly Vec<[String, Ty]>, k: str): Option<Ty> {
+  match (labelIndex(labels, k)) { #Some(i) => #Some(labels[i][1].clone()), #None => #None }
+}
+
+export function labelHas(labels: readonly Vec<[String, Ty]>, k: str): bool { labelIndex(labels, k).isSome() }
+
+// Inserts or replaces, keeping the labels sorted.
+export function labelSet(labels: mut Vec<[String, Ty]>, k: str, t: Ty): void {
+  let i: usize = 0;
+  while (i < labels.len()) {
+    if (labels[i][0] == k) {
+      labels[i] = [k.toString(), t];
+      return;
+    }
+    if (labels[i][0].asStr().cmp(k) == #Greater) { break; }
+    i += 1;
+  }
+  labels.insert(i, [k.toString(), t]);
+}
+
+export function closedRow(labels: Vec<[String, Ty]>): Row { Row { labels, tail: #Closed } }
+
+// ---- display ----
+
+export function showTy(t: readonly Ty, names: readonly Vec<String>): String {
+  let out = String.new();
+  writeTy(t, names, mut out);
+  out
+}
+
+function defName(names: readonly Vec<String>, d: usize): str {
+  if (d < names.len()) { names[d].asStr() } else { "?" }
+}
+
+export function writeTy(t: readonly Ty, names: readonly Vec<String>, out: mut String): void {
+  match (t) {
+    #Var(v) => out.push(`?${v}`),
+    #Param(s) => out.push(s.name),
+    #Prim(p) => out.push(primName(p)),
+    #Named(d, args) => {
+      out.push(defName(names, d));
+      if (args.len() > 0) {
+        out.push("<");
+        for (const [i, a] of args.iter().enumerate()) {
+          if (i > 0) { out.push(", "); }
+          writeArg(a, names, mut out);
+        }
+        out.push(">");
+      }
+    }
+    #Record(r) => {
+      out.push("{ ");
+      for (const [k, v] of r.labels) {
+        out.push(k);
+        out.push(": ");
+        writeTy(v, names, mut out);
+        out.push("; ");
+      }
+      writeTail(r.tail, "...", "r", mut out);
+      out.push("}");
+    }
+    #Union(r) => {
+      for (const [i, [k, v]] of r.labels.iter().enumerate()) {
+        if (i > 0) { out.push(" | "); }
+        out.push("#");
+        out.push(k);
+        match (v) {
+          #Prim(#Void) => {}
+          #Tuple(ts) => {
+            out.push("(");
+            writeList(ts, names, mut out);
+            out.push(")");
+          }
+          other => {
+            out.push(" ");
+            writeTy(other, names, mut out);
+          }
+        }
+      }
+      if (r.tail != #Closed) {
+        out.push(" | ");
+        writeTail(r.tail, "...", "r", mut out);
+      }
+    }
+    #Tuple(ts) => {
+      out.push("[");
+      writeList(ts, names, mut out);
+      out.push("]");
+    }
+    #Array(e, len) => {
+      writeTy(e, names, mut out);
+      out.push("[");
+      match (len) {
+        #Known(k) => out.push(`${k}`),
+        #Var(v) => out.push(`?${v}`),
+        #Param(s) => out.push(s.name),
+      }
+      out.push("]");
+    }
+    #Slice(e) => {
+      writeTy(e, names, mut out);
+      out.push("[]");
+    }
+    #Borrow(m, e) => {
+      out.push(if (m) { "mut " } else { "readonly " });
+      writeTy(e, names, mut out);
+    }
+    #Fn(f) => {
+      out.push(match (f.mode) { #Shared => "", #Mut => "mut ", #Once => "once " });
+      out.push("(");
+      writeList(f.params, names, mut out);
+      out.push(") => ");
+      writeTy(f.ret, names, mut out);
+      if (f.effects.effs.len() > 0 || f.effects.tail != #Closed) {
+        out.push(" uses ");
+        writeEffs(f.effects, names, mut out);
+      }
+    }
+    #Assoc(base, n) => {
+      writeTy(base, names, mut out);
+      out.push(".");
+      out.push(n);
+    }
+    #Error => out.push("{error}"),
+  }
+}
+
+function writeList(ts: readonly Vec<Ty>, names: readonly Vec<String>, out: mut String): void {
+  for (const [i, t] of ts.iter().enumerate()) {
+    if (i > 0) { out.push(", "); }
+    writeTy(t, names, mut out);
+  }
+}
+
+// Row and effect variables print as `?r3` and `?e3`, distinct from type variables `?3`.
+function writeTail(tail: readonly Tail, prefix: str, kind: str, out: mut String): void {
+  match (tail) {
+    #Closed => {}
+    #Var(v) => out.push(`${prefix}?${kind}${v}`),
+    #Param(s) => out.push(`${prefix}${s.name}`),
+  }
+}
+
+export function writeArg(a: readonly GArg, names: readonly Vec<String>, out: mut String): void {
+  match (a) {
+    #Ty(t) => writeTy(t, names, mut out),
+    #Region(r) => writeRegion(r, mut out),
+    #Row(r) => {
+      out.push("[");
+      writeEffs(r, names, mut out);
+      out.push("]");
+    }
+    #Len(l) => match (l) {
+      #Known(k) => out.push(`${k}`),
+      #Var(v) => out.push(`?${v}`),
+      #Param(s) => out.push(s.name),
+    },
+  }
+}
+
+export function writeRegion(r: readonly Region, out: mut String): void {
+  match (r) {
+    #Var(v) => out.push(`'?${v}`),
+    #Param(s) => out.push(s.name),
+    #Heap => out.push("Heap"),
+  }
+}
+
+export function writeEff(e: readonly Eff, names: readonly Vec<String>, out: mut String): void {
+  out.push(defName(names, e.def));
+  if (e.regions.len() > 0 || e.args.len() > 0) {
+    out.push("<");
+    for (const [i, r] of e.regions.iter().enumerate()) {
+      if (i > 0) { out.push(", "); }
+      writeRegion(r, mut out);
+    }
+    if (e.regions.len() > 0 && e.args.len() > 0) { out.push(", "); }
+    writeList(e.args, names, mut out);
+    out.push(">");
+  }
+}
+
+export function writeEffs(r: readonly EffRow, names: readonly Vec<String>, out: mut String): void {
+  for (const [i, e] of r.effs.iter().enumerate()) {
+    if (i > 0) { out.push(", "); }
+    writeEff(e, names, mut out);
+  }
+  if (r.tail != #Closed) {
+    if (r.effs.len() > 0) { out.push(", "); }
+    writeTail(r.tail, "...", "e", mut out);
+  }
+}

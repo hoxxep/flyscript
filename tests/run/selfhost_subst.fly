@@ -1,0 +1,88 @@
+// The self-hosted checker's unifier, on the cases src/check/subst.rs tests.
+// expect: row-polymorphic record: ok, closed record missing a field: mismatch
+// expect: open unions merge and close: #Bad | #Eof
+// expect: union inclusion: ok, then mismatch
+// expect: innermost region solves a variable: R2; undeclared effect: misfit
+// expect: an open row extends: 1
+import { Sym, Region, Tail, Row, Eff, EffRow, Ty, showTy, labelSet } from "../../selfhost/types";
+import { Subst } from "../../selfhost/subst";
+import { println } from "std/io";
+
+function rec(s: mut Subst, fields: Vec<[String, Ty]>, open: bool): Ty {
+  let labels: Vec<[String, Ty]> = Vec.new();
+  for (const [k, t] of fields) { labelSet(mut labels, k.asStr(), t.clone()); }
+  const tail = if (open) { s.freshRowTail() } else { #Closed };
+  #Record(Row { labels, tail })
+}
+
+function tags(s: mut Subst, names: str[], open: bool): Ty {
+  let labels: Vec<[String, Ty]> = Vec.new();
+  for (const n of names) { labelSet(mut labels, n, #Prim(#Void)); }
+  const tail = if (open) { s.freshRowTail() } else { #Closed };
+  #Union(Row { labels, tail })
+}
+
+function verdict(f: once () => void uses Fail<#Mismatch>): String {
+  try { f(); "ok".toString() } catch (_) { "mismatch".toString() }
+}
+
+export function main(): void uses Io {
+  let s = Subst.new();
+  const f64t: Ty = #Prim(#F64);
+  let xy: Vec<[String, Ty]> = Vec.new();
+  xy.push(["x".toString(), f64t.clone()]);
+  xy.push(["y".toString(), f64t.clone()]);
+  const want = rec(mut s, xy.clone(), true);
+  let xyl = xy.clone();
+  xyl.push(["label".toString(), #Prim(#Str)]);
+  const have = rec(mut s, xyl, false);
+  const a = verdict(() => s.unify(want, have));
+  let x: Vec<[String, Ty]> = Vec.new();
+  x.push(["x".toString(), f64t.clone()]);
+  const missing = rec(mut s, x, false);
+  let y: Vec<[String, Ty]> = Vec.new();
+  y.push(["y".toString(), f64t.clone()]);
+  const want2 = rec(mut s, y, false);
+  const b = verdict(() => s.unify(want2, missing));
+  println(`row-polymorphic record: ${a}, closed record missing a field: ${b}`);
+
+  let u = Subst.new();
+  const eof = tags(mut u, ["Eof"], true);
+  const bad = tags(mut u, ["Bad"], true);
+  verdict(() => u.unify(eof, bad));
+  u.closeUnion(eof);
+  println(`open unions merge and close: ${showTy(u.zonk(eof), Vec.new())}`);
+
+  let i = Subst.new();
+  const declared = tags(mut i, ["Eof", "Bad"], false);
+  const thrown = tags(mut i, ["Eof"], true);
+  const first = verdict(() => i.unionSub(thrown, declared));
+  const other = tags(mut i, ["Other"], true);
+  const second = verdict(() => i.unionSub(other, declared));
+  println(`union inclusion: ${first}, then ${second}`);
+
+  let e = Subst.new();
+  const r1: Region = #Param({ id: 1, name: "R1".toString() });
+  const r2: Region = #Param({ id: 2, name: "R2".toString() });
+  let allowedEffs: Vec<Eff> = Vec.new();
+  allowedEffs.push(Eff { def: 1, regions: [r2.clone()], args: Vec.new() });
+  allowedEffs.push(Eff { def: 1, regions: [r1.clone()], args: Vec.new() });
+  allowedEffs.push(Eff { def: 0, regions: Vec.new(), args: Vec.new() });
+  const allowed = EffRow { effs: allowedEffs, tail: #Closed };
+  const v = e.freshRegion();
+  let fresh: Vec<Eff> = Vec.new();
+  fresh.push(Eff { def: 1, regions: [v.clone()], args: Vec.new() });
+  try { e.effSub(EffRow { effs: fresh, tail: #Closed }, allowed); } catch (_) {}
+  const solved = match (e.resolveRegion(v)) { #Param(sym) => sym.name.clone(), _ => "unsolved".toString() };
+  let undeclared: Vec<Eff> = Vec.new();
+  undeclared.push(Eff { def: 9, regions: Vec.new(), args: Vec.new() });
+  const misfit = try { e.effSub(EffRow { effs: undeclared, tail: #Closed }, allowed); "fits".toString() } catch (_) { "misfit".toString() };
+  println(`innermost region solves a variable: ${solved}; undeclared effect: ${misfit}`);
+
+  let o = Subst.new();
+  const open = o.freshEffs();
+  let body: Vec<Eff> = Vec.new();
+  body.push(Eff { def: 3, regions: Vec.new(), args: Vec.new() });
+  try { o.effSub(EffRow { effs: body, tail: #Closed }, open); } catch (_) {}
+  println(`an open row extends: ${o.expandEffs(open).effs.len()}`);
+}

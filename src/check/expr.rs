@@ -1256,6 +1256,15 @@ impl<'p> Checker<'p> {
                 }
                 Ty::Array(elem, Len::Known(items.len() as u64))
             }
+            // A list where a `Vec` is wanted builds it, as an array literal does in TypeScript.
+            Some(Ty::Named(d, args)) if self.p.known.get("Vec") == Some(&d) => {
+                if let Some(GArg::Ty(elem)) = args.first() {
+                    for it in items {
+                        self.slot(it, elem);
+                    }
+                }
+                Ty::Named(d, args)
+            }
             // With nothing expected, a list is an array if its items agree, as in TypeScript, and a
             // tuple if they do not.
             _ => {

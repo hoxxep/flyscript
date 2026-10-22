@@ -1,0 +1,554 @@
+// Inference variables and unification.
+//
+// Records and tag unions use Rémy-style row unification. Effect rows are sets (§3.2): a body's
+// effects are checked by *subsumption* into an allowed row, where region arguments are part of
+// an effect's label and its other arguments unify, and `Fail` payloads (tag unions) are compared
+// by inclusion so error sets compose by union.
+
+import {
+  Sym, Prim, Region, Tail, Row, Eff, EffRow, FnTy, Len, GArg, Ty, isInt, isFloat, voidTy, labelGet, labelHas,
+  labelSet,
+} from "./types";
+
+export enum VarKind { #Any, #Int, #Float }
+impl Clone for VarKind;
+impl Eq for VarKind;
+
+// Unification failed; the caller reports the types it was comparing.
+export type Mismatch = #Mismatch;
+
+// An effect that does not fit the allowed row.
+export type Misfit = #Misfit(Eff);
+
+export struct Subst {
+  tys: Vec<[Option<Ty>, VarKind]>;
+  rows: Vec<Option<Row>>;
+  effs: Vec<Option<EffRow>>;
+  regions: Vec<Option<Region>>;
+  lens: Vec<Option<Len>>;
+}
+impl Clone for Subst;
+
+// Binds a region variable in `regions`, which is a substitution's or a trial copy of one.
+function unifyRegionIn(regions: mut Vec<Option<Region>>, a: readonly Region, b: readonly Region): void uses Fail<Mismatch> {
+  const x = resolveRegionIn(regions, a);
+  const y = resolveRegionIn(regions, b);
+  if (x == y) { return; }
+  match (x) {
+    #Var(v) => { regions[v as usize] = #Some(y); return; }
+    _ => {}
+  }
+  match (y) {
+    #Var(v) => { regions[v as usize] = #Some(x); }
+    _ => throw #Mismatch,
+  }
+}
+
+function resolveRegionIn(regions: readonly Vec<Option<Region>>, r: readonly Region): Region {
+  let r = r.clone();
+  while (const #Var(v) = r) {
+    match (regions[v as usize]) {
+      #Some(b) => { r = b.clone(); }
+      #None => return r,
+    }
+  }
+  r
+}
+
+function ok(f: once () => void uses Fail<Mismatch>): bool {
+  try { f(); true } catch (_) { false }
+}
+
+impl Subst {
+  export function new(): Subst {
+    Subst { tys: Vec.new(), rows: Vec.new(), effs: Vec.new(), regions: Vec.new(), lens: Vec.new() }
+  }
+
+  // ---- fresh variables ----
+
+  export function fresh(self: mut Self): Ty { self.freshKind(#Any) }
+
+  export function freshKind(self: mut Self, kind: VarKind): Ty {
+    self.tys.push([#None, kind]);
+    #Var((self.tys.len() - 1) as u32)
+  }
+
+  export function freshRowTail(self: mut Self): Tail {
+    self.rows.push(#None);
+    #Var((self.rows.len() - 1) as u32)
+  }
+
+  export function freshEffTail(self: mut Self): Tail {
+    self.effs.push(#None);
+    #Var((self.effs.len() - 1) as u32)
+  }
+
+  export function freshEffs(self: mut Self): EffRow { EffRow { effs: Vec.new(), tail: self.freshEffTail() } }
+
+  export function freshRegion(self: mut Self): Region {
+    self.regions.push(#None);
+    #Var((self.regions.len() - 1) as u32)
+  }
+
+  export function freshLen(self: mut Self): Len {
+    self.lens.push(#None);
+    #Var((self.lens.len() - 1) as u32)
+  }
+
+  export function kind(self: readonly Self, v: u32): VarKind { self.tys[v as usize][1] }
+
+  // ---- resolution ----
+
+  // Follows variable bindings at the top of a type.
+  export function resolve(self: readonly Self, t: readonly Ty): Ty {
+    let t = t.clone();
+    while (const #Var(v) = t) {
+      match (self.tys[v as usize][0]) {
+        #Some(b) => { t = b.clone(); }
+        #None => return t,
+      }
+    }
+    t
+  }
+
+  export function resolveRegion(self: readonly Self, r: readonly Region): Region { resolveRegionIn(self.regions, r) }
+
+  export function resolveLen(self: readonly Self, l: readonly Len): Len {
+    let l = l.clone();
+    while (const #Var(v) = l) {
+      match (self.lens[v as usize]) {
+        #Some(b) => { l = b.clone(); }
+        #None => return l,
+      }
+    }
+    l
+  }
+
+  // A row with every bound tail variable folded in.
+  export function expandRow(self: readonly Self, r: readonly Row): Row {
+    let labels = r.labels.clone();
+    let tail = r.tail.clone();
+    while (const #Var(v) = tail) {
+      match (self.rows[v as usize]) {
+        #Some(b) => {
+          for (const [k, t] of b.labels) { labelSet(mut labels, k.asStr(), t.clone()); }
+          tail = b.tail.clone();
+        }
+        #None => break,
+      }
+    }
+    Row { labels, tail }
+  }
+
+  export function expandEffs(self: readonly Self, r: readonly EffRow): EffRow {
+    let effs = r.effs.clone();
+    let tail = r.tail.clone();
+    while (const #Var(v) = tail) {
+      match (self.effs[v as usize]) {
+        #Some(b) => {
+          for (const e of b.effs) { effs.push(e.clone()); }
+          tail = b.tail.clone();
+        }
+        #None => break,
+      }
+    }
+    EffRow { effs, tail }
+  }
+
+  // Fully resolves a type, for printing and for final checks.
+  export function zonk(self: readonly Self, t: readonly Ty): Ty {
+    match (self.resolve(t)) {
+      #Named(d, args) => {
+        let out: Vec<GArg> = Vec.new();
+        for (const a of args) { out.push(self.zonkArg(a)); }
+        #Named(d, out)
+      }
+      #Record(r) => #Record(self.zonkRow(r)),
+      #Union(r) => #Union(self.zonkRow(r)),
+      #Tuple(ts) => {
+        let out: Vec<Ty> = Vec.new();
+        for (const x of ts) { out.push(self.zonk(x)); }
+        if (out.len() == 1 && out[0] == voidTy()) { voidTy() } else { #Tuple(out) }
+      }
+      #Array(e, l) => #Array(Box.new(self.zonk(e)), self.resolveLen(l)),
+      #Slice(e) => #Slice(Box.new(self.zonk(e))),
+      #Borrow(m, e) => #Borrow(m, Box.new(self.zonk(e))),
+      #Fn(f) => {
+        let params: Vec<Ty> = Vec.new();
+        for (const p of f.params) { params.push(self.zonk(p)); }
+        #Fn(Box.new(FnTy { mode: f.mode, params, ret: self.zonk(f.ret), effects: self.zonkEffs(f.effects) }))
+      }
+      #Assoc(base, n) => #Assoc(Box.new(self.zonk(base)), n),
+      other => other,
+    }
+  }
+
+  export function zonkArg(self: readonly Self, a: readonly GArg): GArg {
+    match (a) {
+      #Ty(t) => #Ty(self.zonk(t)),
+      #Region(r) => #Region(self.resolveRegion(r)),
+      #Row(r) => #Row(self.zonkEffs(r)),
+      #Len(l) => #Len(self.resolveLen(l)),
+    }
+  }
+
+  export function zonkRow(self: readonly Self, r: readonly Row): Row {
+    const e = self.expandRow(r);
+    let labels: Vec<[String, Ty]> = Vec.new();
+    for (const [k, t] of e.labels) { labels.push([k.clone(), self.zonk(t)]); }
+    Row { labels, tail: e.tail }
+  }
+
+  export function zonkEffs(self: readonly Self, r: readonly EffRow): EffRow {
+    const e = self.expandEffs(r);
+    let effs: Vec<Eff> = Vec.new();
+    for (const x of e.effs) {
+      let regions: Vec<Region> = Vec.new();
+      for (const g of x.regions) { regions.push(self.resolveRegion(g)); }
+      let args: Vec<Ty> = Vec.new();
+      for (const t of x.args) { args.push(self.zonk(t)); }
+      effs.push(Eff { def: x.def, regions, args });
+    }
+    EffRow { effs, tail: e.tail }
+  }
+
+  // ---- binding ----
+
+  function occurs(self: readonly Self, v: u32, t: readonly Ty): bool {
+    match (self.resolve(t)) {
+      #Var(w) => w == v,
+      #Named(_, args) => args.iter().some((a) => match (a) { #Ty(x) => self.occurs(v, x), _ => false }),
+      #Record(r) | #Union(r) => self.expandRow(r).labels.iter().some(([_, x]) => self.occurs(v, x)),
+      #Tuple(ts) => ts.iter().some((x) => self.occurs(v, x)),
+      #Array(x, _) | #Slice(x) | #Borrow(_, x) | #Assoc(x, _) => self.occurs(v, x),
+      #Fn(f) => f.params.iter().some((x) => self.occurs(v, x)) || self.occurs(v, f.ret),
+      _ => false,
+    }
+  }
+
+  function bindTy(self: mut Self, v: u32, t: Ty): void uses Fail<Mismatch> {
+    if (const #Var(w) = t) {
+      if (w == v) { return; }
+      const [a, b] = [self.kind(v), self.kind(w)];
+      const merged: VarKind = match ([a, b]) {
+        [#Any, k] | [k, #Any] => k,
+        [x, y] if x == y => x,
+        _ => throw #Mismatch,
+      };
+      self.tys[w as usize][1] = merged;
+      self.tys[v as usize][0] = #Some(#Var(w));
+      return;
+    }
+    const fits = match (self.kind(v)) {
+      #Any => true,
+      #Int => match (t) { #Prim(p) => isInt(p), #Error => true, _ => false },
+      #Float => match (t) { #Prim(p) => isFloat(p), #Error => true, _ => false },
+    };
+    if (!fits || self.occurs(v, t)) { throw #Mismatch; }
+    self.tys[v as usize][0] = #Some(t);
+  }
+
+  // ---- unification ----
+
+  export function unify(self: mut Self, a: readonly Ty, b: readonly Ty): void uses Fail<Mismatch> {
+    const x = self.resolve(a);
+    const y = self.resolve(b);
+    match ([x, y]) {
+      [#Error, _] | [_, #Error] => {}
+      [#Prim(#Never), _] | [_, #Prim(#Never)] => {}
+      [#Var(v), other] | [other, #Var(v)] => self.bindTy(v, other),
+      // A payload of one `void` is no payload: `#Ok` is a `Result<void, E>`'s `#Ok`.
+      [#Tuple(ts), #Prim(#Void)] | [#Prim(#Void), #Tuple(ts)] if ts.len() == 1 => self.unify(ts[0], voidTy()),
+      [#Param(p), #Param(q)] if p == q => {}
+      [#Prim(p), #Prim(q)] if p == q => {}
+      [#Named(d1, a1), #Named(d2, a2)] if d1 == d2 && a1.len() == a2.len() => {
+        for (const i of 0..a1.len()) { self.unifyArg(a1[i], a2[i]); }
+      }
+      [#Record(r1), #Record(r2)] | [#Union(r1), #Union(r2)] => self.unifyRows(r1, r2),
+      [#Tuple(t1), #Tuple(t2)] if t1.len() == t2.len() => {
+        for (const i of 0..t1.len()) { self.unify(t1[i], t2[i]); }
+      }
+      [#Array(t1, l1), #Array(t2, l2)] => {
+        self.unify(t1, t2);
+        self.unifyLen(l1, l2);
+      }
+      [#Slice(t1), #Slice(t2)] => self.unify(t1, t2),
+      [#Borrow(m1, t1), #Borrow(m2, t2)] if m1 == m2 => self.unify(t1, t2),
+      [#Fn(f1), #Fn(f2)] if f1.params.len() == f2.params.len() => {
+        for (const i of 0..f1.params.len()) { self.unify(f1.params[i], f2.params[i]); }
+        self.unify(f1.ret, f2.ret);
+        self.effSubOrMismatch(f1.effects, f2.effects);
+        self.effSubOrMismatch(f2.effects, f1.effects);
+      }
+      [#Assoc(t1, n1), #Assoc(t2, n2)] if n1 == n2 => self.unify(t1, t2),
+      _ => throw #Mismatch,
+    }
+  }
+
+  function effSubOrMismatch(self: mut Self, a: readonly EffRow, b: readonly EffRow): void uses Fail<Mismatch> {
+    try { self.effSub(a, b); } catch (_) { throw #Mismatch; }
+  }
+
+  // Whether `a` and `b` unify, binding variables if they do and changing nothing if not.
+  export function tryUnify(self: mut Self, a: readonly Ty, b: readonly Ty): bool {
+    const snap = self.clone();
+    try {
+      self.unify(a, b);
+      true
+    } catch (_) {
+      self.restore(snap);
+      false
+    }
+  }
+
+  export function restore(self: mut Self, s: Subst): void {
+    self.tys = s.tys;
+    self.rows = s.rows;
+    self.effs = s.effs;
+    self.regions = s.regions;
+    self.lens = s.lens;
+  }
+
+  export function unifyArg(self: mut Self, a: readonly GArg, b: readonly GArg): void uses Fail<Mismatch> {
+    match ([a, b]) {
+      [#Ty(x), #Ty(y)] => self.unify(x, y),
+      [#Region(x), #Region(y)] => self.unifyRegion(x, y),
+      [#Row(x), #Row(y)] => {
+        // A row that is only a variable becomes the other row.
+        const ex = self.expandEffs(x);
+        const ey = self.expandEffs(y);
+        if (ex.effs.len() == 0) {
+          if (const #Var(v) = ex.tail) {
+            if (ey.tail != ex.tail) { self.effs[v as usize] = #Some(ey); }
+            return;
+          }
+        }
+        if (ey.effs.len() == 0) {
+          if (const #Var(v) = ey.tail) {
+            if (ex.tail != ey.tail) { self.effs[v as usize] = #Some(ex); }
+            return;
+          }
+        }
+        self.effSubOrMismatch(x, y);
+        self.effSubOrMismatch(y, x);
+      }
+      [#Len(x), #Len(y)] => self.unifyLen(x, y),
+      _ => throw #Mismatch,
+    }
+  }
+
+  export function unifyRegion(self: mut Self, a: readonly Region, b: readonly Region): void uses Fail<Mismatch> {
+    unifyRegionIn(mut self.regions, a, b);
+  }
+
+  export function unifyLen(self: mut Self, a: readonly Len, b: readonly Len): void uses Fail<Mismatch> {
+    const x = self.resolveLen(a);
+    const y = self.resolveLen(b);
+    if (x == y) { return; }
+    match (x) {
+      #Var(v) => { self.lens[v as usize] = #Some(y); return; }
+      _ => {}
+    }
+    match (y) {
+      #Var(v) => { self.lens[v as usize] = #Some(x); }
+      _ => throw #Mismatch,
+    }
+  }
+
+  function bindRowTail(self: mut Self, tail: readonly Tail, labels: Vec<[String, Ty]>, rest: Tail): void uses Fail<Mismatch> {
+    match (tail) {
+      #Var(v) => {
+        if (labels.len() == 0 && rest == tail) { return; }
+        self.rows[v as usize] = #Some(Row { labels, tail: rest });
+      }
+      _ => {
+        if (!(labels.len() == 0 && rest == tail)) { throw #Mismatch; }
+      }
+    }
+  }
+
+  // Rémy row unification for records and tag unions.
+  export function unifyRows(self: mut Self, a: readonly Row, b: readonly Row): void uses Fail<Mismatch> {
+    const ra = self.expandRow(a);
+    const rb = self.expandRow(b);
+    for (const [k, ta] of ra.labels) {
+      if (const #Some(tb) = labelGet(rb.labels, k.asStr())) { self.unify(ta, tb); }
+    }
+    let onlyA: Vec<[String, Ty]> = Vec.new();
+    for (const [k, t] of ra.labels) { if (!labelHas(rb.labels, k.asStr())) { onlyA.push([k.clone(), t.clone()]); } }
+    let onlyB: Vec<[String, Ty]> = Vec.new();
+    for (const [k, t] of rb.labels) { if (!labelHas(ra.labels, k.asStr())) { onlyB.push([k.clone(), t.clone()]); } }
+    match ([ra.tail.clone(), rb.tail.clone()]) {
+      [#Var(x), #Var(y)] if x == y => {
+        if (onlyA.len() > 0 || onlyB.len() > 0) { throw #Mismatch; }
+      }
+      [#Var(_), #Var(_)] => {
+        const fresh = self.freshRowTail();
+        self.bindRowTail(ra.tail, onlyB, fresh.clone());
+        self.bindRowTail(rb.tail, onlyA, fresh);
+      }
+      [#Var(_), other] => {
+        if (onlyA.len() > 0) { throw #Mismatch; }
+        self.bindRowTail(ra.tail, onlyB, other.clone());
+      }
+      [other, #Var(_)] => {
+        if (onlyB.len() > 0) { throw #Mismatch; }
+        self.bindRowTail(rb.tail, onlyA, other.clone());
+      }
+      [x, y] => {
+        if (!(x == y && onlyA.len() == 0 && onlyB.len() == 0)) { throw #Mismatch; }
+      }
+    }
+  }
+
+  // Tag-union inclusion: every tag `actual` may carry is allowed by `allowed`. Used for `Fail`
+  // payloads, so that failure sets compose by union.
+  export function unionSub(self: mut Self, actual: readonly Ty, allowed: readonly Ty): void uses Fail<Mismatch> {
+    const a = self.resolve(actual);
+    const b = self.resolve(allowed);
+    const [ra0, rb0] = match ([a.clone(), b.clone()]) {
+      [#Union(x), #Union(y)] => [x, y],
+      _ => return self.unify(a, b),
+    };
+    const ra = self.expandRow(ra0);
+    let rb = self.expandRow(rb0);
+    for (const [k, ta] of ra.labels) {
+      match (labelGet(rb.labels, k.asStr())) {
+        #Some(tb) => self.unify(ta, tb),
+        #None => {
+          if (const #Var(_) = rb.tail) {
+            const rest = self.freshRowTail();
+            let one: Vec<[String, Ty]> = Vec.new();
+            one.push([k.clone(), ta.clone()]);
+            self.bindRowTail(rb.tail, one, rest);
+            rb = self.expandRow(rb);
+          } else {
+            throw #Mismatch;
+          }
+        }
+      }
+    }
+    match ([ra.tail.clone(), rb.tail.clone()]) {
+      [#Var(_), t] => self.bindRowTail(ra.tail, Vec.new(), t.clone()),
+      [#Closed, _] => {}
+      [#Param(p), #Param(q)] if p == q => {}
+      [#Param(_), #Var(_)] => self.bindRowTail(rb.tail, Vec.new(), ra.tail.clone()),
+      _ => throw #Mismatch,
+    }
+  }
+
+  // Closes every record and union row in `t` whose tail is still a variable: once a function's
+  // types are final, nothing can add labels to them (§3.2).
+  export function closeRows(self: mut Self, t: readonly Ty): void {
+    match (self.resolve(t)) {
+      #Record(r) | #Union(r) => {
+        const e = self.expandRow(r);
+        if (const #Var(_) = e.tail) { try { self.bindRowTail(e.tail, Vec.new(), #Closed); } catch (_) {} }
+        for (const [_, x] of e.labels) { self.closeRows(x); }
+      }
+      #Named(_, args) => {
+        for (const a of args) { if (const #Ty(x) = a) { self.closeRows(x); } }
+      }
+      #Tuple(ts) => { for (const x of ts) { self.closeRows(x); } }
+      #Array(x, _) | #Slice(x) | #Borrow(_, x) => self.closeRows(x),
+      _ => {}
+    }
+  }
+
+  // Closes the open tail of a tag union (handling `Fail`, §5.4).
+  export function closeUnion(self: mut Self, t: readonly Ty): void {
+    if (const #Union(r) = self.resolve(t)) {
+      const e = self.expandRow(r);
+      if (const #Var(_) = e.tail) { try { self.bindRowTail(e.tail, Vec.new(), #Closed); } catch (_) {} }
+    }
+  }
+
+  // Binds an unbound record- or union-row variable to `row`.
+  export function bindRow(self: mut Self, v: u32, row: Row): void { self.rows[v as usize] = #Some(row); }
+
+  // Binds an unbound effect-row variable to `row`.
+  export function bindEffs(self: mut Self, v: u32, row: EffRow): void { self.effs[v as usize] = #Some(row); }
+
+  export function regionsEqual(self: readonly Self, a: readonly Vec<Region>, b: readonly Vec<Region>): bool {
+    if (a.len() != b.len()) { return false; }
+    for (const i of 0..a.len()) { if (self.resolveRegion(a[i]) != self.resolveRegion(b[i])) { return false; } }
+    true
+  }
+
+  // Whether `a`'s regions and `b`'s unify, changing nothing.
+  function regionsUnify(self: readonly Self, a: readonly Vec<Region>, b: readonly Vec<Region>): bool {
+    let probe = self.regions.clone();
+    try {
+      for (const i of 0..min(a.len(), b.len())) { unifyRegionIn(mut probe, a[i], b[i]); }
+      true
+    } catch (_) { false }
+  }
+
+  // Effect-row subsumption: every effect of `actual` is in `allowed`, extending `allowed`'s open
+  // tail where needed. On failure, fails with the effect that does not fit.
+  export function effSub(self: mut Self, actual: readonly EffRow, allowed: readonly EffRow): void uses Fail<Misfit> {
+    const act = self.expandEffs(actual);
+    for (const eff of act.effs) {
+      const row = self.expandEffs(allowed);
+      // Prefer an exact region match; otherwise the first (innermost) effect of the same name
+      // whose regions unify.
+      let candidate: Option<Eff> = #None;
+      for (const c of row.effs) {
+        if (c.def == eff.def && self.regionsEqual(c.regions, eff.regions)) { candidate = #Some(c.clone()); break; }
+      }
+      if (candidate.isNone()) {
+        for (const c of row.effs) {
+          if (c.def == eff.def && self.regionsUnify(c.regions, eff.regions)) { candidate = #Some(c.clone()); break; }
+        }
+      }
+      match (candidate) {
+        #Some(c) => {
+          try {
+            for (const i of 0..min(c.regions.len(), eff.regions.len())) { self.unifyRegion(c.regions[i], eff.regions[i]); }
+            for (const i of 0..min(eff.args.len(), c.args.len())) {
+              const unions = match ([self.resolve(eff.args[i]), self.resolve(c.args[i])]) { [#Union(_), #Union(_)] => true, _ => false };
+              if (unions) { self.unionSub(eff.args[i], c.args[i]); } else { self.unify(eff.args[i], c.args[i]); }
+            }
+          } catch (_) { throw #Misfit(eff.clone()); }
+        }
+        #None => match (row.tail) {
+          #Var(v) => {
+            const rest = self.freshEffTail();
+            let one: Vec<Eff> = Vec.new();
+            one.push(eff.clone());
+            self.effs[v as usize] = #Some(EffRow { effs: one, tail: rest });
+          }
+          _ => throw #Misfit(eff.clone()),
+        },
+      }
+    }
+    // An open tail on the actual side stands for unknown further effects; they must be allowed
+    // by the other side's tail.
+    const row = self.expandEffs(allowed);
+    match ([act.tail.clone(), row.tail.clone()]) {
+      [#Var(x), #Var(y)] if x == y => {}
+      [#Var(v), t] => { self.effs[v as usize] = #Some(EffRow { effs: Vec.new(), tail: t.clone() }); }
+      [#Closed, _] => {}
+      [#Param(p), #Param(q)] if p == q => {}
+      [#Param(_), #Var(v)] => { self.effs[v as usize] = #Some(EffRow { effs: Vec.new(), tail: act.tail.clone() }); }
+      [#Param(p), _] => {
+        let args: Vec<Ty> = Vec.new();
+        args.push(#Param(p.clone()));
+        throw #Misfit(Eff { def: 0xffffffff, regions: Vec.new(), args });
+      }
+    }
+  }
+
+  // Integer and float variables left unconstrained take their defaults (§2.2).
+  export function defaultLiterals(self: mut Self): void {
+    for (const i of 0..self.tys.len()) {
+      if (self.tys[i][0].isNone()) {
+        match (self.tys[i][1]) {
+          #Int => { self.tys[i][0] = #Some(#Prim(#I32)); }
+          #Float => { self.tys[i][0] = #Some(#Prim(#F64)); }
+          #Any => {}
+        }
+      }
+    }
+  }
+}
