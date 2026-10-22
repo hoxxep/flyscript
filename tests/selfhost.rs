@@ -1,7 +1,8 @@
 //! The self-hosted compiler (selfhost/) compiles itself to JavaScript at a fixpoint, and compiles
 //! programs as the Rust prototype runs them. `selfhost/seed.js` is the compiler compiled by
 //! itself: the reference implementation, running the compiler's source, must produce it, and it
-//! must reproduce itself. The tests that run JavaScript need node; without it they stop early.
+//! must reproduce itself. Compiled to C, it is a native compiler at a fixpoint too. The tests that
+//! run JavaScript need node, and those that build C a C compiler; without them they stop early.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -38,6 +39,31 @@ fn seed_reproduces_itself() {
     let again = out().join("seed-again.js");
     compile(&seed, &root().join("selfhost/main.fly"), &again);
     assert!(std::fs::read(&again).unwrap() == std::fs::read(&seed).unwrap(), "the seed is stale: run selfhost/bootstrap.sh --update-seed");
+}
+
+fn has_cc() -> bool {
+    Command::new("cc").arg("--version").output().is_ok()
+}
+
+/// The compiler compiled to C and built is a native compiler, which compiles itself to the same C,
+/// and to the seed.
+#[test]
+fn compiles_itself_natively() {
+    if !has_node() || !has_cc() {
+        return;
+    }
+    let main = root().join("selfhost/main.fly");
+    let c = out().join("native.c");
+    compile(&root().join("selfhost/seed.js"), &main, &c);
+    let exe = out().join("native");
+    let built = Command::new("cc").args(["-std=gnu11", "-O1", "-w", "-o"]).arg(&exe).arg(&c).arg("-lm").output().unwrap();
+    assert!(built.status.success(), "{}", String::from_utf8_lossy(&built.stderr));
+    for (name, want) in [("native-again.c", &c), ("native.js", &root().join("selfhost/seed.js"))] {
+        let again = out().join(name);
+        let r = Command::new(&exe).arg(&main).arg(&again).arg(root()).output().unwrap();
+        assert!(r.status.success() && r.stdout.is_empty(), "{}{}", String::from_utf8_lossy(&r.stdout), String::from_utf8_lossy(&r.stderr));
+        assert!(std::fs::read(&again).unwrap() == std::fs::read(want).unwrap(), "the native compiler makes other than {}", want.display());
+    }
 }
 
 /// The slowest check, the interpreter running the whole compiler on itself: run it with

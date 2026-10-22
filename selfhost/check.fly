@@ -1853,6 +1853,8 @@ impl Checker {
     // Handling `Fail` closes its row (§5.4).
     self.s.closeUnion(payload);
     self.scopes.push(HashMap.new());
+    // What the pattern takes apart, for code generation: patterns and expressions share their ids.
+    self.typed.exprs.insert(pat.id, payload.clone());
     self.bind(pat, payload);
     const b = self.block(handler, expected.clone());
     self.scopes.pop();

@@ -68,6 +68,8 @@ fly_String fly_show_u128(unsigned __int128 v);
 fly_String fly_show_f64(double v);
 fly_String fly_show_bool(bool v);
 void fly_println(fly_str s);
+bool fly_str_next_line(fly_str* rest, fly_str* line);
+bool fly_str_next_word(fly_str* rest, fly_str* word);
 bool fly_str_find(fly_str s, fly_str needle, uint64_t* at);
 bool fly_str_starts(fly_str s, fly_str prefix);
 bool fly_str_ends(fly_str s, fly_str suffix);
@@ -123,6 +125,12 @@ uint64_t fly_Hasher_finish(const fly_Hasher* h);
 
 // ---- generators ----
 
+// What a generator function yields to: a loop's body, called with a pointer to each item, which
+// says whether it wants another. One that does not makes the generator stop: it sets
+// `fly_stopping` and unwinds, and the loop that started it clears it.
+typedef struct { void* env; bool (*fn)(void* env, void* item); } fly_yield;
+extern bool fly_stopping;
+
 // A generator pulled for its items: its state, what makes its next item (false at the end), and
 // what drops it. The compiler makes `next` for each kind of item.
 typedef struct { void* st; bool (*next)(void* st, void* out); void (*drop)(void* st); } fly_gen;
@@ -147,9 +155,18 @@ void fly_gzip_drop(void* s);
 void* fly_alloc(size_t size);
 void* fly_box(const void* value, size_t size);
 
+// ---- files ----
+
+// A file opened: all its text, read when it was opened.
+typedef struct { fly_String text; } fly_File;
+bool fly_read_file(fly_str path, fly_String* out);
+bool fly_write_file(fly_str path, fly_str content);
+void fly_File_drop(fly_File* f);
+
 // ---- the program ----
 
 extern int fly_argc;
 extern char** fly_argv;
 fly_str fly_arg_str(int i);
 int64_t fly_arg_int(int i);
+double fly_arg_float(int i);

@@ -191,6 +191,32 @@ void fly_println(fly_str s) {
   fputc('\n', stdout);
 }
 
+static bool space(uint8_t c) { return c == ' ' || c == '\t' || c == '\n' || c == '\r'; }
+
+// As the reference's `lines()`: split at `\n`, a last empty line dropped, a `\r` before `\n` too.
+bool fly_str_next_line(fly_str* rest, fly_str* line) {
+  if (rest->len == 0) return false;
+  size_t i = 0;
+  while (i < rest->len && rest->ptr[i] != '\n') i++;
+  *line = (fly_str){ rest->ptr, i };
+  if (line->len > 0 && line->ptr[line->len - 1] == '\r') line->len--;
+  size_t skip = i < rest->len ? i + 1 : i;
+  rest->ptr += skip;
+  rest->len -= skip;
+  return true;
+}
+
+bool fly_str_next_word(fly_str* rest, fly_str* word) {
+  while (rest->len > 0 && space(rest->ptr[0])) { rest->ptr++; rest->len--; }
+  if (rest->len == 0) return false;
+  size_t i = 0;
+  while (i < rest->len && !space(rest->ptr[i])) i++;
+  *word = (fly_str){ rest->ptr, i };
+  rest->ptr += i;
+  rest->len -= i;
+  return true;
+}
+
 bool fly_str_find(fly_str s, fly_str needle, uint64_t* at) {
   if (needle.len == 0) { *at = 0; return true; }
   for (size_t i = 0; i + needle.len <= s.len; i++) {
@@ -201,8 +227,6 @@ bool fly_str_find(fly_str s, fly_str needle, uint64_t* at) {
 
 bool fly_str_starts(fly_str s, fly_str p) { return p.len <= s.len && (p.len == 0 || memcmp(s.ptr, p.ptr, p.len) == 0); }
 bool fly_str_ends(fly_str s, fly_str p) { return p.len <= s.len && (p.len == 0 || memcmp(s.ptr + s.len - p.len, p.ptr, p.len) == 0); }
-
-static bool space(uint8_t c) { return c == ' ' || c == '\t' || c == '\n' || c == '\r'; }
 
 fly_str fly_str_trim(fly_str s) {
   while (s.len > 0 && space(s.ptr[0])) { s.ptr++; s.len--; }
@@ -493,6 +517,8 @@ uint64_t fly_Hasher_finish(const fly_Hasher* h) { return h->h; }
 
 // ---- generators ----
 
+bool fly_stopping = false;
+
 void* fly_iter_new(void* base, size_t len, size_t stride) {
   fly_iter* it = fly_alloc(sizeof(fly_iter));
   *it = (fly_iter){ base, len, 0, stride };
@@ -524,6 +550,38 @@ void fly_gmap_drop(void* s) { fly_gen_drop(&((fly_gmap*)s)->in); free(s); }
 void fly_gcount_drop(void* s) { fly_gen_drop(&((fly_gcount*)s)->in); free(s); }
 void fly_gzip_drop(void* s) { fly_gen_drop(&((fly_gzip*)s)->a); fly_gen_drop(&((fly_gzip*)s)->b); free(s); }
 
+// ---- files ----
+
+static char* cpath(fly_str path) {
+  char* p = fly_alloc(path.len + 1);
+  memcpy(p, path.ptr, path.len);
+  return p;
+}
+
+bool fly_read_file(fly_str path, fly_String* out) {
+  char* p = cpath(path);
+  FILE* f = fopen(p, "rb");
+  free(p);
+  if (!f) return false;
+  *out = fly_String_new();
+  uint8_t buf[65536];
+  size_t n;
+  while ((n = fread(buf, 1, sizeof buf, f)) > 0) fly_String_push(out, (fly_str){ buf, n });
+  fclose(f);
+  return true;
+}
+
+bool fly_write_file(fly_str path, fly_str content) {
+  char* p = cpath(path);
+  FILE* f = fopen(p, "wb");
+  free(p);
+  if (!f) return false;
+  bool ok = fwrite(content.ptr, 1, content.len, f) == content.len;
+  return fclose(f) == 0 && ok;
+}
+
+void fly_File_drop(fly_File* f) { fly_String_drop(&f->text); }
+
 // ---- the program ----
 
 int fly_argc;
@@ -539,5 +597,13 @@ int64_t fly_arg_int(int i) {
   char* end;
   long long v = strtoll((const char*)s.ptr, &end, 10);
   if (*end != 0) fly_panicf("argument %d is not an integer", i + 1);
+  return v;
+}
+
+double fly_arg_float(int i) {
+  fly_str s = fly_arg_str(i);
+  char* end;
+  double v = strtod((const char*)s.ptr, &end);
+  if (*end != 0) fly_panicf("argument %d is not a number", i + 1);
   return v;
 }
