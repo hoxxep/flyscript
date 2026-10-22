@@ -150,6 +150,9 @@ pub fn check_function(p: &mut Program, fid: FnId) {
         var_modes: HashMap::new(),
         moves: SpanMap::default(),
         captured_moves: SpanMap::default(),
+        arm_binds: HashMap::new(),
+        arm_moves: HashSet::new(),
+        lending: false,
     };
     // Pass 1 collects every use of every binding, with its position; pass 2 checks.
     for pass in 0..2 {
@@ -263,6 +266,12 @@ struct Own<'p> {
     moves: SpanMap<Vec<String>>,
     /// The bindings each closure moves in, by the closure's span.
     captured_moves: SpanMap<Vec<(String, Ty)>>,
+    /// The bindings a `match` arm on an owned place makes, with the arm's pattern; and the arms
+    /// that move one, found in pass 1. Only those take the place (§4.1).
+    arm_binds: HashMap<VarId, Span>,
+    arm_moves: HashSet<Span>,
+    /// Set while binding the pattern of an arm that borrows what it binds.
+    lending: bool,
 }
 
 impl<'p> Own<'p> {
@@ -379,10 +388,15 @@ impl<'p> Own<'p> {
     /// Checks an access to `path` (a write if `write`, else a read; a borrow of mode `mode`)
     /// against the live loans.
     fn access(&mut self, path: &Path, write: bool, at: Span, except: &BTreeSet<LoanId>) {
+        self.access_from(path, write, at, at.start, except);
+    }
+
+    /// `access`, for an access made at source position `pos`, reported at `at`.
+    fn access_from(&mut self, path: &Path, write: bool, at: Span, pos: usize, except: &BTreeSet<LoanId>) {
         if self.collecting {
             return;
         }
-        for l in self.live_loans(at.start, except) {
+        for l in self.live_loans(pos, except) {
             let loan = self.loans[l].clone();
             if loan.external || !loan.path.overlaps(path) {
                 continue;
@@ -417,7 +431,8 @@ impl<'p> Own<'p> {
     /// The place an expression denotes, if it is one: a binding, or fields of one.
     fn place(&self, e: &Expr) -> Option<Path> {
         match &e.kind {
-            ExprKind::Ident(_) => self.resolved.get(&e.span).map(|v| Path { root: *v, fields: Vec::new() }),
+            // Pass 1 has not resolved it yet where it is first met: the scope at hand does.
+            ExprKind::Ident(name) => self.resolved.get(&e.span).copied().or_else(|| self.lookup(name)).map(|v| Path { root: v, fields: Vec::new() }),
             ExprKind::Field { target, name } => {
                 let mut p = self.place(target)?;
                 p.fields.push(name.name.clone());
@@ -504,6 +519,13 @@ impl<'p> Own<'p> {
     }
 
     fn use_place(&mut self, e: &Expr, path: Path, how: Use) -> Val {
+        let ty = self.ty_of(e);
+        self.use_place_as(e, path, how, ty)
+    }
+
+    /// `use_place`, for a value of type `ty`: a match arm's move of its scrutinee is made at the
+    /// arm's pattern, where no expression's type is recorded.
+    fn use_place_as(&mut self, e: &Expr, path: Path, how: Use, ty: Ty) -> Val {
         let at = e.span;
         if let Some(op) = self.dead_args.get(&path.root).cloned() {
             let name = self.vars[path.root].name.clone();
@@ -513,13 +535,17 @@ impl<'p> Own<'p> {
             self.record_capture(path.root, how, at);
             // The closure owns what it moved in, so a move inside its body is the closure's to
             // record, for its drop flags.
-            let ty = self.vars[path.root].ty.clone();
-            if how == Use::Move && !self.collecting && !self.p.is_copy(&ty) && !matches!(ty, Ty::Borrow(..)) && !self.p.is_copy(&self.ty_of(e)) {
+            let var_ty = self.vars[path.root].ty.clone();
+            if how == Use::Move && !self.collecting && !self.p.is_copy(&var_ty) && !matches!(var_ty, Ty::Borrow(..)) && !self.p.is_copy(&ty) {
                 self.moves.insert(at, path.fields.clone());
+            }
+            if how == Use::Move && self.collecting && !self.p.is_copy(&var_ty) && !matches!(var_ty, Ty::Borrow(..))
+                && let Some(arm) = self.arm_binds.get(&path.root)
+            {
+                self.arm_moves.insert(*arm);
             }
             return Val { loans: self.state.holds.get(&path.root).cloned().unwrap_or_default() };
         }
-        let ty = self.ty_of(e);
         let none = BTreeSet::new();
         // Using something moved.
         if let Some(m) = self.state.moved.iter().find(|m| m.overlaps(&path) || path.overlaps(m)).cloned() {
@@ -549,6 +575,8 @@ impl<'p> Own<'p> {
                         self.state.moved.insert(path.clone());
                         // Where a value leaves its binding, the evaluator stops owning it there (§5.6).
                         self.moves.insert(at, path.fields.clone());
+                    } else if let Some(arm) = self.arm_binds.get(&path.root) {
+                        self.arm_moves.insert(*arm);
                     }
                 }
                 Val { loans: held }
@@ -768,7 +796,7 @@ impl<'p> Own<'p> {
             PatternKind::Bind(name) => {
                 let ty = self.typed.bindings.get(&pat.span).cloned().unwrap_or(Ty::Error);
                 let id = self.declare_var(name, ty.clone(), mutable, false, pat.span.start);
-                if self.may_hold(&ty) {
+                if self.lending || self.may_hold(&ty) {
                     self.state.holds.insert(id, v.loans.clone());
                 }
             }
@@ -935,7 +963,9 @@ impl<'p> Own<'p> {
                             let name = self.path_name(&path);
                             self.err(value.span, format!("cannot store a borrow in `{name}`: it would outlive the call, since `{name}` is reached through a `mut` borrow"));
                         }
-                        self.access(&path, true, target.span, &none);
+                        // The place is written once the value is computed: a borrow the value used
+                        // last has ended by then.
+                        self.access_from(&path, true, target.span, e.span.end, &none);
                         if *op != "=" {
                             // Compound assignment reads the place first.
                             if self.state.moved.contains(&path) {
@@ -1046,13 +1076,14 @@ impl<'p> Own<'p> {
                     let sv = self.contained(|o| o.expr(scrutinee, if m { Use::Mut } else { Use::Read }));
                     return self.match_arms(arms, sv, how);
                 }
-                // A place matched is moved only by the arms that take an owned part of it; the
-                // others read it, and may still use it (§4.1).
+                // A place matched is moved only by the arms that move an owned part they bind; the
+                // others borrow it, and it may still be used after them (§4.1).
                 let place = self.place(scrutinee).filter(|_| !self.behind_reference(scrutinee));
                 let per_arm = place.is_some() && how_for_scrutinee(arms) == Use::Move;
+                let first = self.loans.len();
+                let read = if per_arm { self.contained(|o| o.expr(scrutinee, Use::Read)) } else { Val::default() };
                 let sv = if per_arm {
-                    let first = self.loans.len();
-                    let mut v = self.contained(|o| o.expr(scrutinee, Use::Read));
+                    let mut v = read.clone();
                     v.loans.retain(|l| *l < first);
                     v
                 } else {
@@ -1065,13 +1096,29 @@ impl<'p> Own<'p> {
                 for (i, arm) in arms.iter().enumerate() {
                     self.set_child(i as u32);
                     self.state = before.clone();
-                    if per_arm && self.takes_owned(&arm.pat) {
+                    // Already moved, it was reported where the scrutinee was read.
+                    let path = place.clone().filter(|p| !self.state.moved.iter().any(|m| m.overlaps(p) || p.overlaps(m)));
+                    let takes = per_arm && self.takes_owned(&arm.pat) && self.arm_moves.contains(&arm.pat.span);
+                    if let (true, Some(path)) = (takes, path) {
                         let at = Expr { kind: scrutinee.kind.clone(), span: arm.pat.span };
-                        let path = place.clone().expect("a place");
-                        self.use_place(&at, path, Use::Move);
+                        let ty = self.ty_of(scrutinee);
+                        self.use_place_as(&at, path, Use::Move, ty);
                     }
                     self.scopes.push(HashMap::new());
-                    self.bind_pattern(&arm.pat, &sv, false);
+                    // An arm that takes nothing borrows what it binds from the place.
+                    let bound = if per_arm && !takes { read.clone() } else { sv.clone() };
+                    self.lending = per_arm && !takes;
+                    self.bind_pattern(&arm.pat, &bound, false);
+                    self.lending = false;
+                    if per_arm && self.collecting {
+                        let mut ids = Vec::new();
+                        bind_spans(&arm.pat, &mut ids);
+                        for span in ids {
+                            if let Some(v) = self.sites.iter().find(|((site, _), _)| *site == span.start).map(|(_, v)| *v) {
+                                self.arm_binds.insert(v, arm.pat.span);
+                            }
+                        }
+                    }
                     if let Some(g) = &arm.guard {
                         self.expr(g, Use::Read);
                     }
@@ -1405,9 +1452,14 @@ impl<'p> Own<'p> {
             }
             arg_vals.push((None, v));
         } else if !matches!(callee.kind, ExprKind::Ident(_) | ExprKind::Field { .. }) || scheme.is_none() {
-            // Calling a function value: it is used, and what it captured flows on — but not the
-            // borrow taken to call it.
-            let v = self.expr(callee, Use::Read);
+            // Calling a function value: it is used — used up, if it may be called only once —
+            // and what it captured flows on, but not the borrow taken to call it.
+            let once = match self.ty_of(callee) {
+                Ty::Fn(f) => f.mode == FnMode::Once,
+                Ty::Named(d, _) => self.p.known.get("Cont") == Some(&d),
+                _ => false,
+            };
+            let v = self.expr(callee, if once { Use::Move } else { Use::Read });
             let callee_root = self.place(callee).map(|p| p.root);
             let held: BTreeSet<LoanId> =
                 v.loans.into_iter().filter(|l| Some(self.loans[*l].path.root) != callee_root).collect();
@@ -1916,10 +1968,10 @@ impl Own<'_> {
                 },
             },
             // A match through a `mut` borrow of a binding that changes what it binds changes it.
-            ExprKind::Match { scrutinee, arms } => {
-                if self.typed.lent_scrutinees.get(&scrutinee.span) == Some(&true) && arms.iter().any(|a| self.arm_changes(a)) {
-                    changed(scrutinee);
-                }
+            ExprKind::Match { scrutinee, arms }
+                if self.typed.lent_scrutinees.get(&scrutinee.span) == Some(&true) && arms.iter().any(|a| self.arm_changes(a)) =>
+            {
+                changed(scrutinee);
             }
             _ => {}
         }

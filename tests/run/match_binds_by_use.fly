@@ -1,0 +1,28 @@
+// expect: #Some(2)
+// expect: a a
+// expect: taken a
+// expect: 3 #Some(4)
+// An arm binds by the strongest use it makes of what it binds (§4.1): through a `mut` borrow an
+// arm that changes a part writes it in place; on an owned place an arm that only reads borrows
+// it, so it may be matched again; an arm that moves a part takes the place.
+import { println } from "std/io";
+struct S { f: Option<u32> }
+impl S {
+  function bump(self: mut Self): void {
+    match (self.f) { #Some(n) => { n += 1; }, #None => {} }
+  }
+}
+function take(s: String): String { `taken ${s}` }
+export function main(): void uses Io {
+  let s = S { f: #Some(1) };
+  s.bump();
+  println(`${s.f}`);
+  const o: Option<String> = #Some("a".toString());
+  let seen = String.new();
+  match (o) { #Some(x) => seen.push(x.asStr()), #None => {} }
+  match (o) { #Some(x) => { seen.push(" "); seen.push(x.asStr()); }, #None => {} }
+  println(seen.asStr());
+  match (o) { #Some(x) => println(take(x).asStr()), #None => {} }
+  let counts: Option<u32> = #Some(3);
+  match (counts) { #Some(c) => { println(`${c} ${#Some(c + 1)}`); }, #None => {} }
+}

@@ -1703,7 +1703,7 @@ impl Js {
   function emit(self: mut Self, i: usize): void uses Fail<Diagnostic> {
     const fid = self.insts[i].fid;
     const decl: FnDecl = match (self.p.fnDecl(fid)) { #Some(d) => d, #None => return };
-    const body = match (decl.body) { #Some(b) => b, #None => return };
+    const body = match (decl.body) { #Some(b) => b.clone(), #None => return };
     self.fid = fid;
     self.module = self.p.fns[fid].module;
     self.map = substMap(self.p.fns[fid].scheme.tparams, self.insts[i].args);

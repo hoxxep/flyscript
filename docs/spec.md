@@ -24,6 +24,7 @@ The whole language rests on five laws. Every rule in this document is a conseque
 
 | Change | Why |
 | :--- | :--- |
+| A `match` arm binds by the strongest use it makes of what it binds: it takes an owned place only if it moves a part (§4.1) | matching a local `Option<String>` to read its string moved it, so it could not be matched again; a TypeScript programmer reads a value without giving it away |
 | A `match` through a `mut` borrow lends it `mut` only if an arm changes a part it binds (§4.1) | a compiler's `match (self.defs[d].kind)` in a `mut self` method locked `self` for arms that only read, so they could not call `readonly` methods |
 | `Scope.spawn` and `Scope.fork` use `Io` (§6.1) | starting a task is a scheduling point, an effect like any other; a back end that suspends tasks at their effects needs to see it in the type |
 
@@ -312,7 +313,7 @@ A value that is borrowed without having a place — a call's result, a template 
 
 **A match through a borrow.** A place nothing may be moved out of — reached through a borrow, or an element of a collection (`self.links[v]`) — is matched through a borrow of it: its parts bind as borrows, with copies for `Copy` parts, as below. Reached through a `mut` borrow, it is lent `mut` if an arm changes a part it binds — assigns to it, lends it `mut`, or calls a method that takes it `mut` — and `readonly` otherwise, so `if (const #Alias(n) = self.defs[d].kind) { return self.resolve(n); }` reads `self` while it looks.
 
-**A match moves per arm.** Matching a place moves it only in an arm whose pattern takes an owned, non-`Copy` part; an arm that binds nothing, or only copies, reads it, so `_ => println(`${e}`)` may use what another arm would have taken.
+**A match binds by use, per arm.** An arm binds a part of a matched place by the strongest use it makes of it, as a closure captures (§4.3): an arm that moves an owned, non-`Copy` part it binds takes the place, moving it; an arm that only reads what it binds borrows the place, `readonly`, for as long as those bindings are used; an arm that binds nothing, or only copies, reads it. So `match (o) { #Some(x) => seen.push(x.asStr()), … }` leaves `o` to be matched again, `#Some(x) => take(x)` moves it, and `_ => println(`${e}`)` may use what another arm would have taken.
 
 **Copy parts bind by copy.** A name bound through a `readonly` borrow — by a pattern taking apart a borrowed value, or by `const` from a borrow — binds a copy instead if its type is `Copy`. Nothing can change the original while it is lent `readonly`, so the copy is indistinguishable from the borrow. If its type is class 1 the copy holds nothing: in `while (const #Some(#Op(op)) = self.peek()) { self.pos += 1; … }`, `op` is a `u8` and `self` is free. A class-2 copy — a `str`, a slice, a `readonly T` — keeps what the value it came from held, so a `str` matched out of a `readonly Option<str>` still borrows whatever the option's string did. Likewise a `readonly` borrow passed or assigned where one is wanted is copied with what it holds; it does not borrow the binding it was read from. Through a `mut` borrow, a binding stays a borrow, so it writes in place (below). And a part of a tag, record or list literal whose slot is a borrow is lent, as an argument is: `#Some(self.toks[i])` in a function returning `Option<readonly Token>` lends the token.
 

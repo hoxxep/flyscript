@@ -949,10 +949,24 @@ impl Interp {
             }
             ExprKind::For { pat, iter, body, .. } => self.for_of(pat, iter, body, env),
             ExprKind::Match { scrutinee, arms } => {
-                let v = self.expr(scrutinee, env)?;
+                // A place is matched where it is: an arm that takes what it binds moves it out,
+                // and any other borrows it, writing in place through a `mut` borrow (§4.1).
+                let place = match self.place_fields(scrutinee) {
+                    Some(_) => Some(self.place(scrutinee, env)?),
+                    None => None,
+                };
+                let v = match &place {
+                    Some(p) => get(p),
+                    None => self.expr(scrutinee, env)?,
+                };
                 for arm in arms {
                     let aenv = new_env(Some(env.clone()));
-                    if self.bind(&arm.pat, &v, None, &aenv) {
+                    let takes = self.prog.typed.get(&self.lex.owner).is_some_and(|t| t.moves.contains_key(&arm.pat.span));
+                    let bv = match &place {
+                        Some(p) if !takes => Value::Ptr(p.clone()),
+                        _ => v.clone(),
+                    };
+                    if self.bind(&arm.pat, &bv, None, &aenv) {
                         if let Some(g) = &arm.guard
                             && !self.expr(g, &aenv)?.as_bool() {
                                 continue;

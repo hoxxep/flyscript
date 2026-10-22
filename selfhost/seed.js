@@ -3113,7 +3113,7 @@ function emit$51(self, i) {
   m$6: {
     if (($5.$tag === "Some")) {
       const b = $5.$;
-      $4 = b;
+      $4 = clone$30(b);
       break m$6;
     }
     if (($5.$tag === "None")) {
