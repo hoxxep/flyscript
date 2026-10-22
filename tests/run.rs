@@ -16,7 +16,7 @@ use std::fs;
 use std::path::Path;
 
 use flyscript::check::check_files;
-use flyscript::eval::{World, run};
+use flyscript::eval::{World, command_line, run};
 
 fn unescape(s: &str) -> String {
     s.replace("\\n", "\n")
@@ -64,10 +64,10 @@ fn world_for(source: &str) -> (World, Vec<String>) {
 
 #[test]
 fn programs_run() {
-    // The run suite, and the programs that print the same however their tasks interleave, which
-    // native code also runs on threads (tests/selfhost.rs).
+    // The run suite, the programs that print the same however their tasks interleave, which native
+    // code also runs on threads (tests/selfhost.rs), and the web framework's.
     let mut paths: Vec<_> = Vec::new();
-    for dir in ["tests/run", "tests/threads"] {
+    for dir in ["tests/run", "tests/threads", "tests/web"] {
         let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join(dir);
         let mut ps: Vec<_> = fs::read_dir(&dir).unwrap().map(|e| e.unwrap().path()).filter(|p| p.extension().is_some_and(|e| e == "fly")).collect();
         ps.sort();
@@ -87,7 +87,9 @@ fn programs_run() {
             failures.push(format!("{} does not check:\n{}", path.display(), checked.render().join("\n")));
             continue;
         }
-        let (result, world) = run(checked.program, "main", Vec::new(), world);
+        // `main` is given an empty command line, as it reads one.
+        let args = command_line(&checked.program, "main", &[]).unwrap_or_default();
+        let (result, world) = run(checked.program, "main", args, world);
         // What a program prints is lines; one `println` may print several.
         let mut out: Vec<String> = world.out.iter().flat_map(|s| s.split('\n').map(String::from)).collect();
         if let Err(e) = result {

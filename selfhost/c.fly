@@ -1454,6 +1454,15 @@ impl Cgen {
   // A statement raising `#OutOfMemory`.
   function outOfMemory(self: mut Self): String { `{ fly_err_box(${self.tagId("OutOfMemory")}, NULL, 0); } ` }
 
+  // Statements raising the `IoErr` whose code, a runtime `FLY_IO_…`, is the C expression `code`.
+  function ioRaise(self: mut Self, code: str): String {
+    const names = ["Reset", "TimedOut", "BrokenPipe", "NotFound", "PermissionDenied", "AddrInUse"];
+    let pick = String.new();
+    for (const [i, n] of names.iter().enumerate()) { pick.push(`(${code}) == ${i + 1} ? ${self.tagId(n)} : `); }
+    pick.push(`${self.tagId("Reset")}`);
+    `fly_err_box(${pick}, NULL, 0); `
+  }
+
   // Statements raising the `IoErr` with tag `name`, which has no payload.
   function ioErr(self: mut Self, name: str): String {
     `fly_err_box(${self.tagId(name)}, NULL, 0); `
@@ -1518,9 +1527,9 @@ impl Cgen {
       }
       "File_text" => `fly_String_as_str(&(${arg(0)})->text)`,
       "Listener_next" => {
-        const yes = self.some(rt, "((fly_socket){ x_, 0 })", span);
+        const yes = self.some(rt, "x_", span);
         const no = self.none(rt, span);
-        `({ fly_str x_; fly_world_accept(&x_) ? ${yes} : ${no}; })`
+        `({ fly_socket x_; fly_accept(${arg(0)}, &x_) ? ${yes} : ${no}; })`
       }
       "RegionList_at" => {
         const ec = self.ctype(stripBorrow(rt), span);
@@ -1988,16 +1997,25 @@ impl Cgen {
         const pc = match (stripBorrow(ptys[1])) { #Fn(f) => match (f.params.first()) { #Some(p) => self.ctype(p, span), #None => "void*".toString() }, _ => "void*".toString() };
         `({ __auto_type m_ = ${arg(0)}; fly_fn f_ = ${arg(1)}; fly_point(); fly_lock(m_); ${tc} r_ = ((${tc} (*)(void*, ${pc}))f_.fn)(f_.env, m_); fly_unlock(m_); if (f_.drop) f_.drop(f_.env); r_; })`
       }
-      "Listener_bind" | "Db_connect" => "0".toString(),
-      "Socket_close" => "((fly_unit)0)".toString(),
+      "Db_connect" => "0".toString(),
+      "Listener_bind" => {
+        const raise = self.ioRaise("-l_");
+        `({ int l_ = fly_listen(${arg(0)}); if (l_ < 0) { ${raise}} l_; })`
+      }
+      "Listener_port" => `fly_listener_port(${arg(0)})`,
+      "Socket_close" => `({ fly_sock_close(${arg(0)}); (fly_unit)0; })`,
       "Socket_read" => {
-        const boxed = self.ioErr("TimedOut");
-        `({ fly_socket* s_ = ${arg(0)}; fly_slice b_ = ${arg(1)}; size_t n_ = 0; if (fly_fault()) { ${boxed}} else { n_ = s_->input.len - s_->pos; if (b_.len < n_) n_ = b_.len; memcpy(b_.ptr, s_->input.ptr + s_->pos, n_); s_->pos += n_; } (uint64_t)n_; })`
+        const raise = self.ioRaise("e_");
+        `({ uint64_t n_ = 0; int e_ = fly_sock_read(${arg(0)}, ${arg(1)}, &n_); if (e_) { ${raise}} n_; })`
+      }
+      "Socket_write" => {
+        const raise = self.ioRaise("e_");
+        `({ int e_ = fly_sock_write(${arg(0)}, ${arg(1)}); if (e_) { ${raise}} (fly_unit)0; })`
       }
       // The simulated client's transcript doubles as the program's output.
       "Socket_writeStatus" => {
-        const boxed = self.ioErr("BrokenPipe");
-        `({ unsigned code_ = ${arg(1)}; fly_str b_ = ${arg(2)}; if (fly_fault()) { ${boxed}} else printf("-> %u %.*s\\n", code_, (int)b_.len, (const char*)b_.ptr); (fly_unit)0; })`
+        const raise = self.ioRaise("e_");
+        `({ int e_ = fly_sock_status(${arg(0)}, ${arg(1)}, ${arg(2)}); if (e_) { ${raise}} (fly_unit)0; })`
       }
       "Db_fetchProfile" => {
         const tc = self.ctype(rt, span);

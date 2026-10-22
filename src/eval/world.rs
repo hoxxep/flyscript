@@ -10,6 +10,8 @@ pub struct Socket {
     pub pos: usize,
     /// Every status written, with its body.
     pub written: Vec<(u16, String)>,
+    /// What was written with `write`, shown when the socket closes.
+    pub bytes: Vec<u8>,
 }
 
 #[derive(Debug)]

@@ -1,0 +1,30 @@
+// expect: <div class="todos"><h1>Things to do</h1><ul><li class="done">write &lt;the&gt; spec</li><li>ship it</li></ul><input type="text" value="&quot;next&quot;"></div>
+import { println } from "std/io";
+import { Ui, el, text, cls, attr, on, html } from "../../web/ui";
+
+type Msg = #Toggle(u32) | #Draft;
+type Item = { id: u32; title: String; done: bool };
+
+function view(items: readonly Vec<Item>, draft: str): void uses Ui<Msg> {
+  el("div", () => {
+    cls("todos");
+    el("h1", () => text("Things to do"));
+    el("ul", () => {
+      for (const it of items) {
+        el("li", () => {
+          if (it.done) { cls("done"); }
+          on("click", #Toggle(it.id));
+          text(it.title.asStr());
+        });
+      }
+    });
+    el("input", () => { attr("type", "text"); attr("value", draft); on("input", #Draft); });
+  });
+}
+
+export function main(): void uses Io {
+  const items: Vec<Item> = [{ id: 1, title: "write <the> spec".toString(), done: true }, { id: 2, title: "ship it".toString(), done: false }];
+  let out = String.new();
+  html(mut out, () => view(items, "\"next\""));
+  println(out.asStr());
+}

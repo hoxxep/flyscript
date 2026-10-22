@@ -367,7 +367,7 @@ impl Ord for Instant;
 // A file descriptor, and what a parked task waits on: handles the runtime gives out.
 export struct Fd { private n: u32 }
 export struct WaitKey { private n: u64 }
-export type IoErr = #Reset | #TimedOut | #BrokenPipe | #NotFound | #PermissionDenied;
+export type IoErr = #Reset | #TimedOut | #BrokenPipe | #NotFound | #PermissionDenied | #AddrInUse;
 
 impl<E> Fail<E> {
   export function capture<T, row R>(body: once () => T uses Fail<E>, ...R): Result<T, E> uses ...R;

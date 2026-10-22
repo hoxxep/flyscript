@@ -1,0 +1,29 @@
+// expect: listening on 8080
+// expect: -> HTTP/1.1 200 OK
+// expect: Content-Type: text/plain; charset=utf-8
+// expect: Connection: close
+// expect: Content-Length: 23
+// expect: 
+// expect: hello, GET /index.html
+// request: GET /index.html HTTP/1.1\nHost: here\nConnection: close\n\n
+// A web server in a few lines: `hello [port]`, by default on 8080; port 0 takes any free one.
+import { println } from "std/io";
+import { Listener } from "std/net";
+import { serve, Handler, Request, Response, Conn } from "../../web/http";
+
+struct Hello {}
+impl Handler for Hello {
+  function handle(self: readonly Self, req: readonly Request, conn: mut Conn): void uses Io {
+    const body = `hello, ${req.method} ${req.path}\n`;
+    try { conn.write(Response.text(200, body.asStr())); } catch (_) {}
+  }
+}
+
+export function main(args: readonly String[]): void uses Io {
+  const port: u16 = if (args.len() > 0) { match (parseInt(args[0].asStr())) { #Some(n) => n as u16, #None => 8080 } } else { 8080 };
+  try {
+    let l = Listener.bind(port);
+    println(`listening on ${l.port()}`);
+    serve(mut l, Hello {});
+  } catch (e) { println(`cannot serve: ${e}`); }
+}

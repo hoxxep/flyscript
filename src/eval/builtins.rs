@@ -817,7 +817,8 @@ impl Interp {
                 }
                 Ok(Value::Unit)
             }
-            "Listener.bind" => Ok(Value::Native("Listener", 0)),
+            "Listener.bind" => Ok(Value::Native("Listener", a(0).as_int() as u64)),
+            "Listener.port" => Ok(Value::Int(native(&a(0), "Listener")? as i128)),
             "Listener.accept" => loop {
                 let next = self.world.lock().expect("world").incoming.pop_front();
                 let Some(input) = next else { return Ok(Value::Unit) };
@@ -857,7 +858,27 @@ impl Interp {
                 w.sockets[id].written.push((code, body));
                 Ok(Value::Unit)
             }
-            "Socket.close" => Ok(Value::Unit),
+            "Socket.write" => {
+                let id = native(&a(0), "Socket")? as usize;
+                if self.world.lock().expect("world").fault() {
+                    return self.raise(Value::tag("BrokenPipe", Value::Unit));
+                }
+                let bytes: Vec<u8> = with_list(&a(1), |vs| vs.iter().map(|v| v.as_int() as u8).collect());
+                self.world.lock().expect("world").sockets[id].bytes.extend(bytes);
+                Ok(Value::Unit)
+            }
+            // What was written to the simulated client is the program's output, once it is all
+            // there: one line of it, `\r\n` shown as a line break.
+            "Socket.close" => {
+                let id = native(&a(0), "Socket")? as usize;
+                let mut w = self.world.lock().expect("world");
+                let bytes = std::mem::take(&mut w.sockets[id].bytes);
+                if !bytes.is_empty() {
+                    let text = String::from_utf8_lossy(&bytes).replace("\r\n", "\n");
+                    w.out.push(format!("-> {}", text.trim_end_matches('\n')));
+                }
+                Ok(Value::Unit)
+            }
             "Db.connect" => Ok(Value::Native("Db", 0)),
             "Db.fetchProfile" => {
                 let user = a(1).as_text().to_string();

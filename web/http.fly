@@ -1,0 +1,232 @@
+// HTTP/1.1, as library code over sockets: requests read, responses written whole or streamed, and
+// a server running each connection in a task of its own. Against a simulated world the same code
+// serves the world's requests, and what it writes is the program's output.
+
+import { Listener, Socket } from "std/net";
+
+export type Header = { name: String; value: String };
+
+// A request: its method, its path and query, its protocol's version, its headers, and its body, as
+// text.
+export type Request = { method: String; path: String; query: String; version: String; headers: Vec<Header>; body: String };
+
+export type HttpErr = #BadRequest | IoErr;
+
+impl Request {
+  // A header's value, its name compared without case.
+  export function header(self: readonly Self, name: str): Option<str> from self {
+    for (const h of self.headers) {
+      if (h.name.asStr().toLowerCase() == name.toLowerCase()) { return #Some(h.value.asStr()); }
+    }
+    #None
+  }
+}
+
+// A whole response.
+export struct Response { status: u16; headers: Vec<Header>; body: String }
+
+impl Response {
+  export function new(status: u16, contentType: str, body: String): Response {
+    Response { status, headers: [{ name: "Content-Type".toString(), value: contentType.toString() }], body }
+  }
+  export function text(status: u16, body: str): Response { Response.new(status, "text/plain; charset=utf-8", body.toString()) }
+  export function html(body: String): Response { Response.new(200, "text/html; charset=utf-8", body) }
+  export function json(body: String): Response { Response.new(200, "application/json", body) }
+  export function header(self: mut Self, name: str, value: str): void {
+    self.headers.push({ name: name.toString(), value: value.toString() });
+  }
+}
+
+export function reason(status: u16): str {
+  match (status) {
+    200 => "OK", 201 => "Created", 204 => "No Content", 301 => "Moved Permanently", 302 => "Found", 304 => "Not Modified",
+    400 => "Bad Request", 403 => "Forbidden", 404 => "Not Found", 405 => "Method Not Allowed", 500 => "Internal Server Error",
+    _ => if (status < 400) { "OK" } else { "Error" },
+  }
+}
+
+// ---- reading ----
+
+// A connection's bytes, read as they are needed; and whether it stays open after the response to
+// the request read last, as the request's version and its `Connection` header say.
+export struct Conn { socket: Socket; buf: Vec<u8>; pos: usize; closed: bool; keep: bool; old: bool }
+
+impl Conn {
+  export function new(socket: Socket): Conn { Conn { socket, buf: Vec.new(), pos: 0, closed: false, keep: false, old: false } }
+
+  // Reads more of what the client sent: false once it has sent all it will.
+  function fill(self: mut Self): bool uses Io, Fail<IoErr> {
+    if (self.closed) { return false; }
+    // What was taken is dropped before more is read.
+    if (self.pos > 0) {
+      let rest: Vec<u8> = Vec.new();
+      for (const i of self.pos..self.buf.len()) { rest.push(self.buf[i]); }
+      self.buf = rest;
+      self.pos = 0;
+    }
+    let chunk: u8[4096] = repeat(0 as u8);
+    const n = self.socket.read(mut chunk);
+    if (n == 0) {
+      self.closed = true;
+      return false;
+    }
+    for (const i of 0..n) { self.buf.push(chunk[i]); }
+    true
+  }
+
+  // The next line, without its ending, or none at the end of what the client sent.
+  function line(self: mut Self): Option<String> uses Io, Fail<IoErr> {
+    while (true) {
+      let i = self.pos;
+      while (i < self.buf.len()) {
+        if (self.buf[i] == b'\n') {
+          let end = i;
+          if (end > self.pos && self.buf[end - 1] == b'\r') { end -= 1; }
+          let bytes: Vec<u8> = Vec.new();
+          for (const j of self.pos..end) { bytes.push(self.buf[j]); }
+          self.pos = i + 1;
+          return String.fromUtf8(bytes);
+        }
+        i += 1;
+      }
+      if (!self.fill()) { return #None; }
+    }
+  }
+
+  // The next `n` bytes, or none if the client sends fewer.
+  function take(self: mut Self, n: usize): Option<Vec<u8>> uses Io, Fail<IoErr> {
+    while (self.buf.len() - self.pos < n) {
+      if (!self.fill()) { return #None; }
+    }
+    let out: Vec<u8> = Vec.new();
+    for (const i of self.pos..self.pos + n) { out.push(self.buf[i]); }
+    self.pos += n;
+    #Some(out)
+  }
+
+  // The next request, or none if the client closed the connection before sending one.
+  export function request(self: mut Self): Option<Request> uses Io, Fail<HttpErr> {
+    let first = match (self.line()) { #Some(l) => l, #None => return #None };
+    // Blank lines before a request are allowed.
+    while (first.len() == 0) {
+      first = match (self.line()) { #Some(l) => l, #None => return #None };
+    }
+    const parts = first.asStr().split(" ");
+    if (parts.len() < 2) { throw #BadRequest }
+    const target = parts[1].asStr();
+    const [path, query] = match (target.indexOf("?")) {
+      #Some(q) => [target.slice(0, q).toString(), target.slice(q + 1, target.len()).toString()],
+      #None => [target.toString(), String.new()],
+    };
+    let headers: Vec<Header> = Vec.new();
+    while (true) {
+      const l = match (self.line()) { #Some(l) => l, #None => throw #BadRequest };
+      if (l.len() == 0) { break; }
+      const colon = match (l.asStr().indexOf(":")) { #Some(c) => c, #None => throw #BadRequest };
+      headers.push({ name: l.asStr().slice(0, colon).trim().toString(), value: l.asStr().slice(colon + 1, l.len()).trim().toString() });
+    }
+    const version = if (parts.len() > 2) { parts[2].clone() } else { "HTTP/1.0".toString() };
+    let req: Request = { method: parts[0].clone(), path, query, version, headers, body: String.new() };
+    // HTTP/1.1 keeps a connection open unless asked not to; HTTP/1.0 closes it unless asked not to.
+    const asked = match (req.header("connection")) { #Some(v) => v.toLowerCase(), #None => String.new() };
+    self.old = req.version == "HTTP/1.0";
+    self.keep = if (self.old) { asked == "keep-alive" } else { asked != "close" };
+    const length: usize = match (req.header("content-length")) {
+      #Some(v) => match (parseInt(v)) { #Some(n) => if (n >= 0) { n as usize } else { throw #BadRequest }, #None => throw #BadRequest },
+      #None => 0,
+    };
+    if (length > 0) {
+      const bytes = match (self.take(length)) { #Some(b) => b, #None => throw #BadRequest };
+      req.body = match (String.fromUtf8(bytes)) { #Some(s) => s, #None => throw #BadRequest };
+    }
+    #Some(req)
+  }
+
+  // ---- writing ----
+
+  export function write(self: mut Self, r: readonly Response): void uses Io, Fail<IoErr> {
+    let head = `HTTP/1.1 ${r.status} ${reason(r.status)}\r\n`;
+    for (const h of r.headers) { head.push(`${h.name}: ${h.value}\r\n`); }
+    head.push(self.connection().asStr());
+    head.push(`Content-Length: ${r.body.len()}\r\n\r\n`);
+    self.socket.write(head.asStr().asBytes());
+    self.socket.write(r.body.asStr().asBytes());
+  }
+
+  // Starts a response streamed in chunks, as `send` gives them, until `end`.
+  export function start(self: mut Self, status: u16, contentType: str): void uses Io, Fail<IoErr> {
+    const head = `HTTP/1.1 ${status} ${reason(status)}\r\nContent-Type: ${contentType}\r\n${self.connection()}Transfer-Encoding: chunked\r\n\r\n`;
+    self.socket.write(head.asStr().asBytes());
+  }
+
+  export function send(self: mut Self, chunk: str): void uses Io, Fail<IoErr> {
+    if (chunk.len() == 0) { return; }
+    self.socket.write(`${hex(chunk.len())}\r\n`.asStr().asBytes());
+    self.socket.write(chunk.asBytes());
+    self.socket.write("\r\n".asBytes());
+  }
+
+  export function end(self: mut Self): void uses Io, Fail<IoErr> {
+    self.socket.write("0\r\n\r\n".asBytes());
+  }
+
+  export function close(self: mut Self): void uses Io { self.socket.close(); }
+
+  // What the response says of the connection: closed after it, or, to HTTP/1.0, kept open.
+  function connection(self: readonly Self): String {
+    if (!self.keep) { "Connection: close\r\n".toString() } else if (self.old) { "Connection: keep-alive\r\n".toString() } else { String.new() }
+  }
+}
+
+function hex(n: usize): String {
+  const digits = "0123456789abcdef";
+  if (n == 0) { return "0".toString(); }
+  let out = String.new();
+  let k = n;
+  let rev: Vec<usize> = Vec.new();
+  while (k > 0) {
+    rev.push(k % 16);
+    k = k / 16;
+  }
+  let i = rev.len();
+  while (i > 0) {
+    i -= 1;
+    out.push(digits.slice(rev[i], rev[i] + 1));
+  }
+  out
+}
+
+// ---- serving ----
+
+// What a server does with each request: given the connection, it writes the response. Its state is
+// shared by the tasks serving connections, so it is `Send`, and changed only under a lock.
+export interface Handler extends Send {
+  function handle(self: readonly Self, req: readonly Request, conn: mut Conn): void uses Io;
+}
+
+// Serves the connections `listener` accepts, each in a task of its own: every request on it is given
+// to `app`, until the client closes it or asks to. A request that cannot be read gets a 400.
+export function serve<H extends Handler>(listener: mut Listener, app: readonly H): void uses Io, Fail<IoErr> {
+  Io.scope((s) => {
+    for (const socket of listener.accept()) {
+      let c = Conn.new(socket);
+      s.spawn(() => serveConn<H>(c, app));
+    }
+  });
+}
+
+function serveConn<H extends Handler>(conn: Conn, app: readonly H): void uses Io {
+  let c = conn;
+  try {
+    while (const #Some(req) = c.request()) {
+      app.handle(req, mut c);
+      if (!c.keep) { break; }
+    }
+  } catch (e) {
+    match (e) {
+      #BadRequest => try { c.write(Response.text(400, "bad request\n")); } catch (_) {},
+      _ => {},
+    }
+  }
+  c.close();
+}

@@ -5,14 +5,21 @@ export struct Db;
 export type Profile = { displayName: String };
 export type Quota = { allowed: bool };
 
+// A connection: what it reads is what the other end sent, `0` once it has sent all it will.
 impl Socket {
   export function read(self: mut Self, buf: mut u8[]): usize uses Io, Fail<IoErr>;
+  // Writes all of `bytes`.
+  export function write(self: mut Self, bytes: readonly u8[]): void uses Io, Fail<IoErr>;
   export function writeStatus(self: mut Self, code: u16, body: str): void uses Io, Fail<IoErr>;
   export function close(self: mut Self): void uses Io;
 }
 
+// A TCP listener on every address of the machine. Against a simulated world, its connections are
+// the world's, and what is written to them is the program's output.
 impl Listener {
+  // Port `0` takes any free one, which `port` tells.
   export function bind(port: u16): Listener uses Io, Fail<IoErr>;
+  export function port(self: readonly Self): u16;
   export function accept(self: mut Self): void uses Io, Fail<IoErr>, Yield<Socket>;
 }
 

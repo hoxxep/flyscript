@@ -771,7 +771,8 @@ const { $rt, $b } = (() => {
     *Mutex_lock$g(m, f) { yield* point(); return yield* body(f, m); },
 
     // ---- the simulated network and database ----
-    Listener_bind: () => ({ listener: 0 }),
+    Listener_bind: (port) => ({ listener: port }),
+    Listener_port: (l) => (l.v ?? l).listener,
     *Listener_accept() {
       while (world.incoming.length > 0) yield new Yielded({ input: world.incoming.shift(), pos: 0 });
     },
@@ -788,7 +789,19 @@ const { $rt, $b } = (() => {
       // The simulated client's transcript doubles as the program's output.
       $b.println(`-> ${code} ${body}`);
     },
-    Socket_close() {},
+    Socket_write(r, bytes) {
+      if (fault()) throw new Fail({ $tag: "BrokenPipe" });
+      // A string's bytes are a view of it, one character to a byte; other bytes are a list.
+      const b = bytes.v ?? bytes;
+      r.v.out = (r.v.out ?? "") + (b instanceof Bytes ? b.s : typeof b === "string" ? b : String.fromCharCode(...Array.from(b)));
+    },
+    // What was written to the simulated client is the program's output once it is all there: one
+    // line of it, `\r\n` shown as a line break.
+    Socket_close(r) {
+      const sock = r.v;
+      if (sock.out) $b.println(`-> ${sock.out.replaceAll("\r\n", "\n").replace(/\n+$/, "")}`);
+      sock.out = "";
+    },
     Db_connect: () => ({ db: 0 }),
     Db_fetchProfile(db, user) {
       if (fault()) throw new Fail({ $tag: "TimedOut" });

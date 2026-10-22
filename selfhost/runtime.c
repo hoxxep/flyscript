@@ -7,7 +7,14 @@
 #include <math.h>
 #include <time.h>
 #ifndef __wasm__
+#include <errno.h>
+#include <fcntl.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <signal.h>
 #include <sys/mman.h>
+#include <sys/socket.h>
+#include <unistd.h>
 #endif
 #endif
 
@@ -1276,6 +1283,213 @@ uint64_t fly_now(void) {
   return (uint64_t)ts.tv_sec * 1000000000u + (uint64_t)ts.tv_nsec;
 }
 
+// ---- sockets ----
+
+#if defined(FLY_THREADS)
+// On worker threads a socket does not block: a task waits for it to be ready (below).
+static bool io_wait(int fd, bool write);
+static void io_register(int fd);
+static bool threads;
+#endif
+
+static int io_error(int e) {
+#ifdef __wasm__
+  (void)e;
+  return FLY_IO_PERMISSION_DENIED;
+#else
+  switch (e) {
+    case EPIPE: return FLY_IO_BROKEN_PIPE;
+    case ETIMEDOUT: return FLY_IO_TIMED_OUT;
+    case ENOENT: return FLY_IO_NOT_FOUND;
+    case EACCES: case EPERM: return FLY_IO_PERMISSION_DENIED;
+    case EADDRINUSE: return FLY_IO_ADDR_IN_USE;
+    default: return FLY_IO_RESET;
+  }
+#endif
+}
+
+// Whether to wait for a descriptor that would block, rather than let it block the thread.
+static bool nonblocking(void) {
+#ifdef FLY_THREADS
+  return threads;
+#else
+  return false;
+#endif
+}
+
+int fly_listen(uint16_t port) {
+  world_load();
+  if (world.simulated) return port;
+#ifdef __wasm__
+  return -FLY_IO_PERMISSION_DENIED;
+#else
+  // A peer gone is an error a write reports, not a signal that ends the program.
+  signal(SIGPIPE, SIG_IGN);
+  int fd = socket(AF_INET, SOCK_STREAM, 0);
+  if (fd < 0) return -io_error(errno);
+  int one = 1;
+  setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+  struct sockaddr_in a = { 0 };
+  a.sin_family = AF_INET;
+  a.sin_port = htons(port);
+  a.sin_addr.s_addr = htonl(INADDR_ANY);
+  if (bind(fd, (struct sockaddr*)&a, sizeof a) != 0 || listen(fd, SOMAXCONN) != 0) {
+    int e = errno;
+    close(fd);
+    return -io_error(e);
+  }
+  if (nonblocking()) {
+    fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK);
+#ifdef FLY_THREADS
+    io_register(fd);
+#endif
+  }
+  return fd + 1;
+#endif
+}
+
+uint16_t fly_listener_port(int listener) {
+  if (world.simulated) return (uint16_t)listener;
+#ifdef __wasm__
+  return 0;
+#else
+  struct sockaddr_in a = { 0 };
+  socklen_t n = sizeof a;
+  if (getsockname(listener - 1, (struct sockaddr*)&a, &n) != 0) return 0;
+  return ntohs(a.sin_port);
+#endif
+}
+
+bool fly_accept(int listener, fly_socket* out) {
+  world_load();
+  if (world.simulated) {
+    fly_str input;
+    if (!fly_world_accept(&input)) return false;
+    *out = (fly_socket){ .input = input };
+    return true;
+  }
+#ifdef __wasm__
+  (void)listener;
+  (void)out;
+  return false;
+#else
+  for (;;) {
+    int fd = accept(listener - 1, NULL, NULL);
+    if (fd >= 0) {
+      int one = 1;
+      setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
+      if (nonblocking()) {
+        fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK);
+#ifdef FLY_THREADS
+        io_register(fd);
+#endif
+      }
+      *out = (fly_socket){ .fd = fd + 1 };
+      return true;
+    }
+    if (errno == EINTR || errno == ECONNABORTED) continue;
+#ifdef FLY_THREADS
+    if ((errno == EAGAIN || errno == EWOULDBLOCK) && nonblocking()) {
+      if (!io_wait(listener - 1, false)) return false;
+      continue;
+    }
+#endif
+    return false;
+  }
+#endif
+}
+
+int fly_sock_read(fly_socket* s, fly_slice buf, uint64_t* n) {
+  *n = 0;
+  if (!s->fd) {
+    if (fly_fault()) return FLY_IO_TIMED_OUT;
+    size_t k = s->input.len - s->pos;
+    if (buf.len < k) k = buf.len;
+    memcpy(buf.ptr, s->input.ptr + s->pos, k);
+    s->pos += k;
+    *n = k;
+    return FLY_IO_OK;
+  }
+#ifdef __wasm__
+  return FLY_IO_PERMISSION_DENIED;
+#else
+  for (;;) {
+    ssize_t k = read(s->fd - 1, buf.ptr, buf.len);
+    if (k >= 0) { *n = (uint64_t)k; return FLY_IO_OK; }
+    if (errno == EINTR) continue;
+#ifdef FLY_THREADS
+    if ((errno == EAGAIN || errno == EWOULDBLOCK) && nonblocking()) {
+      if (!io_wait(s->fd - 1, false)) return FLY_IO_OK;
+      continue;
+    }
+#endif
+    return io_error(errno);
+  }
+#endif
+}
+
+int fly_sock_write(fly_socket* s, fly_slice bytes) {
+  if (!s->fd) {
+    if (fly_fault()) return FLY_IO_BROKEN_PIPE;
+    if (!s->out.ptr) s->out = fly_String_new();
+    fly_String_push(&s->out, (fly_str){ bytes.ptr, bytes.len });
+    return FLY_IO_OK;
+  }
+#ifdef __wasm__
+  return FLY_IO_PERMISSION_DENIED;
+#else
+  size_t done = 0;
+  while (done < bytes.len) {
+    ssize_t k = write(s->fd - 1, (const uint8_t*)bytes.ptr + done, bytes.len - done);
+    if (k >= 0) { done += (size_t)k; continue; }
+    if (errno == EINTR) continue;
+#ifdef FLY_THREADS
+    if ((errno == EAGAIN || errno == EWOULDBLOCK) && nonblocking()) {
+      if (!io_wait(s->fd - 1, true)) return FLY_IO_OK;
+      continue;
+    }
+#endif
+    return io_error(errno);
+  }
+  return FLY_IO_OK;
+#endif
+}
+
+int fly_sock_status(fly_socket* s, unsigned code, fly_str body) {
+  if (!s->fd) {
+    if (fly_fault()) return FLY_IO_BROKEN_PIPE;
+    printf("-> %u %.*s\n", code, (int)body.len, (const char*)body.ptr);
+    return FLY_IO_OK;
+  }
+  char head[96];
+  int n = snprintf(head, sizeof head, "HTTP/1.1 %u %s\r\nContent-Length: %zu\r\nConnection: close\r\n\r\n", code, code < 400 ? "OK" : "Error", body.len);
+  int e = fly_sock_write(s, (fly_slice){ head, (size_t)n });
+  return e ? e : fly_sock_write(s, (fly_slice){ (void*)body.ptr, body.len });
+}
+
+// Closing a simulated connection shows what was written to it, `\r\n` as a line break.
+void fly_sock_close(fly_socket* s) {
+  if (!s->fd) {
+    if (s->out.len > 0) {
+      fly_String text = fly_String_new();
+      for (size_t i = 0; i < s->out.len; i++) {
+        if (s->out.ptr[i] == '\r' && i + 1 < s->out.len && s->out.ptr[i + 1] == '\n') continue;
+        fly_String_push(&text, (fly_str){ s->out.ptr + i, 1 });
+      }
+      size_t n = text.len;
+      while (n > 0 && text.ptr[n - 1] == '\n') n--;
+      printf("-> %.*s\n", (int)n, (const char*)text.ptr);
+      fly_String_drop(&text);
+    }
+    fly_String_drop(&s->out);
+    return;
+  }
+#ifndef __wasm__
+  close(s->fd - 1);
+#endif
+  s->fd = 0;
+}
+
 bool fly_world_profile(fly_str user, fly_str* name) {
   world_load();
   for (size_t i = 0; i < world.nprofiles; i++) {
@@ -2279,6 +2493,126 @@ static void run_task(worker* w, mt_task* t) {
   }
 }
 
+// ---- waiting for sockets ----
+
+// Each descriptor, by its number, has a record of who waits to read it and who to write it, made
+// when it is first used and never freed: an event about a descriptor closed meanwhile only wakes
+// whoever uses its number next, who tries again and waits again. A poller thread waits for the
+// kernel's events, edge-triggered, and wakes the waiters; an edge that came while no one waited
+// is remembered, for the next to try again at once.
+#if defined(__APPLE__) || defined(__FreeBSD__)
+#include <sys/event.h>
+#define FLY_KQUEUE 1
+#elif defined(__linux__)
+#include <sys/epoll.h>
+#define FLY_EPOLL 1
+#endif
+
+typedef struct { waitq q[2]; bool ready[2]; } io_obj;
+
+static io_obj** io_chunks[OBJ_CHUNKS];
+static int poll_fd = -1;
+static pthread_once_t poll_once = PTHREAD_ONCE_INIT;
+// Tasks waiting for a descriptor: while any do, none waiting is a deadlock, as an event may come.
+static long io_waiting;
+
+static io_obj* io_of(int fd) {
+  io_obj*** slot = &io_chunks[fd >> OBJ_BITS];
+  io_obj** chunk = __atomic_load_n(slot, __ATOMIC_ACQUIRE);
+  if (!chunk) {
+    io_obj** made = fly_alloc(OBJ_CHUNK * sizeof(io_obj*));
+    io_obj** seen = NULL;
+    if (__atomic_compare_exchange_n(slot, &seen, made, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) chunk = made;
+    else { free(made); chunk = seen; }
+  }
+  io_obj** at = &chunk[fd & (OBJ_CHUNK - 1)];
+  io_obj* o = __atomic_load_n(at, __ATOMIC_ACQUIRE);
+  if (!o) {
+    io_obj* made = fly_alloc(sizeof(io_obj));
+    io_obj* seen = NULL;
+    if (__atomic_compare_exchange_n(at, &seen, made, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) o = made;
+    else { free(made); o = seen; }
+  }
+  return o;
+}
+
+// The kernel says `fd` may be read, or written: its waiters try again.
+static void io_ready(int fd, int dir) {
+  io_obj* o = io_of(fd);
+  spin_lock(&o->q[dir].lock);
+  o->ready[dir] = true;
+  wake_all(&o->q[dir]);
+  spin_unlock(&o->q[dir].lock);
+}
+
+static void* poller(void* arg) {
+  (void)arg;
+  for (;;) {
+#if defined(FLY_KQUEUE)
+    struct kevent evs[64];
+    int n = kevent(poll_fd, NULL, 0, evs, 64, NULL);
+    for (int i = 0; i < n; i++) io_ready((int)evs[i].ident, evs[i].filter == EVFILT_WRITE ? 1 : 0);
+#elif defined(FLY_EPOLL)
+    struct epoll_event evs[64];
+    int n = epoll_wait(poll_fd, evs, 64, -1);
+    for (int i = 0; i < n; i++) {
+      uint32_t e = evs[i].events;
+      if (e & (EPOLLIN | EPOLLRDHUP | EPOLLHUP | EPOLLERR)) io_ready(evs[i].data.fd, 0);
+      if (e & (EPOLLOUT | EPOLLHUP | EPOLLERR)) io_ready(evs[i].data.fd, 1);
+    }
+#else
+    return NULL;
+#endif
+  }
+}
+
+static void poll_start(void) {
+#if defined(FLY_KQUEUE)
+  poll_fd = kqueue();
+#elif defined(FLY_EPOLL)
+  poll_fd = epoll_create1(0);
+#endif
+  pthread_t th;
+  if (poll_fd < 0 || pthread_create(&th, NULL, poller, NULL) != 0) fly_panic("cannot wait for sockets");
+  pthread_detach(th);
+}
+
+// A descriptor made: its events, from now until it is closed, go to the poller.
+static void io_register(int fd) {
+  pthread_once(&poll_once, poll_start);
+  io_obj* o = io_of(fd);
+  for (int d = 0; d < 2; d++) {
+    spin_lock(&o->q[d].lock);
+    o->ready[d] = false;
+    spin_unlock(&o->q[d].lock);
+  }
+#if defined(FLY_KQUEUE)
+  struct kevent ev[2];
+  EV_SET(&ev[0], fd, EVFILT_READ, EV_ADD | EV_CLEAR, 0, 0, NULL);
+  EV_SET(&ev[1], fd, EVFILT_WRITE, EV_ADD | EV_CLEAR, 0, 0, NULL);
+  kevent(poll_fd, ev, 2, NULL, 0, NULL);
+#elif defined(FLY_EPOLL)
+  struct epoll_event ev = { .events = EPOLLIN | EPOLLOUT | EPOLLRDHUP | EPOLLET, .data.fd = fd };
+  epoll_ctl(poll_fd, EPOLL_CTL_ADD, fd, &ev);
+#endif
+}
+
+// The running task waits until `fd` may be read, or written: false if it was cancelled.
+static bool io_wait(int fd, bool write) {
+  io_obj* o = io_of(fd);
+  int d = write ? 1 : 0;
+  spin_lock(&o->q[d].lock);
+  if (o->ready[d]) {
+    o->ready[d] = false;
+    spin_unlock(&o->q[d].lock);
+    return !cancelled_here();
+  }
+  __atomic_fetch_add(&io_waiting, 1, __ATOMIC_SEQ_CST);
+  wait_in(&o->q[d], true);
+  __atomic_fetch_sub(&io_waiting, 1, __ATOMIC_SEQ_CST);
+  return !cancelled_here();
+}
+
 // ---- `par` ----
 
 // Work `join` lets another worker take: the second of the two, run where it is taken.
@@ -2364,7 +2698,7 @@ static void idle(worker* w) {
   __atomic_fetch_add(&idlers, 1, __ATOMIC_SEQ_CST);
   if (!work_anywhere(w) && !(w == &workers[0] && main_done)) {
     uint64_t due = __atomic_load_n(&next_due, __ATOMIC_ACQUIRE);
-    if (!due && __atomic_load_n(&runnable, __ATOMIC_SEQ_CST) == 0 && __atomic_load_n(&alive, __ATOMIC_SEQ_CST) > 0) mt_deadlock();
+    if (!due && __atomic_load_n(&runnable, __ATOMIC_SEQ_CST) == 0 && __atomic_load_n(&alive, __ATOMIC_SEQ_CST) > 0 && __atomic_load_n(&io_waiting, __ATOMIC_SEQ_CST) == 0) mt_deadlock();
     if (due) {
       // The monotonic clock and the condition's clock differ: wait as long as is left.
       uint64_t left = due > now_ns() ? due - now_ns() : 0;
@@ -2408,6 +2742,9 @@ static void* worker_thread(void* arg) {
 
 static void mt_run(void (*main)(void), void (*entry)(void* task, void* closure)) {
   threads = true;
+  // A program whose tasks run on threads may run for long, a server: what it prints goes out a
+  // line at a time.
+  setvbuf(stdout, NULL, _IOLBF, 0);
   const char* n = getenv("FLY_THREADS");
   long cores = n && *n ? strtol(n, NULL, 10) : sysconf(_SC_NPROCESSORS_ONLN);
   nworkers = cores > 0 ? (int)cores : 1;

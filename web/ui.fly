@@ -1,0 +1,102 @@
+// User interfaces as an effect. A view is a function that performs `Ui<M>`: it opens elements,
+// gives them attributes, keys and events, adds text, and closes them, in order — with `if`, `for`
+// and `match` as anywhere else. What handles it decides what that becomes: HTML on the server, the
+// page's DOM in the browser. An event gives the program a message, an `M`, which its `update`
+// turns into a new model, and the view shows that.
+
+export effect Ui<M> {
+  // Starts an element, whose attributes, events and children follow, until `close`.
+  open(tag: str): void;
+  // Who the element just opened is among its siblings, for a list whose items move.
+  key(k: str): void;
+  attr(name: str, value: str): void;
+  // When `event` happens on the element just opened, the program is given `msg`.
+  on(event: str, msg: M): void;
+  text(s: str): void;
+  close(): void;
+}
+
+// What an event says besides its message: the text of the input it happened on, the key pressed,
+// whether a checkbox is checked.
+export type Event = { text: String; key: String; checked: bool };
+
+// ---- building ----
+
+// An element: `el("li", () => { cls("done"); text(item.title); })`.
+export function el<M>(tag: str, body: () => void uses Ui<M>): void uses Ui<M> {
+  Ui.open(tag);
+  body();
+  Ui.close();
+}
+
+export function text<M>(s: str): void uses Ui<M> { Ui.text(s); }
+export function attr<M>(name: str, value: str): void uses Ui<M> { Ui.attr(name, value); }
+export function cls<M>(name: str): void uses Ui<M> { Ui.attr("class", name); }
+export function key<M>(k: str): void uses Ui<M> { Ui.key(k); }
+export function on<M>(event: str, msg: M): void uses Ui<M> { Ui.on(event, msg); }
+
+// ---- HTML ----
+
+// Elements that have no end tag.
+function isVoid(tag: str): bool {
+  match (tag) { "area" | "base" | "br" | "col" | "embed" | "hr" | "img" | "input" | "link" | "meta" | "source" | "track" | "wbr" => true, _ => false }
+}
+
+// Text as HTML shows it: `&`, `<`, `>` and quotes escaped.
+export function escape(s: str, out: mut String): void {
+  const bytes = s.asBytes();
+  let start: usize = 0;
+  for (const i of 0..bytes.len()) {
+    const b = bytes[i];
+    const sub = match (b) { b'&' => "&amp;", b'<' => "&lt;", b'>' => "&gt;", b'"' => "&quot;", b'\'' => "&#39;", _ => "" };
+    if (sub.len() > 0) {
+      out.push(s.slice(start, i));
+      out.push(sub);
+      start = i + 1;
+    }
+  }
+  out.push(s.slice(start, bytes.len()));
+}
+
+// The HTML of what `view` shows, appended to `out`. Events are left out: the page's code adds them
+// when it takes the page over, as it renders the same view again.
+export function html<M>(out: mut String, view: () => void uses Ui<M>): void {
+  // Whether a start tag is still open, waiting for its attributes; the elements open, innermost last.
+  let starting = false;
+  let open: Vec<String> = Vec.new();
+  handle { view() } with Ui<M> {
+    open(tag) resumes k => {
+      if (starting) { out.push(">"); }
+      out.push("<");
+      out.push(tag);
+      open.push(tag.toString());
+      starting = true;
+      k()
+    }
+    key(_) resumes k => k(),
+    attr(name, value) resumes k => {
+      out.push(" ");
+      out.push(name);
+      out.push("=\"");
+      escape(value, mut out);
+      out.push("\"");
+      k()
+    }
+    on(_, _) resumes k => k(),
+    text(s) resumes k => {
+      if (starting) { out.push(">"); starting = false; }
+      escape(s, mut out);
+      k()
+    }
+    close() resumes k => {
+      if (starting) { out.push(">"); starting = false; }
+      const tag = match (open.pop()) { #Some(t) => t, #None => String.new() };
+      if (!isVoid(tag.asStr())) {
+        out.push("</");
+        out.push(tag.asStr());
+        out.push(">");
+      }
+      k()
+    }
+  };
+}

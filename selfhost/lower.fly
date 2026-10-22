@@ -2467,10 +2467,23 @@ impl Lower {
     const k = match (self.builtinOf(iter)) { #Some(k) => k, #None => return false };
     if (k != "Listener_accept") { return false; }
     const itemTy = self.patTy(pat);
+    // The listener, read once: a `Listener` is a handle.
+    const target: Expr = match (iter.kind) {
+      #Call { callee, typeArgs: _, args: _ } => match (callee.get().kind) { #Field { target, name: _ } => target.get().clone(), _ => return false },
+      _ => return false,
+    };
+    const lt = stripBorrow(self.exprTy(target.id));
+    const lv = self.exAs(target, lt.clone());
+    const ll = self.temp(lt.clone());
+    self.emit(#Let(ll, #Use(lv)));
     self.loops.push({ label: l });
     self.push();
     const ot = optionTy(itemTy.clone());
-    const o = self.builtinCall("Listener_next", Vec.new(), Vec.new(), ot.clone(), false, iter.span);
+    const c: Call = {
+      callee: #Builtin("Listener_next".toString()), args: [#Copy(localPlace(ll))], params: [lt.clone()], argTys: [lt.clone()],
+      ret: ot.clone(), regions: Vec.new(), fails: false, suspends: true, yields: false, row: self.ioRow(), targs: Vec.new(), span: iter.span,
+    };
+    const o = self.value(#Call(c), ot.clone());
     self.nextItem(l, pat, o, ot, itemTy, body);
     const loopBody = self.pop();
     self.loops.pop();

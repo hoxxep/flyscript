@@ -1,6 +1,6 @@
 # Flyscript
 
-**Language specification, version 0.59**
+**Language specification, version 0.60**
 
 *Affine values, one row calculus, handlers for everything, and `comptime`: Church on the outside, Turing on the inside.*
 
@@ -20,10 +20,11 @@ The whole language rests on five laws. Every rule in this document is a conseque
 
 ### 0.1 Recent changes
 
-0.59 makes handlers whose arms each end by resuming cost a call per operation (§5.2), the shape dependency injection and rendering take. 0.58 ran native tasks on every core (§8.3), and `par` and `parReduce` on all of them through `join`, which runs two pure closures at once (§6.5). 0.57 added LLVM as a way to native code (§8.3): a program's functions as LLVM IR, with debug information that maps them to their source, optimized together with the runtime, for any target LLVM has. 0.56 built the foreign interface (§8.2): raw pointers as the prelude's `Ptr<T>`, reaching through one an effect, `Unsafe`, that `unsafe { … }` handles, and functions of C's and functions C calls; and one core IR under the self-hosted compiler's back ends. The table lists the language's changes since 0.54; earlier ones are in [docs/history](history/).
+0.60 gives native programs real sockets (§8.3): `std/net` listens and connects on the machine's network when no world is simulated, and `IoErr` says when an address is in use. 0.59 made handlers whose arms each end by resuming cost a call per operation (§5.2), the shape dependency injection and rendering take. 0.58 ran native tasks on every core (§8.3), and `par` and `parReduce` on all of them through `join`, which runs two pure closures at once (§6.5). 0.57 added LLVM as a way to native code (§8.3): a program's functions as LLVM IR, with debug information that maps them to their source, optimized together with the runtime, for any target LLVM has. 0.56 built the foreign interface (§8.2): raw pointers as the prelude's `Ptr<T>`, reaching through one an effect, `Unsafe`, that `unsafe { … }` handles, and functions of C's and functions C calls; and one core IR under the self-hosted compiler's back ends. The table lists the language's changes since 0.54; earlier ones are in [docs/history](history/).
 
 | Change | Why |
 | :--- | :--- |
+| `IoErr` has `#AddrInUse` (§5.1) | a server binding a port another program holds could only report it as some other failure |
 | `std/par` exports `join(a, b)`, which runs two pure closures, at once when a core is free, and gives both results (§6.5) | `par` and `parReduce` need to run halves of their work in parallel without `Io`, which pure code does not perform; so do programs splitting work of their own |
 | A type nothing constrains, such as the result of a closure that only throws, is `never` (§3.6) | `s.fork(() => { …; throw #Bad })` left its `Fiber`'s type unsolved, which code generation cannot lay out; no value of it is ever made |
 | `isize` and `usize` are as wide as the target's addresses: 53 bits on JavaScript (§3.1) | the JavaScript back end represents them as numbers, which hold integers exactly to 53 bits |
@@ -464,7 +465,7 @@ effect Io {
   sleep(d: Duration): void;
   park(on: WaitKey): void;                       // the primitive under locks, channels, atomics and join
 }
-type IoErr = #Reset | #TimedOut | #BrokenPipe | #NotFound | #PermissionDenied;
+type IoErr = #Reset | #TimedOut | #BrokenPipe | #NotFound | #PermissionDenied | #AddrInUse;
 ```
 
 `Fd`, `Instant`, `Duration` and `WaitKey` are prelude structs whose fields are private. A `Duration` is built with `Duration.ms(n)`, `Duration.secs(n)` or `Duration.nanos(n)` and compared with `<`; an `Instant` means something only against another, through `later.since(earlier)`. Under the simulator (§6.4) time passes exactly as tasks sleep, so a test of a timeout runs instantly and the same way every time.
@@ -920,7 +921,7 @@ A foreign call runs on the worker thread's native stack, not on the task's growa
 
 ### 8.3 Targets
 
-- **Native** (x86-64, AArch64): tasks are stackful fibers, run on a worker thread for each core. A task not yet begun is any worker's to take, and an idle worker steals one from a busy one; once begun, a task resumes on the worker it began on, which keeps what code reads of the running task — the failure being raised, whether it unwinds — its thread's. A task that waits gives its worker to others. Run against a simulated world (§6.4), the same program runs its tasks one at a time, in the order the seed chooses. Native code is made through C, or through LLVM: the program's functions as LLVM IR, with debug information mapping each instruction to its line and each variable to its value, linked with the runtime's C and optimized with it as one program. Through LLVM a program reaches every target LLVM has; a freestanding one too.
+- **Native** (x86-64, AArch64): tasks are stackful fibers, run on a worker thread for each core. A task not yet begun is any worker's to take, and an idle worker steals one from a busy one; once begun, a task resumes on the worker it began on, which keeps what code reads of the running task — the failure being raised, whether it unwinds — its thread's. A task that waits gives its worker to others. Run against a simulated world (§6.4), the same program runs its tasks one at a time, in the order the seed chooses, and its sockets are the world's; otherwise they are the machine's, and a task waiting for one gives its worker to others until the kernel says it is ready. Native code is made through C, or through LLVM: the program's functions as LLVM IR, with debug information mapping each instruction to its line and each variable to its value, linked with the runtime's C and optimized with it as one program. Through LLVM a program reaches every target LLVM has; a freestanding one too.
 - **Freestanding** (a kernel, firmware): no operating system and no C library. The program's roots are its `export extern "C"` functions, it has no `main` and no `Io`, and it supplies three functions the runtime calls: `fly_os_alloc(size, align)` for memory, `fly_os_free(p)`, and `fly_os_panic(message, len)`, which does not return. Everything else — failures, regions, `defer`, generators, effect handlers and their fibers — works unchanged, with fiber stacks from `fly_os_alloc`.
 - **WebAssembly**: a program is compiled through C for WASI. A fiber — a task, a `handle`'s body, a generator — runs on a stack of its own in linear memory, so what it lent stays where it is while it is suspended, and the host switches between fibers by JavaScript promise integration (later, the stack-switching proposal). The root `Io` handler maps to WASI, or to the host's promises. Without threads, `par` runs sequentially with the same semantics.
 
@@ -959,6 +960,7 @@ The rules that carry the design:
 export struct Socket { … }
 impl Socket {
   export function read(self: mut Self, buf: mut u8[]): usize uses Io, Fail<IoErr>;
+  export function write(self: mut Self, bytes: readonly u8[]): void uses Io, Fail<IoErr>;
   export function writeStatus(self: mut Self, code: u16, body: str): void uses Io, Fail<IoErr>;
 }
 export struct Db { … }

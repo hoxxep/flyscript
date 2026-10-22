@@ -145,7 +145,8 @@ function cLayout(c: str, ptr: usize): Option<[usize, usize]> {
     "int64_t" | "uint64_t" | "double" | "fly_Hasher" => #Some([8, 8]),
     "fly_i128" => #Some([16, 16]),
     "fly_str" | "fly_slice" | "fly_yield" => #Some([2 * ptr, ptr]),
-    "fly_String" | "fly_vec" | "fly_fn" | "fly_gen" | "fly_cont" | "fly_File" | "fly_socket" => #Some([3 * ptr, ptr]),
+    "fly_String" | "fly_vec" | "fly_fn" | "fly_gen" | "fly_cont" | "fly_File" => #Some([3 * ptr, ptr]),
+    "fly_socket" => #Some([7 * ptr, ptr]),
     "fly_map" => #Some([6 * ptr, ptr]),
     "fly_arena" => #Some([ptr, ptr]),
     _ => if (c.endsWith("*")) { #Some([ptr, ptr]) } else { #None },
@@ -2862,7 +2863,7 @@ _Static_assert(sizeof(fly_String) == 24 && sizeof(fly_vec) == 24 && __builtin_of
 _Static_assert(sizeof(fly_fn) == 24 && __builtin_offsetof(fly_fn, drop) == 8 && __builtin_offsetof(fly_fn, fn) == 16, \"fly_fn\");
 _Static_assert(sizeof(fly_cont) == 24 && __builtin_offsetof(fly_cont, resume) == 8 && __builtin_offsetof(fly_cont, drop) == 16, \"fly_cont\");
 _Static_assert(sizeof(fly_yield) == 16 && __builtin_offsetof(fly_yield, fn) == 8, \"fly_yield\");
-_Static_assert(sizeof(fly_gen) == 24 && sizeof(fly_File) == 24 && sizeof(fly_socket) == 24 && sizeof(fly_map) == 48, \"runtime structs\");
+_Static_assert(sizeof(fly_gen) == 24 && sizeof(fly_File) == 24 && sizeof(fly_socket) == 56 && sizeof(fly_map) == 48, \"runtime structs\");
 _Static_assert(sizeof(fly_arena) == 8 && sizeof(fly_chan) == 4 && sizeof(fly_Hasher) == 8 && _Alignof(fly_i128) == 16, \"runtime scalars\");
 ";
 

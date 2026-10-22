@@ -21,6 +21,17 @@ fn out() -> PathBuf {
     out
 }
 
+/// The programs of the directories given, in order.
+fn suite(dirs: &[&str]) -> Vec<PathBuf> {
+    let mut files: Vec<PathBuf> = Vec::new();
+    for dir in dirs {
+        let mut fs: Vec<PathBuf> = std::fs::read_dir(root().join(dir)).unwrap().map(|e| e.unwrap().path()).filter(|f| f.extension().is_some_and(|e| e == "fly")).collect();
+        fs.sort();
+        files.extend(fs);
+    }
+    files
+}
+
 fn has_node() -> bool {
     Command::new("node").arg("--version").output().is_ok()
 }
@@ -94,7 +105,7 @@ fn build_with_flyc() {
 /// Every program of the test suite and the examples.
 fn programs() -> Vec<PathBuf> {
     let mut programs: Vec<PathBuf> = Vec::new();
-    for dir in ["tests/run", "tests/threads", "tests/native", "tests/accept", "tests/reject", "examples"] {
+    for dir in ["tests/run", "tests/threads", "tests/web", "tests/native", "tests/accept", "tests/reject", "examples"] {
         let mut files: Vec<PathBuf> = std::fs::read_dir(root().join(dir)).unwrap().map(|e| e.unwrap().path()).collect();
         files.sort();
         for f in files {
@@ -169,7 +180,7 @@ fn compiled_programs_run_as_expected() {
     if !has_node() {
         return;
     }
-    let r = Command::new("sh").arg(root().join("selfhost/corpus.sh")).arg(root().join("selfhost/seed.js")).output().unwrap();
+    let r = Command::new("sh").arg(root().join("selfhost/corpus.sh")).arg(root().join("selfhost/seed.js")).args(suite(&["tests/run", "tests/web"])).output().unwrap();
     let report = String::from_utf8_lossy(&r.stdout);
     let failed: Vec<&str> = report.lines().filter_map(|l| l.strip_prefix("FAIL ")).collect();
     assert!(failed.is_empty(), "failed compiled:\n{}", failed.join("\n"));
@@ -184,7 +195,7 @@ fn native_programs_run_as_expected() {
     }
     // The run suite, and the programs that run only natively: those with raw memory and C (§8.2).
     let mut files: Vec<PathBuf> = Vec::new();
-    for dir in ["tests/run", "tests/native"] {
+    for dir in ["tests/run", "tests/web", "tests/native"] {
         let mut fs: Vec<PathBuf> = std::fs::read_dir(root().join(dir)).unwrap().map(|e| e.unwrap().path()).filter(|f| f.extension().is_some_and(|e| e == "fly")).collect();
         fs.sort();
         files.extend(fs);
@@ -228,7 +239,7 @@ fn wasm_programs_run_as_expected() {
     if !has_wasm() {
         return;
     }
-    let r = Command::new("sh").arg(root().join("selfhost/corpus.sh")).arg("--wasm").arg(root().join("selfhost/seed.js")).output().unwrap();
+    let r = Command::new("sh").arg(root().join("selfhost/corpus.sh")).arg("--wasm").arg(root().join("selfhost/seed.js")).args(suite(&["tests/run", "tests/web"])).output().unwrap();
     let report = String::from_utf8_lossy(&r.stdout);
     let failed: Vec<&str> = report.lines().filter_map(|l| l.strip_prefix("FAIL ")).collect();
     assert!(failed.is_empty(), "failed as WebAssembly:\n{}", failed.join("\n"));
@@ -269,7 +280,7 @@ fn llvm_programs_run_as_expected() {
         return;
     }
     let mut files: Vec<PathBuf> = Vec::new();
-    for dir in ["tests/run", "tests/native"] {
+    for dir in ["tests/run", "tests/web", "tests/native"] {
         let mut fs: Vec<PathBuf> = std::fs::read_dir(root().join(dir)).unwrap().map(|e| e.unwrap().path()).filter(|f| f.extension().is_some_and(|e| e == "fly")).collect();
         fs.sort();
         files.extend(fs);
@@ -324,4 +335,47 @@ fn threaded_programs_run_as_expected() {
         let failed: Vec<&str> = report.lines().filter_map(|l| l.strip_prefix("FAIL ")).collect();
         assert!(failed.is_empty(), "failed ({way:?}):\n{}", failed.join("\n"));
     }
+}
+
+/// A server written with web/http.fly, built natively, serves real HTTP on worker threads: each of
+/// several connections, kept alive, gets the answer to each of its requests.
+#[test]
+fn serves_http_on_threads() {
+    use std::io::{BufRead, BufReader, Read, Write};
+    if !has_node() || !has_cc() {
+        return;
+    }
+    let dir = out();
+    let c = dir.join("hello_server.c");
+    compile(&root().join("selfhost/seed.js"), &root().join("tests/web/hello_server.fly"), &c);
+    let exe = dir.join("hello_server");
+    let built = Command::new("cc").args(["-std=gnu11", "-O1", "-w", "-o"]).arg(&exe).arg(&c).arg("-lm").output().unwrap();
+    assert!(built.status.success(), "{}", String::from_utf8_lossy(&built.stderr));
+    let mut server = Command::new(&exe).arg("0").env_remove("FLY_WORLD").stdout(std::process::Stdio::piped()).spawn().unwrap();
+    let mut first = String::new();
+    BufReader::new(server.stdout.as_mut().unwrap()).read_line(&mut first).unwrap();
+    let port: u16 = first.trim().strip_prefix("listening on ").and_then(|p| p.parse().ok()).unwrap_or_else(|| panic!("the server said {first:?}"));
+    let clients: Vec<_> = (0..8)
+        .map(|k| {
+            std::thread::spawn(move || {
+                let mut s = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+                for i in 0..20 {
+                    let close = if i == 19 { "Connection: close\r\n" } else { "" };
+                    write!(s, "GET /c{k}/r{i} HTTP/1.1\r\nHost: here\r\n{close}\r\n").unwrap();
+                }
+                let mut all = String::new();
+                s.read_to_string(&mut all).unwrap();
+                (k, all)
+            })
+        })
+        .collect();
+    for client in clients {
+        let (k, all) = client.join().unwrap();
+        for i in 0..20 {
+            assert!(all.contains(&format!("hello, GET /c{k}/r{i}\n")), "client {k} did not get the answer to request {i}:\n{all}");
+        }
+        assert_eq!(all.matches("HTTP/1.1 200 OK").count(), 20, "{all}");
+    }
+    server.kill().unwrap();
+    server.wait().unwrap();
 }
