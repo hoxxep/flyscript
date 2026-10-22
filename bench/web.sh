@@ -85,6 +85,6 @@ if [ -n "$NODE_PATH" ]; then
   ' "$out/browser.json" >> "$results"
 fi
 
-kill "$fly" 2> /dev/null || true
-kill "$nodepid" "$npid" 2> /dev/null || true
+kill "$fly" "$nodepid" "$npid" 2> /dev/null || true
+wait 2> /dev/null || true
 cat "$results"
