@@ -116,28 +116,6 @@ const { $rt, $b } = (() => {
       r = g.next(yield op);
     }
   }
-  // ---- destructors: what was moved out of an owner, by field path ----
-
-  function moved(m, path) { const out = m === null ? new Set() : new Set(m); out.add(path); return out; }
-  const under = (path, p) => p === path || p.startsWith(path + ".");
-  function isMoved(m, path) {
-    if (m === null) return false;
-    for (const p of m) if (under(p, path)) return true;
-    return false;
-  }
-  // The paths moved out below field `f`, relative to it.
-  function sub(m, f) {
-    if (m === null) return null;
-    let out = null;
-    for (const p of m) if (p.startsWith(f + ".")) { if (out === null) out = new Set(); out.add(p.slice(f.length + 1)); }
-    return out;
-  }
-  // A place assigned anew owns all of it again.
-  function unmove(m, path) {
-    if (m === null) return null;
-    const out = new Set([...m].filter((p) => !under(path, p)));
-    return out.size === 0 ? null : out;
-  }
   // Runs a destructor that may perform `Io` to its end, without letting other tasks in.
   function drive(g) {
     for (let r = g.next(); !r.done; r = g.next()) if (!(r.value instanceof Point)) panic("a destructor performed an effect that nothing handles");
@@ -309,12 +287,6 @@ const { $rt, $b } = (() => {
   }
   function quoted(s) {
     return "\"" + s.replace(/[\\"\n\t\r]/g, (c) => ({ "\\": "\\\\", "\"": "\\\"", "\n": "\\n", "\t": "\\t", "\r": "\\r" })[c]) + "\"";
-  }
-  // What `Show.show` writes, as a string.
-  function shown(show, v) {
-    const out = { v: "" };
-    show(v, out);
-    return out.v;
   }
   // A value's structure, as the interpreter shows one with no `Show` to hand.
   function show(v) {
@@ -931,8 +903,8 @@ const { $rt, $b } = (() => {
 
   const $rt = {
     take, sliceRef, strCmp, nextLine, nextWord, nextConnection,
-    Fail, Panic, Return, YIELD, handle, run, drive, moved, isMoved, sub, unmove, panic, raise, FieldRef, indexRef, rangeRef, yielded, isYield, perform, items,
-    div, rem, ndiv, nrem, bits, fmod, truncFloat, truncNum, toInt, toNum, at, idx, slice, copy, showFloat, shown, show,
+    Fail, Panic, Return, YIELD, handle, run, drive, panic, raise, FieldRef, indexRef, rangeRef, yielded, isYield, perform, items,
+    div, rem, ndiv, nrem, bits, fmod, truncFloat, truncNum, toInt, toNum, at, idx, slice, copy, showFloat, show,
     unmatched: (v) => panic(`no arm matched ${show(v)}`),
     argStr, argList, argInt, argNum, start,
     ...checks, ...wraps,
