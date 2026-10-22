@@ -1,6 +1,7 @@
 //! The native bodies of the standard library's declarations (`std/*.d.fly`).
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
 
 use super::generators::{self as gens_mod, GenKind};
 use super::interp::{Ctl, Handler, Interp, R, panic};
@@ -27,7 +28,7 @@ fn none() -> Value {
 }
 
 fn some(v: Value) -> Value {
-    Value::tag("Some", Value::Tuple(vec![v]))
+    Value::tag("Some", Value::Tuple(vec![v].into()))
 }
 
 fn place_of(v: &Value) -> Result<Place, Ctl> {
@@ -67,10 +68,10 @@ fn bytes_of(s: &str) -> Vec<Value> {
 
 fn list(v: &Value) -> Vec<Value> {
     match v.deref() {
-        Value::List(vs) | Value::Tuple(vs) => vs,
+        Value::List(vs) | Value::Tuple(vs) => Arc::unwrap_or_clone(vs),
         Value::Text(s) => bytes_of(&s),
         Value::Cell(c) => match &*c.lock().expect("cell") {
-            Value::List(vs) => vs.clone(),
+            Value::List(vs) => vs.to_vec(),
             _ => Vec::new(),
         },
         _ => Vec::new(),
@@ -157,8 +158,8 @@ impl Interp {
                 let r = self.call_value(&a(0), Vec::new());
                 self.handlers.pop();
                 match r {
-                    Ok(v) => Ok(Value::tag("Ok", Value::Tuple(vec![v]))),
-                    Err(Ctl::Unwind(h, e)) if h == id => Ok(Value::tag("Err", Value::Tuple(vec![e]))),
+                    Ok(v) => Ok(Value::tag("Ok", Value::Tuple(vec![v].into()))),
+                    Err(Ctl::Unwind(h, e)) if h == id => Ok(Value::tag("Err", Value::Tuple(vec![e].into()))),
                     Err(e) => Err(e),
                 }
             }
@@ -279,11 +280,11 @@ impl Interp {
             // ---- channels (§6.2) ----
             "channel" => {
                 let ch = self.sched.channel();
-                Ok(Value::Tuple(vec![Value::Native("Sender", ch), Value::Native("Receiver", ch)]))
+                Ok(Value::Tuple(vec![Value::Native("Sender", ch), Value::Native("Receiver", ch)].into()))
             }
             "Reply.new" => {
                 let ch = self.sched.channel();
-                Ok(Value::Tuple(vec![Value::Native("Reply", ch), Value::Native("Pending", ch)]))
+                Ok(Value::Tuple(vec![Value::Native("Reply", ch), Value::Native("Pending", ch)].into()))
             }
             "Sender.send" | "Reply.send" => {
                 let ch = match a(0).deref() {
@@ -328,7 +329,7 @@ impl Interp {
             "Vec.drain" => {
                 let p = place_of(&a(0))?;
                 let items = list(&get(&p));
-                set(&p, Value::List(Vec::new()));
+                set(&p, Value::List(Vec::new().into()));
                 Ok(gens_mod::new_gen(self, GenKind::Items { items, pos: 0 }))
             }
             "Sender.close" | "Sender.drop" => {
@@ -424,7 +425,7 @@ impl Interp {
             }
             "str.split" => {
                 let (s, sep) = (a(0).as_text(), a(1).as_text());
-                Ok(Value::List(s.split(&*sep).map(Value::text).collect()))
+                Ok(Value::List(s.split(&*sep).map(Value::text).collect::<Vec<_>>().into()))
             }
             "str.trim" => Ok(Value::text(a(0).as_text().trim())),
             "str.includes" => Ok(Value::Bool(a(0).as_text().contains(&*a(1).as_text()))),
@@ -457,7 +458,7 @@ impl Interp {
                     items.insert(i, a(2));
                     Value::Unit
                 };
-                set(&p, Value::List(items));
+                set(&p, Value::List(items.into()));
                 Ok(out)
             }
             "Vec.truncate" => {
@@ -465,7 +466,7 @@ impl Interp {
                 let n = a(1).as_int().max(0) as usize;
                 update(&p, |l| {
                     if let Value::List(vs) = l {
-                        vs.truncate(n);
+                        Arc::make_mut(vs).truncate(n);
                     }
                 });
                 Ok(Value::Unit)
@@ -478,7 +479,7 @@ impl Interp {
                         kept.push(v);
                     }
                 }
-                set(&p, Value::List(kept));
+                set(&p, Value::List(kept.into()));
                 Ok(Value::Unit)
             }
             "str.splitWhitespace" => {
@@ -509,7 +510,7 @@ impl Interp {
                 }
                 Ok(Value::Unit)
             }
-            "Vec.new" => Ok(Value::List(Vec::new())),
+            "Vec.new" => Ok(Value::List(Vec::new().into())),
             k if k.ends_with(".wrappingAdd") || k.ends_with(".wrappingSub") || k.ends_with(".wrappingMul") => {
                 let (ty, op) = k.split_once('.').expect("a method key");
                 let (x, y) = (a(0).as_int(), a(1).as_int());
@@ -528,7 +529,7 @@ impl Interp {
                 let mut out = None;
                 update(&p, |l| {
                     if let Value::List(vs) = l {
-                        out = vs.pop();
+                        out = Arc::make_mut(vs).pop();
                     }
                 });
                 Ok(out.map_or_else(none, some))
@@ -537,7 +538,7 @@ impl Interp {
                 let p = place_of(&a(0))?;
                 update(&p, |l| {
                     if let Value::List(vs) = l {
-                        vs.reverse();
+                        Arc::make_mut(vs).reverse();
                     }
                 });
                 Ok(Value::Unit)
@@ -548,8 +549,8 @@ impl Interp {
                     Value::List(vs) => vs,
                     _ => return Err(panic("sortBy on something not a list")),
                 };
-                let sorted = merge_sort(self, items, &a(1))?;
-                set(&p, Value::List(sorted));
+                let sorted = merge_sort(self, Arc::unwrap_or_clone(items), &a(1))?;
+                set(&p, Value::List(sorted.into()));
                 Ok(Value::Unit)
             }
             "Vec.push" => {
@@ -557,7 +558,7 @@ impl Interp {
                 let v = std::mem::replace(&mut args[1], Value::Unit);
                 update(&p, |l| {
                     if let Value::List(vs) = l {
-                        vs.push(v);
+                        Arc::make_mut(vs).push(v);
                     }
                 });
                 Ok(Value::Unit)
@@ -565,14 +566,14 @@ impl Interp {
             "Box.new" | "Arc.new" | "Box.get" | "Arc.get" | "Box.into" => Ok(a(0).deref_once()),
             // The same shared value: through the borrow of the `Arc`, never into a cell it shares.
             "Arc.clone" => Ok(a(0).deref_once()),
-            "HashMap.new" => Ok(Value::Map(Dict::default())),
+            "HashMap.new" => Ok(Value::Map(Dict::default().into())),
             "HashMap.insert" => {
                 let p = place_of(&a(0))?;
                 let k = std::mem::replace(&mut args[1], Value::Unit).deref();
                 let v = std::mem::replace(&mut args[2], Value::Unit);
                 update(&p, |m| {
                     if let Value::Map(d) = m {
-                        d.insert(k, v);
+                        Arc::make_mut(d).insert(k, v);
                     }
                 });
                 Ok(Value::Unit)
@@ -614,7 +615,7 @@ impl Interp {
                 let mut removed = none();
                 update(&p, |m| {
                     if let Value::Map(d) = m
-                        && let Some(v) = d.remove(&key) {
+                        && let Some(v) = Arc::make_mut(d).remove(&key) {
                             removed = some(v);
                         }
                 });
@@ -637,7 +638,7 @@ impl Interp {
                     .map(|i| match key.as_str() {
                         "HashMap.keys" => at(i, 0),
                         "HashMap.values" | "HashMap.valuesMut" => at(i, 1),
-                        _ => Value::Tuple(vec![at(i, 0), at(i, 1)]),
+                        _ => Value::Tuple(vec![at(i, 0), at(i, 1)].into()),
                     })
                     .collect();
                 Ok(gens_mod::new_gen(self, GenKind::Items { items, pos: 0 }))
@@ -650,12 +651,12 @@ impl Interp {
                 entries.sort_by(|(k1, v1), (k2, v2)| {
                     v2.as_int().cmp(&v1.as_int()).then_with(|| k1.as_text().cmp(&k2.as_text()))
                 });
-                Ok(Value::List(entries.into_iter().map(|(k, v)| Value::Tuple(vec![k, v])).collect()))
+                Ok(Value::List(entries.into_iter().map(|(k, v)| Value::Tuple(vec![k, v].into())).collect::<Vec<_>>().into()))
             }
 
             // ---- regions (§4.6) ----
             "alloc" => Ok(Value::Ref(shared(a(0)))),
-            "allocAll" => Ok(Value::Ref(shared(Value::List(list(&a(0)))))),
+            "allocAll" => Ok(Value::Ref(shared(Value::List(list(&a(0)).into())))),
             "replace" => {
                 let p = place_of(&a(0))?;
                 let old = get(&p);
@@ -677,7 +678,7 @@ impl Interp {
                     Err(_) => self.raise(Value::tag("MalformedUtf8", Value::Unit)),
                 }
             }
-            "repeat" => Ok(Value::List(vec![a(0); self.expected_len().unwrap_or(0)])),
+            "repeat" => Ok(Value::List(vec![a(0); self.expected_len().unwrap_or(0)].into())),
             "Cell.new" => Ok(Value::Cell(shared(a(0)))),
             "Cell.get" => match a(0) {
                 Value::Cell(c) => Ok(c.lock().expect("cell").clone()),
@@ -689,11 +690,11 @@ impl Interp {
                 }
                 Ok(Value::Unit)
             }
-            "RegionList.new" => Ok(Value::Cell(shared(Value::List(Vec::new())))),
+            "RegionList.new" => Ok(Value::Cell(shared(Value::List(Vec::new().into())))),
             "RegionList.push" => {
                 if let Value::Cell(c) = a(0).deref_handle()
                     && let Value::List(vs) = &mut *c.lock().expect("cell") {
-                        vs.push(a(1));
+                        Arc::make_mut(vs).push(a(1));
                     }
                 Ok(Value::Unit)
             }
@@ -719,7 +720,7 @@ impl Interp {
                 while let Some(v) = gens_mod::next(self, id)? {
                     out.push(v);
                 }
-                Ok(Value::List(out))
+                Ok(Value::List(out.into()))
             }
             "Gen.each" => {
                 let id = gens_mod::gen_id(&a(0))?;
@@ -749,7 +750,7 @@ impl Interp {
                     }
                     Value::Ptr(q)
                 };
-                Ok(Value::Tuple(vec![half(0, at), half(at, n)]))
+                Ok(Value::Tuple(vec![half(0, at), half(at, n)].into()))
             }
             "slice.viewAt" | "slice.readAt" | "array.viewAt" | "array.readAt" | "Vec.viewAt" | "Vec.readAt" => {
                 let mut p = place_of(&a(0))?;
@@ -822,7 +823,7 @@ impl Interp {
                     let sock = &mut w.sockets[id];
                     let Value::List(cells) = &mut target else { return Err(panic("read into a non-buffer")) };
                     let n = cells.len().min(sock.input.len() - sock.pos);
-                    for (i, cell) in cells.iter_mut().enumerate().take(n) {
+                    for (i, cell) in Arc::make_mut(cells).iter_mut().enumerate().take(n) {
                         *cell = Value::Int(sock.input[sock.pos + i] as i128);
                     }
                     sock.pos += n;
@@ -853,7 +854,7 @@ impl Interp {
                     return self.raise(Value::tag("TimedOut", Value::Unit));
                 }
                 match w.profiles.get(&user).cloned() {
-                    Some(name) => Ok(Value::Record([("displayName".to_string(), Value::text(&name))].into_iter().collect())),
+                    Some(name) => Ok(Value::Record([("displayName".to_string(), Value::text(&name))].into_iter().collect::<BTreeMap<_, _>>().into())),
                     None => {
                         drop(w);
                         self.raise(Value::tag("NotFound", Value::Unit))
@@ -868,7 +869,7 @@ impl Interp {
                     return self.raise(Value::tag("TimedOut", Value::Unit));
                 }
                 let allowed = w.quotas.get(&token).copied().unwrap_or(false);
-                Ok(Value::Record([("allowed".to_string(), Value::Bool(allowed))].into_iter().collect()))
+                Ok(Value::Record([("allowed".to_string(), Value::Bool(allowed))].into_iter().collect::<BTreeMap<_, _>>().into()))
             }
             other => Err(panic(format!("no native implementation of `{other}` yet"))),
         }

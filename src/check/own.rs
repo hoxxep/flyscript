@@ -11,7 +11,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 
 use super::env::{FnId, Program, Typed};
 use super::types::*;
-use crate::diag::Span;
+use crate::diag::{Span, SpanMap};
 use crate::syntax::ast::{self, Expr, ExprKind, Pattern, PatternKind, Stmt, TagArgs, TagPatArgs};
 
 type VarId = usize;
@@ -148,8 +148,8 @@ pub fn check_function(p: &mut Program, fid: FnId) {
         collecting: true,
         closure_modes: HashMap::new(),
         var_modes: HashMap::new(),
-        moves: HashMap::new(),
-        captured_moves: HashMap::new(),
+        moves: SpanMap::default(),
+        captured_moves: SpanMap::default(),
     };
     // Pass 1 collects every use of every binding, with its position; pass 2 checks.
     for pass in 0..2 {
@@ -260,9 +260,9 @@ struct Own<'p> {
     closure_modes: HashMap<Span, (FnMode, String)>,
     var_modes: HashMap<VarId, (FnMode, String)>,
     /// Each move out of a binding: the moving expression, and the field path moved.
-    moves: HashMap<Span, Vec<String>>,
+    moves: SpanMap<Vec<String>>,
     /// The bindings each closure moves in, by the closure's span.
-    captured_moves: HashMap<Span, Vec<(String, Ty)>>,
+    captured_moves: SpanMap<Vec<(String, Ty)>>,
 }
 
 impl<'p> Own<'p> {

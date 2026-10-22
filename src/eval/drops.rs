@@ -4,6 +4,7 @@
 //! parts — fields, payloads, elements — skipping parts that were moved out.
 
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use super::interp::{Ctl, Interp, TEnv};
 use super::value::*;
@@ -12,10 +13,11 @@ use crate::check::types::*;
 
 /// Whether dropping a value of type `t` can run any code.
 pub fn needs_drop(p: &Program, t: &Ty) -> bool {
-    needs(p, t, &mut HashSet::new())
+    needs(p, t, false, &mut HashSet::new())
 }
 
-fn needs(p: &Program, t: &Ty, seen: &mut HashSet<DefId>) -> bool {
+// `params` decides a type parameter: whether it may stand for a type that needs dropping.
+fn needs(p: &Program, t: &Ty, params: bool, seen: &mut HashSet<DefId>) -> bool {
     match t {
         Ty::Named(d, args) => {
             if p.has_drop(*d) {
@@ -24,25 +26,52 @@ fn needs(p: &Program, t: &Ty, seen: &mut HashSet<DefId>) -> bool {
             if !seen.insert(*d) {
                 return false;
             }
-            let arg_needs = args.iter().any(|a| matches!(a, GArg::Ty(t) if needs(p, t, seen)));
+            let arg_needs = args.iter().any(|a| matches!(a, GArg::Ty(t) if needs(p, t, params, seen)));
             let parts = match &p.defs[*d].kind {
                 DefKind::Struct { .. } => p.struct_fields(*d, args).unwrap_or_default().into_iter().map(|(_, t)| t).collect(),
                 DefKind::Enum { tags } => tags.values().map(|t| subst_params(t, &p.defs[*d].params, args)).collect(),
                 _ => Vec::new(),
             };
-            arg_needs || parts.iter().any(|t| needs(p, t, seen))
+            arg_needs || parts.iter().any(|t| needs(p, t, params, seen))
         }
-        Ty::Tuple(ts) => ts.iter().any(|t| needs(p, t, seen)),
-        Ty::Record(r) | Ty::Union(r) => r.labels.values().any(|t| needs(p, t, seen)),
-        Ty::Array(e, _) => needs(p, e, seen),
+        Ty::Tuple(ts) => ts.iter().any(|t| needs(p, t, params, seen)),
+        Ty::Record(r) | Ty::Union(r) => r.labels.values().any(|t| needs(p, t, params, seen)),
+        Ty::Array(e, _) => needs(p, e, params, seen),
+        Ty::Param(_) => params,
         _ => false,
     }
 }
 
 impl Interp {
+    /// `needs_drop`, deciding most nominal types from a fact kept per definition.
+    pub fn needs_drop(&self, t: &Ty) -> bool {
+        match t {
+            Ty::Named(d, _) => match self.may_drop(*d) {
+                false => false,
+                true if self.prog.defs[*d].params.is_empty() => true,
+                true => needs_drop(&self.prog, t),
+            },
+            Ty::Tuple(ts) => ts.iter().any(|t| self.needs_drop(t)),
+            Ty::Record(r) | Ty::Union(r) => r.labels.values().any(|t| self.needs_drop(t)),
+            Ty::Array(e, _) => self.needs_drop(e),
+            _ => false,
+        }
+    }
+
+    /// Whether some arguments make the definition `d` need dropping: whether it, or a part of it,
+    /// implements Drop or is a type parameter. A template's parts depend on its arguments.
+    fn may_drop(&self, d: DefId) -> bool {
+        if let Some(&b) = self.memo.drop_shapes.lock().expect("drop shapes").get(&d) {
+            return b;
+        }
+        let b = self.prog.defs[d].template_fields.is_some() || needs(&self.prog, &Ty::Named(d, Vec::new()), true, &mut HashSet::new());
+        self.memo.drop_shapes.lock().expect("drop shapes").insert(d, b);
+        b
+    }
+
     /// Drops `v`, of type `ty`, except the field paths in `moved`.
     pub fn drop_value(&mut self, v: Value, ty: &Ty, moved: &[Vec<String>]) -> Result<(), Ctl> {
-        if moved.iter().any(|m| m.is_empty()) || matches!(v, Value::Ptr(_)) || !needs_drop(&self.prog, ty) {
+        if moved.iter().any(|m| m.is_empty()) || matches!(v, Value::Ptr(_)) || !self.needs_drop(ty) {
             return Ok(());
         }
         let below = |name: &str| -> Vec<Vec<String>> {
@@ -75,7 +104,7 @@ impl Interp {
                     _ => {
                         // A library container: drop what it holds.
                         if let (Some(GArg::Ty(elem)), Value::List(items)) = (args.first(), v.deref()) {
-                            for item in items {
+                            for item in Arc::unwrap_or_clone(items) {
                                 self.drop_value(item, elem, &[])?;
                             }
                         }
@@ -85,7 +114,7 @@ impl Interp {
             }
             Ty::Tuple(ts) => {
                 if let Value::Tuple(vs) | Value::List(vs) = v.deref() {
-                    for (i, (x, t)) in vs.into_iter().zip(ts).enumerate() {
+                    for (i, (x, t)) in Arc::unwrap_or_clone(vs).into_iter().zip(ts).enumerate() {
                         self.drop_value(x, t, &below(&i.to_string()))?;
                     }
                 }
@@ -110,7 +139,7 @@ impl Interp {
             }
             Ty::Array(e, _) => {
                 if let Value::List(vs) = v.deref() {
-                    for x in vs {
+                    for x in Arc::unwrap_or_clone(vs) {
                         self.drop_value(x, e, &[])?;
                     }
                 }
@@ -123,7 +152,7 @@ impl Interp {
     fn drop_payload(&mut self, payload: Value, pt: &Ty) -> Result<(), Ctl> {
         match (pt, payload) {
             (Ty::Tuple(ts), Value::Tuple(vs)) => {
-                for (x, t) in vs.into_iter().zip(ts) {
+                for (x, t) in Arc::unwrap_or_clone(vs).into_iter().zip(ts) {
                     self.drop_value(x, t, &[])?;
                 }
                 Ok(())

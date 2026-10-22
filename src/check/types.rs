@@ -95,14 +95,14 @@ impl Prim {
 /// Index of a declaration (struct, enum, alias, interface, effect) in the program.
 pub type DefId = usize;
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Region {
     Var(u32),
     Param(Sym),
     Heap,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Tail {
     Closed,
     Var(u32),
@@ -110,7 +110,7 @@ pub enum Tail {
 }
 
 /// A record or tag-union row. For a union, a tag's payload is `void` (none), a tuple or a record.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Row {
     pub labels: BTreeMap<String, Ty>,
     pub tail: Tail,
@@ -124,14 +124,14 @@ impl Row {
 
 /// One effect in a row: its declaration, its region arguments (part of its label, §3.2) and
 /// its other arguments (determined by the label).
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Eff {
     pub def: DefId,
     pub regions: Vec<Region>,
     pub args: Vec<Ty>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct EffRow {
     pub effs: Vec<Eff>,
     /// `Tail::Var` indexes the effect-row variables, not the record-row variables.
@@ -144,14 +144,14 @@ impl EffRow {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum FnMode {
     Shared,
     Mut,
     Once,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct FnTy {
     pub mode: FnMode,
     pub params: Vec<Ty>,
@@ -159,7 +159,7 @@ pub struct FnTy {
     pub effects: EffRow,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Len {
     Known(u64),
     Var(u32),
@@ -167,7 +167,7 @@ pub enum Len {
 }
 
 /// A generic argument: generic parameters are types, regions or rows.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum GArg {
     Ty(Ty),
     Region(Region),
@@ -177,7 +177,7 @@ pub enum GArg {
     Len(Len),
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Ty {
     Var(u32),
     Param(Sym),

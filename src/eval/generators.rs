@@ -210,14 +210,14 @@ fn step(it: &mut Interp, kind: &mut GenKind) -> Result<Option<Value>, Ctl> {
             next(it, *inner)
         }
         GenKind::Zip { a, b } => match (next(it, *a)?, next(it, *b)?) {
-            (Some(x), Some(y)) => Ok(Some(Value::Tuple(vec![x, y]))),
+            (Some(x), Some(y)) => Ok(Some(Value::Tuple(vec![x, y].into()))),
             _ => Ok(None),
         },
         GenKind::Enumerate { inner, n } => match next(it, *inner)? {
             Some(v) => {
                 let i = *n;
                 *n += 1;
-                Ok(Some(Value::Tuple(vec![Value::Int(i as i128), v])))
+                Ok(Some(Value::Tuple(vec![Value::Int(i as i128), v].into())))
             }
             None => Ok(None),
         },
@@ -248,7 +248,7 @@ pub fn items_of(_it: &mut Interp, v: &Value) -> Result<Pull, Ctl> {
                 Value::List(vs) => vs.clone(),
                 other => return Err(panic(format!("cannot iterate {}", other.show()))),
             };
-            Ok(snapshot(items))
+            Ok(snapshot(items.to_vec()))
         }
         // A channel's receiver: each message, until the loop ends.
         Value::Native("Receiver", ch) => {
@@ -256,15 +256,15 @@ pub fn items_of(_it: &mut Interp, v: &Value) -> Result<Pull, Ctl> {
             Ok(Box::new(move |it| it.sched.recv(it.task, ch)))
         }
         other => match other.deref() {
-            Value::List(vs) | Value::Tuple(vs) => Ok(snapshot(vs)),
+            Value::List(vs) | Value::Tuple(vs) => Ok(snapshot(vs.to_vec())),
             Value::Text(s) => Ok(snapshot(s.bytes().map(|b| Value::Int(b as i128)).collect())),
             Value::Native("Gen", id) => Ok(Box::new(move |it| next(it, id))),
             Value::Cell(c) => {
                 let items = match &*c.lock().expect("cell") {
                     Value::List(vs) => vs.clone(),
-                    _ => Vec::new(),
+                    _ => Vec::new().into(),
                 };
-                Ok(snapshot(items))
+                Ok(snapshot(items.to_vec()))
             }
             v => Err(panic(format!("cannot iterate {}", v.show()))),
         },

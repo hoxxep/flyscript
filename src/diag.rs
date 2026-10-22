@@ -1,10 +1,39 @@
+use std::collections::{HashMap, HashSet};
 use std::fmt;
+use std::hash::{BuildHasherDefault, Hasher};
 
 /// A half-open byte range into a source file.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct Span {
     pub start: usize,
     pub end: usize,
+}
+
+/// Maps keyed by what the compiler makes itself: spans and ids. The checker's results are found by
+/// span for every expression the evaluator meets, and no adversary chooses these keys, so they are
+/// hashed by multiplication rather than SipHash.
+pub type FastMap<K, V> = HashMap<K, V, BuildHasherDefault<FastHasher>>;
+pub type SpanMap<V> = FastMap<Span, V>;
+pub type SpanSet = HashSet<Span, BuildHasherDefault<FastHasher>>;
+
+#[derive(Default)]
+pub struct FastHasher(u64);
+
+impl Hasher for FastHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.write_u64(b as u64);
+        }
+    }
+    fn write_u64(&mut self, n: u64) {
+        self.0 = (self.0.rotate_left(5) ^ n).wrapping_mul(0x517c_c1b7_2722_0a95);
+    }
+    fn write_usize(&mut self, n: usize) {
+        self.write_u64(n as u64);
+    }
 }
 
 impl Span {

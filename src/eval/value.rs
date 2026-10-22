@@ -38,7 +38,10 @@ impl fmt::Debug for Place {
 pub struct Closure {
     pub params: Vec<String>,
     pub body: ast::Expr,
+    /// What it moved in, each in a cell of its own.
     pub env: Vec<(String, Shared)>,
+    /// The scope it was made in, and how many of that scope's bindings it sees.
+    pub scope: Option<(super::interp::Env, usize)>,
     pub module: usize,
     /// The function whose body the closure appears in, for its recorded types.
     pub owner: usize,
@@ -81,23 +84,23 @@ impl Dict {
 
     pub fn insert(&mut self, key: Value, value: Value) {
         match self.find(&key) {
-            Some(i) => self.entries[i] = Value::Tuple(vec![key, value]),
+            Some(i) => self.entries[i] = Value::Tuple(vec![key, value].into()),
             None => {
                 self.index.entry(key.hash_value()).or_default().push(self.entries.len());
-                self.entries.push(Value::Tuple(vec![key, value]));
+                self.entries.push(Value::Tuple(vec![key, value].into()));
             }
         }
     }
 
     pub fn remove(&mut self, key: &Value) -> Option<Value> {
         let i = self.find(key)?;
-        let Value::Tuple(mut kv) = self.entries.remove(i) else { return None };
+        let Value::Tuple(kv) = self.entries.remove(i) else { return None };
         // Later entries moved down one: index them again.
         self.index.clear();
         for (j, e) in self.entries.iter().enumerate() {
             self.index.entry(entry(e).0.hash_value()).or_default().push(j);
         }
-        kv.pop()
+        Arc::unwrap_or_clone(kv).pop()
     }
 }
 
@@ -109,14 +112,16 @@ pub enum Value {
     Float(f64),
     /// A string: `str` and `String` alike.
     Text(Arc<String>),
-    Tuple(Vec<Value>),
-    Record(BTreeMap<String, Value>),
+    // Compound values are shared and copied on write: a tree-walking interpreter copies values
+    // wherever ownership moves or lends them, and a deep copy there made it quadratic.
+    Tuple(Arc<Vec<Value>>),
+    Record(Arc<BTreeMap<String, Value>>),
     /// A tag and its payload (`Unit`, a `Tuple` or a `Record`).
     Tag(Arc<str>, Box<Value>),
     /// Arrays, `Vec`s and slices.
-    List(Vec<Value>),
+    List(Arc<Vec<Value>>),
     /// A `HashMap`: its entries in insertion order, found by hash.
-    Map(Dict),
+    Map(Arc<Dict>),
     /// A borrow: transparent, it reads and writes through to its place.
     Ptr(Place),
     /// A region reference (§4.6): a `Copy` pointer that stays a pointer when stored or passed.
@@ -262,19 +267,19 @@ impl Value {
             }
             Value::List(vs) => {
                 eat(h, &[3]);
-                for v in &vs {
+                for v in vs.iter() {
                     v.hash_into(h);
                 }
             }
             Value::Tuple(vs) => {
                 eat(h, &[4]);
-                for v in &vs {
+                for v in vs.iter() {
                     v.hash_into(h);
                 }
             }
             Value::Record(fs) => {
                 eat(h, &[5]);
-                for (k, v) in &fs {
+                for (k, v) in fs.iter() {
                     eat(h, k.as_bytes());
                     v.hash_into(h);
                 }
@@ -299,10 +304,10 @@ impl Value {
             (Value::Int(a), Value::Float(b)) | (Value::Float(b), Value::Int(a)) => a as f64 == b,
             (Value::Text(a), Value::Text(b)) => a == b,
             (Value::Text(a), Value::List(b)) | (Value::List(b), Value::Text(a)) => {
-                a.len() == b.len() && a.as_bytes().iter().zip(&b).all(|(x, y)| *x as i128 == y.as_int())
+                a.len() == b.len() && a.as_bytes().iter().zip(b.iter()).all(|(x, y)| *x as i128 == y.as_int())
             }
             (Value::Tuple(a), Value::Tuple(b)) | (Value::List(a), Value::List(b)) => {
-                a.len() == b.len() && a.iter().zip(&b).all(|(x, y)| x.equals(y))
+                a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| x.equals(y))
             }
             (Value::Record(a), Value::Record(b)) => a.len() == b.len() && a.iter().all(|(k, v)| b.get(k).is_some_and(|w| v.equals(w))),
             (Value::Tag(a, p), Value::Tag(b, q)) => a == b && p.equals(&q),
@@ -330,7 +335,7 @@ fn step(v: &Value, seg: &Seg) -> Value {
         (Value::List(vs) | Value::Tuple(vs), Seg::Index(i)) => vs.get(*i).cloned().unwrap_or_else(|| panic!("index {i} out of bounds (length {})", vs.len())),
         (Value::Map(d), Seg::Index(i)) => d.entries[*i].clone(),
         (Value::Text(s), Seg::Index(i)) => Value::Int(*s.as_bytes().get(*i).unwrap_or_else(|| panic!("index {i} out of bounds")) as i128),
-        (Value::List(vs), Seg::Range(lo, hi)) => Value::List(vs[*lo..*hi].to_vec()),
+        (Value::List(vs), Seg::Range(lo, hi)) => Value::List(vs[*lo..*hi].to_vec().into()),
         (Value::Text(s), Seg::Range(lo, hi)) => Value::Text(Arc::new(s[*lo..*hi].to_string())),
         (other, seg) => panic!("cannot follow {seg:?} into {}", other.show()),
     }
@@ -380,12 +385,12 @@ fn step_ref<'a>(v: &'a Value, seg: &Seg) -> Option<&'a Value> {
 
 fn step_mut<'a>(v: &'a mut Value, seg: &Seg) -> Option<&'a mut Value> {
     match (v, seg) {
-        (Value::Record(fs), Seg::Field(f)) => fs.get_mut(f),
-        (Value::Tuple(vs), Seg::Field(f)) => vs.get_mut(f.parse::<usize>().ok()?),
+        (Value::Record(fs), Seg::Field(f)) => Arc::make_mut(fs).get_mut(f),
+        (Value::Tuple(vs), Seg::Field(f)) => Arc::make_mut(vs).get_mut(f.parse::<usize>().ok()?),
         (Value::Tag(_, payload), Seg::Payload) => Some(payload),
         (Value::Tag(_, payload), seg) => step_mut(payload, seg),
-        (Value::List(vs) | Value::Tuple(vs), Seg::Index(i)) => vs.get_mut(*i),
-        (Value::Map(d), Seg::Index(i)) => d.entries.get_mut(*i),
+        (Value::List(vs) | Value::Tuple(vs), Seg::Index(i)) => Arc::make_mut(vs).get_mut(*i),
+        (Value::Map(d), Seg::Index(i)) => Arc::make_mut(d).entries.get_mut(*i),
         _ => None,
     }
 }
@@ -433,14 +438,14 @@ fn write_at(v: &mut Value, path: &[Seg], new: Value) {
         return;
     };
     match (v, first) {
-        (Value::Record(fs), Seg::Field(f)) => write_at(fs.entry(f.clone()).or_insert(Value::Unit), rest, new),
-        (Value::Tuple(vs), Seg::Field(f)) if f.parse::<usize>().is_ok() => write_at(&mut vs[f.parse::<usize>().expect("index")], rest, new),
+        (Value::Record(fs), Seg::Field(f)) => write_at(Arc::make_mut(fs).entry(f.clone()).or_insert(Value::Unit), rest, new),
+        (Value::Tuple(vs), Seg::Field(f)) if f.parse::<usize>().is_ok() => write_at(&mut Arc::make_mut(vs)[f.parse::<usize>().expect("index")], rest, new),
         (Value::Tag(_, payload), Seg::Payload) => write_at(payload, rest, new),
         (Value::Tag(_, payload), _) => write_at(payload, path, new),
-        (Value::List(vs) | Value::Tuple(vs), Seg::Index(i)) => write_at(&mut vs[*i], rest, new),
+        (Value::List(vs) | Value::Tuple(vs), Seg::Index(i)) => write_at(&mut Arc::make_mut(vs)[*i], rest, new),
         // An entry's value, never its key: the index stays right.
-        (Value::Map(d), Seg::Index(i)) => write_at(&mut d.entries[*i], rest, new),
-        (Value::List(vs), Seg::Range(lo, _)) => write_in_range(vs, *lo, rest, new),
+        (Value::Map(d), Seg::Index(i)) => write_at(&mut Arc::make_mut(d).entries[*i], rest, new),
+        (Value::List(vs), Seg::Range(lo, _)) => write_in_range(Arc::make_mut(vs).as_mut_slice(), *lo, rest, new),
         (other, seg) => panic!("cannot write {seg:?} into {}", other.show()),
     }
 }

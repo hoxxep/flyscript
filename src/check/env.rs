@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 use super::types::*;
-use crate::diag::{Diagnostic, Span};
+use crate::diag::{Diagnostic, FastMap, Span, SpanMap, SpanSet};
 use crate::syntax::ast::{self, ItemKind, TypeKind};
 use crate::syntax::{parse_declarations, parse_module};
 
@@ -157,7 +157,7 @@ pub struct Program {
     /// Functions whose bodies have been checked.
     pub checked: std::collections::HashSet<FnId>,
     /// Per checked function: final types of its expressions and bindings, for later passes.
-    pub typed: HashMap<FnId, Typed>,
+    pub typed: FastMap<FnId, Typed>,
     /// Each interface method, as a function called through a bound.
     pub iface_fns: HashMap<(DefId, String), FnId>,
     /// Types computed by `comptime` code, referred to from expanded syntax (`TypeKind::Spliced`).
@@ -194,40 +194,40 @@ pub struct Program {
 /// The type checker's results for one function body, keyed by source span.
 #[derive(Clone, Debug, Default)]
 pub struct Typed {
-    pub exprs: HashMap<Span, Ty>,
+    pub exprs: SpanMap<Ty>,
     /// Types of `Bind` patterns (by the pattern's span), including parameters' bindings.
-    pub bindings: HashMap<Span, Ty>,
+    pub bindings: SpanMap<Ty>,
     pub params: Vec<(String, Ty)>,
     /// `==`, `!=` and `${e}` that call an interface's method (`Eq.eq`, `Show.show`), by the
     /// operator's or the interpolated expression's span, with `Self`'s type (§3.5).
-    pub ops: HashMap<Span, (FnId, Vec<GArg>)>,
+    pub ops: SpanMap<(FnId, Vec<GArg>)>,
     /// Likewise for `${e}`, by the interpolated expression's span (which an operator inside it
     /// may share).
-    pub shows: HashMap<Span, (FnId, Vec<GArg>)>,
+    pub shows: SpanMap<(FnId, Vec<GArg>)>,
     /// Moves out of bindings, by the moving expression's span, with the field path moved: the
     /// evaluator's drop flags (§5.6).
-    pub moves: HashMap<Span, Vec<String>>,
+    pub moves: SpanMap<Vec<String>>,
     /// The bindings each closure moves in, by the closure's span: they leave their scope's
     /// ownership when it is made.
-    pub captured_moves: HashMap<Span, Vec<(String, Ty)>>,
+    pub captured_moves: SpanMap<Vec<(String, Ty)>>,
     /// The effects each call, operation, `yield` or `throw` may perform, by its span; `None` in
     /// the list stands for effects a row variable leaves open.
-    pub performs: HashMap<Span, Vec<Option<DefId>>>,
+    pub performs: SpanMap<Vec<Option<DefId>>>,
     /// The effect each `handle` expression handles, by its span.
-    pub handled: HashMap<Span, DefId>,
+    pub handled: SpanMap<DefId>,
     /// `match` scrutinees that are places nothing may be moved out of — behind a borrow, or an
     /// element of a collection — matched through a borrow (`true` if `mut`), by their span.
-    pub lent_scrutinees: HashMap<Span, bool>,
+    pub lent_scrutinees: SpanMap<bool>,
     /// Tag constructions `#A(x)` whose one argument is the whole of a larger payload (§3.2).
-    pub whole: std::collections::HashSet<Span>,
+    pub whole: SpanSet,
     /// The type each part of a tag, record or list literal was checked against, by the part's
     /// span: a part put where a borrow is wanted is lent, not moved.
-    pub slots: HashMap<Span, Ty>,
+    pub slots: SpanMap<Ty>,
     /// The function each call or method call resolved to, by the call's span.
-    pub calls: HashMap<Span, FnId>,
+    pub calls: SpanMap<FnId>,
     /// Each call's generic arguments, in its scheme's parameter order (for dispatch through
     /// bounds at run time).
-    pub targs: HashMap<Span, Vec<GArg>>,
+    pub targs: SpanMap<Vec<GArg>>,
 }
 
 impl Names for Program {
@@ -273,7 +273,7 @@ impl Program {
             known: HashMap::new(),
             inferred: HashMap::new(),
             checked: Default::default(),
-            typed: HashMap::new(),
+            typed: FastMap::default(),
             iface_fns: HashMap::new(),
             spliced: Vec::new(),
             bodies: HashMap::new(),

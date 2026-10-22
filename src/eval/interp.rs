@@ -5,7 +5,7 @@
 //! no stack capture. Continuations that must be stored — a `Gen` pulled with `next()` — run the
 //! generator on its own thread, handing control back and forth (see `gen`).
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -39,82 +39,98 @@ pub type R = Result<Value, Ctl>;
 
 /// A lexical scope of bindings.
 pub struct Scope {
-    vars: Mutex<HashMap<String, Shared>>,
-    parent: Option<Env>,
+    /// The enclosing scope, and how many of its bindings this one sees: those made before it was.
+    /// A closure keeps its scope, and must not see bindings made after it.
+    parent: Option<(Env, usize)>,
+    bindings: Mutex<Bindings>,
+}
+
+#[derive(Default)]
+struct Bindings {
+    /// In the order made: a binding may shadow another in the same scope.
+    vars: Vec<(String, Shared)>,
     /// The bindings made here that may need dropping, in order, with their types (§5.6).
-    owned: Mutex<Vec<(String, Ty)>>,
+    owned: Vec<(String, Ty)>,
     /// Field paths moved out of this scope's bindings (a whole move is the empty path).
-    moved: Mutex<HashMap<String, Vec<Vec<String>>>>,
+    moved: HashMap<String, Vec<Vec<String>>>,
+}
+
+impl Scope {
+    fn lock(&self) -> std::sync::MutexGuard<'_, Bindings> {
+        self.bindings.lock().expect("env")
+    }
 }
 
 pub type Env = Arc<Scope>;
 
 pub fn new_env(parent: Option<Env>) -> Env {
-    Arc::new(Scope { vars: Mutex::new(HashMap::new()), parent, owned: Mutex::new(Vec::new()), moved: Mutex::new(HashMap::new()) })
+    let parent = parent.map(|p| {
+        let n = p.lock().vars.len();
+        (p, n)
+    });
+    scope_in(parent, Vec::new())
+}
+
+fn scope_in(parent: Option<(Env, usize)>, vars: Vec<(String, Shared)>) -> Env {
+    Arc::new(Scope { parent, bindings: Mutex::new(Bindings { vars, ..Bindings::default() }) })
+}
+
+/// The scope that binds `name` as seen from `env`, and the binding.
+fn find<'a>(env: &'a Env, name: &str) -> Option<(&'a Env, Shared)> {
+    let mut e = env;
+    let mut limit = usize::MAX;
+    loop {
+        {
+            let b = e.lock();
+            if let Some((_, v)) = b.vars[..limit.min(b.vars.len())].iter().rev().find(|(n, _)| n == name) {
+                return Some((e, v.clone()));
+            }
+        }
+        let (p, n) = e.parent.as_ref()?;
+        e = p;
+        limit = *n;
+    }
 }
 
 fn lookup(env: &Env, name: &str) -> Option<Shared> {
-    let mut e = Some(env.clone());
-    while let Some(s) = e {
-        if let Some(v) = s.vars.lock().expect("env").get(name) {
-            return Some(v.clone());
-        }
-        e = s.parent.clone();
-    }
-    None
+    find(env, name).map(|(_, v)| v)
 }
 
 pub fn define(env: &Env, name: &str, v: Value) {
-    env.vars.lock().expect("env").insert(name.to_string(), shared(v));
+    env.lock().vars.push((name.to_string(), shared(v)));
 }
 
 /// Binds `name` to an owned value of type `ty`, to be dropped when its scope ends.
 fn define_owned(env: &Env, name: &str, v: Value, ty: Ty) {
-    env.moved.lock().expect("env").remove(name);
-    env.owned.lock().expect("env").push((name.to_string(), ty));
+    env.lock().moved.remove(name);
+    env.lock().owned.push((name.to_string(), ty));
     define(env, name, v);
 }
 
 /// Records that `path` of binding `name` was moved out, in the scope that has the binding.
 fn mark_moved(env: &Env, name: &str, path: Vec<String>) {
-    let mut e = Some(env.clone());
-    while let Some(s) = e {
-        if s.vars.lock().expect("env").contains_key(name) {
-            s.moved.lock().expect("env").entry(name.to_string()).or_default().push(path);
-            return;
-        }
-        e = s.parent.clone();
+    if let Some((s, _)) = find(env, name) {
+        s.lock().moved.entry(name.to_string()).or_default().push(path);
     }
 }
 
 /// The parts of binding `name` under field path `prefix` that were moved out, relative to
 /// `prefix`; the empty path if the whole of it was.
 fn moved_under(env: &Env, name: &str, prefix: &[String]) -> Vec<Vec<String>> {
-    let mut e = Some(env.clone());
-    while let Some(s) = e {
-        if s.vars.lock().expect("env").contains_key(name) {
-            let moved = s.moved.lock().expect("env").get(name).cloned().unwrap_or_default();
-            if moved.iter().any(|m| prefix.starts_with(m)) {
-                return vec![Vec::new()];
-            }
-            return moved.iter().filter(|m| m.starts_with(prefix)).map(|m| m[prefix.len()..].to_vec()).collect();
-        }
-        e = s.parent.clone();
+    let Some((s, _)) = find(env, name) else { return Vec::new() };
+    let moved = s.lock().moved.get(name).cloned().unwrap_or_default();
+    if moved.iter().any(|m| prefix.starts_with(m)) {
+        return vec![Vec::new()];
     }
-    Vec::new()
+    moved.iter().filter(|m| m.starts_with(prefix)).map(|m| m[prefix.len()..].to_vec()).collect()
 }
 
 /// A place assigned anew owns a value again.
 fn mark_assigned(env: &Env, name: &str, prefix: &[String]) {
-    let mut e = Some(env.clone());
-    while let Some(s) = e {
-        if s.vars.lock().expect("env").contains_key(name) {
-            if let Some(moved) = s.moved.lock().expect("env").get_mut(name) {
-                moved.retain(|m| !m.starts_with(prefix));
-            }
-            return;
-        }
-        e = s.parent.clone();
+    if let Some((s, _)) = find(env, name)
+        && let Some(moved) = s.lock().moved.get_mut(name)
+    {
+        moved.retain(|m| !m.starts_with(prefix));
     }
 }
 
@@ -162,6 +178,43 @@ pub struct Interp {
     pub sched: Arc<super::sched::Sched>,
     /// The task this interpreter is running (0 is the program's first task).
     pub task: u64,
+    pub memo: Arc<Memo>,
+}
+
+/// Facts about the program the interpreter derives once and keeps, rather than per call.
+#[derive(Default)]
+pub struct Memo {
+    fns: Mutex<HashMap<FnId, Arc<FnFacts>>>,
+    /// For each definition met, whether some arguments make it need dropping.
+    pub drop_shapes: Mutex<HashMap<crate::check::types::DefId, bool>>,
+    /// An interface method and its `Self` type: the implementing method, its impl and the impl's
+    /// arguments.
+    dispatches: Mutex<HashMap<(FnId, Ty), Dispatch>>,
+}
+
+type Dispatch = (FnId, usize, HashMap<u32, GArg>);
+
+/// A function as the interpreter calls it: its declaration, and for each parameter whether a
+/// value passed for it needs dropping — `None` where that depends on the frame's type arguments.
+pub struct FnFacts {
+    pub decl: Option<ast::FnDecl>,
+    pub drops: Vec<Option<bool>>,
+    /// How an argument is passed to each parameter — `None` where the frame's type arguments say.
+    pub passes: Vec<Option<Pass>>,
+}
+
+/// How an argument is passed for a parameter.
+#[derive(Clone, Copy)]
+pub enum Pass {
+    /// A `mut` borrow: the argument's place.
+    Mut,
+    /// A readonly borrow of a non-`Copy` value, or a slice: the argument's place if it has one.
+    /// A copied argument would hold no loan (§4.4), so its source could change while it lives.
+    Lend,
+    /// A readonly borrow of a `Copy` value, or a `str`: the argument's value, borrow or not.
+    View,
+    /// An owned value.
+    Owned,
 }
 
 pub fn panic(msg: impl Into<String>) -> Ctl {
@@ -183,6 +236,7 @@ impl Interp {
             call_span: None,
             sched: super::sched::Sched::new(seed),
             task: 0,
+            memo: Arc::default(),
         }
     }
 
@@ -201,7 +255,23 @@ impl Interp {
             call_span: None,
             sched: self.sched.clone(),
             task: self.task,
+            memo: self.memo.clone(),
         }
+    }
+
+    /// What the interpreter needs of `fid` to call it, computed once.
+    pub fn facts(&self, fid: FnId) -> Arc<FnFacts> {
+        if let Some(f) = self.memo.fns.lock().expect("fns").get(&fid) {
+            return f.clone();
+        }
+        let decl = self.prog.fn_decl(fid);
+        let params = &self.prog.fns[fid].scheme.params;
+        let generic = |t: &Ty| super::super::check::impls::contains_params(t) || matches!(t, Ty::Assoc(..));
+        let drops = params.iter().map(|(_, t)| if generic(t) { None } else { Some(self.needs_drop(t)) }).collect();
+        let passes = params.iter().map(|(_, t)| if generic(t) { None } else { Some(self.pass(t)) }).collect();
+        let f = Arc::new(FnFacts { decl, drops, passes });
+        self.memo.fns.lock().expect("fns").insert(fid, f.clone());
+        f
     }
 
     pub fn fresh_id(&self) -> u64 {
@@ -225,23 +295,30 @@ impl Interp {
 
     pub fn call_fn_with(&mut self, fid: FnId, args: Vec<Value>, tenv: TEnv) -> R {
         let module = self.prog.fns[fid].module;
-        let Some(fdecl) = self.prog.fn_decl(fid) else { return Err(panic("not a function")) };
-        let Some(body) = fdecl.body else {
+        let facts = self.facts(fid);
+        let Some(fdecl) = &facts.decl else { return Err(panic("not a function")) };
+        let Some(body) = &fdecl.body else {
             return self.builtin(fid, args);
         };
         let env = new_env(None);
-        let param_tys: Vec<Ty> = self.prog.fns[fid].scheme.params.iter().map(|(_, t)| t.clone()).collect();
         let frame = self.fresh_id();
         let saved = std::mem::replace(&mut self.lex, Lex { frame, loops: Vec::new(), owner: fid, module, tenv });
-        for ((p, a), t) in fdecl.sig.params.iter().zip(args).zip(param_tys) {
-            let t = self.frame_ty(&t);
-            if super::drops::needs_drop(&self.prog, &t) {
+        for (i, (p, a)) in fdecl.sig.params.iter().zip(args).enumerate() {
+            let needs = match facts.drops.get(i).copied().flatten() {
+                Some(n) => n,
+                None => {
+                    let t = self.frame_ty(&self.prog.fns[fid].scheme.params[i].1);
+                    self.needs_drop(&t)
+                }
+            };
+            if needs {
+                let t = self.frame_ty(&self.prog.fns[fid].scheme.params[i].1);
                 define_owned(&env, &p.name.name, a, t);
             } else {
                 define(&env, &p.name.name, a);
             }
         }
-        let r = self.block(&body, &env);
+        let r = self.block(body, &env);
         // Parameters the body did not move are dropped as it returns (§5.6).
         let r = match (r, self.drop_scope(&env)) {
             (Ok(v), Err(e)) => {
@@ -268,13 +345,10 @@ impl Interp {
     pub fn call_value(&mut self, f: &Value, args: Vec<Value>) -> R {
         match f.deref() {
             Value::Closure(c) => {
-                let base = new_env(None);
-                for (n, v) in &c.env {
-                    base.vars.lock().expect("env").insert(n.clone(), v.clone());
-                }
+                let base = scope_in(c.scope.clone(), c.env.clone());
                 // A `once` closure's call is its end: what it owns is dropped with it (§5.6).
                 if c.once {
-                    base.owned.lock().expect("env").extend(c.owned.iter().cloned());
+                    base.lock().owned.extend(c.owned.iter().cloned());
                 }
                 let env = new_env(Some(base.clone()));
                 for (p, a) in c.params.iter().zip(args) {
@@ -374,7 +448,7 @@ impl Interp {
             None => 0,
         };
         Ok(match op {
-            "now" => Value::Record([("nanos".to_string(), Value::Int(w.clock as i128))].into_iter().collect()),
+            "now" => Value::Record([("nanos".to_string(), Value::Int(w.clock as i128))].into_iter().collect::<BTreeMap<_, _>>().into()),
             "sleep" => {
                 w.clock += nanos(args.first());
                 Value::Unit
@@ -386,9 +460,9 @@ impl Interp {
                 };
                 let n = bytes.len();
                 w.out.push(String::from_utf8_lossy(&bytes).into_owned());
-                Value::tag("Ok", Value::Tuple(vec![Value::Int(n as i128)]))
+                Value::tag("Ok", Value::Tuple(vec![Value::Int(n as i128)].into()))
             }
-            "read" => Value::tag("Ok", Value::Tuple(vec![Value::Int(0)])),
+            "read" => Value::tag("Ok", Value::Tuple(vec![Value::Int(0)].into())),
             _ => Value::Unit,
         })
     }
@@ -493,10 +567,10 @@ impl Interp {
 
     /// Drops the owned bindings of a scope, newest first, except what was moved out of them.
     fn drop_scope(&mut self, env: &Env) -> Result<(), Ctl> {
-        let owned = std::mem::take(&mut *env.owned.lock().expect("env"));
+        let owned = std::mem::take(&mut env.lock().owned);
         for (name, ty) in owned.into_iter().rev() {
-            let moved = env.moved.lock().expect("env").get(&name).cloned().unwrap_or_default();
-            let Some(cell) = env.vars.lock().expect("env").get(&name).cloned() else { continue };
+            let moved = env.lock().moved.get(&name).cloned().unwrap_or_default();
+            let Some(cell) = env.lock().vars.iter().rev().find(|(n, _)| *n == name).map(|(_, c)| c.clone()) else { continue };
             let v = cell.lock().expect("cell").clone();
             self.drop_value(v, &ty, &moved)?;
         }
@@ -534,7 +608,7 @@ impl Interp {
             PatternKind::TagAt { .. } => false,
             PatternKind::Bind(name) => {
                 match self.binding_ty(pat.span).map(|t| self.frame_ty(&t)) {
-                    Some(t) if !matches!(v, Value::Ptr(_)) && super::drops::needs_drop(&self.prog, &t) => define_owned(env, name, v.clone(), t),
+                    Some(t) if !matches!(v, Value::Ptr(_)) && self.needs_drop(&t) => define_owned(env, name, v.clone(), t),
                     _ => define(env, name, v.clone()),
                 }
                 true
@@ -658,10 +732,20 @@ impl Interp {
     // ---- expressions ----
 
     pub fn expr(&mut self, e: &Expr, env: &Env) -> R {
+        let moved = self.prog.typed.get(&self.lex.owner).and_then(|t| t.moves.get(&e.span)).cloned();
+        // A binding moved out of whole is never read again, so its value is taken, not copied.
+        if let (Some(path), ExprKind::Ident(name)) = (&moved, &e.kind)
+            && path.is_empty()
+            && let Some(cell) = lookup(env, name)
+        {
+            let v = std::mem::replace(&mut *cell.lock().expect("cell"), Value::Unit);
+            mark_moved(env, name, Vec::new());
+            return Ok(v);
+        }
         let r = self.expr_inner(e, env);
         // A value moved out of a binding is no longer the binding's to drop.
         if r.is_ok()
-            && let Some(path) = self.prog.typed.get(&self.lex.owner).and_then(|t| t.moves.get(&e.span)).cloned()
+            && let Some(path) = moved
                 && let Some(name) = root_name(e) {
                     mark_moved(env, name, path);
                 }
@@ -719,7 +803,7 @@ impl Interp {
                     TagArgs::Tuple(items) if self.prog.typed.get(&self.lex.owner).is_some_and(|t| t.whole.contains(&e.span)) => {
                         self.owned_all(items, env)?.into_iter().next().unwrap_or(Value::Unit)
                     }
-                    TagArgs::Tuple(items) => Value::Tuple(self.owned_all(items, env)?),
+                    TagArgs::Tuple(items) => Value::Tuple(self.owned_all(items, env)?.into()),
                     TagArgs::Record(fields) => self.record(fields, env)?,
                 };
                 Ok(Value::tag(name, payload))
@@ -728,8 +812,8 @@ impl Interp {
             ExprKind::List(items) => {
                 let vs = self.owned_all(items, env)?;
                 Ok(match self.ty_of(e.span) {
-                    Some(Ty::Tuple(_)) => Value::Tuple(vs),
-                    _ => Value::List(vs),
+                    Some(Ty::Tuple(_)) => Value::Tuple(vs.into()),
+                    _ => Value::List(vs.into()),
                 })
             }
             ExprKind::Field { .. } | ExprKind::Index { .. } => {
@@ -795,7 +879,7 @@ impl Interp {
                 let fields = self.place_fields(target);
                 if *op == "="
                     && let Some(t) = self.ty_of(target.span).map(|t| self.frame_ty(&t))
-                    && super::drops::needs_drop(&self.prog, &t)
+                    && self.needs_drop(&t)
                 {
                     let moved = fields.as_ref().map(|(name, prefix)| moved_under(env, name, prefix)).unwrap_or_default();
                     self.drop_value(get(&p), &t, &moved)?;
@@ -822,26 +906,20 @@ impl Interp {
                         captured.push((name.clone(), shared(v)));
                         mark_moved(env, &name, Vec::new());
                         let ty = self.frame_ty(&ty);
-                        if super::drops::needs_drop(&self.prog, &ty) {
+                        if self.needs_drop(&ty) {
                             owned.push((name, ty));
                         }
                     }
                 }
-                // The rest it captures by reference: borrows, as checked (§4.3).
-                let mut scope = Some(env.clone());
-                while let Some(s) = scope {
-                    for (k, v) in s.vars.lock().expect("env").iter() {
-                        if !captured.iter().any(|(n, _)| n == k) {
-                            captured.push((k.clone(), v.clone()));
-                        }
-                    }
-                    scope = s.parent.clone();
-                }
+                // The rest it captures by reference, borrows as checked (§4.3): the scope it is made
+                // in, as it is now.
+                let n = env.lock().vars.len();
                 let once = matches!(self.ty_of(e.span), Some(Ty::Fn(f)) if f.mode == crate::check::types::FnMode::Once);
                 Ok(Value::Closure(Arc::new(Closure {
                     params: params.iter().map(|p| p.name.name.clone()).collect(),
                     body: (**body).clone(),
                     env: captured,
+                    scope: Some((env.clone(), n)),
                     module: self.lex.module,
                     owner: self.lex.owner,
                     tenv: self.lex.tenv.clone(),
@@ -945,7 +1023,7 @@ impl Interp {
             };
             out.insert(f.name.name.clone(), v);
         }
-        Ok(Value::Record(out))
+        Ok(Value::Record(out.into()))
     }
 
     fn owned_all(&mut self, items: &[Expr], env: &Env) -> Result<Vec<Value>, Ctl> {
@@ -1046,16 +1124,23 @@ impl Interp {
     fn call(&mut self, e: &Expr, callee: &Expr, args: &[Expr], env: &Env) -> R {
         let fid = self.prog.typed.get(&self.lex.owner).and_then(|t| t.calls.get(&e.span)).copied();
         if let Some(fid) = fid {
-            let params = self.prog.fns[fid].scheme.params.clone();
+            let facts = self.facts(fid);
+            let prog = self.prog.clone();
+            let params = &prog.fns[fid].scheme.params;
             let mut vals = Vec::new();
             let has_self = params.first().is_some_and(|(n, _)| n == "self");
-            if has_self {
-                let ExprKind::Field { target, .. } = &callee.kind else { return Err(panic("bad method call")) };
-                vals.push(self.arg(target, &params[0].1, env)?);
-            }
-            let rest = if has_self { &params[1..] } else { &params[..] };
-            for (a, (_, pt)) in args.iter().zip(rest) {
-                vals.push(self.arg(a, pt, env)?);
+            let receiver = match (&callee.kind, has_self) {
+                (ExprKind::Field { target, .. }, true) => Some(&**target),
+                (_, true) => return Err(panic("bad method call")),
+                _ => None,
+            };
+            for (i, a) in receiver.into_iter().chain(args).enumerate() {
+                let Some((_, pt)) = params.get(i) else { break };
+                let pass = match facts.passes[i] {
+                    Some(pass) => pass,
+                    None => self.pass_at(a, pt),
+                };
+                vals.push(self.arg(a, pass, env)?);
             }
             return self.call_fn_at(fid, vals, e.span);
         }
@@ -1084,7 +1169,8 @@ impl Interp {
             Some(Ty::Fn(fty)) if fty.params.len() == args.len() => {
                 let mut vals = Vec::new();
                 for (a, pt) in args.iter().zip(&fty.params) {
-                    vals.push(self.arg(a, pt, env)?);
+                    let pass = self.pass_at(a, pt);
+                    vals.push(self.arg(a, pass, env)?);
                 }
                 vals
             }
@@ -1126,10 +1212,19 @@ impl Interp {
         let Some(iface) = info.iface else { return Ok((fid, tenv)) };
         let tps = &info.scheme.tparams;
         let Some(GArg::Ty(self_ty)) = tenv.get(&tps[0].sym.id) else { return Err(panic(format!("no type for `Self` in `{}`", info.name))) };
-        let (imp, binds) = self.prog.resolve_impl(iface, self_ty).ok_or_else(|| {
-            panic(format!("no impl of `{}` for `{}`", self.prog.defs[iface].name, Show(self_ty, &*self.prog)))
-        })?;
-        let m = self.prog.method_for(imp, &info.name, &binds).ok_or_else(|| panic(format!("no specialized `{}`", info.name)))?;
+        let key = (fid, self_ty.clone());
+        let found = self.memo.dispatches.lock().expect("dispatches").get(&key).cloned();
+        let (m, imp, binds) = match found {
+            Some(d) => d,
+            None => {
+                let (imp, binds) = self.prog.resolve_impl(iface, self_ty).ok_or_else(|| {
+                    panic(format!("no impl of `{}` for `{}`", self.prog.defs[iface].name, Show(self_ty, &*self.prog)))
+                })?;
+                let m = self.prog.method_for(imp, &info.name, &binds).ok_or_else(|| panic(format!("no specialized `{}`", info.name)))?;
+                self.memo.dispatches.lock().expect("dispatches").insert(key, (m, imp, binds.clone()));
+                (m, imp, binds)
+            }
+        };
         let mut env: HashMap<u32, GArg> = binds;
         // The method's own parameters follow the impl's; the call gave them after `Self` and the
         // interface's.
@@ -1156,17 +1251,30 @@ impl Interp {
         }
     }
 
-    /// Evaluates an argument for a parameter: a place for a `mut` borrow, a value otherwise.
-    fn arg(&mut self, a: &Expr, param: &Ty, env: &Env) -> R {
+    /// How `a` is passed for a parameter of type `param`, in this frame.
+    fn pass_at(&self, a: &Expr, param: &Ty) -> Pass {
         let mut param = self.concrete(param);
         // A parameter still generic here takes the argument the way the argument's type says.
         if matches!(param, Ty::Param(_) | Ty::Assoc(..))
             && let Some(at) = self.ty_of(a.span) {
                 param = self.concrete(&at);
             }
-        // A place lent readonly is lent where it is, not copied out. Not a `Copy` value: a copied
-        // argument holds no loan (§4.4), so its source may change while it lives. A slice is a
-        // view whatever its elements.
+        self.pass(&param)
+    }
+
+    /// How an argument is passed for a parameter of the concrete type `param`.
+    fn pass(&self, param: &Ty) -> Pass {
+        match param {
+            Ty::Borrow(true, _) => Pass::Mut,
+            Ty::Borrow(false, inner) if matches!(**inner, Ty::Slice(_)) || !self.prog.is_copy(inner) => Pass::Lend,
+            Ty::Slice(_) => Pass::Lend,
+            Ty::Borrow(false, _) | Ty::Prim(Prim::Str) => Pass::View,
+            _ => Pass::Owned,
+        }
+    }
+
+    /// Evaluates an argument: a place for a `mut` borrow, a value otherwise.
+    fn arg(&mut self, a: &Expr, pass: Pass, env: &Env) -> R {
         let place = match &a.kind {
             // A binding holding a handle (a region reference, a cell, a channel) is passed as the
             // handle: its place would be what the handle points at.
@@ -1174,13 +1282,11 @@ impl Interp {
             ExprKind::Field { .. } | ExprKind::Index { .. } => !is_range_index(a),
             _ => false,
         };
-        let lent = |t: &Ty| matches!(t, Ty::Slice(_)) || !self.prog.is_copy(t);
-        match &param {
-            Ty::Borrow(true, _) => Ok(Value::Ptr(self.place(a, env)?)),
-            Ty::Borrow(false, inner) if place && lent(inner) => Ok(Value::Ptr(self.place(a, env)?)),
-            Ty::Slice(_) if place => Ok(Value::Ptr(self.place(a, env)?)),
-            Ty::Borrow(false, _) | Ty::Slice(_) | Ty::Prim(Prim::Str) => self.expr(a, env),
-            _ => {
+        match pass {
+            Pass::Mut => Ok(Value::Ptr(self.place(a, env)?)),
+            Pass::Lend if place => Ok(Value::Ptr(self.place(a, env)?)),
+            Pass::Lend | Pass::View => self.expr(a, env),
+            Pass::Owned => {
                 let v = self.expr(a, env)?;
                 Ok(if matches!(v, Value::Ptr(_)) { v.deref() } else { v })
             }
