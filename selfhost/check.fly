@@ -2628,6 +2628,17 @@ impl Checker {
 
   function finish(self: mut Self, fid: usize, scheme: readonly Scheme, inferring: bool): void {
     const module = self.module;
+    // A key looked up with a literal whose type is not yet known takes the key's type, before
+    // literals take their defaults: `m.get({ start: 1, end: 2 })` with `m: HashMap<Span, V>`.
+    for (const call of self.pendingTargs) {
+      for (const [t, b] of call.bounds) {
+        if (const #Named(d, bargs) = self.s.zonk(b)) {
+          if (self.p.defs[d].name == "LentBy" && self.p.modules[self.p.defs[d].module].isStd && !settled(self.s.zonk(t))) {
+            if (const #Some(#Ty(k)) = bargs.first()) { try { self.s.unify(t.clone(), k.clone()); } catch (_) {} }
+          }
+        }
+      }
+    }
     self.s.defaultLiterals();
     for (const [v, candidates] of replace(mut self.pendingRegions, Vec.new())) {
       if (const #Var(_) = self.s.resolveRegion(#Var(v))) {

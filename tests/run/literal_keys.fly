@@ -1,0 +1,15 @@
+// expect: #Some(5) false
+// expect: #Some("seven")
+// A key looked up with a literal takes the key's type: the literal's integers are `usize` and
+// `u64` here, not their default `i32` (§3.3).
+import { HashMap } from "std/collections";
+import { println } from "std/io";
+type Span = { start: usize; end: usize };
+export function main(): void uses Io {
+  let m: HashMap<Span, u32> = HashMap.new();
+  m.insert({ start: 1, end: 2 }, 5);
+  println(`${m.get({ start: 1, end: 2 })} ${m.has({ start: 3, end: 4 })}`);
+  let n: HashMap<u64, String> = HashMap.new();
+  n.insert(7, "seven".toString());
+  println(`${n.get(7)}`);
+}

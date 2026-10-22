@@ -24,6 +24,7 @@ The whole language rests on five laws. Every rule in this document is a conseque
 
 | Change | Why |
 | :--- | :--- |
+| A key looked up with a literal takes the map's key type before the literal's defaults (§4.1) | `spans.get({ start: 1, end: 2 })` failed: the fields defaulted to `i32` |
 | A call's result holds a borrow of an argument's place only if its declared type can hold a borrow itself, not only through a type argument (§4.1) | `const step = match (self.state.take()) { … }` kept `self.state` lent `mut` while `step` lived, so the state could not be put back: §5.5's own `generate` was rejected |
 | A `match` arm binds by the strongest use it makes of what it binds: it takes an owned place only if it moves a part (§4.1) | matching a local `Option<String>` to read its string moved it, so it could not be matched again; a TypeScript programmer reads a value without giving it away |
 | A `match` through a `mut` borrow lends it `mut` only if an arm changes a part it binds (§4.1) | a compiler's `match (self.defs[d].kind)` in a `mut self` method locked `self` for arms that only read, so they could not call `readonly` methods |
@@ -322,7 +323,7 @@ A borrow lasts until the last use of any value that holds it, not to the end of 
 
 A call borrows each `mut` argument, and a method its receiver, in two phases: `readonly` while the other arguments are evaluated and `mut` only for the call itself, so `v.push(v.len())` and `replace(mut self.code, self.fresh())` are legal, while `v.push({ v.clear(); 1 })` and `both(mut v, v[0..1])` are not.
 
-**Lending.** Wherever a borrow of `U` is expected, an owner that *lends* `U` may be passed: `String` lends `str`, `Vec<T>` lends `T[]`, `Box<T>` lends `T`, and `Ref<R, T>` and `Arc<T>` lend `readonly T`; and a borrow of an owner lends what the owner does, so a `readonly Box<Expr>` matched out of a node is passed where `readonly Expr` is wanted. Lending is the only implicit conversion. Lookups in `HashMap<K, V>` accept any `Q` that `K` lends, so a `HashMap<String, V>` is searched with a `str` without allocating.
+**Lending.** Wherever a borrow of `U` is expected, an owner that *lends* `U` may be passed: `String` lends `str`, `Vec<T>` lends `T[]`, `Box<T>` lends `T`, and `Ref<R, T>` and `Arc<T>` lend `readonly T`; and a borrow of an owner lends what the owner does, so a `readonly Box<Expr>` matched out of a node is passed where `readonly Expr` is wanted. Lending is the only implicit conversion. Lookups in `HashMap<K, V>` accept any `Q` that `K` lends, so a `HashMap<String, V>` is searched with a `str` without allocating; a key written as a literal whose type nothing else fixes takes the key's type, so `m.get({ start: 1, end: 2 })` finds a `Span` with `usize` fields.
 
 ```ts
 match (counts.getMut(word)) {

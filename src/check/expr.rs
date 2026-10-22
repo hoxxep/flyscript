@@ -148,6 +148,20 @@ pub fn check_fn(p: &mut Program, fid: FnId) {
     let ret = scheme.ret.clone();
     let t = c.block(&body, Some(&ret));
     c.coerce(&t, &ret, body.tail.as_ref().map_or(body.span, |e| e.span));
+    // A key looked up with a literal whose type is not yet known takes the key's type, before
+    // literals take their defaults: `m.get({ start: 1, end: 2 })` with `m: HashMap<Span, V>`.
+    for (_, _, bounds) in &c.pending_targs {
+        for (t, b) in bounds {
+            if let Ty::Named(d, bargs) = c.s.zonk(b)
+                && c.p.defs[d].name == "LentBy"
+                && c.p.modules[c.p.defs[d].module].is_std
+                && let Some(GArg::Ty(k)) = bargs.first()
+                && !settled(&c.s.zonk(t))
+            {
+                let _ = c.s.unify(t, k);
+            }
+        }
+    }
     c.s.default_literals();
     for (var, candidates) in std::mem::take(&mut c.pending_regions) {
         if let (Region::Var(_), Some(r)) = (c.s.resolve_region(&Region::Var(var)), candidates.first()) {
