@@ -13,7 +13,8 @@ A small kernel for QEMU's AArch64 `virt` board, written in Flyscript, compiled w
 The code an interrupt runs is a function C calls, which performs nothing: the compiler rejects a call to anything that may sleep from it (see `tests/reject/interrupt_cannot_sleep.fly`).
 
 ```sh
-examples/kernel/run.sh
+examples/kernel/run.sh          # through C
+examples/kernel/run.sh --llvm   # through LLVM
 ```
 
-It needs clang, `ld.lld` and `qemu-system-aarch64`. `boot.S` sets up a stack, turns on floating point, and offers three routines: the heap's bounds, turning translation on, and leaving QEMU through semihosting.
+It needs clang, `ld.lld` and `qemu-system-aarch64`, and through LLVM, `llvm-link`. `boot.S` sets up a stack, turns on floating point, and offers three routines: the heap's bounds, turning translation on, and leaving QEMU through semihosting.

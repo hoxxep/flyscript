@@ -113,6 +113,7 @@ bool fly_parse_float(fly_str s, double* out);
 // ---- lists ----
 
 void* fly_vec_at(const fly_vec* v, size_t i, size_t size);
+_Noreturn void fly_out_of_bounds(uint64_t i, uint64_t len);
 void fly_vec_push(fly_vec* v, const void* elem, size_t size);
 // Room for `extra` more elements, or false if there is no memory for it.
 bool fly_vec_try_reserve(fly_vec* v, size_t extra, size_t size);
@@ -319,3 +320,4 @@ double fly_arg_float(int i);
 // The arguments from the `i`th on, as `str`s or as `String`s.
 fly_slice fly_arg_strs(int i);
 fly_slice fly_arg_strings(int i);
+void fly_args_free(fly_slice s, bool strings);

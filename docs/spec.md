@@ -1,6 +1,6 @@
 # Flyscript
 
-**Language specification, version 0.56**
+**Language specification, version 0.57**
 
 *Affine values, one row calculus, handlers for everything, and `comptime`: Church on the outside, Turing on the inside.*
 
@@ -18,9 +18,9 @@ The whole language rests on five laws. Every rule in this document is a conseque
 4. **Handlers for everything.** Errors, I/O, iteration and region memory are ordinary effects with ordinary handlers. A handler may hold the rest of a computation as a one-shot continuation value; generators and tasks are both built from that one primitive.
 5. **`comptime` is the metalanguage.** Generics, reflection, layout transformation and derived interfaces are ordinary Flyscript code run by the compiler.
 
-### 0.1 Changes from 0.54
+### 0.1 Recent changes
 
-0.56 builds the foreign interface (§8.2): raw pointers as the prelude's `Ptr<T>`, reaching through one an effect, `Unsafe`, that `unsafe { … }` handles, and functions of C's and functions C calls. It follows one core IR under both of the self-hosted compiler's back ends, JavaScript and C. Earlier changes are in [docs/history](history/).
+0.57 adds LLVM as a way to native code (§8.3): a program's functions as LLVM IR, with debug information that maps them to their source, optimized together with the runtime, for any target LLVM has. 0.56 built the foreign interface (§8.2): raw pointers as the prelude's `Ptr<T>`, reaching through one an effect, `Unsafe`, that `unsafe { … }` handles, and functions of C's and functions C calls; and one core IR under the self-hosted compiler's back ends. The table lists the language's changes since 0.54; earlier ones are in [docs/history](history/).
 
 | Change | Why |
 | :--- | :--- |
@@ -913,7 +913,7 @@ A foreign call runs on the worker thread's native stack, not on the task's growa
 
 ### 8.3 Targets
 
-- **Native** (x86-64, AArch64): tasks are stackful fibers scheduled by the runtime over `io_uring` or `kqueue`.
+- **Native** (x86-64, AArch64): tasks are stackful fibers scheduled by the runtime over `io_uring` or `kqueue`. Native code is made through C, or through LLVM: the program's functions as LLVM IR, with debug information mapping each instruction to its line and each variable to its value, linked with the runtime's C and optimized with it as one program. Through LLVM a program reaches every target LLVM has; a freestanding one too.
 - **Freestanding** (a kernel, firmware): no operating system and no C library. The program's roots are its `export extern "C"` functions, it has no `main` and no `Io`, and it supplies three functions the runtime calls: `fly_os_alloc(size, align)` for memory, `fly_os_free(p)`, and `fly_os_panic(message, len)`, which does not return. Everything else — failures, regions, `defer`, generators, effect handlers and their fibers — works unchanged, with fiber stacks from `fly_os_alloc`.
 - **WebAssembly**: a program is compiled through C for WASI. A fiber — a task, a `handle`'s body, a generator — runs on a stack of its own in linear memory, so what it lent stays where it is while it is suspended, and the host switches between fibers by JavaScript promise integration (later, the stack-switching proposal). The root `Io` handler maps to WASI, or to the host's promises. Without threads, `par` runs sequentially with the same semantics.
 
@@ -1024,7 +1024,7 @@ Every property of a type that looks through its parts — `Copy`, `Send`, its cl
 4. **Check ownership** after typing: every value carries the loans it holds, loans flow through call results, patterns, assignments and captures, and a loan is live while any binding holding it may still be used, judged by reachability over the program's structure.
 5. **Evaluate** directly, carrying each frame's type arguments so a call through a bound runs the impl for the type it stands for: abortive handlers unwind and tail-resumptive ones run where the effect is performed, so `for…of` over a generator captures no stack; a `Gen` pulled with `next()` runs on its own thread. `Io` is handled by a deterministic world (files, sockets, a database, a seeded fault schedule), which is what makes §6.4's simulation testing concrete.
 
-A native compiler would add: **lower effects** by evidence passing (tail-resumptive handlers to direct calls, abortive `Fail` to two-register returns, stored continuations to stack switching), and **generate code** with Cranelift for debug builds and LLVM for release, emitting `noalias` and `readonly` from `mut` and `readonly`.
+The self-hosted compiler (`selfhost/`) lowers each checked function once, specialized for its type arguments, to a core IR of structured statements in which evaluation order, moves, drops and every way out of a block are explicit, and prints it three ways: as JavaScript, running effects as generators; as C, with fibers for handlers, generators and tasks; and as LLVM IR, whose integer arithmetic is LLVM's own, checked by its overflow intrinsics. The C and LLVM back ends share the runtime and its library routines, which LLVM inlines into the program. Still to come: **lower effects** by evidence passing (tail-resumptive handlers to direct calls, abortive `Fail` to two-register returns), and emitting `noalias` and `readonly` from `mut` and `readonly`.
 
 ## 12. Design notes
 

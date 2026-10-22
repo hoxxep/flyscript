@@ -64,14 +64,16 @@ test("degrades gracefully under packet loss", () => {
 
 Flyscript is an early-stage language under active design, developed in the open.
 
-- **Language specification:** version 0.56, with every earlier version and the reasoning behind each change in [docs/history](docs/history/).
+- **Language specification:** version 0.57, with every earlier version and the reasoning behind each change in [docs/history](docs/history/).
 - **Compiler (`flyc`):** a complete prototype front end and evaluator. `flyc check` type-, effect- and ownership-checks programs, rejecting use after move, conflicting borrows, borrows that escape through closures and generators, undeclared effects and non-exhaustive matches with precise errors. `flyc run` executes them, with effect handlers, generators and structured concurrency, against a deterministic simulated world. `comptime` runs too: templates specialize per type, and the standard library's JSON codec is derived over reflection in plain Flyscript, with no compiler support.
 
 - **Flyscript in Flyscript:** a compiler written in Flyscript, in [selfhost/](selfhost/), parses, elaborates and checks the whole language — types, effects and ownership — reaching the same verdict as `flyc` on every program in the test suite, `comptime` and all. Its back end is typed: it specializes every generic function for the types it is used at, so method calls are direct, integers keep their widths, derived interfaces are compiled from their `comptime` definitions, effect handlers, generators and tasks run as JavaScript generators, and destructors run where the ownership checker says values die. Every program in the test suite runs compiled exactly as it runs in `flyc`, down to how its tasks interleave. It compiles itself: built by `flyc`, then run on its own output, it reproduces itself byte for byte, in about three seconds.
 
-- **Native code:** the same compiler compiles to C and on to a native executable, with no garbage collector and no runtime to speak of. Ownership decides where every value is freed; failures, `break` and `return` leave through a single exit that drops exactly what is still owned; effect handlers, continuations and tasks run on lightweight fibers; regions are bump arenas released in one step. Every program in the test suite runs natively exactly as it runs in `flyc`, down to how its tasks interleave, with address and undefined-behavior sanitizers watching. The compiler builds itself this way too: natively compiled, it reproduces its own C byte for byte, in about two and a half seconds.
+- **Native code:** the same compiler compiles to C and on to a native executable, with no garbage collector and no runtime to speak of. Ownership decides where every value is freed; failures, `break` and `return` leave through a single exit that drops exactly what is still owned; effect handlers, continuations and tasks run on lightweight fibers; regions are bump arenas released in one step. Every program in the test suite runs natively exactly as it runs in `flyc`, down to how its tasks interleave, with address and undefined-behavior sanitizers watching. The compiler builds itself this way too: natively compiled, it reproduces its own C byte for byte, in under four seconds.
 
-The compiler is written in Flyscript and compiles itself — to JavaScript, to native code, and to WebAssembly — through one core IR; a small kernel written in Flyscript boots on QEMU. Next: an LLVM back end, tasks on every core, and a web framework built on all of it — see the [roadmap](docs/roadmap.md). Flyscript is not yet ready for production programs; it is ready for your ideas, and issues and discussion about the design are very welcome.
+- **LLVM:** the compiler also writes a program's code as LLVM IR, links it with the runtime's C, and optimizes the two as one program, so a call into the runtime inlines like any other. Integer arithmetic is LLVM's own, checked by its overflow intrinsics. Debug information maps every instruction to its line and every variable to its value: a debugger stops at a line of a `.fly` file and shows strings, lists, structs and tagged unions as Flyscript writes them. Every program in the test suite runs this way under the sanitizers, the compiler built through LLVM reproduces itself byte for byte, and the kernel boots built through LLVM too, cross-compiled for AArch64.
+
+The compiler is written in Flyscript and compiles itself — to JavaScript, to native code through C or LLVM, and to WebAssembly — through one core IR; a small kernel written in Flyscript boots on QEMU. Next: tasks on every core, and a web framework built on all of it — see the [roadmap](docs/roadmap.md). Flyscript is not yet ready for production programs; it is ready for your ideas, and issues and discussion about the design are very welcome.
 
 ## Explore
 
@@ -79,7 +81,7 @@ The compiler is written in Flyscript and compiles itself — to JavaScript, to n
 - [A kernel](examples/kernel/) — Flyscript with no operating system under it, booting on QEMU: page tables, a UART driven through its registers, its own memory allocator, effect handlers on fibers.
 - [Example programs](examples/) — a JSON parser, derived JSON encoding and decoding, an inventory service, a web server, a key–value actor, a browser UI, generators, parallel physics.
 - [The roadmap](docs/roadmap.md) — what comes next, and why in that order.
-- [The self-hosted compiler](selfhost/) — a lexer, parser, type and effect checker, `comptime` interpreter, and JavaScript and C back ends, in Flyscript.
+- [The self-hosted compiler](selfhost/) — a lexer, parser, type and effect checker, `comptime` interpreter, and JavaScript, C and LLVM back ends, in Flyscript.
 
 ## Build from source
 
@@ -97,6 +99,12 @@ To compile a program natively with the self-hosted compiler (needs Node.js and a
 ```sh
 node --stack-size=65500 selfhost/seed.js examples/word_count.fly word_count.c .
 cc -std=gnu11 -O2 -o word_count word_count.c -lm
+```
+
+Or through LLVM (needs clang and llvm-link of one version, such as Homebrew's `llvm`), with debug information for lldb or gdb:
+
+```sh
+sh selfhost/llvm.sh selfhost/seed.js examples/word_count.fly word_count
 ```
 
 The compiler compiles itself the same way: `selfhost/main.fly` in place of the example.

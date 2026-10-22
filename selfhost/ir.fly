@@ -184,6 +184,8 @@ export enum Stmt {
   #Handle(Handle),
   // `k(a)`: the continuation, its argument, and the local the body's result goes to.
   #Resume(Operand, Option<Operand>, usize),
+  // Where in the source the code after it comes from: a statement, or a block's value.
+  #At(Span),
 }
 
 // A `handle`: the effect it handles, its body and the local the body's value is in, its arms, and

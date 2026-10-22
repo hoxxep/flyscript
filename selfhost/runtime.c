@@ -456,6 +456,10 @@ bool fly_parse_float(fly_str s, double* out) {
 
 // ---- lists ----
 
+_Noreturn void fly_out_of_bounds(uint64_t i, uint64_t len) {
+  fly_panicf("index %llu out of bounds (length %llu)", (unsigned long long)i, (unsigned long long)len);
+}
+
 void* fly_vec_at(const fly_vec* v, size_t i, size_t size) {
   if (i >= v->len) fly_panicf("index %zu out of bounds (length %zu)", i, v->len);
   return (char*)v->ptr + i * size;
@@ -1785,6 +1789,11 @@ fly_slice fly_arg_strings(int i) {
   fly_String* a = fly_alloc((size_t)n * sizeof(fly_String) + 1);
   for (int k = 0; k < n; k++) a[k] = fly_String_from(fly_arg_str(i + k));
   return (fly_slice){ a, (size_t)n };
+}
+
+void fly_args_free(fly_slice s, bool strings) {
+  if (strings) for (size_t k = 0; k < s.len; k++) fly_String_drop(&((fly_String*)s.ptr)[k]);
+  free(s.ptr);
 }
 #endif
 

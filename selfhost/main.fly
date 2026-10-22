@@ -1,7 +1,9 @@
 // The compiler's driver: `main(entry, out, root)` checks the program whose entry module is `entry`
 // — types and effects, then ownership — and compiles it to one file `out`: C if its name ends in
 // `.c`, JavaScript otherwise, starting with the runtime and ending by calling the entry's `main`
-// with the command line. `root` is the directory that holds `std/` and `selfhost/`.
+// with the command line. A name ending in `.ll` is an LLVM module, with the C it links with — the
+// runtime, and what the module calls of it — beside it, its name ending in `.c` instead. `root` is
+// the directory that holds `std/` and `selfhost/`.
 
 import { Diagnostic, render } from "./diag";
 import { Program } from "./env";
@@ -9,6 +11,7 @@ import { checkFn } from "./check";
 import { checkOwnership } from "./own";
 import { cProgram } from "./c";
 import { jsProgram } from "./js";
+import { llvmProgram } from "./llvm";
 import { File, println, writeFile } from "std/io";
 
 // What stops a compilation: diagnostics, or a file that cannot be read or written.
@@ -52,7 +55,8 @@ function compile(entry: str, out: str, root: str, freestanding: bool): void uses
   }
   const file = p.entryFile(entry);
   const main = match (p.modules.iter().findIndex((m) => m.file == file)) { #Some(k) => k, #None => throw #Unreadable { path: file } };
-  const toC = out.endsWith(".c");
+  const toLlvm = out.endsWith(".ll");
+  const toC = out.endsWith(".c") || toLlvm;
   // The C runtime is its header and its code, made one file.
   const rt: String = if (toC) {
     const h = readText(`${root}/selfhost/runtime.h`);
@@ -61,6 +65,15 @@ function compile(entry: str, out: str, root: str, freestanding: bool): void uses
     const mode = if (freestanding) { "#define FLY_FREESTANDING 1\n" } else { "" };
     `${mode}${h}\n${c.asStr().replaceAll("#include \"runtime.h\"", "")}`
   } else { readText(`${root}/selfhost/runtime.js`) };
+  if (toLlvm) {
+    const [ll, c] = try { llvmProgram(p, main, rt.asStr(), freestanding) } catch (#Failed(message)) {
+      println(message.asStr());
+      throw #Failed
+    };
+    const companion = `${out.slice(0, out.len() - 3)}.c`;
+    try { writeFile(out, ll.asStr()); writeFile(companion.asStr(), c.asStr()); } catch (_) { throw #Unreadable { path: out.toString() } };
+    return;
+  }
   const code = try {
     if (toC) { cProgram(p, main, rt.asStr(), freestanding) } else if (freestanding) { throw #Failed("error: a freestanding program compiles only to C".toString()) } else { jsProgram(p, main, rt.asStr()) }
   } catch (#Failed(message)) {

@@ -1,8 +1,9 @@
 //! The self-hosted compiler (selfhost/) compiles itself to JavaScript at a fixpoint, and compiles
 //! programs as the Rust prototype runs them. `selfhost/seed.js` is the compiler compiled by
 //! itself: the reference implementation, running the compiler's source, must produce it, and it
-//! must reproduce itself. Compiled to C, it is a native compiler at a fixpoint too. The tests that
-//! run JavaScript need node, and those that build C a C compiler; without them they stop early.
+//! must reproduce itself. Compiled to C, or through LLVM, it is a native compiler at a fixpoint too.
+//! The tests that run JavaScript need node, and those that build C or LLVM IR their tools; without
+//! them they stop early.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -195,17 +196,21 @@ fn native_programs_run_as_expected() {
 }
 
 /// The kernel in examples/kernel boots on QEMU's AArch64 `virt` board, runs to its end and prints
-/// what it is expected to, where clang, ld.lld and QEMU are there to build and run it.
+/// what it is expected to, built through C and through LLVM, where clang, ld.lld and QEMU are there
+/// to build and run it.
 #[test]
 fn kernel_runs_on_qemu() {
     let have = |tool: &str| Command::new(tool).arg("--version").output().is_ok_and(|o| o.status.success());
     if !has_node() || !have("clang") || !have("ld.lld") || !have("qemu-system-aarch64") {
         return;
     }
-    let r = Command::new("sh").arg(root().join("examples/kernel/run.sh")).arg(root().join("selfhost/seed.js")).output().unwrap();
     let want = std::fs::read_to_string(root().join("examples/kernel/expected.txt")).unwrap();
-    assert!(r.status.success(), "the kernel did not exit cleanly:\n{}{}", String::from_utf8_lossy(&r.stdout), String::from_utf8_lossy(&r.stderr));
-    assert_eq!(String::from_utf8_lossy(&r.stdout), want);
+    let ways: &[&[&str]] = if has_llvm() { &[&[], &["--llvm"]] } else { &[&[]] };
+    for way in ways {
+        let r = Command::new("sh").arg(root().join("examples/kernel/run.sh")).args(*way).arg(root().join("selfhost/seed.js")).output().unwrap();
+        assert!(r.status.success(), "the kernel did not exit cleanly ({way:?}):\n{}{}", String::from_utf8_lossy(&r.stdout), String::from_utf8_lossy(&r.stderr));
+        assert_eq!(String::from_utf8_lossy(&r.stdout), want, "{way:?}");
+    }
 }
 
 /// Whether WebAssembly for WASI can be built here: clang, wasm-ld, and a WASI sysroot.
@@ -246,4 +251,55 @@ fn compiles_itself_in_wasm() {
     let want = dir.join("seed-self.c");
     compile(&root().join("selfhost/seed.js"), &root().join("selfhost/main.fly"), &want);
     assert!(std::fs::read(root().join(made)).unwrap() == std::fs::read(&want).unwrap(), "the compiler in WebAssembly made other C than the seed");
+}
+
+/// LLVM's tools, where `selfhost/llvm.sh` finds them: `LLVM_BIN`, or Homebrew's llvm.
+fn has_llvm() -> bool {
+    let bin = std::env::var("LLVM_BIN").map(PathBuf::from).ok().or_else(|| {
+        Command::new("brew").args(["--prefix", "llvm"]).output().ok().filter(|o| o.status.success()).map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim()).join("bin"))
+    });
+    has_node() && bin.is_some_and(|b| b.join("clang").exists() && b.join("llvm-link").exists())
+}
+
+/// The run suite and the native programs, compiled through LLVM and built with the address and
+/// undefined behavior sanitizers, print what they expect.
+#[test]
+fn llvm_programs_run_as_expected() {
+    if !has_llvm() {
+        return;
+    }
+    let mut files: Vec<PathBuf> = Vec::new();
+    for dir in ["tests/run", "tests/native"] {
+        let mut fs: Vec<PathBuf> = std::fs::read_dir(root().join(dir)).unwrap().map(|e| e.unwrap().path()).filter(|f| f.extension().is_some_and(|e| e == "fly")).collect();
+        fs.sort();
+        files.extend(fs);
+    }
+    let r = Command::new("sh").arg(root().join("selfhost/corpus.sh")).arg("--llvm").arg(root().join("selfhost/seed.js")).args(&files).output().unwrap();
+    let report = String::from_utf8_lossy(&r.stdout);
+    let failed: Vec<&str> = report.lines().filter_map(|l| l.strip_prefix("FAIL ")).collect();
+    assert!(failed.is_empty(), "failed through LLVM:\n{}", failed.join("\n"));
+}
+
+/// The compiler, compiled through LLVM, compiles itself to the LLVM module, the C beside it, and
+/// the JavaScript the seed makes of it.
+#[test]
+fn compiles_itself_through_llvm() {
+    if !has_llvm() {
+        return;
+    }
+    let dir = out();
+    let exe = dir.join("flyc-llvm");
+    let main = root().join("selfhost/main.fly");
+    let built = Command::new("sh").arg(root().join("selfhost/llvm.sh")).arg(root().join("selfhost/seed.js")).arg(&main).arg(&exe).output().unwrap();
+    assert!(built.status.success(), "{}{}", String::from_utf8_lossy(&built.stdout), String::from_utf8_lossy(&built.stderr));
+    compile(&root().join("selfhost/seed.js"), &main, &dir.join("seed-llvm.ll"));
+    let seed = root().join("selfhost/seed.js");
+    let checks = [("llvm-self.ll", vec![(dir.join("llvm-self.ll"), dir.join("seed-llvm.ll")), (dir.join("llvm-self.c"), dir.join("seed-llvm.c"))]), ("llvm-self.js", vec![(dir.join("llvm-self.js"), seed)])];
+    for (made, pairs) in checks {
+        let r = Command::new(&exe).arg(&main).arg(dir.join(made)).arg(root()).output().unwrap();
+        assert!(r.status.success() && r.stdout.is_empty(), "{}{}", String::from_utf8_lossy(&r.stdout), String::from_utf8_lossy(&r.stderr));
+        for (got, want) in pairs {
+            assert!(std::fs::read(&got).unwrap() == std::fs::read(&want).unwrap(), "the compiler built through LLVM makes other than {}", want.display());
+        }
+    }
 }

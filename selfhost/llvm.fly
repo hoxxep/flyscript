@@ -1,0 +1,2974 @@
+// LLVM IR from the core IR, linked with C the C back end prints for the rest.
+//
+// The program's code — its functions, closures, and the code run apart from them — is LLVM's: every
+// local in memory of its own (which LLVM's `mem2reg` makes registers), every structured statement
+// basic blocks, every operator on integers exact, a value overflowing its type a panic. Its data is
+// C's: each type is laid out as the C back end declares it, and the companion C file checks each
+// layout this file relies on, so the two cannot disagree silently.
+//
+// The library — strings, collections, the scheduler, the simulated world — and the program's types'
+// drops are the C back end's, each routine called through a function of the companion's that takes
+// pointers to its arguments and its result. Between the two, each side keeps its own way of passing
+// values: a function here takes a scalar as it is and anything bigger by pointer, and gives an
+// aggregate through a pointer to where it goes; C passes them as C does. The companion's functions
+// translate, and linking the two modules into one before optimizing inlines them away.
+//
+// Each function has debug information: where in the `.fly` source each statement and call is.
+
+import { Span, Diagnostic } from "./diag";
+import { Prim, Ty, Len, isInt, isFloat, primName } from "./types";
+import { Program as Prog } from "./env";
+import { Entry, stripBorrow, typeArg, ckey, mangle, unitTy, isVoidTy } from "./lower";
+import {
+  Local, LocalKind, Place, Root, Proj, ProjKind, Operand, Constant, Rvalue, Capture, Call, Callee, Stmt, Handle, Arm, Block,
+  Cleanup, Func,
+} from "./ir";
+import { Cgen, newCgen, cquote, ownedIn, useBlock, Uses } from "./c";
+import { HashMap, HashSet } from "std/collections";
+
+// What the code being printed is part of, as in the C back end.
+enum Mode { #Fn, #Body, #Defer }
+enum Scope { #Cleanups(Vec<Cleanup>), #Target(usize) }
+impl Clone for Mode;
+impl Clone for Scope;
+
+// How a value is held: not at all, as an LLVM scalar of the type named, or in memory.
+enum Rep { #Unit, #Scalar(String), #Mem }
+impl Clone for Rep;
+
+// A type's size and alignment in bytes, and where each of its parts is: a struct's fields by their
+// names, `live`, a union's `tag` and its payloads' `u`, an array's `data`; and the size of `u`.
+type Shape = { size: usize; align: usize; offsets: HashMap<String, usize>; uSize: usize };
+
+// What code run apart reaches of the function around it, each through a pointer in its
+// environment, in this order.
+type Apart = { locals: Vec<usize>; captures: Vec<usize>; arenas: Vec<u32> };
+
+type Lctx = {
+  locals: Vec<Local>;
+  // Each local's address, where it is not an alloca of its own.
+  addrs: HashMap<usize, String>;
+  // Each capture's address.
+  captures: Vec<String>;
+  capTys: Vec<Ty>;
+  allocas: String;
+  out: String;
+  // Whether the basic block being printed has not ended.
+  open: bool;
+  tmp: usize;
+  scopes: Vec<Scope>;
+  targets: Vec<String>;
+  mode: Mode;
+  // A pointer to the `fly_yield` the code's yields go to.
+  sink: Option<String>;
+  // A pointer to each region's arena, by the region's symbol.
+  arenas: HashMap<u32, String>;
+  // The type the function gives, and where its result is put; for a loop's body over a generator,
+  // the function's around it, and where a `return` of it puts its value.
+  ret: Ty;
+  retSlot: String;
+  fnRet: Ty;
+  oret: String;
+  // A loop body's `code_`: why it stopped the generator.
+  code: String;
+  hoisted: HashSet<usize>;
+  declared: HashSet<usize>;
+  prologue: String;
+  live: HashSet<usize>;
+  reachable: bool;
+  liveAt: HashMap<String, HashSet<usize>>;
+  // The function's debug information, and the source location of the code being printed.
+  sp: String;
+  loc: String;
+};
+
+function newCtx(locals: Vec<Local>, ret: Ty, mode: Mode): Lctx {
+  {
+    locals, addrs: HashMap.new(), captures: Vec.new(), capTys: Vec.new(), allocas: String.new(), out: String.new(), open: true, tmp: 0,
+    scopes: Vec.new(), targets: Vec.new(), mode, sink: #None, arenas: HashMap.new(), ret: ret.clone(), retSlot: String.new(), fnRet: ret,
+    oret: String.new(), code: String.new(), hoisted: HashSet.new(), declared: HashSet.new(), prologue: String.new(), live: HashSet.new(),
+    reachable: true, liveAt: HashMap.new(), sp: String.new(), loc: String.new(),
+  }
+}
+
+function roundUp(n: usize, a: usize): usize { (n + a - 1) / a * a }
+
+// A struct being laid out: where its next field may start, and its alignment so far.
+type Packer = { at: usize; align: usize };
+
+// Where a field of `n` bytes aligned to `a` goes, next.
+function pack(p: mut Packer, n: usize, a: usize): usize {
+  const o = roundUp(p.at, a);
+  p.at = o + n;
+  if (a > p.align) { p.align = a; }
+  o
+}
+
+// The LLVM scalar a C type is, if it is one.
+function cScalar(c: str): Option<String> {
+  match (c) {
+    "int8_t" | "uint8_t" | "bool" | "fly_unit" => #Some("i8".toString()),
+    "int16_t" | "uint16_t" => #Some("i16".toString()),
+    "int32_t" | "uint32_t" | "int" => #Some("i32".toString()),
+    "int64_t" | "uint64_t" => #Some("i64".toString()),
+    "fly_i128" => #Some("i128".toString()),
+    "float" => #Some("float".toString()),
+    "double" => #Some("double".toString()),
+    _ => if (c.endsWith("*")) { #Some("ptr".toString()) } else { #None },
+  }
+}
+
+function cSigned(c: str): bool {
+  match (c) { "int8_t" | "int16_t" | "int32_t" | "int64_t" | "fly_i128" | "int" => true, _ => false }
+}
+
+// The attribute C's calling convention gives a narrow integer.
+function ext(c: str): str {
+  match (c) { "int8_t" | "int16_t" => " signext", "uint8_t" | "uint16_t" | "bool" => " zeroext", _ => "" }
+}
+
+// A result of the LLVM scalar `s` that is the C type `c`, with C's extension of a narrow integer,
+// which an LLVM function's result has before its type.
+function retTy(s: str, c: str): String {
+  const e = ext(c);
+  if (e.len() == 0) { s.toString() } else { `${e.slice(1, e.len())} ${s}` }
+}
+
+// The size and alignment of the runtime's types, and of C's scalars.
+function cLayout(c: str, ptr: usize): Option<[usize, usize]> {
+  match (c) {
+    "int8_t" | "uint8_t" | "bool" | "fly_unit" => #Some([1, 1]),
+    "int16_t" | "uint16_t" => #Some([2, 2]),
+    "int32_t" | "uint32_t" | "int" | "float" | "fly_chan" => #Some([4, 4]),
+    "int64_t" | "uint64_t" | "double" | "fly_Hasher" => #Some([8, 8]),
+    "fly_i128" => #Some([16, 16]),
+    "fly_str" | "fly_slice" | "fly_yield" => #Some([2 * ptr, ptr]),
+    "fly_String" | "fly_vec" | "fly_fn" | "fly_gen" | "fly_cont" | "fly_File" | "fly_socket" => #Some([3 * ptr, ptr]),
+    "fly_map" => #Some([6 * ptr, ptr]),
+    "fly_arena" => #Some([ptr, ptr]),
+    _ => if (c.endsWith("*")) { #Some([ptr, ptr]) } else { #None },
+  }
+}
+
+function primOf(t: readonly Ty): Option<Prim> {
+  match (t) { #Prim(p) => #Some(p), #Borrow(_, inner) => primOf(inner), _ => #None }
+}
+
+function bits(p: Prim): usize {
+  match (p) {
+    #I8 | #U8 => 8, #I16 | #U16 => 16, #I32 | #U32 => 32, #I128 => 128, _ => 64,
+  }
+}
+
+function signedPrim(p: Prim): bool { match (p) { #I8 | #I16 | #I32 | #I64 | #Isize | #I128 => true, _ => false } }
+
+// The bounds of an integer type no wider than 64 bits.
+function boundsOf(p: Prim): Option<[String, String]> {
+  match (p) {
+    #I8 => #Some(["-128".toString(), "127".toString()]),
+    #I16 => #Some(["-32768".toString(), "32767".toString()]),
+    #I32 => #Some(["-2147483648".toString(), "2147483647".toString()]),
+    #I64 | #Isize => #Some(["-9223372036854775808".toString(), "9223372036854775807".toString()]),
+    #U8 => #Some(["0".toString(), "255".toString()]),
+    #U16 => #Some(["0".toString(), "65535".toString()]),
+    #U32 => #Some(["0".toString(), "4294967295".toString()]),
+    #U64 | #Usize => #Some(["0".toString(), "18446744073709551615".toString()]),
+    _ => #None,
+  }
+}
+
+// An integer literal's value: decimal or `0x` hexadecimal, maybe negative.
+function parseInt(n0: str): i128 {
+  const neg = n0.startsWith("-");
+  const n = if (neg) { n0.slice(1, n0.len()) } else { n0 };
+  let v: i128 = 0;
+  if (n.startsWith("0x") || n.startsWith("0X")) {
+    for (const b of n.slice(2, n.len()).bytes()) {
+      if (b >= b'0' && b <= b'9') { v = v * 16 + ((b - b'0') as i128); }
+      else if (b >= b'a' && b <= b'f') { v = v * 16 + ((b - b'a' + 10) as i128); }
+      else if (b >= b'A' && b <= b'F') { v = v * 16 + ((b - b'A' + 10) as i128); }
+    }
+  } else {
+    for (const b of n.bytes()) { if (b >= b'0' && b <= b'9') { v = v * 10 + ((b - b'0') as i128); } }
+  }
+  if (neg) { -v } else { v }
+}
+
+// `v` as a value of an integer type of `n` bits, as two's complement wraps it.
+function wrap(v: i128, n: usize, signed: bool): i128 {
+  if (n >= 128) { return v; }
+  const m: i128 = (1 as i128) << (n as i128);
+  let r = v % m;
+  if (r < 0) { r += m; }
+  if (signed && r >= m / 2) { r -= m; }
+  r
+}
+
+// Text as the body of an LLVM string constant: printable ASCII as it is, every other byte in hex.
+function llquote(s: str): String {
+  const hex = "0123456789ABCDEF";
+  const bytes = s.asBytes();
+  let out = String.new();
+  for (const i of 0..bytes.len()) {
+    const b = bytes[i];
+    if (b >= 0x20 && b < 0x7f && b != b'"' && b != b'\\') { out.push(s.slice(i, i + 1)); }
+    else {
+      const hi = (b >> 4) as usize;
+      const lo = (b & 15) as usize;
+      out.push("\\");
+      out.push(hex.slice(hi, hi + 1));
+      out.push(hex.slice(lo, lo + 1));
+    }
+  }
+  out
+}
+
+export struct Lgen {
+  // The C back end: the program's types, drops and routines, printed into the companion.
+  c: Cgen;
+  ptr: usize;
+  shapes: HashMap<String, Shape>;
+  // The companion's functions this module calls, by their code: their names; and their code.
+  glue: HashMap<String, String>;
+  glueCode: String;
+  // The checks of the layouts this module relies on.
+  asserts: String;
+  // Functions declared, by name; global constants; the module's functions.
+  declared: HashMap<String, String>;
+  globals: String;
+  strs: HashMap<String, String>;
+  code: String;
+  closuresDone: usize;
+  aparts: usize;
+  // The `defer`s made functions of their own, by function and flag: the function, and what it reaches.
+  defers: HashMap<String, [String, Apart]>;
+  fnName: String;
+  module: usize;
+  cx: Lctx;
+  // Debug information: metadata nodes, numbered from 1; each module's file, and where its lines start.
+  meta: String;
+  metaN: usize;
+  files: HashMap<usize, String>;
+  lineStarts: HashMap<usize, Vec<usize>>;
+  locs: HashMap<String, String>;
+  cu: String;
+  diTypes: HashMap<String, String>;
+}
+
+impl Lgen {
+  function fail(self: readonly Self, span: Span, message: str): never uses Fail<Diagnostic> { self.c.fail(span, message) }
+  function unsupported(self: readonly Self, span: Span, what: str): never uses Fail<Diagnostic> {
+    self.fail(span, `${what} is not supported by the LLVM back end yet`)
+  }
+  function needsDrop(self: readonly Self, t: readonly Ty): bool { self.c.needsDrop(t) }
+
+  // ---- layouts ----
+
+  // How a value of the type is held.
+  function rep(self: mut Self, t: readonly Ty, span: Span): Rep uses Fail<Diagnostic> {
+    if (unitTy(t)) { return #Unit; }
+    const c = self.c.ctype(t, span);
+    match (cScalar(c.asStr())) { #Some(s) => #Scalar(s), #None => #Mem }
+  }
+
+  // The LLVM scalar a value of the type is, which it must be.
+  function scalar(self: mut Self, t: readonly Ty, span: Span): String uses Fail<Diagnostic> {
+    match (self.rep(t, span)) {
+      #Scalar(s) => s,
+      _ => self.fail(span, `a \`${self.c.lw.p.show(t)}\` where a scalar was expected`),
+    }
+  }
+
+  function shape(self: mut Self, t: readonly Ty, span: Span): Shape uses Fail<Diagnostic> {
+    const key = ckey(t);
+    if (const #Some(s) = self.shapes.get(key.asStr())) { return s.clone(); }
+    if (unitTy(t)) { return { size: 1, align: 1, offsets: HashMap.new(), uSize: 0 }; }
+    const c = self.c.ctype(t, span);
+    if (const #Some([size, align]) = cLayout(c.asStr(), self.ptr)) {
+      return { size, align, offsets: HashMap.new(), uSize: 0 };
+    }
+    // A struct of the program's, laid out as C lays it out.
+    let offsets: HashMap<String, usize> = HashMap.new();
+    let names: Vec<[String, String]> = Vec.new();
+    let pk: Packer = { at: 0, align: 1 };
+    let uSize: usize = 0;
+    if (self.c.liveByte(t)) {
+      offsets.insert("live".toString(), pack(mut pk, 1, 1));
+      names.push(["live".toString(), "live".toString()]);
+    }
+    if (self.c.lw.tagged(t)) {
+      offsets.insert("tag".toString(), pack(mut pk, 4, 4));
+      names.push(["tag".toString(), "tag".toString()]);
+      let us: usize = 1;
+      let ua: usize = 1;
+      for (const [_, pt] of self.c.lw.tagsOf(t)) {
+        if (isVoidTy(pt)) { continue; }
+        const s = self.shape(self.c.lw.payloadTy(pt), span);
+        if (s.size > us) { us = s.size; }
+        if (s.align > ua) { ua = s.align; }
+      }
+      uSize = roundUp(us, ua);
+      offsets.insert("u".toString(), pack(mut pk, uSize, ua));
+      names.push(["u".toString(), "u".toString()]);
+    } else {
+      match (t) {
+        #Array(e, l) => {
+          const s = self.shape(e, span);
+          const n = match (l) { #Known(n) => n, _ => 0 };
+          offsets.insert("data".toString(), pack(mut pk, s.size * max(n as usize, 1), s.align));
+          names.push(["data".toString(), "data".toString()]);
+        }
+        _ => {
+          const fields = self.c.lw.fieldsOf(t);
+          for (const [k, ft] of fields) {
+            const s = self.shape(ft, span);
+            offsets.insert(k.clone(), pack(mut pk, s.size, s.align));
+            names.push([k.clone(), self.c.fieldName(t, k.asStr())]);
+          }
+          if (fields.len() == 0) { pack(mut pk, 1, 1); }
+        }
+      }
+    }
+    if (const #Named(d, _) = t) {
+      if (const #Some(a) = self.c.lw.p.defs[d].align) { if (a as usize > pk.align) { pk.align = a as usize; } }
+    }
+    const align = pk.align;
+    const size = roundUp(pk.at, align);
+    // The C compiler checks the layout is C's.
+    let checks: Vec<String> = [`sizeof(${c}) == ${size}`, `_Alignof(${c}) == ${align}`];
+    for (const [k, cn] of names) {
+      const o = match (offsets.get(k.asStr())) { #Some(o) => o, #None => 0 };
+      checks.push(`__builtin_offsetof(${c}, ${cn}) == ${o}`);
+    }
+    self.asserts.push(`_Static_assert(${checks.join(" && ")}, "the layout of ${c}");\n`);
+    const s: Shape = { size, align, offsets, uSize };
+    self.shapes.insert(key, s.clone());
+    s
+  }
+
+  function sizeOf(self: mut Self, t: readonly Ty, span: Span): usize uses Fail<Diagnostic> { self.shape(t, span).size }
+
+  function offsetOf(self: mut Self, t: readonly Ty, part: str, span: Span): usize uses Fail<Diagnostic> {
+    const s = self.shape(t, span);
+    match (s.offsets.get(part)) {
+      #Some(o) => o,
+      #None => self.fail(span, `no part \`${part}\` in a \`${self.c.lw.p.show(t)}\``),
+    }
+  }
+
+  // ---- printing instructions ----
+
+  function fresh(self: mut Self): String {
+    self.cx.tmp += 1;
+    `%t${self.cx.tmp}`
+  }
+
+  function newLabel(self: mut Self, prefix: str): String {
+    self.cx.tmp += 1;
+    `${prefix}${self.cx.tmp}`
+  }
+
+  // Starts a basic block if the last one has ended: for code no jump reaches.
+  function reopen(self: mut Self): void {
+    if (self.cx.open) { return; }
+    const l = self.newLabel("dead");
+    self.cx.out.push(`${l}:\n`);
+    self.cx.open = true;
+  }
+
+  // An instruction, in a basic block of its own if the last one has ended.
+  function ins(self: mut Self, s: str): void {
+    self.reopen();
+    self.cx.out.push("  ");
+    self.cx.out.push(s);
+    if (self.cx.loc.len() > 0) {
+      self.cx.out.push(", !dbg ");
+      self.cx.out.push(self.cx.loc.asStr());
+    }
+    self.cx.out.push("\n");
+  }
+
+  // An instruction giving a value, named afresh.
+  function val(self: mut Self, s: str): String {
+    const t = self.fresh();
+    self.ins(`${t} = ${s}`);
+    t
+  }
+
+  function term(self: mut Self, s: str): void {
+    self.ins(s);
+    self.cx.open = false;
+  }
+
+  // A label, which the code before it falls into.
+  function label(self: mut Self, l: str): void {
+    if (self.cx.open) { self.cx.out.push(`  br label %${l}\n`); }
+    self.cx.out.push(`${l}:\n`);
+    self.cx.open = true;
+  }
+
+  function jump(self: mut Self, l: str): void { self.term(`br label %${l}`); }
+
+  // A jump to `yes` if the `i1` `c`; else the code goes on.
+  function jumpIf(self: mut Self, c: str, yes: str): void {
+    const no = self.newLabel("else");
+    self.term(`br i1 ${c}, label %${yes}, label %${no}`);
+    self.label(no);
+  }
+
+  // Code run only if the `i1` `c`, which ends in a jump or a panic.
+  function unlikely(self: mut Self, c: str): String {
+    const yes = self.newLabel("then");
+    const no = self.newLabel("else");
+    self.term(`br i1 ${c}, label %${yes}, label %${no}, !prof !0`);
+    self.cx.out.push(`${yes}:\n`);
+    self.cx.open = true;
+    no
+  }
+
+  function alloca(self: mut Self, size: usize, align: usize): String {
+    const t = self.fresh();
+    self.cx.allocas.push(`  ${t} = alloca [${max(size, 1)} x i8], align ${align}\n`);
+    t
+  }
+
+  function allocaOf(self: mut Self, t: readonly Ty, span: Span): String uses Fail<Diagnostic> {
+    const s = self.shape(t, span);
+    self.alloca(s.size, s.align)
+  }
+
+  function gep(self: mut Self, base: str, offset: usize): String {
+    if (offset == 0) { return base.toString(); }
+    self.val(`getelementptr inbounds i8, ptr ${base}, i64 ${offset}`)
+  }
+
+  function load(self: mut Self, ty: str, addr: str): String { self.val(`load ${ty}, ptr ${addr}`) }
+  function store(self: mut Self, ty: str, v: str, addr: str): void { self.ins(`store ${ty} ${v}, ptr ${addr}`); }
+
+  function memcpy(self: mut Self, dst: str, src: str, n: usize): void {
+    self.ins(`call void @llvm.memcpy.p0.p0.i64(ptr ${dst}, ptr ${src}, i64 ${n}, i1 false)`);
+  }
+
+  function memzero(self: mut Self, dst: str, n: usize): void {
+    self.ins(`call void @llvm.memset.p0.i64(ptr ${dst}, i8 0, i64 ${n}, i1 false)`);
+  }
+
+  // Makes the place at `addr` hold a value of `t` that is all zero bits: a dead one.
+  function zero(self: mut Self, addr: str, t: readonly Ty, span: Span): void uses Fail<Diagnostic> {
+    match (self.rep(t, span)) {
+      #Unit => {}
+      #Scalar(s) => self.store(s.asStr(), zeroOf(s.asStr()), addr),
+      #Mem => {
+        const n = self.sizeOf(t, span);
+        self.memzero(addr, n);
+      }
+    }
+  }
+
+  // An `i8` that is a `bool`, as an `i1`.
+  function truth(self: mut Self, v: str): String { self.val(`icmp ne i8 ${v}, 0`) }
+  // An `i1` as a `bool`.
+  function boolOf(self: mut Self, c: str): String { self.val(`zext i1 ${c} to i8`) }
+
+  // A function called, declared once.
+  function declare(self: mut Self, name: str, decl: str): void {
+    if (!self.declared.has(name)) { self.declared.insert(name.toString(), decl.toString()); }
+  }
+
+  // A C string constant, for a panic's message.
+  function cstr(self: mut Self, s: str): String {
+    const key = `c:${s}`;
+    if (const #Some(n) = self.strs.get(key.asStr())) { return n.clone(); }
+    const n = `@.cs${self.strs.len()}`;
+    self.globals.push(`${n} = private unnamed_addr constant [${s.len() + 1} x i8] c"${llquote(s)}\\00"\n`);
+    self.strs.insert(key, n.clone());
+    n
+  }
+
+  // A `str`'s bytes, as a constant.
+  function strBytes(self: mut Self, s: str): String {
+    const key = `s:${s}`;
+    if (const #Some(n) = self.strs.get(key.asStr())) { return n.clone(); }
+    const n = `@.s${self.strs.len()}`;
+    self.globals.push(`${n} = private unnamed_addr constant [${s.len()} x i8] c"${llquote(s)}"\n`);
+    self.strs.insert(key, n.clone());
+    n
+  }
+
+  // A panic with a message.
+  function panic(self: mut Self, m: str): void {
+    const s = self.cstr(m);
+    self.ins(`call void @fly_panic(ptr ${s})`);
+    self.term("unreachable");
+  }
+
+  // ---- the companion's functions ----
+
+  // A function of the companion's, made once for its code: `void name(void* r, void* a0, …)`, with
+  // `body` C in terms of them. What it is given, and gives, is behind those pointers.
+  function glueFn(self: mut Self, n: usize, body: str): String {
+    const key = `${n}:${body}`;
+    if (const #Some(name) = self.glue.get(key.asStr())) { return name.clone(); }
+    const name = `flyg_${self.glue.len()}`;
+    let ps: Vec<String> = ["void* r".toString()];
+    for (const i of 0..n) { ps.push(`void* a${i}`); }
+    self.glueCode.push(`void ${name}(${ps.join(", ")}) { (void)r; ${body} }\n`);
+    let lps: Vec<String> = ["ptr".toString()];
+    for (const _ of 0..n) { lps.push("ptr".toString()); }
+    self.declare(name.asStr(), `declare void @${name}(${lps.join(", ")})`);
+    self.glue.insert(key, name.clone());
+    name
+  }
+
+  // A call of a function of the companion's.
+  function callGlue(self: mut Self, name: str, r: str, args: readonly Vec<String>): void {
+    let all: Vec<String> = [`ptr ${r}`];
+    for (const a of args) { all.push(`ptr ${a}`); }
+    self.ins(`call void @${name}(${all.join(", ")})`);
+  }
+
+  // Drops the `t` at `addr`, as the C back end's drop function for it does.
+  function drop(self: mut Self, addr: str, t: readonly Ty, span: Span): void uses Fail<Diagnostic> {
+    const d = self.c.dropFn(t, span);
+    const c = self.c.ctype(t, span);
+    const g = self.glueFn(1, `${d}((${c}*)a0);`.asStr());
+    self.callGlue(g.asStr(), "null", [addr.toString()]);
+  }
+}
+
+function zeroOf(s: str): str {
+  match (s) { "ptr" => "null", "float" | "double" => "0.0", _ => "0" }
+}
+
+// ---- places, operands, values ----
+
+impl Lgen {
+  function rootTy(self: readonly Self, r: readonly Root): Ty {
+    match (r) {
+      #Local(l) => self.cx.locals[l].ty.clone(),
+      #Capture(k) => match (self.cx.capTys.get(k)) { #Some(t) => t.clone(), #None => #Error },
+    }
+  }
+
+  function placeTy(self: readonly Self, p: readonly Place): Ty {
+    match (p.path.last()) { #Some(x) => x.ty.clone(), #None => self.rootTy(p.root) }
+  }
+
+  function operandTy(self: readonly Self, op: readonly Operand): Ty {
+    match (op) {
+      #Copy(p) | #Move(p) => self.placeTy(p),
+      #Const(c) => match (c) {
+        #Int(_, t) | #Float(_, t) | #Named(_, t) | #Zero(t) => t.clone(),
+        #Str(_) => #Prim(#Str),
+        #Byte(_) => #Prim(#U8),
+        #Bool(_) => #Prim(#Bool),
+        #Unit => #Prim(#Void),
+      },
+    }
+  }
+
+  // A local's address.
+  function local(self: readonly Self, l: usize): String {
+    match (self.cx.addrs.get(l)) { #Some(a) => a.clone(), #None => `%l${l}` }
+  }
+
+  // The address of a place, its indexes checked.
+  function addr(self: mut Self, p: readonly Place, span: Span): String uses Fail<Diagnostic> {
+    let a = match (p.root) {
+      #Local(l) => if (unitTy(self.cx.locals[l].ty)) { "null".toString() } else { self.local(l) },
+      #Capture(k) => match (self.cx.captures.get(k)) { #Some(c) => c.clone(), #None => self.fail(span, "a capture out of reach") },
+    };
+    let t = self.rootTy(p.root);
+    for (const proj of p.path) {
+      a = match (proj.kind) {
+        #Field(n) => {
+          const o = self.offsetOf(t, n.asStr(), span);
+          self.gep(a.asStr(), o)
+        }
+        #Payload(_) => {
+          const o = self.offsetOf(t, "u", span);
+          self.gep(a.asStr(), o)
+        }
+        #Deref => match (t) {
+          #Borrow(_, _) => if (self.c.pointerBorrow(t)) { self.load("ptr", a.asStr()) } else { a },
+          _ => self.load("ptr", a.asStr()),
+        },
+        #Index(i) => {
+          const iv = self.index(i, span);
+          const size = self.sizeOf(proj.ty, span);
+          const [base, len] = match (t) {
+            #Array(_, #Known(n)) => [a.clone(), `${n}`],
+            _ => {
+              // A slice, a `str` and a `Vec` start with their elements' address and their length.
+              const b = self.load("ptr", a.asStr());
+              const at = self.gep(a.asStr(), self.ptr);
+              const n = self.load("i64", at.asStr());
+              [b, n]
+            }
+          };
+          const out = self.val(`icmp uge i64 ${iv}, ${len}`);
+          const ok = self.unlikely(out.asStr());
+          self.ins(`call void @fly_out_of_bounds(i64 ${iv}, i64 ${len})`);
+          self.term("unreachable");
+          self.label(ok.asStr());
+          const off = self.val(`mul i64 ${iv}, ${size}`);
+          self.val(`getelementptr inbounds i8, ptr ${base}, i64 ${off}`)
+        }
+      };
+      t = proj.ty.clone();
+    }
+    a
+  }
+
+  // An index, as an `i64`.
+  function index(self: mut Self, i: readonly Operand, span: Span): String uses Fail<Diagnostic> {
+    const t = self.operandTy(i);
+    const v = self.value(i, span);
+    const s = self.scalar(t, span);
+    match (s.asStr()) {
+      "i64" => v,
+      "i8" | "i16" | "i32" => self.val(`zext ${s} ${v} to i64`),
+      "i128" => self.val(`trunc i128 ${v} to i64`),
+      _ => self.fail(span, "an index that is not an integer"),
+    }
+  }
+
+  // The value of an operand of a scalar type. A move leaves its place dead.
+  function value(self: mut Self, op: readonly Operand, span: Span): String uses Fail<Diagnostic> {
+    const t = self.operandTy(op);
+    match (op) {
+      #Copy(p) => {
+        const s = self.scalar(t, span);
+        const a = self.addr(p, span);
+        self.load(s.asStr(), a.asStr())
+      }
+      #Move(p) => {
+        const s = self.scalar(t, span);
+        const a = self.addr(p, span);
+        const v = self.load(s.asStr(), a.asStr());
+        if (self.dies(t)) { self.store(s.asStr(), zeroOf(s.asStr()), a.asStr()); }
+        v
+      }
+      #Const(c) => self.constScalar(c, span),
+    }
+  }
+
+  // Whether moving a value of the type out of its place leaves it dead: zero.
+  function dies(self: readonly Self, t: readonly Ty): bool {
+    self.needsDrop(t) && match (t) { #Borrow(_, _) => false, _ => true }
+  }
+
+  // Puts an operand's value at `dest`.
+  function put(self: mut Self, op: readonly Operand, dest: str, span: Span): void uses Fail<Diagnostic> {
+    const t = self.operandTy(op);
+    match (self.rep(t, span)) {
+      #Unit => {}
+      #Scalar(s) => {
+        const v = self.value(op, span);
+        self.store(s.asStr(), v.asStr(), dest);
+      }
+      #Mem => match (op) {
+        #Copy(p) | #Move(p) => {
+          const a = self.addr(p, span);
+          const n = self.sizeOf(t, span);
+          self.memcpy(dest, a.asStr(), n);
+          if (const #Move(_) = op && self.dies(t)) { self.memzero(a.asStr(), n); }
+        }
+        #Const(c) => self.constInto(c, t, dest, span),
+      },
+    }
+  }
+
+  // A pointer to a copy of an operand's value of its own.
+  function temp(self: mut Self, op: readonly Operand, span: Span): String uses Fail<Diagnostic> {
+    const t = self.operandTy(op);
+    if (unitTy(t)) { return "null".toString(); }
+    const a = self.allocaOf(t, span);
+    self.put(op, a.asStr(), span);
+    a
+  }
+
+  // A pointer to where an operand's value is, for a routine of the companion's: the place itself,
+  // which a routine may change; or, for a value moved — whose place is dead once it is read — or a
+  // constant, a copy of its own.
+  function argPlace(self: mut Self, op: readonly Operand, span: Span): String uses Fail<Diagnostic> {
+    const t = self.operandTy(op);
+    if (unitTy(t)) { return "null".toString(); }
+    match (op) {
+      #Copy(p) => self.addr(p, span),
+      _ => self.temp(op, span),
+    }
+  }
+
+  // ---- constants ----
+
+  function intConst(self: mut Self, n: str, t: readonly Ty, span: Span): String uses Fail<Diagnostic> {
+    const v = parseInt(n);
+    match (primOf(t)) {
+      #Some(p) if isInt(p) => `${wrap(v, bits(p), signedPrim(p))}`,
+      _ => match (self.scalar(t, span).asStr()) {
+        "float" | "double" => self.floatConst(`${n}.0`.asStr(), t, span),
+        _ => `${v}`,
+      },
+    }
+  }
+
+  // A float constant: C's, for its decimal digits to be read as C reads them.
+  function floatConst(self: mut Self, n: str, t: readonly Ty, span: Span): String uses Fail<Diagnostic> {
+    const c = self.c.ctype(t, span);
+    const s = self.scalar(t, span);
+    const key = `f:${c}:${n}`;
+    const g = match (self.strs.get(key.asStr())) {
+      #Some(g) => g.clone(),
+      #None => {
+        const name = `flyk_${self.strs.len()}`;
+        self.glueCode.push(`const ${c} ${name} = ${n};\n`);
+        self.declare(name.asStr(), `@${name} = external constant ${s}`);
+        self.strs.insert(key, name.clone());
+        name
+      }
+    };
+    self.load(s.asStr(), `@${g}`.asStr())
+  }
+
+  function constScalar(self: mut Self, c: readonly Constant, span: Span): String uses Fail<Diagnostic> {
+    match (c) {
+      #Int(n, t) => self.intConst(n.asStr(), t, span),
+      #Float(n, t) => self.floatConst(n.asStr(), t, span),
+      #Byte(b) => `${b}`,
+      #Bool(b) => if (b) { "1".toString() } else { "0".toString() },
+      #Zero(t) => zeroOf(self.scalar(t, span).asStr()).toString(),
+      #Named(_, t) => {
+        const a = self.allocaOf(t, span);
+        self.constInto(c, t, a.asStr(), span);
+        const s = self.scalar(t, span);
+        self.load(s.asStr(), a.asStr())
+      }
+      #Str(_) | #Unit => self.fail(span, "a constant that is not a scalar"),
+    }
+  }
+
+  // Puts a constant of the type `t` at `dest`.
+  function constInto(self: mut Self, c: readonly Constant, t: readonly Ty, dest: str, span: Span): void uses Fail<Diagnostic> {
+    match (c) {
+      #Str(s) => {
+        const g = self.strBytes(s.asStr());
+        self.store("ptr", g.asStr(), dest);
+        const at = self.gep(dest, self.ptr);
+        self.store("i64", `${s.len()}`.asStr(), at.asStr());
+      }
+      #Unit => {}
+      #Zero(_) => self.zero(dest, t, span),
+      #Named(k, _) => {
+        const ct = self.c.ctype(t, span);
+        const v = self.c.named(k, span);
+        const g = self.glueFn(0, `*(${ct}*)r = ${v};`.asStr());
+        self.callGlue(g.asStr(), dest, Vec.new());
+      }
+      _ => {
+        const s = self.scalar(t, span);
+        const v = self.constScalar(c, span);
+        self.store(s.asStr(), v.asStr(), dest);
+      }
+    }
+  }
+}
+
+// ---- arithmetic ----
+
+impl Lgen {
+  // An integer operand of type `p`, widened to `i128`. A constant is its value, which folded
+  // arithmetic may have left wider than its type, as in the C back end.
+  function wide(self: mut Self, op: readonly Operand, p: Prim, span: Span): String uses Fail<Diagnostic> {
+    if (const #Const(#Int(n, _)) = op) {
+      const v = parseInt(n.asStr());
+      const w = if (!signedPrim(p) && v < 0) { wrap(v, bits(p), false) } else { v };
+      return `${w}`;
+    }
+    const t = self.operandTy(op);
+    const v = self.value(op, span);
+    const s = self.scalar(t, span);
+    if (s == "i128") { return v; }
+    const signed = match (primOf(t)) { #Some(q) => signedPrim(q), #None => false };
+    self.val(`${if (signed) { "sext" } else { "zext" }} ${s} ${v} to i128`)
+  }
+
+  // A value computed at 128 bits, as the integer type `p`: a panic if it does not fit, besides the
+  // types whose arithmetic wraps, as in the C back end.
+  function checked(self: mut Self, p: Prim, w: str): String {
+    const lt = `i${bits(p)}`;
+    if (const #Some([lo, hi]) = boundsOf(p)) {
+      const below = self.val(`icmp slt i128 ${w}, ${lo}`);
+      const above = self.val(`icmp sgt i128 ${w}, ${hi}`);
+      const out = self.val(`or i1 ${below}, ${above}`);
+      const ok = self.unlikely(out.asStr());
+      const name = self.cstr(primName(p));
+      self.ins(`call void @fly_overflow(i128 ${w}, ptr ${name})`);
+      self.term("unreachable");
+      self.label(ok.asStr());
+    }
+    if (lt == "i128") { w.toString() } else { self.val(`trunc i128 ${w} to ${lt}`) }
+  }
+
+  // A scalar converted from the LLVM type `from` to `to`, as a C cast converts it.
+  function convertScalar(self: mut Self, v: str, from: str, fromSigned: bool, to: str, toSigned: bool, toBool: bool): String {
+    const isF = (s: str) => s == "float" || s == "double";
+    const width = (s: str) => match (s) { "i8" => 8, "i16" => 16, "i32" => 32, "i64" => 64, "i128" => 128, "float" => 32, "double" => 64, _ => 64 };
+    if (toBool) {
+      const c = if (isF(from)) { self.val(`fcmp une ${from} ${v}, 0.0`) } else if (from == "ptr") { self.val(`icmp ne ptr ${v}, null`) } else { self.val(`icmp ne ${from} ${v}, 0`) };
+      return self.boolOf(c.asStr());
+    }
+    if (from == to) { return v.toString(); }
+    if (from == "ptr") { return self.val(`ptrtoint ptr ${v} to ${to}`); }
+    if (to == "ptr") { return self.val(`inttoptr ${from} ${v} to ptr`); }
+    if (isF(from) && isF(to)) { return self.val(`${if (width(from) < width(to)) { "fpext" } else { "fptrunc" }} ${from} ${v} to ${to}`); }
+    if (isF(from)) {
+      const op = if (toSigned) { "fptosi" } else { "fptoui" };
+      const f = `llvm.${op}.sat.${to}.${if (from == "float") { "f32" } else { "f64" }}`;
+      self.declare(f.asStr(), `declare ${to} @${f}(${from})`);
+      return self.val(`call ${to} @${f}(${from} ${v})`);
+    }
+    if (isF(to)) { return self.val(`${if (fromSigned) { "sitofp" } else { "uitofp" }} ${from} ${v} to ${to}`); }
+    if (width(from) > width(to)) { self.val(`trunc ${from} ${v} to ${to}`) } else { self.val(`${if (fromSigned) { "sext" } else { "zext" }} ${from} ${v} to ${to}`) }
+  }
+
+  function unary(self: mut Self, op: str, v: readonly Operand, ty: readonly Ty, span: Span): String uses Fail<Diagnostic> {
+    const s = self.scalar(ty, span);
+    if (op == "-") {
+      match (primOf(ty)) {
+        #Some(p) if isInt(p) => {
+          const w = self.wide(v, p, span);
+          const n = self.val(`sub i128 0, ${w}`);
+          return self.checked(p, n.asStr());
+        }
+        _ => {
+          const x = self.value(v, span);
+          return self.val(`fneg ${s} ${x}`);
+        }
+      }
+    }
+    const x = self.value(v, span);
+    if (op == "!") { return self.val(`xor i8 ${x}, 1`); }
+    if (op == "~") { return self.val(`xor ${s} ${x}, -1`); }
+    self.unsupported(span, `the operator \`${op}\``)
+  }
+
+  function binary(self: mut Self, op: str, a: readonly Operand, b: readonly Operand, ty: readonly Ty, span: Span): String uses Fail<Diagnostic> {
+    const at = self.operandTy(a);
+    const bt = self.operandTy(b);
+    if (op == "==" || op == "!=" || op == "<" || op == ">" || op == "<=" || op == ">=") {
+      const sa = self.scalar(at, span);
+      const sb = self.scalar(bt, span);
+      const signed = match (primOf(at)) { #Some(p) => signedPrim(p), #None => false };
+      if (sa == "float" || sa == "double") {
+        const x = self.value(a, span);
+        const y = self.value(b, span);
+        const pred = match (op) { "==" => "oeq", "!=" => "une", "<" => "olt", ">" => "ogt", "<=" => "ole", _ => "oge" };
+        const c = self.val(`fcmp ${pred} ${sa} ${x}, ${y}`);
+        return self.boolOf(c.asStr());
+      }
+      // Integers of different types compare by value, as C compares them once both are wide.
+      const [x, y, lt, sg] = if (sa == sb) {
+        const x = self.value(a, span);
+        const y = self.value(b, span);
+        [x, y, sa.clone(), signed]
+      } else {
+        const pa = match (primOf(at)) { #Some(p) => p, #None => #I64 };
+        const pb = match (primOf(bt)) { #Some(p) => p, #None => #I64 };
+        const x = self.wide(a, pa, span);
+        const y = self.wide(b, pb, span);
+        [x, y, "i128".toString(), true]
+      };
+      const pred = match (op) {
+        "==" => "eq", "!=" => "ne",
+        "<" => if (sg) { "slt" } else { "ult" }, ">" => if (sg) { "sgt" } else { "ugt" },
+        "<=" => if (sg) { "sle" } else { "ule" }, _ => if (sg) { "sge" } else { "uge" },
+      };
+      const c = self.val(`icmp ${pred} ${lt} ${x}, ${y}`);
+      return self.boolOf(c.asStr());
+    }
+    const s = self.scalar(ty, span);
+    match (primOf(ty)) {
+      #Some(p) if isInt(p) => match (op) {
+        "+" | "-" | "*" => {
+          if (self.narrow(a, p) && self.narrow(b, p)) { return self.arith(op, a, b, p, span); }
+          const x = self.wide(a, p, span);
+          const y = self.wide(b, p, span);
+          const f = match (op) { "+" => "fly_add128", "-" => "fly_sub128", _ => "fly_mul128" };
+          const w = self.val(`call i128 @${f}(i128 ${x}, i128 ${y})`);
+          self.checked(p, w.asStr())
+        }
+        "<<" => {
+          const x = self.wide(a, p, span);
+          const pb = match (primOf(bt)) { #Some(q) => q, #None => #U32 };
+          const y = self.wide(b, pb, span);
+          const w = self.val(`shl i128 ${x}, ${y}`);
+          self.checked(p, w.asStr())
+        }
+        "/" | "%" => {
+          const x = self.value(a, span);
+          const y0 = self.value(b, span);
+          const y = self.sameWidth(y0.asStr(), bt, s.asStr(), span);
+          const z = self.val(`icmp eq ${s} ${y}, 0`);
+          const ok = self.unlikely(z.asStr());
+          self.ins("call void @fly_div_zero()");
+          self.term("unreachable");
+          self.label(ok.asStr());
+          const div = op == "/";
+          if (!signedPrim(p)) { return self.val(`${if (div) { "udiv" } else { "urem" }} ${s} ${x}, ${y}`); }
+          // Dividing the least value by -1 wraps, as the machine C runs on does.
+          const m1 = self.val(`icmp eq ${s} ${y}, -1`);
+          const y1 = self.val(`select i1 ${m1}, ${s} 1, ${s} ${y}`);
+          const q = self.val(`${if (div) { "sdiv" } else { "srem" }} ${s} ${x}, ${y1}`);
+          const alt = if (div) { self.val(`sub ${s} 0, ${x}`) } else { "0".toString() };
+          self.val(`select i1 ${m1}, ${s} ${alt}, ${s} ${q}`)
+        }
+        ">>" => {
+          // C shifts at least an `int`.
+          const x = self.value(a, span);
+          const y0 = self.value(b, span);
+          const n = bits(p);
+          const wt = if (n < 32) { "i32".toString() } else { s.clone() };
+          const signed = signedPrim(p);
+          const xw = if (n < 32) { self.val(`${if (signed) { "sext" } else { "zext" }} ${s} ${x} to i32`) } else { x };
+          const y = self.sameWidth(y0.asStr(), bt, wt.asStr(), span);
+          const r = self.val(`${if (signed) { "ashr" } else { "lshr" }} ${wt} ${xw}, ${y}`);
+          if (n < 32) { self.val(`trunc i32 ${r} to ${s}`) } else { r }
+        }
+        _ => {
+          const x = self.value(a, span);
+          const y0 = self.value(b, span);
+          const y = self.sameWidth(y0.asStr(), bt, s.asStr(), span);
+          const inst = match (op) { "&" => "and", "|" => "or", "^" => "xor", _ => return self.unsupported(span, `the operator \`${op}\``) };
+          self.val(`${inst} ${s} ${x}, ${y}`)
+        }
+      },
+      _ => {
+        const x = self.value(a, span);
+        const y = self.value(b, span);
+        if (s == "i8") {
+          // `bool`s: `&`, `|` and `^` of two.
+          const inst = match (op) { "&" | "&&" => "and", "|" | "||" => "or", "^" | "!=" => "xor", _ => return self.unsupported(span, `the operator \`${op}\` on this type`) };
+          return self.val(`${inst} i8 ${x}, ${y}`);
+        }
+        const inst = match (op) { "+" => "fadd", "-" => "fsub", "*" => "fmul", "/" => "fdiv", "%" => "frem", _ => return self.unsupported(span, `the operator \`${op}\` on floats`) };
+        self.val(`${inst} ${s} ${x}, ${y}`)
+      }
+    }
+  }
+
+  // Whether an operand of arithmetic at type `p` is a value of `p`: not a constant folded wider.
+  function narrow(self: readonly Self, op: readonly Operand, p: Prim): bool {
+    if (const #Const(#Int(n, _)) = op) {
+      const v = parseInt(n.asStr());
+      return wrap(v, bits(p), signedPrim(p)) == v;
+    }
+    match (primOf(self.operandTy(op))) { #Some(q) => q == p, #None => false }
+  }
+
+  // `a op b` at type `p`, both values of it: LLVM's arithmetic checked for overflow, the exact value
+  // made only to say what did not fit. `i128` overflows only as its routines say.
+  function arith(self: mut Self, op: str, a: readonly Operand, b: readonly Operand, p: Prim, span: Span): String uses Fail<Diagnostic> {
+    const lt = `i${bits(p)}`;
+    const x = self.value(a, span);
+    const y = self.value(b, span);
+    const inst = match (op) { "+" => "add", "-" => "sub", _ => "mul" };
+    const signed = signedPrim(p);
+    const f = `llvm.${if (signed) { "s" } else { "u" }}${inst}.with.overflow.${lt}`;
+    self.declare(f.asStr(), `declare { ${lt}, i1 } @${f}(${lt}, ${lt})`.asStr());
+    const r = self.val(`call { ${lt}, i1 } @${f}(${lt} ${x}, ${lt} ${y})`);
+    const o = self.val(`extractvalue { ${lt}, i1 } ${r}, 1`);
+    const ok = self.unlikely(o.asStr());
+    const g = match (op) { "+" => "fly_add128", "-" => "fly_sub128", _ => "fly_mul128" };
+    if (p == #I128) {
+      self.ins(`call i128 @${g}(i128 ${x}, i128 ${y})`);
+      self.term("unreachable");
+    } else {
+      const k = if (signed) { "sext" } else { "zext" };
+      const wx = self.val(`${k} ${lt} ${x} to i128`);
+      const wy = self.val(`${k} ${lt} ${y} to i128`);
+      // A product of two `u64`s may not fit even `i128`, which its routine says.
+      const w = if (bits(p) == 64 && !signed && op == "*") { self.val(`call i128 @${g}(i128 ${wx}, i128 ${wy})`) } else { self.val(`${inst} i128 ${wx}, ${wy}`) };
+      const name = self.cstr(primName(p));
+      self.ins(`call void @fly_overflow(i128 ${w}, ptr ${name})`);
+      self.term("unreachable");
+    }
+    self.label(ok.asStr());
+    self.val(`extractvalue { ${lt}, i1 } ${r}, 0`)
+  }
+
+  // An integer of the type `t` as the LLVM integer type `to`, as C converts it.
+  function sameWidth(self: mut Self, v: str, t: readonly Ty, to: str, span: Span): String uses Fail<Diagnostic> {
+    const s = self.scalar(t, span);
+    const signed = match (primOf(t)) { #Some(p) => signedPrim(p), #None => false };
+    self.convertScalar(v, s.asStr(), signed, to, signed, false)
+  }
+
+  function cast(self: mut Self, v: readonly Operand, to: readonly Ty, span: Span): String uses Fail<Diagnostic> {
+    const from = self.operandTy(v);
+    const x = self.value(v, span);
+    const sf = self.scalar(from, span);
+    const st = self.scalar(to, span);
+    const cf = self.c.ctype(from, span);
+    const ct = self.c.ctype(to, span);
+    self.convertScalar(x.asStr(), sf.asStr(), cSigned(cf.asStr()), st.asStr(), cSigned(ct.asStr()), ct == "bool")
+  }
+}
+
+// ---- values ----
+
+impl Lgen {
+  // An rvalue other than a call, of type `ty`, put at `dest`.
+  function rvalueInto(self: mut Self, rv: readonly Rvalue, ty: readonly Ty, dest: str, span: Span): void uses Fail<Diagnostic> {
+    match (self.rep(ty, span)) {
+      #Unit => {
+        // A value of nothing is made only for what making it does.
+        if (const #Use(#Move(p)) = rv) { self.addr(p, span); }
+      }
+      #Scalar(s) => {
+        const v = self.rvalueScalar(rv, ty, span);
+        self.store(s.asStr(), v.asStr(), dest);
+      }
+      #Mem => self.rvalueMem(rv, ty, dest, span),
+    }
+  }
+
+  function rvalueScalar(self: mut Self, rv: readonly Rvalue, ty: readonly Ty, span: Span): String uses Fail<Diagnostic> {
+    match (rv) {
+      #Use(op) => self.value(op, span),
+      #Borrow(m, p) => {
+        const a = self.addr(p, span);
+        const bt: Ty = #Borrow(m, Box.new(self.placeTy(p)));
+        if (self.c.pointerBorrow(bt)) { a } else {
+          const s = self.scalar(ty, span);
+          self.load(s.asStr(), a.asStr())
+        }
+      }
+      #Unary(op, v) => self.unary(op.asStr(), v, ty, span),
+      #Binary(op, a, b) => self.binary(op.asStr(), a, b, ty, span),
+      #Cast(v, to) => self.cast(v, to, span),
+      #IsTag(p, tag) => {
+        const pt = self.placeTy(p);
+        const a = self.addr(p, span);
+        const o = self.offsetOf(pt, "tag", span);
+        const at = self.gep(a.asStr(), o);
+        const t = self.load("i32", at.asStr());
+        const id = self.c.tagId(tag.asStr());
+        const c = self.val(`icmp eq i32 ${t}, ${id}`);
+        self.boolOf(c.asStr())
+      }
+      #AddressOf(p) => self.addr(p, span),
+      _ => {
+        // What is made in memory, read as the scalar it is.
+        const a = self.allocaOf(ty, span);
+        self.rvalueMem(rv, ty, a.asStr(), span);
+        const s = self.scalar(ty, span);
+        self.load(s.asStr(), a.asStr())
+      }
+    }
+  }
+
+  function rvalueMem(self: mut Self, rv: readonly Rvalue, ty: readonly Ty, dest: str, span: Span): void uses Fail<Diagnostic> {
+    match (rv) {
+      #Use(op) => self.put(op, dest, span),
+      #Borrow(_, p) => {
+        // A view, or a value C passes as one, lent as it is.
+        const a = self.addr(p, span);
+        const n = self.sizeOf(ty, span);
+        self.memcpy(dest, a.asStr(), n);
+      }
+      #View(p) => {
+        const a = self.addr(p, span);
+        match (self.placeTy(p)) {
+          #Array(_, #Known(n)) => {
+            self.store("ptr", a.asStr(), dest);
+            const at = self.gep(dest, self.ptr);
+            self.store("i64", `${n}`.asStr(), at.asStr());
+          }
+          // A `String` and a `Vec` start with what their view is: an address and a length.
+          _ => self.memcpy(dest, a.asStr(), 2 * self.ptr),
+        }
+      }
+      #Tag(name, vs) => {
+        const n = self.sizeOf(ty, span);
+        self.memzero(dest, n);
+        if (self.c.liveByte(ty)) { self.store("i8", "1", dest); }
+        const id = self.c.tagId(name.asStr());
+        const to = self.offsetOf(ty, "tag", span);
+        const at = self.gep(dest, to);
+        self.store("i32", `${id}`.asStr(), at.asStr());
+        if (const #Some(v) = vs.first()) {
+          const uo = self.offsetOf(ty, "u", span);
+          const u = self.gep(dest, uo);
+          self.put(v, u.asStr(), span);
+        }
+      }
+      #Fields(fs) => {
+        const n = self.sizeOf(ty, span);
+        self.memzero(dest, n);
+        if (self.c.liveByte(ty)) { self.store("i8", "1", dest); }
+        for (const [k, v] of fs) {
+          const o = self.offsetOf(ty, k.asStr(), span);
+          const at = self.gep(dest, o);
+          self.put(v, at.asStr(), span);
+        }
+      }
+      #List(vs) => match (ty) {
+        #Array(e, _) => {
+          const n = self.sizeOf(ty, span);
+          self.memzero(dest, n);
+          const size = self.sizeOf(e, span);
+          for (const [i, v] of vs.iter().enumerate()) {
+            const at = self.gep(dest, i * size);
+            self.put(v, at.asStr(), span);
+          }
+        }
+        _ => {
+          if (vs.len() == 0) {
+            self.memzero(dest, 3 * self.ptr);
+            return;
+          }
+          const e = typeArg(ty, 0);
+          const s = self.shape(e, span);
+          const arr = self.alloca(s.size * vs.len(), s.align);
+          for (const [i, v] of vs.iter().enumerate()) {
+            const at = self.gep(arr.asStr(), i * s.size);
+            self.put(v, at.asStr(), span);
+          }
+          const g = self.glueFn(1, `*(fly_vec*)r = fly_vec_from(a0, ${vs.len()}, ${s.size});`.asStr());
+          self.callGlue(g.asStr(), dest, [arr]);
+        }
+      },
+      #Convert(v) => {
+        const from = self.operandTy(v);
+        if (ckey(from) == ckey(ty)) { return self.put(v, dest, span); }
+        const f = self.c.conversion(from, ty, span);
+        const a = self.c.ctype(from, span);
+        const b = self.c.ctype(ty, span);
+        const src = self.temp(v, span);
+        const g = self.glueFn(1, `*(${b}*)r = ${f}(*(${a}*)a0);`.asStr());
+        self.callGlue(g.asStr(), dest, [src]);
+      }
+      #Closure(k, caps, lent) => self.closure(k, caps, lent, dest, span),
+      #FnRef(i) => {
+        const f = self.fnValue(i, span);
+        self.memzero(dest, 3 * self.ptr);
+        const at = self.gep(dest, 2 * self.ptr);
+        self.store("ptr", `@${f}`.asStr(), at.asStr());
+      }
+      #Call(_) => self.fail(span, "a call where a value was expected"),
+      _ => {
+        const s = self.scalar(ty, span);
+        const v = self.rvalueScalar(rv, ty, span);
+        self.store(s.asStr(), v.asStr(), dest);
+      }
+    }
+  }
+}
+
+// ---- statements ----
+
+impl Lgen {
+  // Where a failure or an unwinding goes from here.
+  function target(self: readonly Self): String {
+    match (self.cx.targets.last()) { #Some(t) => t.clone(), #None => "fail".toString() }
+  }
+
+  function noteJump(self: mut Self, label: String): void {
+    let set: HashSet<usize> = match (self.cx.liveAt.get(label.asStr())) { #Some(s) => s.clone(), #None => HashSet.new() };
+    for (const l of self.cx.live.iter()) { set.insert(l); }
+    self.cx.liveAt.insert(label, set);
+  }
+
+  function dynamicExit(self: mut Self): void {
+    const t = self.target();
+    self.noteJump(t);
+  }
+
+  function gen(self: mut Self, l: usize): void {
+    if (self.c.lw.owned(self.cx.locals[l].ty)) { self.cx.live.insert(l); }
+  }
+
+  function flowOperand(self: mut Self, op: readonly Operand): void {
+    if (const #Move(p) = op && p.path.len() == 0 && const #Local(l) = p.root) { self.cx.live.remove(l); }
+  }
+
+  function flowRvalue(self: mut Self, rv: readonly Rvalue): void {
+    match (rv) {
+      #Use(op) | #Unary(_, op) | #Cast(op, _) | #Convert(op) => self.flowOperand(op),
+      #Binary(_, a, b) => { self.flowOperand(a); self.flowOperand(b); }
+      #Tag(_, vs) | #List(vs) => { for (const v of vs) { self.flowOperand(v); } }
+      #Fields(fs) => { for (const [_, v] of fs) { self.flowOperand(v); } }
+      #Call(c) => self.flowCall(c),
+      #Closure(_, caps, _) => { for (const c of caps) { if (const #Value(op) = c) { self.flowOperand(op); } } }
+      _ => {}
+    }
+  }
+
+  function flowCall(self: mut Self, c: readonly Call): void {
+    for (const a of c.args) { self.flowOperand(a); }
+    if (const #Value(f, _) = c.callee) { self.flowOperand(f); }
+  }
+
+  function assignedIn(self: readonly Self, bs: readonly Vec<Block>): HashSet<usize> {
+    let u: Uses = { locals: HashSet.new(), captures: HashSet.new() };
+    for (const b of bs) { useBlock(b, mut u); }
+    let out: HashSet<usize> = HashSet.new();
+    for (const l of u.locals.iter()) { if (self.c.lw.owned(self.cx.locals[l].ty)) { out.insert(l); } }
+    out
+  }
+
+  // Whether a global flag of the runtime's is set, as an `i1`.
+  function flag(self: mut Self, name: str): String {
+    const v = self.load("i8", `@${name}`.asStr());
+    self.truth(v.asStr())
+  }
+
+  function failed(self: mut Self): String {
+    const e = self.load("ptr", "@fly_err");
+    self.val(`icmp ne ptr ${e}, null`)
+  }
+
+  // ---- cleanups ----
+
+  function cleanup(self: mut Self, c: readonly Cleanup, live: readonly HashSet<usize>, span: Span): void uses Fail<Diagnostic> {
+    match (c) {
+      #Drop(l) => {
+        if (!live.has(l)) { return; }
+        const t = self.cx.locals[l].ty.clone();
+        if (!self.needsDrop(t)) { return; }
+        const a = self.local(l);
+        self.drop(a.asStr(), t, span);
+      }
+      #Defer(flag, body) => {
+        const f = self.local(flag);
+        const v = self.load("i8", f.asStr());
+        const on = self.truth(v.asStr());
+        const run = self.newLabel("defer");
+        const after = self.newLabel("deferred");
+        self.term(`br i1 ${on}, label %${run}, label %${after}`);
+        self.label(run.asStr());
+        self.store("i8", "0", f.asStr());
+        const u = self.alloca(16, 8);
+        self.ins(`call void @flyg_cleanup_begin(ptr ${u})`);
+        self.deferCall(flag, body, span);
+        self.ins(`call void @flyg_cleanup_end(ptr ${u})`);
+        self.label(after.asStr());
+      }
+      #Arena(l) => {
+        const a = self.local(l);
+        self.ins(`call void @fly_arena_free(ptr ${a})`);
+      }
+    }
+  }
+
+  function cleanups(self: mut Self, cs: readonly Vec<Cleanup>, live: readonly HashSet<usize>, span: Span): void uses Fail<Diagnostic> {
+    let k = cs.len();
+    while (k > 0) {
+      k -= 1;
+      self.cleanup(cs[k], live, span);
+    }
+  }
+
+  // Whether a jump to `label` stays in this function.
+  function inReach(self: readonly Self, label: usize): bool {
+    self.cx.scopes.iter().some((s) => match (s) { #Target(l) => l == label, _ => false })
+  }
+
+  // Runs the cleanups of the blocks a jump to `label` leaves — of every block in this function, for
+  // `#None`.
+  function exitTo(self: mut Self, label: Option<usize>, span: Span): void uses Fail<Diagnostic> {
+    const live = self.cx.live.clone();
+    let i = self.cx.scopes.len();
+    while (i > 0) {
+      i -= 1;
+      const s = self.cx.scopes[i].clone();
+      match (s) {
+        #Target(l) => { if (label == #Some(l)) { return; } }
+        #Cleanups(cs) => self.cleanups(cs, live, span),
+      }
+    }
+  }
+
+  // A loop's body over a generator stops it: why, in its `code_`; the body's cleanups; `false`.
+  function stopBody(self: mut Self, code: usize, span: Span): void uses Fail<Diagnostic> {
+    const c = self.cx.code.clone();
+    self.store("i32", `${code}`.asStr(), c.asStr());
+    self.exitTo(#None, span);
+    const r = self.cx.retSlot.clone();
+    self.store("i8", "0", r.asStr());
+    self.jump("ret");
+  }
+
+  // What code does when what it yields to wants no more.
+  function stop(self: mut Self, span: Span): void uses Fail<Diagnostic> {
+    match (self.cx.mode) {
+      #Body => self.stopBody(4, span),
+      _ => {
+        self.dynamicExit();
+        self.store("i8", "1", "@fly_stopping");
+        const t = self.target();
+        self.jump(t.asStr());
+      }
+    }
+  }
+
+  // The locals a block declares, each in memory of its own, each dead as the block starts.
+  function declarations(self: mut Self, b: readonly Block, span: Span): void uses Fail<Diagnostic> {
+    for (const l of b.locals) {
+      if (self.cx.hoisted.has(l) || self.cx.addrs.has(l)) { continue; }
+      const t = self.cx.locals[l].ty.clone();
+      const a = `%l${l}`;
+      match (self.cx.locals[l].kind) {
+        #Arena => {
+          if (self.cx.declared.insert(l)) { self.cx.allocas.push(`  ${a} = alloca ptr, align 8\n`); }
+          self.store("ptr", "null", a.asStr());
+        }
+        _ => {
+          if (unitTy(t)) { continue; }
+          if (self.cx.declared.insert(l)) {
+            const s = self.shape(t, span);
+            self.cx.allocas.push(`  ${a} = alloca [${s.size} x i8], align ${s.align}\n`);
+            self.declareVar(l, a.asStr(), span);
+          }
+          self.zero(a.asStr(), t, span);
+        }
+      }
+    }
+  }
+
+  function block(self: mut Self, b: readonly Block, span: Span): void uses Fail<Diagnostic> {
+    self.declarations(b, span);
+    const pro = replace(mut self.cx.prologue, String.new());
+    if (pro.len() > 0) {
+      self.reopen();
+      self.cx.out.push(pro.asStr());
+    }
+    if (b.cleanups.len() == 0) {
+      for (const s of b.stmts) { self.stmt(s, span); }
+      return;
+    }
+    const k = self.newLabel("");
+    const parent = self.target();
+    const unw = `unw${k}`;
+    self.cx.scopes.push(#Cleanups(b.cleanups.clone()));
+    self.cx.targets.push(unw.clone());
+    for (const s of b.stmts) { self.stmt(s, span); }
+    self.cx.targets.pop();
+    self.cx.scopes.pop();
+    if (self.cx.reachable) {
+      const live = self.cx.live.clone();
+      self.cleanups(b.cleanups, live, span);
+    }
+    // A failure or an unwinding left the block: what may hold a value at any jump here is dropped.
+    if (const #Some(at) = self.cx.liveAt.get(unw.asStr())) {
+      const at2 = at.clone();
+      const end = `end${k}`;
+      self.jump(end.asStr());
+      self.label(unw.asStr());
+      self.cleanups(b.cleanups, at2, span);
+      self.jump(parent.asStr());
+      let rest = at2.clone();
+      for (const cl of b.cleanups) { if (const #Drop(l) = cl) { rest.remove(l); } }
+      let set: HashSet<usize> = match (self.cx.liveAt.get(parent.asStr())) { #Some(s) => s.clone(), #None => HashSet.new() };
+      for (const l of rest.iter()) { set.insert(l); }
+      self.cx.liveAt.insert(parent.clone(), set);
+      self.label(end.asStr());
+    }
+    for (const l of b.locals) { self.cx.live.remove(l); }
+  }
+
+  function stmt(self: mut Self, s: readonly Stmt, span: Span): void uses Fail<Diagnostic> {
+    match (s) {
+      #Let(l, rv) => {
+        const t = self.cx.locals[l].ty.clone();
+        self.flowRvalue(rv);
+        self.gen(l);
+        const dest: Option<String> = if (unitTy(t)) { #None } else { #Some(self.local(l)) };
+        self.assignTo(dest, #None, rv, t, span);
+      }
+      #Store(p, rv) => {
+        const t = self.placeTy(p);
+        self.flowRvalue(rv);
+        if (p.path.len() == 0 && const #Local(l) = p.root) { self.gen(l); }
+        self.assignTo(#None, #Some(p.clone()), rv, t, span);
+      }
+      #Drop(p) => {
+        const t = self.placeTy(p);
+        const whole: Option<usize> = if (p.path.len() == 0 && const #Local(l) = p.root) { #Some(l) } else { #None };
+        const known = match (whole) { #Some(l) => self.cx.live.has(l) || !self.c.lw.owned(self.cx.locals[l].ty), #None => true };
+        if (known && self.needsDrop(t)) {
+          const a = self.addr(p, span);
+          self.drop(a.asStr(), t, span);
+        }
+        if (const #Some(l) = whole) { self.cx.live.remove(l); }
+      }
+      #If(c, a, b) => {
+        const x = self.value(c, span);
+        const on = self.truth(x.asStr());
+        const yes = self.newLabel("if");
+        const no = self.newLabel("ifnot");
+        const join = self.newLabel("fi");
+        self.term(`br i1 ${on}, label %${yes}, label %${no}`);
+        self.label(yes.asStr());
+        const before = self.cx.live.clone();
+        self.block(a, span);
+        self.jump(join.asStr());
+        const liveA = replace(mut self.cx.live, before);
+        const reachA = replace(mut self.cx.reachable, true);
+        self.label(no.asStr());
+        self.block(b, span);
+        const reachB = self.cx.reachable;
+        if (reachA && reachB) { for (const l of liveA.iter()) { self.cx.live.insert(l); } }
+        else if (reachA) { self.cx.live = liveA; }
+        self.cx.reachable = reachA || reachB;
+        self.label(join.asStr());
+      }
+      #Loop(l, body, step) => {
+        const assigned = self.assignedIn([body.clone(), step.clone()]);
+        for (const x of assigned.iter()) { self.cx.live.insert(x); }
+        const head = self.cx.live.clone();
+        const top = `loop${l}`;
+        self.label(top.asStr());
+        self.cx.scopes.push(#Target(l));
+        self.block(body, span);
+        self.cx.live = head.clone();
+        self.cx.reachable = true;
+        self.label(`cont${l}`.asStr());
+        self.block(step, span);
+        self.cx.scopes.pop();
+        self.jump(top.asStr());
+        self.label(`brk${l}`.asStr());
+        self.cx.live = head;
+        self.cx.reachable = true;
+      }
+      #Labeled(l, b) => {
+        const assigned = self.assignedIn([b.clone()]);
+        let after = self.cx.live.clone();
+        for (const x of assigned.iter()) { after.insert(x); }
+        self.cx.scopes.push(#Target(l));
+        self.block(b, span);
+        self.cx.scopes.pop();
+        self.label(`brk${l}`.asStr());
+        self.cx.live = after;
+        self.cx.reachable = true;
+      }
+      #Break(l) | #Continue(l) => {
+        const brk = match (s) { #Break(_) => true, _ => false };
+        if (self.inReach(l)) {
+          self.exitTo(#Some(l), span);
+          self.jump(`${if (brk) { "brk" } else { "cont" }}${l}`.asStr());
+        } else if (brk) {
+          // In a loop's body over a generator: no more items.
+          self.stopBody(1, span);
+        } else {
+          // The next item.
+          self.exitTo(#None, span);
+          self.jump("ret");
+        }
+        self.cx.reachable = false;
+      }
+      #Return(op) => {
+        self.flowOperand(op);
+        match (self.cx.mode) {
+          #Body => {
+            if (!unitTy(self.cx.fnRet)) {
+              const o = self.cx.oret.clone();
+              self.put(op, o.asStr(), span);
+            }
+            self.stopBody(2, span);
+          }
+          _ => {
+            if (!unitTy(self.cx.ret)) {
+              const r = self.cx.retSlot.clone();
+              self.put(op, r.asStr(), span);
+            }
+            self.exitTo(#None, span);
+            self.jump("ret");
+          }
+        }
+        self.cx.reachable = false;
+      }
+      #Throw(op, t) => {
+        const e = self.temp(op, span);
+        self.flowOperand(op);
+        self.raise(e.asStr(), t, span);
+        self.dynamicExit();
+        const target = self.target();
+        self.jump(target.asStr());
+        self.cx.reachable = false;
+      }
+      #Panic(m) => {
+        self.panic(m.asStr());
+        self.cx.reachable = false;
+      }
+      #Block(b) => self.block(b, span),
+      #Try(b, err, h) => {
+        const k = self.newLabel("");
+        const parent = self.target();
+        const catchL = `catch${k}`;
+        const done = `done${k}`;
+        const before = self.cx.live.clone();
+        self.cx.targets.push(catchL.clone());
+        self.block(b, span);
+        self.cx.targets.pop();
+        const liveB = self.cx.live.clone();
+        const reachB = self.cx.reachable;
+        self.jump(done.asStr());
+        self.label(catchL.asStr());
+        self.cx.live = match (self.cx.liveAt.get(catchL.asStr())) { #Some(x) => x.clone(), #None => before };
+        self.cx.reachable = true;
+        self.dynamicExit();
+        const u = self.flag("fly_unwinding");
+        const st = self.flag("fly_stopping");
+        const either = self.val(`or i1 ${u}, ${st}`);
+        self.jumpIf(either.asStr(), parent.asStr());
+        // The handler's block starts by taking the failure into its local.
+        const saved = replace(mut self.cx.out, String.new());
+        const open = replace(mut self.cx.open, true);
+        const et = self.cx.locals[err].ty.clone();
+        if (!unitTy(et)) {
+          if (!self.cx.declared.has(err) && !self.cx.addrs.has(err)) {
+            const s = self.shape(et, span);
+            self.cx.declared.insert(err);
+            self.cx.allocas.push(`  %l${err} = alloca [${s.size} x i8], align ${s.align}\n`);
+          }
+          const e = self.local(err);
+          self.zero(e.asStr(), et, span);
+          self.takeErr(e.asStr(), et, span);
+        }
+        self.cx.prologue = replace(mut self.cx.out, saved);
+        self.cx.open = open;
+        self.gen(err);
+        self.block(h, span);
+        self.label(done.asStr());
+        if (reachB) { for (const l of liveB.iter()) { self.cx.live.insert(l); } }
+        self.cx.reachable = self.cx.reachable || reachB;
+      }
+      #Arm(flag) => {
+        const f = self.local(flag);
+        self.store("i8", "1", f.asStr());
+      }
+      #Yield(op, _) => {
+        const y = match (self.cx.sink) { #Some(y) => y.clone(), #None => return self.fail(span, "`yield` outside a generator") };
+        const item = self.temp(op, span);
+        self.flowOperand(op);
+        const env = self.load("ptr", y.asStr());
+        const fa = self.gep(y.asStr(), self.ptr);
+        const f = self.load("ptr", fa.asStr());
+        const ok = self.val(`call zeroext i1 ${f}(ptr ${env}, ptr ${item})`);
+        const no = self.val(`xor i1 ${ok}, true`);
+        const on = self.unlikely(no.asStr());
+        self.stop(span);
+        self.label(on.asStr());
+      }
+      #ForGen(l, c, item, body) => {
+        self.flowCall(c);
+        self.forGen(l, c, item, body, span);
+      }
+      #Region(sym, arena, b) => {
+        self.cx.arenas.insert(sym, self.local(arena));
+        self.block(b, span);
+        self.cx.arenas.remove(sym);
+      }
+      #Perform(d, op, args, r) => {
+        for (const a of args) { self.flowOperand(a); }
+        self.gen(r);
+        self.perform(d, op, args, r, span);
+      }
+      #Handle(h) => {
+        self.gen(h.result);
+        self.handle(h);
+      }
+      #Resume(k, arg, r) => {
+        self.flowOperand(k);
+        if (const #Some(a) = arg) { self.flowOperand(a); }
+        self.gen(r);
+        self.resume(k, arg, r, span);
+      }
+      #At(at) => self.at(at),
+    }
+  }
+
+  // Puts the value of `rv`, a `t`, in the local at `dest` or the place `p`; or evaluates it.
+  function assignTo(self: mut Self, dest: Option<String>, p: Option<Place>, rv: readonly Rvalue, t: readonly Ty, span: Span): void uses Fail<Diagnostic> {
+    if (const #Call(c) = rv) {
+      const r = self.call(c);
+      if (const #Some(v) = r) {
+        const d = match (dest) {
+          #Some(d) => d,
+          #None => match (p) { #Some(p) => self.addr(p, span), #None => return },
+        };
+        match (self.rep(t, span)) {
+          #Unit => {}
+          #Scalar(s) => self.store(s.asStr(), v.asStr(), d.asStr()),
+          #Mem => {
+            const n = self.sizeOf(t, span);
+            self.memcpy(d.asStr(), v.asStr(), n);
+          }
+        }
+      }
+      return;
+    }
+    const d = match (dest) {
+      #Some(d) => d,
+      #None => match (p) {
+        #Some(p) => self.addr(p, span),
+        #None => {
+          if (const #Use(#Move(q)) = rv) { self.addr(q, span); }
+          return;
+        }
+      },
+    };
+    self.rvalueInto(rv, t, d.asStr(), span);
+  }
+
+  // Raises the failure at `e`, a `t`: boxed by its tag, so a `catch` of a wider or a narrower union of
+  // tags takes it out as its own.
+  function raise(self: mut Self, e: str, t: readonly Ty, span: Span): void uses Fail<Diagnostic> {
+    if (self.c.tagged(t)) {
+      const to = self.offsetOf(t, "tag", span);
+      const ta = self.gep(e, to);
+      const tag = self.load("i32", ta.asStr());
+      const uo = self.offsetOf(t, "u", span);
+      const u = self.gep(e, uo);
+      const n = self.shape(t, span).uSize;
+      self.ins(`call void @fly_err_box(i32 ${tag}, ptr ${u}, i64 ${n})`);
+    } else {
+      const n = self.sizeOf(t, span);
+      self.ins(`call void @fly_err_box(i32 0, ptr ${e}, i64 ${n})`);
+    }
+  }
+
+  // Takes the failure raised into `e`, a `t`.
+  function takeErr(self: mut Self, e: str, t: readonly Ty, span: Span): void uses Fail<Diagnostic> {
+    if (self.c.tagged(t)) {
+      const tag = self.val("call i32 @fly_err_tag()");
+      const to = self.offsetOf(t, "tag", span);
+      const ta = self.gep(e, to);
+      self.store("i32", tag.asStr(), ta.asStr());
+      const uo = self.offsetOf(t, "u", span);
+      const u = self.gep(e, uo);
+      const n = self.shape(t, span).uSize;
+      self.ins(`call void @fly_err_take(ptr ${u}, i64 ${n})`);
+    } else {
+      const n = self.sizeOf(t, span);
+      self.ins(`call void @fly_err_take(ptr ${e}, i64 ${n})`);
+    }
+  }
+}
+
+// ---- calls ----
+
+impl Lgen {
+  // How a function of this module takes a value of the type: a scalar as it is, with C's
+  // extension of a narrow integer; anything bigger by pointer; nothing of nothing.
+  function paramTy(self: mut Self, t: readonly Ty, span: Span): Option<String> uses Fail<Diagnostic> {
+    match (self.rep(t, span)) {
+      #Unit => #None,
+      #Scalar(s) => {
+        const c = self.c.ctype(t, span);
+        #Some(`${s}${ext(c.asStr())}`)
+      }
+      #Mem => #Some("ptr".toString()),
+    }
+  }
+
+  // The C type a function of this module takes or gives a value of the type as: a scalar C's,
+  // a `bool` as a byte; anything bigger by pointer.
+  function cAbi(self: mut Self, t: readonly Ty, span: Span): String uses Fail<Diagnostic> {
+    const c = self.c.ctype(t, span);
+    match (self.rep(t, span)) {
+      #Scalar(_) => if (c == "bool") { "uint8_t".toString() } else { c },
+      _ => "void*".toString(),
+    }
+  }
+
+  // An argument as a function of this module takes it.
+  function arg(self: mut Self, a: readonly Operand, t: readonly Ty, span: Span): Option<String> uses Fail<Diagnostic> {
+    match (self.rep(t, span)) {
+      #Unit => {
+        self.temp(a, span);
+        #None
+      }
+      #Scalar(s) => {
+        const c = self.c.ctype(t, span);
+        const v = self.value(a, span);
+        #Some(`${s}${ext(c.asStr())} ${v}`)
+      }
+      #Mem => {
+        const p = self.temp(a, span);
+        #Some(`ptr noalias ${p}`)
+      }
+    }
+  }
+
+  // What a call gives, before it is put where it goes: a scalar, or a pointer to it.
+  function call(self: mut Self, c: readonly Call): Option<String> uses Fail<Diagnostic> {
+    const span = c.span;
+    self.at(span);
+    let arenas: Vec<String> = Vec.new();
+    for (const r of c.regions) {
+      match (self.cx.arenas.get(r)) {
+        #Some(a) => arenas.push(a.clone()),
+        #None => self.fail(span, "a region's arena is out of reach here"),
+      }
+    }
+    if (c.yields && self.cx.sink.isNone()) { self.fail(span, "a generator is called by `for`, or by a generator"); }
+    const r = match (c.callee) {
+      #Inst(i) => {
+        const name = self.c.lw.insts[i].name.clone();
+        let args: Vec<String> = Vec.new();
+        const rr = self.rep(c.ret, span);
+        const res: Option<String> = match (rr) { #Mem => #Some(self.allocaOf(c.ret, span)), _ => #None };
+        if (const #Some(p) = res) { args.push(`ptr noalias ${p}`); }
+        for (const [k, a] of c.args.iter().enumerate()) {
+          const pt = match (c.params.get(k)) { #Some(t) => t.clone(), #None => self.operandTy(a) };
+          if (const #Some(x) = self.arg(a, pt, span)) { args.push(x); }
+        }
+        for (const a of arenas) { args.push(`ptr ${a}`); }
+        if (c.yields) { args.push(`ptr ${match (self.cx.sink) { #Some(y) => y.clone(), #None => String.new() }}`); }
+        match (rr) {
+          #Scalar(s) => {
+            const rc = self.c.ctype(c.ret, span);
+            #Some(self.val(`call ${retTy(s.asStr(), rc.asStr())} @${name}__fly(${args.join(", ")})`))
+          }
+          _ => {
+            self.ins(`call void @${name}__fly(${args.join(", ")})`);
+            res
+          }
+        }
+      }
+      #Builtin(k) => self.routine(k.asStr(), c, arenas),
+      #Value(f, isOnce) => self.callValue(f, isOnce, c, span),
+    };
+    if (c.yields) {
+      const s = self.flag("fly_stopping");
+      const on = self.unlikely(s.asStr());
+      self.stop(span);
+      self.label(on.asStr());
+    }
+    if (c.suspends || c.fails) { self.dynamicExit(); }
+    if (c.suspends) {
+      const u = self.flag("fly_unwinding");
+      const t = self.target();
+      self.jumpIf(u.asStr(), t.asStr());
+    }
+    if (c.fails) {
+      const f = self.failed();
+      const t = self.target();
+      self.jumpIf(f.asStr(), t.asStr());
+    }
+    r
+  }
+
+  // A routine of the library's: the C back end's code for it, in a function of the companion's
+  // given pointers to the arguments' places, which it may change, as the routine does.
+  function routine(self: mut Self, key: str, c: readonly Call, arenas: readonly Vec<String>): Option<String> uses Fail<Diagnostic> {
+    const span = c.span;
+    let places: Vec<String> = Vec.new();
+    let vs: Vec<String> = Vec.new();
+    for (const [k, a] of c.args.iter().enumerate()) {
+      const t = self.operandTy(a);
+      places.push(self.argPlace(a, span));
+      vs.push(if (unitTy(t)) { "((fly_unit)0)".toString() } else { `(*(${self.c.ctype(t, span)}*)a${k})` });
+    }
+    let ptrs = places.clone();
+    let ars: Vec<String> = Vec.new();
+    for (const a of arenas) {
+      ars.push(`((fly_arena*)a${ptrs.len()})`);
+      ptrs.push(a.clone());
+    }
+    if (c.yields) {
+      ars.push(`(*(fly_yield*)a${ptrs.len()})`);
+      ptrs.push(match (self.cx.sink) { #Some(y) => y.clone(), #None => String.new() });
+    }
+    self.c.argPlaces = vs.clone();
+    const expr = self.c.builtin(key, c, vs, ars);
+    self.c.argPlaces = Vec.new();
+    const res = if (unitTy(c.ret)) { "null".toString() } else { self.allocaOf(c.ret, span) };
+    const body = if (unitTy(c.ret)) { `(void)(${expr});` } else { `*(${self.c.ctype(c.ret, span)}*)r = ${expr};` };
+    const g = self.glueFn(ptrs.len(), body.asStr());
+    self.callGlue(g.asStr(), res.asStr(), ptrs);
+    self.result(res, c.ret, span)
+  }
+
+  // What a call gives from where a function of the companion's put it.
+  function result(self: mut Self, at: String, t: readonly Ty, span: Span): Option<String> uses Fail<Diagnostic> {
+    match (self.rep(t, span)) {
+      #Unit => #None,
+      #Scalar(s) => #Some(self.load(s.asStr(), at.asStr())),
+      #Mem => #Some(at),
+    }
+  }
+
+  // A call of a function value, which C made: through a function of the companion's.
+  function callValue(self: mut Self, f: readonly Operand, isOnce: bool, c: readonly Call, span: Span): Option<String> uses Fail<Diagnostic> {
+    const fp = self.argPlace(f, span);
+    let ptrs: Vec<String> = [fp];
+    let ptypes: Vec<String> = ["void*".toString()];
+    let vs: Vec<String> = ["f_.env".toString()];
+    for (const [k, a] of c.args.iter().enumerate()) {
+      const t = self.operandTy(a);
+      const p = self.argPlace(a, span);
+      const pt = match (c.params.get(k)) { #Some(t) => t.clone(), #None => t.clone() };
+      ptypes.push(self.c.ctype(pt, span));
+      vs.push(if (unitTy(t)) { "((fly_unit)0)".toString() } else { `*(${self.c.ctype(t, span)}*)a${ptrs.len()}` });
+      ptrs.push(p);
+    }
+    if (c.yields) {
+      ptypes.push("fly_yield".toString());
+      vs.push(`*(fly_yield*)a${ptrs.len()}`);
+      ptrs.push(match (self.cx.sink) { #Some(y) => y.clone(), #None => String.new() });
+    }
+    const rt = self.c.ctype(c.ret, span);
+    const callExpr = `((${rt} (*)(${ptypes.join(", ")}))f_.fn)(${vs.join(", ")})`;
+    const store = if (unitTy(c.ret)) { "" } else { `*(${rt}*)r = c_; ` };
+    // Calling a `once` closure consumes it: it is dropped once called.
+    const dropIt = if (isOnce) { "if (f_.drop) f_.drop(f_.env); " } else { "" };
+    const body = `fly_fn f_ = *(fly_fn*)a0; ${rt} c_ = ${callExpr}; (void)c_; ${dropIt}${store}`;
+    const g = self.glueFn(ptrs.len(), body.asStr());
+    const res = if (unitTy(c.ret)) { "null".toString() } else { self.allocaOf(c.ret, span) };
+    self.callGlue(g.asStr(), res.asStr(), ptrs);
+    self.result(res, c.ret, span)
+  }
+}
+
+// ---- code run apart ----
+
+impl Lgen {
+  // What code apart, the blocks `bs`, reaches of the function around it.
+  function apart(self: readonly Self, bs: readonly Vec<Block>): Apart {
+    let own: HashSet<usize> = HashSet.new();
+    let u: Uses = { locals: HashSet.new(), captures: HashSet.new() };
+    for (const b of bs) {
+      ownedIn(b, mut own);
+      useBlock(b, mut u);
+    }
+    let locals: Vec<usize> = Vec.new();
+    for (const l of u.locals.iter()) { if (!own.has(l) && !unitTy(self.cx.locals[l].ty)) { locals.push(l); } }
+    locals.sortBy((a, b) => a.cmp(b));
+    let captures: Vec<usize> = Vec.new();
+    for (const k of 0..self.cx.captures.len()) { if (u.captures.has(k)) { captures.push(k); } }
+    let arenas: Vec<u32> = Vec.new();
+    for (const [id, _] of self.cx.arenas.entries()) { arenas.push(id); }
+    arenas.sortBy((a, b) => a.cmp(b));
+    { locals, captures, arenas }
+  }
+
+  function slots(self: readonly Self, ap: readonly Apart): usize { ap.locals.len() + ap.captures.len() + ap.arenas.len() }
+
+  // Stores the pointers code apart reaches into its environment at `env`, from offset `base`.
+  function fillEnv(self: mut Self, ap: readonly Apart, env: str, base: usize): void {
+    let i = base;
+    for (const l of ap.locals) {
+      const at = self.gep(env, i);
+      const a = self.local(l);
+      self.store("ptr", a.asStr(), at.asStr());
+      i += 8;
+    }
+    for (const k of ap.captures) {
+      const at = self.gep(env, i);
+      const a = self.cx.captures[k].clone();
+      self.store("ptr", a.asStr(), at.asStr());
+      i += 8;
+    }
+    for (const id of ap.arenas) {
+      const at = self.gep(env, i);
+      const a = match (self.cx.arenas.get(id)) { #Some(a) => a.clone(), #None => "null".toString() };
+      self.store("ptr", a.asStr(), at.asStr());
+      i += 8;
+    }
+  }
+
+  // A context for code apart, whose environment is at `%env` from offset `base`: the function's
+  // locals, reached through it.
+  function apartCtx(self: readonly Self, ap: readonly Apart, base: usize, ret: Ty, mode: Mode): Lctx {
+    let cx = newCtx(self.cx.locals.clone(), ret, mode);
+    cx.capTys = self.cx.capTys.clone();
+    cx.fnRet = self.cx.fnRet.clone();
+    let i = base;
+    for (const l of ap.locals) {
+      cx.allocas.push(`  %env.l${l}.at = getelementptr inbounds i8, ptr %env, i64 ${i}\n  %env.l${l} = load ptr, ptr %env.l${l}.at\n`);
+      cx.addrs.insert(l, `%env.l${l}`);
+      i += 8;
+    }
+    for (const _ of 0..self.cx.captures.len()) { cx.captures.push("null".toString()); }
+    for (const k of ap.captures) {
+      cx.allocas.push(`  %env.c${k}.at = getelementptr inbounds i8, ptr %env, i64 ${i}\n  %env.c${k} = load ptr, ptr %env.c${k}.at\n`);
+      cx.captures[k] = `%env.c${k}`;
+      i += 8;
+    }
+    for (const id of ap.arenas) {
+      cx.allocas.push(`  %env.a${id}.at = getelementptr inbounds i8, ptr %env, i64 ${i}\n  %env.a${id} = load ptr, ptr %env.a${id}.at\n`);
+      cx.arenas.insert(id, `%env.a${id}`);
+      i += 8;
+    }
+    cx
+  }
+
+  // A pointer loaded, in the entry block, from the environment at `offset`.
+  function envSlot(self: mut Self, name: str, offset: usize): String {
+    self.cx.allocas.push(`  %${name}.at = getelementptr inbounds i8, ptr %env, i64 ${offset}\n  %${name} = load ptr, ptr %${name}.at\n`);
+    `%${name}`
+  }
+
+  // The ways out of the function printed: a failure gives nothing, and `ret` gives what was put in
+  // the function's result.
+  function epilogue(self: mut Self, span: Span): void uses Fail<Diagnostic> {
+    if (self.cx.open) { self.jump("ret"); }
+    self.label("fail");
+    match (self.cx.mode) {
+      #Body => {
+        const r = self.cx.retSlot.clone();
+        self.store("i8", "0", r.asStr());
+      }
+      #Fn => {
+        const t = self.cx.ret.clone();
+        if (!unitTy(t)) {
+          const r = self.cx.retSlot.clone();
+          self.zero(r.asStr(), t, span);
+        }
+      }
+      #Defer => {}
+    }
+    self.jump("ret");
+    self.label("ret");
+    match (self.cx.mode) {
+      #Body => {
+        const r = self.cx.retSlot.clone();
+        const v = self.load("i8", r.asStr());
+        const b = self.val(`trunc i8 ${v} to i1`);
+        self.term(`ret i1 ${b}`);
+      }
+      #Fn => {
+        const t = self.cx.ret.clone();
+        match (self.rep(t, span)) {
+          #Scalar(s) => {
+            const r = self.cx.retSlot.clone();
+            const v = self.load(s.asStr(), r.asStr());
+            self.term(`ret ${s} ${v}`);
+          }
+          _ => self.term("ret void"),
+        }
+      }
+      #Defer => self.term("ret void"),
+    }
+  }
+
+  // Where a function of type `t` keeps its result: the pointer it is given for it, or memory of its own.
+  function resultSlot(self: mut Self, t: readonly Ty, span: Span): void uses Fail<Diagnostic> {
+    match (self.rep(t, span)) {
+      #Mem => { self.cx.retSlot = "%r".toString(); }
+      #Scalar(s) => {
+        self.cx.allocas.push(`  %retv = alloca ${s}, align 16\n`);
+        self.cx.retSlot = "%retv".toString();
+      }
+      #Unit => {}
+    }
+  }
+
+  // The function printed, its text in `self.code`.
+  function define(self: mut Self, head: str): void {
+    const dbg = if (self.cx.sp.len() > 0) { ` !dbg ${self.cx.sp}` } else { String.new() };
+    self.code.push(`${head} #0${dbg} {\nentry:\n${self.cx.allocas}${self.cx.out}}\n\n`);
+  }
+
+  // A hoisted local: the value of a function, or of a `handle`'s part, read once its blocks end.
+  function hoist(self: mut Self, l: usize, span: Span): void uses Fail<Diagnostic> {
+    const t = self.cx.locals[l].ty.clone();
+    if (unitTy(t)) { return; }
+    self.cx.hoisted.insert(l);
+    const s = self.shape(t, span);
+    self.cx.allocas.push(`  %l${l} = alloca [${s.size} x i8], align ${s.align}\n`);
+    self.zero(`%l${l}`.asStr(), t, span);
+  }
+
+  // Copies a local's value to where the function's result goes.
+  function giveLocal(self: mut Self, l: usize, span: Span): void uses Fail<Diagnostic> {
+    const t = self.cx.ret.clone();
+    if (unitTy(t)) { return; }
+    const r = self.cx.retSlot.clone();
+    const a = self.local(l);
+    const n = self.sizeOf(t, span);
+    self.memcpy(r.asStr(), a.asStr(), n);
+  }
+
+  // A `defer`'s body, made a function of its own, called here.
+  function deferCall(self: mut Self, flag: usize, body: readonly Block, span: Span): void uses Fail<Diagnostic> {
+    const key = `${self.fnName}:${flag}`;
+    const [name, ap] = match (self.defers.get(key.asStr())) {
+      #Some(d) => d.clone(),
+      #None => {
+        self.aparts += 1;
+        const name = `defer_${self.aparts}`;
+        const ap = self.apart([body.clone()]);
+        self.defers.insert(key, [name.clone(), ap.clone()]);
+        const cx = self.apartCtx(ap, 0, #Prim(#Void), #Defer);
+        const saved = replace(mut self.cx, cx);
+        self.subprogram(`${self.fnName} defer`.asStr(), name.asStr(), span);
+        self.declareEnv(ap, span);
+        self.block(body, span);
+        self.epilogue(span);
+        self.define(`define internal void @${name}(ptr %env)`.asStr());
+        self.cx = saved;
+        [name, ap]
+      }
+    };
+    const env = self.alloca(max(self.slots(ap), 1) * 8, 8);
+    self.fillEnv(ap, env.asStr(), 0);
+    self.ins(`call void @${name}(ptr ${env})`);
+  }
+
+  // `for` over a generator: the body is made a function the generator calls with each item, and
+  // what stopped the generator early is acted on once it has unwound.
+  function forGen(self: mut Self, l: usize, c: readonly Call, item: usize, body: readonly Block, span: Span): void uses Fail<Diagnostic> {
+    self.aparts += 1;
+    const n = self.aparts;
+    const ap = self.apart([body.clone()]);
+    const k = self.slots(ap);
+    const outerSink = self.cx.sink.clone();
+    // The body.
+    const cx = self.apartCtx(ap, 0, #Prim(#Bool), #Body);
+    const saved = replace(mut self.cx, cx);
+    self.subprogram(`${self.fnName} loop`.asStr(), `body_${n}`.asStr(), span);
+    self.declareEnv(ap, span);
+    self.cx.oret = self.envSlot("env.oret", k * 8);
+    self.cx.code = self.envSlot("env.code", k * 8 + 8);
+    if (outerSink.isSome()) { self.cx.sink = #Some(self.envSlot("env.y", k * 8 + 16)); }
+    self.cx.allocas.push("  %retv = alloca i8, align 1\n  store i8 1, ptr %retv\n");
+    self.cx.retSlot = "%retv".toString();
+    const it = self.cx.locals[item].ty.clone();
+    if (!unitTy(it)) {
+      let own: HashSet<usize> = HashSet.new();
+      ownedIn(body, mut own);
+      if (!own.has(item) && !self.cx.addrs.has(item)) {
+        const s = self.shape(it, span);
+        self.cx.declared.insert(item);
+        self.cx.allocas.push(`  %l${item} = alloca [${s.size} x i8], align ${s.align}\n`);
+      }
+      // The item the generator gives is the body's.
+      const size = self.sizeOf(it, span);
+      const dst = self.local(item);
+      self.cx.prologue = `  call void @llvm.memcpy.p0.p0.i64(ptr ${dst}, ptr %item, i64 ${size}, i1 false)\n`;
+    }
+    self.gen(item);
+    self.block(body, span);
+    self.epilogue(span);
+    self.define(`define internal zeroext i1 @body_${n}(ptr %env, ptr %item)`.asStr());
+    self.cx = saved;
+    // The call, the body its yields go to.
+    const env = self.alloca((k + 3) * 8, 8);
+    self.fillEnv(ap, env.asStr(), 0);
+    const code = self.alloca(4, 4);
+    const oret = match (self.cx.mode) { #Body => self.cx.oret.clone(), _ => if (self.cx.retSlot.len() > 0) { self.cx.retSlot.clone() } else { "null".toString() } };
+    const o1 = self.gep(env.asStr(), k * 8);
+    self.store("ptr", oret.asStr(), o1.asStr());
+    const o2 = self.gep(env.asStr(), k * 8 + 8);
+    self.store("ptr", code.asStr(), o2.asStr());
+    const o3 = self.gep(env.asStr(), k * 8 + 16);
+    self.store("ptr", match (outerSink) { #Some(y) => y, #None => "null".toString() }.asStr(), o3.asStr());
+    self.store("i32", "0", code.asStr());
+    const y = self.alloca(16, 8);
+    self.store("ptr", env.asStr(), y.asStr());
+    const yf = self.gep(y.asStr(), 8);
+    self.store("ptr", `@body_${n}`.asStr(), yf.asStr());
+    const name = match (c.callee) { #Inst(i) => self.c.lw.insts[i].name.clone(), _ => return self.fail(span, "a loop over no generator") };
+    let args: Vec<String> = Vec.new();
+    const res: Option<String> = match (self.rep(c.ret, span)) { #Mem => #Some(self.allocaOf(c.ret, span)), _ => #None };
+    if (const #Some(p) = res) { args.push(`ptr noalias ${p}`); }
+    for (const [i, a] of c.args.iter().enumerate()) {
+      const pt = match (c.params.get(i)) { #Some(t) => t.clone(), #None => self.operandTy(a) };
+      if (const #Some(x) = self.arg(a, pt, span)) { args.push(x); }
+    }
+    for (const r of c.regions) {
+      match (self.cx.arenas.get(r)) {
+        #Some(a) => args.push(`ptr ${a}`),
+        #None => self.fail(span, "a region's arena is out of reach here"),
+      }
+    }
+    args.push(`ptr ${y}`);
+    match (self.rep(c.ret, span)) {
+      #Scalar(s) => { self.val(`call ${s} @${name}__fly(${args.join(", ")})`); }
+      _ => self.ins(`call void @${name}__fly(${args.join(", ")})`),
+    }
+    self.dynamicExit();
+    self.store("i8", "0", "@fly_stopping");
+    const u = self.flag("fly_unwinding");
+    const t1 = self.target();
+    self.jumpIf(u.asStr(), t1.asStr());
+    const f = self.failed();
+    self.jumpIf(f.asStr(), t1.asStr());
+    // A `return` in the body: its value is where the function's goes already.
+    const why = self.load("i32", code.asStr());
+    const returned = self.val(`icmp eq i32 ${why}, 2`);
+    const notReturned = self.unlikely(returned.asStr());
+    match (self.cx.mode) {
+      #Body => self.stopBody(2, span),
+      _ => {
+        self.exitTo(#None, span);
+        self.jump("ret");
+      }
+    }
+    self.label(notReturned.asStr());
+    const stopped = self.val(`icmp eq i32 ${why}, 4`);
+    const on = self.unlikely(stopped.asStr());
+    self.stop(span);
+    self.label(on.asStr());
+  }
+
+  // `Eff.op(args)`: the arguments are put where the handler finds them, and the body suspends
+  // until it is resumed with the result, or unwound.
+  function perform(self: mut Self, d: usize, op: usize, args: readonly Vec<Operand>, r: usize, span: Span): void uses Fail<Diagnostic> {
+    const rt = self.cx.locals[r].ty.clone();
+    let tys: Vec<Ty> = Vec.new();
+    for (const a of args) { tys.push(self.operandTy(a)); }
+    const a = if (tys.len() == 0) { "null".toString() } else {
+      const tt: Ty = #Tuple(tys);
+      const at = self.allocaOf(tt, span);
+      for (const [i, x] of args.iter().enumerate()) {
+        const o = self.offsetOf(tt, `${i}`.asStr(), span);
+        const p = self.gep(at.asStr(), o);
+        self.put(x, p.asStr(), span);
+      }
+      at
+    };
+    const res = self.allocaOf(rt, span);
+    self.ins(`call void @fly_perform(i32 ${d}, i32 ${op}, ptr ${a}, ptr ${res})`);
+    if (!unitTy(rt)) {
+      const n = self.sizeOf(rt, span);
+      const dst = self.local(r);
+      self.memcpy(dst.asStr(), res.asStr(), n);
+    }
+    self.dynamicExit();
+    const u = self.flag("fly_unwinding");
+    const t = self.target();
+    self.jumpIf(u.asStr(), t.asStr());
+  }
+
+  // `k(a)`: the continuation is consumed, and the body resumed with `a`.
+  function resume(self: mut Self, k: readonly Operand, arg: readonly Option<Operand>, r: usize, span: Span): void uses Fail<Diagnostic> {
+    const b = self.cx.locals[r].ty.clone();
+    const kt = self.temp(k, span);
+    const frame = self.load("ptr", kt.asStr());
+    const fa = self.gep(kt.asStr(), 8);
+    const f = self.load("ptr", fa.asStr());
+    let args: Vec<String> = Vec.new();
+    const rr = self.rep(b, span);
+    const res: Option<String> = match (rr) { #Mem => #Some(self.allocaOf(b, span)), _ => #None };
+    if (const #Some(p) = res) { args.push(`ptr noalias ${p}`); }
+    args.push(`ptr ${frame}`);
+    if (const #Some(a) = arg) {
+      const at = self.operandTy(a);
+      if (const #Some(x) = self.arg(a, at, span)) { args.push(x); }
+    }
+    match (rr) {
+      #Scalar(s) => {
+        const bc = self.c.ctype(b, span);
+        const v = self.val(`call ${retTy(s.asStr(), bc.asStr())} ${f}(${args.join(", ")})`);
+        const dst = self.local(r);
+        self.store(s.asStr(), v.asStr(), dst.asStr());
+      }
+      #Mem => {
+        self.ins(`call void ${f}(${args.join(", ")})`);
+        const n = self.sizeOf(b, span);
+        const dst = self.local(r);
+        const src = match (res) { #Some(p) => p, #None => String.new() };
+        self.memcpy(dst.asStr(), src.asStr(), n);
+      }
+      #Unit => self.ins(`call void ${f}(${args.join(", ")})`),
+    }
+    self.dynamicExit();
+    const u = self.flag("fly_unwinding");
+    const t = self.target();
+    self.jumpIf(u.asStr(), t.asStr());
+    const e = self.failed();
+    self.jumpIf(e.asStr(), t.asStr());
+  }
+}
+
+// ---- handlers ----
+
+impl Lgen {
+  // `handle { body } with Eff { arms }`: the body runs on a fiber of its own, in a frame on the
+  // heap that the `handle` and each continuation of it share: the runtime's handler, a count of
+  // what refers to it, the body's result, and what the body and arms reach of the code around.
+  function handle(self: mut Self, h: readonly Handle): void uses Fail<Diagnostic> {
+    const span = h.span;
+    const d = h.effect;
+    const ops = match (self.c.lw.p.defs[d].kind) { #Effect { ops } => ops.len(), _ => 0 };
+    const b = self.cx.locals[h.result].ty.clone();
+    const bs = self.shape(b, span);
+    const br = self.rep(b, span);
+    const bty = match (br) { #Scalar(s) => s.clone(), _ => "void".toString() };
+    const bc = self.c.ctype(b, span);
+    const bret = match (br) { #Scalar(s) => retTy(s.asStr(), bc.asStr()), _ => "void".toString() };
+    const retParam = match (br) { #Mem => "ptr noalias %r, ", _ => "" };
+    self.aparts += 1;
+    const n = self.aparts;
+    let blocks: Vec<Block> = [h.body.clone()];
+    for (const a of h.arms) { blocks.push(a.body.clone()); }
+    const ap = self.apart(blocks);
+    const yields = self.cx.sink.isSome();
+    const resultAt = roundUp(52, bs.align);
+    const base = roundUp(resultAt + bs.size, 8);
+    const ySlot = base + self.slots(ap) * 8;
+    const size = ySlot + if (yields) { 8 } else { 0 };
+    const handlesYield = self.c.lw.p.defs[d].name == "Yield" && self.c.lw.p.modules[self.c.lw.p.defs[d].module].isStd;
+    const outerSink = self.cx.sink.clone();
+    const r = if (match (br) { #Mem => true, _ => false }) { "ptr noalias %r" } else { "" };
+    // The body. Under a handler of `Yield`, its yields perform the operation.
+    if (handlesYield) {
+      self.code.push(`define internal zeroext i1 @hyield_${n}(ptr %env, ptr %item) #0 {\n  %r = alloca i8\n  call void @fly_perform(i32 ${d}, i32 0, ptr %item, ptr %r)\n  %u = load i8, ptr @fly_unwinding\n  %ok = icmp eq i8 %u, 0\n  ret i1 %ok\n}\n\n`);
+    }
+    const cx = self.apartCtx(ap, base, b.clone(), #Fn);
+    const saved = replace(mut self.cx, cx);
+    self.subprogram(`${self.fnName} handled`.asStr(), `hbody_${n}`.asStr(), span);
+    self.declareEnv(ap, span);
+    self.cx.fnRet = b.clone();
+    if (handlesYield) {
+      self.cx.allocas.push(`  %y = alloca [16 x i8], align 8\n  store ptr null, ptr %y\n  %y.fn = getelementptr inbounds i8, ptr %y, i64 8\n  store ptr @hyield_${n}, ptr %y.fn\n`);
+      self.cx.sink = #Some("%y".toString());
+    } else if (yields) { self.cx.sink = #Some(self.envSlot("env.y", ySlot)); }
+    self.resultSlot(b, span);
+    self.hoist(h.value, span);
+    self.block(h.body, span);
+    if (self.cx.open) { self.giveLocal(h.value, span); }
+    self.epilogue(span);
+    self.define(`define internal ${bret} @hbody_${n}(${r}${if (r.len() > 0) { ", " } else { "" }}ptr %env)`.asStr());
+    self.cx = saved;
+    // The arms, one function choosing by the operation performed.
+    const cx2 = self.apartCtx(ap, base, b.clone(), #Fn);
+    const saved2 = replace(mut self.cx, cx2);
+    self.subprogram(`${self.fnName} handler`.asStr(), `harms_${n}`.asStr(), span);
+    self.declareEnv(ap, span);
+    self.cx.fnRet = b.clone();
+    if (yields) { self.cx.sink = #Some(self.envSlot("env.y", ySlot)); }
+    self.resultSlot(b, span);
+    for (const a of h.arms) { self.hoist(a.value, span); }
+    for (const arm of h.arms) {
+      const opAt = self.gep("%env", 4);
+      const op = self.load("i32", opAt.asStr());
+      const is = self.val(`icmp eq i32 ${op}, ${arm.op}`);
+      const yes = self.newLabel("arm");
+      const no = self.newLabel("notarm");
+      self.term(`br i1 ${is}, label %${yes}, label %${no}`);
+      self.label(yes.asStr());
+      // The operation's arguments become the arm's: an abortive arm takes them before the body unwinds.
+      const saveOut = replace(mut self.cx.out, String.new());
+      let tys: Vec<Ty> = Vec.new();
+      for (const p of arm.params) { tys.push(self.cx.locals[p].ty.clone()); }
+      if (tys.len() > 0) {
+        const tt: Ty = #Tuple(tys);
+        const argsAt = self.gep("%env", 8);
+        const args = self.load("ptr", argsAt.asStr());
+        for (const [i, p] of arm.params.iter().enumerate()) {
+          const pt = self.cx.locals[p].ty.clone();
+          if (unitTy(pt)) { continue; }
+          const o = self.offsetOf(tt, `${i}`.asStr(), span);
+          const src = self.gep(args.asStr(), o);
+          const sz = self.sizeOf(pt, span);
+          const dst = self.local(p);
+          self.memcpy(dst.asStr(), src.asStr(), sz);
+        }
+      }
+      match (arm.cont) {
+        #Some(k) => {
+          const rc = self.gep("%env", 48);
+          const refs = self.load("i32", rc.asStr());
+          const more = self.val(`add i32 ${refs}, 1`);
+          self.store("i32", more.asStr(), rc.asStr());
+          const ka = self.local(k);
+          self.store("ptr", "%env", ka.asStr());
+          const k1 = self.gep(ka.asStr(), 8);
+          self.store("ptr", `@hres_${n}_${arm.op}`.asStr(), k1.asStr());
+          const k2 = self.gep(ka.asStr(), 16);
+          self.store("ptr", `@hdrop_${n}`.asStr(), k2.asStr());
+          self.resumer(n, arm.op, k, b.clone(), bs.size, resultAt, span);
+        }
+        #None => self.ins("call void @fly_handle_unwind(ptr %env)"),
+      }
+      self.cx.prologue = replace(mut self.cx.out, saveOut);
+      // The arm's parameters and continuation are its block's, given values as it starts.
+      for (const p of arm.params) { self.gen(p); }
+      if (const #Some(k) = arm.cont) { self.gen(k); }
+      self.cx.reachable = true;
+      self.block(arm.body, span);
+      if (self.cx.open) {
+        self.giveLocal(arm.value, span);
+        self.jump("ret");
+      }
+      self.label(no.asStr());
+    }
+    self.panic("an operation no arm handles");
+    self.epilogue(span);
+    self.define(`define internal ${bret} @harms_${n}(${r}${if (r.len() > 0) { ", " } else { "" }}ptr %env)`.asStr());
+    self.cx = saved2;
+    // Running the body, and what the handler and its continuations share.
+    const callRes = match (br) {
+      #Mem => `call void @hbody_${n}(ptr %res, ptr %f)`,
+      #Scalar(s) => `%v = call ${bret} @hbody_${n}(ptr %f)\n  store ${s} %v, ptr %res`,
+      #Unit => `call void @hbody_${n}(ptr %f)`,
+    };
+    self.code.push(`define internal void @hentry_${n}(ptr %f) #0 {\n  %res = getelementptr inbounds i8, ptr %f, i64 ${resultAt}\n  ${callRes}\n  ret void\n}\n\n`);
+    self.code.push(`define internal void @hrelease_${n}(ptr %f) #0 {\n  %rc = getelementptr inbounds i8, ptr %f, i64 48\n  %refs = load i32, ptr %rc\n  %left = sub i32 %refs, 1\n  store i32 %left, ptr %rc\n  %gone = icmp eq i32 %left, 0\n  br i1 %gone, label %free, label %done\nfree:\n  call void @fly_handle_free(ptr %f)\n  call void @flyg_free(ptr %f)\n  br label %done\ndone:\n  ret void\n}\n\n`);
+    const [takeResult, armsResult, give] = match (br) {
+      #Mem => [
+        `call void @llvm.memcpy.p0.p0.i64(ptr %r, ptr %res, i64 ${bs.size}, i1 false)\n  call void @llvm.memset.p0.i64(ptr %res, i8 0, i64 ${bs.size}, i1 false)`,
+        `call void @harms_${n}(ptr %r, ptr %f)`, `call void @hrelease_${n}(ptr %f)\n  ret void`,
+      ],
+      #Scalar(s) => [
+        `%v1 = load ${s}, ptr %res\n  store ${s} ${zeroOf(s.asStr())}, ptr %res`,
+        `%v2 = call ${bret} @harms_${n}(ptr %f)`, `%v = phi ${s} [ %v1, %done ], [ %v2, %arms ]\n  call void @hrelease_${n}(ptr %f)\n  ret ${s} %v`,
+      ],
+      #Unit => [String.new(), `call void @harms_${n}(ptr %f)`, `call void @hrelease_${n}(ptr %f)\n  ret void`],
+    };
+    self.code.push(`define internal ${bret} @hrun_${n}(${r}${if (r.len() > 0) { ", " } else { "" }}ptr %f) #0 {\n  %res = getelementptr inbounds i8, ptr %f, i64 ${resultAt}\n  %isdone = call zeroext i1 @fly_handle_done(ptr %f)\n  br i1 %isdone, label %done, label %arms\ndone:\n  ${takeResult}\n  br label %out\narms:\n  ${armsResult}\n  br label %out\nout:\n  ${give}\n}\n\n`);
+    self.code.push(`define internal void @hdrop_${n}(ptr %f) #0 {\n  call void @fly_handle_unwind(ptr %f)\n  call void @hrelease_${n}(ptr %f)\n  ret void\n}\n\n`);
+    // The handler, started here.
+    const f = self.val(`call ptr @fly_alloc(i64 ${size})`);
+    self.store("i32", `${d}`.asStr(), f.asStr());
+    const rc = self.gep(f.asStr(), 48);
+    self.store("i32", "1", rc.asStr());
+    self.fillEnv(ap, f.asStr(), base);
+    if (yields) {
+      const ya = self.gep(f.asStr(), ySlot);
+      self.store("ptr", match (outerSink) { #Some(y) => y, #None => "null".toString() }.asStr(), ya.asStr());
+    }
+    self.ins(`call void @fly_handle_start(ptr ${f}, ptr @hentry_${n}, ptr ${f})`);
+    const dst = self.local(h.result);
+    match (br) {
+      #Mem => self.ins(`call void @hrun_${n}(ptr ${dst}, ptr ${f})`),
+      #Scalar(s) => {
+        const v = self.val(`call ${bret} @hrun_${n}(ptr ${f})`);
+        self.store(s.asStr(), v.asStr(), dst.asStr());
+      }
+      #Unit => self.ins(`call void @hrun_${n}(ptr ${f})`),
+    }
+    self.dynamicExit();
+    const u = self.flag("fly_unwinding");
+    const t = self.target();
+    self.jumpIf(u.asStr(), t.asStr());
+    const e = self.failed();
+    self.jumpIf(e.asStr(), t.asStr());
+  }
+
+  // How the continuation of operation `op` resumes the body with its result, made once.
+  function resumer(self: mut Self, n: usize, op: usize, k: usize, b: Ty, bsize: usize, resultAt: usize, span: Span): void uses Fail<Diagnostic> {
+    const name = `hres_${n}_${op}`;
+    const kt = self.cx.locals[k].ty.clone();
+    const a = typeArg(kt, 0);
+    const br = self.rep(b, span);
+    const bc = self.c.ctype(b, span);
+    const bty = match (br) { #Scalar(s) => retTy(s.asStr(), bc.asStr()), _ => "void".toString() };
+    let ps: Vec<String> = Vec.new();
+    if (const #Mem = br) { ps.push("ptr noalias %r".toString()); }
+    ps.push("ptr %f".toString());
+    let store = String.new();
+    match (self.rep(a, span)) {
+      #Unit => {}
+      #Scalar(s) => {
+        const ac = self.c.ctype(a, span);
+        ps.push(`${s}${ext(ac.asStr())} %a`);
+        store = `  %at = getelementptr inbounds i8, ptr %f, i64 16\n  %to = load ptr, ptr %at\n  store ${s} %a, ptr %to\n`;
+      }
+      #Mem => {
+        ps.push("ptr %a".toString());
+        const sz = self.sizeOf(a, span);
+        store = `  %at = getelementptr inbounds i8, ptr %f, i64 16\n  %to = load ptr, ptr %at\n  call void @llvm.memcpy.p0.p0.i64(ptr %to, ptr %a, i64 ${sz}, i1 false)\n`;
+      }
+    }
+    const run = match (br) {
+      #Mem => `  call void @hrun_${n}(ptr %r, ptr %f)\n  ret void\n`,
+      #Scalar(s) => `  %v = call ${bty} @hrun_${n}(ptr %f)\n  ret ${s} %v\n`,
+      #Unit => `  call void @hrun_${n}(ptr %f)\n  ret void\n`,
+    };
+    self.code.push(`define internal ${bty} @${name}(${ps.join(", ")}) #0 {\n${store}  call void @fly_handle_resume(ptr %f)\n${run}}\n\n`);
+  }
+}
+
+// ---- closures and functions ----
+
+impl Lgen {
+  // Where closure `k`'s environment keeps each capture — a value it holds, or a pointer to what it
+  // borrows — and each region's arena; its size and alignment.
+  function envLayout(self: mut Self, k: usize, span: Span): [Vec<usize>, usize, usize] uses Fail<Diagnostic> {
+    const f = self.c.lw.closures[k].clone();
+    let pk: Packer = { at: 0, align: 1 };
+    let offsets: Vec<usize> = Vec.new();
+    for (const [_, t, byValue] of f.captures) {
+      if (byValue) {
+        const s = self.shape(t, span);
+        offsets.push(pack(mut pk, s.size, s.align));
+      } else { offsets.push(pack(mut pk, 8, 8)); }
+    }
+    for (const _ of f.regions) { offsets.push(pack(mut pk, 8, 8)); }
+    if (offsets.len() == 0) { pack(mut pk, 1, 1); }
+    [offsets, roundUp(pk.at, pk.align), pk.align]
+  }
+
+  // A closure, put at `dest`: an environment holding values is the closure's own, on the heap,
+  // dropped with it; one that only borrows lives as long as the function around it, which the
+  // closure cannot outlive if it is only lent.
+  function closure(self: mut Self, k: usize, caps: readonly Vec<Capture>, lent: bool, dest: str, span: Span): void uses Fail<Diagnostic> {
+    const f = self.c.lw.closures[k].clone();
+    const [offsets, size, align] = self.envLayout(k, span);
+    self.declare(`flyg_lam_${k}`.asStr(), `declare void @flyg_lam_${k}()`.asStr());
+    const held = caps.iter().some((c) => match (c) { #Value(_) => true, _ => false });
+    let arenas: Vec<[usize, String]> = Vec.new();
+    for (const [i, r] of f.regions.iter().enumerate()) {
+      if (const #Some(a) = self.cx.arenas.get(r)) { arenas.push([caps.len() + i, a.clone()]); }
+    }
+    self.memzero(dest, 3 * self.ptr);
+    const fa = self.gep(dest, 2 * self.ptr);
+    self.store("ptr", `@flyg_lam_${k}`.asStr(), fa.asStr());
+    if (caps.len() == 0 && arenas.len() == 0) { return; }
+    const env = if (held || !lent) {
+      self.declare(`flyg_envdrop_${k}`.asStr(), `declare void @flyg_envdrop_${k}(ptr)`.asStr());
+      const e = self.val(`call ptr @fly_alloc(i64 ${size})`);
+      const da = self.gep(dest, self.ptr);
+      self.store("ptr", `@flyg_envdrop_${k}`.asStr(), da.asStr());
+      e
+    } else { self.alloca(size, align) };
+    for (const [i, c] of caps.iter().enumerate()) {
+      const at = self.gep(env.asStr(), offsets[i]);
+      match (c) {
+        #Value(op) => self.put(op, at.asStr(), span),
+        #Ref(_, p) => {
+          const a = self.addr(p, span);
+          self.store("ptr", a.asStr(), at.asStr());
+        }
+      }
+    }
+    for (const [i, a] of arenas) {
+      const at = self.gep(env.asStr(), offsets[i]);
+      self.store("ptr", a.asStr(), at.asStr());
+    }
+    self.store("ptr", env.asStr(), dest);
+  }
+
+  // A function instance as a value: a closure with no environment, whose code is C's, calling it.
+  function fnValue(self: mut Self, i: usize, span: Span): String uses Fail<Diagnostic> {
+    const name = `flyg_fnv_${i}`;
+    if (self.declared.has(name.asStr())) { return name; }
+    const fid = self.c.lw.insts[i].fid;
+    const args = self.c.lw.insts[i].args.clone();
+    const params = self.c.lw.paramTys(fid, args.clone());
+    let pcs: Vec<String> = Vec.new();
+    let names: Vec<String> = Vec.new();
+    for (const [k, t] of params.iter().enumerate()) {
+      pcs.push(`${self.c.ctype(t, span)} a${k}`);
+      names.push(`a${k}`);
+    }
+    const rt = self.c.ctype(self.c.lw.concreteRet(fid, args), span);
+    const sep = if (pcs.len() > 0) { ", " } else { "" };
+    self.glueCode.push(`${rt} ${name}(void* env${sep}${pcs.join(", ")}) { (void)env; return ${self.c.lw.insts[i].name}(${names.join(", ")}); }\n`);
+    self.declare(name.asStr(), `declare void @${name}()`.asStr());
+    name
+  }
+
+  // The C function of the companion's that C calls for a function of this module: named
+  // `wrapper`, taking what the C back end's function would, and calling `name__fly`.
+  function cWrapper(self: mut Self, name: str, wrapper: str, isStatic: bool, env: bool, params: readonly Vec<Ty>, ret: readonly Ty, regions: readonly Vec<u32>, yields: bool, span: Span): void uses Fail<Diagnostic> {
+    let decls: Vec<String> = Vec.new();
+    let abis: Vec<String> = Vec.new();
+    let args: Vec<String> = Vec.new();
+    const rr = self.rep(ret, span);
+    if (const #Mem = rr) {
+      abis.push("void*".toString());
+      args.push("&r_".toString());
+    }
+    if (env) {
+      decls.push("void* env".toString());
+      abis.push("void*".toString());
+      args.push("env".toString());
+    }
+    for (const [k, t] of params.iter().enumerate()) {
+      decls.push(`${self.c.ctype(t, span)} p${k}`);
+      match (self.rep(t, span)) {
+        #Unit => {}
+        #Scalar(_) => {
+          abis.push(self.cAbi(t, span));
+          args.push(`p${k}`);
+        }
+        #Mem => {
+          abis.push("void*".toString());
+          args.push(`&p${k}`);
+        }
+      }
+    }
+    for (const id of regions) {
+      decls.push(`fly_arena* ar_${id}`);
+      abis.push("fly_arena*".toString());
+      args.push(`ar_${id}`);
+    }
+    if (yields) {
+      decls.push("fly_yield y_".toString());
+      abis.push("void*".toString());
+      args.push("&y_".toString());
+    }
+    const rt = self.c.ctype(ret, span);
+    const abiRet = match (rr) { #Scalar(_) => self.cAbi(ret, span), _ => "void".toString() };
+    const call = `${name}__fly(${args.join(", ")})`;
+    const body = match (rr) {
+      #Mem => `${rt} r_; ${call}; return r_;`,
+      #Scalar(_) => `return (${rt})${call};`,
+      #Unit => `${call}; return 0;`,
+    };
+    const ps = if (decls.len() == 0) { "void".toString() } else { decls.join(", ") };
+    const linkage = if (isStatic) { "static " } else { "" };
+    self.c.protos.push(`${abiRet} ${name}__fly(${if (abis.len() == 0) { "void".toString() } else { abis.join(", ") }});\n${linkage}${rt} ${wrapper}(${ps});\n`);
+    self.glueCode.push(`${linkage}${rt} ${wrapper}(${ps}) { ${body} }\n`);
+  }
+
+  // The parameters of a function of this module, named; and the locals of those passed by pointer,
+  // which are where their values are.
+  function params(self: mut Self, f: readonly Func, out: mut Vec<String>, span: Span): void uses Fail<Diagnostic> {
+    for (const [k, l] of f.params.iter().enumerate()) {
+      const t = f.locals[l].ty.clone();
+      match (self.rep(t, span)) {
+        #Unit => {}
+        #Scalar(s) => {
+          // A scalar is kept in memory of its own, given its value as the function starts.
+          const c = self.c.ctype(t, span);
+          out.push(`${s}${ext(c.asStr())} %p${k}`);
+          const sh = self.shape(t, span);
+          self.cx.allocas.push(`  %l${l} = alloca [${sh.size} x i8], align ${sh.align}\n  store ${s} %p${k}, ptr %l${l}\n`);
+          self.cx.addrs.insert(l, `%l${l}`);
+          self.declareVar(l, `%l${l}`.asStr(), span);
+        }
+        #Mem => {
+          out.push(`ptr noalias %p${k}`);
+          self.cx.addrs.insert(l, `%p${k}`);
+          self.declareVar(l, `%p${k}`.asStr(), span);
+        }
+      }
+    }
+    // A function that performs `Region<R>` is given R's arena.
+    for (const id of f.regions) {
+      out.push(`ptr %ar${id}`);
+      self.cx.arenas.insert(id, `%ar${id}`);
+    }
+    // A generator function is given what its yields go to.
+    if (f.yields.isSome()) {
+      out.push("ptr %y".toString());
+      self.cx.sink = #Some("%y".toString());
+    }
+  }
+
+  // A function's body: its value hoisted, its parameters given, its blocks, its ways out.
+  function body(self: mut Self, f: readonly Func): void uses Fail<Diagnostic> {
+    self.resultSlot(f.ret, f.span);
+    self.hoist(f.value, f.span);
+    for (const l of f.params) { self.gen(l); }
+    self.block(f.body, f.span);
+    if (self.cx.open) { self.giveLocal(f.value, f.span); }
+    self.epilogue(f.span);
+  }
+
+  // The return type and first parameter of a function of this module giving a `t`.
+  function retDecl(self: mut Self, t: readonly Ty, ps: mut Vec<String>, span: Span): String uses Fail<Diagnostic> {
+    match (self.rep(t, span)) {
+      #Mem => {
+        ps.push("ptr noalias %r".toString());
+        "void".toString()
+      }
+      #Scalar(s) => {
+        const c = self.c.ctype(t, span);
+        retTy(s.asStr(), c.asStr())
+      }
+      #Unit => "void".toString(),
+    }
+  }
+
+  // Function instance `i`, lowered as `f`.
+  function emit(self: mut Self, i: usize, f: Func): void uses Fail<Diagnostic> {
+    self.fnName = f.name.clone();
+    self.cx = newCtx(f.locals.clone(), f.ret.clone(), #Fn);
+    const shown = self.c.lw.p.fns[self.c.lw.insts[i].fid].name.clone();
+    self.subprogram(shown.asStr(), `${f.name}__fly`.asStr(), f.span);
+    let ps: Vec<String> = Vec.new();
+    const rt = self.retDecl(f.ret, mut ps, f.span);
+    self.params(f, mut ps, f.span);
+    self.body(f);
+    self.define(`define ${rt} @${f.name}__fly(${ps.join(", ")})`.asStr());
+    let ptys: Vec<Ty> = Vec.new();
+    for (const l of f.params) { ptys.push(f.locals[l].ty.clone()); }
+    self.cWrapper(f.name.asStr(), f.name.asStr(), true, false, ptys, f.ret, f.regions, f.yields.isSome(), f.span);
+  }
+
+  // Closure `k`: a function of its environment, which holds the values it holds and pointers to
+  // what it borrows; C's function for it, which a function value's code is; and C's dropping its
+  // environment.
+  function emitClosure(self: mut Self, k: usize): void uses Fail<Diagnostic> {
+    const f = self.c.lw.closures[k].clone();
+    self.fnName = f.name.clone();
+    self.module = f.module;
+    const [offsets, _, _] = self.envLayout(k, f.span);
+    self.cx = newCtx(f.locals.clone(), f.ret.clone(), #Fn);
+    self.subprogram(f.name.asStr(), `lam_${k}__fly`.asStr(), f.span);
+    let drops = String.new();
+    for (const [i, [_, t, byValue]] of f.captures.iter().enumerate()) {
+      const o = offsets[i];
+      self.cx.allocas.push(`  %cap${i}.at = getelementptr inbounds i8, ptr %env, i64 ${o}\n`);
+      if (byValue) {
+        self.cx.captures.push(`%cap${i}.at`);
+        if (self.needsDrop(t)) { drops.push(`${self.c.dropFn(t, f.span)}((${self.c.ctype(t, f.span)}*)((char*)p + ${o})); `); }
+      } else {
+        self.cx.allocas.push(`  %cap${i} = load ptr, ptr %cap${i}.at\n`);
+        self.cx.captures.push(`%cap${i}`);
+      }
+      self.cx.capTys.push(t.clone());
+    }
+    for (const [j, r] of f.regions.iter().enumerate()) {
+      const o = offsets[f.captures.len() + j];
+      self.cx.allocas.push(`  %envar${r}.at = getelementptr inbounds i8, ptr %env, i64 ${o}\n  %envar${r} = load ptr, ptr %envar${r}.at\n`);
+      self.cx.arenas.insert(r, `%envar${r}`);
+    }
+    self.glueCode.push(`void flyg_envdrop_${k}(void* p) { ${drops}free(p); }\n`);
+    let ps: Vec<String> = Vec.new();
+    const rt = self.retDecl(f.ret, mut ps, f.span);
+    ps.push("ptr %env".toString());
+    // A closure takes its parameters, and what its yields go to, as a function does; its regions'
+    // arenas are in its environment.
+    let shown = f.clone();
+    shown.regions = Vec.new();
+    self.params(shown, mut ps, f.span);
+    self.body(f);
+    const name = `lam_${k}`;
+    self.define(`define ${rt} @${name}__fly(${ps.join(", ")})`.asStr());
+    let ptys: Vec<Ty> = Vec.new();
+    for (const l of f.params) { ptys.push(f.locals[l].ty.clone()); }
+    self.cWrapper(name.asStr(), `flyg_lam_${k}`.asStr(), false, true, ptys, f.ret, Vec.new(), f.yields.isSome(), f.span);
+  }
+
+  // The LLVM module and the companion C file for a checked program whose entry module is `entry`.
+  export function program(self: mut Self, entry: usize, runtime: str, freestanding: bool): [String, String] uses Fail<#Failed(String)> {
+    const ent = self.c.lw.entry(entry, freestanding);
+    const uncaught = self.c.uncaught(ent, entry);
+    let next: usize = 0;
+    while (next < self.c.lw.insts.len() || self.closuresDone < self.c.lw.closures.len()) {
+      if (next < self.c.lw.insts.len()) {
+        const i = next;
+        next += 1;
+        const r = try {
+          match (self.c.lw.func(i)) {
+            #Some(f) => {
+              self.module = f.module;
+              self.c.module = f.module;
+              self.emit(i, f);
+            }
+            #None => {}
+          }
+          #Ok
+        } catch (d) { #Err(d) };
+        if (const #Err(d) = r) { throw self.c.failed(d, self.c.lw.module) }
+      } else {
+        const k = self.closuresDone;
+        self.closuresDone += 1;
+        const r = try { self.emitClosure(k); #Ok } catch (d) { #Err(d) };
+        if (const #Err(d) = r) { throw self.c.failed(d, self.module) }
+      }
+    }
+    let glue = String.new();
+    glue.push("\n// ---- what the LLVM module calls, and checks of what it assumes ----\n");
+    glue.push(GLUE);
+    glue.push(self.glueCode.asStr());
+    glue.push(self.asserts.asStr());
+    self.c.glue = glue;
+    const cfile = self.c.assemble(ent, uncaught, runtime);
+    let ll = "; The program's code, as LLVM IR: linked with its companion C file before it is optimized.\n\n".toString();
+    ll.push(DECLS);
+    for (const [_, d] of self.declared.entries()) {
+      ll.push(d.asStr());
+      ll.push("\n");
+    }
+    ll.push("\n");
+    ll.push(self.globals.asStr());
+    ll.push("\n");
+    ll.push(self.code.asStr());
+    ll.push("!0 = !{!\"branch_weights\", i32 1, i32 2000}\n");
+    // What the target is, the build adds: the C compiler's, so the two inline into each other.
+    ll.push("attributes #0 = { nounwind }\n");
+    if (self.cu.len() > 0) {
+      const a = self.node("!{i32 7, !\"Dwarf Version\", i32 5}");
+      const b = self.node("!{i32 2, !\"Debug Info Version\", i32 3}");
+      ll.push(`!llvm.dbg.cu = !{${self.cu}}\n!llvm.module.flags = !{${a}, ${b}}\n`);
+      ll.push(self.meta.asStr());
+    }
+    [ll, cfile]
+  }
+}
+
+// What every module declares: the runtime's routines and flags it calls and reads directly.
+const DECLS: str = "declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1)
+declare void @llvm.memset.p0.i64(ptr, i8, i64, i1)
+declare void @fly_out_of_bounds(i64, i64) noreturn
+declare void @fly_overflow(i128, ptr) noreturn
+declare i128 @fly_add128(i128, i128)
+declare i128 @fly_sub128(i128, i128)
+declare i128 @fly_mul128(i128, i128)
+declare void @fly_div_zero() noreturn
+declare void @fly_panic(ptr) noreturn
+declare void @fly_err_box(i32, ptr, i64)
+declare i32 @fly_err_tag()
+declare void @fly_err_take(ptr, i64)
+declare ptr @fly_alloc(i64)
+declare void @fly_arena_free(ptr)
+declare void @fly_perform(i32, i32, ptr, ptr)
+declare void @fly_handle_start(ptr, ptr, ptr)
+declare void @fly_handle_resume(ptr)
+declare zeroext i1 @fly_handle_done(ptr)
+declare void @fly_handle_unwind(ptr)
+declare void @fly_handle_free(ptr)
+declare void @flyg_cleanup_begin(ptr)
+declare void @flyg_cleanup_end(ptr)
+declare void @flyg_free(ptr)
+@fly_err = external global ptr
+@fly_unwinding = external global i8
+@fly_stopping = external global i8
+";
+
+// The companion's own functions, for what the runtime takes or gives as a struct; and checks of the
+// runtime's layouts the module relies on.
+const GLUE: str = "void flyg_cleanup_begin(fly_unwind_state* s) { *s = fly_cleanup_begin(); }
+void flyg_cleanup_end(fly_unwind_state* s) { fly_cleanup_end(*s); }
+void flyg_free(void* p) { free(p); }
+_Static_assert(sizeof(fly_unwind_state) <= 16 && _Alignof(fly_unwind_state) <= 8, \"fly_unwind_state\");
+_Static_assert(sizeof(fly_handler) == 48 && __builtin_offsetof(fly_handler, op) == 4 && __builtin_offsetof(fly_handler, args) == 8 && __builtin_offsetof(fly_handler, result) == 16, \"fly_handler\");
+_Static_assert(sizeof(fly_str) == 16 && sizeof(fly_slice) == 16 && __builtin_offsetof(fly_str, len) == 8 && __builtin_offsetof(fly_slice, len) == 8, \"views\");
+_Static_assert(sizeof(fly_String) == 24 && sizeof(fly_vec) == 24 && __builtin_offsetof(fly_String, len) == 8 && __builtin_offsetof(fly_vec, len) == 8, \"lists\");
+_Static_assert(sizeof(fly_fn) == 24 && __builtin_offsetof(fly_fn, drop) == 8 && __builtin_offsetof(fly_fn, fn) == 16, \"fly_fn\");
+_Static_assert(sizeof(fly_cont) == 24 && __builtin_offsetof(fly_cont, resume) == 8 && __builtin_offsetof(fly_cont, drop) == 16, \"fly_cont\");
+_Static_assert(sizeof(fly_yield) == 16 && __builtin_offsetof(fly_yield, fn) == 8, \"fly_yield\");
+_Static_assert(sizeof(fly_gen) == 24 && sizeof(fly_File) == 24 && sizeof(fly_socket) == 24 && sizeof(fly_map) == 48, \"runtime structs\");
+_Static_assert(sizeof(fly_arena) == 8 && sizeof(fly_chan) == 4 && sizeof(fly_Hasher) == 8 && _Alignof(fly_i128) == 16, \"runtime scalars\");
+";
+
+// The LLVM module and companion C file for a checked program.
+export function llvmProgram(p: Prog, entry: usize, runtime: str, freestanding: bool): [String, String] uses Fail<#Failed(String)> {
+  let g = Lgen {
+    c: newCgen(p), ptr: 8, shapes: HashMap.new(), glue: HashMap.new(), glueCode: String.new(), asserts: String.new(),
+    declared: HashMap.new(), globals: String.new(), strs: HashMap.new(), code: String.new(), closuresDone: 0, aparts: 0,
+    defers: HashMap.new(), fnName: String.new(), module: 0, cx: newCtx(Vec.new(), #Prim(#Void), #Fn),
+    meta: String.new(), metaN: 0, files: HashMap.new(), lineStarts: HashMap.new(), locs: HashMap.new(), cu: String.new(),
+    diTypes: HashMap.new(),
+  };
+  g.program(entry, runtime, freestanding)
+}
+
+// ---- debug information ----
+
+impl Lgen {
+  // A metadata node, numbered.
+  function node(self: mut Self, text: str): String {
+    self.metaN += 1;
+    const n = `!${self.metaN}`;
+    self.meta.push(`${n} = ${text}\n`);
+    n
+  }
+
+  // The file of module `m`.
+  function file(self: mut Self, m: usize): String {
+    if (const #Some(f) = self.files.get(m)) { return f.clone(); }
+    const path = self.c.lw.p.modules[m].file.clone();
+    const slash = match (path.asStr().lastIndexOf("/")) { #Some(i) => i, #None => 0 };
+    const [dir, name] = if (slash == 0) { [".".toString(), path.clone()] } else { [path.asStr().slice(0, slash).toString(), path.asStr().slice(slash + 1, path.len()).toString()] };
+    const f = self.node(`!DIFile(filename: "${llquote(name.asStr())}", directory: "${llquote(dir.asStr())}")`.asStr());
+    self.files.insert(m, f.clone());
+    f
+  }
+
+  // The line and column of offset `at` in module `m`'s source, from 1.
+  function lineCol(self: mut Self, m: usize, at: usize): [usize, usize] {
+    if (!self.lineStarts.has(m)) {
+      let starts: Vec<usize> = [0];
+      const src = self.c.lw.p.modules[m].source.asStr().asBytes();
+      for (const i of 0..src.len()) { if (src[i] == b'\n') { starts.push(i + 1); } }
+      self.lineStarts.insert(m, starts);
+    }
+    const starts = match (self.lineStarts.get(m)) { #Some(s) => s, #None => return [1, 1] };
+    let lo: usize = 0;
+    let hi = starts.len();
+    while (hi - lo > 1) {
+      const mid = (lo + hi) / 2;
+      if (starts[mid] <= at) { lo = mid; } else { hi = mid; }
+    }
+    [lo + 1, at - starts[lo] + 1]
+  }
+
+  // The debug information of a function printed next, named `name` in the source, starting at `span`.
+  function subprogram(self: mut Self, name: str, linkage: str, span: Span): void {
+    const m = self.module;
+    if (self.cu.len() == 0) {
+      const f0 = self.file(m);
+      self.cu = self.node(`distinct !DICompileUnit(language: DW_LANG_C11, file: ${f0}, producer: "Flyscript", isOptimized: true, runtimeVersion: 0, emissionKind: FullDebug)`.asStr());
+    }
+    const f = self.file(m);
+    const s = self.c.lw.p.sourceSpan(span);
+    const [line, _] = self.lineCol(m, s.start);
+    const ty = self.node("!DISubroutineType(types: !{null})");
+    const sp = self.node(`distinct !DISubprogram(name: "${llquote(name)}", linkageName: "${linkage}", scope: ${f}, file: ${f}, line: ${line}, type: ${ty}, scopeLine: ${line}, spFlags: DISPFlagDefinition | DISPFlagOptimized, unit: ${self.cu})`.asStr());
+    self.cx.sp = sp;
+    self.cx.loc = String.new();
+    self.at(span);
+  }
+
+  // The code printed next comes from `span`.
+  function at(self: mut Self, span: Span): void {
+    if (self.cx.sp.len() == 0) { return; }
+    const s = self.c.lw.p.sourceSpan(span);
+    if (s.start == 0 && s.end == 0 && self.cx.loc.len() > 0) { return; }
+    const [line, col] = self.lineCol(self.module, s.start);
+    const key = `${self.cx.sp}:${line}:${col}`;
+    const loc = match (self.locs.get(key.asStr())) {
+      #Some(l) => l.clone(),
+      #None => {
+        const l = self.node(`!DILocation(line: ${line}, column: ${col}, scope: ${self.cx.sp})`.asStr());
+        self.locs.insert(key, l.clone());
+        l
+      }
+    };
+    self.cx.loc = loc;
+  }
+}
+
+impl Lgen {
+  // A metadata node's number, its text given later: for a type that refers to itself.
+  function reserve(self: mut Self): String {
+    self.metaN += 1;
+    `!${self.metaN}`
+  }
+
+  function basicTy(self: mut Self, name: str, bits: usize, encoding: str): String {
+    const key = `basic:${name}`;
+    if (const #Some(n) = self.diTypes.get(key.asStr())) { return n.clone(); }
+    const n = self.node(`!DIBasicType(name: "${name}", size: ${bits}, encoding: ${encoding})`.asStr());
+    self.diTypes.insert(key, n.clone());
+    n
+  }
+
+  function pointerTo(self: mut Self, base: str): String {
+    const b = if (base.len() == 0) { "null" } else { base };
+    self.node(`!DIDerivedType(tag: DW_TAG_pointer_type, baseType: ${b}, size: ${self.ptr * 8})`.asStr())
+  }
+
+  function member(self: mut Self, scope: str, name: str, ty: str, bits: usize, offset: usize): String {
+    self.node(`!DIDerivedType(tag: DW_TAG_member, name: "${llquote(name)}", scope: ${scope}, baseType: ${ty}, size: ${bits}, offset: ${offset * 8})`.asStr())
+  }
+
+  // The debug information's type of `t`: what a debugger shows a value of it as.
+  function diType(self: mut Self, t: readonly Ty, span: Span): String uses Fail<Diagnostic> {
+    const key = ckey(t);
+    if (const #Some(n) = self.diTypes.get(key.asStr())) { return n.clone(); }
+    const c = self.c.ctype(t, span);
+    const r = self.rep(t, span);
+    if (const #Scalar(sc) = r) {
+      const n = match (primOf(t)) {
+        #Some(#Bool) => self.basicTy("bool", 8, "DW_ATE_boolean"),
+        #Some(#F32) => self.basicTy("f32", 32, "DW_ATE_float"),
+        #Some(#F64) => self.basicTy("f64", 64, "DW_ATE_float"),
+        #Some(p) if isInt(p) => self.basicTy(primName(p), bits(p), if (signedPrim(p)) { "DW_ATE_signed" } else { "DW_ATE_unsigned" }),
+        _ => if (sc == "ptr") {
+          const inner: Option<Ty> = match (t) {
+            #Borrow(_, x) => #Some(x.get().clone()),
+            #Named(_, args) => match (args.last()) { #Some(#Ty(x)) => #Some(x.clone()), _ => #None },
+            _ => #None,
+          };
+          // Reserved first: what a pointer points at may point back.
+          const n = self.reserve();
+          self.diTypes.insert(key.clone(), n.clone());
+          const base = match (inner) { #Some(x) => self.diType(x, span), #None => String.new() };
+          const b = if (base.len() == 0) { "null".toString() } else { base };
+          self.meta.push(`${n} = !DIDerivedType(tag: DW_TAG_pointer_type, baseType: ${b}, size: ${self.ptr * 8})\n`);
+          return n;
+        } else {
+          const width = self.sizeOf(t, span) * 8;
+          self.basicTy(c.asStr(), width, "DW_ATE_signed")
+        },
+      };
+      self.diTypes.insert(key, n.clone());
+      return n;
+    }
+    // An aggregate: a struct of its parts, reserved first, as it may hold a pointer to itself.
+    const sh = self.shape(t, span);
+    const n = self.reserve();
+    self.diTypes.insert(key.clone(), n.clone());
+    const name = llquote(self.c.lw.p.show(t).asStr());
+    let members: Vec<String> = Vec.new();
+    const u64t = self.basicTy("usize", 64, "DW_ATE_unsigned");
+    if (c == "fly_str" || c == "fly_String" || c == "fly_slice" || c == "fly_vec") {
+      const elem: Ty = match (t) { #Slice(x) => x.get().clone(), #Named(_, args) => match (args.first()) { #Some(#Ty(x)) => x.clone(), _ => #Prim(#U8) }, _ => #Prim(#U8) };
+      const et = if (c == "fly_str" || c == "fly_String") { self.basicTy("u8", 8, "DW_ATE_unsigned_char") } else { self.diType(elem, span) };
+      const pt = self.pointerTo(et.asStr());
+      members.push(self.member(n.asStr(), "ptr", pt.asStr(), 64, 0));
+      members.push(self.member(n.asStr(), "len", u64t.asStr(), 64, 8));
+      if (c == "fly_String" || c == "fly_vec") { members.push(self.member(n.asStr(), "cap", u64t.asStr(), 64, 16)); }
+    } else if (self.c.lw.tagged(t) && cLayout(c.asStr(), self.ptr).isNone()) {
+      if (self.c.liveByte(t)) {
+        const b = self.basicTy("bool", 8, "DW_ATE_boolean");
+        members.push(self.member(n.asStr(), "live", b.asStr(), 8, 0));
+      }
+      // The tag, shown by its name.
+      let names: Vec<String> = Vec.new();
+      for (const [tag, _] of self.c.lw.tagsOf(t)) {
+        const id = self.c.tagId(tag.asStr());
+        names.push(self.node(`!DIEnumerator(name: "${llquote(tag.asStr())}", value: ${id}, isUnsigned: true)`.asStr()));
+      }
+      const u32t = self.basicTy("u32", 32, "DW_ATE_unsigned");
+      const tagT = self.node(`!DICompositeType(tag: DW_TAG_enumeration_type, baseType: ${u32t}, size: 32, elements: !{${names.join(", ")}})`.asStr());
+      const to = self.offsetOf(t, "tag", span);
+      members.push(self.member(n.asStr(), "tag", tagT.asStr(), 32, to));
+      const un = self.reserve();
+      let cases: Vec<String> = Vec.new();
+      for (const [tag, pt] of self.c.lw.tagsOf(t)) {
+        if (isVoidTy(pt)) { continue; }
+        const x = self.c.lw.payloadTy(pt);
+        const xt = self.diType(x, span);
+        const xs = self.sizeOf(x, span);
+        cases.push(self.member(un.asStr(), tag.asStr(), xt.asStr(), xs * 8, 0));
+      }
+      self.meta.push(`${un} = !DICompositeType(tag: DW_TAG_union_type, scope: ${n}, size: ${sh.uSize * 8}, elements: !{${cases.join(", ")}})\n`);
+      const uo = self.offsetOf(t, "u", span);
+      members.push(self.member(n.asStr(), "u", un.asStr(), sh.uSize * 8, uo));
+    } else if (cLayout(c.asStr(), self.ptr).isNone()) {
+      match (t) {
+        #Array(e, l) => {
+          const et = self.diType(e, span);
+          const count = match (l) { #Known(k) => k, _ => 0 };
+          const sub = self.node(`!DISubrange(count: ${count})`.asStr());
+          self.meta.push(`${n} = !DICompositeType(tag: DW_TAG_array_type, baseType: ${et}, size: ${sh.size * 8}, elements: !{${sub}})\n`);
+          return n;
+        }
+        _ => {
+          for (const [k, ft] of self.c.lw.fieldsOf(t)) {
+            const o = self.offsetOf(t, k.asStr(), span);
+            const fty = self.diType(ft, span);
+            const fs = self.sizeOf(ft, span);
+            members.push(self.member(n.asStr(), k.asStr(), fty.asStr(), fs * 8, o));
+          }
+        }
+      }
+    }
+    self.meta.push(`${n} = !DICompositeType(tag: DW_TAG_structure_type, name: "${name}", size: ${sh.size * 8}, align: ${sh.align * 8}, elements: !{${members.join(", ")}})\n`);
+    n
+  }
+
+  // The debug information of local `l`, whose memory is at `addr`, if the program names it.
+  function declareVar(self: mut Self, l: usize, addr: str, span: Span): void uses Fail<Diagnostic> {
+    if (self.cx.sp.len() == 0 || self.cx.loc.len() == 0) { return; }
+    match (self.cx.locals[l].kind) { #Param | #Binding => {} _ => return }
+    const name = self.cx.locals[l].name.clone();
+    const t = self.cx.locals[l].ty.clone();
+    if (unitTy(t)) { return; }
+    const ty = self.diType(t, span);
+    const f = self.file(self.module);
+    const v = self.node(`!DILocalVariable(name: "${llquote(name.asStr())}", scope: ${self.cx.sp}, file: ${f}, type: ${ty})`.asStr());
+    self.cx.allocas.push(`    #dbg_declare(ptr ${addr}, ${v}, !DIExpression(), ${self.cx.loc})\n`);
+  }
+
+  // The debug information of the locals code apart reaches of its function's.
+  function declareEnv(self: mut Self, ap: readonly Apart, span: Span): void uses Fail<Diagnostic> {
+    for (const l of ap.locals) { self.declareVar(l, `%env.l${l}`.asStr(), span); }
+  }
+}

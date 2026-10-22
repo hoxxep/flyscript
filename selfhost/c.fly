@@ -114,7 +114,7 @@ function byteStr(b: u8): String {
 }
 
 // A `str` literal: a constant, so it may initialize a static.
-function strLit(s: str): String { `((fly_str){ (const uint8_t*)${cquote(s)}, ${s.len()} })` }
+export function strLit(s: str): String { `((fly_str){ (const uint8_t*)${cquote(s)}, ${s.len()} })` }
 
 function intPrim(t: readonly Ty): Option<Prim> {
   match (t) {
@@ -195,13 +195,17 @@ export struct Cgen {
   // The `defer`s made functions of their own, by function and flag: the statement calling each.
   defers: HashMap<String, String>;
   fnName: String;
+  // Where a routine's arguments are, by index, when it is printed apart from the code calling it.
+  argPlaces: Vec<String>;
+  // Code that calls the program's functions from elsewhere, put after them.
+  glue: String;
 }
 
 impl Cgen {
-  function fail(self: readonly Self, span: Span, message: str): never uses Fail<Diagnostic> {
+  export function fail(self: readonly Self, span: Span, message: str): never uses Fail<Diagnostic> {
     throw #Diagnostic { span: self.lw.p.sourceSpan(span), message: message.toString() }
   }
-  function unsupported(self: readonly Self, span: Span, what: str): never uses Fail<Diagnostic> {
+  export function unsupported(self: readonly Self, span: Span, what: str): never uses Fail<Diagnostic> {
     self.fail(span, `${what} is not supported by the C back end yet`)
   }
 
@@ -210,14 +214,14 @@ impl Cgen {
     `t${self.tmp}`
   }
 
-  function isString(self: readonly Self, t: readonly Ty): bool { self.lw.isString(t) }
-  function namedIs(self: readonly Self, t: readonly Ty, name: str): bool { self.lw.namedIs(t, name) }
-  function needsDrop(self: readonly Self, t: readonly Ty): bool { self.lw.needsDrop(t) }
+  export function isString(self: readonly Self, t: readonly Ty): bool { self.lw.isString(t) }
+  export function namedIs(self: readonly Self, t: readonly Ty, name: str): bool { self.lw.namedIs(t, name) }
+  export function needsDrop(self: readonly Self, t: readonly Ty): bool { self.lw.needsDrop(t) }
 
   // ---- C types ----
 
   // Whether a value of the type is a scalar, passed and borrowed `readonly` by value.
-  function scalar(self: readonly Self, t: readonly Ty): bool {
+  export function scalar(self: readonly Self, t: readonly Ty): bool {
     match (t) {
       #Prim(_) | #Slice(_) | #Fn(_) => true,
       #Borrow(_, _) => true,
@@ -231,7 +235,7 @@ impl Cgen {
   // Whether a value of the borrow type `t` is a pointer in C: a `mut` borrow, or a `readonly`
   // borrow of anything bigger than a scalar. A borrow of a view — a `str`, a slice, a function — is
   // the view: it points at what it shows already.
-  function pointerBorrow(self: readonly Self, t: readonly Ty): bool {
+  export function pointerBorrow(self: readonly Self, t: readonly Ty): bool {
     match (t) {
       #Borrow(m, inner) => match (inner.get()) {
         // A borrow of a borrow is the inner borrow.
@@ -242,7 +246,7 @@ impl Cgen {
     }
   }
 
-  function ctype(self: mut Self, t: readonly Ty, span: Span): String uses Fail<Diagnostic> {
+  export function ctype(self: mut Self, t: readonly Ty, span: Span): String uses Fail<Diagnostic> {
     match (t) {
       #Prim(p) => primType(p).toString(),
       #Borrow(_, inner) if match (inner.get()) { #Borrow(_, _) => true, _ => false } => self.ctype(inner, span),
@@ -331,7 +335,7 @@ impl Cgen {
   }
 
   // The fields of a struct-like type, with their C names and Flyscript types.
-  function cfields(self: readonly Self, t: readonly Ty): Vec<[String, Ty]> {
+  export function cfields(self: readonly Self, t: readonly Ty): Vec<[String, Ty]> {
     let out: Vec<[String, Ty]> = Vec.new();
     const tuple = match (t) { #Tuple(_) => true, _ => false };
     for (const [k, x] of self.lw.fieldsOf(t)) { out.push([if (tuple) { `f${k}` } else { mangle(k.asStr()) }, x.clone()]); }
@@ -339,7 +343,7 @@ impl Cgen {
   }
 
   // The C name of a field of a value of type `t`.
-  function fieldName(self: readonly Self, t: readonly Ty, k: str): String {
+  export function fieldName(self: readonly Self, t: readonly Ty, k: str): String {
     match (t) { #Tuple(_) => `f${k}`, _ => mangle(k) }
   }
 
@@ -370,7 +374,7 @@ impl Cgen {
   }
 
   // A tag's number, the same in every union.
-  function tagId(self: mut Self, name: str): usize {
+  export function tagId(self: mut Self, name: str): usize {
     if (const #Some(i) = self.tags.get(name)) { return i; }
     const i = self.tags.len() + 1;
     self.tags.insert(name.toString(), i);
@@ -395,7 +399,7 @@ impl Cgen {
   }
 
   // Whether a type has a `Drop` impl of its own, so its values carry a byte saying they live.
-  function liveByte(self: readonly Self, t: readonly Ty): bool {
+  export function liveByte(self: readonly Self, t: readonly Ty): bool {
     match (t) { #Named(d, _) => self.lw.p.hasDrop(d), _ => false }
   }
 
@@ -403,7 +407,7 @@ impl Cgen {
 
   // The function that drops a value of the type in place, made once: it runs the type's `Drop` if
   // the value lives, drops its parts, and leaves it dead.
-  function dropFn(self: mut Self, t: readonly Ty, span: Span): String uses Fail<Diagnostic> {
+  export function dropFn(self: mut Self, t: readonly Ty, span: Span): String uses Fail<Diagnostic> {
     const key = ckey(t);
     if (const #Some(n) = self.drops.get(key.asStr())) { return n.clone(); }
     const name = `drop${self.drops.len()}`;
@@ -512,7 +516,7 @@ impl Cgen {
   // ---- unions ----
 
   // The function converting a value of union `from` to union `to`, made once.
-  function conversion(self: mut Self, from: readonly Ty, to: readonly Ty, span: Span): String uses Fail<Diagnostic> {
+  export function conversion(self: mut Self, from: readonly Ty, to: readonly Ty, span: Span): String uses Fail<Diagnostic> {
     const key = `${ckey(from)}=>${ckey(to)}`;
     if (const #Some(n) = self.convs.get(key.asStr())) { return n.clone(); }
     const name = `conv${self.convs.len()}`;
@@ -585,7 +589,7 @@ impl Cgen {
   }
 
   // A module-level constant, made once as a function of no arguments.
-  function named(self: mut Self, c: usize, span: Span): String uses Fail<Diagnostic> {
+  export function named(self: mut Self, c: usize, span: Span): String uses Fail<Diagnostic> {
     if (const #Some(n) = self.consts.get(c)) { return `${n}()`; }
     const name = `const${c}`;
     self.consts.insert(c, name.clone());
@@ -741,7 +745,7 @@ impl Cgen {
     const [lo, hi] = bounds(p);
     const name = primName(p);
     match (p) {
-      #U64 | #Usize | #I128 => `((${primType(p)})(${wide}))`,
+      #I128 => `((${primType(p)})(${wide}))`,
       _ => `FLY_CHECK(${primType(p)}, ${cquote(name)}, ${lo}, ${hi}, ${wide})`,
     }
   }
@@ -1230,6 +1234,7 @@ impl Cgen {
         self.gen(r);
         self.resume(k, arg, r, span);
       }
+      #At(_) => {}
     }
   }
 
@@ -1255,7 +1260,7 @@ impl Cgen {
   }
 
   // Whether values of the type are tagged: a union, or an enum.
-  function tagged(self: readonly Self, t: readonly Ty): bool { self.lw.tagged(t) }
+  export function tagged(self: readonly Self, t: readonly Ty): bool { self.lw.tagged(t) }
 
   // Statements raising the failure `v`, a `t`: boxed by its tag, so a `catch` of a wider or a
   // narrower union of tags takes it out as its own.
@@ -1329,7 +1334,7 @@ impl Cgen {
   }
 
   // A call of interface `iface`'s `method` for `selfTy`, each argument given as a pointer to it.
-  function ifaceCall(self: mut Self, iface: str, method: str, selfTy: readonly Ty, args: readonly Vec<String>, span: Span): String uses Fail<Diagnostic> {
+  export function ifaceCall(self: mut Self, iface: str, method: str, selfTy: readonly Ty, args: readonly Vec<String>, span: Span): String uses Fail<Diagnostic> {
     const [c, ptys] = self.lw.ifaceMethod(iface, method, selfTy, span);
     const fname = match (c) {
       #Inst(i) => self.lw.insts[i].name.clone(),
@@ -1444,7 +1449,7 @@ impl Cgen {
 
   // A call of the runtime's, as a C expression. A routine that fails sets the failure and gives a
   // value of nothing, which the check after the call leaves.
-  function builtin(self: mut Self, key: str, c: readonly Call, vs: Vec<String>, arenas: Vec<String>): String uses Fail<Diagnostic> {
+  export function builtin(self: mut Self, key: str, c: readonly Call, vs: Vec<String>, arenas: Vec<String>): String uses Fail<Diagnostic> {
     const span = c.span;
     const rt = c.ret.clone();
     const arg = (i: usize) => if (i < vs.len()) { vs[i].clone() } else { "0".toString() };
@@ -1613,6 +1618,7 @@ impl Cgen {
 
   // The lvalue of a place an argument reads, for a routine that changes it.
   function placeArg(self: mut Self, c: readonly Call, i: usize): String uses Fail<Diagnostic> {
+    if (i < self.argPlaces.len()) { return self.argPlaces[i].clone(); }
     match (c.args.get(i)) {
       #Some(#Copy(p)) | #Some(#Move(p)) => self.lvalue(p, c.span),
       _ => self.fail(c.span, "a routine changes what is not a place"),
@@ -2158,7 +2164,7 @@ impl Cgen {
 type Apart = { fields: String; inits: Vec<String>; names: HashMap<usize, String>; captures: Vec<String>; arenas: HashMap<u32, String> };
 
 // The locals declared in a block and the blocks in it.
-function ownedIn(b: readonly Block, out: mut HashSet<usize>): void {
+export function ownedIn(b: readonly Block, out: mut HashSet<usize>): void {
   for (const l of b.locals) { out.insert(l); }
   for (const c of b.cleanups) { if (const #Defer(_, d) = c) { ownedIn(d, mut out); } }
   for (const s of b.stmts) {
@@ -2175,7 +2181,7 @@ function ownedIn(b: readonly Block, out: mut HashSet<usize>): void {
 }
 
 // The locals and captures code uses.
-type Uses = { locals: HashSet<usize>; captures: HashSet<usize> };
+export type Uses = { locals: HashSet<usize>; captures: HashSet<usize> };
 
 function usePlace(p: readonly Place, u: mut Uses): void {
   match (p.root) { #Local(l) => { u.locals.insert(l); } #Capture(k) => { u.captures.insert(k); } }
@@ -2206,7 +2212,7 @@ function useRvalue(rv: readonly Rvalue, u: mut Uses): void {
   }
 }
 
-function useBlock(b: readonly Block, u: mut Uses): void {
+export function useBlock(b: readonly Block, u: mut Uses): void {
   for (const c of b.cleanups) {
     match (c) {
       #Drop(l) | #Arena(l) => { u.locals.insert(l); }
@@ -2239,7 +2245,7 @@ function useBlock(b: readonly Block, u: mut Uses): void {
         }
       }
       #Resume(k, arg, r) => { useOperand(k, mut u); if (const #Some(a) = arg) { useOperand(a, mut u); } u.locals.insert(r); }
-      #Break(_) | #Continue(_) | #Panic(_) => {}
+      #Break(_) | #Continue(_) | #Panic(_) | #At(_) => {}
     }
   }
 }
@@ -2691,27 +2697,14 @@ impl Cgen {
   }
 
   // A diagnostic, rendered in the module it arose in.
-  function failed(self: readonly Self, d: Diagnostic, module: usize): #Failed(String) {
+  export function failed(self: readonly Self, d: Diagnostic, module: usize): #Failed(String) {
     #Failed(render(d, self.lw.p.modules[module].file.asStr(), self.lw.p.modules[module].source.asStr()))
   }
 
   // The C for a checked program whose entry module is `entry`.
   export function program(self: mut Self, entry: usize, runtime: str, freestanding: bool): String uses Fail<#Failed(String)> {
     const ent = self.lw.entry(entry, freestanding);
-    // A failure nothing caught is shown, as the reference shows it.
-    let uncaught = "  if (FLY_FAILED) { printf(\"<uncaught failure>\\n\"); return 1; }\n".toString();
-    if (const #Some(errTy) = ent.fails) {
-      const r = try {
-        const ec = self.ctype(errTy, { start: 0, end: 0 });
-        const take = self.takeErr("e", errTy);
-        const show = self.ifaceCall("Show", "show", errTy, ["(&e)".toString(), "(&s)".toString()], { start: 0, end: 0 });
-        #Ok(`  if (FLY_FAILED) {\n    ${ec} e;\n    memset(&e, 0, sizeof e);\n    ${take}\n    fly_String s = fly_String_new();\n    ${show};\n    printf("<uncaught: %.*s>\\n", (int)s.len, (const char*)s.ptr);\n    return 1;\n  }\n`)
-      } catch (d) { #Err(d) };
-      match (r) {
-        #Ok(u) => { uncaught = u; }
-        #Err(d) => throw self.failed(d, entry),
-      }
-    }
+    const uncaught = self.uncaught(ent, entry);
     let next: usize = 0;
     while (next < self.lw.insts.len() || self.closuresDone < self.lw.closures.len()) {
       if (next < self.lw.insts.len()) {
@@ -2735,21 +2728,48 @@ impl Cgen {
         if (const #Err(d) = r) { throw self.failed(d, self.module) }
       }
     }
+    self.assemble(ent, uncaught, runtime)
+  }
+
+  // What `main` does with a failure nothing caught: shows it, as the reference shows it.
+  export function uncaught(self: mut Self, ent: readonly Entry, entry: usize): String uses Fail<#Failed(String)> {
+    const errTy = match (ent.fails) { #Some(t) => t.clone(), #None => return "  if (FLY_FAILED) { printf(\"<uncaught failure>\\n\"); return 1; }\n".toString() };
+    const r = try {
+      const ec = self.ctype(errTy, { start: 0, end: 0 });
+      const take = self.takeErr("e", errTy);
+      const show = self.ifaceCall("Show", "show", errTy, ["(&e)".toString(), "(&s)".toString()], { start: 0, end: 0 });
+      #Ok(`  if (FLY_FAILED) {\n    ${ec} e;\n    memset(&e, 0, sizeof e);\n    ${take}\n    fly_String s = fly_String_new();\n    ${show};\n    printf("<uncaught: %.*s>\\n", (int)s.len, (const char*)s.ptr);\n    return 1;\n  }\n`)
+    } catch (d) { #Err(d) };
+    match (r) {
+      #Ok(u) => u,
+      #Err(d) => throw self.failed(d, entry),
+    }
+  }
+
+  // The C file: the runtime, the program's types and code, the functions C calls, and `main`.
+  export function assemble(self: mut Self, ent: readonly Entry, uncaught: str, runtime: str): String uses Fail<#Failed(String)> {
     // The structs only pointers were made to.
     while (self.pending.len() > 0) {
       const t = match (self.pending.pop()) { #Some(t) => t, #None => break };
       const r = try { self.ctype(t, { start: 0, end: 0 }); #Ok } catch (d) { #Err(d) };
       if (const #Err(d) = r) { throw self.failed(d, 0) }
     }
-    // `main` is given the command line, as its parameters' types read it.
+    // `main` is given the command line, as its parameters' types read it; the lists it is lent are
+    // freed once it returns.
     let args: Vec<String> = Vec.new();
+    let lists = String.new();
+    let frees = String.new();
     for (const [k, a] of ent.args.iter().enumerate()) {
       args.push(match (a) {
         #Int(t) => `(${self.primOf(t)})fly_arg_int(${k})`,
         #Float(t) => `(${self.primOf(t)})fly_arg_float(${k})`,
         #Str => `fly_arg_str(${k})`,
-        #Strings => `fly_arg_strings(${k})`,
-        #Strs => `fly_arg_strs(${k})`,
+        #Strings | #Strs => {
+          const strings = match (a) { #Strings => true, _ => false };
+          lists.push(`fly_slice a${k} = fly_arg_${if (strings) { "strings" } else { "strs" }}(${k}); `);
+          frees.push(` fly_args_free(a${k}, ${strings});`);
+          `a${k}`
+        }
       });
     }
     // The functions C calls, by their own symbols.
@@ -2769,15 +2789,13 @@ impl Cgen {
     out.push(self.dropCode.asStr());
     out.push(self.apartCode.asStr());
     out.push(self.code.asStr());
+    out.push(self.glue.asStr());
     out.push(exports.asStr());
     const main = match (ent.main) { #Some(m) => self.lw.insts[m].name.clone(), #None => return out };
+    out.push(`static void fly_main_run(void) { ${lists}${main}(${args.join(", ")});${frees} }\n`);
     // A program that starts tasks, or makes channels or locks, runs `main` as the first task.
-    if (ent.tasks) {
-      out.push(`static void fly_main_task(void) { ${main}(${args.join(", ")}); }\n`);
-      out.push(`int main(int argc, char** argv) {\n  fly_argc = argc;\n  fly_argv = argv;\n  fly_tasks_run(fly_main_task);\n${uncaught}  return 0;\n}\n`);
-    } else {
-      out.push(`int main(int argc, char** argv) {\n  fly_argc = argc;\n  fly_argv = argv;\n  ${main}(${args.join(", ")});\n${uncaught}  return 0;\n}\n`);
-    }
+    const run = if (ent.tasks) { "fly_tasks_run(fly_main_run)" } else { "fly_main_run()" };
+    out.push(`int main(int argc, char** argv) {\n  fly_argc = argc;\n  fly_argv = argv;\n  ${run};\n${uncaught}  return 0;\n}\n`);
     out
   }
 
@@ -2808,13 +2826,19 @@ impl Cgen {
   }
 }
 
-// The C for a checked program: the runtime, then the code its `main` reaches.
-export function cProgram(p: Prog, entry: usize, runtime: str, freestanding: bool): String uses Fail<#Failed(String)> {
-  let c = Cgen {
+// A printer of C for the program.
+export function newCgen(p: Prog): Cgen {
+  Cgen {
     lw: newLower(p), closuresDone: 0, types: HashMap.new(), defined: HashSet.new(), pending: Vec.new(), typeFwd: String.new(),
     typeDefs: String.new(), tags: HashMap.new(), drops: HashMap.new(), dropCode: String.new(), convs: HashMap.new(),
     helpers: HashMap.new(), consts: HashMap.new(), protos: String.new(), code: String.new(), apartCode: String.new(), aparts: 0,
     tmp: 0, cx: newCtx(Vec.new(), #Prim(#Void), #Fn), module: 0, defers: HashMap.new(), fnName: String.new(),
-  };
+    argPlaces: Vec.new(), glue: String.new(),
+  }
+}
+
+// The C for a checked program: the runtime, then the code its `main` reaches.
+export function cProgram(p: Prog, entry: usize, runtime: str, freestanding: bool): String uses Fail<#Failed(String)> {
+  let c = newCgen(p);
   c.program(entry, runtime, freestanding)
 }

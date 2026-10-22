@@ -1,0 +1,16 @@
+// expect: 18446744073709551615
+// expect: 18446744073709551615
+// expect: <panic: arithmetic overflow: -1 does not fit in `u64`>
+// `u64` is checked as every integer type is: below zero, or past its greatest value, is an
+// overflow (§5.7).
+import { println } from "std/io";
+function largest(): u64 { 18446744073709551615 }
+export function main(): void uses Io {
+  const top = largest();
+  println(`${top}`);
+  const n: u64 = 18446744073709551614;
+  println(`${n + 1}`);
+  let zero = top - top;
+  zero -= 1;
+  println(`${zero}`);
+}

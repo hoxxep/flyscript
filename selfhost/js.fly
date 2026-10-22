@@ -869,6 +869,7 @@ impl JsGen {
         const call = if (self.cx.gen) { `(yield* ${kv}(${a}))` } else { `$rt.run(${kv}(${a}))` };
         if (unitTy(self.cx.locals[r].ty)) { self.line(`${call};`); } else { self.line(`${self.local(r)} = ${call};`); }
       }
+      #At(_) => {}
     }
   }
 

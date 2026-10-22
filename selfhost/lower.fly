@@ -936,6 +936,7 @@ impl Lower {
     for (const st of b.stmts) { self.stmt(st); }
     match (b.tail) {
       #Some(x) => {
+        self.emit(#At(x.span));
         const v = self.exAs(x, t);
         self.deliver(dest, v);
       }
@@ -1764,6 +1765,7 @@ impl Lower {
 
 impl Lower {
   function stmt(self: mut Self, st: readonly AstStmt): void uses Fail<Diagnostic> {
+    self.emit(#At(match (st) { #Let { mutable: _, pat: _, ty: _, init: _, span } => span, #Defer(x) | #Expr(x) => x.span }));
     match (st) {
       #Let { mutable: _, pat, ty: _, init, span: _ } => {
         match (pat.kind) {
