@@ -142,9 +142,8 @@ fn compiled_programs_run_as_expected() {
     if !has_node() {
         return;
     }
-    // Destructors need the ownership pass's record of moves; the simulated network is the
-    // interpreter's.
-    const NOT_YET: [&str; 6] = ["assign_drops_old", "crawler", "generator_drop", "sender_drop_closes", "http_server", "http_simulation"];
+    // The simulated network is the interpreter's.
+    const NOT_YET: [&str; 2] = ["http_server", "http_simulation"];
     let r = Command::new("sh").arg(root().join("selfhost/corpus.sh")).arg(root().join("selfhost/seed.js")).output().unwrap();
     let report = String::from_utf8_lossy(&r.stdout);
     let failed: Vec<&str> = report.lines().filter_map(|l| l.strip_prefix("FAIL ")).filter(|n| !NOT_YET.contains(n)).collect();

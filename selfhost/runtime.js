@@ -91,6 +91,33 @@ const { $rt, $b } = (() => {
       r = g.next(yield op);
     }
   }
+  // ---- destructors: what was moved out of an owner, by field path ----
+
+  function moved(m, path) { const out = m === null ? new Set() : new Set(m); out.add(path); return out; }
+  const under = (path, p) => p === path || p.startsWith(path + ".");
+  function isMoved(m, path) {
+    if (m === null) return false;
+    for (const p of m) if (under(p, path)) return true;
+    return false;
+  }
+  // The paths moved out below field `f`, relative to it.
+  function sub(m, f) {
+    if (m === null) return null;
+    let out = null;
+    for (const p of m) if (p.startsWith(f + ".")) { if (out === null) out = new Set(); out.add(p.slice(f.length + 1)); }
+    return out;
+  }
+  // A place assigned anew owns all of it again.
+  function unmove(m, path) {
+    if (m === null) return null;
+    const out = new Set([...m].filter((p) => !under(path, p)));
+    return out.size === 0 ? null : out;
+  }
+  // Runs a destructor that may perform `Io` to its end, without letting other tasks in.
+  function drive(g) {
+    for (let r = g.next(); !r.done; r = g.next()) if (!(r.value instanceof Point)) panic("a destructor performed an effect that nothing handles");
+  }
+
   // Runs a generator where nothing can handle what it performs.
   function run(g) {
     const r = g.next();
@@ -648,7 +675,12 @@ const { $rt, $b } = (() => {
     *Receiver_recv$g(rx) { const m = yield* recv(rx.ch); return m === undefined ? none() : some(m.v); },
     *Pending_wait$g(p) { const m = yield* recv(p.ch); if (m === undefined) panic("the reply was dropped unsent"); return m.v; },
     *Sender_close$g(s) { yield* close(s.ch); },
-    *Sender_drop(r) { yield* close(r.v.ch); },
+    // A destructor does not suspend: a sender dropped closes its channel then and there.
+    Sender_drop(r) {
+      const ch = r.v.ch, left = Math.max(0, (sched.senders.get(ch) || 0) - 1);
+      sched.senders.set(ch, left);
+      if (left === 0) { sched.closed.add(ch); wake("channel", ch); }
+    },
     Sender_clone: (s) => { sched.senders.set(s.ch, (sched.senders.get(s.ch) || 0) + 1); return { ch: s.ch }; },
     *Receiver_each(rx) { for (let m = yield* recv(rx.ch); m !== undefined; m = yield* recv(rx.ch)) yield new Yielded(m.v); },
     Mutex_new: (v) => ({ v }),
@@ -737,7 +769,7 @@ const { $rt, $b } = (() => {
   }
 
   const $rt = {
-    Fail, Panic, Return, YIELD, handle, run, panic, raise, FieldRef, indexRef, rangeRef, yielded, isYield, perform, items,
+    Fail, Panic, Return, YIELD, handle, run, drive, moved, isMoved, sub, unmove, panic, raise, FieldRef, indexRef, rangeRef, yielded, isYield, perform, items,
     div, rem, fmod, truncFloat, toInt, at, idx, slice, copy, showFloat, shown, show,
     unmatched: (v) => panic(`no arm matched ${show(v)}`),
     argStr, argInt, start,

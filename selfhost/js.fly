@@ -19,10 +19,11 @@ import {
   Ident, Type, TypeKind, Block, Stmt, Expr, ExprKind, FieldInit, TagArgs, TemplatePiece, MatchArm, HandlerArm, Pattern,
   PatternKind, TagPatArgs, Param, FnDecl,
 } from "./ast";
-import { Program, Binding, DefKind, SubstMap, subst, substArg, substEffs, substMap } from "./env";
-import { Prim, Region, Tail, Row, Eff, EffRow, FnTy, Len, GArg, Ty, pure, isInt, isFloat, primName, labelGet, keyArgs } from "./types";
+import { Program, Binding, DefKind, SubstMap, subst, substArg, substEffs, substMap, substParams } from "./env";
+import { Prim, Region, Tail, Row, Eff, EffRow, FnTy, Len, GArg, Ty, pure, isInt, isFloat, primName, labelGet, keyArgs, keyTy } from "./types";
 import { Binds } from "./impls";
 import { checkFn } from "./check";
+import { checkOwnership } from "./own";
 import { HashMap, HashSet } from "std/collections";
 
 // A function with its generic arguments, and its JavaScript name.
@@ -31,8 +32,9 @@ type Inst = { fid: usize; args: Vec<GArg>; js: String; suspends: bool };
 // Where a statement's value goes.
 enum Dest { #Discard, #Return, #Assign(String) }
 
-// A local: its JavaScript name, and whether it lives in a cell (it is lent `mut`).
-type Local = { js: String; cell: bool };
+// A local: its JavaScript name, whether it lives in a cell (it is lent `mut`), and, for an owner
+// whose value needs dropping, the name its drop flags are made from and its type's drop function.
+type Local = { js: String; cell: bool; owner: Option<[String, String]> };
 
 // A step from a matched value to a part of it.
 enum Seg { #Field(String), #Index(usize), #Payload }
@@ -189,6 +191,13 @@ export struct Js {
   // position of their name.
   cells: HashSet<usize>;
   cellParams: HashSet<usize>;
+  // Destructors (§5.6): whether each type, by key, needs dropping; the drop function of each
+  // that does, and their code.
+  dropNeeds: HashMap<String, bool>;
+  dropFns: HashMap<String, String>;
+  dropCode: String;
+  // How many functions the ownership pass had seen: specializations made since have not been.
+  owned: usize;
 }
 
 impl Js {
@@ -198,6 +207,7 @@ impl Js {
       code: String.new(), fid: 0, map: HashMap.new(), module: 0, suspends: false, ret: #Prim(#Void), fnRet: #Prim(#Void),
       inHandle: false,
       out: String.new(), indent: 0, tmp: 0, scopes: Vec.new(), cells: HashSet.new(), cellParams: HashSet.new(),
+      dropNeeds: HashMap.new(), dropFns: HashMap.new(), dropCode: String.new(), owned: 0,
     }
   }
 
@@ -326,6 +336,8 @@ impl Js {
     const key = `${fid}|${keyArgs(eraseArgs(args, self.p, self.tasks))}`;
     if (const #Some(i) = self.instIndex.get(key.asStr())) { return i; }
     if (!self.p.checked.has(fid)) { checkFn(mut self.p, fid); }
+    // A specialization made here has its moves found here.
+    if (fid >= self.owned) { checkOwnership(mut self.p, fid); }
     const i = self.insts.len();
     const suspends = self.fnSuspends(fid, args);
     const js = `${mangle(self.p.fns[fid].name.asStr())}$${i}`;
@@ -439,8 +451,34 @@ impl Js {
     // A name shadowing one in scope is renamed: JavaScript would see the new one in its own
     // initializer.
     if (self.local(name).isSome() || js.asStr().startsWith("$")) { js = `${js}$${self.fresh()}`; }
-    self.scopes[top].insert(name.toString(), { js: js.clone(), cell });
+    self.scopes[top].insert(name.toString(), { js: js.clone(), cell, owner: #None });
     js
+  }
+
+  // Makes local `name` the owner of its value, which is dropped when its scope ends unless it was
+  // moved out (§5.6): `f$l` says it still owns the whole, `f$m` holds the field paths moved out.
+  // The caller drops it where the scope ends.
+  function own(self: mut Self, name: str, dropFn: String): String {
+    const top = self.scopes.len() - 1;
+    const l: Local = match (self.scopes[top].get(name)) { #Some(l) => l.clone(), #None => return String.new() };
+    const flag = l.js.clone();
+    self.scopes[top].insert(name.toString(), { js: l.js.clone(), cell: l.cell, owner: #Some([flag.clone(), dropFn]) });
+    self.line(`let ${flag}$l = true, ${flag}$m = null;`);
+    flag
+  }
+
+  // The statement that drops an owner's value at the end of its scope.
+  function dropOwner(self: readonly Self, name: str): String {
+    match (self.local(name)) {
+      #Some(l) => match (l.owner) {
+        #Some([flag, f]) => {
+          const read = if (l.cell) { `${l.js}.v` } else { l.js.clone() };
+          `if (${flag}$l) ${f}(${read}, ${flag}$m);`
+        }
+        #None => String.new(),
+      },
+      #None => String.new(),
+    }
   }
 
   function local(self: readonly Self, name: str): Option<Local> {
@@ -579,10 +617,13 @@ impl Js {
         out.push(")");
         out
       }
-      #Ident(n) => self.ident(n, e),
+      #Ident(n) => {
+        const v = self.ident(n, e);
+        self.moving(e, v)
+      }
       #Field { target, name } => {
         const t = self.obj(target);
-        `${t}.${mangleField(name.name.asStr())}`
+        self.moving(e, `${t}.${mangleField(name.name.asStr())}`)
       }
       #Index { target, index } => match (index.kind) {
         #Range { lo, hi } => {
@@ -857,6 +898,35 @@ impl Js {
       const bop = op.slice(0, op.len() - 1);
       v = self.arith(bop, place.clone(), v, want, want);
     }
+    // The value a place held is dropped before it is overwritten, unless it was moved out; the
+    // place then owns again (§5.6).
+    if (op == "=" && self.ownedValue(want)) {
+      const f = self.dropFn(want.clone(), target.span);
+      const owner: Option<[Local, Vec<String>]> = match (rootName(target)) {
+        #Some(n) => match (self.local(n.asStr())) { #Some(l) => if (l.owner.isSome()) { #Some([l, fieldPath(target)]) } else { #None }, #None => #None },
+        #None => #None,
+      };
+      match (owner) {
+        #Some([l, path]) => {
+          const flag = match (l.owner) { #Some([fl, _]) => fl, #None => String.new() };
+          if (path.len() == 0) {
+            self.line(`if (${flag}$l) ${f}(${place}, ${flag}$m);`);
+            self.line(`${place} = ${v};`);
+            self.line(`${flag}$l = true; ${flag}$m = null;`);
+          } else {
+            const at = quote(path.join(".").asStr());
+            self.line(`if (${flag}$l && !$rt.isMoved(${flag}$m, ${at})) ${f}(${place}, $rt.sub(${flag}$m, ${at}));`);
+            self.line(`${place} = ${v};`);
+            self.line(`${flag}$m = $rt.unmove(${flag}$m, ${at});`);
+          }
+        }
+        #None => {
+          self.line(`${f}(${place}, null);`);
+          self.line(`${place} = ${v};`);
+        }
+      }
+      return;
+    }
     self.line(`${place} = ${v};`);
   }
 
@@ -943,7 +1013,29 @@ impl Js {
   }
 
   function lambda(self: mut Self, e: readonly Expr, params: readonly Vec<Param>, body: readonly Expr): String uses Fail<Diagnostic> {
+    // What it moves in leaves its owner when it is made (§4.3); a `once` closure owns it, and
+    // drops it as its call ends (§5.6).
+    const moved: Vec<[String, Ty]> = match (self.p.typed.get(self.fid)) {
+      #Some(t) => match (t.capturedMoves.get(e.span)) { #Some(m) => m.clone(), #None => Vec.new() },
+      #None => Vec.new(),
+    };
+    let leaving: Vec<String> = Vec.new();
+    let carried: Vec<[String, Local]> = Vec.new();
+    for (const [n, _] of moved) {
+      if (const #Some(l) = self.local(n.asStr())) {
+        if (const #Some([flag, _]) = l.owner) {
+          leaving.push(`${flag}$l = false`);
+          carried.push([n.clone(), l.clone()]);
+        }
+      }
+    }
+    const closure = self.lambdaCode(e, params, body, carried);
+    if (leaving.len() == 0) { closure } else { `(${leaving.join(", ")}, ${closure})` }
+  }
+
+  function lambdaCode(self: mut Self, e: readonly Expr, params: readonly Vec<Param>, body: readonly Expr, carried: Vec<[String, Local]>): String uses Fail<Diagnostic> {
     const fty: Option<FnTy> = match (stripBorrow(self.exprTy(e.id))) { #Fn(f) => #Some(f.get().clone()), _ => #None };
+    const calledOnce = match (fty) { #Some(f) => f.mode == #Once, #None => false };
     const generator = match (fty) { #Some(f) => rowSuspends(self.p, f.effects, self.tasks), #None => false };
     const ret: Ty = match (fty) { #Some(f) => f.ret.clone(), #None => #Error };
     const saved = replace(mut self.out, String.new());
@@ -965,7 +1057,35 @@ impl Js {
       } else { names.push(js); }
     }
     for (const [js, raw] of celled) { self.line(`const ${js} = { v: ${raw} };`); }
-    self.into(body, #Return);
+    let owners: Vec<String> = Vec.new();
+    if (calledOnce) {
+      for (const [n, l] of carried) {
+        if (const #Some([_, f]) = l.owner) {
+          const top = self.scopes.len() - 1;
+          self.scopes[top].insert(n.clone(), { js: l.js.clone(), cell: l.cell, owner: #None });
+          const flag = `${l.js}$${self.fresh()}`;
+          self.scopes[top].insert(n.clone(), { js: l.js.clone(), cell: l.cell, owner: #Some([flag.clone(), f.clone()]) });
+          self.line(`let ${flag}$l = true, ${flag}$m = null;`);
+          owners.push(n.clone());
+        }
+      }
+    }
+    if (owners.len() > 0) {
+      self.line("try {");
+      self.indent += 1;
+      self.into(body, #Return);
+      self.indent -= 1;
+      self.line("} finally {");
+      self.indent += 1;
+      for (const n of owners) {
+        const d = self.dropOwner(n.asStr());
+        self.line(d.asStr());
+      }
+      self.indent -= 1;
+      self.line("}");
+    } else {
+      self.into(body, #Return);
+    }
     self.pop();
     const inner = replace(mut self.out, saved);
     self.indent = savedIndent;
@@ -1512,6 +1632,21 @@ impl Js {
       const c = self.cond(arm.pat, s);
       self.line(`if (${c}) {`);
       self.indent += 1;
+      // An arm that takes what it binds moves it out of its owner.
+      const armMove: Option<Vec<String>> = match (self.p.typed.get(self.fid)) {
+        #Some(t) => match (t.moves.get(arm.pat.span)) { #Some(p) => #Some(p.clone()), #None => #None },
+        #None => #None,
+      };
+      if (const #Some(path) = armMove) {
+        if (const #Some(n) = rootName(scrutinee)) {
+          if (const #Some(l) = self.local(n.asStr())) {
+            if (const #Some([flag, _]) = l.owner) {
+              if (path.len() == 0) { self.line(`${flag}$l = false;`); }
+              else { self.line(`${flag}$m = $rt.moved(${flag}$m, ${quote(path.join(".").asStr())});`); }
+            }
+          }
+        }
+      }
       self.push();
       self.binds(arm.pat, s, whole.clone(), false);
       match (arm.guard) {
@@ -1663,6 +1798,13 @@ impl Js {
               const js = self.declare(n, cell);
               if (cell) { self.line(`const ${js} = { v: ${v} };`); }
               else { self.line(`${if (mutable) { "let" } else { "const" }} ${js} = ${v};`); }
+              // An owner's value is dropped where its block ends, however it ends (§5.6).
+              if (self.ownedValue(want)) {
+                const f = self.dropFn(want, pat.span);
+                self.own(n, f);
+                self.dropAfter(b, i, dest, [n.clone()]);
+                return;
+              }
             }
             _ => {
               const v = self.value(init);
@@ -1671,6 +1813,21 @@ impl Js {
               const c = self.cond(pat, t);
               if (c != "true") { self.line(`if (!(${c})) $rt.unmatched(${t});`); }
               self.binds(pat, t, #None, mutable);
+              let owners: Vec<String> = Vec.new();
+              let ps: Vec<[String, usize, Vec<Seg>]> = Vec.new();
+              Js.paths(pat, Vec.new(), mut ps);
+              for (const [n, id, _] of ps) {
+                const bt = self.bindingTy(id);
+                if (self.ownedValue(bt)) {
+                  const f = self.dropFn(bt, pat.span);
+                  self.own(n.asStr(), f);
+                  owners.push(n.clone());
+                }
+              }
+              if (owners.len() > 0) {
+                self.dropAfter(b, i, dest, owners);
+                return;
+              }
             }
           }
         }
@@ -1695,6 +1852,25 @@ impl Js {
       #Some(t) => self.into(t, dest),
       #None => self.deliver("undefined", dest),
     }
+  }
+
+  // The rest of a block after statement `i`, with its owners in `names` dropped however it ends,
+  // the last declared first.
+  function dropAfter(self: mut Self, b: readonly Block, i: usize, dest: readonly Dest, names: Vec<String>): void uses Fail<Diagnostic> {
+    self.line("try {");
+    self.indent += 1;
+    self.stmtsFrom(b, i + 1, dest);
+    self.indent -= 1;
+    self.line("} finally {");
+    self.indent += 1;
+    let k = names.len();
+    while (k > 0) {
+      k -= 1;
+      const d = self.dropOwner(names[k].asStr());
+      self.line(d.asStr());
+    }
+    self.indent -= 1;
+    self.line("}");
   }
 
   // ---- functions ----
@@ -1731,9 +1907,39 @@ impl Js {
       } else { params.push(js); }
     }
     for (const [js, raw] of celled) { self.line(`const ${js} = { v: ${raw} };`); }
+    // Parameters that own what they were given drop it as the function returns (§5.6).
+    let owners: Vec<String> = Vec.new();
+    const ptys = self.p.fns[fid].scheme.params.clone();
+    for (const [k, p] of decl.sig.params.iter().enumerate()) {
+      if (k < ptys.len()) {
+        const pt = self.concrete(ptys[k][1]);
+        if (self.ownedValue(pt)) {
+          const f = self.dropFn(pt, p.name.span);
+          self.own(p.name.name.asStr(), f);
+          owners.push(p.name.name.clone());
+        }
+      }
+    }
     // The body's top level is the parameters' scope in JavaScript: a `let` shadowing a parameter
     // is renamed there.
-    self.stmtsFrom(body, 0, #Return);
+    if (owners.len() > 0) {
+      self.line("try {");
+      self.indent += 1;
+      self.stmtsFrom(body, 0, #Return);
+      self.indent -= 1;
+      self.line("} finally {");
+      self.indent += 1;
+      let k = owners.len();
+      while (k > 0) {
+        k -= 1;
+        const d = self.dropOwner(owners[k].asStr());
+        self.line(d.asStr());
+      }
+      self.indent -= 1;
+      self.line("}");
+    } else {
+      self.stmtsFrom(body, 0, #Return);
+    }
     self.pop();
     const inner = replace(mut self.out, String.new());
     const js = self.insts[i].js.clone();
@@ -1918,6 +2124,208 @@ impl Js {
     }
   }
 
+  // ---- destructors ----
+
+  // Whether dropping a value of the type runs code: a `Drop` impl, here or in a part (§5.6).
+  function needsDrop(self: mut Self, t: readonly Ty): bool {
+    const key = keyTy(t);
+    if (const #Some(b) = self.dropNeeds.get(key.asStr())) { return b; }
+    // A type met again inside itself adds nothing.
+    self.dropNeeds.insert(key.clone(), false);
+    const b = self.computeNeeds(t);
+    self.dropNeeds.insert(key, b);
+    b
+  }
+
+  function computeNeeds(self: mut Self, t: readonly Ty): bool {
+    match (t) {
+      #Named(d, args) => {
+        if (self.p.hasDrop(d)) { return true; }
+        // What an `Arc` holds is shared, and dropped by no one clone.
+        if (self.p.isKnown(d, "Arc")) { return false; }
+        for (const a of args) { if (const #Ty(x) = a) { if (self.needsDrop(x)) { return true; } } }
+        for (const x of self.partsOf(d, args)) { if (self.needsDrop(x)) { return true; } }
+        false
+      }
+      #Tuple(ts) => {
+        for (const x of ts) { if (self.needsDrop(x)) { return true; } }
+        false
+      }
+      #Record(r) | #Union(r) => {
+        for (const [_, x] of r.labels) { if (self.needsDrop(x)) { return true; } }
+        false
+      }
+      #Array(e, _) => self.needsDrop(e),
+      _ => false,
+    }
+  }
+
+  function partsOf(self: readonly Self, d: usize, args: readonly Vec<GArg>): Vec<Ty> {
+    let out: Vec<Ty> = Vec.new();
+    match (self.p.defs[d].kind) {
+      #Struct { fields: _ } => { if (const #Some(fs) = self.p.structFields(d, args)) { for (const [_, x] of fs) { out.push(x.clone()); } } }
+      #Enum { tags } => { for (const [_, x] of tags) { out.push(substParams(x, self.p.defs[d].params, args)); } }
+      _ => {}
+    }
+    out
+  }
+
+  // Whether a value of the type, held by a binding, is owned there: not a borrow.
+  function ownedValue(self: mut Self, t: readonly Ty): bool {
+    match (t) { #Borrow(_, _) | #Slice(_) | #Prim(_) | #Error => false, _ => self.needsDrop(t) }
+  }
+
+  // The function that drops a value of type `t`, made once: `(v, m)`, where `m` holds the field
+  // paths moved out of `v`, if any. It runs the type's `Drop`, then drops the parts (§5.6).
+  function dropFn(self: mut Self, t: Ty, span: Span): String uses Fail<Diagnostic> {
+    const key = keyTy(t);
+    if (const #Some(n) = self.dropFns.get(key.asStr())) { return n.clone(); }
+    const name = `$drop${self.dropFns.len()}`;
+    self.dropFns.insert(key, name.clone());
+    let body = String.new();
+    match (t) {
+      #Named(d, args) => {
+        // A value whose type has a `Drop` cannot have parts moved out of it.
+        if (self.p.hasDrop(d)) {
+          const call = self.dropCall(t.clone(), span);
+          body.push(`  if (m === null) ${call};\n`);
+        }
+        if (self.p.isKnown(d, "Box")) {
+          if (const #Some(#Ty(inner)) = args.first()) {
+            if (self.needsDrop(inner)) {
+              const f = self.dropFn(inner.clone(), span);
+              body.push(`  ${f}(v, m);\n`);
+            }
+          }
+        } else {
+          match (self.p.defs[d].kind) {
+            #Struct { fields: #Some(_) } => {
+              const fs: Vec<[String, Ty]> = match (self.p.structFields(d, args)) { #Some(x) => x, #None => Vec.new() };
+              for (const [f, ft] of fs) { self.dropField(mut body, f.asStr(), ft.clone(), span); }
+            }
+            #Enum { tags: _ } => {
+              let payloads: Vec<[String, Ty]> = Vec.new();
+              if (const #Enum { tags } = self.p.defs[d].kind) {
+                for (const [tag, pt0] of tags) { payloads.push([tag.clone(), substParams(pt0, self.p.defs[d].params, args)]); }
+              }
+              for (const [tag, pt] of payloads) { self.dropPayload(mut body, tag.asStr(), pt.clone(), span); }
+            }
+            _ => {
+              // A collection drops its elements; a map its keys and values.
+              const name0 = self.p.defs[d].name.clone();
+              let elems: Vec<Ty> = Vec.new();
+              for (const a of args) { if (const #Ty(x) = a) { elems.push(x.clone()); } }
+              if ((name0 == "Vec" || name0 == "RegionList") && elems.len() > 0 && self.needsDrop(elems[0])) {
+                const f = self.dropFn(elems[0].clone(), span);
+                body.push(`  for (const x of v) ${f}(x, null);\n`);
+              } else if (name0 == "HashMap" && elems.len() == 2) {
+                const dk = self.needsDrop(elems[0]);
+                const dv = self.needsDrop(elems[1]);
+                if (dk || dv) {
+                  body.push("  for (const e of v.m.values()) {\n");
+                  if (dk) { const f = self.dropFn(elems[0].clone(), span); body.push(`    ${f}(e[0], null);\n`); }
+                  if (dv) { const f = self.dropFn(elems[1].clone(), span); body.push(`    ${f}(e[1], null);\n`); }
+                  body.push("  }\n");
+                }
+              }
+            }
+          }
+        }
+      }
+      #Record(r) => { for (const [f, ft] of r.labels) { self.dropField(mut body, f.asStr(), ft.clone(), span); } }
+      #Union(r) => { for (const [tag, pt] of r.labels) { self.dropPayload(mut body, tag.asStr(), pt.clone(), span); } }
+      #Tuple(ts) => {
+        for (const [i, x] of ts.iter().enumerate()) {
+          if (self.needsDrop(x)) {
+            const f = self.dropFn(x.clone(), span);
+            body.push(`  if (m === null || !m.has("${i}")) ${f}(v[${i}], $rt.sub(m, "${i}"));\n`);
+          }
+        }
+      }
+      #Array(e, _) => {
+        if (self.needsDrop(e)) {
+          const f = self.dropFn(e.get().clone(), span);
+          body.push(`  for (const x of v) ${f}(x, null);\n`);
+        }
+      }
+      _ => {}
+    }
+    self.dropCode.push(`function ${name}(v, m) {\n${body}}\n`);
+    name
+  }
+
+  function dropField(self: mut Self, body: mut String, f: str, ft: Ty, span: Span): void uses Fail<Diagnostic> {
+    if (!self.needsDrop(ft)) { return; }
+    const fn = self.dropFn(ft, span);
+    const k = quote(f);
+    body.push(`  if (m === null || !m.has(${k})) ${fn}(v.${mangleField(f)}, $rt.sub(m, ${k}));\n`);
+  }
+
+  // Drops a tag's payload: one value in `$`, several in an array, or a record.
+  function dropPayload(self: mut Self, body: mut String, tag: str, pt: Ty, span: Span): void uses Fail<Diagnostic> {
+    if (!self.needsDrop(pt)) { return; }
+    match (pt) {
+      #Tuple(ts) => {
+        if (ts.len() == 1) {
+          const f = self.dropFn(ts[0].clone(), span);
+          body.push(`  if (v.$tag === ${quote(tag)}) ${f}(v.$, null);\n`);
+        } else {
+          for (const [i, x] of ts.iter().enumerate()) {
+            if (self.needsDrop(x)) {
+              const f = self.dropFn(x.clone(), span);
+              body.push(`  if (v.$tag === ${quote(tag)}) ${f}(v.$[${i}], null);\n`);
+            }
+          }
+        }
+      }
+      other => {
+        const f = self.dropFn(other, span);
+        body.push(`  if (v.$tag === ${quote(tag)}) ${f}(v.$, null);\n`);
+      }
+    }
+  }
+
+  // A call of the type's `Drop.drop` on `v`, run to its end: a destructor does not suspend.
+  function dropCall(self: mut Self, t: Ty, span: Span): String uses Fail<Diagnostic> {
+    const found = self.p.defs.iter().findIndex((d) => d.name == "Drop" && self.p.modules[d.module].isStd);
+    const iface = match (found) { #Some(d) => d, #None => self.fail(span, "no `Drop`") };
+    const f: usize = match (self.p.ifaceFns.get(`${iface}:drop`.asStr())) { #Some(f) => f, #None => self.fail(span, "no `Drop.drop`") };
+    const c = self.callee(f, [#Ty(t)], span);
+    match (c) {
+      #Inst(i) => {
+        const js = self.insts[i].js.clone();
+        if (self.insts[i].suspends) { `$rt.drive(${js}({ v: v }))` } else { `${js}({ v: v })` }
+      }
+      #Builtin(k) => `$b.${k}({ v: v })`,
+    }
+  }
+
+  // The move, if any, an expression makes out of an owner: the owner and the field path.
+  function moveOf(self: readonly Self, e: readonly Expr): Option<[Local, Vec<String>]> {
+    const path: Vec<String> = match (self.p.typed.get(self.fid)) {
+      #Some(t) => match (t.moves.get(e.span)) { #Some(p) => p.clone(), #None => return #None },
+      #None => return #None,
+    };
+    match (rootName(e)) {
+      #Some(n) => match (self.local(n.asStr())) {
+        #Some(l) => if (l.owner.isSome()) { #Some([l, path]) } else { #None },
+        #None => #None,
+      },
+      #None => #None,
+    }
+  }
+
+  // An expression for a value moved out of its owner: the owner no longer drops it.
+  function moving(self: readonly Self, e: readonly Expr, v: String): String {
+    match (self.moveOf(e)) {
+      #Some([l, path]) => {
+        const flag = match (l.owner) { #Some([f, _]) => f, #None => return v };
+        if (path.len() == 0) { `(${flag}$l = false, ${v})` } else { `(${flag}$m = $rt.moved(${flag}$m, ${quote(path.join(".").asStr())}), ${v})` }
+      }
+      #None => v,
+    }
+  }
+
   // ---- the program ----
 
   // Whether the program starts tasks or makes channels or locks: anything the scheduler serves.
@@ -1941,6 +2349,27 @@ impl Js {
   }
 }
 
+// The binding a place expression is rooted at: `x`, `x.f`, `x.f.g`.
+function rootName(e: readonly Expr): Option<String> {
+  match (e.kind) {
+    #Ident(n) => #Some(n.clone()),
+    #Field { target, name: _ } => rootName(target),
+    _ => #None,
+  }
+}
+
+// The field path below a place's binding: `["f", "g"]` for `x.f.g`.
+function fieldPath(e: readonly Expr): Vec<String> {
+  match (e.kind) {
+    #Field { target, name } => {
+      let p = fieldPath(target);
+      p.push(name.name.clone());
+      p
+    }
+    _ => Vec.new(),
+  }
+}
+
 // A field's JavaScript name: one JavaScript gives a meaning of its own is renamed.
 function mangleField(n: str): String {
   if (n == "__proto__" || n == "constructor") { `${n}$` } else { n.toString() }
@@ -1954,7 +2383,9 @@ export function program(p: Program, entry: usize, runtime: str): String uses Fai
     #Some(#Fn(f)) => f,
     _ => throw #Failed("error: the program has no `main` function".toString()),
   };
+  const owned = p.fns.len();
   let js = Js.new(p);
+  js.owned = owned;
   js.tasks = js.startsTasks();
   const main = js.instance(mainFid, Vec.new());
   while (js.next < js.insts.len()) {
@@ -1970,6 +2401,7 @@ export function program(p: Program, entry: usize, runtime: str): String uses Fai
   let out = runtime.toString();
   out.push("\n");
   out.push(js.head.asStr());
+  out.push(js.dropCode.asStr());
   out.push(js.code.asStr());
   const suspends = if (js.insts[main].suspends) { "true" } else { "false" };
   const tasks = if (js.tasks) { "true" } else { "false" };
