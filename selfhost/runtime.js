@@ -29,7 +29,31 @@ const { $rt, $b } = (() => {
   // A range of a list lent `mut`: it reads as a copy and writes back.
   class RangeRef {
     constructor(a, lo, hi) { this.a = a; this.lo = lo; this.hi = hi; }
-    get v() { return this.a.slice(this.lo, this.hi); }
+    // A view of the range, not a copy: what is written through it lands in the list.
+    get v() {
+      const r = this;
+      const index = (k) => (typeof k === "string" && /^(0|[1-9][0-9]*)$/.test(k) ? Number(k) : -1);
+      return new Proxy([], {
+        get(t, k) {
+          if (k === "length") return r.hi - r.lo;
+          const i = index(k);
+          if (i >= 0) return i < r.hi - r.lo ? r.a[r.lo + i] : undefined;
+          return Reflect.get(t, k);
+        },
+        set(t, k, x) {
+          const i = index(k);
+          if (i >= 0 && i < r.hi - r.lo) { r.a[r.lo + i] = x; return true; }
+          return Reflect.set(t, k, x);
+        },
+        has(t, k) { const i = index(k); return i >= 0 ? i < r.hi - r.lo : Reflect.has(t, k); },
+        ownKeys() { const ks = []; for (let i = 0; i < r.hi - r.lo; i++) ks.push(String(i)); ks.push("length"); return ks; },
+        getOwnPropertyDescriptor(t, k) {
+          const i = index(k);
+          if (i >= 0 && i < r.hi - r.lo) return { value: r.a[r.lo + i], writable: true, enumerable: true, configurable: true };
+          return Reflect.getOwnPropertyDescriptor(t, k);
+        },
+      });
+    }
     set v(x) { for (let i = 0; i < x.length; i++) this.a[this.lo + i] = x[i]; }
   }
   function indexRef(a, i) { return new FieldRef(a, at(a, i)); }

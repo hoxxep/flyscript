@@ -1,3 +1,3 @@
-// error: `s` was moved and cannot be used here
+// error: `s` was moved at 3:56 and cannot be used here
 function take(s: String): void {}
 export function f(): void { let s = String.new(); take(s); take(s); }

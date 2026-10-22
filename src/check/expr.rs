@@ -1184,7 +1184,11 @@ impl<'p> Checker<'p> {
                         PKind::Row => GArg::Row(self.s.fresh_effs()),
                         PKind::Len => GArg::Len(self.s.fresh_len()),
                     })
-                    .collect();
+                    .collect::<Vec<_>>();
+                // An alias is the type it names: `P { … }` with `type P = { … }` builds a record.
+                if let DefKind::Alias { ty } = &self.p.defs[d].kind {
+                    return crate::check::env::subst_params(ty, &params, &args);
+                }
                 Ty::Named(d, args)
             }
             _ => {
@@ -1815,6 +1819,11 @@ impl<'p> Checker<'p> {
                 {
                     format!(": `{}` does not implement `{iface}`; ask for it with `impl {iface} for {};`", self.p.defs[d].name, self.p.defs[d].name)
                 }
+                // A list literal is an array, which does not grow (§3.1).
+                (Ty::Array(e, _), _) if ["push", "pop", "insert", "remove", "retain", "truncate", "drain"].contains(&name) => {
+                    let e = self.show(&e);
+                    format!(": an array has a fixed length; for a list that grows, declare a `Vec`: `let xs: Vec<{e}> = [ … ];`")
+                }
                 _ => String::new(),
             };
             self.err(span, format!("no method `{name}` on `{shown}`{hint}"));
@@ -2223,7 +2232,7 @@ impl<'p> Checker<'p> {
                 let t = match &resolved {
                     Ty::Borrow(false, inner) => {
                         let z = self.s.zonk(inner);
-                        if settled(&z) && !matches!(z, Ty::Param(_)) && self.p.is_copy(&z) {
+                        if (settled(&z) && !matches!(z, Ty::Param(_)) && self.p.is_copy(&z)) || self.s.is_number_var(&z) {
                             z
                         } else {
                             self.copy_binds.push(pat.span);

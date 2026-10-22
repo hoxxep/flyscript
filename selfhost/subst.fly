@@ -540,6 +540,14 @@ impl Subst {
   }
 
   // Integer and float variables left unconstrained take their defaults (§2.2).
+  // Whether `t` is a number literal whose type is still open: whatever it becomes is `Copy`.
+  export function isNumberVar(self: readonly Self, t: readonly Ty): bool {
+    match (self.resolve(t)) {
+      #Var(v) => match (self.tys[v as usize][1]) { #Any => false, _ => true },
+      _ => false,
+    }
+  }
+
   export function defaultLiterals(self: mut Self): void {
     for (const i of 0..self.tys.len()) {
       if (self.tys[i][0].isNone()) {

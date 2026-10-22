@@ -1097,6 +1097,8 @@ impl Checker {
             #Len => #Len(self.s.freshLen()),
           });
         }
+        // An alias is the type it names: `P { … }` with `type P = { … }` builds a record.
+        if (const #Alias { ty } = self.p.defs[d].kind) { return substParams(ty, params, args); }
         #Named(d, args)
       }
       _ => {
@@ -1683,6 +1685,12 @@ impl Checker {
           hint = `: \`${n}\` does not implement \`${iface}\`; ask for it with \`impl ${iface} for ${n};\``;
         }
       }
+      // A list literal is an array, which does not grow (§3.1).
+      const growing: str[] = ["push", "pop", "insert", "remove", "retain", "truncate", "drain"];
+      if (const #Array(el, _) = self.strip(recv) && growing.iter().some((m) => m == name)) {
+        const es = self.show(el);
+        hint = `: an array has a fixed length; for a list that grows, declare a \`Vec\`: \`let xs: Vec<${es}> = [ … ];\``;
+      }
       self.err(e.span, `no method \`${name}\` on \`${shown}\`${hint}`.asStr());
     }
     #Error
@@ -2217,7 +2225,7 @@ impl Checker {
         let bound = t.clone();
         if (const #Borrow(false, i) = resolved) {
           const z = self.s.zonk(i);
-          if (settled(z) && !match (z) { #Param(_) => true, _ => false } && self.p.isCopy(z)) {
+          if (settled(z) && !match (z) { #Param(_) => true, _ => false } && self.p.isCopy(z) || self.s.isNumberVar(z)) {
             bound = z;
           } else {
             self.copyBinds.push(pat.id);

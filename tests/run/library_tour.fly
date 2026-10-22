@@ -1,0 +1,96 @@
+// expect: [1, 3, 7, 8] 5 #Some(9) true #Some(3) #Some(1) #Some(8) #None
+// expect: [7, 3, 1] 3 7-3-1
+// expect: [71, 30, 10]
+// expect: ["fig", "pear", "banana"]
+// expect: ["fig", "pear"] 0
+// expect: [20, 40, 60] #Some(4) #Some(3) [21, 42, 63] [1, 3]
+// expect: true true 21 1+4+9+16+25+36
+// expect: #Some(5) #Some(6) #None
+// expect: ["ann", "bo"] 2 ["ann"]
+// expect: 5 #Some(3) true false #Some(1) #None
+// expect: ["and", "bat", "cat", "the"] 14
+// expect:   the 6
+// expect:   and 4
+// expect:   bat 2
+// expect:   cat 2
+// expect: true false true true true 1
+// expect: #Some(1) #Some("x") #None true d
+// expect: true #Ok(3)
+// expect: cy three one two
+// The library's lists, generators, maps, sets, options and places, as one program: every
+// implementation must agree on all of it.
+import { println } from "std/io";
+import { HashMap, HashSet } from "std/collections";
+
+type P = { name: String; age: u32 };
+
+export function main(): void uses Io {
+  // Vec and slices.
+  let v: Vec<i32> = [5, 3, 8, 1];
+  v.push(9);
+  v.insert(1, 7);
+  const removed = v.remove(0);
+  const popped = v.pop();
+  v.sort();
+  println(`${v} ${removed} ${popped} ${v.includes(8)} ${v.indexOf(8)} ${v.first()} ${v.last()} ${v.get(10)}`);
+  v.reverse();
+  v.retain((x) => x % 2 == 1);
+  println(`${v} ${v.len()} ${v.join("-")}`);
+  for (const x of v.iterMut()) { x *= 10; }
+  const [lo, hi] = v.splitAt(1);
+  lo[0] += 1;
+  println(`${v}`);
+  let words: Vec<String> = ["pear".toString(), "fig".toString(), "banana".toString()];
+  words.sortBy((a, b) => a.len().cmp(b.len()));
+  println(`${words}`);
+  words.truncate(2);
+  let drained: Vec<String> = Vec.new();
+  for (const w of words.drain()) { drained.push(w); }
+  println(`${drained} ${words.len()}`);
+
+  // Generators.
+  const xs = [1, 2, 3, 4, 5, 6];
+  const evens = xs.iter().filter((x) => x % 2 == 0).map((x) => x * 10).collect();
+  const firstBig = xs.iter().find((x) => x > 3);
+  const at = xs.iter().findIndex((x) => x == 4);
+  const pairs = xs.iter().zip(evens.iter()).map(([a, b]) => a + b).collect();
+  const numbered = xs.iter().enumerate().filter(([i, _]) => i % 2 == 0).map(([_, x]) => x).take(2).collect();
+  println(`${evens} ${firstBig} ${at} ${pairs} ${numbered}`);
+  println(`${xs.iter().some((x) => x > 5)} ${xs.iter().every((x) => x > 0)} ${xs.iter().reduce((a, x) => a + x, 0)} ${xs.iter().map((x) => x * x).join("+")}`);
+  let g = xs.iter().filter((x) => x > 4);
+  println(`${g.next()} ${g.next()} ${g.next()}`);
+  const ps = [{ name: "ann".toString(), age: 30 }, { name: "bo".toString(), age: 25 }];
+  const names = ps.iter().map((p) => p.name.clone()).collect();
+  const copies: Vec<P> = ps.iter().cloned().collect();
+  const older = ps.iter().filter((p) => p.age > 26).map((p) => p.name.clone()).collect();
+  println(`${names} ${copies.len()} ${older}`);
+
+  // Maps and sets.
+  let m: HashMap<String, u32> = HashMap.new();
+  for (const w of "the cat and the hat and the bat".splitWhitespace()) {
+    if (const #Some(n) = m.getMut(w)) { n += 1; } else { m.insert(w.toString(), 1); }
+  }
+  println(`${m.len()} ${m.get("the")} ${m.has("cat")} ${m.has("dog")} ${m.remove("hat")} ${m.remove("hat")}`);
+  for (const n of m.valuesMut()) { n *= 2; }
+  let keys: Vec<String> = m.keys().cloned().collect();
+  keys.sort();
+  println(`${keys} ${m.values().reduce((a, x) => a + x, 0)}`);
+  for (const [k, n] of m.sortedByValue()) { println(`  ${k.padEnd(4)}${n}`); }
+  let s: HashSet<u32> = HashSet.new();
+  println(`${s.insert(3)} ${s.insert(3)} ${s.insert(4)} ${s.has(3)} ${s.remove(3)} ${s.len()}`);
+
+  // Options, results, boxes, places.
+  let o: Option<String> = #Some("x".toString());
+  const len = match (o) { #Some(t) => #Some(t.len()), #None => #None };
+  const taken = o.take();
+  println(`${len} ${taken} ${o} ${o.isNone()} ${o.unwrapOr("d".toString())}`);
+  const r: Result<u32, #Bad> = #Ok(3);
+  println(`${r.isOk()} ${Fail.capture(() => r.unwrap())}`);
+  const b = Box.new(P { name: "cy".toString(), age: 4 });
+  const inner = b.into();
+  let a1 = "one".toString();
+  let a2 = "two".toString();
+  swap(mut a1, mut a2);
+  const old = replace(mut a1, "three".toString());
+  println(`${inner.name} ${a1} ${a2} ${old}`);
+}

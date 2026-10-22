@@ -7,7 +7,7 @@
 //! is reachable from a point unless they are in different arms of the same branch, and a loop
 //! makes every use of a binding declared outside it reachable (its back edge).
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use super::env::{FnId, Program, Typed};
 use super::types::*;
@@ -139,6 +139,7 @@ pub fn check_function(p: &mut Program, fid: FnId) {
         next_role: Role::Plain,
         roles: Vec::new(),
         task_moved: HashMap::new(),
+        move_sites: BTreeMap::new(),
         dying_holds: HashMap::new(),
         handling: Vec::new(),
         sites: HashMap::new(),
@@ -246,6 +247,8 @@ struct Own<'p> {
     roles: Vec<Role>,
     /// Bindings a task moved in only because they are declared inside its scope, with where.
     task_moved: HashMap<VarId, Span>,
+    /// Where each place was first moved, for what a later use of it reports.
+    move_sites: BTreeMap<Path, Span>,
     /// What the bindings of the block being ended held.
     dying_holds: HashMap<VarId, BTreeSet<LoanId>>,
     /// The `handle`s whose bodies are being checked, innermost last: the effect each handles,
@@ -563,6 +566,16 @@ impl<'p> Own<'p> {
                 }
                 None => String::new(),
             };
+            // Where it was moved, unless a task took it.
+            let what = match self.move_sites.get(&m) {
+                // The same code, on an earlier pass through a loop.
+                Some(site) if why.is_empty() && site.start == at.start => format!("{what} here on an earlier pass through the loop"),
+                Some(site) if why.is_empty() => {
+                    let (line, col) = crate::diag::line_col(&self.p.modules[self.module].source, site.start);
+                    format!("{what} at {line}:{col}")
+                }
+                _ => what,
+            };
             self.err(at, format!("{what} and cannot be used here{why}"));
         }
         let held: BTreeSet<LoanId> = self.state.holds.get(&path.root).cloned().unwrap_or_default();
@@ -578,6 +591,7 @@ impl<'p> Own<'p> {
                         self.err(at, format!("cannot move `{}` out of a value whose type implements `Drop`", self.path_name(&path)));
                     } else if !self.collecting {
                         self.state.moved.insert(path.clone());
+                        self.move_sites.entry(path.clone()).or_insert(at);
                         // Where a value leaves its binding, the evaluator stops owning it there (§5.6).
                         self.moves.insert(at, path.fields.clone());
                     } else if let Some(arm) = self.arm_binds.get(&path.root) {

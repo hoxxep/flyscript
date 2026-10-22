@@ -91,6 +91,11 @@ impl Subst {
     // ---- resolution ----
 
     /// Follows variable bindings at the top of a type.
+    /// Whether `t` is a number literal whose type is still open: whatever it becomes is `Copy`.
+    pub fn is_number_var(&self, t: &Ty) -> bool {
+        matches!(self.resolve(t), Ty::Var(v) if self.tys[v as usize].1.0 != VarKind::Any)
+    }
+
     pub fn resolve(&self, t: &Ty) -> Ty {
         let mut t = t.clone();
         while let Ty::Var(v) = t {

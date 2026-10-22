@@ -179,6 +179,8 @@ export view struct Own {
   roles: Vec<Role>;
   // Bindings a task moved in only because they are declared inside its scope, with where.
   taskMoved: HashMap<usize, Span>;
+  // Where each place was first moved, for what a later use of it reports.
+  moveSites: Vec<[Path, Span]>;
   // What the bindings of the block being ended held.
   dyingHolds: HashMap<usize, Vec<usize>>;
   // The `handle`s whose bodies are being checked, innermost last: the effect each handles, and
@@ -226,7 +228,7 @@ export function checkOwnership(p: mut Program, fid: usize): void {
     loans: Vec.new(), state: emptyState(), chain: Vec.new(), nextNode: 0, temps: Vec.new(), deferred: Vec.new(),
     reported: HashSet.new(), lambdas: Vec.new(), escaping: false, resumes: HashMap.new(), contArgs: HashMap.new(),
     deadArgs: HashMap.new(), lentArgs: HashMap.new(), lambdaParams: HashSet.new(), iterating: false,
-    nextRole: #Plain, roles: Vec.new(), taskMoved: HashMap.new(), dyingHolds: HashMap.new(), handling: Vec.new(),
+    nextRole: #Plain, roles: Vec.new(), taskMoved: HashMap.new(), moveSites: Vec.new(), dyingHolds: HashMap.new(), handling: Vec.new(),
     sites: HashMap.new(), bySite: HashMap.new(), retTy, sources, sendParams, collecting: true,
     closureModes: HashMap.new(), varModes: HashMap.new(), moves: HashMap.new(), capturedMoves: HashMap.new(),
     armBinds: HashMap.new(), armMoves: HashSet.new(), lending: false, lentArms: HashSet.new(),
@@ -568,7 +570,16 @@ impl Own {
         }
         #None => String.new(),
       };
-      self.err(at, `${what} and cannot be used here${why}`.asStr());
+      // Where it was moved, unless a task took it.
+      let where = String.new();
+      if (why.len() == 0 && const #Some([_, site]) = self.moveSites.iter().find(([q, _]) => q == m)) {
+        // The same code, on an earlier pass through a loop.
+        where = if (site.start == at.start) { " here on an earlier pass through the loop".toString() } else {
+          const [line, col] = self.lineColOf(site.start);
+          ` at ${line}:${col}`
+        };
+      }
+      self.err(at, `${what}${where} and cannot be used here${why}`.asStr());
     }
     const held = self.holdsOf(path.root);
     match (how) {
@@ -583,6 +594,7 @@ impl Own {
             self.err(at, `cannot move \`${self.pathName(path)}\` out of a value whose type implements \`Drop\``.asStr());
           } else if (!self.collecting) {
             addMoved(mut self.state.moved, path.clone());
+            if (!self.moveSites.iter().some(([q, _]) => q == path)) { self.moveSites.push([path.clone(), at]); }
             // Where a value leaves its binding, the evaluator stops owning it there (§5.6).
             self.moves.insert(at, path.fields.clone());
           } else if (const #Some(arm) = self.armBinds.get(path.root)) {
