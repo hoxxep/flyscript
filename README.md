@@ -64,7 +64,7 @@ test("degrades gracefully under packet loss", () => {
 
 Flyscript is an early-stage language under active design, developed in the open.
 
-- **Language specification:** version 0.60, with every earlier version and the reasoning behind each change in [docs/history](docs/history/).
+- **Language specification:** version 0.61, with every earlier version and the reasoning behind each change in [docs/history](docs/history/).
 - **Compiler (`flyc`):** a complete prototype front end and evaluator. `flyc check` type-, effect- and ownership-checks programs, rejecting use after move, conflicting borrows, borrows that escape through closures and generators, undeclared effects and non-exhaustive matches with precise errors. `flyc run` executes them, with effect handlers, generators and structured concurrency, against a deterministic simulated world. `comptime` runs too: templates specialize per type, and the standard library's JSON codec is derived over reflection in plain Flyscript, with no compiler support.
 
 - **Flyscript in Flyscript:** a compiler written in Flyscript, in [selfhost/](selfhost/), parses, elaborates and checks the whole language — types, effects and ownership — reaching the same verdict as `flyc` on every program in the test suite, `comptime` and all. Its back end is typed: it specializes every generic function for the types it is used at, so method calls are direct, integers keep their widths, derived interfaces are compiled from their `comptime` definitions, effect handlers, generators and tasks run as JavaScript generators, and destructors run where the ownership checker says values die. Every program in the test suite runs compiled exactly as it runs in `flyc`, down to how its tasks interleave. It compiles itself: built by `flyc`, then run on its own output, it reproduces itself byte for byte, in about three seconds.
@@ -73,13 +73,16 @@ Flyscript is an early-stage language under active design, developed in the open.
 
 - **LLVM:** the compiler also writes a program's code as LLVM IR, links it with the runtime's C, and optimizes the two as one program, so a call into the runtime inlines like any other. Integer arithmetic is LLVM's own, checked by its overflow intrinsics. Debug information maps every instruction to its line and every variable to its value: a debugger stops at a line of a `.fly` file and shows strings, lists, structs and tagged unions as Flyscript writes them. Every program in the test suite runs this way under the sanitizers, the compiler built through LLVM reproduces itself byte for byte, and the kernel boots built through LLVM too, cross-compiled for AArch64.
 
+- **The web:** a [web framework](web/) in library code, and a [site](examples/todo/) built with it. Views are functions that perform `Ui`: the server, compiled natively, handles it by writing HTML, and each page's program, compiled to WebAssembly, takes over what the server rendered, then patches the DOM by a keyed diff of each render's flat list of operations, with no virtual DOM. Calls of the server are an effect too, handled against the store on the server and by `fetch` in the page, with typed failures raised where they were made. The server is Flyscript's own HTTP/1.1 over real sockets, a task per connection on every core.
+
 - **Every core:** native tasks run on a worker thread for each core, an idle worker stealing tasks not yet begun from a busy one, and `par` and `parReduce` split their work across all of them with a work-stealing `join`. On a 30-core machine, `par` over twenty million elements runs 24 times faster than on one core. Against a simulated world the same program runs its tasks one at a time, in the order its seed decides, which is how the test suite runs; on threads, the thread sanitizer checks the runtime.
 
-The compiler is written in Flyscript and compiles itself — to JavaScript, to native code through C or LLVM, and to WebAssembly — through one core IR; a small kernel written in Flyscript boots on QEMU. Next: a web framework built on all of it — see the [roadmap](docs/roadmap.md). Flyscript is not yet ready for production programs; it is ready for your ideas, and issues and discussion about the design are very welcome.
+The compiler is written in Flyscript and compiles itself — to JavaScript, to native code through C or LLVM, and to WebAssembly — through one core IR; a small kernel written in Flyscript boots on QEMU. What comes next is in the [roadmap](docs/roadmap.md). Flyscript is not yet ready for production programs; it is ready for your ideas, and issues and discussion about the design are very welcome.
 
 ## Explore
 
 - [The specification](docs/spec.md) — the five laws, the type system, effects, ownership, concurrency.
+- [A site](examples/todo/) — a list of things to do: a native server rendering pages, and a WebAssembly program for each page that takes it over, both from the same views.
 - [A kernel](examples/kernel/) — Flyscript with no operating system under it, booting on QEMU: page tables, a UART driven through its registers, its own memory allocator, effect handlers on fibers.
 - [Example programs](examples/) — a JSON parser, derived JSON encoding and decoding, an inventory service, a web server, a key–value actor, a browser UI, generators, parallel physics.
 - [The roadmap](docs/roadmap.md) — what comes next, and why in that order.

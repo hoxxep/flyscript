@@ -1840,6 +1840,7 @@ impl Cgen {
         `({ fly_File f_ = { 0 }; if (!fly_read_file(${arg(0)}, &f_.text)) { ${boxed}} f_; })`
       }
       "File_readText" => `fly_String_clone(&(${arg(0)})->text)`,
+      "File_readBytes" => `({ fly_File* f_ = ${arg(0)}; fly_vec_from(f_->text.ptr, f_->text.len, 1); })`,
       // `std/par`'s `join`: each half run by a function the runtime calls, maybe on another core.
       "join" => {
         const [ta, tb] = match (rt) { #Tuple(ts) if ts.len() == 2 => [ts[0].clone(), ts[1].clone()], _ => return #Some(self.fail(span, "`join` gives a pair")) };

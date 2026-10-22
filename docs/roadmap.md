@@ -1,14 +1,18 @@
 # Roadmap
 
-Flyscript compiles itself today, to JavaScript and to C. The next five steps take it from a self-hosted language to a systems platform: one intermediate form under every back end, kernels, LLVM, WebAssembly, every core of the machine, and a web framework that shows what all of it buys.
+Flyscript compiled itself, to JavaScript and to C, when this roadmap was written. Its steps take it from a self-hosted language to a systems platform: one intermediate form under every back end, kernels, LLVM, WebAssembly, every core of the machine, and a web framework that shows what all of it buys. Every step is done; each section says what was built.
 
 ## 0. One core IR under every back end
+
+*Done: `selfhost/ir.fly`, which the JavaScript, C and LLVM back ends all print.*
 
 The compiler lowers the checked program once, after specialization, into a small statement IR: every type a concrete layout, every temporary named in evaluation order, every block with its cleanup (drops, `defer`s, region arenas) explicit, every early exit naming the scopes it unwinds, closures as `{ code, environment, drop }`, region evidence as parameters, and each function classified by what it can do: nothing, fail, allocate in a region, or suspend.
 
 The C and JavaScript back ends both become printers of this IR, so Flyscript's semantics — evaluation order, pattern matching, drops, unwinding — are lowered in exactly one place. Cleanup becomes lexical: a value is dropped where its scope ends, on every path out of it.
 
 ## 1. Foreign code and freestanding programs
+
+*Done: raw pointers, `Unsafe`, `extern "C"` both ways, `@layout(c, align = N)`, fallible allocation, and [a kernel](../examples/kernel/) that boots on QEMU.*
 
 The foreign interface of §8.2, built for real, and what a kernel needs beyond it:
 
@@ -22,17 +26,25 @@ The proof is a small AArch64 kernel that boots under QEMU, drives a UART through
 
 ## 2. WebAssembly
 
+*Done: every test program and the compiler itself run as WebAssembly; pages run it in browsers ([web](../web/)).*
+
 Through clang's `wasm32` target for WASI, with fibers in linear memory: each fiber keeps its own shadow stack, so a value lent `mut` across a suspension never moves, and the host switches between them by JavaScript promise integration. `Io` maps to the host: WASI, or promises in a browser. Every test program and the compiler itself run as WebAssembly.
 
 ## 3. LLVM
+
+*Done: `selfhost/llvm.fly`, with debug information for lldb and gdb; the compiler built through LLVM reproduces itself, and the kernel boots built through it.*
 
 A back end that writes LLVM IR as text from the core IR, linked with the same runtime: exact integer semantics, debug information that maps to `.fly` source, and every target LLVM supports. The C back end stays as the portable, dependency-free bootstrap.
 
 ## 4. Every core
 
+*Done: a work-stealing scheduler over a worker per core, and `par` over a work-stealing `join`, checked by the thread sanitizer; the deterministic scheduler runs every test.*
+
 Tasks on all cores: a work-stealing scheduler over one worker thread per core, small pooled fiber stacks, atomic `Arc` counts, the unwind state kept per fiber, and `par` on a fork-join pool. The deterministic single-thread scheduler remains a separate implementation of the same `Io` interface, and is what tests run on, so every interleaving a test sees can be reproduced from its seed.
 
 ## 5. A web framework
+
+*Done, as a proof of concept: [web](../web/) and [a site](../examples/todo/) built with it. Each route's program is a WebAssembly module of its own, each holding its own copy of the runtime rather than sharing one.*
 
 A proof of concept of what Next.js and React do, in one Flyscript component tree:
 

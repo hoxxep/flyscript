@@ -1,0 +1,395 @@
+// The page's side of `Ui`, in WebAssembly: a view rendered to the DOM, and the loop that runs a
+// program — render, wait for an event, update, render again. A render is recorded as the flat list
+// of the view's operations, with the DOM node each element and text became; the next one is diffed
+// against it, keyed children matched by their keys, the rest in order, and only what changed is
+// done to the page. The first takes over the page the server rendered, if it is the same.
+//
+// The page is reached through functions the host page gives (`web/flynext.js`): nodes by number,
+// strings as bytes in this program's memory. Waiting for an event, or for the server, suspends
+// the program until the page has one for it.
+
+import { Ui, Event } from "./ui";
+
+extern "C" function fly_dom_root(): u32;
+extern "C" function fly_dom_child(parent: u32, i: u32): u32;
+extern "C" function fly_dom_children(parent: u32): u32;
+extern "C" function fly_dom_is(node: u32, tag: u8*, len: u32): bool;
+extern "C" function fly_dom_create(tag: u8*, len: u32): u32;
+extern "C" function fly_dom_text(s: u8*, len: u32): u32;
+extern "C" function fly_dom_set_text(node: u32, s: u8*, len: u32): void;
+extern "C" function fly_dom_set_attr(node: u32, name: u8*, nlen: u32, value: u8*, vlen: u32): void;
+extern "C" function fly_dom_remove_attr(node: u32, name: u8*, nlen: u32): void;
+extern "C" function fly_dom_insert(parent: u32, node: u32, before: u32): void;
+extern "C" function fly_dom_remove(node: u32): void;
+extern "C" function fly_dom_clear(parent: u32): void;
+extern "C" function fly_dom_on(node: u32, event: u8*, elen: u32, msg: u32): void;
+extern "C" function fly_dom_off(node: u32): void;
+// The next event, waited for; the server's answer to a request; the state the server rendered the
+// page with: each a string the page keeps, of the length given, for `fly_take` to copy out.
+extern "C" function fly_wait_event(): u32;
+extern "C" function fly_fetch(url: u8*, ulen: u32, body: u8*, blen: u32): u32;
+extern "C" function fly_initial(): u32;
+extern "C" function fly_take(out: u8*, len: u32): void;
+
+// ---- strings across ----
+
+// A string's bytes, where the page can read them.
+function bytes(s: str): Vec<u8> {
+  let v: Vec<u8> = Vec.new();
+  for (const b of s.bytes()) { v.push(b); }
+  // The page reads none of an empty string's, but the address of one byte.
+  if (v.len() == 0) { v.push(0); }
+  v
+}
+
+function addr(v: mut Vec<u8>): u8* { Ptr.fromMut(mut v[0]) }
+
+// The string the page keeps, `n` bytes of it.
+function take(n: u32): String {
+  let v: Vec<u8> = Vec.new();
+  for (const _ of 0..max(n, 1)) { v.push(0); }
+  unsafe { fly_take(addr(mut v), n); }
+  v.truncate(n as usize);
+  match (String.fromUtf8(v)) { #Some(s) => s, #None => String.new() }
+}
+
+// The state the server rendered the page with, as the server wrote it.
+export function initial(): String {
+  const n = unsafe { fly_initial() };
+  take(n)
+}
+
+// Asks the server: posts `body` to `url`, and gives what it answers.
+export function fetch(url: str, body: str): String {
+  let u = bytes(url);
+  let b = bytes(body);
+  const n = unsafe { fly_fetch(addr(mut u), url.len() as u32, addr(mut b), body.len() as u32) };
+  take(n)
+}
+
+// ---- the DOM ----
+
+function create(tag: str): u32 {
+  let t = bytes(tag);
+  unsafe { fly_dom_create(addr(mut t), tag.len() as u32) }
+}
+
+function textNode(s: str): u32 {
+  let t = bytes(s);
+  unsafe { fly_dom_text(addr(mut t), s.len() as u32) }
+}
+
+function setText(node: u32, s: str): void {
+  let t = bytes(s);
+  unsafe { fly_dom_set_text(node, addr(mut t), s.len() as u32); }
+}
+
+function setAttr(node: u32, name: str, value: str): void {
+  let n = bytes(name);
+  let v = bytes(value);
+  unsafe { fly_dom_set_attr(node, addr(mut n), name.len() as u32, addr(mut v), value.len() as u32); }
+}
+
+function removeAttr(node: u32, name: str): void {
+  let n = bytes(name);
+  unsafe { fly_dom_remove_attr(node, addr(mut n), name.len() as u32); }
+}
+
+function listen(node: u32, event: str, msg: usize): void {
+  let e = bytes(event);
+  unsafe { fly_dom_on(node, addr(mut e), event.len() as u32, msg as u32); }
+}
+
+function isTag(node: u32, tag: str): bool {
+  let t = bytes(tag);
+  unsafe { fly_dom_is(node, addr(mut t), tag.len() as u32) }
+}
+
+// ---- renders ----
+
+export enum Op { #Open(String), #Key(String), #Attr(String, String), #On(String, usize), #Text(String), #Close }
+impl Clone for Op;
+
+// What a render made: its operations, the node each `#Open` and `#Text` became, and the messages
+// its events give, numbered as its `#On`s say.
+export type Frame<M> = { ops: Vec<Op>; nodes: Vec<u32>; msgs: Vec<M> };
+
+// Records what `view` does.
+export function record<M extends Send & Clone>(view: () => void uses Ui<M>): Frame<M> {
+  let ops: Vec<Op> = Vec.new();
+  let msgs: Vec<M> = Vec.new();
+  handle { view() } with Ui<M> {
+    open(tag) resumes k => { ops.push(#Open(tag.toString())); k() }
+    key(s) resumes k => { ops.push(#Key(s.toString())); k() }
+    attr(name, value) resumes k => { ops.push(#Attr(name.toString(), value.toString())); k() }
+    on(event, msg) resumes k => {
+      ops.push(#On(event.toString(), msgs.len()));
+      msgs.push(msg.clone());
+      k()
+    }
+    text(s) resumes k => { ops.push(#Text(s.toString())); k() }
+    close() resumes k => { ops.push(#Close); k() }
+  };
+  let nodes: Vec<u32> = Vec.new();
+  for (const _ of 0..ops.len()) { nodes.push(0); }
+  { ops, nodes, msgs }
+}
+
+// One child of an element in a render: where its operations start and end, and its key.
+type Kid = { start: usize; end: usize; key: Option<String> };
+
+// Where the operations of the child starting at `i` end.
+function spanOf(ops: readonly Vec<Op>, i: usize): usize {
+  match (ops[i]) {
+    #Open(_) => {
+      let depth: usize = 0;
+      let j = i;
+      while (j < ops.len()) {
+        match (ops[j]) {
+          #Open(_) => { depth += 1; }
+          #Close => {
+            depth -= 1;
+            if (depth == 0) { return j + 1; }
+          }
+          _ => {}
+        }
+        j += 1;
+      }
+      ops.len()
+    }
+    _ => i + 1,
+  }
+}
+
+// The children whose operations start at `from`, up to the `#Close` of the element they are in.
+function kids(ops: readonly Vec<Op>, from: usize): Vec<Kid> {
+  let out: Vec<Kid> = Vec.new();
+  let i = from;
+  while (i < ops.len()) {
+    match (ops[i]) {
+      #Close => return out,
+      #Open(_) | #Text(_) => {
+        const end = spanOf(ops, i);
+        out.push({ start: i, end, key: keyOf(ops, i) });
+        i = end;
+      }
+      _ => { i += 1; }
+    }
+  }
+  out
+}
+
+// An element's key, among its own operations, before its children.
+function keyOf(ops: readonly Vec<Op>, i: usize): Option<String> {
+  if (const #Open(_) = ops[i]) {
+    let j = i + 1;
+    while (j < ops.len()) {
+      match (ops[j]) {
+        #Key(k) => return #Some(k.clone()),
+        #Attr(_, _) | #On(_, _) => { j += 1; }
+        _ => return #None,
+      }
+    }
+  }
+  #None
+}
+
+// Whether two children are the same kind of node: elements of one tag, or texts.
+function sameKind(a: readonly Op, b: readonly Op): bool {
+  match (a) {
+    #Open(x) => match (b) { #Open(y) => x == y, _ => false },
+    #Text(_) => match (b) { #Text(_) => true, _ => false },
+    _ => false,
+  }
+}
+
+// An element's attributes and events, as the operations after its `#Open` say.
+function props(ops: readonly Vec<Op>, i: usize): [Vec<[String, String]>, Vec<[String, usize]>] {
+  let attrs: Vec<[String, String]> = Vec.new();
+  let events: Vec<[String, usize]> = Vec.new();
+  let j = i + 1;
+  while (j < ops.len()) {
+    match (ops[j]) {
+      #Attr(n, v) => attrs.push([n.clone(), v.clone()]),
+      #On(e, m) => events.push([e.clone(), m]),
+      #Key(_) => {}
+      _ => break,
+    }
+    j += 1;
+  }
+  [attrs, events]
+}
+
+// Makes the node the child at `i` of `f` shows, and its descendants, and records them in `f`.
+function build<M>(f: mut Frame<M>, i: usize): u32 {
+  match (f.ops[i]) {
+    #Text(s) => {
+      const node = textNode(s.asStr());
+      f.nodes[i] = node;
+      node
+    }
+    #Open(tag) => {
+      const node = create(tag.asStr());
+      f.nodes[i] = node;
+      const [attrs, events] = props(f.ops, i);
+      for (const [n, v] of attrs) { setAttr(node, n.asStr(), v.asStr()); }
+      for (const [e, m] of events) { listen(node, e.asStr(), m); }
+      for (const kid of kids(f.ops, i + 1)) {
+        const child = build(mut f, kid.start);
+        unsafe { fly_dom_insert(node, child, 0); }
+      }
+      node
+    }
+    _ => 0,
+  }
+}
+
+// Takes over the node `node` for the child at `i` of `f`, as the server rendered it: true if it is
+// what the child shows, its descendants too.
+function adopt<M>(f: mut Frame<M>, i: usize, node: u32): bool {
+  match (f.ops[i]) {
+    #Text(_) => {
+      if (!isTag(node, "#text")) { return false; }
+      f.nodes[i] = node;
+      true
+    }
+    #Open(tag) => {
+      if (!isTag(node, tag.asStr())) { return false; }
+      f.nodes[i] = node;
+      const [_, events] = props(f.ops, i);
+      for (const [e, m] of events) { listen(node, e.asStr(), m); }
+      const ks = kids(f.ops, i + 1);
+      if (unsafe { fly_dom_children(node) } != ks.len() as u32) { return false; }
+      for (const [c, kid] of ks.iter().enumerate()) {
+        const child = unsafe { fly_dom_child(node, c as u32) };
+        if (!adopt(mut f, kid.start, child)) { return false; }
+      }
+      true
+    }
+    _ => false,
+  }
+}
+
+// The first render into `root`: the server's nodes taken over if they are what it shows, else
+// made afresh.
+export function hydrate<M>(root: u32, f: mut Frame<M>): void {
+  const ks = kids(f.ops, 0);
+  let same = unsafe { fly_dom_children(root) } == ks.len() as u32;
+  if (same) {
+    for (const [c, kid] of ks.iter().enumerate()) {
+      const child = unsafe { fly_dom_child(root, c as u32) };
+      if (!adopt(mut f, kid.start, child)) {
+        same = false;
+        break;
+      }
+    }
+  }
+  if (!same) {
+    unsafe { fly_dom_clear(root); }
+    for (const kid of ks) {
+      const child = build(mut f, kid.start);
+      unsafe { fly_dom_insert(root, child, 0); }
+    }
+  }
+}
+
+// Updates the node of the child at `oi` of `old`, which the child at `ni` of `new` now shows.
+function patch<M>(old: readonly Frame<M>, oi: usize, new: mut Frame<M>, ni: usize): u32 {
+  const node = old.nodes[oi];
+  new.nodes[ni] = node;
+  match (new.ops[ni]) {
+    #Text(s) => {
+      if (const #Text(was) = old.ops[oi] && was != s) { setText(node, s.asStr()); }
+    }
+    #Open(_) => {
+      const [oa, _] = props(old.ops, oi);
+      const [na, ne] = props(new.ops, ni);
+      for (const [n, v] of na) {
+        const same = oa.iter().some(([m, w]) => m == n && w == v);
+        if (!same) { setAttr(node, n.asStr(), v.asStr()); }
+      }
+      for (const [m, _] of oa) {
+        if (!na.iter().some(([n, _]) => n == m)) { removeAttr(node, m.asStr()); }
+      }
+      unsafe { fly_dom_off(node); }
+      for (const [e, m] of ne) { listen(node, e.asStr(), m); }
+      children(node, old, oi + 1, mut new, ni + 1);
+    }
+    _ => {}
+  }
+  node
+}
+
+// Updates the children of `parent`, which `old`'s start at `oi` and `new`'s at `ni`: each new one
+// matched to an old one by key, or in order among those of its kind without one; the rest made,
+// the old ones not matched removed, and all put in order.
+export function children<M>(parent: u32, old: readonly Frame<M>, oi: usize, new: mut Frame<M>, ni: usize): void {
+  const was = kids(old.ops, oi);
+  const now = kids(new.ops, ni);
+  let used: Vec<bool> = Vec.new();
+  for (const _ of was) { used.push(false); }
+  let nodes: Vec<u32> = Vec.new();
+  for (const kid of now) {
+    let found: Option<usize> = #None;
+    for (const [j, w] of was.iter().enumerate()) {
+      if (used[j] || !sameKind(old.ops[w.start], new.ops[kid.start])) { continue; }
+      const fits = match (kid.key) {
+        #Some(k) => match (w.key) { #Some(wk) => wk == k, #None => false },
+        #None => w.key.isNone(),
+      };
+      if (fits) {
+        found = #Some(j);
+        break;
+      }
+    }
+    const node = match (found) {
+      #Some(j) => {
+        used[j] = true;
+        patch(old, was[j].start, mut new, kid.start)
+      }
+      #None => build(mut new, kid.start),
+    };
+    nodes.push(node);
+  }
+  for (const [j, w] of was.iter().enumerate()) {
+    if (!used[j]) { unsafe { fly_dom_remove(old.nodes[w.start]); } }
+  }
+  // In order, from the last: each put before the one after it, if it is not there already.
+  let next: u32 = 0;
+  let k = nodes.len();
+  while (k > 0) {
+    k -= 1;
+    unsafe { fly_dom_insert(parent, nodes[k], next); }
+    next = nodes[k];
+  }
+}
+
+// ---- running ----
+
+// The event the page has: the message's number, then what the event says, each ended by a zero.
+function nextEvent(): [usize, Event] {
+  const n = unsafe { fly_wait_event() };
+  const s = take(n);
+  const parts = s.asStr().split("\0");
+  const index: usize = if (parts.len() > 0) { match (parseInt(parts[0].asStr())) { #Some(i) => i as usize, #None => 0 } } else { 0 };
+  const field = (i: usize) => if (i < parts.len()) { parts[i].clone() } else { String.new() };
+  [index, { text: field(1), key: field(2), checked: field(3) == "true" }]
+}
+
+// Runs a program in the page: `view` of `model` rendered, then each event's message given to
+// `update`, and the view rendered again, for as long as the page is open.
+export function run<Model, M extends Send & Clone, row E>(model: Model, view: (m: readonly Model) => void uses Ui<M>, update: (m: mut Model, msg: M, ev: readonly Event) => void uses ...E): void uses ...E {
+  let m = model;
+  const root = unsafe { fly_dom_root() };
+  let f = record(() => view(m));
+  hydrate(root, mut f);
+  while (true) {
+    const [i, ev] = nextEvent();
+    if (i < f.msgs.len()) {
+      update(mut m, f.msgs[i].clone(), ev);
+      let g = record(() => view(m));
+      children(root, f, 0, mut g, 0);
+      f = g;
+    }
+  }
+}

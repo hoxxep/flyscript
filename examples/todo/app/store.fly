@@ -1,0 +1,51 @@
+// The server's things to do, shared by every connection's task, changed only under a lock.
+
+import { Mutex } from "std/sync";
+import { Todo, TodoErr, Todos } from "./api";
+
+export type Store = { todos: Vec<Todo>; next: u32 };
+
+export function store(): Store {
+  {
+    todos: [
+      { id: 1, title: "Write the language".toString(), done: true },
+      { id: 2, title: "Compile it to WebAssembly".toString(), done: true },
+      { id: 3, title: "Render pages on the server and take them over in the browser".toString(), done: false },
+    ],
+    next: 4,
+  }
+}
+
+function addTo(s: mut Store, title: String): Result<Vec<Todo>, TodoErr> {
+  const t = title.asStr().trim();
+  if (t.len() == 0) { return #Err(#Empty); }
+  if (t.len() > 80) { return #Err(#TooLong); }
+  s.todos.push({ id: s.next, title: t.toString(), done: false });
+  s.next += 1;
+  #Ok(s.todos.clone())
+}
+
+function toggleIn(s: mut Store, id: u32): Vec<Todo> {
+  for (const t of s.todos.iterMut()) {
+    if (t.id == id) { t.done = !t.done; }
+  }
+  s.todos.clone()
+}
+
+function clearIn(s: mut Store): Vec<Todo> {
+  s.todos.retain((t) => !t.done);
+  s.todos.clone()
+}
+
+// Runs `body` with `Todos` answered from the store.
+export function withStore<T, row E>(db: readonly Mutex<Store>, body: once () => T uses Todos, Io, ...E): T uses Io, ...E {
+  handle { body() } with Todos {
+    list() resumes k => k(db.lock((s) => s.todos.clone())),
+    add(title) resumes k => {
+      const t = title.clone();
+      k(db.lock((s) => addTo(mut s, t)))
+    }
+    toggle(id) resumes k => k(db.lock((s) => toggleIn(mut s, id))),
+    clearDone() resumes k => k(db.lock((s) => clearIn(mut s))),
+  }
+}

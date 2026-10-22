@@ -711,6 +711,7 @@ const { $rt, $b } = (() => {
       catch (e) { throw new Fail({ $tag: "NotFound" }); }
     },
     File_readText: (r) => r.v.text,
+    File_readBytes: (r) => Array.from(r.v.text, (c) => c.charCodeAt(0)),
     *File_lines(r) { yield* $b.str_lines(r.v.text); },
 
     // `std/par`'s two pure halves, one after the other: the order cannot be seen.

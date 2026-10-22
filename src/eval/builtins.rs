@@ -796,6 +796,11 @@ impl Interp {
                 let id = native(&a(0), "File")? as usize;
                 Ok(Value::text(&String::from_utf8_lossy(&self.world.lock().expect("world").sockets[id].input)))
             }
+            "File.readBytes" => {
+                let id = native(&a(0), "File")? as usize;
+                let bytes: Vec<Value> = self.world.lock().expect("world").sockets[id].input.iter().map(|b| Value::Int(*b as i128)).collect();
+                Ok(Value::List(bytes.into()))
+            }
             "writeFile" => {
                 let (path, content) = (a(0).as_text().to_string(), a(1).as_text().to_string());
                 let mut w = self.world.lock().expect("world");

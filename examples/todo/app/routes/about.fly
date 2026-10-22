@@ -1,0 +1,27 @@
+// A page with nothing to change: the server renders it, and the page's program takes it over all
+// the same.
+
+import { Ui, Event, el, text, attr, cls } from "../../../../web/ui";
+import { nav } from "../layout";
+
+export type Model = { visits: u32 };
+export type Msg = #Nothing;
+
+export const title: str = "About";
+
+export function view(m: readonly Model): void uses Ui<Msg> {
+  el("main", () => {
+    nav("about");
+    el("h1", () => text("About"));
+    el("p", () => text("This site is one Flyscript program: a server compiled to native code, which renders each page and answers what pages ask of it, and a WebAssembly module for each page, which takes over the page the server rendered."));
+    el("p", () => {
+      text("Its views are functions that perform ");
+      el("code", () => text("Ui"));
+      text(": the server handles it by writing HTML, the page by changing the DOM. What pages ask of the server is an effect too, ");
+      el("code", () => text("Todos"));
+      text(", which the server handles against its store and the page by asking the server.");
+    });
+  });
+}
+
+export function update(m: mut Model, msg: Msg, ev: readonly Event): void {}

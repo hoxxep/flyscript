@@ -5,6 +5,8 @@ impl File {
   export function lines(self: mut Self): void uses Io, Fail<IoErr>, Yield<String>;
   // The whole file, as text.
   export function readText(self: mut Self): String uses Io, Fail<IoErr>;
+  // The whole file, as bytes.
+  export function readBytes(self: mut Self): Vec<u8> uses Io, Fail<IoErr>;
 }
 
 // Writes `content` to the file at `path`, replacing what was there.

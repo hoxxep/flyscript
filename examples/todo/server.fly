@@ -1,0 +1,72 @@
+// The site's server: each page rendered from the store, what pages ask of it answered, and the
+// files pages load. `server [port] [dir]`: by default on port 8080, its files in `build/`.
+
+import { println, File } from "std/io";
+import { Listener } from "std/net";
+import { Mutex } from "std/sync";
+import { stringify } from "std/json";
+import { serve, Handler, Request, Response, Conn } from "../../web/http";
+import { page } from "../../web/page";
+import { Store, store, withStore } from "./app/store";
+import { answer } from "./app/rpc";
+import { view as indexView, load as indexLoad, title as indexTitle } from "./app/routes/index";
+import { view as aboutView, title as aboutTitle } from "./app/routes/about";
+
+struct Site { db: Mutex<Store>; dir: String }
+
+impl Handler for Site {
+  function handle(self: readonly Self, req: readonly Request, conn: mut Conn): void uses Io {
+    // A client that went away is no one to answer.
+    try { self.route(req, mut conn); } catch (_) {}
+  }
+}
+
+function contentType(path: str): str {
+  if (path.endsWith(".wasm")) { "application/wasm" }
+  else if (path.endsWith(".js")) { "text/javascript" }
+  else if (path.endsWith(".css")) { "text/css" }
+  else if (path.endsWith(".html")) { "text/html; charset=utf-8" }
+  else { "application/octet-stream" }
+}
+
+impl Site {
+  function route(self: readonly Self, req: readonly Request, conn: mut Conn): void uses Io, Fail<IoErr> {
+    const path = req.path.asStr();
+    if (path == "/") {
+      const m = withStore(self.db, () => indexLoad());
+      conn.write(Response.html(page(indexTitle, stringify(m).asStr(), "/_fly/index.wasm", () => indexView(m))));
+    } else if (path == "/about") {
+      const m = { visits: 0 as u32 };
+      conn.write(Response.html(page(aboutTitle, stringify(m).asStr(), "/_fly/about.wasm", () => aboutView(m))));
+    } else if (path.startsWith("/_fly/rpc/") && req.method == "POST") {
+      const op = path.slice(10, path.len());
+      const r = try { #Ok(withStore(self.db, () => answer(op, req.body.asStr()))) } catch (_) { #Err(#BadCall) };
+      match (r) {
+        #Ok(json) => conn.write(Response.json(json)),
+        #Err(_) => conn.write(Response.text(400, "bad call\n")),
+      }
+    } else if (path.includes("..")) {
+      conn.write(Response.text(404, "not found\n"));
+    } else {
+      // A file of the site: its style, its pages' programs and what runs them.
+      const found = try {
+        let f = File.open(`${self.dir}${path}`.asStr());
+        #Some(f.readBytes())
+      } catch (_) { #None };
+      match (found) {
+        #Some(bytes) => conn.writeBytes(200, contentType(path), bytes),
+        #None => conn.write(Response.text(404, "not found\n")),
+      }
+    }
+  }
+}
+
+export function main(args: readonly String[]): void uses Io {
+  const port: u16 = if (args.len() > 0) { match (parseInt(args[0].asStr())) { #Some(n) => n as u16, #None => 8080 } } else { 8080 };
+  const dir = if (args.len() > 1) { args[1].clone() } else { "build".toString() };
+  try {
+    let l = Listener.bind(port);
+    println(`listening on ${l.port()}`);
+    serve(mut l, Site { db: Mutex.new(store()), dir });
+  } catch (e) { println(`cannot serve: ${e}`); }
+}

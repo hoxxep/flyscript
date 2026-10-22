@@ -1,0 +1,21 @@
+// The server's answers to what a page asks: an operation of `Todos` by name, its arguments as a
+// JSON object, and its result as JSON, as the page's handler (client.fly) wrote and reads them.
+
+import { stringify, parse, JsonError } from "std/json";
+import { Todos } from "./api";
+
+export function answer(op: str, args: str): String uses Todos, Fail<JsonError | #NoSuchCall> {
+  match (op) {
+    "list" => stringify(Todos.list()),
+    "add" => {
+      const a: { title: String } = parse(args);
+      stringify(Todos.add(a.title))
+    }
+    "toggle" => {
+      const a: { id: u32 } = parse(args);
+      stringify(Todos.toggle(a.id))
+    }
+    "clearDone" => stringify(Todos.clearDone()),
+    _ => throw #NoSuchCall,
+  }
+}

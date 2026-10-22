@@ -1,0 +1,20 @@
+// The things to do, and what a page asks the server of them: an effect, which the server handles
+// against its store (store.fly), and the page by asking the server (client.fly).
+
+export type Todo = { id: u32; title: String; done: bool };
+export type TodoErr = #Empty | #TooLong;
+
+export effect Todos {
+  list(): Vec<Todo>;
+  add(title: String): Result<Vec<Todo>, TodoErr>;
+  toggle(id: u32): Vec<Todo>;
+  clearDone(): Vec<Todo>;
+}
+
+// Adds a thing to do: the list after, or why not, raised where it was asked for, on either side.
+export function add(title: String): Vec<Todo> uses Todos, Fail<TodoErr> {
+  match (Todos.add(title)) {
+    #Ok(ts) => ts,
+    #Err(e) => throw e,
+  }
+}

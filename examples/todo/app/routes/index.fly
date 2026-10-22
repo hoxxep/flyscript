@@ -1,0 +1,76 @@
+// The list of things to do: rendered by the server, then run by the page, which asks the server
+// to change it.
+
+import { Ui, Event, el, text, cls, attr, on, key } from "../../../../web/ui";
+import { Todo, TodoErr, Todos, add } from "../api";
+import { nav } from "../layout";
+
+export type Model = { todos: Vec<Todo>; draft: String; error: String };
+export type Msg = #Draft | #Add | #Toggle(u32) | #ClearDone;
+
+export const title: str = "Things to do";
+
+export function load(): Model uses Todos {
+  { todos: Todos.list(), draft: String.new(), error: String.new() }
+}
+
+export function view(m: readonly Model): void uses Ui<Msg> {
+  el("main", () => {
+    nav("todos");
+    el("h1", () => text("Things to do"));
+    el("form", () => {
+      on("submit", #Add);
+      el("input", () => {
+        attr("placeholder", "What needs doing?");
+        attr("value", m.draft.asStr());
+        on("input", #Draft);
+      });
+      el("button", () => { attr("type", "submit"); text("Add"); });
+    });
+    if (m.error.len() > 0) {
+      el("p", () => { cls("error"); text(m.error.asStr()); });
+    }
+    el("ul", () => {
+      cls("todos");
+      for (const t of m.todos) {
+        el("li", () => {
+          key(`${t.id}`.asStr());
+          if (t.done) { cls("done"); }
+          on("click", #Toggle(t.id));
+          el("span", () => { cls("check"); if (t.done) { text("✓"); } });
+          el("span", () => { cls("title"); text(t.title.asStr()); });
+        });
+      }
+    });
+    let left: u32 = 0;
+    let done: u32 = 0;
+    for (const t of m.todos) { if (t.done) { done += 1; } else { left += 1; } }
+    el("footer", () => {
+      el("span", () => text(`${left} left`.asStr()));
+      if (done > 0) {
+        el("button", () => { cls("quiet"); on("click", #ClearDone); text(`Clear ${done} done`.asStr()); });
+      }
+    });
+  });
+}
+
+export function update(m: mut Model, msg: Msg, ev: readonly Event): void uses Todos {
+  // What went wrong last is shown until something else is done.
+  m.error = String.new();
+  match (msg) {
+    #Draft => { m.draft = ev.text.clone(); }
+    #Add => {
+      try {
+        m.todos = add(m.draft.clone());
+        m.draft = String.new();
+      } catch (e) {
+        m.error = match (e) {
+          #Empty => "Write something to do first.",
+          #TooLong => "That is too long: 80 characters at most.",
+        }.toString();
+      }
+    }
+    #Toggle(id) => { m.todos = Todos.toggle(id); }
+    #ClearDone => { m.todos = Todos.clearDone(); }
+  }
+}

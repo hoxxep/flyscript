@@ -379,3 +379,51 @@ fn serves_http_on_threads() {
     server.kill().unwrap();
     server.wait().unwrap();
 }
+
+/// The todo site of examples/todo, built: its server renders pages from its store, answers the
+/// pages' calls of `Todos`, and serves each page's program; and, where Playwright is installed
+/// (FLY_NODE_PATH, its `node_modules`), the site works in a browser as someone would use it.
+#[test]
+fn todo_site_serves_and_runs() {
+    use std::io::{BufRead, BufReader, Read, Write};
+    if !has_wasm() || !has_cc() {
+        return;
+    }
+    let dir = out().join("todo");
+    let built = Command::new("sh").arg(root().join("examples/todo/build.sh")).arg(root().join("selfhost/seed.js")).arg(&dir).output().unwrap();
+    assert!(built.status.success(), "{}{}", String::from_utf8_lossy(&built.stdout), String::from_utf8_lossy(&built.stderr));
+    let start = || {
+        let mut server = Command::new(dir.join("server")).arg("0").arg(&dir).env_remove("FLY_WORLD").stdout(std::process::Stdio::piped()).spawn().unwrap();
+        let mut first = String::new();
+        BufReader::new(server.stdout.as_mut().unwrap()).read_line(&mut first).unwrap();
+        let port: u16 = first.trim().strip_prefix("listening on ").and_then(|p| p.parse().ok()).unwrap_or_else(|| panic!("the server said {first:?}"));
+        (server, port)
+    };
+    let ask = |port: u16, request: String| {
+        let mut s = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+        s.write_all(request.as_bytes()).unwrap();
+        let mut all = Vec::new();
+        s.read_to_end(&mut all).unwrap();
+        all
+    };
+    let get = |port: u16, path: &str| ask(port, format!("GET {path} HTTP/1.1\r\nHost: here\r\nConnection: close\r\n\r\n"));
+    let (mut server, port) = start();
+    let page = String::from_utf8(get(port, "/")).unwrap();
+    assert!(page.contains("<span class=\"title\">Write the language</span>") && page.contains("<script id=\"fly-state\""), "{page}");
+    let body = r#"{"title":"Asked by the test"}"#;
+    let answer = String::from_utf8(ask(port, format!("POST /_fly/rpc/add HTTP/1.1\r\nHost: here\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()))).unwrap();
+    assert!(answer.starts_with("HTTP/1.1 200") && answer.contains("Asked by the test"), "{answer}");
+    assert!(String::from_utf8(get(port, "/")).unwrap().contains("Asked by the test"), "the server did not keep what it was asked to add");
+    let wasm = get(port, "/_fly/index.wasm");
+    let at = wasm.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
+    assert!(wasm.starts_with(b"HTTP/1.1 200") && wasm[at..].starts_with(b"\0asm"), "the page's program is not served as WebAssembly");
+    server.kill().unwrap();
+    server.wait().unwrap();
+    // In a browser, against a server with its store as it starts.
+    let Ok(node_path) = std::env::var("FLY_NODE_PATH") else { return };
+    let (mut server, port) = start();
+    let r = Command::new("node").arg(root().join("examples/todo/e2e.js")).arg(port.to_string()).env("NODE_PATH", node_path).output().unwrap();
+    server.kill().unwrap();
+    server.wait().unwrap();
+    assert!(r.status.success(), "{}{}", String::from_utf8_lossy(&r.stdout), String::from_utf8_lossy(&r.stderr));
+}
