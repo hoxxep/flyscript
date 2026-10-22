@@ -41,8 +41,9 @@ void fly_mem_free(void* p);
 typedef uint8_t fly_unit;
 
 // A program that starts tasks runs them on every core, unless it runs against a simulated world
-// (§6.4): what code reads of the task running — its failure, whether it unwinds — is then its
-// thread's, and the scheduler keeps it for each task while another runs.
+// (§6.4). A task may then go on on another core after it waits, so the runtime's state of a
+// thread is kept in variables of the thread's, and what compiled code reads of the task running is
+// the task's own (`fly_ctx`, below).
 #if defined(FLY_TASKS) && !defined(FLY_FREESTANDING) && !defined(__wasm__)
 #define FLY_THREADS 1
 #define FLY_LOCAL _Thread_local
@@ -63,12 +64,33 @@ typedef struct { void* ptr; size_t len; } fly_slice;
 // A closure: its environment, what drops it, and its code, cast to its type where it is called.
 typedef struct { void* env; void (*drop)(void*); void* fn; } fly_fn;
 
-// ---- failure ----
+// ---- the task running ----
 
-// The failure being raised, if any: what was thrown, boxed. A function that may fail returns with
-// this set; its caller checks it after the call.
-extern FLY_LOCAL void* fly_err;
+typedef struct fly_handler fly_handler;
+// What compiled code reads and sets of the task running: the failure being raised, if any — what
+// was thrown, boxed, which a function that may fail returns with set, for its caller to check;
+// whether the task unwinds, a computation whose continuation was dropped; whether a generator
+// stops; and the handlers in force, innermost first.
+typedef struct fly_ctx { void* err; bool unwinding, stopping; fly_handler* handlers; } fly_ctx;
+#ifdef FLY_THREADS
+// The context of the task running. Within one call of a function it is always the same, wherever
+// the task goes on, so it is `const`: a compiler may compute it once a call. It is computed afresh
+// from the thread's own pointer to it, which the scheduler sets as it runs each task.
+fly_ctx* fly_cx(void) __attribute__((const));
+#else
+// With one thread there is one context. Code made through LLVM calls the function, which it
+// inlines.
+extern fly_ctx fly_ctx0;
+fly_ctx* (fly_cx)(void);
+#define fly_cx() (&fly_ctx0)
+#endif
+#define fly_err (fly_cx()->err)
+#define fly_unwinding (fly_cx()->unwinding)
+#define fly_stopping (fly_cx()->stopping)
+#define fly_handlers (fly_cx()->handlers)
 #define FLY_FAILED (fly_err != NULL)
+
+// ---- failure ----
 
 // What was thrown, boxed: its tag, for a value of a union, and the bytes of its payload, or of
 // the whole value. A `catch` takes it out as the type its pattern takes apart.
@@ -175,7 +197,6 @@ uint64_t fly_Hasher_finish(const fly_Hasher* h);
 // says whether it wants another. One that does not makes the generator stop: it sets
 // `fly_stopping` and unwinds, and the loop that started it clears it.
 typedef struct { void* env; bool (*fn)(void* env, void* item); } fly_yield;
-extern FLY_LOCAL bool fly_stopping;
 
 // A generator pulled for its items: its state, what makes its next item (false at the end), and
 // what drops it. The compiler makes `next` for each kind of item.
@@ -211,7 +232,6 @@ void* fly_box(const void* value, size_t size);
 
 // A fiber: a stack of its own, which runs until it suspends and is resumed where it left off.
 typedef struct fly_fiber fly_fiber;
-typedef struct fly_handler fly_handler;
 // A `handle` running its body on a fiber: the effect it handles, the operation the body performed
 // (-1 for none), where the body keeps that operation's arguments and wants its result, the
 // handlers around it, and the fiber the body is suspended in. A direct one (§5.3) has no fiber.
@@ -228,11 +248,6 @@ struct fly_handler {
   void (*direct)(void* frame, int op, void* args, void* result);
   void* frame;
 };
-// The handlers in force, innermost first.
-extern FLY_LOCAL fly_handler* fly_handlers;
-// Set while a computation whose continuation was dropped unwinds: every call that may suspend
-// leaves through its function's way out when it sees it.
-extern FLY_LOCAL bool fly_unwinding;
 void fly_perform(uint32_t effect, int op, void* args, void* result);
 // Whether a `handle` of `effect` is around the running code.
 bool fly_handled(uint32_t effect);

@@ -1221,14 +1221,29 @@ impl Lgen {
     out
   }
 
-  // Whether a global flag of the runtime's is set, as an `i1`.
+  // A field of the context of the task running (runtime.h's `fly_ctx`): its failure, whether it
+  // unwinds, whether a generator stops, its handlers. `@fly_cx` gives the same within a call, so
+  // LLVM computes it once a call.
+  function cxField(self: mut Self, name: str): String {
+    const cx = self.val("call ptr @fly_cx()");
+    match (name) {
+      "fly_err" => cx,
+      "fly_unwinding" => self.gep(cx.asStr(), self.ptr),
+      "fly_stopping" => self.gep(cx.asStr(), self.ptr + 1),
+      _ => self.gep(cx.asStr(), 2 * self.ptr),
+    }
+  }
+
+  // Whether a flag of the task running is set, as an `i1`.
   function flag(self: mut Self, name: str): String {
-    const v = self.load("i8", `@${name}`.asStr());
+    const at = self.cxField(name);
+    const v = self.load("i8", at.asStr());
     self.truth(v.asStr())
   }
 
   function failed(self: mut Self): String {
-    const e = self.load("ptr", "@fly_err");
+    const at = self.cxField("fly_err");
+    const e = self.load("ptr", at.asStr());
     self.val(`icmp ne ptr ${e}, null`)
   }
 
@@ -1309,7 +1324,8 @@ impl Lgen {
       #Body => self.stopBody(4, span),
       _ => {
         self.dynamicExit();
-        self.store("i8", "1", "@fly_stopping");
+        const at = self.cxField("fly_stopping");
+        self.store("i8", "1", at.asStr());
         const t = self.target();
         self.jump(t.asStr());
       }
@@ -2099,7 +2115,8 @@ impl Lgen {
       _ => self.ins(`call void @${name}__fly(${args.join(", ")})`),
     }
     self.dynamicExit();
-    self.store("i8", "0", "@fly_stopping");
+    const stopAt = self.cxField("fly_stopping");
+    self.store("i8", "0", stopAt.asStr());
     const u = self.flag("fly_unwinding");
     const t1 = self.target();
     self.jumpIf(u.asStr(), t1.asStr());
@@ -2229,7 +2246,7 @@ impl Lgen {
     const r = if (match (br) { #Mem => true, _ => false }) { "ptr noalias %r" } else { "" };
     // The body. Under a handler of `Yield`, its yields perform the operation.
     if (handlesYield) {
-      self.code.push(`define internal zeroext i1 @hyield_${n}(ptr %env, ptr %item) #0 {\n  %r = alloca i8\n  call void @fly_perform(i32 ${d}, i32 0, ptr %item, ptr %r)\n  %u = load i8, ptr @fly_unwinding\n  %ok = icmp eq i8 %u, 0\n  ret i1 %ok\n}\n\n`);
+      self.code.push(`define internal zeroext i1 @hyield_${n}(ptr %env, ptr %item) #0 {\n  %r = alloca i8\n  call void @fly_perform(i32 ${d}, i32 0, ptr %item, ptr %r)\n  %cx = call ptr @fly_cx()\n  %ua = getelementptr inbounds i8, ptr %cx, i64 ${self.ptr}\n  %u = load i8, ptr %ua\n  %ok = icmp eq i8 %u, 0\n  ret i1 %ok\n}\n\n`);
     }
     const cx = self.apartCtx(ap, base, b.clone(), #Fn);
     const saved = replace(mut self.cx, cx);
@@ -2429,14 +2446,15 @@ impl Lgen {
     self.store("i32", `${d}`.asStr(), hh.asStr());
     const opAt = self.gep(hh.asStr(), 4);
     self.store("i32", "-1", opAt.asStr());
-    const outer = self.load("ptr", "@fly_handlers");
+    const handlersAt = self.cxField("fly_handlers");
+    const outer = self.load("ptr", handlersAt.asStr());
     const outerAt = self.gep(hh.asStr(), HANDLER_OUTER);
     self.store("ptr", outer.asStr(), outerAt.asStr());
     const directAt = self.gep(hh.asStr(), HANDLER_DIRECT);
     self.store("ptr", `@harm_${n}`.asStr(), directAt.asStr());
     const frameAt = self.gep(hh.asStr(), HANDLER_FRAME);
     self.store("ptr", env.asStr(), frameAt.asStr());
-    self.store("ptr", hh.asStr(), "@fly_handlers");
+    self.store("ptr", hh.asStr(), handlersAt.asStr());
     self.hoist(h.value, span);
     const lk = self.newLabel("");
     const parent = self.target();
@@ -2445,7 +2463,8 @@ impl Lgen {
     self.block(h.body, span);
     self.cx.targets.pop();
     if (self.cx.reachable) {
-      self.store("ptr", outer.asStr(), "@fly_handlers");
+      const hAt = self.cxField("fly_handlers");
+      self.store("ptr", outer.asStr(), hAt.asStr());
       if (!unitTy(b)) {
         const sz = self.sizeOf(b, span);
         const dst = self.local(h.result);
@@ -2459,7 +2478,8 @@ impl Lgen {
       const done = `hdone${lk}`;
       self.jump(done.asStr());
       self.label(out.asStr());
-      self.store("ptr", outer.asStr(), "@fly_handlers");
+      const hAt = self.cxField("fly_handlers");
+      self.store("ptr", outer.asStr(), hAt.asStr());
       self.jump(parent.asStr());
       let set: HashSet<usize> = match (self.cx.liveAt.get(parent.asStr())) { #Some(x) => x.clone(), #None => HashSet.new() };
       for (const l of at2.iter()) { set.insert(l); }
@@ -2794,9 +2814,8 @@ impl Lgen {
     const cfile = self.c.assemble(ent, uncaught, runtime);
     let ll = "; The program's code, as LLVM IR: linked with its companion C file before it is optimized.\n\n".toString();
     ll.push(DECLS);
-    // What code reads of the task running is its thread's, in a program that starts tasks.
-    const local = if (ent.tasks) { "thread_local " } else { "" };
-    ll.push(`@fly_err = external ${local}global ptr\n@fly_unwinding = external ${local}global i8\n@fly_stopping = external ${local}global i8\n@fly_handlers = external ${local}global ptr\n`);
+    // What code reads and sets of the task running is its context, the same throughout a call.
+    ll.push("declare ptr @fly_cx() nounwind willreturn memory(none)\n");
     for (const [_, d] of self.declared.entries()) {
       ll.push(d.asStr());
       ll.push("\n");

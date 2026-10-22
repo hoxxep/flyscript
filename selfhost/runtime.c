@@ -19,7 +19,36 @@
 #endif
 #endif
 
-FLY_LOCAL void* fly_err = NULL;
+// A variable of the thread's. On threads it is reached through a call the compiler may neither
+// inline nor reuse: a task may go on on another thread after a call that switched away, and an
+// address computed before the switch would be the old thread's.
+#ifdef FLY_THREADS
+#define FLY_THREAD_VAR(T, name, init) \
+  static FLY_LOCAL T name##_tls = init; \
+  static __attribute__((noinline)) T* name##_ref(void) { T* p = &name##_tls; __asm__ volatile("" : "+r"(p)); return p; }
+#else
+#define FLY_THREAD_VAR(T, name, init) \
+  static T name##_tls = init; \
+  static inline T* name##_ref(void) { return &name##_tls; }
+#endif
+
+// The task running's context (runtime.h): with one thread, the one there is; on threads, the
+// task's own, which the thread's pointer reaches. A worker running no task has one of its own.
+#ifdef FLY_THREADS
+static fly_ctx fly_ctx0;
+FLY_THREAD_VAR(fly_ctx*, fly_cur, &fly_ctx0)
+#define fly_cur (*fly_cur_ref())
+__attribute__((noinline)) fly_ctx* fly_cx(void) { return fly_cur; }
+// The context as the thread's pointer has it now, for the scheduler, which changes that pointer
+// between tasks: unlike `fly_cx`, never one computed before.
+#define fly_cx_now() (fly_cur)
+#else
+fly_ctx fly_ctx0;
+fly_ctx* (fly_cx)(void) { return &fly_ctx0; }
+#define fly_cx_now() (&fly_ctx0)
+#endif
+// As LLVM IR reaches its fields (llvm.fly's `cxField`).
+_Static_assert(offsetof(fly_ctx, unwinding) == sizeof(void*) && offsetof(fly_ctx, stopping) == sizeof(void*) + 1 && offsetof(fly_ctx, handlers) == 2 * sizeof(void*), "fly_ctx as LLVM IR reaches it");
 
 typedef struct { uint32_t tag; size_t size; uint8_t data[]; } fly_failure;
 
@@ -741,8 +770,6 @@ uint64_t fly_Hasher_finish(const fly_Hasher* h) { return h->h; }
 
 // ---- generators ----
 
-FLY_LOCAL bool fly_stopping = false;
-
 void* fly_iter_new(void* base, size_t len, size_t stride) {
   fly_iter* it = fly_alloc(sizeof(fly_iter));
   *it = (fly_iter){ base, len, 0, stride };
@@ -827,9 +854,9 @@ struct fly_fiber {
 };
 
 static fly_fiber main_fiber = { .base = true };
-static FLY_LOCAL fly_fiber* current = &main_fiber;
-FLY_LOCAL fly_handler* fly_handlers = NULL;
-FLY_LOCAL bool fly_unwinding = false;
+// The fiber running on this thread.
+FLY_THREAD_VAR(fly_fiber*, cur_fiber, &main_fiber)
+#define cur_fiber (*cur_fiber_ref())
 
 void fly_switch(void** save, void* to);
 void fly_fiber_trampoline(void);
@@ -879,10 +906,11 @@ __attribute__((export_name("fly_fiber_top"))) uintptr_t fly_fiber_top(fly_fiber*
 #endif
 
 static void switch_to(fly_fiber* to) {
-  fly_fiber* from = current;
-  from->handlers = fly_handlers;
-  fly_handlers = to->handlers;
-  current = to;
+  fly_fiber* from = cur_fiber;
+  fly_ctx* cx = fly_cx_now();
+  from->handlers = cx->handlers;
+  cx->handlers = to->handlers;
+  cur_fiber = to;
 #if defined(FLY_ASAN)
   void* fake = NULL;
   __sanitizer_start_switch_fiber(from->done ? NULL : &fake, to->stack, to->size);
@@ -900,7 +928,8 @@ static void switch_to(fly_fiber* to) {
 }
 
 // The panic unwinding, until whoever started the fiber it began on takes it up.
-static FLY_LOCAL char* panicking = NULL;
+FLY_THREAD_VAR(char*, panicking, NULL)
+#define panicking (*panicking_ref())
 // The `Mutex` lock this thread holds, if any: a panic in its body gives it back.
 static void unlock_held(void);
 
@@ -923,16 +952,16 @@ void fly_fiber_start(fly_fiber* f) {
 
 static _Noreturn void fiber_panic(const char* message) {
   unlock_held();
-  if (current->base) panic_exit(message);
+  if (cur_fiber->base) panic_exit(message);
   if (!panicking) {
     size_t n = strlen(message);
     panicking = malloc(n + 1);
     memcpy(panicking, message, n + 1);
   }
   // The fiber ends here, as a finished one does, and whoever resumed it takes the panic up.
-  current->panicked = true;
-  current->done = true;
-  switch_to(current->back);
+  cur_fiber->panicked = true;
+  cur_fiber->done = true;
+  switch_to(cur_fiber->back);
   __builtin_trap();
 }
 
@@ -960,7 +989,9 @@ enum { STACK_POOL = 0 };
 #else
 enum { STACK_POOL = 16 };
 #endif
-static FLY_LOCAL struct { void* stacks[STACK_POOL + 1]; int n; } stack_pool;
+typedef struct { void* stacks[STACK_POOL + 1]; int n; } stack_pool_t;
+FLY_THREAD_VAR(stack_pool_t, stack_pool, { 0 })
+#define stack_pool (*stack_pool_ref())
 static void* stack_new(size_t size) {
   if (stack_pool.n > 0) return stack_pool.stacks[--stack_pool.n];
   void* p = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON | MAP_NORESERVE, -1, 0);
@@ -1028,7 +1059,7 @@ void fly_perform(uint32_t effect, int op, void* args, void* result) {
   h->op = op;
   h->args = args;
   h->result = result;
-  h->suspended = current;
+  h->suspended = cur_fiber;
   switch_to(h->fiber->back);
 }
 
@@ -1043,14 +1074,14 @@ void fly_handle_start(fly_handler* h, void (*entry)(void*), void* arg) {
   h->outer = fly_handlers;
   h->op = -1;
   h->fiber = fiber_new(entry, arg, h);
-  h->fiber->back = current;
+  h->fiber->back = cur_fiber;
   switch_to(h->fiber);
   panic_goes_on();
 }
 
 // The handler is deep: what else the body performs goes to the handlers around the resumption.
 void fly_handle_resume(fly_handler* h) {
-  h->fiber->back = current;
+  h->fiber->back = cur_fiber;
   h->outer = fly_handlers;
   h->op = -1;
   switch_to(h->suspended);
@@ -1117,7 +1148,7 @@ typedef struct {
 static bool generated_yield(void* env, void* item) {
   fly_generated* g = env;
   memcpy(g->out, item, g->size);
-  g->h.suspended = current;
+  g->h.suspended = cur_fiber;
   g->h.op = 0;
   switch_to(g->h.fiber->back);
   return !fly_unwinding;
@@ -1786,7 +1817,7 @@ static void suspend_task(int kind, int id) {
   task_t* t = sched.tasks[sched.current];
   t->wait_kind = kind;
   t->wait_id = id;
-  t->suspended = current;
+  t->suspended = cur_fiber;
   switch_to(&main_fiber);
   task_t* me = sched.tasks[sched.current];
   if (me->deliver_deadlock) fly_panic_deadlock();
@@ -2150,11 +2181,11 @@ fly_chan fly_sender_clone(const fly_chan* ch) {
 //
 // Without a simulated world, tasks run on a worker thread for each core. A task not yet started is
 // any worker's: each keeps the tasks started on it in a deque the others steal from when they have
-// nothing to do. Once started, a task stays on its worker: compiled code may keep the address of a
-// thread's variable — the failure being raised, whether it unwinds — across a call that suspends,
-// so a task resumed on another thread would read that thread's. A task waits by parking: it puts
-// itself in the queue of what it waits for, under that queue's lock, and its worker runs others;
-// whatever ends the wait moves it to its worker's inbox.
+// nothing to do. A task waits by parking: it puts itself in the queue of what it waits for, under
+// that queue's lock, and its worker runs others; whatever ends the wait moves it to the inbox of
+// the worker that ended it, or of the last it ran on, and an idle worker takes from any inbox. So a
+// task goes on wherever a core is free: what compiled code reads of it is its own context, and
+// every variable of a thread's is reached afresh after a switch (`FLY_THREAD_VAR`).
 
 #ifdef FLY_THREADS
 #include <pthread.h>
@@ -2318,11 +2349,12 @@ struct mt_task {
   mt_task *wnext, *wprev;
   // Its neighbours among its scope's tasks still alive.
   mt_task *snext, *sprev;
-  // The next task in its worker's inbox.
+  // The next task in an inbox.
   mt_task* rnext;
-  // What compiled code reads of the task, kept while another runs.
-  void* err;
-  bool unwinding, stopping;
+  // The lock its worker gives back once it has switched away to wait.
+  spin_t* release;
+  // What compiled code reads and sets of it, wherever it runs.
+  fly_ctx ctx;
   uint64_t sleep_gen;
 };
 
@@ -2347,6 +2379,9 @@ struct worker {
   int index;
   fly_fiber own;
   fly_fiber* base;
+  // The context of whatever runs here outside a task: `par` work stolen while idle.
+  fly_ctx own_ctx;
+  fly_ctx* idle_ctx;
   // Tasks to resume here, from any thread.
   spin_t inlock;
   mt_task *inhead, *intail;
@@ -2357,8 +2392,10 @@ struct worker {
 
 static worker* workers;
 static int nworkers;
-static FLY_LOCAL worker* this_worker;
-static FLY_LOCAL mt_task* running;
+FLY_THREAD_VAR(worker*, this_worker, NULL)
+#define this_worker (*this_worker_ref())
+FLY_THREAD_VAR(mt_task*, running, NULL)
+#define running (*running_ref())
 static mt_task* main_task;
 static bool main_done;
 // Tasks queued or running, and tasks begun and not ended: when none can run, and none sleeps, those
@@ -2406,10 +2443,12 @@ static mt_task* inbox_pop(worker* w) {
   return t;
 }
 
-// A task that waited may run again, on its own worker.
+// A task that waited may run again: on the worker that woke it, if one did, which the data it
+// waited for is warm on; otherwise on the last it ran on. Any idle worker may take it from there.
 static void unpark(mt_task* t) {
   __atomic_fetch_add(&runnable, 1, __ATOMIC_SEQ_CST);
-  inbox_push(t->home, t);
+  worker* w = this_worker;
+  inbox_push(w ? w : t->home, t);
   notify();
 }
 
@@ -2437,12 +2476,12 @@ static void wake_one(waitq* q) {
 
 static void wake_all(waitq* q) { while (q->head) wake_one(q); }
 
-// The running task gives its worker up, until it is resumed: what compiled code reads of it is kept.
-static void to_worker(mt_task* t) {
-  t->err = fly_err;
-  t->unwinding = fly_unwinding;
-  t->stopping = fly_stopping;
-  t->suspended = current;
+// The running task gives its worker up, until it is resumed. A task that waits holds the lock of
+// what it waits for until then: its worker gives the lock back once the task has switched away,
+// for until then nothing may wake it, which would let another worker resume it half switched.
+static void to_worker(mt_task* t, spin_t* release) {
+  t->release = release;
+  t->suspended = cur_fiber;
   switch_to(this_worker->base);
 }
 
@@ -2460,8 +2499,7 @@ static void wait_in(waitq* q, bool cancellable) {
   }
   t->yielded = false;
   __atomic_fetch_sub(&runnable, 1, __ATOMIC_SEQ_CST);
-  spin_unlock(&q->lock);
-  to_worker(t);
+  to_worker(t, &q->lock);
 }
 
 // Whether the running task has been cancelled: it unwinds from here (§6.1).
@@ -2505,7 +2543,7 @@ static void mt_point(void) {
   if (!t || cancelled_here()) return;
   if (__atomic_load_n(&this_worker->inhead, __ATOMIC_RELAXED)) {
     t->yielded = true;
-    to_worker(t);
+    to_worker(t, NULL);
     cancelled_here();
   }
 }
@@ -2592,9 +2630,11 @@ static void mt_end(mt_task* t) {
   // A task stops being alive before it stops being runnable: the other way round, an idle worker
   // could see one task alive and none able to run, and take that for a deadlock.
   if (t == main_task) {
-    main_done = true;
+    __atomic_store_n(&main_done, true, __ATOMIC_SEQ_CST);
     __atomic_fetch_sub(&alive, 1, __ATOMIC_SEQ_CST);
     __atomic_fetch_sub(&runnable, 1, __ATOMIC_SEQ_CST);
+    // It may have ended on another worker than the program's thread, which may be asleep.
+    notify();
     return;
   }
   mt_scope* sc = t->scope;
@@ -2639,11 +2679,13 @@ static void mt_end(mt_task* t) {
   task_unref(t);
 }
 
+// Runs `t` here until it waits, yields or ends; it may have run elsewhere before, and may run
+// elsewhere after: what it reads of itself is its own context, which this thread now points to.
 static void run_task(worker* w, mt_task* t) {
   running = t;
+  t->home = w;
   if (!t->started) {
     t->started = true;
-    t->home = w;
     // A task cancelled before it began never runs.
     if (__atomic_load_n(&t->cancelled, __ATOMIC_ACQUIRE)) {
       running = NULL;
@@ -2653,22 +2695,24 @@ static void run_task(worker* w, mt_task* t) {
     t->fiber = fiber_new(mt_task_main, t, NULL);
     t->suspended = t->fiber;
   }
-  fly_err = t->err;
-  fly_unwinding = t->unwinding;
-  fly_stopping = t->stopping;
+  fly_cur = &t->ctx;
   t->fiber->back = w->base;
   switch_to(t->suspended);
+  fly_cur = w->idle_ctx;
   running = NULL;
-  if (t->fiber->done) {
+  // Once the lock of what it waits for is given back, the task may be woken and run elsewhere: what
+  // is needed of it is read first.
+  bool done = t->fiber->done, yielded = t->yielded;
+  spin_t* release = t->release;
+  t->release = NULL;
+  if (release) spin_unlock(release);
+  if (done) {
     if (panicking) {
       t->panic = panicking;
       panicking = NULL;
     }
-    fly_unwinding = false;
-    fly_stopping = false;
-    fly_err = NULL;
     mt_end(t);
-  } else if (t->yielded) {
+  } else if (yielded) {
     inbox_push(w, t);
   }
 }
@@ -2823,12 +2867,19 @@ static job_t* steal_job(worker* w) {
   return NULL;
 }
 
+// Another worker's: a task not yet begun, then one woken there that waits for its worker.
 static mt_task* steal_task(worker* w) {
   int start = (int)(worker_rand(w) % (uint64_t)nworkers);
   for (int k = 0; k < nworkers; k++) {
     worker* v = &workers[(start + k) % nworkers];
     if (v == w) continue;
     mt_task* t = dq_steal(&v->fresh);
+    if (t) return t;
+  }
+  for (int k = 0; k < nworkers; k++) {
+    worker* v = &workers[(start + k) % nworkers];
+    if (v == w) continue;
+    mt_task* t = inbox_pop(v);
     if (t) return t;
   }
   return NULL;
@@ -2863,8 +2914,9 @@ static void par_join(void (*a)(void*, void*), void* fa, void* oa, void (*b)(void
 // ---- workers ----
 
 static bool work_anywhere(worker* w) {
-  if (__atomic_load_n(&w->inhead, __ATOMIC_SEQ_CST)) return true;
+  (void)w;
   for (int k = 0; k < nworkers; k++) {
+    if (__atomic_load_n(&workers[k].inhead, __ATOMIC_SEQ_CST)) return true;
     if (dq_size(&workers[k].fresh) > 0 || dq_size(&workers[k].jobs) > 0) return true;
   }
   uint64_t due = __atomic_load_n(&next_due, __ATOMIC_ACQUIRE);
@@ -2876,7 +2928,7 @@ static _Noreturn void mt_deadlock(void) { panic_exit("deadlock: every task is wa
 static void idle(worker* w) {
   pthread_mutex_lock(&idle_mu);
   __atomic_fetch_add(&idlers, 1, __ATOMIC_SEQ_CST);
-  if (!work_anywhere(w) && !(w == &workers[0] && main_done)) {
+  if (!work_anywhere(w) && !(w == &workers[0] && __atomic_load_n(&main_done, __ATOMIC_SEQ_CST))) {
     uint64_t due = __atomic_load_n(&next_due, __ATOMIC_ACQUIRE);
     if (!due && __atomic_load_n(&runnable, __ATOMIC_SEQ_CST) == 0 && __atomic_load_n(&alive, __ATOMIC_SEQ_CST) > 0 && __atomic_load_n(&io_waiting, __ATOMIC_SEQ_CST) == 0) mt_deadlock();
     if (due) {
@@ -2898,7 +2950,7 @@ static void idle(worker* w) {
 
 static void work(worker* w) {
   for (;;) {
-    if (w == &workers[0] && main_done) return;
+    if (w == &workers[0] && __atomic_load_n(&main_done, __ATOMIC_SEQ_CST)) return;
     fire_alarms();
     mt_task* t = inbox_pop(w);
     if (!t) t = dq_pop(&w->fresh);
@@ -2915,7 +2967,8 @@ static void work(worker* w) {
 static void* worker_thread(void* arg) {
   worker* w = arg;
   this_worker = w;
-  current = w->base;
+  fly_cur = w->idle_ctx;
+  cur_fiber = w->base;
   work(w);
   return NULL;
 }
@@ -2934,6 +2987,8 @@ static void mt_run(void (*main)(void), void (*entry)(void* task, void* closure))
     w->index = k;
     w->own.base = true;
     w->base = k == 0 ? &main_fiber : &w->own;
+    // The first worker is the program's thread, whose context is the program's outside its tasks.
+    w->idle_ctx = k == 0 ? &fly_ctx0 : &w->own_ctx;
     w->rng = 0x9e3779b97f4a7c15u * (uint64_t)(k + 1);
     w->fresh.buf = dq_buf_new(256, NULL);
     w->jobs.buf = dq_buf_new(256, NULL);
@@ -3163,7 +3218,8 @@ static mt_mutex* mutex_of(const void* state) { return (mt_mutex*)((uint8_t*)stat
 
 // The lock this thread holds, if any: a body neither suspends nor takes another, so it is the
 // thread's until the body ends, and a panic in the body gives it back.
-static FLY_LOCAL const void* held_state;
+FLY_THREAD_VAR(const void*, held_state, NULL)
+#define held_state (*held_state_ref())
 
 static bool mutex_try(mt_mutex* m) {
   spin_lock(&m->q.lock);
