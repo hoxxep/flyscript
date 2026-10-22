@@ -1,0 +1,16 @@
+// expect: #Some("hello world")
+// expect: #Some(42)
+// An arm that changes what it binds borrows the owned place `mut` and changes it in place (§4.1).
+import { println } from "std/io";
+function take(s: String): void {}
+export function main(): void uses Io {
+  let o: Option<String> = #Some("hello".toString());
+  match (o) {
+    #Some(x) => { x.push(" world"); }
+    #None => {}
+  }
+  println(`${o}`);
+  let n: Option<u32> = #Some(1);
+  match (n) { #Some(k) => { k += 41; } #None => {} }
+  println(`${n}`);
+}

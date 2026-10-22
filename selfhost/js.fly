@@ -198,6 +198,8 @@ export struct Js {
   dropCode: String;
   // How many functions the ownership pass had seen: specializations made since have not been.
   owned: usize;
+  // Set while binding an arm that refers to the parts of an owned place it borrows `mut`.
+  refBinds: bool;
 }
 
 impl Js {
@@ -207,7 +209,7 @@ impl Js {
       code: String.new(), fid: 0, map: HashMap.new(), module: 0, suspends: false, ret: #Prim(#Void), fnRet: #Prim(#Void),
       inHandle: false,
       out: String.new(), indent: 0, tmp: 0, scopes: Vec.new(), cells: HashSet.new(), cellParams: HashSet.new(),
-      dropNeeds: HashMap.new(), dropFns: HashMap.new(), dropCode: String.new(), owned: 0,
+      dropNeeds: HashMap.new(), dropFns: HashMap.new(), dropCode: String.new(), owned: 0, refBinds: false,
     }
   }
 
@@ -1428,7 +1430,7 @@ impl Js {
   // The value a binding takes from `subj`. `whole` is a reference to the matched place where it
   // is matched through a `mut` borrow: a binding then holds a reference to its part.
   function bound(self: mut Self, subj: str, whole: Option<String>, id: usize, segs: readonly Vec<Seg>): String {
-    if (whole.isNone() || !isMutBorrow(self.bindingTy(id))) { return Js.at(subj, segs); }
+    if (!self.refBinds && (whole.isNone() || !isMutBorrow(self.bindingTy(id)))) { return Js.at(subj, segs); }
     if (segs.len() == 0) {
       return match (whole) { #Some(r) => r, #None => subj.toString() };
     }
@@ -1451,7 +1453,8 @@ impl Js {
       Js.paths(alts[0], Vec.new(), mut first);
       if (first.len() == 0) { return; }
       let js: Vec<String> = Vec.new();
-      for (const [n, _, _] of first) { js.push(self.declare(n, false)); }
+      const refs = self.refBinds;
+      for (const [n, _, _] of first) { js.push(self.declare(n, refs)); }
       self.line(`let ${js.join(", ")};`);
       for (const [i, a] of alts.iter().enumerate()) {
         const c = self.cond(a, subj);
@@ -1475,9 +1478,11 @@ impl Js {
     Js.paths(p, Vec.new(), mut ps);
     for (const [n, id, segs] of ps) {
       const v = self.bound(subj, whole.clone(), id, segs);
-      const cell = self.cells.has(id);
+      // A reference to a part is a cell of its own: reads and writes go to the part.
+      const refs = self.refBinds;
+      const cell = refs || self.cells.has(id);
       const js = self.declare(n, cell);
-      const init = if (cell) { `{ v: ${v} }` } else { v };
+      const init = if (cell && !refs) { `{ v: ${v} }` } else { v };
       self.line(`${if (mutable && !cell) { "let" } else { "const" }} ${js} = ${init};`);
     }
   }
@@ -1632,11 +1637,46 @@ impl Js {
       const c = self.cond(arm.pat, s);
       self.line(`if (${c}) {`);
       self.indent += 1;
-      // An arm that takes what it binds moves it out of its owner.
       const armMove: Option<Vec<String>> = match (self.p.typed.get(self.fid)) {
         #Some(t) => match (t.moves.get(arm.pat.span)) { #Some(p) => #Some(p.clone()), #None => #None },
         #None => #None,
       };
+      // An arm that changes what it binds of an owned place borrows the place `mut`: its bindings
+      // refer to the parts (§4.1).
+      const lentArm: bool = match (self.p.typed.get(self.fid)) { #Some(t) => t.lentArms.has(arm.pat.span), #None => false };
+      self.push();
+      if (lentArm) {
+        const r = self.lend(scrutinee);
+        const rs = self.save(r);
+        self.refBinds = true;
+        self.binds(arm.pat, s, #Some(rs), false);
+        self.refBinds = false;
+      } else {
+        self.binds(arm.pat, s, whole.clone(), false);
+      }
+      // What the arm takes, or binds out of a value no place holds, it owns: dropped as it ends.
+      const owns = !lentMut && !lentArm && (armMove.isSome() || !isPlace(scrutinee));
+      let owners: Vec<String> = Vec.new();
+      if (owns) {
+        let ps: Vec<[String, usize, Vec<Seg>]> = Vec.new();
+        Js.paths(arm.pat, Vec.new(), mut ps);
+        for (const [n, id, _] of ps) {
+          const bt = self.bindingTy(id);
+          if (self.ownedValue(bt)) {
+            const f = self.dropFn(bt, arm.pat.span);
+            self.own(n.asStr(), f);
+            owners.push(n.clone());
+          }
+        }
+      }
+      let guarded = false;
+      if (const #Some(g) = arm.guard) {
+        const gv = self.value(g);
+        self.line(`if (${gv}) {`);
+        self.indent += 1;
+        guarded = true;
+      }
+      // The arm takes what it binds out of its owner once its guard has let it run.
       if (const #Some(path) = armMove) {
         if (const #Some(n) = rootName(scrutinee)) {
           if (const #Some(l) = self.local(n.asStr())) {
@@ -1647,28 +1687,39 @@ impl Js {
           }
         }
       }
-      self.push();
-      self.binds(arm.pat, s, whole.clone(), false);
-      match (arm.guard) {
-        #Some(g) => {
-          const gv = self.value(g);
-          self.line(`if (${gv}) {`);
-          self.indent += 1;
-          self.into(arm.body, dest);
-          self.line(`break ${label};`);
-          self.indent -= 1;
-          self.line("}");
-        }
-        #None => {
-          self.into(arm.body, dest);
-          self.line(`break ${label};`);
-        }
+      self.withDrops(arm.body, dest, owners);
+      self.line(`break ${label};`);
+      if (guarded) {
+        self.indent -= 1;
+        self.line("}");
       }
       self.pop();
       self.indent -= 1;
       self.line("}");
     }
     self.line(`$rt.unmatched(${s});`);
+    self.indent -= 1;
+    self.line("}");
+  }
+
+  // An expression into `dest`, with the owners in `names` dropped however it ends.
+  function withDrops(self: mut Self, e: readonly Expr, dest: readonly Dest, names: readonly Vec<String>): void uses Fail<Diagnostic> {
+    if (names.len() == 0) {
+      self.into(e, dest);
+      return;
+    }
+    self.line("try {");
+    self.indent += 1;
+    self.into(e, dest);
+    self.indent -= 1;
+    self.line("} finally {");
+    self.indent += 1;
+    let k = names.len();
+    while (k > 0) {
+      k -= 1;
+      const d = self.dropOwner(names[k].asStr());
+      self.line(d.asStr());
+    }
     self.indent -= 1;
     self.line("}");
   }
@@ -1698,6 +1749,19 @@ impl Js {
         self.pop();
         return;
       }
+    }
+    // `for (x of xs.iter())`: the list itself, not a generator over it.
+    if (const #Some(target) = self.listIter(iter)) {
+      const v = self.value(target);
+      const x = self.fresh();
+      self.line(`for (const ${x} of $rt.items(${v})) {`);
+      self.indent += 1;
+      self.loopBinds(pat, x, mutable);
+      self.loopBody(pat, body);
+      self.indent -= 1;
+      self.line("}");
+      self.pop();
+      return;
     }
     const it = stripBorrow(self.exprTy(iter.id));
     // A generator call: its items drive the body.
@@ -1746,11 +1810,63 @@ impl Js {
       self.line(`for (const ${x} of $rt.items(${v})) {`);
       self.indent += 1;
       self.loopBinds(pat, x, mutable);
-      self.blockInto(body, #Discard);
+      self.loopBody(pat, body);
       self.indent -= 1;
       self.line("}");
     }
     self.pop();
+  }
+
+  // The list a `for` iterates through its `iter()`, if that is what it iterates.
+  function listIter(self: mut Self, iter: readonly Expr): Option<Expr> uses Fail<Diagnostic> {
+    const [callee, args]: [Expr, Vec<Expr>] = match (iter.kind) {
+      #Call { callee, typeArgs: _, args } => [callee.get().clone(), args.clone()],
+      _ => return #None,
+    };
+    if (args.len() > 0) { return #None; }
+    const target: Expr = match (callee.kind) { #Field { target, name: _ } => target.get().clone(), _ => return #None };
+    const fid: usize = match (self.p.typed.get(self.fid)) {
+      #Some(t) => match (t.calls.get(iter.id)) { #Some(f) => f, #None => return #None },
+      #None => return #None,
+    };
+    const c = self.callee(fid, self.callArgs(iter.id), iter.span);
+    match (c) {
+      #Builtin(k) => if (k == "Vec_iter" || k == "slice_iter") { #Some(target) } else { #None },
+      #Inst(_) => #None,
+    }
+  }
+
+  // A loop's body, with the items it binds and owns dropped as each iteration ends (§5.6).
+  function loopBody(self: mut Self, pat: readonly Pattern, body: readonly Block): void uses Fail<Diagnostic> {
+    let owners: Vec<String> = Vec.new();
+    let ps: Vec<[String, usize, Vec<Seg>]> = Vec.new();
+    Js.paths(pat, Vec.new(), mut ps);
+    for (const [n, id, _] of ps) {
+      const bt = self.bindingTy(id);
+      if (self.ownedValue(bt)) {
+        const f = self.dropFn(bt, pat.span);
+        self.own(n.asStr(), f);
+        owners.push(n.clone());
+      }
+    }
+    if (owners.len() == 0) {
+      self.blockInto(body, #Discard);
+      return;
+    }
+    self.line("try {");
+    self.indent += 1;
+    self.blockInto(body, #Discard);
+    self.indent -= 1;
+    self.line("} finally {");
+    self.indent += 1;
+    let k = owners.len();
+    while (k > 0) {
+      k -= 1;
+      const d = self.dropOwner(owners[k].asStr());
+      self.line(d.asStr());
+    }
+    self.indent -= 1;
+    self.line("}");
   }
 
   function loopBinds(self: mut Self, pat: readonly Pattern, x: str, mutable: bool): void uses Fail<Diagnostic> {
@@ -1774,7 +1890,7 @@ impl Js {
     }
     const x = self.save(`${r}.value.item`);
     self.loopBinds(pat, x, mutable);
-    self.blockInto(body, #Discard);
+    self.loopBody(pat, body);
     self.indent -= 1;
     self.line("}");
   }
@@ -2034,7 +2150,8 @@ impl Js {
           #Some(t) => t.lentScrutinees.get(scrutinee.id) == #Some(true),
           #None => false,
         };
-        if (lentMut) { self.lentExpr(scrutinee, scopes); }
+        const lentArms = match (self.p.typed.get(self.fid)) { #Some(t) => arms.iter().some((a) => t.lentArms.has(a.pat.span)), #None => false };
+        if (lentMut || lentArms) { self.lentExpr(scrutinee, scopes); }
         self.cellsExpr(scrutinee, mut scopes);
         for (const arm of arms) {
           let sc: HashMap<String, [bool, usize]> = HashMap.new();

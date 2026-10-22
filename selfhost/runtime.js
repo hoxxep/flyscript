@@ -129,8 +129,19 @@ const { $rt, $b } = (() => {
   class Gen {
     constructor(it) { this.it = it; }
   }
-  function* listOps(items) { for (const x of items) yield new Yielded(x); }
-  const genOf = (items) => new Gen(listOps(items));
+  // A list's items, stepped as a generator yielding them would be, with one step object reused:
+  // whoever steps it reads the item before stepping again.
+  class ListOps {
+    constructor(items) { this.items = items; this.i = 0; this.y = new Yielded(undefined); this.step = { done: false, value: this.y }; }
+    next() {
+      if (this.i >= this.items.length) return { done: true, value: undefined };
+      this.y.item = this.items[this.i++];
+      return this.step;
+    }
+    return() { this.i = this.items.length; return { done: true, value: undefined }; }
+    [Symbol.iterator]() { return this; }
+  }
+  const genOf = (items) => new Gen(new ListOps(items));
   // The next item of a generator, or `undefined` once it is done.
   function step(g) {
     const r = g.it.next();
@@ -200,7 +211,7 @@ const { $rt, $b } = (() => {
 
   function at(a, i) {
     const n = Number(i);
-    if (i < 0n || n >= a.length) panic(`index ${i} out of bounds (length ${a.length})`);
+    if (n < 0 || n >= a.length) panic(`index ${i} out of bounds (length ${a.length})`);
     return n;
   }
   function idx(a, i) {

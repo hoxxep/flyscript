@@ -206,6 +206,8 @@ export view struct Own {
   armMoves: HashSet<Span>;
   // Set while binding the pattern of an arm that borrows what it binds.
   lending: bool;
+  // Arms that borrow an owned place `mut`, to change what they bind in place, by pattern.
+  lentArms: HashSet<Span>;
 }
 
 // Checks ownership in the body of `fid`, and records its moves for code generation (§4.1, §5.6).
@@ -227,7 +229,7 @@ export function checkOwnership(p: mut Program, fid: usize): void {
     nextRole: #Plain, roles: Vec.new(), taskMoved: HashMap.new(), dyingHolds: HashMap.new(), handling: Vec.new(),
     sites: HashMap.new(), bySite: HashMap.new(), retTy, sources, sendParams, collecting: true,
     closureModes: HashMap.new(), varModes: HashMap.new(), moves: HashMap.new(), capturedMoves: HashMap.new(),
-    armBinds: HashMap.new(), armMoves: HashSet.new(), lending: false,
+    armBinds: HashMap.new(), armMoves: HashSet.new(), lending: false, lentArms: HashSet.new(),
   };
   // Pass 1 collects every use of every binding, with its position; pass 2 checks.
   for (const pass of 0..2) {
@@ -268,6 +270,7 @@ export function checkOwnership(p: mut Program, fid: usize): void {
   let typed = replace(mut o.typed, emptyTyped());
   typed.moves = replace(mut o.moves, HashMap.new());
   typed.capturedMoves = replace(mut o.capturedMoves, HashMap.new());
+  typed.lentArms = replace(mut o.lentArms, HashSet.new());
   o.p.typed.insert(fid, typed);
 }
 
@@ -1127,6 +1130,8 @@ impl Own {
         #None => #None,
       };
       const takes = perArm && self.takesOwned(arm.pat) && self.armMoves.has(arm.pat.span);
+      // An arm that changes a part it binds, in place, borrows the place `mut`.
+      const lendsMut = perArm && !takes && self.armMutates(arm);
       if (takes) {
         if (const #Some(path) = fresh) {
           const at: Expr = { kind: scrutinee.kind.clone(), span: arm.pat.span, id: NO_ID };
@@ -1136,9 +1141,18 @@ impl Own {
       }
       self.scopes.push(HashMap.new());
       // An arm that takes nothing borrows what it binds from the place.
-      const bound = if (perArm && !takes) { read.clone() } else { sv.clone() };
+      let bound = if (perArm && !takes) { read.clone() } else { sv.clone() };
+      if (lendsMut) {
+        if (const #Some(path) = place) {
+          self.checkMutable(path, scrutinee.span);
+          self.access(path, true, scrutinee.span, read.loans);
+          const l = self.newLoan(path.clone(), true, scrutinee.span);
+          addLoan(mut bound.loans, l);
+          if (!self.collecting) { self.lentArms.insert(arm.pat.span); }
+        }
+      }
       self.lending = perArm && !takes;
-      self.bindPattern(arm.pat, bound, false);
+      self.bindPattern(arm.pat, bound, lendsMut);
       self.lending = false;
       if (perArm && self.collecting) {
         let ids: Vec<usize> = Vec.new();
@@ -1147,7 +1161,7 @@ impl Own {
           if (const #Some(v) = self.bySite.get(site)) { self.armBinds.insert(v, arm.pat.span); }
         }
       }
-      if (const #Some(g) = arm.guard) { self.expr(g, #Read); }
+      if (const #Some(g) = arm.guard) { self.guard(g, arm.pat); }
       const v = self.expr(arm.body, how);
       addLoans(mut out, v.loans);
       if (const #Some(scope) = self.scopes.pop()) {
@@ -1172,7 +1186,7 @@ impl Own {
       self.state = before.clone();
       self.scopes.push(HashMap.new());
       self.bindPattern(arm.pat, sv, false);
-      if (const #Some(g) = arm.guard) { self.expr(g, #Read); }
+      if (const #Some(g) = arm.guard) { self.guard(g, arm.pat); }
       const v = self.expr(arm.body, how);
       addLoans(mut out, v.loans);
       if (const #Some(scope) = self.scopes.pop()) {
@@ -1186,85 +1200,148 @@ impl Own {
     { loans: out }
   }
 
-  // Whether a match arm changes a part of the scrutinee it binds: assigns to it, lends it `mut`,
-  // or calls a method that takes it `mut`.
-  function armChanges(self: readonly Self, arm: readonly MatchArm): bool {
+  // Whether a match arm changes a part of the scrutinee it binds, or lets one go where it could be
+  // changed: whether any use of what it binds does more than read it.
+  function armChanges(self: readonly Self, arm: readonly MatchArm): bool { self.armUses(arm, true) }
+
+  // Whether a match arm changes a part of an owned place it binds: owned parts it lets go are moved
+  // or copied, not lent.
+  function armMutates(self: readonly Self, arm: readonly MatchArm): bool { self.armUses(arm, false) }
+
+  function armUses(self: readonly Self, arm: readonly MatchArm, escapes: bool): bool {
     let names: Vec<String> = Vec.new();
     bindNames(arm.pat, mut names);
     let changed: HashSet<String> = HashSet.new();
-    if (const #Some(g) = arm.guard) { self.changes(g, mut changed); }
-    self.changes(arm.body, mut changed);
+    self.usesBeyondRead(arm.body, false, escapes, mut changed);
     names.iter().some((n) => changed.has(n.asStr()))
   }
 
-  // The bindings an expression changes, by name: what it assigns to, lends `mut`, or passes where
-  // a `mut` borrow is taken.
-  function changes(self: readonly Self, e: readonly Expr, out: mut HashSet<String>): void {
+  // A guard decides whether its arm runs: it may only read what its pattern binds, so the arms
+  // after it still find the value whole (§4.1).
+  function guard(self: mut Self, g: readonly Expr, pat: readonly Pattern): void {
+    const before = self.state.moved.clone();
+    self.expr(g, #Read);
+    let names: Vec<String> = Vec.new();
+    bindNames(pat, mut names);
+    let bound: Vec<usize> = Vec.new();
+    for (const n of names) { if (const #Some(v) = self.lookup(n.asStr())) { bound.push(v); } }
+    if (self.state.moved.iter().some((m) => bound.iter().some((b) => b == m.root) && !before.iter().some((x) => x == m))) {
+      self.err(g.span, "a guard cannot move what its pattern binds: when it fails, the next arm still needs it");
+    }
+    let changed: HashSet<String> = HashSet.new();
+    self.usesBeyondRead(g, true, false, mut changed);
+    if (names.iter().some((n) => changed.has(n.asStr()))) {
+      self.err(g.span, "a guard cannot change what its pattern binds: it only decides whether the arm runs");
+    }
+  }
+
+  // The bindings an expression uses other than by reading, by name. `read`: the expression's value
+  // is only read where it is used. A value escapes — so may be changed later — where it is bound,
+  // returned, yielded, assigned, put in a literal or passed for a `mut` borrow.
+  function usesBeyondRead(self: readonly Self, e: readonly Expr, read: bool, escapes: bool, out: mut HashSet<String>): void {
     match (e.kind) {
-      #Assign { op: _, target, value: _ } => changedRoot(target, mut out),
-      #BorrowMut(target) => changedRoot(target, mut out),
-      #Call { callee, typeArgs: _, args } => match (self.typed.calls.get(e.id)) {
-        #Some(f) => {
-          const params = self.p.fns[f].scheme.params.clone();
-          let all: Vec<Expr> = Vec.new();
-          const isSelf = match (params.first()) { #Some([n, _]) => n == "self", #None => false };
-          if (isSelf) { if (const #Field { target, name: _ } = callee.kind) { all.push(target.get().clone()); } }
-          for (const a of args) { all.push(a.clone()); }
-          for (const i of 0..min(all.len(), params.len())) {
-            if (isMutBorrowTy(params[i][1])) { changedRoot(all[i], mut out); }
+      #Ident(n) => { if (!read && escapes) { out.insert(n.clone()); } }
+      #Field { target, name: _ } => self.usesBeyondRead(target, true, escapes, mut out),
+      #Index { target, index } => {
+        self.usesBeyondRead(target, true, escapes, mut out);
+        self.usesBeyondRead(index, true, escapes, mut out);
+      }
+      #BorrowMut(x) => changedRoot(x, mut out),
+      #Assign { op: _, target, value } => {
+        changedRoot(target, mut out);
+        self.usesBeyondRead(value, false, escapes, mut out);
+      }
+      #Unary { op: _, operand } => self.usesBeyondRead(operand, true, escapes, mut out),
+      #Binary { op: _, lhs, rhs } => {
+        self.usesBeyondRead(lhs, true, escapes, mut out);
+        self.usesBeyondRead(rhs, true, escapes, mut out);
+      }
+      #Cast { expr, ty: _ } => self.usesBeyondRead(expr, true, escapes, mut out),
+      #Range { lo, hi } => {
+        if (const #Some(x) = lo) { self.usesBeyondRead(x, true, escapes, mut out); }
+        if (const #Some(x) = hi) { self.usesBeyondRead(x, true, escapes, mut out); }
+      }
+      #Template(pieces) => { for (const p of pieces) { if (const #Expr(x) = p) { self.usesBeyondRead(x, true, escapes, mut out); } } }
+      #Call { callee, typeArgs: _, args } => {
+        let params: Option<Vec<Ty>> = #None;
+        let hasSelf = false;
+        match (self.typed.calls.get(e.id)) {
+          #Some(f) => {
+            let ps: Vec<Ty> = Vec.new();
+            for (const [_, t] of self.p.fns[f].scheme.params) { ps.push(t.clone()); }
+            hasSelf = match (self.p.fns[f].scheme.params.first()) { #Some([n, _]) => n == "self", #None => false };
+            params = #Some(ps);
+          }
+          #None => {
+            if (const #Some(#Fn(f)) = self.typed.exprs.get(callee.id)) { params = #Some(f.params.clone()); }
           }
         }
-        #None => match (self.typed.exprs.get(callee.id)) {
-          #Some(#Fn(f)) => {
-            for (const i of 0..min(args.len(), f.params.len())) {
-              if (isMutBorrowTy(f.params[i])) { changedRoot(args[i], mut out); }
-            }
+        let all: Vec<Expr> = Vec.new();
+        const viaField = match (callee.kind) { #Field { target: _ } => true, _ => false };
+        if (hasSelf && viaField) {
+          if (const #Field { target, name: _ } = callee.kind) { all.push(target.get().clone()); }
+        } else {
+          self.usesBeyondRead(callee, true, escapes, mut out);
+        }
+        for (const a of args) { all.push(a.clone()); }
+        for (const [i, x] of all.iter().enumerate()) {
+          const pt: Option<Ty> = match (params) { #Some(ps) => match (ps.get(i)) { #Some(t) => #Some(t.clone()), #None => #None }, #None => #None };
+          match (pt) {
+            #Some(#Borrow(true, _)) => changedRoot(x, mut out),
+            #Some(_) => self.usesBeyondRead(x, true, escapes, mut out),
+            #None => self.usesBeyondRead(x, false, escapes, mut out),
           }
-          _ => { for (const a of args) { changedRoot(a, mut out); } }
-        },
-      },
+        }
+      }
       // A match through a `mut` borrow of a binding that changes what it binds changes it.
       #Match { scrutinee, arms } => {
         if (self.typed.lentScrutinees.get(scrutinee.id) == #Some(true) && arms.iter().some((a) => self.armChanges(a))) {
           changedRoot(scrutinee, mut out);
+        } else {
+          self.usesBeyondRead(scrutinee, true, escapes, mut out);
+        }
+        for (const a of arms) {
+          if (const #Some(g) = a.guard) { self.usesBeyondRead(g, true, escapes, mut out); }
+          self.usesBeyondRead(a.body, read, escapes, mut out);
         }
       }
-      _ => {}
-    }
-    for (const c of children(e)) { self.changes(c, mut out); }
-    match (e.kind) {
-      #Block(b) | #Unsafe(b) => self.blockChanges(b, mut out),
-      #Region { name: _, body } => self.blockChanges(body, mut out),
-      #If { cond: _, then, otherwise: _ } => self.blockChanges(then, mut out),
-      #While { cond: _, body } => self.blockChanges(body, mut out),
-      #For { mutable: _, pat: _, iter: _, body } => self.blockChanges(body, mut out),
-      #Match { scrutinee: _, arms } => {
-        for (const a of arms) {
-          if (const #Some(g) = a.guard) { self.changes(g, mut out); }
-          self.changes(a.body, mut out);
-        }
+      #Block(b) | #Unsafe(b) => self.blockBeyondRead(b, read, escapes, mut out),
+      #Region { name: _, body } => self.blockBeyondRead(body, read, escapes, mut out),
+      #If { cond, then, otherwise } => {
+        self.usesBeyondRead(cond, true, escapes, mut out);
+        self.blockBeyondRead(then, read, escapes, mut out);
+        if (const #Some(o) = otherwise) { self.usesBeyondRead(o, read, escapes, mut out); }
+      }
+      #While { cond, body } => {
+        self.usesBeyondRead(cond, true, escapes, mut out);
+        self.blockBeyondRead(body, true, escapes, mut out);
+      }
+      #For { mutable: _, pat: _, iter, body } => {
+        self.usesBeyondRead(iter, true, escapes, mut out);
+        self.blockBeyondRead(body, true, escapes, mut out);
       }
       #Try { body, pat: _, handler } => {
-        self.blockChanges(body, mut out);
-        self.blockChanges(handler, mut out);
+        self.blockBeyondRead(body, read, escapes, mut out);
+        self.blockBeyondRead(handler, read, escapes, mut out);
       }
       #Handle { body, effect: _, arms } => {
-        self.blockChanges(body, mut out);
-        for (const a of arms) { self.blockChanges(a.body, mut out); }
+        self.blockBeyondRead(body, read, escapes, mut out);
+        for (const a of arms) { self.blockBeyondRead(a.body, read, escapes, mut out); }
       }
-      #Lambda { params: _, body } => self.changes(body, mut out),
-      _ => {}
+      #Lambda { params: _, body } => self.usesBeyondRead(body, false, escapes, mut out),
+      // What is returned, yielded, thrown or put in a value escapes.
+      _ => { for (const c of children(e)) { self.usesBeyondRead(c, false, escapes, mut out); } }
     }
   }
 
-  function blockChanges(self: readonly Self, b: readonly Block, out: mut HashSet<String>): void {
+  function blockBeyondRead(self: readonly Self, b: readonly Block, read: bool, escapes: bool, out: mut HashSet<String>): void {
     for (const st of b.stmts) {
       match (st) {
-        #Let { mutable: _, pat: _, ty: _, init, span: _ } => self.changes(init, mut out),
-        #Defer(x) | #Expr(x) => self.changes(x, mut out),
+        #Let { mutable: _, pat: _, ty: _, init, span: _ } => self.usesBeyondRead(init, false, escapes, mut out),
+        #Defer(x) | #Expr(x) => self.usesBeyondRead(x, true, escapes, mut out),
       }
     }
-    if (const #Some(t) = b.tail) { self.changes(t, mut out); }
+    if (const #Some(t) = b.tail) { self.usesBeyondRead(t, read, escapes, mut out); }
   }
 
   // Whether a pattern binds a part that is owned and not `Copy`, which it takes.
@@ -1635,13 +1712,19 @@ impl Own {
     { loans: loans }
   }
 
-  // Whether a function's declared result can hold a borrow other than through its type
-  // parameters.
+  // Generic code can put a borrow of an argument's place into a `T` only through a function it is
+  // given — a closure, a generator, a continuation — or where `T` is a `comptime` type, which is
+  // code checked once it is known.
   function declaredHolds(self: readonly Self, f: usize): bool {
     let params: Vec<u32> = Vec.new();
-    for (const g of self.p.fns[f].scheme.tparams) { params.push(g.sym.id); }
+    for (const g of self.p.fns[f].scheme.tparams) { if (!g.isComptime) { params.push(g.sym.id); } }
     const ret = self.p.fns[f].scheme.ret.clone();
-    self.p.class(ret) == 2 || hidesBorrows(ret, self.p, params)
+    if (self.p.class(ret) == 2 || hidesBorrows(ret, self.p, params)) { return true; }
+    for (const [_, t] of self.p.fns[f].scheme.params) {
+      let inside: Vec<Ty> = Vec.new();
+      if (carriesCode(self.p, t, mut inside)) { return true; }
+    }
+    false
   }
 
   function addTemps(self: mut Self, ls: readonly Vec<usize>): void {
@@ -2112,6 +2195,29 @@ function hidesIn(t: readonly Ty, p: readonly Program, send: readonly Vec<u32>, i
     #Tuple(ts) => ts.iter().some((x) => hidesIn(x, p, send, mut inside)),
     #Record(r) | #Union(r) => r.labels.iter().some(([_, x]) => hidesIn(x, p, send, mut inside)),
     #Array(x, _) | #Slice(x) | #Borrow(_, x) => hidesIn(x, p, send, mut inside),
+    _ => false,
+  }
+}
+
+// Whether a value of the type can be code that runs: a closure, a generator, a continuation, or
+// something holding one.
+function carriesCode(p: readonly Program, t: readonly Ty, inside: mut Vec<Ty>): bool {
+  match (t) {
+    #Fn(_) => true,
+    #Named(d, args) => {
+      const name = p.defs[d].name.asStr();
+      if ((name == "Gen" || name == "Cont") && p.modules[p.defs[d].module].isStd) { return true; }
+      if (inside.iter().some((x) => x == t)) { return false; }
+      inside.push(t.clone());
+      if (args.iter().some((a) => match (a) { #Ty(x) => carriesCode(p, x, mut inside), _ => false })) { return true; }
+      match (p.structFields(d, args)) {
+        #Some(fs) => fs.iter().some(([_, x]) => carriesCode(p, x, mut inside)),
+        #None => false,
+      }
+    }
+    #Tuple(ts) => ts.iter().some((x) => carriesCode(p, x, mut inside)),
+    #Record(r) | #Union(r) => r.labels.iter().some(([_, x]) => carriesCode(p, x, mut inside)),
+    #Array(x, _) | #Slice(x) | #Borrow(_, x) => carriesCode(p, x, mut inside),
     _ => false,
   }
 }

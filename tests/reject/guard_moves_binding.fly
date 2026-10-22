@@ -1,0 +1,11 @@
+// error: a guard cannot move what its pattern binds
+// A guard only decides whether its arm runs: the arms after it still need what it saw (§4.1).
+function take(s: String): bool { true }
+export function main(): void {
+  const o: Option<String> = #Some("hello".toString());
+  match (o) {
+    #Some(x) if take(x) => {}
+    #Some(x) => {}
+    #None => {}
+  }
+}

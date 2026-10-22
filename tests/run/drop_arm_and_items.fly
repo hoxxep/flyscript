@@ -1,0 +1,22 @@
+// expect: kept a
+// expect: dropped a
+// expect: dropped b
+// expect: dropped 1
+// expect: dropped 2
+// What an arm takes and does not move on, and each item a loop takes, is dropped where the arm or
+// iteration ends (§5.6).
+import { println } from "std/io";
+struct Noisy { name: String }
+impl Drop for Noisy { function drop(self: mut Self): void uses Io { println(`dropped ${self.name}`); } }
+function keep(n: Noisy): void uses Io { println(`kept ${n.name}`); const m = n; drop2(m); }
+function drop2(n: Noisy): void {}
+export function main(): void uses Io {
+  const pair = [Noisy { name: "a".toString() }, Noisy { name: "b".toString() }];
+  match (pair) {
+    [a, b] => { keep(a); }
+  }
+  let items: Vec<Noisy> = Vec.new();
+  items.push(Noisy { name: "1".toString() });
+  items.push(Noisy { name: "2".toString() });
+  for (const it of items.drain()) { }
+}

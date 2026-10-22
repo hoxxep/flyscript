@@ -976,7 +976,12 @@ impl Interp {
                             && let Some(name) = root_name(scrutinee) {
                                 mark_moved(env, name, path);
                             }
-                        return self.expr(&arm.body, &aenv);
+                        // What the arm took and did not move on is dropped as it ends (§5.6).
+                        let r = self.expr(&arm.body, &aenv);
+                        return match (r, self.drop_scope(&aenv)) {
+                            (Ok(_), Err(e)) => Err(e),
+                            (r, _) => r,
+                        };
                     }
                 }
                 Err(panic(format!("no arm matched {}", v.show())))
@@ -1105,7 +1110,13 @@ impl Interp {
                 };
                 let benv = new_env(Some(env.clone()));
                 self.bind(pat, &item, None, &benv);
-                match self.block(body, &benv) {
+                // An item the body did not move on is dropped as the iteration ends (§5.6).
+                let r = self.block(body, &benv);
+                let r = match (r, self.drop_scope(&benv)) {
+                    (Ok(_), Err(e)) => Err(e),
+                    (r, _) => r,
+                };
+                match r {
                     Ok(_) => {}
                     Err(Ctl::Continue(l)) if l == id => {}
                     Err(Ctl::Break(l)) if l == id => break,

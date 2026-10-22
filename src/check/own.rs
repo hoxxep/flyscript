@@ -11,7 +11,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 
 use super::env::{FnId, Program, Typed};
 use super::types::*;
-use crate::diag::{Span, SpanMap};
+use crate::diag::{Span, SpanMap, SpanSet};
 use crate::syntax::ast::{self, Expr, ExprKind, Pattern, PatternKind, Stmt, TagArgs, TagPatArgs};
 
 type VarId = usize;
@@ -153,6 +153,7 @@ pub fn check_function(p: &mut Program, fid: FnId) {
         arm_binds: HashMap::new(),
         arm_moves: HashSet::new(),
         lending: false,
+        lent_arms: SpanSet::default(),
     };
     // Pass 1 collects every use of every binding, with its position; pass 2 checks.
     for pass in 0..2 {
@@ -190,9 +191,11 @@ pub fn check_function(p: &mut Program, fid: FnId) {
     o.p.note = None;
     let moves = std::mem::take(&mut o.moves);
     let captured = std::mem::take(&mut o.captured_moves);
+    let lent_arms = std::mem::take(&mut o.lent_arms);
     if let Some(t) = o.p.typed.get_mut(&fid) {
         t.moves = moves;
         t.captured_moves = captured;
+        t.lent_arms = lent_arms;
     }
 }
 
@@ -272,6 +275,8 @@ struct Own<'p> {
     arm_moves: HashSet<Span>,
     /// Set while binding the pattern of an arm that borrows what it binds.
     lending: bool,
+    /// Arms that borrow an owned place `mut`, to change what they bind in place, by pattern.
+    lent_arms: SpanSet,
 }
 
 impl<'p> Own<'p> {
@@ -1105,6 +1110,8 @@ impl<'p> Own<'p> {
                     // Already moved, it was reported where the scrutinee was read.
                     let path = place.clone().filter(|p| !self.state.moved.iter().any(|m| m.overlaps(p) || p.overlaps(m)));
                     let takes = per_arm && self.takes_owned(&arm.pat) && self.arm_moves.contains(&arm.pat.span);
+                    // An arm that changes a part it binds, in place, borrows the place `mut`.
+                    let lends_mut = per_arm && !takes && self.arm_mutates(arm);
                     if let (true, Some(path)) = (takes, path) {
                         let at = Expr { kind: scrutinee.kind.clone(), span: arm.pat.span };
                         let ty = self.ty_of(scrutinee);
@@ -1112,9 +1119,18 @@ impl<'p> Own<'p> {
                     }
                     self.scopes.push(HashMap::new());
                     // An arm that takes nothing borrows what it binds from the place.
-                    let bound = if per_arm && !takes { read.clone() } else { sv.clone() };
+                    let mut bound = if per_arm && !takes { read.clone() } else { sv.clone() };
+                    if lends_mut && let Some(path) = place.clone() {
+                        self.check_mutable(&path, scrutinee);
+                        self.access(&path, true, scrutinee.span, &read.loans);
+                        let l = self.new_loan(path, true, scrutinee.span);
+                        bound.loans.insert(l);
+                        if !self.collecting {
+                            self.lent_arms.insert(arm.pat.span);
+                        }
+                    }
                     self.lending = per_arm && !takes;
-                    self.bind_pattern(&arm.pat, &bound, false);
+                    self.bind_pattern(&arm.pat, &bound, lends_mut);
                     self.lending = false;
                     if per_arm && self.collecting {
                         let mut ids = Vec::new();
@@ -1126,7 +1142,7 @@ impl<'p> Own<'p> {
                         }
                     }
                     if let Some(g) = &arm.guard {
-                        self.expr(g, Use::Read);
+                        self.guard(g, &arm.pat);
                     }
                     let v = self.expr(&arm.body, how);
                     out.extend(v.loans);
@@ -1584,9 +1600,14 @@ impl<'p> Own<'p> {
 
     /// Whether a function's declared result can hold a borrow other than through its type
     /// parameters.
+    /// Generic code can put a borrow of an argument's place into a `T` only through a function it
+    /// is given — a closure, a generator, a continuation — or where `T` is a `comptime` type,
+    /// which is code checked once it is known.
     fn declared_holds(&self, s: &super::env::Scheme) -> bool {
-        let params: Vec<u32> = s.tparams.iter().map(|g| g.sym.id).collect();
-        self.p.class(&s.ret) == 2 || hides_borrows(&s.ret, self.p, &params)
+        let params: Vec<u32> = s.tparams.iter().filter(|g| !g.comptime).map(|g| g.sym.id).collect();
+        self.p.class(&s.ret) == 2
+            || hides_borrows(&s.ret, self.p, &params)
+            || s.params.iter().any(|(_, t)| carries_code(self.p, t, &mut Vec::new()))
     }
 
     /// A task may capture only `Send` values, moved in, or `readonly` borrows of them (§6.1).
@@ -1932,7 +1953,7 @@ impl Own<'_> {
             self.scopes.push(HashMap::new());
             self.bind_pattern(&arm.pat, &sv, false);
             if let Some(g) = &arm.guard {
-                self.expr(g, Use::Read);
+                self.guard(g, &arm.pat);
             }
             let v = self.expr(&arm.body, how);
             out.extend(v.loans);
@@ -1954,22 +1975,48 @@ impl Own<'_> {
         Val { loans: out }
     }
 
-    /// Whether a match arm changes a part of the scrutinee it binds: assigns to it, lends it `mut`,
-    /// or calls a method that takes it `mut`.
+    /// A guard decides whether its arm runs: it may only read what its pattern binds, so the arms
+    /// after it still find the value whole (§4.1).
+    fn guard(&mut self, g: &Expr, pat: &Pattern) {
+        let before = self.state.moved.clone();
+        self.expr(g, Use::Read);
+        let mut names = Vec::new();
+        bind_names(pat, &mut names);
+        let bound: HashSet<VarId> = names.iter().filter_map(|n| self.lookup(n)).collect();
+        if self.state.moved.iter().any(|m| bound.contains(&m.root) && !before.contains(m)) {
+            self.err(g.span, "a guard cannot move what its pattern binds: when it fails, the next arm still needs it");
+        }
+        let mut changed = HashSet::new();
+        self.uses_beyond_read(g, true, false, &mut changed);
+        if names.iter().any(|n| changed.contains(n)) {
+            self.err(g.span, "a guard cannot change what its pattern binds: it only decides whether the arm runs");
+        }
+    }
+
+    /// Whether a match arm changes a part of the scrutinee it binds, or lets one go where it could
+    /// be changed: whether any use of what it binds does more than read it.
     fn arm_changes(&self, arm: &ast::MatchArm) -> bool {
+        self.arm_uses(arm, true)
+    }
+
+    /// Whether a match arm changes a part of an owned place it binds: owned parts it lets go are
+    /// moved or copied, not lent.
+    fn arm_mutates(&self, arm: &ast::MatchArm) -> bool {
+        self.arm_uses(arm, false)
+    }
+
+    fn arm_uses(&self, arm: &ast::MatchArm, escapes: bool) -> bool {
         let mut names = Vec::new();
         bind_names(&arm.pat, &mut names);
         let mut changed = HashSet::new();
-        if let Some(g) = &arm.guard {
-            self.changes(g, &mut changed);
-        }
-        self.changes(&arm.body, &mut changed);
+        self.uses_beyond_read(&arm.body, false, escapes, &mut changed);
         names.iter().any(|n| changed.contains(n))
     }
 
-    /// The bindings an expression changes, by name: what it assigns to, lends `mut`, or passes
-    /// where a `mut` borrow is taken.
-    fn changes(&self, e: &Expr, out: &mut HashSet<String>) {
+    /// The bindings an expression uses other than by reading, by name. `read`: the expression's
+    /// value is only read where it is used. A value escapes — so may be changed later — where it is
+    /// bound, returned, yielded, assigned, put in a literal or passed for a `mut` borrow.
+    fn uses_beyond_read(&self, e: &Expr, read: bool, escapes: bool, out: &mut HashSet<String>) {
         fn root(e: &Expr) -> Option<&str> {
             match &e.kind {
                 ExprKind::Ident(n) => Some(n),
@@ -1977,80 +2024,127 @@ impl Own<'_> {
                 _ => None,
             }
         }
-        let mut changed = |x: &Expr| {
+        let changed = |x: &Expr, out: &mut HashSet<String>| {
             if let Some(r) = root(x) {
                 out.insert(r.to_string());
             }
         };
         match &e.kind {
-            ExprKind::Assign { target, .. } | ExprKind::BorrowMut(target) => changed(target),
-            ExprKind::Call { callee, args, .. } => match self.typed.calls.get(&e.span).map(|f| &self.p.fns[*f].scheme.params) {
-                Some(params) => {
-                    let receiver = match &callee.kind {
-                        ExprKind::Field { target, .. } if params.first().is_some_and(|(n, _)| n == "self") => Some(&**target),
+            ExprKind::Ident(n) => {
+                if !read && escapes {
+                    out.insert(n.clone());
+                }
+            }
+            ExprKind::Field { target, .. } => self.uses_beyond_read(target, true, escapes, out),
+            ExprKind::Index { target, index } => {
+                self.uses_beyond_read(target, true, escapes, out);
+                self.uses_beyond_read(index, true, escapes, out);
+            }
+            ExprKind::BorrowMut(x) => changed(x, out),
+            ExprKind::Assign { target, value, .. } => {
+                changed(target, out);
+                self.uses_beyond_read(value, false, escapes, out);
+            }
+            ExprKind::Unary { operand, .. } => self.uses_beyond_read(operand, true, escapes, out),
+            ExprKind::Binary { lhs, rhs, .. } => {
+                self.uses_beyond_read(lhs, true, escapes, out);
+                self.uses_beyond_read(rhs, true, escapes, out);
+            }
+            ExprKind::Cast { expr, .. } => self.uses_beyond_read(expr, true, escapes, out),
+            ExprKind::Range { lo, hi } => {
+                for x in lo.iter().chain(hi.iter()) {
+                    self.uses_beyond_read(x, true, escapes, out);
+                }
+            }
+            ExprKind::Template(pieces) => {
+                for p in pieces {
+                    if let ast::TemplatePiece::Expr(x) = p {
+                        self.uses_beyond_read(x, true, escapes, out);
+                    }
+                }
+            }
+            ExprKind::Call { callee, args, .. } => {
+                let params: Option<Vec<Ty>> = match self.typed.calls.get(&e.span) {
+                    Some(f) => Some(self.p.fns[*f].scheme.params.iter().map(|(_, t)| t.clone()).collect()),
+                    None => match self.typed.exprs.get(&callee.span) {
+                        Some(Ty::Fn(f)) => Some(f.params.clone()),
                         _ => None,
-                    };
-                    for (x, (_, t)) in receiver.into_iter().chain(args.iter()).zip(params) {
-                        if matches!(t, Ty::Borrow(true, _)) {
-                            changed(x);
-                        }
+                    },
+                };
+                let has_self = self.typed.calls.get(&e.span).is_some_and(|f| self.p.fns[*f].scheme.params.first().is_some_and(|(n, _)| n == "self"));
+                let mut all: Vec<&Expr> = Vec::new();
+                match (&callee.kind, has_self) {
+                    (ExprKind::Field { target, .. }, true) => all.push(target),
+                    _ => self.uses_beyond_read(callee, true, escapes, out),
+                }
+                all.extend(args.iter());
+                for (i, x) in all.iter().enumerate() {
+                    match params.as_ref().and_then(|ps| ps.get(i)) {
+                        Some(Ty::Borrow(true, _)) => changed(x, out),
+                        Some(_) => self.uses_beyond_read(x, true, escapes, out),
+                        None => self.uses_beyond_read(x, false, escapes, out),
                     }
                 }
-                None => match self.typed.exprs.get(&callee.span) {
-                    Some(Ty::Fn(f)) => {
-                        for (x, t) in args.iter().zip(&f.params) {
-                            if matches!(t, Ty::Borrow(true, _)) {
-                                changed(x);
-                            }
-                        }
-                    }
-                    _ => args.iter().for_each(&mut changed),
-                },
-            },
+            }
             // A match through a `mut` borrow of a binding that changes what it binds changes it.
-            ExprKind::Match { scrutinee, arms }
-                if self.typed.lent_scrutinees.get(&scrutinee.span) == Some(&true) && arms.iter().any(|a| self.arm_changes(a)) =>
-            {
-                changed(scrutinee);
-            }
-            _ => {}
-        }
-        for c in children(e) {
-            self.changes(c, out);
-        }
-        let block = |b: &ast::Block, out: &mut HashSet<String>| {
-            for st in &b.stmts {
-                match st {
-                    Stmt::Let { init, .. } => self.changes(init, out),
-                    Stmt::Defer(x) | Stmt::Expr(x) => self.changes(x, out),
+            ExprKind::Match { scrutinee, arms } => {
+                if self.typed.lent_scrutinees.get(&scrutinee.span) == Some(&true) && arms.iter().any(|a| self.arm_changes(a)) {
+                    changed(scrutinee, out);
+                } else {
+                    self.uses_beyond_read(scrutinee, true, escapes, out);
                 }
-            }
-            if let Some(t) = &b.tail {
-                self.changes(t, out);
-            }
-        };
-        match &e.kind {
-            ExprKind::Block(b) | ExprKind::Region { body: b, .. } | ExprKind::Unsafe(b) => block(b, out),
-            ExprKind::If { then, .. } => block(then, out),
-            ExprKind::While { body, .. } | ExprKind::For { body, .. } => block(body, out),
-            ExprKind::Match { arms, .. } => {
                 for a in arms {
                     if let Some(g) = &a.guard {
-                        self.changes(g, out);
+                        self.uses_beyond_read(g, true, escapes, out);
                     }
-                    self.changes(&a.body, out);
+                    self.uses_beyond_read(&a.body, read, escapes, out);
                 }
             }
+            ExprKind::Block(b) | ExprKind::Region { body: b, .. } | ExprKind::Unsafe(b) => self.block_beyond_read(b, read, escapes, out),
+            ExprKind::If { cond, then, otherwise } => {
+                self.uses_beyond_read(cond, true, escapes, out);
+                self.block_beyond_read(then, read, escapes, out);
+                if let Some(o) = otherwise {
+                    self.uses_beyond_read(o, read, escapes, out);
+                }
+            }
+            ExprKind::While { cond, body } => {
+                self.uses_beyond_read(cond, true, escapes, out);
+                self.block_beyond_read(body, true, escapes, out);
+            }
+            ExprKind::For { iter, body, .. } => {
+                self.uses_beyond_read(iter, true, escapes, out);
+                self.block_beyond_read(body, true, escapes, out);
+            }
             ExprKind::Try { body, handler, .. } => {
-                block(body, out);
-                block(handler, out);
+                self.block_beyond_read(body, read, escapes, out);
+                self.block_beyond_read(handler, read, escapes, out);
             }
             ExprKind::Handle { body, arms, .. } => {
-                block(body, out);
-                arms.iter().for_each(|a| block(&a.body, out));
+                self.block_beyond_read(body, read, escapes, out);
+                for a in arms {
+                    self.block_beyond_read(&a.body, read, escapes, out);
+                }
             }
-            ExprKind::Lambda { body, .. } => self.changes(body, out),
-            _ => {}
+            ExprKind::Lambda { body, .. } => self.uses_beyond_read(body, false, escapes, out),
+            // What is returned, yielded, thrown or put in a value escapes.
+            _ => {
+                for c in children(e) {
+                    self.uses_beyond_read(c, false, escapes, out);
+                }
+            }
+        }
+    }
+
+    fn block_beyond_read(&self, b: &ast::Block, read: bool, escapes: bool, out: &mut HashSet<String>) {
+        for st in &b.stmts {
+            match st {
+                Stmt::Let { init, .. } => self.uses_beyond_read(init, false, escapes, out),
+                Stmt::Defer(x) | Stmt::Expr(x) => self.uses_beyond_read(x, true, escapes, out),
+            }
+        }
+        if let Some(t) = &b.tail {
+            self.uses_beyond_read(t, read, escapes, out);
         }
     }
 
@@ -2179,6 +2273,30 @@ fn hides_in(t: &Ty, p: &Program, send: &[u32], inside: &mut Vec<Ty>) -> bool {
         Ty::Tuple(ts) => ts.iter().any(|t| hides_in(t, p, send, inside)),
         Ty::Record(r) | Ty::Union(r) => r.labels.values().any(|t| hides_in(t, p, send, inside)),
         Ty::Array(t, _) | Ty::Slice(t) | Ty::Borrow(_, t) => hides_in(t, p, send, inside),
+        _ => false,
+    }
+}
+
+/// Whether a value of the type can be code that runs: a closure, a generator, a continuation, or
+/// something holding one.
+fn carries_code(p: &Program, t: &Ty, inside: &mut Vec<Ty>) -> bool {
+    match t {
+        Ty::Fn(_) => true,
+        Ty::Named(d, args) => {
+            let def = &p.defs[*d];
+            if matches!(def.name.as_str(), "Gen" | "Cont") && p.modules[def.module].is_std {
+                return true;
+            }
+            if inside.contains(t) {
+                return false;
+            }
+            inside.push(t.clone());
+            args.iter().any(|a| matches!(a, GArg::Ty(t) if carries_code(p, t, inside)))
+                || p.struct_fields(*d, args).is_some_and(|fs| fs.iter().any(|(_, t)| carries_code(p, t, inside)))
+        }
+        Ty::Tuple(ts) => ts.iter().any(|t| carries_code(p, t, inside)),
+        Ty::Record(r) | Ty::Union(r) => r.labels.values().any(|t| carries_code(p, t, inside)),
+        Ty::Array(t, _) | Ty::Slice(t) | Ty::Borrow(_, t) => carries_code(p, t, inside),
         _ => false,
     }
 }

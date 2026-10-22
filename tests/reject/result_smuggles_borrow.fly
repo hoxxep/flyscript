@@ -1,0 +1,13 @@
+// error: `b` cannot be changed here: it was lent `mut` at 10:25, and that borrow is still in use
+// A function given a closure can hand back, inside a type argument, a borrow of what it lent the
+// closure: its result holds the borrow (§4.1).
+struct Boxed<T> { val: T }
+impl<T> Boxed<T> {
+  function withMut<R>(self: mut Self, f: once (x: mut T) => R): R { f(mut self.val) }
+}
+export function main(): void {
+  let b = Boxed { val: "hello".toString() };
+  const r: mut String = b.withMut((x) => x);
+  const gone = b;
+  r.push(" world");
+}

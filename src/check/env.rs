@@ -218,6 +218,8 @@ pub struct Typed {
     /// `match` scrutinees that are places nothing may be moved out of — behind a borrow, or an
     /// element of a collection — matched through a borrow (`true` if `mut`), by their span.
     pub lent_scrutinees: SpanMap<bool>,
+    /// Match arms on an owned place that borrow it `mut`, changing what they bind in place.
+    pub lent_arms: SpanSet,
     /// Tag constructions `#A(x)` whose one argument is the whole of a larger payload (§3.2).
     pub whole: SpanSet,
     /// The type each part of a tag, record or list literal was checked against, by the part's
