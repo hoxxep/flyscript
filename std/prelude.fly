@@ -566,11 +566,13 @@ impl<T> Vec<T> {
   export function insert(self: mut Self, i: usize, v: T): void;
   // Keeps the elements `keep` accepts, in order: TypeScript's `xs = xs.filter(keep)`, in place.
   export function retain(self: mut Self, keep: mut (x: readonly T) => bool): void;
-  // A generator that performs nothing may be given any row, so its consumers' closures may
-// perform what they need: `xs.iter().some((x) => check(x))` where `check` uses `Region<R>`.
-// Takes every element out, in order, leaving the vector empty: `for (const f of fibers.drain())`.
+  // Keeps the first `n` elements, dropping the rest; a vector no longer than `n` is unchanged.
+  export function truncate(self: mut Self, n: usize): void;
+  // Takes every element out, in order, leaving the vector empty: `for (const f of fibers.drain())`.
   export function drain<row E>(self: mut Self): Gen<T, E>;
   export function len(self: readonly Self): usize;
+  // A generator that performs nothing may be given any row, so its consumers' closures may
+  // perform what they need: `xs.iter().some((x) => check(x))` where `check` uses `Region<R>`.
   export function iter<row E>(self: readonly Self): Gen<readonly T, E>;
   export function iterMut<row E>(self: mut Self): Gen<mut T, E> from self;
 }

@@ -331,6 +331,7 @@ impl Gen {
         `(${c} ? ${a} : ${b})`
       }
       #TagAt { name: _, args: _ } => self.unsupported(e.span, "a tag named by `comptime` code"),
+      #TypeRef(_) => self.unsupported(e.span, "a type `comptime` code computed"),
       #FieldAt { target: _, name: _ } => self.unsupported(e.span, "a field named by `comptime` code"),
       _ => {
         const t = self.fresh();

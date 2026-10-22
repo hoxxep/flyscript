@@ -138,6 +138,8 @@ export enum TypeKind {
   #Dyn(Vec<Ident>),
   // A `comptime` expression in type position, e.g. an array length.
   #Expr(Box<Expr>),
+  // A type computed by `comptime` code, by its index in the program's table (never parsed).
+  #Spliced(usize),
 }
 
 export type Block = { stmts: Vec<Stmt>; tail: Option<Box<Expr>>; span: Span };
@@ -175,6 +177,8 @@ export enum ExprKind {
   #Tag { name: String; args: TagArgs },
   // `#[e](…)`: the tag named by the `comptime` string `e`.
   #TagAt { name: Box<Expr>; args: TagArgs },
+  // A type computed by `comptime` code, used as a value's type: `T.decode(p)` (never parsed).
+  #TypeRef(usize),
   // `{ … }` or `Name { … }`.
   #Record { name: Option<Vec<Ident>>; fields: Vec<FieldInit> },
   // `[a, b]`: a tuple or array literal, resolved by type.

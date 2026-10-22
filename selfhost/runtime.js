@@ -428,6 +428,7 @@ const $rt = (() => {
     insert: (a, i, x) => { a.splice(Number(i), 0, x); },
     remove: (a, i) => { at(a, i); return a.splice(Number(i), 1)[0]; },
     retain: (a, keep) => { let j = 0; for (const x of a) if (keep(x)) a[j++] = x; a.length = j; },
+    truncate: (a, n) => { if (a.length > Number(n)) a.length = Number(n); },
     drain: (a) => gen(a.splice(0)),
     iter: (a) => gen(a), iterMut: (a) => gen(a),
     *each(a) { yield* a; },

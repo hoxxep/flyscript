@@ -460,6 +460,16 @@ impl Interp {
                 set(&p, Value::List(items));
                 Ok(out)
             }
+            "Vec.truncate" => {
+                let p = place_of(&a(0))?;
+                let n = a(1).as_int().max(0) as usize;
+                update(&p, |l| {
+                    if let Value::List(vs) = l {
+                        vs.truncate(n);
+                    }
+                });
+                Ok(Value::Unit)
+            }
             "Vec.retain" => {
                 let p = place_of(&a(0))?;
                 let mut kept = Vec::new();

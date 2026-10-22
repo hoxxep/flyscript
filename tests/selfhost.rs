@@ -40,7 +40,7 @@ fn fixpoint() {
 
 /// The self-hosted checker elaborates programs' declarations as the Rust prototype does:
 /// `flyc schemes` and selfhost/schemes.fly print the same lines. A quarter of the programs are
-/// compared, for time; template structs, which need `comptime`, are not compared yet.
+/// compared, for time.
 fn elaborates_as_flyc_does(root: &Path, compiler: &Path, out: &Path) {
     let schemes = out.join("schemes.js");
     let status = Command::new("node")
@@ -64,9 +64,6 @@ fn elaborates_as_flyc_does(root: &Path, compiler: &Path, out: &Path) {
     }
     let mut differ = Vec::new();
     for f in programs.into_iter().step_by(4) {
-        if std::fs::read_to_string(&f).unwrap().contains("comptime") {
-            continue;
-        }
         let rust = flyscript::check::env::describe(&flyscript::check::env::Program::load(std::slice::from_ref(&f))).join("\n");
         let js = Command::new("node").arg(&schemes).arg(&f).arg(root.join("std")).output().unwrap();
         if String::from_utf8_lossy(&js.stdout).trim_end() != rust {

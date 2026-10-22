@@ -1,0 +1,1469 @@
+// `comptime` (§7): the interpreter the compiler runs, reflection over types, and expansion of
+// `comptime` constructs into ordinary syntax.
+//
+// A body containing `comptime` code — a template's, or any function's — is *expanded* before it is
+// checked: `comptime if`/`match` keep one branch, `comptime for` repeats its body, computed names
+// (`v.[e]`, `#[e]`, `[e]:`) become plain names, and references to `comptime` values become literals
+// or spliced types. The expanded body is ordinary syntax with fresh positions and ids, in source
+// order, so the later passes treat each repeated copy as distinct code; `Program.synth` maps the
+// positions back to the source for diagnostics.
+
+import { Span } from "./diag";
+import {
+  Ident, Item, ItemKind, Field, Generate, TagDecl, TagPayload, Param, Return, RowItem, Type, TypeKind, Block, Stmt,
+  Expr, ExprKind, FieldInit, TagArgs, TemplatePiece, MatchArm, HandlerArm, Pattern, PatternKind, TagPatArgs,
+} from "./ast";
+import { Program, Binding, DefKind, moduleScope, substParams } from "./env";
+import { Prim, Ty, GArg, Len, primFromName, isInt, labelGet, labelSet } from "./types";
+
+// The methods `comptime` values have; any other method of one is a run-time call on its value
+// (`f.name.toString()`).
+const COMPTIME_METHODS: str[] = ["len", "isEmpty", "enumerate", "map", "filter", "any"];
+
+const STEP_BUDGET: u64 = 1000000;
+
+// A value computed by the compiler.
+export enum CV {
+  #Unit,
+  #Bool(bool),
+  #Int(i64),
+  #Str(String),
+  #List(Vec<CV>),
+  // Fields sorted by name.
+  #Record(Vec<[String, CV]>),
+  #Tag(String, Option<Box<CV>>),
+  #Type(Ty),
+  // A `comptime function`, by its declaration.
+  #Fn(usize),
+  #Closure(Vec<String>, Box<Expr>, Vec<[String, Option<CV>]>),
+}
+impl Clone for CV;
+
+// Equality of `comptime` values; functions are never equal.
+export function cvEq(a: readonly CV, b: readonly CV): bool {
+  match ([a, b]) {
+    [#Unit, #Unit] => true,
+    [#Bool(x), #Bool(y)] => x == y,
+    [#Int(x), #Int(y)] => x == y,
+    [#Str(x), #Str(y)] => x == y,
+    [#Type(x), #Type(y)] => x == y,
+    [#List(xs), #List(ys)] => xs.len() == ys.len() && cvsEq(xs, ys),
+    [#Record(xs), #Record(ys)] => {
+      if (xs.len() != ys.len()) { return false; }
+      for (const i of 0..xs.len()) {
+        if (xs[i][0] != ys[i][0] || !cvEq(xs[i][1], ys[i][1])) { return false; }
+      }
+      true
+    }
+    [#Tag(n, p), #Tag(m, q)] => n == m && match ([p, q]) {
+      [#None, #None] => true,
+      [#Some(x), #Some(y)] => cvEq(x, y),
+      _ => false,
+    },
+    [#Fn(f), #Fn(g)] => f == g,
+    _ => false,
+  }
+}
+
+function cvsEq(xs: readonly Vec<CV>, ys: readonly Vec<CV>): bool {
+  for (const i of 0..xs.len()) { if (!cvEq(xs[i], ys[i])) { return false; } }
+  true
+}
+
+function recordGet(fs: readonly Vec<[String, CV]>, k: str): Option<CV> {
+  match (fs.iter().find(([n, _]) => n == k)) { #Some([_, v]) => #Some(v.clone()), #None => #None }
+}
+
+function recordSet(fs: mut Vec<[String, CV]>, k: str, v: CV): void {
+  let i: usize = 0;
+  while (i < fs.len()) {
+    if (fs[i][0] == k) { fs[i] = [k.toString(), v]; return; }
+    if (fs[i][0].asStr().cmp(k) == #Greater) { break; }
+    i += 1;
+  }
+  fs.insert(i, [k.toString(), v]);
+}
+
+function rec(fs: readonly [str, CV][]): CV {
+  let out: Vec<[String, CV]> = Vec.new();
+  for (const [k, v] of fs) { recordSet(mut out, k, v.clone()); }
+  #Record(out)
+}
+
+function tagOf(n: str, v: CV): CV { #Tag(n.toString(), #Some(Box.new(v))) }
+
+export function cvShow(p: readonly Program, v: readonly CV): String {
+  match (v) {
+    #Unit => "void".toString(),
+    #Bool(b) => `${b}`,
+    #Int(i) => `${i}`,
+    #Str(s) => s.clone(),
+    #Type(t) => p.show(t),
+    #List(xs) => {
+      let parts: Vec<String> = Vec.new();
+      for (const x of xs) { parts.push(cvShow(p, x)); }
+      `[${parts.join(", ")}]`
+    }
+    #Record(fs) => {
+      let parts: Vec<String> = Vec.new();
+      for (const [k, x] of fs) { parts.push(`${k}: ${cvShow(p, x)}`); }
+      `{ ${parts.join(", ")} }`
+    }
+    #Tag(n, #None) => `#${n}`,
+    #Tag(n, #Some(x)) => `#${n}(${cvShow(p, x)})`,
+    #Fn(_) | #Closure(_, _, _) => "function".toString(),
+  }
+}
+
+function cvKind(v: readonly CV): str {
+  match (v) {
+    #Unit => "void", #Bool(_) => "a `bool`", #Int(_) => "an integer", #Str(_) => "a string", #List(_) => "a list",
+    #Record(_) => "a record", #Tag(_, _) => "a tag", #Type(_) => "a type", #Fn(_) | #Closure(_, _, _) => "a function",
+  }
+}
+
+export type CtStop = #CtError(Span, String) | #CtReturn(CV);
+
+function fail(span: Span, msg: str): never uses Fail<CtStop> { throw #CtError(span, msg.toString()) }
+
+// Expands `comptime` constructs in one function body.
+export view struct Expand {
+  p: mut Program;
+  module: usize;
+  // The nominal type a derivation was requested for (`impl Json for User;`): its private fields
+  // are visible to the reflection the derivation does (§7.3).
+  requested: Option<usize>;
+  // `comptime` bindings; `#None` where a run-time binding shadows one.
+  env: Vec<[String, Option<CV>]>;
+  steps: u64;
+}
+
+export function expander(p: mut Program, module: usize, requested: Option<usize>, env: Vec<[String, CV]>): Expand {
+  let e: Vec<[String, Option<CV>]> = Vec.new();
+  for (const [k, v] of env) { e.push([k.clone(), #Some(v.clone())]); }
+  Expand { p, module, requested, env: e, steps: 0 }
+}
+
+impl Expand {
+  // Expands a body; on error, reports it at its source position and gives `#None`.
+  export function body(self: mut Self, b: readonly Block): Option<Block> {
+    try { #Some(self.block(b)) } catch (s) { self.report(s); #None }
+  }
+
+  // A type with `comptime` code in it, expanded (a template impl's associated type).
+  export function expandType(self: mut Self, t: readonly Type): Option<Type> {
+    try { #Some(self.ty(t)) } catch (s) { self.report(s); #None }
+  }
+
+  // A template struct's fields for one instance (§7.1); reports an error and gives `#None` if
+  // its `comptime` code fails.
+  export function structFields(self: mut Self, fields: readonly Vec<Field>): Option<Vec<Field>> {
+    try { #Some(self.fields(fields)) } catch (s) { self.report(s); #None }
+  }
+
+  function report(self: mut Self, s: CtStop): void {
+    if (const #CtError(span, msg) = s) {
+      const m = self.module;
+      self.p.error(m, span, msg.asStr());
+    }
+  }
+
+  // ---- positions ----
+
+  // A fresh position for expanded code that came from `orig`.
+  function sp(self: mut Self, orig: Span): Span {
+    const o = self.p.sourceSpan(orig);
+    const s = self.p.nextSynth;
+    self.p.nextSynth += 1;
+    self.p.synth.insert(s, o);
+    { start: s, end: s + 1 }
+  }
+
+  function id(self: mut Self): usize {
+    self.p.nextId += 1;
+    self.p.nextId
+  }
+
+  function mk(self: mut Self, kind: ExprKind, span: Span): Expr { { kind, span, id: self.id() } }
+
+  function ident(self: mut Self, i: readonly Ident): Ident { { name: i.name.clone(), span: self.sp(i.span) } }
+
+  // ---- scopes ----
+
+  function lookup(self: readonly Self, name: str): Option<Option<CV>> {
+    let i = self.env.len();
+    while (i > 0) {
+      i -= 1;
+      if (self.env[i][0] == name) { return #Some(self.env[i][1].clone()); }
+    }
+    #None
+  }
+
+  function ctValue(self: readonly Self, name: str): Option<CV> {
+    match (self.lookup(name)) { #Some(#Some(v)) => #Some(v), _ => #None }
+  }
+
+  function shadow(self: mut Self, name: str): void {
+    if (self.lookup(name).isSome()) { self.env.push([name.toString(), #None]); }
+  }
+
+  function bind(self: mut Self, binds: Vec<[String, CV]>): void {
+    for (const [k, v] of binds) { self.env.push([k.clone(), #Some(v.clone())]); }
+  }
+
+  // Whether `e` is computed from `comptime` values alone, as far as its root.
+  function isCt(self: readonly Self, e: readonly Expr): bool {
+    match (e.kind) {
+      #Ident(n) => self.ctValue(n.asStr()).isSome() || (n == "Type" && self.lookup(n.asStr()).isNone()),
+      #Field { target, name: _ } => self.isCt(target),
+      #Call { callee, typeArgs: _, args } => match (callee.kind) {
+        #Field { target, name: _ } => self.isCt(target),
+        // A `comptime function` applied to `comptime` values: `payloadOf(t)`.
+        #Ident(n) => {
+          self.lookup(n.asStr()).isNone()
+            && match (self.p.lookup(self.module, n.asStr())) {
+              #Some(#Fn(f)) => match (self.p.fnDecl(f)) { #Some(d) => d.sig.isComptime, #None => false },
+              _ => false,
+            }
+            && args.iter().every((a) => self.isCt(a))
+        }
+        _ => false,
+      },
+      _ => false,
+    }
+  }
+
+  // ---- expansion ----
+
+  function block(self: mut Self, b: readonly Block): Block uses Fail<CtStop> {
+    const depth = self.env.len();
+    const span = self.sp(b.span);
+    let stmts: Vec<Stmt> = Vec.new();
+    for (const st of b.stmts) {
+      stmts.push(match (st) {
+        #Let { mutable, pat, ty, init, span: s } => {
+          const at = self.sp(s);
+          const i = self.expr(init);
+          const t: Option<Type> = match (ty) { #Some(x) => #Some(self.ty(x)), #None => #None };
+          const q = self.pattern(pat);
+          #Let { mutable, pat: q, ty: t, init: i, span: at }
+        }
+        #Defer(e) => #Defer(self.expr(e)),
+        #Expr(e) => #Expr(self.expr(e)),
+      });
+    }
+    const tail: Option<Box<Expr>> = match (b.tail) { #Some(t) => #Some(Box.new(self.expr(t))), #None => #None };
+    self.env.truncate(depth);
+    { stmts, tail, span }
+  }
+
+  function scopedBlock(self: mut Self, b: readonly Block): Block uses Fail<CtStop> {
+    const depth = self.env.len();
+    const r = self.block(b);
+    self.env.truncate(depth);
+    r
+  }
+
+  function exprs(self: mut Self, es: readonly Vec<Expr>): Vec<Expr> uses Fail<CtStop> {
+    let out: Vec<Expr> = Vec.new();
+    for (const e of es) { out.push(self.expr(e)); }
+    out
+  }
+
+  function optExpr(self: mut Self, e: readonly Option<Box<Expr>>): Option<Box<Expr>> uses Fail<CtStop> {
+    match (e) { #Some(x) => #Some(Box.new(self.expr(x))), #None => #None }
+  }
+
+  export function expr(self: mut Self, e: readonly Expr): Expr uses Fail<CtStop> {
+    const span = self.sp(e.span);
+    const kind: ExprKind = match (e.kind) {
+      #Int(_) | #Float(_) | #Byte(_) | #Str(_) | #Bool(_) | #Break | #Continue | #TypeRef(_) => e.kind.clone(),
+      #Template(pieces) => {
+        let out: Vec<TemplatePiece> = Vec.new();
+        for (const p of pieces) {
+          out.push(match (p) { #Lit(s) => #Lit(s.clone()), #Expr(x) => #Expr(self.expr(x)) });
+        }
+        #Template(out)
+      }
+      #Ident(n) => match (self.ctValue(n.asStr())) {
+        #Some(v) => return self.splice(v, e.span),
+        #None => #Ident(n.clone()),
+      },
+      #Tag { name, args } => #Tag { name: name.clone(), args: self.tagArgs(args) },
+      #TagAt { name, args } => {
+        const n = self.ctName(name);
+        #Tag { name: n, args: self.tagArgs(args) }
+      }
+      #Record { name, fields } => {
+        const path: Option<Vec<Ident>> = match (name) {
+          #Some(ps) => {
+            let out: Vec<Ident> = Vec.new();
+            for (const i of ps) { out.push(self.ident(i)); }
+            #Some(out)
+          }
+          #None => #None,
+        };
+        #Record { name: path, fields: self.inits(fields) }
+      }
+      #List(items) => #List(self.list(items)),
+      #Field { target, name } if self.isCt(target) => {
+        const v = self.eval(target);
+        if (const #Type(t) = v) {
+          const i = self.spliceTy(t);
+          const ts = self.sp(target.span);
+          const tgt = self.mk(#TypeRef(i), ts);
+          #Field { target: Box.new(tgt), name: self.ident(name) }
+        } else {
+          const fv = self.fieldOf(v, name.name.asStr(), name.span);
+          return self.splice(fv, e.span);
+        }
+      }
+      #Field { target, name } => #Field { target: Box.new(self.expr(target)), name: self.ident(name) },
+      #FieldAt { target, name } => {
+        const n = self.ctName(name);
+        const nm: Ident = { name: n, span: self.sp(name.span) };
+        #Field { target: Box.new(self.expr(target)), name: nm }
+      }
+      #Index { target, index } => #Index { target: Box.new(self.expr(target)), index: Box.new(self.expr(index)) },
+      #Call { callee, typeArgs, args } => {
+        if (const #Field { target, name } = callee.kind) {
+          if (self.isCt(target) && COMPTIME_METHODS.includes(name.name.asStr())) {
+            const recv = self.eval(target);
+            if (!match (recv) { #Type(_) => true, _ => false }) {
+              // A method of a `comptime` value: computed now (`fields.len()`).
+              const v = self.eval(e);
+              return self.splice(v, e.span);
+            }
+          }
+        }
+        let tas: Vec<Type> = Vec.new();
+        for (const t of typeArgs) { tas.push(self.ty(t)); }
+        // A run-time method of a `comptime` value: called on the value, spliced in.
+        const c: Expr = match (callee.kind) {
+          #Field { target, name } if self.isCt(target) && !match (self.eval(target)) { #Type(_) => true, _ => false } => {
+            const v = self.eval(target);
+            const cs = self.sp(callee.span);
+            const recv = self.splice(v, target.span);
+            const nm = self.ident(name);
+            self.mk(#Field { target: Box.new(recv), name: nm }, cs)
+          }
+          _ => self.expr(callee),
+        };
+        #Call { callee: Box.new(c), typeArgs: tas, args: self.exprs(args) }
+      }
+      #Unary { op, operand } => #Unary { op: op.clone(), operand: Box.new(self.expr(operand)) },
+      #BorrowMut(x) => #BorrowMut(Box.new(self.expr(x))),
+      #Binary { op, lhs, rhs } => #Binary { op: op.clone(), lhs: Box.new(self.expr(lhs)), rhs: Box.new(self.expr(rhs)) },
+      #Assign { op, target, value } => #Assign { op: op.clone(), target: Box.new(self.expr(target)), value: Box.new(self.expr(value)) },
+      #Cast { expr, ty } => #Cast { expr: Box.new(self.expr(expr)), ty: self.ty(ty) },
+      #Range { lo, hi } => #Range { lo: self.optExpr(lo), hi: self.optExpr(hi) },
+      #Lambda { params, body } => {
+        const depth = self.env.len();
+        const ps = self.params(params);
+        const b = self.expr(body);
+        self.env.truncate(depth);
+        #Lambda { params: ps, body: Box.new(b) }
+      }
+      #Block(b) => #Block(self.scopedBlock(b)),
+      #If { cond, then, otherwise } => #If { cond: Box.new(self.expr(cond)), then: self.scopedBlock(then), otherwise: self.optExpr(otherwise) },
+      #While { cond, body } => #While { cond: Box.new(self.expr(cond)), body: self.scopedBlock(body) },
+      #For { mutable, pat, iter, body } => {
+        const it = self.expr(iter);
+        const depth = self.env.len();
+        const q = self.pattern(pat);
+        const b = self.block(body);
+        self.env.truncate(depth);
+        #For { mutable, pat: q, iter: Box.new(it), body: b }
+      }
+      #Match { scrutinee, arms } => #Match { scrutinee: Box.new(self.expr(scrutinee)), arms: self.arms(arms) },
+      #Try { body, pat, handler } => {
+        const b = self.scopedBlock(body);
+        const depth = self.env.len();
+        const q = self.pattern(pat);
+        const h = self.block(handler);
+        self.env.truncate(depth);
+        #Try { body: b, pat: q, handler: h }
+      }
+      #Throw(x) => #Throw(Box.new(self.expr(x))),
+      #Yield(x) => #Yield(Box.new(self.expr(x))),
+      #Return(x) => #Return(self.optExpr(x)),
+      #Region { name, body } => #Region { name: self.ident(name), body: self.scopedBlock(body) },
+      #Handle { body, effect, arms } => {
+        const b = self.scopedBlock(body);
+        const eff = self.ty(effect);
+        let out: Vec<HandlerArm> = Vec.new();
+        for (const a of arms) {
+          const depth = self.env.len();
+          for (const p of a.params) { self.shadow(p.name.asStr()); }
+          if (const #Some(k) = a.resumes) { self.shadow(k.name.asStr()); }
+          let ps: Vec<Ident> = Vec.new();
+          for (const i of a.params) { ps.push(self.ident(i)); }
+          const resumes: Option<Ident> = match (a.resumes) { #Some(i) => #Some(self.ident(i)), #None => #None };
+          const op = self.ident(a.op);
+          const ab = self.block(a.body);
+          self.env.truncate(depth);
+          out.push({ op, params: ps, resumes, body: ab });
+        }
+        #Handle { body: b, effect: eff, arms: out }
+      }
+      #Unsafe(b) => #Unsafe(self.scopedBlock(b)),
+      #Comptime(inner) => return self.comptime(inner, e.span),
+    };
+    self.mk(kind, span)
+  }
+
+  // `comptime e`: `if`, `match` and `for` choose or repeat code; anything else is computed and
+  // its value spliced in.
+  function comptime(self: mut Self, inner: readonly Expr, at: Span): Expr uses Fail<CtStop> {
+    match (inner.kind) {
+      #If { cond, then, otherwise } => {
+        if (self.evalBool(cond)) {
+          const b = self.scopedBlock(then);
+          const span = b.span;
+          self.mk(#Block(b), span)
+        } else {
+          match (otherwise) {
+            // `else if` continues the `comptime` choice.
+            #Some(o) if match (o.kind) { #If { cond: _ } => true, _ => false } => self.comptime(o, at),
+            #Some(o) => self.expr(o),
+            #None => self.unit(at),
+          }
+        }
+      }
+      #Match { scrutinee, arms } => {
+        const v = self.eval(scrutinee);
+        for (const arm of arms) {
+          const depth = self.env.len();
+          let binds: Vec<[String, CV]> = Vec.new();
+          if (self.ctMatch(arm.pat, v, mut binds)) {
+            self.bind(binds);
+            const guard = match (arm.guard) { #Some(g) => self.evalBool(g), #None => true };
+            if (guard) {
+              const r = self.expr(arm.body);
+              self.env.truncate(depth);
+              return r;
+            }
+          }
+          self.env.truncate(depth);
+        }
+        fail(scrutinee.span, `no arm matches \`${cvShow(self.p, v)}\``.asStr())
+      }
+      #For { mutable: _, pat, iter, body } => {
+        const items = self.evalList(iter);
+        const span = self.sp(at);
+        let stmts: Vec<Stmt> = Vec.new();
+        for (const item of items) {
+          const depth = self.env.len();
+          let binds: Vec<[String, CV]> = Vec.new();
+          if (!self.ctMatch(pat, item, mut binds)) {
+            fail(pat.span, `\`${cvShow(self.p, item)}\` does not match this pattern`.asStr());
+          }
+          self.bind(binds);
+          const b = self.block(body);
+          self.env.truncate(depth);
+          const bspan = b.span;
+          stmts.push(#Expr(self.mk(#Block(b), bspan)));
+        }
+        self.mk(#Block({ stmts, tail: #None, span }), span)
+      }
+      _ => {
+        const v = self.eval(inner);
+        self.splice(v, at)
+      }
+    }
+  }
+
+  function unit(self: mut Self, at: Span): Expr {
+    const span = self.sp(at);
+    self.mk(#Block({ stmts: Vec.new(), tail: #None, span }), span)
+  }
+
+  // A `comptime` value as syntax.
+  function splice(self: mut Self, v: readonly CV, at: Span): Expr uses Fail<CtStop> {
+    const span = self.sp(at);
+    const kind: ExprKind = match (v) {
+      #Unit => return self.unit(at),
+      #Bool(b) => #Bool(b),
+      #Int(i) if i < 0 => #Unary { op: "-".toString(), operand: Box.new(self.mk(#Int(`${-i}`), span)) },
+      #Int(i) => #Int(`${i}`),
+      #Str(s) => #Str(s.clone()),
+      #Type(t) => #TypeRef(self.spliceTy(t.clone())),
+      #List(xs) => {
+        let out: Vec<Expr> = Vec.new();
+        for (const x of xs) { out.push(self.splice(x, at)); }
+        #List(out)
+      }
+      #Record(fs) => {
+        let fields: Vec<FieldInit> = Vec.new();
+        for (const [k, x] of fs) {
+          const name: Ident = { name: k.clone(), span: self.sp(at) };
+          fields.push(FieldInit { name, value: #Some(self.splice(x, at)), computed: #None, generate: #None });
+        }
+        #Record { name: #None, fields }
+      }
+      #Tag(n, #None) => #Tag { name: n.clone(), args: #None },
+      #Tag(n, #Some(x)) => #Tag { name: n.clone(), args: #Tuple([self.splice(x, at)]) },
+      #Fn(_) | #Closure(_, _, _) => fail(at, "a `comptime` function cannot be used at run time"),
+    };
+    self.mk(kind, span)
+  }
+
+  function spliceTy(self: mut Self, t: Ty): usize {
+    self.p.spliced.push(t);
+    self.p.spliced.len() - 1
+  }
+
+  function ctName(self: mut Self, e: readonly Expr): String uses Fail<CtStop> {
+    match (self.eval(e)) {
+      #Str(s) => s,
+      v => fail(e.span, `a computed name must be a string, not ${cvKind(v)}`.asStr()),
+    }
+  }
+
+  // A list literal's items: in a list, `comptime for` contributes one item per iteration, its
+  // body, and `comptime if` the body it chooses (§7.2).
+  function list(self: mut Self, items: readonly Vec<Expr>): Vec<Expr> uses Fail<CtStop> {
+    let out: Vec<Expr> = Vec.new();
+    for (const it of items) {
+      const inner = match (it.kind) { #Comptime(x) => x, _ => { out.push(self.expr(it)); continue; } };
+      match (inner.kind) {
+        #For { mutable: _, pat, iter, body } => {
+          for (const v of self.evalList(iter)) {
+            const depth = self.env.len();
+            let binds: Vec<[String, CV]> = Vec.new();
+            if (!self.ctMatch(pat, v, mut binds)) {
+              fail(pat.span, `\`${cvShow(self.p, v)}\` does not match this pattern`.asStr());
+            }
+            self.bind(binds);
+            const b = self.block(body);
+            self.env.truncate(depth);
+            const span = b.span;
+            out.push(self.mk(#Block(b), span));
+          }
+        }
+        #If { cond, then, otherwise } => {
+          if (self.evalBool(cond)) {
+            const b = self.scopedBlock(then);
+            const span = b.span;
+            out.push(self.mk(#Block(b), span));
+          } else if (const #Some(o) = otherwise) {
+            out.push(self.expr(o));
+          }
+        }
+        _ => out.push(self.expr(it)),
+      }
+    }
+    out
+  }
+
+  function tagArgs(self: mut Self, a: readonly TagArgs): TagArgs uses Fail<CtStop> {
+    match (a) {
+      #None => #None,
+      #Tuple(es) => #Tuple(self.exprs(es)),
+      #Record(fs) => #Record(self.inits(fs)),
+    }
+  }
+
+  function params(self: mut Self, ps: readonly Vec<Param>): Vec<Param> uses Fail<CtStop> {
+    let out: Vec<Param> = Vec.new();
+    for (const p of ps) {
+      const ty: Option<Type> = match (p.ty) { #Some(t) => #Some(self.ty(t)), #None => #None };
+      self.shadow(p.name.name.asStr());
+      out.push({ isComptime: p.isComptime, name: self.ident(p.name), ty });
+    }
+    out
+  }
+
+  // ---- sequences: what `comptime for`, `if` and `match` generate ----
+
+  function genItems(self: mut Self, g: readonly Generate<FieldInit>, out: mut Vec<FieldInit>): void uses Fail<CtStop> {
+    match (g) {
+      #If { cond, then, otherwise } => {
+        const chosen = if (self.evalBool(cond)) { then } else { otherwise };
+        for (const x of self.inits(chosen)) { out.push(x.clone()); }
+      }
+      #Do(e) => { self.eval(e); }
+      #Match { scrutinee, arms } => {
+        const v = self.eval(scrutinee);
+        for (const [pat, items] of arms) {
+          const depth = self.env.len();
+          let binds: Vec<[String, CV]> = Vec.new();
+          if (self.ctMatch(pat, v, mut binds)) {
+            self.bind(binds);
+            const r = self.inits(items);
+            self.env.truncate(depth);
+            for (const x of r) { out.push(x.clone()); }
+            return;
+          }
+          self.env.truncate(depth);
+        }
+        fail(scrutinee.span, `no arm matches \`${cvShow(self.p, v)}\``.asStr());
+      }
+      #For { pat, iter, body } => {
+        for (const v of self.evalList(iter)) {
+          const depth = self.env.len();
+          let binds: Vec<[String, CV]> = Vec.new();
+          if (!self.ctMatch(pat, v, mut binds)) { fail(pat.span, `\`${cvShow(self.p, v)}\` does not match this pattern`.asStr()); }
+          self.bind(binds);
+          const r = self.inits(body);
+          self.env.truncate(depth);
+          for (const x of r) { out.push(x.clone()); }
+        }
+      }
+    }
+  }
+
+  function inits(self: mut Self, fs: readonly Vec<FieldInit>): Vec<FieldInit> uses Fail<CtStop> {
+    let out: Vec<FieldInit> = Vec.new();
+    for (const f of fs) {
+      if (const #Some(g) = f.generate) { self.genItems(g, mut out); continue; }
+      const name: Ident = match (f.computed) {
+        #Some(e) => { const n = self.ctName(e); { name: n, span: self.sp(f.name.span) } }
+        #None => self.ident(f.name),
+      };
+      const value: Option<Expr> = match (f.value) {
+        #Some(v) => #Some(self.expr(v)),
+        // A punned `comptime` binding is spliced: `{ n }` where `n` is `comptime`.
+        #None => match (self.ctValue(f.name.name.asStr())) {
+          #Some(v) => #Some(self.splice(v, f.name.span)),
+          #None => #None,
+        },
+      };
+      out.push(FieldInit { name, value, computed: #None, generate: #None });
+    }
+    out
+  }
+
+  function genFields(self: mut Self, g: readonly Generate<Field>, out: mut Vec<Field>): void uses Fail<CtStop> {
+    match (g) {
+      #If { cond, then, otherwise } => {
+        const chosen = if (self.evalBool(cond)) { then } else { otherwise };
+        for (const x of self.fields(chosen)) { out.push(x.clone()); }
+      }
+      #Do(e) => { self.eval(e); }
+      #Match { scrutinee, arms } => {
+        const v = self.eval(scrutinee);
+        for (const [pat, items] of arms) {
+          const depth = self.env.len();
+          let binds: Vec<[String, CV]> = Vec.new();
+          if (self.ctMatch(pat, v, mut binds)) {
+            self.bind(binds);
+            const r = self.fields(items);
+            self.env.truncate(depth);
+            for (const x of r) { out.push(x.clone()); }
+            return;
+          }
+          self.env.truncate(depth);
+        }
+        fail(scrutinee.span, `no arm matches \`${cvShow(self.p, v)}\``.asStr());
+      }
+      #For { pat, iter, body } => {
+        for (const v of self.evalList(iter)) {
+          const depth = self.env.len();
+          let binds: Vec<[String, CV]> = Vec.new();
+          if (!self.ctMatch(pat, v, mut binds)) { fail(pat.span, `\`${cvShow(self.p, v)}\` does not match this pattern`.asStr()); }
+          self.bind(binds);
+          const r = self.fields(body);
+          self.env.truncate(depth);
+          for (const x of r) { out.push(x.clone()); }
+        }
+      }
+    }
+  }
+
+  function fields(self: mut Self, fs: readonly Vec<Field>): Vec<Field> uses Fail<CtStop> {
+    let out: Vec<Field> = Vec.new();
+    for (const f of fs) {
+      if (const #Some(g) = f.generate) { self.genFields(g, mut out); continue; }
+      const name: Ident = match (f.computed) {
+        #Some(e) => { const n = self.ctName(e); { name: n, span: self.sp(f.name.span) } }
+        #None => self.ident(f.name),
+      };
+      out.push(Field { name, ty: self.ty(f.ty), private: f.private, computed: #None, generate: #None });
+    }
+    out
+  }
+
+  function genArms(self: mut Self, g: readonly Generate<MatchArm>, out: mut Vec<MatchArm>): void uses Fail<CtStop> {
+    match (g) {
+      #If { cond, then, otherwise } => {
+        const chosen = if (self.evalBool(cond)) { then } else { otherwise };
+        for (const x of self.arms(chosen)) { out.push(x.clone()); }
+      }
+      #Do(e) => { self.eval(e); }
+      #Match { scrutinee, arms } => {
+        const v = self.eval(scrutinee);
+        for (const [pat, items] of arms) {
+          const depth = self.env.len();
+          let binds: Vec<[String, CV]> = Vec.new();
+          if (self.ctMatch(pat, v, mut binds)) {
+            self.bind(binds);
+            const r = self.arms(items);
+            self.env.truncate(depth);
+            for (const x of r) { out.push(x.clone()); }
+            return;
+          }
+          self.env.truncate(depth);
+        }
+        fail(scrutinee.span, `no arm matches \`${cvShow(self.p, v)}\``.asStr());
+      }
+      #For { pat, iter, body } => {
+        for (const v of self.evalList(iter)) {
+          const depth = self.env.len();
+          let binds: Vec<[String, CV]> = Vec.new();
+          if (!self.ctMatch(pat, v, mut binds)) { fail(pat.span, `\`${cvShow(self.p, v)}\` does not match this pattern`.asStr()); }
+          self.bind(binds);
+          const r = self.arms(body);
+          self.env.truncate(depth);
+          for (const x of r) { out.push(x.clone()); }
+        }
+      }
+    }
+  }
+
+  function arms(self: mut Self, arms: readonly Vec<MatchArm>): Vec<MatchArm> uses Fail<CtStop> {
+    let out: Vec<MatchArm> = Vec.new();
+    for (const a of arms) {
+      if (const #Some(g) = a.generate) { self.genArms(g, mut out); continue; }
+      const depth = self.env.len();
+      const pat = self.pattern(a.pat);
+      const guard: Option<Expr> = match (a.guard) { #Some(g) => #Some(self.expr(g)), #None => #None };
+      const body = self.expr(a.body);
+      self.env.truncate(depth);
+      out.push(MatchArm { pat, guard, body, generate: #None });
+    }
+    out
+  }
+
+  // ---- types and patterns ----
+
+  function ty(self: mut Self, t: readonly Type): Type uses Fail<CtStop> {
+    const span = self.sp(t.span);
+    const kind: TypeKind = match (t.kind) {
+      #Path { segments, args } if match (self.lookup(segments[0].name.asStr())) { #Some(#Some(_)) => true, _ => false } => {
+        let e = self.mk(#Ident(segments[0].name.clone()), segments[0].span);
+        for (const i of 1..segments.len()) {
+          const s = segments[i].clone();
+          const at = s.span;
+          e = self.mk(#Field { target: Box.new(e), name: s }, at);
+        }
+        if (args.len() > 0) { fail(t.span, "a `comptime` type takes no type arguments"); }
+        match (self.eval(e)) {
+          #Type(x) => #Spliced(self.spliceTy(x)),
+          v => fail(t.span, `expected a type, found ${cvKind(v)}`.asStr()),
+        }
+      }
+      #Path { segments, args } => {
+        let segs: Vec<Ident> = Vec.new();
+        for (const i of segments) { segs.push(self.ident(i)); }
+        let tas: Vec<Type> = Vec.new();
+        for (const a of args) { tas.push(self.ty(a)); }
+        #Path { segments: segs, args: tas }
+      }
+      #Record { fields, rest } => #Record { fields: self.fields(fields), rest: match (rest) { #Some(r) => #Some(self.ident(r)), #None => #None } },
+      #Union { tags, includes, rest } => {
+        let incs: Vec<Type> = Vec.new();
+        for (const x of includes) { incs.push(self.ty(x)); }
+        let ts: Vec<TagDecl> = Vec.new();
+        for (const tg of tags) {
+          const payload: TagPayload = match (tg.payload) {
+            #None => #None,
+            #Tuple(xs) => {
+              let out: Vec<Type> = Vec.new();
+              for (const x of xs) { out.push(self.ty(x)); }
+              #Tuple(out)
+            }
+            #Record(fs) => #Record(self.fields(fs)),
+          };
+          ts.push({ name: self.ident(tg.name), payload });
+        }
+        #Union { tags: ts, includes: incs, rest: match (rest) { #Some(r) => #Some(self.ident(r)), #None => #None } }
+      }
+      #Tuple(ts) => {
+        let out: Vec<Type> = Vec.new();
+        for (const x of ts) { out.push(self.ty(x)); }
+        #Tuple(out)
+      }
+      #EmptyRow => #EmptyRow,
+      #Fn { mode, params, ret, uses: row } => {
+        const depth = self.env.len();
+        const ps = self.params(params);
+        let from: Vec<Ident> = Vec.new();
+        for (const i of ret.from) { from.push(self.ident(i)); }
+        const r: Return = { ty: self.ty(ret.ty), from };
+        self.env.truncate(depth);
+        #Fn { mode: mode.clone(), params: ps, ret: Box.new(r), uses: self.uses(row) }
+      }
+      #Array { elem, len } => #Array { elem: Box.new(self.ty(elem)), len: self.optExpr(len) },
+      #Mut(x) => #Mut(Box.new(self.ty(x))),
+      #Readonly(x) => #Readonly(Box.new(self.ty(x))),
+      #Ptr(x) => #Ptr(Box.new(self.ty(x))),
+      #Dyn(path) => {
+        let out: Vec<Ident> = Vec.new();
+        for (const i of path) { out.push(self.ident(i)); }
+        #Dyn(out)
+      }
+      #Expr(e) => #Expr(Box.new(self.expr(e))),
+      #Spliced(i) => #Spliced(i),
+    };
+    { kind, span }
+  }
+
+  function uses(self: mut Self, u: readonly Option<Vec<RowItem>>): Option<Vec<RowItem>> uses Fail<CtStop> {
+    match (u) {
+      #None => #None,
+      #Some(items) => {
+        let out: Vec<RowItem> = Vec.new();
+        for (const it of items) {
+          out.push(match (it) { #Effect(t) => #Effect(self.ty(t)), #Spread(i) => #Spread(self.ident(i)) });
+        }
+        #Some(out)
+      }
+    }
+  }
+
+  // A run-time pattern: its bindings shadow `comptime` ones for the rest of the scope.
+  function pattern(self: mut Self, p: readonly Pattern): Pattern uses Fail<CtStop> {
+    const span = self.sp(p.span);
+    const kind: PatternKind = match (p.kind) {
+      #Wild => #Wild,
+      #Bind(n) => {
+        self.shadow(n.asStr());
+        #Bind(n.clone())
+      }
+      #Lit(e) => match (e.kind) {
+        #Comptime(inner) => {
+          const v = self.eval(inner);
+          #Lit(Box.new(self.splice(v, e.span)))
+        }
+        _ => #Lit(Box.new(self.expr(e))),
+      },
+      #Tag { name, args } => #Tag { name: name.clone(), args: self.tagPats(args) },
+      #TagAt { name, args } => {
+        const n = self.ctName(name);
+        #Tag { name: n, args: self.tagPats(args) }
+      }
+      #Tuple(ps) => {
+        let out: Vec<Pattern> = Vec.new();
+        for (const x of ps) { out.push(self.pattern(x)); }
+        #Tuple(out)
+      }
+      #Record { name, fields } => {
+        const path: Option<Vec<Ident>> = match (name) {
+          #Some(ps) => {
+            let out: Vec<Ident> = Vec.new();
+            for (const i of ps) { out.push(self.ident(i)); }
+            #Some(out)
+          }
+          #None => #None,
+        };
+        #Record { name: path, fields: self.fieldPats(fields) }
+      }
+      #Or(ps) => {
+        let out: Vec<Pattern> = Vec.new();
+        for (const x of ps) { out.push(self.pattern(x)); }
+        #Or(out)
+      }
+    };
+    { kind, span, id: self.id() }
+  }
+
+  function fieldPats(self: mut Self, fs: readonly Vec<[Ident, Option<Pattern>]>): Vec<[Ident, Option<Pattern>]> uses Fail<CtStop> {
+    let out: Vec<[Ident, Option<Pattern>]> = Vec.new();
+    for (const [n, p] of fs) {
+      const q: Option<Pattern> = match (p) {
+        #Some(x) => #Some(self.pattern(x)),
+        #None => {
+          self.shadow(n.name.asStr());
+          #None
+        }
+      };
+      out.push([self.ident(n), q]);
+    }
+    out
+  }
+
+  function tagPats(self: mut Self, a: readonly TagPatArgs): TagPatArgs uses Fail<CtStop> {
+    match (a) {
+      #None => #None,
+      #Tuple(ps) => {
+        let out: Vec<Pattern> = Vec.new();
+        for (const x of ps) { out.push(self.pattern(x)); }
+        #Tuple(out)
+      }
+      #Record(fs) => #Record(self.fieldPats(fs)),
+    }
+  }
+
+  // ---- the interpreter ----
+
+  function tick(self: mut Self, span: Span): void uses Fail<CtStop> {
+    self.steps += 1;
+    if (self.steps > STEP_BUDGET) { fail(span, "`comptime` evaluation ran out of steps"); }
+  }
+
+  function evalBool(self: mut Self, e: readonly Expr): bool uses Fail<CtStop> {
+    match (self.eval(e)) {
+      #Bool(b) => b,
+      v => fail(e.span, `expected a \`bool\`, found ${cvKind(v)}`.asStr()),
+    }
+  }
+
+  function evalList(self: mut Self, e: readonly Expr): Vec<CV> uses Fail<CtStop> {
+    match (self.eval(e)) {
+      #List(xs) => xs,
+      v => fail(e.span, `\`comptime for\` needs a list, found ${cvKind(v)}`.asStr()),
+    }
+  }
+
+  export function eval(self: mut Self, e: readonly Expr): CV uses Fail<CtStop> {
+    self.tick(e.span);
+    match (e.kind) {
+      #Int(s) => match (parseInt(s.replaceAll("_", "").asStr())) {
+        #Some(n) => #Int(n),
+        #None => fail(e.span, "bad integer"),
+      },
+      #Str(s) => #Str(s.clone()),
+      #Bool(b) => #Bool(b),
+      #Template(pieces) => {
+        let s = String.new();
+        for (const p of pieces) {
+          match (p) {
+            #Lit(l) => s.push(l.asStr()),
+            #Expr(x) => {
+              const v = self.eval(x);
+              s.push(cvShow(self.p, v).asStr());
+            }
+          }
+        }
+        #Str(s)
+      }
+      #Ident(n) => self.identValue(n.asStr(), e.span),
+      #Tag { name, args } => match (args) {
+        #None => #Tag(name.clone(), #None),
+        #Tuple(xs) if xs.len() == 1 => #Tag(name.clone(), #Some(Box.new(self.eval(xs[0])))),
+        #Tuple(xs) => {
+          let vs: Vec<CV> = Vec.new();
+          for (const x of xs) { vs.push(self.eval(x)); }
+          #Tag(name.clone(), #Some(Box.new(#List(vs))))
+        }
+        #Record(fs) => #Tag(name.clone(), #Some(Box.new(self.evalRecord(fs)))),
+      },
+      #Record { name: _, fields } => self.evalRecord(fields),
+      #List(xs) => {
+        let vs: Vec<CV> = Vec.new();
+        for (const x of xs) { vs.push(self.eval(x)); }
+        #List(vs)
+      }
+      #Field { target, name } => {
+        const v = self.eval(target);
+        self.fieldOf(v, name.name.asStr(), name.span)
+      }
+      #Index { target, index } => {
+        const v = self.eval(target);
+        const i = self.eval(index);
+        match ([v, i]) {
+          [#List(xs), #Int(k)] if k >= 0 && (k as usize) < xs.len() => xs[k as usize].clone(),
+          [#List(_), #Int(_)] => fail(e.span, "index out of range"),
+          _ => fail(e.span, "cannot index this `comptime` value"),
+        }
+      }
+      #Call { callee, typeArgs: _, args } => self.evalCall(callee, args, e.span),
+      #Unary { op, operand } => {
+        const v = self.eval(operand);
+        match (v) {
+          #Bool(b) if op == "!" => #Bool(!b),
+          #Int(i) if op == "-" => #Int(-i),
+          other => fail(e.span, `cannot apply \`${op}\` to ${cvKind(other)}`.asStr()),
+        }
+      }
+      #Binary { op, lhs, rhs } => {
+        if (op == "&&" || op == "||") {
+          const l = self.evalBool(lhs);
+          if ((op == "&&") != l) { return #Bool(l); }
+          return #Bool(self.evalBool(rhs));
+        }
+        const l = self.eval(lhs);
+        const r = self.eval(rhs);
+        match (binary(op.asStr(), l, r)) {
+          #Some(v) => v,
+          #None => fail(e.span, `cannot apply \`${op}\` to these \`comptime\` values`.asStr()),
+        }
+      }
+      #Lambda { params, body } => {
+        let names: Vec<String> = Vec.new();
+        for (const p of params) { names.push(p.name.name.clone()); }
+        #Closure(names, Box.new(body.get().clone()), self.env.clone())
+      }
+      #Block(b) => {
+        const depth = self.env.len();
+        const r = try { self.evalBlock(b) } catch (s) { self.env.truncate(depth); throw s };
+        self.env.truncate(depth);
+        r
+      }
+      #If { cond, then, otherwise } => {
+        if (self.evalBool(cond)) {
+          const depth = self.env.len();
+          const r = try { self.evalBlock(then) } catch (s) { self.env.truncate(depth); throw s };
+          self.env.truncate(depth);
+          r
+        } else {
+          match (otherwise) { #Some(o) => self.eval(o), #None => #Unit }
+        }
+      }
+      #Match { scrutinee, arms } => {
+        const v = self.eval(scrutinee);
+        for (const arm of arms) {
+          const depth = self.env.len();
+          let binds: Vec<[String, CV]> = Vec.new();
+          if (self.ctMatch(arm.pat, v, mut binds)) {
+            self.bind(binds);
+            const ok = match (arm.guard) { #Some(g) => self.evalBool(g), #None => true };
+            if (ok) {
+              const r = try { self.eval(arm.body) } catch (s) { self.env.truncate(depth); throw s };
+              self.env.truncate(depth);
+              return r;
+            }
+          }
+          self.env.truncate(depth);
+        }
+        fail(scrutinee.span, `no arm matches \`${cvShow(self.p, v)}\``.asStr())
+      }
+      #Return(v) => {
+        const r = match (v) { #Some(x) => self.eval(x), #None => #Unit };
+        throw #CtReturn(r)
+      }
+      #Comptime(x) => self.eval(x),
+      #TypeRef(i) => #Type(self.p.spliced[i].clone()),
+      _ => fail(e.span, "this cannot be computed at compile time"),
+    }
+  }
+
+  function evalRecord(self: mut Self, fs: readonly Vec<FieldInit>): CV uses Fail<CtStop> {
+    let out: Vec<[String, CV]> = Vec.new();
+    for (const f of fs) {
+      const v = match (f.value) { #Some(x) => self.eval(x), #None => self.identValue(f.name.name.asStr(), f.name.span) };
+      recordSet(mut out, f.name.name.asStr(), v);
+    }
+    #Record(out)
+  }
+
+  function evalBlock(self: mut Self, b: readonly Block): CV uses Fail<CtStop> {
+    for (const st of b.stmts) {
+      match (st) {
+        #Let { mutable: _, pat, ty: _, init, span: _ } => {
+          const v = self.eval(init);
+          let binds: Vec<[String, CV]> = Vec.new();
+          if (!self.ctMatch(pat, v, mut binds)) { fail(pat.span, "pattern does not match"); }
+          self.bind(binds);
+        }
+        #Expr(e) | #Defer(e) => { self.eval(e); }
+      }
+    }
+    match (b.tail) { #Some(t) => self.eval(t), #None => #Unit }
+  }
+
+  function identValue(self: mut Self, n: str, span: Span): CV uses Fail<CtStop> {
+    match (self.lookup(n)) {
+      #Some(#Some(v)) => return v,
+      #Some(#None) => fail(span, `\`${n}\` is a run-time value; \`comptime\` code cannot use it`.asStr()),
+      #None => {}
+    }
+    if (const #Some(p) = primFromName(n)) {
+      if (p != #Type || self.p.lookup(self.module, n).isNone()) { return #Type(#Prim(p)); }
+    }
+    match (self.p.lookup(self.module, n)) {
+      #Some(#Const(c)) => {
+        const value = self.p.consts[c].value.clone();
+        const m = self.p.consts[c].module;
+        const saved = replace(mut self.module, m);
+        const r = try { self.eval(value) } catch (s) { self.module = saved; throw s };
+        self.module = saved;
+        r
+      }
+      #Some(#Fn(f)) => #Fn(f),
+      #Some(#Def(_)) => {
+        const scope = moduleScope(self.module);
+        const t: Type = { kind: #Path { segments: [{ name: n.toString(), span }], args: Vec.new() }, span };
+        #Type(self.p.elabTy(t, scope))
+      }
+      #None => fail(span, `unknown name \`${n}\` in \`comptime\` code`.asStr()),
+    }
+  }
+
+  function fieldOf(self: mut Self, v: CV, name: str, span: Span): CV uses Fail<CtStop> {
+    match (v) {
+      #Record(fs) => match (recordGet(fs, name)) {
+        #Some(x) => x,
+        #None => fail(span, `no field \`${name}\` in \`${cvShow(self.p, v)}\``.asStr()),
+      },
+      other => fail(span, `${cvKind(other)} has no field \`${name}\``.asStr()),
+    }
+  }
+
+  function evalArgs(self: mut Self, args: readonly Vec<Expr>): Vec<CV> uses Fail<CtStop> {
+    let out: Vec<CV> = Vec.new();
+    for (const a of args) { out.push(self.eval(a)); }
+    out
+  }
+
+  function evalCall(self: mut Self, callee: readonly Expr, args: readonly Vec<Expr>, span: Span): CV uses Fail<CtStop> {
+    if (const #Field { target, name } = callee.kind) {
+      const isType = match (target.kind) { #Ident(t) => t == "Type" && self.lookup(t.asStr()).isNone(), _ => false };
+      if (isType) {
+        const vals = self.evalArgs(args);
+        return self.reflect(name.name.asStr(), vals, span);
+      }
+      const recv = self.eval(target);
+      const vals = self.evalArgs(args);
+      return self.method(recv, name.name.asStr(), vals, span);
+    }
+    if (const #Ident(n) = callee.kind) {
+      if (self.lookup(n.asStr()).isNone()) {
+        if (n == "panic") {
+          const msg = match (args.len()) { 0 => "panic".toString(), _ => { const v = self.eval(args[0]); cvShow(self.p, v) } };
+          fail(span, msg.asStr());
+        }
+        if (n == "assert") {
+          if (!self.evalBool(args[0])) {
+            const msg = if (args.len() > 1) { const v = self.eval(args[1]); cvShow(self.p, v) } else { "assertion failed".toString() };
+            fail(span, msg.asStr());
+          }
+          return #Unit;
+        }
+      }
+    }
+    const f = self.eval(callee);
+    const vals = self.evalArgs(args);
+    self.apply(f, vals, span)
+  }
+
+  function apply(self: mut Self, f: CV, args: Vec<CV>, span: Span): CV uses Fail<CtStop> {
+    match (f) {
+      #Closure(params, body, env) => {
+        let e = env.clone();
+        for (const i of 0..min(params.len(), args.len())) { e.push([params[i].clone(), #Some(args[i].clone())]); }
+        const saved = replace(mut self.env, e);
+        const r: Result<CV, CtStop> = try { #Ok(self.eval(body)) } catch (s) { #Err(s) };
+        self.env = saved;
+        match (r) { #Ok(v) | #Err(#CtReturn(v)) => v, #Err(other) => throw other }
+      }
+      #Fn(fid) => {
+        const decl = self.p.fns[fid].decl;
+        const module = self.p.fns[fid].module;
+        const fd = match (self.p.modules[decl.module].ast.items[decl.item].kind) {
+          #Function(fd) => fd.clone(),
+          _ => fail(span, "not a `comptime` function"),
+        };
+        if (!fd.sig.isComptime) { fail(span, `\`${fd.sig.name.name}\` is not a \`comptime function\``.asStr()); }
+        const body = match (fd.body) { #Some(b) => b, #None => fail(span, "this function has no body") };
+        let e: Vec<[String, Option<CV>]> = Vec.new();
+        for (const i of 0..min(fd.sig.params.len(), args.len())) { e.push([fd.sig.params[i].name.name.clone(), #Some(args[i].clone())]); }
+        const savedEnv = replace(mut self.env, e);
+        const savedModule = replace(mut self.module, module);
+        const r: Result<CV, CtStop> = try { #Ok(self.evalBlock(body)) } catch (s) { #Err(s) };
+        self.env = savedEnv;
+        self.module = savedModule;
+        match (r) { #Ok(v) | #Err(#CtReturn(v)) => v, #Err(other) => throw other }
+      }
+      v => fail(span, `${cvKind(v)} is not a function`.asStr()),
+    }
+  }
+
+  function method(self: mut Self, recv: CV, name: str, args: Vec<CV>, span: Span): CV uses Fail<CtStop> {
+    match (recv) {
+      #List(xs) => {
+        if (name == "len") { return #Int(xs.len() as i64); }
+        if (name == "isEmpty") { return #Bool(xs.len() == 0); }
+        if (name == "enumerate") {
+          let out: Vec<CV> = Vec.new();
+          for (const [i, x] of xs.iter().enumerate()) { out.push(#List([#Int(i as i64), x.clone()])); }
+          return #List(out);
+        }
+        const f: CV = if (args.len() > 0) { args[0].clone() } else { #Unit };
+        if (name == "map") {
+          let out: Vec<CV> = Vec.new();
+          for (const x of xs) { out.push(self.apply(f.clone(), [x.clone()], span)); }
+          return #List(out);
+        }
+        if (name == "filter") {
+          let out: Vec<CV> = Vec.new();
+          for (const x of xs) {
+            if (cvEq(self.apply(f.clone(), [x.clone()], span), #Bool(true))) { out.push(x.clone()); }
+          }
+          return #List(out);
+        }
+        if (name == "any") {
+          for (const x of xs) {
+            if (cvEq(self.apply(f.clone(), [x.clone()], span), #Bool(true))) { return #Bool(true); }
+          }
+          return #Bool(false);
+        }
+        fail(span, `a list has no \`comptime\` method \`${name}\``.asStr())
+      }
+      #Str(s) if name == "len" => #Int(s.len() as i64),
+      v => fail(span, `${cvKind(v)} has no \`comptime\` method \`${name}\``.asStr()),
+    }
+  }
+
+  // ---- reflection ----
+
+  function reflect(self: mut Self, name: str, args: Vec<CV>, span: Span): CV uses Fail<CtStop> {
+    const t = match (args.len()) {
+      0 => fail(span, `\`Type.${name}\` takes a type`.asStr()),
+      _ => match (args[0]) { #Type(t) => t.clone(), _ => fail(span, `\`Type.${name}\` takes a type`.asStr()) },
+    };
+    if (name == "info") { return self.info(t, span); }
+    if (name == "name") { return #Str(self.p.show(t)); }
+    fail(span, `\`Type\` has no function \`${name}\``.asStr())
+  }
+
+  // Whether reflection may see `d`'s private fields: from its own module, or for a derivation it
+  // requested.
+  function privileged(self: readonly Self, d: usize): bool {
+    self.p.defs[d].module == self.module || self.requested == #Some(d)
+  }
+
+  function fieldInfo(k: readonly String, t: readonly Ty): CV {
+    rec([["name", #Str(k.clone())], ["type", #Type(t.clone())]])
+  }
+
+  function info(self: mut Self, t: readonly Ty, span: Span): CV uses Fail<CtStop> {
+    match (t) {
+      #Prim(p) if isInt(p) => {
+        const signed = match (p) { #I8 | #I16 | #I32 | #I64 | #Isize => true, _ => false };
+        const bits: i64 = match (p) { #I8 | #U8 => 8, #I16 | #U16 => 16, #I32 | #U32 => 32, _ => 64 };
+        tagOf("Int", rec([["signed", #Bool(signed)], ["bits", #Int(bits)]]))
+      }
+      #Prim(#F32) => tagOf("Float", #Int(32)),
+      #Prim(#F64) => tagOf("Float", #Int(64)),
+      #Prim(#Bool) => #Tag("Bool".toString(), #None),
+      #Prim(#Str) => #Tag("Str".toString(), #None),
+      #Prim(#Void) => #Tag("Void".toString(), #None),
+      #Record(r) => {
+        let fs: Vec<CV> = Vec.new();
+        for (const [k, x] of r.labels) { fs.push(Expand.fieldInfo(k, x)); }
+        tagOf("Record", #List(fs))
+      }
+      #Tuple(ts) => {
+        let out: Vec<CV> = Vec.new();
+        for (const x of ts) { out.push(#Type(x.clone())); }
+        tagOf("Tuple", #List(out))
+      }
+      #Union(r) => {
+        let out: Vec<CV> = Vec.new();
+        for (const [k, x] of r.labels) { out.push(Expand.tagInfo(k.asStr(), x)); }
+        tagOf("Union", #List(out))
+      }
+      #Array(e, #Known(n)) => tagOf("Array", rec([["item", #Type(e.get().clone())], ["len", #Int(n as i64)]])),
+      #Slice(e) => tagOf("Slice", #Type(e.get().clone())),
+      #Borrow(m, inner) => tagOf("Borrow", rec([["mutable", #Bool(m)], ["type", #Type(inner.get().clone())]])),
+      #Named(d, args) => {
+        const name: CV = #Str(self.p.defs[d].name.clone());
+        let targs: Vec<CV> = Vec.new();
+        for (const a of args) { if (const #Ty(x) = a) { targs.push(#Type(x.clone())); } }
+        const isStruct = match (self.p.defs[d].kind) { #Struct { fields: #Some(_) } => true, _ => false };
+        if (isStruct && (self.p.defs[d].private.len() == 0 || self.privileged(d))) {
+          self.p.ensureInstance(d, args);
+          const fs = match (self.p.structFields(d, args)) { #Some(x) => x, #None => Vec.new() };
+          let infos: Vec<CV> = Vec.new();
+          for (const [k, x] of fs) { infos.push(Expand.fieldInfo(k, x)); }
+          return tagOf("Struct", rec([["name", name], ["fields", #List(infos)]]));
+        }
+        match (self.p.defs[d].kind) {
+          #Enum { tags } => {
+            let infos: Vec<CV> = Vec.new();
+            for (const k of self.p.defs[d].tagOrder) {
+              if (const #Some(x) = labelGet(tags, k.asStr())) {
+                const pt = substParams(x, self.p.defs[d].params, args);
+                infos.push(Expand.tagInfo(k.asStr(), pt));
+              }
+            }
+            tagOf("Enum", rec([["name", name], ["tags", #List(infos)]]))
+          }
+          _ => tagOf("Opaque", rec([["name", name], ["args", #List(targs)]])),
+        }
+      }
+      #Fn(_) => #Tag("Fn".toString(), #None),
+      _ => fail(span, `\`${self.p.show(t)}\` cannot be reflected on`.asStr()),
+    }
+  }
+
+  // A tag's name and payload: none, the one type of `#A(T)`, or the tuple or record of a larger
+  // payload, which `#A(x)` binds whole (§3.2).
+  function tagInfo(name: str, payload: readonly Ty): CV {
+    const p: CV = match (payload) {
+      #Prim(#Void) => #Tag("None".toString(), #None),
+      #Tuple(ts) if ts.len() == 1 => #Tag("Some".toString(), #Some(Box.new(#Type(ts[0].clone())))),
+      t => #Tag("Some".toString(), #Some(Box.new(#Type(t.clone())))),
+    };
+    rec([["name", #Str(name.toString())], ["payload", p]])
+  }
+
+  // ---- `comptime` patterns ----
+
+  function ctMatch(self: mut Self, p: readonly Pattern, v: readonly CV, out: mut Vec<[String, CV]>): bool uses Fail<CtStop> {
+    match (p.kind) {
+      #Wild => true,
+      #Bind(n) => { out.push([n.clone(), v.clone()]); true }
+      #Lit(e) => {
+        const lit = self.eval(e);
+        cvEq(lit, v)
+      }
+      #Tag { name, args } => match (v) {
+        #Tag(n, payload) => {
+          if (name != n) { return false; }
+          match (args) {
+            #None => true,
+            #Tuple(ps) => match (payload) {
+              #Some(x) => {
+                if (ps.len() == 1) { return self.ctMatch(ps[0], x, mut out); }
+                match (x.get()) {
+                  #List(xs) if xs.len() == ps.len() => {
+                    for (const i of 0..ps.len()) { if (!self.ctMatch(ps[i], xs[i], mut out)) { return false; } }
+                    true
+                  }
+                  _ => false,
+                }
+              }
+              #None => false,
+            },
+            #Record(fs) => match (payload) { #Some(x) => self.ctRecord(fs, x, mut out), #None => false },
+          }
+        }
+        _ => false,
+      },
+      #Tuple(ps) => match (v) {
+        #List(xs) if ps.len() == xs.len() => {
+          for (const i of 0..ps.len()) { if (!self.ctMatch(ps[i], xs[i], mut out)) { return false; } }
+          true
+        }
+        _ => false,
+      },
+      #Record { name: _, fields } => self.ctRecord(fields, v, mut out),
+      #Or(ps) => {
+        for (const q of ps) {
+          let binds: Vec<[String, CV]> = Vec.new();
+          if (self.ctMatch(q, v, mut binds)) {
+            for (const b of binds) { out.push(b.clone()); }
+            return true;
+          }
+        }
+        false
+      }
+      _ => false,
+    }
+  }
+
+  function ctRecord(self: mut Self, fs: readonly Vec<[Ident, Option<Pattern>]>, v: readonly CV, out: mut Vec<[String, CV]>): bool uses Fail<CtStop> {
+    const r = match (v) { #Record(r) => r, _ => return false };
+    for (const [n, p] of fs) {
+      const x = match (recordGet(r, n.name.asStr())) { #Some(x) => x, #None => return false };
+      match (p) {
+        #Some(q) => { if (!self.ctMatch(q, x, mut out)) { return false; } }
+        #None => out.push([n.name.clone(), x]),
+      }
+    }
+    true
+  }
+}
+
+function binary(op: str, l: CV, r: CV): Option<CV> {
+  if (op == "==") { return #Some(#Bool(cvEq(l, r))); }
+  if (op == "!=") { return #Some(#Bool(!cvEq(l, r))); }
+  match ([l, r]) {
+    [#Int(a), #Int(b)] => {
+      if (op == "+") { return #Some(#Int(a + b)); }
+      if (op == "-") { return #Some(#Int(a - b)); }
+      if (op == "*") { return #Some(#Int(a * b)); }
+      if (op == "/" && b != 0) { return #Some(#Int(a / b)); }
+      if (op == "%" && b != 0) { return #Some(#Int(a % b)); }
+      if (op == "&") { return #Some(#Int(a & b)); }
+      if (op == "|") { return #Some(#Int(a | b)); }
+      if (op == "<<" && b >= 0 && b < 63) { return #Some(#Int(a << b)); }
+      if (op == ">>" && b >= 0 && b < 63) { return #Some(#Int(a >> b)); }
+      if (op == "<") { return #Some(#Bool(a < b)); }
+      if (op == "<=") { return #Some(#Bool(a <= b)); }
+      if (op == ">") { return #Some(#Bool(a > b)); }
+      if (op == ">=") { return #Some(#Bool(a >= b)); }
+      #None
+    }
+    [#Str(a), #Str(b)] if op == "+" => #Some(#Str(`${a}${b}`)),
+    [#List(a), #List(b)] if op == "+" => {
+      let out = a;
+      for (const x of b) { out.push(x.clone()); }
+      #Some(#List(out))
+    }
+    _ => #None,
+  }
+}
+
+// Whether a body uses `comptime` code, and so must be expanded before checking.
+export function blockHasComptime(b: readonly Block): bool {
+  b.stmts.iter().some((s) => match (s) {
+    #Let { mutable: _, pat: _, ty, init, span: _ } => exprHas(init) || match (ty) { #Some(t) => tyHas(t), #None => false },
+    #Defer(e) | #Expr(e) => exprHas(e),
+  }) || match (b.tail) { #Some(t) => exprHas(t), #None => false }
+}
+
+function tyHas(t: readonly Type): bool {
+  match (t.kind) {
+    #Record { fields, rest: _ } => fields.iter().some((f) => f.generate.isSome() || f.computed.isSome() || tyHas(f.ty)),
+    #Path { segments: _, args } => args.iter().some((a) => tyHas(a)),
+    #Tuple(ts) => ts.iter().some((x) => tyHas(x)),
+    #Mut(x) | #Readonly(x) | #Ptr(x) => tyHas(x),
+    #Array { elem, len: _ } => tyHas(elem),
+    _ => false,
+  }
+}
+
+function initsHave(fs: readonly Vec<FieldInit>): bool {
+  fs.iter().some((f) => f.generate.isSome() || f.computed.isSome() || match (f.value) { #Some(v) => exprHas(v), #None => false })
+}
+
+function optHas(e: readonly Option<Box<Expr>>): bool { match (e) { #Some(x) => exprHas(x), #None => false } }
+
+function exprHas(e: readonly Expr): bool {
+  match (e.kind) {
+    #Comptime(_) | #FieldAt { target: _ } | #TagAt { name: _ } => true,
+    #Template(ps) => ps.iter().some((p) => match (p) { #Expr(x) => exprHas(x), _ => false }),
+    #Tag { name: _, args } => match (args) {
+      #None => false,
+      #Tuple(es) => es.iter().some((x) => exprHas(x)),
+      #Record(fs) => initsHave(fs),
+    },
+    #Record { name: _, fields } => initsHave(fields),
+    #List(es) => es.iter().some((x) => exprHas(x)),
+    #Field { target, name: _ } => exprHas(target),
+    #Index { target, index } => exprHas(target) || exprHas(index),
+    #Call { callee, typeArgs, args } => exprHas(callee) || args.iter().some((x) => exprHas(x)) || typeArgs.iter().some((t) => tyHas(t)),
+    #Unary { op: _, operand } => exprHas(operand),
+    #BorrowMut(x) | #Throw(x) | #Yield(x) => exprHas(x),
+    #Binary { op: _, lhs, rhs } => exprHas(lhs) || exprHas(rhs),
+    #Assign { op: _, target, value } => exprHas(target) || exprHas(value),
+    #Cast { expr, ty } => exprHas(expr) || tyHas(ty),
+    #Range { lo, hi } => optHas(lo) || optHas(hi),
+    #Lambda { params: _, body } => exprHas(body),
+    #Block(b) | #Unsafe(b) => blockHasComptime(b),
+    #Region { name: _, body } => blockHasComptime(body),
+    #If { cond, then, otherwise } => exprHas(cond) || blockHasComptime(then) || optHas(otherwise),
+    #While { cond, body } => exprHas(cond) || blockHasComptime(body),
+    #For { mutable: _, pat: _, iter, body } => exprHas(iter) || blockHasComptime(body),
+    #Match { scrutinee, arms } => exprHas(scrutinee) || arms.iter().some((a) => {
+      a.generate.isSome() || (match (a.pat.kind) { #TagAt { name: _ } | #Lit(_) => true, _ => false } && patHas(a.pat))
+        || exprHas(a.body) || match (a.guard) { #Some(g) => exprHas(g), #None => false }
+    }),
+    #Try { body, pat: _, handler } => blockHasComptime(body) || blockHasComptime(handler),
+    #Return(x) => optHas(x),
+    #Handle { body, effect: _, arms } => blockHasComptime(body) || arms.iter().some((a) => blockHasComptime(a.body)),
+    _ => false,
+  }
+}
+
+function patHas(p: readonly Pattern): bool {
+  match (p.kind) {
+    #TagAt { name: _ } => true,
+    #Lit(e) => match (e.kind) { #Comptime(_) => true, _ => false },
+    _ => false,
+  }
+}
