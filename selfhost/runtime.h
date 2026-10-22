@@ -273,3 +273,6 @@ extern char** fly_argv;
 fly_str fly_arg_str(int i);
 int64_t fly_arg_int(int i);
 double fly_arg_float(int i);
+// The arguments from the `i`th on, as `str`s or as `String`s.
+fly_slice fly_arg_strs(int i);
+fly_slice fly_arg_strings(int i);

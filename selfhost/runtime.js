@@ -849,7 +849,8 @@ const { $rt, $b } = (() => {
   // ---- running a program ----
 
   const argv = process.argv.slice(2).map((a) => Buffer.from(a, "utf8").toString("latin1"));
-  const argStr = (i) => argv[i];
+  const argStr = (i) => (i < argv.length ? argv[i] : panic(`argument ${i + 1} is missing`));
+  const argList = (i) => argv.slice(i);
   function argInt(i) { return /^-?\d+$/.test(argv[i]) ? BigInt(argv[i]) : panic(`argument ${i + 1} is not an integer`); }
   function argNum(i) { return /^-?\d+$/.test(argv[i]) ? Number(argv[i]) : panic(`argument ${i + 1} is not an integer`); }
 
@@ -872,7 +873,7 @@ const { $rt, $b } = (() => {
     Fail, Panic, Return, YIELD, handle, run, drive, moved, isMoved, sub, unmove, panic, raise, FieldRef, indexRef, rangeRef, yielded, isYield, perform, items,
     div, rem, ndiv, nrem, bits, fmod, truncFloat, truncNum, toInt, toNum, at, idx, slice, copy, showFloat, shown, show,
     unmatched: (v) => panic(`no arm matched ${show(v)}`),
-    argStr, argInt, argNum, start,
+    argStr, argList, argInt, argNum, start,
     ...checks, ...wraps,
   };
   return { $rt, $b };

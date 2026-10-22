@@ -79,7 +79,8 @@ fn main() -> ExitCode {
 }
 
 /// `flyc run file.fly [function] [args...]`: checks the program, then runs `function` (default
-/// `main`) with integer or string arguments, printing what it prints and what it returns.
+/// `main`) with the arguments as its parameters read them (§8.1), printing what it prints and what
+/// it returns.
 fn run(args: &[String]) -> ExitCode {
     let Some(file) = args.first() else {
         eprintln!("{USAGE}");
@@ -93,14 +94,13 @@ fn run(args: &[String]) -> ExitCode {
         return ExitCode::FAILURE;
     }
     let name = args.get(1).map_or("main", String::as_str);
-    let values = args
-        .iter()
-        .skip(2)
-        .map(|a| match a.parse::<i128>() {
-            Ok(i) => flyscript::eval::Value::Int(i),
-            Err(_) => flyscript::eval::Value::text(a),
-        })
-        .collect();
+    let values = match flyscript::eval::command_line(&checked.program, name, &args[args.len().min(2)..]) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("{e}");
+            return ExitCode::FAILURE;
+        }
+    };
     // A program run from the command line sees the real file system.
     let mut world = flyscript::eval::World::default();
     world.real_fs = true;

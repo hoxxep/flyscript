@@ -3932,6 +3932,14 @@ impl C {
     // `main` is given the command line, as its parameters' types read it.
     let args: Vec<String> = Vec.new();
     for (const [k, [_, t]] of self.p.fns[mainFid].scheme.params.iter().enumerate()) {
+      // A last parameter that is a list of strings takes every argument left (§8.1).
+      const elem: Option<Ty> = match (stripBorrow(t)) { #Slice(x) => #Some(x.get().clone()), _ => #None };
+      if (const #Some(x) = elem) {
+        if (k + 1 == self.p.fns[mainFid].scheme.params.len()) {
+          args.push(if (self.isString(x)) { `fly_arg_strings(${k})` } else { `fly_arg_strs(${k})` });
+          continue;
+        }
+      }
       args.push(match (t) {
         #Prim(p) if isInt(p) => `(${primType(p)})fly_arg_int(${k})`,
         #Prim(p) if isFloat(p) => `(${primType(p)})fly_arg_float(${k})`,

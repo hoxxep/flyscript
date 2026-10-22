@@ -29,6 +29,7 @@ The whole language rests on five laws. Every rule in this document is a conseque
 | A call's result holds a borrow of an argument's place only if its declared type can hold a borrow itself, not only through a type argument (§4.1) | `const step = match (self.state.take()) { … }` kept `self.state` lent `mut` while `step` lived, so the state could not be put back: §5.5's own `generate` was rejected |
 | A `match` arm binds by the strongest use it makes of what it binds: it takes an owned place only if it moves a part, borrows it `mut` if it changes one in place, and a guard only reads (§4.1) | matching a local `Option<String>` to read its string moved it, so it could not be matched again; a TypeScript programmer reads a value without giving it away |
 | A `match` through a `mut` borrow lends it `mut` only if an arm changes a part it binds (§4.1) | a compiler's `match (self.defs[d].kind)` in a `mut self` method locked `self` for arms that only read, so they could not call `readonly` methods |
+| A program's `main` takes the command line, a last parameter that is a list of strings taking every argument left (§8.1) | the spec's own word count, `main(args: readonly String[])`, could not be run as a program |
 | `Scope.spawn` and `Scope.fork` use `Io` (§6.1) | starting a task is a scheduling point, an effect like any other; a back end that suspends tasks at their effects needs to see it in the type |
 
 ---
@@ -889,6 +890,8 @@ Keys may come in any order, unknown keys are skipped, and an `Option` field may 
 ### 8.1 Modules
 
 Each `.fly` file is an ES module. Declarations are private unless exported. A module-level `const` is evaluated at compile time (`const MAX_BUF: usize = 512;`). The import graph must be acyclic, so modules compile in parallel in dependency order.
+
+**A program** starts at its entry module's exported `main`, which takes the command line: each parameter the next argument, as its type reads it — an integer or a float parses it, failing with a panic if it is not one, and `str` or `String` takes its text — and a last parameter that is a list of strings (`readonly str[]`, `readonly String[]`) takes every argument left. A failure `main` does not catch ends the program, showing what was thrown.
 
 A **declaration file**, `.d.fly`, states a module's interface without its implementation, as a TypeScript `.d.ts` file does. In a declaration file, a function or method ends with `;` instead of a body, and `struct Name<…>;` declares a type whose fields are hidden. The standard library is written this way; its bodies are the runtime's.
 

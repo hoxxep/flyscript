@@ -69,13 +69,15 @@ Flyscript is an early-stage language under active design, developed in the open.
 
 - **Flyscript in Flyscript:** a compiler written in Flyscript, in [selfhost/](selfhost/), parses, elaborates and checks the whole language — types, effects and ownership — reaching the same verdict as `flyc` on every program in the test suite, `comptime` and all. Its back end is typed: it specializes every generic function for the types it is used at, so method calls are direct, integers keep their widths, derived interfaces are compiled from their `comptime` definitions, effect handlers, generators and tasks run as JavaScript generators, and destructors run where the ownership checker says values die. Every program in the test suite runs compiled exactly as it runs in `flyc`, down to how its tasks interleave. It compiles itself: built by `flyc`, then run on its own output, it reproduces itself byte for byte, in about three seconds.
 
-Next comes native code generation. Flyscript is not yet ready for production programs; it is ready for your ideas, and issues and discussion about the design are very welcome.
+- **Native code:** the same compiler compiles to C and on to a native executable, with no garbage collector and no runtime to speak of. Ownership decides where every value is freed; failures, `break` and `return` leave through a single exit that drops exactly what is still owned; effect handlers, continuations and tasks run on lightweight fibers; regions are bump arenas released in one step. Every program in the test suite runs natively exactly as it runs in `flyc`, down to how its tasks interleave, with address and undefined-behavior sanitizers watching. The compiler builds itself this way too: natively compiled, it reproduces its own C byte for byte, in about two and a half seconds.
+
+Next comes WebAssembly. Flyscript is not yet ready for production programs; it is ready for your ideas, and issues and discussion about the design are very welcome.
 
 ## Explore
 
 - [The specification](docs/spec.md) — the five laws, the type system, effects, ownership, concurrency.
 - [Example programs](examples/) — a JSON parser, derived JSON encoding and decoding, an inventory service, a web server, a key–value actor, a browser UI, generators, parallel physics.
-- [The self-hosted compiler](selfhost/) — a lexer, parser, type and effect checker, `comptime` interpreter and JavaScript back end, in Flyscript.
+- [The self-hosted compiler](selfhost/) — a lexer, parser, type and effect checker, `comptime` interpreter, and JavaScript and C back ends, in Flyscript.
 
 ## Build from source
 
@@ -87,6 +89,15 @@ cargo test                          # run the test suite
 cargo run -- check examples/*.fly   # type-, effect- and ownership-check Flyscript files
 cargo run -- run tests/run/http_server.fly   # run a program against the simulated world
 ```
+
+To compile a program natively with the self-hosted compiler (needs Node.js and a C compiler):
+
+```sh
+node --stack-size=65500 selfhost/seed.js examples/word_count.fly word_count.c .
+cc -std=gnu11 -O2 -o word_count word_count.c -lm
+```
+
+The compiler compiles itself the same way: `selfhost/main.fly` in place of the example.
 
 ## License
 

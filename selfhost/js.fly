@@ -2494,8 +2494,11 @@ impl Js {
   // The command line, as `main`'s parameters take it.
   function startArgs(self: readonly Self, fid: usize): Vec<String> {
     let out: Vec<String> = Vec.new();
-    for (const [i, [_, t]] of self.p.fns[fid].scheme.params.iter().enumerate()) {
-      out.push(if (Js.numeric(t)) { `$rt.argNum(${i})` } else if (Js.intPrim(t).isSome()) { `$rt.argInt(${i})` } else { `$rt.argStr(${i})` });
+    const params = self.p.fns[fid].scheme.params.clone();
+    for (const [i, [_, t]] of params.iter().enumerate()) {
+      // A last parameter that is a list of strings takes every argument left (§8.1).
+      const list = i + 1 == params.len() && match (stripBorrow(t)) { #Slice(_) => true, _ => false };
+      out.push(if (list) { `$rt.argList(${i})` } else if (Js.numeric(t)) { `$rt.argNum(${i})` } else if (Js.intPrim(t).isSome()) { `$rt.argInt(${i})` } else { `$rt.argStr(${i})` });
     }
     out
   }

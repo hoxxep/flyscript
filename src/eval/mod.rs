@@ -12,6 +12,7 @@ pub mod world;
 use std::sync::{Arc, Mutex};
 
 use crate::check::env::{Binding, Program};
+use crate::check::types::Ty;
 use interp::{Ctl, Interp};
 pub use value::Value;
 pub use world::World;
@@ -39,4 +40,35 @@ pub fn run(program: Program, name: &str, args: Vec<Value>, world: World) -> (Res
     // Generator threads may still hold the world; take its contents.
     let world = std::mem::take(&mut *world.lock().expect("world"));
     (result, world)
+}
+
+/// The command line as the exported function `name` takes it (§8.1): each parameter the next
+/// argument, read as its type reads it, and a last parameter that is a list of strings every
+/// argument left.
+pub fn command_line(program: &Program, name: &str, args: &[String]) -> Result<Vec<Value>, String> {
+    let entry = program.modules.iter().position(|m| !m.is_std);
+    let Some(Binding::Fn(fid)) = entry.and_then(|m| program.lookup(m, name)) else {
+        return Err(format!("no function `{name}`"));
+    };
+    let params = &program.fns[fid].scheme.params;
+    let mut values = Vec::new();
+    for (i, (_, ty)) in params.iter().enumerate() {
+        let mut t = ty;
+        while let Ty::Borrow(_, inner) = t {
+            t = inner;
+        }
+        let list = matches!(t, Ty::Slice(_));
+        if list && i + 1 == params.len() {
+            let rest = args.iter().skip(i).map(|a| Value::text(a)).collect();
+            values.push(Value::List(Arc::new(rest)));
+            break;
+        }
+        let Some(a) = args.get(i) else { return Err(format!("argument {} is missing", i + 1)) };
+        values.push(match t {
+            Ty::Prim(p) if p.is_int() => Value::Int(a.parse().map_err(|_| format!("argument {} is not an integer", i + 1))?),
+            Ty::Prim(p) if p.is_float() => Value::Float(a.parse().map_err(|_| format!("argument {} is not a number", i + 1))?),
+            _ => Value::text(a),
+        });
+    }
+    Ok(values)
 }

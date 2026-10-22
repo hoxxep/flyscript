@@ -1447,3 +1447,17 @@ double fly_arg_float(int i) {
   if (*end != 0) fly_panicf("argument %d is not a number", i + 1);
   return v;
 }
+
+fly_slice fly_arg_strs(int i) {
+  int n = fly_argc - 1 - i > 0 ? fly_argc - 1 - i : 0;
+  fly_str* a = fly_alloc((size_t)n * sizeof(fly_str) + 1);
+  for (int k = 0; k < n; k++) a[k] = fly_arg_str(i + k);
+  return (fly_slice){ a, (size_t)n };
+}
+
+fly_slice fly_arg_strings(int i) {
+  int n = fly_argc - 1 - i > 0 ? fly_argc - 1 - i : 0;
+  fly_String* a = fly_alloc((size_t)n * sizeof(fly_String) + 1);
+  for (int k = 0; k < n; k++) a[k] = fly_String_from(fly_arg_str(i + k));
+  return (fly_slice){ a, (size_t)n };
+}
