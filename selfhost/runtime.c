@@ -88,6 +88,15 @@ void* fly_alloc(size_t size) {
   return p;
 }
 
+void* fly_arc_new(size_t size) {
+  long* p = fly_alloc(16 + size);
+  p[0] = 1;
+  return (uint8_t*)p + 16;
+}
+void* fly_arc_retain(void* p) { ((long*)((uint8_t*)p - 16))[0]++; return p; }
+bool fly_arc_release(void* p) { return --((long*)((uint8_t*)p - 16))[0] == 0; }
+void fly_arc_free(void* p) { free((uint8_t*)p - 16); }
+
 void* fly_box(const void* value, size_t size) {
   void* p = fly_alloc(size);
   memcpy(p, value, size);
@@ -780,6 +789,514 @@ fly_gen fly_generate(fly_fn producer, size_t size) {
   g->producer = producer;
   g->size = size;
   return (fly_gen){ g, generated_next, generated_drop };
+}
+
+// ---- the simulated world ----
+
+typedef struct { fly_str key, val; } world_pair;
+static struct {
+  bool loaded;
+  fly_str* incoming;
+  size_t nincoming, accepted;
+  world_pair* profiles;
+  size_t nprofiles;
+  world_pair* quotas;
+  size_t nquotas;
+  uint64_t faults, seed;
+} world;
+uint64_t fly_clock = 0;
+static uint64_t fault_rng;
+
+// A small reader of the world's JSON: strings, numbers, booleans, arrays and objects.
+static const char* json_at;
+static void json_space(void) { while (*json_at == ' ' || *json_at == '\n' || *json_at == '\r' || *json_at == '\t') json_at++; }
+static fly_str json_string(void) {
+  json_space();
+  if (*json_at != '"') fly_panic("FLY_WORLD: a string was expected");
+  json_at++;
+  fly_String out = fly_String_new();
+  while (*json_at && *json_at != '"') {
+    char c = *json_at++;
+    if (c == '\\') {
+      char e = *json_at++;
+      switch (e) {
+        case 'n': c = '\n'; break;
+        case 'r': c = '\r'; break;
+        case 't': c = '\t'; break;
+        case 'b': c = '\b'; break;
+        case 'f': c = '\f'; break;
+        case 'u': { unsigned v = 0; for (int i = 0; i < 4; i++) { char h = *json_at++; v = v * 16 + (unsigned)(h <= '9' ? h - '0' : (h | 32) - 'a' + 10); } c = (char)v; break; }
+        default: c = e;
+      }
+    }
+    fly_String_push_byte(&out, (uint8_t)c);
+  }
+  json_at++;
+  return (fly_str){ out.ptr, out.len };
+}
+static void json_skip(void);
+static void json_skip(void) {
+  json_space();
+  if (*json_at == '"') { json_string(); return; }
+  if (*json_at == '[' || *json_at == '{') {
+    char close = *json_at == '[' ? ']' : '}';
+    json_at++;
+    json_space();
+    while (*json_at && *json_at != close) {
+      if (close == '}') { json_string(); json_space(); json_at++; }
+      json_skip();
+      json_space();
+      if (*json_at == ',') json_at++;
+      json_space();
+    }
+    json_at++;
+    return;
+  }
+  while (*json_at && *json_at != ',' && *json_at != '}' && *json_at != ']') json_at++;
+}
+static void json_pairs(world_pair** out, size_t* n, bool booleans) {
+  json_space();
+  json_at++;
+  size_t cap = 0;
+  json_space();
+  while (*json_at && *json_at != '}') {
+    fly_str k = json_string();
+    json_space();
+    json_at++;
+    json_space();
+    fly_str v = { 0 };
+    if (booleans) { v = (fly_str){ (const uint8_t*)(strncmp(json_at, "true", 4) == 0 ? "t" : "f"), 1 }; json_skip(); }
+    else if (*json_at == '"') v = json_string();
+    else json_skip();
+    if (*n == cap) { cap = cap ? cap * 2 : 8; *out = realloc(*out, cap * sizeof(world_pair)); }
+    (*out)[(*n)++] = (world_pair){ k, v };
+    json_space();
+    if (*json_at == ',') json_at++;
+    json_space();
+  }
+  json_at++;
+}
+static void world_load(void) {
+  if (world.loaded) return;
+  world.loaded = true;
+  world.seed = 0x5eed;
+  const char* w = getenv("FLY_WORLD");
+  if (w && *w) {
+    json_at = w;
+    json_space();
+    json_at++;
+    json_space();
+    while (*json_at && *json_at != '}') {
+      fly_str k = json_string();
+      json_space();
+      json_at++;
+      json_space();
+      if (fly_str_eq(k, fly_str_lit("incoming", 8))) {
+        json_at++;
+        size_t cap = 0;
+        json_space();
+        while (*json_at && *json_at != ']') {
+          if (world.nincoming == cap) { cap = cap ? cap * 2 : 8; world.incoming = realloc(world.incoming, cap * sizeof(fly_str)); }
+          world.incoming[world.nincoming++] = json_string();
+          json_space();
+          if (*json_at == ',') json_at++;
+          json_space();
+        }
+        json_at++;
+      } else if (fly_str_eq(k, fly_str_lit("profiles", 8))) {
+        json_pairs(&world.profiles, &world.nprofiles, false);
+      } else if (fly_str_eq(k, fly_str_lit("quotas", 6))) {
+        json_pairs(&world.quotas, &world.nquotas, true);
+      } else if (fly_str_eq(k, fly_str_lit("faults", 6)) || fly_str_eq(k, fly_str_lit("seed", 4))) {
+        uint64_t v = strtoull(json_at, (char**)&json_at, 10);
+        if (k.len == 6) world.faults = v; else world.seed = v;
+      } else {
+        json_skip();
+      }
+      json_space();
+      if (*json_at == ',') json_at++;
+      json_space();
+    }
+  }
+  fault_rng = world.seed > 1 ? world.seed : 1;
+}
+
+static uint64_t xorshift(uint64_t* r) {
+  uint64_t x = *r;
+  x ^= x << 13;
+  x ^= x >> 7;
+  x ^= x << 17;
+  return *r = x;
+}
+
+bool fly_fault(void) {
+  world_load();
+  return xorshift(&fault_rng) % 100 < world.faults;
+}
+
+bool fly_world_accept(fly_str* input) {
+  world_load();
+  if (world.accepted >= world.nincoming) return false;
+  *input = world.incoming[world.accepted++];
+  return true;
+}
+
+bool fly_world_profile(fly_str user, fly_str* name) {
+  world_load();
+  for (size_t i = 0; i < world.nprofiles; i++) {
+    if (fly_str_eq(world.profiles[i].key, user)) { *name = world.profiles[i].val; return true; }
+  }
+  return false;
+}
+
+bool fly_world_quota(fly_str token) {
+  world_load();
+  for (size_t i = 0; i < world.nquotas; i++) {
+    if (fly_str_eq(world.quotas[i].key, token)) return world.quotas[i].val.ptr[0] == 't';
+  }
+  return false;
+}
+
+// ---- tasks ----
+
+enum { WAIT_NONE, WAIT_TASK, WAIT_CHANNEL };
+
+typedef struct {
+  int id, scope;
+  fly_fiber* fiber;
+  fly_fiber* suspended;
+  void (*entry)(void* task, void* closure);
+  void* closure;
+  void* result;
+  size_t size;
+  fly_failure* error;
+  bool started, finished, cancelled, deliver_cancel, deliver_deadlock;
+  int wait_kind, wait_id;
+} task_t;
+
+typedef struct { uint8_t* items; size_t len, head, size; long senders; bool closed; } chan_t;
+typedef struct { int owner; int* tasks; size_t ntasks; fly_failure* failure; } scope_t;
+
+bool fly_tasks_on = false;
+static struct {
+  int current, next, scope_ids;
+  int* ready;
+  size_t nready, capready;
+  int* blocked;
+  size_t nblocked, capblocked;
+  uint64_t rng;
+  task_t** tasks;
+  chan_t** chans;
+  size_t cap;
+  scope_t** scopes;
+  size_t capscopes;
+} sched = { .next = 1, .scope_ids = 1 };
+
+static void grow_ids(int id) {
+  if ((size_t)id < sched.cap) return;
+  size_t cap = sched.cap ? sched.cap : 16;
+  while (cap <= (size_t)id) cap *= 2;
+  sched.tasks = realloc(sched.tasks, cap * sizeof(task_t*));
+  sched.chans = realloc(sched.chans, cap * sizeof(chan_t*));
+  memset(sched.tasks + sched.cap, 0, (cap - sched.cap) * sizeof(task_t*));
+  memset(sched.chans + sched.cap, 0, (cap - sched.cap) * sizeof(chan_t*));
+  sched.cap = cap;
+}
+
+static void push_ready(int t) {
+  if (sched.nready == sched.capready) { sched.capready = sched.capready ? sched.capready * 2 : 16; sched.ready = realloc(sched.ready, sched.capready * sizeof(int)); }
+  sched.ready[sched.nready++] = t;
+}
+
+static void push_blocked(int t) {
+  if (sched.nblocked == sched.capblocked) { sched.capblocked = sched.capblocked ? sched.capblocked * 2 : 16; sched.blocked = realloc(sched.blocked, sched.capblocked * sizeof(int)); }
+  sched.blocked[sched.nblocked++] = t;
+}
+
+static bool remove_blocked(int t) {
+  for (size_t i = 0; i < sched.nblocked; i++) {
+    if (sched.blocked[i] == t) {
+      memmove(sched.blocked + i, sched.blocked + i + 1, (sched.nblocked - i - 1) * sizeof(int));
+      sched.nblocked--;
+      return true;
+    }
+  }
+  return false;
+}
+
+// Hands the baton to a ready task, chosen by the seed; false if none can run.
+static bool pass(void) {
+  if (sched.nready == 0) return false;
+  uint64_t r = xorshift(&sched.rng);
+  size_t i = (size_t)(r % sched.nready);
+  sched.current = sched.ready[i];
+  memmove(sched.ready + i, sched.ready + i + 1, (sched.nready - i - 1) * sizeof(int));
+  sched.nready--;
+  return true;
+}
+
+static void wake(int kind, int id) {
+  for (size_t i = 0; i < sched.nblocked;) {
+    task_t* t = sched.tasks[sched.blocked[i]];
+    if (t->wait_kind == kind && t->wait_id == id) {
+      int me = sched.blocked[i];
+      memmove(sched.blocked + i, sched.blocked + i + 1, (sched.nblocked - i - 1) * sizeof(int));
+      sched.nblocked--;
+      push_ready(me);
+    } else i++;
+  }
+}
+
+static void cancel(int t) {
+  sched.tasks[t]->cancelled = true;
+  if (remove_blocked(t)) push_ready(t);
+}
+
+void fly_panic_deadlock(void) { fly_panic("deadlock: every task is waiting"); }
+
+// Suspends the running task back to the scheduler, waiting for `kind`/`id` or not at all; when it
+// is resumed, a cancellation or a deadlock is delivered to it.
+static void suspend_task(int kind, int id) {
+  task_t* t = sched.tasks[sched.current];
+  t->wait_kind = kind;
+  t->wait_id = id;
+  t->suspended = current;
+  switch_to(&main_fiber);
+  task_t* me = sched.tasks[sched.current];
+  if (me->deliver_deadlock) fly_panic_deadlock();
+  if (me->deliver_cancel) {
+    me->deliver_cancel = false;
+    fly_unwinding = true;
+  }
+}
+
+void fly_point(void) {
+  if (fly_tasks_on) suspend_task(WAIT_NONE, 0);
+}
+
+static void block(int kind, int id) {
+  if (!fly_tasks_on) fly_panic_deadlock();
+  suspend_task(kind, id);
+}
+
+static fly_failure* failure_copy(const fly_failure* f) {
+  fly_failure* c = fly_alloc(sizeof(fly_failure) + f->size);
+  memcpy(c, f, sizeof(fly_failure) + f->size);
+  return c;
+}
+
+// Task `me` has finished: its outcome goes to its scope, and its joiners wake.
+static void end_task(int me) {
+  task_t* t = sched.tasks[me];
+  scope_t* st = sched.scopes[t->scope];
+  if (t->error && !st->failure) {
+    // The first failure cancels the scope: its body and its other tasks.
+    st->failure = failure_copy(t->error);
+    cancel(st->owner);
+    for (size_t i = 0; i < st->ntasks; i++) if (st->tasks[i] != me) cancel(st->tasks[i]);
+  }
+  t->finished = true;
+  wake(WAIT_TASK, me);
+  if (!pass()) fly_panic_deadlock();
+}
+
+static void task_main(void* arg) {
+  task_t* t = arg;
+  t->entry(t, t->closure);
+  if (FLY_FAILED) { t->error = fly_err; fly_err = NULL; }
+  fly_unwinding = false;
+}
+
+static void main_entry(void* task, void* closure) { (void)task; ((void (*)(void))closure)(); }
+
+void fly_tasks_run(void (*main)(void)) {
+  fly_tasks_on = true;
+  world_load();
+  sched.rng = world.seed > 1 ? world.seed : 1;
+  grow_ids(0);
+  task_t* t0 = fly_alloc(sizeof(task_t));
+  t0->entry = main_entry;
+  t0->closure = (void*)main;
+  sched.tasks[0] = t0;
+  sched.current = 0;
+  for (;;) {
+    int me = sched.current;
+    task_t* t = sched.tasks[me];
+    // A cancelled task unwinds at its next scheduling point; one not started never runs.
+    if (!t->deliver_deadlock && t->cancelled) t->deliver_cancel = true;
+    if (!t->started) {
+      t->started = true;
+      if (t->deliver_cancel) {
+        t->deliver_cancel = false;
+        end_task(me);
+        continue;
+      }
+      t->fiber = fiber_new(task_main, t, NULL);
+      t->suspended = t->fiber;
+    }
+    t->fiber->back = &main_fiber;
+    switch_to(t->suspended);
+    if (t->fiber->done) {
+      if (me == 0) {
+        if (t->error) fly_err = t->error;
+        return;
+      }
+      end_task(me);
+      continue;
+    }
+    if (t->wait_kind == WAIT_NONE) {
+      push_ready(me);
+      pass();
+    } else {
+      push_blocked(me);
+      if (!pass()) {
+        // Nothing else can run, so nothing can ever wake this task: reported, not waited on.
+        remove_blocked(me);
+        sched.current = me;
+        t->deliver_deadlock = true;
+      }
+    }
+  }
+}
+
+int fly_spawn(int scope, void (*entry)(void* task, void* closure), void* closure, size_t size) {
+  int id = sched.next++;
+  grow_ids(id);
+  task_t* t = fly_alloc(sizeof(task_t));
+  t->id = id;
+  t->scope = scope;
+  t->entry = entry;
+  t->closure = closure;
+  t->size = size;
+  t->result = fly_alloc(size ? size : 1);
+  sched.tasks[id] = t;
+  push_ready(id);
+  scope_t* st = sched.scopes[scope];
+  st->tasks = realloc(st->tasks, (st->ntasks + 1) * sizeof(int));
+  st->tasks[st->ntasks++] = id;
+  fly_point();
+  return id;
+}
+
+void fly_task_void(void* task, void* closure) {
+  (void)task;
+  fly_fn* f = closure;
+  ((fly_unit (*)(void*))f->fn)(f->env);
+  if (f->drop) f->drop(f->env);
+  free(f);
+}
+
+void* fly_task_result(void* task) { return ((task_t*)task)->result; }
+void* fly_task_closure(void* task) { return ((task_t*)task)->closure; }
+
+static void join_task(int task) {
+  if (!sched.tasks[task]->finished) block(WAIT_TASK, task);
+}
+
+// A forked task's value, or its failure, raised.
+void fly_join(int task, void* out) {
+  join_task(task);
+  if (fly_unwinding) return;
+  task_t* t = sched.tasks[task];
+  if (t->error) { fly_err = failure_copy(t->error); return; }
+  memcpy(out, t->result, t->size);
+}
+
+int fly_scope_open(void) {
+  int sid = sched.scope_ids++;
+  if ((size_t)sid >= sched.capscopes) {
+    size_t cap = sched.capscopes ? sched.capscopes * 2 : 16;
+    while (cap <= (size_t)sid) cap *= 2;
+    sched.scopes = realloc(sched.scopes, cap * sizeof(scope_t*));
+    sched.capscopes = cap;
+  }
+  scope_t* st = fly_alloc(sizeof(scope_t));
+  st->owner = sched.current;
+  sched.scopes[sid] = st;
+  return sid;
+}
+
+// The end of a scope's body, however it ended: every task started in it is waited for, then
+// the scope fails as its body or its first failed task did (§6.1).
+void fly_scope_close(int sid, bool body_failed) {
+  (void)body_failed;
+  scope_t* st = sched.scopes[sid];
+  task_t* me = sched.tasks[sched.current];
+  // The body unwound because a task failed: the scope raises that failure instead.
+  bool unwound = fly_unwinding && !(st->failure);
+  fly_unwinding = false;
+  void* err = fly_err;
+  fly_err = NULL;
+  me->cancelled = false;
+  for (size_t i = 0; i < st->ntasks; i++) {
+    for (;;) {
+      join_task(st->tasks[i]);
+      if (!fly_unwinding) break;
+      fly_unwinding = false;
+      me->cancelled = false;
+    }
+  }
+  me->cancelled = false;
+  if (unwound) { fly_unwinding = true; if (err) free(err); return; }
+  if (err) { fly_err = err; return; }
+  if (st->failure) fly_err = failure_copy(st->failure);
+}
+
+// ---- channels ----
+
+fly_chan fly_channel(void) {
+  int id = sched.next++;
+  grow_ids(id);
+  chan_t* c = fly_alloc(sizeof(chan_t));
+  c->senders = 1;
+  sched.chans[id] = c;
+  return (fly_chan){ id };
+}
+
+void fly_send(fly_chan ch, const void* v, size_t size) {
+  chan_t* c = sched.chans[ch.ch];
+  c->size = size;
+  c->items = realloc(c->items, (c->len + 1) * (size ? size : 1));
+  memcpy(c->items + c->len * size, v, size);
+  c->len++;
+  wake(WAIT_CHANNEL, ch.ch);
+  fly_point();
+}
+
+// The next message, or false once the channel is closed and drained (or the task unwinds).
+bool fly_recv(fly_chan ch, void* out, size_t size) {
+  for (;;) {
+    chan_t* c = sched.chans[ch.ch];
+    if (c->head < c->len) {
+      memcpy(out, c->items + c->head * size, size);
+      c->head++;
+      return true;
+    }
+    if (c->closed) return false;
+    block(WAIT_CHANNEL, ch.ch);
+    if (fly_unwinding) return false;
+  }
+}
+
+static void sender_gone(chan_t* c, int id) {
+  c->senders = c->senders > 0 ? c->senders - 1 : 0;
+  if (c->senders == 0) { c->closed = true; wake(WAIT_CHANNEL, id); }
+}
+
+void fly_close(fly_chan ch) {
+  sender_gone(sched.chans[ch.ch], ch.ch);
+  fly_point();
+}
+
+// A destructor does not suspend: a sender dropped closes its channel then and there.
+void fly_sender_drop(fly_chan* ch) {
+  if (ch->ch) sender_gone(sched.chans[ch->ch], ch->ch);
+  ch->ch = 0;
+}
+
+fly_chan fly_sender_clone(const fly_chan* ch) {
+  sched.chans[ch->ch]->senders++;
+  return *ch;
 }
 
 // ---- regions ----

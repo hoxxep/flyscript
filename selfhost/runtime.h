@@ -153,6 +153,12 @@ void fly_gzip_drop(void* s);
 // ---- memory ----
 
 void* fly_alloc(size_t size);
+// An `Arc`'s contents, after a count of the handles to them.
+void* fly_arc_new(size_t size);
+void* fly_arc_retain(void* p);
+// Whether that was the last handle: the contents are then the caller's to drop, then free.
+bool fly_arc_release(void* p);
+void fly_arc_free(void* p);
 void* fly_box(const void* value, size_t size);
 
 // ---- fibers and handlers ----
@@ -194,6 +200,44 @@ void fly_cont_drop(fly_cont* k);
 
 // `generate(f)`: a generator pulled by running `f` on a fiber until it yields.
 fly_gen fly_generate(fly_fn producer, size_t size);
+
+// ---- the simulated world and tasks (§6.4) ----
+
+// The world a program runs against, from `FLY_WORLD`: connections waiting to be accepted, a
+// database of profiles and quotas, the percent of I/O operations that fail, and the seed that
+// decides which do and how tasks interleave. Time passes only as tasks sleep.
+extern uint64_t fly_clock;
+bool fly_fault(void);
+bool fly_world_accept(fly_str* input);
+bool fly_world_profile(fly_str user, fly_str* name);
+bool fly_world_quota(fly_str token);
+
+// Tasks: one runs at a time, and at each scheduling point the next is chosen by a seeded
+// generator, as the reference's scheduler does, so a seed reproduces an interleaving.
+// `fly_tasks_run` runs `main` as the first task, on the main stack's behalf.
+extern bool fly_tasks_on;
+void fly_tasks_run(void (*main)(void));
+void fly_point(void);
+// A task's outcome: its value (`size` bytes), or its failure.
+int fly_spawn(int scope, void (*entry)(void* task, void* closure), void* closure, size_t size);
+void* fly_task_result(void* task);
+void* fly_task_closure(void* task);
+void fly_join(int task, void* out);
+int fly_scope_open(void);
+void fly_scope_close(int scope, bool body_failed);
+void fly_panic_deadlock(void);
+
+typedef struct { int ch; } fly_chan;
+// A connection the simulated world made: what the client sent, and how much has been read.
+typedef struct { fly_str input; size_t pos; } fly_socket;
+// A task running a closure that gives nothing: it calls it, then drops it.
+void fly_task_void(void* task, void* closure);
+fly_chan fly_channel(void);
+void fly_send(fly_chan c, const void* v, size_t size);
+bool fly_recv(fly_chan c, void* out, size_t size);
+void fly_close(fly_chan c);
+void fly_sender_drop(fly_chan* c);
+fly_chan fly_sender_clone(const fly_chan* c);
 
 // ---- regions ----
 

@@ -173,3 +173,16 @@ fn compiled_programs_run_as_expected() {
     let failed: Vec<&str> = report.lines().filter_map(|l| l.strip_prefix("FAIL ")).collect();
     assert!(failed.is_empty(), "failed compiled:\n{}", failed.join("\n"));
 }
+
+/// Every program of the run corpus compiled to C, built with the address and undefined-behavior
+/// sanitizers, prints what it should.
+#[test]
+fn native_programs_run_as_expected() {
+    if !has_node() || !has_cc() {
+        return;
+    }
+    let r = Command::new("sh").arg(root().join("selfhost/corpus.sh")).arg("--c").arg(root().join("selfhost/seed.js")).output().unwrap();
+    let report = String::from_utf8_lossy(&r.stdout);
+    let failed: Vec<&str> = report.lines().filter_map(|l| l.strip_prefix("FAIL ")).collect();
+    assert!(failed.is_empty(), "failed natively:\n{}", failed.join("\n"));
+}

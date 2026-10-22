@@ -285,7 +285,9 @@ impl C {
     match (t) {
       #Prim(_) | #Slice(_) | #Fn(_) => true,
       #Borrow(_, _) => true,
-      #Named(d, _) => self.p.isKnown(d, "Box") || self.p.isKnown(d, "Ref") || self.namedIs(t, "Cell") || self.namedIs(t, "RegionList"),
+      #Named(d, _) => self.p.isKnown(d, "Box") || self.p.isKnown(d, "Ref") || self.p.isKnown(d, "Arc") || self.namedIs(t, "Cell") || self.namedIs(t, "RegionList")
+        || self.namedIs(t, "Scope") || self.namedIs(t, "Fiber") || self.namedIs(t, "Sender") || self.namedIs(t, "Receiver")
+        || self.namedIs(t, "Reply") || self.namedIs(t, "Pending") || self.namedIs(t, "Mutex") || self.namedIs(t, "Listener") || self.namedIs(t, "Db"),
       _ => false,
     }
   }
@@ -324,13 +326,22 @@ impl C {
         if (self.namedIs(t, "Hasher")) { return "fly_Hasher".toString(); }
         if (self.namedIs(t, "File")) { return "fly_File".toString(); }
         // A region's handles point into its arena.
-        if (self.p.isKnown(d, "Ref") || self.namedIs(t, "Cell")) {
+        if (self.p.isKnown(d, "Ref") || self.namedIs(t, "Cell") || self.p.isKnown(d, "Arc")) {
           const inner: Ty = match (args.last()) { #Some(#Ty(x)) => x.clone(), _ => #Error };
           const c = self.ctypeRef(inner, span);
           return `${c}*`;
         }
         if (self.namedIs(t, "RegionList")) { return "fly_rlist*".toString(); }
         if (self.p.isKnown(d, "Cont")) { return "fly_cont".toString(); }
+        // The scheduler's handles: a scope or a task by its number, a channel's ends.
+        if (self.namedIs(t, "Scope") || self.namedIs(t, "Fiber") || self.namedIs(t, "Listener") || self.namedIs(t, "Db")) { return "int".toString(); }
+        if (self.namedIs(t, "Sender") || self.namedIs(t, "Receiver") || self.namedIs(t, "Reply") || self.namedIs(t, "Pending")) { return "fly_chan".toString(); }
+        if (self.namedIs(t, "Socket")) { return "fly_socket".toString(); }
+        // A lock holds its state on the heap, shared by the tasks that borrow it.
+        if (self.namedIs(t, "Mutex")) {
+          const c = self.ctypeRef(typeArg(t, 0), span);
+          return `${c}*`;
+        }
         if (self.p.isKnown(d, "Box")) {
           return match (args.first()) {
             #Some(#Ty(x)) => {
@@ -486,6 +497,7 @@ impl C {
         if (self.p.hasDrop(d)) { return true; }
         if (self.p.isKnown(d, "String") || self.p.isKnown(d, "Vec") || self.p.isKnown(d, "Box")) { return true; }
         if (self.namedIs(t, "HashMap") || self.namedIs(t, "Gen") || self.namedIs(t, "File") || self.p.isKnown(d, "Cont")) { return true; }
+        if (self.namedIs(t, "Sender") || self.namedIs(t, "Mutex") || self.p.isKnown(d, "Arc")) { return true; }
         if (!seen.insert(ckey(t))) { return false; }
         match (self.p.defs[d].kind) {
           #Struct { fields: _ } => match (self.p.structFields(d, args)) {
@@ -524,6 +536,16 @@ impl C {
           body.push("  fly_File_drop(v);\n");
         } else if (self.p.isKnown(d, "Cont")) {
           body.push("  fly_cont_drop(v);\n");
+        } else if (self.p.isKnown(d, "Arc")) {
+          const inner = typeArg(t, 0);
+          const d2 = if (self.needsDrop(inner)) { `${self.dropFn(inner, span)}(*v); ` } else { "" };
+          body.push(`  if (*v && fly_arc_release(*v)) { ${d2}fly_arc_free(*v); }\n  *v = NULL;\n`);
+        } else if (self.namedIs(t, "Sender")) {
+          body.push("  fly_sender_drop(v);\n");
+        } else if (self.namedIs(t, "Mutex")) {
+          const inner = typeArg(t, 0);
+          if (self.needsDrop(inner)) { body.push(`  if (*v) ${self.dropFn(inner, span)}(*v);\n`); }
+          body.push("  free(*v);\n  *v = NULL;\n");
         } else if (self.namedIs(t, "HashMap")) {
           const e = entryTy(t);
           if (self.needsDrop(e)) {
@@ -630,6 +652,21 @@ impl C {
     self.insts.push({ fid, args, c });
     self.instIndex.insert(key, i);
     i
+  }
+
+  function ensureAssocs(self: mut Self, t: readonly Ty): void {
+    match (t) {
+      #Assoc(base, name) => {
+        self.ensureAssocs(base);
+        const b = self.resolveAssoc(base);
+        self.p.ensureAssoc(b, name.asStr());
+      }
+      #Borrow(_, inner) | #Slice(inner) | #Array(inner, _) => self.ensureAssocs(inner),
+      #Named(_, args) => { for (const a of args) { if (const #Ty(x) = a) { self.ensureAssocs(x); } } }
+      #Tuple(ts) => { for (const x of ts) { self.ensureAssocs(x); } }
+      #Fn(f) => { for (const x of f.params) { self.ensureAssocs(x); } self.ensureAssocs(f.ret); }
+      _ => {}
+    }
   }
 
   function fnEffects(self: readonly Self, fid: usize): EffRow {
@@ -938,7 +975,7 @@ impl C {
       #Return(v) => self.returnExpr(v),
       #Break => self.jump(true),
       #Continue => self.jump(false),
-      #Lambda { params, body } => self.lambda(e, params, body),
+      #Lambda { params, body } => self.lambda(e, params, body, false),
       #Yield(x) => self.yieldExpr(x),
       #Handle { body, effect: _, arms } => self.handleExpr(e, body, arms),
       #Range { lo: _, hi: _ } => self.fail(e.span, "a range can only index or be iterated"),
@@ -1099,17 +1136,19 @@ impl C {
   // does not call it `once` — is the scope's, which drops it after the call.
   function argAs(self: mut Self, e: readonly Expr, pt: readonly Ty): String uses Fail<Diagnostic> {
     if (const #Fn(f) = stripBorrow(pt)) {
-      if (f.mode != #Once && match (e.kind) { #Lambda { params: _, body: _ } => true, _ => false }) {
-        const v = self.ex(e);
+      if (f.mode != #Once) {
+        if (const #Lambda { params, body } = e.kind) {
+        const v = self.lambda(e, params, body, true);
         const tmp = self.temp(self.exprTy(e.id), e.span);
         return `({ ${tmp} = ${v}; ${tmp}; })`;
+        }
       }
     }
     self.exAs(e, pt)
   }
 
   function boxLike(self: readonly Self, t: readonly Ty): bool {
-    match (t) { #Named(d, _) => self.p.isKnown(d, "Box") || self.p.isKnown(d, "Ref"), _ => false }
+    match (t) { #Named(d, _) => self.p.isKnown(d, "Box") || self.p.isKnown(d, "Ref") || self.p.isKnown(d, "Arc"), _ => false }
   }
 
   // A `String`'s bytes, as `str`.
@@ -1880,7 +1919,7 @@ impl C {
   function suspends(self: readonly Self, row: readonly EffRow): bool {
     row.effs.iter().some((e) => {
       const name = self.p.defs[e.def].name.asStr();
-      !(self.p.modules[self.p.defs[e.def].module].isStd && (name == "Fail" || name == "Yield" || name == "Region" || name == "Io"))
+      !(self.p.modules[self.p.defs[e.def].module].isStd && (name == "Fail" || name == "Yield" || name == "Region"))
     })
   }
 
@@ -2173,6 +2212,32 @@ impl C {
       }
       "slice_len" => `((uint64_t)(${arg(0)}).len)`,
       "array_len" => match (recv) { #Array(_, #Known(n)) => `((uint64_t)${n})`, _ => return #None },
+      // `std/par`'s views of a list: the whole as a slice, two halves, one element.
+      "slice_slice" => arg(0),
+      "Vec_slice" => if (match (stripBorrow(ptys[0])) { #Slice(_) => true, _ => false }) { arg(0) } else { `fly_vec_slice(${arg(0)})` },
+      "array_slice" => match (stripBorrow(ptys[0])) { #Array(_, #Known(n)) => `((fly_slice){ (void*)(${arg(0)})->data, ${n} })`, _ => return #None },
+      "slice_split" | "array_split" | "Vec_split" => {
+        const tc = self.ctype(rt, span);
+        const ec2 = self.ctype(match (stripBorrow(ptys[0])) { #Slice(x) => x.get().clone(), _ => #Error }, span);
+        `({ fly_slice s_ = ${arg(0)}; uint64_t i_ = ${arg(1)}; if (i_ > s_.len) fly_panicf("index %llu out of bounds (length %zu)", (unsigned long long)i_, s_.len); (${tc}){ .f0 = { s_.ptr, i_ }, .f1 = { (uint8_t*)s_.ptr + i_ * sizeof(${ec2}), s_.len - i_ } }; })`
+      }
+      "slice_viewAt" | "array_viewAt" | "Vec_viewAt" => {
+        const et = stripBorrow(rt);
+        const ec2 = self.ctype(et, span);
+        const at = self.borrowAt(`fly_slice_at(s_, i_, sizeof(${ec2}))`.asStr(), et, true, span);
+        `({ fly_slice s_ = ${arg(0)}; uint64_t i_ = ${arg(1)}; ${at}; })`
+      }
+      "slice_readAt" | "array_readAt" | "Vec_readAt" => {
+        const et = stripBorrow(rt);
+        const ec2 = self.ctype(et, span);
+        const whole = match (stripBorrow(ptys[0])) {
+          #Array(_, #Known(n)) => `((fly_slice){ (void*)(${arg(0)})->data, ${n} })`,
+          #Slice(_) => arg(0),
+          _ => `fly_vec_slice(${arg(0)})`,
+        };
+        const at = self.borrowAt(`fly_slice_at(s_, i_, sizeof(${ec2}))`.asStr(), et, false, span);
+        `({ fly_slice s_ = ${whole}; uint64_t i_ = ${arg(1)}; ${at}; })`
+      }
       "slice_reverse" => `({ fly_slice_reverse(${arg(0)}, sizeof(${ec})); (fly_unit)0; })`,
       "slice_splitAt" => {
         const tc = self.ctype(rt, span);
@@ -2220,6 +2285,17 @@ impl C {
         `({ fly_File f_; if (!fly_read_file(${arg(0)}, &f_.text)) { ${boxed}goto ${label}; } f_; })`
       }
       "File_readText" => `fly_String_clone(&(${arg(0)})->text)`,
+      "Arc_new" => {
+        const tc = self.ctype(typeArg(rt, 0), span);
+        `({ ${tc} v_ = ${arg(0)}; ${tc}* p_ = fly_arc_new(sizeof(${tc})); *p_ = v_; p_; })`
+      }
+      "Arc_get" => if (self.pointerBorrow(rt)) { arg(0) } else { `(*${arg(0)})` },
+      "Arc_clone" => `fly_arc_retain(${arg(0)})`,
+      "repeat" => {
+        const tc = self.ctype(rt, span);
+        const n = match (rt) { #Array(_, #Known(n)) => n, _ => 0 };
+        `({ __auto_type v_ = ${arg(0)}; ${tc} r_; for (size_t i_ = 0; i_ < ${n}; i_++) r_.data[i_] = v_; r_; })`
+      }
       "Box_into" => {
         const c = self.ctype(rt, span);
         `({ ${c}* b_ = ${arg(0)}; ${c} x_ = *b_; free(b_); x_; })`
@@ -2295,6 +2371,98 @@ impl C {
   // Statements raising the `IoErr` with tag `name`, which has no payload.
   function ioErr(self: mut Self, name: str): String {
     `fly_err_box(${self.tagId(name)}, NULL, 0); `
+  }
+
+  // A call of the scheduler's: scopes and tasks, channels, locks; and of the simulated network
+  // and database. What may be a scheduling point checks for a cancellation delivered there.
+  function tasksLib(self: mut Self, key: str, e: readonly Expr, all: readonly Vec<Expr>, ptys: readonly Vec<Ty>, vs: readonly Vec<String>): Option<String> uses Fail<Diagnostic> {
+    const span = e.span;
+    const rt = self.exprTy(e.id);
+    const arg = (i: usize) => if (i < vs.len()) { vs[i].clone() } else { "0".toString() };
+    const unwind = `if (fly_unwinding) { ${self.unwindAction()} } `;
+    const label = self.failLabel();
+    const failed = `if (FLY_FAILED) goto ${label}; `;
+    // The type of what a channel's end carries.
+    const carried = if (all.len() > 0) { typeArg(stripBorrow(self.exprTy(all[0].id)), 0) } else { #Error };
+    #Some(match (key) {
+      "Io_scope" => {
+        const tc = self.ctype(rt, span);
+        `({ int sid_ = fly_scope_open(); int s_ = sid_; fly_fn f_ = ${arg(0)}; ${tc} r_ = ((${tc} (*)(void*, int*))f_.fn)(f_.env, &s_); if (f_.drop) f_.drop(f_.env); fly_scope_close(sid_, false); ${unwind}${failed}r_; })`
+      }
+      "Scope_spawn" => `({ int* s_ = ${arg(0)}; fly_fn f_ = ${arg(1)}; fly_spawn(*s_, fly_task_void, fly_box(&f_, sizeof f_), 0); ${unwind}(fly_unit)0; })`,
+      "Scope_fork" => {
+        const t = typeArg(rt, 0);
+        const tc = self.ctype(t, span);
+        const entryKey = `fork:${ckey(t)}`;
+        const entry = match (self.helpers.get(entryKey.asStr())) {
+          #Some(n) => n.clone(),
+          #None => {
+            const n = `tentry${self.helpers.len()}`;
+            self.helpers.insert(entryKey, n.clone());
+            self.protos.push(`static void ${n}(void* t, void* c);\n`);
+            self.dropCode.push(`static void ${n}(void* t, void* c) { fly_fn* f = c; ${tc} v = ((${tc} (*)(void*))f->fn)(f->env); *(${tc}*)fly_task_result(t) = v; if (f->drop) f->drop(f->env); free(f); }\n`);
+            n
+          }
+        };
+        `({ int* s_ = ${arg(0)}; fly_fn f_ = ${arg(1)}; int t_ = fly_spawn(*s_, ${entry}, fly_box(&f_, sizeof f_), sizeof(${tc})); ${unwind}t_; })`
+      }
+      "Fiber_join" => {
+        const tc = self.ctype(rt, span);
+        `({ ${tc} r_; fly_join(${arg(0)}, &r_); ${unwind}${failed}r_; })`
+      }
+      "channel" | "Reply_new" => {
+        const tc = self.ctype(rt, span);
+        `({ fly_chan c_ = fly_channel(); (${tc}){ .f0 = c_, .f1 = c_ }; })`
+      }
+      "Sender_send" | "Reply_send" => {
+        const tc = self.ctype(carried, span);
+        `({ fly_chan c_ = ${arg(0)}; ${tc} v_ = ${arg(1)}; fly_send(c_, &v_, sizeof(${tc})); ${unwind}(fly_unit)0; })`
+      }
+      "Receiver_recv" => {
+        const tc = self.ctype(carried, span);
+        const yes = self.some(rt, "x_", span);
+        const no = self.none(rt, span);
+        `({ ${tc} x_; bool ok_ = fly_recv(${arg(0)}, &x_, sizeof(${tc})); ${unwind}ok_ ? ${yes} : ${no}; })`
+      }
+      "Pending_wait" => {
+        const tc = self.ctype(rt, span);
+        `({ ${tc} x_; if (!fly_recv(${arg(0)}, &x_, sizeof(${tc})) && !fly_unwinding) fly_panic("the reply was dropped unsent"); ${unwind}x_; })`
+      }
+      "Sender_close" => `({ fly_close(${arg(0)}); ${unwind}(fly_unit)0; })`,
+      "Sender_clone" => `({ fly_chan c_ = ${arg(0)}; fly_sender_clone(&c_); })`,
+      "Mutex_new" => {
+        const tc = self.ctype(typeArg(rt, 0), span);
+        `({ ${tc} v_ = ${arg(0)}; (${tc}*)fly_box(&v_, sizeof(${tc})); })`
+      }
+      "Mutex_lock" => {
+        const tc = self.ctype(rt, span);
+        const pc = match (stripBorrow(ptys[1])) { #Fn(f) => match (f.params.first()) { #Some(p) => self.ctype(p, span), #None => "void*".toString() }, _ => "void*".toString() };
+        `({ __auto_type m_ = ${arg(0)}; fly_fn f_ = ${arg(1)}; fly_point(); ${unwind}${tc} r_ = ((${tc} (*)(void*, ${pc}))f_.fn)(f_.env, m_); if (f_.drop) f_.drop(f_.env); r_; })`
+      }
+      "Listener_bind" | "Db_connect" => "0".toString(),
+      "Socket_close" => "((fly_unit)0)".toString(),
+      "Socket_read" => {
+        const boxed = self.ioErr("TimedOut");
+        `({ fly_socket* s_ = ${arg(0)}; fly_slice b_ = ${arg(1)}; if (fly_fault()) { ${boxed}goto ${label}; } size_t n_ = s_->input.len - s_->pos; if (b_.len < n_) n_ = b_.len; memcpy(b_.ptr, s_->input.ptr + s_->pos, n_); s_->pos += n_; (uint64_t)n_; })`
+      }
+      // The simulated client's transcript doubles as the program's output.
+      "Socket_writeStatus" => {
+        const boxed = self.ioErr("BrokenPipe");
+        `({ unsigned code_ = ${arg(1)}; fly_str b_ = ${arg(2)}; if (fly_fault()) { ${boxed}goto ${label}; } printf("-> %u %.*s\\n", code_, (int)b_.len, (const char*)b_.ptr); (fly_unit)0; })`
+      }
+      "Db_fetchProfile" => {
+        const tc = self.ctype(rt, span);
+        const timedOut = self.ioErr("TimedOut");
+        const notFound = self.ioErr("NotFound");
+        `({ fly_str u_ = ${arg(1)}; fly_str n_; if (fly_fault()) { ${timedOut}goto ${label}; } if (!fly_world_profile(u_, &n_)) { ${notFound}goto ${label}; } (${tc}){ .displayName = fly_String_from(n_) }; })`
+      }
+      "Db_checkQuota" => {
+        const tc = self.ctype(rt, span);
+        const timedOut = self.ioErr("TimedOut");
+        `({ fly_str t_ = ${arg(1)}; if (fly_fault()) { ${timedOut}goto ${label}; } (${tc}){ .allowed = fly_world_quota(t_) }; })`
+      }
+      _ => return #None,
+    })
   }
 
   // A call of the library's maps, generators and hashing, which the runtime holds untyped.
@@ -2419,6 +2587,7 @@ impl C {
       _ => {}
     }
     if (const #Some(c) = self.prelude(key, e, all, ptys, vs)) { return #Some(c); }
+    if (const #Some(c) = self.tasksLib(key, e, all, ptys, vs)) { return #Some(c); }
     // `generate(f)` runs `f` on a fiber, pulled for each item.
     if (key == "generate") {
       const ic = self.ctype(typeArg(rt, 0), span);
@@ -2623,6 +2792,8 @@ impl C {
     }
     // A string's lines, words or bytes.
     if (const #Some(c) = self.forStr(pat, iter, body, brk.asStr(), cont.asStr())) { return c; }
+    // A channel's messages, until it closes; the world's connections.
+    if (const #Some(c) = self.forTasks(pat, iter, body, brk.asStr(), cont.asStr())) { return c; }
     // A generator: the body, a function of its own, is called with each item.
     if (const #Some(c) = self.forGen(pat, iter, body)) {
       const drops = self.pop(iter.span);
@@ -2861,6 +3032,41 @@ impl C {
     const stop = self.stopAction();
     const unwind = self.unwindAction();
     #Some(`${code} = 0; ${envv} = (${envT}){ ${inits.join(", ")} }; ${call}; fly_stopping = false; if (fly_unwinding) { ${unwind} } if (FLY_FAILED) goto ${label}; if (${code} == 2) { ${returning} } if (${code} == 4) { ${stop} }`)
+  }
+
+  // `for` over a channel's receiver, or a listener's `accept()`.
+  function forTasks(self: mut Self, pat: readonly Pattern, iter: readonly Expr, body: readonly Block, brk: str, cont: str): Option<String> uses Fail<Diagnostic> {
+    const it = stripBorrow(self.exprTy(iter.id));
+    if (self.namedIs(it, "Receiver")) {
+      const itemTy = typeArg(it, 0);
+      const ic = self.ctype(itemTy, iter.span);
+      const ch = self.value(iter);
+      const x = self.fresh();
+      self.loops.push({ brk: brk.toString(), cont: cont.toString(), locals: Vec.new() });
+      const step = self.iteration(pat, itemTy, x.asStr(), body, cont);
+      self.loops.pop();
+      const drops = self.pop(iter.span);
+      const unwind = self.unwindAction();
+      return #Some(`({ fly_chan c_${x} = ${ch}; ${ic} ${x}; while (fly_recv(c_${x}, &${x}, sizeof(${ic}))) ${step}${brk}: ; if (fly_unwinding) { ${unwind} } ${drops}(fly_unit)0; })`);
+    }
+    const [callee, args]: [Expr, Vec<Expr>] = match (iter.kind) {
+      #Call { callee, typeArgs: _, args } => [callee.get().clone(), args.clone()],
+      _ => return #None,
+    };
+    if (args.len() > 0) { return #None; }
+    const fid: usize = match (self.p.typed.get(self.fid)) {
+      #Some(t) => match (t.calls.get(iter.id)) { #Some(f) => f, #None => return #None },
+      #None => return #None,
+    };
+    const k = match (self.callee(fid, self.callArgs(iter.id), iter.span)) { #Builtin(k) => k, #Inst(_) => return #None };
+    if (k != "Listener_accept") { return #None; }
+    const x = self.fresh();
+    self.loops.push({ brk: brk.toString(), cont: cont.toString(), locals: Vec.new() });
+    const itemTy = self.exprTyOfPat(pat);
+    const step = self.iteration(pat, itemTy, `((fly_socket){ ${x}, 0 })`.asStr(), body, cont);
+    self.loops.pop();
+    const drops = self.pop(iter.span);
+    #Some(`({ fly_str ${x}; while (fly_world_accept(&${x})) ${step}${brk}: ; ${drops}(fly_unit)0; })`)
   }
 
   // `for` over a string's `lines()`, `splitWhitespace()` or `bytes()`.
@@ -3289,11 +3495,47 @@ impl C {
     out
   }
 
+  // Whether the program starts tasks or makes channels or locks: anything the scheduler serves.
+  function startsTasks(self: readonly Self): bool {
+    for (const [_, t] of self.p.typed.entries()) {
+      for (const [_, f] of t.calls.entries()) {
+        const key = self.builtinKey(f);
+        if (key == "Io_scope" || key == "channel" || key == "Reply_new" || key == "Mutex_new") { return true; }
+      }
+    }
+    false
+  }
+
   // ---- handlers ----
 
   // `Eff.op(args)`: the arguments, as the operation takes them, are put where the handler finds
   // them, and the body suspends until it is resumed with the result, or unwound.
   function perform(self: mut Self, e: readonly Expr, d: usize, op: str, args: readonly Vec<Expr>): String uses Fail<Diagnostic> {
+    // `Io`'s operations are the runtime's, against the simulated world.
+    if (self.p.defs[d].name == "Io" && self.p.modules[self.p.defs[d].module].isStd) {
+      const rt = self.exprTy(e.id);
+      const rc = self.ctype(rt, e.span);
+      let vs: Vec<String> = Vec.new();
+      for (const a of args) {
+        const t = match (self.slotTy(a.id)) { #Some(t) => t, #None => self.exprTy(a.id) };
+        vs.push(self.exAs(a, t));
+      }
+      // The root operations are scheduling points.
+      const point = `fly_point(); if (fly_unwinding) { ${self.unwindAction()} } `;
+      return match (op) {
+        "now" => `({ ${point}(${rc}){ .nanos = fly_clock }; })`,
+        "sleep" => `({ __auto_type d_ = ${vs[0]}; ${point}fly_clock += d_.nanos; (fly_unit)0; })`,
+        "park" => "((fly_unit)0)".toString(),
+        "write" => {
+          const ok = self.tagId("Ok");
+          `({ fly_slice b_ = ${vs[1]}; ${point}fwrite(b_.ptr, 1, b_.len, stdout); (${rc}){ .tag = ${ok}, .u.Ok = b_.len }; })`
+        }
+        _ => {
+          const ok = self.tagId("Ok");
+          `({ ${point}(${rc}){ .tag = ${ok}, .u.Ok = 0 }; })`
+        }
+      };
+    }
     const ops = match (self.p.defs[d].kind) { #Effect { ops } => ops.clone(), _ => return self.fail(e.span, "not an effect") };
     const idx = match (ops.iter().findIndex(([n, _]) => n == op)) { #Some(i) => i, #None => return self.fail(e.span, `no operation \`${op}\``) };
     const rt = self.exprTy(e.id);
@@ -3487,7 +3729,9 @@ impl C {
 
   // A closure: its body a C function of its environment, which holds pointers to the locals it
   // borrows and the values it moved in.
-  function lambda(self: mut Self, e: readonly Expr, params: readonly Vec<Param>, body: readonly Expr): String uses Fail<Diagnostic> {
+  // A closure. One only `lent` to a call keeps its environment in the function around it, which it
+  // cannot outlive; any other may, so its environment is its own, on the heap.
+  function lambda(self: mut Self, e: readonly Expr, params: readonly Vec<Param>, body: readonly Expr, lent: bool): String uses Fail<Diagnostic> {
     const fty: FnTy = match (stripBorrow(self.exprTy(e.id))) { #Fn(f) => f.get().clone(), _ => return self.fail(e.span, "a closure of no function type") };
     self.lambdas += 1;
     const n = `${self.lambdas}`;
@@ -3569,7 +3813,8 @@ impl C {
     self.restoreFn(saved);
     // An environment holding values is the closure's own, on the heap, dropped with it; one that
     // only borrows lives as long as the function around it, which the closure cannot outlive.
-    if (held) {
+    if (held || !lent) {
+      if (inits.len() == 0) { return `((fly_fn){ NULL, NULL, (void*)${fname} })`; }
       self.lambdaCode.push(`static void envdrop_${n}(void* p) { ${envT}* e = p; ${owned}free(e); }\n`);
       self.protos.push(`static void envdrop_${n}(void* p);\n`);
       return `({ ${envT}* e_ = fly_alloc(sizeof(${envT})); *e_ = (${envT}){ ${inits.join(", ")} }; (fly_fn){ e_, envdrop_${n}, (void*)${fname} }; })`;
@@ -3625,6 +3870,14 @@ impl C {
     self.fid = fid;
     self.module = self.p.fns[fid].module;
     self.map = substMap(self.p.fns[fid].scheme.tparams, self.insts[i].args);
+    // A comptime impl's associated types are made for the types they are asked of.
+    let mentioned: Vec<Ty> = Vec.new();
+    if (const #Some(t) = self.p.typed.get(fid)) {
+      for (const [_, x] of t.exprs.entries()) { mentioned.push(subst(x, self.map)); }
+      for (const [_, x] of t.bindings.entries()) { mentioned.push(subst(x, self.map)); }
+    }
+    for (const [_, x] of self.p.fns[fid].scheme.params) { mentioned.push(subst(x, self.map)); }
+    for (const x of mentioned) { self.ensureAssocs(x); }
     self.ret = self.concrete(self.p.fns[fid].scheme.ret);
     self.tmp = 0;
     self.decls = String.new();
@@ -3676,15 +3929,6 @@ impl C {
     };
     self.owned = self.p.fns.len();
     const main = self.instance(mainFid, Vec.new());
-    while (self.next < self.insts.len()) {
-      const i = self.next;
-      self.next += 1;
-      const r = try { self.emit(i); #Ok } catch (d) { #Err(d) };
-      if (const #Err(d) = r) {
-        const m = self.module;
-        throw #Failed(render(d, self.p.modules[m].file.asStr(), self.p.modules[m].source.asStr()))
-      }
-    }
     // `main` is given the command line, as its parameters' types read it.
     let args: Vec<String> = Vec.new();
     for (const [k, [_, t]] of self.p.fns[mainFid].scheme.params.iter().enumerate()) {
@@ -3708,6 +3952,15 @@ impl C {
         #Err(d) => throw #Failed(render(d, self.p.modules[entry].file.asStr(), self.p.modules[entry].source.asStr())),
       }
     }
+    while (self.next < self.insts.len()) {
+      const i = self.next;
+      self.next += 1;
+      const r = try { self.emit(i); #Ok } catch (d) { #Err(d) };
+      if (const #Err(d) = r) {
+        const m = self.module;
+        throw #Failed(render(d, self.p.modules[m].file.asStr(), self.p.modules[m].source.asStr()))
+      }
+    }
     // The structs only pointers were made to.
     while (self.pending.len() > 0) {
       const t = match (self.pending.pop()) { #Some(t) => t, #None => break };
@@ -3722,7 +3975,13 @@ impl C {
     out.push(self.dropCode.asStr());
     out.push(self.lambdaCode.asStr());
     out.push(self.code.asStr());
-    out.push(`int main(int argc, char** argv) {\n  fly_argc = argc;\n  fly_argv = argv;\n  ${self.insts[main].c}(${args.join(", ")});\n${uncaught}  return 0;\n}\n`);
+    // A program that starts tasks, or makes channels or locks, runs `main` as the first task.
+    if (self.startsTasks()) {
+      out.push(`static void fly_main_task(void) { ${self.insts[main].c}(${args.join(", ")}); }\n`);
+      out.push(`int main(int argc, char** argv) {\n  fly_argc = argc;\n  fly_argv = argv;\n  fly_tasks_run(fly_main_task);\n${uncaught}  return 0;\n}\n`);
+    } else {
+      out.push(`int main(int argc, char** argv) {\n  fly_argc = argc;\n  fly_argv = argv;\n  ${self.insts[main].c}(${args.join(", ")});\n${uncaught}  return 0;\n}\n`);
+    }
     out
   }
 }
