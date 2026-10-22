@@ -64,10 +64,10 @@ test("degrades gracefully under packet loss", () => {
 
 Flyscript is an early-stage language under active design, developed in the open.
 
-- **Language specification:** version 0.54, with every earlier version and the reasoning behind each change in [docs/history](docs/history/).
+- **Language specification:** version 0.55, with every earlier version and the reasoning behind each change in [docs/history](docs/history/).
 - **Compiler (`flyc`):** a complete prototype front end and evaluator. `flyc check` type-, effect- and ownership-checks programs, rejecting use after move, conflicting borrows, borrows that escape through closures and generators, undeclared effects and non-exhaustive matches with precise errors. `flyc run` executes them, with effect handlers, generators and structured concurrency, against a deterministic simulated world. `comptime` runs too: templates specialize per type, and the standard library's JSON codec is derived over reflection in plain Flyscript, with no compiler support.
 
-- **Flyscript in Flyscript:** a compiler written in Flyscript, in [selfhost/](selfhost/), parses, elaborates and type- and effect-checks the whole language, reaching the same verdict as `flyc` on every program in the test suite, `comptime` and all. It compiles Flyscript to JavaScript, and compiles itself: built by `flyc`, then run on its own output, it reproduces itself byte for byte.
+- **Flyscript in Flyscript:** a compiler written in Flyscript, in [selfhost/](selfhost/), parses, elaborates and type- and effect-checks the whole language, reaching the same verdict as `flyc` on every program in the test suite, `comptime` and all. Its back end is typed: it specializes every generic function for the types it is used at, so method calls are direct, integers keep their widths, derived interfaces are compiled from their `comptime` definitions, and effect handlers, generators and tasks run as JavaScript generators. It compiles itself: built by `flyc`, then run on its own output, it reproduces itself byte for byte, in about three seconds.
 
 Next comes native code generation. Flyscript is not yet ready for production programs; it is ready for your ideas, and issues and discussion about the design are very welcome.
 

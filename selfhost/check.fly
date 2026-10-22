@@ -769,7 +769,7 @@ impl Checker {
         }
         self.stringTy()
       }
-      #Ident(name) => self.ident(name.asStr(), span),
+      #Ident(name) => self.ident(name.asStr(), span, #Some(e.id)),
       #Tag { name, args } => self.tag(name.asStr(), args, expected, span, e.id),
       #Record { name, fields } => self.record(name, fields, expected, span),
       #List(items) => self.list(items, expected),
@@ -898,7 +898,7 @@ impl Checker {
     }
   }
 
-  function ident(self: mut Self, name: str, span: Span): Ty {
+  function ident(self: mut Self, name: str, span: Span, at: Option<usize>): Ty {
     if (const #Some(t) = self.local(name)) { return t; }
     match (self.p.lookup(self.module, name)) {
       #Some(#Const(c)) => self.p.consts[c].ty.clone(),
@@ -907,6 +907,12 @@ impl Checker {
         const module = self.module;
         scheme.effects = #Some(fnEffects(mut self.p, fid, module, span));
         const inst = self.instantiate(scheme, Vec.new(), true);
+        // A function used as a value is instantiated like a call, for code generation.
+        if (const #Some(id) = at) {
+          self.typed.calls.insert(id, fid);
+          self.pendingTargs.push({ id, span, args: inst.args.clone(), bounds: Vec.new() });
+          if (self.p.isTemplate(fid)) { self.pendingSpecs.push([id, span, fid, inst.args.clone()]); }
+        }
         let params: Vec<Ty> = Vec.new();
         for (const [_, t] of inst.params) { params.push(t.clone()); }
         #Fn(Box.new(FnTy { mode: #Shared, params, ret: inst.ret, effects: match (inst.effects) { #Some(x) => x, #None => pure() } }))
@@ -1057,7 +1063,7 @@ impl Checker {
           #None => self.expr(v, #None),
         },
         #None => {
-          const t = self.ident(f.name.name.asStr(), f.name.span);
+          const t = self.ident(f.name.name.asStr(), f.name.span, #None);
           match (want) {
             #Some(w) => {
               self.coerce(t, w, f.name.span);
@@ -1818,6 +1824,7 @@ impl Checker {
           // written there (`xs.iter()`).
           self.p.nextId += 1;
           const implicit: Expr = { kind: #Break, span: { start: iter.span.end, end: iter.span.end }, id: self.p.nextId };
+          self.typed.eaches.insert(iter.id, implicit.id);
           self.callMethod(t, iter.span, "each", Vec.new(), Vec.new(), #None, implicit);
           self.allowed = outer2;
           row = self.s.expandEffs(isolated2);

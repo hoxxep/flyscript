@@ -1,5 +1,7 @@
-//! The self-hosted compiler (selfhost/) compiles itself to JavaScript, and the JavaScript compiles
-//! the same source to the same file.
+//! The self-hosted compiler (selfhost/) compiles itself to JavaScript at a fixpoint, and compiles
+//! programs as the Rust prototype runs them. `selfhost/seed.js` is the compiler compiled by
+//! itself: the reference implementation, running the compiler's source, must produce it, and it
+//! must reproduce itself. The tests that run JavaScript need node; without it they stop early.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -7,43 +9,63 @@ use std::process::Command;
 use flyscript::check::check_files;
 use flyscript::eval::{Value, World, run};
 
-#[test]
-fn selfhost_reaches_a_fixpoint() {
-    // The interpreter recurses as deeply as the program it runs; a debug build's frames are large.
-    std::thread::Builder::new().stack_size(1 << 30).spawn(fixpoint).unwrap().join().unwrap();
+fn root() -> &'static Path {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
 }
 
-fn fixpoint() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let dir = root.join("selfhost");
-    let out = root.join("target/selfhost-test");
+fn out() -> PathBuf {
+    let out = root().join("target/selfhost-test");
     std::fs::create_dir_all(&out).unwrap();
-    let main = dir.join("main.fly");
-    let (stage1, stage2) = (out.join("stage1.js"), out.join("stage2.js"));
+    out
+}
 
+fn has_node() -> bool {
+    Command::new("node").arg("--version").output().is_ok()
+}
+
+/// Compiles `entry` to `js` with a compiled compiler.
+fn compile(compiler: &Path, entry: &Path, js: &Path) {
+    let r = Command::new("node").arg("--stack-size=65500").arg(compiler).arg(entry).arg(js).arg(root()).output().unwrap();
+    assert!(r.status.success() && r.stdout.is_empty(), "{}{}", String::from_utf8_lossy(&r.stdout), String::from_utf8_lossy(&r.stderr));
+}
+
+#[test]
+fn seed_reproduces_itself() {
+    if !has_node() {
+        return;
+    }
+    let seed = root().join("selfhost/seed.js");
+    let again = out().join("seed-again.js");
+    compile(&seed, &root().join("selfhost/main.fly"), &again);
+    assert!(std::fs::read(&again).unwrap() == std::fs::read(&seed).unwrap(), "the seed is stale: run selfhost/bootstrap.sh --update-seed");
+}
+
+#[test]
+fn flyc_builds_the_seed() {
+    // The interpreter recurses as deeply as the program it runs.
+    std::thread::Builder::new().stack_size(1 << 30).spawn(build_with_flyc).unwrap().join().unwrap();
+}
+
+fn build_with_flyc() {
+    let main = root().join("selfhost/main.fly");
+    let stage1 = out().join("stage1.js");
     let checked = check_files(std::slice::from_ref(&main));
     assert!(checked.errors.is_empty(), "{}", checked.render().join("\n"));
     let text = |p: &Path| Value::text(p.to_str().unwrap());
     let mut world = World::default();
     world.real_fs = true;
-    let (result, world) = run(checked.program, "main", vec![text(&main), text(&stage1), text(root)], world);
+    let (result, world) = run(checked.program, "main", vec![text(&main), text(&stage1), text(root())], world);
     assert!(result.is_ok(), "{:?}", result.err());
     assert!(world.out.is_empty(), "{}", world.out.join("\n"));
-    let first = std::fs::read(&stage1).unwrap();
-
-    // Stage 2 needs node; without it, stage 1 is as far as this test goes.
-    let Ok(status) = Command::new("node").arg(&stage1).arg(&main).arg(&stage2).arg(root).status() else { return };
-    assert!(status.success());
-    assert!(std::fs::read(&stage2).unwrap() == first, "stage 2 differs from stage 1");
-    elaborates_as_flyc_does(root, &stage1, &out);
-    checks_as_flyc_does(root, &stage1, &out);
+    let seed = std::fs::read(root().join("selfhost/seed.js")).unwrap();
+    assert!(std::fs::read(&stage1).unwrap() == seed, "flyc compiles the compiler to other than the seed: run selfhost/bootstrap.sh --update-seed");
 }
 
-/// The programs a quarter of the corpus samples, for time.
-fn sample(root: &Path) -> Vec<PathBuf> {
+/// Every program of the test suite and the examples.
+fn programs() -> Vec<PathBuf> {
     let mut programs: Vec<PathBuf> = Vec::new();
     for dir in ["tests/run", "tests/accept", "tests/reject", "examples"] {
-        let mut files: Vec<PathBuf> = std::fs::read_dir(root.join(dir)).unwrap().map(|e| e.unwrap().path()).collect();
+        let mut files: Vec<PathBuf> = std::fs::read_dir(root().join(dir)).unwrap().map(|e| e.unwrap().path()).collect();
         files.sort();
         for f in files {
             let f = if f.is_dir() { f.join("main.fly") } else { f };
@@ -52,23 +74,20 @@ fn sample(root: &Path) -> Vec<PathBuf> {
             }
         }
     }
-    programs.into_iter().step_by(4).collect()
+    programs
 }
 
 /// The self-hosted checker reports what the Rust prototype's type and effect checker reports:
 /// `flyc types` and selfhost/typecheck.fly print the same diagnostics.
-fn checks_as_flyc_does(root: &Path, compiler: &Path, out: &Path) {
-    let typecheck = out.join("typecheck.js");
-    let status = Command::new("node")
-        .arg(compiler)
-        .arg(root.join("selfhost/typecheck.fly"))
-        .arg(&typecheck)
-        .arg(root)
-        .status()
-        .unwrap();
-    assert!(status.success());
+#[test]
+fn checks_as_flyc_does() {
+    if !has_node() {
+        return;
+    }
+    let typecheck = out().join("typecheck.js");
+    compile(&root().join("selfhost/seed.js"), &root().join("selfhost/typecheck.fly"), &typecheck);
     let mut differ = Vec::new();
-    for f in sample(root) {
+    for f in programs() {
         let mut p = flyscript::check::env::Program::load(std::slice::from_ref(&f));
         let mut fid = 0;
         while fid < p.fns.len() {
@@ -76,7 +95,7 @@ fn checks_as_flyc_does(root: &Path, compiler: &Path, out: &Path) {
             fid += 1;
         }
         let rust: Vec<String> = p.diags.iter().map(|(m, d)| format!("error {m} {}..{}: {}", d.span.start, d.span.end, d.message)).collect();
-        let js = Command::new("node").arg(&typecheck).arg(&f).arg(root.join("std")).output().unwrap();
+        let js = Command::new("node").arg("--stack-size=65500").arg(&typecheck).arg(&f).arg(root().join("std")).output().unwrap();
         if String::from_utf8_lossy(&js.stdout).trim_end() != rust.join("\n") {
             differ.push(f.display().to_string());
         }
@@ -85,22 +104,18 @@ fn checks_as_flyc_does(root: &Path, compiler: &Path, out: &Path) {
 }
 
 /// The self-hosted checker elaborates programs' declarations as the Rust prototype does:
-/// `flyc schemes` and selfhost/schemes.fly print the same lines. A quarter of the programs are
-/// compared, for time.
-fn elaborates_as_flyc_does(root: &Path, compiler: &Path, out: &Path) {
-    let schemes = out.join("schemes.js");
-    let status = Command::new("node")
-        .arg(compiler)
-        .arg(root.join("selfhost/schemes.fly"))
-        .arg(&schemes)
-        .arg(root)
-        .status()
-        .unwrap();
-    assert!(status.success());
+/// `flyc schemes` and selfhost/schemes.fly print the same lines.
+#[test]
+fn elaborates_as_flyc_does() {
+    if !has_node() {
+        return;
+    }
+    let schemes = out().join("schemes.js");
+    compile(&root().join("selfhost/seed.js"), &root().join("selfhost/schemes.fly"), &schemes);
     let mut differ = Vec::new();
-    for f in sample(root) {
+    for f in programs() {
         let rust = flyscript::check::env::describe(&flyscript::check::env::Program::load(std::slice::from_ref(&f))).join("\n");
-        let js = Command::new("node").arg(&schemes).arg(&f).arg(root.join("std")).output().unwrap();
+        let js = Command::new("node").arg("--stack-size=65500").arg(&schemes).arg(&f).arg(root().join("std")).output().unwrap();
         if String::from_utf8_lossy(&js.stdout).trim_end() != rust {
             differ.push(f.display().to_string());
         }
@@ -108,3 +123,20 @@ fn elaborates_as_flyc_does(root: &Path, compiler: &Path, out: &Path) {
     assert!(differ.is_empty(), "elaborated differently:\n{}", differ.join("\n"));
 }
 
+/// The run suite's programs, compiled to JavaScript, print what they expect, as they do run by
+/// `flyc`, but for those that need what the JavaScript runtime does not have yet.
+#[test]
+fn compiled_programs_run_as_expected() {
+    if !has_node() {
+        return;
+    }
+    // Destructors need the ownership pass's record of moves; the simulated network is the
+    // interpreter's.
+    const NOT_YET: [&str; 6] = ["assign_drops_old", "crawler", "generator_drop", "sender_drop_closes", "http_server", "http_simulation"];
+    let r = Command::new("sh").arg(root().join("selfhost/corpus.sh")).arg(root().join("selfhost/seed.js")).output().unwrap();
+    let report = String::from_utf8_lossy(&r.stdout);
+    let failed: Vec<&str> = report.lines().filter_map(|l| l.strip_prefix("FAIL ")).filter(|n| !NOT_YET.contains(n)).collect();
+    assert!(failed.is_empty(), "failed compiled:\n{}", failed.join("\n"));
+    let fixed: Vec<&&str> = NOT_YET.iter().filter(|n| !report.lines().any(|l| l == format!("FAIL {n}"))).collect();
+    assert!(fixed.is_empty(), "now passing, so no longer exempt: {fixed:?}");
+}

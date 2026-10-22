@@ -4,53 +4,13 @@
 // `selfhost/runtime.js`.
 
 import { Diagnostic, render } from "./diag";
-import { Module, Item, ItemKind } from "./ast";
 import { Program } from "./env";
 import { checkFn } from "./check";
-import { survey, module } from "./gen";
+import { program } from "./js";
 import { File, println, writeFile } from "std/io";
-import { HashMap } from "std/collections";
 
 // What stops a compilation: diagnostics, or a file that cannot be read or written.
 type Stop = #Failed | #Unreadable { path: String };
-
-function isUpper(s: str): bool {
-  const b = s.asBytes();
-  b.len() > 0 && b[0] >= b'A' && b[0] <= b'Z'
-}
-
-// What module `k` can see by name: its own functions and constants, and what it imports.
-function namesOf(p: readonly Program, k: usize): HashMap<String, String> {
-  let names: HashMap<String, String> = HashMap.new();
-  for (const item of p.modules[k].ast.items) {
-    match (item.kind) {
-      #Function(f) => { names.insert(f.sig.name.name.clone(), `m${k}$${f.sig.name.name}`); }
-      #Const { name, ty: _, value: _ } => { names.insert(name.name.clone(), `m${k}$${name.name}`); }
-      #Import { names: imported, from } => {
-        if (from.startsWith("std/")) {
-          // The standard library is the runtime's; its types are known by name.
-          for (const [name, local] of imported) {
-            if (!isUpper(name.name.asStr())) { names.insert(local.name.clone(), `$rt.${name.name}`); }
-          }
-        } else {
-          const j = match (p.importedModule(k, from.asStr())) { #Some(j) => j, #None => continue };
-          for (const [name, local] of imported) {
-            for (const other of p.modules[j].ast.items) {
-              const declares = match (other.kind) {
-                #Function(f) => f.sig.name.name == name.name,
-                #Const { name: c, ty: _, value: _ } => c.name == name.name,
-                _ => false,
-              };
-              if (declares) { names.insert(local.name.clone(), `m${j}$${name.name}`); }
-            }
-          }
-        }
-      }
-      _ => {}
-    }
-  }
-  names
-}
 
 // The program's diagnostics, each with the source line it is about.
 function report(p: readonly Program): void uses Io {
@@ -77,31 +37,17 @@ function compile(entry: str, out: str, root: str): void uses Io, Fail<Stop> {
     report(p);
     throw #Failed;
   }
-  let user: Vec<usize> = Vec.new();
-  for (const [k, m] of p.modules.iter().enumerate()) { if (!m.isStd) { user.push(k); } }
-  let asts: Vec<Module> = Vec.new();
-  for (const k of user) { asts.push(p.modules[k].ast.clone()); }
-  const world = survey(asts);
   const runtime = `${root}/selfhost/runtime.js`;
   const rt: String = try {
     let f = File.open(runtime.asStr());
     f.readText()
   } catch (_) { throw #Unreadable { path: runtime } };
-  let js = rt;
-  let main: usize = 0;
-  for (const k of user) {
-    js.push(`\n// ${p.modules[k].file}\n`);
-    const code = try {
-      module(p.modules[k].ast, `m${k}$`.asStr(), namesOf(p, k), world.clone())
-    } catch (d) {
-      p.diags.push([k, d]);
-      report(p);
-      throw #Failed
-    };
-    js.push(code.asStr());
-    if (p.modules[k].file.asStr() == p.entryFile(entry).asStr()) { main = k; }
-  }
-  js.push(`\n$rt.start(m${main}$main);\n`);
+  const file = p.entryFile(entry);
+  const main = match (p.modules.iter().findIndex((m) => m.file == file)) { #Some(k) => k, #None => throw #Unreadable { path: file } };
+  const js = try { program(p, main, rt.asStr()) } catch (#Failed(message)) {
+    println(message.asStr());
+    throw #Failed
+  };
   try { writeFile(out, js.asStr()); } catch (_) { throw #Unreadable { path: out.toString() } };
 }
 

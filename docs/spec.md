@@ -1,6 +1,6 @@
 # Flyscript
 
-**Language specification, version 0.54**
+**Language specification, version 0.55**
 
 *Affine values, one row calculus, handlers for everything, and `comptime`: Church on the outside, Turing on the inside.*
 
@@ -18,21 +18,13 @@ The whole language rests on five laws. Every rule in this document is a conseque
 4. **Handlers for everything.** Errors, I/O, iteration and region memory are ordinary effects with ordinary handlers. A handler may hold the rest of a computation as a one-shot continuation value; generators and tasks are both built from that one primitive.
 5. **`comptime` is the metalanguage.** Generics, reflection, layout transformation and derived interfaces are ordinary Flyscript code run by the compiler.
 
-### 0.1 Changes from 0.53
+### 0.1 Changes from 0.54
 
-0.54 is the release in which Flyscript compiles itself: a compiler written in Flyscript parses, elaborates and type- and effect-checks the whole language exactly as the reference implementation does, and compiles its own source to JavaScript at a fixpoint. Writing it surfaced the changes below. Earlier changes are in [docs/history](history/).
+0.55 follows the self-hosted compiler's typed JavaScript back end, which specializes every function for the types it is used at and runs tasks on a scheduler of its own. Earlier changes are in [docs/history](history/).
 
 | Change | Why |
 | :--- | :--- |
-| `i128`, the widest integer; `comptime` integers have its range (§3.1) | `comptime (1 << 64) - 1`, a `u64`'s bound, needs more than 64 bits |
-| A list literal builds a `Vec<T>` where one is wanted (§3.1) | `const xs: Vec<T> = [a, b]` is how TypeScript programmers write an array; a `Vec` was built by repeated `push` |
-| A field of a `Box<T>` or `Arc<T>` is read through it (§4.1) | a syntax tree of boxed nodes was taken apart with `b.get().kind` |
-| A narrowed union is a value of the union it came from (§3.2) | `match (a.cmp(b)) { #Equal => #Less, other => other }` was not an `Ordering` |
-| Bare-tag branches are built as the other branches' type when only a variable is expected, as in a closure's result (§3.6) | `(t) => match (m) { #Some(_) => #Wrap(Box.new(t)), _ => t }` built `#Wrap` as a structural tag |
-| A `mut` field reached through a `readonly` borrow is `readonly` when matched (§4.1) | a `match` on `self.p.defs[d].kind` in a `readonly self` method was taken as changing it |
-| What `throw` throws is a tag (§5.4) | a record thrown and then caught failed with a confusing row mismatch |
-| A field pattern may name a reserved-word field (`#Fn { uses: row }`); a `match` guard may end in a parenthesized expression (§2.3) | such fields could be declared and built but not matched; `if b && (x || y) =>` parsed as a lambda |
-| `Vec.truncate`, `get` and `first` on slices, `File.readText`, `writeFile` | what a compiler written in Flyscript needs from the library |
+| `Scope.spawn` and `Scope.fork` use `Io` (§6.1) | starting a task is a scheduling point, an effect like any other; a back end that suspends tasks at their effects needs to see it in the type |
 
 ---
 
@@ -620,9 +612,9 @@ Concurrency is structured. `Io.scope((s) => body)` opens a scope, and a scope st
 function scope<T, X>(body: once (s: mut Scope<X>) => T uses Io, Fail<X>): T uses Io, Fail<X>;
 interface Scope<X> {
   // Fire and forget: the task cannot fail, so it cannot cancel the scope.
-  function spawn(self: mut Self, task: once () => void uses Io): void;
+  function spawn(self: mut Self, task: once () => void uses Io): void uses Io;
   // Work whose result or failure the scope waits for; its failures `X` are rethrown by the scope.
-  function fork<T extends Send>(self: mut Self, task: once () => T uses Io, Fail<X>): Fiber<T>;
+  function fork<T extends Send>(self: mut Self, task: once () => T uses Io, Fail<X>): Fiber<T> uses Io;
 }
 interface Fiber<T> {
   function join(self: Self): T uses Io;

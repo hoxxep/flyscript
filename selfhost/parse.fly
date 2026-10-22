@@ -1468,7 +1468,10 @@ impl Parser {
         #Some(self.pattern())
       } else if (reserved) {
         throw #Diagnostic { span: name.span, message: `\`${name.name}\` is a reserved word: bind the field to a name, \`${name.name}: x\`` }
-      } else { #None };
+      } else {
+        // `{ x }` binds `x`: a pattern of its own, as later passes record what bindings are.
+        #Some(self.pat_(#Bind(name.name.clone()), name.span))
+      };
       fields.push([name, pat]);
       if (!self.eat(",")) { break; }
     }

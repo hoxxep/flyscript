@@ -733,15 +733,6 @@ impl Interp {
 
     pub fn expr(&mut self, e: &Expr, env: &Env) -> R {
         let moved = self.prog.typed.get(&self.lex.owner).and_then(|t| t.moves.get(&e.span)).cloned();
-        // A binding moved out of whole is never read again, so its value is taken, not copied.
-        if let (Some(path), ExprKind::Ident(name)) = (&moved, &e.kind)
-            && path.is_empty()
-            && let Some(cell) = lookup(env, name)
-        {
-            let v = std::mem::replace(&mut *cell.lock().expect("cell"), Value::Unit);
-            mark_moved(env, name, Vec::new());
-            return Ok(v);
-        }
         let r = self.expr_inner(e, env);
         // A value moved out of a binding is no longer the binding's to drop.
         if r.is_ok()

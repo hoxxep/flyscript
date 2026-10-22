@@ -468,8 +468,9 @@ impl Io {
   export function scope<T, X>(body: once (s: mut Scope<X>) => T uses Io, Fail<X>): T uses Io, Fail<X>;
 }
 impl<X> Scope<X> {
-  export function spawn(self: mut Self, task: once () => void uses Io): void;
-  export function fork<T extends Send>(self: mut Self, task: once () => T uses Io, Fail<X>): Fiber<T>;
+  // Starting a task is a scheduling point (§6.4).
+  export function spawn(self: mut Self, task: once () => void uses Io): void uses Io;
+  export function fork<T extends Send>(self: mut Self, task: once () => T uses Io, Fail<X>): Fiber<T> uses Io;
 }
 impl<T> Fiber<T> {
   export function join(self: Self): T uses Io;
