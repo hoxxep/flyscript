@@ -64,15 +64,18 @@ test("degrades gracefully under packet loss", () => {
 
 Flyscript is an early-stage language under active design, developed in the open.
 
-- **Language specification:** version 0.53, with every earlier version and the reasoning behind each change in [docs/history](docs/history/).
+- **Language specification:** version 0.54, with every earlier version and the reasoning behind each change in [docs/history](docs/history/).
 - **Compiler (`flyc`):** a complete prototype front end and evaluator. `flyc check` type-, effect- and ownership-checks programs, rejecting use after move, conflicting borrows, borrows that escape through closures and generators, undeclared effects and non-exhaustive matches with precise errors. `flyc run` executes them, with effect handlers, generators and structured concurrency, against a deterministic simulated world. `comptime` runs too: templates specialize per type, and the standard library's JSON codec is derived over reflection in plain Flyscript, with no compiler support.
 
-Next comes code generation. Flyscript is not yet ready for production programs; it is ready for your ideas, and issues and discussion about the design are very welcome.
+- **Flyscript in Flyscript:** a compiler written in Flyscript, in [selfhost/](selfhost/), parses, elaborates and type- and effect-checks the whole language, reaching the same verdict as `flyc` on every program in the test suite, `comptime` and all. It compiles Flyscript to JavaScript, and compiles itself: built by `flyc`, then run on its own output, it reproduces itself byte for byte.
+
+Next comes native code generation. Flyscript is not yet ready for production programs; it is ready for your ideas, and issues and discussion about the design are very welcome.
 
 ## Explore
 
 - [The specification](docs/spec.md) — the five laws, the type system, effects, ownership, concurrency.
 - [Example programs](examples/) — a JSON parser, derived JSON encoding and decoding, an inventory service, a web server, a key–value actor, a browser UI, generators, parallel physics.
+- [The self-hosted compiler](selfhost/) — a lexer, parser, type and effect checker, `comptime` interpreter and JavaScript back end, in Flyscript.
 
 ## Build from source
 

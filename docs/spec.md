@@ -1,6 +1,6 @@
 # Flyscript
 
-**Language specification, version 0.53**
+**Language specification, version 0.54**
 
 *Affine values, one row calculus, handlers for everything, and `comptime`: Church on the outside, Turing on the inside.*
 
@@ -18,16 +18,21 @@ The whole language rests on five laws. Every rule in this document is a conseque
 4. **Handlers for everything.** Errors, I/O, iteration and region memory are ordinary effects with ordinary handlers. A handler may hold the rest of a computation as a one-shot continuation value; generators and tasks are both built from that one primitive.
 5. **`comptime` is the metalanguage.** Generics, reflection, layout transformation and derived interfaces are ordinary Flyscript code run by the compiler.
 
-### 0.1 Changes from 0.52
+### 0.1 Changes from 0.53
 
-0.53 gives Mini interfaces as Flyscript has them: `interface Measure { size: (Self) => int; }`, `impl Measure for List { … }`, methods resolved after inference to an impl or — in a definition generic over the type — to a dictionary the definition is passed (qualified types, compiled by dictionary passing). Earlier changes are in [docs/history](history/).
+0.54 is the release in which Flyscript compiles itself: a compiler written in Flyscript parses, elaborates and type- and effect-checks the whole language exactly as the reference implementation does, and compiles its own source to JavaScript at a fixpoint. Writing it surfaced the changes below. Earlier changes are in [docs/history](history/).
 
 | Change | Why |
 | :--- | :--- |
-| With nothing expected, a later branch of a `match` or `if` is checked against the first's type (§3.6) | `match (types.get(n)) { #Some(t) => t, #None => alloc(#Error) }` built `#Error` as a structural tag, not the `Type` the first arm gave |
-| A copied value that cannot hold a borrow holds none, so it keeps nothing lent across the call it is passed to; only a generator call's sources lend its items, and a `for…of` keeps lent only what its iterated value holds (§4.1, §4.2, §5.5) | `self.emit(#Global(self.dicts[j]))` and `for (const s of self.sigs[i].iter().cloned().collect()) { self.function(…) }` were rejected |
-| `Option.map`, and `findIndex` on generators (§3.2, §5.5) | under TypeScript's name, finding a position was missing |
-
+| `i128`, the widest integer; `comptime` integers have its range (§3.1) | `comptime (1 << 64) - 1`, a `u64`'s bound, needs more than 64 bits |
+| A list literal builds a `Vec<T>` where one is wanted (§3.1) | `const xs: Vec<T> = [a, b]` is how TypeScript programmers write an array; a `Vec` was built by repeated `push` |
+| A field of a `Box<T>` or `Arc<T>` is read through it (§4.1) | a syntax tree of boxed nodes was taken apart with `b.get().kind` |
+| A narrowed union is a value of the union it came from (§3.2) | `match (a.cmp(b)) { #Equal => #Less, other => other }` was not an `Ordering` |
+| Bare-tag branches are built as the other branches' type when only a variable is expected, as in a closure's result (§3.6) | `(t) => match (m) { #Some(_) => #Wrap(Box.new(t)), _ => t }` built `#Wrap` as a structural tag |
+| A `mut` field reached through a `readonly` borrow is `readonly` when matched (§4.1) | a `match` on `self.p.defs[d].kind` in a `readonly self` method was taken as changing it |
+| What `throw` throws is a tag (§5.4) | a record thrown and then caught failed with a confusing row mismatch |
+| A field pattern may name a reserved-word field (`#Fn { uses: row }`); a `match` guard may end in a parenthesized expression (§2.3) | such fields could be declared and built but not matched; `if b && (x || y) =>` parsed as a lambda |
+| `Vec.truncate`, `get` and `first` on slices, `File.readText`, `writeFile` | what a compiler written in Flyscript needs from the library |
 
 ---
 
@@ -59,7 +64,7 @@ The whole language rests on five laws. Every rule in this document is a conseque
 | TypeScript | Flyscript | Note |
 | :--- | :--- | :--- |
 | `const x = e` / `let x = e` | same | `const` forbids mutation as well as reassignment. With one owner there is no aliasing, so "shallow" and "deep" immutability coincide. |
-| `number`, `bigint` | `i8 … i64`, `u8 … u64`, `isize`, `usize`, `f32`, `f64` | Literals take their type from context; `as` converts. |
+| `number`, `bigint` | `i8 … i128`, `u8 … u64`, `isize`, `usize`, `f32`, `f64` | Literals take their type from context; `as` converts. |
 | `{ x: 1, y: 2 }` | same | A structural record. Functions accept extra fields through a row variable, not by subtyping. |
 | `{ kind: "a", … } \| { kind: "b", … }` | `#A(…) \| #B { … }` | Tag unions are first-class; no discriminant field. |
 | `[A, B]` | same | Tuples. |
@@ -132,7 +137,7 @@ Tuple       = "[" Type { "," Type } "]" ;
 Fn          = [ "mut" | "once" ] "(" [ Params ] ")" "=>" Return [ Uses ] ;
 Row         = RowItem { "," RowItem } ;               (* effect rows *)
 RowItem     = Path [ TypeArgs ] | "..." Ident ;
-Prim        = "i8" | "i16" | "i32" | "i64" | "isize" | "u8" | "u16" | "u32" | "u64" | "usize"
+Prim        = "i8" | "i16" | "i32" | "i64" | "i128" | "isize" | "u8" | "u16" | "u32" | "u64" | "usize"
             | "f32" | "f64" | "bool" | "str" | "void" | "never" | "Type" ;
 
 Block       = "{" { Stmt } [ Expr ] "}" ;
@@ -170,11 +175,12 @@ LambdaParam = Param | Ident | ( "[" [ Pattern { "," Pattern } ] "]" | PatRecord 
 
 Every comma-separated list in the grammar — parameters, arguments, type arguments, fields, entries, items, patterns, tags, arm parameters — may end with a comma.
 
-Three rules settle the grammar's ambiguities, all borrowed from TypeScript:
+Four rules settle the grammar's ambiguities, the first three borrowed from TypeScript:
 
 - **Braces.** A `{` in expression position begins a record literal. A block appears only as the body of a block-like construct, after `=>` in a lambda or match arm, or at the start of a statement — unless the brace opens an entry (`{ a: 1 }`, `{ [k]: v }`, a shorthand entry followed by a comma, `{ a, b }`, or a `comptime for` over entries): Flyscript has no labeled statements and no comma operator, so that is always a record. `{ a }` alone is a block; write `{ a: a }` for the record.
 - **Block-like statements.** A block-like expression at the start of a statement needs no `;` and is not continued by operators: `if (c) { … } [a, b]` is two statements. As the last item of a block it is the block's value.
-- **Contextual words.** `from`, `of`, `with`, `resumes`, `row`, `view` and `private` are keywords only where the grammar expects them. `match`, `handle`, `region` and `effect` are keywords only when followed by `(…) {`, `{`, `(Ident) {` and `Ident` respectively (and `region`, like `row`, at the start of a type parameter: `<region R>`) — shapes a call or a name never takes, since an expression statement ends with `;` — and names anywhere else, so a request handler may be called `handle`. Any reserved word may be used as a member name (`Yield.yield`, `{ default: 1 }`).
+- **Contextual words.** `from`, `of`, `with`, `resumes`, `row`, `view` and `private` are keywords only where the grammar expects them. `match`, `handle`, `region` and `effect` are keywords only when followed by `(…) {`, `{`, `(Ident) {` and `Ident` respectively (and `region`, like `row`, at the start of a type parameter: `<region R>`) — shapes a call or a name never takes, since an expression statement ends with `;` — and names anywhere else, so a request handler may be called `handle`. Any reserved word may be used as a member name (`Yield.yield`, `{ default: 1 }`); a field pattern names such a field with a binding of its own (`#Fn { uses: row }`).
+- **Guards.** A `(` begins a lambda when its `)` is followed by `=>` — except the `=>` ending a `match` guard: in `#Some(b) if b && (n > 0 || n < -10) => n`, the parenthesized expression ends the guard.
 
 ---
 
@@ -182,14 +188,14 @@ Three rules settle the grammar's ambiguities, all borrowed from TypeScript:
 
 ### 3.1 Primitives, strings, arrays
 
-- Scalars: `i8`–`i64`, `isize`, `u8`–`u64`, `usize`, `f32`, `f64`, `bool`, `void`, `never`. All are `Copy`.
+- Scalars: `i8`–`i64`, `i128`, `isize`, `u8`–`u64`, `usize`, `f32`, `f64`, `bool`, `void`, `never`. All are `Copy`. `i128` is the widest integer, for intermediate arithmetic such as the bounds of a `u64`; `comptime` integers have its range.
 - `str` is a borrowed UTF-8 slice; string literals are `str` with static storage. `String` is an owned, growable UTF-8 buffer; wherever a `str` is expected, a `String` lends itself.
 - `T[N]` is an inline array (`Copy` if `T` is); `[a, b, c]` and `repeat(v)` build one, with `N` from context. `T[]` is a borrowed slice, always `readonly T[]` or `mut T[]`.
 - `Vec<T>`, `Box<T>`, `HashMap<K, V>` and the other owning containers are library types.
 
 **Methods.** Arrays, slices and `Vec`s share their methods, which are defined on slices and reached through lending (§4.1): `len`, `iter`, `iterMut`, `splitAt`, `last`, `includes` and `indexOf` (by `Eq`), `sort` (by `Ord`), `sortBy(cmp)` (stable, `cmp` returning `#Less`, `#Equal` or `#Greater`), `reverse`, and `join(sep)` (each element shown, strings as they are). A `Vec` also has `push`, `pop`, `insert(i, v)`, `remove(i)`, `retain(keep)` — TypeScript's `xs = xs.filter(keep)`, in place — and `drain`, which takes the elements out in order. `str` has TypeScript's string methods — `slice`, `split`, `trim`, `includes`, `startsWith`, `endsWith`, `indexOf`, `toUpperCase`, `toLowerCase`, `replaceAll` — plus `toString`, `asBytes`, and the generators `bytes()`, `lines()` and `splitWhitespace()`; a `String` lends them all, and adds `push`, `clone` and `asStr()`, which lends it as a `str` explicitly where nothing expects one. A `HashSet<T>` (from `std/collections`) has `insert`, `has`, `remove`, `len` and `iter()`. `replace(mut place, v)` gives back what a place held and leaves `v` there, and `swap(mut a, mut b)` exchanges two places: how a pass takes a buffer out of `mut self`. A `HashMap<K, V>` is `Clone` when `K` and `V` are, and has `insert`, `get`, `getMut`, `has`, `remove` (each looked up by anything `K` lends), `len`, `sortedByValue()` (the entries, largest value first), and the generators `keys()`, `values()`, `valuesMut()` and `entries()`.
 
-A tuple `[A, B]` is built with a list literal, taken apart with a pattern (`const [a, b] = t`, which takes an array of the same length apart too), and indexed by a constant, as in TypeScript: `t[0]` is a place of its own, like a field.
+A tuple `[A, B]` is built with a list literal, taken apart with a pattern (`const [a, b] = t`, which takes an array of the same length apart too), and indexed by a constant, as in TypeScript: `t[0]` is a place of its own, like a field. Where a `Vec<T>` is wanted, a list literal builds it, as an array literal does in TypeScript: `const xs: Vec<String> = [a, b]`.
 
 Indexing an array, a slice or a `Vec` (`xs[i]`) is a place of the element type, checked against the length at run time (a panic out of bounds); assigning to it writes in place, and while it is borrowed the whole collection is. Slicing (`xs[a..b]`, either bound optional) lends `readonly T[]`, or `mut T[]` where a `mut` slice is expected; `s[a..b]` on a `str` lends a `str`, and panics unless both bounds fall on character boundaries.
 
@@ -227,7 +233,7 @@ type Result<T, E> = #Ok(T) | #Err(E);
 
 `Option<T>` has `isSome`, `isNone`, `map(f)`, `unwrapOr(fallback)`, `unwrap()` (a `#None` is a bug, and panics), and `take()`, which through a `mut` borrow leaves `#None` behind; an `Option<readonly T>` also has `cloned()`. `Result<T, E>` has `isOk`, `isErr`, and `unwrap()`, which throws the `#Err` payload as a failure (§5.4). A record pattern names the fields it binds and ignores the rest: `#Struct { fields }` matches a `#Struct { name: str; fields: Field[] }`.
 
-**Narrowing.** In a `match` on a structural union, an arm whose pattern binds the whole value sees the union without the tags that earlier arms, unguarded, matched whatever their payload: in `match (e) { #Many(ps) => …, one => describe(one) }` with `e: Problem | #Many(Vec<Problem>)`, `one` is a `Problem`. An enum is a type of its own and is not narrowed.
+**Narrowing.** In a `match` on a structural union, an arm whose pattern binds the whole value sees the union without the tags that earlier arms, unguarded, matched whatever their payload: in `match (e) { #Many(ps) => …, one => describe(one) }` with `e: Problem | #Many(Vec<Problem>)`, `one` is a `Problem`. An enum is a type of its own and is not narrowed. A narrowed union is still a value of the union it came from, as every closed union is of a union with all its tags: `match (a.cmp(b)) { #Equal => #Less, other => other }` is an `Ordering`.
 
 ### 3.3 Nominal types
 
@@ -286,7 +292,7 @@ Type checking happens after `comptime` evaluation and uses bidirectional local i
 - Region arguments are unification variables solved over the whole body. An allocation whose region the types leave undetermined goes to the **innermost enclosing region it does not escape from**: when a `region` block ends, each such allocation is placed in it unless that would let the data outlive the block (through the block's value or a variable declared outside it), in which case it is offered to the next enclosing region. A region argument left unconstrained outside every region defaults to the heap, where region allocation is an error, so a stray `alloc` is caught.
 - **Recursion.** A function that is called again while its effects are being inferred — itself, or through others — is assumed pure there; if its body then performs an effect, it must state its effects with `uses`.
 - **Expected types flow inward**: into blocks and their last expression, into the branches of `if`, `match`, `try`, `region` and `handle`, into a lambda's body from the function type expected of it, and into calls. A call checked against an expected type unifies the callee's instantiated return type with it *before* checking the arguments. This is how `alloc({ user, token })` in a function returning `Ref<Request>` builds a `Request` rather than an anonymous record.
-- With nothing expected, the branches of an `if` or `match` after the first are checked against the first's type.
+- With nothing expected — or only a type variable, as a closure's result is — the branches of an `if` or `match` after the first are checked against the first's type, and branches whose value is a bare tag (`#Leaf`, `#A(x)`) go last, so they are built as the other branches' type: `(t) => match (m) { #Some(_) => #Wrap(Box.new(t)), _ => t }` builds `#Wrap` as the type of `t`.
 - `break`, `continue`, `return` and `throw` have type `never`, which fits any expected type.
 - There is no global Hindley–Milner inference: errors stay local, and `comptime`, regions and interfaces stay decidable.
 
@@ -309,7 +315,7 @@ Borrows are **transparent**: a borrow binding reads and writes as the value it r
 
 A value that is borrowed without having a place — a call's result, a template string, a literal lent as `str` — is stored in an anonymous local of the enclosing block, dropped when the block ends. So ``stringify(#Rejected { reason: `missing ${field}` })`` lends the string for the call, and ``const r = #Rejected { reason: `…` };`` holds a borrow of it while `r` is used; returning `r` is the usual error, a borrow of a local.
 
-**A match through a pointer.** A `Box<T>`, a `Ref<R, T>` or an `Arc<T>` is matched as the `T` it holds, through a borrow of it — the borrow the pointer was reached through, or `readonly` for an owned one: `match (node) { #Add(a, b) => … }` with `node: Box<Expr>` binds `a` and `b` as borrows of the boxed `Expr`'s parts. Nothing is moved out of a box by a pattern; take what it holds with `b.into()` (or clone a part) instead.
+**Through a pointer.** A field of a `Box<T>` or an `Arc<T>` is read through it, as a field of a `Ref<R, T>` is: `b.kind` with `b: Box<Expr>`. A `Box<T>`, a `Ref<R, T>` or an `Arc<T>` is matched as the `T` it holds, through a borrow of it — the borrow the pointer was reached through, or `readonly` for an owned one: `match (node) { #Add(a, b) => … }` with `node: Box<Expr>` binds `a` and `b` as borrows of the boxed `Expr`'s parts. Nothing is moved out of a box by a pattern; take what it holds with `b.into()` (or clone a part) instead.
 
 **A match through a borrow.** A place nothing may be moved out of — reached through a borrow, or an element of a collection (`self.links[v]`) — is matched through a borrow of it, `readonly` or, through a `mut` borrow, `mut`: its parts bind as borrows, with copies for `Copy` parts, as below.
 
@@ -498,7 +504,7 @@ A `Cont<A, B, E>` is an affine value that may be stored, moved and returned like
 
 ### 5.4 Errors: `throw`, `try`, `catch`
 
-`throw e` performs `Fail.raise(e)`. `try { body } catch (p) { handler }` is an abortive handler of `Fail`: it evaluates to the body's value, or binds the failure to `p` and evaluates to the handler's value.
+`throw e` performs `Fail.raise(e)`; `e` is a tag, since failures compose by union (below), and throwing a record, a struct or a primitive is an error. `try { body } catch (p) { handler }` is an abortive handler of `Fail`: it evaluates to the body's value, or binds the failure to `p` and evaluates to the handler's value.
 
 Handling `Fail` **closes** its row: any open tail left in the body's failure union is set to empty, so `p` has exactly the type of what the body can throw, and a `match` on it can be checked for exhaustiveness. Since the error type is a tag union, `catch` is usually a `match`:
 
