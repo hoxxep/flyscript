@@ -20,7 +20,7 @@ The whole language rests on five laws. Every rule in this document is a conseque
 
 ### 0.1 Changes from 0.54
 
-0.55 follows the self-hosted compiler's typed JavaScript back end, which specializes every function for the types it is used at and runs tasks on a scheduler of its own, and the port of the ownership pass to Flyscript. Earlier changes are in [docs/history](history/).
+0.55 follows the self-hosted compiler's back ends — typed JavaScript, and C without a garbage collector — which specialize every function for the types it is used at and run tasks on a scheduler of their own, and the port of the ownership pass to Flyscript. Earlier changes are in [docs/history](history/).
 
 | Change | Why |
 | :--- | :--- |
@@ -600,7 +600,7 @@ A `Gen` owns its continuation, so dropping it runs the generator's cleanup; if t
 
 ### 5.6 Cleanup: `defer` and `Drop`
 
-`defer e;` (or `defer { … };`) schedules `e` to run when the enclosing block exits. Because it runs while the block is being left — perhaps by a failure — a `defer` cannot fail, yield, `return`, or `break` or `continue` a loop around it; and `Drop.drop(self: mut Self): void` has no effects. `defer`s and the destructors of the block's owned locals share one stack and run in reverse order of the points at which they were registered, whether the block exits normally, by `return`, `break`, `throw`, an abortive handler, a dropped continuation, or cancellation.
+`defer e;` (or `defer { … };`) schedules `e` to run when the enclosing block exits. Because it runs while the block is being left — perhaps by a failure — a `defer` cannot fail, yield, `return`, or `break` or `continue` a loop around it, though it may perform any other effect its function may, declared or inferred; and `Drop.drop(self: mut Self): void` has no effects. `defer`s and the destructors of the block's owned locals share one stack and run in reverse order of the points at which they were registered, whether the block exits normally, by `return`, `break`, `throw`, an abortive handler, a dropped continuation, or cancellation.
 
 Assigning to a place drops the value it held first, unless that value was moved out: `h = Holder { tx: b }` drops the old holder, closing its `Sender`. Dropping a value from which fields were moved — possible only when its type does not implement `Drop` — drops the fields still in it.
 

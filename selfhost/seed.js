@@ -504,15 +504,16 @@ const { $rt, $b } = (() => {
   function endTask(me, outcome) {
     const t = sched.tasks.get(me);
     const st = sched.scopes.get(t.scope);
+    // The first failure or panic cancels the scope: its body and its other tasks.
+    const ends = outcome.error instanceof Fail || outcome.error instanceof Panic;
+    if (ends && st.failure === undefined && st.panic === undefined) {
+      cancel(st.owner);
+      for (const o of st.tasks) if (o !== me) cancel(o);
+    }
     if (outcome.error === undefined) {
       st.fibers.set(me, { value: outcome.value });
     } else if (outcome.error instanceof Fail) {
-      // The first failure cancels the scope: its body and its other tasks.
-      if (st.failure === undefined) {
-        st.failure = outcome.error;
-        cancel(st.owner);
-        for (const o of st.tasks) if (o !== me) cancel(o);
-      }
+      if (st.failure === undefined) st.failure = outcome.error;
       st.fibers.set(me, { error: outcome.error });
     } else if (outcome.error instanceof Panic) {
       if (st.panic === undefined) st.panic = outcome.error;
@@ -735,8 +736,8 @@ const { $rt, $b } = (() => {
       let result, error;
       try { result = yield* body(f, { v: { sid } }); }
       catch (e) {
-        // The body unwound because a task failed: the scope rethrows that failure.
-        if (!(e instanceof Cancelled && st.failure !== undefined)) error = e;
+        // The body unwound because a task failed or panicked: the scope rethrows that.
+        if (!(e instanceof Cancelled && (st.failure !== undefined || st.panic !== undefined))) error = e;
       }
       sched.cancelled.delete(sched.current);
       // A scope returns only when every task started in it has finished (§6.1).
@@ -2667,11 +2668,17 @@ function block$46(self, b, expected) {
             }
           }
           row.effs = kept.v;
-          const $11 = row.tail;
+          const saved = $b.replace(new $rt.FieldRef(self.v, "allowed"), row);
+          const was = $b.replace(new $rt.FieldRef(self.v, "inDefer"), true);
+          expr$119(self, e, { $tag: "None" });
+          self.v.inDefer = was;
+          self.v.allowed = saved;
+          const $11 = leaves$124(e, 0);
           m$12: {
-            if (($11.$tag === "Var")) {
+            if (($11.$tag === "Some")) {
+              const span = $11.$;
               {
-                row.tail = { $tag: "Closed" };
+                err$125(self, $rt.copy(span), "a `defer` cannot leave its block: it runs while the block is being left");
               }
               break m$12;
             }
@@ -2681,27 +2688,6 @@ function block$46(self, b, expected) {
               break m$12;
             }
             $rt.unmatched($11);
-          }
-          const saved = $b.replace(new $rt.FieldRef(self.v, "allowed"), row);
-          const was = $b.replace(new $rt.FieldRef(self.v, "inDefer"), true);
-          expr$119(self, e, { $tag: "None" });
-          self.v.inDefer = was;
-          self.v.allowed = saved;
-          const $13 = leaves$124(e, 0);
-          m$14: {
-            if (($13.$tag === "Some")) {
-              const span = $13.$;
-              {
-                err$125(self, $rt.copy(span), "a `defer` cannot leave its block: it runs while the block is being left");
-              }
-              break m$14;
-            }
-            if (true) {
-              {
-              }
-              break m$14;
-            }
-            $rt.unmatched($13);
           }
         }
         break m$3;
@@ -2719,27 +2705,27 @@ function block$46(self, b, expected) {
       $rt.unmatched($2);
     }
   }
-  let $15;
-  const $16 = b.tail;
-  m$17: {
-    if (($16.$tag === "Some")) {
-      const e = $16.$;
-      $15 = expr$119(self, e, expected);
-      break m$17;
+  let $13;
+  const $14 = b.tail;
+  m$15: {
+    if (($14.$tag === "Some")) {
+      const e = $14.$;
+      $13 = expr$119(self, e, expected);
+      break m$15;
     }
-    if (($16.$tag === "None")) {
+    if (($14.$tag === "None")) {
       if (diverges) {
-        $15 = neverTy$128();
+        $13 = neverTy$128();
       } else {
         {
-          $15 = voidTy$129();
+          $13 = voidTy$129();
         }
       }
-      break m$17;
+      break m$15;
     }
-    $rt.unmatched($16);
+    $rt.unmatched($14);
   }
-  const t = $15;
+  const t = $13;
   $b.Vec_pop(new $rt.FieldRef(self.v, "scopes"));
   return t;
 }
@@ -25498,9 +25484,11 @@ function lambda$571(self, params, body, expected) {
   const savedRet = $b.replace(new $rt.FieldRef(self.v, "ret"), clone$26(r));
   const innerAllowed = freshEffs$44(new $rt.FieldRef(self.v, "s"));
   const savedAllowed = $b.replace(new $rt.FieldRef(self.v, "allowed"), clone$43(innerAllowed));
+  const inDefer = $b.replace(new $rt.FieldRef(self.v, "inDefer"), false);
   $b.Vec_push(new $rt.FieldRef(self.v, "performed"), $b.Vec_new());
   const t = expr$119(self, body, { $tag: "Some", $: clone$26(r) });
   $b.Vec_pop(new $rt.FieldRef(self.v, "performed"));
+  self.v.inDefer = inDefer;
   if ($b.Option_isSome(wantRet)) {
     coerce$47(self, t, r, $rt.copy(body.span));
   } else {
@@ -25758,6 +25746,7 @@ function forOf$578(self, pat, iter, body) {
   }
   const isolated = freshEffs$44(new $rt.FieldRef(self.v, "s"));
   const outer = $b.replace(new $rt.FieldRef(self.v, "allowed"), clone$43(isolated));
+  const inDefer = $b.replace(new $rt.FieldRef(self.v, "inDefer"), false);
   $b.Vec_push(new $rt.FieldRef(self.v, "performed"), $b.Vec_new());
   let $5;
   const $6 = iter.kind;
@@ -25778,6 +25767,7 @@ function forOf$578(self, pat, iter, body) {
   const t = $5;
   $b.Vec_pop(new $rt.FieldRef(self.v, "performed"));
   self.v.allowed = outer;
+  self.v.inDefer = inDefer;
   const yieldDef = known$121(self.v, "Yield");
   let row = expandEffs$122(self.v.s, isolated);
   let item = { $tag: "Error" };
@@ -25803,11 +25793,13 @@ function forOf$578(self, pat, iter, body) {
           {
             const isolated2 = freshEffs$44(new $rt.FieldRef(self.v, "s"));
             const outer2 = $b.replace(new $rt.FieldRef(self.v, "allowed"), clone$43(isolated2));
+            const inDefer2 = $b.replace(new $rt.FieldRef(self.v, "inDefer"), false);
             self.v.p.v.nextId = $rt.usize(self.v.p.v.nextId + 1);
             const implicit = { kind: { $tag: "Break" }, span: { start: iter.span.end, end: iter.span.end }, id: self.v.p.v.nextId };
             $b.HashMap_insert(new $rt.FieldRef(self.v.typed, "eaches"), iter.id, implicit.id);
             callMethod$834(self, t, $rt.copy(iter.span), "each", $b.Vec_new(), $b.Vec_new(), { $tag: "None" }, implicit);
             self.v.allowed = outer2;
+            self.v.inDefer = inDefer2;
             row = expandEffs$122(self.v.s, isolated2);
             const $10 = findIndex$838($b.slice_iter(row.effs), ((x) => {
   return (x.def === yieldDef);
@@ -26260,93 +26252,110 @@ function perform$582(self, effects, span, id) {
     }
     effs.effs = rest.v;
   }
-  let $28;
+  if (self.v.inDefer) {
+    const yieldDef = known$121(self.v, "Yield");
+    const labels = expandEffs$122(self.v.s, allowed).effs;
+    const rest = { v: $b.Vec_new() };
+    let reported = false;
+    for (const $28 of $rt.items(effs.effs)) {
+      const e = $28;
+      const cleanup = (((e.def === failDef) || (e.def === yieldDef)) && (!some$716($b.slice_iter(labels), ((x) => {
+  return (x.def === e.def);
+      }))));
+      if ((!cleanup)) {
+        $b.Vec_push(rest, clone$123(e));
+        continue;
+      }
+      if ((!reported)) {
+        reported = true;
+        const what = showEff$135(self.v, e);
+        err$125(self, $rt.copy(span), $b.String_asStr(("" + "a `defer` cannot perform " + what + ": it runs while its block is being left, perhaps by a failure")));
+      }
+    }
+    effs.effs = rest.v;
+  }
+  let $29;
   try {
     effSub$134(new $rt.FieldRef(self.v, "s"), effs, allowed);
-    $28 = { $tag: "None" };
-  } catch ($29) {
-    if (!($29 instanceof $rt.Fail)) throw $29;
-    if (!(($29.value.$tag === "Misfit"))) throw $29;
-    const e = $29.value.$;
-    $28 = { $tag: "Some", $: e };
+    $29 = { $tag: "None" };
+  } catch ($30) {
+    if (!($30 instanceof $rt.Fail)) throw $30;
+    if (!(($30.value.$tag === "Misfit"))) throw $30;
+    const e = $30.value.$;
+    $29 = { $tag: "Some", $: e };
   }
-  const misfit = $28;
-  const $30 = misfit;
-  m$31: {
-    if (($30.$tag === "Some")) {
-      const e = $30.$;
+  const misfit = $29;
+  const $31 = misfit;
+  m$32: {
+    if (($31.$tag === "Some")) {
+      const e = $31.$;
       {
         const what = showEff$135(self.v, e);
         const isFail = (e.def === failDef);
-        const cleanup = (self.v.inDefer && (isFail || (e.def === known$121(self.v, "Yield"))));
-        let $32;
-        if (cleanup) {
-          $32 = ("" + "a `defer` cannot perform " + what + ": it runs while its block is being left, perhaps by a failure");
-        } else {
-          if (isFail) {
-            const $33 = find$583($b.slice_iter(expandEffs$122(self.v.s, allowed).effs), ((x) => {
+        let $33;
+        if (isFail) {
+          const $34 = find$583($b.slice_iter(expandEffs$122(self.v.s, allowed).effs), ((x) => {
   return (x.def === e.def);
-            }));
-            m$34: {
-              if (($33.$tag === "Some")) {
-                const d = $33.$;
-                $32 = ("" + "this can fail with `" + show$140(self.v, $rt.idx(e.args, 0)) + "`, which is not in the declared failures `" + show$140(self.v, $rt.idx(d.args, 0)) + "`");
-                break m$34;
+          }));
+          m$35: {
+            if (($34.$tag === "Some")) {
+              const d = $34.$;
+              $33 = ("" + "this can fail with `" + show$140(self.v, $rt.idx(e.args, 0)) + "`, which is not in the declared failures `" + show$140(self.v, $rt.idx(d.args, 0)) + "`");
+              break m$35;
+            }
+            if (($34.$tag === "None")) {
+              $33 = ("" + "this can fail with `" + show$140(self.v, $rt.idx(e.args, 0)) + "`, but the enclosing function does not declare `Fail`");
+              break m$35;
+            }
+            $rt.unmatched($34);
+          }
+        } else {
+          if ((e.def === regionDef)) {
+            let $36;
+            const $37 = first$847(e.regions);
+            m$38: {
+              if (($37.$tag === "Some")) {
+                const r = $37.$;
+                $36 = { $tag: "Some", $: resolveRegion$151(self.v.s, r) };
+                break m$38;
               }
-              if (($33.$tag === "None")) {
-                $32 = ("" + "this can fail with `" + show$140(self.v, $rt.idx(e.args, 0)) + "`, but the enclosing function does not declare `Fail`");
-                break m$34;
+              if (($37.$tag === "None")) {
+                $36 = { $tag: "None" };
+                break m$38;
               }
-              $rt.unmatched($33);
+              $rt.unmatched($37);
+            }
+            const $39 = $36;
+            m$40: {
+              if (($39.$tag === "Some" && ($39.$.$tag === "Heap"))) {
+                $33 = $b.str_toString("this allocates in a region, but its result is expected in the heap; region allocation needs an enclosing `region` block");
+                break m$40;
+              }
+              if (true) {
+                $33 = ("" + "this allocates in " + what + ", but no enclosing `region` block or declared effect allows it");
+                break m$40;
+              }
+              $rt.unmatched($39);
             }
           } else {
-            if ((e.def === regionDef)) {
-              let $35;
-              const $36 = first$847(e.regions);
-              m$37: {
-                if (($36.$tag === "Some")) {
-                  const r = $36.$;
-                  $35 = { $tag: "Some", $: resolveRegion$151(self.v.s, r) };
-                  break m$37;
-                }
-                if (($36.$tag === "None")) {
-                  $35 = { $tag: "None" };
-                  break m$37;
-                }
-                $rt.unmatched($36);
-              }
-              const $38 = $35;
-              m$39: {
-                if (($38.$tag === "Some" && ($38.$.$tag === "Heap"))) {
-                  $32 = $b.str_toString("this allocates in a region, but its result is expected in the heap; region allocation needs an enclosing `region` block");
-                  break m$39;
-                }
-                if (true) {
-                  $32 = ("" + "this allocates in " + what + ", but no enclosing `region` block or declared effect allows it");
-                  break m$39;
-                }
-                $rt.unmatched($38);
-              }
-            } else {
-              {
-                $32 = ("" + "effect " + what + " is not declared by the enclosing function");
-              }
+            {
+              $33 = ("" + "effect " + what + " is not declared by the enclosing function");
             }
           }
         }
-        const msg = $32;
+        const msg = $33;
         err$125(self, $rt.copy(span), $b.String_asStr(msg));
         return undefined;
       }
-      break m$31;
+      break m$32;
     }
     if (true) {
       {
         return undefined;
       }
-      break m$31;
+      break m$32;
     }
-    $rt.unmatched($30);
+    $rt.unmatched($31);
   }
 }
 function find$583(self, test) {

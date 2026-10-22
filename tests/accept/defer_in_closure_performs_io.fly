@@ -1,0 +1,9 @@
+// A closure's cleanup performs the closure's own inferred effects.
+import { println } from "std/io";
+export function work(): void uses Io {
+  const f = () => {
+    defer println("done");
+    println("working");
+  };
+  f();
+}

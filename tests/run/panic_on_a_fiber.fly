@@ -1,0 +1,12 @@
+// A panic on a fiber (a generator's, or under a handler) ends the program as one anywhere does.
+// expect: #Some(1) #Some(2)
+// expect: <panic: division by zero>
+import { println } from "std/io";
+effect Ask { ask(): u32; }
+function deep(n: u32): u32 uses Ask { if (n == 0) { const x: u32 = 0; 10 / x } else { Ask.ask() + deep(n - 1) } }
+export function main(): void uses Io {
+  let g = generate(() => { yield 1; yield 2; panic("producer gave up"); });
+  println(`${g.next()} ${g.next()}`);
+  const v = handle { deep(3) } with Ask { ask() resumes k => k(1) };
+  println(`${v}`);
+}

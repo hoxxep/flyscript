@@ -182,9 +182,9 @@ impl Interp {
                 let sid = self.fresh_id();
                 self.scopes.lock().expect("scopes").insert(sid, ScopeState { owner: self.task, ..Default::default() });
                 let r = self.call_value(&a(0), vec![Value::Native("Scope", sid)]);
-                // The body unwound because a task failed: the scope rethrows that failure.
+                // The body unwound because a task failed or panicked: the scope rethrows that.
                 let r = match r {
-                    Err(Ctl::Cancelled) if self.scopes.lock().expect("scopes").get(&sid).is_some_and(|s| s.failure.is_some()) => {
+                    Err(Ctl::Cancelled) if self.scopes.lock().expect("scopes").get(&sid).is_some_and(|s| s.failure.is_some() || s.panic.is_some()) => {
                         self.sched.uncancel(self.task);
                         Ok(Value::Unit)
                     }
@@ -235,19 +235,20 @@ impl Interp {
                     {
                         let mut scopes = child.scopes.lock().expect("scopes");
                         let st = scopes.entry(sid).or_default();
+                        // The first failure or panic cancels the scope: its body and other tasks.
+                        let ends = matches!(&r, Err(Ctl::Panic(_))) || matches!(&r, Err(Ctl::Unwind(h, _)) if *h == id);
+                        if ends && st.failure.is_none() && st.panic.is_none() {
+                            child.sched.cancel(st.owner);
+                            for t in st.tasks.iter().filter(|t| **t != tid) {
+                                child.sched.cancel(*t);
+                            }
+                        }
                         match r {
                             Ok(v) => {
                                 st.fibers.insert(tid, Ok(v));
                             }
                             Err(Ctl::Unwind(h, e)) if h == id => {
-                                // The first failure cancels the scope: its body and other tasks.
-                                if st.failure.is_none() {
-                                    st.failure = Some(e.clone());
-                                    child.sched.cancel(st.owner);
-                                    for t in st.tasks.iter().filter(|t| **t != tid) {
-                                        child.sched.cancel(*t);
-                                    }
-                                }
+                                st.failure.get_or_insert_with(|| e.clone());
                                 st.fibers.insert(tid, Err(e));
                             }
                             Err(Ctl::Cancelled) => {}

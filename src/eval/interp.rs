@@ -712,10 +712,27 @@ impl Interp {
                             _ => 0,
                         },
                     };
+                    // An out-of-bounds range is a panic of the program's, as the compiled runtimes say.
+                    let len = match get(&p) {
+                        Value::List(vs) => Some(vs.len()),
+                        Value::Text(t) => Some(t.len()),
+                        _ => None,
+                    };
+                    if let Some(n) = len && (lo > hi || hi > n) {
+                        return Err(panic(format!("range {lo}..{hi} out of bounds (length {n})")));
+                    }
                     p.path.push(Seg::Range(lo, hi));
                 } else {
-                    let i = self.expr(index, env)?.as_int() as usize;
-                    p.path.push(Seg::Index(i));
+                    let i = self.expr(index, env)?.as_int();
+                    let len = match get(&p) {
+                        Value::List(vs) => Some(vs.len()),
+                        Value::Text(t) => Some(t.len()),
+                        _ => None,
+                    };
+                    if let Some(n) = len && (i < 0 || i as usize >= n) {
+                        return Err(panic(format!("index {i} out of bounds (length {n})")));
+                    }
+                    p.path.push(Seg::Index(i as usize));
                 }
                 Ok(p)
             }

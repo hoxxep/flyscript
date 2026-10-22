@@ -504,15 +504,16 @@ const { $rt, $b } = (() => {
   function endTask(me, outcome) {
     const t = sched.tasks.get(me);
     const st = sched.scopes.get(t.scope);
+    // The first failure or panic cancels the scope: its body and its other tasks.
+    const ends = outcome.error instanceof Fail || outcome.error instanceof Panic;
+    if (ends && st.failure === undefined && st.panic === undefined) {
+      cancel(st.owner);
+      for (const o of st.tasks) if (o !== me) cancel(o);
+    }
     if (outcome.error === undefined) {
       st.fibers.set(me, { value: outcome.value });
     } else if (outcome.error instanceof Fail) {
-      // The first failure cancels the scope: its body and its other tasks.
-      if (st.failure === undefined) {
-        st.failure = outcome.error;
-        cancel(st.owner);
-        for (const o of st.tasks) if (o !== me) cancel(o);
-      }
+      if (st.failure === undefined) st.failure = outcome.error;
       st.fibers.set(me, { error: outcome.error });
     } else if (outcome.error instanceof Panic) {
       if (st.panic === undefined) st.panic = outcome.error;
@@ -735,8 +736,8 @@ const { $rt, $b } = (() => {
       let result, error;
       try { result = yield* body(f, { v: { sid } }); }
       catch (e) {
-        // The body unwound because a task failed: the scope rethrows that failure.
-        if (!(e instanceof Cancelled && st.failure !== undefined)) error = e;
+        // The body unwound because a task failed or panicked: the scope rethrows that.
+        if (!(e instanceof Cancelled && (st.failure !== undefined || st.panic !== undefined))) error = e;
       }
       sched.cancelled.delete(sched.current);
       // A scope returns only when every task started in it has finished (§6.1).

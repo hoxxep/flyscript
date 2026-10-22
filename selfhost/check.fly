@@ -545,14 +545,29 @@ impl Checker {
       }
       effs.effs = rest;
     }
+    // A `defer` allows its function's effects but `Fail` and `Yield`, with the row still open if
+    // the function's is inferred: either is an error unless a handler in the `defer` allows it.
+    if (self.inDefer) {
+      const yieldDef = self.known("Yield");
+      const labels = self.s.expandEffs(allowed).effs;
+      let rest: Vec<Eff> = Vec.new();
+      let reported = false;
+      for (const e of effs.effs) {
+        const cleanup = (e.def == failDef || e.def == yieldDef) && !labels.iter().some((x) => x.def == e.def);
+        if (!cleanup) { rest.push(e.clone()); continue; }
+        if (!reported) {
+          reported = true;
+          const what = self.showEff(e);
+          self.err(span, `a \`defer\` cannot perform ${what}: it runs while its block is being left, perhaps by a failure`.asStr());
+        }
+      }
+      effs.effs = rest;
+    }
     const misfit: Option<Eff> = try { self.s.effSub(effs, allowed); #None } catch (#Misfit(e)) { #Some(e) };
     if (const #Some(e) = misfit) {
       const what = self.showEff(e);
       const isFail = e.def == failDef;
-      const cleanup = self.inDefer && (isFail || e.def == self.known("Yield"));
-      const msg: String = if (cleanup) {
-        `a \`defer\` cannot perform ${what}: it runs while its block is being left, perhaps by a failure`
-      } else if (isFail) {
+      const msg: String = if (isFail) {
         match (self.s.expandEffs(allowed).effs.iter().find((x) => x.def == e.def)) {
           #Some(d) => `this can fail with \`${self.show(e.args[0])}\`, which is not in the declared failures \`${self.show(d.args[0])}\``,
           #None => `this can fail with \`${self.show(e.args[0])}\`, but the enclosing function does not declare \`Fail\``,
@@ -664,7 +679,6 @@ impl Checker {
           let kept: Vec<Eff> = Vec.new();
           for (const x of row.effs) { if (x.def != fail && x.def != yld) { kept.push(x.clone()); } }
           row.effs = kept;
-          if (const #Var(_) = row.tail) { row.tail = #Closed; }
           const saved = replace(mut self.allowed, row);
           const was = replace(mut self.inDefer, true);
           self.expr(e, #None);
@@ -1727,10 +1741,12 @@ impl Checker {
     const savedRet = replace(mut self.ret, r.clone());
     const innerAllowed = self.s.freshEffs();
     const savedAllowed = replace(mut self.allowed, innerAllowed.clone());
-    // A closure's body performs when it is called, not here.
+    // A closure's body performs when it is called, not here: not in a `defer` around it.
+    const inDefer = replace(mut self.inDefer, false);
     self.performed.push(Vec.new());
     const t = self.expr(body, #Some(r.clone()));
     self.performed.pop();
+    self.inDefer = inDefer;
     if (wantRet.isSome()) { self.coerce(t, r, body.span); } else { try { self.s.unify(r, t); } catch (_) {} }
     self.allowed = savedAllowed;
     self.ret = savedRet;
@@ -1785,6 +1801,7 @@ impl Checker {
     // Check the iterated expression in isolation to see whether it is a generator.
     const isolated = self.s.freshEffs();
     const outer = replace(mut self.allowed, isolated.clone());
+    const inDefer = replace(mut self.inDefer, false);
     // A list literal iterated directly is an array, as in TypeScript (`for (const x of [a, b])`).
     // What it performs is performed below, less the items the loop takes.
     self.performed.push(Vec.new());
@@ -1797,6 +1814,7 @@ impl Checker {
     };
     self.performed.pop();
     self.allowed = outer;
+    self.inDefer = inDefer;
     const yieldDef = self.known("Yield");
     let row = self.s.expandEffs(isolated);
     let item: Ty = #Error;
@@ -1812,6 +1830,7 @@ impl Checker {
         } else {
           const isolated2 = self.s.freshEffs();
           const outer2 = replace(mut self.allowed, isolated2.clone());
+          const inDefer2 = replace(mut self.inDefer, false);
           // The implicit call has an id of its own, so it does not overwrite the record of a call
           // written there (`xs.iter()`).
           self.p.nextId += 1;
@@ -1819,6 +1838,7 @@ impl Checker {
           self.typed.eaches.insert(iter.id, implicit.id);
           self.callMethod(t, iter.span, "each", Vec.new(), Vec.new(), #None, implicit);
           self.allowed = outer2;
+          self.inDefer = inDefer2;
           row = self.s.expandEffs(isolated2);
           match (row.effs.iter().findIndex((x) => x.def == yieldDef)) {
             #Some(i) => { item = row.effs.remove(i).args[0].clone(); }

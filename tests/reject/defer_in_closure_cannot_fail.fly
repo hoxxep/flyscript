@@ -1,0 +1,10 @@
+// error: a `defer` cannot perform `Fail
+// A closure's effects are inferred, and its cleanup may perform them, but never `Fail` (§5.6).
+import { File } from "std/io";
+export function work(): void uses Io, Fail<IoErr> {
+  const f = () => {
+    defer File.open("log");
+    File.open("data");
+  };
+  f();
+}

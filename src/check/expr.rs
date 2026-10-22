@@ -641,13 +641,22 @@ impl<'p> Checker<'p> {
                 }
             });
         }
+        // A `defer` allows its function's effects but `Fail` and `Yield`, with the row still open
+        // if the function's is inferred: either is an error unless a handler in the `defer` allows it.
+        if self.in_defer {
+            let yield_def = self.known("Yield");
+            let labels: Vec<DefId> = self.s.expand_effs(&allowed).effs.iter().map(|e| e.def).collect();
+            let cleanup = |e: &Eff| (e.def == fail_def || e.def == yield_def) && !labels.contains(&e.def);
+            if let Some(e) = effects.effs.iter().find(|e| cleanup(e)) {
+                let what = self.show_eff(e);
+                self.err(span, format!("a `defer` cannot perform {what}: it runs while its block is being left, perhaps by a failure"));
+            }
+            effects.effs.retain(|e| !cleanup(e));
+        }
         let effects = &effects;
         if let Err(e) = self.s.eff_sub(effects, &allowed) {
             let what = self.show_eff(&e);
-            let cleanup = self.in_defer && (self.p.known.get("Fail") == Some(&e.def) || self.p.known.get("Yield") == Some(&e.def));
-            let msg = if cleanup {
-                format!("a `defer` cannot perform {what}: it runs while its block is being left, perhaps by a failure")
-            } else if self.p.known.get("Fail") == Some(&e.def) {
+            let msg = if self.p.known.get("Fail") == Some(&e.def) {
                 let declared = self.s.expand_effs(&allowed).effs.into_iter().find(|x| x.def == e.def);
                 match declared {
                     Some(d) => format!(
@@ -750,9 +759,6 @@ impl<'p> Checker<'p> {
                     let (fail, yld) = (self.known("Fail"), self.known("Yield"));
                     let mut row = self.s.expand_effs(&self.allowed.clone());
                     row.effs.retain(|eff| eff.def != fail && eff.def != yld);
-                    if let Tail::Var(_) = row.tail {
-                        row.tail = Tail::Closed;
-                    }
                     let saved = std::mem::replace(&mut self.allowed, row);
                     let was = std::mem::replace(&mut self.in_defer, true);
                     self.expr(e, None);
@@ -1860,8 +1866,10 @@ impl<'p> Checker<'p> {
         let inner_allowed = self.s.fresh_effs();
         let saved_allowed = std::mem::replace(&mut self.allowed, inner_allowed.clone());
         let ret = self.ret.clone();
-        // A closure's body performs when it is called, not here.
+        // A closure's body performs when it is called, not here: not in a `defer` around it.
+        let in_defer = std::mem::replace(&mut self.in_defer, false);
         let (t, _) = self.performing(|c| c.expr(body, Some(&ret)));
+        self.in_defer = in_defer;
         if want_ret.is_some() {
             self.coerce(&t, &ret, body.span);
         } else {
@@ -1923,6 +1931,7 @@ impl<'p> Checker<'p> {
         // Check the iterated expression in isolation to see whether it is a generator.
         let isolated = self.s.fresh_effs();
         let outer = std::mem::replace(&mut self.allowed, isolated.clone());
+        let in_defer = std::mem::replace(&mut self.in_defer, false);
         // A list literal iterated directly is an array, as in TypeScript (`for (const x of [a, b])`).
         // What it performs is performed below, less the items the loop takes.
         let (t, _) = self.performing(|c| {
@@ -1934,6 +1943,7 @@ impl<'p> Checker<'p> {
             }
         });
         self.allowed = outer;
+        self.in_defer = in_defer;
         let yield_def = self.known("Yield");
         let mut row = self.s.expand_effs(&isolated);
         let item = match row.effs.iter().position(|e| e.def == yield_def) {
@@ -1949,11 +1959,13 @@ impl<'p> Checker<'p> {
                 } else {
                     let isolated2 = self.s.fresh_effs();
                     let outer = std::mem::replace(&mut self.allowed, isolated2.clone());
+                    let in_defer = std::mem::replace(&mut self.in_defer, false);
                     // The implicit call gets its own (zero-width) span, so it does not overwrite the
                     // record of a call written there (`xs.iter()`).
                     let implicit = Span::new(iter.span.end, iter.span.end);
                     self.call_method(&t, iter.span, "each", CallSite { explicit: &[], args: &[], expected: None, span: implicit });
                     self.allowed = outer;
+                    self.in_defer = in_defer;
                     row = self.s.expand_effs(&isolated2);
                     match row.effs.iter().position(|e| e.def == yield_def) {
                         Some(i) => row.effs.remove(i).args[0].clone(),

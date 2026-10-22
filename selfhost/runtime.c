@@ -27,7 +27,12 @@ void fly_err_take(void* out, size_t size) {
   fly_err = NULL;
 }
 
-_Noreturn void fly_panic(const char* message) {
+static _Noreturn void fiber_panic(const char* message);
+
+// A panic unwinds the fiber it happens on; one on the main stack ends the program (§5.7).
+_Noreturn void fly_panic(const char* message) { fiber_panic(message); }
+
+static _Noreturn void panic_exit(const char* message) {
   fflush(stdout);
   printf("<panic: %s>\n", message);
   fflush(stdout);
@@ -580,6 +585,8 @@ void __sanitizer_finish_switch_fiber(void* fake_stack_save, const void** bottom_
 #endif
 
 struct fly_fiber {
+  // Whether the fiber ended in a panic: it stops where it panicked, never to run again.
+  bool panicked;
   void* sp;
   void* stack;
   size_t size;
@@ -648,13 +655,43 @@ static void switch_to(fly_fiber* to) {
 #endif
 }
 
+// The panic unwinding, until whoever started the fiber it began on takes it up.
+static char* panicking = NULL;
+
 void fly_fiber_start(fly_fiber* f) {
 #ifdef FLY_ASAN
-  __sanitizer_finish_switch_fiber(NULL, NULL, NULL);
+  // The first fiber to start was switched to from the main stack, whose bounds the sanitizer
+  // reports here: what switching back to it says.
+  const void* bottom;
+  size_t size;
+  __sanitizer_finish_switch_fiber(NULL, &bottom, &size);
+  if (!main_fiber.stack) {
+    main_fiber.stack = (void*)bottom;
+    main_fiber.size = size;
+  }
 #endif
   f->entry(f->arg);
   f->done = true;
   switch_to(f->back);
+}
+
+static _Noreturn void fiber_panic(const char* message) {
+  if (current == &main_fiber) panic_exit(message);
+  if (!panicking) {
+    size_t n = strlen(message);
+    panicking = malloc(n + 1);
+    memcpy(panicking, message, n + 1);
+  }
+  // The fiber ends here, as a finished one does, and whoever resumed it takes the panic up.
+  current->panicked = true;
+  current->done = true;
+  switch_to(current->back);
+  abort();
+}
+
+// After a fiber this code resumed has run: a panic it ended with goes on here.
+static void panic_goes_on(void) {
+  if (panicking) fiber_panic(panicking);
 }
 
 // Stacks are reserved large and committed as they are touched.
@@ -701,6 +738,7 @@ void fly_handle_start(fly_handler* h, void (*entry)(void*), void* arg) {
   h->fiber = fiber_new(entry, arg, h);
   h->fiber->back = current;
   switch_to(h->fiber);
+  panic_goes_on();
 }
 
 // The handler is deep: what else the body performs goes to the handlers around the resumption.
@@ -709,6 +747,7 @@ void fly_handle_resume(fly_handler* h) {
   h->outer = fly_handlers;
   h->op = -1;
   switch_to(h->suspended);
+  panic_goes_on();
 }
 
 bool fly_handle_done(const fly_handler* h) { return h->fiber->done; }
@@ -985,13 +1024,15 @@ typedef struct {
   void* result;
   size_t size;
   fly_failure* error;
+  // The panic the task ended with, if it did.
+  char* panic;
   bool started, finished, cancelled, deliver_cancel, deliver_deadlock;
   int wait_kind, wait_id;
   uint64_t until;
 } task_t;
 
 typedef struct { uint8_t* items; size_t len, head, size; long senders; bool closed; } chan_t;
-typedef struct { int owner; int* tasks; size_t ntasks; fly_failure* failure; } scope_t;
+typedef struct { int owner; int* tasks; size_t ntasks; fly_failure* failure; char* panic; } scope_t;
 
 bool fly_tasks_on = false;
 static struct {
@@ -1135,13 +1176,14 @@ static void block(int kind, int id) {
 static void end_task(int me) {
   task_t* t = sched.tasks[me];
   scope_t* st = sched.scopes[t->scope];
-  if (t->error && !st->failure) {
-    // The first failure cancels the scope: its body and its other tasks. It is the scope's to
-    // raise, unless a join raises it first: a failure is raised once.
-    st->failure = t->error;
+  // The first failure or panic cancels the scope: its body and its other tasks (§6.1).
+  if ((t->panic || t->error) && !st->panic && !st->failure) {
     cancel(st->owner);
     for (size_t i = 0; i < st->ntasks; i++) if (st->tasks[i] != me) cancel(st->tasks[i]);
   }
+  if (t->panic && !st->panic) st->panic = t->panic;
+  // A failure is the scope's to raise, unless a join raises it first: it is raised once.
+  if (t->error && !st->failure) st->failure = t->error;
   t->finished = true;
   wake(WAIT_TASK, me);
   if (!pass()) fly_panic_deadlock();
@@ -1184,7 +1226,14 @@ void fly_tasks_run(void (*main)(void)) {
     t->fiber->back = &main_fiber;
     switch_to(t->suspended);
     if (t->fiber->done) {
+      if (panicking) {
+        t->panic = panicking;
+        panicking = NULL;
+        fly_unwinding = false;
+        fly_err = NULL;
+      }
       if (me == 0) {
+        if (t->panic) panic_exit(t->panic);
         if (t->error) fly_err = t->error;
         return;
       }
@@ -1245,6 +1294,7 @@ void fly_join(int task, void* out) {
   join_task(task);
   if (fly_unwinding) return;
   task_t* t = sched.tasks[task];
+  if (t->panic) fly_panic("a joined task did not finish");
   if (t->error) {
     scope_t* st = sched.scopes[t->scope];
     if (st && st->failure == t->error) st->failure = NULL;
@@ -1275,8 +1325,8 @@ void fly_scope_close(int sid, bool body_failed) {
   (void)body_failed;
   scope_t* st = sched.scopes[sid];
   task_t* me = sched.tasks[sched.current];
-  // The body unwound because a task failed: the scope raises that failure instead.
-  bool unwound = fly_unwinding && !(st->failure);
+  // The body unwound because a task failed or panicked: the scope raises that instead.
+  bool unwound = fly_unwinding && !st->failure && !st->panic;
   fly_unwinding = false;
   void* err = fly_err;
   fly_err = NULL;
@@ -1290,6 +1340,7 @@ void fly_scope_close(int sid, bool body_failed) {
     }
   }
   me->cancelled = false;
+  if (st->panic) fly_panic(st->panic);
   if (unwound) { fly_unwinding = true; if (err) free(err); return; }
   if (err) { fly_err = err; return; }
   if (st->failure) { fly_err = st->failure; st->failure = NULL; }
