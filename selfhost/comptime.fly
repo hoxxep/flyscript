@@ -26,7 +26,7 @@ const STEP_BUDGET: u64 = 1000000;
 export enum CV {
   #Unit,
   #Bool(bool),
-  #Int(i64),
+  #Int(i128),
   #Str(String),
   #List(Vec<CV>),
   // Fields sorted by name.
@@ -919,7 +919,7 @@ impl Expand {
   export function eval(self: mut Self, e: readonly Expr): CV uses Fail<CtStop> {
     self.tick(e.span);
     match (e.kind) {
-      #Int(s) => match (parseInt(s.replaceAll("_", "").asStr())) {
+      #Int(s) => match (parseDecimal(s.replaceAll("_", "").asStr())) {
         #Some(n) => #Int(n),
         #None => fail(e.span, "bad integer"),
       },
@@ -1173,11 +1173,11 @@ impl Expand {
   function method(self: mut Self, recv: CV, name: str, args: Vec<CV>, span: Span): CV uses Fail<CtStop> {
     match (recv) {
       #List(xs) => {
-        if (name == "len") { return #Int(xs.len() as i64); }
+        if (name == "len") { return #Int(xs.len() as i128); }
         if (name == "isEmpty") { return #Bool(xs.len() == 0); }
         if (name == "enumerate") {
           let out: Vec<CV> = Vec.new();
-          for (const [i, x] of xs.iter().enumerate()) { out.push(#List([#Int(i as i64), x.clone()])); }
+          for (const [i, x] of xs.iter().enumerate()) { out.push(#List([#Int(i as i128), x.clone()])); }
           return #List(out);
         }
         const f: CV = if (args.len() > 0) { args[0].clone() } else { #Unit };
@@ -1201,7 +1201,7 @@ impl Expand {
         }
         fail(span, `a list has no \`comptime\` method \`${name}\``.asStr())
       }
-      #Str(s) if name == "len" => #Int(s.len() as i64),
+      #Str(s) if name == "len" => #Int(s.len() as i128),
       v => fail(span, `${cvKind(v)} has no \`comptime\` method \`${name}\``.asStr()),
     }
   }
@@ -1231,8 +1231,8 @@ impl Expand {
   function info(self: mut Self, t: readonly Ty, span: Span): CV uses Fail<CtStop> {
     match (t) {
       #Prim(p) if isInt(p) => {
-        const signed = match (p) { #I8 | #I16 | #I32 | #I64 | #Isize => true, _ => false };
-        const bits: i64 = match (p) { #I8 | #U8 => 8, #I16 | #U16 => 16, #I32 | #U32 => 32, _ => 64 };
+        const signed = match (p) { #I8 | #I16 | #I32 | #I64 | #I128 | #Isize => true, _ => false };
+        const bits: i128 = match (p) { #I8 | #U8 => 8, #I16 | #U16 => 16, #I32 | #U32 => 32, #I128 => 128, _ => 64 };
         tagOf("Int", rec([["signed", #Bool(signed)], ["bits", #Int(bits)]]))
       }
       #Prim(#F32) => tagOf("Float", #Int(32)),
@@ -1255,7 +1255,7 @@ impl Expand {
         for (const [k, x] of r.labels) { out.push(Expand.tagInfo(k.asStr(), x)); }
         tagOf("Union", #List(out))
       }
-      #Array(e, #Known(n)) => tagOf("Array", rec([["item", #Type(e.get().clone())], ["len", #Int(n as i64)]])),
+      #Array(e, #Known(n)) => tagOf("Array", rec([["item", #Type(e.get().clone())], ["len", #Int(n as i128)]])),
       #Slice(e) => tagOf("Slice", #Type(e.get().clone())),
       #Borrow(m, inner) => tagOf("Borrow", rec([["mutable", #Bool(m)], ["type", #Type(inner.get().clone())]])),
       #Named(d, args) => {
@@ -1368,6 +1368,18 @@ impl Expand {
   }
 }
 
+// A decimal integer literal, as wide as `comptime` integers are; anything else is not one.
+function parseDecimal(s: str): Option<i128> {
+  const bytes = s.asBytes();
+  if (bytes.len() == 0) { return #None; }
+  let n: i128 = 0;
+  for (const b of bytes) {
+    if (b < b'0' || b > b'9') { return #None; }
+    n = n * 10 + ((b - b'0') as i128);
+  }
+  #Some(n)
+}
+
 function binary(op: str, l: CV, r: CV): Option<CV> {
   if (op == "==") { return #Some(#Bool(cvEq(l, r))); }
   if (op == "!=") { return #Some(#Bool(!cvEq(l, r))); }
@@ -1380,8 +1392,8 @@ function binary(op: str, l: CV, r: CV): Option<CV> {
       if (op == "%" && b != 0) { return #Some(#Int(a % b)); }
       if (op == "&") { return #Some(#Int(a & b)); }
       if (op == "|") { return #Some(#Int(a | b)); }
-      if (op == "<<" && b >= 0 && b < 63) { return #Some(#Int(a << b)); }
-      if (op == ">>" && b >= 0 && b < 63) { return #Some(#Int(a >> b)); }
+      if (op == "<<" && b >= 0 && b < 127) { return #Some(#Int(a << b)); }
+      if (op == ">>" && b >= 0 && b < 127) { return #Some(#Int(a >> b)); }
       if (op == "<") { return #Some(#Bool(a < b)); }
       if (op == "<=") { return #Some(#Bool(a <= b)); }
       if (op == ">") { return #Some(#Bool(a > b)); }

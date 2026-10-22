@@ -1,0 +1,19 @@
+// Type- and effect-checks a program, printing its diagnostics in the form `flyc types` prints the
+// Rust prototype's: `main(entry, std)`.
+
+import { Program } from "./env";
+import { checkFn } from "./check";
+import { println } from "std/io";
+
+export function main(entry: str, std: str): void uses Io {
+  let p = Program.load([entry.toString()], std);
+  let fid: usize = 0;
+  while (fid < p.fns.len()) {
+    checkFn(mut p, fid);
+    fid += 1;
+  }
+  for (const [m, d] of p.diags) {
+    const #Diagnostic { span, message } = d;
+    println(`error ${m} ${span.start}..${span.end}: ${message}`);
+  }
+}

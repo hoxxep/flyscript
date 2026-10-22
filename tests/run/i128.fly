@@ -1,0 +1,14 @@
+// `i128`, the widest integer: what `comptime` computes `u64` bounds in.
+// expect: 1267650600228229401496703205376
+// expect: 18446744073709551615
+// expect: <panic: arithmetic overflow>
+import { println } from "std/io";
+
+export function main(): void uses Io {
+  const big: i128 = 1 << 100;
+  println(`${big}`);
+  const u64max: i128 = (1 << 64) - 1;
+  println(`${u64max}`);
+  const top: i128 = 170141183460469231731687303715884105727;
+  println(`${top + 1}`);
+}

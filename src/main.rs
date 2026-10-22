@@ -13,6 +13,21 @@ fn main() -> ExitCode {
     if command == "run" {
         return run(files);
     }
+    // Type and effect diagnostics, without the ownership pass: compared with the self-hosted
+    // checker's.
+    if command == "types" {
+        let paths: Vec<std::path::PathBuf> = files.iter().map(std::path::PathBuf::from).collect();
+        let mut p = flyscript::check::env::Program::load(&paths);
+        let mut fid = 0;
+        while fid < p.fns.len() {
+            flyscript::check::expr::check_fn(&mut p, fid);
+            fid += 1;
+        }
+        for (m, d) in &p.diags {
+            println!("error {m} {}..{}: {}", d.span.start, d.span.end, d.message);
+        }
+        return ExitCode::SUCCESS;
+    }
     // Every declaration as elaborated, one per line: compared with the self-hosted checker's.
     if command == "schemes" {
         let paths: Vec<std::path::PathBuf> = files.iter().map(std::path::PathBuf::from).collect();

@@ -1,0 +1,15 @@
+// A guard may end in a parenthesized expression: the arm's `=>` does not make it a lambda's
+// parameters. A union narrowed by a `match` is a value of the union it came from.
+export function pick(m: Option<bool>, n: i64): i64 {
+  match (m) {
+    #Some(b) if b && (n > 0 || n < -10) => n,
+    _ => 0,
+  }
+}
+
+export function ordered(a: i64, b: i64): Ordering {
+  match (a.cmp(b)) {
+    #Equal => #Less,
+    other => other,
+  }
+}

@@ -481,6 +481,9 @@ impl<'p> Checker<'p> {
                 fs.iter().zip(&xs).all(|(f, x)| self.lends(f, x))
             }
             (Ty::Array(e, _), Ty::Slice(xe)) => self.s.unify(e, xe).is_ok(),
+            // A union narrowed by a `match` (`#Greater | #Less`) is a value of the union it came
+            // from: each of its tags is one of that union's (§3.2).
+            (Ty::Union(r), Ty::Union(_)) if self.s.expand_row(r).tail == Tail::Closed => self.s.union_sub(&f, &x).is_ok(),
             (Ty::Named(d, args), Ty::Slice(xe)) if *d == self.known("Vec") => match args.first() {
                 Some(GArg::Ty(e)) => self.s.unify(e, xe).is_ok(),
                 _ => false,
@@ -757,6 +760,12 @@ impl<'p> Checker<'p> {
         t
     }
 
+    /// Whether nothing is known of the type expected: none, or a variable nothing has bound yet
+    /// (a closure's result).
+    fn unknown(&self, expected: Option<&Ty>) -> bool {
+        expected.is_none_or(|x| matches!(self.s.resolve(x), Ty::Var(_)))
+    }
+
     fn check(&mut self, e: &Expr, expected: &Ty) -> Ty {
         let t = self.expr(e, Some(expected));
         self.coerce(&t, expected, e.span);
@@ -884,7 +893,7 @@ impl<'p> Checker<'p> {
                 self.check(cond, &Ty::bool());
                 match otherwise {
                     // `if (c) { #Leaf } else { node(…) }`: the tag is built as the other branch's type.
-                    Some(o) if expected.is_none() && tag_built_block(then) && !tag_built(o) => {
+                    Some(o) if self.unknown(expected) && tag_built_block(then) && !tag_built(o) => {
                         let b = self.expr(o, None);
                         let anchor = if self.s.resolve(&b).is_never() { None } else { Some(b.clone()) };
                         let a = self.block(then, anchor.as_ref());
@@ -1214,13 +1223,15 @@ impl<'p> Checker<'p> {
                 Some(Ty::Borrow(m, _)) => Some(m),
                 _ => None,
             },
+            // A place is changeable only if every borrow on the way to it is `mut`: a `mut`
+            // field reached through a `readonly` borrow is `readonly`.
             ExprKind::Field { target, .. } => match ty_of(target) {
-                Some(Ty::Borrow(m, _)) => Some(m),
+                Some(Ty::Borrow(m, _)) => Some(m && self.unmovable_place(target).unwrap_or(true)),
                 _ => self.unmovable_place(target),
             },
             ExprKind::Index { target, .. } => match ty_of(target) {
                 Some(Ty::Tuple(_)) => self.unmovable_place(target),
-                Some(Ty::Borrow(m, _)) => Some(m),
+                Some(Ty::Borrow(m, _)) => Some(m && self.unmovable_place(target).unwrap_or(true)),
                 Some(Ty::Slice(_)) => Some(false),
                 _ => Some(self.unmovable_place(target).unwrap_or(false)),
             },
@@ -2140,8 +2151,9 @@ impl<'p> Checker<'p> {
         // With nothing expected, an arm is checked against what the first arm gave, as TypeScript
         // does: `#None => alloc(#Error)` after `#Some(t) => t` builds a `Type` (§3.6). Arms whose
         // value is a bare tag go last, so that they are built as another arm's type.
+        let open = self.unknown(expected);
         let mut order: Vec<usize> = (0..arms.len()).collect();
-        if expected.is_none() {
+        if open {
             order.sort_by_key(|&i| tag_built(&arms[i].body));
         }
         let mut types: Vec<Option<(Ty, Span)>> = vec![None; arms.len()];
@@ -2157,7 +2169,9 @@ impl<'p> Checker<'p> {
             if let Some(g) = &arm.guard {
                 self.check(g, &Ty::bool());
             }
-            let t = self.expr(&arm.body, expected.or(first.as_ref()));
+            // An expectation that is only a variable is anchored by the first arm, as none is.
+            let want = if open { first.as_ref().or(expected) } else { expected };
+            let t = self.expr(&arm.body, want);
             if first.is_none() && !self.s.resolve(&t).is_never() {
                 first = Some(t.clone());
             }

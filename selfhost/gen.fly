@@ -958,7 +958,9 @@ impl Gen {
     self.inGenerator = generator;
     self.line(`function${if (generator) { "*" } else { "" }} ${js}(${params.join(", ")}) {`);
     self.indent += 1;
-    self.blockInto(body, #Return);
+    // The body's top level is the parameters' scope in JavaScript: a `let` shadowing a parameter
+    // is renamed there.
+    self.stmtsFrom(body, 0, #Return);
     self.indent -= 1;
     self.line("}");
     self.inGenerator = false;

@@ -1210,9 +1210,10 @@ pub fn binary(op: &str, a: &Value, b: &Value) -> R {
     use Value::*;
     Ok(match (a, b) {
         (Int(x), Int(y)) => match op {
-            "+" => Int(x + y),
-            "-" => Int(x - y),
-            "*" => Int(x * y),
+            // Overflowing `i128`, the widest type, is overflowing whatever the static type is.
+            "+" => Int(x.checked_add(*y).ok_or_else(|| panic("arithmetic overflow"))?),
+            "-" => Int(x.checked_sub(*y).ok_or_else(|| panic("arithmetic overflow"))?),
+            "*" => Int(x.checked_mul(*y).ok_or_else(|| panic("arithmetic overflow"))?),
             "/" => {
                 if *y == 0 {
                     return Err(panic("division by zero"));
@@ -1283,6 +1284,7 @@ pub fn int_range(p: Prim) -> Option<(i128, i128)> {
         Prim::I16 => (i16::MIN as i128, i16::MAX as i128),
         Prim::I32 => (i32::MIN as i128, i32::MAX as i128),
         Prim::I64 | Prim::Isize => (i64::MIN as i128, i64::MAX as i128),
+        Prim::I128 => (i128::MIN, i128::MAX),
         Prim::U8 => (0, u8::MAX as i128),
         Prim::U16 => (0, u16::MAX as i128),
         Prim::U32 => (0, u32::MAX as i128),

@@ -21,7 +21,7 @@ export function parseModule(src: str): Module uses Fail<Diagnostic> { parse(src,
 export function parseDeclarations(src: str): Module uses Fail<Diagnostic> { parse(src, true) }
 
 function parse(src: str, declarations: bool): Module uses Fail<Diagnostic> {
-  let p = Parser { src, toks: lex(src), pos: 0, declarations, nextId: 0 };
+  let p = Parser { src, toks: lex(src), pos: 0, declarations, nextId: 0, guardArrow: #None };
   let items: Vec<Item> = Vec.new();
   while (!p.atEof()) { items.push(p.item()); }
   { items: items }
@@ -34,7 +34,10 @@ function isUpper(s: str): bool {
   b.len() > 0 && b[0] >= b'A' && b[0] <= b'Z'
 }
 
-view struct Parser { src: str; toks: Vec<Token>; pos: usize; declarations: bool; nextId: usize }
+// `guardArrow`: while a `match` guard is parsed, the token index of its arm's `=>`: a
+// parenthesized expression closing just before it ends the guard, rather than being a lambda's
+// parameters.
+view struct Parser { src: str; toks: Vec<Token>; pos: usize; declarations: bool; nextId: usize; guardArrow: Option<usize> }
 
 impl Parser {
   // ---- nodes ----
@@ -999,7 +1002,31 @@ impl Parser {
   }
 
   function isLambda(self: readonly Self): bool {
-    match (self.closeFrom(self.pos)) { #Some(c) => Parser.isPunct(self.tokIndex(c + 1), "=>"), #None => false }
+    match (self.closeFrom(self.pos)) {
+      #Some(c) => Parser.isPunct(self.tokIndex(c + 1), "=>") && self.guardArrow != #Some(c + 1),
+      #None => false,
+    }
+  }
+
+  // The `=>` that ends a guard starting at the current token: the first at bracket depth 0.
+  function arrowAhead(self: readonly Self): Option<usize> {
+    let depth: usize = 0;
+    let i = self.pos;
+    while (i < self.toks.len()) {
+      match (self.toks[i].tok) {
+        #Punct(p) => {
+          if (p == "(" || p == "[" || p == "{") { depth += 1; }
+          else if (p == ")" || p == "]" || p == "}") {
+            if (depth == 0) { return #None; }
+            depth -= 1;
+          } else if (p == "=>" && depth == 0) { return #Some(i); }
+        }
+        #Eof => return #None,
+        _ => {}
+      }
+      i += 1;
+    }
+    #None
   }
 
   function primary(self: mut Self): Expr uses Fail<Diagnostic> {
@@ -1183,7 +1210,12 @@ impl Parser {
         continue;
       }
       const pat = self.pattern();
-      const guard: Option<Expr> = if (self.eatKw("if")) { #Some(self.expr()) } else { #None };
+      const guard: Option<Expr> = if (self.eatKw("if")) {
+        const saved = replace(mut self.guardArrow, self.arrowAhead());
+        const g = try { self.expr() } catch (d) { self.guardArrow = saved; throw d };
+        self.guardArrow = saved;
+        #Some(g)
+      } else { #None };
       self.expect("=>");
       if (self.at("{")) {
         const b = self.block();
@@ -1337,7 +1369,7 @@ impl Parser {
       match (part) {
         #Lit(s) => out.push(#Lit(s.clone())),
         #Expr(span) => {
-          let sub = Parser { src: self.src, toks: lexRange(self.src, span.start, span.end), pos: 0, declarations: false, nextId: self.nextId };
+          let sub = Parser { src: self.src, toks: lexRange(self.src, span.start, span.end), pos: 0, declarations: false, nextId: self.nextId, guardArrow: #None };
           const e = sub.expr();
           sub.expectEof();
           self.nextId = sub.nextId;

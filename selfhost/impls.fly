@@ -18,6 +18,11 @@ function bindsKey(b: readonly Binds): String {
   out
 }
 
+// The bounds a type parameter is assumed to satisfy.
+function assumedOf(assumed: readonly HashMap<u32, Vec<Ty>>, id: u32): Vec<Ty> {
+  match (assumed.get(id)) { #Some(b) => b.clone(), #None => Vec.new() }
+}
+
 function bindsMap(b: readonly Binds): SubstMap {
   let m: SubstMap = HashMap.new();
   for (const [k, v] of b.entries()) { m.insert(k, v.clone()); }
@@ -182,7 +187,7 @@ impl Program {
         if (const #Ty(t) = args[k]) {
           for (const b of self.impls[i].params[k].bounds) {
             const bound = substParams(b, self.impls[i].params, args);
-            if (!self.satisfiesDepth(t, bound, (_) => Vec.new(), depth + 1)) { ok = false; }
+            if (!self.satisfiesDepth(t, bound, HashMap.new(), depth + 1)) { ok = false; }
           }
         }
       }
@@ -190,7 +195,7 @@ impl Program {
       const supers = self.ifaceClosure(iface);
       let supersOk = true;
       for (const k of 1..supers.len()) {
-        if (!self.satisfiesDepth(ty, #Named(supers[k], Vec.new()), (_) => Vec.new(), depth + 1)) { supersOk = false; }
+        if (!self.satisfiesDepth(ty, #Named(supers[k], Vec.new()), HashMap.new(), depth + 1)) { supersOk = false; }
       }
       // The first impl whose head matches is the one: if its bounds fail, the type does not
       // implement the interface, rather than falling back to a derivation (§7.3).
@@ -200,16 +205,16 @@ impl Program {
   }
 
   // Whether `ty` satisfies `bound`, where `assumed` gives the bounds of type parameters in scope.
-  export function satisfies(self: readonly Self, ty: readonly Ty, bound: readonly Ty, assumed: (id: u32) => Vec<Ty>): bool {
+  export function satisfies(self: readonly Self, ty: readonly Ty, bound: readonly Ty, assumed: readonly HashMap<u32, Vec<Ty>>): bool {
     self.satisfiesDepth(ty, bound, assumed, 0)
   }
 
-  function satisfiesDepth(self: readonly Self, ty: readonly Ty, bound: readonly Ty, assumed: (id: u32) => Vec<Ty>, depth: usize): bool {
+  function satisfiesDepth(self: readonly Self, ty: readonly Ty, bound: readonly Ty, assumed: readonly HashMap<u32, Vec<Ty>>, depth: usize): bool {
     const d = match (bound) { #Named(d, _) => d, _ => return true };
     const send = self.knownDef("Send");
     let sendParams: Vec<u32> = Vec.new();
     if (const #Param(s) = ty) {
-      const bySend = assumed(s.id).iter().some((b) => match (b) {
+      const bySend = assumedOf(assumed, s.id).iter().some((b) => match (b) {
         #Named(x, _) => self.ifaceClosure(x).iter().some((i) => #Some(i) == send),
         _ => false,
       });
@@ -227,7 +232,7 @@ impl Program {
     }
     if (!match (self.defs[d].kind) { #Interface { methods: _ } => true, _ => false }) { return true; }
     match (stripBorrows(ty)) {
-      #Param(s) => assumed(s.id).iter().some((b) => match (b) { #Named(x, _) => self.ifaceClosure(x).includes(d), _ => false }),
+      #Param(s) => assumedOf(assumed, s.id).iter().some((b) => match (b) { #Named(x, _) => self.ifaceClosure(x).includes(d), _ => false }),
       #Var(_) | #Error => true,
       t => self.resolveDepth(d, t, depth).isSome(),
     }

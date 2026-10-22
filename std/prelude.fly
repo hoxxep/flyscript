@@ -336,6 +336,7 @@ export effect Io {
 impl i8 { export function wrappingAdd(self: Self, b: Self): Self; export function wrappingSub(self: Self, b: Self): Self; export function wrappingMul(self: Self, b: Self): Self; }
 impl i16 { export function wrappingAdd(self: Self, b: Self): Self; export function wrappingSub(self: Self, b: Self): Self; export function wrappingMul(self: Self, b: Self): Self; }
 impl i32 { export function wrappingAdd(self: Self, b: Self): Self; export function wrappingSub(self: Self, b: Self): Self; export function wrappingMul(self: Self, b: Self): Self; }
+impl i128 { export function wrappingAdd(self: Self, b: Self): Self; export function wrappingSub(self: Self, b: Self): Self; export function wrappingMul(self: Self, b: Self): Self; }
 impl i64 { export function wrappingAdd(self: Self, b: Self): Self; export function wrappingSub(self: Self, b: Self): Self; export function wrappingMul(self: Self, b: Self): Self; }
 impl isize { export function wrappingAdd(self: Self, b: Self): Self; export function wrappingSub(self: Self, b: Self): Self; export function wrappingMul(self: Self, b: Self): Self; }
 impl u8 { export function wrappingAdd(self: Self, b: Self): Self; export function wrappingSub(self: Self, b: Self): Self; export function wrappingMul(self: Self, b: Self): Self; }
@@ -520,6 +521,10 @@ impl<T> T[] {
   // Sorts in place by `cmp`, stably: elements `cmp` calls equal keep their order.
   export function sortBy(self: mut Self, cmp: mut (a: readonly T, b: readonly T) => Ordering): void;
   export function reverse(self: mut Self): void;
+  // The element at `i`, if there is one.
+  export function get(self: readonly Self, i: usize): Option<readonly T> from self {
+    if (i < self.len()) { #Some(self[i]) } else { #None }
+  }
   export function first(self: readonly Self): Option<readonly T> from self {
     if (self.len() == 0) { #None } else { #Some(self[0]) }
   }

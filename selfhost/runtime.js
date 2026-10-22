@@ -81,7 +81,7 @@ const $rt = (() => {
     return undefined;
   }
 
-  const INTS = ["i64", "usize", "u8", "i32", "u32", "u64", "i8", "i16", "u16", "isize"];
+  const INTS = ["i64", "usize", "u8", "i32", "u32", "u64", "i8", "i16", "u16", "isize", "i128"];
   function userTypes(v) {
     switch (typeof v) {
       case "string": return ["String", "str"];
@@ -376,7 +376,7 @@ const $rt = (() => {
   }
   const continuation = (s, i) => i < s.length && (s.charCodeAt(i) & 0xc0) === 0x80;
 
-  const WIDTHS = { i8: [8, true], i16: [16, true], i32: [32, true], i64: [64, true], isize: [64, true],
+  const WIDTHS = { i8: [8, true], i16: [16, true], i32: [32, true], i64: [64, true], i128: [128, true], isize: [64, true],
     u8: [8, false], u16: [16, false], u32: [32, false], u64: [64, false], usize: [64, false] };
   function cast(v, ty) {
     if (ty === "f64" || ty === "f32") return Number(v);
@@ -432,6 +432,7 @@ const $rt = (() => {
     drain: (a) => gen(a.splice(0)),
     iter: (a) => gen(a), iterMut: (a) => gen(a),
     *each(a) { yield* a; },
+    get: (a, i) => (Number(i) < a.length ? some(a[Number(i)]) : none()),
     first: (a) => (a.length === 0 ? none() : some(a[0])),
     last: (a) => (a.length === 0 ? none() : some(a[a.length - 1])),
     reverse: (a) => { a.reverse(); },

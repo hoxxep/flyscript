@@ -36,6 +36,9 @@ struct Parser<'a> {
     pos: usize,
     /// Parsing a `.d.fly` file.
     declarations: bool,
+    /// While a `match` guard is parsed, the token index of its arm's `=>`: a parenthesized
+    /// expression closing just before it ends the guard, rather than being a lambda's parameters.
+    guard_arrow: Option<usize>,
 }
 
 /// Binary operators by precedence, lowest first. `as` binds tighter than all of them.
@@ -55,7 +58,7 @@ const ASSIGN: &[&str] = &["=", "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^="];
 
 impl<'a> Parser<'a> {
     fn new(src: &'a str, toks: Vec<Token>) -> Parser<'a> {
-        Parser { src, toks, pos: 0, declarations: false }
+        Parser { src, toks, pos: 0, declarations: false, guard_arrow: None }
     }
 
     // ---- token helpers ----
@@ -1181,7 +1184,29 @@ impl<'a> Parser<'a> {
     }
 
     fn is_lambda(&self) -> bool {
-        self.matching_close().is_some_and(|close| matches!(self.toks[(close + 1).min(self.toks.len() - 1)].tok, Tok::Punct("=>")))
+        self.matching_close().is_some_and(|close| {
+            matches!(self.toks[(close + 1).min(self.toks.len() - 1)].tok, Tok::Punct("=>")) && self.guard_arrow != Some(close + 1)
+        })
+    }
+
+    /// The `=>` that ends a guard starting at the current token: the first at bracket depth 0.
+    fn arrow_ahead(&self) -> Option<usize> {
+        let mut depth = 0usize;
+        for (i, t) in self.toks.iter().enumerate().skip(self.pos) {
+            match &t.tok {
+                Tok::Punct("(" | "[" | "{") => depth += 1,
+                Tok::Punct(")" | "]" | "}") => {
+                    if depth == 0 {
+                        return None;
+                    }
+                    depth -= 1;
+                }
+                Tok::Punct("=>") if depth == 0 => return Some(i),
+                Tok::Eof => return None,
+                _ => {}
+            }
+        }
+        None
     }
 
     fn primary(&mut self) -> PResult<Expr> {
@@ -1414,7 +1439,15 @@ impl<'a> Parser<'a> {
                 continue;
             }
             let pat = self.pattern()?;
-            let guard = if self.eat_kw(Kw::If) { Some(self.expr()?) } else { None };
+            let guard = if self.eat_kw(Kw::If) {
+                let arrow = self.arrow_ahead();
+                let saved = std::mem::replace(&mut self.guard_arrow, arrow);
+                let g = self.expr();
+                self.guard_arrow = saved;
+                Some(g?)
+            } else {
+                None
+            };
             self.expect("=>")?;
             if self.at("{") {
                 let b = self.block()?;

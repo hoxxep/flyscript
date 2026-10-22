@@ -1090,11 +1090,12 @@ impl<'p> Expand<'p> {
         let field = |(k, t): (&String, &Ty)| rec(vec![("name", CV::Str(k.clone())), ("type", CV::Type(t.clone()))]);
         Ok(match t {
             Ty::Prim(p) if p.is_int() => {
-                let signed = matches!(p, Prim::I8 | Prim::I16 | Prim::I32 | Prim::I64 | Prim::Isize);
+                let signed = matches!(p, Prim::I8 | Prim::I16 | Prim::I32 | Prim::I64 | Prim::I128 | Prim::Isize);
                 let bits = match p {
                     Prim::I8 | Prim::U8 => 8,
                     Prim::I16 | Prim::U16 => 16,
                     Prim::I32 | Prim::U32 => 32,
+                    Prim::I128 => 128,
                     _ => 64,
                 };
                 tag("Int", rec(vec![("signed", CV::Bool(signed)), ("bits", CV::Int(bits))]))

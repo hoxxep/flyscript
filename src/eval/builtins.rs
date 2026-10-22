@@ -514,8 +514,8 @@ impl Interp {
                 let (ty, op) = k.split_once('.').expect("a method key");
                 let (x, y) = (a(0).as_int(), a(1).as_int());
                 let r = match op {
-                    "wrappingAdd" => x + y,
-                    "wrappingSub" => x - y,
+                    "wrappingAdd" => x.wrapping_add(y),
+                    "wrappingSub" => x.wrapping_sub(y),
                     _ => x.wrapping_mul(y),
                 };
                 Ok(Value::Int(wrap_to(ty, r)))
@@ -915,6 +915,7 @@ fn wrap_to(ty: &str, i: i128) -> i128 {
         "i8" => i as i8 as i128,
         "i16" => i as i16 as i128,
         "i32" => i as i32 as i128,
+        "i128" => i,
         _ => i as i64 as i128,
     }
 }

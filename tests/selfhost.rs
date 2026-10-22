@@ -36,6 +36,52 @@ fn fixpoint() {
     assert!(status.success());
     assert!(std::fs::read(&stage2).unwrap() == first, "stage 2 differs from stage 1");
     elaborates_as_flyc_does(root, &stage1, &out);
+    checks_as_flyc_does(root, &stage1, &out);
+}
+
+/// The programs a quarter of the corpus samples, for time.
+fn sample(root: &Path) -> Vec<PathBuf> {
+    let mut programs: Vec<PathBuf> = Vec::new();
+    for dir in ["tests/run", "tests/accept", "tests/reject", "examples"] {
+        let mut files: Vec<PathBuf> = std::fs::read_dir(root.join(dir)).unwrap().map(|e| e.unwrap().path()).collect();
+        files.sort();
+        for f in files {
+            let f = if f.is_dir() { f.join("main.fly") } else { f };
+            if f.extension().is_some_and(|e| e == "fly") && f.exists() {
+                programs.push(f);
+            }
+        }
+    }
+    programs.into_iter().step_by(4).collect()
+}
+
+/// The self-hosted checker reports what the Rust prototype's type and effect checker reports:
+/// `flyc types` and selfhost/typecheck.fly print the same diagnostics.
+fn checks_as_flyc_does(root: &Path, compiler: &Path, out: &Path) {
+    let typecheck = out.join("typecheck.js");
+    let status = Command::new("node")
+        .arg(compiler)
+        .arg(root.join("selfhost/typecheck.fly"))
+        .arg(&typecheck)
+        .arg(root.join("selfhost/runtime.js"))
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let mut differ = Vec::new();
+    for f in sample(root) {
+        let mut p = flyscript::check::env::Program::load(std::slice::from_ref(&f));
+        let mut fid = 0;
+        while fid < p.fns.len() {
+            flyscript::check::expr::check_fn(&mut p, fid);
+            fid += 1;
+        }
+        let rust: Vec<String> = p.diags.iter().map(|(m, d)| format!("error {m} {}..{}: {}", d.span.start, d.span.end, d.message)).collect();
+        let js = Command::new("node").arg(&typecheck).arg(&f).arg(root.join("std")).output().unwrap();
+        if String::from_utf8_lossy(&js.stdout).trim_end() != rust.join("\n") {
+            differ.push(f.display().to_string());
+        }
+    }
+    assert!(differ.is_empty(), "checked differently:\n{}", differ.join("\n"));
 }
 
 /// The self-hosted checker elaborates programs' declarations as the Rust prototype does:
@@ -51,19 +97,8 @@ fn elaborates_as_flyc_does(root: &Path, compiler: &Path, out: &Path) {
         .status()
         .unwrap();
     assert!(status.success());
-    let mut programs: Vec<PathBuf> = Vec::new();
-    for dir in ["tests/run", "tests/accept", "tests/reject", "examples"] {
-        let mut files: Vec<PathBuf> = std::fs::read_dir(root.join(dir)).unwrap().map(|e| e.unwrap().path()).collect();
-        files.sort();
-        for f in files {
-            let f = if f.is_dir() { f.join("main.fly") } else { f };
-            if f.extension().is_some_and(|e| e == "fly") && f.exists() {
-                programs.push(f);
-            }
-        }
-    }
     let mut differ = Vec::new();
-    for f in programs.into_iter().step_by(4) {
+    for f in sample(root) {
         let rust = flyscript::check::env::describe(&flyscript::check::env::Program::load(std::slice::from_ref(&f))).join("\n");
         let js = Command::new("node").arg(&schemes).arg(&f).arg(root.join("std")).output().unwrap();
         if String::from_utf8_lossy(&js.stdout).trim_end() != rust {

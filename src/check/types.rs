@@ -16,6 +16,7 @@ pub enum Prim {
     I16,
     I32,
     I64,
+    I128,
     Isize,
     U8,
     U16,
@@ -38,6 +39,7 @@ impl Prim {
             "i16" => Prim::I16,
             "i32" => Prim::I32,
             "i64" => Prim::I64,
+            "i128" => Prim::I128,
             "isize" => Prim::Isize,
             "u8" => Prim::U8,
             "u16" => Prim::U16,
@@ -61,6 +63,7 @@ impl Prim {
             Prim::I16 => "i16",
             Prim::I32 => "i32",
             Prim::I64 => "i64",
+            Prim::I128 => "i128",
             Prim::Isize => "isize",
             Prim::U8 => "u8",
             Prim::U16 => "u16",
@@ -80,7 +83,7 @@ impl Prim {
     pub fn is_int(self) -> bool {
         matches!(
             self,
-            Prim::I8 | Prim::I16 | Prim::I32 | Prim::I64 | Prim::Isize | Prim::U8 | Prim::U16 | Prim::U32 | Prim::U64 | Prim::Usize
+            Prim::I8 | Prim::I16 | Prim::I32 | Prim::I64 | Prim::I128 | Prim::Isize | Prim::U8 | Prim::U16 | Prim::U32 | Prim::U64 | Prim::Usize
         )
     }
 
