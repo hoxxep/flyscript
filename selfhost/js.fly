@@ -3,7 +3,8 @@
 // where code is made: which method a call reaches, how wide an integer is, how an argument is
 // passed. The output runs on `runtime.js`.
 //
-// Values: integers are BigInts, floats numbers, strings JavaScript strings of one byte per
+// Values: integers of up to 32 bits, and `usize` and `isize`, are numbers — 53-bit integers on
+// this target — and wider ones BigInts; floats are numbers, strings JavaScript strings of one byte per
 // character, `void` is `undefined`. Structs and records are objects; tuples, arrays and `Vec`s are
 // arrays; a tag is `{ $tag, $ }`, its payload in `$`: the value of a payload of one, an array of
 // several, an object of a record. `Box`, `Arc` and region references are what they hold. A value
@@ -327,6 +328,19 @@ impl Js {
     }
   }
 
+  // Whether integers of the type are JavaScript numbers rather than BigInts.
+  function numeric(t: readonly Ty): bool {
+    match (Js.intPrim(t)) {
+      #Some(p) => match (p) { #I64 | #U64 | #I128 => false, _ => true },
+      #None => false,
+    }
+  }
+
+  // An integer literal of the type.
+  function intLit(t: readonly Ty, n: str): String {
+    if (Js.floatTy(t) || Js.numeric(t)) { n.toString() } else { `${n}n` }
+  }
+
   function floatTy(t: readonly Ty): bool {
     match (t) { #Prim(p) => isFloat(p), #Borrow(_, inner) => Js.floatTy(inner), _ => false }
   }
@@ -579,7 +593,7 @@ impl Js {
         if (const #Range { lo, hi } = index.kind) {
           const a = self.obj(target);
           const sa = if (Js.simpleOpt(lo) && Js.simpleOpt(hi)) { a } else { self.save(a) };
-          const l = match (lo) { #Some(x) => self.value(x), #None => "0n".toString() };
+          const l = match (lo) { #Some(x) => self.value(x), #None => "0".toString() };
           const h = match (hi) { #Some(x) => self.value(x), #None => "undefined".toString() };
           return `$rt.rangeRef(${sa}, ${l}, ${h})`;
         }
@@ -600,10 +614,10 @@ impl Js {
   // The JavaScript for an expression, after emitting what it needs done first.
   function ex(self: mut Self, e: readonly Expr): String uses Fail<Diagnostic> {
     match (e.kind) {
-      #Int(n) => if (Js.floatTy(self.exprTy(e.id))) { n.clone() } else { `${n}n` },
+      #Int(n) => Js.intLit(self.exprTy(e.id), n.asStr()),
       #Float(n) => n.clone(),
       #Str(s) => quote(s),
-      #Byte(b) => `${b}n`,
+      #Byte(b) => `${b}`,
       #Bool(b) => if (b) { "true".toString() } else { "false".toString() },
       #Template(parts) => {
         let out = "(\"\"".toString();
@@ -631,7 +645,7 @@ impl Js {
         #Range { lo, hi } => {
           const t = self.obj(target);
           const st = if (Js.simpleOpt(lo) && Js.simpleOpt(hi)) { t } else { self.save(t) };
-          const l = match (lo) { #Some(x) => self.value(x), #None => "0n".toString() };
+          const l = match (lo) { #Some(x) => self.value(x), #None => "0".toString() };
           const h = match (hi) { #Some(x) => self.value(x), #None => "undefined".toString() };
           `$rt.slice(${st}, ${l}, ${h})`
         }
@@ -770,10 +784,10 @@ impl Js {
   // A constant's value, from its declared type: constants are literals and what is built of them.
   function constValue(self: mut Self, e: readonly Expr, ty: readonly Ty): String uses Fail<Diagnostic> {
     match (e.kind) {
-      #Int(n) => if (Js.floatTy(ty)) { n.clone() } else { `${n}n` },
+      #Int(n) => Js.intLit(ty, n.asStr()),
       #Float(n) => n.clone(),
       #Str(s) => quote(s),
-      #Byte(b) => `${b}n`,
+      #Byte(b) => `${b}`,
       #Bool(b) => if (b) { "true".toString() } else { "false".toString() },
       #Unary { op, operand } => {
         const v = self.constValue(operand, ty);
@@ -782,7 +796,7 @@ impl Js {
       #Binary { op, lhs, rhs } => {
         const a = self.constValue(lhs, ty);
         const b = self.constValue(rhs, ty);
-        `(${a} ${op} ${b})`
+        self.arith(op.asStr(), a, b, ty, ty)
       }
       #List(items) => {
         const elem: Ty = match (stripBorrow(ty)) {
@@ -863,6 +877,21 @@ impl Js {
     match (Js.intPrim(t)) {
       #Some(p) => {
         const name = primName(p);
+        if (Js.numeric(t)) {
+          return match (op) {
+            "/" => `$rt.ndiv(${x}, ${y}, $rt.${name})`,
+            "%" => `$rt.nrem(${x}, ${y})`,
+            // Bitwise operators work on 32 bits: wider numbers go through BigInts.
+            "&" | "|" | "^" => match (p) {
+              #U32 => `((${x} ${op} ${y}) >>> 0)`,
+              #Usize | #Isize => `$rt.bits(${x}, ${y}, ${quote(op)})`,
+              _ => `(${x} ${op} ${y})`,
+            },
+            "<<" => `$rt.${name}(${x} * 2 ** ${y})`,
+            ">>" => `Math.floor(${x} / 2 ** ${y})`,
+            _ => `$rt.${name}(${x} ${op} ${y})`,
+          };
+        }
         match (op) {
           "/" => `$rt.div(${x}, ${y}, $rt.${name})`,
           "%" => `$rt.rem(${x}, ${y})`,
@@ -881,7 +910,13 @@ impl Js {
   function cast(self: readonly Self, v: String, from: readonly Ty, to: readonly Ty): String {
     const fromInt = Js.intPrim(from).isSome();
     match (Js.intPrim(to)) {
-      #Some(p) => if (fromInt) { `$rt.wrap_${primName(p)}(${v})` } else if (Js.floatTy(from)) { `$rt.wrap_${primName(p)}($rt.truncFloat(${v}))` } else { `$rt.wrap_${primName(p)}($rt.toInt(${v}))` },
+      #Some(p) => {
+        // To the target's representation first, then to its width.
+        const conv = if (Js.floatTy(from)) {
+          if (Js.numeric(to)) { "$rt.truncNum" } else { "$rt.truncFloat" }
+        } else if (Js.numeric(to)) { "$rt.toNum" } else { "$rt.toInt" };
+        `$rt.wrap_${primName(p)}(${conv}(${v}))`
+      }
       #None => if (Js.floatTy(to) && fromInt) { `Number(${v})` } else { v },
     }
   }
@@ -1320,8 +1355,8 @@ impl Js {
     match (p.kind) {
       #Wild | #Bind(_) => "true".toString(),
       #Lit(e) => match (e.kind) {
-        #Int(n) => if (Js.floatTy(self.exprTy(e.id))) { `${subj} === ${n}` } else { `${subj} === ${n}n` },
-        #Byte(b) => `${subj} === ${b}n`,
+        #Int(n) => `${subj} === ${Js.intLit(self.exprTy(e.id), n.asStr())}`,
+        #Byte(b) => `${subj} === ${b}`,
         #Bool(b) => `${subj} === ${b}`,
         #Str(s) => `${subj} === ${quote(s)}`,
         _ => {
@@ -2460,7 +2495,7 @@ impl Js {
   function startArgs(self: readonly Self, fid: usize): Vec<String> {
     let out: Vec<String> = Vec.new();
     for (const [i, [_, t]] of self.p.fns[fid].scheme.params.iter().enumerate()) {
-      out.push(if (Js.intPrim(t).isSome()) { `$rt.argInt(${i})` } else { `$rt.argStr(${i})` });
+      out.push(if (Js.numeric(t)) { `$rt.argNum(${i})` } else if (Js.intPrim(t).isSome()) { `$rt.argInt(${i})` } else { `$rt.argStr(${i})` });
     }
     out
   }

@@ -16,7 +16,7 @@ import { argTypes } from "./traits";
 import { HashMap, HashSet } from "std/collections";
 
 // An expression id no table records: what `comptime` expansion and the parser never hand out.
-const NO_ID: usize = 1 << 62;
+const NO_ID: usize = 1 << 52;
 
 enum Use { #Move, #Read, #Mut }
 impl Clone for Use;
@@ -275,7 +275,7 @@ export function checkOwnership(p: mut Program, fid: usize): void {
 }
 
 // Parameters' declaration sites: above any position in a source, counting down.
-const PARAM_SITES: usize = 1 << 61;
+const PARAM_SITES: usize = 1 << 51;
 
 impl Own {
   function err(self: mut Self, span: Span, msg: str): void {

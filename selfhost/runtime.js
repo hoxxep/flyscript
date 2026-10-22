@@ -2,7 +2,8 @@
 // The runtime of Flyscript compiled to JavaScript: what compiled code calls that the standard
 // library declares without a body (`$b`), and the operations code generation leaves to it (`$rt`).
 //
-// Values: integers are BigInts and floats numbers; a string holds one byte per character, so
+// Values: integers of up to 32 bits, and `usize` and `isize`, are numbers (53-bit integers on this
+// target), wider ones BigInts; floats are numbers; a string holds one byte per character, so
 // that lengths and offsets are the byte counts Flyscript defines; `void` is `undefined`. Structs
 // and records are objects, tuples and lists arrays, a tag `{ $tag, $ }`. A value of type `mut T`
 // is a reference: an object whose `v` reads and writes the place lent. A generator yields the
@@ -154,7 +155,7 @@ const { $rt, $b } = (() => {
   function items(v) {
     if (Array.isArray(v)) return v;
     if (v instanceof Bytes) return v.items();
-    if (typeof v === "string") return Array.from(v, (c) => BigInt(c.charCodeAt(0)));
+    if (typeof v === "string") return Array.from(v, (c) => c.charCodeAt(0));
     panic(`cannot iterate over ${show(v)}`);
   }
 
@@ -164,32 +165,46 @@ const { $rt, $b } = (() => {
   class Bytes {
     constructor(s) { this.s = s; }
     get length() { return this.s.length; }
-    items() { return Array.from(this.s, (c) => BigInt(c.charCodeAt(0))); }
+    items() { return Array.from(this.s, (c) => c.charCodeAt(0)); }
   }
 
   // ---- integers ----
 
-  const BOUNDS = {
-    i8: [-(1n << 7n), (1n << 7n) - 1n], i16: [-(1n << 15n), (1n << 15n) - 1n], i32: [-(1n << 31n), (1n << 31n) - 1n],
-    i64: [-(1n << 63n), (1n << 63n) - 1n], isize: [-(1n << 63n), (1n << 63n) - 1n], i128: [-(1n << 127n), (1n << 127n) - 1n],
-    u8: [0n, 255n], u16: [0n, 65535n], u32: [0n, (1n << 32n) - 1n], u64: [0n, (1n << 64n) - 1n], usize: [0n, (1n << 64n) - 1n],
+  // Integers of up to 32 bits, and `usize` and `isize`, are numbers: this target's `usize` is
+  // the 53 bits a number holds exactly. Wider ones are BigInts.
+  const SAFE = Number.MAX_SAFE_INTEGER;
+  const NUMBERS = {
+    i8: [-128, 127], i16: [-32768, 32767], i32: [-(2 ** 31), 2 ** 31 - 1], isize: [-SAFE, SAFE],
+    u8: [0, 255], u16: [0, 65535], u32: [0, 2 ** 32 - 1], usize: [0, SAFE],
   };
-  const WIDTHS = { i8: [8, true], i16: [16, true], i32: [32, true], i64: [64, true], isize: [64, true], i128: [128, true],
-    u8: [8, false], u16: [16, false], u32: [32, false], u64: [64, false], usize: [64, false] };
+  const BIGINTS = {
+    i64: [-(1n << 63n), (1n << 63n) - 1n], i128: [-(1n << 127n), (1n << 127n) - 1n], u64: [0n, (1n << 64n) - 1n],
+  };
   const checks = {}, wraps = {};
-  for (const name of Object.keys(BOUNDS)) {
-    const [lo, hi] = BOUNDS[name];
-    const [w, signed] = WIDTHS[name];
+  for (const [name, [lo, hi]] of Object.entries(NUMBERS)) {
+    checks[name] = (x) => {
+      if (x < lo || x > hi) panic(`arithmetic overflow: ${x} does not fit in \`${name}\``);
+      return x;
+    };
+  }
+  for (const [name, [lo, hi]] of Object.entries(BIGINTS)) {
     // Overflowing `i128`, the widest type, is overflowing whatever the static type is.
     checks[name] = (x) => {
       if (x < lo || x > hi) {
-        if (x < BOUNDS.i128[0] || x > BOUNDS.i128[1]) panic("arithmetic overflow");
+        if (x < BIGINTS.i128[0] || x > BIGINTS.i128[1]) panic("arithmetic overflow");
         panic(`arithmetic overflow: ${x} does not fit in \`${name}\``);
       }
       return x;
     };
-    wraps["wrap_" + name] = signed ? (x) => BigInt.asIntN(w, x) : (x) => BigInt.asUintN(w, x);
   }
+  // A cast keeps the low bits, as the interpreter's does.
+  Object.assign(wraps, {
+    wrap_i8: (x) => (x << 24) >> 24, wrap_i16: (x) => (x << 16) >> 16, wrap_i32: (x) => x | 0,
+    wrap_u8: (x) => x & 255, wrap_u16: (x) => x & 65535, wrap_u32: (x) => x >>> 0,
+    wrap_isize: (x) => (Math.abs(x) <= SAFE ? x : Number(BigInt.asIntN(64, BigInt(x)))),
+    wrap_usize: (x) => (x >= 0 && x <= SAFE ? x : Number(BigInt.asUintN(64, BigInt(x)))),
+    wrap_i64: (x) => BigInt.asIntN(64, x), wrap_u64: (x) => BigInt.asUintN(64, x), wrap_i128: (x) => BigInt.asIntN(128, x),
+  });
   function div(x, y, check) {
     if (y === 0n) panic("division by zero");
     return check(x / y);
@@ -198,14 +213,33 @@ const { $rt, $b } = (() => {
     if (y === 0n) panic("division by zero");
     return x % y;
   }
+  function ndiv(x, y, check) {
+    if (y === 0) panic("division by zero");
+    return check(Math.trunc(x / y));
+  }
+  function nrem(x, y) {
+    if (y === 0) panic("division by zero");
+    return x % y;
+  }
+  // `&`, `|` and `^` on `usize` and `isize`, which JavaScript's operators would cut to 32 bits.
+  function bits(x, y, op) {
+    const a = BigInt(x), b = BigInt(y);
+    return Number(op === "&" ? a & b : op === "|" ? a | b : a ^ b);
+  }
   function fmod(x, y) { return x % y; }
   function truncFloat(f) {
     if (Number.isNaN(f)) return 0n;
-    if (f >= 1.7e38) return BOUNDS.i128[1];
-    if (f <= -1.7e38) return BOUNDS.i128[0];
+    if (f >= 1.7e38) return BIGINTS.i128[1];
+    if (f <= -1.7e38) return BIGINTS.i128[0];
     return BigInt(Math.trunc(f));
   }
-  const toInt = (v) => (typeof v === "boolean" ? (v ? 1n : 0n) : v);
+  function truncNum(f) {
+    if (Number.isNaN(f)) return 0;
+    return Math.trunc(f);
+  }
+  // An integer, a bool or another width, as a BigInt or a number.
+  const toInt = (v) => (typeof v === "boolean" ? (v ? 1n : 0n) : typeof v === "number" ? BigInt(v) : v);
+  const toNum = (v) => (typeof v === "boolean" ? (v ? 1 : 0) : typeof v === "bigint" ? Number(BigInt.asIntN(64, v)) : v);
 
   // ---- lists ----
 
@@ -216,8 +250,8 @@ const { $rt, $b } = (() => {
   }
   function idx(a, i) {
     const n = at(a, i);
-    if (a instanceof Bytes) return BigInt(a.s.charCodeAt(n));
-    if (typeof a === "string") return BigInt(a.charCodeAt(n));
+    if (a instanceof Bytes) return a.s.charCodeAt(n);
+    if (typeof a === "string") return a.charCodeAt(n);
     return a[n];
   }
   const continuation = (s, i) => i < s.length && (s.charCodeAt(i) & 0xc0) === 0x80;
@@ -263,7 +297,8 @@ const { $rt, $b } = (() => {
     switch (typeof v) {
       case "string": return v;
       case "bigint": case "boolean": return String(v);
-      case "number": return showFloat(v);
+      // A number is an integer of up to 32 bits, or a float; one with no fraction shows as an integer.
+      case "number": return Number.isInteger(v) ? String(v) : showFloat(v);
       case "undefined": return "void";
       case "function": return "<function>";
     }
@@ -514,7 +549,7 @@ const { $rt, $b } = (() => {
     alloc: (v) => v,
     allocAll: (vs) => vs.slice(),
     fmt: (s) => s,
-    copyUtf8: (bytes) => (bytes instanceof Bytes ? bytes.s : String.fromCharCode(...bytes.map(Number))),
+    copyUtf8: (bytes) => (bytes instanceof Bytes ? bytes.s : String.fromCharCode(...bytes)),
     repeat: (v, n) => Array.from({ length: n }, () => copy(v)),
     generate: (producer) => new Gen(producer()),
 
@@ -533,15 +568,15 @@ const { $rt, $b } = (() => {
     },
 
     String_new: () => "",
-    String_len: (s) => BigInt(s.length),
+    String_len: (s) => (s.length),
     String_push(r, s) { r.v = r.v + s; },
     String_asStr: (s) => s,
     String_clone: (s) => s,
-    String_fromUtf8: (bytes) => some(String.fromCharCode(...bytes.map(Number))),
+    String_fromUtf8: (bytes) => some(String.fromCharCode(...bytes)),
     str_slice: (s, i, j) => slice(s, i, j),
-    str_len: (s) => BigInt(s.length),
+    str_len: (s) => (s.length),
     str_toString: (s) => s,
-    *str_bytes(s) { for (let i = 0; i < s.length; i++) yield new Yielded(BigInt(s.charCodeAt(i))); },
+    *str_bytes(s) { for (let i = 0; i < s.length; i++) yield new Yielded(s.charCodeAt(i)); },
     str_asBytes: (s) => new Bytes(s),
     *str_splitWhitespace(s) { for (const w of s.split(/[ \t\n\r]+/)) if (w !== "") yield new Yielded(w); },
     *str_lines(s) { const ls = s.split("\n"); if (ls[ls.length - 1] === "") ls.pop(); for (const l of ls) yield new Yielded(l.endsWith("\r") ? l.slice(0, -1) : l); },
@@ -550,13 +585,13 @@ const { $rt, $b } = (() => {
     str_includes: (s, p) => s.includes(p),
     str_startsWith: (s, p) => s.startsWith(p),
     str_endsWith: (s, p) => s.endsWith(p),
-    str_indexOf: (s, p) => { const i = s.indexOf(p); return i < 0 ? none() : some(BigInt(i)); },
+    str_indexOf: (s, p) => { const i = s.indexOf(p); return i < 0 ? none() : some(i); },
     // Byte strings hold UTF-8: only ASCII letters change case.
     str_toUpperCase: (s) => s.replace(/[a-z]/g, (c) => c.toUpperCase()),
     str_toLowerCase: (s) => s.replace(/[A-Z]/g, (c) => c.toLowerCase()),
     str_replaceAll: (s, a, b) => s.split(a).join(b),
 
-    slice_len: (a) => BigInt(a.length),
+    slice_len: (a) => (a.length),
     slice_iter: (a) => genOf(items(a)),
     slice_iterMut: (r) => { const a = r.v; return new Gen((function* () { for (let i = 0; i < a.length; i++) yield new Yielded(new FieldRef(a, i)); })()); },
     slice_splitAt(r, i) { const a = r.v; const n = at(a.concat([undefined]), i); return [new RangeRef(a, 0, n), new RangeRef(a, n, a.length)]; },
@@ -582,23 +617,23 @@ const { $rt, $b } = (() => {
     },
     array_split: (s, i) => $b.slice_split(s, i),
     Vec_split: (s, i) => $b.slice_split(s, i),
-    slice_viewAt(s, i) { const [a, lo, hi] = rangeOf(s); if (i < 0n || Number(i) >= hi - lo) panic(`index ${i} out of bounds (length ${hi - lo})`); return new FieldRef(a, lo + Number(i)); },
+    slice_viewAt(s, i) { const [a, lo, hi] = rangeOf(s); if (i < 0 || i >= hi - lo) panic(`index ${i} out of bounds (length ${hi - lo})`); return new FieldRef(a, lo + Number(i)); },
     array_viewAt: (s, i) => $b.slice_viewAt(s, i),
     Vec_viewAt: (s, i) => $b.slice_viewAt(s, i),
     slice_readAt: (a, i) => idx(a, i),
     array_readAt: (a, i) => idx(a, i),
     Vec_readAt: (a, i) => idx(a, i),
-    array_len: (a) => BigInt(a.length),
+    array_len: (a) => (a.length),
 
     Vec_new: () => [],
     Vec_push(r, x) { r.v.push(x); },
     Vec_pop(r) { const a = r.v; return a.length === 0 ? none() : some(a.pop()); },
     Vec_remove(r, i) { const a = r.v; return a.splice(at(a, i), 1)[0]; },
-    Vec_insert(r, i, x) { const a = r.v; if (i < 0n || Number(i) > a.length) panic(`index ${i} out of bounds (length ${a.length})`); a.splice(Number(i), 0, x); },
+    Vec_insert(r, i, x) { const a = r.v; if (i < 0 || i > a.length) panic(`index ${i} out of bounds (length ${a.length})`); a.splice(Number(i), 0, x); },
     Vec_retain(r, keep) { const a = r.v; let j = 0; for (const x of a) if (keep(x)) a[j++] = x; a.length = j; },
     Vec_truncate(r, n) { const a = r.v; if (a.length > Number(n)) a.length = Number(n); },
     Vec_drain(r) { const a = r.v; return genOf(a.splice(0)); },
-    Vec_len: (a) => BigInt(a.length),
+    Vec_len: (a) => (a.length),
     Vec_iter: (a) => genOf(a),
     Vec_iterMut: (r) => $b.slice_iterMut(r),
     *Vec_each(a) { for (const x of a) yield new Yielded(x); },
@@ -625,7 +660,7 @@ const { $rt, $b } = (() => {
       m.delete(key);
       return some(e[1]);
     },
-    HashMap_len: (m) => BigInt(m.m.size),
+    HashMap_len: (m) => m.m.size,
     HashMap_keys: (m) => genOf(Array.from(m.m.values(), (e) => e[0])),
     HashMap_values: (m) => genOf(Array.from(m.m.values(), (e) => e[1])),
     HashMap_valuesMut: (r) => genOf(Array.from(r.v.m.values(), (e) => new FieldRef(e, 1))),
@@ -638,16 +673,16 @@ const { $rt, $b } = (() => {
     Cell_clone: (c) => c,
     RegionList_new: () => [],
     RegionList_push(l, v) { l.push(v); },
-    RegionList_len: (l) => BigInt(l.length),
+    RegionList_len: (l) => (l.length),
     RegionList_clone: (l) => l,
     *RegionList_each(l) { for (const x of l) yield new Yielded(x); },
 
     Gen_next(r) { const s = step(r.v); return s === undefined ? none() : some(s.item); },
     Gen_map: (g, f) => new Gen((function* () { for (let s = step(g); s !== undefined; s = step(g)) yield new Yielded(f(s.item)); })()),
     Gen_filter: (g, keep) => new Gen((function* () { for (let s = step(g); s !== undefined; s = step(g)) if (keep(s.item)) yield s; })()),
-    Gen_take: (g, n) => new Gen((function* () { let i = 0n; if (i >= n) return; for (let s = step(g); s !== undefined; s = step(g)) { yield s; if (++i >= n) return; } })()),
+    Gen_take: (g, n) => new Gen((function* () { let i = 0; if (i >= n) return; for (let s = step(g); s !== undefined; s = step(g)) { yield s; if (++i >= n) return; } })()),
     Gen_zip: (g, h) => new Gen((function* () { for (let s = step(g); s !== undefined; s = step(g)) { const t = step(h); if (t === undefined) return; yield new Yielded([s.item, t.item]); } })()),
-    Gen_enumerate: (g) => new Gen((function* () { let i = 0n; for (let s = step(g); s !== undefined; s = step(g)) yield new Yielded([i++, s.item]); })()),
+    Gen_enumerate: (g) => new Gen((function* () { let i = 0; for (let s = step(g); s !== undefined; s = step(g)) yield new Yielded([i++, s.item]); })()),
     Gen_collect(g) { const out = []; for (let s = step(g); s !== undefined; s = step(g)) out.push(s.item); return out; },
     *Gen_each(g) { yield* g.it; },
     Gen_drop(r) { if (r.v.it.return) r.v.it.return(); },
@@ -721,10 +756,10 @@ const { $rt, $b } = (() => {
     Socket_read(r, buf) {
       if (fault()) throw new Fail({ $tag: "TimedOut" });
       const sock = r.v, cells = buf.v, n = Math.min(cells.length, sock.input.length - sock.pos);
-      for (let i = 0; i < n; i++) cells[i] = BigInt(sock.input.charCodeAt(sock.pos + i));
+      for (let i = 0; i < n; i++) cells[i] = sock.input.charCodeAt(sock.pos + i);
       buf.v = cells;
       sock.pos += n;
-      return BigInt(n);
+      return n;
     },
     Socket_writeStatus(r, code, body) {
       if (fault()) throw new Fail({ $tag: "BrokenPipe" });
@@ -749,9 +784,9 @@ const { $rt, $b } = (() => {
     Io_write(fd, buf) {
       const s = buf instanceof Bytes ? buf.s : String.fromCharCode(...buf.map(Number));
       process.stdout.write(Buffer.from(s, "latin1"));
-      return { $tag: "Ok", $: BigInt(s.length) };
+      return { $tag: "Ok", $: s.length };
     },
-    Io_read: () => ({ $tag: "Ok", $: 0n }),
+    Io_read: () => ({ $tag: "Ok", $: 0 }),
   };
   // The root `Io` operations are scheduling points.
   for (const op of ["Io_now", "Io_sleep", "Io_write", "Io_read"]) {
@@ -797,9 +832,15 @@ const { $rt, $b } = (() => {
     if (k.endsWith("$g") || $b[k + "$g"] !== undefined || f.constructor.name === "GeneratorFunction") continue;
     $b[k + "$g"] = function* (...args) { return f(...args); };
   }
-  for (const t of ["i8", "i16", "i32", "i64", "i128", "isize", "u8", "u16", "u32", "u64", "usize"]) {
-    const [w, signed] = WIDTHS[t];
-    const wrap = signed ? (x) => BigInt.asIntN(w, x) : (x) => BigInt.asUintN(w, x);
+  for (const t of Object.keys(NUMBERS)) {
+    const wrap = wraps["wrap_" + t];
+    $b[t + "_wrappingAdd"] = (a, b) => wrap(a + b);
+    $b[t + "_wrappingSub"] = (a, b) => wrap(a - b);
+    // The product of two 32-bit numbers can exceed 53 bits: multiplied as BigInts.
+    $b[t + "_wrappingMul"] = (a, b) => wrap(Number(BigInt.asIntN(64, BigInt(a) * BigInt(b))));
+  }
+  for (const t of Object.keys(BIGINTS)) {
+    const wrap = wraps["wrap_" + t];
     $b[t + "_wrappingAdd"] = (a, b) => wrap(a + b);
     $b[t + "_wrappingSub"] = (a, b) => wrap(a - b);
     $b[t + "_wrappingMul"] = (a, b) => wrap(a * b);
@@ -810,6 +851,7 @@ const { $rt, $b } = (() => {
   const argv = process.argv.slice(2).map((a) => Buffer.from(a, "utf8").toString("latin1"));
   const argStr = (i) => argv[i];
   function argInt(i) { return /^-?\d+$/.test(argv[i]) ? BigInt(argv[i]) : panic(`argument ${i + 1} is not an integer`); }
+  function argNum(i) { return /^-?\d+$/.test(argv[i]) ? Number(argv[i]) : panic(`argument ${i + 1} is not an integer`); }
 
   // Runs a program's `main`, as `flyc run` does.
   function start(main, suspends, tasks) {
@@ -828,9 +870,9 @@ const { $rt, $b } = (() => {
 
   const $rt = {
     Fail, Panic, Return, YIELD, handle, run, drive, moved, isMoved, sub, unmove, panic, raise, FieldRef, indexRef, rangeRef, yielded, isYield, perform, items,
-    div, rem, fmod, truncFloat, toInt, at, idx, slice, copy, showFloat, shown, show,
+    div, rem, ndiv, nrem, bits, fmod, truncFloat, truncNum, toInt, toNum, at, idx, slice, copy, showFloat, shown, show,
     unmatched: (v) => panic(`no arm matched ${show(v)}`),
-    argStr, argInt, start,
+    argStr, argInt, argNum, start,
     ...checks, ...wraps,
   };
   return { $rt, $b };

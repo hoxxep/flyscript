@@ -24,6 +24,7 @@ The whole language rests on five laws. Every rule in this document is a conseque
 
 | Change | Why |
 | :--- | :--- |
+| `isize` and `usize` are as wide as the target's addresses: 53 bits on JavaScript (§3.1) | the JavaScript back end represents them as numbers, which hold integers exactly to 53 bits |
 | A key looked up with a literal takes the map's key type before the literal's defaults (§4.1) | `spans.get({ start: 1, end: 2 })` failed: the fields defaulted to `i32` |
 | A call's result holds a borrow of an argument's place only if its declared type can hold a borrow itself, not only through a type argument (§4.1) | `const step = match (self.state.take()) { … }` kept `self.state` lent `mut` while `step` lived, so the state could not be put back: §5.5's own `generate` was rejected |
 | A `match` arm binds by the strongest use it makes of what it binds: it takes an owned place only if it moves a part, borrows it `mut` if it changes one in place, and a guard only reads (§4.1) | matching a local `Option<String>` to read its string moved it, so it could not be matched again; a TypeScript programmer reads a value without giving it away |
@@ -184,7 +185,7 @@ Four rules settle the grammar's ambiguities, the first three borrowed from TypeS
 
 ### 3.1 Primitives, strings, arrays
 
-- Scalars: `i8`–`i64`, `i128`, `isize`, `u8`–`u64`, `usize`, `f32`, `f64`, `bool`, `void`, `never`. All are `Copy`. `i128` is the widest integer, for intermediate arithmetic such as the bounds of a `u64`; `comptime` integers have its range.
+- Scalars: `i8`–`i64`, `i128`, `isize`, `u8`–`u64`, `usize`, `f32`, `f64`, `bool`, `void`, `never`. All are `Copy`. `i128` is the widest integer, for intermediate arithmetic such as the bounds of a `u64`; `comptime` integers have its range. `isize` and `usize` are as wide as the target's addresses: 64 bits natively, and 53 on JavaScript, whose numbers hold integers exactly to that width; arithmetic leaving that range overflows.
 - `str` is a borrowed UTF-8 slice; string literals are `str` with static storage. `String` is an owned, growable UTF-8 buffer; wherever a `str` is expected, a `String` lends itself.
 - `T[N]` is an inline array (`Copy` if `T` is); `[a, b, c]` and `repeat(v)` build one, with `N` from context. `T[]` is a borrowed slice, always `readonly T[]` or `mut T[]`.
 - `Vec<T>`, `Box<T>`, `HashMap<K, V>` and the other owning containers are library types.
