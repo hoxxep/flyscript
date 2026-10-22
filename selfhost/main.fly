@@ -8,6 +8,7 @@ import { Program } from "./env";
 import { checkFn } from "./check";
 import { checkOwnership } from "./own";
 import { program } from "./js";
+import { cProgram } from "./c";
 import { File, println, writeFile } from "std/io";
 
 // What stops a compilation: diagnostics, or a file that cannot be read or written.
@@ -23,6 +24,13 @@ function report(p: readonly Program): void uses Io {
       println(`error: ${message}`);
     }
   }
+}
+
+function readText(path: String): String uses Io, Fail<Stop> {
+  try {
+    let f = File.open(path.asStr());
+    f.readText()
+  } catch (_) { throw #Unreadable { path } }
 }
 
 function compile(entry: str, out: str, root: str): void uses Io, Fail<Stop> {
@@ -42,18 +50,22 @@ function compile(entry: str, out: str, root: str): void uses Io, Fail<Stop> {
     report(p);
     throw #Failed;
   }
-  const runtime = `${root}/selfhost/runtime.js`;
-  const rt: String = try {
-    let f = File.open(runtime.asStr());
-    f.readText()
-  } catch (_) { throw #Unreadable { path: runtime } };
   const file = p.entryFile(entry);
   const main = match (p.modules.iter().findIndex((m) => m.file == file)) { #Some(k) => k, #None => throw #Unreadable { path: file } };
-  const js = try { program(p, main, rt.asStr()) } catch (#Failed(message)) {
+  const toC = out.endsWith(".c");
+  // The C runtime is its header and its code, made one file.
+  const rt: String = if (toC) {
+    const h = readText(`${root}/selfhost/runtime.h`);
+    const c = readText(`${root}/selfhost/runtime.c`);
+    `${h}\n${c.asStr().replaceAll("#include \"runtime.h\"", "")}`
+  } else { readText(`${root}/selfhost/runtime.js`) };
+  const code = try {
+    if (toC) { cProgram(p, main, rt.asStr()) } else { program(p, main, rt.asStr()) }
+  } catch (#Failed(message)) {
     println(message.asStr());
     throw #Failed
   };
-  try { writeFile(out, js.asStr()); } catch (_) { throw #Unreadable { path: out.toString() } };
+  try { writeFile(out, code.asStr()); } catch (_) { throw #Unreadable { path: out.toString() } };
 }
 
 export function main(entry: str, out: str, root: str): void uses Io {

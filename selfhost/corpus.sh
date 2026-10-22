@@ -1,6 +1,10 @@
 #!/bin/sh
 # Compiles each program of the run corpus with a self-hosted compiler and checks what it prints
-# against the program's `// expect:` lines: `selfhost/corpus.sh compiler.js [program.fly...]`.
+# against the program's `// expect:` lines: `selfhost/corpus.sh [--c] compiler.js [program.fly...]`.
+# With `--c` each program is compiled to C and built with `cc`, with the address and undefined
+# behavior sanitizers, so a memory error fails the program.
+c=false
+[ "$1" = "--c" ] && { c=true; shift; }
 compiler=$1; shift
 root=$(cd "$(dirname "$0")/.." && pwd)
 out=$(mktemp -d)
@@ -16,7 +20,14 @@ for f in "$@"; do
     printf '%b' "$text" > "$out/$name.cwd/$file"
   done
   # A program may end in a panic, which it prints; what it prints is what is compared.
-  node --stack-size=65500 "$compiler" "$f" "$out/$name.js" "$root" > "$out/$name.err" 2>&1
+  if $c; then
+    node --stack-size=65500 "$compiler" "$f" "$out/$name.c" "$root" > "$out/$name.err" 2>&1 &&
+      cc -std=gnu11 -g -O1 -w -fsanitize=address,undefined -fno-sanitize-recover=all -o "$out/$name.exe" "$out/$name.c" -lm >> "$out/$name.err" 2>&1
+    run="$out/$name.exe"
+  else
+    node --stack-size=65500 "$compiler" "$f" "$out/$name.js" "$root" > "$out/$name.err" 2>&1
+    run="node $out/$name.js"
+  fi
   # Its header describes the simulated world it runs against, as for `flyc run`'s tests.
   world=$(node -e '
     const w = { incoming: [], profiles: {}, quotas: {}, faults: 0, seed: 0x5eed };
@@ -32,11 +43,12 @@ for f in "$@"; do
       if (key === "seed") w.seed = Number(value);
     }
     console.log(JSON.stringify(w));' "$f")
-  [ -s "$out/$name.err" ] || (cd "$out/$name.cwd" && FLY_WORLD="$world" node "$out/$name.js") > "$out/$name.got" 2>&1
+  [ -s "$out/$name.err" ] || (cd "$out/$name.cwd" && FLY_WORLD="$world" $run) > "$out/$name.got" 2>&1
   if [ ! -s "$out/$name.err" ] && cmp -s "$out/$name.want" "$out/$name.got"; then
     pass=$((pass + 1))
   else
     echo "FAIL $name"
+    [ -n "$VERBOSE" ] && { head -c 2000 "$out/$name.err"; diff "$out/$name.want" "$out/$name.got" | head -20; }
   fi
 done
 echo "$pass/$total pass"

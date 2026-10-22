@@ -1,0 +1,2881 @@
+// C from a checked program, for a native executable with no garbage collector. Like the
+// JavaScript back end, code generation starts at `main` and makes one C function for each function
+// and set of generic arguments it reaches, so every type is known where code is made.
+//
+// Values are C's: integers, floats, structs by value; a tag union is a struct of a tag and a union
+// of payloads, its tags numbered across the program so that a value of a narrowed union converts to
+// a wider one by its tag. A `mut T` is a pointer, and so is a `readonly T` of anything bigger than a
+// scalar. Every expression becomes one C expression, statements inside GNU statement expressions,
+// so evaluation runs left to right as Flyscript's does.
+//
+// Ownership: a value that owns memory is dead when it is all zero bits. A move zeroes the place it
+// moves from, a drop does nothing to a dead value, and every local is declared, zeroed, at the top
+// of its function: so every way out of a scope — its end, `break`, `return`, a failure — drops the
+// locals the scope declared, whether or not they still own anything (§5.6). A type whose `Drop`
+// runs code carries a byte saying it is alive.
+//
+// Failure: a function that may fail sets `fly_err`, what it threw, boxed with its tag, and returns;
+// its caller checks after the call and goes to where its own failure lands: a `catch`, or the end of
+// the function, which drops what it owns and fails in turn.
+
+import { Span, Diagnostic, render } from "./diag";
+import {
+  Ident, Block, Stmt, Expr, ExprKind, FieldInit, TagArgs, TemplatePiece, MatchArm, Pattern, PatternKind, TagPatArgs,
+  Param, FnDecl,
+} from "./ast";
+import { Program, Binding, DefKind, SubstMap, subst, substArg, substEffs, substMap, substParams } from "./env";
+import { Prim, Row, Eff, EffRow, FnTy, Len, GArg, Ty, pure, isInt, isFloat, primName, labelGet, keyArgs, keyTy } from "./types";
+import { Binds } from "./impls";
+import { checkFn } from "./check";
+import { checkOwnership } from "./own";
+import { HashMap, HashSet } from "std/collections";
+
+// A function with its generic arguments, and its C name.
+type Inst = { fid: usize; args: Vec<GArg>; c: String };
+
+// What a call reaches.
+enum Callee { #Inst(usize), #Builtin(String) }
+
+// A local: its C name, its type, and whether the C variable holds a pointer to the value: a
+// binding that refers to part of a place a `match` lends it, rather than owning a value.
+type Local = { c: String; ty: Ty; ref: bool };
+
+// A loop being made: its labels, and the locals declared inside it, which `break` and `continue`
+// drop.
+type Loop = { brk: String; cont: String; locals: Vec<[String, Ty]> };
+
+// What making a function apart sets aside of the function around it.
+type Saved = {
+  decls: String; scopes: Vec<HashMap<String, Local>>; scopeLocals: Vec<Vec<[String, Ty]>>; fnLocals: Vec<[String, Ty]>;
+  loops: Vec<Loop>; catches: Vec<Catch>; ret: Ty; captures: HashMap<String, Local>;
+};
+
+// A `try` being made: where its failures land, and the locals its body declared.
+type Catch = { label: String; locals: Vec<[String, Ty]> };
+
+const C_KEYWORDS: str[] = ["auto", "break", "case", "char", "const", "continue", "default", "do", "double", "else",
+  "enum", "extern", "float", "for", "goto", "if", "inline", "int", "long", "register", "restrict", "return", "short",
+  "signed", "sizeof", "static", "struct", "switch", "typedef", "union", "unsigned", "void", "volatile", "while", "main",
+  "bool", "true", "false", "errno", "free", "exit"];
+
+function mangle(n: str): String {
+  if (C_KEYWORDS.iter().some((k) => k == n)) { `${n}_` } else { n.toString() }
+}
+
+// A string as a C literal: printable ASCII as it is, every other byte in octal.
+function cquote(s: str): String {
+  const bytes = s.asBytes();
+  let out = "\"".toString();
+  for (const b of bytes) {
+    if (b == b'"') { out.push("\\\""); }
+    else if (b == b'\\') { out.push("\\\\"); }
+    else if (b >= 0x20 && b < 0x7f && b != b'?') { out.push(s.slice(0, 0)); out.push(byteStr(b).asStr()); }
+    else { out.push(`\\${(b >> 6) & 7}${(b >> 3) & 7}${b & 7}`); }
+  }
+  out.push("\"");
+  out
+}
+
+function byteStr(b: u8): String {
+  const ascii = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~";
+  const i = (b - 0x20) as usize;
+  ascii.slice(i, i + 1).toString()
+}
+
+// A `str` literal.
+function strLit(s: str): String { `fly_str_lit(${cquote(s)}, ${s.len()})` }
+
+function stripBorrow(t: readonly Ty): Ty {
+  match (t) { #Borrow(_, inner) => stripBorrow(inner), _ => t.clone() }
+}
+
+function isMutBorrow(t: readonly Ty): bool { match (t) { #Borrow(true, _) => true, _ => false } }
+
+function isPlace(e: readonly Expr): bool {
+  match (e.kind) { #Ident(_) | #Field { target: _ } | #Index { target: _ } => true, _ => false }
+}
+
+// The binding a place expression is rooted at.
+function rootName(e: readonly Expr): Option<String> {
+  match (e.kind) {
+    #Ident(n) => #Some(n.clone()),
+    #Field { target, name: _ } | #Index { target, index: _ } => rootName(target),
+    _ => #None,
+  }
+}
+
+function intPrim(t: readonly Ty): Option<Prim> {
+  match (t) {
+    #Prim(p) => if (isInt(p)) { #Some(p) } else { #None },
+    #Borrow(_, inner) => intPrim(inner),
+    _ => #None,
+  }
+}
+
+function floatTy(t: readonly Ty): bool {
+  match (t) { #Prim(p) => isFloat(p), #Borrow(_, inner) => floatTy(inner), _ => false }
+}
+
+// The bounds of an integer type, as C expressions.
+function bounds(p: Prim): [String, String] {
+  match (p) {
+    #I8 => ["-128".toString(), "127".toString()],
+    #I16 => ["-32768".toString(), "32767".toString()],
+    #I32 => ["INT32_MIN".toString(), "INT32_MAX".toString()],
+    #I64 | #Isize => ["INT64_MIN".toString(), "INT64_MAX".toString()],
+    #U8 => ["0".toString(), "255".toString()],
+    #U16 => ["0".toString(), "65535".toString()],
+    #U32 => ["0".toString(), "UINT32_MAX".toString()],
+    #U64 | #Usize => ["0".toString(), "UINT64_MAX".toString()],
+    _ => ["0".toString(), "0".toString()],
+  }
+}
+
+export struct C {
+  p: Program;
+  insts: Vec<Inst>;
+  instIndex: HashMap<String, usize>;
+  next: usize;
+  // How many functions the ownership pass had seen: specializations made since have not been.
+  owned: usize;
+  // Types made so far, by key, with their C names; their forward declarations and definitions,
+  // each defined after what it holds by value.
+  types: HashMap<String, String>;
+  // Those defined, and those named for a pointer, to be defined at the end.
+  defined: HashSet<String>;
+  pending: Vec<Ty>;
+  typeFwd: String;
+  typeDefs: String;
+  // Tags numbered across the program, from 1: zero is a dead value.
+  tags: HashMap<String, usize>;
+  // Drop functions made, by type key; their code.
+  drops: HashMap<String, String>;
+  dropCode: String;
+  // Conversions between union types, by their keys.
+  convs: HashMap<String, String>;
+  // Functions made for the runtime to call — hashes, comparisons, generators' steps — by key.
+  helpers: HashMap<String, String>;
+  // Constants made, by index.
+  consts: HashMap<usize, String>;
+  protos: String;
+  code: String;
+  // Closures made: their C code.
+  lambdaCode: String;
+  // The function being made.
+  fid: usize;
+  map: SubstMap;
+  module: usize;
+  ret: Ty;
+  // Its locals, declared at its top; the scopes that name them; the loops and `try`s around the
+  // code being made; and the locals of each scope, innermost last, which leaving it drops.
+  decls: String;
+  scopes: Vec<HashMap<String, Local>>;
+  scopeLocals: Vec<Vec<[String, Ty]>>;
+  // Every local the function owns, which its way out drops.
+  fnLocals: Vec<[String, Ty]>;
+  loops: Vec<Loop>;
+  catches: Vec<Catch>;
+  tmp: usize;
+  // Closures made so far, which names each.
+  lambdas: usize;
+  // Inside a closure's body: its environment's captures, by name, with how the body reaches them.
+  captures: HashMap<String, Local>;
+}
+
+impl C {
+  function new(p: Program): C {
+    C {
+      p, insts: Vec.new(), instIndex: HashMap.new(), next: 0, owned: 0, types: HashMap.new(), defined: HashSet.new(), pending: Vec.new(), typeFwd: String.new(),
+      typeDefs: String.new(), tags: HashMap.new(), drops: HashMap.new(), dropCode: String.new(), convs: HashMap.new(), helpers: HashMap.new(),
+      consts: HashMap.new(), protos: String.new(), code: String.new(), lambdaCode: String.new(), fid: 0,
+      map: HashMap.new(), module: 0, ret: #Prim(#Void), decls: String.new(), scopes: Vec.new(), scopeLocals: Vec.new(),
+      fnLocals: Vec.new(), loops: Vec.new(), catches: Vec.new(), tmp: 0, lambdas: 0, captures: HashMap.new(),
+    }
+  }
+
+  function fail(self: readonly Self, span: Span, message: str): never uses Fail<Diagnostic> {
+    throw #Diagnostic { span: self.p.sourceSpan(span), message: message.toString() }
+  }
+  function unsupported(self: readonly Self, span: Span, what: str): never uses Fail<Diagnostic> {
+    self.fail(span, `${what} is not supported by the C back end yet`)
+  }
+
+  function fresh(self: mut Self): String {
+    self.tmp += 1;
+    `t${self.tmp}`
+  }
+
+  // ---- types in the function's terms ----
+
+  function concrete(self: readonly Self, t: readonly Ty): Ty {
+    const s = subst(t, self.map);
+    self.resolveAssoc(s)
+  }
+
+  function resolveAssoc(self: readonly Self, t: readonly Ty): Ty {
+    match (t) {
+      #Assoc(base, name) => {
+        const b = self.resolveAssoc(base);
+        match (self.p.assocType(b, name.asStr())) { #Some(r) => self.resolveAssoc(subst(r, self.map)), #None => t.clone() }
+      }
+      #Borrow(m, inner) => #Borrow(m, Box.new(self.resolveAssoc(inner))),
+      #Named(d, args) => {
+        let out: Vec<GArg> = Vec.new();
+        for (const a of args) { out.push(match (a) { #Ty(x) => #Ty(self.resolveAssoc(x)), other => other.clone() }); }
+        #Named(d, out)
+      }
+      #Tuple(ts) => {
+        let out: Vec<Ty> = Vec.new();
+        for (const x of ts) { out.push(self.resolveAssoc(x)); }
+        #Tuple(out)
+      }
+      #Array(e, l) => #Array(Box.new(self.resolveAssoc(e)), l.clone()),
+      #Slice(e) => #Slice(Box.new(self.resolveAssoc(e))),
+      #Fn(f) => {
+        let params: Vec<Ty> = Vec.new();
+        for (const x of f.params) { params.push(self.resolveAssoc(x)); }
+        #Fn(Box.new(FnTy { mode: f.mode, params, ret: self.resolveAssoc(f.ret), effects: f.effects.clone() }))
+      }
+      _ => t.clone(),
+    }
+  }
+
+  function exprTy(self: readonly Self, id: usize): Ty {
+    const raw: Ty = match (self.p.typed.get(self.fid)) {
+      #Some(t) => match (t.exprs.get(id)) { #Some(x) => x.clone(), #None => #Error },
+      #None => #Error,
+    };
+    self.concrete(raw)
+  }
+
+  function bindingTy(self: readonly Self, id: usize): Ty {
+    const raw: Ty = match (self.p.typed.get(self.fid)) {
+      #Some(t) => match (t.bindings.get(id)) { #Some(x) => x.clone(), #None => #Error },
+      #None => #Error,
+    };
+    self.concrete(raw)
+  }
+
+  function slotTy(self: readonly Self, id: usize): Option<Ty> {
+    match (self.p.typed.get(self.fid)) {
+      #Some(t) => match (t.slots.get(id)) { #Some(x) => #Some(self.concrete(x)), #None => #None },
+      #None => #None,
+    }
+  }
+
+  function isString(self: readonly Self, t: readonly Ty): bool {
+    match (t) { #Named(d, _) => self.p.isKnown(d, "String"), _ => false }
+  }
+
+  function namedIs(self: readonly Self, t: readonly Ty, name: str): bool {
+    match (t) { #Named(d, _) => self.p.defs[d].name == name && self.p.modules[self.p.defs[d].module].isStd, _ => false }
+  }
+
+  // ---- C types ----
+
+  // Whether a value of the type is a scalar, passed and borrowed `readonly` by value.
+  function scalar(self: readonly Self, t: readonly Ty): bool {
+    match (t) {
+      #Prim(_) | #Slice(_) | #Fn(_) => true,
+      #Borrow(_, _) => true,
+      #Named(d, _) => self.p.isKnown(d, "Box") || self.p.isKnown(d, "Ref"),
+      _ => false,
+    }
+  }
+
+  // Whether a value of the borrow type `t` is a pointer in C: a `mut` borrow, or a `readonly`
+  // borrow of anything bigger than a scalar. A borrow of a view — a `str`, a slice, a function — is
+  // the view: it points at what it shows already.
+  function pointerBorrow(self: readonly Self, t: readonly Ty): bool {
+    match (t) {
+      #Borrow(m, inner) => match (inner.get()) {
+        // A borrow of a borrow is the inner borrow.
+        #Borrow(_, _) => self.pointerBorrow(inner),
+        x => !viewLike(x) && (m || !self.scalar(x)),
+      },
+      _ => false,
+    }
+  }
+
+  function ctype(self: mut Self, t: readonly Ty, span: Span): String uses Fail<Diagnostic> {
+    match (t) {
+      #Prim(p) => primType(p).toString(),
+      #Borrow(_, inner) if match (inner.get()) { #Borrow(_, _) => true, _ => false } => self.ctype(inner, span),
+      #Borrow(_, inner) => {
+        if (self.pointerBorrow(t)) {
+          const c = self.ctypeRef(inner, span);
+          `${c}*`
+        } else { self.ctype(inner, span) }
+      }
+      #Slice(_) => "fly_slice".toString(),
+      #Fn(_) => "fly_fn".toString(),
+      #Named(d, args) => {
+        if (self.p.isKnown(d, "String")) { return "fly_String".toString(); }
+        if (self.p.isKnown(d, "Vec")) { return "fly_vec".toString(); }
+        if (self.namedIs(t, "HashMap")) { return "fly_map".toString(); }
+        if (self.namedIs(t, "Gen")) { return "fly_gen".toString(); }
+        if (self.namedIs(t, "Hasher")) { return "fly_Hasher".toString(); }
+        if (self.p.isKnown(d, "Box")) {
+          return match (args.first()) {
+            #Some(#Ty(x)) => {
+              const c = self.ctypeRef(x, span);
+              `${c}*`
+            }
+            _ => self.fail(span, "a `Box` without a type"),
+          };
+        }
+        match (self.p.defs[d].kind) {
+          #Struct { fields: #Some(_) } => self.structType(t, span),
+          #Enum { tags: _ } => self.unionType(t, span),
+          _ => self.unsupported(span, `the type \`${self.p.show(t)}\``),
+        }
+      }
+      #Record(_) | #Tuple(_) => self.structType(t, span),
+      #Union(_) => self.unionType(t, span),
+      #Array(_, _) => self.structType(t, span),
+      #Error => "fly_unit".toString(),
+      _ => self.unsupported(span, `the type \`${self.p.show(t)}\``),
+    }
+  }
+
+  // A struct's C name, declared ahead of its definition, so pointers to it may be made first.
+  function typeName(self: mut Self, t: readonly Ty): String {
+    const key = keyTy(t);
+    if (const #Some(n) = self.types.get(key.asStr())) { return n.clone(); }
+    const name = `T${self.types.len()}`;
+    self.types.insert(key, name.clone());
+    self.typeFwd.push(`typedef struct ${name} ${name};\n`);
+    name
+  }
+
+  // Whether the type is a struct C defines here: what may be recursive through a pointer.
+  function aggregate(self: readonly Self, t: readonly Ty): bool {
+    match (t) {
+      #Record(_) | #Tuple(_) | #Union(_) | #Array(_, _) => true,
+      #Named(d, _) => match (self.p.defs[d].kind) {
+        #Struct { fields: #Some(_) } | #Enum { tags: _ } => true,
+        _ => false,
+      },
+      _ => false,
+    }
+  }
+
+  // The C type a pointer points at: a struct need only be named, and is defined at the end.
+  function ctypeRef(self: mut Self, t: readonly Ty, span: Span): String uses Fail<Diagnostic> {
+    if (!self.aggregate(t) || self.isString(t) || self.namedIs(t, "Vec")) { return self.ctype(t, span); }
+    if (!self.defined.has(keyTy(t))) { self.pending.push(t.clone()); }
+    self.typeName(t)
+  }
+
+  // The fields of a struct-like type, with their C names and Flyscript types.
+  function fieldsOf(self: readonly Self, t: readonly Ty): Vec<[String, Ty]> {
+    let out: Vec<[String, Ty]> = Vec.new();
+    match (t) {
+      #Named(d, args) => { if (const #Some(fs) = self.p.structFields(d, args)) { for (const [k, x] of fs) { out.push([k.clone(), x.clone()]); } } }
+      #Record(r) => { for (const [k, x] of r.labels) { out.push([k.clone(), x.clone()]); } }
+      #Tuple(ts) => { for (const [i, x] of ts.iter().enumerate()) { out.push([`f${i}`, x.clone()]); } }
+      _ => {}
+    }
+    out
+  }
+
+  // A struct, record, tuple or array, made once.
+  function structType(self: mut Self, t: readonly Ty, span: Span): String uses Fail<Diagnostic> {
+    const name = self.typeName(t);
+    if (!self.defined.insert(keyTy(t))) { return name; }
+    let body = String.new();
+    if (self.liveByte(t)) { body.push("  bool live;\n"); }
+    match (t) {
+      #Array(e, l) => {
+        const c = self.ctype(e, span);
+        const n = match (l) { #Known(n) => n, _ => self.fail(span, "an array of unknown length") };
+        body.push(`  ${c} data[${max(n, 1)}];\n`);
+      }
+      _ => {
+        for (const [f, ft] of self.fieldsOf(t)) {
+          const c = self.ctype(ft, span);
+          body.push(`  ${c} ${mangle(f.asStr())};\n`);
+        }
+        if (body.len() == 0) { body.push("  fly_unit empty;\n"); }
+      }
+    }
+    self.typeDefs.push(`struct ${name} {\n${body}};\n`);
+    name
+  }
+
+  // The tags of a union or enum, with their payloads.
+  function tagsOf(self: readonly Self, t: readonly Ty): Vec<[String, Ty]> {
+    let out: Vec<[String, Ty]> = Vec.new();
+    match (t) {
+      #Named(d, args) => {
+        if (const #Enum { tags } = self.p.defs[d].kind) {
+          for (const [k, x] of tags) { out.push([k.clone(), substParams(x, self.p.defs[d].params, args)]); }
+        }
+      }
+      #Union(r) => { for (const [k, x] of r.labels) { out.push([k.clone(), x.clone()]); } }
+      _ => {}
+    }
+    out
+  }
+
+  // A tag's number, the same in every union.
+  function tagId(self: mut Self, name: str): usize {
+    if (const #Some(i) = self.tags.get(name)) { return i; }
+    const i = self.tags.len() + 1;
+    self.tags.insert(name.toString(), i);
+    i
+  }
+
+  function unionType(self: mut Self, t: readonly Ty, span: Span): String uses Fail<Diagnostic> {
+    const name = self.typeName(t);
+    if (!self.defined.insert(keyTy(t))) { return name; }
+    let members = String.new();
+    for (const [tag, pt] of self.tagsOf(t)) {
+      self.tagId(tag.asStr());
+      if (!isVoidTy(pt)) {
+        const c = self.payloadType(pt, span);
+        members.push(`    ${c} ${mangle(tag.asStr())};\n`);
+      }
+    }
+    if (members.len() == 0) { members.push("    fly_unit none;\n"); }
+    const live = if (self.liveByte(t)) { "  bool live;\n" } else { "" };
+    self.typeDefs.push(`struct ${name} {\n${live}  uint32_t tag;\n  union {\n${members}  } u;\n};\n`);
+    name
+  }
+
+  // A payload's C type: one value as it is, several as a tuple.
+  function payloadType(self: mut Self, pt: readonly Ty, span: Span): String uses Fail<Diagnostic> {
+    match (pt) {
+      #Tuple(ts) => if (ts.len() == 1) { self.ctype(ts[0], span) } else { self.ctype(pt, span) },
+      other => self.ctype(other, span),
+    }
+  }
+
+  // Whether a type has a `Drop` impl of its own, so its values carry a byte saying they live.
+  function liveByte(self: readonly Self, t: readonly Ty): bool {
+    match (t) { #Named(d, _) => self.p.hasDrop(d), _ => false }
+  }
+
+  // ---- ownership ----
+
+  // Whether dropping a value of the type does anything: it owns memory, or runs a `Drop`.
+  function needsDrop(self: readonly Self, t: readonly Ty): bool {
+    let seen: HashSet<String> = HashSet.new();
+    self.needsIn(t, mut seen)
+  }
+
+  function needsIn(self: readonly Self, t: readonly Ty, seen: mut HashSet<String>): bool {
+    match (t) {
+      #Named(d, args) => {
+        if (self.p.hasDrop(d)) { return true; }
+        if (self.p.isKnown(d, "String") || self.p.isKnown(d, "Vec") || self.p.isKnown(d, "Box")) { return true; }
+        if (self.namedIs(t, "HashMap") || self.namedIs(t, "Gen")) { return true; }
+        if (!seen.insert(keyTy(t))) { return false; }
+        match (self.p.defs[d].kind) {
+          #Struct { fields: _ } => match (self.p.structFields(d, args)) {
+            #Some(fs) => fs.iter().some(([_, x]) => self.needsIn(x, mut seen)),
+            #None => false,
+          },
+          #Enum { tags } => tags.iter().some(([_, x]) => self.needsIn(substParams(x, self.p.defs[d].params, args), mut seen)),
+          _ => false,
+        }
+      }
+      #Record(r) | #Union(r) => r.labels.iter().some(([_, x]) => self.needsIn(x, mut seen)),
+      #Tuple(ts) => ts.iter().some((x) => self.needsIn(x, mut seen)),
+      #Array(e, _) => self.needsIn(e, mut seen),
+      #Fn(_) => true,
+      _ => false,
+    }
+  }
+
+  // The function that drops a value of the type in place, made once: it runs the type's `Drop` if
+  // the value lives, drops its parts, and leaves it dead.
+  function dropFn(self: mut Self, t: readonly Ty, span: Span): String uses Fail<Diagnostic> {
+    const key = keyTy(t);
+    if (const #Some(n) = self.drops.get(key.asStr())) { return n.clone(); }
+    const name = `drop${self.drops.len()}`;
+    self.drops.insert(key, name.clone());
+    const c = self.ctype(t, span);
+    self.protos.push(`static void ${name}(${c}* v);\n`);
+    let body = String.new();
+    match (t) {
+      #Named(d, args) => {
+        if (self.p.isKnown(d, "String")) {
+          body.push("  fly_String_drop(v);\n");
+        } else if (self.namedIs(t, "Gen")) {
+          body.push("  fly_gen_drop(v);\n");
+        } else if (self.namedIs(t, "HashMap")) {
+          const e = entryTy(t);
+          if (self.needsDrop(e)) {
+            const f = self.dropFn(e, span);
+            const ec = self.ctype(e, span);
+            body.push(`  for (size_t i = 0; i < v->len; i++) ${f}(&((${ec}*)v->entries)[i]);\n`);
+          }
+          body.push("  fly_map_free(v);\n");
+        } else if (self.p.isKnown(d, "Vec")) {
+          if (const #Some(#Ty(e)) = args.first()) {
+            if (self.needsDrop(e)) {
+              const f = self.dropFn(e, span);
+              const ec = self.ctype(e, span);
+              body.push(`  for (size_t i = 0; i < v->len; i++) ${f}(&((${ec}*)v->ptr)[i]);\n`);
+            }
+          }
+          body.push("  fly_vec_free(v);\n");
+        } else if (self.p.isKnown(d, "Box")) {
+          if (const #Some(#Ty(e)) = args.first()) {
+            if (self.needsDrop(e)) {
+              const f = self.dropFn(e, span);
+              body.push(`  if (*v) ${f}(*v);\n`);
+            }
+          }
+          body.push("  free(*v);\n  *v = NULL;\n");
+        } else {
+          if (self.p.hasDrop(d)) {
+            const call = self.dropCall(t, span);
+            body.push(`  if (v->live) { ${call}; v->live = false; }\n`);
+          }
+          match (self.p.defs[d].kind) {
+            #Enum { tags: _ } => self.dropTags(mut body, t, span),
+            _ => self.dropFields(mut body, t, span),
+          }
+        }
+      }
+      #Record(_) | #Tuple(_) => self.dropFields(mut body, t, span),
+      #Union(_) => self.dropTags(mut body, t, span),
+      #Array(e, l) => {
+        if (self.needsDrop(e)) {
+          const f = self.dropFn(e, span);
+          const n = match (l) { #Known(n) => n, _ => 0 };
+          body.push(`  for (size_t i = 0; i < ${n}; i++) ${f}(&v->data[i]);\n`);
+        }
+      }
+      #Fn(_) => body.push("  if (v->drop) v->drop(v->env);\n  *v = (fly_fn){ 0 };\n"),
+      _ => {}
+    }
+    self.dropCode.push(`static void ${name}(${c}* v) {\n${body}}\n`);
+    name
+  }
+
+  function dropFields(self: mut Self, body: mut String, t: readonly Ty, span: Span): void uses Fail<Diagnostic> {
+    for (const [f, ft] of self.fieldsOf(t)) {
+      if (self.needsDrop(ft)) {
+        const d = self.dropFn(ft, span);
+        body.push(`  ${d}(&v->${mangle(f.asStr())});\n`);
+      }
+    }
+  }
+
+  function dropTags(self: mut Self, body: mut String, t: readonly Ty, span: Span): void uses Fail<Diagnostic> {
+    for (const [tag, pt] of self.tagsOf(t)) {
+      if (!isVoidTy(pt) && self.needsDrop(pt)) {
+        const id = self.tagId(tag.asStr());
+        const ptc = self.payloadTy(pt);
+        const d = self.dropFn(ptc, span);
+        body.push(`  if (v->tag == ${id}) ${d}(&v->u.${mangle(tag.asStr())});\n`);
+      }
+    }
+    body.push("  v->tag = 0;\n");
+  }
+
+  // The payload of tag `name` of a union.
+  function payloadOf(self: readonly Self, t: readonly Ty, name: str): Ty {
+    match (self.tagsOf(t).iter().find(([k, _]) => k == name)) { #Some([_, x]) => self.payloadTy(x), #None => #Error }
+  }
+
+  // A payload's type: one value as it is.
+  function payloadTy(self: readonly Self, pt: readonly Ty): Ty {
+    match (pt) { #Tuple(ts) => if (ts.len() == 1) { ts[0].clone() } else { pt.clone() }, other => other.clone() }
+  }
+
+  // A call of the type's `Drop.drop` on `*v`.
+  function dropCall(self: mut Self, t: readonly Ty, span: Span): String uses Fail<Diagnostic> {
+    const found = self.p.defs.iter().findIndex((d) => d.name == "Drop" && self.p.modules[d.module].isStd);
+    const iface = match (found) { #Some(d) => d, #None => self.fail(span, "no `Drop`") };
+    const f: usize = match (self.p.ifaceFns.get(`${iface}:drop`.asStr())) { #Some(f) => f, #None => self.fail(span, "no `Drop.drop`") };
+    match (self.callee(f, [#Ty(t.clone())], span)) {
+      #Inst(i) => `${self.insts[i].c}(v)`,
+      #Builtin(k) => `fly_${k}(v)`,
+    }
+  }
+
+  // ---- instances ----
+
+  function instance(self: mut Self, fid: usize, args: Vec<GArg>): usize {
+    const key = `${fid}|${keyArgs(args)}`;
+    if (const #Some(i) = self.instIndex.get(key.asStr())) { return i; }
+    if (!self.p.checked.has(fid)) { checkFn(mut self.p, fid); }
+    if (fid >= self.owned) { checkOwnership(mut self.p, fid); }
+    const i = self.insts.len();
+    const c = `${mangle(self.p.fns[fid].name.asStr())}_${i}`;
+    self.insts.push({ fid, args, c });
+    self.instIndex.insert(key, i);
+    i
+  }
+
+  function fnEffects(self: readonly Self, fid: usize): EffRow {
+    match (self.p.fns[fid].scheme.effects) {
+      #Some(e) => e.clone(),
+      #None => match (self.p.inferred.get(fid)) { #Some(#Some(e)) => e.clone(), _ => pure() },
+    }
+  }
+
+  // Whether a function may fail: its effects include `Fail`, or are open.
+  function mayFail(self: readonly Self, row: readonly EffRow): bool {
+    row.effs.iter().some((e) => self.p.defs[e.def].name == "Fail")
+  }
+
+  function callArgs(self: readonly Self, id: usize): Vec<GArg> {
+    let out: Vec<GArg> = Vec.new();
+    if (const #Some(t) = self.p.typed.get(self.fid)) {
+      if (const #Some(args) = t.targs.get(id)) {
+        for (const a of args) {
+          out.push(match (substArg(a, self.map)) { #Ty(x) => #Ty(self.resolveAssoc(x)), other => other });
+        }
+      }
+    }
+    out
+  }
+
+  function callee(self: mut Self, fid: usize, args: Vec<GArg>, span: Span): Callee uses Fail<Diagnostic> {
+    const ifaceOf = self.p.fns[fid].iface;
+    if (const #Some(iface) = ifaceOf) {
+      const name = self.p.fns[fid].name.clone();
+      const selfTy: Ty = match (args.first()) { #Some(#Ty(t)) => t.clone(), _ => self.fail(span, `no type for \`Self\` in \`${name}\``) };
+      const [imp, binds] = match (self.p.resolveImpl(iface, selfTy)) {
+        #Some(r) => r,
+        #None => self.fail(span, `no impl of \`${self.p.defs[iface].name}\` for \`${self.p.show(selfTy)}\``),
+      };
+      const m = match (self.p.methodForMut(imp, name.asStr(), binds)) { #Some(m) => m, #None => self.fail(span, `no method \`${name}\``) };
+      if (!self.p.checked.has(m)) { checkFn(mut self.p, m); }
+      let env: Binds = binds.clone();
+      const skip = 1 + self.p.defs[iface].params.len();
+      const specialized = self.p.specOf.has(m);
+      let implParams: usize = 0;
+      for (const g of self.p.impls[imp].params) { if (!g.isComptime || !specialized) { implParams += 1; } }
+      const mParams = self.p.fns[m].scheme.tparams.clone();
+      let k = implParams;
+      while (k < mParams.len()) {
+        const at = skip + k - implParams;
+        if (at < args.len()) { env.insert(mParams[k].sym.id, args[at].clone()); }
+        k += 1;
+      }
+      let margs: Vec<GArg> = Vec.new();
+      for (const g of mParams) {
+        margs.push(match (env.get(g.sym.id)) { #Some(a) => a.clone(), #None => #Ty(#Param(g.sym.clone())) });
+      }
+      return self.callee(m, margs, span);
+    }
+    match (self.p.fnDecl(fid)) {
+      #Some(d) if d.body.isSome() => #Inst(self.instance(fid, args)),
+      _ => #Builtin(self.builtinKey(fid)),
+    }
+  }
+
+  function builtinKey(self: readonly Self, fid: usize): String {
+    const name = self.p.fns[fid].name.clone();
+    const imp = match (self.p.fns[fid].implId) { #Some(i) => i, #None => return name };
+    const target = match (self.p.impls[imp].target) {
+      #Named(d, _) => self.p.defs[d].name.clone(),
+      #Prim(p) => primName(p).toString(),
+      #Slice(_) => "slice".toString(),
+      #Array(_, _) => "array".toString(),
+      #Union(r) => if (labelGet(r.labels, "Some").isSome()) { "Option".toString() } else if (labelGet(r.labels, "Ok").isSome()) { "Result".toString() } else { "union".toString() },
+      _ => "any".toString(),
+    };
+    `${target}_${name}`
+  }
+
+  // ---- scopes and locals ----
+
+  // A local, declared at the top of the function, zeroed, and in the innermost scope.
+  function declare(self: mut Self, name: str, ty: Ty, span: Span): String uses Fail<Diagnostic> {
+    self.tmp += 1;
+    const c = `${mangle(name)}_${self.tmp}`;
+    const ct = self.ctype(ty, span);
+    self.decls.push(`  ${ct} ${c} = { 0 };\n`);
+    const top = self.scopes.len() - 1;
+    self.scopes[top].insert(name.toString(), { c: c.clone(), ty: ty.clone(), ref: false });
+    self.owns(c.clone(), ty);
+    c
+  }
+
+  // A local that refers to a value it does not own: a pointer to it.
+  function declareRef(self: mut Self, name: str, ty: Ty, span: Span): String uses Fail<Diagnostic> {
+    self.tmp += 1;
+    const c = `${mangle(name)}_${self.tmp}`;
+    const ct = self.ctype(ty, span);
+    self.decls.push(`  ${ct}* ${c} = NULL;\n`);
+    const top = self.scopes.len() - 1;
+    self.scopes[top].insert(name.toString(), { c: c.clone(), ty, ref: true });
+    c
+  }
+
+  // The C lvalue a name denotes here, and its type: a local, or a closure's capture.
+  function lvalueOf(self: readonly Self, n: str): Option<[String, Ty]> {
+    if (const #Some(l) = self.local(n)) {
+      return #Some([if (l.ref) { `(*${l.c})` } else { l.c.clone() }, l.ty.clone()]);
+    }
+    match (self.captures.get(n)) { #Some(l) => #Some([l.c.clone(), l.ty.clone()]), #None => #None }
+  }
+
+  // A temporary, declared at the top of the function, zeroed; owned by the innermost scope.
+  function temp(self: mut Self, ty: readonly Ty, span: Span): String uses Fail<Diagnostic> {
+    const c = self.fresh();
+    const ct = self.ctype(ty, span);
+    self.decls.push(`  ${ct} ${c} = { 0 };\n`);
+    self.owns(c.clone(), ty.clone());
+    c
+  }
+
+  // A temporary that owns nothing, declared at the top of the function.
+  function unowned(self: mut Self, ty: readonly Ty, span: Span): String uses Fail<Diagnostic> {
+    const c = self.fresh();
+    const ct = self.ctype(ty, span);
+    self.decls.push(`  ${ct} ${c} = { 0 };\n`);
+    c
+  }
+
+  // Records that the innermost scope, and the loops and `try`s around it, own local `c`.
+  function owns(self: mut Self, c: String, ty: Ty): void {
+    if (!self.needsDrop(ty) || match (ty) { #Borrow(_, _) => true, _ => false }) { return; }
+    const top = self.scopeLocals.len() - 1;
+    self.scopeLocals[top].push([c.clone(), ty.clone()]);
+    self.fnLocals.push([c.clone(), ty.clone()]);
+    let i: usize = 0;
+    while (i < self.loops.len()) {
+      self.loops[i].locals.push([c.clone(), ty.clone()]);
+      i += 1;
+    }
+    let k: usize = 0;
+    while (k < self.catches.len()) {
+      self.catches[k].locals.push([c.clone(), ty.clone()]);
+      k += 1;
+    }
+  }
+
+  function local(self: readonly Self, name: str): Option<Local> {
+    let i = self.scopes.len();
+    while (i > 0) {
+      i -= 1;
+      if (const #Some(l) = self.scopes[i].get(name)) { return #Some(l.clone()); }
+    }
+    #None
+  }
+
+  function push(self: mut Self): void {
+    self.scopes.push(HashMap.new());
+    self.scopeLocals.push(Vec.new());
+  }
+
+  // Leaves a scope: the statements that drop what it owns.
+  function pop(self: mut Self, span: Span): String uses Fail<Diagnostic> {
+    self.scopes.pop();
+    const locals = match (self.scopeLocals.pop()) { #Some(l) => l, #None => Vec.new() };
+    self.dropsOf(locals, span)
+  }
+
+  // Drops of locals, the last declared first.
+  function dropsOf(self: mut Self, locals: readonly Vec<[String, Ty]>, span: Span): String uses Fail<Diagnostic> {
+    let out = String.new();
+    let k = locals.len();
+    while (k > 0) {
+      k -= 1;
+      const [c, ty] = locals[k].clone();
+      const f = self.dropFn(ty, span);
+      out.push(`${f}(&${c}); `);
+    }
+    out
+  }
+
+  // Where a failure goes from here: the innermost `catch`, or the function's end.
+  function failLabel(self: readonly Self): String {
+    match (self.catches.last()) { #Some(c) => c.label.clone(), #None => "fail".toString() }
+  }
+
+  // ---- expressions ----
+
+  // The C for an expression: a value of the C type of its Flyscript type.
+  function ex(self: mut Self, e: readonly Expr): String uses Fail<Diagnostic> {
+    match (e.kind) {
+      #Int(n) => self.intLit(self.exprTy(e.id), n.asStr()),
+      #Float(n) => n.clone(),
+      #Str(s) => strLit(s.asStr()),
+      #Byte(b) => `((uint8_t)${b})`,
+      #Bool(b) => if (b) { "true".toString() } else { "false".toString() },
+      #Template(parts) => self.template(parts),
+      #Ident(n) => {
+        const v = self.ident(n.asStr(), e);
+        self.moving(e, v)
+      }
+      #Field { target: _, name: _ } | #Index { target: _, index: _ } => {
+        const t = self.exprTy(e.id);
+        if (const #Index { target: _, index } = e.kind) {
+          if (const #Range { lo: _, hi: _ } = index.kind) { return self.sliceOf(e); }
+        }
+        const p = self.place(e);
+        self.moving(e, p)
+      }
+      #Call { callee, typeArgs: _, args } => self.call(e, callee, args),
+      #Unary { op, operand } => {
+        // A negative literal is written as one, so the least integer is one.
+        if (op == "-") {
+          if (const #Int(n) = operand.kind) {
+            const t = self.exprTy(e.id);
+            if (n == "9223372036854775808" && match (intPrim(t)) { #Some(#I64) | #Some(#Isize) => true, _ => false }) { return "INT64_MIN".toString(); }
+          }
+        }
+        const v = self.value(operand);
+        if (op == "-") {
+          match (intPrim(self.exprTy(e.id))) {
+            #Some(p) => self.checked(p, `-(fly_i128)(${v})`),
+            #None => `(-${v})`,
+          }
+        } else { `(${op}${v})` }
+      }
+      #Binary { op, lhs, rhs } => self.binary(e, op.asStr(), lhs, rhs),
+      #Assign { op, target, value } => self.assign(op.asStr(), target, value),
+      #Tag { name, args } => self.tag(e, name.asStr(), args),
+      #Record { name: _, fields } => self.record(e, fields),
+      #List(items) => self.list(e, items),
+      #Cast { expr, ty: _ } => {
+        const v = self.value(expr);
+        const to = self.exprTy(e.id);
+        const c = self.ctype(to, e.span);
+        `((${c})(${v}))`
+      }
+      #Comptime(x) => self.ex(x),
+      #BorrowMut(x) => self.lend(x),
+      #Block(b) => self.block(b),
+      #Unsafe(b) => self.block(b),
+      #Region { name: _, body } => self.block(body),
+      #If { cond, then, otherwise } => {
+        const t = self.exprTy(e.id);
+        const c = self.value(cond);
+        const a = self.blockAs(then, t);
+        const b = match (otherwise) { #Some(o) => self.exAs(o, t), #None => "((fly_unit)0)".toString() };
+        if (self.unitTy(t)) { `({ if (${c}) { ${a}; } else { ${b}; } (fly_unit)0; })` } else {
+          const ct = self.ctype(t, e.span);
+          `({ ${ct} r_; if (${c}) r_ = ${a}; else r_ = ${b}; r_; })`
+        }
+      }
+      #While { cond, body } => self.whileLoop(cond, body),
+      #For { mutable: _, pat, iter, body } => self.forOf(pat, iter, body),
+      #Match { scrutinee, arms } => self.matchExpr(e, scrutinee, arms),
+      #Try { body, pat, handler } => self.tryCatch(e, body, pat, handler),
+      #Throw(x) => self.throwExpr(x),
+      #Return(v) => self.returnExpr(v),
+      #Break => self.jump(true),
+      #Continue => self.jump(false),
+      #Lambda { params, body } => self.lambda(e, params, body),
+      #Range { lo: _, hi: _ } => self.fail(e.span, "a range can only index or be iterated"),
+      _ => self.unsupported(e.span, "this expression"),
+    }
+  }
+
+  function unitTy(self: readonly Self, t: readonly Ty): bool {
+    match (t) { #Prim(#Void) | #Prim(#Never) | #Error => true, _ => false }
+  }
+
+  function intLit(self: readonly Self, t: readonly Ty, n: str): String {
+    if (floatTy(t)) { return `${n}.0`; }
+    // Folded `comptime` arithmetic may leave a literal wider than its type, which the operations
+    // around it bring back in range: it is made at 128 bits, as they are.
+    if (n.len() > 19 && !n.startsWith("0x")) { return wideLit(n); }
+    match (intPrim(t)) {
+      #Some(#U64) | #Some(#Usize) => `UINT64_C(${n})`,
+      #Some(#I64) | #Some(#Isize) => `INT64_C(${n})`,
+      #Some(#I128) => if (n.len() > 18 && !n.startsWith("0x")) { wideLit(n) } else { `((fly_i128)${n})` },
+      _ => n.toString(),
+    }
+  }
+
+  // A value read out of a pointer where the expression is a borrow kept as one.
+  function value(self: mut Self, e: readonly Expr): String uses Fail<Diagnostic> {
+    const v = self.ex(e);
+    if (self.pointerBorrow(self.exprTy(e.id))) { `(*${v})` } else { v }
+  }
+
+  // An expression as a value of type `want`: a pointer where `want` is one, a conversion between
+  // unions, a value read out of a pointer.
+  function exAs(self: mut Self, e: readonly Expr, want: readonly Ty): String uses Fail<Diagnostic> {
+    const have = self.exprTy(e.id);
+    // What never finishes has any type.
+    if (match (have) { #Prim(#Never) => true, _ => false } && !self.unitTy(want)) {
+      const v = self.ex(e);
+      const wc = self.ctype(want, e.span);
+      return `({ ${v}; (${wc}){ 0 }; })`;
+    }
+    // A view — a `str`, a slice, a function — borrowed or not is its value, which an owner lends.
+    const w = stripBorrow(want);
+    const h = stripBorrow(have);
+    if (viewLike(w)) {
+      match (w) {
+        #Prim(#Str) => { if (self.isString(h)) { return self.stringAsStr(e); } }
+        #Slice(_) => match (h) {
+          #Named(_, _) => return self.vecAsSlice(e),
+          #Array(_, #Known(n)) => {
+            const p = self.lend(e);
+            return `((fly_slice){ (void*)${p}->data, ${n} })`;
+          }
+          _ => {}
+        },
+        _ => {}
+      }
+      return self.value(e);
+    }
+    // A box lends what it holds: the box is a pointer to it.
+    if (match (want) { #Borrow(_, _) => true, _ => false } && self.boxLike(h) && keyTy(h) != keyTy(w)) {
+      const b = self.value(e);
+      return if (self.pointerBorrow(want)) { b } else { `(*${b})` };
+    }
+    if (self.pointerBorrow(want)) {
+      if (self.pointerBorrow(have)) { return self.ex(e); }
+      return self.lend(e);
+    }
+    const v = self.value(e);
+    match (want) {
+      #Borrow(_, _) => v,
+      _ => self.convert(v, h, want, e.span),
+    }
+  }
+
+  function boxLike(self: readonly Self, t: readonly Ty): bool {
+    match (t) { #Named(d, _) => self.p.isKnown(d, "Box") || self.p.isKnown(d, "Ref"), _ => false }
+  }
+
+  // A `String`'s bytes, as `str`.
+  function stringAsStr(self: mut Self, e: readonly Expr): String uses Fail<Diagnostic> {
+    const p = self.lend(e);
+    `fly_String_as_str(${p})`
+  }
+
+  function vecAsSlice(self: mut Self, e: readonly Expr): String uses Fail<Diagnostic> {
+    const p = self.lend(e);
+    `fly_vec_slice(${p})`
+  }
+
+  // A value of type `from` as one of type `to`: a narrowed union to a wider one.
+  function convert(self: mut Self, v: String, from: readonly Ty, to: readonly Ty, span: Span): String uses Fail<Diagnostic> {
+    match ([from, to]) {
+      [#Union(_), #Union(_)] => {
+        if (keyTy(from) == keyTy(to)) { return v; }
+        const f = self.conversion(from, to, span);
+        `${f}(${v})`
+      }
+      _ => v,
+    }
+  }
+
+  function conversion(self: mut Self, from: readonly Ty, to: readonly Ty, span: Span): String uses Fail<Diagnostic> {
+    const key = `${keyTy(from)}=>${keyTy(to)}`;
+    if (const #Some(n) = self.convs.get(key.asStr())) { return n.clone(); }
+    const name = `conv${self.convs.len()}`;
+    self.convs.insert(key, name.clone());
+    const a = self.ctype(from, span);
+    const b = self.ctype(to, span);
+    let body = String.new();
+    for (const [tag, pt] of self.tagsOf(from)) {
+      const id = self.tagId(tag.asStr());
+      if (isVoidTy(pt)) { body.push(`  if (v.tag == ${id}) return (${b}){ .tag = ${id} };\n`); }
+      else {
+        const m = mangle(tag.asStr());
+        body.push(`  if (v.tag == ${id}) return (${b}){ .tag = ${id}, .u.${m} = v.u.${m} };\n`);
+      }
+    }
+    body.push(`  return (${b}){ 0 };\n`);
+    self.protos.push(`static ${b} ${name}(${a} v);\n`);
+    self.dropCode.push(`static ${b} ${name}(${a} v) {\n${body}}\n`);
+    name
+  }
+
+  // A value moved out of its place leaves it dead: the move zeroes it.
+  function moving(self: mut Self, e: readonly Expr, v: String): String uses Fail<Diagnostic> {
+    const moved = match (self.p.typed.get(self.fid)) {
+      #Some(t) => t.moves.has(e.span),
+      #None => false,
+    };
+    const t = self.exprTy(e.id);
+    if (!moved || !self.needsDrop(t) || match (t) { #Borrow(_, _) => true, _ => false }) { return v; }
+    const c = self.ctype(t, e.span);
+    `({ ${c} m_ = ${v}; memset(&${v}, 0, sizeof(${c})); m_; })`
+  }
+
+  function ident(self: mut Self, n: str, e: readonly Expr): String uses Fail<Diagnostic> {
+    if (const #Some([c, _]) = self.lvalueOf(n)) { return c; }
+    match (self.p.lookup(self.module, n)) {
+      #Some(#Fn(fid)) => {
+        const args = self.callArgs(e.id);
+        match (self.callee(fid, args, e.span)) {
+          #Inst(i) => self.fnValue(i, e.span),
+          #Builtin(k) => self.unsupported(e.span, `the library function \`${k}\` as a value`),
+        }
+      }
+      #Some(#Const(c)) => self.constant(c, e.span),
+      _ => self.fail(e.span, `unknown name \`${n}\``),
+    }
+  }
+
+  // ---- places ----
+
+  // The C lvalue a place expression denotes.
+  function place(self: mut Self, e: readonly Expr): String uses Fail<Diagnostic> {
+    match (e.kind) {
+      #Ident(n) => {
+        const v = self.ident(n.asStr(), e);
+        if (self.pointerBorrow(self.exprTy(e.id))) { `(*${v})` } else { v }
+      }
+      #Field { target, name } => {
+        const t = self.obj(target);
+        // A field of a tuple is its element.
+        const f = match (stripBorrow(self.exprTy(target.id))) { #Tuple(_) => `f${name.name}`, _ => mangle(name.name.asStr()) };
+        `${t}.${f}`
+      }
+      #Index { target, index } => {
+        const tt = stripBorrow(self.exprTy(target.id));
+        const elem = self.exprTy(e.id);
+        const ec = self.ctype(stripBorrow(elem), e.span);
+        const i = self.value(index);
+        match (tt) {
+          #Array(_, #Known(n)) => {
+            const a = self.obj(target);
+            `${a}.data[({ uint64_t i_ = ${i}; if (i_ >= ${n}) fly_panicf("index %llu out of bounds (length %d)", (unsigned long long)i_, ${n}); i_; })]`
+          }
+          #Tuple(_) => {
+            const a = self.obj(target);
+            `${a}.f${i}`
+          }
+          #Slice(_) => {
+            const a = self.obj(target);
+            `(*(${ec}*)fly_slice_at(${a}, ${i}, sizeof(${ec})))`
+          }
+          #Prim(#Str) => {
+            const a = self.obj(target);
+            `(*(uint8_t*)fly_slice_at((fly_slice){ (void*)${a}.ptr, ${a}.len }, ${i}, 1))`
+          }
+          _ => {
+            const a = self.lend(target);
+            `(*(${ec}*)fly_vec_at(${a}, ${i}, sizeof(${ec})))`
+          }
+        }
+      }
+      #BorrowMut(x) => self.place(x),
+      _ => {
+        if (self.pointerBorrow(self.exprTy(e.id))) {
+          const v = self.ex(e);
+          return `(*${v})`;
+        }
+        // A value with no place lives in a temporary of the scope.
+        const t = self.exprTy(e.id);
+        const tmp = self.temp(t, e.span);
+        const v = self.ex(e);
+        `(*({ ${tmp} = ${v}; &${tmp}; }))`
+      }
+    }
+  }
+
+  // The object a place expression is a field or element of, as an lvalue.
+  function obj(self: mut Self, e: readonly Expr): String uses Fail<Diagnostic> {
+    match (stripBorrow(self.exprTy(e.id))) {
+      #Named(d, args) => {
+        // A `Box` is read through.
+        if (self.p.isKnown(d, "Box")) {
+          const v = self.value(e);
+          return `(*${v})`;
+        }
+        self.place(e)
+      }
+      _ => self.place(e),
+    }
+  }
+
+  // A pointer to a place, lent.
+  function lend(self: mut Self, e: readonly Expr): String uses Fail<Diagnostic> {
+    match (e.kind) {
+      #BorrowMut(x) => self.lend(x),
+      _ => {
+        if (self.pointerBorrow(self.exprTy(e.id)) && match (e.kind) { #Ident(_) => true, _ => !isPlace(e) }) {
+          return self.ex(e);
+        }
+        const p = self.place(e);
+        `(&${p})`
+      }
+    }
+  }
+
+  function sliceOf(self: mut Self, e: readonly Expr): String uses Fail<Diagnostic> {
+    const [target, lo, hi]: [Expr, Option<Box<Expr>>, Option<Box<Expr>>] = match (e.kind) {
+      #Index { target, index } => match (index.kind) {
+        #Range { lo, hi } => [target.get().clone(), lo.clone(), hi.clone()],
+        _ => return self.fail(e.span, "not a range"),
+      },
+      _ => return self.fail(e.span, "not a range"),
+    };
+    const tt = stripBorrow(self.exprTy(target.id));
+    const l = match (lo) { #Some(x) => self.value(x), #None => "0".toString() };
+    match (tt) {
+      #Prim(#Str) => {
+        const s = self.value(target);
+        const h = match (hi) { #Some(x) => self.value(x), #None => "SIZE_MAX".toString() };
+        `({ fly_str s_ = ${s}; size_t l_ = ${l}; size_t h_ = ${h}; fly_str_slice(s_, l_, h_ == SIZE_MAX ? s_.len : h_); })`
+      }
+      _ => {
+        const elem = match (stripBorrow(self.exprTy(e.id))) { #Slice(x) => x.get().clone(), _ => #Error };
+        const ec = self.ctype(elem, e.span);
+        const s = match (tt) {
+          #Slice(_) => self.value(target),
+          #Array(_, #Known(n)) => {
+            const p = self.lend(target);
+            `((fly_slice){ (void*)${p}->data, ${n} })`
+          }
+          _ => {
+            const p = self.lend(target);
+            `fly_vec_slice(${p})`
+          }
+        };
+        const h = match (hi) { #Some(x) => self.value(x), #None => "SIZE_MAX".toString() };
+        `({ fly_slice s_ = ${s}; size_t l_ = ${l}; size_t h_ = ${h}; fly_slice_range(s_, l_, h_ == SIZE_MAX ? s_.len : h_, sizeof(${ec})); })`
+      }
+    }
+  }
+
+  // ---- operators ----
+
+  function checked(self: readonly Self, p: Prim, wide: str): String {
+    const [lo, hi] = bounds(p);
+    const name = primName(p);
+    match (p) {
+      #U64 | #Usize | #I128 => `((${self.primC(p)})(${wide}))`,
+      _ => `FLY_CHECK(${self.primC(p)}, ${cquote(name)}, ${lo}, ${hi}, ${wide})`,
+    }
+  }
+
+  function primC(self: readonly Self, p: Prim): String { primType(p).toString() }
+
+  function binary(self: mut Self, e: readonly Expr, op: str, a: readonly Expr, b: readonly Expr): String uses Fail<Diagnostic> {
+    if (op == "&&" || op == "||") {
+      const x = self.value(a);
+      const y = self.value(b);
+      return `(${x} ${op} ${y})`;
+    }
+    // `==` and the orderings of anything but a primitive call `Eq.eq` and `Ord.cmp`.
+    const method: Option<[usize, Vec<GArg>]> = match (self.p.typed.get(self.fid)) {
+      #Some(typed) => match (typed.ops.get(e.id)) { #Some(m) => #Some(m.clone()), #None => #None },
+      #None => #None,
+    };
+    const at = stripBorrow(self.exprTy(a.id));
+    if (const #Some([f, args]) = method) {
+      const primitive = match (at) { #Prim(_) => true, _ => false };
+      if (!primitive) {
+        let concrete: Vec<GArg> = Vec.new();
+        for (const g of args) { concrete.push(substArg(g, self.map)); }
+        const ptys = self.paramTys(f, concrete);
+        const c = self.callee(f, concrete, e.span);
+        const fname = self.calleeC(c, e.span);
+        const x = self.exAs(a, ptys[0]);
+        const y = self.exAs(b, ptys[1]);
+        const call = `({ __auto_type x_ = ${x}; __auto_type y_ = ${y}; ${fname}(x_, y_); })`;
+        return match (op) {
+          "==" => call,
+          "!=" => `(!${call})`,
+          "<" => `(${call}.tag == ${self.tagId("Less")})`,
+          "<=" => `(${call}.tag != ${self.tagId("Greater")})`,
+          ">" => `(${call}.tag == ${self.tagId("Greater")})`,
+          _ => `(${call}.tag != ${self.tagId("Less")})`,
+        };
+      }
+    }
+    // Strings compare by their bytes, a `String` as the `str` it lends.
+    const bt = stripBorrow(self.exprTy(b.id));
+    if (match (at) { #Prim(#Str) => true, _ => self.isString(at) } || match (bt) { #Prim(#Str) => true, _ => self.isString(bt) }) {
+      const x = self.exAs(a, #Prim(#Str));
+      const y = self.exAs(b, #Prim(#Str));
+      return match (op) {
+        "==" => `fly_str_eq(${x}, ${y})`,
+        "!=" => `(!fly_str_eq(${x}, ${y}))`,
+        _ => `(fly_str_cmp(${x}, ${y}) ${op} 0)`,
+      };
+    }
+    const x = self.value(a);
+    const y = self.value(b);
+    if (op == "==" || op == "!=" || op == "<" || op == ">" || op == "<=" || op == ">=") {
+      return `({ __auto_type x_ = ${x}; __auto_type y_ = ${y}; x_ ${op} y_; })`;
+    }
+    const t = self.exprTy(e.id);
+    match (intPrim(t)) {
+      #Some(p) => {
+        match (op) {
+          "+" => self.checked(p, `fly_add128((fly_i128)(${x}), (fly_i128)(${y}))`),
+          "-" => self.checked(p, `fly_sub128((fly_i128)(${x}), (fly_i128)(${y}))`),
+          "*" => self.checked(p, `fly_mul128((fly_i128)(${x}), (fly_i128)(${y}))`),
+          "/" | "%" => {
+            const c = self.primC(p);
+            `({ ${c} x_ = ${x}; ${c} y_ = ${y}; if (y_ == 0) fly_div_zero(); (${c})(x_ ${op} y_); })`
+          }
+          "<<" => self.checked(p, `((fly_i128)(${x}) << (${y}))`),
+          _ => `((${self.primC(p)})(${x} ${op} ${y}))`,
+        }
+      }
+      #None => {
+        if (op == "%") { return `fmod(${x}, ${y})`; }
+        `(${x} ${op} ${y})`
+      }
+    }
+  }
+
+  // Assigns to a place; the value it held is dropped first (§5.6).
+  function assign(self: mut Self, op: str, target: readonly Expr, value: readonly Expr): String uses Fail<Diagnostic> {
+    const tt = self.exprTy(target.id);
+    const want = match (tt) { #Borrow(true, inner) => inner.get().clone(), other => other.clone() };
+    const wc = self.ctype(want, target.span);
+    const v = self.exAs(value, want);
+    const p = self.place(target);
+    if (op != "=") {
+      const bop = op.slice(0, op.len() - 1);
+      const combined = match (intPrim(want)) {
+        #Some(prim) => match (bop) {
+          "+" => self.checked(prim, `fly_add128((fly_i128)(${p}), (fly_i128)(v_))`),
+          "-" => self.checked(prim, `fly_sub128((fly_i128)(${p}), (fly_i128)(v_))`),
+          "*" => self.checked(prim, `fly_mul128((fly_i128)(${p}), (fly_i128)(v_))`),
+          _ => `((${wc})(${p} ${bop} v_))`,
+        },
+        #None => `(${p} ${bop} v_)`,
+      };
+      return `({ ${wc} v_ = ${v}; ${p} = ${combined}; (fly_unit)0; })`;
+    }
+    if (self.needsDrop(want)) {
+      const f = self.dropFn(want, target.span);
+      return `({ ${wc} v_ = ${v}; ${f}(&${p}); ${p} = v_; (fly_unit)0; })`;
+    }
+    `({ ${wc} v_ = ${v}; ${p} = v_; (fly_unit)0; })`
+  }
+
+  // ---- literals ----
+
+  function template(self: mut Self, parts: readonly Vec<TemplatePiece>): String uses Fail<Diagnostic> {
+    let out = "({ fly_String s_ = fly_String_new(); ".toString();
+    for (const p of parts) {
+      match (p) {
+        #Lit(s) => { if (s.len() > 0) { out.push(`fly_String_push(&s_, ${strLit(s.asStr())}); `); } }
+        #Expr(x) => {
+          const v = self.shown(x);
+          out.push(v.asStr());
+        }
+      }
+    }
+    out.push("s_; })");
+    out
+  }
+
+  // Statements that write a value into the template's string `s_`.
+  function shown(self: mut Self, x: readonly Expr): String uses Fail<Diagnostic> {
+    const t = stripBorrow(self.exprTy(x.id));
+    if (self.isString(t)) {
+      const v = self.stringAsStr(x);
+      return `fly_String_push(&s_, ${v}); `;
+    }
+    match (t) {
+      #Prim(p) => {
+        const v = self.value(x);
+        const shownV = match (p) {
+          #Str => return `fly_String_push(&s_, ${v}); `,
+          #Bool => `fly_show_bool(${v})`,
+          #F32 | #F64 => `fly_show_f64(${v})`,
+          #U64 | #Usize => `fly_show_u128(${v})`,
+          _ => `fly_show_i128(${v})`,
+        };
+        return `{ fly_String n_ = ${shownV}; fly_String_push(&s_, fly_String_as_str(&n_)); fly_String_drop(&n_); } `;
+      }
+      _ => {}
+    }
+    const show: Option<[usize, Vec<GArg>]> = match (self.p.typed.get(self.fid)) {
+      #Some(typed) => match (typed.shows.get(x.id)) { #Some(s) => #Some(s.clone()), #None => #None },
+      #None => #None,
+    };
+    match (show) {
+      #Some([f, args]) => {
+        let concrete: Vec<GArg> = Vec.new();
+        for (const a of args) { concrete.push(substArg(a, self.map)); }
+        const ptys = self.paramTys(f, concrete);
+        const c = self.callee(f, concrete, x.span);
+        const fname = self.calleeC(c, x.span);
+        const v = self.exAs(x, ptys[0]);
+        `${fname}(${v}, &s_); `
+      }
+      #None => self.unsupported(x.span, "showing a value with no `Show`"),
+    }
+  }
+
+  function tag(self: mut Self, e: readonly Expr, name: str, args: readonly TagArgs): String uses Fail<Diagnostic> {
+    const t = self.exprTy(e.id);
+    const ct = self.ctype(t, e.span);
+    const id = self.tagId(name);
+    const live = if (self.liveByte(t)) { ".live = true, " } else { "" };
+    const pt: Ty = match (self.tagsOf(t).iter().find(([k, _]) => k == name)) { #Some([_, x]) => x.clone(), #None => #Error };
+    const m = mangle(name);
+    match (args) {
+      #None => `((${ct}){ ${live}.tag = ${id} })`,
+      #Tuple(es) => {
+        if (es.len() == 1) {
+          const ptc = self.payloadTy(pt);
+          const v = self.exAs(es[0], ptc);
+          return `((${ct}){ ${live}.tag = ${id}, .u.${m} = ${v} })`;
+        }
+        const tup = self.tupleOf(es, pt, e.span);
+        `((${ct}){ ${live}.tag = ${id}, .u.${m} = ${tup} })`
+      }
+      #Record(fields) => {
+        const rec = self.recordOf(fields, pt, e.span);
+        `((${ct}){ ${live}.tag = ${id}, .u.${m} = ${rec} })`
+      }
+    }
+  }
+
+  // A tuple of the type `t` from expressions in order.
+  function tupleOf(self: mut Self, es: readonly Vec<Expr>, t: readonly Ty, span: Span): String uses Fail<Diagnostic> {
+    const ct = self.ctype(t, span);
+    const fs = self.fieldsOf(t);
+    let decls = String.new();
+    let inits: Vec<String> = Vec.new();
+    for (const [i, x] of es.iter().enumerate()) {
+      const ft: Ty = if (i < fs.len()) { fs[i][1].clone() } else { self.exprTy(x.id) };
+      const v = self.exAs(x, ft);
+      decls.push(`__auto_type e${i}_ = ${v}; `);
+      inits.push(`.f${i} = e${i}_`);
+    }
+    `({ ${decls}(${ct}){ ${inits.join(", ")} }; })`
+  }
+
+  function record(self: mut Self, e: readonly Expr, fields: readonly Vec<FieldInit>): String uses Fail<Diagnostic> {
+    const t = self.exprTy(e.id);
+    self.recordOf(fields, t, e.span)
+  }
+
+  // A struct or record of type `t`, its fields evaluated in the order written.
+  function recordOf(self: mut Self, fields: readonly Vec<FieldInit>, t: readonly Ty, span: Span): String uses Fail<Diagnostic> {
+    const ct = self.ctype(t, span);
+    const fs = self.fieldsOf(t);
+    let decls = String.new();
+    let inits: Vec<String> = Vec.new();
+    if (self.liveByte(t)) { inits.push(".live = true".toString()); }
+    for (const [i, f] of fields.iter().enumerate()) {
+      if (f.generate.isSome() || f.computed.isSome()) { self.fail(f.name.span, "a record entry `comptime` code names at run time"); }
+      const ft: Ty = match (fs.iter().find(([k, _]) => k == f.name.name)) { #Some([_, x]) => x.clone(), #None => #Error };
+      const v = match (f.value) {
+        #Some(x) => self.exAs(x, ft),
+        // A punned field moves the local it names.
+        #None => match (self.lvalueOf(f.name.name.asStr())) {
+          #Some([c, lt]) => if (self.needsDrop(lt) && !match (lt) { #Borrow(_, _) => true, _ => false }) {
+            const lc = self.ctype(lt, f.name.span);
+            `({ ${lc} m_ = ${c}; memset(&${c}, 0, sizeof(${lc})); m_; })`
+          } else { c },
+          #None => self.fail(f.name.span, `unknown name \`${f.name.name}\``),
+        },
+      };
+      decls.push(`__auto_type e${i}_ = ${v}; `);
+      inits.push(`.${mangle(f.name.name.asStr())} = e${i}_`);
+    }
+    `({ ${decls}(${ct}){ ${inits.join(", ")} }; })`
+  }
+
+  // A list literal: a tuple, an array, or a `Vec`.
+  function list(self: mut Self, e: readonly Expr, items: readonly Vec<Expr>): String uses Fail<Diagnostic> {
+    const t = self.exprTy(e.id);
+    match (t) {
+      #Tuple(_) => self.tupleOf(items, t, e.span),
+      #Array(elem, _) => {
+        const ct = self.ctype(t, e.span);
+        let decls = String.new();
+        let vs: Vec<String> = Vec.new();
+        for (const [i, x] of items.iter().enumerate()) {
+          const v = self.exAs(x, elem);
+          decls.push(`__auto_type e${i}_ = ${v}; `);
+          vs.push(`e${i}_`);
+        }
+        `({ ${decls}(${ct}){ { ${vs.join(", ")} } }; })`
+      }
+      #Named(_, args) => {
+        const elem: Ty = match (args.first()) { #Some(#Ty(x)) => x.clone(), _ => #Error };
+        const ec = self.ctype(elem, e.span);
+        if (items.len() == 0) { return "((fly_vec){ 0 })".toString(); }
+        let decls = String.new();
+        let vs: Vec<String> = Vec.new();
+        for (const [i, x] of items.iter().enumerate()) {
+          const v = self.exAs(x, elem);
+          decls.push(`${ec} e${i}_ = ${v}; `);
+          vs.push(`e${i}_`);
+        }
+        `({ ${decls}${ec} a_[] = { ${vs.join(", ")} }; fly_vec_from(a_, ${items.len()}, sizeof(${ec})); })`
+      }
+      _ => self.unsupported(e.span, "this list literal"),
+    }
+  }
+
+  // ---- constants ----
+
+  function constant(self: mut Self, c: usize, span: Span): String uses Fail<Diagnostic> {
+    if (const #Some(n) = self.consts.get(c)) { return `${n}()`; }
+    const name = `const${c}`;
+    self.consts.insert(c, name.clone());
+    const ty = self.p.consts[c].ty.clone();
+    const value = self.p.consts[c].value.clone();
+    const module = replace(mut self.module, self.p.consts[c].module);
+    const r = try { #Ok(self.constValue(value, ty)) } catch (d) { #Err(d) };
+    self.module = module;
+    const v = match (r) { #Ok(v) => v, #Err(d) => throw d };
+    const ct = self.ctype(ty, span);
+    self.protos.push(`static ${ct} ${name}(void);\n`);
+    self.dropCode.push(`static ${ct} ${name}(void) { return ${v}; }\n`);
+    `${name}()`
+  }
+
+  function constValue(self: mut Self, e: readonly Expr, ty: readonly Ty): String uses Fail<Diagnostic> {
+    match (e.kind) {
+      #Int(n) => self.intLit(ty, n.asStr()),
+      #Float(n) => n.clone(),
+      #Str(s) => strLit(s.asStr()),
+      #Byte(b) => `((uint8_t)${b})`,
+      #Bool(b) => if (b) { "true".toString() } else { "false".toString() },
+      #Unary { op, operand } => {
+        const v = self.constValue(operand, ty);
+        `(${op}${v})`
+      }
+      #Binary { op, lhs, rhs } => {
+        const a = self.constValue(lhs, ty);
+        const b = self.constValue(rhs, ty);
+        const c = self.ctype(ty, e.span);
+        `((${c})((${c})${a} ${op} (${c})${b}))`
+      }
+      #List(items) => {
+        const elem: Ty = match (stripBorrow(ty)) { #Array(x, _) | #Slice(x) => x.get().clone(), _ => #Error };
+        const ec = self.ctype(elem, e.span);
+        let vs: Vec<String> = Vec.new();
+        for (const it of items) { vs.push(self.constValue(it, elem)); }
+        match (stripBorrow(ty)) {
+          #Slice(_) => `({ static ${ec} a_[] = { ${vs.join(", ")} }; (fly_slice){ a_, ${items.len()} }; })`,
+          _ => {
+            const ct = self.ctype(ty, e.span);
+            `((${ct}){ { ${vs.join(", ")} } })`
+          }
+        }
+      }
+      #Ident(n) => match (self.p.lookup(self.module, n.asStr())) {
+        #Some(#Const(c)) => self.constant(c, e.span),
+        _ => self.fail(e.span, "a constant can be built only of literals and other constants"),
+      },
+      _ => self.fail(e.span, "a constant can be built only of literals and other constants"),
+    }
+  }
+
+  // ---- calls ----
+
+  // The parameter types of `fid` called with `args`.
+  function paramTys(self: readonly Self, fid: usize, args: readonly Vec<GArg>): Vec<Ty> {
+    const pmap = substMap(self.p.fns[fid].scheme.tparams, args);
+    let out: Vec<Ty> = Vec.new();
+    for (const [_, t] of self.p.fns[fid].scheme.params) { out.push(self.resolveAssoc(subst(t, pmap))); }
+    out
+  }
+
+  function calleeC(self: mut Self, c: readonly Callee, span: Span): String uses Fail<Diagnostic> {
+    match (c) {
+      #Inst(i) => self.insts[i].c.clone(),
+      #Builtin(k) => `fly_${k}`,
+    }
+  }
+
+  function call(self: mut Self, e: readonly Expr, callee: readonly Expr, args: readonly Vec<Expr>): String uses Fail<Diagnostic> {
+    const fid: Option<usize> = match (self.p.typed.get(self.fid)) {
+      #Some(t) => match (t.calls.get(e.id)) { #Some(f) => #Some(f), #None => #None },
+      #None => #None,
+    };
+    if (const #Some(fid) = fid) {
+      const cargs = self.callArgs(e.id);
+      const ptys = self.paramTys(fid, cargs);
+      const hasSelf = match (self.p.fns[fid].scheme.params.first()) { #Some([n, _]) => n == "self", #None => false };
+      let all: Vec<Expr> = Vec.new();
+      if (hasSelf) {
+        match (callee.kind) {
+          #Field { target, name: _ } => all.push(target.get().clone()),
+          _ => self.fail(callee.span, "a method needs a receiver"),
+        }
+      }
+      for (const a of args) { all.push(a.clone()); }
+      const pmap = substMap(self.p.fns[fid].scheme.tparams, cargs);
+      const row = substEffs(self.fnEffects(fid), pmap);
+      const failing = self.mayFail(row);
+      const c = self.callee(fid, cargs.clone(), e.span);
+      match (c) {
+        #Inst(i) => {
+          const f = self.insts[i].c.clone();
+          return self.emitCall(f, all, ptys, failing, self.exprTy(e.id), e.span);
+        }
+        #Builtin(k) => return self.builtin(k.asStr(), e, all, ptys, failing),
+      }
+    }
+    // An effect's operation, `Eff.op(…)`.
+    if (const #Field { target, name } = callee.kind) {
+      if (const #Ident(tname) = target.kind) {
+        if (self.local(tname.asStr()).isNone()) {
+          if (const #Some(#Def(d)) = self.p.lookup(self.module, tname.asStr())) {
+            if (const #Effect { ops: _ } = self.p.defs[d].kind) {
+              if (self.p.defs[d].name == "Fail" && args.len() == 1) { return self.throwExpr(args[0]); }
+              return self.unsupported(e.span, `the effect \`${self.p.defs[d].name}\``);
+            }
+          }
+        }
+      }
+    }
+    // A function value.
+    const ft = stripBorrow(self.exprTy(callee.id));
+    const fty: FnTy = match (ft) { #Fn(f) => f.get().clone(), _ => return self.unsupported(e.span, "calling this") };
+    const f = self.value(callee);
+    let decls = String.new();
+    let vs: Vec<String> = Vec.new();
+    let ptypes: Vec<String> = ["void*".toString()];
+    for (const [i, a] of args.iter().enumerate()) {
+      const pt = fty.params[i].clone();
+      const v = self.exAs(a, pt);
+      const pc = self.ctype(pt, a.span);
+      decls.push(`${pc} a${i}_ = ${v}; `);
+      vs.push(`a${i}_`);
+      ptypes.push(pc);
+    }
+    const rt = self.ctype(fty.ret, e.span);
+    const callExpr = `((${rt} (*)(${ptypes.join(", ")}))f_.fn)(f_.env${if (vs.len() > 0) { ", " } else { "" }}${vs.join(", ")})`;
+    const failing = self.mayFail(fty.effects);
+    self.finishCall(`fly_fn f_ = ${f}; ${decls}`, callExpr, rt, failing)
+  }
+
+  // A call of a made function, its arguments evaluated left to right.
+  function emitCall(self: mut Self, f: String, all: readonly Vec<Expr>, ptys: readonly Vec<Ty>, failing: bool, ret: Ty, span: Span): String uses Fail<Diagnostic> {
+    let decls = String.new();
+    let vs: Vec<String> = Vec.new();
+    for (const [i, a] of all.iter().enumerate()) {
+      const pt: Ty = match (ptys.get(i)) { #Some(t) => t.clone(), #None => self.exprTy(a.id) };
+      const v = self.exAs(a, pt);
+      const pc = self.ctype(pt, a.span);
+      decls.push(`${pc} a${i}_ = ${v}; `);
+      vs.push(`a${i}_`);
+    }
+    const rt = self.ctype(ret, span);
+    self.finishCall(decls, `${f}(${vs.join(", ")})`, rt, failing)
+  }
+
+  // A call after its arguments: a failure goes where failures go from here.
+  function finishCall(self: mut Self, decls: String, call: String, rt: String, failing: bool): String {
+    if (!failing) {
+      return if (decls.len() == 0) { call } else { `({ ${decls}${call}; })` };
+    }
+    const label = self.failLabel();
+    `({ ${decls}${rt} r_ = ${call}; if (FLY_FAILED) goto ${label}; r_; })`
+  }
+
+  // A call of the runtime's.
+  function builtin(self: mut Self, key: str, e: readonly Expr, all: readonly Vec<Expr>, ptys: readonly Vec<Ty>, failing: bool): String uses Fail<Diagnostic> {
+    const rt = self.exprTy(e.id);
+    // What the C runtime does by element type, made here.
+    const elem: Ty = match (all.first()) {
+      #Some(a) => match (stripBorrow(self.exprTy(a.id))) {
+        #Named(_, args) => match (args.first()) { #Some(#Ty(x)) => x.clone(), _ => #Error },
+        #Slice(x) => x.get().clone(),
+        #Array(x, _) => x.get().clone(),
+        _ => #Error,
+      },
+      #None => #Error,
+    };
+    let vs: Vec<String> = Vec.new();
+    for (const [i, a] of all.iter().enumerate()) {
+      const pt: Ty = match (ptys.get(i)) { #Some(t) => t.clone(), #None => self.exprTy(a.id) };
+      vs.push(self.exAs(a, pt));
+    }
+    const arg = (i: usize) => if (i < vs.len()) { vs[i].clone() } else { "0".toString() };
+    match (key) {
+      "println" => `({ fly_println(${arg(0)}); (fly_unit)0; })`,
+      "panic" => `({ fly_str m_ = ${arg(0)}; fly_panicf("%.*s", (int)m_.len, (const char*)m_.ptr); (fly_unit)0; })`,
+      "String_new" => "fly_String_new()".toString(),
+      "String_push" => `({ fly_String_push(${arg(0)}, ${arg(1)}); (fly_unit)0; })`,
+      "String_asStr" => `fly_String_as_str(${arg(0)})`,
+      "String_len" => `((uint64_t)(${arg(0)})->len)`,
+      "String_clone" => `fly_String_clone(${arg(0)})`,
+      "str_len" => `((uint64_t)(${arg(0)}).len)`,
+      "str_toString" => `fly_String_from(${arg(0)})`,
+      "str_slice" => `fly_str_slice(${arg(0)}, ${arg(1)}, ${arg(2)})`,
+      "Vec_new" => "((fly_vec){ 0 })".toString(),
+      "Vec_len" | "slice_len" => {
+        const p = arg(0);
+        if (key == "Vec_len") { `((uint64_t)(${p})->len)` } else { `((uint64_t)(${p}).len)` }
+      }
+      "Vec_push" => {
+        const ec = self.ctype(elem, e.span);
+        `({ ${ec} x_ = ${arg(1)}; fly_vec_push(${arg(0)}, &x_, sizeof(${ec})); (fly_unit)0; })`
+      }
+      "Vec_pop" => {
+        const ec = self.ctype(elem, e.span);
+        const oc = self.ctype(rt, e.span);
+        const some = self.tagId("Some");
+        const none = self.tagId("None");
+        `({ ${ec} x_; fly_vec_pop(${arg(0)}, &x_, sizeof(${ec})) ? (${oc}){ .tag = ${some}, .u.Some = x_ } : (${oc}){ .tag = ${none} }; })`
+      }
+      "Vec_truncate" => {
+        if (self.needsDrop(elem)) {
+          const ec = self.ctype(elem, e.span);
+          const d = self.dropFn(elem, e.span);
+          `({ fly_vec* v_ = ${arg(0)}; uint64_t n_ = ${arg(1)}; while (v_->len > n_) { v_->len--; ${d}(&((${ec}*)v_->ptr)[v_->len]); } (fly_unit)0; })`
+        } else { `({ fly_vec_truncate_raw(${arg(0)}, ${arg(1)}); (fly_unit)0; })` }
+      }
+      "Box_new" => {
+        const ec = self.ctype(stripBorrow(self.exprTy(all[0].id)), e.span);
+        `({ ${ec} x_ = ${arg(0)}; (${ec}*)fly_box(&x_, sizeof(${ec})); })`
+      }
+      "Box_get" => arg(0),
+      _ => match (self.library(key, e, all, ptys, vs)) {
+        #Some(c) => c,
+        #None => self.unsupported(e.span, `the library function \`${key}\``),
+      },
+    }
+  }
+
+  // ---- the library's maps and generators ----
+
+  function stdDef(self: readonly Self, name: str, span: Span): usize uses Fail<Diagnostic> {
+    match (self.p.defs.iter().findIndex((d) => d.name == name && self.p.modules[d.module].isStd)) {
+      #Some(d) => d,
+      #None => self.fail(span, `no \`${name}\` in the standard library`),
+    }
+  }
+
+  // A call of interface `iface`'s `method` for `selfTy`, each argument given as a pointer to it.
+  function ifaceCall(self: mut Self, iface: str, method: str, selfTy: readonly Ty, args: readonly Vec<String>, span: Span): String uses Fail<Diagnostic> {
+    const d = self.stdDef(iface, span);
+    const f: usize = match (self.p.ifaceFns.get(`${d}:${method}`.asStr())) {
+      #Some(f) => f,
+      #None => self.fail(span, `no \`${iface}.${method}\``),
+    };
+    const targs: Vec<GArg> = [#Ty(selfTy.clone())];
+    const ptys = self.paramTys(f, targs);
+    const c = self.callee(f, targs, span);
+    const fname = self.calleeC(c, span);
+    let vs: Vec<String> = Vec.new();
+    for (const [i, a] of args.iter().enumerate()) {
+      vs.push(if (i < ptys.len() && !self.pointerBorrow(ptys[i])) { `(*${a})` } else { a.clone() });
+    }
+    `${fname}(${vs.join(", ")})`
+  }
+
+  // A pointer to what `ptr`, a pointer to a `k`, lends as a `q`, and the statements that make it.
+  function lentPtr(self: mut Self, ptr: String, k: Ty, q: readonly Ty, stmts: mut String, span: Span): String uses Fail<Diagnostic> {
+    if (keyTy(k) == keyTy(q)) { return ptr; }
+    if (self.isString(k) && match (q) { #Prim(#Str) => true, _ => false }) {
+      const n = self.fresh();
+      stmts.push(`fly_str ${n} = fly_String_as_str(${ptr}); `);
+      return `&${n}`;
+    }
+    if (self.namedIs(k, "Vec") && match (q) { #Slice(_) => true, _ => false }) {
+      const n = self.fresh();
+      stmts.push(`fly_slice ${n} = fly_vec_slice(${ptr}); `);
+      return `&${n}`;
+    }
+    if (self.boxLike(k)) {
+      const inner: Ty = match (k) { #Named(_, args) => match (args.last()) { #Some(#Ty(t)) => t.clone(), _ => #Error }, _ => #Error };
+      return self.lentPtr(`(*${ptr})`, inner, q, mut stmts, span);
+    }
+    self.fail(span, `a \`${self.p.show(k)}\` does not lend a \`${self.p.show(q)}\``)
+  }
+
+  // The hash of a `q`, given a pointer to it, as `Hash` makes it.
+  function hashFn(self: mut Self, q: readonly Ty, span: Span): String uses Fail<Diagnostic> {
+    const key = `hash:${keyTy(q)}`;
+    if (const #Some(n) = self.helpers.get(key.asStr())) { return n.clone(); }
+    const name = `hash${self.helpers.len()}`;
+    self.helpers.insert(key, name.clone());
+    const qc = self.ctype(q, span);
+    self.protos.push(`static uint64_t ${name}(const void* k);\n`);
+    const call = self.ifaceCall("Hash", "hash", q, [`((${qc}*)k)`, "(&h)".toString()], span);
+    self.dropCode.push(`static uint64_t ${name}(const void* k) { fly_Hasher h = fly_Hasher_new(); ${call}; return h.h; }\n`);
+    name
+  }
+
+  // Whether a map entry's key, a `k`, equals a `q`, given pointers to both, as the `q`'s `Eq` says.
+  function keyEqFn(self: mut Self, k: readonly Ty, q: readonly Ty, span: Span): String uses Fail<Diagnostic> {
+    const key = `eq:${keyTy(k)}:${keyTy(q)}`;
+    if (const #Some(n) = self.helpers.get(key.asStr())) { return n.clone(); }
+    const name = `keq${self.helpers.len()}`;
+    self.helpers.insert(key, name.clone());
+    const kc = self.ctype(k, span);
+    const qc = self.ctype(q, span);
+    let stmts = String.new();
+    const kp = self.lentPtr(`((${kc}*)e)`, k.clone(), q, mut stmts, span);
+    const call = self.ifaceCall("Eq", "eq", q, [kp, `((${qc}*)p)`], span);
+    self.protos.push(`static bool ${name}(const void* e, const void* p);\n`);
+    self.dropCode.push(`static bool ${name}(const void* e, const void* p) { ${stmts}return ${call}; }\n`);
+    name
+  }
+
+  // An `Option` of type `t`: `#Some(v)`, or `#None`.
+  function some(self: mut Self, t: readonly Ty, v: str, span: Span): String uses Fail<Diagnostic> {
+    const c = self.ctype(t, span);
+    `((${c}){ .tag = ${self.tagId("Some")}, .u.Some = ${v} })`
+  }
+  function none(self: mut Self, t: readonly Ty, span: Span): String uses Fail<Diagnostic> {
+    const c = self.ctype(t, span);
+    `((${c}){ .tag = ${self.tagId("None")} })`
+  }
+
+  // A borrow of a `t` at address `p`, as C holds it: a pointer, or the value of a scalar.
+  function borrowAt(self: mut Self, p: str, t: readonly Ty, m: bool, span: Span): String uses Fail<Diagnostic> {
+    const c = self.ctype(t, span);
+    const b: Ty = #Borrow(m, Box.new(t.clone()));
+    if (self.pointerBorrow(b)) { `((${c}*)(${p}))` } else { `(*(${c}*)(${p}))` }
+  }
+
+  // A generator over `len` places `stride` bytes apart from `base`, each giving `item`: C in
+  // terms of `p`, a `uint8_t*` to the place. `drop` drops what is left.
+  function stridedGen(self: mut Self, itemTy: readonly Ty, base: str, len: str, stride: str, item: str, drop: str, span: Span): String uses Fail<Diagnostic> {
+    const ic = self.ctype(itemTy, span);
+    const key = `iter:${ic}:${item}`;
+    const name = match (self.helpers.get(key.asStr())) {
+      #Some(n) => n.clone(),
+      #None => {
+        const n = `gnext${self.helpers.len()}`;
+        self.helpers.insert(key, n.clone());
+        self.protos.push(`static bool ${n}(void* s_, void* o_);\n`);
+        self.dropCode.push(`static bool ${n}(void* s_, void* o_) { fly_iter* s = s_; if (s->i >= s->len) return false; uint8_t* p = s->base + s->i++ * s->stride; *(${ic}*)o_ = ${item}; return true; }\n`);
+        n
+      }
+    };
+    `((fly_gen){ fly_iter_new((void*)(${base}), ${len}, ${stride}), ${name}, ${drop} })`
+  }
+
+  // An adapter's step, made once for each `key`: `body` is C in terms of `s`, its state.
+  function step(self: mut Self, key: String, state: str, body: str): String {
+    if (const #Some(n) = self.helpers.get(key.asStr())) { return n.clone(); }
+    const n = `gstep${self.helpers.len()}`;
+    self.helpers.insert(key, n.clone());
+    self.protos.push(`static bool ${n}(void* s_, void* o_);\n`);
+    self.dropCode.push(`static bool ${n}(void* s_, void* o_) { ${state}* s = s_; ${body} }\n`);
+    n
+  }
+
+  // Statements finding a map's entry for the key at `probe`, a `q`: its index `i_`, or `SIZE_MAX`.
+  function mapFind(self: mut Self, k: readonly Ty, q: readonly Ty, probe: str, ec: str, span: Span): String uses Fail<Diagnostic> {
+    const h = self.hashFn(q, span);
+    const eq = self.keyEqFn(k, q, span);
+    `void* q_ = (void*)${probe}; size_t i_ = fly_map_find(m_, ${h}(q_), q_, ${eq}, sizeof(${ec})); `
+  }
+
+  // A call of the prelude's functions on strings, lists, options and failures.
+  function prelude(self: mut Self, key: str, e: readonly Expr, all: readonly Vec<Expr>, ptys: readonly Vec<Ty>, vs: readonly Vec<String>): Option<String> uses Fail<Diagnostic> {
+    const span = e.span;
+    const rt = self.exprTy(e.id);
+    const arg = (i: usize) => if (i < vs.len()) { vs[i].clone() } else { "0".toString() };
+    const recv: Ty = match (all.first()) { #Some(a) => stripBorrow(self.exprTy(a.id)), #None => #Error };
+    const elem: Ty = match (recv) { #Slice(x) | #Array(x, _) => x.get().clone(), _ => typeArg(recv, 0) };
+    const ec = if (match (elem) { #Error => false, _ => true }) { self.ctype(elem, span) } else { "fly_unit".toString() };
+    // Wrapping arithmetic, on the unsigned type of the same width.
+    if (key.endsWith("_wrappingAdd") || key.endsWith("_wrappingSub") || key.endsWith("_wrappingMul")) {
+      const p = match (intPrim(rt)) { #Some(p) => p, #None => return #None };
+      const c = self.primC(p);
+      const u = match (p) {
+        #I8 | #U8 => "uint8_t", #I16 | #U16 => "uint16_t", #I32 | #U32 => "uint32_t", #I128 => "unsigned __int128", _ => "uint64_t",
+      };
+      const op = if (key.endsWith("Add")) { "+" } else if (key.endsWith("Sub")) { "-" } else { "*" };
+      return #Some(`((${c})(${u})((${u})(${arg(0)}) ${op} (${u})(${arg(1)})))`);
+    }
+    #Some(match (key) {
+      "str_asBytes" => `({ fly_str s_ = ${arg(0)}; (fly_slice){ (void*)s_.ptr, s_.len }; })`,
+      "str_includes" => `({ uint64_t i_; fly_str_find(${arg(0)}, ${arg(1)}, &i_); })`,
+      "str_startsWith" => `fly_str_starts(${arg(0)}, ${arg(1)})`,
+      "str_endsWith" => `fly_str_ends(${arg(0)}, ${arg(1)})`,
+      "str_trim" => `fly_str_trim(${arg(0)})`,
+      "str_toUpperCase" => `fly_str_case(${arg(0)}, true)`,
+      "str_toLowerCase" => `fly_str_case(${arg(0)}, false)`,
+      "str_replaceAll" => `fly_str_replace_all(${arg(0)}, ${arg(1)}, ${arg(2)})`,
+      "str_split" => `fly_str_split(${arg(0)}, ${arg(1)})`,
+      "str_indexOf" => {
+        const yes = self.some(rt, "i_", span);
+        const no = self.none(rt, span);
+        `({ uint64_t i_; fly_str_find(${arg(0)}, ${arg(1)}, &i_) ? ${yes} : ${no}; })`
+      }
+      "String_fromUtf8" => {
+        // The bytes become the string's: a `Vec<u8>` and a `String` are laid out alike.
+        const yes = self.some(rt, "(fly_String){ (uint8_t*)b_.ptr, b_.len, b_.cap }", span);
+        `({ fly_vec b_ = ${arg(0)}; ${yes}; })`
+      }
+      "parseInt" => {
+        const yes = self.some(rt, "v_", span);
+        const no = self.none(rt, span);
+        `({ int64_t v_; fly_parse_int(${arg(0)}, &v_) ? ${yes} : ${no}; })`
+      }
+      "parseFloat" => {
+        const yes = self.some(rt, "v_", span);
+        const no = self.none(rt, span);
+        `({ double v_; fly_parse_float(${arg(0)}, &v_) ? ${yes} : ${no}; })`
+      }
+      "slice_len" => `((uint64_t)(${arg(0)}).len)`,
+      "array_len" => match (recv) { #Array(_, #Known(n)) => `((uint64_t)${n})`, _ => return #None },
+      "slice_reverse" => `({ fly_slice_reverse(${arg(0)}, sizeof(${ec})); (fly_unit)0; })`,
+      "slice_splitAt" => {
+        const tc = self.ctype(rt, span);
+        `({ fly_slice s_ = ${arg(0)}; uint64_t i_ = ${arg(1)}; if (i_ > s_.len) fly_panicf("index %llu out of bounds (length %zu)", (unsigned long long)i_, s_.len); (${tc}){ .f0 = { s_.ptr, i_ }, .f1 = { (uint8_t*)s_.ptr + i_ * sizeof(${ec}), s_.len - i_ } }; })`
+      }
+      "slice_sortBy" => {
+        // The comparison gets each element as the closure takes it: a pointer, or a scalar's value.
+        const pt: Ty = #Borrow(false, Box.new(elem.clone()));
+        const pc = self.ctype(pt, span);
+        const at = if (self.pointerBorrow(pt)) { "" } else { "*" };
+        const ordTy: Ty = match (stripBorrow(ptys[1])) { #Fn(f) => f.ret.clone(), _ => #Error };
+        const oc = self.ctype(ordTy, span);
+        const less = self.tagId("Less");
+        const greater = self.tagId("Greater");
+        const sortKey = `sort:${ec}:${pc}`;
+        const cmp = match (self.helpers.get(sortKey.asStr())) {
+          #Some(n) => n.clone(),
+          #None => {
+            const n = `sortcmp${self.helpers.len()}`;
+            self.helpers.insert(sortKey, n.clone());
+            self.protos.push(`static int ${n}(void* ctx, const void* a, const void* b);\n`);
+            self.dropCode.push(`static int ${n}(void* ctx, const void* a, const void* b) { fly_fn* f = ctx; ${oc} o = ((${oc} (*)(void*, ${pc}, ${pc}))f->fn)(f->env, ${at}(${ec}*)a, ${at}(${ec}*)b); return o.tag == ${less} ? -1 : o.tag == ${greater} ? 1 : 0; }\n`);
+            n
+          }
+        };
+        `({ fly_fn f_ = ${arg(1)}; fly_sort(${arg(0)}, sizeof(${ec}), ${cmp}, &f_); (fly_unit)0; })`
+      }
+      "Vec_remove" => `({ fly_vec* v_ = ${arg(0)}; uint64_t i_ = ${arg(1)}; ${ec} x_; fly_vec_remove(v_, i_, &x_, sizeof(${ec})); x_; })`,
+      "Vec_insert" => `({ fly_vec* v_ = ${arg(0)}; uint64_t i_ = ${arg(1)}; ${ec} x_ = ${arg(2)}; fly_vec_insert(v_, i_, &x_, sizeof(${ec})); (fly_unit)0; })`,
+      "Vec_retain" => {
+        const pt: Ty = #Borrow(false, Box.new(elem.clone()));
+        const pc = self.ctype(pt, span);
+        const x = if (self.pointerBorrow(pt)) { "x_" } else { "*x_" };
+        const d = if (self.needsDrop(elem)) { `else ${self.dropFn(elem, span)}(x_); ` } else { "" };
+        `({ fly_vec* v_ = ${arg(0)}; fly_fn f_ = ${arg(1)}; size_t j_ = 0; for (size_t i_ = 0; i_ < v_->len; i_++) { ${ec}* x_ = &((${ec}*)v_->ptr)[i_]; if (((bool (*)(void*, ${pc}))f_.fn)(f_.env, ${x})) { ((${ec}*)v_->ptr)[j_++] = *x_; } ${d}} v_->len = j_; (fly_unit)0; })`
+      }
+      "Box_into" => {
+        const c = self.ctype(rt, span);
+        `({ ${c}* b_ = ${arg(0)}; ${c} x_ = *b_; free(b_); x_; })`
+      }
+      "replace" => {
+        const c = self.ctype(rt, span);
+        if (!self.pointerBorrow(ptys[0])) { return #None; }
+        `({ ${c}* p_ = ${arg(0)}; ${c} v_ = ${arg(1)}; ${c} o_ = *p_; *p_ = v_; o_; })`
+      }
+      "swap" => {
+        if (!self.pointerBorrow(ptys[0])) { return #None; }
+        const c = self.ctype(stripBorrow(ptys[0]), span);
+        `({ ${c}* a_ = ${arg(0)}; ${c}* b_ = ${arg(1)}; ${c} t_ = *a_; *a_ = *b_; *b_ = t_; (fly_unit)0; })`
+      }
+      "Option_isSome" => {
+        const o = if (self.pointerBorrow(ptys[0])) { `(*${arg(0)})` } else { arg(0) };
+        `((${o}).tag == ${self.tagId("Some")})`
+      }
+      "Option_take" => {
+        const c = self.ctype(rt, span);
+        const no = self.none(rt, span);
+        `({ ${c}* o_ = ${arg(0)}; ${c} r_ = *o_; *o_ = ${no}; r_; })`
+      }
+      "Option_unwrapOr" => {
+        const c = self.ctype(rt, span);
+        const oc = self.ctype(stripBorrow(ptys[0]), span);
+        const d = if (self.needsDrop(rt)) { `${self.dropFn(rt, span)}(&d_); ` } else { "" };
+        `({ ${oc} o_ = ${arg(0)}; ${c} d_ = ${arg(1)}; ${c} r_; if (o_.tag == ${self.tagId("Some")}) { r_ = o_.u.Some; ${d}} else r_ = d_; r_; })`
+      }
+      "Option_cloned" => {
+        const t = self.payloadOf(rt, "Some");
+        const oc = self.ctype(stripBorrow(ptys[0]), span);
+        const pt: Ty = #Borrow(false, Box.new(t.clone()));
+        const p = if (self.pointerBorrow(pt)) { "o_.u.Some" } else { "&o_.u.Some" };
+        const call = self.ifaceCall("Clone", "clone", t, [p.toString()], span);
+        const yes = self.some(rt, call.asStr(), span);
+        const no = self.none(rt, span);
+        `({ ${oc} o_ = ${arg(0)}; o_.tag == ${self.tagId("Some")} ? ${yes} : ${no}; })`
+      }
+      "Result_unwrap" => {
+        const c = self.ctype(stripBorrow(ptys[0]), span);
+        const errTy = self.payloadOf(stripBorrow(ptys[0]), "Err");
+        const ec2 = self.ctype(errTy, span);
+        const boxed = self.boxErr("e_", errTy);
+        const label = self.failLabel();
+        `({ ${c} r_ = ${arg(0)}; if (r_.tag == ${self.tagId("Err")}) { ${ec2} e_ = r_.u.Err; ${boxed}goto ${label}; } r_.u.Ok; })`
+      }
+      "Fail_capture" => {
+        const t = self.payloadOf(rt, "Ok");
+        const errTy = self.payloadOf(rt, "Err");
+        const tc = self.ctype(t, span);
+        const rc = self.ctype(rt, span);
+        const etc = self.ctype(errTy, span);
+        const take = self.takeErr("e_", errTy);
+        `({ fly_fn f_ = ${arg(0)}; ${tc} v_ = ((${tc} (*)(void*))f_.fn)(f_.env); ${rc} r_; if (FLY_FAILED) { ${etc} e_; memset(&e_, 0, sizeof e_); ${take}r_ = (${rc}){ .tag = ${self.tagId("Err")}, .u.Err = e_ }; } else r_ = (${rc}){ .tag = ${self.tagId("Ok")}, .u.Ok = v_ }; r_; })`
+      }
+      "Fail_map" => {
+        const tc = self.ctype(rt, span);
+        const bodyTy: FnTy = match (stripBorrow(ptys[0])) { #Fn(f) => f.get().clone(), _ => return #None };
+        const wrapTy: FnTy = match (stripBorrow(ptys[1])) { #Fn(f) => f.get().clone(), _ => return #None };
+        const errTy = match (wrapTy.params.first()) { #Some(t) => t.clone(), #None => #Error };
+        const etc = self.ctype(errTy, span);
+        const ftc = self.ctype(wrapTy.ret, span);
+        const take = self.takeErr("e_", errTy);
+        const boxed = self.boxErr("w_", wrapTy.ret);
+        const label = self.failLabel();
+        `({ fly_fn f_ = ${arg(0)}; fly_fn w0_ = ${arg(1)}; ${tc} v_ = ((${tc} (*)(void*))f_.fn)(f_.env); if (FLY_FAILED) { ${etc} e_; memset(&e_, 0, sizeof e_); ${take}${ftc} w_ = ((${ftc} (*)(void*, ${etc}))w0_.fn)(w0_.env, e_); ${boxed}goto ${label}; } v_; })`
+      }
+      _ => return #None,
+    })
+  }
+
+  // A call of the library's maps, generators and hashing, which the runtime holds untyped.
+  function library(self: mut Self, key: str, e: readonly Expr, all: readonly Vec<Expr>, ptys: readonly Vec<Ty>, vs: readonly Vec<String>): Option<String> uses Fail<Diagnostic> {
+    const span = e.span;
+    const rt = self.exprTy(e.id);
+    const arg = (i: usize) => if (i < vs.len()) { vs[i].clone() } else { "0".toString() };
+    const recv: Ty = match (all.first()) { #Some(a) => stripBorrow(self.exprTy(a.id)), #None => #Error };
+    // A pointer to a lookup's key, which is lent `readonly`.
+    const probe = if (ptys.len() > 1 && self.pointerBorrow(ptys[1])) { arg(1) } else { `(&(__typeof__(${arg(1)})){ ${arg(1)} })` };
+    if (key.startsWith("HashMap_")) {
+      const k = typeArg(recv, 0);
+      const v = typeArg(recv, 1);
+      const et = entryTy(recv);
+      const ec = self.ctype(et, span);
+      const q = if (ptys.len() > 1) { stripBorrow(ptys[1]) } else { k.clone() };
+      return #Some(match (key) {
+        "HashMap_new" => "((fly_map){ 0 })".toString(),
+        "HashMap_len" => `((uint64_t)(${arg(0)})->len)`,
+        "HashMap_insert" => {
+          const h = self.hashFn(k, span);
+          const eq = self.keyEqFn(k, k, span);
+          const kc = self.ctype(k, span);
+          const vc = self.ctype(v, span);
+          const d = if (self.needsDrop(et)) { `${self.dropFn(et, span)}(e_); ` } else { "" };
+          `({ fly_map* m_ = ${arg(0)}; ${kc} k_ = ${arg(1)}; ${vc} v_ = ${arg(2)}; uint64_t h_ = ${h}(&k_); size_t i_ = fly_map_find(m_, h_, &k_, ${eq}, sizeof(${ec})); ${ec}* e_; if (i_ == SIZE_MAX) e_ = fly_map_append(m_, h_, sizeof(${ec})); else { e_ = (${ec}*)m_->entries + i_; ${d}} e_->f0 = k_; e_->f1 = v_; (fly_unit)0; })`
+        }
+        "HashMap_has" => {
+          const f = self.mapFind(k, q, probe.asStr(), ec.asStr(), span);
+          `({ fly_map* m_ = (fly_map*)${arg(0)}; ${f}i_ != SIZE_MAX; })`
+        }
+        "HashMap_get" | "HashMap_getMut" => {
+          const f = self.mapFind(k, q, probe.asStr(), ec.asStr(), span);
+          const found = self.borrowAt(`&((${ec}*)m_->entries)[i_].f1`.asStr(), v, key == "HashMap_getMut", span);
+          const yes = self.some(rt, found.asStr(), span);
+          const no = self.none(rt, span);
+          `({ fly_map* m_ = (fly_map*)${arg(0)}; ${f}i_ == SIZE_MAX ? ${no} : ${yes}; })`
+        }
+        "HashMap_remove" => {
+          const f = self.mapFind(k, q, probe.asStr(), ec.asStr(), span);
+          const dk = if (self.needsDrop(k)) { `${self.dropFn(k, span)}(&x_.f0); ` } else { "" };
+          const yes = self.some(rt, "x_.f1", span);
+          const no = self.none(rt, span);
+          `({ fly_map* m_ = ${arg(0)}; ${f}${ec} x_; if (i_ != SIZE_MAX) { fly_map_remove_at(m_, i_, &x_, sizeof(${ec})); ${dk}} i_ == SIZE_MAX ? ${no} : ${yes}; })`
+        }
+        "HashMap_keys" | "HashMap_values" | "HashMap_valuesMut" | "HashMap_entries" => {
+          const itemTy = typeArg(rt, 0);
+          const off = `p + offsetof(${ec}, f1)`;
+          const item = match (key) {
+            "HashMap_keys" => self.borrowAt("p", k, false, span),
+            "HashMap_values" => self.borrowAt(off.asStr(), v, false, span),
+            "HashMap_valuesMut" => self.borrowAt(off.asStr(), v, true, span),
+            _ => {
+              const tc = self.ctype(itemTy, span);
+              const a = self.borrowAt("p", k, false, span);
+              const b = self.borrowAt(off.asStr(), v, false, span);
+              `((${tc}){ .f0 = ${a}, .f1 = ${b} })`
+            }
+          };
+          const g = self.stridedGen(itemTy, "m_->entries", "m_->len", `sizeof(${ec})`.asStr(), item.asStr(), "free", span);
+          `({ fly_map* m_ = (fly_map*)${arg(0)}; ${g}; })`
+        }
+        "HashMap_sortedByValue" => {
+          // Largest value first; equal values by their keys.
+          const key2 = `sorted:${keyTy(et)}`;
+          const cmp = match (self.helpers.get(key2.asStr())) {
+            #Some(n) => n.clone(),
+            #None => {
+              const n = `cmp${self.helpers.len()}`;
+              self.helpers.insert(key2, n.clone());
+              const byV = self.ifaceCall("Ord", "cmp", v, [`(&((${ec}*)b)->f1)`, `(&((${ec}*)a)->f1)`], span);
+              const byK = self.ifaceCall("Ord", "cmp", k, [`(&((${ec}*)a)->f0)`, `(&((${ec}*)b)->f0)`], span);
+              const less = self.tagId("Less");
+              const greater = self.tagId("Greater");
+              const equal = self.tagId("Equal");
+              self.protos.push(`static int ${n}(const void* a, const void* b);\n`);
+              self.dropCode.push(`static int ${n}(const void* a, const void* b) { uint32_t t = ${byV}.tag; if (t == ${equal}) t = ${byK}.tag; return t == ${less} ? -1 : t == ${greater} ? 1 : 0; }\n`);
+              n
+            }
+          };
+          `({ fly_map m_ = ${arg(0)}; fly_vec v_ = fly_vec_from(m_.entries, m_.len, sizeof(${ec})); if (v_.len > 1) qsort(v_.ptr, v_.len, sizeof(${ec}), ${cmp}); fly_map_free(&m_); v_; })`
+        }
+        _ => return #None,
+      });
+    }
+    if (key.startsWith("Hasher_")) {
+      return #Some(match (key) {
+        "Hasher_new" => "fly_Hasher_new()".toString(),
+        "Hasher_finish" => `fly_Hasher_finish(${arg(0)})`,
+        _ => `({ fly_${key}(${arg(0)}, ${arg(1)}); (fly_unit)0; })`,
+      });
+    }
+    match (key) {
+      "Vec_iter" | "slice_iter" | "Vec_iterMut" | "slice_iterMut" => {
+        const itemTy = typeArg(rt, 0);
+        const elem = stripBorrow(itemTy);
+        const ec = self.ctype(elem, span);
+        const item = self.borrowAt("p", elem, key.endsWith("Mut"), span);
+        const list = if (key.startsWith("Vec")) { `fly_vec_slice(${arg(0)})` } else { arg(0) };
+        const g = self.stridedGen(itemTy, "l_.ptr", "l_.len", `sizeof(${ec})`.asStr(), item.asStr(), "free", span);
+        return #Some(`({ fly_slice l_ = ${list}; ${g}; })`);
+      }
+      "Vec_drain" => {
+        const itemTy = typeArg(rt, 0);
+        const ec = self.ctype(itemTy, span);
+        const key2 = `drain:${keyTy(itemTy)}`;
+        const drop = match (self.helpers.get(key2.asStr())) {
+          #Some(n) => n.clone(),
+          #None => {
+            const n = `gdrain${self.helpers.len()}`;
+            self.helpers.insert(key2, n.clone());
+            const d = if (self.needsDrop(itemTy)) { `for (; s->i < s->len; s->i++) ${self.dropFn(itemTy, span)}((${ec}*)(s->base + s->i * s->stride)); ` } else { "" };
+            self.protos.push(`static void ${n}(void* s_);\n`);
+            self.dropCode.push(`static void ${n}(void* s_) { fly_iter* s = s_; ${d}free(s->base); free(s); }\n`);
+            n
+          }
+        };
+        const g = self.stridedGen(itemTy, "v_->ptr", "v_->len", `sizeof(${ec})`.asStr(), `*(${ec}*)p`.asStr(), drop.asStr(), span);
+        return #Some(`({ fly_vec* v_ = ${arg(0)}; fly_gen g_ = ${g}; *v_ = (fly_vec){ 0 }; g_; })`);
+      }
+      _ => {}
+    }
+    if (const #Some(c) = self.prelude(key, e, all, ptys, vs)) { return #Some(c); }
+    if (!key.startsWith("Gen_")) { return #None; }
+    const t = typeArg(recv, 0);
+    const tc = self.ctype(t, span);
+    const out = typeArg(rt, 0);
+    const oc = if (self.namedIs(rt, "Gen")) { self.ctype(out, span) } else { String.new() };
+    const dropT = if (self.needsDrop(t)) { `${self.dropFn(t, span)}(&x); ` } else { "" };
+    #Some(match (key) {
+      "Gen_next" => {
+        const yes = self.some(rt, "x_", span);
+        const no = self.none(rt, span);
+        `({ fly_gen* g_ = ${arg(0)}; ${tc} x_; g_->next(g_->st, &x_) ? ${yes} : ${no}; })`
+      }
+      "Gen_collect" => {
+        const d = self.dropFn(rt, span);
+        `({ fly_gen g_ = ${arg(0)}; fly_vec v_ = { 0 }; ${tc} x_; while (g_.next(g_.st, &x_)) fly_vec_push(&v_, &x_, sizeof(${tc})); fly_gen_drop(&g_); if (FLY_FAILED) ${d}(&v_); v_; })`
+      }
+      "Gen_map" => {
+        const st = self.step(`map:${tc}:${oc}`, "fly_gmap", `${tc} x; if (!s->in.next(s->in.st, &x)) return false; *(${oc}*)o_ = ((${oc} (*)(void*, ${tc}))s->f.fn)(s->f.env, x); return !FLY_FAILED;`.asStr());
+        `((fly_gen){ fly_gmap_new(${arg(0)}, ${arg(1)}), ${st}, fly_gmap_drop })`
+      }
+      "Gen_filter" => {
+        const pt: Ty = #Borrow(false, Box.new(t.clone()));
+        const pc = self.ctype(pt, span);
+        const x = if (self.pointerBorrow(pt)) { "&x" } else { "x" };
+        const st = self.step(`filter:${tc}`, "fly_gmap", `${tc} x; while (s->in.next(s->in.st, &x)) { if (((bool (*)(void*, ${pc}))s->f.fn)(s->f.env, ${x})) return !FLY_FAILED; ${dropT}if (FLY_FAILED) return false; } return false;`.asStr());
+        `((fly_gen){ fly_gmap_new(${arg(0)}, ${arg(1)}), ${st}, fly_gmap_drop })`
+      }
+      "Gen_take" => {
+        const st = self.step(`take:${tc}`, "fly_gcount", "if (s->n == 0) return false; s->n--; return s->in.next(s->in.st, o_);");
+        `((fly_gen){ fly_gcount_new(${arg(0)}, ${arg(1)}), ${st}, fly_gcount_drop })`
+      }
+      "Gen_enumerate" => {
+        const st = self.step(`enumerate:${tc}`, "fly_gcount", `${tc} x; if (!s->in.next(s->in.st, &x)) return false; *(${oc}*)o_ = (${oc}){ .f0 = s->n++, .f1 = x }; return true;`.asStr());
+        `((fly_gen){ fly_gcount_new(${arg(0)}, 0), ${st}, fly_gcount_drop })`
+      }
+      "Gen_zip" => {
+        const u = typeArg(stripBorrow(ptys[1]), 0);
+        const uc = self.ctype(u, span);
+        const st = self.step(`zip:${tc}:${uc}`, "fly_gzip", `${tc} x; if (!s->a.next(s->a.st, &x)) return false; ${uc} y; if (!s->b.next(s->b.st, &y)) { ${dropT}return false; } *(${oc}*)o_ = (${oc}){ .f0 = x, .f1 = y }; return true;`.asStr());
+        `((fly_gen){ fly_gzip_new(${arg(0)}, ${arg(1)}), ${st}, fly_gzip_drop })`
+      }
+      "Gen_drop" => `({ fly_gen_drop(${arg(0)}); (fly_unit)0; })`,
+      _ => return #None,
+    })
+  }
+
+  // ---- control ----
+
+  function block(self: mut Self, b: readonly Block): String uses Fail<Diagnostic> {
+    const t = match (b.tail) { #Some(x) => self.exprTy(x.id), #None => #Prim(#Void) };
+    self.blockAs(b, t)
+  }
+
+  // A block whose value is wanted as a `t`.
+  function blockAs(self: mut Self, b: readonly Block, t: readonly Ty): String uses Fail<Diagnostic> {
+    self.push();
+    let out = "({ ".toString();
+    for (const st of b.stmts) { out.push(self.stmt(st).asStr()); }
+    const tail = match (b.tail) { #Some(x) => self.exAs(x, t), #None => "((fly_unit)0)".toString() };
+    const drops = self.pop(b.span);
+    if (drops.len() == 0) {
+      out.push(`${tail}; })`);
+    } else {
+      const ct = self.ctype(t, b.span);
+      out.push(`${ct} b_ = ${tail}; ${drops}b_; })`);
+    }
+    out
+  }
+
+  function stmt(self: mut Self, st: readonly Stmt): String uses Fail<Diagnostic> {
+    match (st) {
+      #Let { mutable: _, pat, ty: _, init, span: _ } => {
+        match (pat.kind) {
+          #Bind(n) => {
+            const want = self.bindingTy(pat.id);
+            const v = self.exAs(init, want);
+            const c = self.declare(n.asStr(), want, pat.span);
+            `${c} = ${v}; `
+          }
+          _ => {
+            const t = self.exprTy(init.id);
+            // A borrow taken apart lends its parts.
+            if (match (t) { #Borrow(_, _) => true, _ => false }) {
+              const v = self.ex(init);
+              const tmp = self.unowned(t, pat.span);
+              const binds = self.binds(pat, tmp.asStr(), t);
+              const cond = self.cond(pat, tmp.asStr(), t);
+              return `${tmp} = ${v}; if (!(${cond})) fly_panic("pattern did not match"); ${binds}`;
+            }
+            const v = self.value(init);
+            const tmp = self.temp(stripBorrow(t), pat.span);
+            const binds = self.binds(pat, tmp.asStr(), stripBorrow(t));
+            const cond = self.cond(pat, tmp.asStr(), stripBorrow(t));
+            `${tmp} = ${v}; if (!(${cond})) fly_panic("pattern did not match"); ${binds}`
+          }
+        }
+      }
+      #Expr(x) => {
+        // A value nothing takes is dropped where it is made.
+        const t = self.exprTy(x.id);
+        const v = self.ex(x);
+        if (self.needsDrop(t) && !match (t) { #Borrow(_, _) => true, _ => false }) {
+          const d = self.dropFn(t, x.span);
+          const ct = self.ctype(t, x.span);
+          `{ ${ct} d_ = ${v}; ${d}(&d_); } `
+        } else { `${v}; ` }
+      }
+      #Defer(x) => self.unsupported(x.span, "`defer`"),
+    }
+  }
+
+  function whileLoop(self: mut Self, cond: readonly Expr, body: readonly Block): String uses Fail<Diagnostic> {
+    const brk = self.fresh();
+    const cont = self.fresh();
+    self.loops.push({ brk: brk.clone(), cont: cont.clone(), locals: Vec.new() });
+    const c = self.value(cond);
+    const b = self.block(body);
+    self.loops.pop();
+    `({ while (1) { if (!(${c})) break; ${b}; ${cont}: ; } ${brk}: ; (fly_unit)0; })`
+  }
+
+  // `break` or `continue`: what the loop's body owns is dropped first.
+  function jump(self: mut Self, brk: bool): String uses Fail<Diagnostic> {
+    const l = match (self.loops.last()) { #Some(l) => l.clone(), #None => return "((fly_unit)0)".toString() };
+    const drops = self.dropsOf(l.locals, { start: 0, end: 0 });
+    const target = if (brk) { l.brk } else { l.cont };
+    `({ ${drops}goto ${target}; (fly_unit)0; })`
+  }
+
+  function forOf(self: mut Self, pat: readonly Pattern, iter: readonly Expr, body: readonly Block): String uses Fail<Diagnostic> {
+    const brk = self.fresh();
+    const cont = self.fresh();
+    self.push();
+    if (const #Range { lo: #Some(lo), hi: #Some(hi) } = iter.kind) {
+      const t = self.exprTy(iter.id);
+      const ct = self.ctype(t, iter.span);
+      const a = self.value(lo);
+      const b = self.value(hi);
+      const i = self.fresh();
+      const end = self.fresh();
+      self.loops.push({ brk: brk.clone(), cont: cont.clone(), locals: Vec.new() });
+      const step = self.iteration(pat, t, i.asStr(), body, cont.asStr());
+      self.loops.pop();
+      const drops = self.pop(iter.span);
+      return `({ ${ct} ${i} = ${a}; ${ct} ${end} = ${b}; for (; ${i} < ${end}; ${i}++) ${step}${brk}: ; ${drops}(fly_unit)0; })`;
+    }
+    // `for (x of xs.iter())` iterates the list itself.
+    const listed = match (self.listIter(iter)) { #Some(t) => t, #None => iter.clone() };
+    const it = stripBorrow(self.exprTy(listed.id));
+    // A generator: pulled for each item, and dropped when the loop ends.
+    if (self.namedIs(it, "Gen")) {
+      if (match (self.exprTy(iter.id)) { #Borrow(_, _) => true, _ => false }) { return self.unsupported(iter.span, "iterating a borrowed generator"); }
+      const g = self.temp(it, iter.span);
+      // The loop takes the generator: a place it is in no longer holds it.
+      const v = if (isPlace(iter)) {
+        const p = self.place(iter);
+        `({ fly_gen m_ = ${p}; memset(&${p}, 0, sizeof(fly_gen)); m_; })`
+      } else { self.exAs(iter, it) };
+      const itemTy = typeArg(it, 0);
+      const ic = self.ctype(itemTy, iter.span);
+      const x = self.fresh();
+      self.loops.push({ brk: brk.clone(), cont: cont.clone(), locals: Vec.new() });
+      const step = self.iteration(pat, itemTy, x.asStr(), body, cont.asStr());
+      self.loops.pop();
+      const drops = self.pop(iter.span);
+      const label = self.failLabel();
+      return `({ ${g} = ${v}; ${ic} ${x}; while (${g}.next(${g}.st, &${x})) ${step}${brk}: ; if (FLY_FAILED) goto ${label}; ${drops}(fly_unit)0; })`;
+    }
+    // A list, or a borrow of one: its elements.
+    const listy = match (it) { #Slice(_) | #Array(_, _) => true, _ => self.namedIs(it, "Vec") };
+    if (!listy) { return self.unsupported(iter.span, "iterating this"); }
+    const elem: Ty = match (it) {
+      #Slice(x) | #Array(x, _) => x.get().clone(),
+      #Named(_, args) => match (args.first()) { #Some(#Ty(x)) => x.clone(), _ => #Error },
+      _ => #Error,
+    };
+    const ec = self.ctype(elem, iter.span);
+    const s = match (it) {
+      #Slice(_) => self.value(listed),
+      #Array(_, #Known(n)) => {
+        const p = self.lend(listed);
+        `((fly_slice){ (void*)${p}->data, ${n} })`
+      }
+      _ => {
+        const p = self.lend(listed);
+        `fly_vec_slice(${p})`
+      }
+    };
+    const sv = self.fresh();
+    const i = self.fresh();
+    self.loops.push({ brk: brk.clone(), cont: cont.clone(), locals: Vec.new() });
+    // Each element is lent to the body, `readonly`.
+    const itemTy: Ty = #Borrow(false, Box.new(elem.clone()));
+    const item = if (self.pointerBorrow(itemTy)) { `&((${ec}*)${sv}.ptr)[${i}]` } else { `((${ec}*)${sv}.ptr)[${i}]` };
+    const step = self.iteration(pat, itemTy, item.asStr(), body, cont.asStr());
+    self.loops.pop();
+    const drops = self.pop(iter.span);
+    `({ fly_slice ${sv} = ${s}; for (size_t ${i} = 0; ${i} < ${sv}.len; ${i}++) ${step}${brk}: ; ${drops}(fly_unit)0; })`
+  }
+
+  // One iteration: the item bound by the pattern in a scope of its own, which the iteration drops
+  // as it ends.
+  function iteration(self: mut Self, pat: readonly Pattern, itemTy: readonly Ty, item: str, body: readonly Block, cont: str): String uses Fail<Diagnostic> {
+    self.push();
+    const tmp = self.temp(itemTy, pat.span);
+    const binds = self.binds(pat, tmp.asStr(), itemTy);
+    const bodyC = self.block(body);
+    const drops = self.pop(body.span);
+    `{ ${tmp} = ${item}; ${binds}${bodyC}; ${cont}: ; ${drops}} `
+  }
+
+  // The list a `for` iterates through its `iter()`, if that is what it iterates.
+  function listIter(self: mut Self, iter: readonly Expr): Option<Expr> uses Fail<Diagnostic> {
+    const [callee, args]: [Expr, Vec<Expr>] = match (iter.kind) {
+      #Call { callee, typeArgs: _, args } => [callee.get().clone(), args.clone()],
+      _ => return #None,
+    };
+    if (args.len() > 0) { return #None; }
+    const target: Expr = match (callee.kind) { #Field { target, name: _ } => target.get().clone(), _ => return #None };
+    const fid: usize = match (self.p.typed.get(self.fid)) {
+      #Some(t) => match (t.calls.get(iter.id)) { #Some(f) => f, #None => return #None },
+      #None => return #None,
+    };
+    match (self.callee(fid, self.callArgs(iter.id), iter.span)) {
+      #Builtin(k) => if (k == "Vec_iter" || k == "slice_iter") { #Some(target) } else { #None },
+      #Inst(_) => #None,
+    }
+  }
+
+  function returnExpr(self: mut Self, v: readonly Option<Box<Expr>>): String uses Fail<Diagnostic> {
+    const ret = self.ret.clone();
+    const rc = self.ctype(ret, { start: 0, end: 0 });
+    const value = match (v) { #Some(x) => self.exAs(x, ret), #None => "((fly_unit)0)".toString() };
+    `({ ret_ = ${value}; goto ret; (fly_unit)0; })`
+  }
+
+  function throwExpr(self: mut Self, x: readonly Expr): String uses Fail<Diagnostic> {
+    const t = stripBorrow(self.exprTy(x.id));
+    const v = self.value(x);
+    const ct = self.ctype(t, x.span);
+    const label = self.failLabel();
+    const boxed = self.boxErr("e_", t);
+    `({ ${ct} e_ = ${v}; ${boxed}goto ${label}; (fly_unit)0; })`
+  }
+
+  // Whether values of the type are tagged: a union, or an enum.
+  function tagged(self: readonly Self, t: readonly Ty): bool {
+    match (t) {
+      #Union(_) => true,
+      #Named(d, _) => match (self.p.defs[d].kind) { #Enum { tags: _ } => true, _ => false },
+      _ => false,
+    }
+  }
+
+  // Statements raising the failure `v`, a `t`: boxed by its tag, so a `catch` of a wider or a
+  // narrower union of tags takes it out as its own.
+  function boxErr(self: readonly Self, v: str, t: readonly Ty): String {
+    if (self.tagged(t)) { `fly_err_box(${v}.tag, &${v}.u, sizeof(${v}.u)); ` } else { `fly_err_box(0, &${v}, sizeof(${v})); ` }
+  }
+
+  // Statements taking the failure raised into `lv`, a `t`.
+  function takeErr(self: readonly Self, lv: str, t: readonly Ty): String {
+    if (self.tagged(t)) { `${lv}.tag = fly_err_tag(); fly_err_take(&${lv}.u, sizeof(${lv}.u)); ` } else { `fly_err_take(&${lv}, sizeof(${lv})); ` }
+  }
+
+  function tryCatch(self: mut Self, e: readonly Expr, body: readonly Block, pat: readonly Pattern, handler: readonly Block): String uses Fail<Diagnostic> {
+    const t = self.exprTy(e.id);
+    const ct = self.ctype(t, e.span);
+    const label = self.fresh();
+    const done = self.fresh();
+    self.catches.push({ label: label.clone(), locals: Vec.new() });
+    const b = self.blockAs(body, t);
+    const c = match (self.catches.pop()) { #Some(c) => c, #None => ({ label: label.clone(), locals: Vec.new() }) };
+    const drops = self.dropsOf(c.locals, e.span);
+    // What was thrown, as the type the pattern takes apart.
+    const errTy = self.catchTy(pat);
+    const ec = self.ctype(errTy, pat.span);
+    self.push();
+    const tmp = self.temp(errTy, pat.span);
+    const binds = self.binds(pat, tmp.asStr(), errTy);
+    const h = self.blockAs(handler, t);
+    const hdrops = self.pop(handler.span);
+    const take = self.takeErr(tmp.asStr(), errTy);
+    `({ ${ct} r_; r_ = ${b}; goto ${done}; ${label}: ${drops}memset(&${tmp}, 0, sizeof(${ec})); ${take}${binds}r_ = ${h}; ${hdrops}${done}: ; r_; })`
+  }
+
+  // The type a `catch` pattern takes apart.
+  function catchTy(self: readonly Self, pat: readonly Pattern): Ty {
+    let ids: Vec<usize> = Vec.new();
+    bindIds(pat, mut ids);
+    match (pat.kind) {
+      #Bind(_) => self.bindingTy(pat.id),
+      _ => match (self.p.typed.get(self.fid)) {
+        #Some(t) => match (t.exprs.get(pat.id)) { #Some(x) => self.concrete(x), #None => #Error },
+        #None => #Error,
+      },
+    }
+  }
+
+  // ---- patterns ----
+
+  // What a structural pattern takes apart: a borrow, or a box, is looked through to what it holds.
+  function under(self: readonly Self, p: readonly Pattern, subj: String, t: Ty): [String, Ty] {
+    match (p.kind) { #Wild | #Bind(_) => return [subj, t], _ => {} }
+    match (t) {
+      #Borrow(_, inner) => {
+        const s = if (self.pointerBorrow(t)) { `(*${subj})` } else { subj };
+        self.under(p, s, inner.get().clone())
+      }
+      #Named(_, args) if self.boxLike(t) => match (args.last()) {
+        #Some(#Ty(inner)) => self.under(p, `(*${subj})`, inner.clone()),
+        _ => [subj, t],
+      },
+      _ => [subj, t],
+    }
+  }
+
+  // The `i`th part of a tuple pattern's subject: a tuple's field, or an array's element.
+  function part(self: readonly Self, subj: str, t: readonly Ty, i: usize): [String, Ty] {
+    match (t) {
+      #Array(e, _) => [`(${subj}).data[${i}]`, e.get().clone()],
+      _ => {
+        const fs = self.fieldsOf(t);
+        [`(${subj}).f${i}`, if (i < fs.len()) { fs[i][1].clone() } else { #Error }]
+      }
+    }
+  }
+
+  // The condition under which `subj`, of type `t`, matches a pattern.
+  function cond(self: mut Self, p: readonly Pattern, subj0: str, t0: readonly Ty): String uses Fail<Diagnostic> {
+    const [subj, t] = self.under(p, subj0.toString(), t0.clone());
+    match (p.kind) {
+      #Wild | #Bind(_) => "true".toString(),
+      #Lit(e) => match (e.kind) {
+        #Str(s) => `fly_str_eq(${subj}, ${strLit(s.asStr())})`,
+        _ => {
+          const v = self.value(e);
+          `(${subj} == ${v})`
+        }
+      },
+      #Tag { name, args } => {
+        const id = self.tagId(name.asStr());
+        let parts: Vec<String> = [`(${subj}).tag == ${id}`];
+        const pt: Ty = match (self.tagsOf(t).iter().find(([k, _]) => k == name)) { #Some([_, x]) => x.clone(), #None => #Error };
+        const m = mangle(name.asStr());
+        match (args) {
+          #None => {}
+          #Tuple(ps) => {
+            if (ps.len() == 1) {
+              const c = self.cond(ps[0], `(${subj}).u.${m}`.asStr(), self.payloadTy(pt));
+              if (c != "true") { parts.push(c); }
+            } else {
+              for (const [i, q] of ps.iter().enumerate()) {
+                const [qs, qt] = self.part(`(${subj}).u.${m}`.asStr(), pt, i);
+                const c = self.cond(q, qs.asStr(), qt);
+                if (c != "true") { parts.push(c); }
+              }
+            }
+          }
+          #Record(fs) => self.fieldConds(fs, `(${subj}).u.${m}`.asStr(), pt, mut parts),
+        }
+        `(${parts.join(" && ")})`
+      }
+      #Tuple(ps) => {
+        let parts: Vec<String> = Vec.new();
+        for (const [i, q] of ps.iter().enumerate()) {
+          const [qs, qt] = self.part(subj.asStr(), t, i);
+          const c = self.cond(q, qs.asStr(), qt);
+          if (c != "true") { parts.push(c); }
+        }
+        if (parts.len() == 0) { "true".toString() } else { `(${parts.join(" && ")})` }
+      }
+      #Record { name: _, fields } => {
+        let parts: Vec<String> = Vec.new();
+        self.fieldConds(fields, subj.asStr(), t, mut parts);
+        if (parts.len() == 0) { "true".toString() } else { `(${parts.join(" && ")})` }
+      }
+      #Or(alts) => {
+        let parts: Vec<String> = Vec.new();
+        for (const a of alts) { parts.push(self.cond(a, subj.asStr(), t)); }
+        `(${parts.join(" || ")})`
+      }
+      #TagAt { name: _, args: _ } => self.fail(p.span, "a tag named by `comptime` code at run time"),
+    }
+  }
+
+  function fieldConds(self: mut Self, fs: readonly Vec<[Ident, Option<Pattern>]>, subj: str, t: readonly Ty, parts: mut Vec<String>): void uses Fail<Diagnostic> {
+    const fields = self.fieldsOf(t);
+    for (const [f, q] of fs) {
+      if (const #Some(q) = q) {
+        const ft: Ty = match (fields.iter().find(([k, _]) => k == f.name)) { #Some([_, x]) => x.clone(), #None => #Error };
+        const c = self.cond(q, `(${subj}).${mangle(f.name.asStr())}`.asStr(), ft);
+        if (c != "true") { parts.push(c); }
+      }
+    }
+  }
+
+  // Statements declaring what a pattern binds from `subj`, a `t`, which is known to match.
+  function binds(self: mut Self, p: readonly Pattern, subj: str, t: readonly Ty): String uses Fail<Diagnostic> {
+    let taken = String.new();
+    let out = self.bindsThen(p, subj, t, true, false, mut taken);
+    out.push(taken.asStr());
+    out
+  }
+
+  // As `binds`, for a `match` arm: what it binds of an owned value it takes if it `takes` (leaving
+  // the parts where they are: `taken` gets the statements that mark them moved, for when a guard
+  // has accepted the arm), and else refers to where it is — all of it, if the arm is `lent` the
+  // place to change it (§4.1).
+  function bindsThen(self: mut Self, p: readonly Pattern, subj: str, t: readonly Ty, takes: bool, lent: bool, taken: mut String): String uses Fail<Diagnostic> {
+    let out = String.new();
+    let ps: Vec<[String, usize, String, Ty]> = Vec.new();
+    self.paths(p, subj.toString(), t.clone(), mut ps);
+    for (const [n, id, path, pt] of ps) {
+      const bt = self.bindingTy(id);
+      const owned = match (bt) { #Borrow(_, _) => false, _ => !viewLike(bt) };
+      if (owned && (lent || !takes && self.needsDrop(bt))) {
+        const c = self.declareRef(n.asStr(), bt.clone(), p.span);
+        let none = String.new();
+        const v = self.bindValue(path.clone(), pt.clone(), #Borrow(true, Box.new(bt.clone())), mut none, p.span);
+        out.push(`${c} = ${v}; `);
+        continue;
+      }
+      const c = self.declare(n.asStr(), bt.clone(), p.span);
+      const v = self.bindValue(path.clone(), pt.clone(), bt, mut taken, p.span);
+      out.push(`${c} = ${v}; `);
+    }
+    out
+  }
+
+  // A part at `path`, a `pt`, as a binding of type `bt`: the part itself, moved out of what owns it;
+  // or a borrow of it, through what borrows or boxes it.
+  function bindValue(self: mut Self, path: String, pt: Ty, bt: readonly Ty, taken: mut String, span: Span): String uses Fail<Diagnostic> {
+    if (keyTy(pt) == keyTy(bt)) {
+      if (match (bt) { #Borrow(_, _) => false, _ => self.needsDrop(bt) }) {
+        const c = self.ctype(bt, span);
+        taken.push(`memset(&${path}, 0, sizeof(${c})); `);
+      }
+      return path;
+    }
+    const inner: Ty = match (bt) { #Borrow(_, x) => x.get().clone(), _ => return path };
+    match (pt) {
+      #Borrow(_, x) => {
+        const v = if (self.pointerBorrow(pt)) { `(*${path})` } else { path };
+        return self.bindValue(v, x.get().clone(), bt, mut taken, span);
+      }
+      #Named(_, args) if self.boxLike(pt) && keyTy(pt) != keyTy(inner) => {
+        const x: Ty = match (args.last()) { #Some(#Ty(x)) => x.clone(), _ => #Error };
+        return self.bindValue(`(*${path})`, x, bt, mut taken, span);
+      }
+      _ => {}
+    }
+    if (self.pointerBorrow(bt)) { `(&${path})` } else { path }
+  }
+
+  // What a pattern binds: each name, its pattern id, the C path to it from `subj`, and its type.
+  function paths(self: mut Self, p: readonly Pattern, subj0: String, t0: Ty, out: mut Vec<[String, usize, String, Ty]>): void uses Fail<Diagnostic> {
+    const [subj, t] = self.under(p, subj0, t0);
+    match (p.kind) {
+      #Bind(n) => out.push([n.clone(), p.id, subj, t]),
+      #Tag { name, args } => {
+        const pt: Ty = match (self.tagsOf(t).iter().find(([k, _]) => k == name)) { #Some([_, x]) => x.clone(), #None => #Error };
+        const m = mangle(name.asStr());
+        match (args) {
+          #None => {}
+          #Tuple(ps) => {
+            if (ps.len() == 1) { self.paths(ps[0], `(${subj}).u.${m}`, self.payloadTy(pt), mut out); }
+            else {
+              for (const [i, q] of ps.iter().enumerate()) {
+                const [qs, qt] = self.part(`(${subj}).u.${m}`.asStr(), pt, i);
+                self.paths(q, qs, qt, mut out);
+              }
+            }
+          }
+          #Record(fs) => self.fieldPaths(fs, `(${subj}).u.${m}`, pt, mut out),
+        }
+      }
+      #Tuple(ps) => {
+        for (const [i, q] of ps.iter().enumerate()) {
+          const [qs, qt] = self.part(subj.asStr(), t, i);
+          self.paths(q, qs, qt, mut out);
+        }
+      }
+      #Record { name: _, fields } => self.fieldPaths(fields, subj, t, mut out),
+      // Each alternative binds the same names: from the one that matched.
+      #Or(alts) => {
+        if (alts.len() == 0) { return; }
+        let each: Vec<Vec<[String, usize, String, Ty]>> = Vec.new();
+        let conds: Vec<String> = Vec.new();
+        for (const a of alts) {
+          let ps: Vec<[String, usize, String, Ty]> = Vec.new();
+          self.paths(a, subj.clone(), t.clone(), mut ps);
+          each.push(ps);
+          conds.push(self.cond(a, subj.asStr(), t));
+        }
+        for (const [n, id, _, ty] of each[0]) {
+          let k = alts.len() - 1;
+          let at = match (each[k].iter().find(([m, _, _, _]) => m == n)) { #Some([_, _, q, _]) => `&(${q})`, #None => "NULL".toString() };
+          while (k > 0) {
+            k -= 1;
+            const q = match (each[k].iter().find(([m, _, _, _]) => m == n)) { #Some([_, _, q, _]) => `&(${q})`, #None => "NULL".toString() };
+            at = `(${conds[k]} ? ${q} : ${at})`;
+          }
+          out.push([n.clone(), id, `(*${at})`, ty.clone()]);
+        }
+      }
+      _ => {}
+    }
+  }
+
+  function fieldPaths(self: mut Self, fs: readonly Vec<[Ident, Option<Pattern>]>, subj: String, t: Ty, out: mut Vec<[String, usize, String, Ty]>): void uses Fail<Diagnostic> {
+    const fields = self.fieldsOf(t);
+    for (const [f, q] of fs) {
+      const ft: Ty = match (fields.iter().find(([k, _]) => k == f.name)) { #Some([_, x]) => x.clone(), #None => #Error };
+      if (const #Some(q) = q) { self.paths(q, `(${subj}).${mangle(f.name.asStr())}`, ft, mut out); }
+    }
+  }
+
+  function matchExpr(self: mut Self, e: readonly Expr, scrutinee: readonly Expr, arms: readonly Vec<MatchArm>): String uses Fail<Diagnostic> {
+    const t = self.exprTy(e.id);
+    const st = self.exprTy(scrutinee.id);
+    const lent = match (self.p.typed.get(self.fid)) {
+      #Some(typed) => typed.lentScrutinees.get(scrutinee.id).isSome() || typed.lentArms.iter().some((s) => arms.iter().some((a) => a.pat.span == s)),
+      #None => false,
+    };
+    // A place, or a borrow, is matched where it is; anything else is matched as a value.
+    const byPointer = lent || self.pointerBorrow(st) || isPlace(scrutinee);
+    const inner = stripBorrow(st);
+    const ic = self.ctype(inner, scrutinee.span);
+    const s = self.fresh();
+    // A value matched is owned by the scope: what no arm takes of it is dropped with it.
+    const subjDecl = if (byPointer) {
+      const p = self.lend(scrutinee);
+      `${ic}* ${s} = ${p}; `
+    } else {
+      const v = self.value(scrutinee);
+      const tmp = self.temp(inner, scrutinee.span);
+      `${tmp} = ${v}; ${ic}* ${s} = &${tmp}; `
+    };
+    const ct = self.ctype(t, e.span);
+    const done = self.fresh();
+    let out = `({ ${ct} r_; ${subjDecl}`;
+    for (const arm of arms) {
+      if (arm.generate.isSome()) { self.fail(arm.pat.span, "arms generated by `comptime` code at run time"); }
+      const c = self.cond(arm.pat, `(*${s})`.asStr(), inner);
+      self.push();
+      // The arm binds borrows of the parts, or takes them once its guard accepts it.
+      let taken = String.new();
+      const takes = match (self.p.typed.get(self.fid)) { #Some(typed) => typed.moves.has(arm.pat.span), #None => false };
+      const lentArm = match (self.p.typed.get(self.fid)) { #Some(typed) => typed.lentArms.has(arm.pat.span), #None => false };
+      const binds = self.bindsThen(arm.pat, `(*${s})`.asStr(), inner, takes, lentArm, mut taken);
+      const guard = match (arm.guard) { #Some(g) => self.value(g), #None => "true".toString() };
+      const body = self.exAs(arm.body, t);
+      const drops = self.pop(arm.body.span);
+      out.push(`if (${c}) { ${binds}if (${guard}) { ${taken}r_ = ${body}; ${drops}goto ${done}; } } `);
+    }
+    out.push(`fly_panic("no arm matched"); ${done}: ; r_; })`);
+    out
+  }
+
+  // ---- closures ----
+
+  // A function made as a value: a closure with no environment.
+  function fnValue(self: mut Self, i: usize, span: Span): String uses Fail<Diagnostic> {
+    const fid = self.insts[i].fid;
+    const params = self.paramTys(fid, self.insts[i].args);
+    let pcs: Vec<String> = Vec.new();
+    let names: Vec<String> = Vec.new();
+    for (const [k, t] of params.iter().enumerate()) {
+      pcs.push(`${self.ctype(t, span)} a${k}`);
+      names.push(`a${k}`);
+    }
+    const rt = self.ctype(self.concreteRet(fid, self.insts[i].args), span);
+    const name = `fnv_${i}`;
+    if (!self.helpers.has(name.asStr())) {
+      self.helpers.insert(name.clone(), name.clone());
+      const sep = if (pcs.len() > 0) { ", " } else { "" };
+      self.lambdaCode.push(`static ${rt} ${name}(void* env${sep}${pcs.join(", ")}) { (void)env; return ${self.insts[i].c}(${names.join(", ")}); }\n`);
+      self.protos.push(`static ${rt} ${name}(void* env${sep}${pcs.join(", ")});\n`);
+    }
+    `((fly_fn){ NULL, NULL, (void*)${name} })`
+  }
+
+  function concreteRet(self: readonly Self, fid: usize, args: readonly Vec<GArg>): Ty {
+    self.resolveAssoc(subst(self.p.fns[fid].scheme.ret, substMap(self.p.fns[fid].scheme.tparams, args)))
+  }
+
+  // A closure: its body a C function of its environment, which holds pointers to the locals it
+  // borrows and the values it moved in.
+  function lambda(self: mut Self, e: readonly Expr, params: readonly Vec<Param>, body: readonly Expr): String uses Fail<Diagnostic> {
+    const fty: FnTy = match (stripBorrow(self.exprTy(e.id))) { #Fn(f) => f.get().clone(), _ => return self.fail(e.span, "a closure of no function type") };
+    self.lambdas += 1;
+    const n = `${self.lambdas}`;
+    const envT = `env_${n}`;
+    // Its captures: every name its body uses from the function around it.
+    let free: Vec<String> = Vec.new();
+    freeNames(body, mut free);
+    let fields = String.new();
+    let inits: Vec<String> = Vec.new();
+    let captures: HashMap<String, Local> = HashMap.new();
+    for (const name of free) {
+      if (params.iter().some((p) => p.name.name == name)) { continue; }
+      if (const #Some([lv, ty]) = self.lvalueOf(name.asStr())) {
+        const ct = self.ctype(ty, e.span);
+        const f = mangle(name.asStr());
+        fields.push(`  ${ct}* ${f};\n`);
+        inits.push(`.${f} = &(${lv})`);
+        captures.insert(name.clone(), { c: `(*env->${f})`, ty, ref: false });
+      }
+    }
+    if (fields.len() == 0) { fields.push("  fly_unit empty;\n"); }
+    // The body, made apart.
+    const saved = self.saveFn();
+    self.captures = captures;
+    self.ret = fty.ret.clone();
+    self.push();
+    let pcs: Vec<String> = Vec.new();
+    let pinits = String.new();
+    for (const [i, p] of params.iter().enumerate()) {
+      const pt = fty.params[i].clone();
+      const pc = self.ctype(pt, p.name.span);
+      pcs.push(`${pc} p${i}`);
+      const c = self.declare(p.name.name.asStr(), pt, p.name.span);
+      pinits.push(`${c} = p${i}; `);
+    }
+    const b = self.exAs(body, fty.ret);
+    const rt = self.ctype(fty.ret, e.span);
+    self.pop(body.span);
+    const fbody = self.finishFn(pinits.asStr(), b.asStr(), rt.asStr(), body.span);
+    const fname = `lam_${n}`;
+    const sep = if (pcs.len() > 0) { ", " } else { "" };
+    self.typeDefs.push(`typedef struct { \n${fields}} ${envT};\n`);
+    self.protos.push(`static ${rt} ${fname}(void* env_${sep}${pcs.join(", ")});\n`);
+    self.lambdaCode.push(`static ${rt} ${fname}(void* env_${sep}${pcs.join(", ")}) {\n  ${envT}* env = env_; (void)env;\n${fbody}}\n`);
+    self.restoreFn(saved);
+    // The environment lives as long as the function around it: closures here do not escape it.
+    const env = self.fresh();
+    self.decls.push(`  ${envT} ${env} = { 0 };\n`);
+    `({ ${env} = (${envT}){ ${inits.join(", ")} }; (fly_fn){ &${env}, NULL, (void*)${fname} }; })`
+  }
+
+  // A function's C body: its locals, zeroed; its body; and its one way out, for a return or a
+  // failure, which drops every local it owns: a scope that ended dropped its own already, and a
+  // dropped or moved value is dead, which dropping again leaves alone.
+  function finishFn(self: mut Self, inits: str, body: str, rt: str, span: Span): String uses Fail<Diagnostic> {
+    const all = replace(mut self.fnLocals, Vec.new());
+    const drops = self.dropsOf(all, span);
+    const decls = replace(mut self.decls, String.new());
+    `${decls}  ${rt} ret_ = { 0 };\n  ${inits}\n  ret_ = ${body};\n  goto ret;\nfail: ;\n  ${drops}\n  return (${rt}){ 0 };\nret: ;\n  ${drops}\n  return ret_;\n`
+  }
+
+  function saveFn(self: mut Self): Saved {
+    {
+      decls: replace(mut self.decls, String.new()), scopes: replace(mut self.scopes, Vec.new()),
+      scopeLocals: replace(mut self.scopeLocals, Vec.new()), fnLocals: replace(mut self.fnLocals, Vec.new()),
+      loops: replace(mut self.loops, Vec.new()), catches: replace(mut self.catches, Vec.new()), ret: self.ret.clone(),
+      captures: replace(mut self.captures, HashMap.new()),
+    }
+  }
+
+  function restoreFn(self: mut Self, s: Saved): void {
+    const { decls, scopes, scopeLocals: locals, fnLocals, loops, catches, ret, captures } = s;
+    self.fnLocals = fnLocals;
+    self.decls = decls;
+    self.scopes = scopes;
+    self.scopeLocals = locals;
+    self.loops = loops;
+    self.catches = catches;
+    self.ret = ret;
+    self.captures = captures;
+  }
+
+  // ---- functions ----
+
+  function emit(self: mut Self, i: usize): void uses Fail<Diagnostic> {
+    const fid = self.insts[i].fid;
+    const decl: FnDecl = match (self.p.fnDecl(fid)) { #Some(d) => d, #None => return };
+    const body = match (decl.body) { #Some(b) => b.clone(), #None => return };
+    self.fid = fid;
+    self.module = self.p.fns[fid].module;
+    self.map = substMap(self.p.fns[fid].scheme.tparams, self.insts[i].args);
+    self.ret = self.concrete(self.p.fns[fid].scheme.ret);
+    self.tmp = 0;
+    self.decls = String.new();
+    self.scopes = Vec.new();
+    self.scopeLocals = Vec.new();
+    self.loops = Vec.new();
+    self.catches = Vec.new();
+    self.captures = HashMap.new();
+    self.fnLocals = Vec.new();
+    self.push();
+    const ptys = self.p.fns[fid].scheme.params.clone();
+    let params: Vec<String> = Vec.new();
+    let inits = String.new();
+    for (const [k, p] of decl.sig.params.iter().enumerate()) {
+      const pt = self.concrete(ptys[k][1]);
+      const pc = self.ctype(pt, p.name.span);
+      params.push(`${pc} p${k}`);
+      const c = self.declare(p.name.name.asStr(), pt, p.name.span);
+      inits.push(`${c} = p${k}; `);
+    }
+    const rt = self.ctype(self.ret, decl.sig.span);
+    const b = self.blockAs(body, self.ret);
+    self.pop(body.span);
+    const fbody = self.finishFn(inits.asStr(), b.asStr(), rt.asStr(), body.span);
+    const c = self.insts[i].c.clone();
+    const sig = `static ${rt} ${c}(${if (params.len() == 0) { "void".toString() } else { params.join(", ") }})`;
+    self.protos.push(`${sig};\n`);
+    self.code.push(`${sig} {\n${fbody}}\n`);
+  }
+
+  // The C for a checked program whose entry module is `entry`.
+  export function program(self: mut Self, entry: usize, runtime: str): String uses Fail<#Failed(String)> {
+    const mainFid = match (self.p.lookup(entry, "main")) {
+      #Some(#Fn(f)) => f,
+      _ => throw #Failed("error: the program has no `main` function".toString()),
+    };
+    self.owned = self.p.fns.len();
+    const main = self.instance(mainFid, Vec.new());
+    while (self.next < self.insts.len()) {
+      const i = self.next;
+      self.next += 1;
+      const r = try { self.emit(i); #Ok } catch (d) { #Err(d) };
+      if (const #Err(d) = r) {
+        const m = self.module;
+        throw #Failed(render(d, self.p.modules[m].file.asStr(), self.p.modules[m].source.asStr()))
+      }
+    }
+    // The structs only pointers were made to.
+    while (self.pending.len() > 0) {
+      const t = match (self.pending.pop()) { #Some(t) => t, #None => break };
+      const r = try { self.ctype(t, { start: 0, end: 0 }); #Ok } catch (d) { #Err(d) };
+      if (const #Err(d) = r) { throw #Failed(render(d, self.p.modules[0].file.asStr(), self.p.modules[0].source.asStr())) }
+    }
+    let out = runtime.toString();
+    out.push("\n// ---- the program ----\n");
+    out.push(self.typeFwd.asStr());
+    out.push(self.typeDefs.asStr());
+    out.push(self.protos.asStr());
+    out.push(self.dropCode.asStr());
+    out.push(self.lambdaCode.asStr());
+    out.push(self.code.asStr());
+    out.push(`int main(int argc, char** argv) {\n  fly_argc = argc;\n  fly_argv = argv;\n  ${self.insts[main].c}();\n  if (FLY_FAILED) { printf("<uncaught failure>\\n"); return 1; }\n  return 0;\n}\n`);
+    out
+  }
+}
+
+// A decimal literal too wide for a C literal, as its two halves.
+function wideLit(n: str): String {
+  let v: i128 = 0;
+  for (const b of n.bytes()) { if (b >= b'0' && b <= b'9') { v = v * 10 + ((b - b'0') as i128); } }
+  const hi = (v >> 64) as i64;
+  const lo = (v & 0xFFFFFFFFFFFFFFFF) as u64;
+  `((fly_i128)(((unsigned __int128)(uint64_t)INT64_C(${hi}) << 64) | UINT64_C(${lo})))`
+}
+
+function primType(p: Prim): str {
+  match (p) {
+    #I8 => "int8_t", #I16 => "int16_t", #I32 => "int32_t", #I64 | #Isize => "int64_t", #I128 => "fly_i128",
+    #U8 => "uint8_t", #U16 => "uint16_t", #U32 => "uint32_t", #U64 | #Usize => "uint64_t",
+    #F32 => "float", #F64 => "double", #Bool => "bool", #Str => "fly_str", _ => "fly_unit",
+  }
+}
+
+// A view: what a borrow of is the view itself in C.
+function viewLike(t: readonly Ty): bool {
+  match (t) { #Prim(#Str) | #Slice(_) | #Fn(_) => true, _ => false }
+}
+
+// The `i`th type argument of a nominal type.
+function typeArg(t: readonly Ty, i: usize): Ty {
+  match (stripBorrow(t)) {
+    #Named(_, args) => match (args.get(i)) { #Some(#Ty(x)) => x.clone(), _ => #Error },
+    _ => #Error,
+  }
+}
+
+// A map's entry: its key and its value.
+function entryTy(t: readonly Ty): Ty { #Tuple([typeArg(t, 0), typeArg(t, 1)]) }
+
+function isVoidTy(t: readonly Ty): bool { match (t) { #Prim(#Void) => true, _ => false } }
+
+function bindIds(p: readonly Pattern, out: mut Vec<usize>): void {
+  match (p.kind) {
+    #Bind(_) => out.push(p.id),
+    _ => {}
+  }
+}
+
+// The names an expression uses, in order, each once (what a closure captures, and more).
+function freeNames(e: readonly Expr, out: mut Vec<String>): void {
+  match (e.kind) {
+    #Ident(n) => { if (!out.iter().some((x) => x == n)) { out.push(n.clone()); } }
+    #Field { target, name: _ } => freeNames(target, mut out),
+    #Index { target, index } => { freeNames(target, mut out); freeNames(index, mut out); }
+    #Call { callee, typeArgs: _, args } => { freeNames(callee, mut out); for (const a of args) { freeNames(a, mut out); } }
+    #Unary { op: _, operand } => freeNames(operand, mut out),
+    #Binary { op: _, lhs, rhs } => { freeNames(lhs, mut out); freeNames(rhs, mut out); }
+    #Assign { op: _, target, value } => { freeNames(target, mut out); freeNames(value, mut out); }
+    #Cast { expr, ty: _ } => freeNames(expr, mut out),
+    #BorrowMut(x) | #Throw(x) | #Yield(x) | #Comptime(x) => freeNames(x, mut out),
+    #Return(v) => { if (const #Some(x) = v) { freeNames(x, mut out); } }
+    #Template(parts) => { for (const p of parts) { if (const #Expr(x) = p) { freeNames(x, mut out); } } }
+    #List(items) => { for (const x of items) { freeNames(x, mut out); } }
+    #Tag { name: _, args } => match (args) {
+      #Tuple(es) => { for (const x of es) { freeNames(x, mut out); } }
+      #Record(fs) => { for (const f of fs) { match (f.value) { #Some(v) => freeNames(v, mut out), #None => { if (!out.iter().some((x) => x == f.name.name)) { out.push(f.name.name.clone()); } } } } }
+      #None => {}
+    },
+    #Record { name: _, fields } => { for (const f of fields) { match (f.value) { #Some(v) => freeNames(v, mut out), #None => { if (!out.iter().some((x) => x == f.name.name)) { out.push(f.name.name.clone()); } } } } }
+    #Block(b) | #Unsafe(b) => blockNames(b, mut out),
+    #Region { name: _, body } => blockNames(body, mut out),
+    #If { cond, then, otherwise } => { freeNames(cond, mut out); blockNames(then, mut out); if (const #Some(o) = otherwise) { freeNames(o, mut out); } }
+    #While { cond, body } => { freeNames(cond, mut out); blockNames(body, mut out); }
+    #For { mutable: _, pat: _, iter, body } => { freeNames(iter, mut out); blockNames(body, mut out); }
+    #Match { scrutinee, arms } => { freeNames(scrutinee, mut out); for (const a of arms) { if (const #Some(g) = a.guard) { freeNames(g, mut out); } freeNames(a.body, mut out); } }
+    #Try { body, pat: _, handler } => { blockNames(body, mut out); blockNames(handler, mut out); }
+    #Lambda { params: _, body } => freeNames(body, mut out),
+    _ => {}
+  }
+}
+
+function blockNames(b: readonly Block, out: mut Vec<String>): void {
+  for (const s of b.stmts) {
+    match (s) {
+      #Let { mutable: _, pat: _, ty: _, init, span: _ } => freeNames(init, mut out),
+      #Defer(x) | #Expr(x) => freeNames(x, mut out),
+    }
+  }
+  if (const #Some(t) = b.tail) { freeNames(t, mut out); }
+}
+
+// The C for a checked program: the runtime, then the code its `main` reaches.
+export function cProgram(p: Program, entry: usize, runtime: str): String uses Fail<#Failed(String)> {
+  let c = C.new(p);
+  c.program(entry, runtime)
+}
