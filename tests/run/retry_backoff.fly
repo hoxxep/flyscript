@@ -1,0 +1,61 @@
+// expect: 0 failures: #Ok(10) after 0 ms
+// expect: attempt 1 failed with #Timeout; retrying in 100 ms
+// expect: attempt 2 failed with #Refused; retrying in 200 ms
+// expect: 2 failures: #Ok(30) after 300 ms
+// expect: attempt 1 failed with #Timeout; retrying in 100 ms
+// expect: attempt 2 failed with #Refused; retrying in 200 ms
+// expect: attempt 3 failed with #Timeout; retrying in 400 ms
+// expect: 5 failures: #Err(#Refused) after 700 ms
+// A retry with backoff whose logging and sleeping are effects, handled by the caller: what a
+// TypeScript service writes with `await sleep(delay)`, testable without waiting (§5.2).
+import { println } from "std/io";
+
+effect Log { info(msg: String): void; }
+effect Clock { sleepMs(ms: u64): void; }
+
+type NetErr = #Timeout | #Refused;
+
+// Retries `attempt` with exponential backoff: what a TypeScript service would write with
+// `await sleep(delay)`, here with the sleeping and logging left to whoever runs it.
+function retry<T>(tries: u32, attempt: mut () => T uses Fail<NetErr>): T uses Log, Clock, Fail<NetErr> {
+  let delay: u64 = 100;
+  let n: u32 = 1;
+  while (true) {
+    const r = Fail.capture(() => attempt());
+    match (r) {
+      #Ok(v) => return v,
+      #Err(e) => {
+        if (n == tries) { throw e; }
+        Log.info(`attempt ${n} failed with ${e}; retrying in ${delay} ms`);
+        Clock.sleepMs(delay);
+        delay *= 2;
+        n += 1;
+      }
+    }
+  }
+}
+
+function flaky(failures: u32): u32 uses Log, Clock, Fail<NetErr> {
+  let calls: u32 = 0;
+  retry(4, () => {
+    calls += 1;
+    if (calls <= failures) { throw if (calls % 2 == 1) { #Timeout } else { #Refused }; }
+    calls * 10
+  })
+}
+
+export function main(): void uses Io {
+  for (const failures of [0, 2, 5]) {
+    let slept: u64 = 0;
+    let log: Vec<String> = Vec.new();
+    const outcome = handle {
+      Fail.capture(() => flaky(failures))
+    } with Log {
+      info(m) resumes k => { log.push(m); k() }
+    } with Clock {
+      sleepMs(ms) resumes k => { slept += ms; k() }
+    };
+    for (const l of log) { println(l.asStr()); }
+    println(`${failures} failures: ${outcome} after ${slept} ms`);
+  }
+}

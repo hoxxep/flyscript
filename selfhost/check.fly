@@ -17,6 +17,7 @@ import {
 import { containerMessage } from "./traits";
 import { Binds, stripBorrows } from "./impls";
 import { expander, blockHasComptime } from "./comptime";
+import { breaksBlock } from "./own";
 import { HashMap, HashSet } from "std/collections";
 
 // An instantiated signature.
@@ -841,7 +842,9 @@ impl Checker {
       #While { cond, body } => {
         self.check(cond, boolTy());
         self.block(body, #None);
-        voidTy()
+        // A `while (true)` that nothing breaks out of never finishes: it is left only by
+        // `return` or a failure, so it may end a function that returns a value.
+        if (match (cond.kind) { #Bool(true) => true, _ => false } && !breaksBlock(body, 0)) { neverTy() } else { voidTy() }
       }
       #For { mutable: _, pat, iter, body } => self.forOf(pat, iter, body),
       #Match { scrutinee, arms } => self.matchExpr(scrutinee, arms, expected, span),

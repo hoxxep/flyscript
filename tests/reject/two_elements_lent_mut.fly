@@ -1,0 +1,6 @@
+// error: `xs` cannot be changed here: it was lent `readonly` at 5:23, and that borrow is still in use; an element lent `mut` lends its whole list: to change two at once, `xs.swap(i, j)` exchanges them and `xs.splitAt(k)` lends two parts apart
+// Lending an element lends its whole list, so two elements of one list cannot be lent `mut` at
+// once; the error says how to do it: `swap(i, j)`, or `splitAt` for two parts (§4.1).
+function exchange(xs: mut Vec<String>, i: usize, j: usize): void {
+  swap(mut xs[i], mut xs[j]);
+}

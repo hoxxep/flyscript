@@ -1010,6 +1010,10 @@ impl<'a> Parser<'a> {
     fn expr(&mut self) -> PResult<Expr> {
         let start = self.span();
         let lhs = self.range()?;
+        // What a TypeScript programmer writes out of habit, answered with what to write instead.
+        if self.at("?") {
+            return Err(Diagnostic::new(self.span(), "Flyscript has no `? :`: `if` is an expression, so write `if (c) { a } else { b }`".to_string()));
+        }
         for op in ASSIGN {
             if self.at(op) {
                 self.bump();
@@ -1057,6 +1061,12 @@ impl<'a> Parser<'a> {
         let start = self.span();
         let mut lhs = self.binary(level + 1)?;
         while let Some((op, width)) = self.binary_op(level) {
+            if (op == "+" && self.adjacent("+", "+")) || (op == "-" && self.adjacent("-", "-")) {
+                return Err(Diagnostic::new(self.span(), format!("Flyscript has no `{op}{op}`: write `x {op}= 1`")));
+            }
+            if (op == "==" || op == "!=") && self.adjacent(op, "=") {
+                return Err(Diagnostic::new(self.span(), format!("Flyscript compares values with `{op}`: there is no `{op}=`")));
+            }
             for _ in 0..width {
                 self.bump();
             }
@@ -1345,6 +1355,9 @@ impl<'a> Parser<'a> {
                 };
                 self.bump();
                 let pat = self.pattern_one()?;
+                if self.at("=") {
+                    return Err(Diagnostic::new(self.span(), "a `for` loop goes over something: `for (const i of 0..n)` counts from 0 to n - 1".to_string()));
+                }
                 self.expect_word("of")?;
                 let iter = self.expr()?;
                 self.expect(")")?;

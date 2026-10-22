@@ -440,7 +440,10 @@ impl Program {
         let home = self.modules.iter().find(|m| m.is_std && m.name != "std/prelude" && m.exports.contains_key(name));
         match home {
             Some(m) => format!("unknown {what} `{name}`: import it with `import {{ {name} }} from \"{}\";`", m.name),
-            None => format!("unknown {what} `{name}`"),
+            None => match ts_hint(what, name) {
+                Some(hint) => format!("unknown {what} `{name}`: {hint}"),
+                None => format!("unknown {what} `{name}`"),
+            },
         }
     }
 
@@ -1366,4 +1369,21 @@ pub fn describe(p: &Program) -> Vec<String> {
         out.push(format!("error {m} {}..{}: {}", d.span.start, d.span.end, d.message));
     }
     out
+}
+
+/// What Flyscript has where a TypeScript programmer reaches for something it does not (§2.1).
+fn ts_hint(what: &str, name: &str) -> Option<&'static str> {
+    Some(match (what, name) {
+        ("type", "string") => "Flyscript's strings are `str`, a borrowed view of text, and `String`, which owns its bytes",
+        ("type", "number") => "Flyscript's numbers have sizes: `i32`, `i64`, `u32`, `usize`, `f64` and the rest",
+        ("type", "boolean") => "Flyscript's is `bool`",
+        ("type", "Array") => "a list that grows is a `Vec<T>`, and a fixed one `T[N]`",
+        ("type", "Map") => "a map is a `HashMap`, from `std/collections`",
+        ("type", "Set") => "a set is a `HashSet`, from `std/collections`",
+        ("type", "Promise") => "there is no `async`: I/O is the `Io` effect, and tasks run in `Io.scope`",
+        ("type", "any" | "unknown") => "every value has a type; a value of one of several types is a tag union, `#A(T) | #B(U)`",
+        ("name", "console") => "print with `println`, from `std/io`",
+        ("name", "null" | "undefined") => "there is no null: a value that may be missing is an `Option`, `#Some(x)` or `#None`",
+        _ => return None,
+    })
 }

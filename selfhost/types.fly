@@ -105,7 +105,6 @@ export function voidTy(): Ty { #Prim(#Void) }
 export function neverTy(): Ty { #Prim(#Never) }
 export function boolTy(): Ty { #Prim(#Bool) }
 export function isNever(t: readonly Ty): bool { match (t) { #Prim(#Never) => true, _ => false } }
-export function isVoid(t: readonly Ty): bool { match (t) { #Prim(#Void) => true, _ => false } }
 
 // ---- labels: a sorted map from names to types ----
 
@@ -133,7 +132,6 @@ export function labelSet(labels: mut Vec<[String, Ty]>, k: str, t: Ty): void {
   labels.insert(i, [k.toString(), t]);
 }
 
-export function closedRow(labels: Vec<[String, Ty]>): Row { Row { labels, tail: #Closed } }
 
 // ---- display ----
 

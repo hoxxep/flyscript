@@ -71,6 +71,8 @@ struct Loan {
     /// A borrow-typed parameter's own loan from the caller: it flows with the parameter's value
     /// (for the return check) but never conflicts inside the function.
     external: bool,
+    /// A `mut` loan of an element of a list, which lends the whole list.
+    element: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -140,6 +142,7 @@ pub fn check_function(p: &mut Program, fid: FnId) {
         roles: Vec::new(),
         task_moved: HashMap::new(),
         move_sites: BTreeMap::new(),
+        lending_element: false,
         dying_holds: HashMap::new(),
         handling: Vec::new(),
         sites: HashMap::new(),
@@ -171,7 +174,7 @@ pub fn check_function(p: &mut Program, fid: FnId) {
             // A parameter whose type can hide a borrow carries one too, so a `from` that leaves
             // it out is checked against what the body returns (§4.2).
             if o.p.class(&ty) == 2 || hides_borrows(&ty, o.p, &o.send_params) {
-                o.loans.push(Loan { path: Path { root: id, fields: Vec::new() }, mutable: false, span: body.span, external: true });
+                o.loans.push(Loan { path: Path { root: id, fields: Vec::new() }, mutable: false, span: body.span, external: true, element: false });
                 let l = o.loans.len() - 1;
                 o.state.holds.insert(id, [l].into_iter().collect());
             }
@@ -249,6 +252,8 @@ struct Own<'p> {
     task_moved: HashMap<VarId, Span>,
     /// Where each place was first moved, for what a later use of it reports.
     move_sites: BTreeMap<Path, Span>,
+    /// Whether the place being lent `mut` is reached for one of its elements.
+    lending_element: bool,
     /// What the bindings of the block being ended held.
     dying_holds: HashMap<VarId, BTreeSet<LoanId>>,
     /// The `handle`s whose bodies are being checked, innermost last: the effect each handles,
@@ -414,7 +419,13 @@ impl<'p> Own<'p> {
                 let how = if loan.mutable { "lent `mut`" } else { "lent `readonly`" };
                 let what = if write { "changed" } else { "used" };
                 let (line, col) = crate::diag::line_col(&self.p.modules[self.module].source, loan.span.start);
-                self.err(at, format!("`{name}` cannot be {what} here: it was {how} at {line}:{col}, and that borrow is still in use"));
+                // Lending one element lends the list: two at once need a method that proves them apart.
+                let hint = if loan.element || (write && self.lending_element) {
+                    "; an element lent `mut` lends its whole list: to change two at once, `xs.swap(i, j)` exchanges them and `xs.splitAt(k)` lends two parts apart"
+                } else {
+                    ""
+                };
+                self.err(at, format!("`{name}` cannot be {what} here: it was {how} at {line}:{col}, and that borrow is still in use{hint}"));
                 return;
             }
         }
@@ -430,7 +441,7 @@ impl<'p> Own<'p> {
     }
 
     fn new_loan(&mut self, path: Path, mutable: bool, span: Span) -> LoanId {
-        self.loans.push(Loan { path, mutable, span, external: false });
+        self.loans.push(Loan { path, mutable, span, external: false, element: false });
         self.loans.len() - 1
     }
 
@@ -611,6 +622,7 @@ impl<'p> Own<'p> {
                 self.check_mutable(&path, e);
                 self.access(&path, true, at, &none);
                 let l = self.new_loan(path, true, at);
+                self.loans[l].element = self.lending_element;
                 let mut loans = held;
                 loans.insert(l);
                 Val { loans }
@@ -914,7 +926,9 @@ impl<'p> Own<'p> {
                 let _ = iv;
                 let ranged = matches!(index.kind, ExprKind::Range { .. });
                 let base_how = if how == Use::Mut { Use::Mut } else { Use::Read };
+                let outer = std::mem::replace(&mut self.lending_element, how == Use::Mut);
                 let v = self.expr(target, base_how);
+                self.lending_element = outer;
                 if how == Use::Move && !ranged {
                     let ty = self.ty_of(e);
                     if !self.p.is_copy(&ty) {
@@ -1578,8 +1592,11 @@ impl<'p> Own<'p> {
             let mut except = BTreeSet::new();
             except.insert(l);
             self.loans[l].mutable = true;
+            self.loans[l].element = matches!(target.kind, ExprKind::Index { .. });
             self.check_mutable(&path, &target);
+            let outer = std::mem::replace(&mut self.lending_element, self.loans[l].element);
             self.access(&path, true, target.span, &except);
+            self.lending_element = outer;
         }
         // Phase two: the receiver's borrow becomes `mut` for the call itself.
         if let Some((l, path, span)) = receiver_loan {

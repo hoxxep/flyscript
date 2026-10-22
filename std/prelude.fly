@@ -573,6 +573,14 @@ impl<T> T[] {
   // Sorts in place by `cmp`, stably: elements `cmp` calls equal keep their order.
   export function sortBy(self: mut Self, cmp: mut (a: readonly T, b: readonly T) => Ordering): void;
   export function reverse(self: mut Self): void;
+  // Exchanges elements `i` and `j`: the two places are proved apart by splitting the list
+  // between them, as `[a[i], a[j]] = [a[j], a[i]]` does in TypeScript.
+  export function swap(self: mut Self, i: usize, j: usize): void {
+    if (i == j) { return; }
+    const [lo, hi] = if (i < j) { [i, j] } else { [j, i] };
+    const [a, b] = self.splitAt(hi);
+    swap(mut a[lo], mut b[0]);
+  }
   // The element at `i`, if there is one.
   export function get(self: readonly Self, i: usize): Option<readonly T> from self {
     if (i < self.len()) { #Some(self[i]) } else { #None }

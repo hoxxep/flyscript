@@ -933,7 +933,9 @@ impl<'p> Checker<'p> {
             ExprKind::While { cond, body } => {
                 self.check(cond, &Ty::bool());
                 self.block(body, None);
-                Ty::void()
+                // A `while (true)` that nothing breaks out of never finishes: it is left only by
+                // `return` or a failure, so it may end a function that returns a value.
+                if matches!(cond.kind, ExprKind::Bool(true)) && !breaks_block(body, 0) { Ty::never() } else { Ty::void() }
             }
             ExprKind::For { pat, iter, body, .. } => self.for_of(pat, iter, body),
             ExprKind::Match { scrutinee, arms } => self.match_expr(scrutinee, arms, expected, span),
@@ -2692,6 +2694,31 @@ fn leaves_in(e: &Expr, loops: usize) -> Option<Span> {
         ExprKind::Try { body, handler, .. } => block(body, loops).or_else(|| block(handler, loops)),
         ExprKind::Handle { body, arms, .. } => block(body, loops).or_else(|| arms.iter().find_map(|a| block(&a.body, loops))),
         _ => super::own::children(e).into_iter().find_map(|c| leaves_in(c, loops)),
+    }
+}
+
+/// Whether a `break` in a block leaves the loop `loops` levels out, outside the functions in it.
+fn breaks_block(b: &ast::Block, loops: usize) -> bool {
+    b.stmts.iter().any(|st| match st {
+        Stmt::Let { init, .. } => breaks_in(init, loops),
+        Stmt::Defer(x) | Stmt::Expr(x) => breaks_in(x, loops),
+    }) || b.tail.as_deref().is_some_and(|t| breaks_in(t, loops))
+}
+
+fn breaks_in(e: &Expr, loops: usize) -> bool {
+    match &e.kind {
+        ExprKind::Break => loops == 0,
+        ExprKind::Lambda { .. } => false,
+        ExprKind::Block(b) | ExprKind::Unsafe(b) | ExprKind::Region { body: b, .. } => breaks_block(b, loops),
+        ExprKind::If { cond, then, otherwise } => {
+            breaks_in(cond, loops) || breaks_block(then, loops) || otherwise.as_deref().is_some_and(|o| breaks_in(o, loops))
+        }
+        ExprKind::While { cond, body } => breaks_in(cond, loops) || breaks_block(body, loops + 1),
+        ExprKind::For { iter, body, .. } => breaks_in(iter, loops) || breaks_block(body, loops + 1),
+        ExprKind::Match { scrutinee, arms } => breaks_in(scrutinee, loops) || arms.iter().any(|a| breaks_in(&a.body, loops)),
+        ExprKind::Try { body, handler, .. } => breaks_block(body, loops) || breaks_block(handler, loops),
+        ExprKind::Handle { body, arms, .. } => breaks_block(body, loops) || arms.iter().any(|a| breaks_block(&a.body, loops)),
+        _ => super::own::children(e).into_iter().any(|c| breaks_in(c, loops)),
     }
 }
 

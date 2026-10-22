@@ -850,6 +850,10 @@ impl Parser {
   function expr(self: mut Self): Expr uses Fail<Diagnostic> {
     const start = self.span();
     const lhs = self.range();
+    // What a TypeScript programmer writes out of habit, answered with what to write instead.
+    if (self.at("?")) {
+      throw #Diagnostic { span: self.span(), message: "Flyscript has no `? :`: `if` is an expression, so write `if (c) { a } else { b }`".toString() };
+    }
     match (ASSIGN.iter().find((op) => self.at(op))) {
       #Some(op) => {
         self.bump();
@@ -889,6 +893,12 @@ impl Parser {
     const start = self.span();
     let lhs = self.binary(level + 1);
     while (const #Some([op, width]) = self.binaryOp(level)) {
+      if (op == "+" && self.adjacent("+", "+") || op == "-" && self.adjacent("-", "-")) {
+        throw #Diagnostic { span: self.span(), message: `Flyscript has no \`${op}${op}\`: write \`x ${op}= 1\`` };
+      }
+      if ((op == "==" || op == "!=") && self.adjacent(op, "=")) {
+        throw #Diagnostic { span: self.span(), message: `Flyscript compares values with \`${op}\`: there is no \`${op}=\`` };
+      }
       for (const _ of 0..width) { self.bump(); }
       const rhs = self.binary(level + 1);
       lhs = self.expr_(#Binary { op, lhs: Box.new(lhs), rhs: Box.new(rhs) }, self.since(start));
@@ -1109,6 +1119,9 @@ impl Parser {
         const mutable = if (self.atKw("const")) { false } else if (self.atKw("let")) { true } else { self.error("`const` or `let`") };
         self.bump();
         const pat = self.patternOne();
+        if (self.at("=")) {
+          throw #Diagnostic { span: self.span(), message: "a `for` loop goes over something: `for (const i of 0..n)` counts from 0 to n - 1".toString() };
+        }
         self.expectWord("of");
         const iter = self.expr();
         self.expect(")");

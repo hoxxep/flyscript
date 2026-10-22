@@ -1,0 +1,90 @@
+// expect: a: #Some(0)
+// expect: b: #Some(7)
+// expect: c: #Some(9)
+// expect: d: #Some(20)
+// expect: e: #Some(20)
+// expect: f: #Some(11)
+// A generic min-heap over `T extends Ord` drives Dijkstra's shortest paths, written as a
+// TypeScript programmer would; two elements of a list are exchanged with `swap(i, j)` (§3.1).
+import { println } from "std/io";
+import { HashMap } from "std/collections";
+
+// A min-heap: the smallest element first, by `Ord`.
+struct Heap<T extends Ord> { items: Vec<T> }
+impl<T extends Ord> Heap<T> {
+  function new(): Heap<T> { Heap { items: Vec.new() } }
+  function len(self: readonly Self): usize { self.items.len() }
+  function push(self: mut Self, x: T): void {
+    self.items.push(x);
+    let i = self.items.len() - 1;
+    while (i > 0) {
+      const parent = (i - 1) / 2;
+      if (self.items[i] >= self.items[parent]) { break; }
+      self.items.swap(i, parent);
+      i = parent;
+    }
+  }
+  function pop(self: mut Self): Option<T> {
+    const n = self.items.len();
+    if (n == 0) { return #None; }
+    self.items.swap(0, n - 1);
+    const top = self.items.pop();
+    let i: usize = 0;
+    while (true) {
+      const l = 2 * i + 1;
+      const r = l + 1;
+      let smallest = i;
+      if (l < self.items.len() && self.items[l] < self.items[smallest]) { smallest = l; }
+      if (r < self.items.len() && self.items[r] < self.items[smallest]) { smallest = r; }
+      if (smallest == i) { break; }
+      self.items.swap(i, smallest);
+      i = smallest;
+    }
+    top
+  }
+}
+
+type Edge = { to: String; cost: u32 };
+type Graph = HashMap<String, Vec<Edge>>;
+
+function addEdge(g: mut Graph, from: str, to: str, cost: u32): void {
+  if (const #Some(es) = g.getMut(from)) {
+    es.push({ to: to.toString(), cost });
+  } else {
+    g.insert(from.toString(), [{ to: to.toString(), cost }]);
+  }
+}
+
+// Shortest distances from `start`, as a TypeScript programmer would write Dijkstra.
+function shortest(g: readonly Graph, start: str): HashMap<String, u32> {
+  let dist: HashMap<String, u32> = HashMap.new();
+  let queue: Heap<[u32, String]> = Heap.new();
+  queue.push([0, start.toString()]);
+  while (const #Some([d, node]) = queue.pop()) {
+    if (dist.has(node)) { continue; }
+    dist.insert(node.clone(), d);
+    if (const #Some(es) = g.get(node)) {
+      for (const e of es) {
+        if (!dist.has(e.to)) { queue.push([d + e.cost, e.to.clone()]); }
+      }
+    }
+  }
+  dist
+}
+
+export function main(): void uses Io {
+  let g: Graph = HashMap.new();
+  addEdge(mut g, "a", "b", 7);
+  addEdge(mut g, "a", "c", 9);
+  addEdge(mut g, "a", "f", 14);
+  addEdge(mut g, "b", "c", 10);
+  addEdge(mut g, "b", "d", 15);
+  addEdge(mut g, "c", "d", 11);
+  addEdge(mut g, "c", "f", 2);
+  addEdge(mut g, "d", "e", 6);
+  addEdge(mut g, "f", "e", 9);
+  const dist = shortest(g, "a");
+  let names: Vec<String> = dist.keys().cloned().collect();
+  names.sort();
+  for (const n of names) { println(`${n}: ${dist.get(n)}`); }
+}

@@ -1,0 +1,55 @@
+// expect: 1: The cat sat
+// expect: 2: The cat ran
+// expect: 3: Did the cat sit
+// expect: 4: The dog sat
+// expect: the cat   3
+// expect: cat ran   1
+// expect: cat sat   1
+// Generators written as functions that yield: sentences lent out of the text, bigrams made fresh,
+// counted in a map and the most common shown (§5.5).
+import { println } from "std/io";
+import { HashMap } from "std/collections";
+
+// Each sentence of `text`, trimmed: a generator of borrows of the text.
+function sentences(text: str): void uses Yield<str> {
+  let start: usize = 0;
+  const bytes = text.asBytes();
+  for (const i of 0..bytes.len()) {
+    const b = bytes[i];
+    if (b == b'.' || b == b'!' || b == b'?') {
+      const s = text.slice(start, i).trim();
+      if (s.len() > 0) { yield s; }
+      start = i + 1;
+    }
+  }
+  const rest = text.slice(start, bytes.len()).trim();
+  if (rest.len() > 0) { yield rest; }
+}
+
+function bigrams(sentence: str): void uses Yield<String> {
+  let prev: Option<String> = #None;
+  for (const w of sentence.splitWhitespace()) {
+    const word = w.toLowerCase();
+    if (const #Some(p) = prev) { yield `${p} ${word}`; }
+    prev = #Some(word);
+  }
+}
+
+export function main(): void uses Io {
+  const text = "The cat sat. The cat ran! Did the cat sit? The dog sat";
+  let counts: HashMap<String, u32> = HashMap.new();
+  let n = 0;
+  for (const s of sentences(text)) {
+    n += 1;
+    println(`${n}: ${s}`);
+    for (const g of bigrams(s)) {
+      if (const #Some(c) = counts.getMut(g)) { c += 1; } else { counts.insert(g, 1); }
+    }
+  }
+  let shown = 0;
+  for (const [g, c] of counts.sortedByValue()) {
+    if (shown == 3) { break; }
+    println(`${g.padEnd(10)}${c}`);
+    shown += 1;
+  }
+}

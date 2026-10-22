@@ -1,0 +1,55 @@
+// expect: coin: 3.14159
+// expect: card: 6.0
+// expect: sail: 6.0
+// expect: largest: #Some("card")
+// expect: total: 15.14159
+// A heterogeneous list as TypeScript programmers keep one, with a tag union for the variety and
+// an interface for what every element shares (§3.2, §3.4).
+import { println } from "std/io";
+
+interface Named { function name(self: readonly Self): String; }
+
+type Shape =
+  | #Circle { r: f64 }
+  | #Rect { w: f64; h: f64 }
+  | #Triangle { a: f64; b: f64; c: f64 };
+
+function area(s: readonly Shape): f64 {
+  match (s) {
+    #Circle { r } => 3.14159 * r * r,
+    #Rect { w, h } => w * h,
+    #Triangle { a, b, c } => {
+      const p = (a + b + c) / 2.0;
+      const x = p * (p - a) * (p - b) * (p - c);
+      // Heron's formula, with a square root by Newton's method.
+      let g = x / 2.0;
+      for (const _ of 0..30) { g = (g + x / g) / 2.0; }
+      g
+    }
+  }
+}
+
+struct Labelled { label: String; shape: Shape }
+impl Named for Labelled { function name(self: readonly Self): String { self.label.clone() } }
+
+function largest<T extends Named>(items: readonly Vec<T>, size: (x: readonly T) => f64): Option<String> {
+  let best: Option<[f64, String]> = #None;
+  for (const it of items) {
+    const s = size(it);
+    const better = match (best) { #Some([b, _]) => s > b, #None => true };
+    if (better) { best = #Some([s, it.name()]); }
+  }
+  match (best) { #Some([_, n]) => #Some(n), #None => #None }
+}
+
+export function main(): void uses Io {
+  const shapes: Vec<Labelled> = [
+    { label: "coin".toString(), shape: #Circle { r: 1.0 } },
+    { label: "card".toString(), shape: #Rect { w: 3.0, h: 2.0 } },
+    { label: "sail".toString(), shape: #Triangle { a: 3.0, b: 4.0, c: 5.0 } },
+  ];
+  for (const s of shapes) { println(`${s.label}: ${area(s.shape)}`); }
+  println(`largest: ${largest(shapes, (l) => area(l.shape))}`);
+  const total = shapes.iter().map((l) => area(l.shape)).reduce((a, x) => a + x, 0.0);
+  println(`total: ${total}`);
+}

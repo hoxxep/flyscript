@@ -1,0 +1,3 @@
+// error: unknown type `string`: Flyscript's strings are `str`, a borrowed view of text, and `String`, which owns its bytes
+// TypeScript's type names, answered with what Flyscript has instead (§2.1).
+function greet(name: string): String { `hello ${name}` }

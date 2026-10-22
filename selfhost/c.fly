@@ -90,7 +90,6 @@ function stripBorrow(t: readonly Ty): Ty {
   match (t) { #Borrow(_, inner) => stripBorrow(inner), _ => t.clone() }
 }
 
-function isMutBorrow(t: readonly Ty): bool { match (t) { #Borrow(true, _) => true, _ => false } }
 
 function isPlace(e: readonly Expr): bool {
   match (e.kind) { #Ident(_) | #Field { target: _ } | #Index { target: _ } => true, _ => false }
@@ -1898,12 +1897,8 @@ impl C {
     self.finishCall(`fly_fn f_ = ${f}; ${decls}`, call, rt, failing, self.suspends(fty.effects))
   }
 
-  // A call of a made function, its arguments evaluated left to right.
-  function emitCall(self: mut Self, f: String, all: readonly Vec<Expr>, ptys: readonly Vec<Ty>, failing: bool, ret: Ty, span: Span): String uses Fail<Diagnostic> {
-    self.emitCallWith(f, all, ptys, Vec.new(), failing, false, ret, span)
-  }
-
-  // A call, given `extra` as a last argument: what a generator's yields go to.
+  // A call of a made function, its arguments evaluated left to right, given `extra` as its last:
+  // the arenas it is given, and what a generator's yields go to.
   function emitCallWith(self: mut Self, f: String, all: readonly Vec<Expr>, ptys: readonly Vec<Ty>, extra: Vec<String>, failing: bool, suspending: bool, ret: Ty, span: Span): String uses Fail<Diagnostic> {
     let decls = String.new();
     let vs: Vec<String> = Vec.new();
@@ -3229,8 +3224,6 @@ impl C {
 
   // The type a `catch` pattern takes apart.
   function catchTy(self: readonly Self, pat: readonly Pattern): Ty {
-    let ids: Vec<usize> = Vec.new();
-    bindIds(pat, mut ids);
     match (pat.kind) {
       #Bind(_) => self.bindingTy(pat.id),
       _ => match (self.p.typed.get(self.fid)) {
@@ -4104,13 +4097,6 @@ function isControl(e: readonly Expr): bool {
 }
 
 function isVoidTy(t: readonly Ty): bool { match (t) { #Prim(#Void) => true, _ => false } }
-
-function bindIds(p: readonly Pattern, out: mut Vec<usize>): void {
-  match (p.kind) {
-    #Bind(_) => out.push(p.id),
-    _ => {}
-  }
-}
 
 // The names whose values an expression may change: assigned, lent `mut`, or a method's receiver.
 function changedNames(e: readonly Expr, out: mut Vec<String>): void {
