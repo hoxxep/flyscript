@@ -10,9 +10,16 @@ sysroot=${WASI_SYSROOT:-$(brew --prefix wasi-libc 2>/dev/null)/share/wasi-sysroo
 builtins=${WASI_BUILTINS:-$(ls "$(brew --prefix wasi-runtimes 2>/dev/null)"/share/wasi-runtimes/lib/wasm32-unknown-wasip1/libclang_rt.builtins.a 2>/dev/null | head -1)}
 out=$3
 imports=""
-[ "$4" = "--imports" ] && imports="--allow-undefined"
+opt="-O2"
+link=""
+# A page's program is downloaded: it is made small, and its names left out.
+if [ "$4" = "--imports" ]; then
+  imports="--allow-undefined"
+  opt="-Os -ffunction-sections -fdata-sections"
+  link="--gc-sections --strip-all"
+fi
 node --stack-size=65500 "$1" "$2" "$out.c" "$root"
-clang --target=wasm32-wasip1 --sysroot="$sysroot" -std=gnu11 -O2 -w -c "$out.c" -o "$out.o"
-wasm-ld -m wasm32 $imports "$sysroot/lib/wasm32-wasip1/crt1-command.o" "$out.o" -L"$sysroot/lib/wasm32-wasip1" -lc "$builtins" \
+clang --target=wasm32-wasip1 --sysroot="$sysroot" -std=gnu11 $opt -w -c "$out.c" -o "$out.o"
+wasm-ld -m wasm32 $imports $link "$sysroot/lib/wasm32-wasip1/crt1-command.o" "$out.o" -L"$sysroot/lib/wasm32-wasip1" -lc "$builtins" \
   --export=__stack_pointer --export=fly_fiber_run --export=fly_fiber_top -z stack-size=8388608 -o "$out"
 rm -f "$out.c" "$out.o"

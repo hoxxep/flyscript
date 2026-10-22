@@ -1,6 +1,6 @@
 # Flyscript
 
-**Language specification, version 0.64**
+**Language specification, version 0.65**
 
 *Affine values, one row calculus, handlers for everything, and `comptime`: Church on the outside, Turing on the inside.*
 
@@ -20,35 +20,16 @@ The whole language rests on five laws. Every rule in this document is a conseque
 
 ### 0.1 Recent changes
 
-0.64 lets a task go on on any core after it waits (§8.3). 0.63 specifies the standard library as carefully as the core, in [std.md](std.md), and fills what it lacked: `Socket.connect`, `send` that says whether anyone listens, a `Mutex` whose waiters give up their cores, and JSON for arrays. 0.62 makes cleanup run to its end under cancellation (§5.6, §6.1). 0.61 runs programs compiled to WebAssembly in web pages (§8.3), with a web framework in library code built on `Ui`, an effect, and on real sockets. 0.60 gave native programs real sockets (§8.3): `std/net` listens and connects on the machine's network when no world is simulated, and `IoErr` says when an address is in use. 0.59 made handlers whose arms each end by resuming cost a call per operation (§5.2), the shape dependency injection and rendering take. 0.58 ran native tasks on every core (§8.3), and `par` and `parReduce` on all of them through `join`, which runs two pure closures at once (§6.5). 0.57 added LLVM as a way to native code (§8.3): a program's functions as LLVM IR, with debug information that maps them to their source, optimized together with the runtime, for any target LLVM has. 0.56 built the foreign interface (§8.2): raw pointers as the prelude's `Ptr<T>`, reaching through one an effect, `Unsafe`, that `unsafe { … }` handles, and functions of C's and functions C calls; and one core IR under the self-hosted compiler's back ends. The table lists the language's changes since 0.54; earlier ones are in [docs/history](history/).
+0.65 folds the rules for how code takes hold of a place into one (§4.1), states the guarantees of the core calculus and how each is established (§9), and moves what is a cost rather than a meaning into performance contracts (§11.3). 0.64 lets a task go on on any core after it waits (§8.3). 0.63 specifies the standard library as carefully as the core, in [std.md](std.md). 0.62 makes cleanup run to its end under cancellation (§5.6, §6.1). The table lists the changes of 0.64 and 0.65; every earlier one, with the reasoning behind it, is in [docs/history](history/).
 
 | Change | Why |
 | :--- | :--- |
+| Code that takes hold of a place — an arm binding its parts, a closure capturing it, a name bound from a borrow — holds it by use, one rule where there were three (§4.1, §4.3) | the rules for arms, copies and borrowed matches each restated the same principle with its own exceptions |
+| §9 states what the rules guarantee — type, memory and effect safety, data-race freedom, deterministic destruction — and how each is established | the calculus was a sketch, and soundness was argued without saying what stood in for a proof |
+| How handlers, tasks, `join`, locks and regions perform is a contract of the implementations (§11.3), not a rule of the language | a direct handler and a task's core were described in the rules, which a program cannot observe |
+| An operation's argument for a `readonly` or `mut` parameter is lent to the arm, as a call's is (§5.3) | it was moved, so an update could not show a handler a model it did not own |
+| The specification no longer promises `Pool<T>` (§4.5) | the library never had it |
 | A native task goes on wherever a core is free, not only on the worker it began on (§8.3) | a task began where its scope ran and stayed there, so tasks that woke together could queue on one core while others were idle |
-| The standard library has a specification of its own, [std.md](std.md), covering every name it exports; §3.1's list of methods moved there (§3.1) | the library was specified by its declaration files and by examples, so what a function did at an edge — a replaced map entry, a dropped receiver, a number too large — was whatever each implementation did |
-| `Sender.send` gives whether the message went to the channel: `false` once the receiver is dropped (§6.2) | a producer had no way to learn that no one listened, and went on producing |
-| A dropped receiver drops what is in its channel then (§6.2) | a message holding a reply kept its requester waiting until the channel's senders were gone too |
-| `IoErr` has `#Refused`, and `std/net` has `Socket.connect` (§5.1) | programs could listen but not connect |
-| A `Mutex`'s waiters wait without a core, in turn, and each `Mutex` has a lock of its own (§6.2) | waiters spun, so a long body took every core waiting for it |
-| `comptime for` iterates a range (§7.2) | a derivation over an array's length had no list to iterate |
-| A panic stops its task without running the task's cleanup; the tasks it cancels still run theirs (§5.7) | native code stopped a panicking task where it was, while the reference unwound it, running its `defer`s: a panic ends the program anyway, and unwinding natively would cost a check after nearly every call |
-| An operation a `handle` gives no arm passes on to the handlers around it, and a program's own handler of `Io` is honored by every back end (§5.2, §6.4) | a handler that named some operations panicked when the body performed another, and compiled code sent `Io` to the runtime even under a test's handler |
-| `Atomic*` types are not part of the library (§6.2) | the specification listed them, and the library never had them; a `Mutex` serves for shared counters, and `Ptr`'s atomics for code below the library |
-| Cleanup runs to its end: a cancellation that reaches a task in a `defer` takes effect at its first scheduling point after it (§5.6, §6.1) | a `defer` that performed `Io` as a cancelled task unwound — closing a connection, sending a last message — was itself cancelled at its first operation, so cleanup that needed `Io` could not be relied on |
-| Dropping a channel's receiver drops what is sent from then on; a channel is freed with what is in it once both its ends are gone (§6.2) | channels, and the messages no one received, were never freed |
-| `IoErr` has `#AddrInUse` (§5.1) | a server binding a port another program holds could only report it as some other failure |
-| `std/par` exports `join(a, b)`, which runs two pure closures, at once when a core is free, and gives both results (§6.5) | `par` and `parReduce` need to run halves of their work in parallel without `Io`, which pure code does not perform; so do programs splitting work of their own |
-| A type nothing constrains, such as the result of a closure that only throws, is `never` (§3.6) | `s.fork(() => { …; throw #Bad })` left its `Fiber`'s type unsolved, which code generation cannot lay out; no value of it is ever made |
-| `isize` and `usize` are as wide as the target's addresses: 53 bits on JavaScript (§3.1) | the JavaScript back end represents them as numbers, which hold integers exactly to 53 bits |
-| A key looked up with a literal takes the map's key type before the literal's defaults (§4.1) | `spans.get({ start: 1, end: 2 })` failed: the fields defaulted to `i32` |
-| A call's result holds a borrow of an argument's place only if its declared type can hold a borrow itself, not only through a type argument (§4.1) | `const step = match (self.state.take()) { … }` kept `self.state` lent `mut` while `step` lived, so the state could not be put back: §5.5's own `generate` was rejected |
-| A `match` arm binds by the strongest use it makes of what it binds: it takes an owned place only if it moves a part, borrows it `mut` if it changes one in place, and a guard only reads (§4.1) | matching a local `Option<String>` to read its string moved it, so it could not be matched again; a TypeScript programmer reads a value without giving it away |
-| A `match` through a `mut` borrow lends it `mut` only if an arm changes a part it binds (§4.1) | a compiler's `match (self.defs[d].kind)` in a `mut self` method locked `self` for arms that only read, so they could not call `readonly` methods |
-| A `while (true)` with no `break` of its own has type `never` (§3.6) | a retry loop left only by `return`, the last thing in a function returning a value, was rejected for giving `void` |
-| A sleeping task waits for the virtual clock, which moves only when no task can run (§6.4) | each sleep advanced one shared clock, so two tasks sleeping 10 ms at once took 20 ms between them, and a long sleep could end before a short one |
-| A program's `main` takes the command line, a last parameter that is a list of strings taking every argument left (§8.1) | the spec's own word count, `main(args: readonly String[])`, could not be run as a program |
-| A condition may chain bindings and tests with `&&`: `if (const #Some(x) = o && x > 0)`, and `while` likewise (§2.1, §2.3) | the compiler written in Flyscript had 247 `if (const …)` blocks whose first statement was another test |
-| `Scope.spawn` and `Scope.fork` use `Io` (§6.1) | starting a task is a scheduling point, an effect like any other; a back end that suspends tasks at their effects needs to see it in the type |
 
 ---
 
@@ -250,7 +231,7 @@ type Option<T>    = #Some(T) | #None;
 type Result<T, E> = #Ok(T) | #Err(E);
 ```
 
-`Option<T>` has `isSome`, `isNone`, `map(f)`, `unwrapOr(fallback)`, `unwrap()` (a `#None` is a bug, and panics), and `take()`, which through a `mut` borrow leaves `#None` behind; an `Option<readonly T>` also has `cloned()`. `Result<T, E>` has `isOk`, `isErr`, and `unwrap()`, which throws the `#Err` payload as a failure (§5.4). A record pattern names the fields it binds and ignores the rest: `#Struct { fields }` matches a `#Struct { name: str; fields: Field[] }`.
+Their methods are the library's ([std.md](std.md) §1.2). A record pattern names the fields it binds and ignores the rest: `#Struct { fields }` matches a `#Struct { name: str; fields: Field[] }`.
 
 **Narrowing.** In a `match` on a structural union, an arm whose pattern binds the whole value sees the union without the tags that earlier arms, unguarded, matched whatever their payload: in `match (e) { #Many(ps) => …, one => describe(one) }` with `e: Problem | #Many(Vec<Problem>)`, `one` is a `Problem`. An enum is a type of its own and is not narrowed. A narrowed union is still a value of the union it came from, as every closed union is of a union with all its tags: `match (a.cmp(b)) { #Equal => #Less, other => other }` is an `Ordering`.
 
@@ -336,13 +317,11 @@ A value that is borrowed without having a place — a call's result, a template 
 
 **Through a pointer.** A field of a `Box<T>` or an `Arc<T>` is read through it, as a field of a `Ref<R, T>` is: `b.kind` with `b: Box<Expr>`. A `Box<T>`, a `Ref<R, T>` or an `Arc<T>` is matched as the `T` it holds, through a borrow of it — the borrow the pointer was reached through, or `readonly` for an owned one: `match (node) { #Add(a, b) => … }` with `node: Box<Expr>` binds `a` and `b` as borrows of the boxed `Expr`'s parts. Nothing is moved out of a box by a pattern; take what it holds with `b.into()` (or clone a part) instead.
 
-**A match through a borrow.** A place nothing may be moved out of — reached through a borrow, or an element of a collection (`self.links[v]`) — is matched through a borrow of it: its parts bind as borrows, with copies for `Copy` parts, as below. Reached through a `mut` borrow, it is lent `mut` if an arm uses a part it binds other than by reading it — assigns to it, lends it `mut`, calls a method that takes it `mut`, or lets it go where it could be changed (binds it, returns it, puts it in a value) — and `readonly` otherwise, so `if (const #Alias(n) = self.defs[d].kind) { return self.resolve(n); }` reads `self` while it looks.
+**Holding by use.** Code that takes hold of a place without saying how — a `match` arm binding its parts, a closure capturing a binding (§4.3), a name bound by `const` from a borrow — takes the weakest hold its uses need: a copy of a `Copy` value it only reads, a `readonly` borrow of anything else it only reads, a `mut` borrow of what it changes in place or lets go where it could be changed, and the value itself only if it moves it — an arm that moves a part takes the whole place, owning all it binds and dropping what it does not move on when it ends. An arm's uses are its body's; a guard only reads, and an arm takes or borrows the place only once its guard has let it run, so when the guard fails the next arm finds the value whole. So `match (o) { #Some(x) => seen.push(x.asStr()), … }` leaves `o` to be matched again, `#Some(s) => s.push("!")` changes the option in place (which must then be a `let` binding or reached through one), `#Some(x) => take(x)` moves it, and an arm that binds nothing reads it. A place nothing may be moved out of — reached through a borrow, or an element of a collection (`self.links[v]`) — is held at most as that borrow allows: `if (const #Alias(n) = self.defs[d].kind) { return self.resolve(n); }` reads `self` while it looks.
 
-**A match binds by use, per arm.** An arm binds a part of a matched place by the strongest use it makes of it, as a closure captures (§4.3): an arm that moves an owned, non-`Copy` part it binds takes the place, moving it, and owns all it binds, dropping what it does not move on when it ends; an arm that changes a part it binds borrows the place `mut` — which must then be a `let` binding or reached through one — and changes it in place, so `#Some(s) => s.push("!")` changes the option matched; an arm that only reads what it binds borrows the place, `readonly`, for as long as those bindings are used; an arm that binds nothing, or only copies, reads it. A guard only reads what its pattern binds, and an arm takes or borrows the place only once its guard has let it run: when the guard fails, the next arm finds the value whole. So `match (o) { #Some(x) => seen.push(x.asStr()), … }` leaves `o` to be matched again, `#Some(x) => take(x)` moves it, and `_ => println(`${e}`)` may use what another arm would have taken.
+A copy keeps what the value it was copied from held. A class-1 copy holds nothing, so in `while (const #Some(#Op(op)) = self.peek()) { self.pos += 1; … }` `self` is free once `op` is copied; a `str` copied out of a `readonly Option<str>` still borrows what the option's string did; and a `readonly` borrow passed or assigned where one is wanted is copied with what it holds, without borrowing the binding it was read from. A part of a tag, record or list literal whose slot is a borrow is lent, as an argument is: `#Some(self.toks[i])` in a function returning `Option<readonly Token>` lends the token.
 
-**Copy parts bind by copy.** A name bound through a `readonly` borrow — by a pattern taking apart a borrowed value, or by `const` from a borrow — binds a copy instead if its type is `Copy`. Nothing can change the original while it is lent `readonly`, so the copy is indistinguishable from the borrow. If its type is class 1 the copy holds nothing: in `while (const #Some(#Op(op)) = self.peek()) { self.pos += 1; … }`, `op` is a `u8` and `self` is free. A class-2 copy — a `str`, a slice, a `readonly T` — keeps what the value it came from held, so a `str` matched out of a `readonly Option<str>` still borrows whatever the option's string did. Likewise a `readonly` borrow passed or assigned where one is wanted is copied with what it holds; it does not borrow the binding it was read from. Through a `mut` borrow, a binding stays a borrow, so it writes in place (below). And a part of a tag, record or list literal whose slot is a borrow is lent, as an argument is: `#Some(self.toks[i])` in a function returning `Option<readonly Token>` lends the token.
-
-A borrow lasts until the last use of any value that holds it, not to the end of its scope. Every value carries the set of borrows it holds, its *loans*: a borrow taken for an argument is held by the call's result if the result can hold it (§4.2) — if its declared type can hold a borrow itself: a result that can hold one only through an ordinary type parameter, from a function given no closure, generator or continuation, as `take(self: mut Self): Option<T>` gives, holds what the arguments held but not a borrow of their places, which such generic code cannot put into a `T` (a `comptime` type parameter, an associated type or a function argument can, so their results hold the borrow); a value bound by a pattern or assigned to a binding passes its borrows on; a binding assigned anew holds the new value's borrows only, and one assigned on several paths holds the union where they meet. A borrow cannot outlive what it borrows: when a block ends, neither its value nor any binding used afterwards may hold a borrow of a binding declared in it. So `let s = v[0..1]; if (c) { const a = [1, 2, 3]; s = a[0..2]; } use(s)` is rejected — `s` would outlive `a` — while re-pointing `s` at `v` before the block ends is fine. In a loop, the body's bindings end with each iteration. In the example below, the `#None` arm holds no borrow of `counts`, so it may insert, while in the `#Some` arm `n` holds `counts` mutably until its last use.
+A borrow lasts until the last use of any value that holds it, not to the end of its scope. Every value carries the set of borrows it holds, its *loans*: a borrow taken for an argument is held by the call's result if the result can hold it (§4.2); a value bound by a pattern or assigned to a binding passes its borrows on; a binding assigned anew holds the new value's borrows only, and one assigned on several paths holds the union where they meet. A borrow cannot outlive what it borrows: when a block ends, neither its value nor any binding used afterwards may hold a borrow of a binding declared in it. So `let s = v[0..1]; if (c) { const a = [1, 2, 3]; s = a[0..2]; } use(s)` is rejected — `s` would outlive `a` — while re-pointing `s` at `v` before the block ends is fine. In a loop, the body's bindings end with each iteration. In the example below, the `#None` arm holds no borrow of `counts`, so it may insert, while in the `#Some` arm `n` holds `counts` mutably until its last use.
 
 A call borrows each `mut` argument, and a method its receiver, in two phases: `readonly` while the other arguments are evaluated and `mut` only for the call itself, so `v.push(v.len())` and `replace(mut self.code, self.fresh())` are legal, while `v.push({ v.clear(); 1 })` and `both(mut v, v[0..1])` are not.
 
@@ -369,7 +348,7 @@ A class-2 value may be a parameter, a local, or a return value tied to a paramet
 - **Containers hold first-class values.** A nominal type's type parameters range over class-1 types unless the type is a `view`: `Vec<String>` and `HashMap<String, u64>` are fine, `Vec<str>` is an error that suggests `Vec<String>`. Structural types (`Option`, `Result`, tuples, records) and views (`Gen`, `Scanner`) may hold borrows.
 - **No borrow is stored through a borrow.** A `mut` borrow of a view may change its class-1 parts (`sc.pos += 1`) but cannot have a class-2 value written into it: a function that wrote its argument's borrow into a caller's `mut Option<mut T>` would keep that borrow alive after the call had released it. A local binding may still be reassigned (`s = b`), since its borrows are tracked where it lives.
 
-**Results carry their sources' borrows.** A call's result can hold the borrows of its *sources*: the parameters named in its `from` clause; without one, the receiver for a method and every borrowed argument for a free function. Arguments whose types can hide a borrow — closures, generators, type parameters — are always sources, and so is the callee when it is a closure or continuation called as a value: what it captured may be in what it returns. A result whose type cannot hold a borrow at all (class 1, with no closure, continuation or type parameter once instantiated) holds nothing. So `v.len()` holds nothing; `counts.getMut(key)` holds the borrow of `counts` but not of `key`; and `generate(() => v.each())` holds the borrow of `v` for as long as the generator lives.
+**Results carry their sources' borrows.** A call's result can hold the borrows of its *sources*: the parameters named in its `from` clause; without one, the receiver for a method and every borrowed argument for a free function. Arguments whose types can hide a borrow — closures, generators, type parameters — are always sources, and so is the callee when it is a closure or continuation called as a value: what it captured may be in what it returns. A result whose type cannot hold a borrow at all (class 1, with no closure, continuation or type parameter once instantiated) holds nothing. One that can hold a borrow only through an ordinary type parameter, from a function given no closure, generator or continuation, holds what its arguments held but not a borrow of their places, which such generic code cannot put into a `T`: so `self.state.take()` leaves `self.state` free. A `comptime` type parameter, an associated type or a function argument can, so their results hold the borrow. So `v.len()` holds nothing; `counts.getMut(key)` holds the borrow of `counts` but not of `key`; and `generate(() => v.each())` holds the borrow of `v` for as long as the generator lives.
 
 ```ts
 function longer(a: str, b: str): str { if (a.len() >= b.len()) { a } else { b } }   // borrows a and b
@@ -380,7 +359,7 @@ The body is checked against the same rule: everything the returned value borrows
 
 ### 4.3 Closures
 
-A closure captures each binding as its body needs it, by reference: a read takes a `readonly` borrow, a change a `mut` borrow. Passing a closure as an argument is lending it: in `xs.iter().filter((x) => x > min)` the closure borrows `min`, and the resulting generator carries that borrow (§4.2), so `min` may change again once the chain is collected. A closure that *escapes* — returned, or stored in a record, tag or list by the function that creates it — instead takes ownership of what it captures, by move where it is made, so it holds no borrows (a task moves in likewise what is declared inside its scope, §6.1); it may own only `Send` values, so every first-class closure is `Send`. Function values are affine, like any owned value: moving one moves its captures, and dropping it drops them. Its mode follows from what its body does when called:
+A closure holds each binding it captures by use (§4.1), by reference: a read takes a `readonly` borrow, a change a `mut` borrow. Passing a closure as an argument is lending it: in `xs.iter().filter((x) => x > min)` the closure borrows `min`, and the resulting generator carries that borrow (§4.2), so `min` may change again once the chain is collected. A closure that *escapes* — returned, or stored in a record, tag or list by the function that creates it — instead takes ownership of what it captures, by move where it is made, so it holds no borrows (a task moves in likewise what is declared inside its scope, §6.1); it may own only `Send` values, so every first-class closure is `Send`. Function values are affine, like any owned value: moving one moves its captures, and dropping it drops them. Its mode follows from what its body does when called:
 
 | Type | Body | Callable |
 | :--- | :--- | :--- |
@@ -408,10 +387,10 @@ The compiler derives three marker interfaces from structure:
 | :--- | :--- | :--- | :--- |
 | `Box<T>` | heap | unique | by its owner |
 | `Ref<R, T>` | region `R` | `Copy` | none, except through `Cell` and `RegionList` |
-| `Arc<T>` (`T extends Send`) | heap | atomic count | none; shared state goes through `Mutex`, `Atomic` and channels (`Sender`, `Receiver`), which are `Io` |
+| `Arc<T>` (`T extends Send`) | heap | atomic count | none; shared state goes through `Mutex` and channels (`Sender`, `Receiver`), which are `Io` |
 | `readonly T` / `mut T` | anywhere | second-class | `mut` only |
 
-Long-lived cyclic structures outside a region use the library's `Pool<T>` with generation-checked `Handle<T>` indices.
+Long-lived cyclic structures outside a region are indices into a collection that owns the nodes, as the compiler written in Flyscript keeps its scopes and type variables.
 
 ### 4.6 Regions
 
@@ -506,8 +485,6 @@ effect Clock { now(): u64; }
 effect Log { info(msg: String): void; }
 const d = handle { limiter.check(client) } with Clock { now() resumes k => k(t) } with Log { info(m) resumes k => { out.push(m); k() } };
 ```
-
-Most handlers are *tail-resumptive*: each arm resumes its continuation once, as the last thing it does, and cannot fail, as the `Clock` and `Log` handlers above. Such a handler costs no more than a function call per operation: the body runs where the `handle` is, and an operation calls its arm, which returns the resumption's argument to the body. Any other handler runs its body on a fiber of its own (§8.3).
 
 An arm runs in the context of the `handle` expression: its effects are those of the code around the `handle`. If the body's row is `Eff, ...E`, the `handle` expression's row is `...E` together with the arms' own effects. That row is inferred, never written, and is the `E` of the arms' continuations: resuming one runs the rest of the body and, through it, perhaps the arms again, and nothing else. A `region` the body opens and ends, or a `try` inside it, handles its effect there, so that effect is not in the row; one around the `handle` is, so a continuation that performs `Region<R>` cannot leave `R`.
 
@@ -759,7 +736,7 @@ function parReduce<C extends ParSplit, A extends Send>(
 
 `par` borrows its container once into a `Slice` and divides it with `split`, which consumes a slice and returns two disjoint ones — the borrow rules prove them disjoint, so the halves can go to different workers — down to single elements, each lent to `f` by `viewAt`. `f` is shared, so it cannot change anything it captures, and has no effects: it cannot race. `parReduce` only reads, so its workers share the container `readonly` and read elements with `readAt`; `both` must be associative. Slices, arrays and `Vec`s split as `mut T[]`, with `View = mut T` and `ReadView = readonly T`; `Soa<T>` splits all its planes at once (§7.4). The elements go to different workers, so every impl requires them to be `Send`.
 
-`join(a, b)` runs both closures and gives both results. They are pure, so whether they run one after the other or at once cannot be seen; what they capture must be `Send`, since either may run on another core. `par` and `parReduce` divide their work with it, and so may any program. Native code runs it on a work-stealing pool, a worker for each core: the second closure is offered to idle workers while the first runs, and taken back if none took it, so splitting where no core is free costs little more than a call. Elsewhere — the prototype, JavaScript, a simulated world — the two run in order.
+`join(a, b)` runs both closures and gives both results. They are pure, so whether they run one after the other or at once cannot be seen; what they capture must be `Send`, since either may run on another core. `par` and `parReduce` divide their work with it, and so may any program; what it costs is a contract of the implementations (§11.3).
 
 ---
 
@@ -955,17 +932,34 @@ A foreign call runs on the worker thread's native stack, not on the task's growa
 
 ## 9. Core calculus
 
-Surface Flyscript elaborates into a small calculus, λ-fly, with judgments
+Surface Flyscript elaborates into a small calculus, λ-fly, which makes the laws of §0 precise enough to say what the type system guarantees.
 
-> Δ | Θ | Γ ⊢ e : τ / ε ⊣ Θ′
+### 9.1 Terms
+
+> e ::= x | c | (e, …) | #ℓ(e) | {ℓ = e, …} | let x = e in e | if e then e else e | match e { p ⇒ e, … }
+> &nbsp;&nbsp;&nbsp;&nbsp;| λᵐ x. e | e e | move π | borrowᵘ π | π := e | defer e in e
+> &nbsp;&nbsp;&nbsp;&nbsp;| perform E.op(e) | handle e with E { op x ⇒ e | op x k ⇒ e, … } | resume k e
+> &nbsp;&nbsp;&nbsp;&nbsp;| region ρ in e | scope s in e | spawn s e
+>
+> π ::= x | π.ℓ | π[e] &nbsp;&nbsp;&nbsp; m ::= shared | mut | once &nbsp;&nbsp;&nbsp; μ ::= ro | mut
+
+Every surface construct is one of these. `throw` and `try` are `perform Fail.raise` and an abortive `handle`; `yield` and `for…of` are `perform Yield.yield` and a resumptive `handle`; a method call is an application whose receiver is lent in its declared mode; `const` is `let` without `:=`; a struct, an enum or an alias is a name for a type; `comptime` is gone, having run.
+
+### 9.2 Judgments
+
+> Δ | Θ | Γ ⊢ e : τ / ε ⊣ Θ′ ; L
 
 - **Δ** binds type variables (with their bounds), region variables, and row variables. One kind of row variable serves records, tag unions and effects.
-- **Θ** is the ownership context: each owned binding is live or moved. Θ′ is the context after `e`. Where branches disagree, the live branch drops the value.
-- **Γ** is the borrow ledger: each live borrow, its mode (`ro` or `mut`) and the path it locks. A `mut` entry locks its path against all use; a `ro` entry locks it against moves and `mut` borrows.
+- **Θ** is the ownership context: each owned path is live or moved. Θ′ is the context after `e`. Where branches disagree, a path moved on any branch is moved where they meet, and the branches that did not move it drop it.
+- **Γ** is the borrow ledger: each live borrow, its mode and the path it locks. A `mut` entry locks its path against every other use; a `ro` entry locks it against moves and `mut` borrows. Paths are locked per field: a borrow of `x.f` leaves `x.g` free.
 - **ε** is the effect row of `e`.
+- **L** is the loans `e`'s value holds: the borrows it may keep alive. A borrow is live while any value or binding whose loans include it may still be used.
 
-The rules that carry the design:
+### 9.3 The rules that carry the design
 
+- **Move.** `move π` needs `π` live in Θ and unlocked in Γ, and marks it moved in Θ′; a later use of a moved path, or a move in a loop of a path declared outside it, is an error.
+- **Borrow.** `borrowᵘ π` needs no conflicting entry in Γ for `π` or a path above or below it, and gives a value whose loans are `{π : μ}`. A call borrows a `mut` argument `ro` while the other arguments are evaluated and `mut` only for the call.
+- **Loans.** A call's result holds its sources' loans (§4.2); a binding holds its value's; a value placed in a class-1 place may hold none. At the end of a block, neither its value nor any binding used afterwards may hold a loan of a binding the block declared.
 - **Class.** class(`readonly τ`) = class(`mut τ`) = class(`str`) = class(`τ[]`) = 2. For every other type former, class is the maximum over components. A continuation's class is 2 if what it suspended — the body, and through its handler the arms — holds a borrow; `Cont` is a view. Stores into class-1 places, escaping captures, `Send`, and untied returns require class 1, and escaping captures may not hold region data, whose region no closure type mentions.
 - **Purity.** No primitive with ε = ∅ writes memory reachable through a `ro` entry of Γ. Writes through shared references exist only as operations of `Io` or `Region`.
 - **Region.**
@@ -975,6 +969,28 @@ The rules that carry the design:
 - **Handle.** An abortive arm is checked under the Γ of the `handle` expression, the body's borrows having been released. In a resumptive arm, the body's borrows move into `k`, whose type records them; they are released when `k` is resumed to completion or dropped.
 - **Scope.** A task's captures must be class 1 and `Send`, or `ro` borrows of `Send` values whose paths are not under `mut` in Γ. A spawned task's row is exactly `Io`; a forked task's row, and the scope body's, is `Io` and `Fail<X>`, where `X` is rethrown by the scope.
 - **Effect rows.** Rows are label-sorted maps with an optional tail. For records a label occurs once and extension requires the tail to lack it; for tag unions labels merge and their payloads unify; for effects a label is an effect name with its region arguments, its other arguments are functions of the label, and extension by a present label is the identity. Handling `Fail` sets the open tail of its payload to the empty row.
+- **Cleanup.** `defer e₁ in e₂` runs `e₁` on every exit of `e₂` but a panic, to its end; `e₁`'s row has no `Fail` and no `Yield`.
+
+### 9.4 What the rules guarantee
+
+For a program that checks, outside `unsafe` blocks and foreign functions:
+
+1. **Type safety.** Evaluation produces a value of the program's type, runs forever, ends with a failure `main`'s row allows, or panics. It never gets stuck: every operation performed meets a handler, `Io` at the root aside, which the runtime or a simulated world answers.
+2. **Memory safety.** No evaluation reads or writes a value after it was moved or dropped, writes through a `readonly` loan or beside a live `mut` one, reaches region data after its region ended, or drops a value twice.
+3. **Effect safety.** A function performs only the effects its row lists.
+4. **Data-race freedom.** Two tasks reach one location at once only if both read it, or through library operations of `Io` (`Mutex`, channels), which synchronize them.
+5. **Deterministic destruction.** Every owned value is dropped exactly once, where the program text says, on every way out but a panic (§5.7), and a `defer` runs to its end (§5.6).
+
+### 9.5 How they are established
+
+The sections above argue each guarantee rule by rule; none is yet proved mechanically. What stands in for a proof is evidence of three kinds, gathered on every change:
+
+- **Three implementations agree.** The reference evaluator (§11.1) and the compiler written in Flyscript, compiling to JavaScript, to C and through LLVM (§11.2), run every program in the test suite and must print the same, down to how its tasks interleave under the seeded scheduler. Native code runs under the address, undefined-behavior, leak and thread sanitizers, so a memory error in a program the checker accepted shows up as one — a hole in the rules, not a bug of the program's.
+- **Programs no one wrote.** A generator makes random programs that are well typed by construction — owned, `readonly` and `mut` arguments, moves, loops, closures, generators, handlers that resume and handlers that do not, failures, `defer`s, tasks — and each runs in all four ways, under the sanitizers, and must print what the reference prints.
+- **Mutants that must be rejected.** From each generated program come mutants that each break one rule — a value used after it moved, a value moved in a loop, a vector changed while it is iterated, a `readonly` parameter changed — and the checker must reject every one, as it must each program of a hand-written corpus that breaks one rule.
+
+A mechanized proof of guarantees 1–3 for λ-fly is an open question (§12.3).
+
 ---
 
 ## 10. A worked example
@@ -1052,7 +1068,9 @@ Everything here follows from the rules above: the failure row of the `try` body 
 
 ## 11. Implementation
 
-The prototype compiler, `flyc`, implements this specification except code generation. Its evaluator runs destructors as specified, keeping a drop flag per binding at the moves the ownership pass records; a value it does not bind, such as a discarded call result, is reclaimed by the host without one.
+### 11.1 The reference implementation
+
+The reference compiler, `flyc`, implements this specification except code generation. Its evaluator runs destructors as specified, keeping a drop flag per binding at the moves the ownership pass records; a value it does not bind, such as a discarded call result, is reclaimed by the host without one.
 
 1. **Parse** each module into a syntax tree. Standard-library modules are declaration files and Flyscript modules (the prelude's derivations, `std/json`); either may leave out a body that the runtime provides.
 2. **Expand** `comptime` code: a template is specialized when a call or a bound needs it, once per set of `comptime` arguments with their regions erased (generated code never depends on the region data lives in), its body expanded with fresh positions in source order (each repeated copy is distinct code to the later passes) that map back to the template for diagnostics.
@@ -1060,9 +1078,23 @@ The prototype compiler, `flyc`, implements this specification except code genera
 Every property of a type that looks through its parts — `Copy`, `Send`, its class, whether it hides a borrow, whether dropping it runs code — is decided coinductively: recursion goes through nominal types (§3.3), and a nominal type met again inside itself is a cycle, taken as the property's neutral value (true for `Copy` and `Send`, class 1, hides nothing, runs nothing), so each is linear in the type's declaration rather than exponential in its branching.
 
 4. **Check ownership** after typing: every value carries the loans it holds, loans flow through call results, patterns, assignments and captures, and a loan is live while any binding holding it may still be used, judged by reachability over the program's structure.
-5. **Evaluate** directly, carrying each frame's type arguments so a call through a bound runs the impl for the type it stands for: abortive handlers unwind and tail-resumptive ones run where the effect is performed, so `for…of` over a generator captures no stack; a `Gen` pulled with `next()` runs on its own thread. `Io` is handled by a deterministic world (files, sockets, a database, a seeded fault schedule), which is what makes §6.4's simulation testing concrete.
+5. **Evaluate** directly, carrying each frame's type arguments so a call through a bound runs the impl for the type it stands for: abortive handlers unwind and handlers whose arms end by resuming run where the effect is performed, so `for…of` over a generator captures no stack; a `Gen` pulled with `next()` runs on its own thread. `Io` is handled by a deterministic world (files, sockets, a database, a seeded fault schedule), which is what makes §6.4's simulation testing concrete.
 
-The self-hosted compiler (`selfhost/`) lowers each checked function once, specialized for its type arguments, to a core IR of structured statements in which evaluation order, moves, drops and every way out of a block are explicit, and prints it three ways: as JavaScript, running effects as generators; as C, with fibers for handlers, generators and tasks; and as LLVM IR, whose integer arithmetic is LLVM's own, checked by its overflow intrinsics. The C and LLVM back ends share the runtime and its library routines, which LLVM inlines into the program. Native code runs a tail-resumptive handler's body in place and makes each operation a call of its arm; any other handler's body runs on a fiber. What compiled code reads of the running task — the failure being raised, whether it unwinds, its handlers — is the task's own context, which a function computes once a call: the same wherever the task goes on, so a task that waits resumes on whichever worker is free, and the runtime reaches every variable of a thread's afresh after a switch. Still to come: abortive `Fail` as two-register returns, and emitting `noalias` and `readonly` from `mut` and `readonly`.
+### 11.2 The compiler written in Flyscript
+
+The self-hosted compiler (`selfhost/`) lowers each checked function once, specialized for its type arguments, to a core IR of structured statements in which evaluation order, moves, drops and every way out of a block are explicit, and prints it three ways: as JavaScript, running effects as generators; as C, with fibers for handlers, generators and tasks; and as LLVM IR, whose integer arithmetic is LLVM's own, checked by its overflow intrinsics. The C and LLVM back ends share the runtime and its library routines, which LLVM inlines into the program. What compiled code reads of the running task — the failure being raised, whether it unwinds, its handlers — is the task's own context, which a function computes once a call: the same wherever the task goes on, so a task that waits resumes on whichever worker is free, and the runtime reaches every variable of a thread's afresh after a switch. Still to come: abortive `Fail` as two-register returns, and emitting `noalias` and `readonly` from `mut` and `readonly`.
+
+### 11.3 Performance contracts
+
+What follows is no part of a program's meaning — no program can observe it — but the implementations promise it, and programs may be designed around it.
+
+- **Specialization.** Every generic function, generic in rows too, is specialized for each instantiation: a call through a bound is direct, and field offsets and tag numbers are constants (§3.2).
+- **Handlers.** A handler whose every arm resumes its continuation once, as its last act, and cannot fail — the shape of dependency injection and of rendering — costs a call per operation: its body runs where the `handle` is, and an operation calls its arm. Any other handler runs its body on a fiber of its own, and an operation switches to the arm and back. A `for…of` over a generator call runs the loop's body as the generator yields, with no fiber.
+- **Regions.** Allocating in a region bumps a pointer; ending a region releases its arena at once, whatever it holds (§4.6).
+- **Tasks.** A task is a fiber with a stack of its own. Native code runs tasks on a worker thread for each core: a task that waits gives its core to others, and an idle core takes waiting work from a busy one, so tasks that wake together spread over the cores.
+- **`join`.** Native code offers the second closure to idle cores while the first runs and takes it back if none took it, so splitting where no core is free costs little more than a call. Elsewhere — the reference evaluator, JavaScript, a simulated world — the two run in order.
+- **Locks and channels.** A `Mutex` is a word and a queue of its own, and a channel a ring of messages; waiting on either gives the core to others.
+- **Allocation.** Memory is allocated where a value is boxed, a collection or a string grows, a closure escapes, a failure is thrown, a fiber starts, or a region allocates, and nowhere else.
 
 ## 12. Design notes
 
@@ -1095,6 +1127,7 @@ The self-hosted compiler (`selfhost/`) lowers each checked function once, specia
 
 1. **Portable SIMD.** `Soa` and `par` cover vertical arithmetic. Horizontal operations (shuffles, mask extraction) need a `Simd<T, N>` surface that lowers well to both NEON/SVE and AVX2/AVX-512.
 2. **Supervision beyond scopes.** Nursery semantics plus "a task that cannot fail says so" cover servers. Whether long-lived actor trees want restart strategies as a library is open.
+3. **A mechanized core.** §9's guarantees are argued rule by rule and tested by three implementations, generated programs and their mutants, not proved. Mechanizing λ-fly's ownership and effect rules — a syntactic proof for the core without `unsafe`, or a semantic model in the manner of RustBelt that also says what `unsafe` code must uphold — would make guarantees 1–3 theorems.
 
 ---
 

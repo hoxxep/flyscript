@@ -1761,6 +1761,7 @@ impl<'p> Checker<'p> {
         self.perform(&row, span);
         let params: Vec<Ty> = inst.params.iter().map(|(_, t)| t.clone()).collect();
         self.check_args(&params, args, span);
+        self.typed.op_params.insert(span, params);
         inst.ret
     }
 

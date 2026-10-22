@@ -1090,12 +1090,21 @@ void fly_handle_resume(fly_handler* h) {
 
 bool fly_handle_done(const fly_handler* h) { return h->fiber->done; }
 
+// Unwinds a suspended body: what the code dropping it is in the middle of — a failure it raises,
+// an unwinding of its own — is set aside meanwhile, so the body's cleanup cannot take it for its
+// own, and then goes on.
 void fly_handle_unwind(fly_handler* h) {
   if (!h->fiber || h->fiber->done) return;
-  bool was = fly_unwinding;
-  fly_unwinding = true;
+  fly_ctx* cx = fly_cx_now();
+  fly_unwind_state saved = { cx->err, cx->unwinding, cx->stopping };
+  cx->err = NULL;
+  cx->unwinding = true;
+  cx->stopping = false;
   fly_handle_resume(h);
-  fly_unwinding = was;
+  cx = fly_cx_now();
+  cx->err = saved.err;
+  cx->unwinding = saved.unwinding;
+  cx->stopping = saved.stopping;
 }
 
 void fly_handle_free(fly_handler* h) {

@@ -236,6 +236,9 @@ pub struct Typed {
     /// Each call's generic arguments, in its scheme's parameter order (for dispatch through
     /// bounds at run time).
     pub targs: SpanMap<Vec<GArg>>,
+    /// The parameters of each effect operation performed, as instantiated there: an argument
+    /// given where a borrow is declared is lent to the arm, not moved (§5.3).
+    pub op_params: SpanMap<Vec<Ty>>,
 }
 
 impl Names for Program {

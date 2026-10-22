@@ -2,16 +2,18 @@
 // to change it.
 
 import { Ui, Event, el, text, cls, attr, on, key } from "../../../../web/ui";
+import { Page } from "../../../../web/dom";
 import { Todo, TodoErr, Todos, add } from "../api";
 import { nav } from "../layout";
 
-export type Model = { todos: Vec<Todo>; draft: String; error: String };
+// `adding` while the server has yet to answer for a new one.
+export type Model = { todos: Vec<Todo>; draft: String; error: String; adding: bool };
 export type Msg = #Draft | #Add | #Toggle(u32) | #ClearDone;
 
 export const title: str = "Things to do";
 
 export function load(): Model uses Todos {
-  { todos: Todos.list(), draft: String.new(), error: String.new() }
+  { todos: Todos.list(), draft: String.new(), error: String.new(), adding: false }
 }
 
 export function view(m: readonly Model): void uses Ui<Msg> {
@@ -25,7 +27,10 @@ export function view(m: readonly Model): void uses Ui<Msg> {
         attr("value", m.draft.asStr());
         on("input", #Draft);
       });
-      el("button", () => { attr("type", "submit"); text("Add"); });
+      el("button", () => {
+        attr("type", "submit");
+        if (m.adding) { attr("disabled", "disabled"); text("Adding…"); } else { text("Add"); }
+      });
     });
     if (m.error.len() > 0) {
       el("p", () => { cls("error"); text(m.error.asStr()); });
@@ -54,12 +59,16 @@ export function view(m: readonly Model): void uses Ui<Msg> {
   });
 }
 
-export function update(m: mut Model, msg: Msg, ev: readonly Event): void uses Todos {
+export function update(m: mut Model, msg: Msg, ev: readonly Event): void uses Todos, Page<Model> {
   // What went wrong last is shown until something else is done.
   m.error = String.new();
   match (msg) {
     #Draft => { m.draft = ev.text.clone(); }
     #Add => {
+      // The page says it is adding while the server answers.
+      m.adding = true;
+      Page.show(m);
+      defer { m.adding = false; };
       try {
         m.todos = add(m.draft.clone());
         m.draft = String.new();

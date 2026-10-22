@@ -1546,6 +1546,12 @@ impl Own {
       #None => {
         if (const #Fn(f) = stripBorrow(self.tyOf(callee))) {
           for (const t of f.params) { params.push([String.new(), t.clone()]); }
+        } else if (args.len() > 0 && args.iter().every((a) => self.typed.slots.has(a.id))) {
+          // An effect operation's, as the checker instantiated them: an argument given where a
+          // borrow is declared is lent to the arm, not moved (§5.3).
+          for (const a of args) {
+            if (const #Some(t) = self.typed.slots.get(a.id)) { params.push([String.new(), t.clone()]); }
+          }
         }
       }
     }

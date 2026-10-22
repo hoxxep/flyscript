@@ -65,7 +65,7 @@ test("degrades gracefully under packet loss", () => {
 
 Flyscript is an early-stage language under active design, developed in the open.
 
-- **Language specification:** version 0.64, with every earlier version and the reasoning behind each change in [docs/history](docs/history/).
+- **Language specification:** version 0.65, with every earlier version and the reasoning behind each change in [docs/history](docs/history/).
 - **Library specification:** [docs/std.md](docs/std.md), every function the standard library exports: what it performs, when it fails, what it costs.
 - **Compiler (`flyc`):** a complete prototype front end and evaluator. `flyc check` type-, effect- and ownership-checks programs, rejecting use after move, conflicting borrows, borrows that escape through closures and generators, undeclared effects and non-exhaustive matches with precise errors. `flyc run` executes them, with effect handlers, generators and structured concurrency, against a deterministic simulated world. `comptime` runs too: templates specialize per type, and the standard library's JSON codec is derived over reflection in plain Flyscript, with no compiler support.
 

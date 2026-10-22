@@ -1433,6 +1433,10 @@ impl<'p> Own<'p> {
                 s.params.iter().map(|(n, t)| (n.clone(), super::env::subst_params(t, &s.tparams, args))).collect()
             }
             (Some(s), _) => s.params.clone(),
+            // An effect operation's, as the checker instantiated them.
+            (None, _) if self.typed.op_params.contains_key(&e.span) => {
+                self.typed.op_params[&e.span].iter().map(|t| (String::new(), t.clone())).collect()
+            }
             (None, _) => {
                 let mut t = self.ty_of(callee);
                 while let Ty::Borrow(_, inner) = t {

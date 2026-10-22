@@ -19,10 +19,16 @@ const check = (ok, what) => { if (!ok) throw new Error(`FAILED: ${what}`); conso
   const titles = async () => page.$$eval("li .title", (els) => els.map((e) => e.textContent));
   check((await titles()).length === 3, "three things to do");
   await shoot(page, "list");
+  // The server answers slowly: the page says it is adding meanwhile.
+  await page.route("**/_fly/rpc/add", async (route) => { await new Promise((r) => setTimeout(r, 500)); await route.continue(); });
   await page.fill("input", "Ship the web framework");
   await page.click("button[type=submit]");
+  await page.waitForSelector("button[type=submit]:disabled", { timeout: 2000 });
+  check((await page.textContent("button[type=submit]")) === "Adding…", "the page shows it is adding before the server answers");
   await page.waitForFunction(() => document.querySelectorAll("li").length === 4, null, { timeout: 5000 });
+  await page.unroute("**/_fly/rpc/add");
   check((await titles())[3] === "Ship the web framework", "adding asks the server, and shows its answer");
+  check((await page.textContent("button[type=submit]")) === "Add", "the button is ready again once it has");
   check(await page.inputValue("input") === "", "the draft is cleared");
   await page.click("button[type=submit]");
   await page.waitForSelector("p.error", { timeout: 5000 });

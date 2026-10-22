@@ -376,9 +376,16 @@ function nextEvent(): [usize, Event] {
   [index, { text: field(1), key: field(2), checked: field(3) == "true" }]
 }
 
+// What an update may ask of the page besides a new model: to show the model as it is so far, before
+// something slow — the server's answer — so the page says what is happening. Events meanwhile wait
+// their turn.
+export effect Page<Model> {
+  show(m: readonly Model): void;
+}
+
 // Runs a program in the page: `view` of `model` rendered, then each event's message given to
 // `update`, and the view rendered again, for as long as the page is open.
-export function run<Model, M extends Send & Clone, row E>(model: Model, view: (m: readonly Model) => void uses Ui<M>, update: (m: mut Model, msg: M, ev: readonly Event) => void uses ...E): void uses ...E {
+export function run<Model, M extends Send & Clone, row E>(model: Model, view: (m: readonly Model) => void uses Ui<M>, update: (m: mut Model, msg: M, ev: readonly Event) => void uses Page<Model>, ...E): void uses ...E {
   let m = model;
   const root = unsafe { fly_dom_root() };
   let f = record(() => view(m));
@@ -386,7 +393,15 @@ export function run<Model, M extends Send & Clone, row E>(model: Model, view: (m
   while (true) {
     const [i, ev] = nextEvent();
     if (i < f.msgs.len()) {
-      update(mut m, f.msgs[i].clone(), ev);
+      const msg = f.msgs[i].clone();
+      handle { update(mut m, msg, ev) } with Page<Model> {
+        show(now) resumes k => {
+          let g = record(() => view(now));
+          children(root, f, 0, mut g, 0);
+          f = g;
+          k()
+        }
+      };
       let g = record(() => view(m));
       children(root, f, 0, mut g, 0);
       f = g;
