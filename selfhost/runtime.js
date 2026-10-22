@@ -1067,3 +1067,5 @@ function $usize(x) { if (x < 0 || x > 9007199254740991) $overflow(x, "usize"); r
 function $oob(a, i) { $rt.panic(`index ${i} out of bounds (length ${a.length})`); }
 function $at(a, i) { if (i >= a.length) $oob(a, i); return i; }
 function $ix(a, i) { if (i >= a.length) $oob(a, i); return a[i]; }
+function $div(x, y) { if (y === 0) $rt.panic("division by zero"); return Math.trunc(x / y); }
+function $rem(x, y) { if (y === 0) $rt.panic("division by zero"); return x % y; }

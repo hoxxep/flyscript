@@ -107,17 +107,6 @@ function intShape(p: Prim): [bool, u32] {
   }
 }
 
-// Whether a list of the type is a JavaScript array: an array, or a slice whose elements are not
-// bytes, which may be a string's.
-function isArray(t: readonly Ty): bool {
-  match (t) {
-    #Borrow(_, inner) => isArray(inner),
-    #Array(_, _) => true,
-    #Slice(e) => match (e.get()) { #Prim(#U8) => false, _ => true },
-    _ => false,
-  }
-}
-
 // Whether integers of the type are JavaScript numbers rather than BigInts.
 function numeric(t: readonly Ty): bool {
   match (intPrim(t)) {
@@ -502,7 +491,7 @@ impl JsGen {
           const o = s.clone();
           // A list that is a JavaScript array, at an index that is a number, is read and written
           // as one; a string's bytes, or an index that may be a BigInt, by the runtime.
-          if (isArray(t) && numeric(self.operandTy(i))) {
+          if (self.isArray(t) && numeric(self.operandTy(i))) {
             parts = #Some([o.clone(), `$at(${o}, ${iv})`]);
             s = if (write && k + 1 == n) { `${o}[$at(${o}, ${iv})]` } else { `$ix(${o}, ${iv})` };
           } else {
@@ -592,6 +581,17 @@ impl JsGen {
         for (const it of items) { vs.push(self.constValue(it, span)); }
         `[${vs.join(", ")}]`
       }
+    }
+  }
+
+  // Whether a list of the type is a JavaScript array: an array, a `Vec`, or a slice whose elements
+  // are not bytes, which may be a string's.
+  function isArray(self: readonly Self, t: readonly Ty): bool {
+    match (t) {
+      #Borrow(_, inner) => self.isArray(inner),
+      #Array(_, _) => true,
+      #Slice(e) => match (e.get()) { #Prim(#U8) => false, _ => true },
+      _ => self.lw.namedIs(t, "Vec"),
     }
   }
 
@@ -708,8 +708,8 @@ impl JsGen {
         if (numeric(t)) {
           const c = check(p);
           return match (op) {
-            "/" => `$rt.ndiv(${x}, ${y}, ${c})`,
-            "%" => `$rt.nrem(${x}, ${y})`,
+            "/" => `${c}($div(${x}, ${y}))`,
+            "%" => `$rem(${x}, ${y})`,
             // Bitwise operators work on 32 bits: wider numbers go through BigInts.
             "&" | "|" | "^" => match (p) {
               #U32 => `((${x} ${op} ${y}) >>> 0)`,
@@ -760,7 +760,7 @@ impl JsGen {
         } else if (numeric(to)) { "$rt.toNum" } else { "$rt.toInt" };
         `$rt.wrap_${primName(p)}(${conv}(${v}))`
       }
-      #None => if (floatTy(to) && fromInt) { `Number(${v})` } else { v },
+      #None => if (floatTy(to) && fromInt && !numeric(from)) { `Number(${v})` } else { v },
     }
   }
 }

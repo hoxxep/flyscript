@@ -149,8 +149,9 @@ impl Conn {
     for (const h of r.headers) { head.push(`${h.name}: ${h.value}\r\n`); }
     head.push(self.connection().asStr());
     head.push(`Content-Length: ${r.body.len()}\r\n\r\n`);
+    // One write, not two: each is a call into the kernel, which costs more than copying the body.
+    head.push(r.body.asStr());
     self.socket.write(head.asStr().asBytes());
-    self.socket.write(r.body.asStr().asBytes());
   }
 
   // A whole response of bytes: a file's, say.
@@ -179,9 +180,7 @@ impl Conn {
 
   export function send(self: mut Self, chunk: str): void uses Io, Fail<IoErr> {
     if (chunk.len() == 0) { return; }
-    self.socket.write(`${hex(chunk.len())}\r\n`.asStr().asBytes());
-    self.socket.write(chunk.asBytes());
-    self.socket.write("\r\n".asBytes());
+    self.socket.write(`${hex(chunk.len())}\r\n${chunk}\r\n`.asStr().asBytes());
   }
 
   export function end(self: mut Self): void uses Io, Fail<IoErr> {

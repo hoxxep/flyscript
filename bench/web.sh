@@ -1,8 +1,9 @@
 #!/bin/sh
 # The todo app as FlyNext builds it (examples/todo), against the same app in Next.js and React
-# (bench/next): pages rendered per request and a JSON call, under load from oha; each server's
+# (bench/next): pages rendered per request and a JSON call, under load from wrk; each server's
 # memory after it; and, with Playwright (NODE_PATH), what a page downloads, how soon it is
 # interactive, and how fast a link is followed. `bench/web.sh`; results in target/bench/web.md.
+# The client runs on the machine the server does, with four threads of its own.
 set -e
 here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/.." && pwd)
@@ -24,16 +25,20 @@ wait_for() { for _ in $(seq 1 100); do curl -s -o /dev/null "$1" && return 0; sl
 
 # `load name url [method body]`: requests a second, and the median and 99th percentile latency.
 load() {
+  script="$out/$1.lua"
   if [ -n "$3" ]; then
-    oha -z "${secs}s" -c "$conns" --no-tui --output-format json -m "$3" -d "$4" -H "Content-Type: application/json" "$2" > "$out/$1.json" 2> /dev/null
+    printf 'wrk.method = "%s"\nwrk.body = %s\nwrk.headers["Content-Type"] = "application/json"\n' "$3" "'$4'" > "$script"
   else
-    oha -z "${secs}s" -c "$conns" --no-tui --output-format json "$2" > "$out/$1.json" 2> /dev/null
+    : > "$script"
   fi
-  node -e '
-    const d = require(process.argv[1]);
-    const ok = d.statusCodeDistribution?.["200"] ?? 0;
-    console.log(`${Math.round(d.summary.requestsPerSec)} req/s, p50 ${(d.latencyPercentiles.p50 * 1000).toFixed(2)} ms, p99 ${(d.latencyPercentiles.p99 * 1000).toFixed(2)} ms (${ok} OK)`);
-  ' "$out/$1.json"
+  # Non-2xx answers are counted apart: a server failing fast must not look fast.
+  cat >> "$script" <<'LUA'
+done = function(summary, latency, requests)
+  io.write(string.format("%d req/s, p50 %.2f ms, p99 %.2f ms (%d errors)\n", summary.requests / (summary.duration / 1e6),
+    latency:percentile(50) / 1000, latency:percentile(99) / 1000, summary.errors.status + summary.errors.connect + summary.errors.read + summary.errors.write + summary.errors.timeout))
+end
+LUA
+  wrk -t4 -c "$conns" -d "${secs}s" -s "$script" "$2" 2> /dev/null | tail -1
 }
 
 rss() { echo "$(( $(ps -o rss= -p "$1") / 1024 )) MB"; }

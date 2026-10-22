@@ -2391,6 +2391,9 @@ struct worker {
   // Tasks started here that have not begun, and `par` work: either is any worker's to take.
   deque_t fresh, jobs;
   uint64_t rng;
+  // Tasks the kernel's events woke while this worker took them: the first is its own to run.
+  int harvested;
+  bool harvesting;
 };
 
 static worker* workers;
@@ -2410,8 +2413,38 @@ static pthread_mutex_t idle_mu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t idle_cv = PTHREAD_COND_INITIALIZER;
 static int idlers;
 
+// Whether an idle worker waits for the kernel's events about sockets, which `poll_wake`
+// interrupts. One at a time: the kernel wakes every thread waiting on a queue for each event.
+static int pollers;
+// Workers looking for work before they sleep: a few at a time, as each looks at every worker's
+// queues, and a crowd looking would slow the workers whose queues they are. While one looks,
+// work queued wakes no one: it finds it.
+static int spinners;
+static void poll_wake(void);
+
+// There is work: one idle worker wakes to take it, from wherever it is, for each piece of work
+// there is one call. Waking them all for each would have every idle worker contend for one task.
+// One asleep wakes before the one waiting for events, which events need.
 static void notify(void) {
   __atomic_thread_fence(__ATOMIC_SEQ_CST);
+  // A worker looking for work finds it: none needs waking.
+  if (__atomic_load_n(&spinners, __ATOMIC_SEQ_CST) > 0) return;
+  if (__atomic_load_n(&idlers, __ATOMIC_SEQ_CST) > 0) {
+    pthread_mutex_lock(&idle_mu);
+    if (idlers > 0) {
+      pthread_cond_signal(&idle_cv);
+      pthread_mutex_unlock(&idle_mu);
+      return;
+    }
+    pthread_mutex_unlock(&idle_mu);
+  }
+  if (__atomic_load_n(&pollers, __ATOMIC_SEQ_CST) > 0) poll_wake();
+}
+
+// Every idle worker wakes: the program's thread among them, which the end of `main` is for.
+static void notify_all(void) {
+  __atomic_thread_fence(__ATOMIC_SEQ_CST);
+  for (long k = __atomic_load_n(&pollers, __ATOMIC_SEQ_CST); k > 0; k--) poll_wake();
   if (__atomic_load_n(&idlers, __ATOMIC_SEQ_CST) == 0) return;
   pthread_mutex_lock(&idle_mu);
   pthread_cond_broadcast(&idle_cv);
@@ -2451,6 +2484,9 @@ static void unpark(mt_task* t) {
   __atomic_fetch_add(&runnable, 1, __ATOMIC_SEQ_CST);
   worker* w = this_worker;
   inbox_push(w ? w : t->home, t);
+  // A worker that took the kernel's events runs the first task they woke itself: another is woken
+  // only for those after it.
+  if (w && w->harvesting && w->harvested++ == 0) return;
   notify();
 }
 
@@ -2636,7 +2672,7 @@ static void mt_end(mt_task* t) {
     __atomic_fetch_sub(&alive, 1, __ATOMIC_SEQ_CST);
     __atomic_fetch_sub(&runnable, 1, __ATOMIC_SEQ_CST);
     // It may have ended on another worker than the program's thread, which may be asleep.
-    notify();
+    notify_all();
     return;
   }
   mt_scope* sc = t->scope;
@@ -2718,14 +2754,17 @@ static void run_task(worker* w, mt_task* t) {
 
 // Each descriptor, by its number, has a record of who waits to read it and who to write it, made
 // when it is first used and never freed: an event about a descriptor closed meanwhile only wakes
-// whoever uses its number next, who tries again and waits again. A poller thread waits for the
-// kernel's events, edge-triggered, and wakes the waiters; an edge that came while no one waited
-// is remembered, for the next to try again at once.
+// whoever uses its number next, who tries again and waits again. Idle workers wait for the
+// kernel's events themselves, edge-triggered, and wake the waiters, the woken tasks queued on the
+// worker that saw the event; an edge that came while no one waited is remembered, for the next to
+// try again at once. A thread between the kernel and the workers would make every event a handoff
+// between threads, which caps a server at what one thread can hand off.
 #if defined(__APPLE__) || defined(__FreeBSD__)
 #include <sys/event.h>
 #define FLY_KQUEUE 1
 #elif defined(__linux__)
 #include <sys/epoll.h>
+#include <sys/eventfd.h>
 #define FLY_EPOLL 1
 #endif
 
@@ -2733,6 +2772,12 @@ typedef struct { waitq q[2]; bool ready[2]; } io_obj;
 
 static io_obj** io_chunks[OBJ_CHUNKS];
 static int poll_fd = -1;
+#if defined(FLY_EPOLL)
+// What wakes a worker waiting in `epoll_wait`: written to, it is readable.
+static int poll_wake_fd = -1;
+#endif
+// Set once sockets are in use: from then on idle workers wait for the kernel's events.
+static bool polling;
 static pthread_once_t poll_once = PTHREAD_ONCE_INIT;
 // Tasks waiting for a descriptor: while any do, none waiting is a deadlock, as an event may come.
 static long io_waiting;
@@ -2766,39 +2811,86 @@ static void io_ready(int fd, int dir) {
   spin_unlock(&o->q[dir].lock);
 }
 
-static void* poller(void* arg) {
-  (void)arg;
-  for (;;) {
+static void io_harvest(int64_t wait_ns);
+
+// Takes the events the kernel has, waiting for one up to `wait_ns` (forever if negative), and
+// wakes the tasks waiting for them, queued on this worker.
+static void io_poll(int64_t wait_ns) {
+  worker* w = this_worker;
+  w->harvesting = true;
+  w->harvested = 0;
+  io_harvest(wait_ns);
+  w->harvesting = false;
+}
+
+static void io_harvest(int64_t wait_ns) {
+  struct timespec ts = { (time_t)(wait_ns / 1000000000), (long)(wait_ns % 1000000000) };
 #if defined(FLY_KQUEUE)
-    struct kevent evs[64];
-    int n = kevent(poll_fd, NULL, 0, evs, 64, NULL);
-    for (int i = 0; i < n; i++) io_ready((int)evs[i].ident, evs[i].filter == EVFILT_WRITE ? 1 : 0);
-#elif defined(FLY_EPOLL)
-    struct epoll_event evs[64];
-    int n = epoll_wait(poll_fd, evs, 64, -1);
-    for (int i = 0; i < n; i++) {
-      uint32_t e = evs[i].events;
-      if (e & (EPOLLIN | EPOLLRDHUP | EPOLLHUP | EPOLLERR)) io_ready(evs[i].data.fd, 0);
-      if (e & (EPOLLOUT | EPOLLHUP | EPOLLERR)) io_ready(evs[i].data.fd, 1);
-    }
-#else
-    return NULL;
-#endif
+  struct kevent evs[64];
+  int n = kevent(poll_fd, NULL, 0, evs, 64, wait_ns < 0 ? NULL : &ts);
+  for (int i = 0; i < n; i++) {
+    if (evs[i].filter == EVFILT_USER) continue;
+    io_ready((int)evs[i].ident, evs[i].filter == EVFILT_WRITE ? 1 : 0);
   }
+#elif defined(FLY_EPOLL)
+  struct epoll_event evs[64];
+  int n = epoll_wait(poll_fd, evs, 64, wait_ns < 0 ? -1 : (int)((wait_ns + 999999) / 1000000));
+  for (int i = 0; i < n; i++) {
+    uint32_t e = evs[i].events;
+    if (evs[i].data.fd == poll_wake_fd) {
+      uint64_t count;
+      while (read(poll_wake_fd, &count, sizeof count) > 0) {}
+      continue;
+    }
+    if (e & (EPOLLIN | EPOLLRDHUP | EPOLLHUP | EPOLLERR)) io_ready(evs[i].data.fd, 0);
+    if (e & (EPOLLOUT | EPOLLHUP | EPOLLERR)) io_ready(evs[i].data.fd, 1);
+  }
+#else
+  (void)ts;
+#endif
+}
+
+// Takes the events the kernel has, without waiting, unless another worker is taking them.
+static void io_take(void) {
+  int none = 0;
+  if (__atomic_load_n(&pollers, __ATOMIC_RELAXED) != 0) return;
+  if (!__atomic_compare_exchange_n(&pollers, &none, 1, false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)) return;
+  io_poll(0);
+  __atomic_store_n(&pollers, 0, __ATOMIC_SEQ_CST);
+}
+
+// Wakes a worker waiting for the kernel's events: one, as the event is taken by one wait.
+static void poll_wake(void) {
+#if defined(FLY_KQUEUE)
+  struct kevent ev;
+  EV_SET(&ev, 0, EVFILT_USER, 0, NOTE_TRIGGER, 0, NULL);
+  kevent(poll_fd, &ev, 1, NULL, 0, NULL);
+#elif defined(FLY_EPOLL)
+  uint64_t one = 1;
+  if (write(poll_wake_fd, &one, sizeof one) < 0) {}
+#endif
 }
 
 static void poll_start(void) {
 #if defined(FLY_KQUEUE)
   poll_fd = kqueue();
+  struct kevent ev;
+  EV_SET(&ev, 0, EVFILT_USER, EV_ADD | EV_CLEAR, 0, 0, NULL);
+  if (poll_fd < 0 || kevent(poll_fd, &ev, 1, NULL, 0, NULL) < 0) fly_panic("cannot wait for sockets");
 #elif defined(FLY_EPOLL)
   poll_fd = epoll_create1(0);
+  poll_wake_fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+  struct epoll_event ev = { .events = EPOLLIN | EPOLLET, .data.fd = poll_wake_fd };
+  if (poll_fd < 0 || poll_wake_fd < 0 || epoll_ctl(poll_fd, EPOLL_CTL_ADD, poll_wake_fd, &ev) < 0) fly_panic("cannot wait for sockets");
+#else
+  fly_panic("cannot wait for sockets");
 #endif
-  pthread_t th;
-  if (poll_fd < 0 || pthread_create(&th, NULL, poller, NULL) != 0) fly_panic("cannot wait for sockets");
-  pthread_detach(th);
+  __atomic_store_n(&polling, true, __ATOMIC_SEQ_CST);
+  // Workers asleep until now wait for the kernel's events from here on.
+  notify_all();
 }
 
-// A descriptor made: its events, from now until it is closed, go to the poller.
+// A descriptor made: its events, from now until it is closed, go to the workers.
 static void io_register(int fd) {
   pthread_once(&poll_once, poll_start);
   io_obj* o = io_of(fd);
@@ -2923,6 +3015,35 @@ static bool work_anywhere(worker* w) {
 static _Noreturn void mt_deadlock(void) { panic_exit("deadlock: every task is waiting"); }
 
 static void idle(worker* w) {
+  bool io = __atomic_load_n(&polling, __ATOMIC_ACQUIRE);
+  // Under load the next piece of work is microseconds away: looking for it a while costs less than
+  // sleeping and being woken, which takes the kernel tens of microseconds each way.
+  uint64_t until = now_ns() + 50000;
+  bool spin = __atomic_add_fetch(&spinners, 1, __ATOMIC_SEQ_CST) <= 4;
+  if (!spin) __atomic_sub_fetch(&spinners, 1, __ATOMIC_SEQ_CST);
+  for (unsigned n = 1; spin; n++) {
+    if (n % 64 == 0) {
+      // Events no one waits for are this worker's to take, between looks.
+      if (io) io_take();
+      if (work_anywhere(w)) { __atomic_sub_fetch(&spinners, 1, __ATOMIC_SEQ_CST); return; }
+      if (now_ns() > until) break;
+    }
+    relax();
+  }
+  if (spin) __atomic_sub_fetch(&spinners, 1, __ATOMIC_SEQ_CST);
+  int none = 0;
+  if (io && __atomic_compare_exchange_n(&pollers, &none, 1, false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)) {
+    // Asleep in the kernel's wait for events, which work from elsewhere interrupts: counted first,
+    // so that work queued after the look below wakes it.
+    if (!work_anywhere(w) && !(w == &workers[0] && __atomic_load_n(&main_done, __ATOMIC_SEQ_CST))) {
+      uint64_t due = __atomic_load_n(&next_due, __ATOMIC_ACQUIRE);
+      if (!due && __atomic_load_n(&runnable, __ATOMIC_SEQ_CST) == 0 && __atomic_load_n(&alive, __ATOMIC_SEQ_CST) > 0 && __atomic_load_n(&io_waiting, __ATOMIC_SEQ_CST) == 0) mt_deadlock();
+      uint64_t now = now_ns();
+      io_poll(due ? (int64_t)(due > now ? due - now : 0) : -1);
+    }
+    __atomic_store_n(&pollers, 0, __ATOMIC_SEQ_CST);
+    return;
+  }
   pthread_mutex_lock(&idle_mu);
   __atomic_fetch_add(&idlers, 1, __ATOMIC_SEQ_CST);
   if (!work_anywhere(w) && !(w == &workers[0] && __atomic_load_n(&main_done, __ATOMIC_SEQ_CST))) {
@@ -2946,11 +3067,17 @@ static void idle(worker* w) {
 }
 
 static void work(worker* w) {
-  for (;;) {
+  for (unsigned turn = 1;; turn++) {
     if (w == &workers[0] && __atomic_load_n(&main_done, __ATOMIC_SEQ_CST)) return;
     fire_alarms();
-    mt_task* t = inbox_pop(w);
-    if (!t) t = dq_pop(&w->fresh);
+    // A worker that always has work still takes the kernel's events now and then, for the tasks
+    // waiting for sockets while every worker is busy.
+    if (turn % 32 == 0 && __atomic_load_n(&polling, __ATOMIC_ACQUIRE)) io_take();
+    // Tasks woken here and tasks begun here take turns: either kind always first would leave the
+    // other waiting for as long as the first kind keeps coming, as a busy server's connections do.
+    mt_task* t;
+    if (turn % 2) { t = inbox_pop(w); if (!t) t = dq_pop(&w->fresh); }
+    else { t = dq_pop(&w->fresh); if (!t) t = inbox_pop(w); }
     if (!t) {
       job_t* j = steal_job(w);
       if (j) { run_job(j); continue; }
