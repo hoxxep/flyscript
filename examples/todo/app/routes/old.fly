@@ -1,0 +1,11 @@
+// An address the site no longer uses: its `load` sends the browser to the page that took its place.
+
+import { Ui } from "web/ui";
+import { Http } from "web/request";
+
+export type Model = { gone: bool };
+export type Msg = #Nothing;
+
+export function load(): Model uses Http { Http.redirect("/about".toString()) }
+
+export function view(m: readonly Model): void uses Ui<Msg> {}

@@ -1,4 +1,4 @@
-// expect: <div><a href="/x">go</a><button>+</button><span>3</span></div>
+// expect: <div><a href="/x">go</a><button form="_fly" formaction="?_fly=0">+</button><span>3</span></div>
 // A component is a view whose messages a page maps into its own: `map` turns a part of a view that
 // gives `CounterMsg`s into one that gives the page's `Msg`s.
 import { println } from "std/io";

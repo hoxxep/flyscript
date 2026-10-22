@@ -17,7 +17,10 @@ Then open <http://localhost:8080>.
 | `app/routes/layout.fly` | The navigation every page shows, marking where it is. |
 | `app/routes/index.fly` | The list: added to, its items marked done, its titles links to their pages. |
 | `app/routes/todos/[id].fly` | One thing to do: renamed, marked done, or removed, which goes back to the list. |
-| `app/routes/about.fly` | A page with a model of its own, and a component in it. |
+| `app/routes/about.fly` | A page with a model of its own, a component in it, and a timer. |
+| `app/routes/visits.fly` | A page whose `load` reads a cookie and sets it again. |
+| `app/routes/old.fly` | An address the site no longer uses, whose `load` sends the browser to the page that took its place. |
+| `app/routes/api/todos.fly` | An endpoint: the list as JSON. |
 | `app/components/counter.fly` | The component: a model, a view and an update, as a page is. |
 | `app/routes/404.fly` | What an address nothing answers shows. |
 

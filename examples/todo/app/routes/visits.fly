@@ -1,0 +1,27 @@
+// A page that remembers who opens it: a cookie, which the server reads, and sets again, as it makes
+// the page's model.
+
+import { Ui, el, text, cls } from "web/ui";
+import { Http } from "web/request";
+
+export type Model = { visits: u32 };
+export type Msg = #Nothing;
+
+export const title: str = "Visits";
+
+export function load(): Model uses Http {
+  const before: u32 = match (Http.cookie("visits")) {
+    #Some(v) => match (parseInt(v.asStr())) { #Some(n) => n as u32, #None => 0 },
+    #None => 0,
+  };
+  Http.setCookie("visits", `${before + 1}`.asStr(), 3600);
+  { visits: before + 1 }
+}
+
+export function view(m: readonly Model): void uses Ui<Msg> {
+  el("h1", () => text("Visits"));
+  el("p", () => {
+    cls("visits");
+    text(if (m.visits == 1) { "This is your first visit.".toString() } else { `You have opened this page ${m.visits} times.` }.asStr());
+  });
+}

@@ -35,6 +35,13 @@ export function cls<M>(name: str): void uses Ui<M> { Ui.attr("class", name); }
 export function key<M>(k: str): void uses Ui<M> { Ui.key(k); }
 export function on<M>(event: str, msg: M): void uses Ui<M> { Ui.on(event, msg); }
 
+// A message every `ms` milliseconds, for as long as the element just opened is shown: a clock, a
+// poll of the server. Like any event's, it is the message the latest render gave.
+export function every<M>(ms: u32, msg: M): void uses Ui<M> { Ui.on(`every:${ms}`.asStr(), msg); }
+
+// A message once, `ms` milliseconds after the element just opened is first shown, if it still is.
+export function after<M>(ms: u32, msg: M): void uses Ui<M> { Ui.on(`after:${ms}`.asStr(), msg); }
+
 // A link to another page of the site. Followed, it takes the page there without loading it again:
 // the program fetches what the page shows and renders it (web/dom.fly); without the program it is
 // an ordinary link.
@@ -57,6 +64,39 @@ export function map<A, B>(f: (a: A) => B, body: () => void uses Ui<A>): void use
     text(s) resumes k => { Ui.text(s); k() }
     close() resumes k => { Ui.close(); k() }
   }
+}
+
+// ---- without the page's program ----
+
+// What lets an event's message reach the server where the page's program has not taken the page
+// over, by an element's attributes: a form posts to its page, saying which message submitting it
+// gives; a button submits the page's form (`#_fly`, which every page has) for its click's; an input
+// is a field its form posts, named for the message it gives. The program renders the same, so it
+// takes the server's nodes over as they are, and its handlers keep the browser from posting.
+export function posting(tag: str, event: str, k: usize): Vec<[String, String]> {
+  match ([tag, event]) {
+    ["form", "submit"] => [["method".toString(), "post".toString()], ["action".toString(), `?_fly=${k}`]],
+    ["button", "click"] => [["form".toString(), "_fly".toString()], ["formaction".toString(), `?_fly=${k}`]],
+    ["input", "input"] | ["input", "change"] | ["textarea", "input"] | ["select", "change"] => [["name".toString(), `_fly_${k}`]],
+    _ => Vec.new(),
+  }
+}
+
+// The messages `view`'s events give, in order: what a posted form's message numbers count.
+export function messages<M extends Send & Clone>(view: () => void uses Ui<M>): Vec<M> {
+  let out: Vec<M> = Vec.new();
+  handle { view() } with Ui<M> {
+    open(_) resumes k => k(),
+    key(_) resumes k => k(),
+    attr(_, _) resumes k => k(),
+    on(_, msg) resumes k => {
+      out.push(msg.clone());
+      k()
+    }
+    text(_) resumes k => k(),
+    close() resumes k => k(),
+  };
+  out
 }
 
 // ---- HTML ----
@@ -82,12 +122,15 @@ export function escape(s: str, out: mut String): void {
   out.push(s.slice(start, bytes.len()));
 }
 
-// The HTML of what `view` shows, appended to `out`. Events are left out: the page's code adds them
-// when it takes the page over, as it renders the same view again.
+// The HTML of what `view` shows, appended to `out`. Events are left out — the page's code adds them
+// when it takes the page over, as it renders the same view again — but for what posts their
+// messages without it (`posting`).
 export function html<M>(out: mut String, view: () => void uses Ui<M>): void {
-  // Whether a start tag is still open, waiting for its attributes; the elements open, innermost last.
+  // Whether a start tag is still open, waiting for its attributes; the elements open, innermost last;
+  // how many messages the events so far give.
   let starting = false;
   let open: Vec<String> = Vec.new();
+  let events: usize = 0;
   handle { view() } with Ui<M> {
     open(tag) resumes k => {
       if (starting) { out.push(">"); }
@@ -106,7 +149,20 @@ export function html<M>(out: mut String, view: () => void uses Ui<M>): void {
       out.push("\"");
       k()
     }
-    on(_, _) resumes k => k(),
+    on(event, _) resumes k => {
+      if (starting) {
+        const tag = match (open.last()) { #Some(t) => t.clone(), #None => String.new() };
+        for (const [name, value] of posting(tag.asStr(), event, events)) {
+          out.push(" ");
+          out.push(name.asStr());
+          out.push("=\"");
+          escape(value.asStr(), mut out);
+          out.push("\"");
+        }
+      }
+      events += 1;
+      k()
+    }
     text(s) resumes k => {
       if (starting) { out.push(">"); starting = false; }
       escape(s, mut out);

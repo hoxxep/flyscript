@@ -1,4 +1,4 @@
-// expect: <div class="todos"><h1>Things to do</h1><ul><li class="done">write &lt;the&gt; spec</li><li>ship it</li></ul><input type="text" value="&quot;next&quot;"></div>
+// expect: <div class="todos"><h1>Things to do</h1><ul><li class="done">write &lt;the&gt; spec</li><li>ship it</li></ul><input type="text" value="&quot;next&quot;" name="_fly_2"></div>
 import { println } from "std/io";
 import { Ui, el, text, cls, attr, on, html } from "../../web/ui";
 

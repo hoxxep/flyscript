@@ -28,6 +28,8 @@ type Route = {
   title: bool;
   titleFn: bool;
   update: bool;
+  // An endpoint: it answers requests itself, by `handle`, and has no view.
+  endpoint: bool;
   // The layouts around it, outermost first, by their files.
   layouts: Vec<String>;
 };
@@ -131,8 +133,12 @@ function route(app: str, name: str, layouts: readonly Vec<String>): Route uses I
   const m = parsed(path.asStr(), src.asStr());
   let r: Route = {
     name: name.toString(), pattern: patternOf(name), load: false, loadParams: false, loadFails: false, initial: false,
-    title: false, titleFn: false, update: fnOf(m, "update").isSome(), layouts: layoutsOf(name, layouts),
+    title: false, titleFn: false, update: fnOf(m, "update").isSome(), endpoint: false, layouts: layoutsOf(name, layouts),
   };
+  if (fnOf(m, "handle").isSome()) {
+    r.endpoint = true;
+    return r;
+  }
   if (const #Some(s) = fnOf(m, "load")) {
     r.load = true;
     r.loadParams = s.params.len() > 0;
@@ -140,7 +146,7 @@ function route(app: str, name: str, layouts: readonly Vec<String>): Route uses I
   } else if (fnOf(m, "initial").isSome()) {
     r.initial = true;
   } else {
-    stop(`${path}: a page exports \`load\`, which makes its model, or \`initial\``.asStr());
+    stop(`${path}: a page exports \`load\`, which makes its model, or \`initial\`; an endpoint exports \`handle\``.asStr());
   }
   if (fnOf(m, "view").isNone()) { stop(`${path}: a page exports \`view\``.asStr()); }
   if (fnOf(m, "title").isSome()) {
@@ -223,7 +229,8 @@ function imports(out: mut String, routes: readonly Vec<Route>, layouts: readonly
   out.push("import { stringify, parse, FromJson, JsonError } from \"std/json\";\n");
   out.push("import { serve, Handler, Request, Response, Conn } from \"web/http\";\n");
   out.push(`import { Params, matches } from "web/router";\n`.asStr());
-  out.push(`import { Shell, respond, file } from "web/site";\n`.asStr());
+  out.push(`import { Shell, respond, file, withHttp, redirect, setCookies, fields, postedMessage, submitted } from "web/site";\n`.asStr());
+  out.push(`import { Http } from "web/request";\n`.asStr());
   out.push("import { State, init, provide } from \"../server\";\n");
   if (names.len() > 0) {
     out.push("import { ");
@@ -238,6 +245,10 @@ function imports(out: mut String, routes: readonly Vec<Route>, layouts: readonly
 }
 
 function routeImport(out: mut String, r: readonly Route, i: usize): void {
+  if (r.endpoint) {
+    out.push(`import { handle as handle${i} } from "../routes/${r.name}";\n`.asStr());
+    return;
+  }
   let parts: Vec<String> = [`view as view${i}`, `Model as Model${i}`];
   if (r.load) { parts.push(`load as load${i}`); } else { parts.push(`initial as initial${i}`); }
   if (r.title) { parts.push(`title as title${i}`); }
@@ -284,30 +295,60 @@ function server(build: str, head: str, routes: readonly Vec<Route>, layouts: rea
   out.push("    const url = if (req.query.len() > 0) { `${req.path}?${req.query}` } else { req.path.clone() };\n");
   out.push("    if (req.path == \"/_fly/build\") { conn.write(Response.text(200, BUILD)); return; }\n");
   out.push("    if (req.path.startsWith(\"/_fly/rpc/\") && req.method == \"POST\") { return self.call(req, mut conn); }\n");
+  for (const [i, r] of routes.iter().enumerate()) {
+    if (r.endpoint) {
+      out.push(`    if (const #Some(p) = matches(${quoted(r.pattern.asStr())}, url.asStr())) { return self.endpoint${i}(req, mut conn, p); }\n`.asStr());
+    }
+  }
   out.push("    if (req.method == \"GET\") {\n");
   for (const [i, r] of routes.iter().enumerate()) {
-    out.push(`      if (const #Some(p) = matches(${quoted(r.pattern.asStr())}, url.asStr())) { return self.page${i}(req, mut conn, url.asStr(), p); }\n`.asStr());
+    if (!r.endpoint) {
+      out.push(`      if (const #Some(p) = matches(${quoted(r.pattern.asStr())}, url.asStr())) { return self.page${i}(req, mut conn, url.asStr(), p); }\n`.asStr());
+    }
+  }
+  // A form a page posted without its program, to the page.
+  out.push("    }\n    if (req.method == \"POST\" && const #Some(k) = postedMessage(req)) {\n");
+  for (const [i, r] of routes.iter().enumerate()) {
+    if (!r.endpoint && r.update) {
+      out.push(`      if (const #Some(p) = matches(${quoted(r.pattern.asStr())}, req.path.asStr())) { return self.post${i}(req, mut conn, k, p); }\n`.asStr());
+    }
   }
   out.push("    }\n    if (file(mut conn, req, self.dir.asStr())) { return; }\n    self.notFound(req, mut conn, url.asStr());\n  }\n\n");
-  // Each page.
   for (const [i, r] of routes.iter().enumerate()) {
+    if (r.endpoint) {
+      // An endpoint: its answer, with the cookies it set, or where it sent the browser.
+      out.push(`  function endpoint${i}(self: readonly Self, req: readonly Request, conn: mut Conn, p: readonly Params): void uses Io, Fail<IoErr> {\n`.asStr());
+      out.push("    let set: Vec<String> = Vec.new();\n");
+      out.push(`    match (withHttp(req, mut set, () => provide(self.state, () => handle${i}(req, p)))) {\n`.asStr());
+      out.push("      #Ok(r) => {\n        let r = r;\n        setCookies(mut r, set);\n        conn.write(r);\n      }\n");
+      out.push("      #Err(to) => redirect(mut conn, to.asStr(), set),\n    }\n  }\n\n");
+      continue;
+    }
+    // A page: its model made — by `load`, on the server, with `Http` answered from the request — and
+    // shown, or where its `load` sent the browser instead.
     out.push(`  function page${i}(self: readonly Self, req: readonly Request, conn: mut Conn, url: str, p: readonly Params): void uses Io, Fail<IoErr> {\n`.asStr());
+    out.push("    let set: Vec<String> = Vec.new();\n");
     const made = if (r.load) {
       if (r.loadParams) { `provide(self.state, () => load${i}(p))` } else { `provide(self.state, () => load${i}())` }
     } else { `initial${i}()` };
-    if (r.loadFails) {
-      out.push(`    const found: Option<Model${i}> = try { #Some(${made}) } catch (_) { #None };\n`.asStr());
-      out.push(`    const m = match (found) { #Some(m) => m, #None => return self.notFound(req, mut conn, url) };\n`.asStr());
-    } else {
-      out.push(`    const m: Model${i} = ${made};\n`.asStr());
+    const found = if (r.loadFails) { `try { #Some(${made}) } catch (_) { #None }` } else { `#Some(${made})` };
+    out.push(`    const got: Result<Option<Model${i}>, String> = withHttp(req, mut set, () => ${found});\n`.asStr());
+    out.push(`    const m = match (got) {\n      #Ok(#Some(m)) => m,\n      #Ok(#None) => return self.notFound(req, mut conn, url),\n      #Err(to) => return redirect(mut conn, to.asStr(), set),\n    };\n`.asStr());
+    out.push(`    respond(mut conn, req, self.shell, 200, ${quoted(r.name.asStr())}, url, ${titleOf(r, i)}, stringify(m).asStr(), set, ${wrapped(r, i, layouts, "url")});\n  }\n\n`.asStr());
+    if (r.update) {
+      // The same page, posted to: its update run on the server, and the browser sent on.
+      out.push(`  function post${i}(self: readonly Self, req: readonly Request, conn: mut Conn, k: usize, p: readonly Params): void uses Io, Fail<IoErr> {\n`.asStr());
+      out.push("    let set: Vec<String> = Vec.new();\n    const posted = fields(req.body.asStr());\n    const url = req.path.asStr();\n");
+      out.push(`    const got: Result<Option<String>, String> = withHttp(req, mut set, () => match (${found}) {\n`.asStr());
+      out.push(`      #Some(m) => #Some(provide(self.state, () => submitted(m, k, posted, url, view${i}, update${i}))),\n      #None => #None,\n    });\n`.asStr());
+      out.push("    match (got) {\n      #Ok(#Some(to)) => redirect(mut conn, to.asStr(), set),\n      #Ok(#None) => self.notFound(req, mut conn, url),\n      #Err(to) => redirect(mut conn, to.asStr(), set),\n    }\n  }\n\n");
     }
-    out.push(`    respond(mut conn, req, self.shell, 200, ${quoted(r.name.asStr())}, url, ${titleOf(r, i)}, stringify(m).asStr(), ${wrapped(r, i, layouts, "url")});\n  }\n\n`.asStr());
   }
   // Not found.
   out.push("  function notFound(self: readonly Self, req: readonly Request, conn: mut Conn, url: str): void uses Io, Fail<IoErr> {\n");
   if (notFound) {
     out.push("    const m = initial_nf();\n");
-    out.push(`    respond(mut conn, req, self.shell, 404, "404", url, "Not found", stringify(m).asStr(), () => ${aroundNotFound(layouts, "url")});\n`.asStr());
+    out.push(`    respond(mut conn, req, self.shell, 404, "404", url, "Not found", stringify(m).asStr(), Vec.new(), () => ${aroundNotFound(layouts, "url")});\n`.asStr());
   } else {
     out.push("    conn.write(Response.text(404, \"not found\\n\"));\n");
   }
@@ -315,11 +356,14 @@ function server(build: str, head: str, routes: readonly Vec<Route>, layouts: rea
   // Calls.
   out.push("  function call(self: readonly Self, req: readonly Request, conn: mut Conn): void uses Io, Fail<IoErr> {\n");
   out.push("    const op = req.path.asStr().slice(10, req.path.len());\n");
-  out.push("    const r = try { #Ok(provide(self.state, () => answer(op, req.body.asStr()))) } catch (_) { #Err(#BadCall) };\n");
-  out.push("    match (r) {\n      #Ok(json) => conn.write(Response.json(json)),\n      #Err(_) => conn.write(Response.text(400, \"bad call\\n\")),\n    }\n  }\n}\n\n");
+  out.push("    let set: Vec<String> = Vec.new();\n");
+  out.push("    const r = withHttp(req, mut set, () => try { #Ok(provide(self.state, () => answer(op, req.body.asStr()))) } catch (_) { #Err(#BadCall) });\n");
+  out.push("    match (r) {\n      #Ok(#Ok(json)) => {\n        let r = Response.json(json);\n        setCookies(mut r, set);\n        conn.write(r);\n      }\n");
+  out.push("      #Ok(#Err(_)) => conn.write(Response.text(400, \"bad call\\n\")),\n      #Err(to) => redirect(mut conn, to.asStr(), set),\n    }\n  }\n}\n\n");
   // The answers to calls.
   let row: Vec<String> = Vec.new();
   for (const e of effs) { row.push(e.name.clone()); }
+  row.push("Http".toString());
   row.push("Fail<JsonError | #NoSuchCall>".toString());
   out.push(`// A call of an operation the pages perform: its arguments as a JSON object, its result as JSON.\nfunction answer(op: str, args: str): String uses ${row.join(", ")} {\n  match (op) {\n`.asStr());
   for (const e of effs) {
@@ -360,7 +404,7 @@ function client(routes: readonly Vec<Route>, layouts: readonly Vec<String>, effs
     out.push(names.join(", ").asStr());
     out.push(" } from \"../api\";\n");
   }
-  for (const [i, r] of routes.iter().enumerate()) { routeImport(mut out, r, i); }
+  for (const [i, r] of routes.iter().enumerate()) { if (!r.endpoint) { routeImport(mut out, r, i); } }
   if (notFound) { out.push("import { view as view_nf, Model as Model_nf } from \"../routes/404\";\n"); }
   for (const [i, l] of layouts.iter().enumerate()) {
     out.push(`import { layout as layout${i} } from "../routes/${l}";\n`.asStr());
@@ -384,6 +428,7 @@ function client(routes: readonly Vec<Route>, layouts: readonly Vec<String>, effs
   out.push("  let at = arrival(initial().asStr());\n");
   out.push("  while (true) {\n    const url = at.url.clone();\n    const go: Go = match (at.route.asStr()) {\n");
   for (const [i, r] of routes.iter().enumerate()) {
+    if (r.endpoint) { continue; }
     const update = if (r.update) { `update${i}` } else { "still".toString() };
     out.push(`      ${quoted(r.name.asStr())} => {\n        const m: Model${i} = state(at.state.asStr());\n        server(() => run(mut shown, m, (m) => ${shown(r, i, layouts, "url.asStr()")}, ${update}))\n      }\n`.asStr());
   }
@@ -393,7 +438,8 @@ function client(routes: readonly Vec<Route>, layouts: readonly Vec<String>, effs
     out.push("      _ => panic(`no page for ${at.route}`),\n");
   }
   out.push("    };\n    const text = get(go.url.asStr());\n    at = arrival(text.asStr());\n");
-  out.push("    arrived(go.url.asStr(), at.title.asStr(), go.push);\n  }\n}\n\n");
+  // Where the page arrived, which is not where it went if the server sent it on.
+  out.push("    arrived(at.url.asStr(), at.title.asStr(), go.push);\n  }\n}\n\n");
   out.push("function state<M extends FromJson>(json: str): M {\n  try { parse(json) } catch (_) { panic(\"the page's state is not what it should be\") }\n}\n");
   out
 }

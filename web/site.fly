@@ -5,7 +5,10 @@
 import { File } from "std/io";
 import { stringify } from "std/json";
 import { Request, Response, Conn } from "./http";
-import { Ui, html, escape } from "./ui";
+import { Ui, Event, html, escape, messages } from "./ui";
+import { Page } from "./dom";
+import { decode } from "./router";
+import { Http } from "./request";
 
 // What every page of the site has around what it shows: what goes in its `<head>`, and, in
 // development, the build it was made by.
@@ -34,7 +37,8 @@ export function document<M>(shell: readonly Shell, route: str, url: str, title: 
   html(mut out, view);
   // What the program starts from is text a script holds: `</` in it would end the script, and is
   // `<\/` in JSON, which reads it as the same.
-  out.push("</div><script type=\"text/plain\" id=\"fly-page\">");
+  // The form a button posts its message with, without the page's program (web/ui.fly's `posting`).
+  out.push("</div><form id=\"_fly\" method=\"post\" hidden></form><script type=\"text/plain\" id=\"fly-page\">");
   out.push(arrival(route, url, title, state).asStr().replaceAll("</", "<\\/").asStr());
   out.push("</script><script type=\"module\">import { start } from \"/_fly/flynext.js\"; start(\"/_fly/app.wasm\");</script>");
   if (shell.build.len() > 0) {
@@ -47,17 +51,66 @@ export function document<M>(shell: readonly Shell, route: str, url: str, title: 
   out
 }
 
-// Answers for a page: its data, to a page's program, or the page, to a browser.
-export function respond<M>(conn: mut Conn, req: readonly Request, shell: readonly Shell, status: u16, route: str, url: str, title: str, state: str, view: () => void uses Ui<M>): void uses Io, Fail<IoErr> {
-  if (wantsData(req)) {
-    let r = Response.new(status, "text/plain; charset=utf-8", arrival(route, url, title, state));
-    r.header("Cache-Control", "no-store");
-    conn.write(r);
+// Answers for a page: its data, to a page's program, or the page, to a browser; with the cookies
+// its `load` set.
+export function respond<M>(conn: mut Conn, req: readonly Request, shell: readonly Shell, status: u16, route: str, url: str, title: str, state: str, cookies: readonly Vec<String>, view: () => void uses Ui<M>): void uses Io, Fail<IoErr> {
+  let r = if (wantsData(req)) {
+    Response.new(status, "text/plain; charset=utf-8", arrival(route, url, title, state))
   } else {
-    let r = Response.new(status, "text/html; charset=utf-8", document(shell, route, url, title, state, view));
-    r.header("Cache-Control", "no-store");
-    conn.write(r);
+    Response.new(status, "text/html; charset=utf-8", document(shell, route, url, title, state, view))
+  };
+  r.header("Cache-Control", "no-store");
+  setCookies(mut r, cookies);
+  conn.write(r);
+}
+
+// ---- the request ----
+
+// The value of the request's cookie `name`, if it sent one.
+export function cookieOf(req: readonly Request, name: str): Option<String> {
+  const all = match (req.header("Cookie")) { #Some(c) => c, #None => return #None };
+  for (const part of all.split(";")) {
+    const p = part.asStr().trim();
+    if (const #Some(eq) = p.indexOf("=") && p.slice(0, eq) == name) {
+      return #Some(p.slice(eq + 1, p.len()).toString());
+    }
   }
+  #None
+}
+
+// A `Set-Cookie` header's value.
+function cookie(name: str, value: str, maxAge: u32): String {
+  let c = `${name}=${value}; Path=/; HttpOnly; SameSite=Lax`;
+  if (maxAge > 0) { c.push(`; Max-Age=${maxAge}`.asStr()); }
+  c
+}
+
+export function setCookies(r: mut Response, cookies: readonly Vec<String>): void {
+  for (const c of cookies) { r.header("Set-Cookie", c.asStr()); }
+}
+
+// Runs `body` with `Http` answered from `req`: what it gives, or, if it sent the browser
+// elsewhere, where; the cookies it sets added to `set`.
+export function withHttp<T, row E>(req: readonly Request, set: mut Vec<String>, body: once () => T uses Http, ...E): Result<T, String> uses ...E {
+  handle { #Ok(body()) } with Http {
+    header(name) resumes k => k(match (req.header(name)) { #Some(v) => #Some(v.toString()), #None => #None }),
+    cookie(name) resumes k => k(cookieOf(req, name)),
+    setCookie(name, value, maxAge) resumes k => {
+      set.push(cookie(name, value, maxAge));
+      k()
+    }
+    redirect(url) => #Err(url),
+  }
+}
+
+// Sends the browser to `url`, with the cookies set on the way: a page's program following a link
+// follows this too, to the data of the page at `url`.
+export function redirect(conn: mut Conn, url: str, cookies: readonly Vec<String>): void uses Io, Fail<IoErr> {
+  let r = Response.text(303, "");
+  r.header("Location", url);
+  r.header("Cache-Control", "no-store");
+  setCookies(mut r, cookies);
+  conn.write(r);
 }
 
 export function contentType(path: str): str {
@@ -91,4 +144,57 @@ export function file(conn: mut Conn, req: readonly Request, dir: str): bool uses
     }
     #None => false,
   }
+}
+
+// ---- forms, without the page's program ----
+
+// A form's fields, as it posts them: `name=value&…`, each decoded.
+export function fields(body: str): Vec<[String, String]> {
+  let out: Vec<[String, String]> = Vec.new();
+  for (const part of body.split("&")) {
+    if (part.len() == 0) { continue; }
+    match (part.asStr().indexOf("=")) {
+      #Some(eq) => out.push([decode(part.asStr().slice(0, eq), true), decode(part.asStr().slice(eq + 1, part.len()), true)]),
+      #None => out.push([decode(part.asStr(), true), String.new()]),
+    }
+  }
+  out
+}
+
+// What posted the form: the number of the message it gives, from its address's `?_fly=`.
+export function postedMessage(req: readonly Request): Option<usize> {
+  for (const part of req.query.split("&")) {
+    if (part.asStr().startsWith("_fly=")) {
+      return match (parseInt(part.asStr().slice(5, part.len()))) { #Some(n) => #Some(n as usize), #None => #None };
+    }
+  }
+  #None
+}
+
+// A form posted from a page the page's program has not taken over: `update` given, as the page's
+// program would have given it, each input's message with the text the form posted for it, then
+// the message `k` the form's submission, or the button's click, gives — the messages as the page
+// rendered from `m` numbers them. What the update performs is the server's to handle, as it is
+// around a page's `load`. Where the page goes then: where the update sends it, or back to `url`,
+// so that loading it again does not post the form again.
+export function submitted<Model, M extends Send & Clone, row E>(m: Model, k: usize, posted: readonly Vec<[String, String]>, url: str, view: (m: readonly Model) => void uses Ui<M>, update: (m: mut Model, msg: M, ev: readonly Event) => void uses Page<Model>, ...E): String uses ...E {
+  let model = m;
+  const msgs = messages(() => view(model));
+  let to = url.toString();
+  handle {
+    for (const [name, value] of posted) {
+      if (!name.startsWith("_fly_")) { continue; }
+      if (const #Some(j) = parseInt(name.asStr().slice(5, name.len())) && (j as usize) < msgs.len()) {
+        update(mut model, msgs[j as usize].clone(), { text: value.clone(), key: String.new(), checked: true });
+      }
+    }
+    if (k < msgs.len()) { update(mut model, msgs[k].clone(), { text: String.new(), key: String.new(), checked: false }); }
+  } with Page<Model> {
+    show(_) resumes k => k(),
+    go(u) resumes k => {
+      to = u.toString();
+      k()
+    }
+  };
+  to
 }

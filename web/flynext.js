@@ -133,10 +133,23 @@ export async function start(url, root = document.getElementById("app")) {
     // One listener for each kind of event, which looks up the message the last render gave it.
     if (node.__flyListens?.has(type)) return;
     (node.__flyListens ??= new Set()).add(type);
+    // A timer is an event of the element's: it stops once the element is gone.
+    const timer = /^(every|after):(\d+)$/.exec(type);
+    if (timer) {
+      // A timer stops once its element is gone, or a render no longer gives it one.
+      const fire = () => {
+        const msg = node.__fly?.[type];
+        if (!node.isConnected || msg === undefined) { clearInterval(id); node.__flyListens.delete(type); return; }
+        happened(`${msg}\0\0\0false`);
+      };
+      const id = timer[1] === "every" ? setInterval(fire, +timer[2]) : setTimeout(fire, +timer[2]);
+      return;
+    }
     node.addEventListener(type, (ev) => {
       const msg = node.__fly?.[type];
       if (msg === undefined) return;
-      if (type === "submit" || (type === "keydown" && ev.key === "Enter")) ev.preventDefault();
+      // The program has the event: the browser does not post what posts it without the program.
+      if (type === "submit" || (type === "keydown" && ev.key === "Enter") || node.hasAttribute("formaction")) ev.preventDefault();
       const t = ev.target;
       happened(`${msg}\0${t.value ?? ""}\0${ev.key ?? ""}\0${t.checked === true}`);
     });
@@ -194,6 +207,8 @@ export async function start(url, root = document.getElementById("app")) {
     }),
     fly_arrived: (u, ul, t, tl, push) => {
       const url = str(u, ul);
+      // What happened on the page before is not the new page's: its messages are numbered anew.
+      for (let i = events.length - 1; i >= 0; i--) if (!events[i].startsWith("\u0001")) events.splice(i, 1);
       document.title = str(t, tl);
       if (push) { history.pushState(null, "", url); scrollTo(0, 0); }
       globalThis.flyArrivals = (globalThis.flyArrivals ?? 0) + 1;

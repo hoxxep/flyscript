@@ -1,0 +1,13 @@
+// The list as JSON, for whatever asks for it: an endpoint, which answers requests itself, rather than
+// a page.
+
+import { stringify } from "std/json";
+import { Request, Response } from "web/http";
+import { Params } from "web/router";
+import { Todos } from "../../api";
+
+export function handle(req: readonly Request, p: readonly Params): Response uses Todos {
+  let r = Response.json(stringify(Todos.list()));
+  r.header("Cache-Control", "no-store");
+  r
+}

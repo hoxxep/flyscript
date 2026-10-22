@@ -55,17 +55,17 @@ run() {
   printf '| %s | %s | %s | %s | %s |\n' "$name" "$page" "$item" "$call" "$mem" >> "$results"
 }
 
-printf '| Server | Page `/` | Page `/todos/2` | Call (JSON) | Memory after |\n| :--- | :--- | :--- | :--- | :--- |\n' >> "$results"
+printf '| Server | Page `/` | Page `/todos/2` | JSON endpoint `/api/todos` | Memory after |\n| :--- | :--- | :--- | :--- | :--- |\n' >> "$results"
 
 # FlyNext on one core, then on every core.
 FLY_THREADS=1 "$out/todo/server" 4101 "$out/todo" > /dev/null &
 pid=$!
-run "FlyNext, 1 core" http://127.0.0.1:4101 "$pid" POST /_fly/rpc/Todos.list '{}'
+run "FlyNext, 1 core" http://127.0.0.1:4101 "$pid" GET /api/todos ''
 kill "$pid"; wait "$pid" 2> /dev/null || true
 
 "$out/todo/server" 4102 "$out/todo" > /dev/null &
 pid=$!
-run "FlyNext, every core" http://127.0.0.1:4102 "$pid" POST /_fly/rpc/Todos.list '{}'
+run "FlyNext, every core" http://127.0.0.1:4102 "$pid" GET /api/todos ''
 fly=$pid
 
 (cd "$next" && exec npx next start -p 4103 > /dev/null 2>&1) &

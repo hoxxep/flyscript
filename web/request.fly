@@ -1,0 +1,17 @@
+// What the server knows of the request a page is rendered for, or a call or an endpoint answers —
+// its headers and cookies — and what it may do with the answer: set cookies, or send the browser
+// elsewhere. A page's `load`, an endpoint's `handle`, and the server's handlers of the app's
+// effects perform it; the server handles it, for each request (web/site.fly).
+
+export effect Http {
+  // The request's header `name`, whatever its case, if it has one.
+  header(name: str): Option<String>;
+  // The request's cookie `name`, if it has one.
+  cookie(name: str): Option<String>;
+  // Sets a cookie on the answer: for `maxAge` seconds, or, if that is zero, until the browser
+  // closes. The page's program cannot read it (`HttpOnly`); it is sent back with every request.
+  setCookie(name: str, value: str, maxAge: u32): void;
+  // Answers instead by sending the browser to `url`: from a page's `load`, the page at `url` is
+  // shown in its place, by the server or, following a link, by the page's program.
+  redirect(url: String): never;
+}

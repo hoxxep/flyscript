@@ -12,6 +12,14 @@ const check = (ok, what) => { if (!ok) throw new Error(`FAILED: ${what}`); conso
   const missing = await fetch(`${base}/todos/999`);
   check(missing.status === 404 && (await missing.text()).includes("Nothing here"), "an item that is not there is not found, with a page saying so");
   check((await fetch(`${base}/nowhere`)).status === 404, "an address no page answers is not found");
+  const api = await fetch(`${base}/api/todos`);
+  check(api.headers.get("content-type") === "application/json" && (await api.json()).length === 3, "an endpoint answers with the list as JSON");
+  const first = await fetch(`${base}/visits`);
+  check((first.headers.get("set-cookie") ?? "").startsWith("visits=1;") && (await first.text()).includes("This is your first visit."), "a page's load sets a cookie");
+  const again = await fetch(`${base}/visits`, { headers: { Cookie: "visits=4" } });
+  check((await again.text()).includes("You have opened this page 5 times."), "and reads it back");
+  const moved = await fetch(`${base}/old`, { redirect: "manual" });
+  check(moved.status === 303 && moved.headers.get("location") === "/about", "a page's load sends the browser elsewhere");
 
   const browser = await chromium.launch();
   const page = await browser.newPage({ viewport: { width: 900, height: 720 } });
@@ -79,7 +87,21 @@ const check = (ok, what) => { if (!ok) throw new Error(`FAILED: ${what}`); conso
   await page.waitForFunction(() => document.querySelector(".counter output")?.textContent === "1", null, { timeout: 5000 });
   check(true, "a component's messages are its page's: up, up, down is 1");
   check(await page.evaluate(() => document.querySelector("nav a.here")?.getAttribute("href") === "/about"), "the layout marks where the page is");
+  await page.waitForFunction(() => /^Open for [2-9]/.test(document.querySelector("p.open")?.textContent ?? ""), null, { timeout: 5000 });
+  check(true, "a timer in the view gives its page a message every second");
   await shoot(page, "about");
+
+  // A link to an address whose load sends the browser elsewhere lands there, without loading a page.
+  await page.click("a[href='/old']");
+  await page.waitForFunction(() => location.pathname === "/about" && document.querySelector("h1")?.textContent === "About", null, { timeout: 5000 });
+  check(await page.evaluate(() => globalThis.stillHere === true), "following a link the server sends elsewhere shows where it sent it");
+
+  // A cookie a page sets, followed to, and read again when the page is loaded whole.
+  await page.click("nav a[href='/visits']");
+  await page.waitForFunction(() => document.querySelector("p.visits")?.textContent === "This is your first visit.", null, { timeout: 5000 });
+  await page.reload();
+  await page.waitForFunction(() => document.querySelector("p.visits")?.textContent === "You have opened this page 2 times.", null, { timeout: 5000 });
+  check(true, "a cookie set as a link is followed is the browser's, sent back with the next request");
 
   // Removing an item goes back to the list, from a page the browser loaded whole.
   await page.goto(`${base}/todos/4`);
@@ -103,5 +125,25 @@ const check = (ok, what) => { if (!ok) throw new Error(`FAILED: ${what}`); conso
   await page.setViewportSize({ width: 390, height: 760 });
   await shoot(page, "phone");
   check(logs.length === 0, `no errors in the page${logs.length ? ":\n" + logs.join("\n") : ""}`);
+
+  // Without the page's program — scripts off — a form posts to its page, whose update the server
+  // runs as the program would have, and the browser is sent on; links are links.
+  const plain = await browser.newContext({ javaScriptEnabled: false });
+  const bare = await plain.newPage();
+  const listed = () => bare.$$eval("li .title", (els) => els.map((e) => e.textContent));
+  await bare.goto(`${base}/`);
+  await bare.fill("input", "Done without the program");
+  await Promise.all([bare.waitForNavigation(), bare.click("button[type=submit]")]);
+  check((await listed()).includes("Done without the program"), "without the program, a form posts to its page, whose update the server runs");
+  check(new URL(bare.url()).pathname === "/" && !bare.url().includes("_fly"), "and the browser is sent back to the page, so loading it again posts nothing");
+  const href = await bare.$eval("li:last-child a.title", (a) => a.getAttribute("href"));
+  await Promise.all([bare.waitForNavigation(), bare.click(`a[href='${href}']`)]);
+  await bare.fill("input", "Done, renamed, without the program");
+  await Promise.all([bare.waitForNavigation(), bare.click("button[type=submit]")]);
+  check((await bare.textContent("h1")) === "Done, renamed, without the program", "renaming, without the program");
+  await Promise.all([bare.waitForNavigation(), bare.click(".actions button")]);
+  check(new URL(bare.url()).pathname === "/" && !(await listed()).some((t) => t.startsWith("Done")),
+    "a button posts its click's message, and the update sends the browser where it goes");
+  await plain.close();
   await browser.close();
 })().catch((e) => { console.error(e.message); process.exit(1); });

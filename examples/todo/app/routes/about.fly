@@ -1,15 +1,15 @@
-// A page whose model is its own, with no data from the server: rendered from `initial`, and with a
-// component, a counter, kept in its model.
+// A page whose model is its own, with no data from the server: rendered from `initial`, with a
+// component, a counter, kept in its model, and a timer, which counts the seconds it is open.
 
-import { Ui, Event, el, text, map } from "web/ui";
+import { Ui, Event, el, text, cls, map, every, link } from "web/ui";
 import { Counter, CounterMsg, counter, view as counterView, update as counterUpdate } from "../components/counter";
 
-export type Model = { counter: Counter };
-export type Msg = #Counter(CounterMsg);
+export type Model = { counter: Counter; seconds: u32 };
+export type Msg = #Counter(CounterMsg) | #Tick;
 
 export const title: str = "About";
 
-export function initial(): Model { { counter: counter() } }
+export function initial(): Model { { counter: counter(), seconds: 0 } }
 
 export function view(m: readonly Model): void uses Ui<Msg> {
   el("h1", () => text("About"));
@@ -23,10 +23,21 @@ export function view(m: readonly Model): void uses Ui<Msg> {
   });
   el("p", () => text("A component is a view, a model and an update, like a page's:"));
   map((c) => #Counter(c), () => counterView(m.counter));
+  el("p", () => {
+    cls("open");
+    every(1000, #Tick);
+    text(`Open for ${m.seconds} s.`.asStr());
+  });
+  el("p", () => {
+    text("This page was at ");
+    link("/old", () => text("an older address"));
+    text(", which sends you here.");
+  });
 }
 
 export function update(m: mut Model, msg: Msg, ev: readonly Event): void {
   match (msg) {
     #Counter(c) => counterUpdate(mut m.counter, c),
+    #Tick => m.seconds += 1,
   }
 }

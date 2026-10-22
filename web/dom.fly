@@ -9,7 +9,7 @@
 // the program until the page has one for it.
 
 import { parse } from "std/json";
-import { Ui, Event } from "./ui";
+import { Ui, Event, posting } from "./ui";
 
 extern "C" function fly_dom_root(): u32;
 extern "C" function fly_dom_child(parent: u32, i: u32): u32;
@@ -160,17 +160,21 @@ export function nothing(): Render { { ops: Vec.new(), nodes: Vec.new() } }
 export function record<M extends Send & Clone>(view: () => void uses Ui<M>): [Render, Vec<M>] {
   let ops: Vec<Op> = Vec.new();
   let msgs: Vec<M> = Vec.new();
+  // The elements open, innermost last: what posts an event's message is as the server rendered it.
+  let open: Vec<String> = Vec.new();
   handle { view() } with Ui<M> {
-    open(tag) resumes k => { ops.push(#Open(tag.toString())); k() }
+    open(tag) resumes k => { ops.push(#Open(tag.toString())); open.push(tag.toString()); k() }
     key(s) resumes k => { ops.push(#Key(s.toString())); k() }
     attr(name, value) resumes k => { ops.push(#Attr(name.toString(), value.toString())); k() }
     on(event, msg) resumes k => {
       ops.push(#On(event.toString(), msgs.len()));
+      const tag = match (open.last()) { #Some(t) => t.clone(), #None => String.new() };
+      for (const [name, value] of posting(tag.asStr(), event, msgs.len())) { ops.push(#Attr(name.clone(), value.clone())); }
       msgs.push(msg.clone());
       k()
     }
     text(s) resumes k => { ops.push(#Text(s.toString())); k() }
-    close() resumes k => { ops.push(#Close); k() }
+    close() resumes k => { ops.push(#Close); open.pop(); k() }
   };
   let nodes: Vec<u32> = Vec.new();
   for (const _ of 0..ops.len()) { nodes.push(0); }
