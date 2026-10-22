@@ -1,0 +1,5 @@
+name = "FlyCore"
+defaultTargets = ["FlyCore"]
+
+[[lean_lib]]
+name = "FlyCore"
