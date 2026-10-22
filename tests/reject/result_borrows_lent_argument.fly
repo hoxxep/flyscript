@@ -1,0 +1,11 @@
+// error: `name` cannot be changed here: it was lent `readonly` at 8:19, and that borrow is still in use
+// A result that borrows an argument lent to the call keeps it borrowed, whatever the argument's
+// own type can hold (§4.2).
+import { println } from "std/io";
+function label(s: readonly String): str from s { s.asStr() }
+export function main(): void uses Io {
+  let name = "x".toString();
+  const r = label(name);
+  name = "y".toString();
+  println(r);
+}

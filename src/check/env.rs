@@ -146,6 +146,8 @@ pub struct Impl {
     pub target: Ty,
     pub interface: Option<(DefId, Vec<GArg>)>,
     pub methods: Vec<FnId>,
+    /// The `impl` item, in its module.
+    pub item: usize,
 }
 
 pub struct Program {
@@ -619,6 +621,94 @@ impl Program {
                 }
             }
         }
+        self.check_impls();
+    }
+
+    /// An impl of an interface has exactly the interface's methods, each taking what the
+    /// interface's takes, giving what it gives, and performing nothing it does not declare: code
+    /// that calls it through the interface knows only the interface's (§3.4).
+    fn check_impls(&mut self) {
+        for i in 0..self.impls.len() {
+            let Some((iface, iargs)) = self.impls[i].interface.clone() else { continue };
+            if self.impls[i].derived || self.impls[i].params.iter().any(|g| g.comptime) {
+                continue;
+            }
+            let DefKind::Interface { methods, self_sym, .. } = &self.defs[iface].kind else { continue };
+            let (methods, self_sym) = (methods.clone(), self_sym.clone());
+            let (m, item, target, fids, nouter) =
+                (self.impls[i].module, self.impls[i].item, self.impls[i].target.clone(), self.impls[i].methods.clone(), self.impls[i].params.len());
+            let iname = self.defs[iface].name.clone();
+            let shown_target = format!("{}", Show(&target, self));
+            let impl_span = self.modules[m].ast.items[item].span;
+            for (name, want) in &methods {
+                let Some(&fid) = fids.iter().find(|&&f| self.fns[f].name == *name) else {
+                    let span = Span { start: impl_span.start, end: impl_span.start };
+                    self.error(m, span, format!("`{shown_target}` does not implement `{iname}`: it has no `{name}`"));
+                    continue;
+                };
+                let have = self.fns[fid].scheme.clone();
+                let span = self.fn_decl(fid).map_or(impl_span, |d| d.sig.name.span);
+                // The interface's method as this impl has it: `Self` the target, the interface's
+                // parameters its arguments, and its own type parameters the impl method's.
+                let own: Vec<GParam> = have.tparams[nouter.min(have.tparams.len())..].to_vec();
+                if own.len() != want.tparams.len() || have.params.len() != want.params.len() {
+                    self.error(m, span, format!("`{name}` does not match `{iname}`'s: it takes other parameters"));
+                    continue;
+                }
+                let mut params: Vec<GParam> = vec![GParam { sym: self_sym.clone(), kind: PKind::Type, bounds: Vec::new(), default: None, comptime: false }];
+                params.extend(self.defs[iface].params.iter().cloned());
+                params.extend(want.tparams.iter().cloned());
+                let mut args: Vec<GArg> = vec![GArg::Ty(target.clone())];
+                args.extend(iargs.iter().cloned());
+                args.extend(own.iter().map(super::impls::param_arg));
+                let map: SubstMap<'_> = params.iter().map(|p| p.sym.id).zip(args.iter()).collect();
+                let same = |a: &Ty, b: &Ty| super::impls::erase_regions(a) == super::impls::erase_regions(b);
+                let assoc = self.impls[i].assoc_tys.clone();
+                let mine = |t: &Ty| own_assoc(&subst(t, &map), &target, &assoc);
+                let want_params: Vec<Ty> = want.params.iter().map(|(_, t)| mine(t)).collect();
+                let want_ret = mine(&want.ret);
+                let fits = have.params.iter().zip(&want_params).all(|((_, a), b)| same(a, b)) && same(&have.ret, &want_ret);
+                if !fits {
+                    let shown: Vec<String> = want_params.iter().map(|t| format!("{}", Show(t, self))).collect();
+                    let ret = format!("{}", Show(&want_ret, self));
+                    self.error(m, span, format!("`{name}` does not match `{iname}`'s, which takes `({})` and gives `{ret}`", shown.join(", ")));
+                    continue;
+                }
+                let want_row = subst_effs(&want.effects.clone().unwrap_or_else(EffRow::pure), &map);
+                let have_row = have.effects.clone().unwrap_or_else(EffRow::pure);
+                if let Some(e) = self.beyond(&have_row, &want_row) {
+                    let what = format!("{}", Show(&Ty::Named(e.def, Vec::new()), self));
+                    self.error(m, span, format!("`{name}` performs `{what}`, which `{iname}`'s `{name}` does not declare: code calling it through `{iname}` would not handle it"));
+                }
+            }
+            for &fid in &fids {
+                let name = self.fns[fid].name.clone();
+                if !methods.iter().any(|(n, _)| *n == name) {
+                    let span = self.fn_decl(fid).map_or(impl_span, |d| d.sig.name.span);
+                    self.error(m, span, format!("`{name}` is not a method of `{iname}`"));
+                }
+            }
+        }
+    }
+
+    /// An effect `have` performs that `want` does not allow, if there is one: one of another
+    /// effect, or a failure with a tag `want`'s failures lack. A row left open allows anything.
+    fn beyond(&self, have: &EffRow, want: &EffRow) -> Option<Eff> {
+        if want.tail != Tail::Closed {
+            return None;
+        }
+        let fail = self.known.get("Fail").copied();
+        for e in &have.effs {
+            let Some(w) = want.effs.iter().find(|w| w.def == e.def) else { return Some(e.clone()) };
+            if Some(e.def) == fail
+                && let (Some(Ty::Union(he)), Some(Ty::Union(we))) = (e.args.first(), w.args.first())
+                && we.tail == Tail::Closed
+                && he.labels.keys().any(|k| !we.labels.contains_key(k))
+            {
+                return Some(e.clone());
+            }
+        }
+        None
     }
 
     fn placeholder(&mut self, name: &ast::Ident, module: usize) -> DefId {
@@ -873,7 +963,7 @@ impl Program {
         let template = params.iter().any(|g| g.comptime);
         let assoc_tys = if template { HashMap::new() } else { imp.assoc.iter().map(|(n, t)| (n.name.clone(), self.elab_ty(t, &inner))).collect() };
         let assoc = imp.assoc.iter().map(|(n, t)| (n.name.clone(), t.clone())).collect();
-        self.impls.push(Impl { derived: imp.derived, assoc, assoc_tys, module: m, params: params.clone(), target: target.clone(), interface, methods: Vec::new() });
+        self.impls.push(Impl { derived: imp.derived, assoc, assoc_tys, module: m, params: params.clone(), target: target.clone(), interface, methods: Vec::new(), item });
         let method_scope = TyScope { self_ty: Some(target), ..inner };
         for (k, method) in imp.methods.iter().enumerate() {
             let scheme = self.elaborate_sig(&method.decl.sig, &method_scope, Some(&params));
@@ -1307,6 +1397,23 @@ fn normalize(p: &Path) -> PathBuf {
         }
     }
     out
+}
+
+/// A type of an interface's method as an impl of it has it: the target's associated types its
+/// own (`Self.Slice` the impl's `Slice`).
+fn own_assoc(t: &Ty, target: &Ty, assoc: &HashMap<String, Ty>) -> Ty {
+    let go = |t: &Ty| own_assoc(t, target, assoc);
+    match t {
+        Ty::Assoc(base, n) if **base == *target => assoc.get(n).cloned().unwrap_or_else(|| t.clone()),
+        Ty::Named(d, args) => Ty::Named(*d, args.iter().map(|a| match a { GArg::Ty(x) => GArg::Ty(go(x)), a => a.clone() }).collect()),
+        Ty::Tuple(ts) => Ty::Tuple(ts.iter().map(go).collect()),
+        Ty::Array(x, l) => Ty::Array(Box::new(go(x)), l.clone()),
+        Ty::Slice(x) => Ty::Slice(Box::new(go(x))),
+        Ty::Borrow(m, x) => Ty::Borrow(*m, Box::new(go(x))),
+        Ty::Record(r) => Ty::Record(Row { labels: r.labels.iter().map(|(k, x)| (k.clone(), go(x))).collect(), tail: r.tail.clone() }),
+        Ty::Union(r) => Ty::Union(Row { labels: r.labels.iter().map(|(k, x)| (k.clone(), go(x))).collect(), tail: r.tail.clone() }),
+        _ => t.clone(),
+    }
 }
 
 /// Arguments for generic parameters, by the parameter's symbol id.

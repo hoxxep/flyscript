@@ -99,7 +99,7 @@ pub fn handle(it: &mut Interp, body: &ast::Block, effect: usize, arms: &[ast::Ha
             return;
         }
         child.handlers = vec![Handler::Coroutine { co, effect }];
-        let evt = match child.block(&body, &env) {
+        let evt = match child.home(|c| c.block(&body, &env)) {
             Ok(v) => Some(Evt::Done(v)),
             Err(Ctl::Panic(m)) if m == ENDED => None,
             Err(Ctl::Panic(m)) => Some(Evt::Panicked(m)),
@@ -206,7 +206,7 @@ fn arm(it: &mut Interp, co: u64, name: &str, args: Vec<Value>) -> R {
         super::interp::define(&aenv, &k.name, Value::Native("Cont", co));
     }
     let saved = std::mem::replace(&mut it.lex, lex);
-    let r = it.block(&arm.body, &aenv);
+    let r = it.home(|i| i.block(&arm.body, &aenv));
     it.lex = saved;
     r
 }

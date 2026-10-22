@@ -400,3 +400,31 @@ function writeKey(t: readonly Ty, out: mut String): void {
     #Error => out.push("!"),
   }
 }
+
+// A type with its regions forgotten, for comparing types whose regions may be named apart.
+export function eraseRegions(t: readonly Ty): Ty {
+  match (t) {
+    #Named(d, args) => {
+      let out: Vec<GArg> = Vec.new();
+      for (const a of args) {
+        out.push(match (a) { #Region(_) => #Region(#Heap), #Ty(x) => #Ty(eraseRegions(x)), other => other.clone() });
+      }
+      #Named(d, out)
+    }
+    #Tuple(ts) => {
+      let out: Vec<Ty> = Vec.new();
+      for (const x of ts) { out.push(eraseRegions(x)); }
+      #Tuple(out)
+    }
+    #Record(r) | #Union(r) => {
+      let labels: Vec<[String, Ty]> = Vec.new();
+      for (const [k, v] of r.labels) { labels.push([k.clone(), eraseRegions(v)]); }
+      const row = Row { labels, tail: r.tail.clone() };
+      match (t) { #Record(_) => #Record(row), _ => #Union(row) }
+    }
+    #Array(e, l) => #Array(Box.new(eraseRegions(e)), l.clone()),
+    #Slice(e) => #Slice(Box.new(eraseRegions(e))),
+    #Borrow(m, e) => #Borrow(m, Box.new(eraseRegions(e))),
+    other => other.clone(),
+  }
+}

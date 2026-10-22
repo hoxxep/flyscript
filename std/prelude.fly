@@ -332,6 +332,52 @@ export effect Io {
   park(on: WaitKey): void;
 }
 
+// ---- Floats: the arithmetic of the C library's <math.h>, and fixed-point text ----
+impl f64 {
+  export function sqrt(self: Self): Self;
+  export function abs(self: Self): Self;
+  export function floor(self: Self): Self;
+  export function ceil(self: Self): Self;
+  // To the nearest whole number, halves away from zero.
+  export function round(self: Self): Self;
+  export function trunc(self: Self): Self;
+  export function sin(self: Self): Self;
+  export function cos(self: Self): Self;
+  export function tan(self: Self): Self;
+  // The angle of the point (x, self), from -π to π.
+  export function atan2(self: Self, x: Self): Self;
+  export function exp(self: Self): Self;
+  // The natural logarithm.
+  export function ln(self: Self): Self;
+  export function pow(self: Self, e: Self): Self;
+  export function min(self: Self, other: Self): Self;
+  export function max(self: Self, other: Self): Self;
+  // The number written with `digits` digits after the point, rounded: `(2.0 / 3.0).toFixed(3)` is "0.667".
+  export function toFixed(self: Self, digits: u32): String;
+}
+impl f32 {
+  export function sqrt(self: Self): Self;
+  export function abs(self: Self): Self;
+  export function floor(self: Self): Self;
+  export function ceil(self: Self): Self;
+  // To the nearest whole number, halves away from zero.
+  export function round(self: Self): Self;
+  export function trunc(self: Self): Self;
+  export function sin(self: Self): Self;
+  export function cos(self: Self): Self;
+  export function tan(self: Self): Self;
+  // The angle of the point (x, self), from -π to π.
+  export function atan2(self: Self, x: Self): Self;
+  export function exp(self: Self): Self;
+  // The natural logarithm.
+  export function ln(self: Self): Self;
+  export function pow(self: Self, e: Self): Self;
+  export function min(self: Self, other: Self): Self;
+  export function max(self: Self, other: Self): Self;
+  // The number written with `digits` digits after the point, rounded: `(2.0 / 3.0).toFixed(3)` is "0.667".
+  export function toFixed(self: Self, digits: u32): String;
+}
+
 // ---- Integers: arithmetic that wraps instead of panicking on overflow (§5.7) ----
 impl i8 { export function wrappingAdd(self: Self, b: Self): Self; export function wrappingSub(self: Self, b: Self): Self; export function wrappingMul(self: Self, b: Self): Self; }
 impl i16 { export function wrappingAdd(self: Self, b: Self): Self; export function wrappingSub(self: Self, b: Self): Self; export function wrappingMul(self: Self, b: Self): Self; }

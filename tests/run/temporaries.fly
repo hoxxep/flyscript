@@ -1,0 +1,38 @@
+// expect: 1 [1, 100, 10, 200, 11, 201, 2, 300, 3, 400, 5, 500]
+// expect: kept [4]
+// A value made only to be lent is dropped when the statement it is made in ends; one a binding of
+// the statement may hold a borrow of lives as long as the binding (§5.6). A destructor performs
+// nothing, so each value here notes its drop in a log it borrows.
+import { println } from "std/io";
+
+view struct Noisy { log: mut Vec<u32>; n: u32 }
+impl Drop for Noisy { function drop(self: mut Self): void { self.log.push(self.n); } }
+impl Noisy {
+  function size(self: readonly Self): u32 { self.n }
+  function name(self: readonly Self): str from self { "noisy" }
+}
+
+function make(log: mut Vec<u32>, n: u32): Noisy from log { Noisy { log, n } }
+function size(x: readonly Noisy): u32 { x.n }
+
+export function main(): void uses Io {
+  let log: Vec<u32> = Vec.new();
+  let other: Vec<u32> = Vec.new();
+  const first = size(make(mut log, 1));
+  log.push(100);
+  for (const i of 0..2) {
+    const s = size(make(mut log, 10 + i));
+    log.push(200 + i);
+  }
+  const m = make(mut log, 2).size();
+  log.push(300);
+  make(mut log, 3);
+  log.push(400);
+  {
+    const name: str = make(mut other, 4).name();
+    size(make(mut log, 5));
+    log.push(500);
+  }
+  println(`${first} ${log}`);
+  println(`kept ${other}`);
+}

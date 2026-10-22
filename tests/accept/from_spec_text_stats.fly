@@ -6,7 +6,7 @@ import { HashMap } from "std/collections";
 const SAMPLE: str = "the quick brown fox jumps over the lazy dog\nthe fox was very quick and the dog was lazy\nthe quick fox\n";
 
 function lines(text: str): void uses Yield<str> {
-  for (const line of text.split("\n")) {
+  for (const line of text.lines()) {
     const trimmed = line.trim();
     if (trimmed.len() > 0) {
       yield trimmed;

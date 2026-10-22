@@ -1,0 +1,21 @@
+// expect: 4 [7, 700]
+// A temporary lent by the value a `handle`'s body ends with is dropped when the
+// body ends, before the statement around it does anything more.
+import { println } from "std/io";
+
+view struct Noisy { log: mut Vec<u32>; n: u32 }
+impl Drop for Noisy { function drop(self: mut Self): void { self.log.push(self.n); } }
+
+function make(log: mut Vec<u32>, n: u32): Noisy from log { Noisy { log, n } }
+function size(x: readonly Noisy): u32 uses Ask { x.n + Ask.ask(0) as u32 }
+function len(s: readonly String): i64 uses Ask { s.len() as i64 + Ask.ask(1) }
+
+effect Ask { ask(n: i64): i64; }
+
+export function main(): void uses Io {
+  let log: Vec<u32> = Vec.new();
+  const h: i64 = handle { len(`s${3}a`) } with Ask { ask(n) resumes k => k(n) };
+  const s = handle { size(make(mut log, 7)) } with Ask { ask(n) resumes k => k(n) };
+  log.push(s * 100);
+  println(`${h} ${log}`);
+}

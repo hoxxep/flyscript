@@ -768,6 +768,18 @@ impl Cgen {
     }
   }
 
+  // `x op y` on integers of type `p`, checked for overflow at their own width; `i128`'s, the
+  // widest, by the runtime's.
+  function native(self: readonly Self, p: Prim, op: str, x: str, y: str): String {
+    match (p) {
+      #I128 => {
+        const f = match (op) { "ADD" => "fly_add128", "SUB" => "fly_sub128", _ => "fly_mul128" };
+        `${f}((fly_i128)(${x}), (fly_i128)(${y}))`
+      }
+      _ => `FLY_${op}(${primType(p)}, ${cquote(primName(p))}, ${x}, ${y})`,
+    }
+  }
+
   // An rvalue other than a call, as a C expression of type `ty`.
   function rvalue(self: mut Self, rv: readonly Rvalue, ty: readonly Ty, span: Span): String uses Fail<Diagnostic> {
     match (rv) {
@@ -790,7 +802,7 @@ impl Cgen {
         const x = self.operand(v, span);
         if (op == "-") {
           match (intPrim(ty)) {
-            #Some(p) => self.checked(p, `-(fly_i128)(${x})`),
+            #Some(p) => self.native(p, "SUB", "0", x.asStr()),
             #None => `(-${x})`,
           }
         } else if (op == "~") {
@@ -806,9 +818,9 @@ impl Cgen {
         }
         match (intPrim(ty)) {
           #Some(p) => match (op) {
-            "+" => self.checked(p, `fly_add128((fly_i128)(${x}), (fly_i128)(${y}))`),
-            "-" => self.checked(p, `fly_sub128((fly_i128)(${x}), (fly_i128)(${y}))`),
-            "*" => self.checked(p, `fly_mul128((fly_i128)(${x}), (fly_i128)(${y}))`),
+            "+" => self.native(p, "ADD", x.asStr(), y.asStr()),
+            "-" => self.native(p, "SUB", x.asStr(), y.asStr()),
+            "*" => self.native(p, "MUL", x.asStr(), y.asStr()),
             "/" | "%" => {
               const c = primType(p);
               `({ ${c} x_ = ${x}; ${c} y_ = ${y}; if (y_ == 0) fly_div_zero(); (${c})(x_ ${op} y_); })`
@@ -1749,6 +1761,26 @@ impl Cgen {
     const recv: Ty = match (c.argTys.first()) { #Some(t) => stripBorrow(t), #None => #Error };
     const elem: Ty = match (recv) { #Slice(x) | #Array(x, _) => x.get().clone(), _ => typeArg(recv, 0) };
     const ec = if (match (elem) { #Error => false, _ => true }) { self.ctype(elem, span) } else { "fly_unit".toString() };
+    // Float arithmetic, as <math.h> has it: what a processor does in one instruction by the
+    // compiler's builtins, which need no library.
+    if (key.startsWith("f64_") || key.startsWith("f32_")) {
+      const f = if (key.startsWith("f32_")) { "f" } else { "" };
+      const op = key.slice(4, key.len());
+      return #Some(match (op) {
+        "sqrt" => `__builtin_sqrt${f}(${arg(0)})`,
+        "abs" => `__builtin_fabs${f}(${arg(0)})`,
+        "floor" => `__builtin_floor${f}(${arg(0)})`,
+        "ceil" => `__builtin_ceil${f}(${arg(0)})`,
+        "round" => `__builtin_round${f}(${arg(0)})`,
+        "trunc" => `__builtin_trunc${f}(${arg(0)})`,
+        "min" => `__builtin_fmin${f}(${arg(0)}, ${arg(1)})`,
+        "max" => `__builtin_fmax${f}(${arg(0)}, ${arg(1)})`,
+        "ln" => `log${f}(${arg(0)})`,
+        "atan2" | "pow" => `${op}${f}(${arg(0)}, ${arg(1)})`,
+        "toFixed" => `fly_float_fixed((double)(${arg(0)}), ${arg(1)})`,
+        _ => `${op}${f}(${arg(0)})`,
+      });
+    }
     // Wrapping arithmetic, on the unsigned type of the same width.
     if (key.endsWith("_wrappingAdd") || key.endsWith("_wrappingSub") || key.endsWith("_wrappingMul")) {
       const p = match (intPrim(rt)) { #Some(p) => p, #None => return #None };
@@ -2318,7 +2350,8 @@ impl Cgen {
     const n = self.aparts;
     const ap = self.apart([body.clone()], span);
     const envT = `benv_${n}`;
-    const rt = self.ctype(self.cx.fnRet, span);
+    const ret = self.cx.fnRet.clone();
+    const rt = self.ctype(ret, span);
     let fields = ap.fields.clone();
     fields.push(`  ${rt}* oret_;\n  int* code_;\n  fly_yield* y_;\n`);
     self.typeDefs.push(`typedef struct {\n${fields}} ${envT};\n`);
@@ -2673,7 +2706,8 @@ impl Cgen {
 
   // A function's C body: its locals, zeroed; its parameters; its body; its ways out.
   function body(self: mut Self, f: readonly Func, inits: str): String uses Fail<Diagnostic> {
-    const rt = self.ctype(self.cx.ret, f.span);
+    const ret = self.cx.ret.clone();
+    const rt = self.ctype(ret, f.span);
     // The function's value is read once its blocks have ended.
     let decls = String.new();
     if (!unitTy(f.ret)) {

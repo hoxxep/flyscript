@@ -49,6 +49,8 @@ struct Var {
     /// Where it was declared, for the loop rule.
     chain: Chain,
     param: bool,
+    /// A value lent with no place of its own (§5.6), which has no name to report.
+    temp: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -129,6 +131,8 @@ pub fn check_function(p: &mut Program, fid: FnId) {
         next_node: 0,
         temps: Vec::new(),
         deferred: Vec::new(),
+        made: Vec::new(),
+        want: None,
         reported: HashSet::new(),
         lambdas: Vec::new(),
         escaping: false,
@@ -169,6 +173,7 @@ pub fn check_function(p: &mut Program, fid: FnId) {
         o.next_node = 0;
         o.temps.clear();
         o.deferred.clear();
+        o.made.clear();
         for (i, (name, ty)) in o.typed.params.clone().into_iter().enumerate() {
             let id = o.declare_var(&name, ty.clone(), true, true, usize::MAX - i);
             // A parameter whose type can hide a borrow carries one too, so a `from` that leaves
@@ -221,6 +226,11 @@ struct Own<'p> {
     temps: Vec<BTreeSet<LoanId>>,
     /// Loans held by `defer`s, live to the end of their block (§5.6).
     deferred: Vec<BTreeSet<LoanId>>,
+    /// The temporaries made by the statements being checked, innermost last: each ends with its
+    /// statement, or its block's value (§5.6).
+    made: Vec<VarId>,
+    /// The type the value of the block about to be checked is wanted as.
+    want: Option<Ty>,
     reported: HashSet<(Span, String)>,
     /// Closures being checked, innermost last.
     lambdas: Vec<LambdaFrame>,
@@ -326,7 +336,7 @@ impl<'p> Own<'p> {
     }
 
     fn declare_var(&mut self, name: &str, ty: Ty, mutable: bool, param: bool, site: usize) -> VarId {
-        let var = Var { name: name.to_string(), ty, mutable, chain: self.chain.clone(), param };
+        let var = Var { name: name.to_string(), ty, mutable, chain: self.chain.clone(), param, temp: false };
         let id = match self.sites.get(&(site, name.to_string())) {
             Some(id) => {
                 self.vars[*id] = var;
@@ -415,6 +425,10 @@ impl<'p> Own<'p> {
                 continue;
             }
             if loan.mutable || write {
+                if self.vars[path.root].temp {
+                    self.err(at, "this pass through the loop makes this value again, dropping the one made on an earlier pass, which is still borrowed: bind it with `const` before the loop");
+                    return;
+                }
                 let name = self.path_name(path);
                 let how = if loan.mutable { "lent `mut`" } else { "lent `readonly`" };
                 let what = if write { "changed" } else { "used" };
@@ -705,6 +719,7 @@ impl<'p> Own<'p> {
     // ---- statements and blocks ----
 
     fn block(&mut self, b: &ast::Block, how: Use) -> Val {
+        let want = self.want.take();
         self.scopes.push(HashMap::new());
         let id = self.enter(Node::Seq, 0);
         let _ = id;
@@ -714,6 +729,7 @@ impl<'p> Own<'p> {
         for stmt in &b.stmts {
             child += 1;
             self.set_child(child);
+            let mark = self.made.len();
             match stmt {
                 Stmt::Let { mutable, pat, init, .. } => {
                     // A binding of a borrow type borrows its initializer; otherwise it takes it.
@@ -744,12 +760,31 @@ impl<'p> Own<'p> {
                     self.expr(e, Use::Move);
                 }
             }
+            // The statement's temporaries end with it, unless what it binds may hold them: then
+            // they end with the block, as the binding does (§5.6).
+            match stmt {
+                Stmt::Let { pat, init, .. } if self.p.class(&self.bound_ty(pat, init)) == 2 => {
+                    let made: Vec<VarId> = self.made.drain(mark..).collect();
+                    let scope = self.scopes.last_mut().expect("scope");
+                    for t in made {
+                        scope.insert(format!(" temporary {t}"), t);
+                    }
+                }
+                Stmt::Let { span, .. } => self.end_temps(mark, None, span.end, &Val::default(), "is dropped at the end of its statement"),
+                Stmt::Defer(e) | Stmt::Expr(e) => self.end_temps(mark, None, e.span.end, &Val::default(), "is dropped at the end of its statement"),
+            }
         }
         child += 1;
         self.set_child(child);
         self.escaping = escaping;
         let v = match &b.tail {
-            Some(e) => self.expr(e, how),
+            Some(e) => {
+                let how = match &want {
+                    Some(w) => self.part_use(w, e, how),
+                    None => how,
+                };
+                self.expr(e, how)
+            }
             None => Val::default(),
         };
         self.deferred.truncate(deferred_depth);
@@ -812,10 +847,10 @@ impl<'p> Own<'p> {
             && let Some(l) = v.loans.iter().find(|l| on_dying(self, l)).copied()
         {
             let root = self.loans[l].path.root;
-            let name = self.vars[root].name.clone();
+            let name = self.shown_root(root);
             let msg = match self.lent_args.get(&root) {
-                Some(op) => format!("this value borrows `{name}`, which the code that performed `{op}` lent only to this arm"),
-                None => format!("this value borrows `{name}`, which {ends}"),
+                Some(op) => format!("this value borrows {name}, which the code that performed `{op}` lent only to this arm"),
+                None => format!("this value borrows {name}, which {ends}"),
             };
             self.err(tail.span, msg);
         }
@@ -844,8 +879,14 @@ impl<'p> Own<'p> {
                 && self.live_after(h, end)
             {
                 let loan = self.loans[l].clone();
-                let (name, holder) = (self.vars[loan.path.root].name.clone(), self.vars[h].name.clone());
-                self.err(loan.span, format!("`{holder}` borrows `{name}` here, and is used after `{name}` goes out of scope"));
+                let holder = self.vars[h].name.clone();
+                let msg = if self.vars[loan.path.root].temp {
+                    format!("`{holder}` borrows a temporary here, which {ends}, and `{holder}` is used after that: give `{holder}` an owned type, or bind the value with `const` first")
+                } else {
+                    let name = self.vars[loan.path.root].name.clone();
+                    format!("`{holder}` borrows `{name}` here, and is used after `{name}` goes out of scope")
+                };
+                self.err(loan.span, msg);
             }
         }
     }
@@ -920,6 +961,119 @@ impl<'p> Own<'p> {
         if !passes_escape && self.escaping {
             return self.contained(|o| o.expr(e, how));
         }
+        if how != Use::Move && self.lends_temporary(e) {
+            let v = self.value(e, how);
+            return self.temporary(e, v, how);
+        }
+        self.value(e, how)
+    }
+
+    /// Whether lending `e` lends a temporary: a value with no place of its own, not a borrow
+    /// already (§5.6).
+    fn lends_temporary(&self, e: &Expr) -> bool {
+        let fresh = !matches!(
+            e.kind,
+            ExprKind::Ident(_)
+                | ExprKind::Field { .. }
+                | ExprKind::FieldAt { .. }
+                | ExprKind::TagAt { .. }
+                | ExprKind::Index { .. }
+                | ExprKind::BorrowMut(_)
+                | ExprKind::Str(_)
+                | ExprKind::TypeRef(_)
+                | ExprKind::Return(_)
+                | ExprKind::Throw(_)
+                | ExprKind::Break
+                | ExprKind::Continue
+                | ExprKind::Comptime(_)
+        );
+        fresh && !matches!(self.ty_of(e), Ty::Borrow(..) | Ty::Slice(_) | Ty::Prim(Prim::Str | Prim::Void | Prim::Never) | Ty::Error)
+    }
+
+    /// A value lent with no place of its own: a binding with no name, lent, which ends with the
+    /// statement it is made in, or the value of the block it is made in, unless what a `let` binds
+    /// may hold it (§5.6).
+    fn temporary(&mut self, e: &Expr, v: Val, how: Use) -> Val {
+        let ty = self.ty_of(e);
+        let key = (e.span.start, format!(" temporary {}", e.span.end));
+        let id = match self.sites.get(&key) {
+            Some(id) => *id,
+            None => {
+                self.vars.push(Var { name: "a temporary".to_string(), ty: Ty::Error, mutable: true, chain: Vec::new(), param: false, temp: true });
+                self.sites.insert(key, self.vars.len() - 1);
+                self.vars.len() - 1
+            }
+        };
+        // Made again by a later pass through a loop, it replaces the one made before.
+        let path = Path { root: id, fields: Vec::new() };
+        self.access(&path, true, e.span, &BTreeSet::new());
+        self.vars[id] = Var { name: "a temporary".to_string(), ty: ty.clone(), mutable: true, chain: self.chain.clone(), param: false, temp: true };
+        self.state.moved.retain(|p| p.root != id);
+        if self.may_hold(&ty) {
+            self.state.holds.insert(id, v.loans.clone());
+        } else {
+            self.state.holds.remove(&id);
+        }
+        self.made.push(id);
+        let l = self.new_loan(path, how == Use::Mut, e.span);
+        let mut loans = v.loans;
+        loans.insert(l);
+        Val { loans }
+    }
+
+    /// The temporaries made since `mark` end at `end`: nothing may still borrow them, nor the value
+    /// `tail` gives, `v` (§5.6).
+    fn end_temps(&mut self, mark: usize, tail: Option<&Expr>, end: usize, v: &Val, ends: &str) {
+        let made: Vec<VarId> = self.made.drain(mark..).collect();
+        if made.is_empty() {
+            return;
+        }
+        self.dying_holds.clear();
+        for t in &made {
+            if let Some(ls) = self.state.holds.remove(t) {
+                self.dying_holds.insert(*t, ls);
+            }
+        }
+        let dying: HashSet<VarId> = made.into_iter().collect();
+        self.check_outlives_at(&dying, tail, end, v, ends);
+        // Reported if anything still borrows them, they are gone.
+        for ls in self.state.holds.values_mut() {
+            ls.retain(|l| !dying.contains(&self.loans[*l].path.root));
+        }
+    }
+
+    /// A block whose value is the value of `whole`, a branch or a body of it.
+    fn block_as(&mut self, b: &ast::Block, how: Use, whole: &Expr) -> Val {
+        self.want = Some(self.ty_of(whole));
+        self.block(b, how)
+    }
+
+    /// How a part whose value is the value of a whole of type `whole` — a branch's, an arm's, a
+    /// block's — is used: an owned value where the whole is a borrow is lent, in a temporary.
+    fn part_use(&self, whole: &Ty, part: &Expr, how: Use) -> Use {
+        let lends = |t: &Ty| matches!(t, Ty::Borrow(..) | Ty::Slice(_) | Ty::Prim(Prim::Str));
+        let pt = self.ty_of(part);
+        if how != Use::Move || !lends(whole) || lends(&pt) || matches!(pt, Ty::Prim(Prim::Void | Prim::Never) | Ty::Error) {
+            return how;
+        }
+        if matches!(whole, Ty::Borrow(true, _)) { Use::Mut } else { Use::Read }
+    }
+
+    /// What a `let` binds: a name's declared type, or the value a pattern takes apart.
+    fn bound_ty(&self, pat: &Pattern, init: &Expr) -> Ty {
+        match (&pat.kind, self.typed.bindings.get(&pat.span)) {
+            (PatternKind::Bind(_), Some(t)) => t.clone(),
+            _ => self.ty_of(init),
+        }
+    }
+
+    /// The name of what a loan is on, for a diagnostic.
+    fn shown_root(&self, root: VarId) -> String {
+        let var = &self.vars[root];
+        if var.temp { var.name.clone() } else { format!("`{}`", var.name) }
+    }
+
+    fn value(&mut self, e: &Expr, how: Use) -> Val {
         match &e.kind {
             ExprKind::TypeRef(_) | ExprKind::FieldAt { .. } | ExprKind::TagAt { .. } => Val::default(),
             ExprKind::Ident(name) => {
@@ -1005,9 +1159,10 @@ impl<'p> Own<'p> {
             }
             ExprKind::Assign { op, target, value } => {
                 // Into a place that is not a borrow, a borrow is read, not moved. A binding that
-                // holds a `mut` borrow is assigned through: the place is what it refers to.
+                // holds a `mut` borrow is assigned through: the place is what it refers to; so is a
+                // field that holds one, given a value rather than another borrow.
                 let place_ty = match self.ty_of(target) {
-                    Ty::Borrow(true, inner) if matches!(target.kind, ExprKind::Ident(_)) => *inner,
+                    Ty::Borrow(true, inner) if matches!(target.kind, ExprKind::Ident(_)) || !matches!(self.ty_of(value), Ty::Borrow(..)) => *inner,
                     t => t,
                 };
                 let how = self.arg_use(&place_ty, &self.ty_of(value));
@@ -1060,16 +1215,19 @@ impl<'p> Own<'p> {
                 v
             }
             ExprKind::Lambda { params, body } => self.lambda(e, params, body),
-            ExprKind::Block(b) => self.block(b, how),
+            ExprKind::Block(b) => self.block_as(b, how, e),
             ExprKind::If { cond, then, otherwise } => {
                 self.contained(|o| o.expr(cond, Use::Read));
                 self.enter(Node::Branch, 0);
                 let before = self.state.clone();
-                let a = self.block(then, how);
+                let a = self.block_as(then, how, e);
                 let after_then = std::mem::replace(&mut self.state, before);
                 self.set_child(1);
                 let b = match otherwise {
-                    Some(o) => self.expr(o, how),
+                    Some(o) => {
+                        let how = self.part_use(&self.ty_of(e), o, how);
+                        self.expr(o, how)
+                    }
                     None => Val::default(),
                 };
                 // A branch that never finishes (it throws, returns, breaks) does not meet the other.
@@ -1087,8 +1245,10 @@ impl<'p> Own<'p> {
                 // Twice: the second iteration sees what the first left behind (§4.1).
                 for _ in 0..2 {
                     let before = self.state.clone();
+                    let mark = self.made.len();
                     self.expr(cond, Use::Read);
                     self.block(body, Use::Move);
+                    self.end_temps(mark, None, body.span.end, &Val::default(), "is dropped at the end of each pass through the loop");
                     self.state.join(&before);
                 }
                 self.leave();
@@ -1105,17 +1265,22 @@ impl<'p> Own<'p> {
                 self.temps.push(iv.loans.clone());
                 // A generator's items borrow what it holds, never the generator itself: they are
                 // results of its producer (§5.5). A collection's elements borrow the collection.
-                if self.is_gen(&self.ty_of(iter))
-                    && let Some(place) = self.place(iter)
-                {
-                    iv.loans.retain(|l| *l < first_loan || self.loans[*l].path != place);
+                if self.is_gen(&self.ty_of(iter)) {
+                    let place = self.place(iter);
+                    iv.loans.retain(|l| {
+                        let loan = &self.loans[*l];
+                        let itself = Some(&loan.path) == place.as_ref() || (self.vars[loan.path.root].temp && loan.span == iter.span);
+                        *l < first_loan || !itself
+                    });
                 }
                 self.enter(Node::Loop, 0);
                 for _ in 0..2 {
                     let before = self.state.clone();
                     self.scopes.push(HashMap::new());
                     self.bind_pattern(pat, &iv, false);
+                    let mark = self.made.len();
                     self.block(body, Use::Move);
+                    self.end_temps(mark, None, body.span.end, &Val::default(), "is dropped at the end of each pass through the loop");
                     // The loop variables end with the iteration, and release what they held.
                     if let Some(scope) = self.scopes.pop() {
                         for var in scope.values() {
@@ -1129,6 +1294,7 @@ impl<'p> Own<'p> {
                 Val::default()
             }
             ExprKind::Match { scrutinee, arms } => {
+                let whole = self.ty_of(e);
                 // A place that cannot be moved from is matched through a borrow of it: its parts
                 // bind as borrows (§4.1).
                 if let Some(m) = self.typed.lent_scrutinees.get(&scrutinee.span).copied() {
@@ -1136,13 +1302,13 @@ impl<'p> Own<'p> {
                     // reading it is all the others need, and the code around may read it too.
                     let m = m && arms.iter().any(|a| self.arm_changes(a));
                     let sv = self.contained(|o| o.expr(scrutinee, if m { Use::Mut } else { Use::Read }));
-                    return self.match_arms(arms, sv, how);
+                    return self.match_arms(arms, sv, how, &whole);
                 }
                 // A borrow matched is lent on, `mut` only if an arm changes what it binds.
                 if let Ty::Borrow(m, _) = self.ty_of(scrutinee) {
                     let m = m && arms.iter().any(|a| self.arm_changes(a));
                     let sv = self.contained(|o| o.expr(scrutinee, if m { Use::Mut } else { Use::Read }));
-                    return self.match_arms(arms, sv, how);
+                    return self.match_arms(arms, sv, how, &whole);
                 }
                 // A place matched is moved only by the arms that move an owned part they bind; the
                 // others borrow it, and it may still be used after them (§4.1).
@@ -1204,6 +1370,7 @@ impl<'p> Own<'p> {
                     if let Some(g) = &arm.guard {
                         self.guard(g, &arm.pat);
                     }
+                    let how = self.part_use(&whole, &arm.body, how);
                     let v = self.expr(&arm.body, how);
                     // An arm that takes the place owns what it binds and drops it when it ends.
                     if takes && let Some(scope) = self.scopes.last() {
@@ -1232,7 +1399,7 @@ impl<'p> Own<'p> {
             ExprKind::Try { body, pat, handler } => {
                 self.enter(Node::Branch, 0);
                 let before = self.state.clone();
-                let a = self.block(body, how);
+                let a = self.block_as(body, how, e);
                 let after_body = std::mem::replace(&mut self.state, before);
                 // The catch arm runs after the body unwound: its borrows are released (§5.2), but
                 // its moves may have happened.
@@ -1240,7 +1407,7 @@ impl<'p> Own<'p> {
                 self.set_child(1);
                 self.scopes.push(HashMap::new());
                 self.bind_pattern(pat, &Val::default(), false);
-                let b = self.block(handler, how);
+                let b = self.block_as(handler, how, e);
                 self.scopes.pop();
                 self.state.join(&after_body);
                 self.leave();
@@ -1267,12 +1434,12 @@ impl<'p> Own<'p> {
                 Val::default()
             }
             ExprKind::Break | ExprKind::Continue => Val::default(),
-            ExprKind::Region { body, .. } => self.block(body, how),
+            ExprKind::Region { body, .. } => self.block_as(body, how, e),
             // The one thing `unsafe` vouches for in ownership: an operation's arguments may leave
             // their arm, because the code around keeps the continuation they borrow from from
             // being resumed while they live (§5.5's `generate`).
             ExprKind::Unsafe(body) => {
-                let mut v = self.block(body, how);
+                let mut v = self.block_as(body, how, e);
                 v.loans.retain(|l| !self.lent_args.contains_key(&self.loans[*l].path.root));
                 v
             }
@@ -1303,7 +1470,9 @@ impl<'p> Own<'p> {
                 if let Some(d) = handled {
                     self.handling.push((d, BTreeSet::new()));
                 }
-                let v = self.block(body, how);
+                let mark = self.made.len();
+                let v = self.block_as(body, how, e);
+                self.end_temps(mark, body.tail.as_deref(), body.span.end, &v, "is dropped when the `handle`'s body ends");
                 let across = if handled.is_some() { self.handling.pop().map(|f| f.1).unwrap_or_default() } else { BTreeSet::new() };
                 let mut loans = v.loans.clone();
                 for arm in arms {
@@ -1335,7 +1504,9 @@ impl<'p> Own<'p> {
                         self.cont_args.insert(id, lent);
                     }
                     // What an arm gives back is the `handle` expression's value.
-                    let av = self.block(&arm.body, how);
+                    let mark = self.made.len();
+                    let av = self.block_as(&arm.body, how, e);
+                    self.end_temps(mark, arm.body.tail.as_deref(), arm.body.span.end, &av, "is dropped when the arm ends");
                     loans.extend(av.loans.iter().copied());
                     if let Some(scope) = self.scopes.pop() {
                         for var in scope.values() {
@@ -1575,6 +1746,8 @@ impl<'p> Own<'p> {
                 _ => a,
             };
             let staged = if how == Use::Mut { self.place(target).filter(|_| !self.captured(self.place(target).expect("a place").root)) } else { None };
+            // The loan that lends the argument itself, on its place or on the temporary it is in.
+            let mut lend: Option<LoanId> = None;
             let v = match &staged {
                 Some(path) => {
                     let first = self.loans.len();
@@ -1582,25 +1755,33 @@ impl<'p> Own<'p> {
                     if let Some(l) = (first..self.loans.len()).rev().find(|l| self.loans[*l].path == *path) {
                         mut_args.push((l, path.clone(), target.clone()));
                         lent_here.insert(l);
+                        lend = Some(l);
                     }
                     v
                 }
                 None => {
                     let before = self.loans.len();
                     let v = self.expr(a, how);
-                    if how == Use::Read
-                        && let Some(path) = self.place(target)
-                    {
-                        lent_here.extend((before..self.loans.len()).filter(|l| self.loans[*l].path == path));
+                    if how != Use::Move {
+                        let path = self.place(target);
+                        if how == Use::Read && let Some(path) = &path {
+                            lent_here.extend((before..self.loans.len()).filter(|l| self.loans[*l].path == *path));
+                        }
+                        lend = (before..self.loans.len()).rev().find(|l| {
+                            let loan = &self.loans[*l];
+                            Some(&loan.path) == path.as_ref() || (self.vars[loan.path.root].temp && loan.path.fields.is_empty())
+                        });
+                        lent_here.extend(lend);
                     }
                     v
                 }
             };
             // A value that cannot hold a borrow holds none: `self.emit(self.dicts[j])` copies
-            // the index out, and nothing of `self.dicts` stays lent across the call (§4.2).
+            // the index out, and nothing of `self.dicts` stays lent across the call (§4.2). Lent,
+            // it is still borrowed.
             let mut v = v;
             if !self.may_hold(&at) {
-                v.loans.clear();
+                v.loans.retain(|l| Some(*l) == lend);
             }
             self.next_role = Role::Plain;
             if let Some((_, p)) = params.get(i) {
@@ -1786,7 +1967,9 @@ impl<'p> Own<'p> {
             self.lambda_params.insert(id);
             param_ids.push(id);
         }
+        let mark = self.made.len();
         let result = self.contained(|o| o.expr(body, Use::Move));
+        self.end_temps(mark, Some(body), body.span.end, &result, "is dropped when the closure returns");
         // A closure's result may borrow a parameter that is itself a borrow, never one it owns,
         // which it drops when it returns (§4.2).
         if !self.collecting
@@ -1971,7 +2154,7 @@ impl<'p> Own<'p> {
             } else if self.vars[root].param {
                 format!("the result borrows `{name}`, but `{name}` is not one of the result's sources (add it with `from`)")
             } else {
-                format!("the result borrows `{name}`, which does not outlive this function")
+                format!("the result borrows {}, which does not outlive this function", self.shown_root(root))
             };
             self.err(span, msg);
         }
@@ -2007,7 +2190,7 @@ impl Own<'_> {
     }
 
     /// The arms of a `match` whose scrutinee's value is `sv`, none of which moves it.
-    fn match_arms(&mut self, arms: &[ast::MatchArm], sv: Val, how: Use) -> Val {
+    fn match_arms(&mut self, arms: &[ast::MatchArm], sv: Val, how: Use, whole: &Ty) -> Val {
         self.enter(Node::Branch, 0);
         let before = self.state.clone();
         let mut joined: Option<State> = None;
@@ -2020,6 +2203,7 @@ impl Own<'_> {
             if let Some(g) = &arm.guard {
                 self.guard(g, &arm.pat);
             }
+            let how = self.part_use(whole, &arm.body, how);
             let v = self.expr(&arm.body, how);
             out.extend(v.loans);
             if let Some(scope) = self.scopes.pop() {

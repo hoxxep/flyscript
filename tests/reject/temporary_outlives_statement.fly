@@ -1,0 +1,9 @@
+// error: `name` borrows a temporary here, which is dropped at the end of its statement, and `name` is used after that: give `name` an owned type, or bind the value with `const` first
+// A value made only to be lent is dropped when the statement it is made in ends (§5.6): a binding
+// assigned a borrow of it would outlive it.
+import { println } from "std/io";
+export function main(): void uses Io {
+  let name: str = "";
+  name = `user ${7}`;
+  println(name);
+}

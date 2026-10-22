@@ -16,10 +16,10 @@ export function main(): void uses Io {
     println(`${m}`);
   }
   let n = 0;
-  let seen = "";
+  let seen = String.new();
   while (let #Some(x) = below(n, 2)) {
     x += 10;
-    seen = if (seen == "") { `${x}` } else { `${seen} ${x}` };
+    seen = if (seen.len() == 0) { `${x}` } else { `${seen} ${x}` };
     n += 1;
   }
   println(seen);

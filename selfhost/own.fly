@@ -42,6 +42,8 @@ struct Var {
   // Where it was declared, for the loop rule.
   chain: Chain;
   param: bool;
+  // A value lent with no place of its own (§5.6), which has no name to report.
+  temp: bool;
 }
 impl Clone for Var;
 
@@ -156,6 +158,11 @@ export view struct Own {
   temps: Vec<Vec<usize>>;
   // Loans held by `defer`s, live to the end of their block (§5.6).
   deferred: Vec<Vec<usize>>;
+  // The temporaries made by the statements being checked, innermost last: each ends with its
+  // statement (§5.6).
+  made: Vec<usize>;
+  // The type the value of the block about to be checked is wanted as.
+  want: Option<Ty>;
   reported: HashSet<String>;
   // Closures being checked, innermost last.
   lambdas: Vec<Frame>;
@@ -230,7 +237,7 @@ export function checkOwnership(p: mut Program, fid: usize): void {
   let o = Own {
     p, module, typed, vars: Vec.new(), scopes: [HashMap.new()], useSites: HashMap.new(), resolved: HashMap.new(),
     loans: Vec.new(), state: emptyState(), chain: Vec.new(), nextNode: 0, temps: Vec.new(), deferred: Vec.new(),
-    reported: HashSet.new(), lambdas: Vec.new(), escaping: false, resumes: HashMap.new(), contArgs: HashMap.new(),
+    made: Vec.new(), want: #None, reported: HashSet.new(), lambdas: Vec.new(), escaping: false, resumes: HashMap.new(), contArgs: HashMap.new(),
     deadArgs: HashMap.new(), lentArgs: HashMap.new(), lambdaParams: HashSet.new(), iterating: false,
     nextRole: #Plain, roles: Vec.new(), taskMoved: HashMap.new(), moveSites: Vec.new(), lendingElement: false, dyingHolds: HashMap.new(), handling: Vec.new(),
     sites: HashMap.new(), bySite: HashMap.new(), retTy, sources, sendParams, collecting: true,
@@ -247,6 +254,7 @@ export function checkOwnership(p: mut Program, fid: usize): void {
     o.nextNode = 0;
     o.temps = Vec.new();
     o.deferred = Vec.new();
+    o.made = Vec.new();
     const params = o.typed.params.clone();
     for (const [i, [name, ty]] of params.iter().enumerate()) {
       const id = o.declareVar(name.asStr(), ty.clone(), true, true, PARAM_SITES - i);
@@ -328,7 +336,7 @@ impl Own {
   }
 
   function declareVar(self: mut Self, name: str, ty: Ty, mutable: bool, param: bool, site: usize): usize {
-    const v = Var { name: name.toString(), ty, mutable, chain: self.chain.clone(), param };
+    const v = Var { name: name.toString(), ty, mutable, chain: self.chain.clone(), param, temp: false };
     const key = `${site}:${name}`;
     const id: usize = match (self.sites.get(key.asStr())) {
       #Some(i) => {
@@ -423,6 +431,10 @@ impl Own {
       const loan = self.loans[l].clone();
       if (loan.external || !loan.path.overlaps(path)) { continue; }
       if (loan.mutable || write) {
+        if (self.vars[path.root].temp) {
+          self.err(at, "this pass through the loop makes this value again, dropping the one made on an earlier pass, which is still borrowed: bind it with `const` before the loop");
+          return;
+        }
         const name = self.pathName(path);
         const how = if (loan.mutable) { "lent `mut`" } else { "lent `readonly`" };
         const what = if (write) { "changed" } else { "used" };
@@ -707,6 +719,7 @@ impl Own {
   // ---- statements and blocks ----
 
   function block(self: mut Self, b: readonly Block, how: Use): Val {
+    const want = self.want.take();
     self.scopes.push(HashMap.new());
     self.enter(#Seq, 0);
     const deferredDepth = self.deferred.len();
@@ -715,6 +728,7 @@ impl Own {
     for (const stmt of b.stmts) {
       child += 1;
       self.setChild(child);
+      const mark = self.made.len();
       match (stmt) {
         #Let { mutable, pat, ty: _, init, span: _ } => {
           // A binding of a borrow type borrows its initializer; otherwise it takes it.
@@ -744,11 +758,33 @@ impl Own {
         }
         #Expr(e) => { self.expr(e, #Move); }
       }
+      // The statement's temporaries end with it, unless what it binds may hold them: then they
+      // end with the block, as the binding does (§5.6).
+      match (stmt) {
+        #Let { mutable: _, pat, ty: _, init, span } => {
+          if (self.p.class(self.boundTy(pat, init)) == 2) {
+            const top = self.scopes.len() - 1;
+            while (self.made.len() > mark) {
+              const t = match (self.made.pop()) { #Some(t) => t, #None => break };
+              self.scopes[top].insert(` temporary ${t}`, t);
+            }
+          } else {
+            self.endTemps(mark, #None, span.end, { loans: Vec.new() }, "is dropped at the end of its statement");
+          }
+        }
+        #Defer(e) | #Expr(e) => self.endTemps(mark, #None, e.span.end, { loans: Vec.new() }, "is dropped at the end of its statement"),
+      }
     }
     child += 1;
     self.setChild(child);
     self.escaping = escaping;
-    const v: Val = match (b.tail) { #Some(e) => self.expr(e, how), #None => ({ loans: Vec.new() }) };
+    const v: Val = match (b.tail) {
+      #Some(e) => {
+        const use = match (want) { #Some(w) => self.partUse(w, e, how), #None => how };
+        self.expr(e, use)
+      }
+      #None => ({ loans: Vec.new() }),
+    };
     self.deferred.truncate(deferredDepth);
     self.leave();
     // Bindings going out of scope release what they hold, and must not be borrowed by anything
@@ -787,10 +823,10 @@ impl Own {
         const found = v.loans.iter().find((l) => !self.loans[l].external && dying.has(self.loans[l].path.root));
         if (const #Some(l) = found) {
           const root = self.loans[l].path.root;
-          const name = self.vars[root].name.clone();
+          const name = self.shownRoot(root);
           const msg: String = match (self.lentArgs.get(root)) {
-            #Some(op) => `this value borrows \`${name}\`, which the code that performed \`${op}\` lent only to this arm`,
-            #None => `this value borrows \`${name}\`, which ${ends}`,
+            #Some(op) => `this value borrows ${name}, which the code that performed \`${op}\` lent only to this arm`,
+            #None => `this value borrows ${name}, which ${ends}`,
           };
           self.err(tail.span, msg.asStr());
         }
@@ -820,9 +856,14 @@ impl Own {
       const found = ls.iter().find((l) => !self.loans[l].external && dying.has(self.loans[l].path.root));
       if (const #Some(l) = found && self.liveAfter(h, end)) {
         const loan = self.loans[l].clone();
-        const name = self.vars[loan.path.root].name.clone();
         const holder = self.vars[h].name.clone();
-        self.err(loan.span, `\`${holder}\` borrows \`${name}\` here, and is used after \`${name}\` goes out of scope`.asStr());
+        const msg = if (self.vars[loan.path.root].temp) {
+          `\`${holder}\` borrows a temporary here, which ${ends}, and \`${holder}\` is used after that: give \`${holder}\` an owned type, or bind the value with \`const\` first`
+        } else {
+          const name = self.vars[loan.path.root].name.clone();
+          `\`${holder}\` borrows \`${name}\` here, and is used after \`${name}\` goes out of scope`
+        };
+        self.err(loan.span, msg.asStr());
       }
     }
   }
@@ -884,6 +925,103 @@ impl Own {
       _ => false,
     };
     if (!passesEscape && self.escaping) { return self.contained(e, how); }
+    if (how != #Move && self.lendsTemporary(e)) {
+      const v = self.value(e, how);
+      return self.temporary(e, v, how);
+    }
+    self.value(e, how)
+  }
+
+  // Whether lending `e` lends a temporary: a value with no place of its own, not a borrow already
+  // (§5.6).
+  function lendsTemporary(self: readonly Self, e: readonly Expr): bool {
+    const fresh = match (e.kind) {
+      #Ident(_) | #Field { target: _ } | #FieldAt { target: _ } | #TagAt { name: _ } | #Index { target: _ } | #BorrowMut(_)
+        | #Str(_) | #TypeRef(_) | #Return(_) | #Throw(_) | #Break | #Continue | #Comptime(_) => false,
+      _ => true,
+    };
+    fresh && match (self.tyOf(e)) { #Borrow(_, _) | #Slice(_) | #Prim(#Str) | #Prim(#Void) | #Prim(#Never) | #Error => false, _ => true }
+  }
+
+  // A value lent with no place of its own: a binding with no name, lent, which ends with the
+  // statement it is made in, unless what a `let` binds may hold it (§5.6).
+  function temporary(self: mut Self, e: readonly Expr, v: Val, how: Use): Val {
+    const ty = self.tyOf(e);
+    const key = `${e.span.start}: temporary ${e.span.end}`;
+    const id: usize = match (self.sites.get(key.asStr())) {
+      #Some(i) => i,
+      #None => {
+        self.vars.push(Var { name: "a temporary".toString(), ty: #Error, mutable: true, chain: Vec.new(), param: false, temp: true });
+        const i = self.vars.len() - 1;
+        self.sites.insert(key, i);
+        i
+      }
+    };
+    // Made again by a later pass through a loop, it replaces the one made before.
+    const path = Path { root: id, fields: Vec.new() };
+    const none: Vec<usize> = Vec.new();
+    self.access(path, true, e.span, none);
+    self.vars[id] = Var { name: "a temporary".toString(), ty: ty.clone(), mutable: true, chain: self.chain.clone(), param: false, temp: true };
+    self.state.moved.retain((p) => p.root != id);
+    if (self.mayHold(ty)) { self.state.holds.insert(id, v.loans.clone()); } else { self.state.holds.remove(id); }
+    self.made.push(id);
+    const l = self.newLoan(path, how == #Mut, e.span);
+    let loans = v.loans;
+    addLoan(mut loans, l);
+    ({ loans })
+  }
+
+  // The temporaries made since `mark` end at `end`: nothing may still borrow them, nor the value
+  // `tail` gives, `v` (§5.6).
+  function endTemps(self: mut Self, mark: usize, tail: Option<Expr>, end: usize, v: readonly Val, ends: str): void {
+    if (self.made.len() <= mark) { return; }
+    self.dyingHolds = HashMap.new();
+    let dying: HashSet<usize> = HashSet.new();
+    while (self.made.len() > mark) {
+      const t = match (self.made.pop()) { #Some(t) => t, #None => break };
+      dying.insert(t);
+      if (const #Some(ls) = self.state.holds.remove(t)) { self.dyingHolds.insert(t, ls); }
+    }
+    self.checkOutlivesAt(dying, tail, end, v, ends);
+    // Reported if anything still borrows them, they are gone.
+    let holders: Vec<usize> = Vec.new();
+    for (const [h, _] of self.state.holds.entries()) { holders.push(h); }
+    for (const h of holders) {
+      let ls = match (self.state.holds.get(h)) { #Some(x) => x.clone(), #None => continue };
+      ls.retain((l) => !dying.has(self.loans[l].path.root));
+      self.state.holds.insert(h, ls);
+    }
+  }
+
+  // The name of what a loan is on, for a diagnostic.
+  function shownRoot(self: readonly Self, root: usize): String {
+    if (self.vars[root].temp) { self.vars[root].name.clone() } else { `\`${self.vars[root].name}\`` }
+  }
+
+  // What a `let` binds: a name's declared type, or the value a pattern takes apart.
+  function boundTy(self: readonly Self, pat: readonly Pattern, init: readonly Expr): Ty {
+    match (pat.kind) {
+      #Bind(_) => match (self.typed.bindings.get(pat.id)) { #Some(t) => t.clone(), #None => self.tyOf(init) },
+      _ => self.tyOf(init),
+    }
+  }
+
+  // A block whose value is the value of `whole`, a branch or a body of it.
+  function blockAs(self: mut Self, b: readonly Block, how: Use, whole: readonly Expr): Val {
+    self.want = #Some(self.tyOf(whole));
+    self.block(b, how)
+  }
+
+  // How a part whose value is the value of a whole of type `whole` — a branch's, an arm's, a
+  // block's — is used: an owned value where the whole is a borrow is lent, in a temporary.
+  function partUse(self: readonly Self, whole: readonly Ty, part: readonly Expr, how: Use): Use {
+    const pt = self.tyOf(part);
+    const ends = match (pt) { #Prim(#Void) | #Prim(#Never) | #Error => true, _ => false };
+    if (how != #Move || !lendsTy(whole) || lendsTy(pt) || ends) { return how; }
+    match (whole) { #Borrow(true, _) => #Mut, _ => #Read }
+  }
+
+  function value(self: mut Self, e: readonly Expr, how: Use): Val {
     match (e.kind) {
       #TypeRef(_) | #FieldAt { target: _ } | #TagAt { name: _ } => ({ loans: Vec.new() }),
       #Ident(name) => {
@@ -963,15 +1101,21 @@ impl Own {
         v
       }
       #Lambda { params, body } => self.lambda(e, params, body),
-      #Block(b) => self.block(b, how),
+      #Block(b) => self.blockAs(b, how, e),
       #If { cond, then, otherwise } => {
         self.contained(cond, #Read);
         self.enter(#Branch, 0);
         const before = self.state.clone();
-        const a = self.block(then, how);
+        const a = self.blockAs(then, how, e);
         const afterThen = replace(mut self.state, before);
         self.setChild(1);
-        const b: Val = match (otherwise) { #Some(o) => self.expr(o, how), #None => ({ loans: Vec.new() }) };
+        const b: Val = match (otherwise) {
+          #Some(o) => {
+            const use = self.partUse(self.tyOf(e), o, how);
+            self.expr(o, use)
+          }
+          #None => ({ loans: Vec.new() }),
+        };
         // A branch that never finishes (it throws, returns, breaks) does not meet the other.
         const elseDiverges = match (otherwise) { #Some(o) => diverges(o), #None => false };
         if (elseDiverges && !blockDiverges(then)) {
@@ -987,19 +1131,21 @@ impl Own {
         // Twice: the second iteration sees what the first left behind (§4.1).
         for (const _ of 0..2) {
           const before = self.state.clone();
+          const mark = self.made.len();
           self.expr(cond, #Read);
           self.block(body, #Move);
+          self.endTemps(mark, #None, body.span.end, { loans: Vec.new() }, "is dropped at the end of each pass through the loop");
           self.state.join(before);
         }
         self.leave();
         { loans: Vec.new() }
       }
       #For { mutable: _, pat, iter, body } => self.forOf(pat, iter, body),
-      #Match { scrutinee, arms } => self.matchExpr(scrutinee, arms, how),
+      #Match { scrutinee, arms } => self.matchExpr(scrutinee, arms, how, self.tyOf(e)),
       #Try { body, pat, handler } => {
         self.enter(#Branch, 0);
         const before = self.state.clone();
-        const a = self.block(body, how);
+        const a = self.blockAs(body, how, e);
         const afterBody = replace(mut self.state, before);
         // The catch arm runs after the body unwound: its borrows are released (§5.2), but its
         // moves may have happened.
@@ -1007,7 +1153,7 @@ impl Own {
         self.setChild(1);
         self.scopes.push(HashMap.new());
         self.bindPattern(pat, { loans: Vec.new() }, false);
-        const b = self.block(handler, how);
+        const b = self.blockAs(handler, how, e);
         self.scopes.pop();
         self.state.join(afterBody);
         self.leave();
@@ -1034,12 +1180,12 @@ impl Own {
         { loans: Vec.new() }
       }
       #Break | #Continue => ({ loans: Vec.new() }),
-      #Region { name: _, body } => self.block(body, how),
+      #Region { name: _, body } => self.blockAs(body, how, e),
       // The one thing `unsafe` vouches for in ownership: an operation's arguments may leave their
       // arm, because the code around keeps the continuation they borrow from from being resumed
       // while they live (§5.5's `generate`).
       #Unsafe(body) => {
-        let v = self.block(body, how);
+        let v = self.blockAs(body, how, e);
         v.loans.retain((l) => !self.lentArgs.has(self.loans[l].path.root));
         v
       }
@@ -1050,9 +1196,11 @@ impl Own {
 
   function assign(self: mut Self, e: readonly Expr, op: str, target: readonly Expr, value: readonly Expr): Val {
     // Into a place that is not a borrow, a borrow is read, not moved. A binding that holds a `mut`
-    // borrow is assigned through: the place is what it refers to.
+    // borrow is assigned through: the place is what it refers to; so is a field that holds one,
+    // given a value rather than another borrow.
+    const through = match (target.kind) { #Ident(_) => true, _ => !isBorrow(self.tyOf(value)) };
     const placeTy: Ty = match (self.tyOf(target)) {
-      #Borrow(true, inner) => match (target.kind) { #Ident(_) => inner.get().clone(), _ => #Borrow(true, inner.clone()) },
+      #Borrow(true, inner) => if (through) { inner.get().clone() } else { #Borrow(true, inner.clone()) },
       t => t,
     };
     const use = self.argUse(placeTy, self.tyOf(value));
@@ -1114,16 +1262,20 @@ impl Own {
     // A generator's items borrow what it holds, never the generator itself: they are results of
     // its producer (§5.5). A collection's elements borrow the collection.
     if (self.isGen(self.tyOf(iter))) {
-      if (const #Some(p) = self.place(iter)) {
-        iv.loans.retain((l) => l < firstLoan || self.loans[l].path != p);
-      }
+      const p = self.place(iter);
+      iv.loans.retain((l) => {
+        const itself = #Some(self.loans[l].path.clone()) == p || self.vars[self.loans[l].path.root].temp && self.loans[l].span == iter.span;
+        l < firstLoan || !itself
+      });
     }
     self.enter(#Loop, 0);
     for (const _ of 0..2) {
       const before = self.state.clone();
       self.scopes.push(HashMap.new());
       self.bindPattern(pat, iv, false);
+      const mark = self.made.len();
       self.block(body, #Move);
+      self.endTemps(mark, #None, body.span.end, { loans: Vec.new() }, "is dropped at the end of each pass through the loop");
       // The loop variables end with the iteration, and release what they held.
       if (const #Some(scope) = self.scopes.pop()) {
         for (const [_, var] of scope.entries()) { self.state.holds.remove(var); }
@@ -1135,7 +1287,7 @@ impl Own {
     { loans: Vec.new() }
   }
 
-  function matchExpr(self: mut Self, scrutinee: readonly Expr, arms: readonly Vec<MatchArm>, how: Use): Val {
+  function matchExpr(self: mut Self, scrutinee: readonly Expr, arms: readonly Vec<MatchArm>, how: Use, whole: Ty): Val {
     // A place that cannot be moved from is matched through a borrow of it: its parts bind as
     // borrows (§4.1).
     const lent: Option<bool> = match (self.typed.lentScrutinees.get(scrutinee.id)) { #Some(m) => #Some(m), #None => #None };
@@ -1144,13 +1296,13 @@ impl Own {
       // is all the others need, and the code around may read it too.
       const m = m0 && arms.iter().some((a) => self.armChanges(a));
       const sv = self.contained(scrutinee, if (m) { #Mut } else { #Read });
-      return self.matchArms(arms, sv, how);
+      return self.matchArms(arms, sv, how, whole);
     }
     // A borrow matched is lent on, `mut` only if an arm changes what it binds.
     if (const #Borrow(m0, _) = self.tyOf(scrutinee)) {
       const m = m0 && arms.iter().some((a) => self.armChanges(a));
       const sv = self.contained(scrutinee, if (m) { #Mut } else { #Read });
-      return self.matchArms(arms, sv, how);
+      return self.matchArms(arms, sv, how, whole);
     }
     // A place matched is moved only by the arms that move an owned part they bind; the others
     // borrow it, and it may still be used after them (§4.1).
@@ -1214,7 +1366,8 @@ impl Own {
         }
       }
       if (const #Some(g) = arm.guard) { self.guard(g, arm.pat); }
-      const v = self.expr(arm.body, how);
+      const use = self.partUse(whole, arm.body, how);
+      const v = self.expr(arm.body, use);
       // An arm that takes the place owns what it binds and drops it when it ends.
       if (takes) {
         let dying: HashSet<usize> = HashSet.new();
@@ -1253,7 +1406,7 @@ impl Own {
   }
 
   // The arms of a `match` whose scrutinee's value is `sv`, none of which moves it.
-  function matchArms(self: mut Self, arms: readonly Vec<MatchArm>, sv: Val, how: Use): Val {
+  function matchArms(self: mut Self, arms: readonly Vec<MatchArm>, sv: Val, how: Use, whole: readonly Ty): Val {
     self.enter(#Branch, 0);
     const before = self.state.clone();
     let joined: Option<State> = #None;
@@ -1264,7 +1417,8 @@ impl Own {
       self.scopes.push(HashMap.new());
       self.bindPattern(arm.pat, sv, false);
       if (const #Some(g) = arm.guard) { self.guard(g, arm.pat); }
-      const v = self.expr(arm.body, how);
+      const use = self.partUse(whole, arm.body, how);
+      const v = self.expr(arm.body, use);
       addLoans(mut out, v.loans);
       if (const #Some(scope) = self.scopes.pop()) {
         for (const [_, var] of scope.entries()) { self.state.holds.remove(var); }
@@ -1452,7 +1606,9 @@ impl Own {
     }
     const handled: Option<usize> = match (self.typed.handled.get(e.id)) { #Some(d) => #Some(d), #None => #None };
     if (const #Some(d) = handled) { self.handling.push([d, Vec.new()]); }
-    const v = self.block(body, how);
+    const mark = self.made.len();
+    const v = self.blockAs(body, how, e);
+    self.endTemps(mark, blockTail(body), body.span.end, v, "is dropped when the `handle`'s body ends");
     const across: Vec<usize> = if (handled.isSome()) {
       match (self.handling.pop()) { #Some([_, f]) => f, #None => Vec.new() }
     } else { Vec.new() };
@@ -1484,7 +1640,9 @@ impl Own {
         self.contArgs.insert(id, lent);
       }
       // What an arm gives back is the `handle` expression's value.
-      const av = self.block(arm.body, how);
+      const armMark = self.made.len();
+      const av = self.blockAs(arm.body, how, e);
+      self.endTemps(armMark, blockTail(arm.body), arm.body.span.end, av, "is dropped when the arm ends");
       addLoans(mut loans, av.loans);
       if (const #Some(scope) = self.scopes.pop()) {
         let dying: HashSet<usize> = HashSet.new();
@@ -1699,6 +1857,8 @@ impl Own {
       const staged: Option<Path> = if (use == #Mut) {
         match (self.place(target)) { #Some(p) => if (self.captured(p.root)) { #None } else { #Some(p) }, #None => #None }
       } else { #None };
+      // The loan that lends the argument itself, on its place or on the temporary it is in.
+      let lend: Option<usize> = #None;
       let v: Val = match (staged) {
         #Some(path) => {
           const firstLoan = self.loans.len();
@@ -1709,6 +1869,7 @@ impl Own {
             if (self.loans[l].path == path) {
               mutArgs.push([l, path.clone(), target.span, match (target.kind) { #Index { target: _, index: _ } => true, _ => false }]);
               addLoan(mut lentHere, l);
+              lend = #Some(l);
               break;
             }
           }
@@ -1717,16 +1878,29 @@ impl Own {
         #None => {
           const before = self.loans.len();
           const x = self.expr(a, use);
-          if (use == #Read) {
-            if (const #Some(path) = self.place(target)) {
-              for (const l of before..self.loans.len()) { if (self.loans[l].path == path) { addLoan(mut lentHere, l); } }
+          if (use != #Move) {
+            const path = self.place(target);
+            if (use == #Read) {
+              if (const #Some(p) = path) {
+                for (const l of before..self.loans.len()) { if (self.loans[l].path == p) { addLoan(mut lentHere, l); } }
+              }
+            }
+            let l = self.loans.len();
+            while (l > before) {
+              l -= 1;
+              const loan = self.loans[l].clone();
+              if (#Some(loan.path.clone()) == path || self.vars[loan.path.root].temp && loan.path.fields.len() == 0) {
+                lend = #Some(l);
+                addLoan(mut lentHere, l);
+                break;
+              }
             }
           }
           x
         }
       };
-      // A value that cannot hold a borrow holds none (§4.2).
-      if (!self.mayHold(at)) { v.loans = Vec.new(); }
+      // A value that cannot hold a borrow holds none (§4.2). Lent, it is still borrowed.
+      if (!self.mayHold(at)) { v.loans.retain((l) => #Some(l) == lend); }
       self.nextRole = #Plain;
       if (const #Some([_, p]) = params.get(i)) {
         const pt = p.clone();
@@ -1921,7 +2095,9 @@ impl Own {
       self.lambdaParams.insert(id);
       paramIds.push(id);
     }
+    const mark = self.made.len();
     const result = self.contained(body, #Move);
+    self.endTemps(mark, #Some(body.clone()), body.span.end, result, "is dropped when the closure returns");
     // A closure's result may borrow a parameter that is itself a borrow, never one it owns, which
     // it drops when it returns (§4.2).
     if (!self.collecting) {
@@ -2085,7 +2261,7 @@ impl Own {
       } else if (param) {
         `the result borrows \`${name}\`, but \`${name}\` is not one of the result's sources (add it with \`from\`)`
       } else {
-        `the result borrows \`${name}\`, which does not outlive this function`
+        `the result borrows ${self.shownRoot(root)}, which does not outlive this function`
       };
       self.err(span, msg.asStr());
     }
@@ -2106,6 +2282,13 @@ function stripBorrow(t: readonly Ty): Ty {
 }
 
 function isBorrow(t: readonly Ty): bool { match (t) { #Borrow(_, _) => true, _ => false } }
+
+function blockTail(b: readonly Block): Option<Expr> {
+  match (b.tail) { #Some(t) => #Some(t.get().clone()), #None => #None }
+}
+
+// Whether a value of the type is a borrow: an owned one where it is wanted is lent.
+function lendsTy(t: readonly Ty): bool { match (t) { #Borrow(_, _) | #Slice(_) | #Prim(#Str) => true, _ => false } }
 
 // A `readonly` borrow, a slice or a `str`: what is passed on by copying it with what it holds.
 function isShared(t: readonly Ty): bool {

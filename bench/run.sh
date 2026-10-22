@@ -25,7 +25,7 @@ all="binary_trees fannkuch nbody spectral_norm wordfreq"
 [ $# -gt 0 ] && all="$*"
 
 results="$out/results.md"
-printf '| Benchmark | Flyscript (C) | Flyscript (LLVM) | Flyscript (JS) | C | Rust | Go | JavaScript |\n| :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n' > "$results"
+rows=""
 
 for b in $all; do
   n=$(size "$b")
@@ -44,13 +44,10 @@ for b in $all; do
     # shellcheck disable=SC2086
     if ! $run | cmp -s - "$out/$b.expected"; then echo "$run prints something else" >&2; exit 1; fi
   done
+  rows="$rows $b=$n"
   hyperfine -N --warmup 1 --runs "$runs" --export-json "$out/$b.json" \
     -n fly-c "$out/$b.fly-c $n" -n fly-llvm "$out/$b.fly-llvm $n" -n fly-js "node $out/$b.fly.js $n" \
     -n c "$out/$b.c $n" -n rust "$out/$b.rs $n" -n go "$out/$b.go $n" -n js "node $here/js/$b.js $n" > /dev/null
-  node -e '
-    const r = require(process.argv[1]).results, t = (n) => r.find((x) => x.command === n);
-    const ms = (n) => { const x = t(n); return `${(x.mean * 1000).toFixed(0)} ms ± ${(x.stddev * 1000).toFixed(0)}`; };
-    console.log(`| ${process.argv[2]} (${process.argv[3]}) | ${["fly-c", "fly-llvm", "fly-js", "c", "rust", "go", "js"].map(ms).join(" | ")} |`);
-  ' "$out/$b.json" "$b" "$n" | tee -a "$results"
 done
-echo "results in $results"
+# shellcheck disable=SC2086
+node "$here/table.js" $rows | tee "$results"

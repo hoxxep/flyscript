@@ -1,0 +1,20 @@
+// expect: 1.414213562
+// expect: 0.667
+// expect: 2.5 3.0 -3.0 2.0 3.0 2.0
+// expect: 2.71828 2.3026 1024.0 1.0 0.785398 3.0 4.0
+// expect: 1.414213538
+// expect: 0.12 0.38 2.00
+// Float arithmetic as <math.h> has it, and numbers written with a fixed number of digits: a value
+// exactly halfway, as 0.125 is to two digits, rounded to the even one.
+import { println } from "std/io";
+
+export function main(): void uses Io {
+  const x = 2.0;
+  println(x.sqrt().toFixed(9));
+  println((2.0 / 3.0).toFixed(3));
+  println(`${(-2.5).abs()} ${(2.5).round()} ${(-2.5).round()} ${(2.7).floor()} ${(2.2).ceil()} ${(2.9).trunc()}`);
+  println(`${(1.0).exp().toFixed(5)} ${(10.0).ln().toFixed(4)} ${(2.0).pow(10.0)} ${(0.0).cos()} ${(1.0).atan2(1.0).toFixed(6)} ${(3.0).min(4.0)} ${(3.0).max(4.0)}`);
+  const y: f32 = 2.0;
+  println(y.sqrt().toFixed(9));
+  println(`${(0.125).toFixed(2)} ${(0.375).toFixed(2)} ${(1.995).toFixed(2)}`);
+}

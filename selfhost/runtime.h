@@ -106,6 +106,11 @@ _Noreturn void fly_panicf(const char* fmt, ...);
 
 _Noreturn void fly_overflow(fly_i128 value, const char* type);
 #define FLY_CHECK(T, NAME, LO, HI, X) ({ fly_i128 fly_v_ = (X); if (fly_v_ < (fly_i128)(LO) || fly_v_ > (fly_i128)(HI)) fly_overflow(fly_v_, NAME); (T)fly_v_; })
+// Checked arithmetic at the type's own width: the builtins compute the exact result and say whether
+// a `T` holds it. Only when it does not is the result made again, in 128 bits, for the message.
+#define FLY_ADD(T, NAME, X, Y) ({ T fly_r_; if (__builtin_add_overflow((X), (Y), &fly_r_)) fly_overflow(fly_add128((fly_i128)(X), (fly_i128)(Y)), NAME); fly_r_; })
+#define FLY_SUB(T, NAME, X, Y) ({ T fly_r_; if (__builtin_sub_overflow((X), (Y), &fly_r_)) fly_overflow(fly_sub128((fly_i128)(X), (fly_i128)(Y)), NAME); fly_r_; })
+#define FLY_MUL(T, NAME, X, Y) ({ T fly_r_; if (__builtin_mul_overflow((X), (Y), &fly_r_)) fly_overflow(fly_mul128((fly_i128)(X), (fly_i128)(Y)), NAME); fly_r_; })
 fly_i128 fly_add128(fly_i128 a, fly_i128 b);
 fly_i128 fly_sub128(fly_i128 a, fly_i128 b);
 fly_i128 fly_mul128(fly_i128 a, fly_i128 b);
@@ -129,6 +134,7 @@ fly_str fly_str_slice(fly_str s, size_t lo, size_t hi);
 fly_String fly_show_i128(fly_i128 v);
 fly_String fly_show_u128(unsigned __int128 v);
 fly_String fly_show_f64(double v);
+fly_String fly_float_fixed(double v, uint32_t digits);
 fly_String fly_show_bool(bool v);
 void fly_println(fly_str s);
 void fly_eprintln(fly_str s);

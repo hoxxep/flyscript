@@ -1,0 +1,8 @@
+// error: `get` performs `Ask`, which `Get`'s `get` does not declare
+// Code that calls a method through its interface handles only what the interface's method
+// declares: an impl's method performs nothing more (§3.4).
+effect Ask { ask(): u32; }
+interface Get { function get(self: readonly Self): u32; }
+struct S { n: u32 }
+impl Get for S { function get(self: readonly Self): u32 uses Ask { Ask.ask() } }
+export function use<T extends Get>(t: readonly T): u32 { t.get() }

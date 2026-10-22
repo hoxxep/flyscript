@@ -49,6 +49,8 @@ In scope in every module without an import.
 
 ### 1.3 Numbers
 
+`f64` and `f32` have the arithmetic of C's `<math.h>`: `sqrt()`, `abs()`, `floor()`, `ceil()`, `round()` (halves away from zero), `trunc()`, `sin()`, `cos()`, `tan()`, `atan2(x)`, `exp()`, `ln()`, `pow(e)`, and `min(other)` and `max(other)`, which take the number when the other is `NaN`; and `toFixed(digits): String`, the number with `digits` digits after the point (at most 100), rounded to the nearest, a value exactly halfway to the even one: `(0.125).toFixed(2)` is `"0.12"`. An `f32`'s results are rounded to its precision.
+
 Every integer type has `wrappingAdd`, `wrappingSub` and `wrappingMul`, which wrap at the type's width where `+`, `-` and `*` panic. `parseInt(s): Option<i64>` and `parseFloat(s): Option<f64>` read decimal text as TypeScript's functions do, without `NaN`: an optional sign and digits (for a float, a fraction and an exponent too), and nothing else, not even spaces; `#None` otherwise, or for an integer that does not fit.
 
 ### 1.4 Strings

@@ -1,0 +1,45 @@
+// spectral-norm: the largest eigenvalue of an infinite matrix, by the power method; floating point
+// loops over arrays.
+import { println } from "std/io";
+
+function a(i: usize, j: usize): f64 { 1.0 / (((i + j) * (i + j + 1) / 2 + i + 1) as f64) }
+
+function mulAv(v: readonly Vec<f64>, av: mut Vec<f64>): void {
+  for (const i of 0..av.len()) {
+    let s = 0.0;
+    for (const j of 0..v.len()) { s += a(i, j) * v[j]; }
+    av[i] = s;
+  }
+}
+
+function mulAtv(v: readonly Vec<f64>, atv: mut Vec<f64>): void {
+  for (const i of 0..atv.len()) {
+    let s = 0.0;
+    for (const j of 0..v.len()) { s += a(j, i) * v[j]; }
+    atv[i] = s;
+  }
+}
+
+export function main(n: usize): void uses Io {
+  let u: Vec<f64> = Vec.new();
+  let v: Vec<f64> = Vec.new();
+  let tmp: Vec<f64> = Vec.new();
+  for (const _ of 0..n) {
+    u.push(1.0);
+    v.push(0.0);
+    tmp.push(0.0);
+  }
+  for (const _ of 0..10) {
+    mulAv(u, mut tmp);
+    mulAtv(tmp, mut v);
+    mulAv(v, mut tmp);
+    mulAtv(tmp, mut u);
+  }
+  let vBv = 0.0;
+  let vv = 0.0;
+  for (const i of 0..n) {
+    vBv += u[i] * v[i];
+    vv += v[i] * v[i];
+  }
+  println((vBv / vv).sqrt().toFixed(9));
+}

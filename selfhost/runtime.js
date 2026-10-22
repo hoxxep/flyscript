@@ -944,6 +944,45 @@ const { $rt, $b } = (() => {
     if (k.endsWith("$g") || $b[k + "$g"] !== undefined || f.constructor.name === "GeneratorFunction") continue;
     $b[k + "$g"] = function* (...args) { return f(...args); };
   }
+  // A float with `d` digits after the point, rounded to the nearest, and a value exactly halfway to
+  // the even one, as C's printf does; JavaScript's toFixed rounds those up. Whether it is halfway is
+  // found exactly: the float is m·2^e, and halfway when 2·x·10^d is an odd integer.
+  function fixed(x, d) {
+    d = Math.min(d, 100);
+    const s = x.toFixed(d);
+    if (!Number.isFinite(x) || x === 0) return s;
+    const bits = new DataView(new ArrayBuffer(8));
+    bits.setFloat64(0, Math.abs(x));
+    const hi = bits.getUint32(0), lo = bits.getUint32(4);
+    const exp = (hi >>> 20) & 0x7ff;
+    let m = (BigInt(hi & 0xfffff) << 32n) | BigInt(lo);
+    let e = exp - 1075;
+    if (exp === 0) e = -1074; else m |= 1n << 52n;
+    let t = m * 10n ** BigInt(d) * 2n;
+    if (e >= 0) return s;
+    const div = 1n << BigInt(-e);
+    if (t % div !== 0n) return s;
+    t /= div;
+    if (t % 2n === 0n) return s;
+    // Halfway between k and k + 1, in units of 10^-d: the even one.
+    const k = (t - 1n) / 2n;
+    const n = k % 2n === 0n ? k : k + 1n;
+    let digits = n.toString().padStart(d + 1, "0");
+    if (d > 0) digits = `${digits.slice(0, -d)}.${digits.slice(-d)}`;
+    return x < 0 ? `-${digits}` : digits;
+  }
+  // Floats, as JavaScript's Math has them; an `f32` rounded to its precision.
+  for (const [t, round] of [["f64", (x) => x], ["f32", Math.fround]]) {
+    const one = { sqrt: Math.sqrt, abs: Math.abs, floor: Math.floor, ceil: Math.ceil, trunc: Math.trunc, sin: Math.sin, cos: Math.cos, tan: Math.tan, exp: Math.exp, ln: Math.log };
+    for (const [k, f] of Object.entries(one)) $b[`${t}_${k}`] = (x) => round(f(x));
+    // Halves away from zero, as C's round.
+    $b[`${t}_round`] = (x) => round(Math.sign(x) * Math.round(Math.abs(x)));
+    $b[`${t}_atan2`] = (y, x) => round(Math.atan2(y, x));
+    $b[`${t}_pow`] = (x, e) => round(Math.pow(x, e));
+    $b[`${t}_min`] = (x, y) => (x !== x ? y : y !== y ? x : Math.min(x, y));
+    $b[`${t}_max`] = (x, y) => (x !== x ? y : y !== y ? x : Math.max(x, y));
+    $b[`${t}_toFixed`] = fixed;
+  }
   for (const t of Object.keys(NUMBERS)) {
     const wrap = wraps["wrap_" + t];
     $b[t + "_wrappingAdd"] = (a, b) => wrap(a + b);
@@ -1011,3 +1050,20 @@ const { $rt, $b } = (() => {
   };
   return { $rt, $b };
 })();
+
+// What compiled code does at each arithmetic operation on an integer that is a number, and at each
+// element of a list it reads or writes, as functions of the program's own: V8 inlines them where
+// they are called, each with type feedback of its own, which one function reached through `$rt`
+// pools for every caller.
+function $overflow(x, name) { $rt.panic(`arithmetic overflow: ${x} does not fit in \`${name}\``); }
+function $i8(x) { if (x < -128 || x > 127) $overflow(x, "i8"); return x; }
+function $i16(x) { if (x < -32768 || x > 32767) $overflow(x, "i16"); return x; }
+function $i32(x) { if (x < -2147483648 || x > 2147483647) $overflow(x, "i32"); return x; }
+function $isize(x) { if (x < -9007199254740991 || x > 9007199254740991) $overflow(x, "isize"); return x; }
+function $u8(x) { if (x < 0 || x > 255) $overflow(x, "u8"); return x; }
+function $u16(x) { if (x < 0 || x > 65535) $overflow(x, "u16"); return x; }
+function $u32(x) { if (x < 0 || x > 4294967295) $overflow(x, "u32"); return x; }
+function $usize(x) { if (x < 0 || x > 9007199254740991) $overflow(x, "usize"); return x; }
+function $oob(a, i) { $rt.panic(`index ${i} out of bounds (length ${a.length})`); }
+function $at(a, i) { if (i >= a.length) $oob(a, i); return i; }
+function $ix(a, i) { if (i >= a.length) $oob(a, i); return a[i]; }

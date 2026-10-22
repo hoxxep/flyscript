@@ -1,0 +1,6 @@
+// error: `drop` performs `Io`, which `Drop`'s `drop` does not declare
+// A destructor runs wherever a value is dropped, in code that may perform nothing: it performs
+// nothing itself (§5.6).
+import { println } from "std/io";
+struct Noisy { n: u32 }
+impl Drop for Noisy { function drop(self: mut Self): void uses Io { println("dropped"); } }

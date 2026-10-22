@@ -1,0 +1,24 @@
+// expect: 1 [5, 50]
+// expect: [6, 60]
+// A statement that fails drops its temporaries as the failure leaves it, before a `catch` runs
+// (§5.6); so does a statement a `break` leaves.
+import { println } from "std/io";
+
+view struct Noisy { log: mut Vec<u32>; n: u32 }
+impl Drop for Noisy { function drop(self: mut Self): void { self.log.push(self.n); } }
+
+function make(log: mut Vec<u32>, n: u32): Noisy from log { Noisy { log, n } }
+function refuse(x: readonly Noisy): u32 uses Fail<#No> { if (x.n > 0) { throw #No; } x.n }
+function size(x: readonly Noisy): u32 { x.n }
+
+export function main(): void uses Io {
+  let log: Vec<u32> = Vec.new();
+  const r = try { refuse(make(mut log, 5)); 0 } catch (_) { log.push(50); 1 };
+  println(`${r} ${log}`);
+  let other: Vec<u32> = Vec.new();
+  while (size(make(mut other, 6)) > 0) {
+    break;
+  }
+  other.push(60);
+  println(`${other}`);
+}

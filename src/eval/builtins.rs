@@ -579,6 +579,34 @@ impl Interp {
                 };
                 Ok(Value::Int(wrap_to(ty, r)))
             }
+            k if k.starts_with("f64.") || k.starts_with("f32.") => {
+                let (ty, op) = k.split_once('.').expect("a method key");
+                let x = a(0).as_float();
+                if op == "toFixed" {
+                    let digits = a(1).as_int() as usize;
+                    return Ok(Value::text(&format!("{x:.digits$}")));
+                }
+                let r = match op {
+                    "sqrt" => x.sqrt(),
+                    "abs" => x.abs(),
+                    "floor" => x.floor(),
+                    "ceil" => x.ceil(),
+                    "round" => x.round(),
+                    "trunc" => x.trunc(),
+                    "sin" => x.sin(),
+                    "cos" => x.cos(),
+                    "tan" => x.tan(),
+                    "exp" => x.exp(),
+                    "ln" => x.ln(),
+                    "atan2" => x.atan2(a(1).as_float()),
+                    "pow" => x.powf(a(1).as_float()),
+                    "min" => x.min(a(1).as_float()),
+                    "max" => x.max(a(1).as_float()),
+                    _ => return Err(panic(format!("no builtin `{k}`"))),
+                };
+                // An `f32` is an `f64` rounded to its precision.
+                Ok(Value::Float(if ty == "f32" { r as f32 as f64 } else { r }))
+            }
             "panic" => Err(panic(a(0).as_text().to_string())),
             "Ref.clone" | "Cell.clone" | "RegionList.clone" => Ok(a(0).deref_once()),
             "Ref.get" => Ok(a(0).deref()),

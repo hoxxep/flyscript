@@ -1,0 +1,17 @@
+// expect: [7, 8]
+// A view's `mut` field is the place it borrows: what is done through it is done to that place.
+import { println } from "std/io";
+
+view struct Logger { log: mut Vec<u32>; n: u32 }
+
+function note(l: mut Logger): void { l.log.push(l.n); }
+
+export function main(): void uses Io {
+  let log: Vec<u32> = Vec.new();
+  {
+    let x = Logger { log: mut log, n: 7 };
+    note(mut x);
+    x.log.push(8);
+  }
+  println(`${log}`);
+}

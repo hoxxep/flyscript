@@ -1,0 +1,5 @@
+// error: `get` does not match `Get`'s, which takes `(readonly S)` and gives `u32`
+// An impl's method takes what its interface's takes and gives what it gives (§3.4).
+interface Get { function get(self: readonly Self): u32; }
+struct S { n: u32 }
+impl Get for S { function get(self: readonly Self): u64 { 1 } }

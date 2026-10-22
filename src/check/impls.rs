@@ -379,7 +379,7 @@ pub fn spec_key(ct: &[(Sym, Ty)]) -> String {
     format!("{:?}", ct.iter().map(|(_, t)| erase_regions(t)).collect::<Vec<_>>())
 }
 
-fn erase_regions(t: &Ty) -> Ty {
+pub(super) fn erase_regions(t: &Ty) -> Ty {
     let arg = |a: &GArg| match a {
         GArg::Region(_) => GArg::Region(Region::Heap),
         GArg::Ty(t) => GArg::Ty(erase_regions(t)),

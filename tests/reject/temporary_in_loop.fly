@@ -1,0 +1,11 @@
+// error: `last` borrows a temporary here, which is dropped at the end of each pass through the loop, and `last` is used after that: give `last` an owned type, or bind the value with `const` first
+// A temporary made in a loop's body lives no longer than the pass that makes it (§5.6).
+import { println } from "std/io";
+function label(s: readonly String): str from s { s.asStr() }
+export function main(): void uses Io {
+  let last: str = "";
+  for (const i of 0..3) {
+    if (i > 0) { println(last); }
+    last = label(`item ${i}`)
+  }
+}

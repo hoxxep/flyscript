@@ -68,7 +68,9 @@ pub fn command_line(program: &Program, name: &str, args: &[String]) -> Result<Ve
         values.push(match t {
             Ty::Prim(p) if p.is_int() => Value::Int(a.parse().map_err(|_| format!("argument {} is not an integer", i + 1))?),
             Ty::Prim(p) if p.is_float() => Value::Float(a.parse().map_err(|_| format!("argument {} is not a number", i + 1))?),
-            _ => Value::text(a),
+            Ty::Prim(crate::check::types::Prim::Str) => Value::text(a),
+            Ty::Named(d, _) if program.known.get("String") == Some(d) => Value::text(a),
+            _ => return Err(format!("`{name}` takes the command line, whose arguments are integers, floats and strings: its parameter `{}` is none of them", params[i].0)),
         });
     }
     Ok(values)

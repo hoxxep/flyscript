@@ -179,6 +179,10 @@ pub struct Interp {
     /// The task this interpreter is running (0 is the program's first task).
     pub task: u64,
     pub memo: Arc<Memo>,
+    /// The temporaries lent by each statement under way, and by each body of code that runs apart
+    /// from the code around it, innermost last, with where each was made: each is dropped when its
+    /// statement ends, or when the same code makes the next (§5.6).
+    pub temps: Vec<Vec<(Value, Ty, Span)>>,
 }
 
 /// Facts about the program the interpreter derives once and keeps, rather than per call.
@@ -241,6 +245,7 @@ impl Interp {
             sched: super::sched::Sched::new(seed),
             task: 0,
             memo: Arc::default(),
+            temps: Vec::new(),
         }
     }
 
@@ -260,6 +265,7 @@ impl Interp {
             sched: self.sched.clone(),
             task: self.task,
             memo: self.memo.clone(),
+            temps: Vec::new(),
         }
     }
 
@@ -327,7 +333,8 @@ impl Interp {
                 define(&env, &p.name.name, a);
             }
         }
-        let r = self.block(body, &env);
+        // What the body's value lends of its temporaries lives until it is given back.
+        let r = self.home(|o| o.block(body, &env));
         // Parameters the body did not move are dropped as it returns (§5.6).
         let c = self.cleanup(&r, &env);
         let r = match (r, c) {
@@ -431,7 +438,7 @@ impl Interp {
                 let saved_lex = std::mem::replace(&mut self.lex, lex.clone());
                 let env = new_env(Some(env));
                 let r = match self.bind(&pat, &v, None, &env) {
-                    true => self.block(&body, &env),
+                    true => self.home(|o| o.block(&body, &env)),
                     false => Err(panic("loop pattern did not match")),
                 };
                 self.lex = saved_lex;
@@ -519,7 +526,7 @@ impl Interp {
         if let Some(k) = &arm.resumes {
             define(&aenv, &k.name, Value::Resume(id));
         }
-        let r = self.block(&arm.body.clone(), &aenv);
+        let r = self.home(|o| o.block(&arm.body.clone(), &aenv));
         self.lex = saved_lex;
         self.handlers.extend(saved_handlers);
         match r {
@@ -537,9 +544,15 @@ impl Interp {
         let mut defers: Vec<Expr> = Vec::new();
         let mut result = Ok(Value::Unit);
         for st in &b.stmts {
+            self.temps.push(Vec::new());
+            let at = env.lock().owned.len();
             let r = match st {
                 Stmt::Let { pat, init, .. } => match self.expr(init, &env) {
                     Ok(v) => {
+                        // A value bound as a borrow is lent: a temporary.
+                        if matches!(self.binding_ty(pat.span), Some(Ty::Borrow(..))) {
+                            self.lend_temp(&v, init)?;
+                        }
                         let v = self.coerce_binding(pat, v);
                         if self.bind(pat, &v, None, &env) { Ok(Value::Unit) } else { Err(panic("pattern did not match")) }
                     }
@@ -549,7 +562,38 @@ impl Interp {
                     defers.push(e.clone());
                     Ok(Value::Unit)
                 }
-                Stmt::Expr(e) => self.expr(e, &env),
+                // A value nothing takes is dropped where it is made.
+                Stmt::Expr(e) => match self.expr(e, &env) {
+                    Ok(v) if !matches!(v, Value::Ptr(_) | Value::Unit) && !is_place(e) => match self.ty_of(e.span).map(|t| self.concrete(&t)) {
+                        Some(t) if self.needs_drop(&t) => self.drop_value(v, &t, &[]).map(|()| Value::Unit),
+                        _ => Ok(v),
+                    },
+                    r => r,
+                },
+            };
+            // The statement's temporaries end with it, unless what it binds may hold them: then
+            // they are the block's, dropped just after the binding (§5.6).
+            let keeps = match st {
+                Stmt::Let { pat, init, .. } => {
+                    let bound = match &pat.kind {
+                        PatternKind::Bind(_) => self.binding_ty(pat.span),
+                        _ => self.ty_of(init.span),
+                    };
+                    bound.is_some_and(|t| self.prog.class(&self.concrete(&t)) == 2)
+                }
+                _ => false,
+            };
+            let r = if keeps {
+                let temps = self.temps.pop().unwrap_or_default();
+                let mut scope = env.lock();
+                for (k, (v, t, _)) in temps.into_iter().enumerate() {
+                    let name = format!("\0temporary {}", scope.vars.len());
+                    scope.vars.push((name.clone(), shared(v)));
+                    scope.owned.insert(at + k, (name, t));
+                }
+                r
+            } else {
+                self.end_temps(r)
             };
             if let Err(e) = r {
                 result = Err(e);
@@ -573,12 +617,13 @@ impl Interp {
             self.sched.cleaning(self.task, true);
         }
         for d in defers.iter().rev() {
-            if let Err(e) = self.expr(d, &env)
+            if let Err(e) = self.home(|o| o.expr(d, &env))
                 && result.is_ok() {
                     result = Err(e);
                 }
         }
-        // Then the block's owned bindings that were not moved out, newest first.
+        // Then the block's owned bindings that were not moved out, newest first, each just
+        // before the temporaries it held borrows of.
         if let Err(e) = self.drop_scope(&env)
             && result.is_ok() {
                 result = Err(e);
@@ -587,6 +632,50 @@ impl Interp {
             self.sched.cleaning(self.task, false);
         }
         result
+    }
+
+    /// Runs code whose temporaries are its own: a body that runs apart from the code around it.
+    pub(crate) fn home(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
+        self.temps.push(Vec::new());
+        let r = f(self);
+        self.end_temps(r)
+    }
+
+    /// `v`, the value of `e`, is lent: unless it is a place already, it is a temporary of the
+    /// statement under way, which drops the one the same code made before, on an earlier pass
+    /// through a loop.
+    fn lend_temp(&mut self, v: &Value, e: &Expr) -> Result<(), Ctl> {
+        if matches!(v, Value::Ptr(_)) {
+            return Ok(());
+        }
+        let Some(t) = self.ty_of(e.span).map(|t| self.concrete(&t)) else { return Ok(()) };
+        if !self.needs_drop(&t) {
+            return Ok(());
+        }
+        let Some(frame) = self.temps.last_mut() else { return Ok(()) };
+        let before = frame.iter().position(|(_, _, at)| *at == e.span).map(|i| frame.remove(i));
+        frame.push((v.clone(), t, e.span));
+        match before {
+            Some((v, t, _)) => self.drop_value(v, &t, &[]),
+            None => Ok(()),
+        }
+    }
+
+    /// The statement, or the call's body, whose temporaries are the innermost has ended with `r`:
+    /// they are dropped, the last made first, unless a panic is passing (§5.7).
+    fn end_temps(&mut self, r: R) -> R {
+        let temps = self.temps.pop().unwrap_or_default();
+        if is_panic(&r) {
+            return r;
+        }
+        let mut r = r;
+        for (v, t, _) in temps.into_iter().rev() {
+            if let Err(e) = self.drop_value(v, &t, &[])
+                && r.is_ok() {
+                    r = Err(e);
+                }
+        }
+        r
     }
 
     /// The cleanup of a scope left with `r`: its owned bindings dropped, unless a panic is passing,
@@ -734,6 +823,11 @@ impl Interp {
             ExprKind::Field { target, name } => {
                 let mut p = self.place(target, env)?;
                 p.path.push(Seg::Field(name.name.clone()));
+                // A field that holds a borrow, of a view, denotes the borrowed place, as a binding
+                // that holds one does.
+                if let Value::Ptr(q) = get(&p) {
+                    return Ok(q);
+                }
                 Ok(p)
             }
             ExprKind::Index { target, index } => {
@@ -987,12 +1081,14 @@ impl Interp {
                 let id = self.fresh_id();
                 self.lex.loops.push(id);
                 let r = loop {
-                    match self.expr(cond, env) {
-                        Ok(c) if !c.as_bool() => break Ok(Value::Unit),
-                        Ok(_) => {}
-                        Err(e) => break Err(e),
-                    }
-                    match self.block(body, env) {
+                    // A pass's temporaries, the condition's and the body's, end with it (§5.6).
+                    let pass = self.home(|o| match o.expr(cond, env) {
+                        Ok(c) if !c.as_bool() => Ok(Value::Bool(false)),
+                        Ok(_) => o.block(body, env).map(|_| Value::Bool(true)),
+                        Err(e) => Err(e),
+                    });
+                    match pass {
+                        Ok(Value::Bool(false)) => break Ok(Value::Unit),
                         Ok(_) => {}
                         Err(Ctl::Continue(l)) if l == id => {}
                         Err(Ctl::Break(l)) if l == id => break Ok(Value::Unit),
@@ -1108,7 +1204,7 @@ impl Interp {
         }
         let id = self.fresh_id();
         self.handlers.push(Handler::User { id, effect: def, arms: arms.to_vec(), env: env.clone(), lex: self.lex.clone() });
-        let r = self.block(body, env);
+        let r = self.home(|o| o.block(body, env));
         self.handlers.pop();
         match r {
             Err(Ctl::Unwind(h, v)) if h == id => Ok(v),
@@ -1118,7 +1214,7 @@ impl Interp {
                 for (p, a) in arm.params.iter().zip(args) {
                     define(&aenv, &p.name, a);
                 }
-                self.block(&arm.body, &aenv)
+                self.home(|o| o.block(&arm.body, &aenv))
             }
             other => other,
         }
@@ -1134,7 +1230,7 @@ impl Interp {
             for i in lo..hi {
                 let benv = new_env(Some(env.clone()));
                 self.bind(pat, &Value::Int(i), None, &benv);
-                match self.block(body, &benv) {
+                match self.home(|o| o.block(body, &benv)) {
                     Ok(_) => {}
                     Err(Ctl::Continue(l)) if l == id => {}
                     Err(Ctl::Break(l)) if l == id => break,
@@ -1166,8 +1262,9 @@ impl Interp {
                 };
                 let benv = new_env(Some(env.clone()));
                 self.bind(pat, &item, None, &benv);
-                // An item the body did not move on is dropped as the iteration ends (§5.6).
-                let r = self.block(body, &benv);
+                // An item the body did not move on is dropped as the iteration ends (§5.6), after
+                // the temporaries the iteration made.
+                let r = self.home(|o| o.block(body, &benv));
                 let c = self.cleanup(&r, &benv);
                 let r = match (r, c) {
                     (Ok(_), Err(e)) => Err(e),
@@ -1358,7 +1455,14 @@ impl Interp {
         match pass {
             Pass::Mut => Ok(Value::Ptr(self.place(a, env)?)),
             Pass::Lend if place => Ok(Value::Ptr(self.place(a, env)?)),
-            Pass::Lend | Pass::View => self.expr(a, env),
+            Pass::Lend | Pass::View => {
+                let v = self.expr(a, env)?;
+                // A value made to be lent is a temporary, its statement's to drop.
+                if !matches!(a.kind, ExprKind::Ident(_)) {
+                    self.lend_temp(&v, a)?;
+                }
+                Ok(v)
+            }
             Pass::Owned => {
                 let v = self.expr(a, env)?;
                 Ok(if matches!(v, Value::Ptr(_)) { v.deref() } else { v })
@@ -1563,4 +1667,10 @@ fn root_name(e: &Expr) -> Option<&str> {
 
 fn is_range_index(e: &Expr) -> bool {
     matches!(&e.kind, ExprKind::Index { index, .. } if matches!(index.kind, ExprKind::Range { .. }))
+}
+
+/// Whether an expression denotes a place, whose value a statement that only names it leaves where
+/// it is.
+fn is_place(e: &Expr) -> bool {
+    matches!(e.kind, ExprKind::Ident(_) | ExprKind::Field { .. } | ExprKind::Index { .. })
 }

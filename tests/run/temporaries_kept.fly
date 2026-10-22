@@ -1,0 +1,25 @@
+// expect: [10, 11, 99]
+// expect: a1b x2 item 3
+// A temporary lent to what a `let` binds lives as long as the binding: it is dropped when the
+// binding's block ends, just after the binding, on every pass through a loop (§5.6).
+import { println } from "std/io";
+
+view struct Noisy { log: mut Vec<u32>; n: u32 }
+impl Drop for Noisy { function drop(self: mut Self): void { self.log.push(self.n); } }
+
+function make(log: mut Vec<u32>, n: u32): Noisy from log { Noisy { log, n } }
+function label(s: readonly String): str from s { s.asStr() }
+
+export function main(): void uses Io {
+  let log: Vec<u32> = Vec.new();
+  for (const i of 0..2) {
+    const h: readonly Noisy = make(mut log, 10 + i);
+    const n = h.n;
+  }
+  log.push(99);
+  println(`${log}`);
+  const s: str = `a${1}b`;
+  const t: str = if (log.len() > 0) { `x${2}` } else { "y" };
+  const u = label(`item ${3}`);
+  println(`${s} ${t} ${u}`);
+}

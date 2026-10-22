@@ -322,7 +322,36 @@ fly_String fly_show_f64(double v) {
   for (int k = 0; k <= last; k++) fly_String_push_byte(&s, (uint8_t)d[k]);
   return s;
 }
+// `digits` digits after the point, rounded, without the C library: the fraction scaled to an
+// integer, which holds 18 of them.
+fly_String fly_float_fixed(double v, uint32_t digits) {
+  fly_String s = fly_String_new();
+  if (v != v) { fly_String_push(&s, fly_str_lit("NaN", 3)); return s; }
+  if (v < 0) { fly_String_push_byte(&s, '-'); v = -v; }
+  if (digits > 18) digits = 18;
+  double scale = 1;
+  for (uint32_t k = 0; k < digits; k++) scale *= 10;
+  uint64_t whole = (uint64_t)v;
+  uint64_t frac = (uint64_t)((v - (double)whole) * scale + 0.5);
+  if ((double)frac >= scale) { whole += 1; frac = 0; }
+  fly_String w = fly_show_u128(whole);
+  fly_String_push(&s, fly_String_as_str(&w));
+  fly_String_drop(&w);
+  if (digits > 0) {
+    fly_String_push_byte(&s, '.');
+    char d[18];
+    for (int k = (int)digits - 1; k >= 0; k--) { d[k] = (char)('0' + frac % 10); frac /= 10; }
+    for (uint32_t k = 0; k < digits; k++) fly_String_push_byte(&s, (uint8_t)d[k]);
+  }
+  return s;
+}
 #else
+fly_String fly_float_fixed(double v, uint32_t digits) {
+  char buf[400];
+  int n = snprintf(buf, sizeof buf, "%.*f", (int)(digits > 100 ? 100 : digits), v);
+  return fly_String_from((fly_str){ (const uint8_t*)buf, (size_t)(n < (int)sizeof buf ? n : (int)sizeof buf - 1) });
+}
+
 fly_String fly_show_f64(double v) {
   char buf[64];
   if (isnan(v)) snprintf(buf, sizeof buf, "NaN");

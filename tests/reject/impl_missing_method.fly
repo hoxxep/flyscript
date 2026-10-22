@@ -1,0 +1,5 @@
+// error: `S` does not implement `Get`: it has no `get`
+// An impl of an interface has every method the interface declares (§3.4).
+interface Get { function get(self: readonly Self): u32; }
+struct S { n: u32 }
+impl Get for S { function other(self: readonly Self): u32 { 1 } }

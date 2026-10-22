@@ -39,6 +39,7 @@ type LoopInfo = { label: usize };
 type Saved = {
   locals: Vec<Local>; frames: Vec<Frame>; scopes: Vec<HashMap<String, Var>>; loops: Vec<LoopInfo>; labels: usize;
   ret: Ty; captures: Vec<[String, Ty, bool]>; regions: Vec<u32>; yields: Option<Ty>; homes: Vec<usize>;
+  lent: Vec<[usize, usize]>;
 };
 
 export struct Lower {
@@ -70,6 +71,8 @@ export struct Lower {
   // generator, a `handle`'s body or arm — innermost last: where temporaries lent beyond their block
   // live.
   homes: Vec<usize>;
+  // The temporaries lent so far whose statement has not ended, each with the frame it is in.
+  lent: Vec<[usize, usize]>;
   // Whether the program handles `Io` anywhere: then each of `Io`'s operations asks whether one of
   // its handlers is around it, and every other program pays nothing for them.
   handlesIo: bool;
@@ -80,7 +83,7 @@ export function newLower(p: Prog): Lower {
   Lower {
     p, insts: Vec.new(), instIndex: HashMap.new(), owned: 0, closures: Vec.new(), fid: 0, map: HashMap.new(), module: 0,
     ret: #Prim(#Void), locals: Vec.new(), frames: Vec.new(), scopes: Vec.new(), loops: Vec.new(), labels: 0,
-    captures: Vec.new(), regions: Vec.new(), yields: #None, homes: Vec.new(), handlesIo,
+    captures: Vec.new(), regions: Vec.new(), yields: #None, homes: Vec.new(), lent: Vec.new(), handlesIo,
   }
 }
 
@@ -625,8 +628,10 @@ impl Lower {
   // A temporary that owns nothing, whatever its type: a place a value passes through.
   function unownedTemp(self: mut Self, ty: Ty): usize { self.newLocal("t", ty, #Temp) }
 
-  // A temporary whose value is lent, perhaps beyond the block: it lives until the code it is part
-  // of ends, or until the same code makes the next one, which drops the one before.
+  // A temporary whose value is lent: it lives until the end of the statement it is made in, or,
+  // lent to what a `let` binds, as long as the binding (§5.6). Its home's cleanups drop it however
+  // the home is left; made again by a later pass through code that does not leave the home, it
+  // drops the one before.
   function lentTemp(self: mut Self, ty: Ty): usize {
     const home = match (self.homes.last()) { #Some(h) => h, #None => 0 };
     const l = self.locals.len();
@@ -635,8 +640,19 @@ impl Lower {
     if (self.owned(ty)) {
       self.frames[home].cleanups.push(#Drop(l));
       self.emit(#Drop(localPlace(l)));
+      self.lent.push([l, home]);
     }
     l
+  }
+
+  // The statement whose temporaries start at `mark` has ended: they are dropped, last made first.
+  // Their frame's cleanups still drop them if the statement fails first; a drop leaves its place
+  // empty, so once dropped they are not dropped again.
+  function endStatement(self: mut Self, mark: usize): void {
+    while (self.lent.len() > mark) {
+      const [l, _] = match (self.lent.pop()) { #Some(x) => x, #None => return };
+      self.emit(#Drop(localPlace(l)));
+    }
   }
 
   // Starts a block of code that may run apart from the code around it: its lent temporaries are
@@ -646,8 +662,11 @@ impl Lower {
     self.homes.push(self.frames.len() - 1);
   }
 
+  // What the code lent of its temporaries and has not yet ended a statement on, its frame drops.
   function popHome(self: mut Self): Block {
+    const h = self.frames.len() - 1;
     self.homes.pop();
+    while (self.lent.len() > 0 && self.lent[self.lent.len() - 1][1] == h) { self.lent.pop(); }
     self.pop()
   }
 
@@ -997,7 +1016,12 @@ impl Lower {
         for (const a of arms) { if (!self.ownedEnds(a.body)) { return false; } }
         arms.len() > 0
       }
-      _ => match (self.cty(e)) { #Borrow(_, _) | #Prim(#Never) => false, _ => true },
+      // A place the ownership pass did not record a move of is lent, not owned.
+      _ => if (isPlaceExpr(e) && !self.recordedMove(e.span)) {
+        false
+      } else {
+        match (self.cty(e)) { #Borrow(_, _) | #Prim(#Never) => false, _ => true }
+      },
     }
   }
 
@@ -1800,6 +1824,38 @@ impl Lower {
 impl Lower {
   function stmt(self: mut Self, st: readonly AstStmt): void uses Fail<Diagnostic> {
     self.emit(#At(match (st) { #Let { mutable: _, pat: _, ty: _, init: _, span } => span, #Defer(x) | #Expr(x) => x.span }));
+    // What the statement lends of its temporaries ends with it, unless what it binds may hold it.
+    const mark = self.lent.len();
+    const keeps = match (st) {
+      #Let { mutable: _, pat, ty: _, init, span: _ } => {
+        const bound = match (pat.kind) { #Bind(_) => self.bindingTy(pat.id), _ => self.exprTy(init.id) };
+        self.p.class(bound) == 2
+      }
+      _ => false,
+    };
+    // The statement's block is the home of its temporaries: a failure in it drops them as it
+    // leaves the block.
+    const top = self.frames.len() - 1;
+    const at = self.frames[top].cleanups.len();
+    self.homes.push(top);
+    self.statement(st);
+    self.homes.pop();
+    if (keeps) { self.keep(mark, at); } else { self.endStatement(mark); }
+  }
+
+  // The temporaries from `mark` on, which what a `let` binds may hold, live as long as it: they
+  // are dropped with its block, just after it, the last made first (§5.6). Their cleanups, made
+  // as they were, come after its own, from `at`, and move before it.
+  function keep(self: mut Self, mark: usize, at: usize): void {
+    while (self.lent.len() > mark) {
+      const [l, home] = match (self.lent.pop()) { #Some(x) => x, #None => return };
+      const c = self.frames[home].cleanups.iter().findIndex((c) => match (c) { #Drop(x) => x == l, _ => false });
+      if (const #Some(i) = c) { self.frames[home].cleanups.remove(i); }
+      self.frames[home].cleanups.insert(at, #Drop(l));
+    }
+  }
+
+  function statement(self: mut Self, st: readonly AstStmt): void uses Fail<Diagnostic> {
     match (st) {
       #Let { mutable: _, pat, ty: _, init, span: _ } => {
         match (pat.kind) {
@@ -1859,12 +1915,14 @@ impl Lower {
   function whileLoop(self: mut Self, cond: readonly Expr, body: readonly AstBlock): void uses Fail<Diagnostic> {
     const l = self.label();
     self.loops.push({ label: l });
-    self.push();
+    // A pass is the home of what it lends of its temporaries, the condition's and the body's:
+    // they end with it, however it ends (§5.6).
+    self.pushHome();
     const c = self.valueOf(cond);
     let out: Vec<Stmt> = [#Break(l)];
     self.emit(#If(c, emptyBlock(), { locals: Vec.new(), cleanups: Vec.new(), stmts: out }));
     self.blockValue(body, #Prim(#Void));
-    const b = self.pop();
+    const b = self.popHome();
     self.loops.pop();
     self.emit(#Loop(l, b, emptyBlock()));
   }
@@ -2302,8 +2360,9 @@ impl Lower {
     if (self.forStr(l, pat, iter, body)) { return self.close(); }
     if (self.forTasks(l, pat, iter, body)) { return self.close(); }
     if (self.forGen(l, pat, iter, body)) { return self.close(); }
-    // `for (x of xs.iter())` iterates the list itself.
-    const listed = match (self.listIter(iter)) { #Some(t) => t, #None => iter.clone() };
+    // `for (x of xs.iter())` iterates the list itself, as does `xs.iterMut()`, lending each element
+    // `mut`.
+    const [listed, lendsMut]: [Expr, bool] = match (self.listIter(iter)) { #Some(t) => t, #None => [iter.clone(), false] };
     const it = stripBorrow(self.exprTy(listed.id));
     // A generator: pulled for each item, and dropped when the loop ends.
     if (self.namedIs(it, "Gen")) {
@@ -2350,12 +2409,17 @@ impl Lower {
       _ => #Error,
     };
     const st: Ty = #Slice(Box.new(elem.clone()));
-    const sv = match (it) { #Slice(_) => self.valueOf(listed), _ => self.view(listed, st.clone()) };
+    const sv = if (lendsMut) {
+      const lp = self.place(listed);
+      self.value(#View(lp), st.clone())
+    } else {
+      match (it) { #Slice(_) => self.valueOf(listed), _ => self.view(listed, st.clone()) }
+    };
     const s = self.temp(st.clone());
     self.emit(#Let(s, #Use(sv)));
     const n = self.builtinCall("slice_len", [#Copy(localPlace(s))], [st.clone()], #Prim(#Usize), false, iter.span);
-    const itemTy: Ty = #Borrow(false, Box.new(elem.clone()));
-    self.indexed(l, pat, n, body, (lw, i) => lw.value(#Borrow(false, extend(localPlace(s), #Index(i), elem.clone())), itemTy.clone()), itemTy.clone());
+    const itemTy: Ty = #Borrow(lendsMut, Box.new(elem.clone()));
+    self.indexed(l, pat, n, body, (lw, i) => lw.value(#Borrow(lendsMut, extend(localPlace(s), #Index(i), elem.clone())), itemTy.clone()), itemTy.clone());
     self.close();
   }
 
@@ -2404,14 +2468,15 @@ impl Lower {
     self.iteration(pat, itemTy, v, body);
   }
 
-  // One iteration: the item bound by the pattern in a block of its own, which the iteration ends.
+  // One iteration: the item bound by the pattern in a block of its own, which the iteration ends,
+  // with what it lends of its temporaries.
   function iteration(self: mut Self, pat: readonly Pattern, itemTy: Ty, item: Operand, body: readonly AstBlock): void uses Fail<Diagnostic> {
-    self.push();
+    self.pushHome();
     const x = self.temp(itemTy.clone());
     self.emit(#Let(x, #Use(item)));
     self.binds(pat, localPlace(x), itemTy, true, false);
     self.blockValue(body, #Prim(#Void));
-    const b = self.pop();
+    const b = self.popHome();
     self.emit(#Block(b));
   }
 
@@ -2536,8 +2601,9 @@ impl Lower {
     match (pat.kind) { #Bind(_) => self.bindingTy(pat.id), _ => self.catchTy(pat) }
   }
 
-  // The list a `for` iterates through its `iter()`, if that is what it iterates.
-  function listIter(self: mut Self, iter: readonly Expr): Option<Expr> uses Fail<Diagnostic> {
+  // The list a `for` iterates through its `iter()`, or its `iterMut()`, if that is what it
+  // iterates, and whether its elements are lent `mut`.
+  function listIter(self: mut Self, iter: readonly Expr): Option<[Expr, bool]> uses Fail<Diagnostic> {
     const [callee, args]: [Expr, Vec<Expr>] = match (iter.kind) {
       #Call { callee, typeArgs: _, args } => [callee.get().clone(), args.clone()],
       _ => return #None,
@@ -2545,7 +2611,11 @@ impl Lower {
     if (args.len() > 0) { return #None; }
     const target: Expr = match (callee.kind) { #Field { target, name: _ } => target.get().clone(), _ => return #None };
     match (self.builtinOf(iter)) {
-      #Some(k) => if (k == "Vec_iter" || k == "slice_iter") { #Some(target) } else { #None },
+      #Some(k) => if (k == "Vec_iter" || k == "slice_iter") {
+        #Some([target, false])
+      } else if (k == "Vec_iterMut" || k == "slice_iterMut") {
+        #Some([target, true])
+      } else { #None },
       #None => #None,
     }
   }
@@ -2615,13 +2685,14 @@ impl Lower {
       locals: replace(mut self.locals, Vec.new()), frames: replace(mut self.frames, Vec.new()), scopes: replace(mut self.scopes, Vec.new()),
       loops: replace(mut self.loops, Vec.new()), labels: replace(mut self.labels, 0), ret: self.ret.clone(),
       captures: replace(mut self.captures, Vec.new()), regions: self.regions.clone(), yields: replace(mut self.yields, #None),
-      homes: replace(mut self.homes, Vec.new()),
+      homes: replace(mut self.homes, Vec.new()), lent: replace(mut self.lent, Vec.new()),
     }
   }
 
   function restoreFn(self: mut Self, s: Saved): void {
-    const { locals, frames, scopes, loops, labels, ret, captures, regions, yields, homes } = s;
+    const { locals, frames, scopes, loops, labels, ret, captures, regions, yields, homes, lent } = s;
     self.homes = homes;
+    self.lent = lent;
     self.locals = locals;
     self.frames = frames;
     self.scopes = scopes;
@@ -2867,17 +2938,20 @@ impl Lower {
     // `main` is given the command line, as its parameters' types read it.
     let args: Vec<MainArg> = Vec.new();
     const params = self.p.fns[mainFid].scheme.params.clone();
-    for (const [k, [_, t]] of params.iter().enumerate()) {
+    for (const [k, [n, t]] of params.iter().enumerate()) {
       // A last parameter that is a list of strings takes every argument left (§8.1).
       const elem: Option<Ty> = match (stripBorrow(t)) { #Slice(x) => #Some(x.get().clone()), _ => #None };
       if (const #Some(x) = elem && k + 1 == params.len()) {
         args.push(if (self.isString(x)) { #Strings } else { #Strs });
         continue;
       }
+      const st = stripBorrow(t);
+      const text = match (st) { #Prim(#Str) => true, _ => self.isString(st) };
       args.push(match (t) {
         #Prim(p) if isInt(p) => #Int(t.clone()),
         #Prim(p) if isFloat(p) => #Float(t.clone()),
-        _ => #Str,
+        _ if text => #Str,
+        _ => throw #Failed(`error: \`main\` takes the command line, whose arguments are integers, floats and strings: its parameter \`${n}\` is none of them`),
       });
     }
     const fails = self.failOf(self.fnEffects(mainFid));
