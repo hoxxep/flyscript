@@ -18,7 +18,7 @@ fn fixpoint() {
     let dir = root.join("selfhost");
     let out = root.join("target/selfhost-test");
     std::fs::create_dir_all(&out).unwrap();
-    let (main, runtime) = (dir.join("main.fly"), dir.join("runtime.js"));
+    let main = dir.join("main.fly");
     let (stage1, stage2) = (out.join("stage1.js"), out.join("stage2.js"));
 
     let checked = check_files(std::slice::from_ref(&main));
@@ -26,13 +26,13 @@ fn fixpoint() {
     let text = |p: &Path| Value::text(p.to_str().unwrap());
     let mut world = World::default();
     world.real_fs = true;
-    let (result, world) = run(checked.program, "main", vec![text(&main), text(&stage1), text(&runtime)], world);
+    let (result, world) = run(checked.program, "main", vec![text(&main), text(&stage1), text(root)], world);
     assert!(result.is_ok(), "{:?}", result.err());
     assert!(world.out.is_empty(), "{}", world.out.join("\n"));
     let first = std::fs::read(&stage1).unwrap();
 
     // Stage 2 needs node; without it, stage 1 is as far as this test goes.
-    let Ok(status) = Command::new("node").arg(&stage1).arg(&main).arg(&stage2).arg(&runtime).status() else { return };
+    let Ok(status) = Command::new("node").arg(&stage1).arg(&main).arg(&stage2).arg(root).status() else { return };
     assert!(status.success());
     assert!(std::fs::read(&stage2).unwrap() == first, "stage 2 differs from stage 1");
     elaborates_as_flyc_does(root, &stage1, &out);
@@ -63,7 +63,7 @@ fn checks_as_flyc_does(root: &Path, compiler: &Path, out: &Path) {
         .arg(compiler)
         .arg(root.join("selfhost/typecheck.fly"))
         .arg(&typecheck)
-        .arg(root.join("selfhost/runtime.js"))
+        .arg(root)
         .status()
         .unwrap();
     assert!(status.success());
@@ -93,7 +93,7 @@ fn elaborates_as_flyc_does(root: &Path, compiler: &Path, out: &Path) {
         .arg(compiler)
         .arg(root.join("selfhost/schemes.fly"))
         .arg(&schemes)
-        .arg(root.join("selfhost/runtime.js"))
+        .arg(root)
         .status()
         .unwrap();
     assert!(status.success());

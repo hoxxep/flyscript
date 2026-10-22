@@ -12,3 +12,7 @@ name = "flyc"
 path = "src/main.rs"
 
 [dependencies]
+
+# The tests run whole programs, the self-hosted compiler among them, in the interpreter.
+[profile.test]
+opt-level = 2

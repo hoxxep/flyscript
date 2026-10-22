@@ -1,83 +1,28 @@
-// The compiler's driver: `main(entry, out, runtime)` compiles the program whose entry module is
-// `entry`, and every module it imports, to one JavaScript file `out` that starts with the
-// runtime from `runtime` and ends by calling the entry's `main` with the command line.
+// The compiler's driver: `main(entry, out, root)` checks the program whose entry module is `entry`
+// and compiles it to one JavaScript file `out`, which starts with the runtime and ends by calling
+// the entry's `main` with the command line. `root` is the directory that holds `std/` and
+// `selfhost/runtime.js`.
 
 import { Diagnostic, render } from "./diag";
-import { parseModule } from "./parse";
 import { Module, Item, ItemKind } from "./ast";
+import { Program } from "./env";
+import { checkFn } from "./check";
 import { survey, module } from "./gen";
 import { File, println, writeFile } from "std/io";
 import { HashMap } from "std/collections";
 
-// What stops a compilation: a diagnostic in a module, or a module that cannot be read.
-type Stop = #Failed { path: String; diag: Diagnostic } | #Unreadable { path: String };
-
-// The directory a path is in, with its final `/`.
-function dirOf(path: str): str {
-  const bytes = path.asBytes();
-  let i = bytes.len();
-  while (i > 0) {
-    if (bytes[i - 1] == b'/') { return path.slice(0, i); }
-    i -= 1;
-  }
-  ""
-}
-
-// `dir` and a relative path joined, with `.` and `..` resolved.
-function join(dir: str, rel: str): String {
-  let parts: Vec<String> = Vec.new();
-  const absolute = dir.startsWith("/");
-  for (const p of `${dir}${rel}`.split("/")) {
-    if (p == "" || p == ".") { continue; }
-    const up = match (parts.last()) { #Some(q) => q != "..", #None => false };
-    if (p == ".." && up) { parts.pop(); continue; }
-    parts.push(p.toString());
-  }
-  const joined = parts.join("/");
-  if (absolute) { `/${joined}` } else { joined }
-}
-
-// The modules of a program, each registered when first met, so imports may form cycles; `order`
-// is the order they finished loading in, their imports first unless a cycle prevents it.
-struct Loader { paths: Vec<String>; modules: Vec<Module>; order: Vec<usize> }
-
-impl Loader {
-  // Loads a module and what it imports, once.
-  function load(self: mut Self, path: str): usize uses Io, Fail<Stop> {
-    if (const #Some(i) = self.paths.iter().findIndex((p) => p.asStr() == path)) { return i; }
-    const src: String = try {
-      let f = File.open(path);
-      f.readText()
-    } catch (_) { throw #Unreadable { path: path.toString() } };
-    const m = try { parseModule(src.asStr()) } catch (d) { throw #Failed { path: path.toString(), diag: d } };
-    const k = self.paths.len();
-    self.paths.push(path.toString());
-    self.modules.push(m);
-    let imports: Vec<String> = Vec.new();
-    for (const item of self.modules[k].items) {
-      if (const #Import { names: _, from } = item.kind) {
-        if (!from.startsWith("std/")) { imports.push(join(dirOf(path), `${from}.fly`.asStr())); }
-      }
-    }
-    for (const i of imports) { self.load(i.asStr()); }
-    self.order.push(k);
-    k
-  }
-
-  function index(self: readonly Self, path: str): usize {
-    match (self.paths.iter().findIndex((p) => p.asStr() == path)) { #Some(i) => i, #None => 0 }
-  }
-}
+// What stops a compilation: diagnostics, or a file that cannot be read or written.
+type Stop = #Failed | #Unreadable { path: String };
 
 function isUpper(s: str): bool {
   const b = s.asBytes();
   b.len() > 0 && b[0] >= b'A' && b[0] <= b'Z'
 }
 
-// What a module can see by name: its own functions and constants, and what it imports.
-function namesOf(l: readonly Loader, k: usize): HashMap<String, String> {
+// What module `k` can see by name: its own functions and constants, and what it imports.
+function namesOf(p: readonly Program, k: usize): HashMap<String, String> {
   let names: HashMap<String, String> = HashMap.new();
-  for (const item of l.modules[k].items) {
+  for (const item of p.modules[k].ast.items) {
     match (item.kind) {
       #Function(f) => { names.insert(f.sig.name.name.clone(), `m${k}$${f.sig.name.name}`); }
       #Const { name, ty: _, value: _ } => { names.insert(name.name.clone(), `m${k}$${name.name}`); }
@@ -88,9 +33,9 @@ function namesOf(l: readonly Loader, k: usize): HashMap<String, String> {
             if (!isUpper(name.name.asStr())) { names.insert(local.name.clone(), `$rt.${name.name}`); }
           }
         } else {
-          const j = l.index(join(dirOf(l.paths[k]), `${from}.fly`.asStr()).asStr());
+          const j = match (p.importedModule(k, from.asStr())) { #Some(j) => j, #None => continue };
           for (const [name, local] of imported) {
-            for (const other of l.modules[j].items) {
+            for (const other of p.modules[j].ast.items) {
               const declares = match (other.kind) {
                 #Function(f) => f.sig.name.name == name.name,
                 #Const { name: c, ty: _, value: _ } => c.name == name.name,
@@ -107,38 +52,65 @@ function namesOf(l: readonly Loader, k: usize): HashMap<String, String> {
   names
 }
 
-function compile(entry: str, out: str, runtime: str): void uses Io, Fail<Stop> {
-  let l = Loader { paths: Vec.new(), modules: Vec.new(), order: Vec.new() };
-  const main = l.load(entry);
-  const world = survey(l.modules);
+// The program's diagnostics, each with the source line it is about.
+function report(p: readonly Program): void uses Io {
+  for (const [m, d] of p.diags) {
+    if (m < p.modules.len()) {
+      println(render(d, p.modules[m].file.asStr(), p.modules[m].source.asStr()).asStr());
+    } else {
+      const #Diagnostic { span: _, message } = d;
+      println(`error: ${message}`);
+    }
+  }
+}
+
+function compile(entry: str, out: str, root: str): void uses Io, Fail<Stop> {
+  let p = Program.load([entry.toString()], `${root}/std`.asStr());
+  if (p.diags.len() == 0) {
+    let fid: usize = 0;
+    while (fid < p.fns.len()) {
+      checkFn(mut p, fid);
+      fid += 1;
+    }
+  }
+  if (p.diags.len() > 0) {
+    report(p);
+    throw #Failed;
+  }
+  let user: Vec<usize> = Vec.new();
+  for (const [k, m] of p.modules.iter().enumerate()) { if (!m.isStd) { user.push(k); } }
+  let asts: Vec<Module> = Vec.new();
+  for (const k of user) { asts.push(p.modules[k].ast.clone()); }
+  const world = survey(asts);
+  const runtime = `${root}/selfhost/runtime.js`;
   const rt: String = try {
-    let f = File.open(runtime);
+    let f = File.open(runtime.asStr());
     f.readText()
-  } catch (_) { throw #Unreadable { path: runtime.toString() } };
+  } catch (_) { throw #Unreadable { path: runtime } };
   let js = rt;
-  for (const k of l.order) {
-    js.push(`\n// ${l.paths[k]}\n`);
+  let main: usize = 0;
+  for (const k of user) {
+    js.push(`\n// ${p.modules[k].file}\n`);
     const code = try {
-      module(l.modules[k], `m${k}$`.asStr(), namesOf(l, k), world.clone())
-    } catch (d) { throw #Failed { path: l.paths[k].clone(), diag: d } };
+      module(p.modules[k].ast, `m${k}$`.asStr(), namesOf(p, k), world.clone())
+    } catch (d) {
+      p.diags.push([k, d]);
+      report(p);
+      throw #Failed
+    };
     js.push(code.asStr());
+    if (p.modules[k].file.asStr() == p.entryFile(entry).asStr()) { main = k; }
   }
   js.push(`\n$rt.start(m${main}$main);\n`);
   try { writeFile(out, js.asStr()); } catch (_) { throw #Unreadable { path: out.toString() } };
 }
 
-export function main(entry: str, out: str, runtime: str): void uses Io {
+export function main(entry: str, out: str, root: str): void uses Io {
   try {
-    compile(entry, out, runtime);
+    compile(entry, out, root);
   } catch (e) {
     match (e) {
-      #Failed { path, diag } => {
-        const src: String = try {
-          let f = File.open(path.asStr());
-          f.readText()
-        } catch (_) { String.new() };
-        println(render(diag, path.asStr(), src.asStr()).asStr());
-      }
+      #Failed => {}
       #Unreadable { path } => println(`error: cannot read or write ${path}`),
     }
   }
