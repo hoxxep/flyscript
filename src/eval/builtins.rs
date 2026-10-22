@@ -129,6 +129,10 @@ impl Interp {
 
     pub fn builtin(&mut self, fid: FnId, mut args: Vec<Value>) -> R {
         let key = self.builtin_key(fid);
+        // Raw memory and C exist only where the program runs as machine code (§8.2).
+        if self.prog.fns[fid].foreign || key.starts_with("Ptr.") || ["sizeOf", "alignOf", "zeroed", "fence", "fenceAcquire", "fenceRelease"].contains(&key.as_str()) {
+            return Err(panic(format!("`{}` runs only in a native program", self.prog.fns[fid].name)));
+        }
         let a = |i: usize| args.get(i).cloned().unwrap_or(Value::Unit);
         match key.as_str() {
             // ---- Option, Result, Fail ----

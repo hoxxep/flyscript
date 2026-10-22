@@ -1,0 +1,3 @@
+// error: a function C calls performs nothing
+// C cannot handle an effect or a failure, so a function it calls performs none (§8.2).
+export extern "C" function step(n: i32): i32 uses Fail<#Overflow> { n }

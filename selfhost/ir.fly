@@ -107,6 +107,8 @@ export enum Rvalue {
   // A closure: function `fn` of the program's closures, given its captures; and whether it is only
   // lent to a call, so it cannot outlive the function making it.
   #Closure(usize, Vec<Capture>, bool),
+  // A place's address, as a raw pointer (§8.2).
+  #AddressOf(Place),
   // A function instance as a value.
   #FnRef(usize),
 }
@@ -133,6 +135,8 @@ export type Call = {
   yields: bool;
   // The effects the call performs, as the callee states them: what a back end decides more by.
   row: EffRow;
+  // The callee's type arguments: what `sizeOf<T>()` measures.
+  targs: Vec<Ty>;
   span: Span;
 };
 

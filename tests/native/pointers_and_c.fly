@@ -1,0 +1,36 @@
+// expect: n = 6
+// expect: abs = 3
+// expect: strlen = 5
+// expect: pair.b = 40 size 8 page align 64
+// expect: atomics 0 3 true 10
+// expect: twice 42 null 0
+// Raw pointers, C's functions and a function C calls (§8.2), in a program run natively.
+import { println } from "std/io";
+extern "C" function abs(x: i32): i32;
+extern "C" function strlen(s: u8*): usize;
+@layout(c) struct Pair { a: i32; b: i32 }
+@layout(c, align = 64) struct Page { bytes: u8[64] }
+
+export extern "C" function twice(x: i32): i32 { x * 2 }
+
+export function main(): void uses Io {
+  let n: i32 = 5;
+  const p: i32* = Ptr.fromMut(mut n);
+  unsafe { p.write(p.read() + 1); }
+  println(`n = ${n}`);
+  println(`abs = ${unsafe { abs(-3) }}`);
+  const text = "hello\0";
+  const s: u8* = Ptr.fromRef(text.asBytes()[0]);
+  println(`strlen = ${unsafe { strlen(s) }}`);
+  let pair = Pair { a: 1, b: 2 };
+  const pp: Pair* = Ptr.fromMut(mut pair);
+  const bp: i32* = pp.cast<i32>().add(1);
+  unsafe { bp.write(40); }
+  println(`pair.b = ${pair.b} size ${sizeOf<Pair>()} page align ${alignOf<Page>()}`);
+  let counter: u64 = 0;
+  const c: u64* = Ptr.fromMut(mut counter);
+  const old = unsafe { c.fetchAdd(3) };
+  const [seen, swapped] = unsafe { c.compareExchange(3, 10) };
+  println(`atomics ${old} ${seen} ${swapped} ${unsafe { c.loadAcquire() }}`);
+  println(`twice ${twice(21)} null ${Ptr.at<u8>(0).address()}`);
+}

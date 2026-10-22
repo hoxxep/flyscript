@@ -34,12 +34,13 @@ pub enum ItemKind {
     TypeAlias(TypeAlias),
     Effect(EffectDecl),
     Function(FnDecl),
-    Extern(FnSig),
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct StructDecl {
     pub layout: Option<Ident>,
+    /// `@layout(c, align = N)`: the alignment asked for.
+    pub align: Option<u64>,
     /// Declared `view`: it may hold borrows (§3.3).
     pub view: bool,
     pub name: Ident,
@@ -150,6 +151,8 @@ pub struct EffectDecl {
 #[derive(Clone, Debug, PartialEq)]
 pub struct FnSig {
     pub comptime: bool,
+    /// `extern "C"`: a function of C's, declared without a body, or one C calls, with a body (§8.2).
+    pub foreign: bool,
     pub name: Ident,
     pub type_params: Vec<TypeParam>,
     pub params: Vec<Param>,

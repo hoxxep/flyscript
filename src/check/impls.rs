@@ -30,6 +30,7 @@ impl Program {
                 exported: true,
                 impl_id: None,
                 has_body: false,
+                foreign: false,
                 iface: Some(iface),
             });
             self.iface_fns.insert((iface, name.clone()), id);

@@ -270,9 +270,11 @@ impl<'a> Parser<'a> {
         let kind = match self.tok() {
             Tok::Kw(Kw::Import) if !exported => self.import()?,
             Tok::Punct("@") => {
-                let layout = self.layout()?;
+                let (layout, align) = self.layout()?;
                 let view = self.eat_word("view");
-                ItemKind::Struct(self.struct_decl(Some(layout), view)?)
+                let mut s = self.struct_decl(Some(layout), view)?;
+                s.align = align;
+                ItemKind::Struct(s)
             }
             Tok::Ident(w) if w == "view" && matches!(self.tok_at(1), Tok::Kw(Kw::Struct | Kw::Enum)) => {
                 self.bump();
@@ -308,9 +310,11 @@ impl<'a> Parser<'a> {
                     }
                     _ => return self.error("`\"C\"`"),
                 }
-                let sig = self.sig(true)?;
-                self.expect(";")?;
-                ItemKind::Extern(sig)
+                let mut sig = self.sig(true)?;
+                sig.foreign = true;
+                // A function of C's ends in `;`; one C calls has a body.
+                let body = if self.eat(";") { None } else { Some(self.block()?) };
+                ItemKind::Function(FnDecl { sig, body })
             }
             _ => return self.error("a declaration"),
         };
@@ -342,13 +346,27 @@ impl<'a> Parser<'a> {
         Ok(ItemKind::Import { names, from })
     }
 
-    fn layout(&mut self) -> PResult<Ident> {
+    /// `@layout(kind)`, or `@layout(kind, align = N)`.
+    fn layout(&mut self) -> PResult<(Ident, Option<u64>)> {
         self.expect("@")?;
         self.expect_word("layout")?;
         self.expect("(")?;
         let kind = self.ident()?;
+        let mut align = None;
+        if self.eat(",") {
+            self.expect_word("align")?;
+            self.expect("=")?;
+            match self.tok() {
+                Tok::Int(n) => {
+                    let n = n.clone();
+                    self.bump();
+                    align = Some(int_value(&n).unwrap_or(0));
+                }
+                _ => return self.error("an alignment"),
+            }
+        }
         self.expect(")")?;
-        Ok(kind)
+        Ok((kind, align))
     }
 
     fn struct_decl(&mut self, layout: Option<Ident>, view: bool) -> PResult<StructDecl> {
@@ -356,7 +374,7 @@ impl<'a> Parser<'a> {
         let name = self.ident()?;
         let params = self.type_params()?;
         let fields = if self.declarations && self.eat(";") { None } else { Some(self.field_list()?) };
-        Ok(StructDecl { layout, view, name, params, fields })
+        Ok(StructDecl { layout, align: None, view, name, params, fields })
     }
 
     /// `{ name: Type; … }` with `;` or `,` separators.
@@ -603,7 +621,7 @@ impl<'a> Parser<'a> {
         self.expect(":")?;
         let ret = self.ret()?;
         let uses = self.uses()?;
-        Ok(FnSig { comptime, name, type_params, params, ret, uses, span: self.since(start) })
+        Ok(FnSig { comptime, foreign: false, name, type_params, params, ret, uses, span: self.since(start) })
     }
 
     fn params(&mut self, typed: bool) -> PResult<Vec<Param>> {
@@ -1819,6 +1837,14 @@ fn bound_names(p: &Pattern, out: &mut Vec<(String, Span)>) {
             }
         },
         _ => {}
+    }
+}
+
+/// An integer literal's value: decimal, or hexadecimal after `0x`.
+fn int_value(s: &str) -> Option<u64> {
+    match s.strip_prefix("0x") {
+        Some(h) => u64::from_str_radix(h, 16).ok(),
+        None => s.parse().ok(),
     }
 }
 

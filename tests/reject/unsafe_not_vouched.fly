@@ -1,0 +1,3 @@
+// error: this reaches through a raw pointer or calls C, which is `Unsafe`
+// Reaching through a pointer is `Unsafe`: code vouches for it in `unsafe { … }` (§8.2).
+export function get(p: i32*): i32 { p.read() }

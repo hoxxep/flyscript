@@ -777,3 +777,43 @@ export function swap<T>(a: mut T, b: mut T): void;
 
 // ---- Arrays ----
 export function repeat<T extends Copy, comptime N: usize>(v: T): T[N];
+
+// ---- Foreign code (§8.2) ----
+
+// What reaching through a raw pointer, or calling C, performs. `unsafe { … }` handles it: its code
+// vouches for what the compiler cannot check.
+export effect Unsafe {}
+
+// A raw pointer, `T*`: an address, `Copy` and not `Send`, which no borrow rule follows. Taking one
+// is safe; reaching through one is `Unsafe`. Address `0` is null.
+export struct Ptr<T>;
+impl<T> Ptr<T> {
+  export function fromMut(r: mut T): Ptr<T>;
+  export function fromRef(r: readonly T): Ptr<T>;
+  export function at(address: usize): Ptr<T>;
+  export function address(self: Self): usize;
+  // The pointer `n` elements on.
+  export function add(self: Self, n: usize): Ptr<T>;
+  export function cast<U>(self: Self): Ptr<U>;
+  // A copy of the bits there; writing does not drop what was there.
+  export function read(self: Self): T uses Unsafe;
+  export function write(self: Self, v: T): void uses Unsafe;
+  // Reads and writes the compiler keeps, in order: a device's registers.
+  export function readVolatile(self: Self): T uses Unsafe;
+  export function writeVolatile(self: Self, v: T): void uses Unsafe;
+  // Atomic operations, on an integer or a pointer.
+  export function loadAcquire(self: Self): T uses Unsafe;
+  export function storeRelease(self: Self, v: T): void uses Unsafe;
+  export function compareExchange(self: Self, expected: T, desired: T): [T, bool] uses Unsafe;
+  export function fetchAdd(self: Self, v: T): T uses Unsafe;
+}
+
+// The bytes a value of `T` takes, and the alignment it needs, as C lays it out.
+export function sizeOf<T>(): usize;
+export function alignOf<T>(): usize;
+// A value of all zero bits, which C structures are often filled in from.
+export function zeroed<T>(): T uses Unsafe;
+// Memory fences: every access before one is seen before every access after it.
+export function fence(): void;
+export function fenceAcquire(): void;
+export function fenceRelease(): void;

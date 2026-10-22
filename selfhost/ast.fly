@@ -22,11 +22,12 @@ export enum ItemKind {
   #TypeAlias(TypeAlias),
   #Effect(EffectDecl),
   #Function(FnDecl),
-  #Extern(FnSig),
 }
 
 export type StructDecl = {
   layout: Option<Ident>;
+  // `@layout(c, align = N)`: the alignment asked for.
+  align: Option<u64>;
   // Declared `view`: it may hold borrows (§3.3).
   view: bool;
   name: Ident;
@@ -89,6 +90,8 @@ export type EffectDecl = { name: Ident; params: Vec<TypeParam>; ops: Vec<FnSig> 
 
 export type FnSig = {
   isComptime: bool;
+  // `extern "C"`: a function of C's, declared without a body, or one C calls, with a body (§8.2).
+  foreign: bool;
   name: Ident;
   typeParams: Vec<TypeParam>;
   params: Vec<Param>;

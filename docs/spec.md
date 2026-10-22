@@ -1,6 +1,6 @@
 # Flyscript
 
-**Language specification, version 0.55**
+**Language specification, version 0.56**
 
 *Affine values, one row calculus, handlers for everything, and `comptime`: Church on the outside, Turing on the inside.*
 
@@ -20,7 +20,7 @@ The whole language rests on five laws. Every rule in this document is a conseque
 
 ### 0.1 Changes from 0.54
 
-0.55 follows the self-hosted compiler's back ends — typed JavaScript, and C without a garbage collector — which specialize every function for the types it is used at and run tasks on a scheduler of their own, and the port of the ownership pass to Flyscript. Earlier changes are in [docs/history](history/).
+0.56 builds the foreign interface (§8.2): raw pointers as the prelude's `Ptr<T>`, reaching through one an effect, `Unsafe`, that `unsafe { … }` handles, and functions of C's and functions C calls. It follows one core IR under both of the self-hosted compiler's back ends, JavaScript and C. Earlier changes are in [docs/history](history/).
 
 | Change | Why |
 | :--- | :--- |
@@ -903,7 +903,11 @@ A **declaration file**, `.d.fly`, states a module's interface without its implem
 
 ### 8.2 Foreign code
 
-`extern "C"` declares a C function; `@layout(c)` gives a struct C layout. `T*` is a raw pointer: `Copy`, not `Send`, and readable or writable only inside `unsafe { … }` via `p.read()`, `p.write(v)` and `p.add(n)`. Besides pointers and foreign calls, `unsafe` vouches for one thing the ownership rules cannot see: an operation's arguments kept past their arm (§5.3). Calling an `extern "C"` function is `unsafe`; the usual pattern is a safe wrapper that states the function's real effects.
+`T*` is a raw pointer, the prelude's `Ptr<T>`: an address, `Copy`, not `Send`, and outside the borrow rules. Taking one is safe — `Ptr.fromMut(mut x)`, `Ptr.fromRef(x)`, `Ptr.at(address)` for a device's register, with address `0` null — as are `p.address()`, `p.add(n)` (`n` elements on) and `p.cast<U>()`. Reaching through one performs the effect `Unsafe`: `p.read()` (a copy of the bits), `p.write(v)` (which does not drop what was there), `readVolatile` and `writeVolatile`, and the atomics `loadAcquire`, `storeRelease`, `compareExchange(expected, desired)` and `fetchAdd`; so does `zeroed<T>()`. `sizeOf<T>()` and `alignOf<T>()` measure a type as C lays it out, and `fence()`, `fenceAcquire()` and `fenceRelease()` order memory.
+
+`unsafe { … }` handles `Unsafe`: its code vouches for what the compiler cannot check, and a function whose body does is safe to call. A function that performs `Unsafe` without vouching for it says so, `uses Unsafe`, and so do its callers; a closure that reaches through a pointer has `Unsafe` in its own type, wherever it was made. Besides `Unsafe`, an `unsafe` block vouches for one thing the ownership rules cannot see: an operation's arguments kept past their arm (§5.3).
+
+`extern "C" function f(…): R;` declares a function of C's, called by its symbol; it performs `Unsafe` besides what it declares, and the usual pattern is a safe wrapper that states its real effects. `export extern "C" function f(…): R { … }` is a function C calls, under its symbol; it performs nothing, as C can handle no effect or failure. Either takes and gives only what C has: integers, floats, `bool`, pointers, and structs declared `@layout(c)`, laid out as C lays them out, of those; `@layout(c, align = N)` asks for an alignment, a power of two. A program that uses raw memory or C runs only natively.
 
 A foreign call runs on the worker thread's native stack, not on the task's growable segment.
 

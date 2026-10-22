@@ -93,7 +93,7 @@ fn build_with_flyc() {
 /// Every program of the test suite and the examples.
 fn programs() -> Vec<PathBuf> {
     let mut programs: Vec<PathBuf> = Vec::new();
-    for dir in ["tests/run", "tests/accept", "tests/reject", "examples"] {
+    for dir in ["tests/run", "tests/native", "tests/accept", "tests/reject", "examples"] {
         let mut files: Vec<PathBuf> = std::fs::read_dir(root().join(dir)).unwrap().map(|e| e.unwrap().path()).collect();
         files.sort();
         for f in files {
@@ -181,7 +181,14 @@ fn native_programs_run_as_expected() {
     if !has_node() || !has_cc() {
         return;
     }
-    let r = Command::new("sh").arg(root().join("selfhost/corpus.sh")).arg("--c").arg("--leaks").arg(root().join("selfhost/seed.js")).output().unwrap();
+    // The run suite, and the programs that run only natively: those with raw memory and C (§8.2).
+    let mut files: Vec<PathBuf> = Vec::new();
+    for dir in ["tests/run", "tests/native"] {
+        let mut fs: Vec<PathBuf> = std::fs::read_dir(root().join(dir)).unwrap().map(|e| e.unwrap().path()).filter(|f| f.extension().is_some_and(|e| e == "fly")).collect();
+        fs.sort();
+        files.extend(fs);
+    }
+    let r = Command::new("sh").arg(root().join("selfhost/corpus.sh")).arg("--c").arg("--leaks").arg(root().join("selfhost/seed.js")).args(&files).output().unwrap();
     let report = String::from_utf8_lossy(&r.stdout);
     let failed: Vec<&str> = report.lines().filter_map(|l| l.strip_prefix("FAIL ")).collect();
     assert!(failed.is_empty(), "failed natively:\n{}", failed.join("\n"));

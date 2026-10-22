@@ -1,0 +1,2 @@
+// error: an alignment is a power of two
+@layout(c, align = 48) struct S { a: i32 }

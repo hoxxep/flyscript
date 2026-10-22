@@ -449,7 +449,7 @@ impl Lower {
   export function suspends(self: readonly Self, row: readonly EffRow): bool {
     row.effs.iter().some((e) => {
       const name = self.p.defs[e.def].name.asStr();
-      !(self.p.modules[self.p.defs[e.def].module].isStd && (name == "Fail" || name == "Yield" || name == "Region"))
+      !(self.p.modules[self.p.defs[e.def].module].isStd && (name == "Fail" || name == "Yield" || name == "Region" || name == "Unsafe"))
     })
   }
 
@@ -520,7 +520,8 @@ impl Lower {
     }
     match (self.p.fnDecl(fid)) {
       #Some(d) if d.body.isSome() => #Inst(self.instance(fid, args)),
-      _ => #Builtin(self.builtinKey(fid)),
+      // A function of C's, called by its name.
+      _ => if (self.p.fns[fid].foreign) { #Builtin(`extern:${self.p.fns[fid].name}`) } else { #Builtin(self.builtinKey(fid)) },
     }
   }
 
@@ -1586,7 +1587,7 @@ impl Lower {
   function builtinCall(self: mut Self, key: str, args: Vec<Operand>, params: Vec<Ty>, ret: Ty, fails: bool, span: Span): Operand {
     const c: Call = {
       callee: #Builtin(key.toString()), args, params: params.clone(), argTys: params, ret: ret.clone(), regions: Vec.new(),
-      fails, suspends: false, yields: false, row: pure(), span,
+      fails, suspends: false, yields: false, row: pure(), targs: Vec.new(), span,
     };
     self.value(#Call(c), ret)
   }
@@ -1596,7 +1597,7 @@ impl Lower {
     const row: EffRow = match (c) { #Inst(i) => self.instEffects(i), _ => pure() };
     const call: Call = {
       callee: c, args, params, argTys, ret: ret.clone(), regions: self.regionsOf(row), fails: self.mayFail(row),
-      suspends: self.suspends(row), yields: false, row, span,
+      suspends: self.suspends(row), yields: false, row, targs: Vec.new(), span,
     };
     self.value(#Call(call), ret)
   }
@@ -1607,6 +1608,7 @@ impl Lower {
       #None => #None,
     };
     if (const #Some(fid) = fid) {
+      if (const #Some(a) = self.addressOf(e, fid, args)) { return a; }
       const c = self.resolved(e, fid, callee, args);
       if (c.yields && self.yields.isNone()) { return self.fail(e.span, "a generator is called by `for`, or by a generator"); }
       const ret = c.ret.clone();
@@ -1637,13 +1639,21 @@ impl Lower {
     if (yields && self.yields.isNone()) { return self.fail(e.span, "a closure that yields is called by a generator"); }
     const c: Call = {
       callee: #Value(f, fty.mode == #Once), args: vs, params: fty.params.clone(), argTys: fty.params.clone(), ret: fty.ret.clone(),
-      regions: Vec.new(), fails: self.mayFail(fty.effects), suspends: self.suspends(fty.effects), yields, row: fty.effects.clone(), span: e.span,
+      regions: Vec.new(), fails: self.mayFail(fty.effects), suspends: self.suspends(fty.effects), yields, row: fty.effects.clone(), targs: Vec.new(), span: e.span,
     };
     self.value(#Call(c), fty.ret)
   }
 
   // A call of function `fid` — the call `e`, or the implicit call of a `for`'s `Iterable.each` —
   // its receiver and arguments evaluated in order.
+  // `Ptr.fromMut(mut x)` or `Ptr.fromRef(x)`: the address of the place, if this call takes one.
+  function addressOf(self: mut Self, e: readonly Expr, fid: usize, args: readonly Vec<Expr>): Option<Operand> uses Fail<Diagnostic> {
+    const key = self.builtinKey(fid);
+    if ((key != "Ptr_fromMut" && key != "Ptr_fromRef") || self.p.fns[fid].foreign || args.len() != 1) { return #None; }
+    const p = self.place(args[0]);
+    #Some(self.value(#AddressOf(p), self.exprTy(e.id)))
+  }
+
   function resolved(self: mut Self, e: readonly Expr, fid: usize, callee: readonly Expr, args: readonly Vec<Expr>): Call uses Fail<Diagnostic> {
     const cargs = self.callArgs(e.id);
     const ptys = self.paramTys(fid, cargs);
@@ -1664,6 +1674,8 @@ impl Lower {
     const pmap = substMap(self.p.fns[fid].scheme.tparams, cargs);
     const row = substEffs(self.fnEffects(fid), pmap);
     const c = self.callee(fid, cargs.clone(), span);
+    let targs: Vec<Ty> = Vec.new();
+    for (const a of cargs) { if (const #Ty(t) = a) { targs.push(t.clone()); } }
     const vs = self.args(all, ptys);
     let argTys: Vec<Ty> = Vec.new();
     for (const [i, a] of all.iter().enumerate()) { argTys.push(if (i < ptys.len()) { ptys[i].clone() } else { self.exprTy(a.id) }); }
@@ -1674,7 +1686,7 @@ impl Lower {
     const yields = match (c) { #Inst(_) => self.yieldsOf(row).isSome(), _ => false };
     {
       callee: c, args: vs, params: ptys, argTys, ret, regions: self.regionsOf(row), fails: self.mayFail(row),
-      suspends: self.suspends(row), yields, row, span,
+      suspends: self.suspends(row), yields, row, targs, span,
     }
   }
 
@@ -1718,7 +1730,7 @@ impl Lower {
     if (self.p.defs[d].name == "Io" && self.p.modules[self.p.defs[d].module].isStd) {
       const c: Call = {
         callee: #Builtin(`perform:Io:${op}`), args: vs, params: tys.clone(), argTys: tys, ret: rt.clone(), regions: Vec.new(),
-        fails: false, suspends: true, yields: false, row: self.ioRow(), span: e.span,
+        fails: false, suspends: true, yields: false, row: self.ioRow(), targs: Vec.new(), span: e.span,
       };
       return self.value(#Call(c), rt);
     }
@@ -2439,7 +2451,7 @@ impl Lower {
       const ot = optionTy(itemTy.clone());
       const c: Call = {
         callee: #Builtin("Receiver_recv".toString()), args: [#Copy(localPlace(ch))], params: [it.clone()], argTys: [it.clone()],
-        ret: ot.clone(), regions: Vec.new(), fails: false, suspends: true, yields: false, row: self.ioRow(), span: iter.span,
+        ret: ot.clone(), regions: Vec.new(), fails: false, suspends: true, yields: false, row: self.ioRow(), targs: Vec.new(), span: iter.span,
       };
       const o = self.value(#Call(c), ot.clone());
       self.nextItem(l, pat, o, ot, itemTy, body);
@@ -2545,7 +2557,7 @@ impl Lower {
 // What lowering `main` finds: its instance, how its parameters read the command line, what it may
 // fail with, and whether the program starts tasks, or makes channels or locks, which the scheduler
 // serves.
-export type Entry = { main: usize; args: Vec<MainArg>; fails: Option<Ty>; tasks: bool };
+export type Entry = { main: Option<usize>; args: Vec<MainArg>; fails: Option<Ty>; tasks: bool; exports: Vec<usize> };
 
 impl Lower {
   function saveFn(self: mut Self): Saved {
@@ -2754,12 +2766,22 @@ impl Lower {
   }
 
   // The program whose entry module is `entry`: `main`'s instance, and how it is run.
-  export function entry(self: mut Self, entry: usize): Entry uses Fail<#Failed(String)> {
+  // A program run on its own has `main`; a freestanding one is the functions C calls.
+  export function entry(self: mut Self, entry: usize, freestanding: bool): Entry uses Fail<#Failed(String)> {
+    self.owned = self.p.fns.len();
+    // The functions C calls are the program's too.
+    let exports: Vec<usize> = Vec.new();
+    for (const fid of 0..self.p.fns.len()) {
+      if (self.p.fns[fid].foreign && self.p.fns[fid].hasBody) { exports.push(self.instance(fid, Vec.new())); }
+    }
+    if (freestanding) {
+      if (exports.len() == 0) { throw #Failed("error: a freestanding program has no function C calls: declare one `export extern \"C\" function`".toString()); }
+      return { main: #None, args: Vec.new(), fails: #None, tasks: false, exports };
+    }
     const mainFid = match (self.p.lookup(entry, "main")) {
       #Some(#Fn(f)) => f,
       _ => throw #Failed("error: the program has no `main` function".toString()),
     };
-    self.owned = self.p.fns.len();
     const main = self.instance(mainFid, Vec.new());
     // `main` is given the command line, as its parameters' types read it.
     let args: Vec<MainArg> = Vec.new();
@@ -2778,7 +2800,7 @@ impl Lower {
       });
     }
     const fails = self.failOf(self.fnEffects(mainFid));
-    { main, args, fails, tasks: self.startsTasks() }
+    { main: #Some(main), args, fails, tasks: self.startsTasks(), exports }
   }
 
   // Whether the program starts tasks or makes channels or locks: anything the scheduler serves.

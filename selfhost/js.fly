@@ -650,6 +650,7 @@ impl JsGen {
       #Convert(v) => self.operand(v, span),
       #Closure(k, caps, _) => self.closure(k, caps, span),
       #FnRef(i) => self.instName(i),
+      #AddressOf(_) => self.fail(span, "an address exists only in a native program"),
       #Call(_) => self.fail(span, "a call where a value was expected"),
     }
   }
@@ -915,6 +916,10 @@ impl JsGen {
       vs.push(if (lent) { `$rt.sliceRef(${v})` } else { v.clone() });
     }
     const arg = (i: usize) => if (i < vs.len()) { vs[i].clone() } else { "undefined".toString() };
+    // Raw memory and C exist only in a native program (§8.2).
+    if (key.startsWith("extern:") || key.startsWith("Ptr_") || key == "sizeOf" || key == "alignOf" || key == "zeroed" || key.startsWith("fence")) {
+      return self.fail(span, `\`${key}\` runs only in a native program`);
+    }
     if (key.startsWith("perform:Io:")) {
       const op = key.slice(11, key.len());
       return if (self.tasks) { `(yield* $b.Io_${op}$g(${vs.join(", ")}))` } else { `$b.Io_${op}(${vs.join(", ")})` };
@@ -1199,7 +1204,9 @@ impl JsGen {
   }
 
   export function program(self: mut Self, entry: usize, runtime: str): String uses Fail<#Failed(String)> {
-    const ent = self.lw.entry(entry);
+    const ent = self.lw.entry(entry, false);
+    if (ent.exports.len() > 0) { throw #Failed("error: functions C calls exist only in a native program".toString()); }
+    const mainInst = match (ent.main) { #Some(m) => m, #None => throw #Failed("error: the program has no `main` function".toString()) };
     self.tasks = ent.tasks;
     let next: usize = 0;
     while (next < self.lw.insts.len()) {
@@ -1227,8 +1234,8 @@ impl JsGen {
         #Strings | #Strs => `$rt.argList(${k})`,
       });
     }
-    const main = self.instName(ent.main);
-    const suspends = if (self.instSuspends(ent.main)) { "true" } else { "false" };
+    const main = self.instName(mainInst);
+    const suspends = if (self.instSuspends(mainInst)) { "true" } else { "false" };
     const tasks = if (self.tasks) { "true" } else { "false" };
     let out = runtime.toString();
     out.push("\n");

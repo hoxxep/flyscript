@@ -16,6 +16,11 @@
 #include <string.h>
 
 typedef uint8_t fly_unit;
+
+// A function of C's is declared under a name of the program's, bound to its own symbol.
+#define FLY_XSTR(x) #x
+#define FLY_STR(x) FLY_XSTR(x)
+#define FLY_SYMBOL(name) __asm__(FLY_STR(__USER_LABEL_PREFIX__) #name)
 typedef __int128 fly_i128;
 
 typedef struct { const uint8_t* ptr; size_t len; } fly_str;

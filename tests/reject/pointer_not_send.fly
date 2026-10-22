@@ -1,0 +1,7 @@
+// error: a task cannot capture `p`: `Ptr<u8>` is not `Send`
+// A raw pointer is not `Send`: no task may take one to another (§8.2).
+export function main(p: u8*): void uses Io {
+  Io.scope((s) => {
+    s.spawn(() => { const q = p; });
+  });
+}

@@ -1832,7 +1832,7 @@ impl Own {
       #Prim(#Str) => true,
       // A closure lent borrows carries them; one that escaped owns only `Send` values.
       #Fn(_) => mutOk || match (self.state.holds.get(v)) { #Some(h) => h.len() == 0, #None => true },
-      t => self.p.isSendGiven(t, self.sendParams) || self.p.isCopy(t) && self.p.class(t) == 1,
+      t => self.p.isSendGiven(t, self.sendParams),
     }
   }
 

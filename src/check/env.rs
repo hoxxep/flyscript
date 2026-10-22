@@ -105,6 +105,9 @@ pub struct Def {
     pub tag_order: Vec<String>,
     /// A template struct's fields as written, computed per instance (§7.1).
     pub template_fields: Option<Vec<ast::Field>>,
+    /// `@layout(c)`: laid out as C lays it out, so C may take it (§8.2); and the alignment asked.
+    pub c_layout: bool,
+    pub align: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -123,6 +126,8 @@ pub struct FnInfo {
     pub exported: bool,
     pub impl_id: Option<usize>,
     pub has_body: bool,
+    /// `extern "C"`: a function of C's, or one C calls (§8.2).
+    pub foreign: bool,
     /// For an interface's method called through a bound (`x.encode()` with `T extends Json`):
     /// the interface. Its first generic parameter is `Self`, resolved to an impl when called.
     pub iface: Option<DefId>,
@@ -489,6 +494,7 @@ impl Program {
                             exported: item.exported,
                             impl_id: None,
                             has_body: f.body.is_some(),
+                            foreign: f.sig.foreign,
                             iface: None,
                         });
                         (f.sig.name.name.clone(), Binding::Fn(id))
@@ -503,7 +509,7 @@ impl Program {
                 }
             }
         }
-        for name in ["Fail", "Yield", "Region", "Io", "String", "Ref", "Vec", "Iterable", "LentBy", "Copy", "Send", "Eq", "Show", "Ord", "Cont", "Box", "Arc"] {
+        for name in ["Fail", "Yield", "Region", "Io", "String", "Ref", "Vec", "Iterable", "LentBy", "Copy", "Send", "Eq", "Show", "Ord", "Cont", "Box", "Arc", "Ptr", "Unsafe"] {
             let prelude = self.module_named("std/prelude").expect("prelude");
             let layout = self.module_named("std/layout").expect("layout");
             let found = self.modules[prelude].exports.get(name).or_else(|| self.modules[layout].exports.get(name));
@@ -588,8 +594,11 @@ impl Program {
                     ItemKind::Impl(imp) => self.elaborate_impl(m, i, imp),
                     ItemKind::Function(f) => {
                         let scope = TyScope { module: m, ..Default::default() };
-                        let scheme = self.elaborate_sig(&f.sig, &scope, None);
+                        let mut scheme = self.elaborate_sig(&f.sig, &scope, None);
                         let Some(Binding::Fn(id)) = self.modules[m].scope.get(&f.sig.name.name).copied() else { continue };
+                        if f.sig.foreign {
+                            scheme = self.foreign_scheme(m, f, scheme);
+                        }
                         // A template is checked only per specialization, so it states its effects (§7.1).
                         if (item.exported || scheme.tparams.iter().any(|g| g.comptime)) && scheme.effects.is_none() {
                             self.fns[id].scheme = Scheme { effects: Some(EffRow::pure()), ..scheme };
@@ -614,6 +623,8 @@ impl Program {
             view: false,
             tag_order: Vec::new(),
             template_fields: None,
+            c_layout: false,
+            align: None,
         });
         self.defs.len() - 1
     }
@@ -686,6 +697,18 @@ impl Program {
         match &item.kind {
             ItemKind::Struct(s) => {
                 self.defs[id].view = s.view;
+                if let Some(l) = &s.layout {
+                    if l.name != "c" && l.name != "packed" {
+                        self.error(m, l.span, "`@layout` takes `c` or `packed`");
+                    }
+                    self.defs[id].c_layout = l.name == "c";
+                }
+                if let Some(a) = s.align {
+                    if !a.is_power_of_two() {
+                        self.error(m, name.span, "an alignment is a power of two");
+                    }
+                    self.defs[id].align = Some(a);
+                }
                 self.defs[id].private =
                     s.fields.iter().flatten().filter(|f| f.private).map(|f| f.name.name.clone()).collect();
                 // A struct with a type parameter that is `comptime`, or `comptime` code among its
@@ -856,6 +879,7 @@ impl Program {
                 exported,
                 impl_id: Some(id),
                 has_body: method.decl.body.is_some(),
+                foreign: false,
                 iface: None,
             });
             self.impls[id].methods.push(fid);
@@ -885,6 +909,51 @@ impl Program {
         let ret = self.elab_ty(&sig.ret.ty, &inner);
         let effects = sig.uses.as_ref().map(|row| self.elab_effects(row, &inner));
         Scheme { tparams: all, params, ret, effects, ret_from: sig.ret.from.iter().map(|i| i.name.clone()).collect() }
+    }
+
+    /// The scheme of an `extern "C"` function (§8.2): what it takes and gives must be what C has;
+    /// one of C's performs `Unsafe` besides what it declares, and one C calls performs nothing.
+    fn foreign_scheme(&mut self, m: usize, f: &ast::FnDecl, mut scheme: Scheme) -> Scheme {
+        let mut tys: Vec<(Ty, Span)> = scheme.params.iter().zip(&f.sig.params).map(|((_, t), p)| (t.clone(), p.ty.as_ref().map_or(p.name.span, |x| x.span))).collect();
+        tys.push((scheme.ret.clone(), f.sig.ret.ty.span));
+        for (t, span) in tys {
+            if !self.c_representable(&t) {
+                let shown = format!("{}", Show(&t, self));
+                self.error(m, span, format!("an `extern \"C\"` function takes and gives only what C has — integers, floats, `bool`, pointers and `@layout(c)` structs of them — not `{shown}`"));
+            }
+        }
+        if !scheme.tparams.is_empty() {
+            self.error(m, f.sig.name.span, "an `extern \"C\"` function is not generic");
+        }
+        let unsafe_eff = self.known.get("Unsafe").map(|&d| Eff { def: d, regions: Vec::new(), args: Vec::new() });
+        if f.body.is_none() {
+            let mut row = scheme.effects.clone().unwrap_or_else(EffRow::pure);
+            if let Some(u) = unsafe_eff {
+                row.effs.push(u);
+            }
+            scheme.effects = Some(row);
+        } else {
+            if scheme.effects.as_ref().is_some_and(|r| !r.effs.is_empty() || r.tail != Tail::Closed) {
+                self.error(m, f.sig.name.span, "a function C calls performs nothing: C cannot handle an effect, nor a failure");
+            }
+            scheme.effects = Some(EffRow::pure());
+        }
+        scheme
+    }
+
+    /// Whether C has values of the type: a number, a `bool`, a pointer, `void`, or a struct laid
+    /// out as C lays it out, of those.
+    pub fn c_representable(&self, t: &Ty) -> bool {
+        match t {
+            Ty::Prim(p) => !matches!(p, Prim::Str | Prim::Never | Prim::Type | Prim::I128),
+            Ty::Named(d, args) => {
+                if self.known.get("Ptr") == Some(d) {
+                    return true;
+                }
+                self.defs[*d].c_layout && self.struct_fields(*d, args).is_some_and(|fs| fs.iter().all(|(_, x)| self.c_representable(x)))
+            }
+            _ => false,
+        }
     }
 
     // ---- elaboration of types ----
@@ -1035,8 +1104,16 @@ impl Program {
             }
             TypeKind::Mut(inner) => Ty::Borrow(true, Box::new(self.elab_ty(inner, scope))),
             TypeKind::Readonly(inner) => Ty::Borrow(false, Box::new(self.elab_ty(inner, scope))),
-            TypeKind::Ptr(_) | TypeKind::Dyn(_) => {
-                self.error(m, t.span, "raw pointers and `dyn` are not supported yet");
+            // `T*` is the library's `Ptr<T>` (§8.2).
+            TypeKind::Ptr(inner) => {
+                let elem = self.elab_ty(inner, scope);
+                match self.known.get("Ptr") {
+                    Some(&d) => Ty::Named(d, vec![GArg::Ty(elem)]),
+                    None => Ty::Error,
+                }
+            }
+            TypeKind::Dyn(_) => {
+                self.error(m, t.span, "`dyn` is not supported yet");
                 Ty::Error
             }
             TypeKind::Expr(_) => {

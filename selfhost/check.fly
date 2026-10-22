@@ -572,6 +572,8 @@ impl Checker {
           #Some(d) => `this can fail with \`${self.show(e.args[0])}\`, which is not in the declared failures \`${self.show(d.args[0])}\``,
           #None => `this can fail with \`${self.show(e.args[0])}\`, but the enclosing function does not declare \`Fail\``,
         }
+      } else if (self.p.known.get("Unsafe") == #Some(e.def)) {
+        "this reaches through a raw pointer or calls C, which is `Unsafe`: vouch for it in `unsafe { … }`, or declare `uses Unsafe`".toString()
       } else if (e.def == regionDef) {
         match (match (e.regions.first()) { #Some(r) => #Some(self.s.resolveRegion(r)), #None => #None }) {
           #Some(#Heap) => "this allocates in a region, but its result is expected in the heap; region allocation needs an enclosing `region` block".toString(),
@@ -906,7 +908,17 @@ impl Checker {
       #Break | #Continue => neverTy(),
       #Region { name, body } => self.region(name, body, expected, span, e.id),
       #Handle { body, effect, arms } => self.handle(body, effect, arms, expected, e),
-      #Unsafe(b) => self.block(b, expected),
+      // `unsafe { … }` handles `Unsafe`: its body may reach through pointers and call C (§8.2).
+      #Unsafe(b) => match (self.p.known.get("Unsafe")) {
+        #Some(d) => {
+          const eff = Eff { def: d, regions: Vec.new(), args: Vec.new() };
+          const outer = self.enterHandler(eff);
+          const t = self.block(b, expected);
+          self.leaveHandler(eff, outer);
+          t
+        }
+        #None => self.block(b, expected),
+      },
       #Comptime(inner) => self.expr(inner, expected),
     }
   }

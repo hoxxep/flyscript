@@ -1,0 +1,3 @@
+// error: an `extern "C"` function takes and gives only what C has
+// C has no `String`: a function of C's takes what C has (§8.2).
+extern "C" function puts(s: String): i32;

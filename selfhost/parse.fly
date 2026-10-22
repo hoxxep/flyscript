@@ -173,9 +173,11 @@ impl Parser {
     const kind: ItemKind = if (self.atKw("import") && !exported) {
       self.importItem()
     } else if (self.at("@")) {
-      const layout = self.layout();
+      const [layout, align] = self.layout();
       const view = self.eatWord("view");
-      #Struct(self.structDecl(#Some(layout), view))
+      let s = self.structDecl(#Some(layout), view);
+      s.align = align;
+      #Struct(s)
     } else if (self.atWord("view") && (Parser.isKw(self.tokAt(1), "struct") || Parser.isKw(self.tokAt(1), "enum"))) {
       self.bump();
       if (self.atKw("struct")) {
@@ -213,9 +215,11 @@ impl Parser {
         #Str(abi) if abi == "C" => { self.bump(); }
         _ => self.error("`\"C\"`"),
       }
-      const sig = self.sig(true);
-      self.expect(";");
-      #Extern(sig)
+      let sig = self.sig(true);
+      sig.foreign = true;
+      // A function of C's ends in `;`; one C calls has a body.
+      const body: Option<Block> = if (self.eat(";")) { #None } else { #Some(self.block()) };
+      #Function({ sig, body })
     } else {
       self.error("a declaration")
     };
@@ -240,13 +244,27 @@ impl Parser {
     #Import { names, from }
   }
 
-  function layout(self: mut Self): Ident uses Fail<Diagnostic> {
+  // `@layout(kind)`, or `@layout(kind, align = N)`.
+  function layout(self: mut Self): [Ident, Option<u64>] uses Fail<Diagnostic> {
     self.expect("@");
     self.expectWord("layout");
     self.expect("(");
     const kind = self.ident();
+    let align: Option<u64> = #None;
+    if (self.eat(",")) {
+      self.expectWord("align");
+      self.expect("=");
+      match (self.tok()) {
+        #Int(n) => {
+          const v = intValue(n.asStr());
+          self.bump();
+          align = #Some(v);
+        }
+        _ => self.error("an alignment"),
+      }
+    }
     self.expect(")");
-    kind
+    [kind, align]
   }
 
   function structDecl(self: mut Self, layout: Option<Ident>, view: bool): StructDecl uses Fail<Diagnostic> {
@@ -254,7 +272,7 @@ impl Parser {
     const name = self.ident();
     const params = self.typeParams();
     const fields: Option<Vec<Field>> = if (self.declarations && self.eat(";")) { #None } else { #Some(self.fieldList()) };
-    { layout, view, name, params, fields }
+    { layout, align: #None, view, name, params, fields }
   }
 
   // `{ name: Type; … }` with `;` or `,` separators.
@@ -490,7 +508,7 @@ impl Parser {
     self.expect(":");
     const ret = self.ret();
     const row = self.uses();
-    { isComptime, name, typeParams, params, ret, uses: row, span: self.since(start) }
+    { isComptime, foreign: false, name, typeParams, params, ret, uses: row, span: self.since(start) }
   }
 
   function params(self: mut Self, typed: bool): Vec<Param> uses Fail<Diagnostic> {
@@ -1582,4 +1600,18 @@ function boundFields(fields: readonly Vec<[Ident, Option<Pattern>]>, out: mut Ve
       #None => out.push([n.name.clone(), n.span]),
     }
   }
+}
+
+// An integer literal's value: decimal, or hexadecimal after `0x`.
+function intValue(s: str): u64 {
+  let v: u64 = 0;
+  if (s.startsWith("0x")) {
+    for (const b of s.slice(2, s.len()).bytes()) {
+      const d: u64 = if (b >= b'0' && b <= b'9') { (b - b'0') as u64 } else if (b >= b'a' && b <= b'f') { (b - b'a' + 10) as u64 } else if (b >= b'A' && b <= b'F') { (b - b'A' + 10) as u64 } else { 0 };
+      v = v.wrappingMul(16).wrappingAdd(d);
+    }
+  } else {
+    for (const b of s.bytes()) { v = v.wrappingMul(10).wrappingAdd((b - b'0') as u64); }
+  }
+  v
 }

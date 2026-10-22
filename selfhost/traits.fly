@@ -71,7 +71,8 @@ impl Program {
       #Slice(_) => true,
       #Named(d, args) => {
         // Region references and region handles are `Copy` (§4.6).
-        if (self.isKnown(d, "Ref") || self.defNamed(d, ["Cell", "RegionList"])) { return true; }
+        // A raw pointer is `Copy` too (§8.2).
+        if (self.isKnown(d, "Ref") || self.isKnown(d, "Ptr") || self.defNamed(d, ["Cell", "RegionList"])) { return true; }
         if (self.hasDrop(d)) { return false; }
         if (!seen.insert(keyTy(t))) { return true; }
         match (self.components(d, args)) {
@@ -107,7 +108,8 @@ impl Program {
       #Array(e, _) => self.classIn(e, mut seen),
       // A region reference points into its region, not at a loan: it is class 1 whatever it
       // points to (§4.6).
-      #Named(d, _) if self.isKnown(d, "Ref") => 1,
+      // A raw pointer is an address, not a loan, whatever it points to (§8.2).
+      #Named(d, _) if self.isKnown(d, "Ref") || self.isKnown(d, "Ptr") => 1,
       #Named(d, args) => {
         if (!seen.insert(keyTy(t))) { return 1; }
         let c: u8 = 1;
@@ -150,7 +152,7 @@ impl Program {
       }
       #Named(d, args) => {
         // A region reference is class 1 whatever it points at (§4.6).
-        if (!self.defs[d].view && !self.isKnown(d, "Ref")) {
+        if (!self.defs[d].view && !self.isKnown(d, "Ref") && !self.isKnown(d, "Ptr")) {
           for (const a of argTypes(args)) { if (self.class(a) == 2) { return #Some([d, a.clone()]); } }
         }
         if (!seen.insert(keyTy(t))) { return #None; }
@@ -179,7 +181,7 @@ impl Program {
       #Named(d, args) => {
         // Outer regions are frozen while tasks run (§6.1), so region data is always shareable;
         // the runtime's own handles are not.
-        if (self.defNamed(d, ["Gen", "Fiber", "Scope", "Cont"])) { return false; }
+        if (self.defNamed(d, ["Gen", "Fiber", "Scope", "Cont"]) || self.isKnown(d, "Ptr")) { return false; }
         if (!seen.insert(keyTy(t))) { return true; }
         argTypes(args).iter().every((a) => self.sendIn(a, sendParams, mut seen))
           && match (self.components(d, args)) { #Some(cs) => cs.iter().every((c) => self.sendIn(c, sendParams, mut seen)), #None => true }

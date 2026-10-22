@@ -33,7 +33,7 @@ function readText(path: String): String uses Io, Fail<Stop> {
   } catch (_) { throw #Unreadable { path } }
 }
 
-function compile(entry: str, out: str, root: str): void uses Io, Fail<Stop> {
+function compile(entry: str, out: str, root: str, freestanding: bool): void uses Io, Fail<Stop> {
   let p = Program.load([entry.toString()], `${root}/std`.asStr());
   if (p.diags.len() == 0) {
     let fid: usize = 0;
@@ -57,10 +57,12 @@ function compile(entry: str, out: str, root: str): void uses Io, Fail<Stop> {
   const rt: String = if (toC) {
     const h = readText(`${root}/selfhost/runtime.h`);
     const c = readText(`${root}/selfhost/runtime.c`);
-    `${h}\n${c.asStr().replaceAll("#include \"runtime.h\"", "")}`
+    // A freestanding program's runtime does without the C library.
+    const mode = if (freestanding) { "#define FLY_FREESTANDING 1\n" } else { "" };
+    `${mode}${h}\n${c.asStr().replaceAll("#include \"runtime.h\"", "")}`
   } else { readText(`${root}/selfhost/runtime.js`) };
   const code = try {
-    if (toC) { cProgram(p, main, rt.asStr()) } else { jsProgram(p, main, rt.asStr()) }
+    if (toC) { cProgram(p, main, rt.asStr(), freestanding) } else if (freestanding) { throw #Failed("error: a freestanding program compiles only to C".toString()) } else { jsProgram(p, main, rt.asStr()) }
   } catch (#Failed(message)) {
     println(message.asStr());
     throw #Failed
@@ -68,9 +70,10 @@ function compile(entry: str, out: str, root: str): void uses Io, Fail<Stop> {
   try { writeFile(out, code.asStr()); } catch (_) { throw #Unreadable { path: out.toString() } };
 }
 
-export function main(entry: str, out: str, root: str): void uses Io {
+// `--freestanding`: a program without the C library, whose roots are the functions C calls.
+export function main(entry: str, out: str, root: str, flags: readonly String[]): void uses Io {
   try {
-    compile(entry, out, root);
+    compile(entry, out, root, flags.iter().some((f) => f == "--freestanding"));
   } catch (e) {
     match (e) {
       #Failed => {}

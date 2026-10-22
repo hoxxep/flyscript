@@ -221,7 +221,7 @@ impl Cgen {
     match (t) {
       #Prim(_) | #Slice(_) | #Fn(_) => true,
       #Borrow(_, _) => true,
-      #Named(d, _) => self.lw.p.isKnown(d, "Box") || self.lw.p.isKnown(d, "Ref") || self.lw.p.isKnown(d, "Arc") || self.namedIs(t, "Cell") || self.namedIs(t, "RegionList")
+      #Named(d, _) => self.lw.p.isKnown(d, "Box") || self.lw.p.isKnown(d, "Ref") || self.lw.p.isKnown(d, "Arc") || self.lw.p.isKnown(d, "Ptr") || self.namedIs(t, "Cell") || self.namedIs(t, "RegionList")
         || self.namedIs(t, "Scope") || self.namedIs(t, "Fiber") || self.namedIs(t, "Sender") || self.namedIs(t, "Receiver")
         || self.namedIs(t, "Reply") || self.namedIs(t, "Pending") || self.namedIs(t, "Mutex") || self.namedIs(t, "Listener") || self.namedIs(t, "Db"),
       _ => false,
@@ -261,8 +261,8 @@ impl Cgen {
         if (self.namedIs(t, "Gen")) { return "fly_gen".toString(); }
         if (self.namedIs(t, "Hasher")) { return "fly_Hasher".toString(); }
         if (self.namedIs(t, "File")) { return "fly_File".toString(); }
-        // A region's handles point into its arena.
-        if (self.lw.p.isKnown(d, "Ref") || self.namedIs(t, "Cell") || self.lw.p.isKnown(d, "Arc")) {
+        // A region's handles point into its arena; a raw pointer is C's.
+        if (self.lw.p.isKnown(d, "Ref") || self.namedIs(t, "Cell") || self.lw.p.isKnown(d, "Arc") || self.lw.p.isKnown(d, "Ptr")) {
           const inner: Ty = match (args.last()) { #Some(#Ty(x)) => x.clone(), _ => #Error };
           const c = self.ctypeRef(inner, span);
           return `${c}*`;
@@ -363,7 +363,9 @@ impl Cgen {
         if (body.len() == 0) { body.push("  fly_unit empty;\n"); }
       }
     }
-    self.typeDefs.push(`struct ${name} {\n${body}};\n`);
+    // A struct laid out for C may ask for an alignment.
+    const align = match (t) { #Named(d, _) => match (self.lw.p.defs[d].align) { #Some(a) => ` __attribute__((aligned(${a})))`, #None => String.new() }, _ => String.new() };
+    self.typeDefs.push(`struct ${name} {\n${body}}${align};\n`);
     name
   }
 
@@ -851,6 +853,11 @@ impl Cgen {
       }
       #Closure(k, caps, lent) => self.closure(k, caps, lent, span),
       #FnRef(i) => self.fnValue(i, span),
+      #AddressOf(p) => {
+        const lv = self.lvalue(p, span);
+        const ct = self.ctype(ty, span);
+        `((${ct})&(${lv}))`
+      }
       #Call(_) => self.fail(span, "a call where a value was expected"),
     }
   }
@@ -1447,6 +1454,8 @@ impl Cgen {
       _ => #Error,
     };
     if (key.startsWith("perform:Io:")) { return self.ioOp(key.slice(11, key.len()), c, vs.clone()); }
+    if (key.startsWith("extern:")) { return self.foreignCall(key.slice(7, key.len()), c, vs.clone()); }
+    if (const #Some(r) = self.memory(key, c, vs.clone())) { return r; }
     match (key) {
       "println" => `({ fly_println(${arg(0)}); (fly_unit)0; })`,
       "panic" => `({ fly_str m_ = ${arg(0)}; fly_panicf("%.*s", (int)m_.len, (const char*)m_.ptr); (fly_unit)0; })`,
@@ -1531,6 +1540,56 @@ impl Cgen {
         }
       }
     }
+  }
+
+  // A call of a function of C's, by its symbol: declared once, under a name of the program's, so
+  // a C header that declares it otherwise does not conflict.
+  function foreignCall(self: mut Self, name: str, c: readonly Call, vs: Vec<String>): String uses Fail<Diagnostic> {
+    const key = `extern:${name}`;
+    if (!self.helpers.has(key.asStr())) {
+      self.helpers.insert(key.clone(), name.toString());
+      let ps: Vec<String> = Vec.new();
+      for (const p of c.params) { ps.push(self.ctype(p, c.span)); }
+      const rt = if (isVoidTy(c.ret)) { "void".toString() } else { self.ctype(c.ret, c.span) };
+      self.protos.push(`extern ${rt} fly_c_${name}(${if (ps.len() == 0) { "void".toString() } else { ps.join(", ") }}) FLY_SYMBOL(${name});\n`);
+    }
+    const call = `fly_c_${name}(${vs.join(", ")})`;
+    if (isVoidTy(c.ret)) { `({ ${call}; (fly_unit)0; })` } else { call }
+  }
+
+  // Raw memory: pointers, atomics, fences, sizes (§8.2).
+  function memory(self: mut Self, key: str, c: readonly Call, vs: Vec<String>): Option<String> uses Fail<Diagnostic> {
+    const span = c.span;
+    const arg = (i: usize) => if (i < vs.len()) { vs[i].clone() } else { "0".toString() };
+    const rc = self.ctype(c.ret, span);
+    const targ = (k: usize) => match (c.targs.get(k)) { #Some(t) => t.clone(), #None => #Error };
+    #Some(match (key) {
+      "Ptr_at" => `((${rc})(uintptr_t)(${arg(0)}))`,
+      "Ptr_address" => `((uint64_t)(uintptr_t)(${arg(0)}))`,
+      "Ptr_add" => `(${arg(0)} + ${arg(1)})`,
+      "Ptr_cast" => `((${rc})(${arg(0)}))`,
+      "Ptr_read" => `(*(${arg(0)}))`,
+      "Ptr_write" => `({ *(${arg(0)}) = ${arg(1)}; (fly_unit)0; })`,
+      "Ptr_readVolatile" => `(*(volatile __typeof__(*(${arg(0)}))*)(${arg(0)}))`,
+      "Ptr_writeVolatile" => `({ *(volatile __typeof__(*(${arg(0)}))*)(${arg(0)}) = ${arg(1)}; (fly_unit)0; })`,
+      "Ptr_loadAcquire" => `__atomic_load_n(${arg(0)}, __ATOMIC_ACQUIRE)`,
+      "Ptr_storeRelease" => `({ __atomic_store_n(${arg(0)}, ${arg(1)}, __ATOMIC_RELEASE); (fly_unit)0; })`,
+      "Ptr_fetchAdd" => `__atomic_fetch_add(${arg(0)}, ${arg(1)}, __ATOMIC_SEQ_CST)`,
+      "Ptr_compareExchange" => `({ __typeof__(*(${arg(0)})) e_ = ${arg(1)}; bool ok_ = __atomic_compare_exchange_n(${arg(0)}, &e_, ${arg(2)}, false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST); (${rc}){ .f0 = e_, .f1 = ok_ }; })`,
+      "sizeOf" => {
+        const t = targ(0);
+        if (unitTy(t)) { "((uint64_t)0)".toString() } else { `((uint64_t)sizeof(${self.ctype(t, span)}))` }
+      }
+      "alignOf" => {
+        const t = targ(0);
+        if (unitTy(t)) { "((uint64_t)1)".toString() } else { `((uint64_t)_Alignof(${self.ctype(t, span)}))` }
+      }
+      "zeroed" => if (unitTy(c.ret)) { "((fly_unit)0)".toString() } else { `((${rc}){ 0 })` },
+      "fence" => "({ __atomic_thread_fence(__ATOMIC_SEQ_CST); (fly_unit)0; })".toString(),
+      "fenceAcquire" => "({ __atomic_thread_fence(__ATOMIC_ACQUIRE); (fly_unit)0; })".toString(),
+      "fenceRelease" => "({ __atomic_thread_fence(__ATOMIC_RELEASE); (fly_unit)0; })".toString(),
+      _ => return #None,
+    })
   }
 
   // The lvalue of a place an argument reads, for a routine that changes it.
@@ -2116,7 +2175,7 @@ function useCall(c: readonly Call, u: mut Uses): void {
 function useRvalue(rv: readonly Rvalue, u: mut Uses): void {
   match (rv) {
     #Use(op) | #Unary(_, op) | #Cast(op, _) | #Convert(op) => useOperand(op, mut u),
-    #Borrow(_, p) | #View(p) | #IsTag(p, _) => usePlace(p, mut u),
+    #Borrow(_, p) | #View(p) | #IsTag(p, _) | #AddressOf(p) => usePlace(p, mut u),
     #Binary(_, a, b) => { useOperand(a, mut u); useOperand(b, mut u); }
     #Tag(_, vs) | #List(vs) => { for (const v of vs) { useOperand(v, mut u); } }
     #Fields(fs) => { for (const [_, v] of fs) { useOperand(v, mut u); } }
@@ -2618,8 +2677,8 @@ impl Cgen {
   }
 
   // The C for a checked program whose entry module is `entry`.
-  export function program(self: mut Self, entry: usize, runtime: str): String uses Fail<#Failed(String)> {
-    const ent = self.lw.entry(entry);
+  export function program(self: mut Self, entry: usize, runtime: str, freestanding: bool): String uses Fail<#Failed(String)> {
+    const ent = self.lw.entry(entry, freestanding);
     // A failure nothing caught is shown, as the reference shows it.
     let uncaught = "  if (FLY_FAILED) { printf(\"<uncaught failure>\\n\"); return 1; }\n".toString();
     if (const #Some(errTy) = ent.fails) {
@@ -2674,7 +2733,15 @@ impl Cgen {
         #Strs => `fly_arg_strs(${k})`,
       });
     }
-    const main = self.lw.insts[ent.main].name.clone();
+    // The functions C calls, by their own symbols.
+    let exports = String.new();
+    for (const i of ent.exports) {
+      const r = try { #Ok(self.exportWrapper(i)) } catch (d) { #Err(d) };
+      match (r) {
+        #Ok(w) => exports.push(w.asStr()),
+        #Err(d) => throw self.failed(d, self.lw.p.fns[self.lw.insts[i].fid].module),
+      }
+    }
     let out = runtime.toString();
     out.push("\n// ---- the program ----\n");
     out.push(self.typeFwd.asStr());
@@ -2683,6 +2750,8 @@ impl Cgen {
     out.push(self.dropCode.asStr());
     out.push(self.apartCode.asStr());
     out.push(self.code.asStr());
+    out.push(exports.asStr());
+    const main = match (ent.main) { #Some(m) => self.lw.insts[m].name.clone(), #None => return out };
     // A program that starts tasks, or makes channels or locks, runs `main` as the first task.
     if (ent.tasks) {
       out.push(`static void fly_main_task(void) { ${main}(${args.join(", ")}); }\n`);
@@ -2693,18 +2762,36 @@ impl Cgen {
     out
   }
 
+  // A function C calls: its symbol, calling its instance.
+  function exportWrapper(self: mut Self, i: usize): String uses Fail<Diagnostic> {
+    const fid = self.lw.insts[i].fid;
+    const args = self.lw.insts[i].args.clone();
+    const ps = self.lw.paramTys(fid, args.clone());
+    const ret = self.lw.concreteRet(fid, args);
+    let decls: Vec<String> = Vec.new();
+    let names: Vec<String> = Vec.new();
+    for (const [k, t] of ps.iter().enumerate()) {
+      decls.push(`${self.ctype(t, { start: 0, end: 0 })} a${k}`);
+      names.push(`a${k}`);
+    }
+    const name = self.lw.p.fns[fid].name.clone();
+    const params = if (decls.len() == 0) { "void".toString() } else { decls.join(", ") };
+    const call = `${self.lw.insts[i].name}(${names.join(", ")})`;
+    if (isVoidTy(ret)) { `void ${name}(${params}) { ${call}; }\n` } else { `${self.ctype(ret, { start: 0, end: 0 })} ${name}(${params}) { return ${call}; }\n` }
+  }
+
   function primOf(self: readonly Self, t: readonly Ty): str {
     match (t) { #Prim(p) => primType(p), _ => "int64_t" }
   }
 }
 
 // The C for a checked program: the runtime, then the code its `main` reaches.
-export function cProgram(p: Prog, entry: usize, runtime: str): String uses Fail<#Failed(String)> {
+export function cProgram(p: Prog, entry: usize, runtime: str, freestanding: bool): String uses Fail<#Failed(String)> {
   let c = Cgen {
     lw: newLower(p), closuresDone: 0, types: HashMap.new(), defined: HashSet.new(), pending: Vec.new(), typeFwd: String.new(),
     typeDefs: String.new(), tags: HashMap.new(), drops: HashMap.new(), dropCode: String.new(), convs: HashMap.new(),
     helpers: HashMap.new(), consts: HashMap.new(), protos: String.new(), code: String.new(), apartCode: String.new(), aparts: 0,
     tmp: 0, cx: newCtx(Vec.new(), #Prim(#Void), #Fn), module: 0, defers: HashMap.new(), fnName: String.new(),
   };
-  c.program(entry, runtime)
+  c.program(entry, runtime, freestanding)
 }

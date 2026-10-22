@@ -1724,7 +1724,7 @@ impl<'p> Own<'p> {
             Ty::Prim(Prim::Str) => true,
             // A closure lent borrows carries them; one that escaped owns only `Send` values.
             Ty::Fn(_) => mut_ok || self.state.holds.get(&v).is_none_or(|h| h.is_empty()),
-            t => send(t) || self.p.is_copy(t) && self.p.class(t) == 1,
+            t => send(t),
         }
     }
 

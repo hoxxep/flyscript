@@ -64,8 +64,8 @@ impl Program {
             Ty::Array(e, _) => self.copy_in(e, inside),
             Ty::Slice(_) => true,
             Ty::Named(d, args) => {
-                // Region references and region handles are `Copy` (§4.6).
-                if self.is_known(*d, "Ref") || self.def_named(*d, &["Cell", "RegionList"]) {
+                // Region references and region handles are `Copy` (§4.6), as is a raw pointer (§8.2).
+                if self.is_known(*d, "Ref") || self.is_known(*d, "Ptr") || self.def_named(*d, &["Cell", "RegionList"]) {
                     return true;
                 }
                 if self.has_drop(*d) {
@@ -99,7 +99,8 @@ impl Program {
             Ty::Array(e, _) => self.class_in(e, inside),
             // A region reference points into its region, not at a loan: it is class 1 whatever it
             // points to (§4.6).
-            Ty::Named(d, _) if self.is_known(*d, "Ref") => 1,
+            // A raw pointer is an address, not a loan, whatever it points to (§8.2).
+            Ty::Named(d, _) if self.is_known(*d, "Ref") || self.is_known(*d, "Ptr") => 1,
             Ty::Named(d, args) => {
                 if inside.contains(t) {
                     return 1;
@@ -132,7 +133,7 @@ impl Program {
             Ty::Fn(f) => f.params.iter().chain(std::iter::once(&f.ret)).find_map(|t| self.container_in(t, inside)),
             Ty::Named(d, args) => {
                 // A region reference is class 1 whatever it points at (§4.6).
-                if !self.defs[*d].view && !self.is_known(*d, "Ref")
+                if !self.defs[*d].view && !self.is_known(*d, "Ref") && !self.is_known(*d, "Ptr")
                     && let Some(a) = Self::arg_types(args).find(|a| self.class(a) == 2) {
                         return Some((*d, a.clone()));
                     }
@@ -165,7 +166,7 @@ impl Program {
             Ty::Named(d, args) => {
                 // Outer regions are frozen while tasks run (§6.1), so region data is always
                 // shareable; the runtime's own handles are not.
-                if self.def_named(*d, &["Gen", "Fiber", "Scope", "Cont"]) {
+                if self.def_named(*d, &["Gen", "Fiber", "Scope", "Cont"]) || self.is_known(*d, "Ptr") {
                     return false;
                 }
                 if inside.contains(t) {

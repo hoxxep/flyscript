@@ -666,6 +666,8 @@ impl<'p> Checker<'p> {
                     ),
                     None => format!("this can fail with `{}`, but the enclosing function does not declare `Fail`", self.show(&e.args[0])),
                 }
+            } else if self.p.known.get("Unsafe") == Some(&e.def) {
+                "this reaches through a raw pointer or calls C, which is `Unsafe`: vouch for it in `unsafe { … }`, or declare `uses Unsafe`".to_string()
             } else if self.p.known.get("Region") == Some(&e.def) {
                 match e.regions.first().map(|r| self.s.resolve_region(r)) {
                     Some(Region::Heap) => "this allocates in a region, but its result is expected in the heap; region allocation needs an enclosing `region` block".to_string(),
@@ -992,7 +994,11 @@ impl<'p> Checker<'p> {
             ExprKind::Break | ExprKind::Continue => Ty::never(),
             ExprKind::Region { name, body } => self.region(name, body, expected, span),
             ExprKind::Handle { body, effect, arms } => self.handle(body, effect, arms, expected, span),
-            ExprKind::Unsafe(b) => self.block(b, expected),
+            // `unsafe { … }` handles `Unsafe`: its body may reach through pointers and call C (§8.2).
+            ExprKind::Unsafe(b) => match self.p.known.get("Unsafe").copied() {
+                Some(d) => self.with_handler(Eff { def: d, regions: Vec::new(), args: Vec::new() }, |c| c.block(b, expected)),
+                None => self.block(b, expected),
+            },
             ExprKind::Comptime(inner) => self.expr(inner, expected),
         }
     }

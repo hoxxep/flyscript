@@ -1,0 +1,2 @@
+// error: `@layout` takes `c` or `packed`
+@layout(rust) struct S { a: i32 }

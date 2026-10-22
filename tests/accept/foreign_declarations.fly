@@ -1,0 +1,18 @@
+// The foreign interface (§8.2): C's functions and types, pointers, and code vouched for.
+extern "C" function memset(p: u8*, v: i32, n: usize): u8*;
+@layout(c) struct Header { tag: u32; len: u64; next: Header* }
+@layout(c, align = 4096) struct PageTable { entries: u64[512] }
+
+export extern "C" function headerLen(h: Header*): u64 {
+  if (h.address() == 0) { return 0; }
+  unsafe { h.read().len }
+}
+
+// What reaches through a pointer without vouching for it says so.
+export function clear(p: u8*, n: usize): void uses Unsafe {
+  memset(p, 0, n);
+}
+
+export function zero(table: mut PageTable): void {
+  unsafe { clear(Ptr.fromMut(mut table).cast<u8>(), sizeOf<PageTable>()); }
+}

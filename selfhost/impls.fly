@@ -423,7 +423,7 @@ impl Program {
     const module = self.fns[fid].module;
     const spec = FnInfo {
       name: self.fns[fid].name.clone(), module, scheme, decl: self.fns[fid].decl, exported: self.fns[fid].exported,
-      implId: self.fns[fid].implId, hasBody: true, iface: #None,
+      implId: self.fns[fid].implId, hasBody: true, foreign: false, iface: #None,
     };
     const id = self.fns.len();
     self.fns.push(spec);
