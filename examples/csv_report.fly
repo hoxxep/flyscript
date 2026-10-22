@@ -1,0 +1,69 @@
+// A sales report from a CSV file, as a TypeScript programmer would write it: rows parsed into
+// records with typed failures, totals grouped in a map, sorted, and printed as a table.
+import { println, File } from "std/io";
+import { HashMap } from "std/collections";
+
+type Row = { region: String; product: String; units: u32; price: f64 };
+type ParseErr = #BadLine { line: usize; why: String };
+
+function parseRow(line: str, n: usize): Row uses Fail<ParseErr> {
+  const cols = line.split(",");
+  if (cols.len() != 4) {
+    throw #BadLine { line: n, why: `expected 4 columns, found ${cols.len()}` };
+  }
+  const units = match (parseInt(cols[2].asStr())) {
+    #Some(u) => u as u32,
+    #None => throw #BadLine { line: n, why: `units is not a number: ${cols[2]}` },
+  };
+  const price = match (parseFloat(cols[3].asStr())) {
+    #Some(p) => p,
+    #None => throw #BadLine { line: n, why: `price is not a number: ${cols[3]}` },
+  };
+  { region: cols[0].clone(), product: cols[1].clone(), units, price }
+}
+
+function load(path: str): Vec<Row> uses Io, Fail<ParseErr | IoErr> {
+  let rows: Vec<Row> = Vec.new();
+  let f = File.open(path);
+  let n: usize = 0;
+  for (const line of f.lines()) {
+    n += 1;
+    if (n == 1 || line.trim().len() == 0) { continue; }
+    rows.push(parseRow(line.asStr(), n));
+  }
+  rows
+}
+
+type Total = { units: u32; revenue: f64 };
+
+function byRegion(rows: readonly Vec<Row>): Vec<[String, Total]> {
+  let totals: HashMap<String, Total> = HashMap.new();
+  for (const r of rows) {
+    if (const #Some(t) = totals.getMut(r.region)) {
+      t.units += r.units;
+      t.revenue += r.price * (r.units as f64);
+    } else {
+      totals.insert(r.region.clone(), { units: r.units, revenue: r.price * (r.units as f64) });
+    }
+  }
+  let out: Vec<[String, Total]> = Vec.new();
+  for (const [k, v] of totals.entries()) { out.push([k.clone(), v.clone()]); }
+  out.sortBy((a, b) => b[1].revenue.cmp(a[1].revenue));
+  out
+}
+
+export function main(path: str): void uses Io {
+  const rows = try { load(path) } catch (e) {
+    match (e) {
+      #BadLine { line, why } => println(`line ${line}: ${why}`),
+      _ => println(`cannot read ${path}`),
+    }
+    return;
+  };
+  println(`${"region".padEnd(8)}${"units".padEnd(7)}revenue`);
+  for (const [region, t] of byRegion(rows)) {
+    println(`${region.padEnd(8)}${`${t.units}`.padEnd(7)}${t.revenue}`);
+  }
+  const best = rows.iter().filter((r) => r.product == "widget").map((r) => r.units).reduce((a, b) => a + b, 0);
+  println(`widgets sold: ${best}`);
+}

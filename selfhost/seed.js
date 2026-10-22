@@ -52649,7 +52649,24 @@ function library$1249(self, key, e, all, ptys, vs) {
         const pt = { $tag: "Borrow", $: [false, $b.Box_new(clone$26(t))] };
         const pc = ctype$209(self, pt, $rt.copy(span));
         let $37;
-        if (pointerBorrow$415(self.v, pt)) {
+        let $38 = pointerBorrow$415(self.v, pt);
+        if ($38) {
+          let $39;
+          const $40 = t;
+          m$41: {
+            if (($40.$tag === "Borrow")) {
+              $39 = true;
+              break m$41;
+            }
+            if (true) {
+              $39 = false;
+              break m$41;
+            }
+            $rt.unmatched($40);
+          }
+          $38 = (!$39);
+        }
+        if ($38) {
           $37 = "&x";
         } else {
           {
@@ -52657,7 +52674,7 @@ function library$1249(self, key, e, all, ptys, vs) {
           }
         }
         const x = $37;
-        const st = step$1288(self, ("" + "filter:" + tc), "fly_gmap", $b.String_asStr(("" + tc + " x; while (s->in.next(s->in.st, &x)) { if (((bool (*)(void*, " + pc + "))s->f.fn)(s->f.env, " + x + ")) return !FLY_FAILED; " + dropT + "if (FLY_FAILED) return false; } return false;")));
+        const st = step$1288(self, ("" + "filter:" + tc), "fly_gmap", $b.String_asStr(("" + tc + " x; while (s->in.next(s->in.st, &x)) { if (((bool (*)(void*, " + pc + "))s->f.fn)(s->f.env, " + x + ")) { *(" + tc + "*)o_ = x; return !FLY_FAILED; } " + dropT + "if (FLY_FAILED) return false; } return false;")));
         $34 = ("" + "((fly_gen){ fly_gmap_new(" + arg(0) + ", " + arg(1) + "), " + st + ", fly_gmap_drop })");
       }
       break m$36;

@@ -511,7 +511,58 @@ impl str {
   export function toUpperCase(self: Self): String;
   export function toLowerCase(self: Self): String;
   export function replaceAll(self: Self, from: str, to: str): String;
+  // `padStart` and `padEnd` pad with spaces to `width` characters (not bytes).
+  export function padStart(self: Self, width: usize): String {
+    let out = String.new();
+    let n = charsIn(self);
+    while (n < width) { out.push(" "); n += 1; }
+    out.push(self);
+    out
+  }
+  export function padEnd(self: Self, width: usize): String {
+    let out = self.toString();
+    let n = charsIn(self);
+    while (n < width) { out.push(" "); n += 1; }
+    out
+  }
+  export function repeat(self: Self, n: usize): String {
+    let out = String.new();
+    for (const _ of 0..n) { out.push(self); }
+    out
+  }
+  export function trimStart(self: Self): str from self {
+    const b = self.asBytes();
+    let i: usize = 0;
+    while (i < b.len() && isSpace(b[i])) { i += 1; }
+    self.slice(i, b.len())
+  }
+  export function trimEnd(self: Self): str from self {
+    const b = self.asBytes();
+    let n = b.len();
+    while (n > 0 && isSpace(b[n - 1])) { n -= 1; }
+    self.slice(0, n)
+  }
+  // Where `needle` last starts, if anywhere.
+  export function lastIndexOf(self: Self, needle: str): Option<usize> {
+    const n = needle.len();
+    if (n > self.len()) { return #None; }
+    let i = self.len() - n + 1;
+    while (i > 0) {
+      i -= 1;
+      if (self.asBytes()[i..i + n] == needle.asBytes()) { return #Some(i); }
+    }
+    #None
+  }
 }
+
+// The characters of a string: its bytes that start one, in UTF-8.
+function charsIn(s: str): usize {
+  let n: usize = 0;
+  for (const b of s.bytes()) { if ((b & 0xc0) != 0x80) { n += 1; } }
+  n
+}
+
+function isSpace(b: u8): bool { b == b' ' || b == b'\t' || b == b'\n' || b == b'\r' }
 impl<T> T[] {
   export function len(self: readonly Self): usize;
   export function iter<row E>(self: readonly Self): Gen<readonly T, E>;

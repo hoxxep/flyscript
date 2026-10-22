@@ -1,0 +1,11 @@
+// expect: [   ab] [ab   ] [héllo  ] [toolong]
+// expect: [ababab] [x y  ] [  x y]
+// expect: #Some(3) #None #Some(1) #Some(0)
+// TypeScript's padding, repetition, one-sided trimming and last index; padding counts
+// characters, so text with accents lines up (§3.1).
+import { println } from "std/io";
+export function main(): void uses Io {
+  println(`[${"ab".padStart(5)}] [${"ab".padEnd(5)}] [${"héllo".padEnd(7)}] [${"toolong".padEnd(3)}]`);
+  println(`[${"ab".repeat(3)}] [${"  x y  ".trimStart()}] [${"  x y  ".trimEnd()}]`);
+  println(`${"a.b.c".lastIndexOf(".")} ${"abc".lastIndexOf("z")} ${"aaa".lastIndexOf("aa")} ${"".lastIndexOf("")}`);
+}

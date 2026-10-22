@@ -1,0 +1,15 @@
+// file: sales.csv=region,product,units,price\nnorth,widget,12,2.50\nsouth,widget,7,2.50\nnorth,gadget,3,10.00\neast,widget,20,2.25\nsouth,gizmo,5,7.75\nnorth,widget,8,2.50\neast,gadget,1,10.00\n
+// file: bad.csv=region,product,units,price\nnorth,widget,twelve,2.50\n
+// expect: region  units  revenue
+// expect: north   23     80.0
+// expect: south   12     56.25
+// expect: east    21     55.0
+// expect: widgets sold: 47
+// expect: line 2: units is not a number: twelve
+// expect: cannot read missing.csv
+import { main as report } from "../../examples/csv_report";
+export function main(): void uses Io {
+  report("sales.csv");
+  report("bad.csv");
+  report("missing.csv");
+}
