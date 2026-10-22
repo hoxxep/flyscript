@@ -325,7 +325,11 @@ impl Checker {
           #Some(#Ty(inner)) => { x = self.s.resolve(inner); }
           _ => return x,
         },
-        _ => return self.normalize(x),
+        // An associated type may name a borrow, which is stripped in turn.
+        _ => match (self.normalize(x)) {
+          #Borrow(m, inner) => { x = #Borrow(m, inner); }
+          n => return n,
+        },
       }
     }
     x
@@ -2744,13 +2748,14 @@ impl Checker {
     for (const [name, ty] of scheme.params) { self.typed.params.push([name.clone(), ty.clone()]); }
     let typed = replace(mut self.typed, emptyTyped());
     let exprs: HashMap<usize, Ty> = HashMap.new();
-    for (const [k, t] of typed.exprs.entries()) { exprs.insert(k, self.s.zonk(t)); }
+    // Recorded types name what associated types stand for, so what reads them sees a borrow as one.
+    for (const [k, t] of typed.exprs.entries()) { exprs.insert(k, self.normalize(self.s.zonk(t))); }
     typed.exprs = exprs;
     let bindings: HashMap<usize, Ty> = HashMap.new();
-    for (const [k, t] of typed.bindings.entries()) { bindings.insert(k, self.s.zonk(t)); }
+    for (const [k, t] of typed.bindings.entries()) { bindings.insert(k, self.normalize(self.s.zonk(t))); }
     typed.bindings = bindings;
     let slots: HashMap<usize, Ty> = HashMap.new();
-    for (const [k, t] of typed.slots.entries()) { slots.insert(k, self.s.zonk(t)); }
+    for (const [k, t] of typed.slots.entries()) { slots.insert(k, self.normalize(self.s.zonk(t))); }
     typed.slots = slots;
     let names: HashMap<usize, Ty> = HashMap.new();
     for (const [k, t] of typed.names.entries()) { names.insert(k, self.s.zonk(t)); }

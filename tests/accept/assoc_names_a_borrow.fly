@@ -1,0 +1,9 @@
+// An associated type may stand for a borrow: `C.Slice` of an array is `mut T[]`, so a binding of
+// it is a borrow, indexed and written through like any other (§3.4, §4.1).
+import { ParSplit } from "std/par";
+function getSlice<C extends ParSplit>(c: mut C): C.Slice { c.slice() }
+export function main(): void {
+  let xs: u32[3] = [1, 2, 3];
+  const s = getSlice(mut xs);
+  s[0] = 5;
+}

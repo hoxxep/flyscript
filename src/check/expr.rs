@@ -269,8 +269,9 @@ pub fn check_fn(p: &mut Program, fid: FnId) {
         c.typed.params.push((name.clone(), ty.clone()));
     }
     let mut typed = std::mem::take(&mut c.typed);
+    // Recorded types name what associated types stand for, so what reads them sees a borrow as one.
     for t in typed.exprs.values_mut().chain(typed.bindings.values_mut()).chain(typed.slots.values_mut()) {
-        *t = c.s.zonk(t);
+        *t = c.normalize(&c.s.zonk(t));
     }
     // A `readonly` borrow of a `Copy` value is indistinguishable from a copy, which holds nothing.
     for span in std::mem::take(&mut c.copy_binds) {
@@ -400,7 +401,11 @@ impl<'p> Checker<'p> {
                     Some(GArg::Ty(inner)) => t = self.s.resolve(inner),
                     _ => return t,
                 },
-                _ => return self.normalize(&t),
+                // An associated type may name a borrow, which is stripped in turn.
+                _ => match self.normalize(&t) {
+                    n @ Ty::Borrow(..) => t = n,
+                    n => return n,
+                },
             }
         }
     }

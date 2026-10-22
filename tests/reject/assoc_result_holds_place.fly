@@ -1,0 +1,11 @@
+// error: `xs` cannot be used here: it was lent `mut` at 8:26, and that borrow is still in use
+// A result whose type is an associated type can hold a borrow without showing one: the call's
+// result holds the borrow of what it was lent (§4.1, §4.2).
+import { ParSplit } from "std/par";
+function getSlice<C extends ParSplit>(c: mut C): C.Slice { c.slice() }
+export function main(): void {
+  let xs: u32[3] = [1, 2, 3];
+  const s = getSlice(mut xs);
+  const moved = xs;
+  s[0] = 5;
+}

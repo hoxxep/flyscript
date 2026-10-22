@@ -3289,7 +3289,7 @@ function finish$48(self, fid, scheme, inferring) {
     const $68 = $66.value.item;
     const k = $68[0];
     const t = $68[1];
-    $b.HashMap_insert(exprs, k, zonk$146(self.v.s, t));
+    $b.HashMap_insert(exprs, k, normalize$130(self.v, zonk$146(self.v.s, t)));
   }
   typed.exprs = exprs.v;
   const bindings = { v: $b.HashMap_new() };
@@ -3300,7 +3300,7 @@ function finish$48(self, fid, scheme, inferring) {
     const $72 = $70.value.item;
     const k = $72[0];
     const t = $72[1];
-    $b.HashMap_insert(bindings, k, zonk$146(self.v.s, t));
+    $b.HashMap_insert(bindings, k, normalize$130(self.v, zonk$146(self.v.s, t)));
   }
   typed.bindings = bindings.v;
   const slots = { v: $b.HashMap_new() };
@@ -3311,7 +3311,7 @@ function finish$48(self, fid, scheme, inferring) {
     const $76 = $74.value.item;
     const k = $76[0];
     const t = $76[1];
-    $b.HashMap_insert(slots, k, zonk$146(self.v.s, t));
+    $b.HashMap_insert(slots, k, normalize$130(self.v, zonk$146(self.v.s, t)));
   }
   typed.slots = slots.v;
   const names = { v: $b.HashMap_new() };
@@ -7727,7 +7727,23 @@ function strip$141(self, t) {
         }
       }
       if (true) {
-        return normalize$130(self, x);
+        const $5 = normalize$130(self, x);
+        m$6: {
+          if (($5.$tag === "Borrow")) {
+            const m = $5.$[0];
+            const inner = $5.$[1];
+            {
+              x = { $tag: "Borrow", $: [m, inner] };
+            }
+            break m$6;
+          }
+          if (true) {
+            const n = $5;
+            return n;
+            break m$6;
+          }
+          $rt.unmatched($5);
+        }
         break m$2;
       }
       $rt.unmatched($1);
