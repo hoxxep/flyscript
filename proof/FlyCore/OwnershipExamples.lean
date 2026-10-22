@@ -213,4 +213,59 @@ theorem cleans_typed : Typed [] [] [] cleans .int [] [.fail] :=
       (.write .lit (.deref (.own rfl))))
     (.add (.read (.own rfl)) (.read (.deref (.own rfl)))))
 
+/-- `let x = Box.new(1); { const r = mut *x; r = r + 41 }; *x`: the borrow changes what `x` owns,
+and once it ends `x` reads what it left; 42, and nothing left allocated. -/
+def borrows : Expr :=
+  .let_ "x" (.box .int) (.new (.lit 1))
+    (.seq (.lend "r" .mut (deref (var "x")) (.write (var "r") (.add (.read (var "r")) (.lit 41))))
+      (.read (deref (var "x"))))
+
+example : (eval [] [] 20 [] .empty [] borrows).1 = .val (.int 42) := by decide
+example : ∀ l < (eval [] [] 20 [] .empty [] borrows).2.next, (eval [] [] 20 [] .empty [] borrows).2.mem l = none := by
+  decide
+
+theorem borrows_typed : Typed [] [] [] borrows .int [] [.fail] := by
+  refine .let_ (live := true) rfl (.new .lit) (.seq ?_ (.read (.deref (.own rfl))))
+  have := Typed.lend (F := []) (O := []) (Γ := [("x", .own (.box .int) true)]) (x := "r") (m := .mut)
+    (p := deref (var "x")) (τ := .int) (w := true) (y := "x") (r := [.fail])
+    (body := .write (var "r") (.add (.read (var "r")) (.lit 41))) (τb := .int)
+    (Γb := [("x", .lent (.box .int))]) rfl (.deref (.own rfl)) (fun _ => rfl)
+    (.write (.add (.read (.ref rfl)) .lit) (.ref (m := .mut) rfl))
+  simpa [thaw] using this
+
+/-- `let x = Box.new(20); { const r = readonly x; *r + *x }`: a `readonly` borrow and what it
+borrows, both read; 40. -/
+def reads : Expr :=
+  .let_ "x" (.box .int) (.new (.lit 20))
+    (.lend "r" .ro (var "x") (.add (.read (deref (var "r"))) (.read (deref (var "x")))))
+
+example : (eval [] [] 20 [] .empty [] reads).1 = .val (.int 40) := by decide
+
+/-- `let x = Box.new(1); { const r = mut *x; *x }`: `x` reached while lent `mut`. The types reject
+it: nothing may reach what a `mut` borrow has while it lives. -/
+def reaches : Expr :=
+  .let_ "x" (.box .int) (.new (.lit 1)) (.lend "r" .mut (deref (var "x")) (.read (deref (var "x"))))
+
+/-- What a borrow is of, and the code it is in scope for, typed with its root out of reach. -/
+theorem lend_inv : Typed F O Γ (.lend x m p body) τ Γ' r →
+    ∃ τp w y Γb, PlaceTy Γ p τp w y ∧ Typed F O ((x, .ref m τp) :: lendCtx m Γ y) body τ ((x, .ref m τp) :: Γb) r := by
+  intro h
+  cases h with
+  | lend _ hp _ hb => exact ⟨_, _, _, _, hp, hb⟩
+
+theorem reaches_rejected : ¬ Typed [] O [] reaches τ Γ' r := by
+  intro h
+  cases h with
+  | let_ _ _ hb =>
+    obtain ⟨τp, w, y, Γb, hp, hbody⟩ := lend_inv hb
+    have hy : y = "x" := by cases hp with | deref hq => cases hq <;> rfl
+    subst hy
+    · cases hbody with
+      | read hq =>
+        cases hq with
+        | deref hq =>
+          cases hq with
+          | own hx => simp [lendCtx, hide, lookup] at hx
+          | ref hx => simp [lendCtx, hide, lookup] at hx
+
 end FlyCore.Ownership.Examples

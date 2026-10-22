@@ -107,6 +107,30 @@ theorem thaw_weaker {ys : List Var} : ∀ {Γ Γb : Ctx}, Weaker Γb (freeze Γ 
     · simp only [hy, ↓reduceIte] at hle ⊢
       exact .cons hle (ih w)
 
+/-- What the code a `mut` borrow was in scope for leaves, the borrowed variable given back. -/
+theorem thaw_weaker_hide : ∀ {Γ Γb : Ctx}, Weaker Γb (hide Γ y) → Weaker (thaw Γ [y] Γb) Γ := by
+  intro Γ
+  induction Γ with
+  | nil => intro Γb h; rw [Weaker.nil_inv h]; exact .nil
+  | cons p Γ ih =>
+    intro Γb h
+    obtain ⟨z, s⟩ := p
+    simp only [hide, List.map_cons] at h
+    by_cases hzy : z = y
+    · simp only [hzy, ↓reduceIte] at h
+      obtain ⟨s', Γb', rfl, hle, w⟩ := Weaker.cons_inv h
+      rw [thaw_cons]; simp only [List.mem_singleton, hzy, ↓reduceIte]
+      exact .cons .refl (ih w)
+    · simp only [hzy, ↓reduceIte] at h
+      obtain ⟨s', Γb', rfl, hle, w⟩ := Weaker.cons_inv h
+      rw [thaw_cons]; simp only [List.mem_singleton, hzy, ↓reduceIte]
+      exact .cons hle (ih w)
+
+theorem thaw_weaker_lend : Weaker Γb (lendCtx m Γ y) → Weaker (thaw Γ [y] Γb) Γ := by
+  cases m
+  · exact thaw_weaker
+  · exact thaw_weaker_hide
+
 mutual
 /-- Typing only ever moves: what an expression leaves is what it found, some owned variables perhaps
 moved. -/
@@ -135,6 +159,11 @@ theorem typed_weaker : Typed F O Γ e τ Γ' r → (Γ.map Prod.fst).Nodup → W
     | cons _ w => exact w.trans (typed_weaker hb hk)
   | .while_ _ _, _ => Weaker.refl _
   | .defer hb _, hk => typed_weaker hb hk
+  | .lend hx _ _ hb, hk => by
+    have := typed_weaker hb (List.nodup_cons.mpr ⟨by rw [lendCtx_keys]; exact lookup_none_keys hx,
+      by rw [lendCtx_keys]; exact hk⟩)
+    cases this with
+    | cons _ w => exact thaw_weaker_lend w
   | .perform _ _ hargs _ _, hk => args_weaker hargs hk
   | .handle _ _ _ _ _ _ hb, hk => thaw_weaker (typed_weaker hb (by rw [freeze_keys]; exact hk))
   | .handleAbort _ _ _ hx hb hh, hk => by
@@ -640,6 +669,7 @@ theorem allocAll_ok : ∀ {σ : Store} {names : List Var} {τs vs Ls}, Vals σ �
 def Slot.shape : Slot → Slot
   | .own τ _ => .own τ true
   | .ref m τ => .ref m τ
+  | .lent τ => .lent τ
 
 def shape (Γ : Ctx) : Ctx := Γ.map fun p => (p.1, p.2.shape)
 
@@ -672,6 +702,7 @@ theorem shape_split : ∀ (A : Ctx) {Γ : Ctx}, shape Γ = A ++ B → (∀ p ∈
       cases s with
       | own => simp [Slot.shape] at hs
       | ref => simp only [Slot.shape]; exact congrArg _ (ih hB)
+      | lent => simp [Slot.shape] at hs
   | a :: A, [], h, _ => by simp [shape] at h
   | a :: A, g :: Γ, h, hB => by
     simp only [shape, List.map_cons, List.cons_append, List.cons.injEq] at h
@@ -700,6 +731,7 @@ theorem dropCells_ok : ∀ {Γo : Ctx} {σ : Store} {eo : Env} {Eo So} {owns : L
     obtain ⟨⟨-, hrs⟩, hs⟩ := hs
     cases r with
     | ref => simp [Slot.shape] at hrs
+    | lent => simp [Slot.shape] at hrs
     | own τ live =>
     simp only [Slot.shape, Slot.own.injEq] at hrs
     obtain ⟨rfl, -⟩ := hrs
@@ -1157,9 +1189,6 @@ theorem refCtx_refs (refs : List (Var × Mode × Ty)) : ∀ p ∈ refCtx refs, �
 
 /-! ## A `handle`'s body: what its arm was lent, only read -/
 
-theorem thaw_cons : thaw ((x, s) :: Γ) ys ((y, s') :: Γb) = (if x ∈ ys then (x, s) else (y, s')) :: thaw Γ ys Γb := by
-  simp [thaw]
-
 theorem perm_front {A B L : List Nat} : (L ++ (A ++ B)).Perm (A ++ (L ++ B)) := by
   rw [← List.append_assoc, ← List.append_assoc]; exact List.perm_append_comm.append_right B
 
@@ -1167,33 +1196,36 @@ theorem perm_assoc {A B L : List Nat} : (L ++ (A ++ B)).Perm (L ++ A ++ B) :=
   List.Perm.of_eq (List.append_assoc _ _ _).symm
 
 theorem SlotOk.ro {s : Slot} (h : SlotOk σ s a L) (hs : ∀ τ, s ≠ .own τ false) : SlotOk σ s.ro a L := by
-  rcases s with ⟨τ, live⟩ | ⟨m, τ⟩
+  rcases s with ⟨τ, live⟩ | ⟨m, τ⟩ | τ
   · cases live
     · exact absurd rfl (hs τ)
     · exact h
+  · exact h
   · exact h
 
 theorem SlotOk.unro {s : Slot} (h : SlotOk σ s.ro a L) (hs : ∀ τ, s ≠ .own τ false) : SlotOk σ s a L := by
-  rcases s with ⟨τ, live⟩ | ⟨m, τ⟩
+  rcases s with ⟨τ, live⟩ | ⟨m, τ⟩ | τ
   · cases live
     · exact absurd rfl (hs τ)
     · exact h
   · exact h
+  · exact h
 
 theorem Slot.ro_excl {s : Slot} : s.ro.excl = false := by
-  rcases s with ⟨τ, live⟩ | ⟨m, τ⟩ <;> rfl
+  rcases s with ⟨τ, live⟩ | ⟨m, τ⟩ | τ <;> rfl
 
 /-- A slot not changeable is its own `ro`. -/
 theorem Slot.ro_of_excl {s : Slot} (h : s.excl = false) : s.ro = s := by
-  rcases s with ⟨τ, live⟩ | ⟨m, τ⟩
+  rcases s with ⟨τ, live⟩ | ⟨m, τ⟩ | τ
   · simp [Slot.excl] at h
   · cases m
     · rfl
     · simp [Slot.excl] at h
+  · rfl
 
 /-- Only read, a slot is weakened by nothing. -/
 theorem Slot.Le.of_ro {s s' : Slot} (h : Slot.Le s' s.ro) : s' = s.ro := by
-  rcases s with ⟨τ, live⟩ | ⟨m, τ⟩ <;> (simp only [Slot.ro] at h ⊢; cases h; rfl)
+  rcases s with ⟨τ, live⟩ | ⟨m, τ⟩ | τ <;> (simp only [Slot.ro] at h ⊢; cases h; rfl)
 
 /-- The variables `ys` only read, as a `handle`'s body has them: what they owned, `Fz`, is shared
 while the body runs, and given back once it ends, as it was, if nothing changed it or what the
@@ -1417,8 +1449,112 @@ theorem PlaceTy.frozen (h : PlaceTy (freeze Γ ys) p τ w y) (hy : y ∈ ys) : w
     rw [lookup_freeze] at hx
     simp only [Option.map_eq_some_iff, hy, ↓reduceIte] at hx
     obtain ⟨s, -, hs⟩ := hx
-    rcases s <;> simp only [Slot.ro, Slot.ref.injEq] at hs <;> (obtain ⟨rfl, -⟩ := hs; rfl)
+    rcases s with ⟨_, _⟩ | ⟨_, _⟩ | _
+    · simp only [Slot.ro, Slot.ref.injEq] at hs; obtain ⟨rfl, -⟩ := hs; rfl
+    · simp only [Slot.ro, Slot.ref.injEq] at hs; obtain ⟨rfl, -⟩ := hs; rfl
+    · simp [Slot.ro] at hs
   | deref _ ih => exact ih hy
+
+theorem hide_absent : y ∉ Γ.map Prod.fst → hide Γ y = Γ := by
+  induction Γ with
+  | nil => intro; rfl
+  | cons p Γ ih =>
+    obtain ⟨z, s⟩ := p
+    intro h
+    simp only [List.map_cons, List.mem_cons, not_or] at h
+    simp only [hide, List.map_cons, List.cons.injEq]
+    refine ⟨by simp [Ne.symm h.1], ih h.2⟩
+
+theorem thaw_absent : ∀ {Γ Γb : Ctx}, y ∉ Γ.map Prod.fst → Γb.map Prod.fst = Γ.map Prod.fst →
+    thaw Γ [y] Γb = Γb
+  | [], [], _, _ => rfl
+  | [], _ :: _, _, h => by simp at h
+  | _ :: _, [], _, h => by simp at h
+  | (z, s) :: Γ, (z', s') :: Γb, hy, hk => by
+    simp only [List.map_cons, List.mem_cons, not_or, List.cons.injEq] at hy hk
+    rw [thaw_cons]
+    simp only [List.mem_singleton, Ne.symm hy.1, ↓reduceIte, List.cons.injEq, true_and]
+    exact thaw_absent hy.2 hk.2
+
+/-- A variable lent `mut` to a borrow: what it owned, `Ly`, is the borrow's while the borrow lives,
+and the variable owns again, once the borrow ends, what the borrow left there, the rest of the
+activation as it was. -/
+theorem Foot.hidden (h : Foot σ Γ env E S) (hk : (Γ.map Prod.fst).Nodup) (he : Entry σ Γ env y s a Ly)
+    (hex : s.excl = true) :
+    ∃ Eh, Foot σ (hide Γ y) env Eh S ∧ E.Perm (Ly ++ Eh) ∧
+      ∀ σ' Γb Eb' Ly', Foot σ' Γb env Eb' S → Weaker Γb (hide Γ y) → Agree σ σ' S →
+        SlotOk σ' s a Ly' → ∃ E', Foot σ' (thaw Γ [y] Γb) env E' S ∧ E'.Perm (Ly' ++ Eb') := by
+  induction h with
+  | nil => exact absurd he.1 (by simp [lookup])
+  | @cons s0 a0 L0 Γ env E S x hs hrest ih =>
+    simp only [List.map_cons, List.nodup_cons] at hk
+    obtain ⟨hx, hk⟩ := hk
+    rcases (entry_cons hx).mp he with ⟨rfl, rfl, rfl, hL⟩ | ⟨hne, he'⟩
+    · -- The variable lent is this one.
+      obtain rfl := hL.det hs
+      have hhide : hide ((y, s) :: Γ) y = (y, .lent s.ty) :: Γ := by
+        simp only [hide, List.map_cons, ↓reduceIte, List.cons.injEq, true_and]
+        exact hide_absent hx
+      have hS : addS s Ly S = S := by simp [addS, hex]
+      have hE : addE s Ly E = Ly ++ E := by simp [addE, hex]
+      rw [hS, hE]
+      refine ⟨E, ?_, .refl _, ?_⟩
+      · rw [hhide]
+        simpa [addE, addS, Slot.excl] using Foot.cons (s := .lent s.ty) (x := y) (L := []) (a := a) rfl hrest
+      · intro σ' Γb Eb' Ly' hb hw hag hs'
+        rw [hhide] at hw
+        obtain ⟨s', Γb', rfl, hle, hw'⟩ := Weaker.cons_inv hw
+        cases hle
+        obtain ⟨L', Et, St, hL', hft, rfl, hSt⟩ := hb.uncons
+        simp only [SlotOk] at hL'
+        subst hL'
+        simp only [addS, Slot.excl, Bool.false_eq_true, ↓reduceIte, List.nil_append] at hSt
+        subst hSt
+        refine ⟨Ly' ++ Eb', ?_, .refl _⟩
+        rw [thaw_cons]
+        simp only [List.mem_singleton, ↓reduceIte]
+        rw [thaw_absent hx (by rw [hw'.keys])]
+        simpa [addE, addS, hex] using Foot.cons (x := y) hs' hft
+    · -- Another: as it was.
+      obtain ⟨Eh, hfh, hp, hthaw⟩ := ih hk he'
+      have hhide : hide ((x, s0) :: Γ) y = (x, s0) :: hide Γ y := by
+        simp only [hide, List.map_cons, List.cons.injEq]
+        simp [Ne.symm hne]
+      refine ⟨addE s0 L0 Eh, by rw [hhide]; exact .cons hs hfh, ?_, ?_⟩
+      · cases hx0 : s0.excl <;> simp only [addE, hx0, Bool.false_eq_true, ↓reduceIte]
+        · exact hp
+        · exact (hp.append_left L0).trans perm_front
+      · intro σ' Γb Eb' Ly' hb hw hag hs'
+        rw [hhide] at hw
+        obtain ⟨s', Γb', rfl, hle, hw'⟩ := Weaker.cons_inv hw
+        obtain ⟨L', Et, St, hL', hft, rfl, hSt⟩ := hb.uncons
+        have hex' : s'.excl = s0.excl := hle.excl
+        cases hx0 : s0.excl
+        · -- Only read: the same slot, with the same tree.
+          have hsame : s' = s0 := by
+            cases hle with
+            | refl => rfl
+            | forget => simp [Slot.excl] at hx0
+          subst hsame
+          have hLL := (hs.frame fun l hl => hag l (by simp [addS, hx0, hl])).det hL'
+          subst hLL
+          simp only [addS, hx0, Bool.false_eq_true, ↓reduceIte] at hSt
+          have hSS := List.append_cancel_left hSt
+          subst hSS
+          obtain ⟨E', hf', hp'⟩ := hthaw σ' Γb' Et Ly' hft hw' (fun l hl => hag l (by simp [addS, hx0, hl])) hs'
+          refine ⟨E', ?_, by simpa [addE, hx0] using hp'⟩
+          rw [thaw_cons]
+          simp only [List.mem_singleton, Ne.symm hne, ↓reduceIte]
+          simpa [addE, addS, hx0] using Foot.cons (x := x) hL' hf'
+        · simp only [addS, hx0, hex', ↓reduceIte] at hSt
+          subst hSt
+          obtain ⟨E', hf', hp'⟩ := hthaw σ' Γb' Et Ly' hft hw' (fun l hl => hag l (by simp [addS, hx0, hl])) hs'
+          refine ⟨L' ++ E', ?_, ?_⟩
+          · rw [thaw_cons]
+            simp only [List.mem_singleton, Ne.symm hne, ↓reduceIte]
+            simpa [addE, addS, hex', hx0] using Foot.cons (x := x) hL' hf'
+          · simp only [addE, hex', hx0, ↓reduceIte]
+            exact (hp'.append_left L').trans perm_front
 
 theorem shape_length (Γ : Ctx) : (shape Γ).length = Γ.length := by simp [shape]
 

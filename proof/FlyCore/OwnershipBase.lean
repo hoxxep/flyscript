@@ -311,6 +311,7 @@ def Slot.excl : Slot → Bool
   | .own _ _ => true
   | .ref .mut _ => true
   | .ref .ro _ => false
+  | .lent _ => false
 
 /-- The footprint a slot has: what an owned live variable or a borrow holds, owning the rest. A
 variable perhaps moved holds the mark a move leaves, its footprint its cell alone, or still its
@@ -319,6 +320,7 @@ def SlotOk (σ : Store) : Slot → Nat → List Nat → Prop
   | .own τ true, a, L => LT σ a τ L
   | .own τ false, a, L => (σ.mem a = some .moved ∧ L = [a]) ∨ LT σ a τ L
   | .ref _ τ, a, L => LT σ a τ L
+  | .lent _, _, L => L = []
 
 /-- Adds a footprint to the exclusive ones or to the shared ones, as the slot says. -/
 def addE (s : Slot) (L E : List Nat) : List Nat := if s.excl then L ++ E else E
@@ -345,37 +347,40 @@ theorem LT.not_moved : LT σ a τ L → σ.mem a ≠ some .moved := by
 
 theorem SlotOk.alloc : SlotOk σ s a L → ∀ l ∈ L, σ.mem l ≠ none := by
   intro h
-  rcases s with ⟨τ, live⟩ | ⟨m, τ⟩
+  rcases s with ⟨τ, live⟩ | ⟨m, τ⟩ | τ
   · cases live
     · rcases h with ⟨ha, rfl⟩ | h
       · intro l hl; simp at hl; subst hl; simp [ha]
       · exact LT.alloc h
     · exact LT.alloc h
   · exact LT.alloc h
+  · simp only [SlotOk] at h; subst h; simp
 
 theorem SlotOk.frame : SlotOk σ s a L → Agree σ σ' L → SlotOk σ' s a L := by
   intro h hag
-  rcases s with ⟨τ, live⟩ | ⟨m, τ⟩
+  rcases s with ⟨τ, live⟩ | ⟨m, τ⟩ | τ
   · cases live
     · rcases h with ⟨ha, rfl⟩ | h
       · exact .inl ⟨by rw [hag _ (by simp)]; exact ha, rfl⟩
       · exact .inr (LT.frame h hag)
     · exact LT.frame h hag
   · exact LT.frame h hag
+  · exact h
 
 theorem SlotOk.nodup : SlotOk σ s a L → L.Nodup := by
   intro h
-  rcases s with ⟨τ, live⟩ | ⟨m, τ⟩
+  rcases s with ⟨τ, live⟩ | ⟨m, τ⟩ | τ
   · cases live
     · rcases h with ⟨_, rfl⟩ | h
       · simp
       · exact LT.nodup h
     · exact LT.nodup h
   · exact LT.nodup h
+  · simp only [SlotOk] at h; subst h; simp
 
 theorem SlotOk.det : SlotOk σ s a L → SlotOk σ s a L' → L = L' := by
   intro h h'
-  rcases s with ⟨τ, live⟩ | ⟨m, τ⟩
+  rcases s with ⟨τ, live⟩ | ⟨m, τ⟩ | τ
   · cases live
     · rcases h with ⟨ha, rfl⟩ | h <;> rcases h' with ⟨ha', rfl⟩ | h'
       · rfl
@@ -384,6 +389,7 @@ theorem SlotOk.det : SlotOk σ s a L → SlotOk σ s a L' → L = L' := by
       · exact LT.det h h'
     · exact LT.det h h'
   · exact LT.det h h'
+  · simp only [SlotOk] at h h'; rw [h, h']
 
 theorem mem_addE : l ∈ addE s L E ↔ (s.excl ∧ l ∈ L) ∨ l ∈ E := by
   unfold addE; split <;> simp_all

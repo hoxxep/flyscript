@@ -79,6 +79,9 @@ inductive Expr where
   /-- `{ defer { d }; body }`, `body` of type `τ`: `d` runs once `body` ends, with a value or
   unwinding. If `d` unwinds, its unwinding goes on out, `body`'s value dropped. -/
   | defer (τ : Ty) (d body : Expr)
+  /-- `{ const x = p; body }` with `x` a borrow of `p` — `readonly` or `mut` — for as long as
+  `body` runs. -/
+  | lend (x : Var) (m : Mode) (p : Place) (body : Expr)
   /-- `E.op(…)`: the operation of user effect `e`, with its owned arguments and its places lent. -/
   | perform (e : Nat) (owned : List Expr) (lent : List (Mode × Place))
   /-- `handle { body } with E { op(…) resumes k => k(arm) }`: where `body` performs the operation,
@@ -382,6 +385,10 @@ def eval (F : List Fn) (O : List Op) : Nat → HS → Store → Env → Expr →
         | (.val _, σ2) => (.stuck, σ2)
         | r => r
       | r => r
+    | .lend x _ p body =>
+      match resolve σ env p with
+      | some l => eval F O n hs σ ((x, l) :: env) body
+      | none => (.stuck, σ)
     | .perform ef owned lent =>
       match O[ef]? with
       | none => (.stuck, σ)
@@ -414,11 +421,16 @@ def eval (F : List Fn) (O : List Op) : Nat → HS → Store → Env → Expr →
 
 /-! ## Types -/
 
-/-- What a variable is to the code it is in scope in: owned, live or moved; or a borrow. -/
+/-- What a variable is to the code it is in scope in: owned, live or moved; a borrow; or lent `mut`
+to a borrow the code holds for a while, and not to be reached until it ends. -/
 inductive Slot where
   | own (τ : Ty) (live : Bool)
   | ref (m : Mode) (τ : Ty)
+  | lent (τ : Ty)
   deriving DecidableEq, Repr
+
+def Slot.ty : Slot → Ty
+  | .own τ _ | .ref _ τ | .lent τ => τ
 
 abbrev Ctx := List (Var × Slot)
 
@@ -458,10 +470,21 @@ def Exclusive (ys : List (Mode × Var)) : Prop :=
 def Slot.ro : Slot → Slot
   | .own τ _ => .ref .ro τ
   | .ref _ τ => .ref .ro τ
+  | .lent τ => .lent τ
 
 /-- `Γ` with the variables `ys` only read. -/
 def freeze (Γ : Ctx) (ys : List Var) : Ctx :=
   Γ.map fun (y, s) => if y ∈ ys then (y, s.ro) else (y, s)
+
+/-- `Γ` with the variable `y` lent `mut` to a borrow: not to be reached while the borrow lives. -/
+def hide (Γ : Ctx) (y : Var) : Ctx :=
+  Γ.map fun (z, s) => if z = y then (z, .lent s.ty) else (z, s)
+
+/-- What the code a borrow of a place rooted at `y` is in scope for sees of `y`: only read, if the
+borrow is `readonly`, and nothing, if it is `mut`. -/
+def lendCtx : Mode → Ctx → Var → Ctx
+  | .ro, Γ, y => freeze Γ [y]
+  | .mut, Γ, y => hide Γ y
 
 /-- `Γb`, a context of the same variables as `Γ`, with the variables `ys` as `Γ` has them. -/
 def thaw (Γ : Ctx) (ys : List Var) (Γb : Ctx) : Ctx :=
@@ -506,6 +529,11 @@ inductive Typed (F : List Fn) (O : List Op) : Ctx → Expr → Ty → Ctx → Ro
       Typed F O Γ (.try_ body x h) τ Γh r
   /-- A loop moves nothing: each pass starts where the one before started. -/
   | while_ : Typed F O Γ c .int Γ r → Typed F O Γ b .int Γ r → Typed F O Γ (.while_ c b) .int Γ r
+  /-- A borrow lives as long as the code it is in scope for: what the place is rooted at is only
+  read, or not reached, until it ends. -/
+  | lend : lookup x Γ = none → PlaceTy Γ p τ w y → (m = .mut → w = true) →
+      Typed F O ((x, .ref m τ) :: lendCtx m Γ y) body τb ((x, .ref m τ) :: Γb) r →
+      Typed F O Γ (.lend x m p body) τb (thaw Γ [y] Γb) r
   /-- Cleanup starts where the body would have ended, and moves nothing. -/
   | defer : Typed F O Γ body τ Γb r → Typed F O Γb d .int Γb r → Typed F O Γ (.defer τ d body) τ Γb r
   | perform : O[e]? = some op → Label.eff e ∈ r → Args F O Γ owned op.owns Γ₁ r →

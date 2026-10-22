@@ -185,6 +185,22 @@ theorem freeze_keys : (freeze Γ ys).map Prod.fst = Γ.map Prod.fst := by
     simp only [freeze, List.map_cons] at ih ⊢
     split <;> simp [ih]
 
+theorem thaw_cons : thaw ((x, s) :: Γ) ys ((y, s') :: Γb) = (if x ∈ ys then (x, s) else (y, s')) :: thaw Γ ys Γb := by
+  simp [thaw]
+
+theorem hide_keys : (hide Γ y).map Prod.fst = Γ.map Prod.fst := by
+  induction Γ with
+  | nil => rfl
+  | cons p Γ ih =>
+    obtain ⟨z, s⟩ := p
+    simp only [hide, List.map_cons] at ih ⊢
+    split <;> simp [ih]
+
+theorem lendCtx_keys : (lendCtx m Γ y).map Prod.fst = Γ.map Prod.fst := by
+  cases m
+  · exact freeze_keys
+  · exact hide_keys
+
 theorem thaw_keys : ∀ {Γ Γb : Ctx}, Γb.map Prod.fst = Γ.map Prod.fst → (thaw Γ ys Γb).map Prod.fst = Γ.map Prod.fst
   | [], _, h => by simp [thaw]
   | _ :: _, [], h => by simp at h
@@ -216,6 +232,10 @@ theorem typed_keys : Typed F O Γ e τ Γ' r → Γ'.map Prod.fst = Γ.map Prod.
     exact this.2.trans (typed_keys hb)
   | .while_ _ _ => rfl
   | .defer hb _ => typed_keys hb
+  | .lend _ _ _ hb => by
+    have := typed_keys hb
+    simp only [List.map_cons, List.cons.injEq] at this
+    exact thaw_keys (this.2.trans lendCtx_keys)
   | .perform _ _ hargs _ _ => args_keys hargs
   | .handle _ _ _ _ _ _ hb => thaw_keys ((typed_keys hb).trans freeze_keys)
   | .handleAbort _ _ _ _ hb hh => by
