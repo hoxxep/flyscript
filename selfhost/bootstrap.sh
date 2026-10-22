@@ -5,6 +5,9 @@
 # The two must be the same file.
 #   --from-flyc     builds stage 1 with the reference implementation, `flyc run`, instead
 #   --update-seed   makes stage 2 the seed, after a change to the compiler
+# A change to how the runtime represents values needs one step more: the seed's code expects the
+# runtime it was built with, so build stage 1 against a root holding that runtime (`git show
+# HEAD:selfhost/runtime.js`, with `std/` beside it), then bootstrap from stage 1.
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 root="$here/.."
