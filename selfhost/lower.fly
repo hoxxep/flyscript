@@ -19,7 +19,7 @@ import { checkFn } from "./check";
 import { checkOwnership } from "./own";
 import {
   Local, LocalKind, Place, Root, Proj, ProjKind, Operand, Constant, Rvalue, Capture, Call, Callee, Stmt, Handle, Arm, Block,
-  Cleanup, Func, ConstValue, MainArg,
+  Cleanup, Func, ConstValue, MainArg, Uses, useStmt,
 } from "./ir";
 import { HashMap, HashSet } from "std/collections";
 
@@ -2711,7 +2711,8 @@ impl Lower {
     }
     self.ret = ret;
     self.loops = loops;
-    self.emit(#Handle({ effect: d, body: bodyBlock, value, arms: out, result: r, span: e.span }));
+    const direct = !handlesYield && isDirect(bodyBlock, out);
+    self.emit(#Handle({ effect: d, body: bodyBlock, value, arms: out, result: r, span: e.span, direct }));
     if (unitTy(b)) { unitOp() } else { self.useLocal(r) }
   }
 
@@ -2837,6 +2838,115 @@ impl Lower {
     const m = self.module;
     render(d, self.p.modules[m].file.asStr(), self.p.modules[m].source.asStr())
   }
+}
+
+// Whether a `handle` is direct: each arm resumes its continuation once, as the last thing it does —
+// at the end of its block and of the plain blocks around it — and uses it nowhere else, and cannot
+// fail; and neither the body nor an arm returns from the function around it. Then the body may run
+// where the `handle` is, and each operation it performs call its arm, which returns to it. A
+// failure an arm raised would have to leave through the body's calls, which do not expect one.
+function isDirect(body: readonly Block, arms: readonly Vec<Arm>): bool {
+  if (returns(body)) { return false; }
+  for (const a of arms) {
+    const k = match (a.cont) { #Some(k) => k, #None => return false };
+    // The continuation, and the temporaries it is moved to before its argument is computed.
+    let ks: HashSet<usize> = HashSet.new();
+    ks.insert(k);
+    aliases(a.body, mut ks);
+    if (returns(a.body) || fails(a.body) || !endsInResume(a.body, ks) || mentions(a.body, ks) != 1) { return false; }
+  }
+  true
+}
+
+// Adds the locals a block moves or copies one of `ks` into.
+function aliases(b: readonly Block, ks: mut HashSet<usize>): void {
+  for (const s of b.stmts) {
+    match (s) {
+      #Let(x, #Use(op)) => { if (isOneOf(op, ks)) { ks.insert(x); } }
+      #Block(inner) => aliases(inner, mut ks),
+      _ => {}
+    }
+  }
+}
+
+// Whether a block's last statement that does something is a resumption of one of `ks`: in it, or
+// in the plain block it ends with, after which only the arm's value may be taken.
+function endsInResume(b: readonly Block, ks: readonly HashSet<usize>): bool {
+  let i = b.stmts.len();
+  while (i > 0) {
+    i -= 1;
+    match (b.stmts[i]) {
+      #At(_) | #Let(_, #Use(_)) => {}
+      #Resume(op, _, _) => return isOneOf(op, ks),
+      #Block(inner) => return endsInResume(inner, ks),
+      _ => return false,
+    }
+  }
+  false
+}
+
+function isOneOf(op: readonly Operand, ks: readonly HashSet<usize>): bool {
+  match (op) {
+    #Copy(p) | #Move(p) => p.path.len() == 0 && match (p.root) { #Local(l) => ks.has(l), _ => false },
+    _ => false,
+  }
+}
+
+// How many statements mention one of `ks`, besides those moving one into another.
+function mentions(b: readonly Block, ks: readonly HashSet<usize>): usize {
+  let n: usize = 0;
+  for (const s of b.stmts) {
+    n += match (s) {
+      #Let(x, #Use(op)) if ks.has(x) && isOneOf(op, ks) => 0,
+      #If(_, x, y) | #Loop(_, x, y) | #Try(x, _, y) => mentions(x, ks) + mentions(y, ks),
+      #Block(x) | #Labeled(_, x) | #Region(_, _, x) | #ForGen(_, _, _, x) => mentions(x, ks),
+      #Handle(h) => {
+        let m = mentions(h.body, ks);
+        for (const a of h.arms) { m += mentions(a.body, ks); }
+        m
+      }
+      _ => {
+        let one: Uses = { locals: HashSet.new(), captures: HashSet.new() };
+        useStmt(s, mut one);
+        if (ks.iter().some((k) => one.locals.has(k))) { 1 } else { 0 }
+      }
+    };
+  }
+  n
+}
+
+// Whether code may raise a failure: it throws, or calls what may fail.
+function fails(b: readonly Block): bool {
+  for (const c of b.cleanups) { if (const #Defer(_, d) = c && fails(d)) { return true; } }
+  for (const s of b.stmts) {
+    const r = match (s) {
+      #Throw(_, _) => true,
+      #Let(_, #Call(c)) | #Store(_, #Call(c)) => c.fails,
+      #ForGen(_, c, _, x) => c.fails || fails(x),
+      #If(_, x, y) | #Loop(_, x, y) | #Try(x, _, y) => fails(x) || fails(y),
+      #Block(x) | #Labeled(_, x) | #Region(_, _, x) => fails(x),
+      #Handle(h) => fails(h.body) || h.arms.iter().some((a) => fails(a.body)),
+      _ => false,
+    };
+    if (r) { return true; }
+  }
+  false
+}
+
+// Whether code returns from the function around it.
+function returns(b: readonly Block): bool {
+  for (const c of b.cleanups) { if (const #Defer(_, d) = c && returns(d)) { return true; } }
+  for (const s of b.stmts) {
+    const r = match (s) {
+      #Return(_) => true,
+      #If(_, x, y) | #Loop(_, x, y) | #Try(x, _, y) => returns(x) || returns(y),
+      #Block(x) | #Labeled(_, x) | #Region(_, _, x) | #ForGen(_, _, _, x) => returns(x),
+      #Handle(h) => returns(h.body) || h.arms.iter().some((a) => returns(a.body)),
+      _ => false,
+    };
+    if (r) { return true; }
+  }
+  false
 }
 
 // A type with what the checker left unsolved — what nothing constrained, as the result of a

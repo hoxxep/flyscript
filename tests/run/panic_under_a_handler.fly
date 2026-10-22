@@ -1,0 +1,15 @@
+// expect: 3
+// expect: <panic: division by zero>
+// A panic in a handled body ends the program as one anywhere does: the arm here adds to what its
+// resumption gives, so the body runs on a fiber of its own; one whose arm only resumes runs where
+// the `handle` is.
+import { println } from "std/io";
+effect Ask { ask(): u32; }
+function deep(n: u32): u32 uses Ask { if (n == 0) { const x: u32 = 0; 10 / x } else { Ask.ask() + deep(n - 1) } }
+function shallow(n: u32): u32 uses Ask { if (n == 0) { 0 } else { Ask.ask() + shallow(n - 1) } }
+export function main(): void uses Io {
+  const fine = handle { shallow(3) } with Ask { ask() resumes k => k(1) + 0 };
+  println(`${fine}`);
+  const v = handle { deep(3) } with Ask { ask() resumes k => k(1) + 0 };
+  println(`${v}`);
+}

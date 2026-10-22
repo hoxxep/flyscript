@@ -102,7 +102,7 @@ const { $rt, $b } = (() => {
         const arm = arms[name];
         if (arm.length <= args.length) {
           // An arm that does not resume: the body is done, its cleanup run first (§5.2).
-          if (g.return) g.return();
+          yield* finish(g);
           return yield* arm(...args);
         }
         let resumed = false;
@@ -111,10 +111,21 @@ const { $rt, $b } = (() => {
           resumed = true;
           return yield* resume(g, x, effect, arms);
         };
-        return yield* arm(...args, k);
+        try {
+          return yield* arm(...args, k);
+        } catch (e) {
+          // An arm that fails before resuming leaves the body done: its cleanup runs.
+          if (!resumed) yield* finish(g);
+          throw e;
+        }
       }
       r = g.next(yield op);
     }
+  }
+  // Ends a suspended generator, running its cleanup, which may perform what is handled around.
+  function* finish(g) {
+    if (!g.return) return;
+    for (let r = g.return(); !r.done; r = g.next(yield r.value)) {}
   }
   // Runs a destructor that may perform `Io` to its end, without letting other tasks in.
   function drive(g) {

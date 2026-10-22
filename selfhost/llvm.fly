@@ -21,9 +21,9 @@ import { Program as Prog } from "./env";
 import { Entry, stripBorrow, typeArg, ckey, mangle, unitTy, isVoidTy } from "./lower";
 import {
   Local, LocalKind, Place, Root, Proj, ProjKind, Operand, Constant, Rvalue, Capture, Call, Callee, Stmt, Handle, Arm, Block,
-  Cleanup, Func,
+  Cleanup, Func, Uses, ownedIn, useBlock,
 } from "./ir";
-import { Cgen, newCgen, cquote, ownedIn, useBlock, Uses } from "./c";
+import { Cgen, newCgen, cquote } from "./c";
 import { HashMap, HashSet } from "std/collections";
 
 // What the code being printed is part of, as in the C back end.
@@ -80,6 +80,8 @@ type Lctx = {
   // The function's debug information, and the source location of the code being printed.
   sp: String;
   loc: String;
+  // In a direct handler's arms: a resumption gives its argument back to the operation performed.
+  direct: bool;
 };
 
 function newCtx(locals: Vec<Local>, ret: Ty, mode: Mode): Lctx {
@@ -87,7 +89,7 @@ function newCtx(locals: Vec<Local>, ret: Ty, mode: Mode): Lctx {
     locals, addrs: HashMap.new(), captures: Vec.new(), capTys: Vec.new(), allocas: String.new(), out: String.new(), open: true, tmp: 0,
     scopes: Vec.new(), targets: Vec.new(), mode, sink: #None, arenas: HashMap.new(), ret: ret.clone(), retSlot: String.new(), fnRet: ret,
     oret: String.new(), code: String.new(), hoisted: HashSet.new(), declared: HashSet.new(), prologue: String.new(), live: HashSet.new(),
-    reachable: true, liveAt: HashMap.new(), sp: String.new(), loc: String.new(),
+    reachable: true, liveAt: HashMap.new(), sp: String.new(), loc: String.new(), direct: false,
   }
 }
 
@@ -1584,7 +1586,10 @@ impl Lgen {
         self.flowOperand(k);
         if (const #Some(a) = arg) { self.flowOperand(a); }
         self.gen(r);
-        self.resume(k, arg, r, span);
+        if (self.cx.direct) {
+          // The arm's last act: the operation gives the argument, and the body goes on.
+          if (const #Some(a) = arg) { self.put(a, "%result", span); }
+        } else { self.resume(k, arg, r, span); }
       }
       #At(at) => self.at(at),
     }
@@ -2144,6 +2149,9 @@ impl Lgen {
     const u = self.flag("fly_unwinding");
     const t = self.target();
     self.jumpIf(u.asStr(), t.asStr());
+    // A direct handler's arm, run by the operation, may have failed.
+    const f = self.failed();
+    self.jumpIf(f.asStr(), t.asStr());
   }
 
   // `k(a)`: the continuation is consumed, and the body resumed with `a`.
@@ -2194,6 +2202,7 @@ impl Lgen {
   // heap that the `handle` and each continuation of it share: the runtime's handler, a count of
   // what refers to it, the body's result, and what the body and arms reach of the code around.
   function handle(self: mut Self, h: readonly Handle): void uses Fail<Diagnostic> {
+    if (h.direct) { return self.handleDirect(h); }
     const span = h.span;
     const d = h.effect;
     const ops = match (self.c.lw.p.defs[d].kind) { #Effect { ops } => ops.len(), _ => 0 };
@@ -2210,7 +2219,7 @@ impl Lgen {
     for (const a of h.arms) { blocks.push(a.body.clone()); }
     const ap = self.apart(blocks);
     const yields = self.cx.sink.isSome();
-    const resultAt = roundUp(52, bs.align);
+    const resultAt = roundUp(HANDLER + 4, bs.align);
     const base = roundUp(resultAt + bs.size, 8);
     const ySlot = base + self.slots(ap) * 8;
     const size = ySlot + if (yields) { 8 } else { 0 };
@@ -2274,7 +2283,7 @@ impl Lgen {
       }
       match (arm.cont) {
         #Some(k) => {
-          const rc = self.gep("%env", 48);
+          const rc = self.gep("%env", HANDLER);
           const refs = self.load("i32", rc.asStr());
           const more = self.val(`add i32 ${refs}, 1`);
           self.store("i32", more.asStr(), rc.asStr());
@@ -2311,7 +2320,7 @@ impl Lgen {
       #Unit => `call void @hbody_${n}(ptr %f)`,
     };
     self.code.push(`define internal void @hentry_${n}(ptr %f) #0 {\n  %res = getelementptr inbounds i8, ptr %f, i64 ${resultAt}\n  ${callRes}\n  ret void\n}\n\n`);
-    self.code.push(`define internal void @hrelease_${n}(ptr %f) #0 {\n  %rc = getelementptr inbounds i8, ptr %f, i64 48\n  %refs = load i32, ptr %rc\n  %left = sub i32 %refs, 1\n  store i32 %left, ptr %rc\n  %gone = icmp eq i32 %left, 0\n  br i1 %gone, label %free, label %done\nfree:\n  call void @fly_handle_free(ptr %f)\n  call void @flyg_free(ptr %f)\n  br label %done\ndone:\n  ret void\n}\n\n`);
+    self.code.push(`define internal void @hrelease_${n}(ptr %f) #0 {\n  %rc = getelementptr inbounds i8, ptr %f, i64 ${HANDLER}\n  %refs = load i32, ptr %rc\n  %left = sub i32 %refs, 1\n  store i32 %left, ptr %rc\n  %gone = icmp eq i32 %left, 0\n  br i1 %gone, label %free, label %done\nfree:\n  call void @fly_handle_free(ptr %f)\n  call void @flyg_free(ptr %f)\n  br label %done\ndone:\n  ret void\n}\n\n`);
     const [takeResult, armsResult, give] = match (br) {
       #Mem => [
         `call void @llvm.memcpy.p0.p0.i64(ptr %r, ptr %res, i64 ${bs.size}, i1 false)\n  call void @llvm.memset.p0.i64(ptr %res, i8 0, i64 ${bs.size}, i1 false)`,
@@ -2328,7 +2337,7 @@ impl Lgen {
     // The handler, started here.
     const f = self.val(`call ptr @fly_alloc(i64 ${size})`);
     self.store("i32", `${d}`.asStr(), f.asStr());
-    const rc = self.gep(f.asStr(), 48);
+    const rc = self.gep(f.asStr(), HANDLER);
     self.store("i32", "1", rc.asStr());
     self.fillEnv(ap, f.asStr(), base);
     if (yields) {
@@ -2351,6 +2360,111 @@ impl Lgen {
     self.jumpIf(u.asStr(), t.asStr());
     const e = self.failed();
     self.jumpIf(e.asStr(), t.asStr());
+  }
+
+  // A direct `handle`: its body runs here, under a handler whose operations call a function of its
+  // arms, given pointers to what the arms reach of the code around; each arm returns the result
+  // its resumption gives. However the body is left, the handler is removed.
+  function handleDirect(self: mut Self, h: readonly Handle): void uses Fail<Diagnostic> {
+    const span = h.span;
+    const d = h.effect;
+    const b = self.cx.locals[h.result].ty.clone();
+    self.aparts += 1;
+    const n = self.aparts;
+    let blocks: Vec<Block> = Vec.new();
+    for (const a of h.arms) { blocks.push(a.body.clone()); }
+    const ap = self.apart(blocks);
+    const k = self.slots(ap);
+    const outerSink = self.cx.sink.clone();
+    // The arms.
+    const cx = self.apartCtx(ap, 0, #Prim(#Void), #Fn);
+    const saved = replace(mut self.cx, cx);
+    self.cx.direct = true;
+    self.subprogram(`${self.fnName} handler`.asStr(), `harm_${n}`.asStr(), span);
+    self.declareEnv(ap, span);
+    if (outerSink.isSome()) { self.cx.sink = #Some(self.envSlot("env.y", k * 8)); }
+    for (const arm of h.arms) {
+      const is = self.val(`icmp eq i32 %op, ${arm.op}`);
+      const yes = self.newLabel("arm");
+      const no = self.newLabel("notarm");
+      self.term(`br i1 ${is}, label %${yes}, label %${no}`);
+      self.label(yes.asStr());
+      // The operation's arguments become the arm's, as its block starts.
+      const saveOut = replace(mut self.cx.out, String.new());
+      let tys: Vec<Ty> = Vec.new();
+      for (const p of arm.params) { tys.push(self.cx.locals[p].ty.clone()); }
+      if (tys.len() > 0) {
+        const tt: Ty = #Tuple(tys);
+        for (const [i, p] of arm.params.iter().enumerate()) {
+          const pt = self.cx.locals[p].ty.clone();
+          if (unitTy(pt)) { continue; }
+          const o = self.offsetOf(tt, `${i}`.asStr(), span);
+          const src = self.gep("%args", o);
+          const sz = self.sizeOf(pt, span);
+          const dst = self.local(p);
+          self.memcpy(dst.asStr(), src.asStr(), sz);
+        }
+      }
+      self.cx.prologue = replace(mut self.cx.out, saveOut);
+      for (const p of arm.params) { self.gen(p); }
+      self.cx.reachable = true;
+      self.block(arm.body, span);
+      if (self.cx.open) { self.jump("ret"); }
+      self.label(no.asStr());
+    }
+    self.panic("an operation no arm handles");
+    self.epilogue(span);
+    self.define(`define internal void @harm_${n}(ptr %env, i32 %op, ptr %args, ptr %result)`.asStr());
+    self.cx = saved;
+    // The handler, installed for the body.
+    const env = self.alloca(max(k + 1, 1) * 8, 8);
+    self.fillEnv(ap, env.asStr(), 0);
+    if (const #Some(y) = outerSink) {
+      const ya = self.gep(env.asStr(), k * 8);
+      self.store("ptr", y.asStr(), ya.asStr());
+    }
+    const hh = self.alloca(HANDLER, 8);
+    self.memzero(hh.asStr(), HANDLER);
+    self.store("i32", `${d}`.asStr(), hh.asStr());
+    const opAt = self.gep(hh.asStr(), 4);
+    self.store("i32", "-1", opAt.asStr());
+    const outer = self.load("ptr", "@fly_handlers");
+    const outerAt = self.gep(hh.asStr(), HANDLER_OUTER);
+    self.store("ptr", outer.asStr(), outerAt.asStr());
+    const directAt = self.gep(hh.asStr(), HANDLER_DIRECT);
+    self.store("ptr", `@harm_${n}`.asStr(), directAt.asStr());
+    const frameAt = self.gep(hh.asStr(), HANDLER_FRAME);
+    self.store("ptr", env.asStr(), frameAt.asStr());
+    self.store("ptr", hh.asStr(), "@fly_handlers");
+    self.hoist(h.value, span);
+    const lk = self.newLabel("");
+    const parent = self.target();
+    const out = `hx${lk}`;
+    self.cx.targets.push(out.clone());
+    self.block(h.body, span);
+    self.cx.targets.pop();
+    if (self.cx.reachable) {
+      self.store("ptr", outer.asStr(), "@fly_handlers");
+      if (!unitTy(b)) {
+        const sz = self.sizeOf(b, span);
+        const dst = self.local(h.result);
+        const src = self.local(h.value);
+        self.memcpy(dst.asStr(), src.asStr(), sz);
+      }
+    }
+    // A failure or an unwinding leaving the body leaves the handler too.
+    if (const #Some(at) = self.cx.liveAt.get(out.asStr())) {
+      const at2 = at.clone();
+      const done = `hdone${lk}`;
+      self.jump(done.asStr());
+      self.label(out.asStr());
+      self.store("ptr", outer.asStr(), "@fly_handlers");
+      self.jump(parent.asStr());
+      let set: HashSet<usize> = match (self.cx.liveAt.get(parent.asStr())) { #Some(x) => x.clone(), #None => HashSet.new() };
+      for (const l of at2.iter()) { set.insert(l); }
+      self.cx.liveAt.insert(parent.clone(), set);
+      self.label(done.asStr());
+    }
   }
 
   // How the continuation of operation `op` resumes the body with its result, made once.
@@ -2681,7 +2795,7 @@ impl Lgen {
     ll.push(DECLS);
     // What code reads of the task running is its thread's, in a program that starts tasks.
     const local = if (ent.tasks) { "thread_local " } else { "" };
-    ll.push(`@fly_err = external ${local}global ptr\n@fly_unwinding = external ${local}global i8\n@fly_stopping = external ${local}global i8\n`);
+    ll.push(`@fly_err = external ${local}global ptr\n@fly_unwinding = external ${local}global i8\n@fly_stopping = external ${local}global i8\n@fly_handlers = external ${local}global ptr\n`);
     for (const [_, d] of self.declared.entries()) {
       ll.push(d.asStr());
       ll.push("\n");
@@ -2702,6 +2816,13 @@ impl Lgen {
     [ll, cfile]
   }
 }
+
+// The size of the runtime's `fly_handler`, which a `handle`'s frame starts with; where in it the
+// handlers around it are, and a direct one's arms and frame.
+const HANDLER: usize = 64;
+const HANDLER_OUTER: usize = 24;
+const HANDLER_DIRECT: usize = 48;
+const HANDLER_FRAME: usize = 56;
 
 // What every module declares: the runtime's routines and flags it calls and reads directly.
 const DECLS: str = "declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1)
@@ -2735,7 +2856,7 @@ const GLUE: str = "void flyg_cleanup_begin(fly_unwind_state* s) { *s = fly_clean
 void flyg_cleanup_end(fly_unwind_state* s) { fly_cleanup_end(*s); }
 void flyg_free(void* p) { free(p); }
 _Static_assert(sizeof(fly_unwind_state) <= 16 && _Alignof(fly_unwind_state) <= 8, \"fly_unwind_state\");
-_Static_assert(sizeof(fly_handler) == 48 && __builtin_offsetof(fly_handler, op) == 4 && __builtin_offsetof(fly_handler, args) == 8 && __builtin_offsetof(fly_handler, result) == 16, \"fly_handler\");
+_Static_assert(sizeof(fly_handler) == 64 && __builtin_offsetof(fly_handler, op) == 4 && __builtin_offsetof(fly_handler, args) == 8 && __builtin_offsetof(fly_handler, result) == 16 && __builtin_offsetof(fly_handler, outer) == 24 && __builtin_offsetof(fly_handler, direct) == 48 && __builtin_offsetof(fly_handler, frame) == 56, \"fly_handler\");
 _Static_assert(sizeof(fly_str) == 16 && sizeof(fly_slice) == 16 && __builtin_offsetof(fly_str, len) == 8 && __builtin_offsetof(fly_slice, len) == 8, \"views\");
 _Static_assert(sizeof(fly_String) == 24 && sizeof(fly_vec) == 24 && __builtin_offsetof(fly_String, len) == 8 && __builtin_offsetof(fly_vec, len) == 8, \"lists\");
 _Static_assert(sizeof(fly_fn) == 24 && __builtin_offsetof(fly_fn, drop) == 8 && __builtin_offsetof(fly_fn, fn) == 16, \"fly_fn\");

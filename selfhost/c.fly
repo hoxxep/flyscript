@@ -22,7 +22,7 @@ import {
 } from "./lower";
 import {
   Local, LocalKind, Place, Root, Proj, ProjKind, Operand, Constant, Rvalue, Capture, Call, Callee, Stmt, Handle, Arm, Block,
-  Cleanup, Func, ConstValue, MainArg,
+  Cleanup, Func, ConstValue, MainArg, Uses, ownedIn, useBlock,
 } from "./ir";
 import { HashMap, HashSet } from "std/collections";
 
@@ -83,13 +83,15 @@ type Ctx = {
   live: HashSet<usize>;
   reachable: bool;
   liveAt: HashMap<String, HashSet<usize>>;
+  // In a direct handler's arms: a resumption gives its argument back to the operation performed.
+  direct: bool;
 };
 
 function newCtx(locals: Vec<Local>, ret: Ty, mode: Mode): Ctx {
   {
     names: HashMap.new(), locals, captures: Vec.new(), decls: String.new(), scopes: Vec.new(), targets: Vec.new(), mode,
     sink: #None, arenas: HashMap.new(), ret: ret.clone(), fnRet: ret, oret: "ret_".toString(), capTys: Vec.new(), out: String.new(),
-    hoisted: HashSet.new(), prologue: String.new(), live: HashSet.new(), reachable: true, liveAt: HashMap.new(),
+    hoisted: HashSet.new(), prologue: String.new(), live: HashSet.new(), reachable: true, liveAt: HashMap.new(), direct: false,
   }
 }
 
@@ -1232,7 +1234,17 @@ impl Cgen {
         self.flowOperand(k);
         if (const #Some(a) = arg) { self.flowOperand(a); }
         self.gen(r);
-        self.resume(k, arg, r, span);
+        if (self.cx.direct) {
+          // The arm's last act: the operation gives the argument, and the body goes on.
+          if (const #Some(a) = arg) {
+            const at = self.operandTy(a);
+            if (!unitTy(at)) {
+              const ac = self.ctype(at, span);
+              const v = self.operand(a, span);
+              self.line(`*(${ac}*)result_ = ${v};`);
+            }
+          }
+        } else { self.resume(k, arg, r, span); }
       }
       #At(_) => {}
     }
@@ -2186,93 +2198,6 @@ impl Cgen {
 // their initializers, and how it reaches the locals and captures it uses of the code around it.
 type Apart = { fields: String; inits: Vec<String>; names: HashMap<usize, String>; captures: Vec<String>; arenas: HashMap<u32, String> };
 
-// The locals declared in a block and the blocks in it.
-export function ownedIn(b: readonly Block, out: mut HashSet<usize>): void {
-  for (const l of b.locals) { out.insert(l); }
-  for (const c of b.cleanups) { if (const #Defer(_, d) = c) { ownedIn(d, mut out); } }
-  for (const s of b.stmts) {
-    match (s) {
-      #If(_, x, y) => { ownedIn(x, mut out); ownedIn(y, mut out); }
-      #Loop(_, x, y) => { ownedIn(x, mut out); ownedIn(y, mut out); }
-      #Labeled(_, x) | #Block(x) | #Region(_, _, x) => ownedIn(x, mut out),
-      #Try(x, _, y) => { ownedIn(x, mut out); ownedIn(y, mut out); }
-      #ForGen(_, _, _, x) => ownedIn(x, mut out),
-      #Handle(h) => { ownedIn(h.body, mut out); for (const a of h.arms) { ownedIn(a.body, mut out); } }
-      _ => {}
-    }
-  }
-}
-
-// The locals and captures code uses.
-export type Uses = { locals: HashSet<usize>; captures: HashSet<usize> };
-
-function usePlace(p: readonly Place, u: mut Uses): void {
-  match (p.root) { #Local(l) => { u.locals.insert(l); } #Capture(k) => { u.captures.insert(k); } }
-  for (const x of p.path) { if (const #Index(op) = x.kind) { useOperand(op, mut u); } }
-}
-
-function useOperand(op: readonly Operand, u: mut Uses): void {
-  match (op) { #Copy(p) | #Move(p) => usePlace(p, mut u), #Const(_) => {} }
-}
-
-function useCall(c: readonly Call, u: mut Uses): void {
-  for (const a of c.args) { useOperand(a, mut u); }
-  if (const #Value(f, _) = c.callee) { useOperand(f, mut u); }
-}
-
-function useRvalue(rv: readonly Rvalue, u: mut Uses): void {
-  match (rv) {
-    #Use(op) | #Unary(_, op) | #Cast(op, _) | #Convert(op) => useOperand(op, mut u),
-    #Borrow(_, p) | #View(p) | #IsTag(p, _) | #AddressOf(p) => usePlace(p, mut u),
-    #Binary(_, a, b) => { useOperand(a, mut u); useOperand(b, mut u); }
-    #Tag(_, vs) | #List(vs) => { for (const v of vs) { useOperand(v, mut u); } }
-    #Fields(fs) => { for (const [_, v] of fs) { useOperand(v, mut u); } }
-    #Call(c) => useCall(c, mut u),
-    #Closure(_, caps, _) => {
-      for (const c of caps) { match (c) { #Value(op) => useOperand(op, mut u), #Ref(_, p) => usePlace(p, mut u) } }
-    }
-    #FnRef(_) => {}
-  }
-}
-
-export function useBlock(b: readonly Block, u: mut Uses): void {
-  for (const c of b.cleanups) {
-    match (c) {
-      #Drop(l) | #Arena(l) => { u.locals.insert(l); }
-      #Defer(f, d) => { u.locals.insert(f); useBlock(d, mut u); }
-    }
-  }
-  for (const s of b.stmts) {
-    match (s) {
-      #Let(l, rv) => { u.locals.insert(l); useRvalue(rv, mut u); }
-      #Store(p, rv) => { usePlace(p, mut u); useRvalue(rv, mut u); }
-      #Drop(p) => usePlace(p, mut u),
-      #If(c, x, y) => { useOperand(c, mut u); useBlock(x, mut u); useBlock(y, mut u); }
-      #Loop(_, x, y) => { useBlock(x, mut u); useBlock(y, mut u); }
-      #Return(op) | #Throw(op, _) | #Yield(op, _) => useOperand(op, mut u),
-      #Labeled(_, x) | #Block(x) => useBlock(x, mut u),
-      #Try(x, e, y) => { u.locals.insert(e); useBlock(x, mut u); useBlock(y, mut u); }
-      #Arm(f) => { u.locals.insert(f); }
-      #ForGen(_, c, x, b2) => { useCall(c, mut u); u.locals.insert(x); useBlock(b2, mut u); }
-      #Region(_, a, x) => { u.locals.insert(a); useBlock(x, mut u); }
-      #Perform(_, _, args, r) => { for (const a of args) { useOperand(a, mut u); } u.locals.insert(r); }
-      #Handle(h) => {
-        useBlock(h.body, mut u);
-        u.locals.insert(h.value);
-        u.locals.insert(h.result);
-        for (const a of h.arms) {
-          for (const p of a.params) { u.locals.insert(p); }
-          if (const #Some(k) = a.cont) { u.locals.insert(k); }
-          useBlock(a.body, mut u);
-          u.locals.insert(a.value);
-        }
-      }
-      #Resume(k, arg, r) => { useOperand(k, mut u); if (const #Some(a) = arg) { useOperand(a, mut u); } u.locals.insert(r); }
-      #Break(_) | #Continue(_) | #Panic(_) | #At(_) => {}
-    }
-  }
-}
-
 impl Cgen {
   // The environment of code apart, the blocks `bs`: a pointer to each local and capture it uses
   // of the code around it, and the arenas in reach.
@@ -2434,7 +2359,8 @@ impl Cgen {
       self.line(`{ ${tc} a_ = { ${inits.join(", ")} }; ${rc} r_; fly_perform(${d}, ${op}, &a_, &r_); ${store}}`);
     }
     self.dynamicExit();
-    self.line(`if (fly_unwinding) goto ${self.target()};`);
+    // A direct handler's arm, run by the operation, may have failed.
+    self.line(`if (fly_unwinding) goto ${self.target()}; if (FLY_FAILED) goto ${self.target()};`);
   }
 
   // `k(a)`: the continuation is consumed, and the body resumed with `a`.
@@ -2460,6 +2386,7 @@ impl Cgen {
   // heap that the `handle` and each continuation of it share; the arms run where it is handled,
   // or where a continuation is resumed, which is the same code: the handler is deep.
   function handle(self: mut Self, h: readonly Handle): void uses Fail<Diagnostic> {
+    if (h.direct) { return self.handleDirect(h); }
     const span = h.span;
     const d = h.effect;
     const ops = match (self.lw.p.defs[d].kind) { #Effect { ops } => ops.clone(), _ => Vec.new() };
@@ -2565,6 +2492,92 @@ impl Cgen {
     self.line(`{ ${frame}* f_ = fly_alloc(sizeof(${frame})); *f_ = (${frame}){ .refs = 1, .h = { .effect = ${d} }${if (inits.len() > 0) { ", " } else { "" }}${inits.join(", ")} }; fly_handle_start(&f_->h, hentry_${n}, f_); ${bc} v_ = hrun_${n}(f_); ${store}}`);
     self.dynamicExit();
     self.line(`if (fly_unwinding) goto ${self.target()}; if (FLY_FAILED) goto ${self.target()};`);
+  }
+}
+
+impl Cgen {
+  // A direct `handle`: its body runs here, under a handler whose operations call a function of its
+  // arms, given pointers to what the arms reach of the code around; each arm returns the result
+  // its resumption gives. However the body is left, the handler is removed.
+  function handleDirect(self: mut Self, h: readonly Handle): void uses Fail<Diagnostic> {
+    const span = h.span;
+    const d = h.effect;
+    const b = self.cx.locals[h.result].ty.clone();
+    self.aparts += 1;
+    const n = self.aparts;
+    const frame = `hdframe_${n}`;
+    let blocks: Vec<Block> = Vec.new();
+    for (const a of h.arms) { blocks.push(a.body.clone()); }
+    const ap = self.apart(blocks, span);
+    let fields = ap.fields.clone();
+    let inits = ap.inits.clone();
+    const yields = self.cx.sink.isSome();
+    if (yields) {
+      fields.push("  fly_yield* y_;\n");
+      inits.push(`.y_ = &(${match (self.cx.sink) { #Some(y) => y.clone(), #None => String.new() }})`);
+    }
+    if (fields.len() == 0) { fields.push("  fly_unit empty;\n"); }
+    self.typeDefs.push(`typedef struct {\n${fields}} ${frame};\n`);
+    // The arms.
+    let cx = self.apartCtx(ap, #Prim(#Void), #Fn);
+    cx.direct = true;
+    if (yields) { cx.sink = #Some("(*env->y_)".toString()); }
+    const saved = replace(mut self.cx, cx);
+    for (const arm of h.arms) {
+      let binds = String.new();
+      let tys: Vec<Ty> = Vec.new();
+      for (const p of arm.params) { tys.push(self.cx.locals[p].ty.clone()); }
+      if (tys.len() > 0) {
+        const tc = self.ctype(#Tuple(tys.clone()), span);
+        for (const [i, p] of arm.params.iter().enumerate()) {
+          if (unitTy(self.cx.locals[p].ty)) { continue; }
+          binds.push(`${self.local(p)} = ((${tc}*)args_)->f${i}; `);
+        }
+      }
+      self.line(`if (op_ == ${arm.op}) {`);
+      self.cx.prologue = binds;
+      for (const p of arm.params) { self.gen(p); }
+      self.cx.reachable = true;
+      self.block(arm.body, span);
+      self.line("goto ret; }");
+    }
+    const armsCode = replace(mut self.cx.out, String.new());
+    const more = replace(mut self.cx.decls, String.new());
+    self.cx = saved;
+    self.protos.push(`static void harm_${n}(void* env_, int op_, void* args_, void* result_);\n`);
+    self.apartCode.push(`static void harm_${n}(void* env_, int op_, void* args_, void* result_) {\n  ${frame}* env = env_; (void)env; (void)args_; (void)result_;\n${more}${armsCode}  fly_panic("an operation no arm handles");\nfail: ;\nret: ;\n}\n`);
+    // The handler, installed for the body.
+    const hf = self.fresh();
+    const hh = self.fresh();
+    self.cx.decls.push(`  ${frame} ${hf};\n  fly_handler ${hh};\n`);
+    self.line(`${hf} = (${frame}){ ${inits.join(", ")} }; ${hh} = (fly_handler){ .effect = ${d}, .op = -1, .outer = fly_handlers, .direct = harm_${n}, .frame = &${hf} }; fly_handlers = &${hh};`);
+    if (!unitTy(b)) {
+      self.cx.hoisted.insert(h.value);
+      const bc = self.ctype(b, span);
+      const vl = self.local(h.value);
+      self.cx.decls.push(`  ${bc} ${vl} = { 0 };\n`);
+    }
+    self.tmp += 1;
+    const k = self.tmp;
+    const parent = self.target();
+    const out = `hx${k}`;
+    self.cx.targets.push(out.clone());
+    self.block(h.body, span);
+    self.cx.targets.pop();
+    if (self.cx.reachable) {
+      const store = if (unitTy(b)) { String.new() } else { `${self.local(h.result)} = ${self.local(h.value)}; ` };
+      self.line(`fly_handlers = ${hh}.outer; ${store}`);
+    }
+    // A failure or an unwinding leaving the body leaves the handler too.
+    if (const #Some(at) = self.cx.liveAt.get(out.asStr())) {
+      const at2 = at.clone();
+      self.line(`goto hdone${k};`);
+      self.line(`${out}: fly_handlers = ${hh}.outer; goto ${parent};`);
+      let set: HashSet<usize> = match (self.cx.liveAt.get(parent.asStr())) { #Some(x) => x.clone(), #None => HashSet.new() };
+      for (const l of at2.iter()) { set.insert(l); }
+      self.cx.liveAt.insert(parent.clone(), set);
+      self.line(`hdone${k}: ;`);
+    }
   }
 }
 

@@ -1,6 +1,6 @@
 # Flyscript
 
-**Language specification, version 0.58**
+**Language specification, version 0.59**
 
 *Affine values, one row calculus, handlers for everything, and `comptime`: Church on the outside, Turing on the inside.*
 
@@ -20,7 +20,7 @@ The whole language rests on five laws. Every rule in this document is a conseque
 
 ### 0.1 Recent changes
 
-0.58 runs native tasks on every core (§8.3), and `par` and `parReduce` on all of them through `join`, which runs two pure closures at once (§6.5). 0.57 added LLVM as a way to native code (§8.3): a program's functions as LLVM IR, with debug information that maps them to their source, optimized together with the runtime, for any target LLVM has. 0.56 built the foreign interface (§8.2): raw pointers as the prelude's `Ptr<T>`, reaching through one an effect, `Unsafe`, that `unsafe { … }` handles, and functions of C's and functions C calls; and one core IR under the self-hosted compiler's back ends. The table lists the language's changes since 0.54; earlier ones are in [docs/history](history/).
+0.59 makes handlers whose arms each end by resuming cost a call per operation (§5.2), the shape dependency injection and rendering take. 0.58 ran native tasks on every core (§8.3), and `par` and `parReduce` on all of them through `join`, which runs two pure closures at once (§6.5). 0.57 added LLVM as a way to native code (§8.3): a program's functions as LLVM IR, with debug information that maps them to their source, optimized together with the runtime, for any target LLVM has. 0.56 built the foreign interface (§8.2): raw pointers as the prelude's `Ptr<T>`, reaching through one an effect, `Unsafe`, that `unsafe { … }` handles, and functions of C's and functions C calls; and one core IR under the self-hosted compiler's back ends. The table lists the language's changes since 0.54; earlier ones are in [docs/history](history/).
 
 | Change | Why |
 | :--- | :--- |
@@ -493,6 +493,8 @@ effect Clock { now(): u64; }
 effect Log { info(msg: String): void; }
 const d = handle { limiter.check(client) } with Clock { now() resumes k => k(t) } with Log { info(m) resumes k => { out.push(m); k() } };
 ```
+
+Most handlers are *tail-resumptive*: each arm resumes its continuation once, as the last thing it does, and cannot fail, as the `Clock` and `Log` handlers above. Such a handler costs no more than a function call per operation: the body runs where the `handle` is, and an operation calls its arm, which returns the resumption's argument to the body. Any other handler runs its body on a fiber of its own (§8.3).
 
 An arm runs in the context of the `handle` expression: its effects are those of the code around the `handle`. If the body's row is `Eff, ...E`, the `handle` expression's row is `...E` together with the arms' own effects. That row is inferred, never written, and is the `E` of the arms' continuations: resuming one runs the rest of the body and, through it, perhaps the arms again, and nothing else. A `region` the body opens and ends, or a `try` inside it, handles its effect there, so that effect is not in the row; one around the `handle` is, so a continuation that performs `Region<R>` cannot leave `R`.
 
@@ -1029,7 +1031,7 @@ Every property of a type that looks through its parts — `Copy`, `Send`, its cl
 4. **Check ownership** after typing: every value carries the loans it holds, loans flow through call results, patterns, assignments and captures, and a loan is live while any binding holding it may still be used, judged by reachability over the program's structure.
 5. **Evaluate** directly, carrying each frame's type arguments so a call through a bound runs the impl for the type it stands for: abortive handlers unwind and tail-resumptive ones run where the effect is performed, so `for…of` over a generator captures no stack; a `Gen` pulled with `next()` runs on its own thread. `Io` is handled by a deterministic world (files, sockets, a database, a seeded fault schedule), which is what makes §6.4's simulation testing concrete.
 
-The self-hosted compiler (`selfhost/`) lowers each checked function once, specialized for its type arguments, to a core IR of structured statements in which evaluation order, moves, drops and every way out of a block are explicit, and prints it three ways: as JavaScript, running effects as generators; as C, with fibers for handlers, generators and tasks; and as LLVM IR, whose integer arithmetic is LLVM's own, checked by its overflow intrinsics. The C and LLVM back ends share the runtime and its library routines, which LLVM inlines into the program. Still to come: **lower effects** by evidence passing (tail-resumptive handlers to direct calls, abortive `Fail` to two-register returns), and emitting `noalias` and `readonly` from `mut` and `readonly`.
+The self-hosted compiler (`selfhost/`) lowers each checked function once, specialized for its type arguments, to a core IR of structured statements in which evaluation order, moves, drops and every way out of a block are explicit, and prints it three ways: as JavaScript, running effects as generators; as C, with fibers for handlers, generators and tasks; and as LLVM IR, whose integer arithmetic is LLVM's own, checked by its overflow intrinsics. The C and LLVM back ends share the runtime and its library routines, which LLVM inlines into the program. Native code runs a tail-resumptive handler's body in place and makes each operation a call of its arm; any other handler's body runs on a fiber. Still to come: abortive `Fail` as two-register returns, and emitting `noalias` and `readonly` from `mut` and `readonly`.
 
 ## 12. Design notes
 

@@ -19,7 +19,7 @@
 
 import { Span } from "./diag";
 import { Ty, FnTy, GArg, EffRow } from "./types";
-import { HashMap } from "std/collections";
+import { HashMap, HashSet } from "std/collections";
 
 export type Local = { name: String; ty: Ty; kind: LocalKind };
 
@@ -190,7 +190,8 @@ export enum Stmt {
 
 // A `handle`: the effect it handles, its body and the local the body's value is in, its arms, and
 // the local the `handle` gives its value in. The body's value, or an arm's, is the value of the
-// `handle`, or of the continuation's call that resumed the body.
+// `handle`, or of the continuation's call that resumed the body. A direct handle's arms each end by
+// resuming the body, so its value is the body's.
 export type Handle = {
   effect: usize;
   body: Block;
@@ -198,6 +199,9 @@ export type Handle = {
   arms: Vec<Arm>;
   result: usize;
   span: Span;
+  // Whether every arm resumes its continuation once, as the last thing it does: then the body may
+  // run where the `handle` is, and each operation it performs call its arm, which returns to it.
+  direct: bool;
 };
 
 // An arm of a `handle`: the operation's index, the locals its arguments are bound to, its
@@ -250,6 +254,97 @@ export enum ConstValue {
 }
 
 export enum MainArg { #Int(Ty), #Float(Ty), #Str, #Strings, #Strs }
+
+// ---- what code uses ----
+
+// The locals declared in a block and the blocks in it.
+export function ownedIn(b: readonly Block, out: mut HashSet<usize>): void {
+  for (const l of b.locals) { out.insert(l); }
+  for (const c of b.cleanups) { if (const #Defer(_, d) = c) { ownedIn(d, mut out); } }
+  for (const s of b.stmts) {
+    match (s) {
+      #If(_, x, y) => { ownedIn(x, mut out); ownedIn(y, mut out); }
+      #Loop(_, x, y) => { ownedIn(x, mut out); ownedIn(y, mut out); }
+      #Labeled(_, x) | #Block(x) | #Region(_, _, x) => ownedIn(x, mut out),
+      #Try(x, _, y) => { ownedIn(x, mut out); ownedIn(y, mut out); }
+      #ForGen(_, _, _, x) => ownedIn(x, mut out),
+      #Handle(h) => { ownedIn(h.body, mut out); for (const a of h.arms) { ownedIn(a.body, mut out); } }
+      _ => {}
+    }
+  }
+}
+
+// The locals and captures code uses.
+export type Uses = { locals: HashSet<usize>; captures: HashSet<usize> };
+
+export function usePlace(p: readonly Place, u: mut Uses): void {
+  match (p.root) { #Local(l) => { u.locals.insert(l); } #Capture(k) => { u.captures.insert(k); } }
+  for (const x of p.path) { if (const #Index(op) = x.kind) { useOperand(op, mut u); } }
+}
+
+export function useOperand(op: readonly Operand, u: mut Uses): void {
+  match (op) { #Copy(p) | #Move(p) => usePlace(p, mut u), #Const(_) => {} }
+}
+
+export function useCall(c: readonly Call, u: mut Uses): void {
+  for (const a of c.args) { useOperand(a, mut u); }
+  if (const #Value(f, _) = c.callee) { useOperand(f, mut u); }
+}
+
+export function useRvalue(rv: readonly Rvalue, u: mut Uses): void {
+  match (rv) {
+    #Use(op) | #Unary(_, op) | #Cast(op, _) | #Convert(op) => useOperand(op, mut u),
+    #Borrow(_, p) | #View(p) | #IsTag(p, _) | #AddressOf(p) => usePlace(p, mut u),
+    #Binary(_, a, b) => { useOperand(a, mut u); useOperand(b, mut u); }
+    #Tag(_, vs) | #List(vs) => { for (const v of vs) { useOperand(v, mut u); } }
+    #Fields(fs) => { for (const [_, v] of fs) { useOperand(v, mut u); } }
+    #Call(c) => useCall(c, mut u),
+    #Closure(_, caps, _) => {
+      for (const c of caps) { match (c) { #Value(op) => useOperand(op, mut u), #Ref(_, p) => usePlace(p, mut u) } }
+    }
+    #FnRef(_) => {}
+  }
+}
+
+export function useBlock(b: readonly Block, u: mut Uses): void {
+  for (const c of b.cleanups) {
+    match (c) {
+      #Drop(l) | #Arena(l) => { u.locals.insert(l); }
+      #Defer(f, d) => { u.locals.insert(f); useBlock(d, mut u); }
+    }
+  }
+  for (const s of b.stmts) { useStmt(s, mut u); }
+}
+
+export function useStmt(s: readonly Stmt, u: mut Uses): void {
+  match (s) {
+    #Let(l, rv) => { u.locals.insert(l); useRvalue(rv, mut u); }
+    #Store(p, rv) => { usePlace(p, mut u); useRvalue(rv, mut u); }
+    #Drop(p) => usePlace(p, mut u),
+    #If(c, x, y) => { useOperand(c, mut u); useBlock(x, mut u); useBlock(y, mut u); }
+    #Loop(_, x, y) => { useBlock(x, mut u); useBlock(y, mut u); }
+    #Return(op) | #Throw(op, _) | #Yield(op, _) => useOperand(op, mut u),
+    #Labeled(_, x) | #Block(x) => useBlock(x, mut u),
+    #Try(x, e, y) => { u.locals.insert(e); useBlock(x, mut u); useBlock(y, mut u); }
+    #Arm(f) => { u.locals.insert(f); }
+    #ForGen(_, c, x, b2) => { useCall(c, mut u); u.locals.insert(x); useBlock(b2, mut u); }
+    #Region(_, a, x) => { u.locals.insert(a); useBlock(x, mut u); }
+    #Perform(_, _, args, r) => { for (const a of args) { useOperand(a, mut u); } u.locals.insert(r); }
+    #Handle(h) => {
+      useBlock(h.body, mut u);
+      u.locals.insert(h.value);
+      u.locals.insert(h.result);
+      for (const a of h.arms) {
+        for (const p of a.params) { u.locals.insert(p); }
+        if (const #Some(k) = a.cont) { u.locals.insert(k); }
+        useBlock(a.body, mut u);
+        u.locals.insert(a.value);
+      }
+    }
+    #Resume(k, arg, r) => { useOperand(k, mut u); if (const #Some(a) = arg) { useOperand(a, mut u); } u.locals.insert(r); }
+    #Break(_) | #Continue(_) | #Panic(_) | #At(_) => {}
+  }
+}
 
 impl Clone for LocalKind;
 impl Clone for Root;

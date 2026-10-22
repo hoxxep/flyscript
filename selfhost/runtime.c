@@ -984,6 +984,15 @@ void fly_perform(uint32_t effect, int op, void* args, void* result) {
   fly_handler* h = fly_handlers;
   while (h && h->effect != effect) h = h->outer;
   if (!h) fly_panic("an effect is performed that nothing handles");
+  // A direct handler's arm runs here, in the context of its `handle`: what it performs goes to
+  // the handlers around that.
+  if (h->direct) {
+    fly_handler* inner = fly_handlers;
+    fly_handlers = h->outer;
+    h->direct(h->frame, op, args, result);
+    fly_handlers = inner;
+    return;
+  }
   h->op = op;
   h->args = args;
   h->result = result;

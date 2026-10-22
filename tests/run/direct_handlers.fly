@@ -1,0 +1,41 @@
+// expect: log: start
+// expect: log: ask 1
+// expect: answer 42
+// expect: cleaned up
+// expect: failed: #TooMany
+// expect: nested: 6
+// expect: 499500
+// Handlers whose arms each end by resuming run their bodies where they are (§5.3): an arm still
+// runs in the context of its `handle`, performing what the code around it handles, and an arm
+// that fails unwinds the body, running its cleanup, before the failure leaves the `handle`.
+import { println } from "std/io";
+effect Ask { ask(n: u32): u32; }
+effect Log { log(s: String): void; }
+
+function asks(n: u32): u32 uses Ask {
+  let t: u32 = 0;
+  for (const i of 0..n) { t += Ask.ask(i); }
+  t
+}
+
+export function main(): void uses Io {
+  handle {
+    Log.log("start".toString());
+    const a = handle { Ask.ask(1) } with Ask { ask(n) resumes k => { Log.log(`ask ${n}`); k(41 + n) } };
+    println(`answer ${a}`);
+  } with Log { log(s) resumes k => { println(`log: ${s}`); k() } };
+  const r = try {
+    handle {
+      defer println("cleaned up");
+      asks(10)
+    } with Ask { ask(n) resumes k => { if (n > 5) { throw #TooMany } k(n) } }
+  } catch (e) {
+    println(`failed: ${e}`);
+    0
+  };
+  const nested = handle {
+    handle { Ask.ask(1) } with Ask { ask(n) resumes k => k(Ask.ask(n) * 2) }
+  } with Ask { ask(n) resumes k => k(n + 2) };
+  println(`nested: ${nested}`);
+  println(`${handle { asks(1000) } with Ask { ask(n) resumes k => k(n) }}`);
+}

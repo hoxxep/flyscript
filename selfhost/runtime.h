@@ -213,7 +213,7 @@ typedef struct fly_fiber fly_fiber;
 typedef struct fly_handler fly_handler;
 // A `handle` running its body on a fiber: the effect it handles, the operation the body performed
 // (-1 for none), where the body keeps that operation's arguments and wants its result, the
-// handlers around it, and the fiber the body is suspended in.
+// handlers around it, and the fiber the body is suspended in. A direct one (§5.3) has no fiber.
 struct fly_handler {
   uint32_t effect;
   int op;
@@ -222,6 +222,10 @@ struct fly_handler {
   fly_handler* outer;
   fly_fiber* fiber;
   fly_fiber* suspended;
+  // A direct handler's arms: its body runs where it is, and each operation calls them, given its
+  // frame, and returns with the result they give.
+  void (*direct)(void* frame, int op, void* args, void* result);
+  void* frame;
 };
 // The handlers in force, innermost first.
 extern FLY_LOCAL fly_handler* fly_handlers;
