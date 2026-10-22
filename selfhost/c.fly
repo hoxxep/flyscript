@@ -574,7 +574,7 @@ impl C {
         } else {
           if (self.p.hasDrop(d)) {
             const call = self.dropCall(t, span);
-            body.push(`  if (v->live) { ${call}; v->live = false; }\n`);
+            body.push(`  if (v->live) { v->live = false; fly_unwind_state u_ = fly_cleanup_begin(); ${call}; fly_cleanup_end(u_); }\n`);
           }
           match (self.p.defs[d].kind) {
             #Enum { tags: _ } => self.dropTags(mut body, t, span),
@@ -1295,7 +1295,8 @@ impl C {
         match (tt) {
           #Array(_, #Known(n)) => {
             const a = self.obj(target);
-            `${a}.data[({ uint64_t i_ = ${i}; if (i_ >= ${n}) fly_panicf("index %llu out of bounds (length %d)", (unsigned long long)i_, ${n}); i_; })]`
+            const at = self.ctype(tt, e.span);
+            `(*({ ${at}* a_ = &${a}; uint64_t i_ = ${i}; if (i_ >= ${n}) fly_panicf("index %llu out of bounds (length %d)", (unsigned long long)i_, ${n}); &a_->data[i_]; }))`
           }
           #Tuple(_) => {
             const a = self.obj(target);
@@ -1303,15 +1304,15 @@ impl C {
           }
           #Slice(_) => {
             const a = self.obj(target);
-            `(*(${ec}*)fly_slice_at(${a}, ${i}, sizeof(${ec})))`
+            `(*({ fly_slice s_ = ${a}; uint64_t i_ = ${i}; (${ec}*)fly_slice_at(s_, i_, sizeof(${ec})); }))`
           }
           #Prim(#Str) => {
             const a = self.obj(target);
-            `(*(uint8_t*)fly_slice_at((fly_slice){ (void*)${a}.ptr, ${a}.len }, ${i}, 1))`
+            `(*({ fly_str s_ = ${a}; uint64_t i_ = ${i}; (uint8_t*)fly_slice_at((fly_slice){ (void*)s_.ptr, s_.len }, i_, 1); }))`
           }
           _ => {
             const a = self.obj(target);
-            `(*(${ec}*)fly_vec_at(&${a}, ${i}, sizeof(${ec})))`
+            `(*({ fly_vec* v_ = &${a}; uint64_t i_ = ${i}; (${ec}*)fly_vec_at(v_, i_, sizeof(${ec})); }))`
           }
         }
       }
@@ -1447,11 +1448,12 @@ impl C {
     if (match (at) { #Prim(#Str) => true, _ => self.isString(at) } || match (bt) { #Prim(#Str) => true, _ => self.isString(bt) }) {
       const x = self.exAs(a, #Prim(#Str));
       const y = self.exAs(b, #Prim(#Str));
-      return match (op) {
-        "==" => `fly_str_eq(${x}, ${y})`,
-        "!=" => `(!fly_str_eq(${x}, ${y}))`,
-        _ => `(fly_str_cmp(${x}, ${y}) ${op} 0)`,
+      const r = match (op) {
+        "==" => "fly_str_eq(x_, y_)".toString(),
+        "!=" => "(!fly_str_eq(x_, y_))".toString(),
+        _ => `(fly_str_cmp(x_, y_) ${op} 0)`,
       };
+      return `({ fly_str x_ = ${x}; fly_str y_ = ${y}; ${r}; })`;
     }
     const x0 = self.value(a);
     const [x, _] = self.throughBoxes(x0, stripBorrow(self.exprTy(a.id)), #Error);
@@ -1460,26 +1462,24 @@ impl C {
     if (op == "==" || op == "!=" || op == "<" || op == ">" || op == "<=" || op == ">=") {
       return `({ __auto_type x_ = ${x}; __auto_type y_ = ${y}; x_ ${op} y_; })`;
     }
+    // The operands are evaluated left to right, into variables: C does not order a call's
+    // arguments, nor an operator's operands.
     const t = self.exprTy(e.id);
-    match (intPrim(t)) {
-      #Some(p) => {
-        match (op) {
-          "+" => self.checked(p, `fly_add128((fly_i128)(${x}), (fly_i128)(${y}))`),
-          "-" => self.checked(p, `fly_sub128((fly_i128)(${x}), (fly_i128)(${y}))`),
-          "*" => self.checked(p, `fly_mul128((fly_i128)(${x}), (fly_i128)(${y}))`),
-          "/" | "%" => {
-            const c = self.primC(p);
-            `({ ${c} x_ = ${x}; ${c} y_ = ${y}; if (y_ == 0) fly_div_zero(); (${c})(x_ ${op} y_); })`
-          }
-          "<<" => self.checked(p, `((fly_i128)(${x}) << (${y}))`),
-          _ => `((${self.primC(p)})(${x} ${op} ${y}))`,
+    const result = match (intPrim(t)) {
+      #Some(p) => match (op) {
+        "+" => self.checked(p, "fly_add128((fly_i128)x_, (fly_i128)y_)"),
+        "-" => self.checked(p, "fly_sub128((fly_i128)x_, (fly_i128)y_)"),
+        "*" => self.checked(p, "fly_mul128((fly_i128)x_, (fly_i128)y_)"),
+        "/" | "%" => {
+          const c = self.primC(p);
+          `({ if (y_ == 0) fly_div_zero(); (${c})(x_ ${op} y_); })`
         }
-      }
-      #None => {
-        if (op == "%") { return `fmod(${x}, ${y})`; }
-        `(${x} ${op} ${y})`
-      }
-    }
+        "<<" => self.checked(p, "((fly_i128)x_ << y_)"),
+        _ => `((${self.primC(p)})(x_ ${op} y_))`,
+      },
+      #None => if (op == "%") { "fmod(x_, y_)".toString() } else { `(x_ ${op} y_)` },
+    };
+    `({ __auto_type x_ = ${x}; __auto_type y_ = ${y}; ${result}; })`
   }
 
   // Assigns to a place; the value it held is dropped first (§5.6).
@@ -2745,7 +2745,7 @@ impl C {
     const flag = self.fresh();
     const env = self.fresh();
     self.decls.push(`  bool ${flag} = false;\n  ${envT} ${env};\n`);
-    self.release(`if (${flag}) { ${flag} = false; defer_${n}(&${env}); } `);
+    self.release(`if (${flag}) { ${flag} = false; fly_unwind_state u_ = fly_cleanup_begin(); defer_${n}(&${env}); fly_cleanup_end(u_); } `);
     `${env} = (${envT}){ ${inits.join(", ")} }; ${flag} = true; `
   }
 

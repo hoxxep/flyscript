@@ -38522,7 +38522,7 @@ function dropFn$913(self, t, span) {
                             {
                               if (hasDrop$451(self.v.p, d)) {
                                 const call = dropCall$1076(self, t, $rt.copy(span));
-                                $b.String_push(body, ("" + "  if (v->live) { " + call + "; v->live = false; }\n"));
+                                $b.String_push(body, ("" + "  if (v->live) { v->live = false; fly_unwind_state u_ = fly_cleanup_begin(); " + call + "; fly_cleanup_end(u_); }\n"));
                               }
                               const $10 = new $rt.FieldRef($rt.idx(self.v.p.defs, d), "kind");
                               const $11 = $10.v;
@@ -38651,7 +38651,7 @@ function deferStmt$914(self, x) {
   const flag = fresh$1068(self);
   const env = fresh$1068(self);
   $b.String_push(new $rt.FieldRef(self.v, "decls"), ("" + "  bool " + flag + " = false;\n  " + envT + " " + env + ";\n"));
-  release$1042(self, ("" + "if (" + flag + ") { " + flag + " = false; defer_" + String(n) + "(&" + env + "); } "));
+  release$1042(self, ("" + "if (" + flag + ") { " + flag + " = false; fly_unwind_state u_ = fly_cleanup_begin(); defer_" + String(n) + "(&" + env + "); fly_cleanup_end(u_); } "));
   return ("" + env + " = (" + envT + "){ " + join$71(inits.v, ", ") + " }; " + flag + " = true; ");
 }
 function control$915(self, e, t) {
@@ -43489,7 +43489,8 @@ function rawPlace$1049(self, e) {
             const n = $6.$[1].$;
             {
               const a = obj$1155(self, target);
-              return ("" + a + ".data[({ uint64_t i_ = " + i + "; if (i_ >= " + String(n) + ") fly_panicf(\"index %llu out of bounds (length %d)\", (unsigned long long)i_, " + String(n) + "); i_; })]");
+              const at = ctype$209(self, tt, $rt.copy(e.span));
+              return ("" + "(*({ " + at + "* a_ = &" + a + "; uint64_t i_ = " + i + "; if (i_ >= " + String(n) + ") fly_panicf(\"index %llu out of bounds (length %d)\", (unsigned long long)i_, " + String(n) + "); &a_->data[i_]; }))");
             }
             break m$7;
           }
@@ -43503,21 +43504,21 @@ function rawPlace$1049(self, e) {
           if (($6.$tag === "Slice")) {
             {
               const a = obj$1155(self, target);
-              return ("" + "(*(" + ec + "*)fly_slice_at(" + a + ", " + i + ", sizeof(" + ec + ")))");
+              return ("" + "(*({ fly_slice s_ = " + a + "; uint64_t i_ = " + i + "; (" + ec + "*)fly_slice_at(s_, i_, sizeof(" + ec + ")); }))");
             }
             break m$7;
           }
           if (($6.$tag === "Prim" && ($6.$.$tag === "Str"))) {
             {
               const a = obj$1155(self, target);
-              return ("" + "(*(uint8_t*)fly_slice_at((fly_slice){ (void*)" + a + ".ptr, " + a + ".len }, " + i + ", 1))");
+              return ("" + "(*({ fly_str s_ = " + a + "; uint64_t i_ = " + i + "; (uint8_t*)fly_slice_at((fly_slice){ (void*)s_.ptr, s_.len }, i_, 1); }))");
             }
             break m$7;
           }
           if (true) {
             {
               const a = obj$1155(self, target);
-              return ("" + "(*(" + ec + "*)fly_vec_at(&" + a + ", " + i + ", sizeof(" + ec + ")))");
+              return ("" + "(*({ fly_vec* v_ = &" + a + "; uint64_t i_ = " + i + "; (" + ec + "*)fly_vec_at(v_, i_, sizeof(" + ec + ")); }))");
             }
             break m$7;
           }
@@ -44204,83 +44205,88 @@ function binary$1055(self, e, op, a, b) {
   if ($17) {
     const x = exAs$706(self, a, { $tag: "Prim", $: { $tag: "Str" } });
     const y = exAs$706(self, b, { $tag: "Prim", $: { $tag: "Str" } });
-    const $21 = op;
-    m$22: {
-      if ($21 === "==") {
-        return ("" + "fly_str_eq(" + x + ", " + y + ")");
-        break m$22;
+    let $21;
+    const $22 = op;
+    m$23: {
+      if ($22 === "==") {
+        $21 = $b.str_toString("fly_str_eq(x_, y_)");
+        break m$23;
       }
-      if ($21 === "!=") {
-        return ("" + "(!fly_str_eq(" + x + ", " + y + "))");
-        break m$22;
+      if ($22 === "!=") {
+        $21 = $b.str_toString("(!fly_str_eq(x_, y_))");
+        break m$23;
       }
       if (true) {
-        return ("" + "(fly_str_cmp(" + x + ", " + y + ") " + op + " 0)");
-        break m$22;
+        $21 = ("" + "(fly_str_cmp(x_, y_) " + op + " 0)");
+        break m$23;
       }
-      $rt.unmatched($21);
+      $rt.unmatched($22);
     }
+    const r = $21;
+    return ("" + "({ fly_str x_ = " + x + "; fly_str y_ = " + y + "; " + r + "; })");
   }
   const x0 = value$910(self, a);
-  const $23 = throughBoxes$921(self.v, x0, stripBorrow$202(exprTy$905(self.v, a.id)), { $tag: "Error" });
-  const x = $23[0];
+  const $24 = throughBoxes$921(self.v, x0, stripBorrow$202(exprTy$905(self.v, a.id)), { $tag: "Error" });
+  const x = $24[0];
   const y0 = value$910(self, b);
-  const $24 = throughBoxes$921(self.v, y0, stripBorrow$202(exprTy$905(self.v, b.id)), { $tag: "Error" });
-  const y = $24[0];
+  const $25 = throughBoxes$921(self.v, y0, stripBorrow$202(exprTy$905(self.v, b.id)), { $tag: "Error" });
+  const y = $25[0];
   if (((((((op === "==") || (op === "!=")) || (op === "<")) || (op === ">")) || (op === "<=")) || (op === ">="))) {
     return ("" + "({ __auto_type x_ = " + x + "; __auto_type y_ = " + y + "; x_ " + op + " y_; })");
   }
   const t = exprTy$905(self.v, e.id);
-  const $25 = intPrim$1053(t);
-  m$26: {
-    if (($25.$tag === "Some")) {
-      const p = $25.$;
-      {
-        const $27 = op;
-        m$28: {
-          if ($27 === "+") {
-            return checked$1054(self.v, p, ("" + "fly_add128((fly_i128)(" + x + "), (fly_i128)(" + y + "))"));
-            break m$28;
+  let $26;
+  const $27 = intPrim$1053(t);
+  m$28: {
+    if (($27.$tag === "Some")) {
+      const p = $27.$;
+      const $29 = op;
+      m$30: {
+        if ($29 === "+") {
+          $26 = checked$1054(self.v, p, "fly_add128((fly_i128)x_, (fly_i128)y_)");
+          break m$30;
+        }
+        if ($29 === "-") {
+          $26 = checked$1054(self.v, p, "fly_sub128((fly_i128)x_, (fly_i128)y_)");
+          break m$30;
+        }
+        if ($29 === "*") {
+          $26 = checked$1054(self.v, p, "fly_mul128((fly_i128)x_, (fly_i128)y_)");
+          break m$30;
+        }
+        if (($29 === "/" || $29 === "%")) {
+          {
+            const c = primC$1172(self.v, p);
+            $26 = ("" + "({ if (y_ == 0) fly_div_zero(); (" + c + ")(x_ " + op + " y_); })");
           }
-          if ($27 === "-") {
-            return checked$1054(self.v, p, ("" + "fly_sub128((fly_i128)(" + x + "), (fly_i128)(" + y + "))"));
-            break m$28;
-          }
-          if ($27 === "*") {
-            return checked$1054(self.v, p, ("" + "fly_mul128((fly_i128)(" + x + "), (fly_i128)(" + y + "))"));
-            break m$28;
-          }
-          if (($27 === "/" || $27 === "%")) {
-            {
-              const c = primC$1172(self.v, p);
-              return ("" + "({ " + c + " x_ = " + x + "; " + c + " y_ = " + y + "; if (y_ == 0) fly_div_zero(); (" + c + ")(x_ " + op + " y_); })");
-            }
-            break m$28;
-          }
-          if ($27 === "<<") {
-            return checked$1054(self.v, p, ("" + "((fly_i128)(" + x + ") << (" + y + "))"));
-            break m$28;
-          }
-          if (true) {
-            return ("" + "((" + primC$1172(self.v, p) + ")(" + x + " " + op + " " + y + "))");
-            break m$28;
-          }
-          $rt.unmatched($27);
+          break m$30;
+        }
+        if ($29 === "<<") {
+          $26 = checked$1054(self.v, p, "((fly_i128)x_ << y_)");
+          break m$30;
+        }
+        if (true) {
+          $26 = ("" + "((" + primC$1172(self.v, p) + ")(x_ " + op + " y_))");
+          break m$30;
+        }
+        $rt.unmatched($29);
+      }
+      break m$28;
+    }
+    if (($27.$tag === "None")) {
+      if ((op === "%")) {
+        $26 = $b.str_toString("fmod(x_, y_)");
+      } else {
+        {
+          $26 = ("" + "(x_ " + op + " y_)");
         }
       }
-      break m$26;
+      break m$28;
     }
-    if (($25.$tag === "None")) {
-      {
-        if ((op === "%")) {
-          return ("" + "fmod(" + x + ", " + y + ")");
-        }
-        return ("" + "(" + x + " " + op + " " + y + ")");
-      }
-      break m$26;
-    }
-    $rt.unmatched($25);
+    $rt.unmatched($27);
   }
+  const result = $26;
+  return ("" + "({ __auto_type x_ = " + x + "; __auto_type y_ = " + y + "; " + result + "; })");
 }
 function assign$1056(self, op, target, value) {
   const tt = exprTy$905(self.v, target.id);

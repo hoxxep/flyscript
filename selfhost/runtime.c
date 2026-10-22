@@ -726,6 +726,20 @@ void fly_handle_free(fly_handler* h) {
   h->fiber = NULL;
 }
 
+fly_unwind_state fly_cleanup_begin(void) {
+  fly_unwind_state s = { fly_err, fly_unwinding, fly_stopping };
+  fly_err = NULL;
+  fly_unwinding = false;
+  fly_stopping = false;
+  return s;
+}
+
+void fly_cleanup_end(fly_unwind_state s) {
+  fly_err = s.err;
+  fly_unwinding = s.unwinding;
+  fly_stopping = s.stopping;
+}
+
 void fly_cont_drop(fly_cont* k) {
   if (k->drop) k->drop(k->frame);
   *k = (fly_cont){ 0 };
@@ -1079,19 +1093,14 @@ static void block(int kind, int id) {
   suspend_task(kind, id);
 }
 
-static fly_failure* failure_copy(const fly_failure* f) {
-  fly_failure* c = fly_alloc(sizeof(fly_failure) + f->size);
-  memcpy(c, f, sizeof(fly_failure) + f->size);
-  return c;
-}
-
 // Task `me` has finished: its outcome goes to its scope, and its joiners wake.
 static void end_task(int me) {
   task_t* t = sched.tasks[me];
   scope_t* st = sched.scopes[t->scope];
   if (t->error && !st->failure) {
-    // The first failure cancels the scope: its body and its other tasks.
-    st->failure = failure_copy(t->error);
+    // The first failure cancels the scope: its body and its other tasks. It is the scope's to
+    // raise, unless a join raises it first: a failure is raised once.
+    st->failure = t->error;
     cancel(st->owner);
     for (size_t i = 0; i < st->ntasks; i++) if (st->tasks[i] != me) cancel(st->tasks[i]);
   }
@@ -1198,7 +1207,13 @@ void fly_join(int task, void* out) {
   join_task(task);
   if (fly_unwinding) return;
   task_t* t = sched.tasks[task];
-  if (t->error) { fly_err = failure_copy(t->error); return; }
+  if (t->error) {
+    scope_t* st = sched.scopes[t->scope];
+    if (st && st->failure == t->error) st->failure = NULL;
+    fly_err = t->error;
+    t->error = NULL;
+    return;
+  }
   memcpy(out, t->result, t->size);
 }
 
@@ -1239,7 +1254,7 @@ void fly_scope_close(int sid, bool body_failed) {
   me->cancelled = false;
   if (unwound) { fly_unwinding = true; if (err) free(err); return; }
   if (err) { fly_err = err; return; }
-  if (st->failure) fly_err = failure_copy(st->failure);
+  if (st->failure) { fly_err = st->failure; st->failure = NULL; }
 }
 
 // ---- channels ----
@@ -1301,7 +1316,8 @@ fly_chan fly_sender_clone(const fly_chan* ch) {
 
 // ---- regions ----
 
-struct fly_chunk { fly_chunk* next; size_t used, cap; };
+// Its header is 32 bytes, so what follows it is aligned for anything.
+struct fly_chunk { fly_chunk* next; size_t used, cap, pad; };
 #define CHUNK_DATA(c) ((uint8_t*)((c) + 1))
 
 void* fly_arena_alloc(fly_arena* a, size_t size) {

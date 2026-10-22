@@ -184,6 +184,12 @@ extern fly_handler* fly_handlers;
 // leaves through its function's way out when it sees it.
 extern bool fly_unwinding;
 void fly_perform(uint32_t effect, int op, void* args, void* result);
+// Cleanup — a `defer`, a destructor — runs to its end however its block is left: what is
+// unwinding past it is set aside while it runs, so its own failures, loops and handlers work,
+// and then goes on.
+typedef struct { void* err; bool unwinding, stopping; } fly_unwind_state;
+fly_unwind_state fly_cleanup_begin(void);
+void fly_cleanup_end(fly_unwind_state s);
 // Starts `h`'s body, `entry(arg)`, on a fiber of its own; runs it until it performs `h`'s effect or
 // finishes, as resuming does.
 void fly_handle_start(fly_handler* h, void (*entry)(void*), void* arg);

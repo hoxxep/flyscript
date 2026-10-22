@@ -1,0 +1,35 @@
+// expect: inner cleanup caught its own failure
+// expect: loop in cleanup ran to 3
+// expect: caught #Outer
+// expect: 1 2 3
+// Cleanup runs to its end however its block is left: a `defer` that catches a failure of its own,
+// or runs a loop, while a failure unwinds past it does both, and the failure goes on (§5.6).
+// Operands are evaluated left to right (§2.3).
+import { println } from "std/io";
+function risky(): void uses Fail<#Inner> { throw #Inner; }
+function work(log: mut Vec<String>): void uses Fail<#Outer> {
+  defer {
+    try { risky(); } catch (_) { log.push("inner cleanup caught its own failure".toString()); }
+    let n: u32 = 0;
+    for (const x of [1, 2, 3]) { n = x; }
+    log.push(`loop in cleanup ran to ${n}`);
+  };
+  throw #Outer;
+}
+function say(n: i64, out: mut Vec<String>): i64 { out.push(`${n}`); n }
+export function main(): void uses Io {
+  let log: Vec<String> = Vec.new();
+  const r = try { work(mut log); "no failure".toString() } catch (e) { `caught ${e}` };
+  for (const l of log) { println(l.asStr()); }
+  println(r.asStr());
+  let order: Vec<String> = Vec.new();
+  const total = say(1, mut order) + say(2, mut order) * say(3, mut order);
+  println(order.join(" ").asStr());
+  region (R) {
+    const small: u8 = 1;
+    const big: i128 = 170141183460469231731687303715884105727;
+    const a = alloc(small);
+    const b = alloc(big);
+    if (a.get() + 1 == 2 && b.get() > 0 && total == 7) {}
+  }
+}
