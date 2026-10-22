@@ -851,13 +851,13 @@ static fly_str json_string(void) {
 static void json_skip(void);
 static void json_skip(void) {
   json_space();
-  if (*json_at == '"') { json_string(); return; }
+  if (*json_at == '"') { free((void*)json_string().ptr); return; }
   if (*json_at == '[' || *json_at == '{') {
     char close = *json_at == '[' ? ']' : '}';
     json_at++;
     json_space();
     while (*json_at && *json_at != close) {
-      if (close == '}') { json_string(); json_space(); json_at++; }
+      if (close == '}') { free((void*)json_string().ptr); json_space(); json_at++; }
       json_skip();
       json_space();
       if (*json_at == ',') json_at++;
@@ -927,6 +927,7 @@ static void world_load(void) {
       } else {
         json_skip();
       }
+      free((void*)k.ptr);
       json_space();
       if (*json_at == ',') json_at++;
       json_space();

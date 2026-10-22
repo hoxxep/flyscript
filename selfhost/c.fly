@@ -1132,6 +1132,28 @@ impl C {
     self.throughBoxes(`(*${v})`, inner, stop)
   }
 
+  // The `i`th part of a literal, `v`: the statement that evaluates it, and what takes it once all
+  // are evaluated.
+  function element(self: mut Self, v: String, t: readonly Ty, more: bool, i: usize, span: Span): [String, String] uses Fail<Diagnostic> {
+    match (self.held(v.clone(), t, more, span)) {
+      #Some(tmp) => {
+        const tc = self.ctype(t, span);
+        [`${tmp} = ${v}; `, `({ ${tc} m_ = ${tmp}; memset(&${tmp}, 0, sizeof m_); m_; })`]
+      }
+      #None => {
+        const tc = self.ctype(t, span);
+        [`${tc} e${i}_ = ${v}; `, `e${i}_`]
+      }
+    }
+  }
+
+  // Where an owned value evaluated before more of the same expression is held: a temporary of the
+  // scope, until the call takes it, so a failure evaluating the rest drops it on the way out.
+  function held(self: mut Self, v: String, t: readonly Ty, more: bool, span: Span): Option<String> uses Fail<Diagnostic> {
+    if (!more || !self.needsDrop(t) || match (t) { #Borrow(_, _) => true, _ => viewLike(t) }) { return #None; }
+    #Some(self.temp(t, span))
+  }
+
   // An argument as the parameter takes it. A closure made only to be lent — to a parameter that
   // does not call it `once` — is the scope's, which drops it after the call.
   function argAs(self: mut Self, e: readonly Expr, pt: readonly Ty): String uses Fail<Diagnostic> {
@@ -1512,32 +1534,43 @@ impl C {
 
   // ---- literals ----
 
+  // A template string, built in a temporary of the scope, so a part that fails leaves nothing
+  // half-built behind.
   function template(self: mut Self, parts: readonly Vec<TemplatePiece>): String uses Fail<Diagnostic> {
-    let out = "({ fly_String s_ = fly_String_new(); ".toString();
+    const tmp = self.temp(self.stringTy(), { start: 0, end: 0 });
+    let out = `({ ${tmp} = fly_String_new(); fly_String* sb_ = &${tmp}; `;
     for (const p of parts) {
       match (p) {
-        #Lit(s) => { if (s.len() > 0) { out.push(`fly_String_push(&s_, ${strLit(s.asStr())}); `); } }
+        #Lit(s) => { if (s.len() > 0) { out.push(`fly_String_push(sb_, ${strLit(s.asStr())}); `); } }
         #Expr(x) => {
           const v = self.shown(x);
           out.push(v.asStr());
         }
       }
     }
-    out.push("s_; })");
+    out.push(`fly_String m_ = ${tmp}; memset(&${tmp}, 0, sizeof m_); m_; })`);
     out
+  }
+
+  // The type `String`.
+  function stringTy(self: readonly Self): Ty {
+    match (self.p.defs.iter().findIndex((d) => d.name == "String" && self.p.modules[d.module].isStd)) {
+      #Some(d) => #Named(d, Vec.new()),
+      #None => #Error,
+    }
   }
 
   // Statements that write a value into the template's string `s_`.
   // Statements writing `v`, a primitive, into the template's string `s_`.
   function showPrim(self: readonly Self, p: Prim, v: str): String {
     const shownV = match (p) {
-      #Str => return `fly_String_push(&s_, ${v}); `,
+      #Str => return `fly_String_push(sb_, ${v}); `,
       #Bool => `fly_show_bool(${v})`,
       #F32 | #F64 => `fly_show_f64(${v})`,
       #U64 | #Usize => `fly_show_u128(${v})`,
       _ => `fly_show_i128(${v})`,
     };
-    `{ fly_String n_ = ${shownV}; fly_String_push(&s_, fly_String_as_str(&n_)); fly_String_drop(&n_); } `
+    `{ fly_String n_ = ${shownV}; fly_String_push(sb_, fly_String_as_str(&n_)); fly_String_drop(&n_); } `
   }
 
   function shown(self: mut Self, x: readonly Expr): String uses Fail<Diagnostic> {
@@ -1546,15 +1579,15 @@ impl C {
     if (self.boxLike(raw)) {
       const v0 = self.value(x);
       const [lv, t] = self.throughBoxes(v0, raw, #Error);
-      if (self.isString(t)) { return `fly_String_push(&s_, fly_String_as_str(&${lv})); `; }
+      if (self.isString(t)) { return `fly_String_push(sb_, fly_String_as_str(&${lv})); `; }
       if (const #Prim(p) = t) { return self.showPrim(p, lv.asStr()); }
-      const call = self.ifaceCall("Show", "show", t, [`(&${lv})`, "(&s_)".toString()], x.span);
+      const call = self.ifaceCall("Show", "show", t, [`(&${lv})`, "sb_".toString()], x.span);
       return `${call}; `;
     }
     const t = raw;
     if (self.isString(t)) {
       const v = self.stringAsStr(x);
-      return `fly_String_push(&s_, ${v}); `;
+      return `fly_String_push(sb_, ${v}); `;
     }
     match (t) {
       #Prim(p) => {
@@ -1575,7 +1608,7 @@ impl C {
         const c = self.callee(f, concrete, x.span);
         const fname = self.calleeC(c, x.span);
         const v = self.exAs(x, ptys[0]);
-        `${fname}(${v}, &s_); `
+        `${fname}(${v}, sb_); `
       }
       #None => self.unsupported(x.span, "showing a value with no `Show`"),
     }
@@ -1615,8 +1648,9 @@ impl C {
     for (const [i, x] of es.iter().enumerate()) {
       const ft: Ty = if (i < fs.len()) { fs[i][1].clone() } else { self.exprTy(x.id) };
       const v = self.exAs(x, ft);
-      decls.push(`__auto_type e${i}_ = ${v}; `);
-      inits.push(`.f${i} = e${i}_`);
+      const [d, u] = self.element(v, ft, i + 1 < es.len(), i, span);
+      decls.push(d.asStr());
+      inits.push(`.f${i} = ${u}`);
     }
     `({ ${decls}(${ct}){ ${inits.join(", ")} }; })`
   }
@@ -1647,8 +1681,9 @@ impl C {
           #None => self.fail(f.name.span, `unknown name \`${f.name.name}\``),
         },
       };
-      decls.push(`__auto_type e${i}_ = ${v}; `);
-      inits.push(`.${mangle(f.name.name.asStr())} = e${i}_`);
+      const [d, u] = self.element(v, ft, i + 1 < fields.len(), i, span);
+      decls.push(d.asStr());
+      inits.push(`.${mangle(f.name.name.asStr())} = ${u}`);
     }
     `({ ${decls}(${ct}){ ${inits.join(", ")} }; })`
   }
@@ -1664,8 +1699,9 @@ impl C {
         let vs: Vec<String> = Vec.new();
         for (const [i, x] of items.iter().enumerate()) {
           const v = self.exAs(x, elem);
-          decls.push(`__auto_type e${i}_ = ${v}; `);
-          vs.push(`e${i}_`);
+          const [d, u] = self.element(v, elem, i + 1 < items.len(), i, e.span);
+          decls.push(d.asStr());
+          vs.push(u);
         }
         `({ ${decls}(${ct}){ { ${vs.join(", ")} } }; })`
       }
@@ -1677,8 +1713,9 @@ impl C {
         let vs: Vec<String> = Vec.new();
         for (const [i, x] of items.iter().enumerate()) {
           const v = self.exAs(x, elem);
-          decls.push(`${ec} e${i}_ = ${v}; `);
-          vs.push(`e${i}_`);
+          const [d, u] = self.element(v, elem, i + 1 < items.len(), i, e.span);
+          decls.push(d.asStr());
+          vs.push(u);
         }
         `({ ${decls}${ec} a_[] = { ${vs.join(", ")} }; fly_vec_from(a_, ${items.len()}, sizeof(${ec})); })`
       }
@@ -1874,7 +1911,9 @@ impl C {
     const rt = self.ctype(fty.ret, e.span);
     const callExpr = `((${rt} (*)(${ptypes.join(", ")}))f_.fn)(f_.env${if (vs.len() > 0) { ", " } else { "" }}${vs.join(", ")})`;
     const failing = self.mayFail(fty.effects);
-    self.finishCall(`fly_fn f_ = ${f}; ${decls}`, callExpr, rt, failing, self.suspends(fty.effects))
+    // Calling a `once` closure consumes it: it is dropped once called.
+    const call = if (fty.mode == #Once) { `({ ${rt} c_ = ${callExpr}; if (f_.drop) f_.drop(f_.env); c_; })` } else { callExpr };
+    self.finishCall(`fly_fn f_ = ${f}; ${decls}`, call, rt, failing, self.suspends(fty.effects))
   }
 
   // A call of a made function, its arguments evaluated left to right.
@@ -1888,10 +1927,18 @@ impl C {
     let vs: Vec<String> = Vec.new();
     for (const [i, a] of all.iter().enumerate()) {
       const pt: Ty = match (ptys.get(i)) { #Some(t) => t.clone(), #None => self.exprTy(a.id) };
-      const v = self.argAs(a, pt);
+      const v0 = self.argAs(a, pt);
       const pc = self.ctype(pt, a.span);
-      decls.push(`${pc} a${i}_ = ${v}; `);
-      vs.push(`a${i}_`);
+      match (self.held(v0.clone(), pt, i + 1 < all.len(), a.span)) {
+        #Some(tmp) => {
+          decls.push(`${tmp} = ${v0}; `);
+          vs.push(`({ ${pc} m_ = ${tmp}; memset(&${tmp}, 0, sizeof m_); m_; })`);
+        }
+        #None => {
+          decls.push(`${pc} a${i}_ = ${v0}; `);
+          vs.push(`a${i}_`);
+        }
+      }
     }
     for (const x of extra) { vs.push(x.clone()); }
     const rt = self.ctype(ret, span);
@@ -2350,7 +2397,7 @@ impl C {
         const rc = self.ctype(rt, span);
         const etc = self.ctype(errTy, span);
         const take = self.takeErr("e_", errTy);
-        `({ fly_fn f_ = ${arg(0)}; ${tc} v_ = ((${tc} (*)(void*))f_.fn)(f_.env); ${rc} r_; if (FLY_FAILED) { ${etc} e_; memset(&e_, 0, sizeof e_); ${take}r_ = (${rc}){ .tag = ${self.tagId("Err")}, .u.Err = e_ }; } else r_ = (${rc}){ .tag = ${self.tagId("Ok")}, .u.Ok = v_ }; r_; })`
+        `({ fly_fn f_ = ${arg(0)}; ${tc} v_ = ((${tc} (*)(void*))f_.fn)(f_.env); if (f_.drop) f_.drop(f_.env); ${rc} r_; if (FLY_FAILED) { ${etc} e_; memset(&e_, 0, sizeof e_); ${take}r_ = (${rc}){ .tag = ${self.tagId("Err")}, .u.Err = e_ }; } else r_ = (${rc}){ .tag = ${self.tagId("Ok")}, .u.Ok = v_ }; r_; })`
       }
       "Fail_map" => {
         const tc = self.ctype(rt, span);
@@ -2362,7 +2409,7 @@ impl C {
         const take = self.takeErr("e_", errTy);
         const boxed = self.boxErr("w_", wrapTy.ret);
         const label = self.failLabel();
-        `({ fly_fn f_ = ${arg(0)}; fly_fn w0_ = ${arg(1)}; ${tc} v_ = ((${tc} (*)(void*))f_.fn)(f_.env); if (FLY_FAILED) { ${etc} e_; memset(&e_, 0, sizeof e_); ${take}${ftc} w_ = ((${ftc} (*)(void*, ${etc}))w0_.fn)(w0_.env, e_); ${boxed}goto ${label}; } v_; })`
+        `({ fly_fn f_ = ${arg(0)}; fly_fn w0_ = ${arg(1)}; ${tc} v_ = ((${tc} (*)(void*))f_.fn)(f_.env); if (f_.drop) f_.drop(f_.env); if (FLY_FAILED) { ${etc} e_; memset(&e_, 0, sizeof e_); ${take}${ftc} w_ = ((${ftc} (*)(void*, ${etc}))w0_.fn)(w0_.env, e_); if (w0_.drop) w0_.drop(w0_.env); ${boxed}goto ${label}; } if (w0_.drop) w0_.drop(w0_.env); v_; })`
       }
       _ => return #None,
     })
@@ -3544,7 +3591,7 @@ impl C {
     let vs: Vec<String> = Vec.new();
     for (const a of args) {
       const t = match (self.slotTy(a.id)) { #Some(t) => t, #None => self.exprTy(a.id) };
-      vs.push(self.exAs(a, t));
+      vs.push(self.argAs(a, t));
       tys.push(t);
     }
     const unwind = self.unwindAction();
@@ -3659,7 +3706,7 @@ impl C {
       }
       const av = self.blockAs(arm.body, b);
       const drops = self.pop(arm.body.span);
-      armCode.push(`if (env->h.op == ${oi}) { ${binds}${bc} v_ = ${av}; ${drops}return v_; } `);
+      armCode.push(`if (env->h.op == ${oi}) { ${binds}${bc} v_ = ${av}; ${drops}ret_ = v_; goto ret; } `);
     }
     self.pop(e.span);
     const armsFn = self.finishFn("", `({ ${armCode}fly_panic("an operation no arm handles"); (${bc}){ 0 }; })`.asStr(), bc.asStr(), e.span);
