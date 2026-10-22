@@ -120,6 +120,23 @@ theorem LT.det : LT σ a τ L → LT σ a τ L' → L = L' := by
       cases ha'
       rw [ih hb']
 
+/-- What a location holds says its type, too. -/
+theorem LT.det_ty : LT σ a τ L → LT σ a τ' L' → τ = τ' ∧ L = L' := by
+  intro h
+  induction h generalizing τ' L' with
+  | int ha => intro h'; cases h' with
+    | int => exact ⟨rfl, rfl⟩
+    | box ha' => rw [ha] at ha'; cases ha'
+  | box ha _ _ ih =>
+    intro h'
+    cases h' with
+    | int ha' => rw [ha] at ha'; cases ha'
+    | box ha' hb' _ =>
+      rw [ha] at ha'
+      cases ha'
+      obtain ⟨rfl, rfl⟩ := ih hb'
+      exact ⟨rfl, rfl⟩
+
 theorem VT.alloc : VT σ τ v L → ∀ l ∈ L, σ.mem l ≠ none := by
   intro h
   cases h with

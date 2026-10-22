@@ -110,7 +110,7 @@ the arm lent `*base` as `b`: the body reads `base` while the arm may, and neithe
 and nothing left allocated. -/
 def asks : Expr :=
   .let_ "base" (.box .int) (.new (.lit 40))
-    (.handle (.add (.perform 0 [] []) (.read (deref (var "base")))) 0 [("b", deref (var "base"))] [] []
+    (.handle (.add (.perform 0 [] []) (.read (deref (var "base")))) 0 [⟨"b", .ro, .int, deref (var "base")⟩] [] []
       (.add (.read (var "b")) (.lit 1)))
 
 example : (eval [] ops 20 [] .empty [] asks).1 = .val (.int 81) := by decide
@@ -120,15 +120,15 @@ example : ∀ l < (eval [] ops 20 [] .empty [] asks).2.next, (eval [] ops 20 [] 
 theorem asks_typed : Typed [] ops [] asks .int [] [.fail] := by
   refine .let_ (live := true) rfl (.new .lit) ?_
   have := Typed.handle (F := []) (O := ops) (Γ := [("base", .own (.box .int) true)]) (e := 0) (op := ops[0])
-    (os := []) (rs := []) (caps := [("b", deref (var "base"))]) (ts := [.int]) (ys := ["base"]) (r := [.fail])
+    (os := []) (rs := []) (caps := [⟨"b", .ro, .int, deref (var "base")⟩]) (ys := [(.ro, "base")]) (r := [.fail])
     (arm := .add (.read (var "b")) (.lit 1)) (Γa := [("b", .ref .ro .int)])
     (body := .add (.perform 0 [] []) (.read (deref (var "base")))) (τ := .int)
     (Γb := [("base", .ref .ro (.box .int))])
-    rfl rfl rfl (.cons (.deref (.own rfl)) .nil) (by decide)
+    rfl rfl rfl (.ro (.deref (.own rfl)) .nil) (by simp [Exclusive]) (by decide)
     (.add (.read (.ref rfl)) .lit)
     (.add (.perform (op := { owns := [], refs := [], ret := .int }) rfl (List.mem_cons_self ..) .nil .nil
       List.Pairwise.nil) (.read (.deref (.ref rfl))))
-  simpa [thaw] using this
+  simpa [thaw, unhideAll, hideAll, roots] using this
 
 example : ∀ n, match eval [] ops n [.abort .fail 0] .empty [] asks with
     | (.stuck, _) => False
@@ -160,24 +160,26 @@ the arm lent `*x` as `b`: the body would free the cell the arm reads. The types 
 `handle` lends its arm, its body may only read. -/
 def clobbers : Expr :=
   .let_ "x" (.box .int) (.new (.lit 1))
-    (.handle (.seq (.assign (var "x") (.box .int) (.new (.lit 2))) (.perform 0 [] [])) 0 [("b", deref (var "x"))] [] []
+    (.handle (.seq (.assign (var "x") (.box .int) (.new (.lit 2))) (.perform 0 [] [])) 0 [⟨"b", .ro, .int, deref (var "x")⟩] [] []
       (.read (var "b")))
 
-/-- What a `handle` lends its arm, and its body, typed where those places are only read. -/
+/-- What a `handle` lends its arm, and its body, typed where those places lent `readonly` are only
+read and those lent `mut` out of reach. -/
 theorem handle_inv : Typed F O Γ (.handle body e caps os rs arm) τ Γ' r →
-    ∃ ts ys Γb, Caps Γ caps ts ys ∧ Typed F O (freeze Γ ys) body τ Γb (.eff e :: r) := by
+    ∃ ys Γb, Caps Γ caps ys ∧ Typed F O (freeze (hideAll Γ (roots .mut ys)) (roots .ro ys)) body τ Γb (.eff e :: r) := by
   intro h
   cases h with
-  | handle _ _ _ hc _ _ hb => exact ⟨_, _, _, hc, hb⟩
+  | handle _ _ _ hc _ _ _ hb => exact ⟨_, _, hc, hb⟩
 
 theorem clobbers_rejected : ¬ Typed [] ops [] clobbers τ Γ' r := by
   intro h
   cases h with
   | let_ _ _ hb =>
-    obtain ⟨ts, ys, Γb, hc, hbody⟩ := handle_inv hb
+    obtain ⟨ys, Γb, hc, hbody⟩ := handle_inv hb
     cases hc with
-    | cons hp hc =>
+    | ro hp hc =>
       cases hc
+      simp only [roots, List.filter] at hbody
       have hroot : ∀ {Γ τ w y}, PlaceTy Γ (deref (var "x")) τ w y → y = "x" := by
         intro Γ τ w y hp; cases hp with | deref hq => cases hq <;> rfl
       obtain rfl := hroot hp
@@ -192,7 +194,70 @@ theorem clobbers_rejected : ¬ Typed [] ops [] clobbers τ Γ' r := by
               intro Γ τ w y hp; cases hp <;> rfl
             have := hx hp'
             subst this
-            exact Bool.noConfusion (hp'.frozen (List.mem_singleton_self _))
+            exact Bool.noConfusion (hp'.frozen (by decide))
+
+/-- `let n = 0; (handle { Ask.ask() + Ask.ask() } with Ask { ask() resumes k => { c = c + 1; k(c) } }) + n`,
+the arm lent `n` as `c`, `mut`: state an arm keeps from one operation to the next, which the body
+cannot reach while the `handle` runs. The operations give 1 and 2, and `n` is 2 after; 5. -/
+def counts : Expr :=
+  .let_ "n" .int (.lit 0)
+    (.add (.handle (.add (.perform 0 [] []) (.perform 0 [] [])) 0 [⟨"c", .mut, .int, var "n"⟩] [] []
+        (.seq (.write (var "c") (.add (.read (var "c")) (.lit 1))) (.read (var "c"))))
+      (.read (var "n")))
+
+example : (eval [] ops 20 [] .empty [] counts).1 = .val (.int 5) := by decide
+example : ∀ l < (eval [] ops 20 [] .empty [] counts).2.next, (eval [] ops 20 [] .empty [] counts).2.mem l = none := by
+  decide
+
+theorem counts_typed : Typed [] ops [] counts .int [] [.fail] := by
+  refine .let_ (live := true) rfl .lit (.add ?_ (.read (.own rfl)))
+  have := Typed.handle (F := []) (O := ops) (Γ := [("n", .own .int true)]) (e := 0) (op := ops[0])
+    (os := []) (rs := []) (caps := [⟨"c", .mut, .int, var "n"⟩]) (ys := [(.mut, "n")]) (r := [.fail])
+    (arm := .seq (.write (var "c") (.add (.read (var "c")) (.lit 1))) (.read (var "c")))
+    (Γa := [("c", .ref .mut .int)])
+    (body := .add (.perform 0 [] []) (.perform 0 [] [])) (τ := .int) (Γb := [("n", .lent .int)])
+    rfl rfl rfl (.mut (.own rfl) .nil) (by simp [Exclusive]) (by decide)
+    (.seq (.write (.add (.read (.ref rfl)) .lit) (.ref (m := .mut) rfl)) (.read (.ref rfl)))
+    (.add (.perform (op := { owns := [], refs := [], ret := .int }) rfl (List.mem_cons_self ..) .nil .nil
+      List.Pairwise.nil)
+      (.perform (op := { owns := [], refs := [], ret := .int }) rfl (List.mem_cons_self ..) .nil .nil
+      List.Pairwise.nil))
+  simpa [thaw, unhideAll, hideAll, hide, roots, Slot.ty] using this
+
+example : ∀ n, match eval [] ops n [.abort .fail 0] .empty [] counts with
+    | (.stuck, _) => False
+    | (.timeout, _) => True
+    | (.val v, σ') => ∃ L, VT σ' .int v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
+    | (.abort _ _, σ') => ∀ l, σ'.mem l = none :=
+  program_ok (fun _ h => by simp at h) counts_typed
+
+/-- `let n = 0; handle { n = 5; Ask.ask() } with Ask { ask() resumes k => { c = c + 1; k(c) } }`: the
+body changes the state its arm was lent `mut`. The types reject it: what an arm keeps, the body
+cannot reach. -/
+def meddles : Expr :=
+  .let_ "n" .int (.lit 0)
+    (.handle (.seq (.write (var "n") (.lit 5)) (.perform 0 [] [])) 0 [⟨"c", .mut, .int, var "n"⟩] [] []
+      (.seq (.write (var "c") (.add (.read (var "c")) (.lit 1))) (.read (var "c"))))
+
+/-- A variable out of reach is no place. -/
+theorem lent_unreachable (h : lookup x Γ = some (.lent τ')) : ¬ PlaceTy Γ (var x) τ w y := by
+  intro hp; cases hp <;> simp_all
+
+theorem meddles_rejected : ¬ Typed [] ops [] meddles τ Γ' r := by
+  intro h
+  cases h with
+  | let_ _ ha hb =>
+    cases ha
+    obtain ⟨ys, Γb, hc, hbody⟩ := handle_inv hb
+    cases hc with
+    | «mut» hp hc =>
+      cases hc
+      cases hbody with
+      | seq ha _ =>
+        cases ha with
+        | write ha hq =>
+          cases ha
+          exact lent_unreachable (τ' := .int) (by decide) hq
 
 /-- `let x = Box.new(1); try { defer { *x = 5 }; let y = Box.new(2); throw *y } catch (e) { e + *x }`:
 the cleanup runs as the failure leaves its block, before the handler, which sees what it wrote; 7,

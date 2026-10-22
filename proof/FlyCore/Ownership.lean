@@ -13,7 +13,7 @@ the context of its `handle`: what it performs goes to the handlers around the `h
 Every variable lives in a cell of the store; a box is a pointer to a cell holding its contents. A
 borrowed parameter is bound to the location it borrows, not to a cell of its own. A value is an
 integer, a pointer, or the mark a move leaves in a variable's cell. An arm that resumes may use
-places of its `handle`'s scope, lent to it `readonly` for as long as the `handle` runs.
+places of its `handle`'s scope, lent to it `readonly` or `mut` for as long as the `handle` runs.
 
 The semantics is an interpreter with fuel, and anything no rule covers is `stuck`: reading a value
 that was moved, reaching a cell that was freed, freeing one twice, performing an operation nothing
@@ -43,6 +43,18 @@ inductive Label where
   deriving DecidableEq, Repr
 
 abbrev Row := List Label
+
+/-- What a `handle` lends its arm: the name the arm knows it by, the mode it is lent in, its type,
+and where it is — a place in the program, a location once the `handle` runs. -/
+structure Cap (α : Type) where
+  name : Var
+  mode : Mode
+  ty : Ty
+  loc : α
+  deriving Repr
+
+/-- What the arm sees of a capture: its name, mode and type. -/
+def Cap.sig (c : Cap α) : Var × Mode × Ty := (c.name, c.mode, c.ty)
 
 /-- A place: a variable, or what a box at a place points to. -/
 inductive Place where
@@ -86,9 +98,9 @@ inductive Expr where
   | perform (e : Nat) (owned : List Expr) (lent : List (Mode × Place))
   /-- `handle { body } with E { op(…) resumes k => k(arm) }`: where `body` performs the operation,
   `arm` runs, its value the operation's result, given the operation's arguments — owned as `owns`,
-  lent as `refs` — and the places of `caps`, lent to it `readonly` for as long as the `handle`
-  runs. -/
-  | handle (body : Expr) (e : Nat) (caps : List (Var × Place)) (owns refs : List Var) (arm : Expr)
+  lent as `refs` — and the places of `caps`, each lent to it `readonly` or `mut` for as long as the
+  `handle` runs: the state the arm keeps from one operation to the next. -/
+  | handle (body : Expr) (e : Nat) (caps : List (Cap Place)) (owns refs : List Var) (arm : Expr)
   /-- `handle { body } with E { op(x) => h }`: where `body` performs the operation, whose argument
   is an integer, it unwinds, and `h` gives the `handle`'s value. -/
   | handleAbort (body : Expr) (e : Nat) (x : Var) (h : Expr)
@@ -174,7 +186,7 @@ def dropCells (σ : Store) : List (Ty × Nat) → Option Store
 one that unwinds — an abortive arm, or a `try` — by the depth of the stack it was installed on,
 which the unwinding is aimed at. -/
 inductive Frame where
-  | resume (e : Nat) (caps : Env) (owns refs : List Var) (arm : Expr)
+  | resume (e : Nat) (caps : List (Cap Nat)) (owns refs : List Var) (arm : Expr)
   | abort (l : Label) (id : Nat)
 
 abbrev HS := List Frame
@@ -400,7 +412,7 @@ def eval (F : List Fn) (O : List Op) : Nat → HS → Store → Env → Expr →
             match find (.eff ef) hs with
             | some (.resume _ caps os rs arm, rest) =>
               if vs.length = os.length ∧ ls.length = rs.length then
-                enter (eval F O n rest) σ1 (os.zip op.owns) vs rs ls caps arm
+                enter (eval F O n rest) σ1 (os.zip op.owns) vs rs ls (caps.map fun c => (c.name, c.loc)) arm
               else (.stuck, σ1)
             | some (.abort _ id, _) =>
               match vs with
@@ -410,8 +422,8 @@ def eval (F : List Fn) (O : List Op) : Nat → HS → Store → Env → Expr →
           | none => (.stuck, σ1)
         | (.inr r, σ1) => (r, σ1)
     | .handle body ef caps os rs arm =>
-      match caps.mapM (fun (_, p) => resolve σ env p) with
-      | some ls => eval F O n (.resume ef (caps.map Prod.fst |>.zip ls) os rs arm :: hs) σ env body
+      match caps.mapM (fun c => resolve σ env c.loc) with
+      | some ls => eval F O n (.resume ef (List.zipWith (fun c l => ⟨c.name, c.mode, c.ty, l⟩) caps ls) os rs arm :: hs) σ env body
       | none => (.stuck, σ)
     | .handleAbort body ef x h =>
       catchAt hs.length (eval F O n (.abort (.eff ef) hs.length :: hs) σ env body) fun k σ1 =>
@@ -490,16 +502,32 @@ def lendCtx : Mode → Ctx → Var → Ctx
 def thaw (Γ : Ctx) (ys : List Var) (Γb : Ctx) : Ctx :=
   List.zipWith (fun p q => if p.1 ∈ ys then p else q) Γ Γb
 
-/-- The places a `handle` lends its arm, each of its type, and the variable each is rooted at. -/
-inductive Caps (Γ : Ctx) : List (Var × Place) → List Ty → List Var → Prop
-  | nil : Caps Γ [] [] []
-  | cons : PlaceTy Γ p τ w y → Caps Γ rest ts ys → Caps Γ ((x, p) :: rest) (τ :: ts) (y :: ys)
+/-- `Γ` with the variables `ys` not to be reached, each lent `mut` in turn. -/
+def hideAll (Γ : Ctx) : List Var → Ctx
+  | [] => Γ
+  | y :: ys => hideAll (hide Γ y) ys
+
+/-- `Γb`, a context of the same variables as `hideAll Γ ys`, with the variables `ys` given back. -/
+def unhideAll (Γ : Ctx) : List Var → Ctx → Ctx
+  | [], Γb => Γb
+  | y :: ys, Γb => thaw Γ [y] (unhideAll (hide Γ y) ys Γb)
+
+/-- The variables lent in mode `m`. -/
+def roots (m : Mode) (ys : List (Mode × Var)) : List Var := (ys.filter (·.1 = m)).map Prod.snd
+
+/-- The places a `handle` lends its arm, each of its type, and the variable each is rooted at, with
+the mode it is lent in. What is lent `mut` is a whole variable the arm may change, live or itself a
+`mut` borrow. -/
+inductive Caps (Γ : Ctx) : List (Cap Place) → List (Mode × Var) → Prop
+  | nil : Caps Γ [] []
+  | ro : PlaceTy Γ p τ w y → Caps Γ rest ys → Caps Γ (⟨x, .ro, τ, p⟩ :: rest) ((.ro, y) :: ys)
+  | mut : PlaceTy Γ (.var y) τ true y → Caps Γ rest ys → Caps Γ (⟨x, .mut, τ, .var y⟩ :: rest) ((.mut, y) :: ys)
 
 /-- An arm's context: the operation's owned arguments, live, then its borrowed ones, then the
-places its `handle` lent it. -/
-def armCtx (os : List Var) (rs : List Var) (op : Op) (caps : List Var) (ts : List Ty) : Ctx :=
+places its `handle` lent it, each as it was lent. -/
+def armCtx (os : List Var) (rs : List Var) (op : Op) (caps : List (Var × Mode × Ty)) : Ctx :=
   (os.zip op.owns).map (fun p => (p.1, Slot.own p.2 true)) ++ (rs.zip op.refs).map (fun p => (p.1, Slot.ref p.2.1 p.2.2)) ++
-    (caps.zip ts).map (fun p => (p.1, Slot.ref .ro p.2))
+    caps.map (fun c => (c.1, Slot.ref c.2.1 c.2.2))
 
 mutual
 /-- `Typed F O Γ e τ Γ' r`: `e` has type `τ`, leaves its variables as `Γ'` says — moved or not —
@@ -539,12 +567,13 @@ inductive Typed (F : List Fn) (O : List Op) : Ctx → Expr → Ty → Ctx → Ro
   | perform : O[e]? = some op → Label.eff e ∈ r → Args F O Γ owned op.owns Γ₁ r →
       Lends Γ₁ lent op.refs ys → Exclusive ys → Typed F O Γ (.perform e owned lent) op.ret Γ₁ r
   /-- The arm runs in the context of the `handle`: its row is the `handle`'s. What it is lent of
-  the `handle`'s scope the body may only read. -/
+  the `handle`'s scope the body may only read, or, lent `mut`, not reach. -/
   | handle : O[e]? = some op → os.length = op.owns.length → rs.length = op.refs.length →
-      Caps Γ caps ts ys → (os ++ rs ++ caps.map Prod.fst).Nodup →
-      Typed F O (armCtx os rs op (caps.map Prod.fst) ts) arm op.ret Γa r →
-      Typed F O (freeze Γ ys) body τ Γb (.eff e :: r) →
-      Typed F O Γ (.handle body e caps os rs arm) τ (thaw Γ ys Γb) r
+      Caps Γ caps ys → Exclusive ys → (os ++ rs ++ caps.map Cap.name).Nodup →
+      Typed F O (armCtx os rs op (caps.map Cap.sig)) arm op.ret Γa r →
+      Typed F O (freeze (hideAll Γ (roots .mut ys)) (roots .ro ys)) body τ Γb (.eff e :: r) →
+      Typed F O Γ (.handle body e caps os rs arm) τ
+        (unhideAll Γ (roots .mut ys) (thaw (hideAll Γ (roots .mut ys)) (roots .ro ys) Γb)) r
   /-- As for `try`, the arm starts where the body would have ended. -/
   | handleAbort : O[e]? = some op → op.owns = [.int] → op.refs = [] → lookup x Γb = none →
       Typed F O Γ body τ Γb (.eff e :: r) →

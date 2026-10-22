@@ -209,6 +209,15 @@ theorem thaw_keys : ∀ {Γ Γb : Ctx}, Γb.map Prod.fst = Γ.map Prod.fst → (
     simp only [thaw, List.zipWith_cons_cons, List.map_cons, List.cons.injEq]
     refine ⟨by split <;> simp [h.1], thaw_keys h.2⟩
 
+theorem hideAll_keys : ∀ {Γ : Ctx} {ys : List Var}, (hideAll Γ ys).map Prod.fst = Γ.map Prod.fst
+  | _, [] => rfl
+  | Γ, y :: ys => (hideAll_keys (Γ := hide Γ y) (ys := ys)).trans hide_keys
+
+theorem unhideAll_keys : ∀ {Γ Γb : Ctx} {ys : List Var}, Γb.map Prod.fst = Γ.map Prod.fst →
+    (unhideAll Γ ys Γb).map Prod.fst = Γ.map Prod.fst
+  | _, _, [], h => h
+  | Γ, _, y :: ys, h => thaw_keys ((unhideAll_keys (Γ := hide Γ y) (ys := ys) (h.trans hide_keys.symm)).trans hide_keys)
+
 mutual
 theorem typed_keys : Typed F O Γ e τ Γ' r → Γ'.map Prod.fst = Γ.map Prod.fst
   | .lit => rfl
@@ -237,7 +246,8 @@ theorem typed_keys : Typed F O Γ e τ Γ' r → Γ'.map Prod.fst = Γ.map Prod.
     simp only [List.map_cons, List.cons.injEq] at this
     exact thaw_keys (this.2.trans lendCtx_keys)
   | .perform _ _ hargs _ _ => args_keys hargs
-  | .handle _ _ _ _ _ _ hb => thaw_keys ((typed_keys hb).trans freeze_keys)
+  | .handle _ _ _ _ _ _ _ hb =>
+    unhideAll_keys ((thaw_keys ((typed_keys hb).trans freeze_keys)).trans hideAll_keys)
   | .handleAbort _ _ _ _ hb hh => by
     have := typed_keys hh
     simp only [List.map_cons, List.cons.injEq] at this
