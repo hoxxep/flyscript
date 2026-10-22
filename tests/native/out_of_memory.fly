@@ -1,0 +1,10 @@
+// expect: #OutOfMemory
+// expect: still 1
+// Asking for more than memory can hold fails, and leaves what there was (§8.2).
+import { println } from "std/io";
+
+export function main(): void uses Io {
+  let v: Vec<u64> = [1];
+  try { v.tryReserve(18446744073709551000); } catch (e) { println(`${e}`); }
+  println(`still ${v.len()}`);
+}

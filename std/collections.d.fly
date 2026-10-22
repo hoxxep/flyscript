@@ -3,6 +3,8 @@ export struct HashMap<K extends Hash & Eq, V>;
 impl<K extends Hash & Eq, V> HashMap<K, V> {
   export function new(): HashMap<K, V>;
   export function insert(self: mut Self, key: K, val: V): void;
+  // Room for `n` more entries, so inserting them allocates nothing; or `#OutOfMemory`.
+  export function tryReserve(self: mut Self, n: usize): void uses Fail<#OutOfMemory>;
   // Lookups accept anything the key type lends, so a HashMap<String, V> is searched with a str.
   export function get<Q extends LentBy<K>>(self: readonly Self, key: readonly Q): Option<readonly V> from self;
   export function getMut<Q extends LentBy<K>>(self: mut Self, key: readonly Q): Option<mut V> from self;

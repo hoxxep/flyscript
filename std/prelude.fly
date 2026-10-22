@@ -486,6 +486,8 @@ impl String {
   export function new(): String;
   export function len(self: readonly Self): usize;
   export function push(self: mut Self, s: str): void;
+  // Room for `n` more bytes, so pushing them allocates nothing; or `#OutOfMemory`.
+  export function tryReserve(self: mut Self, n: usize): void uses Fail<#OutOfMemory>;
   export function asStr(self: readonly Self): str from self;
   // The string these bytes spell, if they are UTF-8.
   export function fromUtf8(bytes: Vec<u8>): Option<String>;
@@ -628,6 +630,8 @@ impl<T> Iterable<readonly T> for T[] {
 impl<T> Vec<T> {
   export function new(): Vec<T>;
   export function push(self: mut Self, v: T): void;
+  // Room for `n` more elements, so pushing them allocates nothing; or `#OutOfMemory`.
+  export function tryReserve(self: mut Self, n: usize): void uses Fail<#OutOfMemory>;
   export function pop(self: mut Self): Option<T>;
   // The element at `i`, taken out; those after it move down. Out of bounds panics.
   export function remove(self: mut Self, i: usize): T;
@@ -700,6 +704,8 @@ impl<T> Iterable<readonly T> for Vec<T> {
 }
 impl<T> Box<T> {
   export function new(v: T): Box<T>;
+  // A box, or `#OutOfMemory`, which drops `v`.
+  export function tryNew(v: T): Box<T> uses Fail<#OutOfMemory>;
   export function get(self: readonly Self): readonly T from self;
   // What the box held, the box consumed: how a value is taken out of a box.
   export function into(self: Self): T;

@@ -644,7 +644,9 @@ const { $rt, $b } = (() => {
     Vec_iterMut: (r) => $b.slice_iterMut(r),
     *Vec_each(a) { for (const x of a) yield new Yielded(x); },
 
-    Box_new: (v) => v, Box_get: (v) => v, Box_into: (v) => v,
+    Box_new: (v) => v, Box_get: (v) => v, Box_into: (v) => v, Box_tryNew: (v) => v,
+    // Memory is the garbage collector's: room is always there.
+    String_tryReserve() {}, Vec_tryReserve() {}, HashMap_tryReserve() {},
     Arc_new: (v) => v, Arc_get: (v) => v, Arc_clone: (v) => v,
     Ref_get: (v) => v, Ref_clone: (v) => v,
 
@@ -34837,13 +34839,14 @@ function primOf_210($506, $507) {
 function exportWrapper_211($508, $509) {
   let v2_ret;
   {
-    let v0_self, v1_i, v3_t, v11_t, v43_t, v82_t, v119_t;
+    let v0_self, v1_i, v3_t, v11_t, v43_t, v82_t;
     v0_self = $508; v1_i = $509; 
     {
       const v22_decls = { v: undefined };
       const v24_names = { v: undefined };
       const v73_t = { v: undefined };
-      let v4_fid, v5_t, v6_t, v7_args, v8_t, v9_t, v10_t, v12_t, v13_t, v14_t, v15_ps, v16_t, v17_t, v18_t, v19_t, v20_ret, v21_t, v23_t, v60_t, v61_t, v62_name, v63_t, v64_t, v65_t, v66_t, v72_params, v74_t, v75_t, v76_t, v77_t, v78_t, v79_t, v80_t, v81_t, v83_t, v84_t, v85_t, v86_t, v87_t, v88_call, v89_t, v90_t, v91_t;
+      const v124_t = { v: undefined };
+      let v4_fid, v5_t, v6_t, v7_args, v8_t, v9_t, v10_t, v12_t, v13_t, v14_t, v15_ps, v16_t, v17_t, v18_t, v19_t, v20_ret, v21_t, v23_t, v60_t, v61_t, v62_name, v63_t, v64_t, v65_t, v66_t, v72_params, v74_t, v75_t, v76_t, v77_t, v78_t, v79_t, v80_t, v81_t, v83_t, v84_t, v85_t, v86_t, v87_t, v88_call, v89_t, v90_t, v91_t, v99_rt, v100_t, v101_t, v102_t, v123_body, v125_t, v126_t, v127_t, v128_t, v129_t, v130_t, v131_t, v132_t, v133_t, v134_t, v135_t, v136_t, v137_t, v138_t, v139_t, v140_t, v141_t, v142_t, v143_t, v144_t, v145_t, v146_t, v147_t, v148_t, v149_t, v150_t, v151_t, v152_t, v153_t, v154_t, v155_t, v156_t, v157_t, v158_t, v159_t, v160_t, v161_t, v162_t, v163_t, v164_t, v165_t;
       v4_fid = $rt.idx(v0_self.v.lw.insts, v1_i).fid;
       v5_t = $rt.idx(v0_self.v.lw.insts, v1_i).args;
       v6_t = clone_243(v5_t);
@@ -34983,69 +34986,110 @@ function exportWrapper_211($508, $509) {
       {
         let v92_t;
         {
-          const v93_t = { v: undefined };
-          let v94_t, v95_t, v96_t, v97_t, v98_t, v99_t, v100_t, v101_t, v102_t, v103_t, v104_t, v105_t, v106_t, v107_t, v108_t, v109_t, v110_t, v111_t;
-          v94_t = $b.String_new();
-          v93_t.v = v94_t;
-          v95_t = v93_t;
-          $b.String_push(v95_t, "void ");
-          v97_t = v62_name;
-          v98_t = v93_t;
-          $b.String_push(v98_t, v97_t);
-          v100_t = v93_t;
-          $b.String_push(v100_t, "(");
-          v102_t = v72_params;
-          v103_t = v93_t;
-          $b.String_push(v103_t, v102_t);
-          v105_t = v93_t;
-          $b.String_push(v105_t, ") { ");
-          v107_t = v88_call;
-          v108_t = v93_t;
-          $b.String_push(v108_t, v107_t);
-          v110_t = v93_t;
-          $b.String_push(v110_t, "; }\n");
-          v92_t = v93_t.v;
+          let v93_t;
+          v93_t = $b.str_toString("void");
+          v92_t = v93_t;
         }
         v91_t = v92_t;
       }
       else
       {
-        let v112_t;
+        let v94_t;
         {
-          const v113_t = { v: undefined };
-          let v114_t, v115_t, v116_t, v117_t, v118_t, v120_t, v121_t, v122_t, v123_t, v124_t, v125_t, v126_t, v127_t, v128_t, v129_t, v130_t, v131_t, v132_t, v133_t, v134_t, v135_t, v136_t, v137_t, v138_t, v139_t;
-          v114_t = $b.String_new();
-          v113_t.v = v114_t;
-          v117_t = v0_self;
-          v115_t = v20_ret;
-          v116_t = { start: 0, end: 0 };
-          v118_t = ctype_203(v117_t, v115_t, v116_t);
-          v119_t = v118_t;
-          v120_t = v119_t;
-          v121_t = v113_t;
-          $b.String_push(v121_t, v120_t);
-          v123_t = v113_t;
-          $b.String_push(v123_t, " ");
-          v125_t = v62_name;
-          v126_t = v113_t;
-          $b.String_push(v126_t, v125_t);
-          v128_t = v113_t;
-          $b.String_push(v128_t, "(");
-          v130_t = v72_params;
-          v131_t = v113_t;
-          $b.String_push(v131_t, v130_t);
-          v133_t = v113_t;
-          $b.String_push(v133_t, ") { return ");
-          v135_t = v88_call;
-          v136_t = v113_t;
-          $b.String_push(v136_t, v135_t);
-          v138_t = v113_t;
-          $b.String_push(v138_t, "; }\n");
-          v112_t = v113_t.v;
+          let v95_t, v96_t, v97_t, v98_t;
+          v97_t = v0_self;
+          v95_t = v20_ret;
+          v96_t = { start: 0, end: 0 };
+          v98_t = ctype_203(v97_t, v95_t, v96_t);
+          v94_t = v98_t;
         }
-        v91_t = v112_t;
+        v91_t = v94_t;
       }
-      v3_t = v91_t;
+      v99_rt = v91_t;
+      v100_t = v20_ret;
+      v101_t = isVoidTy_444(v100_t);
+      if (v101_t)
+      {
+        let v103_t;
+        {
+          const v104_t = { v: undefined };
+          let v105_t, v106_t, v107_t, v108_t, v109_t, v110_t, v111_t, v112_t;
+          v105_t = $b.String_new();
+          v104_t.v = v105_t;
+          v106_t = v104_t;
+          $b.String_push(v106_t, "{ ");
+          v108_t = v88_call;
+          v109_t = v104_t;
+          $b.String_push(v109_t, v108_t);
+          v111_t = v104_t;
+          $b.String_push(v111_t, "; }");
+          v103_t = v104_t.v;
+        }
+        v102_t = v103_t;
+      }
+      else
+      {
+        let v113_t;
+        {
+          const v114_t = { v: undefined };
+          let v115_t, v116_t, v117_t, v118_t, v119_t, v120_t, v121_t, v122_t;
+          v115_t = $b.String_new();
+          v114_t.v = v115_t;
+          v116_t = v114_t;
+          $b.String_push(v116_t, "{ return ");
+          v118_t = v88_call;
+          v119_t = v114_t;
+          $b.String_push(v119_t, v118_t);
+          v121_t = v114_t;
+          $b.String_push(v121_t, "; }");
+          v113_t = v114_t.v;
+        }
+        v102_t = v113_t;
+      }
+      v123_body = v102_t;
+      v125_t = $b.String_new();
+      v124_t.v = v125_t;
+      v126_t = v99_rt;
+      v127_t = v124_t;
+      $b.String_push(v127_t, v126_t);
+      v129_t = v124_t;
+      $b.String_push(v129_t, " fly_export_");
+      v131_t = v62_name;
+      v132_t = v124_t;
+      $b.String_push(v132_t, v131_t);
+      v134_t = v124_t;
+      $b.String_push(v134_t, "(");
+      v136_t = v72_params;
+      v137_t = v124_t;
+      $b.String_push(v137_t, v136_t);
+      v139_t = v124_t;
+      $b.String_push(v139_t, ") FLY_SYMBOL(");
+      v141_t = v62_name;
+      v142_t = v124_t;
+      $b.String_push(v142_t, v141_t);
+      v144_t = v124_t;
+      $b.String_push(v144_t, ");\n");
+      v146_t = v99_rt;
+      v147_t = v124_t;
+      $b.String_push(v147_t, v146_t);
+      v149_t = v124_t;
+      $b.String_push(v149_t, " fly_export_");
+      v151_t = v62_name;
+      v152_t = v124_t;
+      $b.String_push(v152_t, v151_t);
+      v154_t = v124_t;
+      $b.String_push(v154_t, "(");
+      v156_t = v72_params;
+      v157_t = v124_t;
+      $b.String_push(v157_t, v156_t);
+      v159_t = v124_t;
+      $b.String_push(v159_t, ") ");
+      v161_t = v123_body;
+      v162_t = v124_t;
+      $b.String_push(v162_t, v161_t);
+      v164_t = v124_t;
+      $b.String_push(v164_t, "\n");
+      v3_t = v124_t.v;
     }
     v2_ret = v3_t;
   }
@@ -174363,7 +174407,7 @@ function clone_1335($3149) {
 function builtin_1336($3150, $3151, $3152, $3153, $3154) {
   let v5_ret;
   {
-    let v0_self, v1_key, v2_c, v3_vs, v4_arenas, v6_t, v81_t, v93_t, v107_t, v114_t, v140_t, v207_t, v219_t, v231_t, v243_t, v255_t, v267_t, v279_t, v286_t, v293_t, v305_t, v312_t, v324_t, v331_t, v388_t, v398_t, v405_t, v412_t, v429_t, v463_t, v473_t, v480_t, v486_t, v491_t, v503_t, v515_t, v537_t, v544_t, v579_t, v628_t, v635_t, v657_t, v664_t, v674_t, v689_t, v719_t, v739_t;
+    let v0_self, v1_key, v2_c, v3_vs, v4_arenas, v6_t, v81_t, v93_t, v107_t, v114_t, v140_t, v207_t, v219_t, v231_t, v243_t, v255_t, v267_t, v279_t, v286_t, v293_t, v305_t, v312_t, v324_t, v331_t, v388_t, v398_t, v405_t, v412_t, v429_t, v463_t, v473_t, v480_t, v486_t, v491_t, v503_t, v515_t, v537_t, v544_t, v579_t, v628_t, v635_t, v657_t, v664_t, v674_t, v689_t, v718_t, v743_t, v762_t, v782_t, v794_t, v801_t, v808_t, v825_t, v832_t, v844_t, v854_t, v864_t, v871_t, v883_t, v901_t, v921_t;
     v0_self = $3150; v1_key = $3151; v2_c = $3152; v3_vs = $3153; v4_arenas = $3154; 
     {
       let v7_span, v8_t, v9_t, v10_rt, v11_t, v12_arg, v13_t, v14_t, v15_t, v16_t, v22_recv, v23_t, v46_elem, v47_t, v56_t, v65_t, v66_t, v67_t, v68_t, v69_t, v70_t, v71_t, v74_t;
@@ -174564,7 +174608,7 @@ function builtin_1336($3150, $3151, $3152, $3153, $3154) {
       }
       L5:
       {
-        let v75_t, v87_t, v99_t, v101_t, v120_t, v213_t, v225_t, v237_t, v249_t, v261_t, v273_t, v299_t, v318_t, v337_t, v379_t, v423_t, v435_t, v459_t, v495_t, v497_t, v509_t, v521_t, v555_t, v608_t, v670_t, v705_t;
+        let v75_t, v87_t, v99_t, v101_t, v120_t, v213_t, v225_t, v237_t, v249_t, v261_t, v273_t, v299_t, v318_t, v337_t, v379_t, v423_t, v435_t, v459_t, v495_t, v497_t, v509_t, v521_t, v555_t, v608_t, v670_t, v705_t, v724_t, v788_t, v814_t, v850_t;
         v75_t = (v1_key === "println");
         if (v75_t)
         {
@@ -175560,32 +175604,283 @@ function builtin_1336($3150, $3151, $3152, $3153, $3154) {
         v705_t = (v1_key === "Box_get");
         if (v705_t)
         {
-          let v706_t;
-          v706_t = v12_arg(0);
-          v74_t = v706_t;
+          let v706_t, v707_t, v708_t, v709_t;
+          v706_t = v0_self.v;
+          v707_t = v10_rt;
+          v708_t = pointerBorrow_412(v706_t, v707_t);
+          if (v708_t)
+          {
+            let v710_t;
+            {
+              let v711_t;
+              v711_t = v12_arg(0);
+              v710_t = v711_t;
+            }
+            v709_t = v710_t;
+          }
+          else
+          {
+            let v712_t;
+            {
+              const v713_t = { v: undefined };
+              let v714_t, v715_t, v716_t, v717_t, v719_t, v720_t, v721_t, v722_t, v723_t;
+              v714_t = $b.String_new();
+              v713_t.v = v714_t;
+              v715_t = v713_t;
+              $b.String_push(v715_t, "(*");
+              v717_t = v12_arg(0);
+              v718_t = v717_t;
+              v719_t = v718_t;
+              v720_t = v713_t;
+              $b.String_push(v720_t, v719_t);
+              v722_t = v713_t;
+              $b.String_push(v722_t, ")");
+              v712_t = v713_t.v;
+            }
+            v709_t = v712_t;
+          }
+          v74_t = v709_t;
+          break L5;
+        }
+        v724_t = (v1_key === "Box_tryNew");
+        if (v724_t)
+        {
+          let v725_t;
+          {
+            const v752_t = { v: undefined };
+            let v726_t, v727_t, v728_t, v729_t, v730_t, v731_t, v732_ec, v733_t, v734_t, v735_t, v736_t, v751_d, v753_t, v754_t, v755_t, v756_t, v757_t, v758_t, v759_t, v760_t, v761_t, v763_t, v764_t, v765_t, v766_t, v767_t, v768_t, v769_t, v770_t, v771_t, v772_t, v773_t, v774_t, v775_t, v776_t, v777_t, v778_t, v779_t, v780_t, v781_t, v783_t, v784_t, v785_t, v786_t, v787_t;
+            v726_t = $rt.idx(v2_c.argTys, 0);
+            v727_t = stripBorrow_404(v726_t);
+            v728_t = v727_t;
+            v730_t = v0_self;
+            v729_t = v728_t;
+            v731_t = ctype_203(v730_t, v729_t, $copy2(v7_span));
+            v732_ec = v731_t;
+            v733_t = v0_self.v;
+            v734_t = v728_t;
+            v735_t = needsDrop_440(v733_t, v734_t);
+            if (v735_t)
+            {
+              let v737_t;
+              {
+                const v738_t = { v: undefined };
+                let v739_t, v740_t, v741_t, v742_t, v744_t, v745_t, v746_t, v747_t, v748_t;
+                v739_t = $b.String_new();
+                v738_t.v = v739_t;
+                v741_t = v0_self;
+                v740_t = v728_t;
+                v742_t = dropFn_441(v741_t, v740_t, $copy2(v7_span));
+                v743_t = v742_t;
+                v744_t = v743_t;
+                v745_t = v738_t;
+                $b.String_push(v745_t, v744_t);
+                v747_t = v738_t;
+                $b.String_push(v747_t, "(&x_); ");
+                v737_t = v738_t.v;
+              }
+              v736_t = v737_t;
+            }
+            else
+            {
+              let v749_t;
+              {
+                let v750_t;
+                v750_t = $b.str_toString("");
+                v749_t = v750_t;
+              }
+              v736_t = v749_t;
+            }
+            v751_d = v736_t;
+            v753_t = $b.String_new();
+            v752_t.v = v753_t;
+            v754_t = v752_t;
+            $b.String_push(v754_t, "({ ");
+            v756_t = v732_ec;
+            v757_t = v752_t;
+            $b.String_push(v757_t, v756_t);
+            v759_t = v752_t;
+            $b.String_push(v759_t, " x_ = ");
+            v761_t = v12_arg(0);
+            v762_t = v761_t;
+            v763_t = v762_t;
+            v764_t = v752_t;
+            $b.String_push(v764_t, v763_t);
+            v766_t = v752_t;
+            $b.String_push(v766_t, "; ");
+            v768_t = v732_ec;
+            v769_t = v752_t;
+            $b.String_push(v769_t, v768_t);
+            v771_t = v752_t;
+            $b.String_push(v771_t, "* p_ = malloc(sizeof(");
+            v773_t = v732_ec;
+            v774_t = v752_t;
+            $b.String_push(v774_t, v773_t);
+            v776_t = v752_t;
+            $b.String_push(v776_t, ")); if (p_) *p_ = x_; else { ");
+            v778_t = v751_d;
+            v779_t = v752_t;
+            $b.String_push(v779_t, v778_t);
+            v781_t = outOfMemory_1385(v0_self);
+            v782_t = v781_t;
+            v783_t = v782_t;
+            v784_t = v752_t;
+            $b.String_push(v784_t, v783_t);
+            v786_t = v752_t;
+            $b.String_push(v786_t, "} p_; })");
+            v725_t = v752_t.v;
+          }
+          v74_t = v725_t;
+          break L5;
+        }
+        v788_t = (v1_key === "String_tryReserve");
+        if (v788_t)
+        {
+          const v789_t = { v: undefined };
+          let v790_t, v791_t, v792_t, v793_t, v795_t, v796_t, v797_t, v798_t, v799_t, v800_t, v802_t, v803_t, v804_t, v805_t, v806_t, v807_t, v809_t, v810_t, v811_t, v812_t, v813_t;
+          v790_t = $b.String_new();
+          v789_t.v = v790_t;
+          v791_t = v789_t;
+          $b.String_push(v791_t, "({ if (!fly_String_try_reserve(");
+          v793_t = v12_arg(0);
+          v794_t = v793_t;
+          v795_t = v794_t;
+          v796_t = v789_t;
+          $b.String_push(v796_t, v795_t);
+          v798_t = v789_t;
+          $b.String_push(v798_t, ", ");
+          v800_t = v12_arg(1);
+          v801_t = v800_t;
+          v802_t = v801_t;
+          v803_t = v789_t;
+          $b.String_push(v803_t, v802_t);
+          v805_t = v789_t;
+          $b.String_push(v805_t, ")) ");
+          v807_t = outOfMemory_1385(v0_self);
+          v808_t = v807_t;
+          v809_t = v808_t;
+          v810_t = v789_t;
+          $b.String_push(v810_t, v809_t);
+          v812_t = v789_t;
+          $b.String_push(v812_t, "(fly_unit)0; })");
+          v74_t = v789_t.v;
+          break L5;
+        }
+        v814_t = (v1_key === "Vec_tryReserve");
+        if (v814_t)
+        {
+          let v815_t;
+          {
+            const v820_t = { v: undefined };
+            let v816_t, v817_t, v818_t, v819_ec, v821_t, v822_t, v823_t, v824_t, v826_t, v827_t, v828_t, v829_t, v830_t, v831_t, v833_t, v834_t, v835_t, v836_t, v837_t, v838_t, v839_t, v840_t, v841_t, v842_t, v843_t, v845_t, v846_t, v847_t, v848_t, v849_t;
+            v817_t = v0_self;
+            v816_t = v46_elem;
+            v818_t = ctype_203(v817_t, v816_t, $copy2(v7_span));
+            v819_ec = v818_t;
+            v821_t = $b.String_new();
+            v820_t.v = v821_t;
+            v822_t = v820_t;
+            $b.String_push(v822_t, "({ if (!fly_vec_try_reserve(");
+            v824_t = v12_arg(0);
+            v825_t = v824_t;
+            v826_t = v825_t;
+            v827_t = v820_t;
+            $b.String_push(v827_t, v826_t);
+            v829_t = v820_t;
+            $b.String_push(v829_t, ", ");
+            v831_t = v12_arg(1);
+            v832_t = v831_t;
+            v833_t = v832_t;
+            v834_t = v820_t;
+            $b.String_push(v834_t, v833_t);
+            v836_t = v820_t;
+            $b.String_push(v836_t, ", sizeof(");
+            v838_t = v819_ec;
+            v839_t = v820_t;
+            $b.String_push(v839_t, v838_t);
+            v841_t = v820_t;
+            $b.String_push(v841_t, "))) ");
+            v843_t = outOfMemory_1385(v0_self);
+            v844_t = v843_t;
+            v845_t = v844_t;
+            v846_t = v820_t;
+            $b.String_push(v846_t, v845_t);
+            v848_t = v820_t;
+            $b.String_push(v848_t, "(fly_unit)0; })");
+            v815_t = v820_t.v;
+          }
+          v74_t = v815_t;
+          break L5;
+        }
+        v850_t = (v1_key === "HashMap_tryReserve");
+        if (v850_t)
+        {
+          let v851_t;
+          {
+            const v859_t = { v: undefined };
+            let v852_t, v853_t, v855_t, v856_t, v857_t, v858_ec, v860_t, v861_t, v862_t, v863_t, v865_t, v866_t, v867_t, v868_t, v869_t, v870_t, v872_t, v873_t, v874_t, v875_t, v876_t, v877_t, v878_t, v879_t, v880_t, v881_t, v882_t, v884_t, v885_t, v886_t, v887_t, v888_t;
+            v856_t = v0_self;
+            v852_t = v22_recv;
+            v853_t = entryTy_723(v852_t);
+            v854_t = v853_t;
+            v855_t = v854_t;
+            v857_t = ctype_203(v856_t, v855_t, $copy2(v7_span));
+            v858_ec = v857_t;
+            v860_t = $b.String_new();
+            v859_t.v = v860_t;
+            v861_t = v859_t;
+            $b.String_push(v861_t, "({ if (!fly_map_try_reserve(");
+            v863_t = v12_arg(0);
+            v864_t = v863_t;
+            v865_t = v864_t;
+            v866_t = v859_t;
+            $b.String_push(v866_t, v865_t);
+            v868_t = v859_t;
+            $b.String_push(v868_t, ", ");
+            v870_t = v12_arg(1);
+            v871_t = v870_t;
+            v872_t = v871_t;
+            v873_t = v859_t;
+            $b.String_push(v873_t, v872_t);
+            v875_t = v859_t;
+            $b.String_push(v875_t, ", sizeof(");
+            v877_t = v858_ec;
+            v878_t = v859_t;
+            $b.String_push(v878_t, v877_t);
+            v880_t = v859_t;
+            $b.String_push(v880_t, "))) ");
+            v882_t = outOfMemory_1385(v0_self);
+            v883_t = v882_t;
+            v884_t = v883_t;
+            v885_t = v859_t;
+            $b.String_push(v885_t, v884_t);
+            v887_t = v859_t;
+            $b.String_push(v887_t, "(fly_unit)0; })");
+            v851_t = v859_t.v;
+          }
+          v74_t = v851_t;
           break L5;
         }
         {
-          let v707_t;
+          let v889_t;
           {
-            let v708_t, v709_t, v710_t, v711_t, v712_t, v713_t, v714_t, v717_t, v718_t, v720_t, v721_t, v722_t, v723_t, v724_t, v725_t, v726_t;
-            v712_t = v0_self;
-            v711_t = v1_key;
-            v710_t = v2_c;
-            v708_t = v3_vs;
-            v709_t = clone_94(v708_t);
-            v713_t = regionLib_1385(v712_t, v711_t, v710_t, v709_t, v4_arenas);
-            v714_t = v713_t;
+            let v890_t, v891_t, v892_t, v893_t, v894_t, v895_t, v896_t, v899_t, v900_t, v902_t, v903_t, v904_t, v905_t, v906_t, v907_t, v908_t;
+            v894_t = v0_self;
+            v893_t = v1_key;
+            v892_t = v2_c;
+            v890_t = v3_vs;
+            v891_t = clone_94(v890_t);
+            v895_t = regionLib_1386(v894_t, v893_t, v892_t, v891_t, v4_arenas);
+            v896_t = v895_t;
             L10:
             {
-              let v715_t;
-              v715_t = (v714_t.$tag === "Some");
-              if (v715_t)
+              let v897_t;
+              v897_t = (v896_t.$tag === "Some");
+              if (v897_t)
               {
-                let v716_r;
-                v716_r = new $rt.FieldRef(v714_t, "$");
+                let v898_r;
+                v898_r = new $rt.FieldRef(v896_t, "$");
                 {
-                  return v716_r.v;
+                  return v898_r.v;
                 }
                 break L10;
               }
@@ -175596,52 +175891,52 @@ function builtin_1336($3150, $3151, $3152, $3153, $3154) {
               }
               $rt.panic("no arm matched");
             }
-            v723_t = v0_self;
-            v722_t = v1_key;
-            v721_t = v2_c;
-            v717_t = v3_vs;
-            v718_t = clone_94(v717_t);
-            v719_t = v718_t;
-            v720_t = v719_t;
-            v724_t = library_1386(v723_t, v722_t, v721_t, v720_t);
-            v725_t = v724_t;
+            v905_t = v0_self;
+            v904_t = v1_key;
+            v903_t = v2_c;
+            v899_t = v3_vs;
+            v900_t = clone_94(v899_t);
+            v901_t = v900_t;
+            v902_t = v901_t;
+            v906_t = library_1387(v905_t, v904_t, v903_t, v902_t);
+            v907_t = v906_t;
             L11:
             {
-              let v727_t, v729_t;
-              v727_t = (v725_t.$tag === "Some");
-              if (v727_t)
+              let v909_t, v911_t;
+              v909_t = (v907_t.$tag === "Some");
+              if (v909_t)
               {
-                let v728_r;
-                v728_r = new $rt.FieldRef(v725_t, "$");
-                v726_t = v728_r.v;
+                let v910_r;
+                v910_r = new $rt.FieldRef(v907_t, "$");
+                v908_t = v910_r.v;
                 break L11;
               }
-              v729_t = (v725_t.$tag === "None");
-              if (v729_t)
+              v911_t = (v907_t.$tag === "None");
+              if (v911_t)
               {
-                const v731_t = { v: undefined };
-                let v730_t, v732_t, v733_t, v734_t, v735_t, v736_t, v737_t, v738_t, v740_t, v741_t, v742_t;
-                v730_t = v0_self.v;
-                v741_t = $copy2(v7_span);
-                v732_t = $b.String_new();
-                v731_t.v = v732_t;
-                v733_t = v731_t;
-                $b.String_push(v733_t, "the library function `");
-                v735_t = v731_t;
-                (v735_t.v += String(v1_key), undefined);
-                v737_t = v731_t;
-                $b.String_push(v737_t, "`");
-                v739_t = v731_t.v;
-                v740_t = v739_t;
-                unsupported_419(v730_t, v741_t, v740_t);
-                v726_t = undefined;
+                const v913_t = { v: undefined };
+                let v912_t, v914_t, v915_t, v916_t, v917_t, v918_t, v919_t, v920_t, v922_t, v923_t, v924_t;
+                v912_t = v0_self.v;
+                v923_t = $copy2(v7_span);
+                v914_t = $b.String_new();
+                v913_t.v = v914_t;
+                v915_t = v913_t;
+                $b.String_push(v915_t, "the library function `");
+                v917_t = v913_t;
+                (v917_t.v += String(v1_key), undefined);
+                v919_t = v913_t;
+                $b.String_push(v919_t, "`");
+                v921_t = v913_t.v;
+                v922_t = v921_t;
+                unsupported_419(v912_t, v923_t, v922_t);
+                v908_t = undefined;
                 break L11;
               }
               $rt.panic("no arm matched");
             }
-            v707_t = v726_t;
+            v889_t = v908_t;
           }
-          v74_t = v707_t;
+          v74_t = v889_t;
           break L5;
         }
         $rt.panic("no arm matched");
@@ -175722,7 +176017,7 @@ function checked_1338($3157, $3158, $3159) {
     v0_self = $3157; v1_p = $3158; v2_wide = $3159; 
     {
       let v5_t, v6_t, v7_lo, v8_hi, v9_t, v10_name, v11_t;
-      v5_t = bounds_1387(v1_p);
+      v5_t = bounds_1388(v1_p);
       v6_t = v5_t;
       v7_lo = v6_t[0];
       v8_hi = v6_t[1];
@@ -176723,7 +177018,7 @@ function intLit_1343($3175, $3176, $3177) {
         v7_t = v12_t;
       }
       v13_n = v7_t;
-      v14_t = floatTy_1388(v1_t);
+      v14_t = floatTy_1389(v1_t);
       if (v14_t)
       {
         {
@@ -176821,7 +177116,7 @@ function intLit_1343($3175, $3176, $3177) {
         let v39_t;
         {
           let v40_t;
-          v40_t = wideLit_1389(v13_n);
+          v40_t = wideLit_1390(v13_n);
           v39_t = v40_t;
         }
         v38_t = v39_t;
@@ -176953,7 +177248,7 @@ function intLit_1343($3175, $3176, $3177) {
                 let v79_t;
                 {
                   let v80_t;
-                  v80_t = wideLit_1389(v13_n);
+                  v80_t = wideLit_1390(v13_n);
                   v79_t = v80_t;
                 }
                 v78_t = v79_t;
@@ -177119,7 +177414,7 @@ function named_1345($3179, $3180, $3181) {
       v35_value = v34_t;
       v37_t = v0_self;
       v36_t = v35_value;
-      v38_t = constValue_1390(v37_t, v36_t, $copy2(v2_span));
+      v38_t = constValue_1391(v37_t, v36_t, $copy2(v2_span));
       v39_v = v38_t;
       v41_t = v0_self;
       v40_t = v32_ty;
@@ -178370,7 +178665,7 @@ function clone_1354($3195) {
         {
           let v9_x, v10_t, v11_t;
           v9_x = v0_self.$;
-          v10_t = clone_1391(v9_x);
+          v10_t = clone_1392(v9_x);
           v11_t = { $tag: "Borrow", $: v10_t };
           v3_t = v11_t;
           break L1;
@@ -178390,7 +178685,7 @@ function clone_1354($3195) {
         {
           let v17_x, v18_t, v19_t;
           v17_x = v0_self.$;
-          v18_t = clone_1392(v17_x);
+          v18_t = clone_1393(v17_x);
           v19_t = { $tag: "Unary", $: v18_t };
           v3_t = v19_t;
           break L1;
@@ -178400,7 +178695,7 @@ function clone_1354($3195) {
         {
           let v21_x, v22_t, v23_t;
           v21_x = v0_self.$;
-          v22_t = clone_1393(v21_x);
+          v22_t = clone_1394(v21_x);
           v23_t = { $tag: "Binary", $: v22_t };
           v3_t = v23_t;
           break L1;
@@ -178420,7 +178715,7 @@ function clone_1354($3195) {
         {
           let v29_x, v30_t, v31_t;
           v29_x = v0_self.$;
-          v30_t = clone_1394(v29_x);
+          v30_t = clone_1395(v29_x);
           v31_t = { $tag: "IsTag", $: v30_t };
           v3_t = v31_t;
           break L1;
@@ -178430,7 +178725,7 @@ function clone_1354($3195) {
         {
           let v33_x, v34_t, v35_t;
           v33_x = v0_self.$;
-          v34_t = clone_1395(v33_x);
+          v34_t = clone_1396(v33_x);
           v35_t = { $tag: "Tag", $: v34_t };
           v3_t = v35_t;
           break L1;
@@ -178440,7 +178735,7 @@ function clone_1354($3195) {
         {
           let v37_x, v38_t, v39_t;
           v37_x = v0_self.$;
-          v38_t = clone_1396(v37_x);
+          v38_t = clone_1397(v37_x);
           v39_t = { $tag: "Fields", $: v38_t };
           v3_t = v39_t;
           break L1;
@@ -178480,7 +178775,7 @@ function clone_1354($3195) {
         {
           let v53_x, v54_t, v55_t;
           v53_x = v0_self.$;
-          v54_t = clone_1397(v53_x);
+          v54_t = clone_1398(v53_x);
           v55_t = { $tag: "Closure", $: v54_t };
           v3_t = v55_t;
           break L1;
@@ -178528,7 +178823,7 @@ function clone_1355($3196) {
         v6_t = v0_self.args;
         v7_t = clone_1356(v6_t);
         v8_t = v0_self.callee;
-        v9_t = clone_1398(v8_t);
+        v9_t = clone_1399(v8_t);
         v10_t = v0_self.fails;
         v11_t = clone_245(v10_t);
         v12_t = v0_self.params;
@@ -178648,7 +178943,7 @@ function clone_1357($3198) {
               {
                 let v14_t, v15_t, v16_t;
                 v14_t = v4_v;
-                v15_t = clone_1399(v13_x);
+                v15_t = clone_1400(v13_x);
                 $b.Vec_push(v14_t, v15_t);
               }
             }
@@ -178814,7 +179109,7 @@ function constValue_1362($3205, $3206) {
           v17_t = v0_self;
           v15_t = v9_value;
           v16_t = v6_ty;
-          v18_t = constOf_1400(v17_t, v15_t, v16_t);
+          v18_t = constOf_1401(v17_t, v15_t, v16_t);
           v19_t = { $tag: "Ok", $: v18_t };
           v14_t = v19_t;
         }
@@ -179143,7 +179438,7 @@ function initItems_1366($3213) {
                   return v1_ret;
                 });
                 v25_t = v24_t;
-                v27_t = generate_1401(v26_t, v25_t);
+                v27_t = generate_1402(v26_t, v25_t);
                 v28_g = v27_t;
                 v29_t = v4_fields;
                 v30_t = v0_self.v;
@@ -179241,7 +179536,7 @@ function chainHead_1367($3215) {
       {
         let v6_t, v7_t;
         v6_t = v0_self.v;
-        v7_t = chainAhead_1402(v6_t);
+        v7_t = chainAhead_1403(v6_t);
         v5_t = v7_t;
       }
       v8_t = (!v5_t);
@@ -179308,7 +179603,7 @@ function chainHead_1367($3215) {
                     let v29_t, v30_t, v31_t;
                     v29_t = v25_pat;
                     v30_t = v14_names;
-                    boundNames_1403(v29_t, v30_t);
+                    boundNames_1404(v29_t, v30_t);
                   }
                 }
                 v32_t = v12_conds;
@@ -180046,7 +180341,7 @@ function clone_1371($3225) {
         {
           let v5_x, v6_t, v7_t;
           v5_x = v0_self.$;
-          v6_t = clone_1404(v5_x);
+          v6_t = clone_1405(v5_x);
           v7_t = { $tag: "For", $: v6_t };
           v3_t = v7_t;
           break L1;
@@ -180056,7 +180351,7 @@ function clone_1371($3225) {
         {
           let v9_x, v10_t, v11_t;
           v9_x = v0_self.$;
-          v10_t = clone_1405(v9_x);
+          v10_t = clone_1406(v9_x);
           v11_t = { $tag: "If", $: v10_t };
           v3_t = v11_t;
           break L1;
@@ -180066,7 +180361,7 @@ function clone_1371($3225) {
         {
           let v13_x, v14_t, v15_t;
           v13_x = v0_self.$;
-          v14_t = clone_1406(v13_x);
+          v14_t = clone_1407(v13_x);
           v15_t = { $tag: "Match", $: v14_t };
           v3_t = v15_t;
           break L1;
@@ -180104,7 +180399,7 @@ function clone_1372($3226) {
         {
           let v5_x, v6_t, v7_t;
           v5_x = v0_self.$;
-          v6_t = clone_1407(v5_x);
+          v6_t = clone_1408(v5_x);
           v7_t = { $tag: "For", $: v6_t };
           v3_t = v7_t;
           break L1;
@@ -180114,7 +180409,7 @@ function clone_1372($3226) {
         {
           let v9_x, v10_t, v11_t;
           v9_x = v0_self.$;
-          v10_t = clone_1408(v9_x);
+          v10_t = clone_1409(v9_x);
           v11_t = { $tag: "If", $: v10_t };
           v3_t = v11_t;
           break L1;
@@ -180124,7 +180419,7 @@ function clone_1372($3226) {
         {
           let v13_x, v14_t, v15_t;
           v13_x = v0_self.$;
-          v14_t = clone_1409(v13_x);
+          v14_t = clone_1410(v13_x);
           v15_t = { $tag: "Match", $: v14_t };
           v3_t = v15_t;
           break L1;
@@ -180205,7 +180500,7 @@ function clone_1375($3229) {
       {
         let v4_t, v5_t, v6_t, v7_t, v8_t;
         v4_t = v0_self.arms;
-        v5_t = clone_1410(v4_t);
+        v5_t = clone_1411(v4_t);
         v6_t = v0_self.scrutinee;
         v7_t = clone_76(v6_t);
         v8_t = { arms: v5_t, scrutinee: v7_t };
@@ -181281,7 +181576,7 @@ function placeArg_1383($3254, $3255, $3256) {
     {
       let v5_t, v6_t, v7_t, v8_t;
       v5_t = v1_c.args;
-      v6_t = get_1411(v5_t, v2_i);
+      v6_t = get_1412(v5_t, v2_i);
       v7_t = v6_t;
       L1:
       {
@@ -181452,11 +181747,34 @@ function borrowAt_1384($3257, $3258, $3259, $3260, $3261) {
   }
   return v5_ret;
 }
-function regionLib_1385($3262, $3263, $3264, $3265, $3266) {
+function outOfMemory_1385($3262) {
+  let v1_ret;
+  {
+    let v0_self, v2_t;
+    v0_self = $3262; 
+    {
+      const v3_t = { v: undefined };
+      let v4_t, v5_t, v6_t, v7_t, v8_t, v9_t, v10_t, v11_t;
+      v4_t = $b.String_new();
+      v3_t.v = v4_t;
+      v5_t = v3_t;
+      $b.String_push(v5_t, "{ fly_err_box(");
+      v7_t = tagId_695(v0_self, "OutOfMemory");
+      v8_t = v3_t;
+      (v8_t.v += String(v7_t), undefined);
+      v10_t = v3_t;
+      $b.String_push(v10_t, ", NULL, 0); } ");
+      v2_t = v3_t.v;
+    }
+    v1_ret = v2_t;
+  }
+  return v1_ret;
+}
+function regionLib_1386($3263, $3264, $3265, $3266, $3267) {
   let v5_ret;
   {
     let v0_self, v1_key, v2_c, v3_vs, v4_arenas, v6_t, v69_t, v101_t, v116_t, v131_t, v151_t, v172_t, v184_t, v191_t, v226_t, v229_t, v239_t, v251_t, v263_t, v282_t;
-    v0_self = $3262; v1_key = $3263; v2_c = $3264; v3_vs = $3265; v4_arenas = $3266; 
+    v0_self = $3263; v1_key = $3264; v2_c = $3265; v3_vs = $3266; v4_arenas = $3267; 
     {
       let v7_t, v8_t, v9_t, v12_t, v15_t, v18_t, v21_t, v24_t, v28_span, v29_t, v30_t, v31_rt, v32_t, v33_t, v34_ptys, v35_t, v36_arg, v37_t, v38_t, v39_t, v40_t, v46_ar, v47_t, v48_t, v49_held, v50_t, v289_t;
       v7_t = (v1_key === "alloc");
@@ -181524,11 +181842,11 @@ function regionLib_1385($3262, $3263, $3264, $3265, $3266) {
       v32_t = v2_c.params;
       v33_t = clone_39(v32_t);
       v34_ptys = v33_t;
-      v35_t = (($3267) => {
+      v35_t = (($3268) => {
         let v1_ret;
         {
           let v0_i, v2_t, v3_t, v4_t, v5_t, v6_t;
-          v0_i = $3267; 
+          v0_i = $3268; 
           v4_t = v0_i;
           v2_t = v3_vs;
           v3_t = $b.slice_len(v2_t);
@@ -181560,7 +181878,7 @@ function regionLib_1385($3262, $3263, $3264, $3265, $3266) {
       });
       v36_arg = v35_t;
       v37_t = v4_arenas;
-      v38_t = first_1412(v37_t);
+      v38_t = first_1413(v37_t);
       v39_t = v38_t;
       L1:
       {
@@ -182005,11 +182323,11 @@ function regionLib_1385($3262, $3263, $3264, $3265, $3266) {
   }
   return v5_ret;
 }
-function library_1386($3268, $3269, $3270, $3271) {
+function library_1387($3269, $3270, $3271, $3272) {
   let v4_ret;
   {
     let v0_self, v1_key, v2_c, v3_vs, v5_t, v41_t, v63_t, v106_t, v141_t, v155_t, v167_t, v179_t, v236_t, v272_t, v295_t, v340_t, v362_t, v480_t, v493_t, v512_t, v562_t, v587_t, v608_t, v643_t, v652_t, v685_t, v700_t, v707_t, v742_t, v761_t, v798_t, v840_t, v864_t, v882_t, v896_t, v908_t, v921_t, v946_t, v956_t, v1002_t, v1027_t, v1059_t, v1116_t, v1127_t, v1134_t, v1201_t, v1212_t, v1219_t, v1247_t, v1254_t, v1291_t, v1302_t, v1317_t, v1364_t, v1375_t, v1382_t, v1399_t;
-    v0_self = $3268; v1_key = $3269; v2_c = $3270; v3_vs = $3271; 
+    v0_self = $3269; v1_key = $3270; v2_c = $3271; v3_vs = $3272; 
     {
       let v6_t, v7_t, v8_ptys, v9_span, v10_t, v11_t, v12_rt, v13_t, v14_arg, v15_t, v16_t, v17_t, v18_t, v24_recv, v25_t, v26_t, v27_t, v28_t, v32_t, v47_probe, v48_t, v49_t, v50_t, v51_t, v56_t, v71_probeDecl, v72_t, v675_t, v933_t, v934_t, v938_t, v939_t, v943_t, v968_t, v969_t, v971_t, v972_t, v973_t, v974_t, v975_t, v976_t, v977_tc, v978_t, v979_t, v980_out, v981_t, v982_t, v983_t, v984_t, v991_oc, v992_t, v993_t, v994_t, v995_t, v1010_dropT, v1011_t, v1406_t;
       v6_t = v2_c.params;
@@ -182019,11 +182337,11 @@ function library_1386($3268, $3269, $3270, $3271) {
       v10_t = v2_c.ret;
       v11_t = clone_27(v10_t);
       v12_rt = v11_t;
-      v13_t = (($3272) => {
+      v13_t = (($3273) => {
         let v1_ret;
         {
           let v0_i, v2_t, v3_t, v4_t, v5_t, v6_t;
-          v0_i = $3272; 
+          v0_i = $3273; 
           v4_t = v0_i;
           v2_t = v3_vs;
           v3_t = $b.slice_len(v2_t);
@@ -182252,12 +182570,12 @@ function library_1386($3268, $3269, $3270, $3271) {
                 let v114_t, v115_t, v116_t, v117_h, v118_t, v119_t, v120_t, v121_t, v122_eq, v123_t, v124_t, v125_t, v126_kc, v127_t, v128_t, v129_t, v130_vc, v131_t, v132_t, v133_t, v134_t, v149_d, v151_t, v152_t, v153_t, v154_t, v156_t, v157_t, v158_t, v159_t, v160_t, v161_t, v162_t, v163_t, v164_t, v165_t, v166_t, v168_t, v169_t, v170_t, v171_t, v172_t, v173_t, v174_t, v175_t, v176_t, v177_t, v178_t, v180_t, v181_t, v182_t, v183_t, v184_t, v185_t, v186_t, v187_t, v188_t, v189_t, v190_t, v191_t, v192_t, v193_t, v194_t, v195_t, v196_t, v197_t, v198_t, v199_t, v200_t, v201_t, v202_t, v203_t, v204_t, v205_t, v206_t, v207_t, v208_t, v209_t, v210_t, v211_t, v212_t, v213_t, v214_t, v215_t, v216_t, v217_t, v218_t, v219_t;
                 v115_t = v0_self;
                 v114_t = v75_k;
-                v116_t = hashFn_1413(v115_t, v114_t, $copy2(v9_span));
+                v116_t = hashFn_1414(v115_t, v114_t, $copy2(v9_span));
                 v117_h = v116_t;
                 v120_t = v0_self;
                 v118_t = v75_k;
                 v119_t = v75_k;
-                v121_t = keyEqFn_1414(v120_t, v118_t, v119_t, $copy2(v9_span));
+                v121_t = keyEqFn_1415(v120_t, v118_t, v119_t, $copy2(v9_span));
                 v122_eq = v121_t;
                 v124_t = v0_self;
                 v123_t = v75_k;
@@ -182391,7 +182709,7 @@ function library_1386($3268, $3269, $3270, $3271) {
                 v225_t = $b.String_asStr(v224_t);
                 v226_t = v85_ec;
                 v227_t = $b.String_asStr(v226_t);
-                v229_t = mapFind_1415(v228_t, v222_t, v223_t, v225_t, v227_t, $copy2(v9_span));
+                v229_t = mapFind_1416(v228_t, v222_t, v223_t, v225_t, v227_t, $copy2(v9_span));
                 v230_f = v229_t;
                 v232_t = $b.String_new();
                 v231_t.v = v232_t;
@@ -182450,7 +182768,7 @@ function library_1386($3268, $3269, $3270, $3271) {
                 v257_t = $b.String_asStr(v256_t);
                 v258_t = v85_ec;
                 v259_t = $b.String_asStr(v258_t);
-                v261_t = mapFind_1415(v260_t, v254_t, v255_t, v257_t, v259_t, $copy2(v9_span));
+                v261_t = mapFind_1416(v260_t, v254_t, v255_t, v257_t, v259_t, $copy2(v9_span));
                 v262_f = v261_t;
                 v277_t = v0_self;
                 v264_t = $b.String_new();
@@ -182527,7 +182845,7 @@ function library_1386($3268, $3269, $3270, $3271) {
                 v324_t = $b.String_asStr(v323_t);
                 v325_t = v85_ec;
                 v326_t = $b.String_asStr(v325_t);
-                v328_t = mapFind_1415(v327_t, v321_t, v322_t, v324_t, v326_t, $copy2(v9_span));
+                v328_t = mapFind_1416(v327_t, v321_t, v322_t, v324_t, v326_t, $copy2(v9_span));
                 v329_f = v328_t;
                 v330_t = v0_self.v;
                 v331_t = v75_k;
@@ -182776,7 +183094,7 @@ function library_1386($3268, $3269, $3270, $3271) {
                 v482_t = $b.String_asStr(v481_t);
                 v483_t = v469_item;
                 v484_t = $b.String_asStr(v483_t);
-                v486_t = stridedGen_1416(v485_t, v470_t, "m_->entries", "m_->len", v482_t, v484_t, "free", $copy2(v9_span));
+                v486_t = stridedGen_1417(v485_t, v470_t, "m_->entries", "m_->len", v482_t, v484_t, "free", $copy2(v9_span));
                 v487_g = v486_t;
                 v489_t = $b.String_new();
                 v488_t.v = v489_t;
@@ -183197,7 +183515,7 @@ function library_1386($3268, $3269, $3270, $3271) {
             v763_t = $b.String_asStr(v762_t);
             v764_t = v733_item;
             v765_t = $b.String_asStr(v764_t);
-            v767_t = stridedGen_1416(v766_t, v751_t, "l_.ptr", "l_.len", v763_t, v765_t, "free", $copy2(v9_span));
+            v767_t = stridedGen_1417(v766_t, v751_t, "l_.ptr", "l_.len", v763_t, v765_t, "free", $copy2(v9_span));
             v768_g = v767_t;
             v770_t = $b.String_new();
             v769_t.v = v770_t;
@@ -183394,7 +183712,7 @@ function library_1386($3268, $3269, $3270, $3271) {
             v910_t = $b.String_asStr(v909_t);
             v911_t = v885_drop;
             v912_t = $b.String_asStr(v911_t);
-            v914_t = stridedGen_1416(v913_t, v886_t, "v_->ptr", "v_->len", v898_t, v910_t, v912_t, $copy2(v9_span));
+            v914_t = stridedGen_1417(v913_t, v886_t, "v_->ptr", "v_->len", v898_t, v910_t, v912_t, $copy2(v9_span));
             v915_g = v914_t;
             v917_t = $b.String_new();
             v916_t.v = v917_t;
@@ -183424,7 +183742,7 @@ function library_1386($3268, $3269, $3270, $3271) {
         }
         $rt.panic("no arm matched");
       }
-      v933_t = prelude_1417(v0_self, v1_key, v2_c, v3_vs);
+      v933_t = prelude_1418(v0_self, v1_key, v2_c, v3_vs);
       v934_t = v933_t;
       L8:
       {
@@ -183448,7 +183766,7 @@ function library_1386($3268, $3269, $3270, $3271) {
         }
         $rt.panic("no arm matched");
       }
-      v938_t = tasksLib_1418(v0_self, v1_key, v2_c, v3_vs);
+      v938_t = tasksLib_1419(v0_self, v1_key, v2_c, v3_vs);
       v939_t = v938_t;
       L9:
       {
@@ -183724,7 +184042,7 @@ function library_1386($3268, $3269, $3270, $3271) {
             v1116_t = v1094_t.v;
             v1117_t = v1116_t;
             v1118_t = $b.String_asStr(v1117_t);
-            v1120_t = step_1419(v1119_t, v1082_t.v, "fly_gmap", v1118_t);
+            v1120_t = step_1420(v1119_t, v1082_t.v, "fly_gmap", v1118_t);
             v1121_st = v1120_t;
             v1123_t = $b.String_new();
             v1122_t.v = v1123_t;
@@ -183852,7 +184170,7 @@ function library_1386($3268, $3269, $3270, $3271) {
             v1201_t = v1175_t.v;
             v1202_t = v1201_t;
             v1203_t = $b.String_asStr(v1202_t);
-            v1205_t = step_1419(v1204_t, v1168_t.v, "fly_gmap", v1203_t);
+            v1205_t = step_1420(v1204_t, v1168_t.v, "fly_gmap", v1203_t);
             v1206_st = v1205_t;
             v1208_t = $b.String_new();
             v1207_t.v = v1208_t;
@@ -183898,7 +184216,7 @@ function library_1386($3268, $3269, $3270, $3271) {
             v1236_t = v977_tc;
             v1237_t = v1232_t;
             $b.String_push(v1237_t, v1236_t);
-            v1240_t = step_1419(v1239_t, v1232_t.v, "fly_gcount", "if (s->n == 0) return false; s->n--; return s->in.next(s->in.st, o_);");
+            v1240_t = step_1420(v1239_t, v1232_t.v, "fly_gcount", "if (s->n == 0) return false; s->n--; return s->in.next(s->in.st, o_);");
             v1241_st = v1240_t;
             v1243_t = $b.String_new();
             v1242_t.v = v1243_t;
@@ -183965,7 +184283,7 @@ function library_1386($3268, $3269, $3270, $3271) {
             v1291_t = v1274_t.v;
             v1292_t = v1291_t;
             v1293_t = $b.String_asStr(v1292_t);
-            v1295_t = step_1419(v1294_t, v1267_t.v, "fly_gcount", v1293_t);
+            v1295_t = step_1420(v1294_t, v1267_t.v, "fly_gcount", v1293_t);
             v1296_st = v1295_t;
             v1298_t = $b.String_new();
             v1297_t.v = v1298_t;
@@ -184050,7 +184368,7 @@ function library_1386($3268, $3269, $3270, $3271) {
             v1364_t = v1337_t.v;
             v1365_t = v1364_t;
             v1366_t = $b.String_asStr(v1365_t);
-            v1368_t = step_1419(v1367_t, v1325_t.v, "fly_gzip", v1366_t);
+            v1368_t = step_1420(v1367_t, v1325_t.v, "fly_gzip", v1366_t);
             v1369_st = v1368_t;
             v1371_t = $b.String_new();
             v1370_t.v = v1371_t;
@@ -184115,11 +184433,11 @@ function library_1386($3268, $3269, $3270, $3271) {
   }
   return v4_ret;
 }
-function bounds_1387($3273) {
+function bounds_1388($3274) {
   let v1_ret;
   {
     let v0_p, v2_t;
-    v0_p = $3273; 
+    v0_p = $3274; 
     {
       let v3_t;
       L1:
@@ -184257,11 +184575,11 @@ function bounds_1387($3273) {
   }
   return v1_ret;
 }
-function floatTy_1388($3274) {
+function floatTy_1389($3275) {
   let v1_ret;
   {
     let v0_t, v2_t;
-    v0_t = $3274; 
+    v0_t = $3275; 
     {
       let v3_t;
       L1:
@@ -184282,7 +184600,7 @@ function floatTy_1388($3274) {
           let v8_inner, v9_t, v10_t;
           v8_inner = v0_t.$[1];
           v9_t = v8_inner;
-          v10_t = floatTy_1388(v9_t);
+          v10_t = floatTy_1389(v9_t);
           v3_t = v10_t;
           break L1;
         }
@@ -184298,11 +184616,11 @@ function floatTy_1388($3274) {
   }
   return v1_ret;
 }
-function wideLit_1389($3275) {
+function wideLit_1390($3276) {
   let v1_ret;
   {
     let v0_n, v2_t;
-    v0_n = $3275; 
+    v0_n = $3276; 
     {
       const v25_t = { v: undefined };
       let v3_v, v19_t, v20_t, v21_hi, v22_t, v23_t, v24_lo, v26_t, v27_t, v28_t, v29_t, v30_t, v31_t, v32_t, v33_t, v34_t, v35_t, v36_t;
@@ -184384,11 +184702,11 @@ function wideLit_1389($3275) {
   }
   return v1_ret;
 }
-function constValue_1390($3276, $3277, $3278) {
+function constValue_1391($3277, $3278, $3279) {
   let v3_ret;
   {
     let v0_self, v1_v, v2_span, v4_t, v152_t;
-    v0_self = $3276; v1_v = $3277; v2_span = $3278; 
+    v0_self = $3277; v1_v = $3278; v2_span = $3279; 
     {
       let v5_t;
       L1:
@@ -184414,7 +184732,7 @@ function constValue_1390($3276, $3277, $3278) {
             let v13_t, v14_t, v15_t, v16_a, v18_t, v19_t, v20_t, v21_t, v22_t, v23_t, v24_t, v25_t, v26_t, v27_t, v28_t;
             v14_t = v0_self;
             v13_t = v11_x;
-            v15_t = constValue_1390(v14_t, v13_t, $copy2(v2_span));
+            v15_t = constValue_1391(v14_t, v13_t, $copy2(v2_span));
             v16_a = v15_t;
             v18_t = $b.String_new();
             v17_t.v = v18_t;
@@ -184446,11 +184764,11 @@ function constValue_1390($3276, $3277, $3278) {
             let v35_t, v36_t, v37_t, v38_a, v39_t, v40_t, v41_t, v42_b, v43_t, v44_c, v46_t, v47_t, v48_t, v49_t, v50_t, v51_t, v52_t, v53_t, v54_t, v55_t, v56_t, v57_t, v58_t, v59_t, v60_t, v61_t, v62_t, v63_t, v64_t, v65_t, v66_t, v67_t, v68_t, v69_t, v70_t, v71_t, v72_t, v73_t, v74_t, v75_t, v76_t, v77_t, v78_t;
             v36_t = v0_self;
             v35_t = v31_x;
-            v37_t = constValue_1390(v36_t, v35_t, $copy2(v2_span));
+            v37_t = constValue_1391(v36_t, v35_t, $copy2(v2_span));
             v38_a = v37_t;
             v40_t = v0_self;
             v39_t = v32_y;
-            v41_t = constValue_1390(v40_t, v39_t, $copy2(v2_span));
+            v41_t = constValue_1391(v40_t, v39_t, $copy2(v2_span));
             v42_b = v41_t;
             v43_t = ctype_203(v0_self, v33_ty, $copy2(v2_span));
             v44_c = v43_t;
@@ -184584,7 +184902,7 @@ function constValue_1390($3276, $3277, $3278) {
                   v102_t = v0_self;
                   v101_t = v80_items;
                   v100_t = v96_elem;
-                  v103_t = constArray_1420(v102_t, v101_t, v100_t, $copy2(v2_span));
+                  v103_t = constArray_1421(v102_t, v101_t, v100_t, $copy2(v2_span));
                   v104_name = v103_t;
                   v106_t = $b.String_new();
                   v105_t.v = v106_t;
@@ -184644,7 +184962,7 @@ function constValue_1390($3276, $3277, $3278) {
                             v135_t = v0_self;
                             v134_t = v131_it;
                             v133_t = v96_elem;
-                            v136_t = constInit_1421(v135_t, v134_t, v133_t, $copy2(v2_span));
+                            v136_t = constInit_1422(v135_t, v134_t, v133_t, $copy2(v2_span));
                             $b.Vec_push(v132_t, v136_t);
                           }
                         }
@@ -184695,11 +185013,11 @@ function constValue_1390($3276, $3277, $3278) {
   }
   return v3_ret;
 }
-function clone_1391($3279) {
+function clone_1392($3280) {
   let v1_ret;
   {
     let v0_self, v2_t;
-    v0_self = $3279; 
+    v0_self = $3280; 
     {
       let v3_t;
       {
@@ -184726,11 +185044,11 @@ function clone_1391($3279) {
   }
   return v1_ret;
 }
-function clone_1392($3280) {
+function clone_1393($3281) {
   let v1_ret;
   {
     let v0_self, v2_t;
-    v0_self = $3280; 
+    v0_self = $3281; 
     {
       let v3_t;
       {
@@ -184757,11 +185075,11 @@ function clone_1392($3280) {
   }
   return v1_ret;
 }
-function clone_1393($3281) {
+function clone_1394($3282) {
   let v1_ret;
   {
     let v0_self, v2_t;
-    v0_self = $3281; 
+    v0_self = $3282; 
     {
       let v3_t;
       {
@@ -184794,11 +185112,11 @@ function clone_1393($3281) {
   }
   return v1_ret;
 }
-function clone_1394($3282) {
+function clone_1395($3283) {
   let v1_ret;
   {
     let v0_self, v2_t;
-    v0_self = $3282; 
+    v0_self = $3283; 
     {
       let v3_t;
       {
@@ -184825,11 +185143,11 @@ function clone_1394($3282) {
   }
   return v1_ret;
 }
-function clone_1395($3283) {
+function clone_1396($3284) {
   let v1_ret;
   {
     let v0_self, v2_t;
-    v0_self = $3283; 
+    v0_self = $3284; 
     {
       let v3_t;
       {
@@ -184856,11 +185174,11 @@ function clone_1395($3283) {
   }
   return v1_ret;
 }
-function clone_1396($3284) {
+function clone_1397($3285) {
   let v1_ret;
   {
     let v0_self, v2_t;
-    v0_self = $3284; 
+    v0_self = $3285; 
     {
       const v4_v = { v: undefined };
       let v3_t;
@@ -184893,7 +185211,7 @@ function clone_1396($3284) {
               {
                 let v14_t, v15_t, v16_t;
                 v14_t = v4_v;
-                v15_t = clone_1392(v13_x);
+                v15_t = clone_1393(v13_x);
                 $b.Vec_push(v14_t, v15_t);
               }
             }
@@ -184911,11 +185229,11 @@ function clone_1396($3284) {
   }
   return v1_ret;
 }
-function clone_1397($3285) {
+function clone_1398($3286) {
   let v1_ret;
   {
     let v0_self, v2_t;
-    v0_self = $3285; 
+    v0_self = $3286; 
     {
       let v3_t;
       {
@@ -184929,7 +185247,7 @@ function clone_1397($3285) {
         {
           let v8_t, v9_t;
           v8_t = v0_self[1];
-          v9_t = clone_1422(v8_t);
+          v9_t = clone_1423(v8_t);
           v7_t = v9_t;
         }
         {
@@ -184948,11 +185266,11 @@ function clone_1397($3285) {
   }
   return v1_ret;
 }
-function clone_1398($3286) {
+function clone_1399($3287) {
   let v1_ret;
   {
     let v0_self, v2_t;
-    v0_self = $3286; 
+    v0_self = $3287; 
     {
       let v3_t;
       L1:
@@ -184984,7 +185302,7 @@ function clone_1398($3286) {
         {
           let v14_x, v15_t, v16_t;
           v14_x = v0_self.$;
-          v15_t = clone_1423(v14_x);
+          v15_t = clone_1424(v14_x);
           v16_t = { $tag: "Value", $: v15_t };
           v3_t = v16_t;
           break L1;
@@ -184997,11 +185315,11 @@ function clone_1398($3286) {
   }
   return v1_ret;
 }
-function clone_1399($3287) {
+function clone_1400($3288) {
   let v1_ret;
   {
     let v0_self, v2_t;
-    v0_self = $3287; 
+    v0_self = $3288; 
     {
       let v3_t;
       {
@@ -185025,11 +185343,11 @@ function clone_1399($3287) {
   }
   return v1_ret;
 }
-function constOf_1400($3288, $3289, $3290) {
+function constOf_1401($3289, $3290, $3291) {
   let v3_ret;
   {
     let v0_self, v1_e, v2_ty, v4_t;
-    v0_self = $3288; v1_e = $3289; v2_ty = $3290; 
+    v0_self = $3289; v1_e = $3290; v2_ty = $3291; 
     {
       let v5_t;
       L1:
@@ -185101,7 +185419,7 @@ function constOf_1400($3288, $3289, $3290) {
           v36_t = $b.String_clone(v34_op);
           v38_t = v0_self;
           v37_t = v35_operand;
-          v39_t = constOf_1400(v38_t, v37_t, v2_ty);
+          v39_t = constOf_1401(v38_t, v37_t, v2_ty);
           v40_t = $b.Box_new(v39_t);
           v41_t = clone_27(v2_ty);
           v42_t = [v36_t, v40_t, v41_t];
@@ -185119,11 +185437,11 @@ function constOf_1400($3288, $3289, $3290) {
           v48_t = $b.String_clone(v45_op);
           v50_t = v0_self;
           v49_t = v46_lhs;
-          v51_t = constOf_1400(v50_t, v49_t, v2_ty);
+          v51_t = constOf_1401(v50_t, v49_t, v2_ty);
           v52_t = $b.Box_new(v51_t);
           v54_t = v0_self;
           v53_t = v47_rhs;
-          v55_t = constOf_1400(v54_t, v53_t, v2_ty);
+          v55_t = constOf_1401(v54_t, v53_t, v2_ty);
           v56_t = $b.Box_new(v55_t);
           v57_t = clone_27(v2_ty);
           v58_t = [v48_t, v52_t, v56_t, v57_t];
@@ -185244,7 +185562,7 @@ function constOf_1400($3288, $3289, $3290) {
                       v94_t = v0_self;
                       v93_t = v90_it;
                       v92_t = v79_elem;
-                      v95_t = constOf_1400(v94_t, v93_t, v92_t);
+                      v95_t = constOf_1401(v94_t, v93_t, v92_t);
                       $b.Vec_push(v91_t, v95_t);
                     }
                   }
@@ -185325,11 +185643,11 @@ function constOf_1400($3288, $3289, $3290) {
   }
   return v3_ret;
 }
-function generate_1401($3291, $3292) {
+function generate_1402($3292, $3293) {
   let v2_ret;
   {
     let v0_self, v1_items, v3_t;
-    v0_self = $3291; v1_items = $3292; 
+    v0_self = $3292; v1_items = $3293; 
     {
       let v4_t, v5_t, v26_t, v41_t, v64_t, v65_t;
       v4_t = expectKw_971(v0_self, "comptime");
@@ -185458,11 +185776,11 @@ function generate_1401($3291, $3292) {
   }
   return v2_ret;
 }
-function chainAhead_1402($3293) {
+function chainAhead_1403($3294) {
   let v1_ret;
   {
     let v0_self, v2_t;
-    v0_self = $3293; 
+    v0_self = $3294; 
     {
       let v3_depth, v4_i;
       v3_depth = 0;
@@ -185616,10 +185934,10 @@ function chainAhead_1402($3293) {
   }
   return v1_ret;
 }
-function boundNames_1403($3294, $3295) {
+function boundNames_1404($3295, $3296) {
   {
     let v0_p, v1_out, v2_ret;
-    v0_p = $3294; v1_out = $3295; 
+    v0_p = $3295; v1_out = $3296; 
     {
       L1:
       {
@@ -185715,7 +186033,7 @@ function boundNames_1403($3294, $3295) {
                     v26_q = v25_t;
                     {
                       let v27_t;
-                      boundNames_1403(v26_q, v1_out);
+                      boundNames_1404(v26_q, v1_out);
                     }
                   }
                 }
@@ -185736,7 +186054,7 @@ function boundNames_1403($3294, $3295) {
           v30_fields = v0_p.kind.$.fields;
           {
             let v31_t;
-            boundFields_1424(v30_fields, v1_out);
+            boundFields_1425(v30_fields, v1_out);
           }
           break L1;
         }
@@ -185835,7 +186153,7 @@ function boundNames_1403($3294, $3295) {
                         v52_q = v51_t;
                         {
                           let v53_t;
-                          boundNames_1403(v52_q, v1_out);
+                          boundNames_1404(v52_q, v1_out);
                         }
                       }
                     }
@@ -185856,7 +186174,7 @@ function boundNames_1403($3294, $3295) {
               v56_fs = v35_args.$;
               {
                 let v57_t;
-                boundFields_1424(v56_fs, v1_out);
+                boundFields_1425(v56_fs, v1_out);
               }
               break L3;
             }
@@ -185874,11 +186192,11 @@ function boundNames_1403($3294, $3295) {
     }
   }
 }
-function clone_1404($3296) {
+function clone_1405($3297) {
   let v1_ret;
   {
     let v0_self, v2_t;
-    v0_self = $3296; 
+    v0_self = $3297; 
     {
       let v3_t;
       {
@@ -185898,11 +186216,11 @@ function clone_1404($3296) {
   }
   return v1_ret;
 }
-function clone_1405($3297) {
+function clone_1406($3298) {
   let v1_ret;
   {
     let v0_self, v2_t;
-    v0_self = $3297; 
+    v0_self = $3298; 
     {
       let v3_t;
       {
@@ -185922,17 +186240,17 @@ function clone_1405($3297) {
   }
   return v1_ret;
 }
-function clone_1406($3298) {
+function clone_1407($3299) {
   let v1_ret;
   {
     let v0_self, v2_t;
-    v0_self = $3298; 
+    v0_self = $3299; 
     {
       let v3_t;
       {
         let v4_t, v5_t, v6_t, v7_t, v8_t;
         v4_t = v0_self.arms;
-        v5_t = clone_1425(v4_t);
+        v5_t = clone_1426(v4_t);
         v6_t = v0_self.scrutinee;
         v7_t = clone_76(v6_t);
         v8_t = { arms: v5_t, scrutinee: v7_t };
@@ -185944,11 +186262,11 @@ function clone_1406($3298) {
   }
   return v1_ret;
 }
-function clone_1407($3299) {
+function clone_1408($3300) {
   let v1_ret;
   {
     let v0_self, v2_t;
-    v0_self = $3299; 
+    v0_self = $3300; 
     {
       let v3_t;
       {
@@ -185968,11 +186286,11 @@ function clone_1407($3299) {
   }
   return v1_ret;
 }
-function clone_1408($3300) {
+function clone_1409($3301) {
   let v1_ret;
   {
     let v0_self, v2_t;
-    v0_self = $3300; 
+    v0_self = $3301; 
     {
       let v3_t;
       {
@@ -185992,17 +186310,17 @@ function clone_1408($3300) {
   }
   return v1_ret;
 }
-function clone_1409($3301) {
+function clone_1410($3302) {
   let v1_ret;
   {
     let v0_self, v2_t;
-    v0_self = $3301; 
+    v0_self = $3302; 
     {
       let v3_t;
       {
         let v4_t, v5_t, v6_t, v7_t, v8_t;
         v4_t = v0_self.arms;
-        v5_t = clone_1426(v4_t);
+        v5_t = clone_1427(v4_t);
         v6_t = v0_self.scrutinee;
         v7_t = clone_76(v6_t);
         v8_t = { arms: v5_t, scrutinee: v7_t };
@@ -186014,11 +186332,11 @@ function clone_1409($3301) {
   }
   return v1_ret;
 }
-function clone_1410($3302) {
+function clone_1411($3303) {
   let v1_ret;
   {
     let v0_self, v2_t;
-    v0_self = $3302; 
+    v0_self = $3303; 
     {
       const v4_v = { v: undefined };
       let v3_t;
@@ -186051,7 +186369,7 @@ function clone_1410($3302) {
               {
                 let v14_t, v15_t, v16_t;
                 v14_t = v4_v;
-                v15_t = clone_1427(v13_x);
+                v15_t = clone_1428(v13_x);
                 $b.Vec_push(v14_t, v15_t);
               }
             }
@@ -186069,11 +186387,11 @@ function clone_1410($3302) {
   }
   return v1_ret;
 }
-function get_1411($3303, $3304) {
+function get_1412($3304, $3305) {
   let v2_ret;
   {
     let v0_self, v1_i, v3_t;
-    v0_self = $3303; v1_i = $3304; 
+    v0_self = $3304; v1_i = $3305; 
     {
       let v4_t, v5_t, v6_t, v7_t;
       v5_t = v1_i;
@@ -186106,11 +186424,11 @@ function get_1411($3303, $3304) {
   }
   return v2_ret;
 }
-function first_1412($3305) {
+function first_1413($3306) {
   let v1_ret;
   {
     let v0_self, v2_t;
-    v0_self = $3305; 
+    v0_self = $3306; 
     {
       let v3_t, v4_t, v5_t;
       v3_t = $b.slice_len(v0_self);
@@ -186142,11 +186460,11 @@ function first_1412($3305) {
   }
   return v1_ret;
 }
-function hashFn_1413($3306, $3307, $3308) {
+function hashFn_1414($3307, $3308, $3309) {
   let v3_ret;
   {
     let v0_self, v1_q, v2_span, v4_t, v10_t, v49_t, v63_t, v84_t;
-    v0_self = $3306; v1_q = $3307; v2_span = $3308; 
+    v0_self = $3307; v1_q = $3308; v2_span = $3309; 
     {
       const v5_t = { v: undefined };
       const v23_t = { v: undefined };
@@ -186261,11 +186579,11 @@ function hashFn_1413($3306, $3307, $3308) {
   }
   return v3_ret;
 }
-function keyEqFn_1414($3309, $3310, $3311, $3312) {
+function keyEqFn_1415($3310, $3311, $3312, $3313) {
   let v4_ret;
   {
     let v0_self, v1_k, v2_q, v3_span, v5_t, v11_t, v18_t, v77_t, v93_t, v116_t;
-    v0_self = $3309; v1_k = $3310; v2_q = $3311; v3_span = $3312; 
+    v0_self = $3310; v1_k = $3311; v2_q = $3312; v3_span = $3313; 
     {
       const v6_t = { v: undefined };
       const v31_t = { v: undefined };
@@ -186352,7 +186670,7 @@ function keyEqFn_1414($3309, $3310, $3311, $3312) {
       v60_t = clone_27(v1_k);
       v62_t = v2_q;
       v61_t = v50_stmts;
-      v64_t = lentPtr_1428(v63_t, v51_t.v, v60_t, v62_t, v61_t, $copy2(v3_span));
+      v64_t = lentPtr_1429(v63_t, v51_t.v, v60_t, v62_t, v61_t, $copy2(v3_span));
       v65_kp = v64_t;
       v80_t = v0_self;
       v79_t = v2_q;
@@ -186413,17 +186731,17 @@ function keyEqFn_1414($3309, $3310, $3311, $3312) {
   }
   return v4_ret;
 }
-function mapFind_1415($3313, $3314, $3315, $3316, $3317, $3318) {
+function mapFind_1416($3314, $3315, $3316, $3317, $3318, $3319) {
   let v6_ret;
   {
     let v0_self, v1_k, v2_q, v3_probe, v4_ec, v5_span, v7_t;
-    v0_self = $3313; v1_k = $3314; v2_q = $3315; v3_probe = $3316; v4_ec = $3317; v5_span = $3318; 
+    v0_self = $3314; v1_k = $3315; v2_q = $3316; v3_probe = $3317; v4_ec = $3318; v5_span = $3319; 
     {
       const v12_t = { v: undefined };
       let v8_t, v9_h, v10_t, v11_eq, v13_t, v14_t, v15_t, v16_t, v17_t, v18_t, v19_t, v20_t, v21_t, v22_t, v23_t, v24_t, v25_t, v26_t, v27_t, v28_t, v29_t, v30_t, v31_t, v32_t, v33_t;
-      v8_t = hashFn_1413(v0_self, v2_q, $copy2(v5_span));
+      v8_t = hashFn_1414(v0_self, v2_q, $copy2(v5_span));
       v9_h = v8_t;
-      v10_t = keyEqFn_1414(v0_self, v1_k, v2_q, $copy2(v5_span));
+      v10_t = keyEqFn_1415(v0_self, v1_k, v2_q, $copy2(v5_span));
       v11_eq = v10_t;
       v13_t = $b.String_new();
       v12_t.v = v13_t;
@@ -186453,11 +186771,11 @@ function mapFind_1415($3313, $3314, $3315, $3316, $3317, $3318) {
   }
   return v6_ret;
 }
-function stridedGen_1416($3319, $3320, $3321, $3322, $3323, $3324, $3325, $3326) {
+function stridedGen_1417($3320, $3321, $3322, $3323, $3324, $3325, $3326, $3327) {
   let v8_ret;
   {
     let v0_self, v1_itemTy, v2_base, v3_len, v4_stride, v5_item, v6_drop, v7_span, v9_t, v59_t, v81_t;
-    v0_self = $3319; v1_itemTy = $3320; v2_base = $3321; v3_len = $3322; v4_stride = $3323; v5_item = $3324; v6_drop = $3325; v7_span = $3326; 
+    v0_self = $3320; v1_itemTy = $3321; v2_base = $3322; v3_len = $3323; v4_stride = $3324; v5_item = $3325; v6_drop = $3326; v7_span = $3327; 
     {
       const v12_t = { v: undefined };
       const v85_t = { v: undefined };
@@ -186590,11 +186908,11 @@ function stridedGen_1416($3319, $3320, $3321, $3322, $3323, $3324, $3325, $3326)
   }
   return v8_ret;
 }
-function prelude_1417($3327, $3328, $3329, $3330) {
+function prelude_1418($3328, $3329, $3330, $3331) {
   let v4_ret;
   {
     let v0_self, v1_key, v2_c, v3_vs, v5_t, v104_t, v119_t, v133_t, v145_t, v152_t, v164_t, v171_t, v183_t, v190_t, v202_t, v214_t, v226_t, v238_t, v245_t, v252_t, v264_t, v271_t, v292_t, v299_t, v326_t, v352_t, v383_t, v405_t, v442_t, v461_t, v491_t, v501_t, v508_t, v545_t, v557_t, v564_t, v599_t, v616_t, v632_t, v649_t, v666_t, v688_t, v695_t, v796_t, v855_t, v864_t, v871_t, v893_t, v900_t, v922_t, v929_t, v941_t, v983_t, v997_t, v1004_t, v1048_t, v1055_t, v1075_t, v1092_t, v1102_t, v1117_t, v1146_t, v1158_t, v1180_t, v1211_t, v1243_t, v1255_t, v1275_t, v1290_t, v1302_t, v1325_t, v1368_t, v1392_t, v1407_t, v1426_t, v1438_t, v1467_t, v1488_t, v1513_t, v1538_t, v1546_t, v1561_t, v1579_t, v1636_t, v1746_t, v1753_t;
-    v0_self = $3327; v1_key = $3328; v2_c = $3329; v3_vs = $3330; 
+    v0_self = $3328; v1_key = $3329; v2_c = $3330; v3_vs = $3331; 
     {
       let v6_t, v7_t, v8_ptys, v9_span, v10_t, v11_t, v12_rt, v13_t, v14_arg, v15_t, v16_t, v17_t, v18_t, v24_recv, v25_t, v40_elem, v41_t, v43_t, v50_ec, v51_t, v52_t, v54_t, v126_t, v1798_t;
       v6_t = v2_c.params;
@@ -186604,11 +186922,11 @@ function prelude_1417($3327, $3328, $3329, $3330) {
       v10_t = v2_c.ret;
       v11_t = clone_27(v10_t);
       v12_rt = v11_t;
-      v13_t = (($3331) => {
+      v13_t = (($3332) => {
         let v1_ret;
         {
           let v0_i, v2_t, v3_t, v4_t, v5_t, v6_t;
-          v0_i = $3331; 
+          v0_i = $3332; 
           v4_t = v0_i;
           v2_t = v3_vs;
           v3_t = $b.slice_len(v2_t);
@@ -188398,7 +188716,7 @@ function prelude_1417($3327, $3328, $3329, $3330) {
           {
             const v1043_t = { v: undefined };
             let v1041_t, v1042_boxed, v1044_t, v1045_t, v1046_t, v1047_t, v1049_t, v1050_t, v1051_t, v1052_t, v1053_t, v1054_t, v1056_t, v1057_t, v1058_t, v1059_t, v1060_t, v1061_t, v1062_t, v1063_t, v1064_t, v1065_t;
-            v1041_t = ioErr_1429(v0_self, "PermissionDenied");
+            v1041_t = ioErr_1430(v0_self, "PermissionDenied");
             v1042_boxed = v1041_t;
             v1044_t = $b.String_new();
             v1043_t.v = v1044_t;
@@ -188435,7 +188753,7 @@ function prelude_1417($3327, $3328, $3329, $3330) {
           {
             const v1070_t = { v: undefined };
             let v1068_t, v1069_boxed, v1071_t, v1072_t, v1073_t, v1074_t, v1076_t, v1077_t, v1078_t, v1079_t, v1080_t, v1081_t, v1082_t, v1083_t, v1084_t, v1085_t;
-            v1068_t = ioErr_1429(v0_self, "NotFound");
+            v1068_t = ioErr_1430(v0_self, "NotFound");
             v1069_boxed = v1068_t;
             v1071_t = $b.String_new();
             v1070_t.v = v1071_t;
@@ -189467,11 +189785,11 @@ function prelude_1417($3327, $3328, $3329, $3330) {
   }
   return v4_ret;
 }
-function tasksLib_1418($3332, $3333, $3334, $3335) {
+function tasksLib_1419($3333, $3334, $3335, $3336) {
   let v4_ret;
   {
     let v0_self, v1_key, v2_c, v3_vs, v5_t, v22_t, v40_t, v62_t, v69_t, v90_t, v130_t, v158_t, v167_t, v174_t, v206_t, v242_t, v254_t, v289_t, v326_t, v343_t, v355_t, v365_t, v380_t, v424_t, v431_t, v467_t, v474_t, v494_t, v501_t, v527_t, v566_t;
-    v0_self = $3332; v1_key = $3333; v2_c = $3334; v3_vs = $3335; 
+    v0_self = $3333; v1_key = $3334; v2_c = $3335; v3_vs = $3336; 
     {
       let v6_t, v7_t, v8_ptys, v9_span, v10_t, v11_t, v12_rt, v13_t, v14_arg, v15_t, v16_t, v17_t, v18_t, v27_carried, v28_t, v588_t;
       v6_t = v2_c.params;
@@ -189481,11 +189799,11 @@ function tasksLib_1418($3332, $3333, $3334, $3335) {
       v10_t = v2_c.ret;
       v11_t = clone_27(v10_t);
       v12_rt = v11_t;
-      v13_t = (($3336) => {
+      v13_t = (($3337) => {
         let v1_ret;
         {
           let v0_i, v2_t, v3_t, v4_t, v5_t, v6_t;
-          v0_i = $3336; 
+          v0_i = $3337; 
           v4_t = v0_i;
           v2_t = v3_vs;
           v3_t = $b.slice_len(v2_t);
@@ -190209,7 +190527,7 @@ function tasksLib_1418($3332, $3333, $3334, $3335) {
           {
             const v462_t = { v: undefined };
             let v460_t, v461_boxed, v463_t, v464_t, v465_t, v466_t, v468_t, v469_t, v470_t, v471_t, v472_t, v473_t, v475_t, v476_t, v477_t, v478_t, v479_t, v480_t, v481_t, v482_t, v483_t, v484_t;
-            v460_t = ioErr_1429(v0_self, "TimedOut");
+            v460_t = ioErr_1430(v0_self, "TimedOut");
             v461_boxed = v460_t;
             v463_t = $b.String_new();
             v462_t.v = v463_t;
@@ -190246,7 +190564,7 @@ function tasksLib_1418($3332, $3333, $3334, $3335) {
           {
             const v489_t = { v: undefined };
             let v487_t, v488_boxed, v490_t, v491_t, v492_t, v493_t, v495_t, v496_t, v497_t, v498_t, v499_t, v500_t, v502_t, v503_t, v504_t, v505_t, v506_t, v507_t, v508_t, v509_t, v510_t, v511_t;
-            v487_t = ioErr_1429(v0_self, "BrokenPipe");
+            v487_t = ioErr_1430(v0_self, "BrokenPipe");
             v488_boxed = v487_t;
             v490_t = $b.String_new();
             v489_t.v = v490_t;
@@ -190287,9 +190605,9 @@ function tasksLib_1418($3332, $3333, $3334, $3335) {
             v514_t = v12_rt;
             v516_t = ctype_203(v515_t, v514_t, $copy2(v9_span));
             v517_tc = v516_t;
-            v518_t = ioErr_1429(v0_self, "TimedOut");
+            v518_t = ioErr_1430(v0_self, "TimedOut");
             v519_timedOut = v518_t;
-            v520_t = ioErr_1429(v0_self, "NotFound");
+            v520_t = ioErr_1430(v0_self, "NotFound");
             v521_notFound = v520_t;
             v523_t = $b.String_new();
             v522_t.v = v523_t;
@@ -190338,7 +190656,7 @@ function tasksLib_1418($3332, $3333, $3334, $3335) {
             v555_t = v12_rt;
             v557_t = ctype_203(v556_t, v555_t, $copy2(v9_span));
             v558_tc = v557_t;
-            v559_t = ioErr_1429(v0_self, "TimedOut");
+            v559_t = ioErr_1430(v0_self, "TimedOut");
             v560_timedOut = v559_t;
             v562_t = $b.String_new();
             v561_t.v = v562_t;
@@ -190387,11 +190705,11 @@ function tasksLib_1418($3332, $3333, $3334, $3335) {
   }
   return v4_ret;
 }
-function step_1419($3337, $3338, $3339, $3340) {
+function step_1420($3338, $3339, $3340, $3341) {
   let v4_ret;
   {
     let v0_self, v1_key, v2_state, v3_body, v5_t, v38_t, v59_t;
-    v0_self = $3337; v1_key = $3338; v2_state = $3339; v3_body = $3340; 
+    v0_self = $3338; v1_key = $3339; v2_state = $3340; v3_body = $3341; 
     {
       const v14_t = { v: undefined };
       const v29_t = { v: undefined };
@@ -190478,11 +190796,11 @@ function step_1419($3337, $3338, $3339, $3340) {
   }
   return v4_ret;
 }
-function constArray_1420($3341, $3342, $3343, $3344) {
+function constArray_1421($3342, $3343, $3344, $3345) {
   let v4_ret;
   {
     let v0_self, v1_items, v2_elem, v3_span, v5_t, v55_t, v61_t;
-    v0_self = $3341; v1_items = $3342; v2_elem = $3343; v3_span = $3344; 
+    v0_self = $3342; v1_items = $3343; v2_elem = $3344; v3_span = $3345; 
     {
       const v9_vs = { v: undefined };
       const v23_t = { v: undefined };
@@ -190519,7 +190837,7 @@ function constArray_1420($3341, $3342, $3343, $3344) {
               {
                 let v19_t, v20_t, v21_t;
                 v19_t = v9_vs;
-                v20_t = constInit_1421(v0_self, v18_it, v2_elem, $copy2(v3_span));
+                v20_t = constInit_1422(v0_self, v18_it, v2_elem, $copy2(v3_span));
                 $b.Vec_push(v19_t, v20_t);
               }
             }
@@ -190578,11 +190896,11 @@ function constArray_1420($3341, $3342, $3343, $3344) {
   }
   return v4_ret;
 }
-function constInit_1421($3345, $3346, $3347, $3348) {
+function constInit_1422($3346, $3347, $3348, $3349) {
   let v4_ret;
   {
     let v0_self, v1_v, v2_ty, v3_span, v5_t, v16_t;
-    v0_self = $3345; v1_v = $3346; v2_ty = $3347; v3_span = $3348; 
+    v0_self = $3346; v1_v = $3347; v2_ty = $3348; v3_span = $3349; 
     {
       let v6_t;
       L1:
@@ -190638,7 +190956,7 @@ function constInit_1421($3345, $3346, $3347, $3348) {
             v34_t = v0_self;
             v33_t = v29_items;
             v32_t = v30_e;
-            v35_t = constArray_1420(v34_t, v33_t, v32_t, $copy2(v3_span));
+            v35_t = constArray_1421(v34_t, v33_t, v32_t, $copy2(v3_span));
             v36_name = v35_t;
             v38_t = $b.String_new();
             v37_t.v = v38_t;
@@ -190662,7 +190980,7 @@ function constInit_1421($3345, $3346, $3347, $3348) {
         }
         {
           let v52_t;
-          v52_t = constValue_1390(v0_self, v1_v, $copy2(v3_span));
+          v52_t = constValue_1391(v0_self, v1_v, $copy2(v3_span));
           v6_t = v52_t;
           break L1;
         }
@@ -190674,165 +190992,11 @@ function constInit_1421($3345, $3346, $3347, $3348) {
   }
   return v4_ret;
 }
-function clone_1422($3349) {
-  let v1_ret;
-  {
-    let v0_self, v2_t;
-    v0_self = $3349; 
-    {
-      const v4_v = { v: undefined };
-      let v3_t;
-      v3_t = $b.Vec_new();
-      v4_v.v = v3_t;
-      {
-        let v5_t, v6_t, v7_t, v8_t, v9_t;
-        v5_t = v0_self;
-        v6_t = v5_t;
-        v7_t = $b.slice_len(v6_t);
-        v8_t = v7_t;
-        v9_t = 0;
-        L1: for (;;) {
-          C1:
-          {
-            let v10_t, v11_t;
-            v10_t = (v9_t < v8_t);
-            if (v10_t)
-            {
-            }
-            else
-            {
-              break L1;
-            }
-            v11_t = $rt.idx(v6_t, v9_t);
-            {
-              let v12_t, v13_x;
-              v12_t = v11_t;
-              v13_x = v12_t;
-              {
-                let v14_t, v15_t, v16_t;
-                v14_t = v4_v;
-                v15_t = clone_1430(v13_x);
-                $b.Vec_push(v14_t, v15_t);
-              }
-            }
-          }
-          {
-            let v17_t;
-            v17_t = $rt.usize(v9_t + 1);
-            v9_t = v17_t;
-          }
-        }
-      }
-      v2_t = v4_v.v;
-    }
-    v1_ret = v2_t;
-  }
-  return v1_ret;
-}
 function clone_1423($3350) {
   let v1_ret;
   {
     let v0_self, v2_t;
     v0_self = $3350; 
-    {
-      let v3_t;
-      {
-        let v4_t, v7_t, v10_t, v11_v;
-        {
-          let v5_t, v6_t;
-          v5_t = v0_self[0];
-          v6_t = clone_1187(v5_t);
-          v4_t = v6_t;
-        }
-        {
-          let v8_t, v9_t;
-          v8_t = v0_self[1];
-          v9_t = clone_245(v8_t);
-          v7_t = v9_t;
-        }
-        v10_t = [v4_t, v7_t];
-        v11_v = v10_t;
-        v3_t = v11_v;
-      }
-      v2_t = v3_t;
-    }
-    v1_ret = v2_t;
-  }
-  return v1_ret;
-}
-function boundFields_1424($3351, $3352) {
-  {
-    let v0_fields, v1_out, v2_ret;
-    v0_fields = $3351; v1_out = $3352; 
-    {
-      {
-        let v3_t, v4_t, v5_t, v6_t, v7_t;
-        v3_t = v0_fields;
-        v4_t = v3_t;
-        v5_t = $b.slice_len(v4_t);
-        v6_t = v5_t;
-        v7_t = 0;
-        L1: for (;;) {
-          C1:
-          {
-            let v8_t, v9_t;
-            v8_t = (v7_t < v6_t);
-            if (v8_t)
-            {
-            }
-            else
-            {
-              break L1;
-            }
-            v9_t = $rt.idx(v4_t, v7_t);
-            {
-              let v10_t, v11_n, v12_q;
-              v10_t = v9_t;
-              v11_n = v10_t[0];
-              v12_q = v10_t[1];
-              {
-                L2:
-                {
-                  let v13_t, v16_t;
-                  v13_t = (v12_q.$tag === "Some");
-                  if (v13_t)
-                  {
-                    let v14_q, v15_t;
-                    v14_q = v12_q.$;
-                    boundNames_1403(v14_q, v1_out);
-                    break L2;
-                  }
-                  v16_t = (v12_q.$tag === "None");
-                  if (v16_t)
-                  {
-                    let v17_t, v18_t, v19_t, v20_t, v21_t;
-                    v20_t = v1_out;
-                    v17_t = v11_n.name;
-                    v18_t = $b.String_clone(v17_t);
-                    v19_t = [v18_t, $copy2(v11_n.span)];
-                    $b.Vec_push(v20_t, v19_t);
-                    break L2;
-                  }
-                  $rt.panic("no arm matched");
-                }
-              }
-            }
-          }
-          {
-            let v22_t;
-            v22_t = $rt.usize(v7_t + 1);
-            v7_t = v22_t;
-          }
-        }
-      }
-    }
-  }
-}
-function clone_1425($3353) {
-  let v1_ret;
-  {
-    let v0_self, v2_t;
-    v0_self = $3353; 
     {
       const v4_v = { v: undefined };
       let v3_t;
@@ -190882,6 +191046,105 @@ function clone_1425($3353) {
     v1_ret = v2_t;
   }
   return v1_ret;
+}
+function clone_1424($3351) {
+  let v1_ret;
+  {
+    let v0_self, v2_t;
+    v0_self = $3351; 
+    {
+      let v3_t;
+      {
+        let v4_t, v7_t, v10_t, v11_v;
+        {
+          let v5_t, v6_t;
+          v5_t = v0_self[0];
+          v6_t = clone_1187(v5_t);
+          v4_t = v6_t;
+        }
+        {
+          let v8_t, v9_t;
+          v8_t = v0_self[1];
+          v9_t = clone_245(v8_t);
+          v7_t = v9_t;
+        }
+        v10_t = [v4_t, v7_t];
+        v11_v = v10_t;
+        v3_t = v11_v;
+      }
+      v2_t = v3_t;
+    }
+    v1_ret = v2_t;
+  }
+  return v1_ret;
+}
+function boundFields_1425($3352, $3353) {
+  {
+    let v0_fields, v1_out, v2_ret;
+    v0_fields = $3352; v1_out = $3353; 
+    {
+      {
+        let v3_t, v4_t, v5_t, v6_t, v7_t;
+        v3_t = v0_fields;
+        v4_t = v3_t;
+        v5_t = $b.slice_len(v4_t);
+        v6_t = v5_t;
+        v7_t = 0;
+        L1: for (;;) {
+          C1:
+          {
+            let v8_t, v9_t;
+            v8_t = (v7_t < v6_t);
+            if (v8_t)
+            {
+            }
+            else
+            {
+              break L1;
+            }
+            v9_t = $rt.idx(v4_t, v7_t);
+            {
+              let v10_t, v11_n, v12_q;
+              v10_t = v9_t;
+              v11_n = v10_t[0];
+              v12_q = v10_t[1];
+              {
+                L2:
+                {
+                  let v13_t, v16_t;
+                  v13_t = (v12_q.$tag === "Some");
+                  if (v13_t)
+                  {
+                    let v14_q, v15_t;
+                    v14_q = v12_q.$;
+                    boundNames_1404(v14_q, v1_out);
+                    break L2;
+                  }
+                  v16_t = (v12_q.$tag === "None");
+                  if (v16_t)
+                  {
+                    let v17_t, v18_t, v19_t, v20_t, v21_t;
+                    v20_t = v1_out;
+                    v17_t = v11_n.name;
+                    v18_t = $b.String_clone(v17_t);
+                    v19_t = [v18_t, $copy2(v11_n.span)];
+                    $b.Vec_push(v20_t, v19_t);
+                    break L2;
+                  }
+                  $rt.panic("no arm matched");
+                }
+              }
+            }
+          }
+          {
+            let v22_t;
+            v22_t = $rt.usize(v7_t + 1);
+            v7_t = v22_t;
+          }
+        }
+      }
+    }
+  }
 }
 function clone_1426($3354) {
   let v1_ret;
@@ -190944,6 +191207,61 @@ function clone_1427($3355) {
     let v0_self, v2_t;
     v0_self = $3355; 
     {
+      const v4_v = { v: undefined };
+      let v3_t;
+      v3_t = $b.Vec_new();
+      v4_v.v = v3_t;
+      {
+        let v5_t, v6_t, v7_t, v8_t, v9_t;
+        v5_t = v0_self;
+        v6_t = v5_t;
+        v7_t = $b.slice_len(v6_t);
+        v8_t = v7_t;
+        v9_t = 0;
+        L1: for (;;) {
+          C1:
+          {
+            let v10_t, v11_t;
+            v10_t = (v9_t < v8_t);
+            if (v10_t)
+            {
+            }
+            else
+            {
+              break L1;
+            }
+            v11_t = $rt.idx(v6_t, v9_t);
+            {
+              let v12_t, v13_x;
+              v12_t = v11_t;
+              v13_x = v12_t;
+              {
+                let v14_t, v15_t, v16_t;
+                v14_t = v4_v;
+                v15_t = clone_1433(v13_x);
+                $b.Vec_push(v14_t, v15_t);
+              }
+            }
+          }
+          {
+            let v17_t;
+            v17_t = $rt.usize(v9_t + 1);
+            v9_t = v17_t;
+          }
+        }
+      }
+      v2_t = v4_v.v;
+    }
+    v1_ret = v2_t;
+  }
+  return v1_ret;
+}
+function clone_1428($3356) {
+  let v1_ret;
+  {
+    let v0_self, v2_t;
+    v0_self = $3356; 
+    {
       let v3_t;
       {
         let v4_t, v7_t, v10_t, v11_v;
@@ -190969,11 +191287,11 @@ function clone_1427($3355) {
   }
   return v1_ret;
 }
-function lentPtr_1428($3356, $3357, $3358, $3359, $3360, $3361) {
+function lentPtr_1429($3357, $3358, $3359, $3360, $3361, $3362) {
   let v6_ret;
   {
     let v0_self, v1_ptr, v2_k, v3_q, v4_stmts, v5_span, v7_t, v10_t, v13_t, v39_t, v72_t, v119_t, v127_t, v133_t;
-    v0_self = $3356; v1_ptr = $3357; v2_k = $3358; v3_q = $3359; v4_stmts = $3360; v5_span = $3361; 
+    v0_self = $3357; v1_ptr = $3358; v2_k = $3359; v3_q = $3360; v4_stmts = $3361; v5_span = $3362; 
     {
       const v112_t = { v: undefined };
       let v8_t, v9_t, v11_t, v12_t, v14_t, v15_t, v16_t, v17_t, v18_t, v19_t, v50_t, v51_t, v52_t, v53_t, v83_t, v84_t, v85_t, v111_t, v113_t, v114_t, v115_t, v116_t, v117_t, v118_t, v120_t, v121_t, v122_t, v123_t, v124_t, v125_t, v126_t, v128_t, v129_t, v130_t, v131_t, v132_t, v134_t, v135_t, v136_t;
@@ -191184,7 +191502,7 @@ function lentPtr_1428($3356, $3357, $3358, $3359, $3360, $3361) {
           $b.String_push(v105_t, v104_t);
           v107_t = v100_t;
           $b.String_push(v107_t, ")");
-          v110_t = lentPtr_1428(v109_t, v100_t.v, v99_inner, v3_q, v4_stmts, $copy2(v5_span));
+          v110_t = lentPtr_1429(v109_t, v100_t.v, v99_inner, v3_q, v4_stmts, $copy2(v5_span));
           return v110_t;
         }
       }
@@ -191220,11 +191538,11 @@ function lentPtr_1428($3356, $3357, $3358, $3359, $3360, $3361) {
   }
   return v6_ret;
 }
-function ioErr_1429($3362, $3363) {
+function ioErr_1430($3363, $3364) {
   let v2_ret;
   {
     let v0_self, v1_name, v3_t;
-    v0_self = $3362; v1_name = $3363; 
+    v0_self = $3363; v1_name = $3364; 
     {
       const v4_t = { v: undefined };
       let v5_t, v6_t, v7_t, v8_t, v9_t, v10_t, v11_t, v12_t;
@@ -191243,11 +191561,11 @@ function ioErr_1429($3362, $3363) {
   }
   return v2_ret;
 }
-function clone_1430($3364) {
+function clone_1431($3365) {
   let v1_ret;
   {
     let v0_self, v2_t;
-    v0_self = $3364; 
+    v0_self = $3365; 
     {
       let v3_t;
       L1:
@@ -191268,7 +191586,7 @@ function clone_1430($3364) {
         {
           let v9_x, v10_t, v11_t;
           v9_x = v0_self.$;
-          v10_t = clone_1391(v9_x);
+          v10_t = clone_1392(v9_x);
           v11_t = { $tag: "Ref", $: v10_t };
           v3_t = v11_t;
           break L1;
@@ -191281,11 +191599,11 @@ function clone_1430($3364) {
   }
   return v1_ret;
 }
-function clone_1431($3365) {
+function clone_1432($3366) {
   let v1_ret;
   {
     let v0_self, v2_t;
-    v0_self = $3365; 
+    v0_self = $3366; 
     {
       let v3_t;
       {
@@ -191312,11 +191630,11 @@ function clone_1431($3365) {
   }
   return v1_ret;
 }
-function clone_1432($3366) {
+function clone_1433($3367) {
   let v1_ret;
   {
     let v0_self, v2_t;
-    v0_self = $3366; 
+    v0_self = $3367; 
     {
       let v3_t;
       {

@@ -1,0 +1,220 @@
+// A small kernel for QEMU's `virt` board (AArch64): Flyscript with no operating system under it
+// (§8.2). It drives the console's UART through its registers, runs its own memory allocator
+// over raw memory — the one the runtime asks for memory — and uses the language as any program
+// does: failures, regions, `defer`, effect handlers.
+
+// What `boot.S` gives: where the kernel's memory is, and how to stop the machine.
+extern "C" function heapStart(): usize;
+extern "C" function heapEnd(): usize;
+extern "C" function powerOff(): void;
+extern "C" function exitWith(status: u32): void;
+extern "C" function mmuOn(table: PageTable*): void;
+
+// ---- the console: a PL011 UART ----
+
+const UART: usize = 0x09000000;
+
+// Writes text to the console, a byte at a time, waiting while the UART's queue is full.
+function print(s: str): void {
+  const data: u32* = Ptr.at(UART);
+  const flags: u32* = Ptr.at(UART + 0x18);
+  for (const b of s.bytes()) {
+    unsafe {
+      while ((flags.readVolatile() & 0x20) != 0) {}
+      data.writeVolatile(b as u32);
+    }
+  }
+}
+
+function println(s: str): void {
+  print(s);
+  print("\n");
+}
+
+// ---- memory: a first-fit allocator over the kernel's heap ----
+
+// What the heap keeps at its start: where unused memory begins, where it ends, and the list of
+// blocks given back.
+@layout(c) struct Heap { next: usize; end: usize; free: usize }
+// Each block starts with its size and, while on the free list, the next block's address.
+@layout(c) struct Header { size: usize; link: usize }
+
+const HEADER: usize = 16;
+
+function heap(): Heap* { Ptr.at(unsafe { heapStart() }) }
+
+function roundUp(n: usize, to: usize): usize { (n + to - 1) / to * to }
+
+// What the runtime calls for memory: a block of `size` bytes at a multiple of `align`, or null.
+export extern "C" function fly_os_alloc(size: usize, align: usize): u8* {
+  const h = heap();
+  unsafe {
+    let state = h.read();
+    if (state.end == 0) {
+      state = Heap { next: roundUp(h.address() + sizeOf<Heap>(), 16), end: heapEnd(), free: 0 };
+    }
+    const need = roundUp(size, 16);
+    // A block given back that is big enough, first.
+    let prev: usize = 0;
+    let at = state.free;
+    while (at != 0) {
+      const b: Header* = Ptr.at(at);
+      const block = b.read();
+      if (block.size >= need && align <= 16) {
+        if (prev == 0) { state.free = block.link; } else {
+          const p: Header* = Ptr.at(prev);
+          let before = p.read();
+          before.link = block.link;
+          p.write(before);
+        }
+        h.write(state);
+        return Ptr.at(at + HEADER);
+      }
+      prev = at;
+      at = block.link;
+    }
+    // Else from the memory not yet used.
+    const start = roundUp(state.next + HEADER, max(align, 16));
+    if (start + need > state.end) {
+      h.write(state);
+      return Ptr.at(0);
+    }
+    const header: Header* = Ptr.at(start - HEADER);
+    header.write(Header { size: need, link: 0 });
+    state.next = start + need;
+    h.write(state);
+    Ptr.at(start)
+  }
+}
+
+// What the runtime calls to give memory back.
+export extern "C" function fly_os_free(p: u8*): void {
+  if (p.address() == 0) { return; }
+  const h = heap();
+  unsafe {
+    let state = h.read();
+    const b: Header* = Ptr.at(p.address() - HEADER);
+    let block = b.read();
+    block.link = state.free;
+    b.write(block);
+    state.free = b.address();
+    h.write(state);
+  }
+}
+
+// What a panic does: say why, and stop the machine.
+export extern "C" function fly_os_panic(message: u8*, len: usize): void {
+  print("kernel panic: ");
+  const data: u32* = Ptr.at(UART);
+  for (const i of 0..len) { unsafe { data.writeVolatile(message.add(i).read() as u32); } }
+  print("\n");
+  unsafe { exitWith(1); }
+}
+
+// ---- translation ----
+
+// A first-level translation table: 512 entries, each mapping a gigabyte, at a 4 KB boundary.
+@layout(c, align = 4096) struct PageTable { entries: u64[512] }
+
+// A block entry mapping the gigabyte at `address` with memory attribute `attr`: accessed, valid.
+function block(address: usize, attr: u64, shared: bool): u64 {
+  const sh: u64 = if (shared) { 3 << 8 } else { 0 };
+  (address as u64) | (1 << 10) | sh | (attr << 2) | 1
+}
+
+// Maps memory to itself: the first gigabyte, where the devices are, as device memory, and the next,
+// where RAM is, as normal memory. Until this runs every access is a device access, which must be
+// aligned and cannot be atomic.
+function mapMemory(): void {
+  const table: PageTable* = fly_os_alloc(sizeOf<PageTable>(), alignOf<PageTable>()).cast<PageTable>();
+  unsafe {
+    let t: PageTable = zeroed<PageTable>();
+    t.entries[0] = block(0, 0, false);
+    t.entries[1] = block(0x40000000, 1, true);
+    table.write(t);
+    mmuOn(table);
+  }
+}
+
+// ---- a spinlock ----
+
+// A lock any core may take: taken by swapping 0 for 1, given back by storing 0.
+struct Spinlock { word: u32* }
+
+impl Spinlock {
+  export function lock(self: readonly Self): void {
+    unsafe {
+      while (true) {
+        const [_, taken] = self.word.compareExchange(0, 1);
+        if (taken) { break; }
+      }
+    }
+  }
+  export function unlock(self: readonly Self): void { unsafe { self.word.storeRelease(0); } }
+}
+
+// ---- the kernel ----
+
+// Work the kernel logs as it goes, through an effect its caller decides how to handle.
+effect Log { line(text: String): void; }
+
+function bootTasks(n: u32): u32 uses Log {
+  let started: u32 = 0;
+  for (const i of 0..n) {
+    Log.line(`task ${i} started`);
+    started += 1;
+  }
+  started
+}
+
+// Pages for a table that must be all there or not at all.
+function pages(n: usize): Vec<u64> uses Fail<#OutOfMemory> {
+  let v: Vec<u64> = Vec.new();
+  v.tryReserve(n * 512);
+  for (const i of 0..n * 512) { v.push(i as u64); }
+  v
+}
+
+export extern "C" function kmain(): void {
+  mapMemory();
+  println("Flyscript kernel, on QEMU virt");
+
+  // Memory the kernel asks for may not be there: asking says so, and the kernel goes on.
+  try {
+    const table = pages(4);
+    println(`page table: ${table.len()} entries`);
+    const huge = pages(1 << 40);
+    println(`impossible: ${huge.len()}`);
+  } catch (e) { println(`asked for too much: ${e}`); }
+
+  // A lock taken and given back however the block is left.
+  let word: u32 = 0;
+  const lock = Spinlock { word: Ptr.fromMut(mut word) };
+  {
+    lock.lock();
+    defer lock.unlock();
+    println(`locked: ${word}`);
+  }
+  println(`unlocked: ${word}`);
+
+  // Scratch memory for one piece of work, given back all at once.
+  region (R) {
+    const forty: u64 = 40;
+    const two: u64 = 2;
+    const a = alloc(forty);
+    const b = alloc(two);
+    println(`scratch: ${a.get() + b.get()}`);
+  }
+
+  // An effect handled by code that resumes the work: the work runs on a fiber of its own.
+  const started = handle {
+    bootTasks(3)
+  } with Log {
+    line(text) resumes k => {
+      println(`  log: ${text}`);
+      k()
+    }
+  };
+  println(`started ${started} tasks`);
+  println("halting");
+}

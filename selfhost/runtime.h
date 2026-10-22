@@ -11,9 +11,32 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+
+#ifdef FLY_FREESTANDING
+// A freestanding program — a kernel, firmware — has no C library. It supplies memory and what a
+// panic does; the runtime supplies the rest of what compiled code calls, each replaceable.
+void* fly_os_alloc(size_t size, size_t align);
+void fly_os_free(void* p);
+_Noreturn void fly_os_panic(const char* message, size_t len);
+void* memcpy(void* dst, const void* src, size_t n);
+void* memmove(void* dst, const void* src, size_t n);
+void* memset(void* dst, int c, size_t n);
+int memcmp(const void* a, const void* b, size_t n);
+size_t strlen(const char* s);
+// The C library's allocation, over the program's: each block remembers its size.
+void* fly_mem_alloc(size_t n);
+void* fly_mem_calloc(size_t n, size_t size);
+void* fly_mem_realloc(void* p, size_t n);
+void fly_mem_free(void* p);
+#define malloc fly_mem_alloc
+#define calloc fly_mem_calloc
+#define realloc fly_mem_realloc
+#define free fly_mem_free
+#else
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#endif
 
 typedef uint8_t fly_unit;
 
@@ -64,6 +87,8 @@ fly_String fly_String_from(fly_str s);
 void fly_String_push(fly_String* s, fly_str t);
 void fly_String_push_byte(fly_String* s, uint8_t b);
 void fly_String_drop(fly_String* s);
+// Room for `extra` more bytes, or false if there is no memory for it.
+bool fly_String_try_reserve(fly_String* s, size_t extra);
 fly_String fly_String_clone(const fly_String* s);
 bool fly_str_eq(fly_str a, fly_str b);
 int fly_str_cmp(fly_str a, fly_str b);
@@ -89,6 +114,8 @@ bool fly_parse_float(fly_str s, double* out);
 
 void* fly_vec_at(const fly_vec* v, size_t i, size_t size);
 void fly_vec_push(fly_vec* v, const void* elem, size_t size);
+// Room for `extra` more elements, or false if there is no memory for it.
+bool fly_vec_try_reserve(fly_vec* v, size_t extra, size_t size);
 bool fly_vec_pop(fly_vec* v, void* out, size_t size);
 void fly_vec_insert(fly_vec* v, size_t i, const void* elem, size_t size);
 void fly_vec_remove(fly_vec* v, size_t i, void* out, size_t size);
@@ -116,6 +143,8 @@ typedef struct {
 } fly_map;
 size_t fly_map_find(const fly_map* m, uint64_t h, const void* probe, bool (*eq)(const void* entry, const void* probe), size_t esize);
 void* fly_map_append(fly_map* m, uint64_t h, size_t esize);
+// Room for `extra` more entries, index included, or false if there is no memory for it.
+bool fly_map_try_reserve(fly_map* m, size_t extra, size_t esize);
 void fly_map_remove_at(fly_map* m, size_t i, void* out, size_t esize);
 void fly_map_free(fly_map* m);
 

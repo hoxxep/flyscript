@@ -568,7 +568,9 @@ impl Interp {
                 });
                 Ok(Value::Unit)
             }
-            "Box.new" | "Arc.new" | "Box.get" | "Arc.get" | "Box.into" => Ok(a(0).deref_once()),
+            "Box.new" | "Box.tryNew" | "Arc.new" | "Box.get" | "Arc.get" | "Box.into" => Ok(a(0).deref_once()),
+            // The interpreter's memory is its own: room is always there.
+            "String.tryReserve" | "Vec.tryReserve" | "HashMap.tryReserve" => Ok(Value::Unit),
             // The same shared value: through the borrow of the `Arc`, never into a cell it shares.
             "Arc.clone" => Ok(a(0).deref_once()),
             "HashMap.new" => Ok(Value::Map(Dict::default().into())),

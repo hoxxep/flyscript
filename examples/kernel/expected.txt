@@ -1,0 +1,11 @@
+Flyscript kernel, on QEMU virt
+page table: 2048 entries
+asked for too much: #OutOfMemory
+locked: 1
+unlocked: 0
+scratch: 42
+  log: task 0 started
+  log: task 1 started
+  log: task 2 started
+started 3 tasks
+halting

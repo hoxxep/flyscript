@@ -1,0 +1,29 @@
+// expect: reserved 3 then pushed 3
+// expect: a map of 2
+// expect: boxed 7
+// Room asked for ahead, as code that must not fail halfway does (§8.2).
+import { println } from "std/io";
+import { HashMap } from "std/collections";
+
+function fill(n: usize): Vec<u32> uses Fail<#OutOfMemory> {
+  let v: Vec<u32> = Vec.new();
+  v.tryReserve(n);
+  for (const i of 0..n) { v.push(i as u32); }
+  v
+}
+
+export function main(): void uses Io {
+  try {
+    const v = fill(3);
+    println(`reserved 3 then pushed ${v.len()}`);
+    let m = HashMap.new<String, u32>();
+    m.tryReserve(2);
+    m.insert("a".toString(), 1);
+    m.insert("b".toString(), 2);
+    println(`a map of ${m.len()}`);
+    let s = String.new();
+    s.tryReserve(8);
+    const b = Box.tryNew(7);
+    println(`boxed ${b.get()}`);
+  } catch (e) { println(`out of memory: ${e}`); }
+}

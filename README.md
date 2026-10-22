@@ -76,6 +76,7 @@ Next: one core IR under every back end, freestanding programs down to a kernel, 
 ## Explore
 
 - [The specification](docs/spec.md) — the five laws, the type system, effects, ownership, concurrency.
+- [A kernel](examples/kernel/) — Flyscript with no operating system under it, booting on QEMU: page tables, a UART driven through its registers, its own memory allocator, effect handlers on fibers.
 - [Example programs](examples/) — a JSON parser, derived JSON encoding and decoding, an inventory service, a web server, a key–value actor, a browser UI, generators, parallel physics.
 - [The roadmap](docs/roadmap.md) — what comes next, and why in that order.
 - [The self-hosted compiler](selfhost/) — a lexer, parser, type and effect checker, `comptime` interpreter, and JavaScript and C back ends, in Flyscript.

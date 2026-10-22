@@ -2,9 +2,11 @@
 
 #include "runtime.h"
 
-#include <math.h>
 #include <stdarg.h>
+#ifndef FLY_FREESTANDING
+#include <math.h>
 #include <sys/mman.h>
+#endif
 
 void* fly_err = NULL;
 
@@ -32,6 +34,48 @@ static _Noreturn void fiber_panic(const char* message);
 // A panic unwinds the fiber it happens on; one on the main stack ends the program (§5.7).
 _Noreturn void fly_panic(const char* message) { fiber_panic(message); }
 
+#ifdef FLY_FREESTANDING
+static _Noreturn void panic_exit(const char* message) { fly_os_panic(message, strlen(message)); }
+
+// What a panic's message needs: `%d`, `%u`, `%llu`, `%lld`, `%zu`, `%s`, `%.*s` and `%%`.
+static void format(char* out, size_t cap, const char* fmt, va_list ap) {
+  size_t n = 0;
+#define PUT(c) do { if (n + 1 < cap) out[n++] = (c); } while (0)
+  for (const char* f = fmt; *f; f++) {
+    if (*f != '%') { PUT(*f); continue; }
+    f++;
+    int prec = -1;
+    if (f[0] == '.' && f[1] == '*') { prec = va_arg(ap, int); f += 2; }
+    int longs = 0;
+    while (*f == 'l') { longs++; f++; }
+    bool size = *f == 'z';
+    if (size) f++;
+    if (*f == 's') {
+      const char* s = va_arg(ap, const char*);
+      for (int i = 0; s[i] && (prec < 0 || i < prec); i++) PUT(s[i]);
+    } else if (*f == 'd' || *f == 'u') {
+      unsigned long long u;
+      bool neg = false;
+      if (*f == 'd') {
+        long long v = longs ? va_arg(ap, long long) : va_arg(ap, int);
+        neg = v < 0;
+        u = neg ? (unsigned long long)(-(v + 1)) + 1 : (unsigned long long)v;
+      } else {
+        u = size ? va_arg(ap, size_t) : longs ? va_arg(ap, unsigned long long) : va_arg(ap, unsigned);
+      }
+      char digits[24];
+      int k = 0;
+      do { digits[k++] = (char)('0' + u % 10); u /= 10; } while (u > 0);
+      if (neg) PUT('-');
+      while (k > 0) PUT(digits[--k]);
+    } else if (*f == '%') {
+      PUT('%');
+    }
+  }
+#undef PUT
+  out[n] = 0;
+}
+#else
 static _Noreturn void panic_exit(const char* message) {
   fflush(stdout);
   printf("<panic: %s>\n", message);
@@ -39,11 +83,14 @@ static _Noreturn void panic_exit(const char* message) {
   exit(101);
 }
 
+static void format(char* out, size_t cap, const char* fmt, va_list ap) { vsnprintf(out, cap, fmt, ap); }
+#endif
+
 _Noreturn void fly_panicf(const char* fmt, ...) {
   char buf[512];
   va_list ap;
   va_start(ap, fmt);
-  vsnprintf(buf, sizeof buf, fmt, ap);
+  format(buf, sizeof buf, fmt, ap);
   va_end(ap);
   fly_panic(buf);
 }
@@ -125,6 +172,18 @@ static void reserve(fly_String* s, size_t extra) {
   s->cap = cap;
 }
 
+bool fly_String_try_reserve(fly_String* s, size_t extra) {
+  if (s->len + extra <= s->cap) return true;
+  if (extra > SIZE_MAX / 2 - s->len) return false;
+  size_t cap = s->cap ? s->cap : 16;
+  while (cap < s->len + extra) cap *= 2;
+  uint8_t* p = realloc(s->ptr, cap);
+  if (!p) return false;
+  s->ptr = p;
+  s->cap = cap;
+  return true;
+}
+
 fly_String fly_String_from(fly_str t) {
   fly_String s = fly_String_new();
   fly_String_push(&s, t);
@@ -185,6 +244,27 @@ fly_String fly_show_u128(unsigned __int128 v) {
 
 // As the reference prints a float: one decimal place when it is integral, else the shortest digits
 // that read back as it.
+#ifdef FLY_FREESTANDING
+// Without the C library: the integer part and up to six decimals.
+fly_String fly_show_f64(double v) {
+  fly_String s = fly_String_new();
+  if (v != v) { fly_String_push(&s, fly_str_lit("NaN", 3)); return s; }
+  if (v < 0) { fly_String_push_byte(&s, '-'); v = -v; }
+  if (v > 1e18) { fly_String_push(&s, fly_str_lit("inf", 3)); return s; }
+  uint64_t whole = (uint64_t)v;
+  fly_String w = fly_show_u128(whole);
+  fly_String_push(&s, fly_String_as_str(&w));
+  fly_String_drop(&w);
+  uint64_t frac = (uint64_t)((v - (double)whole) * 1e6 + 0.5);
+  fly_String_push_byte(&s, '.');
+  char d[6];
+  for (int k = 5; k >= 0; k--) { d[k] = (char)('0' + frac % 10); frac /= 10; }
+  int last = 5;
+  while (last > 0 && d[last] == '0') last--;
+  for (int k = 0; k <= last; k++) fly_String_push_byte(&s, (uint8_t)d[k]);
+  return s;
+}
+#else
 fly_String fly_show_f64(double v) {
   char buf[64];
   if (isnan(v)) snprintf(buf, sizeof buf, "NaN");
@@ -198,13 +278,16 @@ fly_String fly_show_f64(double v) {
   }
   return fly_String_from((fly_str){ (const uint8_t*)buf, strlen(buf) });
 }
+#endif
 
 fly_String fly_show_bool(bool v) { return fly_String_from(v ? fly_str_lit("true", 4) : fly_str_lit("false", 5)); }
 
+#ifndef FLY_FREESTANDING
 void fly_println(fly_str s) {
   fwrite(s.ptr, 1, s.len, stdout);
   fputc('\n', stdout);
 }
+#endif
 
 static bool space(uint8_t c) { return c == ' ' || c == '\t' || c == '\n' || c == '\r'; }
 
@@ -324,6 +407,36 @@ bool fly_parse_int(fly_str s, int64_t* out) {
   return true;
 }
 
+#ifdef FLY_FREESTANDING
+// Without the C library: digits, a point and digits, an exponent.
+bool fly_parse_float(fly_str s, double* out) {
+  fly_str t = fly_str_trim(s);
+  size_t i = 0;
+  if (t.len == 0) return false;
+  bool neg = t.ptr[0] == '-';
+  if (neg || t.ptr[0] == '+') i++;
+  double v = 0;
+  bool digits = false;
+  while (i < t.len && t.ptr[i] >= '0' && t.ptr[i] <= '9') { v = v * 10 + (t.ptr[i++] - '0'); digits = true; }
+  if (i < t.len && t.ptr[i] == '.') {
+    i++;
+    double scale = 0.1;
+    while (i < t.len && t.ptr[i] >= '0' && t.ptr[i] <= '9') { v += (t.ptr[i++] - '0') * scale; scale /= 10; digits = true; }
+  }
+  if (!digits) return false;
+  if (i < t.len && (t.ptr[i] == 'e' || t.ptr[i] == 'E')) {
+    i++;
+    bool eneg = i < t.len && t.ptr[i] == '-';
+    if (i < t.len && (t.ptr[i] == '-' || t.ptr[i] == '+')) i++;
+    int e = 0;
+    while (i < t.len && t.ptr[i] >= '0' && t.ptr[i] <= '9') e = e * 10 + (t.ptr[i++] - '0');
+    while (e-- > 0) v = eneg ? v / 10 : v * 10;
+  }
+  if (i != t.len) return false;
+  *out = neg ? -v : v;
+  return true;
+}
+#else
 // As JavaScript's `Number(s)` on text that is not blank.
 bool fly_parse_float(fly_str s, double* out) {
   fly_str t = fly_str_trim(s);
@@ -337,6 +450,7 @@ bool fly_parse_float(fly_str s, double* out) {
   *out = v;
   return true;
 }
+#endif
 
 // ---- lists ----
 
@@ -352,6 +466,19 @@ static void vreserve(fly_vec* v, size_t extra, size_t size) {
   v->ptr = realloc(v->ptr, cap * size);
   if (!v->ptr) fly_panic("out of memory");
   v->cap = cap;
+}
+
+bool fly_vec_try_reserve(fly_vec* v, size_t extra, size_t size) {
+  if (v->len + extra <= v->cap) return true;
+  size_t unit = size ? size : 1;
+  if (extra > SIZE_MAX / 2 / unit - v->len) return false;
+  size_t cap = v->cap ? v->cap : 4;
+  while (cap < v->len + extra) cap *= 2;
+  void* p = realloc(v->ptr, cap * unit);
+  if (!p) return false;
+  v->ptr = p;
+  v->cap = cap;
+  return true;
 }
 
 void fly_vec_push(fly_vec* v, const void* elem, size_t size) {
@@ -468,6 +595,38 @@ size_t fly_map_find(const fly_map* m, uint64_t h, const void* probe, bool (*eq)(
   return SIZE_MAX;
 }
 
+bool fly_map_try_reserve(fly_map* m, size_t extra, size_t esize) {
+  size_t want = m->len + extra;
+  if (extra > SIZE_MAX / 4 / (esize + sizeof(uint64_t) + 2 * sizeof(uint32_t)) - m->len) return false;
+  if (want > m->cap) {
+    size_t cap = m->cap ? m->cap : 8;
+    while (cap < want) cap *= 2;
+    uint8_t* e = realloc(m->entries, cap * esize);
+    if (!e) return false;
+    m->entries = e;
+    uint64_t* h = realloc(m->hashes, cap * sizeof(uint64_t));
+    if (!h) return false;
+    m->hashes = h;
+    m->cap = cap;
+  }
+  // The index is made big enough now, so inserting `extra` more never rebuilds it.
+  size_t n = 8;
+  while (n < want * 2) n *= 2;
+  if (n > m->nslots) {
+    uint32_t* slots = calloc(n, sizeof(uint32_t));
+    if (!slots) return false;
+    free(m->slots);
+    m->slots = slots;
+    m->nslots = n;
+    for (size_t i = 0; i < m->len; i++) {
+      size_t k = m->hashes[i] & (m->nslots - 1);
+      while (m->slots[k]) k = (k + 1) & (m->nslots - 1);
+      m->slots[k] = (uint32_t)(i + 1);
+    }
+  }
+  return true;
+}
+
 void* fly_map_append(fly_map* m, uint64_t h, size_t esize) {
   if (m->len == m->cap) {
     m->cap = m->cap ? m->cap * 2 : 8;
@@ -512,6 +671,15 @@ void fly_Hasher_writeInt(fly_Hasher* h, int64_t v) {
   for (int k = 0; k < 8; k++) b[k] = (uint8_t)((uint64_t)v >> (8 * k));
   hash_bytes(h, b, 8);
 }
+#ifdef FLY_FREESTANDING
+// Without the C library: by its bits, `-0.0` as `0.0`.
+void fly_Hasher_writeFloat(fly_Hasher* h, double v) {
+  if (v == 0) v = 0;
+  uint8_t b[8];
+  memcpy(b, &v, 8);
+  hash_bytes(h, b, 8);
+}
+#else
 // A float hashes as the reference shows it, so `-0.0` hashes as `0.0`.
 void fly_Hasher_writeFloat(fly_Hasher* h, double v) {
   char buf[64];
@@ -526,6 +694,7 @@ void fly_Hasher_writeFloat(fly_Hasher* h, double v) {
   }
   hash_bytes(h, (const uint8_t*)buf, strlen(buf));
 }
+#endif
 void fly_Hasher_writeBool(fly_Hasher* h, bool v) { uint8_t b = v; hash_bytes(h, &b, 1); }
 void fly_Hasher_writeStr(fly_Hasher* h, fly_str s) { hash_bytes(h, s.ptr, s.len); }
 uint64_t fly_Hasher_finish(const fly_Hasher* h) { return h->h; }
@@ -686,7 +855,7 @@ static _Noreturn void fiber_panic(const char* message) {
   current->panicked = true;
   current->done = true;
   switch_to(current->back);
-  abort();
+  __builtin_trap();
 }
 
 // After a fiber this code resumed has run: a panic it ended with goes on here.
@@ -694,14 +863,30 @@ static void panic_goes_on(void) {
   if (panicking) fiber_panic(panicking);
 }
 
+#ifdef FLY_FREESTANDING
+// Stacks come from the program's memory, whole.
+#define FLY_STACK (256u << 10)
+static void* stack_new(size_t size) {
+  void* p = fly_os_alloc(size, 16);
+  if (!p) fly_panic("out of memory");
+  return p;
+}
+static void stack_free(void* p, size_t size) { (void)size; fly_os_free(p); }
+#else
 // Stacks are reserved large and committed as they are touched.
 #define FLY_STACK (64u << 20)
+static void* stack_new(size_t size) {
+  void* p = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON | MAP_NORESERVE, -1, 0);
+  if (p == MAP_FAILED) fly_panic("out of memory");
+  return p;
+}
+static void stack_free(void* p, size_t size) { munmap(p, size); }
+#endif
 
 static fly_fiber* fiber_new(void (*entry)(void*), void* arg, fly_handler* handlers) {
   fly_fiber* f = fly_alloc(sizeof(fly_fiber));
   f->size = FLY_STACK;
-  f->stack = mmap(NULL, f->size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON | MAP_NORESERVE, -1, 0);
-  if (f->stack == MAP_FAILED) fly_panic("out of memory");
+  f->stack = stack_new(f->size);
   f->entry = entry;
   f->arg = arg;
   f->handlers = handlers;
@@ -715,7 +900,7 @@ static fly_fiber* fiber_new(void (*entry)(void*), void* arg, fly_handler* handle
 }
 
 static void fiber_free(fly_fiber* f) {
-  munmap(f->stack, f->size);
+  stack_free(f->stack, f->size);
   free(f);
 }
 
@@ -844,6 +1029,7 @@ fly_gen fly_generate(fly_fn producer, size_t size) {
   return (fly_gen){ g, generated_next, generated_drop };
 }
 
+#ifndef FLY_FREESTANDING
 // ---- the simulated world ----
 
 typedef struct { fly_str key, val; } world_pair;
@@ -1403,6 +1589,8 @@ fly_chan fly_sender_clone(const fly_chan* ch) {
   return *ch;
 }
 
+#endif
+
 // ---- regions ----
 
 // Its header is 32 bytes, so what follows it is aligned for anything.
@@ -1503,6 +1691,7 @@ bool fly_utf8_valid(fly_slice b) {
   return true;
 }
 
+#ifndef FLY_FREESTANDING
 // ---- files ----
 
 static char* cpath(fly_str path) {
@@ -1574,3 +1763,64 @@ fly_slice fly_arg_strings(int i) {
   for (int k = 0; k < n; k++) a[k] = fly_String_from(fly_arg_str(i + k));
   return (fly_slice){ a, (size_t)n };
 }
+#endif
+
+#ifdef FLY_FREESTANDING
+// ---- without the C library ----
+
+typedef struct { size_t size; size_t pad; } fly_block;
+
+void* fly_mem_alloc(size_t n) {
+  fly_block* b = fly_os_alloc(sizeof(fly_block) + n, 16);
+  if (!b) return NULL;
+  b->size = n;
+  return b + 1;
+}
+void* fly_mem_calloc(size_t n, size_t size) {
+  void* p = fly_mem_alloc(n * size);
+  if (p) memset(p, 0, n * size);
+  return p;
+}
+void* fly_mem_realloc(void* p, size_t n) {
+  if (!p) return fly_mem_alloc(n);
+  fly_block* b = (fly_block*)p - 1;
+  if (n <= b->size) return p;
+  void* q = fly_mem_alloc(n);
+  if (!q) return NULL;
+  memcpy(q, p, b->size);
+  fly_mem_free(p);
+  return q;
+}
+void fly_mem_free(void* p) { if (p) fly_os_free((fly_block*)p - 1); }
+
+// What compiled code calls of the C library's: weak, so a program may give its own.
+__attribute__((weak)) void* memcpy(void* dst, const void* src, size_t n) {
+  uint8_t* d = dst;
+  const uint8_t* s = src;
+  while (n--) *d++ = *s++;
+  return dst;
+}
+__attribute__((weak)) void* memmove(void* dst, const void* src, size_t n) {
+  uint8_t* d = dst;
+  const uint8_t* s = src;
+  if (d < s) while (n--) *d++ = *s++;
+  else { d += n; s += n; while (n--) *--d = *--s; }
+  return dst;
+}
+__attribute__((weak)) void* memset(void* dst, int c, size_t n) {
+  uint8_t* d = dst;
+  while (n--) *d++ = (uint8_t)c;
+  return dst;
+}
+__attribute__((weak)) int memcmp(const void* a, const void* b, size_t n) {
+  const uint8_t* x = a;
+  const uint8_t* y = b;
+  for (; n; n--, x++, y++) if (*x != *y) return *x < *y ? -1 : 1;
+  return 0;
+}
+__attribute__((weak)) size_t strlen(const char* s) {
+  size_t n = 0;
+  while (s[n]) n++;
+  return n;
+}
+#endif

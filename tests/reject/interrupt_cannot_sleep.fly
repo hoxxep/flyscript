@@ -1,0 +1,8 @@
+// error: effect `Sleep` is not declared by the enclosing function
+// Code an interrupt runs is a function C calls, which performs nothing: what may sleep cannot be
+// called from it (§8.2).
+effect Sleep { until(tick: u64): void; }
+
+function waitFor(tick: u64): void uses Sleep { Sleep.until(tick); }
+
+export extern "C" function onTimer(): void { waitFor(1); }

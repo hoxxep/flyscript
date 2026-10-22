@@ -193,3 +193,17 @@ fn native_programs_run_as_expected() {
     let failed: Vec<&str> = report.lines().filter_map(|l| l.strip_prefix("FAIL ")).collect();
     assert!(failed.is_empty(), "failed natively:\n{}", failed.join("\n"));
 }
+
+/// The kernel in examples/kernel boots on QEMU's AArch64 `virt` board, runs to its end and prints
+/// what it is expected to, where clang, ld.lld and QEMU are there to build and run it.
+#[test]
+fn kernel_runs_on_qemu() {
+    let have = |tool: &str| Command::new(tool).arg("--version").output().is_ok_and(|o| o.status.success());
+    if !has_node() || !have("clang") || !have("ld.lld") || !have("qemu-system-aarch64") {
+        return;
+    }
+    let r = Command::new("sh").arg(root().join("examples/kernel/run.sh")).arg(root().join("selfhost/seed.js")).output().unwrap();
+    let want = std::fs::read_to_string(root().join("examples/kernel/expected.txt")).unwrap();
+    assert!(r.status.success(), "the kernel did not exit cleanly:\n{}{}", String::from_utf8_lossy(&r.stdout), String::from_utf8_lossy(&r.stderr));
+    assert_eq!(String::from_utf8_lossy(&r.stdout), want);
+}

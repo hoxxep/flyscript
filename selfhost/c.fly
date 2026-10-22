@@ -1434,6 +1434,9 @@ impl Cgen {
     `void* q_ = (void*)${probe}; size_t i_ = fly_map_find(m_, ${h}(q_), q_, ${eq}, sizeof(${ec})); `
   }
 
+  // A statement raising `#OutOfMemory`.
+  function outOfMemory(self: mut Self): String { `{ fly_err_box(${self.tagId("OutOfMemory")}, NULL, 0); } ` }
+
   // Statements raising the `IoErr` with tag `name`, which has no payload.
   function ioErr(self: mut Self, name: str): String {
     `fly_err_box(${self.tagId(name)}, NULL, 0); `
@@ -1531,7 +1534,23 @@ impl Cgen {
         const ec = self.ctype(stripBorrow(c.argTys[0]), span);
         `({ ${ec} x_ = ${arg(0)}; (${ec}*)fly_box(&x_, sizeof(${ec})); })`
       }
-      "Box_get" => arg(0),
+      // A box lends what it holds: the box itself where the borrow is a pointer, else its value.
+      "Box_get" => if (self.pointerBorrow(rt)) { arg(0) } else { `(*${arg(0)})` },
+      "Box_tryNew" => {
+        const t = stripBorrow(c.argTys[0]);
+        const ec = self.ctype(t, span);
+        const d = if (self.needsDrop(t)) { `${self.dropFn(t, span)}(&x_); ` } else { "" };
+        `({ ${ec} x_ = ${arg(0)}; ${ec}* p_ = malloc(sizeof(${ec})); if (p_) *p_ = x_; else { ${d}${self.outOfMemory()}} p_; })`
+      }
+      "String_tryReserve" => `({ if (!fly_String_try_reserve(${arg(0)}, ${arg(1)})) ${self.outOfMemory()}(fly_unit)0; })`,
+      "Vec_tryReserve" => {
+        const ec = self.ctype(elem, span);
+        `({ if (!fly_vec_try_reserve(${arg(0)}, ${arg(1)}, sizeof(${ec}))) ${self.outOfMemory()}(fly_unit)0; })`
+      }
+      "HashMap_tryReserve" => {
+        const ec = self.ctype(entryTy(recv), span);
+        `({ if (!fly_map_try_reserve(${arg(0)}, ${arg(1)}, sizeof(${ec}))) ${self.outOfMemory()}(fly_unit)0; })`
+      }
       _ => {
         if (const #Some(r) = self.regionLib(key, c, vs.clone(), arenas)) { return r; }
         match (self.library(key, c, vs.clone())) {
@@ -2777,7 +2796,11 @@ impl Cgen {
     const name = self.lw.p.fns[fid].name.clone();
     const params = if (decls.len() == 0) { "void".toString() } else { decls.join(", ") };
     const call = `${self.lw.insts[i].name}(${names.join(", ")})`;
-    if (isVoidTy(ret)) { `void ${name}(${params}) { ${call}; }\n` } else { `${self.ctype(ret, { start: 0, end: 0 })} ${name}(${params}) { return ${call}; }\n` }
+    // Declared under a name of the program's bound to the symbol, so a C declaration of the same
+    // symbol with types C spells differently does not conflict.
+    const rt = if (isVoidTy(ret)) { "void".toString() } else { self.ctype(ret, { start: 0, end: 0 }) };
+    const body = if (isVoidTy(ret)) { `{ ${call}; }` } else { `{ return ${call}; }` };
+    `${rt} fly_export_${name}(${params}) FLY_SYMBOL(${name});\n${rt} fly_export_${name}(${params}) ${body}\n`
   }
 
   function primOf(self: readonly Self, t: readonly Ty): str {

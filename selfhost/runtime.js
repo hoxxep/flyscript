@@ -644,7 +644,9 @@ const { $rt, $b } = (() => {
     Vec_iterMut: (r) => $b.slice_iterMut(r),
     *Vec_each(a) { for (const x of a) yield new Yielded(x); },
 
-    Box_new: (v) => v, Box_get: (v) => v, Box_into: (v) => v,
+    Box_new: (v) => v, Box_get: (v) => v, Box_into: (v) => v, Box_tryNew: (v) => v,
+    // Memory is the garbage collector's: room is always there.
+    String_tryReserve() {}, Vec_tryReserve() {}, HashMap_tryReserve() {},
     Arc_new: (v) => v, Arc_get: (v) => v, Arc_clone: (v) => v,
     Ref_get: (v) => v, Ref_clone: (v) => v,
 
