@@ -1,11 +1,12 @@
 // The compiler's driver: `main(entry, out, root)` checks the program whose entry module is `entry`
-// and compiles it to one JavaScript file `out`, which starts with the runtime and ends by calling
-// the entry's `main` with the command line. `root` is the directory that holds `std/` and
-// `selfhost/runtime.js`.
+// — types and effects, then ownership — and compiles it to one JavaScript file `out`, which starts
+// with the runtime and ends by calling the entry's `main` with the command line. `root` is the
+// directory that holds `std/` and `selfhost/runtime.js`.
 
 import { Diagnostic, render } from "./diag";
 import { Program } from "./env";
 import { checkFn } from "./check";
+import { checkOwnership } from "./own";
 import { program } from "./js";
 import { File, println, writeFile } from "std/io";
 
@@ -32,6 +33,10 @@ function compile(entry: str, out: str, root: str): void uses Io, Fail<Stop> {
       checkFn(mut p, fid);
       fid += 1;
     }
+  }
+  // Ownership needs well-typed bodies.
+  if (p.diags.len() == 0) {
+    for (const f of 0..p.fns.len()) { checkOwnership(mut p, f); }
   }
   if (p.diags.len() > 0) {
     report(p);

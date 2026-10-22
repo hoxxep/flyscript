@@ -1076,6 +1076,12 @@ impl<'p> Own<'p> {
                     let sv = self.contained(|o| o.expr(scrutinee, if m { Use::Mut } else { Use::Read }));
                     return self.match_arms(arms, sv, how);
                 }
+                // A borrow matched is lent on, `mut` only if an arm changes what it binds.
+                if let Ty::Borrow(m, _) = self.ty_of(scrutinee) {
+                    let m = m && arms.iter().any(|a| self.arm_changes(a));
+                    let sv = self.contained(|o| o.expr(scrutinee, if m { Use::Mut } else { Use::Read }));
+                    return self.match_arms(arms, sv, how);
+                }
                 // A place matched is moved only by the arms that move an owned part they bind; the
                 // others borrow it, and it may still be used after them (§4.1).
                 let place = self.place(scrutinee).filter(|_| !self.behind_reference(scrutinee));
@@ -1400,6 +1406,9 @@ impl<'p> Own<'p> {
         let yields = std::mem::replace(&mut self.iterating, false) && matches!(ret, Ty::Prim(Prim::Void));
         let mut arg_vals: Vec<(Option<String>, Val)> = Vec::new();
         let mut receiver_loan: Option<(LoanId, Path, Span)> = None;
+        // The borrows of argument places this call takes, which its result holds only if its
+        // declared type can hold a borrow itself (§4.2).
+        let mut lent_here: BTreeSet<LoanId> = BTreeSet::new();
         self.temps.push(BTreeSet::new());
         let has_self = params.first().is_some_and(|(n, _)| n == "self");
         // The receiver of a method call, borrowed in two phases (§4.1).
@@ -1410,7 +1419,11 @@ impl<'p> Own<'p> {
                 self.record_capture(path.root, want, target.span);
             }
             let first = if want == Use::Mut { Use::Read } else { want };
+            let before = self.loans.len();
             let v = self.expr(target, first);
+            if let Some(path) = self.place(target) {
+                lent_here.extend((before..self.loans.len()).filter(|l| self.loans[*l].path == path));
+            }
             if want == Use::Mut
                 && let Some(path) = self.place(target) {
                     // The receiver's own fresh loan, not an external one it already held.
@@ -1490,10 +1503,20 @@ impl<'p> Own<'p> {
                     let v = self.expr(target, Use::Read);
                     if let Some(l) = (first..self.loans.len()).rev().find(|l| self.loans[*l].path == *path) {
                         mut_args.push((l, path.clone(), target.clone()));
+                        lent_here.insert(l);
                     }
                     v
                 }
-                None => self.expr(a, how),
+                None => {
+                    let before = self.loans.len();
+                    let v = self.expr(a, how);
+                    if how == Use::Read
+                        && let Some(path) = self.place(target)
+                    {
+                        lent_here.extend((before..self.loans.len()).filter(|l| self.loans[*l].path == path));
+                    }
+                    v
+                }
             };
             // A value that cannot hold a borrow holds none: `self.emit(self.dicts[j])` copies
             // the index out, and nothing of `self.dicts` stays lent across the call (§4.2).
@@ -1538,21 +1561,32 @@ impl<'p> Own<'p> {
         }
         self.task_captures(fid, args);
         self.temps.pop();
-        // The result carries its sources' borrows unless it cannot hold one (§4.2).
+        // The result carries its sources' borrows unless it cannot hold one (§4.2). A result that
+        // can hold a borrow only through a type argument holds what its arguments held, never a
+        // borrow of an argument's place: generic code cannot make one into a `T`.
         let mut loans = BTreeSet::new();
         if yields || self.may_hold(&ret) {
             let sources = scheme.as_ref().map(|s| result_sources(self.p, s));
+            // A generator's items are what it gives, whatever its result's type.
+            let declared = yields || scheme.as_ref().is_none_or(|s| self.declared_holds(s));
             for (name, v) in &arg_vals {
                 let is_source = match (&sources, name) {
                     (Some(srcs), Some(n)) => srcs.contains(n),
                     _ => true,
                 };
                 if is_source {
-                    loans.extend(v.loans.iter().copied());
+                    loans.extend(v.loans.iter().copied().filter(|l| declared || !lent_here.contains(l)));
                 }
             }
         }
         Val { loans }
+    }
+
+    /// Whether a function's declared result can hold a borrow other than through its type
+    /// parameters.
+    fn declared_holds(&self, s: &super::env::Scheme) -> bool {
+        let params: Vec<u32> = s.tparams.iter().map(|g| g.sym.id).collect();
+        self.p.class(&s.ret) == 2 || hides_borrows(&s.ret, self.p, &params)
     }
 
     /// A task may capture only `Send` values, moved in, or `readonly` borrows of them (§6.1).
@@ -1789,7 +1823,9 @@ impl<'p> Own<'p> {
             let loan = self.loans[*l].clone();
             let root = loan.path.root;
             let given = if in_lambda { self.lambda_params.contains(&root) } else { self.vars[root].param };
-            if loan.external || given && self.through_reference(&loan) {
+            // A loan taken through a reference borrows what that refers to, whose own loans the
+            // value carries too: they are what decides.
+            if loan.external || self.through_reference(&loan) {
                 continue;
             }
             let name = self.vars[root].name.clone();
@@ -1838,6 +1874,10 @@ impl<'p> Own<'p> {
             let root = loan.path.root;
             let name = self.vars[root].name.clone();
             if self.vars[root].param && self.sources.contains(&name) && (loan.external || self.through_reference(&loan)) {
+                continue;
+            }
+            // Through a local reference, the reference's own loans decide.
+            if !self.vars[root].param && !loan.external && self.through_reference(&loan) {
                 continue;
             }
             let msg = if self.vars[root].param && self.sources.contains(&name) {

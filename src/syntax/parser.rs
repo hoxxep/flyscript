@@ -1694,7 +1694,8 @@ impl<'a> Parser<'a> {
             } else if reserved {
                 return Err(Diagnostic::new(name.span, format!("`{}` is a reserved word: bind the field to a name, `{}: x`", name.name, name.name)));
             } else {
-                None
+                // `{ x }` binds `x`: a pattern of its own, as later passes record what bindings are.
+                Some(Pattern { kind: PatternKind::Bind(name.name.clone()), span: name.span })
             };
             fields.push((name, pat));
             if !self.eat(",") {

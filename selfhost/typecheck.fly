@@ -1,8 +1,10 @@
-// Type- and effect-checks a program, printing its diagnostics in the form `flyc types` prints the
-// Rust prototype's: `main(entry, std)`.
+// Checks a program as `flyc check` does — types and effects, then, if they are sound, ownership —
+// printing its diagnostics in the form the tests compare with the Rust prototype's:
+// `main(entry, std)`.
 
 import { Program } from "./env";
 import { checkFn } from "./check";
+import { checkOwnership } from "./own";
 import { println } from "std/io";
 
 export function main(entry: str, std: str): void uses Io {
@@ -11,6 +13,10 @@ export function main(entry: str, std: str): void uses Io {
   while (fid < p.fns.len()) {
     checkFn(mut p, fid);
     fid += 1;
+  }
+  // Ownership needs well-typed bodies.
+  if (p.diags.len() == 0) {
+    for (const f of 0..p.fns.len()) { checkOwnership(mut p, f); }
   }
   for (const [m, d] of p.diags) {
     const #Diagnostic { span, message } = d;

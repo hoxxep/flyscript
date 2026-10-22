@@ -1,0 +1,2390 @@
+// The ownership pass: moves, borrows, mutability, class and task captures.
+//
+// Runs after type checking, over each function body, using the types the checker recorded.
+// Every value carries the set of loans (borrows) it holds; a loan stays live while any binding
+// holding it may still be used, and every access to a place is checked against the live loans
+// that conflict with it (§4.1). Liveness uses the program's structure: a later use is reachable
+// from a point unless they are in different arms of the same branch, and a loop makes every use
+// of a binding declared outside it reachable (its back edge).
+
+import { Span, lineCol } from "./diag";
+import { Ident, Block, Stmt, Expr, ExprKind, FieldInit, TagArgs, TemplatePiece, MatchArm, HandlerArm, Pattern, PatternKind, TagPatArgs, Param } from "./ast";
+import { Program, Scheme, GParam, Typed, DefKind, emptyTyped, substParams } from "./env";
+import { Prim, FnMode, GArg, Ty, labelGet } from "./types";
+import { Binds } from "./impls";
+import { argTypes } from "./traits";
+import { HashMap, HashSet } from "std/collections";
+
+// An expression id no table records: what `comptime` expansion and the parser never hand out.
+const NO_ID: usize = 1 << 62;
+
+enum Use { #Move, #Read, #Mut }
+impl Clone for Use;
+impl Eq for Use;
+
+// What a closure is for, where that changes how it captures (§6.1).
+enum Role { #Plain, #ScopeBody, #Task }
+impl Clone for Role;
+impl Eq for Role;
+
+enum Node { #Seq, #Branch, #Loop }
+impl Clone for Node;
+impl Eq for Node;
+
+// A position in the program's structure: the chain of enclosing constructs, each with the index
+// of the child taken.
+type Chain = Vec<[u32, Node, u32]>;
+
+struct Var {
+  name: String;
+  ty: Ty;
+  mutable: bool;
+  // Where it was declared, for the loop rule.
+  chain: Chain;
+  param: bool;
+}
+impl Clone for Var;
+
+struct Path { root: usize; fields: Vec<String> }
+impl Clone for Path;
+impl Eq for Path;
+
+impl Path {
+  function overlaps(self: readonly Self, other: readonly Path): bool {
+    if (self.root != other.root) { return false; }
+    const n = min(self.fields.len(), other.fields.len());
+    for (const i of 0..n) { if (self.fields[i] != other.fields[i]) { return false; } }
+    true
+  }
+}
+
+// In the order a set of paths keeps them: by root, then by fields.
+function pathBefore(a: readonly Path, b: readonly Path): bool {
+  if (a.root != b.root) { return a.root < b.root; }
+  const n = min(a.fields.len(), b.fields.len());
+  for (const i of 0..n) {
+    if (a.fields[i] != b.fields[i]) { return a.fields[i].asStr().cmp(b.fields[i].asStr()) == #Less; }
+  }
+  a.fields.len() < b.fields.len()
+}
+
+struct Loan {
+  path: Path;
+  mutable: bool;
+  span: Span;
+  // A borrow-typed parameter's own loan from the caller: it flows with the parameter's value
+  // (for the return check) but never conflicts inside the function.
+  external: bool;
+}
+impl Clone for Loan;
+
+// Sets of loans are kept sorted: the order they are searched in decides which loan a diagnostic
+// names, as in the reference implementation.
+function addLoan(s: mut Vec<usize>, l: usize): void {
+  let i = s.len();
+  while (i > 0 && s[i - 1] > l) { i -= 1; }
+  if (i > 0 && s[i - 1] == l) { return; }
+  s.insert(i, l);
+}
+
+function addLoans(s: mut Vec<usize>, ls: readonly Vec<usize>): void {
+  for (const l of ls) { addLoan(mut s, l); }
+}
+
+function hasLoan(s: readonly Vec<usize>, l: usize): bool { s.iter().some((x) => x == l) }
+
+function unionLoans(a: readonly Vec<usize>, b: readonly Vec<usize>): Vec<usize> {
+  let out = a.clone();
+  addLoans(mut out, b);
+  out
+}
+
+// Flow-sensitive state: which places are moved, and which loans each binding holds.
+struct State { moved: Vec<Path>; holds: HashMap<usize, Vec<usize>> }
+impl Clone for State;
+
+impl State {
+  function join(self: mut Self, other: readonly State): void {
+    for (const m of other.moved) { addMoved(mut self.moved, m.clone()); }
+    for (const [v, ls] of other.holds.entries()) {
+      match (self.holds.getMut(v)) {
+        #Some(mine) => addLoans(mut mine, ls),
+        #None => { self.holds.insert(v, ls.clone()); }
+      }
+    }
+  }
+}
+
+function addMoved(s: mut Vec<Path>, p: Path): void {
+  let i = s.len();
+  while (i > 0 && pathBefore(p, s[i - 1])) { i -= 1; }
+  if (i > 0 && s[i - 1] == p) { return; }
+  s.insert(i, p);
+}
+
+function emptyState(): State { State { moved: Vec.new(), holds: HashMap.new() } }
+
+// Where several paths meet: the first sets the state, each other joins it.
+function joinInto(joined: mut Option<State>, s: readonly State): void {
+  match (joined) {
+    #Some(j) => j.join(s),
+    #None => { joined = #Some(s.clone()); }
+  }
+}
+
+// A closure being checked: the bindings it captures from outside, and the strongest use its body
+// makes of each.
+type Frame = { outer: HashSet<usize>; captures: HashMap<usize, [Use, Span]> };
+
+export view struct Own {
+  p: mut Program;
+  module: usize;
+  typed: Typed;
+  vars: Vec<Var>;
+  scopes: Vec<HashMap<String, usize>>;
+  // Pass 1's record of each binding's uses, by the position in source order they occur.
+  useSites: HashMap<usize, Vec<[usize, Chain]>>;
+  // Which binding each identifier refers to, by its span (filled in pass 1).
+  resolved: HashMap<Span, usize>;
+  loans: Vec<Loan>;
+  state: State;
+  chain: Chain;
+  nextNode: u32;
+  // Loans held by values being evaluated (arguments in flight, the iterated generator).
+  temps: Vec<Vec<usize>>;
+  // Loans held by `defer`s, live to the end of their block (§5.6).
+  deferred: Vec<Vec<usize>>;
+  reported: HashSet<String>;
+  // Closures being checked, innermost last.
+  lambdas: Vec<Frame>;
+  // Set while evaluating a value that escapes (returned, or stored in a first-class value): a
+  // closure there captures by move (§4.3).
+  escaping: bool;
+  // For each continuation binding, the outer bindings its handler's body and arms use, and
+  // whether any of them changes each: calling it re-enters them (§5.3).
+  resumes: HashMap<usize, Vec<[usize, bool]>>;
+  // For each continuation binding, its arm's parameters that may hold a borrow, with the loan
+  // each holds on itself (§5.3).
+  contArgs: HashMap<usize, Vec<[usize, usize]>>;
+  // Parameters of arms that do not resume and may hold a borrow, with their operation.
+  deadArgs: HashMap<usize, String>;
+  // Arm parameters that may hold a borrow, with their operation, for diagnostics.
+  lentArgs: HashMap<usize, String>;
+  // Closures' parameters: what a closure yields may borrow them.
+  lambdaParams: HashSet<usize>;
+  // Set while a `for…of` evaluates a generator call it iterates (§5.5).
+  iterating: bool;
+  // The role of the closure about to be checked, and of each being checked, innermost last.
+  nextRole: Role;
+  roles: Vec<Role>;
+  // Bindings a task moved in only because they are declared inside its scope, with where.
+  taskMoved: HashMap<usize, Span>;
+  // What the bindings of the block being ended held.
+  dyingHolds: HashMap<usize, Vec<usize>>;
+  // The `handle`s whose bodies are being checked, innermost last: the effect each handles, and
+  // the loans live across any point where the body may perform it (§5.3).
+  handling: Vec<[usize, Vec<usize>]>;
+  // Variable ids by declaration site and name, so they are the same in both passes and in every
+  // traversal of a loop body; and by site alone.
+  sites: HashMap<String, usize>;
+  bySite: HashMap<usize, usize>;
+  retTy: Ty;
+  // The parameters this function's result may borrow from (§4.2).
+  sources: Vec<String>;
+  // Type parameters declared `extends Send`, by symbol id.
+  sendParams: Vec<u32>;
+  collecting: bool;
+  // Each closure's mode, by its span, with the capture that decided it; and the mode of bindings
+  // initialized with a closure.
+  closureModes: HashMap<Span, [FnMode, String]>;
+  varModes: HashMap<usize, [FnMode, String]>;
+  moves: HashMap<Span, Vec<String>>;
+  capturedMoves: HashMap<Span, Vec<[String, Ty]>>;
+  // The bindings a `match` arm on an owned place makes, with the arm's pattern; and the arms that
+  // move one, found in pass 1. Only those take the place (§4.1).
+  armBinds: HashMap<usize, Span>;
+  armMoves: HashSet<Span>;
+  // Set while binding the pattern of an arm that borrows what it binds.
+  lending: bool;
+}
+
+// Checks ownership in the body of `fid`, and records its moves for code generation (§4.1, §5.6).
+export function checkOwnership(p: mut Program, fid: usize): void {
+  const fdecl = match (p.fnDecl(fid)) { #Some(d) => d, #None => return };
+  const body = match (fdecl.body) { #Some(b) => b.clone(), #None => return };
+  // Taken out of the program while the pass reads it, and put back with what it found.
+  const typed: Typed = match (p.typed.remove(fid)) { #Some(t) => t, #None => return };
+  p.note = match (p.specNotes.get(fid)) { #Some(n) => #Some(n.clone()), #None => #None };
+  const module = p.fns[fid].module;
+  const retTy = p.fns[fid].scheme.ret.clone();
+  const sources = resultSources(p, p.fns[fid].scheme);
+  const sendParams = sendParamsOf(p, p.fns[fid].scheme.tparams);
+  let o = Own {
+    p, module, typed, vars: Vec.new(), scopes: [HashMap.new()], useSites: HashMap.new(), resolved: HashMap.new(),
+    loans: Vec.new(), state: emptyState(), chain: Vec.new(), nextNode: 0, temps: Vec.new(), deferred: Vec.new(),
+    reported: HashSet.new(), lambdas: Vec.new(), escaping: false, resumes: HashMap.new(), contArgs: HashMap.new(),
+    deadArgs: HashMap.new(), lentArgs: HashMap.new(), lambdaParams: HashSet.new(), iterating: false,
+    nextRole: #Plain, roles: Vec.new(), taskMoved: HashMap.new(), dyingHolds: HashMap.new(), handling: Vec.new(),
+    sites: HashMap.new(), bySite: HashMap.new(), retTy, sources, sendParams, collecting: true,
+    closureModes: HashMap.new(), varModes: HashMap.new(), moves: HashMap.new(), capturedMoves: HashMap.new(),
+    armBinds: HashMap.new(), armMoves: HashSet.new(), lending: false,
+  };
+  // Pass 1 collects every use of every binding, with its position; pass 2 checks.
+  for (const pass of 0..2) {
+    o.collecting = pass == 0;
+    o.scopes = [HashMap.new()];
+    o.state = emptyState();
+    o.loans = Vec.new();
+    o.chain = Vec.new();
+    o.nextNode = 0;
+    o.temps = Vec.new();
+    o.deferred = Vec.new();
+    const params = o.typed.params.clone();
+    for (const [i, [name, ty]] of params.iter().enumerate()) {
+      const id = o.declareVar(name.asStr(), ty.clone(), true, true, PARAM_SITES - i);
+      // A parameter whose type can hide a borrow carries one too, so a `from` that leaves it out
+      // is checked against what the body returns (§4.2).
+      if (o.p.class(ty) == 2 || hidesBorrows(ty, o.p, o.sendParams)) {
+        o.loans.push(Loan { path: Path { root: id, fields: Vec.new() }, mutable: false, span: body.span, external: true });
+        const l = o.loans.len() - 1;
+        o.state.holds.insert(id, [l]);
+      }
+    }
+    o.escaping = true;
+    // A result that is a borrow lends what the body ends with, as an argument would (§4.2).
+    const how = o.resultUse();
+    const v = o.block(body, how);
+    o.escaping = false;
+    if (!o.collecting) {
+      const at = match (body.tail) { #Some(e) => e.span, #None => body.span };
+      o.checkReturn(v, at);
+      if (const #Some(t) = body.tail) {
+        const ret = o.retTy.clone();
+        o.checkMode(t, ret, "returned");
+      }
+    }
+  }
+  o.p.note = #None;
+  let typed = replace(mut o.typed, emptyTyped());
+  typed.moves = replace(mut o.moves, HashMap.new());
+  typed.capturedMoves = replace(mut o.capturedMoves, HashMap.new());
+  o.p.typed.insert(fid, typed);
+}
+
+// Parameters' declaration sites: above any position in a source, counting down.
+const PARAM_SITES: usize = 1 << 61;
+
+impl Own {
+  function err(self: mut Self, span: Span, msg: str): void {
+    if (self.collecting) { return; }
+    const key = `${span.start}:${span.end}:${msg}`;
+    if (self.reported.insert(key)) {
+      const m = self.module;
+      self.p.error(m, span, msg);
+    }
+  }
+
+  function tyOf(self: readonly Self, e: readonly Expr): Ty {
+    match (self.typed.exprs.get(e.id)) { #Some(t) => t.clone(), #None => #Error }
+  }
+
+  function bindingTy(self: readonly Self, id: usize): Ty {
+    match (self.typed.bindings.get(id)) { #Some(t) => t.clone(), #None => #Error }
+  }
+
+  function nameTy(self: readonly Self, at: usize): Ty {
+    match (self.typed.names.get(at)) { #Some(t) => t.clone(), #None => #Error }
+  }
+
+  function show(self: readonly Self, t: readonly Ty): String { self.p.show(t) }
+
+  function lineColOf(self: readonly Self, pos: usize): [usize, usize] {
+    lineCol(self.p.modules[self.module].source.asStr(), pos)
+  }
+
+  // ---- structure and liveness ----
+
+  function enter(self: mut Self, kind: Node, child: u32): u32 {
+    self.nextNode += 1;
+    const id = self.nextNode;
+    self.chain.push([id, kind, child]);
+    id
+  }
+
+  function leave(self: mut Self): void { self.chain.pop(); }
+
+  function setChild(self: mut Self, child: u32): void {
+    const n = self.chain.len();
+    if (n > 0) { self.chain[n - 1][2] = child; }
+  }
+
+  function declareVar(self: mut Self, name: str, ty: Ty, mutable: bool, param: bool, site: usize): usize {
+    const v = Var { name: name.toString(), ty, mutable, chain: self.chain.clone(), param };
+    const key = `${site}:${name}`;
+    const id: usize = match (self.sites.get(key.asStr())) {
+      #Some(i) => {
+        self.vars[i] = v;
+        i
+      }
+      #None => {
+        self.vars.push(v);
+        const i = self.vars.len() - 1;
+        self.sites.insert(key, i);
+        i
+      }
+    };
+    self.bySite.insert(site, id);
+    const top = self.scopes.len() - 1;
+    self.scopes[top].insert(name.toString(), id);
+    self.state.holds.remove(id);
+    self.state.moved.retain((p) => p.root != id);
+    id
+  }
+
+  function lookup(self: readonly Self, name: str): Option<usize> {
+    let i = self.scopes.len();
+    while (i > 0) {
+      i -= 1;
+      if (const #Some(v) = self.scopes[i].get(name)) { return #Some(v); }
+    }
+    #None
+  }
+
+  function recordUse(self: mut Self, v: usize, at: Span): void {
+    if (self.collecting) {
+      const c = self.chain.clone();
+      match (self.useSites.getMut(v)) {
+        #Some(list) => list.push([at.start, c]),
+        #None => { self.useSites.insert(v, [[at.start, c]]); }
+      }
+      self.resolved.insert(at, v);
+    }
+  }
+
+  // Whether a use at `(upos, uchain)` can happen after the point `(pos, chain)`.
+  function reachable(self: readonly Self, v: readonly Var, pos: usize, chain: readonly Chain, upos: usize, uchain: readonly Chain): bool {
+    // A loop enclosing both, which does not enclose the binding's declaration, can carry the
+    // binding round to an earlier use.
+    let common: usize = 0;
+    while (common < chain.len() && common < uchain.len() && chain[common][0] == uchain[common][0]) { common += 1; }
+    for (const i of 0..common) {
+      const id = chain[i][0];
+      if (chain[i][1] == #Loop && !v.chain.iter().some((d) => d[0] == id)) { return true; }
+    }
+    if (upos <= pos) { return false; }
+    // Different arms of one branch are never both executed.
+    if (common < chain.len() && common < uchain.len()) {
+      const a = chain[common].clone();
+      const b = uchain[common].clone();
+      if (a[0] == b[0] && a[1] == #Branch && a[2] != b[2]) { return false; }
+    }
+    true
+  }
+
+  // Whether binding `v` may be used after the current point (pass 1's uses).
+  function liveAfter(self: readonly Self, v: usize, pos: usize): bool {
+    match (self.useSites.get(v)) {
+      #Some(list) => list.iter().some(([upos, uchain]) => self.reachable(self.vars[v], pos, self.chain, upos, uchain)),
+      #None => false,
+    }
+  }
+
+  // The loans live at `pos`: held by values in flight, by `defer`s, or by a binding that may
+  // still be used.
+  function liveLoans(self: readonly Self, pos: usize, except: readonly Vec<usize>): Vec<usize> {
+    let live: Vec<usize> = Vec.new();
+    for (const t of self.temps) { addLoans(mut live, t); }
+    for (const d of self.deferred) { addLoans(mut live, d); }
+    for (const [v, ls] of self.state.holds.entries()) {
+      if (self.liveAfter(v, pos)) { addLoans(mut live, ls); }
+    }
+    live.retain((l) => !hasLoan(except, l));
+    live
+  }
+
+  // Checks an access to `path` (a write if `write`, else a read) against the live loans.
+  function access(self: mut Self, path: readonly Path, write: bool, at: Span, except: readonly Vec<usize>): void {
+    self.accessFrom(path, write, at, at.start, except);
+  }
+
+  // `access`, for an access made at source position `pos`, reported at `at`.
+  function accessFrom(self: mut Self, path: readonly Path, write: bool, at: Span, pos: usize, except: readonly Vec<usize>): void {
+    if (self.collecting) { return; }
+    for (const l of self.liveLoans(pos, except)) {
+      const loan = self.loans[l].clone();
+      if (loan.external || !loan.path.overlaps(path)) { continue; }
+      if (loan.mutable || write) {
+        const name = self.pathName(path);
+        const how = if (loan.mutable) { "lent `mut`" } else { "lent `readonly`" };
+        const what = if (write) { "changed" } else { "used" };
+        const [line, col] = self.lineColOf(loan.span.start);
+        self.err(at, `\`${name}\` cannot be ${what} here: it was ${how} at ${line}:${col}, and that borrow is still in use`.asStr());
+        return;
+      }
+    }
+  }
+
+  function pathName(self: readonly Self, path: readonly Path): String {
+    let s = self.vars[path.root].name.clone();
+    for (const f of path.fields) {
+      s.push(".");
+      s.push(f.asStr());
+    }
+    s
+  }
+
+  function newLoan(self: mut Self, path: Path, mutable: bool, span: Span): usize {
+    self.loans.push(Loan { path, mutable, span, external: false });
+    self.loans.len() - 1
+  }
+
+  // ---- places ----
+
+  // The place an expression denotes, if it is one: a binding, or fields of one.
+  function place(self: readonly Self, e: readonly Expr): Option<Path> {
+    match (e.kind) {
+      // Pass 1 has not resolved it yet where it is first met: the scope at hand does.
+      #Ident(name) => {
+        const v = match (self.resolved.get(e.span)) { #Some(v) => #Some(v), #None => self.lookup(name.asStr()) };
+        match (v) { #Some(r) => #Some(Path { root: r, fields: Vec.new() }), #None => #None }
+      }
+      #Field { target, name } => match (self.place(target)) {
+        #Some(p) => {
+          let q = p;
+          q.fields.push(name.name.clone());
+          #Some(q)
+        }
+        #None => #None,
+      },
+      // Indexing borrows the whole collection; a tuple's element is a place of its own.
+      #Index { target, index } => match (self.place(target)) {
+        #Some(p) => {
+          let q = p;
+          if (const #Int(i) = index.kind) {
+            if (const #Tuple(_) = stripBorrow(self.tyOf(target))) { q.fields.push(i.clone()); }
+          }
+          #Some(q)
+        }
+        #None => #None,
+      },
+      #BorrowMut(inner) => self.place(inner),
+      _ => #None,
+    }
+  }
+
+  function isTuple(self: readonly Self, e: readonly Expr): bool {
+    match (stripBorrow(self.tyOf(e))) { #Tuple(_) => true, _ => false }
+  }
+
+  // Whether the place is reached through a borrow or a region reference, so nothing can be moved
+  // out of it.
+  function behindReference(self: readonly Self, e: readonly Expr): bool {
+    match (e.kind) {
+      #Ident(_) => {
+        const t = self.tyOf(e);
+        isBorrow(t) || self.isRef(t)
+      }
+      #Field { target, name: _ } | #Index { target, index: _ } => {
+        const t = self.tyOf(target);
+        isBorrow(t) || self.isRef(t) || self.behindReference(target)
+      }
+      _ => false,
+    }
+  }
+
+  function isRef(self: readonly Self, t: readonly Ty): bool {
+    match (t) { #Named(d, _) => self.p.known.get("Ref") == #Some(d), _ => false }
+  }
+
+  // Whether a value of this type could hold a borrow (§4.2).
+  function mayHold(self: readonly Self, t: readonly Ty): bool {
+    self.p.class(t) == 2 || hidesBorrows(t, self.p, self.sendParams)
+  }
+
+  // ---- uses of places ----
+
+  // Whether `root` is captured by the closure whose body is being checked.
+  function captured(self: readonly Self, root: usize): bool {
+    match (self.lambdas.last()) { #Some(f) => f.outer.has(root), #None => false }
+  }
+
+  // Records a closure body's use of a captured binding; the strongest use decides how the
+  // closure captures it (§4.3).
+  function recordCapture(self: mut Self, root: usize, how0: Use, at: Span): void {
+    const ty = self.vars[root].ty.clone();
+    // A by-value use of a `Copy` (or borrowed) value reads it: closures capture by reference.
+    const how: Use = if (how0 == #Move && (self.p.isCopy(ty) || isBorrow(ty))) { #Read } else { how0 };
+    const n = self.lambdas.len();
+    if (n == 0) { return; }
+    const known: Option<[Use, Span]> = match (self.lambdas[n - 1].captures.get(root)) { #Some(e) => #Some(e.clone()), #None => #None };
+    match (known) {
+      #Some([u, _]) => { if (rank(how) > rank(u)) { self.lambdas[n - 1].captures.insert(root, [how, at]); } }
+      #None => { self.lambdas[n - 1].captures.insert(root, [how, at]); }
+    }
+  }
+
+  function usePlace(self: mut Self, e: readonly Expr, path: Path, how: Use): Val {
+    const ty = self.tyOf(e);
+    self.usePlaceAs(e, path, how, ty)
+  }
+
+  // `usePlace`, for a value of type `ty`: a match arm's move of its scrutinee is made at the arm's
+  // pattern, where no expression's type is recorded.
+  function usePlaceAs(self: mut Self, e: readonly Expr, path: Path, how: Use, ty: Ty): Val {
+    const at = e.span;
+    if (const #Some(op) = self.deadArgs.get(path.root)) {
+      const opName = op.clone();
+      const name = self.vars[path.root].name.clone();
+      self.err(at, `\`${name}\` cannot be used: an arm that does not resume runs after the body has unwound, and \`${name}\` may borrow from it (give \`${opName}\` an owned parameter type, or resume)`.asStr());
+    }
+    if (self.captured(path.root)) {
+      self.recordCapture(path.root, how, at);
+      // The closure owns what it moved in, so a move inside its body is the closure's to record,
+      // for its drop flags.
+      const varTy = self.vars[path.root].ty.clone();
+      const owned = how == #Move && !self.p.isCopy(varTy) && !isBorrow(varTy);
+      if (owned && !self.collecting && !self.p.isCopy(ty)) { self.moves.insert(at, path.fields.clone()); }
+      if (owned && self.collecting) {
+        if (const #Some(arm) = self.armBinds.get(path.root)) { self.armMoves.insert(arm); }
+      }
+      return { loans: self.holdsOf(path.root) };
+    }
+    const none: Vec<usize> = Vec.new();
+    // Using something moved.
+    const movedAlready: Option<Path> = match (self.state.moved.iter().find((m) => m.overlaps(path) || path.overlaps(m))) {
+      #Some(m) => #Some(m.clone()),
+      #None => #None,
+    };
+    if (const #Some(m) = movedAlready) {
+      const name = self.pathName(path);
+      const what = if (m == path) { `\`${name}\` was moved` } else { `\`${self.pathName(m)}\` was moved` };
+      const why: String = match (self.taskMoved.get(m.root)) {
+        #Some(span) => {
+          const [line, col] = self.lineColOf(span.start);
+          `: the task at ${line}:${col} moved it in, since it is declared inside the task's scope (declare it before \`Io.scope\` to lend it to the tasks instead)`
+        }
+        #None => String.new(),
+      };
+      self.err(at, `${what} and cannot be used here${why}`.asStr());
+    }
+    const held = self.holdsOf(path.root);
+    match (how) {
+      #Move => {
+        const copy = self.p.isCopy(ty);
+        self.access(path, !copy, at, none);
+        if (!copy) {
+          if (self.behindReference(e)) {
+            const shown = self.show(ty);
+            self.err(at, `cannot move a \`${shown}\` out of a borrow; it is not \`Copy\``.asStr());
+          } else if (path.fields.len() > 0 && self.hasDropAncestor(path)) {
+            self.err(at, `cannot move \`${self.pathName(path)}\` out of a value whose type implements \`Drop\``.asStr());
+          } else if (!self.collecting) {
+            addMoved(mut self.state.moved, path.clone());
+            // Where a value leaves its binding, the evaluator stops owning it there (§5.6).
+            self.moves.insert(at, path.fields.clone());
+          } else if (const #Some(arm) = self.armBinds.get(path.root)) {
+            self.armMoves.insert(arm);
+          }
+        }
+        { loans: held }
+      }
+      #Read => {
+        self.access(path, false, at, none);
+        const l = self.newLoan(path, false, at);
+        let loans = held;
+        addLoan(mut loans, l);
+        { loans: loans }
+      }
+      #Mut => {
+        self.checkMutable(path, at);
+        self.access(path, true, at, none);
+        const l = self.newLoan(path, true, at);
+        let loans = held;
+        addLoan(mut loans, l);
+        { loans: loans }
+      }
+    }
+  }
+
+  function holdsOf(self: readonly Self, v: usize): Vec<usize> {
+    match (self.state.holds.get(v)) { #Some(ls) => ls.clone(), #None => Vec.new() }
+  }
+
+  function hasDropAncestor(self: readonly Self, path: readonly Path): bool {
+    // The root's type, and every field type on the way, must not implement Drop.
+    let t = self.vars[path.root].ty.clone();
+    for (const f of path.fields) {
+      if (const #Named(d, _) = t) { if (self.p.hasDrop(d)) { return true; } }
+      t = match (fieldType(self.p, t, f.asStr())) { #Some(x) => x, #None => #Error };
+    }
+    false
+  }
+
+  // Mutation through `path` requires a `let` binding, or a `mut` borrow on the way (§4.1).
+  // Whether `path` may be changed; true if the change writes through a `mut` borrow.
+  function checkMutable(self: mut Self, path: readonly Path, at: Span): bool {
+    const v = self.vars[path.root].clone();
+    match (v.ty) {
+      #Borrow(true, _) => return true,
+      #Borrow(false, _) => {
+        self.err(at, `cannot change \`${self.pathName(path)}\` through a \`readonly\` borrow`.asStr());
+        return false;
+      }
+      _ => {}
+    }
+    // Through a field that is itself a borrow or a region reference.
+    let t = v.ty.clone();
+    for (const f of path.fields) {
+      t = match (fieldType(self.p, t, f.asStr())) { #Some(x) => x, #None => #Error };
+      match (t) {
+        #Borrow(true, _) => return true,
+        #Borrow(false, _) => {
+          self.err(at, `cannot change \`${self.pathName(path)}\` through a \`readonly\` borrow`.asStr());
+          return false;
+        }
+        _ => {
+          if (self.isRef(t)) {
+            self.err(at, `cannot change \`${self.pathName(path)}\`: region data changes only through a \`Cell\``.asStr());
+            return false;
+          }
+        }
+      }
+    }
+    if (!v.mutable) { self.err(at, `cannot change \`${v.name}\`: it is declared \`const\``.asStr()); }
+    false
+  }
+
+  // ---- statements and blocks ----
+
+  function block(self: mut Self, b: readonly Block, how: Use): Val {
+    self.scopes.push(HashMap.new());
+    self.enter(#Seq, 0);
+    const deferredDepth = self.deferred.len();
+    let child: u32 = 0;
+    const escaping = replace(mut self.escaping, false);
+    for (const stmt of b.stmts) {
+      child += 1;
+      self.setChild(child);
+      match (stmt) {
+        #Let { mutable, pat, ty: _, init, span: _ } => {
+          // A binding of a borrow type borrows its initializer; otherwise it takes it.
+          const use: Use = match (pat.kind) {
+            #Bind(_) => match (self.typed.bindings.get(pat.id)) {
+              #Some(bt) => {
+                const b0 = bt.clone();
+                self.argUse(b0, self.tyOf(init))
+              }
+              #None => #Move,
+            },
+            _ => #Move,
+          };
+          const v = self.expr(init, use);
+          self.bindPattern(pat, v, mutable);
+          if (const #Bind(name) = pat.kind) {
+            if (const #Some(m) = self.closureMode(init)) {
+              if (const #Some(id) = self.lookup(name.asStr())) { self.varModes.insert(id, m); }
+            }
+          }
+        }
+        #Defer(e) => {
+          // A `defer` holds everything it borrows until the block ends (§5.6).
+          const firstLoan = self.loans.len();
+          const v = self.expr(e, #Read);
+          let held = v.loans;
+          for (const l of firstLoan..self.loans.len()) { addLoan(mut held, l); }
+          self.deferred.push(held);
+        }
+        #Expr(e) => { self.expr(e, #Move); }
+      }
+    }
+    child += 1;
+    self.setChild(child);
+    self.escaping = escaping;
+    const v: Val = match (b.tail) { #Some(e) => self.expr(e, how), #None => ({ loans: Vec.new() }) };
+    self.deferred.truncate(deferredDepth);
+    self.leave();
+    // Bindings going out of scope release what they hold, and must not be borrowed by anything
+    // that outlives them: the block's value, or a binding used later (§4.2).
+    if (const #Some(scope) = self.scopes.pop()) {
+      self.dyingHolds = HashMap.new();
+      let dying: HashSet<usize> = HashSet.new();
+      for (const [_, var] of scope.entries()) {
+        dying.insert(var);
+        if (const #Some(ls) = self.state.holds.remove(var)) { self.dyingHolds.insert(var, ls); }
+      }
+      self.checkOutlives(dying, b, v);
+    }
+    v
+  }
+
+  // Whether dropping a value of this type runs code — a `Drop` impl, here or in a part — which
+  // may read what the value borrows.
+  function dropRunsCode(self: readonly Self, t: readonly Ty): bool {
+    let inside: Vec<Ty> = Vec.new();
+    dropsIn(self.p, t, mut inside)
+  }
+
+  function checkOutlives(self: mut Self, dying: readonly HashSet<usize>, b: readonly Block, v: readonly Val): void {
+    if (self.collecting || dying.len() == 0) { return; }
+    // A function's own body is the return check's to judge.
+    if (self.scopes.len() > 1) {
+      if (const #Some(tail) = b.tail) {
+        if (self.mayHold(self.tyOf(tail))) {
+          const found = v.loans.iter().find((l) => !self.loans[l].external && dying.has(self.loans[l].path.root));
+          if (const #Some(l) = found) {
+            const root = self.loans[l].path.root;
+            const name = self.vars[root].name.clone();
+            const msg: String = match (self.lentArgs.get(root)) {
+              #Some(op) => `this value borrows \`${name}\`, which the code that performed \`${op}\` lent only to this arm`,
+              #None => `this value borrows \`${name}\`, which goes out of scope at the end of its block`,
+            };
+            self.err(tail.span, msg.asStr());
+          }
+        }
+      }
+    }
+    // Bindings are dropped in reverse order of declaration: one whose destructor runs code must
+    // not borrow a binding declared after it, which is gone by then (§5.6).
+    let sorted: Vec<usize> = Vec.new();
+    for (const d of dying.iter()) { sorted.push(d); }
+    sorted.sortBy((a, b) => a.cmp(b));
+    for (const h of sorted) {
+      const ls: Vec<usize> = match (self.dyingHolds.get(h)) { #Some(x) => x.clone(), #None => continue };
+      const moved = self.state.moved.iter().some((m) => m.root == h && m.fields.len() == 0);
+      const hty = self.vars[h].ty.clone();
+      if (moved || !self.dropRunsCode(hty)) { continue; }
+      const found = ls.iter().find((l) => !self.loans[l].external && self.loans[l].path.root > h && dying.has(self.loans[l].path.root));
+      if (const #Some(l) = found) {
+        const loan = self.loans[l].clone();
+        const hn = self.vars[h].name.clone();
+        const an = self.vars[loan.path.root].name.clone();
+        self.err(loan.span, `\`${hn}\` borrows \`${an}\` here, but \`${an}\` is dropped before \`${hn}\`'s destructor runs, since it is declared after it: declare \`${an}\` first`.asStr());
+      }
+    }
+    const end = b.span.end;
+    let holders: Vec<[usize, Vec<usize>]> = Vec.new();
+    for (const [h, ls] of self.state.holds.entries()) { holders.push([h, ls.clone()]); }
+    for (const [h, ls] of holders) {
+      const found = ls.iter().find((l) => !self.loans[l].external && dying.has(self.loans[l].path.root));
+      if (const #Some(l) = found) {
+        if (self.liveAfter(h, end)) {
+          const loan = self.loans[l].clone();
+          const name = self.vars[loan.path.root].name.clone();
+          const holder = self.vars[h].name.clone();
+          self.err(loan.span, `\`${holder}\` borrows \`${name}\` here, and is used after \`${name}\` goes out of scope`.asStr());
+        }
+      }
+    }
+  }
+
+  function bindPattern(self: mut Self, pat: readonly Pattern, v: readonly Val, mutable: bool): void {
+    match (pat.kind) {
+      #TagAt { name: _, args: _ } => {}
+      #Bind(name) => {
+        const ty = self.bindingTy(pat.id);
+        self.bindName(name.asStr(), ty, pat.span.start, v, mutable);
+      }
+      #Wild | #Lit(_) => {}
+      #Tuple(ps) | #Or(ps) => { for (const q of ps) { self.bindPattern(q, v, mutable); } }
+      #Record { name: _, fields } => self.bindFields(fields, v, mutable),
+      #Tag { name: _, args } => match (args) {
+        #None => {}
+        #Tuple(ps) => { for (const q of ps) { self.bindPattern(q, v, mutable); } }
+        #Record(fs) => self.bindFields(fs, v, mutable),
+      },
+    }
+  }
+
+  function bindName(self: mut Self, name: str, ty: Ty, site: usize, v: readonly Val, mutable: bool): void {
+    const holds = self.lending || self.mayHold(ty);
+    const id = self.declareVar(name, ty, mutable, false, site);
+    if (holds) { self.state.holds.insert(id, v.loans.clone()); }
+  }
+
+  function bindFields(self: mut Self, fields: readonly Vec<[Ident, Option<Pattern>]>, v: readonly Val, mutable: bool): void {
+    for (const [name, sub] of fields) {
+      match (sub) {
+        #Some(q) => self.bindPattern(q, v, mutable),
+        #None => self.bindName(name.name.asStr(), #Error, name.span.start, v, mutable),
+      }
+    }
+  }
+
+  // ---- expressions ----
+
+  function contained(self: mut Self, e: readonly Expr, how: Use): Val {
+    const saved = replace(mut self.escaping, false);
+    const v = self.expr(e, how);
+    self.escaping = saved;
+    v
+  }
+
+  function escape(self: mut Self, e: readonly Expr, how: Use): Val {
+    const saved = replace(mut self.escaping, true);
+    const v = self.expr(e, how);
+    self.escaping = saved;
+    v
+  }
+
+  function expr(self: mut Self, e: readonly Expr, how: Use): Val {
+    // Only these positions pass "escaping" on to their direct value.
+    const passesEscape = match (e.kind) {
+      #Lambda { params: _ } | #Block(_) | #If { cond: _ } | #Match { scrutinee: _ } | #Try { body: _ } | #Region { name: _ }
+        | #Unsafe(_) | #Return(_) | #Record { name: _ } | #Tag { name: _ } | #List(_) => true,
+      _ => false,
+    };
+    if (!passesEscape && self.escaping) { return self.contained(e, how); }
+    match (e.kind) {
+      #TypeRef(_) | #FieldAt { target: _ } | #TagAt { name: _ } => ({ loans: Vec.new() }),
+      #Ident(name) => {
+        const v = match (self.lookup(name.asStr())) { #Some(v) => v, #None => return { loans: Vec.new() } };
+        self.recordUse(v, e.span);
+        self.usePlace(e, Path { root: v, fields: Vec.new() }, how)
+      }
+      #Field { target, name: _ } => match (self.place(e)) {
+        #Some(path) => {
+          self.recordBaseUses(target);
+          self.usePlace(e, path, how)
+        }
+        #None => self.expr(target, #Read),
+      },
+      #Index { target, index } => {
+        // A tuple's element by a constant index is a place, like a field.
+        const constant = match (index.kind) { #Int(_) => true, _ => false };
+        if (constant && self.isTuple(target)) {
+          return match (self.place(e)) {
+            #Some(path) => {
+              self.recordBaseUses(target);
+              self.usePlace(e, path, how)
+            }
+            #None => self.expr(target, #Read),
+          };
+        }
+        self.expr(index, #Move);
+        const ranged = match (index.kind) { #Range { lo: _ } => true, _ => false };
+        const baseHow: Use = if (how == #Mut) { #Mut } else { #Read };
+        const v = self.expr(target, baseHow);
+        if (how == #Move && !ranged) {
+          const ty = self.tyOf(e);
+          if (!self.p.isCopy(ty)) {
+            const shown = self.show(ty);
+            self.err(e.span, `cannot move a \`${shown}\` out of an indexed place; it is not \`Copy\``.asStr());
+          }
+        }
+        v
+      }
+      #BorrowMut(inner) => self.expr(inner, #Mut),
+      #Int(_) | #Float(_) | #Byte(_) | #Str(_) | #Bool(_) => ({ loans: Vec.new() }),
+      #Template(pieces) => {
+        for (const p of pieces) { if (const #Expr(x) = p) { self.expr(x, #Read); } }
+        { loans: Vec.new() }
+      }
+      #Tag { name: _, args } => match (args) {
+        #None => ({ loans: Vec.new() }),
+        #Tuple(items) => self.collect(items),
+        #Record(fields) => self.fieldInits(fields),
+      },
+      #Record { name: _, fields } => self.fieldInits(fields),
+      #List(items) => self.collect(items),
+      #Range { lo, hi } => {
+        if (const #Some(x) = lo) { self.expr(x, #Read); }
+        if (const #Some(x) = hi) { self.expr(x, #Read); }
+        { loans: Vec.new() }
+      }
+      #Unary { op: _, operand } => {
+        self.expr(operand, #Read);
+        { loans: Vec.new() }
+      }
+      #Binary { op: _, lhs, rhs } => {
+        self.expr(lhs, #Read);
+        self.expr(rhs, #Read);
+        { loans: Vec.new() }
+      }
+      #Cast { expr, ty: _ } => {
+        self.expr(expr, #Read);
+        { loans: Vec.new() }
+      }
+      #Assign { op, target, value } => self.assign(e, op.asStr(), target, value),
+      #Call { callee, typeArgs: _, args } => {
+        const v = self.call(e, callee, args);
+        self.notePerform(e);
+        v
+      }
+      #Lambda { params, body } => self.lambda(e, params, body),
+      #Block(b) => self.block(b, how),
+      #If { cond, then, otherwise } => {
+        self.contained(cond, #Read);
+        self.enter(#Branch, 0);
+        const before = self.state.clone();
+        const a = self.block(then, how);
+        const afterThen = replace(mut self.state, before);
+        self.setChild(1);
+        const b: Val = match (otherwise) { #Some(o) => self.expr(o, how), #None => ({ loans: Vec.new() }) };
+        // A branch that never finishes (it throws, returns, breaks) does not meet the other.
+        const elseDiverges = match (otherwise) { #Some(o) => diverges(o), #None => false };
+        if (elseDiverges && !blockDiverges(then)) {
+          self.state = afterThen;
+        } else if (!blockDiverges(then)) {
+          self.state.join(afterThen);
+        }
+        self.leave();
+        { loans: unionLoans(a.loans, b.loans) }
+      }
+      #While { cond, body } => {
+        self.enter(#Loop, 0);
+        // Twice: the second iteration sees what the first left behind (§4.1).
+        for (const _ of 0..2) {
+          const before = self.state.clone();
+          self.expr(cond, #Read);
+          self.block(body, #Move);
+          self.state.join(before);
+        }
+        self.leave();
+        { loans: Vec.new() }
+      }
+      #For { mutable: _, pat, iter, body } => self.forOf(pat, iter, body),
+      #Match { scrutinee, arms } => self.matchExpr(scrutinee, arms, how),
+      #Try { body, pat, handler } => {
+        self.enter(#Branch, 0);
+        const before = self.state.clone();
+        const a = self.block(body, how);
+        const afterBody = replace(mut self.state, before);
+        // The catch arm runs after the body unwound: its borrows are released (§5.2), but its
+        // moves may have happened.
+        for (const m of afterBody.moved) { addMoved(mut self.state.moved, m.clone()); }
+        self.setChild(1);
+        self.scopes.push(HashMap.new());
+        self.bindPattern(pat, { loans: Vec.new() }, false);
+        const b = self.block(handler, how);
+        self.scopes.pop();
+        self.state.join(afterBody);
+        self.leave();
+        { loans: unionLoans(a.loans, b.loans) }
+      }
+      #Throw(v) => {
+        self.expr(v, #Move);
+        { loans: Vec.new() }
+      }
+      #Yield(v) => {
+        const val = self.escape(v, #Move);
+        self.checkYield(val, v);
+        self.notePerform(e);
+        { loans: Vec.new() }
+      }
+      #Return(v) => {
+        if (const #Some(x) = v) {
+          const use = self.resultUse();
+          const val = self.escape(x, use);
+          self.checkReturn(val, x.span);
+          const ret = self.retTy.clone();
+          self.checkMode(x, ret, "returned");
+        }
+        { loans: Vec.new() }
+      }
+      #Break | #Continue => ({ loans: Vec.new() }),
+      #Region { name: _, body } => self.block(body, how),
+      // The one thing `unsafe` vouches for in ownership: an operation's arguments may leave their
+      // arm, because the code around keeps the continuation they borrow from from being resumed
+      // while they live (§5.5's `generate`).
+      #Unsafe(body) => {
+        let v = self.block(body, how);
+        v.loans.retain((l) => !self.lentArgs.has(self.loans[l].path.root));
+        v
+      }
+      #Handle { body, effect: _, arms } => self.handle(e, body, arms, how),
+      #Comptime(inner) => self.expr(inner, how),
+    }
+  }
+
+  function assign(self: mut Self, e: readonly Expr, op: str, target: readonly Expr, value: readonly Expr): Val {
+    // Into a place that is not a borrow, a borrow is read, not moved. A binding that holds a `mut`
+    // borrow is assigned through: the place is what it refers to.
+    const placeTy: Ty = match (self.tyOf(target)) {
+      #Borrow(true, inner) => match (target.kind) { #Ident(_) => inner.get().clone(), _ => #Borrow(true, inner.clone()) },
+      t => t,
+    };
+    const use = self.argUse(placeTy, self.tyOf(value));
+    const v = self.expr(value, use);
+    match (self.place(target)) {
+      #Some(path) => {
+        if (self.captured(path.root)) {
+          self.recordBaseUses(target);
+          self.recordCapture(path.root, #Mut, target.span);
+          return { loans: Vec.new() };
+        }
+        self.recordBaseUses(target);
+        const none: Vec<usize> = Vec.new();
+        if (self.checkMutable(path, target.span) && self.p.class(self.tyOf(value)) == 2) {
+          // The borrow would outlive the loan the caller gave this one (§4.2).
+          const name = self.pathName(path);
+          self.err(value.span, `cannot store a borrow in \`${name}\`: it would outlive the call, since \`${name}\` is reached through a \`mut\` borrow`.asStr());
+        }
+        // The place is written once the value is computed: a borrow the value used last has
+        // ended by then.
+        self.accessFrom(path, true, target.span, e.span.end, none);
+        if (op != "=") {
+          // Compound assignment reads the place first.
+          if (self.state.moved.iter().some((m) => m == path)) {
+            self.err(target.span, `\`${self.pathName(path)}\` was moved and cannot be used here`.asStr());
+          }
+        } else if (!self.collecting) {
+          // Assignment reinitializes a moved place.
+          self.state.moved.retain((m) => !m.overlaps(path));
+        }
+        const ty = self.vars[path.root].ty.clone();
+        // Assigned through, a binding holding a `mut` borrow keeps the borrow.
+        const through = match (ty) { #Borrow(true, _) => true, _ => false };
+        if (path.fields.len() == 0 && self.mayHold(ty) && !through) {
+          // A binding assigned anew holds only the new value's loans; one assigned on several
+          // paths holds the union, where the paths join (§4.1).
+          self.state.holds.insert(path.root, v.loans.clone());
+        } else if (path.fields.len() > 0 && v.loans.len() > 0) {
+          match (self.state.holds.getMut(path.root)) {
+            #Some(ls) => addLoans(mut ls, v.loans),
+            #None => { self.state.holds.insert(path.root, v.loans.clone()); }
+          }
+        }
+      }
+      #None => { self.expr(target, #Mut); }
+    }
+    { loans: Vec.new() }
+  }
+
+  function forOf(self: mut Self, pat: readonly Pattern, iter: readonly Expr, body: readonly Block): Val {
+    // What the iterated value borrows stays borrowed for the whole loop (§4.1).
+    const firstLoan = self.loans.len();
+    self.iterating = match (iter.kind) { #Call { callee: _ } => true, _ => false };
+    let iv = self.expr(iter, #Read);
+    self.iterating = false;
+    // What the iterated value holds stays borrowed for the whole loop; a temporary it was made
+    // from does not.
+    self.temps.push(iv.loans.clone());
+    // A generator's items borrow what it holds, never the generator itself: they are results of
+    // its producer (§5.5). A collection's elements borrow the collection.
+    if (self.isGen(self.tyOf(iter))) {
+      if (const #Some(p) = self.place(iter)) {
+        iv.loans.retain((l) => l < firstLoan || self.loans[l].path != p);
+      }
+    }
+    self.enter(#Loop, 0);
+    for (const _ of 0..2) {
+      const before = self.state.clone();
+      self.scopes.push(HashMap.new());
+      self.bindPattern(pat, iv, false);
+      self.block(body, #Move);
+      // The loop variables end with the iteration, and release what they held.
+      if (const #Some(scope) = self.scopes.pop()) {
+        for (const [_, var] of scope.entries()) { self.state.holds.remove(var); }
+      }
+      self.state.join(before);
+    }
+    self.leave();
+    self.temps.pop();
+    { loans: Vec.new() }
+  }
+
+  function matchExpr(self: mut Self, scrutinee: readonly Expr, arms: readonly Vec<MatchArm>, how: Use): Val {
+    // A place that cannot be moved from is matched through a borrow of it: its parts bind as
+    // borrows (§4.1).
+    const lent: Option<bool> = match (self.typed.lentScrutinees.get(scrutinee.id)) { #Some(m) => #Some(m), #None => #None };
+    if (const #Some(m0) = lent) {
+      // Through a `mut` borrow it is lent `mut` only if an arm changes what it binds; reading it
+      // is all the others need, and the code around may read it too.
+      const m = m0 && arms.iter().some((a) => self.armChanges(a));
+      const sv = self.contained(scrutinee, if (m) { #Mut } else { #Read });
+      return self.matchArms(arms, sv, how);
+    }
+    // A borrow matched is lent on, `mut` only if an arm changes what it binds.
+    if (const #Borrow(m0, _) = self.tyOf(scrutinee)) {
+      const m = m0 && arms.iter().some((a) => self.armChanges(a));
+      const sv = self.contained(scrutinee, if (m) { #Mut } else { #Read });
+      return self.matchArms(arms, sv, how);
+    }
+    // A place matched is moved only by the arms that move an owned part they bind; the others
+    // borrow it, and it may still be used after them (§4.1).
+    const place: Option<Path> = if (self.behindReference(scrutinee)) { #None } else { self.place(scrutinee) };
+    const perArm = place.isSome() && howForScrutinee(arms) == #Move;
+    const first = self.loans.len();
+    const read: Val = if (perArm) { self.contained(scrutinee, #Read) } else { ({ loans: Vec.new() }) };
+    const sv: Val = if (perArm) {
+      let v = read.clone();
+      v.loans.retain((l) => l < first);
+      v
+    } else {
+      const h = howForScrutinee(arms);
+      self.contained(scrutinee, h)
+    };
+    self.enter(#Branch, 0);
+    const before = self.state.clone();
+    let joined: Option<State> = #None;
+    let out: Vec<usize> = Vec.new();
+    for (const [i, arm] of arms.iter().enumerate()) {
+      self.setChild(i as u32);
+      self.state = before.clone();
+      // Already moved, it was reported where the scrutinee was read.
+      const fresh: Option<Path> = match (place) {
+        #Some(p) => if (self.state.moved.iter().some((m) => m.overlaps(p) || p.overlaps(m))) { #None } else { #Some(p.clone()) },
+        #None => #None,
+      };
+      const takes = perArm && self.takesOwned(arm.pat) && self.armMoves.has(arm.pat.span);
+      if (takes) {
+        if (const #Some(path) = fresh) {
+          const at: Expr = { kind: scrutinee.kind.clone(), span: arm.pat.span, id: NO_ID };
+          const ty = self.tyOf(scrutinee);
+          self.usePlaceAs(at, path, #Move, ty);
+        }
+      }
+      self.scopes.push(HashMap.new());
+      // An arm that takes nothing borrows what it binds from the place.
+      const bound = if (perArm && !takes) { read.clone() } else { sv.clone() };
+      self.lending = perArm && !takes;
+      self.bindPattern(arm.pat, bound, false);
+      self.lending = false;
+      if (perArm && self.collecting) {
+        let ids: Vec<usize> = Vec.new();
+        bindSites(arm.pat, mut ids);
+        for (const site of ids) {
+          if (const #Some(v) = self.bySite.get(site)) { self.armBinds.insert(v, arm.pat.span); }
+        }
+      }
+      if (const #Some(g) = arm.guard) { self.expr(g, #Read); }
+      const v = self.expr(arm.body, how);
+      addLoans(mut out, v.loans);
+      if (const #Some(scope) = self.scopes.pop()) {
+        for (const [_, var] of scope.entries()) { self.state.holds.remove(var); }
+      }
+      if (diverges(arm.body)) { continue; }
+      joinInto(mut joined, self.state);
+    }
+    self.state = match (joined) { #Some(j) => j, #None => before };
+    self.leave();
+    { loans: out }
+  }
+
+  // The arms of a `match` whose scrutinee's value is `sv`, none of which moves it.
+  function matchArms(self: mut Self, arms: readonly Vec<MatchArm>, sv: Val, how: Use): Val {
+    self.enter(#Branch, 0);
+    const before = self.state.clone();
+    let joined: Option<State> = #None;
+    let out: Vec<usize> = Vec.new();
+    for (const [i, arm] of arms.iter().enumerate()) {
+      self.setChild(i as u32);
+      self.state = before.clone();
+      self.scopes.push(HashMap.new());
+      self.bindPattern(arm.pat, sv, false);
+      if (const #Some(g) = arm.guard) { self.expr(g, #Read); }
+      const v = self.expr(arm.body, how);
+      addLoans(mut out, v.loans);
+      if (const #Some(scope) = self.scopes.pop()) {
+        for (const [_, var] of scope.entries()) { self.state.holds.remove(var); }
+      }
+      if (diverges(arm.body)) { continue; }
+      joinInto(mut joined, self.state);
+    }
+    self.state = match (joined) { #Some(j) => j, #None => before };
+    self.leave();
+    { loans: out }
+  }
+
+  // Whether a match arm changes a part of the scrutinee it binds: assigns to it, lends it `mut`,
+  // or calls a method that takes it `mut`.
+  function armChanges(self: readonly Self, arm: readonly MatchArm): bool {
+    let names: Vec<String> = Vec.new();
+    bindNames(arm.pat, mut names);
+    let changed: HashSet<String> = HashSet.new();
+    if (const #Some(g) = arm.guard) { self.changes(g, mut changed); }
+    self.changes(arm.body, mut changed);
+    names.iter().some((n) => changed.has(n.asStr()))
+  }
+
+  // The bindings an expression changes, by name: what it assigns to, lends `mut`, or passes where
+  // a `mut` borrow is taken.
+  function changes(self: readonly Self, e: readonly Expr, out: mut HashSet<String>): void {
+    match (e.kind) {
+      #Assign { op: _, target, value: _ } => changedRoot(target, mut out),
+      #BorrowMut(target) => changedRoot(target, mut out),
+      #Call { callee, typeArgs: _, args } => match (self.typed.calls.get(e.id)) {
+        #Some(f) => {
+          const params = self.p.fns[f].scheme.params.clone();
+          let all: Vec<Expr> = Vec.new();
+          const isSelf = match (params.first()) { #Some([n, _]) => n == "self", #None => false };
+          if (isSelf) { if (const #Field { target, name: _ } = callee.kind) { all.push(target.get().clone()); } }
+          for (const a of args) { all.push(a.clone()); }
+          for (const i of 0..min(all.len(), params.len())) {
+            if (isMutBorrowTy(params[i][1])) { changedRoot(all[i], mut out); }
+          }
+        }
+        #None => match (self.typed.exprs.get(callee.id)) {
+          #Some(#Fn(f)) => {
+            for (const i of 0..min(args.len(), f.params.len())) {
+              if (isMutBorrowTy(f.params[i])) { changedRoot(args[i], mut out); }
+            }
+          }
+          _ => { for (const a of args) { changedRoot(a, mut out); } }
+        },
+      },
+      // A match through a `mut` borrow of a binding that changes what it binds changes it.
+      #Match { scrutinee, arms } => {
+        if (self.typed.lentScrutinees.get(scrutinee.id) == #Some(true) && arms.iter().some((a) => self.armChanges(a))) {
+          changedRoot(scrutinee, mut out);
+        }
+      }
+      _ => {}
+    }
+    for (const c of children(e)) { self.changes(c, mut out); }
+    match (e.kind) {
+      #Block(b) | #Unsafe(b) => self.blockChanges(b, mut out),
+      #Region { name: _, body } => self.blockChanges(body, mut out),
+      #If { cond: _, then, otherwise: _ } => self.blockChanges(then, mut out),
+      #While { cond: _, body } => self.blockChanges(body, mut out),
+      #For { mutable: _, pat: _, iter: _, body } => self.blockChanges(body, mut out),
+      #Match { scrutinee: _, arms } => {
+        for (const a of arms) {
+          if (const #Some(g) = a.guard) { self.changes(g, mut out); }
+          self.changes(a.body, mut out);
+        }
+      }
+      #Try { body, pat: _, handler } => {
+        self.blockChanges(body, mut out);
+        self.blockChanges(handler, mut out);
+      }
+      #Handle { body, effect: _, arms } => {
+        self.blockChanges(body, mut out);
+        for (const a of arms) { self.blockChanges(a.body, mut out); }
+      }
+      #Lambda { params: _, body } => self.changes(body, mut out),
+      _ => {}
+    }
+  }
+
+  function blockChanges(self: readonly Self, b: readonly Block, out: mut HashSet<String>): void {
+    for (const st of b.stmts) {
+      match (st) {
+        #Let { mutable: _, pat: _, ty: _, init, span: _ } => self.changes(init, mut out),
+        #Defer(x) | #Expr(x) => self.changes(x, mut out),
+      }
+    }
+    if (const #Some(t) = b.tail) { self.changes(t, mut out); }
+  }
+
+  // Whether a pattern binds a part that is owned and not `Copy`, which it takes.
+  function takesOwned(self: readonly Self, p: readonly Pattern): bool {
+    let ids: Vec<usize> = Vec.new();
+    bindIds(p, mut ids);
+    ids.iter().some((id) => match (self.typed.bindings.get(id)) {
+      #Some(t) => !self.p.isCopy(t) && !isShared(t) && !isBorrow(t),
+      #None => true,
+    })
+  }
+
+  function handle(self: mut Self, e: readonly Expr, body: readonly Block, arms: readonly Vec<HandlerArm>, how: Use): Val {
+    // The outer bindings that resuming can reach: those the body or any arm uses.
+    let reach: Vec<[String, Span]> = Vec.new();
+    walkBlock(body, HashSet.new(), mut reach);
+    for (const arm of arms) {
+      let bound: HashSet<String> = HashSet.new();
+      for (const p of arm.params) { bound.insert(p.name.clone()); }
+      if (const #Some(k) = arm.resumes) { bound.insert(k.name.clone()); }
+      walkBlock(arm.body, bound, mut reach);
+    }
+    let changed: HashSet<String> = HashSet.new();
+    syntacticBlockChanges(body, mut changed);
+    for (const arm of arms) { syntacticBlockChanges(arm.body, mut changed); }
+    let reached: Vec<[usize, bool]> = Vec.new();
+    for (const [name, _] of reach) {
+      if (const #Some(v) = self.lookup(name.asStr())) {
+        if (!reached.iter().some(([r, _]) => r == v)) { reached.push([v, changed.has(name.asStr())]); }
+      }
+    }
+    const handled: Option<usize> = match (self.typed.handled.get(e.id)) { #Some(d) => #Some(d), #None => #None };
+    if (const #Some(d) = handled) { self.handling.push([d, Vec.new()]); }
+    const v = self.block(body, how);
+    const across: Vec<usize> = if (handled.isSome()) {
+      match (self.handling.pop()) { #Some([_, f]) => f, #None => Vec.new() }
+    } else { Vec.new() };
+    let loans = v.loans.clone();
+    for (const arm of arms) {
+      self.scopes.push(HashMap.new());
+      // An operation's arguments are lent by the code that performed it: one that may hold a
+      // borrow lives only until the arm resumes or ends (§5.3).
+      let lent: Vec<[usize, usize]> = Vec.new();
+      for (const p of arm.params) {
+        const ty = self.nameTy(p.span.start);
+        const holds = self.mayHold(ty);
+        const id = self.declareVar(p.name.asStr(), ty, false, false, p.span.start);
+        if (!holds) { continue; }
+        if (arm.resumes.isNone()) {
+          self.deadArgs.insert(id, arm.op.name.clone());
+        } else {
+          const l = self.newLoan(Path { root: id, fields: Vec.new() }, false, p.span);
+          self.state.holds.insert(id, [l]);
+          self.lentArgs.insert(id, arm.op.name.clone());
+          lent.push([id, l]);
+        }
+      }
+      if (const #Some(k) = arm.resumes) {
+        // The continuation holds whatever the body held where it was suspended (§5.3).
+        const id = self.declareVar(k.name.asStr(), #Error, false, false, k.span.start);
+        self.state.holds.insert(id, unionLoans(v.loans, across));
+        self.resumes.insert(id, reached.clone());
+        self.contArgs.insert(id, lent);
+      }
+      // What an arm gives back is the `handle` expression's value.
+      const av = self.block(arm.body, how);
+      addLoans(mut loans, av.loans);
+      if (const #Some(scope) = self.scopes.pop()) {
+        let dying: HashSet<usize> = HashSet.new();
+        for (const [_, var] of scope.entries()) {
+          self.state.holds.remove(var);
+          dying.insert(var);
+        }
+        self.checkOutlives(dying, arm.body, av);
+      }
+    }
+    // A continuation that leaves its arm takes its handler with it, so whatever has it borrows
+    // everything the handler's arms use (§5.3).
+    if (arms.iter().some((a) => match (a.resumes) { #Some(k) => escapes(a.body, k.name.asStr()), #None => false })) {
+      let armUses: Vec<[String, Span]> = Vec.new();
+      let armChanged: HashSet<String> = HashSet.new();
+      for (const arm of arms) {
+        let bound: HashSet<String> = HashSet.new();
+        for (const p of arm.params) { bound.insert(p.name.clone()); }
+        if (const #Some(k) = arm.resumes) { bound.insert(k.name.clone()); }
+        walkBlock(arm.body, bound, mut armUses);
+        syntacticBlockChanges(arm.body, mut armChanged);
+      }
+      for (const [name, span] of armUses) {
+        if (const #Some(var) = self.lookup(name.asStr())) {
+          const l = self.newLoan(Path { root: var, fields: Vec.new() }, armChanged.has(name.asStr()), span);
+          addLoan(mut loans, l);
+        }
+      }
+    }
+    { loans: loans }
+  }
+
+  // Records the uses of the binding at the root of a field or index chain, without using it.
+  function recordBaseUses(self: mut Self, e: readonly Expr): void {
+    match (e.kind) {
+      #Ident(name) => {
+        if (const #Some(v) = self.lookup(name.asStr())) { self.recordUse(v, e.span); }
+      }
+      #Field { target, name: _ } | #Index { target, index: _ } | #BorrowMut(target) => self.recordBaseUses(target),
+      _ => { self.expr(e, #Read); }
+    }
+  }
+
+  function collect(self: mut Self, items: readonly Vec<Expr>): Val {
+    let loans: Vec<usize> = Vec.new();
+    for (const it of items) {
+      const use = self.slotUse(it);
+      const v = self.escape(it, use);
+      addLoans(mut loans, v.loans);
+    }
+    { loans: loans }
+  }
+
+  function fieldInits(self: mut Self, fields: readonly Vec<FieldInit>): Val {
+    let loans: Vec<usize> = Vec.new();
+    for (const f of fields) {
+      match (f.value) {
+        #Some(v) => {
+          const use = self.slotUse(v);
+          const x = self.escape(v, use);
+          addLoans(mut loans, x.loans);
+        }
+        #None => {
+          const e: Expr = { kind: #Ident(f.name.name.clone()), span: f.name.span, id: NO_ID };
+          const use = self.slotUse(e);
+          const x = self.expr(e, use);
+          addLoans(mut loans, x.loans);
+        }
+      }
+    }
+    { loans: loans }
+  }
+
+  // How a part of a literal is used: an owned value put where a borrow is wanted is lent;
+  // anything else, a borrow included, is passed on.
+  function slotUse(self: readonly Self, e: readonly Expr): Use {
+    const ty = self.tyOf(e);
+    match (self.typed.slots.get(e.id)) {
+      #Some(t) => if (isBorrow(ty) || isShared(ty)) { #Move } else { self.argUse(t, ty) },
+      #None => #Move,
+    }
+  }
+
+  // ---- calls ----
+
+  // How an argument is used, given the parameter type and the argument's own type.
+  function argUse(self: readonly Self, param: readonly Ty, argTy: readonly Ty): Use {
+    // A `readonly` borrow passed where one is wanted is copied, with what it holds: nothing
+    // borrows the binding it was read from.
+    if (isShared(param) && isShared(argTy)) { return #Move; }
+    match (param) {
+      #Borrow(true, _) => #Mut,
+      #Borrow(false, _) | #Slice(_) | #Prim(#Str) => #Read,
+      // A borrow read into an owned place that holds no borrow copies what it refers to (the
+      // checker has required that to be `Copy`); the borrow itself stays.
+      p => {
+        const variable = match (p) { #Param(_) | #Var(_) => true, _ => false };
+        if (isBorrow(argTy) && !variable && self.p.class(p) == 1) { #Read } else { #Move }
+      }
+    }
+  }
+
+  function call(self: mut Self, e: readonly Expr, callee: readonly Expr, args: readonly Vec<Expr>): Val {
+    const fid: Option<usize> = match (self.typed.calls.get(e.id)) { #Some(f) => #Some(f), #None => #None };
+    const scheme: Option<Scheme> = match (fid) { #Some(f) => #Some(self.p.fns[f].scheme.clone()), #None => #None };
+    // The parameters as instantiated at this call: `push(x)` on a `Vec<i64>` takes an `i64`; a
+    // function value's come from its type.
+    let params: Vec<[String, Ty]> = Vec.new();
+    match (scheme) {
+      #Some(s) => {
+        const targs: Option<Vec<GArg>> = match (self.typed.targs.get(e.id)) { #Some(a) => #Some(a.clone()), #None => #None };
+        match (targs) {
+          #Some(a) if a.len() == s.tparams.len() => {
+            for (const [n, t] of s.params) { params.push([n.clone(), substParams(t, s.tparams, a)]); }
+          }
+          _ => { for (const [n, t] of s.params) { params.push([n.clone(), t.clone()]); } }
+        }
+      }
+      #None => {
+        if (const #Fn(f) = stripBorrow(self.tyOf(callee))) {
+          for (const t of f.params) { params.push([String.new(), t.clone()]); }
+        }
+      }
+    }
+    const ret = self.tyOf(e);
+    // Only a generator call — one whose result is `void`, its items yielded — lends its sources to
+    // its items; a call that returns a collection gives back what it returns.
+    const yields = replace(mut self.iterating, false) && match (ret) { #Prim(#Void) => true, _ => false };
+    let argVals: Vec<[Option<String>, Val]> = Vec.new();
+    let receiverLoan: Option<[usize, Path, Span]> = #None;
+    // The borrows of argument places this call takes, which its result holds only if its declared
+    // type can hold a borrow itself (§4.2).
+    let lentHere: Vec<usize> = Vec.new();
+    self.temps.push(Vec.new());
+    const hasSelf = match (params.first()) { #Some([n, _]) => n == "self", #None => false };
+    const resumed: Option<Vec<[usize, bool]>> = match (self.place(callee)) {
+      #Some(p) => match (self.resumes.get(p.root)) { #Some(r) => #Some(r.clone()), #None => #None },
+      #None => #None,
+    };
+    const isMethod = match (callee.kind) { #Field { target: _ } => true, _ => false };
+    if (hasSelf && isMethod) {
+      // The receiver of a method call, borrowed in two phases (§4.1).
+      const target: Expr = match (callee.kind) { #Field { target, name: _ } => target.get().clone(), _ => callee.clone() };
+      const selfTy = params.remove(0)[1].clone();
+      const want = self.argUse(selfTy, self.tyOf(target));
+      if (const #Some(path) = self.place(target)) {
+        if (self.captured(path.root)) { self.recordCapture(path.root, want, target.span); }
+      }
+      const firstUse: Use = if (want == #Mut) { #Read } else { want };
+      const before = self.loans.len();
+      const v = self.expr(target, firstUse);
+      if (const #Some(path) = self.place(target)) {
+        for (const l of before..self.loans.len()) { if (self.loans[l].path == path) { addLoan(mut lentHere, l); } }
+      }
+      if (want == #Mut) {
+        if (const #Some(path) = self.place(target)) {
+          // The receiver's own fresh loan, not an external one it already held.
+          let best: Option<usize> = #None;
+          for (const l of v.loans) {
+            if (self.loans[l].path == path && !self.loans[l].external) { best = #Some(l); }
+          }
+          if (const #Some(l) = best) { receiverLoan = #Some([l, path, target.span]); }
+        }
+      }
+      self.addTemps(v.loans);
+      argVals.push([#Some("self".toString()), v]);
+    } else if (const #Some(reach) = resumed) {
+      // Resuming runs the rest of the body, and may re-enter the arms: it uses everything they
+      // use, so no borrow of those may be live across it (§5.3).
+      const none: Vec<usize> = Vec.new();
+      for (const [v, write] of reach) {
+        self.access(Path { root: v, fields: Vec.new() }, write, callee.span, none);
+      }
+      // The operation's arguments end with the code that performed them, which resuming lets run
+      // on.
+      const k: Option<usize> = match (self.place(callee)) { #Some(p) => #Some(p.root), #None => #None };
+      const lent: Vec<[usize, usize]> = match (k) {
+        #Some(kv) => match (self.contArgs.get(kv)) { #Some(x) => x.clone(), #None => Vec.new() },
+        #None => Vec.new(),
+      };
+      if (!self.collecting) {
+        for (const [param, l] of lent) {
+          let holders: Vec<usize> = Vec.new();
+          for (const [h, ls] of self.state.holds.entries()) { if (hasLoan(ls, l)) { holders.push(h); } }
+          if (const #Some(h) = holders.iter().find((h) => self.liveAfter(h, e.span.end))) {
+            const pn = self.vars[param].name.clone();
+            const hn = self.vars[h].name.clone();
+            const what = if (pn == hn) { `\`${pn}\`` } else { `\`${hn}\`, which borrows \`${pn}\`,` };
+            self.err(e.span, `${what} is used after this resumes the code that lent \`${pn}\`, which may end it`.asStr());
+          }
+        }
+      }
+      // What resuming gives back may hold what the body held, never the continuation: it is used
+      // up by the call.
+      let v = self.expr(callee, #Read);
+      if (const #Some(kv) = k) { v.loans.retain((l) => self.loans[l].path.root != kv); }
+      argVals.push([#None, v]);
+    } else if (!match (callee.kind) { #Ident(_) | #Field { target: _ } => true, _ => false } || fid.isNone()) {
+      // Calling a function value: it is used — used up, if it may be called only once — and what
+      // it captured flows on, but not the borrow taken to call it.
+      const usedUp = match (self.tyOf(callee)) {
+        #Fn(f) => f.mode == #Once,
+        #Named(d, _) => self.p.known.get("Cont") == #Some(d),
+        _ => false,
+      };
+      const v = self.expr(callee, if (usedUp) { #Move } else { #Read });
+      const calleeRoot: Option<usize> = match (self.place(callee)) { #Some(p) => #Some(p.root), #None => #None };
+      let held: Vec<usize> = Vec.new();
+      for (const l of v.loans) { if (#Some(self.loans[l].path.root) != calleeRoot) { held.push(l); } }
+      argVals.push([#None, { loans: held }]);
+    }
+    const role = self.closureRole(fid);
+    let mutArgs: Vec<[usize, Path, Span]> = Vec.new();
+    for (const [i, a] of args.iter().enumerate()) {
+      const at = self.tyOf(a);
+      const use: Use = match (params.get(i)) { #Some([_, p]) => self.argUse(p, at), #None => #Move };
+      if (const #Lambda { params: _ } = a.kind) { self.nextRole = role; }
+      // Two phases, as for a receiver: a `mut` argument that is a place is lent `readonly` while
+      // the later arguments are evaluated, and `mut` only for the call itself (§4.1).
+      const target: Expr = match (a.kind) { #BorrowMut(inner) => inner.get().clone(), _ => a.clone() };
+      const staged: Option<Path> = if (use == #Mut) {
+        match (self.place(target)) { #Some(p) => if (self.captured(p.root)) { #None } else { #Some(p) }, #None => #None }
+      } else { #None };
+      let v: Val = match (staged) {
+        #Some(path) => {
+          const firstLoan = self.loans.len();
+          const x = self.expr(target, #Read);
+          let l = self.loans.len();
+          while (l > firstLoan) {
+            l -= 1;
+            if (self.loans[l].path == path) {
+              mutArgs.push([l, path.clone(), target.span]);
+              addLoan(mut lentHere, l);
+              break;
+            }
+          }
+          x
+        }
+        #None => {
+          const before = self.loans.len();
+          const x = self.expr(a, use);
+          if (use == #Read) {
+            if (const #Some(path) = self.place(target)) {
+              for (const l of before..self.loans.len()) { if (self.loans[l].path == path) { addLoan(mut lentHere, l); } }
+            }
+          }
+          x
+        }
+      };
+      // A value that cannot hold a borrow holds none (§4.2).
+      if (!self.mayHold(at)) { v.loans = Vec.new(); }
+      self.nextRole = #Plain;
+      if (const #Some([_, p]) = params.get(i)) {
+        const pt = p.clone();
+        self.checkMode(a, pt, "passed");
+      }
+      // An owned parameter fed from a borrow of a non-`Copy` type is a move out of the borrow.
+      if (const #Some([_, p]) = params.get(i)) {
+        if (const #Borrow(_, inner) = at) {
+          if (!isBorrow(p) && !isShared(p) && !self.p.isCopy(inner) && !self.p.isCopy(at) && self.p.class(p) == 1) {
+            const shown = self.show(inner);
+            self.err(a.span, `cannot move a \`${shown}\` out of a borrow; it is not \`Copy\``.asStr());
+          }
+        }
+      }
+      self.addTemps(v.loans);
+      const pname: Option<String> = match (params.get(i)) { #Some([n, _]) => #Some(n.clone()), #None => #None };
+      argVals.push([pname, v]);
+    }
+    // Phase two: each staged `mut` argument's borrow becomes `mut` for the call itself.
+    for (const [l, path, span] of mutArgs) {
+      self.loans[l].mutable = true;
+      self.checkMutable(path, span);
+      self.access(path, true, span, [l]);
+    }
+    // Phase two: the receiver's borrow becomes `mut` for the call itself.
+    if (const #Some([l, path, span]) = receiverLoan) {
+      self.loans[l].mutable = true;
+      self.checkMutable(path, span);
+      self.access(path, true, span, [l]);
+    }
+    self.taskCaptures(fid, args);
+    self.temps.pop();
+    // The result carries its sources' borrows unless it cannot hold one (§4.2). A result that can
+    // hold a borrow only through a type argument holds what its arguments held, never a borrow of
+    // an argument's place: generic code cannot make one into a `T`.
+    let loans: Vec<usize> = Vec.new();
+    if (yields || self.mayHold(ret)) {
+      const sources: Option<Vec<String>> = match (fid) { #Some(f) => #Some(resultSources(self.p, self.p.fns[f].scheme)), #None => #None };
+      // A generator's items are what it gives, whatever its result's type.
+      const declared = yields || match (fid) { #Some(f) => self.declaredHolds(f), #None => true };
+      for (const [name, v] of argVals) {
+        const isSource = match (sources) {
+          #Some(srcs) => match (name) { #Some(n) => srcs.iter().some((s) => s == n), #None => true },
+          #None => true,
+        };
+        if (isSource) {
+          for (const l of v.loans) { if (declared || !hasLoan(lentHere, l)) { addLoan(mut loans, l); } }
+        }
+      }
+    }
+    { loans: loans }
+  }
+
+  // Whether a function's declared result can hold a borrow other than through its type
+  // parameters.
+  function declaredHolds(self: readonly Self, f: usize): bool {
+    let params: Vec<u32> = Vec.new();
+    for (const g of self.p.fns[f].scheme.tparams) { params.push(g.sym.id); }
+    const ret = self.p.fns[f].scheme.ret.clone();
+    self.p.class(ret) == 2 || hidesBorrows(ret, self.p, params)
+  }
+
+  function addTemps(self: mut Self, ls: readonly Vec<usize>): void {
+    const n = self.temps.len();
+    if (n > 0) { addLoans(mut self.temps[n - 1], ls); }
+  }
+
+  // At a point that may perform a handled effect, the body is suspended there while the arm
+  // runs, holding every loan still needed afterwards.
+  function notePerform(self: mut Self, e: readonly Expr): void {
+    if (self.collecting || self.handling.len() == 0) { return; }
+    const defs: Vec<Option<usize>> = match (self.typed.performs.get(e.id)) { #Some(d) => d.clone(), #None => return };
+    const live = self.liveLoans(e.span.end, Vec.new());
+    for (const d of defs) {
+      // The innermost `handle` of an effect takes it; an open row may be any of them.
+      let i = self.handling.len();
+      while (i > 0) {
+        i -= 1;
+        const frameEffect = self.handling[i][0];
+        const takes = match (d) { #None => true, #Some(x) => x == frameEffect };
+        if (takes) {
+          addLoans(mut self.handling[i][1], live);
+          if (d.isSome()) { break; }
+        }
+      }
+    }
+  }
+
+  // Whether a call's closure argument is a scope's body or a task (§6.1).
+  function closureRole(self: readonly Self, fid: Option<usize>): Role {
+    const f = match (fid) { #Some(f) => f, #None => return #Plain };
+    if (!self.p.modules[self.p.fns[f].module].isStd) { return #Plain; }
+    const name = self.p.fns[f].name.asStr();
+    if ((name == "spawn" || name == "fork") && self.implOn(f, "Scope")) { return #Task; }
+    if (name == "scope" && self.implOn(f, "Io")) { return #ScopeBody; }
+    #Plain
+  }
+
+  function implOn(self: readonly Self, f: usize, name: str): bool {
+    match (self.p.fns[f].implId) {
+      #Some(i) => match (self.p.impls[i].target) { #Named(d, _) => self.p.defs[d].name == name, _ => false },
+      #None => false,
+    }
+  }
+
+  // A task may capture only `Send` values, moved in, or `readonly` borrows of them (§6.1).
+  function taskCaptures(self: mut Self, fid: Option<usize>, args: readonly Vec<Expr>): void {
+    const f = match (fid) { #Some(f) => f, #None => return };
+    const name = self.p.fns[f].name.asStr();
+    const isTask = self.p.modules[self.p.fns[f].module].isStd && (name == "spawn" || name == "fork") && self.implOn(f, "Scope");
+    if (!isTask || self.collecting) { return; }
+    // Only inside the body of its `Io.scope` is it known what outlives the scope; a task started
+    // elsewhere, by a helper given the scope, cannot borrow at all.
+    const inBody = self.roles.iter().some((r) => r == #ScopeBody);
+    for (const a of args) {
+      const [ps, body]: [Vec<Param>, Expr] = match (a.kind) {
+        #Lambda { params, body } => [params.clone(), body.get().clone()],
+        _ => continue,
+      };
+      let bound: HashSet<String> = HashSet.new();
+      for (const p of ps) { bound.insert(p.name.name.clone()); }
+      let free: Vec<[String, Span]> = Vec.new();
+      freeVars(body, bound, mut free);
+      for (const [vname, span] of free) {
+        const v = match (self.lookup(vname.asStr())) { #Some(v) => v, #None => continue };
+        const ty = self.vars[v].ty.clone();
+        const isFn = match (ty) { #Fn(_) => true, _ => false };
+        if (!inBody && (self.p.class(ty) == 2 || isFn)) {
+          const shown = self.show(ty);
+          self.err(span, `a task started outside the body of its \`Io.scope\` cannot capture \`${vname}\`, a \`${shown}\`, which borrows: nothing here says it outlives the scope (pass an owned value)`.asStr());
+          continue;
+        }
+        if (!self.sendable(v, false)) {
+          const shown = self.show(ty);
+          const why = if (self.p.isSendGiven(ty, self.sendParams)) { "holds a borrow" } else { "is not `Send`" };
+          self.err(span, `a task cannot capture \`${vname}\`: \`${shown}\` ${why}`.asStr());
+        }
+      }
+    }
+  }
+
+  // Whether binding `v` may be owned by something that leaves this function's fiber: an escaping
+  // closure (`mut` borrows, which it holds alone, allowed) or a task (§4.3, §6.1).
+  function sendable(self: readonly Self, v: usize, mutOk: bool): bool {
+    const ty = self.vars[v].ty.clone();
+    match (ty) {
+      #Borrow(m, inner) => (mutOk || !m) && self.p.isSendGiven(inner, self.sendParams),
+      // A `str` is a `readonly` borrow of immutable bytes.
+      #Prim(#Str) => true,
+      // A closure lent borrows carries them; one that escaped owns only `Send` values.
+      #Fn(_) => mutOk || match (self.state.holds.get(v)) { #Some(h) => h.len() == 0, #None => true },
+      t => self.p.isSendGiven(t, self.sendParams) || self.p.isCopy(t) && self.p.class(t) == 1,
+    }
+  }
+
+  function lambda(self: mut Self, e: readonly Expr, params: readonly Vec<Param>, body: readonly Expr): Val {
+    const escapes = self.escaping;
+    const role = replace(mut self.nextRole, #Plain);
+    // A task borrows only what is outside its scope, which outlives it; what is declared inside,
+    // it moves in (§6.1).
+    let outsideScope: Option<HashSet<usize>> = #None;
+    if (role == #Task) {
+      let found: Option<HashSet<usize>> = #None;
+      let i = self.roles.len();
+      while (i > 0) {
+        i -= 1;
+        if (self.roles[i] == #ScopeBody) {
+          found = #Some(self.lambdas[i].outer.clone());
+          break;
+        }
+      }
+      outsideScope = match (found) { #Some(s) => #Some(s), #None => #Some(HashSet.new()) };
+    }
+    self.roles.push(role);
+    // Check the body first, recording how it uses each binding it captures.
+    let outer: HashSet<usize> = HashSet.new();
+    for (const sc of self.scopes) { for (const [_, v] of sc.entries()) { outer.insert(v); } }
+    self.lambdas.push({ outer, captures: HashMap.new() });
+    const savedState = self.state.clone();
+    const savedTemps = replace(mut self.temps, Vec.new());
+    const savedDeferred = replace(mut self.deferred, Vec.new());
+    self.scopes.push(HashMap.new());
+    let paramIds: Vec<usize> = Vec.new();
+    for (const p of params) {
+      const ty = self.nameTy(p.name.span.start);
+      const id = self.declareVar(p.name.name.asStr(), ty, true, false, p.name.span.start);
+      self.lambdaParams.insert(id);
+      paramIds.push(id);
+    }
+    const result = self.contained(body, #Move);
+    // A closure's result may borrow a parameter that is itself a borrow, never one it owns, which
+    // it drops when it returns (§4.2).
+    if (!self.collecting) {
+      const found = result.loans.iter().find((l) => {
+        const loan = self.loans[l].clone();
+        !loan.external && paramIds.iter().some((p) => p == loan.path.root) && !self.throughReference(loan)
+      });
+      if (const #Some(l) = found) {
+        const name = self.vars[self.loans[l].path.root].name.clone();
+        self.err(body.span, `the closure's result borrows \`${name}\`, a parameter it owns and drops when it returns: return an owned value`.asStr());
+      }
+    }
+    self.scopes.pop();
+    self.temps = savedTemps;
+    self.deferred = savedDeferred;
+    self.state = savedState;
+    const frame = match (self.lambdas.pop()) { #Some(f) => f, #None => ({ outer: HashSet.new(), captures: HashMap.new() }) };
+    self.roles.pop();
+    // The closure's mode follows from what its body does with its captures (§4.3): changing one
+    // makes it `mut`, giving one away makes it `once`.
+    let mode: [FnMode, String] = [#Shared, String.new()];
+    for (const [v, [how, _]] of frame.captures.entries()) {
+      const name = self.vars[v].name.clone();
+      const ty = self.vars[v].ty.clone();
+      if (how == #Move && !self.p.isCopy(ty) && !isBorrow(ty)) {
+        mode = [#Once, name];
+      } else if (how == #Mut && mode[0] == #Shared) {
+        mode = [#Mut, name];
+      }
+    }
+    self.closureModes.insert(e.span, mode);
+    // Then capture each binding as the body needs it: a `readonly` loan for reads, a `mut` loan
+    // for changes, a move for moves (§4.3). The closure holds these loans.
+    let loans: Vec<usize> = Vec.new();
+    let captures: Vec<[usize, Use, Span]> = Vec.new();
+    for (const [v, [how, span]] of frame.captures.entries()) { captures.push([v, how, span]); }
+    captures.sortBy((a, b) => a[2].start.cmp(b[2].start));
+    for (const [v, how0, span] of captures) {
+      // A closure that escapes owns what it captures: a borrow is copied (with its loans), a
+      // `Copy` value is copied, anything else is moved (§4.3).
+      let how = how0;
+      if (escapes) {
+        how = #Move;
+      } else if (const #Some(outside) = outsideScope) {
+        if (!outside.has(v)) {
+          if (how != #Move) { self.taskMoved.insert(v, e.span); }
+          how = #Move;
+        }
+      }
+      if (escapes && !self.collecting && !self.sendable(v, true)) {
+        const name = self.vars[v].name.clone();
+        const shown = self.show(self.vars[v].ty);
+        self.err(span, `a closure that escapes owns what it captures, so it can capture only \`Send\` values: \`${name}\` is a \`${shown}\``.asStr());
+      } else if (escapes && !self.collecting && hasRegion(self.vars[v].ty)) {
+        // A closure's type does not say which regions it holds data of, so one that escapes could
+        // outlive them (§4.6).
+        const name = self.vars[v].name.clone();
+        const shown = self.show(self.vars[v].ty);
+        self.err(span, `a closure that escapes cannot capture \`${name}\`, a \`${shown}\`: its type does not mention the region, so it could outlive it`.asStr());
+      }
+      // A task shares what it borrows with the other tasks, so it may only read it (§6.1).
+      if (role == #Task && how == #Mut && !self.collecting) {
+        const name = self.vars[v].name.clone();
+        self.err(span, `a task cannot change \`${name}\`, which other tasks may be reading: share it through a \`Mutex\`, or move it into one task`.asStr());
+      }
+      self.recordUse(v, span);
+      // The capture happens where the closure is made: a binding moved in leaves its scope's
+      // ownership then, not when the closure runs.
+      const ident: Expr = { kind: #Ident(self.vars[v].name.clone()), span: e.span, id: e.id };
+      const val = self.usePlace(ident, Path { root: v, fields: Vec.new() }, how);
+      if (self.moves.remove(e.span).isSome()) {
+        const name = self.vars[v].name.clone();
+        const ty = self.vars[v].ty.clone();
+        // A loop's body is checked twice; the closure captures once.
+        match (self.capturedMoves.getMut(e.span)) {
+          #Some(list) => { if (!list.iter().some(([n, _]) => n == name)) { list.push([name, ty]); } }
+          #None => { self.capturedMoves.insert(e.span, [[name, ty]]); }
+        }
+      }
+      addLoans(mut loans, val.loans);
+    }
+    { loans: loans }
+  }
+
+  // The mode of a closure, written in place or bound to a name.
+  function closureMode(self: readonly Self, e: readonly Expr): Option<[FnMode, String]> {
+    match (e.kind) {
+      #Lambda { params: _ } => match (self.closureModes.get(e.span)) { #Some(m) => #Some(m.clone()), #None => #None },
+      #Ident(_) => match (self.resolved.get(e.span)) {
+        #Some(v) => match (self.varModes.get(v)) { #Some(m) => #Some(m.clone()), #None => #None },
+        #None => #None,
+      },
+      _ => #None,
+    }
+  }
+
+  // A closure goes where a function type says how often, and by how many callers at once, it may
+  // be called.
+  function checkMode(self: mut Self, e: readonly Expr, want: readonly Ty, how: str): void {
+    const fmode = match (want) { #Fn(f) => f.mode, _ => return };
+    const [mode, capture] = match (self.closureMode(e)) { #Some(m) => m, #None => return };
+    if (self.collecting) { return; }
+    if (mode == #Mut && fmode == #Shared) {
+      self.err(e.span, `this closure changes \`${capture}\`, so one caller at a time may call it (\`mut\`), but it is ${how} where it may be called by several at once`.asStr());
+    } else if (mode == #Once && (fmode == #Shared || fmode == #Mut)) {
+      self.err(e.span, `this closure gives away \`${capture}\`, so it can be called only once (\`once\`), but it is ${how} where it may be called again`.asStr());
+    }
+  }
+
+  // A yielded value is a result of its function, handed out before it returns: it may borrow what
+  // the function was given, never its locals (§5.5).
+  function checkYield(self: mut Self, v: readonly Val, e: readonly Expr): void {
+    if (self.collecting || !self.mayHold(self.tyOf(e))) { return; }
+    const inLambda = self.lambdas.len() > 0;
+    for (const l of v.loans) {
+      const loan = self.loans[l].clone();
+      const root = loan.path.root;
+      const given = if (inLambda) { self.lambdaParams.has(root) } else { self.vars[root].param };
+      // A loan taken through a reference borrows what that refers to, whose own loans the value
+      // carries too: they are what decides.
+      if (loan.external || self.throughReference(loan)) { continue; }
+      const name = self.vars[root].name.clone();
+      const what = if (given) { "a parameter the generator owns, which it drops when it ends" } else { "a local of the generator, which may end before the item does" };
+      self.err(e.span, `this yields a borrow of \`${name}\`, ${what}: yield an owned value (\`.toString()\`), or borrow from a parameter that is itself a borrow`.asStr());
+      return;
+    }
+  }
+
+  function isGen(self: readonly Self, t: readonly Ty): bool {
+    match (stripBorrow(t)) {
+      #Named(d, _) => self.p.defs[d].name == "Gen" && self.p.modules[self.p.defs[d].module].isStd,
+      _ => false,
+    }
+  }
+
+  // Whether a loan reaches its place through a reference — the binding, or a field on the way —
+  // so it borrows what that refers to, not the binding's own storage.
+  function throughReference(self: readonly Self, loan: readonly Loan): bool {
+    let t = self.vars[loan.path.root].ty.clone();
+    if (isReference(t)) { return true; }
+    for (const f of loan.path.fields) {
+      t = match (fieldType(self.p, t, f.asStr())) { #Some(x) => x, #None => #Error };
+      if (isReference(t)) { return true; }
+    }
+    false
+  }
+
+  function checkReturn(self: mut Self, v: readonly Val, span: Span): void {
+    if (self.collecting || !self.mayHold(self.retTy)) { return; }
+    for (const l of v.loans) {
+      const loan = self.loans[l].clone();
+      const root = loan.path.root;
+      const name = self.vars[root].name.clone();
+      const param = self.vars[root].param;
+      const source = self.sources.iter().some((s) => s == name);
+      if (param && source && (loan.external || self.throughReference(loan))) { continue; }
+      // Through a local reference, the reference's own loans decide.
+      if (!param && !loan.external && self.throughReference(loan)) { continue; }
+      const msg = if (param && source) {
+        `the result borrows \`${name}\`, a parameter this function owns and drops when it returns: take it as a borrow, or return an owned value`
+      } else if (param) {
+        `the result borrows \`${name}\`, but \`${name}\` is not one of the result's sources (add it with \`from\`)`
+      } else {
+        `the result borrows \`${name}\`, which does not outlive this function`
+      };
+      self.err(span, msg.asStr());
+    }
+  }
+
+  // How a function's result is taken from the expression that gives it.
+  function resultUse(self: readonly Self): Use {
+    match (self.retTy) { #Borrow(true, _) => #Mut, #Borrow(false, _) => #Read, _ => #Move }
+  }
+}
+
+type Val = { loans: Vec<usize> };
+
+function rank(u: Use): u8 { match (u) { #Read => 0, #Mut => 1, #Move => 2 } }
+
+function stripBorrow(t: readonly Ty): Ty {
+  match (t) { #Borrow(_, inner) => stripBorrow(inner), _ => t.clone() }
+}
+
+function isBorrow(t: readonly Ty): bool { match (t) { #Borrow(_, _) => true, _ => false } }
+
+function isMutBorrowTy(t: readonly Ty): bool { match (t) { #Borrow(true, _) => true, _ => false } }
+
+// A `readonly` borrow, a slice or a `str`: what is passed on by copying it with what it holds.
+function isShared(t: readonly Ty): bool {
+  match (t) { #Borrow(false, _) | #Slice(_) | #Prim(#Str) => true, _ => false }
+}
+
+// Whether a binding of this type is a reference, so a borrow taken through it borrows what it
+// refers to, which outlives the binding.
+function isReference(t: readonly Ty): bool {
+  match (t) { #Borrow(_, _) | #Slice(_) | #Prim(#Str) | #Fn(_) | #Error => true, _ => false }
+}
+
+function changedRoot(e: readonly Expr, out: mut HashSet<String>): void {
+  match (e.kind) {
+    #Ident(n) => { out.insert(n.clone()); }
+    #Field { target, name: _ } | #Index { target, index: _ } | #BorrowMut(target) => changedRoot(target, mut out),
+    _ => {}
+  }
+}
+
+// The parameters a function's result may borrow from (§4.2): those named by `from`; otherwise the
+// receiver of a method, or every parameter of a free function, plus parameters whose types can
+// hide a borrow. An explicit `from` is verified against the body, so it may leave those out.
+function resultSources(p: readonly Program, scheme: readonly Scheme): Vec<String> {
+  if (scheme.retFrom.len() > 0) { return scheme.retFrom.clone(); }
+  const send = sendParamsOf(p, scheme.tparams);
+  let sources: Vec<String> = Vec.new();
+  const isMethod = match (scheme.params.first()) { #Some([n, _]) => n == "self", #None => false };
+  if (isMethod) { sources.push("self".toString()); } else { for (const [n, _] of scheme.params) { sources.push(n.clone()); } }
+  for (const [n, t] of scheme.params) { if (hidesBorrows(t, p, send)) { sources.push(n.clone()); } }
+  sources
+}
+
+// Whether a pattern binds anything.
+function patternBinds(p: readonly Pattern): bool {
+  match (p.kind) {
+    #Bind(_) => true,
+    #Tuple(ps) | #Or(ps) => ps.iter().some((q) => patternBinds(q)),
+    #Record { name: _, fields } => fields.iter().some(([_, q]) => match (q) { #Some(x) => patternBinds(x), #None => true }),
+    #Tag { name: _, args } => match (args) {
+      #None => false,
+      #Tuple(ps) => ps.iter().some((q) => patternBinds(q)),
+      #Record(fs) => fs.iter().some(([_, q]) => match (q) { #Some(x) => patternBinds(x), #None => true }),
+    },
+    _ => false,
+  }
+}
+
+// Arms that bind parts of the value take them; arms that only test it read it.
+function howForScrutinee(arms: readonly Vec<MatchArm>): Use {
+  if (arms.iter().some((a) => patternBinds(a.pat))) { #Move } else { #Read }
+}
+
+function bindNames(p: readonly Pattern, out: mut Vec<String>): void {
+  match (p.kind) {
+    #Bind(n) => out.push(n.clone()),
+    #Tuple(ps) | #Or(ps) => { for (const q of ps) { bindNames(q, mut out); } }
+    #Record { name: _, fields } => fieldNames(fields, mut out),
+    #Tag { name: _, args } => match (args) {
+      #None => {}
+      #Tuple(ps) => { for (const q of ps) { bindNames(q, mut out); } }
+      #Record(fs) => fieldNames(fs, mut out),
+    },
+    _ => {}
+  }
+}
+
+function fieldNames(fs: readonly Vec<[Ident, Option<Pattern>]>, out: mut Vec<String>): void {
+  for (const [name, sub] of fs) {
+    match (sub) { #Some(q) => bindNames(q, mut out), #None => out.push(name.name.clone()) }
+  }
+}
+
+// The pattern ids of the bindings a pattern makes.
+function bindIds(p: readonly Pattern, out: mut Vec<usize>): void {
+  match (p.kind) {
+    #Bind(_) => out.push(p.id),
+    #Tuple(ps) | #Or(ps) => { for (const q of ps) { bindIds(q, mut out); } }
+    #Record { name: _, fields } => { for (const [_, q] of fields) { if (const #Some(x) = q) { bindIds(x, mut out); } } }
+    #Tag { name: _, args } => match (args) {
+      #None => {}
+      #Tuple(ps) => { for (const q of ps) { bindIds(q, mut out); } }
+      #Record(fs) => { for (const [_, q] of fs) { if (const #Some(x) = q) { bindIds(x, mut out); } } }
+    },
+    _ => {}
+  }
+}
+
+// The declaration sites of the bindings a pattern makes: where each name is.
+function bindSites(p: readonly Pattern, out: mut Vec<usize>): void {
+  match (p.kind) {
+    #Bind(_) => out.push(p.span.start),
+    #Tuple(ps) | #Or(ps) => { for (const q of ps) { bindSites(q, mut out); } }
+    #Record { name: _, fields } => fieldSites(fields, mut out),
+    #Tag { name: _, args } => match (args) {
+      #None => {}
+      #Tuple(ps) => { for (const q of ps) { bindSites(q, mut out); } }
+      #Record(fs) => fieldSites(fs, mut out),
+    },
+    _ => {}
+  }
+}
+
+function fieldSites(fs: readonly Vec<[Ident, Option<Pattern>]>, out: mut Vec<usize>): void {
+  for (const [name, sub] of fs) {
+    match (sub) { #Some(q) => bindSites(q, mut out), #None => out.push(name.span.start) }
+  }
+}
+
+// Type parameters that are `Send`, directly or through an interface that extends it: they range
+// over class-1 types, so they hide no borrow (§4.4).
+function sendParamsOf(p: readonly Program, tparams: readonly Vec<GParam>): Vec<u32> {
+  let out: Vec<u32> = Vec.new();
+  const send = p.knownDef("Send");
+  for (const g of tparams) {
+    const isSend = g.bounds.iter().some((b) => match (b) {
+      #Named(d, _) => p.ifaceClosure(d).iter().some((i) => #Some(i) == send),
+      _ => false,
+    });
+    if (isSend) { out.push(g.sym.id); }
+  }
+  out
+}
+
+function hidesBorrows(t: readonly Ty, p: readonly Program, send: readonly Vec<u32>): bool {
+  let inside: Vec<Ty> = Vec.new();
+  hidesIn(t, p, send, mut inside)
+}
+
+// Whether a type can hold a borrow its type does not show: a closure, a continuation, a type
+// parameter, or a type built from one — a nominal type's fields included. A nominal type met again
+// inside itself is a cycle, which hides nothing that the first visit did not find.
+function hidesIn(t: readonly Ty, p: readonly Program, send: readonly Vec<u32>, inside: mut Vec<Ty>): bool {
+  match (t) {
+    #Param(s) => !send.iter().some((x) => x == s.id),
+    #Fn(_) | #Var(_) | #Assoc(_, _) => true,
+    #Named(d, args) => {
+      const name = p.defs[d].name.asStr();
+      if ((name == "Gen" || name == "Cont") && p.modules[p.defs[d].module].isStd) { return true; }
+      if (inside.iter().some((x) => x == t)) { return false; }
+      inside.push(t.clone());
+      if (args.iter().some((a) => match (a) { #Ty(x) => hidesIn(x, p, send, mut inside), _ => false })) { return true; }
+      match (p.defs[d].kind) {
+        #Struct { fields: _ } => match (p.structFields(d, args)) {
+          #Some(fs) => fs.iter().some(([_, x]) => hidesIn(x, p, send, mut inside)),
+          #None => false,
+        },
+        #Enum { tags } => tags.iter().some(([_, x]) => hidesIn(substParams(x, p.defs[d].params, args), p, send, mut inside)),
+        _ => false,
+      }
+    }
+    #Tuple(ts) => ts.iter().some((x) => hidesIn(x, p, send, mut inside)),
+    #Record(r) | #Union(r) => r.labels.iter().some(([_, x]) => hidesIn(x, p, send, mut inside)),
+    #Array(x, _) | #Slice(x) | #Borrow(_, x) => hidesIn(x, p, send, mut inside),
+    _ => false,
+  }
+}
+
+function dropsIn(p: readonly Program, t: readonly Ty, inside: mut Vec<Ty>): bool {
+  match (t) {
+    #Named(d, args) => {
+      if (p.hasDrop(d)) { return true; }
+      if (inside.iter().some((x) => x == t)) { return false; }
+      inside.push(t.clone());
+      if (args.iter().some((a) => match (a) { #Ty(x) => dropsIn(p, x, mut inside), _ => false })) { return true; }
+      match (p.structFields(d, args)) {
+        #Some(fs) => fs.iter().some(([_, x]) => dropsIn(p, x, mut inside)),
+        #None => false,
+      }
+    }
+    #Tuple(ts) => ts.iter().some((x) => dropsIn(p, x, mut inside)),
+    #Record(r) | #Union(r) => r.labels.iter().some(([_, x]) => dropsIn(p, x, mut inside)),
+    #Array(x, _) => dropsIn(p, x, mut inside),
+    _ => false,
+  }
+}
+
+function fieldType(p: readonly Program, t0: readonly Ty, field: str): Option<Ty> {
+  let t = t0.clone();
+  while (true) {
+    match (t) {
+      #Borrow(_, inner) => { t = inner.get().clone(); }
+      #Named(d, args) if p.knownDef("Ref") == #Some(d) => match (args.get(1)) {
+        #Some(#Ty(inner)) => { t = inner.clone(); }
+        _ => return #None,
+      },
+      _ => break,
+    }
+  }
+  match (t) {
+    #Named(d, args) => match (p.structFields(d, args)) {
+      #Some(fs) => match (fs.iter().find(([k, _]) => k == field)) { #Some([_, x]) => #Some(x.clone()), #None => #None },
+      #None => #None,
+    },
+    #Record(r) => labelGet(r.labels, field),
+    #Tuple(ts) => match (parseInt(field)) {
+      #Some(i) => if (i >= 0 && (i as usize) < ts.len()) { #Some(ts[i as usize].clone()) } else { #None },
+      #None => #None,
+    },
+    _ => #None,
+  }
+}
+
+// The free variables of an expression (names not bound inside it), with a span of each use.
+function freeVars(e: readonly Expr, bound: readonly HashSet<String>, out: mut Vec<[String, Span]>): void {
+  let b = bound.clone();
+  walkFree(e, mut b, mut out);
+}
+
+function walkFree(e: readonly Expr, bound: mut HashSet<String>, out: mut Vec<[String, Span]>): void {
+  match (e.kind) {
+    #Ident(n) => { if (!bound.has(n.asStr())) { out.push([n.clone(), e.span]); } }
+    #Lambda { params, body } => {
+      let inner = bound.clone();
+      for (const p of params) { inner.insert(p.name.name.clone()); }
+      walkFree(body, mut inner, mut out);
+    }
+    #Block(b) | #Unsafe(b) => walkBlock(b, bound, mut out),
+    #Region { name: _, body } => walkBlock(body, bound, mut out),
+    _ => {
+      for (const c of children(e)) { walkFree(c, mut bound, mut out); }
+      match (e.kind) {
+        #If { cond: _, then, otherwise: _ } => walkBlock(then, bound, mut out),
+        #While { cond: _, body } => walkBlock(body, bound, mut out),
+        #For { mutable: _, pat, iter: _, body } => {
+          let inner = bound.clone();
+          patternNames(pat, mut inner);
+          walkBlock(body, inner, mut out);
+        }
+        #Match { scrutinee: _, arms } => {
+          for (const arm of arms) {
+            let inner = bound.clone();
+            patternNames(arm.pat, mut inner);
+            if (const #Some(g) = arm.guard) { walkFree(g, mut inner, mut out); }
+            walkFree(arm.body, mut inner, mut out);
+          }
+        }
+        #Try { body, pat, handler } => {
+          walkBlock(body, bound, mut out);
+          let inner = bound.clone();
+          patternNames(pat, mut inner);
+          walkBlock(handler, inner, mut out);
+        }
+        #Handle { body, effect: _, arms } => {
+          walkBlock(body, bound, mut out);
+          for (const arm of arms) {
+            let inner = bound.clone();
+            for (const p of arm.params) { inner.insert(p.name.clone()); }
+            if (const #Some(k) = arm.resumes) { inner.insert(k.name.clone()); }
+            walkBlock(arm.body, inner, mut out);
+          }
+        }
+        _ => {}
+      }
+    }
+  }
+}
+
+function walkBlock(b: readonly Block, bound: readonly HashSet<String>, out: mut Vec<[String, Span]>): void {
+  let inner = bound.clone();
+  for (const s of b.stmts) {
+    match (s) {
+      #Let { mutable: _, pat, ty: _, init, span: _ } => {
+        walkFree(init, mut inner, mut out);
+        patternNames(pat, mut inner);
+      }
+      #Defer(x) | #Expr(x) => walkFree(x, mut inner, mut out),
+    }
+  }
+  if (const #Some(t) = b.tail) { walkFree(t, mut inner, mut out); }
+}
+
+function patternNames(p: readonly Pattern, out: mut HashSet<String>): void {
+  let names: Vec<String> = Vec.new();
+  bindNames(p, mut names);
+  for (const n of names) { out.insert(n.clone()); }
+}
+
+// The direct sub-expressions of an expression (not those inside blocks it owns).
+function children(e: readonly Expr): void uses Yield<readonly Expr> {
+  match (e.kind) {
+    #Field { target, name: _ } => yield target.get(),
+    #Index { target, index } => {
+      yield target.get();
+      yield index.get();
+    }
+    #Call { callee, typeArgs: _, args } => {
+      yield callee.get();
+      for (const a of args) { yield a; }
+    }
+    #Unary { op: _, operand } => yield operand.get(),
+    #BorrowMut(x) | #Throw(x) | #Yield(x) | #Comptime(x) => yield x.get(),
+    #Binary { op: _, lhs, rhs } => {
+      yield lhs.get();
+      yield rhs.get();
+    }
+    #Assign { op: _, target, value } => {
+      yield target.get();
+      yield value.get();
+    }
+    #Cast { expr, ty: _ } => yield expr.get(),
+    #Range { lo, hi } => {
+      if (const #Some(x) = lo) { yield x.get(); }
+      if (const #Some(x) = hi) { yield x.get(); }
+    }
+    #If { cond, then: _, otherwise } => {
+      yield cond.get();
+      if (const #Some(o) = otherwise) { yield o.get(); }
+    }
+    #While { cond, body: _ } => yield cond.get(),
+    #For { mutable: _, pat: _, iter, body: _ } => yield iter.get(),
+    #Match { scrutinee, arms: _ } => yield scrutinee.get(),
+    #Return(x) => { if (const #Some(v) = x) { yield v.get(); } }
+    #Tag { name: _, args } => match (args) {
+      #Tuple(items) => { for (const x of items) { yield x; } }
+      #Record(fields) => { for (const f of fields) { if (const #Some(v) = f.value) { yield v; } } }
+      #None => {}
+    },
+    #List(items) => { for (const x of items) { yield x; } }
+    #Record { name: _, fields } => { for (const f of fields) { if (const #Some(v) = f.value) { yield v; } } }
+    #Template(pieces) => { for (const p of pieces) { if (const #Expr(x) = p) { yield x; } } }
+    _ => {}
+  }
+}
+
+// The bindings a block assigns to or lends `mut`, or calls a method on, by name: for the resume
+// rule, which cannot see through calls.
+function syntacticBlockChanges(b: readonly Block, out: mut HashSet<String>): void {
+  for (const st of b.stmts) {
+    match (st) {
+      #Let { mutable: _, pat: _, ty: _, init, span: _ } => syntacticChanges(init, mut out),
+      #Defer(x) | #Expr(x) => syntacticChanges(x, mut out),
+    }
+  }
+  if (const #Some(t) = b.tail) { syntacticChanges(t, mut out); }
+}
+
+function syntacticChanges(e: readonly Expr, out: mut HashSet<String>): void {
+  match (e.kind) {
+    #Assign { op: _, target, value: _ } => syntacticRoot(target, mut out),
+    #BorrowMut(target) => syntacticRoot(target, mut out),
+    // A method call may change its receiver.
+    #Call { callee, typeArgs: _, args: _ } => { if (const #Field { target, name: _ } = callee.kind) { syntacticRoot(target, mut out); } }
+    _ => {}
+  }
+  for (const c of children(e)) { syntacticChanges(c, mut out); }
+  match (e.kind) {
+    #Block(b) | #Unsafe(b) => syntacticBlockChanges(b, mut out),
+    #Region { name: _, body } => syntacticBlockChanges(body, mut out),
+    #If { cond: _, then, otherwise: _ } => syntacticBlockChanges(then, mut out),
+    #While { cond: _, body } => syntacticBlockChanges(body, mut out),
+    #For { mutable: _, pat: _, iter: _, body } => syntacticBlockChanges(body, mut out),
+    #Match { scrutinee: _, arms } => { for (const a of arms) { syntacticChanges(a.body, mut out); } }
+    #Try { body, pat: _, handler } => {
+      syntacticBlockChanges(body, mut out);
+      syntacticBlockChanges(handler, mut out);
+    }
+    #Lambda { params: _, body } => syntacticChanges(body, mut out),
+    _ => {}
+  }
+}
+
+function syntacticRoot(e: readonly Expr, out: mut HashSet<String>): void {
+  match (e.kind) {
+    #Ident(n) => { out.insert(n.clone()); }
+    #Field { target, name: _ } | #Index { target, index: _ } => syntacticRoot(target, mut out),
+    _ => {}
+  }
+}
+
+// Whether an expression never finishes normally: it throws, returns, breaks or continues on every
+// path.
+function diverges(e: readonly Expr): bool {
+  match (e.kind) {
+    #Throw(_) | #Return(_) | #Break | #Continue => true,
+    #Block(b) | #Unsafe(b) => blockDiverges(b),
+    #If { cond: _, then, otherwise: #Some(o) } => blockDiverges(then) && diverges(o),
+    #Match { scrutinee: _, arms } => arms.len() > 0 && arms.iter().every((a) => diverges(a.body)),
+    _ => false,
+  }
+}
+
+function blockDiverges(b: readonly Block): bool {
+  b.stmts.iter().some((s) => match (s) { #Expr(x) => diverges(x), _ => false })
+    || match (b.tail) { #Some(t) => diverges(t), #None => false }
+}
+
+// Whether an arm lets its continuation `k` go other than by calling it: returns it, stores it,
+// passes it on.
+function escapes(b: readonly Block, k: str): bool {
+  let seen: Vec<[String, Span]> = Vec.new();
+  walkBlock(b, HashSet.new(), mut seen);
+  let calls: usize = 0;
+  countCalls(b, k, mut calls);
+  let named: usize = 0;
+  for (const [n, _] of seen) { if (n == k) { named += 1; } }
+  named > calls
+}
+
+// How many times `k(…)` is called in a block.
+function countCalls(b: readonly Block, k: str, n: mut usize): void {
+  for (const s of b.stmts) {
+    match (s) {
+      #Let { mutable: _, pat: _, ty: _, init, span: _ } => callsIn(init, k, mut n),
+      #Defer(x) | #Expr(x) => callsIn(x, k, mut n),
+    }
+  }
+  if (const #Some(t) = b.tail) { callsIn(t, k, mut n); }
+}
+
+function callsIn(e: readonly Expr, k: str, n: mut usize): void {
+  if (const #Call { callee, typeArgs: _, args } = e.kind) {
+    const direct = match (callee.kind) { #Ident(c) => c == k, _ => false };
+    if (direct) { n += 1; } else { callsIn(callee, k, mut n); }
+    for (const a of args) { callsIn(a, k, mut n); }
+    return;
+  }
+  for (const c of children(e)) { callsIn(c, k, mut n); }
+}
+
+// Whether a type holds region data: a `Ref`, `Cell` or `RegionList` of some region (§4.6).
+function hasRegion(t: readonly Ty): bool {
+  match (t) {
+    #Named(_, args) => args.iter().some((a) => match (a) { #Region(_) => true, #Ty(x) => hasRegion(x), _ => false }),
+    #Record(r) | #Union(r) => r.labels.iter().some(([_, x]) => hasRegion(x)),
+    #Tuple(ts) => ts.iter().some((x) => hasRegion(x)),
+    #Array(x, _) | #Slice(x) | #Borrow(_, x) => hasRegion(x),
+    _ => false,
+  }
+}

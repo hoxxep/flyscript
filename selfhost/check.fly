@@ -1729,6 +1729,7 @@ impl Checker {
         #None => match (wantParams) { #Some(w) => self.normalize(w[i]), #None => self.s.fresh() },
       };
       if (p.name.name != "_") { self.declare(p.name.name.asStr(), t.clone()); }
+      self.typed.names.insert(p.name.span.start, t.clone());
       ptys.push(t);
     }
     const r = match (wantRet) { #Some(x) => x.clone(), #None => self.s.fresh() };
@@ -2017,7 +2018,10 @@ impl Checker {
       for (const [n, t] of op.params) { params.push([n.clone(), substParams(t, effParams, effArgs)]); }
       const opRet = substParams(op.ret, effParams, effArgs);
       self.scopes.push(HashMap.new());
-      for (const i of 0..min(arm.params.len(), params.len())) { self.declare(arm.params[i].name.asStr(), params[i][1].clone()); }
+      for (const i of 0..min(arm.params.len(), params.len())) {
+        self.declare(arm.params[i].name.asStr(), params[i][1].clone());
+        self.typed.names.insert(arm.params[i].span.start, params[i][1].clone());
+      }
       if (const #Some(k) = arm.resumes) {
         // A continuation of a `void` operation takes no argument: `k()`.
         const cont: Ty = #Named(self.known("Cont"), [#Ty(opRet), #Ty(result.clone()), #Row(contRow.clone())]);
@@ -2731,6 +2735,9 @@ impl Checker {
     let slots: HashMap<usize, Ty> = HashMap.new();
     for (const [k, t] of typed.slots.entries()) { slots.insert(k, self.s.zonk(t)); }
     typed.slots = slots;
+    let names: HashMap<usize, Ty> = HashMap.new();
+    for (const [k, t] of typed.names.entries()) { names.insert(k, self.s.zonk(t)); }
+    typed.names = names;
     // A `readonly` borrow of a `Copy` value is indistinguishable from a copy, which holds nothing.
     for (const id of replace(mut self.copyBinds, Vec.new())) {
       if (const #Some(#Borrow(false, inner)) = typed.bindings.get(id)) {

@@ -77,8 +77,9 @@ fn programs() -> Vec<PathBuf> {
     programs
 }
 
-/// The self-hosted checker reports what the Rust prototype's type and effect checker reports:
-/// `flyc types` and selfhost/typecheck.fly print the same diagnostics.
+/// The self-hosted checker reports what the Rust prototype's reports: `flyc check` and
+/// selfhost/typecheck.fly print the same diagnostics, of types and effects and then of ownership.
+/// Ownership's are compared as a set: each pass meets some bindings in a hash map's order.
 #[test]
 fn checks_as_flyc_does() {
     if !has_node() {
@@ -94,10 +95,18 @@ fn checks_as_flyc_does() {
             flyscript::check::expr::check_fn(&mut p, fid);
             fid += 1;
         }
-        let rust: Vec<String> = p.diags.iter().map(|(m, d)| format!("error {m} {}..{}: {}", d.span.start, d.span.end, d.message)).collect();
+        if p.diags.is_empty() {
+            for fid in 0..p.fns.len() {
+                flyscript::check::own::check_function(&mut p, fid);
+            }
+        }
+        let mut rust: Vec<String> = p.diags.iter().map(|(m, d)| format!("error {m} {}..{}: {}", d.span.start, d.span.end, d.message)).collect();
         let js = Command::new("node").arg("--stack-size=65500").arg(&typecheck).arg(&f).arg(root().join("std")).output().unwrap();
-        if String::from_utf8_lossy(&js.stdout).trim_end() != rust.join("\n") {
-            differ.push(f.display().to_string());
+        let mut ours: Vec<String> = String::from_utf8_lossy(&js.stdout).lines().map(str::to_string).collect();
+        rust.sort();
+        ours.sort();
+        if ours != rust {
+            differ.push(format!("{}\n  flyc: {rust:?}\n  ours: {ours:?}", f.display()));
         }
     }
     assert!(differ.is_empty(), "checked differently:\n{}", differ.join("\n"));
