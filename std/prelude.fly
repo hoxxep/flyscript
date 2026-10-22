@@ -520,6 +520,9 @@ impl<T> T[] {
   // Sorts in place by `cmp`, stably: elements `cmp` calls equal keep their order.
   export function sortBy(self: mut Self, cmp: mut (a: readonly T, b: readonly T) => Ordering): void;
   export function reverse(self: mut Self): void;
+  export function first(self: readonly Self): Option<readonly T> from self {
+    if (self.len() == 0) { #None } else { #Some(self[0]) }
+  }
   export function last(self: readonly Self): Option<readonly T> from self {
     if (self.len() == 0) { #None } else { #Some(self[self.len() - 1]) }
   }

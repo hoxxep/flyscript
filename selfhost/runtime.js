@@ -432,6 +432,7 @@ const $rt = (() => {
     drain: (a) => gen(a.splice(0)),
     iter: (a) => gen(a), iterMut: (a) => gen(a),
     *each(a) { yield* a; },
+    first: (a) => (a.length === 0 ? none() : some(a[0])),
     last: (a) => (a.length === 0 ? none() : some(a[a.length - 1])),
     reverse: (a) => { a.reverse(); },
     sortBy: (a, f) => { a.sort((x, y) => ordinal(f(x, y))); },

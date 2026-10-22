@@ -1,0 +1,458 @@
+// Interfaces as bounds (§3.4): calling a method through a bound, choosing the impl for a type,
+// and checking that a type satisfies a bound.
+
+import { Program, DefKind, FnInfo, GParam, Scheme, SubstMap, subst, substEffs, substParams, paramArg, containsParams, moduleScope } from "./env";
+import { Sym, Prim, Region, Row, EffRow, Ty, GArg, Len, keyTy, keyArgs } from "./types";
+import { CV, expander } from "./comptime";
+import { HashMap } from "std/collections";
+
+// The generic arguments an impl was matched with, by parameter symbol.
+export type Binds = HashMap<u32, GArg>;
+
+function bindsKey(b: readonly Binds): String {
+  let parts: Vec<[u32, String]> = Vec.new();
+  for (const [k, v] of b.entries()) { parts.push([k, keyArgs([v.clone()])]); }
+  parts.sortBy((x, y) => x[0].cmp(y[0]));
+  let out = String.new();
+  for (const [k, v] of parts) { out.push(`${k}=${v}`); }
+  out
+}
+
+function bindsMap(b: readonly Binds): SubstMap {
+  let m: SubstMap = HashMap.new();
+  for (const [k, v] of b.entries()) { m.insert(k, v.clone()); }
+  m
+}
+
+export function stripBorrows(t: readonly Ty): Ty {
+  match (t) { #Borrow(_, inner) => stripBorrows(inner), other => other.clone() }
+}
+
+// Specializations are keyed by their `comptime` arguments with regions erased: what generated
+// code does never depends on which region data lives in, and at run time a region parameter
+// stands for whichever region the frame was given.
+export function specKey(ct: readonly Vec<[Sym, Ty]>): String {
+  let out = String.new();
+  for (const [_, t] of ct) {
+    out.push(keyTy(eraseRegions(t)));
+    out.push(";");
+  }
+  out
+}
+
+function eraseRegions(t: readonly Ty): Ty {
+  match (t) {
+    #Named(d, args) => {
+      let out: Vec<GArg> = Vec.new();
+      for (const a of args) {
+        out.push(match (a) { #Region(_) => #Region(#Heap), #Ty(x) => #Ty(eraseRegions(x)), other => other.clone() });
+      }
+      #Named(d, out)
+    }
+    #Tuple(ts) => {
+      let out: Vec<Ty> = Vec.new();
+      for (const x of ts) { out.push(eraseRegions(x)); }
+      #Tuple(out)
+    }
+    #Record(r) | #Union(r) => {
+      let labels: Vec<[String, Ty]> = Vec.new();
+      for (const [k, v] of r.labels) { labels.push([k.clone(), eraseRegions(v)]); }
+      const row = Row { labels, tail: r.tail.clone() };
+      match (t) { #Record(_) => #Record(row), _ => #Union(row) }
+    }
+    #Array(e, l) => #Array(Box.new(eraseRegions(e)), l.clone()),
+    #Slice(e) => #Slice(Box.new(eraseRegions(e))),
+    #Borrow(m, e) => #Borrow(m, Box.new(eraseRegions(e))),
+    other => other.clone(),
+  }
+}
+
+// One-way matching of an impl's target against a concrete type, binding the impl's parameters.
+export function matchTy(pat: readonly Ty, ty: readonly Ty, vars: readonly Vec<u32>, binds: mut Binds): bool {
+  match ([pat, ty]) {
+    [#Param(s), _] if vars.includes(s.id) => match (binds.get(s.id)) {
+      #Some(#Ty(prev)) => prev == ty,
+      _ => {
+        binds.insert(s.id, #Ty(ty.clone()));
+        true
+      }
+    },
+    [#Named(a, xs), #Named(b, ys)] => {
+      if (a != b || xs.len() != ys.len()) { return false; }
+      for (const i of 0..xs.len()) { if (!matchArg(xs[i], ys[i], vars, mut binds)) { return false; } }
+      true
+    }
+    [#Tuple(xs), #Tuple(ys)] => {
+      if (xs.len() != ys.len()) { return false; }
+      for (const i of 0..xs.len()) { if (!matchTy(xs[i], ys[i], vars, mut binds)) { return false; } }
+      true
+    }
+    [#Record(a), #Record(b)] | [#Union(a), #Union(b)] => {
+      if (a.labels.len() != b.labels.len()) { return false; }
+      for (const i of 0..a.labels.len()) {
+        if (a.labels[i][0] != b.labels[i][0] || !matchTy(a.labels[i][1], b.labels[i][1], vars, mut binds)) { return false; }
+      }
+      true
+    }
+    [#Array(x, _), #Array(y, _)] | [#Slice(x), #Slice(y)] => matchTy(x, y, vars, mut binds),
+    [#Borrow(m1, x), #Borrow(m2, y)] => m1 == m2 && matchTy(x, y, vars, mut binds),
+    _ => pat == ty,
+  }
+}
+
+function matchArg(pat: readonly GArg, arg: readonly GArg, vars: readonly Vec<u32>, binds: mut Binds): bool {
+  match ([pat, arg]) {
+    [#Ty(p), #Ty(t)] => matchTy(p, t, vars, mut binds),
+    [#Region(#Param(s)), a] | [#Len(#Param(s)), a] if vars.includes(s.id) => {
+      binds.insert(s.id, a.clone());
+      true
+    }
+    [#Row(r), a] => {
+      if (const #Param(s) = r.tail) { if (vars.includes(s.id)) { binds.insert(s.id, a.clone()); } }
+      true
+    }
+    _ => true,
+  }
+}
+
+impl Program {
+  // `iface` and every interface it extends, transitively.
+  export function ifaceClosure(self: readonly Self, iface: usize): Vec<usize> {
+    let out: Vec<usize> = [iface];
+    let i: usize = 0;
+    while (i < out.len()) {
+      if (const #Interface { methods: _, assoc: _, selfSym: _, supers } = self.defs[out[i]].kind) {
+        for (const e of supers) {
+          if (const #Named(d, _) = e) { if (!out.includes(d)) { out.push(d); } }
+        }
+      }
+      i += 1;
+    }
+    out
+  }
+
+  // The interface method `name` reachable from a bound, with the bound it came through.
+  export function boundMethod(self: readonly Self, bounds: readonly Vec<Ty>, name: str): Option<[usize, Ty]> {
+    for (const b of bounds) {
+      if (const #Named(d, _) = b) {
+        for (const i of self.ifaceClosure(d)) {
+          if (const #Some(f) = self.ifaceFns.get(`${i}:${name}`.asStr())) {
+            // A method of an extended interface is reached through the bound's own arguments only
+            // when it is the bound itself.
+            const via: Ty = if (i == d) { b.clone() } else {
+              let args: Vec<GArg> = Vec.new();
+              for (const g of self.defs[i].params) { args.push(paramArg(g)); }
+              #Named(i, args)
+            };
+            return #Some([f, via]);
+          }
+        }
+      }
+    }
+    #None
+  }
+
+  // The impl of `iface` for the concrete type `ty`, with the arguments its parameters take.
+  export function resolveImpl(self: readonly Self, iface: usize, ty: readonly Ty): Option<[usize, Binds]> {
+    self.resolveDepth(iface, ty, 0)
+  }
+
+  function resolveDepth(self: readonly Self, iface: usize, ty0: readonly Ty, depth: usize): Option<[usize, Binds]> {
+    if (depth > 16) { return #None; }
+    const ty = stripBorrows(ty0);
+    // Specific impls first; a template impl only for structural types, and for nominal types that
+    // ask for it with `impl I for T;` (§7.3).
+    let candidates: Vec<usize> = Vec.new();
+    for (const i of 0..self.impls.len()) { if (!self.isBlanket(i)) { candidates.push(i); } }
+    for (const i of 0..self.impls.len()) { if (self.isBlanket(i)) { candidates.push(i); } }
+    for (const i of candidates) {
+      const forIface = match (self.impls[i].iface) { #Some([d, _]) => d == iface, #None => false };
+      if (self.impls[i].derived || !forIface) { continue; }
+      if (self.isBlanket(i) && !self.derives(iface, ty)) { continue; }
+      let vars: Vec<u32> = Vec.new();
+      for (const g of self.impls[i].params) { vars.push(g.sym.id); }
+      let binds: Binds = HashMap.new();
+      if (!matchTy(self.impls[i].target, ty, vars, mut binds)) { continue; }
+      let args: Vec<GArg> = Vec.new();
+      for (const g of self.impls[i].params) {
+        args.push(match (binds.get(g.sym.id)) { #Some(a) => a.clone(), #None => paramArg(g) });
+      }
+      let ok = true;
+      for (const k of 0..self.impls[i].params.len()) {
+        if (const #Ty(t) = args[k]) {
+          for (const b of self.impls[i].params[k].bounds) {
+            const bound = substParams(b, self.impls[i].params, args);
+            if (!self.satisfiesDepth(t, bound, (_) => Vec.new(), depth + 1)) { ok = false; }
+          }
+        }
+      }
+      // Implementing an interface means meeting the interfaces it extends (§3.4).
+      const supers = self.ifaceClosure(iface);
+      let supersOk = true;
+      for (const k of 1..supers.len()) {
+        if (!self.satisfiesDepth(ty, #Named(supers[k], Vec.new()), (_) => Vec.new(), depth + 1)) { supersOk = false; }
+      }
+      // The first impl whose head matches is the one: if its bounds fail, the type does not
+      // implement the interface, rather than falling back to a derivation (§7.3).
+      return if (ok && supersOk) { #Some([i, binds]) } else { #None };
+    }
+    #None
+  }
+
+  // Whether `ty` satisfies `bound`, where `assumed` gives the bounds of type parameters in scope.
+  export function satisfies(self: readonly Self, ty: readonly Ty, bound: readonly Ty, assumed: (id: u32) => Vec<Ty>): bool {
+    self.satisfiesDepth(ty, bound, assumed, 0)
+  }
+
+  function satisfiesDepth(self: readonly Self, ty: readonly Ty, bound: readonly Ty, assumed: (id: u32) => Vec<Ty>, depth: usize): bool {
+    const d = match (bound) { #Named(d, _) => d, _ => return true };
+    const send = self.knownDef("Send");
+    let sendParams: Vec<u32> = Vec.new();
+    if (const #Param(s) = ty) {
+      const bySend = assumed(s.id).iter().some((b) => match (b) {
+        #Named(x, _) => self.ifaceClosure(x).iter().some((i) => #Some(i) == send),
+        _ => false,
+      });
+      if (bySend) { sendParams.push(s.id); }
+    }
+    const name = self.defs[d].name.clone();
+    if (self.isStdDef(d)) {
+      if (name == "Send") { return self.isSendGiven(ty, sendParams) || match (ty) { #Error | #Var(_) => true, _ => false }; }
+      if (name == "Copy") { return self.isCopy(ty) || match (ty) { #Param(_) | #Var(_) => true, _ => false }; }
+      // `Q extends LentBy<K>`: a `Q` is what a `K` lends, to look it up (§3.3).
+      if (name == "LentBy") {
+        const k = match (bound) { #Named(_, args) => match (args.first()) { #Some(#Ty(k)) => k.clone(), _ => return true }, _ => return true };
+        return self.lentBy(stripBorrows(ty), stripBorrows(k));
+      }
+    }
+    if (!match (self.defs[d].kind) { #Interface { methods: _ } => true, _ => false }) { return true; }
+    match (stripBorrows(ty)) {
+      #Param(s) => assumed(s.id).iter().some((b) => match (b) { #Named(x, _) => self.ifaceClosure(x).includes(d), _ => false }),
+      #Var(_) | #Error => true,
+      t => self.resolveDepth(d, t, depth).isSome(),
+    }
+  }
+
+  function lentBy(self: readonly Self, q: readonly Ty, k: readonly Ty): bool {
+    if (q == k || match (q) { #Var(_) | #Param(_) | #Error => true, _ => false } || match (k) { #Var(_) | #Param(_) => true, _ => false }) {
+      return true;
+    }
+    match ([q, k]) {
+      // A pointer lends what it points at, and what that lends: a `Ref<R, str>` key is looked up
+      // by a `str`.
+      [_, #Named(d, args)] if self.isKnown(d, "Ref") || self.isKnown(d, "Box") || self.isKnown(d, "Arc") => {
+        match (args.last()) { #Some(#Ty(t)) => self.lentBy(q, t), _ => false }
+      }
+      [#Prim(#Str), #Named(d, _)] => self.isKnown(d, "String"),
+      [#Slice(e), #Named(d, args)] => self.isKnown(d, "Vec") && match (args.first()) { #Some(#Ty(t)) => t == e.get(), _ => false },
+      _ => false,
+    }
+  }
+
+  function isStdDef(self: readonly Self, d: usize): bool { self.modules[self.defs[d].module].isStd }
+
+  // The method `name` of impl `imp`.
+  export function implMethod(self: readonly Self, imp: usize, name: str): Option<usize> {
+    for (const f of self.impls[imp].methods) { if (self.fns[f].name == name) { return #Some(f); } }
+    #None
+  }
+
+  // The impl that gives `base` its associated type `name`, with the arguments it matched.
+  function assocImpl(self: readonly Self, base: readonly Ty, name: str): Option<[usize, Binds]> {
+    for (const d of 0..self.defs.len()) {
+      if (const #Interface { methods: _, assoc, selfSym: _, supers: _ } = self.defs[d].kind) {
+        if (assoc.iter().some((a) => a == name)) {
+          if (const #Some(r) = self.resolveImpl(d, base)) { return #Some(r); }
+        }
+      }
+    }
+    #None
+  }
+
+  // `base.name` (`Soa<Particle>.View`), once `base` is known: what its impl says (§3.4).
+  export function assocType(self: readonly Self, base: readonly Ty, name: str): Option<Ty> {
+    const [imp, binds] = match (self.assocImpl(base, name)) { #Some(r) => r, #None => return #None };
+    if (self.isTemplateImpl(imp)) {
+      return match (self.assocInstances.get(`${imp}|${bindsKey(binds)}|${name}`.asStr())) { #Some(t) => #Some(t.clone()), #None => #None };
+    }
+    match (self.impls[imp].assocTys.get(name)) {
+      #Some(t) => #Some(subst(t, bindsMap(binds))),
+      #None => #None,
+    }
+  }
+
+  // Computes a template impl's associated type for `base`, so `assocType` finds it.
+  export function ensureAssoc(self: mut Self, base: readonly Ty, name: str): void {
+    if (containsParams(base)) { return; }
+    const [imp, binds] = match (self.assocImpl(base, name)) { #Some(r) => r, #None => return };
+    const key = `${imp}|${bindsKey(binds)}|${name}`;
+    if (!self.isTemplateImpl(imp) || self.assocInstances.has(key.asStr())) { return; }
+    const astTy = match (self.impls[imp].assoc.iter().find(([n, _]) => n == name)) { #Some([_, t]) => t.clone(), #None => return };
+    const params = self.impls[imp].params.clone();
+    const module = self.impls[imp].module;
+    let env: Vec<[String, CV]> = Vec.new();
+    for (const g of params) {
+      if (g.isComptime) {
+        if (const #Some(#Ty(t)) = binds.get(g.sym.id)) { env.push([g.sym.name.clone(), #Type(t.clone())]); }
+      }
+    }
+    let ex = expander(mut self, module, #None, env);
+    const expanded = match (ex.expandType(astTy)) { #Some(t) => t, #None => return };
+    const scope = moduleScope(module).withParams(params);
+    const t = self.elabTy(expanded, scope);
+    self.assocInstances.insert(key, subst(t, bindsMap(binds)));
+  }
+
+  export function isTemplateImpl(self: readonly Self, imp: usize): bool {
+    self.impls[imp].params.iter().some((g) => g.isComptime)
+  }
+
+  // A derivation: a template impl for any type (`impl<comptime T: Type> Show for T`), as opposed
+  // to one for a family of types (`impl<comptime T: Type> ParSplit for Soa<T>`).
+  export function isBlanket(self: readonly Self, imp: usize): bool {
+    match (self.impls[imp].target) {
+      #Param(s) => self.impls[imp].params.iter().some((g) => g.isComptime && g.sym.id == s.id),
+      _ => false,
+    }
+  }
+
+  // Whether `iface`'s template impl applies to `ty`.
+  function derives(self: readonly Self, iface: usize, ty: readonly Ty): bool {
+    match (ty) {
+      // Types that belong to no module: primitives, records, tuples, tag unions (§7.3).
+      #Prim(_) | #Record(_) | #Union(_) | #Tuple(_) | #Array(_, _) | #Slice(_) => true,
+      #Named(d, _) => self.deriveRequest(iface, d),
+      _ => false,
+    }
+  }
+
+  export function deriveRequest(self: readonly Self, iface: usize, d: usize): bool {
+    self.impls.iter().some((r) => r.derived && match (r.iface) { #Some([i, _]) => i == iface, #None => false }
+      && match (r.target) { #Named(x, _) => x == d, _ => false })
+  }
+
+  // A function with `comptime` type parameters that has not been specialized.
+  export function isTemplate(self: readonly Self, fid: usize): bool {
+    !self.specOf.has(fid) && self.fns[fid].scheme.tparams.iter().some((g) => g.isComptime)
+  }
+
+  // The `comptime` arguments of `fid` among `args`, in its parameter order.
+  export function comptimeArgs(self: readonly Self, fid: usize, args: readonly Binds): Option<Vec<[Sym, Ty]>> {
+    let out: Vec<[Sym, Ty]> = Vec.new();
+    for (const g of self.fns[fid].scheme.tparams) {
+      if (g.isComptime) {
+        match (args.get(g.sym.id)) {
+          #Some(#Ty(t)) => out.push([g.sym.clone(), t.clone()]),
+          _ => return #None,
+        }
+      }
+    }
+    #Some(out)
+  }
+
+  // The method `name` of impl `imp` matched with `binds`: for a template impl, its specialization,
+  // which must exist.
+  export function methodFor(self: readonly Self, imp: usize, name: str, binds: readonly Binds): Option<usize> {
+    const m = match (self.implMethod(imp, name)) { #Some(m) => m, #None => return #None };
+    if (!self.isTemplate(m)) { return #Some(m); }
+    const ct = match (self.comptimeArgs(m, binds)) { #Some(c) => c, #None => return #None };
+    match (self.specs.get(`${m}|${specKey(ct)}`.asStr())) { #Some(f) => #Some(f), #None => #None }
+  }
+
+  // Like `methodFor`, specializing the template impl's method if it has not been.
+  export function methodForMut(self: mut Self, imp: usize, name: str, binds: readonly Binds): Option<usize> {
+    const m = match (self.implMethod(imp, name)) { #Some(m) => m, #None => return #None };
+    if (!self.isTemplate(m)) { return #Some(m); }
+    const ct = match (self.comptimeArgs(m, binds)) { #Some(c) => c, #None => return #None };
+    #Some(self.specializeFor(m, ct))
+  }
+
+  // Specializes `fid`; a template impl's method is specialized on behalf of the type that asked
+  // for the derivation, which may then see its private fields (§7.3).
+  export function specializeFor(self: mut Self, fid: usize, ct: readonly Vec<[Sym, Ty]>): usize {
+    const implId = self.fns[fid].implId;
+    const fromTemplateImpl = match (implId) { #Some(i) => self.isTemplateImpl(i), #None => false };
+    const requested: Option<usize> = if (fromTemplateImpl && ct.len() > 0) {
+      match (stripBorrows(ct[0][1])) { #Named(d, _) => #Some(d), _ => #None }
+    } else { #None };
+    self.specialize(fid, ct, requested)
+  }
+
+  // Makes sure every impl that `ty` satisfying `iface` relies on is specialized, so a call through
+  // a bound finds it at run time.
+  export function ensureImpl(self: mut Self, iface: usize, ty: readonly Ty, depth: usize): void {
+    if (depth > 16 || containsParams(ty)) { return; }
+    const [imp, binds] = match (self.resolveImpl(iface, ty)) { #Some(r) => r, #None => return };
+    if (self.isTemplateImpl(imp)) {
+      let names: Vec<String> = Vec.new();
+      for (const f of self.impls[imp].methods) { names.push(self.fns[f].name.clone()); }
+      for (const n of names) { self.methodForMut(imp, n.asStr(), binds); }
+    }
+    const params = self.impls[imp].params.clone();
+    let args: Vec<GArg> = Vec.new();
+    for (const g of params) { args.push(match (binds.get(g.sym.id)) { #Some(a) => a.clone(), #None => paramArg(g) }); }
+    for (const k of 0..params.len()) {
+      if (const #Ty(t) = args[k]) {
+        for (const b of params[k].bounds) {
+          if (const #Named(d, _) = substParams(b, params, args)) {
+            if (match (self.defs[d].kind) { #Interface { methods: _ } => true, _ => false }) { self.ensureImpl(d, t, depth + 1); }
+          }
+        }
+      }
+    }
+  }
+
+  // The specialization of template `fid` for its `comptime` arguments (§7.1): its signature with
+  // them substituted, and its body expanded. Memoized, and registered before its body is
+  // expanded, so a recursive type's derivation refers to itself.
+  export function specialize(self: mut Self, fid: usize, ct: readonly Vec<[Sym, Ty]>, requested: Option<usize>): usize {
+    const key = `${fid}|${specKey(ct)}`;
+    if (const #Some(f) = self.specs.get(key.asStr())) { return f; }
+    let map: SubstMap = HashMap.new();
+    for (const [s, t] of ct) { map.insert(s.id, #Ty(t.clone())); }
+    const info = self.fns[fid].scheme.clone();
+    let tparams: Vec<GParam> = Vec.new();
+    for (const g of info.tparams) { if (!g.isComptime) { tparams.push(g.clone()); } }
+    let params: Vec<[String, Ty]> = Vec.new();
+    for (const [n, t] of info.params) { params.push([n.clone(), subst(t, map)]); }
+    const effects: Option<EffRow> = match (info.effects) { #Some(e) => #Some(substEffs(e, map)), #None => #None };
+    const scheme = Scheme { tparams, params, ret: subst(info.ret, map), effects, retFrom: info.retFrom.clone() };
+    const module = self.fns[fid].module;
+    const spec = FnInfo {
+      name: self.fns[fid].name.clone(), module, scheme, decl: self.fns[fid].decl, exported: self.fns[fid].exported,
+      implId: self.fns[fid].implId, hasBody: true, iface: #None,
+    };
+    const id = self.fns.len();
+    self.fns.push(spec);
+    self.specs.insert(key, id);
+    self.specOf.insert(id, fid);
+    let shown: Vec<String> = Vec.new();
+    for (const [_, t] of ct) { shown.push(self.show(t)); }
+    let note = `in \`${self.fns[fid].name}\` for \`${shown.join(", ")}\``;
+    // The specialization that needed this one, and so on, three deep at most.
+    if (const #Some(outer) = self.note) {
+      const chain = outer.split(", from ");
+      let kept: Vec<String> = Vec.new();
+      for (const i of 0..min(2, chain.len())) { kept.push(chain[i].clone()); }
+      const joined = kept.join(", from ");
+      const trimmed = if (joined.startsWith("in ")) { joined.slice(3, joined.len()).toString() } else { joined };
+      note = `${note}, from ${trimmed}`;
+    }
+    self.specNotes.insert(id, note.clone());
+    if (const #Some(d) = requested) { self.specRequested.insert(id, d); }
+    // Errors found while expanding the body belong to this specialization too.
+    const saved = replace(mut self.note, #Some(note));
+    if (const #Some(decl) = self.fnDecl(fid)) {
+      let env: Vec<[String, CV]> = Vec.new();
+      for (const [s, t] of ct) { env.push([s.name.clone(), #Type(t.clone())]); }
+      let d = decl;
+      if (const #Some(b) = d.body.clone()) {
+        let ex = expander(mut self, module, requested, env);
+        d.body = ex.body(b);
+      }
+      self.bodies.insert(id, d);
+    }
+    self.note = saved;
+    id
+  }
+}
