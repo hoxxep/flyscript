@@ -177,6 +177,7 @@ State shared by tasks, reached only inside `lock`.
 | :--- | :--- |
 | `println(s)` | Writes `s` and a line break to standard output. Each line is written whole, so lines from tasks on different cores never mix; on worker threads, standard output is flushed at each line. |
 | `eprintln(s)` | The same, to standard error, which is not buffered. |
+| `exit(code): never` | Ends the program at once, every task with it, with `code` its exit status; standard output is flushed first. No cleanup runs, as for a panic (spec §5.7). |
 | `File.open(path): File` | Opens a file to read: `#NotFound`, `#PermissionDenied`. |
 | `f.lines()` | A generator of the file's lines, as `str.lines()` splits them. |
 | `f.readText(): String` | The whole file, as text. |
@@ -255,4 +256,4 @@ Services only a simulated world provides (spec §6.4), for examples and tests: `
 
 ## 11. The web framework
 
-The web framework is library code shipped with the compiler and specified in [web/README.md](../web/README.md): `web/http` (requests, responses and `serve`), `web/ui` (the `Ui<M>` effect and HTML), `web/dom` (a view in a page) and `web/page`.
+The web framework, FlyNext, is a package shipped with the compiler and specified in [web/README.md](../web/README.md): `web/http` (requests, responses and `serve`), `web/ui` (the `Ui<M>` effect, links, components and HTML), `web/dom` (pages in the browser), `web/router` (routes and their parameters) and `web/site` (pages and files answered), with the app compiler `web/flynext`.

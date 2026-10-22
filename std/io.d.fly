@@ -16,3 +16,5 @@ export function writeFile(path: str, content: str): void uses Io, Fail<IoErr>;
 export function println(s: str): void uses Io;
 // A line to standard error, which is not buffered.
 export function eprintln(s: str): void uses Io;
+// Ends the program at once, with `code` its exit status: no cleanup runs, as for a panic.
+export function exit(code: i32): never uses Io;

@@ -1,0 +1,14 @@
+// What the site shows at an address no page answers, with the status 404.
+
+import { Ui, el, text, cls, link } from "web/ui";
+
+// What the page shows is the same wherever it is: its model says nothing.
+export type Model = { found: bool };
+
+export function initial(): Model { { found: false } }
+
+export function view(m: readonly Model): void uses Ui<#Nothing> {
+  el("h1", () => text("Nothing here"));
+  el("p", () => text("No page of this site answers that address."));
+  link("/", () => { cls("back"); text("← Back to the list"); });
+}

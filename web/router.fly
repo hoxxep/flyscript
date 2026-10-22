@@ -1,0 +1,106 @@
+// Routes: a page's address pattern, as its file's place under `app/routes` gives it, matched against
+// the address asked for. `todos/[id].fly` answers `/todos/[id]`, which `/todos/7` matches with `id`
+// "7"; `index.fly` answers its directory's address.
+
+// What an address gave the page: the route's parameters, and the query after `?`.
+export struct Params {
+  names: Vec<String>;
+  values: Vec<String>;
+  query: Vec<[String, String]>;
+}
+
+impl Params {
+  // The route parameter `name`, or `""`.
+  export function get(self: readonly Self, name: str): str {
+    for (const [i, n] of self.names.iter().enumerate()) {
+      if (n == name) { return self.values[i].asStr(); }
+    }
+    ""
+  }
+
+  // The query's `name`, if the address has one.
+  export function query(self: readonly Self, name: str): Option<String> {
+    for (const [n, v] of self.query) {
+      if (n == name) { return #Some(v.clone()); }
+    }
+    #None
+  }
+}
+
+// The value of a hexadecimal digit.
+function hex(b: u8): Option<u8> {
+  if (b >= b'0' && b <= b'9') { #Some(b - b'0') }
+  else if (b >= b'a' && b <= b'f') { #Some(b - b'a' + 10) }
+  else if (b >= b'A' && b <= b'F') { #Some(b - b'A' + 10) }
+  else { #None }
+}
+
+// Text from an address: `%XX` the byte it names, and in a query `+` a space.
+export function decode(s: str, plus: bool): String {
+  const bytes = s.asBytes();
+  let out: Vec<u8> = Vec.new();
+  let i: usize = 0;
+  while (i < bytes.len()) {
+    const b = bytes[i];
+    if (b == b'%' && i + 2 < bytes.len()) {
+      match ([hex(bytes[i + 1]), hex(bytes[i + 2])]) {
+        [#Some(h), #Some(l)] => {
+          out.push(h * 16 + l);
+          i += 3;
+          continue;
+        }
+        _ => {}
+      }
+    }
+    out.push(if (plus && b == b'+') { b' ' } else { b });
+    i += 1;
+  }
+  match (String.fromUtf8(out)) { #Some(t) => t, #None => s.toString() }
+}
+
+// An address's path, without its query.
+export function pathOf(url: str): str {
+  match (url.indexOf("?")) { #Some(q) => url.slice(0, q), #None => url }
+}
+
+// The pairs of an address's query.
+function queryOf(url: str): Vec<[String, String]> {
+  let out: Vec<[String, String]> = Vec.new();
+  const q = match (url.indexOf("?")) { #Some(i) => url.slice(i + 1, url.len()), #None => return out };
+  for (const part of q.split("&")) {
+    if (part.len() == 0) { continue; }
+    match (part.asStr().indexOf("=")) {
+      #Some(e) => out.push([decode(part.asStr().slice(0, e), true), decode(part.asStr().slice(e + 1, part.len()), true)]),
+      #None => out.push([decode(part.asStr(), true), String.new()]),
+    }
+  }
+  out
+}
+
+// The segments of a path, without empty ones: `/todos/7/` is `todos`, `7`.
+function segments(path: str): Vec<String> {
+  let out: Vec<String> = Vec.new();
+  for (const s of path.split("/")) {
+    if (s.len() > 0) { out.push(s.clone()); }
+  }
+  out
+}
+
+// Whether the route `pattern` answers `url`, and if so what its parameters are.
+export function matches(pattern: str, url: str): Option<Params> {
+  const want = segments(pattern);
+  const have = segments(pathOf(url));
+  if (want.len() != have.len()) { return #None; }
+  let names: Vec<String> = Vec.new();
+  let values: Vec<String> = Vec.new();
+  for (const [i, w] of want.iter().enumerate()) {
+    const ws = w.asStr();
+    if (ws.startsWith("[") && ws.endsWith("]")) {
+      names.push(ws.slice(1, ws.len() - 1).toString());
+      values.push(decode(have[i].asStr(), false));
+    } else if (w != have[i]) {
+      return #None;
+    }
+  }
+  #Some(Params { names, values, query: queryOf(url) })
+}

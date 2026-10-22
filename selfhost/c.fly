@@ -1508,6 +1508,7 @@ impl Cgen {
     match (key) {
       "println" => `({ fly_println(${arg(0)}); (fly_unit)0; })`,
       "eprintln" => `({ fly_eprintln(${arg(0)}); (fly_unit)0; })`,
+      "exit" => `({ fly_exit(${arg(0)}); (fly_unit)0; })`,
       "panic" => `({ fly_str m_ = ${arg(0)}; fly_panicf("%.*s", (int)m_.len, (const char*)m_.ptr); (fly_unit)0; })`,
       "String_new" => "fly_String_new()".toString(),
       "String_push" => `({ fly_String_push(${arg(0)}, ${arg(1)}); (fly_unit)0; })`,

@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use super::generators::{self as gens_mod, GenKind};
-use super::interp::{Ctl, Handler, Interp, R, panic};
+use super::interp::{Ctl, Handler, Interp, R, panic, EXITED};
 use super::value::*;
 use crate::check::env::FnId;
 use crate::check::types::{GArg, Prim, Ty};
@@ -830,6 +830,11 @@ impl Interp {
             "eprintln" => {
                 eprintln!("{}", a(0).as_text());
                 Ok(Value::Unit)
+            }
+            // The program ends at once, as for a panic, but with the status asked for.
+            "exit" => {
+                self.world.lock().expect("world").exit = Some(a(0).as_int() as i32);
+                Err(panic(EXITED))
             }
             "File.open" => {
                 let path = a(0).as_text().to_string();

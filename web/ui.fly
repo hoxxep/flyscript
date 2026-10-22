@@ -35,6 +35,30 @@ export function cls<M>(name: str): void uses Ui<M> { Ui.attr("class", name); }
 export function key<M>(k: str): void uses Ui<M> { Ui.key(k); }
 export function on<M>(event: str, msg: M): void uses Ui<M> { Ui.on(event, msg); }
 
+// A link to another page of the site. Followed, it takes the page there without loading it again:
+// the program fetches what the page shows and renders it (web/dom.fly); without the program it is
+// an ordinary link.
+export function link<M>(href: str, body: () => void uses Ui<M>): void uses Ui<M> {
+  Ui.open("a");
+  Ui.attr("href", href);
+  body();
+  Ui.close();
+}
+
+// A part of a view whose events give its own messages, `A`s, made part of a view whose events give
+// `B`s: each of its messages becomes `f`'s. So a component is a view, an update and a model like any
+// page's, and a page shows it by `map((c) => #Counter(c), () => counter.view(m.counter))`.
+export function map<A, B>(f: (a: A) => B, body: () => void uses Ui<A>): void uses Ui<B> {
+  handle { body() } with Ui<A> {
+    open(tag) resumes k => { Ui.open(tag); k() }
+    key(s) resumes k => { Ui.key(s); k() }
+    attr(name, value) resumes k => { Ui.attr(name, value); k() }
+    on(event, msg) resumes k => { Ui.on(event, f(msg)); k() }
+    text(s) resumes k => { Ui.text(s); k() }
+    close() resumes k => { Ui.close(); k() }
+  }
+}
+
 // ---- HTML ----
 
 // Elements that have no end tag.

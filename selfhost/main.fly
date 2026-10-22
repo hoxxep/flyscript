@@ -12,7 +12,7 @@ import { checkOwnership } from "./own";
 import { cProgram } from "./c";
 import { jsProgram } from "./js";
 import { llvmProgram } from "./llvm";
-import { File, println, writeFile } from "std/io";
+import { File, println, writeFile, exit } from "std/io";
 
 // What stops a compilation: diagnostics, or a file that cannot be read or written.
 type Stop = #Failed | #Unreadable { path: String };
@@ -92,5 +92,7 @@ export function main(entry: str, out: str, root: str, flags: readonly String[]):
       #Failed => {}
       #Unreadable { path } => println(`error: cannot read or write ${path}`),
     }
+    // A program that did not compile is no success.
+    exit(1);
   }
 }

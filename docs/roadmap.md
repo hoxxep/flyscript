@@ -44,7 +44,7 @@ Tasks on all cores: a work-stealing scheduler over one worker thread per core, s
 
 ## 5. A web framework
 
-*Done, as a proof of concept: [web](../web/) and [a site](../examples/todo/) built with it. Each route's program is a WebAssembly module of its own, each holding its own copy of the runtime rather than sharing one.*
+*Done: [FlyNext](../web/) and [a site](../examples/todo/) built with it. Routes from files with parameters, nested layouts, data loaded on the server, server functions from an effect, links followed and the history stepped through without loading a page, components, a 404 page, and `web/flynext dev`; one WebAssembly program for the whole site.*
 
 A proof of concept of what Next.js and React do, in one Flyscript component tree:
 

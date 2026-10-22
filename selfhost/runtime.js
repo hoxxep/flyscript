@@ -610,6 +610,7 @@ const { $rt, $b } = (() => {
     panic,
     println(s) { process.stdout.write(Buffer.from(s + "\n", "latin1")); },
     eprintln(s) { process.stderr.write(Buffer.from(s + "\n", "latin1")); },
+    exit(code) { process.exit(code); },
     writeFile(path, content) {
       try { fs.writeFileSync(Buffer.from(path, "latin1").toString("utf8"), Buffer.from(content, "latin1")); }
       catch (e) { throw new Fail({ $tag: "PermissionDenied" }); }

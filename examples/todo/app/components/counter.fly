@@ -1,0 +1,25 @@
+// A counter: a component, which is a model, a view and an update like a page's, shown inside a page
+// by `map`, which makes its messages the page's.
+
+import { Ui, el, text, on, cls } from "web/ui";
+
+export type Counter = { n: i32 };
+export type CounterMsg = #Up | #Down;
+
+export function counter(): Counter { { n: 0 } }
+
+export function view(c: readonly Counter): void uses Ui<CounterMsg> {
+  el("span", () => {
+    cls("counter");
+    el("button", () => { on("click", #Down); text("−"); });
+    el("output", () => text(`${c.n}`.asStr()));
+    el("button", () => { on("click", #Up); text("+"); });
+  });
+}
+
+export function update(c: mut Counter, msg: CounterMsg): void {
+  match (msg) {
+    #Up => { c.n += 1; }
+    #Down => { c.n -= 1; }
+  }
+}

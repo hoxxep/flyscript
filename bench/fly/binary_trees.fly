@@ -1,0 +1,31 @@
+// binary-trees, single-threaded: allocation and freeing of many small trees. Each tree is owned,
+// and freed as it goes out of scope.
+import { println } from "std/io";
+
+enum Tree { #Leaf, #Node(Box<Tree>, Box<Tree>) }
+
+function make(d: u32): Tree {
+  if (d == 0) { #Leaf } else { #Node(Box.new(make(d - 1)), Box.new(make(d - 1))) }
+}
+
+function check(t: readonly Tree): u32 {
+  match (t) {
+    #Leaf => 1,
+    #Node(l, r) => 1 + check(l) + check(r),
+  }
+}
+
+export function main(n: u32): void uses Io {
+  const max = if (n < 6) { 6 } else { n };
+  println(`stretch tree of depth ${max + 1}\t check: ${check(make(max + 1))}`);
+  const long = make(max);
+  let d: u32 = 4;
+  while (d <= max) {
+    const iters: u32 = 1 << (max - d + 4);
+    let sum: u32 = 0;
+    for (const _ of 0..iters) { sum += check(make(d)); }
+    println(`${iters}\t trees of depth ${d}\t check: ${sum}`);
+    d += 2;
+  }
+  println(`long lived tree of depth ${max}\t check: ${check(long)}`);
+}

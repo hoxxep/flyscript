@@ -1,0 +1,22 @@
+// expect: <div><a href="/x">go</a><button>+</button><span>3</span></div>
+// A component is a view whose messages a page maps into its own: `map` turns a part of a view that
+// gives `CounterMsg`s into one that gives the page's `Msg`s.
+import { println } from "std/io";
+import { Ui, el, text, on, html, link, map } from "../../web/ui";
+type CounterMsg = #Inc | #Dec;
+function counter(n: u32): void uses Ui<CounterMsg> {
+  el("button", () => { on("click", #Inc); text("+"); });
+  el("span", () => text(`${n}`.asStr()));
+}
+type Msg = #Counter(CounterMsg) | #Go;
+function view(): void uses Ui<Msg> {
+  el("div", () => {
+    link("/x", () => text("go"));
+    map((c) => #Counter(c), () => counter(3));
+  });
+}
+export function main(): void uses Io {
+  let out = String.new();
+  html(mut out, () => view());
+  println(out.asStr());
+}

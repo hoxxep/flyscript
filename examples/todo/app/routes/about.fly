@@ -1,27 +1,32 @@
-// A page with nothing to change: the server renders it, and the page's program takes it over all
-// the same.
+// A page whose model is its own, with no data from the server: rendered from `initial`, and with a
+// component, a counter, kept in its model.
 
-import { Ui, Event, el, text, attr, cls } from "../../../../web/ui";
-import { nav } from "../layout";
+import { Ui, Event, el, text, map } from "web/ui";
+import { Counter, CounterMsg, counter, view as counterView, update as counterUpdate } from "../components/counter";
 
-export type Model = { visits: u32 };
-export type Msg = #Nothing;
+export type Model = { counter: Counter };
+export type Msg = #Counter(CounterMsg);
 
 export const title: str = "About";
 
+export function initial(): Model { { counter: counter() } }
+
 export function view(m: readonly Model): void uses Ui<Msg> {
-  el("main", () => {
-    nav("about");
-    el("h1", () => text("About"));
-    el("p", () => text("This site is one Flyscript program: a server compiled to native code, which renders each page and answers what pages ask of it, and a WebAssembly module for each page, which takes over the page the server rendered."));
-    el("p", () => {
-      text("Its views are functions that perform ");
-      el("code", () => text("Ui"));
-      text(": the server handles it by writing HTML, the page by changing the DOM. What pages ask of the server is an effect too, ");
-      el("code", () => text("Todos"));
-      text(", which the server handles against its store and the page by asking the server.");
-    });
+  el("h1", () => text("About"));
+  el("p", () => text("This site is one Flyscript app: a server compiled to native code, which renders each page and answers what pages ask of it, and one WebAssembly program, which takes over the page the server rendered and from then on renders the pages a link leads to itself."));
+  el("p", () => {
+    text("Its views are functions that perform ");
+    el("code", () => text("Ui"));
+    text(": the server handles it by writing HTML, the page by changing the DOM. What pages ask of the server is an effect too, ");
+    el("code", () => text("Todos"));
+    text(", which the server handles against its store and the page by asking the server.");
   });
+  el("p", () => text("A component is a view, a model and an update, like a page's:"));
+  map((c) => #Counter(c), () => counterView(m.counter));
 }
 
-export function update(m: mut Model, msg: Msg, ev: readonly Event): void {}
+export function update(m: mut Model, msg: Msg, ev: readonly Event): void {
+  match (msg) {
+    #Counter(c) => counterUpdate(mut m.counter, c),
+  }
+}

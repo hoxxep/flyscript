@@ -1,0 +1,27 @@
+// Word frequencies: text built from a vocabulary, split into words, counted in a hash map, and
+// the most frequent shown; strings, hashing and sorting.
+import { println } from "std/io";
+import { HashMap } from "std/collections";
+
+export function main(n: u32): void uses Io {
+  // The text: `n` words, each one of 20000, chosen by a linear congruential generator.
+  let text = String.new();
+  let seed: u64 = 42;
+  for (const i of 0..n) {
+    seed = (seed.wrappingMul(6364136223846793005)).wrappingAdd(1442695040888963407);
+    const w = (seed >> 33) % 20000;
+    if (i > 0) { text.push(" "); }
+    text.push("w");
+    text.push(`${w}`.asStr());
+  }
+  let counts: HashMap<String, u32> = HashMap.new();
+  for (const word of text.asStr().splitWhitespace()) {
+    match (counts.getMut(word)) {
+      #Some(c) => { c += 1; }
+      #None => counts.insert(word.toString(), 1),
+    }
+  }
+  println(`${counts.len()} distinct words`);
+  const top = counts.sortedByValue();
+  for (const [w, c] of top[0..10]) { println(`${w} ${c}`); }
+}

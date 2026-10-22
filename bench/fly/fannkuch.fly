@@ -1,0 +1,45 @@
+// fannkuch-redux: permutations of small arrays, flipped; integer work over arrays.
+import { println } from "std/io";
+
+export function main(n: usize): void uses Io {
+  let perm: i32[16] = repeat(0);
+  let perm1: i32[16] = repeat(0);
+  let count: i32[16] = repeat(0);
+  let maxFlips: i32 = 0;
+  let checksum: i32 = 0;
+  let r = n;
+  let permCount: i32 = 0;
+  for (const i of 0..n) { perm1[i] = i as i32; }
+  while (true) {
+    while (r != 1) { count[r - 1] = r as i32; r -= 1; }
+    for (const i of 0..n) { perm[i] = perm1[i]; }
+    let flips: i32 = 0;
+    while (perm[0] != 0) {
+      let i: usize = 0;
+      let j = perm[0] as usize;
+      while (i < j) {
+        const t = perm[i];
+        perm[i] = perm[j];
+        perm[j] = t;
+        i += 1;
+        j -= 1;
+      }
+      flips += 1;
+    }
+    if (flips > maxFlips) { maxFlips = flips; }
+    checksum += if (permCount % 2 == 0) { flips } else { -flips };
+    while (true) {
+      if (r == n) {
+        println(`${checksum}\nPfannkuchen(${n}) = ${maxFlips}`);
+        return;
+      }
+      const p0 = perm1[0];
+      for (const i of 0..r) { perm1[i] = perm1[i + 1]; }
+      perm1[r] = p0;
+      count[r] -= 1;
+      if (count[r] > 0) { break; }
+      r += 1;
+    }
+    permCount += 1;
+  }
+}

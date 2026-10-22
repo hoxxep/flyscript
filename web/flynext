@@ -1,0 +1,86 @@
+#!/bin/sh
+# Builds and runs an app made with the web framework:
+#
+#   web/flynext build [app] [out]   the server, natively, and the pages' program, as WebAssembly
+#   web/flynext start [out] [port]  serves a build
+#   web/flynext dev [app] [port]    builds, serves, and builds again whenever the app changes;
+#                                   pages open in a browser reload themselves
+#
+# `app` is the app's directory (by default `app`), with its pages in `routes/`, the effects pages
+# ask the server for in `api.fly`, how the server answers them in `server.fly`, and its files in
+# `public/`. A build goes to `out`, by default `app/.flynext/build`. The compiler is
+# selfhost/seed.js unless FLY_COMPILER says otherwise. Needs node, a C compiler, and what
+# selfhost/wasm.sh needs.
+set -e
+web=$(cd "$(dirname "$0")" && pwd)
+root=$(cd "$web/.." && pwd)
+compiler=${FLY_COMPILER:-$root/selfhost/seed.js}
+cmd=${1:-build}
+
+# The app compiler, built once and again only when its source has changed.
+gen() {
+  bin="$root/target/flynext/flynext-gen"
+  mkdir -p "$root/target/flynext"
+  if [ ! -x "$bin" ] || [ -n "$(find "$web/flynext.fly" "$root/selfhost/parse.fly" "$root/selfhost/ast.fly" "$root/selfhost/lex.fly" "$compiler" -newer "$bin" 2>/dev/null)" ]; then
+    node --stack-size=65500 "$compiler" "$web/flynext.fly" "$bin.c" "$root"
+    cc -std=gnu11 -O2 -w -o "$bin" "$bin.c" -lm
+    rm -f "$bin.c"
+  fi
+  echo "$bin"
+}
+
+# `build app out [id]`: the app's programs, made and compiled; `id` names a development build.
+build() {
+  app=$(cd "$1" && pwd) || return 1
+  out=$2
+  mkdir -p "$out/_fly" "$app/.flynext"
+  out=$(cd "$out" && pwd) || return 1
+  files=$(cd "$app/routes" && find . -name '*.fly' | sort)
+  # shellcheck disable=SC2086
+  "$(gen)" "$app" "${3:-}" $files || return 1
+  node --stack-size=65500 "$compiler" "$app/.flynext/server.fly" "$out/server.c" "$root" || return 1
+  cc -std=gnu11 -O2 -w -o "$out/server" "$out/server.c" -lm || return 1
+  rm -f "$out/server.c"
+  sh "$root/selfhost/wasm.sh" "$compiler" "$app/.flynext/client.fly" "$out/_fly/app.wasm" --imports || return 1
+  cp "$web/flynext.js" "$out/_fly/"
+  if [ -d "$app/public" ]; then cp -R "$app/public/." "$out/"; fi
+}
+
+case "$cmd" in
+  build)
+    app=${2:-app}
+    build "$app" "${3:-$app/.flynext/build}"
+    echo "built $(cd "${3:-$app/.flynext/build}" && pwd)"
+    ;;
+  start)
+    out=${2:-app/.flynext/build}
+    exec "$out/server" "${3:-3000}" "$out"
+    ;;
+  dev)
+    app=${2:-app}
+    port=${3:-3000}
+    out="$app/.flynext/dev"
+    stamp="$app/.flynext/stamp"
+    pid=""
+    stop() { if [ -n "$pid" ]; then kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; fi; }
+    trap 'stop; exit 0' INT TERM
+    while :; do
+      mkdir -p "$app/.flynext"
+      touch "$stamp"
+      if build "$app" "$out" "$(date +%s%N)"; then
+        stop
+        "$out/server" "$port" "$out" &
+        pid=$!
+        echo "serving http://localhost:$port"
+      else
+        echo "the build failed; fix the app and save it again"
+      fi
+      # Then wait for the app to change.
+      while [ -z "$(find "$app" -path "$app/.flynext" -prune -o -type f -newer "$stamp" -print | head -1)" ]; do sleep 0.3; done
+    done
+    ;;
+  *)
+    echo "usage: web/flynext build|start|dev ..." >&2
+    exit 2
+    ;;
+esac

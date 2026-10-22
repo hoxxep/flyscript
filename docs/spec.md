@@ -1,6 +1,6 @@
 # Flyscript
 
-**Language specification, version 0.68**
+**Language specification, version 0.69**
 
 *Affine values, one row calculus, handlers for everything, and `comptime`: Church on the outside, Turing on the inside.*
 
@@ -20,7 +20,7 @@ The whole language rests on five laws. Every rule in this document is a conseque
 
 ### 0.1 Recent changes
 
-0.68 makes a panic end the program at once, running no task's cleanup, which could otherwise wait forever on what the panicking task held (§5.7); ends a resumptive arm's borrowed arguments when the continuation is given up in any way, not only when it is called (§5.3); and keeps a match arm that moves a part from taking apart a `Drop` value, or from letting a borrow of what it owns outlive it (§4.1). 0.67 extends the proof of ownership to branches and to failures, which unwind through scopes and calls dropping what each owns (§9.5). 0.66 proves two fragments of the core calculus mechanically — moves, drops and lending; effects and handlers — and says exactly what the proofs cover and what rests on testing (§9.5). 0.65 folds the rules for how code takes hold of a place into one (§4.1), states the guarantees of the core calculus and how each is established (§9), and moves what is a cost rather than a meaning into performance contracts (§11.3). 0.64 lets a task go on on any core after it waits (§8.3). 0.63 specifies the standard library as carefully as the core, in [std.md](std.md). 0.62 makes cleanup run to its end under cancellation (§5.6, §6.1). The table lists the changes of 0.64 and 0.65; every earlier one, with the reasoning behind it, is in [docs/history](history/).
+0.69 adds packages, imported by name rather than by a relative path (§8.1). 0.68 makes a panic end the program at once, running no task's cleanup, which could otherwise wait forever on what the panicking task held (§5.7); ends a resumptive arm's borrowed arguments when the continuation is given up in any way, not only when it is called (§5.3); and keeps a match arm that moves a part from taking apart a `Drop` value, or from letting a borrow of what it owns outlive it (§4.1). 0.67 extends the proof of ownership to branches and to failures, which unwind through scopes and calls dropping what each owns (§9.5). 0.66 proves two fragments of the core calculus mechanically — moves, drops and lending; effects and handlers — and says exactly what the proofs cover and what rests on testing (§9.5). 0.65 folds the rules for how code takes hold of a place into one (§4.1), states the guarantees of the core calculus and how each is established (§9), and moves what is a cost rather than a meaning into performance contracts (§11.3). 0.64 lets a task go on on any core after it waits (§8.3). 0.63 specifies the standard library as carefully as the core, in [std.md](std.md). 0.62 makes cleanup run to its end under cancellation (§5.6, §6.1). The table lists the changes of 0.64 and 0.65; every earlier one, with the reasoning behind it, is in [docs/history](history/).
 
 | Change | Why |
 | :--- | :--- |
@@ -907,6 +907,8 @@ Keys may come in any order, unknown keys are skipped, and an `Option` field may 
 ### 8.1 Modules
 
 Each `.fly` file is an ES module. Declarations are private unless exported. A module-level `const` is evaluated at compile time (`const MAX_BUF: usize = 512;`). The import graph must be acyclic, so modules compile in parallel in dependency order.
+
+An import's path is relative to the importing module when it begins with `./` or `../`. Otherwise it names a module of a *package*: `std/…` is the standard library, and any other path is a module of the installation's packages, found beside `std` — `import { el, text } from "web/ui"`. A module is the same module however it is reached: a package's own modules import each other relatively, and an app that imports the package by name meets the very modules those imports do.
 
 **A program** starts at its entry module's exported `main`, which takes the command line: each parameter the next argument, as its type reads it — an integer or a float parses it, failing with a panic if it is not one, and `str` or `String` takes its text — and a last parameter that is a list of strings (`readonly str[]`, `readonly String[]`) takes every argument left. A failure `main` does not catch ends the program, showing what was thrown.
 

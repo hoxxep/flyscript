@@ -108,6 +108,9 @@ fn run(args: &[String]) -> ExitCode {
     for line in &world.out {
         println!("{line}");
     }
+    if let Some(code) = world.exit {
+        return ExitCode::from(code as u8);
+    }
     match result {
         Ok(flyscript::eval::Value::Unit) => ExitCode::SUCCESS,
         Ok(v) => {

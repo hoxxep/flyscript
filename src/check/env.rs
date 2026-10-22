@@ -320,10 +320,12 @@ impl Program {
             };
             let idx = p.add_module(name, path.display().to_string(), source, false, false);
             for item in &p.modules[idx].ast.items {
-                if let ItemKind::Import { from, .. } = &item.kind
-                    && is_relative(from)
-                {
-                    queue.push(normalize(&path.parent().unwrap_or(Path::new(".")).join(format!("{from}.fly"))));
+                if let ItemKind::Import { from, .. } = &item.kind {
+                    if is_relative(from) {
+                        queue.push(normalize(&path.parent().unwrap_or(Path::new(".")).join(format!("{from}.fly"))));
+                    } else if !from.starts_with("std/") {
+                        queue.push(normalize(&package_root().join(format!("{from}.fly"))));
+                    }
                 }
             }
         }
@@ -536,8 +538,11 @@ impl Program {
                 let target = if is_relative(from) {
                     let dir = Path::new(&self.modules[m].name).parent().unwrap_or(Path::new("")).to_path_buf();
                     self.module_named(&normalize(&dir.join(from)).to_string_lossy())
-                } else {
+                } else if from.starts_with("std/") {
                     self.module_named(from)
+                } else {
+                    // A package's module is known by its file, however it was reached.
+                    self.module_named(&normalize(&package_root().join(from)).to_string_lossy())
                 };
                 let Some(target) = target else {
                     self.error(m, item.span, format!("no module `{from}`"));
@@ -1274,6 +1279,11 @@ impl Program {
         }
         out
     }
+}
+
+/// Where packages are found: the installation, beside its `std` (§8.1).
+fn package_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
 fn is_relative(import: &str) -> bool {

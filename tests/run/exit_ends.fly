@@ -1,0 +1,10 @@
+// expect: working
+// `exit` ends the program at once, with the status it is given: no cleanup runs (std/io).
+import { println, exit } from "std/io";
+
+export function main(): void uses Io {
+  defer println("not reached: exit runs no cleanup");
+  println("working");
+  exit(0);
+  println("not reached either");
+}

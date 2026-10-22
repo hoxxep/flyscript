@@ -1,0 +1,67 @@
+// One thing to do, at `/todos/[id]`: renamed, marked done, or removed, which goes back to the list.
+// An address for one that is not there is the site's page for nothing found.
+
+import { Ui, Event, el, text, cls, attr, on, link } from "web/ui";
+import { Page } from "web/dom";
+import { Params } from "web/router";
+import { Todo, TodoErr, Todos, why } from "../../api";
+
+export type Model = { todo: Todo; draft: String; error: String };
+export type Msg = #Draft | #Rename | #Toggle | #Remove;
+
+export function title(m: readonly Model): String { m.todo.title.clone() }
+
+export function load(p: readonly Params): Model uses Todos, Fail<#NotFound> {
+  const id: u32 = match (parseInt(p.get("id"))) { #Some(n) => n as u32, #None => throw #NotFound };
+  match (Todos.get(id)) {
+    #Some(t) => { const draft = t.title.clone(); { todo: t, draft, error: String.new() } }
+    #None => throw #NotFound,
+  }
+}
+
+export function view(m: readonly Model): void uses Ui<Msg> {
+  link("/", () => { cls("back"); text("← All things to do"); });
+  el("h1", () => text(m.todo.title.asStr()));
+  el("p", () => {
+    cls(if (m.todo.done) { "status done" } else { "status" });
+    on("click", #Toggle);
+    el("span", () => { cls("check"); if (m.todo.done) { text("✓"); } });
+    text(if (m.todo.done) { "Done" } else { "Not done yet" });
+  });
+  el("form", () => {
+    on("submit", #Rename);
+    el("input", () => {
+      attr("value", m.draft.asStr());
+      attr("aria-label", "Title");
+      on("input", #Draft);
+    });
+    el("button", () => { attr("type", "submit"); text("Rename"); });
+  });
+  if (m.error.len() > 0) {
+    el("p", () => { cls("error"); text(m.error.asStr()); });
+  }
+  el("div", () => {
+    cls("actions");
+    el("button", () => { cls("quiet"); on("click", #Remove); text("Remove"); });
+  });
+}
+
+export function update(m: mut Model, msg: Msg, ev: readonly Event): void uses Todos, Page<Model> {
+  m.error = String.new();
+  match (msg) {
+    #Draft => { m.draft = ev.text.clone(); }
+    #Rename => match (Todos.rename(m.todo.id, m.draft.clone())) {
+      #Ok(#Some(t)) => { m.todo = t; }
+      #Ok(#None) => Page.go("/"),
+      #Err(e) => { m.error = why(e).toString(); }
+    },
+    #Toggle => {
+      Todos.toggle(m.todo.id);
+      m.todo.done = !m.todo.done;
+    }
+    #Remove => {
+      Todos.remove(m.todo.id);
+      Page.go("/");
+    }
+  }
+}

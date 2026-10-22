@@ -1,0 +1,21 @@
+// What every page shows around itself: the site's navigation, the link to where it is marked.
+
+import { Ui, el, text, cls, link } from "web/ui";
+
+function item<M>(href: str, label: str, here: bool): void uses Ui<M> {
+  link(href, () => {
+    if (here) { cls("here"); }
+    text(label);
+  });
+}
+
+export function layout<M>(path: str, body: () => void uses Ui<M>): void uses Ui<M> {
+  el("main", () => {
+    el("nav", () => {
+      el("span", () => { cls("brand"); text("Flyscript"); });
+      item("/", "Things to do", path == "/" || path.startsWith("/todos/"));
+      item("/about", "About", path == "/about");
+    });
+    body();
+  });
+}

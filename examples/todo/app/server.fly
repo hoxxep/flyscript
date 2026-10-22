@@ -1,0 +1,82 @@
+// The server's things to do, shared by every connection's task, changed only under a lock: how the
+// server answers `Todos`, for its pages as it renders them and for their calls.
+
+import { Mutex } from "std/sync";
+import { Todo, TodoErr, Todos } from "./api";
+
+type Store = { todos: Vec<Todo>; next: u32 };
+export type State = Mutex<Store>;
+
+export function init(): State uses Io {
+  Mutex.new({
+    todos: [
+      { id: 1, title: "Write the language".toString(), done: true },
+      { id: 2, title: "Compile it to WebAssembly".toString(), done: true },
+      { id: 3, title: "Render pages on the server and take them over in the browser".toString(), done: false },
+    ],
+    next: 4,
+  })
+}
+
+function checked(title: str): Result<String, TodoErr> {
+  const t = title.trim();
+  if (t.len() == 0) { return #Err(#Empty); }
+  if (t.len() > 80) { return #Err(#TooLong); }
+  #Ok(t.toString())
+}
+
+function addTo(s: mut Store, title: String): Result<Vec<Todo>, TodoErr> {
+  match (checked(title.asStr())) {
+    #Ok(t) => {
+      s.todos.push({ id: s.next, title: t, done: false });
+      s.next += 1;
+      #Ok(s.todos.clone())
+    }
+    #Err(e) => #Err(e),
+  }
+}
+
+function find(s: readonly Store, id: u32): Option<Todo> {
+  for (const t of s.todos) {
+    if (t.id == id) { return #Some(t.clone()); }
+  }
+  #None
+}
+
+function renameIn(s: mut Store, id: u32, title: String): Result<Option<Todo>, TodoErr> {
+  match (checked(title.asStr())) {
+    #Ok(t) => {
+      for (const todo of s.todos.iterMut()) {
+        if (todo.id == id) { todo.title = t.clone(); }
+      }
+      #Ok(find(s, id))
+    }
+    #Err(e) => #Err(e),
+  }
+}
+
+function toggleIn(s: mut Store, id: u32): Vec<Todo> {
+  for (const t of s.todos.iterMut()) {
+    if (t.id == id) { t.done = !t.done; }
+  }
+  s.todos.clone()
+}
+
+// Runs `body` with `Todos` answered from the store.
+export function provide<T, row E>(db: readonly State, body: once () => T uses Todos, Io, ...E): T uses Io, ...E {
+  handle { body() } with Todos {
+    list() resumes k => k(db.lock((s) => s.todos.clone())),
+    get(id) resumes k => k(db.lock((s) => find(s, id))),
+    add(title) resumes k => {
+      const t = title.clone();
+      k(db.lock((s) => addTo(mut s, t)))
+    }
+    rename(id, title) resumes k => {
+      const t = title.clone();
+      k(db.lock((s) => renameIn(mut s, id, t)))
+    }
+    toggle(id) resumes k => k(db.lock((s) => toggleIn(mut s, id))),
+    remove(id) resumes k => k(db.lock((s) => { s.todos.retain((t) => t.id != id); s.todos.clone() })),
+    clearDone() resumes k => k(db.lock((s) => { s.todos.retain((t) => !t.done); s.todos.clone() })),
+  }
+}

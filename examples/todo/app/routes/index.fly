@@ -1,10 +1,9 @@
 // The list of things to do: rendered by the server, then run by the page, which asks the server
-// to change it.
+// to change it. Each title links to its own page.
 
-import { Ui, Event, el, text, cls, attr, on, key } from "../../../../web/ui";
-import { Page } from "../../../../web/dom";
-import { Todo, TodoErr, Todos, add } from "../api";
-import { nav } from "../layout";
+import { Ui, Event, el, text, cls, attr, on, key, link } from "web/ui";
+import { Page } from "web/dom";
+import { Todo, TodoErr, Todos, add, why } from "../api";
 
 // `adding` while the server has yet to answer for a new one.
 export type Model = { todos: Vec<Todo>; draft: String; error: String; adding: bool };
@@ -17,45 +16,41 @@ export function load(): Model uses Todos {
 }
 
 export function view(m: readonly Model): void uses Ui<Msg> {
-  el("main", () => {
-    nav("todos");
-    el("h1", () => text("Things to do"));
-    el("form", () => {
-      on("submit", #Add);
-      el("input", () => {
-        attr("placeholder", "What needs doing?");
-        attr("value", m.draft.asStr());
-        on("input", #Draft);
-      });
-      el("button", () => {
-        attr("type", "submit");
-        if (m.adding) { attr("disabled", "disabled"); text("Adding…"); } else { text("Add"); }
-      });
+  el("h1", () => text("Things to do"));
+  el("form", () => {
+    on("submit", #Add);
+    el("input", () => {
+      attr("placeholder", "What needs doing?");
+      attr("value", m.draft.asStr());
+      on("input", #Draft);
     });
-    if (m.error.len() > 0) {
-      el("p", () => { cls("error"); text(m.error.asStr()); });
+    el("button", () => {
+      attr("type", "submit");
+      if (m.adding) { attr("disabled", "disabled"); text("Adding…"); } else { text("Add"); }
+    });
+  });
+  if (m.error.len() > 0) {
+    el("p", () => { cls("error"); text(m.error.asStr()); });
+  }
+  el("ul", () => {
+    cls("todos");
+    for (const t of m.todos) {
+      el("li", () => {
+        key(`${t.id}`.asStr());
+        if (t.done) { cls("done"); }
+        el("span", () => { cls("check"); on("click", #Toggle(t.id)); if (t.done) { text("✓"); } });
+        link(`/todos/${t.id}`.asStr(), () => { cls("title"); text(t.title.asStr()); });
+      });
     }
-    el("ul", () => {
-      cls("todos");
-      for (const t of m.todos) {
-        el("li", () => {
-          key(`${t.id}`.asStr());
-          if (t.done) { cls("done"); }
-          on("click", #Toggle(t.id));
-          el("span", () => { cls("check"); if (t.done) { text("✓"); } });
-          el("span", () => { cls("title"); text(t.title.asStr()); });
-        });
-      }
-    });
-    let left: u32 = 0;
-    let done: u32 = 0;
-    for (const t of m.todos) { if (t.done) { done += 1; } else { left += 1; } }
-    el("footer", () => {
-      el("span", () => text(`${left} left`.asStr()));
-      if (done > 0) {
-        el("button", () => { cls("quiet"); on("click", #ClearDone); text(`Clear ${done} done`.asStr()); });
-      }
-    });
+  });
+  let left: u32 = 0;
+  let done: u32 = 0;
+  for (const t of m.todos) { if (t.done) { done += 1; } else { left += 1; } }
+  el("footer", () => {
+    el("span", () => text(`${left} left`.asStr()));
+    if (done > 0) {
+      el("button", () => { cls("quiet"); on("click", #ClearDone); text(`Clear ${done} done`.asStr()); });
+    }
   });
 }
 
@@ -73,10 +68,7 @@ export function update(m: mut Model, msg: Msg, ev: readonly Event): void uses To
         m.todos = add(m.draft.clone());
         m.draft = String.new();
       } catch (e) {
-        m.error = match (e) {
-          #Empty => "Write something to do first.",
-          #TooLong => "That is too long: 80 characters at most.",
-        }.toString();
+        m.error = why(e).toString();
       }
     }
     #Toggle(id) => { m.todos = Todos.toggle(id); }

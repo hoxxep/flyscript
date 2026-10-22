@@ -40,3 +40,14 @@ ul.todos li:hover .check { border-color: var(--accent); }
 li.done .check { background: var(--done); border-color: var(--done); }
 li.done .title { color: var(--muted); text-decoration: line-through; }
 footer { display: flex; justify-content: space-between; align-items: center; margin-top: 1rem; color: var(--muted); font-size: 0.9rem; min-height: 2rem; }
+ul.todos li .title { flex: 1; color: inherit; text-decoration: none; }
+ul.todos li .title:hover { color: var(--accent); }
+ul.todos li .check { cursor: pointer; }
+.back { display: inline-block; color: var(--muted); text-decoration: none; margin-bottom: 1rem; font-size: 0.95rem; }
+.back:hover { color: var(--accent); }
+.status { display: flex; align-items: center; gap: 0.6rem; margin: 0 0 1.25rem; cursor: pointer; user-select: none; }
+.status.done .check { background: var(--done); border-color: var(--done); }
+.actions { display: flex; justify-content: flex-end; margin-top: 1.5rem; }
+.counter { display: inline-flex; align-items: center; gap: 0.75rem; margin: 0.5rem 0 1rem; }
+.counter output { min-width: 2ch; text-align: center; font-weight: 600; font-variant-numeric: tabular-nums; }
+.counter button { padding: 0.35rem 0.8rem; }

@@ -1,0 +1,94 @@
+// What a site's server does for any site, which the server `flynext` makes from an app calls: a
+// page answered — whole, for a browser, or as its data, for the page's program following a link —
+// the site's files, and the address of a build, which a page in development watches to reload.
+
+import { File } from "std/io";
+import { stringify } from "std/json";
+import { Request, Response, Conn } from "./http";
+import { Ui, html, escape } from "./ui";
+
+// What every page of the site has around what it shows: what goes in its `<head>`, and, in
+// development, the build it was made by.
+export type Shell = { head: String; build: String };
+
+// What a page's program is told of a page: the route that answers it, its address, its title, and
+// the state its view starts from, as JSON. One line each, the title a JSON string, so nothing in it
+// ends a line; an address a request came with has none.
+export function arrival(route: str, url: str, title: str, state: str): String {
+  `${route}\n${url}\n${stringify(title)}\n${state}`
+}
+
+// Whether the request is a page's program asking for what a page shows, not a browser for the page.
+export function wantsData(req: readonly Request): bool {
+  match (req.header("X-Fly-Data")) { #Some(_) => true, #None => false }
+}
+
+// A page as a browser gets it: the view rendered, what the page's program starts from, and the
+// program, which takes the page over (web/dom.fly).
+export function document<M>(shell: readonly Shell, route: str, url: str, title: str, state: str, view: () => void uses Ui<M>): String {
+  let out = "<!doctype html>\n<html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>".toString();
+  escape(title, mut out);
+  out.push("</title>");
+  out.push(shell.head.asStr());
+  out.push("<link rel=\"modulepreload\" href=\"/_fly/flynext.js\"></head><body><div id=\"app\">");
+  html(mut out, view);
+  // What the program starts from is text a script holds: `</` in it would end the script, and is
+  // `<\/` in JSON, which reads it as the same.
+  out.push("</div><script type=\"text/plain\" id=\"fly-page\">");
+  out.push(arrival(route, url, title, state).asStr().replaceAll("</", "<\\/").asStr());
+  out.push("</script><script type=\"module\">import { start } from \"/_fly/flynext.js\"; start(\"/_fly/app.wasm\");</script>");
+  if (shell.build.len() > 0) {
+    // In development a page reloads once the server answers for another build.
+    out.push("<script>(async () => { const was = ");
+    out.push(stringify(shell.build.asStr()).asStr());
+    out.push("; for (;;) { await new Promise((r) => setTimeout(r, 400)); try { const now = await (await fetch(\"/_fly/build\")).text(); if (now !== was) { location.reload(); return; } } catch (_) {} } })();</script>");
+  }
+  out.push("</body></html>\n");
+  out
+}
+
+// Answers for a page: its data, to a page's program, or the page, to a browser.
+export function respond<M>(conn: mut Conn, req: readonly Request, shell: readonly Shell, status: u16, route: str, url: str, title: str, state: str, view: () => void uses Ui<M>): void uses Io, Fail<IoErr> {
+  if (wantsData(req)) {
+    let r = Response.new(status, "text/plain; charset=utf-8", arrival(route, url, title, state));
+    r.header("Cache-Control", "no-store");
+    conn.write(r);
+  } else {
+    let r = Response.new(status, "text/html; charset=utf-8", document(shell, route, url, title, state, view));
+    r.header("Cache-Control", "no-store");
+    conn.write(r);
+  }
+}
+
+export function contentType(path: str): str {
+  if (path.endsWith(".wasm")) { "application/wasm" }
+  else if (path.endsWith(".js")) { "text/javascript" }
+  else if (path.endsWith(".css")) { "text/css" }
+  else if (path.endsWith(".html")) { "text/html; charset=utf-8" }
+  else if (path.endsWith(".svg")) { "image/svg+xml" }
+  else if (path.endsWith(".png")) { "image/png" }
+  else if (path.endsWith(".jpg") || path.endsWith(".jpeg")) { "image/jpeg" }
+  else if (path.endsWith(".ico")) { "image/x-icon" }
+  else if (path.endsWith(".json")) { "application/json" }
+  else if (path.endsWith(".txt")) { "text/plain; charset=utf-8" }
+  else { "application/octet-stream" }
+}
+
+// Answers with the site's file at the request's path, under `dir`, if there is one. The program a
+// build makes is named for it, so a browser may keep it as long as it likes; other files it checks.
+export function file(conn: mut Conn, req: readonly Request, dir: str): bool uses Io, Fail<IoErr> {
+  const path = req.path.asStr();
+  if (path.includes("..") || path.endsWith("/")) { return false; }
+  const found = try {
+    let f = File.open(`${dir}${path}`.asStr());
+    #Some(f.readBytes())
+  } catch (_) { #None };
+  match (found) {
+    #Some(bytes) => {
+      const cache = if (path.startsWith("/_fly/")) { "no-cache" } else { "public, max-age=300" };
+      conn.writeFile(contentType(path), cache, bytes);
+      true
+    }
+    #None => false,
+  }
+}

@@ -1,5 +1,5 @@
 // The page's side of `Ui`, in WebAssembly: a view rendered to the DOM, and the loop that runs a
-// program — render, wait for an event, update, render again. A render is recorded as the flat list
+// page — render, wait for an event, update, render again — until a link takes it to another. A render is recorded as the flat list
 // of the view's operations, with the DOM node each element and text became; the next one is diffed
 // against it, keyed children matched by their keys, the rest in order, and only what changed is
 // done to the page. The first takes over the page the server rendered, if it is the same.
@@ -8,6 +8,7 @@
 // strings as bytes in this program's memory. Waiting for an event, or for the server, suspends
 // the program until the page has one for it.
 
+import { parse } from "std/json";
 import { Ui, Event } from "./ui";
 
 extern "C" function fly_dom_root(): u32;
@@ -24,12 +25,17 @@ extern "C" function fly_dom_remove(node: u32): void;
 extern "C" function fly_dom_clear(parent: u32): void;
 extern "C" function fly_dom_on(node: u32, event: u8*, elen: u32, msg: u32): void;
 extern "C" function fly_dom_off(node: u32): void;
-// The next event, waited for; the server's answer to a request; the state the server rendered the
-// page with: each a string the page keeps, of the length given, for `fly_take` to copy out.
+// The next event, waited for; the server's answer to a request; what the server answers for a
+// page's data; the state the server rendered the page with: each a string the page keeps, of the
+// length given, for `fly_take` to copy out.
 extern "C" function fly_wait_event(): u32;
 extern "C" function fly_fetch(url: u8*, ulen: u32, body: u8*, blen: u32): u32;
+extern "C" function fly_get(url: u8*, ulen: u32): u32;
 extern "C" function fly_initial(): u32;
 extern "C" function fly_take(out: u8*, len: u32): void;
+// The page has become another: its address, pushed onto the history unless it came from it, and
+// its title.
+extern "C" function fly_arrived(url: u8*, ulen: u32, title: u8*, tlen: u32, push: bool): void;
 
 // ---- strings across ----
 
@@ -65,6 +71,38 @@ export function fetch(url: str, body: str): String {
   let b = bytes(body);
   const n = unsafe { fly_fetch(addr(mut u), url.len() as u32, addr(mut b), body.len() as u32) };
   take(n)
+}
+
+// Asks the server for what the page at `url` shows: the route that answers it, its title and the
+// state it starts from, as JSON.
+export function get(url: str): String {
+  let u = bytes(url);
+  const n = unsafe { fly_get(addr(mut u), url.len() as u32) };
+  take(n)
+}
+
+// A page as the server describes it to the program (web/site.fly): the route that answers it, its
+// address, its title, and the state its view starts from, as JSON.
+export type Arrival = { route: String; url: String; title: String; state: String };
+
+// The server's description of a page, a line each, the title a JSON string.
+export function arrival(text: str): Arrival {
+  let parts: Vec<String> = Vec.new();
+  let rest = text;
+  for (const _ of 0..3) {
+    const end = match (rest.indexOf("\n")) { #Some(e) => e, #None => rest.len() };
+    parts.push(rest.slice(0, end).toString());
+    rest = if (end < rest.len()) { rest.slice(end + 1, rest.len()) } else { "" };
+  }
+  const title: String = try { parse(parts[2].asStr()) } catch (_) { String.new() };
+  { route: parts[0].clone(), url: parts[1].clone(), title, state: rest.toString() }
+}
+
+// The page is now the one at `url`, called `title`.
+export function arrived(url: str, title: str, push: bool): void {
+  let u = bytes(url);
+  let t = bytes(title);
+  unsafe { fly_arrived(addr(mut u), url.len() as u32, addr(mut t), title.len() as u32, push); }
 }
 
 // ---- the DOM ----
@@ -110,12 +148,16 @@ function isTag(node: u32, tag: str): bool {
 export enum Op { #Open(String), #Key(String), #Attr(String, String), #On(String, usize), #Text(String), #Close }
 impl Clone for Op;
 
-// What a render made: its operations, the node each `#Open` and `#Text` became, and the messages
-// its events give, numbered as its `#On`s say.
-export type Frame<M> = { ops: Vec<Op>; nodes: Vec<u32>; msgs: Vec<M> };
+// What a render made: its operations, and the node each `#Open` and `#Text` became. It knows
+// nothing of the page's messages, so the next page's render is diffed against it as any other:
+// what the two show alike — a layout around both — is left as it is.
+export type Render = { ops: Vec<Op>; nodes: Vec<u32> };
 
-// Records what `view` does.
-export function record<M extends Send & Clone>(view: () => void uses Ui<M>): Frame<M> {
+// A render with nothing in it, the first page's to take the server's over.
+export function nothing(): Render { { ops: Vec.new(), nodes: Vec.new() } }
+
+// Records what `view` does, and the messages its events give, numbered as its `#On`s say.
+export function record<M extends Send & Clone>(view: () => void uses Ui<M>): [Render, Vec<M>] {
   let ops: Vec<Op> = Vec.new();
   let msgs: Vec<M> = Vec.new();
   handle { view() } with Ui<M> {
@@ -132,7 +174,7 @@ export function record<M extends Send & Clone>(view: () => void uses Ui<M>): Fra
   };
   let nodes: Vec<u32> = Vec.new();
   for (const _ of 0..ops.len()) { nodes.push(0); }
-  { ops, nodes, msgs }
+  [{ ops, nodes }, msgs]
 }
 
 // One child of an element in a render: where its operations start and end, and its key.
@@ -221,7 +263,7 @@ function props(ops: readonly Vec<Op>, i: usize): [Vec<[String, String]>, Vec<[St
 }
 
 // Makes the node the child at `i` of `f` shows, and its descendants, and records them in `f`.
-function build<M>(f: mut Frame<M>, i: usize): u32 {
+function build(f: mut Render, i: usize): u32 {
   match (f.ops[i]) {
     #Text(s) => {
       const node = textNode(s.asStr());
@@ -246,7 +288,7 @@ function build<M>(f: mut Frame<M>, i: usize): u32 {
 
 // Takes over the node `node` for the child at `i` of `f`, as the server rendered it: true if it is
 // what the child shows, its descendants too.
-function adopt<M>(f: mut Frame<M>, i: usize, node: u32): bool {
+function adopt(f: mut Render, i: usize, node: u32): bool {
   match (f.ops[i]) {
     #Text(_) => {
       if (!isTag(node, "#text")) { return false; }
@@ -272,7 +314,7 @@ function adopt<M>(f: mut Frame<M>, i: usize, node: u32): bool {
 
 // The first render into `root`: the server's nodes taken over if they are what it shows, else
 // made afresh.
-export function hydrate<M>(root: u32, f: mut Frame<M>): void {
+export function hydrate(root: u32, f: mut Render): void {
   const ks = kids(f.ops, 0);
   let same = unsafe { fly_dom_children(root) } == ks.len() as u32;
   if (same) {
@@ -294,7 +336,7 @@ export function hydrate<M>(root: u32, f: mut Frame<M>): void {
 }
 
 // Updates the node of the child at `oi` of `old`, which the child at `ni` of `new` now shows.
-function patch<M>(old: readonly Frame<M>, oi: usize, new: mut Frame<M>, ni: usize): u32 {
+function patch(old: readonly Render, oi: usize, new: mut Render, ni: usize): u32 {
   const node = old.nodes[oi];
   new.nodes[ni] = node;
   match (new.ops[ni]) {
@@ -323,7 +365,7 @@ function patch<M>(old: readonly Frame<M>, oi: usize, new: mut Frame<M>, ni: usiz
 // Updates the children of `parent`, which `old`'s start at `oi` and `new`'s at `ni`: each new one
 // matched to an old one by key, or in order among those of its kind without one; the rest made,
 // the old ones not matched removed, and all put in order.
-export function children<M>(parent: u32, old: readonly Frame<M>, oi: usize, new: mut Frame<M>, ni: usize): void {
+export function children(parent: u32, old: readonly Render, oi: usize, new: mut Render, ni: usize): void {
   const was = kids(old.ops, oi);
   const now = kids(new.ops, ni);
   let used: Vec<bool> = Vec.new();
@@ -366,45 +408,82 @@ export function children<M>(parent: u32, old: readonly Frame<M>, oi: usize, new:
 
 // ---- running ----
 
-// The event the page has: the message's number, then what the event says, each ended by a zero.
-function nextEvent(): [usize, Event] {
+// What happened in the page: an event, with the number of its message and what it says; or a link
+// followed, or a step back or forward through the history, to the page at an address.
+enum Happened { #Event(usize, Event), #Go(String, bool) }
+
+// The page's next happening. An event is the message's number and what the event says; going
+// elsewhere is `\u{1}`, the address and whether it is a new step; each part ended by a zero.
+function next(): Happened {
   const n = unsafe { fly_wait_event() };
   const s = take(n);
   const parts = s.asStr().split("\0");
-  const index: usize = if (parts.len() > 0) { match (parseInt(parts[0].asStr())) { #Some(i) => i as usize, #None => 0 } } else { 0 };
   const field = (i: usize) => if (i < parts.len()) { parts[i].clone() } else { String.new() };
-  [index, { text: field(1), key: field(2), checked: field(3) == "true" }]
+  if (field(0) == "\u{1}") {
+    return #Go(field(1), field(2) == "1");
+  }
+  const index: usize = match (parseInt(field(0).asStr())) { #Some(i) => i as usize, #None => 0 };
+  #Event(index, { text: field(1), key: field(2), checked: field(3) == "true" })
 }
 
 // What an update may ask of the page besides a new model: to show the model as it is so far, before
-// something slow — the server's answer — so the page says what is happening. Events meanwhile wait
-// their turn.
+// something slow — the server's answer — so the page says what is happening, events meanwhile
+// waiting their turn; and to go to another page once the update is done, as a link would.
 export effect Page<Model> {
   show(m: readonly Model): void;
+  go(url: str): void;
 }
 
-// Runs a program in the page: `view` of `model` rendered, then each event's message given to
-// `update`, and the view rendered again, for as long as the page is open.
-export function run<Model, M extends Send & Clone, row E>(model: Model, view: (m: readonly Model) => void uses Ui<M>, update: (m: mut Model, msg: M, ev: readonly Event) => void uses Page<Model>, ...E): void uses ...E {
+// Where a page sends the program next: the page at `url`, a new step in the history if `push`.
+export type Go = { url: String; push: bool };
+
+// Runs a page: `view` of `model` rendered, then each event's message given to `update`, and the
+// view rendered again, until a link is followed or the history stepped through: then where to. The
+// first render is diffed against `shown`, what the page showed before — or, with nothing shown,
+// takes over what the server rendered — and `shown` is left what the page shows at the end.
+export function run<Model, M extends Send & Clone, row E>(shown: mut Render, model: Model, view: (m: readonly Model) => void uses Ui<M>, update: (m: mut Model, msg: M, ev: readonly Event) => void uses Page<Model>, ...E): Go uses ...E {
   let m = model;
   const root = unsafe { fly_dom_root() };
-  let f = record(() => view(m));
-  hydrate(root, mut f);
+  let [f, msgs] = record(() => view(m));
+  if (shown.ops.len() == 0) { hydrate(root, mut f); } else { children(root, shown, 0, mut f, 0); }
   while (true) {
-    const [i, ev] = nextEvent();
-    if (i < f.msgs.len()) {
-      const msg = f.msgs[i].clone();
-      handle { update(mut m, msg, ev) } with Page<Model> {
-        show(now) resumes k => {
-          let g = record(() => view(now));
+    match (next()) {
+      #Go(url, push) => {
+        shown = f;
+        return { url, push };
+      }
+      #Event(i, ev) => {
+        if (i < msgs.len()) {
+          const msg = msgs[i].clone();
+          let leaving: Option<String> = #None;
+          handle { update(mut m, msg, ev) } with Page<Model> {
+            show(now) resumes k => {
+              let [g, gm] = record(() => view(now));
+              children(root, f, 0, mut g, 0);
+              f = g;
+              msgs = gm;
+              k()
+            }
+            go(url) resumes k => {
+              leaving = #Some(url.toString());
+              k()
+            }
+          };
+          let [g, gm] = record(() => view(m));
           children(root, f, 0, mut g, 0);
           f = g;
-          k()
+          msgs = gm;
+          if (const #Some(url) = leaving) {
+            shown = f;
+            return { url, push: true };
+          }
         }
-      };
-      let g = record(() => view(m));
-      children(root, f, 0, mut g, 0);
-      f = g;
+      }
     }
   }
+  shown = f;
+  { url: String.new(), push: false }
 }
+
+// An update for a page that changes nothing.
+export function still<Model, M>(m: mut Model, msg: M, ev: readonly Event): void {}

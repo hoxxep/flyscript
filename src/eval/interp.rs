@@ -217,6 +217,10 @@ pub enum Pass {
     Owned,
 }
 
+/// What `exit` ends the program with: a panic, so nothing cleans up, that `run` reports as the end
+/// of the program, its status in the world.
+pub const EXITED: &str = "\u{2}exit";
+
 pub fn panic(msg: impl Into<String>) -> Ctl {
     Ctl::Panic(msg.into())
 }

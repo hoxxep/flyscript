@@ -1,0 +1,453 @@
+// The app compiler: it reads an app — its pages under `app/routes`, the effects its pages ask the
+// server for in `app/api.fly`, and how the server answers them in `app/server.fly` — and writes the
+// two programs that run it, into `app/.flynext`: the server, which routes each address to its page,
+// renders it inside its layouts, and answers the pages' calls; and the client, one program for every
+// page, which takes over the page the server rendered, follows links by rendering the next page
+// itself, and asks the server for what its pages perform.
+//
+// `flynext-gen app build file...`: `app` the app's directory, `build` what names this build (empty
+// unless in development), and each file a page or layout, by its place under `app/routes`. Run by
+// `web/flynext`. The generated programs, and the app, reach this framework as the package `web`.
+
+import { println, eprintln, exit, File, writeFile } from "std/io";
+import { parseModule } from "../selfhost/parse";
+import { Module, Item, ItemKind, FnSig } from "../selfhost/ast";
+
+// A page, as its module says what it has.
+type Route = {
+  // Its file, under `routes/`, without `.fly`: `todos/[id]`. Also what the client calls it.
+  name: String;
+  // The addresses it answers: `/todos/[id]`.
+  pattern: String;
+  // `load`, and whether it takes the address's parameters and can fail; or `initial`.
+  load: bool;
+  loadParams: bool;
+  loadFails: bool;
+  initial: bool;
+  // `title`: a function of the model, or a constant.
+  title: bool;
+  titleFn: bool;
+  update: bool;
+  // The layouts around it, outermost first, by their files.
+  layouts: Vec<String>;
+};
+
+type Op = { name: String; params: Vec<[String, String]>; ret: String };
+type Effect = { name: String; ops: Vec<Op> };
+
+function read(path: str): String uses Io {
+  try {
+    let f = File.open(path);
+    f.readText()
+  } catch (_) { String.new() }
+}
+
+function exists(path: str): bool uses Io {
+  try {
+    let f = File.open(path);
+    true
+  } catch (_) { false }
+}
+
+// What a module says, or why it says nothing: then the app cannot be built.
+function parsed(path: str, src: str): Module uses Io {
+  try { parseModule(src) } catch (e) {
+    match (e) {
+      #Diagnostic { span, message } => {
+        let line: usize = 1;
+        let col: usize = 1;
+        for (const b of src.slice(0, min(span.start, src.len())).bytes()) {
+          if (b == b'\n') { line += 1; col = 1; } else { col += 1; }
+        }
+        stop(`${path}:${line}:${col}: ${message}`.asStr())
+      }
+    }
+  }
+}
+
+// What is wrong with the app, said, and the build stopped.
+function stop(message: str): never uses Io {
+  eprintln(message);
+  exit(1)
+}
+
+// The text of a part of the source.
+function text(src: str, start: usize, end: usize): String { src.slice(start, end).toString() }
+
+// The function an item exports, if it does.
+function exported(it: readonly Item, name: str): Option<FnSig> {
+  if (!it.exported) { return #None; }
+  match (it.kind) {
+    #Function(f) => if (f.sig.name.name == name) { #Some(f.sig.clone()) } else { #None },
+    _ => #None,
+  }
+}
+
+function exportsConst(m: readonly Module, name: str): bool {
+  m.items.iter().some((it) => it.exported && match (it.kind) { #Const { name: n, ty: _, value: _ } => n.name == name, _ => false })
+}
+
+function fnOf(m: readonly Module, name: str): Option<FnSig> {
+  for (const it of m.items) {
+    if (const #Some(s) = exported(it, name)) { return #Some(s); }
+  }
+  #None
+}
+
+// What a route's file says of the address it answers: `index` its directory's.
+function patternOf(name: str): String {
+  let parts: Vec<String> = Vec.new();
+  for (const p of name.split("/")) {
+    if (p != "index" && p.len() > 0) { parts.push(p.clone()); }
+  }
+  let out = String.new();
+  for (const p of parts) {
+    out.push("/");
+    out.push(p.asStr());
+  }
+  if (out.len() == 0) { out.push("/"); }
+  out
+}
+
+// The layouts around a route in `dir`: each directory's from the top down to its own.
+function layoutsOf(name: str, all: readonly Vec<String>): Vec<String> {
+  let out: Vec<String> = Vec.new();
+  const parts = name.split("/");
+  let dir = String.new();
+  for (const [i, p] of parts.iter().enumerate()) {
+    const here = if (dir.len() == 0) { "layout".toString() } else { `${dir}/layout` };
+    if (all.iter().some((l) => l == here)) { out.push(here); }
+    if (i + 1 < parts.len()) {
+      if (dir.len() > 0) { dir.push("/"); }
+      dir.push(p.asStr());
+    }
+  }
+  out
+}
+
+function route(app: str, name: str, layouts: readonly Vec<String>): Route uses Io {
+  const path = `${app}/routes/${name}.fly`;
+  const src = read(path.asStr());
+  const m = parsed(path.asStr(), src.asStr());
+  let r: Route = {
+    name: name.toString(), pattern: patternOf(name), load: false, loadParams: false, loadFails: false, initial: false,
+    title: false, titleFn: false, update: fnOf(m, "update").isSome(), layouts: layoutsOf(name, layouts),
+  };
+  if (const #Some(s) = fnOf(m, "load")) {
+    r.load = true;
+    r.loadParams = s.params.len() > 0;
+    r.loadFails = text(src.asStr(), s.span.start, s.span.end).includes("Fail");
+  } else if (fnOf(m, "initial").isSome()) {
+    r.initial = true;
+  } else {
+    stop(`${path}: a page exports \`load\`, which makes its model, or \`initial\``.asStr());
+  }
+  if (fnOf(m, "view").isNone()) { stop(`${path}: a page exports \`view\``.asStr()); }
+  if (fnOf(m, "title").isSome()) {
+    r.title = true;
+    r.titleFn = true;
+  } else if (exportsConst(m, "title")) {
+    r.title = true;
+  }
+  r
+}
+
+// The effects `api.fly` exports, and every name it exports, which the generated code imports.
+function effects(app: str): [Vec<Effect>, Vec<String>] uses Io {
+  const path = `${app}/api.fly`;
+  let out: Vec<Effect> = Vec.new();
+  let names: Vec<String> = Vec.new();
+  if (!exists(path.asStr())) { return [out, names]; }
+  const src = read(path.asStr());
+  const m = parsed(path.asStr(), src.asStr());
+  for (const it of m.items) {
+    if (!it.exported) { continue; }
+    match (it.kind) {
+      #Effect(e) => {
+        let ops: Vec<Op> = Vec.new();
+        for (const op of e.ops) {
+          let params: Vec<[String, String]> = Vec.new();
+          for (const p of op.params) {
+            const ty = match (p.ty) { #Some(t) => text(src.asStr(), t.span.start, t.span.end), #None => "void".toString() };
+            params.push([p.name.name.clone(), ty]);
+          }
+          ops.push({ name: op.name.name.clone(), params, ret: text(src.asStr(), op.ret.ty.span.start, op.ret.ty.span.end) });
+        }
+        out.push({ name: e.name.name.clone(), ops });
+        names.push(e.name.name.clone());
+      }
+      #Struct(s) => names.push(s.name.name.clone()),
+      #Enum(e) => names.push(e.name.name.clone()),
+      #TypeAlias(t) => names.push(t.name.name.clone()),
+      #Function(f) => names.push(f.sig.name.name.clone()),
+      #Const { name, ty: _, value: _ } => names.push(name.name.clone()),
+      #Interface(i) => names.push(i.name.name.clone()),
+      _ => {}
+    }
+  }
+  [out, names]
+}
+
+// An argument's type as a call's JSON carries it: owned.
+function owned(ty: str): String {
+  if (ty == "str") { return "String".toString(); }
+  if (ty.startsWith("readonly ")) { return owned(ty.slice(9, ty.len())); }
+  if (ty.startsWith("mut ")) { return owned(ty.slice(4, ty.len())); }
+  ty.toString()
+}
+
+// More specific routes are tried first: those with fewer parameters, then longer ones.
+function before(a: readonly Route, b: readonly Route): bool {
+  const pa = a.pattern.asStr().split("[").len();
+  const pb = b.pattern.asStr().split("[").len();
+  if (pa != pb) { return pa < pb; }
+  a.pattern.len() > b.pattern.len()
+}
+
+function sorted(rs: Vec<Route>): Vec<Route> {
+  let out: Vec<Route> = Vec.new();
+  let all = rs;
+  for (const r of all.drain()) {
+    let i: usize = 0;
+    while (i < out.len() && !before(r, out[i])) { i += 1; }
+    out.insert(i, r);
+  }
+  out
+}
+
+// ---- the server ----
+
+function imports(out: mut String, routes: readonly Vec<Route>, layouts: readonly Vec<String>, names: readonly Vec<String>, notFound: bool): void {
+  out.push("import { println } from \"std/io\";\n");
+  out.push("import { Listener } from \"std/net\";\n");
+  out.push("import { stringify, parse, FromJson, JsonError } from \"std/json\";\n");
+  out.push("import { serve, Handler, Request, Response, Conn } from \"web/http\";\n");
+  out.push(`import { Params, matches } from "web/router";\n`.asStr());
+  out.push(`import { Shell, respond, file } from "web/site";\n`.asStr());
+  out.push("import { State, init, provide } from \"../server\";\n");
+  if (names.len() > 0) {
+    out.push("import { ");
+    out.push(names.join(", ").asStr());
+    out.push(" } from \"../api\";\n");
+  }
+  for (const [i, r] of routes.iter().enumerate()) { routeImport(mut out, r, i); }
+  if (notFound) { out.push("import { view as view_nf, initial as initial_nf } from \"../routes/404\";\n"); }
+  for (const [i, l] of layouts.iter().enumerate()) {
+    out.push(`import { layout as layout${i} } from "../routes/${l}";\n`.asStr());
+  }
+}
+
+function routeImport(out: mut String, r: readonly Route, i: usize): void {
+  let parts: Vec<String> = [`view as view${i}`, `Model as Model${i}`];
+  if (r.load) { parts.push(`load as load${i}`); } else { parts.push(`initial as initial${i}`); }
+  if (r.title) { parts.push(`title as title${i}`); }
+  if (r.update) { parts.push(`update as update${i}`); }
+  out.push(`import { ${parts.join(", ")} } from "../routes/${r.name}";\n`.asStr());
+}
+
+// The view of route `i` of model `m`, inside its layouts, for the page at `path`.
+function shown(r: readonly Route, i: usize, layouts: readonly Vec<String>, path: str): String {
+  let v = `view${i}(m)`;
+  let k = r.layouts.len();
+  while (k > 0) {
+    k -= 1;
+    const li = match (layouts.indexOf(r.layouts[k])) { #Some(x) => x, #None => 0 };
+    v = `layout${li}(${path}, () => ${v})`;
+  }
+  v
+}
+
+// The page for nothing found, inside the layout at the top, if there is one.
+function aroundNotFound(layouts: readonly Vec<String>, path: str): String {
+  match (layouts.indexOf("layout".toString())) {
+    #Some(li) => `layout${li}(${path}, () => view_nf(m))`,
+    #None => "view_nf(m)".toString(),
+  }
+}
+
+// The same, as a view: a function of nothing.
+function wrapped(r: readonly Route, i: usize, layouts: readonly Vec<String>, path: str): String {
+  `() => ${shown(r, i, layouts, path)}`
+}
+
+function titleOf(r: readonly Route, i: usize): String {
+  if (!r.title) { "\"\"".toString() } else if (r.titleFn) { `title${i}(m).asStr()` } else { `title${i}` }
+}
+
+function server(build: str, head: str, routes: readonly Vec<Route>, layouts: readonly Vec<String>, effs: readonly Vec<Effect>, names: readonly Vec<String>, notFound: bool): String {
+  let out = "// Made by flynext from the app: change the app, not this.\n\n".toString();
+  imports(mut out, routes, layouts, names, notFound);
+  out.push(`\nconst BUILD: str = ${quoted(build)};\nconst HEAD: str = ${quoted(head)};\n\n`.asStr());
+  out.push("struct Site { state: State; dir: String; shell: Shell }\n\n");
+  out.push("impl Handler for Site {\n  function handle(self: readonly Self, req: readonly Request, conn: mut Conn): void uses Io {\n    // A client that went away is no one to answer.\n    try { self.route(req, mut conn); } catch (_) {}\n  }\n}\n\n");
+  out.push("impl Site {\n  function route(self: readonly Self, req: readonly Request, conn: mut Conn): void uses Io, Fail<IoErr> {\n");
+  out.push("    const url = if (req.query.len() > 0) { `${req.path}?${req.query}` } else { req.path.clone() };\n");
+  out.push("    if (req.path == \"/_fly/build\") { conn.write(Response.text(200, BUILD)); return; }\n");
+  out.push("    if (req.path.startsWith(\"/_fly/rpc/\") && req.method == \"POST\") { return self.call(req, mut conn); }\n");
+  out.push("    if (req.method == \"GET\") {\n");
+  for (const [i, r] of routes.iter().enumerate()) {
+    out.push(`      if (const #Some(p) = matches(${quoted(r.pattern.asStr())}, url.asStr())) { return self.page${i}(req, mut conn, url.asStr(), p); }\n`.asStr());
+  }
+  out.push("    }\n    if (file(mut conn, req, self.dir.asStr())) { return; }\n    self.notFound(req, mut conn, url.asStr());\n  }\n\n");
+  // Each page.
+  for (const [i, r] of routes.iter().enumerate()) {
+    out.push(`  function page${i}(self: readonly Self, req: readonly Request, conn: mut Conn, url: str, p: readonly Params): void uses Io, Fail<IoErr> {\n`.asStr());
+    const made = if (r.load) {
+      if (r.loadParams) { `provide(self.state, () => load${i}(p))` } else { `provide(self.state, () => load${i}())` }
+    } else { `initial${i}()` };
+    if (r.loadFails) {
+      out.push(`    const found: Option<Model${i}> = try { #Some(${made}) } catch (_) { #None };\n`.asStr());
+      out.push(`    const m = match (found) { #Some(m) => m, #None => return self.notFound(req, mut conn, url) };\n`.asStr());
+    } else {
+      out.push(`    const m: Model${i} = ${made};\n`.asStr());
+    }
+    out.push(`    respond(mut conn, req, self.shell, 200, ${quoted(r.name.asStr())}, url, ${titleOf(r, i)}, stringify(m).asStr(), ${wrapped(r, i, layouts, "url")});\n  }\n\n`.asStr());
+  }
+  // Not found.
+  out.push("  function notFound(self: readonly Self, req: readonly Request, conn: mut Conn, url: str): void uses Io, Fail<IoErr> {\n");
+  if (notFound) {
+    out.push("    const m = initial_nf();\n");
+    out.push(`    respond(mut conn, req, self.shell, 404, "404", url, "Not found", stringify(m).asStr(), () => ${aroundNotFound(layouts, "url")});\n`.asStr());
+  } else {
+    out.push("    conn.write(Response.text(404, \"not found\\n\"));\n");
+  }
+  out.push("  }\n\n");
+  // Calls.
+  out.push("  function call(self: readonly Self, req: readonly Request, conn: mut Conn): void uses Io, Fail<IoErr> {\n");
+  out.push("    const op = req.path.asStr().slice(10, req.path.len());\n");
+  out.push("    const r = try { #Ok(provide(self.state, () => answer(op, req.body.asStr()))) } catch (_) { #Err(#BadCall) };\n");
+  out.push("    match (r) {\n      #Ok(json) => conn.write(Response.json(json)),\n      #Err(_) => conn.write(Response.text(400, \"bad call\\n\")),\n    }\n  }\n}\n\n");
+  // The answers to calls.
+  let row: Vec<String> = Vec.new();
+  for (const e of effs) { row.push(e.name.clone()); }
+  row.push("Fail<JsonError | #NoSuchCall>".toString());
+  out.push(`// A call of an operation the pages perform: its arguments as a JSON object, its result as JSON.\nfunction answer(op: str, args: str): String uses ${row.join(", ")} {\n  match (op) {\n`.asStr());
+  for (const e of effs) {
+    for (const op of e.ops) {
+      const name = `${e.name}.${op.name}`;
+      if (op.params.len() == 0) {
+        out.push(`    ${quoted(name.asStr())} => stringify(${name}()),\n`.asStr());
+      } else {
+        let fields: Vec<String> = Vec.new();
+        let args: Vec<String> = Vec.new();
+        for (const [n, t] of op.params) {
+          fields.push(`${n}: ${owned(t.asStr())}`);
+          args.push(`a.${n}`);
+        }
+        out.push(`    ${quoted(name.asStr())} => {\n      const a: { ${fields.join("; ")} } = parse(args);\n      stringify(${name}(${args.join(", ")}))\n    }\n`.asStr());
+      }
+    }
+  }
+  out.push("    _ => throw #NoSuchCall,\n  }\n}\n\n");
+  out.push("export function main(args: readonly String[]): void uses Io {\n");
+  out.push("  const port: u16 = if (args.len() > 0) { match (parseInt(args[0].asStr())) { #Some(n) => n as u16, #None => 3000 } } else { 3000 };\n");
+  out.push("  const dir = if (args.len() > 1) { args[1].clone() } else { \".\".toString() };\n");
+  out.push("  try {\n    let l = Listener.bind(port);\n    println(`listening on ${l.port()}`);\n");
+  out.push("    serve(mut l, Site { state: init(), dir, shell: { head: HEAD.toString(), build: BUILD.toString() } });\n");
+  out.push("  } catch (e) { println(`cannot serve: ${e}`); }\n}\n");
+  out
+}
+
+// ---- the client ----
+
+function client(routes: readonly Vec<Route>, layouts: readonly Vec<String>, effs: readonly Vec<Effect>, names: readonly Vec<String>, notFound: bool): String {
+  let out = "// Made by flynext from the app: change the app, not this.\n\n".toString();
+  out.push("import { stringify, parse, FromJson } from \"std/json\";\n");
+  out.push(`import { Event } from "web/ui";\n`.asStr());
+  out.push(`import { run, still, nothing, initial, fetch, get, arrived, arrival, Page, Go } from "web/dom";\n`.asStr());
+  if (names.len() > 0) {
+    out.push("import { ");
+    out.push(names.join(", ").asStr());
+    out.push(" } from \"../api\";\n");
+  }
+  for (const [i, r] of routes.iter().enumerate()) { routeImport(mut out, r, i); }
+  if (notFound) { out.push("import { view as view_nf, Model as Model_nf } from \"../routes/404\";\n"); }
+  for (const [i, l] of layouts.iter().enumerate()) {
+    out.push(`import { layout as layout${i} } from "../routes/${l}";\n`.asStr());
+  }
+  // What the pages perform, asked of the server.
+  out.push("\nfunction call<R extends FromJson>(op: str, args: String): R {\n  const text = fetch(`/_fly/rpc/${op}`.asStr(), args.asStr());\n  try { parse(text.asStr()) } catch (_) { panic(`the server's answer to \\`${op}\\` was not what it should be`) }\n}\n\n");
+  let row: Vec<String> = Vec.new();
+  for (const e of effs) { row.push(e.name.clone()); }
+  row.push("Io".toString());
+  out.push(`// Runs \`body\` with what it performs of the server's asked of it.\nfunction server<T>(body: once () => T uses ${row.join(", ")}): T uses Io {\n`.asStr());
+  let close = String.new();
+  for (const e of effs) {
+    out.push("  handle {\n");
+    close = `  } with ${e.name} {\n${arms(e)}  }\n${close}`;
+  }
+  out.push("  body()\n");
+  out.push(close.asStr());
+  out.push("}\n\n");
+  // What a page arrives as.
+  out.push("export function main(): void uses Io {\n  let shown = nothing();\n");
+  out.push("  let at = arrival(initial().asStr());\n");
+  out.push("  while (true) {\n    const url = at.url.clone();\n    const go: Go = match (at.route.asStr()) {\n");
+  for (const [i, r] of routes.iter().enumerate()) {
+    const update = if (r.update) { `update${i}` } else { "still".toString() };
+    out.push(`      ${quoted(r.name.asStr())} => {\n        const m: Model${i} = state(at.state.asStr());\n        server(() => run(mut shown, m, (m) => ${shown(r, i, layouts, "url.asStr()")}, ${update}))\n      }\n`.asStr());
+  }
+  if (notFound) {
+    out.push(`      _ => {\n        const m: Model_nf = state(at.state.asStr());\n        run(mut shown, m, (m) => ${aroundNotFound(layouts, "url.asStr()")}, still)\n      }\n`.asStr());
+  } else {
+    out.push("      _ => panic(`no page for ${at.route}`),\n");
+  }
+  out.push("    };\n    const text = get(go.url.asStr());\n    at = arrival(text.asStr());\n");
+  out.push("    arrived(go.url.asStr(), at.title.asStr(), go.push);\n  }\n}\n\n");
+  out.push("function state<M extends FromJson>(json: str): M {\n  try { parse(json) } catch (_) { panic(\"the page's state is not what it should be\") }\n}\n");
+  out
+}
+
+// The arms of the client's handler of `e`: each operation a call of the server's.
+function arms(e: readonly Effect): String {
+  let out = String.new();
+  for (const op of e.ops) {
+    let ps: Vec<String> = Vec.new();
+    for (const [n, _] of op.params) { ps.push(n.clone()); }
+    const args = if (ps.len() == 0) { "\"{}\".toString()".toString() } else { `stringify({ ${ps.join(", ")} })` };
+    out.push(`    ${op.name}(${ps.join(", ")}) resumes k => k(call(${quoted(`${e.name}.${op.name}`.asStr())}, ${args})),\n`.asStr());
+  }
+  out
+}
+
+// A string as Flyscript writes it.
+function quoted(s: str): String {
+  let out = "\"".toString();
+  out.push(s.replaceAll("\\", "\\\\").replaceAll("\"", "\\\"").replaceAll("\n", "\\n").asStr());
+  out.push("\"");
+  out
+}
+
+export function main(args: readonly String[]): void uses Io {
+  if (args.len() < 2) {
+    eprintln("flynext-gen app build file...");
+    return;
+  }
+  const app = args[0].asStr();
+  const build = args[1].asStr();
+  let names: Vec<String> = Vec.new();
+  for (const f of args[2..args.len()]) {
+    const n = f.asStr().trimStart();
+    const n = if (n.startsWith("./")) { n.slice(2, n.len()) } else { n };
+    if (n.endsWith(".fly")) { names.push(n.slice(0, n.len() - 4).toString()); }
+  }
+  let layouts: Vec<String> = Vec.new();
+  for (const n of names) {
+    if (n == "layout" || n.asStr().endsWith("/layout")) { layouts.push(n.clone()); }
+  }
+  let rs: Vec<Route> = Vec.new();
+  let notFound = false;
+  for (const n of names) {
+    if (layouts.iter().some((l) => l == n)) { continue; }
+    if (n == "404") { notFound = true; continue; }
+    rs.push(route(app, n.asStr(), layouts));
+  }
+  const routes = sorted(rs);
+  const [effs, apiNames] = effects(app);
+  const head = if (exists(`${app}/head.html`.asStr())) { read(`${app}/head.html`.asStr()).asStr().trimEnd().toString() } else { "<link rel=\"stylesheet\" href=\"/style.css\">".toString() };
+  try {
+    writeFile(`${app}/.flynext/server.fly`.asStr(), server(build, head.asStr(), routes, layouts, effs, apiNames, notFound).asStr());
+    writeFile(`${app}/.flynext/client.fly`.asStr(), client(routes, layouts, effs, apiNames, notFound).asStr());
+  } catch (e) { stop(`cannot write ${app}/.flynext: ${e}`.asStr()); }
+  println(`${routes.len()} pages, ${layouts.len()} layouts, ${effs.len()} server effects`);
+}

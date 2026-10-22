@@ -1,7 +1,9 @@
 // The page's side of a Flyscript program compiled to WebAssembly (web/dom.fly): it gives the program
 // what WASI would, fibers by JavaScript promise integration, and the page — its nodes by number,
 // its events, the server — through functions that may suspend the program until there is an
-// answer. `start(url)` runs the program at `url` in the page's element `#app`.
+// answer. `start(url)` runs the program at `url` in the page's element `#app`. Following a link
+// within the site, or stepping through the history, is an event too: the program asks the server
+// for what the next page shows, and renders it, the module and its state kept.
 
 const ENOSYS = 52;
 const EBADF = 8;
@@ -102,6 +104,30 @@ export async function start(url, root = document.getElementById("app")) {
     events.push(e);
     if (wake) { const w = wake; wake = null; w(); }
   };
+  // A link within the site, followed by a plain click, is the program's to follow.
+  const ours = (a) => a && a.href && a.origin === location.origin && !a.target && !a.hasAttribute("download");
+  document.addEventListener("click", (ev) => {
+    if (ev.defaultPrevented || ev.button !== 0 || ev.metaKey || ev.ctrlKey || ev.shiftKey || ev.altKey) return;
+    const a = ev.target.closest?.("a");
+    if (!ours(a)) return;
+    ev.preventDefault();
+    happened(`\u0001\0${a.pathname}${a.search}\0${1}`);
+  });
+  addEventListener("popstate", () => happened(`\u0001\0${location.pathname}${location.search}\0${0}`));
+  // What a page shows is asked for as soon as a link to it is pointed at, and taken once.
+  const prefetched = new Map();
+  const ask = (url) => fetch(url, { headers: { "X-Fly-Data": "1" } }).then((r) => r.text());
+  const prefetch = (ev) => {
+    const a = ev.target.closest?.("a");
+    if (!ours(a)) return;
+    const url = `${a.pathname}${a.search}`;
+    if (!prefetched.has(url)) {
+      prefetched.set(url, ask(url).catch(() => null));
+      setTimeout(() => prefetched.delete(url), 10000);
+    }
+  };
+  document.addEventListener("mouseover", prefetch);
+  document.addEventListener("touchstart", prefetch, { passive: true });
   const listen = (node, type) => {
     node.__fly ??= {};
     // One listener for each kind of event, which looks up the message the last render gave it.
@@ -156,7 +182,23 @@ export async function start(url, root = document.getElementById("app")) {
       const res = await fetch(str(u, ul), { method: "POST", body: str(b, bl), headers: { "Content-Type": "application/json" } });
       return keep(await res.text());
     }),
-    fly_initial: () => keep(document.getElementById("fly-state")?.textContent ?? ""),
+    fly_get: new WebAssembly.Suspending(async (u, ul) => {
+      const url = str(u, ul);
+      const early = prefetched.get(url);
+      prefetched.delete(url);
+      let text = early ? await early : null;
+      if (text === null) {
+        try { text = await ask(url); } catch (_) { location.href = url; await new Promise(() => {}); }
+      }
+      return keep(text);
+    }),
+    fly_arrived: (u, ul, t, tl, push) => {
+      const url = str(u, ul);
+      document.title = str(t, tl);
+      if (push) { history.pushState(null, "", url); scrollTo(0, 0); }
+      globalThis.flyArrivals = (globalThis.flyArrivals ?? 0) + 1;
+    },
+    fly_initial: () => keep(document.getElementById("fly-page")?.textContent ?? ""),
     fly_take: (out, len) => { mem().set(pending.subarray(0, len), out); },
   };
 

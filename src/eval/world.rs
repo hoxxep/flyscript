@@ -35,6 +35,8 @@ pub struct World {
     /// Whether files not in `files` are read from, and written to, the real file system: so
     /// for `flyc run`, never for tests, which stay deterministic (§6.4).
     pub real_fs: bool,
+    /// The status the program asked to end with, by `exit`.
+    pub exit: Option<i32>,
 }
 
 impl Default for World {
@@ -57,6 +59,7 @@ impl World {
             seed,
             rng: seed.max(1),
             real_fs: false,
+            exit: None,
         }
     }
 

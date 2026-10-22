@@ -355,6 +355,12 @@ static void write_line(FILE* f, fly_str s) {
 
 void fly_println(fly_str s) { write_line(stdout, s); }
 void fly_eprintln(fly_str s) { write_line(stderr, s); }
+
+// The program ends here, with the status asked for: no cleanup runs, as for a panic (§5.7).
+_Noreturn void fly_exit(int32_t code) {
+  fflush(stdout);
+  _Exit(code);
+}
 #endif
 
 static bool space(uint8_t c) { return c == ' ' || c == '\t' || c == '\n' || c == '\r'; }

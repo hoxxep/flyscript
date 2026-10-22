@@ -99,6 +99,7 @@ uint32_t fly_err_tag(void);
 void fly_err_take(void* out, size_t size);
 
 _Noreturn void fly_panic(const char* message);
+_Noreturn void fly_exit(int32_t code);
 _Noreturn void fly_panicf(const char* fmt, ...);
 
 // ---- integers ----

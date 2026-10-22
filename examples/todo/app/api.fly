@@ -1,13 +1,17 @@
 // The things to do, and what a page asks the server of them: an effect, which the server handles
-// against its store (store.fly), and the page by asking the server (client.fly).
+// against its store (server.fly), and a page, in the browser, by asking the server, through what
+// `web/flynext` makes of it.
 
 export type Todo = { id: u32; title: String; done: bool };
 export type TodoErr = #Empty | #TooLong;
 
 export effect Todos {
   list(): Vec<Todo>;
+  get(id: u32): Option<Todo>;
   add(title: String): Result<Vec<Todo>, TodoErr>;
+  rename(id: u32, title: String): Result<Option<Todo>, TodoErr>;
   toggle(id: u32): Vec<Todo>;
+  remove(id: u32): Vec<Todo>;
   clearDone(): Vec<Todo>;
 }
 
@@ -16,5 +20,13 @@ export function add(title: String): Vec<Todo> uses Todos, Fail<TodoErr> {
   match (Todos.add(title)) {
     #Ok(ts) => ts,
     #Err(e) => throw e,
+  }
+}
+
+// What a refusal says to whoever asked.
+export function why(e: TodoErr): str {
+  match (e) {
+    #Empty => "Write something to do first.",
+    #TooLong => "That is too long: 80 characters at most.",
   }
 }
