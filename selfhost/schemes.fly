@@ -1,0 +1,10 @@
+// Prints every declaration of a program as the self-hosted checker elaborates it, in the form
+// `flyc schemes` prints the Rust prototype's: `main(entry, std)`.
+
+import { Program, describe } from "./env";
+import { println } from "std/io";
+
+export function main(entry: str, std: str): void uses Io {
+  const p = Program.load([entry.toString()], std);
+  for (const line of describe(p)) { println(line.asStr()); }
+}

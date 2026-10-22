@@ -1,0 +1,198 @@
+// Structural properties of types: `Copy`, class (§4.2) and `Send` (§4.4).
+
+import { Program, DefKind, substParams } from "./env";
+import { Prim, Ty, GArg, keyTy } from "./types";
+import { HashSet } from "std/collections";
+
+// The type arguments among generic arguments.
+export function argTypes(args: readonly Vec<GArg>): Vec<Ty> {
+  let out: Vec<Ty> = Vec.new();
+  for (const a of args) { if (const #Ty(t) = a) { out.push(t.clone()); } }
+  out
+}
+
+export function containerMessage(p: readonly Program, d: usize, arg: readonly Ty): String {
+  const shown = p.show(arg);
+  const hint = if (shown.includes("str") && !shown.includes("u8")) { "an owned `String`" } else { "an owned value" };
+  `\`${p.defs[d].name}\` cannot hold \`${shown}\`, which borrows: it holds owned values, so use ${hint} (§4.2)`
+}
+
+impl Program {
+  function defNamed(self: readonly Self, d: usize, names: readonly str[]): bool {
+    names.includes(self.defs[d].name.asStr()) && self.modules[self.defs[d].module].isStd
+  }
+
+  // Whether the nominal type `d` has a `Drop` implementation.
+  export function hasDrop(self: readonly Self, d: usize): bool {
+    self.impls.iter().some((imp) => match (imp.target) {
+      #Named(t, _) => t == d && match (imp.iface) { #Some([i, _]) => self.defs[i].name == "Drop", #None => false },
+      _ => false,
+    })
+  }
+
+  // The fields of a nominal struct, or the payloads of an enum, with arguments substituted.
+  export function components(self: readonly Self, d: usize, args: readonly Vec<GArg>): Option<Vec<Ty>> {
+    match (self.defs[d].kind) {
+      #Struct { fields: #Some(_) } => match (self.structFields(d, args)) {
+        #Some(fs) => {
+          let out: Vec<Ty> = Vec.new();
+          for (const [_, t] of fs) { out.push(t.clone()); }
+          #Some(out)
+        }
+        #None => #None,
+      },
+      #Enum { tags } => {
+        let out: Vec<Ty> = Vec.new();
+        for (const [_, t] of tags) { out.push(substParamsOf(self, d, t, args)); }
+        #Some(out)
+      }
+      _ => #None,
+    }
+  }
+
+  // Each walk below keeps the nominal types it has visited: recursion goes through them (§3.3).
+  // Each property is an `all`, `any` or `max` over every type reachable from the one asked about,
+  // so meeting a visited type again — on a cycle, or on another path to it — adds nothing, and is
+  // decided as the property's neutral value.
+
+  // `Copy`: copying the bits is the whole meaning of a copy (§4.4). Expects a zonked type.
+  export function isCopy(self: readonly Self, t: readonly Ty): bool {
+    let seen: HashSet<String> = HashSet.new();
+    self.copyIn(t, mut seen)
+  }
+
+  function copyIn(self: readonly Self, t: readonly Ty, seen: mut HashSet<String>): bool {
+    match (t) {
+      #Prim(_) => true,
+      #Borrow(m, _) => !m,
+      #Tuple(ts) => ts.iter().every((x) => self.copyIn(x, mut seen)),
+      #Record(r) | #Union(r) => r.labels.iter().every(([_, x]) => self.copyIn(x, mut seen)),
+      #Array(e, _) => self.copyIn(e, mut seen),
+      #Slice(_) => true,
+      #Named(d, args) => {
+        // Region references and region handles are `Copy` (§4.6).
+        if (self.isKnown(d, "Ref") || self.defNamed(d, ["Cell", "RegionList"])) { return true; }
+        if (self.hasDrop(d)) { return false; }
+        if (!seen.insert(keyTy(t))) { return true; }
+        match (self.components(d, args)) {
+          #Some(cs) => cs.iter().every((c) => self.copyIn(c, mut seen)),
+          // Opaque library types own resources unless declared otherwise.
+          #None => self.defNamed(d, ["Hasher"]),
+        }
+      }
+      #Param(_) | #Var(_) | #Fn(_) | #Assoc(_, _) => false,
+      #Error => true,
+    }
+  }
+
+  // The class of a type: 2 if it contains a borrow, anywhere (§4.2).
+  export function class(self: readonly Self, t: readonly Ty): u8 {
+    let seen: HashSet<String> = HashSet.new();
+    self.classIn(t, mut seen)
+  }
+
+  function classIn(self: readonly Self, t: readonly Ty, seen: mut HashSet<String>): u8 {
+    match (t) {
+      #Borrow(_, _) | #Slice(_) | #Prim(#Str) => 2,
+      #Tuple(ts) => {
+        let c: u8 = 1;
+        for (const x of ts) { c = max(c, self.classIn(x, mut seen)); }
+        c
+      }
+      #Record(r) | #Union(r) => {
+        let c: u8 = 1;
+        for (const [_, x] of r.labels) { c = max(c, self.classIn(x, mut seen)); }
+        c
+      }
+      #Array(e, _) => self.classIn(e, mut seen),
+      // A region reference points into its region, not at a loan: it is class 1 whatever it
+      // points to (§4.6).
+      #Named(d, _) if self.isKnown(d, "Ref") => 1,
+      #Named(d, args) => {
+        if (!seen.insert(keyTy(t))) { return 1; }
+        let c: u8 = 1;
+        for (const a of argTypes(args)) { c = max(c, self.classIn(a, mut seen)); }
+        if (c < 2) {
+          if (const #Some(cs) = self.components(d, args)) {
+            for (const x of cs) { c = max(c, self.classIn(x, mut seen)); }
+          }
+        }
+        c
+      }
+      #Fn(_) => 1,
+      // `C.Slice` may be a borrow until `C` is known (§4.2).
+      #Assoc(_, _) => 2,
+      _ => 1,
+    }
+  }
+
+  // A borrow held by a nominal type that is not a `view` (§4.2): `Vec<str>`. Containers release
+  // what they hold on every change, so their type parameters range over class-1 types.
+  export function borrowInContainer(self: readonly Self, t: readonly Ty): Option<[usize, Ty]> {
+    let seen: HashSet<String> = HashSet.new();
+    self.containerIn(t, mut seen)
+  }
+
+  function containerIn(self: readonly Self, t: readonly Ty, seen: mut HashSet<String>): Option<[usize, Ty]> {
+    match (t) {
+      #Borrow(_, e) | #Slice(e) | #Array(e, _) => self.containerIn(e, mut seen),
+      #Tuple(ts) => {
+        for (const x of ts) { if (const #Some(r) = self.containerIn(x, mut seen)) { return #Some(r); } }
+        #None
+      }
+      #Record(r) | #Union(r) => {
+        for (const [_, x] of r.labels) { if (const #Some(found) = self.containerIn(x, mut seen)) { return #Some(found); } }
+        #None
+      }
+      #Fn(f) => {
+        for (const x of f.params) { if (const #Some(found) = self.containerIn(x, mut seen)) { return #Some(found); } }
+        self.containerIn(f.ret, mut seen)
+      }
+      #Named(d, args) => {
+        // A region reference is class 1 whatever it points at (§4.6).
+        if (!self.defs[d].view && !self.isKnown(d, "Ref")) {
+          for (const a of argTypes(args)) { if (self.class(a) == 2) { return #Some([d, a.clone()]); } }
+        }
+        if (!seen.insert(keyTy(t))) { return #None; }
+        for (const a of argTypes(args)) { if (const #Some(found) = self.containerIn(a, mut seen)) { return #Some(found); } }
+        #None
+      }
+      _ => #None,
+    }
+  }
+
+  // `Send`: may move to another task, and `readonly T` may be shared with one (§4.4).
+  export function isSend(self: readonly Self, t: readonly Ty): bool { self.isSendGiven(t, Vec.new()) }
+
+  // `Send`, given type parameters declared `extends Send` (by symbol id).
+  export function isSendGiven(self: readonly Self, t: readonly Ty, sendParams: readonly Vec<u32>): bool {
+    let seen: HashSet<String> = HashSet.new();
+    self.class(t) == 1 && self.sendIn(t, sendParams, mut seen)
+  }
+
+  function sendIn(self: readonly Self, t: readonly Ty, sendParams: readonly Vec<u32>, seen: mut HashSet<String>): bool {
+    match (t) {
+      #Prim(_) | #Error => true,
+      #Tuple(ts) => ts.iter().every((x) => self.sendIn(x, sendParams, mut seen)),
+      #Record(r) | #Union(r) => r.labels.iter().every(([_, x]) => self.sendIn(x, sendParams, mut seen)),
+      #Array(e, _) | #Slice(e) | #Borrow(_, e) => self.sendIn(e, sendParams, mut seen),
+      #Named(d, args) => {
+        // Outer regions are frozen while tasks run (§6.1), so region data is always shareable;
+        // the runtime's own handles are not.
+        if (self.defNamed(d, ["Gen", "Fiber", "Scope", "Cont"])) { return false; }
+        if (!seen.insert(keyTy(t))) { return true; }
+        argTypes(args).iter().every((a) => self.sendIn(a, sendParams, mut seen))
+          && match (self.components(d, args)) { #Some(cs) => cs.iter().every((c) => self.sendIn(c, sendParams, mut seen)), #None => true }
+      }
+      // An escaping closure owns only `Send` values, and a lent one carries loans that keep it
+      // from crossing to a task (§4.3), so every function value is `Send`.
+      #Fn(_) => true,
+      #Param(sym) => sendParams.includes(sym.id),
+      #Var(_) | #Assoc(_, _) => false,
+    }
+  }
+}
+
+function substParamsOf(p: readonly Program, d: usize, t: readonly Ty, args: readonly Vec<GArg>): Ty {
+  substParams(t, p.defs[d].params, args)
+}

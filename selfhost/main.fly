@@ -10,7 +10,7 @@ import { File, println, writeFile } from "std/io";
 import { HashMap } from "std/collections";
 
 // What stops a compilation: a diagnostic in a module, or a module that cannot be read.
-type Stop = #Failed { path: String; diag: Diagnostic } | #Unreadable { path: String } | #Cycle { path: String };
+type Stop = #Failed { path: String; diag: Diagnostic } | #Unreadable { path: String };
 
 // The directory a path is in, with its final `/`.
 function dirOf(path: str): str {
@@ -37,29 +37,31 @@ function join(dir: str, rel: str): String {
   if (absolute) { `/${joined}` } else { joined }
 }
 
-struct Loader { paths: Vec<String>; sources: Vec<String>; modules: Vec<Module>; loading: Vec<String> }
+// The modules of a program, each registered when first met, so imports may form cycles; `order`
+// is the order they finished loading in, their imports first unless a cycle prevents it.
+struct Loader { paths: Vec<String>; modules: Vec<Module>; order: Vec<usize> }
 
 impl Loader {
-  // Loads a module after the modules it imports, once.
+  // Loads a module and what it imports, once.
   function load(self: mut Self, path: str): usize uses Io, Fail<Stop> {
     if (const #Some(i) = self.paths.iter().findIndex((p) => p.asStr() == path)) { return i; }
-    if (self.loading.iter().some((p) => p.asStr() == path)) { throw #Cycle { path: path.toString() }; }
-    self.loading.push(path.toString());
     const src: String = try {
       let f = File.open(path);
       f.readText()
     } catch (_) { throw #Unreadable { path: path.toString() } };
     const m = try { parseModule(src.asStr()) } catch (d) { throw #Failed { path: path.toString(), diag: d } };
-    for (const item of m.items) {
+    const k = self.paths.len();
+    self.paths.push(path.toString());
+    self.modules.push(m);
+    let imports: Vec<String> = Vec.new();
+    for (const item of self.modules[k].items) {
       if (const #Import { names: _, from } = item.kind) {
-        if (!from.startsWith("std/")) { self.load(join(dirOf(path), `${from}.fly`.asStr()).asStr()); }
+        if (!from.startsWith("std/")) { imports.push(join(dirOf(path), `${from}.fly`.asStr())); }
       }
     }
-    self.loading.pop();
-    self.paths.push(path.toString());
-    self.sources.push(src);
-    self.modules.push(m);
-    self.paths.len() - 1
+    for (const i of imports) { self.load(i.asStr()); }
+    self.order.push(k);
+    k
   }
 
   function index(self: readonly Self, path: str): usize {
@@ -106,7 +108,7 @@ function namesOf(l: readonly Loader, k: usize): HashMap<String, String> {
 }
 
 function compile(entry: str, out: str, runtime: str): void uses Io, Fail<Stop> {
-  let l = Loader { paths: Vec.new(), sources: Vec.new(), modules: Vec.new(), loading: Vec.new() };
+  let l = Loader { paths: Vec.new(), modules: Vec.new(), order: Vec.new() };
   const main = l.load(entry);
   const world = survey(l.modules);
   const rt: String = try {
@@ -114,7 +116,7 @@ function compile(entry: str, out: str, runtime: str): void uses Io, Fail<Stop> {
     f.readText()
   } catch (_) { throw #Unreadable { path: runtime.toString() } };
   let js = rt;
-  for (const k of 0..l.modules.len()) {
+  for (const k of l.order) {
     js.push(`\n// ${l.paths[k]}\n`);
     const code = try {
       module(l.modules[k], `m${k}$`.asStr(), namesOf(l, k), world.clone())
@@ -138,7 +140,6 @@ export function main(entry: str, out: str, runtime: str): void uses Io {
         println(render(diag, path.asStr(), src.asStr()).asStr());
       }
       #Unreadable { path } => println(`error: cannot read or write ${path}`),
-      #Cycle { path } => println(`error: ${path} imports itself`),
     }
   }
 }

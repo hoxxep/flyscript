@@ -1652,8 +1652,17 @@ impl<'a> Parser<'a> {
         self.expect("{")?;
         let mut fields = Vec::new();
         while !self.at("}") {
-            let name = self.ident()?;
-            let pat = if self.eat(":") { Some(self.pattern()?) } else { None };
+            // A field's name may be a reserved word, as in a declaration or a literal; such a field
+            // is bound to a name of its own (`{ uses: row }`).
+            let reserved = matches!(self.tok(), Tok::Kw(_));
+            let name = self.member_name()?;
+            let pat = if self.eat(":") {
+                Some(self.pattern()?)
+            } else if reserved {
+                return Err(Diagnostic::new(name.span, format!("`{}` is a reserved word: bind the field to a name, `{}: x`", name.name, name.name)));
+            } else {
+                None
+            };
             fields.push((name, pat));
             if !self.eat(",") {
                 break;

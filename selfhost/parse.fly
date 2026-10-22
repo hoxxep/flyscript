@@ -1428,8 +1428,15 @@ impl Parser {
     self.expect("{");
     let fields: Vec<[Ident, Option<Pattern>]> = Vec.new();
     while (!self.at("}")) {
-      const name = self.ident();
-      const pat: Option<Pattern> = if (self.eat(":")) { #Some(self.pattern()) } else { #None };
+      // A field's name may be a reserved word, as in a declaration or a literal; such a field is
+      // bound to a name of its own (`{ uses: row }`).
+      const reserved = match (self.tok()) { #Kw(_) => true, _ => false };
+      const name = self.memberName();
+      const pat: Option<Pattern> = if (self.eat(":")) {
+        #Some(self.pattern())
+      } else if (reserved) {
+        throw #Diagnostic { span: name.span, message: `\`${name.name}\` is a reserved word: bind the field to a name, \`${name.name}: x\`` }
+      } else { #None };
       fields.push([name, pat]);
       if (!self.eat(",")) { break; }
     }

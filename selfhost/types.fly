@@ -305,3 +305,100 @@ export function writeEffs(r: readonly EffRow, names: readonly Vec<String>, out: 
     writeTail(r.tail, "...", "e", mut out);
   }
 }
+
+// ---- keys: a canonical text for a type, for tables keyed by types ----
+
+export function keyTy(t: readonly Ty): String {
+  let out = String.new();
+  writeKey(t, mut out);
+  out
+}
+
+export function keyArgs(args: readonly Vec<GArg>): String {
+  let out = String.new();
+  for (const a of args) {
+    writeKeyArg(a, mut out);
+    out.push(";");
+  }
+  out
+}
+
+function writeKeyArg(a: readonly GArg, out: mut String): void {
+  match (a) {
+    #Ty(t) => { out.push("T"); writeKey(t, mut out); }
+    #Region(r) => { out.push("R"); writeKeyRegion(r, mut out); }
+    #Row(r) => { out.push("E"); writeKeyEffs(r, mut out); }
+    #Len(l) => match (l) {
+      #Known(k) => out.push(`L${k}`),
+      #Var(v) => out.push(`Lv${v}`),
+      #Param(s) => out.push(`Lp${s.id}`),
+    },
+  }
+}
+
+function writeKeyRegion(r: readonly Region, out: mut String): void {
+  match (r) {
+    #Var(v) => out.push(`v${v}`),
+    #Param(s) => out.push(`p${s.id}`),
+    #Heap => out.push("H"),
+  }
+}
+
+function writeKeyTail(t: readonly Tail, out: mut String): void {
+  match (t) {
+    #Closed => out.push("."),
+    #Var(v) => out.push(`v${v}`),
+    #Param(s) => out.push(`p${s.id}`),
+  }
+}
+
+function writeKeyEffs(r: readonly EffRow, out: mut String): void {
+  out.push("{");
+  for (const e of r.effs) {
+    out.push(`${e.def}<`);
+    for (const g of e.regions) { writeKeyRegion(g, mut out); out.push(","); }
+    for (const t of e.args) { writeKey(t, mut out); out.push(","); }
+    out.push(">");
+  }
+  writeKeyTail(r.tail, mut out);
+  out.push("}");
+}
+
+function writeKey(t: readonly Ty, out: mut String): void {
+  match (t) {
+    #Var(v) => out.push(`?${v}`),
+    #Param(s) => out.push(`'${s.id}`),
+    #Prim(p) => out.push(primName(p)),
+    #Named(d, args) => {
+      out.push(`N${d}<`);
+      for (const a of args) { writeKeyArg(a, mut out); out.push(","); }
+      out.push(">");
+    }
+    #Record(r) | #Union(r) => {
+      out.push(if (match (t) { #Record(_) => true, _ => false }) { "R(" } else { "U(" });
+      for (const [k, v] of r.labels) { out.push(k); out.push(":"); writeKey(v, mut out); out.push(","); }
+      writeKeyTail(r.tail, mut out);
+      out.push(")");
+    }
+    #Tuple(ts) => {
+      out.push("[");
+      for (const x of ts) { writeKey(x, mut out); out.push(","); }
+      out.push("]");
+    }
+    #Array(e, len) => {
+      writeKey(e, mut out);
+      match (len) { #Known(k) => out.push(`[${k}]`), #Var(v) => out.push(`[?${v}]`), #Param(s) => out.push(`['${s.id}]`) }
+    }
+    #Slice(e) => { writeKey(e, mut out); out.push("[]"); }
+    #Borrow(m, e) => { out.push(if (m) { "&mut " } else { "&" }); writeKey(e, mut out); }
+    #Fn(f) => {
+      out.push("fn(");
+      for (const p of f.params) { writeKey(p, mut out); out.push(","); }
+      out.push(")");
+      writeKey(f.ret, mut out);
+      writeKeyEffs(f.effects, mut out);
+    }
+    #Assoc(base, n) => { writeKey(base, mut out); out.push("."); out.push(n); }
+    #Error => out.push("!"),
+  }
+}

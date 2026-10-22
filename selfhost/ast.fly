@@ -234,3 +234,21 @@ export enum PatternKind {
 }
 
 export enum TagPatArgs { #None, #Tuple(Vec<Pattern>), #Record(Vec<[Ident, Option<Pattern>]>) }
+
+impl Clone for ItemKind;
+impl Clone for Field;
+impl<T extends Clone> Clone for Generate<T>;
+impl Clone for TagPayload;
+impl Clone for InterfaceMember;
+impl Clone for TypeParam;
+impl Clone for RowItem;
+impl Clone for FnMode;
+impl Clone for TypeKind;
+impl Clone for Stmt;
+impl Clone for FieldInit;
+impl Clone for TagArgs;
+impl Clone for TemplatePiece;
+impl Clone for ExprKind;
+impl Clone for MatchArm;
+impl Clone for PatternKind;
+impl Clone for TagPatArgs;

@@ -1310,3 +1310,58 @@ fn concrete_arg(a: &GArg) -> bool {
         _ => true,
     }
 }
+
+/// Every declaration as elaborated, one per line, for comparison with another implementation.
+pub fn describe(p: &Program) -> Vec<String> {
+    let ty = |t: &Ty| format!("{}", Show(t, p));
+    let params = |gs: &[GParam]| {
+        gs.iter()
+            .map(|g| {
+                let bounds: Vec<String> = g.bounds.iter().map(ty).collect();
+                format!("{}{}:{:?}[{}]", if g.comptime { "comptime " } else { "" }, g.sym.name, g.kind, bounds.join(" & "))
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let scheme = |s: &Scheme| {
+        let ps: Vec<String> = s.params.iter().map(|(n, t)| format!("{n}: {}", ty(t))).collect();
+        let effs = match &s.effects {
+            Some(e) => format!("{}", Show(e, p)),
+            None => "?".to_string(),
+        };
+        format!("<{}>({}): {} uses {} from {}", params(&s.tparams), ps.join(", "), ty(&s.ret), effs, s.ret_from.join(","))
+    };
+    let mut out = Vec::new();
+    for (i, d) in p.defs.iter().enumerate() {
+        let kind = match &d.kind {
+            DefKind::Struct { fields } => match fields {
+                Some(fs) => format!("struct {{ {} }}", fs.iter().map(|(k, t)| format!("{k}: {}", ty(t))).collect::<Vec<_>>().join("; ")),
+                None => "struct opaque".to_string(),
+            },
+            DefKind::Enum { tags } => format!("enum {}", tags.iter().map(|(k, t)| format!("#{k} {}", ty(t))).collect::<Vec<_>>().join(" | ")),
+            DefKind::Alias { ty: t } => format!("alias {}", ty(t)),
+            DefKind::Interface { methods, assoc, extends, .. } => format!(
+                "interface extends [{}] assoc [{}] {}",
+                extends.iter().map(ty).collect::<Vec<_>>().join(", "),
+                assoc.join(", "),
+                methods.iter().map(|(n, s)| format!("{n}{}", scheme(s))).collect::<Vec<_>>().join("; ")
+            ),
+            DefKind::Effect { ops } => format!("effect {}", ops.iter().map(|(n, s)| format!("{n}{}", scheme(s))).collect::<Vec<_>>().join("; ")),
+        };
+        out.push(format!("def {i} {} <{}> {kind}", d.name, params(&d.params)));
+    }
+    for (i, c) in p.consts.iter().enumerate() {
+        out.push(format!("const {i} {}: {}", c.name, ty(&c.ty)));
+    }
+    for (i, f) in p.fns.iter().enumerate() {
+        out.push(format!("fn {i} {} {}{}", p.modules[f.module].name, f.name, scheme(&f.scheme)));
+    }
+    for (i, imp) in p.impls.iter().enumerate() {
+        let iface = imp.interface.as_ref().map(|(d, args)| format!("{}<{}>", p.defs[*d].name, args.iter().map(|a| format!("{}", Show(a, p))).collect::<Vec<_>>().join(", ")));
+        out.push(format!("impl {i} <{}> {} for {} methods {:?}", params(&imp.params), iface.unwrap_or_default(), ty(&imp.target), imp.methods));
+    }
+    for (m, d) in &p.diags {
+        out.push(format!("error {m} {}..{}: {}", d.span.start, d.span.end, d.message));
+    }
+    out
+}

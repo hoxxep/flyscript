@@ -13,6 +13,15 @@ fn main() -> ExitCode {
     if command == "run" {
         return run(files);
     }
+    // Every declaration as elaborated, one per line: compared with the self-hosted checker's.
+    if command == "schemes" {
+        let paths: Vec<std::path::PathBuf> = files.iter().map(std::path::PathBuf::from).collect();
+        let p = flyscript::check::env::Program::load(&paths);
+        for line in flyscript::check::env::describe(&p) {
+            println!("{line}");
+        }
+        return ExitCode::SUCCESS;
+    }
     if !matches!(command.as_str(), "parse" | "ast" | "check") || files.is_empty() {
         eprintln!("{USAGE}");
         return ExitCode::FAILURE;

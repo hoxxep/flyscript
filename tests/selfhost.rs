@@ -1,7 +1,7 @@
 //! The self-hosted compiler (selfhost/) compiles itself to JavaScript, and the JavaScript compiles
 //! the same source to the same file.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use flyscript::check::check_files;
@@ -35,4 +35,44 @@ fn fixpoint() {
     let Ok(status) = Command::new("node").arg(&stage1).arg(&main).arg(&stage2).arg(&runtime).status() else { return };
     assert!(status.success());
     assert!(std::fs::read(&stage2).unwrap() == first, "stage 2 differs from stage 1");
+    elaborates_as_flyc_does(root, &stage1, &out);
 }
+
+/// The self-hosted checker elaborates programs' declarations as the Rust prototype does:
+/// `flyc schemes` and selfhost/schemes.fly print the same lines. A quarter of the programs are
+/// compared, for time; template structs, which need `comptime`, are not compared yet.
+fn elaborates_as_flyc_does(root: &Path, compiler: &Path, out: &Path) {
+    let schemes = out.join("schemes.js");
+    let status = Command::new("node")
+        .arg(compiler)
+        .arg(root.join("selfhost/schemes.fly"))
+        .arg(&schemes)
+        .arg(root.join("selfhost/runtime.js"))
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let mut programs: Vec<PathBuf> = Vec::new();
+    for dir in ["tests/run", "tests/accept", "tests/reject", "examples"] {
+        let mut files: Vec<PathBuf> = std::fs::read_dir(root.join(dir)).unwrap().map(|e| e.unwrap().path()).collect();
+        files.sort();
+        for f in files {
+            let f = if f.is_dir() { f.join("main.fly") } else { f };
+            if f.extension().is_some_and(|e| e == "fly") && f.exists() {
+                programs.push(f);
+            }
+        }
+    }
+    let mut differ = Vec::new();
+    for f in programs.into_iter().step_by(4) {
+        if std::fs::read_to_string(&f).unwrap().contains("comptime") {
+            continue;
+        }
+        let rust = flyscript::check::env::describe(&flyscript::check::env::Program::load(std::slice::from_ref(&f))).join("\n");
+        let js = Command::new("node").arg(&schemes).arg(&f).arg(root.join("std")).output().unwrap();
+        if String::from_utf8_lossy(&js.stdout).trim_end() != rust {
+            differ.push(f.display().to_string());
+        }
+    }
+    assert!(differ.is_empty(), "elaborated differently:\n{}", differ.join("\n"));
+}
+
