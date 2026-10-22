@@ -170,7 +170,7 @@ impl JsGen {
     row.effs.iter().some((e) => {
       const name = self.lw.p.defs[e.def].name.asStr();
       match (self.lw.p.defs[e.def].kind) {
-        #Effect { ops: _ } => name != "Fail" && name != "Region" && (name != "Io" || self.tasks),
+        #Effect { ops: _ } => name != "Fail" && name != "Region" && (name != "Io" || self.tasks || self.lw.handlesIo),
         _ => false,
       }
     })
@@ -745,7 +745,8 @@ impl JsGen {
       self.cx.indent += 1;
       for (const s of b.stmts) { self.stmt(s, span); }
       self.cx.indent -= 1;
-      self.line("} finally {");
+      // A panic stops the task where it is: its cleanup does not run (§5.7).
+      self.line("} finally { if ($rt.unwinds()) {");
       self.cx.indent += 1;
       let k = b.cleanups.len();
       while (k > 0) {
@@ -775,7 +776,7 @@ impl JsGen {
         }
       }
       self.cx.indent -= 1;
-      self.line("}");
+      self.line("} }");
     }
     self.cx.indent -= 1;
     self.line("}");
@@ -905,7 +906,9 @@ impl JsGen {
       }
       #Value(f, _) => {
         const fv = self.operand(f, span);
-        if (self.rowSuspends(c.row)) { `(yield* ${fv}(${vs.join(", ")}))` } else { `${fv}(${vs.join(", ")})` }
+        // A function value may do less than its type allows — a closure that performs nothing,
+        // passed where one may suspend — and then is no generator: it is called either way.
+        if (self.rowSuspends(c.row)) { `(yield* $rt.lift(${fv}(${vs.join(", ")})))` } else { `${fv}(${vs.join(", ")})` }
       }
       #Builtin(k) => self.builtin(k.asStr(), c, vs),
     }
@@ -947,6 +950,19 @@ impl JsGen {
         self.line(`${lv} = ${t}[1];`);
         return `(${t}[0] === undefined ? { $tag: "None" } : { $tag: "Some", $: ${t}[0] })`;
       }
+      "channel" | "Reply_new" => {
+        // What drops a message left in the channel, or sent to it once no one receives.
+        const msg = match (c.ret) { #Tuple(ts) if ts.len() > 0 => typeArg(ts[0], 0), _ => #Error };
+        const drop = if (self.drops(msg)) { self.dropFn(msg, span) } else { "undefined".toString() };
+        return `$b.${key}(${drop})`;
+      }
+      "HashMap_insert" => {
+        // The entry an equal key replaces is dropped.
+        const m = match (c.argTys.first()) { #Some(t) => stripBorrow(t), #None => #Error };
+        const e = entryTy(m);
+        if (self.drops(e)) { return `$b.HashMap_insert(${arg(0)}, ${arg(1)}, ${arg(2)}, ${self.dropFn(e, span)})`; }
+      }
+      "Io_handled" => return "$rt.ioHandled()".toString(),
       "File_text" => return `${arg(0)}.text`,
       "RegionList_at" => return `${arg(0)}[${arg(1)}]`,
       "Listener_next" => return "$rt.nextConnection()".toString(),
@@ -993,7 +1009,7 @@ impl JsGen {
     self.line("}");
     self.cx.indent -= 1;
     // A generator left early runs its cleanup.
-    self.line(`} finally { if (${g}.return) ${g}.return(); }`);
+    self.line(`} finally { if (${g}.return && $rt.unwinds()) ${g}.return(); }`);
   }
 
   // Whether a block has a `return` outside the closures in it.
@@ -1027,7 +1043,9 @@ impl JsGen {
       const f = self.part(a.params, a.cont, a.body, a.value, b.clone(), span);
       parts.push(`${mangleField(name.asStr())}: ${f}`);
     }
-    const run = `$rt.handle(${id}, ${body}, { ${parts.join(", ")} })`;
+    // A handler of `Io` says, while its body runs, that `Io`'s operations are the program's.
+    const io = if (self.lw.p.defs[d].name == "Io" && self.lw.p.modules[self.lw.p.defs[d].module].isStd) { ", true" } else { "" };
+    const run = `$rt.handle(${id}, ${body}, { ${parts.join(", ")} }${io})`;
     const call = if (self.cx.gen) { `(yield* ${run})` } else { `$rt.run(${run})` };
     const store = if (unitTy(b)) { "".toString() } else { `${self.local(h.result)} = ` };
     const leaves = JsGen.returnsIn(h.body) || h.arms.iter().some((a) => JsGen.returnsIn(a.body));
@@ -1145,7 +1163,7 @@ impl JsGen {
     if (drops.len() > 0) {
       self.line("try {");
       self.block(f.body, span);
-      self.line(`} finally { ${drops}}`);
+      self.line(`} finally { if ($rt.unwinds()) { ${drops}} }`);
     } else {
       self.block(f.body, span);
     }

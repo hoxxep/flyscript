@@ -108,6 +108,7 @@ fly_String fly_show_u128(unsigned __int128 v);
 fly_String fly_show_f64(double v);
 fly_String fly_show_bool(bool v);
 void fly_println(fly_str s);
+void fly_eprintln(fly_str s);
 bool fly_str_next_line(fly_str* rest, fly_str* line);
 bool fly_str_next_word(fly_str* rest, fly_str* word);
 bool fly_str_find(fly_str s, fly_str needle, uint64_t* at);
@@ -233,6 +234,8 @@ extern FLY_LOCAL fly_handler* fly_handlers;
 // leaves through its function's way out when it sees it.
 extern FLY_LOCAL bool fly_unwinding;
 void fly_perform(uint32_t effect, int op, void* args, void* result);
+// Whether a `handle` of `effect` is around the running code.
+bool fly_handled(uint32_t effect);
 // Cleanup — a `defer`, a destructor — runs to its end however its block is left: what is
 // unwinding past it is set aside while it runs, so its own failures, loops and handlers work,
 // and then goes on.
@@ -277,8 +280,11 @@ void fly_point(void);
 void fly_sleep(uint64_t nanos);
 // The time: the simulated world's clock, or the machine's monotonic one, in nanoseconds.
 uint64_t fly_now(void);
-// A `Mutex`'s lock, by the address of its state. The body it guards performs nothing, so it holds
-// no other lock and does not suspend while it holds this one.
+// A `Mutex`: its state on the heap after a header holding its lock, which `fly_lock` takes by the
+// state's address. The body it guards performs nothing, so it holds no other lock and does not
+// suspend while it holds this one.
+void* fly_mutex_new(const void* value, size_t size);
+void fly_mutex_free(void* state);
 void fly_lock(const void* state);
 void fly_unlock(const void* state);
 // `join(a, b)` of `std/par`: both run, maybe at once on two cores, each putting its result where
@@ -294,18 +300,20 @@ void fly_scope_close(int scope, bool body_failed);
 void fly_panic_deadlock(void);
 
 typedef struct { int ch; } fly_chan;
-// A connection. Against a simulated world: what the client sent, how much has been read, and what
-// was written to it, which is the program's output once it closes. Otherwise its descriptor, plus
-// one, so that a socket of zeros has none.
-typedef struct { fly_str input; size_t pos; int fd; fly_String out; } fly_socket;
+// A connection. Against a simulated world: what the other end sent, how much has been read, what
+// was written to it, which is the program's output once it closes, and the peer it was made to,
+// if the program connected. Otherwise its descriptor, plus one, so that a socket of zeros has none.
+typedef struct { fly_str input; size_t pos; int fd; fly_String out; fly_str peer; } fly_socket;
 // What a socket operation failed with: an `IoErr`, by its tag's name, or nothing.
-enum { FLY_IO_OK, FLY_IO_RESET, FLY_IO_TIMED_OUT, FLY_IO_BROKEN_PIPE, FLY_IO_NOT_FOUND, FLY_IO_PERMISSION_DENIED, FLY_IO_ADDR_IN_USE };
+enum { FLY_IO_OK, FLY_IO_RESET, FLY_IO_TIMED_OUT, FLY_IO_BROKEN_PIPE, FLY_IO_NOT_FOUND, FLY_IO_PERMISSION_DENIED, FLY_IO_ADDR_IN_USE, FLY_IO_REFUSED };
 // A listener: against a simulated world, its port; otherwise its descriptor, plus one. Negative,
 // what binding failed with.
 int fly_listen(uint16_t port);
 uint16_t fly_listener_port(int listener);
 // The next connection, or none, ever: the world has no more, or the listener failed.
 bool fly_accept(int listener, fly_socket* out);
+// A connection to `host` on `port`, or what connecting failed with.
+int fly_connect(fly_str host, uint16_t port, fly_socket* out);
 int fly_sock_read(fly_socket* s, fly_slice buf, uint64_t* n);
 int fly_sock_write(fly_socket* s, fly_slice bytes);
 // A whole HTTP response of `code`, with `body`: in a simulated world, a line of the output.
@@ -315,7 +323,7 @@ void fly_sock_close(fly_socket* s);
 void fly_task_void(void* task, void* closure);
 // A channel, given what drops a message of its, if anything must.
 fly_chan fly_channel(void (*drop)(void*));
-void fly_send(fly_chan c, const void* v, size_t size);
+bool fly_send(fly_chan c, const void* v, size_t size);
 bool fly_recv(fly_chan c, void* out, size_t size);
 void fly_close(fly_chan c);
 void fly_sender_drop(fly_chan* c);

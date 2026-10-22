@@ -1,0 +1,6 @@
+// error: this `handle` has no arm for `Clock.later`
+effect Clock { now(): u64; later(): u64; }
+function f(): u64 uses Clock { Clock.now() + Clock.later() }
+export function main(): u64 {
+  handle { f() } with Clock { now() resumes k => k(1) }
+}

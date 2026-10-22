@@ -367,7 +367,7 @@ impl Ord for Instant;
 // A file descriptor, and what a parked task waits on: handles the runtime gives out.
 export struct Fd { private n: u32 }
 export struct WaitKey { private n: u64 }
-export type IoErr = #Reset | #TimedOut | #BrokenPipe | #NotFound | #PermissionDenied | #AddrInUse;
+export type IoErr = #Reset | #TimedOut | #BrokenPipe | #NotFound | #PermissionDenied | #AddrInUse | #Refused;
 
 impl<E> Fail<E> {
   export function capture<T, row R>(body: once () => T uses Fail<E>, ...R): Result<T, E> uses ...R;
@@ -510,6 +510,7 @@ impl str {
   export function startsWith(self: Self, prefix: str): bool;
   export function endsWith(self: Self, suffix: str): bool;
   export function indexOf(self: Self, needle: str): Option<usize>;
+  // ASCII letters changed, every other character as it is.
   export function toUpperCase(self: Self): String;
   export function toLowerCase(self: Self): String;
   export function replaceAll(self: Self, from: str, to: str): String;

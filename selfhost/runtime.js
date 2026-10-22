@@ -15,7 +15,14 @@ const { $rt, $b } = (() => {
     constructor(value) { this.value = value; }
   }
   class Panic extends Error {}
-  function panic(message) { throw new Panic(message); }
+  // Whether a panic is passing: it stops its task where it is, without the task's cleanup (§5.7),
+  // until the scheduler takes it up.
+  let panicking = false;
+  const unwinds = () => !panicking;
+  function panic(message) {
+    panicking = true;
+    throw new Panic(message);
+  }
   function raise(value) { throw new Fail(value); }
 
   // ---- references ----
@@ -85,8 +92,17 @@ const { $rt, $b } = (() => {
 
   // A `handle`: runs `body`, a generator, with `arms` handling `effect` (§5.2): deep, so a
   // continuation resumes the body with the handler still around it.
-  function* handle(effect, body, arms) {
-    return yield* resume(body(), undefined, effect, arms);
+  function* handle(effect, body, arms, io = false) {
+    return yield* resume(body(), undefined, effect, arms, io);
+  }
+  // How many handlers of `Io` of the program's own are around the running code: each counts while
+  // its body runs, which is while the body's generator is stepped, so a suspended one does not.
+  let ioDepth = 0;
+  const ioHandled = () => ioDepth > 0;
+  function stepIo(io, f) {
+    if (!io) return f();
+    ioDepth++;
+    try { return f(); } finally { ioDepth--; }
   }
   // Runs `g` from `v` until it ends, or performs an operation of `effect`, whose arm's value is
   // the result; any other operation is passed on, and its answer back.
@@ -94,14 +110,15 @@ const { $rt, $b } = (() => {
   // this one is left abruptly — an arm fails, or a handler around drops what this one is part of —
   // `g`'s cleanup runs. An arm that returns normally may have kept the continuation, which then
   // owns `g`.
-  function* resume(g, v, effect, arms) {
+  function* resume(g, v, effect, arms, io) {
     let owned = true, abrupt = true;
     try {
-      let r = g.next(v);
+      let r = stepIo(io, () => g.next(v));
       for (;;) {
         if (r.done) { owned = false; return r.value; }
         const op = r.value;
-        const ours = effect === YIELD ? op instanceof Yielded : op instanceof Op && op.effect === effect;
+        // An operation without an arm here passes on to the handlers around (§5.2).
+        const ours = effect === YIELD ? op instanceof Yielded : op instanceof Op && op.effect === effect && arms[op.op] !== undefined;
         if (ours) {
           const name = effect === YIELD ? "yield" : op.op;
           const args = effect === YIELD ? [op.item] : op.args;
@@ -109,28 +126,37 @@ const { $rt, $b } = (() => {
           if (arm.length <= args.length) {
             // An arm that does not resume: the body is done, its cleanup run first (§5.2).
             owned = false;
-            yield* finish(g);
+            yield* finish(g, io);
             return yield* arm(...args);
           }
           const k = function* (x) {
             if (!owned) panic("a continuation resumed twice");
             owned = false;
-            return yield* resume(g, x, effect, arms);
+            return yield* resume(g, x, effect, arms, io);
           };
           const a = yield* arm(...args, k);
           abrupt = false;
           return a;
         }
-        r = g.next(yield op);
+        const answer = yield op;
+        r = stepIo(io, () => g.next(answer));
       }
     } finally {
-      if (owned && abrupt) { owned = false; yield* finish(g); }
+      if (owned && abrupt && !panicking) { owned = false; yield* finish(g, io); }
     }
   }
+  // What a call of a function value gave: run, if it is a generator; its value, if it was a plain
+  // function's.
+  function* lift(r) {
+    return r !== null && typeof r === "object" && r[Symbol.toStringTag] === "Generator" ? yield* r : r;
+  }
   // Ends a suspended generator, running its cleanup, which may perform what is handled around.
-  function* finish(g) {
+  function* finish(g, io = false) {
     if (!g.return) return;
-    for (let r = g.return(); !r.done; r = g.next(yield r.value)) {}
+    for (let r = stepIo(io, () => g.return()); !r.done;) {
+      const answer = yield r.value;
+      r = stepIo(io, () => g.next(answer));
+    }
   }
   // Runs a destructor that may perform `Io` to its end, without letting other tasks in.
   function drive(g) {
@@ -384,9 +410,10 @@ const { $rt, $b } = (() => {
   let clock = 0n;
 
   // The deterministic world the program runs against (§6.4), from `FLY_WORLD`, JSON: connections
-  // waiting to be accepted, a database of profiles and quotas, the percent of I/O operations that
-  // time out, and the seed that decides which do, and how tasks interleave.
-  const world = Object.assign({ incoming: [], profiles: {}, quotas: {}, faults: 0, seed: 0x5eed },
+  // waiting to be accepted, the hosts a program may connect to with what each sends back, a
+  // database of profiles and quotas, the percent of I/O operations that time out, and the seed
+  // that decides which do, and how tasks interleave.
+  const world = Object.assign({ incoming: [], peers: {}, profiles: {}, quotas: {}, faults: 0, seed: 0x5eed },
     process.env.FLY_WORLD ? JSON.parse(process.env.FLY_WORLD) : {});
   let faultRng = BigInt(Math.max(1, world.seed));
   // Whether the next I/O operation fails.
@@ -409,7 +436,7 @@ const { $rt, $b } = (() => {
   class Cancelled extends Error {}
   const sched = {
     on: false, current: 0, ready: [], blocked: new Map(), finished: new Set(), rng: BigInt(Math.max(1, world.seed)), next: 1,
-    tasks: new Map(), channels: new Map(), closed: new Set(), senders: new Map(), cancelled: new Set(), scopes: new Map(), scopeIds: 1,
+    tasks: new Map(), channels: new Map(), closed: new Set(), senders: new Map(), deaf: new Set(), drops: new Map(), cancelled: new Set(), scopes: new Map(), scopeIds: 1,
   };
   // Hands the baton to a ready task, chosen by the seed; `false` if none can run. With none
   // ready, time passes to the earliest sleeper's wake time, waking every task due then.
@@ -470,9 +497,11 @@ const { $rt, $b } = (() => {
         const error = t.error, input = t.input;
         t.error = undefined;
         t.input = undefined;
+        if (error instanceof Panic) panicking = true;
         r = error !== undefined ? t.gen.throw(error) : t.gen.next(input);
       } catch (e) {
         if (me === 0) throw e;
+        if (e instanceof Panic) panicking = false;
         endTask(me, { error: e });
         continue;
       }
@@ -536,16 +565,32 @@ const { $rt, $b } = (() => {
     sched.scopes.get(sid).tasks.push(id);
     return id;
   }
-  function channel() {
+  // A channel: what was sent and not yet received, and what drops a message no one will receive.
+  function channel(drop) {
     const id = sched.next++;
     sched.channels.set(id, []);
     sched.senders.set(id, 1);
+    if (drop) sched.drops.set(id, drop);
     return id;
   }
+  // Whether the message went to the channel: once its receiver is gone, it is dropped instead.
   function* send(ch, v) {
-    sched.channels.get(ch).push(v);
-    wake("channel", ch);
+    const ok = !sched.deaf.has(ch);
+    if (ok) {
+      sched.channels.get(ch).push(v);
+      wake("channel", ch);
+    } else {
+      sched.drops.get(ch)?.(v);
+    }
     yield* point();
+    return ok;
+  }
+  // The receiving end is gone: what is in the channel is dropped, as is what is sent from now on.
+  function receiverGone(ch) {
+    sched.deaf.add(ch);
+    const drop = sched.drops.get(ch), q = sched.channels.get(ch);
+    sched.channels.set(ch, []);
+    if (drop) for (const m of q) drop(m);
   }
   // The next message, or `undefined` once the channel is closed and drained.
   function* recv(ch) {
@@ -568,6 +613,7 @@ const { $rt, $b } = (() => {
   const $b = {
     panic,
     println(s) { process.stdout.write(Buffer.from(s + "\n", "latin1")); },
+    eprintln(s) { process.stderr.write(Buffer.from(s + "\n", "latin1")); },
     writeFile(path, content) {
       try { fs.writeFileSync(Buffer.from(path, "latin1").toString("utf8"), Buffer.from(content, "latin1")); }
       catch (e) { throw new Fail({ $tag: "PermissionDenied" }); }
@@ -682,7 +728,11 @@ const { $rt, $b } = (() => {
     Hasher_finish: (h) => h.h,
 
     HashMap_new: () => new HashMap(),
-    HashMap_insert(r, k, v) { r.v.m.set(keyOf(k), [k, v]); },
+    HashMap_insert(r, k, v, drop) {
+      const key = keyOf(k), old = r.v.m.get(key);
+      r.v.m.set(key, [k, v]);
+      if (old !== undefined && drop) drop(old);
+    },
     HashMap_get(m, k) { const e = m.m.get(keyOf(k)); return e === undefined ? none() : some(e[1]); },
     HashMap_getMut(r, k) { const e = r.v.m.get(keyOf(k)); return e === undefined ? none() : some(new FieldRef(e, 1)); },
     HashMap_has: (m, k) => m.m.has(keyOf(k)),
@@ -697,7 +747,7 @@ const { $rt, $b } = (() => {
     HashMap_values: (m) => genOf(Array.from(m.m.values(), (e) => e[1])),
     HashMap_valuesMut: (r) => genOf(Array.from(r.v.m.values(), (e) => new FieldRef(e, 1))),
     HashMap_entries: (m) => genOf(Array.from(m.m.values(), (e) => [e[0], e[1]])),
-    HashMap_sortedByValue: (m) => Array.from(m.m.values(), (e) => [e[0], e[1]]).sort((a, b) => compare(b[1], a[1]) || compare(a[0], b[0])),
+    HashMap_intoEntries: (m) => Array.from(m.m.values(), (e) => [e[0], e[1]]),
 
     Cell_new: (v) => ({ v }),
     Cell_get: (c) => c.v,
@@ -751,7 +801,7 @@ const { $rt, $b } = (() => {
       }
       sched.cancelled.delete(sched.current);
       sched.scopes.delete(sid);
-      if (st.panic !== undefined) throw st.panic;
+      if (st.panic !== undefined) { panicking = true; throw st.panic; }
       if (error !== undefined) throw error;
       if (st.failure !== undefined) throw st.failure;
       return result;
@@ -766,9 +816,9 @@ const { $rt, $b } = (() => {
       }
       panic("a joined task did not finish");
     },
-    channel: () => { const ch = channel(); return [{ ch }, { ch }]; },
-    Reply_new: () => { const ch = channel(); return [{ ch }, { ch }]; },
-    *Sender_send$g(s, v) { yield* send(s.ch, v); },
+    channel: (drop) => { const ch = channel(drop); return [{ ch }, { ch }]; },
+    Reply_new: (drop) => { const ch = channel(drop); return [{ ch }, { ch }]; },
+    *Sender_send$g(s, v) { return yield* send(s.ch, v); },
     *Reply_send$g(s, v) { yield* send(s.ch, v); $b.Sender_drop({ v: s }); },
     *Receiver_recv$g(rx) { const m = yield* recv(rx.ch); return m === undefined ? none() : some(m.v); },
     *Pending_wait$g(p) { const m = yield* recv(p.ch); if (m === undefined) panic("the reply was dropped unsent"); return m.v; },
@@ -780,8 +830,8 @@ const { $rt, $b } = (() => {
       if (left === 0) { sched.closed.add(ch); wake("channel", ch); }
     },
     Reply_drop(r) { $b.Sender_drop(r); },
-    Receiver_drop() {},
-    Pending_drop() {},
+    Receiver_drop(r) { if (r.v) receiverGone(r.v.ch); },
+    Pending_drop(r) { if (r.v) receiverGone(r.v.ch); },
     Sender_clone: (s) => { sched.senders.set(s.ch, (sched.senders.get(s.ch) || 0) + 1); return { ch: s.ch }; },
     *Receiver_each(rx) { for (let m = yield* recv(rx.ch); m !== undefined; m = yield* recv(rx.ch)) yield new Yielded(m.v); },
     Mutex_new: (v) => ({ v }),
@@ -792,6 +842,12 @@ const { $rt, $b } = (() => {
     Listener_port: (l) => (l.v ?? l).listener,
     *Listener_accept() {
       while (world.incoming.length > 0) yield new Yielded({ input: world.incoming.shift(), pos: 0 });
+    },
+    Socket_connect(host, port) {
+      if (fault()) throw new Fail({ $tag: "TimedOut" });
+      const peer = `${host}:${port}`, input = world.peers[peer];
+      if (input === undefined) throw new Fail({ $tag: "Refused" });
+      return { input, pos: 0, peer };
     },
     Socket_read(r, buf) {
       if (fault()) throw new Fail({ $tag: "TimedOut" });
@@ -816,7 +872,7 @@ const { $rt, $b } = (() => {
     // line of it, `\r\n` shown as a line break.
     Socket_close(r) {
       const sock = r.v;
-      if (sock.out) $b.println(`-> ${sock.out.replaceAll("\r\n", "\n").replace(/\n+$/, "")}`);
+      if (sock.out) $b.println(`-> ${sock.peer ? `${sock.peer}: ` : ""}${sock.out.replaceAll("\r\n", "\n").replace(/\n+$/, "")}`);
       sock.out = "";
     },
     Db_connect: () => ({ db: 0 }),
@@ -952,7 +1008,7 @@ const { $rt, $b } = (() => {
     Fail, Panic, Return, YIELD, handle, run, drive, panic, raise, FieldRef, indexRef, rangeRef, yielded, isYield, perform, items,
     div, rem, ndiv, nrem, bits, fmod, truncFloat, truncNum, toInt, toNum, at, idx, slice, copy, showFloat, show,
     unmatched: (v) => panic(`no arm matched ${show(v)}`),
-    argStr, argList, argInt, argNum, start, cleaning,
+    argStr, argList, argInt, argNum, start, cleaning, ioHandled, lift, unwinds,
     ...checks, ...wraps,
   };
   return { $rt, $b };

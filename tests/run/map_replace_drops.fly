@@ -1,0 +1,17 @@
+// expect: the replaced sender's channel ended: 0
+// Inserting an entry whose key is already in a map drops the entry it replaces: here a sender,
+// whose channel then ends.
+import { println } from "std/io";
+import { channel, Sender } from "std/sync";
+import { HashMap } from "std/collections";
+
+export function main(): void uses Io {
+  const [tx, rx] = channel<u32>();
+  let m: HashMap<u32, Sender<u32>> = HashMap.new();
+  m.insert(1, tx);
+  const [tx2, rx2] = channel<u32>();
+  m.insert(1, tx2);
+  let n = 0;
+  for (const _ of rx) { n += 1; }
+  println(`the replaced sender's channel ended: ${n}`);
+}

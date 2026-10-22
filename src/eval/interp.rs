@@ -298,7 +298,12 @@ impl Interp {
         let facts = self.facts(fid);
         let Some(fdecl) = &facts.decl else { return Err(panic("not a function")) };
         let Some(body) = &fdecl.body else {
-            return self.builtin(fid, args);
+            // A builtin sees its impl's type arguments: a channel's destructor drops messages of
+            // its element type.
+            let saved = std::mem::replace(&mut self.lex.tenv, tenv);
+            let r = self.builtin(fid, args);
+            self.lex.tenv = saved;
+            return r;
         };
         let env = new_env(None);
         let frame = self.fresh_id();
@@ -320,7 +325,8 @@ impl Interp {
         }
         let r = self.block(body, &env);
         // Parameters the body did not move are dropped as it returns (§5.6).
-        let r = match (r, self.drop_scope(&env)) {
+        let c = self.cleanup(&r, &env);
+        let r = match (r, c) {
             (Ok(v), Err(e)) => {
                 let _ = v;
                 Err(e)
@@ -357,7 +363,8 @@ impl Interp {
                 let frame = self.fresh_id();
                 let saved = std::mem::replace(&mut self.lex, Lex { frame, loops: Vec::new(), owner: c.owner, module: c.module, tenv: c.tenv.clone() });
                 let r = self.expr(&c.body, &env);
-                let r = match (r, self.drop_scope(&base)) {
+                let c = self.cleanup(&r, &base);
+                let r = match (r, c) {
                     (Ok(_), Err(e)) => Err(e),
                     (r, _) => r,
                 };
@@ -475,11 +482,12 @@ impl Interp {
     }
 
     fn perform(&mut self, effect: usize, op: &str, args: Vec<Value>) -> R {
-        let Some(pos) = self.handlers.iter().rposition(|h| matches!(h, Handler::User { effect: e, .. } if *e == effect)) else {
+        // The innermost handler with an arm for `op`: one without passes it on (§5.2).
+        let Some(pos) = self.handlers.iter().rposition(|h| matches!(h, Handler::User { effect: e, arms, .. } if *e == effect && arms.iter().any(|a| a.op.name == op))) else {
             // On a coroutine's thread, the effect is its handler's or its resumer's.
             if let Some(Handler::Coroutine { co, effect: handled }) = self.handlers.first() {
                 let (co, handled) = (*co, *handled);
-                return if handled == effect {
+                return if handled == effect && super::coroutine::has_arm(self, co, op) {
                     super::coroutine::op(self, co, op, args)
                 } else {
                     super::coroutine::forward(self, co, super::coroutine::Evt::Perform(effect, op.to_string(), args))
@@ -491,9 +499,7 @@ impl Interp {
             return Err(panic(format!("unhandled effect `{}`", self.prog.defs[effect].name)));
         };
         let Handler::User { id, arms, env, lex, .. } = self.handlers[pos].clone() else { unreachable!() };
-        let Some(ai) = arms.iter().position(|a| a.op.name == op) else {
-            return Err(panic(format!("no arm for `{op}`")));
-        };
+        let Some(ai) = arms.iter().position(|a| a.op.name == op) else { unreachable!() };
         let arm = &arms[ai];
         if arm.resumes.is_none() {
             // Abortive: unwind the body first, then run the arm at the handler (§5.2).
@@ -553,7 +559,11 @@ impl Interp {
             };
         }
         // `defer`s run in reverse order however the block exits (§5.6), and to their end: a
-        // cancellation meanwhile takes effect after them.
+        // cancellation meanwhile takes effect after them. A panic stops the task where it is, its
+        // cleanup not run (§5.7).
+        if is_panic(&result) {
+            return result;
+        }
         let cleans = !defers.is_empty() || !env.lock().owned.is_empty();
         if cleans {
             self.sched.cleaning(self.task, true);
@@ -573,6 +583,15 @@ impl Interp {
             self.sched.cleaning(self.task, false);
         }
         result
+    }
+
+    /// The cleanup of a scope left with `r`: its owned bindings dropped, unless a panic is passing,
+    /// which stops the task where it is (§5.7).
+    fn cleanup(&mut self, r: &R, env: &Env) -> Result<(), Ctl> {
+        if is_panic(r) {
+            return Ok(());
+        }
+        self.drop_scope(env)
     }
 
     /// Drops the owned bindings of a scope, newest first, except what was moved out of them. A
@@ -1010,7 +1029,8 @@ impl Interp {
                             }
                         // What the arm took and did not move on is dropped as it ends (§5.6).
                         let r = self.expr(&arm.body, &aenv);
-                        return match (r, self.drop_scope(&aenv)) {
+                        let c = self.cleanup(&r, &aenv);
+                        return match (r, c) {
                             (Ok(_), Err(e)) => Err(e),
                             (r, _) => r,
                         };
@@ -1144,7 +1164,8 @@ impl Interp {
                 self.bind(pat, &item, None, &benv);
                 // An item the body did not move on is dropped as the iteration ends (§5.6).
                 let r = self.block(body, &benv);
-                let r = match (r, self.drop_scope(&benv)) {
+                let c = self.cleanup(&r, &benv);
+                let r = match (r, c) {
                     (Ok(_), Err(e)) => Err(e),
                     (r, _) => r,
                 };
@@ -1419,6 +1440,12 @@ pub fn binary(op: &str, a: &Value, b: &Value) -> R {
             _ => return Err(panic(format!("bad operands for {op}: {} and {}", a.show(), b.show()))),
         },
     })
+}
+
+/// Whether `r` is a panic passing, which stops its task without cleanup (§5.7). A generator or
+/// coroutine ended early unwinds by a panic of its own, marked with a NUL, and runs its cleanup.
+fn is_panic(r: &R) -> bool {
+    matches!(r, Err(Ctl::Panic(m)) if !m.starts_with('\u{0}'))
 }
 
 fn compare(op: &str, o: std::cmp::Ordering) -> bool {

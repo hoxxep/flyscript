@@ -19,7 +19,7 @@ use flyscript::check::check_files;
 use flyscript::eval::{World, command_line, run};
 
 fn unescape(s: &str) -> String {
-    s.replace("\\n", "\n")
+    s.replace("\\r", "\r").replace("\\n", "\n")
 }
 
 fn world_for(source: &str) -> (World, Vec<String>) {
@@ -37,6 +37,10 @@ fn world_for(source: &str) -> (World, Vec<String>) {
                 world.files.insert(name.to_string(), unescape(contents));
             }
             "request" => world.incoming.push_back(unescape(value).into_bytes()),
+            "peer" => {
+                let (peer, reply) = value.split_once('=').expect("peer: host:port=reply");
+                world.peers.insert(peer.to_string(), unescape(reply).into_bytes());
+            }
             "profile" => {
                 let (user, name) = value.split_once('=').expect("profile: user=name");
                 world.profiles.insert(user.to_string(), name.to_string());
@@ -54,6 +58,7 @@ fn world_for(source: &str) -> (World, Vec<String>) {
         let mut seeded = World::seeded(seed);
         seeded.files = std::mem::take(&mut world.files);
         seeded.incoming = std::mem::take(&mut world.incoming);
+        seeded.peers = std::mem::take(&mut world.peers);
         seeded.profiles = std::mem::take(&mut world.profiles);
         seeded.quotas = std::mem::take(&mut world.quotas);
         world = seeded;

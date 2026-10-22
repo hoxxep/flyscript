@@ -97,7 +97,8 @@ impl<T extends ToJson> ToJson for Option<T> {
 }
 
 // Numbers and booleans are themselves, strings are quoted; records and structs are objects,
-// tuples arrays; a tag without a payload is its name, and a tag with one is `{ "Name": payload }`.
+// tuples, fixed arrays and slices arrays; a tag without a payload is its name, and a tag with one
+// is `{ "Name": payload }`.
 impl<comptime T: Type> ToJson for T {
   function toJson(self: readonly Self, out: mut String): void {
     comptime match (Type.info(T)) {
@@ -118,6 +119,16 @@ impl<comptime T: Type> ToJson for T {
         comptime for (const [i, _] of items.enumerate()) {
           comptime if (i > 0) { out.push(","); }
           self[i].toJson(mut out);
+        }
+        out.push("]");
+      }
+      #Array(_) | #Slice(_) => {
+        out.push("[");
+        let i: usize = 0;
+        while (i < self.len()) {
+          if (i > 0) { out.push(","); }
+          self[i].toJson(mut out);
+          i += 1;
         }
         out.push("]");
       }
@@ -151,6 +162,17 @@ function isSpace(b: u8): bool { b == b' ' || b == b'\n' || b == b'\t' || b == b'
 
 function isNumberByte(b: u8): bool {
   b >= b'0' && b <= b'9' || b == b'-' || b == b'+' || b == b'.' || b == b'e' || b == b'E'
+}
+
+// An optional `-` and at least one digit, and nothing else.
+function isInteger(s: str): bool {
+  const bytes = s.asBytes();
+  const from: usize = if (bytes.len() > 0 && bytes[0] == b'-') { 1 } else { 0 };
+  if (bytes.len() == from) { return false; }
+  for (const i of from..bytes.len()) {
+    if (bytes[i] < b'0' || bytes[i] > b'9') { return false; }
+  }
+  true
 }
 
 function hexValue(b: u8): u32 {
@@ -242,12 +264,15 @@ impl JsonParser {
     n
   }
 
+  // An integer, over the whole range of `i64`.
   export function int(self: mut Self): i64 uses Fail<JsonError> {
     self.peek();
     const start = self.pos;
-    match (parseInt(self.number())) {
+    const text = self.number();
+    match (parseInt(text)) {
       #Some(n) => n,
-      #None => throw #BadJson(start),
+      // Digits too many for an `i64` are out of range; anything else is not an integer.
+      #None => if (isInteger(text)) { throw #OutOfRange(start) } else { throw #BadJson(start) },
     }
   }
 
@@ -447,6 +472,18 @@ impl<comptime T: Type> FromJson for T {
           comptime for (const t of items) {
             if (!p.nextItem()) { throw #BadJson(p.at()); }
             t.fromJson(mut p)
+          }
+        ];
+        if (p.nextItem()) { throw #BadJson(p.at()); }
+        v
+      }
+      // Exactly as many items as the array's length.
+      #Array { item, len } => {
+        p.beginArray();
+        const v: T = [
+          comptime for (const _ of 0..len) {
+            if (!p.nextItem()) { throw #BadJson(p.at()); }
+            item.fromJson(mut p)
           }
         ];
         if (p.nextItem()) { throw #BadJson(p.at()); }

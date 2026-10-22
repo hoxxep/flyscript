@@ -82,12 +82,14 @@ impl Dict {
         self.index.get(&key.hash_value())?.iter().copied().find(|&i| entry(&self.entries[i]).0.equals(key))
     }
 
-    pub fn insert(&mut self, key: Value, value: Value) {
+    /// Adds the entry, giving back the one it replaced, which its owner drops.
+    pub fn insert(&mut self, key: Value, value: Value) -> Option<Value> {
         match self.find(&key) {
-            Some(i) => self.entries[i] = Value::Tuple(vec![key, value].into()),
+            Some(i) => Some(std::mem::replace(&mut self.entries[i], Value::Tuple(vec![key, value].into()))),
             None => {
                 self.index.entry(key.hash_value()).or_default().push(self.entries.len());
                 self.entries.push(Value::Tuple(vec![key, value].into()));
+                None
             }
         }
     }

@@ -1,4 +1,5 @@
-import { Socket, Db } from "std/net";
+import { Socket } from "std/net";
+import { Db } from "std/world";
 
 struct Request<region R> { user: Ref<str>; token: Ref<str>; }
 

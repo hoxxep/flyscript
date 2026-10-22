@@ -1,4 +1,5 @@
-import { Listener, Db } from "std/net";
+import { Listener } from "std/net";
+import { Db } from "std/world";
 import { serveOne } from "./http_handler";
 
 export function serve(listener: mut Listener, db: readonly Db): void uses Io, Fail<IoErr> {

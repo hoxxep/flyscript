@@ -2071,7 +2071,22 @@ impl<'p> Checker<'p> {
         let around = self.allowed.clone();
         let (_, inside) = self.performing(|c| c.handle_parts(body, &eff, arms, &result, &cont_row));
         let calls = self.pending_conts.pop().map(|(_, calls)| calls).unwrap_or_default();
-        let own = self.own_row(inside, &around);
+        let mut own = self.own_row(inside, &around);
+        // An operation without an arm passes on to the handlers around the `handle` (§5.2), so
+        // the `handle`, and resuming its continuation, performs the effect itself.
+        let DefKind::Effect { ops } = &self.p.defs[eff.def].kind else { return Ty::Error };
+        if let Some((op, _)) = ops.iter().find(|(op, _)| !arms.iter().any(|a| a.op.name == *op)) {
+            let around_row = self.s.expand_effs(&around);
+            if around_row.effs.iter().any(|e| e.def == eff.def) || !matches!(around_row.tail, Tail::Closed) {
+                self.perform(&EffRow { effs: vec![eff.clone()], tail: Tail::Closed }, span);
+                if !own.effs.iter().any(|e| e.def == eff.def) {
+                    own.effs.push(eff.clone());
+                }
+            } else {
+                let name = self.p.defs[eff.def].name.clone();
+                self.err(span, format!("this `handle` has no arm for `{name}.{op}`, which it passes on to the code around it, but that code does not perform `{name}`: give every operation an arm"));
+            }
+        }
         match self.s.expand_effs(&cont_row).tail {
             Tail::Var(v) if v == cont_var && self.s.expand_effs(&cont_row).effs.is_empty() => self.s.bind_effs(v, own.clone()),
             _ => {

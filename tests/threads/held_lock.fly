@@ -1,0 +1,33 @@
+// expect: 16 tasks kept 800 entries sorted
+// expect: the other lock counted 800
+// Bodies that hold a lock a long time: tasks that find it held wait without a core, woken in turn,
+// and every change is whole when the next body sees it. A second lock is taken between, which is a
+// lock of its own (§6.2).
+import { println } from "std/io";
+import { Mutex } from "std/sync";
+
+export function main(): void uses Io {
+  const sorted = Mutex.new(Vec.new());
+  const other = Mutex.new(0 as u64);
+  Io.scope((s) => {
+    for (const t of 0..16) {
+      s.spawn(() => {
+        for (const i of 0..50) {
+          const v = (t * 7919 + i * 104729) % 100003;
+          // Inserting in order and checking the whole list, under the lock.
+          const ok = sorted.lock((xs) => {
+            xs.push(v);
+            xs.sort();
+            let fine = true;
+            for (const k of 1..xs.len()) { if (xs[k - 1] > xs[k]) { fine = false; } }
+            fine
+          });
+          if (!ok) { println("a body saw a change half made"); }
+          other.lock((n) => { n += 1; });
+        }
+      });
+    }
+  });
+  println(`16 tasks kept ${sorted.lock((xs) => xs.len())} entries sorted`);
+  println(`the other lock counted ${other.lock((n) => n + 0)}`);
+}

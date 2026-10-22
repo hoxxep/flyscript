@@ -11,6 +11,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Condvar, Mutex};
 
 use super::interp::{Ctl, panic};
+use crate::check::types::Ty;
 use super::value::Value;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -43,6 +44,8 @@ struct Inner {
     cancelled: HashSet<u64>,
     /// How deep each task is in cleanup, which runs to its end: a cancellation waits for it.
     cleaning: HashMap<u64, u32>,
+    /// Channels whose receiver is gone: what is sent to them is dropped, as a value of this type.
+    deaf: HashMap<u64, Ty>,
 }
 
 pub struct Sched {
@@ -67,6 +70,7 @@ impl Sched {
                 senders: HashMap::new(),
                 cancelled: HashSet::new(),
                 cleaning: HashMap::new(),
+                deaf: HashMap::new(),
             }),
             turn: Condvar::new(),
         })
@@ -235,11 +239,24 @@ impl Sched {
         *self.inner.lock().expect("scheduler").senders.entry(ch).or_insert(0) += 1;
     }
 
-    /// Puts `v` in channel `ch`, waking its receiver; sending is that and a scheduling point.
-    pub fn deliver(&self, ch: u64, v: Value) {
+    /// Puts `v` in channel `ch`, waking its receiver; sending is that and a scheduling point. If
+    /// the receiver is gone, `v` is given back with the type to drop it as.
+    pub fn deliver(&self, ch: u64, v: Value) -> Option<(Value, Ty)> {
         let mut inner = self.inner.lock().expect("scheduler");
+        if let Some(t) = inner.deaf.get(&ch) {
+            return Some((v, t.clone()));
+        }
         inner.channels.entry(ch).or_default().push_back(v);
         Self::wake(&mut inner, &Wait::Channel(ch));
+        None
+    }
+
+    /// The receiving end of `ch` is gone: what is in the channel is given back to be dropped, as
+    /// is whatever is sent to it from now on.
+    pub fn receiver_gone(&self, ch: u64, elem: Ty) -> Vec<Value> {
+        let mut inner = self.inner.lock().expect("scheduler");
+        inner.deaf.insert(ch, elem);
+        inner.channels.remove(&ch).map(Vec::from).unwrap_or_default()
     }
 
     /// The next message, or `None` once the channel is closed and drained.

@@ -1,0 +1,41 @@
+// peer: example.com:80=HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello
+// expect: -> example.com:80: GET / HTTP/1.1
+// expect: Host: example.com
+// expect: Connection: close
+// expect: HTTP/1.1 200 OK
+// expect: body: hello
+// expect: nothing listens on example.com:81: #Refused
+// A client: `Socket.connect` reaches a peer the simulated world describes, which answers what it
+// is given to, and what the program writes to it is shown when the connection closes (§6.4).
+import { println } from "std/io";
+import { Socket } from "std/net";
+
+function get(host: str, port: u16): String uses Io, Fail<IoErr> {
+  let s = Socket.connect(host, port);
+  s.write(`GET / HTTP/1.1\r\nHost: ${host}\r\nConnection: close\r\n\r\n`.asStr().asBytes());
+  let reply: Vec<u8> = Vec.new();
+  let buf: u8[256] = repeat(0 as u8);
+  while (true) {
+    const n = s.read(mut buf);
+    if (n == 0) { break; }
+    for (const i of 0..n) { reply.push(buf[i]); }
+  }
+  s.close();
+  match (String.fromUtf8(reply)) { #Some(t) => t, #None => String.new() }
+}
+
+export function main(): void uses Io {
+  try {
+    const reply = get("example.com", 80);
+    const lines = reply.asStr().split("\r\n");
+    println(lines[0].asStr());
+    println(`body: ${lines[lines.len() - 1]}`);
+  } catch (e) {
+    println(`failed: ${e}`);
+  }
+  try {
+    get("example.com", 81);
+  } catch (e) {
+    println(`nothing listens on example.com:81: ${e}`);
+  }
+}

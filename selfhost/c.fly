@@ -177,6 +177,8 @@ export struct Cgen {
   tags: HashMap<String, usize>;
   // Drop functions made, by type key; their code.
   drops: HashMap<String, String>;
+  // Their forms taking `void*`, for the runtime.
+  anyDrops: HashSet<String>;
   dropCode: String;
   // Conversions between union types, by their keys.
   convs: HashMap<String, String>;
@@ -438,7 +440,7 @@ impl Cgen {
         } else if (self.namedIs(t, "Mutex")) {
           const inner = typeArg(t, 0);
           if (self.needsDrop(inner)) { body.push(`  if (*v) ${self.dropFn(inner, span)}(*v);\n`); }
-          body.push("  free(*v);\n  *v = NULL;\n");
+          body.push("  fly_mutex_free(*v);\n  *v = NULL;\n");
         } else if (self.namedIs(t, "HashMap")) {
           const e = entryTy(t);
           if (self.needsDrop(e)) {
@@ -484,6 +486,18 @@ impl Cgen {
       _ => {}
     }
     self.dropCode.push(`static void ${name}(${c}* v) {\n${body}}\n`);
+    name
+  }
+
+  // The drop function of `t` for the runtime, which knows a value only by its address: called
+  // through a pointer of a type of its own, as C requires.
+  function anyDropFn(self: mut Self, t: readonly Ty, span: Span): String uses Fail<Diagnostic> {
+    const d = self.dropFn(t, span);
+    const name = `${d}_any`;
+    if (self.anyDrops.insert(name.clone())) {
+      self.protos.push(`static void ${name}(void* v);\n`);
+      self.dropCode.push(`static void ${name}(void* v) { ${d}(v); }\n`);
+    }
     name
   }
 
@@ -1458,7 +1472,7 @@ impl Cgen {
 
   // Statements raising the `IoErr` whose code, a runtime `FLY_IO_…`, is the C expression `code`.
   function ioRaise(self: mut Self, code: str): String {
-    const names = ["Reset", "TimedOut", "BrokenPipe", "NotFound", "PermissionDenied", "AddrInUse"];
+    const names = ["Reset", "TimedOut", "BrokenPipe", "NotFound", "PermissionDenied", "AddrInUse", "Refused"];
     let pick = String.new();
     for (const [i, n] of names.iter().enumerate()) { pick.push(`(${code}) == ${i + 1} ? ${self.tagId(n)} : `); }
     pick.push(`${self.tagId("Reset")}`);
@@ -1485,10 +1499,15 @@ impl Cgen {
       _ => #Error,
     };
     if (key.startsWith("perform:Io:")) { return self.ioOp(key.slice(11, key.len()), c, vs.clone()); }
+    // Whether a handler of the program's own handles `Io` around here.
+    if (key == "Io_handled") {
+      return match (self.lw.p.knownDef("Io")) { #Some(d) => `fly_handled(${d})`, #None => "false".toString() };
+    }
     if (key.startsWith("extern:")) { return self.foreignCall(key.slice(7, key.len()), c, vs.clone()); }
     if (const #Some(r) = self.memory(key, c, vs.clone())) { return r; }
     match (key) {
       "println" => `({ fly_println(${arg(0)}); (fly_unit)0; })`,
+      "eprintln" => `({ fly_eprintln(${arg(0)}); (fly_unit)0; })`,
       "panic" => `({ fly_str m_ = ${arg(0)}; fly_panicf("%.*s", (int)m_.len, (const char*)m_.ptr); (fly_unit)0; })`,
       "String_new" => "fly_String_new()".toString(),
       "String_push" => `({ fly_String_push(${arg(0)}, ${arg(1)}); (fly_unit)0; })`,
@@ -1975,12 +1994,12 @@ impl Cgen {
         const tc = self.ctype(rt, span);
         // What drops a message left in the channel, or sent to it once no one receives.
         const msg = match (rt) { #Tuple(ts) if ts.len() > 0 => typeArg(ts[0], 0), _ => #Error };
-        const drop = if (self.needsDrop(msg)) { `(void (*)(void*))${self.dropFn(msg, span)}` } else { "NULL".toString() };
+        const drop = if (self.needsDrop(msg)) { self.anyDropFn(msg, span) } else { "NULL".toString() };
         `({ fly_chan c_ = fly_channel(${drop}); (${tc}){ .f0 = c_, .f1 = c_ }; })`
       }
       "Sender_send" => {
         const tc = self.ctype(carried, span);
-        `({ fly_chan c_ = ${arg(0)}; ${tc} v_ = ${arg(1)}; fly_send(c_, &v_, sizeof(${tc})); (fly_unit)0; })`
+        `({ fly_chan c_ = ${arg(0)}; ${tc} v_ = ${arg(1)}; fly_send(c_, &v_, sizeof(${tc})); })`
       }
       // A reply sent is done with: its channel's sending end is gone.
       "Reply_send" => {
@@ -2001,7 +2020,7 @@ impl Cgen {
       "Sender_clone" => `({ fly_chan c_ = ${arg(0)}; fly_sender_clone(&c_); })`,
       "Mutex_new" => {
         const tc = self.ctype(typeArg(rt, 0), span);
-        `({ ${tc} v_ = ${arg(0)}; (${tc}*)fly_box(&v_, sizeof(${tc})); })`
+        `({ ${tc} v_ = ${arg(0)}; (${tc}*)fly_mutex_new(&v_, sizeof(${tc})); })`
       }
       "Mutex_lock" => {
         const tc = self.ctype(rt, span);
@@ -2015,6 +2034,10 @@ impl Cgen {
       }
       "Listener_port" => `fly_listener_port(${arg(0)})`,
       "Socket_close" => `({ fly_sock_close(${arg(0)}); (fly_unit)0; })`,
+      "Socket_connect" => {
+        const raise = self.ioRaise("e_");
+        `({ fly_socket s_; int e_ = fly_connect(${arg(0)}, ${arg(1)}, &s_); if (e_) { ${raise}} s_; })`
+      }
       "Socket_read" => {
         const raise = self.ioRaise("e_");
         `({ uint64_t n_ = 0; int e_ = fly_sock_read(${arg(0)}, ${arg(1)}, &n_); if (e_) { ${raise}} n_; })`
@@ -2105,26 +2128,7 @@ impl Cgen {
           const g = self.stridedGen(itemTy, "m_->entries", "m_->len", `sizeof(${ec})`.asStr(), item.asStr(), "free", span);
           `({ fly_map* m_ = (fly_map*)${arg(0)}; ${g}; })`
         }
-        "HashMap_sortedByValue" => {
-          // Largest value first; equal values by their keys.
-          const key2 = `sorted:${ckey(et)}`;
-          const cmp = match (self.helpers.get(key2.asStr())) {
-            #Some(n) => n.clone(),
-            #None => {
-              const n = `cmp${self.helpers.len()}`;
-              self.helpers.insert(key2, n.clone());
-              const byV = self.ifaceCall("Ord", "cmp", v, [`(&((${ec}*)b)->f1)`, `(&((${ec}*)a)->f1)`], span);
-              const byK = self.ifaceCall("Ord", "cmp", k, [`(&((${ec}*)a)->f0)`, `(&((${ec}*)b)->f0)`], span);
-              const less = self.tagId("Less");
-              const greater = self.tagId("Greater");
-              const equal = self.tagId("Equal");
-              self.protos.push(`static int ${n}(const void* a, const void* b);\n`);
-              self.dropCode.push(`static int ${n}(const void* a, const void* b) { uint32_t t = ${byV}.tag; if (t == ${equal}) t = ${byK}.tag; return t == ${less} ? -1 : t == ${greater} ? 1 : 0; }\n`);
-              n
-            }
-          };
-          `({ fly_map m_ = ${arg(0)}; fly_vec v_ = fly_vec_from(m_.entries, m_.len, sizeof(${ec})); if (v_.len > 1) qsort(v_.ptr, v_.len, sizeof(${ec}), ${cmp}); fly_map_free(&m_); v_; })`
-        }
+        "HashMap_intoEntries" => `({ fly_map m_ = ${arg(0)}; fly_vec v_ = fly_vec_from(m_.entries, m_.len, sizeof(${ec})); fly_map_free(&m_); v_; })`,
         _ => return #None,
       });
     }
@@ -2897,7 +2901,7 @@ impl Cgen {
 export function newCgen(p: Prog): Cgen {
   Cgen {
     lw: newLower(p), closuresDone: 0, types: HashMap.new(), defined: HashSet.new(), pending: Vec.new(), typeFwd: String.new(),
-    typeDefs: String.new(), tags: HashMap.new(), drops: HashMap.new(), dropCode: String.new(), convs: HashMap.new(),
+    typeDefs: String.new(), tags: HashMap.new(), drops: HashMap.new(), anyDrops: HashSet.new(), dropCode: String.new(), convs: HashMap.new(),
     helpers: HashMap.new(), consts: HashMap.new(), protos: String.new(), code: String.new(), apartCode: String.new(), aparts: 0,
     tmp: 0, cx: newCtx(Vec.new(), #Prim(#Void), #Fn), module: 0, defers: HashMap.new(), fnName: String.new(),
     argPlaces: Vec.new(), glue: String.new(),

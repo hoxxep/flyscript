@@ -70,14 +70,28 @@ export struct Lower {
   // generator, a `handle`'s body or arm — innermost last: where temporaries lent beyond their block
   // live.
   homes: Vec<usize>;
+  // Whether the program handles `Io` anywhere: then each of `Io`'s operations asks whether one of
+  // its handlers is around it, and every other program pays nothing for them.
+  handlesIo: bool;
 }
 
 export function newLower(p: Prog): Lower {
+  const handlesIo = programHandlesIo(p);
   Lower {
     p, insts: Vec.new(), instIndex: HashMap.new(), owned: 0, closures: Vec.new(), fid: 0, map: HashMap.new(), module: 0,
     ret: #Prim(#Void), locals: Vec.new(), frames: Vec.new(), scopes: Vec.new(), loops: Vec.new(), labels: 0,
-    captures: Vec.new(), regions: Vec.new(), yields: #None, homes: Vec.new(),
+    captures: Vec.new(), regions: Vec.new(), yields: #None, homes: Vec.new(), handlesIo,
   }
+}
+
+// Whether a `handle` anywhere in the program handles `Io`.
+function programHandlesIo(p: readonly Prog): bool {
+  for (const t of p.typed.values()) {
+    for (const d of t.handled.values()) {
+      if (p.defs[d].name == "Io" && p.modules[p.defs[d].module].isStd) { return true; }
+    }
+  }
+  false
 }
 
 const KEYWORDS: str[] = ["auto", "break", "case", "char", "const", "continue", "default", "do", "double", "else",
@@ -1727,18 +1741,38 @@ impl Lower {
     }
     const vs = self.settle(ops);
     const rt = self.exprTy(e.id);
-    // `Io`'s operations are the runtime's.
+    self.performOp(d, op, vs, tys, rt, e.span)
+  }
+
+  // Operation `op` of effect `d`, given `vs` of types `tys`, giving an `rt`.
+  function performOp(self: mut Self, d: usize, op: str, vs: Vec<Operand>, tys: Vec<Ty>, rt: Ty, span: Span): Operand uses Fail<Diagnostic> {
+    const ops = match (self.p.defs[d].kind) { #Effect { ops } => ops.clone(), _ => return self.fail(span, "not an effect") };
+    const idx = match (ops.iter().findIndex(([n, _]) => n == op)) { #Some(i) => i, #None => return self.fail(span, `no operation \`${op}\``) };
+    const r = if (unitTy(rt)) { self.unownedTemp(rt.clone()) } else { self.temp(rt.clone()) };
+    // `Io`'s operations are the runtime's, unless the program handles `Io` itself: then each goes
+    // to a handler of the program's if one is around it.
     if (self.p.defs[d].name == "Io" && self.p.modules[self.p.defs[d].module].isStd) {
       const c: Call = {
-        callee: #Builtin(`perform:Io:${op}`), args: vs, params: tys.clone(), argTys: tys, ret: rt.clone(), regions: Vec.new(),
-        fails: false, suspends: true, yields: false, row: self.ioRow(), targs: Vec.new(), span: e.span,
+        callee: #Builtin(`perform:Io:${op}`), args: vs.clone(), params: tys.clone(), argTys: tys, ret: rt.clone(), regions: Vec.new(),
+        fails: false, suspends: true, yields: false, row: self.ioRow(), targs: Vec.new(), span,
       };
-      return self.value(#Call(c), rt);
+      if (!self.handlesIo) { return self.value(#Call(c), rt); }
+      const test: Call = {
+        callee: #Builtin("Io_handled".toString()), args: Vec.new(), params: Vec.new(), argTys: Vec.new(), ret: #Prim(#Bool), regions: Vec.new(),
+        fails: false, suspends: false, yields: false, row: pure(), targs: Vec.new(), span,
+      };
+      const handled = self.value(#Call(test), #Prim(#Bool));
+      self.push();
+      self.emit(#Perform(d, idx, vs, r));
+      const there = self.pop();
+      self.push();
+      const v = self.value(#Call(c), rt.clone());
+      if (!unitTy(rt)) { self.emit(#Let(r, #Use(v))); }
+      const root = self.pop();
+      self.emit(#If(handled, there, root));
+    } else {
+      self.emit(#Perform(d, idx, vs, r));
     }
-    const ops = match (self.p.defs[d].kind) { #Effect { ops } => ops.clone(), _ => return self.fail(e.span, "not an effect") };
-    const idx = match (ops.iter().findIndex(([n, _]) => n == op)) { #Some(i) => i, #None => return self.fail(e.span, `no operation \`${op}\``) };
-    const r = if (unitTy(rt)) { self.unownedTemp(rt.clone()) } else { self.temp(rt.clone()) };
-    self.emit(#Perform(d, idx, vs, r));
     if (unitTy(rt)) { unitOp() } else { self.useLocal(r) }
   }
 
@@ -2722,6 +2756,36 @@ impl Lower {
       if (!unitTy(b)) { self.emit(#Let(av, #Use(v))); }
       const ab = self.popHome();
       out.push({ op: oi, params: ps, cont, body: ab, value: av });
+    }
+    // An operation without an arm passes on to the handlers around (§5.2): its arm performs it
+    // there, and resumes the body with what it gives.
+    const effArgs: Vec<GArg> = match (self.p.typed.get(self.fid)) {
+      #Some(t) => match (t.targs.get(e.id)) { #Some(a) => a.clone(), #None => Vec.new() },
+      #None => Vec.new(),
+    };
+    const eparams = self.p.defs[d].params.clone();
+    const contDef = match (self.p.knownDef("Cont")) { #Some(c) => c, #None => return self.fail(e.span, "no `Cont`") };
+    for (const [oi, [name, scheme]] of ops.iter().enumerate()) {
+      if (arms.iter().some((a) => a.op.name == name)) { continue; }
+      self.pushHome();
+      let ps: Vec<usize> = Vec.new();
+      let vs: Vec<Operand> = Vec.new();
+      let tys: Vec<Ty> = Vec.new();
+      for (const [pn, pt0] of scheme.params) {
+        const pt = self.concrete(substParams(pt0, eparams, effArgs));
+        const l = self.newLocal(pn.asStr(), pt.clone(), #Binding);
+        ps.push(l);
+        vs.push(#Move(localPlace(l)));
+        tys.push(pt);
+      }
+      const opRet = self.concrete(substParams(scheme.ret, eparams, effArgs));
+      const k = self.newLocal("k", #Named(contDef, [#Ty(opRet.clone()), #Ty(b.clone()), #Row(pure())]), #Binding);
+      const got = self.performOp(d, name.asStr(), vs, tys, opRet.clone(), e.span);
+      const av = self.newLocal("av", b.clone(), #Temp);
+      const arg: Option<Operand> = if (unitTy(opRet)) { #None } else { #Some(got) };
+      self.emit(#Resume(#Move(localPlace(k)), arg, av));
+      const ab = self.popHome();
+      out.push({ op: oi, params: ps, cont: #Some(k), body: ab, value: av });
     }
     self.ret = ret;
     self.loops = loops;

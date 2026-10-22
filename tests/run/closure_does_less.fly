@@ -1,0 +1,10 @@
+// expect: 2
+// A closure that performs less than the type it is passed as allows: here nothing, where `Log` may
+// be performed. It is called like any other (§5.1).
+import { println } from "std/io";
+effect Log { info(m: str): void; }
+function twice(f: () => u32 uses Log): u32 uses Log { f() + f() }
+export function main(): void uses Io {
+  const n = handle { twice(() => 1) } with Log { info(m) resumes k => k() };
+  println(`${n}`);
+}

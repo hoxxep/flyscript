@@ -953,6 +953,20 @@ impl Expand {
         for (const x of xs) { vs.push(self.eval(x)); }
         #List(vs)
       }
+      // A range is the list of its integers, for `comptime for`.
+      #Range { lo: #Some(lo), hi: #Some(hi) } => match ([self.eval(lo), self.eval(hi)]) {
+        [#Int(a), #Int(b)] => {
+          if (b - a > 65536) { return fail(e.span, "a range at compile time has at most 65536 integers"); }
+          let vs: Vec<CV> = Vec.new();
+          let i = a;
+          while (i < b) {
+            vs.push(#Int(i));
+            i += 1;
+          }
+          #List(vs)
+        }
+        _ => fail(e.span, "a range's bounds are integers"),
+      },
       #Field { target, name } => {
         const v = self.eval(target);
         self.fieldOf(v, name.name.asStr(), name.span)

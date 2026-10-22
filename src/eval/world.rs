@@ -12,6 +12,8 @@ pub struct Socket {
     pub written: Vec<(u16, String)>,
     /// What was written with `write`, shown when the socket closes.
     pub bytes: Vec<u8>,
+    /// The peer the program connected to, if it did.
+    pub peer: Option<String>,
 }
 
 #[derive(Debug)]
@@ -20,6 +22,8 @@ pub struct World {
     pub files: HashMap<String, String>,
     /// Requests waiting to be accepted, each becoming a socket.
     pub incoming: VecDeque<Vec<u8>>,
+    /// The hosts a program may connect to, `host:port`, each with what it sends back.
+    pub peers: HashMap<String, Vec<u8>>,
     pub sockets: Vec<Socket>,
     pub profiles: HashMap<String, String>,
     pub quotas: HashMap<String, bool>,
@@ -45,6 +49,7 @@ impl World {
             out: Vec::new(),
             files: HashMap::new(),
             incoming: VecDeque::new(),
+            peers: HashMap::new(),
             sockets: Vec::new(),
             profiles: HashMap::new(),
             quotas: HashMap::new(),

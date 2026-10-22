@@ -802,6 +802,16 @@ impl<'p> Expand<'p> {
             },
             ExprKind::Record { fields, .. } => self.eval_record(fields)?,
             ExprKind::List(xs) => CV::List(xs.iter().map(|x| self.eval(x)).collect::<R<_>>()?),
+            // A range is the list of its integers, for `comptime for`.
+            ExprKind::Range { lo: Some(lo), hi: Some(hi) } => match (self.eval(lo)?, self.eval(hi)?) {
+                (CV::Int(a), CV::Int(b)) => {
+                    if b - a > 1 << 16 {
+                        return fail(e.span, "a range at compile time has at most 65536 integers");
+                    }
+                    CV::List((a..b.max(a)).map(CV::Int).collect())
+                }
+                _ => return fail(e.span, "a range's bounds are integers"),
+            },
             ExprKind::Field { target, name } => {
                 let v = self.eval(target)?;
                 self.field_of(v, &name.name, name.span)?

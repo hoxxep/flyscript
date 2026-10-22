@@ -1,12 +1,13 @@
+// TCP (§8.3). Against the machine, sockets are its network's; against a simulated world (§6.4),
+// the world's: its incoming requests and its peers, and what a program writes is its output.
 export struct Socket;
 export struct Listener;
-export struct Db;
-
-export type Profile = { displayName: String };
-export type Quota = { allowed: bool };
 
 // A connection: what it reads is what the other end sent, `0` once it has sent all it will.
 impl Socket {
+  // Connects to `host`, a name or an address, on `port`: `#NotFound` if the name does not
+  // resolve, `#Refused` if nothing listens there.
+  export function connect(host: str, port: u16): Socket uses Io, Fail<IoErr>;
   export function read(self: mut Self, buf: mut u8[]): usize uses Io, Fail<IoErr>;
   // Writes all of `bytes`.
   export function write(self: mut Self, bytes: readonly u8[]): void uses Io, Fail<IoErr>;
@@ -21,10 +22,4 @@ impl Listener {
   export function bind(port: u16): Listener uses Io, Fail<IoErr>;
   export function port(self: readonly Self): u16;
   export function accept(self: mut Self): void uses Io, Fail<IoErr>, Yield<Socket>;
-}
-
-impl Db {
-  export function connect(): Db uses Io, Fail<IoErr>;
-  export function fetchProfile(self: readonly Self, user: str): Profile uses Io, Fail<IoErr>;
-  export function checkQuota(self: readonly Self, token: str): Quota uses Io, Fail<IoErr>;
 }

@@ -62,13 +62,14 @@ for f in "$@"; do
   fi
   # Its header describes the simulated world it runs against, as for `flyc run`'s tests.
   world=$(node -e '
-    const w = { incoming: [], profiles: {}, quotas: {}, faults: 0, seed: 0x5eed };
+    const w = { incoming: [], peers: {}, profiles: {}, quotas: {}, faults: 0, seed: 0x5eed };
     for (const line of require("fs").readFileSync(process.argv[1], "utf8").split("\n")) {
       if (!line.startsWith("//")) break;
       const m = /^\/\/\s*(\w+):\s?(.*)$/.exec(line);
       if (!m) continue;
       const [, key, value] = m, [k, v] = value.split("=");
-      if (key === "request") w.incoming.push(value.replace(/\\n/g, "\n"));
+      if (key === "request") w.incoming.push(value.replace(/\\r/g, "\r").replace(/\\n/g, "\n"));
+      if (key === "peer") { const at = value.indexOf("="); w.peers[value.slice(0, at)] = value.slice(at + 1).replace(/\\r/g, "\r").replace(/\\n/g, "\n"); }
       if (key === "profile") w.profiles[k] = v;
       if (key === "quota") w.quotas[k] = v === "true";
       if (key === "faults") w.faults = Number(value);

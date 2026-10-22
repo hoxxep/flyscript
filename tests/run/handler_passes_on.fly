@@ -1,0 +1,44 @@
+// expect: retried 3 times, slept 70 ms of the clock's 0
+// expect: 1 + 100 = 101
+// An operation a `handle` gives no arm passes on to the handlers around it (§5.2): a test answers
+// only `Io.sleep`, so a retry loop's backoff costs no time, while everything else `Io` does is the
+// world's. An inner handler of a user effect does the same.
+import { println } from "std/io";
+
+type Flaky = #Down;
+
+// Retries `op` up to `n` times, sleeping twice as long after each failure.
+function retry(n: u32, op: mut () => u32 uses Io, Fail<Flaky>): u32 uses Io, Fail<Flaky> {
+  let wait: u64 = 10;
+  let tries: u32 = 1;
+  while (true) {
+    try { return op(); } catch (e) {
+      if (tries == n) { throw e; }
+      Io.sleep(Duration.ms(wait));
+      wait *= 2;
+      tries += 1;
+    }
+  }
+}
+
+effect Config { base(): u32; bonus(): u32; }
+function total(): u32 uses Config { Config.base() + Config.bonus() }
+
+export function main(): void uses Io {
+  const start = Io.now();
+  let slept: u64 = 0;
+  let calls: u32 = 0;
+  const r = handle {
+    Fail.capture(() => retry(5, () => {
+      calls += 1;
+      if (calls < 4) { throw #Down; }
+      calls
+    }))
+  } with Io { sleep(d) resumes k => { slept += d.toMs(); k() } };
+  const n = match (r) { #Ok(n) => n - 1, #Err(_) => 0 };
+  println(`retried ${n} times, slept ${slept} ms of the clock's ${Io.now().since(start).toMs()}`);
+  const t = handle {
+    handle { total() } with Config { bonus() resumes k => k(100) }
+  } with Config { base() resumes k => k(1), bonus() resumes k => k(0) };
+  println(`1 + 100 = ${t}`);
+}

@@ -1947,6 +1947,21 @@ impl Checker {
     const row = self.p.elabEffects([#Effect(effect.clone())], scope);
     const eff = match (row.effs.first()) { #Some(x) => x.clone(), #None => return #Error };
     self.typed.handled.insert(e.id, eff.def);
+    // The effect's arguments, recorded under the `handle`: what the arms an operation is not given
+    // pass it on with (§5.2).
+    let effArgs: Vec<GArg> = Vec.new();
+    let ri: usize = 0;
+    let ti: usize = 0;
+    for (const g of self.p.defs[eff.def].params) {
+      if (g.kind == #Region) {
+        effArgs.push(#Region(match (eff.regions.get(ri)) { #Some(r) => r.clone(), #None => #Heap }));
+        ri += 1;
+      } else {
+        effArgs.push(#Ty(match (eff.args.get(ti)) { #Some(t) => t.clone(), #None => #Error }));
+        ti += 1;
+      }
+    }
+    self.pendingTargs.push({ id: e.id, span: e.span, args: effArgs, bounds: Vec.new() });
     const result = match (expected) { #Some(x) => x, #None => self.s.fresh() };
     // Resuming a continuation performs what the `handle` does: what its body does but does not
     // handle, and what its arms do (§5.3). That is known once they are checked.
@@ -1958,7 +1973,21 @@ impl Checker {
     self.handleParts(body, eff, arms, result, contRow);
     const inside = match (self.performed.pop()) { #Some(v) => v, #None => Vec.new() };
     const calls = match (self.pendingConts.pop()) { #Some([_, c]) => c, #None => Vec.new() };
-    const own = self.ownRow(inside, around);
+    let own = self.ownRow(inside, around);
+    // An operation without an arm passes on to the handlers around the `handle` (§5.2), so the
+    // `handle`, and resuming its continuation, performs the effect itself.
+    const ops = match (self.p.defs[eff.def].kind) { #Effect { ops } => ops.clone(), _ => return #Error };
+    if (const #Some([op, _]) = ops.iter().find(([n, _]) => !arms.iter().some((a) => a.op.name == n))) {
+      const aroundRow = self.s.expandEffs(around);
+      const open = match (aroundRow.tail) { #Closed => false, _ => true };
+      if (open || aroundRow.effs.iter().some((x) => x.def == eff.def)) {
+        self.perform({ effs: [eff.clone()], tail: #Closed }, e.span, e.id);
+        if (!own.effs.iter().some((x) => x.def == eff.def)) { own.effs.push(eff.clone()); }
+      } else {
+        const name = self.p.defs[eff.def].name.clone();
+        self.err(e.span, `this \`handle\` has no arm for \`${name}.${op}\`, which it passes on to the code around it, but that code does not perform \`${name}\`: give every operation an arm`.asStr());
+      }
+    }
     const expanded = self.s.expandEffs(contRow);
     const unbound = match (expanded.tail) { #Var(v) => v == contVar && expanded.effs.len() == 0, _ => false };
     if (unbound) {

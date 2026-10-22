@@ -9,6 +9,7 @@
 #ifndef __wasm__
 #include <errno.h>
 #include <fcntl.h>
+#include <netdb.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <signal.h>
@@ -166,6 +167,20 @@ void* fly_box(const void* value, size_t size) {
   return p;
 }
 
+// A `Mutex`'s state follows a header of its own: its lock, and the tasks waiting for it.
+#define MUTEX_HEADER 32
+
+void* fly_mutex_new(const void* value, size_t size) {
+  uint8_t* p = fly_alloc(MUTEX_HEADER + size);
+  memset(p, 0, MUTEX_HEADER);
+  memcpy(p + MUTEX_HEADER, value, size);
+  return p + MUTEX_HEADER;
+}
+
+void fly_mutex_free(void* state) {
+  if (state) free((uint8_t*)state - MUTEX_HEADER);
+}
+
 // ---- strings ----
 
 fly_str fly_str_lit(const char* bytes, size_t len) { return (fly_str){ (const uint8_t*)bytes, len }; }
@@ -294,10 +309,20 @@ fly_String fly_show_f64(double v) {
 fly_String fly_show_bool(bool v) { return fly_String_from(v ? fly_str_lit("true", 4) : fly_str_lit("false", 5)); }
 
 #ifndef FLY_FREESTANDING
-void fly_println(fly_str s) {
-  fwrite(s.ptr, 1, s.len, stdout);
-  fputc('\n', stdout);
+// A line written whole, under the stream's lock, so lines from tasks on other cores never mix.
+static void write_line(FILE* f, fly_str s) {
+#ifndef __wasm__
+  flockfile(f);
+#endif
+  fwrite(s.ptr, 1, s.len, f);
+  fputc('\n', f);
+#ifndef __wasm__
+  funlockfile(f);
+#endif
 }
+
+void fly_println(fly_str s) { write_line(stdout, s); }
+void fly_eprintln(fly_str s) { write_line(stderr, s); }
 #endif
 
 static bool space(uint8_t c) { return c == ' ' || c == '\t' || c == '\n' || c == '\r'; }
@@ -1007,6 +1032,13 @@ void fly_perform(uint32_t effect, int op, void* args, void* result) {
   switch_to(h->fiber->back);
 }
 
+bool fly_handled(uint32_t effect) {
+  for (fly_handler* h = fly_handlers; h; h = h->outer) {
+    if (h->effect == effect) return true;
+  }
+  return false;
+}
+
 void fly_handle_start(fly_handler* h, void (*entry)(void*), void* arg) {
   h->outer = fly_handlers;
   h->op = -1;
@@ -1137,6 +1169,9 @@ static struct {
   bool loaded;
   fly_str* incoming;
   size_t nincoming, accepted;
+  // The hosts a program may connect to, `host:port`, each with what it sends back.
+  world_pair* peers;
+  size_t npeers;
   world_pair* profiles;
   size_t nprofiles;
   world_pair* quotas;
@@ -1245,6 +1280,8 @@ static void world_load(void) {
           json_space();
         }
         json_at++;
+      } else if (fly_str_eq(k, fly_str_lit("peers", 5))) {
+        json_pairs(&world.peers, &world.npeers, false);
       } else if (fly_str_eq(k, fly_str_lit("profiles", 8))) {
         json_pairs(&world.profiles, &world.nprofiles, false);
       } else if (fly_str_eq(k, fly_str_lit("quotas", 6))) {
@@ -1313,6 +1350,7 @@ static int io_error(int e) {
     case ENOENT: return FLY_IO_NOT_FOUND;
     case EACCES: case EPERM: return FLY_IO_PERMISSION_DENIED;
     case EADDRINUSE: return FLY_IO_ADDR_IN_USE;
+    case ECONNREFUSED: return FLY_IO_REFUSED;
     default: return FLY_IO_RESET;
   }
 #endif
@@ -1409,6 +1447,76 @@ bool fly_accept(int listener, fly_socket* out) {
 #endif
 }
 
+int fly_connect(fly_str host, uint16_t port, fly_socket* out) {
+  world_load();
+  *out = (fly_socket){ 0 };
+  if (world.simulated) {
+    if (fly_fault()) return FLY_IO_TIMED_OUT;
+    char key[300];
+    int k = snprintf(key, sizeof key, "%.*s:%u", (int)host.len, (const char*)host.ptr, (unsigned)port);
+    for (size_t i = 0; i < world.npeers; i++) {
+      if (fly_str_eq(world.peers[i].key, (fly_str){ (const uint8_t*)key, (size_t)k })) {
+        out->input = world.peers[i].val;
+        out->peer = world.peers[i].key;
+        return FLY_IO_OK;
+      }
+    }
+    return FLY_IO_REFUSED;
+  }
+#ifdef __wasm__
+  return FLY_IO_PERMISSION_DENIED;
+#else
+  signal(SIGPIPE, SIG_IGN);
+  char name[256], service[8];
+  if (host.len >= sizeof name) return FLY_IO_NOT_FOUND;
+  memcpy(name, host.ptr, host.len);
+  name[host.len] = 0;
+  snprintf(service, sizeof service, "%u", (unsigned)port);
+  struct addrinfo hints = { 0 }, *found = NULL;
+  hints.ai_family = AF_UNSPEC;
+  hints.ai_socktype = SOCK_STREAM;
+  if (getaddrinfo(name, service, &hints, &found) != 0) return FLY_IO_NOT_FOUND;
+  int failure = FLY_IO_REFUSED;
+  // Each address the name has, in the order the resolver gives them, until one answers.
+  for (struct addrinfo* a = found; a; a = a->ai_next) {
+    int fd = socket(a->ai_family, a->ai_socktype, a->ai_protocol);
+    if (fd < 0) { failure = io_error(errno); continue; }
+    bool waits = nonblocking();
+    if (waits) {
+      fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK);
+#ifdef FLY_THREADS
+      io_register(fd);
+#endif
+    }
+    int r;
+    do { r = connect(fd, a->ai_addr, a->ai_addrlen); } while (r != 0 && errno == EINTR);
+#ifdef FLY_THREADS
+    if (r != 0 && errno == EINPROGRESS && waits) {
+      // Connected, or refused, once the descriptor may be written. A task cancelled meanwhile
+      // unwinds, with a socket of nothing.
+      if (!io_wait(fd, true)) { close(fd); freeaddrinfo(found); return FLY_IO_OK; }
+      int e = 0;
+      socklen_t n = sizeof e;
+      getsockopt(fd, SOL_SOCKET, SO_ERROR, &e, &n);
+      r = e ? -1 : 0;
+      errno = e;
+    }
+#endif
+    if (r == 0) {
+      int one = 1;
+      setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
+      freeaddrinfo(found);
+      out->fd = fd + 1;
+      return FLY_IO_OK;
+    }
+    failure = io_error(errno);
+    close(fd);
+  }
+  freeaddrinfo(found);
+  return failure;
+#endif
+}
+
 int fly_sock_read(fly_socket* s, fly_slice buf, uint64_t* n) {
   *n = 0;
   if (!s->fd) {
@@ -1488,7 +1596,8 @@ void fly_sock_close(fly_socket* s) {
       }
       size_t n = text.len;
       while (n > 0 && text.ptr[n - 1] == '\n') n--;
-      printf("-> %.*s\n", (int)n, (const char*)text.ptr);
+      if (s->peer.len) printf("-> %.*s: %.*s\n", (int)s->peer.len, (const char*)s->peer.ptr, (int)n, (const char*)text.ptr);
+      else printf("-> %.*s\n", (int)n, (const char*)text.ptr);
       fly_String_drop(&text);
     }
     fly_String_drop(&s->out);
@@ -1532,7 +1641,7 @@ static int mt_scope_open(void);
 static void mt_scope_close(int scope);
 static fly_chan mt_channel(void (*drop)(void*));
 static void mt_receiver_gone(fly_chan ch);
-static void mt_send(fly_chan ch, const void* v, size_t size);
+static bool mt_send(fly_chan ch, const void* v, size_t size);
 static bool mt_recv(fly_chan ch, void* out, size_t size);
 static void mt_sender_gone(fly_chan ch);
 static void mt_sender_clone(fly_chan ch);
@@ -1938,33 +2047,33 @@ fly_chan fly_channel(void (*drop)(void*)) {
   return (fly_chan){ id };
 }
 
-// A channel both of whose ends are gone is freed, and the messages in it dropped.
+// A channel both of whose ends are gone is freed.
 static void chan_maybe_free(int id) {
   chan_t* c = sched.chans[id];
   if (c->senders > 0 || !c->deaf) return;
-  if (c->drop) for (size_t i = c->head; i < c->len; i++) c->drop(c->items + i * c->size);
   free(c->items);
   free(c);
   sched.chans[id] = NULL;
 }
 
-void fly_send(fly_chan ch, const void* v, size_t size) {
+// Whether the message went to the channel: once its receiver is gone, it is dropped instead.
+bool fly_send(fly_chan ch, const void* v, size_t size) {
 #ifdef FLY_THREADS
-  if (threads) { mt_send(ch, v, size); return; }
+  if (threads) return mt_send(ch, v, size);
 #endif
   chan_t* c = sched.chans[ch.ch];
-  // No one will receive it.
-  if (c->deaf) {
-    if (c->drop) c->drop((void*)v);
-    fly_point();
-    return;
+  bool ok = !c->deaf;
+  if (ok) {
+    c->size = size;
+    c->items = realloc(c->items, (c->len + 1) * (size ? size : 1));
+    memcpy(c->items + c->len * size, v, size);
+    c->len++;
+    wake(WAIT_CHANNEL, ch.ch);
+  } else if (c->drop) {
+    c->drop((void*)v);
   }
-  c->size = size;
-  c->items = realloc(c->items, (c->len + 1) * (size ? size : 1));
-  memcpy(c->items + c->len * size, v, size);
-  c->len++;
-  wake(WAIT_CHANNEL, ch.ch);
   fly_point();
+  return ok;
 }
 
 // The next message, or false once the channel is closed and drained (or the task unwinds).
@@ -1998,7 +2107,16 @@ void fly_receiver_drop(fly_chan* ch) {
   if (threads) { if (ch->ch) mt_receiver_gone(*ch); ch->ch = 0; return; }
 #endif
   if (!ch->ch) return;
-  sched.chans[ch->ch]->deaf = true;
+  chan_t* c = sched.chans[ch->ch];
+  c->deaf = true;
+  // What is in it is dropped now: a message may hold a reply someone waits for. It is taken out
+  // first, as dropping one may reach this channel.
+  uint8_t* items = c->items;
+  size_t head = c->head, len = c->len, size = c->size;
+  c->items = NULL;
+  c->head = c->len = 0;
+  if (c->drop) for (size_t i = head; i < len; i++) c->drop(items + i * size);
+  free(items);
   chan_maybe_free(ch->ch);
   ch->ch = 0;
 }
@@ -2944,29 +3062,38 @@ static fly_chan mt_channel(void (*drop)(void*)) {
 
 // Frees a channel both of whose ends are gone, which nothing else can reach.
 static void mt_chan_free(int id, mt_chan* c) {
-  if (c->drop) for (size_t i = 0; i < c->len; i++) c->drop(c->items + ((c->head + i) % c->cap) * c->size);
   free(c->items);
   obj_clear(id);
   free(c);
 }
 
+// The receiving end is gone: what is in the channel is taken out and dropped, outside its lock, as
+// dropping a message may reach the channel again. Whichever end goes last frees the channel,
+// decided under the lock: with senders left, the last of them will.
 static void mt_receiver_gone(fly_chan ch) {
   mt_chan* c = obj_get(ch.ch);
   spin_lock(&c->q.lock);
   c->deaf = true;
+  uint8_t* items = c->items;
+  size_t head = c->head, len = c->len, cap = c->cap, size = c->size;
+  c->items = NULL;
+  c->head = c->len = c->cap = 0;
+  void (*drop)(void*) = c->drop;
   bool gone = c->senders == 0;
   spin_unlock(&c->q.lock);
   if (gone) mt_chan_free(ch.ch, c);
+  if (drop) for (size_t i = 0; i < len; i++) drop(items + ((head + i) % cap) * size);
+  free(items);
 }
 
-static void mt_send(fly_chan ch, const void* v, size_t size) {
+static bool mt_send(fly_chan ch, const void* v, size_t size) {
   mt_chan* c = obj_get(ch.ch);
   spin_lock(&c->q.lock);
   if (c->deaf) {
     spin_unlock(&c->q.lock);
     if (c->drop) c->drop((void*)v);
     mt_point();
-    return;
+    return false;
   }
   if (c->len == c->cap) {
     size_t cap = c->cap ? c->cap * 2 : 8;
@@ -2983,6 +3110,7 @@ static void mt_send(fly_chan ch, const void* v, size_t size) {
   wake_one(&c->q);
   spin_unlock(&c->q.lock);
   mt_point();
+  return true;
 }
 
 static bool mt_recv(fly_chan ch, void* out, size_t size) {
@@ -3025,25 +3153,57 @@ static void mt_sender_clone(fly_chan ch) {
   spin_unlock(&c->q.lock);
 }
 
-// A `Mutex`'s lock is one of a few, chosen by its state's address: a body performs nothing, so it
-// takes no other lock, and two locks sharing one only take turns.
-static spin_t stripes[64];
-static FLY_LOCAL spin_t* held;
+// A `Mutex`'s lock, in the header before its state. Its body performs nothing, so it is held
+// briefly and never across a scheduling point: a task that finds it held spins a little, then
+// waits in its queue, giving its core to others, and is woken in turn.
+typedef struct { waitq q; bool held; } mt_mutex;
+_Static_assert(sizeof(mt_mutex) <= MUTEX_HEADER, "a mutex's header holds its lock");
+
+static mt_mutex* mutex_of(const void* state) { return (mt_mutex*)((uint8_t*)state - MUTEX_HEADER); }
+
+// The lock this thread holds, if any: a body neither suspends nor takes another, so it is the
+// thread's until the body ends, and a panic in the body gives it back.
+static FLY_LOCAL const void* held_state;
+
+static bool mutex_try(mt_mutex* m) {
+  spin_lock(&m->q.lock);
+  bool free_ = !__atomic_load_n(&m->held, __ATOMIC_RELAXED);
+  if (free_) __atomic_store_n(&m->held, true, __ATOMIC_RELAXED);
+  spin_unlock(&m->q.lock);
+  return free_;
+}
 
 void fly_lock(const void* state) {
   if (!threads) return;
-  held = &stripes[((uintptr_t)state >> 4) & 63];
-  spin_lock(held);
+  mt_mutex* m = mutex_of(state);
+  for (int i = 0; i < 64; i++) {
+    if (!__atomic_load_n(&m->held, __ATOMIC_RELAXED) && mutex_try(m)) {
+      held_state = state;
+      return;
+    }
+    relax();
+  }
+  spin_lock(&m->q.lock);
+  while (__atomic_load_n(&m->held, __ATOMIC_RELAXED)) {
+    wait_in(&m->q, false);
+    spin_lock(&m->q.lock);
+  }
+  __atomic_store_n(&m->held, true, __ATOMIC_RELAXED);
+  spin_unlock(&m->q.lock);
+  held_state = state;
 }
 
 void fly_unlock(const void* state) {
-  (void)state;
-  if (!held) return;
-  spin_unlock(held);
-  held = NULL;
+  if (!threads || !state) return;
+  held_state = NULL;
+  mt_mutex* m = mutex_of(state);
+  spin_lock(&m->q.lock);
+  __atomic_store_n(&m->held, false, __ATOMIC_RELAXED);
+  wake_one(&m->q);
+  spin_unlock(&m->q.lock);
 }
 
-static void unlock_held(void) { fly_unlock(NULL); }
+static void unlock_held(void) { if (held_state) fly_unlock(held_state); }
 
 static void* mt_task_result(mt_task* t) { return t->result; }
 static void* mt_task_closure(mt_task* t) { return t->closure; }

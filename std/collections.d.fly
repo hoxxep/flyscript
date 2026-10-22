@@ -8,7 +8,8 @@ impl<K extends Hash & Eq, V> HashMap<K, V> {
   // Lookups accept anything the key type lends, so a HashMap<String, V> is searched with a str.
   export function get<Q extends LentBy<K>>(self: readonly Self, key: readonly Q): Option<readonly V> from self;
   export function getMut<Q extends LentBy<K>>(self: mut Self, key: readonly Q): Option<mut V> from self;
-  export function sortedByValue(self: Self): Vec<[K, V]>;
+  // Every entry, moved out of the map, in no order.
+  export function intoEntries(self: Self): Vec<[K, V]>;
   export function len(self: readonly Self): usize;
   export function has<Q extends LentBy<K>>(self: readonly Self, key: readonly Q): bool;
   // The entry's value, if there was one.
@@ -17,6 +18,14 @@ impl<K extends Hash & Eq, V> HashMap<K, V> {
   export function values<row E>(self: readonly Self): Gen<readonly V, E> from self;
   export function valuesMut<row E>(self: mut Self): Gen<mut V, E> from self;
   export function entries<row E>(self: readonly Self): Gen<[readonly K, readonly V], E> from self;
+}
+impl<K extends Hash & Eq & Ord, V extends Ord> HashMap<K, V> {
+  // Every entry, largest value first, and equal values by key, smallest first: a tally's report.
+  export function sortedByValue(self: Self): Vec<[K, V]> {
+    let out = self.intoEntries();
+    out.sortBy((a, b) => match (b[1].cmp(a[1])) { #Equal => a[0].cmp(b[0]), o => o });
+    out
+  }
 }
 impl<K extends Hash & Eq & Clone, V extends Clone> Clone for HashMap<K, V> {
   function clone(self: readonly Self): HashMap<K, V> {

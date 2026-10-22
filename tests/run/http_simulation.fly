@@ -12,7 +12,8 @@
 // expect: -> 200 Ada
 // expect: -> 502 error
 // expect: -> 502 error
-import { Listener, Db } from "std/net";
+import { Listener } from "std/net";
+import { Db } from "std/world";
 import { println } from "std/io";
 import { serve } from "../../examples/server";
 

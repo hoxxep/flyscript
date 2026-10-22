@@ -20,6 +20,7 @@ const STD: &[(&str, &str)] = &[
     ("std/layout.fly", include_str!("../../std/layout.fly")),
     ("std/sync.d.fly", include_str!("../../std/sync.d.fly")),
     ("std/json.fly", include_str!("../../std/json.fly")),
+    ("std/world.d.fly", include_str!("../../std/world.d.fly")),
 ];
 
 pub struct Module {

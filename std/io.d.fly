@@ -12,4 +12,7 @@ impl File {
 // Writes `content` to the file at `path`, replacing what was there.
 export function writeFile(path: str, content: str): void uses Io, Fail<IoErr>;
 
+// A line to standard output; on threads, each line is written whole.
 export function println(s: str): void uses Io;
+// A line to standard error, which is not buffered.
+export function eprintln(s: str): void uses Io;

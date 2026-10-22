@@ -7,7 +7,8 @@
 Flyscript compiles ahead of time to native code and WebAssembly. It has no garbage collector, no lifetime annotations and no `async`/`await`, and it is memory-safe and free of data races by construction. If you can read TypeScript, you can read Flyscript today.
 
 ```ts
-import { Listener, Db } from "std/net";
+import { Listener } from "std/net";
+import { Db } from "std/world";
 
 // A server that cannot be taken down by a bad connection — and the compiler proves it.
 export function serve(listener: mut Listener, db: readonly Db): void uses Io, Fail<IoErr> {
@@ -64,7 +65,8 @@ test("degrades gracefully under packet loss", () => {
 
 Flyscript is an early-stage language under active design, developed in the open.
 
-- **Language specification:** version 0.62, with every earlier version and the reasoning behind each change in [docs/history](docs/history/).
+- **Language specification:** version 0.63, with every earlier version and the reasoning behind each change in [docs/history](docs/history/).
+- **Library specification:** [docs/std.md](docs/std.md), every function the standard library exports: what it performs, when it fails, what it costs.
 - **Compiler (`flyc`):** a complete prototype front end and evaluator. `flyc check` type-, effect- and ownership-checks programs, rejecting use after move, conflicting borrows, borrows that escape through closures and generators, undeclared effects and non-exhaustive matches with precise errors. `flyc run` executes them, with effect handlers, generators and structured concurrency, against a deterministic simulated world. `comptime` runs too: templates specialize per type, and the standard library's JSON codec is derived over reflection in plain Flyscript, with no compiler support.
 
 - **Flyscript in Flyscript:** a compiler written in Flyscript, in [selfhost/](selfhost/), parses, elaborates and checks the whole language — types, effects and ownership — reaching the same verdict as `flyc` on every program in the test suite, `comptime` and all. Its back end is typed: it specializes every generic function for the types it is used at, so method calls are direct, integers keep their widths, derived interfaces are compiled from their `comptime` definitions, effect handlers, generators and tasks run as JavaScript generators, and destructors run where the ownership checker says values die. Every program in the test suite runs compiled exactly as it runs in `flyc`, down to how its tasks interleave. It compiles itself: built by `flyc`, then run on its own output, it reproduces itself byte for byte, in about three seconds.

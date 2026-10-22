@@ -185,6 +185,11 @@ pub fn drive(it: &mut Interp, co: u64, mut cmd: Cmd) -> R {
     }
 }
 
+/// Whether coroutine `co`'s `handle` has an arm for operation `name`: one it has not passes on.
+pub fn has_arm(it: &Interp, co: u64, name: &str) -> bool {
+    it.cos.drivers.lock().expect("cos").get(&co).is_some_and(|c| c.arms.iter().any(|a| a.op.name == name))
+}
+
 /// Runs the arm for operation `name` where the coroutine was resumed, lexically in its `handle`.
 fn arm(it: &mut Interp, co: u64, name: &str, args: Vec<Value>) -> R {
     let (arms, env, lex) = {

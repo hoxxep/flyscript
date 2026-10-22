@@ -1,6 +1,6 @@
 # Flyscript
 
-**Language specification, version 0.62**
+**Language specification, version 0.63**
 
 *Affine values, one row calculus, handlers for everything, and `comptime`: Church on the outside, Turing on the inside.*
 
@@ -20,10 +20,19 @@ The whole language rests on five laws. Every rule in this document is a conseque
 
 ### 0.1 Recent changes
 
-0.62 makes cleanup run to its end under cancellation (§5.6, §6.1). 0.61 runs programs compiled to WebAssembly in web pages (§8.3), with a web framework in library code built on `Ui`, an effect, and on real sockets. 0.60 gave native programs real sockets (§8.3): `std/net` listens and connects on the machine's network when no world is simulated, and `IoErr` says when an address is in use. 0.59 made handlers whose arms each end by resuming cost a call per operation (§5.2), the shape dependency injection and rendering take. 0.58 ran native tasks on every core (§8.3), and `par` and `parReduce` on all of them through `join`, which runs two pure closures at once (§6.5). 0.57 added LLVM as a way to native code (§8.3): a program's functions as LLVM IR, with debug information that maps them to their source, optimized together with the runtime, for any target LLVM has. 0.56 built the foreign interface (§8.2): raw pointers as the prelude's `Ptr<T>`, reaching through one an effect, `Unsafe`, that `unsafe { … }` handles, and functions of C's and functions C calls; and one core IR under the self-hosted compiler's back ends. The table lists the language's changes since 0.54; earlier ones are in [docs/history](history/).
+0.63 specifies the standard library as carefully as the core, in [std.md](std.md), and fills what it lacked: `Socket.connect`, `send` that says whether anyone listens, a `Mutex` whose waiters give up their cores, and JSON for arrays. 0.62 makes cleanup run to its end under cancellation (§5.6, §6.1). 0.61 runs programs compiled to WebAssembly in web pages (§8.3), with a web framework in library code built on `Ui`, an effect, and on real sockets. 0.60 gave native programs real sockets (§8.3): `std/net` listens and connects on the machine's network when no world is simulated, and `IoErr` says when an address is in use. 0.59 made handlers whose arms each end by resuming cost a call per operation (§5.2), the shape dependency injection and rendering take. 0.58 ran native tasks on every core (§8.3), and `par` and `parReduce` on all of them through `join`, which runs two pure closures at once (§6.5). 0.57 added LLVM as a way to native code (§8.3): a program's functions as LLVM IR, with debug information that maps them to their source, optimized together with the runtime, for any target LLVM has. 0.56 built the foreign interface (§8.2): raw pointers as the prelude's `Ptr<T>`, reaching through one an effect, `Unsafe`, that `unsafe { … }` handles, and functions of C's and functions C calls; and one core IR under the self-hosted compiler's back ends. The table lists the language's changes since 0.54; earlier ones are in [docs/history](history/).
 
 | Change | Why |
 | :--- | :--- |
+| The standard library has a specification of its own, [std.md](std.md), covering every name it exports; §3.1's list of methods moved there (§3.1) | the library was specified by its declaration files and by examples, so what a function did at an edge — a replaced map entry, a dropped receiver, a number too large — was whatever each implementation did |
+| `Sender.send` gives whether the message went to the channel: `false` once the receiver is dropped (§6.2) | a producer had no way to learn that no one listened, and went on producing |
+| A dropped receiver drops what is in its channel then (§6.2) | a message holding a reply kept its requester waiting until the channel's senders were gone too |
+| `IoErr` has `#Refused`, and `std/net` has `Socket.connect` (§5.1) | programs could listen but not connect |
+| A `Mutex`'s waiters wait without a core, in turn, and each `Mutex` has a lock of its own (§6.2) | waiters spun, so a long body took every core waiting for it |
+| `comptime for` iterates a range (§7.2) | a derivation over an array's length had no list to iterate |
+| A panic stops its task without running the task's cleanup; the tasks it cancels still run theirs (§5.7) | native code stopped a panicking task where it was, while the reference unwound it, running its `defer`s: a panic ends the program anyway, and unwinding natively would cost a check after nearly every call |
+| An operation a `handle` gives no arm passes on to the handlers around it, and a program's own handler of `Io` is honored by every back end (§5.2, §6.4) | a handler that named some operations panicked when the body performed another, and compiled code sent `Io` to the runtime even under a test's handler |
+| `Atomic*` types are not part of the library (§6.2) | the specification listed them, and the library never had them; a `Mutex` serves for shared counters, and `Ptr`'s atomics for code below the library |
 | Cleanup runs to its end: a cancellation that reaches a task in a `defer` takes effect at its first scheduling point after it (§5.6, §6.1) | a `defer` that performed `Io` as a cancelled task unwound — closing a connection, sending a last message — was itself cancelled at its first operation, so cleanup that needed `Io` could not be relied on |
 | Dropping a channel's receiver drops what is sent from then on; a channel is freed with what is in it once both its ends are gone (§6.2) | channels, and the messages no one received, were never freed |
 | `IoErr` has `#AddrInUse` (§5.1) | a server binding a port another program holds could only report it as some other failure |
@@ -202,7 +211,7 @@ Four rules settle the grammar's ambiguities, the first three borrowed from TypeS
 - `T[N]` is an inline array (`Copy` if `T` is); `[a, b, c]` and `repeat(v)` build one, with `N` from context. `T[]` is a borrowed slice, always `readonly T[]` or `mut T[]`.
 - `Vec<T>`, `Box<T>`, `HashMap<K, V>` and the other owning containers are library types.
 
-**Methods.** Arrays, slices and `Vec`s share their methods, which are defined on slices and reached through lending (§4.1): `len`, `iter`, `iterMut`, `splitAt`, `last`, `includes` and `indexOf` (by `Eq`), `sort` (by `Ord`), `sortBy(cmp)` (stable, `cmp` returning `#Less`, `#Equal` or `#Greater`), `reverse`, `swap(i, j)`, and `join(sep)` (each element shown, strings as they are). A `Vec` also has `push`, `pop`, `insert(i, v)`, `remove(i)`, `retain(keep)` — TypeScript's `xs = xs.filter(keep)`, in place — and `drain`, which takes the elements out in order. `str` has TypeScript's string methods — `slice`, `split`, `trim`, `trimStart`, `trimEnd`, `includes`, `startsWith`, `endsWith`, `indexOf`, `lastIndexOf`, `toUpperCase`, `toLowerCase`, `replaceAll`, `repeat`, and `padStart` and `padEnd`, which pad with spaces to a width in characters — plus `toString`, `asBytes`, and the generators `bytes()`, `lines()` and `splitWhitespace()`; a `String` lends them all, and adds `push`, `clone` and `asStr()`, which lends it as a `str` explicitly where nothing expects one. A `HashSet<T>` (from `std/collections`) has `insert`, `has`, `remove`, `len` and `iter()`. `replace(mut place, v)` gives back what a place held and leaves `v` there, and `swap(mut a, mut b)` exchanges two places: how a pass takes a buffer out of `mut self`. A `HashMap<K, V>` is `Clone` when `K` and `V` are, and has `insert`, `get`, `getMut`, `has`, `remove` (each looked up by anything `K` lends), `len`, `sortedByValue()` (the entries, largest value first), and the generators `keys()`, `values()`, `valuesMut()` and `entries()`.
+**Methods.** The library's types and their methods are specified in [std.md](std.md), under TypeScript's names where TypeScript has the method. Arrays, slices and `Vec`s share theirs, which are defined on slices and reached through lending (§4.1); a `String` lends every method of `str`.
 
 A tuple `[A, B]` is built with a list literal, taken apart with a pattern (`const [a, b] = t`, which takes an array of the same length apart too), and indexed by a constant, as in TypeScript: `t[0]` is a place of its own, like a field. Where a `Vec<T>` is wanted, a list literal builds it, as an array literal does in TypeScript: `const xs: Vec<String> = [a, b]`.
 
@@ -467,7 +476,7 @@ effect Io {
   sleep(d: Duration): void;
   park(on: WaitKey): void;                       // the primitive under locks, channels, atomics and join
 }
-type IoErr = #Reset | #TimedOut | #BrokenPipe | #NotFound | #PermissionDenied | #AddrInUse;
+type IoErr = #Reset | #TimedOut | #BrokenPipe | #NotFound | #PermissionDenied | #AddrInUse | #Refused;
 ```
 
 `Fd`, `Instant`, `Duration` and `WaitKey` are prelude structs whose fields are private. A `Duration` is built with `Duration.ms(n)`, `Duration.secs(n)` or `Duration.nanos(n)` and compared with `<`; an `Instant` means something only against another, through `later.since(earlier)`. Under the simulator (§6.4) time passes exactly as tasks sleep, so a test of a timeout runs instantly and the same way every time.
@@ -489,7 +498,7 @@ function map<T, U, row E>(xs: readonly T[], f: (x: readonly T) => U uses ...E): 
 - **Abortive** — `op(x) => armBody`. The body's frames are unwound first (running its `defer`s and destructors and releasing its borrows), then `armBody` runs and its value becomes the value of the `handle` expression. Because the body's borrows are released, the arm may use anything the body had borrowed.
 - **Resumptive** — `op(x) resumes k => armBody`. The body stays suspended, holding its borrows, and `k` is the rest of the body, a `Cont<A, B, E>`, where `A` is the operation's result type, `B` the `handle` expression's type and `E` the `handle` expression's own row (below), which resuming may perform. Calling `k(a)` resumes the body and performs `E`.
 
-The `handle` expression evaluates to the body's value if the body completes without performing `Eff`, and otherwise to the value of the arm that handled the operation. A resumptive arm usually produces that value by resuming: `k(a)` itself evaluates to the `handle` expression's eventual value. Injecting a dependency is handling its effect:
+An operation the `handle` gives no arm passes on to the handlers around it, as if its arm were `op(x) resumes k => k(Eff.op(x))`: so a handler overrides only what it names, and such a `handle` performs `Eff` itself, which the code around it must allow. The `handle` expression evaluates to the body's value if the body completes without performing `Eff`, and otherwise to the value of the arm that handled the operation. A resumptive arm usually produces that value by resuming: `k(a)` itself evaluates to the `handle` expression's eventual value. Injecting a dependency is handling its effect:
 
 ```ts
 effect Clock { now(): u64; }
@@ -607,7 +616,7 @@ A `Gen` owns its continuation, so dropping it runs the generator's cleanup; if t
 
 ### 5.6 Cleanup: `defer` and `Drop`
 
-`defer e;` (or `defer { … };`) schedules `e` to run when the enclosing block exits. Because it runs while the block is being left — perhaps by a failure — a `defer` cannot fail, yield, `return`, or `break` or `continue` a loop around it, though it may perform any other effect its function may, declared or inferred; and `Drop.drop(self: mut Self): void` has no effects. `defer`s and the destructors of the block's owned locals share one stack and run in reverse order of the points at which they were registered, whether the block exits normally, by `return`, `break`, `throw`, an abortive handler, a dropped continuation, or cancellation.
+`defer e;` (or `defer { … };`) schedules `e` to run when the enclosing block exits. Because it runs while the block is being left — perhaps by a failure — a `defer` cannot fail, yield, `return`, or `break` or `continue` a loop around it, though it may perform any other effect its function may, declared or inferred; and `Drop.drop(self: mut Self): void` has no effects. `defer`s and the destructors of the block's owned locals share one stack and run in reverse order of the points at which they were registered, whether the block exits normally, by `return`, `break`, `throw`, an abortive handler, a dropped continuation, or cancellation — every way but a panic (§5.7).
 
 **Cleanup runs to its end.** A cancellation (§6.1) that reaches a task while it runs a `defer` — whether the block is being left normally or the task is already unwinding — waits: the `defer` runs to its end, performing what it performs, and the cancellation takes effect at the task's first scheduling point after it. So a `defer` may rely on its `Io`: a connection closed with a last message, a lock released on a server, a temporary file removed. The price is the one every language with destructors pays: a `defer` that waits for something that never comes holds its task, and so its scope, forever. Cleanup should be brief and bounded, and one that waits on another party gives the wait a time limit.
 
@@ -619,7 +628,7 @@ Because a `defer` runs at the block's exit, it holds the borrows it needs from t
 
 ### 5.7 Panics
 
-Integer division by zero, integer overflow (in every build; `wrappingAdd`, `wrappingSub` and `wrappingMul` wrap instead), an out-of-bounds index, heap exhaustion and `panic(message)` *panic*; so does `unwrap()` of a `#None`. A panic is not an effect and cannot be caught by a handler: it unwinds the current task, running cleanup, and fails the task's scope (§6.1); an unscoped panic terminates the process. Panics are for bugs; anticipated failure is `Fail`.
+Integer division by zero, integer overflow (in every build; `wrappingAdd`, `wrappingSub` and `wrappingMul` wrap instead), an out-of-bounds index, heap exhaustion and `panic(message)` *panic*; so does `unwrap()` of a `#None`. A panic is not an effect and cannot be caught by a handler. It stops the current task where it is: a bug leaves no state worth cleaning up from, so the task's `defer`s do not run and what it owns is not dropped — except that a `Mutex` its body held is given back. It then fails the task's scope (§6.1), whose other tasks are cancelled and unwind, running their cleanup as cancelled tasks do; once they have, the panic continues in the task that opened the scope, and so on outward, until it ends the program. Panics are for bugs; anticipated failure is `Fail`.
 
 ---
 
@@ -663,9 +672,9 @@ Io.scope((s) => {
 
 ### 6.2 Shared state
 
-`Mutex<T>`, `Atomic*` and channels — a `Sender<T>` and a `Receiver<T>` — are library types whose operations perform `Io` (through `Io.park`). Every synchronization is therefore visible in the type, pure code cannot observe shared mutable state, and the deterministic simulator (§6.4) controls every interleaving.
+`Mutex<T>` and channels — a `Sender<T>` and a `Receiver<T>` — are library types whose operations perform `Io` (through `Io.park`). Every synchronization is therefore visible in the type, pure code cannot observe shared mutable state, and the deterministic simulator (§6.4) controls every interleaving.
 
-`channel<T>()` gives a `Sender<T>` and a `Receiver<T>`. A `Sender` is `Clone`, one per producer. A channel ends when its last sender is gone — dropped, or closed with `tx.close()`, which consumes it — and its receivers then drain what was sent and see the end: `recv()` gives `#None`, and `for (const m of rx)` stops. A task that is to end a channel therefore owns its sender: a sender cloned inside the scope is moved into its task and dropped when the task ends. Once the receiver is dropped, what is sent is dropped instead of kept; once both ends are gone, the channel is freed with the messages still in it.
+`channel<T>()` gives a `Sender<T>` and a `Receiver<T>`. A `Sender` is `Clone`, one per producer. A channel ends when its last sender is gone — dropped, or closed with `tx.close()`, which consumes it — and its receivers then drain what was sent and see the end: `recv()` gives `#None`, and `for (const m of rx)` stops. A task that is to end a channel therefore owns its sender: a sender cloned inside the scope is moved into its task and dropped when the task ends. `tx.send(v)` gives `true`, or, once the receiver has been dropped, drops `v` and gives `false`: a producer may stop when no one listens. Dropping the receiver drops what is in the channel then, so a message holding a reply ends its requester's wait at once; the channel is freed when both its ends are gone.
 
 `Mutex<T>` (from `std/sync`) holds state that tasks share. Declared outside a scope, it is simply borrowed by the scope's tasks: `const totals = Mutex.new(HashMap.new()); Io.scope((s) => { s.spawn(() => totals.lock((m) => …)); … })`. An `Arc` (in the prelude) is for sharing beyond a scope's lexical reach — with tasks a helper starts, which may not borrow (§6.1) — and is cloned for each. The state is reached only inside `lock`, which lends it `mut` to a body that performs no effects and gives back a `Send` value:
 
@@ -677,7 +686,7 @@ impl<T extends Send> Mutex<T> {
 shared.lock((m) => { m.insert(url, n); });
 ```
 
-Because the body cannot perform effects, no lock is ever held across a scheduling point, so a mutex cannot be part of a deadlock cycle through I/O, and because what it returns is `Send`, nothing borrowed from the state outlives the lock.
+Because the body cannot perform effects, no lock is ever held across a scheduling point, so a mutex cannot be part of a deadlock cycle through I/O, and because what it returns is `Send`, nothing borrowed from the state outlives the lock. Each `Mutex` has a lock of its own, and a task that finds it held waits without its core, woken in turn.
 
 ```ts
 const [tx, rx] = channel<Hit>();
@@ -701,17 +710,29 @@ When an `Io.read` or `Io.write` suspends, the buffer stays borrowed until the op
 
 ### 6.4 Deterministic simulation
 
-`Io` is an ordinary effect, so a test can handle it. The standard `SimIo` handler runs every task on one thread with a seeded scheduler, a virtual clock and fault injection; with the same seed, a run is reproducible exactly. A task that sleeps waits until the clock reaches its wake time; the clock moves only when no task can run, jumping to the earliest wake time and waking every task due then, in the order they began to wait. So tasks sleeping concurrently overlap, as they would in real time, and a test of a timeout runs instantly.
+`Io` is an ordinary effect, so a test can handle it, at two scales.
+
+**In the program.** A handler of `Io` answers the operations it has arms for and passes the rest on (§5.2). A test of a retry loop answers `sleep`, so the backoff costs no time and is counted; a test of a rate limiter answers `now` with a clock of its own:
 
 ```ts
-test("handler degrades under packet loss", () => {
-  SimIo.run({ seed: 0x5eed, loss: 0.25 }, () => {
-    let net = SimIo.pair();
-    serveOne(net.server, net.db);
-    assert(net.client.status() == 200 || net.client.status() == 502);
-  });
-});
+let slept: u64 = 0;
+const r = handle { Fail.capture(() => retry(5, flaky)) } with Io {
+  sleep(d) resumes k => { slept += d.toMs(); k() },
+};
 ```
+
+**Around the program.** A whole program — its tasks, files and sockets — runs against a simulated world when it is given one, which the runtime's root handler of `Io` then is: every task runs on one thread with a seeded scheduler and a virtual clock, files, incoming connections and the peers a program may connect to are the world's, and faults are injected from the seed. With the same seed a run is reproducible exactly, in every implementation. A task that sleeps waits until the clock reaches its wake time; the clock moves only when no task can run, jumping to the earliest wake time and waking every task due then, in the order they began to wait. So tasks sleeping concurrently overlap, as they would in real time, and a test of a timeout runs instantly. A world is described in JSON, given to a program as `FLY_WORLD`, and to a test as header lines:
+
+```ts
+// request: GET /profile?user=ada HTTP/1.1\r\nHost: example.com\r\n\r\n
+// peer: billing.internal:80=HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok
+// profile: ada=Ada Lovelace
+// faults: 25
+// seed: 7
+// expect: -> 200 Ada Lovelace
+```
+
+Without a world, a program's `Io` is the machine's (§8.3).
 
 ### 6.5 Data parallelism
 
@@ -800,7 +821,7 @@ A struct's private fields are visible to reflection only from its own module, or
 **Generating code.** `comptime` before a construct runs it in the compiler and leaves code behind:
 
 - `comptime if (c) { … } else { … }` and `comptime match (e) { … }` keep the branch the value selects. The others are never checked, so they may mention fields the type lacks.
-- `comptime for (const x of xs) { … }` repeats its body once per element of a `comptime` list, with `x` a constant in each copy.
+- `comptime for (const x of xs) { … }` repeats its body once per element of a `comptime` list, or integer of a range (`0..n`, `n` known at compile time), with `x` a constant in each copy.
 - `comptime e`, for any other expression, computes `e` and leaves its value: `comptime fields.len()`, `comptime panic("…")`, `comptime assert(…)`. `comptime` is a prefix operator, binding like TypeScript's `await`: `n > comptime (1 << bits) - 1`.
 
 The same `comptime for`, `comptime if` and `comptime match` generate the items of a sequence: the fields of a record type, the entries of a record literal, the arms of a `match`, the items of a list literal (one per iteration). A `comptime` value used at run time becomes a literal, and a `Type` value can stand wherever a type does: `Option<f.type>`, `f.type.fromJson(p)`.
@@ -967,6 +988,8 @@ impl Socket {
   export function write(self: mut Self, bytes: readonly u8[]): void uses Io, Fail<IoErr>;
   export function writeStatus(self: mut Self, code: u16, body: str): void uses Io, Fail<IoErr>;
 }
+
+// std/world: a simulated world's database (§6.4)
 export struct Db { … }
 impl Db {
   export function fetchProfile(self: readonly Self, user: str): Profile uses Io, Fail<IoErr>;
@@ -983,7 +1006,8 @@ function copyUtf8<region R>(bytes: readonly u8[]): Ref<R, str> uses Region<R>, F
 ### 10.2 An HTTP request handler
 
 ```ts
-import { Socket, Db } from "std/net";
+import { Socket } from "std/net";
+import { Db } from "std/world";
 
 struct Request<region R> { user: Ref<str>; token: Ref<str>; }
 
@@ -1265,7 +1289,8 @@ export function kv(inbox: readonly Receiver<Command>): void uses Io {
 ### A.7 A server
 
 ```ts
-import { Listener, Db } from "std/net";
+import { Listener } from "std/net";
+import { Db } from "std/world";
 import { serveOne } from "./http_handler";
 
 export function serve(listener: mut Listener, db: readonly Db): void uses Io, Fail<IoErr> {

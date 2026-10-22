@@ -1,0 +1,42 @@
+// expect: the producer stopped once no one listened
+// expect: the inner channel ended with 0 messages
+// expect: a send after the receiver went: false
+// Dropping a channel's receiver (§6.2): a producer learns that no one listens, as `send` gives
+// `false`, and what was waiting in the channel is dropped then and there, so a sender inside a
+// message lets its own channel end.
+import { println } from "std/io";
+import { channel, Sender } from "std/sync";
+
+function discard<T>(v: T): void {}
+
+export function main(): void uses Io {
+  const sent = Io.scope((s) => {
+    const [tx, rx] = channel<u32>();
+    const producer = s.fork(() => {
+      let n: u32 = 0;
+      while (tx.send(n)) { n += 1; }
+      n
+    });
+    s.spawn(() => {
+      const r = rx;
+      let got = 0;
+      for (const _ of r) {
+        got += 1;
+        if (got == 3) { break; }
+      }
+    });
+    producer.join()
+  });
+  if (sent >= 3) { println("the producer stopped once no one listened"); }
+
+  const [itx, irx] = channel<u32>();
+  const [otx, orx] = channel<Sender<u32>>();
+  otx.send(itx);
+  discard(orx);
+  let k = 0;
+  for (const _ of irx) { k += 1; }
+  println(`the inner channel ended with ${k} messages`);
+  const [stx, srx] = channel<u32>();
+  discard(srx);
+  println(`a send after the receiver went: ${stx.send(1)}`);
+}

@@ -7,7 +7,7 @@ use super::generators::{self as gens_mod, GenKind};
 use super::interp::{Ctl, Handler, Interp, R, panic};
 use super::value::*;
 use crate::check::env::FnId;
-use crate::check::types::{Prim, Ty};
+use crate::check::types::{GArg, Prim, Ty};
 
 /// A structured-concurrency scope (§6.1). Tasks run to completion when started, in order, which
 /// keeps runs deterministic; a forked task's failure is rethrown by the scope.
@@ -125,6 +125,16 @@ impl Interp {
             _ => "?".into(),
         };
         format!("{target}.{}", info.name)
+    }
+
+    /// Type argument `i` of the builtin `fid` being called, its impl's first: what a builtin that
+    /// drops values drops them as.
+    fn type_arg(&self, fid: FnId, i: usize) -> Option<Ty> {
+        let g = self.prog.fns[fid].scheme.tparams.get(i)?;
+        match self.lex.tenv.get(&g.sym.id)? {
+            GArg::Ty(t) => Some(t.clone()),
+            _ => None,
+        }
     }
 
     pub fn builtin(&mut self, fid: FnId, mut args: Vec<Value>) -> R {
@@ -296,17 +306,32 @@ impl Interp {
                     Value::Native(_, ch) => ch,
                     other => return Err(panic(format!("not a sender: {}", other.show()))),
                 };
-                self.sched.deliver(ch, a(1));
+                let rejected = self.sched.deliver(ch, a(1));
+                let sent = rejected.is_none();
+                if let Some((v, t)) = rejected {
+                    self.drop_value(v, &t, &[])?;
+                }
                 // A reply sent is done with: its channel's sending end is gone.
                 if key == "Reply.send" {
                     self.sched.sender_gone(ch);
                 }
                 self.sched.yield_now(self.task)?;
-                Ok(Value::Unit)
+                Ok(if key == "Reply.send" { Value::Unit } else { Value::Bool(sent) })
             }
-            // A dropped receiving end leaves its channel to the host's memory; an unsent reply
-            // ends the wait for it.
-            "Receiver.drop" | "Pending.drop" => Ok(Value::Unit),
+            // A dropped receiving end drops what is in its channel, and what is sent to it later:
+            // a message may hold a reply someone waits for.
+            "Receiver.drop" | "Pending.drop" => {
+                let Value::Native(_, ch) = a(0).deref() else { return Ok(Value::Unit) };
+                let Some(elem) = self.type_arg(fid, 0) else { return Ok(Value::Unit) };
+                let mut result = Ok(Value::Unit);
+                for m in self.sched.receiver_gone(ch, elem.clone()) {
+                    if let Err(e) = self.drop_value(m, &elem, &[])
+                        && result.is_ok() {
+                            result = Err(e);
+                        }
+                }
+                result
+            }
             "Reply.drop" => {
                 let ch = native(&a(0), "Reply")?;
                 self.sched.sender_gone(ch);
@@ -464,8 +489,9 @@ impl Interp {
                 Some(i) => some(Value::Int(i as i128)),
                 None => none(),
             }),
-            "str.toUpperCase" => Ok(Value::text(&a(0).as_text().to_uppercase())),
-            "str.toLowerCase" => Ok(Value::text(&a(0).as_text().to_lowercase())),
+            // ASCII letters only, as every back end does: other characters are themselves.
+            "str.toUpperCase" => Ok(Value::text(&a(0).as_text().to_ascii_uppercase())),
+            "str.toLowerCase" => Ok(Value::text(&a(0).as_text().to_ascii_lowercase())),
             "str.replaceAll" => Ok(Value::text(&a(0).as_text().replace(&*a(1).as_text(), &a(2).as_text()))),
             "str.lines" => {
                 for l in a(0).as_text().lines() {
@@ -602,11 +628,16 @@ impl Interp {
                 let p = place_of(&a(0))?;
                 let k = std::mem::replace(&mut args[1], Value::Unit).deref();
                 let v = std::mem::replace(&mut args[2], Value::Unit);
+                let mut old = None;
                 update(&p, |m| {
                     if let Value::Map(d) = m {
-                        Arc::make_mut(d).insert(k, v);
+                        old = Arc::make_mut(d).insert(k, v);
                     }
                 });
+                // The entry replaced is dropped, its key and its value.
+                if let (Some(old), Some(kt), Some(vt)) = (old, self.type_arg(fid, 0), self.type_arg(fid, 1)) {
+                    self.drop_value(old, &Ty::Tuple(vec![kt, vt]), &[])?;
+                }
                 Ok(Value::Unit)
             }
             "HashMap.get" | "HashMap.getMut" => {
@@ -674,15 +705,12 @@ impl Interp {
                     .collect();
                 Ok(gens_mod::new_gen(self, GenKind::Items { items, pos: 0 }))
             }
-            "HashMap.sortedByValue" => {
-                let mut entries: Vec<(Value, Value)> = match a(0).deref() {
-                    Value::Map(d) => d.entries.iter().map(|e| (entry(e).0.clone(), entry(e).1.clone())).collect(),
+            "HashMap.intoEntries" => {
+                let entries: Vec<Value> = match a(0).deref() {
+                    Value::Map(d) => d.entries.iter().map(|e| Value::Tuple(vec![entry(e).0.clone(), entry(e).1.clone()].into())).collect(),
                     _ => Vec::new(),
                 };
-                entries.sort_by(|(k1, v1), (k2, v2)| {
-                    v2.as_int().cmp(&v1.as_int()).then_with(|| k1.as_text().cmp(&k2.as_text()))
-                });
-                Ok(Value::List(entries.into_iter().map(|(k, v)| Value::Tuple(vec![k, v].into())).collect::<Vec<_>>().into()))
+                Ok(Value::List(entries.into()))
             }
 
             // ---- regions (§4.6) ----
@@ -795,6 +823,11 @@ impl Interp {
                 self.world.lock().expect("world").out.push(s);
                 Ok(Value::Unit)
             }
+            // Standard error is not the world's output: it goes straight out.
+            "eprintln" => {
+                eprintln!("{}", a(0).as_text());
+                Ok(Value::Unit)
+            }
             "File.open" => {
                 let path = a(0).as_text().to_string();
                 let mut w = self.world.lock().expect("world");
@@ -848,6 +881,21 @@ impl Interp {
                 let id = self.world.lock().expect("world").open_socket(input);
                 self.yield_value(Value::Native("Socket", id))?;
             },
+            "Socket.connect" => {
+                let peer = format!("{}:{}", a(0).as_text(), a(1).as_int());
+                let mut w = self.world.lock().expect("world");
+                if w.fault() {
+                    drop(w);
+                    return self.raise(Value::tag("TimedOut", Value::Unit));
+                }
+                let Some(input) = w.peers.get(&peer).cloned() else {
+                    drop(w);
+                    return self.raise(Value::tag("Refused", Value::Unit));
+                };
+                let id = w.open_socket(input);
+                w.sockets[id as usize].peer = Some(peer);
+                Ok(Value::Native("Socket", id))
+            }
             "Socket.read" => {
                 let id = native(&a(0), "Socket")? as usize;
                 if self.world.lock().expect("world").fault() {
@@ -898,7 +946,8 @@ impl Interp {
                 let bytes = std::mem::take(&mut w.sockets[id].bytes);
                 if !bytes.is_empty() {
                     let text = String::from_utf8_lossy(&bytes).replace("\r\n", "\n");
-                    w.out.push(format!("-> {}", text.trim_end_matches('\n')));
+                    let to = w.sockets[id].peer.as_ref().map(|p| format!("{p}: ")).unwrap_or_default();
+                    w.out.push(format!("-> {to}{}", text.trim_end_matches('\n')));
                 }
                 Ok(Value::Unit)
             }

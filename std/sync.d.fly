@@ -12,7 +12,9 @@ export function channel<T extends Send>(): [Sender<T>, Receiver<T>];
 // A channel ends when its last sender is dropped or closed (`close` is an explicit drop): its
 // receivers drain what was sent, then see the end (`recv` gives `#None`, and `for…of` stops).
 impl<T> Sender<T> {
-  export function send(self: readonly Self, v: T): void uses Io;
+  // Whether `v` went to the channel: once the receiver is dropped, `v` is dropped instead, and a
+  // producer may stop.
+  export function send(self: readonly Self, v: T): bool uses Io;
   export function close(self: Self): void uses Io;
 }
 impl<T extends Send> Drop for Sender<T> {

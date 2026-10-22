@@ -1,0 +1,30 @@
+// expect: {"name":"probe","at":[1.5,2.0,-3.0],"grid":[[1,2],[3,4]],"tags":["a","b"]}
+// expect: decoded the same: true
+// expect: [7,8,9]
+// expect: too few items: #BadJson(6)
+// expect: too many items: #BadJson(9)
+// JSON for fixed arrays, nested, and slices, derived like every other shape (§7.5): an array
+// decodes from exactly its length of items.
+import { println } from "std/io";
+import { stringify, parse, ToJson, FromJson, JsonError } from "std/json";
+
+struct Probe { name: String; at: f64[3]; grid: u8[2][2]; tags: Vec<String> }
+impl ToJson for Probe;
+impl FromJson for Probe;
+impl Eq for Probe;
+
+function lent(xs: readonly u32[]): String { stringify(xs) }
+
+export function main(): void uses Io {
+  const p = Probe { name: "probe".toString(), at: [1.5, 2.0, -3.0], grid: [[1, 2], [3, 4]], tags: ["a".toString(), "b".toString()] };
+  const text = stringify(p);
+  println(text);
+  const q: Probe = try { parse(text.asStr()) } catch (e) { println(`${e}`); return; };
+  println(`decoded the same: ${q == p}`);
+  const v: Vec<u32> = [7, 8, 9];
+  println(lent(v));
+  const few: Result<u8[3], JsonError> = Fail.capture(() => parse("[1, 2] "));
+  match (few) { #Ok(_) => println("too few items: decoded"), #Err(e) => println(`too few items: ${e}`) }
+  const many: Result<u8[3], JsonError> = Fail.capture(() => parse("[1, 2, 3, 4]"));
+  match (many) { #Ok(_) => println("too many items: decoded"), #Err(e) => println(`too many items: ${e}`) }
+}
