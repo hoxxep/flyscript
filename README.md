@@ -65,8 +65,8 @@ test("degrades gracefully under packet loss", () => {
 
 Flyscript is an early-stage language under active design, developed in the open.
 
-- **Language specification:** version 0.66, with every earlier version and the reasoning behind each change in [docs/history](docs/history/).
-- **Proofs:** two fragments of the core calculus are proved in Lean, in [proof/](proof/): a program that moves, drops and lends boxes never touches a moved or freed cell and ends having freed everything but its result, and a program with effect handlers never performs an operation nothing handles. What the proofs do not yet cover is listed in the specification (§9.5).
+- **Language specification:** version 0.67, with every earlier version and the reasoning behind each change in [docs/history](docs/history/).
+- **Proofs:** two fragments of the core calculus are proved in Lean, in [proof/](proof/): a program that moves, drops and lends boxes never touches a moved or freed cell and ends having freed everything but its result, failures and all, and a program with effect handlers never performs an operation nothing handles. What the proofs do not yet cover is listed in the specification (§9.5).
 - **Library specification:** [docs/std.md](docs/std.md), every function the standard library exports: what it performs, when it fails, what it costs.
 - **Compiler (`flyc`):** a complete prototype front end and evaluator. `flyc check` type-, effect- and ownership-checks programs, rejecting use after move, conflicting borrows, borrows that escape through closures and generators, undeclared effects and non-exhaustive matches with precise errors. `flyc run` executes them, with effect handlers, generators and structured concurrency, against a deterministic simulated world. `comptime` runs too: templates specialize per type, and the standard library's JSON codec is derived over reflection in plain Flyscript, with no compiler support.
 

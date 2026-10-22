@@ -61,8 +61,24 @@ theorem lends_typed : Typed [addInto] [] lends .int [] := by
 example : ∀ n, match eval [addInto] n .empty [] lends with
     | (.stuck, _) => False
     | (.timeout, _) => True
-    | (.val v, σ') => ∃ L, VT σ' .int v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L :=
+    | (.val v, σ') => ∃ L, VT σ' .int v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
+    | (.fail _, σ') => ∀ l, σ'.mem l = none :=
   program_ok addInto_ok lends_typed
+
+/-- `let x = Box.new(1); try { let y = Box.new(2); throw *y } catch (e) { e + *x }`: the failure
+leaves `y`'s scope, which drops it, and the handler sees `x`; 3, and nothing left allocated. -/
+def unwinds : Expr :=
+  .let_ "x" (.box .int) (.new (.lit 1))
+    (.try_ (.let_ "y" (.box .int) (.new (.lit 2)) (.throw_ (.read (deref (var "y"))))) "e"
+      (.add (.read (var "e")) (.read (deref (var "x")))))
+
+example : (eval [] 20 .empty [] unwinds).1 = .val (.int 3) := by decide
+example : ∀ l < (eval [] 20 .empty [] unwinds).2.next, (eval [] 20 .empty [] unwinds).2.mem l = none := by
+  decide
+
+theorem unwinds_typed : Typed [] [] unwinds .int [] :=
+  .let_ rfl (.new .lit) (.try_ rfl (.let_ rfl (.new .lit) (.throw_ (.read (.deref (.own rfl)))))
+    (.add (.read (.own rfl)) (.read (.deref (.own rfl)))))
 
 theorem aliased_rejected : ¬ Typed [clobber] [] aliased τ Γ' := by
   intro h

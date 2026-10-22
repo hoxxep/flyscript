@@ -2,8 +2,9 @@
 # Ownership
 
 The ownership fragment of λ-fly (spec §4, §9): a heap of cells, owned boxes that are allocated and
-freed, moves, drops at the end of a scope, assignment that drops what a place held, and borrows —
-`readonly` and `mut` — that exist only as parameters, so they cannot outlive what they borrow (§4.2).
+freed, moves, drops at the end of a scope, assignment that drops what a place held, branches, failures
+that unwind through scopes and calls, and borrows — `readonly` and `mut` — that exist only as
+parameters, so they cannot outlive what they borrow (§4.2).
 
 Every variable lives in a cell of the store; a box is a pointer to a cell holding its contents. A
 borrowed parameter is bound to the location it borrows, not to a cell of its own. A value is an
@@ -11,8 +12,8 @@ integer, a pointer, or the mark a move leaves in a variable's cell.
 
 The semantics is an interpreter with fuel, and anything no rule covers is `stuck`: reading a value
 that was moved, reaching a cell that was freed, freeing one twice. The theorems are that a
-well-typed program never gets stuck, and that when it ends every cell it allocated has been freed
-but those of its result: each owned value is dropped exactly once.
+well-typed program never gets stuck, and that when it ends, with a value or a failure, every cell it
+allocated has been freed but those of its result: each owned value is dropped exactly once.
 -/
 
 namespace FlyCore.Ownership
@@ -53,6 +54,12 @@ inductive Expr where
   /-- A call: the owned arguments, evaluated in order, then the places lent, each with its mode. -/
   | call (f : Nat) (owned : List Expr) (lent : List (Mode × Place))
   | seq (a b : Expr)
+  /-- `if (c) a else b`: `b` when `c` is zero. -/
+  | ite (c a b : Expr)
+  /-- `throw a`: a failure carrying an integer. -/
+  | throw_ (a : Expr)
+  /-- `try { body } catch (x) { h }`: a failure of `body` is handled by `h`, `x` its payload. -/
+  | try_ (body : Expr) (x : Var) (h : Expr)
   deriving Repr
 
 /-- A function: its owned parameters, its borrowed ones, its result, its body. -/
@@ -125,9 +132,16 @@ def dropCells (σ : Store) : List (Ty × Nat) → Option Store
 
 inductive Res where
   | val (v : Val)
+  /-- A failure on its way out, carrying its payload. -/
+  | fail (k : Int)
   | stuck
   | timeout
   deriving DecidableEq, Repr
+
+/-- Evaluation ended, with a value or a failure: a scope it leaves drops what it owns. -/
+def Res.done : Res → Bool
+  | .val _ | .fail _ => true
+  | _ => false
 
 /-- Allocates a cell for each value, binding the names to them. -/
 def allocAll (σ : Store) : List (Var × Val) → Env × Store
@@ -137,16 +151,33 @@ def allocAll (σ : Store) : List (Var × Val) → Env × Store
     let (env, σ2) := allocAll σ1 rest
     ((x, c) :: env, σ2)
 
-/-- The owned arguments of a call, in order, by `ev`: their values, or what stopped them. -/
-def evalArgs (ev : Store → Env → Expr → Res × Store) : Store → Env → List Expr → (List Val ⊕ Res) × Store
-  | σ, _, [] => (.inl [], σ)
-  | σ, env, a :: rest =>
+/-- The owned arguments of a call, in order, by `ev`, against the parameters' types: their values,
+or what stopped them, the values of those before dropped. -/
+def evalArgs (ev : Store → Env → Expr → Res × Store) :
+    Store → Env → List Expr → List Ty → (List Val ⊕ Res) × Store
+  | σ, _, [], _ => (.inl [], σ)
+  | σ, _, _ :: _, [] => (.inr .stuck, σ)
+  | σ, env, a :: rest, τ :: τs =>
     match ev σ env a with
     | (.val v, σ1) =>
-      match evalArgs ev σ1 env rest with
+      match evalArgs ev σ1 env rest τs with
       | (.inl vs, σ2) => (.inl (v :: vs), σ2)
-      | r => r
+      | (.inr r, σ2) =>
+        if r.done then
+          match drop σ2 τ v with
+          | some σ3 => (.inr r, σ3)
+          | none => (.inr .stuck, σ2)
+        else (.inr r, σ2)
     | (r, σ1) => (.inr r, σ1)
+
+/-- Leaving a scope whose variable is in cell `c`: dropped on every way out but a timeout. -/
+def leave (τ : Ty) (c : Nat) : Res × Store → Res × Store
+  | (r, σ) =>
+    if r.done then
+      match dropCell σ τ c with
+      | some σ' => (r, σ')
+      | none => (.stuck, σ)
+    else (r, σ)
 
 def eval (F : List Fn) : Nat → Store → Env → Expr → Res × Store
   | 0, σ, _, _ => (.timeout, σ)
@@ -186,12 +217,7 @@ def eval (F : List Fn) : Nat → Store → Env → Expr → Res × Store
       match eval F n σ env a with
       | (.val v, σ1) =>
         let (c, σ2) := σ1.alloc v
-        match eval F n σ2 ((x, c) :: env) b with
-        | (.val w, σ3) =>
-          match dropCell σ3 τ c with
-          | some σ4 => (.val w, σ4)
-          | none => (.stuck, σ3)
-        | r => r
+        leave τ c (eval F n σ2 ((x, c) :: env) b)
       | r => r
     | .write p a =>
       match eval F n σ env a with
@@ -221,7 +247,7 @@ def eval (F : List Fn) : Nat → Store → Env → Expr → Res × Store
       match F[f]? with
       | none => (.stuck, σ)
       | some d =>
-        match evalArgs (eval F n) σ env owned with
+        match evalArgs (eval F n) σ env owned (d.owns.map Prod.snd) with
         | (.inl vs, σ1) =>
           match lent.mapM (fun (_, p) => resolve σ1 env p) with
           | some ls =>
@@ -229,11 +255,12 @@ def eval (F : List Fn) : Nat → Store → Env → Expr → Res × Store
               let (cells, σ2) := allocAll σ1 (d.owns.map Prod.fst |>.zip vs)
               let env' := cells ++ (d.refs.map Prod.fst |>.zip ls)
               match eval F n σ2 env' d.body with
-              | (.val w, σ3) =>
-                match dropCells σ3 (d.owns.map Prod.snd |>.zip (cells.map Prod.snd)) with
-                | some σ4 => (.val w, σ4)
-                | none => (.stuck, σ3)
-              | r => r
+              | (r, σ3) =>
+                if r.done then
+                  match dropCells σ3 (d.owns.map Prod.snd |>.zip (cells.map Prod.snd)) with
+                  | some σ4 => (r, σ4)
+                  | none => (.stuck, σ3)
+                else (r, σ3)
             else (.stuck, σ1)
           | none => (.stuck, σ1)
         | (.inr r, σ1) => (r, σ1)
@@ -241,6 +268,22 @@ def eval (F : List Fn) : Nat → Store → Env → Expr → Res × Store
       match eval F n σ env a with
       | (.val (.int _), σ1) => eval F n σ1 env b
       | (.val _, σ1) => (.stuck, σ1)
+      | r => r
+    | .ite c a b =>
+      match eval F n σ env c with
+      | (.val (.int k), σ1) => if k = 0 then eval F n σ1 env b else eval F n σ1 env a
+      | (.val _, σ1) => (.stuck, σ1)
+      | r => r
+    | .throw_ a =>
+      match eval F n σ env a with
+      | (.val (.int k), σ1) => (.fail k, σ1)
+      | (.val _, σ1) => (.stuck, σ1)
+      | r => r
+    | .try_ body x h =>
+      match eval F n σ env body with
+      | (.fail k, σ1) =>
+        let (c, σ2) := σ1.alloc (.int k)
+        leave .int c (eval F n σ2 ((x, c) :: env) h)
       | r => r
 
 
@@ -262,6 +305,17 @@ inductive PlaceTy (Γ : Ctx) : Place → Ty → Bool → Var → Prop
   | own : lookup x Γ = some (.own τ true) → PlaceTy Γ (.var x) τ true x
   | ref : lookup x Γ = some (.ref m τ) → PlaceTy Γ (.var x) τ (m == .mut) x
   | deref : PlaceTy Γ p (.box τ) w r → PlaceTy Γ (.deref p) τ w r
+
+/-- `s'` is `s`, or, for an owned variable, `s` with what it holds perhaps moved: where branches
+disagree, or where a failure may have left. -/
+inductive Slot.Le : Slot → Slot → Prop
+  | refl : Slot.Le s s
+  | forget : Slot.Le (.own τ false) (.own τ true)
+
+/-- `Γ'` is `Γ` with some owned variables perhaps moved. -/
+inductive Weaker : Ctx → Ctx → Prop
+  | nil : Weaker [] []
+  | cons : Slot.Le s' s → Weaker Γ' Γ → Weaker ((x, s') :: Γ') ((x, s) :: Γ)
 
 /-- The places lent, each of the parameter's type and changeable where lent `mut`, with the mode
 each is lent in and the variable it is rooted at. -/
@@ -292,6 +346,13 @@ inductive Typed (F : List Fn) : Ctx → Expr → Ty → Ctx → Prop
       Lends Γ₁ lent (d.refs.map Prod.snd) ys → Exclusive ys →
       Typed F Γ (.call f owned lent) d.ret Γ₁
   | seq : Typed F Γ a .int Γ₁ → Typed F Γ₁ b τ Γ₂ → Typed F Γ (.seq a b) τ Γ₂
+  /-- Where the branches disagree, a variable is perhaps moved. -/
+  | ite : Typed F Γ c .int Γ₀ → Typed F Γ₀ a τ Γa → Typed F Γ₀ b τ Γb → Weaker Γ' Γa → Weaker Γ' Γb →
+      Typed F Γ (.ite c a b) τ Γ'
+  | throw_ : Typed F Γ a .int Γ₁ → Typed F Γ (.throw_ a) τ Γ₁
+  /-- The handler starts where the body would have ended: what the body moves is perhaps moved. -/
+  | try_ : lookup x Γb = none → Typed F Γ body τ Γb →
+      Typed F ((x, .own .int true) :: Γb) h τ ((x, .own .int live) :: Γh) → Typed F Γ (.try_ body x h) τ Γh
 
 /-- The owned arguments, in order, against the parameters' types. -/
 inductive Args (F : List Fn) : Ctx → List Expr → List Ty → Ctx → Prop

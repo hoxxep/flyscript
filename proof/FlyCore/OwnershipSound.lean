@@ -52,13 +52,28 @@ theorem post_now (hI : Inv σ Γ env E S) (hwf : WF σ) (hv : VT σ τ v []) :
     Post σ E S Γ env τ (.val v, σ) :=
   ⟨E, [], hI, hv, disj_nil_left, disj_nil_left, Moves.refl hwf hI.alloc⟩
 
-/-- A result that is stuck, or carried on unchanged out of a sub-expression, is as the sub-expression
-said. -/
-theorem post_out {r : Res × Store} (h : Post σ E S Γ₁ env τ₁ r) (hv : ∀ v σ', r ≠ (.val v, σ')) :
-    Post σ E S Γ' env τ r := by
+/-- A result carried on unchanged out of a sub-expression — a failure, or running out of fuel — is as
+the sub-expression said, of any context weaker than the one it would have left. -/
+theorem post_out {r : Res × Store} (h : Post σ E S Γ₁ env τ₁ r) (hv : ∀ v σ', r ≠ (.val v, σ'))
+    (w : Weaker Γ' Γ₁) : Post σ E S Γ' env τ r := by
   rcases r with ⟨r, σ'⟩
   cases r with
   | val v => exact absurd rfl (hv v σ')
+  | fail k => obtain ⟨E', hI, hm⟩ := h; exact ⟨E', hI.weaken w, hm⟩
+  | stuck => exact h
+  | timeout => trivial
+
+/-- After a step that gave nothing of its own, what the next one gives is what the two give. -/
+theorem post_after {r : Res × Store} (hm : Moves σ E σ1 E₁ []) (hwf : WF σ)
+    (h : Post σ1 E₁ S Γ' env τ r) : Post σ E S Γ' env τ r := by
+  rcases r with ⟨r, σ'⟩
+  cases r with
+  | val v =>
+    obtain ⟨E', L, hI, hv, hd, hdS, hm'⟩ := h
+    exact ⟨E', L, hI, hv, hd, hdS, (hm.trans hm' disj_nil_left hwf).relabel fun x => by simp⟩
+  | fail k =>
+    obtain ⟨E', hI, hm'⟩ := h
+    exact ⟨E', hI, (hm.trans hm' disj_nil_left hwf).relabel fun x => by simp⟩
   | stuck => exact h
   | timeout => trivial
 
@@ -69,6 +84,103 @@ theorem seg3 {A P R B : List Nat} (h : (A ++ (P ++ R) ++ B).Nodup) :
     List.perm_iff_count.mpr fun a => by simp only [List.count_append]; omega
   rw [hp.nodup_iff, nodup_append_disj] at h
   exact ⟨h.2.2, h.2.1⟩
+
+/-! ## Scopes -/
+
+/-- Binding a value to a new variable: a fresh cell holding it, whose tree is the variable's
+footprint. -/
+theorem bind_ok (hI₁ : Inv σ1 Γ₁ env E₁ S) (hv₁ : VT σ1 τx v L₁) (hd₁ : Disj L₁ E₁) (hdS₁ : Disj L₁ S)
+    (hm₁ : Moves σ E σ1 E₁ L₁) (hwf : WF σ) (hx : x ∉ Γ₁.map Prod.fst) :
+    Inv (σ1.alloc v).2 ((x, .own τx true) :: Γ₁) ((x, σ1.next) :: env) (σ1.next :: L₁ ++ E₁) S ∧
+      Moves σ E (σ1.alloc v).2 (σ1.next :: L₁ ++ E₁) [] := by
+  have hwf₁ := hm₁.wf
+  have hL₁ := hv₁.alloc
+  have hfresh : ∀ l, σ1.mem l ≠ none → l ≠ σ1.next := fun l hl h => by
+    subst h; exact Nat.lt_irrefl _ (hwf₁ _ hl)
+  have hag : Agree σ1 (σ1.alloc v).2 (L₁ ++ E₁ ++ S) := agree_alloc hwf₁ (by
+    intro l hl
+    simp only [List.mem_append] at hl
+    rcases hl with (hl | hl) | hl
+    · exact hL₁ l hl
+    · exact hI₁.alloc l hl
+    · exact hI₁.allocS l hl)
+  have hcL : σ1.next ∉ L₁ := fun h => hfresh _ (hL₁ _ h) rfl
+  have hcE : σ1.next ∉ E₁ := fun h => hfresh _ (hI₁.alloc _ h) rfl
+  have hcS : σ1.next ∉ S := fun h => hfresh _ (hI₁.allocS _ h) rfl
+  have hLt : LT (σ1.alloc v).2 σ1.next τx (σ1.next :: L₁) :=
+    LT.of_contents (by simp [Store.alloc]) (hv₁.frame fun l hl => hag l (by simp [hl])) hcL
+  refine ⟨⟨.cons (s := .own τx true) hLt (hI₁.foot.frame fun l hl => hag l (by
+    simp only [List.mem_append] at hl ⊢; rcases hl with hl | hl <;> simp [hl])), ?_, ?_, ?_⟩, ?_⟩
+  · refine List.nodup_cons.mpr ⟨by simp [hcL, hcE], ?_⟩
+    exact nodup_append_disj.mpr ⟨hv₁.nodup, hI₁.nodup, hd₁⟩
+  · intro l hl hl'
+    simp only [List.mem_append, List.mem_cons] at hl'
+    rcases hl' with (rfl | hl') | hl'
+    · exact hcS hl
+    · exact hdS₁ l hl' hl
+    · exact hI₁.disj l hl hl'
+  · exact List.nodup_cons.mpr ⟨hx, hI₁.keys⟩
+  · exact (hm₁.relabel (E'' := L₁ ++ E₁) (L'' := []) fun x => by mem_iff).trans
+      ((Moves.allocate hwf₁ (fun l hl => by
+        rcases List.mem_append.mp hl with hl | hl
+        · exact hL₁ l hl
+        · exact hI₁.alloc l hl))) disj_nil_left hwf |>.relabel fun x => by mem_iff
+
+/-- Dropping the variable a scope declared, live or perhaps moved, as the scope is left: its
+footprint is freed, and the rest stands. -/
+theorem drop_var (hI₃ : Inv σ3 ((x, .own τx live) :: Γ₂) ((x, c) :: env) E₃ S)
+    (hL₃ : ∀ l ∈ L₃, σ3.mem l ≠ none) (hd₃ : Disj L₃ E₃) (hm : Moves σ E σ3 E₃ L₃) (hwf : WF σ) :
+    ∃ σ4 E₂, dropCell σ3 τx c = some σ4 ∧ Inv σ4 Γ₂ env E₂ S ∧ Agree σ3 σ4 L₃ ∧ Disj L₃ E₂ ∧
+      Moves σ E σ4 E₂ L₃ := by
+  obtain ⟨Lx, E₂, S₂, hs, hfoot, hE₃, hS₃⟩ := hI₃.foot.uncons
+  simp only [addE, addS, Slot.excl, ↓reduceIte] at hE₃ hS₃
+  subst hE₃ hS₃
+  obtain ⟨σ4, hdrop, hnext, hfree, hkeep⟩ := dropCell_own hs
+  have hnd := nodup_append_disj.mp hI₃.nodup
+  have hag4 : Agree σ3 σ4 (E₂ ++ S) := by
+    intro l hl
+    refine hkeep l fun h => ?_
+    rcases List.mem_append.mp hl with hl | hl
+    · exact hnd.2.2 l h hl
+    · exact hI₃.disj l hl (List.mem_append.mpr (.inl h))
+  have hm₄ := Moves.free (E := Lx ++ E₂ ++ L₃) (E' := E₂ ++ L₃) (D := Lx) (WF.of_free hm.wf hnext hfree hkeep)
+    hnext
+    (fun l hl => by
+      rcases List.mem_append.mp hl with hl | hl
+      · exact hI₃.alloc l hl
+      · exact hL₃ l hl)
+    (fun x => by mem_iff) hfree hkeep (by
+      intro l hl hlx
+      rcases List.mem_append.mp hl with hl | hl
+      · exact hnd.2.2 l hlx hl
+      · exact hd₃ l hl (List.mem_append.mpr (.inl hlx)))
+  refine ⟨σ4, E₂, hdrop, ⟨hfoot.frame hag4, hnd.2.1, fun l hl hl' => hI₃.disj l hl
+      (List.mem_append.mpr (.inr hl')), (List.nodup_cons.mp hI₃.keys).2⟩,
+    fun l hl => hkeep l fun h => hd₃ l hl (List.mem_append.mpr (.inl h)),
+    fun l hl hl' => hd₃ l hl (List.mem_append.mpr (.inr hl')), ?_⟩
+  exact ((hm.relabel (E'' := Lx ++ E₂ ++ L₃) (L'' := []) fun x => by mem_iff).trans hm₄ disj_nil_left
+    hwf).relabel fun x => by mem_iff
+
+/-- Leaving a scope, with a value or a failure, drops its variable. -/
+theorem leave_ok {r : Res × Store} (hm : Moves σ E σb Eb []) (hwf : WF σ)
+    (h : Post σb Eb S ((x, .own τx live) :: Γ₂) ((x, c) :: env) τ r) :
+    Post σ E S Γ₂ env τ (leave τx c r) := by
+  rcases r with ⟨r, σ3⟩
+  cases r with
+  | val w =>
+    obtain ⟨E₃, L₃, hI₃, hv₃, hd₃, hdS₃, hm₃⟩ := h
+    obtain ⟨σ4, E₂, hdrop, hI₄, hag, hd, hm₄⟩ := drop_var hI₃ hv₃.alloc hd₃
+      ((hm.trans hm₃ disj_nil_left hwf).relabel fun x => by simp) hwf
+    simp only [leave, Res.done, ↓reduceIte, hdrop]
+    exact ⟨E₂, L₃, hI₄, hv₃.frame hag, hd, hdS₃, hm₄⟩
+  | fail k =>
+    obtain ⟨E₃, hI₃, hm₃⟩ := h
+    obtain ⟨σ4, E₂, hdrop, hI₄, -, -, hm₄⟩ := drop_var (L₃ := []) hI₃ (by simp) disj_nil_left
+      ((hm.trans hm₃ disj_nil_left hwf).relabel fun x => by simp) hwf
+    simp only [leave, Res.done, ↓reduceIte, hdrop]
+    exact ⟨E₂, hI₄, hm₄⟩
+  | stuck => exact h
+  | timeout => simp [leave, Res.done, Post]
 
 /-! ## Soundness -/
 
@@ -137,8 +249,10 @@ theorem eval_ok (F : List Fn) (hF : FnsOk F) : ∀ n σ Γ env E S e τ Γ',
             | int =>
               dsimp only
               exact ⟨E₂, [], hI₂, .int, disj_nil_left, disj_nil_left, (hm₁.trans hm₂ disj_nil_left hwf).relabel (by simp)⟩
+          | fail k => exact post_after hm₁ hwf h2
           | stuck => simp [Post] at h2
           | timeout => simp [Post]
+      | fail k => exact post_out h1 (by simp) (typed_weaker hb (by rw [typed_keys ha]; exact hI.keys))
       | stuck => simp [Post] at h1
       | timeout => simp [Post]
     | new ha =>
@@ -176,6 +290,7 @@ theorem eval_ok (F : List Fn) (hF : FnsOk F) : ∀ n σ Γ env E S e τ Γ',
         · refine disj_cons_left.mpr ⟨fun h => hfresh _ (List.mem_append.mpr (.inl (List.mem_append.mpr (.inr h)))) rfl, hd₁⟩
         · exact disj_cons_left.mpr ⟨fun h => hfresh _ (List.mem_append.mpr (.inr h)) rfl, hdS₁⟩
         · exact (hm₁.trans (Moves.allocate hm₁.wf hI₁.alloc) hd₁ hwf).relabel fun x => by mem_iff
+      | fail k => exact post_out h1 (by simp) (Weaker.refl _)
       | stuck => simp [Post] at h1
       | timeout => simp [Post]
     | seq ha hb =>
@@ -196,8 +311,10 @@ theorem eval_ok (F : List Fn) (hF : FnsOk F) : ∀ n σ Γ env E S e τ Γ',
           | val w =>
             obtain ⟨E₂, L₂, hI₂, hv₂, hd₂, hdS₂, hm₂⟩ := h2
             exact ⟨E₂, L₂, hI₂, hv₂, hd₂, hdS₂, (hm₁.trans hm₂ disj_nil_left hwf).relabel (by simp)⟩
+          | fail k => exact post_after hm₁ hwf h2
           | stuck => simp [Post] at h2
           | timeout => simp [Post]
+      | fail k => exact post_out h1 (by simp) (typed_weaker hb (by rw [typed_keys ha]; exact hI.keys))
       | stuck => simp [Post] at h1
       | timeout => simp [Post]
     | write ha hp =>
@@ -230,6 +347,7 @@ theorem eval_ok (F : List Fn) (hF : FnsOk F) : ∀ n σ Γ env E S e τ Γ',
               simp only [List.mem_append, not_or] at hout ⊢; exact hout.1) (by
               intro x hx; simp at hx; subst hx; exact hlS)
             rwa [← hE] at this
+      | fail k => exact post_out h1 (by simp) (Weaker.refl _)
       | stuck => simp [Post] at h1
       | timeout => simp [Post]
     | assign ha hp =>
@@ -296,11 +414,14 @@ theorem eval_ok (F : List Fn) (hF : FnsOk F) : ∀ n σ Γ env E S e τ Γ',
             ((hm₂.trans hm₃ disj_nil_left hm₁.wf).relabel (E'' := A ++ (P ++ (l :: L₁)) ++ B) (L'' := [])
               fun x => by mem_iff) disj_nil_left hwf
           simpa using this
+      | fail k => exact post_out h1 (by simp) (Weaker.refl _)
       | stuck => simp [Post] at h1
       | timeout => simp [Post]
     | let_ hx ha hb =>
       rename_i x a τx Γ₁ b live
       simp only [eval]
+      have hk₁ : (Γ₁.map Prod.fst).Nodup := by rw [typed_keys ha]; exact hI.keys
+      have hx₁ : x ∉ Γ₁.map Prod.fst := by rw [typed_keys ha]; exact lookup_none_keys hx
       have h1 := ih _ _ _ _ _ _ _ _ ha hI hwf
       generalize eval F n σ env _ = r1 at h1 ⊢
       rcases r1 with ⟨r1, σ1⟩
@@ -308,91 +429,27 @@ theorem eval_ok (F : List Fn) (hF : FnsOk F) : ∀ n σ Γ env E S e τ Γ',
       | val v =>
         dsimp only
         obtain ⟨E₁, L₁, hI₁, hv₁, hd₁, hdS₁, hm₁⟩ := h1
-        have hwf₁ := hm₁.wf
-        have hL₁ := hv₁.alloc
-        have hfresh : ∀ l, σ1.mem l ≠ none → l ≠ σ1.next := fun l hl h => by
-          subst h; exact Nat.lt_irrefl _ (hwf₁ _ hl)
-        have hag : Agree σ1 (σ1.alloc v).2 (L₁ ++ E₁ ++ S) := agree_alloc hwf₁ (by
-          intro l hl
-          simp only [List.mem_append] at hl
-          rcases hl with (hl | hl) | hl
-          · exact hL₁ l hl
-          · exact hI₁.alloc l hl
-          · exact hI₁.allocS l hl)
-        have hcL : σ1.next ∉ L₁ := fun h => hfresh _ (hL₁ _ h) rfl
-        have hcE : σ1.next ∉ E₁ := fun h => hfresh _ (hI₁.alloc _ h) rfl
-        have hcS : σ1.next ∉ S := fun h => hfresh _ (hI₁.allocS _ h) rfl
-        have hLt : LT (σ1.alloc v).2 σ1.next τx (σ1.next :: L₁) :=
-          LT.of_contents (by simp [Store.alloc]) (hv₁.frame fun l hl => hag l (by simp [hl])) hcL
-        have hIb : Inv (σ1.alloc v).2 ((x, .own τx true) :: Γ₁) ((x, σ1.next) :: env)
-            (σ1.next :: L₁ ++ E₁) S := by
-          refine ⟨.cons (s := .own τx true) hLt (hI₁.foot.frame fun l hl => hag l (by
-            simp only [List.mem_append] at hl ⊢; rcases hl with hl | hl <;> simp [hl])), ?_, ?_, ?_⟩
-          · refine List.nodup_cons.mpr ⟨by simp [hcL, hcE], ?_⟩
-            exact nodup_append_disj.mpr ⟨hv₁.nodup, hI₁.nodup, hd₁⟩
-          · intro l hl hl'
-            simp only [List.mem_append, List.mem_cons] at hl'
-            rcases hl' with (rfl | hl') | hl'
-            · exact hcS hl
-            · exact hdS₁ l hl' hl
-            · exact hI₁.disj l hl hl'
-          · refine List.nodup_cons.mpr ⟨?_, hI₁.keys⟩
-            rw [typed_keys ha]; exact lookup_none_keys hx
-        have hma : Moves σ E (σ1.alloc v).2 (σ1.next :: L₁ ++ E₁) [] :=
-          (hm₁.relabel (E'' := L₁ ++ E₁) (L'' := []) fun x => by mem_iff).trans
-            ((Moves.allocate hwf₁ (fun l hl => by
-              rcases List.mem_append.mp hl with hl | hl
-              · exact hL₁ l hl
-              · exact hI₁.alloc l hl))) disj_nil_left hwf |>.relabel
-            fun x => by mem_iff
+        obtain ⟨hIb, hma⟩ := bind_ok hI₁ hv₁ hd₁ hdS₁ hm₁ hwf hx₁
         have h2 := ih _ _ _ _ _ _ _ _ hb hIb hma.wf
         rw [show (σ1.alloc v).1 = σ1.next from rfl]
-        generalize eval F n _ _ _ = r2 at h2 ⊢
-        rcases r2 with ⟨r2, σ3⟩
-        cases r2 with
-        | val w =>
-          obtain ⟨E₃, L₃, hI₃, hv₃, hd₃, hdS₃, hm₃⟩ := h2
-          obtain ⟨Lx, E₂, S₂, hs, hfoot, hE₃, hS₃⟩ := hI₃.foot.uncons
-          simp only [addE, addS, Slot.excl, ↓reduceIte] at hE₃ hS₃
-          subst hE₃ hS₃
-          obtain ⟨σ4, hdrop, hnext, hfree, hkeep⟩ := dropCell_own hs
-          simp only [hdrop]
-          have hnd := nodup_append_disj.mp hI₃.nodup
-          have hag4 : Agree σ3 σ4 (E₂ ++ S) := by
-            intro l hl
-            refine hkeep l fun h => ?_
-            rcases List.mem_append.mp hl with hl | hl
-            · exact hnd.2.2 l h hl
-            · exact hI₃.disj l hl (List.mem_append.mpr (.inl h))
-          have hwf4 := WF.of_free hm₃.wf hnext hfree hkeep
-          have hm₄ := Moves.free (E := Lx ++ E₂ ++ L₃) (E' := E₂ ++ L₃) (D := Lx) hwf4 hnext
-            (fun l hl => by
-              rcases List.mem_append.mp hl with hl | hl
-              · exact hI₃.alloc l hl
-              · exact hv₃.alloc l hl)
-            (fun x => by mem_iff) hfree hkeep (by
-              intro l hl hlx
-              rcases List.mem_append.mp hl with hl | hl
-              · exact hnd.2.2 l hlx hl
-              · exact hd₃ l hl (List.mem_append.mpr (.inl hlx)))
-          refine ⟨E₂, L₃, ⟨hfoot.frame hag4, hnd.2.1, fun l hl hl' => hI₃.disj l hl
-              (List.mem_append.mpr (.inr hl')), (List.nodup_cons.mp hI₃.keys).2⟩,
-            hv₃.frame fun l hl => hkeep l fun h => hd₃ l hl (List.mem_append.mpr (.inl h)),
-            fun l hl hl' => hd₃ l hl (List.mem_append.mpr (.inr hl')), hdS₃, ?_⟩
-          exact ((hma.trans hm₃ disj_nil_left hwf).relabel (E'' := Lx ++ E₂ ++ L₃) (L'' := [])
-            (fun x => by mem_iff) |>.trans hm₄ disj_nil_left hwf).relabel fun x => by mem_iff
-        | stuck => simp [Post] at h2
-        | timeout => simp [Post]
+        exact leave_ok hma hwf h2
+      | fail k =>
+        have w := typed_weaker hb (List.nodup_cons.mpr ⟨hx₁, hk₁⟩)
+        cases w with
+        | cons _ w => exact post_out h1 (by simp) w
       | stuck => simp [Post] at h1
       | timeout => simp [Post]
     | call hfd hargs hlends hexcl =>
       rename_i f d owned lent ys
       simp only [eval, hfd]
       have ha := args_ok ih hargs hI hwf
-      generalize evalArgs (eval F n) σ env owned = ra at ha ⊢
+      generalize evalArgs (eval F n) σ env owned _ = ra at ha ⊢
       rcases ra with ⟨ra, σ1⟩
       cases ra with
-      | inr r => subst ha; trivial
+      | inr r =>
+        rcases ha with rfl | ⟨k, rfl, E', hI', hm'⟩
+        · trivial
+        · exact ⟨E', hI', hm'⟩
       | inl vs =>
         obtain ⟨E₁, Ls, hI₁, hvs, hLn, hdL, hdLS, hm₁⟩ := ha
         have hwf₁ := hm₁.wf
@@ -436,12 +493,13 @@ theorem eval_ok (F : List Fn) (hF : FnsOk F) : ∀ n σ Γ env E S e τ Γ',
           (fun l hl => (mem_keep.mp hl).2)
         have hSc : Disj S (Eo ++ (mutCells (olds hs))) := hapartE hI₁.allocS (fun l hl h => hdLS l h hl)
           (fun l hl h => hI₁.disj l hl (hMin l h))
-        have h3 := ih _ _ _ _ _ _ _ _ hbody hIc hwf₂
-        generalize eval F n σ2 _ d.body = r3 at h3 ⊢
-        rcases r3 with ⟨r3, σ3⟩
-        cases r3 with
-        | val w =>
-          obtain ⟨Ec', Lw, hI₃, hvw, hdw, hdwS, hm₃⟩ := h3
+        -- What the call leaves, with a value or a failure: the callee's owned parameters dropped, and
+        -- the caller's variables as they were, but for the trees it lent `mut`.
+        have key : ∀ σ3 Ec' Lw, Inv σ3 Γ'' (cells ++ (d.refs.map Prod.fst).zip (hs.map Hole.loc)) Ec'
+            (roCells (olds hs)) → Disj Lw Ec' → Moves σ2 (Eo ++ mutCells (olds hs)) σ3 Ec' Lw →
+            ∃ σ4 E'', dropCells σ3 ((d.owns.map Prod.snd).zip (cells.map Prod.snd)) = some σ4 ∧
+              Inv σ4 Γ' env E'' S ∧ Agree σ3 σ4 Lw ∧ Disj Lw E'' ∧ Disj Lw S ∧ Moves σ E σ4 E'' Lw := by
+          intro σ3 Ec' Lw hI₃ hdw hm₃
           -- The callee's variables when it ends: its owned parameters, then its borrows, as they were.
           have hsh := (typed_shape hbody hIc.keys).trans (shape_fnCtx d)
           obtain ⟨Γa, rfl, hΓa⟩ := shape_split (ownCtx d.owns) hsh (refCtx_refs d.refs)
@@ -451,7 +509,6 @@ theorem eval_ok (F : List Fn) (hF : FnsOk F) : ∀ n σ Γ env E S e τ Γ',
           obtain ⟨ps, hps, hlt, rfl, rfl⟩ := (foot_refs hts.symm).mp hfb
           have hnd := nodup_append_disj.mp hI₃.nodup
           obtain ⟨rfl, σ4, hdrop, hn4, hfree4, hkeep4⟩ := dropCells_ok hfa hΓa hnd.1
-          simp only [hdrop]
           have hXSa : ∀ l ∈ (E₁.filter fun l => l ∉ mutCells (olds hs)) ++ S, σ1.mem l ≠ none := by
             intro l hl
             rcases List.mem_append.mp hl with h | h
@@ -519,7 +576,7 @@ theorem eval_ok (F : List Fn) (hF : FnsOk F) : ∀ n σ Γ env E S e τ Γ',
               · exact hXin.1 l h (List.mem_append.mpr (.inl hl'))
               · exact hnd.2.2 l hl' h
               · exact hdw l h (List.mem_append.mpr (.inl hl')))
-          refine ⟨E'', Lw, hI₄, hvw.frame fun l hl => hkeep4 l fun h => hdw l hl (List.mem_append.mpr (.inl h)),
+          refine ⟨σ4, E'', hdrop, hI₄, fun l hl => hkeep4 l fun h => hdw l hl (List.mem_append.mpr (.inl h)),
             fun l hl hl' => ?_, fun l hl hS => hSin.2 l hS hl, ?_⟩
           · rcases (hmem l).mp hl' with h | h
             · exact hXin.2 l h hl
@@ -528,20 +585,89 @@ theorem eval_ok (F : List Fn) (hF : FnsOk F) : ∀ n σ Γ env E S e τ Γ',
               hwf).relabel fun x => ?_
             rw [hmem x]
             simp only [List.mem_append, List.not_mem_nil, or_false]
+        have h3 := ih _ _ _ _ _ _ _ _ hbody hIc hwf₂
+        generalize eval F n σ2 _ d.body = r3 at h3 ⊢
+        rcases r3 with ⟨r3, σ3⟩
+        cases r3 with
+        | val w =>
+          obtain ⟨Ec', Lw, hI₃, hvw, hdw, -, hm₃⟩ := h3
+          obtain ⟨σ4, E'', hdrop, hI₄, hag, hdE, hdS, hm⟩ := key σ3 Ec' Lw hI₃ hdw hm₃
+          simp only [Res.done, ↓reduceIte, hdrop]
+          exact ⟨E'', Lw, hI₄, hvw.frame hag, hdE, hdS, hm⟩
+        | fail k =>
+          obtain ⟨Ec', hI₃, hm₃⟩ := h3
+          obtain ⟨σ4, E'', hdrop, hI₄, -, -, -, hm⟩ := key σ3 Ec' [] hI₃ disj_nil_left hm₃
+          simp only [Res.done, ↓reduceIte, hdrop]
+          exact ⟨E'', hI₄, hm⟩
         | stuck => simp [Post] at h3
-        | timeout => simp [Post]
+        | timeout => simp [Res.done, Post]
+    | ite hc ha hb wa wb =>
+      simp only [eval]
+      have hk₀ := hI.keys
+      rw [← typed_keys hc] at hk₀
+      have h1 := ih _ _ _ _ _ _ _ _ hc hI hwf
+      generalize eval F n σ env _ = r1 at h1 ⊢
+      rcases r1 with ⟨r1, σ1⟩
+      cases r1 with
+      | val v =>
+        obtain ⟨E₁, L₁, hI₁, hv₁, -, -, hm₁⟩ := h1
+        cases hv₁ with
+        | @int k =>
+          dsimp only
+          split
+          · exact post_after hm₁ hwf (post_weaken (ih _ _ _ _ _ _ _ _ hb hI₁ hm₁.wf) wb)
+          · exact post_after hm₁ hwf (post_weaken (ih _ _ _ _ _ _ _ _ ha hI₁ hm₁.wf) wa)
+      | fail k => exact post_out h1 (by simp) (wa.trans (typed_weaker ha hk₀))
+      | stuck => simp [Post] at h1
+      | timeout => simp [Post]
+    | throw_ ha =>
+      simp only [eval]
+      have h1 := ih _ _ _ _ _ _ _ _ ha hI hwf
+      generalize eval F n σ env _ = r1 at h1 ⊢
+      rcases r1 with ⟨r1, σ1⟩
+      cases r1 with
+      | val v =>
+        obtain ⟨E₁, L₁, hI₁, hv₁, -, -, hm₁⟩ := h1
+        cases hv₁ with
+        | int => exact ⟨E₁, hI₁, hm₁⟩
+      | fail k => exact post_out h1 (by simp) (Weaker.refl _)
+      | stuck => simp [Post] at h1
+      | timeout => simp [Post]
+    | try_ hx hb hh =>
+      simp only [eval]
+      have hkb := hI.keys
+      rw [← typed_keys hb] at hkb
+      have hxb := lookup_none_keys hx
+      have h1 := ih _ _ _ _ _ _ _ _ hb hI hwf
+      generalize eval F n σ env _ = r1 at h1 ⊢
+      rcases r1 with ⟨r1, σ1⟩
+      cases r1 with
+      | val v =>
+        have w := typed_weaker hh (List.nodup_cons.mpr ⟨hxb, hkb⟩)
+        cases w with
+        | cons _ w => exact post_weaken h1 w
+      | fail k =>
+        dsimp only
+        obtain ⟨E₁, hI₁, hm₁⟩ := h1
+        obtain ⟨hIb, hma⟩ := bind_ok (v := .int k) hI₁ .int disj_nil_left disj_nil_left hm₁ hwf hxb
+        have h2 := ih _ _ _ _ _ _ _ _ hh hIb hma.wf
+        rw [show (σ1.alloc (.int k)).1 = σ1.next from rfl]
+        exact leave_ok hma hwf h2
+      | stuck => simp [Post] at h1
+      | timeout => simp [Post]
 
 /-- The store a program starts in: nothing allocated. -/
 def Store.empty : Store := { mem := fun _ => none, next := 0 }
 
 /-- A well-typed program never gets stuck — no use of a moved value, no use after free, no double
-free — and when it ends, the only cells left allocated are those its result owns: every other value
-was dropped exactly once. -/
+free — and when it ends, the only cells left allocated are those its result owns, and none if it
+failed: every other value was dropped exactly once, on the way out of a failure too. -/
 theorem program_ok (hF : FnsOk F) (ht : Typed F [] e τ Γ') (n : Nat) :
     match eval F n .empty [] e with
     | (.stuck, _) => False
     | (.timeout, _) => True
-    | (.val v, σ') => ∃ L, VT σ' τ v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L := by
+    | (.val v, σ') => ∃ L, VT σ' τ v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
+    | (.fail _, σ') => ∀ l, σ'.mem l = none := by
   have h := eval_ok F hF n .empty [] [] [] [] e τ Γ' ht ⟨.nil, List.nodup_nil, disj_nil_left, List.nodup_nil⟩
     (fun _ h => absurd rfl h)
   generalize eval F n .empty [] e = r at h ⊢
@@ -555,5 +681,14 @@ theorem program_ok (hF : FnsOk F) (ht : Typed F [] e τ Γ') (n : Nat) :
     subst hΓ
     cases hI.foot
     exact ⟨L, hv, fun l => by rw [hm.alloc]; simp [Store.empty]⟩
+  | fail k =>
+    obtain ⟨E', hI, hm⟩ := h
+    have hΓ : Γ' = [] := List.eq_nil_of_map_eq_nil (typed_keys ht)
+    subst hΓ
+    cases hI.foot
+    intro l
+    have := hm.alloc l
+    simp [Store.empty] at this
+    exact this
 
 end FlyCore.Ownership

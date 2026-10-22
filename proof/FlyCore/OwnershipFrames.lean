@@ -29,9 +29,10 @@ theorem dropCell_own : SlotOk σ (.own τ live) c L →
   cases live with
   | true => exact dropCell_live h
   | false =>
-    obtain ⟨hc, rfl⟩ := h
-    obtain ⟨σ', hd, hn, hfree, hkeep⟩ := dropCell_moved (τ := τ) hc
-    exact ⟨σ', hd, hn, by simpa using hfree, fun l hl => hkeep l (by simpa using hl)⟩
+    rcases h with ⟨hc, rfl⟩ | h
+    · obtain ⟨σ', hd, hn, hfree, hkeep⟩ := dropCell_moved (τ := τ) hc
+      exact ⟨σ', hd, hn, by simpa using hfree, fun l hl => hkeep l (by simpa using hl)⟩
+    · exact dropCell_live h
 
 theorem WF.of_free {D : List Nat} (hwf : WF σ) (hnext : σ'.next = σ.next) (hfree : ∀ l ∈ D, σ'.mem l = none)
     (hkeep : ∀ l, l ∉ D → σ'.mem l = σ.mem l) : WF σ' := by

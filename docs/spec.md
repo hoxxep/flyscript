@@ -1,6 +1,6 @@
 # Flyscript
 
-**Language specification, version 0.66**
+**Language specification, version 0.67**
 
 *Affine values, one row calculus, handlers for everything, and `comptime`: Church on the outside, Turing on the inside.*
 
@@ -20,7 +20,7 @@ The whole language rests on five laws. Every rule in this document is a conseque
 
 ### 0.1 Recent changes
 
-0.66 proves two fragments of the core calculus mechanically — moves, drops and lending; effects and handlers — and says exactly what the proofs cover and what rests on testing (§9.5). 0.65 folds the rules for how code takes hold of a place into one (§4.1), states the guarantees of the core calculus and how each is established (§9), and moves what is a cost rather than a meaning into performance contracts (§11.3). 0.64 lets a task go on on any core after it waits (§8.3). 0.63 specifies the standard library as carefully as the core, in [std.md](std.md). 0.62 makes cleanup run to its end under cancellation (§5.6, §6.1). The table lists the changes of 0.64 and 0.65; every earlier one, with the reasoning behind it, is in [docs/history](history/).
+0.67 extends the proof of ownership to branches and to failures, which unwind through scopes and calls dropping what each owns (§9.5). 0.66 proves two fragments of the core calculus mechanically — moves, drops and lending; effects and handlers — and says exactly what the proofs cover and what rests on testing (§9.5). 0.65 folds the rules for how code takes hold of a place into one (§4.1), states the guarantees of the core calculus and how each is established (§9), and moves what is a cost rather than a meaning into performance contracts (§11.3). 0.64 lets a task go on on any core after it waits (§8.3). 0.63 specifies the standard library as carefully as the core, in [std.md](std.md). 0.62 makes cleanup run to its end under cancellation (§5.6, §6.1). The table lists the changes of 0.64 and 0.65; every earlier one, with the reasoning behind it, is in [docs/history](history/).
 
 | Change | Why |
 | :--- | :--- |
@@ -985,12 +985,12 @@ For a program that checks, outside `unsafe` blocks and foreign functions:
 
 Two fragments of λ-fly are proved in Lean, in [proof/](../proof/). The proofs are checked on every change and rest on Lean's standard axioms alone.
 
-- **Moves, drops and lending.** Straight-line code with boxes that are allocated, moved, replaced in place and dropped at the end of their scope, and calls that take owned arguments and lend places `readonly` and `mut`, several at once, no variable lent `mut` beside another borrow of it. A program that checks never gets stuck: it never reads a moved value, reaches a freed cell or frees one twice. When it ends, nothing is allocated but the cells its result owns, so every other box was dropped exactly once (`program_ok`).
+- **Ownership.** Boxes that are allocated, moved, replaced in place and dropped at the end of their scope; branches that disagree about a move, after which the variable is dropped at the end of its scope if it still holds its value; failures thrown and caught, which unwind through scopes and calls; and calls that take owned arguments and lend places `readonly` and `mut`, several at once, no variable lent `mut` beside another borrow of it. A program that checks never gets stuck: it never reads a moved value, reaches a freed cell or frees one twice. When it ends, nothing is allocated but the cells its result owns, and nothing at all if it failed: every other box was dropped exactly once, on the way out of a failure too (`program_ok`).
 - **Effects and handlers.** Functions, failures, and handlers of user effects, deep, resuming and abortive, each arm running in the context of its `handle`. A closed program that checks never gets stuck and performs no operation that nothing handles: it gives a value of its type (`program_sound`).
 
 Both proofs are syntactic. The semantics is an interpreter that is stuck wherever no rule applies, and the types keep an invariant that rules the stuck states out; for ownership, that the cells of each variable form a tree of its type, those that may be changed apart from each other and from those that may be read.
 
-What the proofs do not cover rests on evidence of three kinds, gathered on every change. They do not cover the two fragments together — the loans a suspended continuation holds, and failures and abortive arms that unwind through owned values — nor the loans of local and returned borrows, paths locked per field, branches that disagree about a move, loops, closures, regions, tasks or `unsafe`.
+What the proofs do not cover rests on evidence of three kinds, gathered on every change. They do not cover the two fragments together — the loans a suspended continuation holds, and abortive arms that unwind through owned values — nor the loans of local and returned borrows, paths locked per field, loops, closures, regions, tasks or `unsafe`.
 
 - **Three implementations agree.** The reference evaluator (§11.1) and the compiler written in Flyscript, compiling to JavaScript, to C and through LLVM (§11.2), run every program in the test suite and must print the same, down to how its tasks interleave under the seeded scheduler. Native code runs under the address, undefined-behavior, leak and thread sanitizers, so a memory error in a program the checker accepted shows up as one — a hole in the rules, not a bug of the program's.
 - **Programs no one wrote.** A generator makes random programs that are well typed by construction — owned, `readonly` and `mut` arguments, moves, loops, closures, generators, handlers that resume and handlers that do not, failures, `defer`s, tasks — and each runs in all four ways, under the sanitizers, and must print what the reference prints.
@@ -1134,7 +1134,7 @@ What follows is no part of a program's meaning — no program can observe it —
 
 1. **Portable SIMD.** `Soa` and `par` cover vertical arithmetic. Horizontal operations (shuffles, mask extraction) need a `Simd<T, N>` surface that lowers well to both NEON/SVE and AVX2/AVX-512.
 2. **Supervision beyond scopes.** Nursery semantics plus "a task that cannot fail says so" cover servers. Whether long-lived actor trees want restart strategies as a library is open.
-3. **The rest of the core, mechanized.** Moves, drops and lending, and effects and handlers, are proved apart (§9.5). Soundness is hardest where they meet: the loans a suspended continuation holds, released when it is resumed to completion or dropped, and failures and abortive arms that unwind through owned values and must drop each exactly once. After that come the loans of local and returned borrows, paths locked per field, branches that disagree about a move, regions and tasks. A semantic model in the manner of RustBelt would also say what `unsafe` code must uphold.
+3. **The rest of the core, mechanized.** Ownership with failures, and effects and handlers, are proved apart (§9.5). Soundness is hardest where they meet: the loans a suspended continuation holds, released when it is resumed to completion or dropped, and abortive arms that unwind through owned values and must drop each exactly once. After that come the loans of local and returned borrows, paths locked per field, loops, regions and tasks. A semantic model in the manner of RustBelt would also say what `unsafe` code must uphold.
 
 ---
 

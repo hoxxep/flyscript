@@ -312,11 +312,12 @@ def Slot.excl : Slot → Bool
   | .ref .mut _ => true
   | .ref .ro _ => false
 
-/-- The footprint a slot has: what an owned live variable or a borrow holds, owning the rest; the
-cell of a variable that was moved. -/
+/-- The footprint a slot has: what an owned live variable or a borrow holds, owning the rest. A
+variable perhaps moved holds the mark a move leaves, its footprint its cell alone, or still its
+value: which, only running the program tells, and dropping it at the end of its scope looks. -/
 def SlotOk (σ : Store) : Slot → Nat → List Nat → Prop
   | .own τ true, a, L => LT σ a τ L
-  | .own _ false, a, L => σ.mem a = some .moved ∧ L = [a]
+  | .own τ false, a, L => (σ.mem a = some .moved ∧ L = [a]) ∨ LT σ a τ L
   | .ref _ τ, a, L => LT σ a τ L
 
 /-- Adds a footprint to the exclusive ones or to the shared ones, as the slot says. -/
@@ -338,11 +339,17 @@ structure Inv (σ : Store) (Γ : Ctx) (env : Env) (E S : List Nat) : Prop where
   disj : Disj S E
   keys : (Γ.map Prod.fst).Nodup
 
+theorem LT.not_moved : LT σ a τ L → σ.mem a ≠ some .moved := by
+  intro h
+  cases h <;> simp_all
+
 theorem SlotOk.alloc : SlotOk σ s a L → ∀ l ∈ L, σ.mem l ≠ none := by
   intro h
   rcases s with ⟨τ, live⟩ | ⟨m, τ⟩
   · cases live
-    · obtain ⟨ha, rfl⟩ := h; intro l hl; simp at hl; subst hl; simp [ha]
+    · rcases h with ⟨ha, rfl⟩ | h
+      · intro l hl; simp at hl; subst hl; simp [ha]
+      · exact LT.alloc h
     · exact LT.alloc h
   · exact LT.alloc h
 
@@ -350,7 +357,9 @@ theorem SlotOk.frame : SlotOk σ s a L → Agree σ σ' L → SlotOk σ' s a L :
   intro h hag
   rcases s with ⟨τ, live⟩ | ⟨m, τ⟩
   · cases live
-    · obtain ⟨ha, rfl⟩ := h; exact ⟨by rw [hag _ (by simp)]; exact ha, rfl⟩
+    · rcases h with ⟨ha, rfl⟩ | h
+      · exact .inl ⟨by rw [hag _ (by simp)]; exact ha, rfl⟩
+      · exact .inr (LT.frame h hag)
     · exact LT.frame h hag
   · exact LT.frame h hag
 
@@ -358,7 +367,9 @@ theorem SlotOk.nodup : SlotOk σ s a L → L.Nodup := by
   intro h
   rcases s with ⟨τ, live⟩ | ⟨m, τ⟩
   · cases live
-    · obtain ⟨_, rfl⟩ := h; simp
+    · rcases h with ⟨_, rfl⟩ | h
+      · simp
+      · exact LT.nodup h
     · exact LT.nodup h
   · exact LT.nodup h
 
@@ -366,7 +377,11 @@ theorem SlotOk.det : SlotOk σ s a L → SlotOk σ s a L' → L = L' := by
   intro h h'
   rcases s with ⟨τ, live⟩ | ⟨m, τ⟩
   · cases live
-    · rw [h.2, h'.2]
+    · rcases h with ⟨ha, rfl⟩ | h <;> rcases h' with ⟨ha', rfl⟩ | h'
+      · rfl
+      · exact absurd ha h'.not_moved
+      · exact absurd ha' h.not_moved
+      · exact LT.det h h'
     · exact LT.det h h'
   · exact LT.det h h'
 

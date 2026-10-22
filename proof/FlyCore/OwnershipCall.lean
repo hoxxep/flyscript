@@ -11,12 +11,108 @@ lemmas here follow those steps; `eval_ok` puts them together.
 namespace FlyCore.Ownership
 
 /-- What evaluating may give: never stuck; a value, with the activation still well formed after,
-the value owning cells no variable does, and the step accounted for. -/
+the value owning cells no variable does, and the step accounted for; or a failure, everything the
+scopes it left owned dropped, the activation well formed as the expression would have left it. -/
 def Post (σ : Store) (E S : List Nat) (Γ' : Ctx) (env : Env) (τ : Ty) : Res × Store → Prop
   | (.stuck, _) => False
   | (.timeout, _) => True
   | (.val v, σ') => ∃ E' L, Inv σ' Γ' env E' S ∧ VT σ' τ v L ∧ Disj L E' ∧ Disj L S ∧
       Moves σ E σ' E' L
+  | (.fail _, σ') => ∃ E', Inv σ' Γ' env E' S ∧ Moves σ E σ' E' []
+
+/-! ## Variables perhaps moved -/
+
+theorem Slot.Le.excl : Slot.Le s' s → s'.excl = s.excl
+  | .refl => rfl
+  | .forget => rfl
+
+theorem SlotOk.weaken : Slot.Le s' s → SlotOk σ s a L → SlotOk σ s' a L
+  | .refl, h => h
+  | .forget, h => .inr h
+
+theorem Weaker.refl : ∀ Γ : Ctx, Weaker Γ Γ
+  | [] => .nil
+  | (_, _) :: Γ => .cons .refl (Weaker.refl Γ)
+
+theorem Slot.Le.trans : Slot.Le s₁ s₂ → Slot.Le s₂ s₃ → Slot.Le s₁ s₃
+  | .refl, h => h
+  | h, .refl => h
+
+theorem Weaker.trans : Weaker Γ₁ Γ₂ → Weaker Γ₂ Γ₃ → Weaker Γ₁ Γ₃
+  | .nil, .nil => .nil
+  | .cons h₁ w₁, .cons h₂ w₂ => .cons (h₁.trans h₂) (w₁.trans w₂)
+
+theorem Foot.weaken : Foot σ Γ env E S → Weaker Γ' Γ → Foot σ Γ' env E S := by
+  intro h
+  induction h generalizing Γ' with
+  | nil => intro w; cases w; exact .nil
+  | @cons s a L Γ env E S x hs _ ih =>
+    intro w
+    cases w with
+    | cons hle w =>
+      have := Foot.cons (x := x) (hs.weaken hle) (ih w)
+      simp only [addE, addS, hle.excl] at this ⊢
+      exact this
+
+theorem Inv.weaken (h : Inv σ Γ env E S) (w : Weaker Γ' Γ) : Inv σ Γ' env E S :=
+  ⟨h.foot.weaken w, h.nodup, h.disj, w.keys ▸ h.keys⟩
+
+theorem setSlot_weaker : ∀ {Γ : Ctx}, (Γ.map Prod.fst).Nodup → lookup x Γ = some s → Slot.Le s' s →
+    Weaker (setSlot Γ x s') Γ
+  | [], _, h, _ => by simp [lookup] at h
+  | (y, t) :: Γ, hk, hx, hle => by
+    simp only [List.map_cons] at hk
+    obtain ⟨hy, hk⟩ := List.nodup_cons.mp hk
+    by_cases hxy : x = y
+    · subst hxy
+      simp only [lookup, ↓reduceIte, Option.some.injEq] at hx
+      subst hx
+      rw [setSlot_head Γ hy]
+      exact .cons hle (Weaker.refl Γ)
+    · rw [setSlot_tail Γ (Ne.symm hxy)]
+      simp only [lookup, hxy, ↓reduceIte] at hx
+      exact .cons .refl (setSlot_weaker hk hx hle)
+
+mutual
+/-- Typing only ever moves: what an expression leaves is what it found, some owned variables perhaps
+moved. -/
+theorem typed_weaker : Typed F Γ e τ Γ' → (Γ.map Prod.fst).Nodup → Weaker Γ' Γ
+  | .lit, _ => Weaker.refl _
+  | .read _, _ => Weaker.refl _
+  | .move hx, hk => setSlot_weaker hk hx .forget
+  | .add ha hb, hk => (typed_weaker hb (by rw [typed_keys ha]; exact hk)).trans (typed_weaker ha hk)
+  | .new ha, hk => typed_weaker ha hk
+  | .let_ hx ha hb, hk => by
+    have := typed_weaker hb (List.nodup_cons.mpr ⟨by rw [typed_keys ha]; exact lookup_none_keys hx,
+      by rw [typed_keys ha]; exact hk⟩)
+    cases this with
+    | cons _ w => exact w.trans (typed_weaker ha hk)
+  | .write ha _, hk => typed_weaker ha hk
+  | .assign ha _, hk => typed_weaker ha hk
+  | .call _ hargs _ _, hk => args_weaker hargs hk
+  | .seq ha hb, hk => (typed_weaker hb (by rw [typed_keys ha]; exact hk)).trans (typed_weaker ha hk)
+  | .ite hc ha _ wa _, hk =>
+    wa.trans ((typed_weaker ha (by rw [typed_keys hc]; exact hk)).trans (typed_weaker hc hk))
+  | .throw_ ha, hk => typed_weaker ha hk
+  | .try_ hx hb hh, hk => by
+    have := typed_weaker hh (List.nodup_cons.mpr ⟨by exact lookup_none_keys hx,
+      by rw [typed_keys hb]; exact hk⟩)
+    cases this with
+    | cons _ w => exact w.trans (typed_weaker hb hk)
+theorem args_weaker : Args F Γ as τs Γ' → (Γ.map Prod.fst).Nodup → Weaker Γ' Γ
+  | .nil, _ => Weaker.refl _
+  | .cons ha hrest, hk => (args_weaker hrest (by rw [typed_keys ha]; exact hk)).trans (typed_weaker ha hk)
+end
+
+/-- What an expression may give, said of a context it leaves, holds of one that is weaker. -/
+theorem post_weaken {r : Res × Store} (h : Post σ E S Γ₁ env τ r) (w : Weaker Γ' Γ₁) :
+    Post σ E S Γ' env τ r := by
+  rcases r with ⟨r, σ'⟩
+  cases r with
+  | val v => obtain ⟨E', L, hI, hv, hd, hdS, hm⟩ := h; exact ⟨E', L, hI.weaken w, hv, hd, hdS, hm⟩
+  | fail k => obtain ⟨E', hI, hm⟩ := h; exact ⟨E', hI.weaken w, hm⟩
+  | stuck => exact h
+  | timeout => trivial
 
 /-- A function's context: its owned parameters, live, then its borrowed ones. -/
 def fnCtx (d : Fn) : Ctx :=
@@ -155,14 +251,14 @@ theorem Vals.length : Vals σ τs vs Ls → vs.length = τs.length := by
   | cons _ _ ih => simp [ih]
 
 /-- The owned arguments, evaluated in order: never stuck; their values, each owning cells of no
-variable's and of no other value's. -/
+variable's and of no other value's; or a failure, the values before it dropped. -/
 theorem args_ok (ihn : ∀ σ Γ env E S e τ Γ', Typed F Γ e τ Γ' → Inv σ Γ env E S → WF σ →
       Post σ E S Γ' env τ (eval F n σ env e)) :
     Args F Γ as τs Γ' → Inv σ Γ env E S → WF σ →
-    match evalArgs (eval F n) σ env as with
+    match evalArgs (eval F n) σ env as τs with
     | (.inl vs, σ') => ∃ E' Ls, Inv σ' Γ' env E' S ∧ Vals σ' τs vs Ls ∧ Ls.flatten.Nodup ∧
         Disj Ls.flatten E' ∧ Disj Ls.flatten S ∧ Moves σ E σ' E' Ls.flatten
-    | (.inr r, _) => r = .timeout := by
+    | (.inr r, σ') => r = .timeout ∨ ∃ k, r = .fail k ∧ ∃ E', Inv σ' Γ' env E' S ∧ Moves σ E σ' E' [] := by
   intro hargs
   induction as generalizing Γ τs σ E with
   | nil =>
@@ -183,7 +279,7 @@ theorem args_ok (ihn : ∀ σ Γ env E S e τ Γ', Typed F Γ e τ Γ' → Inv �
       dsimp only
       obtain ⟨E₁, L₁, hI₁, hv₁, hd₁, hdS₁, hm₁⟩ := h1
       have h2 := ih hrest hI₁ hm₁.wf
-      generalize evalArgs (eval F n) σ1 env _ = r2 at h2 ⊢
+      generalize evalArgs (eval F n) σ1 env _ _ = r2 at h2 ⊢
       rcases r2 with ⟨r2, σ2⟩
       cases r2 with
       | inl vs =>
@@ -198,9 +294,31 @@ theorem args_ok (ihn : ∀ σ Γ env E S e τ Γ', Typed F Γ e τ Γ' → Inv �
         · simp only [List.flatten_cons]
           exact disj_append_left.mpr ⟨hdS₁, hdS₂⟩
         · simpa using hm₁.trans hm₂ hd₁ hwf
-      | inr r => exact h2
+      | inr r =>
+        rcases h2 with rfl | ⟨k, rfl, E₂, hI₂, hm₂⟩
+        · exact .inl rfl
+        -- A later argument failed: this one's value is dropped on the way out.
+        have hv₂ := hv₁.frame (hm₂.keeps hm₁.wf hv₁.alloc hd₁)
+        obtain ⟨hdE, -⟩ := hm₂.apart hm₁.wf hv₁.alloc hd₁
+        obtain ⟨σ3, hdrop, hn, hfree, hkeep⟩ := drop_ok _ σ2 v L₁ hv₂
+        simp only [Res.done, ↓reduceIte, hdrop]
+        refine .inr ⟨k, rfl, E₂, ⟨hI₂.foot.frame fun l hl => hkeep l fun h => ?_, hI₂.nodup, hI₂.disj,
+          hI₂.keys⟩, ?_⟩
+        · rcases List.mem_append.mp hl with hl | hl
+          · exact hdE l h hl
+          · exact hdS₁ l h hl
+        · refine ((hm₁.trans hm₂ hd₁ hwf).relabel (E'' := E₂ ++ L₁) (L'' := []) fun x => by mem_iff).trans
+            (Moves.free (E := E₂ ++ L₁) (E' := E₂) (D := L₁) (WF.of_free hm₂.wf hn hfree hkeep) hn
+              (fun l hl => by
+                rcases List.mem_append.mp hl with hl | hl
+                · exact hI₂.alloc l hl
+                · exact hv₂.alloc l hl)
+              (fun x => by simp) hfree hkeep hdE.symm) disj_nil_left hwf |>.relabel fun x => by simp
+    | fail k =>
+      obtain ⟨E₁, hI₁, hm₁⟩ := h1
+      exact .inr ⟨k, rfl, E₁, hI₁.weaken (args_weaker hrest (by rw [typed_keys ha]; exact hI.keys)), hm₁⟩
     | stuck => simp [Post] at h1
-    | timeout => rfl
+    | timeout => exact .inl rfl
 
 /-! ## Binding the owned parameters -/
 
@@ -303,44 +421,18 @@ def Slot.shape : Slot → Slot
 
 def shape (Γ : Ctx) : Ctx := Γ.map fun p => (p.1, p.2.shape)
 
-theorem setSlot_shape : ∀ {Γ : Ctx}, (Γ.map Prod.fst).Nodup → lookup x Γ = some s →
-    s'.shape = s.shape → shape (setSlot Γ x s') = shape Γ
-  | [], _, h, _ => by simp [lookup] at h
-  | (y, t) :: Γ, hk, hx, hs => by
-    simp only [List.map_cons] at hk
-    obtain ⟨hy, hk⟩ := List.nodup_cons.mp hk
-    by_cases hxy : x = y
-    · subst hxy
-      simp only [lookup, ↓reduceIte, Option.some.injEq] at hx
-      subst hx
-      rw [setSlot_head Γ hy]
-      simp [shape, hs]
-    · rw [setSlot_tail Γ (Ne.symm hxy)]
-      simp only [lookup, hxy, ↓reduceIte] at hx
-      have := setSlot_shape hk hx hs
-      simp only [shape, List.map_cons] at this ⊢
-      rw [this]
+theorem Slot.Le.shape : Slot.Le s' s → s'.shape = s.shape
+  | .refl => rfl
+  | .forget => rfl
 
-mutual
-theorem typed_shape : Typed F Γ e τ Γ' → (Γ.map Prod.fst).Nodup → shape Γ' = shape Γ
-  | .lit, _ => rfl
-  | .read _, _ => rfl
-  | .move hx, hk => setSlot_shape hk hx rfl
-  | .add ha hb, hk => (typed_shape hb (by rw [typed_keys ha]; exact hk)).trans (typed_shape ha hk)
-  | .new ha, hk => typed_shape ha hk
-  | .let_ hx ha hb, hk => by
-    have := typed_shape hb (List.nodup_cons.mpr ⟨by rw [typed_keys ha]; exact lookup_none_keys hx,
-      by rw [typed_keys ha]; exact hk⟩)
-    simp only [shape, List.map_cons, List.cons.injEq] at this
-    exact this.2.trans (typed_shape ha hk)
-  | .write ha _, hk => typed_shape ha hk
-  | .assign ha _, hk => typed_shape ha hk
-  | .call _ hargs _ _, hk => args_shape hargs hk
-  | .seq ha hb, hk => (typed_shape hb (by rw [typed_keys ha]; exact hk)).trans (typed_shape ha hk)
-theorem args_shape : Args F Γ as τs Γ' → (Γ.map Prod.fst).Nodup → shape Γ' = shape Γ
-  | .nil, _ => rfl
-  | .cons ha hrest, hk => (args_shape hrest (by rw [typed_keys ha]; exact hk)).trans (typed_shape ha hk)
-end
+theorem Weaker.shape : Weaker Γ' Γ → shape Γ' = shape Γ
+  | .nil => rfl
+  | .cons hle w => by
+    show (_, _) :: FlyCore.Ownership.shape _ = (_, _) :: FlyCore.Ownership.shape _
+    rw [hle.shape, w.shape]
+
+theorem typed_shape (h : Typed F Γ e τ Γ') (hk : (Γ.map Prod.fst).Nodup) : shape Γ' = shape Γ :=
+  (typed_weaker h hk).shape
 
 /-- Where the shape ends in borrows, so does the context: borrows are their own shape. -/
 theorem shape_split : ∀ (A : Ctx) {Γ : Ctx}, shape Γ = A ++ B → (∀ p ∈ B, ∃ m τ, p.2 = .ref m τ) →

@@ -173,6 +173,10 @@ theorem lookup_none_keys : lookup x Γ = none → x ∉ Γ.map Prod.fst := by
     · simp only [List.map_cons, List.mem_cons, not_or]
       exact ⟨by assumption, ih h⟩
 
+theorem Weaker.keys : Weaker Γ' Γ → Γ'.map Prod.fst = Γ.map Prod.fst
+  | .nil => rfl
+  | .cons _ h => by simp [h.keys]
+
 mutual
 theorem typed_keys : Typed F Γ e τ Γ' → Γ'.map Prod.fst = Γ.map Prod.fst
   | .lit => rfl
@@ -188,6 +192,12 @@ theorem typed_keys : Typed F Γ e τ Γ' → Γ'.map Prod.fst = Γ.map Prod.fst
   | .assign ha _ => typed_keys ha
   | .call _ hargs _ _ => args_keys hargs
   | .seq ha hb => (typed_keys hb).trans (typed_keys ha)
+  | .ite hc ha _ wa _ => wa.keys.trans ((typed_keys ha).trans (typed_keys hc))
+  | .throw_ ha => typed_keys ha
+  | .try_ _ hb hh => by
+    have := typed_keys hh
+    simp only [List.map_cons, List.cons.injEq] at this
+    exact this.2.trans (typed_keys hb)
 theorem args_keys : Args F Γ as τs Γ' → Γ'.map Prod.fst = Γ.map Prod.fst
   | .nil => rfl
   | .cons ha hrest => (args_keys hrest).trans (typed_keys ha)
