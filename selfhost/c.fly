@@ -431,8 +431,10 @@ impl Cgen {
           const inner = typeArg(t, 0);
           const d2 = if (self.needsDrop(inner)) { `${self.dropFn(inner, span)}(*v); ` } else { "" };
           body.push(`  if (*v && fly_arc_release(*v)) { ${d2}fly_arc_free(*v); }\n  *v = NULL;\n`);
-        } else if (self.namedIs(t, "Sender")) {
+        } else if (self.namedIs(t, "Sender") || self.namedIs(t, "Reply")) {
           body.push("  fly_sender_drop(v);\n");
+        } else if (self.namedIs(t, "Receiver") || self.namedIs(t, "Pending")) {
+          body.push("  fly_receiver_drop(v);\n");
         } else if (self.namedIs(t, "Mutex")) {
           const inner = typeArg(t, 0);
           if (self.needsDrop(inner)) { body.push(`  if (*v) ${self.dropFn(inner, span)}(*v);\n`); }
@@ -1971,11 +1973,19 @@ impl Cgen {
       }
       "channel" | "Reply_new" => {
         const tc = self.ctype(rt, span);
-        `({ fly_chan c_ = fly_channel(); (${tc}){ .f0 = c_, .f1 = c_ }; })`
+        // What drops a message left in the channel, or sent to it once no one receives.
+        const msg = match (rt) { #Tuple(ts) if ts.len() > 0 => typeArg(ts[0], 0), _ => #Error };
+        const drop = if (self.needsDrop(msg)) { `(void (*)(void*))${self.dropFn(msg, span)}` } else { "NULL".toString() };
+        `({ fly_chan c_ = fly_channel(${drop}); (${tc}){ .f0 = c_, .f1 = c_ }; })`
       }
-      "Sender_send" | "Reply_send" => {
+      "Sender_send" => {
         const tc = self.ctype(carried, span);
         `({ fly_chan c_ = ${arg(0)}; ${tc} v_ = ${arg(1)}; fly_send(c_, &v_, sizeof(${tc})); (fly_unit)0; })`
+      }
+      // A reply sent is done with: its channel's sending end is gone.
+      "Reply_send" => {
+        const tc = self.ctype(carried, span);
+        `({ fly_chan c_ = ${arg(0)}; ${tc} v_ = ${arg(1)}; fly_send(c_, &v_, sizeof(${tc})); fly_sender_drop(&c_); (fly_unit)0; })`
       }
       "Receiver_recv" => {
         const tc = self.ctype(carried, span);
@@ -1985,7 +1995,7 @@ impl Cgen {
       }
       "Pending_wait" => {
         const tc = self.ctype(rt, span);
-        `({ ${tc} x_; if (!fly_recv(${arg(0)}, &x_, sizeof(${tc})) && !fly_unwinding) fly_panic("the reply was dropped unsent"); x_; })`
+        `({ fly_chan c_ = ${arg(0)}; ${tc} x_; bool ok_ = fly_recv(c_, &x_, sizeof(${tc})); fly_receiver_drop(&c_); if (!ok_ && !fly_unwinding) fly_panic("the reply was dropped unsent"); x_; })`
       }
       "Sender_close" => `({ fly_close(${arg(0)}); (fly_unit)0; })`,
       "Sender_clone" => `({ fly_chan c_ = ${arg(0)}; fly_sender_clone(&c_); })`,

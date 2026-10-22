@@ -313,11 +313,13 @@ int fly_sock_status(fly_socket* s, unsigned code, fly_str body);
 void fly_sock_close(fly_socket* s);
 // A task running a closure that gives nothing: it calls it, then drops it.
 void fly_task_void(void* task, void* closure);
-fly_chan fly_channel(void);
+// A channel, given what drops a message of its, if anything must.
+fly_chan fly_channel(void (*drop)(void*));
 void fly_send(fly_chan c, const void* v, size_t size);
 bool fly_recv(fly_chan c, void* out, size_t size);
 void fly_close(fly_chan c);
 void fly_sender_drop(fly_chan* c);
+void fly_receiver_drop(fly_chan* c);
 fly_chan fly_sender_clone(const fly_chan* c);
 
 // ---- regions ----

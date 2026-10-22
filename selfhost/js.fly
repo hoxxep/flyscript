@@ -760,10 +760,14 @@ impl JsGen {
           }
           #Defer(flag, body) => {
             const fl = self.local(flag);
+            // A `defer` runs to its end: a cancellation meanwhile waits for it (§5.6).
             self.line(`if (${fl}) {`);
             self.cx.indent += 1;
             self.line(`${fl} = false;`);
+            self.line("$rt.cleaning(1);");
+            self.line("try {");
             self.block(body, span);
+            self.line("} finally { $rt.cleaning(-1); }");
             self.cx.indent -= 1;
             self.line("}");
           }

@@ -90,36 +90,41 @@ const { $rt, $b } = (() => {
   }
   // Runs `g` from `v` until it ends, or performs an operation of `effect`, whose arm's value is
   // the result; any other operation is passed on, and its answer back.
+  // While `g` is suspended here and its continuation not yet called, it is this generator's: if
+  // this one is left abruptly — an arm fails, or a handler around drops what this one is part of —
+  // `g`'s cleanup runs. An arm that returns normally may have kept the continuation, which then
+  // owns `g`.
   function* resume(g, v, effect, arms) {
-    let r = g.next(v);
-    for (;;) {
-      if (r.done) return r.value;
-      const op = r.value;
-      const ours = effect === YIELD ? op instanceof Yielded : op instanceof Op && op.effect === effect;
-      if (ours) {
-        const name = effect === YIELD ? "yield" : op.op;
-        const args = effect === YIELD ? [op.item] : op.args;
-        const arm = arms[name];
-        if (arm.length <= args.length) {
-          // An arm that does not resume: the body is done, its cleanup run first (§5.2).
-          yield* finish(g);
-          return yield* arm(...args);
+    let owned = true, abrupt = true;
+    try {
+      let r = g.next(v);
+      for (;;) {
+        if (r.done) { owned = false; return r.value; }
+        const op = r.value;
+        const ours = effect === YIELD ? op instanceof Yielded : op instanceof Op && op.effect === effect;
+        if (ours) {
+          const name = effect === YIELD ? "yield" : op.op;
+          const args = effect === YIELD ? [op.item] : op.args;
+          const arm = arms[name];
+          if (arm.length <= args.length) {
+            // An arm that does not resume: the body is done, its cleanup run first (§5.2).
+            owned = false;
+            yield* finish(g);
+            return yield* arm(...args);
+          }
+          const k = function* (x) {
+            if (!owned) panic("a continuation resumed twice");
+            owned = false;
+            return yield* resume(g, x, effect, arms);
+          };
+          const a = yield* arm(...args, k);
+          abrupt = false;
+          return a;
         }
-        let resumed = false;
-        const k = function* (x) {
-          if (resumed) panic("a continuation resumed twice");
-          resumed = true;
-          return yield* resume(g, x, effect, arms);
-        };
-        try {
-          return yield* arm(...args, k);
-        } catch (e) {
-          // An arm that fails before resuming leaves the body done: its cleanup runs.
-          if (!resumed) yield* finish(g);
-          throw e;
-        }
+        r = g.next(yield op);
       }
-      r = g.next(yield op);
+    } finally {
+      if (owned && abrupt) { owned = false; yield* finish(g); }
     }
   }
   // Ends a suspended generator, running its cleanup, which may perform what is handled around.
@@ -439,9 +444,17 @@ const { $rt, $b } = (() => {
     if (!sched.on) panic("deadlock: every task is waiting");
     yield new Point(wait);
   }
+  // A task waiting in its cleanup waits on: cleanup runs to its end, and the cancellation is
+  // delivered at the first scheduling point after it (§5.6).
   function cancel(t) {
     sched.cancelled.add(t);
+    if (sched.tasks.get(t)?.cleaning) return;
     if (sched.blocked.delete(t)) sched.ready.push(t);
+  }
+  function cleaning(d) {
+    if (!sched.on) return;
+    const t = sched.tasks.get(sched.current);
+    t.cleaning = (t.cleaning ?? 0) + d;
   }
   // Runs the tasks, starting with `main`, until `main` ends.
   function runTasks(main) {
@@ -453,7 +466,7 @@ const { $rt, $b } = (() => {
       let r;
       try {
         // A cancelled task unwinds at its next scheduling point; one not started never runs.
-        if (t.error === undefined && sched.cancelled.has(me)) t.error = new Cancelled();
+        if (t.error === undefined && sched.cancelled.has(me) && !t.cleaning) t.error = new Cancelled();
         const error = t.error, input = t.input;
         t.error = undefined;
         t.input = undefined;
@@ -756,7 +769,7 @@ const { $rt, $b } = (() => {
     channel: () => { const ch = channel(); return [{ ch }, { ch }]; },
     Reply_new: () => { const ch = channel(); return [{ ch }, { ch }]; },
     *Sender_send$g(s, v) { yield* send(s.ch, v); },
-    *Reply_send$g(s, v) { yield* send(s.ch, v); },
+    *Reply_send$g(s, v) { yield* send(s.ch, v); $b.Sender_drop({ v: s }); },
     *Receiver_recv$g(rx) { const m = yield* recv(rx.ch); return m === undefined ? none() : some(m.v); },
     *Pending_wait$g(p) { const m = yield* recv(p.ch); if (m === undefined) panic("the reply was dropped unsent"); return m.v; },
     *Sender_close$g(s) { yield* close(s.ch); },
@@ -766,6 +779,9 @@ const { $rt, $b } = (() => {
       sched.senders.set(ch, left);
       if (left === 0) { sched.closed.add(ch); wake("channel", ch); }
     },
+    Reply_drop(r) { $b.Sender_drop(r); },
+    Receiver_drop() {},
+    Pending_drop() {},
     Sender_clone: (s) => { sched.senders.set(s.ch, (sched.senders.get(s.ch) || 0) + 1); return { ch: s.ch }; },
     *Receiver_each(rx) { for (let m = yield* recv(rx.ch); m !== undefined; m = yield* recv(rx.ch)) yield new Yielded(m.v); },
     Mutex_new: (v) => ({ v }),
@@ -936,7 +952,7 @@ const { $rt, $b } = (() => {
     Fail, Panic, Return, YIELD, handle, run, drive, panic, raise, FieldRef, indexRef, rangeRef, yielded, isYield, perform, items,
     div, rem, ndiv, nrem, bits, fmod, truncFloat, truncNum, toInt, toNum, at, idx, slice, copy, showFloat, show,
     unmatched: (v) => panic(`no arm matched ${show(v)}`),
-    argStr, argList, argInt, argNum, start,
+    argStr, argList, argInt, argNum, start, cleaning,
     ...checks, ...wraps,
   };
   return { $rt, $b };

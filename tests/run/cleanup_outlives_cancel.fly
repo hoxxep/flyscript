@@ -1,0 +1,43 @@
+// expect: closing 1 at 1 ms
+// expect: closing 2 at 2 ms
+// expect: closed 1 at 11 ms
+// expect: closed 2 at 12 ms
+// expect: scope failed at 12 ms: #Boom
+// expect: after: closing 3 at 12 ms
+// expect: after: closed 3 at 22 ms
+// Cleanup runs to its end (§5.6, §6.1): a task cancelled while its `defer` performs `Io`, or
+// cancelled and unwinding into one, finishes the cleanup, and the cancellation takes effect after.
+// The scope waits for both cleanups before it rethrows the failure.
+import { println } from "std/io";
+
+function at(start: Instant): u64 uses Io { Io.now().since(start).toMs() }
+
+// Holds a connection; letting it go takes 10 ms of `Io`, which nothing may cut short.
+function hold(id: u32, work: u64, start: Instant, log: str): void uses Io {
+  defer {
+    println(`${log}closing ${id} at ${at(start)} ms`);
+    Io.sleep(Duration.ms(10));
+    println(`${log}closed ${id} at ${at(start)} ms`);
+  };
+  Io.sleep(Duration.ms(work));
+}
+
+export function main(): void uses Io {
+  const start = Io.now();
+  try {
+    Io.scope((s) => {
+      // Finishes its work at 1 ms and is still closing when the scope is cancelled at 2 ms.
+      s.spawn(() => hold(1, 1, start, ""));
+      // Cancelled at 2 ms in the middle of its work, so it unwinds into its cleanup at once.
+      s.spawn(() => hold(2, 1000, start, ""));
+      s.fork(() => {
+        Io.sleep(Duration.ms(2));
+        throw #Boom;
+      });
+    });
+  } catch (e) {
+    match (e) { #Boom => println(`scope failed at ${at(start)} ms: #Boom`) }
+  }
+  // A task not cancelled cleans up as ever.
+  hold(3, 0, start, "after: ");
+}

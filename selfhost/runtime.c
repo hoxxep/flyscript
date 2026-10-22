@@ -1040,7 +1040,16 @@ void fly_handle_free(fly_handler* h) {
   h->fiber = NULL;
 }
 
+#ifdef FLY_FREESTANDING
+static void cleaning(int d) { (void)d; }
+#else
+static void cleaning(int d);
+#endif
+
+// Cleanup — a `defer`'s body — runs to its end: a cancellation that comes meanwhile is delivered at
+// the task's first scheduling point after it (§5.6).
 fly_unwind_state fly_cleanup_begin(void) {
+  cleaning(1);
   fly_unwind_state s = { fly_err, fly_unwinding, fly_stopping };
   fly_err = NULL;
   fly_unwinding = false;
@@ -1049,6 +1058,7 @@ fly_unwind_state fly_cleanup_begin(void) {
 }
 
 void fly_cleanup_end(fly_unwind_state s) {
+  cleaning(-1);
   fly_err = s.err;
   fly_unwinding = s.unwinding;
   fly_stopping = s.stopping;
@@ -1514,12 +1524,14 @@ bool fly_world_quota(fly_str token) {
 static bool threads;
 static void mt_run(void (*main)(void), void (*entry)(void* task, void* closure));
 static void mt_point(void);
+static void mt_cleaning(int d);
 static void mt_sleep(uint64_t nanos);
 static int mt_spawn(int scope, void (*entry)(void* task, void* closure), void* closure, size_t size);
 static void mt_join(int task, void* out);
 static int mt_scope_open(void);
 static void mt_scope_close(int scope);
-static fly_chan mt_channel(void);
+static fly_chan mt_channel(void (*drop)(void*));
+static void mt_receiver_gone(fly_chan ch);
 static void mt_send(fly_chan ch, const void* v, size_t size);
 static bool mt_recv(fly_chan ch, void* out, size_t size);
 static void mt_sender_gone(fly_chan ch);
@@ -1543,11 +1555,15 @@ typedef struct {
   // The panic the task ended with, if it did.
   char* panic;
   bool started, finished, cancelled, deliver_cancel, deliver_deadlock;
+  // How deep it is in cleanup, which a cancellation waits for.
+  int cleaning;
   int wait_kind, wait_id;
   uint64_t until;
 } task_t;
 
-typedef struct { uint8_t* items; size_t len, head, size; long senders; bool closed; } chan_t;
+// A channel: what was sent and not yet received, its senders, whether its receiver is gone, and
+// what drops a message, which it does to those no one will receive.
+typedef struct { uint8_t* items; size_t len, head, size; long senders; bool closed, deaf; void (*drop)(void*); } chan_t;
 typedef struct { int owner; int* tasks; size_t ntasks; fly_failure* failure; char* panic; } scope_t;
 
 bool fly_tasks_on = false;
@@ -1650,7 +1666,7 @@ static void wake_until(uint64_t due) {
 
 static void cancel(int t) {
   sched.tasks[t]->cancelled = true;
-  if (remove_blocked(t)) push_ready(t);
+  if (!sched.tasks[t]->cleaning && remove_blocked(t)) push_ready(t);
 }
 
 void fly_panic_deadlock(void) { fly_panic("deadlock: every task is waiting"); }
@@ -1676,6 +1692,13 @@ void fly_point(void) {
   if (threads) { mt_point(); return; }
 #endif
   if (fly_tasks_on) suspend_task(WAIT_NONE, 0);
+}
+
+static void cleaning(int d) {
+#ifdef FLY_THREADS
+  if (threads) { mt_cleaning(d); return; }
+#endif
+  if (fly_tasks_on) sched.tasks[sched.current]->cleaning += d;
 }
 
 // Sleeping waits for the virtual clock, which passes only when no task can run; without a
@@ -1744,7 +1767,7 @@ void fly_tasks_run(void (*main)(void)) {
     int me = sched.current;
     task_t* t = sched.tasks[me];
     // A cancelled task unwinds at its next scheduling point; one not started never runs.
-    if (!t->deliver_deadlock && t->cancelled) t->deliver_cancel = true;
+    if (!t->deliver_deadlock && t->cancelled && !t->cleaning) t->deliver_cancel = true;
     if (!t->started) {
       t->started = true;
       if (t->deliver_cancel) {
@@ -1902,16 +1925,27 @@ void fly_scope_close(int sid, bool body_failed) {
 
 // ---- channels ----
 
-fly_chan fly_channel(void) {
+fly_chan fly_channel(void (*drop)(void*)) {
 #ifdef FLY_THREADS
-  if (threads) return mt_channel();
+  if (threads) return mt_channel(drop);
 #endif
   int id = sched.next++;
   grow_ids(id);
   chan_t* c = fly_alloc(sizeof(chan_t));
   c->senders = 1;
+  c->drop = drop;
   sched.chans[id] = c;
   return (fly_chan){ id };
+}
+
+// A channel both of whose ends are gone is freed, and the messages in it dropped.
+static void chan_maybe_free(int id) {
+  chan_t* c = sched.chans[id];
+  if (c->senders > 0 || !c->deaf) return;
+  if (c->drop) for (size_t i = c->head; i < c->len; i++) c->drop(c->items + i * c->size);
+  free(c->items);
+  free(c);
+  sched.chans[id] = NULL;
 }
 
 void fly_send(fly_chan ch, const void* v, size_t size) {
@@ -1919,6 +1953,12 @@ void fly_send(fly_chan ch, const void* v, size_t size) {
   if (threads) { mt_send(ch, v, size); return; }
 #endif
   chan_t* c = sched.chans[ch.ch];
+  // No one will receive it.
+  if (c->deaf) {
+    if (c->drop) c->drop((void*)v);
+    fly_point();
+    return;
+  }
   c->size = size;
   c->items = realloc(c->items, (c->len + 1) * (size ? size : 1));
   memcpy(c->items + c->len * size, v, size);
@@ -1948,6 +1988,19 @@ bool fly_recv(fly_chan ch, void* out, size_t size) {
 static void sender_gone(chan_t* c, int id) {
   c->senders = c->senders > 0 ? c->senders - 1 : 0;
   if (c->senders == 0) { c->closed = true; wake(WAIT_CHANNEL, id); }
+  chan_maybe_free(id);
+}
+
+// The receiving end dropped: what is sent from now on is dropped, and the channel freed once its
+// senders are gone too.
+void fly_receiver_drop(fly_chan* ch) {
+#ifdef FLY_THREADS
+  if (threads) { if (ch->ch) mt_receiver_gone(*ch); ch->ch = 0; return; }
+#endif
+  if (!ch->ch) return;
+  sched.chans[ch->ch]->deaf = true;
+  chan_maybe_free(ch->ch);
+  ch->ch = 0;
 }
 
 void fly_close(fly_chan ch) {
@@ -2137,6 +2190,8 @@ struct mt_task {
   // `Fiber` until it is joined.
   int refs;
   bool started, cancelled, yielded;
+  // How deep it is in cleanup, which a cancellation waits for.
+  int cleaning;
   // Its joiners, and whether it has finished, under their queue's lock.
   waitq joiners;
   bool finished;
@@ -2168,7 +2223,7 @@ struct mt_scope {
 
 // A channel: what was sent and not yet received, in a ring, and the receivers waiting, under its
 // queue's lock.
-typedef struct { waitq q; uint8_t* items; size_t head, len, cap, size; long senders; bool closed; } mt_chan;
+typedef struct { waitq q; uint8_t* items; size_t head, len, cap, size; long senders; bool closed, deaf; void (*drop)(void*); } mt_chan;
 
 struct worker {
   int index;
@@ -2279,7 +2334,7 @@ static void wait_in(waitq* q, bool cancellable) {
   mt_task* t = running;
   q_append(q, t);
   __atomic_store_n(&t->waiting, q, __ATOMIC_SEQ_CST);
-  if (cancellable && __atomic_load_n(&t->cancelled, __ATOMIC_SEQ_CST)) {
+  if (cancellable && __atomic_load_n(&t->cancelled, __ATOMIC_SEQ_CST) && !__atomic_load_n(&t->cleaning, __ATOMIC_SEQ_CST)) {
     q_remove(q, t);
     __atomic_store_n(&t->waiting, NULL, __ATOMIC_SEQ_CST);
     spin_unlock(&q->lock);
@@ -2294,7 +2349,7 @@ static void wait_in(waitq* q, bool cancellable) {
 // Whether the running task has been cancelled: it unwinds from here (§6.1).
 static bool cancelled_here(void) {
   mt_task* t = running;
-  if (t && __atomic_load_n(&t->cancelled, __ATOMIC_ACQUIRE)) {
+  if (t && __atomic_load_n(&t->cancelled, __ATOMIC_ACQUIRE) && !__atomic_load_n(&t->cleaning, __ATOMIC_SEQ_CST)) {
     fly_unwinding = true;
     return true;
   }
@@ -2304,6 +2359,8 @@ static bool cancelled_here(void) {
 // Cancels a task: one running or queued sees it at its next scheduling point; one waiting is woken.
 static void cancel_task(mt_task* t) {
   __atomic_store_n(&t->cancelled, true, __ATOMIC_SEQ_CST);
+  // One in cleanup is left to finish it; it sees the cancellation at its next scheduling point.
+  if (__atomic_load_n(&t->cleaning, __ATOMIC_SEQ_CST)) return;
   for (;;) {
     waitq* q = __atomic_load_n(&t->waiting, __ATOMIC_SEQ_CST);
     if (!q) return;
@@ -2317,6 +2374,11 @@ static void cancel_task(mt_task* t) {
     }
     spin_unlock(&q->lock);
   }
+}
+
+static void mt_cleaning(int d) {
+  mt_task* t = running;
+  if (t) __atomic_fetch_add(&t->cleaning, d, __ATOMIC_SEQ_CST);
 }
 
 // A scheduling point: a cancellation is delivered, and the worker's other tasks get a turn.
@@ -2873,15 +2935,39 @@ static void mt_scope_close(int id) {
   if (failer) task_unref(failer);
 }
 
-static fly_chan mt_channel(void) {
+static fly_chan mt_channel(void (*drop)(void*)) {
   mt_chan* c = fly_alloc(sizeof(mt_chan));
   c->senders = 1;
+  c->drop = drop;
   return (fly_chan){ obj_new(c) };
+}
+
+// Frees a channel both of whose ends are gone, which nothing else can reach.
+static void mt_chan_free(int id, mt_chan* c) {
+  if (c->drop) for (size_t i = 0; i < c->len; i++) c->drop(c->items + ((c->head + i) % c->cap) * c->size);
+  free(c->items);
+  obj_clear(id);
+  free(c);
+}
+
+static void mt_receiver_gone(fly_chan ch) {
+  mt_chan* c = obj_get(ch.ch);
+  spin_lock(&c->q.lock);
+  c->deaf = true;
+  bool gone = c->senders == 0;
+  spin_unlock(&c->q.lock);
+  if (gone) mt_chan_free(ch.ch, c);
 }
 
 static void mt_send(fly_chan ch, const void* v, size_t size) {
   mt_chan* c = obj_get(ch.ch);
   spin_lock(&c->q.lock);
+  if (c->deaf) {
+    spin_unlock(&c->q.lock);
+    if (c->drop) c->drop((void*)v);
+    mt_point();
+    return;
+  }
   if (c->len == c->cap) {
     size_t cap = c->cap ? c->cap * 2 : 8;
     uint8_t* items = fly_alloc(cap * (size ? size : 1));
@@ -2927,7 +3013,9 @@ static void mt_sender_gone(fly_chan ch) {
     c->closed = true;
     wake_all(&c->q);
   }
+  bool gone = c->senders == 0 && c->deaf;
   spin_unlock(&c->q.lock);
+  if (gone) mt_chan_free(ch.ch, c);
 }
 
 static void mt_sender_clone(fly_chan ch) {

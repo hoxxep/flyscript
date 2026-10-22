@@ -34,6 +34,11 @@ impl<T extends Send> Mutex<T> {
 impl<T> Receiver<T> {
   export function recv(self: readonly Self): Option<T> uses Io;
 }
+// A receiver dropped: what is sent from then on is dropped, and the channel is freed once its
+// senders are gone too.
+impl<T> Drop for Receiver<T> {
+  function drop(self: mut Self): void;
+}
 impl<T> Iterable<T, [Io]> for Receiver<T> {
   function each(self: readonly Self): void uses Yield<T>, Io;
 }
@@ -45,4 +50,12 @@ impl<T> Reply<T> {
 }
 impl<T> Pending<T> {
   export function wait(self: Self): T uses Io;
+}
+// A reply dropped unsent ends the wait for it: `wait` panics. A `Pending` dropped unwaited for is
+// done with.
+impl<T> Drop for Reply<T> {
+  function drop(self: mut Self): void;
+}
+impl<T> Drop for Pending<T> {
+  function drop(self: mut Self): void;
 }

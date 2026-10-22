@@ -552,7 +552,12 @@ impl Interp {
                 None => Ok(Value::Unit),
             };
         }
-        // `defer`s run in reverse order however the block exits (§5.6).
+        // `defer`s run in reverse order however the block exits (§5.6), and to their end: a
+        // cancellation meanwhile takes effect after them.
+        let cleans = !defers.is_empty() || !env.lock().owned.is_empty();
+        if cleans {
+            self.sched.cleaning(self.task, true);
+        }
         for d in defers.iter().rev() {
             if let Err(e) = self.expr(d, &env)
                 && result.is_ok() {
@@ -564,19 +569,27 @@ impl Interp {
             && result.is_ok() {
                 result = Err(e);
             }
+        if cleans {
+            self.sched.cleaning(self.task, false);
+        }
         result
     }
 
-    /// Drops the owned bindings of a scope, newest first, except what was moved out of them.
+    /// Drops the owned bindings of a scope, newest first, except what was moved out of them. A
+    /// destructor that panics leaves the others to run; the first panic is the scope's.
     fn drop_scope(&mut self, env: &Env) -> Result<(), Ctl> {
         let owned = std::mem::take(&mut env.lock().owned);
+        let mut result = Ok(());
         for (name, ty) in owned.into_iter().rev() {
             let moved = env.lock().moved.get(&name).cloned().unwrap_or_default();
             let Some(cell) = env.lock().vars.iter().rev().find(|(n, _)| *n == name).map(|(_, c)| c.clone()) else { continue };
             let v = cell.lock().expect("cell").clone();
-            self.drop_value(v, &ty, &moved)?;
+            if let Err(e) = self.drop_value(v, &ty, &moved)
+                && result.is_ok() {
+                    result = Err(e);
+                }
         }
-        Ok(())
+        result
     }
 
     /// A value bound to an owned binding is read out of any borrow it arrived as.

@@ -296,7 +296,20 @@ impl Interp {
                     Value::Native(_, ch) => ch,
                     other => return Err(panic(format!("not a sender: {}", other.show()))),
                 };
-                self.sched.send(self.task, ch, a(1))?;
+                self.sched.deliver(ch, a(1));
+                // A reply sent is done with: its channel's sending end is gone.
+                if key == "Reply.send" {
+                    self.sched.sender_gone(ch);
+                }
+                self.sched.yield_now(self.task)?;
+                Ok(Value::Unit)
+            }
+            // A dropped receiving end leaves its channel to the host's memory; an unsent reply
+            // ends the wait for it.
+            "Receiver.drop" | "Pending.drop" => Ok(Value::Unit),
+            "Reply.drop" => {
+                let ch = native(&a(0), "Reply")?;
+                self.sched.sender_gone(ch);
                 Ok(Value::Unit)
             }
             "Receiver.recv" => {
@@ -343,9 +356,14 @@ impl Interp {
                 set(&p, Value::List(Vec::new().into()));
                 Ok(gens_mod::new_gen(self, GenKind::Items { items, pos: 0 }))
             }
-            "Sender.close" | "Sender.drop" => {
+            "Sender.close" => {
                 let ch = native(&a(0), "Sender")?;
                 self.sched.close(self.task, ch)?;
+                Ok(Value::Unit)
+            }
+            "Sender.drop" => {
+                let ch = native(&a(0), "Sender")?;
+                self.sched.sender_gone(ch);
                 Ok(Value::Unit)
             }
             "Receiver.each" => {

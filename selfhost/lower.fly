@@ -2445,8 +2445,9 @@ impl Lower {
     const it = stripBorrow(self.exprTy(iter.id));
     if (self.namedIs(it, "Receiver")) {
       const itemTy = typeArg(it, 0);
+      // The receiver, read where it is: a loop over a place borrows it, one over a value owns it.
       const cv = self.valueOf(iter);
-      const ch = self.temp(it.clone());
+      const ch = if (isPlaceExpr(iter)) { self.unownedTemp(it.clone()) } else { self.temp(it.clone()) };
       self.emit(#Let(ch, #Use(cv)));
       self.loops.push({ label: l });
       self.push();

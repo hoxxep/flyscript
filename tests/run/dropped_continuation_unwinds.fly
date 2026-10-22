@@ -1,0 +1,24 @@
+// expect: cleanup held
+// expect: 42
+// An arm of an outer handler that does not resume drops the continuation, so the body unwinds:
+// through an inner handler's arm and its body, whose `defer` runs (§5.2, §5.3).
+import { println } from "std/io";
+
+effect Log { info(msg: str): void; }
+effect Bail { bail(): i32; }
+
+function inner(): void uses Log, Io {
+  let g = "held".toString();
+  defer { println(`cleanup ${g}`); };
+  Log.info(g.asStr());
+  println("not reached");
+}
+
+export function main(): void uses Io {
+  const res = handle {
+    handle { inner(); 0 } with Log {
+      info(m) resumes k => { const _ = Bail.bail(); k() }
+    }
+  } with Bail { bail() => 42 };
+  println(`${res}`);
+}

@@ -1,0 +1,39 @@
+// expect: the scope failed: #Bad
+// expect: 16 cleanups finished
+// Tasks cancelled while they wait unwind into a `defer` that performs `Io` — a sleep, then a send —
+// which runs to its end on whichever core (§5.6): the scope waits for every one before it fails.
+import { println } from "std/io";
+import { channel } from "std/sync";
+
+export function main(): void uses Io {
+  const [started, ready] = channel<u32>();
+  const [done, finished] = channel<u32>();
+  const r = try {
+    Io.scope((s) => {
+      for (const i of 0..16) {
+        const up = started.clone();
+        const out = done.clone();
+        s.spawn(() => {
+          defer {
+            Io.sleep(Duration.ms(2));
+            out.send(i);
+          };
+          up.send(i);
+          Io.sleep(Duration.secs(60));
+        });
+      }
+      // Fails once every task has begun, so every one has its cleanup to run.
+      const bad = s.fork(() => {
+        for (const _ of 0..16) { ready.recv(); }
+        throw #Bad
+      });
+      bad.join()
+    });
+    "no failure".toString()
+  } catch (e) { `the scope failed: ${e}` };
+  done.close();
+  let n = 0;
+  for (const _ of finished) { n += 1; }
+  println(r);
+  println(`${n} cleanups finished`);
+}

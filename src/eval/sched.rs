@@ -41,6 +41,8 @@ struct Inner {
     senders: HashMap<u64, usize>,
     /// Tasks whose scope was cancelled: they unwind at their next scheduling point.
     cancelled: HashSet<u64>,
+    /// How deep each task is in cleanup, which runs to its end: a cancellation waits for it.
+    cleaning: HashMap<u64, u32>,
 }
 
 pub struct Sched {
@@ -64,6 +66,7 @@ impl Sched {
                 closed: HashSet::new(),
                 senders: HashMap::new(),
                 cancelled: HashSet::new(),
+                cleaning: HashMap::new(),
             }),
             turn: Condvar::new(),
         })
@@ -100,16 +103,20 @@ impl Sched {
             }
             inner = self.turn.wait(inner).expect("scheduler");
         }
-        if inner.cancelled.contains(&me) {
+        if inner.cancelled.contains(&me) && !inner.cleaning.contains_key(&me) {
             return Err(Ctl::Cancelled);
         }
         Ok(())
     }
 
     /// Cancels task `t`: if it is waiting, it wakes, and at its next scheduling point it unwinds.
+    /// One waiting in its cleanup waits on, and unwinds at its first scheduling point after it.
     pub fn cancel(&self, t: u64) {
         let mut inner = self.inner.lock().expect("scheduler");
         inner.cancelled.insert(t);
+        if inner.cleaning.contains_key(&t) {
+            return;
+        }
         if let Some(i) = inner.blocked.iter().position(|(b, _)| *b == t) {
             inner.blocked.remove(i);
             inner.ready.push(t);
@@ -119,6 +126,19 @@ impl Sched {
     /// Task `t` has unwound to the scope that cancelled it, and runs on.
     pub fn uncancel(&self, t: u64) {
         self.inner.lock().expect("scheduler").cancelled.remove(&t);
+    }
+
+    /// Task `me` begins cleanup (§5.6), or ends it: in between, it is not cancelled.
+    pub fn cleaning(&self, me: u64, begin: bool) {
+        let mut inner = self.inner.lock().expect("scheduler");
+        if begin {
+            *inner.cleaning.entry(me).or_insert(0) += 1;
+        } else if let Some(n) = inner.cleaning.get_mut(&me) {
+            *n -= 1;
+            if *n == 0 {
+                inner.cleaning.remove(&me);
+            }
+        }
     }
 
     /// A new task, ready to run when the scheduler picks it.
@@ -215,13 +235,11 @@ impl Sched {
         *self.inner.lock().expect("scheduler").senders.entry(ch).or_insert(0) += 1;
     }
 
-    pub fn send(&self, me: u64, ch: u64, v: Value) -> Result<(), Ctl> {
-        {
-            let mut inner = self.inner.lock().expect("scheduler");
-            inner.channels.entry(ch).or_default().push_back(v);
-            Self::wake(&mut inner, &Wait::Channel(ch));
-        }
-        self.yield_now(me)
+    /// Puts `v` in channel `ch`, waking its receiver; sending is that and a scheduling point.
+    pub fn deliver(&self, ch: u64, v: Value) {
+        let mut inner = self.inner.lock().expect("scheduler");
+        inner.channels.entry(ch).or_default().push_back(v);
+        Self::wake(&mut inner, &Wait::Channel(ch));
     }
 
     /// The next message, or `None` once the channel is closed and drained.
@@ -242,17 +260,21 @@ impl Sched {
 
     /// No more messages will be sent on `ch`: its receivers wake to drain it.
     pub fn close(&self, me: u64, ch: u64) -> Result<(), Ctl> {
-        {
-            let mut inner = self.inner.lock().expect("scheduler");
-            let left = inner.senders.get_mut(&ch).map(|n| {
-                *n = n.saturating_sub(1);
-                *n
-            });
-            if left.unwrap_or(0) == 0 {
-                inner.closed.insert(ch);
-                Self::wake(&mut inner, &Wait::Channel(ch));
-            }
-        }
+        self.sender_gone(ch);
         self.yield_now(me)
+    }
+
+    /// A sender of `ch` is gone, dropped: a destructor does not suspend, so this is no scheduling
+    /// point.
+    pub fn sender_gone(&self, ch: u64) {
+        let mut inner = self.inner.lock().expect("scheduler");
+        let left = inner.senders.get_mut(&ch).map(|n| {
+            *n = n.saturating_sub(1);
+            *n
+        });
+        if left.unwrap_or(0) == 0 {
+            inner.closed.insert(ch);
+            Self::wake(&mut inner, &Wait::Channel(ch));
+        }
     }
 }
