@@ -92,12 +92,10 @@ export function checkFn(p: mut Program, fid: usize): void {
   if (fdecl.sig.isComptime) { return; }
   // A body that uses `comptime` code is expanded first (§7.2).
   if (!p.bodies.has(fid)) {
-    if (const #Some(b) = fdecl.body.clone()) {
-      if (blockHasComptime(b)) {
-        let ex = expander(mut p, module, #None, Vec.new());
-        fdecl.body = ex.body(b);
-        p.bodies.insert(fid, fdecl.clone());
-      }
+    if (const #Some(b) = fdecl.body.clone() && blockHasComptime(b)) {
+      let ex = expander(mut p, module, #None, Vec.new());
+      fdecl.body = ex.body(b);
+      p.bodies.insert(fid, fdecl.clone());
     }
   }
   const body = match (fdecl.body) { #Some(b) => b.clone(), #None => return };
@@ -450,14 +448,12 @@ impl Checker {
       // A record with a struct's fields: the struct is a new type, named where it is built.
       let hint = String.new();
       let recordHint = false;
-      if (const [#Record(r), #Named(d, _)] = [self.strip(found), self.strip(expected)]) {
-        if (const #Struct { fields: #Some(fields) } = self.p.defs[d].kind) {
-          const e = self.s.expandRow(r);
-          if (fields.len() == e.labels.len() && fields.iter().every(([k, _]) => labelHas(e.labels, k.asStr()))) {
-            const n = self.p.defs[d].name.clone();
-            hint = `: a record is not a \`${n}\`; build it as one with \`${n} { … }\`, or give its binding the type \`${n}\``;
-            recordHint = true;
-          }
+      if (const [#Record(r), #Named(d, _)] = [self.strip(found), self.strip(expected)] && const #Struct { fields: #Some(fields) } = self.p.defs[d].kind) {
+        const e = self.s.expandRow(r);
+        if (fields.len() == e.labels.len() && fields.iter().every(([k, _]) => labelHas(e.labels, k.asStr()))) {
+          const n = self.p.defs[d].name.clone();
+          hint = `: a record is not a \`${n}\`; build it as one with \`${n} { … }\`, or give its binding the type \`${n}\``;
+          recordHint = true;
         }
       }
       if (!recordHint) { hint = match (self.enumHint(found, expected)) { #Some(h) => h, #None => String.new() }; }
@@ -624,13 +620,9 @@ impl Checker {
     const fail = self.known("Fail");
     for (const i of 0..row.effs.len()) {
       if (row.effs[i].def == fail) {
-        if (const #Some(t) = row.effs[i].args.first()) {
-          if (const #Union(r) = self.s.resolve(t)) {
-            if (r.tail == #Closed) {
-              const tail = self.s.freshRowTail();
-              row.effs[i].args[0] = #Union(Row { labels: r.labels.clone(), tail });
-            }
-          }
+        if (const #Some(t) = row.effs[i].args.first() && const #Union(r) = self.s.resolve(t) && r.tail == #Closed) {
+          const tail = self.s.freshRowTail();
+          row.effs[i].args[0] = #Union(Row { labels: r.labels.clone(), tail });
         }
       }
     }
@@ -950,12 +942,10 @@ impl Checker {
   function tag(self: mut Self, name: str, args: readonly TagArgs, expected: Option<Ty>, span: Span, id: usize): Ty {
     // The payload type expected for this tag, if the context names it.
     let known: Option<Option<Ty>> = #None;
-    if (const #Some(x) = expected) {
-      if (const #Some([tags, tail]) = self.tagPayloads(x)) {
-        match (labelGet(tags, name)) {
-          #Some(t) => { known = #Some(#Some(t)); }
-          #None => { if (tail == #Closed) { known = #Some(#None); } }
-        }
+    if (const #Some(x) = expected && const #Some([tags, tail]) = self.tagPayloads(x)) {
+      match (labelGet(tags, name)) {
+        #Some(t) => { known = #Some(#Some(t)); }
+        #None => { if (tail == #Closed) { known = #Some(#None); } }
       }
     }
     if (const #Some(#None) = known) {
@@ -1397,15 +1387,13 @@ impl Checker {
           const ty = self.p.spliced[i].clone();
           return self.callOnType(ty, name.name.asStr(), explicit, args, expected, e);
         }
-        if (const #Ident(tname) = target.kind) {
-          if (self.local(tname.asStr()).isNone()) {
-            const param: Option<Sym> = match (self.scope.params.get(tname.asStr())) { #Some([sym, _]) => #Some(sym.clone()), #None => #None };
-            if (const #Some(sym) = param) {
-              return self.callOnType(#Param(sym), name.name.asStr(), explicit, args, expected, e);
-            }
-            if (const #Some(#Def(d)) = self.p.lookup(self.module, tname.asStr())) {
-              return self.callStatic(d, name.name.asStr(), explicit, args, expected, e);
-            }
+        if (const #Ident(tname) = target.kind && self.local(tname.asStr()).isNone()) {
+          const param: Option<Sym> = match (self.scope.params.get(tname.asStr())) { #Some([sym, _]) => #Some(sym.clone()), #None => #None };
+          if (const #Some(sym) = param) {
+            return self.callOnType(#Param(sym), name.name.asStr(), explicit, args, expected, e);
+          }
+          if (const #Some(#Def(d)) = self.p.lookup(self.module, tname.asStr())) {
+            return self.callStatic(d, name.name.asStr(), explicit, args, expected, e);
           }
         }
         const recv = self.expr(target, #None);
@@ -1418,16 +1406,14 @@ impl Checker {
     // through any borrow, a `mut` one through a `mut` borrow, a `once` one only by move.
     const through: Option<bool> = match (self.s.resolve(t)) { #Borrow(m, _) => #Some(m), _ => #None };
     // A continuation is called once, like a `once` function (§5.3).
-    if (const #Named(d, cargs) = self.strip(t)) {
-      if (d == self.known("Cont")) {
-        const a = match (cargs.first()) { #Some(#Ty(x)) => x.clone(), _ => return #Error };
-        const b = match (cargs.get(1)) { #Some(#Ty(x)) => x.clone(), _ => return #Error };
-        if (through.isSome()) { self.err(callee.span, "a continuation is called only by moving it"); }
-        const params: Vec<Ty> = if (a == voidTy()) { Vec.new() } else { [a.clone()] };
-        self.checkArgs(params, args, span);
-        if (const #Some(#Row(row)) = cargs.get(2)) { self.perform(row.clone(), span, e.id); }
-        return b;
-      }
+    if (const #Named(d, cargs) = self.strip(t) && d == self.known("Cont")) {
+      const a = match (cargs.first()) { #Some(#Ty(x)) => x.clone(), _ => return #Error };
+      const b = match (cargs.get(1)) { #Some(#Ty(x)) => x.clone(), _ => return #Error };
+      if (through.isSome()) { self.err(callee.span, "a continuation is called only by moving it"); }
+      const params: Vec<Ty> = if (a == voidTy()) { Vec.new() } else { [a.clone()] };
+      self.checkArgs(params, args, span);
+      if (const #Some(#Row(row)) = cargs.get(2)) { self.perform(row.clone(), span, e.id); }
+      return b;
     }
     match (self.strip(t)) {
       #Fn(f) if through.isSome() && (f.mode == #Once || (f.mode == #Mut && through == #Some(false))) => {
@@ -1517,11 +1503,9 @@ impl Checker {
     const retVar = match (self.s.resolve(inst.ret)) { #Var(_) => true, _ => false };
     const lentVar = (retVar && match (expected) { #Some(x) => match (self.s.resolve(x)) { #Borrow(false, _) => true, _ => false }, #None => false })
       || (recv.isSome() && retVar);
-    if (const #Some(x) = expected) {
-      if (!lentVar) {
-        const ret = inst.ret.clone();
-        if (!self.tryUnify(ret, x)) { self.lends(ret, x); }
-      }
+    if (const #Some(x) = expected && !lentVar) {
+      const ret = inst.ret.clone();
+      if (!self.tryUnify(ret, x)) { self.lends(ret, x); }
     }
     let params: Vec<Ty> = Vec.new();
     for (const [_, t] of inst.params) { params.push(t.clone()); }
@@ -1544,11 +1528,9 @@ impl Checker {
 
   // `Type.f(…)`: an effect operation, or a function in an `impl` of the type without `self`.
   function callStatic(self: mut Self, def: usize, name: str, explicit: readonly Vec<Ty>, args: readonly Vec<Expr>, expected: Option<Ty>, e: readonly Expr): Ty {
-    if (const #Effect { ops } = self.p.defs[def].kind) {
-      if (const #Some([_, op]) = ops.iter().find(([n, _]) => n == name)) {
-        const o = op.clone();
-        return self.callOp(def, o, args, expected, e);
-      }
+    if (const #Effect { ops } = self.p.defs[def].kind && const #Some([_, op]) = ops.iter().find(([n, _]) => n == name)) {
+      const o = op.clone();
+      return self.callOp(def, o, args, expected, e);
     }
     let candidate: Option<usize> = #None;
     for (const imp of self.p.impls) {
@@ -1574,14 +1556,10 @@ impl Checker {
 
   // `T.f(…)` for a function of an interface `T` implements, without `self` (`User.decode(p)`).
   function callOnType(self: mut Self, ty: readonly Ty, name: str, explicit: readonly Vec<Ty>, args: readonly Vec<Expr>, expected: Option<Ty>, e: readonly Expr): Ty {
-    if (const #Param(sym) = ty) {
-      if (const #Some(bounds) = self.bounds.get(sym.id)) {
-        if (const #Some([fid, #Named(_, bargs)]) = self.p.boundMethod(bounds.clone(), name)) {
-          let fixed: Vec<GArg> = [#Ty(ty.clone())];
-          for (const a of bargs) { fixed.push(a.clone()); }
-          return self.callFn(fid, fixed, #None, explicit, args, expected, e);
-        }
-      }
+    if (const #Param(sym) = ty && const #Some(bounds) = self.bounds.get(sym.id) && const #Some([fid, #Named(_, bargs)]) = self.p.boundMethod(bounds.clone(), name)) {
+      let fixed: Vec<GArg> = [#Ty(ty.clone())];
+      for (const a of bargs) { fixed.push(a.clone()); }
+      return self.callFn(fid, fixed, #None, explicit, args, expected, e);
     }
     let ifaces: Vec<usize> = Vec.new();
     for (const [key, _] of self.p.ifaceFns.entries()) {
@@ -1698,13 +1676,11 @@ impl Checker {
       // A struct or enum gets the derived interfaces only by asking (§3.5).
       const derived: [str, str][] = [["clone", "Clone"], ["eq", "Eq"], ["cmp", "Ord"], ["hash", "Hash"], ["show", "Show"]];
       let hint = String.new();
-      if (const #Named(d, _) = self.strip(recv)) {
-        if (const #Some([_, iface]) = derived.iter().find(([m, _]) => m == name)) {
-          const nominal = match (self.p.defs[d].kind) { #Struct { fields: #Some(_) } | #Enum { tags: _ } => true, _ => false };
-          if (nominal && !self.p.modules[self.p.defs[d].module].isStd) {
-            const n = self.p.defs[d].name.clone();
-            hint = `: \`${n}\` does not implement \`${iface}\`; ask for it with \`impl ${iface} for ${n};\``;
-          }
+      if (const #Named(d, _) = self.strip(recv) && const #Some([_, iface]) = derived.iter().find(([m, _]) => m == name)) {
+        const nominal = match (self.p.defs[d].kind) { #Struct { fields: #Some(_) } | #Enum { tags: _ } => true, _ => false };
+        if (nominal && !self.p.modules[self.p.defs[d].module].isStd) {
+          const n = self.p.defs[d].name.clone();
+          hint = `: \`${n}\` does not implement \`${iface}\`; ask for it with \`impl ${iface} for ${n};\``;
         }
       }
       self.err(e.span, `no method \`${name}\` on \`${shown}\`${hint}`.asStr());
@@ -1717,12 +1693,10 @@ impl Checker {
     let wantParams: Option<Vec<Ty>> = #None;
     let wantRet: Option<Ty> = #None;
     let mode: FnMode = #Shared;
-    if (const #Some(#Fn(f)) = want) {
-      if (f.params.len() == params.len()) {
-        wantParams = #Some(f.params.clone());
-        wantRet = #Some(f.ret.clone());
-        mode = f.mode;
-      }
+    if (const #Some(#Fn(f)) = want && f.params.len() == params.len()) {
+      wantParams = #Some(f.params.clone());
+      wantRet = #Some(f.ret.clone());
+      mode = f.mode;
     }
     self.scopes.push(HashMap.new());
     let ptys: Vec<Ty> = Vec.new();
@@ -1982,10 +1956,8 @@ impl Checker {
       if (!around.effs.iter().some((c) => c.def == e.def && self.s.regionsEqual(c.regions, e.regions))) { continue; }
       if (e.def == failDef) {
         anyFail = true;
-        if (const #Some(t) = e.args.first()) {
-          if (const #Union(r) = self.s.zonk(t)) {
-            for (const [k, v] of self.s.expandRow(r).labels) { labelSet(mut fails, k.asStr(), v.clone()); }
-          }
+        if (const #Some(t) = e.args.first() && const #Union(r) = self.s.zonk(t)) {
+          for (const [k, v] of self.s.expandRow(r).labels) { labelSet(mut fails, k.asStr(), v.clone()); }
         }
       } else if (!effs.iter().some((y) => y == e)) {
         effs.push(e);
@@ -2055,11 +2027,9 @@ impl Checker {
     // A place nothing may be moved out of is matched through a borrow of it, so its parts bind as
     // borrows, as TypeScript programmers expect (§4.1).
     let st = st1.clone();
-    if (const #Some(m) = self.unmovablePlace(scrutinee)) {
-      if (!match (self.s.resolve(st1)) { #Borrow(_, _) => true, _ => false }) {
-        self.typed.lentScrutinees.insert(scrutinee.id, m);
-        st = #Borrow(m, Box.new(st1));
-      }
+    if (const #Some(m) = self.unmovablePlace(scrutinee) && !match (self.s.resolve(st1)) { #Borrow(_, _) => true, _ => false }) {
+      self.typed.lentScrutinees.insert(scrutinee.id, m);
+      st = #Borrow(m, Box.new(st1));
     }
     // Tags that earlier unguarded arms match whatever their payload: a later arm that binds the
     // whole value sees the union without them, as TypeScript narrows (§3.2).
@@ -2387,12 +2357,10 @@ impl Checker {
     }
     let unguarded: Vec<Pattern> = Vec.new();
     for (const a of arms) { if (a.guard.isNone()) { unguarded.push(a.pat.clone()); } }
-    if (const #Some([_, #Param(_)]) = self.tagPayloads(st)) {
-      if (!unguarded.iter().some((p) => match (p.kind) { #Wild | #Bind(_) => true, _ => false })) {
-        const shown = self.show(st);
-        self.err(span, `this \`match\` needs a \`_\` arm: \`${shown}\` may hold more tags`.asStr());
-        return;
-      }
+    if (const #Some([_, #Param(_)]) = self.tagPayloads(st) && !unguarded.iter().some((p) => match (p.kind) { #Wild | #Bind(_) => true, _ => false })) {
+      const shown = self.show(st);
+      self.err(span, `this \`match\` needs a \`_\` arm: \`${shown}\` may hold more tags`.asStr());
+      return;
     }
     let rows: Vec<Vec<Pat>> = Vec.new();
     for (const p of unguarded) { rows.push([self.lowerPat(p, st)]); }
@@ -2642,10 +2610,8 @@ impl Checker {
     // literals take their defaults: `m.get({ start: 1, end: 2 })` with `m: HashMap<Span, V>`.
     for (const call of self.pendingTargs) {
       for (const [t, b] of call.bounds) {
-        if (const #Named(d, bargs) = self.s.zonk(b)) {
-          if (self.p.defs[d].name == "LentBy" && self.p.modules[self.p.defs[d].module].isStd && !settled(self.s.zonk(t))) {
-            if (const #Some(#Ty(k)) = bargs.first()) { try { self.s.unify(t.clone(), k.clone()); } catch (_) {} }
-          }
+        if (const #Named(d, bargs) = self.s.zonk(b) && self.p.defs[d].name == "LentBy" && self.p.modules[self.p.defs[d].module].isStd && !settled(self.s.zonk(t))) {
+          if (const #Some(#Ty(k)) = bargs.first()) { try { self.s.unify(t.clone(), k.clone()); } catch (_) {} }
         }
       }
     }

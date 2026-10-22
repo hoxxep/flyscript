@@ -683,10 +683,8 @@ impl Own {
           };
           const v = self.expr(init, use);
           self.bindPattern(pat, v, mutable);
-          if (const #Bind(name) = pat.kind) {
-            if (const #Some(m) = self.closureMode(init)) {
-              if (const #Some(id) = self.lookup(name.asStr())) { self.varModes.insert(id, m); }
-            }
+          if (const #Bind(name) = pat.kind && const #Some(m) = self.closureMode(init)) {
+            if (const #Some(id) = self.lookup(name.asStr())) { self.varModes.insert(id, m); }
           }
         }
         #Defer(e) => {
@@ -731,18 +729,16 @@ impl Own {
     if (self.collecting || dying.len() == 0) { return; }
     // A function's own body is the return check's to judge.
     if (self.scopes.len() > 1) {
-      if (const #Some(tail) = b.tail) {
-        if (self.mayHold(self.tyOf(tail))) {
-          const found = v.loans.iter().find((l) => !self.loans[l].external && dying.has(self.loans[l].path.root));
-          if (const #Some(l) = found) {
-            const root = self.loans[l].path.root;
-            const name = self.vars[root].name.clone();
-            const msg: String = match (self.lentArgs.get(root)) {
-              #Some(op) => `this value borrows \`${name}\`, which the code that performed \`${op}\` lent only to this arm`,
-              #None => `this value borrows \`${name}\`, which goes out of scope at the end of its block`,
-            };
-            self.err(tail.span, msg.asStr());
-          }
+      if (const #Some(tail) = b.tail && self.mayHold(self.tyOf(tail))) {
+        const found = v.loans.iter().find((l) => !self.loans[l].external && dying.has(self.loans[l].path.root));
+        if (const #Some(l) = found) {
+          const root = self.loans[l].path.root;
+          const name = self.vars[root].name.clone();
+          const msg: String = match (self.lentArgs.get(root)) {
+            #Some(op) => `this value borrows \`${name}\`, which the code that performed \`${op}\` lent only to this arm`,
+            #None => `this value borrows \`${name}\`, which goes out of scope at the end of its block`,
+          };
+          self.err(tail.span, msg.asStr());
         }
       }
     }
@@ -769,13 +765,11 @@ impl Own {
     for (const [h, ls] of self.state.holds.entries()) { holders.push([h, ls.clone()]); }
     for (const [h, ls] of holders) {
       const found = ls.iter().find((l) => !self.loans[l].external && dying.has(self.loans[l].path.root));
-      if (const #Some(l) = found) {
-        if (self.liveAfter(h, end)) {
-          const loan = self.loans[l].clone();
-          const name = self.vars[loan.path.root].name.clone();
-          const holder = self.vars[h].name.clone();
-          self.err(loan.span, `\`${holder}\` borrows \`${name}\` here, and is used after \`${name}\` goes out of scope`.asStr());
-        }
+      if (const #Some(l) = found && self.liveAfter(h, end)) {
+        const loan = self.loans[l].clone();
+        const name = self.vars[loan.path.root].name.clone();
+        const holder = self.vars[h].name.clone();
+        self.err(loan.span, `\`${holder}\` borrows \`${name}\` here, and is used after \`${name}\` goes out of scope`.asStr());
       }
     }
   }
@@ -1665,13 +1659,9 @@ impl Own {
         self.checkMode(a, pt, "passed");
       }
       // An owned parameter fed from a borrow of a non-`Copy` type is a move out of the borrow.
-      if (const #Some([_, p]) = params.get(i)) {
-        if (const #Borrow(_, inner) = at) {
-          if (!isBorrow(p) && !isShared(p) && !self.p.isCopy(inner) && !self.p.isCopy(at) && self.p.class(p) == 1) {
-            const shown = self.show(inner);
-            self.err(a.span, `cannot move a \`${shown}\` out of a borrow; it is not \`Copy\``.asStr());
-          }
-        }
+      if (const #Some([_, p]) = params.get(i) && const #Borrow(_, inner) = at && !isBorrow(p) && !isShared(p) && !self.p.isCopy(inner) && !self.p.isCopy(at) && self.p.class(p) == 1) {
+        const shown = self.show(inner);
+        self.err(a.span, `cannot move a \`${shown}\` out of a borrow; it is not \`Copy\``.asStr());
       }
       self.addTemps(v.loans);
       const pname: Option<String> = match (params.get(i)) { #Some([n, _]) => #Some(n.clone()), #None => #None };

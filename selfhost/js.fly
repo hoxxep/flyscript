@@ -377,14 +377,12 @@ impl Js {
   // The generic arguments a call or function value at `id` gives, in this instance's terms.
   function callArgs(self: readonly Self, id: usize): Vec<GArg> {
     let out: Vec<GArg> = Vec.new();
-    if (const #Some(t) = self.p.typed.get(self.fid)) {
-      if (const #Some(args) = t.targs.get(id)) {
-        for (const a of args) {
-          out.push(match (substArg(a, self.map)) {
-            #Ty(x) => #Ty(self.resolveAssoc(x)),
-            other => other,
-          });
-        }
+    if (const #Some(t) = self.p.typed.get(self.fid) && const #Some(args) = t.targs.get(id)) {
+      for (const a of args) {
+        out.push(match (substArg(a, self.map)) {
+          #Ty(x) => #Ty(self.resolveAssoc(x)),
+          other => other,
+        });
       }
     }
     out
@@ -1059,11 +1057,9 @@ impl Js {
     let leaving: Vec<String> = Vec.new();
     let carried: Vec<[String, Local]> = Vec.new();
     for (const [n, _] of moved) {
-      if (const #Some(l) = self.local(n.asStr())) {
-        if (const #Some([flag, _]) = l.owner) {
-          leaving.push(`${flag}$l = false`);
-          carried.push([n.clone(), l.clone()]);
-        }
+      if (const #Some(l) = self.local(n.asStr()) && const #Some([flag, _]) = l.owner) {
+        leaving.push(`${flag}$l = false`);
+        carried.push([n.clone(), l.clone()]);
       }
     }
     const closure = self.lambdaCode(e, params, body, carried);
@@ -1264,37 +1260,27 @@ impl Js {
       return if (suspends && !driven) { `(yield* ${f}(${vs.join(", ")}))` } else { `${f}(${vs.join(", ")})` };
     }
     // An effect's operation, `Eff.op(…)`.
-    if (const #Field { target, name } = callee.kind) {
-      if (const #Ident(tname) = target.kind) {
-        if (self.local(tname.asStr()).isNone()) {
-          if (const #Some(#Def(d)) = self.p.lookup(self.module, tname.asStr())) {
-            if (const #Effect { ops: _ } = self.p.defs[d].kind) {
-              let vs: Vec<String> = Vec.new();
-              for (const a of args) { vs.push(self.value(a)); }
-              const effect = self.p.defs[d].name.clone();
-              if (effect == "Fail") { return `$rt.raise(${vs.join(", ")})`; }
-              if (effect == "Yield") { return `(yield $rt.yielded(${vs.join(", ")}))`; }
-              // `Io`'s own operations are the runtime's, and scheduling points where tasks run.
-              if (effect == "Io") {
-                return if (self.tasks) { `(yield* $b.Io_${name.name}$g(${vs.join(", ")}))` } else { `$b.Io_${name.name}(${vs.join(", ")})` };
-              }
-              return `(yield $rt.perform(${d}, ${quote(name.name)}, [${vs.join(", ")}]))`;
-            }
-          }
-        }
+    if (const #Field { target, name } = callee.kind && const #Ident(tname) = target.kind && self.local(tname.asStr()).isNone() && const #Some(#Def(d)) = self.p.lookup(self.module, tname.asStr()) && const #Effect { ops: _ } = self.p.defs[d].kind) {
+      let vs: Vec<String> = Vec.new();
+      for (const a of args) { vs.push(self.value(a)); }
+      const effect = self.p.defs[d].name.clone();
+      if (effect == "Fail") { return `$rt.raise(${vs.join(", ")})`; }
+      if (effect == "Yield") { return `(yield $rt.yielded(${vs.join(", ")}))`; }
+      // `Io`'s own operations are the runtime's, and scheduling points where tasks run.
+      if (effect == "Io") {
+        return if (self.tasks) { `(yield* $b.Io_${name.name}$g(${vs.join(", ")}))` } else { `$b.Io_${name.name}(${vs.join(", ")})` };
       }
+      return `(yield $rt.perform(${d}, ${quote(name.name)}, [${vs.join(", ")}]))`;
     }
     // A function value.
     const f0 = self.value(callee);
     const fty: Option<FnTy> = match (stripBorrow(self.exprTy(callee.id))) { #Fn(f) => #Some(f.get().clone()), _ => #None };
     const f = if (args.iter().every((a) => Js.simple(a))) { f0 } else { self.save(f0) };
     // A continuation, `k(a)`: a generator, as the body it resumes is.
-    if (const #Named(d, _) = stripBorrow(self.exprTy(callee.id))) {
-      if (self.p.isKnown(d, "Cont")) {
-        let vs: Vec<String> = Vec.new();
-        for (const a of args) { vs.push(self.value(a)); }
-        return if (self.suspends) { `(yield* ${f}(${vs.join(", ")}))` } else { `$rt.run(${f}(${vs.join(", ")}))` };
-      }
+    if (const #Named(d, _) = stripBorrow(self.exprTy(callee.id)) && self.p.isKnown(d, "Cont")) {
+      let vs: Vec<String> = Vec.new();
+      for (const a of args) { vs.push(self.value(a)); }
+      return if (self.suspends) { `(yield* ${f}(${vs.join(", ")}))` } else { `$rt.run(${f}(${vs.join(", ")}))` };
     }
     match (fty) {
       #Some(t) => {
@@ -1712,15 +1698,9 @@ impl Js {
         guarded = true;
       }
       // The arm takes what it binds out of its owner once its guard has let it run.
-      if (const #Some(path) = armMove) {
-        if (const #Some(n) = rootName(scrutinee)) {
-          if (const #Some(l) = self.local(n.asStr())) {
-            if (const #Some([flag, _]) = l.owner) {
-              if (path.len() == 0) { self.line(`${flag}$l = false;`); }
-              else { self.line(`${flag}$m = $rt.moved(${flag}$m, ${quote(path.join(".").asStr())});`); }
-            }
-          }
-        }
+      if (const #Some(path) = armMove && const #Some(n) = rootName(scrutinee) && const #Some(l) = self.local(n.asStr()) && const #Some([flag, _]) = l.owner) {
+        if (path.len() == 0) { self.line(`${flag}$l = false;`); }
+        else { self.line(`${flag}$m = $rt.moved(${flag}$m, ${quote(path.join(".").asStr())});`); }
       }
       self.withDrops(arm.body, dest, owners);
       self.line(`break ${label};`);
@@ -2343,11 +2323,9 @@ impl Js {
           body.push(`  if (m === null) ${call};\n`);
         }
         if (self.p.isKnown(d, "Box")) {
-          if (const #Some(#Ty(inner)) = args.first()) {
-            if (self.needsDrop(inner)) {
-              const f = self.dropFn(inner.clone(), span);
-              body.push(`  ${f}(v, m);\n`);
-            }
+          if (const #Some(#Ty(inner)) = args.first() && self.needsDrop(inner)) {
+            const f = self.dropFn(inner.clone(), span);
+            body.push(`  ${f}(v, m);\n`);
           }
         } else {
           match (self.p.defs[d].kind) {

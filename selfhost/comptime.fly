@@ -326,14 +326,12 @@ impl Expand {
       }
       #Index { target, index } => #Index { target: Box.new(self.expr(target)), index: Box.new(self.expr(index)) },
       #Call { callee, typeArgs, args } => {
-        if (const #Field { target, name } = callee.kind) {
-          if (self.isCt(target) && COMPTIME_METHODS.includes(name.name.asStr())) {
-            const recv = self.eval(target);
-            if (!match (recv) { #Type(_) => true, _ => false }) {
-              // A method of a `comptime` value: computed now (`fields.len()`).
-              const v = self.eval(e);
-              return self.splice(v, e.span);
-            }
+        if (const #Field { target, name } = callee.kind && self.isCt(target) && COMPTIME_METHODS.includes(name.name.asStr())) {
+          const recv = self.eval(target);
+          if (!match (recv) { #Type(_) => true, _ => false }) {
+            // A method of a `comptime` value: computed now (`fields.len()`).
+            const v = self.eval(e);
+            return self.splice(v, e.span);
           }
         }
         let tas: Vec<Type> = Vec.new();
@@ -1118,19 +1116,17 @@ impl Expand {
       const vals = self.evalArgs(args);
       return self.method(recv, name.name.asStr(), vals, span);
     }
-    if (const #Ident(n) = callee.kind) {
-      if (self.lookup(n.asStr()).isNone()) {
-        if (n == "panic") {
-          const msg = match (args.len()) { 0 => "panic".toString(), _ => { const v = self.eval(args[0]); cvShow(self.p, v) } };
+    if (const #Ident(n) = callee.kind && self.lookup(n.asStr()).isNone()) {
+      if (n == "panic") {
+        const msg = match (args.len()) { 0 => "panic".toString(), _ => { const v = self.eval(args[0]); cvShow(self.p, v) } };
+        fail(span, msg.asStr());
+      }
+      if (n == "assert") {
+        if (!self.evalBool(args[0])) {
+          const msg = if (args.len() > 1) { const v = self.eval(args[1]); cvShow(self.p, v) } else { "assertion failed".toString() };
           fail(span, msg.asStr());
         }
-        if (n == "assert") {
-          if (!self.evalBool(args[0])) {
-            const msg = if (args.len() > 1) { const v = self.eval(args[1]); cvShow(self.p, v) } else { "assertion failed".toString() };
-            fail(span, msg.asStr());
-          }
-          return #Unit;
-        }
+        return #Unit;
       }
     }
     const f = self.eval(callee);

@@ -265,10 +265,8 @@ impl Program {
   // The impl that gives `base` its associated type `name`, with the arguments it matched.
   function assocImpl(self: readonly Self, base: readonly Ty, name: str): Option<[usize, Binds]> {
     for (const d of 0..self.defs.len()) {
-      if (const #Interface { methods: _, assoc, selfSym: _, supers: _ } = self.defs[d].kind) {
-        if (assoc.iter().some((a) => a == name)) {
-          if (const #Some(r) = self.resolveImpl(d, base)) { return #Some(r); }
-        }
+      if (const #Interface { methods: _, assoc, selfSym: _, supers: _ } = self.defs[d].kind && assoc.iter().some((a) => a == name)) {
+        if (const #Some(r) = self.resolveImpl(d, base)) { return #Some(r); }
       }
     }
     #None

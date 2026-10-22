@@ -555,20 +555,16 @@ impl C {
           }
           body.push("  fly_map_free(v);\n");
         } else if (self.p.isKnown(d, "Vec")) {
-          if (const #Some(#Ty(e)) = args.first()) {
-            if (self.needsDrop(e)) {
-              const f = self.dropFn(e, span);
-              const ec = self.ctype(e, span);
-              body.push(`  for (size_t i = 0; i < v->len; i++) ${f}(&((${ec}*)v->ptr)[i]);\n`);
-            }
+          if (const #Some(#Ty(e)) = args.first() && self.needsDrop(e)) {
+            const f = self.dropFn(e, span);
+            const ec = self.ctype(e, span);
+            body.push(`  for (size_t i = 0; i < v->len; i++) ${f}(&((${ec}*)v->ptr)[i]);\n`);
           }
           body.push("  fly_vec_free(v);\n");
         } else if (self.p.isKnown(d, "Box")) {
-          if (const #Some(#Ty(e)) = args.first()) {
-            if (self.needsDrop(e)) {
-              const f = self.dropFn(e, span);
-              body.push(`  if (*v) ${f}(*v);\n`);
-            }
+          if (const #Some(#Ty(e)) = args.first() && self.needsDrop(e)) {
+            const f = self.dropFn(e, span);
+            body.push(`  if (*v) ${f}(*v);\n`);
           }
           body.push("  free(*v);\n  *v = NULL;\n");
         } else {
@@ -691,11 +687,9 @@ impl C {
 
   function callArgs(self: readonly Self, id: usize): Vec<GArg> {
     let out: Vec<GArg> = Vec.new();
-    if (const #Some(t) = self.p.typed.get(self.fid)) {
-      if (const #Some(args) = t.targs.get(id)) {
-        for (const a of args) {
-          out.push(match (substArg(a, self.map)) { #Ty(x) => #Ty(self.resolveAssoc(x)), other => other });
-        }
+    if (const #Some(t) = self.p.typed.get(self.fid) && const #Some(args) = t.targs.get(id)) {
+      for (const a of args) {
+        out.push(match (substArg(a, self.map)) { #Ty(x) => #Ty(self.resolveAssoc(x)), other => other });
       }
     }
     out
@@ -766,15 +760,13 @@ impl C {
 
   // A parameter: owned, unless it is a closure lent to the function — one not called `once`.
   function declareParam(self: mut Self, name: str, ty: Ty, span: Span): String uses Fail<Diagnostic> {
-    if (const #Fn(f) = ty) {
-      if (f.mode != #Once) {
-        self.tmp += 1;
-        const c = `${mangle(name)}_${self.tmp}`;
-        self.decls.push(`  fly_fn ${c} = { 0 };\n`);
-        const top = self.scopes.len() - 1;
-        self.scopes[top].insert(name.toString(), { c: c.clone(), ty, ref: false });
-        return c;
-      }
+    if (const #Fn(f) = ty && f.mode != #Once) {
+      self.tmp += 1;
+      const c = `${mangle(name)}_${self.tmp}`;
+      self.decls.push(`  fly_fn ${c} = { 0 };\n`);
+      const top = self.scopes.len() - 1;
+      self.scopes[top].insert(name.toString(), { c: c.clone(), ty, ref: false });
+      return c;
     }
     self.declare(name, ty, span)
   }
@@ -1157,13 +1149,11 @@ impl C {
   // An argument as the parameter takes it. A closure made only to be lent — to a parameter that
   // does not call it `once` — is the scope's, which drops it after the call.
   function argAs(self: mut Self, e: readonly Expr, pt: readonly Ty): String uses Fail<Diagnostic> {
-    if (const #Fn(f) = stripBorrow(pt)) {
-      if (f.mode != #Once) {
-        if (const #Lambda { params, body } = e.kind) {
-        const v = self.lambda(e, params, body, true);
-        const tmp = self.temp(self.exprTy(e.id), e.span);
-        return `({ ${tmp} = ${v}; ${tmp}; })`;
-        }
+    if (const #Fn(f) = stripBorrow(pt) && f.mode != #Once) {
+      if (const #Lambda { params, body } = e.kind) {
+      const v = self.lambda(e, params, body, true);
+      const tmp = self.temp(self.exprTy(e.id), e.span);
+      return `({ ${tmp} = ${v}; ${tmp}; })`;
       }
     }
     self.exAs(e, pt)
@@ -1871,17 +1861,9 @@ impl C {
       }
     }
     // An effect's operation, `Eff.op(…)`.
-    if (const #Field { target, name } = callee.kind) {
-      if (const #Ident(tname) = target.kind) {
-        if (self.local(tname.asStr()).isNone()) {
-          if (const #Some(#Def(d)) = self.p.lookup(self.module, tname.asStr())) {
-            if (const #Effect { ops: _ } = self.p.defs[d].kind) {
-              if (self.p.defs[d].name == "Fail" && args.len() == 1) { return self.throwExpr(args[0]); }
-              return self.perform(e, d, name.name.asStr(), args);
-            }
-          }
-        }
-      }
+    if (const #Field { target, name } = callee.kind && const #Ident(tname) = target.kind && self.local(tname.asStr()).isNone() && const #Some(#Def(d)) = self.p.lookup(self.module, tname.asStr()) && const #Effect { ops: _ } = self.p.defs[d].kind) {
+      if (self.p.defs[d].name == "Fail" && args.len() == 1) { return self.throwExpr(args[0]); }
+      return self.perform(e, d, name.name.asStr(), args);
     }
     // A continuation, which the call consumes.
     if (const #Named(cd, cargs0) = stripBorrow(self.exprTy(callee.id))) {
@@ -3981,11 +3963,9 @@ impl C {
     for (const [k, [_, t]] of self.p.fns[mainFid].scheme.params.iter().enumerate()) {
       // A last parameter that is a list of strings takes every argument left (§8.1).
       const elem: Option<Ty> = match (stripBorrow(t)) { #Slice(x) => #Some(x.get().clone()), _ => #None };
-      if (const #Some(x) = elem) {
-        if (k + 1 == self.p.fns[mainFid].scheme.params.len()) {
-          args.push(if (self.isString(x)) { `fly_arg_strings(${k})` } else { `fly_arg_strs(${k})` });
-          continue;
-        }
+      if (const #Some(x) = elem && k + 1 == self.p.fns[mainFid].scheme.params.len()) {
+        args.push(if (self.isString(x)) { `fly_arg_strings(${k})` } else { `fly_arg_strs(${k})` });
+        continue;
       }
       args.push(match (t) {
         #Prim(p) if isInt(p) => `(${primType(p)})fly_arg_int(${k})`,
