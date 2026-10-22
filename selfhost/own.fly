@@ -543,6 +543,27 @@ impl Own {
 
   // `usePlace`, for a value of type `ty`: a match arm's move of its scrutinee is made at the arm's
   // pattern, where no expression's type is recorded.
+  // An arm's parameters that may hold a borrow borrow from the code that performed the operation,
+  // which resuming the continuation `k` lets run on and dropping it unwinds: none may be used after
+  // `k` is resumed at `at`, or, when `moved` names it, given up there (§5.3).
+  function checkLent(self: mut Self, k: usize, at: Span, moved: Option<String>): void {
+    if (self.collecting) { return; }
+    const lent: Vec<[usize, usize]> = match (self.contArgs.get(k)) { #Some(x) => x.clone(), #None => Vec.new() };
+    for (const [param, l] of lent) {
+      let holders: Vec<usize> = Vec.new();
+      for (const [h, ls] of self.state.holds.entries()) { if (hasLoan(ls, l)) { holders.push(h); } }
+      if (const #Some(h) = holders.iter().find((h) => self.liveAfter(h, at.end))) {
+        const pn = self.vars[param].name.clone();
+        const hn = self.vars[h].name.clone();
+        const what = if (pn == hn) { `\`${pn}\`` } else { `\`${hn}\`, which borrows \`${pn}\`,` };
+        match (moved) {
+          #None => self.err(at, `${what} is used after this resumes the code that lent \`${pn}\`, which may end it`.asStr()),
+          #Some(kn) => self.err(at, `${what} is used after \`${kn}\` is given up here, which may resume or drop the code that lent \`${pn}\``.asStr()),
+        }
+      }
+    }
+  }
+
   function usePlaceAs(self: mut Self, e: readonly Expr, path: Path, how: Use, ty: Ty): Val {
     const at = e.span;
     if (const #Some(op) = self.deadArgs.get(path.root)) {
@@ -601,6 +622,11 @@ impl Own {
           } else if (path.fields.len() > 0 && self.hasDropAncestor(path)) {
             self.err(at, `cannot move \`${self.pathName(path)}\` out of a value whose type implements \`Drop\``.asStr());
           } else if (!self.collecting) {
+            // A continuation moved may be resumed or dropped wherever it goes.
+            if (path.fields.len() == 0) {
+              const kn = self.vars[path.root].name.clone();
+              self.checkLent(path.root, at, #Some(kn));
+            }
             addMoved(mut self.state.moved, path.clone());
             if (!self.moveSites.iter().some(([q, _]) => q == path)) { self.moveSites.push([path.clone(), at]); }
             // Where a value leaves its binding, the evaluator stops owning it there (§5.6).
@@ -747,17 +773,24 @@ impl Own {
   }
 
   function checkOutlives(self: mut Self, dying: readonly HashSet<usize>, b: readonly Block, v: readonly Val): void {
+    const tail: Option<Expr> = match (b.tail) { #Some(t) => #Some(t.get().clone()), #None => #None };
+    self.checkOutlivesAt(dying, tail, b.span.end, v, "goes out of scope at the end of its block");
+  }
+
+  // No borrow of a binding in `dying`, which ends at `end`, may outlive it: not in `v`, the value
+  // `tail` gives, nor in a binding used after `end`. `ends` says how the binding ends.
+  function checkOutlivesAt(self: mut Self, dying: readonly HashSet<usize>, tail: Option<Expr>, end: usize, v: readonly Val, ends: str): void {
     if (self.collecting || dying.len() == 0) { return; }
     // A function's own body is the return check's to judge.
     if (self.scopes.len() > 1) {
-      if (const #Some(tail) = b.tail && self.mayHold(self.tyOf(tail))) {
+      if (const #Some(tail) = tail && self.mayHold(self.tyOf(tail))) {
         const found = v.loans.iter().find((l) => !self.loans[l].external && dying.has(self.loans[l].path.root));
         if (const #Some(l) = found) {
           const root = self.loans[l].path.root;
           const name = self.vars[root].name.clone();
           const msg: String = match (self.lentArgs.get(root)) {
             #Some(op) => `this value borrows \`${name}\`, which the code that performed \`${op}\` lent only to this arm`,
-            #None => `this value borrows \`${name}\`, which goes out of scope at the end of its block`,
+            #None => `this value borrows \`${name}\`, which ${ends}`,
           };
           self.err(tail.span, msg.asStr());
         }
@@ -781,7 +814,6 @@ impl Own {
         self.err(loan.span, `\`${hn}\` borrows \`${an}\` here, but \`${an}\` is dropped before \`${hn}\`'s destructor runs, since it is declared after it: declare \`${an}\` first`.asStr());
       }
     }
-    const end = b.span.end;
     let holders: Vec<[usize, Vec<usize>]> = Vec.new();
     for (const [h, ls] of self.state.holds.entries()) { holders.push([h, ls.clone()]); }
     for (const [h, ls] of holders) {
@@ -1147,6 +1179,9 @@ impl Own {
         #None => #None,
       };
       const takes = perArm && self.takesOwned(arm.pat) && self.armMoves.has(arm.pat.span);
+      if (takes && !self.collecting && self.destructuresDrop(arm.pat, self.tyOf(scrutinee))) {
+        self.err(arm.pat.span, "this arm moves what it binds out of a value whose type implements `Drop`, which is dropped whole: bind the value itself, or only read its parts");
+      }
       // An arm that changes a part it binds, in place, borrows the place `mut`.
       const lendsMut = perArm && !takes && self.armMutates(arm);
       if (takes) {
@@ -1180,6 +1215,13 @@ impl Own {
       }
       if (const #Some(g) = arm.guard) { self.guard(g, arm.pat); }
       const v = self.expr(arm.body, how);
+      // An arm that takes the place owns what it binds and drops it when it ends.
+      if (takes) {
+        let dying: HashSet<usize> = HashSet.new();
+        if (const #Some(scope) = self.scopes.last()) { for (const [_, var] of scope.entries()) { dying.insert(var); } }
+        self.checkOutlivesAt(dying, #Some(arm.body.clone()), arm.body.span.end, v,
+          "this arm owns, having taken the whole place to move a part, and drops when it ends");
+      }
       addLoans(mut out, v.loans);
       if (const #Some(scope) = self.scopes.pop()) {
         for (const [_, var] of scope.entries()) { self.state.holds.remove(var); }
@@ -1190,6 +1232,24 @@ impl Own {
     self.state = match (joined) { #Some(j) => j, #None => before };
     self.leave();
     { loans: out }
+  }
+
+  // Whether a pattern takes apart a value whose type implements `Drop`, at `ty` or within it.
+  function destructuresDrop(self: readonly Self, p: readonly Pattern, ty: readonly Ty): bool {
+    const dropped = match (ty) { #Named(d, _) => self.p.hasDrop(d), _ => false };
+    match (p.kind) {
+      #Record { name: _, fields } => dropped || fields.iter().some(([name, sub]) => match (sub) {
+        #Some(q) => self.destructuresDrop(q, match (fieldType(self.p, ty, name.name.asStr())) { #Some(x) => x, #None => #Error }),
+        #None => false,
+      }),
+      #Tag { name: _, args: _ } => dropped,
+      #Tuple(ps) => match (ty) {
+        #Tuple(ts) => ps.iter().enumerate().some(([i, q]) => i < ts.len() && self.destructuresDrop(q, ts[i])),
+        _ => false,
+      },
+      #Or(ps) => ps.iter().some((q) => self.destructuresDrop(q, ty)),
+      _ => false,
+    }
   }
 
   // The arms of a `match` whose scrutinee's value is `sv`, none of which moves it.
@@ -1607,22 +1667,7 @@ impl Own {
       // The operation's arguments end with the code that performed them, which resuming lets run
       // on.
       const k: Option<usize> = match (self.place(callee)) { #Some(p) => #Some(p.root), #None => #None };
-      const lent: Vec<[usize, usize]> = match (k) {
-        #Some(kv) => match (self.contArgs.get(kv)) { #Some(x) => x.clone(), #None => Vec.new() },
-        #None => Vec.new(),
-      };
-      if (!self.collecting) {
-        for (const [param, l] of lent) {
-          let holders: Vec<usize> = Vec.new();
-          for (const [h, ls] of self.state.holds.entries()) { if (hasLoan(ls, l)) { holders.push(h); } }
-          if (const #Some(h) = holders.iter().find((h) => self.liveAfter(h, e.span.end))) {
-            const pn = self.vars[param].name.clone();
-            const hn = self.vars[h].name.clone();
-            const what = if (pn == hn) { `\`${pn}\`` } else { `\`${hn}\`, which borrows \`${pn}\`,` };
-            self.err(e.span, `${what} is used after this resumes the code that lent \`${pn}\`, which may end it`.asStr());
-          }
-        }
-      }
+      if (const #Some(kv) = k) { self.checkLent(kv, e.span, #None); }
       // What resuming gives back may hold what the body held, never the continuation: it is used
       // up by the call.
       let v = self.expr(callee, #Read);

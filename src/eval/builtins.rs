@@ -16,7 +16,6 @@ pub struct ScopeState {
     /// The task running the scope's body, cancelled with the rest when a task fails.
     pub owner: u64,
     pub failure: Option<Value>,
-    pub panic: Option<String>,
     /// Every task started in the scope; the scope waits for all of them.
     pub tasks: Vec<u64>,
     /// Forked tasks' outcomes, by task.
@@ -196,9 +195,16 @@ impl Interp {
                 let sid = self.fresh_id();
                 self.scopes.lock().expect("scopes").insert(sid, ScopeState { owner: self.task, ..Default::default() });
                 let r = self.call_value(&a(0), vec![Value::Native("Scope", sid)]);
-                // The body unwound because a task failed or panicked: the scope rethrows that.
+                // A panic ends the program at once, not waiting for the tasks (§5.7).
+                if let Err(Ctl::Panic(m)) = &r
+                    && !m.starts_with('\u{0}')
+                {
+                    self.sched.abort(m);
+                    return r;
+                }
+                // The body unwound because a task failed: the scope rethrows that.
                 let r = match r {
-                    Err(Ctl::Cancelled) if self.scopes.lock().expect("scopes").get(&sid).is_some_and(|s| s.failure.is_some() || s.panic.is_some()) => {
+                    Err(Ctl::Cancelled) if self.scopes.lock().expect("scopes").get(&sid).is_some_and(|s| s.failure.is_some()) => {
                         self.sched.uncancel(self.task);
                         Ok(Value::Unit)
                     }
@@ -217,9 +223,6 @@ impl Interp {
                 }
                 self.sched.uncancel(self.task);
                 let st = self.scopes.lock().expect("scopes").remove(&sid).unwrap_or_default();
-                if let Some(p) = st.panic {
-                    return Err(panic(p));
-                }
                 match (r, st.failure) {
                     (Ok(_), Some(f)) => self.raise(f),
                     (r, _) => r,
@@ -246,12 +249,18 @@ impl Interp {
                         }
                         Err(e) => Err(e),
                     };
+                    // A panic ends the program, every task with it (§5.7).
+                    if let Err(Ctl::Panic(m)) = &r
+                        && !m.starts_with('\u{0}')
+                    {
+                        child.sched.abort(m);
+                    }
                     {
                         let mut scopes = child.scopes.lock().expect("scopes");
                         let st = scopes.entry(sid).or_default();
-                        // The first failure or panic cancels the scope: its body and other tasks.
-                        let ends = matches!(&r, Err(Ctl::Panic(_))) || matches!(&r, Err(Ctl::Unwind(h, _)) if *h == id);
-                        if ends && st.failure.is_none() && st.panic.is_none() {
+                        // The first failure cancels the scope: its body and other tasks.
+                        let ends = matches!(&r, Err(Ctl::Unwind(h, _)) if *h == id);
+                        if ends && st.failure.is_none() {
                             child.sched.cancel(st.owner);
                             for t in st.tasks.iter().filter(|t| **t != tid) {
                                 child.sched.cancel(*t);
@@ -265,13 +274,7 @@ impl Interp {
                                 st.failure.get_or_insert_with(|| e.clone());
                                 st.fibers.insert(tid, Err(e));
                             }
-                            Err(Ctl::Cancelled) => {}
-                            Err(Ctl::Panic(m)) => {
-                                st.panic.get_or_insert(m);
-                            }
-                            Err(other) => {
-                                st.panic.get_or_insert(format!("{other:?}"));
-                            }
+                            Err(_) => {}
                         }
                     }
                     child.sched.finish(tid);

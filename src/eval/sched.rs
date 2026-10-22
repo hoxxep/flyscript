@@ -46,6 +46,9 @@ struct Inner {
     cleaning: HashMap<u64, u32>,
     /// Channels whose receiver is gone: what is sent to them is dropped, as a value of this type.
     deaf: HashMap<u64, Ty>,
+    /// A panic that ends the program: every task meets it at its next scheduling point, and none
+    /// runs its cleanup (§5.7).
+    aborted: Option<String>,
 }
 
 pub struct Sched {
@@ -71,6 +74,7 @@ impl Sched {
                 cancelled: HashSet::new(),
                 cleaning: HashMap::new(),
                 deaf: HashMap::new(),
+                aborted: None,
             }),
             turn: Condvar::new(),
         })
@@ -101,7 +105,13 @@ impl Sched {
 
     fn wait_turn(&self, me: u64, mut inner: std::sync::MutexGuard<'_, Inner>) -> Result<(), Ctl> {
         self.turn.notify_all();
-        while inner.current != me {
+        loop {
+            if let Some(m) = &inner.aborted {
+                return Err(panic(m.clone()));
+            }
+            if inner.current == me {
+                break;
+            }
             if inner.deadlocked {
                 return Err(panic("deadlock: every task is waiting"));
             }
@@ -111,6 +121,13 @@ impl Sched {
             return Err(Ctl::Cancelled);
         }
         Ok(())
+    }
+
+    /// A task panicked: the program ends, and every task with it, wherever it waits.
+    pub fn abort(&self, message: &str) {
+        let mut inner = self.inner.lock().expect("scheduler");
+        inner.aborted.get_or_insert_with(|| message.to_string());
+        self.turn.notify_all();
     }
 
     /// Cancels task `t`: if it is waiting, it wakes, and at its next scheduling point it unwinds.

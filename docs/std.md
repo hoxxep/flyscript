@@ -24,7 +24,7 @@ In scope in every module without an import.
 | Interface | Meaning |
 | :--- | :--- |
 | `Copy` | The value is its bits: assigning it copies it, and the original stays usable. Structural: a type is `Copy` when every part is and nothing in it implements `Drop` (spec §4.4). |
-| `Send` | The value may move to another task: it holds no borrow, no `Ptr`, no `Cont` and no region data. Structural (spec §4.4). |
+| `Send` | The value may move to another task: it holds no borrow, no `Ptr` and no runtime handle (`Cont`, `Fiber`, `Scope`). Region data is `Send`, since an outer region is frozen while tasks run. Structural (spec §4.4). |
 | `LentBy<K>` | `Q extends LentBy<K>` holds when `K` is `Q` or lends `Q`: `String` lends `str`, `Vec<T>` lends `T[]`. Lookups take anything a key lends, so a `HashMap<String, V>` is searched with a `str`. |
 | `Drop` | `drop(self: mut Self): void` runs when a value's owner ends. It performs no effects (spec §5.6). |
 | `Eq` | `eq(self, other): bool`, an equivalence. `==` and `!=` call it on anything but a primitive. Derived, floats are equal by a total equality: `NaN` equals itself and `-0.0` equals `0.0`, as `Hash` agrees. |
@@ -165,7 +165,7 @@ What tasks share (spec §6.2). Every operation that waits for another task perfo
 State shared by tasks, reached only inside `lock`.
 
 - `Mutex.new(v)`, for `T extends Send`.
-- `m.lock(body): R uses Io` lends the state `mut` to `body`, a closure that performs no effects and gives back a `Send` value, and gives back what `body` gives. Because `body` performs nothing, no lock is held across a scheduling point, so no `Mutex` takes part in a deadlock. A body that panics leaves the state as it left it, and gives the lock back (spec §5.7).
+- `m.lock(body): R uses Io` lends the state `mut` to `body`, a closure that performs no effects and gives back a `Send` value, and gives back what `body` gives. Because `body` performs nothing, no lock is held across a scheduling point, so no `Mutex` takes part in a deadlock. A body that panics ends the program (spec §5.7).
 - `lock` is a scheduling point before it takes the lock. A task that finds the lock held spins briefly, then waits without a core, and waiting tasks are woken in the order they began to wait.
 - Each `Mutex` has a lock of its own: locking one never waits for another.
 

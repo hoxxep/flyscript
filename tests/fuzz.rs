@@ -96,6 +96,8 @@ struct Site {
     line: usize,
     text: String,
     what: &'static str,
+    /// Whether `text` replaces the line, rather than following it.
+    replace: bool,
 }
 
 struct Gen {
@@ -365,6 +367,10 @@ impl Gen {
             self.print();
             return;
         }
+        if self.in_main && self.rng.chance(6) {
+            self.holds();
+            return;
+        }
         match self.rng.below(18) {
             0..=3 => {
                 let ty = [Ty::Int, Ty::Int, Ty::Bool, Ty::Str, Ty::Vec, Ty::Opt, Ty::Shape, Ty::Bag][self.rng.below(8)];
@@ -414,7 +420,7 @@ impl Gen {
                 if let Some(v) = self.pick_var(|v| v.ty == Ty::Str && v.owned) {
                     let at = self.lines.len();
                     let pad = "  ".repeat(self.indent + 1);
-                    self.sites.push(Site { line: at, text: format!("{pad}const moved_in_loop: String = {};", v.name), what: "a value moved in a loop" });
+                    self.sites.push(Site { line: at, text: format!("{pad}const moved_in_loop: String = {};", v.name), what: "a value moved in a loop", replace: false });
                 }
                 self.line(&format!("for (const {i} of 0..{n}) {{"));
                 self.loops += 1;
@@ -447,7 +453,7 @@ impl Gen {
                     if v.mutable {
                         // A mutant changes the vector while the loop reads it.
                         let at = self.lines.len() - 1;
-                        self.sites.push(Site { line: at, text: format!("{}  {}.push(1);", "  ".repeat(self.indent), v.name), what: "a vector changed while iterated" });
+                        self.sites.push(Site { line: at, text: format!("{}  {}.push(1);", "  ".repeat(self.indent), v.name), what: "a vector changed while iterated", replace: false });
                     }
                     if self.rng.chance(50) && self.budget > 0 {
                         self.budget -= 1;
@@ -476,12 +482,12 @@ impl Gen {
                 }
             }
             11 => {
-                if let Some(v) = self.pick_var(|v| v.ty == Ty::Vec && v.mutable) {
-                    if !self.iterated.contains(&v.name) {
-                        let o = self.name("o");
-                        self.line(&format!("const {o}: Option<i64> = {}.pop();", v.name));
-                        self.declare(&o, Ty::Opt, false, true);
-                    }
+                if let Some(v) = self.pick_var(|v| v.ty == Ty::Vec && v.mutable)
+                    && !self.iterated.contains(&v.name)
+                {
+                    let o = self.name("o");
+                    self.line(&format!("const {o}: Option<i64> = {}.pop();", v.name));
+                    self.declare(&o, Ty::Opt, false, true);
                 }
             }
             12 => {
@@ -530,6 +536,58 @@ impl Gen {
                 }
             }
         }
+    }
+
+    /// Code that holds what it was lent, or what an arm took, as long as it may and no longer: each
+    /// with a mutant that holds it past that.
+    fn holds(&mut self) {
+        let pad = "  ".repeat(self.indent);
+        let words = ["ab", "four", "seven", "x"];
+        let (w1, w2) = (words[self.rng.below(4)], words[self.rng.below(4)]);
+        let r = self.name("hd");
+        match self.rng.below(3) {
+            0 => {
+                // An operation's borrowed argument, used before the arm resumes.
+                let t = self.name("t");
+                let c = self.rng.below(5) + 2;
+                let head = format!("const {r}: i64 = handle {{ const {t} = \"{w1}\".toString(); Peek.peek({t}.asStr()) + 1 }} with Peek");
+                self.line(&format!("{head} {{ peek(s) resumes k => k((s.len() as i64) * {c}) }};"));
+                let at = self.lines.len() - 1;
+                self.sites.push(Site {
+                    line: at,
+                    text: format!("{pad}{head} {{ peek(s) resumes k => {{ discard(k); s.len() as i64 }} }};"),
+                    what: "an operation's borrowed argument used after its continuation was given up",
+                    replace: true,
+                });
+            }
+            1 => {
+                // A value whose type implements `Drop`, its parts only read.
+                let g = self.name("gd");
+                self.line(&format!("const {g} = Guard {{ a: \"{w1}\".toString(), b: \"{w2}\".toString() }};"));
+                self.line(&format!("const {r}: i64 = match ({g}) {{ Guard {{ a, b }} => (a.len() + b.len()) as i64 }};"));
+                let at = self.lines.len() - 1;
+                self.sites.push(Site {
+                    line: at,
+                    text: format!("{pad}const {r}: i64 = match ({g}) {{ Guard {{ a, b }} => consume(a) + (b.len() as i64) }};"),
+                    what: "a part moved out of a value whose type implements `Drop`",
+                    replace: true,
+                });
+            }
+            _ => {
+                // An arm that moves a part owns the rest, until it ends.
+                let pr = self.name("pr");
+                self.line(&format!("const {pr} = #Pair(\"{w1}\".toString(), \"{w2}\".toString());"));
+                self.line(&format!("const {r}: i64 = match ({pr}) {{ #Pair(a, b) => consume(a) + (b.len() as i64) }};"));
+                let at = self.lines.len() - 1;
+                self.sites.push(Site {
+                    line: at,
+                    text: format!("{pad}const {r}: i64 = {{ const sl: str = match ({pr}) {{ #Pair(a, b) => {{ consume(a); b.asStr() }} }}; sl.len() as i64 }};"),
+                    what: "a borrow of what an arm owns, used after the arm",
+                    replace: true,
+                });
+            }
+        }
+        self.declare(&r, Ty::Int, false, true);
     }
 
     /// Tasks in a scope, each printing as it goes and giving a result: the seeded scheduler decides
@@ -696,7 +754,7 @@ impl Gen {
             self.declare(&p, ty, mode == Mode::Mut, mode == Mode::Owned);
             if mode == Mode::Readonly && ty == Ty::Str {
                 let at = self.lines.len();
-                self.sites.push(Site { line: at, text: format!("  {p}.push(\"no\");"), what: "a readonly parameter changed" });
+                self.sites.push(Site { line: at, text: format!("  {p}.push(\"no\");"), what: "a readonly parameter changed", replace: false });
             }
         }
         let mut uses = Vec::new();
@@ -756,6 +814,12 @@ impl Gen {
         self.line("type Shape = #Circle(i64) | #Rect { w: i64; h: i64 } | #Empty;");
         self.line("struct Bag { name: String; items: Vec<i64>; tag: Option<i64> }");
         self.line("effect Ask { ask(n: i64): i64; }");
+        self.line("effect Peek { peek(s: str): i64; }");
+        self.line("type Pair = #Pair(String, String);");
+        self.line("struct Guard { a: String; b: String }");
+        self.line("impl Drop for Guard { function drop(self: mut Self): void {} }");
+        self.line("function consume(s: String): i64 { s.len() as i64 }");
+        self.line("function discard<A, B, row E>(k: Cont<A, B, E>): void {}");
         self.line("");
         self.line("function twice(f: (z: i64) => i64, x: i64): i64 { f(f(x)) }");
         self.line("");
@@ -777,7 +841,7 @@ impl Gen {
             if let Some(v) = moved.last() {
                 reported.push(v.name.clone());
                 let at = self.lines.len() - 1;
-                self.sites.push(Site { line: at, text: format!("  println({}.asStr());", v.name), what: "a value used after it moved" });
+                self.sites.push(Site { line: at, text: format!("  println({}.asStr());", v.name), what: "a value used after it moved", replace: false });
             }
         }
         for v in self.scopes[0].clone() {
@@ -793,7 +857,11 @@ impl Gen {
     /// The program with the mutation at `site` made.
     fn mutant(&self, site: &Site) -> String {
         let mut lines = self.lines.clone();
-        lines.insert(site.line + 1, site.text.clone());
+        if site.replace {
+            lines[site.line] = site.text.clone();
+        } else {
+            lines.insert(site.line + 1, site.text.clone());
+        }
         lines.join("\n") + "\n"
     }
 }

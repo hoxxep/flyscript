@@ -601,6 +601,10 @@ impl<'p> Own<'p> {
                     } else if !path.fields.is_empty() && self.has_drop_ancestor(&path) {
                         self.err(at, format!("cannot move `{}` out of a value whose type implements `Drop`", self.path_name(&path)));
                     } else if !self.collecting {
+                        // A continuation moved may be resumed or dropped wherever it goes.
+                        if path.fields.is_empty() {
+                            self.check_lent(path.root, at, Some(self.vars[path.root].name.clone()));
+                        }
                         self.state.moved.insert(path.clone());
                         self.move_sites.entry(path.clone()).or_insert(at);
                         // Where a value leaves its binding, the evaluator stops owning it there (§5.6).
@@ -626,6 +630,26 @@ impl<'p> Own<'p> {
                 let mut loans = held;
                 loans.insert(l);
                 Val { loans }
+            }
+        }
+    }
+
+    /// An arm's parameters that may hold a borrow borrow from the code that performed the
+    /// operation, which resuming the continuation `k` lets run on and dropping it unwinds: none may
+    /// be used after `k` is resumed at `at`, or, when `moved` names it, given up there (§5.3).
+    fn check_lent(&mut self, k: VarId, at: Span, moved: Option<String>) {
+        if self.collecting {
+            return;
+        }
+        for (param, l) in self.cont_args.get(&k).cloned().unwrap_or_default() {
+            let holders: Vec<VarId> = self.state.holds.iter().filter(|(_, ls)| ls.contains(&l)).map(|(h, _)| *h).collect();
+            if let Some(h) = holders.into_iter().find(|h| self.live_after(*h, at.end)) {
+                let (pn, hn) = (self.vars[param].name.clone(), self.vars[h].name.clone());
+                let what = if pn == hn { format!("`{pn}`") } else { format!("`{hn}`, which borrows `{pn}`,") };
+                match &moved {
+                    None => self.err(at, format!("{what} is used after this resumes the code that lent `{pn}`, which may end it")),
+                    Some(kn) => self.err(at, format!("{what} is used after `{kn}` is given up here, which may resume or drop the code that lent `{pn}`")),
+                }
             }
         }
     }
@@ -771,13 +795,19 @@ impl<'p> Own<'p> {
     }
 
     fn check_outlives(&mut self, dying: &HashSet<VarId>, b: &ast::Block, v: &Val) {
+        self.check_outlives_at(dying, b.tail.as_deref(), b.span.end, v, "goes out of scope at the end of its block");
+    }
+
+    /// No borrow of a binding in `dying`, which ends at `end`, may outlive it: not in `v`, the
+    /// value `tail` gives, nor in a binding used after `end`. `ends` says how the binding ends.
+    fn check_outlives_at(&mut self, dying: &HashSet<VarId>, tail: Option<&Expr>, end: usize, v: &Val, ends: &str) {
         if self.collecting || dying.is_empty() {
             return;
         }
         let on_dying = |o: &Self, l: &LoanId| !o.loans[*l].external && dying.contains(&o.loans[*l].path.root);
         // A function's own body is the return check's to judge.
         if self.scopes.len() > 1
-            && let Some(tail) = &b.tail
+            && let Some(tail) = tail
             && self.may_hold(&self.ty_of(tail))
             && let Some(l) = v.loans.iter().find(|l| on_dying(self, l)).copied()
         {
@@ -785,7 +815,7 @@ impl<'p> Own<'p> {
             let name = self.vars[root].name.clone();
             let msg = match self.lent_args.get(&root) {
                 Some(op) => format!("this value borrows `{name}`, which the code that performed `{op}` lent only to this arm"),
-                None => format!("this value borrows `{name}`, which goes out of scope at the end of its block"),
+                None => format!("this value borrows `{name}`, which {ends}"),
             };
             self.err(tail.span, msg);
         }
@@ -808,7 +838,6 @@ impl<'p> Own<'p> {
                 self.err(loan.span, format!("`{hn}` borrows `{an}` here, but `{an}` is dropped before `{hn}`'s destructor runs, since it is declared after it: declare `{an}` first"));
             }
         }
-        let end = b.span.end;
         let holders: Vec<(VarId, BTreeSet<LoanId>)> = self.state.holds.iter().map(|(h, ls)| (*h, ls.clone())).collect();
         for (h, ls) in holders {
             if let Some(l) = ls.iter().find(|l| on_dying(self, l)).copied()
@@ -1138,6 +1167,9 @@ impl<'p> Own<'p> {
                     // Already moved, it was reported where the scrutinee was read.
                     let path = place.clone().filter(|p| !self.state.moved.iter().any(|m| m.overlaps(p) || p.overlaps(m)));
                     let takes = per_arm && self.takes_owned(&arm.pat) && self.arm_moves.contains(&arm.pat.span);
+                    if takes && !self.collecting && self.destructures_drop(&arm.pat, &self.ty_of(scrutinee)) {
+                        self.err(arm.pat.span, "this arm moves what it binds out of a value whose type implements `Drop`, which is dropped whole: bind the value itself, or only read its parts");
+                    }
                     // An arm that changes a part it binds, in place, borrows the place `mut`.
                     let lends_mut = per_arm && !takes && self.arm_mutates(arm);
                     if let (true, Some(path)) = (takes, path) {
@@ -1173,6 +1205,12 @@ impl<'p> Own<'p> {
                         self.guard(g, &arm.pat);
                     }
                     let v = self.expr(&arm.body, how);
+                    // An arm that takes the place owns what it binds and drops it when it ends.
+                    if takes && let Some(scope) = self.scopes.last() {
+                        let dying: HashSet<VarId> = scope.values().copied().collect();
+                        self.check_outlives_at(&dying, Some(&arm.body), arm.body.span.end, &v,
+                            "this arm owns, having taken the whole place to move a part, and drops when it ends");
+                    }
                     out.extend(v.loans);
                     if let Some(scope) = self.scopes.pop() {
                         for var in scope.values() {
@@ -1494,16 +1532,8 @@ impl<'p> Own<'p> {
             // The operation's arguments end with the code that performed them, which resuming
             // lets run on.
             let k = self.place(callee).map(|p| p.root);
-            let lent = k.and_then(|k| self.cont_args.get(&k).cloned()).unwrap_or_default();
-            if !self.collecting {
-                for (param, l) in lent {
-                    let holders: Vec<VarId> = self.state.holds.iter().filter(|(_, ls)| ls.contains(&l)).map(|(h, _)| *h).collect();
-                    if let Some(h) = holders.into_iter().find(|h| self.live_after(*h, e.span.end)) {
-                        let (pn, hn) = (self.vars[param].name.clone(), self.vars[h].name.clone());
-                        let what = if pn == hn { format!("`{pn}`") } else { format!("`{hn}`, which borrows `{pn}`,") };
-                        self.err(e.span, format!("{what} is used after this resumes the code that lent `{pn}`, which may end it"));
-                    }
-                }
+            if let Some(k) = k {
+                self.check_lent(k, e.span, None);
             }
             // What resuming gives back may hold what the body held, never the continuation: it
             // is used up by the call.
@@ -2184,6 +2214,26 @@ impl Own<'_> {
     }
 
     /// Whether a pattern binds a part that is owned and not `Copy`, which it takes.
+    /// Whether a pattern takes apart a value whose type implements `Drop`, at `ty` or within it.
+    fn destructures_drop(&self, p: &Pattern, ty: &Ty) -> bool {
+        let dropped = matches!(ty, Ty::Named(d, _) if self.p.has_drop(*d));
+        match &p.kind {
+            PatternKind::Record { fields, .. } => {
+                dropped
+                    || fields.iter().any(|(name, sub)| {
+                        sub.as_ref().is_some_and(|q| self.destructures_drop(q, &field_type(self.p, ty, &name.name).unwrap_or(Ty::Error)))
+                    })
+            }
+            PatternKind::Tag { .. } => dropped,
+            PatternKind::Tuple(ps) => match ty {
+                Ty::Tuple(ts) => ps.iter().zip(ts).any(|(q, t)| self.destructures_drop(q, t)),
+                _ => false,
+            },
+            PatternKind::Or(ps) => ps.iter().any(|q| self.destructures_drop(q, ty)),
+            _ => false,
+        }
+    }
+
     fn takes_owned(&self, p: &Pattern) -> bool {
         let mut names = Vec::new();
         bind_spans(p, &mut names);

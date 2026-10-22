@@ -1,0 +1,16 @@
+// error: this value borrows `b`, which this arm owns, having taken the whole place to move a part
+// An arm that moves a part takes the whole place: what else it binds it owns and drops when it
+// ends, so no borrow of that may leave the arm (§4.1).
+import { println } from "std/io";
+type Pair = #Pair(String, String);
+function consume(s: String): void {}
+export function main(): void uses Io {
+  let p = #Pair("hi".toString(), "there".toString());
+  const slice: str = match (p) {
+    #Pair(a, b) => {
+      consume(a);
+      b.asStr()
+    }
+  };
+  println(slice);
+}

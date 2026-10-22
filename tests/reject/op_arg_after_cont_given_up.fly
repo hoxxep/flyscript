@@ -1,0 +1,12 @@
+// error: `msg` is used after `k` is given up here, which may resume or drop the code that lent `msg`
+// Giving the continuation away — to a function, a binding, a closure — may resume it or drop it,
+// unwinding the code that lent the argument, so a borrowed argument is dead from there on (§5.3).
+import { println } from "std/io";
+effect Log { log(msg: str): void; }
+function discard<A, B, row E>(k: Cont<A, B, E>): void {}
+export function main(): void uses Io {
+  handle {
+    const line = "hello".toString();
+    Log.log(line.asStr());
+  } with Log { log(msg) resumes k => { discard(k); println(msg); } }
+}

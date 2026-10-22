@@ -1,0 +1,22 @@
+// A panic ends the program even while another task's cleanup waits on a channel whose sender
+// the panicking task held: it never lets go of it, and no one waits for it (§5.7).
+// expect: <panic: division by zero>
+import { channel } from "std/sync";
+import { println } from "std/io";
+
+export function main(): void uses Io {
+  const [tx, rx] = channel<i32>();
+  Io.scope((s) => {
+    s.spawn(() => {
+      defer { for (const msg of rx) { println(`drained ${msg}`); } };
+      Io.sleep(Duration.secs(10));
+    });
+    s.spawn(() => {
+      const tx2 = tx;
+      Io.sleep(Duration.ms(1));
+      const zero: i32 = 0;
+      const x = 1 / zero;
+      tx2.send(x);
+    });
+  });
+}

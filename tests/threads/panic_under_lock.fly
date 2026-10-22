@@ -1,8 +1,7 @@
-// expect: a cancelled task took the lock in its cleanup: 1
 // expect: <panic: index 9 out of bounds (length 3)>
-// A body panics while it holds its lock. The panic stops its task without the task's cleanup
-// (§5.7), but the lock is given back: the task it cancels takes the lock in its own cleanup, on
-// whatever core it runs.
+// A body panics while it holds its lock, with another task asleep holding cleanup that takes the
+// lock: the panic ends the program at once, on whatever core it happens (§5.7). No cleanup runs,
+// so none can wait for a lock the panicking task never gave back.
 import { println } from "std/io";
 import { Mutex } from "std/sync";
 
@@ -12,7 +11,7 @@ export function main(): void uses Io {
     s.spawn(() => {
       defer {
         const n = counter.lock((c) => c + 0);
-        println(`a cancelled task took the lock in its cleanup: ${n}`);
+        println(`not reached: a panic runs no cleanup: ${n}`);
       };
       counter.lock((c) => { c += 1; });
       Io.sleep(Duration.secs(60));

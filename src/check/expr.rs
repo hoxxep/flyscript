@@ -75,6 +75,8 @@ pub struct Checker<'p> {
     privileged: Option<DefId>,
     /// Checking a `defer`, which cannot fail or yield (§5.6).
     in_defer: bool,
+    /// Checking a closure whose effects its expected type gives.
+    closure_row: bool,
 }
 
 /// A call's span, its generic arguments, and each (argument, bound) pair it must satisfy.
@@ -135,6 +137,7 @@ pub fn check_fn(p: &mut Program, fid: FnId) {
         pending_ops: Vec::new(),
         privileged: None,
         in_defer: false,
+        closure_row: false,
     };
     c.privileged = c.p.spec_requested.get(&fid).copied();
     let inferring = scheme.effects.is_none();
@@ -450,6 +453,23 @@ impl<'p> Checker<'p> {
 
     /// Whether `found` can be used where `expected` is wanted: by unification, or by lending
     /// (§4.1), the only implicit conversion. Commits the successful attempt.
+    /// What a box or an `Arc` lends, where a borrow is wanted: its contents.
+    fn boxed(&self, t: &Ty) -> Ty {
+        match t {
+            Ty::Named(d, args) if *d == self.known("Box") || *d == self.known("Arc") => match args.last() {
+                Some(GArg::Ty(inner)) => inner.clone(),
+                _ => t.clone(),
+            },
+            _ => t.clone(),
+        }
+    }
+
+    /// Whether a box or an `Arc` lends its contents where a borrow of `expected` is wanted.
+    fn lends_contents(&mut self, found: &Ty, expected: &Ty) -> bool {
+        let inner = self.boxed(&self.normalize(&self.s.resolve(found)));
+        inner != self.normalize(&self.s.resolve(found)) && self.lends(&inner, expected)
+    }
+
     fn lends(&mut self, found: &Ty, expected: &Ty) -> bool {
         if self.try_unify(found, expected) {
             return true;
@@ -468,7 +488,7 @@ impl<'p> Checker<'p> {
             }
             (Ty::Borrow(fm, fi), Ty::Borrow(xm, xi)) if *fm || !*xm => {
                 let (fi, xi) = (fi.clone(), xi.clone());
-                self.lends(&fi, &xi)
+                self.lends(&fi, &xi) || self.lends_contents(&fi, &xi)
             }
             (Ty::Borrow(_, fi), _) => {
                 // Reading out of a borrow into an owned position copies, so it must be `Copy`.
@@ -483,9 +503,10 @@ impl<'p> Checker<'p> {
             (Ty::Named(d, _), Ty::Borrow(true, _)) if *d == self.known("Ref") || *d == self.known("Arc") => false,
             (_, Ty::Borrow(_, xi)) => {
                 let xi = xi.clone();
-                self.lends(&f, &xi)
+                self.lends(&f, &xi) || self.lends_contents(&f, &xi)
             }
-            (Ty::Named(d, args), _) if *d == self.known("Ref") || *d == self.known("Box") || *d == self.known("Arc") => {
+            // Owned, a box or an `Arc` is not its contents: `b.get().clone()` copies them out.
+            (Ty::Named(d, args), _) if *d == self.known("Ref") => {
                 match args.last() {
                     Some(GArg::Ty(inner)) => {
                         let inner = inner.clone();
@@ -656,7 +677,15 @@ impl<'p> Checker<'p> {
         let effects = &effects;
         if let Err(e) = self.s.eff_sub(effects, &allowed) {
             let what = self.show_eff(&e);
-            let msg = if self.p.known.get("Fail") == Some(&e.def) {
+            let msg = if self.closure_row {
+                let allowed = self.s.zonk_effs(&allowed);
+                let allowed = if allowed.effs.is_empty() && allowed.tail == Tail::Closed {
+                    "no effects".to_string()
+                } else {
+                    format!("only `{}`", Show(&allowed, &*self.p))
+                };
+                format!("this function performs {what}, but {allowed} may be performed here")
+            } else if self.p.known.get("Fail") == Some(&e.def) {
                 let declared = self.s.expand_effs(&allowed).effs.into_iter().find(|x| x.def == e.def);
                 match declared {
                     Some(d) => format!(
@@ -1848,9 +1877,9 @@ impl<'p> Checker<'p> {
 
     fn lambda(&mut self, params: &[ast::Param], body: &Expr, expected: Option<&Ty>) -> Ty {
         let want = expected.map(|x| self.normalize(&self.s.resolve(x)));
-        let (want_params, want_ret, mode) = match &want {
-            Some(Ty::Fn(f)) if f.params.len() == params.len() => (Some(f.params.clone()), Some(f.ret.clone()), f.mode),
-            _ => (None, None, FnMode::Shared),
+        let (want_params, want_ret, want_effects, mode) = match &want {
+            Some(Ty::Fn(f)) if f.params.len() == params.len() => (Some(f.params.clone()), Some(f.ret.clone()), Some(f.effects.clone()), f.mode),
+            _ => (None, None, None, FnMode::Shared),
         };
         self.scopes.push(HashMap::new());
         let mut ptys = Vec::new();
@@ -1870,7 +1899,10 @@ impl<'p> Checker<'p> {
             ptys.push(t);
         }
         let saved_ret = std::mem::replace(&mut self.ret, want_ret.clone().unwrap_or_else(|| self.s.fresh()));
-        let inner_allowed = self.s.fresh_effs();
+        // Expected as a function that performs what its type says, a closure may perform that; what
+        // only resuming a continuation performs is known later, and checked against it then.
+        let closure_row = std::mem::replace(&mut self.closure_row, want_effects.is_some());
+        let inner_allowed = want_effects.unwrap_or_else(|| self.s.fresh_effs());
         let saved_allowed = std::mem::replace(&mut self.allowed, inner_allowed.clone());
         let ret = self.ret.clone();
         // A closure's body performs when it is called, not here: not in a `defer` around it.
@@ -1883,6 +1915,7 @@ impl<'p> Checker<'p> {
             let _ = self.s.unify(&ret, &t);
         }
         self.allowed = saved_allowed;
+        self.closure_row = closure_row;
         self.ret = saved_ret;
         self.scopes.pop();
         Ty::Fn(Box::new(FnTy { mode, params: ptys, ret, effects: inner_allowed }))

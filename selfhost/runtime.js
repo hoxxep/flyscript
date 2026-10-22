@@ -15,8 +15,7 @@ const { $rt, $b } = (() => {
     constructor(value) { this.value = value; }
   }
   class Panic extends Error {}
-  // Whether a panic is passing: it stops its task where it is, without the task's cleanup (§5.7),
-  // until the scheduler takes it up.
+  // Whether a panic is passing: it ends the program, running no one's cleanup on the way (§5.7).
   let panicking = false;
   const unwinds = () => !panicking;
   function panic(message) {
@@ -500,8 +499,8 @@ const { $rt, $b } = (() => {
         if (error instanceof Panic) panicking = true;
         r = error !== undefined ? t.gen.throw(error) : t.gen.next(input);
       } catch (e) {
-        if (me === 0) throw e;
-        if (e instanceof Panic) panicking = false;
+        // A panic ends the program, every task with it.
+        if (me === 0 || e instanceof Panic) throw e;
         endTask(me, { error: e });
         continue;
       }
@@ -529,9 +528,8 @@ const { $rt, $b } = (() => {
   function endTask(me, outcome) {
     const t = sched.tasks.get(me);
     const st = sched.scopes.get(t.scope);
-    // The first failure or panic cancels the scope: its body and its other tasks.
-    const ends = outcome.error instanceof Fail || outcome.error instanceof Panic;
-    if (ends && st.failure === undefined && st.panic === undefined) {
+    // The first failure cancels the scope: its body and its other tasks.
+    if (outcome.error instanceof Fail && st.failure === undefined) {
       cancel(st.owner);
       for (const o of st.tasks) if (o !== me) cancel(o);
     }
@@ -540,8 +538,6 @@ const { $rt, $b } = (() => {
     } else if (outcome.error instanceof Fail) {
       if (st.failure === undefined) st.failure = outcome.error;
       st.fibers.set(me, { error: outcome.error });
-    } else if (outcome.error instanceof Panic) {
-      if (st.panic === undefined) st.panic = outcome.error;
     } else if (!(outcome.error instanceof Cancelled)) {
       throw outcome.error;
     }
@@ -783,13 +779,15 @@ const { $rt, $b } = (() => {
     // ---- tasks and channels: generators, as they are scheduling points ----
     *Io_scope$g(f) {
       const sid = sched.scopeIds++;
-      const st = { owner: sched.current, tasks: [], fibers: new Map(), failure: undefined, panic: undefined };
+      const st = { owner: sched.current, tasks: [], fibers: new Map(), failure: undefined };
       sched.scopes.set(sid, st);
       let result, error;
       try { result = yield* body(f, { v: { sid } }); }
       catch (e) {
-        // The body unwound because a task failed or panicked: the scope rethrows that.
-        if (!(e instanceof Cancelled && (st.failure !== undefined || st.panic !== undefined))) error = e;
+        // A panic ends the program at once, not waiting for the tasks.
+        if (e instanceof Panic) throw e;
+        // The body unwound because a task failed: the scope rethrows that.
+        if (!(e instanceof Cancelled && st.failure !== undefined)) error = e;
       }
       sched.cancelled.delete(sched.current);
       // A scope returns only when every task started in it has finished (§6.1).
@@ -801,7 +799,6 @@ const { $rt, $b } = (() => {
       }
       sched.cancelled.delete(sched.current);
       sched.scopes.delete(sid);
-      if (st.panic !== undefined) { panicking = true; throw st.panic; }
       if (error !== undefined) throw error;
       if (st.failure !== undefined) throw st.failure;
       return result;

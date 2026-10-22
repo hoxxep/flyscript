@@ -1,0 +1,12 @@
+// error: this arm moves what it binds out of a value whose type implements `Drop`
+// A value whose type implements `Drop` is dropped whole, by its destructor: no pattern may take
+// it apart, as no projection may move a field out of it (§4.1).
+struct Packet { header: String; body: String; }
+impl Drop for Packet {
+  function drop(self: mut Self): void {}
+}
+export function takeHeader(pkt: Packet): String {
+  match (pkt) {
+    Packet { header, body } => header
+  }
+}

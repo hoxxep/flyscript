@@ -7,12 +7,9 @@ use std::process::Command;
 
 fn lake() -> Option<PathBuf> {
     let home = std::env::var("HOME").unwrap_or_default();
-    for candidate in [PathBuf::from("lake"), Path::new(&home).join(".elan/bin/lake")] {
-        if Command::new(&candidate).arg("--version").output().is_ok_and(|o| o.status.success()) {
-            return Some(candidate);
-        }
-    }
-    None
+    [PathBuf::from("lake"), Path::new(&home).join(".elan/bin/lake")]
+        .into_iter()
+        .find(|candidate| Command::new(candidate).arg("--version").output().is_ok_and(|o| o.status.success()))
 }
 
 #[test]

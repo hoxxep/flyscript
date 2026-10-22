@@ -1,0 +1,4 @@
+// error: expected `String`, found `Box<String>`
+// A box lends its contents where a borrow is wanted, but owned it is a box: its contents come
+// out by `get().clone()`, or `into()` (§4.1).
+export function unbox(b: Box<String>): String { b }

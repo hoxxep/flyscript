@@ -69,10 +69,10 @@ void fly_err_take(void* out, size_t size) {
   fly_err = NULL;
 }
 
-static _Noreturn void fiber_panic(const char* message);
+static _Noreturn void panic_exit(const char* message);
 
-// A panic unwinds the fiber it happens on; one on the main stack ends the program (§5.7).
-_Noreturn void fly_panic(const char* message) { fiber_panic(message); }
+// A panic ends the program where it is, every task with it, running no one's cleanup (§5.7).
+_Noreturn void fly_panic(const char* message) { panic_exit(message); }
 
 #ifdef FLY_FREESTANDING
 static _Noreturn void panic_exit(const char* message) { fly_os_panic(message, strlen(message)); }
@@ -117,10 +117,13 @@ static void format(char* out, size_t cap, const char* fmt, va_list ap) {
 }
 #else
 static _Noreturn void panic_exit(const char* message) {
+  // On worker threads, the first to panic reports it; the others wait for the end.
+  static int reporting;
+  if (__atomic_exchange_n(&reporting, 1, __ATOMIC_ACQ_REL)) for (;;) {}
   fflush(stdout);
   printf("<panic: %s>\n", message);
   fflush(stdout);
-  exit(101);
+  _Exit(101);
 }
 
 static void format(char* out, size_t cap, const char* fmt, va_list ap) { vsnprintf(out, cap, fmt, ap); }
@@ -836,8 +839,6 @@ void __tsan_switch_to_fiber(void* fiber, unsigned flags);
 #endif
 
 struct fly_fiber {
-  // Whether the fiber ended in a panic: it stops where it panicked, never to run again.
-  bool panicked;
   // Whether it is a thread's own stack, which a panic cannot leave.
   bool base;
   void* sp;
@@ -927,12 +928,6 @@ static void switch_to(fly_fiber* to) {
 #endif
 }
 
-// The panic unwinding, until whoever started the fiber it began on takes it up.
-FLY_THREAD_VAR(char*, panicking, NULL)
-#define panicking (*panicking_ref())
-// The `Mutex` lock this thread holds, if any: a panic in its body gives it back.
-static void unlock_held(void);
-
 void fly_fiber_start(fly_fiber* f) {
 #ifdef FLY_ASAN
   // The first fiber a thread starts is switched to from the thread's own stack, whose bounds the
@@ -948,26 +943,6 @@ void fly_fiber_start(fly_fiber* f) {
   f->entry(f->arg);
   f->done = true;
   switch_to(f->back);
-}
-
-static _Noreturn void fiber_panic(const char* message) {
-  unlock_held();
-  if (cur_fiber->base) panic_exit(message);
-  if (!panicking) {
-    size_t n = strlen(message);
-    panicking = malloc(n + 1);
-    memcpy(panicking, message, n + 1);
-  }
-  // The fiber ends here, as a finished one does, and whoever resumed it takes the panic up.
-  cur_fiber->panicked = true;
-  cur_fiber->done = true;
-  switch_to(cur_fiber->back);
-  __builtin_trap();
-}
-
-// After a fiber this code resumed has run: a panic it ended with goes on here.
-static void panic_goes_on(void) {
-  if (panicking) fiber_panic(panicking);
 }
 
 #if defined(FLY_FREESTANDING) || defined(__wasm__)
@@ -1076,7 +1051,6 @@ void fly_handle_start(fly_handler* h, void (*entry)(void*), void* arg) {
   h->fiber = fiber_new(entry, arg, h);
   h->fiber->back = cur_fiber;
   switch_to(h->fiber);
-  panic_goes_on();
 }
 
 // The handler is deep: what else the body performs goes to the handlers around the resumption.
@@ -1085,7 +1059,6 @@ void fly_handle_resume(fly_handler* h) {
   h->outer = fly_handlers;
   h->op = -1;
   switch_to(h->suspended);
-  panic_goes_on();
 }
 
 bool fly_handle_done(const fly_handler* h) { return h->fiber->done; }
@@ -1701,8 +1674,6 @@ typedef struct {
   void* result;
   size_t size;
   fly_failure* error;
-  // The panic the task ended with, if it did.
-  char* panic;
   bool started, finished, cancelled, deliver_cancel, deliver_deadlock;
   // How deep it is in cleanup, which a cancellation waits for.
   int cleaning;
@@ -1713,7 +1684,7 @@ typedef struct {
 // A channel: what was sent and not yet received, its senders, whether its receiver is gone, and
 // what drops a message, which it does to those no one will receive.
 typedef struct { uint8_t* items; size_t len, head, size; long senders; bool closed, deaf; void (*drop)(void*); } chan_t;
-typedef struct { int owner; int* tasks; size_t ntasks; fly_failure* failure; char* panic; } scope_t;
+typedef struct { int owner; int* tasks; size_t ntasks; fly_failure* failure; } scope_t;
 
 bool fly_tasks_on = false;
 static struct {
@@ -1877,12 +1848,11 @@ static void block(int kind, int id) {
 static void end_task(int me) {
   task_t* t = sched.tasks[me];
   scope_t* st = sched.scopes[t->scope];
-  // The first failure or panic cancels the scope: its body and its other tasks (§6.1).
-  if ((t->panic || t->error) && !st->panic && !st->failure) {
+  // The first failure cancels the scope: its body and its other tasks (§6.1).
+  if (t->error && !st->failure) {
     cancel(st->owner);
     for (size_t i = 0; i < st->ntasks; i++) if (st->tasks[i] != me) cancel(st->tasks[i]);
   }
-  if (t->panic && !st->panic) st->panic = t->panic;
   // A failure is the scope's to raise, unless a join raises it first: it is raised once.
   if (t->error && !st->failure) st->failure = t->error;
   t->finished = true;
@@ -1930,14 +1900,7 @@ void fly_tasks_run(void (*main)(void)) {
     t->fiber->back = &main_fiber;
     switch_to(t->suspended);
     if (t->fiber->done) {
-      if (panicking) {
-        t->panic = panicking;
-        panicking = NULL;
-        fly_unwinding = false;
-        fly_err = NULL;
-      }
       if (me == 0) {
-        if (t->panic) panic_exit(t->panic);
         if (t->error) fly_err = t->error;
         return;
       }
@@ -2014,7 +1977,6 @@ void fly_join(int task, void* out) {
   join_task(task);
   if (fly_unwinding) return;
   task_t* t = sched.tasks[task];
-  if (t->panic) fly_panic("a joined task did not finish");
   if (t->error) {
     scope_t* st = sched.scopes[t->scope];
     if (st && st->failure == t->error) st->failure = NULL;
@@ -2051,8 +2013,8 @@ void fly_scope_close(int sid, bool body_failed) {
 #endif
   scope_t* st = sched.scopes[sid];
   task_t* me = sched.tasks[sched.current];
-  // The body unwound because a task failed or panicked: the scope raises that instead.
-  bool unwound = fly_unwinding && !st->failure && !st->panic;
+  // The body unwound because a task failed: the scope raises that instead.
+  bool unwound = fly_unwinding && !st->failure;
   fly_unwinding = false;
   void* err = fly_err;
   fly_err = NULL;
@@ -2066,7 +2028,6 @@ void fly_scope_close(int sid, bool body_failed) {
     }
   }
   me->cancelled = false;
-  if (st->panic) fly_panic(st->panic);
   if (unwound) { fly_unwinding = true; if (err) free(err); return; }
   if (err) { fly_err = err; return; }
   if (st->failure) { fly_err = st->failure; st->failure = NULL; }
@@ -2341,9 +2302,8 @@ struct mt_task {
   worker* home;
   fly_fiber* fiber;
   fly_fiber* suspended;
-  // How it ended: its failure, or the panic it ended with.
+  // How it ended: its failure, if it failed.
   fly_failure* error;
-  char* panic;
   // Who still refers to it: itself while it lives, its scope while it does, and a forked task's
   // `Fiber` until it is joined.
   int refs;
@@ -2375,9 +2335,8 @@ struct mt_scope {
   mt_task* live;
   size_t nlive;
   bool closing;
-  // The task whose failure the scope raises, unless a join raises it first; the first panic.
+  // The task whose failure the scope raises, unless a join raises it first.
   mt_task* failer;
-  char* panic;
 };
 
 // A channel: what was sent and not yet received, in a ring, and the receivers waiting, under its
@@ -2427,7 +2386,6 @@ static void notify(void) {
 static void task_unref(mt_task* t) {
   if (__atomic_sub_fetch(&t->refs, 1, __ATOMIC_ACQ_REL) > 0) return;
   free(t->result);
-  free(t->panic);
   free(t);
 }
 
@@ -2650,7 +2608,7 @@ static void mt_end(mt_task* t) {
   mt_task** cancels = NULL;
   size_t ncancels = 0;
   spin_lock(&sc->q.lock);
-  if ((t->panic || t->error) && !sc->panic && !sc->failer) {
+  if (t->error && !sc->failer) {
     cancels = fly_alloc((sc->nlive + 1) * sizeof(mt_task*));
     if (!sc->closing && sc->owner) {
       __atomic_fetch_add(&sc->owner->refs, 1, __ATOMIC_RELAXED);
@@ -2662,7 +2620,6 @@ static void mt_end(mt_task* t) {
       cancels[ncancels++] = o;
     }
   }
-  if (t->panic && !sc->panic) { sc->panic = t->panic; t->panic = NULL; }
   if (t->error && !sc->failer) {
     __atomic_fetch_add(&t->refs, 1, __ATOMIC_RELAXED);
     sc->failer = t;
@@ -2716,10 +2673,6 @@ static void run_task(worker* w, mt_task* t) {
   t->release = NULL;
   if (release) spin_unlock(release);
   if (done) {
-    if (panicking) {
-      t->panic = panicking;
-      panicking = NULL;
-    }
     mt_end(t);
   } else if (yielded) {
     inbox_push(w, t);
@@ -3021,7 +2974,6 @@ static void mt_run(void (*main)(void), void (*entry)(void* task, void* closure))
   }
   pthread_attr_destroy(&attr);
   work(&workers[0]);
-  if (t->panic) panic_exit(t->panic);
   if (t->error) fly_err = t->error;
 }
 
@@ -3061,7 +3013,6 @@ static void mt_join(int task, void* out) {
     spin_lock(&t->joiners.lock);
   }
   spin_unlock(&t->joiners.lock);
-  if (t->panic) fly_panic("a joined task did not finish");
   if (t->error) {
     // Raised here, so not again by the scope.
     fly_err = t->error;
@@ -3083,8 +3034,8 @@ static void mt_scope_close(int id) {
   mt_scope* sc = obj_get(id);
   mt_task* me = running;
   spin_lock(&sc->q.lock);
-  // The body unwound because a task failed or panicked: the scope raises that instead.
-  bool unwound = fly_unwinding && !sc->failer && !sc->panic;
+  // The body unwound because a task failed: the scope raises that instead.
+  bool unwound = fly_unwinding && !sc->failer;
   sc->closing = true;
   spin_unlock(&sc->q.lock);
   fly_unwinding = false;
@@ -3097,14 +3048,9 @@ static void mt_scope_close(int id) {
   }
   spin_unlock(&sc->q.lock);
   __atomic_store_n(&me->cancelled, false, __ATOMIC_SEQ_CST);
-  char* panic = sc->panic;
   mt_task* failer = sc->failer;
   obj_clear(id);
   free(sc);
-  if (panic) {
-    if (failer) task_unref(failer);
-    fly_panic(panic);
-  }
   if (unwound) {
     fly_unwinding = true;
     if (err) free(err);
@@ -3225,11 +3171,6 @@ _Static_assert(sizeof(mt_mutex) <= MUTEX_HEADER, "a mutex's header holds its loc
 
 static mt_mutex* mutex_of(const void* state) { return (mt_mutex*)((uint8_t*)state - MUTEX_HEADER); }
 
-// The lock this thread holds, if any: a body neither suspends nor takes another, so it is the
-// thread's until the body ends, and a panic in the body gives it back.
-FLY_THREAD_VAR(const void*, held_state, NULL)
-#define held_state (*held_state_ref())
-
 static bool mutex_try(mt_mutex* m) {
   spin_lock(&m->q.lock);
   bool free_ = !__atomic_load_n(&m->held, __ATOMIC_RELAXED);
@@ -3242,10 +3183,7 @@ void fly_lock(const void* state) {
   if (!threads) return;
   mt_mutex* m = mutex_of(state);
   for (int i = 0; i < 64; i++) {
-    if (!__atomic_load_n(&m->held, __ATOMIC_RELAXED) && mutex_try(m)) {
-      held_state = state;
-      return;
-    }
+    if (!__atomic_load_n(&m->held, __ATOMIC_RELAXED) && mutex_try(m)) return;
     relax();
   }
   spin_lock(&m->q.lock);
@@ -3255,20 +3193,16 @@ void fly_lock(const void* state) {
   }
   __atomic_store_n(&m->held, true, __ATOMIC_RELAXED);
   spin_unlock(&m->q.lock);
-  held_state = state;
 }
 
 void fly_unlock(const void* state) {
   if (!threads || !state) return;
-  held_state = NULL;
   mt_mutex* m = mutex_of(state);
   spin_lock(&m->q.lock);
   __atomic_store_n(&m->held, false, __ATOMIC_RELAXED);
   wake_one(&m->q);
   spin_unlock(&m->q.lock);
 }
-
-static void unlock_held(void) { if (held_state) fly_unlock(held_state); }
 
 static void* mt_task_result(mt_task* t) { return t->result; }
 static void* mt_task_closure(mt_task* t) { return t->closure; }
@@ -3286,7 +3220,6 @@ void fly_par_join(void (*a)(void* f, void* out), void* fa, void* oa, void (*b)(v
 #ifndef FLY_THREADS
 void fly_lock(const void* state) { (void)state; }
 void fly_unlock(const void* state) { (void)state; }
-static void unlock_held(void) {}
 void fly_par_join(void (*a)(void* f, void* out), void* fa, void* oa, void (*b)(void* f, void* out), void* fb, void* ob) {
   a(fa, oa);
   b(fb, ob);

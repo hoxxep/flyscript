@@ -75,6 +75,8 @@ export view struct Checker {
   privileged: Option<usize>;
   // Checking a `defer`, which cannot fail or yield (§5.6).
   inDefer: bool;
+  // Checking a closure whose effects its expected type gives.
+  closureRow: bool;
   // Where each expression and binding is, by id, to report the first in source order.
   spans: HashMap<usize, Span>;
 }
@@ -116,7 +118,7 @@ export function checkFn(p: mut Program, fid: usize): void {
     p, s: Subst.new(), module, scopes: [HashMap.new()], ret: scheme.ret.clone(), allowed: pure(), scope,
     pendingMatches: Vec.new(), typed: emptyTyped(), pendingRegions: Vec.new(), performed: Vec.new(),
     pendingConts: Vec.new(), copiesOut: Vec.new(), copyBinds: Vec.new(), pendingCopy: Vec.new(), bounds,
-    pendingTargs: Vec.new(), pendingSpecs: Vec.new(), pendingOps: Vec.new(), privileged, inDefer: false,
+    pendingTargs: Vec.new(), pendingSpecs: Vec.new(), pendingOps: Vec.new(), privileged, inDefer: false, closureRow: false,
     spans: HashMap.new(),
   };
   const inferring = scheme.effects.isNone();
@@ -367,6 +369,18 @@ impl Checker {
 
   // Whether `found` can be used where `expected` is wanted: by unification, or by lending
   // (§4.1), the only implicit conversion. Commits the successful attempt.
+  // Whether a box or an `Arc` lends its contents where a borrow of `expected` is wanted.
+  function lendsContents(self: mut Self, found: readonly Ty, expected: readonly Ty): bool {
+    const f = self.normalize(self.s.resolve(found));
+    match (f) {
+      #Named(d, args) if d == self.known("Box") || d == self.known("Arc") => match (args.last()) {
+        #Some(#Ty(inner)) => self.lends(inner, expected),
+        _ => false,
+      },
+      _ => false,
+    }
+  }
+
   function lends(self: mut Self, found: readonly Ty, expected: readonly Ty): bool {
     if (self.tryUnify(found, expected)) { return true; }
     const f = self.normalize(self.s.resolve(found));
@@ -381,7 +395,7 @@ impl Checker {
         }
         all && self.lends(ff.ret, xf.ret) && try { self.s.effSub(ff.effects, xf.effects); true } catch (_) { false }
       }
-      [#Borrow(fm, fi), #Borrow(xm, xi)] if fm || !xm => self.lends(fi, xi),
+      [#Borrow(fm, fi), #Borrow(xm, xi)] if fm || !xm => self.lends(fi, xi) || self.lendsContents(fi, xi),
       [#Borrow(_, fi), _] => {
         // Reading out of a borrow into an owned position copies, so it must be `Copy`.
         const r = self.lends(fi, x);
@@ -390,8 +404,9 @@ impl Checker {
       }
       // A region reference and an `Arc` lend only `readonly`.
       [#Named(d, _), #Borrow(true, _)] if d == self.known("Ref") || d == self.known("Arc") => false,
-      [_, #Borrow(_, xi)] => self.lends(f, xi),
-      [#Named(d, args), _] if d == self.known("Ref") || d == self.known("Box") || d == self.known("Arc") => {
+      [_, #Borrow(_, xi)] => self.lends(f, xi) || self.lendsContents(f, xi),
+      // Owned, a box or an `Arc` is not its contents: `b.get().clone()` copies them out.
+      [#Named(d, args), _] if d == self.known("Ref") => {
         match (args.last()) { #Some(#Ty(inner)) => self.lends(inner, x), _ => false }
       }
       [#Named(d, _), #Prim(#Str)] => d == self.known("String"),
@@ -567,7 +582,15 @@ impl Checker {
     if (const #Some(e) = misfit) {
       const what = self.showEff(e);
       const isFail = e.def == failDef;
-      const msg: String = if (isFail) {
+      const msg: String = if (self.closureRow) {
+        const allowedRow = self.s.zonkEffs(allowed);
+        const shown = if (allowedRow.effs.len() == 0 && allowedRow.tail == #Closed) {
+          "no effects".toString()
+        } else {
+          `only \`${self.showEffs(allowedRow)}\``
+        };
+        `this function performs ${what}, but ${shown} may be performed here`
+      } else if (isFail) {
         match (self.s.expandEffs(allowed).effs.iter().find((x) => x.def == e.def)) {
           #Some(d) => `this can fail with \`${self.show(e.args[0])}\`, which is not in the declared failures \`${self.show(d.args[0])}\``,
           #None => `this can fail with \`${self.show(e.args[0])}\`, but the enclosing function does not declare \`Fail\``,
@@ -1729,10 +1752,12 @@ impl Checker {
     const want: Option<Ty> = match (expected) { #Some(x) => #Some(self.normalize(self.s.resolve(x))), #None => #None };
     let wantParams: Option<Vec<Ty>> = #None;
     let wantRet: Option<Ty> = #None;
+    let wantEffects: Option<EffRow> = #None;
     let mode: FnMode = #Shared;
     if (const #Some(#Fn(f)) = want && f.params.len() == params.len()) {
       wantParams = #Some(f.params.clone());
       wantRet = #Some(f.ret.clone());
+      wantEffects = #Some(f.effects.clone());
       mode = f.mode;
     }
     self.scopes.push(HashMap.new());
@@ -1751,7 +1776,10 @@ impl Checker {
     }
     const r = match (wantRet) { #Some(x) => x.clone(), #None => self.s.fresh() };
     const savedRet = replace(mut self.ret, r.clone());
-    const innerAllowed = self.s.freshEffs();
+    // Expected as a function that performs what its type says, a closure may perform that; what
+    // only resuming a continuation performs is known later, and checked against it then.
+    const closureRow = replace(mut self.closureRow, wantEffects.isSome());
+    const innerAllowed: EffRow = match (wantEffects) { #Some(e) => e, #None => self.s.freshEffs() };
     const savedAllowed = replace(mut self.allowed, innerAllowed.clone());
     // A closure's body performs when it is called, not here: not in a `defer` around it.
     const inDefer = replace(mut self.inDefer, false);
@@ -1761,6 +1789,7 @@ impl Checker {
     self.inDefer = inDefer;
     if (wantRet.isSome()) { self.coerce(t, r, body.span); } else { try { self.s.unify(r, t); } catch (_) {} }
     self.allowed = savedAllowed;
+    self.closureRow = closureRow;
     self.ret = savedRet;
     self.scopes.pop();
     #Fn(Box.new(FnTy { mode, params: ptys, ret: r, effects: innerAllowed }))

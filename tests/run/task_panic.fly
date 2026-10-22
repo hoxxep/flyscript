@@ -1,8 +1,7 @@
-// A panic in a task cancels its scope (§6.1): the other tasks unwind at their next `Io`
-// operation, running their cleanup, and the panic goes on once all have finished.
+// A panic in a task ends the program at once (§5.7): the other tasks stop where they are, and
+// none runs its cleanup, which could wait forever on what the panicking task never let go of.
 // expect: slow task starts
 // expect: body ends
-// expect: slow task cleans up
 // expect: <panic: index 7 out of bounds (length 3)>
 import { println } from "std/io";
 
@@ -15,7 +14,7 @@ function risky(n: u32): u32 uses Io {
 export function main(): void uses Io {
   Io.scope((s) => {
     s.spawn(() => {
-      defer println("slow task cleans up");
+      defer println("not reached: a panic runs no cleanup");
       println("slow task starts");
       Io.sleep(Duration.ms(10));
       println("slow task ends");
