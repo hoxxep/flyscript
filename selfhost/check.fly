@@ -891,7 +891,7 @@ impl Checker {
         neverTy()
       }
       #Break | #Continue => neverTy(),
-      #Region { name, body } => self.region(name, body, expected, span),
+      #Region { name, body } => self.region(name, body, expected, span, e.id),
       #Handle { body, effect, arms } => self.handle(body, effect, arms, expected, e),
       #Unsafe(b) => self.block(b, expected),
       #Comptime(inner) => self.expr(inner, expected),
@@ -1627,6 +1627,8 @@ impl Checker {
     let params: Vec<Ty> = Vec.new();
     for (const [_, t] of inst.params) { params.push(t.clone()); }
     self.checkArgs(params, args, e.span);
+    // What each argument is passed as, for code generation.
+    for (const i of 0..min(params.len(), args.len())) { self.typed.slots.insert(args[i].id, params[i].clone()); }
     inst.ret
   }
 
@@ -1861,8 +1863,9 @@ impl Checker {
     self.join([[a, body.span], [b, handler.span]], expected)
   }
 
-  function region(self: mut Self, name: readonly Ident, body: readonly Block, expected: Option<Ty>, span: Span): Ty {
+  function region(self: mut Self, name: readonly Ident, body: readonly Block, expected: Option<Ty>, span: Span, id: usize): Ty {
     const sym = self.p.freshSym(name.name.asStr());
+    self.typed.regions.insert(id, sym.clone());
     const saved = self.scope.clone();
     self.scope.params.insert(name.name.clone(), [sym.clone(), #Region]);
     self.scope.elidedRegion = #Some(#Param(sym.clone()));
@@ -2027,6 +2030,7 @@ impl Checker {
       if (const #Some(k) = arm.resumes) {
         // A continuation of a `void` operation takes no argument: `k()`.
         const cont: Ty = #Named(self.known("Cont"), [#Ty(opRet), #Ty(result.clone()), #Row(contRow.clone())]);
+        self.typed.names.insert(k.span.start, cont.clone());
         self.declare(k.name.asStr(), cont);
       }
       const at = self.block(arm.body, #Some(result.clone()));

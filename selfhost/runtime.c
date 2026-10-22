@@ -4,6 +4,7 @@
 
 #include <math.h>
 #include <stdarg.h>
+#include <sys/mman.h>
 
 void* fly_err = NULL;
 
@@ -549,6 +550,328 @@ void* fly_gzip_new(fly_gen a, fly_gen b) {
 void fly_gmap_drop(void* s) { fly_gen_drop(&((fly_gmap*)s)->in); free(s); }
 void fly_gcount_drop(void* s) { fly_gen_drop(&((fly_gcount*)s)->in); free(s); }
 void fly_gzip_drop(void* s) { fly_gen_drop(&((fly_gzip*)s)->a); fly_gen_drop(&((fly_gzip*)s)->b); free(s); }
+
+// ---- fibers ----
+
+// Switching saves the callee-saved registers on the stack being left, and its stack pointer in
+// the fiber being left, then restores the other's. A new fiber's stack holds a frame that returns
+// into fly_fiber_trampoline, with the fiber where the restore puts it.
+
+#if defined(__has_feature)
+#if __has_feature(address_sanitizer)
+#define FLY_ASAN 1
+#endif
+#endif
+#if defined(__SANITIZE_ADDRESS__)
+#define FLY_ASAN 1
+#endif
+#ifdef FLY_ASAN
+void __sanitizer_start_switch_fiber(void** fake_stack_save, const void* bottom, size_t size);
+void __sanitizer_finish_switch_fiber(void* fake_stack_save, const void** bottom_old, size_t* size_old);
+#endif
+
+struct fly_fiber {
+  void* sp;
+  void* stack;
+  size_t size;
+  void (*entry)(void* arg);
+  void* arg;
+  fly_fiber* back;
+  fly_handler* handlers;
+  bool done;
+};
+
+static fly_fiber main_fiber;
+static fly_fiber* current = &main_fiber;
+fly_handler* fly_handlers = NULL;
+bool fly_unwinding = false;
+
+void fly_switch(void** save, void* to);
+void fly_fiber_trampoline(void);
+void fly_fiber_start(fly_fiber* f);
+
+#ifdef __APPLE__
+#define FLY_SYM(x) "_" #x
+#else
+#define FLY_SYM(x) #x
+#endif
+
+#if defined(__aarch64__) || defined(__arm64__)
+__asm__(
+  ".text\n.p2align 2\n.globl " FLY_SYM(fly_switch) "\n" FLY_SYM(fly_switch) ":\n"
+  "  sub sp, sp, #160\n"
+  "  stp x19, x20, [sp, #0]\n  stp x21, x22, [sp, #16]\n  stp x23, x24, [sp, #32]\n"
+  "  stp x25, x26, [sp, #48]\n  stp x27, x28, [sp, #64]\n  stp x29, x30, [sp, #80]\n"
+  "  stp d8, d9, [sp, #96]\n  stp d10, d11, [sp, #112]\n  stp d12, d13, [sp, #128]\n  stp d14, d15, [sp, #144]\n"
+  "  mov x9, sp\n  str x9, [x0]\n  mov sp, x1\n"
+  "  ldp x19, x20, [sp, #0]\n  ldp x21, x22, [sp, #16]\n  ldp x23, x24, [sp, #32]\n"
+  "  ldp x25, x26, [sp, #48]\n  ldp x27, x28, [sp, #64]\n  ldp x29, x30, [sp, #80]\n"
+  "  ldp d8, d9, [sp, #96]\n  ldp d10, d11, [sp, #112]\n  ldp d12, d13, [sp, #128]\n  ldp d14, d15, [sp, #144]\n"
+  "  add sp, sp, #160\n  ret\n"
+  ".globl " FLY_SYM(fly_fiber_trampoline) "\n" FLY_SYM(fly_fiber_trampoline) ":\n"
+  "  mov x0, x19\n  bl " FLY_SYM(fly_fiber_start) "\n  brk #0\n");
+enum { FRAME_WORDS = 20, FRAME_FIBER = 0, FRAME_RETURN = 11 };
+#elif defined(__x86_64__)
+__asm__(
+  ".text\n.globl " FLY_SYM(fly_switch) "\n" FLY_SYM(fly_switch) ":\n"
+  "  pushq %rbp\n  pushq %rbx\n  pushq %r12\n  pushq %r13\n  pushq %r14\n  pushq %r15\n"
+  "  movq %rsp, (%rdi)\n  movq %rsi, %rsp\n"
+  "  popq %r15\n  popq %r14\n  popq %r13\n  popq %r12\n  popq %rbx\n  popq %rbp\n  ret\n"
+  ".globl " FLY_SYM(fly_fiber_trampoline) "\n" FLY_SYM(fly_fiber_trampoline) ":\n"
+  "  movq %rbx, %rdi\n  call " FLY_SYM(fly_fiber_start) "\n  ud2\n");
+enum { FRAME_WORDS = 8, FRAME_FIBER = 4, FRAME_RETURN = 6 };
+#else
+#error "fibers need arm64 or x86-64"
+#endif
+
+static void switch_to(fly_fiber* to) {
+  fly_fiber* from = current;
+  from->handlers = fly_handlers;
+  fly_handlers = to->handlers;
+  current = to;
+#ifdef FLY_ASAN
+  void* fake = NULL;
+  __sanitizer_start_switch_fiber(from->done ? NULL : &fake, to->stack, to->size);
+  fly_switch(&from->sp, to->sp);
+  __sanitizer_finish_switch_fiber(fake, NULL, NULL);
+#else
+  fly_switch(&from->sp, to->sp);
+#endif
+}
+
+void fly_fiber_start(fly_fiber* f) {
+#ifdef FLY_ASAN
+  __sanitizer_finish_switch_fiber(NULL, NULL, NULL);
+#endif
+  f->entry(f->arg);
+  f->done = true;
+  switch_to(f->back);
+}
+
+// Stacks are reserved large and committed as they are touched.
+#define FLY_STACK (64u << 20)
+
+static fly_fiber* fiber_new(void (*entry)(void*), void* arg, fly_handler* handlers) {
+  fly_fiber* f = fly_alloc(sizeof(fly_fiber));
+  f->size = FLY_STACK;
+  f->stack = mmap(NULL, f->size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON | MAP_NORESERVE, -1, 0);
+  if (f->stack == MAP_FAILED) fly_panic("out of memory");
+  f->entry = entry;
+  f->arg = arg;
+  f->handlers = handlers;
+  uintptr_t top = ((uintptr_t)f->stack + f->size) & ~(uintptr_t)15;
+  void** frame = (void**)(top - FRAME_WORDS * sizeof(void*));
+  memset(frame, 0, FRAME_WORDS * sizeof(void*));
+  frame[FRAME_FIBER] = f;
+  frame[FRAME_RETURN] = (void*)fly_fiber_trampoline;
+  f->sp = frame;
+  return f;
+}
+
+static void fiber_free(fly_fiber* f) {
+  munmap(f->stack, f->size);
+  free(f);
+}
+
+// ---- handlers ----
+
+void fly_perform(uint32_t effect, int op, void* args, void* result) {
+  fly_handler* h = fly_handlers;
+  while (h && h->effect != effect) h = h->outer;
+  if (!h) fly_panic("an effect is performed that nothing handles");
+  h->op = op;
+  h->args = args;
+  h->result = result;
+  h->suspended = current;
+  switch_to(h->fiber->back);
+}
+
+void fly_handle_start(fly_handler* h, void (*entry)(void*), void* arg) {
+  h->outer = fly_handlers;
+  h->op = -1;
+  h->fiber = fiber_new(entry, arg, h);
+  h->fiber->back = current;
+  switch_to(h->fiber);
+}
+
+// The handler is deep: what else the body performs goes to the handlers around the resumption.
+void fly_handle_resume(fly_handler* h) {
+  h->fiber->back = current;
+  h->outer = fly_handlers;
+  h->op = -1;
+  switch_to(h->suspended);
+}
+
+bool fly_handle_done(const fly_handler* h) { return h->fiber->done; }
+
+void fly_handle_unwind(fly_handler* h) {
+  if (!h->fiber || h->fiber->done) return;
+  bool was = fly_unwinding;
+  fly_unwinding = true;
+  fly_handle_resume(h);
+  fly_unwinding = was;
+}
+
+void fly_handle_free(fly_handler* h) {
+  if (h->fiber) fiber_free(h->fiber);
+  h->fiber = NULL;
+}
+
+void fly_cont_drop(fly_cont* k) {
+  if (k->drop) k->drop(k->frame);
+  *k = (fly_cont){ 0 };
+}
+
+// ---- `generate` ----
+
+// The producer runs under a handler of nothing, whose outer handlers are those around each
+// `next()`, so what else it performs goes to them.
+typedef struct {
+  fly_handler h;
+  fly_fn producer;
+  size_t size;
+  void* out;
+  bool started;
+  uint8_t item[];
+} fly_generated;
+
+static bool generated_yield(void* env, void* item) {
+  fly_generated* g = env;
+  memcpy(g->out, item, g->size);
+  g->h.suspended = current;
+  g->h.op = 0;
+  switch_to(g->h.fiber->back);
+  return !fly_unwinding;
+}
+
+static void generated_run(void* arg) {
+  fly_generated* g = arg;
+  ((fly_unit (*)(void*, fly_yield))g->producer.fn)(g->producer.env, (fly_yield){ g, generated_yield });
+}
+
+static bool generated_next(void* st, void* out) {
+  fly_generated* g = st;
+  if (g->started && g->h.fiber->done) return false;
+  g->out = out;
+  g->h.op = -1;
+  if (!g->started) {
+    g->started = true;
+    g->h.effect = UINT32_MAX;
+    fly_handle_start(&g->h, generated_run, g);
+  } else {
+    fly_handle_resume(&g->h);
+  }
+  return !g->h.fiber->done;
+}
+
+static void generated_drop(void* st) {
+  fly_generated* g = st;
+  if (g->started) {
+    fly_handle_unwind(&g->h);
+    fly_handle_free(&g->h);
+  }
+  fly_fn* f = &g->producer;
+  if (f->drop) f->drop(f->env);
+  free(g);
+}
+
+fly_gen fly_generate(fly_fn producer, size_t size) {
+  fly_generated* g = fly_alloc(sizeof(fly_generated) + size);
+  g->producer = producer;
+  g->size = size;
+  return (fly_gen){ g, generated_next, generated_drop };
+}
+
+// ---- regions ----
+
+struct fly_chunk { fly_chunk* next; size_t used, cap; };
+#define CHUNK_DATA(c) ((uint8_t*)((c) + 1))
+
+void* fly_arena_alloc(fly_arena* a, size_t size) {
+  size = (size + 15) & ~(size_t)15;
+  fly_chunk* c = a->head;
+  if (!c || c->used + size > c->cap) {
+    size_t cap = c ? c->cap * 2 : 4096;
+    while (cap < size) cap *= 2;
+    fly_chunk* n = fly_alloc(sizeof(fly_chunk) + cap);
+    n->next = c;
+    n->cap = cap;
+    a->head = c = n;
+  }
+  void* p = CHUNK_DATA(c) + c->used;
+  c->used += size;
+  return p;
+}
+
+void fly_arena_free(fly_arena* a) {
+  for (fly_chunk* c = a->head; c;) {
+    fly_chunk* next = c->next;
+    free(c);
+    c = next;
+  }
+  a->head = NULL;
+}
+
+fly_str* fly_arena_str(fly_arena* a, fly_str s) {
+  uint8_t* bytes = fly_arena_alloc(a, s.len);
+  if (s.len) memcpy(bytes, s.ptr, s.len);
+  fly_str* r = fly_arena_alloc(a, sizeof(fly_str));
+  *r = (fly_str){ bytes, s.len };
+  return r;
+}
+
+fly_slice* fly_arena_slice(fly_arena* a, fly_slice s, size_t size) {
+  void* items = fly_arena_alloc(a, s.len * size);
+  if (s.len) memcpy(items, s.ptr, s.len * size);
+  fly_slice* r = fly_arena_alloc(a, sizeof(fly_slice));
+  *r = (fly_slice){ items, s.len };
+  return r;
+}
+
+fly_rlist* fly_rlist_new(fly_arena* a, size_t size) {
+  fly_rlist* l = fly_arena_alloc(a, sizeof(fly_rlist));
+  *l = (fly_rlist){ a, 0, size, NULL, NULL };
+  return l;
+}
+
+void fly_rlist_push(fly_rlist* l, const void* v) {
+  fly_rchunk* c = l->last;
+  if (!c || c->len == c->cap) {
+    size_t cap = c ? c->cap * 2 : 8;
+    fly_rchunk* n = fly_arena_alloc(l->arena, sizeof(fly_rchunk) + cap * l->size);
+    *n = (fly_rchunk){ NULL, 0, cap, 0 };
+    if (c) c->next = n; else l->first = n;
+    l->last = c = n;
+  }
+  memcpy(FLY_RCHUNK_DATA(c) + c->len * l->size, v, l->size);
+  c->len++;
+  l->len++;
+}
+
+// Well-formed UTF-8: no overlong forms, surrogates, or code points past U+10FFFF.
+bool fly_utf8_valid(fly_slice b) {
+  const uint8_t* p = b.ptr;
+  size_t i = 0, n = b.len;
+  while (i < n) {
+    uint8_t c = p[i];
+    size_t k;
+    uint32_t cp;
+    if (c < 0x80) { i++; continue; }
+    else if ((c & 0xe0) == 0xc0) { k = 1; cp = c & 0x1f; }
+    else if ((c & 0xf0) == 0xe0) { k = 2; cp = c & 0x0f; }
+    else if ((c & 0xf8) == 0xf0) { k = 3; cp = c & 0x07; }
+    else return false;
+    if (i + k >= n) return false;
+    for (size_t j = 1; j <= k; j++) {
+      if ((p[i + j] & 0xc0) != 0x80) return false;
+      cp = (cp << 6) | (p[i + j] & 0x3f);
+    }
+    if ((k == 1 && cp < 0x80) || (k == 2 && cp < 0x800) || (k == 3 && cp < 0x10000)) return false;
+    if (cp > 0x10ffff || (cp >= 0xd800 && cp <= 0xdfff)) return false;
+    i += k + 1;
+  }
+  return true;
+}
 
 // ---- files ----
 

@@ -155,6 +155,65 @@ void fly_gzip_drop(void* s);
 void* fly_alloc(size_t size);
 void* fly_box(const void* value, size_t size);
 
+// ---- fibers and handlers ----
+
+// A fiber: a stack of its own, which runs until it suspends and is resumed where it left off.
+typedef struct fly_fiber fly_fiber;
+typedef struct fly_handler fly_handler;
+// A `handle` running its body on a fiber: the effect it handles, the operation the body performed
+// (-1 for none), where the body keeps that operation's arguments and wants its result, the
+// handlers around it, and the fiber the body is suspended in.
+struct fly_handler {
+  uint32_t effect;
+  int op;
+  void* args;
+  void* result;
+  fly_handler* outer;
+  fly_fiber* fiber;
+  fly_fiber* suspended;
+};
+// The handlers in force, innermost first.
+extern fly_handler* fly_handlers;
+// Set while a computation whose continuation was dropped unwinds: every call that may suspend
+// leaves through its function's way out when it sees it.
+extern bool fly_unwinding;
+void fly_perform(uint32_t effect, int op, void* args, void* result);
+// Starts `h`'s body, `entry(arg)`, on a fiber of its own; runs it until it performs `h`'s effect or
+// finishes, as resuming does.
+void fly_handle_start(fly_handler* h, void (*entry)(void*), void* arg);
+void fly_handle_resume(fly_handler* h);
+bool fly_handle_done(const fly_handler* h);
+// Unwinds a suspended body, running its cleanup.
+void fly_handle_unwind(fly_handler* h);
+void fly_handle_free(fly_handler* h);
+
+// A continuation: the frame of the `handle` it resumes, how to resume it with the operation's
+// result, and how to drop it, which unwinds the body.
+typedef struct { void* frame; void* resume; void (*drop)(void* frame); } fly_cont;
+void fly_cont_drop(fly_cont* k);
+
+// `generate(f)`: a generator pulled by running `f` on a fiber until it yields.
+fly_gen fly_generate(fly_fn producer, size_t size);
+
+// ---- regions ----
+
+// A region's arena: chunks bump-allocated, released all at once when the region ends. Region data
+// is all `Copy`, so nothing in it needs dropping (§4.6).
+typedef struct fly_chunk fly_chunk;
+typedef struct { fly_chunk* head; } fly_arena;
+void* fly_arena_alloc(fly_arena* a, size_t size);
+void fly_arena_free(fly_arena* a);
+fly_str* fly_arena_str(fly_arena* a, fly_str s);
+fly_slice* fly_arena_slice(fly_arena* a, fly_slice s, size_t size);
+// An append-only list in a region, whose elements never move: chunks of doubling size.
+typedef struct fly_rchunk { struct fly_rchunk* next; size_t len, cap, pad; } fly_rchunk;
+typedef struct { fly_arena* arena; size_t len, size; fly_rchunk *first, *last; } fly_rlist;
+fly_rlist* fly_rlist_new(fly_arena* a, size_t size);
+bool fly_utf8_valid(fly_slice b);
+void fly_rlist_push(fly_rlist* l, const void* v);
+// The elements of a chunk follow it.
+#define FLY_RCHUNK_DATA(c) ((uint8_t*)((c) + 1))
+
 // ---- files ----
 
 // A file opened: all its text, read when it was opened.
