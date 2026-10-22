@@ -53338,12 +53338,12 @@ function lambdaParams$1263(self) {
 }
 function ifExpr$1264(self) {
   expectKw$960(self, "if");
-  const $1 = letHead$1291(self);
+  const head = span$742(self.v);
+  const $1 = chainHead$1291(self);
   m$2: {
     if (($1.$tag === "Some")) {
-      const pat = $1.$[0];
-      const scrutinee = $1.$[1];
-      const then = $1.$[2];
+      const conds = $1.$[0];
+      const then = $1.$[1];
       {
         const start = span$742(self.v);
         let $3;
@@ -53364,13 +53364,9 @@ function ifExpr$1264(self) {
           }
         }
         const otherwise = $3;
-        const span = $rt.copy(then.span);
-        const rest = pat_$1227(self, { $tag: "Wild" }, $rt.copy(otherwise.span));
-        const thenExpr = expr_$973(self, { $tag: "Block", $: then }, $rt.copy(span));
-        const arms = { v: $b.Vec_new() };
-        $b.Vec_push(arms, { pat: pat, guard: { $tag: "None" }, body: thenExpr, generate: { $tag: "None" } });
-        $b.Vec_push(arms, { pat: rest, guard: { $tag: "None" }, body: otherwise, generate: { $tag: "None" } });
-        return { $tag: "Match", $: { scrutinee: $b.Box_new(scrutinee), arms: arms.v } };
+        const span = { start: head.start, end: prevEnd$979(self.v) };
+        const e = chain$1292(self, conds, 0, then, otherwise, $rt.copy(span));
+        return e.kind;
       }
       break m$2;
     }
@@ -53410,24 +53406,30 @@ function ifExpr$1264(self) {
 function whileExpr$1265(self) {
   const kw = span$742(self.v);
   bump$753(self);
-  const $1 = letHead$1291(self);
+  const $1 = chainHead$1291(self);
   m$2: {
     if (($1.$tag === "Some")) {
-      const pat = $1.$[0];
-      const scrutinee = $1.$[1];
-      const body = $1.$[2];
+      const conds = $1.$[0];
+      const body = $1.$[1];
       {
         const all = { start: kw.start, end: body.span.end };
         const end = { start: body.span.end, end: body.span.end };
-        const head = { start: scrutinee.span.start, end: body.span.end };
-        const bspan = $rt.copy(body.span);
-        const thenExpr = expr_$973(self, { $tag: "Block", $: body }, $rt.copy(bspan));
-        const wild = pat_$1227(self, { $tag: "Wild" }, $rt.copy(end));
+        let $3;
+        const $4 = $rt.idx(conds, 0);
+        m$5: {
+          if ((($4.$tag === "Bind") || ($4.$tag === "Test"))) {
+            let e;
+            if (($4.$tag === "Bind")) { e = $4.$[1]; }
+            else if (($4.$tag === "Test")) { e = $4.$; }
+            $3 = e.span.start;
+            break m$5;
+          }
+          $rt.unmatched($4);
+        }
+        const first = $3;
+        const head = { start: first, end: body.span.end };
         const brk = expr_$973(self, { $tag: "Break" }, $rt.copy(end));
-        const arms = { v: $b.Vec_new() };
-        $b.Vec_push(arms, { pat: pat, guard: { $tag: "None" }, body: thenExpr, generate: { $tag: "None" } });
-        $b.Vec_push(arms, { pat: wild, guard: { $tag: "None" }, body: brk, generate: { $tag: "None" } });
-        const m = expr_$973(self, { $tag: "Match", $: { scrutinee: $b.Box_new(scrutinee), arms: arms.v } }, $rt.copy(head));
+        const m = chain$1292(self, conds, 0, body, brk, $rt.copy(head));
         const yes = expr_$973(self, { $tag: "Bool", $: true }, $rt.copy(kw));
         const stmts = { v: $b.Vec_new() };
         $b.Vec_push(stmts, { $tag: "Expr", $: m });
@@ -53450,7 +53452,7 @@ function armItems$1266(self) {
   while ((!at$746(self.v, "}"))) {
     if ((atKw$744(self.v, "comptime") && ((isKw$752(tokAt$751(self.v, 1), "for") || isKw$752(tokAt$751(self.v, 1), "if")) || wordAt$1210(self.v, 1, "match")))) {
       const start = span$742(self.v);
-      const g = generate$1292(self, ((p) => {
+      const g = generate$1293(self, ((p) => {
   return armItems$1266(p);
       }));
       const span = since$768(self.v, $rt.copy(start));
@@ -53463,7 +53465,7 @@ function armItems$1266(self) {
     const pat = pattern$1225(self);
     let $1;
     if (eatKw$743(self, "if")) {
-      const saved = $b.replace(new $rt.FieldRef(self.v, "guardArrow"), arrowAhead$1293(self.v));
+      const saved = $b.replace(new $rt.FieldRef(self.v, "guardArrow"), arrowAhead$1294(self.v));
       let $2;
       try {
         $2 = expr$759(self);
@@ -53588,7 +53590,7 @@ function clone$1269(self) {
   const v = { v: $b.Vec_new() };
   for (const $1 of $rt.items(self)) {
     const x = $1;
-    $b.Vec_push(v, clone$1294(x));
+    $b.Vec_push(v, clone$1295(x));
   }
   return v.v;
 }
@@ -53649,17 +53651,17 @@ function clone$1273(self) {
   m$2: {
     if (($1.$tag === "For")) {
       const x = $1.$;
-      return { $tag: "For", $: clone$1295(x) };
+      return { $tag: "For", $: clone$1296(x) };
       break m$2;
     }
     if (($1.$tag === "If")) {
       const x = $1.$;
-      return { $tag: "If", $: clone$1296(x) };
+      return { $tag: "If", $: clone$1297(x) };
       break m$2;
     }
     if (($1.$tag === "Match")) {
       const x = $1.$;
-      return { $tag: "Match", $: clone$1297(x) };
+      return { $tag: "Match", $: clone$1298(x) };
       break m$2;
     }
     if (($1.$tag === "Do")) {
@@ -53675,17 +53677,17 @@ function clone$1274(self) {
   m$2: {
     if (($1.$tag === "For")) {
       const x = $1.$;
-      return { $tag: "For", $: clone$1298(x) };
+      return { $tag: "For", $: clone$1299(x) };
       break m$2;
     }
     if (($1.$tag === "If")) {
       const x = $1.$;
-      return { $tag: "If", $: clone$1299(x) };
+      return { $tag: "If", $: clone$1300(x) };
       break m$2;
     }
     if (($1.$tag === "Match")) {
       const x = $1.$;
-      return { $tag: "Match", $: clone$1300(x) };
+      return { $tag: "Match", $: clone$1301(x) };
       break m$2;
     }
     if (($1.$tag === "Do")) {
@@ -53708,7 +53710,7 @@ function clone$1276(self) {
 }
 function clone$1277(self) {
   {
-    return { arms: clone$1301(self.arms), scrutinee: clone$78(self.scrutinee) };
+    return { arms: clone$1302(self.arms), scrutinee: clone$78(self.scrutinee) };
   }
 }
 function constArray$1278(self, items, ty, span) {
@@ -53825,7 +53827,7 @@ function keyEqFn$1281(self, k, q, span) {
   const kc = ctype$209(self, k, $rt.copy(span));
   const qc = ctype$209(self, q, $rt.copy(span));
   const stmts = { v: $b.String_new() };
-  const kp = lentPtr$1302(self, ("" + "((" + kc + "*)e)"), clone$26(k), q, stmts, $rt.copy(span));
+  const kp = lentPtr$1303(self, ("" + "((" + kc + "*)e)"), clone$26(k), q, stmts, $rt.copy(span));
   const call = ifaceCall$211(self, "Eq", "eq", q, [kp, ("" + "((" + qc + "*)p)")], $rt.copy(span));
   $b.String_push(new $rt.FieldRef(self.v, "protos"), ("" + "static bool " + name + "(const void* e, const void* p);\n"));
   $b.String_push(new $rt.FieldRef(self.v, "dropCode"), ("" + "static bool " + name + "(const void* e, const void* p) { " + stmts.v + "return " + call + "; }\n"));
@@ -54291,7 +54293,7 @@ function prelude$1286(self, key, e, all, ptys, vs) {
     }
     if ($19 === "writeFile") {
       {
-        const boxed = ioErr$1303(self, "PermissionDenied");
+        const boxed = ioErr$1304(self, "PermissionDenied");
         const label = failLabel$1165(self.v);
         $18 = ("" + "({ if (!fly_write_file(" + arg(0) + ", " + arg(1) + ")) { " + boxed + "goto " + label + "; } (fly_unit)0; })");
       }
@@ -54299,7 +54301,7 @@ function prelude$1286(self, key, e, all, ptys, vs) {
     }
     if ($19 === "File_open") {
       {
-        const boxed = ioErr$1303(self, "NotFound");
+        const boxed = ioErr$1304(self, "NotFound");
         const label = failLabel$1165(self.v);
         $18 = ("" + "({ fly_File f_; if (!fly_read_file(" + arg(0) + ", &f_.text)) { " + boxed + "goto " + label + "; } f_; })");
       }
@@ -54421,7 +54423,7 @@ function prelude$1286(self, key, e, all, ptys, vs) {
     }
     if ($19 === "Option_cloned") {
       {
-        const t = payloadOf$1304(self.v, rt, "Some");
+        const t = payloadOf$1305(self.v, rt, "Some");
         const oc = ctype$209(self, stripBorrow$202($rt.idx(ptys, 0)), $rt.copy(span));
         const pt = { $tag: "Borrow", $: [false, $b.Box_new(clone$26(t))] };
         let $49;
@@ -54443,7 +54445,7 @@ function prelude$1286(self, key, e, all, ptys, vs) {
     if ($19 === "Result_unwrap") {
       {
         const c = ctype$209(self, stripBorrow$202($rt.idx(ptys, 0)), $rt.copy(span));
-        const errTy = payloadOf$1304(self.v, stripBorrow$202($rt.idx(ptys, 0)), "Err");
+        const errTy = payloadOf$1305(self.v, stripBorrow$202($rt.idx(ptys, 0)), "Err");
         const ec2 = ctype$209(self, errTy, $rt.copy(span));
         const boxed = boxErr$1184(self.v, "e_", errTy);
         const label = failLabel$1165(self.v);
@@ -54453,8 +54455,8 @@ function prelude$1286(self, key, e, all, ptys, vs) {
     }
     if ($19 === "Fail_capture") {
       {
-        const t = payloadOf$1304(self.v, rt, "Ok");
-        const errTy = payloadOf$1304(self.v, rt, "Err");
+        const t = payloadOf$1305(self.v, rt, "Ok");
+        const errTy = payloadOf$1305(self.v, rt, "Err");
         const tc = ctype$209(self, t, $rt.copy(span));
         const rc = ctype$209(self, rt, $rt.copy(span));
         const etc = ctype$209(self, errTy, $rt.copy(span));
@@ -54692,14 +54694,14 @@ function tasksLib$1287(self, key, e, all, ptys, vs) {
     }
     if ($3 === "Socket_read") {
       {
-        const boxed = ioErr$1303(self, "TimedOut");
+        const boxed = ioErr$1304(self, "TimedOut");
         $2 = ("" + "({ fly_socket* s_ = " + arg(0) + "; fly_slice b_ = " + arg(1) + "; if (fly_fault()) { " + boxed + "goto " + label + "; } size_t n_ = s_->input.len - s_->pos; if (b_.len < n_) n_ = b_.len; memcpy(b_.ptr, s_->input.ptr + s_->pos, n_); s_->pos += n_; (uint64_t)n_; })");
       }
       break m$4;
     }
     if ($3 === "Socket_writeStatus") {
       {
-        const boxed = ioErr$1303(self, "BrokenPipe");
+        const boxed = ioErr$1304(self, "BrokenPipe");
         $2 = ("" + "({ unsigned code_ = " + arg(1) + "; fly_str b_ = " + arg(2) + "; if (fly_fault()) { " + boxed + "goto " + label + "; } printf(\"-> %u %.*s\\n\", code_, (int)b_.len, (const char*)b_.ptr); (fly_unit)0; })");
       }
       break m$4;
@@ -54707,8 +54709,8 @@ function tasksLib$1287(self, key, e, all, ptys, vs) {
     if ($3 === "Db_fetchProfile") {
       {
         const tc = ctype$209(self, rt, $rt.copy(span));
-        const timedOut = ioErr$1303(self, "TimedOut");
-        const notFound = ioErr$1303(self, "NotFound");
+        const timedOut = ioErr$1304(self, "TimedOut");
+        const notFound = ioErr$1304(self, "NotFound");
         $2 = ("" + "({ fly_str u_ = " + arg(1) + "; fly_str n_; if (fly_fault()) { " + timedOut + "goto " + label + "; } if (!fly_world_profile(u_, &n_)) { " + notFound + "goto " + label + "; } (" + tc + "){ .displayName = fly_String_from(n_) }; })");
       }
       break m$4;
@@ -54716,7 +54718,7 @@ function tasksLib$1287(self, key, e, all, ptys, vs) {
     if ($3 === "Db_checkQuota") {
       {
         const tc = ctype$209(self, rt, $rt.copy(span));
-        const timedOut = ioErr$1303(self, "TimedOut");
+        const timedOut = ioErr$1304(self, "TimedOut");
         $2 = ("" + "({ fly_str t_ = " + arg(1) + "; if (fly_fault()) { " + timedOut + "goto " + label + "; } (" + tc + "){ .allowed = fly_world_quota(t_) }; })");
       }
       break m$4;
@@ -54763,7 +54765,7 @@ function initItems$1290(self) {
   while ((!at$746(self.v, "}"))) {
     if ((atKw$744(self.v, "comptime") && ((isKw$752(tokAt$751(self.v, 1), "for") || isKw$752(tokAt$751(self.v, 1), "if")) || wordAt$1210(self.v, 1, "match")))) {
       const start = span$742(self.v);
-      const g = generate$1305(self, ((p) => {
+      const g = generate$1306(self, ((p) => {
   return initItems$1290(p);
       }));
       $b.Vec_push(fields, { name: mkIdent$1123("", since$768(self.v, $rt.copy(start))), value: { $tag: "None" }, computed: { $tag: "None" }, generate: { $tag: "Some", $: $b.Box_new(g) } });
@@ -54790,23 +54792,39 @@ function initItems$1290(self) {
   }
   return fields.v;
 }
-function letHead$1291(self) {
-  if ((!(at$746(self.v, "(") && (isKw$752(tokAt$751(self.v, 1), "const") || isKw$752(tokAt$751(self.v, 1), "let"))))) {
+function chainHead$1291(self) {
+  if ((!(at$746(self.v, "(") && chainAhead$1307(self.v)))) {
     return { $tag: "None" };
   }
   bump$753(self);
-  const mutable = eatKw$743(self, "let");
-  if ((!mutable)) {
+  const conds = { v: $b.Vec_new() };
+  const names = { v: $b.Vec_new() };
+  while (true) {
+    if ((atKw$744(self.v, "const") || atKw$744(self.v, "let"))) {
+      const mutable = eatKw$743(self, "let");
+      if ((!mutable)) {
+        bump$753(self);
+      }
+      const pat = pattern$1225(self);
+      expect$758(self, "=");
+      const init = binary$1128(self, 2);
+      if (mutable) {
+        boundNames$1308(pat, names);
+      }
+      $b.Vec_push(conds, { $tag: "Bind", $: [pat, init] });
+    } else {
+      {
+        $b.Vec_push(conds, { $tag: "Test", $: binary$1128(self, 2) });
+      }
+    }
+    if ((!at$746(self.v, "&&"))) {
+      break;
+    }
     bump$753(self);
   }
-  const pat = pattern$1225(self);
-  expect$758(self, "=");
-  const scrutinee = expr$759(self);
   expect$758(self, ")");
   let body = block$976(self);
-  if (mutable) {
-    const names = { v: $b.Vec_new() };
-    boundNames$1306(pat, names);
+  if (($b.slice_len(names.v) > 0)) {
     const stmts = { v: $b.Vec_new() };
     for (const $1 of $rt.items(names.v)) {
       const name = $1[0];
@@ -54825,9 +54843,78 @@ function letHead$1291(self) {
     }
     body.stmts = stmts.v;
   }
-  return { $tag: "Some", $: [pat, scrutinee, body] };
+  return { $tag: "Some", $: [conds.v, body] };
 }
-function generate$1292(self, items) {
+function chain$1292(self, conds, from, then, otherwise, span) {
+  if ((from === $b.slice_len(conds))) {
+    return expr_$973(self, { $tag: "Block", $: clone$33(then) }, $rt.copy(then.span));
+  }
+  const tests = { v: $b.Vec_new() };
+  for (const $1 of $rt.items($rt.slice(conds, $rt.usize(from + 1), $b.slice_len(conds)))) {
+    const c = $1;
+    const $2 = c;
+    m$3: {
+      if (($2.$tag === "Test")) {
+        const x = $2.$;
+        {
+          $b.Vec_push(tests, clone$78(x));
+        }
+        break m$3;
+      }
+      if (true) {
+        {
+        }
+        break m$3;
+      }
+      $rt.unmatched($2);
+    }
+  }
+  const onlyTests = ($rt.usize($rt.usize($b.slice_len(tests.v) + from) + 1) === $b.slice_len(conds));
+  const $4 = $rt.idx(conds, from);
+  m$5: {
+    if (($4.$tag === "Bind")) {
+      const pat = $4.$[0];
+      const init = $4.$[1];
+      {
+        let guard = { $tag: "None" };
+        let $6;
+        if ((onlyTests && ($b.slice_len(tests.v) > 0))) {
+          let g = clone$78($rt.idx(tests.v, 0));
+          for (const $7 of $rt.items($rt.slice(tests.v, 1, $b.slice_len(tests.v)))) {
+            const t = $7;
+            const gs = { start: g.span.start, end: t.span.end };
+            g = expr_$973(self, { $tag: "Binary", $: { op: $b.str_toString("&&"), lhs: $b.Box_new(g), rhs: $b.Box_new(clone$78(t)) } }, $rt.copy(gs));
+          }
+          guard = { $tag: "Some", $: g };
+          $6 = expr_$973(self, { $tag: "Block", $: clone$33(then) }, $rt.copy(then.span));
+        } else {
+          {
+            $6 = chain$1292(self, conds, $rt.usize(from + 1), then, otherwise, $rt.copy(span));
+          }
+        }
+        const body = $6;
+        const rest = pat_$1227(self, { $tag: "Wild" }, $rt.copy(otherwise.span));
+        const arms = { v: $b.Vec_new() };
+        $b.Vec_push(arms, { pat: clone$342(pat), guard: guard, body: body, generate: { $tag: "None" } });
+        $b.Vec_push(arms, { pat: rest, guard: { $tag: "None" }, body: clone$78(otherwise), generate: { $tag: "None" } });
+        return expr_$973(self, { $tag: "Match", $: { scrutinee: $b.Box_new(clone$78(init)), arms: arms.v } }, $rt.copy(span));
+      }
+      break m$5;
+    }
+    if (($4.$tag === "Test")) {
+      const c = $4.$;
+      {
+        const inner = chain$1292(self, conds, $rt.usize(from + 1), then, otherwise, $rt.copy(span));
+        const ispan = $rt.copy(inner.span);
+        const block = { stmts: $b.Vec_new(), tail: { $tag: "Some", $: $b.Box_new(inner) }, span: $rt.copy(ispan) };
+        return expr_$973(self, { $tag: "If", $: { cond: $b.Box_new(clone$78(c)), then: block, otherwise: { $tag: "Some", $: $b.Box_new(clone$78(otherwise)) } } }, $rt.copy(span));
+      }
+      break m$5;
+    }
+    $rt.unmatched($4);
+  }
+}
+function generate$1293(self, items) {
   expectKw$960(self, "comptime");
   if (eatKw$743(self, "for")) {
     expect$758(self, "(");
@@ -54874,7 +54961,7 @@ function generate$1292(self, items) {
   }
   return error$766(self.v, "`for`, `if` or `match` after `comptime`");
 }
-function arrowAhead$1293(self) {
+function arrowAhead$1294(self) {
   let depth = 0;
   let i = self.pos;
   while ((i < $b.slice_len(self.toks))) {
@@ -54915,7 +55002,7 @@ function arrowAhead$1293(self) {
   }
   return { $tag: "None" };
 }
-function clone$1294(self) {
+function clone$1295(self) {
   const $1 = self;
   m$2: {
     if (($1.$tag === "Lit")) {
@@ -54931,45 +55018,45 @@ function clone$1294(self) {
     $rt.unmatched($1);
   }
 }
-function clone$1295(self) {
+function clone$1296(self) {
   {
     return { body: clone$779(self.body), iter: clone$78(self.iter), pat: clone$342(self.pat) };
   }
 }
-function clone$1296(self) {
+function clone$1297(self) {
   {
     return { cond: clone$78(self.cond), otherwise: clone$779(self.otherwise), then: clone$779(self.then) };
   }
 }
-function clone$1297(self) {
-  {
-    return { arms: clone$1307(self.arms), scrutinee: clone$78(self.scrutinee) };
-  }
-}
 function clone$1298(self) {
   {
-    return { body: clone$782(self.body), iter: clone$78(self.iter), pat: clone$342(self.pat) };
+    return { arms: clone$1309(self.arms), scrutinee: clone$78(self.scrutinee) };
   }
 }
 function clone$1299(self) {
   {
-    return { cond: clone$78(self.cond), otherwise: clone$782(self.otherwise), then: clone$782(self.then) };
+    return { body: clone$782(self.body), iter: clone$78(self.iter), pat: clone$342(self.pat) };
   }
 }
 function clone$1300(self) {
   {
-    return { arms: clone$1308(self.arms), scrutinee: clone$78(self.scrutinee) };
+    return { cond: clone$78(self.cond), otherwise: clone$782(self.otherwise), then: clone$782(self.then) };
   }
 }
 function clone$1301(self) {
+  {
+    return { arms: clone$1310(self.arms), scrutinee: clone$78(self.scrutinee) };
+  }
+}
+function clone$1302(self) {
   const v = { v: $b.Vec_new() };
   for (const $1 of $rt.items(self)) {
     const x = $1;
-    $b.Vec_push(v, clone$1309(x));
+    $b.Vec_push(v, clone$1311(x));
   }
   return v.v;
 }
-function lentPtr$1302(self, ptr, k, q, stmts, span) {
+function lentPtr$1303(self, ptr, k, q, stmts, span) {
   if (eq$7(ckey$688(k), ckey$688(q))) {
     return ptr;
   }
@@ -55045,14 +55132,14 @@ function lentPtr$1302(self, ptr, k, q, stmts, span) {
       $rt.unmatched($10);
     }
     const inner = $9;
-    return lentPtr$1302(self, ("" + "(*" + ptr + ")"), inner, q, stmts, $rt.copy(span));
+    return lentPtr$1303(self, ("" + "(*" + ptr + ")"), inner, q, stmts, $rt.copy(span));
   }
   return fail$419(self.v, $rt.copy(span), ("" + "a `" + show$156(self.v.p, k) + "` does not lend a `" + show$156(self.v.p, q) + "`"));
 }
-function ioErr$1303(self, name) {
+function ioErr$1304(self, name) {
   return ("" + "fly_err_box(" + String(tagId$695(self, name)) + ", NULL, 0); ");
 }
-function payloadOf$1304(self, t, name) {
+function payloadOf$1305(self, t, name) {
   const $3 = find$551($b.slice_iter(tagsOf$694(self, t)), (($0$$1) => {
   {
     const $2 = $0$$1;
@@ -55073,7 +55160,7 @@ function payloadOf$1304(self, t, name) {
     $rt.unmatched($3);
   }
 }
-function generate$1305(self, items) {
+function generate$1306(self, items) {
   expectKw$960(self, "comptime");
   if (eatKw$743(self, "for")) {
     expect$758(self, "(");
@@ -55120,7 +55207,47 @@ function generate$1305(self, items) {
   }
   return error$766(self.v, "`for`, `if` or `match` after `comptime`");
 }
-function boundNames$1306(p, out) {
+function chainAhead$1307(self) {
+  let depth = 0;
+  let i = 1;
+  while (true) {
+    const t = tokAt$751(self, i);
+    if (((isPunct$962(t, "(") || isPunct$962(t, "[")) || isPunct$962(t, "{"))) {
+      depth = $rt.usize(depth + 1);
+    } else {
+      if (((isPunct$962(t, ")") || isPunct$962(t, "]")) || isPunct$962(t, "}"))) {
+        if ((depth === 0)) {
+          return false;
+        }
+        depth = $rt.usize(depth - 1);
+      } else {
+        if (((depth === 0) && (isKw$752(t, "const") || isKw$752(t, "let")))) {
+          return true;
+        } else {
+          let $1;
+          const $2 = t;
+          m$3: {
+            if (($2.$tag === "Eof")) {
+              $1 = true;
+              break m$3;
+            }
+            if (true) {
+              $1 = false;
+              break m$3;
+            }
+            $rt.unmatched($2);
+          }
+          if ($1) {
+            return false;
+          }
+        }
+      }
+    }
+    i = $rt.usize(i + 1);
+  }
+  return false;
+}
+function boundNames$1308(p, out) {
   const $1 = p.kind;
   m$2: {
     if (($1.$tag === "Bind")) {
@@ -55135,7 +55262,7 @@ function boundNames$1306(p, out) {
       {
         for (const $3 of $rt.items(ps)) {
           const q = $3;
-          boundNames$1306(q, out);
+          boundNames$1308(q, out);
         }
         return undefined;
       }
@@ -55144,7 +55271,7 @@ function boundNames$1306(p, out) {
     if (($1.$tag === "Record")) {
       const fields = $1.$.fields;
       {
-        boundFields$1310(fields, out);
+        boundFields$1312(fields, out);
         return undefined;
       }
       break m$2;
@@ -55166,7 +55293,7 @@ function boundNames$1306(p, out) {
           {
             for (const $6 of $rt.items(ps)) {
               const q = $6;
-              boundNames$1306(q, out);
+              boundNames$1308(q, out);
             }
             return undefined;
           }
@@ -55175,7 +55302,7 @@ function boundNames$1306(p, out) {
         if (($4.$tag === "Record")) {
           const fs = $4.$;
           {
-            boundFields$1310(fs, out);
+            boundFields$1312(fs, out);
             return undefined;
           }
           break m$5;
@@ -55193,29 +55320,29 @@ function boundNames$1306(p, out) {
     $rt.unmatched($1);
   }
 }
-function clone$1307(self) {
-  const v = { v: $b.Vec_new() };
-  for (const $1 of $rt.items(self)) {
-    const x = $1;
-    $b.Vec_push(v, clone$1311(x));
-  }
-  return v.v;
-}
-function clone$1308(self) {
-  const v = { v: $b.Vec_new() };
-  for (const $1 of $rt.items(self)) {
-    const x = $1;
-    $b.Vec_push(v, clone$1312(x));
-  }
-  return v.v;
-}
 function clone$1309(self) {
+  const v = { v: $b.Vec_new() };
+  for (const $1 of $rt.items(self)) {
+    const x = $1;
+    $b.Vec_push(v, clone$1313(x));
+  }
+  return v.v;
+}
+function clone$1310(self) {
+  const v = { v: $b.Vec_new() };
+  for (const $1 of $rt.items(self)) {
+    const x = $1;
+    $b.Vec_push(v, clone$1314(x));
+  }
+  return v.v;
+}
+function clone$1311(self) {
   {
     const v = [clone$342($rt.idx(self, 0n)), clone$500($rt.idx(self, 1n))];
     return v;
   }
 }
-function boundFields$1310(fields, out) {
+function boundFields$1312(fields, out) {
   for (const $1 of $rt.items(fields)) {
     const n = $1[0];
     const q = $1[1];
@@ -55223,7 +55350,7 @@ function boundFields$1310(fields, out) {
     m$3: {
       if (($2.$tag === "Some")) {
         const q$$4 = $2.$;
-        boundNames$1306(q$$4, out);
+        boundNames$1308(q$$4, out);
         break m$3;
       }
       if (($2.$tag === "None")) {
@@ -55235,13 +55362,13 @@ function boundFields$1310(fields, out) {
   }
   return undefined;
 }
-function clone$1311(self) {
+function clone$1313(self) {
   {
     const v = [clone$342($rt.idx(self, 0n)), clone$779($rt.idx(self, 1n))];
     return v;
   }
 }
-function clone$1312(self) {
+function clone$1314(self) {
   {
     const v = [clone$342($rt.idx(self, 0n)), clone$782($rt.idx(self, 1n))];
     return v;

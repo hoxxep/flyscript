@@ -30,6 +30,12 @@ pub fn parse_expr(source: &str) -> PResult<Expr> {
     Ok(e)
 }
 
+/// One condition of a chain: a binding, `const Pat = e`, or a test.
+enum Cond {
+    Bind(Pattern, Expr),
+    Test(Expr),
+}
+
 struct Parser<'a> {
     src: &'a str,
     toks: Vec<Token>,
@@ -1311,17 +1317,17 @@ impl<'a> Parser<'a> {
             Tok::Kw(Kw::While) => {
                 let kw = self.span();
                 self.bump();
-                // `while (const #Some(x) = e) { … }` loops while `e` matches.
-                if let Some((pat, scrutinee, body)) = self.let_head()? {
+                // `while (const #Some(x) = e && …) { … }` loops while its conditions hold.
+                if let Some((conds, body)) = self.chain_head()? {
                     // Each piece has a span of its own: what is recorded about it is keyed by span.
                     let all = Span { start: kw.start, end: body.span.end };
                     let end = Span { start: body.span.end, end: body.span.end };
-                    let head = Span { start: scrutinee.span.start, end: body.span.end };
-                    let arms = vec![
-                        MatchArm::new(pat, None, Expr { kind: ExprKind::Block(body.clone()), span: body.span }),
-                        MatchArm::new(Pattern { kind: PatternKind::Wild, span: end }, None, Expr { kind: ExprKind::Break, span: end }),
-                    ];
-                    let m = Expr { kind: ExprKind::Match { scrutinee: Box::new(scrutinee), arms }, span: head };
+                    let first = match &conds[0] {
+                        Cond::Bind(_, e) | Cond::Test(e) => e.span.start,
+                    };
+                    let head = Span { start: first, end: body.span.end };
+                    let brk = Expr { kind: ExprKind::Break, span: end };
+                    let m = Parser::chain(&conds, &body, &brk, head);
                     let yes = Expr { kind: ExprKind::Bool(true), span: kw };
                     ExprKind::While { cond: Box::new(yes), body: Block { stmts: vec![Stmt::Expr(m)], tail: None, span: all } }
                 } else {
@@ -1471,41 +1477,110 @@ impl<'a> Parser<'a> {
         Ok(e)
     }
 
-    /// The head and block of `if (const|let Pat = e) { … }` or its `while`, if that is next.
-    fn let_head(&mut self) -> PResult<Option<(Pattern, Expr, Block)>> {
-        if !(self.at("(") && matches!(self.tok_at(1), Tok::Kw(Kw::Const | Kw::Let))) {
+    /// The conditions and block of `if (…) { … }` or its `while`, if a condition binds with
+    /// `const` or `let`: a chain of bindings and tests joined by `&&`, each binding's names in
+    /// scope in what follows it (§2.3).
+    fn chain_head(&mut self) -> PResult<Option<(Vec<Cond>, Block)>> {
+        if !(self.at("(") && self.chain_ahead()) {
             return Ok(None);
         }
         self.bump();
-        let mutable = self.eat_kw(Kw::Let);
-        if !mutable {
+        let mut conds = Vec::new();
+        let mut lets = Vec::new();
+        loop {
+            if matches!(self.tok(), Tok::Kw(Kw::Const | Kw::Let)) {
+                let mutable = self.eat_kw(Kw::Let);
+                if !mutable {
+                    self.bump();
+                }
+                let pat = self.pattern()?;
+                self.expect("=")?;
+                // A binding's value stops at `&&`, which joins it to what follows.
+                let init = self.binary(2)?;
+                if mutable {
+                    bound_names(&pat, &mut lets);
+                }
+                conds.push(Cond::Bind(pat, init));
+            } else {
+                conds.push(Cond::Test(self.binary(2)?));
+            }
+            if !self.at("&&") {
+                break;
+            }
             self.bump();
         }
-        let pat = self.pattern()?;
-        self.expect("=")?;
-        let scrutinee = self.expr()?;
         self.expect(")")?;
         let mut body = self.block()?;
         // `let` makes the names it binds mutable in the block.
-        if mutable {
-            let mut names = Vec::new();
-            bound_names(&pat, &mut names);
-            let lets = names.into_iter().map(|(name, span)| Stmt::Let {
-                mutable: true,
-                pat: Pattern { kind: PatternKind::Bind(name.clone()), span },
-                ty: None,
-                init: Expr { kind: ExprKind::Ident(name), span },
-                span,
-            });
-            body.stmts.splice(0..0, lets);
+        let stmts = lets.into_iter().map(|(name, span)| Stmt::Let {
+            mutable: true,
+            pat: Pattern { kind: PatternKind::Bind(name.clone()), span },
+            ty: None,
+            init: Expr { kind: ExprKind::Ident(name), span },
+            span,
+        });
+        body.stmts.splice(0..0, stmts);
+        Ok(Some((conds, body)))
+    }
+
+    /// Whether the parenthesized condition ahead binds: has `const` or `let` outside any nesting.
+    fn chain_ahead(&self) -> bool {
+        let mut depth = 0usize;
+        let mut i = 1;
+        loop {
+            match self.tok_at(i) {
+                Tok::Punct("(" | "[" | "{") => depth += 1,
+                Tok::Punct(")" | "]" | "}") => {
+                    if depth == 0 {
+                        return false;
+                    }
+                    depth -= 1;
+                }
+                Tok::Kw(Kw::Const | Kw::Let) if depth == 0 => return true,
+                Tok::Eof => return false,
+                _ => {}
+            }
+            i += 1;
         }
-        Ok(Some((pat, scrutinee, body)))
+    }
+
+    /// A chain of conditions as `match`es and `if`s: `then` if every one holds, else `otherwise`,
+    /// which every condition that fails reaches. A binding followed only by tests is one arm with
+    /// a guard.
+    fn chain(conds: &[Cond], then: &Block, otherwise: &Expr, span: Span) -> Expr {
+        let Some((first, rest)) = conds.split_first() else {
+            return Expr { kind: ExprKind::Block(then.clone()), span: then.span };
+        };
+        let rest_tests = rest.iter().all(|c| matches!(c, Cond::Test(_)));
+        match first {
+            Cond::Bind(pat, init) => {
+                let (guard, body) = if rest_tests && !rest.is_empty() {
+                    let tests: Vec<Expr> = rest.iter().filter_map(|c| if let Cond::Test(e) = c { Some(e.clone()) } else { None }).collect();
+                    let guard = tests.into_iter().reduce(|a, b| {
+                        let span = Span { start: a.span.start, end: b.span.end };
+                        Expr { kind: ExprKind::Binary { op: "&&", lhs: Box::new(a), rhs: Box::new(b) }, span }
+                    });
+                    (guard, Expr { kind: ExprKind::Block(then.clone()), span: then.span })
+                } else {
+                    (None, Parser::chain(rest, then, otherwise, span))
+                };
+                let rest_pat = Pattern { kind: PatternKind::Wild, span: otherwise.span };
+                let arms = vec![MatchArm::new(pat.clone(), guard, body), MatchArm::new(rest_pat, None, otherwise.clone())];
+                Expr { kind: ExprKind::Match { scrutinee: Box::new(init.clone()), arms }, span }
+            }
+            Cond::Test(c) => {
+                let inner = Parser::chain(rest, then, otherwise, span);
+                let then = Block { stmts: Vec::new(), tail: Some(Box::new(inner.clone())), span: inner.span };
+                Expr { kind: ExprKind::If { cond: Box::new(c.clone()), then, otherwise: Some(Box::new(otherwise.clone())) }, span }
+            }
+        }
     }
 
     fn if_expr(&mut self) -> PResult<ExprKind> {
         self.expect_kw(Kw::If)?;
-        // `if (const #Some(x) = e) { … } else { … }` is a two-armed `match`.
-        if let Some((pat, scrutinee, then)) = self.let_head()? {
+        // `if (const #Some(x) = e && …) { … } else { … }` is `match`es and `if`s (§2.3).
+        let head = self.span();
+        if let Some((conds, then)) = self.chain_head()? {
             let start = self.span();
             let otherwise = if self.eat_kw(Kw::Else) {
                 if self.at_kw(Kw::If) {
@@ -1519,10 +1594,8 @@ impl<'a> Parser<'a> {
             } else {
                 Expr { kind: ExprKind::Block(Block { stmts: Vec::new(), tail: None, span: start }), span: start }
             };
-            let span = then.span;
-            let rest = Pattern { kind: PatternKind::Wild, span: otherwise.span };
-            let arms = vec![MatchArm::new(pat, None, Expr { kind: ExprKind::Block(then), span }), MatchArm::new(rest, None, otherwise)];
-            return Ok(ExprKind::Match { scrutinee: Box::new(scrutinee), arms });
+            let span = Span { start: head.start, end: self.prev_end() };
+            return Ok(Parser::chain(&conds, &then, &otherwise, span).kind);
         }
         let cond = self.paren_expr()?;
         let then = self.block()?;

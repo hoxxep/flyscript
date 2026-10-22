@@ -1,0 +1,30 @@
+// expect: big 12
+// expect: same 3
+// expect: other
+// expect: op 43
+// expect: other
+// expect: 6 3
+// expect: 2
+// A condition may chain bindings and tests with `&&`; each binding's names are in scope in what
+// follows, and any condition that fails goes to the `else` (§2.3).
+import { println } from "std/io";
+type Tok = #Num(i64) | #Op(u8) | #End;
+function describe(o: Option<i64>, t: readonly Tok): String {
+  if (const #Some(n) = o && n > 10) { return `big ${n}`; }
+  if (const #Some(n) = o && const #Num(m) = t && m == n) { return `same ${n}`; }
+  if (o.isNone() && const #Op(c) = t) { `op ${c}` } else { "other".toString() }
+}
+export function main(): void uses Io {
+  println(describe(#Some(12), #End).asStr());
+  println(describe(#Some(3), #Num(3)).asStr());
+  println(describe(#Some(3), #Num(4)).asStr());
+  println(describe(#None, #Op(43)).asStr());
+  println(describe(#None, #End).asStr());
+  let xs = [1, 2, 3, 4, 5];
+  let i: usize = 0;
+  let total = 0;
+  while (const #Some(x) = xs.get(i) && x < 4) { total += x; i += 1; }
+  println(`${total} ${i}`);
+  let opt: Option<u32> = #Some(1);
+  if (let #Some(k) = opt && k > 0) { k += 1; println(`${k}`); }
+}

@@ -30,6 +30,7 @@ The whole language rests on five laws. Every rule in this document is a conseque
 | A `match` arm binds by the strongest use it makes of what it binds: it takes an owned place only if it moves a part, borrows it `mut` if it changes one in place, and a guard only reads (§4.1) | matching a local `Option<String>` to read its string moved it, so it could not be matched again; a TypeScript programmer reads a value without giving it away |
 | A `match` through a `mut` borrow lends it `mut` only if an arm changes a part it binds (§4.1) | a compiler's `match (self.defs[d].kind)` in a `mut self` method locked `self` for arms that only read, so they could not call `readonly` methods |
 | A program's `main` takes the command line, a last parameter that is a list of strings taking every argument left (§8.1) | the spec's own word count, `main(args: readonly String[])`, could not be run as a program |
+| A condition may chain bindings and tests with `&&`: `if (const #Some(x) = o && x > 0)`, and `while` likewise (§2.1, §2.3) | the compiler written in Flyscript had 247 `if (const …)` blocks whose first statement was another test |
 | `Scope.spawn` and `Scope.fork` use `Io` (§6.1) | starting a task is a scheduling point, an effect like any other; a back end that suspends tasks at their effects needs to see it in the type |
 
 ---
@@ -68,6 +69,7 @@ The whole language rests on five laws. Every rule in this document is a conseque
 | `[A, B]` | same | Tuples. |
 | `interface` + `class … implements` | `interface` + `struct` + `impl` | Data and behaviour are declared separately. Interfaces are nominal and may extend others. Fields are public unless `private`. |
 | `T \| null \| undefined` | `Option<T>` = `#Some(T) \| #None` | There is no null. |
+| `if (x !== undefined && x.ready)` | `if (const #Some(x) = o && x.ready)` | A condition may bind: `const Pat = e` tests that `e` matches and binds its names for the rest of the condition and the block. Bindings and tests chain with `&&`; `while` takes the same. |
 | `throw` / `try` / `catch` | same | Typed: a function's failures are part of its type. |
 | `function*` / `yield` / `for…of` | `yield` / `for…of` | A generator is any function that uses `Yield<T>`; `for…of` also accepts any `Iterable<T>`. |
 | `xs.map(f).filter(p)` | `xs.iter().map(f).filter(p)` | Iteration chains are lazy generators (§5.5); `.collect()` makes a `Vec`. |
@@ -152,8 +154,10 @@ Entry       = FieldName [ ":" Expr ] | Generate(Entry) ;
 ListLit     = "[" [ Item { "," Item } ] "]" ;
 Item        = Expr | Generate(Item) ;                   (* one item per expression generated, §7.2 *)
 Match       = "match" "(" Expr ")" "{" { MatchArm } "}" ;
-IfConst     = "if" "(" ( "const" | "let" ) Pattern "=" Expr ")" Block [ "else" ( If | IfConst | Block ) ] ;  (* a two-armed match *)
-WhileConst  = "while" "(" ( "const" | "let" ) Pattern "=" Expr ")" Block ;   (* while (true) { match (e) { Pattern => Block, _ => break } } *)
+IfConst     = "if" "(" Chain ")" Block [ "else" ( If | IfConst | Block ) ] ;   (* matches and ifs; any condition that fails goes to the else *)
+WhileConst  = "while" "(" Chain ")" Block ;   (* while (true) { if (Chain) Block else break } *)
+Chain       = Cond { "&&" Cond } ;            (* with at least one binding *)
+Cond        = ( "const" | "let" ) Pattern "=" Expr | Expr ;   (* each ends at `&&`; a binding's names are in scope in what follows *)
 MatchArm    = Pattern [ "if" Expr ] "=>" ( Expr "," | Block ) | Generate(MatchArm) ;
 Pattern     = PatAtom { "|" PatAtom } ;
 PatAtom     = "_" | Literal | "comptime" Unary | Ident

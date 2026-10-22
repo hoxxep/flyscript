@@ -1240,20 +1240,34 @@ impl Parser {
   }
 
   // The head and block of `if (const|let Pat = e) { … }` or its `while`, if that is next.
-  function letHead(self: mut Self): Option<[Pattern, Expr, Block]> uses Fail<Diagnostic> {
-    if (!(self.at("(") && (Parser.isKw(self.tokAt(1), "const") || Parser.isKw(self.tokAt(1), "let")))) { return #None; }
+  // The conditions and block of `if (…) { … }` or its `while`, if a condition binds with `const`
+  // or `let`: a chain of bindings and tests joined by `&&`, each binding's names in scope in what
+  // follows it (§2.3).
+  function chainHead(self: mut Self): Option<[Vec<Cond>, Block]> uses Fail<Diagnostic> {
+    if (!(self.at("(") && self.chainAhead())) { return #None; }
     self.bump();
-    const mutable = self.eatKw("let");
-    if (!mutable) { self.bump(); }
-    const pat = self.pattern();
-    self.expect("=");
-    const scrutinee = self.expr();
+    let conds: Vec<Cond> = Vec.new();
+    let names: Vec<[String, Span]> = Vec.new();
+    while (true) {
+      if (self.atKw("const") || self.atKw("let")) {
+        const mutable = self.eatKw("let");
+        if (!mutable) { self.bump(); }
+        const pat = self.pattern();
+        self.expect("=");
+        // A binding's value stops at `&&`, which joins it to what follows.
+        const init = self.binary(2);
+        if (mutable) { boundNames(pat, mut names); }
+        conds.push(#Bind(pat, init));
+      } else {
+        conds.push(#Test(self.binary(2)));
+      }
+      if (!self.at("&&")) { break; }
+      self.bump();
+    }
     self.expect(")");
     let body = self.block();
     // `let` makes the names it binds mutable in the block.
-    if (mutable) {
-      let names: Vec<[String, Span]> = Vec.new();
-      boundNames(pat, mut names);
+    if (names.len() > 0) {
       let stmts: Vec<Stmt> = Vec.new();
       for (const [name, span] of names) {
         const bind = self.pat_(#Bind(name.clone()), span);
@@ -1263,13 +1277,72 @@ impl Parser {
       for (const s of body.stmts.drain()) { stmts.push(s); }
       body.stmts = stmts;
     }
-    #Some([pat, scrutinee, body])
+    #Some([conds, body])
+  }
+
+  // Whether the parenthesized condition ahead binds: has `const` or `let` outside any nesting.
+  function chainAhead(self: readonly Self): bool {
+    let depth: usize = 0;
+    let i: usize = 1;
+    while (true) {
+      const t = self.tokAt(i);
+      if (Parser.isPunct(t, "(") || Parser.isPunct(t, "[") || Parser.isPunct(t, "{")) {
+        depth += 1;
+      } else if (Parser.isPunct(t, ")") || Parser.isPunct(t, "]") || Parser.isPunct(t, "}")) {
+        if (depth == 0) { return false; }
+        depth -= 1;
+      } else if (depth == 0 && (Parser.isKw(t, "const") || Parser.isKw(t, "let"))) {
+        return true;
+      } else if (match (t) { #Eof => true, _ => false }) {
+        return false;
+      }
+      i += 1;
+    }
+    false
+  }
+
+  // A chain of conditions as `match`es and `if`s: `then` if every one holds, else `otherwise`,
+  // which every condition that fails reaches. A binding followed only by tests is one arm with a
+  // guard.
+  function chain(self: mut Self, conds: readonly Vec<Cond>, from: usize, then: readonly Block, otherwise: readonly Expr, span: Span): Expr {
+    if (from == conds.len()) { return self.expr_(#Block(then.clone()), then.span); }
+    let tests: Vec<Expr> = Vec.new();
+    for (const c of conds[from + 1..conds.len()]) { if (const #Test(x) = c) { tests.push(x.clone()); } }
+    const onlyTests = tests.len() + from + 1 == conds.len();
+    match (conds[from]) {
+      #Bind(pat, init) => {
+        let guard: Option<Expr> = #None;
+        const body = if (onlyTests && tests.len() > 0) {
+          let g = tests[0].clone();
+          for (const t of tests[1..tests.len()]) {
+            const gs: Span = { start: g.span.start, end: t.span.end };
+            g = self.expr_(#Binary { op: "&&".toString(), lhs: Box.new(g), rhs: Box.new(t.clone()) }, gs);
+          }
+          guard = #Some(g);
+          self.expr_(#Block(then.clone()), then.span)
+        } else {
+          self.chain(conds, from + 1, then, otherwise, span)
+        };
+        const rest = self.pat_(#Wild, otherwise.span);
+        let arms: Vec<MatchArm> = Vec.new();
+        arms.push(MatchArm { pat: pat.clone(), guard, body, generate: #None });
+        arms.push(MatchArm { pat: rest, guard: #None, body: otherwise.clone(), generate: #None });
+        self.expr_(#Match { scrutinee: Box.new(init.clone()), arms }, span)
+      }
+      #Test(c) => {
+        const inner = self.chain(conds, from + 1, then, otherwise, span);
+        const ispan = inner.span;
+        const block: Block = { stmts: Vec.new(), tail: #Some(Box.new(inner)), span: ispan };
+        self.expr_(#If { cond: Box.new(c.clone()), then: block, otherwise: #Some(Box.new(otherwise.clone())) }, span)
+      }
+    }
   }
 
   function ifExpr(self: mut Self): ExprKind uses Fail<Diagnostic> {
     self.expectKw("if");
-    // `if (const #Some(x) = e) { … } else { … }` is a two-armed `match`.
-    if (const #Some([pat, scrutinee, then]) = self.letHead()) {
+    // `if (const #Some(x) = e && …) { … } else { … }` is `match`es and `if`s (§2.3).
+    const head = self.span();
+    if (const #Some([conds, then]) = self.chainHead()) {
       const start = self.span();
       const otherwise: Expr = if (self.eatKw("else")) {
         if (self.atKw("if")) {
@@ -1283,13 +1356,9 @@ impl Parser {
       } else {
         self.expr_(#Block({ stmts: Vec.new(), tail: #None, span: start }), start)
       };
-      const span = then.span;
-      const rest = self.pat_(#Wild, otherwise.span);
-      const thenExpr = self.expr_(#Block(then), span);
-      let arms: Vec<MatchArm> = Vec.new();
-      arms.push(MatchArm { pat, guard: #None, body: thenExpr, generate: #None });
-      arms.push(MatchArm { pat: rest, guard: #None, body: otherwise, generate: #None });
-      return #Match { scrutinee: Box.new(scrutinee), arms };
+      const span: Span = { start: head.start, end: self.prevEnd() };
+      const e = self.chain(conds, 0, then, otherwise, span);
+      return e.kind;
     }
     const cond = self.parenExpr();
     const then = self.block();
@@ -1311,20 +1380,15 @@ impl Parser {
   function whileExpr(self: mut Self): ExprKind uses Fail<Diagnostic> {
     const kw = self.span();
     self.bump();
-    // `while (const #Some(x) = e) { … }` loops while `e` matches.
-    if (const #Some([pat, scrutinee, body]) = self.letHead()) {
+    // `while (const #Some(x) = e && …) { … }` loops while its conditions hold.
+    if (const #Some([conds, body]) = self.chainHead()) {
       // Each piece has a span of its own, as the Rust prototype keys what it records by span.
       const all: Span = { start: kw.start, end: body.span.end };
       const end: Span = { start: body.span.end, end: body.span.end };
-      const head: Span = { start: scrutinee.span.start, end: body.span.end };
-      const bspan = body.span;
-      const thenExpr = self.expr_(#Block(body), bspan);
-      const wild = self.pat_(#Wild, end);
+      const first = match (conds[0]) { #Bind(_, e) | #Test(e) => e.span.start };
+      const head: Span = { start: first, end: body.span.end };
       const brk = self.expr_(#Break, end);
-      let arms: Vec<MatchArm> = Vec.new();
-      arms.push(MatchArm { pat, guard: #None, body: thenExpr, generate: #None });
-      arms.push(MatchArm { pat: wild, guard: #None, body: brk, generate: #None });
-      const m = self.expr_(#Match { scrutinee: Box.new(scrutinee), arms }, head);
+      const m = self.chain(conds, 0, body, brk, head);
       const yes = self.expr_(#Bool(true), kw);
       let stmts: Vec<Stmt> = Vec.new();
       stmts.push(#Expr(m));
@@ -1481,6 +1545,9 @@ impl Parser {
 }
 
 // The names a pattern binds, with where.
+// One condition of a chain: a binding, `const Pat = e`, or a test.
+enum Cond { #Bind(Pattern, Expr), #Test(Expr) }
+
 export function boundNames(p: readonly Pattern, out: mut Vec<[String, Span]>): void {
   match (p.kind) {
     #Bind(n) => out.push([n.clone(), p.span]),
