@@ -325,6 +325,22 @@ const { $rt, $b } = (() => {
 
   let clock = 0n;
 
+  // The deterministic world the program runs against (§6.4), from `FLY_WORLD`, JSON: connections
+  // waiting to be accepted, a database of profiles and quotas, the percent of I/O operations that
+  // time out, and the seed that decides which do, and how tasks interleave.
+  const world = Object.assign({ incoming: [], profiles: {}, quotas: {}, faults: 0, seed: 0x5eed },
+    process.env.FLY_WORLD ? JSON.parse(process.env.FLY_WORLD) : {});
+  let faultRng = BigInt(Math.max(1, world.seed));
+  // Whether the next I/O operation fails.
+  function fault() {
+    let r = faultRng;
+    r = BigInt.asUintN(64, r ^ (r << 13n));
+    r = BigInt.asUintN(64, r ^ (r >> 7n));
+    r = BigInt.asUintN(64, r ^ (r << 17n));
+    faultRng = r;
+    return r % 100n < BigInt(world.faults);
+  }
+
   // ---- tasks (§6.1): one runs at a time, and at each scheduling point the next is chosen by a
   // seeded generator, as the interpreter's scheduler does, so a seed reproduces an interleaving.
 
@@ -334,7 +350,7 @@ const { $rt, $b } = (() => {
   }
   class Cancelled extends Error {}
   const sched = {
-    on: false, current: 0, ready: [], blocked: new Map(), finished: new Set(), rng: 0x5eedn, next: 1,
+    on: false, current: 0, ready: [], blocked: new Map(), finished: new Set(), rng: BigInt(Math.max(1, world.seed)), next: 1,
     tasks: new Map(), channels: new Map(), closed: new Set(), senders: new Map(), cancelled: new Set(), scopes: new Map(), scopeIds: 1,
   };
   // Hands the baton to a ready task, chosen by the seed; `false` if none can run.
@@ -685,6 +701,37 @@ const { $rt, $b } = (() => {
     *Receiver_each(rx) { for (let m = yield* recv(rx.ch); m !== undefined; m = yield* recv(rx.ch)) yield new Yielded(m.v); },
     Mutex_new: (v) => ({ v }),
     *Mutex_lock$g(m, f) { yield* point(); return yield* body(f, m); },
+
+    // ---- the simulated network and database ----
+    Listener_bind: () => ({ listener: 0 }),
+    *Listener_accept() {
+      while (world.incoming.length > 0) yield new Yielded({ input: world.incoming.shift(), pos: 0 });
+    },
+    Socket_read(r, buf) {
+      if (fault()) throw new Fail({ $tag: "TimedOut" });
+      const sock = r.v, cells = buf.v, n = Math.min(cells.length, sock.input.length - sock.pos);
+      for (let i = 0; i < n; i++) cells[i] = BigInt(sock.input.charCodeAt(sock.pos + i));
+      buf.v = cells;
+      sock.pos += n;
+      return BigInt(n);
+    },
+    Socket_writeStatus(r, code, body) {
+      if (fault()) throw new Fail({ $tag: "BrokenPipe" });
+      // The simulated client's transcript doubles as the program's output.
+      $b.println(`-> ${code} ${body}`);
+    },
+    Socket_close() {},
+    Db_connect: () => ({ db: 0 }),
+    Db_fetchProfile(db, user) {
+      if (fault()) throw new Fail({ $tag: "TimedOut" });
+      const name = world.profiles[user];
+      if (name === undefined) throw new Fail({ $tag: "NotFound" });
+      return { displayName: name };
+    },
+    Db_checkQuota(db, token) {
+      if (fault()) throw new Fail({ $tag: "TimedOut" });
+      return { allowed: world.quotas[token] === true };
+    },
 
     Io_now: () => ({ nanos: clock }),
     Io_sleep(d) { clock += d.nanos; },

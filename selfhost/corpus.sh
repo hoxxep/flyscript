@@ -17,7 +17,22 @@ for f in "$@"; do
   done
   # A program may end in a panic, which it prints; what it prints is what is compared.
   node --stack-size=65500 "$compiler" "$f" "$out/$name.js" "$root" > "$out/$name.err" 2>&1
-  [ -s "$out/$name.err" ] || (cd "$out/$name.cwd" && node "$out/$name.js") > "$out/$name.got" 2>&1
+  # Its header describes the simulated world it runs against, as for `flyc run`'s tests.
+  world=$(node -e '
+    const w = { incoming: [], profiles: {}, quotas: {}, faults: 0, seed: 0x5eed };
+    for (const line of require("fs").readFileSync(process.argv[1], "utf8").split("\n")) {
+      if (!line.startsWith("//")) break;
+      const m = /^\/\/\s*(\w+):\s?(.*)$/.exec(line);
+      if (!m) continue;
+      const [, key, value] = m, [k, v] = value.split("=");
+      if (key === "request") w.incoming.push(value.replace(/\\n/g, "\n"));
+      if (key === "profile") w.profiles[k] = v;
+      if (key === "quota") w.quotas[k] = v === "true";
+      if (key === "faults") w.faults = Number(value);
+      if (key === "seed") w.seed = Number(value);
+    }
+    console.log(JSON.stringify(w));' "$f")
+  [ -s "$out/$name.err" ] || (cd "$out/$name.cwd" && FLY_WORLD="$world" node "$out/$name.js") > "$out/$name.got" 2>&1
   if [ ! -s "$out/$name.err" ] && cmp -s "$out/$name.want" "$out/$name.got"; then
     pass=$((pass + 1))
   else
