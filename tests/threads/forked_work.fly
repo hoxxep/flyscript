@@ -1,0 +1,22 @@
+// expect: 64 results, total 2105004248
+// Forked tasks compute on whichever cores are free; each result is joined where it was asked for.
+import { println } from "std/io";
+
+function work(n: u64): u64 {
+  let total: u64 = 0;
+  for (const i of 0..n) { total += (i * i) % 1013; }
+  total
+}
+
+export function main(): void uses Io {
+  const results = Io.scope((s) => {
+    let fibers: Vec<Fiber<u64>> = Vec.new();
+    for (const k of 0..64) { fibers.push(s.fork(() => work(((k as u64) + 1) * 2000))); }
+    let out: Vec<u64> = Vec.new();
+    while (const #Some(f) = fibers.pop()) { out.push(f.join()); }
+    out
+  });
+  let total: u64 = 0;
+  for (const r of results) { total += r; }
+  println(`${results.len()} results, total ${total}`);
+}

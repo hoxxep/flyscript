@@ -1,0 +1,20 @@
+// expect: woke 32 sleepers, together
+// Tasks sleeping at once wake together: each sleeps 100 ms, and all of them take far less than
+// one after another would.
+import { println } from "std/io";
+import { Mutex } from "std/sync";
+
+export function main(): void uses Io {
+  const woke = Mutex.new(0 as u32);
+  const before = Io.now();
+  Io.scope((s) => {
+    for (const _ of 0..32) {
+      s.spawn(() => {
+        Io.sleep(Duration.ms(100));
+        woke.lock((n) => { n += 1; });
+      });
+    }
+  });
+  const ms = Io.now().since(before).toMs();
+  println(`woke ${woke.lock((n) => n + 0)} sleepers, ${if (ms < 1600) { "together" } else { "one after another" }}`);
+}

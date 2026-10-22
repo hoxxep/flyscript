@@ -1,0 +1,20 @@
+// expect: received 20000 messages, total 199990000
+// Many tasks send to one receiver, which counts what arrives however the senders interleave.
+import { println } from "std/io";
+import { channel } from "std/sync";
+
+export function main(): void uses Io {
+  const [tx, rx] = channel<u64>();
+  const [count, total] = Io.scope((s) => {
+    for (const k of 0..400) {
+      const t = tx.clone();
+      s.spawn(() => { for (const i of 0..50) { t.send((k as u64) * 50 + (i as u64)); } });
+    }
+    tx.close();
+    let total: u64 = 0;
+    let count: u64 = 0;
+    for (const v of rx) { total += v; count += 1; }
+    [count, total]
+  });
+  println(`received ${count} messages, total ${total}`);
+}

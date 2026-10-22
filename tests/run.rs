@@ -64,9 +64,15 @@ fn world_for(source: &str) -> (World, Vec<String>) {
 
 #[test]
 fn programs_run() {
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/run");
-    let mut paths: Vec<_> = fs::read_dir(&dir).unwrap().map(|e| e.unwrap().path()).filter(|p| p.extension().is_some_and(|e| e == "fly")).collect();
-    paths.sort();
+    // The run suite, and the programs that print the same however their tasks interleave, which
+    // native code also runs on threads (tests/selfhost.rs).
+    let mut paths: Vec<_> = Vec::new();
+    for dir in ["tests/run", "tests/threads"] {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join(dir);
+        let mut ps: Vec<_> = fs::read_dir(&dir).unwrap().map(|e| e.unwrap().path()).filter(|p| p.extension().is_some_and(|e| e == "fly")).collect();
+        ps.sort();
+        paths.extend(ps);
+    }
     // Programs of several modules in examples/, entered at their `main.fly`, run too.
     let examples = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples");
     let mut multi: Vec<_> = fs::read_dir(&examples).unwrap().map(|e| e.unwrap().path().join("main.fly")).filter(|p| p.exists()).collect();

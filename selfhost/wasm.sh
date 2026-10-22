@@ -11,5 +11,5 @@ out=$3
 node --stack-size=65500 "$1" "$2" "$out.c" "$root"
 clang --target=wasm32-wasip1 --sysroot="$sysroot" -std=gnu11 -O2 -w -c "$out.c" -o "$out.o"
 wasm-ld -m wasm32 "$sysroot/lib/wasm32-wasip1/crt1-command.o" "$out.o" -L"$sysroot/lib/wasm32-wasip1" -lc "$builtins" \
-  --export=__stack_pointer --export=fly_fiber_run --export=fly_fiber_top -z stack-size=1048576 -o "$out"
+  --export=__stack_pointer --export=fly_fiber_run --export=fly_fiber_top -z stack-size=8388608 -o "$out"
 rm -f "$out.c" "$out.o"

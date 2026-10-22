@@ -1,0 +1,22 @@
+// expect: the scope failed: #Bad
+// expect: every other task stopped
+// A forked task fails while the others wait for messages that never come: the failure cancels
+// them, and the scope raises it once they have all stopped (§6.1). Nothing else ends their wait,
+// so the scope returning at all shows they were cancelled.
+import { println } from "std/io";
+import { channel } from "std/sync";
+
+export function main(): void uses Io {
+  const [tx, rx] = channel<u32>();
+  const r = try {
+    Io.scope((s) => {
+      for (const _ of 0..16) { s.spawn(() => { rx.recv(); }); }
+      const bad = s.fork(() => { Io.sleep(Duration.ms(5)); throw #Bad });
+      bad.join()
+    });
+    "no failure".toString()
+  } catch (e) { `the scope failed: ${e}` };
+  tx.close();
+  println(r);
+  println("every other task stopped");
+}

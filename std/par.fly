@@ -14,8 +14,16 @@ export interface ParSplit {
   function readAt(self: readonly Self, i: usize): Self.ReadView from self;
 }
 
-// Runs `f` on every element. The halves of each split are independent; this prototype runs them
-// in order, and a native runtime gives them to its workers.
+// Runs `a` and `b` and gives both results: at once, on two cores, when another is free. Both are
+// pure, so whether they overlap cannot be seen; what each captures must be `Send`, as either may
+// run on another core.
+export function join<A extends Send, B extends Send>(a: once () => A, b: once () => B): [A, B];
+
+// Fewer elements than this are worked on in order, by the worker that has them.
+const GRAIN: usize = 16;
+
+// Runs `f` on every element. The halves of each split are independent, so `join` may run them at
+// once.
 export function par<C extends ParSplit>(c: mut C, f: (v: C.View, i: usize) => void): void {
   const n = c.len();
   each<C>(c.slice(), 0, n, f);
@@ -23,7 +31,11 @@ export function par<C extends ParSplit>(c: mut C, f: (v: C.View, i: usize) => vo
 
 // `f` is lent, so both halves call it.
 function each<C extends ParSplit>(s: C.Slice, lo: usize, n: usize, f: readonly (v: C.View, i: usize) => void): void {
-  if (n == 1) {
+  if (n > GRAIN) {
+    const half = n / 2;
+    const [a, b] = C.split(s, half);
+    join(() => each<C>(a, lo, half, f), () => each<C>(b, lo + half, n - half, f));
+  } else if (n == 1) {
     f(C.viewAt(s, 0), lo);
   } else if (n > 1) {
     const half = n / 2;
@@ -33,17 +45,29 @@ function each<C extends ParSplit>(s: C.Slice, lo: usize, n: usize, f: readonly (
   }
 }
 
-// Folds every element with `one` and combines with `both`, which must be associative. Workers
-// share the container `readonly`; this prototype folds in order.
+// Folds every element with `one` and combines with `both`, which must be associative, starting
+// from `zero`. Workers share the container `readonly`, and fold halves of it at once.
 export function parReduce<C extends ParSplit, A extends Send>(
   c: readonly C,
   zero: A,
   one: (v: C.ReadView, i: usize) => A,
   both: (a: A, b: A) => A,
 ): A {
-  let acc = zero;
-  let i: usize = 0;
-  while (i < c.len()) {
+  const n = c.len();
+  if (n == 0) { return zero; }
+  both(zero, fold<C, A>(c, 0, n, one, both))
+}
+
+// The fold of elements `lo` up to `hi`, of which there is at least one.
+function fold<C extends ParSplit, A extends Send>(c: readonly C, lo: usize, hi: usize, one: readonly (v: C.ReadView, i: usize) => A, both: readonly (a: A, b: A) => A): A {
+  if (hi - lo > GRAIN) {
+    const mid = lo + (hi - lo) / 2;
+    const [a, b] = join(() => fold<C, A>(c, lo, mid, one, both), () => fold<C, A>(c, mid, hi, one, both));
+    return both(a, b);
+  }
+  let acc = one(c.readAt(lo), lo);
+  let i = lo + 1;
+  while (i < hi) {
     acc = both(acc, one(c.readAt(i), i));
     i += 1;
   }

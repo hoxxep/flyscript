@@ -22,8 +22,9 @@ target=""
 for a in frame-pointer target-cpu target-features tune-cpu; do
   target="$target $(grep -m1 -o "\"$a\"=\"[^\"]*\"" "$out.c.ll" || true)"
 done
-# Under the address sanitizer, the module's functions are checked as C's are.
+# Under a sanitizer, the module's functions are checked as C's are.
 case " $* " in *-fsanitize=*address*) target="$target sanitize_address" ;; esac
+case " $* " in *-fsanitize=*thread*) target="$target sanitize_thread" ;; esac
 sed "s/^attributes #0 = { nounwind }/attributes #0 = { nounwind$target }/" "$out.ll" | cat "$out.target.ll" - > "$out.prog.ll"
 "$bin/llvm-link" "$out.c.ll" "$out.prog.ll" -o "$out.bc"
 case "$out" in

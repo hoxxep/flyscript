@@ -1,21 +1,36 @@
 #!/bin/sh
 # Compiles each program of the run corpus with a self-hosted compiler and checks what it prints
-# against the program's `// expect:` lines: `selfhost/corpus.sh [--c | --wasm | --llvm] compiler.js [program.fly...]`.
+# against the program's `// expect:` lines: `selfhost/corpus.sh [--c | --wasm | --llvm] [--leaks]
+# [--threads] compiler.js [program.fly...]`.
 # With `--c` each program is compiled to C and built with `cc`, with the address and undefined
 # behavior sanitizers, so a memory error fails the program. With `--leaks` too, a program that
 # leaks fails: on Linux the address sanitizer checks for leaks itself; where it cannot, on macOS,
 # a plain build is run under `leaks`. A program that panics exits at once, and is not checked.
 # With `--wasm` each is compiled to WebAssembly for WASI and run by `selfhost/wasm.js`. With
 # `--llvm` each is compiled through LLVM by `selfhost/llvm.sh`, with the sanitizers as for `--c`.
+# With `--threads` too, natively, each runs on worker threads, not against a simulated world,
+# under the thread sanitizer.
 c=false
 wasm=false
 llvm=false
 leaks=false
-[ "$1" = "--c" ] && { c=true; shift; }
-[ "$1" = "--wasm" ] && { wasm=true; shift; }
-[ "$1" = "--llvm" ] && { llvm=true; shift; }
-[ "$1" = "--leaks" ] && { leaks=true; shift; }
+threads=false
+while :; do
+  case "$1" in
+    --c) c=true ;;
+    --wasm) wasm=true ;;
+    --llvm) llvm=true ;;
+    --leaks) leaks=true ;;
+    --threads) threads=true ;;
+    *) break ;;
+  esac
+  shift
+done
 command -v leaks > /dev/null 2>&1 || leaks=false
+# On threads the sanitizer is the thread sanitizer, and the program runs against no simulated
+# world, on four workers.
+sanitize="-fsanitize=address,undefined -fno-sanitize-recover=all"
+$threads && sanitize="-fsanitize=thread"
 compiler=$1; shift
 root=$(cd "$(dirname "$0")/.." && pwd)
 out=$(mktemp -d)
@@ -32,14 +47,14 @@ for f in "$@"; do
   done
   # A program may end in a panic, which it prints; what it prints is what is compared.
   if $llvm; then
-    sh "$root/selfhost/llvm.sh" "$compiler" "$f" "$out/$name.exe" -fsanitize=address,undefined -fno-sanitize-recover=all > "$out/$name.err" 2>&1
+    sh "$root/selfhost/llvm.sh" "$compiler" "$f" "$out/$name.exe" $sanitize > "$out/$name.err" 2>&1
     run="$out/$name.exe"
   elif $wasm; then
     sh "$root/selfhost/wasm.sh" "$compiler" "$f" "$out/$name.wasm" > "$out/$name.err" 2>&1
     run="node --no-warnings $root/selfhost/wasm.js $out/$name.wasm"
   elif $c; then
     node --stack-size=65500 "$compiler" "$f" "$out/$name.c" "$root" > "$out/$name.err" 2>&1 &&
-      cc -std=gnu11 -g -O1 -w -fsanitize=address,undefined -fno-sanitize-recover=all -o "$out/$name.exe" "$out/$name.c" -lm >> "$out/$name.err" 2>&1
+      cc -std=gnu11 -g -O1 -w $sanitize -o "$out/$name.exe" "$out/$name.c" -lm >> "$out/$name.err" 2>&1
     run="$out/$name.exe"
   else
     node --stack-size=65500 "$compiler" "$f" "$out/$name.js" "$root" > "$out/$name.err" 2>&1
@@ -60,7 +75,11 @@ for f in "$@"; do
       if (key === "seed") w.seed = Number(value);
     }
     console.log(JSON.stringify(w));' "$f")
-  [ -s "$out/$name.err" ] || (cd "$out/$name.cwd" && FLY_WORLD="$world" $run) > "$out/$name.got" 2>&1
+  if $threads; then
+    [ -s "$out/$name.err" ] || (cd "$out/$name.cwd" && FLY_THREADS=4 $run) > "$out/$name.got" 2>&1
+  else
+    [ -s "$out/$name.err" ] || (cd "$out/$name.cwd" && FLY_WORLD="$world" $run) > "$out/$name.got" 2>&1
+  fi
   if $c && $leaks && [ ! -s "$out/$name.err" ] && ! grep -q '<panic' "$out/$name.want"; then
     cc -std=gnu11 -g -O1 -w -o "$out/$name.plain" "$out/$name.c" -lm &&
       (cd "$out/$name.cwd" && FLY_WORLD="$world" leaks --atExit -- "$out/$name.plain" 2>&1) | grep -q ' 0 leaks for ' ||

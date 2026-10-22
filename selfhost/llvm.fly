@@ -2679,6 +2679,9 @@ impl Lgen {
     const cfile = self.c.assemble(ent, uncaught, runtime);
     let ll = "; The program's code, as LLVM IR: linked with its companion C file before it is optimized.\n\n".toString();
     ll.push(DECLS);
+    // What code reads of the task running is its thread's, in a program that starts tasks.
+    const local = if (ent.tasks) { "thread_local " } else { "" };
+    ll.push(`@fly_err = external ${local}global ptr\n@fly_unwinding = external ${local}global i8\n@fly_stopping = external ${local}global i8\n`);
     for (const [_, d] of self.declared.entries()) {
       ll.push(d.asStr());
       ll.push("\n");
@@ -2724,9 +2727,6 @@ declare void @fly_handle_free(ptr)
 declare void @flyg_cleanup_begin(ptr)
 declare void @flyg_cleanup_end(ptr)
 declare void @flyg_free(ptr)
-@fly_err = external global ptr
-@fly_unwinding = external global i8
-@fly_stopping = external global i8
 ";
 
 // The companion's own functions, for what the runtime takes or gives as a struct; and checks of the

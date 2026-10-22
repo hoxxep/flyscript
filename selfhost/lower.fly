@@ -217,7 +217,7 @@ impl Lower {
 
   export function concrete(self: readonly Self, t: readonly Ty): Ty {
     const s = subst(t, self.map);
-    self.resolveAssoc(s)
+    settled(self.resolveAssoc(s))
   }
 
   export function resolveAssoc(self: readonly Self, t: readonly Ty): Ty {
@@ -481,7 +481,7 @@ impl Lower {
     let out: Vec<GArg> = Vec.new();
     if (const #Some(t) = self.p.typed.get(self.fid) && const #Some(args) = t.targs.get(id)) {
       for (const a of args) {
-        out.push(match (substArg(a, self.map)) { #Ty(x) => #Ty(self.resolveAssoc(x)), other => other });
+        out.push(match (substArg(a, self.map)) { #Ty(x) => #Ty(settled(self.resolveAssoc(x))), other => other });
       }
     }
     out
@@ -2805,13 +2805,29 @@ impl Lower {
     { main: #Some(main), args, fails, tasks: self.startsTasks(), exports }
   }
 
-  // Whether the program starts tasks or makes channels or locks: anything the scheduler serves.
+  // Whether the program starts tasks, makes channels or locks, or joins work: anything the scheduler
+  // serves. A function does if it calls one of the scheduler's routines, or a function that does;
+  // the program does if one of its own does, as the standard library's `par` does only for a
+  // program that calls it.
   function startsTasks(self: readonly Self): bool {
-    for (const [_, t] of self.p.typed.entries()) {
-      for (const [_, f] of t.calls.entries()) {
-        const key = self.builtinKey(f);
-        if (key == "Io_scope" || key == "channel" || key == "Reply_new" || key == "Mutex_new") { return true; }
+    let starts: HashSet<usize> = HashSet.new();
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const [fid, t] of self.p.typed.entries()) {
+        if (starts.has(fid)) { continue; }
+        for (const [_, f] of t.calls.entries()) {
+          const key = self.builtinKey(f);
+          if (starts.has(f) || key == "Io_scope" || key == "channel" || key == "Reply_new" || key == "Mutex_new" || (key == "join" && !self.p.fns[f].hasBody)) {
+            starts.insert(fid);
+            changed = true;
+            break;
+          }
+        }
       }
+    }
+    for (const fid of starts.iter()) {
+      if (!self.p.modules[self.p.fns[fid].module].isStd) { return true; }
     }
     false
   }
@@ -2821,6 +2837,41 @@ impl Lower {
     const m = self.module;
     render(d, self.p.modules[m].file.asStr(), self.p.modules[m].source.asStr())
   }
+}
+
+// A type with what the checker left unsolved — what nothing constrained, as the result of a
+// closure that only throws — taken as `never`: no value of it is ever made.
+function settled(t: readonly Ty): Ty {
+  match (t) {
+    #Var(_) => #Prim(#Never),
+    #Named(d, args) => {
+      let out: Vec<GArg> = Vec.new();
+      for (const a of args) { out.push(match (a) { #Ty(x) => #Ty(settled(x)), _ => a.clone() }); }
+      #Named(d, out)
+    }
+    #Record(r) => #Record(settledRow(r)),
+    #Union(r) => #Union(settledRow(r)),
+    #Tuple(ts) => {
+      let out: Vec<Ty> = Vec.new();
+      for (const x of ts) { out.push(settled(x)); }
+      #Tuple(out)
+    }
+    #Array(e, l) => #Array(Box.new(settled(e)), l.clone()),
+    #Slice(e) => #Slice(Box.new(settled(e))),
+    #Borrow(m, e) => #Borrow(m, Box.new(settled(e))),
+    #Fn(f) => {
+      let params: Vec<Ty> = Vec.new();
+      for (const p of f.params) { params.push(settled(p)); }
+      #Fn(Box.new(FnTy { mode: f.mode, params, ret: settled(f.ret), effects: f.effects.clone() }))
+    }
+    _ => t.clone(),
+  }
+}
+
+function settledRow(r: readonly Row): Row {
+  let labels: Vec<[String, Ty]> = Vec.new();
+  for (const [k, t] of r.labels) { labels.push([k.clone(), settled(t)]); }
+  Row { labels, tail: r.tail.clone() }
 }
 
 // ---- names code uses ----

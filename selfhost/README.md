@@ -51,6 +51,12 @@ Failures propagate by checked `goto` to the nearest `catch`. A `for` over a gene
 
 `corpus.sh --c --leaks` builds every test program natively with the address and undefined-behavior sanitizers and checks for leaks; each prints what the reference implementation prints.
 
+## Tasks on every core
+
+A program that starts tasks runs them on a worker thread for each core (`FLY_THREADS` sets how many), unless `FLY_WORLD` gives it a simulated world, against which it runs them one at a time in the order its seed decides, as the reference does. Each worker keeps the tasks it starts in a work-stealing deque, and an idle worker steals one not yet begun. A task that has begun stays on its worker: compiled code may keep a thread-local variable's address across a call that suspends, so a task resumed on another thread would read the wrong thread's. A task waits by parking in the queue of what it waits for — a channel, a task it joins, its scope's end, a timer — and whatever ends the wait hands it back to its worker's inbox. `join`, under `par`, offers its second closure in a deque of its own, which idle workers steal from first, and helps with other work while waiting for one taken.
+
+What compiled code reads of the running task — the failure being raised, whether it unwinds — is thread-local only in programs that start tasks, so the others pay nothing for it. `corpus.sh --threads` runs the programs of `tests/threads`, which print the same however their tasks interleave, on threads under the thread sanitizer.
+
 ## The LLVM back end
 
 Writing an output path ending in `.ll` makes the program's code an LLVM module, and beside it a C file with the runtime and what the module calls of it: the C back end's library routines, its drop functions, the program's entry. Every local lives in memory of its own, which LLVM's `mem2reg` makes registers; each structured statement becomes basic blocks, with the C back end's cleanups and its tracking of what may hold a value at each way out. The data are C's: the module lays out every type as the C back end declares it, and the C file checks each layout the module relies on with `_Static_assert`, so the two cannot drift apart.

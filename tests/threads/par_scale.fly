@@ -1,0 +1,23 @@
+// expect: 849666 steps in all, the longest 261 from 6171
+// `par` and `parReduce` over thousands of elements: split by `join` across the workers.
+import { println } from "std/io";
+import { par, parReduce } from "std/par";
+
+function collatz(n: u64): u64 {
+  let x = n;
+  let steps: u64 = 0;
+  while (x != 1) {
+    x = if (x % 2 == 0) { x / 2 } else { 3 * x + 1 };
+    steps += 1;
+  }
+  steps
+}
+
+export function main(): void uses Io {
+  let steps: Vec<u64> = Vec.new();
+  for (const _ of 0..10000) { steps.push(0); }
+  par(mut steps, (v, i) => { v = collatz((i as u64) + 1); });
+  const total = parReduce(steps, 0 as u64, (v, i) => v, (a, b) => a + b);
+  const [best, at] = parReduce(steps, [0 as u64, 0 as usize], (v, i) => [v, i + 1], (a, b) => if (b[0] > a[0] || (b[0] == a[0] && b[1] < a[1])) { b } else { a });
+  println(`${total} steps in all, the longest ${best} from ${at}`);
+}

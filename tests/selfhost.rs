@@ -94,7 +94,7 @@ fn build_with_flyc() {
 /// Every program of the test suite and the examples.
 fn programs() -> Vec<PathBuf> {
     let mut programs: Vec<PathBuf> = Vec::new();
-    for dir in ["tests/run", "tests/native", "tests/accept", "tests/reject", "examples"] {
+    for dir in ["tests/run", "tests/threads", "tests/native", "tests/accept", "tests/reject", "examples"] {
         let mut files: Vec<PathBuf> = std::fs::read_dir(root().join(dir)).unwrap().map(|e| e.unwrap().path()).collect();
         files.sort();
         for f in files {
@@ -301,5 +301,27 @@ fn compiles_itself_through_llvm() {
         for (got, want) in pairs {
             assert!(std::fs::read(&got).unwrap() == std::fs::read(&want).unwrap(), "the compiler built through LLVM makes other than {}", want.display());
         }
+    }
+}
+
+/// The programs of tests/threads print the same however their tasks interleave: against the
+/// simulated world, as JavaScript and as C, and natively on worker threads under the thread
+/// sanitizer, through C and through LLVM.
+#[test]
+fn threaded_programs_run_as_expected() {
+    if !has_node() || !has_cc() {
+        return;
+    }
+    let mut files: Vec<PathBuf> = std::fs::read_dir(root().join("tests/threads")).unwrap().map(|e| e.unwrap().path()).filter(|f| f.extension().is_some_and(|e| e == "fly")).collect();
+    files.sort();
+    let mut ways: Vec<&[&str]> = vec![&[], &["--c"], &["--c", "--threads"]];
+    if has_llvm() {
+        ways.push(&["--llvm", "--threads"]);
+    }
+    for way in ways {
+        let r = Command::new("sh").arg(root().join("selfhost/corpus.sh")).args(way).arg(root().join("selfhost/seed.js")).args(&files).output().unwrap();
+        let report = String::from_utf8_lossy(&r.stdout);
+        let failed: Vec<&str> = report.lines().filter_map(|l| l.strip_prefix("FAIL ")).collect();
+        assert!(failed.is_empty(), "failed ({way:?}):\n{}", failed.join("\n"));
     }
 }

@@ -321,6 +321,12 @@ impl Interp {
                 self.sched.add_sender(ch);
                 Ok(Value::Native("Sender", ch))
             }
+            // `std/par`'s two pure halves, here one after the other: the order cannot be seen (§6.5).
+            "join" => {
+                let x = self.call_value(&a(0), Vec::new())?;
+                let y = self.call_value(&a(1), Vec::new())?;
+                Ok(Value::Tuple(vec![x, y].into()))
+            }
             // A mutex is a cell its clones share; `lock` lends the value to the body (§6.2).
             "Mutex.new" => Ok(Value::Ref(shared(a(0)))),
             "Mutex.lock" => {

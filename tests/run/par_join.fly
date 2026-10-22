@@ -1,0 +1,34 @@
+// expect: squares: 0 1 4 9 16 25 36 49 64 81
+// expect: sum of squares below 1000: 332833500
+// expect: longest: 871 takes 178 steps
+// expect: both: 111 and 118
+// `par` and `parReduce` split their work with `join`, which may run its two halves at once (§6.5):
+// the halves are pure, so what a program prints cannot depend on it.
+import { println } from "std/io";
+import { par, parReduce, join } from "std/par";
+
+function collatz(n: u64): u64 {
+  let x = n;
+  let steps: u64 = 0;
+  while (x != 1) {
+    x = if (x % 2 == 0) { x / 2 } else { 3 * x + 1 };
+    steps += 1;
+  }
+  steps
+}
+
+export function main(): void uses Io {
+  let xs: Vec<u64> = Vec.new();
+  for (const i of 0..1000) { xs.push(i as u64); }
+  par(mut xs, (v, i) => { v = v * v; });
+  let shown = String.new();
+  for (const i of 0..10) { shown.push(` ${xs[i]}`); }
+  println(`squares:${shown}`);
+  println(`sum of squares below 1000: ${parReduce(xs, 0 as u64, (v, i) => v, (a, b) => a + b)}`);
+  let steps: u64[1000] = repeat(0 as u64);
+  par(mut steps, (v, i) => { v = if (i == 0) { 0 } else { collatz(i as u64) }; });
+  const [best, at] = parReduce(steps, [0 as u64, 0 as usize], (v, i) => [v, i], (a, b) => if (b[0] > a[0]) { b } else { a });
+  println(`longest: ${at} takes ${best} steps`);
+  const [a, b] = join(() => collatz(27), () => collatz(97));
+  println(`both: ${a} and ${b}`);
+}

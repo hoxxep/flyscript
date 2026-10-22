@@ -1,6 +1,6 @@
 # Flyscript
 
-**Language specification, version 0.57**
+**Language specification, version 0.58**
 
 *Affine values, one row calculus, handlers for everything, and `comptime`: Church on the outside, Turing on the inside.*
 
@@ -20,10 +20,12 @@ The whole language rests on five laws. Every rule in this document is a conseque
 
 ### 0.1 Recent changes
 
-0.57 adds LLVM as a way to native code (§8.3): a program's functions as LLVM IR, with debug information that maps them to their source, optimized together with the runtime, for any target LLVM has. 0.56 built the foreign interface (§8.2): raw pointers as the prelude's `Ptr<T>`, reaching through one an effect, `Unsafe`, that `unsafe { … }` handles, and functions of C's and functions C calls; and one core IR under the self-hosted compiler's back ends. The table lists the language's changes since 0.54; earlier ones are in [docs/history](history/).
+0.58 runs native tasks on every core (§8.3), and `par` and `parReduce` on all of them through `join`, which runs two pure closures at once (§6.5). 0.57 added LLVM as a way to native code (§8.3): a program's functions as LLVM IR, with debug information that maps them to their source, optimized together with the runtime, for any target LLVM has. 0.56 built the foreign interface (§8.2): raw pointers as the prelude's `Ptr<T>`, reaching through one an effect, `Unsafe`, that `unsafe { … }` handles, and functions of C's and functions C calls; and one core IR under the self-hosted compiler's back ends. The table lists the language's changes since 0.54; earlier ones are in [docs/history](history/).
 
 | Change | Why |
 | :--- | :--- |
+| `std/par` exports `join(a, b)`, which runs two pure closures, at once when a core is free, and gives both results (§6.5) | `par` and `parReduce` need to run halves of their work in parallel without `Io`, which pure code does not perform; so do programs splitting work of their own |
+| A type nothing constrains, such as the result of a closure that only throws, is `never` (§3.6) | `s.fork(() => { …; throw #Bad })` left its `Fiber`'s type unsolved, which code generation cannot lay out; no value of it is ever made |
 | `isize` and `usize` are as wide as the target's addresses: 53 bits on JavaScript (§3.1) | the JavaScript back end represents them as numbers, which hold integers exactly to 53 bits |
 | A key looked up with a literal takes the map's key type before the literal's defaults (§4.1) | `spans.get({ start: 1, end: 2 })` failed: the fields defaulted to `i32` |
 | A call's result holds a borrow of an argument's place only if its declared type can hold a borrow itself, not only through a type argument (§4.1) | `const step = match (self.state.take()) { … }` kept `self.state` lent `mut` while `step` lived, so the state could not be put back: §5.5's own `generate` was rejected |
@@ -297,7 +299,7 @@ Type checking happens after `comptime` evaluation and uses bidirectional local i
 - **Recursion.** A function that is called again while its effects are being inferred — itself, or through others — is assumed pure there; if its body then performs an effect, it must state its effects with `uses`.
 - **Expected types flow inward**: into blocks and their last expression, into the branches of `if`, `match`, `try`, `region` and `handle`, into a lambda's body from the function type expected of it, and into calls. A call checked against an expected type unifies the callee's instantiated return type with it *before* checking the arguments. This is how `alloc({ user, token })` in a function returning `Ref<Request>` builds a `Request` rather than an anonymous record.
 - With nothing expected — or only a type variable, as a closure's result is — the branches of an `if` or `match` after the first are checked against the first's type, and branches whose value is a bare tag (`#Leaf`, `#A(x)`) go last, so they are built as the other branches' type: `(t) => match (m) { #Some(_) => #Wrap(Box.new(t)), _ => t }` builds `#Wrap` as the type of `t`.
-- `break`, `continue`, `return` and `throw` have type `never`, which fits any expected type. So does a `while (true)` loop with no `break` of its own: it is left only by `return` or a failure, so it may end a function that returns a value, as in TypeScript.
+- `break`, `continue`, `return` and `throw` have type `never`, which fits any expected type. So does a `while (true)` loop with no `break` of its own: it is left only by `return` or a failure, so it may end a function that returns a value, as in TypeScript. A type nothing constrains is `never` too: the result type of a closure that only throws, or of a call of one, is that of a value never made.
 - There is no global Hindley–Milner inference: errors stay local, and `comptime`, regions and interfaces stay decidable.
 
 ---
@@ -719,13 +721,16 @@ interface ParSplit {
   function viewAt(s: Self.Slice, i: usize): Self.View from s;
   function readAt(self: readonly Self, i: usize): Self.ReadView from self;
 }
+function join<A extends Send, B extends Send>(a: once () => A, b: once () => B): [A, B];
 function par<C extends ParSplit>(c: mut C, f: (v: C.View, i: usize) => void): void;
 function parReduce<C extends ParSplit, A extends Send>(
   c: readonly C, zero: A, one: (v: C.ReadView, i: usize) => A, both: (a: A, b: A) => A,
 ): A;
 ```
 
-`par` borrows its container once into a `Slice` and divides it with `split`, which consumes a slice and returns two disjoint ones — the borrow rules prove them disjoint, so the halves can go to different workers — down to single elements, each lent to `f` by `viewAt`. `f` is shared, so it cannot change anything it captures, and has no effects: it cannot race. `parReduce` only reads, so its workers share the container `readonly` and read elements with `readAt`; `both` must be associative. Slices, arrays and `Vec`s split as `mut T[]`, with `View = mut T` and `ReadView = readonly T`; `Soa<T>` splits all its planes at once (§7.4). The elements go to different workers, so every impl requires them to be `Send`. The prototype runs the halves in order.
+`par` borrows its container once into a `Slice` and divides it with `split`, which consumes a slice and returns two disjoint ones — the borrow rules prove them disjoint, so the halves can go to different workers — down to single elements, each lent to `f` by `viewAt`. `f` is shared, so it cannot change anything it captures, and has no effects: it cannot race. `parReduce` only reads, so its workers share the container `readonly` and read elements with `readAt`; `both` must be associative. Slices, arrays and `Vec`s split as `mut T[]`, with `View = mut T` and `ReadView = readonly T`; `Soa<T>` splits all its planes at once (§7.4). The elements go to different workers, so every impl requires them to be `Send`.
+
+`join(a, b)` runs both closures and gives both results. They are pure, so whether they run one after the other or at once cannot be seen; what they capture must be `Send`, since either may run on another core. `par` and `parReduce` divide their work with it, and so may any program. Native code runs it on a work-stealing pool, a worker for each core: the second closure is offered to idle workers while the first runs, and taken back if none took it, so splitting where no core is free costs little more than a call. Elsewhere — the prototype, JavaScript, a simulated world — the two run in order.
 
 ---
 
@@ -913,7 +918,7 @@ A foreign call runs on the worker thread's native stack, not on the task's growa
 
 ### 8.3 Targets
 
-- **Native** (x86-64, AArch64): tasks are stackful fibers scheduled by the runtime over `io_uring` or `kqueue`. Native code is made through C, or through LLVM: the program's functions as LLVM IR, with debug information mapping each instruction to its line and each variable to its value, linked with the runtime's C and optimized with it as one program. Through LLVM a program reaches every target LLVM has; a freestanding one too.
+- **Native** (x86-64, AArch64): tasks are stackful fibers, run on a worker thread for each core. A task not yet begun is any worker's to take, and an idle worker steals one from a busy one; once begun, a task resumes on the worker it began on, which keeps what code reads of the running task — the failure being raised, whether it unwinds — its thread's. A task that waits gives its worker to others. Run against a simulated world (§6.4), the same program runs its tasks one at a time, in the order the seed chooses. Native code is made through C, or through LLVM: the program's functions as LLVM IR, with debug information mapping each instruction to its line and each variable to its value, linked with the runtime's C and optimized with it as one program. Through LLVM a program reaches every target LLVM has; a freestanding one too.
 - **Freestanding** (a kernel, firmware): no operating system and no C library. The program's roots are its `export extern "C"` functions, it has no `main` and no `Io`, and it supplies three functions the runtime calls: `fly_os_alloc(size, align)` for memory, `fly_os_free(p)`, and `fly_os_panic(message, len)`, which does not return. Everything else — failures, regions, `defer`, generators, effect handlers and their fibers — works unchanged, with fiber stacks from `fly_os_alloc`.
 - **WebAssembly**: a program is compiled through C for WASI. A fiber — a task, a `handle`'s body, a generator — runs on a stack of its own in linear memory, so what it lent stays where it is while it is suspended, and the host switches between fibers by JavaScript promise integration (later, the stack-switching proposal). The root `Io` handler maps to WASI, or to the host's promises. Without threads, `par` runs sequentially with the same semantics.
 

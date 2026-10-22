@@ -702,6 +702,9 @@ const { $rt, $b } = (() => {
     File_readText: (r) => r.v.text,
     *File_lines(r) { yield* $b.str_lines(r.v.text); },
 
+    // `std/par`'s two pure halves, one after the other: the order cannot be seen.
+    join: (a, b) => [a(), b()],
+
     // ---- tasks and channels: generators, as they are scheduling points ----
     *Io_scope$g(f) {
       const sid = sched.scopeIds++;

@@ -1,0 +1,22 @@
+// expect: 10000 round trips, last answer 20000
+// Two tasks answer each other through one-shot replies, back and forth across cores.
+import { println } from "std/io";
+import { channel, Reply, Pending } from "std/sync";
+
+export function main(): void uses Io {
+  const [tx, rx] = channel<[u64, Reply<u64>]>();
+  const last = Io.scope((s) => {
+    s.spawn(() => {
+      for (const [n, reply] of rx) { reply.send(n * 2); }
+    });
+    let answer: u64 = 0;
+    for (const i of 1..10001) {
+      const [reply, pending] = Reply.new<u64>();
+      tx.send([i as u64, reply]);
+      answer = pending.wait();
+    }
+    tx.close();
+    answer
+  });
+  println(`10000 round trips, last answer ${last}`);
+}

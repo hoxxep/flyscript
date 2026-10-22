@@ -40,6 +40,16 @@ void fly_mem_free(void* p);
 
 typedef uint8_t fly_unit;
 
+// A program that starts tasks runs them on every core, unless it runs against a simulated world
+// (§6.4): what code reads of the task running — its failure, whether it unwinds — is then its
+// thread's, and the scheduler keeps it for each task while another runs.
+#if defined(FLY_TASKS) && !defined(FLY_FREESTANDING) && !defined(__wasm__)
+#define FLY_THREADS 1
+#define FLY_LOCAL _Thread_local
+#else
+#define FLY_LOCAL
+#endif
+
 // A function of C's is declared under a name of the program's, bound to its own symbol.
 #define FLY_XSTR(x) #x
 #define FLY_STR(x) FLY_XSTR(x)
@@ -57,7 +67,7 @@ typedef struct { void* env; void (*drop)(void*); void* fn; } fly_fn;
 
 // The failure being raised, if any: what was thrown, boxed. A function that may fail returns with
 // this set; its caller checks it after the call.
-extern void* fly_err;
+extern FLY_LOCAL void* fly_err;
 #define FLY_FAILED (fly_err != NULL)
 
 // What was thrown, boxed: its tag, for a value of a union, and the bytes of its payload, or of
@@ -164,7 +174,7 @@ uint64_t fly_Hasher_finish(const fly_Hasher* h);
 // says whether it wants another. One that does not makes the generator stop: it sets
 // `fly_stopping` and unwinds, and the loop that started it clears it.
 typedef struct { void* env; bool (*fn)(void* env, void* item); } fly_yield;
-extern bool fly_stopping;
+extern FLY_LOCAL bool fly_stopping;
 
 // A generator pulled for its items: its state, what makes its next item (false at the end), and
 // what drops it. The compiler makes `next` for each kind of item.
@@ -214,10 +224,10 @@ struct fly_handler {
   fly_fiber* suspended;
 };
 // The handlers in force, innermost first.
-extern fly_handler* fly_handlers;
+extern FLY_LOCAL fly_handler* fly_handlers;
 // Set while a computation whose continuation was dropped unwinds: every call that may suspend
 // leaves through its function's way out when it sees it.
-extern bool fly_unwinding;
+extern FLY_LOCAL bool fly_unwinding;
 void fly_perform(uint32_t effect, int op, void* args, void* result);
 // Cleanup — a `defer`, a destructor — runs to its end however its block is left: what is
 // unwinding past it is set aside while it runs, so its own failures, loops and handlers work,
@@ -253,13 +263,23 @@ bool fly_world_accept(fly_str* input);
 bool fly_world_profile(fly_str user, fly_str* name);
 bool fly_world_quota(fly_str token);
 
-// Tasks: one runs at a time, and at each scheduling point the next is chosen by a seeded
-// generator, as the reference's scheduler does, so a seed reproduces an interleaving.
-// `fly_tasks_run` runs `main` as the first task, on the main stack's behalf.
+// Tasks. Against a simulated world one runs at a time, and at each scheduling point the next is
+// chosen by a seeded generator, as the reference's scheduler does, so a seed reproduces an
+// interleaving. Otherwise they run on a worker thread for each core. `fly_tasks_run` runs `main`
+// as the first task, on the main stack's behalf.
 extern bool fly_tasks_on;
 void fly_tasks_run(void (*main)(void));
 void fly_point(void);
 void fly_sleep(uint64_t nanos);
+// The time: the simulated world's clock, or the machine's monotonic one, in nanoseconds.
+uint64_t fly_now(void);
+// A `Mutex`'s lock, by the address of its state. The body it guards performs nothing, so it holds
+// no other lock and does not suspend while it holds this one.
+void fly_lock(const void* state);
+void fly_unlock(const void* state);
+// `join(a, b)` of `std/par`: both run, maybe at once on two cores, each putting its result where
+// its `out` points; each is pure, so the order cannot be seen.
+void fly_par_join(void (*a)(void* f, void* out), void* fa, void* oa, void (*b)(void* f, void* out), void* fb, void* ob);
 // A task's outcome: its value (`size` bytes), or its failure.
 int fly_spawn(int scope, void (*entry)(void* task, void* closure), void* closure, size_t size);
 void* fly_task_result(void* task);

@@ -5,12 +5,13 @@
 #include <stdarg.h>
 #ifndef FLY_FREESTANDING
 #include <math.h>
+#include <time.h>
 #ifndef __wasm__
 #include <sys/mman.h>
 #endif
 #endif
 
-void* fly_err = NULL;
+FLY_LOCAL void* fly_err = NULL;
 
 typedef struct { uint32_t tag; size_t size; uint8_t data[]; } fly_failure;
 
@@ -147,8 +148,9 @@ void* fly_arc_new(size_t size) {
   p[0] = 1;
   return (uint8_t*)p + 16;
 }
-void* fly_arc_retain(void* p) { ((long*)((uint8_t*)p - 16))[0]++; return p; }
-bool fly_arc_release(void* p) { return --((long*)((uint8_t*)p - 16))[0] == 0; }
+// The count is shared by the tasks that share the value, on whichever cores they run.
+void* fly_arc_retain(void* p) { __atomic_fetch_add((long*)((uint8_t*)p - 16), 1, __ATOMIC_RELAXED); return p; }
+bool fly_arc_release(void* p) { return __atomic_sub_fetch((long*)((uint8_t*)p - 16), 1, __ATOMIC_ACQ_REL) == 0; }
 void fly_arc_free(void* p) { free((uint8_t*)p - 16); }
 
 void* fly_box(const void* value, size_t size) {
@@ -707,7 +709,7 @@ uint64_t fly_Hasher_finish(const fly_Hasher* h) { return h->h; }
 
 // ---- generators ----
 
-bool fly_stopping = false;
+FLY_LOCAL bool fly_stopping = false;
 
 void* fly_iter_new(void* base, size_t len, size_t stride) {
   fly_iter* it = fly_alloc(sizeof(fly_iter));
@@ -758,10 +760,27 @@ void fly_gzip_drop(void* s) { fly_gen_drop(&((fly_gzip*)s)->a); fly_gen_drop(&((
 void __sanitizer_start_switch_fiber(void** fake_stack_save, const void* bottom, size_t size);
 void __sanitizer_finish_switch_fiber(void* fake_stack_save, const void** bottom_old, size_t* size_old);
 #endif
+// The thread sanitizer follows fibers as threads of its own.
+#if defined(__has_feature)
+#if __has_feature(thread_sanitizer)
+#define FLY_TSAN 1
+#endif
+#endif
+#if defined(__SANITIZE_THREAD__)
+#define FLY_TSAN 1
+#endif
+#ifdef FLY_TSAN
+void* __tsan_get_current_fiber(void);
+void* __tsan_create_fiber(unsigned flags);
+void __tsan_destroy_fiber(void* fiber);
+void __tsan_switch_to_fiber(void* fiber, unsigned flags);
+#endif
 
 struct fly_fiber {
   // Whether the fiber ended in a panic: it stops where it panicked, never to run again.
   bool panicked;
+  // Whether it is a thread's own stack, which a panic cannot leave.
+  bool base;
   void* sp;
   void* stack;
   size_t size;
@@ -770,12 +789,15 @@ struct fly_fiber {
   fly_fiber* back;
   fly_handler* handlers;
   bool done;
+#ifdef FLY_TSAN
+  void* tsan;
+#endif
 };
 
-static fly_fiber main_fiber;
-static fly_fiber* current = &main_fiber;
-fly_handler* fly_handlers = NULL;
-bool fly_unwinding = false;
+static fly_fiber main_fiber = { .base = true };
+static FLY_LOCAL fly_fiber* current = &main_fiber;
+FLY_LOCAL fly_handler* fly_handlers = NULL;
+FLY_LOCAL bool fly_unwinding = false;
 
 void fly_switch(void** save, void* to);
 void fly_fiber_trampoline(void);
@@ -834,6 +856,10 @@ static void switch_to(fly_fiber* to) {
   __sanitizer_start_switch_fiber(from->done ? NULL : &fake, to->stack, to->size);
   fly_switch(&from->sp, to->sp);
   __sanitizer_finish_switch_fiber(fake, NULL, NULL);
+#elif defined(FLY_TSAN)
+  if (!from->tsan) from->tsan = __tsan_get_current_fiber();
+  __tsan_switch_to_fiber(to->tsan, 0);
+  fly_switch(&from->sp, to->sp);
 #elif defined(__wasm__)
   fly_host_switch(from, to);
 #else
@@ -842,18 +868,20 @@ static void switch_to(fly_fiber* to) {
 }
 
 // The panic unwinding, until whoever started the fiber it began on takes it up.
-static char* panicking = NULL;
+static FLY_LOCAL char* panicking = NULL;
+// The `Mutex` lock this thread holds, if any: a panic in its body gives it back.
+static void unlock_held(void);
 
 void fly_fiber_start(fly_fiber* f) {
 #ifdef FLY_ASAN
-  // The first fiber to start was switched to from the main stack, whose bounds the sanitizer
-  // reports here: what switching back to it says.
+  // The first fiber a thread starts is switched to from the thread's own stack, whose bounds the
+  // sanitizer reports here: what switching back to it says.
   const void* bottom;
   size_t size;
   __sanitizer_finish_switch_fiber(NULL, &bottom, &size);
-  if (!main_fiber.stack) {
-    main_fiber.stack = (void*)bottom;
-    main_fiber.size = size;
+  if (f->back->base && !f->back->stack) {
+    f->back->stack = (void*)bottom;
+    f->back->size = size;
   }
 #endif
   f->entry(f->arg);
@@ -862,7 +890,8 @@ void fly_fiber_start(fly_fiber* f) {
 }
 
 static _Noreturn void fiber_panic(const char* message) {
-  if (current == &main_fiber) panic_exit(message);
+  unlock_held();
+  if (current->base) panic_exit(message);
   if (!panicking) {
     size_t n = strlen(message);
     panicking = malloc(n + 1);
@@ -890,14 +919,26 @@ static void* stack_new(size_t size) {
 }
 static void stack_free(void* p, size_t size) { (void)size; free(p); }
 #else
-// Stacks are reserved large and committed as they are touched.
+// Stacks are reserved large and committed as they are touched. A thread keeps a few it is done
+// with, for the fibers it starts next.
 #define FLY_STACK (64u << 20)
+// The sanitizers keep what they knew of a stack's last frames, so under them none is kept.
+#if defined(FLY_ASAN) || defined(FLY_TSAN)
+enum { STACK_POOL = 0 };
+#else
+enum { STACK_POOL = 16 };
+#endif
+static FLY_LOCAL struct { void* stacks[STACK_POOL + 1]; int n; } stack_pool;
 static void* stack_new(size_t size) {
+  if (stack_pool.n > 0) return stack_pool.stacks[--stack_pool.n];
   void* p = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON | MAP_NORESERVE, -1, 0);
   if (p == MAP_FAILED) fly_panic("out of memory");
   return p;
 }
-static void stack_free(void* p, size_t size) { munmap(p, size); }
+static void stack_free(void* p, size_t size) {
+  if (stack_pool.n < STACK_POOL) stack_pool.stacks[stack_pool.n++] = p;
+  else munmap(p, size);
+}
 #endif
 
 static fly_fiber* fiber_new(void (*entry)(void*), void* arg, fly_handler* handlers) {
@@ -907,6 +948,9 @@ static fly_fiber* fiber_new(void (*entry)(void*), void* arg, fly_handler* handle
   f->entry = entry;
   f->arg = arg;
   f->handlers = handlers;
+#ifdef FLY_TSAN
+  f->tsan = __tsan_create_fiber(0);
+#endif
 #ifndef __wasm__
   // Otherwise the host starts it at the top of its stack.
   uintptr_t top = ((uintptr_t)f->stack + f->size) & ~(uintptr_t)15;
@@ -922,6 +966,9 @@ static fly_fiber* fiber_new(void (*entry)(void*), void* arg, fly_handler* handle
 static void fiber_free(fly_fiber* f) {
 #ifdef __wasm__
   fly_host_free(f);
+#endif
+#ifdef FLY_TSAN
+  __tsan_destroy_fiber(f->tsan);
 #endif
   stack_free(f->stack, f->size);
   free(f);
@@ -1069,6 +1116,8 @@ static struct {
   world_pair* quotas;
   size_t nquotas;
   uint64_t faults, seed;
+  // Whether there is a world to simulate: otherwise time is the machine's, and tasks its cores'.
+  bool simulated;
 } world;
 uint64_t fly_clock = 0;
 static uint64_t fault_rng;
@@ -1147,6 +1196,7 @@ static void world_load(void) {
   world.loaded = true;
   world.seed = 0x5eed;
   const char* w = getenv("FLY_WORLD");
+  world.simulated = w != NULL;
   if (w && *w) {
     json_at = w;
     json_space();
@@ -1198,14 +1248,23 @@ static uint64_t xorshift(uint64_t* r) {
 
 bool fly_fault(void) {
   world_load();
-  return xorshift(&fault_rng) % 100 < world.faults;
+  return world.faults > 0 && xorshift(&fault_rng) % 100 < world.faults;
 }
 
 bool fly_world_accept(fly_str* input) {
   world_load();
-  if (world.accepted >= world.nincoming) return false;
-  *input = world.incoming[world.accepted++];
+  size_t i = __atomic_fetch_add(&world.accepted, 1, __ATOMIC_RELAXED);
+  if (i >= world.nincoming) return false;
+  *input = world.incoming[i];
   return true;
+}
+
+uint64_t fly_now(void) {
+  world_load();
+  if (world.simulated) return fly_clock;
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return (uint64_t)ts.tv_sec * 1000000000u + (uint64_t)ts.tv_nsec;
 }
 
 bool fly_world_profile(fly_str user, fly_str* name) {
@@ -1225,6 +1284,27 @@ bool fly_world_quota(fly_str token) {
 }
 
 // ---- tasks ----
+
+#ifdef FLY_THREADS
+// The scheduler on every core, below: what the functions compiled code calls turn to without a
+// simulated world.
+static bool threads;
+static void mt_run(void (*main)(void), void (*entry)(void* task, void* closure));
+static void mt_point(void);
+static void mt_sleep(uint64_t nanos);
+static int mt_spawn(int scope, void (*entry)(void* task, void* closure), void* closure, size_t size);
+static void mt_join(int task, void* out);
+static int mt_scope_open(void);
+static void mt_scope_close(int scope);
+static fly_chan mt_channel(void);
+static void mt_send(fly_chan ch, const void* v, size_t size);
+static bool mt_recv(fly_chan ch, void* out, size_t size);
+static void mt_sender_gone(fly_chan ch);
+static void mt_sender_clone(fly_chan ch);
+typedef struct mt_task mt_task;
+static void* mt_task_result(mt_task* t);
+static void* mt_task_closure(mt_task* t);
+#endif
 
 enum { WAIT_NONE, WAIT_TASK, WAIT_CHANNEL, WAIT_UNTIL };
 
@@ -1369,11 +1449,24 @@ static void suspend_task(int kind, int id) {
 }
 
 void fly_point(void) {
+#ifdef FLY_THREADS
+  if (threads) { mt_point(); return; }
+#endif
   if (fly_tasks_on) suspend_task(WAIT_NONE, 0);
 }
 
-// Sleeping waits for the virtual clock, which passes only when no task can run.
+// Sleeping waits for the virtual clock, which passes only when no task can run; without a
+// simulated world, for the machine's.
 void fly_sleep(uint64_t nanos) {
+#ifdef FLY_THREADS
+  if (threads) { mt_sleep(nanos); return; }
+#endif
+  world_load();
+  if (!world.simulated) {
+    struct timespec ts = { (time_t)(nanos / 1000000000u), (long)(nanos % 1000000000u) };
+    while (nanosleep(&ts, &ts) != 0) {}
+    return;
+  }
   if (!fly_tasks_on) { fly_clock += nanos; return; }
   if (nanos == 0) { fly_point(); return; }
   sched.tasks[sched.current]->until = fly_clock + nanos;
@@ -1414,6 +1507,9 @@ static void main_entry(void* task, void* closure) { (void)task; ((void (*)(void)
 void fly_tasks_run(void (*main)(void)) {
   fly_tasks_on = true;
   world_load();
+#ifdef FLY_THREADS
+  if (!world.simulated) { mt_run(main, main_entry); return; }
+#endif
   sched.rng = world.seed > 1 ? world.seed : 1;
   grow_ids(0);
   task_t* t0 = fly_alloc(sizeof(task_t));
@@ -1469,6 +1565,9 @@ void fly_tasks_run(void (*main)(void)) {
 }
 
 int fly_spawn(int scope, void (*entry)(void* task, void* closure), void* closure, size_t size) {
+#ifdef FLY_THREADS
+  if (threads) return mt_spawn(scope, entry, closure, size);
+#endif
   int id = sched.next++;
   grow_ids(id);
   task_t* t = fly_alloc(sizeof(task_t));
@@ -1495,8 +1594,18 @@ void fly_task_void(void* task, void* closure) {
   free(f);
 }
 
-void* fly_task_result(void* task) { return ((task_t*)task)->result; }
-void* fly_task_closure(void* task) { return ((task_t*)task)->closure; }
+void* fly_task_result(void* task) {
+#ifdef FLY_THREADS
+  if (threads) return mt_task_result(task);
+#endif
+  return ((task_t*)task)->result;
+}
+void* fly_task_closure(void* task) {
+#ifdef FLY_THREADS
+  if (threads) return mt_task_closure(task);
+#endif
+  return ((task_t*)task)->closure;
+}
 
 static void join_task(int task) {
   if (!sched.tasks[task]->finished) block(WAIT_TASK, task);
@@ -1504,6 +1613,9 @@ static void join_task(int task) {
 
 // A forked task's value, or its failure, raised.
 void fly_join(int task, void* out) {
+#ifdef FLY_THREADS
+  if (threads) { mt_join(task, out); return; }
+#endif
   join_task(task);
   if (fly_unwinding) return;
   task_t* t = sched.tasks[task];
@@ -1519,6 +1631,9 @@ void fly_join(int task, void* out) {
 }
 
 int fly_scope_open(void) {
+#ifdef FLY_THREADS
+  if (threads) return mt_scope_open();
+#endif
   int sid = sched.scope_ids++;
   if ((size_t)sid >= sched.capscopes) {
     size_t cap = sched.capscopes ? sched.capscopes * 2 : 16;
@@ -1536,6 +1651,9 @@ int fly_scope_open(void) {
 // the scope fails as its body or its first failed task did (§6.1).
 void fly_scope_close(int sid, bool body_failed) {
   (void)body_failed;
+#ifdef FLY_THREADS
+  if (threads) { mt_scope_close(sid); return; }
+#endif
   scope_t* st = sched.scopes[sid];
   task_t* me = sched.tasks[sched.current];
   // The body unwound because a task failed or panicked: the scope raises that instead.
@@ -1562,6 +1680,9 @@ void fly_scope_close(int sid, bool body_failed) {
 // ---- channels ----
 
 fly_chan fly_channel(void) {
+#ifdef FLY_THREADS
+  if (threads) return mt_channel();
+#endif
   int id = sched.next++;
   grow_ids(id);
   chan_t* c = fly_alloc(sizeof(chan_t));
@@ -1571,6 +1692,9 @@ fly_chan fly_channel(void) {
 }
 
 void fly_send(fly_chan ch, const void* v, size_t size) {
+#ifdef FLY_THREADS
+  if (threads) { mt_send(ch, v, size); return; }
+#endif
   chan_t* c = sched.chans[ch.ch];
   c->size = size;
   c->items = realloc(c->items, (c->len + 1) * (size ? size : 1));
@@ -1582,6 +1706,9 @@ void fly_send(fly_chan ch, const void* v, size_t size) {
 
 // The next message, or false once the channel is closed and drained (or the task unwinds).
 bool fly_recv(fly_chan ch, void* out, size_t size) {
+#ifdef FLY_THREADS
+  if (threads) return mt_recv(ch, out, size);
+#endif
   for (;;) {
     chan_t* c = sched.chans[ch.ch];
     if (c->head < c->len) {
@@ -1601,21 +1728,910 @@ static void sender_gone(chan_t* c, int id) {
 }
 
 void fly_close(fly_chan ch) {
+#ifdef FLY_THREADS
+  if (threads) { mt_sender_gone(ch); mt_point(); return; }
+#endif
   sender_gone(sched.chans[ch.ch], ch.ch);
   fly_point();
 }
 
 // A destructor does not suspend: a sender dropped closes its channel then and there.
 void fly_sender_drop(fly_chan* ch) {
+#ifdef FLY_THREADS
+  if (threads) { if (ch->ch) mt_sender_gone(*ch); ch->ch = 0; return; }
+#endif
   if (ch->ch) sender_gone(sched.chans[ch->ch], ch->ch);
   ch->ch = 0;
 }
 
 fly_chan fly_sender_clone(const fly_chan* ch) {
+#ifdef FLY_THREADS
+  if (threads) { mt_sender_clone(*ch); return *ch; }
+#endif
   sched.chans[ch->ch]->senders++;
   return *ch;
 }
 
+// ---- tasks on every core ----
+//
+// Without a simulated world, tasks run on a worker thread for each core. A task not yet started is
+// any worker's: each keeps the tasks started on it in a deque the others steal from when they have
+// nothing to do. Once started, a task stays on its worker: compiled code may keep the address of a
+// thread's variable — the failure being raised, whether it unwinds — across a call that suspends,
+// so a task resumed on another thread would read that thread's. A task waits by parking: it puts
+// itself in the queue of what it waits for, under that queue's lock, and its worker runs others;
+// whatever ends the wait moves it to its worker's inbox.
+
+#ifdef FLY_THREADS
+#include <pthread.h>
+#include <sched.h>
+#include <unistd.h>
+
+static bool threads = false;
+
+// A lock held for a few instructions at a time.
+typedef struct { int v; } spin_t;
+
+static inline void relax(void) {
+#if defined(__aarch64__) || defined(__arm64__)
+  __asm__ volatile("yield");
+#elif defined(__x86_64__)
+  __asm__ volatile("pause");
+#endif
+}
+
+static void spin_lock(spin_t* l) {
+  unsigned n = 0;
+  while (__atomic_exchange_n(&l->v, 1, __ATOMIC_ACQUIRE)) {
+    while (__atomic_load_n(&l->v, __ATOMIC_RELAXED)) {
+      if (++n < 128) relax(); else sched_yield();
+    }
+  }
+}
+
+static void spin_unlock(spin_t* l) { __atomic_store_n(&l->v, 0, __ATOMIC_RELEASE); }
+
+static uint64_t now_ns(void) {
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return (uint64_t)ts.tv_sec * 1000000000u + (uint64_t)ts.tv_nsec;
+}
+
+// ---- what compiled code names by number ----
+
+// Tasks, scopes and channels are numbers in compiled code. The table they are found in grows in
+// chunks that never move, so a thread may read it while another adds to it.
+enum { OBJ_BITS = 12, OBJ_CHUNK = 1 << OBJ_BITS, OBJ_CHUNKS = 1 << 18 };
+static void** objs[OBJ_CHUNKS];
+static int obj_count = 1;
+
+static int obj_new(void* p) {
+  int id = __atomic_fetch_add(&obj_count, 1, __ATOMIC_RELAXED);
+  if (id >> OBJ_BITS >= OBJ_CHUNKS) fly_panic("too many tasks, scopes and channels");
+  void*** slot = &objs[id >> OBJ_BITS];
+  void** chunk = __atomic_load_n(slot, __ATOMIC_ACQUIRE);
+  if (!chunk) {
+    void** made = fly_alloc(OBJ_CHUNK * sizeof(void*));
+    void** seen = NULL;
+    if (__atomic_compare_exchange_n(slot, &seen, made, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) chunk = made;
+    else { free(made); chunk = seen; }
+  }
+  __atomic_store_n(&chunk[id & (OBJ_CHUNK - 1)], p, __ATOMIC_RELEASE);
+  return id;
+}
+
+static void* obj_get(int id) { return __atomic_load_n(&objs[id >> OBJ_BITS][id & (OBJ_CHUNK - 1)], __ATOMIC_ACQUIRE); }
+static void obj_clear(int id) { __atomic_store_n(&objs[id >> OBJ_BITS][id & (OBJ_CHUNK - 1)], NULL, __ATOMIC_RELEASE); }
+
+// ---- deques ----
+
+// A work-stealing deque (Chase and Lev, in Lê et al.'s form for weak memory): its owner pushes and
+// pops at the bottom, others steal from the top. A buffer outgrown stays allocated, as a thief may
+// still be reading it.
+typedef struct dq_buf { long cap; struct dq_buf* old; void* items[]; } dq_buf;
+typedef struct { long top, bottom; dq_buf* buf; } deque_t;
+
+static dq_buf* dq_buf_new(long cap, dq_buf* old) {
+  dq_buf* b = fly_alloc(sizeof(dq_buf) + (size_t)cap * sizeof(void*));
+  b->cap = cap;
+  b->old = old;
+  return b;
+}
+
+static void dq_push(deque_t* d, void* x) {
+  long b = __atomic_load_n(&d->bottom, __ATOMIC_RELAXED);
+  long t = __atomic_load_n(&d->top, __ATOMIC_ACQUIRE);
+  dq_buf* a = __atomic_load_n(&d->buf, __ATOMIC_RELAXED);
+  if (b - t > a->cap - 1) {
+    dq_buf* g = dq_buf_new(a->cap * 2, a);
+    for (long i = t; i < b; i++) __atomic_store_n(&g->items[i & (g->cap - 1)], __atomic_load_n(&a->items[i & (a->cap - 1)], __ATOMIC_RELAXED), __ATOMIC_RELAXED);
+    __atomic_store_n(&d->buf, g, __ATOMIC_RELEASE);
+    a = g;
+  }
+  __atomic_store_n(&a->items[b & (a->cap - 1)], x, __ATOMIC_RELAXED);
+  // Released with the item, for a thief that reads `bottom` to see what it takes.
+  __atomic_store_n(&d->bottom, b + 1, __ATOMIC_RELEASE);
+}
+
+static void* dq_pop(deque_t* d) {
+  long b = __atomic_load_n(&d->bottom, __ATOMIC_RELAXED) - 1;
+  dq_buf* a = __atomic_load_n(&d->buf, __ATOMIC_RELAXED);
+  __atomic_store_n(&d->bottom, b, __ATOMIC_RELAXED);
+  __atomic_thread_fence(__ATOMIC_SEQ_CST);
+  long t = __atomic_load_n(&d->top, __ATOMIC_RELAXED);
+  void* x = NULL;
+  if (t <= b) {
+    x = __atomic_load_n(&a->items[b & (a->cap - 1)], __ATOMIC_RELAXED);
+    if (t == b) {
+      if (!__atomic_compare_exchange_n(&d->top, &t, t + 1, false, __ATOMIC_SEQ_CST, __ATOMIC_RELAXED)) x = NULL;
+      __atomic_store_n(&d->bottom, b + 1, __ATOMIC_RELAXED);
+    }
+  } else {
+    __atomic_store_n(&d->bottom, b + 1, __ATOMIC_RELAXED);
+  }
+  return x;
+}
+
+static void* dq_steal(deque_t* d) {
+  long t = __atomic_load_n(&d->top, __ATOMIC_ACQUIRE);
+  __atomic_thread_fence(__ATOMIC_SEQ_CST);
+  long b = __atomic_load_n(&d->bottom, __ATOMIC_ACQUIRE);
+  if (t >= b) return NULL;
+  dq_buf* a = __atomic_load_n(&d->buf, __ATOMIC_ACQUIRE);
+  void* x = __atomic_load_n(&a->items[t & (a->cap - 1)], __ATOMIC_RELAXED);
+  if (!__atomic_compare_exchange_n(&d->top, &t, t + 1, false, __ATOMIC_SEQ_CST, __ATOMIC_RELAXED)) return NULL;
+  return x;
+}
+
+static long dq_size(deque_t* d) {
+  long b = __atomic_load_n(&d->bottom, __ATOMIC_ACQUIRE);
+  long t = __atomic_load_n(&d->top, __ATOMIC_ACQUIRE);
+  return b > t ? b - t : 0;
+}
+
+// ---- tasks, scopes, channels ----
+
+typedef struct mt_task mt_task;
+typedef struct mt_scope mt_scope;
+typedef struct worker worker;
+
+// The tasks waiting for something, in the order they began to, under the queue's lock.
+typedef struct { spin_t lock; mt_task *head, *tail; } waitq;
+
+struct mt_task {
+  void (*entry)(void* task, void* closure);
+  void* closure;
+  void* result;
+  size_t size;
+  mt_scope* scope;
+  worker* home;
+  fly_fiber* fiber;
+  fly_fiber* suspended;
+  // How it ended: its failure, or the panic it ended with.
+  fly_failure* error;
+  char* panic;
+  // Who still refers to it: itself while it lives, its scope while it does, and a forked task's
+  // `Fiber` until it is joined.
+  int refs;
+  bool started, cancelled, yielded;
+  // Its joiners, and whether it has finished, under their queue's lock.
+  waitq joiners;
+  bool finished;
+  // The queue it waits in, if it waits, and its neighbours there.
+  waitq* waiting;
+  mt_task *wnext, *wprev;
+  // Its neighbours among its scope's tasks still alive.
+  mt_task *snext, *sprev;
+  // The next task in its worker's inbox.
+  mt_task* rnext;
+  // What compiled code reads of the task, kept while another runs.
+  void* err;
+  bool unwinding, stopping;
+  uint64_t sleep_gen;
+};
+
+// A scope: its tasks still alive, and how it fails. Its queue holds its owner while the owner waits
+// for them at the scope's end; the queue's lock guards it all.
+struct mt_scope {
+  waitq q;
+  mt_task* owner;
+  mt_task* live;
+  size_t nlive;
+  bool closing;
+  // The task whose failure the scope raises, unless a join raises it first; the first panic.
+  mt_task* failer;
+  char* panic;
+};
+
+// A channel: what was sent and not yet received, in a ring, and the receivers waiting, under its
+// queue's lock.
+typedef struct { waitq q; uint8_t* items; size_t head, len, cap, size; long senders; bool closed; } mt_chan;
+
+struct worker {
+  int index;
+  fly_fiber own;
+  fly_fiber* base;
+  // Tasks to resume here, from any thread.
+  spin_t inlock;
+  mt_task *inhead, *intail;
+  // Tasks started here that have not begun, and `par` work: either is any worker's to take.
+  deque_t fresh, jobs;
+  uint64_t rng;
+};
+
+static worker* workers;
+static int nworkers;
+static FLY_LOCAL worker* this_worker;
+static FLY_LOCAL mt_task* running;
+static mt_task* main_task;
+static bool main_done;
+// Tasks queued or running, and tasks begun and not ended: when none can run, and none sleeps, those
+// alive wait for each other forever.
+static long runnable, alive;
+
+// Idle workers sleep here until there is work.
+static pthread_mutex_t idle_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t idle_cv = PTHREAD_COND_INITIALIZER;
+static int idlers;
+
+static void notify(void) {
+  __atomic_thread_fence(__ATOMIC_SEQ_CST);
+  if (__atomic_load_n(&idlers, __ATOMIC_SEQ_CST) == 0) return;
+  pthread_mutex_lock(&idle_mu);
+  pthread_cond_broadcast(&idle_cv);
+  pthread_mutex_unlock(&idle_mu);
+}
+
+static void task_unref(mt_task* t) {
+  if (__atomic_sub_fetch(&t->refs, 1, __ATOMIC_ACQ_REL) > 0) return;
+  free(t->result);
+  free(t->panic);
+  free(t);
+}
+
+static void inbox_push(worker* w, mt_task* t) {
+  t->rnext = NULL;
+  spin_lock(&w->inlock);
+  if (w->intail) w->intail->rnext = t;
+  else __atomic_store_n(&w->inhead, t, __ATOMIC_RELAXED);
+  w->intail = t;
+  spin_unlock(&w->inlock);
+}
+
+static mt_task* inbox_pop(worker* w) {
+  if (!__atomic_load_n(&w->inhead, __ATOMIC_RELAXED)) return NULL;
+  spin_lock(&w->inlock);
+  mt_task* t = w->inhead;
+  if (t) {
+    __atomic_store_n(&w->inhead, t->rnext, __ATOMIC_RELAXED);
+    if (!t->rnext) w->intail = NULL;
+  }
+  spin_unlock(&w->inlock);
+  return t;
+}
+
+// A task that waited may run again, on its own worker.
+static void unpark(mt_task* t) {
+  __atomic_fetch_add(&runnable, 1, __ATOMIC_SEQ_CST);
+  inbox_push(t->home, t);
+  notify();
+}
+
+static void q_append(waitq* q, mt_task* t) {
+  t->wnext = NULL;
+  t->wprev = q->tail;
+  if (q->tail) q->tail->wnext = t; else q->head = t;
+  q->tail = t;
+}
+
+static void q_remove(waitq* q, mt_task* t) {
+  if (t->wprev) t->wprev->wnext = t->wnext; else q->head = t->wnext;
+  if (t->wnext) t->wnext->wprev = t->wprev; else q->tail = t->wprev;
+  t->wnext = t->wprev = NULL;
+}
+
+// Wakes the first task waiting in `q`, whose lock is held.
+static void wake_one(waitq* q) {
+  mt_task* t = q->head;
+  if (!t) return;
+  q_remove(q, t);
+  __atomic_store_n(&t->waiting, NULL, __ATOMIC_SEQ_CST);
+  unpark(t);
+}
+
+static void wake_all(waitq* q) { while (q->head) wake_one(q); }
+
+// The running task gives its worker up, until it is resumed: what compiled code reads of it is kept.
+static void to_worker(mt_task* t) {
+  t->err = fly_err;
+  t->unwinding = fly_unwinding;
+  t->stopping = fly_stopping;
+  t->suspended = current;
+  switch_to(this_worker->base);
+}
+
+// The running task waits in `q`, whose lock is held, until something wakes it; a cancellation
+// wakes it too, unless it waits for its scope's tasks, which it must. The lock is released.
+static void wait_in(waitq* q, bool cancellable) {
+  mt_task* t = running;
+  q_append(q, t);
+  __atomic_store_n(&t->waiting, q, __ATOMIC_SEQ_CST);
+  if (cancellable && __atomic_load_n(&t->cancelled, __ATOMIC_SEQ_CST)) {
+    q_remove(q, t);
+    __atomic_store_n(&t->waiting, NULL, __ATOMIC_SEQ_CST);
+    spin_unlock(&q->lock);
+    return;
+  }
+  t->yielded = false;
+  __atomic_fetch_sub(&runnable, 1, __ATOMIC_SEQ_CST);
+  spin_unlock(&q->lock);
+  to_worker(t);
+}
+
+// Whether the running task has been cancelled: it unwinds from here (§6.1).
+static bool cancelled_here(void) {
+  mt_task* t = running;
+  if (t && __atomic_load_n(&t->cancelled, __ATOMIC_ACQUIRE)) {
+    fly_unwinding = true;
+    return true;
+  }
+  return false;
+}
+
+// Cancels a task: one running or queued sees it at its next scheduling point; one waiting is woken.
+static void cancel_task(mt_task* t) {
+  __atomic_store_n(&t->cancelled, true, __ATOMIC_SEQ_CST);
+  for (;;) {
+    waitq* q = __atomic_load_n(&t->waiting, __ATOMIC_SEQ_CST);
+    if (!q) return;
+    spin_lock(&q->lock);
+    if (__atomic_load_n(&t->waiting, __ATOMIC_SEQ_CST) == q) {
+      q_remove(q, t);
+      __atomic_store_n(&t->waiting, NULL, __ATOMIC_SEQ_CST);
+      spin_unlock(&q->lock);
+      unpark(t);
+      return;
+    }
+    spin_unlock(&q->lock);
+  }
+}
+
+// A scheduling point: a cancellation is delivered, and the worker's other tasks get a turn.
+static void mt_point(void) {
+  mt_task* t = running;
+  if (!t || cancelled_here()) return;
+  if (__atomic_load_n(&this_worker->inhead, __ATOMIC_RELAXED)) {
+    t->yielded = true;
+    to_worker(t);
+    cancelled_here();
+  }
+}
+
+// ---- sleeping ----
+
+// Sleeping tasks wait in one queue; when each wakes is kept in a heap, under the queue's lock. A
+// task woken early — cancelled — leaves its alarm behind, which then wakes nothing.
+typedef struct { uint64_t due, gen; mt_task* task; } alarm_t;
+static waitq sleepers;
+static alarm_t* alarms;
+static size_t nalarms, capalarms;
+static uint64_t next_due;
+
+static void alarm_push(alarm_t a) {
+  if (nalarms == capalarms) {
+    capalarms = capalarms ? capalarms * 2 : 16;
+    alarms = realloc(alarms, capalarms * sizeof(alarm_t));
+  }
+  size_t i = nalarms++;
+  while (i > 0 && alarms[(i - 1) / 2].due > a.due) { alarms[i] = alarms[(i - 1) / 2]; i = (i - 1) / 2; }
+  alarms[i] = a;
+}
+
+static alarm_t alarm_pop(void) {
+  alarm_t top = alarms[0], last = alarms[--nalarms];
+  size_t i = 0;
+  for (;;) {
+    size_t c = 2 * i + 1;
+    if (c >= nalarms) break;
+    if (c + 1 < nalarms && alarms[c + 1].due < alarms[c].due) c++;
+    if (alarms[c].due >= last.due) break;
+    alarms[i] = alarms[c];
+    i = c;
+  }
+  if (nalarms > 0) alarms[i] = last;
+  return top;
+}
+
+static void mt_sleep(uint64_t nanos) {
+  mt_task* t = running;
+  if (nanos == 0) { mt_point(); return; }
+  spin_lock(&sleepers.lock);
+  __atomic_fetch_add(&t->refs, 1, __ATOMIC_RELAXED);
+  alarm_push((alarm_t){ now_ns() + nanos, ++t->sleep_gen, t });
+  __atomic_store_n(&next_due, alarms[0].due, __ATOMIC_RELEASE);
+  wait_in(&sleepers, true);
+  cancelled_here();
+}
+
+// Wakes the tasks whose alarms are due.
+static void fire_alarms(void) {
+  uint64_t due = __atomic_load_n(&next_due, __ATOMIC_ACQUIRE);
+  if (!due || due > now_ns()) return;
+  spin_lock(&sleepers.lock);
+  uint64_t now = now_ns();
+  while (nalarms > 0 && alarms[0].due <= now) {
+    alarm_t a = alarm_pop();
+    mt_task* t = a.task;
+    if (__atomic_load_n(&t->waiting, __ATOMIC_SEQ_CST) == &sleepers && t->sleep_gen == a.gen) {
+      q_remove(&sleepers, t);
+      __atomic_store_n(&t->waiting, NULL, __ATOMIC_SEQ_CST);
+      unpark(t);
+    }
+    task_unref(t);
+  }
+  __atomic_store_n(&next_due, nalarms ? alarms[0].due : 0, __ATOMIC_RELEASE);
+  spin_unlock(&sleepers.lock);
+}
+
+// ---- running tasks ----
+
+static void mt_task_main(void* arg) {
+  mt_task* t = arg;
+  t->entry(t, t->closure);
+  if (FLY_FAILED) { t->error = fly_err; fly_err = NULL; }
+  fly_unwinding = false;
+}
+
+// Task `t` has ended: its outcome goes to its scope, its joiners wake, and the first failure or
+// panic cancels the scope's body and its other tasks (§6.1).
+static void mt_end(mt_task* t) {
+  if (t->fiber) { fiber_free(t->fiber); t->fiber = NULL; }
+  // A task stops being alive before it stops being runnable: the other way round, an idle worker
+  // could see one task alive and none able to run, and take that for a deadlock.
+  if (t == main_task) {
+    main_done = true;
+    __atomic_fetch_sub(&alive, 1, __ATOMIC_SEQ_CST);
+    __atomic_fetch_sub(&runnable, 1, __ATOMIC_SEQ_CST);
+    return;
+  }
+  mt_scope* sc = t->scope;
+  mt_task** cancels = NULL;
+  size_t ncancels = 0;
+  spin_lock(&sc->q.lock);
+  if ((t->panic || t->error) && !sc->panic && !sc->failer) {
+    cancels = fly_alloc((sc->nlive + 1) * sizeof(mt_task*));
+    if (!sc->closing && sc->owner) {
+      __atomic_fetch_add(&sc->owner->refs, 1, __ATOMIC_RELAXED);
+      cancels[ncancels++] = sc->owner;
+    }
+    for (mt_task* o = sc->live; o; o = o->snext) {
+      if (o == t) continue;
+      __atomic_fetch_add(&o->refs, 1, __ATOMIC_RELAXED);
+      cancels[ncancels++] = o;
+    }
+  }
+  if (t->panic && !sc->panic) { sc->panic = t->panic; t->panic = NULL; }
+  if (t->error && !sc->failer) {
+    __atomic_fetch_add(&t->refs, 1, __ATOMIC_RELAXED);
+    sc->failer = t;
+  }
+  if (t->sprev) t->sprev->snext = t->snext; else sc->live = t->snext;
+  if (t->snext) t->snext->sprev = t->sprev;
+  sc->nlive--;
+  if (sc->nlive == 0) wake_all(&sc->q);
+  spin_unlock(&sc->q.lock);
+  for (size_t i = 0; i < ncancels; i++) {
+    cancel_task(cancels[i]);
+    task_unref(cancels[i]);
+  }
+  free(cancels);
+  spin_lock(&t->joiners.lock);
+  t->finished = true;
+  wake_all(&t->joiners);
+  spin_unlock(&t->joiners.lock);
+  __atomic_fetch_sub(&alive, 1, __ATOMIC_SEQ_CST);
+  __atomic_fetch_sub(&runnable, 1, __ATOMIC_SEQ_CST);
+  // Its scope no longer refers to it, nor does it to itself.
+  task_unref(t);
+  task_unref(t);
+}
+
+static void run_task(worker* w, mt_task* t) {
+  running = t;
+  if (!t->started) {
+    t->started = true;
+    t->home = w;
+    // A task cancelled before it began never runs.
+    if (__atomic_load_n(&t->cancelled, __ATOMIC_ACQUIRE)) {
+      running = NULL;
+      mt_end(t);
+      return;
+    }
+    t->fiber = fiber_new(mt_task_main, t, NULL);
+    t->suspended = t->fiber;
+  }
+  fly_err = t->err;
+  fly_unwinding = t->unwinding;
+  fly_stopping = t->stopping;
+  t->fiber->back = w->base;
+  switch_to(t->suspended);
+  running = NULL;
+  if (t->fiber->done) {
+    if (panicking) {
+      t->panic = panicking;
+      panicking = NULL;
+    }
+    fly_unwinding = false;
+    fly_stopping = false;
+    fly_err = NULL;
+    mt_end(t);
+  } else if (t->yielded) {
+    inbox_push(w, t);
+  }
+}
+
+// ---- `par` ----
+
+// Work `join` lets another worker take: the second of the two, run where it is taken.
+typedef struct { void (*run)(void* f, void* out); void* f; void* out; int done; } job_t;
+
+static void run_job(job_t* j) {
+  j->run(j->f, j->out);
+  __atomic_store_n(&j->done, 1, __ATOMIC_RELEASE);
+}
+
+static uint64_t worker_rand(worker* w) {
+  uint64_t x = w->rng;
+  x ^= x << 13;
+  x ^= x >> 7;
+  x ^= x << 17;
+  return w->rng = x;
+}
+
+// Another worker's: `par` work first, which a running task waits for, then a task not yet begun.
+static job_t* steal_job(worker* w) {
+  int start = (int)(worker_rand(w) % (uint64_t)nworkers);
+  for (int k = 0; k < nworkers; k++) {
+    worker* v = &workers[(start + k) % nworkers];
+    if (v == w) continue;
+    job_t* j = dq_steal(&v->jobs);
+    if (j) return j;
+  }
+  return NULL;
+}
+
+static mt_task* steal_task(worker* w) {
+  int start = (int)(worker_rand(w) % (uint64_t)nworkers);
+  for (int k = 0; k < nworkers; k++) {
+    worker* v = &workers[(start + k) % nworkers];
+    if (v == w) continue;
+    mt_task* t = dq_steal(&v->fresh);
+    if (t) return t;
+  }
+  return NULL;
+}
+
+static void par_join(void (*a)(void*, void*), void* fa, void* oa, void (*b)(void*, void*), void* fb, void* ob) {
+  worker* w = this_worker;
+  // With work enough waiting to be taken here already, this pair runs here, in order.
+  if (dq_size(&w->jobs) >= 4) {
+    a(fa, oa);
+    b(fb, ob);
+    return;
+  }
+  job_t jb = { b, fb, ob, 0 };
+  dq_push(&w->jobs, &jb);
+  notify();
+  a(fa, oa);
+  // Only what `a` pushed was above `b`, and `a` took it back: `b` is next, unless it was taken.
+  if (dq_pop(&w->jobs) == &jb) {
+    b(fb, ob);
+    return;
+  }
+  // Taken: help with other work until it is done.
+  for (unsigned n = 0; !__atomic_load_n(&jb.done, __ATOMIC_ACQUIRE); n++) {
+    job_t* j = steal_job(w);
+    if (j) { run_job(j); n = 0; }
+    else if (n < 128) relax();
+    else sched_yield();
+  }
+}
+
+// ---- workers ----
+
+static bool work_anywhere(worker* w) {
+  if (__atomic_load_n(&w->inhead, __ATOMIC_SEQ_CST)) return true;
+  for (int k = 0; k < nworkers; k++) {
+    if (dq_size(&workers[k].fresh) > 0 || dq_size(&workers[k].jobs) > 0) return true;
+  }
+  uint64_t due = __atomic_load_n(&next_due, __ATOMIC_ACQUIRE);
+  return due && due <= now_ns();
+}
+
+static _Noreturn void mt_deadlock(void) { panic_exit("deadlock: every task is waiting"); }
+
+static void idle(worker* w) {
+  pthread_mutex_lock(&idle_mu);
+  __atomic_fetch_add(&idlers, 1, __ATOMIC_SEQ_CST);
+  if (!work_anywhere(w) && !(w == &workers[0] && main_done)) {
+    uint64_t due = __atomic_load_n(&next_due, __ATOMIC_ACQUIRE);
+    if (!due && __atomic_load_n(&runnable, __ATOMIC_SEQ_CST) == 0 && __atomic_load_n(&alive, __ATOMIC_SEQ_CST) > 0) mt_deadlock();
+    if (due) {
+      // The monotonic clock and the condition's clock differ: wait as long as is left.
+      uint64_t left = due > now_ns() ? due - now_ns() : 0;
+      struct timespec ts;
+      clock_gettime(CLOCK_REALTIME, &ts);
+      uint64_t at = (uint64_t)ts.tv_sec * 1000000000u + (uint64_t)ts.tv_nsec + left;
+      ts.tv_sec = (time_t)(at / 1000000000u);
+      ts.tv_nsec = (long)(at % 1000000000u);
+      pthread_cond_timedwait(&idle_cv, &idle_mu, &ts);
+    } else {
+      pthread_cond_wait(&idle_cv, &idle_mu);
+    }
+  }
+  __atomic_fetch_sub(&idlers, 1, __ATOMIC_SEQ_CST);
+  pthread_mutex_unlock(&idle_mu);
+}
+
+static void work(worker* w) {
+  for (;;) {
+    if (w == &workers[0] && main_done) return;
+    fire_alarms();
+    mt_task* t = inbox_pop(w);
+    if (!t) t = dq_pop(&w->fresh);
+    if (!t) {
+      job_t* j = steal_job(w);
+      if (j) { run_job(j); continue; }
+      t = steal_task(w);
+    }
+    if (t) { run_task(w, t); continue; }
+    idle(w);
+  }
+}
+
+static void* worker_thread(void* arg) {
+  worker* w = arg;
+  this_worker = w;
+  current = w->base;
+  work(w);
+  return NULL;
+}
+
+static void mt_run(void (*main)(void), void (*entry)(void* task, void* closure)) {
+  threads = true;
+  const char* n = getenv("FLY_THREADS");
+  long cores = n && *n ? strtol(n, NULL, 10) : sysconf(_SC_NPROCESSORS_ONLN);
+  nworkers = cores > 0 ? (int)cores : 1;
+  workers = fly_alloc((size_t)nworkers * sizeof(worker));
+  for (int k = 0; k < nworkers; k++) {
+    worker* w = &workers[k];
+    w->index = k;
+    w->own.base = true;
+    w->base = k == 0 ? &main_fiber : &w->own;
+    w->rng = 0x9e3779b97f4a7c15u * (uint64_t)(k + 1);
+    w->fresh.buf = dq_buf_new(256, NULL);
+    w->jobs.buf = dq_buf_new(256, NULL);
+  }
+  this_worker = &workers[0];
+  mt_task* t = fly_alloc(sizeof(mt_task));
+  t->entry = entry;
+  t->closure = (void*)main;
+  t->refs = 1;
+  main_task = t;
+  runnable = alive = 1;
+  inbox_push(&workers[0], t);
+  // Each worker's stack is as large as a fiber's: `par` work runs on it.
+  pthread_attr_t attr;
+  pthread_attr_init(&attr);
+  pthread_attr_setstacksize(&attr, FLY_STACK);
+  for (int k = 1; k < nworkers; k++) {
+    pthread_t th;
+    if (pthread_create(&th, &attr, worker_thread, &workers[k]) != 0) fly_panic("cannot start a worker thread");
+    pthread_detach(th);
+  }
+  pthread_attr_destroy(&attr);
+  work(&workers[0]);
+  if (t->panic) panic_exit(t->panic);
+  if (t->error) fly_err = t->error;
+}
+
+// ---- what compiled code calls, without a simulated world ----
+
+static int mt_spawn(int scope, void (*entry)(void* task, void* closure), void* closure, size_t size) {
+  mt_scope* sc = obj_get(scope);
+  mt_task* t = fly_alloc(sizeof(mt_task));
+  t->entry = entry;
+  t->closure = closure;
+  t->size = size;
+  t->result = fly_alloc(size ? size : 1);
+  t->scope = sc;
+  // A forked task's `Fiber` refers to it too.
+  t->refs = entry == fly_task_void ? 2 : 3;
+  int id = obj_new(t);
+  spin_lock(&sc->q.lock);
+  t->snext = sc->live;
+  if (sc->live) sc->live->sprev = t;
+  sc->live = t;
+  sc->nlive++;
+  spin_unlock(&sc->q.lock);
+  __atomic_fetch_add(&runnable, 1, __ATOMIC_SEQ_CST);
+  __atomic_fetch_add(&alive, 1, __ATOMIC_SEQ_CST);
+  dq_push(&this_worker->fresh, t);
+  notify();
+  mt_point();
+  return id;
+}
+
+static void mt_join(int task, void* out) {
+  mt_task* t = obj_get(task);
+  spin_lock(&t->joiners.lock);
+  while (!t->finished) {
+    wait_in(&t->joiners, true);
+    if (cancelled_here()) return;
+    spin_lock(&t->joiners.lock);
+  }
+  spin_unlock(&t->joiners.lock);
+  if (t->panic) fly_panic("a joined task did not finish");
+  if (t->error) {
+    // Raised here, so not again by the scope.
+    fly_err = t->error;
+    t->error = NULL;
+  } else {
+    memcpy(out, t->result, t->size);
+  }
+  obj_clear(task);
+  task_unref(t);
+}
+
+static int mt_scope_open(void) {
+  mt_scope* sc = fly_alloc(sizeof(mt_scope));
+  sc->owner = running;
+  return obj_new(sc);
+}
+
+static void mt_scope_close(int id) {
+  mt_scope* sc = obj_get(id);
+  mt_task* me = running;
+  spin_lock(&sc->q.lock);
+  // The body unwound because a task failed or panicked: the scope raises that instead.
+  bool unwound = fly_unwinding && !sc->failer && !sc->panic;
+  sc->closing = true;
+  spin_unlock(&sc->q.lock);
+  fly_unwinding = false;
+  void* err = fly_err;
+  fly_err = NULL;
+  spin_lock(&sc->q.lock);
+  while (sc->nlive > 0) {
+    wait_in(&sc->q, false);
+    spin_lock(&sc->q.lock);
+  }
+  spin_unlock(&sc->q.lock);
+  __atomic_store_n(&me->cancelled, false, __ATOMIC_SEQ_CST);
+  char* panic = sc->panic;
+  mt_task* failer = sc->failer;
+  obj_clear(id);
+  free(sc);
+  if (panic) {
+    if (failer) task_unref(failer);
+    fly_panic(panic);
+  }
+  if (unwound) {
+    fly_unwinding = true;
+    if (err) free(err);
+  } else if (err) {
+    fly_err = err;
+  } else if (failer && failer->error) {
+    fly_err = failer->error;
+    failer->error = NULL;
+  }
+  if (failer) task_unref(failer);
+}
+
+static fly_chan mt_channel(void) {
+  mt_chan* c = fly_alloc(sizeof(mt_chan));
+  c->senders = 1;
+  return (fly_chan){ obj_new(c) };
+}
+
+static void mt_send(fly_chan ch, const void* v, size_t size) {
+  mt_chan* c = obj_get(ch.ch);
+  spin_lock(&c->q.lock);
+  if (c->len == c->cap) {
+    size_t cap = c->cap ? c->cap * 2 : 8;
+    uint8_t* items = fly_alloc(cap * (size ? size : 1));
+    for (size_t i = 0; i < c->len; i++) memcpy(items + i * size, c->items + ((c->head + i) % c->cap) * size, size);
+    free(c->items);
+    c->items = items;
+    c->head = 0;
+    c->cap = cap;
+  }
+  c->size = size;
+  memcpy(c->items + ((c->head + c->len) % c->cap) * size, v, size);
+  c->len++;
+  wake_one(&c->q);
+  spin_unlock(&c->q.lock);
+  mt_point();
+}
+
+static bool mt_recv(fly_chan ch, void* out, size_t size) {
+  mt_chan* c = obj_get(ch.ch);
+  spin_lock(&c->q.lock);
+  for (;;) {
+    if (c->len > 0) {
+      memcpy(out, c->items + c->head * size, size);
+      c->head = (c->head + 1) % c->cap;
+      c->len--;
+      spin_unlock(&c->q.lock);
+      return true;
+    }
+    if (c->closed) {
+      spin_unlock(&c->q.lock);
+      return false;
+    }
+    wait_in(&c->q, true);
+    if (cancelled_here()) return false;
+    spin_lock(&c->q.lock);
+  }
+}
+
+static void mt_sender_gone(fly_chan ch) {
+  mt_chan* c = obj_get(ch.ch);
+  spin_lock(&c->q.lock);
+  if (c->senders > 0 && --c->senders == 0) {
+    c->closed = true;
+    wake_all(&c->q);
+  }
+  spin_unlock(&c->q.lock);
+}
+
+static void mt_sender_clone(fly_chan ch) {
+  mt_chan* c = obj_get(ch.ch);
+  spin_lock(&c->q.lock);
+  c->senders++;
+  spin_unlock(&c->q.lock);
+}
+
+// A `Mutex`'s lock is one of a few, chosen by its state's address: a body performs nothing, so it
+// takes no other lock, and two locks sharing one only take turns.
+static spin_t stripes[64];
+static FLY_LOCAL spin_t* held;
+
+void fly_lock(const void* state) {
+  if (!threads) return;
+  held = &stripes[((uintptr_t)state >> 4) & 63];
+  spin_lock(held);
+}
+
+void fly_unlock(const void* state) {
+  (void)state;
+  if (!held) return;
+  spin_unlock(held);
+  held = NULL;
+}
+
+static void unlock_held(void) { fly_unlock(NULL); }
+
+static void* mt_task_result(mt_task* t) { return t->result; }
+static void* mt_task_closure(mt_task* t) { return t->closure; }
+
+void fly_par_join(void (*a)(void* f, void* out), void* fa, void* oa, void (*b)(void* f, void* out), void* fb, void* ob) {
+  if (threads && nworkers > 1 && this_worker) { par_join(a, fa, oa, b, fb, ob); return; }
+  a(fa, oa);
+  b(fb, ob);
+}
+#endif
+
+#endif
+
+// Without threads, a `Mutex` is never contended, and `join` runs its two in order.
+#ifndef FLY_THREADS
+void fly_lock(const void* state) { (void)state; }
+void fly_unlock(const void* state) { (void)state; }
+static void unlock_held(void) {}
+void fly_par_join(void (*a)(void* f, void* out), void* fa, void* oa, void (*b)(void* f, void* out), void* fb, void* ob) {
+  a(fa, oa);
+  b(fb, ob);
+}
 #endif
 
 // ---- regions ----

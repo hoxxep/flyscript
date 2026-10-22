@@ -1,0 +1,14 @@
+// expect: counted 40000
+// Tasks on many cores change one counter, each change under its lock.
+import { println } from "std/io";
+import { Mutex } from "std/sync";
+
+export function main(): void uses Io {
+  const counter = Mutex.new(0 as u64);
+  Io.scope((s) => {
+    for (const _ of 0..200) {
+      s.spawn(() => { for (const _ of 0..200) { counter.lock((c) => { c += 1; }); } });
+    }
+  });
+  println(`counted ${counter.lock((c) => c + 0)}`);
+}

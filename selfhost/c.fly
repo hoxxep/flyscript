@@ -1629,7 +1629,7 @@ impl Cgen {
   function ioOp(self: mut Self, op: str, c: readonly Call, vs: Vec<String>): String uses Fail<Diagnostic> {
     const rc = self.ctype(c.ret, c.span);
     match (op) {
-      "now" => `({ fly_point(); (${rc}){ .nanos = fly_clock }; })`,
+      "now" => `({ fly_point(); (${rc}){ .nanos = fly_now() }; })`,
       // Sleeping waits for the virtual clock, which is its scheduling point.
       "sleep" => `({ __auto_type d_ = ${vs[0]}; fly_sleep(d_.nanos); (fly_unit)0; })`,
       "park" => "((fly_unit)0)".toString(),
@@ -1684,6 +1684,19 @@ impl Cgen {
       _ => return #None,
     })
   }
+  // What runs one half of a `join` giving a `t`: it calls the closure, puts its result where it is
+  // told, and drops the closure, which is `once`.
+  function halfRunner(self: mut Self, t: readonly Ty, span: Span): String uses Fail<Diagnostic> {
+    const tc = self.ctype(t, span);
+    const key = `half:${tc}`;
+    if (const #Some(n) = self.helpers.get(key.asStr())) { return n.clone(); }
+    const n = `half${self.helpers.len()}`;
+    self.helpers.insert(key, n.clone());
+    self.protos.push(`static void ${n}(void* f, void* out);\n`);
+    self.dropCode.push(`static void ${n}(void* f, void* out) { fly_fn* fn = f; ${tc} v = ((${tc} (*)(void*))fn->fn)(fn->env); *(${tc}*)out = v; if (fn->drop) fn->drop(fn->env); }\n`);
+    n
+  }
+
   // A call of the prelude's functions on strings, lists, options and failures.
   function prelude(self: mut Self, key: str, c: readonly Call, vs: readonly Vec<String>): Option<String> uses Fail<Diagnostic> {
     const ptys = c.params.clone();
@@ -1806,6 +1819,16 @@ impl Cgen {
         `({ fly_File f_ = { 0 }; if (!fly_read_file(${arg(0)}, &f_.text)) { ${boxed}} f_; })`
       }
       "File_readText" => `fly_String_clone(&(${arg(0)})->text)`,
+      // `std/par`'s `join`: each half run by a function the runtime calls, maybe on another core.
+      "join" => {
+        const [ta, tb] = match (rt) { #Tuple(ts) if ts.len() == 2 => [ts[0].clone(), ts[1].clone()], _ => return #Some(self.fail(span, "`join` gives a pair")) };
+        const ra = self.halfRunner(ta, span);
+        const rb = self.halfRunner(tb, span);
+        const ac = self.ctype(ta, span);
+        const bc = self.ctype(tb, span);
+        const tc = self.ctype(rt, span);
+        `({ fly_fn fa_ = ${arg(0)}; fly_fn fb_ = ${arg(1)}; ${ac} ra_; ${bc} rb_; fly_par_join(${ra}, &fa_, &ra_, ${rb}, &fb_, &rb_); (${tc}){ .f0 = ra_, .f1 = rb_ }; })`
+      }
       "Arc_new" => {
         const tc = self.ctype(typeArg(rt, 0), span);
         `({ ${tc} v_ = ${arg(0)}; ${tc}* p_ = fly_arc_new(sizeof(${tc})); *p_ = v_; p_; })`
@@ -1951,7 +1974,7 @@ impl Cgen {
       "Mutex_lock" => {
         const tc = self.ctype(rt, span);
         const pc = match (stripBorrow(ptys[1])) { #Fn(f) => match (f.params.first()) { #Some(p) => self.ctype(p, span), #None => "void*".toString() }, _ => "void*".toString() };
-        `({ __auto_type m_ = ${arg(0)}; fly_fn f_ = ${arg(1)}; fly_point(); ${tc} r_ = ((${tc} (*)(void*, ${pc}))f_.fn)(f_.env, m_); if (f_.drop) f_.drop(f_.env); r_; })`
+        `({ __auto_type m_ = ${arg(0)}; fly_fn f_ = ${arg(1)}; fly_point(); fly_lock(m_); ${tc} r_ = ((${tc} (*)(void*, ${pc}))f_.fn)(f_.env, m_); fly_unlock(m_); if (f_.drop) f_.drop(f_.env); r_; })`
       }
       "Listener_bind" | "Db_connect" => "0".toString(),
       "Socket_close" => "((fly_unit)0)".toString(),
@@ -2781,7 +2804,9 @@ impl Cgen {
         #Err(d) => throw self.failed(d, self.lw.p.fns[self.lw.insts[i].fid].module),
       }
     }
-    let out = runtime.toString();
+    // A program that starts tasks runs them on every core: the runtime's state is each thread's.
+    let out = if (ent.tasks) { "#define FLY_TASKS 1\n".toString() } else { String.new() };
+    out.push(runtime);
     out.push("\n// ---- the program ----\n");
     out.push(self.typeFwd.asStr());
     out.push(self.typeDefs.asStr());
