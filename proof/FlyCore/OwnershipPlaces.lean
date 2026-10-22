@@ -215,6 +215,7 @@ theorem typed_keys : Typed F O Γ e τ Γ' r → Γ'.map Prod.fst = Γ.map Prod.
     simp only [List.map_cons, List.cons.injEq] at this
     exact this.2.trans (typed_keys hb)
   | .while_ _ _ => rfl
+  | .defer hb _ => typed_keys hb
   | .perform _ _ hargs _ _ => args_keys hargs
   | .handle _ _ _ _ _ _ hb => thaw_keys ((typed_keys hb).trans freeze_keys)
   | .handleAbort _ _ _ _ hb hh => by

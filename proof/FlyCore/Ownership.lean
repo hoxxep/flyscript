@@ -76,6 +76,9 @@ inductive Expr where
   | try_ (body : Expr) (x : Var) (h : Expr)
   /-- `while (c) { body }`, while `c` is not zero. -/
   | while_ (c body : Expr)
+  /-- `{ defer { d }; body }`, `body` of type `τ`: `d` runs once `body` ends, with a value or
+  unwinding. If `d` unwinds, its unwinding goes on out, `body`'s value dropped. -/
+  | defer (τ : Ty) (d body : Expr)
   /-- `E.op(…)`: the operation of user effect `e`, with its owned arguments and its places lent. -/
   | perform (e : Nat) (owned : List Expr) (lent : List (Mode × Place))
   /-- `handle { body } with E { op(…) resumes k => k(arm) }`: where `body` performs the operation,
@@ -362,6 +365,23 @@ def eval (F : List Fn) (O : List Op) : Nat → HS → Store → Env → Expr →
         | r => r
       | (.val _, σ1) => (.stuck, σ1)
       | r => r
+    | .defer τ d body =>
+      match eval F O n hs σ env body with
+      | (.val v, σ1) =>
+        match eval F O n hs σ1 env d with
+        | (.val (.int _), σ2) => (.val v, σ2)
+        | (.abort i k, σ2) =>
+          match drop σ2 τ v with
+          | some σ3 => (.abort i k, σ3)
+          | none => (.stuck, σ2)
+        | (.val _, σ2) => (.stuck, σ2)
+        | r => r
+      | (.abort i k, σ1) =>
+        match eval F O n hs σ1 env d with
+        | (.val (.int _), σ2) => (.abort i k, σ2)
+        | (.val _, σ2) => (.stuck, σ2)
+        | r => r
+      | r => r
     | .perform ef owned lent =>
       match O[ef]? with
       | none => (.stuck, σ)
@@ -486,6 +506,8 @@ inductive Typed (F : List Fn) (O : List Op) : Ctx → Expr → Ty → Ctx → Ro
       Typed F O Γ (.try_ body x h) τ Γh r
   /-- A loop moves nothing: each pass starts where the one before started. -/
   | while_ : Typed F O Γ c .int Γ r → Typed F O Γ b .int Γ r → Typed F O Γ (.while_ c b) .int Γ r
+  /-- Cleanup starts where the body would have ended, and moves nothing. -/
+  | defer : Typed F O Γ body τ Γb r → Typed F O Γb d .int Γb r → Typed F O Γ (.defer τ d body) τ Γb r
   | perform : O[e]? = some op → Label.eff e ∈ r → Args F O Γ owned op.owns Γ₁ r →
       Lends Γ₁ lent op.refs ys → Exclusive ys → Typed F O Γ (.perform e owned lent) op.ret Γ₁ r
   /-- The arm runs in the context of the `handle`: its row is the `handle`'s. What it is lent of

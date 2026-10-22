@@ -194,4 +194,23 @@ theorem clobbers_rejected : ¬ Typed [] ops [] clobbers τ Γ' r := by
             subst this
             exact Bool.noConfusion (hp'.frozen (List.mem_singleton_self _))
 
+/-- `let x = Box.new(1); try { defer { *x = 5 }; let y = Box.new(2); throw *y } catch (e) { e + *x }`:
+the cleanup runs as the failure leaves its block, before the handler, which sees what it wrote; 7,
+and nothing left allocated. -/
+def cleans : Expr :=
+  .let_ "x" (.box .int) (.new (.lit 1))
+    (.try_ (.defer .int (.write (deref (var "x")) (.lit 5))
+        (.let_ "y" (.box .int) (.new (.lit 2)) (.throw_ (.read (deref (var "y")))))) "e"
+      (.add (.read (var "e")) (.read (deref (var "x")))))
+
+example : (eval [] [] 20 [] .empty [] cleans).1 = .val (.int 7) := by decide
+example : ∀ l < (eval [] [] 20 [] .empty [] cleans).2.next, (eval [] [] 20 [] .empty [] cleans).2.mem l = none := by
+  decide
+
+theorem cleans_typed : Typed [] [] [] cleans .int [] [.fail] :=
+  .let_ rfl (.new .lit) (.try_ rfl
+    (.defer (.let_ rfl (.new .lit) (.throw_ (.read (.deref (.own rfl))) (List.mem_cons_self ..)))
+      (.write .lit (.deref (.own rfl))))
+    (.add (.read (.own rfl)) (.read (.deref (.own rfl)))))
+
 end FlyCore.Ownership.Examples

@@ -929,6 +929,65 @@ theorem eval_ok (F : List Fn) (O : List Op) (hF : FnsOk F O) : ∀ n hs σ Γ en
       | abort i k => exact post_out h1 (by simp) (Weaker.refl _)
       | stuck => simp [Post] at h1
       | timeout => simp [Post]
+    | defer hb hd =>
+      simp only [eval]
+      have h1 := ih _ _ _ _ _ _ _ _ _ _ hb hI hwf hR
+      generalize eval F O n hs σ env _ = r1 at h1 ⊢
+      rcases r1 with ⟨r1, σ1⟩
+      cases r1 with
+      | val v =>
+        obtain ⟨E₁, L₁, hI₁, hv₁, hd₁, hdS₁, hm₁⟩ := h1
+        dsimp only
+        have h2 := ih _ _ _ _ _ _ _ _ _ _ hd hI₁ hm₁.wf (hR.moves hwf hm₁ fun x hx => .inl hx)
+        generalize eval F O n hs σ1 env _ = r2 at h2 ⊢
+        rcases r2 with ⟨r2, σ2⟩
+        cases r2 with
+        | val w =>
+          obtain ⟨E₂, L₂, hI₂, hv₂, -, -, hm₂⟩ := h2
+          cases hv₂ with
+          | int =>
+            dsimp only
+            -- The body's value owns cells the cleanup cannot reach: none of the activation's.
+            obtain ⟨hdE, -⟩ := hm₂.apart hm₁.wf hv₁.alloc hd₁
+            exact ⟨E₂, L₁, hI₂, hv₁.frame (hm₂.keeps hm₁.wf hv₁.alloc hd₁), hdE, hdS₁,
+              (hm₁.trans hm₂ hd₁ hwf).relabel fun x => by simp⟩
+        | abort i k =>
+          -- The cleanup unwinds: the body's value is dropped on the way out.
+          dsimp only
+          obtain ⟨haim, E₂, hI₂, hm₂⟩ := h2
+          have hv₂ := hv₁.frame (hm₂.keeps hm₁.wf hv₁.alloc hd₁)
+          obtain ⟨hdE, -⟩ := hm₂.apart hm₁.wf hv₁.alloc hd₁
+          obtain ⟨σ3, hdrop, hn, hfree, hkeep⟩ := drop_ok _ σ2 v L₁ hv₂
+          simp only [hdrop]
+          refine ⟨haim, E₂, ⟨hI₂.foot.frame fun l hl => hkeep l fun h => ?_, hI₂.nodup, hI₂.disj, hI₂.keys⟩, ?_⟩
+          · rcases List.mem_append.mp hl with hl | hl
+            · exact hdE l h hl
+            · exact hdS₁ l h hl
+          · refine ((hm₁.trans hm₂ hd₁ hwf).relabel (E'' := E₂ ++ L₁) (L'' := []) fun x => by mem_iff).trans
+              (Moves.free (E := E₂ ++ L₁) (E' := E₂) (D := L₁) (WF.of_free hm₂.wf hn hfree hkeep) hn
+                (fun l hl => by
+                  rcases List.mem_append.mp hl with hl | hl
+                  · exact hI₂.alloc l hl
+                  · exact hv₂.alloc l hl)
+                (fun x => by simp) hfree hkeep hdE.symm) disj_nil_left hwf |>.relabel fun x => by simp
+        | stuck => simp [Post] at h2
+        | timeout => simp [Post]
+      | abort i k =>
+        dsimp only
+        obtain ⟨haim, E₁, hI₁, hm₁⟩ := h1
+        have h2 := ih _ _ _ _ _ _ _ _ _ _ hd hI₁ hm₁.wf (hR.moves hwf hm₁ fun x hx => .inl hx)
+        generalize eval F O n hs σ1 env _ = r2 at h2 ⊢
+        rcases r2 with ⟨r2, σ2⟩
+        cases r2 with
+        | val w =>
+          obtain ⟨E₂, L₂, hI₂, hv₂, -, -, hm₂⟩ := h2
+          cases hv₂ with
+          | int => exact ⟨haim, E₂, hI₂, (hm₁.trans hm₂ disj_nil_left hwf).relabel fun x => by simp⟩
+        | abort i' k' => exact post_after hm₁ hwf (post_out h2 (by simp) (Weaker.refl _))
+        | stuck => simp [Post] at h2
+        | timeout => simp [Post]
+      | stuck => simp [Post] at h1
+      | timeout => simp [Post]
     | perform hop hlab hargs hlends hexcl => exact perform_ok ih hop hlab hargs hlends hexcl hI hwf hR
     | handle hop hos hrs hcaps hnd harm hbody => exact handle_ok ih hop hos hrs hcaps hnd harm hbody hI hwf hR
     | handleAbort hop howns hrefs hx hb hh =>

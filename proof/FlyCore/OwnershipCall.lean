@@ -134,6 +134,7 @@ theorem typed_weaker : Typed F O Γ e τ Γ' r → (Γ.map Prod.fst).Nodup → W
     cases this with
     | cons _ w => exact w.trans (typed_weaker hb hk)
   | .while_ _ _, _ => Weaker.refl _
+  | .defer hb _, hk => typed_weaker hb hk
   | .perform _ _ hargs _ _, hk => args_weaker hargs hk
   | .handle _ _ _ _ _ _ hb, hk => thaw_weaker (typed_weaker hb (by rw [freeze_keys]; exact hk))
   | .handleAbort _ _ _ hx hb hh, hk => by
