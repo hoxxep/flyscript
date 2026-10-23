@@ -155,7 +155,7 @@ theorem typed_weaker : Typed F O Γ e τ Γ' r → (Γ.map Prod.fst).Nodup → W
   | .write ha _, hk => atom_weaker ha hk
   | .assign ha _ _, hk => atom_weaker ha hk
   | .call _ _ _ _ hargs _ _, hk => atoms_weaker hargs hk
-  | .lam _ _ _ _ _ _ ha, hk => atom_weaker ha hk
+  | .lam _ _ _ _ _ ha, hk => atom_weaker ha hk
   | .lendClo _ _ _ _ _ _ _ hx hb, hk => by
     have := typed_weaker hb (List.nodup_cons.mpr ⟨by rw [freeze_keys]; exact lookup_none_keys hx,
       by rw [freeze_keys]; exact hk⟩)
@@ -523,15 +523,15 @@ theorem shape_split : ∀ (A : Ctx) {Γ : Ctx}, shape Γ = A ++ B → (∀ p ∈
 
 /-- Dropping the callee's owned parameters, live or moved, frees exactly their footprints. -/
 theorem dropCells_ok : ∀ {Γo : Ctx} {σ : Store} {eo : Env} {Eo So} {owns : List (Var × Ty)},
-    Foot F σ Γo eo Eo So → shape Γo = ownCtx owns → Eo.Nodup →
+    Foot F σ Γo eo Eo So → shape Γo = ownCtx owns → Eo.Nodup → WF σ →
     So = [] ∧ ∃ σ', dropCells σ ((owns.map Prod.snd).zip (eo.map Prod.snd)) = some σ' ∧
       σ'.next = σ.next ∧ (∀ l ∈ Eo, σ'.mem l = none) ∧ ∀ l, l ∉ Eo → σ'.mem l = σ.mem l
-  | [], σ, _, _, _, owns, h, hs, _ => by
+  | [], σ, _, _, _, owns, h, hs, _, _ => by
     cases h
     cases owns with
     | nil => exact ⟨rfl, σ, by simp [dropCells], rfl, by simp, fun _ _ => rfl⟩
     | cons => simp [shape, ownCtx] at hs
-  | (z, r) :: Γo, σ, _, _, _, owns, h, hs, hn => by
+  | (z, r) :: Γo, σ, _, _, _, owns, h, hs, hn, hwf => by
     cases h with
     | @cons _ c M _ eo E S _ hr hrest =>
     cases owns with
@@ -547,10 +547,10 @@ theorem dropCells_ok : ∀ {Γo : Ctx} {σ : Store} {eo : Env} {Eo So} {owns : L
     obtain ⟨rfl, -⟩ := hrs
     simp only [addE, addS, Slot.excl, ↓reduceIte, exclPart, sharedPart, Slot.shell, Bool.false_eq_true] at hn ⊢
     obtain ⟨hnM, hnE, hdME⟩ := nodup_append_disj.mp hn
-    obtain ⟨σ1, hd1, hn1, hfree1, hkeep1⟩ := dropCell_own hr
-    obtain ⟨rfl, -⟩ := dropCells_ok hrest hs hnE
+    obtain ⟨σ1, hd1, hn1, hfree1, hkeep1⟩ := dropCell_own hwf hr
+    obtain ⟨rfl, -⟩ := dropCells_ok hrest hs hnE hwf
     have hrest1 := hrest.frame (σ' := σ1) fun l hl => hkeep1 l fun h => hdME l h (by simpa using hl)
-    obtain ⟨-, σ', hd', hn', hfree', hkeep'⟩ := dropCells_ok hrest1 hs hnE
+    obtain ⟨-, σ', hd', hn', hfree', hkeep'⟩ := dropCells_ok hrest1 hs hnE (WF.of_free hwf hn1 hfree1 hkeep1)
     refine ⟨rfl, σ', ?_, by rw [hn', hn1], ?_, ?_⟩
     · simp only [List.map_cons, List.zip_cons_cons, dropCells, hd1, hd']
     · intro l hl
@@ -580,7 +580,7 @@ def HoleOk (F : List Fn) (σ : Store) (Γ : Ctx) (env : Env) (h : Hole) : Prop :
   ∃ s a τr, lookup h.root Γ = some s ∧ lookup h.root env = some a ∧ (h.mode = .mut → s.excl = true) ∧
     Path σ a τr h.path h.loc h.ty ∧ LT F σ a τr (h.path ++ h.old) ∧ SlotOk F σ s a (h.path ++ h.old) ∧
     LT F σ h.loc h.ty h.old ∧ (∀ σ' L', LT F σ' a τr L' → SlotOk F σ' s a L') ∧
-    (s.shell = true → (h.path = [] ∧ h.ty = τr) ∨ (h.path = [a] ∧ h.ty.isFn = false))
+    (s.shell = true → (h.path = [] ∧ h.ty = τr) ∨ h.path = [a])
 
 theorem HoleOk.entry (h : HoleOk F σ Γ env hl) :
     ∃ s a, Entry F σ Γ env hl.root s a (hl.path ++ hl.old) ∧ (hl.mode = .mut → s.excl = true) :=
@@ -600,7 +600,7 @@ theorem HoleOk.excl_sub (hok : HoleOk F σ Γ env h) (hm : h.mode = .mut) :
   cases hss : s.shell
   · rw [exclPart_plain hss, if_pos (hex hm)]
     exact List.mem_append.mpr (.inr (exclPart_sub hl))
-  · rcases hsh hss with ⟨hp, hty⟩ | ⟨hp, hfn⟩
+  · rcases hsh hss with ⟨hp, hty⟩ | hp
     · rw [hp] at hso hLT ⊢
       simp only [List.nil_append] at hso hLT ⊢
       match s, hss, hso with
@@ -609,10 +609,8 @@ theorem HoleOk.excl_sub (hok : HoleOk F σ Γ env h) (hm : h.mode = .mut) :
         simp only [Hole.slot, hm, hty, ← this] at hl
         exact hl
     · -- The closure's capture, through the closure's cell, which is only read.
-      have hhs : h.slot.shell = false := by simp [Hole.slot, Slot.shell_ref, hfn]
-      rw [exclPart_plain hhs, if_pos (by simp [Hole.slot, hm, Slot.excl])] at hl
       rw [hp]
-      simp [exclPart, Slot.shell_excl hss, hss, hl]
+      simp [exclPart, Slot.shell_excl hss, hss, exclPart_sub hl]
 
 theorem Hole.excl_mut {h : Hole} (hl : l ∈ exclPart h.slot L) : h.mode = .mut ∧ l ∈ L := by
   refine ⟨?_, exclPart_sub hl⟩
@@ -807,11 +805,11 @@ theorem HoleOk.old_head (hok : HoleOk F σ Γ env h) : ∃ R, h.old = h.loc :: R
 callee borrows it, or what the closure captured, through the closure's cell. -/
 theorem HoleOk.shell_root (hok : HoleOk F σ Γ env h) (he : Entry F σ Γ env h.root s a L)
     (hs : s.shell = true) (hm : h.mode = .mut) :
-    (h.path = [] ∧ s = h.slot) ∨ (h.path = [a] ∧ h.slot.shell = false) := by
+    (h.path = [] ∧ s = h.slot) ∨ h.path = [a] := by
   obtain ⟨s', a', τr, hs', ha', -, -, hLT, hso, -, -, hsh⟩ := hok
   rw [lookup_det hs' he.1] at hso hsh
   rw [lookup_det ha' he.2.1] at hso hsh hLT
-  rcases hsh hs with ⟨hp, hty⟩ | ⟨hp, hfn⟩
+  rcases hsh hs with ⟨hp, hty⟩ | hp
   · refine .inl ⟨hp, ?_⟩
     rw [hp] at hLT hso
     simp only [List.nil_append] at hLT hso
@@ -819,7 +817,7 @@ theorem HoleOk.shell_root (hok : HoleOk F σ Γ env h) (he : Entry F σ Γ env h
     | .ref .mut (.fn k A B r), _, hso =>
       have := hso.ref_ty hLT
       simp only [Hole.slot, hm, hty, ← this]
-  · exact .inr ⟨hp, by simp [Hole.slot, Slot.shell_ref, hfn]⟩
+  · exact .inr hp
 
 /-- What a `mut` hole only lets the callee read is the head of the tree there. -/
 theorem Hole.shared_mut_head {h : Hole} (hm : h.mode = .mut) (hl : l ∈ sharedPart h.slot (c :: R)) : l = c := by
@@ -1126,14 +1124,19 @@ theorem caller_rebuild (hI : Inv F σ Γ env E S) (hholes : ∀ h ∈ hs, HoleOk
             have hlL : l ∈ L := hL ▸ List.mem_append.mpr (.inr hold)
             have hE := (hI.foot.memE hI.keys l).mpr ⟨x, s, a, L, he, by rw [exclPart_plain hsh, if_pos hex]; exact hlL⟩
             exact .inl ⟨hlL, mem_keep.mpr ⟨hE, shared_not_mut hI hholes hpw (hpsin p hp) hsh'⟩⟩
-      · rcases (hpsok p hp).shell_root (hL ▸ he') hsh hm with ⟨hpath, rfl⟩ | ⟨hpath, hhs⟩
+      · rcases (hpsok p hp).shell_root (hL ▸ he') hsh hm with ⟨hpath, rfl⟩ | hpath
         · rw [hpath] at hl
           exact .inr ⟨p, hp, hr, hm, by simpa using hl⟩
         · -- Through the closure's cell, only read: what the callee left is the closure's capture.
           rw [hpath] at hl
           have hl2 : l ∈ p.2 := by simpa [exclPart, Slot.shell_excl hsh, hsh] using hl
-          exact .inr ⟨p, hp, hr, hm, by
-            rw [exclPart_plain hhs, if_pos (by simp [Hole.slot, hm, Slot.excl])]; exact hl2⟩
+          rcases mem_parts (s := p.1.slot) hl2 with h1 | h1
+          · exact .inr ⟨p, hp, hr, hm, h1⟩
+          · obtain ⟨hold, hsh'⟩ := hhead p hp hm l h1
+            have hlL : l ∈ exclPart s L := by
+              rw [hL, hpath]; simp [exclPart, Slot.shell_excl hsh, hsh, hold]
+            have hE := (hI.foot.memE hI.keys l).mpr ⟨x, s, a, L, he, hlL⟩
+            exact .inl ⟨hlL, mem_keep.mpr ⟨hE, shared_not_mut hI hholes hpw (hpsin p hp) hsh'⟩⟩
   obtain ⟨E', hf', hn', hmem'⟩ := hI.foot.rebuild (σ' := σ') (fill ps) hI.keys
     (by
       intro x s a L he
@@ -1155,7 +1158,7 @@ theorem caller_rebuild (hI : Inv F σ Γ env E S) (hholes : ∀ h ∈ hs, HoleOk
         rw [hL]
         cases hsh : s.shell
         · simp [sharedPart_plain hsh, hex]
-        · rcases (hpsok p hp).shell_root (hr ▸ hL ▸ he) hsh hm with ⟨hpe, -⟩ | ⟨hpe, -⟩
+        · rcases (hpsok p hp).shell_root (hr ▸ hL ▸ he) hsh hm with ⟨hpe, -⟩ | hpe
           · obtain ⟨R, hR⟩ := (hnew p hp hm).cons
             obtain ⟨R0, hR0⟩ := (hpsok p hp).old_head
             rw [hpe, hR, hR0]
@@ -1202,14 +1205,20 @@ theorem caller_rebuild (hI : Inv F σ Γ env E S) (hholes : ∀ h ∈ hs, HoleOk
                 obtain rfl := Hole.shared_mut_head hm h1
                 exact List.mem_append.mpr (.inr (by rw [hR]; exact List.mem_cons_self ..))
           · have he' : Entry F σ Γ env p.1.root s a L := hr ▸ he
-            rcases (hpsok p hp).shell_root (hL ▸ he') hsh hm with ⟨hpath, rfl⟩ | ⟨hpath, hhs⟩
+            rcases (hpsok p hp).shell_root (hL ▸ he') hsh hm with ⟨hpath, rfl⟩ | hpath
             · rw [hL, hpath] at hl
               simp only [List.nil_append] at hl
               exact absurd (mem_olds_mut.mpr ⟨p.1, hpsin p hp, hl⟩) hnM
             · rw [hL, hpath] at hl
               have hl2 : l ∈ p.1.old := by simpa [exclPart, Slot.shell_excl hsh, hsh] using hl
-              exact absurd (mem_olds_mut.mpr ⟨p.1, hpsin p hp, by
-                rw [exclPart_plain hhs, if_pos (by simp [Hole.slot, hm, Slot.excl])]; exact hl2⟩) hnM
+              rcases mem_parts (s := p.1.slot) hl2 with h1 | h1
+              · exact absurd (mem_olds_mut.mpr ⟨p.1, hpsin p hp, h1⟩) hnM
+              · obtain ⟨R0, hR0⟩ := (hpsok p hp).old_head
+                obtain ⟨R, hR⟩ := (hnew p hp hm).cons
+                rw [hR0] at h1
+                obtain rfl := Hole.shared_mut_head hm h1
+                rw [hpath, hR]
+                simp [exclPart, Slot.shell_excl hsh, hsh]
       · obtain ⟨p, hp, hlp⟩ := mem_mutCells.mp hlM
         have hpm := (Hole.excl_mut hlp).1
         obtain ⟨s, a, he, hex⟩ := (hpsok p hp).entry
@@ -1218,7 +1227,7 @@ theorem caller_rebuild (hI : Inv F σ Γ env E S) (hholes : ∀ h ∈ hs, HoleOk
         cases hsh : s.shell
         · rw [exclPart_plain hsh, if_pos (hex hpm)]
           exact List.mem_append.mpr (.inr (exclPart_sub hlp))
-        · rcases (hpsok p hp).shell_root he hsh hpm with ⟨hpath, rfl⟩ | ⟨hpath, hhs⟩
+        · rcases (hpsok p hp).shell_root he hsh hpm with ⟨hpath, rfl⟩ | hpath
           · rw [hpath]
             simpa using hlp
           · rw [hpath]

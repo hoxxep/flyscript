@@ -33,7 +33,7 @@ def isStuck : Res × Store → Bool
 syntax "run" "[" Lean.Parser.Tactic.simpLemma,* "]" : tactic
 macro_rules
   | `(tactic| run [$xs,*]) => `(tactic| simp [eval, ret, evalK, evalAtom, evalAtoms, resolve, leave, cleanV,
-      cleanA, dropRet, armEnd, allocAll, dropCells, dropCell, drop, dropData, Store.fresh, Store.alloc, Store.set, find,
+      cleanA, dropRet, armEnd, allocAll, dropCells, dropCell, drop, dropK, Store.fresh, Store.alloc, Store.set, find,
       Frame.handles, Kont.push, lookup, Res.done, Outcome.res, Cap.at, Store.empty, value, freed, freedBelow,
       isStuck, $xs,*])
 
@@ -568,7 +568,7 @@ theorem counter_typed : Typed [bump] [] [] counter .int [] [.fail] := by
   have hlam : Typed [bump] [] [("b", .own (.box .int) true)] (.lam 0 (.move "b")) (.fn .excl .int .int [])
       [("b", .own (.box .int) false)] [.fail] := by
     have := Typed.lam (F := [bump]) (O := []) (Γ := [("b", .own (.box .int) true)]) (f := 0) (d := bump)
-      (r := [.fail]) rfl rfl rfl rfl rfl rfl (.move (x := "b") rfl)
+      (r := [.fail]) rfl rfl rfl rfl rfl (.move (x := "b") rfl)
     simpa [bump, setSlot] using this
   exact .let_ (live := false) rfl (.new .lit)
     (.let_ (live := true) rfl hlam
@@ -748,5 +748,98 @@ theorem swapClosure_rejected : ¬ Typed [bump] [] [("b", .own (.box .int) true)]
     | assign _ hp hsh =>
       obtain rfl := placeTy_var_root hp
       simp [lookup, Slot.shell] at hsh
+
+/-! Closures returned and passed by value. -/
+
+/-- `function make(b: Box<int>): once (int) => int { (x) => *b + x }`: a closure that owns the box. -/
+def make : Fn :=
+  { owns := [("b", .box .int)], refs := [], ret := .fn .once .int .int [], row := [],
+    body := .lam 0 (.move "b") }
+
+/-- `function useOnce(g: once (int) => int): int { g(5) }`. -/
+def useOnce : Fn :=
+  { owns := [("g", .fn .once .int .int [])], refs := [], ret := .int, row := [],
+    body := .apply .once (var "g") (.lit 5) }
+
+/-- `let b = Box.new(40); let f = make(b); useOnce(f)`: the box goes into the closure `make` returns,
+and the closure into `useOnce`, which consumes it; 45, and nothing left allocated. -/
+def handOff : Expr :=
+  .let_ "b" (.box .int) (.new (.lit 40))
+    (.let_ "f" (.fn .once .int .int []) (.call 1 [.move "b"] []) (.call 2 [.move "f"] []))
+
+example : value (eval [spend, make, useOnce] [] 30 [] .empty [] handOff) = some 45 := by
+  run [handOff, spend, make, useOnce, cloFn]
+example : freed (eval [spend, make, useOnce] [] 30 [] .empty [] handOff) := by
+  run [handOff, spend, make, useOnce, cloFn]
+
+theorem handOff_fns_ok : FnsOk [spend, make, useOnce] [] := by
+  intro d hd
+  simp only [List.mem_cons, List.mem_singleton, List.not_mem_nil, or_false] at hd
+  rcases hd with rfl | rfl | rfl
+  · exact ⟨by decide, by decide, _, .add (.read (.deref (.own rfl))) (.read (.own rfl))⟩
+  · exact ⟨by decide, _, .lam (d := spend) rfl rfl rfl rfl rfl (.move rfl)⟩
+  · exact ⟨by decide, _, .applyOnce rfl (by simp) .lit⟩
+
+theorem handOff_typed : Typed [spend, make, useOnce] [] [] handOff .int [] [.fail] :=
+  .let_ (live := false) rfl (.new .lit)
+    (.let_ (live := false) rfl (.call (d := make) rfl rfl rfl (by simp [make]) (.cons (.move rfl) .nil) .nil
+        (by simp [Exclusive]))
+      (.call (d := useOnce) rfl rfl rfl (by simp [useOnce]) (.cons (.move rfl) .nil) .nil (by simp [Exclusive])))
+
+example : ∀ n, match eval [spend, make, useOnce] [] n [.abort .fail 0] .empty [] handOff with
+    | (.stuck, _) => False
+    | (.susp _ _ _ _ _, _) => False
+    | (.timeout, _) => True
+    | (.val v, σ') => ∃ L, VT [spend, make, useOnce] σ' .int v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
+    | (.abort _ _, σ') => ∀ l, σ'.mem l = none :=
+  program_ok handOff_fns_ok handOff_typed
+
+/-! A closure that owns a closure. -/
+
+/-- `(x) => x + *c`, owning a box `c`, called through a borrow. -/
+def addBox : Fn :=
+  { owns := [("x", .int)], refs := [], ret := .int, row := [],
+    body := .add (.read (var "x")) (.read (deref (var "c"))), cap := some ("c", .box .int, .shared) }
+
+/-- `(x) => g(g(x))`, owning a closure `g`. -/
+def twiceOf : Fn :=
+  { owns := [("x", .int)], refs := [], ret := .int, row := [],
+    body := .let_ "t" .int (.apply .shared (var "g") (.read (var "x"))) (.apply .shared (var "g") (.read (var "t"))),
+    cap := some ("g", .fn .shared .int .int [], .shared) }
+
+/-- `let b = Box.new(5); let f = (x) => x + *b; let h = (x) => f(f(x)); h(1)`: `h` takes `f`, which
+took `b`; 11, and dropping `h` drops `f` and its box: nothing left allocated. -/
+def nested : Expr :=
+  .let_ "b" (.box .int) (.new (.lit 5))
+    (.let_ "f" (.fn .shared .int .int []) (.lam 0 (.move "b"))
+      (.let_ "h" (.fn .shared .int .int []) (.lam 1 (.move "f")) (.apply .shared (var "h") (.lit 1))))
+
+example : value (eval [addBox, twiceOf] [] 30 [] .empty [] nested) = some 11 := by
+  run [nested, addBox, twiceOf, cloFn]
+example : freed (eval [addBox, twiceOf] [] 30 [] .empty [] nested) := by
+  run [nested, addBox, twiceOf, cloFn]
+
+theorem nested_fns_ok : FnsOk [addBox, twiceOf] [] := by
+  intro d hd
+  simp only [List.mem_cons, List.mem_singleton, List.not_mem_nil, or_false] at hd
+  rcases hd with rfl | rfl
+  · exact ⟨by decide, by decide, _, .add (.read (.own rfl)) (.read (.deref (.ref (m := .ro) rfl)))⟩
+  · exact ⟨by decide, by decide, _, .let_ (live := true) rfl
+      (.applyBorrow (by decide) (.read (.own rfl)) (.ref (m := .ro) rfl) (fun h => by cases h) (by simp))
+      (.applyBorrow (by decide) (.read (.own rfl)) (.ref (m := .ro) rfl) (fun h => by cases h) (by simp))⟩
+
+theorem nested_typed : Typed [addBox, twiceOf] [] [] nested .int [] [.fail] :=
+  .let_ (live := false) rfl (.new .lit)
+    (.let_ (live := false) rfl (.lam (d := addBox) rfl rfl rfl rfl rfl (.move rfl))
+      (.let_ (live := true) rfl (.lam (d := twiceOf) rfl rfl rfl rfl rfl (.move rfl))
+        (.applyBorrow (by decide) .lit (.own rfl) (fun h => by cases h) (by simp))))
+
+example : ∀ n, match eval [addBox, twiceOf] [] n [.abort .fail 0] .empty [] nested with
+    | (.stuck, _) => False
+    | (.susp _ _ _ _ _, _) => False
+    | (.timeout, _) => True
+    | (.val v, σ') => ∃ L, VT [addBox, twiceOf] σ' .int v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
+    | (.abort _ _, σ') => ∀ l, σ'.mem l = none :=
+  program_ok nested_fns_ok nested_typed
 
 end FlyCore.Ownership.Examples

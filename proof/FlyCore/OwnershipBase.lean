@@ -14,15 +14,15 @@ another closure in its place while the borrow lives.
 namespace FlyCore.Ownership
 
 /-- The code `f` is a closure's, called as `k`, taking an `A` and giving a `B`, performing only
-what `r` names, having captured plain data of type `τc`. -/
+what `r` names, having captured a value of type `τc`. -/
 def CloOk (F : List Fn) (f : Nat) (τc : Ty) (k : Kind) (A B : Ty) (r : Row) : Prop :=
   ∃ d xc pn, F[f]? = some d ∧ d.cap = some (xc, τc, k) ∧ d.owns = [(pn, A)] ∧ d.refs = [] ∧
-    d.retp = none ∧ d.ret = B ∧ d.row = r ∧ τc.data = true
+    d.retp = none ∧ d.ret = B ∧ d.row = r
 
 /-- A closure's code says its type. -/
 theorem CloOk.det : CloOk F f τc k A B r → CloOk F f τc' k' A' B' r' →
     τc = τc' ∧ k = k' ∧ A = A' ∧ B = B' ∧ r = r' := by
-  rintro ⟨d, xc, pn, hd, hcap, hown, -, -, hret, hrow, -⟩ ⟨d', xc', pn', hd', hcap', hown', -, -, hret', hrow', -⟩
+  rintro ⟨d, xc, pn, hd, hcap, hown, -, -, hret, hrow⟩ ⟨d', xc', pn', hd', hcap', hown', -, -, hret', hrow'⟩
   rw [hd] at hd'
   cases hd'
   rw [hcap] at hcap'
@@ -257,54 +257,43 @@ theorem LT.of_contents : σ.mem b = some w → VT F σ τ w R' → b ∉ R' → 
 
 /-! ## Dropping -/
 
-/-- Dropping plain data frees exactly the cells it owns. -/
-theorem dropData_ok : ∀ (τ : Ty) (σ : Store) v L, VT F σ τ v L → τ.data = true →
-    ∃ σ', dropData σ τ v = some σ' ∧ σ'.next = σ.next ∧ (∀ l ∈ L, σ'.mem l = none) ∧
-      ∀ l, l ∉ L → σ'.mem l = σ.mem l := by
-  intro τ
-  induction τ with
-  | int =>
-    intro σ v L h _
-    cases h
-    exact ⟨σ, by simp [dropData], rfl, by simp, fun _ _ => rfl⟩
-  | box τ ih =>
-    intro σ v L h hd
-    cases h with
-    | @box b _ _ hb =>
-      obtain ⟨w, R', hw, hv, rfl, hn⟩ := hb.contents
-      obtain ⟨σ1, hdr, hnext, hfree, hkeep⟩ := ih σ w R' hv (by simpa [Ty.data] using hd)
-      refine ⟨σ1.set b none, by simp [dropData, hw, hdr], by simp [Store.set, hnext], ?_, ?_⟩
-      · intro l hl
-        simp only [Store.set]
-        split
-        · rfl
-        · rcases List.mem_cons.mp hl with rfl | hl
-          · contradiction
-          · exact hfree l hl
-      · intro l hl
-        simp only [Store.set]
-        split
-        · subst_vars; simp at hl
-        · exact hkeep l (fun h => hl (List.mem_cons_of_mem _ h))
-  | fn => intro _ _ _ _ hd; simp [Ty.data] at hd
+/-- Distinct numbers below `n` are at most `n` of them. -/
+theorem nodup_length_le : ∀ (n : Nat) (L : List Nat), L.Nodup → (∀ x ∈ L, x < n) → L.length ≤ n
+  | 0, [], _, _ => Nat.le_refl _
+  | 0, x :: _, _, h => absurd (h x (List.mem_cons_self ..)) (Nat.not_lt_zero _)
+  | n + 1, L, hn, h => by
+    have h' : ∀ x ∈ L.erase n, x < n := fun x hx => by
+      have hne : x ≠ n := fun e => by subst e; exact (List.Nodup.mem_erase_iff hn).mp hx |>.1 rfl
+      have := h x (List.mem_of_mem_erase hx)
+      omega
+    have ih := nodup_length_le n (L.erase n) (hn.erase n) h'
+    have := List.length_erase (a := n) (l := L)
+    split at this <;> omega
 
-/-- Dropping a value frees exactly the cells it owns. -/
-theorem drop_ok : ∀ (τ : Ty) (σ : Store) v L, VT F σ τ v L →
-    ∃ σ', drop σ τ v = some σ' ∧ σ'.next = σ.next ∧ (∀ l ∈ L, σ'.mem l = none) ∧
+/-- A list of distinct cells, all allocated, is no longer than the store. -/
+theorem length_le_next {L : List Nat} (hwf : WF σ) (hn : L.Nodup) (ha : ∀ l ∈ L, σ.mem l ≠ none) : L.length ≤ σ.next :=
+  nodup_length_le σ.next L hn fun l hl => hwf l (ha l hl)
+
+/-- Dropping a value with as many cells to spare as it owns frees exactly the cells it owns. -/
+theorem dropK_ok : ∀ (k : Nat) (τ : Ty) (σ : Store) v L, VT F σ τ v L → L.length ≤ k →
+    ∃ σ', dropK k σ τ v = some σ' ∧ σ'.next = σ.next ∧ (∀ l ∈ L, σ'.mem l = none) ∧
       ∀ l, l ∉ L → σ'.mem l = σ.mem l := by
-  intro τ
-  induction τ with
-  | int =>
-    intro σ v L h
-    cases h
-    exact ⟨σ, by simp [drop], rfl, by simp, fun _ _ => rfl⟩
-  | box τ ih =>
-    intro σ v L h
+  intro k
+  induction k with
+  | zero =>
+    intro τ σ v L h hk
     cases h with
+    | int => exact ⟨σ, by simp [dropK], rfl, by simp, fun _ _ => rfl⟩
+    | box hb => obtain ⟨R, rfl⟩ := hb.cons; simp at hk
+    | clo _ hb => obtain ⟨R, rfl⟩ := hb.cons; simp at hk
+  | succ k ih =>
+    intro τ σ v L h hk
+    cases h with
+    | int => exact ⟨σ, by simp [dropK], rfl, by simp, fun _ _ => rfl⟩
     | @box b _ _ hb =>
       obtain ⟨w, R', hw, hv, rfl, hn⟩ := hb.contents
-      obtain ⟨σ1, hd, hnext, hfree, hkeep⟩ := ih σ w R' hv
-      refine ⟨σ1.set b none, by simp [drop, hw, hd], by simp [Store.set, hnext], ?_, ?_⟩
+      obtain ⟨σ1, hd, hnext, hfree, hkeep⟩ := ih _ σ w R' hv (by simpa using hk)
+      refine ⟨σ1.set b none, by simp [dropK, hw, hd], by simp [Store.set, hnext], ?_, ?_⟩
       · intro l hl
         simp only [Store.set]
         split
@@ -317,14 +306,10 @@ theorem drop_ok : ∀ (τ : Ty) (σ : Store) v L, VT F σ τ v L →
         split
         · subst_vars; simp at hl
         · exact hkeep l (fun h => hl (List.mem_cons_of_mem _ h))
-  | fn =>
-    intro σ v L h
-    cases h with
     | @clo f τc _ _ _ _ c _ hc hb =>
       obtain ⟨w, R', hw, hv, rfl, hn⟩ := hb.contents
-      obtain ⟨-, -, -, -, -, -, -, -, -, -, hdat⟩ := hc
-      obtain ⟨σ1, hdr, hnext, hfree, hkeep⟩ := dropData_ok τc σ w R' hv hdat
-      refine ⟨σ1.set c none, by simp [drop, hw, hdr], by simp [Store.set, hnext], ?_, ?_⟩
+      obtain ⟨σ1, hd, hnext, hfree, hkeep⟩ := ih _ σ w R' hv (by simpa using hk)
+      refine ⟨σ1.set c none, by simp [dropK, hw, hd], by simp [Store.set, hnext], ?_, ?_⟩
       · intro l hl
         simp only [Store.set]
         split
@@ -338,13 +323,19 @@ theorem drop_ok : ∀ (τ : Ty) (σ : Store) v L, VT F σ τ v L →
         · subst_vars; simp at hl
         · exact hkeep l (fun h => hl (List.mem_cons_of_mem _ h))
 
+/-- Dropping a value frees exactly the cells it owns. -/
+theorem drop_ok (hwf : WF σ) : ∀ (τ : Ty) v L, VT F σ τ v L →
+    ∃ σ', drop σ τ v = some σ' ∧ σ'.next = σ.next ∧ (∀ l ∈ L, σ'.mem l = none) ∧
+      ∀ l, l ∉ L → σ'.mem l = σ.mem l :=
+  fun τ v L h => dropK_ok σ.next τ σ v L h (length_le_next hwf h.nodup h.alloc)
+
 /-- Dropping a variable's cell frees its footprint: the cell, and what a live value in it owns. -/
-theorem dropCell_live : LT F σ c τ L →
+theorem dropCell_live (hwf : WF σ) : LT F σ c τ L →
     ∃ σ', dropCell σ τ c = some σ' ∧ σ'.next = σ.next ∧ (∀ l ∈ L, σ'.mem l = none) ∧
       ∀ l, l ∉ L → σ'.mem l = σ.mem l := by
   intro h
   obtain ⟨w, R', hw, hv, rfl, hn⟩ := h.contents
-  obtain ⟨σ1, hd, hnext, hfree, hkeep⟩ := drop_ok τ σ w R' hv
+  obtain ⟨σ1, hd, hnext, hfree, hkeep⟩ := drop_ok hwf τ w R' hv
   refine ⟨σ1.set c none, ?_, by simp [Store.set, hnext], ?_, ?_⟩
   · cases hv <;> simp [dropCell, hw, hd]
   · intro l hl

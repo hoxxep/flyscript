@@ -249,7 +249,7 @@ theorem typed_keys : Typed F O Γ e τ Γ' r → Γ'.map Prod.fst = Γ.map Prod.
   | .write ha _ => atom_keys ha
   | .assign ha _ _ => atom_keys ha
   | .call _ _ _ _ hargs _ _ => atoms_keys hargs
-  | .lam _ _ _ _ _ _ ha => atom_keys ha
+  | .lam _ _ _ _ _ ha => atom_keys ha
   | .lendClo _ _ _ _ _ _ _ _ hb => by
     have := typed_keys hb
     simp only [List.map_cons, List.cons.injEq] at this

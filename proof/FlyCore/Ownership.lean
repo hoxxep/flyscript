@@ -222,38 +222,29 @@ def resolve (σ : Store) (env : Env) : Place → Option Nat
       | _ => none
     | none => none
 
-/-- Drops plain data of type `τ`: frees the cells of its boxes, innermost first. `none` if a cell it
-should free is not there: a double free. -/
-def dropData (σ : Store) : Ty → Val → Option Store
-  | .int, .int _ => some σ
-  | .box τ, .ptr l =>
+/-- Drops a value of type `τ` with `k` cells to spare: frees the cells of its boxes, innermost
+first, and what a closure captured, which may hold closures in turn. `none` if a cell it should free
+is not there, a double free, or it runs out of cells to spare. -/
+def dropK : Nat → Store → Ty → Val → Option Store
+  | _, σ, .int, .int _ => some σ
+  | k + 1, σ, .box τ, .ptr l =>
     match σ.mem l with
     | some w =>
-      match dropData σ τ w with
+      match dropK k σ τ w with
       | some σ' => some (σ'.set l none)
       | none => none
     | none => none
-  | _, _ => none
-
-/-- Drops a value of type `τ`: frees the cells of its boxes, innermost first, and what a closure
-captured. `none` if a cell it should free is not there: a double free. -/
-def drop (σ : Store) : Ty → Val → Option Store
-  | .int, .int _ => some σ
-  | .box τ, .ptr l =>
-    match σ.mem l with
-    | some w =>
-      match drop σ τ w with
-      | some σ' => some (σ'.set l none)
-      | none => none
-    | none => none
-  | .fn _ _ _ _, .clo _ c τc =>
+  | k + 1, σ, .fn _ _ _ _, .clo _ c τc =>
     match σ.mem c with
     | some w =>
-      match dropData σ τc w with
+      match dropK k σ τc w with
       | some σ' => some (σ'.set c none)
       | none => none
     | none => none
-  | _, _ => none
+  | _, _, _, _ => none
+
+/-- Drops a value of type `τ`: a value owns fewer cells than the store has. -/
+def drop (σ : Store) (τ : Ty) (v : Val) : Option Store := dropK σ.next σ τ v
 
 /-- Drops what a variable's cell holds, unless it was moved, then frees the cell. -/
 def dropCell (σ : Store) (τ : Ty) (c : Nat) : Option Store :=
@@ -442,8 +433,8 @@ def evalAtom (σ : Store) (env : Env) : Atom → Option (Val × Store)
     match lookup x env with
     | some c =>
       match σ.mem c with
-      | some (.ptr l) => some (.ptr l, σ.set c (some .moved))
-      | _ => none
+      | some .moved | none => none
+      | some v => some (v, σ.set c (some .moved))
     | none => none
 
 /-- The atoms' values, in order. -/
@@ -862,8 +853,8 @@ def armCtx (os : List Var) (rs : List Var) (op : Op) (caps : List (Var × Mode �
 inductive AtomTy (Γ : Ctx) : Atom → Ty → Ctx → Prop
   | lit : AtomTy Γ (.lit n) .int Γ
   | read : PlaceTy Γ p .int w y → AtomTy Γ (.read p) .int Γ
-  | move : lookup x Γ = some (.own (.box τ) true) →
-      AtomTy Γ (.move x) (.box τ) (setSlot Γ x (.own (.box τ) false))
+  /-- A value moved out of its variable: a box, or a closure, passed or returned by value. -/
+  | move : lookup x Γ = some (.own τ true) → AtomTy Γ (.move x) τ (setSlot Γ x (.own τ false))
 
 /-- The owned arguments, in order, against the parameters' types. -/
 inductive AtomsTy : Ctx → List Atom → List Ty → Ctx → Prop
@@ -885,10 +876,10 @@ inductive Typed (F : List Fn) (O : List Op) : Ctx → Expr → Ty → Ctx → Ro
   | call : F[f]? = some d → d.retp = none → d.cap = none → (∀ l ∈ d.row, l ∈ r) → AtomsTy Γ owned (d.owns.map Prod.snd) Γ₁ →
       Lends Γ₁ lent (d.refs.map Prod.snd) ys → Exclusive ys →
       Typed F O Γ (.call f owned lent) d.ret Γ₁ r
-  /-- A closure captures plain data, moved in; its type says how it is called, what it takes and
-  gives, and what it may perform, but not what it captured. -/
+  /-- A closure captures a value, moved in, which may be a closure; its type says how it is called,
+  what it takes and gives, and what it may perform, but not what it captured. -/
   | lam : F[f]? = some d → d.cap = some (xc, τc, k) → d.owns = [(pn, A)] → d.refs = [] →
-      d.retp = none → τc.data = true → AtomTy Γ a τc Γ₁ → Typed F O Γ (.lam f a) (.fn k A d.ret d.row) Γ₁ r
+      d.retp = none → AtomTy Γ a τc Γ₁ → Typed F O Γ (.lam f a) (.fn k A d.ret d.row) Γ₁ r
   /-- A closure called once is moved out of its variable. -/
   | applyOnce : lookup x Γ = some (.own (.fn .once A B r') true) → (∀ l ∈ r', l ∈ r) →
       AtomTy (setSlot Γ x (.own (.fn .once A B r') false)) a A Γ₁ →
