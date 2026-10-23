@@ -231,7 +231,7 @@ impl Cgen {
       #Borrow(_, _) => true,
       #Named(d, _) => self.lw.p.isKnown(d, "Box") || self.lw.p.isKnown(d, "Ref") || self.lw.p.isKnown(d, "Arc") || self.lw.p.isKnown(d, "Ptr") || self.namedIs(t, "Cell") || self.namedIs(t, "RegionList")
         || self.namedIs(t, "Scope") || self.namedIs(t, "Fiber") || self.namedIs(t, "Sender") || self.namedIs(t, "Receiver")
-        || self.namedIs(t, "Reply") || self.namedIs(t, "Pending") || self.namedIs(t, "Mutex") || self.namedIs(t, "Listener") || self.namedIs(t, "Db"),
+        || self.namedIs(t, "Reply") || self.namedIs(t, "Pending") || self.namedIs(t, "Mutex") || self.namedIs(t, "Atomic") || self.namedIs(t, "Listener") || self.namedIs(t, "Db"),
       _ => false,
     }
   }
@@ -282,7 +282,7 @@ impl Cgen {
         if (self.namedIs(t, "Sender") || self.namedIs(t, "Receiver") || self.namedIs(t, "Reply") || self.namedIs(t, "Pending")) { return "fly_chan".toString(); }
         if (self.namedIs(t, "Socket")) { return "fly_socket".toString(); }
         // A lock holds its state on the heap, shared by the tasks that borrow it.
-        if (self.namedIs(t, "Mutex")) {
+        if (self.namedIs(t, "Mutex") || self.namedIs(t, "Atomic")) {
           const c = self.ctypeRef(typeArg(t, 0), span);
           return `${c}*`;
         }
@@ -441,6 +441,8 @@ impl Cgen {
           const inner = typeArg(t, 0);
           if (self.needsDrop(inner)) { body.push(`  if (*v) ${self.dropFn(inner, span)}(*v);\n`); }
           body.push("  fly_mutex_free(*v);\n  *v = NULL;\n");
+        } else if (self.namedIs(t, "Atomic")) {
+          body.push("  free(*v);\n  *v = NULL;\n");
         } else if (self.namedIs(t, "HashMap")) {
           const e = entryTy(t);
           if (self.needsDrop(e)) {
@@ -2063,6 +2065,20 @@ impl Cgen {
         const pc = match (stripBorrow(ptys[1])) { #Fn(f) => match (f.params.first()) { #Some(p) => self.ctype(p, span), #None => "void*".toString() }, _ => "void*".toString() };
         `({ __auto_type m_ = ${arg(0)}; fly_fn f_ = ${arg(1)}; fly_point(); fly_lock(m_); ${tc} r_ = ((${tc} (*)(void*, ${pc}))f_.fn)(f_.env, m_); fly_unlock(m_); if (f_.drop) f_.drop(f_.env); r_; })`
       }
+      // An atomic is a word on the heap, shared by the tasks that borrow it; each operation is a
+      // scheduling point, then one sequentially consistent access.
+      "Atomic_new" => {
+        const tc = self.ctype(typeArg(rt, 0), span);
+        `({ ${tc} x_ = ${arg(0)}; (${tc}*)fly_box(&x_, sizeof(${tc})); })`
+      }
+      "Atomic_load" => `({ __auto_type a_ = ${arg(0)}; fly_point(); __atomic_load_n(a_, __ATOMIC_SEQ_CST); })`,
+      "Atomic_store" => `({ __auto_type a_ = ${arg(0)}; __auto_type v_ = ${arg(1)}; fly_point(); __atomic_store_n(a_, v_, __ATOMIC_SEQ_CST); (fly_unit)0; })`,
+      "Atomic_swap" => `({ __auto_type a_ = ${arg(0)}; __auto_type v_ = ${arg(1)}; fly_point(); __atomic_exchange_n(a_, v_, __ATOMIC_SEQ_CST); })`,
+      "Atomic_compareExchange" => {
+        const tc = self.ctype(rt, span);
+        `({ __auto_type a_ = ${arg(0)}; __auto_type e_ = ${arg(1)}; __auto_type d_ = ${arg(2)}; fly_point(); bool ok_ = __atomic_compare_exchange_n(a_, &e_, d_, false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST); (${tc}){ .f0 = e_, .f1 = ok_ }; })`
+      }
+      "Atomic_fetchAdd" => `({ __auto_type a_ = ${arg(0)}; int64_t v_ = ${arg(1)}; fly_point(); fly_atomic_add(a_, v_); })`,
       "Db_connect" => "0".toString(),
       "Listener_bind" => {
         const raise = self.ioRaise("-l_");

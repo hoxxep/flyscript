@@ -130,6 +130,10 @@ impl Program {
         match self.defs[*d].name.as_str() {
             "Send" if self.is_std_def(*d) => return self.is_send_given(ty, &send_params) || matches!(ty, Ty::Error | Ty::Var(_)),
             "Copy" if self.is_std_def(*d) => return self.is_copy(ty) || matches!(ty, Ty::Param(_) | Ty::Var(_)),
+            // What an `Atomic` may hold: the machine words it is defined for (§6.2), and no others.
+            "AtomicWord" if self.is_std_def(*d) => {
+                return matches!(strip_borrows(ty), Ty::Prim(Prim::I64 | Prim::Bool) | Ty::Param(_) | Ty::Var(_) | Ty::Error)
+            }
             // `Q extends LentBy<K>`: a `Q` is what a `K` lends, to look it up (§3.3).
             "LentBy" if self.is_std_def(*d) => {
                 let Ty::Named(_, args) = bound else { return true };

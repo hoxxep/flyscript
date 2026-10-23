@@ -378,6 +378,44 @@ impl Interp {
                 self.sched.yield_now(self.task)?;
                 self.call_value(&a(1), vec![Value::Ptr(Place { root, path: Vec::new() })])
             }
+            // An atomic is a cell its borrowers share; each operation is a scheduling point and
+            // then takes effect whole, under the cell's lock (§6.2).
+            "Atomic.new" => Ok(Value::Ref(shared(a(0)))),
+            "Atomic.load" | "Atomic.store" | "Atomic.swap" | "Atomic.compareExchange" | "Atomic.fetchAdd" => {
+                let root = match a(0).deref_once() {
+                    Value::Ref(r) => r,
+                    other => return Err(panic(format!("not an atomic: {}", other.show()))),
+                };
+                self.sched.yield_now(self.task)?;
+                let mut cell = root.lock().unwrap();
+                let old = cell.clone();
+                match key.as_str() {
+                    "Atomic.load" => Ok(old),
+                    "Atomic.store" => {
+                        *cell = a(1).deref();
+                        Ok(Value::Unit)
+                    }
+                    "Atomic.swap" => {
+                        *cell = a(1).deref();
+                        Ok(old)
+                    }
+                    "Atomic.compareExchange" => {
+                        let hit = old.equals(&a(1));
+                        if hit {
+                            *cell = a(2).deref();
+                        }
+                        Ok(Value::Tuple(vec![old, Value::Bool(hit)].into()))
+                    }
+                    _ => {
+                        let sum = old.as_int() + a(1).as_int();
+                        if sum < i64::MIN as i128 || sum > i64::MAX as i128 {
+                            return Err(panic("arithmetic overflow"));
+                        }
+                        *cell = Value::Int(sum);
+                        Ok(old)
+                    }
+                }
+            }
             "Vec.drain" => {
                 let p = place_of(&a(0))?;
                 let items = list(&get(&p));

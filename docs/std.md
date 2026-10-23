@@ -171,6 +171,19 @@ State shared by tasks, reached only inside `lock`.
 - `lock` is a scheduling point before it takes the lock. A task that finds the lock held spins briefly, then waits without a core, and waiting tasks are woken in the order they began to wait.
 - Each `Mutex` has a lock of its own: locking one never waits for another.
 
+### `Atomic<T>`
+
+An integer or a flag that tasks share, for `T` `i64` or `bool`: `T extends AtomicWord`, an interface the checker decides, which those two meet and no `impl` adds a type to. Every operation is a scheduling point, then takes effect at one point among all of every task's operations, in the one order every task sees: sequentially consistent. There are no weaker orderings; `Ptr`'s acquire and release accesses (§1.12) are for foreign memory, under `unsafe`.
+
+| Function | Contract |
+| :--- | :--- |
+| `Atomic.new(v)` | An atomic holding `v`. Tasks borrow it `readonly`, as they borrow a `Mutex`. |
+| `a.load(): T` | What it holds. |
+| `a.store(v)` | Puts `v` in it. |
+| `a.swap(v): T` | Puts `v` in it and gives what was there. |
+| `a.compareExchange(expected, desired): [T, bool]` | What was there, and whether it was `expected` and is now `desired`. |
+| `a.fetchAdd(v): i64` | For `Atomic<i64>`: adds `v` and gives what was there. A sum that overflows panics, as `+` does, and changes nothing. |
+
 ---
 
 ## 4. `std/io`

@@ -1,0 +1,31 @@
+// expect: 4000
+// expect: [4000, false]
+// expect: [4000, true]
+// expect: 5
+// expect: true
+// expect: 1
+// Sequentially consistent atomics (§6.2): four tasks add to one integer at once, and none of the
+// additions is lost; a flag one task raises with `compareExchange` is raised once.
+import { println } from "std/io";
+import { Atomic } from "std/sync";
+
+export function main(): void uses Io {
+  const hits: Atomic<i64> = Atomic.new(0);
+  const first: Atomic<bool> = Atomic.new(false);
+  const winners: Atomic<i64> = Atomic.new(0);
+  Io.scope((s) => {
+    for (const _ of 0..4) {
+      s.spawn(() => {
+        for (const _ of 0..1000) { hits.fetchAdd(1); }
+        const [_, won] = first.compareExchange(false, true);
+        if (won) { winners.fetchAdd(1); }
+      });
+    }
+  });
+  println(`${hits.load()}`);
+  println(`${hits.compareExchange(0, 1)}`);
+  println(`${hits.compareExchange(4000, 5)}`);
+  println(`${hits.swap(0)}`);
+  println(`${first.load()}`);
+  println(`${winners.load()}`);
+}

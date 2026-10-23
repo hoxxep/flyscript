@@ -198,6 +198,8 @@ impl Program {
     if (self.isStdDef(d)) {
       if (name == "Send") { return self.isSendGiven(ty, sendParams) || match (ty) { #Error | #Var(_) => true, _ => false }; }
       if (name == "Copy") { return self.isCopy(ty) || match (ty) { #Param(_) | #Var(_) => true, _ => false }; }
+      // What an `Atomic` may hold: the machine words it is defined for (§6.2), and no others.
+      if (name == "AtomicWord") { return match (stripBorrows(ty)) { #Prim(#I64) | #Prim(#Bool) | #Param(_) | #Var(_) | #Error => true, _ => false }; }
       // `Q extends LentBy<K>`: a `Q` is what a `K` lends, to look it up (§3.3).
       if (name == "LentBy") {
         const k = match (bound) { #Named(_, args) => match (args.first()) { #Some(#Ty(k)) => k.clone(), _ => return true }, _ => return true };

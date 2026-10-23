@@ -340,7 +340,7 @@ impl Lower {
         if (self.p.hasDrop(d)) { return true; }
         if (self.p.isKnown(d, "String") || self.p.isKnown(d, "Vec") || self.p.isKnown(d, "Box")) { return true; }
         if (self.namedIs(t, "HashMap") || self.namedIs(t, "Gen") || self.namedIs(t, "File") || self.p.isKnown(d, "Cont")) { return true; }
-        if (self.namedIs(t, "Sender") || self.namedIs(t, "Mutex") || self.p.isKnown(d, "Arc")) { return true; }
+        if (self.namedIs(t, "Sender") || self.namedIs(t, "Mutex") || self.namedIs(t, "Atomic") || self.p.isKnown(d, "Arc")) { return true; }
         if (!seen.insert(ckey(t))) { return false; }
         match (self.p.defs[d].kind) {
           #Struct { fields: _ } => match (self.p.structFields(d, args)) {

@@ -316,6 +316,8 @@ uint64_t fly_now(void);
 void* fly_mutex_new(const void* value, size_t size);
 void fly_mutex_free(void* state);
 void fly_lock(const void* state);
+// `fetchAdd` of an `Atomic<i64>`: what was there; a sum that overflows panics and changes nothing.
+int64_t fly_atomic_add(int64_t* a, int64_t v);
 void fly_unlock(const void* state);
 // `join(a, b)` of `std/par`: both run, maybe at once on two cores, each putting its result where
 // its `out` points; each is pure, so the order cannot be seen.

@@ -850,6 +850,13 @@ const { $rt, $b } = (() => {
     *Receiver_each(rx) { for (let m = yield* recv(rx.ch); m !== undefined; m = yield* recv(rx.ch)) yield new Yielded(m.v); },
     Mutex_new: (v) => ({ v }),
     *Mutex_lock$g(m, f) { yield* point(); return yield* body(f, m); },
+    // An atomic's operations are scheduling points, each then taking effect whole.
+    Atomic_new: (v) => ({ v }),
+    *Atomic_load$g(a) { yield* point(); return a.v; },
+    *Atomic_store$g(a, v) { yield* point(); a.v = v; },
+    *Atomic_swap$g(a, v) { yield* point(); const o = a.v; a.v = v; return o; },
+    *Atomic_compareExchange$g(a, e, d) { yield* point(); const o = a.v, hit = o === e; if (hit) a.v = d; return [o, hit]; },
+    *Atomic_fetchAdd$g(a, n) { yield* point(); const o = a.v; a.v = checks.i64(o + n); return o; },
 
     // ---- the simulated network and database ----
     Listener_bind: (port) => ({ listener: port }),

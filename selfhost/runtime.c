@@ -213,6 +213,14 @@ void fly_mutex_free(void* state) {
   if (state) free((uint8_t*)state - MUTEX_HEADER);
 }
 
+int64_t fly_atomic_add(int64_t* a, int64_t v) {
+  int64_t old = __atomic_load_n(a, __ATOMIC_SEQ_CST), sum;
+  do {
+    if (__builtin_add_overflow(old, v, &sum)) fly_panic("arithmetic overflow");
+  } while (!__atomic_compare_exchange_n(a, &old, sum, false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST));
+  return old;
+}
+
 // ---- strings ----
 
 fly_str fly_str_lit(const char* bytes, size_t len) { return (fly_str){ (const uint8_t*)bytes, len }; }

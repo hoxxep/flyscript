@@ -33,6 +33,25 @@ impl<T extends Send> Mutex<T> {
   export function new(v: T): Mutex<T>;
   export function lock<R extends Send>(self: readonly Self, body: once (v: mut T) => R): R uses Io;
 }
+// An integer or a flag that tasks share. Each operation is `Io`, a scheduling point, and takes
+// effect at one point among all of every task's operations, in the one order every task sees:
+// sequentially consistent. There are no weaker orderings.
+export struct Atomic<T>;
+// What an `Atomic` may hold: `i64` and `bool`, which the checker knows, and nothing else.
+export interface AtomicWord {}
+impl<T extends AtomicWord> Atomic<T> {
+  export function new(v: T): Atomic<T>;
+  export function load(self: readonly Self): T uses Io;
+  export function store(self: readonly Self, v: T): void uses Io;
+  // What was there.
+  export function swap(self: readonly Self, v: T): T uses Io;
+  // What was there, and whether it was `expected` and is now `desired`.
+  export function compareExchange(self: readonly Self, expected: T, desired: T): [T, bool] uses Io;
+}
+impl Atomic<i64> {
+  // What was there; a sum that overflows panics, as `+` does, and changes nothing.
+  export function fetchAdd(self: readonly Self, v: i64): i64 uses Io;
+}
 impl<T> Receiver<T> {
   export function recv(self: readonly Self): Option<T> uses Io;
 }

@@ -1,0 +1,8 @@
+// error: does not implement `AtomicWord`
+// What an `Atomic` may hold is the checker's to say: an `impl` adds no type to it (§6.2).
+import { Atomic, AtomicWord } from "std/sync";
+type Pair = { a: i64; b: i64 };
+impl AtomicWord for Pair {}
+export function main(): void {
+  const a = Atomic.new({ a: 1, b: 2 } as Pair);
+}

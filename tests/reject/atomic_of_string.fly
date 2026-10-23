@@ -1,0 +1,6 @@
+// error: `String` does not implement `AtomicWord`
+// An `Atomic` holds an `i64` or a `bool`, and nothing else (§6.2).
+import { Atomic } from "std/sync";
+export function main(): void {
+  const a = Atomic.new("text".toString());
+}
