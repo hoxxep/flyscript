@@ -14,9 +14,9 @@ namespace FlyCore.Ownership
 def Sub (A B : List Nat) : Prop := ∀ x ∈ A, x ∈ B
 
 /-- Each variable the types know is bound in the environment, with the footprint its slot says,
-among the exclusive footprints or the shared ones as its slot says. -/
+its parts among the exclusive footprints and the shared ones as its slot says. -/
 theorem foot_lookup : Foot F σ Γ env E S → lookup x Γ = some s →
-    ∃ a L, lookup x env = some a ∧ SlotOk F σ s a L ∧ Sub L (if s.excl then E else S) := by
+    ∃ a L, lookup x env = some a ∧ SlotOk F σ s a L ∧ Sub (exclPart s L) E ∧ Sub (sharedPart s L) S := by
   intro h
   induction h with
   | nil => simp [lookup]
@@ -25,47 +25,59 @@ theorem foot_lookup : Foot F σ Γ env E S → lookup x Γ = some s →
     by_cases hy : x = y
     · simp only [lookup, hy, ↓reduceIte, Option.some.injEq] at hx ⊢
       subst hx
-      refine ⟨a, L, rfl, ht, fun z hz => ?_⟩
-      cases he : t.excl <;> simp [he, addE, addS, hz]
+      exact ⟨a, L, rfl, ht, fun z hz => mem_addE.mpr (.inl hz), fun z hz => mem_addS.mpr (.inl hz)⟩
     · simp only [lookup, hy, ↓reduceIte] at hx ⊢
-      obtain ⟨a', L', ha, hs, hsub⟩ := ih hx
-      refine ⟨a', L', ha, hs, fun z hz => ?_⟩
-      have := hsub z hz
-      cases he : s.excl <;> simp only [he] at this ⊢
-      · exact mem_addS.mpr (.inr this)
-      · exact mem_addE.mpr (.inr this)
+      obtain ⟨a', L', ha, hs, hE, hS⟩ := ih hx
+      exact ⟨a', L', ha, hs, fun z hz => mem_addE.mpr (.inr (hE z hz)), fun z hz => mem_addS.mpr (.inr (hS z hz))⟩
+
+theorem exclPart_of_noshell (he : s.excl = true) (hs : s.shell = false) : exclPart s L = L := by
+  simp [exclPart, he, hs]
+
+theorem sharedPart_of_ro (he : s.excl = false) : sharedPart s L = L := by
+  simp [sharedPart, he]
+
+/-- A closure borrowed `mut` holds a closure. -/
+theorem SlotOk.shell_fn (h : SlotOk F σ s a L) (hL : LT F σ a τ L) (hs : s.shell = true) : τ.isFn = true := by
+  match s, hs, h with
+  | .ref .mut (.fn _ _ _ _), _, h => rw [← (LT.det_ty h hL).1]; rfl
 
 /-- A typed place: where it is, on a path into the tree of its root, and, if it may be changed, in
-the exclusive footprint. -/
+the exclusive footprint — but for a closure borrowed `mut`, which is the place itself, its cell only
+read. -/
 theorem place_ok : PlaceTy Γ p τ w r → Foot F σ Γ env E S →
     ∃ a τr Lr P l s, lookup r env = some a ∧ LT F σ a τr Lr ∧ Path σ a τr P l τ ∧
-      resolve σ env p = some l ∧ (Sub Lr E ∨ Sub Lr S) ∧ (w = true → Sub Lr E) ∧
+      resolve σ env p = some l ∧ (Sub (exclPart s Lr) E ∧ Sub (sharedPart s Lr) S) ∧
+      (w = true → s.shell = false → Sub Lr E) ∧
       lookup r Γ = some s ∧ SlotOk F σ s a Lr ∧ (w = true → s.excl = true) ∧
-      ∀ σ' L', LT F σ' a τr L' → SlotOk F σ' s a L' := by
+      (∀ σ' L', LT F σ' a τr L' → SlotOk F σ' s a L') ∧ (s.shell = true → P = [] ∧ τ = τr) := by
   intro hp hf
   induction hp with
   | own hx =>
-    obtain ⟨a, L, ha, hL, hsub⟩ := foot_lookup hf hx
-    simp [Slot.excl] at hsub
-    exact ⟨a, _, L, [], a, _, ha, hL, .here, ha, .inl hsub, fun _ => hsub, hx, hL, fun _ => rfl,
-      fun _ _ h => h⟩
+    obtain ⟨a, L, ha, hL, hE, hS⟩ := foot_lookup hf hx
+    exact ⟨a, _, L, [], a, _, ha, hL, .here, ha, ⟨hE, hS⟩,
+      fun _ _ => by simpa [exclPart, Slot.excl, Slot.shell] using hE, hx, hL, fun _ => rfl,
+      fun _ _ h => h, fun h => by simp [Slot.shell] at h⟩
   | @ref x m τ hx =>
-    obtain ⟨a, L, ha, hL, hsub⟩ := foot_lookup hf hx
-    cases m
-    · simp [Slot.excl] at hsub
-      exact ⟨a, τ, L, [], a, _, ha, hL, .here, ha, .inr hsub, fun h => by simp at h, hx, hL,
-        fun h => by simp at h, fun _ _ h => h⟩
-    · simp [Slot.excl] at hsub
-      exact ⟨a, τ, L, [], a, _, ha, hL, .here, ha, .inl hsub, fun _ => hsub, hx, hL, fun _ => rfl,
-        fun _ _ h => h⟩
-  | deref _ ih =>
-    obtain ⟨a, τr, Lr, P, l, s, ha, hLr, hpath, hres, hsub, hw, hs, hso, hex, hlt⟩ := ih
+    obtain ⟨a, L, ha, hL, hE, hS⟩ := foot_lookup hf hx
+    refine ⟨a, τ, L, [], a, _, ha, hL, .here, ha, ⟨hE, hS⟩, ?_, hx, hL, ?_, fun _ _ h => h, fun _ => ⟨rfl, rfl⟩⟩
+    · intro hw hsh
+      cases m
+      · simp at hw
+      · simpa [exclPart, Slot.excl, hsh] using hE
+    · intro hw; cases m
+      · simp at hw
+      · rfl
+  | deref hq ih =>
+    obtain ⟨a, τr, Lr, P, l, s, ha, hLr, hpath, hres, hsub, hw, hs, hso, hex, hlt, hsh⟩ := ih
     obtain ⟨R, hR, rfl⟩ := path_split hpath hLr
     cases hR with
     | box hl hb _ =>
-      exact ⟨a, τr, _, P ++ [l], _, s, ha, hLr, hpath.snoc hl, by simp [resolve, hres, hl], hsub, hw, hs,
-        hso, hex, hlt⟩
-
+      refine ⟨a, τr, _, P ++ [l], _, s, ha, hLr, hpath.snoc hl, by simp [resolve, hres, hl], hsub, hw, hs,
+        hso, hex, hlt, fun h => ?_⟩
+      -- A closure's cell holds no box to follow.
+      obtain ⟨-, rfl⟩ := hsh h
+      match s, h, hso with
+      | .ref .mut (.fn _ _ _ _), _, hso => exact absurd (LT.det_ty hLr hso).1 (by simp)
 
 /-! ## Changing one variable -/
 
@@ -101,15 +113,15 @@ theorem setSlot_tail (Γ : Ctx) : y ≠ x → setSlot ((y, t) :: Γ) x s = (y, t
 /-- An exclusive variable's footprint is one segment of the exclusive footprints. It may be
 replaced, as the variable changes, in a store that changed nothing else, and the rest stands. -/
 theorem foot_update : Foot F σ Γ env E S → (Γ.map Prod.fst).Nodup → lookup x Γ = some s →
-    s.excl = true →
+    s.excl = true → s.shell = false →
     ∃ a L E₁ E₂, lookup x env = some a ∧ SlotOk F σ s a L ∧ E = E₁ ++ L ++ E₂ ∧
-      ∀ σ' s' L', s'.excl = true → Agree σ σ' (E₁ ++ E₂ ++ S) → SlotOk F σ' s' a L' →
+      ∀ σ' s' L', s'.excl = true → s'.shell = false → Agree σ σ' (E₁ ++ E₂ ++ S) → SlotOk F σ' s' a L' →
         Foot F σ' (setSlot Γ x s') env (E₁ ++ L' ++ E₂) S := by
   intro h
   induction h with
   | nil => simp [lookup]
   | @cons t a L Γ env E S y ht hrest ih =>
-    intro hk hx hex
+    intro hk hx hex hsh
     simp only [List.map_cons] at hk
     have hy' := (List.nodup_cons.mp hk).1
     have hk' := (List.nodup_cons.mp hk).2
@@ -117,34 +129,33 @@ theorem foot_update : Foot F σ Γ env E S → (Γ.map Prod.fst).Nodup → looku
     · subst hy
       simp only [lookup, ↓reduceIte, Option.some.injEq] at hx
       subst hx
-      refine ⟨a, L, [], E, by simp [lookup], ht, by simp [addE, hex], ?_⟩
-      intro σ' s' L' hex' hag hs'
-      have hS : addS t L S = S := by simp [addS, hex]
+      refine ⟨a, L, [], E, by simp [lookup], ht, by simp [addE, exclPart, hex, hsh], ?_⟩
+      intro σ' s' L' hex' hsh' hag hs'
+      have hS : addS t L S = S := by simp [addS, sharedPart, hex, hsh]
       rw [hS] at hag
       have hrest' := hrest.frame (σ' := σ') (fun l hl => hag l (by simpa using hl))
       rw [setSlot_head Γ hy']
       have := Foot.cons (x := x) hs' hrest'
-      simpa [addE, addS, hex, hex'] using this
+      simpa [addE, addS, exclPart, sharedPart, hex, hsh, hex', hsh'] using this
     · simp only [lookup, hy, ↓reduceIte] at hx
-      obtain ⟨a', L', E₁, E₂, ha, hs, hE, hupd⟩ := ih hk' hx hex
-      refine ⟨a', L', addE t L E₁, E₂, by simp [lookup, hy, ha], hs, ?_, ?_⟩
-      · subst hE; cases he : t.excl <;> simp [addE, he]
-      · intro σ' s' L'' hex' hag hs'
-        have hL : Agree σ σ' L := by
-          intro l hl
-          apply hag l
-          cases he : t.excl
-          · exact List.mem_append.mpr (.inr (mem_addS.mpr (.inl ⟨he, hl⟩)))
-          · exact List.mem_append.mpr (.inl (List.mem_append.mpr (.inl (mem_addE.mpr (.inl ⟨he, hl⟩)))))
-        have hrest' := hupd σ' s' L'' hex' (fun l hl => hag l (by
-          simp only [List.mem_append] at hl ⊢
-          rcases hl with (hl | hl) | hl
-          · exact .inl (.inl (mem_addE.mpr (.inr hl)))
-          · exact .inl (.inr hl)
-          · exact .inr (mem_addS.mpr (.inr hl)))) hs'
-        rw [setSlot_tail Γ (Ne.symm hy)]
-        have := Foot.cons (x := y) (ht.frame hL) hrest'
-        cases he : t.excl <;> simpa [addE, addS, he] using this
+      obtain ⟨a', L', E₁, E₂, ha, hs, hE, hupd⟩ := ih hk' hx hex hsh
+      refine ⟨a', L', addE t L E₁, E₂, by simp [lookup, hy, ha], hs, by subst hE; simp [addE], ?_⟩
+      intro σ' s' L'' hex' hsh' hag hs'
+      have hL : Agree σ σ' L := by
+        intro l hl
+        apply hag l
+        rcases mem_parts (s := t) hl with h | h
+        · exact List.mem_append.mpr (.inl (List.mem_append.mpr (.inl (mem_addE.mpr (.inl h)))))
+        · exact List.mem_append.mpr (.inr (mem_addS.mpr (.inl h)))
+      have hrest' := hupd σ' s' L'' hex' hsh' (fun l hl => hag l (by
+        simp only [List.mem_append] at hl ⊢
+        rcases hl with (hl | hl) | hl
+        · exact .inl (.inl (mem_addE.mpr (.inr hl)))
+        · exact .inl (.inr hl)
+        · exact .inr (mem_addS.mpr (.inr hl)))) hs'
+      rw [setSlot_tail Γ (Ne.symm hy)]
+      have := Foot.cons (x := y) (ht.frame hL) hrest'
+      simpa [addE, addS] using this
 
 theorem setSlot_same (Γ : Ctx) : (Γ.map Prod.fst).Nodup → lookup x Γ = some s → setSlot Γ x s = Γ := by
   induction Γ with
@@ -236,16 +247,20 @@ theorem typed_keys : Typed F O Γ e τ Γ' r → Γ'.map Prod.fst = Γ.map Prod.
     simp only [List.map_cons, List.cons.injEq] at this
     exact this.2.trans (typed_keys ha)
   | .write ha _ => atom_keys ha
-  | .assign ha _ => atom_keys ha
+  | .assign ha _ _ => atom_keys ha
   | .call _ _ _ _ hargs _ _ => atoms_keys hargs
   | .lam _ _ _ _ _ _ ha => atom_keys ha
   | .lendClo _ _ _ _ _ _ _ _ hb => by
     have := typed_keys hb
     simp only [List.map_cons, List.cons.injEq] at this
     exact thaw_keys (this.2.trans freeze_keys)
+  | .lendCloMut _ _ _ _ _ _ _ _ hb => by
+    have := typed_keys hb
+    simp only [List.map_cons, List.cons.injEq] at this
+    exact thaw_keys (this.2.trans hide_keys)
   | .applyOnce _ _ ha => (atom_keys ha).trans (setSlot_keys _)
   | .applyBorrow _ ha _ _ _ => atom_keys ha
-  | .lendCall _ _ _ _ hargs _ _ _ _ _ hb => by
+  | .lendCall _ _ _ _ hargs _ _ _ _ _ _ hb => by
     have := typed_keys hb
     simp only [List.map_cons, List.cons.injEq] at this
     exact (thaw_keys (this.2.trans lendCtx_keys)).trans (atoms_keys hargs)
@@ -257,7 +272,7 @@ theorem typed_keys : Typed F O Γ e τ Γ' r → Γ'.map Prod.fst = Γ.map Prod.
     exact this.2.trans (typed_keys hb)
   | .while_ _ _ => rfl
   | .defer hb _ => typed_keys hb
-  | .lend _ _ _ hb => by
+  | .lend _ _ _ _ hb => by
     have := typed_keys hb
     simp only [List.map_cons, List.cons.injEq] at this
     exact thaw_keys (this.2.trans lendCtx_keys)
@@ -274,13 +289,22 @@ theorem lookup_det {α : Type} {x : Var} {a b : α} {env : List (Var × α)} : l
 
 /-- At a place that may be changed, what the location holds may be replaced: the rest of the
 activation stands, the variable the place is rooted at now owning the new tree. -/
-theorem replace_at (hI : Inv F σ Γ env E S) (hp : PlaceTy Γ p τ true r) :
+theorem replace_at (hI : Inv F σ Γ env E S) (hp : PlaceTy Γ p τ true r)
+    (hτ : τ.isFn = false ∨ ∀ s, lookup r Γ = some s → s.shell = false) :
     ∃ l R P E₁ E₂, resolve σ env p = some l ∧ LT F σ l τ R ∧ E = E₁ ++ (P ++ R) ++ E₂ ∧
       ∀ σ' R', Agree σ σ' (E₁ ++ P ++ E₂ ++ S) → LT F σ' l τ R' → Disj R' (E₁ ++ P ++ E₂) →
         Disj R' S → Inv F σ' Γ env (E₁ ++ (P ++ R') ++ E₂) S := by
-  obtain ⟨a, τr, Lr, P, l, s, ha, hLr, hpath, hres, -, -, hs, hso, hex, hlt⟩ := place_ok hp hI.foot
+  obtain ⟨a, τr, Lr, P, l, s, ha, hLr, hpath, hres, -, -, hs, hso, hex, hlt, hshp⟩ := place_ok hp hI.foot
+  have hsh : ∀ s', lookup r Γ = some s' → s'.shell = false := by
+    rcases hτ with hτ | h
+    · intro s' hs'
+      obtain rfl := lookup_det hs hs'
+      cases h : s.shell
+      · rfl
+      · obtain ⟨-, rfl⟩ := hshp h; rw [hso.shell_fn hLr h] at hτ; cases hτ
+    · exact h
   obtain ⟨R, hR, rfl⟩ := path_split hpath hLr
-  obtain ⟨a', L', E₁, E₂, ha', hso', hE, hupd⟩ := foot_update hI.foot hI.keys hs (hex rfl)
+  obtain ⟨a', L', E₁, E₂, ha', hso', hE, hupd⟩ := foot_update hI.foot hI.keys hs (hex rfl) (hsh s hs)
   cases lookup_det ha ha'
   cases hso.det hso'
   refine ⟨l, R, P, E₁, E₂, hres, hR, hE, ?_⟩
@@ -292,7 +316,7 @@ theorem replace_at (hI : Inv F σ Γ env E S) (hp : PlaceTy Γ p τ true r) :
   have hagP : Agree σ σ' P := fun x hx => hag x (by simp [hx])
   have hdP : Disj P R' := fun x hx hx' => hd x hx' (by simp [hx])
   obtain ⟨hlt', -⟩ := path_join hpath hLr hagP hR' hdP
-  have hfoot := hupd σ' s (P ++ R') (hex rfl) (fun x hx => hag x (by
+  have hfoot := hupd σ' s (P ++ R') (hex rfl) (hsh s hs) (fun x hx => hag x (by
     simp only [List.mem_append] at hx ⊢
     rcases hx with (hx | hx) | hx
     · exact .inl (.inl (.inl hx))

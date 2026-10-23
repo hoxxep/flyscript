@@ -6,7 +6,9 @@ import FlyCore.Ownership
 What a well-typed program keeps true of the store: each location a variable stands for holds a
 value of the variable's type, and the cells that value owns — the location itself and the cells of
 its boxes — form a tree, its footprint. Footprints of what may be changed are disjoint; footprints
-of what is only read may overlap each other, but nothing that may be changed.
+of what is only read may overlap each other, but nothing that may be changed. A `mut` borrow of a
+closure may change what the closure captured but only reads the closure's own cell, so nothing puts
+another closure in its place while the borrow lives.
 -/
 
 namespace FlyCore.Ownership
@@ -101,6 +103,10 @@ theorem nodup_append_disj : (A ++ B).Nodup ↔ A.Nodup ∧ B.Nodup ∧ Disj A B 
 theorem LT.head : LT F σ a τ L → a ∈ L := by
   intro h
   cases h <;> simp
+
+theorem LT.cons : LT F σ a τ L → ∃ R, L = a :: R := by
+  intro h
+  cases h <;> exact ⟨_, rfl⟩
 
 theorem LT.alloc : LT F σ a τ L → ∀ l ∈ L, σ.mem l ≠ none := by
   intro h
@@ -482,9 +488,14 @@ def SlotOk (F : List Fn) (σ : Store) : Slot → Nat → List Nat → Prop
   | .ref _ τ, a, L => LT F σ a τ L
   | .lent _, _, L => L = []
 
-/-- Adds a footprint to the exclusive ones or to the shared ones, as the slot says. -/
-def addE (s : Slot) (L E : List Nat) : List Nat := if s.excl then L ++ E else E
-def addS (s : Slot) (L S : List Nat) : List Nat := if s.excl then S else L ++ S
+/-- The part of a slot's footprint that may be changed, and the part that is only read: a `mut`
+borrow of a closure only reads the closure's cell, the head of its footprint. -/
+def exclPart (s : Slot) (L : List Nat) : List Nat := if s.excl then (if s.shell then L.tail else L) else []
+def sharedPart (s : Slot) (L : List Nat) : List Nat := if s.excl then (if s.shell then L.take 1 else []) else L
+
+/-- Adds a footprint to the exclusive ones and to the shared ones, as the slot says. -/
+def addE (s : Slot) (L E : List Nat) : List Nat := exclPart s L ++ E
+def addS (s : Slot) (L S : List Nat) : List Nat := sharedPart s L ++ S
 
 /-- The footprints of an activation's variables, in order: of those that may be changed — owned
 variables and `mut` borrows — and of those that may only be read, `readonly` borrows. -/
@@ -551,11 +562,87 @@ theorem SlotOk.det : SlotOk F σ s a L → SlotOk F σ s a L' → L = L' := by
   · exact LT.det h h'
   · simp only [SlotOk] at h h'; rw [h, h']
 
-theorem mem_addE : l ∈ addE s L E ↔ (s.excl ∧ l ∈ L) ∨ l ∈ E := by
-  unfold addE; split <;> simp_all
+theorem mem_addE : l ∈ addE s L E ↔ l ∈ exclPart s L ∨ l ∈ E := by
+  simp [addE]
 
-theorem mem_addS : l ∈ addS s L S ↔ (s.excl = false ∧ l ∈ L) ∨ l ∈ S := by
-  unfold addS; split <;> simp_all
+theorem mem_addS : l ∈ addS s L S ↔ l ∈ sharedPart s L ∨ l ∈ S := by
+  simp [addS]
+
+theorem exclPart_sub : l ∈ exclPart s L → l ∈ L := by
+  unfold exclPart; split
+  · split
+    · exact List.mem_of_mem_tail
+    · exact id
+  · simp
+
+theorem sharedPart_sub : l ∈ sharedPart s L → l ∈ L := by
+  unfold sharedPart; split
+  · split
+    · exact List.mem_of_mem_take
+    · simp
+  · exact id
+
+/-- Every cell of a footprint is in one part or the other. -/
+theorem mem_parts : l ∈ L → l ∈ exclPart s L ∨ l ∈ sharedPart s L := by
+  intro h
+  unfold exclPart sharedPart
+  split
+  · split
+    · cases L with
+      | nil => simp at h
+      | cons a L => rcases List.mem_cons.mp h with rfl | h <;> simp_all
+    · exact .inl h
+  · exact .inr h
+
+theorem parts_perm {L : List Nat} {s : Slot} : L.Perm (exclPart s L ++ sharedPart s L) := by
+  unfold exclPart sharedPart
+  split
+  · split
+    · cases L with
+      | nil => simp
+      | cons a L => simpa using (List.perm_append_singleton a L).symm
+    · simp
+  · simp
+
+/-- A slot that is not a closure borrowed `mut`: all of its footprint changeable, or all only read. -/
+theorem exclPart_plain (hs : s.shell = false) : exclPart s L = if s.excl then L else [] := by
+  simp [exclPart, hs]
+
+theorem sharedPart_plain (hs : s.shell = false) : sharedPart s L = if s.excl then [] else L := by
+  simp [sharedPart, hs]
+
+theorem Slot.shell_ref : (Slot.ref m τ).shell = (m == .mut && τ.isFn) := by
+  cases m <;> cases τ <;> rfl
+
+theorem Slot.shell_own : (Slot.own τ l).shell = false := rfl
+
+theorem Slot.shell_lent : (Slot.lent τ).shell = false := rfl
+
+theorem Slot.shell_excl {s : Slot} : s.shell = true → s.excl = true := by
+  intro h; match s, h with
+  | .ref .mut (.fn _ _ _ _), _ => rfl
+
+/-- A footprint without duplicates splits into disjoint parts. -/
+theorem parts_disj : L.Nodup → Disj (exclPart s L) (sharedPart s L) := by
+  intro hn x hx hy
+  unfold exclPart at hx; unfold sharedPart at hy
+  by_cases he : s.excl = true <;> by_cases hs : s.shell = true <;> simp only [he, hs, ↓reduceIte] at hx hy
+  · cases L with
+    | nil => simp at hx
+    | cons a L =>
+      simp only [List.tail_cons, List.take_succ_cons, List.take_zero, List.mem_singleton] at hx hy
+      subst hy
+      exact (List.nodup_cons.mp hn).1 hx
+  all_goals simp_all
+
+theorem parts_nodup : L.Nodup → (exclPart s L).Nodup ∧ (sharedPart s L).Nodup := by
+  intro hn
+  unfold exclPart sharedPart
+  split
+  · split
+    · exact ⟨hn.sublist (List.tail_sublist _), hn.sublist (List.take_sublist _ _)⟩
+    · exact ⟨hn, by simp⟩
+  · exact ⟨by simp, hn⟩
 
 theorem Foot.alloc : Foot F σ Γ env E S → ∀ l, l ∈ E ∨ l ∈ S → σ.mem l ≠ none := by
   intro h
@@ -564,11 +651,11 @@ theorem Foot.alloc : Foot F σ Γ env E S → ∀ l, l ∈ E ∨ l ∈ S → σ.
   | cons hs _ ih =>
     intro l hl
     rcases hl with hl | hl
-    · rcases mem_addE.mp hl with ⟨_, hl⟩ | hl
-      · exact hs.alloc l hl
+    · rcases mem_addE.mp hl with hl | hl
+      · exact hs.alloc l (exclPart_sub hl)
       · exact ih l (.inl hl)
-    · rcases mem_addS.mp hl with ⟨_, hl⟩ | hl
-      · exact hs.alloc l hl
+    · rcases mem_addS.mp hl with hl | hl
+      · exact hs.alloc l (sharedPart_sub hl)
       · exact ih l (.inr hl)
 
 theorem Foot.frame : Foot F σ Γ env E S → Agree σ σ' (E ++ S) → Foot F σ' Γ env E S := by
@@ -580,9 +667,9 @@ theorem Foot.frame : Foot F σ Γ env E S → Agree σ σ' (E ++ S) → Foot F �
     have hL : Agree σ σ' L := by
       intro l hl
       apply hag l
-      cases he : s.excl
-      · exact List.mem_append.mpr (.inr (mem_addS.mpr (.inl ⟨he, hl⟩)))
-      · exact List.mem_append.mpr (.inl (mem_addE.mpr (.inl ⟨he, hl⟩)))
+      rcases mem_parts (s := s) hl with h | h
+      · exact List.mem_append.mpr (.inl (mem_addE.mpr (.inl h)))
+      · exact List.mem_append.mpr (.inr (mem_addS.mpr (.inl h)))
     exact .cons (hs.frame hL) (ih fun l hl => hag l (by
       rcases List.mem_append.mp hl with hl | hl
       · exact List.mem_append.mpr (.inl (mem_addE.mpr (.inr hl)))

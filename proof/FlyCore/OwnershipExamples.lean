@@ -312,7 +312,7 @@ theorem counts_typed : Typed [] ops [] counts .int [] [.fail] := by
     (Γa := [("c", .ref .mut .int)])
     (body := .let_ "a" .int (.perform 0 [] []) (.let_ "b" .int (.perform 0 [] []) (.add (.read (var "a")) (.read (var "b")))))
     (τ := .int) (Γb := [("n", .lent .int)])
-    rfl rfl rfl (.mut (.own rfl) .nil) (by simp [Exclusive]) (by decide)
+    rfl rfl rfl (.mut (.own rfl) rfl .nil) (by simp [Exclusive]) (by decide)
     (.let_ (live := true) rfl (.add (.read (.ref rfl)) .lit)
       (.let_ (live := true) rfl (.write (.read (.own rfl)) (.ref (m := .mut) rfl)) (.atom (.read (.ref rfl)))))
     (.let_ (live := true) rfl (.perform (op := { owns := [], refs := [], ret := .int }) rfl (List.mem_cons_self ..)
@@ -354,7 +354,7 @@ theorem meddles_rejected : ¬ Typed [] ops [] meddles τ Γ' r := by
     cases ha
     obtain ⟨ys, Γb, hc, hbody⟩ := handle_inv hb
     cases hc with
-    | «mut» hp hc =>
+    | «mut» hp _ hc =>
       cases hc
       cases hbody with
       | let_ _ ha _ =>
@@ -400,7 +400,7 @@ theorem borrows_typed : Typed [] [] [] borrows .int [] [.fail] := by
   have := Typed.lend (F := []) (O := []) (Γ := [("x", .own (.box .int) true)]) (x := "r") (m := .mut)
     (p := deref (var "x")) (τ := .int) (w := true) (y := "x") (r := [.fail])
     (body := .let_ "t" .int (.add (.read (var "r")) (.lit 41)) (.write (var "r") (.read (var "t")))) (τb := .int)
-    (Γb := [("x", .lent (.box .int))]) rfl (.deref (.own rfl)) (fun _ => rfl)
+    (Γb := [("x", .lent (.box .int))]) rfl (.deref (.own rfl)) (fun _ => rfl) (fun _ => rfl)
     (.let_ (live := true) rfl (.add (.read (.ref rfl)) .lit) (.write (.read (.own rfl)) (.ref (m := .mut) rfl)))
   simp only [thaw] at this
   exact .let_ (live := true) rfl (.new .lit) (.let_ (live := true) rfl (by simpa using this)
@@ -425,7 +425,7 @@ theorem lend_inv : Typed F O Γ (.lend x m p body) τ Γ' r →
     ∃ τp w y Γb, PlaceTy Γ p τp w y ∧ Typed F O ((x, .ref m τp) :: lendCtx m Γ y) body τ ((x, .ref m τp) :: Γb) r := by
   intro h
   cases h with
-  | lend _ hp _ hb => exact ⟨_, _, _, _, hp, hb⟩
+  | lend _ hp _ _ hb => exact ⟨_, _, _, _, hp, hb⟩
 
 theorem reaches_rejected : ¬ Typed [] O [] reaches τ Γ' r := by
   intro h
@@ -477,7 +477,7 @@ theorem returns_typed : Typed [inside] [] [] returns .int [] [.fail] := by
     (body := .let_ "t" .int (.add (.read (var "v")) (.lit 41)) (.write (var "v") (.read (var "t"))))
     (τb := .int) (Γb := [("x", .lent (.box .int))])
     rfl rfl rfl (by simp [inside]) .nil (.cons (.own rfl) (fun _ => rfl) .nil) (by simp [Exclusive]) rfl
-    (fun _ => rfl) rfl
+    (fun _ => rfl) (fun _ => ⟨rfl, by simp [inside, Ty.isFn]⟩) rfl
     (.let_ (live := true) rfl (.add (.read (.ref rfl)) .lit) (.write (.read (.own rfl)) (.ref (m := .mut) rfl)))
   simp only [thaw] at this
   exact .let_ (live := true) rfl (.new .lit) (.let_ (live := true) rfl (by simpa using this)
@@ -505,7 +505,7 @@ theorem lendCall_inv : Typed F O Γ (.lendCall x m f owned lent body) τ Γ' r �
       Typed F O ((x, .ref m d.ret) :: lendCtx m Γ₁ y) body τ ((x, .ref m d.ret) :: Γb) r := by
   intro h
   cases h with
-  | lendCall hf hret _ _ ha hl _ hyi _ _ hb => exact ⟨_, _, _, _, _, _, _, _, hf, hret, ha, hl, hyi, hb⟩
+  | lendCall hf hret _ _ ha hl _ hyi _ _ _ hb => exact ⟨_, _, _, _, _, _, _, _, hf, hret, ha, hl, hyi, hb⟩
 
 theorem reachesReturned_rejected : ¬ Typed [inside] [] [] reachesReturned τ Γ' r := by
   intro h
@@ -676,5 +676,77 @@ example : ∀ n, match eval [addTo, twice] [] n [.abort .fail 0] .empty [] highe
     | (.val v, σ') => ∃ L, VT [addTo, twice] σ' .int v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
     | (.abort _ _, σ') => ∀ l, σ'.mem l = none :=
   program_ok higher_fns_ok higher_typed
+
+/-! A closure over a `mut` borrow, and a function that takes one `mut`. -/
+
+/-- `function callsTwice(g: mut (int) => int): int { g(1); g(2) }`. -/
+def callsTwice : Fn :=
+  { owns := [], refs := [("g", .mut, .fn .excl .int .int [])], ret := .int, row := [],
+    body := .let_ "t" .int (.apply .excl (var "g") (.lit 1)) (.apply .excl (var "g") (.lit 2)) }
+
+/-- `let b = Box.new(10); let u = { const f = (x) => { *b = *b + x; *b }; callsTwice(f) }; u + *b`:
+the closure changes `b`, lent on `mut` to `callsTwice`, while `b` is out of reach; once it is gone,
+`b` is whole again, and holds what the closure left: 13 + 13, and nothing left allocated. -/
+def tally : Expr :=
+  .let_ "b" (.box .int) (.new (.lit 10))
+    (.let_ "u" .int (.lendClo "f" 0 (var "b") (.call 1 [] [(.mut, var "f")]))
+      (.add (.read (var "u")) (.read (deref (var "b")))))
+
+example : value (eval [bump, callsTwice] [] 30 [] .empty [] tally) = some 26 := by
+  run [tally, bump, callsTwice, cloFn]
+example : freed (eval [bump, callsTwice] [] 30 [] .empty [] tally) := by
+  run [tally, bump, callsTwice, cloFn]
+
+theorem tally_fns_ok : FnsOk [bump, callsTwice] [] := by
+  intro d hd
+  simp only [List.mem_cons, List.mem_singleton, List.not_mem_nil, or_false] at hd
+  rcases hd with rfl | rfl
+  · exact ⟨by decide, by decide, _, .let_ (live := true) rfl
+      (.add (.read (.deref (.ref (m := .mut) rfl))) (.read (.own rfl)))
+      (.let_ (live := true) rfl (.write (.read (.own rfl)) (.deref (.ref (m := .mut) rfl)))
+        (.atom (.read (.deref (.ref (m := .mut) rfl)))))⟩
+  · exact ⟨by decide, _, .let_ (live := true) rfl
+      (.applyBorrow (by decide) .lit (.ref (m := .mut) rfl) (fun _ => rfl) (by simp))
+      (.applyBorrow (by decide) .lit (.ref (m := .mut) rfl) (fun _ => rfl) (by simp))⟩
+
+theorem tally_typed : Typed [bump, callsTwice] [] [] tally .int [] [.fail] := by
+  have hcall : Typed [bump, callsTwice] [] [("f", .ref .mut (.fn .excl .int .int [])), ("b", .lent (.box .int))]
+      (.call 1 [] [(.mut, var "f")]) .int
+      [("f", .ref .mut (.fn .excl .int .int [])), ("b", .lent (.box .int))] [.fail] :=
+    .call (d := callsTwice) rfl rfl rfl (by simp [callsTwice]) .nil
+      (.cons (.ref (m := .mut) rfl) (fun _ => rfl) .nil) (by simp [Exclusive])
+  have hlc := Typed.lendCloMut (F := [bump, callsTwice]) (O := []) (Γ := [("b", .own (.box .int) true)]) (f := 0)
+    (d := bump) (p := var "b") (y := "b") (x := "f") (r := [.fail]) (τb := .int)
+    (Γb := [("b", .lent (.box .int))]) rfl rfl rfl rfl rfl rfl (.own rfl) rfl
+    (by simpa [bump, hide, Slot.ty] using hcall)
+  simp only [thaw] at hlc
+  exact .let_ (live := true) rfl (.new .lit) (.let_ (live := true) rfl (by simpa using hlc)
+    (.add (.read (.own rfl)) (.read (.deref (.own rfl)))))
+
+example : ∀ n, match eval [bump, callsTwice] [] n [.abort .fail 0] .empty [] tally with
+    | (.stuck, _) => False
+    | (.susp _ _ _ _ _, _) => False
+    | (.timeout, _) => True
+    | (.val v, σ') => ∃ L, VT [bump, callsTwice] σ' .int v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
+    | (.abort _ _, σ') => ∀ l, σ'.mem l = none :=
+  program_ok tally_fns_ok tally_typed
+
+theorem placeTy_var_root {w : Bool} (h : PlaceTy Γ (.var x) τ w y) : y = x := by
+  cases h <;> rfl
+
+/-- `{ const f = (x) => { … }; f = …; }` over a borrow of `b`: putting another closure in place
+of one borrowed `mut`, the types reject it. -/
+def swapClosure : Expr :=
+  .lendClo "f" 0 (var "b") (.assign (var "f") (.fn .excl .int .int []) (.lit 0))
+
+theorem swapClosure_rejected : ¬ Typed [bump] [] [("b", .own (.box .int) true)] swapClosure τ Γ' r := by
+  intro h
+  cases h with
+  | lendClo hfd hcap => simp at hfd; subst hfd; simp [bump] at hcap
+  | lendCloMut _ _ _ _ _ _ _ _ hb =>
+    cases hb with
+    | assign _ hp hsh =>
+      obtain rfl := placeTy_var_root hp
+      simp [lookup, Slot.shell] at hsh
 
 end FlyCore.Ownership.Examples

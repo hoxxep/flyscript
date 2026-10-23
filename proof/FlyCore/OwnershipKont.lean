@@ -58,6 +58,7 @@ structure HandleOk (F : List Fn) (O : List Op) (σf : Store) (e : Nat) (caps : L
   hS : ∀ l ∈ S, l ∈ Sin
   hRc : ∀ l ∈ Rc, l ∈ Fz ∨ l ∈ S
   hRcdet : ∀ σ1 Rc' Hc, Agree σf σ1 (Fz ++ S) → CapsOk F σ1 caps Rc' Hc → Rc' = Rc
+  hfns : CapsFns caps
   hre : ∀ σ1 Eb Hc, Agree σf σ1 (Fz ++ S) → Disj (Fz ++ Hc) Eb → Disj S Hc → (Fz ++ Hc).Nodup →
     CapsOk F σ1 caps Rc Hc → Inv F σ1 Γin env Eb Sin →
     ∃ E', Inv F σ1 Γout env E' S ∧ ∀ z, z ∈ E' ↔ z ∈ Eb ∨ z ∈ Fz ∨ z ∈ Hc
@@ -95,7 +96,9 @@ reached, while it lives. -/
       ((d.owns.map Prod.fst) ++ (d.refs.map Prod.fst)).Nodup →
       Typed F O (fnCtx d) d.body .int Γ'' d.row → cells.map Prod.fst = d.owns.map Prod.fst →
       d.refs[(i : Nat)]? = some (xi, mi, τi) → PlaceTy Γ'' p d.ret w xi → (m = .mut → w = true) →
+      (m = .mut → d.ret.isFn = false ∧ τi.isFn = false) →
       hos[i]? = some (hd : Hole) → (m = .mut → hd.mode = .mut) →
+      (∀ s, lookup hd.root Γ₁ = some s → s.shell = true → hd.path = []) →
       (∀ τ', lookup hd.root Γ₁ ≠ some (.own τ' false)) → lookup x Γ₁ = none →
       Typed F O ((x, .ref m d.ret) :: lendCtx m Γ₁ hd.root) body τb ((x, .ref m d.ret) :: Γb) r →
       FrameOk F O σf (.callLendK x p (cells ++ (d.refs.map Prod.fst).zip (hos.map Hole.loc))

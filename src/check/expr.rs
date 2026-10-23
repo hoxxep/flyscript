@@ -928,6 +928,12 @@ impl<'p> Checker<'p> {
             ExprKind::Binary { op, lhs, rhs } => self.binary(op, lhs, rhs, span),
             ExprKind::Assign { op, target, value } => {
                 let t = self.expr(target, None);
+                // A `mut` borrow of a closure lends the right to call it, not to replace it (§4.3).
+                if let Ty::Borrow(true, inner) = self.s.resolve(&t)
+                    && matches!(self.s.resolve(&inner), Ty::Fn(_))
+                {
+                    self.err(target.span, "a closure borrowed `mut` can be called, not replaced; to replace it, own it or hold it in a field");
+                }
                 let v = self.strip(&t);
                 let found = self.expr(value, Some(&v));
                 let found = if *op == "=" { found } else { self.strip(&found) };

@@ -1,0 +1,13 @@
+// A closure held in a field of a binding borrowed `mut` may be replaced: the borrow is of the
+// binding, which owns its closure (§4.3).
+import { println } from "std/io";
+struct Button { onClick: (x: i32) => i32 }
+function rewire(b: mut Button): void {
+  b.onClick = (x) => x * 100;
+}
+export function main(): void uses Io {
+  let b = Button { onClick: (x) => x + 1 };
+  rewire(mut b);
+  const f = b.onClick;
+  println(`${f(2)}`);
+}

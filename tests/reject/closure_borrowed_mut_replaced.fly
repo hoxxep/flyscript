@@ -1,0 +1,15 @@
+// error: a closure borrowed `mut` can be called, not replaced; to replace it, own it or hold it in a field
+// A `mut` borrow of a closure lends the right to call it, changing what it captured, and nothing
+// more (§4.3): the caller's closure is the one it lent when the borrow ends.
+import { println } from "std/io";
+
+function swap(f: mut mut (x: i32) => i32): void {
+  f = (x) => x * 100;
+}
+
+export function main(): void uses Io {
+  let n = 1;
+  let g = (x: i32) => { n += x; n };
+  swap(mut g);
+  println(`${g(2)}`);
+}

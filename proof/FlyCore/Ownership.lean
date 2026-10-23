@@ -63,6 +63,13 @@ def Ty.data : Ty → Bool
   | .box τ => τ.data
   | .fn _ _ _ _ => false
 
+def Ty.isFn : Ty → Bool
+  | .fn _ _ _ _ => true
+  | _ => false
+
+theorem Ty.data_not_fn {τ : Ty} (h : τ.data = true) : τ.isFn = false := by
+  cases τ <;> simp_all [Ty.data, Ty.isFn]
+
 /-- What a `handle` lends its arm: the name the arm knows it by, the mode it is lent in, its type,
 and where it is — a place in the program, a location once the `handle` runs. -/
 structure Cap (α : Type) where
@@ -759,6 +766,12 @@ inductive Slot where
 def Slot.ty : Slot → Ty
   | .own τ _ | .ref _ τ | .lent τ => τ
 
+/-- A `mut` borrow of a closure: it may call the closure, changing what it captured, but not put
+another closure in its place. -/
+def Slot.shell : Slot → Bool
+  | .ref .mut (.fn _ _ _ _) => true
+  | _ => false
+
 abbrev Ctx := List (Var × Slot)
 
 def setSlot (Γ : Ctx) (x : Var) (s : Slot) : Ctx :=
@@ -836,7 +849,8 @@ the mode it is lent in. What is lent `mut` is a whole variable the arm may chang
 inductive Caps (Γ : Ctx) : List (Cap Place) → List (Mode × Var) → Prop
   | nil : Caps Γ [] []
   | ro : PlaceTy Γ p τ w y → Caps Γ rest ys → Caps Γ (⟨x, .ro, τ, p⟩ :: rest) ((.ro, y) :: ys)
-  | mut : PlaceTy Γ (.var y) τ true y → Caps Γ rest ys → Caps Γ (⟨x, .mut, τ, .var y⟩ :: rest) ((.mut, y) :: ys)
+  | mut : PlaceTy Γ (.var y) τ true y → τ.isFn = false → Caps Γ rest ys →
+      Caps Γ (⟨x, .mut, τ, .var y⟩ :: rest) ((.mut, y) :: ys)
 
 /-- An arm's context: the operation's owned arguments, live, then its borrowed ones, then the
 places its `handle` lent it, each as it was lent. -/
@@ -865,7 +879,9 @@ inductive Typed (F : List Fn) (O : List Op) : Ctx → Expr → Ty → Ctx → Ro
   | let_ : lookup x Γ = none → Typed F O Γ a τ Γ₁ r →
       Typed F O ((x, .own τ true) :: Γ₁) b τb ((x, .own τ live) :: Γ₂) r → Typed F O Γ (.let_ x τ a b) τb Γ₂ r
   | write : AtomTy Γ a .int Γ₁ → PlaceTy Γ₁ p .int true y → Typed F O Γ (.write p a) .int Γ₁ r
-  | assign : AtomTy Γ a τ Γ₁ → PlaceTy Γ₁ p τ true y → Typed F O Γ (.assign p τ a) .int Γ₁ r
+  /-- Nothing is put in place of a closure borrowed `mut`, or of what it captured. -/
+  | assign : AtomTy Γ a τ Γ₁ → PlaceTy Γ₁ p τ true y → (∀ s, lookup y Γ₁ = some s → s.shell = false) →
+      Typed F O Γ (.assign p τ a) .int Γ₁ r
   | call : F[f]? = some d → d.retp = none → d.cap = none → (∀ l ∈ d.row, l ∈ r) → AtomsTy Γ owned (d.owns.map Prod.snd) Γ₁ →
       Lends Γ₁ lent (d.refs.map Prod.snd) ys → Exclusive ys →
       Typed F O Γ (.call f owned lent) d.ret Γ₁ r
@@ -887,11 +903,20 @@ inductive Typed (F : List Fn) (O : List Op) : Ctx → Expr → Ty → Ctx → Ro
       Typed F O ((x, .ref .ro (.fn .shared A d.ret d.row)) :: freeze Γ [y]) body τb
         ((x, .ref .ro (.fn .shared A d.ret d.row)) :: Γb) r →
       Typed F O Γ (.lendClo x f p body) τb (thaw Γ [y] Γb) r
+  /-- A closure over a `mut` borrow is a `mut` borrow too: `body` may call it, changing what it
+  captured, or lend it on, but not move it or put another closure in its place; what the borrowed
+  place is rooted at is out of reach meanwhile. -/
+  | lendCloMut : F[f]? = some d → d.cap = some (xc, τc, .excl) → d.owns = [(pn, A)] → d.refs = [] →
+      d.retp = none → τc.data = true → PlaceTy Γ p τc true y → lookup x Γ = none →
+      Typed F O ((x, .ref .mut (.fn .excl A d.ret d.row)) :: hide Γ y) body τb
+        ((x, .ref .mut (.fn .excl A d.ret d.row)) :: Γb) r →
+      Typed F O Γ (.lendClo x f p body) τb (thaw Γ [y] Γb) r
   /-- The borrow a call returns is of what the caller lent it as its `i`th borrowed argument, rooted
   at `y`: as for a borrow of a place, `y` is only read, or not reached, while the borrow lives. -/
   | lendCall : F[f]? = some d → d.retp = some (m, i, p) → d.cap = none → (∀ l ∈ d.row, l ∈ r) →
       AtomsTy Γ owned (d.owns.map Prod.snd) Γ₁ → Lends Γ₁ lent (d.refs.map Prod.snd) ys → Exclusive ys →
-      ys[i]? = some (mi, y) → (m = .mut → mi = .mut) → lookup x Γ₁ = none →
+      ys[i]? = some (mi, y) → (m = .mut → mi = .mut) →
+      (m = .mut → d.ret.isFn = false ∧ ∀ e, d.refs[i]? = some e → e.2.2.isFn = false) → lookup x Γ₁ = none →
       Typed F O ((x, .ref m d.ret) :: lendCtx m Γ₁ y) body τb ((x, .ref m d.ret) :: Γb) r →
       Typed F O Γ (.lendCall x m f owned lent body) τb (thaw Γ₁ [y] Γb) r
   /-- Where the branches disagree, a variable is perhaps moved. -/
@@ -906,7 +931,7 @@ inductive Typed (F : List Fn) (O : List Op) : Ctx → Expr → Ty → Ctx → Ro
   | while_ : Typed F O Γ c .int Γ r → Typed F O Γ b .int Γ r → Typed F O Γ (.while_ c b) .int Γ r
   /-- A borrow lives as long as the code it is in scope for: what the place is rooted at is only
   read, or not reached, until it ends. -/
-  | lend : lookup x Γ = none → PlaceTy Γ p τ w y → (m = .mut → w = true) →
+  | lend : lookup x Γ = none → PlaceTy Γ p τ w y → (m = .mut → w = true) → (m = .mut → τ.isFn = false) →
       Typed F O ((x, .ref m τ) :: lendCtx m Γ y) body τb ((x, .ref m τ) :: Γb) r →
       Typed F O Γ (.lend x m p body) τb (thaw Γ [y] Γb) r
   /-- Cleanup starts where the body would have ended, and moves nothing. -/

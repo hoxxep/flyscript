@@ -45560,14 +45560,14 @@ function elabLen_305($686, $687, $688) {
 function exprInner_306($689, $690, $691) {
   let v3_ret;
   {
-    let v0_self, v1_e, v2_expected, v4_t, v331_t, v373_t;
+    let v0_self, v1_e, v2_expected, v4_t, v344_t, v386_t;
     v0_self = $689; v1_e = $690; v2_expected = $691; 
     {
       let v5_span, v6_t;
       v5_span = $copy2(v1_e.span);
       L1:
       {
-        let v7_t, v33_t, v39_t, v61_t, v65_t, v68_t, v71_t, v73_t, v103_t, v110_t, v116_t, v120_t, v123_t, v137_t, v144_t, v151_t, v176_t, v208_t, v217_t, v252_t, v267_t, v271_t, v278_t, v281_t, v381_t, v406_t, v414_t, v420_t, v425_t, v488_t, v549_t, v569_t, v573_t, v577_t, v582_t, v607_t;
+        let v7_t, v33_t, v39_t, v61_t, v65_t, v68_t, v71_t, v73_t, v103_t, v110_t, v116_t, v120_t, v123_t, v137_t, v144_t, v151_t, v176_t, v208_t, v217_t, v265_t, v280_t, v284_t, v291_t, v294_t, v394_t, v419_t, v427_t, v433_t, v438_t, v501_t, v562_t, v582_t, v586_t, v590_t, v595_t, v620_t;
         v7_t = (v1_e.kind.$tag === "TypeRef");
         if (v7_t)
         {
@@ -46079,604 +46079,654 @@ function exprInner_306($689, $690, $691) {
           v219_target = v1_e.kind.$.target;
           v220_value = v1_e.kind.$.value;
           {
-            let v222_t, v223_t, v224_t, v225_t, v226_t, v227_t, v228_t, v229_t, v230_v, v231_t, v232_t, v233_t, v234_t, v235_t, v236_t, v237_found0, v238_t, v239_t, v240_t, v246_found, v247_t, v248_t, v249_t, v250_t, v251_t;
+            let v222_t, v223_t, v224_t, v225_t, v226_t, v227_t, v228_t, v229_t, v230_t, v240_t, v241_t, v242_t, v243_v, v244_t, v245_t, v246_t, v247_t, v248_t, v249_t, v250_found0, v251_t, v252_t, v253_t, v259_found, v260_t, v261_t, v262_t, v263_t, v264_t;
             v224_t = v0_self;
             v222_t = v219_target;
             v223_t = { $tag: "None" };
             v225_t = expr_124(v224_t, v222_t, v223_t);
             v226_t = v225_t;
-            v227_t = v0_self.v;
+            v227_t = v0_self.v.s;
             v228_t = v226_t;
-            v229_t = strip_146(v227_t, v228_t);
-            v230_v = v229_t;
-            v235_t = v0_self;
-            v231_t = v220_value;
-            v232_t = v230_v;
-            v233_t = clone_28(v232_t);
-            v234_t = { $tag: "Some", $: v233_t };
-            v236_t = expr_124(v235_t, v231_t, v234_t);
-            v237_found0 = v236_t;
-            v238_t = v218_op;
-            v239_t = (v238_t === "=");
-            if (v239_t)
+            v229_t = resolve_132(v227_t, v228_t);
+            v230_t = v229_t;
+            L8:
             {
-              let v241_t;
+              let v231_t;
+              v231_t = (v230_t.$tag === "Borrow");
+              if (v231_t)
               {
-                v241_t = v237_found0;
+                let v232_t;
+                v232_t = (v230_t.$[0] === true);
+                v231_t = v232_t;
               }
-              v240_t = v241_t;
+              if (v231_t)
+              {
+                let v233_inner, v234_t, v235_t, v236_t, v237_t;
+                v233_inner = new $rt.FieldRef(v230_t.$, 1);
+                v234_t = v0_self.v.s;
+                v235_t = v233_inner.v;
+                v236_t = resolve_132(v234_t, v235_t);
+                v237_t = v236_t;
+                L9:
+                {
+                  let v238_t;
+                  v238_t = (v237_t.$tag === "Fn");
+                  if (v238_t)
+                  {
+                    {
+                      let v239_t;
+                      err_130(v0_self, $copy2(v219_target.span), "a closure borrowed `mut` can be called, not replaced; to replace it, own it or hold it in a field");
+                    }
+                    break L9;
+                  }
+                  {
+                    {
+                    }
+                    break L9;
+                  }
+                  $rt.panic("no arm matched");
+                }
+                break L8;
+              }
+              {
+                {
+                }
+                break L8;
+              }
+              $rt.panic("no arm matched");
+            }
+            v240_t = v0_self.v;
+            v241_t = v226_t;
+            v242_t = strip_146(v240_t, v241_t);
+            v243_v = v242_t;
+            v248_t = v0_self;
+            v244_t = v220_value;
+            v245_t = v243_v;
+            v246_t = clone_28(v245_t);
+            v247_t = { $tag: "Some", $: v246_t };
+            v249_t = expr_124(v248_t, v244_t, v247_t);
+            v250_found0 = v249_t;
+            v251_t = v218_op;
+            v252_t = (v251_t === "=");
+            if (v252_t)
+            {
+              let v254_t;
+              {
+                v254_t = v250_found0;
+              }
+              v253_t = v254_t;
             }
             else
             {
-              let v242_t;
+              let v255_t;
               {
-                let v243_t, v244_t, v245_t;
-                v243_t = v0_self.v;
-                v244_t = v237_found0;
-                v245_t = strip_146(v243_t, v244_t);
-                v242_t = v245_t;
+                let v256_t, v257_t, v258_t;
+                v256_t = v0_self.v;
+                v257_t = v250_found0;
+                v258_t = strip_146(v256_t, v257_t);
+                v255_t = v258_t;
               }
-              v240_t = v242_t;
+              v253_t = v255_t;
             }
-            v246_found = v240_t;
-            v249_t = v0_self;
-            v247_t = v246_found;
-            v248_t = v230_v;
-            coerce_49(v249_t, v247_t, v248_t, $copy2(v220_value.span));
-            v251_t = voidTy_134();
-            v221_t = v251_t;
+            v259_found = v253_t;
+            v262_t = v0_self;
+            v260_t = v259_found;
+            v261_t = v243_v;
+            coerce_49(v262_t, v260_t, v261_t, $copy2(v220_value.span));
+            v264_t = voidTy_134();
+            v221_t = v264_t;
           }
           v6_t = v221_t;
           break L1;
         }
-        v252_t = (v1_e.kind.$tag === "Cast");
-        if (v252_t)
+        v265_t = (v1_e.kind.$tag === "Cast");
+        if (v265_t)
         {
-          let v253_expr, v254_ty, v255_t;
-          v253_expr = v1_e.kind.$.expr;
-          v254_ty = v1_e.kind.$.ty;
+          let v266_expr, v267_ty, v268_t;
+          v266_expr = v1_e.kind.$.expr;
+          v267_ty = v1_e.kind.$.ty;
           {
-            let v256_t, v257_t, v258_t, v259_t, v260_t, v261_t, v262_scope, v263_t, v264_t, v265_t, v266_t;
-            v258_t = v0_self;
-            v256_t = v253_expr;
-            v257_t = { $tag: "None" };
-            v259_t = expr_124(v258_t, v256_t, v257_t);
-            v260_t = v0_self.v.scope;
-            v261_t = clone_119(v260_t);
-            v262_scope = v261_t;
-            v265_t = v0_self.v.p;
-            v264_t = v254_ty;
-            v263_t = v262_scope;
-            v266_t = elabTy_123(v265_t, v264_t, v263_t);
-            v255_t = v266_t;
-          }
-          v6_t = v255_t;
-          break L1;
-        }
-        v267_t = (v1_e.kind.$tag === "Range");
-        if (v267_t)
-        {
-          let v268_t;
-          {
-            let v269_t, v270_t;
-            err_130(v0_self, $copy2(v5_span), "a range can only be used to index");
-            v270_t = { $tag: "Error" };
-            v268_t = v270_t;
+            let v269_t, v270_t, v271_t, v272_t, v273_t, v274_t, v275_scope, v276_t, v277_t, v278_t, v279_t;
+            v271_t = v0_self;
+            v269_t = v266_expr;
+            v270_t = { $tag: "None" };
+            v272_t = expr_124(v271_t, v269_t, v270_t);
+            v273_t = v0_self.v.scope;
+            v274_t = clone_119(v273_t);
+            v275_scope = v274_t;
+            v278_t = v0_self.v.p;
+            v277_t = v267_ty;
+            v276_t = v275_scope;
+            v279_t = elabTy_123(v278_t, v277_t, v276_t);
+            v268_t = v279_t;
           }
           v6_t = v268_t;
           break L1;
         }
-        v271_t = (v1_e.kind.$tag === "Lambda");
-        if (v271_t)
+        v280_t = (v1_e.kind.$tag === "Range");
+        if (v280_t)
         {
-          let v272_params, v273_body, v274_t, v275_t, v276_t, v277_t;
-          v272_params = v1_e.kind.$.params;
-          v273_body = v1_e.kind.$.body;
-          v276_t = v0_self;
-          v275_t = v272_params;
-          v274_t = v273_body;
-          v277_t = lambda_561(v276_t, v275_t, v274_t, v2_expected);
-          v6_t = v277_t;
-          break L1;
-        }
-        v278_t = (v1_e.kind.$tag === "Block");
-        if (v278_t)
-        {
-          let v279_b, v280_t;
-          v279_b = v1_e.kind.$;
-          v280_t = block_48(v0_self, v279_b, v2_expected);
-          v6_t = v280_t;
-          break L1;
-        }
-        v281_t = (v1_e.kind.$tag === "If");
-        if (v281_t)
-        {
-          let v282_cond, v283_then, v284_otherwise, v285_t;
-          v282_cond = v1_e.kind.$.cond;
-          v283_then = v1_e.kind.$.then;
-          v284_otherwise = v1_e.kind.$.otherwise;
+          let v281_t;
           {
-            let v286_t, v287_t, v288_t, v289_t, v290_t, v291_t, v292_t;
-            v290_t = v0_self;
-            v286_t = v282_cond;
-            v287_t = boolTy_243();
-            v288_t = v287_t;
-            v289_t = v288_t;
-            v291_t = check_562(v290_t, v286_t, v289_t);
-            L8:
+            let v282_t, v283_t;
+            err_130(v0_self, $copy2(v5_span), "a range can only be used to index");
+            v283_t = { $tag: "Error" };
+            v281_t = v283_t;
+          }
+          v6_t = v281_t;
+          break L1;
+        }
+        v284_t = (v1_e.kind.$tag === "Lambda");
+        if (v284_t)
+        {
+          let v285_params, v286_body, v287_t, v288_t, v289_t, v290_t;
+          v285_params = v1_e.kind.$.params;
+          v286_body = v1_e.kind.$.body;
+          v289_t = v0_self;
+          v288_t = v285_params;
+          v287_t = v286_body;
+          v290_t = lambda_561(v289_t, v288_t, v287_t, v2_expected);
+          v6_t = v290_t;
+          break L1;
+        }
+        v291_t = (v1_e.kind.$tag === "Block");
+        if (v291_t)
+        {
+          let v292_b, v293_t;
+          v292_b = v1_e.kind.$;
+          v293_t = block_48(v0_self, v292_b, v2_expected);
+          v6_t = v293_t;
+          break L1;
+        }
+        v294_t = (v1_e.kind.$tag === "If");
+        if (v294_t)
+        {
+          let v295_cond, v296_then, v297_otherwise, v298_t;
+          v295_cond = v1_e.kind.$.cond;
+          v296_then = v1_e.kind.$.then;
+          v297_otherwise = v1_e.kind.$.otherwise;
+          {
+            let v299_t, v300_t, v301_t, v302_t, v303_t, v304_t, v305_t;
+            v303_t = v0_self;
+            v299_t = v295_cond;
+            v300_t = boolTy_243();
+            v301_t = v300_t;
+            v302_t = v301_t;
+            v304_t = check_562(v303_t, v299_t, v302_t);
+            L10:
             {
-              let v293_t, v335_t, v377_t;
-              v293_t = (v284_otherwise.$tag === "Some");
-              if (v293_t)
+              let v306_t, v348_t, v390_t;
+              v306_t = (v297_otherwise.$tag === "Some");
+              if (v306_t)
               {
-                let v294_t;
+                let v307_t;
                 {
-                  let v295_o, v296_t, v297_t, v298_t, v299_t, v301_t;
-                  v295_o = v284_otherwise.$;
-                  v296_t = v0_self.v;
-                  v297_t = v2_expected;
-                  v298_t = unknown_563(v296_t, v297_t);
-                  v299_t = v298_t;
-                  if (v299_t)
+                  let v308_o, v309_t, v310_t, v311_t, v312_t, v314_t;
+                  v308_o = v297_otherwise.$;
+                  v309_t = v0_self.v;
+                  v310_t = v2_expected;
+                  v311_t = unknown_563(v309_t, v310_t);
+                  v312_t = v311_t;
+                  if (v312_t)
                   {
-                    let v300_t;
-                    v300_t = tagBuiltBlock_564(v283_then);
-                    v299_t = v300_t;
+                    let v313_t;
+                    v313_t = tagBuiltBlock_564(v296_then);
+                    v312_t = v313_t;
                   }
-                  v301_t = v299_t;
-                  if (v301_t)
+                  v314_t = v312_t;
+                  if (v314_t)
                   {
-                    let v302_t, v303_t, v304_t;
-                    v302_t = v295_o;
-                    v303_t = tagBuilt_565(v302_t);
-                    v304_t = (!v303_t);
-                    v301_t = v304_t;
+                    let v315_t, v316_t, v317_t;
+                    v315_t = v308_o;
+                    v316_t = tagBuilt_565(v315_t);
+                    v317_t = (!v316_t);
+                    v314_t = v317_t;
                   }
-                  v294_t = v301_t;
+                  v307_t = v314_t;
                 }
-                if (v294_t)
+                if (v307_t)
                 {
-                  let v305_o, v306_t;
-                  v305_o = v284_otherwise.$;
+                  let v318_o, v319_t;
+                  v318_o = v297_otherwise.$;
                   {
-                    let v307_t, v308_t, v309_t, v310_t, v311_b, v312_t, v313_t, v314_t, v315_t, v316_t, v317_t, v318_t, v325_anchor, v326_t, v327_a, v328_t, v329_t, v330_t, v332_t, v333_t, v334_t;
-                    v309_t = v0_self;
-                    v307_t = v305_o;
-                    v308_t = { $tag: "None" };
-                    v310_t = expr_124(v309_t, v307_t, v308_t);
-                    v311_b = v310_t;
-                    v312_t = v0_self.v.s;
-                    v313_t = v311_b;
-                    v314_t = resolve_132(v312_t, v313_t);
-                    v315_t = v314_t;
-                    v316_t = v315_t;
-                    v317_t = isNever_131(v316_t);
-                    if (v317_t)
+                    let v320_t, v321_t, v322_t, v323_t, v324_b, v325_t, v326_t, v327_t, v328_t, v329_t, v330_t, v331_t, v338_anchor, v339_t, v340_a, v341_t, v342_t, v343_t, v345_t, v346_t, v347_t;
+                    v322_t = v0_self;
+                    v320_t = v318_o;
+                    v321_t = { $tag: "None" };
+                    v323_t = expr_124(v322_t, v320_t, v321_t);
+                    v324_b = v323_t;
+                    v325_t = v0_self.v.s;
+                    v326_t = v324_b;
+                    v327_t = resolve_132(v325_t, v326_t);
+                    v328_t = v327_t;
+                    v329_t = v328_t;
+                    v330_t = isNever_131(v329_t);
+                    if (v330_t)
                     {
-                      let v319_t;
+                      let v332_t;
                       {
-                        let v320_t;
-                        v320_t = { $tag: "None" };
-                        v319_t = v320_t;
+                        let v333_t;
+                        v333_t = { $tag: "None" };
+                        v332_t = v333_t;
                       }
-                      v318_t = v319_t;
+                      v331_t = v332_t;
                     }
                     else
                     {
-                      let v321_t;
+                      let v334_t;
                       {
-                        let v322_t, v323_t, v324_t;
-                        v322_t = v311_b;
-                        v323_t = clone_28(v322_t);
-                        v324_t = { $tag: "Some", $: v323_t };
-                        v321_t = v324_t;
+                        let v335_t, v336_t, v337_t;
+                        v335_t = v324_b;
+                        v336_t = clone_28(v335_t);
+                        v337_t = { $tag: "Some", $: v336_t };
+                        v334_t = v337_t;
                       }
-                      v318_t = v321_t;
+                      v331_t = v334_t;
                     }
-                    v325_anchor = v318_t;
-                    v326_t = block_48(v0_self, v283_then, v325_anchor);
-                    v327_a = v326_t;
-                    v333_t = v0_self;
-                    v328_t = [v327_a, $copy2(v283_then.span)];
-                    v329_t = [v311_b, $copy2(v305_o.span)];
-                    v330_t = [v328_t, v329_t];
-                    v331_t = v330_t;
-                    v332_t = v331_t;
-                    v334_t = join_566(v333_t, v332_t, v2_expected);
-                    v306_t = v334_t;
+                    v338_anchor = v331_t;
+                    v339_t = block_48(v0_self, v296_then, v338_anchor);
+                    v340_a = v339_t;
+                    v346_t = v0_self;
+                    v341_t = [v340_a, $copy2(v296_then.span)];
+                    v342_t = [v324_b, $copy2(v318_o.span)];
+                    v343_t = [v341_t, v342_t];
+                    v344_t = v343_t;
+                    v345_t = v344_t;
+                    v347_t = join_566(v346_t, v345_t, v2_expected);
+                    v319_t = v347_t;
                   }
-                  v292_t = v306_t;
-                  break L8;
+                  v305_t = v319_t;
+                  break L10;
                 }
               }
-              v335_t = (v284_otherwise.$tag === "Some");
-              if (v335_t)
+              v348_t = (v297_otherwise.$tag === "Some");
+              if (v348_t)
               {
-                let v336_o, v337_t;
-                v336_o = v284_otherwise.$;
+                let v349_o, v350_t;
+                v349_o = v297_otherwise.$;
                 {
-                  let v338_t, v339_t, v340_t, v341_t, v342_t, v343_a, v344_t, v345_t, v346_t, v347_t, v348_t, v349_t, v350_t, v357_first, v358_t, v365_want, v366_t, v367_t, v368_t, v369_b, v370_t, v371_t, v372_t, v374_t, v375_t, v376_t;
-                  v341_t = v0_self;
-                  v340_t = v283_then;
-                  v338_t = v2_expected;
-                  v339_t = clone_296(v338_t);
-                  v342_t = block_48(v341_t, v340_t, v339_t);
-                  v343_a = v342_t;
-                  v344_t = v0_self.v.s;
-                  v345_t = v343_a;
-                  v346_t = resolve_132(v344_t, v345_t);
-                  v347_t = v346_t;
-                  v348_t = v347_t;
-                  v349_t = isNever_131(v348_t);
-                  if (v349_t)
+                  let v351_t, v352_t, v353_t, v354_t, v355_t, v356_a, v357_t, v358_t, v359_t, v360_t, v361_t, v362_t, v363_t, v370_first, v371_t, v378_want, v379_t, v380_t, v381_t, v382_b, v383_t, v384_t, v385_t, v387_t, v388_t, v389_t;
+                  v354_t = v0_self;
+                  v353_t = v296_then;
+                  v351_t = v2_expected;
+                  v352_t = clone_296(v351_t);
+                  v355_t = block_48(v354_t, v353_t, v352_t);
+                  v356_a = v355_t;
+                  v357_t = v0_self.v.s;
+                  v358_t = v356_a;
+                  v359_t = resolve_132(v357_t, v358_t);
+                  v360_t = v359_t;
+                  v361_t = v360_t;
+                  v362_t = isNever_131(v361_t);
+                  if (v362_t)
                   {
-                    let v351_t;
+                    let v364_t;
                     {
-                      let v352_t;
-                      v352_t = { $tag: "None" };
-                      v351_t = v352_t;
+                      let v365_t;
+                      v365_t = { $tag: "None" };
+                      v364_t = v365_t;
                     }
-                    v350_t = v351_t;
+                    v363_t = v364_t;
                   }
                   else
                   {
-                    let v353_t;
+                    let v366_t;
                     {
-                      let v354_t, v355_t, v356_t;
-                      v354_t = v343_a;
-                      v355_t = clone_28(v354_t);
-                      v356_t = { $tag: "Some", $: v355_t };
-                      v353_t = v356_t;
+                      let v367_t, v368_t, v369_t;
+                      v367_t = v356_a;
+                      v368_t = clone_28(v367_t);
+                      v369_t = { $tag: "Some", $: v368_t };
+                      v366_t = v369_t;
                     }
-                    v350_t = v353_t;
+                    v363_t = v366_t;
                   }
-                  v357_first = v350_t;
-                  L9:
+                  v370_first = v363_t;
+                  L11:
                   {
-                    let v359_t, v364_t;
-                    v359_t = (v2_expected.$tag === "Some");
-                    if (v359_t)
+                    let v372_t, v377_t;
+                    v372_t = (v2_expected.$tag === "Some");
+                    if (v372_t)
                     {
-                      let v360_x, v361_t, v362_t, v363_t;
-                      v360_x = new $rt.FieldRef(v2_expected, "$");
-                      v361_t = v360_x.v;
-                      v362_t = clone_28(v361_t);
-                      v363_t = { $tag: "Some", $: v362_t };
-                      v358_t = v363_t;
-                      break L9;
+                      let v373_x, v374_t, v375_t, v376_t;
+                      v373_x = new $rt.FieldRef(v2_expected, "$");
+                      v374_t = v373_x.v;
+                      v375_t = clone_28(v374_t);
+                      v376_t = { $tag: "Some", $: v375_t };
+                      v371_t = v376_t;
+                      break L11;
                     }
-                    v364_t = (v2_expected.$tag === "None");
-                    if (v364_t)
+                    v377_t = (v2_expected.$tag === "None");
+                    if (v377_t)
                     {
-                      v358_t = v357_first;
-                      break L9;
+                      v371_t = v370_first;
+                      break L11;
                     }
                     $rt.panic("no arm matched");
                   }
-                  v365_want = v358_t;
-                  v367_t = v0_self;
-                  v366_t = v336_o;
-                  v368_t = expr_124(v367_t, v366_t, v365_want);
-                  v369_b = v368_t;
-                  v375_t = v0_self;
-                  v370_t = [v343_a, $copy2(v283_then.span)];
-                  v371_t = [v369_b, $copy2(v336_o.span)];
-                  v372_t = [v370_t, v371_t];
-                  v373_t = v372_t;
-                  v374_t = v373_t;
-                  v376_t = join_566(v375_t, v374_t, v2_expected);
-                  v337_t = v376_t;
+                  v378_want = v371_t;
+                  v380_t = v0_self;
+                  v379_t = v349_o;
+                  v381_t = expr_124(v380_t, v379_t, v378_want);
+                  v382_b = v381_t;
+                  v388_t = v0_self;
+                  v383_t = [v356_a, $copy2(v296_then.span)];
+                  v384_t = [v382_b, $copy2(v349_o.span)];
+                  v385_t = [v383_t, v384_t];
+                  v386_t = v385_t;
+                  v387_t = v386_t;
+                  v389_t = join_566(v388_t, v387_t, v2_expected);
+                  v350_t = v389_t;
                 }
-                v292_t = v337_t;
-                break L8;
+                v305_t = v350_t;
+                break L10;
               }
-              v377_t = (v284_otherwise.$tag === "None");
-              if (v377_t)
+              v390_t = (v297_otherwise.$tag === "None");
+              if (v390_t)
               {
-                let v378_t;
+                let v391_t;
                 {
-                  let v379_t, v380_t;
-                  v379_t = block_48(v0_self, v283_then, v2_expected);
-                  v380_t = voidTy_134();
-                  v378_t = v380_t;
+                  let v392_t, v393_t;
+                  v392_t = block_48(v0_self, v296_then, v2_expected);
+                  v393_t = voidTy_134();
+                  v391_t = v393_t;
                 }
-                v292_t = v378_t;
-                break L8;
+                v305_t = v391_t;
+                break L10;
               }
               $rt.panic("no arm matched");
             }
-            v285_t = v292_t;
+            v298_t = v305_t;
           }
-          v6_t = v285_t;
+          v6_t = v298_t;
           break L1;
         }
-        v381_t = (v1_e.kind.$tag === "While");
-        if (v381_t)
+        v394_t = (v1_e.kind.$tag === "While");
+        if (v394_t)
         {
-          let v382_cond, v383_body, v384_t;
-          v382_cond = v1_e.kind.$.cond;
-          v383_body = v1_e.kind.$.body;
+          let v395_cond, v396_body, v397_t;
+          v395_cond = v1_e.kind.$.cond;
+          v396_body = v1_e.kind.$.body;
           {
-            let v385_t, v386_t, v387_t, v388_t, v389_t, v390_t, v391_t, v392_t, v393_t, v394_t, v395_t, v398_t, v401_t;
-            v389_t = v0_self;
-            v385_t = v382_cond;
-            v386_t = boolTy_243();
-            v387_t = v386_t;
-            v388_t = v387_t;
-            v390_t = check_562(v389_t, v385_t, v388_t);
-            v393_t = v0_self;
-            v392_t = v383_body;
-            v391_t = { $tag: "None" };
-            v394_t = block_48(v393_t, v392_t, v391_t);
-            L10:
+            let v398_t, v399_t, v400_t, v401_t, v402_t, v403_t, v404_t, v405_t, v406_t, v407_t, v408_t, v411_t, v414_t;
+            v402_t = v0_self;
+            v398_t = v395_cond;
+            v399_t = boolTy_243();
+            v400_t = v399_t;
+            v401_t = v400_t;
+            v403_t = check_562(v402_t, v398_t, v401_t);
+            v406_t = v0_self;
+            v405_t = v396_body;
+            v404_t = { $tag: "None" };
+            v407_t = block_48(v406_t, v405_t, v404_t);
+            L12:
             {
-              let v396_t;
-              v396_t = (v382_cond.kind.$tag === "Bool");
-              if (v396_t)
+              let v409_t;
+              v409_t = (v395_cond.kind.$tag === "Bool");
+              if (v409_t)
               {
-                let v397_t;
-                v397_t = (v382_cond.kind.$ === true);
-                v396_t = v397_t;
+                let v410_t;
+                v410_t = (v395_cond.kind.$ === true);
+                v409_t = v410_t;
               }
-              if (v396_t)
+              if (v409_t)
               {
-                v395_t = true;
-                break L10;
+                v408_t = true;
+                break L12;
               }
               {
-                v395_t = false;
-                break L10;
+                v408_t = false;
+                break L12;
               }
               $rt.panic("no arm matched");
             }
-            v398_t = v395_t;
-            if (v398_t)
+            v411_t = v408_t;
+            if (v411_t)
             {
-              let v399_t, v400_t;
-              v399_t = breaksBlock_567(v383_body, 0);
-              v400_t = (!v399_t);
-              v398_t = v400_t;
+              let v412_t, v413_t;
+              v412_t = breaksBlock_567(v396_body, 0);
+              v413_t = (!v412_t);
+              v411_t = v413_t;
             }
-            if (v398_t)
+            if (v411_t)
             {
-              let v402_t;
+              let v415_t;
               {
-                let v403_t;
-                v403_t = neverTy_133();
-                v402_t = v403_t;
+                let v416_t;
+                v416_t = neverTy_133();
+                v415_t = v416_t;
               }
-              v401_t = v402_t;
+              v414_t = v415_t;
             }
             else
             {
-              let v404_t;
+              let v417_t;
               {
-                let v405_t;
-                v405_t = voidTy_134();
-                v404_t = v405_t;
+                let v418_t;
+                v418_t = voidTy_134();
+                v417_t = v418_t;
               }
-              v401_t = v404_t;
+              v414_t = v417_t;
             }
-            v384_t = v401_t;
+            v397_t = v414_t;
           }
-          v6_t = v384_t;
+          v6_t = v397_t;
           break L1;
         }
-        v406_t = (v1_e.kind.$tag === "For");
-        if (v406_t)
+        v419_t = (v1_e.kind.$tag === "For");
+        if (v419_t)
         {
-          let v407_pat, v408_iter, v409_body, v410_t, v411_t, v412_t, v413_t;
-          v407_pat = v1_e.kind.$.pat;
-          v408_iter = v1_e.kind.$.iter;
-          v409_body = v1_e.kind.$.body;
-          v412_t = v0_self;
-          v411_t = v407_pat;
-          v410_t = v408_iter;
-          v413_t = forOf_568(v412_t, v411_t, v410_t, v409_body);
-          v6_t = v413_t;
+          let v420_pat, v421_iter, v422_body, v423_t, v424_t, v425_t, v426_t;
+          v420_pat = v1_e.kind.$.pat;
+          v421_iter = v1_e.kind.$.iter;
+          v422_body = v1_e.kind.$.body;
+          v425_t = v0_self;
+          v424_t = v420_pat;
+          v423_t = v421_iter;
+          v426_t = forOf_568(v425_t, v424_t, v423_t, v422_body);
+          v6_t = v426_t;
           break L1;
         }
-        v414_t = (v1_e.kind.$tag === "Match");
-        if (v414_t)
+        v427_t = (v1_e.kind.$tag === "Match");
+        if (v427_t)
         {
-          let v415_scrutinee, v416_arms, v417_t, v418_t, v419_t;
-          v415_scrutinee = v1_e.kind.$.scrutinee;
-          v416_arms = v1_e.kind.$.arms;
-          v418_t = v0_self;
-          v417_t = v415_scrutinee;
-          v419_t = matchExpr_569(v418_t, v417_t, v416_arms, v2_expected, $copy2(v5_span));
-          v6_t = v419_t;
+          let v428_scrutinee, v429_arms, v430_t, v431_t, v432_t;
+          v428_scrutinee = v1_e.kind.$.scrutinee;
+          v429_arms = v1_e.kind.$.arms;
+          v431_t = v0_self;
+          v430_t = v428_scrutinee;
+          v432_t = matchExpr_569(v431_t, v430_t, v429_arms, v2_expected, $copy2(v5_span));
+          v6_t = v432_t;
           break L1;
         }
-        v420_t = (v1_e.kind.$tag === "Try");
-        if (v420_t)
+        v433_t = (v1_e.kind.$tag === "Try");
+        if (v433_t)
         {
-          let v421_body, v422_pat, v423_handler, v424_t;
-          v421_body = v1_e.kind.$.body;
-          v422_pat = v1_e.kind.$.pat;
-          v423_handler = v1_e.kind.$.handler;
-          v424_t = tryCatch_570(v0_self, v421_body, v422_pat, v423_handler, v2_expected);
-          v6_t = v424_t;
+          let v434_body, v435_pat, v436_handler, v437_t;
+          v434_body = v1_e.kind.$.body;
+          v435_pat = v1_e.kind.$.pat;
+          v436_handler = v1_e.kind.$.handler;
+          v437_t = tryCatch_570(v0_self, v434_body, v435_pat, v436_handler, v2_expected);
+          v6_t = v437_t;
           break L1;
         }
-        v425_t = (v1_e.kind.$tag === "Throw");
-        if (v425_t)
+        v438_t = (v1_e.kind.$tag === "Throw");
+        if (v438_t)
         {
-          let v426_value, v427_t;
-          v426_value = v1_e.kind.$;
+          let v439_value, v440_t;
+          v439_value = v1_e.kind.$;
           {
-            let v428_t, v429_t, v430_t, v431_t, v432_t, v433_t, v434_t, v435_t, v436_t, v437_t, v448_t, v456_notATag, v476_t, v477_t, v478_t, v479_t, v480_t, v481_t, v482_t, v483_row, v484_t, v485_t, v486_t, v487_t;
-            v430_t = v0_self;
-            v428_t = v426_value;
-            v429_t = { $tag: "None" };
-            v431_t = expr_124(v430_t, v428_t, v429_t);
-            v432_t = v431_t;
-            v433_t = v0_self.v;
-            v434_t = v432_t;
-            v435_t = strip_146(v433_t, v434_t);
-            v436_t = v435_t;
-            L11:
+            let v441_t, v442_t, v443_t, v444_t, v445_t, v446_t, v447_t, v448_t, v449_t, v450_t, v461_t, v469_notATag, v489_t, v490_t, v491_t, v492_t, v493_t, v494_t, v495_t, v496_row, v497_t, v498_t, v499_t, v500_t;
+            v443_t = v0_self;
+            v441_t = v439_value;
+            v442_t = { $tag: "None" };
+            v444_t = expr_124(v443_t, v441_t, v442_t);
+            v445_t = v444_t;
+            v446_t = v0_self.v;
+            v447_t = v445_t;
+            v448_t = strip_146(v446_t, v447_t);
+            v449_t = v448_t;
+            L13:
             {
-              let v438_t, v444_t, v452_t;
-              v438_t = false;
-              if (v438_t)
+              let v451_t, v457_t, v465_t;
+              v451_t = false;
+              if (v451_t)
               {
               }
               else
               {
-                let v439_t;
-                v439_t = (v436_t.$tag === "Record");
-                v438_t = v439_t;
+                let v452_t;
+                v452_t = (v449_t.$tag === "Record");
+                v451_t = v452_t;
               }
-              if (v438_t)
+              if (v451_t)
               {
               }
               else
               {
-                let v440_t;
-                v440_t = (v436_t.$tag === "Tuple");
-                v438_t = v440_t;
+                let v453_t;
+                v453_t = (v449_t.$tag === "Tuple");
+                v451_t = v453_t;
               }
-              if (v438_t)
+              if (v451_t)
               {
               }
               else
               {
-                let v441_t;
-                v441_t = (v436_t.$tag === "Array");
-                v438_t = v441_t;
+                let v454_t;
+                v454_t = (v449_t.$tag === "Array");
+                v451_t = v454_t;
               }
-              if (v438_t)
+              if (v451_t)
               {
               }
               else
               {
-                let v442_t;
-                v442_t = (v436_t.$tag === "Slice");
-                v438_t = v442_t;
+                let v455_t;
+                v455_t = (v449_t.$tag === "Slice");
+                v451_t = v455_t;
               }
-              if (v438_t)
+              if (v451_t)
               {
               }
               else
               {
-                let v443_t;
-                v443_t = (v436_t.$tag === "Fn");
-                v438_t = v443_t;
+                let v456_t;
+                v456_t = (v449_t.$tag === "Fn");
+                v451_t = v456_t;
               }
-              if (v438_t)
+              if (v451_t)
               {
-                v437_t = true;
-                break L11;
+                v450_t = true;
+                break L13;
               }
-              v444_t = (v436_t.$tag === "Prim");
-              if (v444_t)
+              v457_t = (v449_t.$tag === "Prim");
+              if (v457_t)
               {
-                let v445_p, v446_t, v447_t, v449_t, v450_t, v451_t;
-                v445_p = v436_t.$;
-                v446_t = v445_p;
-                v447_t = { $tag: "Never" };
-                v448_t = v447_t;
-                v449_t = v448_t;
-                v450_t = eq_299(v446_t, v449_t);
-                v451_t = (!v450_t);
-                v437_t = v451_t;
-                break L11;
+                let v458_p, v459_t, v460_t, v462_t, v463_t, v464_t;
+                v458_p = v449_t.$;
+                v459_t = v458_p;
+                v460_t = { $tag: "Never" };
+                v461_t = v460_t;
+                v462_t = v461_t;
+                v463_t = eq_299(v459_t, v462_t);
+                v464_t = (!v463_t);
+                v450_t = v464_t;
+                break L13;
               }
-              v452_t = (v436_t.$tag === "Named");
-              if (v452_t)
+              v465_t = (v449_t.$tag === "Named");
+              if (v465_t)
               {
-                let v453_d, v454_t;
-                v453_d = v436_t.$[0];
-                L12:
+                let v466_d, v467_t;
+                v466_d = v449_t.$[0];
+                L14:
                 {
-                  let v455_t;
-                  v455_t = ($ix(v0_self.v.p.v.defs, v453_d).kind.$tag === "Struct");
-                  if (v455_t)
+                  let v468_t;
+                  v468_t = ($ix(v0_self.v.p.v.defs, v466_d).kind.$tag === "Struct");
+                  if (v468_t)
                   {
-                    v454_t = true;
-                    break L12;
+                    v467_t = true;
+                    break L14;
                   }
                   {
-                    v454_t = false;
-                    break L12;
+                    v467_t = false;
+                    break L14;
                   }
                   $rt.panic("no arm matched");
                 }
-                v437_t = v454_t;
-                break L11;
+                v450_t = v467_t;
+                break L13;
               }
               {
-                v437_t = false;
-                break L11;
+                v450_t = false;
+                break L13;
               }
               $rt.panic("no arm matched");
             }
-            v456_notATag = v437_t;
-            if (v456_notATag)
+            v469_notATag = v450_t;
+            if (v469_notATag)
             {
               {
-                const v461_t = { v: undefined };
-                let v457_t, v458_t, v459_t, v460_shown, v462_t, v463_t, v464_t, v465_t, v466_t, v467_t, v468_t, v469_t, v470_t, v471_t, v472_t, v473_t, v474_t, v475_t;
-                v457_t = v0_self.v;
-                v458_t = v432_t;
-                v459_t = show_145(v457_t, v458_t);
-                v460_shown = v459_t;
-                v474_t = v0_self;
-                v473_t = $copy2(v426_value.span);
-                v462_t = $b.String_new();
-                v461_t.v = v462_t;
-                v463_t = v461_t;
-                $b.String_push(v463_t, "a failure is a tag union (\xc2\xa75.4), and `");
-                v465_t = v460_shown;
-                v466_t = v461_t;
-                $b.String_push(v466_t, v465_t);
-                v468_t = v461_t;
-                $b.String_push(v468_t, "` is not: throw a tag, such as `#Failed { \xe2\x80\xa6 }`");
-                v470_t = v461_t.v;
-                v471_t = v470_t;
-                v472_t = $b.String_asStr(v471_t);
-                err_130(v474_t, v473_t, v472_t);
+                const v474_t = { v: undefined };
+                let v470_t, v471_t, v472_t, v473_shown, v475_t, v476_t, v477_t, v478_t, v479_t, v480_t, v481_t, v482_t, v483_t, v484_t, v485_t, v486_t, v487_t, v488_t;
+                v470_t = v0_self.v;
+                v471_t = v445_t;
+                v472_t = show_145(v470_t, v471_t);
+                v473_shown = v472_t;
+                v487_t = v0_self;
+                v486_t = $copy2(v439_value.span);
+                v475_t = $b.String_new();
+                v474_t.v = v475_t;
+                v476_t = v474_t;
+                $b.String_push(v476_t, "a failure is a tag union (\xc2\xa75.4), and `");
+                v478_t = v473_shown;
+                v479_t = v474_t;
+                $b.String_push(v479_t, v478_t);
+                v481_t = v474_t;
+                $b.String_push(v481_t, "` is not: throw a tag, such as `#Failed { \xe2\x80\xa6 }`");
+                v483_t = v474_t.v;
+                v484_t = v483_t;
+                v485_t = $b.String_asStr(v484_t);
+                err_130(v487_t, v486_t, v485_t);
               }
             }
-            v476_t = v0_self.v;
-            v477_t = $b.Vec_new();
-            v478_t = [v432_t];
-            v479_t = eff_571(v476_t, "Fail", v477_t, v478_t);
-            v480_t = [v479_t];
-            v481_t = { $tag: "Closed" };
-            v482_t = { effs: v480_t, tail: v481_t };
-            v483_row = v482_t;
-            v485_t = v0_self;
-            v484_t = v483_row;
-            perform_572(v485_t, v484_t, $copy2(v5_span), v1_e.id);
-            v487_t = neverTy_133();
-            v427_t = v487_t;
+            v489_t = v0_self.v;
+            v490_t = $b.Vec_new();
+            v491_t = [v445_t];
+            v492_t = eff_571(v489_t, "Fail", v490_t, v491_t);
+            v493_t = [v492_t];
+            v494_t = { $tag: "Closed" };
+            v495_t = { effs: v493_t, tail: v494_t };
+            v496_row = v495_t;
+            v498_t = v0_self;
+            v497_t = v496_row;
+            perform_572(v498_t, v497_t, $copy2(v5_span), v1_e.id);
+            v500_t = neverTy_133();
+            v440_t = v500_t;
           }
-          v6_t = v427_t;
+          v6_t = v440_t;
           break L1;
         }
-        v488_t = (v1_e.kind.$tag === "Yield");
-        if (v488_t)
+        v501_t = (v1_e.kind.$tag === "Yield");
+        if (v501_t)
         {
-          let v489_value, v490_t;
-          v489_value = v1_e.kind.$;
+          let v502_value, v503_t;
+          v502_value = v1_e.kind.$;
           {
-            let v491_t, v492_t, v493_yieldDef, v494_t, v495_t, v496_t, v497_t, v498_t, v499_t, v500_t, v501_t, v502_t, v503_t, v504_t, v505_t, v506_declared, v507_t, v522_t, v523_t, v536_t, v537_t, v538_t, v539_t, v540_t, v541_t, v542_t, v543_t, v544_row, v545_t, v546_t, v547_t, v548_t;
+            let v504_t, v505_t, v506_yieldDef, v507_t, v508_t, v509_t, v510_t, v511_t, v512_t, v513_t, v514_t, v515_t, v516_t, v517_t, v518_t, v519_declared, v520_t, v535_t, v536_t, v549_t, v550_t, v551_t, v552_t, v553_t, v554_t, v555_t, v556_t, v557_row, v558_t, v559_t, v560_t, v561_t;
             try {
-              v491_t = v0_self.v;
-              v492_t = known_126(v491_t, "Yield");
-              v493_yieldDef = v492_t;
-              v494_t = v0_self.v.s;
-              v495_t = v0_self.v.allowed;
-              v496_t = clone_45(v495_t);
-              v497_t = v496_t;
-              v498_t = v497_t;
-              v499_t = expandEffs_127(v494_t, v498_t);
-              v500_t = v499_t;
-              v501_t = v500_t.effs;
-              v502_t = $b.slice_iter(v501_t);
-              v503_t = (($692) => ($693) => {
+              v504_t = v0_self.v;
+              v505_t = known_126(v504_t, "Yield");
+              v506_yieldDef = v505_t;
+              v507_t = v0_self.v.s;
+              v508_t = v0_self.v.allowed;
+              v509_t = clone_45(v508_t);
+              v510_t = v509_t;
+              v511_t = v510_t;
+              v512_t = expandEffs_127(v507_t, v511_t);
+              v513_t = v512_t;
+              v514_t = v513_t.effs;
+              v515_t = $b.slice_iter(v514_t);
+              v516_t = (($692) => ($693) => {
                 let v1_ret;
                 {
                   let v0_x, v2_t;
@@ -46685,264 +46735,264 @@ function exprInner_306($689, $690, $691) {
                   v1_ret = v2_t;
                 }
                 return v1_ret;
-              })(v493_yieldDef);
-              v504_t = v503_t;
-              v505_t = find_505($rt.take(v502_t, v502_t = undefined), v504_t);
-              v506_declared = v505_t;
-              L13:
+              })(v506_yieldDef);
+              v517_t = v516_t;
+              v518_t = find_505($rt.take(v515_t, v515_t = undefined), v517_t);
+              v519_declared = v518_t;
+              L15:
               {
-                let v508_t, v520_t;
-                v508_t = (v506_declared.$tag === "Some");
-                if (v508_t)
+                let v521_t, v533_t;
+                v521_t = (v519_declared.$tag === "Some");
+                if (v521_t)
                 {
-                  let v509_d, v510_t, v511_t, v512_t, v513_t;
-                  v509_d = v506_declared.$;
-                  v510_t = v509_d.args;
-                  v511_t = first_333(v510_t);
-                  v512_t = v511_t;
-                  L14:
+                  let v522_d, v523_t, v524_t, v525_t, v526_t;
+                  v522_d = v519_declared.$;
+                  v523_t = v522_d.args;
+                  v524_t = first_333(v523_t);
+                  v525_t = v524_t;
+                  L16:
                   {
-                    let v514_t, v518_t;
-                    v514_t = (v512_t.$tag === "Some");
-                    if (v514_t)
+                    let v527_t, v531_t;
+                    v527_t = (v525_t.$tag === "Some");
+                    if (v527_t)
                     {
-                      let v515_a, v516_t, v517_t;
-                      v515_a = v512_t.$;
-                      v516_t = clone_28(v515_a);
-                      v517_t = { $tag: "Some", $: v516_t };
-                      v513_t = v517_t;
-                      break L14;
+                      let v528_a, v529_t, v530_t;
+                      v528_a = v525_t.$;
+                      v529_t = clone_28(v528_a);
+                      v530_t = { $tag: "Some", $: v529_t };
+                      v526_t = v530_t;
+                      break L16;
                     }
-                    v518_t = (v512_t.$tag === "None");
-                    if (v518_t)
+                    v531_t = (v525_t.$tag === "None");
+                    if (v531_t)
                     {
-                      let v519_t;
-                      v519_t = { $tag: "None" };
-                      v513_t = v519_t;
-                      break L14;
+                      let v532_t;
+                      v532_t = { $tag: "None" };
+                      v526_t = v532_t;
+                      break L16;
                     }
                     $rt.panic("no arm matched");
                   }
-                  v507_t = v513_t;
-                  break L13;
+                  v520_t = v526_t;
+                  break L15;
                 }
-                v520_t = (v506_declared.$tag === "None");
-                if (v520_t)
+                v533_t = (v519_declared.$tag === "None");
+                if (v533_t)
                 {
-                  let v521_t;
-                  v521_t = { $tag: "None" };
-                  v507_t = v521_t;
-                  break L13;
+                  let v534_t;
+                  v534_t = { $tag: "None" };
+                  v520_t = v534_t;
+                  break L15;
                 }
                 $rt.panic("no arm matched");
               }
-              v522_t = v507_t;
-              L15:
+              v535_t = v520_t;
+              L17:
               {
-                let v524_t, v531_t;
-                v524_t = (v522_t.$tag === "Some");
-                if (v524_t)
+                let v537_t, v544_t;
+                v537_t = (v535_t.$tag === "Some");
+                if (v537_t)
                 {
-                  let v525_item, v526_t;
-                  v525_item = new $rt.FieldRef(v522_t, "$");
+                  let v538_item, v539_t;
+                  v538_item = new $rt.FieldRef(v535_t, "$");
                   {
-                    let v527_t, v528_t, v529_t, v530_t;
-                    v529_t = v0_self;
-                    v527_t = v489_value;
-                    v528_t = v525_item.v;
-                    v530_t = check_562(v529_t, v527_t, v528_t);
-                    v526_t = v525_item.v;
+                    let v540_t, v541_t, v542_t, v543_t;
+                    v542_t = v0_self;
+                    v540_t = v502_value;
+                    v541_t = v538_item.v;
+                    v543_t = check_562(v542_t, v540_t, v541_t);
+                    v539_t = v538_item.v;
                   }
-                  v523_t = v526_t;
-                  break L15;
+                  v536_t = v539_t;
+                  break L17;
                 }
-                v531_t = (v522_t.$tag === "None");
-                if (v531_t)
+                v544_t = (v535_t.$tag === "None");
+                if (v544_t)
                 {
-                  let v532_t, v533_t, v534_t, v535_t;
-                  v534_t = v0_self;
-                  v532_t = v489_value;
-                  v533_t = { $tag: "None" };
-                  v535_t = expr_124(v534_t, v532_t, v533_t);
-                  v523_t = v535_t;
-                  break L15;
+                  let v545_t, v546_t, v547_t, v548_t;
+                  v547_t = v0_self;
+                  v545_t = v502_value;
+                  v546_t = { $tag: "None" };
+                  v548_t = expr_124(v547_t, v545_t, v546_t);
+                  v536_t = v548_t;
+                  break L17;
                 }
                 $rt.panic("no arm matched");
               }
-              v536_t = v523_t;
-              v537_t = v0_self.v;
-              v538_t = $b.Vec_new();
-              v539_t = [v536_t];
-              v540_t = eff_571(v537_t, "Yield", v538_t, v539_t);
-              v541_t = [v540_t];
-              v542_t = { $tag: "Closed" };
-              v543_t = { effs: v541_t, tail: v542_t };
-              v544_row = v543_t;
-              v546_t = v0_self;
-              v545_t = v544_row;
-              perform_572(v546_t, v545_t, $copy2(v5_span), v1_e.id);
-              v548_t = voidTy_134();
-              v490_t = v548_t;
+              v549_t = v536_t;
+              v550_t = v0_self.v;
+              v551_t = $b.Vec_new();
+              v552_t = [v549_t];
+              v553_t = eff_571(v550_t, "Yield", v551_t, v552_t);
+              v554_t = [v553_t];
+              v555_t = { $tag: "Closed" };
+              v556_t = { effs: v554_t, tail: v555_t };
+              v557_row = v556_t;
+              v559_t = v0_self;
+              v558_t = v557_row;
+              perform_572(v559_t, v558_t, $copy2(v5_span), v1_e.id);
+              v561_t = voidTy_134();
+              v503_t = v561_t;
             } finally { if ($rt.unwinds()) {
-              $drop69(v502_t);
+              $drop69(v515_t);
             } }
           }
-          v6_t = v490_t;
+          v6_t = v503_t;
           break L1;
         }
-        v549_t = (v1_e.kind.$tag === "Return");
-        if (v549_t)
+        v562_t = (v1_e.kind.$tag === "Return");
+        if (v562_t)
         {
-          let v550_value, v551_t;
-          v550_value = v1_e.kind.$;
+          let v563_value, v564_t;
+          v563_value = v1_e.kind.$;
           {
-            let v552_t, v553_t, v554_ret, v563_t, v568_t;
-            v552_t = v0_self.v.ret;
-            v553_t = clone_28(v552_t);
-            v554_ret = v553_t;
-            L16:
+            let v565_t, v566_t, v567_ret, v576_t, v581_t;
+            v565_t = v0_self.v.ret;
+            v566_t = clone_28(v565_t);
+            v567_ret = v566_t;
+            L18:
             {
-              let v555_t, v561_t;
-              v555_t = (v550_value.$tag === "Some");
-              if (v555_t)
+              let v568_t, v574_t;
+              v568_t = (v563_value.$tag === "Some");
+              if (v568_t)
               {
-                let v556_v;
-                v556_v = v550_value.$;
+                let v569_v;
+                v569_v = v563_value.$;
                 {
-                  let v557_t, v558_t, v559_t, v560_t;
-                  v559_t = v0_self;
-                  v557_t = v556_v;
-                  v558_t = v554_ret;
-                  v560_t = check_562(v559_t, v557_t, v558_t);
+                  let v570_t, v571_t, v572_t, v573_t;
+                  v572_t = v0_self;
+                  v570_t = v569_v;
+                  v571_t = v567_ret;
+                  v573_t = check_562(v572_t, v570_t, v571_t);
                 }
-                break L16;
+                break L18;
               }
-              v561_t = (v550_value.$tag === "None");
-              if (v561_t)
+              v574_t = (v563_value.$tag === "None");
+              if (v574_t)
               {
-                let v562_t, v564_t, v565_t, v566_t, v567_t;
-                v566_t = v0_self;
-                v562_t = voidTy_134();
-                v563_t = v562_t;
-                v564_t = v563_t;
-                v565_t = v554_ret;
-                coerce_49(v566_t, v564_t, v565_t, $copy2(v5_span));
-                break L16;
+                let v575_t, v577_t, v578_t, v579_t, v580_t;
+                v579_t = v0_self;
+                v575_t = voidTy_134();
+                v576_t = v575_t;
+                v577_t = v576_t;
+                v578_t = v567_ret;
+                coerce_49(v579_t, v577_t, v578_t, $copy2(v5_span));
+                break L18;
               }
               $rt.panic("no arm matched");
             }
-            v568_t = neverTy_133();
-            v551_t = v568_t;
+            v581_t = neverTy_133();
+            v564_t = v581_t;
           }
-          v6_t = v551_t;
+          v6_t = v564_t;
           break L1;
         }
-        v569_t = false;
-        if (v569_t)
-        {
-        }
-        else
-        {
-          let v570_t;
-          v570_t = (v1_e.kind.$tag === "Break");
-          v569_t = v570_t;
-        }
-        if (v569_t)
-        {
-        }
-        else
-        {
-          let v571_t;
-          v571_t = (v1_e.kind.$tag === "Continue");
-          v569_t = v571_t;
-        }
-        if (v569_t)
-        {
-          let v572_t;
-          v572_t = neverTy_133();
-          v6_t = v572_t;
-          break L1;
-        }
-        v573_t = (v1_e.kind.$tag === "Region");
-        if (v573_t)
-        {
-          let v574_name, v575_body, v576_t;
-          v574_name = v1_e.kind.$.name;
-          v575_body = v1_e.kind.$.body;
-          v576_t = region_573(v0_self, v574_name, v575_body, v2_expected, $copy2(v5_span), v1_e.id);
-          v6_t = v576_t;
-          break L1;
-        }
-        v577_t = (v1_e.kind.$tag === "Handle");
-        if (v577_t)
-        {
-          let v578_body, v579_effect, v580_arms, v581_t;
-          v578_body = v1_e.kind.$.body;
-          v579_effect = v1_e.kind.$.effect;
-          v580_arms = v1_e.kind.$.arms;
-          v581_t = handle_574(v0_self, v578_body, v579_effect, v580_arms, v2_expected, v1_e);
-          v6_t = v581_t;
-          break L1;
-        }
-        v582_t = (v1_e.kind.$tag === "Unsafe");
+        v582_t = false;
         if (v582_t)
         {
-          let v583_b, v584_t, v585_t, v586_t, v587_t;
-          v583_b = v1_e.kind.$;
-          v584_t = v0_self.v.p.v.known;
-          v585_t = $b.HashMap_get(v584_t, "Unsafe");
-          v586_t = v585_t;
-          L17:
+        }
+        else
+        {
+          let v583_t;
+          v583_t = (v1_e.kind.$tag === "Break");
+          v582_t = v583_t;
+        }
+        if (v582_t)
+        {
+        }
+        else
+        {
+          let v584_t;
+          v584_t = (v1_e.kind.$tag === "Continue");
+          v582_t = v584_t;
+        }
+        if (v582_t)
+        {
+          let v585_t;
+          v585_t = neverTy_133();
+          v6_t = v585_t;
+          break L1;
+        }
+        v586_t = (v1_e.kind.$tag === "Region");
+        if (v586_t)
+        {
+          let v587_name, v588_body, v589_t;
+          v587_name = v1_e.kind.$.name;
+          v588_body = v1_e.kind.$.body;
+          v589_t = region_573(v0_self, v587_name, v588_body, v2_expected, $copy2(v5_span), v1_e.id);
+          v6_t = v589_t;
+          break L1;
+        }
+        v590_t = (v1_e.kind.$tag === "Handle");
+        if (v590_t)
+        {
+          let v591_body, v592_effect, v593_arms, v594_t;
+          v591_body = v1_e.kind.$.body;
+          v592_effect = v1_e.kind.$.effect;
+          v593_arms = v1_e.kind.$.arms;
+          v594_t = handle_574(v0_self, v591_body, v592_effect, v593_arms, v2_expected, v1_e);
+          v6_t = v594_t;
+          break L1;
+        }
+        v595_t = (v1_e.kind.$tag === "Unsafe");
+        if (v595_t)
+        {
+          let v596_b, v597_t, v598_t, v599_t, v600_t;
+          v596_b = v1_e.kind.$;
+          v597_t = v0_self.v.p.v.known;
+          v598_t = $b.HashMap_get(v597_t, "Unsafe");
+          v599_t = v598_t;
+          L19:
           {
-            let v588_t, v605_t;
-            v588_t = (v586_t.$tag === "Some");
-            if (v588_t)
+            let v601_t, v618_t;
+            v601_t = (v599_t.$tag === "Some");
+            if (v601_t)
             {
-              let v589_d, v590_t;
-              v589_d = v586_t.$;
+              let v602_d, v603_t;
+              v602_d = v599_t.$;
               {
-                let v591_t, v592_t, v593_t, v594_t, v595_eff, v596_t, v597_t, v598_t, v599_outer, v600_t, v601_t, v602_t, v603_t, v604_t;
-                v593_t = v589_d;
-                v591_t = $b.Vec_new();
-                v592_t = $b.Vec_new();
-                v594_t = { def: v593_t, regions: v591_t, args: v592_t };
-                v595_eff = v594_t;
-                v597_t = v0_self;
-                v596_t = v595_eff;
-                v598_t = enterHandler_575(v597_t, v596_t);
-                v599_outer = v598_t;
-                v600_t = block_48(v0_self, v583_b, v2_expected);
-                v601_t = v600_t;
-                v603_t = v0_self;
-                v602_t = v595_eff;
-                leaveHandler_576(v603_t, v602_t, v599_outer);
-                v590_t = v601_t;
+                let v604_t, v605_t, v606_t, v607_t, v608_eff, v609_t, v610_t, v611_t, v612_outer, v613_t, v614_t, v615_t, v616_t, v617_t;
+                v606_t = v602_d;
+                v604_t = $b.Vec_new();
+                v605_t = $b.Vec_new();
+                v607_t = { def: v606_t, regions: v604_t, args: v605_t };
+                v608_eff = v607_t;
+                v610_t = v0_self;
+                v609_t = v608_eff;
+                v611_t = enterHandler_575(v610_t, v609_t);
+                v612_outer = v611_t;
+                v613_t = block_48(v0_self, v596_b, v2_expected);
+                v614_t = v613_t;
+                v616_t = v0_self;
+                v615_t = v608_eff;
+                leaveHandler_576(v616_t, v615_t, v612_outer);
+                v603_t = v614_t;
               }
-              v587_t = v590_t;
-              break L17;
+              v600_t = v603_t;
+              break L19;
             }
-            v605_t = (v586_t.$tag === "None");
-            if (v605_t)
+            v618_t = (v599_t.$tag === "None");
+            if (v618_t)
             {
-              let v606_t;
-              v606_t = block_48(v0_self, v583_b, v2_expected);
-              v587_t = v606_t;
-              break L17;
+              let v619_t;
+              v619_t = block_48(v0_self, v596_b, v2_expected);
+              v600_t = v619_t;
+              break L19;
             }
             $rt.panic("no arm matched");
           }
-          v6_t = v587_t;
+          v6_t = v600_t;
           break L1;
         }
-        v607_t = (v1_e.kind.$tag === "Comptime");
-        if (v607_t)
+        v620_t = (v1_e.kind.$tag === "Comptime");
+        if (v620_t)
         {
-          let v608_inner, v609_t, v610_t, v611_t;
-          v608_inner = v1_e.kind.$;
-          v610_t = v0_self;
-          v609_t = v608_inner;
-          v611_t = expr_124(v610_t, v609_t, v2_expected);
-          v6_t = v611_t;
+          let v621_inner, v622_t, v623_t, v624_t;
+          v621_inner = v1_e.kind.$;
+          v623_t = v0_self;
+          v622_t = v621_inner;
+          v624_t = expr_124(v623_t, v622_t, v2_expected);
+          v6_t = v624_t;
           break L1;
         }
         $rt.panic("no arm matched");

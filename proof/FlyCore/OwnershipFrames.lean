@@ -65,7 +65,7 @@ theorem Foot.append : Foot F σ Γa ea Ea Sa → Foot F σ Γb eb Eb Sb →
   | nil => simpa using hb
   | @cons s a L Γ env E S x hs _ ih =>
     have := Foot.cons (x := x) hs ih
-    cases he : s.excl <;> simpa [addE, addS, he] using this
+    simpa [addE, addS] using this
 
 theorem Foot.split : ∀ {Γa : Ctx} {ea : Env} {E S}, Foot F σ (Γa ++ Γb) (ea ++ eb) E S →
     Γa.length = ea.length →
@@ -76,8 +76,7 @@ theorem Foot.split : ∀ {Γa : Ctx} {ea : Env} {E S}, Foot F σ (Γa ++ Γb) (e
     cases h with
     | cons hs hrest =>
       obtain ⟨Ea, Sa, Eb, Sb, h1, h2, rfl, rfl⟩ := Foot.split hrest (by simpa using hl)
-      refine ⟨addE s _ Ea, addS s _ Sa, Eb, Sb, .cons hs h1, h2, ?_, ?_⟩ <;>
-        cases he : s.excl <;> simp [addE, addS, he]
+      exact ⟨addE s _ Ea, addS s _ Sa, Eb, Sb, .cons hs h1, h2, by simp [addE], by simp [addS]⟩
   | [], _ :: _, _, _, _, hl => by simp at hl
   | _ :: _, [], _, _, _, hl => by simp at hl
 
@@ -114,9 +113,9 @@ theorem entry_cons (hx : x ∉ Γ.map Prod.fst) :
       · exact absurd h hy
       · exact h
 
-/-- A cell is in the exclusive footprints just when it is in an exclusive variable's. -/
+/-- A cell is in the exclusive footprints just when it is in an exclusive part of a variable's. -/
 theorem Foot.memE : Foot F σ Γ env E S → (Γ.map Prod.fst).Nodup → ∀ y,
-    (y ∈ E ↔ ∃ x s a L, Entry F σ Γ env x s a L ∧ s.excl = true ∧ y ∈ L) := by
+    (y ∈ E ↔ ∃ x s a L, Entry F σ Γ env x s a L ∧ y ∈ exclPart s L) := by
   intro h
   induction h with
   | nil => intro _ y; simp [Entry, lookup]
@@ -126,18 +125,17 @@ theorem Foot.memE : Foot F σ Γ env E S → (Γ.map Prod.fst).Nodup → ∀ y,
     obtain ⟨hx, hk⟩ := List.nodup_cons.mp hk
     rw [mem_addE, ih hk]
     constructor
-    · rintro (⟨he, hy⟩ | ⟨x', s', a', L', he', hex, hy⟩)
-      · exact ⟨x, s, a, L, (entry_cons hx).mpr (.inl ⟨rfl, rfl, rfl, hs⟩), he, hy⟩
-      · exact ⟨x', s', a', L', (entry_cons hx).mpr (.inr ⟨fun h => hx (h ▸ lookup_some_keys he'.1), he'⟩),
-          hex, hy⟩
-    · rintro ⟨x', s', a', L', he', hex, hy⟩
+    · rintro (hy | ⟨x', s', a', L', he', hy⟩)
+      · exact ⟨x, s, a, L, (entry_cons hx).mpr (.inl ⟨rfl, rfl, rfl, hs⟩), hy⟩
+      · exact ⟨x', s', a', L', (entry_cons hx).mpr (.inr ⟨fun h => hx (h ▸ lookup_some_keys he'.1), he'⟩), hy⟩
+    · rintro ⟨x', s', a', L', he', hy⟩
       rcases (entry_cons hx).mp he' with ⟨rfl, rfl, rfl, hL⟩ | ⟨-, he'⟩
-      · exact .inl ⟨hex, hL.det hs ▸ hy⟩
-      · exact .inr ⟨x', s', a', L', he', hex, hy⟩
+      · exact .inl (hL.det hs ▸ hy)
+      · exact .inr ⟨x', s', a', L', he', hy⟩
 
-/-- A cell is in the shared footprints just when it is in a shared variable's. -/
+/-- A cell is in the shared footprints just when it is in a shared part of a variable's. -/
 theorem Foot.memS : Foot F σ Γ env E S → (Γ.map Prod.fst).Nodup → ∀ y,
-    (y ∈ S ↔ ∃ x s a L, Entry F σ Γ env x s a L ∧ s.excl = false ∧ y ∈ L) := by
+    (y ∈ S ↔ ∃ x s a L, Entry F σ Γ env x s a L ∧ y ∈ sharedPart s L) := by
   intro h
   induction h with
   | nil => intro _ y; simp [Entry, lookup]
@@ -147,40 +145,24 @@ theorem Foot.memS : Foot F σ Γ env E S → (Γ.map Prod.fst).Nodup → ∀ y,
     obtain ⟨hx, hk⟩ := List.nodup_cons.mp hk
     rw [mem_addS, ih hk]
     constructor
-    · rintro (⟨he, hy⟩ | ⟨x', s', a', L', he', hex, hy⟩)
-      · exact ⟨x, s, a, L, (entry_cons hx).mpr (.inl ⟨rfl, rfl, rfl, hs⟩), he, hy⟩
-      · exact ⟨x', s', a', L', (entry_cons hx).mpr (.inr ⟨fun h => hx (h ▸ lookup_some_keys he'.1), he'⟩),
-          hex, hy⟩
-    · rintro ⟨x', s', a', L', he', hex, hy⟩
+    · rintro (hy | ⟨x', s', a', L', he', hy⟩)
+      · exact ⟨x, s, a, L, (entry_cons hx).mpr (.inl ⟨rfl, rfl, rfl, hs⟩), hy⟩
+      · exact ⟨x', s', a', L', (entry_cons hx).mpr (.inr ⟨fun h => hx (h ▸ lookup_some_keys he'.1), he'⟩), hy⟩
+    · rintro ⟨x', s', a', L', he', hy⟩
       rcases (entry_cons hx).mp he' with ⟨rfl, rfl, rfl, hL⟩ | ⟨-, he'⟩
-      · exact .inl ⟨hex, hL.det hs ▸ hy⟩
-      · exact .inr ⟨x', s', a', L', he', hex, hy⟩
+      · exact .inl (hL.det hs ▸ hy)
+      · exact .inr ⟨x', s', a', L', he', hy⟩
 
 theorem Inv.entry_sub (hI : Inv F σ Γ env E S) (he : Entry F σ Γ env x s a L) :
-    ∀ y ∈ L, (s.excl = true ∧ y ∈ E) ∨ (s.excl = false ∧ y ∈ S) := by
+    ∀ y ∈ L, (y ∈ exclPart s L ∧ y ∈ E) ∨ (y ∈ sharedPart s L ∧ y ∈ S) := by
   intro y hy
-  cases hs : s.excl
-  · exact .inr ⟨rfl, (hI.foot.memS hI.keys y).mpr ⟨x, s, a, L, he, hs, hy⟩⟩
-  · exact .inl ⟨rfl, (hI.foot.memE hI.keys y).mpr ⟨x, s, a, L, he, hs, hy⟩⟩
+  rcases mem_parts (s := s) hy with h | h
+  · exact .inl ⟨h, (hI.foot.memE hI.keys y).mpr ⟨x, s, a, L, he, h⟩⟩
+  · exact .inr ⟨h, (hI.foot.memS hI.keys y).mpr ⟨x, s, a, L, he, h⟩⟩
 
-/-- The head variable's footprint is apart from a later one's when either may be changed. -/
-theorem foot_head_apart (hrest : Foot F σ Γ env E S) (hk : (Γ.map Prod.fst).Nodup)
-    (hn : (addE r M E).Nodup) (hd : Disj (addS r M S) (addE r M E)) (hy : Entry F σ Γ env y t b L')
-    (he : r.excl = true ∨ t.excl = true) : Disj M L' := by
-  intro l hl hl'
-  cases ht : t.excl
-  · have hS : l ∈ S := (hrest.memS hk l).mpr ⟨y, t, b, L', hy, ht, hl'⟩
-    have hr' : r.excl = true := by simpa [ht] using he
-    exact hd l (mem_addS.mpr (.inr hS)) (mem_addE.mpr (.inl ⟨hr', hl⟩))
-  · have hE : l ∈ E := (hrest.memE hk l).mpr ⟨y, t, b, L', hy, ht, hl'⟩
-    cases hre : r.excl
-    · exact hd l (mem_addS.mpr (.inl ⟨hre, hl⟩)) (mem_addE.mpr (.inr hE))
-    · simp only [addE, hre, ↓reduceIte] at hn
-      exact (nodup_append_disj.mp hn).2.2 l hl hE
-
-/-- Two variables' footprints are apart when either may be changed. -/
+/-- What a variable may change is apart from every other variable's footprint. -/
 theorem Inv.apart (hI : Inv F σ Γ env E S) (hx : Entry F σ Γ env x s a L) (hy : Entry F σ Γ env y t b L')
-    (hne : x ≠ y) (he : s.excl = true ∨ t.excl = true) : Disj L L' := by
+    (hne : x ≠ y) : Disj (exclPart s L) L' := by
   obtain ⟨hf, hn, hd, hk⟩ := hI
   revert hn hd hk
   induction hf generalizing x s a L y t b L' with
@@ -189,28 +171,35 @@ theorem Inv.apart (hI : Inv F σ Γ env E S) (hx : Entry F σ Γ env x s a L) (h
     intro hn hd hk
     simp only [List.map_cons] at hk
     obtain ⟨hz, hkt⟩ := List.nodup_cons.mp hk
+    have hn' : E.Nodup := (nodup_append_disj.mp hn).2.1
+    have hd' : Disj S E := hd.mono_left (fun l hl => mem_addS.mpr (.inr hl)) |>.mono_right
+      (fun l hl => mem_addE.mpr (.inr hl))
     rcases (entry_cons hz).mp hx with ⟨rfl, rfl, rfl, hL⟩ | ⟨hxz, hxt⟩
     · rcases (entry_cons hz).mp hy with ⟨rfl, -⟩ | ⟨-, hyt⟩
       · exact absurd rfl hne
-      · cases hL.det hr; exact foot_head_apart hrest hkt hn hd hyt he
+      · cases hL.det hr
+        intro l hl hl'
+        rcases mem_parts (s := t) hl' with h | h
+        · exact (nodup_append_disj.mp hn).2.2 l hl ((hrest.memE hkt l).mpr ⟨y, t, b, L', hyt, h⟩)
+        · exact hd l (mem_addS.mpr (.inr ((hrest.memS hkt l).mpr ⟨y, t, b, L', hyt, h⟩))) (mem_addE.mpr (.inl hl))
     · rcases (entry_cons hz).mp hy with ⟨rfl, rfl, rfl, hL'⟩ | ⟨-, hyt⟩
-      · cases hL'.det hr; exact (foot_head_apart hrest hkt hn hd hxt he.symm).symm
-      · refine ih hxt hyt hne he ?_ ?_ hkt
-        · cases he : r.excl <;> simp only [addE, he, ↓reduceIte] at hn
-          · exact hn
-          · exact (nodup_append_disj.mp hn).2.1
-        · exact hd.mono_left (fun l hl => mem_addS.mpr (.inr hl)) |>.mono_right
-            (fun l hl => mem_addE.mpr (.inr hl))
+      · cases hL'.det hr
+        intro l hl hl'
+        have hE : l ∈ E := (hrest.memE hkt l).mpr ⟨x, s, a, L, hxt, hl⟩
+        rcases mem_parts (s := t) hl' with h | h
+        · exact (nodup_append_disj.mp hn).2.2 l h hE
+        · exact hd l (mem_addS.mpr (.inl h)) (mem_addE.mpr (.inr hE))
+      · exact ih hxt hyt hne hn' hd' hkt
 
 /-- Every variable's footprint rebuilt at once, in a store where each holds what `nf` says: the
-shared ones as they were, the exclusive ones apart from each other. -/
+shared parts as they were, the exclusive ones apart from each other. -/
 theorem Foot.rebuild (nf : Var → List Nat → List Nat) (h : Foot F σ Γ env E S)
     (hk : (Γ.map Prod.fst).Nodup)
-    (hok : ∀ x s a L, Entry F σ Γ env x s a L → SlotOk F σ' s a (nf x L) ∧ (s.excl = false → nf x L = L))
+    (hok : ∀ x s a L, Entry F σ Γ env x s a L → SlotOk F σ' s a (nf x L) ∧ sharedPart s (nf x L) = sharedPart s L)
     (hdisj : ∀ x s a L y t b L', Entry F σ Γ env x s a L → Entry F σ Γ env y t b L' → x ≠ y →
-      s.excl = true → t.excl = true → Disj (nf x L) (nf y L')) :
+      Disj (exclPart s (nf x L)) (exclPart t (nf y L'))) :
     ∃ E', Foot F σ' Γ env E' S ∧ E'.Nodup ∧
-      ∀ y, y ∈ E' ↔ ∃ x s a L, Entry F σ Γ env x s a L ∧ s.excl = true ∧ y ∈ nf x L := by
+      ∀ y, y ∈ E' ↔ ∃ x s a L, Entry F σ Γ env x s a L ∧ y ∈ exclPart s (nf x L) := by
   revert hk hok hdisj
   induction h with
   | nil => intro _ _ _; exact ⟨[], .nil, List.nodup_nil, by simp [Entry, lookup]⟩
@@ -225,25 +214,20 @@ theorem Foot.rebuild (nf : Var → List Nat → List Nat) (h : Foot F σ Γ env 
     obtain ⟨E', hf', hn', hmem'⟩ := ih hkt (fun x s a L he => hok x s a L (htail he).1)
       (fun x s a L y t b L' hx hy hne => hdisj x s a L y t b L' (htail hx).1 (htail hy).1 hne)
     obtain ⟨hr', hsame⟩ := hok z r c M hhead
-    have hS : addS r (nf z M) S = addS r M S := by
-      cases he : r.excl
-      · rw [hsame he]
-      · simp [addS, he]
+    have hS : addS r (nf z M) S = addS r M S := by simp [addS, hsame]
     refine ⟨addE r (nf z M) E', hS ▸ Foot.cons hr' hf', ?_, ?_⟩
-    · cases he : r.excl <;> simp only [addE, he, ↓reduceIte]
-      · exact hn'
-      · refine nodup_append_disj.mpr ⟨hr'.nodup, hn', fun l hl hl' => ?_⟩
-        obtain ⟨x, s, a, L, hx, hex, hl'⟩ := (hmem' l).mp hl'
-        exact hdisj z r c M x s a L hhead (htail hx).1 (htail hx).2.symm he hex l hl hl'
+    · refine nodup_append_disj.mpr ⟨(parts_nodup hr'.nodup).1, hn', fun l hl hl' => ?_⟩
+      obtain ⟨x, s, a, L, hx, hl'⟩ := (hmem' l).mp hl'
+      exact hdisj z r c M x s a L hhead (htail hx).1 (htail hx).2.symm l hl hl'
     · intro l
       rw [mem_addE, hmem']
       constructor
-      · rintro (⟨he, hl⟩ | ⟨x, s, a, L, hx, hex, hl⟩)
-        · exact ⟨z, r, c, M, hhead, he, hl⟩
-        · exact ⟨x, s, a, L, (htail hx).1, hex, hl⟩
-      · rintro ⟨x, s, a, L, hx, hex, hl⟩
+      · rintro (hl | ⟨x, s, a, L, hx, hl⟩)
+        · exact ⟨z, r, c, M, hhead, hl⟩
+        · exact ⟨x, s, a, L, (htail hx).1, hl⟩
+      · rintro ⟨x, s, a, L, hx, hl⟩
         rcases (entry_cons hz).mp hx with ⟨rfl, rfl, rfl, hL⟩ | ⟨-, hxt⟩
-        · exact .inl ⟨hex, hL.det hr ▸ hl⟩
-        · exact .inr ⟨x, s, a, L, hxt, hex, hl⟩
+        · exact .inl (hL.det hr ▸ hl)
+        · exact .inr ⟨x, s, a, L, hxt, hl⟩
 
 end FlyCore.Ownership

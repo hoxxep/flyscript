@@ -838,6 +838,10 @@ impl Checker {
       #Binary { op, lhs, rhs } => self.binary(op.asStr(), lhs, rhs, e),
       #Assign { op, target, value } => {
         const t = self.expr(target, #None);
+        // A `mut` borrow of a closure lends the right to call it, not to replace it (§4.3).
+        if (const #Borrow(true, inner) = self.s.resolve(t) && const #Fn(_) = self.s.resolve(inner)) {
+          self.err(target.span, "a closure borrowed `mut` can be called, not replaced; to replace it, own it or hold it in a field");
+        }
         const v = self.strip(t);
         const found0 = self.expr(value, #Some(v.clone()));
         const found = if (op == "=") { found0 } else { self.strip(found0) };
