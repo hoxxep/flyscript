@@ -327,8 +327,10 @@ theorem pair_alloc (hI : Inv F ι σ Γ env E S) (hwf : WF σ) (hv : VT F ι σ 
   have hLwa := hw.alloc
   have hLv1 : LT F ι σ4 σ.next A (σ.next :: Lv) :=
     LT.of_contents hb4 (hv.frame <| Agree.of' fun z hz => hold4 z (hLva z hz)) (fun h => (hfresh _ (hLva _ h)).1 rfl)
+      (by simp only [σ4, σ3, Store.alloc]; simp; exact hI.cur)
   have hLw1 : LT F ι σ4 (σ.next + 1) B ((σ.next + 1) :: Lw) :=
     LT.of_contents hc4 (hw.frame <| Agree.of' fun z hz => hold4 z (hLwa z hz)) (fun h => (hfresh _ (hLwa _ h)).2 rfl)
+      (by simp only [σ4, σ3, Store.alloc]; simp; exact hI.cur)
   obtain ⟨hnv, hnw, hdvw⟩ := nodup_append_disj.mp hLn
   have hdisj : ∀ x ∈ σ.next :: Lv, x ∉ (σ.next + 1) :: Lw := by
     intro x hx hx'
@@ -913,7 +915,7 @@ theorem par_ok (hF : FnsOk F O) (hR : RetOk F O n) (hKk : EvalKOk F O n)
   have hLn' := nodup_append_disj.mp (by simpa using hLn : (LsA.flatten ++ LsB.flatten).Nodup)
   -- The first task's parameters.
   obtain ⟨EoA, hfoA, hEoA, hEoAm, hleA, hwf₂, holdA, hnewA, -⟩ :=
-    allocAll_ok (names := da.owns.map Prod.fst) hvA (by simp) hwf₁ hLn'.1
+    allocAll_ok (names := da.owns.map Prod.fst) hvA (by simp) hwf₁ hLn'.1 (by cur_inv)
   rw [zip_fst_snd] at hfoA
   have hcellsA : (allocAll σ1 ((da.owns.map Prod.fst).zip vsA)).1.map Prod.fst = da.owns.map Prod.fst := by
     rw [allocAll_fst]; exact List.map_fst_zip (by rw [hlenA]; simp)
@@ -926,7 +928,7 @@ theorem par_ok (hF : FnsOk F O) (hR : RetOk F O n) (hKk : EvalKOk F O n)
   -- The second's.
   have hvB2 := hvB.frame <| Agree.of' fun l hl => holdA l (hwf₁ l (hvB.alloc l hl))
   obtain ⟨EoB, hfoB, hEoB, hEoBm, hleB, hwf₃, holdB, hnewB, -⟩ :=
-    allocAll_ok (names := db.owns.map Prod.fst) hvB2 (by simp) hwf₂ hLn'.2.1
+    allocAll_ok (names := db.owns.map Prod.fst) hvB2 (by simp) hwf₂ hLn'.2.1 (hcutA.trans hI₁.cur)
   rw [zip_fst_snd] at hfoB
   have hcellsB : (allocAll σ2 ((db.owns.map Prod.fst).zip vsB)).1.map Prod.fst = db.owns.map Prod.fst := by
     rw [allocAll_fst]; exact List.map_fst_zip (by rw [hlenB]; simp)

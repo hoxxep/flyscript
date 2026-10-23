@@ -90,27 +90,28 @@ def RD (ι : Iota) (σ : Store) : Ty → Val → Prop
 
 /-- `a` holds a value of type `τ`, whose cells — `a` and every cell of its boxes — are `L`. -/
 inductive LT (F : List Fn) (ι : Iota) (σ : Store) : Nat → Ty → List Nat → Prop
-  | int : σ.mem a = some (.int n) → LT F ι σ a .int [a]
-  | box : σ.mem a = some (.ptr b) → LT F ι σ b τ R → a ∉ R → LT F ι σ a (.box τ) (a :: R)
+  | int : σ.mem a = some (.int n) → σ.fb a = some ι.fiber → LT F ι σ a .int [a]
+  | box : σ.mem a = some (.ptr b) → LT F ι σ b τ R → a ∉ R → σ.fb a = some ι.fiber → LT F ι σ a (.box τ) (a :: R)
   | clo : σ.mem a = some (.clo f c τc) → CloOk F f τc k A B r Rf → LT F ι σ c τc R → a ∉ R →
-      LT F ι σ a (.fn k A B r Rf) (a :: R)
+      σ.fb a = some ι.fiber → LT F ι σ a (.fn k A B r Rf) (a :: R)
   | pair : σ.mem a = some (.pair b c) → LT F ι σ b A R₁ → LT F ι σ c B R₂ → (∀ x ∈ R₁, x ∉ R₂) →
-      a ∉ R₁ ++ R₂ → LT F ι σ a (.pair A B) (a :: (R₁ ++ R₂))
-  | tag : σ.mem a = some (.tag A' B' t b) → LT F ι σ b (if t then A else B) R → a ∉ R → LT F ι σ a (.sum A B) (a :: R)
+      a ∉ R₁ ++ R₂ → σ.fb a = some ι.fiber → LT F ι σ a (.pair A B) (a :: (R₁ ++ R₂))
+  | tag : σ.mem a = some (.tag A' B' t b) → LT F ι σ b (if t then A else B) R → a ∉ R → σ.fb a = some ι.fiber →
+      LT F ι σ a (.sum A B) (a :: R)
   /-- A place lent: what is there is the borrow's. -/
   | hole : LT F ι σ a (.hole τ) []
   /-- A reference into a region: the cell holding it is its holder's, the cell it refers to the
   region's. -/
-  | rref : σ.mem a = some (.rptr l) → RefOk ι σ k τ l → LT F ι σ a (.rref c k τ) [a]
+  | rref : σ.mem a = some (.rptr l) → RefOk ι σ k τ l → σ.fb a = some ι.fiber → LT F ι σ a (.rref c k τ) [a]
   /-- The arena of the region `k` regions out, which is `a`: its cells, every cell tagged as the
   region's, each holding data of the region. -/
   | arena : ι.arenas[k]? = some a → σ.mem a = some (.arena cs) → cs.Nodup → a ∉ cs →
       (∀ l ∈ cs, ∃ τ v, σ.rt l = some (a, τ) ∧ σ.mem l = some v ∧ RD (ι.drop k) σ τ v) →
-      (∀ l x, σ.rt l = some (a, x) → l ∈ cs) → LT F ι σ a (.arena k) (a :: cs)
+      (∀ l x, σ.rt l = some (a, x) → l ∈ cs) → (∀ l ∈ a :: cs, σ.fb l = some ι.fiber) → LT F ι σ a (.arena k) (a :: cs)
   /-- A vector: its cell holds its elements' cells, each holding a `τ`, their trees apart. -/
   | vec {cs : List Nat} {Rs : List (List Nat)} : σ.mem a = some (.vec cs) → Rs.length = cs.length →
       (∀ i (h : i < cs.length) (h' : i < Rs.length), LT F ι σ cs[i] τ Rs[i]) → Rs.flatten.Nodup →
-      a ∉ Rs.flatten → LT F ι σ a (.vec g τ) (a :: Rs.flatten)
+      a ∉ Rs.flatten → σ.fb a = some ι.fiber → LT F ι σ a (.vec g τ) (a :: Rs.flatten)
 
 /-- A value of type `τ`, and the cells it owns. -/
 inductive VT (F : List Fn) (ι : Iota) (σ : Store) : Ty → Val → List Nat → Prop
@@ -465,12 +466,12 @@ theorem LT.alloc : LT F ι σ a τ L → ∀ l ∈ L, σ.mem l ≠ none := by
   induction h with
   | hole => intro l hl; simp at hl
   | int ha => intro l hl; simp at hl; subst hl; simp [ha]
-  | box ha _ _ ih | clo ha _ _ _ ih | tag ha _ _ ih =>
+  | box ha _ _ _ ih | clo ha _ _ _ _ ih | tag ha _ _ _ ih =>
     intro l hl
     rcases List.mem_cons.mp hl with rfl | hl
     · simp [ha]
     · exact ih l hl
-  | pair ha _ _ _ _ ih1 ih2 =>
+  | pair ha _ _ _ _ _ ih1 ih2 =>
     intro l hl
     rcases List.mem_cons.mp hl with rfl | hl
     · simp [ha]
@@ -484,7 +485,7 @@ theorem LT.alloc : LT F ι σ a τ L → ∀ l ∈ L, σ.mem l ≠ none := by
     · simp [ha]
     · obtain ⟨_, _, _, hv, _⟩ := hcs l hl
       simp [hv]
-  | vec ha hlen _ _ _ ih =>
+  | vec ha hlen _ _ _ _ ih =>
     intro l hl
     rcases List.mem_cons.mp hl with rfl | hl
     · simp [ha]
@@ -496,75 +497,86 @@ theorem LT.nodup : LT F ι σ a τ L → L.Nodup := by
   induction h with
   | hole => simp
   | int => simp
-  | box _ _ hn ih | clo _ _ _ hn ih | tag _ _ hn ih => exact List.nodup_cons.mpr ⟨hn, ih⟩
-  | pair _ _ _ hd hn ih1 ih2 =>
+  | box _ _ hn _ ih | clo _ _ _ hn _ ih | tag _ _ hn _ ih => exact List.nodup_cons.mpr ⟨hn, ih⟩
+  | pair _ _ _ hd hn _ ih1 ih2 =>
     exact List.nodup_cons.mpr ⟨hn, List.nodup_append.mpr ⟨ih1, ih2, fun x hx y hy e => hd x hx (e ▸ hy)⟩⟩
   | rref => simp
   | arena _ _ hnd hn => exact List.nodup_cons.mpr ⟨hn, hnd⟩
-  | vec _ _ _ hnd hn => exact List.nodup_cons.mpr ⟨hn, hnd⟩
+  | vec _ _ _ hnd hn hfv => exact List.nodup_cons.mpr ⟨hn, hnd⟩
 
 theorem LT.frame : LT F ι σ a τ L → Agree σ σ' L → LT F ι σ' a τ L := by
   intro h
   induction h with
   | hole => intro _; exact .hole
-  | int ha =>
+  | int ha hf =>
     intro hag
-    exact .int (by rw [hag _ (List.mem_singleton_self _)]; exact ha)
-  | box ha _ hn ih =>
+    exact .int (by rw [hag _ (List.mem_singleton_self _)]; exact ha) (hag.fb _ _ hf)
+  | box ha _ hn hf ih =>
     intro hag
     refine .box (by rw [hag _ (List.mem_cons_self ..)]; exact ha) (ih (hag.mono fun l hl => List.mem_cons_of_mem _ hl)) hn
-  | clo ha hc _ hn ih =>
+      (hag.fb _ _ hf)
+  | clo ha hc _ hn hf ih =>
     intro hag
     exact .clo (by rw [hag _ (List.mem_cons_self ..)]; exact ha) hc (ih (hag.mono fun l hl => List.mem_cons_of_mem _ hl)) hn
-  | tag ha _ hn ih =>
+      (hag.fb _ _ hf)
+  | tag ha _ hn hf ih =>
     intro hag
     exact .tag (by rw [hag _ (List.mem_cons_self ..)]; exact ha) (ih (hag.mono fun l hl => List.mem_cons_of_mem _ hl)) hn
-  | pair ha _ _ hd hn ih1 ih2 =>
+      (hag.fb _ _ hf)
+  | pair ha _ _ hd hn hf ih1 ih2 =>
     intro hag
     exact .pair (by rw [hag _ (List.mem_cons_self ..)]; exact ha)
       (ih1 (hag.mono fun l hl => List.mem_cons_of_mem _ (List.mem_append.mpr (.inl hl))))
-      (ih2 (hag.mono fun l hl => List.mem_cons_of_mem _ (List.mem_append.mpr (.inr hl)))) hd hn
-  | rref ha hr =>
+      (ih2 (hag.mono fun l hl => List.mem_cons_of_mem _ (List.mem_append.mpr (.inr hl)))) hd hn (hag.fb _ _ hf)
+  | rref ha hr hf =>
     intro hag
-    exact .rref (by rw [hag _ (List.mem_singleton_self _)]; exact ha) (hr.frame hag.rt)
-  | arena hk ha hnd hn hcs hex =>
+    exact .rref (by rw [hag _ (List.mem_singleton_self _)]; exact ha) (hr.frame hag.rt) (hag.fb _ _ hf)
+  | arena hk ha hnd hn hcs hex hf =>
     intro hag
     refine .arena hk (by rw [hag _ (List.mem_cons_self ..)]; exact ha) hnd hn (fun l hl => ?_)
-      (fun l x hx => hex l x (hag.fresh _ (List.mem_cons_self ..) l x hx))
+      (fun l x hx => hex l x (hag.fresh _ (List.mem_cons_self ..) l x hx)) (fun l hl => hag.fb _ _ (hf l hl))
     obtain ⟨τ, v, hrt, hv, hrd⟩ := hcs l hl
     exact ⟨τ, v, hag.rt l _ hrt, by rw [hag l (List.mem_cons_of_mem _ hl)]; exact hv, hrd.frame hag.rt⟩
-  | vec ha hlen _ hnd hn ih =>
+  | vec ha hlen _ hnd hn hf ih =>
     intro hag
     exact .vec (by rw [hag _ (List.mem_cons_self ..)]; exact ha) hlen
-      (fun i h h' => ih i h h' (hag.mono fun l hl => List.mem_cons_of_mem _ (mem_flatten_of h' hl))) hnd hn
+      (fun i h h' => ih i h h' (hag.mono fun l hl => List.mem_cons_of_mem _ (mem_flatten_of h' hl))) hnd hn (hag.fb _ _ hf)
+
+/-- The cell at the root of a tree is on the fiber of the code it is in. -/
+theorem LT.fiber : LT F ι σ a τ L → a ∈ L → σ.fb a = some ι.fiber := by
+  intro h hl
+  cases h with
+  | hole => simp at hl
+  | int _ hf | box _ _ _ hf | clo _ _ _ _ hf | tag _ _ _ hf | pair _ _ _ _ _ hf | rref _ _ hf | vec _ _ _ _ _ hf => exact hf
+  | arena _ _ _ _ _ _ hf => exact hf _ (List.mem_cons_self ..)
 
 theorem LT.det : LT F ι σ a τ L → LT F ι σ a τ L' → L = L' := by
   intro h
   induction h generalizing L' with
   | hole => intro h'; cases h'; rfl
   | int => intro h'; cases h'; rfl
-  | box ha _ _ ih =>
+  | box ha _ _ _ ih =>
     intro h'
     cases h' with
     | box ha' hb' _ =>
       rw [ha] at ha'
       cases ha'
       rw [ih hb']
-  | clo ha _ _ _ ih =>
+  | clo ha _ _ _ _ ih =>
     intro h'
     cases h' with
     | clo ha' _ hb' _ =>
       rw [ha] at ha'
       cases ha'
       rw [ih hb']
-  | pair ha _ _ _ _ ih1 ih2 =>
+  | pair ha _ _ _ _ _ ih1 ih2 =>
     intro h'
     cases h' with
     | pair ha' h1 h2 _ _ =>
       rw [ha] at ha'
       cases ha'
       rw [ih1 h1, ih2 h2]
-  | tag ha _ _ ih =>
+  | tag ha _ _ _ ih =>
     intro h'
     cases h' with
     | tag ha' hb' _ =>
@@ -579,10 +591,10 @@ theorem LT.det : LT F ι σ a τ L → LT F ι σ a τ L' → L = L' := by
       rw [ha] at ha'
       cases ha'
       rfl
-  | vec ha hlen _ _ _ ih =>
+  | vec ha hlen _ _ _ _ ih =>
     intro h'
     cases h' with
-    | vec ha' hlen' hel' _ _ =>
+    | vec ha' hlen' hel' _ _ hfv =>
       rw [ha] at ha'
       cases ha'
       congr 2
@@ -716,18 +728,19 @@ theorem LT.contents : LT F ι σ b τ R → τ.complete = true →
   | hole => simp [Ty.complete] at hc
   | rref ha hr => exact ⟨_, [], ha, .rref hr, rfl, by simp⟩
   | arena => simp [Ty.complete] at hc
-  | vec ha hlen hel hnd hn => exact ⟨_, _, ha, .vec hlen hel hnd (by simpa [Ty.complete] using hc), rfl, hn⟩
+  | vec ha hlen hel hnd hn hfv => exact ⟨_, _, ha, .vec hlen hel hnd (by simpa [Ty.complete] using hc), rfl, hn⟩
 
-theorem LT.of_contents : σ.mem b = some w → VT F ι σ τ w R' → b ∉ R' → LT F ι σ b τ (b :: R') := by
-  intro ha hv hn
+theorem LT.of_contents : σ.mem b = some w → VT F ι σ τ w R' → b ∉ R' → σ.fb b = some ι.fiber →
+    LT F ι σ b τ (b :: R') := by
+  intro ha hv hn hf
   cases hv with
-  | int => exact .int ha
-  | box hb => exact .box ha hb hn
-  | clo hc hb => exact .clo ha hc hb hn
-  | pair h1 h2 hd => exact .pair ha h1 h2 hd hn
-  | tag hb => exact .tag ha hb hn
-  | rref hr => exact .rref ha hr
-  | vec hlen hel hnd => exact .vec ha hlen hel hnd hn
+  | int => exact .int ha hf
+  | box hb => exact .box ha hb hn hf
+  | clo hc hb => exact .clo ha hc hb hn hf
+  | pair h1 h2 hd => exact .pair ha h1 h2 hd hn hf
+  | tag hb => exact .tag ha hb hn hf
+  | rref hr => exact .rref ha hr hf
+  | vec hlen hel hnd => exact .vec ha hlen hel hnd hn hf
 
 /-! ## Dropping -/
 
@@ -1071,98 +1084,99 @@ which holds a `τ`; `P` are the cells passed on the way, and the trees of the fi
 which the place leaves as they are. -/
 inductive Path (F : List Fn) (ι : Iota) (σ : Store) : Nat → Ty → List Nat → Nat → Ty → Prop
   | here : Path F ι σ a τ [] a τ
-  | step : σ.mem a = some (.ptr b) → Path F ι σ b τ' P l τ → Path F ι σ a (.box τ') (a :: P) l τ
-  | clo : σ.mem a = some (.clo f c τc) → CloOk F f τc k A B r Rf → Path F ι σ c τc P l τ →
+  | step : σ.mem a = some (.ptr b) → Path F ι σ b τ' P l τ → σ.fb a = some ι.fiber → Path F ι σ a (.box τ') (a :: P) l τ
+  | clo : σ.mem a = some (.clo f c τc) → CloOk F f τc k A B r Rf → Path F ι σ c τc P l τ → σ.fb a = some ι.fiber →
       Path F ι σ a (.fn k A B r Rf) (a :: P) l τ
-  | fst : σ.mem a = some (.pair b c) → LT F ι σ c B R → Path F ι σ b A P l τ →
+  | fst : σ.mem a = some (.pair b c) → LT F ι σ c B R → Path F ι σ b A P l τ → σ.fb a = some ι.fiber →
       Path F ι σ a (.pair A B) (a :: (R ++ P)) l τ
-  | snd : σ.mem a = some (.pair b c) → LT F ι σ b A R → Path F ι σ c B P l τ →
+  | snd : σ.mem a = some (.pair b c) → LT F ι σ b A R → Path F ι σ c B P l τ → σ.fb a = some ι.fiber →
       Path F ι σ a (.pair A B) (a :: (R ++ P)) l τ
-  | tag : σ.mem a = some (.tag A' B' t b) → Path F ι σ b (if t then A else B) P l τ →
+  | tag : σ.mem a = some (.tag A' B' t b) → Path F ι σ b (if t then A else B) P l τ → σ.fb a = some ι.fiber →
       Path F ι σ a (.sum A B) (a :: P) l τ
 
-theorem Path.snoc' : Path F ι σ a τa P l τl → τl = .box τ → σ.mem l = some (.ptr b) →
+theorem Path.snoc' : Path F ι σ a τa P l τl → τl = .box τ → σ.mem l = some (.ptr b) → σ.fb l = some ι.fiber →
     Path F ι σ a τa (P ++ [l]) b τ := by
   intro h
   induction h with
-  | here => intro he hl; subst he; exact .step hl .here
-  | step ha _ ih => intro he hl; exact .step ha (ih he hl)
-  | tag ha _ ih => intro he hl; exact .tag ha (ih he hl)
-  | clo ha hc _ ih => intro he hl; exact .clo ha hc (ih he hl)
-  | fst ha hR _ ih => intro he hl; simpa using Path.fst ha hR (ih he hl)
-  | snd ha hR _ ih => intro he hl; simpa using Path.snd ha hR (ih he hl)
+  | here => intro he hl hf; subst he; exact .step hl .here hf
+  | step ha _ hfa ih => intro he hl hf; exact .step ha (ih he hl hf) hfa
+  | tag ha _ hfa ih => intro he hl hf; exact .tag ha (ih he hl hf) hfa
+  | clo ha hc _ hfa ih => intro he hl hf; exact .clo ha hc (ih he hl hf) hfa
+  | fst ha hR _ hfa ih => intro he hl hf; simpa using Path.fst ha hR (ih he hl hf) hfa
+  | snd ha hR _ hfa ih => intro he hl hf; simpa using Path.snd ha hR (ih he hl hf) hfa
 
-theorem Path.snoc : Path F ι σ a τa P l (.box τ) → σ.mem l = some (.ptr b) → Path F ι σ a τa (P ++ [l]) b τ :=
+theorem Path.snoc : Path F ι σ a τa P l (.box τ) → σ.mem l = some (.ptr b) → σ.fb l = some ι.fiber →
+    Path F ι σ a τa (P ++ [l]) b τ :=
   fun h => h.snoc' rfl
 
 /-- A path on into a field: the pair's cell, and the other field's tree, are passed. -/
 theorem Path.snocFst' : Path F ι σ a τa P l τl → τl = .pair A B → σ.mem l = some (.pair b c) → LT F ι σ c B R →
-    Path F ι σ a τa (P ++ (l :: R)) b A := by
+    σ.fb l = some ι.fiber → Path F ι σ a τa (P ++ (l :: R)) b A := by
   intro h
   induction h with
-  | here => intro he hl hR; subst he; simpa using Path.fst hl hR .here
-  | step ha _ ih => intro he hl hR; exact .step ha (ih he hl hR)
-  | tag ha _ ih => intro he hl hR; exact .tag ha (ih he hl hR)
-  | clo ha hc _ ih => intro he hl hR; exact .clo ha hc (ih he hl hR)
-  | fst ha hR' _ ih => intro he hl hR; simpa using Path.fst ha hR' (ih he hl hR)
-  | snd ha hR' _ ih => intro he hl hR; simpa using Path.snd ha hR' (ih he hl hR)
+  | here => intro he hl hR hf; subst he; simpa using Path.fst hl hR .here hf
+  | step ha _ hfa ih => intro he hl hR hf; exact .step ha (ih he hl hR hf) hfa
+  | tag ha _ hfa ih => intro he hl hR hf; exact .tag ha (ih he hl hR hf) hfa
+  | clo ha hc _ hfa ih => intro he hl hR hf; exact .clo ha hc (ih he hl hR hf) hfa
+  | fst ha hR' _ hfa ih => intro he hl hR hf; simpa using Path.fst ha hR' (ih he hl hR hf) hfa
+  | snd ha hR' _ hfa ih => intro he hl hR hf; simpa using Path.snd ha hR' (ih he hl hR hf) hfa
 
 theorem Path.snocSnd' : Path F ι σ a τa P l τl → τl = .pair A B → σ.mem l = some (.pair b c) → LT F ι σ b A R →
-    Path F ι σ a τa (P ++ (l :: R)) c B := by
+    σ.fb l = some ι.fiber → Path F ι σ a τa (P ++ (l :: R)) c B := by
   intro h
   induction h with
-  | here => intro he hl hR; subst he; simpa using Path.snd hl hR .here
-  | step ha _ ih => intro he hl hR; exact .step ha (ih he hl hR)
-  | tag ha _ ih => intro he hl hR; exact .tag ha (ih he hl hR)
-  | clo ha hc _ ih => intro he hl hR; exact .clo ha hc (ih he hl hR)
-  | fst ha hR' _ ih => intro he hl hR; simpa using Path.fst ha hR' (ih he hl hR)
-  | snd ha hR' _ ih => intro he hl hR; simpa using Path.snd ha hR' (ih he hl hR)
+  | here => intro he hl hR hf; subst he; simpa using Path.snd hl hR .here hf
+  | step ha _ hfa ih => intro he hl hR hf; exact .step ha (ih he hl hR hf) hfa
+  | tag ha _ hfa ih => intro he hl hR hf; exact .tag ha (ih he hl hR hf) hfa
+  | clo ha hc _ hfa ih => intro he hl hR hf; exact .clo ha hc (ih he hl hR hf) hfa
+  | fst ha hR' _ hfa ih => intro he hl hR hf; simpa using Path.fst ha hR' (ih he hl hR hf) hfa
+  | snd ha hR' _ hfa ih => intro he hl hR hf; simpa using Path.snd ha hR' (ih he hl hR hf) hfa
 
 /-- A path on into what a tag carries. -/
 theorem Path.snocTag' : Path F ι σ a τa P l τl → τl = .sum A B → σ.mem l = some (.tag A' B' t b) →
-    Path F ι σ a τa (P ++ [l]) b (if t then A else B) := by
+    σ.fb l = some ι.fiber → Path F ι σ a τa (P ++ [l]) b (if t then A else B) := by
   intro h
   induction h with
-  | here => intro he hl; subst he; exact .tag hl .here
-  | step ha _ ih => intro he hl; exact .step ha (ih he hl)
-  | tag ha _ ih => intro he hl; exact .tag ha (ih he hl)
-  | clo ha hc _ ih => intro he hl; exact .clo ha hc (ih he hl)
-  | fst ha hR _ ih => intro he hl; simpa using Path.fst ha hR (ih he hl)
-  | snd ha hR _ ih => intro he hl; simpa using Path.snd ha hR (ih he hl)
+  | here => intro he hl hf; subst he; exact .tag hl .here hf
+  | step ha _ hfa ih => intro he hl hf; exact .step ha (ih he hl hf) hfa
+  | tag ha _ hfa ih => intro he hl hf; exact .tag ha (ih he hl hf) hfa
+  | clo ha hc _ hfa ih => intro he hl hf; exact .clo ha hc (ih he hl hf) hfa
+  | fst ha hR _ hfa ih => intro he hl hf; simpa using Path.fst ha hR (ih he hl hf) hfa
+  | snd ha hR _ hfa ih => intro he hl hf; simpa using Path.snd ha hR (ih he hl hf) hfa
 
 /-- Two paths, the second from where the first ends, are one. -/
 theorem Path.trans : Path F ι σ a τa P l τl → Path F ι σ l τl P' b τ → Path F ι σ a τa (P ++ P') b τ := by
   intro h h'
   induction h with
   | here => exact h'
-  | step ha _ ih => exact .step ha (ih h')
-  | tag ha _ ih => exact .tag ha (ih h')
-  | clo ha hc _ ih => exact .clo ha hc (ih h')
-  | fst ha hR _ ih => simpa using Path.fst ha hR (ih h')
-  | snd ha hR _ ih => simpa using Path.snd ha hR (ih h')
+  | step ha _ hfa ih => exact .step ha (ih h') hfa
+  | tag ha _ hfa ih => exact .tag ha (ih h') hfa
+  | clo ha hc _ hfa ih => exact .clo ha hc (ih h') hfa
+  | fst ha hR _ hfa ih => simpa using Path.fst ha hR (ih h') hfa
+  | snd ha hR _ hfa ih => simpa using Path.snd ha hR (ih h') hfa
 
 /-- A path stays where its cells do. -/
 theorem Path.frame : Path F ι σ a τa P l τ → Agree σ σ' P → Path F ι σ' a τa P l τ := by
   intro h hag
   induction h with
   | here => exact .here
-  | step ha _ ih =>
+  | step ha _ hfa ih =>
     exact .step (by rw [hag _ (List.mem_cons_self ..)]; exact ha)
-      (ih (hag.mono fun x hx => List.mem_cons_of_mem _ hx))
-  | tag ha _ ih =>
+      (ih (hag.mono fun x hx => List.mem_cons_of_mem _ hx)) (hag.fb _ _ hfa)
+  | tag ha _ hfa ih =>
     exact .tag (by rw [hag _ (List.mem_cons_self ..)]; exact ha)
-      (ih (hag.mono fun x hx => List.mem_cons_of_mem _ hx))
-  | clo ha hc _ ih =>
+      (ih (hag.mono fun x hx => List.mem_cons_of_mem _ hx)) (hag.fb _ _ hfa)
+  | clo ha hc _ hfa ih =>
     exact .clo (by rw [hag _ (List.mem_cons_self ..)]; exact ha) hc
-      (ih (hag.mono fun x hx => List.mem_cons_of_mem _ hx))
-  | fst ha hR _ ih =>
+      (ih (hag.mono fun x hx => List.mem_cons_of_mem _ hx)) (hag.fb _ _ hfa)
+  | fst ha hR _ hfa ih =>
     exact .fst (by rw [hag _ (List.mem_cons_self ..)]; exact ha)
       (hR.frame (hag.mono fun x hx => List.mem_cons_of_mem _ (List.mem_append.mpr (.inl hx))))
-      (ih (hag.mono fun x hx => List.mem_cons_of_mem _ (List.mem_append.mpr (.inr hx))))
-  | snd ha hR _ ih =>
+      (ih (hag.mono fun x hx => List.mem_cons_of_mem _ (List.mem_append.mpr (.inr hx)))) (hag.fb _ _ hfa)
+  | snd ha hR _ hfa ih =>
     exact .snd (by rw [hag _ (List.mem_cons_self ..)]; exact ha)
       (hR.frame (hag.mono fun x hx => List.mem_cons_of_mem _ (List.mem_append.mpr (.inl hx))))
-      (ih (hag.mono fun x hx => List.mem_cons_of_mem _ (List.mem_append.mpr (.inr hx))))
+      (ih (hag.mono fun x hx => List.mem_cons_of_mem _ (List.mem_append.mpr (.inr hx)))) (hag.fb _ _ hfa)
 
 /-- A tree is the cells on a path into it, the trees of the fields it passes by, and the tree where
 the path ends. -/
@@ -1170,7 +1184,7 @@ theorem path_split : Path F ι σ a τa P l τ → LT F ι σ a τa L → ∃ R,
   intro hp
   induction hp generalizing L with
   | here => intro h; exact ⟨L, h, .refl _⟩
-  | step ha _ ih =>
+  | step ha _ hfa ih =>
     intro h
     cases h with
     | box ha' hb hn =>
@@ -1178,7 +1192,7 @@ theorem path_split : Path F ι σ a τa P l τ → LT F ι σ a τa L → ∃ R,
       cases ha'
       obtain ⟨R, hR, hp⟩ := ih hb
       exact ⟨R, hR, hp.cons _⟩
-  | tag ha _ ih =>
+  | tag ha _ hfa ih =>
     intro h
     cases h with
     | tag ha' hb hn =>
@@ -1186,7 +1200,7 @@ theorem path_split : Path F ι σ a τa P l τ → LT F ι σ a τa L → ∃ R,
       cases ha'
       obtain ⟨R, hR, hp⟩ := ih hb
       exact ⟨R, hR, hp.cons _⟩
-  | clo ha _ _ ih =>
+  | clo ha _ _ hfa ih =>
     intro h
     cases h with
     | clo ha' _ hb hn =>
@@ -1194,7 +1208,7 @@ theorem path_split : Path F ι σ a τa P l τ → LT F ι σ a τa L → ∃ R,
       cases ha'
       obtain ⟨R, hR, hp⟩ := ih hb
       exact ⟨R, hR, hp.cons _⟩
-  | fst ha hR _ ih =>
+  | fst ha hR _ hfa ih =>
     intro h
     cases h with
     | pair ha' h1 h2 _ _ =>
@@ -1204,7 +1218,7 @@ theorem path_split : Path F ι σ a τa P l τ → LT F ι σ a τa L → ∃ R,
       obtain ⟨R', hR', hp⟩ := ih h1
       refine ⟨R', hR', List.Perm.cons _ ?_⟩
       exact ((hp.append_right _).trans (List.perm_append_comm)).trans (by simp)
-  | snd ha hR _ ih =>
+  | snd ha hR _ hfa ih =>
     intro h
     cases h with
     | pair ha' h1 h2 _ _ =>
@@ -1221,37 +1235,37 @@ theorem path_join : Path F ι σ a τa P l τ → P.Nodup → Agree σ σ' P →
   intro hp
   induction hp with
   | here => intro _ _ h _; exact ⟨_, h, .refl _, .here⟩
-  | step ha _ ih =>
+  | step ha _ hfa ih =>
     intro hn hag h' hd
     obtain ⟨hna, hn'⟩ := List.nodup_cons.mp hn
     obtain ⟨L1, hlt, hp, hpath⟩ := ih hn' ((hag.mono fun x hx => List.mem_cons_of_mem _ hx)) h'
       (fun x hx => hd x (List.mem_cons_of_mem _ hx))
     have ha' := (hag _ (List.mem_cons_self ..)).trans ha
-    refine ⟨_, .box ha' hlt fun hx => ?_, hp.cons _, .step ha' hpath⟩
+    refine ⟨_, .box ha' hlt (fun hx => ?_) (hag.fb _ _ hfa), hp.cons _, .step ha' hpath (hag.fb _ _ hfa)⟩
     rcases List.mem_append.mp (hp.mem_iff.mp hx) with hx | hx
     · exact hna hx
     · exact hd _ (List.mem_cons_self ..) hx
-  | tag ha _ ih =>
+  | tag ha _ hfa ih =>
     intro hn hag h' hd
     obtain ⟨hna, hn'⟩ := List.nodup_cons.mp hn
     obtain ⟨L1, hlt, hp, hpath⟩ := ih hn' ((hag.mono fun x hx => List.mem_cons_of_mem _ hx)) h'
       (fun x hx => hd x (List.mem_cons_of_mem _ hx))
     have ha' := (hag _ (List.mem_cons_self ..)).trans ha
-    refine ⟨_, .tag ha' hlt fun hx => ?_, hp.cons _, .tag ha' hpath⟩
+    refine ⟨_, .tag ha' hlt (fun hx => ?_) (hag.fb _ _ hfa), hp.cons _, .tag ha' hpath (hag.fb _ _ hfa)⟩
     rcases List.mem_append.mp (hp.mem_iff.mp hx) with hx | hx
     · exact hna hx
     · exact hd _ (List.mem_cons_self ..) hx
-  | clo ha hc _ ih =>
+  | clo ha hc _ hfa ih =>
     intro hn hag h' hd
     obtain ⟨hna, hn'⟩ := List.nodup_cons.mp hn
     obtain ⟨L1, hlt, hp, hpath⟩ := ih hn' ((hag.mono fun x hx => List.mem_cons_of_mem _ hx)) h'
       (fun x hx => hd x (List.mem_cons_of_mem _ hx))
     have ha' := (hag _ (List.mem_cons_self ..)).trans ha
-    refine ⟨_, .clo ha' hc hlt fun hx => ?_, hp.cons _, .clo ha' hc hpath⟩
+    refine ⟨_, .clo ha' hc hlt (fun hx => ?_) (hag.fb _ _ hfa), hp.cons _, .clo ha' hc hpath (hag.fb _ _ hfa)⟩
     rcases List.mem_append.mp (hp.mem_iff.mp hx) with hx | hx
     · exact hna hx
     · exact hd _ (List.mem_cons_self ..) hx
-  | fst ha hR _ ih =>
+  | fst ha hR _ hfa ih =>
     intro hn hag h' hd
     obtain ⟨hna, hn'⟩ := List.nodup_cons.mp hn
     obtain ⟨hnR, hnP, hdRP⟩ := nodup_append_disj.mp hn'
@@ -1259,7 +1273,7 @@ theorem path_join : Path F ι σ a τa P l τ → P.Nodup → Agree σ σ' P →
       (fun x hx => hd x (List.mem_cons_of_mem _ (List.mem_append.mpr (.inr hx))))
     have ha' := (hag _ (List.mem_cons_self ..)).trans ha
     have hR' := hR.frame (σ' := σ') (hag.mono fun x hx => List.mem_cons_of_mem _ (List.mem_append.mpr (.inl hx)))
-    refine ⟨_, .pair ha' hlt hR' (fun x hx hx' => ?_) (fun hx => ?_), ?_, .fst ha' hR' hpath⟩
+    refine ⟨_, .pair ha' hlt hR' (fun x hx hx' => ?_) (fun hx => ?_) (hag.fb _ _ hfa), ?_, .fst ha' hR' hpath (hag.fb _ _ hfa)⟩
     · rcases List.mem_append.mp (hp.mem_iff.mp hx) with hx | hx
       · exact hdRP x hx' hx
       · exact hd x (List.mem_cons_of_mem _ (List.mem_append.mpr (.inl hx'))) hx
@@ -1270,7 +1284,7 @@ theorem path_join : Path F ι σ a τa P l τ → P.Nodup → Agree σ σ' P →
       · exact hna (List.mem_append.mpr (.inl hx))
     · refine List.Perm.cons _ ?_
       exact ((hp.append_right _).trans List.perm_append_comm).trans (by simp)
-  | snd ha hR _ ih =>
+  | snd ha hR _ hfa ih =>
     intro hn hag h' hd
     obtain ⟨hna, hn'⟩ := List.nodup_cons.mp hn
     obtain ⟨hnR, hnP, hdRP⟩ := nodup_append_disj.mp hn'
@@ -1278,7 +1292,7 @@ theorem path_join : Path F ι σ a τa P l τ → P.Nodup → Agree σ σ' P →
       (fun x hx => hd x (List.mem_cons_of_mem _ (List.mem_append.mpr (.inr hx))))
     have ha' := (hag _ (List.mem_cons_self ..)).trans ha
     have hR' := hR.frame (σ' := σ') (hag.mono fun x hx => List.mem_cons_of_mem _ (List.mem_append.mpr (.inl hx)))
-    refine ⟨_, .pair ha' hR' hlt (fun x hx hx' => ?_) (fun hx => ?_), ?_, .snd ha' hR' hpath⟩
+    refine ⟨_, .pair ha' hR' hlt (fun x hx hx' => ?_) (fun hx => ?_) (hag.fb _ _ hfa), ?_, .snd ha' hR' hpath (hag.fb _ _ hfa)⟩
     · rcases List.mem_append.mp (hp.mem_iff.mp hx') with hx' | hx'
       · exact hdRP x hx hx'
       · exact hd x (List.mem_cons_of_mem _ (List.mem_append.mpr (.inl hx))) hx'

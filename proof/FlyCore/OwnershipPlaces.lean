@@ -72,8 +72,8 @@ theorem place_ok : PlaceTy Γ p τ w r → Foot F ι σ Γ env E S →
     obtain ⟨a, τr, Lr, P, l, s, ha, hLr, hpath, hres, hsub, hw, hs, hso, hex, hlt, hsh, hty⟩ := ih
     obtain ⟨R, hR, -⟩ := path_split hpath hLr
     cases hR with
-    | box hl hb _ =>
-      refine ⟨a, τr, Lr, P ++ [l], _, s, ha, hLr, hpath.snoc hl, by simp [resolve, hres, hl], hsub, hw, hs,
+    | box hl hb _ hfl =>
+      refine ⟨a, τr, Lr, P ++ [l], _, s, ha, hLr, hpath.snoc hl hfl, by simp [resolve, hres, hl], hsub, hw, hs,
         hso, hex, hlt, fun h => .inr ?_, hty⟩
       rcases hsh h with ⟨rfl, rfl⟩ | ⟨hfn, P', rfl⟩
       · cases hpath; exact ⟨rfl, [], rfl⟩
@@ -82,8 +82,8 @@ theorem place_ok : PlaceTy Γ p τ w r → Foot F ι σ Γ env E S →
     obtain ⟨a, τr, Lr, P, l, s, ha, hLr, hpath, hres, hsub, hw, hs, hso, hex, hlt, hsh, hty⟩ := ih
     obtain ⟨R, hR, -⟩ := path_split hpath hLr
     cases hR with
-    | pair hl h1 h2 _ _ =>
-      refine ⟨a, τr, Lr, _, _, s, ha, hLr, hpath.snocFst' rfl hl h2, by simp [resolve, hres, hl], hsub, hw, hs,
+    | pair hl h1 h2 _ _ hfl =>
+      refine ⟨a, τr, Lr, _, _, s, ha, hLr, hpath.snocFst' rfl hl h2 hfl, by simp [resolve, hres, hl], hsub, hw, hs,
         hso, hex, hlt, fun h => .inr ?_, hty⟩
       rcases hsh h with ⟨rfl, rfl⟩ | ⟨hfn, P', rfl⟩
       · cases hpath; exact ⟨rfl, _, rfl⟩
@@ -92,8 +92,8 @@ theorem place_ok : PlaceTy Γ p τ w r → Foot F ι σ Γ env E S →
     obtain ⟨a, τr, Lr, P, l, s, ha, hLr, hpath, hres, hsub, hw, hs, hso, hex, hlt, hsh, hty⟩ := ih
     obtain ⟨R, hR, -⟩ := path_split hpath hLr
     cases hR with
-    | pair hl h1 h2 _ _ =>
-      refine ⟨a, τr, Lr, _, _, s, ha, hLr, hpath.snocSnd' rfl hl h1, by simp [resolve, hres, hl], hsub, hw, hs,
+    | pair hl h1 h2 _ _ hfl =>
+      refine ⟨a, τr, Lr, _, _, s, ha, hLr, hpath.snocSnd' rfl hl h1 hfl, by simp [resolve, hres, hl], hsub, hw, hs,
         hso, hex, hlt, fun h => .inr ?_, hty⟩
       rcases hsh h with ⟨rfl, rfl⟩ | ⟨hfn, P', rfl⟩
       · cases hpath; exact ⟨rfl, _, rfl⟩
@@ -479,38 +479,38 @@ theorem split_field (t : Bool) (hL : LT F ι σ a (.pair A B) L) :
         LT F ι σ' (if t then b else c) (if t then A else B) Rx → Disj Rx Ro' → a ∉ Rx ++ Ro' →
         ∃ L', LT F ι σ' a (.pair A B) L' ∧ L'.Perm (a :: (Rx ++ Ro')) := by
   cases hL with
-  | pair ha h1 h2 hd hn =>
+  | pair ha h1 h2 hd hn hfa =>
     rename_i b c R₁ R₂
     cases t with
     | true =>
       have hlt : LT F ι σ a (Ty.lent1 true A B) (a :: R₂) := by
         have := LT.pair ha (.hole (τ := A)) h2 (by simp)
-          (fun h => hn (List.mem_append.mpr (.inr (by simpa using h))))
+          (fun h => hn (List.mem_append.mpr (.inr (by simpa using h)))) hfa
         simpa [Ty.lent1] using this
       refine ⟨b, c, R₁, R₂, ha, h1, hlt, .refl _, hd, hn, ?_⟩
       intro σ' Ro' Rx hag hL' hx hd' hn'
       simp only [Ty.lent1, ↓reduceIte] at hL'
       cases hL' with
-      | pair ha' g1 g2 _ _ =>
+      | pair ha' g1 g2 _ _ hf' =>
         rw [hag, ha] at ha'; cases ha'
         cases g1
-        exact ⟨_, .pair (hag.trans ha) hx g2 (fun z h h' => hd' z h (by simpa using h')) (by simpa using hn'), by simp⟩
+        exact ⟨_, .pair (hag.trans ha) hx g2 (fun z h h' => hd' z h (by simpa using h')) (by simpa using hn') hf', by simp⟩
     | false =>
       have hlt : LT F ι σ a (Ty.lent1 false A B) (a :: R₁) := by
         have := LT.pair ha h1 (.hole (τ := B)) (by simp)
-          (fun h => hn (List.mem_append.mpr (.inl (by simpa using h))))
+          (fun h => hn (List.mem_append.mpr (.inl (by simpa using h)))) hfa
         simpa [Ty.lent1] using this
       refine ⟨b, c, R₂, R₁, ha, h2, hlt, List.Perm.cons _ List.perm_append_comm, fun x hx hx' => hd x hx' hx,
         fun h => hn (List.perm_append_comm.mem_iff.mp h), ?_⟩
       intro σ' Ro' Rx hag hL' hx hd' hn'
       simp only [Ty.lent1, Bool.false_eq_true, ↓reduceIte] at hL'
       cases hL' with
-      | pair ha' g1 g2 _ _ =>
+      | pair ha' g1 g2 _ _ hf' =>
         rw [hag, ha] at ha'; cases ha'
         cases g2
         simp only [List.append_nil] at hd' hn' ⊢
         exact ⟨_, .pair (hag.trans ha) g1 hx (fun z h h' => hd' z h' h)
-          (fun h => hn' (List.perm_append_comm.mem_iff.mp h)), List.Perm.cons _ List.perm_append_comm⟩
+          (fun h => hn' (List.perm_append_comm.mem_iff.mp h)) hf', List.Perm.cons _ List.perm_append_comm⟩
 
 /-- A slot that may change all but its first cell holds that cell first. -/
 theorem SlotOk.head_of_shell (h : SlotOk F ι σ s a L) (hs : s.shell = true) : ∃ R, L = a :: R := by

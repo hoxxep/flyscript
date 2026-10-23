@@ -266,7 +266,7 @@ theorem mkTask_ok (hF : FnsOk F O) (hS : ScOk O e eS op opS rT R r τ) (hcz : Sc
     .cons .int (.cons (hvw.frame (Agree.of' fun l hl => hold1 l fun e => hcRw (e ▸ hl))) .nil)
   have hwf1 : WF (σ.set c none) := WF.set_none hwf
   obtain ⟨Eo, hfo, hEo, hEom, hle, hwf₂, hold, hnew, -⟩ :=
-    allocAll_ok (names := [pn, xc]) hvs (by simp) hwf1 (by simpa using hvw.nodup)
+    allocAll_ok (names := [pn, xc]) hvs (by simp) hwf1 (by simpa using hvw.nodup) hcur
   have hcells := allocAll_fst (σ.set c none) ([pn, xc].zip [.int 0, w'])
   have hrt := allocAll_rt (σ.set c none) ([pn, xc].zip [.int 0, w'])
   have hfbt := allocAll_fbext (σ.set c none) ([pn, xc].zip [.int 0, w'])

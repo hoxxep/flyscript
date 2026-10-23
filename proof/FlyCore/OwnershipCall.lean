@@ -561,21 +561,21 @@ def ownCtx (ps : List (Var × Ty)) : Ctx := ps.map fun p => (p.1, Slot.own p.2 t
 /-- Each owned argument in a fresh cell: the cells, and what the values owned, are the footprint of
 the callee's owned parameters. -/
 theorem allocAll_ok : ∀ {σ : Store} {names : List Var} {τs vs Ls}, Vals F ι σ τs vs Ls →
-    names.length = τs.length → WF σ → Ls.flatten.Nodup →
+    names.length = τs.length → WF σ → Ls.flatten.Nodup → σ.cur = ι.fiber →
     ∃ Eo, Foot F ι (allocAll σ (names.zip vs)).2 (ownCtx (names.zip τs)) (allocAll σ (names.zip vs)).1 Eo [] ∧
       Eo.Nodup ∧ (∀ l, l ∈ Eo ↔ l ∈ Ls.flatten ∨ (σ.next ≤ l ∧ l < (allocAll σ (names.zip vs)).2.next)) ∧
       σ.next ≤ (allocAll σ (names.zip vs)).2.next ∧ WF (allocAll σ (names.zip vs)).2 ∧
       (∀ l, l < σ.next → (allocAll σ (names.zip vs)).2.mem l = σ.mem l) ∧
       (∀ l, σ.next ≤ l → l < (allocAll σ (names.zip vs)).2.next → (allocAll σ (names.zip vs)).2.mem l ≠ none) ∧
       (allocAll σ (names.zip vs)).1.length = names.length
-  | σ, [], _, _, _, h, hl, hwf, _ => by
+  | σ, [], _, _, _, h, hl, hwf, _, _ => by
     cases h with
     | nil =>
       refine ⟨[], .nil, List.nodup_nil, ?_, Nat.le_refl _, hwf, fun _ _ => rfl, ?_, rfl⟩
       · intro l; simp only [List.zip_nil_left, allocAll, List.flatten_nil, List.not_mem_nil, false_or, false_iff]; omega
       · intro l h1 h2; simp only [List.zip_nil_left, allocAll] at h2; omega
     | cons => simp at hl
-  | σ, x :: names, _, _, _, h, hl, hwf, hn => by
+  | σ, x :: names, _, _, _, h, hl, hwf, hn, hcur => by
     cases h with
     | nil => simp at hl
     | @cons τ v L τs vs Ls hv hvs =>
@@ -593,7 +593,7 @@ theorem allocAll_ok : ∀ {σ : Store} {names : List Var} {τs vs Ls}, Vals F ι
         · exact hwf l (hvs.alloc l hl)
       obtain ⟨Eo, hf, hnd, hmem, hle, hwf2, hold, hnew, hlen⟩ :=
         allocAll_ok (σ := (σ.alloc v).2) (names := names)
-          (hvs.frame (hag.mono fun l hl => List.mem_append.mpr (.inr hl))) (by simpa using hl) hwf.alloc hnLs
+          (hvs.frame (hag.mono fun l hl => List.mem_append.mpr (.inr hl))) (by simpa using hl) hwf.alloc hnLs hcur
       simp only [List.zip_cons_cons, allocAll]
       have hn1 : (σ.alloc v).2.next = σ.next + 1 := rfl
       have hc : (σ.alloc v).1 = σ.next := rfl
@@ -606,7 +606,8 @@ theorem allocAll_ok : ∀ {σ : Store} {names : List Var} {τs vs Ls}, Vals F ι
       dsimp only at hf hmem hle hwf2 hold hnew hlen hrt ⊢
       have hcL : σ.next ∉ L := fun h => Nat.lt_irrefl _ (hlow _ (List.mem_append.mpr (.inl h)))
       have hLt : LT F ι σ2 σ.next τ (σ.next :: L) := by
-        refine (LT.of_contents (by simp [Store.alloc]) (hv.frame (hag.mono fun l hl => List.mem_append.mpr (.inl hl))) hcL).frame (Agree.of (fun l hl => hold l ?_) hrt)
+        refine (LT.of_contents (by simp [Store.alloc]) (hv.frame (hag.mono fun l hl => List.mem_append.mpr (.inl hl))) hcL
+          (by simp [Store.alloc, hcur])).frame (Agree.of (fun l hl => hold l ?_) hrt)
         rcases List.mem_cons.mp hl with rfl | hl
         · rw [hn1]; omega
         · have := hlow l (List.mem_append.mpr (.inl hl)); rw [hn1]; omega

@@ -50,7 +50,7 @@ theorem moveAll_fbext : ∀ (cs : List Nat) (σ σ' : Store) (cs' : List Nat), �
     · cases h
 
 theorem moveAll_ok {τ : Ty} (hc : τ.complete = true) : ∀ (cs : List Nat) (Rs : List (List Nat)) (σ : Store),
-    WF σ → Rs.length = cs.length → (∀ i (h : i < cs.length) (h' : i < Rs.length), LT F ι σ cs[i] τ Rs[i]) →
+    WF σ → σ.cur = ι.fiber → Rs.length = cs.length → (∀ i (h : i < cs.length) (h' : i < Rs.length), LT F ι σ cs[i] τ Rs[i]) →
     Rs.flatten.Nodup →
     ∃ (Rs' : List (List Nat)) (σ' : Store), σ.moveAll cs = some (List.range' σ.next cs.length, σ') ∧ Rs'.length = cs.length ∧
       (∀ i (h : i < (List.range' σ.next cs.length).length) (h' : i < Rs'.length),
@@ -58,11 +58,11 @@ theorem moveAll_ok {τ : Ty} (hc : τ.complete = true) : ∀ (cs : List Nat) (Rs
       (∀ x, x ∈ Rs'.flatten ↔ (x ∈ Rs.flatten ∧ x ∉ cs) ∨ x ∈ List.range' σ.next cs.length) ∧
       (∀ x ∈ cs, σ'.mem x = none) ∧ (∀ x, x ∉ cs → x < σ.next → σ'.mem x = σ.mem x) ∧
       σ'.next = σ.next + cs.length ∧ σ'.rt = σ.rt ∧ WF σ'
-  | [], Rs, σ, hwf, hlen, _, _ => by
+  | [], Rs, σ, hwf, _, hlen, _, _ => by
     obtain rfl : Rs = [] := List.eq_nil_of_length_eq_zero hlen
     exact ⟨[], σ, rfl, rfl, fun i h => by simp at h, List.nodup_nil, by simp, by simp,
       fun _ _ _ => rfl, rfl, rfl, hwf⟩
-  | c :: cs, Rs, σ, hwf, hlen, hel, hnd => by
+  | c :: cs, Rs, σ, hwf, hcur, hlen, hel, hnd => by
     cases Rs with
     | nil => simp at hlen
     | cons R Rs =>
@@ -94,7 +94,7 @@ theorem moveAll_ok {τ : Ty} (hc : τ.complete = true) : ∀ (cs : List Nat) (Rs
       have hxn : x ≠ σ.next := fun e => Nat.lt_irrefl _ (e ▸ hi.alloc_lt hwf x hx)
       rw [hm2]; simp [hxc, hxn]
     obtain ⟨Rs'', σ3, hmv, hlen', hel', hnd'', hmem'', hfree, hkeep, hn3, hrt3, hwf3⟩ :=
-      moveAll_ok hc cs Rs σ2 hwf2 hlen hel2 hnd'.2.1
+      moveAll_ok hc cs Rs σ2 hwf2 hcur hlen hel2 hnd'.2.1
     have hfb3 : FbExt σ σ3 := fun l g h => moveAll_fbext _ _ _ _ hmv l g (FbExt.alloc (v := w) l g h)
     have hcur3 : σ3.cur = σ.cur := (moveAll_cur _ _ _ _ hmv).trans rfl
     rw [hn2] at hmv hel' hmem'' hn3
@@ -118,6 +118,7 @@ theorem moveAll_ok {τ : Ty} (hc : τ.complete = true) : ∀ (cs : List Nat) (Rs
       hold3 x (fun h => hcs_out x h (List.mem_cons_of_mem _ hx)) (fun e => hn (e ▸ hx)) (hR'n x hx)) hrt3'
     have hnR' : σ.next ∉ R' := fun h => Nat.lt_irrefl _ (hR'n _ h)
     have hLT0 : LT F ι σ3 σ.next τ (σ.next :: R') := LT.of_contents hnew3 (hv.frame hagR') hnR'
+      (by rw [← hcur]; exact moveAll_fbext _ _ _ _ hmv _ _ (by simp [σ2, σ1, Store.set, Store.alloc]))
     have hrange : List.range' σ.next (cs.length + 1) = σ.next :: List.range' (σ.next + 1) cs.length := by
       simp [List.range'_succ]
     refine ⟨(σ.next :: R') :: Rs'', σ3, ?_, by simp [hlen'], ?_, ?_, ?_, ?_, ?_, by rw [hn3]; simp; omega, hrt3', hwf3⟩
@@ -239,11 +240,11 @@ theorem vpush_ok (ha : AtomTy Γ a τ Γ₁) (hp : PlaceTy Γ₁ p (.vec true τ
   have hcτ : τ.complete = true := hv₁.complete
   obtain ⟨c, Rb, P, A, B, hres, hRb, hE, hupd⟩ := replace_at hI₁ hp (by simpa [Ty.complete] using hcτ) (.inl rfl)
   cases hRb with
-  | vec hcm hlen hel hnd hcn =>
+  | vec hcm hlen hel hnd hcn hfv =>
   rename_i cs Rs
   have hwf₁ := hm₁.wf
   obtain ⟨Rs', σ2, hmv, hlen', hel', hnd', hmem', hfree, hkeep, hn2, hrt2, hwf2⟩ :=
-    moveAll_ok hcτ cs Rs σ1 hwf₁ hlen hel hnd
+    moveAll_ok hcτ cs Rs σ1 hwf₁ (by cur_inv) hlen hel hnd
   have hfb2 : FbExt σ1 σ2 := moveAll_fbext _ _ _ _ hmv
   have hcur2 : σ2.cur = σ1.cur := moveAll_cur _ _ _ _ hmv
   simp only [evalS, hev, hres, hcm, hmv]
@@ -290,6 +291,7 @@ theorem vpush_ok (ha : AtomTy Γ a τ Γ₁) (hp : PlaceTy Γ₁ p (.vec true τ
   -- The vector, one element more.
   have hLT : LT F ι σ4 c (.vec true τ) (c :: (Rs' ++ [l :: L₁]).flatten) := by
     refine .vec (cs := List.range' σ1.next cs.length ++ [l]) (by rw [hm4]; simp) (by simp [hlen']) (fun i h h' => ?_) ?_ ?_
+      (hfb4 _ _ hfv)
     · simp only [List.length_append, List.length_range', List.length_singleton] at h
       by_cases hi : i < cs.length
       · have := hel' i (by simpa using hi) (by omega)
@@ -309,6 +311,7 @@ theorem vpush_ok (ha : AtomTy Γ a τ Γ₁) (hp : PlaceTy Γ₁ p (.vec true τ
         rw [List.getElem_append_right (by simp), List.getElem_append_right (by omega)]
         simp only [List.length_range', Nat.sub_self, List.getElem_singleton, hlen']
         exact LT.of_contents (by rw [hm4]; simp [show l ≠ c by omega]) (hv₁.frame hagL) hlL
+          (by rw [← hσ4, ← hl]; simp [Store.alloc, Store.set]; exact hcur2.trans hI₁.cur)
     · simp only [List.flatten_append, List.flatten_singleton]
       refine List.nodup_append.mpr ⟨hnd', List.nodup_cons.mpr ⟨hlL, hv₁.nodup⟩, ?_⟩
       intro x hx y hy e
@@ -446,7 +449,7 @@ theorem vpop_ok (hp : PlaceTy Γ p (.vec true τ) true y) (hcτ : τ.complete = 
     Post F ι O σ E S Γ env (.sum .int τ) r hs (evalS F O n hs σ env (.vpop p)) := by
   obtain ⟨c, Rb, P, A, B, hres, hRb, hE, hupd⟩ := replace_at hI hp (by simpa [Ty.complete] using hcτ) (.inl rfl)
   cases hRb with
-  | vec hcm hlen hel hnd hcn =>
+  | vec hcm hlen hel hnd hcn hfv =>
   rename_i cs Rs
   simp only [evalS, hres, hcm]
   have hndE := hE.nodup_iff.mp hI.nodup
@@ -468,7 +471,7 @@ theorem vpop_ok (hp : PlaceTy Γ p (.vec true τ) true y) (hcτ : τ.complete = 
       rcases List.mem_append.mp hl with h | h
       · exact hold l (hI.alloc l h)
       · exact hold l (hI.allocS l h)) (by rw [← hσ1]; rfl)
-    refine ⟨E, [b], ⟨hI.foot.frame hag, hI.nodup, hI.disj, hI.keys, hag.cur.trans hI.cur⟩, .tag (.int hbm) rfl hcτ,
+    refine ⟨E, [b], ⟨hI.foot.frame hag, hI.nodup, hI.disj, hI.keys, hag.cur.trans hI.cur⟩, .tag (.int hbm (by rw [← hσ1, hbn]; simp [Store.alloc]; exact hI.cur)) rfl hcτ,
       fun l h1 h2 => ?_, fun l h1 h2 => ?_, ?_⟩
     · simp at h1; subst h1; exact hfresh _ (hI.alloc _ h2) rfl
     · simp at h1; subst h1; exact hfresh _ (hI.allocS _ h2) rfl
@@ -505,6 +508,7 @@ theorem vpop_ok (hp : PlaceTy Γ p (.vec true τ) true y) (hcτ : τ.complete = 
       rw [hm', if_neg (fun (e : x = c) => hcl (e ▸ hx))]) hrt'
     have hLT' : LT F ι σ' c (.vec true τ) (c :: Rs.dropLast.flatten) := by
       refine .vec (cs := cs.dropLast) (by rw [hm']; simp) (by simp [hlen]) (fun j hj hj' => ?_) hnd2.1 hcD
+        (by rw [← hσ']; exact hfv)
       have hj1 : j < cs.length := by simp at hj; omega
       have := hel j hj1 (by rw [hlen]; exact hj1)
       rw [List.getElem_dropLast, List.getElem_dropLast]
@@ -568,7 +572,7 @@ theorem elem_reach (hp : Path F ι σ a τr P c (.vec g τ)) (hLr : LT F ι σ a
     (hi : i < cs.length) : ∃ Os, Reach F ι σ a τr (P ++ c :: Os) cs[i] τ := by
   obtain ⟨Rc, hRc, hperm⟩ := path_split hp hLr
   cases hRc with
-  | vec hcm' hlen hel hnd hcn =>
+  | vec hcm' hlen hel hnd hcn hfv =>
   rename_i cs' Rs
   rw [hcm] at hcm'
   cases hcm'
@@ -586,7 +590,7 @@ theorem elem_reach (hp : Path F ι σ a τr P c (.vec g τ)) (hLr : LT F ι σ a
     have hcOs : c ∉ (Rs.set i []).flatten := (List.nodup_cons.mp hn'.2.1).1
     have hagc : σ'.mem c = σ.mem c := hag c (by simp)
     have hLc : LT F ι σ' c (.vec g τ) (c :: (Rs.set i R').flatten) := by
-      refine .vec (by rw [hagc]; exact hcm) (by simp [hlen]) (fun j hj hj' => ?_) ?_ ?_
+      refine .vec (by rw [hagc]; exact hcm) (by simp [hlen]) (fun j hj hj' => ?_) ?_ ?_ (hag.fb _ _ hfv)
       · rw [List.getElem_set]
         by_cases hji : i = j
         · subst hji; rw [if_pos rfl]; exact hR'
@@ -866,7 +870,7 @@ theorem range_reach (hp : Path F ι σ a τr P c (.vec g τ)) (hLr : LT F ι σ 
         ∃ L', LT F ι σ' a τr L' ∧ L'.Perm (P ++ c :: Os ++ Rn.flatten) := by
   obtain ⟨Rc, hRc, hperm⟩ := path_split hp hLr
   cases hRc with
-  | vec hcm' hlen hel hnd hcn =>
+  | vec hcm' hlen hel hnd hcn hfv =>
   rename_i cs' Rs
   rw [hcm] at hcm'
   cases hcm'
@@ -894,7 +898,7 @@ theorem range_reach (hp : Path F ι σ a τr P c (.vec g τ)) (hLr : LT F ι σ 
       simp only [List.flatten_append]
       exact List.perm_iff_count.mpr fun z => by simp only [List.count_append]; omega
     have hLc : LT F ι σ' c (.vec g τ) (c :: Rs'.flatten) := by
-      refine .vec (by rw [hagc]; exact hcm) hlen' (fun k hk hk' => ?_) ?_ ?_
+      refine .vec (by rw [hagc]; exact hcm) hlen' (fun k hk hk' => ?_) ?_ ?_ (hag.fb _ _ hfv)
       · subst hRs'
         by_cases h1 : k < i
         · have e : (Rs.take i ++ Rn ++ (Rs.drop i).drop m)[k] = Rs[k]'(by omega) := by
@@ -953,7 +957,7 @@ theorem lendSlice_ok (hE : EvalOk F O n) (hx : lookup x Γ = none) (hp : PlaceTy
   obtain ⟨Rc, hRc, hLrPR⟩ := path_split hpath hLr
   have hRc' := hRc
   cases hRc' with
-  | vec hcm hlen hel hnd hcn =>
+  | vec hcm hlen hel hnd hcn hfv =>
   rename_i cs Rs
   have intOf : ∀ {v w' yv}, PlaceTy Γ (.var v) .int w' yv → ∃ l k, lookup v env = some l ∧ σ.mem l = some (.int k) := by
     intro v w' yv hv
@@ -997,7 +1001,7 @@ theorem lendSlice_ok (hE : EvalOk F O n) (hx : lookup x Γ = none) (hp : PlaceTy
   have hk : i.toNat ≤ cs.length ∧ j.toNat ≤ cs.length ∧ i.toNat ≤ j.toNat := by omega
   have hLa : LT F ι (σ.alloc (.vec sub)).2 σ.next (.vec false τ) (σ.next :: Rsub.flatten) := by
     refine .vec (cs := sub) (by simp [Store.alloc]) (by rw [← hsub, ← hRsub]; simp [hlen]) (fun k hk1 hk2 => ?_)
-      hRsubn haRt
+      hRsubn haRt (by simp [Store.alloc]; exact hI.cur)
     have hk1' : i.toNat + k < cs.length := by rw [← hsub] at hk1; simp at hk1; omega
     have e1 : sub[k] = cs[i.toNat + k] := by subst hsub; simp
     have e2 : Rsub[k] = Rs[i.toNat + k]'(by rw [hlen]; exact hk1') := by subst hRsub; simp
@@ -1109,7 +1113,7 @@ theorem lendSliceMut_ok (hE : EvalOk F O n) (hx : lookup x Γ = none) (hp : Plac
   have hsx := hexw rfl
   obtain ⟨Rc, hRc, -⟩ := path_split hpath hLr
   cases hRc with
-  | vec hcm hlen hel hnd hcn =>
+  | vec hcm hlen hel hnd hcn hfv =>
   rename_i cs Rs
   have intOf : ∀ {v w' yv}, PlaceTy Γ (.var v) .int w' yv → ∃ l k, lookup v env = some l ∧ σ.mem l = some (.int k) := by
     intro v w' yv hv
@@ -1169,7 +1173,7 @@ theorem lendSliceMut_ok (hE : EvalOk F O n) (hx : lookup x Γ = none) (hp : Plac
   have hbRm : σ.next ∉ Rm.flatten := fun h => hna _ (hRma _ h) rfl
   have hLb : LT F ι (σ.alloc (.vec sub)).2 σ.next (.vec false τ) (σ.next :: Rm.flatten) := by
     refine .vec (cs := sub) (by simp [Store.alloc]) (by rw [← hsubd, hRml]; simp; omega) (fun k hk1 hk2 => ?_)
-      hRmn hbRm
+      hRmn hbRm (by simp [Store.alloc]; exact hI.cur)
     have hk' : k < j.toNat - i.toNat := by rw [← hsubd] at hk1; simp at hk1; omega
     have e1 : sub[k] = cs[i.toNat + k]'(by omega) := by subst hsubd; simp
     rw [e1]
@@ -1201,7 +1205,7 @@ theorem lendSliceMut_ok (hE : EvalOk F O n) (hx : lookup x Γ = none) (hp : Plac
       rw [hag _ (List.mem_append.mpr (.inl (List.mem_cons_self ..)))]; simp [Store.alloc]
     simp only [SlotOk] at hL'
     cases hL' with
-    | vec hcm2 hlen2 hel2 hnd2 hn2 =>
+    | vec hcm2 hlen2 hel2 hnd2 hn2 hfv =>
     rename_i cs2 Rn
     rw [hb2] at hcm2
     cases hcm2

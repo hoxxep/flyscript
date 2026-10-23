@@ -14,6 +14,10 @@ namespace FlyCore.Ownership
 
 /-! ## Region data -/
 
+theorem LT.arena_tags (h : LT F ι σ a (.arena k) L) : ∀ x ∈ L, σ.fb x = some ι.fiber := by
+  cases h with
+  | arena _ _ _ _ _ _ hf => exact hf
+
 theorem RD.toVT {v : Val} (h : RD (ι.drop k) σ τ v) (hd : τ.rdata = true) : VT F ι σ (τ.shiftBy k) v [] := by
   cases τ with
   | int => cases v <;> simp only [RD] at h; exact .int
@@ -196,8 +200,11 @@ theorem region_alloc (hR : lookup R Γ = some s) (hs : s = .own (.arena k) true 
   have hrt' : (σ3.tag l c τ).rt = fun x => if x = l then some (c, τ) else σ.rt x := Store.tag_rt htag
   have hmem' : (σ3.tag l c τ).mem = σ3.mem := Store.tag_mem
   -- The arena, one cell more.
+  have hfb3 : ∀ x, (σ3.tag l c τ).fb x = if x = l then some σ.cur else σ.fb x := by
+    intro x; simp only [Store.tag_fb, σ3, σ2, Store.set_fb, Store.alloc, hl]
+  have htags := (hLT hsl).arena_tags
   have hLT' : LT F ι (σ3.tag l c τ) c (.arena k) (c :: (cs ++ [l])) := by
-    refine .arena hk (by rw [hmem', hm3]; simp) ?_ ?_ (fun x hx => ?_) (fun x y hx => ?_)
+    refine .arena hk (by rw [hmem', hm3]; simp) ?_ ?_ (fun x hx => ?_) (fun x y hx => ?_) (fun x hx => ?_)
     · exact List.nodup_append.mpr ⟨(List.nodup_cons.mp hnd).2, by simp,
         fun x hx y hy e => by simp at hy; subst hy; subst e; exact hlcs (List.mem_cons_of_mem _ hx)⟩
     · intro h
@@ -222,6 +229,15 @@ theorem region_alloc (hR : lookup R Γ = some s) (hs : s = .own (.arena k) true 
       split at hx
       · subst_vars; simp
       · exact List.mem_append.mpr (.inl (hexa x y hx))
+    · rw [hfb3]; split
+      · exact congrArg some hI.cur
+      · rename_i hxl
+        apply htags
+        simp only [List.mem_cons, List.mem_append, List.mem_singleton] at hx ⊢
+        rcases hx with h | h | h
+        · exact .inl h
+        · exact .inr h
+        · exact absurd (by simpa using h) hxl
   -- The rest of the activation, as it was.
   have hout : ∀ x ∈ E₁a ++ E₂a ++ S, x ≠ c ∧ x ≠ l := by
     intro x hx
@@ -327,7 +343,7 @@ theorem region_set (hR : lookup R Γ = some s) (hs : s = .own (.arena k) true �
   have hag : Agree σ σ' (E₁a ++ E₂a ++ S) := Agree.of (fun x hx => by rw [hm', if_neg (hout x hx)]) hrt'
   have hLT' : LT F ι σ' c (.arena k) (c :: cs) := by
     refine .arena hk' (by rw [hm', if_neg (Ne.symm hlc)]; exact hcm) (List.nodup_cons.mp hnd).2
-      (List.nodup_cons.mp hnd).1 (fun x hx => ?_) (fun x y hx => hexa x y hx)
+      (List.nodup_cons.mp hnd).1 (fun x hx => ?_) (fun x y hx => hexa x y hx) (fun x hx => (hLT hsl).arena_tags x hx)
     by_cases hxl : x = l
     · subst hxl
       rw [ht] at ht'
@@ -403,7 +419,7 @@ theorem rnth_ok (hp : PlaceTy Γ p (.rref c k (.vec true τ)) w y) (hz : PlaceTy
   obtain ⟨az, τz, Lz, Pz, lz, sz, -, hLz, hpathz, hresz, -⟩ := place_ok hz hI.foot
   obtain ⟨Rz, hRz, -⟩ := path_split hpathz hLz
   cases hRz with
-  | int hk0 =>
+  | int hk0 hf0 =>
   rename_i i
   have hlz : lookup z env = some lz := hresz
   simp only [evalS, hres, hlz, hq, hk0, hlc]
@@ -474,7 +490,7 @@ theorem ret_regionK (hR : Ready O hs r) (hwf : WF σ0) (hag : Agree σf σ0 S) (
     obtain ⟨LR, E'', S'', hsl, hfoot, hE', hS'⟩ := hI.foot.uncons
     simp only [SlotOk] at hsl
     cases hsl with
-    | arena hk ha hnd hn hcs hex =>
+    | arena hk ha hnd hn hcs hex hfA =>
     rename_i cs
     simp only [addE, addS, exclPart, sharedPart, Slot.excl, Slot.shell, Ty.shell, ↓reduceIte, Bool.false_eq_true,
       List.nil_append] at hE' hS'
@@ -565,6 +581,9 @@ theorem region_ok (hE : EvalOk F O n) (hR : RetOk F O n) (hx : lookup R Γ = non
   -- The arena, empty.
   have hLa : LT F (ι.push a) σ1 a (.arena 0) [a] := by
     refine .arena (by simp) (by rw [hm1]; simp) List.nodup_nil (by simp) (fun l hl => by simp at hl) ?_
+      (fun l hl => by
+        simp only [List.mem_singleton] at hl; subst hl
+        rw [← hσ1, ← hna]; simp [Store.alloc]; exact hI.cur)
     intro l x hl
     rw [hrt1] at hl
     have := (σ.rtwf l a x hl).1
