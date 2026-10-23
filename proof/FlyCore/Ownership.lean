@@ -369,6 +369,10 @@ inductive Expr where
   /-- `p.push(a)`: `a` moved to the end of the vector at `p`, whose elements move to new cells as it
   grows. -/
   | vpush (p : Place) (a : Atom)
+  /-- `{ const g = generate(f(owned, lent)); body }`: `f` runs as `body` asks for its values, each a
+  `τy` it yields by performing `eY`; `body` asks by performing `eN`, which gives `#Some(v)`, or
+  `#Done` once `f` has ended. `body` has type `τb`; `f` is lent places only `readonly`. -/
+  | gen (eN eY : Nat) (τy τb : Ty) (f : Nat) (owned : List Atom) (lent : List Place) (body : Expr)
   /-- `{ const x = p[z]; body }` with `x` a borrow — `readonly` or `mut` — of the element of the
   vector at `p` that the integer `z` names, for as long as `body` runs; a panic if there is none. -/
   | lendIdx (x : Var) (m : Mode) (p : Place) (z : Var) (body : Expr)
@@ -645,6 +649,19 @@ inductive Kont where
   | parE
   /-- A region's body, its arena in cell `a`: as it ends, the region's cells and the arena are freed. -/
   | regionK (a : Nat)
+  /-- A generator's consumer running, asking by `eN`, handled here as `id`; its producer waiting as
+  `Kp`, or ended. -/
+  | genC (eN eY id : Nat) (τy τb : Ty) (Kp : Option (List Kont))
+  /-- A generator's producer running, yielding by `eY`, handled here as `id`; its consumer waiting as
+  `Kc` for what it asked. -/
+  | genP (eN eY id : Nat) (τy τb : Ty) (Kc : List Kont)
+  /-- A producer being dropped: what it yields is dropped, and it goes on at once. -/
+  | genY (eY id : Nat) (τy : Ty)
+  /-- A consumer being dropped: what it asks is answered `#Done`. -/
+  | genN (eN id : Nat) (τy : Ty)
+  /-- A producer being dropped as its consumer ended with `o`, of type `τb`, by unwinding it to the
+  barrier `d`: once the unwinding reaches it, `o` goes on. -/
+  | genE (τb : Ty) (o : Outcome) (d : Nat)
 
 /-- A handler in force, by name: one that unwinds — an abortive arm, or a `try` — handling `l`; or
 one whose arm takes the code that performed `e` as its continuation, resuming it with its value.
@@ -674,6 +691,11 @@ def Kont.push : Kont → HS → HS
   | .parS e id _ _ _ _, hs => .capture e id :: hs
   | .parD e id _ _ _ _, hs => .capture e id :: hs
   | .parY e id, hs => .capture e id :: hs
+  | .genC eN _ id _ _ _, hs => .capture eN id :: hs
+  | .genP _ eY id _ _ _, hs => .capture eY id :: hs
+  | .genY eY id _, hs => .capture eY id :: hs
+  | .genN eN id _, hs => .capture eN id :: hs
+  | .genE _ _ d, hs => .abort .drop d :: hs
   | _, hs => hs
 
 inductive Res where
@@ -1077,6 +1099,23 @@ def eval (F : List Fn) (O : List Op) : Nat → HS → Store → Env → Expr →
           | none => (.stuck, σ1)
         | none => (.stuck, σ)
       | _, _ => (.stuck, σ)
+    | .gen eN eY τy τb f owned lent body =>
+      match F[f]? with
+      | some d =>
+        match evalAtoms σ env owned with
+        | some (vs, σ1) =>
+          match lent.mapM (fun p => resolve σ1 env p) with
+          | some ls =>
+            if vs.length = d.owns.length ∧ ls.length = d.refs.length then
+              let (cP, σ2) := allocAll σ1 ((d.owns.map Prod.fst).zip vs)
+              let (id, σ3) := σ2.fresh
+              ret F O n hs (.genC eN eY id τy τb (some [.callK ((d.owns.map Prod.snd).zip (cP.map Prod.snd)),
+                  .startK (cP ++ (d.refs.map Prod.fst).zip ls) d.body]))
+                (eval F O n (.capture eN id :: hs) σ3 env body)
+            else (.stuck, σ1)
+          | none => (.stuck, σ1)
+        | none => (.stuck, σ)
+      | none => (.stuck, σ)
     | .region R _ body =>
       let (a, σ1) := σ.alloc (.arena [])
       ret F O n hs (.regionK a) (eval F O n hs σ1 ((R, a) :: env) body)
@@ -1202,6 +1241,41 @@ def ret (F : List Fn) (O : List Op) (n : Nat) (hs : HS) : Kont → Res × Store 
     match n with
     | 0 => (.timeout, σ)
     | m + 1 => ret F O m hs (.parY e id) (evalK F O m (.capture e id :: hs) σ K (.val (.int 0)))
+  | .genC eN eY id τy τb Kp, (.susp j ef vs ls K, σ) =>
+    if j ≠ id ∨ ef ≠ eN then (.susp j ef vs ls (.genC eN eY id τy τb Kp :: K), σ) else
+    match n with
+    | 0 => (.timeout, σ)
+    | m + 1 =>
+      match Kp with
+      | some Kq => ret F O m hs (.genP eN eY id τy τb K) (evalK F O m (.capture eY id :: hs) σ Kq (.val (.int 0)))
+      | none =>
+        let (b, σ1) := σ.alloc (.int 0)
+        ret F O m hs (.genC eN eY id τy τb none) (evalK F O m (.capture eN id :: hs) σ1 K (.val (.tag .int τy true b)))
+  | .genP eN eY id τy τb Kc, (.susp j ef vs ls K, σ) =>
+    if j ≠ id ∨ ef ≠ eY then (.susp j ef vs ls (.genP eN eY id τy τb Kc :: K), σ) else
+    match n, vs with
+    | 0, _ => (.timeout, σ)
+    | m + 1, [v] =>
+      let (b, σ1) := σ.alloc v
+      ret F O m hs (.genC eN eY id τy τb (some K)) (evalK F O m (.capture eN id :: hs) σ1 Kc (.val (.tag .int τy false b)))
+    | _ + 1, _ => (.stuck, σ)
+  | .genY eY id τy, (.susp j ef vs ls K, σ) =>
+    if j ≠ id ∨ ef ≠ eY then (.susp j ef vs ls (.genY eY id τy :: K), σ) else
+    match n, vs with
+    | 0, _ => (.timeout, σ)
+    | m + 1, [v] =>
+      match drop σ τy v with
+      | some σ1 => ret F O m hs (.genY eY id τy) (evalK F O m (.capture eY id :: hs) σ1 K (.val (.int 0)))
+      | none => (.stuck, σ)
+    | _ + 1, _ => (.stuck, σ)
+  | .genN eN id τy, (.susp j ef vs ls K, σ) =>
+    if j ≠ id ∨ ef ≠ eN then (.susp j ef vs ls (.genN eN id τy :: K), σ) else
+    match n with
+    | 0 => (.timeout, σ)
+    | m + 1 =>
+      let (b, σ1) := σ.alloc (.int 0)
+      ret F O m hs (.genN eN id τy) (evalK F O m (.capture eN id :: hs) σ1 K (.val (.tag .int τy true b)))
+  | .genE τb o d, (.susp j ef vs ls K, σ) => (.susp j ef vs ls (.genE τb o d :: K), σ)
   | f, (.susp j ef vs ls K, σ) =>
     match f with
     | .scopeK τ c => leave τ c (.susp j ef vs ls K, σ)
@@ -1338,6 +1412,50 @@ def ret (F : List Fn) (O : List Op) (n : Nat) (hs : HS) : Kont → Res × Store 
     | none => (.stuck, σ)
   | .parY _ _, r => r
   | .parE, r => r
+  | .genC _ eY id τy τb Kp, (.val v, σ) =>
+    match Kp with
+    | none => (.val v, σ)
+    | some Kq =>
+      match n with
+      | 0 => (.timeout, σ)
+      | m + 1 =>
+        let (d, σ1) := σ.fresh
+        ret F O m hs (.genE τb (.val v) d) (ret F O m (.abort .drop d :: hs) (.genY eY id τy)
+          (evalK F O m (.capture eY id :: .abort .drop d :: hs) σ1 Kq (.abort d 0)))
+  | .genC _ eY id τy τb Kp, (.abort j k, σ) =>
+    match Kp with
+    | none => (.abort j k, σ)
+    | some Kq =>
+      match n with
+      | 0 => (.timeout, σ)
+      | m + 1 =>
+        let (d, σ1) := σ.fresh
+        ret F O m hs (.genE τb (.abort j k) d) (ret F O m (.abort .drop d :: hs) (.genY eY id τy)
+          (evalK F O m (.capture eY id :: .abort .drop d :: hs) σ1 Kq (.abort d 0)))
+  | .genP eN eY id τy τb Kc, (.val _, σ) =>
+    match n with
+    | 0 => (.timeout, σ)
+    | m + 1 =>
+      let (b, σ1) := σ.alloc (.int 0)
+      ret F O m hs (.genC eN eY id τy τb none) (evalK F O m (.capture eN id :: hs) σ1 Kc (.val (.tag .int τy true b)))
+  | .genP eN _ id τy τb Kc, (.abort j k, σ) =>
+    match n with
+    | 0 => (.timeout, σ)
+    | m + 1 =>
+      let (d, σ1) := σ.fresh
+      ret F O m hs .lendK (dropRet τb (.abort j k) d (ret F O m (.abort .drop d :: hs) (.genN eN id τy)
+        (evalK F O m (.capture eN id :: .abort .drop d :: hs) σ1 Kc (.abort d 0))))
+  | .genY _ _ _, r => r
+  | .genN _ _ _, r => r
+  | .genE τb o d, (.abort j k, σ) =>
+    if j = d then (o.res, σ) else
+    match o with
+    | .val u =>
+      match drop σ τb u with
+      | some σ' => (.abort j k, σ')
+      | none => (.stuck, σ)
+    | .abort _ _ => (.abort j k, σ)
+  | .genE τb o _, (.val _, σ) => (o.res, σ)
   | .regionK a, (r, σ) =>
     match σ.mem a with
     | some (.arena cs) => (r, (σ.freeAll cs).set a none)
@@ -1625,6 +1743,17 @@ inductive Typed (F : List Fn) (O : List Op) : Ctx → Expr → Ty → Ctx → Ro
       (m = .mut → Unsplit Γ y) →
       Typed F O ((x, .ref m τ) :: lendCtx m Γ y) body τb ((x, .ref m τ) :: Γb) r →
       Typed F O Γ (.lend x m p body) τb (thaw Γ [y] Γb) r
+  /-- A generator: `body` asks for the values `f`'s run yields, each by `eN`, which gives `#Some` of
+  one or `#Done`; `f` yields each by `eY`, and is lent places only `readonly`, which `body` may then
+  only read. -/
+  | gen : O[eN]? = some opN → opN.owns = [] → opN.refs = [] → opN.ret = .sum .int τy →
+      O[eY]? = some opY → opY.owns = [τy] → opY.refs = [] → opY.ret = .int → τy.complete = true →
+      F[f]? = some d → d.retp = none → d.cap = none → d.ret = .int → (∀ l ∈ d.row, l ∈ .eff eY :: r) →
+      Label.eff eY ∈ d.row → (∀ x ∈ d.refs, x.2.1 = .ro) →
+      AtomsTy Γ owned (d.owns.map Prod.snd) Γ₁ →
+      Lends Γ₁ (lent.map fun p => (.ro, p)) (d.refs.map Prod.snd) ys →
+      Typed F O (freeze Γ₁ (ys.map Prod.snd)) body τb Γb (.eff eN :: r) → τb.complete = true →
+      Typed F O Γ (.gen eN eY τy τb f owned lent body) τb (thaw Γ₁ (ys.map Prod.snd) Γb) r
   /-- A borrow of an element of a vector, for the code it is in scope for: it is a borrow of the
   whole vector, which is only read, or not reached, until it ends. -/
   | lendIdx : lookup x Γ = none → PlaceTy Γ p (.vec τ) w y → PlaceTy Γ (.var z) .int wz yz →

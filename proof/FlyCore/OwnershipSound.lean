@@ -432,6 +432,23 @@ theorem FrameOk.ready (hf : FrameOk F O ιi ιo σf f inL outL Xf A) (hR : Ready
     rcases List.mem_cons.mp hl with rfl | hl
     · exact ⟨_, by simp only [Kont.push, find, Frame.handles, beq_self_eq_true, ↓reduceIte]; rfl⟩
     · exact covers_cons _ hcov l hl
+  | genC hG | genCd hG =>
+    refine ⟨.capture ⟨_, hG.hopN⟩ hok, fun l hl => ?_⟩
+    rcases List.mem_cons.mp hl with rfl | hl
+    · exact ⟨_, by simp only [Kont.push, find, Frame.handles, beq_self_eq_true, ↓reduceIte]; rfl⟩
+    · exact covers_cons _ hcov l hl
+  | genP hG =>
+    refine ⟨.capture ⟨_, hG.hopY⟩ hok, fun l hl => ?_⟩
+    rcases List.mem_cons.mp hl with rfl | hl
+    · exact ⟨_, by simp only [Kont.push, find, Frame.handles, beq_self_eq_true, ↓reduceIte]; rfl⟩
+    · exact covers_cons _ hcov l hl
+  | genY hop | genN hop =>
+    refine ⟨.capture ⟨_, hop⟩ hok, fun l hl => ?_⟩
+    rcases List.mem_cons.mp hl with rfl | hl
+    · exact ⟨_, by simp only [Kont.push, find, Frame.handles, beq_self_eq_true, ↓reduceIte]; rfl⟩
+    · exact covers_cons _ hcov l hl
+  | genE =>
+    exact ⟨.abort (by intro e h; cases h) hok, fun l hl => covers_cons _ hcov l hl⟩
   | _ => exact ⟨hok, hcov⟩
 
 /-- What a frame's code only reads is its own, or what its construct only reads. -/
@@ -470,6 +487,26 @@ theorem FrameOk.S_sub (hf : FrameOk F O ιi ιo σf f inL outL Xf A) : ∀ l ∈
     intro l hl
     rcases hSo l hl with h | h
     · exact .inl h
+    · exact .inr h
+  | genC hG =>
+    intro l hl
+    rcases hG.hSin l hl with h | h
+    · exact .inl (List.mem_append.mpr (.inl h))
+    · exact .inr h
+  | genCd hG =>
+    intro l hl
+    rcases hG.hSin l hl with h | h
+    · exact .inl h
+    · exact .inr h
+  | genP _ _ hSo =>
+    intro l hl
+    rcases hSo l hl with h | h
+    · exact .inl (List.mem_append.mpr (.inl h))
+    · exact .inr h
+  | genE _ _ hSo =>
+    intro l hl
+    rcases hSo l hl with h | h
+    · exact .inl (List.mem_append.mpr (.inl h))
     · exact .inr h
   | _ => intro l hl; exact .inr hl
 

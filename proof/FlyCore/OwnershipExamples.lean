@@ -1730,6 +1730,146 @@ theorem pushWhileBorrowed_rejected :
     | ref hv => simp [lookup] at hv
     | half hv => simp [lookup] at hv
 
+/-! Generators: a producer yields as its consumer asks, each waiting in the generator's frame while
+the other runs. -/
+
+/-- `Next`, asking a generator for its next value, and `Yield`, giving one. -/
+def nextOp : Op := { owns := [], refs := [], ret := .sum .int .int }
+def yieldOp : Op := { owns := [.int], refs := [], ret := .int }
+def genOps : List Op := [nextOp, yieldOp]
+
+/-- `function* three() { yield 10; yield 20; yield 12; }` -/
+def three : Fn :=
+  { owns := [], refs := [], ret := .int, row := [.eff 1],
+    body := .let_ "u" .int (.perform 1 [.lit 10] [])
+      (.let_ "v" .int (.perform 1 [.lit 20] []) (.let_ "w" .int (.perform 1 [.lit 12] []) (.atom (.lit 0)))) }
+
+/-- What `g.next()` gives, or 0 once the generator is done, into `x`. -/
+def nextOr0 (x : Var) (rest : Expr) : Expr :=
+  .let_ x .int (.let_ "a" (.sum .int .int) (.perform 0 [] [])
+    (.case "a" "y" .int .int (.atom (.read (var "y"))) (.atom (.read (var "y"))))) rest
+
+/-- `const g = three(); g.next() + g.next() + g.next() + (g.next() ?? 0)`: 42, the fourth asking
+answered `#Done`. -/
+def genSum : Expr :=
+  .gen 0 1 .int .int 0 [] []
+    (nextOr0 "x1" (nextOr0 "x2" (nextOr0 "x3" (nextOr0 "x4"
+      (.let_ "s" .int (.add (.read (var "x1")) (.read (var "x2")))
+        (.let_ "t" .int (.add (.read (var "s")) (.read (var "x3")))
+          (.add (.read (var "t")) (.read (var "x4")))))))))
+
+example : value (eval [three] genOps 60 [.abort .fail 0] .empty [] genSum) = some 42 := by
+  run [genSum, three, nextOr0, genOps, nextOp, yieldOp]
+example : freed (eval [three] genOps 60 [.abort .fail 0] .empty [] genSum) := by
+  run [genSum, three, nextOr0, genOps, nextOp, yieldOp]
+
+/-- `const x = g.next() ?? 0; rest`, typed. -/
+theorem nextOr0_typed (hx : x ∉ Γ.map Prod.fst) (ha : "a" ∉ Γ.map Prod.fst) (hy : "y" ∉ Γ.map Prod.fst)
+    (hr : Label.eff 0 ∈ r)
+    (hrest : Typed F genOps ((x, .own .int true) :: Γ) rest τ ((x, .own .int live) :: Γ') r) :
+    Typed F genOps Γ (nextOr0 x rest) τ Γ' r := by
+  refine .let_ (lookup_none_of_keys hx) ?_ hrest
+  refine .let_ (live := false) (lookup_none_of_keys ha)
+    (Typed.perform (op := nextOp) rfl hr .nil .nil .nil) ?_
+  have hset : setSlot (("a", Slot.own (.sum .int .int) true) :: Γ) "a" (.own (.sum .int .int) false) =
+      ("a", .own (.sum .int .int) false) :: Γ := setSlot_head Γ ha
+  refine .case (Γ₁ := ("a", .own (.sum .int .int) false) :: Γ) (Γ₂ := ("a", .own (.sum .int .int) false) :: Γ)
+    (l₁ := true) (l₂ := true) (by simp [lookup]) rfl
+    (by simp only [lookup]; rw [if_neg (by decide)]; exact lookup_none_of_keys hy) ?_ ?_ (Weaker.refl _) (Weaker.refl _)
+  · rw [hset]; exact .atom (.read (.own rfl))
+  · rw [hset]; exact .atom (.read (.own rfl))
+
+theorem three_ok : FnsOk [three] genOps := by
+  intro d hd
+  simp only [List.mem_singleton] at hd
+  subst hd
+  refine ⟨by decide, ?_⟩
+  simp only [three, FnOk]
+  exact ⟨_, .let_ (live := true) rfl (.perform (op := yieldOp) rfl (List.mem_singleton_self _) (.cons .lit .nil) .nil .nil)
+    (.let_ (live := true) rfl (.perform (op := yieldOp) rfl (List.mem_singleton_self _) (.cons .lit .nil) .nil .nil)
+      (.let_ (live := true) rfl (.perform (op := yieldOp) rfl (List.mem_singleton_self _) (.cons .lit .nil) .nil .nil)
+        (.atom .lit)))⟩
+
+theorem genSum_typed : Typed [three] genOps [] genSum .int [] [.fail] := by
+  refine .gen (Γ₁ := []) (ys := []) (Γb := []) rfl rfl rfl rfl rfl rfl rfl rfl rfl rfl rfl rfl rfl
+    (by simp [three]) (by simp [three]) (by simp [three]) .nil .nil ?_ rfl
+  simp only [List.map_nil, freeze]
+  refine nextOr0_typed (live := true) (by simp) (by simp) (by simp) (by simp) ?_
+  refine nextOr0_typed (live := true) (by simp) (by simp) (by simp) (by simp) ?_
+  refine nextOr0_typed (live := true) (by simp) (by simp) (by simp) (by simp) ?_
+  refine nextOr0_typed (live := true) (by simp) (by simp) (by simp) (by simp) ?_
+  exact .let_ (live := true) rfl (.add (.read (.own rfl)) (.read (.own rfl)))
+    (.let_ (live := true) rfl (.add (.read (.own rfl)) (.read (.own rfl))) (.add (.read (.own rfl)) (.read (.own rfl))))
+
+example : ∀ n, match eval [three] genOps n [.abort .fail 0] .empty [] genSum with
+    | (.stuck, _) => False
+    | (.susp _ _ _ _ _, _) => False
+    | (.timeout, _) => True
+    | (.panic, _) => True
+    | (.val v, σ') => ∃ L, VT [three] [] σ' .int v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
+    | (.abort _ _, σ') => ∀ l, σ'.mem l = none :=
+  program_ok three_ok genSum_typed
+
+/-- `function* boxed() { const b = Box.new(5); yield *b; yield 7; }` -/
+def boxed : Fn :=
+  { owns := [], refs := [], ret := .int, row := [.eff 1],
+    body := .let_ "b" (.box .int) (.new (.lit 5))
+      (.let_ "u" .int (.perform 1 [.read (deref (var "b"))] []) (.let_ "v" .int (.perform 1 [.lit 7] []) (.atom (.lit 0)))) }
+
+/-- `const g = boxed(); g.next() ?? 0`: the consumer asks once and ends, and the producer, still owning
+its box, is dropped where it waits; 5, and nothing left allocated. -/
+def genEarly : Expr := .gen 0 1 .int .int 0 [] [] (nextOr0 "x" (.atom (.read (var "x"))))
+
+example : value (eval [boxed] genOps 40 [.abort .fail 0] .empty [] genEarly) = some 5 := by
+  run [genEarly, boxed, nextOr0, genOps, nextOp, yieldOp]
+example : freed (eval [boxed] genOps 40 [.abort .fail 0] .empty [] genEarly) := by
+  run [genEarly, boxed, nextOr0, genOps, nextOp, yieldOp]
+
+theorem boxed_ok : FnsOk [boxed] genOps := by
+  intro d hd
+  simp only [List.mem_singleton] at hd
+  subst hd
+  refine ⟨by decide, ?_⟩
+  simp only [boxed, FnOk]
+  exact ⟨_, .let_ (live := true) rfl (.new .lit)
+    (.let_ (live := true) rfl (.perform (op := yieldOp) rfl (List.mem_singleton_self _)
+        (.cons (.read (.deref (.own rfl))) .nil) .nil .nil)
+      (.let_ (live := true) rfl (.perform (op := yieldOp) rfl (List.mem_singleton_self _) (.cons .lit .nil) .nil .nil)
+        (.atom .lit)))⟩
+
+theorem genEarly_typed : Typed [boxed] genOps [] genEarly .int [] [.fail] := by
+  refine .gen (Γ₁ := []) (ys := []) (Γb := []) rfl rfl rfl rfl rfl rfl rfl rfl rfl rfl rfl rfl rfl
+    (by simp [boxed]) (by simp [boxed]) (by simp [boxed]) .nil .nil ?_ rfl
+  simp only [List.map_nil, freeze]
+  exact nextOr0_typed (live := true) (by simp) (by simp) (by simp) (by simp) (.atom (.read (.own rfl)))
+
+example : ∀ n, match eval [boxed] genOps n [.abort .fail 0] .empty [] genEarly with
+    | (.stuck, _) => False
+    | (.susp _ _ _ _ _, _) => False
+    | (.timeout, _) => True
+    | (.panic, _) => True
+    | (.val v, σ') => ∃ L, VT [boxed] [] σ' .int v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
+    | (.abort _ _, σ') => ∀ l, σ'.mem l = none :=
+  program_ok boxed_ok genEarly_typed
+
+/-- `function* fails() { yield 1; throw 41; }` -/
+def fails : Fn :=
+  { owns := [], refs := [], ret := .int, row := [.eff 1, .fail],
+    body := .let_ "u" .int (.perform 1 [.lit 1] []) (.throw_ (.lit 41)) }
+
+/-- `try { const g = fails(); const b = Box.new(1); g.next() ?? 0; g.next() ?? 0 } catch (e) { e + 1 }`:
+the producer fails as the consumer waits, owning a box, which is dropped where it waits; 42, and
+nothing left allocated. -/
+def genFails : Expr :=
+  .try_ (.gen 0 1 .int .int 0 [] []
+      (.let_ "b" (.box .int) (.new (.lit 1)) (nextOr0 "x" (nextOr0 "z" (.atom (.read (var "z")))))))
+    "e" (.add (.read (var "e")) (.lit 1))
+
+example : value (eval [fails] genOps 60 [.abort .fail 0] .empty [] genFails) = some 42 := by
+  run [genFails, fails, nextOr0, genOps, nextOp, yieldOp]
+example : freed (eval [fails] genOps 60 [.abort .fail 0] .empty [] genFails) := by
+  run [genFails, fails, nextOr0, genOps, nextOp, yieldOp]
+
 theorem ralloc_ty (h : Typed F O Γ (.ralloc R c τ a) t Γ' r) :
     ∃ k s, t = .rref c k τ ∧ lookup R Γ = some s ∧ (s = .own (.arena k) true ∨ s = .ref .mut (.arena k)) := by
   cases h; exact ⟨_, _, rfl, ‹_›, ‹_›⟩
