@@ -12,6 +12,8 @@ compiler=$1; program=$2; out=$3
 shift 3
 mode=""
 [ "$1" = "--freestanding" ] && { mode=--freestanding; shift; }
+# For WebAssembly the module's pointers are 32 bits, as the target's are.
+case " $* " in *--target=wasm32*) mode="$mode --wasm32" ;; esac
 node --stack-size=65500 "$compiler" "$program" "$out.ll" "$root" $mode
 # The C is made LLVM IR without optimizing it: the two are optimized once, together.
 "$bin/clang" -std=gnu11 -w -g -O2 -Xclang -disable-llvm-passes -S -emit-llvm "$@" "$out.c" -o "$out.c.ll"
@@ -22,6 +24,8 @@ target=""
 for a in frame-pointer target-cpu target-features tune-cpu; do
   target="$target $(grep -m1 -o "\"$a\"=\"[^\"]*\"" "$out.c.ll" || true)"
 done
+# Made small, the module's functions are, as C's are.
+case " $* " in *" -Os "*) target="$target optsize" ;; *" -Oz "*) target="$target optsize minsize" ;; esac
 # Under a sanitizer, the module's functions are checked as C's are.
 case " $* " in *-fsanitize=*address*) target="$target sanitize_address" ;; esac
 case " $* " in *-fsanitize=*thread*) target="$target sanitize_thread" ;; esac

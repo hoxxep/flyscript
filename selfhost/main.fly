@@ -36,7 +36,7 @@ function readText(path: String): String uses Io, Fail<Stop> {
   } catch (_) { throw #Unreadable { path } }
 }
 
-function compile(entry: str, out: str, root: str, freestanding: bool): void uses Io, Fail<Stop> {
+function compile(entry: str, out: str, root: str, freestanding: bool, ptr: usize): void uses Io, Fail<Stop> {
   let p = Program.load([entry.toString()], `${root}/std`.asStr());
   if (p.diags.len() == 0) {
     let fid: usize = 0;
@@ -66,7 +66,7 @@ function compile(entry: str, out: str, root: str, freestanding: bool): void uses
     `${mode}${h}\n${c.asStr().replaceAll("#include \"runtime.h\"", "")}`
   } else { readText(`${root}/selfhost/runtime.js`) };
   if (toLlvm) {
-    const [ll, c] = try { llvmProgram(p, main, rt.asStr(), freestanding) } catch (#Failed(message)) {
+    const [ll, c] = try { llvmProgram(p, main, rt.asStr(), freestanding, ptr) } catch (#Failed(message)) {
       println(message.asStr());
       throw #Failed
     };
@@ -84,9 +84,11 @@ function compile(entry: str, out: str, root: str, freestanding: bool): void uses
 }
 
 // `--freestanding`: a program without the C library, whose roots are the functions C calls.
+// `--wasm32`: through LLVM, for a target of 32-bit pointers, WebAssembly's.
 export function main(entry: str, out: str, root: str, flags: readonly String[]): void uses Io {
   try {
-    compile(entry, out, root, flags.iter().some((f) => f == "--freestanding"));
+    const ptr: usize = if (flags.iter().some((f) => f == "--wasm32")) { 4 } else { 8 };
+    compile(entry, out, root, flags.iter().some((f) => f == "--freestanding"), ptr);
   } catch (e) {
     match (e) {
       #Failed => {}

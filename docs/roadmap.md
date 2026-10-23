@@ -28,7 +28,7 @@ The proof is a small AArch64 kernel that boots under QEMU, drives a UART through
 
 *Done: every test program and the compiler itself run as WebAssembly; pages run it in browsers ([web](../web/)).*
 
-Through clang's `wasm32` target for WASI, with fibers in linear memory: each fiber keeps its own shadow stack, so a value lent `mut` across a suspension never moves, and the host switches between them by JavaScript promise integration. `Io` maps to the host: WASI, or promises in a browser. Every test program and the compiler itself run as WebAssembly.
+Through LLVM, as native code is, for WASI: the program's LLVM IR made for 32-bit pointers and linked with the runtime's C for `wasm32`, smaller than through C for the same speed. Fibers live in linear memory: each fiber keeps its own shadow stack, so a value lent `mut` across a suspension never moves, and the host switches between them by JavaScript promise integration. `Io` maps to the host: WASI, or promises in a browser. Every test program and the compiler itself run as WebAssembly.
 
 ## 3. LLVM
 

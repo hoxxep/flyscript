@@ -136,6 +136,9 @@ function retTy(s: str, c: str): String {
   if (e.len() == 0) { s.toString() } else { `${e.slice(1, e.len())} ${s}` }
 }
 
+// The C type `size_t`, a view's length, as LLVM has it, for pointers of `ptr` bytes.
+function sizeTy(ptr: usize): str { if (ptr == 4) { "i32" } else { "i64" } }
+
 // The size and alignment of the runtime's types, and of C's scalars.
 function cLayout(c: str, ptr: usize): Option<[usize, usize]> {
   match (c) {
@@ -605,7 +608,7 @@ impl Lgen {
               // A slice, a `str` and a `Vec` start with their elements' address and their length.
               const b = self.load("ptr", a.asStr());
               const at = self.gep(a.asStr(), self.ptr);
-              const n = self.load("i64", at.asStr());
+              const n = self.sizeVal(at.asStr());
               [b, n]
             }
           };
@@ -758,7 +761,8 @@ impl Lgen {
         const g = self.strBytes(s.asStr());
         self.store("ptr", g.asStr(), dest);
         const at = self.gep(dest, self.ptr);
-        self.store("i64", `${s.len()}`.asStr(), at.asStr());
+        const st = sizeTy(self.ptr);
+        self.store(st, `${s.len()}`.asStr(), at.asStr());
       }
       #Unit => {}
       #Zero(_) => self.zero(dest, t, span),
@@ -1086,7 +1090,8 @@ impl Lgen {
           #Array(_, #Known(n)) => {
             self.store("ptr", a.asStr(), dest);
             const at = self.gep(dest, self.ptr);
-            self.store("i64", `${n}`.asStr(), at.asStr());
+            const st = sizeTy(self.ptr);
+            self.store(st, `${n}`.asStr(), at.asStr());
           }
           // A `String` and a `Vec` start with what their view is: an address and a length.
           _ => self.memcpy(dest, a.asStr(), 2 * self.ptr),
@@ -1269,7 +1274,7 @@ impl Lgen {
         self.term(`br i1 ${on}, label %${run}, label %${after}`);
         self.label(run.asStr());
         self.store("i8", "0", f.asStr());
-        const u = self.alloca(16, 8);
+        const u = self.alloca(2 * self.ptr, self.ptr);
         self.ins(`call void @flyg_cleanup_begin(ptr ${u})`);
         self.deferCall(flag, body, span);
         self.ins(`call void @flyg_cleanup_end(ptr ${u})`);
@@ -1342,7 +1347,7 @@ impl Lgen {
       const a = `%l${l}`;
       match (self.cx.locals[l].kind) {
         #Arena => {
-          if (self.cx.declared.insert(l)) { self.cx.allocas.push(`  ${a} = alloca ptr, align 8\n`); }
+          if (self.cx.declared.insert(l)) { self.cx.allocas.push(`  ${a} = alloca ptr, align ${self.ptr}\n`); }
           self.store("ptr", "null", a.asStr());
         }
         _ => {
@@ -1657,10 +1662,10 @@ impl Lgen {
       const uo = self.offsetOf(t, "u", span);
       const u = self.gep(e, uo);
       const n = self.shape(t, span).uSize;
-      self.ins(`call void @fly_err_box(i32 ${tag}, ptr ${u}, i64 ${n})`);
+      self.ins(`call void @fly_err_box(i32 ${tag}, ptr ${u}, ${sizeTy(self.ptr)} ${n})`);
     } else {
       const n = self.sizeOf(t, span);
-      self.ins(`call void @fly_err_box(i32 0, ptr ${e}, i64 ${n})`);
+      self.ins(`call void @fly_err_box(i32 0, ptr ${e}, ${sizeTy(self.ptr)} ${n})`);
     }
   }
 
@@ -1674,10 +1679,10 @@ impl Lgen {
       const uo = self.offsetOf(t, "u", span);
       const u = self.gep(e, uo);
       const n = self.shape(t, span).uSize;
-      self.ins(`call void @fly_err_take(ptr ${u}, i64 ${n})`);
+      self.ins(`call void @fly_err_take(ptr ${u}, ${sizeTy(self.ptr)} ${n})`);
     } else {
       const n = self.sizeOf(t, span);
-      self.ins(`call void @fly_err_take(ptr ${e}, i64 ${n})`);
+      self.ins(`call void @fly_err_take(ptr ${e}, ${sizeTy(self.ptr)} ${n})`);
     }
   }
 }
@@ -1880,6 +1885,13 @@ impl Lgen {
     { locals, captures, arenas }
   }
 
+  // A view's length loaded from `at`, as a `usize`.
+  function sizeVal(self: mut Self, at: str): String {
+    const t = sizeTy(self.ptr);
+    const n = self.load(t, at);
+    if (self.ptr == 4) { self.val(`zext i32 ${n} to i64`) } else { n }
+  }
+
   function slots(self: readonly Self, ap: readonly Apart): usize { ap.locals.len() + ap.captures.len() + ap.arenas.len() }
 
   // Stores the pointers code apart reaches into its environment at `env`, from offset `base`.
@@ -1889,19 +1901,19 @@ impl Lgen {
       const at = self.gep(env, i);
       const a = self.local(l);
       self.store("ptr", a.asStr(), at.asStr());
-      i += 8;
+      i += self.ptr;
     }
     for (const k of ap.captures) {
       const at = self.gep(env, i);
       const a = self.cx.captures[k].clone();
       self.store("ptr", a.asStr(), at.asStr());
-      i += 8;
+      i += self.ptr;
     }
     for (const id of ap.arenas) {
       const at = self.gep(env, i);
       const a = match (self.cx.arenas.get(id)) { #Some(a) => a.clone(), #None => "null".toString() };
       self.store("ptr", a.asStr(), at.asStr());
-      i += 8;
+      i += self.ptr;
     }
   }
 
@@ -1915,18 +1927,18 @@ impl Lgen {
     for (const l of ap.locals) {
       cx.allocas.push(`  %env.l${l}.at = getelementptr inbounds i8, ptr %env, i64 ${i}\n  %env.l${l} = load ptr, ptr %env.l${l}.at\n`);
       cx.addrs.insert(l, `%env.l${l}`);
-      i += 8;
+      i += self.ptr;
     }
     for (const _ of 0..self.cx.captures.len()) { cx.captures.push("null".toString()); }
     for (const k of ap.captures) {
       cx.allocas.push(`  %env.c${k}.at = getelementptr inbounds i8, ptr %env, i64 ${i}\n  %env.c${k} = load ptr, ptr %env.c${k}.at\n`);
       cx.captures[k] = `%env.c${k}`;
-      i += 8;
+      i += self.ptr;
     }
     for (const id of ap.arenas) {
       cx.allocas.push(`  %env.a${id}.at = getelementptr inbounds i8, ptr %env, i64 ${i}\n  %env.a${id} = load ptr, ptr %env.a${id}.at\n`);
       cx.arenas.insert(id, `%env.a${id}`);
-      i += 8;
+      i += self.ptr;
     }
     cx
   }
@@ -2039,7 +2051,7 @@ impl Lgen {
         [name, ap]
       }
     };
-    const env = self.alloca(max(self.slots(ap), 1) * 8, 8);
+    const env = self.alloca(max(self.slots(ap), 1) * self.ptr, self.ptr);
     self.fillEnv(ap, env.asStr(), 0);
     self.ins(`call void @${name}(ptr ${env})`);
   }
@@ -2057,9 +2069,9 @@ impl Lgen {
     const saved = replace(mut self.cx, cx);
     self.subprogram(`${self.fnName} loop`.asStr(), `body_${n}`.asStr(), span);
     self.declareEnv(ap, span);
-    self.cx.oret = self.envSlot("env.oret", k * 8);
-    self.cx.code = self.envSlot("env.code", k * 8 + 8);
-    if (outerSink.isSome()) { self.cx.sink = #Some(self.envSlot("env.y", k * 8 + 16)); }
+    self.cx.oret = self.envSlot("env.oret", k * self.ptr);
+    self.cx.code = self.envSlot("env.code", (k + 1) * self.ptr);
+    if (outerSink.isSome()) { self.cx.sink = #Some(self.envSlot("env.y", (k + 2) * self.ptr)); }
     self.cx.allocas.push("  %retv = alloca i8, align 1\n  store i8 1, ptr %retv\n");
     self.cx.retSlot = "%retv".toString();
     const it = self.cx.locals[item].ty.clone();
@@ -2082,20 +2094,20 @@ impl Lgen {
     self.define(`define internal zeroext i1 @body_${n}(ptr %env, ptr %item)`.asStr());
     self.cx = saved;
     // The call, the body its yields go to.
-    const env = self.alloca((k + 3) * 8, 8);
+    const env = self.alloca((k + 3) * self.ptr, self.ptr);
     self.fillEnv(ap, env.asStr(), 0);
     const code = self.alloca(4, 4);
     const oret = match (self.cx.mode) { #Body => self.cx.oret.clone(), _ => if (self.cx.retSlot.len() > 0) { self.cx.retSlot.clone() } else { "null".toString() } };
-    const o1 = self.gep(env.asStr(), k * 8);
+    const o1 = self.gep(env.asStr(), k * self.ptr);
     self.store("ptr", oret.asStr(), o1.asStr());
-    const o2 = self.gep(env.asStr(), k * 8 + 8);
+    const o2 = self.gep(env.asStr(), (k + 1) * self.ptr);
     self.store("ptr", code.asStr(), o2.asStr());
-    const o3 = self.gep(env.asStr(), k * 8 + 16);
+    const o3 = self.gep(env.asStr(), (k + 2) * self.ptr);
     self.store("ptr", match (outerSink) { #Some(y) => y, #None => "null".toString() }.asStr(), o3.asStr());
     self.store("i32", "0", code.asStr());
-    const y = self.alloca(16, 8);
+    const y = self.alloca(2 * self.ptr, self.ptr);
     self.store("ptr", env.asStr(), y.asStr());
-    const yf = self.gep(y.asStr(), 8);
+    const yf = self.gep(y.asStr(), self.ptr);
     self.store("ptr", `@body_${n}`.asStr(), yf.asStr());
     const name = match (c.callee) { #Inst(i) => self.c.lw.insts[i].name.clone(), _ => return self.fail(span, "a loop over no generator") };
     let args: Vec<String> = Vec.new();
@@ -2179,7 +2191,7 @@ impl Lgen {
     const b = self.cx.locals[r].ty.clone();
     const kt = self.temp(k, span);
     const frame = self.load("ptr", kt.asStr());
-    const fa = self.gep(kt.asStr(), 8);
+    const fa = self.gep(kt.asStr(), self.ptr);
     const f = self.load("ptr", fa.asStr());
     let args: Vec<String> = Vec.new();
     const rr = self.rep(b, span);
@@ -2239,10 +2251,10 @@ impl Lgen {
     for (const a of h.arms) { blocks.push(a.body.clone()); }
     const ap = self.apart(blocks);
     const yields = self.cx.sink.isSome();
-    const resultAt = roundUp(HANDLER + 4, bs.align);
-    const base = roundUp(resultAt + bs.size, 8);
-    const ySlot = base + self.slots(ap) * 8;
-    const size = ySlot + if (yields) { 8 } else { 0 };
+    const resultAt = roundUp(handlerSize(self.ptr) + 4, bs.align);
+    const base = roundUp(resultAt + bs.size, self.ptr);
+    const ySlot = base + self.slots(ap) * self.ptr;
+    const size = ySlot + if (yields) { self.ptr } else { 0 };
     const handlesYield = self.c.lw.p.defs[d].name == "Yield" && self.c.lw.p.modules[self.c.lw.p.defs[d].module].isStd;
     const outerSink = self.cx.sink.clone();
     const r = if (match (br) { #Mem => true, _ => false }) { "ptr noalias %r" } else { "" };
@@ -2256,7 +2268,7 @@ impl Lgen {
     self.declareEnv(ap, span);
     self.cx.fnRet = b.clone();
     if (handlesYield) {
-      self.cx.allocas.push(`  %y = alloca [16 x i8], align 8\n  store ptr null, ptr %y\n  %y.fn = getelementptr inbounds i8, ptr %y, i64 8\n  store ptr @hyield_${n}, ptr %y.fn\n`);
+      self.cx.allocas.push(`  %y = alloca [${2 * self.ptr} x i8], align ${self.ptr}\n  store ptr null, ptr %y\n  %y.fn = getelementptr inbounds i8, ptr %y, i64 ${self.ptr}\n  store ptr @hyield_${n}, ptr %y.fn\n`);
       self.cx.sink = #Some("%y".toString());
     } else if (yields) { self.cx.sink = #Some(self.envSlot("env.y", ySlot)); }
     self.resultSlot(b, span);
@@ -2303,15 +2315,15 @@ impl Lgen {
       }
       match (arm.cont) {
         #Some(k) => {
-          const rc = self.gep("%env", HANDLER);
+          const rc = self.gep("%env", handlerSize(self.ptr));
           const refs = self.load("i32", rc.asStr());
           const more = self.val(`add i32 ${refs}, 1`);
           self.store("i32", more.asStr(), rc.asStr());
           const ka = self.local(k);
           self.store("ptr", "%env", ka.asStr());
-          const k1 = self.gep(ka.asStr(), 8);
+          const k1 = self.gep(ka.asStr(), self.ptr);
           self.store("ptr", `@hres_${n}_${arm.op}`.asStr(), k1.asStr());
-          const k2 = self.gep(ka.asStr(), 16);
+          const k2 = self.gep(ka.asStr(), 2 * self.ptr);
           self.store("ptr", `@hdrop_${n}`.asStr(), k2.asStr());
           self.resumer(n, arm.op, k, b.clone(), bs.size, resultAt, span);
         }
@@ -2340,7 +2352,7 @@ impl Lgen {
       #Unit => `call void @hbody_${n}(ptr %f)`,
     };
     self.code.push(`define internal void @hentry_${n}(ptr %f) #0 {\n  %res = getelementptr inbounds i8, ptr %f, i64 ${resultAt}\n  ${callRes}\n  ret void\n}\n\n`);
-    self.code.push(`define internal void @hrelease_${n}(ptr %f) #0 {\n  %rc = getelementptr inbounds i8, ptr %f, i64 ${HANDLER}\n  %refs = load i32, ptr %rc\n  %left = sub i32 %refs, 1\n  store i32 %left, ptr %rc\n  %gone = icmp eq i32 %left, 0\n  br i1 %gone, label %free, label %done\nfree:\n  call void @fly_handle_free(ptr %f)\n  call void @flyg_free(ptr %f)\n  br label %done\ndone:\n  ret void\n}\n\n`);
+    self.code.push(`define internal void @hrelease_${n}(ptr %f) #0 {\n  %rc = getelementptr inbounds i8, ptr %f, i64 ${handlerSize(self.ptr)}\n  %refs = load i32, ptr %rc\n  %left = sub i32 %refs, 1\n  store i32 %left, ptr %rc\n  %gone = icmp eq i32 %left, 0\n  br i1 %gone, label %free, label %done\nfree:\n  call void @fly_handle_free(ptr %f)\n  call void @flyg_free(ptr %f)\n  br label %done\ndone:\n  ret void\n}\n\n`);
     const [takeResult, armsResult, give] = match (br) {
       #Mem => [
         `call void @llvm.memcpy.p0.p0.i64(ptr %r, ptr %res, i64 ${bs.size}, i1 false)\n  call void @llvm.memset.p0.i64(ptr %res, i8 0, i64 ${bs.size}, i1 false)`,
@@ -2355,9 +2367,9 @@ impl Lgen {
     self.code.push(`define internal ${bret} @hrun_${n}(${r}${if (r.len() > 0) { ", " } else { "" }}ptr %f) #0 {\n  %res = getelementptr inbounds i8, ptr %f, i64 ${resultAt}\n  %isdone = call zeroext i1 @fly_handle_done(ptr %f)\n  br i1 %isdone, label %done, label %arms\ndone:\n  ${takeResult}\n  br label %out\narms:\n  ${armsResult}\n  br label %out\nout:\n  ${give}\n}\n\n`);
     self.code.push(`define internal void @hdrop_${n}(ptr %f) #0 {\n  call void @fly_handle_unwind(ptr %f)\n  call void @hrelease_${n}(ptr %f)\n  ret void\n}\n\n`);
     // The handler, started here.
-    const f = self.val(`call ptr @fly_alloc(i64 ${size})`);
+    const f = self.val(`call ptr @fly_alloc(${sizeTy(self.ptr)} ${size})`);
     self.store("i32", `${d}`.asStr(), f.asStr());
-    const rc = self.gep(f.asStr(), HANDLER);
+    const rc = self.gep(f.asStr(), handlerSize(self.ptr));
     self.store("i32", "1", rc.asStr());
     self.fillEnv(ap, f.asStr(), base);
     if (yields) {
@@ -2415,7 +2427,7 @@ impl Lgen {
     self.cx.direct = true;
     self.subprogram(`${self.fnName} handler`.asStr(), `harm_${n}`.asStr(), span);
     self.declareEnv(ap, span);
-    if (outerSink.isSome()) { self.cx.sink = #Some(self.envSlot("env.y", k * 8)); }
+    if (outerSink.isSome()) { self.cx.sink = #Some(self.envSlot("env.y", k * self.ptr)); }
     for (const [ai, arm] of h.arms.iter().enumerate()) {
       const is = self.val(`icmp eq i32 %op, ${arm.op}`);
       const yes = self.newLabel("arm");
@@ -2424,11 +2436,11 @@ impl Lgen {
       self.label(yes.asStr());
       if (arm.cont.isNone()) {
         if (const #Some(tt) = argTys[ai]) {
-          const buf = self.envSlot(`env.aa${ai}`.asStr(), (k + 2 + ai) * 8);
+          const buf = self.envSlot(`env.aa${ai}`.asStr(), (k + 2 + ai) * self.ptr);
           const sz = self.sizeOf(tt, span);
           self.memcpy(buf.asStr(), "%args", sz);
         }
-        const abAt = self.gep("%env", (k + 1) * 8);
+        const abAt = self.gep("%env", (k + 1) * self.ptr);
         self.store("i32", `${ai + 1}`.asStr(), abAt.asStr());
         const uw = self.cxField("fly_unwinding");
         self.store("i8", "1", uw.asStr());
@@ -2461,39 +2473,39 @@ impl Lgen {
     self.define(`define internal void @harm_${n}(ptr %env, i32 %op, ptr %args, ptr %result)`.asStr());
     self.cx = saved;
     // The handler, installed for the body.
-    const env = self.alloca(max(k + 2 + h.arms.len(), 1) * 8, 8);
+    const env = self.alloca(max(k + 2 + h.arms.len(), 1) * self.ptr, self.ptr);
     self.fillEnv(ap, env.asStr(), 0);
     if (const #Some(y) = outerSink) {
-      const ya = self.gep(env.asStr(), k * 8);
+      const ya = self.gep(env.asStr(), k * self.ptr);
       self.store("ptr", y.asStr(), ya.asStr());
     }
     let bufs: Vec<String> = Vec.new();
     if (aborts) {
-      const abAt = self.gep(env.asStr(), (k + 1) * 8);
+      const abAt = self.gep(env.asStr(), (k + 1) * self.ptr);
       self.store("i32", "0", abAt.asStr());
       for (const [ai, arm] of h.arms.iter().enumerate()) {
         bufs.push(String.new());
         if (arm.cont.isSome()) { continue; }
         if (const #Some(tt) = argTys[ai]) {
           const buf = self.allocaOf(tt, span);
-          const at = self.gep(env.asStr(), (k + 2 + ai) * 8);
+          const at = self.gep(env.asStr(), (k + 2 + ai) * self.ptr);
           self.store("ptr", buf.asStr(), at.asStr());
           bufs[ai] = buf;
         }
       }
     }
-    const hh = self.alloca(HANDLER, 8);
-    self.memzero(hh.asStr(), HANDLER);
+    const hh = self.alloca(handlerSize(self.ptr), self.ptr);
+    self.memzero(hh.asStr(), handlerSize(self.ptr));
     self.store("i32", `${d}`.asStr(), hh.asStr());
     const opAt = self.gep(hh.asStr(), 4);
     self.store("i32", "-1", opAt.asStr());
     const handlersAt = self.cxField("fly_handlers");
     const outer = self.load("ptr", handlersAt.asStr());
-    const outerAt = self.gep(hh.asStr(), HANDLER_OUTER);
+    const outerAt = self.gep(hh.asStr(), handlerOuter(self.ptr));
     self.store("ptr", outer.asStr(), outerAt.asStr());
-    const directAt = self.gep(hh.asStr(), HANDLER_DIRECT);
+    const directAt = self.gep(hh.asStr(), handlerDirect(self.ptr));
     self.store("ptr", `@harm_${n}`.asStr(), directAt.asStr());
-    const frameAt = self.gep(hh.asStr(), HANDLER_FRAME);
+    const frameAt = self.gep(hh.asStr(), handlerFrame(self.ptr));
     self.store("ptr", env.asStr(), frameAt.asStr());
     self.store("ptr", hh.asStr(), handlersAt.asStr());
     self.hoist(h.value, span);
@@ -2526,7 +2538,7 @@ impl Lgen {
       self.cx.liveAt.insert(parent.clone(), set);
       if (aborts) {
         // An unwinding an arm began ends here, and the arm runs.
-        const abAt = self.gep(env.asStr(), (k + 1) * 8);
+        const abAt = self.gep(env.asStr(), (k + 1) * self.ptr);
         const ab = self.load("i32", abAt.asStr());
         const began = self.val(`icmp ne i32 ${ab}, 0`);
         const caught = self.newLabel("caught");
@@ -2593,12 +2605,12 @@ impl Lgen {
       #Scalar(s) => {
         const ac = self.c.ctype(a, span);
         ps.push(`${s}${ext(ac.asStr())} %a`);
-        store = `  %at = getelementptr inbounds i8, ptr %f, i64 16\n  %to = load ptr, ptr %at\n  store ${s} %a, ptr %to\n`;
+        store = `  %at = getelementptr inbounds i8, ptr %f, i64 ${8 + self.ptr}\n  %to = load ptr, ptr %at\n  store ${s} %a, ptr %to\n`;
       }
       #Mem => {
         ps.push("ptr %a".toString());
         const sz = self.sizeOf(a, span);
-        store = `  %at = getelementptr inbounds i8, ptr %f, i64 16\n  %to = load ptr, ptr %at\n  call void @llvm.memcpy.p0.p0.i64(ptr %to, ptr %a, i64 ${sz}, i1 false)\n`;
+        store = `  %at = getelementptr inbounds i8, ptr %f, i64 ${8 + self.ptr}\n  %to = load ptr, ptr %at\n  call void @llvm.memcpy.p0.p0.i64(ptr %to, ptr %a, i64 ${sz}, i1 false)\n`;
       }
     }
     const run = match (br) {
@@ -2623,9 +2635,9 @@ impl Lgen {
       if (byValue) {
         const s = self.shape(t, span);
         offsets.push(pack(mut pk, s.size, s.align));
-      } else { offsets.push(pack(mut pk, 8, 8)); }
+      } else { offsets.push(pack(mut pk, self.ptr, self.ptr)); }
     }
-    for (const _ of f.regions) { offsets.push(pack(mut pk, 8, 8)); }
+    for (const _ of f.regions) { offsets.push(pack(mut pk, self.ptr, self.ptr)); }
     if (offsets.len() == 0) { pack(mut pk, 1, 1); }
     [offsets, roundUp(pk.at, pk.align), pk.align]
   }
@@ -2648,7 +2660,7 @@ impl Lgen {
     if (caps.len() == 0 && arenas.len() == 0) { return; }
     const env = if (held || !lent) {
       self.declare(`flyg_envdrop_${k}`.asStr(), `declare void @flyg_envdrop_${k}(ptr)`.asStr());
-      const e = self.val(`call ptr @fly_alloc(i64 ${size})`);
+      const e = self.val(`call ptr @fly_alloc(${sizeTy(self.ptr)} ${size})`);
       const da = self.gep(dest, self.ptr);
       self.store("ptr", `@flyg_envdrop_${k}`.asStr(), da.asStr());
       e
@@ -2896,12 +2908,14 @@ impl Lgen {
     let glue = String.new();
     glue.push("\n// ---- what the LLVM module calls, and checks of what it assumes ----\n");
     glue.push(GLUE);
+    glue.push(layoutChecks(self.ptr).asStr());
     glue.push(self.glueCode.asStr());
     glue.push(self.asserts.asStr());
     self.c.glue = glue;
     const cfile = self.c.assemble(ent, uncaught, runtime);
     let ll = "; The program's code, as LLVM IR: linked with its companion C file before it is optimized.\n\n".toString();
-    ll.push(DECLS);
+    // `SIZE` is C's `size_t`.
+    ll.push(DECLS.replaceAll("SIZE", sizeTy(self.ptr)).asStr());
     // What code reads and sets of the task running is its context, the same throughout a call.
     ll.push("declare ptr @fly_cx() nounwind willreturn memory(none)\n");
     for (const [_, d] of self.declared.entries()) {
@@ -2927,10 +2941,12 @@ impl Lgen {
 
 // The size of the runtime's `fly_handler`, which a `handle`'s frame starts with; where in it the
 // handlers around it are, and a direct one's arms and frame.
-const HANDLER: usize = 80;
-const HANDLER_OUTER: usize = 24;
-const HANDLER_DIRECT: usize = 48;
-const HANDLER_FRAME: usize = 56;
+// Where a `fly_handler`'s fields are (runtime.h), for pointers of `ptr` bytes: two 32-bit integers,
+// seven pointers, two flags.
+function handlerOuter(ptr: usize): usize { 8 + 2 * ptr }
+function handlerDirect(ptr: usize): usize { 8 + 5 * ptr }
+function handlerFrame(ptr: usize): usize { 8 + 6 * ptr }
+function handlerSize(ptr: usize): usize { roundUp(10 + 8 * ptr, ptr) }
 
 // What every module declares: the runtime's routines and flags it calls and reads directly.
 const DECLS: str = "declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1)
@@ -2942,10 +2958,10 @@ declare i128 @fly_sub128(i128, i128)
 declare i128 @fly_mul128(i128, i128)
 declare void @fly_div_zero() noreturn
 declare void @fly_panic(ptr) noreturn
-declare void @fly_err_box(i32, ptr, i64)
+declare void @fly_err_box(i32, ptr, SIZE)
 declare i32 @fly_err_tag()
-declare void @fly_err_take(ptr, i64)
-declare ptr @fly_alloc(i64)
+declare void @fly_err_take(ptr, SIZE)
+declare ptr @fly_alloc(SIZE)
 declare void @fly_arena_free(ptr)
 declare void @fly_perform(i32, i32, ptr, ptr)
 declare void @fly_handle_start(ptr, ptr, ptr)
@@ -2959,26 +2975,34 @@ declare void @flyg_cleanup_end(ptr)
 declare void @flyg_free(ptr)
 ";
 
-// The companion's own functions, for what the runtime takes or gives as a struct; and checks of the
-// runtime's layouts the module relies on.
+// The companion's own functions, for what the runtime takes or gives as a struct.
 const GLUE: str = "void flyg_cleanup_begin(fly_unwind_state* s) { *s = fly_cleanup_begin(); }
 void flyg_cleanup_end(fly_unwind_state* s) { fly_cleanup_end(*s); }
 void flyg_free(void* p) { free(p); }
-_Static_assert(sizeof(fly_unwind_state) <= 16 && _Alignof(fly_unwind_state) <= 8, \"fly_unwind_state\");
-_Static_assert(sizeof(fly_handler) == 80 && __builtin_offsetof(fly_handler, op) == 4 && __builtin_offsetof(fly_handler, args) == 8 && __builtin_offsetof(fly_handler, result) == 16 && __builtin_offsetof(fly_handler, outer) == 24 && __builtin_offsetof(fly_handler, direct) == 48 && __builtin_offsetof(fly_handler, frame) == 56, \"fly_handler\");
-_Static_assert(sizeof(fly_str) == 16 && sizeof(fly_slice) == 16 && __builtin_offsetof(fly_str, len) == 8 && __builtin_offsetof(fly_slice, len) == 8, \"views\");
-_Static_assert(sizeof(fly_String) == 24 && sizeof(fly_vec) == 24 && __builtin_offsetof(fly_String, len) == 8 && __builtin_offsetof(fly_vec, len) == 8, \"lists\");
-_Static_assert(sizeof(fly_fn) == 24 && __builtin_offsetof(fly_fn, drop) == 8 && __builtin_offsetof(fly_fn, fn) == 16, \"fly_fn\");
-_Static_assert(sizeof(fly_cont) == 24 && __builtin_offsetof(fly_cont, resume) == 8 && __builtin_offsetof(fly_cont, drop) == 16, \"fly_cont\");
-_Static_assert(sizeof(fly_yield) == 16 && __builtin_offsetof(fly_yield, fn) == 8, \"fly_yield\");
-_Static_assert(sizeof(fly_gen) == 24 && sizeof(fly_File) == 24 && sizeof(fly_socket) == 9 * sizeof(void*) && sizeof(fly_map) == 48, \"runtime structs\");
-_Static_assert(sizeof(fly_arena) == 8 && sizeof(fly_chan) == 4 && sizeof(fly_Hasher) == 8 && _Alignof(fly_i128) == 16, \"runtime scalars\");
 ";
 
+// Checks of the runtime's layouts the module relies on, for pointers of `ptr` bytes.
+function layoutChecks(ptr: usize): String {
+  const p2 = 2 * ptr;
+  const p3 = 3 * ptr;
+  `_Static_assert(sizeof(void*) == ${ptr}, \"pointers\");
+_Static_assert(sizeof(fly_unwind_state) <= 16 && _Alignof(fly_unwind_state) <= 8, \"fly_unwind_state\");
+_Static_assert(sizeof(fly_handler) == ${handlerSize(ptr)} && __builtin_offsetof(fly_handler, op) == 4 && __builtin_offsetof(fly_handler, args) == 8 && __builtin_offsetof(fly_handler, result) == ${8 + ptr} && __builtin_offsetof(fly_handler, outer) == ${handlerOuter(ptr)} && __builtin_offsetof(fly_handler, direct) == ${handlerDirect(ptr)} && __builtin_offsetof(fly_handler, frame) == ${handlerFrame(ptr)}, \"fly_handler\");
+_Static_assert(sizeof(fly_str) == ${p2} && sizeof(fly_slice) == ${p2} && __builtin_offsetof(fly_str, len) == ${ptr} && __builtin_offsetof(fly_slice, len) == ${ptr} && sizeof(size_t) == ${ptr}, \"views\");
+_Static_assert(sizeof(fly_String) == ${p3} && sizeof(fly_vec) == ${p3} && __builtin_offsetof(fly_String, len) == ${ptr} && __builtin_offsetof(fly_vec, len) == ${ptr}, \"lists\");
+_Static_assert(sizeof(fly_fn) == ${p3} && __builtin_offsetof(fly_fn, drop) == ${ptr} && __builtin_offsetof(fly_fn, fn) == ${p2}, \"fly_fn\");
+_Static_assert(sizeof(fly_cont) == ${p3} && __builtin_offsetof(fly_cont, resume) == ${ptr} && __builtin_offsetof(fly_cont, drop) == ${p2}, \"fly_cont\");
+_Static_assert(sizeof(fly_yield) == ${p2} && __builtin_offsetof(fly_yield, fn) == ${ptr}, \"fly_yield\");
+_Static_assert(sizeof(fly_gen) == ${p3} && sizeof(fly_File) == ${p3} && sizeof(fly_socket) == ${9 * ptr} && sizeof(fly_map) == ${6 * ptr}, \"runtime structs\");
+_Static_assert(sizeof(fly_arena) == ${ptr} && sizeof(fly_chan) == 4 && sizeof(fly_Hasher) == 8 && _Alignof(fly_i128) == 16, \"runtime scalars\");
+`
+}
+
 // The LLVM module and companion C file for a checked program.
-export function llvmProgram(p: Prog, entry: usize, runtime: str, freestanding: bool): [String, String] uses Fail<#Failed(String)> {
+// `ptr` is the target's size of a pointer: 8, or 4 for wasm32.
+export function llvmProgram(p: Prog, entry: usize, runtime: str, freestanding: bool, ptr: usize): [String, String] uses Fail<#Failed(String)> {
   let g = Lgen {
-    c: newCgen(p), ptr: 8, shapes: HashMap.new(), glue: HashMap.new(), glueCode: String.new(), asserts: String.new(),
+    c: newCgen(p), ptr, shapes: HashMap.new(), glue: HashMap.new(), glueCode: String.new(), asserts: String.new(),
     declared: HashMap.new(), globals: String.new(), strs: HashMap.new(), code: String.new(), closuresDone: 0, aparts: 0,
     defers: HashMap.new(), fnName: String.new(), module: 0, cx: newCtx(Vec.new(), #Prim(#Void), #Fn),
     meta: String.new(), metaN: 0, files: HashMap.new(), lineStarts: HashMap.new(), locs: HashMap.new(), cu: String.new(),
@@ -3131,9 +3155,9 @@ impl Lgen {
       const elem: Ty = match (t) { #Slice(x) => x.get().clone(), #Named(_, args) => match (args.first()) { #Some(#Ty(x)) => x.clone(), _ => #Prim(#U8) }, _ => #Prim(#U8) };
       const et = if (c == "fly_str" || c == "fly_String") { self.basicTy("u8", 8, "DW_ATE_unsigned_char") } else { self.diType(elem, span) };
       const pt = self.pointerTo(et.asStr());
-      members.push(self.member(n.asStr(), "ptr", pt.asStr(), 64, 0));
-      members.push(self.member(n.asStr(), "len", u64t.asStr(), 64, 8));
-      if (c == "fly_String" || c == "fly_vec") { members.push(self.member(n.asStr(), "cap", u64t.asStr(), 64, 16)); }
+      members.push(self.member(n.asStr(), "ptr", pt.asStr(), self.ptr * 8, 0));
+      members.push(self.member(n.asStr(), "len", u64t.asStr(), self.ptr * 8, self.ptr));
+      if (c == "fly_String" || c == "fly_vec") { members.push(self.member(n.asStr(), "cap", u64t.asStr(), self.ptr * 8, 2 * self.ptr)); }
     } else if (self.c.lw.tagged(t) && cLayout(c.asStr(), self.ptr).isNone()) {
       if (self.c.liveByte(t)) {
         const b = self.basicTy("bool", 8, "DW_ATE_boolean");

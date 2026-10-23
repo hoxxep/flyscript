@@ -1,9 +1,10 @@
 #!/bin/sh
 # Compiles a Flyscript program to WebAssembly for WASI: `selfhost/wasm.sh compiler.js program.fly
-# out.wasm [--imports]`, then `node selfhost/wasm.js out.wasm args...` runs it. With `--imports`,
-# the functions of C's the program declares are its host's, as a page's are (web/flynext.js).
-# Needs clang with the wasm32 target, wasm-ld, and a WASI sysroot and compiler runtime:
-# WASI_SYSROOT and WASI_BUILTINS, or Homebrew's wasi-libc and wasi-runtimes.
+# out.wasm [--imports]`, then `node selfhost/wasm.js out.wasm args...` runs it. The program's code
+# is made through LLVM, as natively (selfhost/llvm.sh), for 32-bit pointers. With `--imports`, the
+# functions of C's the program declares are its host's, as a page's are (web/flynext.js).
+# Needs what selfhost/llvm.sh needs, with the wasm32 target, wasm-ld, and a WASI sysroot and
+# compiler runtime: WASI_SYSROOT and WASI_BUILTINS, or Homebrew's wasi-libc and wasi-runtimes.
 set -e
 root=$(cd "$(dirname "$0")/.." && pwd)
 sysroot=${WASI_SYSROOT:-$(brew --prefix wasi-libc 2>/dev/null)/share/wasi-sysroot}
@@ -18,8 +19,8 @@ if [ "$4" = "--imports" ]; then
   opt="-Os -ffunction-sections -fdata-sections"
   link="--gc-sections --strip-all"
 fi
-node --stack-size=65500 "$1" "$2" "$out.c" "$root"
-clang --target=wasm32-wasip1 --sysroot="$sysroot" -std=gnu11 $opt -w -c "$out.c" -o "$out.o"
+# shellcheck disable=SC2086
+sh "$root/selfhost/llvm.sh" "$1" "$2" "$out.o" --target=wasm32-wasip1 --sysroot="$sysroot" $opt
 wasm-ld -m wasm32 $imports $link "$sysroot/lib/wasm32-wasip1/crt1-command.o" "$out.o" -L"$sysroot/lib/wasm32-wasip1" -lc "$builtins" \
   --export=__stack_pointer --export=fly_fiber_run --export=fly_fiber_top -z stack-size=8388608 -o "$out"
-rm -f "$out.c" "$out.o"
+rm -f "$out.o"

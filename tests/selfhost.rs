@@ -224,13 +224,13 @@ fn kernel_runs_on_qemu() {
     }
 }
 
-/// Whether WebAssembly for WASI can be built here: clang, wasm-ld, and a WASI sysroot.
+/// Whether WebAssembly for WASI can be built here: LLVM's tools, wasm-ld, and a WASI sysroot.
 fn has_wasm() -> bool {
     let have = |tool: &str| Command::new(tool).arg("--version").output().is_ok_and(|o| o.status.success());
     let sysroot = std::env::var("WASI_SYSROOT").map(PathBuf::from).ok().or_else(|| {
         Command::new("brew").args(["--prefix", "wasi-libc"]).output().ok().filter(|o| o.status.success()).map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim()).join("share/wasi-sysroot"))
     });
-    has_node() && have("clang") && have("wasm-ld") && sysroot.is_some_and(|p| p.exists())
+    has_node() && has_llvm() && have("wasm-ld") && sysroot.is_some_and(|p| p.exists())
 }
 
 /// The run suite, compiled to WebAssembly and run under WASI, prints what it expects.
