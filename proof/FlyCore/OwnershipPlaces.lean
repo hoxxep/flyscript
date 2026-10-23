@@ -415,6 +415,7 @@ theorem typed_keys : Typed F O Γ e τ Γ' r → Γ'.map Prod.fst = Γ.map Prod.
   | .vnew _ => rfl
   | .vlen _ => rfl
   | .vpush ha _ => atom_keys ha
+  | .vpop _ _ => rfl
   | .call _ _ _ _ hargs _ _ => atoms_keys hargs
   | .lam _ _ _ _ _ ha _ => atom_keys ha
   | .lendClo _ _ _ _ _ _ _ _ hb => by

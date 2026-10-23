@@ -249,6 +249,7 @@ theorem typed_weaker : Typed F O Γ e τ Γ' r → (Γ.map Prod.fst).Nodup → W
   | .vnew _, _ => Weaker.refl _
   | .vlen _, _ => Weaker.refl _
   | .vpush ha _, hk => atom_weaker ha hk
+  | .vpop _ _, _ => Weaker.refl _
   | .call _ _ _ _ hargs _ _, hk => atoms_weaker hargs hk
   | .lam _ _ _ _ _ ha _, hk => atom_weaker ha hk
   | .lendClo _ _ _ _ _ _ _ hx hb, hk => by

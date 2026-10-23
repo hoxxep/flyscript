@@ -393,6 +393,108 @@ theorem vpush_ok (ha : AtomTy Γ a τ Γ₁) (hp : PlaceTy Γ₁ p (.vec τ) tru
   exact this.relabel fun x => by simp only [List.append_nil, hE''.mem_iff, List.not_mem_nil, or_false]
 
 
+
+/-- `p.pop()`: an empty vector gives `#None`; otherwise its last element's tree moves out of the
+vector into the value, `#Some` of it, and the vector keeps the rest. -/
+theorem vpop_ok (hp : PlaceTy Γ p (.vec τ) true y) (hcτ : τ.complete = true) (hI : Inv F ι σ Γ env E S)
+    (hwf : WF σ) :
+    Post F ι O σ E S Γ env (.sum .int τ) r hs (eval F O (n + 1) hs σ env (.vpop p)) := by
+  obtain ⟨c, Rb, P, A, B, hres, hRb, hE, hupd⟩ := replace_at hI hp (by simpa [Ty.complete] using hcτ) (.inl rfl)
+  cases hRb with
+  | vec hcm hlen hel hnd hcn =>
+  rename_i cs Rs
+  simp only [eval, hres, hcm]
+  have hndE := hE.nodup_iff.mp hI.nodup
+  obtain ⟨hdR, -⟩ := seg3 hndE
+  have hRE : ∀ x ∈ c :: Rs.flatten, x ∈ E := fun x hx =>
+    hE.mem_iff.mpr (mem_seg.mpr (.inl (List.mem_append.mpr (.inr hx))))
+  cases hlast : cs.getLast? with
+  | none =>
+    simp only
+    generalize hb : (σ.alloc (.int 0)).1 = b
+    have hbn : b = σ.next := hb.symm
+    generalize hσ1 : (σ.alloc (.int 0)).2 = σ1
+    have hfresh : ∀ l, σ.mem l ≠ none → l ≠ b := fun l h e => by
+      subst e; rw [hbn] at h; exact Nat.lt_irrefl _ (hwf _ h)
+    have hold : ∀ l, σ.mem l ≠ none → σ1.mem l = σ.mem l := fun l h => by
+      rw [← hσ1]; simp only [Store.alloc]; rw [if_neg (fun e => hfresh l h (by rw [hbn]; exact e))]
+    have hbm : σ1.mem b = some (.int 0) := by rw [← hσ1, hbn]; simp [Store.alloc]
+    have hag : Agree σ σ1 (E ++ S) := Agree.of' (fun l hl => by
+      rcases List.mem_append.mp hl with h | h
+      · exact hold l (hI.alloc l h)
+      · exact hold l (hI.allocS l h)) (by rw [← hσ1]; rfl)
+    refine ⟨E, [b], ⟨hI.foot.frame hag, hI.nodup, hI.disj, hI.keys⟩, .tag (.int hbm) rfl hcτ,
+      fun l h1 h2 => ?_, fun l h1 h2 => ?_, ?_⟩
+    · simp at h1; subst h1; exact hfresh _ (hI.alloc _ h2) rfl
+    · simp at h1; subst h1; exact hfresh _ (hI.allocS _ h2) rfl
+    · rw [← hσ1, hbn]; exact Moves.allocate hwf hI.alloc
+  | some l =>
+    simp only
+    have hne : cs ≠ [] := by intro h; simp [h] at hlast
+    have hRne : Rs ≠ [] := by intro h; simp [h] at hlen; exact hne (List.eq_nil_of_length_eq_zero hlen.symm)
+    have hcs := List.dropLast_concat_getLast hne
+    have hRs := List.dropLast_concat_getLast hRne
+    have hl : cs.getLast hne = l := by rw [List.getLast?_eq_getLast hne] at hlast; exact Option.some.inj hlast
+    have hk : cs.length - 1 < cs.length := by
+      have : cs.length ≠ 0 := fun h => hne (List.eq_nil_of_length_eq_zero h)
+      omega
+    have hkR : cs.length - 1 < Rs.length := by rw [hlen]; exact hk
+    have hlk : cs[cs.length - 1] = l := by rw [← hl, List.getLast_eq_getElem]
+    have hRk : Rs[cs.length - 1]'hkR = Rs.getLast hRne := by
+      rw [List.getLast_eq_getElem]; congr 1; omega
+    have hLl : LT F ι σ l τ (Rs.getLast hRne) := by
+      have := hel _ hk hkR; rw [hlk, hRk] at this; exact this
+    have hflat : Rs.flatten = Rs.dropLast.flatten ++ Rs.getLast hRne := by
+      have := congrArg List.flatten hRs
+      simp only [List.flatten_append, List.flatten_singleton] at this
+      exact this.symm
+    rw [hflat] at hnd hcn hRE hdR
+    have hnd2 := List.nodup_append.mp hnd
+    generalize hσ' : σ.set c (some (.vec cs.dropLast)) = σ'
+    have hm' : ∀ x, σ'.mem x = if x = c then some (.vec cs.dropLast) else σ.mem x := by
+      intro x; rw [← hσ']; simp only [Store.set]
+    have hrt' : σ'.rt = σ.rt := by rw [← hσ']; rfl
+    have hcl : c ∉ Rs.getLast hRne := fun h => hcn (List.mem_append.mpr (.inr h))
+    have hcD : c ∉ Rs.dropLast.flatten := fun h => hcn (List.mem_append.mpr (.inl h))
+    have hagR : Agree σ σ' (Rs.getLast hRne) := Agree.of (fun x hx => by
+      rw [hm', if_neg (fun (e : x = c) => hcl (e ▸ hx))]) hrt'
+    have hLT' : LT F ι σ' c (.vec τ) (c :: Rs.dropLast.flatten) := by
+      refine .vec (cs := cs.dropLast) (by rw [hm']; simp) (by simp [hlen]) (fun j hj hj' => ?_) hnd2.1 hcD
+      have hj1 : j < cs.length := by simp at hj; omega
+      have := hel j hj1 (by rw [hlen]; exact hj1)
+      rw [List.getElem_dropLast, List.getElem_dropLast]
+      refine this.frame (Agree.of (fun x hx => ?_) hrt')
+      have : x ∈ Rs.dropLast.flatten := mem_flatten_of (by simpa using hj') (by rw [List.getElem_dropLast]; exact hx)
+      rw [hm', if_neg (fun (e : x = c) => hcD (e ▸ this))]
+    have hout : ∀ x ∈ A ++ P ++ B ++ S, x ≠ c := fun x hx e => by
+      subst e
+      rcases List.mem_append.mp hx with hx | hx
+      · exact hdR _ (List.mem_cons_self ..) hx
+      · exact hI.disj _ hx (hRE _ (List.mem_cons_self ..))
+    have hag : Agree σ σ' (A ++ P ++ B ++ S) := Agree.of (fun x hx => by rw [hm', if_neg (hout x hx)]) hrt'
+    have hdAPB : Disj (c :: Rs.dropLast.flatten) (A ++ P ++ B) := fun x hx hx' =>
+      hdR x (by rcases List.mem_cons.mp hx with rfl | hx <;> simp [*]) hx'
+    have hdS : Disj (c :: Rs.dropLast.flatten) S := fun x hx hx' =>
+      hI.disj x hx' (hRE x (by rcases List.mem_cons.mp hx with rfl | hx <;> simp [*]))
+    obtain ⟨E'', hI'', hE''⟩ := hupd σ' _ hag hLT' hdAPB hdS
+    have hRlast : ∀ x ∈ Rs.getLast hRne, x ∈ E := fun x hx => hRE x (by simp [hx])
+    refine ⟨E'', Rs.getLast hRne, hI'', .tag (hLl.frame hagR) rfl hcτ, fun x h1 h2 => ?_,
+      fun x h1 h2 => hI.disj x h2 (hRlast x h1), ?_⟩
+    · rcases List.mem_append.mp (hE''.mem_iff.mp h2) with h2 | h2
+      · rcases List.mem_append.mp h2 with h2 | h2
+        · exact hdR x (by simp [h1]) (by simp [h2])
+        · rcases List.mem_append.mp h2 with h2 | h2
+          · exact hdR x (by simp [h1]) (by simp [h2])
+          · rcases List.mem_cons.mp h2 with rfl | h2
+            · exact hcl h1
+            · exact hnd2.2.2 x h2 x h1 rfl
+      · exact hdR x (by simp [h1]) (by simp [h2])
+    · have m := Moves.set (v := .vec cs.dropLast) hwf hI.alloc (hRE c (List.mem_cons_self ..))
+      rw [hσ'] at m
+      exact m.relabel fun x => by
+        simp only [hE''.mem_iff, hE.mem_iff, List.mem_append, List.mem_cons, List.not_mem_nil, or_false]
+        grind
+
 /-! ## Borrowing an element -/
 
 theorem flatten_set_perm : ∀ {Rs : List (List Nat)} {i : Nat}, i < Rs.length → ∀ R : List Nat,

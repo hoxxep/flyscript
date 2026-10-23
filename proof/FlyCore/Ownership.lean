@@ -369,6 +369,9 @@ inductive Expr where
   /-- `p.push(a)`: `a` moved to the end of the vector at `p`, whose elements move to new cells as it
   grows. -/
   | vpush (p : Place) (a : Atom)
+  /-- `p.pop()`: the last element of the vector at `p`, moved out, as `#Some`, or `#None` if it is
+  empty. -/
+  | vpop (p : Place)
   /-- `{ const g = generate(f(owned, lent)); body }`: `f` runs as `body` asks for its values, each a
   `τy` it yields by performing `eY`; `body` asks by performing `eN`, which gives `#Some(v)`, or
   `#Done` once `f` has ended. `body` has type `τb`; `f` is lent places only `readonly`. -/
@@ -1162,6 +1165,18 @@ def eval (F : List Fn) (O : List Op) : Nat → HS → Store → Env → Expr →
         | some (.vec cs) => (.val (.int cs.length), σ)
         | _ => (.stuck, σ)
       | none => (.stuck, σ)
+    | .vpop p =>
+      match resolve σ env p with
+      | some c =>
+        match σ.mem c with
+        | some (.vec cs) =>
+          match cs.getLast? with
+          | some l => (.val (.tag .int .int false l), σ.set c (some (.vec cs.dropLast)))
+          | none =>
+            let (b, σ1) := σ.alloc (.int 0)
+            (.val (.tag .int .int true b), σ1)
+        | _ => (.stuck, σ)
+      | none => (.stuck, σ)
     | .vpush p a =>
       match evalAtom σ env a with
       | some (v, σ1) =>
@@ -1830,6 +1845,8 @@ inductive Typed (F : List Fn) (O : List Op) : Ctx → Expr → Ty → Ctx → Ro
   | vlen : PlaceTy Γ p (.vec τ) w y → Typed F O Γ (.vlen p) .int Γ r
   /-- Pushing to a vector at a place that may be changed, the element moved in. -/
   | vpush : AtomTy Γ a τ Γ₁ → PlaceTy Γ₁ p (.vec τ) true y → Typed F O Γ (.vpush p a) .int Γ₁ r
+  /-- Taking the last element out of a vector at a place that may be changed. -/
+  | vpop : PlaceTy Γ p (.vec τ) true y → τ.complete = true → Typed F O Γ (.vpop p) (.sum .int τ) Γ r
   /-- Changing what a `Cell` of a region holds, through its arena, owned or lent `mut`. -/
   | rset : PlaceTy Γ p (.rref true k τ) w y → lookup R Γ = some s → (s = .own (.arena k) true ∨ s = .ref .mut (.arena k)) →
       τ.rdata = true → AtomTy Γ a (τ.shiftBy k) Γ → Typed F O Γ (.rset R p a) .int Γ r

@@ -1662,6 +1662,20 @@ example : ∀ n, match eval [] [] n [.abort .fail 0] .empty [] vecEx with
     | (.abort _ _, σ') => ∀ l, σ'.mem l = none :=
   program_ok (by intro d hd; simp at hd) vecEx_typed
 
+/-- `let v = []; v.push(Box.new(41)); match (v.pop()) { #None => 0, #Some(b) => *b + 1 }`: the element
+taken back out of the vector, owned by the arm; 42, and nothing left allocated. -/
+def vecPop : Expr :=
+  .let_ "v" (.vec (.box .int)) .vnew
+    (.let_ "a" (.box .int) (.new (.lit 41))
+      (.let_ "u" .int (.vpush (var "v") (.move "a"))
+        (.let_ "o" (.sum .int (.box .int)) (.vpop (var "v"))
+          (.case "o" "y" .int (.box .int) (.atom (.read (var "y"))) (.add (.read (deref (var "y"))) (.lit 1))))))
+
+example : value (eval [] [] 40 [] .empty [] vecPop) = some 42 := by
+  run [vecPop]
+example : freed (eval [] [] 40 [] .empty [] vecPop) := by
+  run [vecPop]
+
 /-- `let v = []; v.push(1); v.push(41); const i = 1; { const e = mut v[i]; *e = *e + 1 }; v[i]`:
 an element changed and read through borrows of it; 42. -/
 def vecIdx : Expr :=
