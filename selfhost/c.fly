@@ -846,6 +846,7 @@ impl Cgen {
         const live = if (self.liveByte(ty)) { ".live = true, " } else { "" };
         match (vs.first()) {
           #None => `((${ct}){ ${live}.tag = ${id} })`,
+          #Some(_) if (isVoidTy(self.lw.payloadOf(ty, name.asStr()))) => `((${ct}){ ${live}.tag = ${id} })`,
           #Some(v) => {
             const x = self.operand(v, span);
             `((${ct}){ ${live}.tag = ${id}, .u.${mangle(name.asStr())} = ${x} })`
@@ -1962,7 +1963,8 @@ impl Cgen {
         const boxed = self.boxErr("e_", errTy);
         const okTy = self.lw.payloadOf(stripBorrow(ptys[0]), "Ok");
         const oc = self.ctype(okTy, span);
-        `({ ${c} r_ = ${arg(0)}; ${oc} o_ = { 0 }; if (r_.tag == ${self.tagId("Err")}) { ${ec2} e_ = r_.u.Err; ${boxed}} else o_ = r_.u.Ok; o_; })`
+        const okRead = if (isVoidTy(okTy)) { "{}" } else { "o_ = r_.u.Ok" };
+        `({ ${c} r_ = ${arg(0)}; ${oc} o_ = { 0 }; if (r_.tag == ${self.tagId("Err")}) { ${ec2} e_ = r_.u.Err; ${boxed}} else ${okRead}; o_; })`
       }
       "Fail_capture" => {
         const t = self.lw.payloadOf(rt, "Ok");
@@ -1971,7 +1973,8 @@ impl Cgen {
         const rc = self.ctype(rt, span);
         const etc = self.ctype(errTy, span);
         const take = self.takeErr("e_", errTy);
-        `({ fly_fn f_ = ${arg(0)}; ${tc} v_ = ((${tc} (*)(void*))f_.fn)(f_.env); if (f_.drop) f_.drop(f_.env); ${rc} r_; if (FLY_FAILED) { ${etc} e_; memset(&e_, 0, sizeof e_); ${take}r_ = (${rc}){ .tag = ${self.tagId("Err")}, .u.Err = e_ }; } else r_ = (${rc}){ .tag = ${self.tagId("Ok")}, .u.Ok = v_ }; r_; })`
+        const okInit = if (isVoidTy(t)) { "" } else { ", .u.Ok = v_" };
+        `({ fly_fn f_ = ${arg(0)}; ${tc} v_ = ((${tc} (*)(void*))f_.fn)(f_.env); if (f_.drop) f_.drop(f_.env); ${rc} r_; if (FLY_FAILED) { ${etc} e_; memset(&e_, 0, sizeof e_); ${take}r_ = (${rc}){ .tag = ${self.tagId("Err")}, .u.Err = e_ }; } else r_ = (${rc}){ .tag = ${self.tagId("Ok")}${okInit} }; r_; })`
       }
       "Fail_map" => {
         const tc = self.ctype(rt, span);
@@ -2780,7 +2783,7 @@ impl Cgen {
     for (const [k, l] of f.params.iter().enumerate()) {
       const pc = self.ctype(f.locals[l].ty, f.span);
       params.push(`${pc} p${k}`);
-      inits.push(`${self.local(l)} = p${k}; `);
+      if (!unitTy(f.locals[l].ty)) { inits.push(`${self.local(l)} = p${k}; `); }
     }
     // A function that performs `Region<R>` is given R's arena.
     for (const id of f.regions) {
@@ -2833,7 +2836,7 @@ impl Cgen {
     for (const [i, l] of f.params.iter().enumerate()) {
       const pc = self.ctype(f.locals[l].ty, f.span);
       pcs.push(`${pc} p${i}`);
-      inits.push(`${self.local(l)} = p${i}; `);
+      if (!unitTy(f.locals[l].ty)) { inits.push(`${self.local(l)} = p${i}; `); }
     }
     // A closure that yields is given what its yields go to, as a generator function is.
     if (f.yields.isSome()) {

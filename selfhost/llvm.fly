@@ -1100,7 +1100,9 @@ impl Lgen {
         const to = self.offsetOf(ty, "tag", span);
         const at = self.gep(dest, to);
         self.store("i32", `${id}`.asStr(), at.asStr());
+        const voidPayload = isVoidTy(self.c.lw.payloadOf(ty, name.asStr()));
         if (const #Some(v) = vs.first()) {
+          if (voidPayload) { return; }
           const uo = self.offsetOf(ty, "u", span);
           const u = self.gep(dest, uo);
           self.put(v, u.asStr(), span);

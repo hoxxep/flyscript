@@ -166,9 +166,10 @@ impl Conn {
     self.socket.write(body);
   }
 
-  // A file's bytes, with how long a browser may keep them (`Cache-Control`).
-  export function writeFile(self: mut Self, contentType: str, cache: str, body: readonly u8[]): void uses Io, Fail<IoErr> {
+  // A file's bytes, with how long a browser may keep them (`Cache-Control`) and the cookies it sets.
+  export function writeFile(self: mut Self, contentType: str, cache: str, cookies: readonly Vec<String>, body: readonly u8[]): void uses Io, Fail<IoErr> {
     let head = `HTTP/1.1 200 OK\r\nContent-Type: ${contentType}\r\nCache-Control: ${cache}\r\n`;
+    for (const c of cookies) { head.push(`Set-Cookie: ${c}\r\n`.asStr()); }
     head.push(self.connection().asStr());
     head.push(`Content-Length: ${body.len()}\r\n\r\n`);
     self.socket.write(head.asStr().asBytes());

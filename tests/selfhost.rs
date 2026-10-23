@@ -424,6 +424,15 @@ fn todo_site_serves_and_runs() {
     let help = String::from_utf8(get(port, "/help/links/following")).unwrap();
     assert!(help.starts_with("HTTP/1.1 200") && help.contains("<p>On links/following:"), "{help}");
     assert!(String::from_utf8(get(port, "/help")).unwrap().contains("<p>Pick a topic:</p>"), "a catch-all that may be empty does not answer its own address");
+    // Middleware runs before any route: the list's own address sends a reader home.
+    let moved = String::from_utf8(get(port, "/todos")).unwrap();
+    assert!(moved.starts_with("HTTP/1.1 303") && moved.contains("\r\nLocation: /\r\n"), "middleware did not redirect: {moved}");
+    // Its cookies go with whatever answers, a page rendered once or nothing found, and a value from
+    // the request cannot add attributes of its own.
+    let shared = String::from_utf8(get(port, "/about?from=news%3B%20Domain%3Devil")).unwrap();
+    assert!(shared.starts_with("HTTP/1.1 200") && shared.contains("\r\nSet-Cookie: from=news%3B%20Domain=evil; Path=/;"), "{shared}");
+    let lost = String::from_utf8(get(port, "/nowhere?from=x")).unwrap();
+    assert!(lost.starts_with("HTTP/1.1 404") && lost.contains("\r\nSet-Cookie: from=x;"), "{lost}");
     let data = String::from_utf8(ask(port, "GET /about HTTP/1.1\r\nHost: here\r\nX-Fly-Data: 1\r\nConnection: close\r\n\r\n".to_string())).unwrap();
     assert!(data.contains("\r\n\r\n(info)/about\n/about\n"), "{data}");
     let body = r#"{"title":"Asked by the test"}"#;

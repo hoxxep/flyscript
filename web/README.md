@@ -1,6 +1,6 @@
 # FlyNext: a web framework, in Flyscript
 
-What Next.js and React are for a JavaScript site, in one Flyscript app: pages rendered on the server and taken over in the browser, routes from files, layouts, data loaded on the server with the request's headers and cookies, redirects, endpoints, server functions called from the page as if they were local, links followed without loading a page, timers, and forms that work before the page's program has loaded, or without it. The server is native code; the browser runs one WebAssembly program for every page of the site. [examples/todo](../examples/todo/) is an app built with it.
+What Next.js and React are for a JavaScript site, in one Flyscript app: pages rendered on the server and taken over in the browser, routes from files, layouts, data loaded on the server with the request's headers and cookies, middleware, redirects, endpoints, server functions called from the page as if they were local, links followed without loading a page, timers, and forms that work before the page's program has loaded, or without it. The server is native code; the browser runs one WebAssembly program for every page of the site. [examples/todo](../examples/todo/) is an app built with it.
 
 ```sh
 web/flynext dev app            # serves the app on :3000, rebuilding and reloading pages as it changes
@@ -23,6 +23,7 @@ app/
     404.fly          what an address nothing answers shows
     error.fly        what a page whose `load` failed shows
     loading.fly      what shows while a followed link waits for the next page
+  middleware.fly     what runs before every page, endpoint and call
   api.fly            the effects the pages ask the server for
   server.fly         how the server answers them
   public/            files served as they are
@@ -50,9 +51,11 @@ export function update(m: mut Model, msg: Msg, ev: readonly Event): void uses To
 
 **An endpoint** is a route file that exports `handle(req: readonly Request, p: readonly Params): Response`, performing what the app's server handles, rather than a view: it answers any request for its address itself, with JSON, say.
 
-**The request** is an effect too, `Http` (`request.fly`), which the server handles around a page's `load`, an endpoint's `handle`, and its own handlers of the app's effects: `Http.header(name)` and `Http.cookie(name)` read the request, `Http.setCookie(name, value, maxAge)` sets a cookie on the answer, and `Http.redirect(url)` answers instead by sending the browser to `url` — from a `load`, the page there is shown in its place, whether the browser asked for the page or the program followed a link to it.
+**The request** is an effect too, `Http` (`request.fly`), which the server handles around a page's `load`, an endpoint's `handle`, and its own handlers of the app's effects: `Http.header(name)` and `Http.cookie(name)` read the request, `Http.setCookie(name, value, maxAge)` sets a cookie on the answer, its value percent-encoded where a cookie may not hold a byte (and `Http.cookie` decodes it), and `Http.redirect(url)` answers instead by sending the browser to `url` — from a `load`, the page there is shown in its place, whether the browser asked for the page or the program followed a link to it.
 
 **What shows when nothing else does**: `404.fly` and `error.fly` export a `Model`, an `initial` that makes it, and a `view`, shown inside the outermost layout; `loading.fly` exports a `view` of nothing.
+
+**Middleware**, `middleware.fly`, exports `middleware(url: str): void`, which the server runs with the request's address, its query too, before any page, endpoint or call answers, under the same handlers as a page's `load`. Performing `Http`, it may read the request's headers and cookies, set cookies, which go with whatever answers, even a public file, or send the browser elsewhere with `Http.redirect(url)`, and then nothing else answers.
 
 **A layout** wraps the pages of its directory and those below it, given the page's address: `export function layout<M>(path: str, body: () => void uses Ui<M>): void uses Ui<M>`. Layouts nest, the outermost first.
 

@@ -75,13 +75,14 @@ export function fixed<M>(shell: readonly Shell, route: str, url: str, title: str
 }
 
 // Answers for a page rendered once.
-export function answerFixed(conn: mut Conn, req: readonly Request, f: readonly Fixed): void uses Io, Fail<IoErr> {
+export function answerFixed(conn: mut Conn, req: readonly Request, f: readonly Fixed, cookies: readonly Vec<String>): void uses Io, Fail<IoErr> {
   let r = if (wantsData(req)) {
     Response.new(200, "text/plain; charset=utf-8", f.data.clone())
   } else {
     Response.new(200, "text/html; charset=utf-8", f.doc.clone())
   };
   r.header("Cache-Control", "no-store");
+  setCookies(mut r, cookies);
   conn.write(r);
 }
 
@@ -93,7 +94,7 @@ export function cookieOf(req: readonly Request, name: str): Option<String> {
   for (const part of all.split(";")) {
     const p = part.asStr().trim();
     if (const #Some(eq) = p.indexOf("=") && p.slice(0, eq) == name) {
-      return #Some(p.slice(eq + 1, p.len()).toString());
+      return #Some(decode(p.slice(eq + 1, p.len()), false));
     }
   }
   #None
@@ -101,9 +102,23 @@ export function cookieOf(req: readonly Request, name: str): Option<String> {
 
 // A `Set-Cookie` header's value.
 function cookie(name: str, value: str, maxAge: u32): String {
-  let c = `${name}=${value}; Path=/; HttpOnly; SameSite=Lax`;
+  let c = `${name}=${cookieValue(value)}; Path=/; HttpOnly; SameSite=Lax`;
   if (maxAge > 0) { c.push(`; Max-Age=${maxAge}`.asStr()); }
   c
+}
+
+// A cookie's value as a header may carry it: a byte no cookie value may hold, `%` among them, as
+// `%XX`, so a value from a request cannot end the value and add attributes of its own.
+function cookieValue(value: str): String {
+  const digits = "0123456789ABCDEF".asBytes();
+  let out: Vec<u8> = Vec.new();
+  for (const b of value.asBytes()) {
+    if (b > 0x20 && b < 0x7f && b != b'"' && b != b',' && b != b';' && b != b'\\' && b != b'%') { out.push(b); continue; }
+    out.push(b'%');
+    out.push(digits[(b >> 4) as usize]);
+    out.push(digits[(b & 15) as usize]);
+  }
+  match (String.fromUtf8(out)) { #Some(t) => t, #None => value.toString() }
 }
 
 export function setCookies(r: mut Response, cookies: readonly Vec<String>): void {
@@ -150,7 +165,7 @@ export function contentType(path: str): str {
 
 // Answers with the site's file at the request's path, under `dir`, if there is one. The program a
 // build makes is named for it, so a browser may keep it as long as it likes; other files it checks.
-export function file(conn: mut Conn, req: readonly Request, dir: str): bool uses Io, Fail<IoErr> {
+export function file(conn: mut Conn, req: readonly Request, dir: str, cookies: readonly Vec<String>): bool uses Io, Fail<IoErr> {
   const path = req.path.asStr();
   if (path.includes("..") || path.endsWith("/")) { return false; }
   const found = try {
@@ -160,7 +175,9 @@ export function file(conn: mut Conn, req: readonly Request, dir: str): bool uses
   match (found) {
     #Some(bytes) => {
       const cache = if (path.startsWith("/_fly/")) { "no-cache" } else { "public, max-age=300" };
-      conn.writeFile(contentType(path), cache, bytes);
+      // A file answered with cookies is no one's to keep.
+      const keep = if (cookies.len() > 0) { "no-store" } else { cache };
+      conn.writeFile(contentType(path), keep, cookies, bytes);
       true
     }
     #None => false,

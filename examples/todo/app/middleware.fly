@@ -1,0 +1,13 @@
+import { Http } from "web/request";
+import { decode } from "web/router";
+
+// Runs before every page, endpoint and call answers. The list has no page of its own: its address
+// sends a reader home, where it is. A link that says where it was shared, `?from=…` and nothing
+// after, is remembered for the day, whatever answers it.
+export function middleware(url: str): void uses Http {
+  if (url == "/todos" || url == "/todos/") { Http.redirect("/".toString()); }
+  if (const #Some(at) = url.indexOf("?from=")) {
+    const from = url.slice(at + 6, url.len());
+    if (from.len() > 0) { Http.setCookie("from", decode(from, true).asStr(), 86400); }
+  }
+}

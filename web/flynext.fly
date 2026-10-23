@@ -238,7 +238,7 @@ function sorted(rs: Vec<Route>): Vec<Route> {
 
 // The pages an app may have besides its routes: what shows for an address nothing answers, for a
 // page whose `load` failed, and while a followed link waits for the next page's data.
-type Specials = { notFound: bool; error: bool; loading: bool };
+type Specials = { notFound: bool; error: bool; loading: bool; middleware: bool };
 
 function imports(out: mut String, routes: readonly Vec<Route>, layouts: readonly Vec<String>, names: readonly Vec<String>, sp: readonly Specials): void {
   out.push("import { println } from \"std/io\";\n");
@@ -257,6 +257,7 @@ function imports(out: mut String, routes: readonly Vec<Route>, layouts: readonly
   for (const [i, r] of routes.iter().enumerate()) { routeImport(mut out, r, i); }
   if (sp.notFound) { out.push("import { view as view_nf, initial as initial_nf } from \"../routes/404\";\n"); }
   if (sp.error) { out.push("import { view as view_err, initial as initial_err } from \"../routes/error\";\n"); }
+  if (sp.middleware) { out.push("import { middleware } from \"../middleware\";\n"); }
   for (const [i, l] of layouts.iter().enumerate()) {
     out.push(`import { layout as layout${i} } from "../routes/${l}";\n`.asStr());
   }
@@ -320,31 +321,37 @@ function server(build: str, head: str, routes: readonly Vec<Route>, layouts: rea
   out.push("impl Site {\n  function route(self: readonly Self, req: readonly Request, conn: mut Conn): void uses Io, Fail<IoErr> {\n");
   out.push("    const url = if (req.query.len() > 0) { `${req.path}?${req.query}` } else { req.path.clone() };\n");
   out.push("    if (req.path == \"/_fly/build\") { conn.write(Response.text(200, BUILD)); return; }\n");
-  out.push("    if (req.path.startsWith(\"/_fly/rpc/\") && req.method == \"POST\") { return self.call(req, mut conn); }\n");
+  // The cookies set while answering: the app's middleware's first, which runs before anything but
+  // the app compiler's own files answers, and may send the browser elsewhere instead.
+  out.push("    let set: Vec<String> = Vec.new();\n");
+  if (sp.middleware) {
+    out.push("    if (!req.path.startsWith(\"/_fly/\") || req.path.startsWith(\"/_fly/rpc/\")) {\n");
+    out.push("      if (const #Err(to) = withHttp(req, mut set, () => provide(self.state, () => middleware(url.asStr())))) { return redirect(mut conn, to.asStr(), set); }\n    }\n");
+  }
+  out.push("    if (req.path.startsWith(\"/_fly/rpc/\") && req.method == \"POST\") { return self.call(req, mut conn, mut set); }\n");
   for (const [i, r] of routes.iter().enumerate()) {
     if (r.endpoint) {
-      out.push(`    if (const #Some(p) = matches(${quoted(r.pattern.asStr())}, url.asStr())) { return self.endpoint${i}(req, mut conn, p); }\n`.asStr());
+      out.push(`    if (const #Some(p) = matches(${quoted(r.pattern.asStr())}, url.asStr())) { return self.endpoint${i}(req, mut conn, mut set, p); }\n`.asStr());
     }
   }
   out.push("    if (req.method == \"GET\") {\n");
   for (const [i, r] of routes.iter().enumerate()) {
     if (!r.endpoint) {
-      out.push(`      if (const #Some(p) = matches(${quoted(r.pattern.asStr())}, url.asStr())) { return self.page${i}(req, mut conn, url.asStr(), p); }\n`.asStr());
+      out.push(`      if (const #Some(p) = matches(${quoted(r.pattern.asStr())}, url.asStr())) { return self.page${i}(req, mut conn, mut set, url.asStr(), p); }\n`.asStr());
     }
   }
   // A form a page posted without its program, to the page.
   out.push("    }\n    if (req.method == \"POST\" && const #Some(k) = postedMessage(req)) {\n");
   for (const [i, r] of routes.iter().enumerate()) {
     if (!r.endpoint && r.update) {
-      out.push(`      if (const #Some(p) = matches(${quoted(r.pattern.asStr())}, req.path.asStr())) { return self.post${i}(req, mut conn, k, p); }\n`.asStr());
+      out.push(`      if (const #Some(p) = matches(${quoted(r.pattern.asStr())}, req.path.asStr())) { return self.post${i}(req, mut conn, mut set, k, p); }\n`.asStr());
     }
   }
-  out.push("    }\n    if (file(mut conn, req, self.dir.asStr())) { return; }\n    self.notFound(req, mut conn, url.asStr());\n  }\n\n");
+  out.push("    }\n    if (file(mut conn, req, self.dir.asStr(), set)) { return; }\n    self.notFound(req, mut conn, set, url.asStr());\n  }\n\n");
   for (const [i, r] of routes.iter().enumerate()) {
     if (r.endpoint) {
       // An endpoint: its answer, with the cookies it set, or where it sent the browser.
-      out.push(`  function endpoint${i}(self: readonly Self, req: readonly Request, conn: mut Conn, p: readonly Params): void uses Io, Fail<IoErr> {\n`.asStr());
-      out.push("    let set: Vec<String> = Vec.new();\n");
+      out.push(`  function endpoint${i}(self: readonly Self, req: readonly Request, conn: mut Conn, set: mut Vec<String>, p: readonly Params): void uses Io, Fail<IoErr> {\n`.asStr());
       out.push(`    match (withHttp(req, mut set, () => provide(self.state, () => handle${i}(req, p)))) {\n`.asStr());
       out.push("      #Ok(r) => {\n        let r = r;\n        setCookies(mut r, set);\n        conn.write(r);\n      }\n");
       out.push("      #Err(to) => redirect(mut conn, to.asStr(), set),\n    }\n  }\n\n");
@@ -352,11 +359,10 @@ function server(build: str, head: str, routes: readonly Vec<Route>, layouts: rea
     }
     // A page: its model made — by `load`, on the server, with `Http` answered from the request — and
     // shown, or where its `load` sent the browser instead.
-    out.push(`  function page${i}(self: readonly Self, req: readonly Request, conn: mut Conn, url: str, p: readonly Params): void uses Io, Fail<IoErr> {\n`.asStr());
+    out.push(`  function page${i}(self: readonly Self, req: readonly Request, conn: mut Conn, set: mut Vec<String>, url: str, p: readonly Params): void uses Io, Fail<IoErr> {\n`.asStr());
     if (fixedRoute(r)) {
-      out.push(`    if (url == ${quoted(r.pattern.asStr())}) { return answerFixed(mut conn, req, self.fixed[${i}]); }\n`.asStr());
+      out.push(`    if (url == ${quoted(r.pattern.asStr())}) { return answerFixed(mut conn, req, self.fixed[${i}], set); }\n`.asStr());
     }
-    out.push("    let set: Vec<String> = Vec.new();\n");
     const made = if (r.load) {
       if (r.loadParams) { `provide(self.state, () => load${i}(p))` } else { `provide(self.state, () => load${i}())` }
     } else { `initial${i}()` };
@@ -366,42 +372,41 @@ function server(build: str, head: str, routes: readonly Vec<Route>, layouts: rea
       else if (r.loadMissing) { `try { #Page(${made}) } catch (e) { match (e) { #NotFound => #Missing, _ => #Broken } }` }
       else { `try { #Page(${made}) } catch (_) { #Broken }` };
     out.push(`    const got: Result<Loaded<Model${i}>, String> = withHttp(req, mut set, () => ${found});\n`.asStr());
-    out.push(`    const m = match (got) {\n      #Ok(#Page(m)) => m,\n      #Ok(#Missing) => return self.notFound(req, mut conn, url),\n      #Ok(#Broken) => return self.failed(req, mut conn, url),\n      #Err(to) => return redirect(mut conn, to.asStr(), set),\n    };\n`.asStr());
+    out.push(`    const m = match (got) {\n      #Ok(#Page(m)) => m,\n      #Ok(#Missing) => return self.notFound(req, mut conn, set, url),\n      #Ok(#Broken) => return self.failed(req, mut conn, set, url),\n      #Err(to) => return redirect(mut conn, to.asStr(), set),\n    };\n`.asStr());
     out.push(`    respond(mut conn, req, self.shell, 200, ${quoted(r.name.asStr())}, url, ${titleOf(r, i)}, stringify(m).asStr(), set, ${wrapped(r, i, layouts, "url")});\n  }\n\n`.asStr());
     if (r.update) {
       // The same page, posted to: its update run on the server, and the browser sent on.
-      out.push(`  function post${i}(self: readonly Self, req: readonly Request, conn: mut Conn, k: usize, p: readonly Params): void uses Io, Fail<IoErr> {\n`.asStr());
-      out.push("    let set: Vec<String> = Vec.new();\n    const posted = fields(req.body.asStr());\n    const url = req.path.asStr();\n");
+      out.push(`  function post${i}(self: readonly Self, req: readonly Request, conn: mut Conn, set: mut Vec<String>, k: usize, p: readonly Params): void uses Io, Fail<IoErr> {\n`.asStr());
+      out.push("    const posted = fields(req.body.asStr());\n    const url = req.path.asStr();\n");
       out.push(`    const got: Result<Loaded<String>, String> = withHttp(req, mut set, () => match (${found}) {\n`.asStr());
       out.push(`      #Page(m) => #Page(provide(self.state, () => submitted(m, k, posted, url, view${i}, update${i}))),\n      #Missing => #Missing,\n      #Broken => #Broken,\n    });\n`.asStr());
-      out.push("    match (got) {\n      #Ok(#Page(to)) => redirect(mut conn, to.asStr(), set),\n      #Ok(#Missing) => self.notFound(req, mut conn, url),\n      #Ok(#Broken) => self.failed(req, mut conn, url),\n      #Err(to) => redirect(mut conn, to.asStr(), set),\n    }\n  }\n\n");
+      out.push("    match (got) {\n      #Ok(#Page(to)) => redirect(mut conn, to.asStr(), set),\n      #Ok(#Missing) => self.notFound(req, mut conn, set, url),\n      #Ok(#Broken) => self.failed(req, mut conn, set, url),\n      #Err(to) => redirect(mut conn, to.asStr(), set),\n    }\n  }\n\n");
     }
   }
   // A page that failed.
-  out.push("  function failed(self: readonly Self, req: readonly Request, conn: mut Conn, url: str): void uses Io, Fail<IoErr> {\n");
+  out.push("  function failed(self: readonly Self, req: readonly Request, conn: mut Conn, set: readonly Vec<String>, url: str): void uses Io, Fail<IoErr> {\n");
   if (sp.error) {
     out.push("    const m = initial_err();\n");
-    out.push(`    respond(mut conn, req, self.shell, 500, "error", url, "Something went wrong", stringify(m).asStr(), Vec.new(), () => ${aroundTop(layouts, "url", "view_err(m)")});\n`.asStr());
+    out.push(`    respond(mut conn, req, self.shell, 500, "error", url, "Something went wrong", stringify(m).asStr(), set, () => ${aroundTop(layouts, "url", "view_err(m)")});\n`.asStr());
   } else {
-    out.push("    conn.write(Response.text(500, \"something went wrong\\n\"));\n");
+    out.push("    let r = Response.text(500, \"something went wrong\\n\");\n    setCookies(mut r, set);\n    conn.write(r);\n");
   }
   out.push("  }\n\n");
   // Not found.
-  out.push("  function notFound(self: readonly Self, req: readonly Request, conn: mut Conn, url: str): void uses Io, Fail<IoErr> {\n");
+  out.push("  function notFound(self: readonly Self, req: readonly Request, conn: mut Conn, set: readonly Vec<String>, url: str): void uses Io, Fail<IoErr> {\n");
   if (sp.notFound) {
     out.push("    const m = initial_nf();\n");
-    out.push(`    respond(mut conn, req, self.shell, 404, "404", url, "Not found", stringify(m).asStr(), Vec.new(), () => ${aroundNotFound(layouts, "url")});\n`.asStr());
+    out.push(`    respond(mut conn, req, self.shell, 404, "404", url, "Not found", stringify(m).asStr(), set, () => ${aroundNotFound(layouts, "url")});\n`.asStr());
   } else {
-    out.push("    conn.write(Response.text(404, \"not found\\n\"));\n");
+    out.push("    let r = Response.text(404, \"not found\\n\");\n    setCookies(mut r, set);\n    conn.write(r);\n");
   }
   out.push("  }\n\n");
   // Calls.
-  out.push("  function call(self: readonly Self, req: readonly Request, conn: mut Conn): void uses Io, Fail<IoErr> {\n");
+  out.push("  function call(self: readonly Self, req: readonly Request, conn: mut Conn, set: mut Vec<String>): void uses Io, Fail<IoErr> {\n");
   out.push("    const op = req.path.asStr().slice(10, req.path.len());\n");
-  out.push("    let set: Vec<String> = Vec.new();\n");
   out.push("    const r = withHttp(req, mut set, () => try { #Ok(provide(self.state, () => answer(op, req.body.asStr()))) } catch (_) { #Err(#BadCall) });\n");
   out.push("    match (r) {\n      #Ok(#Ok(json)) => {\n        let r = Response.json(json);\n        setCookies(mut r, set);\n        conn.write(r);\n      }\n");
-  out.push("      #Ok(#Err(_)) => conn.write(Response.text(400, \"bad call\\n\")),\n      #Err(to) => redirect(mut conn, to.asStr(), set),\n    }\n  }\n}\n\n");
+  out.push("      #Ok(#Err(_)) => {\n        let r = Response.text(400, \"bad call\\n\");\n        setCookies(mut r, set);\n        conn.write(r);\n      }\n      #Err(to) => redirect(mut conn, to.asStr(), set),\n    }\n  }\n}\n\n");
   // The answers to calls.
   let row: Vec<String> = Vec.new();
   for (const e of effs) { row.push(e.name.clone()); }
@@ -550,7 +555,7 @@ export function main(args: readonly String[]): void uses Io {
     if (n == "layout" || n.asStr().endsWith("/layout")) { layouts.push(n.clone()); }
   }
   let rs: Vec<Route> = Vec.new();
-  let sp: Specials = { notFound: false, error: false, loading: false };
+  let sp: Specials = { notFound: false, error: false, loading: false, middleware: exists(`${app}/middleware.fly`.asStr()) };
   for (const n of names) {
     if (layouts.iter().some((l) => l == n)) { continue; }
     if (n == "404") { sp.notFound = true; continue; }

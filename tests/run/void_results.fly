@@ -1,0 +1,31 @@
+// expect: ok, refused, ok
+// expect: checked 2
+// A result whose success carries nothing: made directly, captured from a body that returns
+// nothing, and unwrapped back into a failure.
+import { println } from "std/io";
+
+type Refusal = #Refused;
+
+function check(n: u32): void uses Fail<Refusal> {
+  if (n > 3) { throw #Refused; }
+}
+
+function nothing(): void {}
+
+function wrap<T>(v: T): Result<T, Refusal> { #Ok(v) }
+
+function show(r: Result<void, Refusal>): str {
+  match (r) { #Ok => "ok", #Err(_) => "refused" }
+}
+
+export function main(): void uses Io {
+  const a: Result<void, Refusal> = wrap(nothing());
+  const b: Result<void, Refusal> = Fail.capture(() => check(7));
+  const c: Result<void, Refusal> = Fail.capture(() => check(1));
+  println(`${show(a)}, ${show(b)}, ${show(c)}`);
+  let checked: u32 = 0;
+  const all: Result<void, Refusal> = Fail.capture(() => {
+    for (const n of [1, 2]) { Fail.capture(() => check(n)).unwrap(); checked += 1; }
+  });
+  match (all) { #Ok => println(`checked ${checked}`), #Err(_) => println("refused") }
+}
