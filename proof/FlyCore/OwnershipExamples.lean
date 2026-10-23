@@ -1081,6 +1081,59 @@ example : ∀ n, match eval [] [] n [.abort .fail 0] .empty [] fieldBorrow with
     | (.abort _ _, σ') => ∀ l, σ'.mem l = none :=
   program_ok (fun _ h => by simp at h) fieldBorrow_typed
 
+/-- `let p = ((1, 2), 3); { const r = mut p.0.1; *r = p.0.0 + p.1 + 38 }; p.0.1`: a field two steps in
+borrowed for a while, the fields beside it at each step read meanwhile — as the calculus writes it, a
+borrow of the field of a borrow of a field; 42. -/
+def deepField : Expr :=
+  .let_ "a" (.pair .int .int) (.pair (.lit 1) (.lit 2))
+    (.let_ "p" (.pair (.pair .int .int) .int) (.pair (.move "a") (.lit 3))
+      (.let_ "u" .int
+        (.lend "q" .mut (fieldOf true "p")
+          (.lend "r" .mut (fieldOf false "q")
+            (.let_ "s" .int (.add (.read (.fst (var "q"))) (.read (.snd (var "p"))))
+              (.let_ "t" .int (.add (.read (var "s")) (.lit 38))
+                (.write (var "r") (.read (var "t")))))))
+        (.atom (.read (.snd (.fst (var "p")))))))
+
+example : value (eval [] [] 40 [] .empty [] deepField) = some 42 := by
+  run [deepField, fieldOf]
+example : freed (eval [] [] 40 [] .empty [] deepField) := by
+  run [deepField, fieldOf]
+
+theorem deepField_typed : Typed [] [] [] deepField .int [] [.fail] := by
+  have hin : Typed [] [] [("r", .ref .mut .int), ("q", .half false .int .int), ("p", .half true (.pair .int .int) .int),
+        ("a", .own (.pair .int .int) false)]
+      (.let_ "s" .int (.add (.read (.fst (var "q"))) (.read (.snd (var "p"))))
+        (.let_ "t" .int (.add (.read (var "s")) (.lit 38)) (.write (var "r") (.read (var "t")))))
+      .int [("r", .ref .mut .int), ("q", .half false .int .int), ("p", .half true (.pair .int .int) .int),
+        ("a", .own (.pair .int .int) false)] [.fail] :=
+    .let_ (live := true) rfl (.add (.read (.fst (.half rfl rfl))) (.read (.snd (.half rfl rfl))))
+      (.let_ (live := true) rfl (.add (.read (.own rfl)) .lit) (.write (.read (.own rfl)) (.ref (m := .mut) rfl)))
+  have hr := Typed.lendField (F := []) (O := [])
+    (Γ := [("q", .ref .mut (.pair .int .int)), ("p", .half true (.pair .int .int) .int), ("a", .own (.pair .int .int) false)])
+    (x := "r") (y := "q") (s := .ref .mut (.pair .int .int)) (A := .int) (B := .int) (t := false) (m := .mut)
+    (r := [.fail]) (Γb := [("q", .half false .int .int), ("p", .half true (.pair .int .int) .int), ("a", .own (.pair .int .int) false)])
+    rfl rfl rfl (.inr (.inl ⟨_, rfl⟩)) rfl (fun _ => rfl) (by simpa [setSlot] using hin)
+  simp only [thaw] at hr
+  have hq := Typed.lendField (F := []) (O := [])
+    (Γ := [("p", .own (.pair (.pair .int .int) .int) true), ("a", .own (.pair .int .int) false)])
+    (x := "q") (y := "p") (s := .own (.pair (.pair .int .int) .int) true) (A := .pair .int .int) (B := .int) (t := true)
+    (m := .mut) (r := [.fail]) (Γb := [("p", .half true (.pair .int .int) .int), ("a", .own (.pair .int .int) false)])
+    rfl rfl rfl (.inl ⟨_, rfl⟩) rfl (fun _ => rfl) (by simpa [setSlot] using hr)
+  simp only [thaw] at hq
+  exact .let_ (live := false) rfl (.pair .lit .lit)
+    (.let_ (live := true) rfl (.pair (.move rfl rfl) .lit)
+      (.let_ (live := true) rfl (by simpa [setSlot] using hq) (.atom (.read (.snd (.fst (.own rfl)))))))
+
+example : ∀ n, match eval [] [] n [.abort .fail 0] .empty [] deepField with
+    | (.stuck, _) => False
+    | (.susp _ _ _ _ _, _) => False
+    | (.timeout, _) => True
+    | (.panic, _) => True
+    | (.val v, σ') => ∃ L, VT [] [] σ' .int v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
+    | (.abort _ _, σ') => ∀ l, σ'.mem l = none :=
+  program_ok (fun _ h => by simp at h) deepField_typed
+
 /-! An arm that resumes in its midst, and goes on after the rest of its `handle`. -/
 
 /-- `Tick`, whose operation takes nothing and gives an integer. -/
