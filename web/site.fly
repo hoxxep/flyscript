@@ -14,11 +14,11 @@ import { Http } from "./request";
 // development, the build it was made by.
 export type Shell = { head: String; build: String };
 
-// What a page's program is told of a page: the route that answers it, its address, its title, and
-// the state its view starts from, as JSON. One line each, the title a JSON string, so nothing in it
-// ends a line; an address a request came with has none.
-export function arrival(route: str, url: str, title: str, state: str): String {
-  `${route}\n${url}\n${stringify(title)}\n${state}`
+// What a page's program is told of a page: the route that answers it, its address, its title and
+// description, and the state its view starts from, as JSON. One line each, the title and the
+// description JSON strings, so nothing in them ends a line; an address a request came with has none.
+export function arrival(route: str, url: str, title: str, description: str, state: str): String {
+  `${route}\n${url}\n${stringify(title)}\n${stringify(description)}\n${state}`
 }
 
 // Whether the request is a page's program asking for what a page shows, not a browser for the page.
@@ -28,10 +28,23 @@ export function wantsData(req: readonly Request): bool {
 
 // A page as a browser gets it: the view rendered, what the page's program starts from, and the
 // program, which takes the page over (web/dom.fly).
-export function document<M>(shell: readonly Shell, route: str, url: str, title: str, state: str, view: () => void uses Ui<M>): String {
+export function document<M>(shell: readonly Shell, route: str, url: str, title: str, description: str, state: str, view: () => void uses Ui<M>): String {
   let out = "<!doctype html>\n<html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>".toString();
   escape(title, mut out);
   out.push("</title>");
+  // What a search engine or a link preview shows of the page.
+  if (description.len() > 0) {
+    out.push("<meta name=\"description\" content=\"");
+    escape(description, mut out);
+    out.push("\"><meta property=\"og:description\" content=\"");
+    escape(description, mut out);
+    out.push("\">");
+  }
+  if (title.len() > 0) {
+    out.push("<meta property=\"og:title\" content=\"");
+    escape(title, mut out);
+    out.push("\">");
+  }
   out.push(shell.head.asStr());
   out.push("<link rel=\"modulepreload\" href=\"/_fly/flynext.js\"></head><body><div id=\"app\">");
   html(mut out, view);
@@ -39,7 +52,7 @@ export function document<M>(shell: readonly Shell, route: str, url: str, title: 
   // `<\/` in JSON, which reads it as the same.
   // The form a button posts its message with, without the page's program (web/ui.fly's `posting`).
   out.push("</div><form id=\"_fly\" method=\"post\" hidden></form><script type=\"text/plain\" id=\"fly-page\">");
-  out.push(arrival(route, url, title, state).asStr().replaceAll("</", "<\\/").asStr());
+  out.push(arrival(route, url, title, description, state).asStr().replaceAll("</", "<\\/").asStr());
   out.push("</script><script type=\"module\">import { start } from \"/_fly/flynext.js\"; start(\"/_fly/app.wasm\");</script>");
   if (shell.build.len() > 0) {
     // In development a page reloads once the server answers for another build.
@@ -53,11 +66,11 @@ export function document<M>(shell: readonly Shell, route: str, url: str, title: 
 
 // Answers for a page: its data, to a page's program, or the page, to a browser; with the cookies
 // its `load` set.
-export function respond<M>(conn: mut Conn, req: readonly Request, shell: readonly Shell, status: u16, route: str, url: str, title: str, state: str, cookies: readonly Vec<String>, view: () => void uses Ui<M>): void uses Io, Fail<IoErr> {
+export function respond<M>(conn: mut Conn, req: readonly Request, shell: readonly Shell, status: u16, route: str, url: str, title: str, description: str, state: str, cookies: readonly Vec<String>, view: () => void uses Ui<M>): void uses Io, Fail<IoErr> {
   let r = if (wantsData(req)) {
-    Response.new(status, "text/plain; charset=utf-8", arrival(route, url, title, state))
+    Response.new(status, "text/plain; charset=utf-8", arrival(route, url, title, description, state))
   } else {
-    Response.new(status, "text/html; charset=utf-8", document(shell, route, url, title, state, view))
+    Response.new(status, "text/html; charset=utf-8", document(shell, route, url, title, description, state, view))
   };
   r.header("Cache-Control", "no-store");
   setCookies(mut r, cookies);
@@ -70,8 +83,8 @@ export enum Loaded<M> { #Page(M), #Missing, #Broken }
 // A page that is the same for every request, rendered once: as a browser gets it, and as its data.
 export type Fixed = { doc: String; data: String };
 
-export function fixed<M>(shell: readonly Shell, route: str, url: str, title: str, state: str, view: () => void uses Ui<M>): Fixed {
-  { doc: document(shell, route, url, title, state, view), data: arrival(route, url, title, state) }
+export function fixed<M>(shell: readonly Shell, route: str, url: str, title: str, description: str, state: str, view: () => void uses Ui<M>): Fixed {
+  { doc: document(shell, route, url, title, description, state, view), data: arrival(route, url, title, description, state) }
 }
 
 // Answers for a page rendered once.

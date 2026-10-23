@@ -414,6 +414,9 @@ fn todo_site_serves_and_runs() {
     assert!(page.contains("<a href=\"/todos/1\" class=\"title\">Write the language</a>") && page.contains("<script type=\"text/plain\" id=\"fly-page\">"), "{page}");
     let item = String::from_utf8(get(port, "/todos/2")).unwrap();
     assert!(item.starts_with("HTTP/1.1 200") && item.contains("<h1>Compile it to WebAssembly</h1>"), "{item}");
+    // A page's description, a function of its model, in its head for search engines and link previews.
+    assert!(item.contains("<meta name=\"description\" content=\"Done: Compile it to WebAssembly\">")
+        && item.contains("<meta property=\"og:title\" content=\"Compile it to WebAssembly\">"), "{item}");
     assert!(String::from_utf8(get(port, "/todos/99")).unwrap().starts_with("HTTP/1.1 404"), "an item that is not there is found");
     let failed = String::from_utf8(get(port, "/todos/abc")).unwrap();
     assert!(failed.starts_with("HTTP/1.1 500") && failed.contains("<h1>Something went wrong</h1>"), "a page whose load failed is not the error page: {failed}");

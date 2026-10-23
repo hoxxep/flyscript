@@ -1,6 +1,6 @@
 # FlyNext: a web framework, in Flyscript
 
-What Next.js and React are for a JavaScript site, in one Flyscript app: pages rendered on the server and taken over in the browser, routes from files, layouts, data loaded on the server with the request's headers and cookies, middleware, redirects, endpoints, server functions called from the page as if they were local, links followed without loading a page, timers, and forms that work before the page's program has loaded, or without it. The server is native code; the browser runs one WebAssembly program for every page of the site. [examples/todo](../examples/todo/) is an app built with it.
+What Next.js and React are for a JavaScript site, in one Flyscript app: pages rendered on the server and taken over in the browser, routes from files, layouts, data loaded on the server with the request's headers and cookies, titles and descriptions for search engines and link previews, middleware, redirects, endpoints, server functions called from the page as if they were local, links followed without loading a page, timers, and forms that work before the page's program has loaded, or without it. The server is native code; the browser runs one WebAssembly program for every page of the site. [examples/todo](../examples/todo/) is an app built with it.
 
 ```sh
 web/flynext dev app            # serves the app on :3000, rebuilding and reloading pages as it changes
@@ -30,13 +30,14 @@ app/
   head.html          what every page's <head> holds, if not the stylesheet /style.css
 ```
 
-**A page** exports its `Model` and `Msg` types, a `view` that performs `Ui<Msg>`, and how its model is made: `load`, which the server runs — given the address's `Params`, performing the app's effects, and failing with `#NotFound` for an address it has nothing for, which is then the 404 page, and with anything else for a page that failed, which is then the error page, with the status 500 — or `initial`, which needs nothing. A page made by `initial` at an address with no parameters is the same for every request: the server renders it once, as it starts, and answers with that. It may export an `update`, which changes the model for each message its view gives, and a `title`, a constant or a function of the model.
+**A page** exports its `Model` and `Msg` types, a `view` that performs `Ui<Msg>`, and how its model is made: `load`, which the server runs — given the address's `Params`, performing the app's effects, and failing with `#NotFound` for an address it has nothing for, which is then the 404 page, and with anything else for a page that failed, which is then the error page, with the status 500 — or `initial`, which needs nothing. A page made by `initial` at an address with no parameters is the same for every request: the server renders it once, as it starts, and answers with that. It may export an `update`, which changes the model for each message its view gives, and a `title` and a `description`, each a constant or a function of the model: the description goes in the page's head as what a search engine or a link preview shows (`description`, `og:description`, with the title as `og:title`), and following a link changes both, as it changes the title.
 
 ```ts
 export type Model = { todo: Todo; draft: String };
 export type Msg = #Draft | #Rename;
 
 export function title(m: readonly Model): String { m.todo.title.clone() }
+export function description(m: readonly Model): String { `To do: ${m.todo.title}` }
 
 export function load(p: readonly Params): Model uses Todos, Fail<#NotFound> { … }
 

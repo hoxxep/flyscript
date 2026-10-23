@@ -35,7 +35,7 @@ extern "C" function fly_initial(): u32;
 extern "C" function fly_take(out: u8*, len: u32): void;
 // The page has become another: its address, pushed onto the history unless it came from it, and
 // its title.
-extern "C" function fly_arrived(url: u8*, ulen: u32, title: u8*, tlen: u32, push: bool): void;
+extern "C" function fly_arrived(url: u8*, ulen: u32, title: u8*, tlen: u32, description: u8*, dlen: u32, push: bool): void;
 
 // ---- strings across ----
 
@@ -82,27 +82,29 @@ export function get(url: str): String {
 }
 
 // A page as the server describes it to the program (web/site.fly): the route that answers it, its
-// address, its title, and the state its view starts from, as JSON.
-export type Arrival = { route: String; url: String; title: String; state: String };
+// address, its title and description, and the state its view starts from, as JSON.
+export type Arrival = { route: String; url: String; title: String; description: String; state: String };
 
-// The server's description of a page, a line each, the title a JSON string.
+// The server's description of a page, a line each, the title and description JSON strings.
 export function arrival(text: str): Arrival {
   let parts: Vec<String> = Vec.new();
   let rest = text;
-  for (const _ of 0..3) {
+  for (const _ of 0..4) {
     const end = match (rest.indexOf("\n")) { #Some(e) => e, #None => rest.len() };
     parts.push(rest.slice(0, end).toString());
     rest = if (end < rest.len()) { rest.slice(end + 1, rest.len()) } else { "" };
   }
   const title: String = try { parse(parts[2].asStr()) } catch (_) { String.new() };
-  { route: parts[0].clone(), url: parts[1].clone(), title, state: rest.toString() }
+  const description: String = try { parse(parts[3].asStr()) } catch (_) { String.new() };
+  { route: parts[0].clone(), url: parts[1].clone(), title, description, state: rest.toString() }
 }
 
-// The page is now the one at `url`, called `title`.
-export function arrived(url: str, title: str, push: bool): void {
+// The page is now the one at `url`, called `title`, described as `description`.
+export function arrived(url: str, title: str, description: str, push: bool): void {
   let u = bytes(url);
   let t = bytes(title);
-  unsafe { fly_arrived(addr(mut u), url.len() as u32, addr(mut t), title.len() as u32, push); }
+  let d = bytes(description);
+  unsafe { fly_arrived(addr(mut u), url.len() as u32, addr(mut t), title.len() as u32, addr(mut d), description.len() as u32, push); }
 }
 
 // ---- the DOM ----

@@ -114,6 +114,19 @@ export async function start(url, root = document.getElementById("app")) {
     happened(`\u0001\0${a.pathname}${a.search}\0${1}`);
   });
   addEventListener("popstate", () => happened(`\u0001\0${location.pathname}${location.search}\0${0}`));
+  // The head's description of the page, as the server writes it (web/site.fly): what a search engine
+  // or a link preview shows of it.
+  const describe = (title, description) => {
+    const meta = (key, value, content) => {
+      let m = document.head.querySelector(`meta[${key}="${value}"]`);
+      if (content === "") { m?.remove(); return; }
+      if (!m) { m = document.createElement("meta"); m.setAttribute(key, value); document.head.append(m); }
+      m.setAttribute("content", content);
+    };
+    meta("name", "description", description);
+    meta("property", "og:description", description);
+    meta("property", "og:title", title);
+  };
   // What a page shows is asked for as soon as a link to it is pointed at, and taken once.
   const prefetched = new Map();
   const ask = (url) => fetch(url, { headers: { "X-Fly-Data": "1" } }).then((r) => r.text());
@@ -205,11 +218,13 @@ export async function start(url, root = document.getElementById("app")) {
       }
       return keep(text);
     }),
-    fly_arrived: (u, ul, t, tl, push) => {
+    fly_arrived: (u, ul, t, tl, d, dl, push) => {
       const url = str(u, ul);
       // What happened on the page before is not the new page's: its messages are numbered anew.
       for (let i = events.length - 1; i >= 0; i--) if (!events[i].startsWith("\u0001")) events.splice(i, 1);
-      document.title = str(t, tl);
+      const title = str(t, tl);
+      document.title = title;
+      describe(title, str(d, dl));
       if (push) { history.pushState(null, "", url); scrollTo(0, 0); }
       globalThis.flyArrivals = (globalThis.flyArrivals ?? 0) + 1;
     },

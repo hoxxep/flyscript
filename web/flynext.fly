@@ -27,9 +27,11 @@ type Route = {
   loadMissingOnly: bool;
   loadMissing: bool;
   initial: bool;
-  // `title`: a function of the model, or a constant.
+  // `title` and `description`: each a function of the model, or a constant.
   title: bool;
   titleFn: bool;
+  description: bool;
+  descriptionFn: bool;
   update: bool;
   // An endpoint: it answers requests itself, by `handle`, and has no view.
   endpoint: bool;
@@ -139,7 +141,7 @@ function route(app: str, name: str, layouts: readonly Vec<String>): Route uses I
   let r: Route = {
     name: name.toString(), pattern: patternOf(name), load: false, loadParams: false, loadFails: false,
     loadMissingOnly: false, loadMissing: false, initial: false,
-    title: false, titleFn: false, update: fnOf(m, "update").isSome(), endpoint: false, layouts: layoutsOf(name, layouts),
+    title: false, titleFn: false, description: false, descriptionFn: false, update: fnOf(m, "update").isSome(), endpoint: false, layouts: layoutsOf(name, layouts),
   };
   if (fnOf(m, "handle").isSome()) {
     r.endpoint = true;
@@ -163,6 +165,12 @@ function route(app: str, name: str, layouts: readonly Vec<String>): Route uses I
     r.titleFn = true;
   } else if (exportsConst(m, "title")) {
     r.title = true;
+  }
+  if (fnOf(m, "description").isSome()) {
+    r.description = true;
+    r.descriptionFn = true;
+  } else if (exportsConst(m, "description")) {
+    r.description = true;
   }
   r
 }
@@ -271,6 +279,7 @@ function routeImport(out: mut String, r: readonly Route, i: usize): void {
   let parts: Vec<String> = [`view as view${i}`, `Model as Model${i}`];
   if (r.load) { parts.push(`load as load${i}`); } else { parts.push(`initial as initial${i}`); }
   if (r.title) { parts.push(`title as title${i}`); }
+  if (r.description) { parts.push(`description as description${i}`); }
   if (r.update) { parts.push(`update as update${i}`); }
   out.push(`import { ${parts.join(", ")} } from "../routes/${r.name}";\n`.asStr());
 }
@@ -309,6 +318,10 @@ function wrapped(r: readonly Route, i: usize, layouts: readonly Vec<String>, pat
 
 function titleOf(r: readonly Route, i: usize): String {
   if (!r.title) { "\"\"".toString() } else if (r.titleFn) { `title${i}(m).asStr()` } else { `title${i}` }
+}
+
+function descriptionOf(r: readonly Route, i: usize): String {
+  if (!r.description) { "\"\"".toString() } else if (r.descriptionFn) { `description${i}(m).asStr()` } else { `description${i}` }
 }
 
 function server(build: str, head: str, routes: readonly Vec<Route>, layouts: readonly Vec<String>, effs: readonly Vec<Effect>, names: readonly Vec<String>, sp: readonly Specials): String {
@@ -373,7 +386,7 @@ function server(build: str, head: str, routes: readonly Vec<Route>, layouts: rea
       else { `try { #Page(${made}) } catch (_) { #Broken }` };
     out.push(`    const got: Result<Loaded<Model${i}>, String> = withHttp(req, mut set, () => ${found});\n`.asStr());
     out.push(`    const m = match (got) {\n      #Ok(#Page(m)) => m,\n      #Ok(#Missing) => return self.notFound(req, mut conn, set, url),\n      #Ok(#Broken) => return self.failed(req, mut conn, set, url),\n      #Err(to) => return redirect(mut conn, to.asStr(), set),\n    };\n`.asStr());
-    out.push(`    respond(mut conn, req, self.shell, 200, ${quoted(r.name.asStr())}, url, ${titleOf(r, i)}, stringify(m).asStr(), set, ${wrapped(r, i, layouts, "url")});\n  }\n\n`.asStr());
+    out.push(`    respond(mut conn, req, self.shell, 200, ${quoted(r.name.asStr())}, url, ${titleOf(r, i)}, ${descriptionOf(r, i)}, stringify(m).asStr(), set, ${wrapped(r, i, layouts, "url")});\n  }\n\n`.asStr());
     if (r.update) {
       // The same page, posted to: its update run on the server, and the browser sent on.
       out.push(`  function post${i}(self: readonly Self, req: readonly Request, conn: mut Conn, set: mut Vec<String>, k: usize, p: readonly Params): void uses Io, Fail<IoErr> {\n`.asStr());
@@ -387,7 +400,7 @@ function server(build: str, head: str, routes: readonly Vec<Route>, layouts: rea
   out.push("  function failed(self: readonly Self, req: readonly Request, conn: mut Conn, set: readonly Vec<String>, url: str): void uses Io, Fail<IoErr> {\n");
   if (sp.error) {
     out.push("    const m = initial_err();\n");
-    out.push(`    respond(mut conn, req, self.shell, 500, "error", url, "Something went wrong", stringify(m).asStr(), set, () => ${aroundTop(layouts, "url", "view_err(m)")});\n`.asStr());
+    out.push(`    respond(mut conn, req, self.shell, 500, "error", url, "Something went wrong", "", stringify(m).asStr(), set, () => ${aroundTop(layouts, "url", "view_err(m)")});\n`.asStr());
   } else {
     out.push("    let r = Response.text(500, \"something went wrong\\n\");\n    setCookies(mut r, set);\n    conn.write(r);\n");
   }
@@ -396,7 +409,7 @@ function server(build: str, head: str, routes: readonly Vec<Route>, layouts: rea
   out.push("  function notFound(self: readonly Self, req: readonly Request, conn: mut Conn, set: readonly Vec<String>, url: str): void uses Io, Fail<IoErr> {\n");
   if (sp.notFound) {
     out.push("    const m = initial_nf();\n");
-    out.push(`    respond(mut conn, req, self.shell, 404, "404", url, "Not found", stringify(m).asStr(), set, () => ${aroundNotFound(layouts, "url")});\n`.asStr());
+    out.push(`    respond(mut conn, req, self.shell, 404, "404", url, "Not found", "", stringify(m).asStr(), set, () => ${aroundNotFound(layouts, "url")});\n`.asStr());
   } else {
     out.push("    let r = Response.text(404, \"not found\\n\");\n    setCookies(mut r, set);\n    conn.write(r);\n");
   }
@@ -433,7 +446,7 @@ function server(build: str, head: str, routes: readonly Vec<Route>, layouts: rea
   for (const [i, r] of routes.iter().enumerate()) {
     if (fixedRoute(r)) {
       const url = quoted(r.pattern.asStr());
-      out.push(`// The page at ${r.pattern}, the same for every request.\nfunction fixed${i}(shell: readonly Shell): Fixed {\n  const m = initial${i}();\n  fixed(shell, ${quoted(r.name.asStr())}, ${url}, ${titleOf(r, i)}, stringify(m).asStr(), ${wrapped(r, i, layouts, url.asStr())})\n}\n\n`.asStr());
+      out.push(`// The page at ${r.pattern}, the same for every request.\nfunction fixed${i}(shell: readonly Shell): Fixed {\n  const m = initial${i}();\n  fixed(shell, ${quoted(r.name.asStr())}, ${url}, ${titleOf(r, i)}, ${descriptionOf(r, i)}, stringify(m).asStr(), ${wrapped(r, i, layouts, url.asStr())})\n}\n\n`.asStr());
     }
   }
   out.push("export function main(args: readonly String[]): void uses Io {\n");
@@ -512,7 +525,7 @@ function client(routes: readonly Vec<Route>, layouts: readonly Vec<String>, effs
   }
   out.push("    const text = get(go.url.asStr());\n    at = arrival(text.asStr());\n");
   // Where the page arrived, which is not where it went if the server sent it on.
-  out.push("    arrived(at.url.asStr(), at.title.asStr(), go.push);\n  }\n}\n\n");
+  out.push("    arrived(at.url.asStr(), at.title.asStr(), at.description.asStr(), go.push);\n  }\n}\n\n");
   out.push("function state<M extends FromJson>(json: str): M {\n  try { parse(json) } catch (_) { panic(\"the page's state is not what it should be\") }\n}\n");
   out
 }

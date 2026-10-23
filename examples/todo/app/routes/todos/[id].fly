@@ -11,6 +11,9 @@ export type Model = { todo: Todo; draft: String; error: String };
 export type Msg = #Draft | #Rename | #Toggle | #Remove;
 
 export function title(m: readonly Model): String { m.todo.title.clone() }
+export function description(m: readonly Model): String {
+  if (m.todo.done) { `Done: ${m.todo.title}` } else { `To do: ${m.todo.title}` }
+}
 
 export function load(p: readonly Params): Model uses Todos, Fail<#NotFound | #BadAddress> {
   const id: u32 = match (parseInt(p.get("id"))) { #Some(n) => n as u32, #None => throw #BadAddress };

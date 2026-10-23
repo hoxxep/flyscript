@@ -61,6 +61,8 @@ const check = (ok, what) => { if (!ok) throw new Error(`FAILED: ${what}`); conso
   check(await page.evaluate(() => globalThis.stillHere === true), "a link is followed without loading a page");
   check(await page.evaluate(() => document.querySelector("nav") === globalThis.oldNav), "the layout around both pages is kept as it was");
   check((await page.title()) === "Ship the web framework", "the title is the page's");
+  check(await page.evaluate(() => document.querySelector("meta[name=description]")?.content) === "To do: Ship the web framework",
+    "so is the description, which a link preview shows");
   await shoot(page, "item");
   await page.fill("input", "Ship the web framework, completely");
   await page.click("button[type=submit]");
@@ -68,6 +70,8 @@ const check = (ok, what) => { if (!ok) throw new Error(`FAILED: ${what}`); conso
   check(true, "renaming asks the server, and shows the new name");
   await page.click("a.back");
   await page.waitForFunction(() => location.pathname === "/" && document.querySelectorAll("li").length === 4, null, { timeout: 5000 });
+  check(await page.evaluate(() => document.querySelector("meta[property='og:description']")?.content) ===
+    "A list of things to do, kept on the server and changed in place.", "going back puts the list's description back");
   check((await titles())[3] === "Ship the web framework, completely", "back on the list, it has the new name");
 
   // The history steps back and forward through pages the program renders.

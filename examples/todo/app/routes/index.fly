@@ -10,6 +10,7 @@ export type Model = { todos: Vec<Todo>; draft: String; error: String; adding: bo
 export type Msg = #Draft | #Add | #Toggle(u32) | #ClearDone;
 
 export const title: str = "Things to do";
+export const description: str = "A list of things to do, kept on the server and changed in place.";
 
 export function load(): Model uses Todos {
   { todos: Todos.list(), draft: String.new(), error: String.new(), adding: false }
