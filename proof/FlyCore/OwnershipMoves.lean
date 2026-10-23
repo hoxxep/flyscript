@@ -25,8 +25,13 @@ structure Moves (σ : Store) (E : List Nat) (σ' : Store) (E' L : List Nat) : Pr
   wf : WF σ'
   frame : ∀ l, l < σ.next → l ∉ E → σ'.mem l = σ.mem l
   alloc : ∀ l, σ'.mem l ≠ none ↔ (σ.mem l ≠ none ∧ l ∉ E) ∨ l ∈ E' ∨ l ∈ L
+  rt : RtExt σ σ'
+  /-- A region gains cells only through an arena the step may change, or one it made. -/
+  fresh : ∀ l a x, σ'.rt l = some (a, x) → σ.rt l = none → a ∈ E ∨ σ.next ≤ a
 
 theorem Moves.refl (hwf : WF σ) (hE : ∀ l ∈ E, σ.mem l ≠ none) : Moves σ E σ E [] where
+  rt := RtExt.refl
+  fresh := fun _ _ _ h h0 => by rw [h0] at h; cases h
   within := by intro l h; simp at h; exact .inl h
   next := Nat.le_refl _
   wf := hwf
@@ -48,6 +53,21 @@ theorem Moves.refl (hwf : WF σ) (hE : ∀ l ∈ E, σ.mem l ≠ none) : Moves �
 -/
 theorem Moves.trans (h₁ : Moves σ E σ₁ E₁ L₁) (h₂ : Moves σ₁ E₁ σ₂ E₂ L₂) (hd : Disj L₁ E₁)
     (hwf : WF σ) : Moves σ E σ₂ E₂ (L₁ ++ L₂) where
+  rt := h₁.rt.trans h₂.rt
+  fresh := by
+    intro l a x h h0
+    cases h1 : σ₁.rt l with
+    | none =>
+      rcases h₂.fresh l a x h h1 with ha | ha
+      · rcases h₁.within a (.inr ha) with h' | h'
+        · exact .inl h'
+        · exact .inr h'
+      · exact .inr (Nat.le_trans h₁.next ha)
+    | some y =>
+      have := h₂.rt l y h1
+      rw [h] at this
+      cases this
+      exact h₁.fresh l a x h1 h0
   within := by
     intro l h
     rcases h with h | h
@@ -95,6 +115,8 @@ theorem Moves.trans (h₁ : Moves σ E σ₁ E₁ L₁) (h₂ : Moves σ₁ E₁
 /-- Allocating a cell: new, and given as the value's. -/
 theorem Moves.allocate (hwf : WF σ) (hE : ∀ l ∈ E, σ.mem l ≠ none) :
     Moves σ E (σ.alloc v).2 E [σ.next] where
+  rt := fun _ _ h => h
+  fresh := fun _ _ _ h h0 => by simp only [Store.alloc_rt] at h; rw [h0] at h; cases h
   within := by
     intro l h
     rcases h with h | h
@@ -126,6 +148,8 @@ theorem Moves.allocate (hwf : WF σ) (hE : ∀ l ∈ E, σ.mem l ≠ none) :
 /-- Changing what a cell of the footprint holds, to something. -/
 theorem Moves.set (hwf : WF σ) (hE : ∀ l ∈ E, σ.mem l ≠ none) (hl : l ∈ E) :
     Moves σ E (σ.set l (some v)) E [] where
+  rt := fun _ _ h => h
+  fresh := fun _ _ _ h h0 => by simp only [Store.set_rt] at h; rw [h0] at h; cases h
   within := by intro x h; simp at h; exact .inl h
   next := Nat.le_refl _
   wf := hwf.set (hwf l (hE l hl))
@@ -155,7 +179,11 @@ theorem Moves.set (hwf : WF σ) (hE : ∀ l ∈ E, σ.mem l ≠ none) (hl : l �
 /-- Freeing cells `D` of the footprint, which is then `E'`. -/
 theorem Moves.free (hwf : WF σ') (hnext : σ'.next = σ.next) (hE : ∀ l ∈ E, σ.mem l ≠ none)
     (hsplit : ∀ l, l ∈ E ↔ l ∈ E' ∨ l ∈ D) (hD : ∀ l ∈ D, σ'.mem l = none)
-    (hkeep : ∀ l, l ∉ D → σ'.mem l = σ.mem l) (hdisj : Disj E' D) : Moves σ E σ' E' [] where
+    (hkeep : ∀ l, l ∉ D → σ'.mem l = σ.mem l) (hdisj : Disj E' D)
+    (hrt : σ'.rt = σ.rt := by rt_tac) :
+    Moves σ E σ' E' [] where
+  rt := fun l x h => by rw [hrt]; exact h
+  fresh := fun _ _ _ h h0 => by rw [hrt, h0] at h; cases h
   within := by
     intro l h
     simp at h
@@ -187,6 +215,8 @@ theorem Moves.free (hwf : WF σ') (hnext : σ'.next = σ.next) (hE : ∀ l ∈ E
 footprint's, as when a value is bound to a variable or stored in a place. -/
 theorem Moves.relabel (h : Moves σ E σ' E' L) (hsplit : ∀ x, x ∈ E'' ∨ x ∈ L'' ↔ x ∈ E' ∨ x ∈ L) :
     Moves σ E σ' E'' L'' where
+  rt := h.rt
+  fresh := h.fresh
   within := fun l hl => h.within l ((hsplit l).mp (hl.symm)).symm
   next := h.next
   wf := h.wf

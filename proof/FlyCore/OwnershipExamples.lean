@@ -35,6 +35,7 @@ macro_rules
   | `(tactic| run [$xs,*]) => `(tactic| simp [eval, ret, evalK, evalAtom, evalAtoms, resolve, leave, cleanV,
       cleanA, dropRet, armEnd, callRet, allocAll, dropCells, dropCell, drop, dropK, pick, Store.fresh, Store.alloc, Store.set, find,
       Frame.handles, Kont.push, lookup, Res.done, Outcome.res, Cap.at, Store.empty, Store.sched0, value, freed, freedBelow,
+      Store.tag, Store.freeAll,
       isStuck, $xs,*])
 
 /-- `function add(b: Box<int>, r: mut Box<int>): int { *r = *r + *b; *r }` -/
@@ -92,7 +93,7 @@ example : ∀ n, match eval [addInto] [] n [.abort .fail 0] .empty [] lends with
     | (.stuck, _) => False
     | (.susp _ _ _ _ _, _) => False
     | (.timeout, _) => True
-    | (.val v, σ') => ∃ L, VT [addInto] σ' .int v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
+    | (.val v, σ') => ∃ L, VT [addInto] [] σ' .int v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
     | (.abort _ _, σ') => ∀ l, σ'.mem l = none :=
   program_ok addInto_ok lends_typed
 
@@ -168,7 +169,7 @@ example : ∀ n, match eval [] ops n [.abort .fail 0] .empty [] asks with
     | (.stuck, _) => False
     | (.susp _ _ _ _ _, _) => False
     | (.timeout, _) => True
-    | (.val v, σ') => ∃ L, VT [] σ' .int v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
+    | (.val v, σ') => ∃ L, VT [] [] σ' .int v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
     | (.abort _ _, σ') => ∀ l, σ'.mem l = none :=
   program_ok (fun _ h => by simp at h) asks_typed
 
@@ -229,7 +230,7 @@ example : ∀ n, match eval [] ops n [.abort .fail 0] .empty [] drops with
     | (.stuck, _) => False
     | (.susp _ _ _ _ _, _) => False
     | (.timeout, _) => True
-    | (.val v, σ') => ∃ L, VT [] σ' .int v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
+    | (.val v, σ') => ∃ L, VT [] [] σ' .int v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
     | (.abort _ _, σ') => ∀ l, σ'.mem l = none :=
   program_ok (fun _ h => by simp at h) drops_typed
 
@@ -332,7 +333,7 @@ example : ∀ n, match eval [] ops n [.abort .fail 0] .empty [] counts with
     | (.stuck, _) => False
     | (.susp _ _ _ _ _, _) => False
     | (.timeout, _) => True
-    | (.val v, σ') => ∃ L, VT [] σ' .int v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
+    | (.val v, σ') => ∃ L, VT [] [] σ' .int v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
     | (.abort _ _, σ') => ∀ l, σ'.mem l = none :=
   program_ok (fun _ h => by simp at h) counts_typed
 
@@ -443,7 +444,7 @@ theorem reaches_rejected : ¬ Typed [] O [] reaches τ Γ' r := by
     · cases hbody with
       | atom ha =>
         cases ha with
-        | read hq =>
+        | read hq | readRef hq =>
           cases hq with
           | deref hq =>
             cases hq with
@@ -498,7 +499,7 @@ example : ∀ n, match eval [inside] [] n [.abort .fail 0] .empty [] returns wit
     | (.stuck, _) => False
     | (.susp _ _ _ _ _, _) => False
     | (.timeout, _) => True
-    | (.val v, σ') => ∃ L, VT [inside] σ' .int v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
+    | (.val v, σ') => ∃ L, VT [inside] [] σ' .int v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
     | (.abort _ _, σ') => ∀ l, σ'.mem l = none :=
   program_ok inside_ok returns_typed
 
@@ -544,7 +545,7 @@ theorem reachesReturned_rejected : ¬ Typed [inside] [] [] reachesReturned τ Γ
         cases hbody with
         | atom ha =>
           cases ha with
-          | read hq =>
+          | read hq | readRef hq =>
             cases hq with
             | deref hq =>
               cases hq with
@@ -585,7 +586,7 @@ theorem counter_typed : Typed [bump] [] [] counter .int [] [.fail] := by
   have hlam : Typed [bump] [] [("b", .own (.box .int) true)] (.lam 0 (.move "b")) (.fn .excl .int .int [])
       [("b", .own (.box .int) false)] [.fail] := by
     have := Typed.lam (F := [bump]) (O := []) (Γ := [("b", .own (.box .int) true)]) (f := 0) (d := bump)
-      (r := [.fail]) rfl rfl rfl rfl rfl (.move (x := "b") rfl rfl)
+      (r := [.fail]) rfl rfl rfl rfl rfl (.move (x := "b") rfl rfl) rfl
     simpa [bump, setSlot] using this
   exact .let_ (live := false) rfl (.new .lit)
     (.let_ (live := true) rfl hlam
@@ -596,7 +597,7 @@ example : ∀ n, match eval [bump] [] n [.abort .fail 0] .empty [] counter with
     | (.stuck, _) => False
     | (.susp _ _ _ _ _, _) => False
     | (.timeout, _) => True
-    | (.val v, σ') => ∃ L, VT [bump] σ' .int v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
+    | (.val v, σ') => ∃ L, VT [bump] [] σ' .int v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
     | (.abort _ _, σ') => ∀ l, σ'.mem l = none :=
   program_ok bump_ok counter_typed
 
@@ -690,7 +691,7 @@ example : ∀ n, match eval [addTo, twice] [] n [.abort .fail 0] .empty [] highe
     | (.stuck, _) => False
     | (.susp _ _ _ _ _, _) => False
     | (.timeout, _) => True
-    | (.val v, σ') => ∃ L, VT [addTo, twice] σ' .int v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
+    | (.val v, σ') => ∃ L, VT [addTo, twice] [] σ' .int v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
     | (.abort _ _, σ') => ∀ l, σ'.mem l = none :=
   program_ok higher_fns_ok higher_typed
 
@@ -744,7 +745,7 @@ example : ∀ n, match eval [bump, callsTwice] [] n [.abort .fail 0] .empty [] t
     | (.stuck, _) => False
     | (.susp _ _ _ _ _, _) => False
     | (.timeout, _) => True
-    | (.val v, σ') => ∃ L, VT [bump, callsTwice] σ' .int v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
+    | (.val v, σ') => ∃ L, VT [bump, callsTwice] [] σ' .int v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
     | (.abort _ _, σ') => ∀ l, σ'.mem l = none :=
   program_ok tally_fns_ok tally_typed
 
@@ -797,7 +798,7 @@ theorem handOff_fns_ok : FnsOk [spend, make, useOnce] [] := by
   simp only [List.mem_cons, List.mem_singleton, List.not_mem_nil, or_false] at hd
   rcases hd with rfl | rfl | rfl
   · exact ⟨by decide, by decide, _, .add (.read (.deref (.own rfl))) (.read (.own rfl))⟩
-  · exact ⟨by decide, _, .lam (d := spend) rfl rfl rfl rfl rfl (.move rfl rfl)⟩
+  · exact ⟨by decide, _, .lam (d := spend) rfl rfl rfl rfl rfl (.move rfl rfl) rfl⟩
   · exact ⟨by decide, _, .applyOnce rfl (by simp) .lit⟩
 
 theorem handOff_typed : Typed [spend, make, useOnce] [] [] handOff .int [] [.fail] :=
@@ -810,7 +811,7 @@ example : ∀ n, match eval [spend, make, useOnce] [] n [.abort .fail 0] .empty 
     | (.stuck, _) => False
     | (.susp _ _ _ _ _, _) => False
     | (.timeout, _) => True
-    | (.val v, σ') => ∃ L, VT [spend, make, useOnce] σ' .int v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
+    | (.val v, σ') => ∃ L, VT [spend, make, useOnce] [] σ' .int v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
     | (.abort _ _, σ') => ∀ l, σ'.mem l = none :=
   program_ok handOff_fns_ok handOff_typed
 
@@ -850,15 +851,15 @@ theorem nested_fns_ok : FnsOk [addBox, twiceOf] [] := by
 
 theorem nested_typed : Typed [addBox, twiceOf] [] [] nested .int [] [.fail] :=
   .let_ (live := false) rfl (.new .lit)
-    (.let_ (live := false) rfl (.lam (d := addBox) rfl rfl rfl rfl rfl (.move rfl rfl))
-      (.let_ (live := true) rfl (.lam (d := twiceOf) rfl rfl rfl rfl rfl (.move rfl rfl))
+    (.let_ (live := false) rfl (.lam (d := addBox) rfl rfl rfl rfl rfl (.move rfl rfl) rfl)
+      (.let_ (live := true) rfl (.lam (d := twiceOf) rfl rfl rfl rfl rfl (.move rfl rfl) rfl)
         (.applyBorrow (by decide) .lit (.own rfl) (fun h => by cases h) (by simp))))
 
 example : ∀ n, match eval [addBox, twiceOf] [] n [.abort .fail 0] .empty [] nested with
     | (.stuck, _) => False
     | (.susp _ _ _ _ _, _) => False
     | (.timeout, _) => True
-    | (.val v, σ') => ∃ L, VT [addBox, twiceOf] σ' .int v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
+    | (.val v, σ') => ∃ L, VT [addBox, twiceOf] [] σ' .int v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
     | (.abort _ _, σ') => ∀ l, σ'.mem l = none :=
   program_ok nested_fns_ok nested_typed
 
@@ -914,7 +915,7 @@ example : ∀ n, match eval [either] [] n [.abort .fail 0] .empty [] picks with
     | (.stuck, _) => False
     | (.susp _ _ _ _ _, _) => False
     | (.timeout, _) => True
-    | (.val v, σ') => ∃ L, VT [either] σ' .int v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
+    | (.val v, σ') => ∃ L, VT [either] [] σ' .int v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
     | (.abort _ _, σ') => ∀ l, σ'.mem l = none :=
   program_ok either_ok picks_typed
 
@@ -956,7 +957,7 @@ example : ∀ n, match eval [inc] [] n [.abort .fail 0] .empty [] fields with
     | (.stuck, _) => False
     | (.susp _ _ _ _ _, _) => False
     | (.timeout, _) => True
-    | (.val v, σ') => ∃ L, VT [inc] σ' .int v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
+    | (.val v, σ') => ∃ L, VT [inc] [] σ' .int v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
     | (.abort _ _, σ') => ∀ l, σ'.mem l = none :=
   program_ok inc_ok fields_typed
 
@@ -1014,7 +1015,7 @@ example : ∀ n, match eval [swap, addField] [] n [.abort .fail 0] .empty [] fie
     | (.stuck, _) => False
     | (.susp _ _ _ _ _, _) => False
     | (.timeout, _) => True
-    | (.val v, σ') => ∃ L, VT [swap, addField] σ' .int v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
+    | (.val v, σ') => ∃ L, VT [swap, addField] [] σ' .int v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
     | (.abort _ _, σ') => ∀ l, σ'.mem l = none :=
   program_ok swap_ok fieldPairs_typed
 
@@ -1062,7 +1063,7 @@ example : ∀ n, match eval [] [] n [.abort .fail 0] .empty [] fieldBorrow with
     | (.stuck, _) => False
     | (.susp _ _ _ _ _, _) => False
     | (.timeout, _) => True
-    | (.val v, σ') => ∃ L, VT [] σ' .int v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
+    | (.val v, σ') => ∃ L, VT [] [] σ' .int v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
     | (.abort _ _, σ') => ∀ l, σ'.mem l = none :=
   program_ok (fun _ h => by simp at h) fieldBorrow_typed
 
@@ -1141,7 +1142,7 @@ example : ∀ n, match eval [after] ticks n [.abort .fail 0] .empty [] tallies w
     | (.stuck, _) => False
     | (.susp _ _ _ _ _, _) => False
     | (.timeout, _) => True
-    | (.val v, σ') => ∃ L, VT [after] σ' .int v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
+    | (.val v, σ') => ∃ L, VT [after] [] σ' .int v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
     | (.abort _ _, σ') => ∀ l, σ'.mem l = none :=
   program_ok after_ok tallies_typed
 
@@ -1189,7 +1190,7 @@ example : ∀ n, match eval [after] ticks n [.abort .fail 0] .empty [] early wit
     | (.stuck, _) => False
     | (.susp _ _ _ _ _, _) => False
     | (.timeout, _) => True
-    | (.val v, σ') => ∃ L, VT [after] σ' .int v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
+    | (.val v, σ') => ∃ L, VT [after] [] σ' .int v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
     | (.abort _ _, σ') => ∀ l, σ'.mem l = none :=
   program_ok after_ok early_typed
 
@@ -1217,7 +1218,7 @@ example : ∀ n, match eval [] [] n [.abort .fail 0] .empty [] tags with
     | (.stuck, _) => False
     | (.susp _ _ _ _ _, _) => False
     | (.timeout, _) => True
-    | (.val v, σ') => ∃ L, VT [] σ' .int v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
+    | (.val v, σ') => ∃ L, VT [] [] σ' .int v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
     | (.abort _ _, σ') => ∀ l, σ'.mem l = none :=
   program_ok (by intro d hd; simp at hd) tags_typed
 
@@ -1251,7 +1252,7 @@ example : ∀ n, match eval [] [] n [.abort .fail 0] .empty [] tagRef with
     | (.stuck, _) => False
     | (.susp _ _ _ _ _, _) => False
     | (.timeout, _) => True
-    | (.val v, σ') => ∃ L, VT [] σ' .int v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
+    | (.val v, σ') => ∃ L, VT [] [] σ' .int v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
     | (.abort _ _, σ') => ∀ l, σ'.mem l = none :=
   program_ok (by intro d hd; simp at hd) tagRef_typed
 
@@ -1304,7 +1305,7 @@ example : ∀ s n, match eval [step] yields n [.abort .fail 0] (Store.sched0 s) 
     | (.stuck, _) => False
     | (.susp _ _ _ _ _, _) => False
     | (.timeout, _) => True
-    | (.val v, σ') => ∃ L, VT [step] σ' .int v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
+    | (.val v, σ') => ∃ L, VT [step] [] σ' .int v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
     | (.abort _ _, σ') => ∀ l, σ'.mem l = none :=
   program_ok_sched step_ok tasks_typed
 
@@ -1361,8 +1362,97 @@ example : ∀ s n, match eval [hold, failing] yields n [.abort .fail 0] (Store.s
     | (.stuck, _) => False
     | (.susp _ _ _ _ _, _) => False
     | (.timeout, _) => True
-    | (.val v, σ') => ∃ L, VT [hold, failing] σ' .int v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
+    | (.val v, σ') => ∃ L, VT [hold, failing] [] σ' .int v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
     | (.abort _ _, σ') => ∀ l, σ'.mem l = none :=
   program_ok_sched cancel_fns cancel_typed
+
+/-! Regions: an arena whose cells refer to each other, released at once. -/
+
+/-- `region (R) { const p = R.alloc(41); const q = R.alloc(p); const pp = *q; *pp + 1 }`: a cell
+holding a reference to another of the region; 42, and once the region ends, nothing left
+allocated. -/
+def regionEx : Expr :=
+  .region "R" .int
+    (.let_ "p" (.rref 0 .int) (.ralloc "R" .int (.lit 41))
+      (.let_ "q" (.rref 0 (.rref 0 .int)) (.ralloc "R" (.rref 0 .int) (.read (var "p")))
+        (.let_ "pp" (.rref 0 .int) (.rget (var "q"))
+          (.let_ "x" .int (.rget (var "pp"))
+            (.add (.read (var "x")) (.lit 1))))))
+
+example : value (eval [] [] 40 [] .empty [] regionEx) = some 42 := by
+  run [regionEx]
+example : freed (eval [] [] 40 [] .empty [] regionEx) := by
+  run [regionEx]
+
+theorem regionEx_typed : Typed [] [] [] regionEx .int [] [.fail] := by
+  have hR : lookup "R" [("R", Slot.own (.arena 0) true)] = some (.own (.arena 0) true) := rfl
+  refine .region rfl rfl ?_
+  exact .let_ (live := true) rfl (.ralloc rfl (.inl rfl) rfl .lit)
+    (.let_ (live := true) rfl (.ralloc rfl (.inl rfl) rfl (.readRef (.own rfl)))
+      (.let_ (live := true) rfl (by simpa [Ty.shiftBy] using Typed.rget (R := "R") (k := 0) (τ := .rref 0 .int) (.own rfl) rfl (.inl rfl))
+        (.let_ (live := true) rfl (by simpa [Ty.shiftBy] using Typed.rget (R := "R") (k := 0) (τ := .int) (.own rfl) rfl (.inl rfl))
+          (.add (.read (.own rfl)) .lit))))
+
+example : ∀ n, match eval [] [] n [.abort .fail 0] .empty [] regionEx with
+    | (.stuck, _) => False
+    | (.susp _ _ _ _ _, _) => False
+    | (.timeout, _) => True
+    | (.val v, σ') => ∃ L, VT [] [] σ' .int v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
+    | (.abort _ _, σ') => ∀ l, σ'.mem l = none :=
+  program_ok (by intro d hd; simp at hd) regionEx_typed
+
+/-- `try { region (R) { const p = R.alloc(41); region (S) { const q = S.alloc(p); const pp = *q;
+throw *pp + 1 } } } catch (e) { e }`: a cell of an inner region referring to one of the region around
+it, and a failure that leaves both, releasing each; 42, and nothing left allocated. -/
+def regionsUnwind : Expr :=
+  .try_
+    (.region "R" .int
+      (.let_ "p" (.rref 0 .int) (.ralloc "R" .int (.lit 41))
+        (.region "S" .int
+          (.let_ "q" (.rref 0 (.rref 1 .int)) (.ralloc "S" (.rref 1 .int) (.read (var "p")))
+            (.let_ "pp" (.rref 1 .int) (.rget (var "q"))
+              (.let_ "x" .int (.rget (var "pp"))
+                (.let_ "y" .int (.add (.read (var "x")) (.lit 1))
+                  (.throw_ (.read (var "y"))))))))))
+    "e" (.atom (.read (var "e")))
+
+example : value (eval [] [] 60 [] .empty [] regionsUnwind) = some 42 := by
+  run [regionsUnwind]
+example : freed (eval [] [] 60 [] .empty [] regionsUnwind) := by
+  run [regionsUnwind]
+
+theorem regionsUnwind_typed : Typed [] [] [] regionsUnwind .int [] [.fail] := by
+  refine .try_ rfl (.region rfl rfl ?_) (.atom (.read (.own rfl)))
+  refine .let_ (live := true) rfl (.ralloc rfl (.inl rfl) rfl .lit) (.region rfl rfl ?_)
+  exact .let_ (live := true) rfl (.ralloc rfl (.inl rfl) rfl (.readRef (.own rfl)))
+    (.let_ (live := true) rfl (by simpa [Ty.shiftBy] using Typed.rget (R := "S") (k := 0) (τ := .rref 1 .int) (.own rfl) rfl (.inl rfl))
+      (.let_ (live := true) rfl (by simpa [Ty.shiftBy] using Typed.rget (R := "R") (k := 1) (τ := .int) (.own rfl) rfl (.inl rfl))
+        (.let_ (live := true) rfl (.add (.read (.own rfl)) .lit)
+          (.throw_ (.read (.own rfl)) (by simp)))))
+
+example : ∀ n, match eval [] [] n [.abort .fail 0] .empty [] regionsUnwind with
+    | (.stuck, _) => False
+    | (.susp _ _ _ _ _, _) => False
+    | (.timeout, _) => True
+    | (.val v, σ') => ∃ L, VT [] [] σ' .int v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
+    | (.abort _ _, σ') => ∀ l, σ'.mem l = none :=
+  program_ok (by intro d hd; simp at hd) regionsUnwind_typed
+
+theorem ralloc_ty (h : Typed F O Γ (.ralloc R τ a) t Γ' r) :
+    ∃ k s, t = .rref k τ ∧ lookup R Γ = some s ∧ (s = .own (.arena k) true ∨ s = .ref .mut (.arena k)) := by
+  cases h; exact ⟨_, _, rfl, ‹_›, ‹_›⟩
+
+/-- `region (R) { R.alloc(1) }`: a reference into the region cannot be its value — no type said of the
+code around refers to the region. -/
+theorem escape_rejected : ¬ Typed [] [] [] (.region "R" τ (.ralloc "R" .int (.lit 1))) τ Γ' r := by
+  intro h
+  cases h with
+  | region _ _ hb =>
+    obtain ⟨k, s, ht, hl, hs⟩ := ralloc_ty hb
+    simp only [lookup, ↓reduceIte, Option.some.injEq] at hl
+    subst hl
+    rcases hs with hs | hs <;> simp only [Slot.own.injEq, Ty.arena.injEq, reduceCtorEq] at hs
+    obtain ⟨rfl, -⟩ := hs
+    cases τ <;> simp [Ty.shiftBy] at ht
 
 end FlyCore.Ownership.Examples

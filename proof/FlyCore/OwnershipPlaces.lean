@@ -15,8 +15,8 @@ def Sub (A B : List Nat) : Prop := ∀ x ∈ A, x ∈ B
 
 /-- Each variable the types know is bound in the environment, with the footprint its slot says,
 its parts among the exclusive footprints and the shared ones as its slot says. -/
-theorem foot_lookup : Foot F σ Γ env E S → lookup x Γ = some s →
-    ∃ a L, lookup x env = some a ∧ SlotOk F σ s a L ∧ Sub (exclPart s L) E ∧ Sub (sharedPart s L) S := by
+theorem foot_lookup : Foot F ι σ Γ env E S → lookup x Γ = some s →
+    ∃ a L, lookup x env = some a ∧ SlotOk F ι σ s a L ∧ Sub (exclPart s L) E ∧ Sub (sharedPart s L) S := by
   intro h
   induction h with
   | nil => simp [lookup]
@@ -37,7 +37,7 @@ theorem sharedPart_of_ro (he : s.excl = false) : sharedPart s L = L := by
   simp [sharedPart, he]
 
 /-- A closure borrowed `mut` holds a closure. -/
-theorem SlotOk.shell_fn (h : SlotOk F σ s a L) (hL : LT F σ a τ L) (hs : s.shell = true)
+theorem SlotOk.shell_fn (h : SlotOk F ι σ s a L) (hL : LT F ι σ a τ L) (hs : s.shell = true)
     (hh : ∀ t A B, s ≠ .half t A B) : τ.isFn = true := by
   match s, hs, h with
   | .half t A B, _, _ => exact absurd rfl (hh t A B)
@@ -52,12 +52,12 @@ theorem SlotOk.shell_fn (h : SlotOk F σ s a L) (hL : LT F σ a τ L) (hs : s.sh
 /-- A typed place: where it is, on a path into the tree of its root, and, if it may be changed, in
 the exclusive footprint — but for a closure borrowed `mut`, which is the place itself, its cell only
 read. -/
-theorem place_ok : PlaceTy Γ p τ w r → Foot F σ Γ env E S →
-    ∃ a τr Lr P l s, lookup r env = some a ∧ LT F σ a τr Lr ∧ Path F σ a τr P l τ ∧
+theorem place_ok : PlaceTy Γ p τ w r → Foot F ι σ Γ env E S →
+    ∃ a τr Lr P l s, lookup r env = some a ∧ LT F ι σ a τr Lr ∧ Path F ι σ a τr P l τ ∧
       resolve σ env p = some l ∧ (Sub (exclPart s Lr) E ∧ Sub (sharedPart s Lr) S) ∧
       (w = true → s.shell = false → Sub Lr E) ∧
-      lookup r Γ = some s ∧ SlotOk F σ s a Lr ∧ (w = true → s.excl = true) ∧
-      (∀ σ' L', LT F σ' a τr L' → SlotOk F σ' s a L') ∧
+      lookup r Γ = some s ∧ SlotOk F ι σ s a Lr ∧ (w = true → s.excl = true) ∧
+      (∀ σ' L', LT F ι σ' a τr L' → SlotOk F ι σ' s a L') ∧
       (s.shell = true → (P = [] ∧ τ = τr) ∨ (τr.isFn = false ∧ ∃ P', P = a :: P')) ∧ τr = s.ty := by
   intro hp hf
   induction hp with
@@ -144,16 +144,16 @@ theorem PlaceTy.root_eq : PlaceTy Γ p τ w y → y = p.root := by
   | snd _ ih => exact ih
 
 /-- A typed place denotes a location holding a tree of its type. -/
-theorem place_lt (hp : PlaceTy Γ p τ w y) (hf : Foot F σ Γ env E S) :
-    ∃ l R, resolve σ env p = some l ∧ LT F σ l τ R := by
+theorem place_lt (hp : PlaceTy Γ p τ w y) (hf : Foot F ι σ Γ env E S) :
+    ∃ l R, resolve σ env p = some l ∧ LT F ι σ l τ R := by
   obtain ⟨a, τr, Lr, P, l, -, -, hLr, hpath, hres, -⟩ := place_ok hp hf
   obtain ⟨R, hR, -⟩ := path_split hpath hLr
   exact ⟨l, R, hres, hR⟩
 
 /-- The tree at a place reached from another lies in the tree there. -/
-theorem place_within (hq : Place.Within q p) : PlaceTy Γ q τ w y → Foot F σ Γ env E S →
-    resolve σ env q = some l → LT F σ l τ R →
-    ∃ τp wp lp Rp, PlaceTy Γ p τp wp y ∧ resolve σ env p = some lp ∧ LT F σ lp τp Rp ∧ Sub R Rp := by
+theorem place_within (hq : Place.Within q p) : PlaceTy Γ q τ w y → Foot F ι σ Γ env E S →
+    resolve σ env q = some l → LT F ι σ l τ R →
+    ∃ τp wp lp Rp, PlaceTy Γ p τp wp y ∧ resolve σ env p = some lp ∧ LT F ι σ lp τp Rp ∧ Sub R Rp := by
   induction hq generalizing τ w l R with
   | refl => intro ht _ hres hR; exact ⟨τ, w, l, R, ht, hres, hR, fun _ h => h⟩
   | deref _ ih =>
@@ -197,12 +197,12 @@ theorem place_within (hq : Place.Within q p) : PlaceTy Γ q τ w y → Foot F σ
 
 /-- Places in different fields of a pair hold trees apart. -/
 theorem place_apart (hap : Place.Apart p q) (hp : PlaceTy Γ p τ w y) (hq : PlaceTy Γ q τ' w' y')
-    (hf : Foot F σ Γ env E S) (hres : resolve σ env p = some l) (hres' : resolve σ env q = some l')
-    (hR : LT F σ l τ R) (hR' : LT F σ l' τ' R') : Disj R R' := by
+    (hf : Foot F ι σ Γ env E S) (hres : resolve σ env p = some l) (hres' : resolve σ env q = some l')
+    (hR : LT F ι σ l τ R) (hR' : LT F ι σ l' τ' R') : Disj R R' := by
   -- The pair's fields hold trees apart, and each place's tree lies in its field's.
   have key : ∀ {p q τ w y τ' w' y' l l' R R'} (r : Place), p.Within (.fst r) → q.Within (.snd r) →
       PlaceTy Γ p τ w y → PlaceTy Γ q τ' w' y' → resolve σ env p = some l → resolve σ env q = some l' →
-      LT F σ l τ R → LT F σ l' τ' R' → Disj R R' := by
+      LT F ι σ l τ R → LT F ι σ l' τ' R' → Disj R R' := by
     intro p q τ w y τ' w' y' l l' R R' r h1 h2 hp hq hres hres' hR hR'
     obtain ⟨τ1, w1, l1, R1, ht1, hres1, hR1, hs1⟩ := place_within h1 hp hf hres hR
     obtain ⟨τ2, w2, l2, R2, ht2, hres2, hR2, hs2⟩ := place_within h2 hq hf hres' hR'
@@ -257,11 +257,11 @@ theorem setSlot_tail (Γ : Ctx) : y ≠ x → setSlot ((y, t) :: Γ) x s = (y, t
 
 /-- An exclusive variable's footprint is one segment of the exclusive footprints. It may be
 replaced, as the variable changes, in a store that changed nothing else, and the rest stands. -/
-theorem foot_update : Foot F σ Γ env E S → (Γ.map Prod.fst).Nodup → lookup x Γ = some s →
+theorem foot_update : Foot F ι σ Γ env E S → (Γ.map Prod.fst).Nodup → lookup x Γ = some s →
     s.excl = true → s.shell = false →
-    ∃ a L E₁ E₂, lookup x env = some a ∧ SlotOk F σ s a L ∧ E = E₁ ++ L ++ E₂ ∧
-      ∀ σ' s' L', s'.excl = true → s'.shell = false → Agree σ σ' (E₁ ++ E₂ ++ S) → SlotOk F σ' s' a L' →
-        Foot F σ' (setSlot Γ x s') env (E₁ ++ L' ++ E₂) S := by
+    ∃ a L E₁ E₂, lookup x env = some a ∧ SlotOk F ι σ s a L ∧ E = E₁ ++ L ++ E₂ ∧
+      ∀ σ' s' L', s'.excl = true → s'.shell = false → Agree σ σ' (E₁ ++ E₂ ++ S) → SlotOk F ι σ' s' a L' →
+        Foot F ι σ' (setSlot Γ x s') env (E₁ ++ L' ++ E₂) S := by
   intro h
   induction h with
   | nil => simp [lookup]
@@ -278,7 +278,7 @@ theorem foot_update : Foot F σ Γ env E S → (Γ.map Prod.fst).Nodup → looku
       intro σ' s' L' hex' hsh' hag hs'
       have hS : addS t L S = S := by simp [addS, sharedPart, hex, hsh]
       rw [hS] at hag
-      have hrest' := hrest.frame (σ' := σ') (fun l hl => hag l (by simpa using hl))
+      have hrest' := hrest.frame (σ' := σ') ((hag.mono fun l hl => by simpa using hl))
       rw [setSlot_head Γ hy']
       have := Foot.cons (x := x) hs' hrest'
       simpa [addE, addS, exclPart, sharedPart, hex, hsh, hex', hsh'] using this
@@ -286,13 +286,11 @@ theorem foot_update : Foot F σ Γ env E S → (Γ.map Prod.fst).Nodup → looku
       obtain ⟨a', L', E₁, E₂, ha, hs, hE, hupd⟩ := ih hk' hx hex hsh
       refine ⟨a', L', addE t L E₁, E₂, by simp [lookup, hy, ha], hs, by subst hE; simp [addE], ?_⟩
       intro σ' s' L'' hex' hsh' hag hs'
-      have hL : Agree σ σ' L := by
-        intro l hl
-        apply hag l
+      have hL : Agree σ σ' L := hag.mono fun l hl => by
         rcases mem_parts (s := t) hl with h | h
         · exact List.mem_append.mpr (.inl (List.mem_append.mpr (.inl (mem_addE.mpr (.inl h)))))
         · exact List.mem_append.mpr (.inr (mem_addS.mpr (.inl h)))
-      have hrest' := hupd σ' s' L'' hex' hsh' (fun l hl => hag l (by
+      have hrest' := hupd σ' s' L'' hex' hsh' ((hag.mono fun l hl => by
         simp only [List.mem_append] at hl ⊢
         rcases hl with (hl | hl) | hl
         · exact .inl (.inl (mem_addE.mpr (.inr hl)))
@@ -387,6 +385,7 @@ theorem unlend_keys (h : Γb.map Prod.fst = Γ.map Prod.fst) : (unlend m Γ ys �
 theorem atom_keys : AtomTy Γ a τ Γ' → Γ'.map Prod.fst = Γ.map Prod.fst
   | .lit => rfl
   | .read _ => rfl
+  | .readRef _ => rfl
   | .move _ _ => setSlot_keys _
 
 theorem atoms_keys : AtomsTy Γ as τs Γ' → Γ'.map Prod.fst = Γ.map Prod.fst
@@ -414,7 +413,7 @@ theorem typed_keys : Typed F O Γ e τ Γ' r → Γ'.map Prod.fst = Γ.map Prod.
   | .write ha _ => atom_keys ha
   | .assign ha _ _ => atom_keys ha
   | .call _ _ _ _ hargs _ _ => atoms_keys hargs
-  | .lam _ _ _ _ _ ha => atom_keys ha
+  | .lam _ _ _ _ _ ha _ => atom_keys ha
   | .lendClo _ _ _ _ _ _ _ _ hb => by
     have := typed_keys hb
     simp only [List.map_cons, List.cons.injEq] at this
@@ -455,24 +454,29 @@ theorem typed_keys : Typed F O Γ e τ Γ' r → Γ'.map Prod.fst = Γ.map Prod.
     simp only [List.map_cons, List.cons.injEq] at this
     exact this.2.trans (typed_keys hb)
   | .par _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ hargs _ => atoms_keys hargs
+  | .region _ _ hb => by
+    have := typed_keys hb
+    simpa [Ctx.shift, Function.comp_def] using this
+  | .ralloc _ _ _ _ => rfl
+  | .rget _ _ _ => rfl
 
 theorem lookup_det {α : Type} {x : Var} {a b : α} {env : List (Var × α)} : lookup x env = some a → lookup x env = some b → a = b := by
   intro h1 h2; rw [h1] at h2; exact Option.some.inj h2
 
 /-- A pair's tree, one field of it lent: the field's tree, and the pair's with a hole there; and the
 pair's tree again, the field filled with what the borrow left, once it ends. -/
-theorem split_field (t : Bool) (hL : LT F σ a (.pair A B) L) :
-    ∃ b c Rt Ro, σ.mem a = some (.pair b c) ∧ LT F σ (if t then b else c) (if t then A else B) Rt ∧
-      LT F σ a (Ty.lent1 t A B) (a :: Ro) ∧ L.Perm (a :: (Rt ++ Ro)) ∧ Disj Rt Ro ∧ a ∉ Rt ++ Ro ∧
-      ∀ σ' Ro' Rx, σ'.mem a = σ.mem a → LT F σ' a (Ty.lent1 t A B) (a :: Ro') →
-        LT F σ' (if t then b else c) (if t then A else B) Rx → Disj Rx Ro' → a ∉ Rx ++ Ro' →
-        ∃ L', LT F σ' a (.pair A B) L' ∧ L'.Perm (a :: (Rx ++ Ro')) := by
+theorem split_field (t : Bool) (hL : LT F ι σ a (.pair A B) L) :
+    ∃ b c Rt Ro, σ.mem a = some (.pair b c) ∧ LT F ι σ (if t then b else c) (if t then A else B) Rt ∧
+      LT F ι σ a (Ty.lent1 t A B) (a :: Ro) ∧ L.Perm (a :: (Rt ++ Ro)) ∧ Disj Rt Ro ∧ a ∉ Rt ++ Ro ∧
+      ∀ σ' Ro' Rx, σ'.mem a = σ.mem a → LT F ι σ' a (Ty.lent1 t A B) (a :: Ro') →
+        LT F ι σ' (if t then b else c) (if t then A else B) Rx → Disj Rx Ro' → a ∉ Rx ++ Ro' →
+        ∃ L', LT F ι σ' a (.pair A B) L' ∧ L'.Perm (a :: (Rx ++ Ro')) := by
   cases hL with
   | pair ha h1 h2 hd hn =>
     rename_i b c R₁ R₂
     cases t with
     | true =>
-      have hlt : LT F σ a (Ty.lent1 true A B) (a :: R₂) := by
+      have hlt : LT F ι σ a (Ty.lent1 true A B) (a :: R₂) := by
         have := LT.pair ha (.hole (τ := A)) h2 (by simp)
           (fun h => hn (List.mem_append.mpr (.inr (by simpa using h))))
         simpa [Ty.lent1] using this
@@ -485,7 +489,7 @@ theorem split_field (t : Bool) (hL : LT F σ a (.pair A B) L) :
         cases g1
         exact ⟨_, .pair (hag.trans ha) hx g2 (fun z h h' => hd' z h (by simpa using h')) (by simpa using hn'), by simp⟩
     | false =>
-      have hlt : LT F σ a (Ty.lent1 false A B) (a :: R₁) := by
+      have hlt : LT F ι σ a (Ty.lent1 false A B) (a :: R₁) := by
         have := LT.pair ha h1 (.hole (τ := B)) (by simp)
           (fun h => hn (List.mem_append.mpr (.inl (by simpa using h))))
         simpa [Ty.lent1] using this
@@ -502,18 +506,18 @@ theorem split_field (t : Bool) (hL : LT F σ a (.pair A B) L) :
           (fun h => hn' (List.perm_append_comm.mem_iff.mp h)), List.Perm.cons _ List.perm_append_comm⟩
 
 /-- A slot that may change all but its first cell holds that cell first. -/
-theorem SlotOk.head_of_shell (h : SlotOk F σ s a L) (hs : s.shell = true) : ∃ R, L = a :: R := by
+theorem SlotOk.head_of_shell (h : SlotOk F ι σ s a L) (hs : s.shell = true) : ∃ R, L = a :: R := by
   match s, hs, h with
   | .ref .mut (.fn _ _ _ _), _, h => exact LT.cons h rfl
   | .half _ _ _, _, h => exact LT.cons h Ty.lent1_isHole
 
 /-- A variable that may change all but its first cell, changed: the rest of the activation stands,
 the variable owning the new tree, its first cell as it was and only read. -/
-theorem foot_update_sh : Foot F σ Γ env E S → (Γ.map Prod.fst).Nodup → lookup x Γ = some s →
+theorem foot_update_sh : Foot F ι σ Γ env E S → (Γ.map Prod.fst).Nodup → lookup x Γ = some s →
     s.shell = true →
-    ∃ a R E₁ E₂, lookup x env = some a ∧ SlotOk F σ s a (a :: R) ∧ E = E₁ ++ R ++ E₂ ∧ a ∈ S ∧
-      ∀ σ' R', Agree σ σ' (E₁ ++ E₂ ++ S) → SlotOk F σ' s a (a :: R') →
-        Foot F σ' Γ env (E₁ ++ R' ++ E₂) S := by
+    ∃ a R E₁ E₂, lookup x env = some a ∧ SlotOk F ι σ s a (a :: R) ∧ E = E₁ ++ R ++ E₂ ∧ a ∈ S ∧
+      ∀ σ' R', Agree σ σ' (E₁ ++ E₂ ++ S) → SlotOk F ι σ' s a (a :: R') →
+        Foot F ι σ' Γ env (E₁ ++ R' ++ E₂) S := by
   intro h
   induction h with
   | nil => simp [lookup]
@@ -529,7 +533,7 @@ theorem foot_update_sh : Foot F σ Γ env E S → (Γ.map Prod.fst).Nodup → lo
       have hex := Slot.shell_excl hsh
       refine ⟨a, R, [], E, by simp [lookup], ht, by simp [addE, exclPart, hex, hsh], by simp [addS, sharedPart, hex, hsh], ?_⟩
       intro σ' R' hag hs'
-      have hrest' := hrest.frame (σ' := σ') (fun l hl => hag l (by
+      have hrest' := hrest.frame (σ' := σ') ((hag.mono fun l hl => by
         simp only [List.nil_append, List.mem_append, addS, sharedPart, hex, hsh, ↓reduceIte, List.take_succ_cons,
           List.take_zero, List.cons_append, List.nil_append, List.mem_cons] at hl ⊢
         rcases hl with hl | hl
@@ -542,13 +546,11 @@ theorem foot_update_sh : Foot F σ Γ env E S → (Γ.map Prod.fst).Nodup → lo
       refine ⟨a', R, addE t L E₁, E₂, by simp [lookup, hy, ha], hs, by subst hE; simp [addE],
         mem_addS.mpr (.inr haS), ?_⟩
       intro σ' R' hag hs'
-      have hL : Agree σ σ' L := by
-        intro l hl
-        apply hag l
+      have hL : Agree σ σ' L := hag.mono fun l hl => by
         rcases mem_parts (s := t) hl with h | h
         · exact List.mem_append.mpr (.inl (List.mem_append.mpr (.inl (mem_addE.mpr (.inl h)))))
         · exact List.mem_append.mpr (.inr (mem_addS.mpr (.inl h)))
-      have hrest' := hupd σ' R' (fun l hl => hag l (by
+      have hrest' := hupd σ' R' ((hag.mono fun l hl => by
         simp only [List.mem_append] at hl ⊢
         rcases hl with (hl | hl) | hl
         · exact .inl (.inl (mem_addE.mpr (.inr hl)))
@@ -560,17 +562,17 @@ theorem foot_update_sh : Foot F σ Γ env E S → (Γ.map Prod.fst).Nodup → lo
 /-- At a place that may be changed, what the location holds may be replaced: the rest of the
 activation stands, the variable the place is rooted at now owning the new tree. The place holds no
 closure or no place lent, or is rooted at a variable that may change all it holds. -/
-theorem replace_at (hI : Inv F σ Γ env E S) (hp : PlaceTy Γ p τ true r) (hc : τ.complete = true)
+theorem replace_at (hI : Inv F ι σ Γ env E S) (hp : PlaceTy Γ p τ true r) (hc : τ.complete = true)
     (hτ : τ.isFn = false ∨ ∀ k A B r', lookup r Γ ≠ some (.ref .mut (.fn k A B r'))) :
-    ∃ l R P E₁ E₂, resolve σ env p = some l ∧ LT F σ l τ R ∧ E.Perm (E₁ ++ (P ++ R) ++ E₂) ∧
-      ∀ σ' R', Agree σ σ' (E₁ ++ P ++ E₂ ++ S) → LT F σ' l τ R' → Disj R' (E₁ ++ P ++ E₂) →
-        Disj R' S → ∃ E', Inv F σ' Γ env E' S ∧ E'.Perm (E₁ ++ (P ++ R') ++ E₂) := by
+    ∃ l R P E₁ E₂, resolve σ env p = some l ∧ LT F ι σ l τ R ∧ E.Perm (E₁ ++ (P ++ R) ++ E₂) ∧
+      ∀ σ' R', Agree σ σ' (E₁ ++ P ++ E₂ ++ S) → LT F ι σ' l τ R' → Disj R' (E₁ ++ P ++ E₂) →
+        Disj R' S → ∃ E', Inv F ι σ' Γ env E' S ∧ E'.Perm (E₁ ++ (P ++ R') ++ E₂) := by
   obtain ⟨a, τr, Lr, Pf, l, s, ha, hLr, hpath, hres, -, -, hs, hso, hex, hlt, hshp, hty⟩ := place_ok hp hI.foot
   obtain ⟨R, hR, hLrp⟩ := path_split hpath hLr
   -- The cells the root keeps, and how the root takes a new tree at the place.
   have key : ∃ P E₁ E₂, E.Perm (E₁ ++ (P ++ R) ++ E₂) ∧ (∀ z ∈ P, z ∈ Pf) ∧
-      ∀ σ' R', Agree σ σ' (E₁ ++ P ++ E₂ ++ S) → LT F σ' l τ R' → Disj R' (E₁ ++ P ++ E₂) → Disj R' S →
-        ∃ M, Foot F σ' Γ env (E₁ ++ M ++ E₂) S ∧ M.Perm (P ++ R') := by
+      ∀ σ' R', Agree σ σ' (E₁ ++ P ++ E₂ ++ S) → LT F ι σ' l τ R' → Disj R' (E₁ ++ P ++ E₂) → Disj R' S →
+        ∃ M, Foot F ι σ' Γ env (E₁ ++ M ++ E₂) S ∧ M.Perm (P ++ R') := by
     have hPn : Pf.Nodup := (nodup_append_disj.mp (hLrp.nodup_iff.mp hLr.nodup)).1
     cases hshb : s.shell
     · obtain ⟨a', L', E₁, E₂, ha', hso', hE, hupd⟩ := foot_update hI.foot hI.keys hs (hex rfl) hshb
@@ -578,10 +580,10 @@ theorem replace_at (hI : Inv F σ Γ env E S) (hp : PlaceTy Γ p τ true r) (hc 
       cases hso.det hso'
       refine ⟨Pf, E₁, E₂, by rw [hE]; exact (hLrp.append_left E₁).append_right E₂, fun _ h => h, ?_⟩
       intro σ' R' hag hR' hd hdS
-      have hagP : Agree σ σ' Pf := fun x hx => hag x (by simp [hx])
+      have hagP : Agree σ σ' Pf := (hag.mono fun x hx => by simp [hx])
       have hdP : Disj Pf R' := fun x hx hx' => hd x hx' (by simp [hx])
       obtain ⟨L'', hlt', hL''p, -⟩ := path_join hpath hPn hagP hR' hdP
-      have hfoot := hupd σ' s L'' (hex rfl) hshb (fun x hx => hag x (by
+      have hfoot := hupd σ' s L'' (hex rfl) hshb ((hag.mono fun x hx => by
         simp only [List.mem_append] at hx ⊢
         rcases hx with (hx | hx) | hx
         · exact .inl (.inl (.inl hx))
@@ -610,10 +612,10 @@ theorem replace_at (hI : Inv F σ Γ env E S) (hp : PlaceTy Γ p τ true r) (hc 
       refine ⟨P', E₁, E₂, by rw [hE]; exact (hR0p.append_left E₁).append_right E₂,
         fun z hz => List.mem_cons_of_mem _ hz, ?_⟩
       intro σ' R' hag hR' hd hdS
-      have hagP : Agree σ σ' (a :: P') := fun x hx => by
+      have hagP : Agree σ σ' (a :: P') := hag.mono fun x hx => by
         rcases List.mem_cons.mp hx with rfl | hx
-        · exact hag x (by simp [haS])
-        · exact hag x (by simp [hx])
+        · simp [haS]
+        · simp [hx]
       have hdP : Disj (a :: P') R' := fun x hx hx' => by
         rcases List.mem_cons.mp hx with rfl | hx
         · exact hdS x hx' haS
@@ -623,7 +625,7 @@ theorem replace_at (hI : Inv F σ Γ env E S) (hp : PlaceTy Γ p τ true r) (hc 
         | .ref .mut (.fn _ _ _ _), _ => rfl
         | .half _ _ _, _ => exact Ty.lent1_isHole
       obtain ⟨R'', rfl⟩ := hlt'.cons hτr
-      have hfoot := hupd σ' R'' (fun x hx => hag x (by
+      have hfoot := hupd σ' R'' ((hag.mono fun x hx => by
         simp only [List.mem_append] at hx ⊢
         rcases hx with (hx | hx) | hx
         · exact .inl (.inl (.inl hx))

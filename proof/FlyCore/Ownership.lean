@@ -61,6 +61,11 @@ inductive Ty where
   | sum (A B : Ty)
   /-- A place lent to a borrow: what holds it holds a `τ` there, but not for now. -/
   | hole (τ : Ty)
+  /-- A reference into the region `k` regions out from here (`0` the innermost), to data of type
+  `τ`, which is said of that region: its references count regions from there. -/
+  | rref (k : Nat) (τ : Ty)
+  /-- The arena of the region `k` regions out from here. -/
+  | arena (k : Nat)
   deriving DecidableEq, Repr
 
 /-- Plain data: integers and boxes of them, which a closure may capture. -/
@@ -71,6 +76,8 @@ def Ty.data : Ty → Bool
   | .pair A B => A.data && B.data
   | .sum A B => A.data && B.data
   | .hole _ => false
+  | .rref _ _ => false
+  | .arena _ => false
 
 /-- A pair whose first field, or whose second, is lent. -/
 def Ty.lent1 (t : Bool) (A B : Ty) : Ty := if t then .pair (.hole A) B else .pair A (.hole B)
@@ -83,6 +90,8 @@ def Ty.complete : Ty → Bool
   | .pair A B => A.complete && B.complete
   | .sum A B => A.complete && B.complete
   | .hole _ => false
+  | .rref _ _ => true
+  | .arena _ => false
 
 def Ty.isHole : Ty → Bool
   | .hole _ => true
@@ -100,6 +109,8 @@ theorem Ty.data_complete : ∀ {τ : Ty}, τ.data = true → τ.complete = true
     simp only [Ty.data, Bool.and_eq_true] at h
     simp only [Ty.complete, Bool.and_eq_true]; exact ⟨Ty.data_complete h.1, Ty.data_complete h.2⟩
   | .hole _, h => by simp [Ty.data] at h
+  | .rref _ _, h => by simp [Ty.data] at h
+  | .arena _, h => by simp [Ty.data] at h
 
 theorem Ty.complete_ite {t : Bool} {A B : Ty} (hA : A.complete = true) (hB : B.complete = true) :
     (if t then A else B).complete = true := by
@@ -117,6 +128,48 @@ theorem Ty.lent1_isHole : (Ty.lent1 t A B).isHole = false := by
 def Ty.isFn : Ty → Bool
   | .fn _ _ _ _ => true
   | _ => false
+
+/-- A type no region is part of, which says the same of a value wherever it is. -/
+def Ty.rfree : Ty → Bool
+  | .int => true
+  | .box τ => τ.rfree
+  | .fn _ _ _ _ => true
+  | .pair A B => A.rfree && B.rfree
+  | .sum A B => A.rfree && B.rfree
+  | .hole τ => τ.rfree
+  | .rref _ _ => false
+  | .arena _ => false
+
+theorem Ty.data_rfree : ∀ {τ : Ty}, τ.data = true → τ.rfree = true
+  | .int, _ => rfl
+  | .box τ, h => by simp only [Ty.data] at h; simp only [Ty.rfree]; exact Ty.data_rfree h
+  | .fn _ _ _ _, _ => rfl
+  | .pair A B, h => by
+    simp only [Ty.data, Bool.and_eq_true] at h
+    simp only [Ty.rfree, Bool.and_eq_true]; exact ⟨Ty.data_rfree h.1, Ty.data_rfree h.2⟩
+  | .sum A B, h => by
+    simp only [Ty.data, Bool.and_eq_true] at h
+    simp only [Ty.rfree, Bool.and_eq_true]; exact ⟨Ty.data_rfree h.1, Ty.data_rfree h.2⟩
+  | .hole _, h => by simp [Ty.data] at h
+  | .rref _ _, h => by simp [Ty.data] at h
+  | .arena _, h => by simp [Ty.data] at h
+
+/-- Data a region may hold: integers, and references into it or the regions around it. -/
+def Ty.rdata : Ty → Bool
+  | .int => true
+  | .rref _ τ => τ.rdata
+  | _ => false
+
+/-- A type said of a place `n` regions further in: references count `n` more regions out. -/
+def Ty.shiftBy (n : Nat) : Ty → Ty
+  | .int => .int
+  | .box τ => .box (τ.shiftBy n)
+  | .fn k A B r => .fn k A B r
+  | .pair A B => .pair (A.shiftBy n) (B.shiftBy n)
+  | .sum A B => .sum (A.shiftBy n) (B.shiftBy n)
+  | .hole τ => .hole (τ.shiftBy n)
+  | .rref k τ => .rref (k + n) τ
+  | .arena k => .arena (k + n)
 
 theorem Ty.data_not_fn {τ : Ty} (h : τ.data = true) : τ.isFn = false := by
   cases τ <;> simp_all [Ty.data, Ty.isFn]
@@ -227,6 +280,14 @@ inductive Expr where
   and `fb`, given their owned arguments and lent places only `readonly`, run as one, each giving way
   to the other wherever it performs `e`, and the pair of what they give is the value. -/
   | par (e : Nat) (fa : Nat) (oa : List Atom) (la : List Place) (fb : Nat) (ob : List Atom) (lb : List Place)
+  /-- `region (R) { body }`, of type `τ`: `R` the arena of a region for as long as `body` runs, which is
+  then released at once. -/
+  | region (R : Var) (τ : Ty) (body : Expr)
+  /-- `R.alloc(a)`: `a`, a `τ` said of the region of arena `R`, put in a new cell of the region; a
+  reference to it. -/
+  | ralloc (R : Var) (τ : Ty) (a : Atom)
+  /-- `*p` for a reference `p` into a region: a copy of what the cell holds. -/
+  | rget (p : Place)
   deriving Repr
 
 /-- A user effect's operation: what it takes, owned and lent, and what it gives. -/
@@ -234,6 +295,9 @@ structure Op where
   owns : List Ty
   refs : List (Mode × Ty)
   ret : Ty
+  /-- What an operation takes and gives is said of no region: its arm may run regions out from
+  where it was performed. -/
+  rfree : (owns.all Ty.rfree && refs.all (fun p => p.2.rfree) && ret.rfree) = true := by decide
 
 /-- A function: its owned parameters, its borrowed ones, its result, the effects it may perform,
 its body. A function that returns a borrow says which it may be, `retp`: in a mode, of one of
@@ -267,6 +331,10 @@ inductive Val where
   | pair (b c : Nat)
   /-- A tag, left or right, of a union of an `A` and a `B`, and the cell of what it carries. -/
   | tag (A B : Ty) (left : Bool) (l : Nat)
+  /-- A reference to a cell of a region. -/
+  | rptr (l : Nat)
+  /-- A region's arena: the cells allocated in it. -/
+  | arena (cs : List Nat)
   deriving DecidableEq, Repr
 
 /-- The store: its cells, `none` once freed or before allocation, the next to allocate, and the
@@ -277,6 +345,10 @@ structure Store where
   ids : Nat := 0
   /-- Which task goes on at each point where one could give way to the other: any schedule. -/
   sched : Nat → Bool := fun _ => true
+  /-- The region and type of each cell allocated in a region, kept once set. -/
+  rt : Nat → Option (Nat × Ty) := fun _ => none
+  /-- A region is named by its arena's cell: a tagged cell, and its region's arena, were allocated. -/
+  rtwf : ∀ l a x, rt l = some (a, x) → a < next ∧ l < next := by intro l a x h; simp at h
 
 /-- A fresh name for a handler. -/
 def Store.fresh (σ : Store) : Nat × Store := (σ.ids, { σ with ids := σ.ids + 1 })
@@ -284,8 +356,24 @@ def Store.fresh (σ : Store) : Nat × Store := (σ.ids, { σ with ids := σ.ids 
 def Store.set (σ : Store) (l : Nat) (v : Option Val) : Store :=
   { σ with mem := fun k => if k = l then v else σ.mem k }
 
+/-- Tags cell `l` as a cell of the region whose arena is cell `a`, holding a `τ`. -/
+def Store.tag (σ : Store) (l a : Nat) (τ : Ty) : Store :=
+  if h : a < σ.next ∧ l < σ.next then
+    { σ with rt := fun k => if k = l then some (a, τ) else σ.rt k,
+             rtwf := fun k b x hk => by
+               split at hk
+               · rename_i hkl; cases hk; exact ⟨h.1, hkl ▸ h.2⟩
+               · exact σ.rtwf k b x hk }
+  else σ
+
+/-- Frees the cells `cs`. -/
+def Store.freeAll (σ : Store) : List Nat → Store
+  | [] => σ
+  | l :: cs => (σ.set l none).freeAll cs
+
 def Store.alloc (σ : Store) (v : Val) : Nat × Store :=
-  (σ.next, { σ with mem := fun k => if k = σ.next then some v else σ.mem k, next := σ.next + 1 })
+  (σ.next, { σ with mem := fun k => if k = σ.next then some v else σ.mem k, next := σ.next + 1,
+                    rtwf := fun l a x h => ⟨Nat.lt_succ_of_lt (σ.rtwf l a x h).1, Nat.lt_succ_of_lt (σ.rtwf l a x h).2⟩ })
 
 abbrev Env := List (Var × Nat)
 
@@ -323,6 +411,7 @@ first, and what a closure captured, which may hold closures in turn. `none` if a
 is not there, a double free, or it runs out of cells to spare. -/
 def dropK : Nat → Store → Ty → Val → Option Store
   | _, σ, .int, .int _ => some σ
+  | _, σ, .rref _ _, .rptr _ => some σ
   | k + 1, σ, .box τ, .ptr l =>
     match σ.mem l with
     | some w =>
@@ -442,6 +531,8 @@ inductive Kont where
   | parY (e id : Nat)
   /-- The code around two tasks, one of which failed, the other being dropped. -/
   | parE
+  /-- A region's body, its arena in cell `a`: as it ends, the region's cells and the arena are freed. -/
+  | regionK (a : Nat)
 
 /-- A handler in force, by name: one that unwinds — an abortive arm, or a `try` — handling `l`; or
 one whose arm takes the code that performed `e` as its continuation, resuming it with its value.
@@ -587,6 +678,7 @@ def evalAtom (σ : Store) (env : Env) : Atom → Option (Val × Store)
     | some l =>
       match σ.mem l with
       | some (.int k) => some (.int k, σ)
+      | some (.rptr r) => some (.rptr r, σ)
       | _ => none
     | none => none
   | .move x =>
@@ -858,6 +950,31 @@ def eval (F : List Fn) (O : List Op) : Nat → HS → Store → Env → Expr →
           | none => (.stuck, σ1)
         | none => (.stuck, σ)
       | _, _ => (.stuck, σ)
+    | .region R _ body =>
+      let (a, σ1) := σ.alloc (.arena [])
+      ret F O n hs (.regionK a) (eval F O n hs σ1 ((R, a) :: env) body)
+    | .ralloc R τ a =>
+      match lookup R env with
+      | some c =>
+        match σ.mem c with
+        | some (.arena cs) =>
+          match evalAtom σ env a with
+          | some (v, σ1) =>
+            let (l, σ2) := σ1.alloc v
+            (.val (.rptr l), (σ2.set c (some (.arena (cs ++ [l])))).tag l c τ)
+          | none => (.stuck, σ)
+        | _ => (.stuck, σ)
+      | none => (.stuck, σ)
+    | .rget p =>
+      match resolve σ env p with
+      | some c =>
+        match σ.mem c with
+        | some (.rptr l) =>
+          match σ.mem l with
+          | some v => (.val v, σ)
+          | none => (.stuck, σ)
+        | _ => (.stuck, σ)
+      | none => (.stuck, σ)
 termination_by n _ _ _ _ => (n, 0, 0)
 
 /-- What frame `f` does with what the code it ran gave, under the handlers `hs` around it. -/
@@ -1057,6 +1174,10 @@ def ret (F : List Fn) (O : List Op) (n : Nat) (hs : HS) : Kont → Res × Store 
     | none => (.stuck, σ)
   | .parY _ _, r => r
   | .parE, r => r
+  | .regionK a, (r, σ) =>
+    match σ.mem a with
+    | some (.arena cs) => (r, (σ.freeAll cs).set a none)
+    | _ => (.stuck, σ)
 termination_by _ _ => (n, 1, 0)
 
 /-- A continuation given what the code it was taken at gives: its frames, the outermost first, each
@@ -1094,6 +1215,16 @@ def Slot.shell : Slot → Bool
   | _ => false
 
 abbrev Ctx := List (Var × Slot)
+
+/-- A slot said of a place `n` regions further in. -/
+def Slot.shiftBy (n : Nat) : Slot → Slot
+  | .own τ live => .own (τ.shiftBy n) live
+  | .ref m τ => .ref m (τ.shiftBy n)
+  | .lent τ => .lent (τ.shiftBy n)
+  | .half t A B => .half t (A.shiftBy n) (B.shiftBy n)
+
+/-- A context said of the body of a region inside it. -/
+def Ctx.shift (Γ : Ctx) : Ctx := Γ.map fun p => (p.1, p.2.shiftBy 1)
 
 def setSlot (Γ : Ctx) (x : Var) (s : Slot) : Ctx :=
   Γ.map fun (y, t) => if y = x then (y, s) else (y, t)
@@ -1236,6 +1367,8 @@ def armCtx (os : List Var) (rs : List Var) (op : Op) (caps : List (Var × Mode �
 inductive AtomTy (Γ : Ctx) : Atom → Ty → Ctx → Prop
   | lit : AtomTy Γ (.lit n) .int Γ
   | read : PlaceTy Γ p .int w y → AtomTy Γ (.read p) .int Γ
+  /-- A reference into a region, copied. -/
+  | readRef : PlaceTy Γ p (.rref k τ) w y → AtomTy Γ (.read p) (.rref k τ) Γ
   /-- A value moved out of its variable: a box, or a closure, passed or returned by value. -/
   | move : lookup x Γ = some (.own τ true) → τ.complete = true → AtomTy Γ (.move x) τ (setSlot Γ x (.own τ false))
 
@@ -1276,7 +1409,7 @@ inductive Typed (F : List Fn) (O : List Op) : Ctx → Expr → Ty → Ctx → Ro
   /-- A closure captures a value, moved in, which may be a closure; its type says how it is called,
   what it takes and gives, and what it may perform, but not what it captured. -/
   | lam : F[f]? = some d → d.cap = some (xc, τc, k) → d.owns = [(pn, A)] → d.refs = [] →
-      d.retp = none → AtomTy Γ a τc Γ₁ → Typed F O Γ (.lam f a) (.fn k A d.ret d.row) Γ₁ r
+      d.retp = none → AtomTy Γ a τc Γ₁ → τc.rfree = true → Typed F O Γ (.lam f a) (.fn k A d.ret d.row) Γ₁ r
   /-- A closure called once is moved out of its variable. -/
   | applyOnce : lookup x Γ = some (.own (.fn .once A B r') true) → (∀ l ∈ r', l ∈ r) →
       AtomTy (setSlot Γ x (.own (.fn .once A B r') false)) a A Γ₁ →
@@ -1378,6 +1511,18 @@ inductive Typed (F : List Fn) (O : List Op) : Ctx → Expr → Ty → Ctx → Ro
       AtomsTy Γ (oa ++ ob) (da.owns.map Prod.snd ++ db.owns.map Prod.snd) Γ₁ →
       Lends Γ₁ ((la ++ lb).map fun p => (.ro, p)) (da.refs.map Prod.snd ++ db.refs.map Prod.snd) ys →
       Typed F O Γ (.par e fa oa la fb ob lb) (.pair da.ret db.ret) Γ₁ r
+  /-- A region: its body sees its arena `R` as the innermost region, and the variables around it a
+  region further out. Nothing the region holds outlives it: the type of its value, and what its body
+  leaves of the variables around, are said of the code around. -/
+  | region : lookup R Γ = none → τ.complete = true →
+      Typed F O ((R, .own (.arena 0) true) :: Ctx.shift Γ) body (τ.shiftBy 1) ((R, .own (.arena 0) true) :: Ctx.shift Γ') r →
+      Typed F O Γ (.region R τ body) τ Γ' r
+  /-- Allocating in a region, through its arena, owned or lent `mut`: data the region may hold. -/
+  | ralloc : lookup R Γ = some s → (s = .own (.arena k) true ∨ s = .ref .mut (.arena k)) → τ.rdata = true →
+      AtomTy Γ a (τ.shiftBy k) Γ → Typed F O Γ (.ralloc R τ a) (.rref k τ) Γ r
+  /-- Reading what a reference into a region refers to, its arena in reach. -/
+  | rget : PlaceTy Γ p (.rref k τ) w y → lookup R Γ = some s → (s = .own (.arena k) true ∨ ∃ m, s = .ref m (.arena k)) →
+      Typed F O Γ (.rget p) (τ.shiftBy k) Γ r
 
 
 end FlyCore.Ownership
