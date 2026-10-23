@@ -401,7 +401,19 @@ theorem find_head : ∃ f, find l (Frame.abort l i :: hs) = some f :=
 theorem AimedIn.push (h : AimedIn a hs) : AimedIn a (Kont.push f hs) := by
   obtain ⟨l, hl⟩ := h
   refine ⟨l, ?_⟩
-  cases f <;> first | exact hl | exact List.mem_cons_of_mem _ hl
+  cases f <;> first | exact hl | exact List.mem_cons_of_mem _ hl | exact List.mem_cons_of_mem _ (List.mem_cons_of_mem _ hl)
+
+/-- A scope's frames put in force the handlers of its two operations. -/
+theorem sc_ready (hop : O[e]? = some op) (hopS : O[eS]? = some opS) (hok : HSOk O hs) (hcov : Covers hs r) :
+    Ready O (.capture e hid :: .capture eS hid :: hs) (.eff e :: .eff eS :: r) := by
+  refine ⟨.capture ⟨_, hop⟩ (.capture ⟨_, hopS⟩ hok), fun l hl => ?_⟩
+  rcases List.mem_cons.mp hl with rfl | hl
+  · exact ⟨_, by simp only [find, Frame.handles, beq_self_eq_true, ↓reduceIte]; rfl⟩
+  rcases List.mem_cons.mp hl with rfl | hl
+  · by_cases h : e = eS
+    · subst h; exact ⟨_, by simp only [find, Frame.handles, beq_self_eq_true, ↓reduceIte]; rfl⟩
+    · exact ⟨.capture eS hid, by simp [find, Frame.handles, h]⟩
+  · exact covers_cons _ (covers_cons _ hcov) l hl
 
 /-- What a frame puts in force is well formed, and handles what the code it runs may perform. -/
 theorem FrameOk.ready (hf : FrameOk F O ιi ιo σf f inL outL Xf A) (hR : Ready O hs outL.r) :
@@ -447,8 +459,10 @@ theorem FrameOk.ready (hf : FrameOk F O ιi ιo σf f inL outL Xf A) (hR : Ready
     rcases List.mem_cons.mp hl with rfl | hl
     · exact ⟨_, by simp only [Kont.push, find, Frame.handles, beq_self_eq_true, ↓reduceIte]; rfl⟩
     · exact covers_cons _ hcov l hl
-  | genE =>
+  | genE | scEb | scEt =>
     exact ⟨.abort (by intro e h; cases h) hok, fun l hl => covers_cons _ hcov l hl⟩
+  | scB hS | scW hS | scV hS => exact sc_ready hS.hop hS.hopS hok hcov
+  | scX hop _ _ _ hopS => exact sc_ready hop hopS hok hcov
   | _ => exact ⟨hok, hcov⟩
 
 /-- What a frame's code only reads is its own, or what its construct only reads. -/
@@ -508,6 +522,7 @@ theorem FrameOk.S_sub (hf : FrameOk F O ιi ιo σf f inL outL Xf A) : ∀ l ∈
     rcases hSo l hl with h | h
     · exact .inl (by simp [h])
     · exact .inr h
+  | scW | scV | scEt => intro l hl; simp [tLvl] at hl
   | _ => intro l hl; exact .inr hl
 
 /-- The code that performed the operation a continuation was taken at: its activation, the places
@@ -536,7 +551,7 @@ theorem FramesOk.base_of : ∀ {ι : List Nat} {K : List Kont} {top : Lvl} {X : 
       · exact .inr h
 
 theorem Kont.push_mem {f : Kont} {x : Frame} (h : x ∈ f.push []) : x ∈ f.push hs := by
-  cases f <;> simp only [Kont.push, List.mem_cons, List.not_mem_nil, or_false] at h ⊢ <;> simp_all
+  cases f <;> simp only [Kont.push, List.mem_cons, List.not_mem_nil, or_false] at h ⊢ <;> first | simp_all | grind
 
 /-- The continuation of an operation: resumed with a value of the operation's type, or dropped,
 it gives what its outermost frame's construct does. -/

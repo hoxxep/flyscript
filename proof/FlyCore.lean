@@ -12,5 +12,6 @@ import FlyCore.OwnershipTasks
 import FlyCore.OwnershipRegions
 import FlyCore.OwnershipVec
 import FlyCore.OwnershipGen
+import FlyCore.OwnershipScope
 import FlyCore.OwnershipMain
 import FlyCore.OwnershipExamples

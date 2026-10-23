@@ -2232,6 +2232,107 @@ example : ∀ n, match eval [drain] genOps n [.abort .fail 0] .empty [] genDrain
     | (.abort _ _, σ') => ∀ l, σ'.mem l = none :=
   program_ok drain_ok genDrain_typed
 
+/-! Scopes: a body starts tasks as it runs, each a closure called once that moved in what it
+captured; the body and its tasks give way to each other, in any order a schedule picks. -/
+
+/-- `Yield`, by which a scope's body and tasks give way, and `Spawn`, by which they start a task. -/
+def scYield : Op := { owns := [], refs := [], ret := .int }
+def scSpawn : Op := { owns := [.fn .once .int .int [.eff 0]], refs := [], ret := .int }
+def scOps : List Op := [scYield, scSpawn]
+
+/-- `(_) => { yield; *b }`, a closure that captured a box `b`. -/
+def tk : Fn :=
+  { owns := [("p", .int)], refs := [], ret := .int, row := [.eff 0], cap := some ("b", .box .int, .once),
+    body := .let_ "u" .int (.perform 0 [] []) (.atom (.read (deref (var "b")))) }
+
+/-- `scope((s) => { const b = Box.new(5); s.spawn(() => …b…); const c = Box.new(7);
+s.spawn(() => …c…); yield; 42 })`: two tasks started as the body runs, each owning a box; 42, and
+nothing left allocated, whichever way they interleave. -/
+def scopeEx : Expr :=
+  .scope 0 1 .int
+    (.let_ "b" (.box .int) (.new (.lit 5))
+      (.let_ "k" (.fn .once .int .int [.eff 0]) (.lam 0 (.move "b"))
+        (.let_ "u" .int (.perform 1 [.move "k"] [])
+          (.let_ "c" (.box .int) (.new (.lit 7))
+            (.let_ "k2" (.fn .once .int .int [.eff 0]) (.lam 0 (.move "c"))
+              (.let_ "u2" .int (.perform 1 [.move "k2"] [])
+                (.let_ "y" .int (.perform 0 [] []) (.atom (.lit 42)))))))))
+
+example : value (eval [tk] scOps 80 [] .empty [] scopeEx) = some 42 := by
+  run [scopeEx, tk, scOps, scYield, scSpawn, mkTask, cloFn]
+example : freed (eval [tk] scOps 80 [] .empty [] scopeEx) := by
+  run [scopeEx, tk, scOps, scYield, scSpawn, mkTask, cloFn]
+example : value (eval [tk] scOps 80 [] (Store.sched0 fun _ => false) [] scopeEx) = some 42 := by
+  run [scopeEx, tk, scOps, scYield, scSpawn, mkTask, cloFn]
+example : freed (eval [tk] scOps 80 [] (Store.sched0 fun _ => false) [] scopeEx) := by
+  run [scopeEx, tk, scOps, scYield, scSpawn, mkTask, cloFn]
+
+theorem tk_ok : FnsOk [tk] scOps := by
+  intro d hd
+  simp only [List.mem_singleton] at hd
+  subst hd
+  refine ⟨by decide, ?_⟩
+  simp only [tk, FnOk, fnCtx, cloFn, ownCtx, refCtx]
+  exact ⟨by decide, [("p", .own .int true), ("b", .own (.box .int) true)], .let_ (live := true) rfl (.perform (op := scYield) rfl (List.mem_singleton_self _) .nil .nil .nil)
+    (.atom (.read (.deref (.own rfl))))⟩
+
+theorem scopeEx_typed : Typed [tk] scOps [] scopeEx .int [] [.fail] := by
+  refine .scope (op := scYield) (opS := scSpawn) (rT := [.eff 0]) rfl rfl rfl rfl rfl rfl rfl rfl (by decide)
+    (by simp) (by simp) rfl ?_
+  refine .let_ (live := false) rfl (.new .lit) ?_
+  refine .let_ (live := false) rfl (.lam (d := tk) rfl rfl rfl rfl rfl (.move rfl rfl) rfl) ?_
+  refine .let_ (live := true) rfl (.perform (op := scSpawn) rfl (by simp) (.cons (.move rfl rfl) .nil) .nil .nil) ?_
+  refine .let_ (live := false) rfl (.new .lit) ?_
+  refine .let_ (live := false) rfl (.lam (d := tk) rfl rfl rfl rfl rfl (.move rfl rfl) rfl) ?_
+  refine .let_ (live := true) rfl (.perform (op := scSpawn) rfl (by simp) (.cons (.move rfl rfl) .nil) .nil .nil) ?_
+  exact .let_ (live := true) rfl (.perform (op := scYield) rfl (by simp) .nil .nil .nil) (.atom .lit)
+
+/-- Under any schedule. -/
+example (s : Nat → Bool) : ∀ n, match eval [tk] scOps n [.abort .fail 0] (Store.sched0 s) [] scopeEx with
+    | (.stuck, _) => False
+    | (.susp _ _ _ _ _, _) => False
+    | (.timeout, _) => True
+    | (.panic, _) => True
+    | (.val v, σ') => ∃ L, VT [tk] [] σ' .int v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
+    | (.abort _ _, σ') => ∀ l, σ'.mem l = none :=
+  program_ok_sched tk_ok scopeEx_typed s
+
+/-- `(_) => { yield; throw 41 }` and `(_) => { yield; *b }`, closures that captured a box each. -/
+def badTk : Fn :=
+  { owns := [("p", .int)], refs := [], ret := .int, row := [.eff 0, .fail], cap := some ("b", .box .int, .once),
+    body := .let_ "u" .int (.perform 0 [] []) (.throw_ (.lit 41)) }
+def okTk : Fn :=
+  { owns := [("p", .int)], refs := [], ret := .int, row := [.eff 0, .fail], cap := some ("b", .box .int, .once),
+    body := .let_ "u" .int (.perform 0 [] []) (.atom (.read (deref (var "b")))) }
+def scSpawnF : Op := { owns := [.fn .once .int .int [.eff 0, .fail]], refs := [], ret := .int }
+
+/-- `try { scope((s) => { s.spawn(bad); s.spawn(ok); const d = Box.new(1); yield; yield; 0 }) }
+catch (e) { e + 1 }`: a task fails; what is left of the scope, its body and the other task, each
+owning a box, is dropped where it waits; 42, and nothing left allocated, whichever way they
+interleave. -/
+def scopeFail : Expr :=
+  .try_ (.scope 0 1 .int
+    (.let_ "b" (.box .int) (.new (.lit 5))
+      (.let_ "k" (.fn .once .int .int [.eff 0, .fail]) (.lam 0 (.move "b"))
+        (.let_ "u" .int (.perform 1 [.move "k"] [])
+          (.let_ "c" (.box .int) (.new (.lit 7))
+            (.let_ "k2" (.fn .once .int .int [.eff 0, .fail]) (.lam 1 (.move "c"))
+              (.let_ "u2" .int (.perform 1 [.move "k2"] [])
+                (.let_ "d" (.box .int) (.new (.lit 1))
+                  (.let_ "y" .int (.perform 0 [] []) (.let_ "y2" .int (.perform 0 [] []) (.atom (.lit 0))))))))))))
+    "e" (.add (.read (var "e")) (.lit 1))
+
+example : value (eval [badTk, okTk] [scYield, scSpawnF] 120 [.abort .fail 0] .empty [] scopeFail) = some 42 := by
+  run [scopeFail, badTk, okTk, scYield, scSpawnF, mkTask, cloFn]
+example : freed (eval [badTk, okTk] [scYield, scSpawnF] 120 [.abort .fail 0] .empty [] scopeFail) := by
+  run [scopeFail, badTk, okTk, scYield, scSpawnF, mkTask, cloFn]
+example : value (eval [badTk, okTk] [scYield, scSpawnF] 120 [.abort .fail 0] (Store.sched0 fun _ => false) []
+    scopeFail) = some 42 := by
+  run [scopeFail, badTk, okTk, scYield, scSpawnF, mkTask, cloFn]
+example : freed (eval [badTk, okTk] [scYield, scSpawnF] 120 [.abort .fail 0] (Store.sched0 fun _ => false) []
+    scopeFail) := by
+  run [scopeFail, badTk, okTk, scYield, scSpawnF, mkTask, cloFn]
+
 /-- `region (R) { const l = RegionList.new(); l.push(40); l.push(2); l[0] + l[1] }`: a list of the
 region, its elements cells of the region, all released as it ends; 42. -/
 def regionList : Expr :=

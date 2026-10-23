@@ -398,6 +398,10 @@ inductive Expr where
   `#Done` once `f` has ended. `body` has type `τb`; `f` is lent the places of `caps`, `readonly` or,
   whole bindings, `mut`. -/
   | gen (eN eY : Nat) (τy τb : Ty) (f : Nat) (owned : List Atom) (caps : List (Cap Place)) (body : Expr)
+  /-- `scope (s) { body }`: `body` starts tasks as it runs, each by performing `eS` with a closure
+  called once, `spawn(s, () => …)`, and each, `body` too, gives way by performing `e`; the scope
+  ends once `body` and every task it started have. -/
+  | scope (e eS : Nat) (τ : Ty) (body : Expr)
   /-- `{ const x = p[z]; body }` with `x` a borrow — `readonly` or `mut` — of the element of the
   vector at `p` that the integer `z` names, for as long as `body` runs; a panic if there is none. -/
   | lendIdx (x : Var) (m : Mode) (p : Place) (z : Var) (body : Expr)
@@ -687,6 +691,19 @@ inductive Kont where
   /-- A producer being dropped as its consumer ended with `o`, of type `τb`, by unwinding it to the
   barrier `d`: once the unwinding reaches it, `o` goes on. -/
   | genE (τb : Ty) (o : Outcome) (d : Nat)
+  /-- A scope's body running, of type `τ`, its tasks waiting as `Q`, each where it last gave way;
+  giving way by `e` and starting tasks by `eS`, handled here as `id`. -/
+  | scB (e eS id : Nat) (τ : Ty) (Q : List (List Kont))
+  /-- A scope's task running, its body waiting as `Kb` where it last gave way, its other tasks as `Q`. -/
+  | scW (e eS id : Nat) (τ : Ty) (Kb : List Kont) (Q : List (List Kont))
+  /-- A scope's task running, its body done with `v`, its other tasks waiting as `Q`. -/
+  | scV (e eS id : Nat) (τ : Ty) (v : Val) (Q : List (List Kont))
+  /-- A scope's body or task being dropped: it goes on at once where it gives way, and a task it
+  starts is dropped. -/
+  | scX (e eS id : Nat)
+  /-- A scope that failed, or whose body or task did, with `o`, of type `τ`: what is being dropped, of
+  type `τd`, is unwinding to the barrier `d`; then each task of `Q` is, and `o` goes on. -/
+  | scE (e eS id : Nat) (τ τd : Ty) (o : Outcome) (d : Nat) (Q : List (List Kont))
 
 /-- A handler in force, by name: one that unwinds — an abortive arm, or a `try` — handling `l`; or
 one whose arm takes the code that performed `e` as its continuation, resuming it with its value.
@@ -721,6 +738,11 @@ def Kont.push : Kont → HS → HS
   | .genY eY id _, hs => .capture eY id :: hs
   | .genN eN id _, hs => .capture eN id :: hs
   | .genE _ _ d, hs => .abort .drop d :: hs
+  | .scB e eS id _ _, hs => .capture e id :: .capture eS id :: hs
+  | .scW e eS id _ _ _, hs => .capture e id :: .capture eS id :: hs
+  | .scV e eS id _ _ _, hs => .capture e id :: .capture eS id :: hs
+  | .scX e eS id, hs => .capture e id :: .capture eS id :: hs
+  | .scE _ _ _ _ _ _ d _, hs => .abort .drop d :: hs
   | _, hs => hs
 
 inductive Res where
@@ -805,6 +827,24 @@ def dropRet (τ : Ty) (o : Outcome) (d : Nat) : Res × Store → Res × Store
     | none => (.stuck, σ)
   | (.susp j ef vs ls K, σ) => (.susp j ef vs ls (.dropK τ o d :: K), σ)
   | r => r
+
+/-- A task started from a closure called once, `v`: what it captured moved to a parameter of its
+code, which is called with `0` once the task first goes on. -/
+def mkTask (F : List Fn) (σ : Store) : Val → Option (List Kont × Store)
+  | .clo f c τc =>
+    match F[f]?, σ.mem c with
+    | some d, some w =>
+      match d.cap with
+      | some (xc, _, _) =>
+        let d' := cloFn d xc τc .once
+        if 2 = d'.owns.length ∧ d'.refs = [] then
+          let (cells, σ2) := allocAll (σ.set c none) ((d'.owns.map Prod.fst).zip [.int 0, w])
+          some ([.callK ((d'.owns.map Prod.snd).zip (cells.map Prod.snd)),
+            .startK (cells ++ (d'.refs.map Prod.fst).zip ([] : List Nat)) d'.body], σ2)
+        else none
+      | none => none
+    | _, _ => none
+  | _ => none
 
 /-- A call's body ended: the parameters it owns are dropped; a continuation taken in it keeps them. -/
 def callRet (cells : List (Ty × Nat)) : Res × Store → Res × Store
@@ -1124,6 +1164,9 @@ def eval (F : List Fn) (O : List Op) : Nat → HS → Store → Env → Expr →
           | none => (.stuck, σ1)
         | none => (.stuck, σ)
       | _, _ => (.stuck, σ)
+    | .scope e eS τ body =>
+      let (id, σ1) := σ.fresh
+      ret F O n hs (.scB e eS id τ []) (eval F O n (.capture e id :: .capture eS id :: hs) σ1 env body)
     | .gen eN eY τy τb f owned caps body =>
       match F[f]? with
       | some d =>
@@ -1377,6 +1420,86 @@ def ret (F : List Fn) (O : List Op) (n : Nat) (hs : HS) : Kont → Res × Store 
       let (b, σ1) := σ.alloc (.int 0)
       ret F O m hs (.genN eN id τy) (evalK F O m (.capture eN id :: hs) σ1 K (.val (.tag .int τy true b)))
   | .genE τb o d, (.susp j ef vs ls K, σ) => (.susp j ef vs ls (.genE τb o d :: K), σ)
+  | .scB e eS id τ Q, (.susp j ef vs ls K, σ) =>
+    if j ≠ id ∨ (ef ≠ e ∧ ef ≠ eS) then (.susp j ef vs ls (.scB e eS id τ Q :: K), σ) else
+    match n with
+    | 0 => (.timeout, σ)
+    | m + 1 =>
+      if ef = eS then
+        match vs with
+        | [v] =>
+          match mkTask F σ v with
+          | some (Kt, σ1) =>
+            ret F O m hs (.scB e eS id τ (Q ++ [Kt]))
+              (evalK F O m (.capture e id :: .capture eS id :: hs) σ1 K (.val (.int 0)))
+          | none => (.stuck, σ)
+        | _ => (.stuck, σ)
+      else
+        let (t, σ1) := σ.fresh
+        match Q with
+        | [] => ret F O m hs (.scB e eS id τ []) (evalK F O m (.capture e id :: .capture eS id :: hs) σ1 K (.val (.int 0)))
+        | Kt :: Q' =>
+          if σ.sched t then
+            ret F O m hs (.scB e eS id τ (Kt :: Q')) (evalK F O m (.capture e id :: .capture eS id :: hs) σ1 K (.val (.int 0)))
+          else
+            ret F O m hs (.scW e eS id τ K Q') (evalK F O m (.capture e id :: .capture eS id :: hs) σ1 Kt (.val (.int 0)))
+  | .scW e eS id τ Kb Q, (.susp j ef vs ls K, σ) =>
+    if j ≠ id ∨ (ef ≠ e ∧ ef ≠ eS) then (.susp j ef vs ls (.scW e eS id τ Kb Q :: K), σ) else
+    match n with
+    | 0 => (.timeout, σ)
+    | m + 1 =>
+      if ef = eS then
+        match vs with
+        | [v] =>
+          match mkTask F σ v with
+          | some (Kt, σ1) =>
+            ret F O m hs (.scW e eS id τ Kb (Q ++ [Kt]))
+              (evalK F O m (.capture e id :: .capture eS id :: hs) σ1 K (.val (.int 0)))
+          | none => (.stuck, σ)
+        | _ => (.stuck, σ)
+      else
+        let (t, σ1) := σ.fresh
+        if σ.sched t then
+          ret F O m hs (.scW e eS id τ Kb Q) (evalK F O m (.capture e id :: .capture eS id :: hs) σ1 K (.val (.int 0)))
+        else
+          ret F O m hs (.scB e eS id τ (Q ++ [K])) (evalK F O m (.capture e id :: .capture eS id :: hs) σ1 Kb (.val (.int 0)))
+  | .scV e eS id τ v Q, (.susp j ef vs ls K, σ) =>
+    if j ≠ id ∨ (ef ≠ e ∧ ef ≠ eS) then (.susp j ef vs ls (.scV e eS id τ v Q :: K), σ) else
+    match n with
+    | 0 => (.timeout, σ)
+    | m + 1 =>
+      if ef = eS then
+        match vs with
+        | [w] =>
+          match mkTask F σ w with
+          | some (Kt, σ1) =>
+            ret F O m hs (.scV e eS id τ v (Q ++ [Kt]))
+              (evalK F O m (.capture e id :: .capture eS id :: hs) σ1 K (.val (.int 0)))
+          | none => (.stuck, σ)
+        | _ => (.stuck, σ)
+      else
+        let (t, σ1) := σ.fresh
+        match Q with
+        | [] => ret F O m hs (.scV e eS id τ v []) (evalK F O m (.capture e id :: .capture eS id :: hs) σ1 K (.val (.int 0)))
+        | Kt :: Q' =>
+          if σ.sched t then
+            ret F O m hs (.scV e eS id τ v (Kt :: Q')) (evalK F O m (.capture e id :: .capture eS id :: hs) σ1 K (.val (.int 0)))
+          else
+            ret F O m hs (.scV e eS id τ v (Q' ++ [K])) (evalK F O m (.capture e id :: .capture eS id :: hs) σ1 Kt (.val (.int 0)))
+  | .scX e eS id, (.susp j ef vs ls K, σ) =>
+    if j ≠ id ∨ (ef ≠ e ∧ ef ≠ eS) then (.susp j ef vs ls (.scX e eS id :: K), σ) else
+    match n with
+    | 0 => (.timeout, σ)
+    | m + 1 =>
+      if ef = eS then
+        match vs with
+        | [w] =>
+          match drop σ (.fn .once .int .int []) w with
+          | some σ1 => ret F O m hs (.scX e eS id) (evalK F O m (.capture e id :: .capture eS id :: hs) σ1 K (.val (.int 0)))
+          | none => (.stuck, σ)
+        | _ => (.stuck, σ)
+      else ret F O m hs (.scX e eS id) (evalK F O m (.capture e id :: .capture eS id :: hs) σ K (.val (.int 0)))
+  | .scE e eS id τ τd o d Q, (.susp j ef vs ls K, σ) => (.susp j ef vs ls (.scE e eS id τ τd o d Q :: K), σ)
   | f, (.susp j ef vs ls K, σ) =>
     match f with
     | .scopeK τ c => leave τ c (.susp j ef vs ls K, σ)
@@ -1557,6 +1680,69 @@ def ret (F : List Fn) (O : List Op) (n : Nat) (hs : HS) : Kont → Res × Store 
       | none => (.stuck, σ)
     | .abort _ _ => (.abort j k, σ)
   | .genE τb o _, (.val _, σ) => (o.res, σ)
+  | .scB e eS id τ Q, (.val v, σ) =>
+    match Q, n with
+    | [], _ => (.val v, σ)
+    | _ :: _, 0 => (.timeout, σ)
+    | Kt :: Q', m + 1 =>
+      ret F O m hs (.scV e eS id τ v Q') (evalK F O m (.capture e id :: .capture eS id :: hs) σ Kt (.val (.int 0)))
+  | .scB e eS id τ Q, (.abort j k, σ) =>
+    match Q, n with
+    | [], _ => (.abort j k, σ)
+    | _ :: _, 0 => (.timeout, σ)
+    | Kt :: Q', m + 1 =>
+      let (d, σ1) := σ.fresh
+      ret F O m hs (.scE e eS id τ .int (.abort j k) d Q') (ret F O m (.abort .drop d :: hs) (.scX e eS id)
+        (evalK F O m (.capture e id :: .capture eS id :: .abort .drop d :: hs) σ1 Kt (.abort d 0)))
+  | .scW e eS id τ Kb Q, (.val _, σ) =>
+    match n with
+    | 0 => (.timeout, σ)
+    | m + 1 => ret F O m hs (.scB e eS id τ Q) (evalK F O m (.capture e id :: .capture eS id :: hs) σ Kb (.val (.int 0)))
+  | .scW e eS id τ Kb Q, (.abort j k, σ) =>
+    match n with
+    | 0 => (.timeout, σ)
+    | m + 1 =>
+      let (d, σ1) := σ.fresh
+      ret F O m hs (.scE e eS id τ τ (.abort j k) d Q) (ret F O m (.abort .drop d :: hs) (.scX e eS id)
+        (evalK F O m (.capture e id :: .capture eS id :: .abort .drop d :: hs) σ1 Kb (.abort d 0)))
+  | .scV e eS id τ v Q, (.val _, σ) =>
+    match Q, n with
+    | [], _ => (.val v, σ)
+    | _ :: _, 0 => (.timeout, σ)
+    | Kt :: Q', m + 1 =>
+      ret F O m hs (.scV e eS id τ v Q') (evalK F O m (.capture e id :: .capture eS id :: hs) σ Kt (.val (.int 0)))
+  | .scV e eS id τ v Q, (.abort j k, σ) =>
+    match drop σ τ v with
+    | none => (.stuck, σ)
+    | some σ' =>
+      match Q, n with
+      | [], _ => (.abort j k, σ')
+      | _ :: _, 0 => (.timeout, σ')
+      | Kt :: Q', m + 1 =>
+        let (d, σ1) := σ'.fresh
+        ret F O m hs (.scE e eS id τ .int (.abort j k) d Q') (ret F O m (.abort .drop d :: hs) (.scX e eS id)
+          (evalK F O m (.capture e id :: .capture eS id :: .abort .drop d :: hs) σ1 Kt (.abort d 0)))
+  | .scX _ _ _, r => r
+  | .scE e eS id τ τd o d Q, (r, σ) =>
+    let next : Option (Outcome × Store) :=
+      match r with
+      | .abort j k =>
+        if j = d then some (o, σ) else
+        match o with
+        | .val u => (drop σ τ u).map fun σ' => (.abort j k, σ')
+        | .abort _ _ => some (.abort j k, σ)
+      | .val v => (drop σ τd v).map fun σ' => (o, σ')
+      | _ => some (o, σ)
+    match next with
+    | none => (.stuck, σ)
+    | some (o', σ') =>
+      match Q, n with
+      | [], _ => (o'.res, σ')
+      | _ :: _, 0 => (.timeout, σ')
+      | Kt :: Q', m + 1 =>
+        let (d', σ1) := σ'.fresh
+        ret F O m hs (.scE e eS id τ .int o' d' Q') (ret F O m (.abort .drop d' :: hs) (.scX e eS id)
+          (evalK F O m (.capture e id :: .capture eS id :: .abort .drop d' :: hs) σ1 Kt (.abort d' 0)))
   | .regionK a, (r, σ) =>
     match σ.mem a with
     | some (.arena cs) => (r, (σ.freeAll cs).set a none)
@@ -1855,6 +2041,13 @@ inductive Typed (F : List Fn) (O : List Op) : Ctx → Expr → Ty → Ctx → Ro
       Typed F O (freeze (hideAll Γ₁ (roots .mut ys)) (roots .ro ys)) body τb Γb (.eff eN :: r) → τb.complete = true →
       Typed F O Γ (.gen eN eY τy τb f owned caps body) τb
         (unhideAll Γ₁ (roots .mut ys) (thaw (hideAll Γ₁ (roots .mut ys)) (roots .ro ys) Γb)) r
+  /-- A scope: its body, and every task it starts — a closure called once, which took what it captured
+by moving it — give way by `e` and start tasks by `eS`; what else they perform goes on to the code
+around. -/
+  | scope : O[e]? = some op → op.owns = [] → op.refs = [] → op.ret = .int →
+      O[eS]? = some opS → opS.owns = [.fn .once .int .int rT] → opS.refs = [] → opS.ret = .int → e ≠ eS →
+      (∀ l ∈ rT, l ∈ .eff e :: .eff eS :: r) → Label.eff e ∈ rT → τ.complete = true →
+      Typed F O Γ body τ Γb (.eff e :: .eff eS :: r) → Typed F O Γ (.scope e eS τ body) τ Γb r
   /-- A borrow of an element of a vector, for the code it is in scope for: it is a borrow of the
   whole vector, which is only read, or not reached, until it ends. -/
   | lendIdx : lookup x Γ = none → PlaceTy Γ p (.vec g τ) w y → PlaceTy Γ (.var z) .int wz yz →

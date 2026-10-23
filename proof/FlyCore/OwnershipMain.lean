@@ -1,4 +1,4 @@
-import FlyCore.OwnershipGen
+import FlyCore.OwnershipScope
 
 /-!
 # Ownership: soundness
@@ -559,6 +559,8 @@ theorem eval_ok_succ (hF : FnsOk F O) (hE : EvalOk F O n) (hR : RetOk F O n) :
       exact gen_ok hF hE hR hopN hNowns hNrefs hNret hopY hYowns hYrefs hYret hcy hfd hretp hcap hdret hrow hey hdrefs
         hargs hcaps hexcl hb hcb hI hwf hRdy
     | lendField hx hy hty hsl _ hmf hb => exact lendField_ok hE hx hy hty hsl hmf hb hI hwf hRdy
+    | scope hop howns hrefs hret hopS hSowns hSrefs hSret hne hrT heT hcτ hb =>
+      exact scope_ok hE hR ⟨hop, howns, hrefs, hret, hopS, hSowns, hSrefs, hSret, hne, hrT, heT, hcτ⟩ hb hI hwf hRdy
     | handle hop hcomp hos hrs hcaps hexcl hnd harm hbody =>
       exact handle_ok hE hR hop hcomp hos hrs hcaps hexcl hnd harm hbody hI hwf hRdy
     | handleR hop hcomp hos hrs hcaps hexcl hnd hfd hown hdrefs hretp hcap hret hrow hC harm hbody =>
@@ -581,7 +583,7 @@ theorem eval_ok_succ (hF : FnsOk F O) (hE : EvalOk F O n) (hR : RetOk F O n) :
       exact par_ok hF hR (evalK_ok hR) hop howns hrefs hret hfa hfb hretpa hcapa hretpb hcapb hea heb hrowa hrowb
         hca hcb hargs hlends hI hwf hRdy
 
-theorem ret_ok (hE : EvalOk F O n) (hKo : ∀ m, n = m + 1 → EvalKOk F O m ∧ RetOk F O m) : RetOk F O n := by
+theorem ret_ok (hF : FnsOk F O) (hE : EvalOk F O n) (hKo : ∀ m, n = m + 1 → EvalKOk F O m ∧ RetOk F O m) : RetOk F O n := by
   intro hs ιi ιo σf f inL outL Xf A σ0 Ein res hf hR hA hwf hag halloc hnd hd hSa hSd hp
   cases hf with
   | letK hx hk hb => exact ret_letK hE hx hk hb hR hwf hp
@@ -636,17 +638,26 @@ theorem ret_ok (hE : EvalOk F O n) (hKo : ∀ m, n = m + 1 → EvalKOk F O m ∧
   | genN hop howns hrefs hret hcy =>
     simpa using ret_genN hKo hop howns hrefs hret hcy hR hwf (by simpa using hag) hSa (by simpa using hSd) hp
   | genE hG hIc hdFE hSo ho => exact ret_genE hG hIc hdFE hSo ho hR hA hwf hag halloc hnd hd hSa hSd hp
+  | scB hS hT => exact ret_scB hF hKo hS hT hR hA hwf hag halloc hnd hd hSa hSd hp
+  | scW hS hbr hbrefs hKb hagb hab hT hdbq =>
+    exact ret_scW hF hKo hS hbr hbrefs hKb hagb hab hT hdbq hR hA hwf hag halloc hnd hd hSa hSd hp
+  | scV hS hIb hv hdLE hdLS hT hdq => exact ret_scV hF hKo hS hIb hv hdLE hdLS hT hdq hR hA hwf hag halloc hnd hd hSa hSd hp
+  | scX hop howns hrefs hret hopS hSowns hSrefs hSret =>
+    simpa using ret_scX hKo hop howns hrefs hret hopS hSowns hSrefs hSret hR hwf (by simpa using hag) hSa
+      (by simpa using hSd) hp
+  | scEb hS hT => exact ret_scEb hKo hS hT hR hA hwf hag halloc hnd hd hSa hSd hp
+  | scEt hS hI hT hdT => exact ret_scEt hKo hS hI hT hdT hR hA hwf hag halloc hnd hd hSa hSd hp
 
 /-- Expressions, frames and continuations, at every fuel. -/
 theorem sound (hF : FnsOk F O) : ∀ n, EvalOk F O n ∧ RetOk F O n ∧ EvalKOk F O n
   | 0 =>
     have hE : EvalOk F O 0 := by intro _ _ _ _ _ _ _ _ _ _ _ _ _ _; simp [eval, Post]
-    have hR : RetOk F O 0 := ret_ok hE fun m h => absurd h (by omega)
+    have hR : RetOk F O 0 := ret_ok hF hE fun m h => absurd h (by omega)
     ⟨hE, hR, evalK_ok hR⟩
   | n + 1 =>
     have ⟨hE, hR, hK⟩ := sound hF n
     have hE' := eval_ok_succ hF hE hR
-    have hR' : RetOk F O (n + 1) := ret_ok hE' fun m h => by cases h; exact ⟨hK, hR⟩
+    have hR' : RetOk F O (n + 1) := ret_ok hF hE' fun m h => by cases h; exact ⟨hK, hR⟩
     ⟨hE', hR', evalK_ok hR'⟩
 
 theorem eval_ok (hF : FnsOk F O) (n : Nat) : EvalOk F O n := (sound hF n).1

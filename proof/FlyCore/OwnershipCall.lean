@@ -225,6 +225,7 @@ theorem atoms_weaker : AtomsTy Γ as τs Γ' → (Γ.map Prod.fst).Nodup → Wea
 moved. -/
 theorem typed_weaker : Typed F O Γ e τ Γ' r → (Γ.map Prod.fst).Nodup → Weaker Γ' Γ
   | .atom ha, hk => atom_weaker ha hk
+  | .scope _ _ _ _ _ _ _ _ _ _ _ _ hb, hk => typed_weaker hb hk
   | .add ha hb, hk => (atom_weaker hb (by rw [atom_keys ha]; exact hk)).trans (atom_weaker ha hk)
   | .new ha, hk => atom_weaker ha hk
   | .pair ha hb, hk => (atom_weaker hb (by rw [atom_keys ha]; exact hk)).trans (atom_weaker ha hk)
