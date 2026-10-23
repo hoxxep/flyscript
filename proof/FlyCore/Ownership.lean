@@ -372,6 +372,9 @@ inductive Expr where
   /-- `p.pop()`: the last element of the vector at `p`, moved out, as `#Some`, or `#None` if it is
   empty. -/
   | vpop (p : Place)
+  /-- `{ const x = p[lo..hi]; body }`, `x` a `readonly` slice of the vector at `p`, its elements from
+  `lo` up to `hi`, for as long as `body` runs; a panic if they are not there. -/
+  | lendSlice (x : Var) (p : Place) (lo hi : Var) (body : Expr)
   /-- `{ const g = generate(f(owned, lent)); body }`: `f` runs as `body` asks for its values, each a
   `τy` it yields by performing `eY`; `body` asks by performing `eN`, which gives `#Some(v)`, or
   `#Done` once `f` has ended. `body` has type `τb`; `f` is lent places only `readonly`. -/
@@ -1165,6 +1168,17 @@ def eval (F : List Fn) (O : List Op) : Nat → HS → Store → Env → Expr →
         | some (.vec cs) => (.val (.int cs.length), σ)
         | _ => (.stuck, σ)
       | none => (.stuck, σ)
+    | .lendSlice x p lo hi body =>
+      match resolve σ env p, lookup lo env, lookup hi env with
+      | some c, some l1, some l2 =>
+        match σ.mem c, σ.mem l1, σ.mem l2 with
+        | some (.vec cs), some (.int i), some (.int j) =>
+          if 0 ≤ i ∧ i ≤ j ∧ j ≤ cs.length then
+            let (a, σ1) := σ.alloc (.vec ((cs.drop i.toNat).take (j.toNat - i.toNat)))
+            ret F O n hs (.cloK a) (eval F O n hs σ1 ((x, a) :: env) body)
+          else (.panic, σ)
+        | _, _, _ => (.stuck, σ)
+      | _, _, _ => (.stuck, σ)
     | .vpop p =>
       match resolve σ env p with
       | some c =>
@@ -1845,6 +1859,12 @@ inductive Typed (F : List Fn) (O : List Op) : Ctx → Expr → Ty → Ctx → Ro
   | vlen : PlaceTy Γ p (.vec τ) w y → Typed F O Γ (.vlen p) .int Γ r
   /-- Pushing to a vector at a place that may be changed, the element moved in. -/
   | vpush : AtomTy Γ a τ Γ₁ → PlaceTy Γ₁ p (.vec τ) true y → Typed F O Γ (.vpush p a) .int Γ₁ r
+  /-- A `readonly` slice of a vector, for the code it is in scope for: a vector of its own, of some of
+  the vector's elements, which is only read meanwhile. -/
+  | lendSlice : lookup x Γ = none → PlaceTy Γ p (.vec τ) w y → PlaceTy Γ (.var lo) .int w1 y1 →
+      PlaceTy Γ (.var hi) .int w2 y2 →
+      Typed F O ((x, .ref .ro (.vec τ)) :: freeze Γ [y]) body τb ((x, .ref .ro (.vec τ)) :: Γb) r →
+      Typed F O Γ (.lendSlice x p lo hi body) τb (thaw Γ [y] Γb) r
   /-- Taking the last element out of a vector at a place that may be changed. -/
   | vpop : PlaceTy Γ p (.vec τ) true y → τ.complete = true → Typed F O Γ (.vpop p) (.sum .int τ) Γ r
   /-- Changing what a `Cell` of a region holds, through its arena, owned or lent `mut`. -/

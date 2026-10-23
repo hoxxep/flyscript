@@ -571,6 +571,7 @@ theorem eval_ok_succ (hF : FnsOk F O) (hE : EvalOk F O n) (hR : RetOk F O n) :
     | vlen hp => exact vlen_ok hp hI hwf
     | vpush ha hp => exact vpush_ok ha hp hI hwf
     | vpop hp hc => exact vpop_ok hp hc hI hwf
+    | lendSlice hx hp hlo hhi hb => exact lendSlice_ok hE hx hp hlo hhi hb hI hwf hRdy
     | par hop howns hrefs hret hfa hfb hretpa hcapa hretpb hcapb hea heb hrowa hrowb hca hcb hargs hlends =>
       exact par_ok hF hR (evalK_ok hR) hop howns hrefs hret hfa hfb hretpa hcapa hretpb hcapb hea heb hrowa hrowb
         hca hcb hargs hlends hI hwf hRdy

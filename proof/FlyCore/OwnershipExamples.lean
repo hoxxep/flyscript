@@ -1676,6 +1676,55 @@ example : value (eval [] [] 40 [] .empty [] vecPop) = some 42 := by
 example : freed (eval [] [] 40 [] .empty [] vecPop) := by
   run [vecPop]
 
+/-- `let v = [1, 2, 40]; { const s = v[1..3]; s.len() + s[1] }`: a slice of the vector, a vector of
+its own whose cell is freed as it ends; 42, and nothing left allocated. -/
+def vecSlice : Expr :=
+  .let_ "v" (.vec .int) .vnew
+    (.let_ "u1" .int (.vpush (var "v") (.lit 1))
+      (.let_ "u2" .int (.vpush (var "v") (.lit 2))
+        (.let_ "u3" .int (.vpush (var "v") (.lit 40))
+          (.let_ "lo" .int (.atom (.lit 1))
+            (.let_ "hi" .int (.atom (.lit 3))
+              (.let_ "k" .int (.atom (.lit 1))
+                (.lendSlice "s" (var "v") "lo" "hi"
+                  (.let_ "n" .int (.vlen (var "s"))
+                    (.lendIdx "e" .ro (var "s") "k" (.add (.read (var "e")) (.read (var "n"))))))))))))
+
+example : value (eval [] [] 60 [] .empty [] vecSlice) = some 42 := by
+  run [vecSlice]
+example : freed (eval [] [] 60 [] .empty [] vecSlice) := by
+  run [vecSlice]
+
+theorem vecSlice_typed : Typed [] [] [] vecSlice .int [] [.fail] := by
+  refine .let_ (live := true) rfl (.vnew rfl) ?_
+  refine .let_ (live := true) rfl (.vpush .lit (.own rfl)) ?_
+  refine .let_ (live := true) rfl (.vpush .lit (.own rfl)) ?_
+  refine .let_ (live := true) rfl (.vpush .lit (.own rfl)) ?_
+  refine .let_ (live := true) rfl (.atom .lit) ?_
+  refine .let_ (live := true) rfl (.atom .lit) ?_
+  refine .let_ (live := true) rfl (.atom .lit) ?_
+  let Γ0 : Ctx := [("k", .own .int true), ("hi", .own .int true), ("lo", .own .int true), ("u3", .own .int true),
+      ("u2", .own .int true), ("u1", .own .int true), ("v", .own (.vec .int) true)]
+  let Γs : Ctx := ("n", .own .int true) :: ("s", .ref .ro (.vec .int)) :: freeze Γ0 ["v"]
+  have hIdx : Typed [] [] Γs (.lendIdx "e" .ro (var "s") "k" (.add (.read (var "e")) (.read (var "n")))) .int Γs [.fail] := by
+    have := Typed.lendIdx (F := []) (O := []) (Γ := Γs) (x := "e") (m := .ro) (y := "s") (τ := .int) (τb := .int)
+      (r := [.fail]) (Γb := lendCtx .ro Γs "s") rfl (.ref rfl) (.own (x := "k") rfl) (fun h => by cases h)
+      (fun h => by cases h) (fun h => by cases h) (.add (.read (.ref (x := "e") rfl)) (.read (.own (x := "n") rfl)))
+    simpa [Γs, Γ0, thaw, lendCtx, freeze, Slot.ro] using this
+  have h := Typed.lendSlice (F := []) (O := []) (x := "s") (y := "v") (τ := .int) (r := [.fail]) (τb := .int)
+    (Γ := Γ0) (Γb := freeze Γ0 ["v"]) rfl (.own rfl) (.own (x := "lo") rfl) (.own (x := "hi") rfl)
+    (.let_ (live := true) rfl (.vlen (.ref (x := "s") (m := .ro) rfl)) hIdx)
+  simpa [Γ0, thaw, freeze, Slot.ro] using h
+
+example : ∀ n, match eval [] [] n [.abort .fail 0] .empty [] vecSlice with
+    | (.stuck, _) => False
+    | (.susp _ _ _ _ _, _) => False
+    | (.timeout, _) => True
+    | (.panic, _) => True
+    | (.val v, σ') => ∃ L, VT [] [] σ' .int v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
+    | (.abort _ _, σ') => ∀ l, σ'.mem l = none :=
+  program_ok (by intro d hd; simp at hd) vecSlice_typed
+
 /-- `let v = []; v.push(1); v.push(41); const i = 1; { const e = mut v[i]; *e = *e + 1 }; v[i]`:
 an element changed and read through borrows of it; 42. -/
 def vecIdx : Expr :=

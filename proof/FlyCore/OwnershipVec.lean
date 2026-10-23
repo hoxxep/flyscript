@@ -605,4 +605,168 @@ theorem lendIdx_ok {m : Mode} (hE : EvalOk F O n) (hx : lookup x Γ = none) (hp 
     · simp [Post]
   · simp [Post]
 
+
+/-! ## A slice -/
+
+theorem flatten_mid (Rs : List (List Nat)) (i m : Nat) :
+    Rs.flatten = (Rs.take i).flatten ++ ((Rs.drop i).take m).flatten ++ ((Rs.drop i).drop m).flatten := by
+  have h1 : Rs = Rs.take i ++ ((Rs.drop i).take m ++ (Rs.drop i).drop m) := by
+    rw [List.take_append_drop, List.take_append_drop]
+  have := congrArg List.flatten h1
+  simp only [List.flatten_append, List.append_assoc] at this
+  simpa [List.append_assoc] using this
+
+/-- `{ const x = p[lo..hi]; body }`: out of bounds, a panic; else a vector of its own, whose cell is
+the frame's, of the elements from `lo` up to `hi`, the vector's root only read while it lives. -/
+theorem lendSlice_ok (hE : EvalOk F O n) (hx : lookup x Γ = none) (hp : PlaceTy Γ p (.vec τ) w y)
+    (hlo : PlaceTy Γ (.var lo) .int w1 y1) (hhi : PlaceTy Γ (.var hi) .int w2 y2)
+    (hb : Typed F O ((x, .ref .ro (.vec τ)) :: freeze Γ [y]) body τb ((x, .ref .ro (.vec τ)) :: Γb) r)
+    (hI : Inv F ι σ Γ env E S) (hwf : WF σ) (hR : Ready O hs r) :
+    Post F ι O σ E S (thaw Γ [y] Γb) env τb r hs (eval F O (n + 1) hs σ env (.lendSlice x p lo hi body)) := by
+  obtain ⟨a0, τr, Lr, P, c, s, ha0, hLr, hpath, hres, -, -, hsl, hso, -, -⟩ := place_ok hp hI.foot
+  obtain ⟨Rc, hRc, hLrPR⟩ := path_split hpath hLr
+  have hRc' := hRc
+  cases hRc' with
+  | vec hcm hlen hel hnd hcn =>
+  rename_i cs Rs
+  have intOf : ∀ {v w' yv}, PlaceTy Γ (.var v) .int w' yv → ∃ l k, lookup v env = some l ∧ σ.mem l = some (.int k) := by
+    intro v w' yv hv
+    obtain ⟨az, τz, Lz, Pz, lz, sz, -, hLz, hpathz, hresz, -⟩ := place_ok hv hI.foot
+    obtain ⟨Rz, hRz, -⟩ := path_split hpathz hLz
+    cases hRz with
+    | int hk => exact ⟨lz, _, hresz, hk⟩
+  obtain ⟨l1, i, hl1, hi⟩ := intOf hlo
+  obtain ⟨l2, j, hl2, hj⟩ := intOf hhi
+  simp only [eval, hres, hl1, hl2, hcm, hi, hj]
+  split
+  case isFalse => simp [Post]
+  rename_i hbd
+  obtain ⟨hi0, hij, hjn⟩ := hbd
+  generalize hsub : (cs.drop i.toNat).take (j.toNat - i.toNat) = sub
+  generalize hRsub : (Rs.drop i.toNat).take (j.toNat - i.toNat) = Rsub
+  have hmid := flatten_mid Rs i.toNat (j.toNat - i.toNat)
+  rw [hRsub] at hmid
+  have hRt : ∀ z ∈ Rsub.flatten, z ∈ Rs.flatten := fun z hz => by rw [hmid]; simp [hz]
+  have hRsubn : Rsub.flatten.Nodup := by
+    rw [hmid] at hnd
+    exact (List.nodup_append.mp (List.nodup_append.mp hnd).1).2.1
+  -- The slice's cells: the frozen vector's, but its own cell, new.
+  have hxk : x ∉ (freeze Γ [y]).map Prod.fst := by rw [freeze_keys]; exact lookup_none_keys hx
+  have hwb := typed_weaker hb (List.nodup_cons.mpr ⟨hxk, by rw [freeze_keys]; exact hI.keys⟩)
+  cases hwb with
+  | cons _ hwb =>
+  obtain ⟨Eb, Sb, Fz, hfb, hEp, hS, hent, hthaw⟩ := hI.foot.handle (ys := [y]) hI.keys (by
+    intro y' hy' τ'; simp only [List.mem_singleton] at hy'; subst hy'; exact hp.root_live τ')
+  obtain ⟨hEbn, hFzn, hdEF⟩ := nodup_append_disj.mp (hEp.nodup_iff.mp hI.nodup)
+  have hEb : ∀ l ∈ Eb, l ∈ E := fun l h => hEp.mem_iff.mpr (List.mem_append.mpr (.inl h))
+  have hFz : ∀ l ∈ Fz, l ∈ E := fun l h => hEp.mem_iff.mpr (List.mem_append.mpr (.inr h))
+  have hRin : ∀ l ∈ Rsub.flatten, l ∈ Fz ∨ l ∈ S := fun l hl =>
+    hent y s a0 Lr ⟨hsl, ha0, hso⟩ (List.mem_singleton_self _) l
+      (hLrPR.mem_iff.mpr (List.mem_append.mpr (.inr (List.mem_cons_of_mem _ (hRt l hl)))))
+  have hold : ∀ z, σ.mem z ≠ none → (σ.alloc (.vec sub)).2.mem z = σ.mem z := fun z hz => by
+    simp only [Store.alloc]; rw [if_neg (fun e => Nat.lt_irrefl _ (e ▸ hwf z hz))]
+  have hRta : ∀ z ∈ Rsub.flatten, σ.mem z ≠ none := fun z hz => hRc.alloc z (List.mem_cons_of_mem _ (hRt z hz))
+  have hna : ∀ z, σ.mem z ≠ none → z ≠ σ.next := fun z hz e => Nat.lt_irrefl _ (e ▸ hwf z hz)
+  have haRt : σ.next ∉ Rsub.flatten := fun h => hna _ (hRta _ h) rfl
+  have hk : i.toNat ≤ cs.length ∧ j.toNat ≤ cs.length ∧ i.toNat ≤ j.toNat := by omega
+  have hLa : LT F ι (σ.alloc (.vec sub)).2 σ.next (.vec τ) (σ.next :: Rsub.flatten) := by
+    refine .vec (cs := sub) (by simp [Store.alloc]) (by rw [← hsub, ← hRsub]; simp [hlen]) (fun k hk1 hk2 => ?_)
+      hRsubn haRt
+    have hk1' : i.toNat + k < cs.length := by rw [← hsub] at hk1; simp at hk1; omega
+    have e1 : sub[k] = cs[i.toNat + k] := by subst hsub; simp
+    have e2 : Rsub[k] = Rs[i.toNat + k]'(by rw [hlen]; exact hk1') := by subst hRsub; simp
+    rw [e1, e2]
+    refine (hel _ hk1' (by rw [hlen]; exact hk1')).frame (Agree.of' fun z hz => hold z ?_)
+    exact hRta z (by rw [← e2] at hz; exact mem_flatten_of hk2 hz)
+  have hFza : ∀ z ∈ Fz, σ.mem z ≠ none := fun z hz => hI.alloc z (hFz z hz)
+  have hSin : ∀ z ∈ (σ.next :: Rsub.flatten) ++ Sb, z ∈ (σ.next :: Fz) ∨ z ∈ S := fun z hz => by
+    rcases List.mem_append.mp hz with h | h
+    · rcases List.mem_cons.mp h with rfl | h
+      · exact .inl (List.mem_cons_self ..)
+      · rcases hRin z h with h | h
+        · exact .inl (List.mem_cons_of_mem _ h)
+        · exact .inr h
+    · rcases List.mem_append.mp (hS.mem_iff.mp h) with h | h
+      · exact .inl (List.mem_cons_of_mem _ h)
+      · exact .inr h
+  have hIb : Inv F ι (σ.alloc (.vec sub)).2 ((x, .ref .ro (.vec τ)) :: freeze Γ [y])
+      ((x, σ.next) :: env) Eb ((σ.next :: Rsub.flatten) ++ Sb) := by
+    have hfoot := Foot.cons (s := .ref .ro (.vec τ)) (x := x) (a := σ.next) hLa
+      (hfb.frame <| Agree.of' fun z hz => hold z (hfb.alloc z (List.mem_append.mp hz)))
+    refine ⟨by simpa [addE, addS, Slot.excl, exclPart, sharedPart, Slot.shell, Bool.false_eq_true] using hfoot, hEbn, ?_,
+      List.nodup_cons.mpr ⟨hxk, by rw [freeze_keys]; exact hI.keys⟩⟩
+    intro z hz hz'
+    rcases hSin z hz with h | h
+    · rcases List.mem_cons.mp h with rfl | h
+      · exact hna _ (hI.alloc _ (hEb _ hz')) rfl
+      · exact hdEF z hz' h
+    · exact hI.disj z h (hEb z hz')
+  have hkb : Γb.map Prod.fst = Γ.map Prod.fst := by
+    have := typed_keys hb
+    simp only [List.map_cons, List.cons.injEq] at this
+    rw [this.2, freeze_keys]
+  have hre : ∀ σ1 Eb', Agree (σ.alloc (.vec sub)).2 σ1 ((σ.next :: Fz) ++ S) → Disj (σ.next :: Fz) Eb' →
+      Inv F ι σ1 ((x, .ref .ro (.vec τ)) :: Γb) ((x, σ.next) :: env) Eb' ((σ.next :: Rsub.flatten) ++ Sb) →
+      ∃ E', Inv F ι σ1 (thaw Γ [y] Γb) env E' S ∧
+        ∀ z, z ∈ E' ↔ z ∈ Eb' ∨ (z ∈ σ.next :: Fz ∧ z ≠ σ.next) := by
+    intro σ1 Eb' hag hdX hI'
+    obtain ⟨L', Et, St, hL', hft, hEt, hSt⟩ := hI'.foot.uncons
+    simp only [addE, addS, Slot.excl, Bool.false_eq_true, ↓reduceIte, exclPart, sharedPart, Slot.shell] at hEt hSt
+    have hagR : Agree (σ.alloc (.vec sub)).2 σ1 (σ.next :: Rsub.flatten) := (hag.mono fun z hz => by
+      rcases List.mem_cons.mp hz with rfl | h
+      · exact List.mem_append.mpr (.inl (List.mem_cons_self ..))
+      · rcases hRin z h with h | h
+        · exact List.mem_append.mpr (.inl (List.mem_cons_of_mem _ h))
+        · exact List.mem_append.mpr (.inr h))
+    have hRR := (hLa.frame hagR).det hL'
+    subst hRR
+    obtain rfl := List.append_cancel_left hSt
+    subst hEt
+    have hag0 : Agree σ σ1 (Fz ++ S) := Agree.ofPre (by rt_tac) hag
+      (fun z hz => by simp only [List.mem_append, List.mem_cons] at hz ⊢; grind) (fun z hz => by
+      rw [hag z (by simp only [List.mem_append, List.mem_cons] at hz ⊢; grind)]
+      rcases List.mem_append.mp hz with h | h
+      · exact hold z (hFza z h)
+      · exact hold z (hI.allocS z h))
+    obtain ⟨E', hf', hpe⟩ := hthaw σ1 Γb Eb' hft hwb hag0
+    refine ⟨E', ⟨hf', hpe.nodup_iff.mpr (nodup_append_disj.mpr ⟨hI'.nodup, hFzn,
+        fun z h h' => hdX z (List.mem_cons_of_mem _ h') h⟩), ?_, by rw [thaw_keys hkb]; exact hI.keys⟩,
+      fun z => ?_⟩
+    · intro z hz hz'
+      rcases List.mem_append.mp (hpe.mem_iff.mp hz') with h | h
+      · exact hI'.disj z (List.mem_append.mpr (.inr (hS.mem_iff.mpr (List.mem_append.mpr (.inr hz))))) h
+      · exact hI.disj z hz (hFz z h)
+    · rw [hpe.mem_iff, List.mem_append]
+      constructor
+      · rintro (h | h)
+        · exact .inl h
+        · exact .inr ⟨List.mem_cons_of_mem _ h, fun e => hna z (hFza z h) e⟩
+      · rintro (h | ⟨h, hne⟩)
+        · exact .inl h
+        · exact .inr ((List.mem_cons.mp h).resolve_left hne)
+  have hSS : ∀ z ∈ S, z ∈ (σ.next :: Rsub.flatten) ++ Sb := fun z hz =>
+    List.mem_append.mpr (.inr (hS.mem_iff.mpr (List.mem_append.mpr (.inr hz))))
+  have hndF : (σ.next :: Fz).Nodup := List.nodup_cons.mpr ⟨fun h => hna _ (hFza _ h) rfl, hFzn⟩
+  have hd : Disj (σ.next :: Fz) Eb := fun z hz hz' => by
+    rcases List.mem_cons.mp hz with rfl | h
+    · exact hna _ (hI.alloc _ (hEb _ hz')) rfl
+    · exact hdEF z hz' h
+  have hwf1 : WF (σ.alloc (.vec sub)).2 := hwf.alloc
+  refine post_after (E₁ := (σ.next :: Fz) ++ Eb) ((Moves.allocate (v := .vec sub) hwf hI.alloc).relabel fun z => by
+    rw [hEp.mem_iff]; simp only [List.mem_append, List.mem_cons, List.mem_singleton, List.not_mem_nil, or_false,
+      show (σ.alloc (Val.vec sub)).1 = σ.next from rfl]; grind) hwf ?_
+  exact ret_cloK (σf := (σ.alloc (.vec sub)).2) hSin hSS (List.mem_cons_self ..) hre hR.2 hwf1 Agree.self
+    (fun z hz => by
+      rcases List.mem_cons.mp hz with rfl | h
+      · simp [Store.alloc]
+      · rw [hold z (hFza z h)]; exact hFza z h)
+    hndF hd (fun z hz => by rw [hold z (hI.allocS z hz)]; exact hI.allocS z hz)
+    (fun z hz h => by
+      simp only [List.mem_append, List.mem_cons] at h
+      rcases h with (rfl | h) | h
+      · exact hna _ (hI.allocS _ hz) rfl
+      · exact hI.disj z hz (hFz z h)
+      · exact hI.disj z hz (hEb z h))
+    (hE _ _ _ _ _ _ _ _ _ _ _ hb hIb hwf1 hR)
+
 end FlyCore.Ownership

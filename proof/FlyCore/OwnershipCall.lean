@@ -250,6 +250,11 @@ theorem typed_weaker : Typed F O Γ e τ Γ' r → (Γ.map Prod.fst).Nodup → W
   | .vlen _, _ => Weaker.refl _
   | .vpush ha _, hk => atom_weaker ha hk
   | .vpop _ _, _ => Weaker.refl _
+  | .lendSlice hx _ _ _ hb, hk => by
+    have := typed_weaker hb (List.nodup_cons.mpr ⟨by rw [freeze_keys]; exact lookup_none_keys hx,
+      by rw [freeze_keys]; exact hk⟩)
+    cases this with
+    | cons _ w => exact thaw_weaker w
   | .call _ _ _ _ hargs _ _, hk => atoms_weaker hargs hk
   | .lam _ _ _ _ _ ha _, hk => atom_weaker ha hk
   | .lendClo _ _ _ _ _ _ _ hx hb, hk => by
