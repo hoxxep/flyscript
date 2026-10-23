@@ -246,6 +246,10 @@ theorem typed_weaker : Typed F O Γ e τ Γ' r → (Γ.map Prod.fst).Nodup → W
     | cons _ w => exact w.trans (typed_weaker ha hk)
   | .write ha _, hk => atom_weaker ha hk
   | .assign ha _ _, hk => atom_weaker ha hk
+  | .rlnew _ _ _, _ => Weaker.refl _
+  | .rpush _ _ _ _ _, _ => Weaker.refl _
+  | .rnth _ _ _ _ _, _ => Weaker.refl _
+  | .rlen _ _ _, _ => Weaker.refl _
   | .vnew _, _ => Weaker.refl _
   | .vlen _, _ => Weaker.refl _
   | .vpush ha _, hk => atom_weaker ha hk
@@ -326,7 +330,7 @@ theorem typed_weaker : Typed F O Γ e τ Γ' r → (Γ.map Prod.fst).Nodup → W
     cases w with
     | cons _ w => exact Weaker.unshift w
   | .ralloc _ _ _ _, _ => Weaker.refl _
-  | .rget _ _ _, _ => Weaker.refl _
+  | .rget _ _ _ _, _ => Weaker.refl _
   | .rset _ _ _ _ _, _ => Weaker.refl _
 
 /-- A function's context: its owned parameters, live, then its borrowed ones. -/

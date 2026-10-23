@@ -42,10 +42,12 @@ theorem CloOk.det : CloOk F f τc k A B r → CloOk F f τc' k' A' B' r' →
 def RefOk (ι : List Nat) (σ : Store) (k : Nat) (τ : Ty) (l : Nat) : Prop :=
   ∃ a, ι[k]? = some a ∧ σ.rt l = some (a, τ)
 
-/-- Data a region holds, of type `τ` said of that region, its arenas from it outwards `ι`. -/
+/-- Data a region holds, of type `τ` said of that region, its arenas from it outwards `ι`: plain
+data, or, for a list of the region, its elements' cells, each a cell of the region holding a `τ`. -/
 def RD (ι : List Nat) (σ : Store) : Ty → Val → Prop
   | .int, .int _ => True
   | .rref _ k τ, .rptr l => RefOk ι σ k τ l
+  | .vec τ, .vec ls => ∀ l ∈ ls, RefOk ι σ 0 τ l
   | _, _ => False
 
 /-- `a` holds a value of type `τ`, whose cells — `a` and every cell of its boxes — are `L`. -/
@@ -209,8 +211,8 @@ theorem RefOk.frame (h : RefOk ι σ k τ l) (hr : RtExt σ σ') : RefOk ι σ' 
   let ⟨a, ha, ht⟩ := h; ⟨a, ha, hr l _ ht⟩
 
 theorem RD.frame {v : Val} (h : RD ι σ τ v) (hr : RtExt σ σ') : RD ι σ' τ v := by
-  cases τ <;> cases v <;> simp_all [RD]
-  exact RefOk.frame h hr
+  cases τ <;> cases v <;> simp only [RD] at h ⊢
+  all_goals first | trivial | exact RefOk.frame h hr | exact fun l hl => (h l hl).frame hr
 
 theorem LT.alloc : LT F ι σ a τ L → ∀ l ∈ L, σ.mem l ≠ none := by
   intro h

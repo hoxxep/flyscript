@@ -565,8 +565,12 @@ theorem eval_ok_succ (hF : FnsOk F O) (hE : EvalOk F O n) (hR : RetOk F O n) :
         hbody hI hwf hRdy
     | region hx _ hb => exact region_ok hE hR hx hb hI hwf hRdy
     | ralloc hRl hs hd ha => exact ralloc_ok hRl hs hd ha hI hwf
-    | rget hp hRl hs => exact rget_ok hp hRl hs hI hwf
+    | rget hp hRl hs hd => exact rget_ok hp hRl hs hd hI hwf
     | rset hp hRl hs hd ha => exact rset_ok hp hRl hs hd ha hI hwf
+    | rlnew hRl hs _ => exact rlnew_ok hRl hs hI hwf
+    | rpush hp hRl hs hd ha => exact rpush_ok hp hRl hs hd ha hI hwf
+    | rnth hp hz hRl hs hd => exact rnth_ok hp hz hRl hs hd hI hwf
+    | rlen hp hRl hs => exact rlen_ok hp hRl hs hI hwf
     | vnew hc => exact vnew_ok hc hI hwf
     | vlen hp => exact vlen_ok hp hI hwf
     | vpush ha hp => exact vpush_ok ha hp hI hwf

@@ -14,22 +14,27 @@ namespace FlyCore.Ownership
 
 /-! ## Region data -/
 
-theorem RD.toVT {v : Val} (h : RD (ι.drop k) σ τ v) : VT F ι σ (τ.shiftBy k) v [] := by
-  cases τ <;> cases v <;> simp only [RD] at h
-  · exact .int
-  · obtain ⟨a, ha, ht⟩ := h
+theorem RD.toVT {v : Val} (h : RD (ι.drop k) σ τ v) (hd : τ.rdata = true) : VT F ι σ (τ.shiftBy k) v [] := by
+  cases τ with
+  | int => cases v <;> simp only [RD] at h; exact .int
+  | rref c j τ' =>
+    cases v <;> simp only [RD] at h
+    obtain ⟨a, ha, ht⟩ := h
     simp only [List.getElem?_drop] at ha
     exact .rref ⟨a, by rw [Nat.add_comm]; exact ha, ht⟩
+  | _ => simp [Ty.rdata] at hd
 
 theorem VT.toRD {v : Val} (h : VT F ι σ (τ.shiftBy k) v L) (hd : τ.rdata = true) : L = [] ∧ RD (ι.drop k) σ τ v := by
-  cases τ <;> simp [Ty.rdata] at hd
-  · simp only [Ty.shiftBy] at h; cases h; exact ⟨rfl, trivial⟩
-  · simp only [Ty.shiftBy] at h
+  cases τ with
+  | int => simp only [Ty.shiftBy] at h; cases h; exact ⟨rfl, trivial⟩
+  | rref c j τ' =>
+    simp only [Ty.shiftBy] at h
     cases h with
     | rref hr =>
       obtain ⟨a, ha, ht⟩ := hr
       refine ⟨rfl, a, ?_, ht⟩
       simp only [List.getElem?_drop]; rw [Nat.add_comm]; exact ha
+  | _ => simp [Ty.rdata] at hd
 
 /-- An arena in reach: its cell, and every cell of the region tagged with it, each holding data of it. -/
 theorem arena_of (hR : lookup R Γ = some s) (hs : s = .own (.arena k) true ∨ ∃ m, s = .ref m (.arena k))
@@ -47,7 +52,7 @@ theorem arena_of (hR : lookup R Γ = some s) (hs : s = .own (.arena k) true ∨ 
 /-! ## Reading -/
 
 theorem rget_ok (hp : PlaceTy Γ p (.rref c k τ) w y) (hR : lookup R Γ = some s)
-    (hs : s = .own (.arena k) true ∨ ∃ m, s = .ref m (.arena k)) (hI : Inv F ι σ Γ env E S) (hwf : WF σ) :
+    (hs : s = .own (.arena k) true ∨ ∃ m, s = .ref m (.arena k)) (hd : τ.rdata = true) (hI : Inv F ι σ Γ env E S) (hwf : WF σ) :
     Post F ι O σ E S Γ env (τ.shiftBy k) r hs' (eval F O (n + 1) hs' σ env (.rget p)) := by
   obtain ⟨a, τr, Lr, P, l, s', ha, hLr, hpath, hres, -⟩ := place_ok hp hI.foot
   obtain ⟨Rb, hRb, -⟩ := path_split hpath hLr
@@ -60,7 +65,7 @@ theorem rget_ok (hp : PlaceTy Γ p (.rref c k τ) w y) (hR : lookup R Γ = some 
     rw [ht] at ht'
     obtain ⟨-, rfl⟩ := Prod.mk.inj (Option.some.inj ht')
     simp only [eval, hres, hl, hv]
-    exact ⟨E, [], hI, hrd.toVT, disj_nil_left, disj_nil_left, Moves.refl hwf hI.alloc⟩
+    exact ⟨E, [], hI, hrd.toVT hd, disj_nil_left, disj_nil_left, Moves.refl hwf hI.alloc⟩
 
 /-! ## Allocating -/
 
@@ -136,22 +141,25 @@ theorem AtomTy.same_store (h : AtomTy Γ a τ Γ') (hΓ : Γ' = Γ) (hev : evalA
     rw [hΓ, hx] at h1
     simp at h1
 
-theorem ralloc_ok (hR : lookup R Γ = some s) (hs : s = .own (.arena k) true ∨ s = .ref .mut (.arena k))
-    (hd : τ.rdata = true) (ha : AtomTy Γ a (τ.shiftBy k) Γ) (hI : Inv F ι σ Γ env E S) (hwf : WF σ) :
-    Post F ι O σ E S Γ env (.rref c k τ) r hs' (eval F O (n + 1) hs' σ env (.ralloc R c τ a)) := by
-  obtain ⟨v, σ1, E₁, L₁, hev, -, hv₁, -, -, -⟩ := atom_ok ha hI hwf
-  obtain rfl : σ = σ1 := (ha.same_store rfl hev).symm
-  obtain ⟨rfl, hrd⟩ := hv₁.toRD hd
+/-- A new cell of the region of arena `R`, holding `v`, data of the region of type `τ`: tagged as the
+region's, the arena one cell more, and a reference to it the value. -/
+theorem region_alloc (hR : lookup R Γ = some s) (hs : s = .own (.arena k) true ∨ s = .ref .mut (.arena k))
+    (hrd : RD (ι.drop k) σ τ v) (hc1 : lookup R env = some c1) (hcm1 : σ.mem c1 = some (.arena cs))
+    (hI : Inv F ι σ Γ env E S) (hwf : WF σ) :
+    Post F ι O σ E S Γ env (.rref b k τ) r hs'
+      (let (l, σ2) := σ.alloc v
+       (.val (.rptr l), (σ2.set c1 (some (.arena (cs ++ [l])))).tag l c1 τ)) := by
   have hex' : s.excl = true ∧ s.shell = false := by rcases hs with rfl | rfl <;> simp [Slot.excl, Slot.shell]
   obtain ⟨c0, LR, E₁a, E₂a, hc0, hsl, hE, hupd⟩ := foot_update hI.foot hI.keys hR hex'.1 hex'.2
-  obtain ⟨c, cs, hc, hk, hcm, hnd, hcs, hexa, hsl'⟩ :=
+  obtain ⟨c, cs', hc, hk, hcm, hnd, hcs, hexa, hsl'⟩ :=
     arena_of hR (by rcases hs with h | h; exact .inl h; exact .inr ⟨_, h⟩) hI
+  obtain rfl : c = c1 := Option.some.inj (hc.symm.trans hc1)
+  obtain rfl : cs = cs' := by rw [hcm1] at hcm; cases hcm; rfl
   have hcc : c0 = c := by rw [hc] at hc0; exact (Option.some.inj hc0).symm
   subst c0
   have hLT : ∀ {σ' : Store} {L : List Nat}, SlotOk F ι σ' s c L → LT F ι σ' c (.arena k) L := fun h => by
     rcases hs with rfl | rfl <;> exact h
   obtain rfl : LR = c :: cs := (hLT hsl).det (hLT hsl')
-  simp only [eval, hc, hcm, hev]
   -- Where the new cell is, and what changed.
   generalize hl : σ.next = l
   have hnd' := nodup_append_disj.mp (hE ▸ hI.nodup)
@@ -263,22 +271,24 @@ theorem ralloc_ok (hR : lookup R Γ = some s) (hs : s = .own (.arena k) true ∨
     exact m123.relabel fun x => by
       rw [hE]; simp only [List.mem_append, List.mem_cons, List.mem_singleton, List.not_mem_nil, or_false, hl]; grind
 
-/-! ## Changing a cell -/
-
-/-- `p.set(a)`: the cell `p` refers to is one of its region's, which the arena it is changed through
-owns, so nothing else sees it change; what it holds next is data of the region as what it held was. -/
-theorem rset_ok (hp : PlaceTy Γ p (.rref true k τ) w y) (hR : lookup R Γ = some s)
-    (hs : s = .own (.arena k) true ∨ s = .ref .mut (.arena k)) (hd : τ.rdata = true)
-    (ha : AtomTy Γ a (τ.shiftBy k) Γ) (hI : Inv F ι σ Γ env E S) (hwf : WF σ) :
-    Post F ι O σ E S Γ env .int r hs' (eval F O (n + 1) hs' σ env (.rset R p a)) := by
+theorem ralloc_ok (hR : lookup R Γ = some s) (hs : s = .own (.arena k) true ∨ s = .ref .mut (.arena k))
+    (hd : τ.rdata = true) (ha : AtomTy Γ a (τ.shiftBy k) Γ) (hI : Inv F ι σ Γ env E S) (hwf : WF σ) :
+    Post F ι O σ E S Γ env (.rref c k τ) r hs' (eval F O (n + 1) hs' σ env (.ralloc R c τ a)) := by
   obtain ⟨v, σ1, E₁, L₁, hev, -, hv₁, -, -, -⟩ := atom_ok ha hI hwf
   obtain rfl : σ = σ1 := (ha.same_store rfl hev).symm
-  obtain ⟨-, hrd⟩ := hv₁.toRD hd
-  obtain ⟨a0, τr, Lr, P, q, s', -, hLr, hpath, hres, -⟩ := place_ok hp hI.foot
-  obtain ⟨Rb, hRb, -⟩ := path_split hpath hLr
-  cases hRb with
-  | @rref _ l _ _ _ hql hr =>
-  obtain ⟨a', hk, ht⟩ := hr
+  obtain ⟨rfl, hrd⟩ := hv₁.toRD hd
+  obtain ⟨c1, cs, hc1, -, hcm1, -⟩ := arena_of hR (by rcases hs with h | h; exact .inl h; exact .inr ⟨_, h⟩) hI
+  simp only [eval, hc1, hcm1, hev]
+  exact region_alloc hR hs hrd hc1 hcm1 hI hwf
+
+/-! ## Changing a cell -/
+
+/-- A cell of the region of arena `R`, tagged as holding a `τ`, given another `τ`: nothing else
+changes, and the arena, which owns the cell, is still well formed. -/
+theorem region_set (hR : lookup R Γ = some s) (hs : s = .own (.arena k) true ∨ s = .ref .mut (.arena k))
+    (hk : ι[k]? = some a') (ht : σ.rt l = some (a', τ)) (hrd : RD (ι.drop k) σ τ v)
+    (hI : Inv F ι σ Γ env E S) (hwf : WF σ) :
+    Inv F ι (σ.set l (some v)) Γ env E S ∧ Moves σ E (σ.set l (some v)) E [] ∧ ∃ w, σ.mem l = some w := by
   have hex' : s.excl = true ∧ s.shell = false := by rcases hs with rfl | rfl <;> simp [Slot.excl, Slot.shell]
   obtain ⟨c0, LR, E₁a, E₂a, hc0, hsl, hE, hupd⟩ := foot_update hI.foot hI.keys hR hex'.1 hex'.2
   obtain ⟨c, cs, hc, hk', hcm, hnd, hcs, hexa, hsl'⟩ :=
@@ -292,7 +302,6 @@ theorem rset_ok (hp : PlaceTy Γ p (.rref true k τ) w y) (hR : lookup R Γ = so
   obtain rfl : LR = c :: cs := (hLT hsl).det (hLT hsl')
   have hlcs : l ∈ cs := hexa l τ ht
   obtain ⟨τ', w0, ht', hw0, -⟩ := hcs l hlcs
-  simp only [eval, hev, hres, hql, hw0]
   let σ' := σ.set l (some v)
   have hm' : ∀ x, σ'.mem x = if x = l then some v else σ.mem x := by intro x; simp only [σ', Store.set]
   have hrt' : σ'.rt = σ.rt := rfl
@@ -320,8 +329,125 @@ theorem rset_ok (hp : PlaceTy Γ p (.rref true k τ) w y) (hR : lookup R Γ = so
       exact ⟨τ'', w, h1, by rw [hm', if_neg hxl]; exact h2, h3.frame (fun _ _ h => h)⟩
   have hfoot := hupd σ' s (c :: cs) hex'.1 hex'.2 hag (by rcases hs with rfl | rfl <;> exact hLT')
   rw [setSlot_same _ hI.keys hR, ← hE] at hfoot
-  exact ⟨E, [], ⟨hfoot, hI.nodup, hI.disj, hI.keys⟩, .int, disj_nil_left, disj_nil_left,
-    Moves.set hwf hI.alloc hlE⟩
+  exact ⟨⟨hfoot, hI.nodup, hI.disj, hI.keys⟩, Moves.set hwf hI.alloc hlE, w0, hw0⟩
+
+/-- `p.set(a)`: the cell `p` refers to is one of its region's, which the arena it is changed through
+owns, so nothing else sees it change; what it holds next is data of the region as what it held was. -/
+theorem rset_ok (hp : PlaceTy Γ p (.rref true k τ) w y) (hR : lookup R Γ = some s)
+    (hs : s = .own (.arena k) true ∨ s = .ref .mut (.arena k)) (hd : τ.rdata = true)
+    (ha : AtomTy Γ a (τ.shiftBy k) Γ) (hI : Inv F ι σ Γ env E S) (hwf : WF σ) :
+    Post F ι O σ E S Γ env .int r hs' (eval F O (n + 1) hs' σ env (.rset R p a)) := by
+  obtain ⟨v, σ1, E₁, L₁, hev, -, hv₁, -, -, -⟩ := atom_ok ha hI hwf
+  obtain rfl : σ = σ1 := (ha.same_store rfl hev).symm
+  obtain ⟨-, hrd⟩ := hv₁.toRD hd
+  obtain ⟨a0, τr, Lr, P, q, s', -, hLr, hpath, hres, -⟩ := place_ok hp hI.foot
+  obtain ⟨Rb, hRb, -⟩ := path_split hpath hLr
+  cases hRb with
+  | @rref _ l _ _ _ hql hr =>
+  obtain ⟨a', hk, ht⟩ := hr
+  obtain ⟨hI', hm', w0, hw0⟩ := region_set hR hs hk ht hrd hI hwf
+  simp only [eval, hev, hres, hql, hw0]
+  exact ⟨E, [], hI', .int, disj_nil_left, disj_nil_left, hm'⟩
+
+
+/-! ## A region's lists -/
+
+/-- `RegionList.new()`: a new cell of the region, an empty list of it. -/
+theorem rlnew_ok (hR : lookup R Γ = some s) (hs : s = .own (.arena k) true ∨ s = .ref .mut (.arena k))
+    (hI : Inv F ι σ Γ env E S) (hwf : WF σ) :
+    Post F ι O σ E S Γ env (.rref false k (.vec τ)) r hs' (eval F O (n + 1) hs' σ env (.rlnew R τ)) := by
+  obtain ⟨c1, cs, hc1, -, hcm1, -⟩ := arena_of hR (by rcases hs with h | h; exact .inl h; exact .inr ⟨_, h⟩) hI
+  simp only [eval, hc1, hcm1]
+  exact region_alloc (v := .vec []) (τ := .vec τ) hR hs (by simp [RD]) hc1 hcm1 hI hwf
+
+/-- A list of a region a place holds a reference to: its cell holds its elements' cells, each a cell
+of the region holding a `τ`. -/
+theorem list_of (hp : PlaceTy Γ p (.rref c k (.vec τ)) w y) (hR : lookup R Γ = some s)
+    (hs : s = .own (.arena k) true ∨ ∃ m, s = .ref m (.arena k)) (hI : Inv F ι σ Γ env E S) :
+    ∃ q lc ls a cs, resolve σ env p = some q ∧ σ.mem q = some (.rptr lc) ∧ σ.mem lc = some (.vec ls) ∧
+      σ.rt lc = some (a, .vec τ) ∧ ι[k]? = some a ∧ lookup R env = some a ∧ σ.mem a = some (.arena cs) ∧
+      (∀ l ∈ ls, l ∈ cs ∧ σ.rt l = some (a, τ)) ∧
+      (∀ l ∈ cs, ∃ τ v, σ.rt l = some (a, τ) ∧ σ.mem l = some v ∧ RD (ι.drop k) σ τ v) := by
+  obtain ⟨a0, τr, Lr, P, q, s', -, hLr, hpath, hres, -⟩ := place_ok hp hI.foot
+  obtain ⟨Rb, hRb, -⟩ := path_split hpath hLr
+  cases hRb with
+  | @rref _ lc _ _ _ hql hr =>
+  obtain ⟨a', hk, ht⟩ := hr
+  obtain ⟨c1, cs, hc1, hk', hcm, -, hcs, hexa, -⟩ := arena_of hR hs hI
+  obtain rfl : a' = c1 := Option.some.inj (hk.symm.trans hk')
+  obtain ⟨τ', w0, ht', hw0, hrd⟩ := hcs lc (hexa lc _ ht)
+  rw [ht] at ht'
+  obtain ⟨-, rfl⟩ := Prod.mk.inj (Option.some.inj ht')
+  cases w0 <;> simp only [RD] at hrd
+  rename_i ls
+  refine ⟨q, lc, ls, a', cs, hres, hql, hw0, ht, hk, hc1, hcm, fun l hl => ?_, hcs⟩
+  obtain ⟨b, hb, htl⟩ := hrd l hl
+  simp only [List.getElem?_drop, Nat.add_zero] at hb
+  obtain rfl : b = a' := Option.some.inj (hb.symm.trans hk)
+  exact ⟨hexa l _ htl, htl⟩
+
+/-- `p[z]` for a list: out of bounds, a panic; else a copy of the element, data of the region. -/
+theorem rnth_ok (hp : PlaceTy Γ p (.rref c k (.vec τ)) w y) (hz : PlaceTy Γ (.var z) .int wz yz)
+    (hR : lookup R Γ = some s) (hs : s = .own (.arena k) true ∨ ∃ m, s = .ref m (.arena k))
+    (hd : τ.rdata = true) (hI : Inv F ι σ Γ env E S) (hwf : WF σ) :
+    Post F ι O σ E S Γ env (τ.shiftBy k) r hs' (eval F O (n + 1) hs' σ env (.rnth R p z)) := by
+  obtain ⟨q, lc, ls, a, cs, hres, hq, hlc, -, -, -, -, hls, hcs⟩ := list_of hp hR hs hI
+  obtain ⟨az, τz, Lz, Pz, lz, sz, -, hLz, hpathz, hresz, -⟩ := place_ok hz hI.foot
+  obtain ⟨Rz, hRz, -⟩ := path_split hpathz hLz
+  cases hRz with
+  | int hk0 =>
+  rename_i i
+  have hlz : lookup z env = some lz := hresz
+  simp only [eval, hres, hlz, hq, hk0, hlc]
+  split
+  · cases hget : ls[i.toNat]? with
+    | none => simp [Post]
+    | some l =>
+      have hl : l ∈ ls := List.mem_of_getElem? hget
+      obtain ⟨hlcs, htl⟩ := hls l hl
+      obtain ⟨τ', v, ht', hv, hrd⟩ := hcs l hlcs
+      rw [htl] at ht'
+      obtain ⟨-, rfl⟩ := Prod.mk.inj (Option.some.inj ht')
+      simp only [hv]
+      exact ⟨E, [], hI, hrd.toVT hd, disj_nil_left, disj_nil_left, Moves.refl hwf hI.alloc⟩
+  · simp [Post]
+
+/-- `p.len()` for a list. -/
+theorem rlen_ok (hp : PlaceTy Γ p (.rref c k (.vec τ)) w y) (hR : lookup R Γ = some s)
+    (hs : s = .own (.arena k) true ∨ ∃ m, s = .ref m (.arena k)) (hI : Inv F ι σ Γ env E S) (hwf : WF σ) :
+    Post F ι O σ E S Γ env .int r hs' (eval F O (n + 1) hs' σ env (.rlen R p)) := by
+  obtain ⟨q, lc, ls, -, -, hres, hq, hlc, -⟩ := list_of hp hR hs hI
+  simp only [eval, hres, hq, hlc]
+  exact ⟨E, [], hI, .int, disj_nil_left, disj_nil_left, Moves.refl hwf hI.alloc⟩
+
+/-- `p.push(a)` for a list: `a` in a new cell of the region, tagged as holding a `τ`, and the list's
+cell given that cell at its end. -/
+theorem rpush_ok (hp : PlaceTy Γ p (.rref c k (.vec τ)) w y) (hR : lookup R Γ = some s)
+    (hs : s = .own (.arena k) true ∨ s = .ref .mut (.arena k)) (hd : τ.rdata = true)
+    (ha : AtomTy Γ a (τ.shiftBy k) Γ) (hI : Inv F ι σ Γ env E S) (hwf : WF σ) :
+    Post F ι O σ E S Γ env .int r hs' (eval F O (n + 1) hs' σ env (.rpush R τ p a)) := by
+  obtain ⟨v, σ1, E₁, L₁, hev, -, hv₁, -, -, -⟩ := atom_ok ha hI hwf
+  obtain rfl : σ = σ1 := (ha.same_store rfl hev).symm
+  obtain ⟨-, hrd⟩ := hv₁.toRD hd
+  obtain ⟨q, lc, ls, a', cs, hres, hq, hlc, htlc, hk, hc1, hcm, hls, -⟩ :=
+    list_of hp hR (by rcases hs with h | h; exact .inl h; exact .inr ⟨_, h⟩) hI
+  simp only [eval, hc1, hev, hcm, hres, hq, hlc]
+  have h1 := region_alloc (b := false) (O := O) (r := r) (hs' := hs') hR hs hrd hc1 hcm hI hwf
+  simp only at h1
+  generalize hl : (σ.alloc v).1 = l at h1 ⊢
+  generalize hσ3 : ((σ.alloc v).2.set a' (some (.arena (cs ++ [l])))).tag l a' τ = σ3 at h1 ⊢
+  obtain ⟨E', L, hI3, hvl, -, -, hm3⟩ := h1
+  cases hvl with
+  | rref hrl =>
+  have hrt3 := hm3.rt
+  obtain ⟨hI4, hm4, -⟩ := region_set (v := .vec (ls ++ [l])) hR hs hk (hrt3 _ _ htlc) (by
+    intro l' hl'
+    rcases List.mem_append.mp hl' with h | h
+    · obtain ⟨-, htl⟩ := hls l' h
+      exact ⟨a', by simpa [List.getElem?_drop] using hk, hrt3 _ _ htl⟩
+    · simp at h; subst h
+      exact RefOk.drop_iff.mp (by simpa using hrl)) hI3 hm3.wf
+  exact ⟨E', [], hI4, .int, disj_nil_left, disj_nil_left, by simpa using hm3.trans hm4 disj_nil_left hwf⟩
 
 /-! ## A region's end -/
 

@@ -1462,8 +1462,8 @@ theorem regionEx_typed : Typed [] [] [] regionEx .int [] [.fail] := by
   refine .region rfl rfl ?_
   exact .let_ (live := true) rfl (.ralloc rfl (.inl rfl) rfl .lit)
     (.let_ (live := true) rfl (.ralloc rfl (.inl rfl) rfl (.readRef (.own rfl)))
-      (.let_ (live := true) rfl (by simpa [Ty.shiftBy] using Typed.rget (R := "R") (k := 0) (τ := .rref false 0 .int) (.own rfl) rfl (.inl rfl))
-        (.let_ (live := true) rfl (by simpa [Ty.shiftBy] using Typed.rget (R := "R") (k := 0) (τ := .int) (.own rfl) rfl (.inl rfl))
+      (.let_ (live := true) rfl (by simpa [Ty.shiftBy] using Typed.rget (R := "R") (k := 0) (τ := .rref false 0 .int) (.own rfl) rfl (.inl rfl) rfl)
+        (.let_ (live := true) rfl (by simpa [Ty.shiftBy] using Typed.rget (R := "R") (k := 0) (τ := .int) (.own rfl) rfl (.inl rfl) rfl)
           (.add (.read (.own rfl)) .lit))))
 
 example : ∀ n, match eval [] [] n [.abort .fail 0] .empty [] regionEx with
@@ -1499,8 +1499,8 @@ theorem regionsUnwind_typed : Typed [] [] [] regionsUnwind .int [] [.fail] := by
   refine .try_ rfl (.region rfl rfl ?_) (.atom (.read (.own rfl)))
   refine .let_ (live := true) rfl (.ralloc rfl (.inl rfl) rfl .lit) (.region rfl rfl ?_)
   exact .let_ (live := true) rfl (.ralloc rfl (.inl rfl) rfl (.readRef (.own rfl)))
-    (.let_ (live := true) rfl (by simpa [Ty.shiftBy] using Typed.rget (R := "S") (k := 0) (τ := .rref false 1 .int) (.own rfl) rfl (.inl rfl))
-      (.let_ (live := true) rfl (by simpa [Ty.shiftBy] using Typed.rget (R := "R") (k := 1) (τ := .int) (.own rfl) rfl (.inl rfl))
+    (.let_ (live := true) rfl (by simpa [Ty.shiftBy] using Typed.rget (R := "S") (k := 0) (τ := .rref false 1 .int) (.own rfl) rfl (.inl rfl) rfl)
+      (.let_ (live := true) rfl (by simpa [Ty.shiftBy] using Typed.rget (R := "R") (k := 1) (τ := .int) (.own rfl) rfl (.inl rfl) rfl)
         (.let_ (live := true) rfl (.add (.read (.own rfl)) .lit)
           (.throw_ (.read (.own rfl)) (by simp)))))
 
@@ -1533,9 +1533,9 @@ theorem cellEx_typed : Typed [] [] [] cellEx .int [] [.fail] := by
   refine .region rfl rfl ?_
   exact .let_ (live := true) rfl (.ralloc rfl (.inl rfl) rfl .lit)
     (.let_ (live := true) rfl (.ralloc rfl (.inl rfl) rfl (.readRef (.own rfl)))
-      (.let_ (live := true) rfl (by simpa [Ty.shiftBy] using Typed.rget (R := "R") (k := 0) (τ := .rref true 0 .int) (.own rfl) rfl (.inl rfl))
+      (.let_ (live := true) rfl (by simpa [Ty.shiftBy] using Typed.rget (R := "R") (k := 0) (τ := .rref true 0 .int) (.own rfl) rfl (.inl rfl) rfl)
         (.let_ (live := true) rfl (.rset (.own rfl) rfl (.inl rfl) rfl .lit)
-          (.let_ (live := true) rfl (by simpa [Ty.shiftBy] using Typed.rget (R := "R") (k := 0) (τ := .int) (.own rfl) rfl (.inl rfl))
+          (.let_ (live := true) rfl (by simpa [Ty.shiftBy] using Typed.rget (R := "R") (k := 0) (τ := .int) (.own rfl) rfl (.inl rfl) rfl)
             (.add (.read (.own rfl)) .lit)))))
 
 example : ∀ n, match eval [] [] n [.abort .fail 0] .empty [] cellEx with
@@ -1549,8 +1549,9 @@ example : ∀ n, match eval [] [] n [.abort .fail 0] .empty [] cellEx with
 
 /-- Reading through a reference into the innermost region. -/
 theorem Typed.rget0 (hp : PlaceTy Γ p (.rref c 0 τ) w y) (hR : lookup R Γ = some s)
-    (hs : s = .own (.arena 0) true ∨ ∃ m, s = .ref m (.arena 0)) : Typed F O Γ (.rget p) τ Γ r := by
-  simpa [Ty.shiftBy_zero] using Typed.rget (k := 0) hp hR hs
+    (hs : s = .own (.arena 0) true ∨ ∃ m, s = .ref m (.arena 0)) (hd : τ.rdata = true := by rfl) :
+    Typed F O Γ (.rget p) τ Γ r := by
+  simpa [Ty.shiftBy_zero] using Typed.rget (k := 0) hp hR hs hd
 
 /-- `function growR<region R>(p: Ref<R, int>): Ref<R, int> uses Region<R> { R.alloc(*p + 1) }`: a
 function of its caller's region, lent the arena to allocate in and read through. -/
@@ -1581,7 +1582,7 @@ theorem growR_ok : FnsOk [growR] [] := by
 theorem growEx_typed : Typed [growR] [] [] growEx .int [] [.fail] := by
   refine .region rfl rfl ?_
   refine .let_ (live := true) rfl (.ralloc rfl (.inl rfl) rfl .lit) ?_
-  refine .let_ (live := true) rfl ?_ (by simpa [Ty.shiftBy] using Typed.rget (R := "R") (k := 0) (τ := .int) (.own rfl) rfl (.inl rfl))
+  refine .let_ (live := true) rfl ?_ (by simpa [Ty.shiftBy] using Typed.rget (R := "R") (k := 0) (τ := .int) (.own rfl) rfl (.inl rfl) rfl)
   have := Typed.call (k := 0) (F := [growR]) (O := []) (f := 0) (d := growR) (r := [.fail])
     (Γ := [("p", .own (.rref false 0 .int) true), ("R", .own (.arena 0) true)])
     rfl rfl rfl (by simp [growR]) (.cons (.readRef (.own (x := "p") rfl)) .nil)
@@ -1613,7 +1614,7 @@ theorem growOuter_typed : Typed [growR] [] [] growOuter .int [] [.fail] := by
   refine .region rfl rfl ?_
   refine .let_ (live := true) rfl (.ralloc rfl (.inl rfl) rfl .lit) (.region rfl rfl ?_)
   refine .let_ (live := true) rfl ?_
-    (by simpa [Ty.shiftBy] using Typed.rget (R := "R") (k := 1) (τ := .int) (.own (x := "q") rfl) rfl (.inl rfl))
+    (by simpa [Ty.shiftBy] using Typed.rget (R := "R") (k := 1) (τ := .int) (.own (x := "q") rfl) rfl (.inl rfl) rfl)
   have := Typed.call (k := 1) (F := [growR]) (O := []) (f := 0) (d := growR) (r := [.fail])
     (Γ := [("S", .own (.arena 0) true), ("p", .own (.rref false 1 .int) true), ("R", .own (.arena 1) true)])
     rfl rfl rfl (by simp [growR]) (.cons (.readRef (.own (x := "p") rfl)) .nil)
@@ -1932,6 +1933,51 @@ example : value (eval [fails] genOps 60 [.abort .fail 0] .empty [] genFails) = s
   run [genFails, fails, nextOr0, genOps, nextOp, yieldOp]
 example : freed (eval [fails] genOps 60 [.abort .fail 0] .empty [] genFails) := by
   run [genFails, fails, nextOr0, genOps, nextOp, yieldOp]
+
+/-- `region (R) { const l = RegionList.new(); l.push(40); l.push(2); l[0] + l[1] }`: a list of the
+region, its elements cells of the region, all released as it ends; 42. -/
+def regionList : Expr :=
+  .region "R" .int
+    (.let_ "l" (.rref false 0 (.vec .int)) (.rlnew "R" .int)
+      (.let_ "u" .int (.rpush "R" .int (var "l") (.lit 40))
+        (.let_ "v" .int (.rpush "R" .int (var "l") (.lit 2))
+          (.let_ "i" .int (.atom (.lit 0))
+            (.let_ "j" .int (.atom (.lit 1))
+              (.let_ "x" .int (.rnth "R" (var "l") "i")
+                (.let_ "y" .int (.rnth "R" (var "l") "j")
+                  (.add (.read (var "x")) (.read (var "y"))))))))))
+
+example : value (eval [] [] 40 [] .empty [] regionList) = some 42 := by
+  run [regionList]
+example : freed (eval [] [] 40 [] .empty [] regionList) := by
+  run [regionList]
+
+theorem regionList_typed : Typed [] [] [] regionList .int [] [.fail] := by
+  refine .region rfl rfl ?_
+  refine .let_ (live := true) rfl (.rlnew (k := 0) rfl (.inl rfl) rfl) ?_
+  refine .let_ (live := true) rfl (.rpush (k := 0) (.own rfl) rfl (.inl rfl) rfl .lit) ?_
+  refine .let_ (live := true) rfl (.rpush (k := 0) (.own rfl) rfl (.inl rfl) rfl .lit) ?_
+  refine .let_ (live := true) rfl (.atom .lit) ?_
+  refine .let_ (live := true) rfl (.atom .lit) ?_
+  have hx := Typed.rnth (F := []) (O := []) (r := [.fail]) (k := 0) (τ := .int) (R := "R") (c := false) (z := "i")
+    (Γ := [("j", .own .int true), ("i", .own .int true), ("v", .own .int true), ("u", .own .int true),
+      ("l", .own (.rref false 0 (.vec .int)) true), ("R", .own (.arena 0) true)]) (.own (x := "l") rfl) (.own rfl) rfl (.inl rfl) rfl
+  refine .let_ (live := true) rfl (by simpa [Ctx.shift] using hx) ?_
+  have hy := Typed.rnth (F := []) (O := []) (r := [.fail]) (k := 0) (τ := .int) (R := "R") (c := false) (z := "j")
+    (Γ := [("x", .own .int true), ("j", .own .int true), ("i", .own .int true), ("v", .own .int true),
+      ("u", .own .int true), ("l", .own (.rref false 0 (.vec .int)) true), ("R", .own (.arena 0) true)])
+    (.own (x := "l") rfl) (.own rfl) rfl (.inl rfl) rfl
+  refine .let_ (live := true) rfl (by simpa [Ctx.shift] using hy) ?_
+  exact .add (.read (.own rfl)) (.read (.own rfl))
+
+example : ∀ n, match eval [] [] n [.abort .fail 0] .empty [] regionList with
+    | (.stuck, _) => False
+    | (.susp _ _ _ _ _, _) => False
+    | (.timeout, _) => True
+    | (.panic, _) => True
+    | (.val v, σ') => ∃ L, VT [] [] σ' .int v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
+    | (.abort _ _, σ') => ∀ l, σ'.mem l = none :=
+  program_ok (by intro d hd; simp at hd) regionList_typed
 
 theorem ralloc_ty (h : Typed F O Γ (.ralloc R c τ a) t Γ' r) :
     ∃ k s, t = .rref c k τ ∧ lookup R Γ = some s ∧ (s = .own (.arena k) true ∨ s = .ref .mut (.arena k)) := by

@@ -412,6 +412,10 @@ theorem typed_keys : Typed F O Γ e τ Γ' r → Γ'.map Prod.fst = Γ.map Prod.
     exact this.2.trans (typed_keys ha)
   | .write ha _ => atom_keys ha
   | .assign ha _ _ => atom_keys ha
+  | .rlnew _ _ _ => rfl
+  | .rpush _ _ _ _ _ => rfl
+  | .rnth _ _ _ _ _ => rfl
+  | .rlen _ _ _ => rfl
   | .vnew _ => rfl
   | .vlen _ => rfl
   | .vpush ha _ => atom_keys ha
@@ -473,7 +477,7 @@ theorem typed_keys : Typed F O Γ e τ Γ' r → Γ'.map Prod.fst = Γ.map Prod.
     have := typed_keys hb
     simpa [Ctx.shift, Function.comp_def] using this
   | .ralloc _ _ _ _ => rfl
-  | .rget _ _ _ => rfl
+  | .rget _ _ _ _ => rfl
   | .rset _ _ _ _ _ => rfl
 
 theorem lookup_det {α : Type} {x : Var} {a b : α} {env : List (Var × α)} : lookup x env = some a → lookup x env = some b → a = b := by

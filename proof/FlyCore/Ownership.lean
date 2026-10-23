@@ -176,9 +176,11 @@ theorem Ty.data_rfree : ∀ {τ : Ty}, τ.data = true → τ.rfree = true
   | .arena _, h => by simp [Ty.data] at h
   | .vec _, h => by simp [Ty.data] at h
 
-/-- Data a region may hold: integers, and references into it or the regions around it. -/
+/-- Data a region may hold: integers, and references into it or the regions around it, to data or to
+a list of data. -/
 def Ty.rdata : Ty → Bool
   | .int => true
+  | .rref _ _ (.vec τ) => τ.rdata
   | .rref _ _ τ => τ.rdata
   | _ => false
 
@@ -362,6 +364,16 @@ inductive Expr where
   /-- `p.set(a)` for a `Cell` `p` of the region of arena `R`: `a` put in its cell in place of what it
   held. -/
   | rset (R : Var) (p : Place) (a : Atom)
+  /-- `RegionList.new()` in the region of arena `R`: a list of the region, of `τ`s, empty. -/
+  | rlnew (R : Var) (τ : Ty)
+  /-- `p.push(a)` for a list `p` of the region of arena `R`: `a`, a `τ`, put in a new cell of the
+  region, at the list's end. -/
+  | rpush (R : Var) (τ : Ty) (p : Place) (a : Atom)
+  /-- `p[z]` for a list `p` of the region of arena `R`: a copy of its element `z`; a panic if there is
+  none. -/
+  | rnth (R : Var) (p : Place) (z : Var)
+  /-- `p.len()` for a list `p` of the region of arena `R`. -/
+  | rlen (R : Var) (p : Place)
   /-- `[]`, an empty vector. -/
   | vnew
   /-- `p.len()`: how many elements the vector at `p` has. -/
@@ -1160,6 +1172,59 @@ def eval (F : List Fn) (O : List Op) : Nat → HS → Store → Env → Expr →
           | _ => (.stuck, σ)
         | none => (.stuck, σ)
       | none => (.stuck, σ)
+    | .rlnew R τ =>
+      match lookup R env with
+      | some c =>
+        match σ.mem c with
+        | some (.arena cs) =>
+          let (l, σ2) := σ.alloc (.vec [])
+          (.val (.rptr l), (σ2.set c (some (.arena (cs ++ [l])))).tag l c (.vec τ))
+        | _ => (.stuck, σ)
+      | none => (.stuck, σ)
+    | .rpush R τ p a =>
+      match lookup R env, evalAtom σ env a with
+      | some c, some (v, σ1) =>
+        match σ1.mem c, resolve σ1 env p with
+        | some (.arena cs), some q =>
+          match σ1.mem q with
+          | some (.rptr lc) =>
+            match σ1.mem lc with
+            | some (.vec ls) =>
+              let (l, σ2) := σ1.alloc v
+              let σ3 := (σ2.set c (some (.arena (cs ++ [l])))).tag l c τ
+              (.val (.int 0), σ3.set lc (some (.vec (ls ++ [l]))))
+            | _ => (.stuck, σ1)
+          | _ => (.stuck, σ1)
+        | _, _ => (.stuck, σ1)
+      | _, _ => (.stuck, σ)
+    | .rnth _ p z =>
+      match resolve σ env p, lookup z env with
+      | some q, some lz =>
+        match σ.mem q, σ.mem lz with
+        | some (.rptr lc), some (.int i) =>
+          match σ.mem lc with
+          | some (.vec ls) =>
+            if 0 ≤ i then
+              match ls[i.toNat]? with
+              | some l =>
+                match σ.mem l with
+                | some v => (.val v, σ)
+                | none => (.stuck, σ)
+              | none => (.panic, σ)
+            else (.panic, σ)
+          | _ => (.stuck, σ)
+        | _, _ => (.stuck, σ)
+      | _, _ => (.stuck, σ)
+    | .rlen _ p =>
+      match resolve σ env p with
+      | some q =>
+        match σ.mem q with
+        | some (.rptr lc) =>
+          match σ.mem lc with
+          | some (.vec ls) => (.val (.int ls.length), σ)
+          | _ => (.stuck, σ)
+        | _ => (.stuck, σ)
+      | none => (.stuck, σ)
     | .vnew => (.val (.vec []), σ)
     | .vlen p =>
       match resolve σ env p with
@@ -1852,7 +1917,21 @@ inductive Typed (F : List Fn) (O : List Op) : Ctx → Expr → Ty → Ctx → Ro
       AtomTy Γ a (τ.shiftBy k) Γ → Typed F O Γ (.ralloc R c τ a) (.rref c k τ) Γ r
   /-- Reading what a reference into a region refers to, its arena in reach. -/
   | rget : PlaceTy Γ p (.rref c k τ) w y → lookup R Γ = some s → (s = .own (.arena k) true ∨ ∃ m, s = .ref m (.arena k)) →
-      Typed F O Γ (.rget p) (τ.shiftBy k) Γ r
+      τ.rdata = true → Typed F O Γ (.rget p) (τ.shiftBy k) Γ r
+  /-- A new list of a region, through its arena, owned or lent `mut`, of data the region may hold. -/
+  | rlnew : lookup R Γ = some s → (s = .own (.arena k) true ∨ s = .ref .mut (.arena k)) → τ.rdata = true →
+      Typed F O Γ (.rlnew R τ) (.rref false k (.vec τ)) Γ r
+  /-- Pushing to a list of a region, through its arena, owned or lent `mut`. -/
+  | rpush : PlaceTy Γ p (.rref c k (.vec τ)) w y → lookup R Γ = some s →
+      (s = .own (.arena k) true ∨ s = .ref .mut (.arena k)) → τ.rdata = true → AtomTy Γ a (τ.shiftBy k) Γ →
+      Typed F O Γ (.rpush R τ p a) .int Γ r
+  /-- Reading an element of a list of a region, its arena in reach. -/
+  | rnth : PlaceTy Γ p (.rref c k (.vec τ)) w y → PlaceTy Γ (.var z) .int wz yz → lookup R Γ = some s →
+      (s = .own (.arena k) true ∨ ∃ m, s = .ref m (.arena k)) → τ.rdata = true →
+      Typed F O Γ (.rnth R p z) (τ.shiftBy k) Γ r
+  /-- A list's length, its arena in reach. -/
+  | rlen : PlaceTy Γ p (.rref c k (.vec τ)) w y → lookup R Γ = some s →
+      (s = .own (.arena k) true ∨ ∃ m, s = .ref m (.arena k)) → Typed F O Γ (.rlen R p) .int Γ r
   /-- An empty vector. -/
   | vnew : τ.complete = true → Typed F O Γ .vnew (.vec τ) Γ r
   /-- A vector's length, which reading it says. -/
