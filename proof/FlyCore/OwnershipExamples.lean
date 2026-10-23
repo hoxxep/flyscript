@@ -764,7 +764,10 @@ theorem swapClosure_rejected : ¬ Typed [bump] [] [("b", .own (.box .int) true)]
     cases hb with
     | assign _ hp hsh =>
       obtain rfl := placeTy_var_root hp
-      simp [lookup, Slot.shell] at hsh
+      rcases var_writable hp rfl with h | h | ⟨_, _, _, h⟩
+      · simp [lookup] at h
+      · exact hsh _ _ _ _ h
+      · simp [lookup] at h
 
 /-! Closures returned and passed by value. -/
 

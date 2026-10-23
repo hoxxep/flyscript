@@ -557,8 +557,8 @@ theorem foot_update_sh : Foot F σ Γ env E S → (Γ.map Prod.fst).Nodup → lo
 /-- At a place that may be changed, what the location holds may be replaced: the rest of the
 activation stands, the variable the place is rooted at now owning the new tree. The place holds no
 closure or no place lent, or is rooted at a variable that may change all it holds. -/
-theorem replace_at (hI : Inv F σ Γ env E S) (hp : PlaceTy Γ p τ true r)
-    (hτ : (τ.isFn = false ∧ τ.complete = true) ∨ ∀ s, lookup r Γ = some s → s.shell = false) :
+theorem replace_at (hI : Inv F σ Γ env E S) (hp : PlaceTy Γ p τ true r) (hc : τ.complete = true)
+    (hτ : τ.isFn = false ∨ ∀ k A B r', lookup r Γ ≠ some (.ref .mut (.fn k A B r'))) :
     ∃ l R P E₁ E₂, resolve σ env p = some l ∧ LT F σ l τ R ∧ E.Perm (E₁ ++ (P ++ R) ++ E₂) ∧
       ∀ σ' R', Agree σ σ' (E₁ ++ P ++ E₂ ++ S) → LT F σ' l τ R' → Disj R' (E₁ ++ P ++ E₂) →
         Disj R' S → ∃ E', Inv F σ' Γ env E' S ∧ E'.Perm (E₁ ++ (P ++ R') ++ E₂) := by
@@ -590,12 +590,13 @@ theorem replace_at (hI : Inv F σ Γ env E S) (hp : PlaceTy Γ p τ true r)
       have hpast : ∃ P', Pf = a :: P' := by
         rcases hshp hshb with ⟨rfl, rfl⟩ | ⟨-, P', hP'⟩
         · exfalso
-          rcases hτ with ⟨hfn, hc⟩ | h
-          · rw [hty] at hfn hc
-            match s, hshb with
-            | .ref .mut (.fn _ _ _ _), _ => simp [Slot.ty, Ty.isFn] at hfn
-            | .half _ _ _, _ => simp [Slot.ty, Ty.lent1_complete] at hc
-          · exact absurd hshb (by rw [h s hs]; simp)
+          rw [hty] at hc
+          match s, hshb, hs with
+          | .half _ _ _, _, _ => simp [Slot.ty, Ty.lent1_complete] at hc
+          | .ref .mut (.fn _ _ _ _), _, hs =>
+            rcases hτ with hfn | h
+            · rw [hty] at hfn; simp [Slot.ty, Ty.isFn] at hfn
+            · exact h _ _ _ _ hs
         · exact ⟨P', hP'⟩
       obtain ⟨P', rfl⟩ := hpast
       obtain ⟨a', R0, E₁, E₂, ha', hso', hE, haS, hupd⟩ := foot_update_sh hI.foot hI.keys hs hshb

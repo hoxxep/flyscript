@@ -1086,7 +1086,7 @@ inductive Typed (F : List Fn) (O : List Op) : Ctx → Expr → Ty → Ctx → Ro
       Typed F O ((x, .own τ true) :: Γ₁) b τb ((x, .own τ live) :: Γ₂) r → Typed F O Γ (.let_ x τ a b) τb Γ₂ r
   | write : AtomTy Γ a .int Γ₁ → PlaceTy Γ₁ p .int true y → Typed F O Γ (.write p a) .int Γ₁ r
   /-- Nothing is put in place of a closure borrowed `mut`, or of what it captured. -/
-  | assign : AtomTy Γ a τ Γ₁ → PlaceTy Γ₁ p τ true y → (∀ s, lookup y Γ₁ = some s → s.shell = false) →
+  | assign : AtomTy Γ a τ Γ₁ → PlaceTy Γ₁ p τ true y → (∀ k A B r', lookup y Γ₁ ≠ some (.ref .mut (.fn k A B r'))) →
       Typed F O Γ (.assign p τ a) .int Γ₁ r
   | call : F[f]? = some d → d.retp = none → d.cap = none → (∀ l ∈ d.row, l ∈ r) → AtomsTy Γ owned (d.owns.map Prod.snd) Γ₁ →
       Lends Γ₁ lent (d.refs.map Prod.snd) ys → LentApart lent →

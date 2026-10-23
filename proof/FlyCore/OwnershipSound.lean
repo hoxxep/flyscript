@@ -3236,7 +3236,7 @@ theorem eval_ok_succ (hF : FnsOk F O) (hE : EvalOk F O n) (hR : RetOk F O n) :
       obtain ⟨v, σ1, E₁, L₁, hev, hI₁, hv₁, -, -, hm₁⟩ := atom_ok ha hI hwf
       cases hv₁ with
       | @int k =>
-      obtain ⟨l, Rb, P, A, B, hres, hRb, hE, hupd⟩ := replace_at hI₁ hp (.inl ⟨rfl, rfl⟩)
+      obtain ⟨l, Rb, P, A, B, hres, hRb, hE, hupd⟩ := replace_at hI₁ hp rfl (.inl rfl)
       cases hRb with
       | int hl =>
         simp only [eval, hev, hres, hl]
@@ -3259,7 +3259,7 @@ theorem eval_ok_succ (hF : FnsOk F O) (hE : EvalOk F O n) (hR : RetOk F O n) :
             (fun x => by simp only [List.append_nil, hE''.mem_iff, ← hE.mem_iff]))
     | assign ha hp hsh =>
       obtain ⟨v, σ1, E₁, L₁, hev, hI₁, hv₁, hd₁, hdS₁, hm₁⟩ := atom_ok ha hI hwf
-      obtain ⟨l, Rb, P, A, B, hres, hRb, hE, hupd⟩ := replace_at hI₁ hp (.inr hsh)
+      obtain ⟨l, Rb, P, A, B, hres, hRb, hE, hupd⟩ := replace_at hI₁ hp ha.complete (.inr hsh)
       obtain ⟨w, R', hw, hvw, rfl, hlR'⟩ := hRb.contents ha.complete
       obtain ⟨σ2, hdrop, hnext, hfree, hkeep⟩ := drop_ok hm₁.wf _ w R' hvw
       simp only [eval, hev, hres, hw, hdrop]
