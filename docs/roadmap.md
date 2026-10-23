@@ -117,7 +117,7 @@ What programs need beyond the core, each part an effect or a pure library, so th
 
 *Next.*
 
-- One command, `fly`, in place of the scripts: `new`, `build`, `run`, `test`, `add` and `fmt`.
+- One command, `fly`, in place of the scripts: `new`, `build`, `run`, `test` and `add`.
 - `fly.toml` names a package and its dependencies, fetched from git by semantic version tag; a registry can come later.
 - `fly.lock` records the exact commit and the hash of the content of every dependency, so that a build is the same wherever it is made.
 - The lockfile also records the effects each dependency's exported functions perform, which their types already say: an update after which a package performs `Io` or `Unsafe` where it did not is shown, and stops the build, until it is accepted. A package's types are a statement of what it can do, and its lockfile holds it to that statement.
