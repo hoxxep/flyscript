@@ -274,6 +274,15 @@ theorem typed_keys : Typed F O Γ e τ Γ' r → Γ'.map Prod.fst = Γ.map Prod.
   | .add ha hb => (atom_keys hb).trans (atom_keys ha)
   | .new ha => atom_keys ha
   | .pair ha hb => (atom_keys hb).trans (atom_keys ha)
+  | .inj ha => atom_keys ha
+  | .case _ _ h₁ _ w₁ _ => by
+    have := typed_keys h₁
+    simp only [List.map_cons, List.cons.injEq] at this
+    exact w₁.keys.trans (this.2.trans (setSlot_keys _))
+  | .caseRef _ _ _ _ h₁ _ w₁ _ => by
+    have := typed_keys h₁
+    simp only [List.map_cons, List.cons.injEq] at this
+    exact thaw_keys (w₁.keys.trans (this.2.trans lendCtx_keys))
   | .let_ _ ha hb => by
     have := typed_keys hb
     simp only [List.map_cons, List.cons.injEq] at this

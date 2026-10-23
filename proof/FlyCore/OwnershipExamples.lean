@@ -946,4 +946,65 @@ example : ∀ n, match eval [inc] [] n [.abort .fail 0] .empty [] fields with
     | (.abort _ _, σ') => ∀ l, σ'.mem l = none :=
   program_ok inc_ok fields_typed
 
+/-! Tags, and matching them. -/
+
+/-- `let b = Box.new(5); let v: #L(int) | #R(Box<int>) = #R(b); match (v) { #L(y) => y, #R(y) => *y }`:
+the arm owns the box the tag carried and drops it as it ends; 5, and nothing left allocated. -/
+def tags : Expr :=
+  .let_ "b" (.box .int) (.new (.lit 5))
+    (.let_ "v" (.sum .int (.box .int)) (.inj .int (.box .int) false (.move "b"))
+      (.case "v" "y" .int (.box .int) (.atom (.read (var "y"))) (.atom (.read (deref (var "y"))))))
+
+example : value (eval [] [] 30 [] .empty [] tags) = some 5 := by
+  run [tags]
+example : freed (eval [] [] 30 [] .empty [] tags) := by
+  run [tags]
+
+theorem tags_typed : Typed [] [] [] tags .int [] [.fail] :=
+  .let_ (live := false) rfl (.new .lit)
+    (.let_ (live := false) rfl (.inj (t := false) (.move rfl))
+      (.case rfl rfl (l₁ := true) (l₂ := true) (.atom (.read (.own rfl))) (.atom (.read (.deref (.own rfl))))
+        (Weaker.refl _) (Weaker.refl _)))
+
+example : ∀ n, match eval [] [] n [.abort .fail 0] .empty [] tags with
+    | (.stuck, _) => False
+    | (.susp _ _ _ _ _, _) => False
+    | (.timeout, _) => True
+    | (.val v, σ') => ∃ L, VT [] σ' .int v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
+    | (.abort _ _, σ') => ∀ l, σ'.mem l = none :=
+  program_ok (by intro d hd; simp at hd) tags_typed
+
+/-- `let v = #L(1); match (mut v) { #L(x) => x = 41, #R(x) => x = 0 }; match (v) { #L(y) => y, #R(y) => y }`:
+an arm changes what the tag carries through a `mut` borrow; 41. -/
+def tagRef : Expr :=
+  .let_ "v" (.sum .int .int) (.inj .int .int true (.lit 1))
+    (.let_ "u" .int (.caseRef "x" .mut (var "v") (.write (var "x") (.lit 41)) (.write (var "x") (.lit 0)))
+      (.case "v" "y" .int .int (.atom (.read (var "y"))) (.atom (.read (var "y")))))
+
+example : value (eval [] [] 30 [] .empty [] tagRef) = some 41 := by
+  run [tagRef]
+example : freed (eval [] [] 30 [] .empty [] tagRef) := by
+  run [tagRef]
+
+theorem tagRef_typed : Typed [] [] [] tagRef .int [] [.fail] := by
+  have := Typed.caseRef (F := []) (O := []) (Γ := [("v", .own (.sum .int .int) true)]) (x := "x") (m := .mut)
+    (p := var "v") (A := .int) (B := .int) (w := true) (y := "v") (τ := .int) (r := [.fail])
+    (e₁ := .write (var "x") (.lit 41)) (e₂ := .write (var "x") (.lit 0))
+    (Γb₁ := [("v", .lent (.sum .int .int))]) (Γb₂ := [("v", .lent (.sum .int .int))])
+    (Γb := [("v", .lent (.sum .int .int))]) rfl (.own rfl) (fun _ => rfl) (fun _ => ⟨rfl, rfl⟩)
+    (.write .lit (.ref (m := .mut) rfl)) (.write .lit (.ref (m := .mut) rfl)) (Weaker.refl _) (Weaker.refl _)
+  simp only [thaw] at this
+  exact .let_ (live := false) rfl (.inj (t := true) .lit)
+    (.let_ (live := true) rfl (by simpa using this)
+      (.case rfl rfl (l₁ := true) (l₂ := true) (.atom (.read (.own rfl))) (.atom (.read (.own rfl)))
+        (Weaker.refl _) (Weaker.refl _)))
+
+example : ∀ n, match eval [] [] n [.abort .fail 0] .empty [] tagRef with
+    | (.stuck, _) => False
+    | (.susp _ _ _ _ _, _) => False
+    | (.timeout, _) => True
+    | (.val v, σ') => ∃ L, VT [] σ' .int v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
+    | (.abort _ _, σ') => ∀ l, σ'.mem l = none :=
+  program_ok (by intro d hd; simp at hd) tagRef_typed
+
 end FlyCore.Ownership.Examples

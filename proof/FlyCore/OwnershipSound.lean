@@ -1751,6 +1751,114 @@ theorem lendCloMut_ok (hE : EvalOk F O n) (hfd : F[f]? = some d) (hcap : d.cap =
       · exact hI.disj z hz (hEhE z h))
     (hE _ _ _ _ _ _ _ _ _ _ hb hIb hwf1 hR)
 
+/-- Taking a tag apart: what it carried is the arm's variable's, and the tag's own variable is
+left moved; the arm's variable is dropped as the arm ends. -/
+theorem case_ok (hE : EvalOk F O n) (hx : lookup x Γ = some (.own (.sum A B) true)) (hy : lookup y Γ = none)
+    (h₁ : Typed F O ((y, .own A true) :: setSlot Γ x (.own (.sum A B) false)) e₁ τ ((y, .own A l₁) :: Γ₁) r)
+    (h₂ : Typed F O ((y, .own B true) :: setSlot Γ x (.own (.sum A B) false)) e₂ τ ((y, .own B l₂) :: Γ₂) r)
+    (w₁ : Weaker Γ' Γ₁) (w₂ : Weaker Γ' Γ₂)
+    (hI : Inv F σ Γ env E S) (hwf : WF σ) (hR : Ready O hs r) :
+    Post F O σ E S Γ' env τ r hs (eval F O (n + 1) hs σ env (.case x y A B e₁ e₂)) := by
+  obtain ⟨a, L, E₁, E₂, ha, hL, hE', hupd⟩ := foot_update hI.foot hI.keys hx rfl rfl
+  simp only [SlotOk] at hL
+  cases hL with
+  | @tag _ _ _ t l R hat hRp hn =>
+  have hnd := seg_nodup (hE' ▸ hI.nodup)
+  have haE : a ∈ E := hE' ▸ mem_seg.mpr (.inl (List.mem_cons_self ..))
+  have haS : a ∉ S := fun h => hI.disj a h haE
+  have ha12 : a ∉ E₁ ++ E₂ := hnd.2.1 a (List.mem_cons_self ..)
+  let σ1 := σ.set a (some .moved)
+  have hag : Agree σ σ1 (E₁ ++ E₂ ++ S) := agree_set (by
+    intro h
+    rcases List.mem_append.mp h with h | h
+    · exact ha12 h
+    · exact haS h)
+  have hfoot := hupd σ1 (.own (.sum A B) false) [a] (by rfl) rfl hag (by simp [SlotOk, σ1, Store.set])
+  have hR1 : LT F σ1 l (if t then A else B) R := hRp.frame (agree_set hn)
+  have hRd : Disj R (E₁ ++ E₂) := fun z hz => hnd.2.1 z (List.mem_cons_of_mem _ hz)
+  have hyk : y ∉ (setSlot Γ x (.own (.sum A B) false)).map Prod.fst := by
+    rw [setSlot_keys]; exact lookup_none_keys hy
+  have hIb : ∀ {Ay : Ty}, Ay = (if t then A else B) →
+      Inv F σ1 ((y, .own Ay true) :: setSlot Γ x (.own (.sum A B) false)) ((y, l) :: env)
+        (R ++ (E₁ ++ [a] ++ E₂)) S := by
+    intro Ay hAy
+    subst hAy
+    refine ⟨by simpa [addE, addS, exclPart, sharedPart, Slot.excl, Slot.shell] using Foot.cons (x := y) (s := .own _ true) hR1 hfoot, ?_, ?_, ?_⟩
+    · refine nodup_append_disj.mpr ⟨hRp.nodup, seg_replace hnd.2.2 (by simp) (disj_cons_left.mpr ⟨ha12, disj_nil_left⟩), ?_⟩
+      intro z hz hz'
+      rcases mem_seg.mp hz' with hz' | hz'
+      · simp at hz'; subst hz'; exact hn hz
+      · exact hRd z hz hz'
+    · intro z hz hz'
+      rcases List.mem_append.mp hz' with hz' | hz'
+      · exact hI.disj z hz (hE' ▸ mem_seg.mpr (.inl (List.mem_cons_of_mem _ hz')))
+      · rcases mem_seg.mp hz' with hz' | hz'
+        · simp at hz'; subst hz'; exact haS hz
+        · exact hI.disj z hz (hE' ▸ mem_seg.mpr (.inr hz'))
+    · exact List.nodup_cons.mpr ⟨hyk, by rw [setSlot_keys]; exact hI.keys⟩
+  have hm : Moves σ E σ1 (R ++ (E₁ ++ [a] ++ E₂)) [] :=
+    (Moves.set hwf hI.alloc haE).relabel fun z => by rw [hE']; mem_iff
+  have hk₁ : ∀ {Γb : Ctx} {e : Expr} {Ay ly}, Typed F O ((y, .own Ay true) :: setSlot Γ x (.own (.sum A B) false)) e τ
+      ((y, .own Ay ly) :: Γb) r → y ∉ Γb.map Prod.fst ∧ (Γb.map Prod.fst).Nodup := by
+    intro Γb e Ay ly h
+    have := typed_keys h
+    simp only [List.map_cons, List.cons.injEq, setSlot_keys] at this
+    rw [this.2]; exact ⟨lookup_none_keys hy, hI.keys⟩
+  have hret : ∀ τy c res, ret F O n hs (.scopeK τy c) res = leave τy c res := fun τy c res => by
+    rcases res with ⟨_ | _ | _ | _ | _, _⟩ <;> simp [ret, leave, Res.done]
+  simp only [eval, ha, hat, hret]
+  cases t with
+  | true =>
+    simp only [↓reduceIte] at hIb ⊢
+    exact post_weaken (leave_ok hm hwf (hk₁ h₁).1 (hk₁ h₁).2
+      (hE _ _ _ _ _ _ _ _ _ _ h₁ (hIb rfl) hm.wf hR)) w₁
+  | false =>
+    simp only [Bool.false_eq_true, ↓reduceIte] at hIb ⊢
+    exact post_weaken (leave_ok hm hwf (hk₁ h₂).1 (hk₁ h₂).2
+      (hE _ _ _ _ _ _ _ _ _ _ h₂ (hIb rfl) hm.wf hR)) w₂
+
+/-- Matching a tag through a borrow: the arm borrows what it carries, as a borrow of a place does. -/
+theorem caseRef_ok (hE : EvalOk F O n) (hx : lookup x Γ = none) (hp : PlaceTy Γ p (.sum A B) w y)
+    (hm : m = .mut → w = true) (hmf : m = .mut → A.isFn = false ∧ B.isFn = false)
+    (h₁ : Typed F O ((x, .ref m A) :: lendCtx m Γ y) e₁ τ ((x, .ref m A) :: Γb₁) r)
+    (h₂ : Typed F O ((x, .ref m B) :: lendCtx m Γ y) e₂ τ ((x, .ref m B) :: Γb₂) r)
+    (w₁ : Weaker Γb Γb₁) (w₂ : Weaker Γb Γb₂)
+    (hI : Inv F σ Γ env E S) (hwf : WF σ) (hR : Ready O hs r) :
+    Post F O σ E S (thaw Γ [y] Γb) env τ r hs (eval F O (n + 1) hs σ env (.caseRef x m p e₁ e₂)) := by
+  obtain ⟨a, τr, Lr, P, l0, s, ha, hLr, hpath, hres, -, hsubE, hsl, hso, hexw, hslot, hshp⟩ := place_ok hp hI.foot
+  obtain ⟨R0, hR0, -⟩ := path_split hpath hLr
+  cases hR0 with
+  | @tag _ _ _ t l R hat _ hn =>
+  have hpath' := hpath.snocTag' rfl hat
+  simp only [eval, hres, hat]
+  -- The root is no closure borrowed `mut`: the place holds a tag.
+  have hsh : s.shell = false := by
+    cases h : s.shell
+    · rfl
+    · obtain ⟨-, rfl⟩ := hshp h
+      have := hso.shell_fn hLr h
+      simp [Ty.isFn] at this
+  cases m with
+  | ro =>
+    cases t with
+    | true =>
+      simp only [↓reduceIte]
+      exact post_weaken (lend_ro_core hE hx ha hsl hLr hpath' hso hp.root_live h₁ hI hwf hR) (thaw_mono w₁)
+    | false =>
+      simp only [Bool.false_eq_true, ↓reduceIte]
+      exact post_weaken (lend_ro_core hE hx ha hsl hLr hpath' hso hp.root_live h₂ hI hwf hR) (thaw_mono w₂)
+  | «mut» =>
+    obtain rfl := hm rfl
+    cases t with
+    | true =>
+      simp only [↓reduceIte]
+      exact post_weaken (lend_mut_core hE hx ha hsl hLr hpath' hso (hsubE rfl hsh) (hexw rfl) hslot hsh
+        (hmf rfl).1 h₁ hI hwf hR) (thaw_mono w₁)
+    | false =>
+      simp only [Bool.false_eq_true, ↓reduceIte]
+      exact post_weaken (lend_mut_core hE hx ha hsl hLr hpath' hso (hsubE rfl hsh) (hexw rfl) hslot hsh
+        (hmf rfl).2 h₂ hI hwf hR) (thaw_mono w₂)
+
 theorem lend_ok {m : Mode} (hE : EvalOk F O n) (hx : lookup x Γ = none) (hp : PlaceTy Γ p τ w y)
     (hm : m = .mut → w = true) (hmf : m = .mut → τ.isFn = false)
     (hb : Typed F O ((x, .ref m τ) :: lendCtx m Γ y) body τb ((x, .ref m τ) :: Γb) r)
@@ -2814,6 +2922,39 @@ theorem eval_ok_succ (hF : FnsOk F O) (hE : EvalOk F O n) (hR : RetOk F O n) :
       · exact disj_cons_left.mpr ⟨fun h => hfresh _ (List.mem_append.mpr (.inr h)) rfl, hdS₁⟩
     | pair ha hb =>
       exact pair_ok ha hb hI hwf
+    | case hx hy h₁ h₂ w₁ w₂ => exact case_ok hE hx hy h₁ h₂ w₁ w₂ hI hwf hRdy
+    | caseRef hx hp hm hmf h₁ h₂ w₁ w₂ => exact caseRef_ok hE hx hp hm hmf h₁ h₂ w₁ w₂ hI hwf hRdy
+    | inj ha =>
+      obtain ⟨v, σ1, E₁, L₁, hev, hI₁, hv₁, hd₁, hdS₁, hm₁⟩ := atom_ok ha hI hwf
+      simp only [eval, hev]
+      have hL₁ := hv₁.alloc
+      have hag : Agree σ1 (σ1.alloc v).2 (L₁ ++ E₁ ++ S) := agree_alloc hm₁.wf (by
+        intro l hl
+        rcases List.mem_append.mp hl with hl | hl
+        · rcases List.mem_append.mp hl with hl | hl
+          · exact hL₁ l hl
+          · exact hI₁.alloc l hl
+        · exact hI₁.allocS l hl)
+      have hfresh : ∀ l ∈ L₁ ++ E₁ ++ S, l ≠ σ1.next := by
+        intro l hl h
+        subst h
+        rcases List.mem_append.mp hl with hl | hl
+        · rcases List.mem_append.mp hl with hl | hl
+          · exact Nat.lt_irrefl _ (hm₁.wf _ (hL₁ _ hl))
+          · exact Nat.lt_irrefl _ (hm₁.wf _ (hI₁.alloc _ hl))
+        · exact Nat.lt_irrefl _ (hm₁.wf _ (hI₁.allocS _ hl))
+      refine post_val ⟨hI₁.foot.frame fun l hl => hag l ?_, hI₁.nodup, hI₁.disj, hI₁.keys⟩
+        (.tag (LT.of_contents (by simp [Store.alloc]) (hv₁.frame fun l hl => hag l ?_) ?_)) ?_ ?_
+        ((hm₁.trans (Moves.allocate hm₁.wf hI₁.alloc) hd₁ hwf).relabel fun x => by
+          simp only [List.mem_append, List.mem_cons, List.not_mem_nil, or_false,
+            show (σ1.alloc v).1 = σ1.next from rfl]; grind)
+      · rcases List.mem_append.mp hl with hl | hl
+        · exact List.mem_append.mpr (.inl (List.mem_append.mpr (.inr hl)))
+        · exact List.mem_append.mpr (.inr hl)
+      · exact List.mem_append.mpr (.inl (List.mem_append.mpr (.inl hl)))
+      · exact fun h => hfresh _ (List.mem_append.mpr (.inl (List.mem_append.mpr (.inl h)))) rfl
+      · exact disj_cons_left.mpr ⟨fun h => hfresh _ (List.mem_append.mpr (.inl (List.mem_append.mpr (.inr h)))) rfl, hd₁⟩
+      · exact disj_cons_left.mpr ⟨fun h => hfresh _ (List.mem_append.mpr (.inr h)) rfl, hdS₁⟩
     | lendClo hfd hcap hown hrefs hretp hdat hp hx hb =>
       exact lendClo_ok hE hfd hcap hown hrefs hretp hdat hp hx hb hI hwf hRdy
     | lendCloMut hfd hcap hown hrefs hretp hdat hp hx hb =>

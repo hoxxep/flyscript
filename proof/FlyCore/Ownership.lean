@@ -57,6 +57,8 @@ inductive Ty where
   | fn (k : Kind) (A B : Ty) (r : Row)
   /-- Two values, each in a cell of its own: a record of two fields. -/
   | pair (A B : Ty)
+  /-- A value of one type or the other, and which: a union of two tags. -/
+  | sum (A B : Ty)
   deriving DecidableEq, Repr
 
 /-- Plain data: integers and boxes of them, which a closure may capture. -/
@@ -65,6 +67,7 @@ def Ty.data : Ty → Bool
   | .box τ => τ.data
   | .fn _ _ _ _ => false
   | .pair A B => A.data && B.data
+  | .sum A B => A.data && B.data
 
 def Ty.isFn : Ty → Bool
   | .fn _ _ _ _ => true
@@ -115,6 +118,14 @@ inductive Expr where
   | new (a : Atom)
   /-- A pair of two values, each put in a cell of its own. -/
   | pair (a b : Atom)
+  /-- A tag, left or right, of a union of an `A` and a `B`, carrying a value put in a cell of its own. -/
+  | inj (A B : Ty) (left : Bool) (a : Atom)
+  /-- `match (x) { #Left(y) => e₁, #Right(y) => e₂ }`, taking `x` apart: `y` owns what the tag
+  carried, an `A` or a `B`, for the arm, and `x` is left moved. -/
+  | case (x y : Var) (A B : Ty) (e₁ e₂ : Expr)
+  /-- `match (p) { … }` through a borrow, `readonly` or `mut`: `x` is a borrow of what the tag at `p`
+  carries, for the arm. -/
+  | caseRef (x : Var) (m : Mode) (p : Place) (e₁ e₂ : Expr)
   /-- `let x: τ = a; b`, `x` dropped when `b` ends unless it was moved. -/
   | let_ (x : Var) (τ : Ty) (a b : Expr)
   /-- `p = a` for an integer place. -/
@@ -197,6 +208,8 @@ inductive Val where
   | clo (f : Nat) (c : Nat) (τc : Ty)
   /-- A pair: the cells of its fields. -/
   | pair (b c : Nat)
+  /-- A tag, left or right, of a union of an `A` and a `B`, and the cell of what it carries. -/
+  | tag (A B : Ty) (left : Bool) (l : Nat)
   deriving DecidableEq, Repr
 
 /-- The store: its cells, `none` once freed or before allocation, the next to allocate, and the
@@ -263,6 +276,13 @@ def dropK : Nat → Store → Ty → Val → Option Store
     | some w =>
       match dropK k σ τc w with
       | some σ' => some (σ'.set c none)
+      | none => none
+    | none => none
+  | k + 1, σ, .sum A B, .tag _ _ t l =>
+    match σ.mem l with
+    | some w =>
+      match dropK k σ (if t then A else B) w with
+      | some σ' => some (σ'.set l none)
       | none => none
     | none => none
   | k + 1, σ, .pair A B, .pair b c =>
@@ -521,6 +541,28 @@ def eval (F : List Fn) (O : List Op) : Nat → HS → Store → Env → Expr →
           let (lc, σ4) := σ3.alloc w
           (.val (.pair lb lc), σ4)
         | none => (.stuck, σ)
+      | none => (.stuck, σ)
+    | .inj A B t a =>
+      match evalAtom σ env a with
+      | some (v, σ1) =>
+        let (l, σ2) := σ1.alloc v
+        (.val (.tag A B t l), σ2)
+      | none => (.stuck, σ)
+    | .case x y A B e₁ e₂ =>
+      match lookup x env with
+      | some c =>
+        match σ.mem c with
+        | some (.tag _ _ t l) =>
+          ret F O n hs (.scopeK (if t then A else B) l)
+            (eval F O n hs (σ.set c (some .moved)) ((y, l) :: env) (if t then e₁ else e₂))
+        | _ => (.stuck, σ)
+      | none => (.stuck, σ)
+    | .caseRef x _ p e₁ e₂ =>
+      match resolve σ env p with
+      | some l0 =>
+        match σ.mem l0 with
+        | some (.tag _ _ t l) => ret F O n hs .lendK (eval F O n hs σ ((x, l) :: env) (if t then e₁ else e₂))
+        | _ => (.stuck, σ)
       | none => (.stuck, σ)
     | .let_ x τ a b => ret F O n hs (.letK x τ env b) (eval F O n hs σ env a)
     | .write p a =>
@@ -940,6 +982,18 @@ inductive Typed (F : List Fn) (O : List Op) : Ctx → Expr → Ty → Ctx → Ro
   | add : AtomTy Γ a .int Γ₁ → AtomTy Γ₁ b .int Γ₂ → Typed F O Γ (.add a b) .int Γ₂ r
   | new : AtomTy Γ a τ Γ₁ → Typed F O Γ (.new a) (.box τ) Γ₁ r
   | pair : AtomTy Γ a A Γ₁ → AtomTy Γ₁ b B Γ₂ → Typed F O Γ (.pair a b) (.pair A B) Γ₂ r
+  | inj : AtomTy Γ a (if t then A else B) Γ₁ → Typed F O Γ (.inj A B t a) (.sum A B) Γ₁ r
+  /-- Each arm owns what the tag carried; where they disagree, a variable is perhaps moved. -/
+  | case : lookup x Γ = some (.own (.sum A B) true) → lookup y Γ = none →
+      Typed F O ((y, .own A true) :: setSlot Γ x (.own (.sum A B) false)) e₁ τ ((y, .own A l₁) :: Γ₁) r →
+      Typed F O ((y, .own B true) :: setSlot Γ x (.own (.sum A B) false)) e₂ τ ((y, .own B l₂) :: Γ₂) r →
+      Weaker Γ' Γ₁ → Weaker Γ' Γ₂ → Typed F O Γ (.case x y A B e₁ e₂) τ Γ' r
+  /-- Each arm borrows what the tag carries, as a borrow of a place does. -/
+  | caseRef : lookup x Γ = none → PlaceTy Γ p (.sum A B) w y → (m = .mut → w = true) →
+      (m = .mut → A.isFn = false ∧ B.isFn = false) →
+      Typed F O ((x, .ref m A) :: lendCtx m Γ y) e₁ τ ((x, .ref m A) :: Γb₁) r →
+      Typed F O ((x, .ref m B) :: lendCtx m Γ y) e₂ τ ((x, .ref m B) :: Γb₂) r →
+      Weaker Γb Γb₁ → Weaker Γb Γb₂ → Typed F O Γ (.caseRef x m p e₁ e₂) τ (thaw Γ [y] Γb) r
   | let_ : lookup x Γ = none → Typed F O Γ a τ Γ₁ r →
       Typed F O ((x, .own τ true) :: Γ₁) b τb ((x, .own τ live) :: Γ₂) r → Typed F O Γ (.let_ x τ a b) τb Γ₂ r
   | write : AtomTy Γ a .int Γ₁ → PlaceTy Γ₁ p .int true y → Typed F O Γ (.write p a) .int Γ₁ r

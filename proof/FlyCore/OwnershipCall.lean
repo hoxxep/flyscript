@@ -122,6 +122,17 @@ theorem thaw_weaker_hide : ∀ {Γ Γb : Ctx}, Weaker Γb (hide Γ y) → Weaker
       rw [thaw_cons]; simp only [List.mem_singleton, hzy, ↓reduceIte]
       exact .cons hle (ih w)
 
+/-- Giving back what was lent keeps what is weaker weaker. -/
+theorem thaw_mono {ys : List Var} : ∀ {Γ Γb Γb' : Ctx}, Weaker Γb' Γb → Weaker (thaw Γ ys Γb') (thaw Γ ys Γb)
+  | [], _, _, _ => by simp [thaw]; exact .nil
+  | _ :: _, [], _, w => by rw [Weaker.nil_inv w]; simp [thaw]; exact .nil
+  | (z, s) :: Γ, q :: Γb, _, w => by
+    obtain ⟨s', Γb'', rfl, hle, w'⟩ := Weaker.cons_inv w
+    rw [thaw_cons, thaw_cons]
+    by_cases hz : z ∈ ys
+    · simp only [hz, ↓reduceIte]; exact .cons .refl (thaw_mono w')
+    · simp only [hz, ↓reduceIte]; exact .cons hle (thaw_mono w')
+
 theorem thaw_weaker_lend : Weaker Γb (lendCtx m Γ y) → Weaker (thaw Γ [y] Γb) Γ := by
   cases m
   · exact thaw_weaker
@@ -148,6 +159,17 @@ theorem typed_weaker : Typed F O Γ e τ Γ' r → (Γ.map Prod.fst).Nodup → W
   | .add ha hb, hk => (atom_weaker hb (by rw [atom_keys ha]; exact hk)).trans (atom_weaker ha hk)
   | .new ha, hk => atom_weaker ha hk
   | .pair ha hb, hk => (atom_weaker hb (by rw [atom_keys ha]; exact hk)).trans (atom_weaker ha hk)
+  | .inj ha, hk => atom_weaker ha hk
+  | .case hx hy h₁ _ w₁ _, hk => by
+    have := typed_weaker h₁ (List.nodup_cons.mpr ⟨by rw [setSlot_keys]; exact lookup_none_keys hy,
+      by rw [setSlot_keys]; exact hk⟩)
+    cases this with
+    | cons _ w => exact w₁.trans (w.trans (setSlot_weaker hk hx .forget))
+  | .caseRef hx _ _ _ h₁ _ w₁ _, hk => by
+    have := typed_weaker h₁ (List.nodup_cons.mpr ⟨by rw [lendCtx_keys]; exact lookup_none_keys hx,
+      by rw [lendCtx_keys]; exact hk⟩)
+    cases this with
+    | cons _ w => exact thaw_weaker_lend (w₁.trans w)
   | .let_ hx ha hb, hk => by
     have := typed_weaker hb (List.nodup_cons.mpr ⟨by rw [typed_keys ha]; exact lookup_none_keys hx,
       by rw [typed_keys ha]; exact hk⟩)
