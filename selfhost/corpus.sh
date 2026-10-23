@@ -5,12 +5,12 @@
 # With `--c` each program is compiled to C and built with `cc`, with the address and undefined
 # behavior sanitizers, so a memory error fails the program. With `--leaks` too, a program that
 # leaks fails: on Linux the address sanitizer checks for leaks itself; where it cannot, on macOS,
-# a plain build is run under `leaks`. A program that panics exits at once, and is not checked.
+# a plain build, on the C library's allocator, is run under `leaks`. A program that panics exits at once, and is not checked.
 # With `--wasm` each is compiled to WebAssembly for WASI, through LLVM, and run by
 # `selfhost/wasm.js`. With
 # `--llvm` each is compiled through LLVM by `selfhost/llvm.sh`, with the sanitizers as for `--c`.
 # With `--threads` too, natively, each runs on worker threads, not against a simulated world,
-# under the thread sanitizer.
+# under the thread sanitizer. `FLY_SANITIZE`, if set, replaces the sanitizers' flags.
 c=false
 wasm=false
 llvm=false
@@ -32,6 +32,9 @@ command -v leaks > /dev/null 2>&1 || leaks=false
 # world, on four workers.
 sanitize="-fsanitize=address,undefined -fno-sanitize-recover=all"
 $threads && sanitize="-fsanitize=thread"
+# `FLY_SANITIZE` replaces the sanitizers' flags; empty, programs run as built for use, on the
+# runtime's own allocator.
+sanitize=${FLY_SANITIZE-$sanitize}
 compiler=$1; shift
 root=$(cd "$(dirname "$0")/.." && pwd)
 out=$(mktemp -d)
@@ -83,7 +86,7 @@ for f in "$@"; do
     [ -s "$out/$name.err" ] || (cd "$out/$name.cwd" && FLY_WORLD="$world" $run) > "$out/$name.got" 2>&1
   fi
   if $c && $leaks && [ ! -s "$out/$name.err" ] && ! grep -q '<panic' "$out/$name.want"; then
-    cc -std=gnu11 -g -O1 -w -o "$out/$name.plain" "$out/$name.c" -lm &&
+    cc -std=gnu11 -g -O1 -w -DFLY_SYSTEM_MALLOC -o "$out/$name.plain" "$out/$name.c" -lm &&
       (cd "$out/$name.cwd" && FLY_WORLD="$world" leaks --atExit -- "$out/$name.plain" 2>&1) | grep -q ' 0 leaks for ' ||
       echo "leaks" >> "$out/$name.err"
   fi

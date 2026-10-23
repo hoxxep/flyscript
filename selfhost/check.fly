@@ -386,7 +386,7 @@ impl Checker {
     const f = self.normalize(self.s.resolve(found));
     const x = self.normalize(self.s.resolve(expected));
     if (isNever(f)) { return true; }
-    const snap = self.s.clone();
+    const snap = self.s.mark();
     const ok = match ([f.clone(), x.clone()]) {
       [#Fn(ff), #Fn(xf)] if ff.params.len() == xf.params.len() => {
         let all = true;
@@ -425,7 +425,7 @@ impl Checker {
       },
       _ => false,
     };
-    if (!ok) { self.s.restore(snap); }
+    if (!ok) { self.s.rollback(snap); }
     ok
   }
 
@@ -434,7 +434,7 @@ impl Checker {
     const fnf = self.normalize(self.s.resolve(found));
     const fnx = self.normalize(self.s.resolve(expected));
     if (const [#Fn(f), #Fn(x)] = [fnf, fnx]) {
-      const snap = self.s.clone();
+      const snap = self.s.mark();
       let shapes = f.params.len() == x.params.len();
       if (shapes) {
         for (const i of 0..f.params.len()) { if (!self.unifies(f.params[i], x.params[i])) { shapes = false; break; } }
@@ -450,12 +450,12 @@ impl Checker {
           } else {
             `only \`${self.showEffs(allowedRow)}\``
           };
-          self.s.restore(snap);
+          self.s.rollback(snap);
           self.err(span, `this function performs ${what}, but ${allowed} may be performed here`.asStr());
           return;
         }
       }
-      self.s.restore(snap);
+      self.s.rollback(snap);
     }
     const before = self.pendingCopy.len();
     if (!self.lends(found, expected)) {
@@ -1433,7 +1433,7 @@ impl Checker {
     match (callee.kind) {
       #Ident(name) if self.local(name.asStr()).isNone() => {
         if (const #Some(#Fn(fid)) = self.p.lookup(self.module, name.asStr())) {
-          if (match (self.p.fnDecl(fid)) { #Some(d) => d.sig.isComptime, #None => false }) {
+          if (match (self.p.fnDeclOf(fid)) { #Some(d) => d.sig.isComptime, #None => false }) {
             self.err(span, `\`${name}\` is a \`comptime function\`: call it from \`comptime\` code`.asStr());
             return #Error;
           }
@@ -1687,20 +1687,20 @@ impl Checker {
   }
 
   function findMethod(self: mut Self, recv: readonly Ty, name: str): Option<usize> {
-    for (const f of 0..self.p.fns.len()) {
+    const candidates: Vec<usize> = match (self.p.methods.get(name)) { #Some(fs) => fs.clone(), #None => Vec.new() };
+    for (const f of candidates) {
       const implId = self.p.fns[f].implId;
-      const isCandidate = self.p.fns[f].name == name
-        && match (implId) { #Some(i) => !self.p.isBlanket(i), #None => false }
+      const isCandidate = match (implId) { #Some(i) => !self.p.isBlanket(i), #None => false }
         && self.hasSelf(f)
         && !self.p.specOf.has(f);
       if (!isCandidate) { continue; }
       let scheme = self.p.fns[f].scheme.clone();
       scheme.effects = #None;
-      const snap = self.s.clone();
+      const snap = self.s.mark();
       const inst = self.instantiate(scheme, Vec.new(), false);
       const selfTy = inst.params[0][1].clone();
       const fits = self.lends(recv, selfTy);
-      self.s.restore(snap);
+      self.s.rollback(snap);
       if (fits) { return #Some(f); }
     }
     // A derivation: the template impl of an interface with this method (§7.3).
@@ -1965,10 +1965,10 @@ impl Checker {
         self.pendingRegions.push([v, candidates]);
         continue;
       }
-      const snap = self.s.clone();
+      const snap = self.s.mark();
       try { self.s.unifyRegion(#Var(v), #Param(sym.clone())); } catch (_) {}
       if (self.escapes(sym, result) && candidates.len() > 1) {
-        self.s.restore(snap);
+        self.s.rollback(snap);
         candidates.remove(0);
         self.pendingRegions.push([v, candidates]);
       }

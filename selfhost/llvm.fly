@@ -1220,9 +1220,10 @@ impl Lgen {
     if (const #Value(f, _) = c.callee) { self.flowOperand(f); }
   }
 
-  function assignedIn(self: readonly Self, bs: readonly Vec<Block>): HashSet<usize> {
+  function assignedIn(self: readonly Self, b: readonly Block, more: Option<readonly Block>): HashSet<usize> {
     let u: Uses = { locals: HashSet.new(), captures: HashSet.new() };
-    for (const b of bs) { useBlock(b, mut u); }
+    useBlock(b, mut u);
+    if (const #Some(m) = more) { useBlock(m, mut u); }
     let out: HashSet<usize> = HashSet.new();
     for (const l of u.locals.iter()) { if (self.c.lw.owned(self.cx.locals[l].ty)) { out.insert(l); } }
     out
@@ -1451,7 +1452,7 @@ impl Lgen {
         self.label(join.asStr());
       }
       #Loop(l, body, step) => {
-        const assigned = self.assignedIn([body.clone(), step.clone()]);
+        const assigned = self.assignedIn(body, #Some(step));
         for (const x of assigned.iter()) { self.cx.live.insert(x); }
         const head = self.cx.live.clone();
         const top = `loop${l}`;
@@ -1469,7 +1470,7 @@ impl Lgen {
         self.cx.reachable = true;
       }
       #Labeled(l, b) => {
-        const assigned = self.assignedIn([b.clone()]);
+        const assigned = self.assignedIn(b, #None);
         let after = self.cx.live.clone();
         for (const x of assigned.iter()) { after.insert(x); }
         self.cx.scopes.push(#Target(l));
@@ -2171,6 +2172,8 @@ impl Lgen {
       at
     };
     const res = self.allocaOf(rt, span);
+    // An operation the task unwinds from gives nothing, and what it gives is dropped as it unwinds.
+    self.zero(res.asStr(), rt, span);
     self.ins(`call void @fly_perform(i32 ${d}, i32 ${op}, ptr ${a}, ptr ${res})`);
     if (!unitTy(rt)) {
       const n = self.sizeOf(rt, span);

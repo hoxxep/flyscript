@@ -26,8 +26,23 @@ export struct Subst {
   effs: Vec<Option<EffRow>>;
   regions: Vec<Option<Region>>;
   lens: Vec<Option<Len>>;
+  // What each binding replaced, latest last, so that a trial is undone by going back along it
+  // rather than by copying every binding before it.
+  trail: Vec<Undo>;
 }
 impl Clone for Subst;
+
+enum Undo {
+  #Ty(u32, [Option<Ty>, VarKind]),
+  #Row(u32, Option<Row>),
+  #Eff(u32, Option<EffRow>),
+  #Region(u32, Option<Region>),
+  #Len(u32, Option<Len>),
+}
+impl Clone for Undo;
+
+// A point to go back to: how far the trail and each kind of variable had come.
+export struct Mark { trail: usize; tys: usize; rows: usize; effs: usize; regions: usize; lens: usize }
 
 // Binds a region variable in `regions`, which is a substitution's or a trial copy of one.
 function unifyRegionIn(regions: mut Vec<Option<Region>>, a: readonly Region, b: readonly Region): void uses Fail<Mismatch> {
@@ -61,7 +76,66 @@ function ok(f: once () => void uses Fail<Mismatch>): bool {
 
 impl Subst {
   export function new(): Subst {
-    Subst { tys: Vec.new(), rows: Vec.new(), effs: Vec.new(), regions: Vec.new(), lens: Vec.new() }
+    Subst { tys: Vec.new(), rows: Vec.new(), effs: Vec.new(), regions: Vec.new(), lens: Vec.new(), trail: Vec.new() }
+  }
+
+  // ---- bindings, each recorded on the trail ----
+
+  function setTy(self: mut Self, v: u32, b: Option<Ty>): void {
+    const old = replace(mut self.tys[v as usize][0], b);
+    self.trail.push(#Ty(v, [old, self.tys[v as usize][1]]));
+  }
+
+  function setKind(self: mut Self, v: u32, k: VarKind): void {
+    self.trail.push(#Ty(v, self.tys[v as usize].clone()));
+    self.tys[v as usize][1] = k;
+  }
+
+  function setRow(self: mut Self, v: u32, b: Row): void {
+    const old = replace(mut self.rows[v as usize], #Some(b));
+    self.trail.push(#Row(v, old));
+  }
+
+  function setEffs(self: mut Self, v: u32, b: EffRow): void {
+    const old = replace(mut self.effs[v as usize], #Some(b));
+    self.trail.push(#Eff(v, old));
+  }
+
+  function setRegion(self: mut Self, v: u32, b: Region): void {
+    const old = replace(mut self.regions[v as usize], #Some(b));
+    self.trail.push(#Region(v, old));
+  }
+
+  function setLen(self: mut Self, v: u32, b: Len): void {
+    const old = replace(mut self.lens[v as usize], #Some(b));
+    self.trail.push(#Len(v, old));
+  }
+
+  // Where the bindings are now, to come back to with `rollback`.
+  export function mark(self: readonly Self): Mark {
+    Mark {
+      trail: self.trail.len(), tys: self.tys.len(), rows: self.rows.len(), effs: self.effs.len(),
+      regions: self.regions.len(), lens: self.lens.len(),
+    }
+  }
+
+  // Undoes every binding made since `m`, latest first, and forgets the variables made since.
+  export function rollback(self: mut Self, m: Mark): void {
+    while (self.trail.len() > m.trail) {
+      match (self.trail.pop()) {
+        #Some(#Ty(v, old)) => { self.tys[v as usize] = old; }
+        #Some(#Row(v, old)) => { self.rows[v as usize] = old; }
+        #Some(#Eff(v, old)) => { self.effs[v as usize] = old; }
+        #Some(#Region(v, old)) => { self.regions[v as usize] = old; }
+        #Some(#Len(v, old)) => { self.lens[v as usize] = old; }
+        #None => {}
+      }
+    }
+    self.tys.truncate(m.tys);
+    self.rows.truncate(m.rows);
+    self.effs.truncate(m.effs);
+    self.regions.truncate(m.regions);
+    self.lens.truncate(m.lens);
   }
 
   // ---- fresh variables ----
@@ -100,14 +174,11 @@ impl Subst {
   // ---- resolution ----
 
   // Follows variable bindings at the top of a type.
-  export function resolve(self: readonly Self, t: readonly Ty): Ty {
-    let t = t.clone();
-    while (const #Var(v) = t) {
-      match (self.tys[v as usize][0]) {
-        #Some(b) => { t = b.clone(); }
-        #None => return t,
-      }
-    }
+  export function resolve(self: readonly Self, t: readonly Ty): Ty { self.resolved(t).clone() }
+
+  // The same, lent: the type `t` is, or the binding it comes to.
+  export function resolved(self: readonly Self, t: readonly Ty): readonly Ty from self, t {
+    if (const #Var(v) = t && const #Some(b) = self.tys[v as usize][0]) { return self.resolved(b); }
     t
   }
 
@@ -157,7 +228,8 @@ impl Subst {
 
   // Fully resolves a type, for printing and for final checks.
   export function zonk(self: readonly Self, t: readonly Ty): Ty {
-    match (self.resolve(t)) {
+    const r = self.resolved(t);
+    match (r) {
       #Named(d, args) => {
         let out: Vec<GArg> = Vec.new();
         for (const a of args) { out.push(self.zonkArg(a)); }
@@ -178,8 +250,8 @@ impl Subst {
         for (const p of f.params) { params.push(self.zonk(p)); }
         #Fn(Box.new(FnTy { mode: f.mode, params, ret: self.zonk(f.ret), effects: self.zonkEffs(f.effects) }))
       }
-      #Assoc(base, n) => #Assoc(Box.new(self.zonk(base)), n),
-      other => other,
+      #Assoc(base, n) => #Assoc(Box.new(self.zonk(base)), n.clone()),
+      _ => r.clone(),
     }
   }
 
@@ -235,8 +307,8 @@ impl Subst {
         [x, y] if x == y => x,
         _ => throw #Mismatch,
       };
-      self.tys[w as usize][1] = merged;
-      self.tys[v as usize][0] = #Some(#Var(w));
+      if (merged != b) { self.setKind(w, merged); }
+      self.setTy(v, #Some(#Var(w)));
       return;
     }
     const fits = match (self.kind(v)) {
@@ -245,7 +317,7 @@ impl Subst {
       #Float => match (t) { #Prim(p) => isFloat(p), #Error => true, _ => false },
     };
     if (!fits || self.occurs(v, t)) { throw #Mismatch; }
-    self.tys[v as usize][0] = #Some(t);
+    self.setTy(v, #Some(t));
   }
 
   // ---- unification ----
@@ -291,22 +363,14 @@ impl Subst {
 
   // Whether `a` and `b` unify, binding variables if they do and changing nothing if not.
   export function tryUnify(self: mut Self, a: readonly Ty, b: readonly Ty): bool {
-    const snap = self.clone();
+    const snap = self.mark();
     try {
       self.unify(a, b);
       true
     } catch (_) {
-      self.restore(snap);
+      self.rollback(snap);
       false
     }
-  }
-
-  export function restore(self: mut Self, s: Subst): void {
-    self.tys = s.tys;
-    self.rows = s.rows;
-    self.effs = s.effs;
-    self.regions = s.regions;
-    self.lens = s.lens;
   }
 
   export function unifyArg(self: mut Self, a: readonly GArg, b: readonly GArg): void uses Fail<Mismatch> {
@@ -319,13 +383,13 @@ impl Subst {
         const ey = self.expandEffs(y);
         if (ex.effs.len() == 0) {
           if (const #Var(v) = ex.tail) {
-            if (ey.tail != ex.tail) { self.effs[v as usize] = #Some(ey); }
+            if (ey.tail != ex.tail) { self.setEffs(v, ey); }
             return;
           }
         }
         if (ey.effs.len() == 0) {
           if (const #Var(v) = ey.tail) {
-            if (ex.tail != ey.tail) { self.effs[v as usize] = #Some(ex); }
+            if (ex.tail != ey.tail) { self.setEffs(v, ex); }
             return;
           }
         }
@@ -338,7 +402,14 @@ impl Subst {
   }
 
   export function unifyRegion(self: mut Self, a: readonly Region, b: readonly Region): void uses Fail<Mismatch> {
-    unifyRegionIn(mut self.regions, a, b);
+    const x = self.resolveRegion(a);
+    const y = self.resolveRegion(b);
+    if (x == y) { return; }
+    match ([x, y]) {
+      [#Var(v), y] => self.setRegion(v, y.clone()),
+      [x, #Var(v)] => self.setRegion(v, x.clone()),
+      _ => throw #Mismatch,
+    }
   }
 
   export function unifyLen(self: mut Self, a: readonly Len, b: readonly Len): void uses Fail<Mismatch> {
@@ -346,11 +417,11 @@ impl Subst {
     const y = self.resolveLen(b);
     if (x == y) { return; }
     match (x) {
-      #Var(v) => { self.lens[v as usize] = #Some(y); return; }
+      #Var(v) => { self.setLen(v, y); return; }
       _ => {}
     }
     match (y) {
-      #Var(v) => { self.lens[v as usize] = #Some(x); }
+      #Var(v) => { self.setLen(v, x); }
       _ => throw #Mismatch,
     }
   }
@@ -359,7 +430,7 @@ impl Subst {
     match (tail) {
       #Var(v) => {
         if (labels.len() == 0 && rest == tail) { return; }
-        self.rows[v as usize] = #Some(Row { labels, tail: rest });
+        self.setRow(v, Row { labels, tail: rest });
       }
       _ => {
         if (!(labels.len() == 0 && rest == tail)) { throw #Mismatch; }
@@ -464,7 +535,7 @@ impl Subst {
   }
 
   // Binds an unbound effect-row variable to `row`.
-  export function bindEffs(self: mut Self, v: u32, row: EffRow): void { self.effs[v as usize] = #Some(row); }
+  export function bindEffs(self: mut Self, v: u32, row: EffRow): void { self.setEffs(v, row); }
 
   export function regionsEqual(self: readonly Self, a: readonly Vec<Region>, b: readonly Vec<Region>): bool {
     if (a.len() != b.len()) { return false; }
@@ -513,7 +584,7 @@ impl Subst {
             const rest = self.freshEffTail();
             let one: Vec<Eff> = Vec.new();
             one.push(eff.clone());
-            self.effs[v as usize] = #Some(EffRow { effs: one, tail: rest });
+            self.setEffs(v, EffRow { effs: one, tail: rest });
           }
           _ => throw #Misfit(eff.clone()),
         },
@@ -524,10 +595,10 @@ impl Subst {
     const row = self.expandEffs(allowed);
     match ([act.tail.clone(), row.tail.clone()]) {
       [#Var(x), #Var(y)] if x == y => {}
-      [#Var(v), t] => { self.effs[v as usize] = #Some(EffRow { effs: Vec.new(), tail: t.clone() }); }
+      [#Var(v), t] => { self.setEffs(v, EffRow { effs: Vec.new(), tail: t.clone() }); }
       [#Closed, _] => {}
       [#Param(p), #Param(q)] if p == q => {}
-      [#Param(_), #Var(v)] => { self.effs[v as usize] = #Some(EffRow { effs: Vec.new(), tail: act.tail.clone() }); }
+      [#Param(_), #Var(v)] => { self.setEffs(v, EffRow { effs: Vec.new(), tail: act.tail.clone() }); }
       [#Param(p), _] => {
         let args: Vec<Ty> = Vec.new();
         args.push(#Param(p.clone()));
@@ -549,8 +620,8 @@ impl Subst {
     for (const i of 0..self.tys.len()) {
       if (self.tys[i][0].isNone()) {
         match (self.tys[i][1]) {
-          #Int => { self.tys[i][0] = #Some(#Prim(#I32)); }
-          #Float => { self.tys[i][0] = #Some(#Prim(#F64)); }
+          #Int => { self.setTy(i as u32, #Some(#Prim(#I32))); }
+          #Float => { self.setTy(i as u32, #Some(#Prim(#F64))); }
           #Any => {}
         }
       }

@@ -36,6 +36,31 @@ void fly_mem_free(void* p);
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+// Natively, blocks come from the runtime's own allocator (runtime.c), which the C library's names
+// are made to mean here; under a sanitizer, in WebAssembly, and built with `FLY_SYSTEM_MALLOC`,
+// from the C library's, so that a sanitizer, or a checker of leaks, sees every block.
+#if defined(__has_feature)
+#if __has_feature(address_sanitizer) || __has_feature(thread_sanitizer)
+#define FLY_SANITIZED 1
+#endif
+#endif
+#if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__)
+#define FLY_SANITIZED 1
+#endif
+#if !defined(__wasm__) && !defined(FLY_SANITIZED) && !defined(FLY_SYSTEM_MALLOC)
+#define FLY_MALLOC 1
+static inline void* fly_sys_malloc(size_t n) { return malloc(n); }
+static inline void* fly_sys_realloc(void* p, size_t n) { return realloc(p, n); }
+static inline void fly_sys_free(void* p) { free(p); }
+void* fly_mem_alloc(size_t n);
+void* fly_mem_calloc(size_t n, size_t size);
+void* fly_mem_realloc(void* p, size_t n);
+void fly_mem_free(void* p);
+#define malloc fly_mem_alloc
+#define calloc fly_mem_calloc
+#define realloc fly_mem_realloc
+#define free fly_mem_free
+#endif
 #endif
 
 typedef uint8_t fly_unit;

@@ -12,21 +12,21 @@ An Apple M5 Ultra with 30 cores and 96 GB, on macOS 27.0.1. Apple clang 21 at `-
 
 | Benchmark | Flyscript (C) | Flyscript (LLVM) | Flyscript (JS) | C | Rust | Go | JavaScript |
 | :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| binary-trees, depth 18 | 663 ms | 652 ms | 880 ms | 596 ms | 618 ms | 512 ms | 372 ms |
-| fannkuch-redux, 11 | 1399 ms | 1401 ms | 2701 ms | 1456 ms | 1514 ms | 1374 ms | 1702 ms |
-| n-body, 5 million steps | 135 ms | 135 ms | 478 ms | 129 ms | 133 ms | 141 ms | 215 ms |
-| spectral-norm, 3000 | 327 ms | 321 ms | 762 ms | 265 ms | 217 ms | 285 ms | 390 ms |
-| word frequencies, 3 million words | 139 ms | 140 ms | 754 ms | 162 ms | 85 ms | 110 ms | 566 ms |
+| binary-trees, depth 18 | 487 ms | 494 ms | 881 ms | 598 ms | 622 ms | 513 ms | 369 ms |
+| fannkuch-redux, 11 | 1396 ms | 1392 ms | 2685 ms | 1448 ms | 1512 ms | 1368 ms | 1678 ms |
+| n-body, 5 million steps | 134 ms | 138 ms | 483 ms | 128 ms | 133 ms | 142 ms | 215 ms |
+| spectral-norm, 3000 | 321 ms | 320 ms | 733 ms | 263 ms | 209 ms | 285 ms | 394 ms |
+| word frequencies, 3 million words | 112 ms | 116 ms | 740 ms | 159 ms | 84 ms | 110 ms | 563 ms |
 
 | Peak memory | Flyscript (C) | Flyscript (LLVM) | Flyscript (JS) | C | Rust | Go | JavaScript |
 | :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| binary-trees | 34.4 MB | 34.3 MB | 384 MB | 18.2 MB | 18.4 MB | 43.8 MB | 390 MB |
-| fannkuch-redux | 2.1 MB | 2.1 MB | 49.2 MB | 2.1 MB | 2.2 MB | 5.0 MB | 46.2 MB |
-| n-body | 2.1 MB | 2.1 MB | 50.7 MB | 2.1 MB | 2.3 MB | 5.0 MB | 48.4 MB |
-| spectral-norm | 2.3 MB | 2.3 MB | 49.5 MB | 2.2 MB | 2.3 MB | 5.0 MB | 48.2 MB |
-| word frequencies | 23.4 MB | 23.5 MB | 531 MB | 24.4 MB | 22.9 MB | 88.0 MB | 421 MB |
+| binary-trees | 34.2 MB | 34.2 MB | 340 MB | 18.2 MB | 18.4 MB | 42.1 MB | 397 MB |
+| fannkuch-redux | 2.2 MB | 2.1 MB | 49.3 MB | 2.1 MB | 2.2 MB | 5.1 MB | 46.1 MB |
+| n-body | 2.1 MB | 2.1 MB | 50.8 MB | 2.1 MB | 2.3 MB | 4.9 MB | 48.4 MB |
+| spectral-norm | 3.4 MB | 3.4 MB | 49.5 MB | 2.2 MB | 2.3 MB | 5.1 MB | 48.0 MB |
+| word frequencies | 24.4 MB | 24.4 MB | 531 MB | 24.4 MB | 22.9 MB | 92.3 MB | 420 MB |
 
-Natively, Flyscript runs faster than C on fannkuch-redux and word frequencies, within 5% of it on n-body, and within 11% and 23% of it on binary-trees and spectral-norm, with no garbage collector: every value is freed where ownership says it dies. It does more than the C does. Every integer operation is checked for overflow and every index for its bounds, and the checks are what remains of the gap on spectral-norm, whose inner loop is integer arithmetic and indexing. Rust checks bounds and not overflow, and is fastest there.
+Natively, Flyscript runs faster than C on binary-trees, fannkuch-redux and word frequencies, within 5% of it on n-body, and within 22% of it on spectral-norm, with no garbage collector: every value is freed where ownership says it dies. Natively a program allocates from the runtime's own allocator, which keeps blocks in classes of sizes and lets each thread allocate again what it freed without a lock; it is why binary-trees, which allocates and frees a node at a time, runs in less time than C's, which calls `malloc` and `free`. It does more than the C does. Every integer operation is checked for overflow and every index for its bounds, and the checks are what remains of the gap on spectral-norm, whose inner loop is integer arithmetic and indexing. Rust checks bounds and not overflow, and is fastest there.
 
 On binary-trees Flyscript holds twice the memory C does. A node is an enum, `#Leaf | #Node(Box<Tree>, Box<Tree>)`: its tag and two boxes take 24 bytes, which the allocator rounds to 32, where C's node is two pointers in 16. Keeping the tag in a box's null pointer, as Rust does for `Option<Box<T>>`, would close the gap; Flyscript does not lay enums out that way yet.
 
@@ -34,7 +34,7 @@ Compiled to JavaScript, Flyscript runs 1.3 to 2.4 times as long as the hand-writ
 
 ## The compiler
 
-The compiler is 23,821 lines of Flyscript, plus the standard library it compiles with it. Compiled natively, through C or LLVM, it compiles itself in 4.0 seconds; compiled to JavaScript, it does so on Node in 11.8 seconds. Most of that time goes to allocating and freeing types: the checker represents a type as a tree of boxes and copies it wherever it substitutes one, and interning types would remove most of the work.
+The compiler is 24,225 lines of Flyscript, plus the standard library it compiles with it. Compiled natively, through C or LLVM, it checks and compiles itself in 0.95 seconds, in 180 MB; compiled to JavaScript, it does so on Node in 4.0 seconds. It took 4.0 and 11.8 seconds until four changes: the properties of a nominal type that do not depend on its arguments — whether it can hold a borrow, whether it hides one, whether it has a `Drop` — are worked out once for the program, as the least solution over types that hold each other, rather than by walking its fields at every question; a method is looked up among the methods of its name rather than among every function; a trial unification is undone along a trail of what it bound rather than by copying every binding before it; and the runtime's allocator replaced the C library's.
 
 ## A web app
 

@@ -956,9 +956,10 @@ impl Cgen {
 
   // The locals code in blocks may give a value to: what may hold one after a loop, which may run
   // its body any number of times, or after code left by jumps.
-  function assignedIn(self: readonly Self, bs: readonly Vec<Block>): HashSet<usize> {
+  function assignedIn(self: readonly Self, b: readonly Block, more: Option<readonly Block>): HashSet<usize> {
     let u: Uses = { locals: HashSet.new(), captures: HashSet.new() };
-    for (const b of bs) { useBlock(b, mut u); }
+    useBlock(b, mut u);
+    if (const #Some(m) = more) { useBlock(m, mut u); }
     let out: HashSet<usize> = HashSet.new();
     for (const l of u.locals.iter()) { if (self.lw.owned(self.cx.locals[l].ty)) { out.insert(l); } }
     out
@@ -1135,7 +1136,7 @@ impl Cgen {
         self.cx.reachable = reachA || reachB;
       }
       #Loop(l, body, step) => {
-        const assigned = self.assignedIn([body.clone(), step.clone()]);
+        const assigned = self.assignedIn(body, #Some(step));
         for (const x of assigned.iter()) { self.cx.live.insert(x); }
         const head = self.cx.live.clone();
         self.line("for (;;) {");
@@ -1152,7 +1153,7 @@ impl Cgen {
         self.cx.reachable = true;
       }
       #Labeled(l, b) => {
-        const assigned = self.assignedIn([b.clone()]);
+        const assigned = self.assignedIn(b, #None);
         let after = self.cx.live.clone();
         for (const x of assigned.iter()) { after.insert(x); }
         self.cx.scopes.push(#Target(l));
@@ -1906,7 +1907,7 @@ impl Cgen {
         const ac = self.ctype(ta, span);
         const bc = self.ctype(tb, span);
         const tc = self.ctype(rt, span);
-        `({ fly_fn fa_ = ${arg(0)}; fly_fn fb_ = ${arg(1)}; ${ac} ra_; ${bc} rb_; fly_par_join(${ra}, &fa_, &ra_, ${rb}, &fb_, &rb_); (${tc}){ .f0 = ra_, .f1 = rb_ }; })`
+        `({ fly_fn fa_ = ${arg(0)}; fly_fn fb_ = ${arg(1)}; ${ac} ra_ = { 0 }; ${bc} rb_ = { 0 }; fly_par_join(${ra}, &fa_, &ra_, ${rb}, &fb_, &rb_); (${tc}){ .f0 = ra_, .f1 = rb_ }; })`
       }
       "Arc_new" => {
         const tc = self.ctype(typeArg(rt, 0), span);
@@ -2026,7 +2027,7 @@ impl Cgen {
       }
       "Fiber_join" => {
         const tc = self.ctype(rt, span);
-        `({ ${tc} r_; fly_join(${arg(0)}, &r_); r_; })`
+        `({ ${tc} r_ = { 0 }; fly_join(${arg(0)}, &r_); r_; })`
       }
       "channel" | "Reply_new" => {
         const tc = self.ctype(rt, span);
@@ -2052,7 +2053,7 @@ impl Cgen {
       }
       "Pending_wait" => {
         const tc = self.ctype(rt, span);
-        `({ fly_chan c_ = ${arg(0)}; ${tc} x_; bool ok_ = fly_recv(c_, &x_, sizeof(${tc})); fly_receiver_drop(&c_); if (!ok_ && !fly_unwinding) fly_panic("the reply was dropped unsent"); x_; })`
+        `({ fly_chan c_ = ${arg(0)}; ${tc} x_ = { 0 }; bool ok_ = fly_recv(c_, &x_, sizeof(${tc})); fly_receiver_drop(&c_); if (!ok_ && !fly_unwinding) fly_panic("the reply was dropped unsent"); x_; })`
       }
       "Sender_close" => `({ fly_close(${arg(0)}); (fly_unit)0; })`,
       "Sender_clone" => `({ fly_chan c_ = ${arg(0)}; fly_sender_clone(&c_); })`,
@@ -2437,12 +2438,12 @@ impl Cgen {
     }
     const store = if (unitTy(rt)) { "".toString() } else { `${self.local(r)} = r_; ` };
     if (tys.len() == 0) {
-      self.line(`{ ${rc} r_; fly_perform(${d}, ${op}, NULL, &r_); ${store}}`);
+      self.line(`{ ${rc} r_ = { 0 }; fly_perform(${d}, ${op}, NULL, &r_); ${store}}`);
     } else {
       const tc = self.ctype(#Tuple(tys), span);
       let inits: Vec<String> = Vec.new();
       for (const [i, v] of vs.iter().enumerate()) { inits.push(`.f${i} = ${v}`); }
-      self.line(`{ ${tc} a_ = { ${inits.join(", ")} }; ${rc} r_; fly_perform(${d}, ${op}, &a_, &r_); ${store}}`);
+      self.line(`{ ${tc} a_ = { ${inits.join(", ")} }; ${rc} r_ = { 0 }; fly_perform(${d}, ${op}, &a_, &r_); ${store}}`);
     }
     self.dynamicExit();
     // A direct handler's arm, run by the operation, may have failed.

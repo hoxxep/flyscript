@@ -1,6 +1,6 @@
 // Structural properties of types: `Copy`, class (§4.2) and `Send` (§4.4).
 
-import { Program, DefKind, substParams } from "./env";
+import { Program, DefKind, Shape, substParams } from "./env";
 import { Prim, Ty, GArg, keyTy } from "./types";
 import { HashSet } from "std/collections";
 
@@ -24,6 +24,7 @@ impl Program {
 
   // Whether the nominal type `d` has a `Drop` implementation.
   export function hasDrop(self: readonly Self, d: usize): bool {
+    if (d < self.shapes.len()) { return self.shapes[d].drop; }
     self.impls.iter().some((imp) => match (imp.target) {
       #Named(t, _) => t == d && match (imp.iface) { #Some([i, _]) => self.defs[i].name == "Drop", #None => false },
       _ => false,
@@ -111,13 +112,13 @@ impl Program {
       // A raw pointer is an address, not a loan, whatever it points to (§8.2).
       #Named(d, _) if self.isKnown(d, "Ref") || self.isKnown(d, "Ptr") => 1,
       #Named(d, args) => {
-        if (!seen.insert(keyTy(t))) { return 1; }
         let c: u8 = 1;
-        for (const a of argTypes(args)) { c = max(c, self.classIn(a, mut seen)); }
-        if (c < 2) {
-          if (const #Some(cs) = self.components(d, args)) {
-            for (const x of cs) { c = max(c, self.classIn(x, mut seen)); }
-          }
+        for (const a of args) { if (const #Ty(x) = a) { c = max(c, self.classIn(x, mut seen)); } }
+        if (c == 2) { return 2; }
+        if (d < self.shapes.len() && self.shapes[d].known) { return max(c, self.shapes[d].class); }
+        if (!seen.insert(keyTy(t))) { return 1; }
+        if (const #Some(cs) = self.components(d, args)) {
+          for (const x of cs) { c = max(c, self.classIn(x, mut seen)); }
         }
         c
       }
@@ -126,6 +127,81 @@ impl Program {
       #Assoc(_, _) => 2,
       _ => 1,
     }
+  }
+
+  // Whether a type can hold a borrow its type does not show: a closure, a continuation, a type
+  // parameter not declared `extends Send` (by symbol id), or a type built from one — a nominal
+  // type's fields included.
+  export function hides(self: readonly Self, t: readonly Ty, send: readonly Vec<u32>): bool {
+    let inside: Vec<Ty> = Vec.new();
+    self.hidesIn(t, send, true, mut inside)
+  }
+
+  // With `params` false, a type parameter hides nothing: a shape's, whose arguments count for
+  // themselves. A template struct met again inside itself is a cycle, which hides nothing the
+  // first visit did not find.
+  function hidesIn(self: readonly Self, t: readonly Ty, send: readonly Vec<u32>, params: bool, inside: mut Vec<Ty>): bool {
+    match (t) {
+      #Param(s) => params && !send.iter().some((x) => x == s.id),
+      #Fn(_) | #Var(_) | #Assoc(_, _) => true,
+      #Named(d, args) => {
+        if (self.defNamed(d, ["Gen", "Cont"])) { return true; }
+        if (args.iter().some((a) => match (a) { #Ty(x) => self.hidesIn(x, send, params, mut inside), _ => false })) { return true; }
+        if (d < self.shapes.len() && self.shapes[d].known) { return self.shapes[d].hides; }
+        if (inside.iter().some((x) => x == t)) { return false; }
+        inside.push(t.clone());
+        match (self.components(d, args)) {
+          #Some(cs) => cs.iter().some((x) => self.hidesIn(x, send, params, mut inside)),
+          #None => false,
+        }
+      }
+      #Tuple(ts) => ts.iter().some((x) => self.hidesIn(x, send, params, mut inside)),
+      #Record(r) | #Union(r) => r.labels.iter().some(([_, x]) => self.hidesIn(x, send, params, mut inside)),
+      #Array(x, _) | #Slice(x) | #Borrow(_, x) => self.hidesIn(x, send, params, mut inside),
+      _ => false,
+    }
+  }
+
+  // Every nominal type's shape: the least solution of its fields' and payloads' class and
+  // hiding, over types that hold each other, found by going over them all until none changes.
+  // Asked of types as they are declared, the class and hiding of an instance are its
+  // arguments' and its shape's, with no walk of its fields and no substitution.
+  export function summarize(self: mut Self): void {
+    let shapes: Vec<Shape> = Vec.new();
+    for (const d of 0..self.defs.len()) {
+      shapes.push(Shape { class: 1, hides: false, known: self.defs[d].templateFields.isNone(), drop: self.hasDrop(d) });
+    }
+    self.shapes = shapes;
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const d of 0..self.defs.len()) {
+        if (!self.shapes[d].known || self.isKnown(d, "Ref") || self.isKnown(d, "Ptr")) { continue; }
+        let class: u8 = 1;
+        let hides = false;
+        for (const x of self.declared(d)) {
+          class = max(class, self.class(x));
+          let inside: Vec<Ty> = Vec.new();
+          hides = hides || self.hidesIn(x, Vec.new(), false, mut inside);
+        }
+        if (class != self.shapes[d].class || hides != self.shapes[d].hides) {
+          self.shapes[d].class = class;
+          self.shapes[d].hides = hides;
+          changed = true;
+        }
+      }
+    }
+  }
+
+  // A nominal type's fields or payloads as declared, its parameters unsubstituted.
+  function declared(self: readonly Self, d: usize): Vec<Ty> {
+    let out: Vec<Ty> = Vec.new();
+    match (self.defs[d].kind) {
+      #Struct { fields: #Some(fs) } => { for (const [_, t] of fs) { out.push(t.clone()); } }
+      #Enum { tags } => { for (const [_, t] of tags) { out.push(t.clone()); } }
+      _ => {}
+    }
+    out
   }
 
   // A borrow held by a nominal type that is not a `view` (§4.2): `Vec<str>`. Containers release

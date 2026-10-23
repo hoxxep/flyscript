@@ -535,7 +535,7 @@ impl Lower {
       }
       return self.callee(m, margs, span);
     }
-    match (self.p.fnDecl(fid)) {
+    match (self.p.fnDeclOf(fid)) {
       #Some(d) if d.body.isSome() => #Inst(self.instance(fid, args)),
       // A function of C's, called by its name.
       _ => if (self.p.fns[fid].foreign) { #Builtin(`extern:${self.p.fns[fid].name}`) } else { #Builtin(self.builtinKey(fid)) },
@@ -1672,7 +1672,7 @@ impl Lower {
     const fty: FnTy = match (ft) { #Fn(f) => f.get().clone(), _ => return self.unsupported(e.span, "calling this") };
     const f0 = self.valueOf(callee);
     const atF = self.mark();
-    const vs = self.args(args, fty.params);
+    const vs = self.args(#None, args, fty.params);
     const f = self.settle([[f0, ft.clone(), atF]])[0].clone();
     const yields = self.yieldsOf(fty.effects).isSome();
     if (yields && self.yields.isNone()) { return self.fail(e.span, "a closure that yields is called by a generator"); }
@@ -1697,27 +1697,30 @@ impl Lower {
     const cargs = self.callArgs(e.id);
     const ptys = self.paramTys(fid, cargs);
     const hasSelf = match (self.p.fns[fid].scheme.params.first()) { #Some([n, _]) => n == "self", #None => false };
-    let all: Vec<Expr> = Vec.new();
     if (hasSelf) {
       match (callee.kind) {
-        #Field { target, name: _ } => all.push(target.get().clone()),
+        #Field { target, name: _ } => self.callOf(e.id, e.span, fid, cargs, ptys, #Some(target.get()), args),
         _ => self.fail(callee.span, "a method needs a receiver"),
       }
+    } else {
+      self.callOf(e.id, e.span, fid, cargs, ptys, #None, args)
     }
-    for (const a of args) { all.push(a.clone()); }
-    self.callOf(e.id, e.span, fid, cargs, ptys, all)
   }
 
-  // A call of `fid` with generic arguments `cargs`, given the expressions `all`: the call `id`.
-  function callOf(self: mut Self, id: usize, span: Span, fid: usize, cargs: Vec<GArg>, ptys: Vec<Ty>, all: readonly Vec<Expr>): Call uses Fail<Diagnostic> {
+  // A call of `fid` with generic arguments `cargs`, given its receiver, if it is a method's, and
+  // the expressions `rest`: the call `id`.
+  function callOf(self: mut Self, id: usize, span: Span, fid: usize, cargs: Vec<GArg>, ptys: Vec<Ty>, recv: Option<readonly Expr>, rest: readonly Vec<Expr>): Call uses Fail<Diagnostic> {
     const pmap = substMap(self.p.fns[fid].scheme.tparams, cargs);
     const row = substEffs(self.fnEffects(fid), pmap);
     const c = self.callee(fid, cargs.clone(), span);
     let targs: Vec<Ty> = Vec.new();
     for (const a of cargs) { if (const #Ty(t) = a) { targs.push(t.clone()); } }
-    const vs = self.args(all, ptys);
+    const vs = self.args(recv, rest, ptys);
     let argTys: Vec<Ty> = Vec.new();
-    for (const [i, a] of all.iter().enumerate()) { argTys.push(if (i < ptys.len()) { ptys[i].clone() } else { self.exprTy(a.id) }); }
+    let ids: Vec<usize> = Vec.new();
+    if (const #Some(r) = recv) { ids.push(r.id); }
+    for (const a of rest) { ids.push(a.id); }
+    for (const [i, a] of ids.iter().enumerate()) { argTys.push(if (i < ptys.len()) { ptys[i].clone() } else { self.exprTy(a) }); }
     const ret = match (c) {
       #Inst(i) => self.concreteRet(self.insts[i].fid, self.insts[i].args),
       _ => self.exprTy(id),
@@ -1730,14 +1733,17 @@ impl Lower {
   }
 
   // Arguments as the parameters take them, evaluated in order.
-  function args(self: mut Self, all: readonly Vec<Expr>, ptys: readonly Vec<Ty>): Vec<Operand> uses Fail<Diagnostic> {
+  function args(self: mut Self, recv: Option<readonly Expr>, rest: readonly Vec<Expr>, ptys: readonly Vec<Ty>): Vec<Operand> uses Fail<Diagnostic> {
     let ops: Vec<[Operand, Ty, usize]> = Vec.new();
-    for (const a of all) {
-      const pt: Ty = match (ptys.get(ops.len())) { #Some(t) => t.clone(), #None => self.exprTy(a.id) };
-      const v = self.argAs(a, pt);
-      ops.push([v, pt, self.mark()]);
-    }
+    if (const #Some(a) = recv) { self.argInto(mut ops, a, ptys); }
+    for (const a of rest) { self.argInto(mut ops, a, ptys); }
     self.settle(ops)
+  }
+
+  function argInto(self: mut Self, ops: mut Vec<[Operand, Ty, usize]>, a: readonly Expr, ptys: readonly Vec<Ty>): void uses Fail<Diagnostic> {
+    const pt: Ty = match (ptys.get(ops.len())) { #Some(t) => t.clone(), #None => self.exprTy(a.id) };
+    const v = self.argAs(a, pt);
+    ops.push([v, pt, self.mark()]);
   }
 
   // An argument as the parameter takes it. A closure made only to be lent — to a parameter that
@@ -2659,7 +2665,7 @@ impl Lower {
       _ => return false,
     }
     const ptys = self.paramTys(fid, cargs);
-    const c = self.callOf(callId, iter.span, fid, cargs, ptys, all);
+    const c = self.callOf(callId, iter.span, fid, cargs, ptys, #None, all);
     self.loops.push({ label: l });
     self.pushHome();
     const x = self.temp(itemTy.clone());

@@ -222,7 +222,7 @@ impl Expand {
         #Ident(n) => {
           self.lookup(n.asStr()).isNone()
             && match (self.p.lookup(self.module, n.asStr())) {
-              #Some(#Fn(f)) => match (self.p.fnDecl(f)) { #Some(d) => d.sig.isComptime, #None => false },
+              #Some(#Fn(f)) => match (self.p.fnDeclOf(f)) { #Some(d) => d.sig.isComptime, #None => false },
               _ => false,
             }
             && args.iter().every((a) => self.isCt(a))

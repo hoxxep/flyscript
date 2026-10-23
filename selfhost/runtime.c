@@ -177,6 +177,181 @@ _Noreturn void fly_div_zero(void) { fly_panic("division by zero"); }
 
 // ---- memory ----
 
+#ifdef FLY_MALLOC
+// Blocks of up to 16 KiB come in 36 classes of sizes, each a multiple of 16, four to a doubling
+// past 128 bytes. A class's blocks are carved from spans of 64 KiB, each of one class, which say
+// which in their first 16 bytes; spans are carved from one reservation of address space, which the
+// system commits as it is touched. Each thread keeps a list per class of the blocks it freed, and
+// allocates from it first; a list grown past a bound gives half back to its class's, which every
+// thread shares, and an empty one takes a batch from there, or from a span. Larger blocks, and
+// every block once the reservation is used up, are the C library's, which a block's address tells
+// apart. Memory freed stays the program's, to allocate again.
+#define FLY_SPAN ((size_t)64 << 10)
+#define FLY_CLASSES 36
+#define FLY_SMALL_MAX ((size_t)16 << 10)
+#define FLY_BATCH 32
+
+static inline size_t fly_class_size(unsigned c) {
+  if (c < 8) return (size_t)(c + 1) * 16;
+  unsigned k = c - 8;
+  return (size_t)(5 + k % 4) << (5 + k / 4);
+}
+
+static inline unsigned fly_class_of(size_t n) {
+  if (n <= 128) return n ? (unsigned)((n - 1) >> 4) : 0;
+  unsigned b = 63 - (unsigned)__builtin_clzll((unsigned long long)(n - 1));
+  return 8 + (b - 7) * 4 + (unsigned)(((n - 1) >> (b - 2)) & 3);
+}
+
+typedef struct { int lock; void* free; uint8_t* bump; uint8_t* end; } fly_central;
+static fly_central fly_centrals[FLY_CLASSES];
+static uint8_t* fly_heap_lo;
+static uint8_t* fly_heap_hi;
+static uint8_t* fly_heap_next;
+static int fly_heap_state;
+
+typedef struct { void* head[FLY_CLASSES]; uint32_t n[FLY_CLASSES]; } fly_cache;
+FLY_THREAD_VAR(fly_cache, fly_cache, { { 0 } })
+
+static void fly_spin_lock(int* l) {
+  while (__atomic_exchange_n(l, 1, __ATOMIC_ACQUIRE)) {
+    while (__atomic_load_n(l, __ATOMIC_RELAXED)) {
+#if defined(__aarch64__)
+      __asm__ volatile("yield");
+#elif defined(__x86_64__)
+      __asm__ volatile("pause");
+#endif
+    }
+  }
+}
+static void fly_spin_unlock(int* l) { __atomic_store_n(l, 0, __ATOMIC_RELEASE); }
+
+// The reservation, made once, by whichever thread allocates first: 64 GiB, or 4 if the system will
+// not give that, or none, and every block the C library's.
+static void fly_heap_init(void) {
+  int expected = 0;
+  if (__atomic_compare_exchange_n(&fly_heap_state, &expected, 1, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+    size_t sizes[2] = { (size_t)64 << 30, (size_t)4 << 30 };
+    for (int i = 0; i < 2; i++) {
+      void* p = mmap(NULL, sizes[i] + FLY_SPAN, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON | MAP_NORESERVE, -1, 0);
+      if (p == MAP_FAILED) continue;
+      uint8_t* lo = (uint8_t*)(((uintptr_t)p + FLY_SPAN - 1) & ~(uintptr_t)(FLY_SPAN - 1));
+      fly_heap_next = lo;
+      fly_heap_hi = lo + sizes[i];
+      fly_heap_lo = lo;
+      break;
+    }
+    __atomic_store_n(&fly_heap_state, 2, __ATOMIC_RELEASE);
+  } else {
+    while (__atomic_load_n(&fly_heap_state, __ATOMIC_ACQUIRE) != 2) {}
+  }
+}
+
+// A thread's list of class `c` is empty: a batch from the class's, or carved from its span, or
+// from a new span. Holds the class's lock while it does.
+static void* fly_refill(fly_cache* t, unsigned c, size_t n) {
+  if (__atomic_load_n(&fly_heap_state, __ATOMIC_ACQUIRE) != 2) fly_heap_init();
+  fly_central* k = &fly_centrals[c];
+  size_t size = fly_class_size(c);
+  fly_spin_lock(&k->lock);
+  uint32_t got = 0;
+  while (k->free && got < FLY_BATCH) {
+    void* b = k->free;
+    k->free = *(void**)b;
+    *(void**)b = t->head[c];
+    t->head[c] = b;
+    got++;
+  }
+  while (got < FLY_BATCH) {
+    if (k->bump + size > k->end) {
+      uint8_t* span = fly_heap_lo ? __atomic_fetch_add(&fly_heap_next, FLY_SPAN, __ATOMIC_RELAXED) : NULL;
+      if (!span || span + FLY_SPAN > fly_heap_hi) break;
+      *(uint32_t*)span = c;
+      k->bump = span + 16;
+      k->end = span + FLY_SPAN;
+    }
+    void* b = k->bump;
+    k->bump += size;
+    *(void**)b = t->head[c];
+    t->head[c] = b;
+    got++;
+  }
+  fly_spin_unlock(&k->lock);
+  if (!got) return fly_sys_malloc(n);
+  t->n[c] += got;
+  void* p = t->head[c];
+  t->head[c] = *(void**)p;
+  t->n[c]--;
+  return p;
+}
+
+// A thread's list of class `c` has grown past its bound: a batch of it goes back to the class's.
+static void fly_flush(fly_cache* t, unsigned c) {
+  void* first = t->head[c];
+  void* last = first;
+  for (uint32_t i = 1; i < FLY_BATCH; i++) last = *(void**)last;
+  t->head[c] = *(void**)last;
+  t->n[c] -= FLY_BATCH;
+  fly_central* k = &fly_centrals[c];
+  fly_spin_lock(&k->lock);
+  *(void**)last = k->free;
+  k->free = first;
+  fly_spin_unlock(&k->lock);
+}
+
+static inline bool fly_small(const void* p) { return (const uint8_t*)p >= fly_heap_lo && (const uint8_t*)p < fly_heap_hi; }
+static inline unsigned fly_class_at(const void* p) { return *(const uint32_t*)((uintptr_t)p & ~(uintptr_t)(FLY_SPAN - 1)); }
+
+void* fly_mem_alloc(size_t n) {
+  if (n > FLY_SMALL_MAX) return fly_sys_malloc(n);
+  unsigned c = fly_class_of(n);
+  fly_cache* t = fly_cache_ref();
+  void* p = t->head[c];
+  if (!p) return fly_refill(t, c, n);
+  t->head[c] = *(void**)p;
+  t->n[c]--;
+  return p;
+}
+
+void fly_mem_free(void* p) {
+  if (!p) return;
+  if (!fly_small(p)) { fly_sys_free(p); return; }
+  unsigned c = fly_class_at(p);
+  fly_cache* t = fly_cache_ref();
+  *(void**)p = t->head[c];
+  t->head[c] = p;
+  if (++t->n[c] > 2 * FLY_BATCH) fly_flush(t, c);
+}
+
+void* fly_mem_calloc(size_t n, size_t size) {
+  size_t total;
+  if (__builtin_mul_overflow(n, size, &total)) return NULL;
+  void* p = fly_mem_alloc(total);
+  if (p) memset(p, 0, total);
+  return p;
+}
+
+void* fly_mem_realloc(void* p, size_t n) {
+  if (!p) return fly_mem_alloc(n);
+  if (!fly_small(p)) {
+    if (n > FLY_SMALL_MAX) return fly_sys_realloc(p, n);
+    // Shrunk to a small block: what it keeps is all of `n`, as the old block is larger.
+    void* q = fly_mem_alloc(n);
+    if (!q) return NULL;
+    memcpy(q, p, n);
+    fly_sys_free(p);
+    return q;
+  }
+  size_t have = fly_class_size(fly_class_at(p));
+  if (n <= have) return p;
+  void* q = fly_mem_alloc(n);
+  if (!q) return NULL;
+  memcpy(q, p, have);
+  fly_mem_free(p);
+  return q;
+}
+#endif
+
 void* fly_alloc(size_t size) {
   void* p = calloc(1, size ? size : 1);
   if (!p) fly_panic("out of memory");

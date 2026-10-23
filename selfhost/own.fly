@@ -2437,39 +2437,7 @@ function sendParamsOf(p: readonly Program, tparams: readonly Vec<GParam>): Vec<u
   out
 }
 
-function hidesBorrows(t: readonly Ty, p: readonly Program, send: readonly Vec<u32>): bool {
-  let inside: Vec<Ty> = Vec.new();
-  hidesIn(t, p, send, mut inside)
-}
-
-// Whether a type can hold a borrow its type does not show: a closure, a continuation, a type
-// parameter, or a type built from one — a nominal type's fields included. A nominal type met again
-// inside itself is a cycle, which hides nothing that the first visit did not find.
-function hidesIn(t: readonly Ty, p: readonly Program, send: readonly Vec<u32>, inside: mut Vec<Ty>): bool {
-  match (t) {
-    #Param(s) => !send.iter().some((x) => x == s.id),
-    #Fn(_) | #Var(_) | #Assoc(_, _) => true,
-    #Named(d, args) => {
-      const name = p.defs[d].name.asStr();
-      if ((name == "Gen" || name == "Cont") && p.modules[p.defs[d].module].isStd) { return true; }
-      if (inside.iter().some((x) => x == t)) { return false; }
-      inside.push(t.clone());
-      if (args.iter().some((a) => match (a) { #Ty(x) => hidesIn(x, p, send, mut inside), _ => false })) { return true; }
-      match (p.defs[d].kind) {
-        #Struct { fields: _ } => match (p.structFields(d, args)) {
-          #Some(fs) => fs.iter().some(([_, x]) => hidesIn(x, p, send, mut inside)),
-          #None => false,
-        },
-        #Enum { tags } => tags.iter().some(([_, x]) => hidesIn(substParams(x, p.defs[d].params, args), p, send, mut inside)),
-        _ => false,
-      }
-    }
-    #Tuple(ts) => ts.iter().some((x) => hidesIn(x, p, send, mut inside)),
-    #Record(r) | #Union(r) => r.labels.iter().some(([_, x]) => hidesIn(x, p, send, mut inside)),
-    #Array(x, _) | #Slice(x) | #Borrow(_, x) => hidesIn(x, p, send, mut inside),
-    _ => false,
-  }
-}
+function hidesBorrows(t: readonly Ty, p: readonly Program, send: readonly Vec<u32>): bool { p.hides(t, send) }
 
 // Whether a value of the type can be code that runs: a closure, a generator, a continuation, or
 // something holding one.
