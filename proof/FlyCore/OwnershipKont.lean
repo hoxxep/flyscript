@@ -350,7 +350,7 @@ their own cells are `X`; the code that performed the operation lent its handler 
 and they may unwind to the handlers `A`. -/
 inductive FramesOk (F : List Fn) (O : List Op) : List Nat → Store → List Kont → Op → Lvl → List Nat → List Hole → List Nat → Prop
   | base : Inv F ι σs Γ₁ env E₁ S → (∀ h ∈ hos, HoleOk F ι σs Γ₁ env h) → hos.Pairwise Apart →
-      O[e]? = some op → hos.map (fun h => (h.mode, h.ty)) = op.refs → Label.eff e ∈ r → Weaker Γ' Γ₁ →
+      O[(e : Nat)]? = some op → hos.map (fun h => (h.mode, h.ty)) = op.refs → Weaker Γ' Γ₁ →
       FramesOk F O ι σs [] op ⟨Γ', env, op.ret, S, r⟩ (E₁.filter (· ∉ mutCells (olds hos))) hos []
   | cons : FrameOk F O ιi ι σf f mid ⟨Γ, env, τ, S, r⟩ Xf Af → Weaker Γ' Γ → Agree σf σs (Xf ++ S) →
       (∀ l ∈ Xf, σf.mem l ≠ none) → Xf.Nodup → Disj Xf (XK ++ mutCells (olds hos)) →
@@ -375,7 +375,7 @@ branches meet. -/
 theorem FramesOk.weaken (h : FramesOk F O ι σs K op0 ⟨Γ, env, τ, S, r⟩ X hos A) (w : Weaker Γ' Γ) :
     FramesOk F O ι σs K op0 ⟨Γ', env, τ, S, r⟩ X hos A := by
   cases h with
-  | base hI hholes hpw hop hts hlab w' => exact .base hI hholes hpw hop hts hlab (w.trans w')
+  | base hI hholes hpw hop hts w' => exact .base hI hholes hpw hop hts (w.trans w')
   | cons hf w' hag ha hn hd hK h1 h2 => exact .cons hf (w.trans w') hag ha hn hd hK h1 h2
 
 /-- What evaluating under the handlers `hs` may give: never stuck; a value, with the activation

@@ -532,7 +532,7 @@ theorem FramesOk.base_of : ∀ {ι : List Nat} {K : List Kont} {top : Lvl} {X : 
     ∃ ι₁ Γ₁ env₁ E₁ S₁, Inv F ι₁ σs Γ₁ env₁ E₁ S₁ ∧ (∀ h ∈ hos, HoleOk F ι₁ σs Γ₁ env₁ h) ∧ hos.Pairwise Apart ∧
       hos.map (fun h => (h.mode, h.ty)) = op.refs ∧ (∀ l ∈ E₁, l ∉ mutCells (olds hos) → l ∈ X) ∧
       (∀ l ∈ S₁, l ∈ X ∨ l ∈ top.S) ∧ X.Nodup ∧ Disj X (mutCells (olds hos))
-  | _, [], _, _, _, .base hI hholes hpw _ hts _ _ =>
+  | _, [], _, _, _, .base hI hholes hpw _ hts _ =>
     ⟨_, _, _, _, _, hI, hholes, hpw, hts, fun l hl hm => mem_keep.mpr ⟨hl, hm⟩, fun l hl => .inr hl,
       hI.nodup.filter _, fun l hl => (mem_keep.mp hl).2⟩
   | _, _ :: _, _, _, _, .cons hf _ _ _ hn hd hK _ _ => by
@@ -561,7 +561,7 @@ theorem evalK_ok (hR : RetOk F O n) : EvalKOk F O n := by
   | nil =>
     intro top X hos A σr ps r0 op0 Lv hK hR' haim hwf hag halloc hnd hps hnew hMn hX hdS hin
     cases hK with
-    | base hI hholes hpw hop hts hlab w =>
+    | base hI hholes hpw hop hts w =>
     obtain ⟨E', hI', hmem⟩ := caller_rebuild hI hholes hpw hps hnew hMn hag hX
       (fun l hl h => hdS l hl (by simp [h]))
     have hXa := fun l hl => (hag l (List.mem_append.mpr (.inl hl))).symm ▸ halloc l (List.mem_append.mpr (.inl hl))
@@ -1426,7 +1426,7 @@ theorem allocAll_fst : ∀ (σ : Store) (xs : List (Var × Val)), (allocAll σ x
 
 /-- A pair: its two values, each put in a fresh cell, which the pair owns with what they own. -/
 theorem pair_ok (ha : AtomTy Γ a A Γ₁) (hb : AtomTy Γ₁ b B Γ₂) (hI : Inv F ι σ Γ env E S) (hwf : WF σ) :
-    Post F ι O σ E S Γ₂ env (.pair A B) r hs (eval F O (n + 1) hs σ env (.pair a b)) := by
+    Post F ι O σ E S Γ₂ env (.pair A B) r hs (evalS F O n hs σ env (.pair a b)) := by
   obtain ⟨vs, σ2a, E₂, Ls, hevs, hI₂, hvs, hLn, hdL, hdLS, hm₂⟩ := atoms_ok (.cons ha (.cons hb .nil)) hI hwf
   cases hvs with
   | @cons _ v0 Lv _ _ _ hv hrest =>
@@ -1476,7 +1476,7 @@ theorem pair_ok (ha : AtomTy Γ a A Γ₁) (hb : AtomTy Γ₁ b B Γ₂) (hI : I
         · exact (hfresh _ (hLwa _ hx')).1 rfl
         · exact (hfresh _ (hLva _ hx)).2 e
         · exact hdvw x hx hx'
-      simp only [eval, hea, heb]
+      simp only [evalS, hea, heb]
       refine post_val (L := (σ2.next :: Lv) ++ ((σ2.next + 1) :: Lw)) (E' := E₂) ?_ (.pair hLv1 hLw1 hdisj hv.complete hw.complete) ?_ ?_ ?_
       · exact ⟨hI₂.foot.frame <| Agree.of' fun z hz => hold4 z (hI₂.foot.alloc z (List.mem_append.mp hz)), hI₂.nodup,
           hI₂.disj, hI₂.keys⟩
@@ -1689,8 +1689,8 @@ theorem lend_mut_core (hE : EvalOk F O n) (hx : lookup x Γ = none) (ha : lookup
 theorem lend_ro_ok (hE : EvalOk F O n) (hx : lookup x Γ = none) (hp : PlaceTy Γ p τ w y)
     (hb : Typed F O ((x, .ref .ro τ) :: lendCtx .ro Γ y) body τb ((x, .ref .ro τ) :: Γb) r)
     (hI : Inv F ι σ Γ env E S) (hwf : WF σ) (hR : Ready O hs r) :
-    Post F ι O σ E S (thaw Γ [y] Γb) env τb r hs (eval F O (n + 1) hs σ env (.lend x .ro p body)) := by
-  simp only [eval]
+    Post F ι O σ E S (thaw Γ [y] Γb) env τb r hs (evalS F O n hs σ env (.lend x .ro p body)) := by
+  simp only [evalS]
   obtain ⟨a, τr, Lr, P, l, s, ha, hLr, hpath, hres, -, -, hsl, hso, -, -⟩ := place_ok hp hI.foot
   simp only [hres]
   exact lend_ro_core hE hx ha hsl hLr hpath.reach hso hp.root_live hb hI hwf hR
@@ -1725,8 +1725,8 @@ theorem lend_mut_ok (hE : EvalOk F O n) (hx : lookup x Γ = none) (hp : PlaceTy 
     (hτ : τ.shell = false) (hun : Unsplit Γ y)
     (hb : Typed F O ((x, .ref .mut τ) :: lendCtx .mut Γ y) body τb ((x, .ref .mut τ) :: Γb) r)
     (hI : Inv F ι σ Γ env E S) (hwf : WF σ) (hR : Ready O hs r) :
-    Post F ι O σ E S (thaw Γ [y] Γb) env τb r hs (eval F O (n + 1) hs σ env (.lend x .mut p body)) := by
-  simp only [eval]
+    Post F ι O σ E S (thaw Γ [y] Γb) env τb r hs (evalS F O n hs σ env (.lend x .mut p body)) := by
+  simp only [evalS]
   obtain ⟨a, τr, Lr, P, l, s, ha, hLr, hpath, hres, -, hsubE, hsl, hso, hexw, hslot, hshp, hty⟩ := place_ok hp hI.foot
   simp only [hres]
   have hsh : s.shell = false := root_whole hsl hun hshp hty hτ
@@ -1740,10 +1740,10 @@ theorem lendClo_ok (hE : EvalOk F O n) (hfd : F[f]? = some d) (hcap : d.cap = so
     (hb : Typed F O ((x, .ref .ro (.fn .shared A d.ret d.row .nil)) :: freeze Γ [y]) body τb
       ((x, .ref .ro (.fn .shared A d.ret d.row .nil)) :: Γb) r)
     (hI : Inv F ι σ Γ env E S) (hwf : WF σ) (hR : Ready O hs r) :
-    Post F ι O σ E S (thaw Γ [y] Γb) env τb r hs (eval F O (n + 1) hs σ env (.lendClo x f p body)) := by
+    Post F ι O σ E S (thaw Γ [y] Γb) env τb r hs (evalS F O n hs σ env (.lendClo x f p body)) := by
   obtain ⟨a0, τr, Lr, P, l, s, ha0, hLr, hpath, hres, -, -, hsl, hso, -, -⟩ := place_ok hp hI.foot
   obtain ⟨Rt, hRt, hLrPR⟩ := path_split hpath hLr
-  simp only [eval, hfd, hres, hcap]
+  simp only [evalS, hfd, hres, hcap]
   have hxk : x ∉ (freeze Γ [y]).map Prod.fst := by rw [freeze_keys]; exact lookup_none_keys hx
   have hwb := typed_weaker hb (List.nodup_cons.mpr ⟨hxk, by rw [freeze_keys]; exact hI.keys⟩)
   cases hwb with
@@ -1865,13 +1865,13 @@ theorem lendCloMut_ok (hE : EvalOk F O n) (hfd : F[f]? = some d) (hcap : d.cap =
     (hb : Typed F O ((x, .ref .mut (.fn .excl A d.ret d.row .nil)) :: hide Γ y) body τb
       ((x, .ref .mut (.fn .excl A d.ret d.row .nil)) :: Γb) r)
     (hI : Inv F ι σ Γ env E S) (hwf : WF σ) (hR : Ready O hs r) :
-    Post F ι O σ E S (thaw Γ [y] Γb) env τb r hs (eval F O (n + 1) hs σ env (.lendClo x f p body)) := by
+    Post F ι O σ E S (thaw Γ [y] Γb) env τb r hs (evalS F O n hs σ env (.lendClo x f p body)) := by
   obtain ⟨a0, τr, Lr, P, l, s, ha0, hLr, hpath, hres, -, hsubE, hsl, hso, hexw, hslot, hshp, hty⟩ := place_ok hp hI.foot
   -- What is captured is plain data, so its root is no closure borrowed `mut`.
   have hsh : s.shell = false := root_whole hsl hun hshp hty (Ty.data_not_fn hdat)
   have hLrE := hsubE rfl hsh
   obtain ⟨Rt, hRt, hLrPR⟩ := path_split hpath hLr
-  simp only [eval, hfd, hres, hcap]
+  simp only [evalS, hfd, hres, hcap]
   have hxk : x ∉ (hide Γ y).map Prod.fst := by rw [hide_keys]; exact lookup_none_keys hx
   have hwb := typed_weaker hb (List.nodup_cons.mpr ⟨hxk, by rw [hide_keys]; exact hI.keys⟩)
   cases hwb with
@@ -2003,7 +2003,7 @@ theorem case_ok (hE : EvalOk F O n) (hx : lookup x Γ = some (.own (.sum A B) tr
     (h₂ : Typed F O ((y, .own B true) :: setSlot Γ x (.own (.sum A B) false)) e₂ τ ((y, .own B l₂) :: Γ₂) r)
     (w₁ : Weaker Γ' Γ₁) (w₂ : Weaker Γ' Γ₂)
     (hI : Inv F ι σ Γ env E S) (hwf : WF σ) (hR : Ready O hs r) :
-    Post F ι O σ E S Γ' env τ r hs (eval F O (n + 1) hs σ env (.case x y A B e₁ e₂)) := by
+    Post F ι O σ E S Γ' env τ r hs (evalS F O n hs σ env (.case x y A B e₁ e₂)) := by
   obtain ⟨a, L, E₁, E₂, ha, hL, hE', hupd⟩ := foot_update hI.foot hI.keys hx rfl rfl
   simp only [SlotOk] at hL
   cases hL with
@@ -2051,7 +2051,7 @@ theorem case_ok (hE : EvalOk F O n) (hx : lookup x Γ = some (.own (.sum A B) tr
     rw [this.2]; exact ⟨lookup_none_keys hy, hI.keys⟩
   have hret : ∀ τy c res, ret F O n hs (.scopeK τy c) res = leave τy c res := fun τy c res => by
     rcases res with ⟨_ | _ | _ | _ | _, _⟩ <;> simp [ret, leave, Res.done]
-  simp only [eval, ha, hat, hret]
+  simp only [evalS, ha, hat, hret]
   cases t with
   | true =>
     simp only [↓reduceIte] at hIb ⊢
@@ -2072,13 +2072,13 @@ theorem caseRef_ok (hE : EvalOk F O n) (hx : lookup x Γ = none) (hp : PlaceTy �
     (h₂ : Typed F O ((x, .ref m B) :: lendCtx m Γ y) e₂ τ ((x, .ref m B) :: Γb₂) r)
     (w₁ : Weaker Γb Γb₁) (w₂ : Weaker Γb Γb₂)
     (hI : Inv F ι σ Γ env E S) (hwf : WF σ) (hR : Ready O hs r) :
-    Post F ι O σ E S (thaw Γ [y] Γb) env τ r hs (eval F O (n + 1) hs σ env (.caseRef x m p e₁ e₂)) := by
+    Post F ι O σ E S (thaw Γ [y] Γb) env τ r hs (evalS F O n hs σ env (.caseRef x m p e₁ e₂)) := by
   obtain ⟨a, τr, Lr, P, l0, s, ha, hLr, hpath, hres, -, hsubE, hsl, hso, hexw, hslot, hshp, hty⟩ := place_ok hp hI.foot
   obtain ⟨R0, hR0, -⟩ := path_split hpath hLr
   cases hR0 with
   | @tag _ _ _ t l _ _ R hat _ hn =>
   have hpath' := hpath.snocTag' rfl hat
-  simp only [eval, hres, hat]
+  simp only [evalS, hres, hat]
   -- The root is no closure borrowed `mut`: the place holds a tag.
   have hsh : s.shell = false := root_whole hsl hun hshp hty rfl
   cases m with
@@ -2106,7 +2106,7 @@ theorem lend_ok {m : Mode} (hE : EvalOk F O n) (hx : lookup x Γ = none) (hp : P
     (hm : m = .mut → w = true) (hmf : m = .mut → τ.shell = false) (hun : m = .mut → Unsplit Γ y)
     (hb : Typed F O ((x, .ref m τ) :: lendCtx m Γ y) body τb ((x, .ref m τ) :: Γb) r)
     (hI : Inv F ι σ Γ env E S) (hwf : WF σ) (hR : Ready O hs r) :
-    Post F ι O σ E S (thaw Γ [y] Γb) env τb r hs (eval F O (n + 1) hs σ env (.lend x m p body)) := by
+    Post F ι O σ E S (thaw Γ [y] Γb) env τb r hs (evalS F O n hs σ env (.lend x m p body)) := by
   cases m with
   | ro => exact lend_ro_ok hE hx hp hb hI hwf hR
   | «mut» => obtain rfl := hm rfl; exact lend_mut_ok hE hx hp (hmf rfl) (hun rfl) hb hI hwf hR
@@ -2127,7 +2127,7 @@ theorem lendField_ok (hE : EvalOk F O n) (hx : lookup x Γ = none) (hy : lookup 
     (hb : Typed F O ((x, .ref m (if t then A else B)) :: setSlot Γ y (.half t A B)) body τb
       ((x, .ref m (if t then A else B)) :: Γb) r)
     (hI : Inv F ι σ Γ env E S) (hwf : WF σ) (hR : Ready O hs r) :
-    Post F ι O σ E S (thaw Γ [y] Γb) env τb r hs (eval F O (n + 1) hs σ env (.lend x m (fieldOf t y) body)) := by
+    Post F ι O σ E S (thaw Γ [y] Γb) env τb r hs (evalS F O n hs σ env (.lend x m (fieldOf t y) body)) := by
   obtain ⟨a, Ly, ha, hso, -, -⟩ := foot_lookup hI.foot hy
   -- What the variable holds is a pair, wherever it is.
   have hslot : ∀ {σ' L}, SlotOk F ι σ' s a L ↔ LT F ι σ' a (.pair A B) L := by
@@ -2139,7 +2139,7 @@ theorem lendField_ok (hE : EvalOk F O n) (hx : lookup x Γ = none) (hy : lookup 
   obtain ⟨b, c, Rt, Ro, hab, hRt, hLh, hLyp, hdRR, haRR, hfill⟩ := split_field t hLy
   have hres : resolve σ env (fieldOf t y) = some (if t then b else c) := by
     cases t <;> simp [fieldOf, resolve, ha, hab]
-  simp only [eval, hres]
+  simp only [evalS, hres]
   generalize hl : (if t then b else c) = l at hRt hfill ⊢
   generalize hτf : (if t then A else B) = τf at hRt hfill hb hmf
   -- The borrow's slot: it may change all it holds, or nothing.
@@ -3428,13 +3428,13 @@ theorem handle_core (hE : EvalOk F O n) (hR : RetOk F O n) (hop : O[e]? = some o
     (hP : PostOk F O (unhideAll Γ (roots .mut ys) (thaw (hideAll Γ (roots .mut ys)) (roots .ro ys) Γb)) env τ r post)
     (harm : Typed F O (armCtx os rs op (caps.map Cap.sig)) arm (armTy op post) Γa r)
     (hbody : Typed F O (freeze (hideAll Γ (roots .mut ys)) (roots .ro ys)) body τ Γb (.eff e :: r))
-    (heval : eval F O (n + 1) hs σ env h = match caps.mapM (fun c => resolve σ env c.loc) with
+    (heval : evalS F O n hs σ env h = match caps.mapM (fun c => resolve σ env c.loc) with
       | some ls => ret F O n hs (.capK τ e σ.fresh.1 (List.zipWith Cap.at caps ls) os rs arm post)
           (eval F O n (.capture e σ.fresh.1 :: hs) σ.fresh.2 env body)
       | none => (.stuck, σ))
     (hI : Inv F ι σ Γ env E S) (hwf : WF σ) (hRdy : Ready O hs r) :
     Post F ι O σ E S (unhideAll Γ (roots .mut ys) (thaw (hideAll Γ (roots .mut ys)) (roots .ro ys) Γb)) env τ r
-      hs (eval F O (n + 1) hs σ env h) := by
+      hs (evalS F O n hs σ env h) := by
   rw [heval]
   obtain ⟨ls, Rc, Hc, hmap, hlen, hcok, hcin, htr, htr'⟩ := caps_ok hcaps hI.foot
   simp only [hmap]
@@ -3540,9 +3540,9 @@ theorem handle_ok (hE : EvalOk F O n) (hR : RetOk F O n) (hop : O[e]? = some op)
     (hbody : Typed F O (freeze (hideAll Γ (roots .mut ys)) (roots .ro ys)) body τ Γb (.eff e :: r))
     (hI : Inv F ι σ Γ env E S) (hwf : WF σ) (hRdy : Ready O hs r) :
     Post F ι O σ E S (unhideAll Γ (roots .mut ys) (thaw (hideAll Γ (roots .mut ys)) (roots .ro ys) Γb)) env τ r
-      hs (eval F O (n + 1) hs σ env (.handle τ body e caps os rs arm)) :=
+      hs (evalS F O n hs σ env (.handle τ body e caps os rs arm)) :=
   handle_core (post := none) hE hR hop hcomp hos hrs hcaps hexcl hnd trivial harm hbody
-    (by simp only [eval]; rfl)
+    (by simp only [evalS]; rfl)
     hI hwf hRdy
 
 /-- A place's type is what its root says. -/
@@ -3612,7 +3612,7 @@ theorem handleR_ok (hF : FnsOk F O) (hE : EvalOk F O n) (hR : RetOk F O n) (hop 
     (hbody : Typed F O (freeze (hideAll Γ (roots .mut ys)) (roots .ro ys)) body τ Γb (.eff e :: r))
     (hI : Inv F ι σ Γ env E S) (hwf : WF σ) (hRdy : Ready O hs r) :
     Post F ι O σ E S (unhideAll Γ (roots .mut ys) (thaw (hideAll Γ (roots .mut ys)) (roots .ro ys) Γb)) env τ r
-      hs (eval F O (n + 1) hs σ env (.handleR τ body e caps os rs arm C f)) := by
+      hs (evalS F O n hs σ env (.handleR τ body e caps os rs arm C f)) := by
   obtain ⟨hkeys, hfb⟩ := hF d (List.mem_of_getElem? hfd)
   rw [hcap, hretp] at hfb
   have hkb : Γb.map Prod.fst = Γ.map Prod.fst := by rw [typed_keys hbody, freeze_keys, hideAll_keys]
@@ -3622,7 +3622,7 @@ theorem handleR_ok (hF : FnsOk F O) (hE : EvalOk F O n) (hR : RetOk F O n) (hop 
         rcases p with ⟨m, y⟩
         cases m
         · exact .inr (mem_roots.mpr hp)
-        · exact .inl (mem_roots.mpr hp)), hexcl, hkeys, hfb⟩ harm hbody (by simp only [eval]; rfl)
+        · exact .inl (mem_roots.mpr hp)), hexcl, hkeys, hfb⟩ harm hbody (by simp only [evalS]; rfl)
     hI hwf hRdy
 
 /-- What is lent is rooted at a live variable. -/

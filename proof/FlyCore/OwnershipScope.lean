@@ -1698,9 +1698,9 @@ theorem scope_ok (hE : EvalOk F O n) (hR : RetOk F O n) (hS : ScOk O e eS op opS
     (hcaps : ∀ c ∈ caps, c.mode = .ro ∧ ∃ y, c.loc = .var y ∧ lookup y Γ = some (.ref .ro c.ty))
     (hb : Typed F O Γ body τ Γb (.eff e :: .eff eS :: r)) (hI : Inv F ι σ Γ env E S) (hwf : WF σ)
     (hRdy : Ready O hs r) :
-    Post F ι O σ E S Γb env τ r hs (eval F O (n + 1) hs σ env (.scope e eS caps τ body)) := by
+    Post F ι O σ E S Γb env τ r hs (evalS F O n hs σ env (.scope e eS caps τ body)) := by
   obtain ⟨ls, Rc, hmap, hc, hRc, hty, hro⟩ := scope_caps hI.foot hcaps
-  simp only [eval, hmap]
+  simp only [evalS, hmap]
   have hI1 : Inv F ι σ.fresh.2 Γ env E S := ⟨hI.foot.frame (Agree.of' fun _ _ => rfl), hI.nodup, hI.disj, hI.keys⟩
   have hwf1 : WF σ.fresh.2 := hwf
   have hcz : ScCaps F ι σ.fresh.2 (List.zipWith Cap.at caps ls) R S Rc :=

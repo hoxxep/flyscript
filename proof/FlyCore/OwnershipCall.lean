@@ -225,7 +225,7 @@ theorem atoms_weaker : AtomsTy Γ as τs Γ' → (Γ.map Prod.fst).Nodup → Wea
 moved. -/
 theorem typed_weaker : Typed F O Γ e τ Γ' r → (Γ.map Prod.fst).Nodup → Weaker Γ' Γ
   | .atom ha, hk => atom_weaker ha hk
-  | .scope _ _ _ _ _ _ _ _ _ _ _ _ _ _ hb, hk => typed_weaker hb hk
+  | .scope _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ hb, hk => typed_weaker hb hk
   | .add ha hb, hk => (atom_weaker hb (by rw [atom_keys ha]; exact hk)).trans (atom_weaker ha hk)
   | .new ha, hk => atom_weaker ha hk
   | .pair ha hb, hk => (atom_weaker hb (by rw [atom_keys ha]; exact hk)).trans (atom_weaker ha hk)
@@ -316,16 +316,16 @@ theorem typed_weaker : Typed F O Γ e τ Γ' r → (Γ.map Prod.fst).Nodup → W
     cases this with
     | cons _ w => exact thaw_weaker_lend w
   | .perform _ _ hargs _ _, hk => atoms_weaker hargs hk
-  | .handle _ _ _ _ _ _ _ _ hb, hk =>
+  | .handle _ _ _ _ _ _ _ _ _ hb, hk =>
     unhideAll_weaker (thaw_weaker (typed_weaker hb (by rw [freeze_keys, hideAll_keys]; exact hk)))
-  | .handleR _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ hb, hk =>
+  | .handleR _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ hb, hk =>
     unhideAll_weaker (thaw_weaker (typed_weaker hb (by rw [freeze_keys, hideAll_keys]; exact hk)))
   | .handleAbort _ _ _ hx hb hh, hk => by
     have := typed_weaker hh (List.nodup_cons.mpr ⟨by exact lookup_none_keys hx,
       by rw [typed_keys hb]; exact hk⟩)
     cases this with
     | cons _ w => exact w.trans (typed_weaker hb hk)
-  | .par _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ hargs _, hk => atoms_weaker hargs hk
+  | .par _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ hargs _, hk => atoms_weaker hargs hk
   | .region hR _ hb, hk => by
     have w := typed_weaker hb (List.nodup_cons.mpr ⟨by
       simpa [Ctx.shift, Function.comp_def] using lookup_none_keys hR, by simpa [Ctx.shift, Function.comp_def] using hk⟩)

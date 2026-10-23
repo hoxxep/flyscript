@@ -178,24 +178,24 @@ theorem Moves.rewrite {D : List Nat} (hwf : WF σ) (hwf' : WF σ') (hn : σ.next
 /-! ## Making, measuring and growing a vector -/
 
 theorem vnew_ok (hc : τ.complete = true) (hI : Inv F ι σ Γ env E S) (hwf : WF σ) :
-    Post F ι O σ E S Γ env (.vec true τ) r hs (eval F O (n + 1) hs σ env .vnew) := by
-  simp only [eval]
+    Post F ι O σ E S Γ env (.vec true τ) r hs (evalS F O n hs σ env .vnew) := by
+  simp only [evalS]
   exact ⟨E, [], hI, .vec (Rs := []) rfl (fun i h => by simp at h) List.nodup_nil hc, disj_nil_left, disj_nil_left,
     Moves.refl hwf hI.alloc⟩
 
 theorem vlen_ok (hp : PlaceTy Γ p (.vec g τ) w y) (hI : Inv F ι σ Γ env E S) (hwf : WF σ) :
-    Post F ι O σ E S Γ env .int r hs (eval F O (n + 1) hs σ env (.vlen p)) := by
+    Post F ι O σ E S Γ env .int r hs (evalS F O n hs σ env (.vlen p)) := by
   obtain ⟨a, τr, Lr, P, l, s', ha, hLr, hpath, hres, -⟩ := place_ok hp hI.foot
   obtain ⟨Rb, hRb, -⟩ := path_split hpath hLr
   cases hRb with
   | vec hl =>
-    simp only [eval, hres, hl]
+    simp only [evalS, hres, hl]
     exact ⟨E, [], hI, .int, disj_nil_left, disj_nil_left, Moves.refl hwf hI.alloc⟩
 
 /-- `p.push(a)`: the vector's elements move to new cells, the old ones freed, and `a` goes in one
 more; the tree of the variable `p` is rooted at changes there alone. -/
 theorem vpush_ok (ha : AtomTy Γ a τ Γ₁) (hp : PlaceTy Γ₁ p (.vec true τ) true y) (hI : Inv F ι σ Γ env E S) (hwf : WF σ) :
-    Post F ι O σ E S Γ₁ env .int r hs (eval F O (n + 1) hs σ env (.vpush p a)) := by
+    Post F ι O σ E S Γ₁ env .int r hs (evalS F O n hs σ env (.vpush p a)) := by
   obtain ⟨v, σ1, E₁, L₁, hev, hI₁, hv₁, hd₁, hdS₁, hm₁⟩ := atom_ok ha hI hwf
   have hcτ : τ.complete = true := hv₁.complete
   obtain ⟨c, Rb, P, A, B, hres, hRb, hE, hupd⟩ := replace_at hI₁ hp (by simpa [Ty.complete] using hcτ) (.inl rfl)
@@ -205,7 +205,7 @@ theorem vpush_ok (ha : AtomTy Γ a τ Γ₁) (hp : PlaceTy Γ₁ p (.vec true τ
   have hwf₁ := hm₁.wf
   obtain ⟨Rs', σ2, hmv, hlen', hel', hnd', hmem', hfree, hkeep, hn2, hrt2, hwf2⟩ :=
     moveAll_ok hcτ cs Rs σ1 hwf₁ hlen hel hnd
-  simp only [eval, hev, hres, hcm, hmv]
+  simp only [evalS, hev, hres, hcm, hmv]
   -- Where everything is.
   have hndE := hE.nodup_iff.mp hI₁.nodup
   obtain ⟨hdR, -⟩ := seg3 hndE
@@ -398,12 +398,12 @@ theorem vpush_ok (ha : AtomTy Γ a τ Γ₁) (hp : PlaceTy Γ₁ p (.vec true τ
 vector into the value, `#Some` of it, and the vector keeps the rest. -/
 theorem vpop_ok (hp : PlaceTy Γ p (.vec true τ) true y) (hcτ : τ.complete = true) (hI : Inv F ι σ Γ env E S)
     (hwf : WF σ) :
-    Post F ι O σ E S Γ env (.sum .int τ) r hs (eval F O (n + 1) hs σ env (.vpop p)) := by
+    Post F ι O σ E S Γ env (.sum .int τ) r hs (evalS F O n hs σ env (.vpop p)) := by
   obtain ⟨c, Rb, P, A, B, hres, hRb, hE, hupd⟩ := replace_at hI hp (by simpa [Ty.complete] using hcτ) (.inl rfl)
   cases hRb with
   | vec hcm hlen hel hnd hcn =>
   rename_i cs Rs
-  simp only [eval, hres, hcm]
+  simp only [evalS, hres, hcm]
   have hndE := hE.nodup_iff.mp hI.nodup
   obtain ⟨hdR, -⟩ := seg3 hndE
   have hRE : ∀ x ∈ c :: Rs.flatten, x ∈ E := fun x hx =>
@@ -760,7 +760,7 @@ theorem lendIdx_ok {m : Mode} (hE : EvalOk F O n) (hx : lookup x Γ = none) (hp 
     (hun : m = .mut → Unsplit Γ y)
     (hb : Typed F O ((x, .ref m τ) :: lendCtx m Γ y) body τb ((x, .ref m τ) :: Γb) r)
     (hI : Inv F ι σ Γ env E S) (hwf : WF σ) (hR : Ready O hs r) :
-    Post F ι O σ E S (thaw Γ [y] Γb) env τb r hs (eval F O (n + 1) hs σ env (.lendIdx x m p z body)) := by
+    Post F ι O σ E S (thaw Γ [y] Γb) env τb r hs (evalS F O n hs σ env (.lendIdx x m p z body)) := by
   obtain ⟨a, τr, Lr, P, c, s, ha, hLr, hpath, hres, hsub, hsubE, hsl, hso, hexw, hslot, hshp, hty⟩ := place_ok hp hI.foot
   obtain ⟨Rc, hRc, -⟩ := path_split hpath hLr
   cases hRc with
@@ -772,7 +772,7 @@ theorem lendIdx_ok {m : Mode} (hE : EvalOk F O n) (hx : lookup x Γ = none) (hp 
   | int hk =>
   rename_i k
   have hlz : lookup z env = some lz := hresz
-  simp only [eval, hres, hlz, hcm, hk]
+  simp only [evalS, hres, hlz, hcm, hk]
   split
   · split
     · rename_i l hl
@@ -903,7 +903,7 @@ theorem lendSlice_ok (hE : EvalOk F O n) (hx : lookup x Γ = none) (hp : PlaceTy
     (hlo : PlaceTy Γ (.var lo) .int w1 y1) (hhi : PlaceTy Γ (.var hi) .int w2 y2)
     (hb : Typed F O ((x, .ref .ro (.vec false τ)) :: freeze Γ [y]) body τb ((x, .ref .ro (.vec false τ)) :: Γb) r)
     (hI : Inv F ι σ Γ env E S) (hwf : WF σ) (hR : Ready O hs r) :
-    Post F ι O σ E S (thaw Γ [y] Γb) env τb r hs (eval F O (n + 1) hs σ env (.lendSlice x .ro p lo hi body)) := by
+    Post F ι O σ E S (thaw Γ [y] Γb) env τb r hs (evalS F O n hs σ env (.lendSlice x .ro p lo hi body)) := by
   obtain ⟨a0, τr, Lr, P, c, s, ha0, hLr, hpath, hres, -, -, hsl, hso, -, -⟩ := place_ok hp hI.foot
   obtain ⟨Rc, hRc, hLrPR⟩ := path_split hpath hLr
   have hRc' := hRc
@@ -918,7 +918,7 @@ theorem lendSlice_ok (hE : EvalOk F O n) (hx : lookup x Γ = none) (hp : PlaceTy
     | int hk => exact ⟨lz, _, hresz, hk⟩
   obtain ⟨l1, i, hl1, hi⟩ := intOf hlo
   obtain ⟨l2, j, hl2, hj⟩ := intOf hhi
-  simp only [eval, hres, hl1, hl2, hcm, hi, hj]
+  simp only [evalS, hres, hl1, hl2, hcm, hi, hj]
   split
   case isFalse => simp [Post]
   rename_i hbd
@@ -1059,7 +1059,7 @@ theorem lendSliceMut_ok (hE : EvalOk F O n) (hx : lookup x Γ = none) (hp : Plac
     (hlo : PlaceTy Γ (.var lo) .int w1 y1) (hhi : PlaceTy Γ (.var hi) .int w2 y2)
     (hb : Typed F O ((x, .ref .mut (.vec false τ)) :: hide Γ y) body τb ((x, .ref .mut (.vec false τ)) :: Γb) r)
     (hI : Inv F ι σ Γ env E S) (hwf : WF σ) (hR : Ready O hs r) :
-    Post F ι O σ E S (thaw Γ [y] Γb) env τb r hs (eval F O (n + 1) hs σ env (.lendSlice x .mut p lo hi body)) := by
+    Post F ι O σ E S (thaw Γ [y] Γb) env τb r hs (evalS F O n hs σ env (.lendSlice x .mut p lo hi body)) := by
   obtain ⟨a0, τr, Lr, P, c, s, ha0, hLr, hpath, hres, hsub, hsubE, hsl, hso, hexw, hslot, hshp, hty⟩ := place_ok hp hI.foot
   have hsx := hexw rfl
   obtain ⟨Rc, hRc, -⟩ := path_split hpath hLr
@@ -1074,7 +1074,7 @@ theorem lendSliceMut_ok (hE : EvalOk F O n) (hx : lookup x Γ = none) (hp : Plac
     | int hk => exact ⟨lz, _, hresz, hk⟩
   obtain ⟨l1, i, hl1, hi⟩ := intOf hlo
   obtain ⟨l2, j, hl2, hj⟩ := intOf hhi
-  simp only [eval, hres, hl1, hl2, hcm, hi, hj]
+  simp only [evalS, hres, hl1, hl2, hcm, hi, hj]
   split
   case isFalse => simp [Post]
   rename_i hbd
@@ -1256,7 +1256,7 @@ theorem lendSlice_any {m : Mode} (hE : EvalOk F O n) (hx : lookup x Γ = none) (
     (hlo : PlaceTy Γ (.var lo) .int w1 y1) (hhi : PlaceTy Γ (.var hi) .int w2 y2) (hm : m = .mut → w = true)
     (hb : Typed F O ((x, .ref m (.vec false τ)) :: lendCtx m Γ y) body τb ((x, .ref m (.vec false τ)) :: Γb) r)
     (hI : Inv F ι σ Γ env E S) (hwf : WF σ) (hR : Ready O hs r) :
-    Post F ι O σ E S (thaw Γ [y] Γb) env τb r hs (eval F O (n + 1) hs σ env (.lendSlice x m p lo hi body)) := by
+    Post F ι O σ E S (thaw Γ [y] Γb) env τb r hs (evalS F O n hs σ env (.lendSlice x m p lo hi body)) := by
   cases m with
   | ro => exact lendSlice_ok hE hx hp hlo hhi hb hI hwf hR
   | «mut» => obtain rfl := hm rfl; exact lendSliceMut_ok hE hx hp hlo hhi hb hI hwf hR

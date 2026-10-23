@@ -854,7 +854,7 @@ theorem task_frames {d : Fn} {cells : Env} {ls : List Nat} {e : Nat}
         .startK (cells ++ (d.refs.map Prod.fst).zip ls) d.body] op
       ⟨refCtx d.refs, (d.refs.map Prod.fst).zip ls, d.ret, St, .eff e :: r⟩ Et [] [] := by
   have hb := FramesOk.base (hos := []) (Γ' := fnCtx d) (r := d.row) hI (fun _ h => by simp at h) List.Pairwise.nil hop
-    (by simp [hrefs]) he (Weaker.refl _)
+    (by simp [hrefs]) (Weaker.refl _)
   rw [hret] at hb
   simp only [olds, mutCells, List.map_nil, List.flatMap_nil, List.not_mem_nil, not_false_eq_true,
     decide_true] at hb
@@ -878,7 +878,7 @@ theorem par_ok (hF : FnsOk F O) (hR : RetOk F O n) (hKk : EvalKOk F O n)
     (hargs : AtomsTy Γ (oa ++ ob) (da.owns.map Prod.snd ++ db.owns.map Prod.snd) Γ₁)
     (hlends : Lends Γ₁ ((la ++ lb).map fun p => (.ro, p)) (da.refs.map Prod.snd ++ db.refs.map Prod.snd) ys)
     (hI : Inv F ι σ Γ env E S) (hwf : WF σ) (hRdy : Ready O hs r) :
-    Post F ι O σ E S Γ₁ env (.pair da.ret db.ret) r hs (eval F O (n + 1) hs σ env (.par e fa oa la fb ob lb)) := by
+    Post F ι O σ E S Γ₁ env (.pair da.ret db.ret) r hs (evalS F O n hs σ env (.par e fa oa la fb ob lb)) := by
   obtain ⟨vs, σ1, E₁, Ls, hevs, hI₁, hvs, hLn, hdL, hdLS, hm₁⟩ := atoms_ok hargs hI hwf
   have hwf₁ := hm₁.wf
   have hrolent : ∀ x ∈ (la ++ lb).map (fun p => ((Mode.ro), p)), x.1 = .ro := by
@@ -902,7 +902,7 @@ theorem par_ok (hF : FnsOk F O) (hR : RetOk F O n) (hKk : EvalKOk F O n)
   have hlenB : vsB.length = db.owns.length := by rw [hvB.length]; simp
   have hlenhA : hosA.length = da.refs.length := by have := congrArg List.length htsA; simpa using this
   have hlenhB : hosB.length = db.refs.length := by have := congrArg List.length htsB; simpa using this
-  simp only [eval, hfa, hfb, hevs, hmap]
+  simp only [evalS, hfa, hfb, hevs, hmap]
   have htA : List.take da.owns.length (vsA ++ vsB) = vsA := by rw [← hlenA]; simp
   have hdA : List.drop da.owns.length (vsA ++ vsB) = vsB := by rw [← hlenA]; simp
   have htH : List.take da.refs.length (List.map Hole.loc (hosA ++ hosB)) = hosA.map Hole.loc := by

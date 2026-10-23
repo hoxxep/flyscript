@@ -1116,7 +1116,7 @@ theorem gen_ok (hF : FnsOk F O) (hE : EvalOk F O n) (hR : RetOk F O n)
     (hb : Typed F O (freeze (hideAll Γ₁ (roots .mut ys)) (roots .ro ys)) body τb Γb (.eff eN :: r))
     (hcb : τb.complete = true) (hI : Inv F ι σ Γ env E S) (hwf : WF σ) (hRdy : Ready O hs r) :
     Post F ι O σ E S (unhideAll Γ₁ (roots .mut ys) (thaw (hideAll Γ₁ (roots .mut ys)) (roots .ro ys) Γb)) env τb r
-      hs (eval F O (n + 1) hs σ env (.gen eN eY τy τb f owned caps body)) := by
+      hs (evalS F O n hs σ env (.gen eN eY τy τb f owned caps body)) := by
   obtain ⟨vs, σ1, E₁, Ls, hevs, hI₁, hvs, hLn, hdL, hdLS, hm₁⟩ := atoms_ok hargs hI hwf
   have hwf₁ := hm₁.wf
   obtain ⟨ls, Rc, Hc, hmap, hlen, hcok, hcin, htr, htr'⟩ := caps_ok hcaps hI₁.foot
@@ -1125,7 +1125,7 @@ theorem gen_ok (hF : FnsOk F O) (hE : EvalOk F O n) (hR : RetOk F O n)
   obtain ⟨Γ'', hbody⟩ := hbody
   have hlen' : vs.length = d.owns.length ∧ ls.length = d.refs.length :=
     ⟨by rw [hvs.length]; simp, by rw [hdrefs, List.length_map]; exact hlen⟩
-  simp only [eval, hfd, hevs, hmap]
+  simp only [evalS, hfd, hevs, hmap]
   rw [if_pos hlen']
   -- The producer's parameters.
   obtain ⟨Eo, hfo, hEo, hEom, hle, hwf₂, hold, hnew, -⟩ :=

@@ -32,7 +32,7 @@ def isStuck : Res × Store → Bool
 /-- Runs a program: the evaluator unfolded by its equations. -/
 syntax "run" "[" Lean.Parser.Tactic.simpLemma,* "]" : tactic
 macro_rules
-  | `(tactic| run [$xs,*]) => `(tactic| simp [eval, ret, evalK, evalAtom, evalAtoms, resolve, leave, cleanV,
+  | `(tactic| run [$xs,*]) => `(tactic| simp [eval, evalS, preTarget, ret, evalK, evalAtom, evalAtoms, resolve, leave, cleanV,
       cleanA, dropRet, armEnd, callRet, allocAll, dropCells, dropCell, drop, dropK, pick, Store.fresh, Store.alloc, Store.set, find,
       Frame.handles, Kont.push, lookup, Res.done, Outcome.res, Cap.at, Store.empty, Store.sched0, value, freed, freedBelow,
       Store.tag, Store.freeAll, Store.moveAll, dropCellsWith,
@@ -160,7 +160,7 @@ theorem asks_typed : Typed [] ops [] asks .int [] [.fail] := by
     (arm := .add (.read (var "b")) (.lit 1)) (Γa := [("b", .ref .ro .int)])
     (body := .let_ "a" .int (.perform 0 [] []) (.add (.read (var "a")) (.read (deref (var "base"))))) (τ := .int)
     (Γb := [("base", .ref .ro (.box .int))])
-    rfl (by simp [ops]) rfl rfl (.ro (.deref (.own rfl)) rfl .nil) (by simp [Exclusive]) (by decide)
+    rfl rfl (by simp [ops]) rfl rfl (.ro (.deref (.own rfl)) rfl .nil) (by simp [Exclusive]) (by decide)
     (.add (.read (.ref rfl)) .lit)
     (.let_ rfl (.perform (op := { owns := [], refs := [], ret := .int }) rfl (List.mem_cons_self ..) .nil .nil
       List.Pairwise.nil) (.add (.read (.own rfl)) (.read (.deref (.ref rfl)))))
@@ -220,7 +220,7 @@ theorem drops_typed : Typed [] ops [] drops .int [] [.fail] := by
       (.let_ "y" (.box .int) (.new (.lit 2))
         (.let_ "a" .int (.perform 0 [] []) (.add (.read (var "a")) (.read (deref (var "y")))))))
     (τ := .int) (Γb := [("x", .own (.box .int) true)])
-    rfl (by simp [ops]) rfl rfl .nil (by simp [Exclusive]) (by decide) (.throw_ .lit (List.mem_cons_self ..))
+    rfl rfl (by simp [ops]) rfl rfl .nil (by simp [Exclusive]) (by decide) (.throw_ .lit (List.mem_cons_self ..))
     (.defer (.let_ (live := true) rfl (.new .lit)
         (.let_ (live := true) rfl (.perform (op := { owns := [], refs := [], ret := .int }) rfl
           (List.mem_cons_self ..) .nil .nil List.Pairwise.nil) (.add (.read (.own rfl)) (.read (.deref (.own rfl))))))
@@ -264,7 +264,7 @@ theorem handle_inv : Typed F O Γ (.handle τ body e caps os rs arm) τ' Γ' r �
     ∃ ys Γb, Caps Γ caps ys ∧ Typed F O (freeze (hideAll Γ (roots .mut ys)) (roots .ro ys)) body τ Γb (.eff e :: r) := by
   intro h
   cases h with
-  | handle _ _ _ _ hc _ _ _ hb => exact ⟨_, _, hc, hb⟩
+  | handle _ _ _ _ _ hc _ _ _ hb => exact ⟨_, _, hc, hb⟩
 
 theorem clobbers_rejected : ¬ Typed [] ops [] clobbers τ Γ' r := by
   intro h
@@ -320,7 +320,7 @@ theorem counts_typed : Typed [] ops [] counts .int [] [.fail] := by
     (Γa := [("c", .ref .mut .int)])
     (body := .let_ "a" .int (.perform 0 [] []) (.let_ "b" .int (.perform 0 [] []) (.add (.read (var "a")) (.read (var "b")))))
     (τ := .int) (Γb := [("n", .lent .int false)])
-    rfl (by simp [ops]) rfl rfl (.mut (.own rfl) rfl rfl .nil) (by simp [Exclusive]) (by decide)
+    rfl rfl (by simp [ops]) rfl rfl (.mut (.own rfl) rfl rfl .nil) (by simp [Exclusive]) (by decide)
     (.let_ (live := true) rfl (.add (.read (.ref rfl)) .lit)
       (.let_ (live := true) rfl (.write (.read (.own rfl)) (.ref (m := .mut) rfl)) (.atom (.read (.ref rfl)))))
     (.let_ (live := true) rfl (.perform (op := { owns := [], refs := [], ret := .int }) rfl (List.mem_cons_self ..)
@@ -1200,7 +1200,7 @@ theorem tallies_typed : Typed [after] ticks [] tallies .int [] [.fail] := by
             (.inj (.pair .int .int) .int true (.move "p")))))
     (body := .let_ "a" .int (.perform 0 [] []) (.let_ "b" .int (.perform 0 [] [])
         (.add (.read (var "a")) (.read (var "b")))))
-    rfl (by simp [ticks]) rfl rfl (.mut (.own rfl) rfl rfl .nil) (by simp [Exclusive]) (by decide)
+    rfl rfl (by simp [ticks]) rfl rfl (.mut (.own rfl) rfl rfl .nil) (by simp [Exclusive]) (by decide)
     rfl rfl rfl rfl rfl rfl (by simp [after]) rfl harm (by simpa [roots, hideAll, hide, freeze, Slot.ty, Slot.shell] using hbody)
   simp only [roots, hideAll, hide, freeze, thaw, unhideAll, Slot.ty] at h
   exact .let_ (live := true) rfl (.atom .lit) (by simpa [thaw, hide, hideAll, unhideAll] using h)
@@ -1294,7 +1294,7 @@ theorem tallies2_typed : Typed [after2] ticks [] tallies2 .int [] [.fail] := by
               (.inj (.pair .int .int) .int true (.move "p"))))))
     (body := .let_ "a" .int (.perform 0 [] []) (.let_ "b" .int (.perform 0 [] [])
         (.add (.read (var "a")) (.read (var "b")))))
-    rfl (by simp [ticks]) rfl rfl (.mut (.own rfl) rfl rfl .nil) (by simp [Exclusive]) (by decide)
+    rfl rfl (by simp [ticks]) rfl rfl (.mut (.own rfl) rfl rfl .nil) (by simp [Exclusive]) (by decide)
     rfl rfl rfl rfl rfl rfl (by simp [after2]) rfl harm (by simpa [roots, hideAll, hide, freeze, Slot.ty, Slot.shell] using hbody)
   simp only [roots, hideAll, hide, freeze, thaw, unhideAll, Slot.ty] at h
   exact .let_ (live := true) rfl (.atom .lit) (by simpa [thaw, hide, hideAll, unhideAll] using h)
@@ -1344,7 +1344,7 @@ theorem early_typed : Typed [after] ticks [] early .int [] [.fail] := by
     (arm := .let_ "t" .int (.add (.read (var "m")) (.lit 1))
         (.let_ "u" .int (.write (var "m") (.read (var "t"))) (.inj (.pair .int .int) .int false (.read (var "m")))))
     (body := .let_ "a" .int (.perform 0 [] []) (.add (.read (var "a")) (.lit 1000)))
-    rfl (by simp [ticks]) rfl rfl (.mut (.own rfl) rfl rfl .nil) (by simp [Exclusive]) (by decide)
+    rfl rfl (by simp [ticks]) rfl rfl (.mut (.own rfl) rfl rfl .nil) (by simp [Exclusive]) (by decide)
     rfl rfl rfl rfl rfl rfl (by simp [after]) rfl harm (by simpa [roots, hideAll, hide, freeze, Slot.ty, Slot.shell] using hbody)
   simp only [roots, hideAll, hide, freeze, thaw, unhideAll, Slot.ty] at h
   exact .let_ (live := true) rfl (.atom .lit) (by simpa [thaw, hide, hideAll, unhideAll] using h)
@@ -1425,7 +1425,7 @@ example : ∀ n, match eval [] [] n [.abort .fail 0] .empty [] tagRef with
 /-! Two tasks, each giving way where it yields, in whatever order the schedule picks. -/
 
 /-- `Yield`, whose operation takes nothing and gives an integer. -/
-def yields : List Op := [{ owns := [], refs := [], ret := .int }]
+def yields : List Op := [{ owns := [], refs := [], ret := .int, task := true }]
 
 /-- `function step(k: int, b: readonly int): int { yield(); const a = k + b; yield(); a + k }` -/
 def step : Fn :=
@@ -1449,6 +1449,13 @@ example : value (eval [step] yields 60 [] (Store.sched0 fun _ => false) [] tasks
   run [tasks, step, yields]
 example : freed (eval [step] yields 60 [] (Store.sched0 fun _ => false) [] tasks) := by
   run [tasks, step, yields]
+/-- Each task stopped, now and then, before an operation, for the other to run: the same 26, and
+nothing left. -/
+example : value (eval [step] yields 60 [] (Store.sched0 (fun _ => false) fun i => i % 3 == 0) [] tasks) = some 26 := by
+  run [tasks, step, yields, preTarget]
+example : freed (eval [step] yields 60 [] (Store.sched0 (fun _ => false) fun i => i % 3 == 0) [] tasks) := by
+  run [tasks, step, yields, preTarget]
+
 
 theorem step_ok : FnsOk [step] yields := by
   intro d hd
@@ -1461,13 +1468,13 @@ theorem step_ok : FnsOk [step] yields := by
 
 theorem tasks_typed : Typed [step] yields [] tasks .int [] [.fail] :=
   .let_ (live := true) rfl (.atom .lit)
-    (.let_ (live := true) rfl (.par (op := yields[0]) (da := step) (db := step) rfl rfl rfl rfl rfl rfl rfl rfl rfl
+    (.let_ (live := true) rfl (.par (op := yields[0]) (da := step) (db := step) rfl rfl rfl rfl rfl rfl rfl rfl rfl rfl
         rfl (by simp [step]) (by simp [step]) (by simp [step]) (by simp [step]) rfl rfl (.cons .lit (.cons .lit .nil))
         (.cons (.own rfl) (fun h => by cases h) rfl (.cons (.own rfl) (fun h => by cases h) rfl .nil)))
       (.add (.read (.fst (.own rfl))) (.read (.snd (.own rfl)))))
 
 /-- Under any schedule. -/
-example : ∀ s n, match eval [step] yields n [.abort .fail 0] (Store.sched0 s) [] tasks with
+example : ∀ s p n, match eval [step] yields n [.abort .fail 0] (Store.sched0 s p) [] tasks with
     | (.stuck, _) => False
     | (.susp _ _ _ _ _, _) => False
     | (.timeout, _) => True
@@ -1518,14 +1525,14 @@ theorem cancel_fns : FnsOk [hold, failing] yields := by
 theorem cancel_typed : Typed [hold, failing] yields [] cancel .int [] [.fail] :=
   .let_ (live := false) rfl (.new .lit)
     (.try_ rfl
-      (.let_ (live := true) rfl (.par (op := yields[0]) (da := hold) (db := failing) rfl rfl rfl rfl rfl rfl rfl rfl
+      (.let_ (live := true) rfl (.par (op := yields[0]) (da := hold) (db := failing) rfl rfl rfl rfl rfl rfl rfl rfl rfl
           rfl rfl (by simp [hold]) (by simp [failing]) (by simp [hold]) (by simp [failing]) rfl rfl
           (.cons (.move rfl rfl) (.cons .lit .nil)) .nil)
         (.add (.read (.fst (.own rfl))) (.read (.snd (.own rfl)))))
       (.atom (.read (.own rfl))))
 
 /-- Under any schedule. -/
-example : ∀ s n, match eval [hold, failing] yields n [.abort .fail 0] (Store.sched0 s) [] cancel with
+example : ∀ s p n, match eval [hold, failing] yields n [.abort .fail 0] (Store.sched0 s p) [] cancel with
     | (.stuck, _) => False
     | (.susp _ _ _ _ _, _) => False
     | (.timeout, _) => True
@@ -2236,7 +2243,7 @@ example : ∀ n, match eval [drain] genOps n [.abort .fail 0] .empty [] genDrain
 captured; the body and its tasks give way to each other, in any order a schedule picks. -/
 
 /-- `Yield`, by which a scope's body and tasks give way, and `Spawn`, by which they start a task. -/
-def scYield : Op := { owns := [], refs := [], ret := .int }
+def scYield : Op := { owns := [], refs := [], ret := .int, task := true }
 def scSpawn : Op := { owns := [.fn .once .int .int [.eff 0] .nil], refs := [], ret := .int }
 def scOps : List Op := [scYield, scSpawn]
 
@@ -2277,7 +2284,7 @@ theorem tk_ok : FnsOk [tk] scOps := by
     (.atom (.read (.deref (.own rfl))))⟩
 
 theorem scopeEx_typed : Typed [tk] scOps [] scopeEx .int [] [.fail] := by
-  refine .scope (op := scYield) (opS := scSpawn) (rT := [.eff 0]) rfl rfl rfl rfl rfl rfl rfl rfl (by decide)
+  refine .scope (op := scYield) (opS := scSpawn) (rT := [.eff 0]) rfl rfl rfl rfl rfl rfl rfl rfl rfl (by decide)
     (by simp) (by simp) rfl rfl (by simp) ?_
   refine .let_ (live := false) rfl (.new .lit) ?_
   refine .let_ (live := false) rfl (.lam (d := tk) rfl rfl rfl rfl rfl (.move rfl rfl) rfl) ?_
@@ -2288,14 +2295,14 @@ theorem scopeEx_typed : Typed [tk] scOps [] scopeEx .int [] [.fail] := by
   exact .let_ (live := true) rfl (.perform (op := scYield) rfl (by simp) .nil .nil .nil) (.atom .lit)
 
 /-- Under any schedule. -/
-example (s : Nat → Bool) : ∀ n, match eval [tk] scOps n [.abort .fail 0] (Store.sched0 s) [] scopeEx with
+example (s p : Nat → Bool) : ∀ n, match eval [tk] scOps n [.abort .fail 0] (Store.sched0 s p) [] scopeEx with
     | (.stuck, _) => False
     | (.susp _ _ _ _ _, _) => False
     | (.timeout, _) => True
     | (.panic, _) => True
     | (.val v, σ') => ∃ L, VT [tk] [] σ' .int v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
     | (.abort _ _, σ') => ∀ l, σ'.mem l = none :=
-  program_ok_sched tk_ok scopeEx_typed s
+  program_ok_sched tk_ok scopeEx_typed s p
 
 /-- `(_) => { yield; throw 41 }` and `(_) => { yield; *b }`, closures that captured a box each. -/
 def badTk : Fn :=
@@ -2360,6 +2367,11 @@ example : freed (eval [rdTk] scROps 80 [] .empty [] scopeRead) := by
   run [scopeRead, scopeBody, rdTk, scROps, scYield, scRSpawn, mkTask, cloFn]
 example : value (eval [rdTk] scROps 80 [] (Store.sched0 fun _ => false) [] scopeRead) = some 42 := by
   run [scopeRead, scopeBody, rdTk, scROps, scYield, scRSpawn, mkTask, cloFn]
+example : value (eval [rdTk] scROps 80 [] (Store.sched0 (fun _ => false) fun i => i % 3 == 1) [] scopeRead) =
+    some 42 := by
+  run [scopeRead, scopeBody, rdTk, scROps, scYield, scRSpawn, mkTask, cloFn, preTarget]
+example : freed (eval [rdTk] scROps 80 [] (Store.sched0 (fun _ => false) fun i => i % 3 == 1) [] scopeRead) := by
+  run [scopeRead, scopeBody, rdTk, scROps, scYield, scRSpawn, mkTask, cloFn, preTarget]
 
 theorem rdTk_ok : FnsOk [rdTk] scROps := by
   intro d hd
@@ -2374,7 +2386,7 @@ theorem scopeRead_typed : Typed [rdTk] scROps [] scopeRead .int [] [.fail] := by
   have hb : Typed [rdTk] scROps [("r", .ref .ro .int), ("n", .ref .ro .int)]
       (.scope 0 1 [⟨"r", .ro, .int, .var "r"⟩] .int scopeBody) .int [("r", .ref .ro .int), ("n", .ref .ro .int)]
       [.fail] := by
-    refine .scope (op := scYield) (opS := scRSpawn) (rT := [.eff 0]) rfl rfl rfl rfl rfl rfl rfl rfl (by decide)
+    refine .scope (op := scYield) (opS := scRSpawn) (rT := [.eff 0]) rfl rfl rfl rfl rfl rfl rfl rfl rfl (by decide)
       (by simp) (by simp) rfl rfl (by simp [lookup]) ?_
     refine .let_ (live := false) rfl (.new .lit) ?_
     refine .let_ (live := false) rfl (.lam (d := rdTk) rfl rfl rfl rfl rfl (.move rfl rfl) rfl) ?_
@@ -2389,14 +2401,14 @@ theorem scopeRead_typed : Typed [rdTk] scROps [] scopeRead .int [] [.fail] := by
   exact .let_ (live := true) rfl (.atom .lit) (by simpa using this)
 
 /-- Under any schedule. -/
-example (s : Nat → Bool) : ∀ n, match eval [rdTk] scROps n [.abort .fail 0] (Store.sched0 s) [] scopeRead with
+example (s p : Nat → Bool) : ∀ n, match eval [rdTk] scROps n [.abort .fail 0] (Store.sched0 s p) [] scopeRead with
     | (.stuck, _) => False
     | (.susp _ _ _ _ _, _) => False
     | (.timeout, _) => True
     | (.panic, _) => True
     | (.val v, σ') => ∃ L, VT [rdTk] [] σ' .int v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
     | (.abort _ _, σ') => ∀ l, σ'.mem l = none :=
-  program_ok_sched rdTk_ok scopeRead_typed s
+  program_ok_sched rdTk_ok scopeRead_typed s p
 
 /-- `region (R) { const l = RegionList.new(); l.push(40); l.push(2); l[0] + l[1] }`: a list of the
 region, its elements cells of the region, all released as it ends; 42. -/

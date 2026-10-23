@@ -426,6 +426,9 @@ structure Op where
   owns : List Ty
   refs : List (Mode × Ty)
   ret : Ty
+  /-- An operation by which tasks give way to each other: only the frame of their tasks takes it,
+  and a task may be made to give way by it before anything it does, as if it had performed it. -/
+  task : Bool := false
   /-- What an operation takes and gives is said of no region: its arm may run regions out from
   where it was performed. -/
   rfree : (owns.all Ty.rfree && refs.all (fun p => p.2.rfree) && ret.rfree) = true := by decide
@@ -478,6 +481,9 @@ structure Store where
   ids : Nat := 0
   /-- Which task goes on at each point where one could give way to the other: any schedule. -/
   sched : Nat → Bool := fun _ => true
+  /-- Where a running task is stopped, before an operation, for another to run: any interleaving of
+  their operations, as on many cores at once. -/
+  pre : Nat → Bool := fun _ => false
   /-- The region and type of each cell allocated in a region, kept once set. -/
   rt : Nat → Option (Nat × Ty) := fun _ => none
   /-- A region is named by its arena's cell: a tagged cell, and its region's arena, were allocated. -/
@@ -734,6 +740,15 @@ def Frame.handles : Frame → Label → Bool
   | .capture e _, .eff e' => e == e'
   | _, _ => false
 
+/-- The innermost frame of tasks: a handler of an operation by which tasks give way. -/
+def preTarget (O : List Op) : HS → Option (Nat × Nat)
+  | [] => none
+  | .capture e id :: hs =>
+    match O[e]? with
+    | some op => if op.task ∧ op.owns = [] ∧ op.refs = [] ∧ op.ret = .int then some (e, id) else preTarget O hs
+    | none => preTarget O hs
+  | _ :: hs => preTarget O hs
+
 /-- The innermost frame handling `l`. -/
 def find (l : Label) : HS → Option Frame
   | [] => none
@@ -921,6 +936,13 @@ mutual
 def eval (F : List Fn) (O : List Op) : Nat → HS → Store → Env → Expr → Res × Store
   | 0, _, σ, _, _ => (.timeout, σ)
   | n + 1, hs, σ, env, e =>
+    match (if σ.pre σ.ids then preTarget O hs else none) with
+    | some (e0, j) => (.susp j e0 [] [] [.startK env e], σ.fresh.2)
+    | none => evalS F O n hs σ.fresh.2 env e
+termination_by n _ _ _ _ => (n, 0, 0)
+
+/-- One step of the interpreter, `e` evaluated with the fuel left, `n`. -/
+def evalS (F : List Fn) (O : List Op) (n : Nat) (hs : HS) (σ : Store) (env : Env) (e : Expr) : Res × Store :=
     match e with
     | .atom a =>
       match evalAtom σ env a with
@@ -1339,7 +1361,7 @@ def eval (F : List Fn) (O : List Op) : Nat → HS → Store → Env → Expr →
           | _ => (.stuck, σ1)
         | none => (.stuck, σ1)
       | none => (.stuck, σ)
-termination_by n _ _ _ _ => (n, 0, 0)
+termination_by (n, 2, 0)
 
 /-- What frame `f` does with what the code it ran gave, under the handlers `hs` around it. -/
 def ret (F : List Fn) (O : List Op) (n : Nat) (hs : HS) : Kont → Res × Store → Res × Store
@@ -2063,7 +2085,7 @@ inductive Typed (F : List Fn) (O : List Op) : Ctx → Expr → Ty → Ctx → Ro
   /-- A scope: its body, and every task it starts — a closure called once, which took what it captured
 by moving it, and is lent `readonly` the scope's places `caps`, each a `readonly` borrow in scope —
 give way by `e` and start tasks by `eS`; what else they perform goes on to the code around. -/
-  | scope : O[e]? = some op → op.owns = [] → op.refs = [] → op.ret = .int →
+  | scope : O[e]? = some op → op.task = true → op.owns = [] → op.refs = [] → op.ret = .int →
       O[eS]? = some opS → opS.owns = [.fn .once .int .int rT R] → opS.refs = [] → opS.ret = .int → e ≠ eS →
       (∀ l ∈ rT, l ∈ .eff e :: .eff eS :: r) → Label.eff e ∈ rT → τ.complete = true →
       R.toList = caps.map Cap.ty →
@@ -2091,7 +2113,7 @@ give way by `e` and start tasks by `eS`; what else they perform goes on to the c
       Lends Γ₁ lent op.refs ys → LentApart lent → Typed F O Γ (.perform e owned lent) op.ret Γ₁ r
   /-- The arm runs in the context of the `handle`: its row is the `handle`'s. What it is lent of
   the `handle`'s scope the body may only read, or, lent `mut`, not reach. -/
-  | handle : O[e]? = some op → (∀ τ ∈ op.owns, τ.complete = true) → os.length = op.owns.length →
+  | handle : O[e]? = some op → op.task = false → (∀ τ ∈ op.owns, τ.complete = true) → os.length = op.owns.length →
       rs.length = op.refs.length →
       Caps Γ caps ys → Exclusive ys → (os ++ rs ++ caps.map Cap.name).Nodup →
       Typed F O (armCtx os rs op (caps.map Cap.sig)) arm op.ret Γa r →
@@ -2102,7 +2124,7 @@ give way by `e` and start tasks by `eS`; what else they perform goes on to the c
   `caps`, and gives `#Resume([v, c])`, what the code resumes with and what it carries, or `#Done(u)`,
   the `handle`'s value, the code dropped; once the rest of a resumed `handle` ends, `post` takes what
   the arm carried and that value, the places lent to it again, as a call would. -/
-  | handleR : O[e]? = some op → (∀ τ ∈ op.owns, τ.complete = true) →
+  | handleR : O[e]? = some op → op.task = false → (∀ τ ∈ op.owns, τ.complete = true) →
       os.length = op.owns.length → rs.length = op.refs.length → Caps Γ caps ys → Exclusive ys →
       (os ++ rs ++ caps.map Cap.name).Nodup →
       F[f]? = some d → d.owns.map Prod.snd = [C, τ] → d.refs = caps.map Cap.sig → d.retp = none →
@@ -2120,7 +2142,7 @@ give way by `e` and start tasks by `eS`; what else they perform goes on to the c
   /-- Two tasks: calls that take their owned arguments and are lent places only `readonly`, both
   of which the code around reads at most meanwhile; each may give way by performing `e`, which takes
   nothing and gives an integer, and may perform what the code around may. -/
-  | par : O[e]? = some op → op.owns = [] → op.refs = [] → op.ret = .int →
+  | par : O[e]? = some op → op.task = true → op.owns = [] → op.refs = [] → op.ret = .int →
       F[fa]? = some da → F[fb]? = some db → da.retp = none → da.cap = none → db.retp = none → db.cap = none →
       Label.eff e ∈ da.row → Label.eff e ∈ db.row → (∀ l ∈ da.row, l ∈ .eff e :: r) → (∀ l ∈ db.row, l ∈ .eff e :: r) →
       da.ret.complete = true → db.ret.complete = true →

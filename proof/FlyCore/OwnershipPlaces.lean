@@ -381,7 +381,7 @@ theorem atoms_keys : AtomsTy Γ as τs Γ' → Γ'.map Prod.fst = Γ.map Prod.fs
 
 theorem typed_keys : Typed F O Γ e τ Γ' r → Γ'.map Prod.fst = Γ.map Prod.fst
   | .atom ha => atom_keys ha
-  | .scope _ _ _ _ _ _ _ _ _ _ _ _ _ _ hb => typed_keys hb
+  | .scope _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ hb => typed_keys hb
   | .add ha hb => (atom_keys hb).trans (atom_keys ha)
   | .new ha => atom_keys ha
   | .pair ha hb => (atom_keys hb).trans (atom_keys ha)
@@ -451,15 +451,15 @@ theorem typed_keys : Typed F O Γ e τ Γ' r → Γ'.map Prod.fst = Γ.map Prod.
     simp only [List.map_cons, List.cons.injEq] at this
     exact thaw_keys (this.2.trans (setSlot_keys _))
   | .perform _ _ hargs _ _ => atoms_keys hargs
-  | .handle _ _ _ _ _ _ _ _ hb =>
+  | .handle _ _ _ _ _ _ _ _ _ hb =>
     unhideAll_keys ((thaw_keys ((typed_keys hb).trans freeze_keys)).trans hideAll_keys)
-  | .handleR _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ hb =>
+  | .handleR _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ hb =>
     unhideAll_keys ((thaw_keys ((typed_keys hb).trans freeze_keys)).trans hideAll_keys)
   | .handleAbort _ _ _ _ hb hh => by
     have := typed_keys hh
     simp only [List.map_cons, List.cons.injEq] at this
     exact this.2.trans (typed_keys hb)
-  | .par _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ hargs _ => atoms_keys hargs
+  | .par _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ hargs _ => atoms_keys hargs
   | .region _ _ hb => by
     have := typed_keys hb
     simpa [Ctx.shift, Function.comp_def] using this
