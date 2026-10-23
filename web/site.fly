@@ -64,6 +64,27 @@ export function respond<M>(conn: mut Conn, req: readonly Request, shell: readonl
   conn.write(r);
 }
 
+// How a page's model was made: made, or nothing found for the address, or the page failed.
+export enum Loaded<M> { #Page(M), #Missing, #Broken }
+
+// A page that is the same for every request, rendered once: as a browser gets it, and as its data.
+export type Fixed = { doc: String; data: String };
+
+export function fixed<M>(shell: readonly Shell, route: str, url: str, title: str, state: str, view: () => void uses Ui<M>): Fixed {
+  { doc: document(shell, route, url, title, state, view), data: arrival(route, url, title, state) }
+}
+
+// Answers for a page rendered once.
+export function answerFixed(conn: mut Conn, req: readonly Request, f: readonly Fixed): void uses Io, Fail<IoErr> {
+  let r = if (wantsData(req)) {
+    Response.new(200, "text/plain; charset=utf-8", f.data.clone())
+  } else {
+    Response.new(200, "text/html; charset=utf-8", f.doc.clone())
+  };
+  r.header("Cache-Control", "no-store");
+  conn.write(r);
+}
+
 // ---- the request ----
 
 // The value of the request's cookie `name`, if it sent one.

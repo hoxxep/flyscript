@@ -1,5 +1,6 @@
 // One thing to do, at `/todos/[id]`: renamed, marked done, or removed, which goes back to the list.
-// An address for one that is not there is the site's page for nothing found.
+// An address for one that is not there is the site's page for nothing found; an address that names
+// no number at all, the site's page for a page that failed.
 
 import { Ui, Event, el, text, cls, attr, on, link } from "web/ui";
 import { Page } from "web/dom";
@@ -11,8 +12,8 @@ export type Msg = #Draft | #Rename | #Toggle | #Remove;
 
 export function title(m: readonly Model): String { m.todo.title.clone() }
 
-export function load(p: readonly Params): Model uses Todos, Fail<#NotFound> {
-  const id: u32 = match (parseInt(p.get("id"))) { #Some(n) => n as u32, #None => throw #NotFound };
+export function load(p: readonly Params): Model uses Todos, Fail<#NotFound | #BadAddress> {
+  const id: u32 = match (parseInt(p.get("id"))) { #Some(n) => n as u32, #None => throw #BadAddress };
   match (Todos.get(id)) {
     #Some(t) => { const draft = t.title.clone(); { todo: t, draft, error: String.new() } }
     #None => throw #NotFound,

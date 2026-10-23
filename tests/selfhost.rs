@@ -415,6 +415,13 @@ fn todo_site_serves_and_runs() {
     let item = String::from_utf8(get(port, "/todos/2")).unwrap();
     assert!(item.starts_with("HTTP/1.1 200") && item.contains("<h1>Compile it to WebAssembly</h1>"), "{item}");
     assert!(String::from_utf8(get(port, "/todos/99")).unwrap().starts_with("HTTP/1.1 404"), "an item that is not there is found");
+    let failed = String::from_utf8(get(port, "/todos/abc")).unwrap();
+    assert!(failed.starts_with("HTTP/1.1 500") && failed.contains("<h1>Something went wrong</h1>"), "a page whose load failed is not the error page: {failed}");
+    // A page the same for every request, rendered once, is still rendered whole and as its data.
+    let about = String::from_utf8(get(port, "/about")).unwrap();
+    assert!(about.starts_with("HTTP/1.1 200") && about.contains("<h1>About</h1>") && about.contains("Open for 0 s."), "{about}");
+    let data = String::from_utf8(ask(port, "GET /about HTTP/1.1\r\nHost: here\r\nX-Fly-Data: 1\r\nConnection: close\r\n\r\n".to_string())).unwrap();
+    assert!(data.contains("\r\n\r\nabout\n/about\n"), "{data}");
     let body = r#"{"title":"Asked by the test"}"#;
     let answer = String::from_utf8(ask(port, format!("POST /_fly/rpc/Todos.add HTTP/1.1\r\nHost: here\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()))).unwrap();
     assert!(answer.starts_with("HTTP/1.1 200") && answer.contains("Asked by the test"), "{answer}");

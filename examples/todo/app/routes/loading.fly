@@ -1,0 +1,7 @@
+// What the site shows, inside its layout, while a followed link waits for the next page's data.
+
+import { Ui, el, text, cls } from "web/ui";
+
+export function view(): void uses Ui<#Nothing> {
+  el("p", () => { cls("loading"); text("Loading…"); });
+}

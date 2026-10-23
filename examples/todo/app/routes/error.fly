@@ -1,0 +1,14 @@
+// What the site shows, with the status 500, for a page whose `load` failed for a reason other than
+// there being nothing at its address.
+
+import { Ui, el, text, cls, link } from "web/ui";
+
+export type Model = { failed: bool };
+
+export function initial(): Model { { failed: true } }
+
+export function view(m: readonly Model): void uses Ui<#Nothing> {
+  el("h1", () => text("Something went wrong"));
+  el("p", () => text("This page could not be shown."));
+  link("/", () => { cls("back"); text("← Back to the list"); });
+}

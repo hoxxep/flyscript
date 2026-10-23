@@ -19,13 +19,15 @@ app/
     todos/[id].fly   /todos/7, with the parameter `id`
     api/todos.fly    an endpoint: it answers /api/todos itself
     404.fly          what an address nothing answers shows
+    error.fly        what a page whose `load` failed shows
+    loading.fly      what shows while a followed link waits for the next page
   api.fly            the effects the pages ask the server for
   server.fly         how the server answers them
   public/            files served as they are
   head.html          what every page's <head> holds, if not the stylesheet /style.css
 ```
 
-**A page** exports its `Model` and `Msg` types, a `view` that performs `Ui<Msg>`, and how its model is made: `load`, which the server runs — given the address's `Params`, performing the app's effects, and failing for an address it has nothing for, which is then the 404 page — or `initial`, which needs nothing. It may export an `update`, which changes the model for each message its view gives, and a `title`, a constant or a function of the model.
+**A page** exports its `Model` and `Msg` types, a `view` that performs `Ui<Msg>`, and how its model is made: `load`, which the server runs — given the address's `Params`, performing the app's effects, and failing with `#NotFound` for an address it has nothing for, which is then the 404 page, and with anything else for a page that failed, which is then the error page, with the status 500 — or `initial`, which needs nothing. A page made by `initial` at an address with no parameters is the same for every request: the server renders it once, as it starts, and answers with that. It may export an `update`, which changes the model for each message its view gives, and a `title`, a constant or a function of the model.
 
 ```ts
 export type Model = { todo: Todo; draft: String };
@@ -48,11 +50,13 @@ export function update(m: mut Model, msg: Msg, ev: readonly Event): void uses To
 
 **The request** is an effect too, `Http` (`request.fly`), which the server handles around a page's `load`, an endpoint's `handle`, and its own handlers of the app's effects: `Http.header(name)` and `Http.cookie(name)` read the request, `Http.setCookie(name, value, maxAge)` sets a cookie on the answer, and `Http.redirect(url)` answers instead by sending the browser to `url` — from a `load`, the page there is shown in its place, whether the browser asked for the page or the program followed a link to it.
 
+**What shows when nothing else does**: `404.fly` and `error.fly` export a `Model`, an `initial` that makes it, and a `view`, shown inside the outermost layout; `loading.fly` exports a `view` of nothing.
+
 **A layout** wraps the pages of its directory and those below it, given the page's address: `export function layout<M>(path: str, body: () => void uses Ui<M>): void uses Ui<M>`. Layouts nest, the outermost first.
 
 **What pages ask of the server** is an effect, declared in `api.fly`. On the server, `server.fly`'s `provide` handles it, around the page's `load` and around each call; `init` makes the state it shares, once. In the browser the app compiler makes a handler of the same effect that calls the server, its arguments and results as JSON, and a failure the server answers with is raised where the page asked. So a page's code is the same on both sides, and calling the server is calling the effect.
 
-**Links** are ordinary `<a>` elements (`link(href, body)`). Followed within the site, the program asks the server for the next page's data, renders it in place, and moves the history on; what both pages show alike, a layout, is left as it is. The data of a page a link points at is asked for as soon as the pointer is over it. Back and forward render the pages again the same way. Without the program, a link is a link.
+**Links** are ordinary `<a>` elements (`link(href, body)`). Followed within the site, the program shows `loading.fly`'s view inside the outermost layout, if the app has one, asks the server for the next page's data, renders it in place, and moves the history on; what both pages show alike, a layout, is left as it is. The data of a page a link points at is asked for as soon as the pointer is over it. Back and forward render the pages again the same way. Without the program, a link is a link.
 
 **Components** are a model, a view and an update, as a page is. A page shows one by `map`, which makes the component's messages the page's: `map((c) => #Counter(c), () => counter.view(m.counter))`.
 

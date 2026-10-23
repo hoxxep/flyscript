@@ -1,7 +1,7 @@
 #!/bin/sh
 # The todo app as FlyNext builds it (examples/todo), against the same app in Next.js and React
-# (bench/next): pages rendered per request and a JSON call, under load from wrk; each server's
-# memory after it; and, with Playwright (NODE_PATH), what a page downloads, how soon it is
+# (bench/next): pages rendered per request, a page the same for every request, and a JSON call,
+# under load from wrk; each server's memory after it; and, with Playwright (NODE_PATH), what a page downloads, how soon it is
 # interactive, and how fast a link is followed. `bench/web.sh`; results in target/bench/web.md.
 # The client runs on the machine the server does, with four threads of its own.
 set -e
@@ -50,12 +50,13 @@ run() {
   wait_for "$base/"
   page=$(load "$name-page" "$base/")
   item=$(load "$name-item" "$base/todos/2")
+  about=$(load "$name-about" "$base/about")
   call=$(load "$name-call" "$base$call_url" "$call_method" "$call_body")
   mem=$(rss "$pid")
-  printf '| %s | %s | %s | %s | %s |\n' "$name" "$page" "$item" "$call" "$mem" >> "$results"
+  printf '| %s | %s | %s | %s | %s | %s |\n' "$name" "$page" "$item" "$about" "$call" "$mem" >> "$results"
 }
 
-printf '| Server | Page `/` | Page `/todos/2` | JSON endpoint `/api/todos` | Memory after |\n| :--- | :--- | :--- | :--- | :--- |\n' >> "$results"
+printf '| Server | Page `/` | Page `/todos/2` | Page `/about`, the same for every request | JSON endpoint `/api/todos` | Memory after |\n| :--- | :--- | :--- | :--- | :--- | :--- |\n' >> "$results"
 
 # FlyNext on one core, then on every core.
 FLY_THREADS=1 "$out/todo/server" 4101 "$out/todo" > /dev/null &

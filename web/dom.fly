@@ -489,5 +489,14 @@ export function run<Model, M extends Send & Clone, row E>(shown: mut Render, mod
   { url: String.new(), push: false }
 }
 
+// Shows `view` as it is, with no events: what a page shows while the next one's data is asked for.
+// `shown` is left what the page shows.
+export function show<M extends Send & Clone>(shown: mut Render, view: () => void uses Ui<M>): void {
+  const root = unsafe { fly_dom_root() };
+  let [f, _] = record(view);
+  if (shown.ops.len() == 0) { hydrate(root, mut f); } else { children(root, shown, 0, mut f, 0); }
+  shown = f;
+}
+
 // An update for a page that changes nothing.
 export function still<Model, M>(m: mut Model, msg: M, ev: readonly Event): void {}
