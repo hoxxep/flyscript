@@ -65,7 +65,7 @@ theorem Foot.weaken : Foot F ι σ Γ env E S → Weaker Γ' Γ → Foot F ι σ
       exact this
 
 theorem Inv.weaken (h : Inv F ι σ Γ env E S) (w : Weaker Γ' Γ) : Inv F ι σ Γ' env E S :=
-  ⟨h.foot.weaken w, h.nodup, h.disj, w.keys ▸ h.keys⟩
+  ⟨h.foot.weaken w, h.nodup, h.disj, w.keys ▸ h.keys, h.cur⟩
 
 theorem setSlot_weaker : ∀ {Γ : Ctx}, (Γ.map Prod.fst).Nodup → lookup x Γ = some s → Slot.Le s' s →
     Weaker (setSlot Γ x s') Γ
@@ -370,7 +370,7 @@ theorem Moves.keeps (h : Moves σ E σ' E' L) (hwf : WF σ) (hX : ∀ l ∈ X, �
       have := h.rt l y h0
       rw [hx] at this
       cases this
-      rfl⟩
+      rfl, h.fb, h.cur⟩
 
 /-- What a step gives or leaves in its footprint is apart from cells it could not reach. -/
 theorem Moves.apart (h : Moves σ E σ' E' L) (hwf : WF σ) (hX : ∀ l ∈ X, σ.mem l ≠ none)
@@ -384,6 +384,8 @@ theorem Moves.apart (h : Moves σ E σ' E' L) (hwf : WF σ) (hX : ∀ l ∈ X, �
 theorem Moves.widen (h : Moves σ E σ' E' L) (hX : ∀ l ∈ X, σ.mem l ≠ none) (hd : Disj X E) :
     Moves σ (X ++ E) σ' (X ++ E') L where
   rt := h.rt
+  fb := h.fb
+  cur := h.cur
   fresh := fun l a x h1 h2 => (h.fresh l a x h1 h2).imp_left fun h => List.mem_append.mpr (.inr h)
   within := by
     intro l hl
@@ -421,9 +423,11 @@ footprint. -/
 theorem Moves.grow (hwf : WF σ) (hwf' : WF σ') (hn : σ.next ≤ σ'.next)
     (hold : ∀ l, l < σ.next → σ'.mem l = σ.mem l) (hnew : ∀ l, σ.next ≤ l → l < σ'.next → σ'.mem l ≠ none)
     (hE : ∀ l ∈ E, σ.mem l ≠ none) (hE' : ∀ l, l ∈ E' ↔ l ∈ E ∨ (σ.next ≤ l ∧ l < σ'.next))
-    (hrt : σ'.rt = σ.rt := by rt_tac) :
+    (hrt : σ'.rt = σ.rt := by rt_tac) (hfb : FbExt σ σ' := by fb_tac) (hcur : σ'.cur = σ.cur := by cur_tac) :
     Moves σ E σ' E' [] where
   rt := fun l x h => by rw [hrt]; exact h
+  fb := hfb
+  cur := hcur
   fresh := fun _ _ _ h h0 => by rw [hrt, h0] at h; cases h
   within := by
     intro l hl
@@ -466,6 +470,8 @@ theorem Moves.grow (hwf : WF σ) (hwf' : WF σ') (hn : σ.next ≤ σ'.next)
 /-- What a step accounts for depends on the cells it may change, not on their order. -/
 theorem Moves.congr_left (h : Moves σ E σ' E' L) (hE : ∀ x, x ∈ E ↔ x ∈ E₀) : Moves σ E₀ σ' E' L where
   rt := h.rt
+  fb := h.fb
+  cur := h.cur
   fresh := fun l a x h1 h2 => (h.fresh l a x h1 h2).imp_left (hE a).mp
   within := fun l hl => (h.within l hl).imp_left (hE l).mp
   next := h.next
@@ -593,7 +599,9 @@ theorem allocAll_ok : ∀ {σ : Store} {names : List Var} {τs vs Ls}, Vals F ι
       have hc : (σ.alloc v).1 = σ.next := rfl
       rw [hc]
       have hrt := allocAll_rt (σ.alloc v).2 (names.zip vs)
-      generalize hr : allocAll (σ.alloc v).2 (names.zip vs) = r at hf hmem hle hwf2 hold hnew hlen hrt
+      have hfbt := allocAll_fbext (σ.alloc v).2 (names.zip vs)
+      have hcut := allocAll_cur (σ.alloc v).2 (names.zip vs)
+      generalize hr : allocAll (σ.alloc v).2 (names.zip vs) = r at hf hmem hle hwf2 hold hnew hlen hrt hfbt hcut
       obtain ⟨cells, σ2⟩ := r
       dsimp only at hf hmem hle hwf2 hold hnew hlen hrt ⊢
       have hcL : σ.next ∉ L := fun h => Nat.lt_irrefl _ (hlow _ (List.mem_append.mpr (.inl h)))
@@ -1185,8 +1193,8 @@ theorem callee_inv {Eo Lall : List Nat} {hs : List Hole} (hI : Inv F ι₁ σ1 �
     (hkeys : ((d.owns.map Prod.fst) ++ (d.refs.map Prod.fst)).Nodup)
     (hfo : Foot F ι σ2 (ownCtx d.owns) cells Eo []) (hEo : Eo.Nodup)
     (hEo_in : ∀ l ∈ Eo, l ∈ Lall ∨ σ1.next ≤ l) (hdL : Disj Lall E₁) (hdLS : Disj Lall S) (hwf : WF σ1)
-    (hold : ∀ l, l < σ1.next → σ2.mem l = σ1.mem l) (hrt : σ2.rt = σ1.rt)
-    (hconv : ∀ h ∈ hs, ∀ L, LT F ι₁ σ2 h.loc h.ty L → LT F ι σ2 h.loc (h.ty.lowerBy k) L) :
+    (hold : ∀ l, l < σ1.next → σ2.mem l = σ1.mem l) (hrt : σ2.rt = σ1.rt) (hfb : FbExt σ1 σ2) (hcur : σ2.cur = σ1.cur)
+    (hfib : ι.fiber = ι₁.fiber) (hconv : ∀ h ∈ hs, ∀ L, LT F ι₁ σ2 h.loc h.ty L → LT F ι σ2 h.loc (h.ty.lowerBy k) L) :
     Inv F ι σ2 (fnCtx d) (cells ++ (d.refs.map Prod.fst).zip (hs.map Hole.loc))
       (Eo ++ mutCells (olds hs)) (roCells (olds hs)) := by
   have hout := fun h hh => hole_out hI (hholes h hh) hwf hEo_in hdL hdLS
@@ -1195,7 +1203,7 @@ theorem callee_inv {Eo Lall : List Nat} {hs : List Hole} (hI : Inv F ι₁ σ1 �
     ⟨olds (hs.map (Hole.lower k)), by simp [olds, Function.comp_def], ?_, rfl, rfl⟩
   · rw [olds_lower.1, olds_lower.2, List.map_map, show Hole.loc ∘ Hole.lower k = Hole.loc from rfl] at hfr
     rw [fnCtx_eq]
-    refine ⟨by simpa using hfo.append hfr, ?_, ?_, ?_⟩
+    refine ⟨by simpa using hfo.append hfr, ?_, ?_, ?_, by rw [hcur, hI.cur, hfib]⟩
     · refine nodup_append_disj.mpr ⟨hEo, olds_nodup hI hholes hpw, fun l hl hl' => ?_⟩
       obtain ⟨h, hh, hl'⟩ := mem_olds_mut.mp hl'
       exact (hout h hh l (List.mem_append.mpr (.inr (exclPart_sub hl')))).2 hl
@@ -1343,7 +1351,7 @@ theorem root_join (hI : Inv F ι σ Γ env E S) (hholes : ∀ h ∈ hs, HoleOk F
     · exact .inl h
     · exact .inr ⟨h1, shared_kept hI hholes hpw (hpsin p hp) h2⟩
   have hcut := fun {c} (h : c ∈ cutsOf ps x) => mem_cutsOf.mp h
-  refine multi_join hLT hag.rt (cutsOf ps x ++ extra) ?_ ?_ ?_ ?_ ?_ ?_ ?_
+  refine multi_join hLT hag.rt hag.fb hag.cur (cutsOf ps x ++ extra) ?_ ?_ ?_ ?_ ?_ ?_ ?_
   · intro c hc
     rcases List.mem_append.mp hc with hc | hc
     · obtain ⟨p, hp, hr, hm, rfl⟩ := hcut hc
@@ -1559,7 +1567,7 @@ theorem caller_rebuild (hI : Inv F ι σ Γ env E S) (hholes : ∀ h ∈ hs, Hol
     rcases hsub he h with ⟨-, h1⟩ | ⟨p, hp, -, -, h1⟩
     · exact .inl h1
     · exact .inr (mem_mutCells.mpr ⟨p, hp, h1⟩)
-  refine ⟨E', ⟨hf', hn', fun l hS hl => ?_, hI.keys⟩, fun l => ⟨hto l, ?_⟩⟩
+  refine ⟨E', ⟨hf', hn', fun l hS hl => ?_, hI.keys, hag.cur.trans hI.cur⟩, fun l => ⟨hto l, ?_⟩⟩
   · rcases hto l hl with h | h
     · exact hI.disj l hS (mem_keep.mp h).1
     · exact hSX l hS h

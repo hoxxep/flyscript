@@ -28,9 +28,32 @@ structure Moves (σ : Store) (E : List Nat) (σ' : Store) (E' L : List Nat) : Pr
   rt : RtExt σ σ'
   /-- A region gains cells only through an arena the step may change, or one it made. -/
   fresh : ∀ l a x, σ'.rt l = some (a, x) → σ.rt l = none → a ∈ E ∨ σ.next ≤ a
+  fb : FbExt σ σ'
+  cur : σ'.cur = σ.cur
+
+/-- A step keeps the fiber tags. -/
+macro_rules | `(tactic| fb_core) => `(tactic| first
+  | exact Moves.fb (by assumption)
+  | exact fun l g h => Moves.fb (by assumption) l g h
+  | exact (Moves.fb (by assumption)).trans (by assumption)
+  | exact fun l g h => (by assumption : FbExt _ _) l g (Moves.fb (by assumption) l g h))
+
+/-- The fiber running, as an invariant at some store this one stepped from says. -/
+macro "cur_inv" : tactic => `(tactic| first
+  | exact Inv.cur (by assumption)
+  | (simp only [Store.set_cur, Store.alloc_cur, Store.fresh_cur, Store.freeAll_cur, allocAll_cur]
+     exact Inv.cur (by assumption))
+  | (rw [drop_cur (by assumption)]; exact Inv.cur (by assumption))
+  | (rw [dropCells_cur _ _ _ (by assumption)]; exact Inv.cur (by assumption))
+  | (rw [dropCell_cur (by assumption)]; exact Inv.cur (by assumption))
+  | (simp only [Store.set_cur, Store.freeAll_cur]; rw [drop_cur (by assumption)]; exact Inv.cur (by assumption))
+  | solve_by_elim (maxDepth := 6) [Inv.cur, Agree.cur, Moves.cur, Eq.trans, Eq.symm, Store.set_cur,
+      Store.alloc_cur, Store.fresh_cur, Store.freeAll_cur, allocAll_cur])
 
 theorem Moves.refl (hwf : WF σ) (hE : ∀ l ∈ E, σ.mem l ≠ none) : Moves σ E σ E [] where
   rt := RtExt.refl
+  fb := FbExt.refl
+  cur := rfl
   fresh := fun _ _ _ h h0 => by rw [h0] at h; cases h
   within := by intro l h; simp at h; exact .inl h
   next := Nat.le_refl _
@@ -54,6 +77,8 @@ theorem Moves.refl (hwf : WF σ) (hE : ∀ l ∈ E, σ.mem l ≠ none) : Moves �
 theorem Moves.trans (h₁ : Moves σ E σ₁ E₁ L₁) (h₂ : Moves σ₁ E₁ σ₂ E₂ L₂) (hd : Disj L₁ E₁)
     (hwf : WF σ) : Moves σ E σ₂ E₂ (L₁ ++ L₂) where
   rt := h₁.rt.trans h₂.rt
+  fb := h₁.fb.trans h₂.fb
+  cur := h₂.cur.trans h₁.cur
   fresh := by
     intro l a x h h0
     cases h1 : σ₁.rt l with
@@ -116,6 +141,8 @@ theorem Moves.trans (h₁ : Moves σ E σ₁ E₁ L₁) (h₂ : Moves σ₁ E₁
 theorem Moves.allocate (hwf : WF σ) (hE : ∀ l ∈ E, σ.mem l ≠ none) :
     Moves σ E (σ.alloc v).2 E [σ.next] where
   rt := fun _ _ h => h
+  fb := FbExt.alloc
+  cur := rfl
   fresh := fun _ _ _ h h0 => by simp only [Store.alloc_rt] at h; rw [h0] at h; cases h
   within := by
     intro l h
@@ -149,6 +176,8 @@ theorem Moves.allocate (hwf : WF σ) (hE : ∀ l ∈ E, σ.mem l ≠ none) :
 theorem Moves.set (hwf : WF σ) (hE : ∀ l ∈ E, σ.mem l ≠ none) (hl : l ∈ E) :
     Moves σ E (σ.set l (some v)) E [] where
   rt := fun _ _ h => h
+  fb := FbExt.refl
+  cur := rfl
   fresh := fun _ _ _ h h0 => by simp only [Store.set_rt] at h; rw [h0] at h; cases h
   within := by intro x h; simp at h; exact .inl h
   next := Nat.le_refl _
@@ -180,9 +209,11 @@ theorem Moves.set (hwf : WF σ) (hE : ∀ l ∈ E, σ.mem l ≠ none) (hl : l �
 theorem Moves.free (hwf : WF σ') (hnext : σ'.next = σ.next) (hE : ∀ l ∈ E, σ.mem l ≠ none)
     (hsplit : ∀ l, l ∈ E ↔ l ∈ E' ∨ l ∈ D) (hD : ∀ l ∈ D, σ'.mem l = none)
     (hkeep : ∀ l, l ∉ D → σ'.mem l = σ.mem l) (hdisj : Disj E' D)
-    (hrt : σ'.rt = σ.rt := by rt_tac) :
+    (hrt : σ'.rt = σ.rt := by rt_tac) (hfb : FbExt σ σ' := by fb_tac) (hcur : σ'.cur = σ.cur := by cur_tac) :
     Moves σ E σ' E' [] where
   rt := fun l x h => by rw [hrt]; exact h
+  fb := hfb
+  cur := hcur
   fresh := fun _ _ _ h h0 => by rw [hrt, h0] at h; cases h
   within := by
     intro l h
@@ -216,6 +247,8 @@ footprint's, as when a value is bound to a variable or stored in a place. -/
 theorem Moves.relabel (h : Moves σ E σ' E' L) (hsplit : ∀ x, x ∈ E'' ∨ x ∈ L'' ↔ x ∈ E' ∨ x ∈ L) :
     Moves σ E σ' E'' L'' where
   rt := h.rt
+  fb := h.fb
+  cur := h.cur
   fresh := h.fresh
   within := fun l hl => h.within l ((hsplit l).mp (hl.symm)).symm
   next := h.next

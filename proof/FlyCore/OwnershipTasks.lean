@@ -173,7 +173,7 @@ theorem ret_taskK {d : Fn} {cells : Env} {ls : List Nat}
     have hdisj := hI₃.disj
     simp only [List.nil_append] at hdisj ⊢
     refine ⟨σ4, Er, hdrop, ⟨hfr.frame <| Agree.of' fun l hl => hkeep4 l fun h => ?_, hnd.2.1,
-      fun l hl h => hdisj l hl (List.mem_append.mpr (.inr h)), refCtx_keys hkeys⟩,
+      fun l hl h => hdisj l hl (List.mem_append.mpr (.inr h)), refCtx_keys hkeys, by cur_inv⟩,
       Agree.of' fun l hl => hkeep4 l fun h => hdw l hl (List.mem_append.mpr (.inl h)),
       fun l h1 h2 => hdw l h1 (List.mem_append.mpr (.inr h2)), ?_⟩
     · rcases List.mem_append.mp hl with hl | hl
@@ -277,7 +277,7 @@ theorem ret_parE (hI : Inv F ι σf Γ₁ env E₁ S) (hro : RoCtx Γo) (hSo : �
     intro σ1 Eb L hIb hm
     obtain rfl := foot_ro hIb.foot hro
     have hag1 : Agree σf σ1 (E₁ ++ S) := (Agree.trans (hag) (hm.keeps hwf hXSa hXSd))
-    exact ⟨rfl, ⟨hI.foot.frame hag1, hI.nodup, hI.disj, hI.keys⟩,
+    exact ⟨rfl, ⟨hI.foot.frame hag1, hI.nodup, hI.disj, hI.keys, hag1.cur.trans hI.cur⟩,
       (hm.widen hXa hd).relabel fun x => by simp⟩
   rcases res with ⟨res, σ1⟩
   cases res with
@@ -338,7 +338,7 @@ theorem pair_alloc (hI : Inv F ι σ Γ env E S) (hwf : WF σ) (hv : VT F ι σ 
     · exact (hfresh _ (hLva _ hx)).2 e
     · exact hdvw x hx hx'
   refine ⟨(σ.next :: Lv) ++ ((σ.next + 1) :: Lw),
-    ⟨hI.foot.frame <| Agree.of' fun z hz => hold4 z (hI.foot.alloc z (List.mem_append.mp hz)), hI.nodup, hI.disj, hI.keys⟩,
+    ⟨hI.foot.frame <| Agree.of' fun z hz => hold4 z (hI.foot.alloc z (List.mem_append.mp hz)), hI.nodup, hI.disj, hI.keys, hI.cur⟩,
     .pair hLv1 hLw1 hdisj hv.complete hw.complete, ?_, ?_, ?_⟩
   · intro x hx hx'
     have hxa := hI.alloc x hx'
@@ -401,7 +401,7 @@ theorem ret_parD (hKo : ∀ m, n = m + 1 → EvalKOk F O m ∧ RetOk F O m)
   have agreeM : ∀ {E' L σ1}, Moves σ0 Ein σ1 E' L → Agree σf σ1 (E₁ ++ Lw ++ S) := fun hm => Agree.trans hag (hm.keeps hwf hXSa hXSd)
   have hE1L := nodup_append_disj.mp hnd
   have callerI : ∀ {σ1}, Agree σf σ1 (E₁ ++ S) → Inv F ι σ1 Γ₁ env E₁ S := fun hag1 =>
-    ⟨hP.hI.foot.frame hag1, hP.hI.nodup, hP.hI.disj, hP.hI.keys⟩
+    ⟨hP.hI.foot.frame hag1, hP.hI.nodup, hP.hI.disj, hP.hI.keys, hag1.cur.trans hP.hI.cur⟩
   have restrict : ∀ {σ1}, Agree σf σ1 (E₁ ++ Lw ++ S) → Agree σf σ1 (E₁ ++ S) := fun hag1 =>
     hag1.mono fun l hl => by simp only [List.mem_append] at hl ⊢; grind
   rcases res with ⟨res, σ1⟩
@@ -532,7 +532,7 @@ theorem ret_parD (hKo : ∀ m, n = m + 1 → EvalKOk F O m ∧ RetOk F O m)
 
 theorem ParOk.transfer (h : ParOk F ι O σf e op Γ₁ env E₁ S τa τb) (hag : Agree σf σ' (E₁ ++ S)) :
     ParOk F ι O σ' e op Γ₁ env E₁ S τa τb :=
-  { h with hI := ⟨h.hI.foot.frame hag, h.hI.nodup, h.hI.disj, h.hI.keys⟩ }
+  { h with hI := ⟨h.hI.foot.frame hag, h.hI.nodup, h.hI.disj, h.hI.keys, hag.cur.trans h.hI.cur⟩ }
 
 /-- Two tasks, the one running `side`, the other waiting as `Ko`: where the running one gives way,
 the schedule says which goes on; once it is done, the other runs alone; if it fails, the other is
@@ -682,7 +682,7 @@ theorem ret_parS (hKo : ∀ m, n = m + 1 → EvalKOk F O m ∧ RetOk F O m)
     simp only [List.nil_append] at h2
     rw [dropRet_eq (F := F) (O := O) (n := m) (hs := hs)]
     have h3 := ret_dropK (τ' := .pair τa τb) (n := m) (k := k) (aimed_uncap haim) hR.2 hwf2 h2
-    have hI2 : Inv F ι σ1.fresh.2 Γ₁ env E₁ S := ⟨hP.hI.foot.frame (restrict hag2), hP.hI.nodup, hP.hI.disj, hP.hI.keys⟩
+    have hI2 : Inv F ι σ1.fresh.2 Γ₁ env E₁ S := ⟨hP.hI.foot.frame (restrict hag2), hP.hI.nodup, hP.hI.disj, hP.hI.keys, by cur_inv⟩
     have hE1a : ∀ l ∈ E₁, σ1.fresh.2.mem l ≠ none := fun l hl => by
       show σ1.mem l ≠ none
       rw [restrict hag1 l (by simp [hl])]; exact hfa l (by simp [hl])
@@ -918,9 +918,11 @@ theorem par_ok (hF : FnsOk F O) (hR : RetOk F O n) (hKk : EvalKOk F O n)
   have hcellsA : (allocAll σ1 ((da.owns.map Prod.fst).zip vsA)).1.map Prod.fst = da.owns.map Prod.fst := by
     rw [allocAll_fst]; exact List.map_fst_zip (by rw [hlenA]; simp)
   have hrtA := allocAll_rt σ1 ((da.owns.map Prod.fst).zip vsA)
-  generalize allocAll σ1 ((da.owns.map Prod.fst).zip vsA) = alA at hfoA hEoAm hleA hwf₂ holdA hnewA hcellsA hrtA ⊢
+  have hfbtA := allocAll_fbext σ1 ((da.owns.map Prod.fst).zip vsA)
+  have hcutA := allocAll_cur σ1 ((da.owns.map Prod.fst).zip vsA)
+  generalize allocAll σ1 ((da.owns.map Prod.fst).zip vsA) = alA at hfoA hEoAm hleA hwf₂ holdA hnewA hcellsA hrtA hfbtA hcutA ⊢
   obtain ⟨cA, σ2⟩ := alA
-  dsimp only at hfoA hEoAm hleA hwf₂ holdA hnewA hcellsA hrtA ⊢
+  dsimp only at hfoA hEoAm hleA hwf₂ holdA hnewA hcellsA hrtA hfbtA ⊢
   -- The second's.
   have hvB2 := hvB.frame <| Agree.of' fun l hl => holdA l (hwf₁ l (hvB.alloc l hl))
   obtain ⟨EoB, hfoB, hEoB, hEoBm, hleB, hwf₃, holdB, hnewB, -⟩ :=
@@ -929,9 +931,11 @@ theorem par_ok (hF : FnsOk F O) (hR : RetOk F O n) (hKk : EvalKOk F O n)
   have hcellsB : (allocAll σ2 ((db.owns.map Prod.fst).zip vsB)).1.map Prod.fst = db.owns.map Prod.fst := by
     rw [allocAll_fst]; exact List.map_fst_zip (by rw [hlenB]; simp)
   have hrtB := allocAll_rt σ2 ((db.owns.map Prod.fst).zip vsB)
-  generalize allocAll σ2 ((db.owns.map Prod.fst).zip vsB) = alB at hfoB hEoBm hleB hwf₃ holdB hnewB hcellsB hrtB ⊢
+  have hfbtB := allocAll_fbext σ2 ((db.owns.map Prod.fst).zip vsB)
+  have hcutB := allocAll_cur σ2 ((db.owns.map Prod.fst).zip vsB)
+  generalize allocAll σ2 ((db.owns.map Prod.fst).zip vsB) = alB at hfoB hEoBm hleB hwf₃ holdB hnewB hcellsB hrtB hfbtB hcutB ⊢
   obtain ⟨cB, σ3⟩ := alB
-  dsimp only at hfoB hEoBm hleB hwf₃ holdB hnewB hcellsB hrtB ⊢
+  dsimp only at hfoB hEoBm hleB hwf₃ holdB hnewB hcellsB hrtB hfbtB ⊢
   have hold31 : ∀ l, l < σ1.next → σ3.mem l = σ1.mem l := fun l hl =>
     (holdB l (Nat.lt_of_lt_of_le hl hleA)).trans (holdA l hl)
   have hEoAin : ∀ l ∈ EoA, l ∈ LsA.flatten ∨ σ1.next ≤ l := fun l hl => by
@@ -958,9 +962,9 @@ theorem par_ok (hF : FnsOk F O) (hR : RetOk F O n) (hKk : EvalKOk F O n)
   have hmA := mutCells_ro (hmodes htsA hroa)
   have hmB := mutCells_ro (hmodes htsB hrob)
   have hIA := callee_inv (k := 0) (d := da) hI₁ (fun h hh => hholes h (List.mem_append.mpr (.inl hh))) hpw2.1
-    (by simpa using htsA.symm) hkA hfoA hEoA hEoAin hdLA hdLSA hwf₁ holdA hrtA (fun _ _ _ h => by simpa using h)
+    (by simpa using htsA.symm) hkA hfoA hEoA hEoAin hdLA hdLSA hwf₁ holdA hrtA hfbtA hcutA rfl (fun _ _ _ h => by simpa using h)
   have hIB := callee_inv (k := 0) (d := db) hI₁ (fun h hh => hholes h (List.mem_append.mpr (.inr hh))) hpw2.2.1
-    (by simpa using htsB.symm) hkB hfoB hEoB hEoBin hdLB hdLSB hwf₁ hold31 (hrtB.trans hrtA) (fun _ _ _ h => by simpa using h)
+    (by simpa using htsB.symm) hkB hfoB hEoB hEoBin hdLB hdLSB hwf₁ hold31 (hrtB.trans hrtA) (hfbtA.trans hfbtB) (hcutB.trans hcutA) rfl (fun _ _ _ h => by simpa using h)
   rw [hmA, List.append_nil] at hIA
   rw [hmB, List.append_nil] at hIB
   -- Everything at the start of the tasks, where the first is given its turn.
@@ -968,14 +972,15 @@ theorem par_ok (hF : FnsOk F O) (hR : RetOk F O n) (hKk : EvalKOk F O n)
   have hIA4 : Inv F ι σ3.fresh.2 (fnCtx da) (cA ++ (da.refs.map Prod.fst).zip (hosA.map Hole.loc)) EoA
       (roCells (olds hosA)) :=
     ⟨hIA.foot.frame (Agree.of (fun l hl => hag23 l (hIA.foot.alloc l (List.mem_append.mp hl))) hrtB), hIA.nodup,
-      hIA.disj, hIA.keys⟩
+      hIA.disj, hIA.keys, hcutB.trans hIA.cur⟩
   have hIB4 : Inv F ι σ3.fresh.2 (fnCtx db) (cB ++ (db.refs.map Prod.fst).zip (hosB.map Hole.loc)) EoB
       (roCells (olds hosB)) :=
-    ⟨hIB.foot.frame <| Agree.of' fun _ _ => rfl, hIB.nodup, hIB.disj, hIB.keys⟩
+    ⟨hIB.foot.frame <| Agree.of' fun _ _ => rfl, hIB.nodup, hIB.disj, hIB.keys, hIB.cur⟩
   have hag14 : Agree σ1 σ3.fresh.2 (E₁ ++ S) :=
     Agree.of (fun l hl => hold31 l (hwf₁ l (hI₁.foot.alloc l (List.mem_append.mp hl)))) (hrtB.trans hrtA)
+      (hfbtA.trans hfbtB) (hcutB.trans hcutA)
   have hP4 : ParOk F ι O σ3.fresh.2 e op Γ₁ env E₁ S da.ret db.ret :=
-    ⟨hop, howns, hrefs, hret, ⟨hI₁.foot.frame hag14, hI₁.nodup, hI₁.disj, hI₁.keys⟩, hca, hcb⟩
+    ⟨hop, howns, hrefs, hret, ⟨hI₁.foot.frame hag14, hI₁.nodup, hI₁.disj, hI₁.keys, hag14.cur.trans hI₁.cur⟩, hca, hcb⟩
   have hSt : ∀ {hs' : List Hole}, (∀ h ∈ hs', HoleOk F ι σ1 Γ₁ env h) → ∀ l ∈ roCells (olds hs'), l ∈ E₁ ∨ l ∈ S := by
     intro hs' hh l hl
     obtain ⟨h, hmem, hlo⟩ := mem_olds_ro.mp hl
@@ -1039,6 +1044,7 @@ theorem par_ok (hF : FnsOk F O) (hR : RetOk F O n) (hKk : EvalKOk F O n)
       · exact hdSA l h1 h2) (by simpa using hres)
   have m1 := hm₁.relabel (E'' := E₁ ++ (LsA.flatten ++ LsB.flatten)) (L'' := []) fun x => by simp
   have m2 := Moves.grow (σ := σ1) (σ' := σ3) (E := E₁ ++ (LsA.flatten ++ LsB.flatten)) (E' := E₁ ++ EoB ++ EoA)
+    (hfb := hfbtA.trans hfbtB) (hcur := hcutB.trans hcutA)
     hwf₁ hwf₃ (Nat.le_trans hleA hleB) hold31
     (fun l h1 h2 => by
       by_cases h3 : l < σ2.next
