@@ -527,7 +527,7 @@ theorem FrameOk.S_sub (hf : FrameOk F O ιi ιo σf f inL outL Xf A) : ∀ l ∈
 
 /-- The code that performed the operation a continuation was taken at: its activation, the places
 it lent, and how its cells and what it read are among the continuation's. -/
-theorem FramesOk.base_of : ∀ {ι : List Nat} {K : List Kont} {top : Lvl} {X : List Nat} {A : List Nat},
+theorem FramesOk.base_of : ∀ {ι : Iota} {K : List Kont} {top : Lvl} {X : List Nat} {A : List Nat},
     FramesOk F O ι σs K op top X hos A →
     ∃ ι₁ Γ₁ env₁ E₁ S₁, Inv F ι₁ σs Γ₁ env₁ E₁ S₁ ∧ (∀ h ∈ hos, HoleOk F ι₁ σs Γ₁ env₁ h) ∧ hos.Pairwise Apart ∧
       hos.map (fun h => (h.mode, h.ty)) = op.refs ∧ (∀ l ∈ E₁, l ∉ mutCells (olds hos) → l ∈ X) ∧
@@ -1515,7 +1515,7 @@ theorem post_relabel {r : Res × Store} (hwf : WF σ) (hE : ∀ l ∈ E, σ.mem 
 
 /-- The tree at `a` reaches the tree at `l`: it is that tree and the cells `P`; and given a new tree
 at `l`, in a store that kept `P`, it is that tree and `P` again. -/
-structure Reach (F : List Fn) (ι : List Nat) (σ : Store) (a : Nat) (τr : Ty) (P : List Nat) (l : Nat) (τ : Ty) :
+structure Reach (F : List Fn) (ι : Iota) (σ : Store) (a : Nat) (τr : Ty) (P : List Nat) (l : Nat) (τ : Ty) :
     Prop where
   split : ∀ {Lr}, LT F ι σ a τr Lr → ∃ Rt, LT F ι σ l τ Rt ∧ Lr.Perm (P ++ Rt)
   join : P.Nodup → ∀ σ' R', Agree σ σ' P → LT F ι σ' l τ R' → Disj P R' →

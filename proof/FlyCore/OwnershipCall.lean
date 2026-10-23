@@ -14,7 +14,7 @@ namespace FlyCore.Ownership
 
 /-- The places a `handle` lent its arm, each holding a value of its type: `R` the cells of those
 lent `readonly`, `H` of those lent `mut`. -/
-inductive CapsOk (F : List Fn) (ι : List Nat) (σ : Store) : List (Cap Nat) → List Nat → List Nat → Prop
+inductive CapsOk (F : List Fn) (ι : Iota) (σ : Store) : List (Cap Nat) → List Nat → List Nat → Prop
   | nil : CapsOk F ι σ [] [] []
   | ro : LT F ι σ a τ L → CapsOk F ι σ rest R H → CapsOk F ι σ (⟨x, .ro, τ, a⟩ :: rest) (L ++ R) H
   | mut : LT F ι σ a τ L → τ.shell = false → CapsOk F ι σ rest R H → CapsOk F ι σ (⟨x, .mut, τ, a⟩ :: rest) R (L ++ H)
@@ -505,7 +505,7 @@ theorem CapsOk.det_ro : CapsOk F ι σ caps R H → CapsOk F ι σ' caps R' H' �
 /-! ## Owned arguments -/
 
 /-- Values of the given types, each owning its cells. -/
-inductive Vals (F : List Fn) (ι : List Nat) (σ : Store) : List Ty → List Val → List (List Nat) → Prop
+inductive Vals (F : List Fn) (ι : Iota) (σ : Store) : List Ty → List Val → List (List Nat) → Prop
   | nil : Vals F ι σ [] [] []
   | cons : VT F ι σ τ v L → Vals F ι σ τs vs Ls → Vals F ι σ (τ :: τs) (v :: vs) (L :: Ls)
 
@@ -750,7 +750,7 @@ structure Hole where
 /-- What the borrow of a hole is to the callee. -/
 def Hole.slot (h : Hole) : Slot := .ref h.mode h.ty
 
-def HoleOk (F : List Fn) (ι : List Nat) (σ : Store) (Γ : Ctx) (env : Env) (h : Hole) : Prop :=
+def HoleOk (F : List Fn) (ι : Iota) (σ : Store) (Γ : Ctx) (env : Env) (h : Hole) : Prop :=
   ∃ s a τr, lookup h.root Γ = some s ∧ lookup h.root env = some a ∧ (h.mode = .mut → s.excl = true) ∧
     Path F ι σ a τr h.path h.loc h.ty ∧ LT F ι σ a τr h.tree ∧ h.tree.Perm (h.path ++ h.old) ∧
     SlotOk F ι σ s a h.tree ∧ LT F ι σ h.loc h.ty h.old ∧ (∀ σ' L', LT F ι σ' a τr L' → SlotOk F ι σ' s a L') ∧
@@ -1829,7 +1829,7 @@ theorem Caps.roots_live : Caps Γ caps ys → ∀ p ∈ ys, ∀ τ, lookup p.2 �
     · exact hr.roots_live p h τ
 
 /-- The variables `ys`, in order, each changeable, with the trees they own in turn: `H`. -/
-inductive Trees (F : List Fn) (ι : List Nat) (σ : Store) (Γ : Ctx) (env : Env) : List Var → List Nat → Prop
+inductive Trees (F : List Fn) (ι : Iota) (σ : Store) (Γ : Ctx) (env : Env) : List Var → List Nat → Prop
   | nil : Trees F ι σ Γ env [] []
   | cons : Entry F ι σ Γ env y s a L → s.excl = true → s.shell = false → Trees F ι σ Γ env ys H →
       Trees F ι σ Γ env (y :: ys) (L ++ H)

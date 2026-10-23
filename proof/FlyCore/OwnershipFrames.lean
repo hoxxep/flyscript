@@ -81,7 +81,7 @@ theorem Foot.split : ∀ {Γa : Ctx} {ea : Env} {E S}, Foot F ι σ (Γa ++ Γb)
   | _ :: _, [], _, _, _, hl => by simp at hl
 
 /-- A variable of the activation, bound at `a` with footprint `L`. -/
-def Entry (F : List Fn) (ι : List Nat) (σ : Store) (Γ : Ctx) (env : Env) (x : Var) (s : Slot) (a : Nat) (L : List Nat) : Prop :=
+def Entry (F : List Fn) (ι : Iota) (σ : Store) (Γ : Ctx) (env : Env) (x : Var) (s : Slot) (a : Nat) (L : List Nat) : Prop :=
   lookup x Γ = some s ∧ lookup x env = some a ∧ SlotOk F ι σ s a L
 
 theorem Entry.det (h : Entry F ι σ Γ env x s a L) (h' : Entry F ι σ Γ env x s' a' L') :

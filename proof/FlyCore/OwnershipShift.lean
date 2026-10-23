@@ -17,7 +17,7 @@ theorem Ty.rfree_ite {t : Bool} {A B : Ty} (hA : A.rfree = true) (hB : B.rfree =
     (if t then A else B).rfree = true := by
   cases t <;> simpa
 
-theorem RefOk.shift_iff : RefOk (a :: ι) σ (k + 1) τ l ↔ RefOk ι σ k τ l := by
+theorem RefOk.shift_iff : RefOk (ι.push a) σ (k + 1) τ l ↔ RefOk ι σ k τ l := by
   simp [RefOk]
 
 /-! ## What no region is part of -/
@@ -75,7 +75,7 @@ theorem Op.ret_rfree (op : Op) : op.ret.rfree = true := by
 
 /-! ## One region further in -/
 
-theorem LT.shift (h : LT F ι σ c τ L) : LT F (a :: ι) σ c (τ.shiftBy 1) L := by
+theorem LT.shift (h : LT F ι σ c τ L) : LT F (ι.push a) σ c (τ.shiftBy 1) L := by
   induction h with
   | int ha => exact .int ha
   | box ha _ hn ih => exact .box ha ih hn
@@ -92,7 +92,7 @@ theorem LT.shift (h : LT F ι σ c τ L) : LT F (a :: ι) σ c (τ.shiftBy 1) L 
     exact ⟨τ, v, h1, h2, by simpa using h3⟩
   | vec ha hlen _ hnd hn ih => exact .vec ha hlen ih hnd hn
 
-theorem LT.unshift : ∀ {τ : Ty} {c : Nat} {L : List Nat}, LT F (a :: ι) σ c (τ.shiftBy 1) L → LT F ι σ c τ L
+theorem LT.unshift : ∀ {τ : Ty} {c : Nat} {L : List Nat}, LT F (ι.push a) σ c (τ.shiftBy 1) L → LT F ι σ c τ L
   | .int, _, _, h => by simp only [Ty.shiftBy] at h; cases h with | int ha => exact .int ha
   | .box τ, _, _, h => by
     simp only [Ty.shiftBy] at h
@@ -142,13 +142,13 @@ theorem Ty.complete_shift : ∀ {τ : Ty}, (τ.shiftBy n).complete = τ.complete
 theorem Ty.isHole_shift {τ : Ty} : (τ.shiftBy n).isHole = τ.isHole := by
   cases τ <;> rfl
 
-theorem LT.unshift_ite {t : Bool} (h : LT F (a :: ι) σ c (if t then A.shiftBy 1 else B.shiftBy 1) L) :
+theorem LT.unshift_ite {t : Bool} (h : LT F (ι.push a) σ c (if t then A.shiftBy 1 else B.shiftBy 1) L) :
     LT F ι σ c (if t then A else B) L := by
   cases t
   · exact LT.unshift (τ := B) h
   · exact LT.unshift (τ := A) h
 
-theorem VT.shift (h : VT F ι σ τ v L) : VT F (a :: ι) σ (τ.shiftBy 1) v L := by
+theorem VT.shift (h : VT F ι σ τ v L) : VT F (ι.push a) σ (τ.shiftBy 1) v L := by
   cases h with
   | int => exact .int
   | box h hc => exact .box h.shift (by rw [Ty.complete_shift]; exact hc)
@@ -161,7 +161,7 @@ theorem VT.shift (h : VT F ι σ τ v L) : VT F (a :: ι) σ (τ.shiftBy 1) v L 
   | rref hr => exact .rref (RefOk.shift_iff.mpr hr)
   | vec hlen hel hnd hc => exact .vec hlen (fun i h h' => (hel i h h').shift) hnd (by rw [Ty.complete_shift]; exact hc)
 
-theorem VT.unshift : ∀ {τ : Ty} {v : Val} {L : List Nat}, VT F (a :: ι) σ (τ.shiftBy 1) v L → VT F ι σ τ v L
+theorem VT.unshift : ∀ {τ : Ty} {v : Val} {L : List Nat}, VT F (ι.push a) σ (τ.shiftBy 1) v L → VT F ι σ τ v L
   | .int, _, _, h => by simp only [Ty.shiftBy] at h; cases h; exact .int
   | .box τ, _, _, h => by
     simp only [Ty.shiftBy] at h
@@ -212,7 +212,7 @@ theorem sharedPart_shift {s : Slot} : sharedPart (s.shiftBy n) L = sharedPart s 
 theorem Ty.lent1_shift {t : Bool} : (Ty.lent1 t A B).shiftBy n = Ty.lent1 t (A.shiftBy n) (B.shiftBy n) := by
   cases t <;> rfl
 
-theorem SlotOk.shift (h : SlotOk F ι σ s c L) : SlotOk F (a :: ι) σ (s.shiftBy 1) c L := by
+theorem SlotOk.shift (h : SlotOk F ι σ s c L) : SlotOk F (ι.push a) σ (s.shiftBy 1) c L := by
   cases s with
   | own τ live =>
     cases live with
@@ -227,7 +227,7 @@ theorem SlotOk.shift (h : SlotOk F ι σ s c L) : SlotOk F (a :: ι) σ (s.shift
     simp only [Slot.shiftBy, SlotOk] at h ⊢
     rw [← Ty.lent1_shift]; exact h.shift
 
-theorem SlotOk.unshift (h : SlotOk F (a :: ι) σ (s.shiftBy 1) c L) : SlotOk F ι σ s c L := by
+theorem SlotOk.unshift (h : SlotOk F (ι.push a) σ (s.shiftBy 1) c L) : SlotOk F ι σ s c L := by
   cases s with
   | own τ live =>
     cases live with
@@ -242,14 +242,14 @@ theorem SlotOk.unshift (h : SlotOk F (a :: ι) σ (s.shiftBy 1) c L) : SlotOk F 
     simp only [Slot.shiftBy, SlotOk] at h ⊢
     rw [← Ty.lent1_shift] at h; exact LT.unshift h
 
-theorem Foot.shift (h : Foot F ι σ Γ env E S) : Foot F (a :: ι) σ (Ctx.shift Γ) env E S := by
+theorem Foot.shift (h : Foot F ι σ Γ env E S) : Foot F (ι.push a) σ (Ctx.shift Γ) env E S := by
   induction h with
   | nil => exact .nil
   | @cons s c L Γ env E S x hs _ ih =>
     have := Foot.cons (x := x) hs.shift ih
     simpa [Ctx.shift, addE, addS, exclPart_shift, sharedPart_shift] using this
 
-theorem Foot.unshift : ∀ {Γ : Ctx} {env : Env} {E S : List Nat}, Foot F (a :: ι) σ (Ctx.shift Γ) env E S → Foot F ι σ Γ env E S
+theorem Foot.unshift : ∀ {Γ : Ctx} {env : Env} {E S : List Nat}, Foot F (ι.push a) σ (Ctx.shift Γ) env E S → Foot F ι σ Γ env E S
   | [], _, _, _, h => by simp only [Ctx.shift, List.map_nil] at h; cases h; exact .nil
   | (x, s) :: Γ, _, _, _, h => by
     simp only [Ctx.shift, List.map_cons] at h
@@ -261,10 +261,10 @@ theorem Foot.unshift : ∀ {Γ : Ctx} {env : Env} {E S : List Nat}, Foot F (a ::
 theorem Ctx.shift_keys (Γ : Ctx) : (Ctx.shift Γ).map Prod.fst = Γ.map Prod.fst := by
   simp [Ctx.shift, Function.comp_def]
 
-theorem Inv.shift (h : Inv F ι σ Γ env E S) : Inv F (a :: ι) σ (Ctx.shift Γ) env E S :=
+theorem Inv.shift (h : Inv F ι σ Γ env E S) : Inv F (ι.push a) σ (Ctx.shift Γ) env E S :=
   ⟨h.foot.shift, h.nodup, h.disj, by rw [Ctx.shift_keys]; exact h.keys⟩
 
-theorem Inv.unshift (h : Inv F (a :: ι) σ (Ctx.shift Γ) env E S) : Inv F ι σ Γ env E S :=
+theorem Inv.unshift (h : Inv F (ι.push a) σ (Ctx.shift Γ) env E S) : Inv F ι σ Γ env E S :=
   ⟨h.foot.unshift, h.nodup, h.disj, by rw [← Ctx.shift_keys]; exact h.keys⟩
 
 
@@ -276,8 +276,7 @@ around it: `ι.drop k`. -/
 theorem RefOk.drop_iff : RefOk ι σ (j + k) τ l ↔ RefOk (ι.drop k) σ j τ l := by
   simp [RefOk, List.getElem?_drop, Nat.add_comm]
 
-theorem drop_drop_add {ι : List Nat} : (ι.drop k).drop j = ι.drop (j + k) := by
-  rw [List.drop_drop, Nat.add_comm]
+theorem drop_drop_add {ι : Iota} : (ι.drop k).drop j = ι.drop (j + k) := Iota.drop_drop ι
 
 theorem LT.shiftk (h : LT F (ι.drop k) σ c τ L) : LT F ι σ c (τ.shiftBy k) L := by
   generalize hι : ι.drop k = ι' at h

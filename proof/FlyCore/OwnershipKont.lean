@@ -62,7 +62,7 @@ operation's result; and how the `handle`'s activation, `Γout`, is rebuilt from 
 the body ends — with what it froze for the body, `Fz`, as it was, and with the trees the arm last left
 at the places it was lent `mut`. `Rc` are the cells of the places lent `readonly`, which nothing
 changes while the `handle` runs. -/
-structure HandleOk (F : List Fn) (ι : List Nat) (O : List Op) (σf : Store) (e : Nat) (caps : List (Cap Nat))
+structure HandleOk (F : List Fn) (ι : Iota) (O : List Op) (σf : Store) (e : Nat) (caps : List (Cap Nat))
     (os rs : List Var) (arm : Expr) (post : PostR) (Γin Γout : Ctx) (env : Env) (Sin S : List Nat) (r : Row)
     (Fz Rc : List Nat) (op : Op) : Prop where
   hop : O[e]? = some op
@@ -93,7 +93,7 @@ def RoCtx (Γ : Ctx) : Prop := ∀ p ∈ Γ, ∃ τ, p.2 = .ref .ro τ
 
 /-- What two tasks keep while they run: the operation `e` by which each gives way, which takes
 nothing and gives an integer; and the code around, `Γ₁` in `env`, whose cells `E₁` neither changes. -/
-structure ParOk (F : List Fn) (ι : List Nat) (O : List Op) (σf : Store) (e : Nat) (op : Op) (Γ₁ : Ctx) (env : Env)
+structure ParOk (F : List Fn) (ι : Iota) (O : List Op) (σf : Store) (e : Nat) (op : Op) (Γ₁ : Ctx) (env : Env)
     (E₁ S : List Nat) (τa τb : Ty) : Prop where
   hop : O[e]? = some op
   howns : op.owns = []
@@ -108,7 +108,7 @@ nothing and giving `#Some` of a `τy` or `#Done`, and `eY`, by which its produce
 places `caps` it lent its producer; and how the activation, `Γout`, is rebuilt from its consumer's,
 `Γin`, once both sides are done — with what it froze, `Fz`, as it was, and the trees the producer
 left at the places lent `mut`. `Rc` are the cells of the places lent `readonly`, which nothing changes. -/
-structure GenOk (F : List Fn) (ι : List Nat) (O : List Op) (σf : Store) (eN eY : Nat) (opN opY : Op) (τy τb : Ty)
+structure GenOk (F : List Fn) (ι : Iota) (O : List Op) (σf : Store) (eN eY : Nat) (opN opY : Op) (τy τb : Ty)
     (caps : List (Cap Nat)) (Γin Γout : Ctx) (env : Env) (Sin S Fz Rc : List Nat) : Prop where
   hopN : O[eN]? = some opN
   hNowns : opN.owns = []
@@ -148,7 +148,7 @@ structure ScOk (O : List Op) (e eS : Nat) (op opS : Op) (rT : Row) (R : TyList) 
 
 /-- What a scope lends each task it starts: the places `cz`, of the types `R`, only read, their trees
 `Rc` among what the code around only reads. -/
-structure ScCaps (F : List Fn) (ι : List Nat) (σf : Store) (cz : List (Cap Nat)) (R : TyList) (S Rc : List Nat) :
+structure ScCaps (F : List Fn) (ι : Iota) (σf : Store) (cz : List (Cap Nat)) (R : TyList) (S Rc : List Nat) :
     Prop where
   hc : CapsOk F ι σf cz Rc []
   hRc : ∀ l ∈ Rc, l ∈ S
@@ -160,7 +160,7 @@ def capsLvlΓ (caps : List (Cap Nat)) : Ctx := capCtx (caps.map Cap.sig)
 def capsLvlEnv (caps : List (Cap Nat)) : Env := caps.map fun c => (c.name, c.loc)
 
 /-- What a producer being dropped, as its consumer ended with `o`, keeps: `o`'s cells, `Lo`. -/
-def OutOk (F : List Fn) (ι : List Nat) (σ : Store) (τ : Ty) : Outcome → List Nat → Prop
+def OutOk (F : List Fn) (ι : Iota) (σ : Store) (τ : Ty) : Outcome → List Nat → Prop
   | .val v, L => VT F ι σ τ v L
   | .abort _ _, L => L = []
 
@@ -173,7 +173,7 @@ mutual
 /-- `FrameOk σf f inL outL X A`: frame `f`, put in force where the store was `σf`, takes what the
 code it ran gives at level `inL` and gives what its construct does at level `outL`; the cells `X` are
 its own, as they were at `σf`; it may unwind to the handlers `A`. -/
-inductive FrameOk (F : List Fn) (O : List Op) : List Nat → List Nat → Store → Kont → Lvl → Lvl → List Nat → List Nat → Prop
+inductive FrameOk (F : List Fn) (O : List Op) : Iota → Iota → Store → Kont → Lvl → Lvl → List Nat → List Nat → Prop
   | letK : lookup x Γ₁ = none → (Γ₁.map Prod.fst).Nodup →
       Typed F O ((x, .own τx true) :: Γ₁) b τb ((x, .own τx live) :: Γ₂) r →
       FrameOk F O ι ι σf (.letK x τx env b) ⟨Γ₁, env, τx, S, r⟩ ⟨Γ₂, env, τb, S, r⟩ [] []
@@ -309,7 +309,7 @@ are the frame's own. -/
         (Fz ++ Eb ++ Lo) o.aims
   /-- A region's body, its arena `a` innermost: as it ends, the arena and the region's cells are
   freed, and the activation is the code around's. -/
-  | regionK : FrameOk F O (a :: ι) ι σf (.regionK a)
+  | regionK : FrameOk F O (ι.push a) ι σf (.regionK a)
       ⟨(R, .own (.arena 0) true) :: Ctx.shift Γ, (R, a) :: env, τ.shiftBy 1, S, r⟩ ⟨Γ, env, τ, S, r⟩ [] []
   /-- The code around two tasks, one of which failed: once the other is dropped, the activation is
   the code around's again, its cells as they were. -/
@@ -348,7 +348,7 @@ are the frame's own. -/
 `σs`, take the value of the operation `op` that suspended them and give what level `top` does;
 their own cells are `X`; the code that performed the operation lent its handler the places `hos`;
 and they may unwind to the handlers `A`. -/
-inductive FramesOk (F : List Fn) (O : List Op) : List Nat → Store → List Kont → Op → Lvl → List Nat → List Hole → List Nat → Prop
+inductive FramesOk (F : List Fn) (O : List Op) : Iota → Store → List Kont → Op → Lvl → List Nat → List Hole → List Nat → Prop
   | base : Inv F ι σs Γ₁ env E₁ S → (∀ h ∈ hos, HoleOk F ι σs Γ₁ env h) → hos.Pairwise Apart →
       O[(e : Nat)]? = some op → hos.map (fun h => (h.mode, h.ty)) = op.refs → Weaker Γ' Γ₁ →
       FramesOk F O ι σs [] op ⟨Γ', env, op.ret, S, r⟩ (E₁.filter (· ∉ mutCells (olds hos))) hos []
@@ -362,7 +362,7 @@ inductive FramesOk (F : List Fn) (O : List Op) : List Nat → Store → List Kon
 call ends at, where it only reads what the code around only reads, `S`; their cells `X`, apart; the
 handlers they may unwind to, `A`. -/
 inductive TasksOk (F : List Fn) (O : List Op) :
-    List Nat → Store → Nat → Nat → Row → List Nat → List (List Kont) → List Nat → List Nat → Prop
+    Iota → Store → Nat → Nat → Row → List Nat → List (List Kont) → List Nat → List Nat → Prop
   | nil : TasksOk F O ι σf e eS r S [] [] []
   | cons : FramesOk F O ι σt K op0 ⟨Γt, envt, .int, St, .eff e :: .eff eS :: r⟩ X [] AK → RoCtx Γt →
       Agree σt σf (X ++ St) → (∀ l ∈ X ++ St, σt.mem l ≠ none) → (∀ l ∈ St, l ∈ S) → Disj St X →
@@ -384,7 +384,7 @@ unwinding aimed at one of the handlers, everything the scopes it left owned drop
 well formed as the expression would have left it; or an operation performed, the code that performed
 it suspended as frames that give what the expression would, the operation's owned arguments and the
 places it lends apart from them, the step accounted for. -/
-def Post (F : List Fn) (ι : List Nat) (O : List Op) (σ : Store) (E S : List Nat) (Γ' : Ctx) (env : Env) (τ : Ty)
+def Post (F : List Fn) (ι : Iota) (O : List Op) (σ : Store) (E S : List Nat) (Γ' : Ctx) (env : Env) (τ : Ty)
     (r : Row) (hs : HS) : Res × Store → Prop
   | (.stuck, _) => False
   | (.timeout, _) => True

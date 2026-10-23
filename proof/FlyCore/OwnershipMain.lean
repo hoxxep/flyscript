@@ -739,12 +739,12 @@ theorem program_ok_sched (hF : FnsOk F O) (ht : Typed F O [] e τ Γ' [.fail]) (
     | (.susp _ _ _ _ _, _) => False
     | (.timeout, _) => True
     | (.panic, _) => True
-    | (.val v, σ') => ∃ L, VT F [] σ' τ v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
+    | (.val v, σ') => ∃ L, VT F ∅ σ' τ v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
     | (.abort _ _, σ') => ∀ l, σ'.mem l = none := by
   have hR : Ready O [.abort .fail 0] [.fail] :=
     ⟨.abort (by intro e h; cases h) .nil, fun l hl => by
       simp only [List.mem_singleton] at hl; subst hl; exact find_head⟩
-  have h := eval_ok hF n [.abort .fail 0] (Store.sched0 s p) [] [] [] [] [] e τ Γ' [.fail] ht
+  have h := eval_ok hF n [.abort .fail 0] (Store.sched0 s p) ∅ [] [] [] [] e τ Γ' [.fail] ht
     ⟨.nil, List.nodup_nil, disj_nil_left, List.nodup_nil⟩ Store.sched0_wf hR
   generalize eval F O n [.abort .fail 0] (Store.sched0 s p) [] e = r at h ⊢
   rcases r with ⟨r, σ'⟩
@@ -776,7 +776,7 @@ theorem program_ok (hF : FnsOk F O) (ht : Typed F O [] e τ Γ' [.fail]) (n : Na
     | (.susp _ _ _ _ _, _) => False
     | (.timeout, _) => True
     | (.panic, _) => True
-    | (.val v, σ') => ∃ L, VT F [] σ' τ v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
+    | (.val v, σ') => ∃ L, VT F ∅ σ' τ v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
     | (.abort _ _, σ') => ∀ l, σ'.mem l = none :=
   program_ok_sched hF ht (fun _ => true) (fun _ => false) n
 

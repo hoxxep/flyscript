@@ -49,20 +49,47 @@ theorem CloOk.det : CloOk F f τc k A B r R → CloOk F f τc' k' A' B' r' R' �
   simp only [Option.some.injEq, Prod.mk.injEq, List.cons.injEq, and_true] at hcap' hown'
   exact ⟨hcap'.2.1, hcap'.2.2, hown'.2, hret.symm.trans hret', hrow.symm.trans hrow', map_ro_inj (hrefs.symm.trans hrefs')⟩
 
+/-- What the continuations a value may hold are taken to be: given the store their frames were
+suspended at, their frames, their fiber, their type and their cells. -/
+structure World where
+  kok : Store → List Kont → Nat → Ty → List Nat → Prop
+
+/-- Where code runs: the arenas of the regions it is in, the innermost first; the fiber it runs on;
+and the world it is checked in. -/
+structure Iota where
+  arenas : List Nat
+  fiber : Nat := 0
+  w : World := ⟨fun _ _ _ _ _ => False⟩
+
+instance : EmptyCollection Iota := ⟨{ arenas := [] }⟩
+
+/-- The regions `k` out, in the same fiber and world. -/
+def Iota.drop (k : Nat) (ι : Iota) : Iota := { ι with arenas := ι.arenas.drop k }
+
+/-- One region in, its arena `a`. -/
+def Iota.push (ι : Iota) (a : Nat) : Iota := { ι with arenas := a :: ι.arenas }
+
+@[simp] theorem Iota.drop_arenas (ι : Iota) : (ι.drop k).arenas = ι.arenas.drop k := rfl
+@[simp] theorem Iota.push_arenas (ι : Iota) : (ι.push a).arenas = a :: ι.arenas := rfl
+@[simp] theorem Iota.drop_zero (ι : Iota) : ι.drop 0 = ι := rfl
+@[simp] theorem Iota.drop_drop (ι : Iota) : (ι.drop k).drop j = ι.drop (j + k) := by
+  simp only [Iota.drop, List.drop_drop]; congr 2; omega
+@[simp] theorem Iota.push_drop_succ (ι : Iota) : (ι.push a).drop (k + 1) = ι.drop k := rfl
+
 /-- A reference to a cell of the region `k` regions out, among the arenas `ι`, holding a `τ`. -/
-def RefOk (ι : List Nat) (σ : Store) (k : Nat) (τ : Ty) (l : Nat) : Prop :=
-  ∃ a, ι[k]? = some a ∧ σ.rt l = some (a, τ)
+def RefOk (ι : Iota) (σ : Store) (k : Nat) (τ : Ty) (l : Nat) : Prop :=
+  ∃ a, ι.arenas[k]? = some a ∧ σ.rt l = some (a, τ)
 
 /-- Data a region holds, of type `τ` said of that region, its arenas from it outwards `ι`: plain
 data, or, for a list of the region, its elements' cells, each a cell of the region holding a `τ`. -/
-def RD (ι : List Nat) (σ : Store) : Ty → Val → Prop
+def RD (ι : Iota) (σ : Store) : Ty → Val → Prop
   | .int, .int _ => True
   | .rref _ k τ, .rptr l => RefOk ι σ k τ l
   | .vec _ τ, .vec ls => ∀ l ∈ ls, RefOk ι σ 0 τ l
   | _, _ => False
 
 /-- `a` holds a value of type `τ`, whose cells — `a` and every cell of its boxes — are `L`. -/
-inductive LT (F : List Fn) (ι : List Nat) (σ : Store) : Nat → Ty → List Nat → Prop
+inductive LT (F : List Fn) (ι : Iota) (σ : Store) : Nat → Ty → List Nat → Prop
   | int : σ.mem a = some (.int n) → LT F ι σ a .int [a]
   | box : σ.mem a = some (.ptr b) → LT F ι σ b τ R → a ∉ R → LT F ι σ a (.box τ) (a :: R)
   | clo : σ.mem a = some (.clo f c τc) → CloOk F f τc k A B r Rf → LT F ι σ c τc R → a ∉ R →
@@ -77,7 +104,7 @@ inductive LT (F : List Fn) (ι : List Nat) (σ : Store) : Nat → Ty → List Na
   | rref : σ.mem a = some (.rptr l) → RefOk ι σ k τ l → LT F ι σ a (.rref c k τ) [a]
   /-- The arena of the region `k` regions out, which is `a`: its cells, every cell tagged as the
   region's, each holding data of the region. -/
-  | arena : ι[k]? = some a → σ.mem a = some (.arena cs) → cs.Nodup → a ∉ cs →
+  | arena : ι.arenas[k]? = some a → σ.mem a = some (.arena cs) → cs.Nodup → a ∉ cs →
       (∀ l ∈ cs, ∃ τ v, σ.rt l = some (a, τ) ∧ σ.mem l = some v ∧ RD (ι.drop k) σ τ v) →
       (∀ l x, σ.rt l = some (a, x) → l ∈ cs) → LT F ι σ a (.arena k) (a :: cs)
   /-- A vector: its cell holds its elements' cells, each holding a `τ`, their trees apart. -/
@@ -86,7 +113,7 @@ inductive LT (F : List Fn) (ι : List Nat) (σ : Store) : Nat → Ty → List Na
       a ∉ Rs.flatten → LT F ι σ a (.vec g τ) (a :: Rs.flatten)
 
 /-- A value of type `τ`, and the cells it owns. -/
-inductive VT (F : List Fn) (ι : List Nat) (σ : Store) : Ty → Val → List Nat → Prop
+inductive VT (F : List Fn) (ι : Iota) (σ : Store) : Ty → Val → List Nat → Prop
   | int : VT F ι σ .int (.int n) []
   | box : LT F ι σ b τ R → τ.complete → VT F ι σ (.box τ) (.ptr b) R
   | clo : CloOk F f τc k A B r Rf → LT F ι σ c τc R → τc.complete → VT F ι σ (.fn k A B r Rf) (.clo f c τc) R
@@ -833,7 +860,7 @@ theorem dropCell_moved : σ.mem c = some .moved →
 /-- Following boxes, closures' captures and pairs' fields from `a`, which holds a `τa`, reaches `l`,
 which holds a `τ`; `P` are the cells passed on the way, and the trees of the fields not followed,
 which the place leaves as they are. -/
-inductive Path (F : List Fn) (ι : List Nat) (σ : Store) : Nat → Ty → List Nat → Nat → Ty → Prop
+inductive Path (F : List Fn) (ι : Iota) (σ : Store) : Nat → Ty → List Nat → Nat → Ty → Prop
   | here : Path F ι σ a τ [] a τ
   | step : σ.mem a = some (.ptr b) → Path F ι σ b τ' P l τ → Path F ι σ a (.box τ') (a :: P) l τ
   | clo : σ.mem a = some (.clo f c τc) → CloOk F f τc k A B r Rf → Path F ι σ c τc P l τ →
@@ -1066,7 +1093,7 @@ def Slot.excl : Slot → Bool
 /-- The footprint a slot has: what an owned live variable or a borrow holds, owning the rest. A
 variable perhaps moved holds the mark a move leaves, its footprint its cell alone, or still its
 value: which, only running the program tells, and dropping it at the end of its scope looks. -/
-def SlotOk (F : List Fn) (ι : List Nat) (σ : Store) : Slot → Nat → List Nat → Prop
+def SlotOk (F : List Fn) (ι : Iota) (σ : Store) : Slot → Nat → List Nat → Prop
   | .own τ true, a, L => LT F ι σ a τ L
   | .own τ false, a, L => (σ.mem a = some .moved ∧ L = [a]) ∨ (LT F ι σ a τ L ∧ τ.isHole = false)
   | .ref _ τ, a, L => LT F ι σ a τ L
@@ -1085,14 +1112,14 @@ def addS (s : Slot) (L S : List Nat) : List Nat := sharedPart s L ++ S
 
 /-- The footprints of an activation's variables, in order: of those that may be changed — owned
 variables and `mut` borrows — and of those that may only be read, `readonly` borrows. -/
-inductive Foot (F : List Fn) (ι : List Nat) (σ : Store) : Ctx → Env → List Nat → List Nat → Prop
+inductive Foot (F : List Fn) (ι : Iota) (σ : Store) : Ctx → Env → List Nat → List Nat → Prop
   | nil : Foot F ι σ [] [] [] []
   | cons : SlotOk F ι σ s a L → Foot F ι σ Γ env E S →
       Foot F ι σ ((x, s) :: Γ) ((x, a) :: env) (addE s L E) (addS s L S)
 
 /-- The invariant of an activation: its variables' footprints, those that may be changed disjoint
 from each other and from those that may be read. -/
-structure Inv (F : List Fn) (ι : List Nat) (σ : Store) (Γ : Ctx) (env : Env) (E S : List Nat) : Prop where
+structure Inv (F : List Fn) (ι : Iota) (σ : Store) (Γ : Ctx) (env : Env) (E S : List Nat) : Prop where
   foot : Foot F ι σ Γ env E S
   nodup : E.Nodup
   disj : Disj S E
