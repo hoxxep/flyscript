@@ -70,6 +70,9 @@ inductive Ty where
   /-- A vector of `τ`s, each in a cell of its own: a `Vec`, which grows as it is pushed to, or, not
   `g`, a slice `τ[]`, a run of some vector's elements, which does not. -/
   | vec (g : Bool) (τ : Ty)
+  /-- A continuation kept as a value: resumed with an `A`, it gives what its `handle` does, a `B`,
+  performing what `r` names. -/
+  | cont (A B : Ty) (r : Row)
   deriving DecidableEq, Repr
 
 /-- The types of the places a closure's code is lent `readonly` when called: none, but for a
@@ -95,6 +98,7 @@ def Ty.data : Ty → Bool
   | .rref _ _ _ => false
   | .arena _ => false
   | .vec _ _ => false
+  | .cont _ _ _ => false
 
 /-- A pair whose first field, or whose second, is lent. -/
 def Ty.lent1 (t : Bool) (A B : Ty) : Ty := if t then .pair (.hole A) B else .pair A (.hole B)
@@ -110,6 +114,7 @@ def Ty.complete : Ty → Bool
   | .rref _ _ _ => true
   | .arena _ => false
   | .vec _ τ => τ.complete
+  | .cont _ _ _ => true
 
 /-- What a borrow may be of: a value with no place lent out of it, or a region's arena. -/
 def Ty.whole : Ty → Bool
@@ -138,6 +143,7 @@ theorem Ty.data_complete : ∀ {τ : Ty}, τ.data = true → τ.complete = true
   | .rref _ _ _, h => by simp [Ty.data] at h
   | .arena _, h => by simp [Ty.data] at h
   | .vec _ _, h => by simp [Ty.data] at h
+  | .cont _ _ _, h => by simp [Ty.data] at h
 
 theorem Ty.complete_ite {t : Bool} {A B : Ty} (hA : A.complete = true) (hB : B.complete = true) :
     (if t then A else B).complete = true := by
@@ -167,6 +173,13 @@ def Ty.shell : Ty → Bool
   | .vec false _ => true
   | _ => false
 
+/-- What may pass between fibers as it is: an integer, or a continuation, whose cells are its own
+fiber's. -/
+def Ty.cross : Ty → Bool
+  | .int => true
+  | .cont _ _ _ => true
+  | _ => false
+
 /-- A type no region is part of, which says the same of a value wherever it is. -/
 def Ty.rfree : Ty → Bool
   | .int => true
@@ -178,6 +191,7 @@ def Ty.rfree : Ty → Bool
   | .rref _ _ _ => false
   | .arena _ => false
   | .vec _ τ => τ.rfree
+  | .cont _ _ _ => true
 
 theorem Ty.data_rfree : ∀ {τ : Ty}, τ.data = true → τ.rfree = true
   | .int, _ => rfl
@@ -193,6 +207,7 @@ theorem Ty.data_rfree : ∀ {τ : Ty}, τ.data = true → τ.rfree = true
   | .rref _ _ _, h => by simp [Ty.data] at h
   | .arena _, h => by simp [Ty.data] at h
   | .vec _ _, h => by simp [Ty.data] at h
+  | .cont _ _ _, h => by simp [Ty.data] at h
 
 /-- Data a region may hold: integers, and references into it or the regions around it, to data or to
 a list of data. -/
@@ -213,6 +228,7 @@ def Ty.shiftBy (n : Nat) : Ty → Ty
   | .rref c k τ => .rref c (k + n) τ
   | .arena k => .arena (k + n)
   | .vec g τ => .vec g (τ.shiftBy n)
+  | .cont A B r => .cont A B r
 
 /-- A type said of a place `n` regions further out: what `shiftBy n` undoes. -/
 def Ty.lowerBy (n : Nat) : Ty → Ty
@@ -225,6 +241,7 @@ def Ty.lowerBy (n : Nat) : Ty → Ty
   | .rref c k τ => .rref c (k - n) τ
   | .arena k => .arena (k - n)
   | .vec g τ => .vec g (τ.lowerBy n)
+  | .cont A B r => .cont A B r
 
 @[simp] theorem Ty.lowerBy_shiftBy : ∀ {τ : Ty}, (τ.shiftBy n).lowerBy n = τ
   | .int => rfl
@@ -236,6 +253,7 @@ def Ty.lowerBy (n : Nat) : Ty → Ty
   | .rref _ _ _ => by simp [Ty.shiftBy, Ty.lowerBy]
   | .arena _ => by simp [Ty.shiftBy, Ty.lowerBy]
   | .vec _ τ => by simp [Ty.shiftBy, Ty.lowerBy, Ty.lowerBy_shiftBy (τ := τ)]
+  | .cont _ _ _ => rfl
 
 @[simp] theorem Ty.shiftBy_zero : ∀ {τ : Ty}, τ.shiftBy 0 = τ
   | .int => rfl
@@ -247,6 +265,7 @@ def Ty.lowerBy (n : Nat) : Ty → Ty
   | .rref _ _ _ => rfl
   | .arena _ => rfl
   | .vec _ τ => by simp [Ty.shiftBy, Ty.shiftBy_zero (τ := τ)]
+  | .cont _ _ _ => rfl
 
 @[simp] theorem Ty.lowerBy_zero : ∀ {τ : Ty}, τ.lowerBy 0 = τ
   | .int => rfl
@@ -258,6 +277,7 @@ def Ty.lowerBy (n : Nat) : Ty → Ty
   | .rref _ _ _ => rfl
   | .arena _ => rfl
   | .vec _ τ => by simp [Ty.lowerBy, Ty.lowerBy_zero (τ := τ)]
+  | .cont _ _ _ => rfl
 
 theorem Ty.shell_lowerBy {τ : Ty} : (τ.lowerBy n).shell = τ.shell := by
   cases τ <;> try rfl
@@ -416,6 +436,12 @@ inductive Expr where
   each, `body` too, gives way by performing `e`; the scope ends once `body` and every task it
   started have. -/
   | scope (e eS : Nat) (caps : List (Cap Place)) (τ : Ty) (body : Expr)
+  /-- `handle { f(owned) } with E { op(x…) resumes k => fa(x…, k) }`, of type `τ`, its body a call of `f`
+  on a fiber of its own, its arm a call of `fa` given what the operation takes and the continuation,
+  which it may keep. -/
+  | handleV (τ : Ty) (e : Nat) (f : Nat) (owned : List Atom) (fa : Nat)
+  /-- `k(a)`, the continuation `k` moved out of its variable and resumed with `a`. -/
+  | resume (x : Var) (a : Atom)
   /-- `{ const x = p[z]; body }` with `x` a borrow — `readonly` or `mut` — of the element of the
   vector at `p` that the integer `z` names, for as long as `body` runs; a panic if there is none. -/
   | lendIdx (x : Var) (m : Mode) (p : Place) (z : Var) (body : Expr)
@@ -455,6 +481,14 @@ def cloFn (d : Fn) (xc : Var) (τc : Ty) : Kind → Fn
   | .shared => { d with refs := [(xc, .ro, τc)], cap := none }
   | .excl => { d with refs := [(xc, .mut, τc)], cap := none }
 
+abbrev Env := List (Var × Nat)
+
+/-- What a `handle` whose arm resumes in its midst runs after: the type of what the arm carries, the
+function that runs once the rest of the `handle` ends, and the `handle`'s variables and places it
+lends that function. -/
+abbrev PostR := Option (Ty × Ty × Nat × Env × List (Cap Place))
+
+mutual
 inductive Val where
   | int (n : Int)
   | ptr (l : Nat)
@@ -471,7 +505,98 @@ inductive Val where
   | arena (cs : List Nat)
   /-- A vector: the cells of its elements, in order. -/
   | vec (cs : List Nat)
-  deriving DecidableEq, Repr
+  /-- A continuation taken where a fiber gave way: its frames, the fiber, the cells it owns. -/
+  | kont (K : List Kont) (g : Nat) (X : List Nat)
+
+/-- How a computation that was dropped ended: with a value, or unwinding. -/
+inductive Outcome where
+  | val (v : Val)
+  | abort (j : Nat) (k : Int)
+
+/-- A frame of the code around what is being evaluated: what a construct does with what the code
+it runs gives. The frames between an operation and the `handle` that handles it are its
+continuation, taken whole when the operation is performed, and given back when it is resumed. -/
+inductive Kont where
+  /-- `let x: τ = □; b`. -/
+  | letK (x : Var) (τ : Ty) (env : Env) (b : Expr)
+  /-- The scope of a variable in cell `c`, which is dropped as it ends. -/
+  | scopeK (τ : Ty) (c : Nat)
+  /-- A call's body: the parameters it owns, dropped as it returns. -/
+  | callK (cells : List (Ty × Nat))
+  /-- The body of a call that returns a borrow of `p`, in the callee's variables `cenv`: once it
+  ends, the borrow is taken, the parameters it owns dropped, and `body` runs in the caller's
+  variables `env` with `x` the borrow. -/
+  | callLendK (x : Var) (ps : List Place) (cenv : Env) (cells : List (Ty × Nat)) (env : Env) (body : Expr)
+  /-- The body of a `try`, or of a `handle` whose arm ends it, handling `l`, its handler named `id`. -/
+  | catchK (l : Label) (id : Nat) (x : Var) (env : Env) (h : Expr)
+  /-- A loop's condition, and its body. -/
+  | whileC (env : Env) (c b : Expr)
+  | whileB (env : Env) (c b : Expr)
+  /-- A body with cleanup `d` to run as it ends; the cleanup running as the body gave `v`, or as it
+  unwound. -/
+  | deferK (τ : Ty) (env : Env) (d : Expr)
+  | deferV (τ : Ty) (v : Val)
+  | deferA (j : Nat) (k : Int)
+  /-- The code a borrow is in scope for. -/
+  | lendK
+  /-- The code a closure over a borrow is in scope for, the closure in cell `a`, freed as it ends. -/
+  | cloK (a : Nat)
+  /-- The body of a `handle` of type `τ` whose arm resumes, its handler named `id`. -/
+  | capK (τ : Ty) (e : Nat) (id : Nat) (caps : List (Cap Nat)) (os rs : List Var) (arm : Expr) (post : PostR)
+  /-- An arm running, the parameters it owns dropped as it ends: then the code its `handle` (of type
+  `τ`) ran, `K`, goes on with the arm's value, or, if the arm unwinds, is dropped. -/
+  | armK (τ : Ty) (cells : List (Ty × Nat)) (K : List Kont) (post : PostR)
+  /-- What a `handle`'s arm carried, `v` of type `C`, waiting for the rest of the `handle` to end: then
+  function `f` runs, given `v` and that value, the places `caps` of the `handle`'s scope, in `env`, lent
+  to it. -/
+  | postR (C : Ty) (f : Nat) (v : Val) (env : Env) (caps : List (Cap Place))
+  /-- Code of type `τ` being dropped as an arm unwinds with `o`, by unwinding it to a barrier named
+  `d`. -/
+  | dropK (τ : Ty) (o : Outcome) (d : Nat)
+  /-- A task's body, run once the task is first given its turn. -/
+  | startK (env : Env) (b : Expr)
+  /-- Two tasks of types `τa` and `τb`, the one running `side` (the first if `true`), the other
+  waiting as `K` where it last gave way; each gives way by performing `e`, handled here as `id`. -/
+  | parS (e id : Nat) (τa τb : Ty) (side : Bool) (K : List Kont)
+  /-- Two tasks, the one running `side`, the other done with `w`. -/
+  | parD (e id : Nat) (τa τb : Ty) (side : Bool) (w : Val)
+  /-- A task running alone as it is dropped, its turns given back at once. -/
+  | parY (e id : Nat)
+  /-- The code around two tasks, one of which failed, the other being dropped. -/
+  | parE
+  /-- A region's body, its arena in cell `a`: as it ends, the region's cells and the arena are freed. -/
+  | regionK (a : Nat)
+  /-- A generator's consumer running, asking by `eN`, handled here as `id`; its producer waiting as
+  `Kp`, or ended. -/
+  | genC (eN eY id : Nat) (τy τb : Ty) (Kp : Option (List Kont))
+  /-- A generator's producer running, yielding by `eY`, handled here as `id`; its consumer waiting as
+  `Kc` for what it asked. -/
+  | genP (eN eY id : Nat) (τy τb : Ty) (Kc : List Kont)
+  /-- A producer being dropped: what it yields is dropped, and it goes on at once. -/
+  | genY (eY id : Nat) (τy : Ty)
+  /-- A consumer being dropped: what it asks is answered `#Done`. -/
+  | genN (eN id : Nat) (τy : Ty)
+  /-- A producer being dropped as its consumer ended with `o`, of type `τb`, by unwinding it to the
+  barrier `d`: once the unwinding reaches it, `o` goes on. -/
+  | genE (τb : Ty) (o : Outcome) (d : Nat)
+  /-- A scope's body running, of type `τ`, its tasks waiting as `Q`, each where it last gave way;
+  giving way by `e` and starting tasks by `eS`, handled here as `id`. -/
+  | scB (e eS id : Nat) (τ : Ty) (cz : List (Cap Nat)) (Q : List (List Kont))
+  /-- A scope's task running, its body waiting as `Kb` where it last gave way, its other tasks as `Q`. -/
+  | scW (e eS id : Nat) (τ : Ty) (cz : List (Cap Nat)) (Kb : List Kont) (Q : List (List Kont))
+  /-- A scope's task running, its body done with `v`, its other tasks waiting as `Q`. -/
+  | scV (e eS id : Nat) (τ : Ty) (cz : List (Cap Nat)) (v : Val) (Q : List (List Kont))
+  /-- A scope's body or task being dropped: it goes on at once where it gives way, and a task it
+  starts is dropped. -/
+  | scX (e eS id : Nat)
+  /-- A scope that failed, or whose body or task did, with `o`, of type `τ`: what is being dropped, of
+  type `τd`, is unwinding to the barrier `d`; then each task of `Q` is, and `o` goes on. -/
+  | scE (e eS id : Nat) (τ τd : Ty) (o : Outcome) (d : Nat) (Q : List (List Kont))
+  /-- The fiber `g` of a `handle` whose arm keeps its continuation: the code around runs on fiber
+  `r0`; its arm, the function `fa`, is called with what the operation takes and the continuation. -/
+  | capV (τ : Ty) (e : Nat) (g : Nat) (fa : Nat) (r0 : Nat)
+end
+
 
 /-- The store: its cells, `none` once freed or before allocation, the next to allocate, and the
 next name for a handler put in force. -/
@@ -537,7 +662,6 @@ def Store.moveAll (σ : Store) : List Nat → Option (List Nat × Store)
       | none => none
     | none => none
 
-abbrev Env := List (Var × Nat)
 
 def lookup {α : Type} (x : Var) : List (Var × α) → Option α
   | [] => none
@@ -644,96 +768,8 @@ def dropCells (σ : Store) : List (Ty × Nat) → Option Store
     | some σ' => dropCells σ' rest
     | none => none
 
-/-- How a computation that was dropped ended: with a value, or unwinding. -/
-inductive Outcome where
-  | val (v : Val)
-  | abort (j : Nat) (k : Int)
-  deriving Repr
 
-/-- What a `handle` whose arm resumes in its midst runs after: the type of what the arm carries, the
-function that runs once the rest of the `handle` ends, and the `handle`'s variables and places it
-lends that function. -/
-abbrev PostR := Option (Ty × Ty × Nat × Env × List (Cap Place))
 
-/-- A frame of the code around what is being evaluated: what a construct does with what the code
-it runs gives. The frames between an operation and the `handle` that handles it are its
-continuation, taken whole when the operation is performed, and given back when it is resumed. -/
-inductive Kont where
-  /-- `let x: τ = □; b`. -/
-  | letK (x : Var) (τ : Ty) (env : Env) (b : Expr)
-  /-- The scope of a variable in cell `c`, which is dropped as it ends. -/
-  | scopeK (τ : Ty) (c : Nat)
-  /-- A call's body: the parameters it owns, dropped as it returns. -/
-  | callK (cells : List (Ty × Nat))
-  /-- The body of a call that returns a borrow of `p`, in the callee's variables `cenv`: once it
-  ends, the borrow is taken, the parameters it owns dropped, and `body` runs in the caller's
-  variables `env` with `x` the borrow. -/
-  | callLendK (x : Var) (ps : List Place) (cenv : Env) (cells : List (Ty × Nat)) (env : Env) (body : Expr)
-  /-- The body of a `try`, or of a `handle` whose arm ends it, handling `l`, its handler named `id`. -/
-  | catchK (l : Label) (id : Nat) (x : Var) (env : Env) (h : Expr)
-  /-- A loop's condition, and its body. -/
-  | whileC (env : Env) (c b : Expr)
-  | whileB (env : Env) (c b : Expr)
-  /-- A body with cleanup `d` to run as it ends; the cleanup running as the body gave `v`, or as it
-  unwound. -/
-  | deferK (τ : Ty) (env : Env) (d : Expr)
-  | deferV (τ : Ty) (v : Val)
-  | deferA (j : Nat) (k : Int)
-  /-- The code a borrow is in scope for. -/
-  | lendK
-  /-- The code a closure over a borrow is in scope for, the closure in cell `a`, freed as it ends. -/
-  | cloK (a : Nat)
-  /-- The body of a `handle` of type `τ` whose arm resumes, its handler named `id`. -/
-  | capK (τ : Ty) (e : Nat) (id : Nat) (caps : List (Cap Nat)) (os rs : List Var) (arm : Expr) (post : PostR)
-  /-- An arm running, the parameters it owns dropped as it ends: then the code its `handle` (of type
-  `τ`) ran, `K`, goes on with the arm's value, or, if the arm unwinds, is dropped. -/
-  | armK (τ : Ty) (cells : List (Ty × Nat)) (K : List Kont) (post : PostR)
-  /-- What a `handle`'s arm carried, `v` of type `C`, waiting for the rest of the `handle` to end: then
-  function `f` runs, given `v` and that value, the places `caps` of the `handle`'s scope, in `env`, lent
-  to it. -/
-  | postR (C : Ty) (f : Nat) (v : Val) (env : Env) (caps : List (Cap Place))
-  /-- Code of type `τ` being dropped as an arm unwinds with `o`, by unwinding it to a barrier named
-  `d`. -/
-  | dropK (τ : Ty) (o : Outcome) (d : Nat)
-  /-- A task's body, run once the task is first given its turn. -/
-  | startK (env : Env) (b : Expr)
-  /-- Two tasks of types `τa` and `τb`, the one running `side` (the first if `true`), the other
-  waiting as `K` where it last gave way; each gives way by performing `e`, handled here as `id`. -/
-  | parS (e id : Nat) (τa τb : Ty) (side : Bool) (K : List Kont)
-  /-- Two tasks, the one running `side`, the other done with `w`. -/
-  | parD (e id : Nat) (τa τb : Ty) (side : Bool) (w : Val)
-  /-- A task running alone as it is dropped, its turns given back at once. -/
-  | parY (e id : Nat)
-  /-- The code around two tasks, one of which failed, the other being dropped. -/
-  | parE
-  /-- A region's body, its arena in cell `a`: as it ends, the region's cells and the arena are freed. -/
-  | regionK (a : Nat)
-  /-- A generator's consumer running, asking by `eN`, handled here as `id`; its producer waiting as
-  `Kp`, or ended. -/
-  | genC (eN eY id : Nat) (τy τb : Ty) (Kp : Option (List Kont))
-  /-- A generator's producer running, yielding by `eY`, handled here as `id`; its consumer waiting as
-  `Kc` for what it asked. -/
-  | genP (eN eY id : Nat) (τy τb : Ty) (Kc : List Kont)
-  /-- A producer being dropped: what it yields is dropped, and it goes on at once. -/
-  | genY (eY id : Nat) (τy : Ty)
-  /-- A consumer being dropped: what it asks is answered `#Done`. -/
-  | genN (eN id : Nat) (τy : Ty)
-  /-- A producer being dropped as its consumer ended with `o`, of type `τb`, by unwinding it to the
-  barrier `d`: once the unwinding reaches it, `o` goes on. -/
-  | genE (τb : Ty) (o : Outcome) (d : Nat)
-  /-- A scope's body running, of type `τ`, its tasks waiting as `Q`, each where it last gave way;
-  giving way by `e` and starting tasks by `eS`, handled here as `id`. -/
-  | scB (e eS id : Nat) (τ : Ty) (cz : List (Cap Nat)) (Q : List (List Kont))
-  /-- A scope's task running, its body waiting as `Kb` where it last gave way, its other tasks as `Q`. -/
-  | scW (e eS id : Nat) (τ : Ty) (cz : List (Cap Nat)) (Kb : List Kont) (Q : List (List Kont))
-  /-- A scope's task running, its body done with `v`, its other tasks waiting as `Q`. -/
-  | scV (e eS id : Nat) (τ : Ty) (cz : List (Cap Nat)) (v : Val) (Q : List (List Kont))
-  /-- A scope's body or task being dropped: it goes on at once where it gives way, and a task it
-  starts is dropped. -/
-  | scX (e eS id : Nat)
-  /-- A scope that failed, or whose body or task did, with `o`, of type `τ`: what is being dropped, of
-  type `τd`, is unwinding to the barrier `d`; then each task of `Q` is, and `o` goes on. -/
-  | scE (e eS id : Nat) (τ τd : Ty) (o : Outcome) (d : Nat) (Q : List (List Kont))
 
 /-- A handler in force, by name: one that unwinds — an abortive arm, or a `try` — handling `l`; or
 one whose arm takes the code that performed `e` as its continuation, resuming it with its value.
@@ -782,7 +818,27 @@ def Kont.push : Kont → HS → HS
   | .scV e eS id _ _ _ _, hs => .capture e id :: .capture eS id :: hs
   | .scX e eS id, hs => .capture e id :: .capture eS id :: hs
   | .scE _ _ _ _ _ _ d _, hs => .abort .drop d :: hs
+  | .capV _ e g _ _, hs => .capture e g :: hs
   | _, hs => hs
+
+/-- The store as the code inside a frame runs on it: inside a fiber's frame, that fiber runs. -/
+def Kont.enter : Kont → Store → Store
+  | .capV _ _ g _ _, σ => { σ with cur := g }
+  | _, σ => σ
+
+/-- The cells tagged with one of the fibers `ids`, still allocated. -/
+def tagged (σ : Store) (ids : List Nat) : List Nat :=
+  (List.range σ.next).filter fun l => (σ.mem l).isSome && ids.any fun h => σ.fb l == some h
+
+/-- What a fiber `g`, suspended as the frames `K`, owns: the cells of `g` and of the fibers running
+inside it, and what the continuations those cells hold own. -/
+def kfootK (σ : Store) (g : Nat) (K : List Kont) : List Nat :=
+  let ids := g :: K.filterMap fun f => match f with | .capV _ _ h _ _ => some h | _ => none
+  let G := tagged σ ids
+  G ++ G.flatMap fun c => match σ.mem c with | some (.kont _ _ X) => X | _ => []
+
+/-- A fiber's stack segment released as it ends: whatever of it is left. -/
+def Store.release (σ : Store) (g : Nat) : Store := σ.freeAll (kfootK σ g [])
 
 inductive Res where
   | val (v : Val)
@@ -1217,6 +1273,30 @@ def evalS (F : List Fn) (O : List Op) (n : Nat) (hs : HS) (σ : Store) (env : En
         ret F O n hs (.scB e eS id τ (List.zipWith Cap.at caps ls) [])
           (eval F O n (.capture e id :: .capture eS id :: hs) σ1 env body)
       | none => (.stuck, σ)
+    | .handleV τ e f owned fa =>
+      match F[f]? with
+      | some d =>
+        match evalAtoms σ env owned with
+        | some (vs, σ1) =>
+          if vs.length = d.owns.length ∧ d.refs = [] then
+            let (g, σ2) := σ1.fresh
+            let (cells, σ4) := allocAll { σ2 with cur := g } ((d.owns.map Prod.fst).zip vs)
+            ret F O n hs (.capV τ e g fa σ1.cur)
+              (evalK F O n (.capture e g :: hs) σ4
+                [.callK ((d.owns.map Prod.snd).zip (cells.map Prod.snd)), .startK cells d.body] (.val (.int 0)))
+          else (.stuck, σ1)
+        | none => (.stuck, σ)
+      | none => (.stuck, σ)
+    | .resume x a =>
+      match lookup x env with
+      | some c =>
+        match σ.mem c with
+        | some (.kont (.capV τ e g fa _ :: K) _ _) =>
+          match evalAtom (σ.set c (some .moved)) env a with
+          | some (v, σ1) => evalK F O n hs σ1 (.capV τ e g fa σ.cur :: K) (.val v)
+          | none => (.stuck, σ)
+        | _ => (.stuck, σ)
+      | none => (.stuck, σ)
     | .gen eN eY τy τb f owned caps body =>
       match F[f]? with
       | some d =>
@@ -1550,6 +1630,20 @@ def ret (F : List Fn) (O : List Op) (n : Nat) (hs : HS) : Kont → Res × Store 
         | _ => (.stuck, σ)
       else ret F O m hs (.scX e eS id) (evalK F O m (.capture e id :: .capture eS id :: hs) σ K (.val (.int 0)))
   | .scE e eS id τ τd o d Q, (.susp j ef vs ls K, σ) => (.susp j ef vs ls (.scE e eS id τ τd o d Q :: K), σ)
+  | .capV τ e g fa r0, (.susp j ef vs ls K, σ) =>
+    if j = g ∧ ef = e then
+      match n with
+      | 0 => (.timeout, σ)
+      | m + 1 =>
+        match F[fa]? with
+        | some da =>
+          let args := vs ++ [.kont (.capV τ e g fa r0 :: K) g (kfootK σ g K)]
+          if args.length = da.owns.length ∧ ls = [] then
+            let (cells, σ2) := allocAll { σ with cur := r0 } ((da.owns.map Prod.fst).zip args)
+            ret F O m hs (.callK ((da.owns.map Prod.snd).zip (cells.map Prod.snd))) (eval F O m hs σ2 cells da.body)
+          else (.stuck, σ)
+        | none => (.stuck, σ)
+    else (.susp j ef vs ls (.capV τ e g fa r0 :: K), { σ with cur := r0 })
   | f, (.susp j ef vs ls K, σ) =>
     match f with
     | .scopeK τ c => leave τ c (.susp j ef vs ls K, σ)
@@ -1797,13 +1891,14 @@ def ret (F : List Fn) (O : List Op) (n : Nat) (hs : HS) : Kont → Res × Store 
     match σ.mem a with
     | some (.arena cs) => (r, (σ.freeAll cs).set a none)
     | _ => (.stuck, σ)
+  | .capV _ _ g _ r0, (r, σ) => (r, { σ.release g with cur := r0 })
 termination_by _ _ => (n, 1, 0)
 
 /-- A continuation given what the code it was taken at gives: its frames, the outermost first, each
 putting in force the handler it did. -/
 def evalK (F : List Fn) (O : List Op) (n : Nat) (hs : HS) (σ : Store) : List Kont → Res → Res × Store
   | [], r => (r, σ)
-  | f :: K, r => ret F O n hs f (evalK F O n (f.push hs) σ K r)
+  | f :: K, r => ret F O n hs f (evalK F O n (f.push hs) (f.enter σ) K r)
 termination_by K _ => (n, 1, sizeOf K + 1)
 end
 

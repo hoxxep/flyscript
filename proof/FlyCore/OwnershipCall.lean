@@ -180,6 +180,7 @@ theorem Ty.shiftBy_inj : ∀ {A B : Ty}, A.shiftBy n = B.shiftBy n → A = B
   | .rref c k A, B, h => by cases B <;> simp_all [Ty.shiftBy]
   | .arena k, B, h => by cases B <;> simp_all [Ty.shiftBy]
   | .vec _ A, B, h => by cases B <;> simp_all [Ty.shiftBy]; exact Ty.shiftBy_inj h.2
+  | .cont _ _ _, B, h => by cases B <;> simp_all [Ty.shiftBy]
 
 theorem Slot.shiftBy_inj {s s' : Slot} (h : s.shiftBy n = s'.shiftBy n) : s = s' := by
   cases s <;> cases s' <;> simp only [Slot.shiftBy, Slot.own.injEq, Slot.ref.injEq, Slot.lent.injEq,

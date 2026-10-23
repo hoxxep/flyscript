@@ -130,6 +130,7 @@ theorem LT.unshift : ∀ {τ : Ty} {c : Nat} {L : List Nat}, LT F (ι.push a) σ
     simp only [Ty.shiftBy] at h
     cases h with
     | vec ha hlen hel hnd hn hf => exact .vec ha hlen (fun i h h' => LT.unshift (hel i h h')) hnd hn hf
+  | .cont _ _ _, _, _, h => by simp only [Ty.shiftBy] at h; cases h
 
 theorem Ty.complete_shift : ∀ {τ : Ty}, (τ.shiftBy n).complete = τ.complete
   | .int => rfl
@@ -141,6 +142,7 @@ theorem Ty.complete_shift : ∀ {τ : Ty}, (τ.shiftBy n).complete = τ.complete
   | .rref _ _ _ => rfl
   | .arena _ => rfl
   | .vec _ τ => by simp [Ty.shiftBy, Ty.complete, Ty.complete_shift (τ := τ)]
+  | .cont _ _ _ => rfl
 
 theorem Ty.isHole_shift {τ : Ty} : (τ.shiftBy n).isHole = τ.isHole := by
   cases τ <;> rfl
@@ -191,6 +193,7 @@ theorem VT.unshift : ∀ {τ : Ty} {v : Val} {L : List Nat}, VT F (ι.push a) σ
     simp only [Ty.shiftBy] at h
     cases h with
     | vec hlen hel hnd hc => exact .vec hlen (fun i h h' => LT.unshift (hel i h h')) hnd (by rwa [Ty.complete_shift] at hc)
+  | .cont _ _ _, _, _, h => by simp only [Ty.shiftBy] at h; cases h
 
 theorem Slot.excl_shift {s : Slot} : (s.shiftBy n).excl = s.excl := by
   cases s with
@@ -335,6 +338,7 @@ theorem LT.unshiftk : ∀ {τ : Ty} {c : Nat} {L : List Nat}, LT F ι σ c (τ.s
     simp only [Ty.shiftBy] at h
     cases h with
     | vec ha hlen hel hnd hn hf => exact .vec ha hlen (fun i h h' => LT.unshiftk (hel i h h')) hnd hn hf
+  | .cont _ _ _, _, _, h => by simp only [Ty.shiftBy] at h; cases h
 
 theorem VT.shiftk (h : VT F (ι.drop k) σ τ v L) : VT F ι σ (τ.shiftBy k) v L := by
   cases h with
@@ -382,6 +386,7 @@ theorem VT.unshiftk : ∀ {τ : Ty} {v : Val} {L : List Nat}, VT F ι σ (τ.shi
     simp only [Ty.shiftBy] at h
     cases h with
     | vec hlen hel hnd hc => exact .vec hlen (fun i h h' => LT.unshiftk (hel i h h')) hnd (by rwa [Ty.complete_shift] at hc)
+  | .cont _ _ _, _, _, h => by simp only [Ty.shiftBy] at h; cases h
 
 theorem Vals.unshiftk : ∀ {τs : List Ty} {vs : List Val} {Ls : List (List Nat)},
     Vals F ι σ (τs.map (Ty.shiftBy k)) vs Ls → Vals F (ι.drop k) σ τs vs Ls

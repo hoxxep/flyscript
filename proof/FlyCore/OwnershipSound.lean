@@ -526,6 +526,10 @@ theorem FrameOk.S_sub (hf : FrameOk F O ιi ιo σf f inL outL Xf A) : ∀ l ∈
   | scW _ _ _ _ _ _ _ _ _ hSt _ | scV _ _ _ _ _ _ _ _ hSt _ | scEt _ _ _ _ hSt _ => intro l hl; exact .inr (hSt l hl)
   | _ => intro l hl; exact .inr hl
 
+/-- The frames so far run on the fiber of the code around them as they are entered. -/
+theorem FrameOk.enter (h : FrameOk F O ιi ιo σf f inL outL Xf A) : f.enter σ = σ := by
+  cases h <;> rfl
+
 /-- Every frame runs on the fiber of the code around it. -/
 theorem FrameOk.fiber (h : FrameOk F O ιi ιo σf f inL outL Xf A) : ιi.fiber = ιo.fiber := by
   cases h <;> rfl
@@ -649,6 +653,7 @@ theorem evalK_ok (hR : RetOk F O n) : EvalKOk F O n := by
           · simp at h)
       (fun l hl => by rw [hag l (List.mem_append.mpr (.inr hl))]; exact halloc l (List.mem_append.mpr (.inr hl)))
       (fun l hl h => hdS l hl (by simp only [List.mem_append] at h ⊢; grind)) hpost
+    rw [hf.enter]
     simpa [List.append_assoc] using post_weaken this w
 
 /-! ## Frames that keep no cells -/
