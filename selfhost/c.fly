@@ -2564,8 +2564,10 @@ impl Cgen {
 
 impl Cgen {
   // A direct `handle`: its body runs here, under a handler whose operations call a function of its
-  // arms, given pointers to what the arms reach of the code around; each arm returns the result
-  // its resumption gives. However the body is left, the handler is removed.
+  // arms, given pointers to what the arms reach of the code around; each arm that resumes returns
+  // the result its resumption gives. An operation whose arm ends the `handle` moves its arguments
+  // into the handler's frame and has the body unwind; the arm runs here once it has. However the
+  // body is left, the handler is removed.
   function handleDirect(self: mut Self, h: readonly Handle): void uses Fail<Diagnostic> {
     const span = h.span;
     const d = h.effect;
@@ -2574,10 +2576,24 @@ impl Cgen {
     const n = self.aparts;
     const frame = `hdframe_${n}`;
     let blocks: Vec<Block> = Vec.new();
-    for (const a of h.arms) { blocks.push(a.body.clone()); }
+    for (const a of h.arms) { if (a.cont.isSome()) { blocks.push(a.body.clone()); } }
     const ap = self.apart(blocks, span);
     let fields = ap.fields.clone();
     let inits = ap.inits.clone();
+    const aborts = h.arms.iter().some((a) => a.cont.isNone());
+    // Which arm ends the `handle`, numbered from one, and each one's arguments.
+    let argTys: Vec<String> = Vec.new();
+    if (aborts) {
+      fields.push("  int ab_;\n".toString());
+      inits.push(".ab_ = 0".toString());
+    }
+    for (const [i, arm] of h.arms.iter().enumerate()) {
+      let tys: Vec<Ty> = Vec.new();
+      for (const p of arm.params) { tys.push(self.cx.locals[p].ty.clone()); }
+      const tc = if (tys.len() > 0) { self.ctype(#Tuple(tys), span) } else { String.new() };
+      if (arm.cont.isNone() && tc.len() > 0) { fields.push(`  ${tc} aa${i}_;\n`); }
+      argTys.push(tc);
+    }
     const yields = self.cx.sink.isSome();
     if (yields) {
       fields.push("  fly_yield* y_;\n");
@@ -2585,21 +2601,21 @@ impl Cgen {
     }
     if (fields.len() == 0) { fields.push("  fly_unit empty;\n"); }
     self.typeDefs.push(`typedef struct {\n${fields}} ${frame};\n`);
-    // The arms.
+    // The arms that resume, and what the others do as the operation is performed.
     let cx = self.apartCtx(ap, #Prim(#Void), #Fn);
     cx.direct = true;
     if (yields) { cx.sink = #Some("(*env->y_)".toString()); }
     const saved = replace(mut self.cx, cx);
-    for (const arm of h.arms) {
+    for (const [i, arm] of h.arms.iter().enumerate()) {
+      if (arm.cont.isNone()) {
+        const take = if (argTys[i].len() > 0) { `memcpy(&env->aa${i}_, args_, sizeof env->aa${i}_); ` } else { "".toString() };
+        self.line(`if (op_ == ${arm.op}) { ${take}env->ab_ = ${i + 1}; fly_unwinding = true; goto ret; }`);
+        continue;
+      }
       let binds = String.new();
-      let tys: Vec<Ty> = Vec.new();
-      for (const p of arm.params) { tys.push(self.cx.locals[p].ty.clone()); }
-      if (tys.len() > 0) {
-        const tc = self.ctype(#Tuple(tys.clone()), span);
-        for (const [i, p] of arm.params.iter().enumerate()) {
-          if (unitTy(self.cx.locals[p].ty)) { continue; }
-          binds.push(`${self.local(p)} = ((${tc}*)args_)->f${i}; `);
-        }
+      for (const [j, p] of arm.params.iter().enumerate()) {
+        if (unitTy(self.cx.locals[p].ty)) { continue; }
+        binds.push(`${self.local(p)} = ((${argTys[i]}*)args_)->f${j}; `);
       }
       self.line(`if (op_ == ${arm.op}) {`);
       self.cx.prologue = binds;
@@ -2639,10 +2655,41 @@ impl Cgen {
     if (const #Some(at) = self.cx.liveAt.get(out.asStr())) {
       const at2 = at.clone();
       self.line(`goto hdone${k};`);
-      self.line(`${out}: fly_handlers = ${hh}.outer; goto ${parent};`);
+      // An unwinding an arm began ends here, and the arm runs.
+      const caught = if (aborts) { `if (${hf}.ab_) { fly_unwinding = false; goto hab${k}; } ` } else { "" };
+      self.line(`${out}: fly_handlers = ${hh}.outer; ${caught}goto ${parent};`);
       let set: HashSet<usize> = match (self.cx.liveAt.get(parent.asStr())) { #Some(x) => x.clone(), #None => HashSet.new() };
       for (const l of at2.iter()) { set.insert(l); }
       self.cx.liveAt.insert(parent.clone(), set);
+      if (aborts) {
+        self.line(`hab${k}: ;`);
+        for (const arm of h.arms) {
+          if (arm.cont.isNone() && !unitTy(b)) {
+            self.cx.hoisted.insert(arm.value);
+            const decl = `  ${self.ctype(b, span)} ${self.local(arm.value)} = { 0 };\n`;
+            self.cx.decls.push(decl);
+          }
+        }
+        for (const [i, arm] of h.arms.iter().enumerate()) {
+          if (arm.cont.isSome()) { continue; }
+          let binds = String.new();
+          for (const [j, p] of arm.params.iter().enumerate()) {
+            if (unitTy(self.cx.locals[p].ty)) { continue; }
+            binds.push(`${self.local(p)} = ${hf}.aa${i}_.f${j}; `);
+          }
+          self.line(`if (${hf}.ab_ == ${i + 1}) {`);
+          self.cx.prologue = binds;
+          for (const p of arm.params) { self.gen(p); }
+          self.cx.reachable = true;
+          self.block(arm.body, span);
+          if (self.cx.reachable) {
+            const store = if (unitTy(b)) { String.new() } else { `${self.local(h.result)} = ${self.local(arm.value)}; ` };
+            self.line(`${store}goto hdone${k};`);
+          }
+          self.line("}");
+        }
+        self.cx.reachable = true;
+      }
       self.line(`hdone${k}: ;`);
     }
   }

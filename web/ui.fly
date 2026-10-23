@@ -82,6 +82,16 @@ export function posting(tag: str, event: str, k: usize): Vec<[String, String]> {
   }
 }
 
+// `posting`'s attributes, written as HTML.
+function writePosting(tag: str, event: str, k: usize, out: mut String): void {
+  match ([tag, event]) {
+    ["form", "submit"] => out.push(` method="post" action="?_fly=${k}"`),
+    ["button", "click"] => out.push(` form="_fly" formaction="?_fly=${k}"`),
+    ["input", "input"] | ["input", "change"] | ["textarea", "input"] | ["select", "change"] => out.push(` name="_fly_${k}"`),
+    _ => {}
+  }
+}
+
 // The messages `view`'s events give, in order: what a posted form's message numbers count.
 export function messages<M extends Send & Clone>(view: () => void uses Ui<M>): Vec<M> {
   let out: Vec<M> = Vec.new();
@@ -151,13 +161,9 @@ export function html<M>(out: mut String, view: () => void uses Ui<M>): void {
     }
     on(event, _) resumes k => {
       if (starting) {
-        const tag = match (open.last()) { #Some(t) => t.clone(), #None => String.new() };
-        for (const [name, value] of posting(tag.asStr(), event, events)) {
-          out.push(" ");
-          out.push(name.asStr());
-          out.push("=\"");
-          escape(value.asStr(), mut out);
-          out.push("\"");
+        match (open.last()) {
+          #Some(tag) => writePosting(tag.asStr(), event, events, mut out),
+          #None => {}
         }
       }
       events += 1;

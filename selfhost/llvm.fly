@@ -2381,8 +2381,12 @@ impl Lgen {
   }
 
   // A direct `handle`: its body runs here, under a handler whose operations call a function of its
-  // arms, given pointers to what the arms reach of the code around; each arm returns the result
-  // its resumption gives. However the body is left, the handler is removed.
+  // arms, given pointers to what the arms reach of the code around; each arm that resumes returns
+  // the result its resumption gives. An operation whose arm ends the `handle` moves its arguments
+  // to where the `handle` keeps them and has the body unwind; the arm runs here once it has.
+  // However the body is left, the handler is removed. The environment holds the pointers, then the
+  // sink a generator's yields go to, which arm ended the `handle`, numbered from one, and where
+  // each such arm's arguments are.
   function handleDirect(self: mut Self, h: readonly Handle): void uses Fail<Diagnostic> {
     const span = h.span;
     const d = h.effect;
@@ -2390,29 +2394,48 @@ impl Lgen {
     self.aparts += 1;
     const n = self.aparts;
     let blocks: Vec<Block> = Vec.new();
-    for (const a of h.arms) { blocks.push(a.body.clone()); }
+    for (const a of h.arms) { if (a.cont.isSome()) { blocks.push(a.body.clone()); } }
     const ap = self.apart(blocks);
     const k = self.slots(ap);
     const outerSink = self.cx.sink.clone();
-    // The arms.
+    const aborts = h.arms.iter().some((a) => a.cont.isNone());
+    // Each arm's arguments, as a tuple.
+    let argTys: Vec<Option<Ty>> = Vec.new();
+    for (const arm of h.arms) {
+      let tys: Vec<Ty> = Vec.new();
+      for (const p of arm.params) { tys.push(self.cx.locals[p].ty.clone()); }
+      argTys.push(if (tys.len() > 0) { #Some(#Tuple(tys)) } else { #None });
+    }
+    // The arms that resume, and what the others do as the operation is performed.
     const cx = self.apartCtx(ap, 0, #Prim(#Void), #Fn);
     const saved = replace(mut self.cx, cx);
     self.cx.direct = true;
     self.subprogram(`${self.fnName} handler`.asStr(), `harm_${n}`.asStr(), span);
     self.declareEnv(ap, span);
     if (outerSink.isSome()) { self.cx.sink = #Some(self.envSlot("env.y", k * 8)); }
-    for (const arm of h.arms) {
+    for (const [ai, arm] of h.arms.iter().enumerate()) {
       const is = self.val(`icmp eq i32 %op, ${arm.op}`);
       const yes = self.newLabel("arm");
       const no = self.newLabel("notarm");
       self.term(`br i1 ${is}, label %${yes}, label %${no}`);
       self.label(yes.asStr());
+      if (arm.cont.isNone()) {
+        if (const #Some(tt) = argTys[ai]) {
+          const buf = self.envSlot(`env.aa${ai}`.asStr(), (k + 2 + ai) * 8);
+          const sz = self.sizeOf(tt, span);
+          self.memcpy(buf.asStr(), "%args", sz);
+        }
+        const abAt = self.gep("%env", (k + 1) * 8);
+        self.store("i32", `${ai + 1}`.asStr(), abAt.asStr());
+        const uw = self.cxField("fly_unwinding");
+        self.store("i8", "1", uw.asStr());
+        self.jump("ret");
+        self.label(no.asStr());
+        continue;
+      }
       // The operation's arguments become the arm's, as its block starts.
       const saveOut = replace(mut self.cx.out, String.new());
-      let tys: Vec<Ty> = Vec.new();
-      for (const p of arm.params) { tys.push(self.cx.locals[p].ty.clone()); }
-      if (tys.len() > 0) {
-        const tt: Ty = #Tuple(tys);
+      if (const #Some(tt) = argTys[ai]) {
         for (const [i, p] of arm.params.iter().enumerate()) {
           const pt = self.cx.locals[p].ty.clone();
           if (unitTy(pt)) { continue; }
@@ -2435,11 +2458,26 @@ impl Lgen {
     self.define(`define internal void @harm_${n}(ptr %env, i32 %op, ptr %args, ptr %result)`.asStr());
     self.cx = saved;
     // The handler, installed for the body.
-    const env = self.alloca(max(k + 1, 1) * 8, 8);
+    const env = self.alloca(max(k + 2 + h.arms.len(), 1) * 8, 8);
     self.fillEnv(ap, env.asStr(), 0);
     if (const #Some(y) = outerSink) {
       const ya = self.gep(env.asStr(), k * 8);
       self.store("ptr", y.asStr(), ya.asStr());
+    }
+    let bufs: Vec<String> = Vec.new();
+    if (aborts) {
+      const abAt = self.gep(env.asStr(), (k + 1) * 8);
+      self.store("i32", "0", abAt.asStr());
+      for (const [ai, arm] of h.arms.iter().enumerate()) {
+        bufs.push(String.new());
+        if (arm.cont.isSome()) { continue; }
+        if (const #Some(tt) = argTys[ai]) {
+          const buf = self.allocaOf(tt, span);
+          const at = self.gep(env.asStr(), (k + 2 + ai) * 8);
+          self.store("ptr", buf.asStr(), at.asStr());
+          bufs[ai] = buf;
+        }
+      }
     }
     const hh = self.alloca(HANDLER, 8);
     self.memzero(hh.asStr(), HANDLER);
@@ -2480,10 +2518,57 @@ impl Lgen {
       self.label(out.asStr());
       const hAt = self.cxField("fly_handlers");
       self.store("ptr", outer.asStr(), hAt.asStr());
-      self.jump(parent.asStr());
       let set: HashSet<usize> = match (self.cx.liveAt.get(parent.asStr())) { #Some(x) => x.clone(), #None => HashSet.new() };
       for (const l of at2.iter()) { set.insert(l); }
       self.cx.liveAt.insert(parent.clone(), set);
+      if (aborts) {
+        // An unwinding an arm began ends here, and the arm runs.
+        const abAt = self.gep(env.asStr(), (k + 1) * 8);
+        const ab = self.load("i32", abAt.asStr());
+        const began = self.val(`icmp ne i32 ${ab}, 0`);
+        const caught = self.newLabel("caught");
+        self.term(`br i1 ${began}, label %${caught}, label %${parent}`);
+        self.label(caught.asStr());
+        const uw = self.cxField("fly_unwinding");
+        self.store("i8", "0", uw.asStr());
+        for (const [ai, arm] of h.arms.iter().enumerate()) {
+          if (arm.cont.isSome()) { continue; }
+          const is = self.val(`icmp eq i32 ${ab}, ${ai + 1}`);
+          const yes = self.newLabel("ended");
+          const no = self.newLabel("notended");
+          self.term(`br i1 ${is}, label %${yes}, label %${no}`);
+          self.label(yes.asStr());
+          const saveOut = replace(mut self.cx.out, String.new());
+          if (const #Some(tt) = argTys[ai]) {
+            for (const [i, p] of arm.params.iter().enumerate()) {
+              const pt = self.cx.locals[p].ty.clone();
+              if (unitTy(pt)) { continue; }
+              const o = self.offsetOf(tt, `${i}`.asStr(), span);
+              const src = self.gep(bufs[ai].asStr(), o);
+              const sz = self.sizeOf(pt, span);
+              const dst = self.local(p);
+              self.memcpy(dst.asStr(), src.asStr(), sz);
+            }
+          }
+          self.cx.prologue = replace(mut self.cx.out, saveOut);
+          for (const p of arm.params) { self.gen(p); }
+          self.cx.reachable = true;
+          self.hoist(arm.value, span);
+          self.block(arm.body, span);
+          if (self.cx.open) {
+            if (!unitTy(b)) {
+              const sz = self.sizeOf(b, span);
+              const dst = self.local(h.result);
+              const src = self.local(arm.value);
+              self.memcpy(dst.asStr(), src.asStr(), sz);
+            }
+            self.jump(done.asStr());
+          }
+          self.label(no.asStr());
+        }
+        self.term("unreachable");
+        self.cx.reachable = true;
+      } else { self.jump(parent.asStr()); }
       self.label(done.asStr());
     }
   }

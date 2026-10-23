@@ -1,0 +1,40 @@
+// expect: left deep 0
+// expect: left deep 1
+// expect: left deep 2
+// expect: stopped at 10, kept
+// expect: left deep 0
+// expect: left deep 1
+// expect: stopped at 1
+// expect: after
+// A handler whose arms each resume at their end, or end the `handle`, runs its body where the
+// `handle` is. An operation whose arm ends it unwinds the body to the `handle`, through the calls
+// between, each running its `defer`s and dropping what it owns; then the arm runs, and its value
+// is the `handle`'s (§5.2).
+import { println } from "std/io";
+
+effect Ask { ask(): i32; stop(why: String): never; }
+
+function deep(n: i32): i32 uses Ask, Io {
+  const mark = `deep ${n}`;
+  defer { println(`left ${mark}`); };
+  const x = Ask.ask();
+  if (n == 0) { Ask.stop(`stopped at ${x}`); }
+  x + deep(n - 1)
+}
+
+function run(n: i32, last: i32): String uses Io {
+  const owned = "kept".toString();
+  handle { const v = deep(n); `done with ${v}` } with Ask {
+    ask() resumes k => k(10),
+    stop(why) => `${why}, ${owned}`,
+  }
+}
+
+export function main(): void uses Io {
+  println(run(2, 0));
+  handle { deep(1); } with Ask {
+    ask() resumes k => k(1),
+    stop(why) => println(why),
+  }
+  println("after");
+}

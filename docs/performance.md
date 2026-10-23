@@ -40,13 +40,13 @@ The compiler is 23,821 lines of Flyscript, plus the standard library it compiles
 
 The todo app in [examples/todo](../examples/todo/) is built twice, with FlyNext and, page for page, with Next.js 16.4.2 and React 19.3.1 in [bench/next](../bench/next/), each in production mode. `bench/web.sh` loads each server with wrk for ten seconds at a time, over 64 connections kept alive, from four client threads on the same machine. FlyNext's server runs on one core, then on all 30; Next.js runs as Node does, its JavaScript on one thread.
 
-| Server | Page `/` | Page `/todos/2` | JSON call | Memory after |
+| Server | Page `/` | Page `/todos/2` | JSON endpoint `/api/todos` | Memory after |
 | :--- | :--- | :--- | :--- | ---: |
-| FlyNext, 1 core | 127,354 req/s, p50 0.49 ms, p99 0.78 ms | 138,117 req/s, p50 0.45 ms, p99 0.72 ms | 176,018 req/s, p50 0.35 ms, p99 0.45 ms | 3 MB |
-| FlyNext, every core | 116,383 req/s, p50 0.38 ms, p99 0.68 ms | 116,487 req/s, p50 0.39 ms, p99 0.68 ms | 116,168 req/s, p50 0.39 ms, p99 0.72 ms | 17 MB |
-| Next.js | 3,120 req/s, p50 19.89 ms, p99 56.81 ms | 2,629 req/s, p50 23.68 ms, p99 49.46 ms | 13,031 req/s, p50 4.50 ms, p99 10.85 ms | 512 MB |
+| FlyNext, 1 core | 125,976 req/s, p50 0.50 ms, p99 0.63 ms | 128,255 req/s, p50 0.48 ms, p99 0.93 ms | 174,130 req/s, p50 0.36 ms, p99 0.50 ms | 3 MB |
+| FlyNext, every core | 115,193 req/s, p50 0.38 ms, p99 0.72 ms | 116,851 req/s, p50 0.40 ms, p99 0.67 ms | 117,587 req/s, p50 0.38 ms, p99 0.69 ms | 17 MB |
+| Next.js | 3,088 req/s, p50 20.09 ms, p99 60.03 ms | 2,612 req/s, p50 23.88 ms, p99 43.92 ms | 13,127 req/s, p50 4.48 ms, p99 9.58 ms | 511 MB |
 
-On one core, FlyNext renders 41 times as many pages a second as Next.js and answers 13 times as many calls, with a p99 latency under a millisecond where Next.js's pages take 49 to 57, in 3 MB of memory to Next.js's 512 MB. No request failed on either.
+On one core, FlyNext renders 41 to 49 times as many pages a second as Next.js and answers 13 times as many calls of an endpoint, with a p99 latency under a millisecond where Next.js's pages take 44 to 60, in 3 MB of memory to Next.js's 511 MB. No request failed on either. Each FlyNext page renders inside the handlers of the request — its headers, cookies and redirects — and of the view; their arms each resume where they end or end the `handle`, so they run as calls on the request's own stack, with no fiber of their own.
 
 On every core FlyNext answers no more requests than on one, because the load generator shares the machine: client and server contend for the same cores and the same loopback interface, and past a few server threads the contention costs more than the threads add. Go's `net/http`, serving the same page on the same machine to the same load, shows the same curve, and FlyNext stays ahead of it at every size:
 
@@ -59,10 +59,10 @@ In the browser, each site's first page is loaded with nothing cached, and a link
 
 | Site | Scripts | Downloaded | Gzipped | Interactive after | Link followed in |
 | :--- | ---: | ---: | ---: | ---: | ---: |
-| FlyNext | 2 | 126 KB | 43 KB | 24 ms | 74 ms |
-| Next.js | 7 | 454 KB | 135 KB | 34 ms | 77 ms |
+| FlyNext | 2 | 142 KB | 46 KB | 22 ms | 74 ms |
+| Next.js | 7 | 454 KB | 135 KB | 34 ms | 79 ms |
 
-A FlyNext page is interactive once its one WebAssembly program has taken over the HTML the server rendered: it downloads a third as much as the Next.js page and is ready 10 milliseconds sooner. Following a link costs both sites a request for the next page's data and a render in place, about the same.
+A FlyNext page is interactive once its one WebAssembly program has taken over the HTML the server rendered: it downloads a third as much as the Next.js page and is ready 12 milliseconds sooner. Following a link costs both sites a request for the next page's data and a render in place, about the same.
 
 ## Running them
 

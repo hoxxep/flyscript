@@ -1054,16 +1054,17 @@ uintptr_t fly_fiber_top(fly_fiber* f) { return ((uintptr_t)f->stack + f->size) &
 // ---- handlers ----
 
 void fly_perform(uint32_t effect, int op, void* args, void* result) {
-  fly_handler* h = fly_handlers;
+  fly_ctx* cx = fly_cx();
+  fly_handler* inner = cx->handlers;
+  fly_handler* h = inner;
   while (h && h->effect != effect) h = h->outer;
   if (!h) fly_panic("an effect is performed that nothing handles");
   // A direct handler's arm runs here, in the context of its `handle`: what it performs goes to
-  // the handlers around that.
+  // the handlers around that. The arm runs on this task, so its context is this one.
   if (h->direct) {
-    fly_handler* inner = fly_handlers;
-    fly_handlers = h->outer;
+    cx->handlers = h->outer;
     h->direct(h->frame, op, args, result);
-    fly_handlers = inner;
+    cx->handlers = inner;
     return;
   }
   h->op = op;

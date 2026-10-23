@@ -2992,15 +2992,23 @@ impl Lower {
   }
 }
 
-// Whether a `handle` is direct: each arm resumes its continuation once, as the last thing it does —
-// at the end of its block and of the plain blocks around it — and uses it nowhere else, and cannot
-// fail; and neither the body nor an arm returns from the function around it. Then the body may run
-// where the `handle` is, and each operation it performs call its arm, which returns to it. A
-// failure an arm raised would have to leave through the body's calls, which do not expect one.
+// Whether a `handle` is direct: each arm either resumes its continuation once, as the last thing it
+// does — at the end of its block and of the plain blocks around it — and uses it nowhere else, or
+// ends the `handle`; no arm can fail; and neither the body nor an arm returns from the function
+// around it. Then the body may run where the `handle` is, and each operation it performs call its
+// arm, which returns to it: with the operation's result, or with the `handle`'s value and the body
+// unwinding to it, as a dropped continuation's does. A failure an arm raised would have to leave
+// through the body's calls, which do not expect one.
 function isDirect(body: readonly Block, arms: readonly Vec<Arm>): bool {
   if (returns(body)) { return false; }
   for (const a of arms) {
-    const k = match (a.cont) { #Some(k) => k, #None => return false };
+    const k = match (a.cont) {
+      #Some(k) => k,
+      #None => {
+        if (returns(a.body) || fails(a.body)) { return false; }
+        continue;
+      }
+    };
     // The continuation, and the temporaries it is moved to before its argument is computed.
     let ks: HashSet<usize> = HashSet.new();
     ks.insert(k);
