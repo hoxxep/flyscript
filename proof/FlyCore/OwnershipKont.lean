@@ -74,19 +74,19 @@ structure HandleOk (F : List Fn) (ι : Iota) (O : List Op) (σf : Store) (e : Na
   hSin : ∀ l ∈ Sin, l ∈ Fz ∨ l ∈ S
   hS : ∀ l ∈ S, l ∈ Sin
   hRc : ∀ l ∈ Rc, l ∈ Fz ∨ l ∈ S
-  hRcdet : ∀ σ1 Rc' Hc, Agree σf σ1 (Fz ++ S) → CapsOk F ι σ1 caps Rc' Hc → Rc' = Rc
+  hRcdet : ∀ W, ι.w.le W → ∀ σ1 Rc' Hc, Agree σf σ1 (Fz ++ S) → CapsOk F (ι.inW W) σ1 caps Rc' Hc → Rc' = Rc
   hfns : CapsFns caps
-  hre : ∀ σ1 Eb Hc, Agree σf σ1 (Fz ++ S) → Disj (Fz ++ Hc) Eb → Disj S Hc → (Fz ++ Hc).Nodup →
-    CapsOk F ι σ1 caps Rc Hc → Inv F ι σ1 Γin env Eb Sin →
-    ∃ E', Inv F ι σ1 Γout env E' S ∧ ∀ z, z ∈ E' ↔ z ∈ Eb ∨ z ∈ Fz ∨ z ∈ Hc
+  hre : ∀ W, ι.w.le W → ∀ σ1 Eb Hc, Agree σf σ1 (Fz ++ S) → Disj (Fz ++ Hc) Eb → Disj S Hc → (Fz ++ Hc).Nodup →
+    CapsOk F (ι.inW W) σ1 caps Rc Hc → Inv F (ι.inW W) σ1 Γin env Eb Sin →
+    ∃ E', Inv F (ι.inW W) σ1 Γout env E' S ∧ ∀ z, z ∈ E' ↔ z ∈ Eb ∨ z ∈ Fz ∨ z ∈ Hc
 
 /-- What a `handle` keeps holds wherever what it froze, and what its activation only reads, are as
 they were. -/
 theorem HandleOk.transfer (h : HandleOk F ι O σf e caps os rs arm post Γin Γout env Sin S r Fz Rc op)
     (hag : Agree σf σ' (Fz ++ S)) : HandleOk F ι O σ' e caps os rs arm post Γin Γout env Sin S r Fz Rc op :=
   { h with
-    hRcdet := fun σ1 Rc' Hc hag' => h.hRcdet σ1 Rc' Hc (Agree.trans (hag) (hag'))
-    hre := fun σ1 Eb Hc hag' => h.hre σ1 Eb Hc (Agree.trans (hag) (hag')) }
+    hRcdet := fun W hW σ1 Rc' Hc hag' => h.hRcdet W hW σ1 Rc' Hc (Agree.trans (hag) (hag'))
+    hre := fun W hW σ1 Eb Hc hag' => h.hre W hW σ1 Eb Hc (Agree.trans (hag) (hag')) }
 
 /-- A context of `readonly` borrows only: a task's once its body has run, which owns nothing. -/
 def RoCtx (Γ : Ctx) : Prop := ∀ p ∈ Γ, ∃ τ, p.2 = .ref .ro τ
@@ -123,11 +123,11 @@ structure GenOk (F : List Fn) (ι : Iota) (O : List Op) (σf : Store) (eN eY : N
   hSin : ∀ l ∈ Sin, l ∈ Fz ∨ l ∈ S
   hS : ∀ l ∈ S, l ∈ Sin
   hRc : ∀ l ∈ Rc, l ∈ Fz ∨ l ∈ S
-  hRcdet : ∀ σ1 Rc' Hc, Agree σf σ1 (Fz ++ S) → CapsOk F ι σ1 caps Rc' Hc → Rc' = Rc
+  hRcdet : ∀ W, ι.w.le W → ∀ σ1 Rc' Hc, Agree σf σ1 (Fz ++ S) → CapsOk F (ι.inW W) σ1 caps Rc' Hc → Rc' = Rc
   hfns : ∀ c ∈ caps, c.mode = .mut → c.ty.shell = false
-  hre : ∀ σ1 Eb Hc, Agree σf σ1 (Fz ++ S) → Disj (Fz ++ Hc) Eb → Disj S Hc → (Fz ++ Hc).Nodup →
-    CapsOk F ι σ1 caps Rc Hc → Inv F ι σ1 Γin env Eb Sin →
-    ∃ E', Inv F ι σ1 Γout env E' S ∧ ∀ z, z ∈ E' ↔ z ∈ Eb ∨ z ∈ Fz ∨ z ∈ Hc
+  hre : ∀ W, ι.w.le W → ∀ σ1 Eb Hc, Agree σf σ1 (Fz ++ S) → Disj (Fz ++ Hc) Eb → Disj S Hc → (Fz ++ Hc).Nodup →
+    CapsOk F (ι.inW W) σ1 caps Rc Hc → Inv F (ι.inW W) σ1 Γin env Eb Sin →
+    ∃ E', Inv F (ι.inW W) σ1 Γout env E' S ∧ ∀ z, z ∈ E' ↔ z ∈ Eb ∨ z ∈ Fz ∨ z ∈ Hc
 
 /-- What a scope keeps while it runs: the operation `e` by which its body and tasks give way, taking
 nothing and giving an integer, and `eS`, by which they start a task, a closure called once whose
@@ -225,14 +225,14 @@ reached, while it lives. -/
 cells it kept from the borrow, `Xf`, as they were — what it froze, lent `readonly`, or the path to
 the place, lent `mut`. -/
   | lendK : (∀ l ∈ Sin, l ∈ Xf ∨ l ∈ S) → (∀ l ∈ S, l ∈ Sin) →
-      (∀ σ1 Eb, Agree σf σ1 (Xf ++ S) → Disj Xf Eb → Inv F ι σ1 Γin envin Eb Sin →
-        ∃ E', Inv F ι σ1 Γout env E' S ∧ ∀ z, z ∈ E' ↔ z ∈ Eb ∨ z ∈ Xf) →
+      (∀ W, ι.w.le W → ∀ σ1 Eb, Agree σf σ1 (Xf ++ S) → Disj Xf Eb → Inv F (ι.inW W) σ1 Γin envin Eb Sin →
+        ∃ E', Inv F (ι.inW W) σ1 Γout env E' S ∧ ∀ z, z ∈ E' ↔ z ∈ Eb ∨ z ∈ Xf) →
       FrameOk F O ι ι σf .lendK ⟨Γin, envin, τ, Sin, r⟩ ⟨Γout, env, τ, S, r⟩ Xf []
   /-- The code a closure over a `readonly` borrow is in scope for: as it ends, the closure's cell
 `a`, one of the frame's own, is freed, and the activation is the lender's again. -/
   | cloK : (∀ l ∈ Sin, l ∈ Xf ∨ l ∈ S) → (∀ l ∈ S, l ∈ Sin) → a ∈ Xf →
-      (∀ σ1 Eb, Agree σf σ1 (Xf ++ S) → Disj Xf Eb → Inv F ι σ1 Γin envin Eb Sin →
-        ∃ E', Inv F ι σ1 Γout env E' S ∧ ∀ z, z ∈ E' ↔ z ∈ Eb ∨ (z ∈ Xf ∧ z ≠ a)) →
+      (∀ W, ι.w.le W → ∀ σ1 Eb, Agree σf σ1 (Xf ++ S) → Disj Xf Eb → Inv F (ι.inW W) σ1 Γin envin Eb Sin →
+        ∃ E', Inv F (ι.inW W) σ1 Γout env E' S ∧ ∀ z, z ∈ E' ↔ z ∈ Eb ∨ (z ∈ Xf ∧ z ≠ a)) →
       FrameOk F O ι ι σf (.cloK a) ⟨Γin, envin, τ, Sin, r⟩ ⟨Γout, env, τ, S, r⟩ Xf []
   /-- The body of a `handle` whose arm resumes: its own cells are what it froze and the trees at
 the places its arm was lent `mut`. -/
@@ -335,6 +335,11 @@ are the frame's own. -/
   | scX : O[e]? = some op → op.owns = [] → op.refs = [] → op.ret = .int →
       O[eS]? = some opS → opS.owns = [.fn .once .int .int rT R] → opS.refs = [] → opS.ret = .int →
       FrameOk F O ι ι σf (.scX e eS hid) ⟨Γ, env, τ, S, .eff e :: .eff eS :: r⟩ ⟨Γ, env, τ, S, r⟩ [] []
+  /-- A kept continuation being dropped: the operation its cleanup performs goes on at once, given an
+  integer, what it passed dropped; and if it ends with a value after all, that is dropped too. -/
+  | capD : O[e]? = some op → op.ret = .int → op.refs = [] → (∀ τ' ∈ op.owns, τ'.cross = true) →
+      τ.complete = true →
+      FrameOk F O ι ι σf (.capD τ e g) ⟨Γ, env, τ, S, .eff e :: r⟩ ⟨Γ, env, .int, S, r⟩ [] []
   /-- A scope that failed, its body being dropped, its tasks to be. -/
   | scEb : ScOk O e eS op opS rT R r τ → TasksOk F O ι σf e eS r S Q Xq Aq →
       FrameOk F O ι ι σf (.scE e eS hid τ τ (.abort j k) d Q) ⟨Γ, env, τ, S, r⟩ ⟨Γ, env, τ, S, r⟩ Xq (j :: Aq)
@@ -368,6 +373,112 @@ inductive TasksOk (F : List Fn) (O : List Op) :
       Agree σt σf (X ++ St) → (∀ l ∈ X ++ St, σt.mem l ≠ none) → (∀ l ∈ St, l ∈ S) → Disj St X →
       op0.ret = .int → op0.refs = [] → Disj X Xs →
       TasksOk F O ι σf e eS r S Q Xs As → TasksOk F O ι σf e eS r S (K :: Q) (X ++ Xs) (AK ++ As)
+end
+
+/-! ## A larger world -/
+
+theorem FrameOk.w_eq (hf : FrameOk F O ιi ιo σf f inL outL Xf A) : ιi.w = ιo.w := by
+  cases hf <;> rfl
+
+theorem HandleOk.mono (h : HandleOk F ι O σf e caps os rs arm post Γin Γout env Sin S r Fz Rc op)
+    (hW : ι.w.le W) : HandleOk F (ι.inW W) O σf e caps os rs arm post Γin Γout env Sin S r Fz Rc op where
+  hop := h.hop
+  hcomp := h.hcomp
+  hown := h.hown
+  href := h.href
+  hnames := h.hnames
+  harm := h.harm
+  hSin := h.hSin
+  hS := h.hS
+  hRc := h.hRc
+  hRcdet := fun W' hW' => h.hRcdet W' (World.le_trans hW hW')
+  hfns := h.hfns
+  hre := fun W' hW' => h.hre W' (World.le_trans hW hW')
+
+theorem GenOk.mono (h : GenOk F ι O σf eN eY opN opY τy τb cz Γin Γout env Sin S Fz Rc) (hW : ι.w.le W) :
+    GenOk F (ι.inW W) O σf eN eY opN opY τy τb cz Γin Γout env Sin S Fz Rc where
+  hopN := h.hopN
+  hNowns := h.hNowns
+  hNrefs := h.hNrefs
+  hNret := h.hNret
+  hopY := h.hopY
+  hYowns := h.hYowns
+  hYrefs := h.hYrefs
+  hYret := h.hYret
+  hcy := h.hcy
+  hcb := h.hcb
+  hSin := h.hSin
+  hS := h.hS
+  hRc := h.hRc
+  hRcdet := fun W' hW' => h.hRcdet W' (World.le_trans hW hW')
+  hfns := h.hfns
+  hre := fun W' hW' => h.hre W' (World.le_trans hW hW')
+
+theorem ParOk.mono (h : ParOk F ι O σf e op Γ₁ env E₁ S τa τb) (hW : ι.w.le W) :
+    ParOk F (ι.inW W) O σf e op Γ₁ env E₁ S τa τb :=
+  ⟨h.hop, h.howns, h.hrefs, h.hret, h.hI.mono hW, h.hca, h.hcb⟩
+
+theorem ScCaps.mono (h : ScCaps F ι σf cz R S Rc) (hW : ι.w.le W) : ScCaps F (ι.inW W) σf cz R S Rc :=
+  ⟨h.hc.mono hW, h.hRc, h.hR, h.hro⟩
+
+theorem OutOk.mono (h : OutOk F ι σ τ o L) (hW : ι.w.le W) : OutOk F (ι.inW W) σ τ o L := by
+  cases o with
+  | val v => exact VT.mono (show VT F ι σ τ v L from h) hW
+  | abort _ _ => exact h
+
+mutual
+theorem FrameOk.mono : FrameOk F O ιi ιo σf f inL outL Xf A → ιo.w.le W →
+    FrameOk F O (ιi.inW W) (ιo.inW W) σf f inL outL Xf A
+  | .letK h1 h2 h3, _ => .letK h1 h2 h3
+  | .scopeK h1 h2 h3, _ => .scopeK h1 h2 h3
+  | .callK h1 h2 h3 h4 h5 h6 h7 h8 h9, hW =>
+    .callK h1 (h2.mono hW) (fun h hh => (h3 h hh).mono hW) h4 h5 h6 h7 h8 h9
+  | .callLendK h1 h2 h3 h4 h5 h6 h7 h8 h9 h10 h11 h12 h13 h14 h15 h16, hW =>
+    .callLendK h1 (h2.mono hW) (fun h hh => (h3 h hh).mono hW) h4 h5 h6 h7 h8 h9 h10 h11 h12 h13 h14 h15 h16
+  | .catchK h1 h2 h3 h4, _ => .catchK h1 h2 h3 h4
+  | .whileC h1 h2, _ => .whileC h1 h2
+  | .whileB h1 h2, _ => .whileB h1 h2
+  | .deferK h1, _ => .deferK h1
+  | .deferV h1, hW => .deferV (h1.mono hW)
+  | .deferA, _ => .deferA
+  | .dropK, _ => .dropK
+  | .dropKv h1, hW => .dropKv (h1.mono hW)
+  | .lendK h1 h2 h3, hW => .lendK h1 h2 fun W' hW' => h3 W' (World.le_trans hW hW')
+  | .cloK h1 h2 h3 h4, hW => .cloK h1 h2 h3 fun W' hW' => h4 W' (World.le_trans hW hW')
+  | .capK h1 h2 h3, hW => .capK (h1.mono hW) h2 (h3.mono hW)
+  | .armK h1 h2 h3 h4 h5 h6, hW => .armK (h1.mono hW) h2 (h3.mono hW) h4 h5 h6
+  | .postR h1 h2, hW => .postR h1 (h2.mono hW)
+  | .startK h1, _ => .startK h1
+  | .taskK h1 h2 h3 h4 h5, _ => .taskK h1 h2 h3 h4 h5
+  | .parS h1 h2 h3 h4 h5 h6, hW => .parS (h1.mono hW) h2 h3 h4 h5 (h6.mono hW)
+  | .parD h1 h2 h3 h4, hW => .parD (h1.mono hW) h2 h3 (h4.mono hW)
+  | .parY h1 h2 h3 h4, _ => .parY h1 h2 h3 h4
+  | .genC h1 h2 h3, hW => .genC (h1.mono hW) h2 (h3.mono hW)
+  | .genCd h1 h2, hW => .genCd (h1.mono hW) (h2.mono hW)
+  | .genP h1 h2 h3, hW => .genP (h1.mono hW) h2 (h3.mono hW)
+  | .genY h1 h2 h3 h4 h5, _ => .genY h1 h2 h3 h4 h5
+  | .genN h1 h2 h3 h4 h5, _ => .genN h1 h2 h3 h4 h5
+  | .genE h1 h2 h3 h4 h5, hW => .genE (h1.mono hW) (h2.mono hW) h3 h4 (h5.mono hW)
+  | .regionK, _ => .regionK (ι := ιo.inW W)
+  | .parE h1 h2 h3, hW => .parE (h1.mono hW) h2 h3
+  | .scB h1 h2 h3, hW => .scB h1 (h2.mono hW) (h3.mono hW)
+  | .scW h1 h2 h3 h4 h5 h6 h7 h8 h9 h10 h11, hW =>
+    .scW h1 (h2.mono hW) h3 h4 (h5.mono hW) h6 h7 (h8.mono hW) h9 h10 h11
+  | .scV h1 h2 h3 h4 h5 h6 h7 h8 h9 h10, hW =>
+    .scV h1 (h2.mono hW) (h3.mono hW) (h4.mono hW) h5 h6 (h7.mono hW) h8 h9 h10
+  | .scX h1 h2 h3 h4 h5 h6 h7 h8, _ => .scX h1 h2 h3 h4 h5 h6 h7 h8
+  | .scEb h1 h2, hW => .scEb h1 (h2.mono hW)
+  | .capD h1 h2 h3 h4 h5, _ => .capD h1 h2 h3 h4 h5
+  | .scEt h1 h2 h3 h4 h5 h6, hW => .scEt h1 (h2.mono hW) (h3.mono hW) h4 h5 h6
+
+theorem FramesOk.mono : FramesOk F O ι σs K op top X hos A → ι.w.le W → FramesOk F O (ι.inW W) σs K op top X hos A
+  | .base h1 h2 h3 h4 h5 h6, hW => .base (h1.mono hW) (fun h hh => (h2 h hh).mono hW) h3 h4 h5 h6
+  | .cons h1 h2 h3 h4 h5 h6 h7 h8 h9, hW =>
+    .cons (h1.mono hW) h2 h3 h4 h5 h6 (h7.mono (h1.w_eq ▸ hW)) h8 h9
+
+theorem TasksOk.mono : TasksOk F O ι σf e eS r S Q X A → ι.w.le W → TasksOk F O (ι.inW W) σf e eS r S Q X A
+  | .nil, _ => .nil
+  | .cons h1 h2 h3 h4 h5 h6 h7 h8 h9 h10, hW => .cons (h1.mono hW) h2 h3 h4 h5 h6 h7 h8 h9 (h10.mono hW)
 end
 
 /-- Continuations give what is said of a context weaker than the one their frames leave, where

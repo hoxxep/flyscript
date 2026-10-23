@@ -29,7 +29,7 @@ theorem aimed_uncap2 : AimedIn a (.capture e hid :: .capture eS hid :: hs) → A
 
 /-- A scope's body or task being dropped: it goes on at once where it gives way, and each task it
 starts is dropped. -/
-theorem ret_scX (hfl : FlushOk F ι (flushR F O n)) (hKo : ∀ m, n = m + 1 → EvalKOk F O m ∧ RetOk F O m) (hop : O[e]? = some op)
+theorem ret_scX [WorldOk F O ι.w] (hfl : FlushOk F ι (flushR F O n)) (hKo : ∀ m, n = m + 1 → EvalKOk F O m ∧ RetOk F O m) (hop : O[e]? = some op)
     (howns : op.owns = []) (hrefs : op.refs = []) (hret : op.ret = .int) (hopS : O[eS]? = some opS)
     (hSowns : opS.owns = [.fn .once .int .int rT R]) (hSrefs : opS.refs = []) (hSret : opS.ret = .int)
     (hR : Ready O hs r) (hwf : WF σ0) (hag : Agree σf σ0 S) (hSa : ∀ l ∈ S, σ0.mem l ≠ none) (hSd : Disj S Ein)
@@ -345,7 +345,7 @@ theorem mkTask_ok (hF : FnsOk F O) (hS : ScOk O e eS op opS rT R r τ) (hcz : Sc
 
 /-- A scope that failed with `abort j k`, its activation `Eb` as it ended: the next of its waiting
 tasks unwound to a new barrier, then the rest, by the dropping frame. -/
-theorem drop_one (hKk : EvalKOk F O m) (hRr : RetOk F O m) (hS : ScOk O e eS op opS rT R r τ)
+theorem drop_one [WorldOk F O ι.w] (hKk : EvalKOk F O m) (hRr : RetOk F O m) (hS : ScOk O e eS op opS rT R r τ)
     (hI : Inv F ι σ0 Γ env Eb S) (hT : TasksOk F O ι σf e eS r S (Kt :: Q') Xq Aq) (hagT : Agree σf σ0 (Xq ++ S))
     (hXa : ∀ l ∈ Xq, σf.mem l ≠ none) (hnd : Xq.Nodup) (hdE : Disj Eb Xq) (hdS : Disj S Xq)
     (haim : AimedIn j hs) (hA : ∀ a ∈ Aq, AimedIn a hs) (hR : Ready O hs r) (hwf : WF σ0) :
@@ -421,7 +421,7 @@ theorem drop_one (hKk : EvalKOk F O m) (hRr : RetOk F O m) (hS : ScOk O e eS op 
 
 /-- A scope that failed, a task of it being dropped: once it is, the rest are, and the failure goes on
 from the activation as it ended. -/
-theorem ret_scEt (hKo : ∀ m, n = m + 1 → EvalKOk F O m ∧ RetOk F O m) (hS : ScOk O e eS op opS rT R r τ)
+theorem ret_scEt [WorldOk F O ι.w] (hKo : ∀ m, n = m + 1 → EvalKOk F O m ∧ RetOk F O m) (hS : ScOk O e eS op opS rT R r τ)
     (hI : Inv F ι σf Γ env Eb S) (hT : TasksOk F O ι σf e eS r S Q Xq Aq) (hdT : Disj Eb Xq)
     (hR : Ready O hs r) (hA : ∀ a ∈ j :: Aq, AimedIn a hs) (hwf : WF σ0) (hag : Agree σf σ0 (Eb ++ Xq ++ S))
     (halloc : ∀ l ∈ Eb ++ Xq, σf.mem l ≠ none) (hnd : (Eb ++ Xq).Nodup) (hd : Disj (Eb ++ Xq) Ein)
@@ -496,7 +496,7 @@ theorem ret_scEt (hKo : ∀ m, n = m + 1 → EvalKOk F O m ∧ RetOk F O m) (hS 
 
 /-- A scope that failed with `abort jj kk`, its activation `Eb` as it ended: its waiting tasks are
 dropped one by one, then the failure goes on. -/
-theorem drop_rest (hKo : ∀ m, n = m + 1 → EvalKOk F O m ∧ RetOk F O m) (hS : ScOk O e eS op opS rT R r τ)
+theorem drop_rest [WorldOk F O ι.w] (hKo : ∀ m, n = m + 1 → EvalKOk F O m ∧ RetOk F O m) (hS : ScOk O e eS op opS rT R r τ)
     (hI : Inv F ι σ1 Γ env Eb S) (hT : TasksOk F O ι σf e eS r S Q Xq Aq) (hagT : Agree σf σ1 (Xq ++ S))
     (hXa : ∀ l ∈ Xq, σf.mem l ≠ none) (hnd : Xq.Nodup) (hdE : Disj Eb Xq) (hdS : Disj S Xq)
     (haim : AimedIn jj hs) (hA : ∀ a ∈ Aq, AimedIn a hs) (hR : Ready O hs r) (hwf1 : WF σ1) :
@@ -519,7 +519,7 @@ theorem drop_rest (hKo : ∀ m, n = m + 1 → EvalKOk F O m ∧ RetOk F O m) (hS
 
 /-- A scope that failed, its body being dropped: once it is, its tasks are, and the failure goes on
 from the activation the body left. -/
-theorem ret_scEb (hfl : FlushOk F ι (flushR F O n)) (hKo : ∀ m, n = m + 1 → EvalKOk F O m ∧ RetOk F O m) (hS : ScOk O e eS op opS rT R r τ)
+theorem ret_scEb [WorldOk F O ι.w] (hfl : FlushOk F ι (flushR F O n)) (hKo : ∀ m, n = m + 1 → EvalKOk F O m ∧ RetOk F O m) (hS : ScOk O e eS op opS rT R r τ)
     (hT : TasksOk F O ι σf e eS r S Q Xq Aq)
     (hR : Ready O hs r) (hA : ∀ a ∈ j :: Aq, AimedIn a hs) (hwf : WF σ0) (hag : Agree σf σ0 (Xq ++ S))
     (halloc : ∀ l ∈ Xq, σf.mem l ≠ none) (hnd : Xq.Nodup) (hd : Disj Xq Ein)
@@ -585,7 +585,7 @@ theorem ret_scEb (hfl : FlushOk F ι (flushR F O n)) (hKo : ∀ m, n = m + 1 →
 /-! ## A scope's body running -/
 
 /-- What gave way, resumed with `0`: what its continuation does. -/
-theorem resume0 (hKk : EvalKOk F O m) (hrefs : op.refs = []) (hret : op.ret = .int)
+theorem resume0 [WorldOk F O ι.w] (hKk : EvalKOk F O m) (hrefs : op.refs = []) (hret : op.ret = .int)
     (hK : FramesOk F O ι σs K op top X hos A) (hR : Ready O hs top.r) (hA : ∀ a ∈ A, AimedIn a hs)
     (hwf : WF σr) (hag : Agree σs σr (X ++ top.S)) (hXa : ∀ l ∈ X ++ top.S, σs.mem l ≠ none) (hXn : X.Nodup)
     (hdS : Disj top.S X) :
@@ -602,7 +602,7 @@ theorem resume0 (hKk : EvalKOk F O m) (hrefs : op.refs = []) (hret : op.ret = .i
 /-- A scope's body running: what it starts joins the tasks waiting; where it gives way, it goes on or
 the first waiting task does; once it ends, the tasks run, its activation and value kept; if it fails,
 the tasks are dropped. -/
-theorem ret_scB (hF : FnsOk F O) (hKo : ∀ m, n = m + 1 → EvalKOk F O m ∧ RetOk F O m)
+theorem ret_scB [WorldOk F O ι.w] (hF : FnsOk F O) (hKo : ∀ m, n = m + 1 → EvalKOk F O m ∧ RetOk F O m)
     (hS : ScOk O e eS op opS rT R r τ) (hcz : ScCaps F ι σf cz R S Rc) (hT : TasksOk F O ι σf e eS r S Q Xq Aq)
     (hR : Ready O hs r) (hA : ∀ a ∈ Aq, AimedIn a hs) (hwf : WF σ0) (hag : Agree σf σ0 (Xq ++ S))
     (halloc : ∀ l ∈ Xq, σf.mem l ≠ none) (hnd : Xq.Nodup) (hd : Disj Xq Ein)
@@ -941,7 +941,7 @@ theorem ret_scB (hF : FnsOk F O) (hKo : ∀ m, n = m + 1 → EvalKOk F O m ∧ R
 /-- A scope's task running, its body waiting where it gave way: what the task starts joins the tasks
 waiting; where it gives way, it goes on, or it waits last and the body goes on; once it ends, the
 body goes on; if it fails, the body is dropped, then the other tasks. -/
-theorem ret_scW (hF : FnsOk F O) (hKo : ∀ m, n = m + 1 → EvalKOk F O m ∧ RetOk F O m)
+theorem ret_scW [WorldOk F O ι.w] (hF : FnsOk F O) (hKo : ∀ m, n = m + 1 → EvalKOk F O m ∧ RetOk F O m)
     (hS : ScOk O e eS op opS rT R r τ) (hcz : ScCaps F ι σf cz R S Rc) (hbr : opb.ret = .int) (hbrefs : opb.refs = [])
     (hKb : FramesOk F O ι σb Kb opb ⟨Γ, env, τ, S, .eff e :: .eff eS :: r⟩ Xb [] Ab)
     (hagb : Agree σb σf (Xb ++ S)) (hab : ∀ l ∈ Xb ++ S, σb.mem l ≠ none)
@@ -1290,7 +1290,7 @@ theorem ret_scW (hF : FnsOk F O) (hKo : ∀ m, n = m + 1 → EvalKOk F O m ∧ R
 
 /-- A scope's task running, its body done with `v`, its activation `Eb` as it ended: once every task
 has ended, the scope gives `v`; if a task fails, `v` is dropped, then the other tasks. -/
-theorem ret_scV (hfl : FlushOk F ι (flushR F O n)) (hF : FnsOk F O) (hKo : ∀ m, n = m + 1 → EvalKOk F O m ∧ RetOk F O m)
+theorem ret_scV [WorldOk F O ι.w] (hfl : FlushOk F ι (flushR F O n)) (hF : FnsOk F O) (hKo : ∀ m, n = m + 1 → EvalKOk F O m ∧ RetOk F O m)
     (hS : ScOk O e eS op opS rT R r τ) (hcz : ScCaps F ι σf cz R S Rc) (hIb : Inv F ι σf Γ env Eb S) (hv : VT F ι σf τ v Lv)
     (hdLE : Disj Lv Eb) (hdLS : Disj Lv S) (hT : TasksOk F O ι σf e eS r S Q Xq Aq) (hdq : Disj (Eb ++ Lv) Xq)
     (hSt : ∀ l ∈ St, l ∈ S) (hro : RoCtx Γt) (hR : Ready O hs r) (hA : ∀ a ∈ Aq, AimedIn a hs) (hwf : WF σ0) (hag : Agree σf σ0 (Eb ++ Lv ++ Xq ++ S))
@@ -1705,7 +1705,7 @@ theorem scope_caps (hf : Foot F ι σ Γ env E S) : ∀ {caps : List (Cap Place)
 
 /-- `scope`: its body runs, giving way and starting tasks through the scope's frame, no task yet
 waiting, each task it starts lent the places it names. -/
-theorem scope_ok (hE : EvalOk F O n) (hR : RetOk F O n) (hS : ScOk O e eS op opS rT R r τ)
+theorem scope_ok [WorldOk F O ι.w] (hE : EvalOk F O n) (hR : RetOk F O n) (hS : ScOk O e eS op opS rT R r τ)
     (hRt : R.toList = caps.map Cap.ty)
     (hcaps : ∀ c ∈ caps, c.mode = .ro ∧ ∃ y, c.loc = .var y ∧ lookup y Γ = some (.ref .ro c.ty))
     (hb : Typed F O Γ body τ Γb (.eff e :: .eff eS :: r)) (hI : Inv F ι σ Γ env E S) (hwf : WF σ)

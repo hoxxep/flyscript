@@ -764,8 +764,8 @@ def dropCells (σ : Store) : List (Ty × Nat) → Option Store
 
 /-- The continuations a value of type `τ` holds, which dropping it leaves to be dropped: they have
 cleanup to run. -/
-def kontsK : Nat → Store → Ty → Val → List (List Kont)
-  | _, _, .cont _ _ _, .kont K _ => [K]
+def kontsK : Nat → Store → Ty → Val → List Val
+  | _, _, .cont _ _ _, .kont K X => [.kont K X]
   | k + 1, σ, .box τ, .ptr l =>
     match σ.mem l with
     | some w => kontsK k σ τ w
@@ -792,16 +792,16 @@ def kontsK : Nat → Store → Ty → Val → List (List Kont)
       | none => []
   | _, _, _, _ => []
 
-def konts (σ : Store) (τ : Ty) (v : Val) : List (List Kont) := kontsK σ.next σ τ v
+def konts (σ : Store) (τ : Ty) (v : Val) : List Val := kontsK σ.next σ τ v
 
 /-- The continuations what a variable's cell holds holds. -/
-def cellKonts (σ : Store) (τ : Ty) (c : Nat) : List (List Kont) :=
+def cellKonts (σ : Store) (τ : Ty) (c : Nat) : List Val :=
   match σ.mem c with
   | some .moved => []
   | some v => konts σ τ v
   | none => []
 
-def cellsKonts (σ : Store) : List (Ty × Nat) → List (List Kont)
+def cellsKonts (σ : Store) : List (Ty × Nat) → List Val
   | [] => []
   | (τ, c) :: rest => cellKonts σ τ c ++ cellsKonts σ rest
 
@@ -900,7 +900,7 @@ def andThen (x : Res × Store) (k : Store → Res × Store) : Res × Store :=
   | x => x
 
 /-- How the continuations a drop leaves are dropped: unwinding each, its cleanup running. -/
-abbrev Flush := List (List Kont) → Store → Res × Store
+abbrev Flush := List Val → Store → Res × Store
 
 /-- Leaving a scope whose variable is in cell `c`: dropped on every way out but a timeout, or kept
 with the continuation taken in it. -/
@@ -1693,7 +1693,7 @@ def ret (F : List Fn) (O : List Op) (n : Nat) (hs : HS) : Kont → Res × Store 
       match n with
       | 0 => (.timeout, σ)
       | m + 1 =>
-        andThen (flushR F O (m + 1) (vs.filterMap fun v => match v with | .kont K' _ => some K' | _ => none) σ) fun σ1 =>
+        andThen (flushR F O (m + 1) vs σ) fun σ1 =>
           ret F O m hs (.capD τ e g) (evalK F O m (.capture e g :: hs) σ1 K (.val (.int 0)))
     else (.susp j ef vs ls (.capD τ e g :: K), σ)
   | f, (.susp j ef vs ls K, σ) =>
@@ -1922,7 +1922,7 @@ def ret (F : List Fn) (O : List Op) (n : Nat) (hs : HS) : Kont → Res × Store 
           (evalK F O m (.capture e id :: .capture eS id :: .abort .drop d :: hs) σ1 Kt (.abort d 0)))
   | .scX _ _ _, r => r
   | .scE e eS id τ τd o d Q, (r, σ) =>
-    let next : Option (Outcome × Store × List (List Kont)) :=
+    let next : Option (Outcome × Store × List Val) :=
       match r with
       | .abort j k =>
         if j = d then some (o, σ, []) else
@@ -1947,7 +1947,11 @@ def ret (F : List Fn) (O : List Op) (n : Nat) (hs : HS) : Kont → Res × Store 
     | some (.arena cs) => (r, (σ.freeAll cs).set a none)
     | _ => (.stuck, σ)
   | .capV _ _ _ _ _ _, r => r
-  | .capD _ _ _, r => r
+  | .capD τ _ _, (.val v, σ) =>
+    match drop σ τ v with
+    | some σ1 => andThen (flushR F O n (konts σ τ v) σ1) fun σ2 => (.val (.int 0), σ2)
+    | none => (.stuck, σ)
+  | .capD _ _ _, (.abort j k, σ) => (.abort j k, σ)
 termination_by _ _ => (n, 1, 0)
 
 /-- A continuation given what the code it was taken at gives: its frames, the outermost first, each
@@ -1957,20 +1961,22 @@ def evalK (F : List Fn) (O : List Op) (n : Nat) (hs : HS) (σ : Store) : List Ko
   | f :: K, r => ret F O n hs f (evalK F O n (f.push hs) σ K r)
 termination_by K _ => (n, 1, sizeOf K + 1)
 
-/-- Drops the continuations `ks`, each unwound to a barrier of its own, its cleanup running. -/
-def flush (F : List Fn) (O : List Op) (n : Nat) : List (List Kont) → Store → Res × Store
+/-- Drops the values `vs`, integers or continuations, each continuation unwound to a barrier of its
+own, its cleanup running. -/
+def flush (F : List Fn) (O : List Op) (n : Nat) : List Val → Store → Res × Store
   | [], σ => (.val (.int 0), σ)
-  | (.capV τ e g _ _ _ :: K) :: ks, σ =>
+  | .int _ :: vs, σ => flush F O n vs σ
+  | .kont (.capV τ e g _ _ _ :: K) _ :: vs, σ =>
     let (d, σ1) := σ.fresh
     match evalK F O n [.abort .drop d] σ1 (.capD τ e g :: K) (.abort d 0) with
-    | (.val _, σ2) => flush F O n ks σ2
-    | (.abort _ _, σ2) => flush F O n ks σ2
+    | (.val _, σ2) => flush F O n vs σ2
+    | (.abort _ _, σ2) => flush F O n vs σ2
     | r => r
   | _ :: _, σ => (.stuck, σ)
-termination_by ks _ => (n, 1, sizeOf ks + 1)
+termination_by vs _ => (n, 1, sizeOf vs + 1)
 
-/-- Drops the continuations `ks` with what fuel is left. -/
-def flushR (F : List Fn) (O : List Op) (n : Nat) (ks : List (List Kont)) (σ : Store) : Res × Store :=
+/-- Drops the values `vs` with what fuel is left. -/
+def flushR (F : List Fn) (O : List Op) (n : Nat) (ks : List Val) (σ : Store) : Res × Store :=
   match n with
   | 0 => (.timeout, σ)
   | m + 1 => flush F O m ks σ

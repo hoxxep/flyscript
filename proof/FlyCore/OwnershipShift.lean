@@ -22,7 +22,8 @@ theorem RefOk.shift_iff : RefOk (ι.push a) σ (k + 1) τ l ↔ RefOk ι σ k τ
 
 /-! ## What no region is part of -/
 
-theorem LT.rfree_iota (h : LT F ι σ c τ L) (hr : τ.rfree = true) : LT F ι' σ c τ L := by
+theorem LT.rfree_iota (h : LT F ι σ c τ L) (hr : τ.rfree = true)
+    (hw : ι'.w = ι.w := by first | rfl | assumption) : LT F ι' σ c τ L := by
   induction h with
   | int ha => exact .int ha
   | box ha _ hn ih => exact .box ha (ih (by simpa [Ty.rfree] using hr)) hn
@@ -37,8 +38,10 @@ theorem LT.rfree_iota (h : LT F ι σ c τ L) (hr : τ.rfree = true) : LT F ι' 
   | rref => simp [Ty.rfree] at hr
   | arena => simp [Ty.rfree] at hr
   | vec ha hlen _ hnd hn ih => exact .vec ha hlen (fun i h h' => ih i h h' (by simpa [Ty.rfree] using hr)) hnd hn
+  | kont ha hn hnd hX hk => exact .kont ha hn hnd hX (by rw [hw]; exact hk)
 
-theorem VT.rfree_iota (h : VT F ι σ τ v L) (hr : τ.rfree = true) : VT F ι' σ τ v L := by
+theorem VT.rfree_iota (h : VT F ι σ τ v L) (hr : τ.rfree = true)
+    (hw : ι'.w = ι.w := by first | rfl | assumption) : VT F ι' σ τ v L := by
   cases h with
   | int => exact .int
   | box h hc => exact .box (h.rfree_iota (by simpa [Ty.rfree] using hr)) hc
@@ -51,8 +54,10 @@ theorem VT.rfree_iota (h : VT F ι σ τ v L) (hr : τ.rfree = true) : VT F ι' 
     exact .tag (h.rfree_iota (Ty.rfree_ite hr.1 hr.2)) hA hB
   | rref => simp [Ty.rfree] at hr
   | vec hlen hel hnd hc => exact .vec hlen (fun i h h' => (hel i h h').rfree_iota (by simpa [Ty.rfree] using hr)) hnd hc
+  | kont hnd hX hk => exact .kont hnd hX (by rw [hw]; exact hk)
 
-theorem Vals.rfree_iota (h : Vals F ι σ τs vs Ls) (hr : ∀ τ ∈ τs, τ.rfree = true) : Vals F ι' σ τs vs Ls := by
+theorem Vals.rfree_iota (h : Vals F ι σ τs vs Ls) (hr : ∀ τ ∈ τs, τ.rfree = true)
+    (hw : ι'.w = ι.w := by first | rfl | assumption) : Vals F ι' σ τs vs Ls := by
   induction h with
   | nil => exact .nil
   | cons hv _ ih =>
@@ -91,6 +96,7 @@ theorem LT.shift (h : LT F ι σ c τ L) : LT F (ι.push a) σ c (τ.shiftBy 1) 
     obtain ⟨τ, v, h1, h2, h3⟩ := hcs l hl
     exact ⟨τ, v, h1, h2, by simpa using h3⟩
   | vec ha hlen _ hnd hn ih => exact .vec ha hlen ih hnd hn
+  | kont ha hn hnd hX hk => exact .kont ha hn hnd hX hk
 
 theorem LT.unshift : ∀ {τ : Ty} {c : Nat} {L : List Nat}, LT F (ι.push a) σ c (τ.shiftBy 1) L → LT F ι σ c τ L
   | .int, _, _, h => by simp only [Ty.shiftBy] at h; cases h with | int ha => exact .int ha
@@ -127,7 +133,9 @@ theorem LT.unshift : ∀ {τ : Ty} {c : Nat} {L : List Nat}, LT F (ι.push a) σ
     simp only [Ty.shiftBy] at h
     cases h with
     | vec ha hlen hel hnd hn => exact .vec ha hlen (fun i h h' => LT.unshift (hel i h h')) hnd hn
-  | .cont _ _ _, _, _, h => by simp only [Ty.shiftBy] at h; cases h
+  | .cont _ _ _, _, _, h => by
+    simp only [Ty.shiftBy] at h
+    cases h with | kont ha hn hnd hX hk => exact .kont ha hn hnd hX hk
 
 theorem Ty.complete_shift : ∀ {τ : Ty}, (τ.shiftBy n).complete = τ.complete
   | .int => rfl
@@ -162,6 +170,7 @@ theorem VT.shift (h : VT F ι σ τ v L) : VT F (ι.push a) σ (τ.shiftBy 1) v 
       (by rw [Ty.complete_shift]; exact hB)
   | rref hr => exact .rref (RefOk.shift_iff.mpr hr)
   | vec hlen hel hnd hc => exact .vec hlen (fun i h h' => (hel i h h').shift) hnd (by rw [Ty.complete_shift]; exact hc)
+  | kont hnd hX hk => exact .kont hnd hX hk
 
 theorem VT.unshift : ∀ {τ : Ty} {v : Val} {L : List Nat}, VT F (ι.push a) σ (τ.shiftBy 1) v L → VT F ι σ τ v L
   | .int, _, _, h => by simp only [Ty.shiftBy] at h; cases h; exact .int
@@ -190,7 +199,9 @@ theorem VT.unshift : ∀ {τ : Ty} {v : Val} {L : List Nat}, VT F (ι.push a) σ
     simp only [Ty.shiftBy] at h
     cases h with
     | vec hlen hel hnd hc => exact .vec hlen (fun i h h' => LT.unshift (hel i h h')) hnd (by rwa [Ty.complete_shift] at hc)
-  | .cont _ _ _, _, _, h => by simp only [Ty.shiftBy] at h; cases h
+  | .cont _ _ _, _, _, h => by
+    simp only [Ty.shiftBy] at h
+    cases h with | kont hnd hX hk => exact .kont hnd hX hk
 
 theorem Slot.excl_shift {s : Slot} : (s.shiftBy n).excl = s.excl := by
   cases s with
@@ -286,7 +297,7 @@ theorem LT.shiftk (h : LT F (ι.drop k) σ c τ L) : LT F ι σ c (τ.shiftBy k)
   induction h with
   | int ha => exact .int ha
   | box ha _ hn ih => exact .box ha ih hn
-  | clo ha hc hb hn _ => exact .clo ha hc (hb.rfree_iota hc.rfree) hn
+  | clo ha hc hb hn _ => subst hι; exact .clo ha hc (hb.rfree_iota hc.rfree) hn
   | pair ha _ _ hd hn ih1 ih2 => exact .pair ha ih1 ih2 hd hn
   | tag ha _ hn ih =>
     refine .tag ha ?_ hn
@@ -299,6 +310,7 @@ theorem LT.shiftk (h : LT F (ι.drop k) σ c τ L) : LT F ι σ c (τ.shiftBy k)
     obtain ⟨τ, v, h1, h2, h3⟩ := hcs l hl
     exact ⟨τ, v, h1, h2, by rw [drop_drop_add] at h3; exact h3⟩
   | vec ha hlen _ hnd hn ih => exact .vec ha hlen ih hnd hn
+  | kont ha hn hnd hX hk => subst hι; exact .kont ha hn hnd hX hk
 
 theorem LT.unshiftk : ∀ {τ : Ty} {c : Nat} {L : List Nat}, LT F ι σ c (τ.shiftBy k) L → LT F (ι.drop k) σ c τ L
   | .int, _, _, h => by simp only [Ty.shiftBy] at h; cases h with | int ha => exact .int ha
@@ -335,7 +347,9 @@ theorem LT.unshiftk : ∀ {τ : Ty} {c : Nat} {L : List Nat}, LT F ι σ c (τ.s
     simp only [Ty.shiftBy] at h
     cases h with
     | vec ha hlen hel hnd hn => exact .vec ha hlen (fun i h h' => LT.unshiftk (hel i h h')) hnd hn
-  | .cont _ _ _, _, _, h => by simp only [Ty.shiftBy] at h; cases h
+  | .cont _ _ _, _, _, h => by
+    simp only [Ty.shiftBy] at h
+    cases h with | kont ha hn hnd hX hk => exact .kont ha hn hnd hX hk
 
 theorem VT.shiftk (h : VT F (ι.drop k) σ τ v L) : VT F ι σ (τ.shiftBy k) v L := by
   cases h with
@@ -349,6 +363,7 @@ theorem VT.shiftk (h : VT F (ι.drop k) σ τ v L) : VT F ι σ (τ.shiftBy k) v
       (by rw [Ty.complete_shift]; exact hB)
   | rref hr => exact .rref (RefOk.drop_iff.mpr hr)
   | vec hlen hel hnd hc => exact .vec hlen (fun i h h' => (hel i h h').shiftk) hnd (by rw [Ty.complete_shift]; exact hc)
+  | kont hnd hX hk => exact .kont hnd hX hk
 
 theorem LT.unshiftk_ite {t : Bool} (h : LT F ι σ c (if t then A.shiftBy k else B.shiftBy k) L) :
     LT F (ι.drop k) σ c (if t then A else B) L := by
@@ -383,7 +398,9 @@ theorem VT.unshiftk : ∀ {τ : Ty} {v : Val} {L : List Nat}, VT F ι σ (τ.shi
     simp only [Ty.shiftBy] at h
     cases h with
     | vec hlen hel hnd hc => exact .vec hlen (fun i h h' => LT.unshiftk (hel i h h')) hnd (by rwa [Ty.complete_shift] at hc)
-  | .cont _ _ _, _, _, h => by simp only [Ty.shiftBy] at h; cases h
+  | .cont _ _ _, _, _, h => by
+    simp only [Ty.shiftBy] at h
+    cases h with | kont hnd hX hk => exact .kont hnd hX hk
 
 theorem Vals.unshiftk : ∀ {τs : List Ty} {vs : List Val} {Ls : List (List Nat)},
     Vals F ι σ (τs.map (Ty.shiftBy k)) vs Ls → Vals F (ι.drop k) σ τs vs Ls

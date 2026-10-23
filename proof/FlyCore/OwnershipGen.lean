@@ -12,7 +12,7 @@ When either side ends, the other is dropped where it waits, its scopes dropping 
 namespace FlyCore.Ownership
 
 /-- A continuation resumed with a value of its operation's result, owning `Lv`. -/
-theorem value_resume (hKk : EvalKOk F O m) (hrefs : op.refs = [])
+theorem value_resume [WorldOk F O ι.w] (hKk : EvalKOk F O m) (hrefs : op.refs = [])
     (hK : FramesOk F O ι σs K op top X hos A) (hR : Ready O hs top.r) (hA : ∀ a ∈ A, AimedIn a hs)
     (hwf : WF σr) (hag : Agree σs σr (X ++ top.S)) (hXa : ∀ l ∈ X ++ top.S, σs.mem l ≠ none) (hXn : X.Nodup)
     (hdS : Disj top.S (X ++ Lv)) (hv : VT F ι σr op.ret v Lv) (hdv : Disj Lv X) :
@@ -28,7 +28,7 @@ theorem value_resume (hKk : EvalKOk F O m) (hrefs : op.refs = [])
 /-! ## Dropping one side -/
 
 /-- A producer being dropped: each value it yields is dropped, and it goes on at once. -/
-theorem ret_genY (hfl : FlushOk F ι (flushR F O n)) (hKo : ∀ m, n = m + 1 → EvalKOk F O m ∧ RetOk F O m) (hop : O[eY]? = some op)
+theorem ret_genY [WorldOk F O ι.w] (hfl : FlushOk F ι (flushR F O n)) (hKo : ∀ m, n = m + 1 → EvalKOk F O m ∧ RetOk F O m) (hop : O[eY]? = some op)
     (howns : op.owns = [τy]) (hrefs : op.refs = []) (hret : op.ret = .int) (hcy : τy.complete = true)
     (hR : Ready O hs r) (hwf : WF σ0) (hag : Agree σf σ0 S) (hSa : ∀ l ∈ S, σ0.mem l ≠ none) (hSd : Disj S Ein)
     (hp : Post F ι O σ0 Ein S Γ env τ (.eff eY :: r) (.capture eY hid :: hs) res) :
@@ -115,13 +115,107 @@ theorem ret_genY (hfl : FlushOk F ι (flushR F O n)) (hKo : ∀ m, n = m + 1 →
   exact post_after (hm'.trans hm2 disj_nil_left hwf) hwf (by simpa using h2)
 
 
+/-! ## A kept continuation being dropped -/
+
+/-- A kept continuation being dropped: what its cleanup passes by its operation is dropped, and the
+operation goes on at once, given `0`; if it ends with a value after all, the value is dropped. -/
+theorem ret_capD [WorldOk F O ι.w] (hfl : FlushOk F ι (flushR F O n))
+    (hKo : ∀ m, n = m + 1 → EvalKOk F O m ∧ RetOk F O m) (hop : O[e]? = some op) (hret : op.ret = .int)
+    (hrefs : op.refs = []) (hcross : ∀ τ' ∈ op.owns, τ'.cross = true) (hcτ : τ.complete = true)
+    (hR : Ready O hs r) (hwf : WF σ0) (hag : Agree σf σ0 S) (hSa : ∀ l ∈ S, σ0.mem l ≠ none) (hSd : Disj S Ein)
+    (hp : Post F ι O σ0 Ein S Γ env τ (.eff e :: r) (.capture e g :: hs) res) :
+    Post F ι O σ0 Ein S Γ env .int r hs (ret F O n hs (.capD τ e g) res) := by
+  rcases res with ⟨res, σ1⟩
+  cases res with
+  | val v =>
+    obtain ⟨E', L, hI, hv, hdL, hdLS, hm⟩ := hp
+    obtain ⟨σ2', hdrop, hfg⟩ := dropF hfl hm.wf hv
+    simp only [ret, hdrop]
+    refine hfg.post fun σ2 hd2 => ⟨E', [], hI.dropped hd2 hm.wf hdL hdLS, .int, disj_nil_left, disj_nil_left, ?_⟩
+    exact Moves.thenDrop (E₂ := E') (L := []) (hm.relabel fun x => by mem_iff) hd2
+      (fun l hl => hI.alloc l (by simpa using hl)) (fun l hl h => hdL l h (by simpa using hl)) hwf
+  | abort j k =>
+    obtain ⟨haim, E', hI, hm⟩ := hp
+    simp only [ret]
+    exact ⟨aimed_uncap haim, E', hI, hm⟩
+  | stuck => simp [Post] at hp
+  | timeout => simp [ret, Post]
+  | panic => simp [ret, Post]
+  | susp j ef vs ls K =>
+  by_cases hc : j ≠ g ∨ ef ≠ e
+  · -- Not its operation: the frame joins the continuation taken.
+    have : ret F O n hs (.capD τ e g) (.susp j ef vs ls K, σ1) = (.susp j ef vs ls (.capD τ e g :: K), σ1) := by
+      rw [ret.eq_def]
+      rcases hc with hc | hc <;> simp [hc]
+    rw [this]
+    obtain ⟨op', X, hos, A, Lv, hcap, hop', -, haim, hK, hls, hvs, hn, hd, hdS, hm⟩ := hp
+    have hK' := FramesOk.cons (σf := σ1) (A := A) (.capD (g := g) hop hret hrefs hcross hcτ) (Weaker.refl _)
+      Agree.self (fun _ h => by simp at h) List.nodup_nil disj_nil_left hK (fun _ h => by simp at h)
+      (fun a ha => .inl ha)
+    simp only [List.nil_append] at hK'
+    refine ⟨op', X, hos, A, Lv, ?_, hop', hR.2, fun a ha => aimed_uncap (haim a ha), hK', hls, hvs, hn, hd, hdS, hm⟩
+    rcases List.mem_cons.mp hcap with h | h
+    · simp only [Frame.capture.injEq] at h
+      obtain ⟨rfl, rfl⟩ := h
+      simp at hc
+    · exact h
+  simp only [ne_eq, not_or, Decidable.not_not] at hc
+  obtain ⟨h1, h2⟩ := hc
+  subst j ef
+  obtain ⟨op', X, hos, A, Lv, -, hop', -, haim, hK, hls, hvs, hLn, hdLX, hdLS, hm⟩ := hp
+  obtain rfl : op = op' := Option.some.inj (hop.symm.trans hop')
+  obtain ⟨-, -, -, -, -, -, -, -, hts, -, -, hXn, -⟩ := hK.base_of
+  rw [hrefs] at hts
+  obtain rfl : hos = [] := List.map_eq_nil_iff.mp hts
+  simp only [olds, mutCells, List.map_nil, List.flatMap_nil, List.append_nil] at hm hdLX hdLS hLn
+  cases n with
+  | zero => simp [ret, Post]
+  | succ m =>
+  obtain ⟨hKk, hRr⟩ := hKo m rfl
+  have hwf₁ := hm.wf
+  obtain ⟨hko, hfoot⟩ := hvs.konts hcross hLn
+  have hfg := hfl σ1 vs hwf₁ hko
+  rw [hfoot] at hfg
+  simp only [ret, ne_eq, not_true_eq_false, or_self, ↓reduceIte, and_self]
+  refine hfg.post fun σ2 hd2 => ?_
+  have hwf2 : WF σ2 := hd2.wf
+  have hSa1 : ∀ l ∈ S, σ1.mem l ≠ none := fun l hl => by
+    rw [hm.keeps hwf hSa (fun l h1 h2 => hSd l h1 h2) l hl]; exact hSa l hl
+  have hXa1 : ∀ l ∈ X, σ1.mem l ≠ none := fun l hl => (hm.alloc l).mpr (.inr (.inl hl))
+  have hag12 : Agree σ1 σ2 (X ++ S) := hd2.keeps hwf₁ (fun l hl => by
+      rcases List.mem_append.mp hl with hl | hl
+      · exact hXa1 l hl
+      · exact hSa1 l hl) fun l hl h => by
+    rcases List.mem_append.mp hl with hl | hl
+    · exact hdLX l h hl
+    · exact hdLS l h hl
+  have hm2 : Moves σ1 (X ++ Lv.flatten) σ2 X [] :=
+    (hd2.widen (X := X) hXa1 (fun l h1 h2 => hdLX l h2 h1)).relabel fun x => by simp
+  have hR' : Ready O (.capture e g :: hs) (.eff e :: r) :=
+    (FrameOk.capD (F := F) (ι := ι) (σf := σ2) (Γ := Γ) (env := env) (τ := τ) (S := S) (g := g) hop hret hrefs
+      hcross hcτ).ready hR
+  have hres := yield_resume (top := ⟨Γ, env, τ, S, .eff e :: r⟩) hKk hop hrefs hret hK hR' haim hwf2 hag12
+    (fun l hl => by
+      rcases List.mem_append.mp hl with h | h
+      · exact hXa1 l h
+      · exact hSa1 l h) hXn (fun l h1 h2 => (hm.apart hwf hSa hSd).1 l h1 h2)
+  have hSa2 : ∀ l ∈ S, σ2.mem l ≠ none := fun l hl => by
+    rw [hag12 l (List.mem_append.mpr (.inr hl))]; exact hSa1 l hl
+  have h2 := hRr hs _ _ σ2 (.capD τ e g) ⟨Γ, env, τ, S, .eff e :: r⟩ ⟨Γ, env, .int, S, r⟩ [] [] σ2 X _
+      (.capD hop hret hrefs hcross hcτ) hR (fun _ h => by simp at h) hwf2 Agree.self (fun _ h => by simp at h)
+      List.nodup_nil disj_nil_left hSa2 (fun l h1 h2 => (hm.apart hwf hSa hSd).1 l h1 (by simpa using h2)) hres
+  have hm' : Moves σ0 Ein σ1 (X ++ Lv.flatten) [] := hm.relabel fun x => by
+    simp only [List.mem_append, List.not_mem_nil, or_false]
+  exact post_after (hm'.trans hm2 disj_nil_left hwf) hwf (by simpa using h2)
+
+
 /-- `#Done`, in a cell of its own. -/
 theorem done_vt (hb : σ.mem b = some (.int 0)) (hcy : τy.complete = true) :
     VT F ι σ (.sum .int τy) (.tag .int τy true b) [b] :=
   .tag (.int hb) rfl hcy
 
 /-- A consumer being dropped: whatever it asks is answered `#Done`. -/
-theorem ret_genN (hKo : ∀ m, n = m + 1 → EvalKOk F O m ∧ RetOk F O m) (hop : O[eN]? = some op)
+theorem ret_genN [WorldOk F O ι.w] (hKo : ∀ m, n = m + 1 → EvalKOk F O m ∧ RetOk F O m) (hop : O[eN]? = some op)
     (howns : op.owns = []) (hrefs : op.refs = []) (hret : op.ret = .sum .int τy) (hcy : τy.complete = true)
     (hR : Ready O hs r) (hwf : WF σ0) (hag : Agree σf σ0 S) (hSa : ∀ l ∈ S, σ0.mem l ≠ none) (hSd : Disj S Ein)
     (hp : Post F ι O σ0 Ein S Γ env τ (.eff eN :: r) (.capture eN hid :: hs) res) :
@@ -264,17 +358,17 @@ theorem post_susp_abort (hf : FrameOk F O ι ι σf f ⟨Γin, envin, τin, Sin,
 theorem GenOk.transfer (hG : GenOk F ι O σf eN eY opN opY τy τb cz Γin Γout env Sin S Fz Rc)
     (hag : Agree σf σ' (Fz ++ S)) : GenOk F ι O σ' eN eY opN opY τy τb cz Γin Γout env Sin S Fz Rc :=
   { hG with
-    hRcdet := fun σ1 Rc' Hc hag' => hG.hRcdet σ1 Rc' Hc (Agree.trans hag hag')
-    hre := fun σ1 Eb Hc hag' => hG.hre σ1 Eb Hc (Agree.trans hag hag') }
+    hRcdet := fun W hW σ1 Rc' Hc hag' => hG.hRcdet W hW σ1 Rc' Hc (Agree.trans hag hag')
+    hre := fun W hW σ1 Eb Hc hag' => hG.hre W hW σ1 Eb Hc (Agree.trans hag hag') }
 
 /-- The activation around a generator rebuilt, once both sides are done, from its consumer's as it
 ended and the trees its producer left at the places lent `mut`. -/
-theorem GenOk.rebuild (hG : GenOk F ι O σf eN eY opN opY τy τb cz Γin Γout env Sin S Fz Rc)
-    (hag : Agree σf σ1 (Fz ++ S)) (hc : CapsOk F ι σ1 cz Rc' Hc) (hdX : Disj (Fz ++ Hc) Eb) (hSH : Disj S Hc)
-    (hnX : (Fz ++ Hc).Nodup) (hI : Inv F ι σ1 Γin env Eb Sin) :
-    ∃ E', Inv F ι σ1 Γout env E' S ∧ ∀ z, z ∈ E' ↔ z ∈ Eb ∨ z ∈ Fz ∨ z ∈ Hc := by
-  obtain rfl := hG.hRcdet σ1 Rc' Hc hag hc
-  exact hG.hre σ1 Eb Hc hag hdX hSH hnX hc hI
+theorem GenOk.rebuild (hG : GenOk F ι O σf eN eY opN opY τy τb cz Γin Γout env Sin S Fz Rc) (hW : ι.w.le W)
+    (hag : Agree σf σ1 (Fz ++ S)) (hc : CapsOk F (ι.inW W) σ1 cz Rc' Hc) (hdX : Disj (Fz ++ Hc) Eb) (hSH : Disj S Hc)
+    (hnX : (Fz ++ Hc).Nodup) (hI : Inv F (ι.inW W) σ1 Γin env Eb Sin) :
+    ∃ E', Inv F (ι.inW W) σ1 Γout env E' S ∧ ∀ z, z ∈ E' ↔ z ∈ Eb ∨ z ∈ Fz ∨ z ∈ Hc := by
+  obtain rfl := hG.hRcdet W hW σ1 Rc' Hc hag hc
+  exact hG.hre W hW σ1 Eb Hc hag hdX hSH hnX hc hI
 
 theorem agree_after (hag : Agree σf σ0 (Xf ++ S)) (hm : Moves σ0 Ein σ1 E1 L) (hwf : WF σ0)
     (hXa : ∀ l ∈ Xf ++ S, σ0.mem l ≠ none) (hd : Disj (Xf ++ S) Ein) : Agree σf σ1 (Xf ++ S) :=
@@ -316,7 +410,7 @@ theorem ret_genE (hfl : FlushOk F ι (flushR F O n)) (hG : GenOk F ι O σf eN e
         rcases List.mem_append.mp hl with h | h
         · simp [h]
         · rcases hG.hSin l h with h | h <;> simp [h]), hIc.nodup, hIc.disj, hIc.keys⟩
-    obtain ⟨E', hIo, hE'⟩ := hG.rebuild (hag1.mono fun l hl => by rcases List.mem_append.mp hl with h | h <;> simp [h])
+    obtain ⟨E', hIo, hE'⟩ := hG.rebuild (World.le_refl _) (hag1.mono fun l hl => by rcases List.mem_append.mp hl with h | h <;> simp [h])
       hc (fun l h1 h2 => by
         rcases List.mem_append.mp h1 with h1 | h1
         · exact hdFE l h1 h2
@@ -382,7 +476,7 @@ theorem ret_genE (hfl : FlushOk F ι (flushR F O n)) (hG : GenOk F ι O σf eN e
 
 /-- A consumer whose producer has ended: what it asks is answered `#Done`; once it ends, the
 activation is rebuilt from what the producer left at the places lent `mut`, which the frame keeps. -/
-theorem ret_genCd (hKo : ∀ m, n = m + 1 → EvalKOk F O m ∧ RetOk F O m)
+theorem ret_genCd [WorldOk F O ι.w] (hKo : ∀ m, n = m + 1 → EvalKOk F O m ∧ RetOk F O m)
     (hG : GenOk F ι O σf eN eY opN opY τy τb cz Γin Γout env Sin S Fz Rc) (hc : CapsOk F ι σf cz Rc Hc)
     (hR : Ready O hs r) (hwf : WF σ0) (hag : Agree σf σ0 (Fz ++ Hc ++ S)) (halloc : ∀ l ∈ Fz ++ Hc, σf.mem l ≠ none)
     (hnd : (Fz ++ Hc).Nodup) (hd : Disj (Fz ++ Hc) Ein) (hSa : ∀ l ∈ S, σ0.mem l ≠ none)
@@ -393,7 +487,7 @@ theorem ret_genCd (hKo : ∀ m, n = m + 1 → EvalKOk F O m ∧ RetOk F O m)
   have hre' : ∀ σ1 Eb, Agree σf σ1 (Fz ++ Hc ++ S) → Disj (Fz ++ Hc) Eb → Inv F ι σ1 Γin env Eb Sin →
       ∃ E', Inv F ι σ1 Γout env E' S ∧ ∀ z, z ∈ E' ↔ z ∈ Eb ∨ z ∈ Fz ++ Hc := by
     intro σ1 Eb hag1 hdX hI'
-    obtain ⟨E', hIo, hE'⟩ := hG.rebuild (hag1.mono fun l hl => by rcases List.mem_append.mp hl with h | h <;> simp [h])
+    obtain ⟨E', hIo, hE'⟩ := hG.rebuild (World.le_refl _) (hag1.mono fun l hl => by rcases List.mem_append.mp hl with h | h <;> simp [h])
       (hc.frame (hag1.mono fun l hl => by
         rcases List.mem_append.mp hl with h | h
         · rcases hG.hRc l h with h | h <;> simp [h]
@@ -528,8 +622,8 @@ theorem ret_genCd (hKo : ∀ m, n = m + 1 → EvalKOk F O m ∧ RetOk F O m)
 /-- A consumer whose producer waits as `Kq`: what it asks resumes the producer; once it ends, with a
 value or unwinding, the producer is dropped, and the activation then rebuilt from the consumer's and
 what the producer left at the places lent `mut`. -/
-theorem ret_genC (hKo : ∀ m, n = m + 1 → EvalKOk F O m ∧ RetOk F O m)
-    (hG : GenOk F ι O σf eN eY opN opY τy τb cz Γin Γout env Sin S Fz Rc) (hSo : ∀ l ∈ So, l ∈ Fz ∨ l ∈ S)
+theorem ret_genC [WorldOk F O ι.w] (hKo : ∀ m, n = m + 1 → EvalKOk F O m ∧ RetOk F O m)
+    (hflm : ∀ m, n = m + 1 → FlushOk F ι (flushR F O m)) (hG : GenOk F ι O σf eN eY opN opY τy τb cz Γin Γout env Sin S Fz Rc) (hSo : ∀ l ∈ So, l ∈ Fz ∨ l ∈ S)
     (hK : FramesOk F O ι σf Kq opY ⟨capsLvlΓ cz, capsLvlEnv cz, .int, So, .eff eY :: r⟩ Xp [] AK)
     (hR : Ready O hs r) (hA : ∀ a ∈ AK, AimedIn a hs) (hwf : WF σ0) (hag : Agree σf σ0 (Fz ++ Xp ++ S))
     (halloc : ∀ l ∈ Fz ++ Xp, σf.mem l ≠ none) (hnd : (Fz ++ Xp).Nodup) (hd : Disj (Fz ++ Xp) Ein)
@@ -558,13 +652,13 @@ theorem ret_genC (hKo : ∀ m, n = m + 1 → EvalKOk F O m ∧ RetOk F O m)
     · exact hfa l (by simp [h])
     · exact hfa l (inFS (hSo l h))
   -- The producer dropped, the consumer having ended with `o`, its activation `Eb`.
-  have dropP : ∀ m σ1 Eb Lo (o : Outcome), EvalKOk F O m → RetOk F O m → WF σ1 →
+  have dropP : ∀ m σ1 Eb Lo (o : Outcome), EvalKOk F O m → RetOk F O m → FlushOk F ι (flushR F O m) → WF σ1 →
       Agree σf σ1 (Fz ++ Xp ++ S) → Inv F ι σ1 Γin env Eb Sin → Disj (Fz ++ Xp) Eb →
       OutOk F ι σ1 τb o Lo → (∀ a ∈ o.aims, AimedIn a hs) → Disj Lo (Fz ++ Eb ++ Xp) → Disj Lo S → Lo.Nodup →
       Post F ι O σ1 (Fz ++ Eb ++ Lo ++ Xp) S Γout env τb r hs
         (ret F O m hs (.genE τb o σ1.fresh.1) (ret F O m (.abort .drop σ1.fresh.1 :: hs) (.genY eY hid τy)
           (evalK F O m (.capture eY hid :: .abort .drop σ1.fresh.1 :: hs) σ1.fresh.2 Kq (.abort σ1.fresh.1 0)))) := by
-    intro m σ1 Eb Lo o hKk hRr hwf1 hag1 hIc hdXE ho haims hdLo hdLoS hLon
+    intro m σ1 Eb Lo o hKk hRr hflm' hwf1 hag1 hIc hdXE ho haims hdLo hdLoS hLon
     generalize hdd : σ1.fresh.1 = d
     have hwf2 : WF σ1.fresh.2 := hwf1
     have hag2 : Agree σf σ1.fresh.2 (Fz ++ Xp ++ S) := hag1.trans (Agree.of' fun _ _ => rfl)
@@ -605,7 +699,7 @@ theorem ret_genC (hKo : ∀ m, n = m + 1 → EvalKOk F O m ∧ RetOk F O m)
       | abort _ _ => exact ho
     have hdSE : Disj S Eb := fun l h1 h2 => hIc.disj l (hG.hS l h1) h2
     have hG2 := hG.transfer (hag2.mono fun l hl => by rcases List.mem_append.mp hl with h | h <;> simp [h])
-    have h4 := ret_genE (n := m) flushR_ok hG2 hIc2 (fun l h1 h2 => hdXE l (by simp [h1]) h2) hSo ho2 hR haims hwf2 Agree.self
+    have h4 := ret_genE (n := m) hflm' hG2 hIc2 (fun l h1 h2 => hdXE l (by simp [h1]) h2) hSo ho2 hR haims hwf2 Agree.self
       (fun l hl => by
         simp only [List.mem_append] at hl
         rcases hl with (h | h) | h
@@ -655,7 +749,7 @@ theorem ret_genC (hKo : ∀ m, n = m + 1 → EvalKOk F O m ∧ RetOk F O m)
           (evalK F O m (.capture eY hid :: .abort .drop σ1.fresh.1 :: hs) σ1.fresh.2 Kq (.abort σ1.fresh.1 0))) := by
       rw [ret.eq_def]
     rw [this]
-    have h := dropP m σ1 E' L (.val v) hKk hRr hm.wf hag1 hI' (fun l h1 h2 => hdE l (List.mem_append.mpr (.inl h1)) h2) hv
+    have h := dropP m σ1 E' L (.val v) hKk hRr (hflm m rfl) hm.wf hag1 hI' (fun l h1 h2 => hdE l (List.mem_append.mpr (.inl h1)) h2) hv
       (fun _ h => by simp [Outcome.aims] at h)
       (fun l h1 h2 => by
         simp only [List.mem_append] at h2
@@ -680,7 +774,7 @@ theorem ret_genC (hKo : ∀ m, n = m + 1 → EvalKOk F O m ∧ RetOk F O m)
           (evalK F O m (.capture eY hid :: .abort .drop σ1.fresh.1 :: hs) σ1.fresh.2 Kq (.abort σ1.fresh.1 0))) := by
       rw [ret.eq_def]
     rw [this]
-    have h := dropP m σ1 E' [] (.abort j k) hKk hRr hm.wf hag1 hI' (fun l h1 h2 => hdE l (List.mem_append.mpr (.inl h1)) h2) rfl
+    have h := dropP m σ1 E' [] (.abort j k) hKk hRr (hflm m rfl) hm.wf hag1 hI' (fun l h1 h2 => hdE l (List.mem_append.mpr (.inl h1)) h2) rfl
       (fun a ha => by simp [Outcome.aims] at ha; subst ha; exact aimed_uncap haim)
       disj_nil_left disj_nil_left List.nodup_nil
     refine post_after ((hm.widen hXa hd).relabel fun x => ?_) hwf h
@@ -769,7 +863,7 @@ theorem some_vt (hb : σ.mem b = some v) (hv : VT F ι σ τy v L) (hbL : b ∉ 
 /-- A producer whose consumer waits as `Kc` for what it asked: what it yields answers it; once it
 ends, its consumer's asking is answered `#Done`, the frame keeping what it left at the places lent
 `mut`; if it fails, its consumer is dropped and the activation rebuilt, before the failure goes on. -/
-theorem ret_genP (hfl : FlushOk F ι (flushR F O n)) (hKo : ∀ m, n = m + 1 → EvalKOk F O m ∧ RetOk F O m)
+theorem ret_genP [WorldOk F O ι.w] (hfl : FlushOk F ι (flushR F O n)) (hKo : ∀ m, n = m + 1 → EvalKOk F O m ∧ RetOk F O m)
     (hG : GenOk F ι O σf eN eY opN opY τy τb cz Γin Γout env Sin S Fz Rc) (hSo : ∀ l ∈ So, l ∈ Fz ∨ l ∈ S)
     (hKc : FramesOk F O ι σf Kc opN ⟨Γin, env, τb, Sin, .eff eN :: r⟩ Xc [] AK)
     (hR : Ready O hs r) (hA : ∀ a ∈ AK, AimedIn a hs) (hwf : WF σ0) (hag : Agree σf σ0 (Fz ++ Xc ++ S))
@@ -837,7 +931,7 @@ theorem ret_genP (hfl : FlushOk F ι (flushR F O n)) (hKo : ∀ m, n = m + 1 →
     -- What the producer left at the places lent it, which the frame now keeps.
     have hG1 := hG.transfer (hag1.mono fun l hl => by rcases List.mem_append.mp hl with h | h <;> simp [h])
     have hc := Foot.capsOk hG.hfns hIb.foot
-    rw [hG1.hRcdet σ1 So Ep Agree.self hc] at hc
+    rw [hG1.hRcdet _ (World.le_refl _) σ1 So Ep Agree.self hc] at hc
     generalize hb : (σ1.alloc (.int 0)).1 = b
     have hbn : b = σ1.next := hb.symm
     generalize hσ2 : (σ1.alloc (.int 0)).2 = σ2
@@ -941,11 +1035,12 @@ theorem ret_genP (hfl : FlushOk F ι (flushR F O n)) (hKo : ∀ m, n = m + 1 →
     -- The activation rebuilt from the consumer's, as it was dropped, and what the producer left.
     have hG2 := hG.transfer (hag2.mono fun l hl => by rcases List.mem_append.mp hl with h | h <;> simp [h])
     have hc2 : CapsOk F ι σ1.fresh.2 cz So Ep := (Foot.capsOk hG.hfns hIb.foot).frame (Agree.of' fun _ _ => rfl)
-    have hre' : ∀ σ3 Eb, Agree σ1.fresh.2 σ3 (Fz ++ Ep ++ S) → Disj (Fz ++ Ep) Eb → Inv F ι σ3 Γin env Eb Sin →
-        ∃ E', Inv F ι σ3 Γout env E' S ∧ ∀ z, z ∈ E' ↔ z ∈ Eb ∨ z ∈ Fz ++ Ep := by
-      intro σ3 Eb hag3 hdX hI'
-      obtain ⟨E', hIo, hE'⟩ := hG2.rebuild (hag3.mono fun l hl => by rcases List.mem_append.mp hl with h | h <;> simp [h])
-        (hc2.frame (hag3.mono fun l hl => by
+    have hre' : ∀ W, ι.w.le W → ∀ σ3 Eb, Agree σ1.fresh.2 σ3 (Fz ++ Ep ++ S) → Disj (Fz ++ Ep) Eb →
+        Inv F (ι.inW W) σ3 Γin env Eb Sin →
+        ∃ E', Inv F (ι.inW W) σ3 Γout env E' S ∧ ∀ z, z ∈ E' ↔ z ∈ Eb ∨ z ∈ Fz ++ Ep := by
+      intro W hW σ3 Eb hag3 hdX hI'
+      obtain ⟨E', hIo, hE'⟩ := hG2.rebuild hW (hag3.mono fun l hl => by rcases List.mem_append.mp hl with h | h <;> simp [h])
+        ((hc2.mono hW).frame (hag3.mono fun l hl => by
           rcases List.mem_append.mp hl with h | h
           · rcases hSo l h with h | h <;> simp [h]
           · simp [h])) hdX (fun l h1 h2 => hdE l (by simp [h1]) h2) hnFE hI'
@@ -1100,7 +1195,7 @@ theorem zip_refs_at : ∀ {caps : List (Cap Place)} {ls : List Nat}, ls.length =
 /-- `gen`: the producer's arguments taken, its parameters allocated and the places it is lent
 resolved, it waits as if it had yielded just before its body; the consumer runs with the places lent
 `mut` out of reach and those lent `readonly` frozen. -/
-theorem gen_ok (hF : FnsOk F O) (hE : EvalOk F O n) (hR : RetOk F O n)
+theorem gen_ok [WorldOk F O ι.w] (hF : FnsOk F O) (hE : EvalOk F O n) (hR : RetOk F O n)
     (hopN : O[eN]? = some opN) (hNowns : opN.owns = []) (hNrefs : opN.refs = []) (hNret : opN.ret = .sum .int τy)
     (hopY : O[eY]? = some opY) (hYowns : opY.owns = [τy]) (hYrefs : opY.refs = []) (hYret : opY.ret = .int)
     (hcy : τy.complete = true) (hfd : F[f]? = some d) (hretp : d.retp = none) (hcap : d.cap = none)
@@ -1234,15 +1329,15 @@ theorem gen_ok (hF : FnsOk F O) (hE : EvalOk F O n) (hR : RetOk F O n)
       hSin := fun l hl => List.mem_append.mp (hS.mem_iff.mp hl),
       hS := fun l hl => hS.mem_iff.mpr (List.mem_append.mpr (.inr hl)),
       hRc := hRc,
-      hRcdet := fun σ' Rc' Hc' hag hc => hcok3.det_ro hc (hag.mono fun l hl => by
+      hRcdet := fun W hW σ' Rc' Hc' hag hc => (hcok3.mono hW).det_ro hc (hag.mono fun l hl => by
         rcases hRc l hl with h | h <;> simp [h]),
       hfns := hcok.fns,
       hre := by
-        intro σ' Eb' Hc' hag hdX hSH hnX hc hI'
+        intro W hW σ' Eb' Hc' hag hdX hSH hnX hc hI'
         have hag' : Agree σ1 σ' (Fz ++ S) := (hag13 _ hFS1).trans hag
-        obtain ⟨E1, hf1, hp1⟩ := hthaw σ' Γb Eb' hI'.foot hw hag'
-        obtain ⟨E', hf', hp'⟩ := hreb σ' _ E1 Hc' hf1 (thaw_weaker hw)
-          ((hag'.mono fun l hl => List.mem_append.mpr (.inr hl))) (htr' σ' Rc Hc' hc)
+        obtain ⟨E1, hf1, hp1⟩ := hthaw W hW σ' Γb Eb' hI'.foot hw hag'
+        obtain ⟨E', hf', hp'⟩ := hreb W hW σ' _ E1 Hc' hf1 (thaw_weaker hw)
+          ((hag'.mono fun l hl => List.mem_append.mpr (.inr hl))) (htr' _ σ' Rc Hc' hc)
         have hmem' : ∀ z, z ∈ E' ↔ z ∈ Eb' ∨ z ∈ Fz ∨ z ∈ Hc' := fun z => by
           rw [hp'.mem_iff, List.mem_append, hp1.mem_iff, List.mem_append]; grind
         obtain ⟨hFzn', hHcn', hdFH⟩ := nodup_append_disj.mp hnX

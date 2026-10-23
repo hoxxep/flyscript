@@ -50,11 +50,11 @@ theorem preempt_ok (ht : Typed F O Γ e τ Γ' r) (hI : Inv F ι σ Γ env E S) 
   simp only [olds, mutCells, List.map_nil, List.flatMap_nil, List.flatten_nil, List.nil_append, List.append_nil]
   exact (Moves.freshen hwf hI.alloc).relabel fun x => by simp
 
-theorem eval_ok_succ (hF : FnsOk F O) (hE : EvalOk F O n) (hR : RetOk F O n) :
+theorem eval_ok_succ (hF : FnsOk F O) (hE : EvalOk F O n) (hR : RetOk F O n) (hKo : ∀ m, n = m + 1 → EvalKOk F O m) :
     EvalOk F O (n + 1) := by
-  intro hs σ ι Γ env E S e τ Γ' r ht hI hwf hRdy
-  have hfl : ∀ ι, FlushOk F ι (flushR F O n) := fun _ => flushR_ok
-  have hfl' : ∀ ι, FlushOk F ι (flush F O n) := fun _ => flush_ok
+  intro hs σ ι Γ env E S e τ Γ' r _ ht hI hwf hRdy
+  have hfl : ∀ ι, [WorldOk F O ι.w] → FlushOk F ι (flushR F O n) := fun _ _ => flushR_ok hKo
+  have hfl' : ∀ ι, [WorldOk F O ι.w] → FlushOk F ι (flush F O n) := fun _ _ => flush_ok (evalK_ok hR)
   -- A task may be stopped before anything it does, for another to run.
   rw [eval]
   split
@@ -652,9 +652,13 @@ theorem eval_ok_succ (hF : FnsOk F O) (hE : EvalOk F O n) (hR : RetOk F O n) :
       exact par_ok hF hR (evalK_ok hR) hop howns hrefs hret hfa hfb hretpa hcapa hretpb hcapb hea heb hrowa hrowb
         hca hcb hargs hlends hI hwf hRdy
 
-theorem ret_ok (hF : FnsOk F O) (hE : EvalOk F O n) (hKo : ∀ m, n = m + 1 → EvalKOk F O m ∧ RetOk F O m) : RetOk F O n := by
-  intro hs ιi ιo σf f inL outL Xf A σ0 Ein res hf hR hA hwf hag halloc hnd hd hSa hSd hp
-  have hfl : ∀ ι, FlushOk F ι (flushR F O n) := fun _ => flushR_ok
+theorem ret_ok (hF : FnsOk F O) (hE : EvalOk F O n) (hKs : ∀ m, m < n → EvalKOk F O m ∧ RetOk F O m) :
+    RetOk F O n := by
+  have hKo : ∀ m, n = m + 1 → EvalKOk F O m ∧ RetOk F O m := fun m h => hKs m (by omega)
+  intro hs ιi ιo σf f inL outL Xf A σ0 Ein res _ hf hR hA hwf hag halloc hnd hd hSa hSd hp
+  have hfl : ∀ ι, [WorldOk F O ι.w] → FlushOk F ι (flushR F O n) := fun _ _ => flushR_ok fun m h => (hKo m h).1
+  have hflm : ∀ ι, [WorldOk F O ι.w] → ∀ m, n = m + 1 → FlushOk F ι (flushR F O m) :=
+    fun _ _ m h => flushR_ok fun k hk => (hKs k (by omega)).1
   cases hf with
   | letK hx hk hb => exact ret_letK (hfl _) hE hx hk hb hR hwf hp
   | callLendK hrow hI₁ hholes hpw hts hkeys hoc hbody hcells hcne hcs hzs hzm hlive hx hb =>
@@ -700,11 +704,13 @@ theorem ret_ok (hF : FnsOk F O) (hE : EvalOk F O n) (hKo : ∀ m, n = m + 1 → 
   | parE hI hro hSo => exact ret_parE hI hro hSo hR hwf hag halloc hnd hd hSa hSd hp
   | regionK => exact ret_regionK hR hwf (by simpa using hag) hSa (by simpa using hSd) (by simpa [Kont.push] using hp)
   | postR hP hv => exact ret_postR (hfl _) hE hP hv hR hwf hag halloc hnd hd hSa hSd hp
-  | genC hG hSo hK => exact ret_genC hKo hG hSo hK hR hA hwf hag halloc hnd hd hSa hSd hp
+  | genC hG hSo hK => exact ret_genC hKo (hflm _) hG hSo hK hR hA hwf hag halloc hnd hd hSa hSd hp
   | genCd hG hc => exact ret_genCd hKo hG hc hR hwf hag halloc hnd hd hSa hSd hp
   | genP hG hSo hKc => exact ret_genP (hfl _) hKo hG hSo hKc hR hA hwf hag halloc hnd hd hSa hSd hp
   | genY hop howns hrefs hret hcy =>
     simpa using ret_genY (hfl _) hKo hop howns hrefs hret hcy hR hwf (by simpa using hag) hSa (by simpa using hSd) hp
+  | capD hop hret hrefs hcross hcτ =>
+    simpa using ret_capD (hfl _) hKo hop hret hrefs hcross hcτ hR hwf (by simpa using hag) hSa (by simpa using hSd) hp
   | genN hop howns hrefs hret hcy =>
     simpa using ret_genN hKo hop howns hrefs hret hcy hR hwf (by simpa using hag) hSa (by simpa using hSd) hp
   | genE hG hIc hdFE hSo ho => exact ret_genE (hfl _) hG hIc hdFE hSo ho hR hA hwf hag halloc hnd hd hSa hSd hp
@@ -722,14 +728,17 @@ theorem ret_ok (hF : FnsOk F O) (hE : EvalOk F O n) (hKo : ∀ m, n = m + 1 → 
 /-- Expressions, frames and continuations, at every fuel. -/
 theorem sound (hF : FnsOk F O) : ∀ n, EvalOk F O n ∧ RetOk F O n ∧ EvalKOk F O n
   | 0 =>
-    have hE : EvalOk F O 0 := by intro _ _ _ _ _ _ _ _ _ _ _ _ _ _; simp [eval, Post]
+    have hE : EvalOk F O 0 := by intro _ _ _ _ _ _ _ _ _ _ _ _ _ _ _; simp [eval, Post]
     have hR : RetOk F O 0 := ret_ok hF hE fun m h => absurd h (by omega)
     ⟨hE, hR, evalK_ok hR⟩
   | n + 1 =>
     have ⟨hE, hR, hK⟩ := sound hF n
-    have hE' := eval_ok_succ hF hE hR
-    have hR' : RetOk F O (n + 1) := ret_ok hF hE' fun m h => by cases h; exact ⟨hK, hR⟩
+    have hE' := eval_ok_succ hF hE hR fun m h => (sound hF m).2.2
+    have hR' : RetOk F O (n + 1) := ret_ok hF hE' fun m h =>
+      if hm : m = n then hm ▸ ⟨hK, hR⟩ else let s := sound hF m; ⟨s.2.2, s.2.1⟩
     ⟨hE', hR', evalK_ok hR'⟩
+termination_by n => n
+decreasing_by all_goals omega
 
 theorem eval_ok (hF : FnsOk F O) (n : Nat) : EvalOk F O n := (sound hF n).1
 
@@ -752,12 +761,12 @@ theorem program_ok_sched (hF : FnsOk F O) (ht : Typed F O [] e τ Γ' [.fail]) (
     | (.susp _ _ _ _ _, _) => False
     | (.timeout, _) => True
     | (.panic, _) => True
-    | (.val v, σ') => ∃ L, VT F ∅ σ' τ v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
+    | (.val v, σ') => ∃ L, VT F ⟨[], Wstar F O⟩ σ' τ v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
     | (.abort _ _, σ') => ∀ l, σ'.mem l = none := by
   have hR : Ready O [.abort .fail 0] [.fail] :=
     ⟨.abort (by intro e h; cases h) .nil, fun l hl => by
       simp only [List.mem_singleton] at hl; subst hl; exact find_head⟩
-  have h := eval_ok hF n [.abort .fail 0] (Store.sched0 s p) ∅ [] [] [] [] e τ Γ' [.fail] ht
+  have h := eval_ok hF n [.abort .fail 0] (Store.sched0 s p) ⟨[], Wstar F O⟩ [] [] [] [] e τ Γ' [.fail] ht
     ⟨.nil, List.nodup_nil, disj_nil_left, List.nodup_nil⟩ Store.sched0_wf hR
   generalize eval F O n [.abort .fail 0] (Store.sched0 s p) [] e = r at h ⊢
   rcases r with ⟨r, σ'⟩
@@ -789,7 +798,7 @@ theorem program_ok (hF : FnsOk F O) (ht : Typed F O [] e τ Γ' [.fail]) (n : Na
     | (.susp _ _ _ _ _, _) => False
     | (.timeout, _) => True
     | (.panic, _) => True
-    | (.val v, σ') => ∃ L, VT F ∅ σ' τ v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
+    | (.val v, σ') => ∃ L, VT F ⟨[], Wstar F O⟩ σ' τ v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
     | (.abort _ _, σ') => ∀ l, σ'.mem l = none :=
   program_ok_sched hF ht (fun _ => true) (fun _ => false) n
 

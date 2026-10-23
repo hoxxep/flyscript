@@ -532,7 +532,7 @@ theorem ret_regionK (hR : Ready O hs r) (hwf : WF σ0) (hag : Agree σf σ0 S) (
 
 /-- `region (R) { body }`: a new arena, innermost, its region empty; the body runs with the code
 around a region further out; as it ends, the region is released. -/
-theorem region_ok (hE : EvalOk F O n) (hR : RetOk F O n) (hx : lookup R Γ = none)
+theorem region_ok [WorldOk F O ι.w] (hE : EvalOk F O n) (hR : RetOk F O n) (hx : lookup R Γ = none)
     (hb : Typed F O ((R, .own (.arena 0) true) :: Ctx.shift Γ) body (τ.shiftBy 1)
       ((R, .own (.arena 0) true) :: Ctx.shift Γ') r)
     (hI : Inv F ι σ Γ env E S) (hwf : WF σ) (hRdy : Ready O hs r) :

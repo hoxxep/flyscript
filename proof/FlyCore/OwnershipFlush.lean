@@ -1,4 +1,4 @@
-import FlyCore.OwnershipKont
+import FlyCore.OwnershipWorld
 
 /-!
 # Ownership: dropping what holds continuations
@@ -12,10 +12,6 @@ namespace FlyCore.Ownership
 
 variable {F : List Fn} {O : List Op}
 
-/-- The continuations `ks`, holding the cells `Y` between them, are as their types say. -/
-def KontsOk (_F : List Fn) (_ι : Iota) (_σ : Store) (ks : List (List Kont)) (Y : List Nat) : Prop :=
-  ks = [] ∧ Y = []
-
 /-- What dropping the cells `D` left, where the store was `σ`. -/
 abbrev Dropped (σ : Store) (D : List Nat) (σ' : Store) : Prop := Moves σ D σ' [] []
 
@@ -24,9 +20,9 @@ their cleanup. -/
 def FlushGives (x : Res × Store) (σ : Store) (D : List Nat) : Prop :=
   x.1 = .timeout ∨ x.1 = .panic ∨ ∃ v σ', x = (.val v, σ') ∧ Dropped σ D σ'
 
-/-- `fl` drops continuations as their types say. -/
+/-- `fl` drops continuations as their types say, freeing what they own. -/
 def FlushOk (F : List Fn) (ι : Iota) (fl : Flush) : Prop :=
-  ∀ σ ks Y, WF σ → KontsOk F ι σ ks Y → FlushGives (fl ks σ) σ Y
+  ∀ σ vs, WF σ → KontsOk F ι σ vs → FlushGives (fl vs σ) σ (vs.flatMap Val.foot)
 
 theorem FlushGives.bind {P : Res × Store → Prop} (h : FlushGives x σ D)
     (hk : ∀ σ', Dropped σ D σ' → P (k σ')) (ht : ∀ σ', P (.timeout, σ')) (hp : ∀ σ', P (.panic, σ')) :
@@ -43,72 +39,51 @@ theorem FlushGives.post (h : FlushGives x σ D)
     Post F ι O σ0 E S Γ env τ r hs (andThen x k) :=
   h.bind (P := Post F ι O σ0 E S Γ env τ r hs) hk (fun _ => trivial) (fun _ => trivial)
 
-theorem kontsK_nil : ∀ (k : Nat) (τ : Ty) (σ : Store) v L, VT F ι σ τ v L → kontsK k σ τ v = [] := by
-  intro k
-  induction k with
-  | zero => intro τ σ v L h; cases h <;> simp [kontsK]
-  | succ k ih =>
-    intro τ σ v L h
-    cases h with
-    | int => simp [kontsK]
-    | rref => simp [kontsK]
-    | box hb hc =>
-      obtain ⟨w, R', hw, hv, -, -⟩ := hb.contents hc
-      simp [kontsK, hw, ih _ _ _ _ hv]
-    | clo _ hb hc =>
-      obtain ⟨w, R', hw, hv, -, -⟩ := hb.contents hc
-      simp [kontsK, hw, ih _ _ _ _ hv]
-    | tag hb hA hB =>
-      obtain ⟨w, R', hw, hv, -, -⟩ := hb.contents (Ty.complete_ite hA hB)
-      simp [kontsK, hw, ih _ _ _ _ hv]
-    | pair h1 h2 _ hA hB =>
-      obtain ⟨w, R₁', hw, hv1, -, -⟩ := h1.contents hA
-      obtain ⟨u, R₂', hu, hv2, -, -⟩ := h2.contents hB
-      simp [kontsK, hw, hu, ih _ _ _ _ hv1, ih _ _ _ _ hv2]
-    | vec hlen hel _ hc =>
-      simp only [kontsK, List.flatMap_eq_nil_iff]
-      intro c hcs
-      obtain ⟨i, hi, rfl⟩ := List.getElem_of_mem hcs
-      obtain ⟨w, R', hw, hv, -, -⟩ := (hel i hi (by omega)).contents hc
-      simp [hw, ih _ _ _ _ hv]
+/-- Dropping a value's own cells, and then its continuations, which own the rest of its cells. -/
+theorem FlushGives.after (hm : Moves σ L σ' Y []) (h : FlushGives x σ' Y) (hwf : WF σ) : FlushGives x σ L := by
+  rcases h with h | h | ⟨w, σ'', h1, hm'⟩
+  · exact .inl h
+  · exact .inr (.inl h)
+  · exact .inr (.inr ⟨w, σ'', h1, (hm.trans hm' disj_nil_left hwf).relabel fun x => by simp⟩)
 
-/-- A value's continuations, as dropping it leaves them. -/
-theorem konts_ok (h : VT F ι σ τ v L) : KontsOk F ι σ' (konts σ τ v) [] :=
-  ⟨kontsK_nil _ _ _ _ _ h, rfl⟩
+/-- A drop that frees `L` but `Y`, which it keeps. -/
+theorem Moves.ofDrop {L Y : List Nat} (hwf : WF σ) (hnext : σ'.next = σ.next) (hL : ∀ l ∈ L, σ.mem l ≠ none)
+    (hY : ∀ l ∈ Y, l ∈ L) (hfree : ∀ l ∈ L, l ∉ Y → σ'.mem l = none)
+    (hkeep : ∀ l, l ∉ L ∨ l ∈ Y → σ'.mem l = σ.mem l) (hrt : σ'.rt = σ.rt) : Moves σ L σ' Y [] :=
+  Moves.free (D := L.filter (· ∉ Y)) (WF.of_drop hwf hnext hfree hkeep) hnext hL
+    (fun l => by
+      simp only [List.mem_filter, decide_eq_true_eq]
+      constructor
+      · intro h; by_cases hy : l ∈ Y
+        · exact .inl hy
+        · exact .inr ⟨h, hy⟩
+      · rintro (h | ⟨h, -⟩)
+        · exact hY l h
+        · exact h)
+    (fun l hl => by simp only [List.mem_filter, decide_eq_true_eq] at hl; exact hfree l hl.1 hl.2)
+    (fun l hl => hkeep l (by
+      simp only [List.mem_filter, decide_eq_true_eq, not_and, Decidable.not_not] at hl
+      by_cases h : l ∈ L
+      · exact .inr (hl h)
+      · exact .inl h))
+    (fun l h1 h2 => by simp only [List.mem_filter, decide_eq_true_eq] at h2; exact h2.2 h1) hrt
 
 /-- Dropping a value, and then the continuations it held, frees what it owns. -/
 theorem dropF (hfl : FlushOk F ι fl) (hwf : WF σ) (h : VT F ι σ τ v L) :
     ∃ σ', drop σ τ v = some σ' ∧ FlushGives (fl (konts σ τ v) σ') σ L := by
   obtain ⟨σ', hd, hnext, hfree, hkeep⟩ := drop_ok hwf τ v L h
-  have hwf' := WF.of_free hwf hnext hfree hkeep
-  have hm : Dropped σ L σ' := Moves.free (D := L) hwf' hnext h.alloc (fun x => by simp) hfree hkeep
-    disj_nil_left
-  refine ⟨σ', hd, ?_⟩
-  rcases hfl σ' _ [] hwf' (konts_ok (σ' := σ') h) with h1 | h1 | ⟨w, σ'', h1, hm'⟩
-  · exact .inl h1
-  · exact .inr (.inl h1)
-  · exact .inr (.inr ⟨w, σ'', h1, (hm.trans hm' disj_nil_left hwf).relabel fun x => by simp⟩)
-
-theorem cellKonts_live (h : LT F ι σ c τ L) (hc : τ.complete = true) : cellKonts σ τ c = [] := by
-  obtain ⟨w, R', hw, hv, -, -⟩ := h.contents hc
-  have hk := kontsK_nil σ.next _ _ _ _ hv
-  cases hv <;> simp_all [cellKonts, konts]
-
-theorem cellKonts_own (hτ : τ.complete = true) (h : SlotOk F ι σ (.own τ live) c L) : cellKonts σ τ c = [] := by
-  cases live with
-  | true => exact cellKonts_live h hτ
-  | false =>
-    rcases h with ⟨hc, -⟩ | ⟨h, -⟩
-    · simp [cellKonts, hc]
-    · exact cellKonts_live h hτ
+  obtain ⟨hk, hY⟩ := konts_ok h
+  have hm := Moves.ofDrop hwf hnext h.alloc hY hfree hkeep (drop_rt hd)
+  exact ⟨σ', hd, FlushGives.after hm (hfl σ' _ hm.wf (hk.frame (Agree.of (fun l hl => hkeep l (.inr hl))
+    (drop_rt hd)))) hwf⟩
 
 /-- Dropping an owned variable's cell, live or moved, and then the continuations it held, frees its
 footprint. -/
 theorem dropCellF (hfl : FlushOk F ι fl) (hwf : WF σ) (hτ : τ.complete = true)
     (h : SlotOk F ι σ (.own τ live) c L) :
     ∃ σ', dropCell σ τ c = some σ' ∧ FlushGives (fl (cellKonts σ τ c) σ') σ L := by
-  obtain ⟨σ', hd, hnext, hfree, hkeep⟩ := dropCell_own hwf hτ h
-  have hwf' := WF.of_free hwf hnext hfree hkeep
+  obtain ⟨σ', hd, hnext, hfree, hkeep, hrt⟩ := dropCell_own hwf hτ h
+  obtain ⟨hk, hY⟩ := cellKonts_ok hτ h
   have hL : ∀ l ∈ L, σ.mem l ≠ none := by
     cases live with
     | true => exact LT.alloc h
@@ -116,41 +91,8 @@ theorem dropCellF (hfl : FlushOk F ι fl) (hwf : WF σ) (hτ : τ.complete = tru
       rcases h with ⟨hc, rfl⟩ | ⟨h, -⟩
       · intro l hl; simp at hl; subst hl; simp [hc]
       · exact LT.alloc h
-  have hm : Dropped σ L σ' := Moves.free (D := L) hwf' hnext hL (fun x => by simp) hfree hkeep
-    disj_nil_left (dropCell_rt hd)
-  refine ⟨σ', hd, ?_⟩
-  rw [cellKonts_own hτ h]
-  rcases hfl σ' [] [] hwf' ⟨rfl, rfl⟩ with h1 | h1 | ⟨w, σ'', h1, hm'⟩
-  · exact .inl h1
-  · exact .inr (.inl h1)
-  · exact .inr (.inr ⟨w, σ'', h1, (hm.trans hm' disj_nil_left hwf).relabel fun x => by simp⟩)
-
-theorem cellsKonts_nil : ∀ {Γo : Ctx} {σ : Store} {eo : Env} {Eo So} {owns : List (Var × Ty)},
-    Foot F ι σ Γo eo Eo So → shape Γo = ownCtx owns → (∀ o ∈ owns, o.2.complete = true) →
-    cellsKonts σ ((owns.map Prod.snd).zip (eo.map Prod.snd)) = []
-  | [], σ, _, _, _, owns, h, hs, _ => by
-    cases h
-    cases owns with
-    | nil => rfl
-    | cons => simp [shape, ownCtx] at hs
-  | (z, r) :: Γo, σ, _, _, _, owns, h, hs, hc => by
-    cases h with
-    | @cons _ c M _ eo E S _ hr hrest =>
-    cases owns with
-    | nil => simp [shape, ownCtx] at hs
-    | cons o owns =>
-    simp only [shape, ownCtx, List.map_cons, List.cons.injEq, Prod.mk.injEq] at hs
-    obtain ⟨⟨-, hrs⟩, hs⟩ := hs
-    cases r with
-    | ref => simp [Slot.shape] at hrs
-    | lent => simp [Slot.shape] at hrs
-    | half => simp [Slot.shape] at hrs
-    | own τ live =>
-    simp only [Slot.shape, Slot.own.injEq] at hrs
-    obtain ⟨rfl, -⟩ := hrs
-    simp only [List.map_cons, List.zip_cons_cons, cellsKonts,
-      cellKonts_own (hc _ (List.mem_cons_self ..)) hr, List.nil_append]
-    exact cellsKonts_nil hrest hs fun o ho => hc o (List.mem_cons_of_mem _ ho)
+  have hm := Moves.ofDrop hwf hnext hL hY hfree hkeep hrt
+  exact ⟨σ', hd, FlushGives.after hm (hfl σ' _ hm.wf (hk.frame (Agree.of (fun l hl => hkeep l (.inr hl)) hrt))) hwf⟩
 
 /-- Dropping the callee's owned parameters, and then the continuations they held, frees their
 footprints. -/
@@ -158,23 +100,12 @@ theorem dropCellsF (hfl : FlushOk F ι fl) (h : Foot F ι σ Γo eo Eo So) (hs :
     (hn : Eo.Nodup) (hwf : WF σ) (hc : ∀ o ∈ owns, o.2.complete = true) :
     So = [] ∧ ∃ σ', dropCells σ ((owns.map Prod.snd).zip (eo.map Prod.snd)) = some σ' ∧
       FlushGives (fl (cellsKonts σ ((owns.map Prod.snd).zip (eo.map Prod.snd))) σ') σ Eo := by
-  obtain ⟨hSo, σ', hd, hnext, hfree, hkeep⟩ := dropCells_ok h hs hn hwf hc
-  have hwf' := WF.of_free hwf hnext hfree hkeep
-  have hm : Dropped σ Eo σ' := Moves.free (D := Eo) hwf' hnext (fun l hl => h.alloc l (.inl hl))
-    (fun x => by simp) hfree hkeep disj_nil_left (dropCells_rt _ _ _ hd)
-  refine ⟨hSo, σ', hd, ?_⟩
-  rw [cellsKonts_nil h hs hc]
-  rcases hfl σ' [] [] hwf' ⟨rfl, rfl⟩ with h1 | h1 | ⟨w, σ'', h1, hm'⟩
-  · exact .inl h1
-  · exact .inr (.inl h1)
-  · exact .inr (.inr ⟨w, σ'', h1, (hm.trans hm' disj_nil_left hwf).relabel fun x => by simp⟩)
+  obtain ⟨hSo, σ', hd, hnext, hfree, hkeep, hrt, hk, hY⟩ := dropCells_ok h hs hn hwf hc
+  have hL : ∀ l ∈ Eo, σ.mem l ≠ none := fun l hl => h.alloc l (.inl hl)
+  have hm := Moves.ofDrop hwf hnext hL hY hfree hkeep hrt
+  exact ⟨hSo, σ', hd, FlushGives.after hm (hfl σ' _ hm.wf (hk.frame (Agree.of (fun l hl => hkeep l (.inr hl)) hrt)))
+    hwf⟩
 
-theorem flushR_ok : FlushOk F ι (flushR F O n) := by
-  intro σ ks Y hwf ⟨hks, hY⟩
-  subst hks hY
-  cases n with
-  | zero => exact .inl (by rw [flushR])
-  | succ m => exact .inr (.inr ⟨.int 0, σ, by rw [flushR, flush], Moves.refl hwf (by simp)⟩)
 
 /-- A step, and then the cells `D` of its footprint dropped. -/
 theorem Moves.thenDrop (hm : Moves σ0 E σ1 (E₂ ++ D) L) (hd : Dropped σ1 D σ2)
@@ -234,15 +165,31 @@ theorem post_flushR_nil (h : Post F ι O σ0 E S Γ env τ r hs (k σ)) :
 @[simp] theorem konts_int : konts σ .int v = [] := by
   simp only [konts]; cases σ.next <;> cases v <;> simp [kontsK]
 
-theorem flush_ok : FlushOk F ι (flush F O n) := by
-  intro σ ks Y hwf ⟨hks, hY⟩
-  subst hks hY
-  exact .inr (.inr ⟨.int 0, σ, by rw [flush], Moves.refl hwf (by simp)⟩)
 
 /-- `Moves.free`, for cells dropped with what they held. -/
 theorem Moves.ofDropped (hd : Dropped σ D σ') (hE : ∀ l ∈ E, σ.mem l ≠ none)
     (hsplit : ∀ l, l ∈ E ↔ l ∈ E' ∨ l ∈ D) (hdisj : Disj E' D) : Moves σ E σ' E' [] :=
   ((hd.widen (X := E') (fun l hl => hE l ((hsplit l).mpr (.inl hl))) hdisj).congr_left fun x => by
     rw [hsplit, List.mem_append]).relabel fun x => by simp
+
+theorem VT.foot_cross (h : VT F ι σ τ v L) (hc : τ.cross = true) : L = v.foot := by
+  cases h <;> simp_all [Ty.cross, Val.foot]
+
+/-- Values that may pass out of a fiber, each owning its continuation's cells. -/
+theorem Vals.konts : Vals F ι σ τs vs Ls → (∀ τ ∈ τs, τ.cross = true) → Ls.flatten.Nodup →
+    KontsOk F ι σ vs ∧ vs.flatMap Val.foot = Ls.flatten
+  | .nil, _, _ => ⟨KontsOk.nil, rfl⟩
+  | .cons hv hr, hc, hn => by
+    have hc1 := hc _ (List.mem_cons_self ..)
+    have hfoot := hv.foot_cross hc1
+    simp only [List.flatten_cons] at hn
+    obtain ⟨-, hn2, -⟩ := nodup_append_disj.mp hn
+    obtain ⟨hk, he⟩ := Vals.konts hr (fun τ hτ => hc τ (List.mem_cons_of_mem _ hτ)) hn2
+    refine ⟨⟨fun w hw => ?_, ?_⟩, ?_⟩
+    · rcases List.mem_cons.mp hw with rfl | hw
+      · exact ⟨_, hc1, hfoot ▸ hv⟩
+      · exact hk.1 w hw
+    · simp only [List.flatMap_cons, he, ← hfoot]; simpa using hn
+    · simp only [List.flatMap_cons, he, ← hfoot, List.flatten_cons]
 
 end FlyCore.Ownership

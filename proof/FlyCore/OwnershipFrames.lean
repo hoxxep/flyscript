@@ -21,17 +21,23 @@ theorem Foot.uncons : Foot F ι σ ((x, s) :: Γ) ((x, a) :: env) E S →
     ∃ L E' S', SlotOk F ι σ s a L ∧ Foot F ι σ Γ env E' S' ∧ E = addE s L E' ∧ S = addS s L S' := by
   intro h; cases h; exact ⟨_, _, _, ‹_›, ‹_›, rfl, rfl⟩
 
-/-- Dropping an owned variable's cell, live or moved, frees exactly its footprint. -/
+/-- Dropping an owned variable's cell, live or moved, frees its footprint but what the continuations
+it holds own. -/
 theorem dropCell_own (hwf : WF σ) (hτ : τ.complete = true) : SlotOk F ι σ (.own τ live) c L →
-    ∃ σ', dropCell σ τ c = some σ' ∧ σ'.next = σ.next ∧ (∀ l ∈ L, σ'.mem l = none) ∧
-      ∀ l, l ∉ L → σ'.mem l = σ.mem l := by
+    ∃ σ', dropCell σ τ c = some σ' ∧ σ'.next = σ.next ∧
+      (∀ l ∈ L, l ∉ (cellKonts σ τ c).flatMap Val.foot → σ'.mem l = none) ∧
+      (∀ l, l ∉ L ∨ l ∈ (cellKonts σ τ c).flatMap Val.foot → σ'.mem l = σ.mem l) ∧ σ'.rt = σ.rt := by
   intro h
   cases live with
   | true => exact dropCell_live hwf h hτ
   | false =>
     rcases h with ⟨hc, rfl⟩ | ⟨h, -⟩
-    · obtain ⟨σ', hd, hn, hfree, hkeep⟩ := dropCell_moved (τ := τ) hc
-      exact ⟨σ', hd, hn, by simpa using hfree, fun l hl => hkeep l (by simpa using hl)⟩
+    · obtain ⟨σ', hd, hn, hfree, hkeep, hk⟩ := dropCell_moved (τ := τ) hc
+      rw [hk]
+      refine ⟨σ', hd, hn, by simpa using hfree, fun l hl => hkeep l ?_, ?_⟩
+      · simp only [List.mem_singleton, List.flatMap_nil, List.not_mem_nil, or_false] at hl; exact hl
+      · obtain ⟨σ'', hd', -, -, -⟩ := dropCell_moved (τ := τ) hc
+        simp only [dropCell, hc] at hd; cases hd; rfl
     · exact dropCell_live hwf h hτ
 
 theorem WF.of_free {D : List Nat} (hwf : WF σ) (hnext : σ'.next = σ.next) (hfree : ∀ l ∈ D, σ'.mem l = none)

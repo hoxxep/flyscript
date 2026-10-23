@@ -1,4 +1,4 @@
-import FlyCore.OwnershipSound
+import FlyCore.OwnershipKept
 
 /-!
 # Ownership: tasks
@@ -14,7 +14,7 @@ namespace FlyCore.Ownership
 /-! ## A task's body, started -/
 
 /-- A task first given its turn runs its body. -/
-theorem ret_startK (hE : EvalOk F O n) (hb : Typed F O Γ b τ Γ' r) (hR : Ready O hs r) (hwf : WF σ0)
+theorem ret_startK [WorldOk F O ι.w] (hE : EvalOk F O n) (hb : Typed F O Γ b τ Γ' r) (hR : Ready O hs r) (hwf : WF σ0)
     (hp : Post F ι O σ0 Ein S Γ env .int r hs res) :
     Post F ι O σ0 Ein S Γ' env τ r hs (ret F O n hs (.startK env b) res) := by
   rcases res with ⟨res, σ1⟩
@@ -37,7 +37,7 @@ theorem ret_startK (hE : EvalOk F O n) (hb : Typed F O Γ b τ Γ' r) (hR : Read
 /-! ## Giving way -/
 
 /-- A task that gave way, resumed: what its continuation does. -/
-theorem yield_resume {e : Nat} (hKk : EvalKOk F O m) (hop : O[e]? = some op) (hrefs : op.refs = []) (hret : op.ret = .int)
+theorem yield_resume [WorldOk F O ι.w] {e : Nat} (hKk : EvalKOk F O m) (hop : O[e]? = some op) (hrefs : op.refs = []) (hret : op.ret = .int)
     (hK : FramesOk F O ι σs K op top X hos A) (hR : Ready O hs top.r) (hA : ∀ a ∈ A, AimedIn a hs)
     (hwf : WF σr) (hag : Agree σs σr (X ++ top.S)) (hXa : ∀ l ∈ X ++ top.S, σs.mem l ≠ none) (hXn : X.Nodup)
     (hdS : Disj top.S X) :
@@ -52,7 +52,7 @@ theorem yield_resume {e : Nat} (hKk : EvalKOk F O m) (hop : O[e]? = some op) (hr
   simpa [mutCells] using h
 
 /-- A task running alone as it is dropped: its turns are given back at once. -/
-theorem ret_parY (hKo : ∀ m, n = m + 1 → EvalKOk F O m ∧ RetOk F O m) (hop : O[e]? = some op)
+theorem ret_parY [WorldOk F O ι.w] (hKo : ∀ m, n = m + 1 → EvalKOk F O m ∧ RetOk F O m) (hop : O[e]? = some op)
     (howns : op.owns = []) (hrefs : op.refs = []) (hret : op.ret = .int)
     (hR : Ready O hs r) (hwf : WF σ0) (hag : Agree σf σ0 S) (hSa : ∀ l ∈ S, σ0.mem l ≠ none) (hSd : Disj S Ein)
     (hp : Post F ι O σ0 Ein S Γ env τ (.eff e :: r) (.capture e hid :: hs) res) :
@@ -387,7 +387,7 @@ theorem aimed_uncap : AimedIn a (.capture e hid :: hs) → AimedIn a hs := fun �
 
 /-- Two tasks, the one running `side`, the other done with `w`: the running one gives way to no one,
 and once it is done too the pair of what they gave is the value; if it fails, `w` is dropped. -/
-theorem ret_parD (hfl : FlushOk F ι (flushR F O n)) (hKo : ∀ m, n = m + 1 → EvalKOk F O m ∧ RetOk F O m)
+theorem ret_parD [WorldOk F O ι.w] (hfl : FlushOk F ι (flushR F O n)) (hKo : ∀ m, n = m + 1 → EvalKOk F O m ∧ RetOk F O m)
     (hP : ParOk F ι O σf e op Γ₁ env E₁ S τa τb) (hro : RoCtx Γr) (hSr : ∀ l ∈ Sr, l ∈ E₁ ∨ l ∈ S)
     (hw : VT F ι σf (if side then τb else τa) w Lw)
     (hR : Ready O hs r) (hwf : WF σ0) (hag : Agree σf σ0 (E₁ ++ Lw ++ S)) (halloc : ∀ l ∈ E₁ ++ Lw, σf.mem l ≠ none)
@@ -542,7 +542,7 @@ theorem ParOk.transfer (h : ParOk F ι O σf e op Γ₁ env E₁ S τa τb) (hag
 /-- Two tasks, the one running `side`, the other waiting as `Ko`: where the running one gives way,
 the schedule says which goes on; once it is done, the other runs alone; if it fails, the other is
 dropped, unwinding to a barrier, before the failure goes on. -/
-theorem ret_parS (hfl : FlushOk F ι (flushR F O n)) (hKo : ∀ m, n = m + 1 → EvalKOk F O m ∧ RetOk F O m)
+theorem ret_parS [WorldOk F O ι.w] (hfl : FlushOk F ι (flushR F O n)) (hKo : ∀ m, n = m + 1 → EvalKOk F O m ∧ RetOk F O m)
     (hP : ParOk F ι O σf e op Γ₁ env E₁ S τa τb) (hroR : RoCtx Γr) (hroO : RoCtx Γo)
     (hSr : ∀ l ∈ Sr, l ∈ E₁ ∨ l ∈ S) (hSo : ∀ l ∈ So, l ∈ E₁ ∨ l ∈ S)
     (hK : FramesOk F O ι σf Ko op ⟨Γo, envo, (if side then τb else τa), So, .eff e :: r⟩ X [] AK)
@@ -873,7 +873,7 @@ theorem task_frames {d : Fn} {cells : Env} {ls : List Nat} {e : Nat}
 
 /-- `par`: both tasks' arguments taken and their parameters allocated, the first runs, the second
 waiting as if it had given way just before its body. -/
-theorem par_ok (hF : FnsOk F O) (hR : RetOk F O n) (hKk : EvalKOk F O n)
+theorem par_ok [WorldOk F O ι.w] (hF : FnsOk F O) (hR : RetOk F O n) (hKk : EvalKOk F O n)
     (hop : O[e]? = some op) (howns : op.owns = []) (hrefs : op.refs = []) (hret : op.ret = .int)
     (hfa : F[fa]? = some da) (hfb : F[fb]? = some db) (hretpa : da.retp = none) (hcapa : da.cap = none)
     (hretpb : db.retp = none) (hcapb : db.cap = none) (hea : Label.eff e ∈ da.row) (heb : Label.eff e ∈ db.row)

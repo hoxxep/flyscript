@@ -44,7 +44,7 @@ theorem place_ok : PlaceTy Γ p τ w r → Foot F ι σ Γ env E S →
       resolve σ env p = some l ∧ (Sub (exclPart s Lr) E ∧ Sub (sharedPart s Lr) S) ∧
       (w = true → s.shell = false → Sub Lr E) ∧
       lookup r Γ = some s ∧ SlotOk F ι σ s a Lr ∧ (w = true → s.excl = true) ∧
-      (∀ σ' L', LT F ι σ' a τr L' → SlotOk F ι σ' s a L') ∧
+      (∀ ι' σ' L', LT F ι' σ' a τr L' → SlotOk F ι' σ' s a L') ∧
       (s.shell = true → (P = [] ∧ τ = τr) ∨ (τr.shell = false ∧ ∃ P', P = a :: P')) ∧ τr = s.ty := by
   intro hp hf
   induction hp with
@@ -52,10 +52,10 @@ theorem place_ok : PlaceTy Γ p τ w r → Foot F ι σ Γ env E S →
     obtain ⟨a, L, ha, hL, hE, hS⟩ := foot_lookup hf hx
     exact ⟨a, _, L, [], a, _, ha, hL, .here, ha, ⟨hE, hS⟩,
       fun _ _ => by simpa [exclPart, Slot.excl, Slot.shell, Ty.shell] using hE, hx, hL, fun _ => rfl,
-      fun _ _ h => h, fun h => by simp [Slot.shell, Ty.shell] at h, rfl⟩
+      fun _ _ _ h => h, fun h => by simp [Slot.shell, Ty.shell] at h, rfl⟩
   | @ref x m τ hx =>
     obtain ⟨a, L, ha, hL, hE, hS⟩ := foot_lookup hf hx
-    refine ⟨a, τ, L, [], a, _, ha, hL, .here, ha, ⟨hE, hS⟩, ?_, hx, hL, ?_, fun _ _ h => h, fun _ => .inl ⟨rfl, rfl⟩, rfl⟩
+    refine ⟨a, τ, L, [], a, _, ha, hL, .here, ha, ⟨hE, hS⟩, ?_, hx, hL, ?_, fun _ _ _ h => h, fun _ => .inl ⟨rfl, rfl⟩, rfl⟩
     · intro hw hsh
       cases m
       · simp at hw
@@ -67,7 +67,7 @@ theorem place_ok : PlaceTy Γ p τ w r → Foot F ι σ Γ env E S →
     subst hτ
     obtain ⟨a, L, ha, hL, hE, hS⟩ := foot_lookup hf hx
     exact ⟨a, .lent1 t A B, L, [], a, _, ha, hL, .here, ha, ⟨hE, hS⟩, fun _ hsh => by simp [Slot.shell, Ty.shell] at hsh, hx, hL,
-      fun _ => rfl, fun _ _ h => h, fun _ => .inl ⟨rfl, rfl⟩, rfl⟩
+      fun _ => rfl, fun _ _ _ h => h, fun _ => .inl ⟨rfl, rfl⟩, rfl⟩
   | deref hq ih =>
     obtain ⟨a, τr, Lr, P, l, s, ha, hLr, hpath, hres, hsub, hw, hs, hso, hex, hlt, hsh, hty⟩ := ih
     obtain ⟨R, hR, -⟩ := path_split hpath hLr
@@ -475,9 +475,9 @@ pair's tree again, the field filled with what the borrow left, once it ends. -/
 theorem split_field (t : Bool) (hL : LT F ι σ a (.pair A B) L) :
     ∃ b c Rt Ro, σ.mem a = some (.pair b c) ∧ LT F ι σ (if t then b else c) (if t then A else B) Rt ∧
       LT F ι σ a (Ty.lent1 t A B) (a :: Ro) ∧ L.Perm (a :: (Rt ++ Ro)) ∧ Disj Rt Ro ∧ a ∉ Rt ++ Ro ∧
-      ∀ σ' Ro' Rx, σ'.mem a = σ.mem a → LT F ι σ' a (Ty.lent1 t A B) (a :: Ro') →
-        LT F ι σ' (if t then b else c) (if t then A else B) Rx → Disj Rx Ro' → a ∉ Rx ++ Ro' →
-        ∃ L', LT F ι σ' a (.pair A B) L' ∧ L'.Perm (a :: (Rx ++ Ro')) := by
+      ∀ ι' σ' Ro' Rx, σ'.mem a = σ.mem a → LT F ι' σ' a (Ty.lent1 t A B) (a :: Ro') →
+        LT F ι' σ' (if t then b else c) (if t then A else B) Rx → Disj Rx Ro' → a ∉ Rx ++ Ro' →
+        ∃ L', LT F ι' σ' a (.pair A B) L' ∧ L'.Perm (a :: (Rx ++ Ro')) := by
   cases hL with
   | pair ha h1 h2 hd hn =>
     rename_i b c R₁ R₂
@@ -488,7 +488,7 @@ theorem split_field (t : Bool) (hL : LT F ι σ a (.pair A B) L) :
           (fun h => hn (List.mem_append.mpr (.inr (by simpa using h))))
         simpa [Ty.lent1] using this
       refine ⟨b, c, R₁, R₂, ha, h1, hlt, .refl _, hd, hn, ?_⟩
-      intro σ' Ro' Rx hag hL' hx hd' hn'
+      intro ι' σ' Ro' Rx hag hL' hx hd' hn'
       simp only [Ty.lent1, ↓reduceIte] at hL'
       cases hL' with
       | pair ha' g1 g2 _ _ =>
@@ -502,7 +502,7 @@ theorem split_field (t : Bool) (hL : LT F ι σ a (.pair A B) L) :
         simpa [Ty.lent1] using this
       refine ⟨b, c, R₂, R₁, ha, h2, hlt, List.Perm.cons _ List.perm_append_comm, fun x hx hx' => hd x hx' hx,
         fun h => hn (List.perm_append_comm.mem_iff.mp h), ?_⟩
-      intro σ' Ro' Rx hag hL' hx hd' hn'
+      intro ι' σ' Ro' Rx hag hL' hx hd' hn'
       simp only [Ty.lent1, Bool.false_eq_true, ↓reduceIte] at hL'
       cases hL' with
       | pair ha' g1 g2 _ _ =>
@@ -596,7 +596,7 @@ theorem replace_at (hI : Inv F ι σ Γ env E S) (hp : PlaceTy Γ p τ true r) (
         rcases hx with (hx | hx) | hx
         · exact .inl (.inl (.inl hx))
         · exact .inl (.inr hx)
-        · exact .inr hx)) (hlt σ' _ hlt')
+        · exact .inr hx)) (hlt _ σ' _ hlt')
       rw [setSlot_same Γ hI.keys hs] at hfoot
       exact ⟨L'', hfoot, hL''p⟩
     · -- The place lies past the root's first cell, which stays as it was.
@@ -639,7 +639,7 @@ theorem replace_at (hI : Inv F ι σ Γ env E S) (hp : PlaceTy Γ p τ true r) (
         rcases hx with (hx | hx) | hx
         · exact .inl (.inl (.inl hx))
         · exact .inl (.inr hx)
-        · exact .inr hx)) (hlt σ' _ hlt')
+        · exact .inr hx)) (hlt _ σ' _ hlt')
       exact ⟨R'', hfoot, by simpa using hL''p⟩
   obtain ⟨P, E₁, E₂, hEp, hPf, hupd⟩ := key
   refine ⟨l, R, P, E₁, E₂, hres, hR, hEp, ?_⟩
