@@ -109,14 +109,14 @@ theorem atom_ok (h : AtomTy Γ a τ Γ') (hI : Inv F ι σ Γ env E S) (hwf : WF
     · exact (Moves.set hwf hI.alloc haE).relabel fun x => by rw [hE]; mem_iff
 
 /-- A closure moved out of its variable: what it captured is the mover's, the variable left moved. -/
-theorem move_clo (hx : lookup x Γ = some (.own (.fn k A B r) true)) (hI : Inv F ι σ Γ env E S) (hwf : WF σ) :
-    ∃ cx f c τc Rc E', lookup x env = some cx ∧ σ.mem cx = some (.clo f c τc) ∧ CloOk F f τc k A B r ∧
-      LT F ι σ c τc Rc ∧ cx ∉ Rc ∧ Inv F ι (σ.set cx (some .moved)) (setSlot Γ x (.own (.fn k A B r) false)) env E' S ∧
+theorem move_clo (hx : lookup x Γ = some (.own (.fn k A B r Rf) true)) (hI : Inv F ι σ Γ env E S) (hwf : WF σ) :
+    ∃ cx f c τc Rc E', lookup x env = some cx ∧ σ.mem cx = some (.clo f c τc) ∧ CloOk F f τc k A B r Rf ∧
+      LT F ι σ c τc Rc ∧ cx ∉ Rc ∧ Inv F ι (σ.set cx (some .moved)) (setSlot Γ x (.own (.fn k A B r Rf) false)) env E' S ∧
       Disj Rc E' ∧ Disj Rc S ∧ Moves σ E (σ.set cx (some .moved)) E' Rc := by
   obtain ⟨a, L, E₁, E₂, ha, hL, hE, hupd⟩ := foot_update hI.foot hI.keys hx rfl rfl
   simp only [SlotOk] at hL
   cases hL with
-  | @clo _ f c τc _ _ _ _ Rb hla hco hRb hn =>
+  | @clo _ f c τc _ _ _ _ _ Rb hla hco hRb hn =>
     have hnd := seg_nodup (hE ▸ hI.nodup)
     have haE : a ∈ E := hE ▸ mem_seg.mpr (.inl (List.mem_cons_self ..))
     have haS : a ∉ S := fun h => hI.disj a h haE
@@ -522,7 +522,7 @@ theorem FrameOk.S_sub (hf : FrameOk F O ιi ιo σf f inL outL Xf A) : ∀ l ∈
     rcases hSo l hl with h | h
     · exact .inl (by simp [h])
     · exact .inr h
-  | scW | scV | scEt => intro l hl; simp [tLvl] at hl
+  | scW _ _ _ _ _ _ _ _ _ hSt _ | scV _ _ _ _ _ _ _ _ hSt _ | scEt _ _ _ _ hSt _ => intro l hl; exact .inr (hSt l hl)
   | _ => intro l hl; exact .inr hl
 
 /-- The code that performed the operation a continuation was taken at: its activation, the places
@@ -1737,8 +1737,8 @@ what the borrowed place is rooted at is only read while it lives; once it ends, 
 theorem lendClo_ok (hE : EvalOk F O n) (hfd : F[f]? = some d) (hcap : d.cap = some (xc, τc, .shared))
     (hown : d.owns = [(pn, A)]) (hrefs : d.refs = []) (hretp : d.retp = none) (hdat : τc.data = true)
     (hp : PlaceTy Γ p τc w y) (hx : lookup x Γ = none)
-    (hb : Typed F O ((x, .ref .ro (.fn .shared A d.ret d.row)) :: freeze Γ [y]) body τb
-      ((x, .ref .ro (.fn .shared A d.ret d.row)) :: Γb) r)
+    (hb : Typed F O ((x, .ref .ro (.fn .shared A d.ret d.row .nil)) :: freeze Γ [y]) body τb
+      ((x, .ref .ro (.fn .shared A d.ret d.row .nil)) :: Γb) r)
     (hI : Inv F ι σ Γ env E S) (hwf : WF σ) (hR : Ready O hs r) :
     Post F ι O σ E S (thaw Γ [y] Γb) env τb r hs (eval F O (n + 1) hs σ env (.lendClo x f p body)) := by
   obtain ⟨a0, τr, Lr, P, l, s, ha0, hLr, hpath, hres, -, -, hsl, hso, -, -⟩ := place_ok hp hI.foot
@@ -1761,9 +1761,9 @@ theorem lendClo_ok (hE : EvalOk F O n) (hfd : F[f]? = some d) (hcap : d.cap = so
   have hRta : ∀ z ∈ Rt, σ.mem z ≠ none := hRt.alloc
   have hna : ∀ z, σ.mem z ≠ none → z ≠ σ.next := fun z hz e => Nat.lt_irrefl _ (e ▸ hwf z hz)
   have haRt : σ.next ∉ Rt := fun h => hna _ (hRta _ h) rfl
-  have hco : CloOk F f τc .shared A d.ret d.row :=
-    ⟨d, xc, pn, hfd, hcap, hown, hrefs, hretp, rfl, rfl, Ty.data_complete hdat, Ty.data_rfree hdat⟩
-  have hLa : LT F ι (σ.alloc (.clo f l τc)).2 σ.next (.fn .shared A d.ret d.row) (σ.next :: Rt) :=
+  have hco : CloOk F f τc .shared A d.ret d.row .nil :=
+    ⟨d, xc, pn, hfd, hcap, hown, by simp [hrefs, TyList.toList], hretp, rfl, rfl, Ty.data_complete hdat, Ty.data_rfree hdat⟩
+  have hLa : LT F ι (σ.alloc (.clo f l τc)).2 σ.next (.fn .shared A d.ret d.row .nil) (σ.next :: Rt) :=
     .clo (by simp [Store.alloc]) hco (hRt.frame <| Agree.of' fun z hz => hold z (hRta z hz)) haRt
   have hFza : ∀ z ∈ Fz, σ.mem z ≠ none := fun z hz => hI.alloc z (hFz z hz)
   have hSin : ∀ z ∈ (σ.next :: Rt) ++ Sb, z ∈ (σ.next :: Fz) ∨ z ∈ S := fun z hz => by
@@ -1776,9 +1776,9 @@ theorem lendClo_ok (hE : EvalOk F O n) (hfd : F[f]? = some d) (hcap : d.cap = so
     · rcases List.mem_append.mp (hS.mem_iff.mp h) with h | h
       · exact .inl (List.mem_cons_of_mem _ h)
       · exact .inr h
-  have hIb : Inv F ι (σ.alloc (.clo f l τc)).2 ((x, .ref .ro (.fn .shared A d.ret d.row)) :: freeze Γ [y])
+  have hIb : Inv F ι (σ.alloc (.clo f l τc)).2 ((x, .ref .ro (.fn .shared A d.ret d.row .nil)) :: freeze Γ [y])
       ((x, σ.next) :: env) Eb ((σ.next :: Rt) ++ Sb) := by
-    have hfoot := Foot.cons (s := .ref .ro (.fn .shared A d.ret d.row)) (x := x) (a := σ.next) hLa
+    have hfoot := Foot.cons (s := .ref .ro (.fn .shared A d.ret d.row .nil)) (x := x) (a := σ.next) hLa
       (hfb.frame <| Agree.of' fun z hz => hold z (hfb.alloc z (List.mem_append.mp hz)))
     refine ⟨by simpa [addE, addS, Slot.excl, exclPart, sharedPart, Slot.shell, Ty.shell, Bool.false_eq_true] using hfoot, hEbn, ?_,
       List.nodup_cons.mpr ⟨hxk, by rw [freeze_keys]; exact hI.keys⟩⟩
@@ -1793,7 +1793,7 @@ theorem lendClo_ok (hE : EvalOk F O n) (hfd : F[f]? = some d) (hcap : d.cap = so
     simp only [List.map_cons, List.cons.injEq] at this
     rw [this.2, freeze_keys]
   have hre : ∀ σ1 Eb', Agree (σ.alloc (.clo f l τc)).2 σ1 ((σ.next :: Fz) ++ S) → Disj (σ.next :: Fz) Eb' →
-      Inv F ι σ1 ((x, .ref .ro (.fn .shared A d.ret d.row)) :: Γb) ((x, σ.next) :: env) Eb' ((σ.next :: Rt) ++ Sb) →
+      Inv F ι σ1 ((x, .ref .ro (.fn .shared A d.ret d.row .nil)) :: Γb) ((x, σ.next) :: env) Eb' ((σ.next :: Rt) ++ Sb) →
       ∃ E', Inv F ι σ1 (thaw Γ [y] Γb) env E' S ∧
         ∀ z, z ∈ E' ↔ z ∈ Eb' ∨ (z ∈ σ.next :: Fz ∧ z ≠ σ.next) := by
     intro σ1 Eb' hag hdX hI'
@@ -1862,8 +1862,8 @@ reach; once it ends, the cell is freed and the root owns again its path and what
 theorem lendCloMut_ok (hE : EvalOk F O n) (hfd : F[f]? = some d) (hcap : d.cap = some (xc, τc, .excl))
     (hown : d.owns = [(pn, A)]) (hrefs : d.refs = []) (hretp : d.retp = none) (hdat : τc.data = true)
     (hp : PlaceTy Γ p τc true y) (hun : Unsplit Γ y) (hx : lookup x Γ = none)
-    (hb : Typed F O ((x, .ref .mut (.fn .excl A d.ret d.row)) :: hide Γ y) body τb
-      ((x, .ref .mut (.fn .excl A d.ret d.row)) :: Γb) r)
+    (hb : Typed F O ((x, .ref .mut (.fn .excl A d.ret d.row .nil)) :: hide Γ y) body τb
+      ((x, .ref .mut (.fn .excl A d.ret d.row .nil)) :: Γb) r)
     (hI : Inv F ι σ Γ env E S) (hwf : WF σ) (hR : Ready O hs r) :
     Post F ι O σ E S (thaw Γ [y] Γb) env τb r hs (eval F O (n + 1) hs σ env (.lendClo x f p body)) := by
   obtain ⟨a0, τr, Lr, P, l, s, ha0, hLr, hpath, hres, -, hsubE, hsl, hso, hexw, hslot, hshp, hty⟩ := place_ok hp hI.foot
@@ -1891,13 +1891,13 @@ theorem lendCloMut_ok (hE : EvalOk F O n) (hfd : F[f]? = some d) (hcap : d.cap =
   have hPa : ∀ z ∈ P, σ.mem z ≠ none := fun z h => hLr.alloc z (hLrPR.mem_iff.mpr (List.mem_append.mpr (.inl h)))
   have haRt : σ.next ∉ Rt := fun h => hna _ (hRta _ h) rfl
   have haP : σ.next ∉ P := fun h => hna _ (hPa _ h) rfl
-  have hco : CloOk F f τc .excl A d.ret d.row :=
-    ⟨d, xc, pn, hfd, hcap, hown, hrefs, hretp, rfl, rfl, Ty.data_complete hdat, Ty.data_rfree hdat⟩
-  have hLa : LT F ι (σ.alloc (.clo f l τc)).2 σ.next (.fn .excl A d.ret d.row) (σ.next :: Rt) :=
+  have hco : CloOk F f τc .excl A d.ret d.row .nil :=
+    ⟨d, xc, pn, hfd, hcap, hown, by simp [hrefs, TyList.toList], hretp, rfl, rfl, Ty.data_complete hdat, Ty.data_rfree hdat⟩
+  have hLa : LT F ι (σ.alloc (.clo f l τc)).2 σ.next (.fn .excl A d.ret d.row .nil) (σ.next :: Rt) :=
     .clo (by simp [Store.alloc]) hco (hRt.frame <| Agree.of' fun z hz => hold z (hRta z hz)) haRt
-  have hIb : Inv F ι (σ.alloc (.clo f l τc)).2 ((x, .ref .mut (.fn .excl A d.ret d.row)) :: hide Γ y)
+  have hIb : Inv F ι (σ.alloc (.clo f l τc)).2 ((x, .ref .mut (.fn .excl A d.ret d.row .nil)) :: hide Γ y)
       ((x, σ.next) :: env) (Rt ++ Eh) (σ.next :: S) := by
-    have hfoot := Foot.cons (s := .ref .mut (.fn .excl A d.ret d.row)) (x := x) (a := σ.next) hLa
+    have hfoot := Foot.cons (s := .ref .mut (.fn .excl A d.ret d.row .nil)) (x := x) (a := σ.next) hLa
       (hfh.frame <| Agree.of' fun z hz => hold z (hfh.alloc z (List.mem_append.mp hz)))
     refine ⟨by simpa [addE, addS, exclPart, sharedPart, Slot.excl, Slot.shell, Ty.shell] using hfoot,
       nodup_append_disj.mpr ⟨hRn, hEhn, fun z h h' => hdLrEh z (List.mem_append.mpr (.inr h)) h'⟩, ?_,
@@ -1915,7 +1915,7 @@ theorem lendCloMut_ok (hE : EvalOk F O n) (hfd : F[f]? = some d) (hcap : d.cap =
     simp only [List.map_cons, List.cons.injEq] at this
     rw [this.2, hide_keys]
   have hre : ∀ σ1 Eb', Agree (σ.alloc (.clo f l τc)).2 σ1 ((σ.next :: P) ++ S) → Disj (σ.next :: P) Eb' →
-      Inv F ι σ1 ((x, .ref .mut (.fn .excl A d.ret d.row)) :: Γb) ((x, σ.next) :: env) Eb' (σ.next :: S) →
+      Inv F ι σ1 ((x, .ref .mut (.fn .excl A d.ret d.row .nil)) :: Γb) ((x, σ.next) :: env) Eb' (σ.next :: S) →
       ∃ E', Inv F ι σ1 (thaw Γ [y] Γb) env E' S ∧ ∀ z, z ∈ E' ↔ z ∈ Eb' ∨ (z ∈ σ.next :: P ∧ z ≠ σ.next) := by
     intro σ1 Eb' hag hdX hI'
     obtain ⟨L', Et, St, hL', hft, hEt, hSt⟩ := hI'.foot.uncons
@@ -1924,7 +1924,7 @@ theorem lendCloMut_ok (hE : EvalOk F O n) (hfd : F[f]? = some d) (hcap : d.cap =
       rw [hag _ (List.mem_append.mpr (.inl (List.mem_cons_self ..)))]; simp [Store.alloc]
     simp only [SlotOk] at hL'
     cases hL' with
-    | @clo _ f' c' τc' _ _ _ _ R' ha' _ hR' hn' =>
+    | @clo _ f' c' τc' _ _ _ _ _ R' ha' _ hR' hn' =>
     rw [ha1] at ha'
     cases ha'
     simp only [addE, addS, exclPart, sharedPart, Slot.excl, Slot.shell, Ty.shell, ↓reduceIte, List.tail_cons,

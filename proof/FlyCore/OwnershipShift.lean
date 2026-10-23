@@ -97,7 +97,7 @@ theorem LT.unshift : ∀ {τ : Ty} {c : Nat} {L : List Nat}, LT F (a :: ι) σ c
   | .box τ, _, _, h => by
     simp only [Ty.shiftBy] at h
     cases h with | box ha hb hn => exact .box ha (LT.unshift hb) hn
-  | .fn _ _ _ _, _, _, h => by
+  | .fn _ _ _ _ _, _, _, h => by
     simp only [Ty.shiftBy] at h
     cases h with | clo ha hc hb hn => exact .clo ha hc (hb.rfree_iota hc.rfree) hn
   | .pair A B, _, _, h => by
@@ -131,7 +131,7 @@ theorem LT.unshift : ∀ {τ : Ty} {c : Nat} {L : List Nat}, LT F (a :: ι) σ c
 theorem Ty.complete_shift : ∀ {τ : Ty}, (τ.shiftBy n).complete = τ.complete
   | .int => rfl
   | .box τ => by simp [Ty.shiftBy, Ty.complete, Ty.complete_shift (τ := τ)]
-  | .fn _ _ _ _ => rfl
+  | .fn _ _ _ _ _ => rfl
   | .pair A B => by simp [Ty.shiftBy, Ty.complete, Ty.complete_shift (τ := A), Ty.complete_shift (τ := B)]
   | .sum A B => by simp [Ty.shiftBy, Ty.complete, Ty.complete_shift (τ := A), Ty.complete_shift (τ := B)]
   | .hole _ => rfl
@@ -166,7 +166,7 @@ theorem VT.unshift : ∀ {τ : Ty} {v : Val} {L : List Nat}, VT F (a :: ι) σ (
   | .box τ, _, _, h => by
     simp only [Ty.shiftBy] at h
     cases h with | box hb hc => exact .box (LT.unshift hb) (by rwa [Ty.complete_shift] at hc)
-  | .fn _ _ _ _, _, _, h => by
+  | .fn _ _ _ _ _, _, _, h => by
     simp only [Ty.shiftBy] at h
     cases h with | clo hc hb hc' => exact .clo hc (hb.rfree_iota hc.rfree) hc'
   | .pair A B, _, _, h => by
@@ -303,7 +303,7 @@ theorem LT.unshiftk : ∀ {τ : Ty} {c : Nat} {L : List Nat}, LT F ι σ c (τ.s
   | .box τ, _, _, h => by
     simp only [Ty.shiftBy] at h
     cases h with | box ha hb hn => exact .box ha (LT.unshiftk hb) hn
-  | .fn _ _ _ _, _, _, h => by
+  | .fn _ _ _ _ _, _, _, h => by
     simp only [Ty.shiftBy] at h
     cases h with | clo ha hc hb hn => exact .clo ha hc (hb.rfree_iota hc.rfree) hn
   | .pair A B, _, _, h => by
@@ -358,7 +358,7 @@ theorem VT.unshiftk : ∀ {τ : Ty} {v : Val} {L : List Nat}, VT F ι σ (τ.shi
   | .box τ, _, _, h => by
     simp only [Ty.shiftBy] at h
     cases h with | box hb hc => exact .box (LT.unshiftk hb) (by rwa [Ty.complete_shift] at hc)
-  | .fn _ _ _ _, _, _, h => by
+  | .fn _ _ _ _ _, _, _, h => by
     simp only [Ty.shiftBy] at h
     cases h with | clo hc hb hc' => exact .clo hc (hb.rfree_iota hc.rfree) hc'
   | .pair A B, _, _, h => by

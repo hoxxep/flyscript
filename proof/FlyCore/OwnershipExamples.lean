@@ -571,7 +571,7 @@ def bump : Fn :=
 to the next; 42, and once `f` goes out of scope, its box with it: nothing left allocated. -/
 def counter : Expr :=
   .let_ "b" (.box .int) (.new (.lit 40))
-    (.let_ "f" (.fn .excl .int .int []) (.lam 0 (.move "b"))
+    (.let_ "f" (.fn .excl .int .int [] .nil) (.lam 0 (.move "b"))
       (.let_ "u" .int (.apply .excl (var "f") (.lit 1)) (.apply .excl (var "f") (.lit 1))))
 
 example : value (eval [bump] [] 30 [] .empty [] counter) = some 42 := by
@@ -588,10 +588,10 @@ theorem bump_ok : FnsOk [bump] [] := by
       (.atom (.read (.deref (.ref (m := .mut) rfl)))))⟩
 
 theorem counter_typed : Typed [bump] [] [] counter .int [] [.fail] := by
-  have hlam : Typed [bump] [] [("b", .own (.box .int) true)] (.lam 0 (.move "b")) (.fn .excl .int .int [])
+  have hlam : Typed [bump] [] [("b", .own (.box .int) true)] (.lam 0 (.move "b")) (.fn .excl .int .int [] .nil)
       [("b", .own (.box .int) false)] [.fail] := by
     have := Typed.lam (F := [bump]) (O := []) (Γ := [("b", .own (.box .int) true)]) (f := 0) (d := bump)
-      (r := [.fail]) rfl rfl rfl rfl rfl (.move (x := "b") rfl rfl) rfl
+      (r := [.fail]) (R := .nil) rfl rfl rfl rfl rfl (.move (x := "b") rfl rfl) rfl
     simpa [bump, setSlot] using this
   exact .let_ (live := false) rfl (.new .lit)
     (.let_ (live := true) rfl hlam
@@ -616,7 +616,7 @@ def spend : Fn :=
 /-- `let b = Box.new(40); let f = (x) => *c + x; f(2)`: 42, and nothing left allocated. -/
 def spends : Expr :=
   .let_ "b" (.box .int) (.new (.lit 40))
-    (.let_ "f" (.fn .once .int .int []) (.lam 0 (.move "b")) (.apply .once (var "f") (.lit 2)))
+    (.let_ "f" (.fn .once .int .int [] .nil) (.lam 0 (.move "b")) (.apply .once (var "f") (.lit 2)))
 
 example : value (eval [spend] [] 30 [] .empty [] spends) = some 42 := by
   run [spends, spend, cloFn]
@@ -626,7 +626,7 @@ example : freed (eval [spend] [] 30 [] .empty [] spends) := by
 /-- `f(2); f(2)` for a closure called once: the types reject the second call. -/
 def spendsTwice : Expr :=
   .let_ "b" (.box .int) (.new (.lit 40))
-    (.let_ "f" (.fn .once .int .int []) (.lam 0 (.move "b"))
+    (.let_ "f" (.fn .once .int .int [] .nil) (.lam 0 (.move "b"))
       (.let_ "u" .int (.apply .once (var "f") (.lit 2)) (.apply .once (var "f") (.lit 2))))
 
 theorem spendsTwice_rejected : ¬ Typed [spend] [] [] spendsTwice τ Γ' r := by
@@ -654,7 +654,7 @@ def addTo : Fn :=
 
 /-- `function twice(x: int, g: readonly (int) => int): int { g(g(x)) }`. -/
 def twice : Fn :=
-  { owns := [("x", .int)], refs := [("g", .ro, .fn .shared .int .int [])], ret := .int, row := [],
+  { owns := [("x", .int)], refs := [("g", .ro, .fn .shared .int .int [] .nil)], ret := .int, row := [],
     body := .let_ "t" .int (.apply .shared (var "g") (.read (var "x"))) (.apply .shared (var "g") (.read (var "t"))) }
 
 /-- `let b = Box.new(20); let u = { const f = (x) => x + *b; twice(2, f) }; u + *b`: the closure reads
@@ -680,9 +680,9 @@ theorem higher_fns_ok : FnsOk [addTo, twice] [] := by
       (.applyBorrow (by decide) (.read (.own rfl)) (.ref (m := .ro) rfl) (fun h => by cases h) (by simp))⟩
 
 theorem higher_typed : Typed [addTo, twice] [] [] higher .int [] [.fail] := by
-  have hcall : Typed [addTo, twice] [] [("f", .ref .ro (.fn .shared .int .int [])), ("b", .ref .ro (.box .int))]
+  have hcall : Typed [addTo, twice] [] [("f", .ref .ro (.fn .shared .int .int [] .nil)), ("b", .ref .ro (.box .int))]
       (.call 1 [.lit 2] [(.ro, var "f")]) .int
-      [("f", .ref .ro (.fn .shared .int .int [])), ("b", .ref .ro (.box .int))] [.fail] :=
+      [("f", .ref .ro (.fn .shared .int .int [] .nil)), ("b", .ref .ro (.box .int))] [.fail] :=
     .call (k := 0) (d := twice) rfl rfl rfl (by simp [twice]) (.cons .lit .nil)
       (.cons (.ref (m := .ro) rfl) (fun h => by cases h) rfl .nil) (by simp [LentApart])
   have hlc := Typed.lendClo (F := [addTo, twice]) (O := []) (Γ := [("b", .own (.box .int) true)]) (f := 0)
@@ -706,7 +706,7 @@ example : ∀ n, match eval [addTo, twice] [] n [.abort .fail 0] .empty [] highe
 
 /-- `function callsTwice(g: mut (int) => int): int { g(1); g(2) }`. -/
 def callsTwice : Fn :=
-  { owns := [], refs := [("g", .mut, .fn .excl .int .int [])], ret := .int, row := [],
+  { owns := [], refs := [("g", .mut, .fn .excl .int .int [] .nil)], ret := .int, row := [],
     body := .let_ "t" .int (.apply .excl (var "g") (.lit 1)) (.apply .excl (var "g") (.lit 2)) }
 
 /-- `let b = Box.new(10); let u = { const f = (x) => { *b = *b + x; *b }; callsTwice(f) }; u + *b`:
@@ -735,9 +735,9 @@ theorem tally_fns_ok : FnsOk [bump, callsTwice] [] := by
       (.applyBorrow (by decide) .lit (.ref (m := .mut) rfl) (fun _ => rfl) (by simp))⟩
 
 theorem tally_typed : Typed [bump, callsTwice] [] [] tally .int [] [.fail] := by
-  have hcall : Typed [bump, callsTwice] [] [("f", .ref .mut (.fn .excl .int .int [])), ("b", .lent (.box .int) false)]
+  have hcall : Typed [bump, callsTwice] [] [("f", .ref .mut (.fn .excl .int .int [] .nil)), ("b", .lent (.box .int) false)]
       (.call 1 [] [(.mut, var "f")]) .int
-      [("f", .ref .mut (.fn .excl .int .int [])), ("b", .lent (.box .int) false)] [.fail] :=
+      [("f", .ref .mut (.fn .excl .int .int [] .nil)), ("b", .lent (.box .int) false)] [.fail] :=
     .call (k := 0) (d := callsTwice) rfl rfl rfl (by simp [callsTwice]) .nil
       (.cons (.ref (m := .mut) rfl) (fun _ => rfl) rfl .nil) (by simp [LentApart])
   have hlc := Typed.lendCloMut (F := [bump, callsTwice]) (O := []) (Γ := [("b", .own (.box .int) true)]) (f := 0)
@@ -763,7 +763,7 @@ theorem placeTy_var_root {w : Bool} (h : PlaceTy Γ (.var x) τ w y) : y = x := 
 /-- `{ const f = (x) => { … }; f = …; }` over a borrow of `b`: putting another closure in place
 of one borrowed `mut`, the types reject it. -/
 def swapClosure : Expr :=
-  .lendClo "f" 0 (var "b") (.assign (var "f") (.fn .excl .int .int []) (.lit 0))
+  .lendClo "f" 0 (var "b") (.assign (var "f") (.fn .excl .int .int [] .nil) (.lit 0))
 
 theorem swapClosure_rejected : ¬ Typed [bump] [] [("b", .own (.box .int) true)] swapClosure τ Γ' r := by
   intro h
@@ -782,19 +782,19 @@ theorem swapClosure_rejected : ¬ Typed [bump] [] [("b", .own (.box .int) true)]
 
 /-- `function make(b: Box<int>): once (int) => int { (x) => *b + x }`: a closure that owns the box. -/
 def make : Fn :=
-  { owns := [("b", .box .int)], refs := [], ret := .fn .once .int .int [], row := [],
+  { owns := [("b", .box .int)], refs := [], ret := .fn .once .int .int [] .nil, row := [],
     body := .lam 0 (.move "b") }
 
 /-- `function useOnce(g: once (int) => int): int { g(5) }`. -/
 def useOnce : Fn :=
-  { owns := [("g", .fn .once .int .int [])], refs := [], ret := .int, row := [],
+  { owns := [("g", .fn .once .int .int [] .nil)], refs := [], ret := .int, row := [],
     body := .apply .once (var "g") (.lit 5) }
 
 /-- `let b = Box.new(40); let f = make(b); useOnce(f)`: the box goes into the closure `make` returns,
 and the closure into `useOnce`, which consumes it; 45, and nothing left allocated. -/
 def handOff : Expr :=
   .let_ "b" (.box .int) (.new (.lit 40))
-    (.let_ "f" (.fn .once .int .int []) (.call 1 [.move "b"] []) (.call 2 [.move "f"] []))
+    (.let_ "f" (.fn .once .int .int [] .nil) (.call 1 [.move "b"] []) (.call 2 [.move "f"] []))
 
 example : value (eval [spend, make, useOnce] [] 30 [] .empty [] handOff) = some 45 := by
   run [handOff, spend, make, useOnce, cloFn]
@@ -835,14 +835,14 @@ def addBox : Fn :=
 def twiceOf : Fn :=
   { owns := [("x", .int)], refs := [], ret := .int, row := [],
     body := .let_ "t" .int (.apply .shared (var "g") (.read (var "x"))) (.apply .shared (var "g") (.read (var "t"))),
-    cap := some ("g", .fn .shared .int .int [], .shared) }
+    cap := some ("g", .fn .shared .int .int [] .nil, .shared) }
 
 /-- `let b = Box.new(5); let f = (x) => x + *b; let h = (x) => f(f(x)); h(1)`: `h` takes `f`, which
 took `b`; 11, and dropping `h` drops `f` and its box: nothing left allocated. -/
 def nested : Expr :=
   .let_ "b" (.box .int) (.new (.lit 5))
-    (.let_ "f" (.fn .shared .int .int []) (.lam 0 (.move "b"))
-      (.let_ "h" (.fn .shared .int .int []) (.lam 1 (.move "f")) (.apply .shared (var "h") (.lit 1))))
+    (.let_ "f" (.fn .shared .int .int [] .nil) (.lam 0 (.move "b"))
+      (.let_ "h" (.fn .shared .int .int [] .nil) (.lam 1 (.move "f")) (.apply .shared (var "h") (.lit 1))))
 
 example : value (eval [addBox, twiceOf] [] 30 [] .empty [] nested) = some 11 := by
   run [nested, addBox, twiceOf, cloFn]
@@ -2237,7 +2237,7 @@ captured; the body and its tasks give way to each other, in any order a schedule
 
 /-- `Yield`, by which a scope's body and tasks give way, and `Spawn`, by which they start a task. -/
 def scYield : Op := { owns := [], refs := [], ret := .int }
-def scSpawn : Op := { owns := [.fn .once .int .int [.eff 0]], refs := [], ret := .int }
+def scSpawn : Op := { owns := [.fn .once .int .int [.eff 0] .nil], refs := [], ret := .int }
 def scOps : List Op := [scYield, scSpawn]
 
 /-- `(_) => { yield; *b }`, a closure that captured a box `b`. -/
@@ -2249,12 +2249,12 @@ def tk : Fn :=
 s.spawn(() => …c…); yield; 42 })`: two tasks started as the body runs, each owning a box; 42, and
 nothing left allocated, whichever way they interleave. -/
 def scopeEx : Expr :=
-  .scope 0 1 .int
+  .scope 0 1 [] .int
     (.let_ "b" (.box .int) (.new (.lit 5))
-      (.let_ "k" (.fn .once .int .int [.eff 0]) (.lam 0 (.move "b"))
+      (.let_ "k" (.fn .once .int .int [.eff 0] .nil) (.lam 0 (.move "b"))
         (.let_ "u" .int (.perform 1 [.move "k"] [])
           (.let_ "c" (.box .int) (.new (.lit 7))
-            (.let_ "k2" (.fn .once .int .int [.eff 0]) (.lam 0 (.move "c"))
+            (.let_ "k2" (.fn .once .int .int [.eff 0] .nil) (.lam 0 (.move "c"))
               (.let_ "u2" .int (.perform 1 [.move "k2"] [])
                 (.let_ "y" .int (.perform 0 [] []) (.atom (.lit 42)))))))))
 
@@ -2278,7 +2278,7 @@ theorem tk_ok : FnsOk [tk] scOps := by
 
 theorem scopeEx_typed : Typed [tk] scOps [] scopeEx .int [] [.fail] := by
   refine .scope (op := scYield) (opS := scSpawn) (rT := [.eff 0]) rfl rfl rfl rfl rfl rfl rfl rfl (by decide)
-    (by simp) (by simp) rfl ?_
+    (by simp) (by simp) rfl rfl (by simp) ?_
   refine .let_ (live := false) rfl (.new .lit) ?_
   refine .let_ (live := false) rfl (.lam (d := tk) rfl rfl rfl rfl rfl (.move rfl rfl) rfl) ?_
   refine .let_ (live := true) rfl (.perform (op := scSpawn) rfl (by simp) (.cons (.move rfl rfl) .nil) .nil .nil) ?_
@@ -2304,19 +2304,19 @@ def badTk : Fn :=
 def okTk : Fn :=
   { owns := [("p", .int)], refs := [], ret := .int, row := [.eff 0, .fail], cap := some ("b", .box .int, .once),
     body := .let_ "u" .int (.perform 0 [] []) (.atom (.read (deref (var "b")))) }
-def scSpawnF : Op := { owns := [.fn .once .int .int [.eff 0, .fail]], refs := [], ret := .int }
+def scSpawnF : Op := { owns := [.fn .once .int .int [.eff 0, .fail] .nil], refs := [], ret := .int }
 
 /-- `try { scope((s) => { s.spawn(bad); s.spawn(ok); const d = Box.new(1); yield; yield; 0 }) }
 catch (e) { e + 1 }`: a task fails; what is left of the scope, its body and the other task, each
 owning a box, is dropped where it waits; 42, and nothing left allocated, whichever way they
 interleave. -/
 def scopeFail : Expr :=
-  .try_ (.scope 0 1 .int
+  .try_ (.scope 0 1 [] .int
     (.let_ "b" (.box .int) (.new (.lit 5))
-      (.let_ "k" (.fn .once .int .int [.eff 0, .fail]) (.lam 0 (.move "b"))
+      (.let_ "k" (.fn .once .int .int [.eff 0, .fail] .nil) (.lam 0 (.move "b"))
         (.let_ "u" .int (.perform 1 [.move "k"] [])
           (.let_ "c" (.box .int) (.new (.lit 7))
-            (.let_ "k2" (.fn .once .int .int [.eff 0, .fail]) (.lam 1 (.move "c"))
+            (.let_ "k2" (.fn .once .int .int [.eff 0, .fail] .nil) (.lam 1 (.move "c"))
               (.let_ "u2" .int (.perform 1 [.move "k2"] [])
                 (.let_ "d" (.box .int) (.new (.lit 1))
                   (.let_ "y" .int (.perform 0 [] []) (.let_ "y2" .int (.perform 0 [] []) (.atom (.lit 0))))))))))))
@@ -2332,6 +2332,71 @@ example : value (eval [badTk, okTk] [scYield, scSpawnF] 120 [.abort .fail 0] (St
 example : freed (eval [badTk, okTk] [scYield, scSpawnF] 120 [.abort .fail 0] (Store.sched0 fun _ => false) []
     scopeFail) := by
   run [scopeFail, badTk, okTk, scYield, scSpawnF, mkTask, cloFn]
+
+/-- `(_) => { yield; r + *b }`, a closure that captured a box `b` and reads `r`, a place its scope lends
+it `readonly`. -/
+def rdTk : Fn :=
+  { owns := [("p", .int)], refs := [("r", .ro, .int)], ret := .int, row := [.eff 0],
+    cap := some ("b", .box .int, .once),
+    body := .let_ "u" .int (.perform 0 [] []) (.add (.read (var "r")) (.read (deref (var "b")))) }
+def scRSpawn : Op := { owns := [.fn .once .int .int [.eff 0] (.cons .int .nil)], refs := [], ret := .int }
+def scROps : List Op := [scYield, scRSpawn]
+
+/-- `let n = 40; { const r = readonly n; scope((s) => { const b = Box.new(2); s.spawn(() => …r…b…);
+yield; r + 2 }) }`: a task the scope starts reads `r`, a borrow of what was declared outside the
+scope, as the body does; 42, and nothing left allocated, whichever way they interleave. -/
+def scopeBody : Expr :=
+  .let_ "b" (.box .int) (.new (.lit 2))
+    (.let_ "k" (.fn .once .int .int [.eff 0] (.cons .int .nil)) (.lam 0 (.move "b"))
+      (.let_ "u" .int (.perform 1 [.move "k"] [])
+        (.let_ "y" .int (.perform 0 [] []) (.add (.read (var "r")) (.lit 2)))))
+def scopeRead : Expr :=
+  .let_ "n" .int (.atom (.lit 40))
+    (.lend "r" .ro (var "n") (.scope 0 1 [⟨"r", .ro, .int, .var "r"⟩] .int scopeBody))
+
+example : value (eval [rdTk] scROps 80 [] .empty [] scopeRead) = some 42 := by
+  run [scopeRead, scopeBody, rdTk, scROps, scYield, scRSpawn, mkTask, cloFn]
+example : freed (eval [rdTk] scROps 80 [] .empty [] scopeRead) := by
+  run [scopeRead, scopeBody, rdTk, scROps, scYield, scRSpawn, mkTask, cloFn]
+example : value (eval [rdTk] scROps 80 [] (Store.sched0 fun _ => false) [] scopeRead) = some 42 := by
+  run [scopeRead, scopeBody, rdTk, scROps, scYield, scRSpawn, mkTask, cloFn]
+
+theorem rdTk_ok : FnsOk [rdTk] scROps := by
+  intro d hd
+  simp only [List.mem_singleton] at hd
+  subst hd
+  refine ⟨by decide, ?_⟩
+  simp only [rdTk, FnOk, fnCtx, cloFn, ownCtx, refCtx]
+  refine ⟨by decide, _, .let_ (live := true) rfl (.perform (op := scYield) rfl (List.mem_singleton_self _) .nil .nil .nil)
+    (.add (.read (.ref rfl)) (.read (.deref (.own rfl))))⟩
+
+theorem scopeRead_typed : Typed [rdTk] scROps [] scopeRead .int [] [.fail] := by
+  have hb : Typed [rdTk] scROps [("r", .ref .ro .int), ("n", .ref .ro .int)]
+      (.scope 0 1 [⟨"r", .ro, .int, .var "r"⟩] .int scopeBody) .int [("r", .ref .ro .int), ("n", .ref .ro .int)]
+      [.fail] := by
+    refine .scope (op := scYield) (opS := scRSpawn) (rT := [.eff 0]) rfl rfl rfl rfl rfl rfl rfl rfl (by decide)
+      (by simp) (by simp) rfl rfl (by simp [lookup]) ?_
+    refine .let_ (live := false) rfl (.new .lit) ?_
+    refine .let_ (live := false) rfl (.lam (d := rdTk) rfl rfl rfl rfl rfl (.move rfl rfl) rfl) ?_
+    refine .let_ (live := true) rfl (.perform (op := scRSpawn) rfl (by simp) (.cons (.move rfl rfl) .nil) .nil .nil) ?_
+    exact .let_ (live := true) rfl (.perform (op := scYield) rfl (by simp) .nil .nil .nil) (.add (.read (.ref rfl)) .lit)
+  have := Typed.lend (F := [rdTk]) (O := scROps) (Γ := [("n", .own .int true)]) (x := "r") (m := .ro)
+    (p := var "n") (τ := .int) (w := true) (y := "n") (r := [.fail])
+    (body := .scope 0 1 [⟨"r", .ro, .int, .var "r"⟩] .int scopeBody) (τb := .int)
+    (Γb := [("n", .ref .ro .int)]) rfl (.own rfl) (fun h => by cases h) (fun h => by cases h) (fun h => by cases h)
+    (by simpa [lendCtx, freeze, Slot.ro] using hb)
+  simp only [thaw] at this
+  exact .let_ (live := true) rfl (.atom .lit) (by simpa using this)
+
+/-- Under any schedule. -/
+example (s : Nat → Bool) : ∀ n, match eval [rdTk] scROps n [.abort .fail 0] (Store.sched0 s) [] scopeRead with
+    | (.stuck, _) => False
+    | (.susp _ _ _ _ _, _) => False
+    | (.timeout, _) => True
+    | (.panic, _) => True
+    | (.val v, σ') => ∃ L, VT [rdTk] [] σ' .int v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
+    | (.abort _ _, σ') => ∀ l, σ'.mem l = none :=
+  program_ok_sched rdTk_ok scopeRead_typed s
 
 /-- `region (R) { const l = RegionList.new(); l.push(40); l.push(2); l[0] + l[1] }`: a list of the
 region, its elements cells of the region, all released as it ends; 42. -/

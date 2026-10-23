@@ -238,6 +238,7 @@ theorem eval_ok_succ (hF : FnsOk F O) (hE : EvalOk F O n) (hR : RetOk F O n) :
       rename_i x r' A a
       obtain ⟨cx, f, c, τc, Rc, Em, hcx, hσcx, hco, hRc, hcxR, hIm, hdRE, hdRS, hmm⟩ := move_clo hx hI hwf
       obtain ⟨d, xc, pn, hfd, hcap, hown, hrefs, hretp, hret, hrow', hτc⟩ := hco
+      replace hrefs : d.refs = [] := by simpa [TyList.toList] using hrefs
       obtain ⟨hkeys0, hbody⟩ := hF d (List.mem_of_getElem? hfd)
       rw [hcap, hretp] at hbody
       obtain ⟨hxc, Γ'', hbody⟩ := hbody
@@ -322,8 +323,9 @@ theorem eval_ok_succ (hF : FnsOk F O) (hE : EvalOk F O n) (hR : RetOk F O n) :
         place_ok hp hI₁.foot
       obtain ⟨Rt, hRt, hLrPR⟩ := path_split hpath hLr
       cases hRt with
-      | @clo _ f c τc _ _ _ _ Rc hla hco hc hn =>
+      | @clo _ f c τc _ _ _ _ _ Rc hla hco hc hn =>
       obtain ⟨d, xc, pn, hfd, hcap, hown, hrefs, hretp, hret, hrow', hτc⟩ := hco
+      replace hrefs : d.refs = [] := by simpa [TyList.toList] using hrefs
       obtain ⟨hkeys0, hbody⟩ := hF d (List.mem_of_getElem? hfd)
       rw [hcap, hretp] at hbody
       obtain ⟨hxc, Γ'', hbody⟩ := hbody
@@ -335,7 +337,7 @@ theorem eval_ok_succ (hF : FnsOk F O) (hE : EvalOk F O n) (hR : RetOk F O n) :
         | shared => exact ⟨.ro, rfl, fun h => by cases h⟩
         | excl => exact ⟨.mut, rfl, fun _ => hw rfl⟩
       let h : Hole := ⟨md, τc, y, c, P ++ [la], Rc, Lr⟩
-      have hco' : CloOk F f τc k A _ r' := ⟨d, xc, pn, hfd, hcap, hown, hrefs, hretp, hret, hrow', hτc⟩
+      have hco' : CloOk F f τc k A _ r' .nil := ⟨d, xc, pn, hfd, hcap, hown, by simp [hrefs, TyList.toList], hretp, hret, hrow', hτc⟩
       have hhole : HoleOk F ι σ1 Γ' env h := ⟨s, ra, τr, hsl, hra, fun hm => hexw (hmdw hm),
         hpath.trans (.clo hla hco' .here), hLr, by simpa [h] using hLrPR,
         hso, hc, hslot, fun hs => .inr (by
@@ -559,8 +561,9 @@ theorem eval_ok_succ (hF : FnsOk F O) (hE : EvalOk F O n) (hR : RetOk F O n) :
       exact gen_ok hF hE hR hopN hNowns hNrefs hNret hopY hYowns hYrefs hYret hcy hfd hretp hcap hdret hrow hey hdrefs
         hargs hcaps hexcl hb hcb hI hwf hRdy
     | lendField hx hy hty hsl _ hmf hb => exact lendField_ok hE hx hy hty hsl hmf hb hI hwf hRdy
-    | scope hop howns hrefs hret hopS hSowns hSrefs hSret hne hrT heT hcτ hb =>
-      exact scope_ok hE hR ⟨hop, howns, hrefs, hret, hopS, hSowns, hSrefs, hSret, hne, hrT, heT, hcτ⟩ hb hI hwf hRdy
+    | scope hop howns hrefs hret hopS hSowns hSrefs hSret hne hrT heT hcτ hRt hcaps hb =>
+      exact scope_ok hE hR ⟨hop, howns, hrefs, hret, hopS, hSowns, hSrefs, hSret, hne, hrT, heT, hcτ⟩ hRt hcaps hb hI
+        hwf hRdy
     | handle hop hcomp hos hrs hcaps hexcl hnd harm hbody =>
       exact handle_ok hE hR hop hcomp hos hrs hcaps hexcl hnd harm hbody hI hwf hRdy
     | handleR hop hcomp hos hrs hcaps hexcl hnd hfd hown hdrefs hretp hcap hret hrow hC harm hbody =>
@@ -638,15 +641,16 @@ theorem ret_ok (hF : FnsOk F O) (hE : EvalOk F O n) (hKo : ∀ m, n = m + 1 → 
   | genN hop howns hrefs hret hcy =>
     simpa using ret_genN hKo hop howns hrefs hret hcy hR hwf (by simpa using hag) hSa (by simpa using hSd) hp
   | genE hG hIc hdFE hSo ho => exact ret_genE hG hIc hdFE hSo ho hR hA hwf hag halloc hnd hd hSa hSd hp
-  | scB hS hT => exact ret_scB hF hKo hS hT hR hA hwf hag halloc hnd hd hSa hSd hp
-  | scW hS hbr hbrefs hKb hagb hab hT hdbq =>
-    exact ret_scW hF hKo hS hbr hbrefs hKb hagb hab hT hdbq hR hA hwf hag halloc hnd hd hSa hSd hp
-  | scV hS hIb hv hdLE hdLS hT hdq => exact ret_scV hF hKo hS hIb hv hdLE hdLS hT hdq hR hA hwf hag halloc hnd hd hSa hSd hp
+  | scB hS hcz hT => exact ret_scB hF hKo hS hcz hT hR hA hwf hag halloc hnd hd hSa hSd hp
+  | scW hS hcz hbr hbrefs hKb hagb hab hT hdbq hSt hro =>
+    exact ret_scW hF hKo hS hcz hbr hbrefs hKb hagb hab hT hdbq hSt hro hR hA hwf hag halloc hnd hd hSa hSd hp
+  | scV hS hcz hIb hv hdLE hdLS hT hdq hSt hro =>
+    exact ret_scV hF hKo hS hcz hIb hv hdLE hdLS hT hdq hSt hro hR hA hwf hag halloc hnd hd hSa hSd hp
   | scX hop howns hrefs hret hopS hSowns hSrefs hSret =>
     simpa using ret_scX hKo hop howns hrefs hret hopS hSowns hSrefs hSret hR hwf (by simpa using hag) hSa
       (by simpa using hSd) hp
   | scEb hS hT => exact ret_scEb hKo hS hT hR hA hwf hag halloc hnd hd hSa hSd hp
-  | scEt hS hI hT hdT => exact ret_scEt hKo hS hI hT hdT hR hA hwf hag halloc hnd hd hSa hSd hp
+  | scEt hS hI hT hdT hSt hro => exact ret_scEt hKo hS hI hT hdT hR hA hwf hag halloc hnd hd hSa hSd hSt hro hp
 
 /-- Expressions, frames and continuations, at every fuel. -/
 theorem sound (hF : FnsOk F O) : ∀ n, EvalOk F O n ∧ RetOk F O n ∧ EvalKOk F O n

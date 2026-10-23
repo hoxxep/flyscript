@@ -224,7 +224,7 @@ theorem multi_join (hL : LT F ι σ a τ L) (hR : RtExt σ σ') : ∀ (cs : List
           · exact .inr (.inr h)
       · obtain ⟨P, hp⟩ := hpaths1 c hc
         exact ⟨_, .step ha' hp⟩
-  | @clo a f c0 τc k A B r R ha hc0 hb hn ih =>
+  | @clo a f c0 τc k A B r Rf R ha hc0 hb hn ih =>
     intro cs hcs hcc hd hag hfr hdn hnn
     by_cases hh : ∃ c ∈ cs, c.loc = a
     · obtain ⟨c, hc, hloc⟩ := hh

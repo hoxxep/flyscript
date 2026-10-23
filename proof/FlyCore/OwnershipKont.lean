@@ -132,13 +132,13 @@ structure GenOk (F : List Fn) (ι : List Nat) (O : List Op) (σf : Store) (eN eY
 /-- What a scope keeps while it runs: the operation `e` by which its body and tasks give way, taking
 nothing and giving an integer, and `eS`, by which they start a task, a closure called once whose
 row `rT` gives way by `e`, starting tasks or performing what the code around handles. -/
-structure ScOk (O : List Op) (e eS : Nat) (op opS : Op) (rT r : Row) (τ : Ty) : Prop where
+structure ScOk (O : List Op) (e eS : Nat) (op opS : Op) (rT : Row) (R : TyList) (r : Row) (τ : Ty) : Prop where
   hop : O[e]? = some op
   howns : op.owns = []
   hrefs : op.refs = []
   hret : op.ret = .int
   hopS : O[eS]? = some opS
-  hSowns : opS.owns = [.fn .once .int .int rT]
+  hSowns : opS.owns = [.fn .once .int .int rT R]
   hSrefs : opS.refs = []
   hSret : opS.ret = .int
   hne : e ≠ eS
@@ -146,8 +146,14 @@ structure ScOk (O : List Op) (e eS : Nat) (op opS : Op) (rT r : Row) (τ : Ty) :
   heT : Label.eff e ∈ rT
   hcτ : τ.complete = true
 
-/-- The level a scope's task is at, once its call ends. -/
-def tLvl (e eS : Nat) (r : Row) : Lvl := ⟨[], [], .int, [], .eff e :: .eff eS :: r⟩
+/-- What a scope lends each task it starts: the places `cz`, of the types `R`, only read, their trees
+`Rc` among what the code around only reads. -/
+structure ScCaps (F : List Fn) (ι : List Nat) (σf : Store) (cz : List (Cap Nat)) (R : TyList) (S Rc : List Nat) :
+    Prop where
+  hc : CapsOk F ι σf cz Rc []
+  hRc : ∀ l ∈ Rc, l ∈ S
+  hR : R.toList = cz.map Cap.ty
+  hro : ∀ c ∈ cz, c.mode = .ro
 
 /-- The level a generator's producer is at, once its call ends: the places lent it. -/
 def capsLvlΓ (caps : List (Cap Nat)) : Ctx := capCtx (caps.map Cap.sig)
@@ -310,29 +316,32 @@ are the frame's own. -/
   | parE : Inv F ι σf Γ₁ env E₁ S → RoCtx Γo → (∀ l ∈ So, l ∈ E₁ ∨ l ∈ S) →
       FrameOk F O ι ι σf .parE ⟨Γo, envo, τ, So, r⟩ ⟨Γ₁, env, τ, S, r⟩ E₁ []
   /-- A scope's body running, its tasks waiting: the frame's cells are theirs. -/
-  | scB : ScOk O e eS op opS rT r τ → TasksOk F O ι σf e eS r Q Xq Aq →
-      FrameOk F O ι ι σf (.scB e eS hid τ Q) ⟨Γ, env, τ, S, .eff e :: .eff eS :: r⟩ ⟨Γ, env, τ, S, r⟩ Xq Aq
+  | scB : ScOk O e eS op opS rT R r τ → ScCaps F ι σf cz R S Rc → TasksOk F O ι σf e eS r S Q Xq Aq →
+      FrameOk F O ι ι σf (.scB e eS hid τ cz Q) ⟨Γ, env, τ, S, .eff e :: .eff eS :: r⟩ ⟨Γ, env, τ, S, r⟩ Xq Aq
   /-- A scope's task running, its body waiting as `Kb` where it gave way, and its other tasks. -/
-  | scW : ScOk O e eS op opS rT r τ → opb.ret = .int → opb.refs = [] →
+  | scW : ScOk O e eS op opS rT R r τ → ScCaps F ι σf cz R S Rc → opb.ret = .int → opb.refs = [] →
       FramesOk F O ι σb Kb opb ⟨Γ, env, τ, S, .eff e :: .eff eS :: r⟩ Xb [] Ab → Agree σb σf (Xb ++ S) →
       (∀ l ∈ Xb ++ S, σb.mem l ≠ none) →
-      TasksOk F O ι σf e eS r Q Xq Aq → Disj Xb Xq →
-      FrameOk F O ι ι σf (.scW e eS hid τ Kb Q) (tLvl e eS r) ⟨Γ, env, τ, S, r⟩ (Xb ++ Xq) (Ab ++ Aq)
+      TasksOk F O ι σf e eS r S Q Xq Aq → Disj Xb Xq → (∀ l ∈ St, l ∈ S) → RoCtx Γt →
+      FrameOk F O ι ι σf (.scW e eS hid τ cz Kb Q) ⟨Γt, envt, .int, St, .eff e :: .eff eS :: r⟩ ⟨Γ, env, τ, S, r⟩
+        (Xb ++ Xq) (Ab ++ Aq)
   /-- A scope's task running, its body done with `v`, its activation as it ended kept by the frame. -/
-  | scV : ScOk O e eS op opS rT r τ → Inv F ι σf Γ env Eb S → VT F ι σf τ v Lv → Disj Lv Eb → Disj Lv S →
-      TasksOk F O ι σf e eS r Q Xq Aq → Disj (Eb ++ Lv) Xq →
-      FrameOk F O ι ι σf (.scV e eS hid τ v Q) (tLvl e eS r) ⟨Γ, env, τ, S, r⟩ (Eb ++ Lv ++ Xq) Aq
+  | scV : ScOk O e eS op opS rT R r τ → ScCaps F ι σf cz R S Rc → Inv F ι σf Γ env Eb S → VT F ι σf τ v Lv →
+      Disj Lv Eb → Disj Lv S → TasksOk F O ι σf e eS r S Q Xq Aq → Disj (Eb ++ Lv) Xq → (∀ l ∈ St, l ∈ S) →
+      RoCtx Γt → FrameOk F O ι ι σf (.scV e eS hid τ cz v Q) ⟨Γt, envt, .int, St, .eff e :: .eff eS :: r⟩ ⟨Γ, env, τ, S, r⟩
+        (Eb ++ Lv ++ Xq) Aq
   /-- A scope's body or task being dropped: what it starts is dropped, and it goes on where it gives
   way. -/
   | scX : O[e]? = some op → op.owns = [] → op.refs = [] → op.ret = .int →
-      O[eS]? = some opS → opS.owns = [.fn .once .int .int rT] → opS.refs = [] → opS.ret = .int →
+      O[eS]? = some opS → opS.owns = [.fn .once .int .int rT R] → opS.refs = [] → opS.ret = .int →
       FrameOk F O ι ι σf (.scX e eS hid) ⟨Γ, env, τ, S, .eff e :: .eff eS :: r⟩ ⟨Γ, env, τ, S, r⟩ [] []
   /-- A scope that failed, its body being dropped, its tasks to be. -/
-  | scEb : ScOk O e eS op opS rT r τ → TasksOk F O ι σf e eS r Q Xq Aq →
+  | scEb : ScOk O e eS op opS rT R r τ → TasksOk F O ι σf e eS r S Q Xq Aq →
       FrameOk F O ι ι σf (.scE e eS hid τ τ (.abort j k) d Q) ⟨Γ, env, τ, S, r⟩ ⟨Γ, env, τ, S, r⟩ Xq (j :: Aq)
   /-- A scope that failed, a task of it being dropped, the others to be, its activation kept. -/
-  | scEt : ScOk O e eS op opS rT r τ → Inv F ι σf Γ env Eb S → TasksOk F O ι σf e eS r Q Xq Aq → Disj Eb Xq →
-      FrameOk F O ι ι σf (.scE e eS hid τ .int (.abort j k) d Q) ⟨[], [], .int, [], r⟩ ⟨Γ, env, τ, S, r⟩ (Eb ++ Xq)
+  | scEt : ScOk O e eS op opS rT R r τ → Inv F ι σf Γ env Eb S → TasksOk F O ι σf e eS r S Q Xq Aq → Disj Eb Xq →
+      (∀ l ∈ St, l ∈ S) → RoCtx Γt →
+      FrameOk F O ι ι σf (.scE e eS hid τ .int (.abort j k) d Q) ⟨Γt, envt, .int, St, r⟩ ⟨Γ, env, τ, S, r⟩ (Eb ++ Xq)
         (j :: Aq)
 
 /-- `FramesOk σs K op top X hos A`: the frames `K`, the outermost first, suspended where the store is
@@ -349,14 +358,16 @@ inductive FramesOk (F : List Fn) (O : List Op) : List Nat → Store → List Kon
       (∀ a ∈ AK, a ∈ A ∨ AimedIn a (f.push [])) →
       FramesOk F O ι σs (f :: K) op0 ⟨Γ', env, τ, S, r⟩ (Xf ++ XK) hos A
 
-/-- `TasksOk σf e eS r Q X A`: a scope's tasks waiting, each where it gave way, at the level a task
-is at; their cells `X`, apart; the handlers they may unwind to, `A`. -/
+/-- `TasksOk σf e eS r S Q X A`: a scope's tasks waiting, each where it gave way, at the level its
+call ends at, where it only reads what the code around only reads, `S`; their cells `X`, apart; the
+handlers they may unwind to, `A`. -/
 inductive TasksOk (F : List Fn) (O : List Op) :
-    List Nat → Store → Nat → Nat → Row → List (List Kont) → List Nat → List Nat → Prop
-  | nil : TasksOk F O ι σf e eS r [] [] []
-  | cons : FramesOk F O ι σt K op0 (tLvl e eS r) X [] AK → Agree σt σf X → (∀ l ∈ X, σt.mem l ≠ none) →
+    List Nat → Store → Nat → Nat → Row → List Nat → List (List Kont) → List Nat → List Nat → Prop
+  | nil : TasksOk F O ι σf e eS r S [] [] []
+  | cons : FramesOk F O ι σt K op0 ⟨Γt, envt, .int, St, .eff e :: .eff eS :: r⟩ X [] AK → RoCtx Γt →
+      Agree σt σf (X ++ St) → (∀ l ∈ X ++ St, σt.mem l ≠ none) → (∀ l ∈ St, l ∈ S) → Disj St X →
       op0.ret = .int → op0.refs = [] → Disj X Xs →
-      TasksOk F O ι σf e eS r Q Xs As → TasksOk F O ι σf e eS r (K :: Q) (X ++ Xs) (AK ++ As)
+      TasksOk F O ι σf e eS r S Q Xs As → TasksOk F O ι σf e eS r S (K :: Q) (X ++ Xs) (AK ++ As)
 end
 
 /-- Continuations give what is said of a context weaker than the one their frames leave, where

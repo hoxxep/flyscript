@@ -14,29 +14,40 @@ another closure in its place while the borrow lives.
 namespace FlyCore.Ownership
 
 /-- The code `f` is a closure's, called as `k`, taking an `A` and giving a `B`, performing only
-what `r` names, having captured a value of type `τc`. -/
-def CloOk (F : List Fn) (f : Nat) (τc : Ty) (k : Kind) (A B : Ty) (r : Row) : Prop :=
-  ∃ d xc pn, F[f]? = some d ∧ d.cap = some (xc, τc, k) ∧ d.owns = [(pn, A)] ∧ d.refs = [] ∧
+what `r` names, having captured a value of type `τc`, and lent `readonly` places of the types `R`
+— none, but for a scope's task, lent the places its scope froze. -/
+def CloOk (F : List Fn) (f : Nat) (τc : Ty) (k : Kind) (A B : Ty) (r : Row) (R : TyList) : Prop :=
+  ∃ d xc pn, F[f]? = some d ∧ d.cap = some (xc, τc, k) ∧ d.owns = [(pn, A)] ∧
+    d.refs.map Prod.snd = R.toList.map (fun τ => (Mode.ro, τ)) ∧
     d.retp = none ∧ d.ret = B ∧ d.row = r ∧ τc.complete = true ∧ τc.rfree = true
 
+theorem map_ro_inj : ∀ {R R' : TyList}, R.toList.map (fun τ => (Mode.ro, τ)) = R'.toList.map (fun τ => (Mode.ro, τ)) →
+    R = R'
+  | .nil, .nil, _ => rfl
+  | .nil, .cons _ _, h => by simp [TyList.toList] at h
+  | .cons _ _, .nil, h => by simp [TyList.toList] at h
+  | .cons _ _, .cons _ _, h => by
+    simp only [TyList.toList, List.map_cons, List.cons.injEq, Prod.mk.injEq, true_and] at h
+    rw [h.1, map_ro_inj h.2]
+
 /-- What a closure captured has no place lent out of it. -/
-theorem CloOk.complete : CloOk F f τc k A B r → τc.complete = true :=
+theorem CloOk.complete : CloOk F f τc k A B r R → τc.complete = true :=
   fun ⟨_, _, _, _, _, _, _, _, _, _, h⟩ => h.1
 
 /-- What a closure captured is said of no region. -/
-theorem CloOk.rfree : CloOk F f τc k A B r → τc.rfree = true :=
+theorem CloOk.rfree : CloOk F f τc k A B r R → τc.rfree = true :=
   fun ⟨_, _, _, _, _, _, _, _, _, _, h⟩ => h.2
 
 /-- A closure's code says its type. -/
-theorem CloOk.det : CloOk F f τc k A B r → CloOk F f τc' k' A' B' r' →
-    τc = τc' ∧ k = k' ∧ A = A' ∧ B = B' ∧ r = r' := by
-  rintro ⟨d, xc, pn, hd, hcap, hown, -, -, hret, hrow, -⟩ ⟨d', xc', pn', hd', hcap', hown', -, -, hret', hrow', -⟩
+theorem CloOk.det : CloOk F f τc k A B r R → CloOk F f τc' k' A' B' r' R' →
+    τc = τc' ∧ k = k' ∧ A = A' ∧ B = B' ∧ r = r' ∧ R = R' := by
+  rintro ⟨d, xc, pn, hd, hcap, hown, hrefs, -, hret, hrow, -⟩ ⟨d', xc', pn', hd', hcap', hown', hrefs', -, hret', hrow', -⟩
   rw [hd] at hd'
   cases hd'
   rw [hcap] at hcap'
   rw [hown] at hown'
   simp only [Option.some.injEq, Prod.mk.injEq, List.cons.injEq, and_true] at hcap' hown'
-  exact ⟨hcap'.2.1, hcap'.2.2, hown'.2, hret.symm.trans hret', hrow.symm.trans hrow'⟩
+  exact ⟨hcap'.2.1, hcap'.2.2, hown'.2, hret.symm.trans hret', hrow.symm.trans hrow', map_ro_inj (hrefs.symm.trans hrefs')⟩
 
 /-- A reference to a cell of the region `k` regions out, among the arenas `ι`, holding a `τ`. -/
 def RefOk (ι : List Nat) (σ : Store) (k : Nat) (τ : Ty) (l : Nat) : Prop :=
@@ -54,8 +65,8 @@ def RD (ι : List Nat) (σ : Store) : Ty → Val → Prop
 inductive LT (F : List Fn) (ι : List Nat) (σ : Store) : Nat → Ty → List Nat → Prop
   | int : σ.mem a = some (.int n) → LT F ι σ a .int [a]
   | box : σ.mem a = some (.ptr b) → LT F ι σ b τ R → a ∉ R → LT F ι σ a (.box τ) (a :: R)
-  | clo : σ.mem a = some (.clo f c τc) → CloOk F f τc k A B r → LT F ι σ c τc R → a ∉ R →
-      LT F ι σ a (.fn k A B r) (a :: R)
+  | clo : σ.mem a = some (.clo f c τc) → CloOk F f τc k A B r Rf → LT F ι σ c τc R → a ∉ R →
+      LT F ι σ a (.fn k A B r Rf) (a :: R)
   | pair : σ.mem a = some (.pair b c) → LT F ι σ b A R₁ → LT F ι σ c B R₂ → (∀ x ∈ R₁, x ∉ R₂) →
       a ∉ R₁ ++ R₂ → LT F ι σ a (.pair A B) (a :: (R₁ ++ R₂))
   | tag : σ.mem a = some (.tag A' B' t b) → LT F ι σ b (if t then A else B) R → a ∉ R → LT F ι σ a (.sum A B) (a :: R)
@@ -78,7 +89,7 @@ inductive LT (F : List Fn) (ι : List Nat) (σ : Store) : Nat → Ty → List Na
 inductive VT (F : List Fn) (ι : List Nat) (σ : Store) : Ty → Val → List Nat → Prop
   | int : VT F ι σ .int (.int n) []
   | box : LT F ι σ b τ R → τ.complete → VT F ι σ (.box τ) (.ptr b) R
-  | clo : CloOk F f τc k A B r → LT F ι σ c τc R → τc.complete → VT F ι σ (.fn k A B r) (.clo f c τc) R
+  | clo : CloOk F f τc k A B r Rf → LT F ι σ c τc R → τc.complete → VT F ι σ (.fn k A B r Rf) (.clo f c τc) R
   | pair : LT F ι σ b A R₁ → LT F ι σ c B R₂ → (∀ x ∈ R₁, x ∉ R₂) → A.complete → B.complete →
       VT F ι σ (.pair A B) (.pair b c) (R₁ ++ R₂)
   | tag : LT F ι σ b (if t then A else B) R → A.complete → B.complete → VT F ι σ (.sum A B) (.tag A' B' t b) R
@@ -343,8 +354,8 @@ theorem LT.det : LT F ι σ a τ L → LT F ι σ a τ L' → L = L' := by
       exact List.ext_getElem (hlen.trans hlen'.symm) fun i h1 h2 => ih i (hlen ▸ h1) h1 (hel' i (hlen ▸ h1) h2)
 
 /-- What holds a closure is a closure, unless it is lent. -/
-theorem LT.det_fn : LT F ι σ a (.fn k A B r) L → LT F ι σ a τ L' → τ.isHole = false →
-    τ = .fn k A B r ∧ L = L' := by
+theorem LT.det_fn : LT F ι σ a (.fn k A B r Rf) L → LT F ι σ a τ L' → τ.isHole = false →
+    τ = .fn k A B r Rf ∧ L = L' := by
   intro h h' hτ
   cases h with
   | clo ha hc hb _ =>
@@ -360,7 +371,7 @@ theorem LT.det_fn : LT F ι σ a (.fn k A B r) L → LT F ι σ a τ L' → τ.i
     | clo ha' hc' hb' _ =>
       rw [ha] at ha'
       cases ha'
-      obtain ⟨-, rfl, rfl, rfl, rfl⟩ := hc'.det hc
+      obtain ⟨-, rfl, rfl, rfl, rfl, rfl⟩ := hc'.det hc
       rw [LT.det hb hb']
       exact ⟨rfl, rfl⟩
 
@@ -622,7 +633,7 @@ theorem dropK_ok : ∀ (k : Nat) (τ : Ty) (σ : Store) v L, VT F ι σ τ v L �
         split
         · subst_vars; simp at hl
         · exact hkeep l (fun h => hl (List.mem_cons_of_mem _ h))
-    | @clo f τc _ _ _ _ c _ hc hb hcc =>
+    | @clo f τc _ _ _ _ _ c _ hc hb hcc =>
       obtain ⟨w, R', hw, hv, rfl, hn⟩ := hb.contents hcc
       obtain ⟨σ1, hd, hnext, hfree, hkeep, hrt⟩ := ih _ σ w R' hv (by simpa using hk)
       refine ⟨σ1.set c none, by simp [dropK, hw, hd], by simp [Store.set, hnext], ?_, ?_, by simp [hrt]⟩
@@ -825,8 +836,8 @@ which the place leaves as they are. -/
 inductive Path (F : List Fn) (ι : List Nat) (σ : Store) : Nat → Ty → List Nat → Nat → Ty → Prop
   | here : Path F ι σ a τ [] a τ
   | step : σ.mem a = some (.ptr b) → Path F ι σ b τ' P l τ → Path F ι σ a (.box τ') (a :: P) l τ
-  | clo : σ.mem a = some (.clo f c τc) → CloOk F f τc k A B r → Path F ι σ c τc P l τ →
-      Path F ι σ a (.fn k A B r) (a :: P) l τ
+  | clo : σ.mem a = some (.clo f c τc) → CloOk F f τc k A B r Rf → Path F ι σ c τc P l τ →
+      Path F ι σ a (.fn k A B r Rf) (a :: P) l τ
   | fst : σ.mem a = some (.pair b c) → LT F ι σ c B R → Path F ι σ b A P l τ →
       Path F ι σ a (.pair A B) (a :: (R ++ P)) l τ
   | snd : σ.mem a = some (.pair b c) → LT F ι σ b A R → Path F ι σ c B P l τ →
@@ -1210,7 +1221,7 @@ theorem Slot.shell_lent : (Slot.lent τ h).shell = false := rfl
 
 theorem Slot.shell_excl {s : Slot} : s.shell = true → s.excl = true := by
   intro h; match s, h with
-  | .ref .mut (.fn _ _ _ _), _ => rfl
+  | .ref .mut (.fn _ _ _ _ _), _ => rfl
   | .ref .mut (.vec false _), _ => rfl
   | .half _ _ _, _ => rfl
 

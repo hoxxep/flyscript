@@ -171,7 +171,7 @@ theorem unhideAll_weaker : ∀ {Γ Γb : Ctx} {ys : List Var}, Weaker Γb (hideA
 theorem Ty.shiftBy_inj : ∀ {A B : Ty}, A.shiftBy n = B.shiftBy n → A = B
   | .int, B, h => by cases B <;> simp_all [Ty.shiftBy]
   | .box A, B, h => by cases B <;> simp_all [Ty.shiftBy]; exact Ty.shiftBy_inj h
-  | .fn _ _ _ _, B, h => by cases B <;> simp_all [Ty.shiftBy]
+  | .fn _ _ _ _ _, B, h => by cases B <;> simp_all [Ty.shiftBy]
   | .pair A₁ A₂, B, h => by
     cases B <;> simp_all [Ty.shiftBy]; exact ⟨Ty.shiftBy_inj h.1, Ty.shiftBy_inj h.2⟩
   | .sum A₁ A₂, B, h => by
@@ -225,7 +225,7 @@ theorem atoms_weaker : AtomsTy Γ as τs Γ' → (Γ.map Prod.fst).Nodup → Wea
 moved. -/
 theorem typed_weaker : Typed F O Γ e τ Γ' r → (Γ.map Prod.fst).Nodup → Weaker Γ' Γ
   | .atom ha, hk => atom_weaker ha hk
-  | .scope _ _ _ _ _ _ _ _ _ _ _ _ hb, hk => typed_weaker hb hk
+  | .scope _ _ _ _ _ _ _ _ _ _ _ _ _ _ hb, hk => typed_weaker hb hk
   | .add ha hb, hk => (atom_weaker hb (by rw [atom_keys ha]; exact hk)).trans (atom_weaker ha hk)
   | .new ha, hk => atom_weaker ha hk
   | .pair ha hb, hk => (atom_weaker hb (by rw [atom_keys ha]; exact hk)).trans (atom_weaker ha hk)
@@ -349,7 +349,8 @@ def FnOk (F : List Fn) (O : List Op) (d : Fn) : Prop :=
   | none, none => ∃ Γ', Typed F O (fnCtx d) d.body d.ret Γ' d.row
   | none, some (m, cs) => cs ≠ [] ∧ ∃ Γ', Typed F O (fnCtx d) d.body .int Γ' d.row ∧
       ∀ c ∈ cs, ∃ x mi τi w, d.refs[c.1]? = some (x, mi, τi) ∧ PlaceTy Γ' c.2 d.ret w x ∧ (m = .mut → w = true)
-  | some (xc, τc, k), none => xc ∉ d.owns.map Prod.fst ∧ ∃ Γ', Typed F O (fnCtx (cloFn d xc τc k)) d.body d.ret Γ' d.row
+  | some (xc, τc, k), none => xc ∉ d.owns.map Prod.fst ++ d.refs.map Prod.fst ∧
+      ∃ Γ', Typed F O (fnCtx (cloFn d xc τc k)) d.body d.ret Γ' d.row
   | some _, some _ => False
 
 def FnsOk (F : List Fn) (O : List Op) : Prop := ∀ d ∈ F, FnOk F O d
@@ -772,7 +773,7 @@ theorem SlotOk.cons_of_shell (h : SlotOk F ι σ s a L) (hs : s.shell = true) : 
   h.head_of_shell hs
 
 /-- A `mut` borrow's slot is a ref slot of the type its footprint says. -/
-theorem SlotOk.ref_ty (h : SlotOk F ι σ (.ref m (.fn k A B r)) a L) (hL : LT F ι σ a τ L) : .fn k A B r = τ :=
+theorem SlotOk.ref_ty (h : SlotOk F ι σ (.ref m (.fn k A B r Rf)) a L) (hL : LT F ι σ a τ L) : .fn k A B r Rf = τ :=
   (LT.det_fn h hL (hL.nonhole_of h rfl)).1.symm
 
 /-- What a `mut` hole lets the callee change lies in what its root may change. -/

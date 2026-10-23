@@ -381,7 +381,7 @@ theorem atoms_keys : AtomsTy Γ as τs Γ' → Γ'.map Prod.fst = Γ.map Prod.fs
 
 theorem typed_keys : Typed F O Γ e τ Γ' r → Γ'.map Prod.fst = Γ.map Prod.fst
   | .atom ha => atom_keys ha
-  | .scope _ _ _ _ _ _ _ _ _ _ _ _ hb => typed_keys hb
+  | .scope _ _ _ _ _ _ _ _ _ _ _ _ _ _ hb => typed_keys hb
   | .add ha hb => (atom_keys hb).trans (atom_keys ha)
   | .new ha => atom_keys ha
   | .pair ha hb => (atom_keys hb).trans (atom_keys ha)
@@ -515,7 +515,7 @@ theorem split_field (t : Bool) (hL : LT F ι σ a (.pair A B) L) :
 /-- A slot that may change all but its first cell holds that cell first. -/
 theorem SlotOk.head_of_shell (h : SlotOk F ι σ s a L) (hs : s.shell = true) : ∃ R, L = a :: R := by
   match s, hs, h with
-  | .ref .mut (.fn _ _ _ _), _, h => exact LT.cons h rfl
+  | .ref .mut (.fn _ _ _ _ _), _, h => exact LT.cons h rfl
   | .ref .mut (.vec false _), _, h => exact LT.cons h rfl
   | .half _ _ _, _, h => exact LT.cons h Ty.lent1_isHole
 
