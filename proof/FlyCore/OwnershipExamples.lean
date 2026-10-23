@@ -1,16 +1,41 @@
 import FlyCore.OwnershipSound
 
 /-!
-The semantics computes what the language means, in the kernel: a program that lends and moves
-ends with every cell freed, handlers resume and unwind dropping what the scopes they leave own,
-and the aliasing the types forbid is a use after free.
+The semantics computes what the language means: a program that lends and moves ends with every cell
+freed, handlers resume and unwind dropping what the scopes they leave own, an arm that fails drops
+the code its `handle` ran, cleanups and all, and the aliasing the types forbid is a use after free.
 -/
 
 namespace FlyCore.Ownership.Examples
 
 open Expr Place
 
-def empty : Store := { mem := fun _ => none, next := 0 }
+set_option linter.unusedSimpArgs false
+
+/-- The integer a run gave. -/
+def value : Res × Store → Option Int
+  | (.val (.int k), _) => some k
+  | _ => none
+
+/-- Whether no cell below `n` is allocated. -/
+def freedBelow (σ : Store) : Nat → Bool
+  | 0 => true
+  | n + 1 => (σ.mem n).isNone && freedBelow σ n
+
+/-- Whether a run left nothing allocated. -/
+def freed (r : Res × Store) : Bool := freedBelow r.2 r.2.next
+
+def isStuck : Res × Store → Bool
+  | (.stuck, _) => true
+  | _ => false
+
+/-- Runs a program: the evaluator unfolded by its equations. -/
+syntax "run" "[" Lean.Parser.Tactic.simpLemma,* "]" : tactic
+macro_rules
+  | `(tactic| run [$xs,*]) => `(tactic| simp [eval, ret, evalK, evalAtom, evalAtoms, resolve, leave, cleanV,
+      cleanA, dropRet, armEnd, allocAll, dropCells, dropCell, drop, Store.fresh, Store.alloc, Store.set, find,
+      Frame.handles, Kont.push, lookup, Res.done, Outcome.res, Cap.at, Store.empty, value, freed, freedBelow,
+      isStuck, $xs,*])
 
 /-- `function add(b: Box<int>, r: mut Box<int>): int { *r = *r + *b; *r }` -/
 def addInto : Fn :=
@@ -24,9 +49,10 @@ def lends : Expr :=
     (.let_ "y" (.box .int) (.new (.lit 41))
       (.call 0 [.move "y"] [(.mut, var "x")]))
 
-example : (eval [addInto] [] 20 [] empty [] lends).1 = .val (.int 42) := by decide
-example : ∀ l < (eval [addInto] [] 20 [] empty [] lends).2.next,
-    (eval [addInto] [] 20 [] empty [] lends).2.mem l = none := by decide
+example : value (eval [addInto] [] 20 [] .empty [] lends) = some 42 := by
+  run [lends, addInto]
+example : freed (eval [addInto] [] 20 [] .empty [] lends) := by
+  run [lends, addInto]
 
 /-- `function g(a: mut Box<int>, c: int (readonly)): int { a = Box.new(7); c }`, called with
 `mut x` and `readonly *x`: the assignment frees the cell `c` borrows. -/
@@ -38,7 +64,8 @@ def clobber : Fn :=
 def aliased : Expr :=
   .let_ "x" (.box .int) (.new (.lit 1)) (.call 0 [] [(.mut, var "x"), (.ro, deref (var "x"))])
 
-example : (eval [clobber] [] 20 [] empty [] aliased).1 = .stuck := by decide
+example : isStuck (eval [clobber] [] 20 [] .empty [] aliased) := by
+  run [aliased, clobber]
 
 /-! The types accept `lends`, so `program_ok` covers it; they reject `aliased`. -/
 
@@ -63,6 +90,7 @@ theorem lends_typed : Typed [addInto] [] [] lends .int [] [.fail] := by
 
 example : ∀ n, match eval [addInto] [] n [.abort .fail 0] .empty [] lends with
     | (.stuck, _) => False
+    | (.susp _ _ _ _ _, _) => False
     | (.timeout, _) => True
     | (.val v, σ') => ∃ L, VT σ' .int v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
     | (.abort _ _, σ') => ∀ l, σ'.mem l = none :=
@@ -75,9 +103,10 @@ def unwinds : Expr :=
     (.try_ (.let_ "y" (.box .int) (.new (.lit 2)) (.throw_ (.read (deref (var "y"))))) "e"
       (.add (.read (var "e")) (.read (deref (var "x")))))
 
-example : (eval [] [] 20 [] .empty [] unwinds).1 = .val (.int 3) := by decide
-example : ∀ l < (eval [] [] 20 [] .empty [] unwinds).2.next, (eval [] [] 20 [] .empty [] unwinds).2.mem l = none := by
-  decide
+example : value (eval [] [] 20 [] .empty [] unwinds) = some 3 := by
+  run [unwinds]
+example : freed (eval [] [] 20 [] .empty [] unwinds) := by
+  run [unwinds]
 
 theorem unwinds_typed : Typed [] [] [] unwinds .int [] [] :=
   .let_ rfl (.new .lit) (.try_ rfl (.let_ rfl (.new .lit) (.throw_ (.read (.deref (.own rfl))) (by simp)))
@@ -112,13 +141,14 @@ the arm lent `*base` as `b`: the body reads `base` while the arm may, and neithe
 and nothing left allocated. -/
 def asks : Expr :=
   .let_ "base" (.box .int) (.new (.lit 40))
-    (.handle (.let_ "a" .int (.perform 0 [] []) (.add (.read (var "a")) (.read (deref (var "base"))))) 0
+    (.handle .int (.let_ "a" .int (.perform 0 [] []) (.add (.read (var "a")) (.read (deref (var "base"))))) 0
       [⟨"b", .ro, .int, deref (var "base")⟩] [] []
       (.add (.read (var "b")) (.lit 1)))
 
-example : (eval [] ops 20 [] .empty [] asks).1 = .val (.int 81) := by decide
-example : ∀ l < (eval [] ops 20 [] .empty [] asks).2.next, (eval [] ops 20 [] .empty [] asks).2.mem l = none := by
-  decide
+example : value (eval [] ops 20 [] .empty [] asks) = some 81 := by
+  run [asks, ops]
+example : freed (eval [] ops 20 [] .empty [] asks) := by
+  run [asks, ops]
 
 theorem asks_typed : Typed [] ops [] asks .int [] [.fail] := by
   refine .let_ (live := true) rfl (.new .lit) ?_
@@ -135,6 +165,7 @@ theorem asks_typed : Typed [] ops [] asks .int [] [.fail] := by
 
 example : ∀ n, match eval [] ops n [.abort .fail 0] .empty [] asks with
     | (.stuck, _) => False
+    | (.susp _ _ _ _ _, _) => False
     | (.timeout, _) => True
     | (.val v, σ') => ∃ L, VT σ' .int v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
     | (.abort _ _, σ') => ∀ l, σ'.mem l = none :=
@@ -148,9 +179,10 @@ def stops : Expr :=
     (.handleAbort (.let_ "y" (.box .int) (.new (.lit 2)) (.perform 1 [.read (deref (var "y"))] [])) 1 "e"
       (.add (.read (var "e")) (.read (deref (var "x")))))
 
-example : (eval [] ops 20 [] .empty [] stops).1 = .val (.int 3) := by decide
-example : ∀ l < (eval [] ops 20 [] .empty [] stops).2.next, (eval [] ops 20 [] .empty [] stops).2.mem l = none := by
-  decide
+example : value (eval [] ops 20 [] .empty [] stops) = some 3 := by
+  run [stops, ops]
+example : freed (eval [] ops 20 [] .empty [] stops) := by
+  run [stops, ops]
 
 theorem stops_typed : Typed [] ops [] stops .int [] [.fail] :=
   .let_ rfl (.new .lit) (.handleAbort rfl rfl rfl rfl
@@ -158,12 +190,54 @@ theorem stops_typed : Typed [] ops [] stops .int [] [.fail] :=
       (.cons (.read (.deref (.own rfl))) .nil) .nil List.Pairwise.nil))
     (.add (.read (.own rfl)) (.read (.deref (.own rfl)))))
 
+/-- `let x = Box.new(1); try { handle { defer { *x = 5 }; let y = Box.new(2); Ask.ask() + *y } with
+Ask { ask() resumes k => throw 7 } } catch (e) { e + *x }`: the arm fails, so the code its `handle`
+ran is dropped — `y` freed, the cleanup run — and the failure goes on to the handler, which sees what
+the cleanup wrote; 12, and nothing left allocated. -/
+def drops : Expr :=
+  .let_ "x" (.box .int) (.new (.lit 1))
+    (.try_
+      (.handle .int
+        (.defer .int (.write (deref (var "x")) (.lit 5))
+          (.let_ "y" (.box .int) (.new (.lit 2))
+            (.let_ "a" .int (.perform 0 [] []) (.add (.read (var "a")) (.read (deref (var "y")))))))
+        0 [] [] [] (.throw_ (.lit 7)))
+      "e" (.add (.read (var "e")) (.read (deref (var "x")))))
+
+example : value (eval [] ops 20 [] .empty [] drops) = some 12 := by
+  run [drops, ops]
+example : freed (eval [] ops 20 [] .empty [] drops) := by
+  run [drops, ops]
+
+theorem drops_typed : Typed [] ops [] drops .int [] [.fail] := by
+  have hb := Typed.handle (F := []) (O := ops) (Γ := [("x", .own (.box .int) true)]) (e := 0) (op := ops[0])
+    (os := []) (rs := []) (caps := []) (ys := []) (r := [.fail, .fail]) (arm := .throw_ (.lit 7)) (Γa := [])
+    (body := .defer .int (.write (deref (var "x")) (.lit 5))
+      (.let_ "y" (.box .int) (.new (.lit 2))
+        (.let_ "a" .int (.perform 0 [] []) (.add (.read (var "a")) (.read (deref (var "y")))))))
+    (τ := .int) (Γb := [("x", .own (.box .int) true)])
+    rfl rfl rfl .nil (by simp [Exclusive]) (by decide) (.throw_ .lit (List.mem_cons_self ..))
+    (.defer (.let_ (live := true) rfl (.new .lit)
+        (.let_ (live := true) rfl (.perform (op := { owns := [], refs := [], ret := .int }) rfl
+          (List.mem_cons_self ..) .nil .nil List.Pairwise.nil) (.add (.read (.own rfl)) (.read (.deref (.own rfl))))))
+      (.write .lit (.deref (.own rfl))))
+  simp [thaw, unhideAll, hideAll, freeze, roots] at hb
+  exact .let_ (live := true) rfl (.new .lit) (.try_ rfl hb (.add (.read (.own rfl)) (.read (.deref (.own rfl)))))
+
+example : ∀ n, match eval [] ops n [.abort .fail 0] .empty [] drops with
+    | (.stuck, _) => False
+    | (.susp _ _ _ _ _, _) => False
+    | (.timeout, _) => True
+    | (.val v, σ') => ∃ L, VT σ' .int v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
+    | (.abort _ _, σ') => ∀ l, σ'.mem l = none :=
+  program_ok (fun _ h => by simp at h) drops_typed
+
 /-- `let x = Box.new(1); handle { x = Box.new(2); Ask.ask() } with Ask { ask() resumes k => k(*b) }`,
 the arm lent `*x` as `b`: the body would free the cell the arm reads. The types reject it: what a
 `handle` lends its arm, its body may only read. -/
 def clobbers : Expr :=
   .let_ "x" (.box .int) (.new (.lit 1))
-    (.handle (.let_ "t" (.box .int) (.new (.lit 2))
+    (.handle .int (.let_ "t" (.box .int) (.new (.lit 2))
         (.let_ "u" .int (.assign (var "x") (.box .int) (.move "t")) (.perform 0 [] []))) 0
       [⟨"b", .ro, .int, deref (var "x")⟩] [] [] (.atom (.read (var "b"))))
 
@@ -180,7 +254,7 @@ theorem var_writable (h : PlaceTy Γ (var x) τ w y) (hw : w = true) :
 
 /-- What a `handle` lends its arm, and its body, typed where those places lent `readonly` are only
 read and those lent `mut` out of reach. -/
-theorem handle_inv : Typed F O Γ (.handle body e caps os rs arm) τ Γ' r →
+theorem handle_inv : Typed F O Γ (.handle τ body e caps os rs arm) τ' Γ' r →
     ∃ ys Γb, Caps Γ caps ys ∧ Typed F O (freeze (hideAll Γ (roots .mut ys)) (roots .ro ys)) body τ Γb (.eff e :: r) := by
   intro h
   cases h with
@@ -219,15 +293,16 @@ cannot reach while the `handle` runs. The operations give 1 and 2, and `n` is 2 
 def counts : Expr :=
   .let_ "n" .int (.atom (.lit 0))
     (.let_ "h" .int
-      (.handle (.let_ "a" .int (.perform 0 [] []) (.let_ "b" .int (.perform 0 [] []) (.add (.read (var "a")) (.read (var "b")))))
+      (.handle .int (.let_ "a" .int (.perform 0 [] []) (.let_ "b" .int (.perform 0 [] []) (.add (.read (var "a")) (.read (var "b")))))
         0 [⟨"c", .mut, .int, var "n"⟩] [] []
         (.let_ "t" .int (.add (.read (var "c")) (.lit 1)) (.let_ "u" .int (.write (var "c") (.read (var "t")))
           (.atom (.read (var "c"))))))
       (.add (.read (var "h")) (.read (var "n"))))
 
-example : (eval [] ops 20 [] .empty [] counts).1 = .val (.int 5) := by decide
-example : ∀ l < (eval [] ops 20 [] .empty [] counts).2.next, (eval [] ops 20 [] .empty [] counts).2.mem l = none := by
-  decide
+example : value (eval [] ops 20 [] .empty [] counts) = some 5 := by
+  run [counts, ops]
+example : freed (eval [] ops 20 [] .empty [] counts) := by
+  run [counts, ops]
 
 theorem counts_typed : Typed [] ops [] counts .int [] [.fail] := by
   have := Typed.handle (F := []) (O := ops) (Γ := [("n", .own .int true)]) (e := 0) (op := ops[0])
@@ -251,6 +326,7 @@ theorem counts_typed : Typed [] ops [] counts .int [] [.fail] := by
 
 example : ∀ n, match eval [] ops n [.abort .fail 0] .empty [] counts with
     | (.stuck, _) => False
+    | (.susp _ _ _ _ _, _) => False
     | (.timeout, _) => True
     | (.val v, σ') => ∃ L, VT σ' .int v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
     | (.abort _ _, σ') => ∀ l, σ'.mem l = none :=
@@ -261,7 +337,7 @@ body changes the state its arm was lent `mut`. The types reject it: what an arm 
 cannot reach. -/
 def meddles : Expr :=
   .let_ "n" .int (.atom (.lit 0))
-    (.handle (.let_ "u" .int (.write (var "n") (.lit 5)) (.perform 0 [] [])) 0 [⟨"c", .mut, .int, var "n"⟩] [] []
+    (.handle .int (.let_ "u" .int (.write (var "n") (.lit 5)) (.perform 0 [] [])) 0 [⟨"c", .mut, .int, var "n"⟩] [] []
       (.let_ "t" .int (.add (.read (var "c")) (.lit 1)) (.let_ "u" .int (.write (var "c") (.read (var "t")))
         (.atom (.read (var "c"))))))
 
@@ -296,9 +372,10 @@ def cleans : Expr :=
         (.let_ "y" (.box .int) (.new (.lit 2)) (.throw_ (.read (deref (var "y")))))) "e"
       (.add (.read (var "e")) (.read (deref (var "x")))))
 
-example : (eval [] [] 20 [] .empty [] cleans).1 = .val (.int 7) := by decide
-example : ∀ l < (eval [] [] 20 [] .empty [] cleans).2.next, (eval [] [] 20 [] .empty [] cleans).2.mem l = none := by
-  decide
+example : value (eval [] [] 20 [] .empty [] cleans) = some 7 := by
+  run [cleans]
+example : freed (eval [] [] 20 [] .empty [] cleans) := by
+  run [cleans]
 
 theorem cleans_typed : Typed [] [] [] cleans .int [] [.fail] :=
   .let_ rfl (.new .lit) (.try_ rfl
@@ -314,9 +391,10 @@ def borrows : Expr :=
         (.let_ "t" .int (.add (.read (var "r")) (.lit 41)) (.write (var "r") (.read (var "t")))))
       (.atom (.read (deref (var "x")))))
 
-example : (eval [] [] 20 [] .empty [] borrows).1 = .val (.int 42) := by decide
-example : ∀ l < (eval [] [] 20 [] .empty [] borrows).2.next, (eval [] [] 20 [] .empty [] borrows).2.mem l = none := by
-  decide
+example : value (eval [] [] 20 [] .empty [] borrows) = some 42 := by
+  run [borrows]
+example : freed (eval [] [] 20 [] .empty [] borrows) := by
+  run [borrows]
 
 theorem borrows_typed : Typed [] [] [] borrows .int [] [.fail] := by
   have := Typed.lend (F := []) (O := []) (Γ := [("x", .own (.box .int) true)]) (x := "r") (m := .mut)
@@ -334,7 +412,8 @@ def reads : Expr :=
   .let_ "x" (.box .int) (.new (.lit 20))
     (.lend "r" .ro (var "x") (.add (.read (deref (var "r"))) (.read (deref (var "x")))))
 
-example : (eval [] [] 20 [] .empty [] reads).1 = .val (.int 40) := by decide
+example : value (eval [] [] 20 [] .empty [] reads) = some 40 := by
+  run [reads]
 
 /-- `let x = Box.new(1); { const r = mut *x; *x }`: `x` reached while lent `mut`. The types reject
 it: nothing may reach what a `mut` borrow has while it lives. -/

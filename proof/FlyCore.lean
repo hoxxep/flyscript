@@ -4,5 +4,6 @@ import FlyCore.OwnershipPlaces
 import FlyCore.OwnershipMoves
 import FlyCore.OwnershipFrames
 import FlyCore.OwnershipCall
+import FlyCore.OwnershipKont
 import FlyCore.OwnershipSound
 import FlyCore.OwnershipExamples

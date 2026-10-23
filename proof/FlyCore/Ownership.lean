@@ -40,6 +40,8 @@ abbrev Var := String
 inductive Label where
   | fail
   | eff (n : Nat)
+  /-- What no row holds: the barrier code is unwound to as it is dropped. -/
+  | drop
   deriving DecidableEq, Repr
 
 abbrev Row := List Label
@@ -55,6 +57,9 @@ structure Cap (α : Type) where
 
 /-- What the arm sees of a capture: its name, mode and type. -/
 def Cap.sig (c : Cap α) : Var × Mode × Ty := (c.name, c.mode, c.ty)
+
+/-- A capture as its frame has it: where its place was when the `handle` began. -/
+def Cap.at (c : Cap Place) (l : Nat) : Cap Nat := ⟨c.name, c.mode, c.ty, l⟩
 
 /-- A place: a variable, or what a box at a place points to. -/
 inductive Place where
@@ -107,7 +112,7 @@ inductive Expr where
   `arm` runs, its value the operation's result, given the operation's arguments — owned as `owns`,
   lent as `refs` — and the places of `caps`, each lent to it `readonly` or `mut` for as long as the
   `handle` runs: the state the arm keeps from one operation to the next. -/
-  | handle (body : Expr) (e : Nat) (caps : List (Cap Place)) (owns refs : List Var) (arm : Expr)
+  | handle (τ : Ty) (body : Expr) (e : Nat) (caps : List (Cap Place)) (owns refs : List Var) (arm : Expr)
   /-- `handle { body } with E { op(x) => h }`: where `body` performs the operation, whose argument
   is an integer, it unwinds, and `h` gives the `handle`'s value. -/
   | handleAbort (body : Expr) (e : Nat) (x : Var) (h : Expr)
@@ -134,16 +139,21 @@ inductive Val where
   | moved
   deriving DecidableEq, Repr
 
-/-- The store: its cells, `none` once freed or before allocation, and the next to allocate. -/
+/-- The store: its cells, `none` once freed or before allocation, the next to allocate, and the
+next name for a handler put in force. -/
 structure Store where
   mem : Nat → Option Val
   next : Nat
+  ids : Nat := 0
+
+/-- A fresh name for a handler. -/
+def Store.fresh (σ : Store) : Nat × Store := (σ.ids, { σ with ids := σ.ids + 1 })
 
 def Store.set (σ : Store) (l : Nat) (v : Option Val) : Store :=
   { σ with mem := fun k => if k = l then v else σ.mem k }
 
 def Store.alloc (σ : Store) (v : Val) : Nat × Store :=
-  (σ.next, { mem := fun k => if k = σ.next then some v else σ.mem k, next := σ.next + 1 })
+  (σ.next, { σ with mem := fun k => if k = σ.next then some v else σ.mem k, next := σ.next + 1 })
 
 abbrev Env := List (Var × Nat)
 
@@ -189,37 +199,119 @@ def dropCells (σ : Store) : List (Ty × Nat) → Option Store
     | some σ' => dropCells σ' rest
     | none => none
 
-/-- A handler in force: one that resumes, with its arm and the places its `handle` lent it; or
-one that unwinds — an abortive arm, or a `try` — by the depth of the stack it was installed on,
-which the unwinding is aimed at. -/
+/-- How a computation that was dropped ended: with a value, or unwinding. -/
+inductive Outcome where
+  | val (v : Val)
+  | abort (j : Nat) (k : Int)
+  deriving Repr
+
+/-- A frame of the code around what is being evaluated: what a construct does with what the code
+it runs gives. The frames between an operation and the `handle` that handles it are its
+continuation, taken whole when the operation is performed, and given back when it is resumed. -/
+inductive Kont where
+  /-- `let x: τ = □; b`. -/
+  | letK (x : Var) (τ : Ty) (env : Env) (b : Expr)
+  /-- The scope of a variable in cell `c`, which is dropped as it ends. -/
+  | scopeK (τ : Ty) (c : Nat)
+  /-- A call's body: the parameters it owns, dropped as it returns. -/
+  | callK (cells : List (Ty × Nat))
+  /-- The body of a `try`, or of a `handle` whose arm ends it, handling `l`, its handler named `id`. -/
+  | catchK (l : Label) (id : Nat) (x : Var) (env : Env) (h : Expr)
+  /-- A loop's condition, and its body. -/
+  | whileC (env : Env) (c b : Expr)
+  | whileB (env : Env) (c b : Expr)
+  /-- A body with cleanup `d` to run as it ends; the cleanup running as the body gave `v`, or as it
+  unwound. -/
+  | deferK (τ : Ty) (env : Env) (d : Expr)
+  | deferV (τ : Ty) (v : Val)
+  | deferA (j : Nat) (k : Int)
+  /-- The code a borrow is in scope for. -/
+  | lendK
+  /-- The body of a `handle` of type `τ` whose arm resumes, its handler named `id`. -/
+  | capK (τ : Ty) (e : Nat) (id : Nat) (caps : List (Cap Nat)) (os rs : List Var) (arm : Expr)
+  /-- An arm running, the parameters it owns dropped as it ends: then the code its `handle` (of type
+  `τ`) ran, `K`, goes on with the arm's value, or, if the arm unwinds, is dropped. -/
+  | armK (τ : Ty) (cells : List (Ty × Nat)) (K : List Kont)
+  /-- Code of type `τ` being dropped as an arm unwinds with `o`, by unwinding it to a barrier named
+  `d`. -/
+  | dropK (τ : Ty) (o : Outcome) (d : Nat)
+
+/-- A handler in force, by name: one that unwinds — an abortive arm, or a `try` — handling `l`; or
+one whose arm takes the code that performed `e` as its continuation, resuming it with its value.
+An unwinding or a continuation taken is aimed at a handler by its name, which the handler keeps
+wherever the code around it goes on. -/
 inductive Frame where
-  | resume (e : Nat) (caps : List (Cap Nat)) (owns refs : List Var) (arm : Expr)
   | abort (l : Label) (id : Nat)
+  | capture (e : Nat) (id : Nat)
 
 abbrev HS := List Frame
 
 def Frame.handles : Frame → Label → Bool
-  | .resume e _ _ _ _, .eff e' => e == e'
-  | .resume _ _ _ _ _, .fail => false
   | .abort l _, l' => l == l'
+  | .capture e _, .eff e' => e == e'
+  | _, _ => false
 
-/-- The innermost frame handling `l`, and the frames below it: the context its arm runs in. -/
-def find (l : Label) : HS → Option (Frame × HS)
+/-- The innermost frame handling `l`. -/
+def find (l : Label) : HS → Option Frame
   | [] => none
-  | f :: rest => if f.handles l then some (f, rest) else find l rest
+  | f :: rest => if f.handles l then some f else find l rest
+
+/-- The frame a construct puts in force for the code it runs, if any. -/
+def Kont.push : Kont → HS → HS
+  | .catchK l id _ _ _, hs => .abort l id :: hs
+  | .capK _ e id _ _ _ _, hs => .capture e id :: hs
+  | .dropK _ _ d, hs => .abort .drop d :: hs
+  | _, hs => hs
 
 inductive Res where
   | val (v : Val)
-  /-- Unwinding to the handler installed at depth `id`, with the operation's integer argument. -/
+  /-- Unwinding to the handler named `id`, with the operation's integer argument. -/
   | abort (id : Nat) (k : Int)
+  /-- An operation of effect `e` performed, its handler named `id` taking the code as its
+  continuation: the operation's owned arguments, the locations it lends, and the frames so far, the
+  outermost first. A `handle` takes it if it is that handler, for that effect. -/
+  | susp (id : Nat) (e : Nat) (vs : List Val) (ls : List Nat) (K : List Kont)
   | stuck
   | timeout
-  deriving DecidableEq, Repr
+
+/-- The value of a result, if it is one. -/
+def Res.value? : Res → Option Val
+  | .val v => some v
+  | _ => none
 
 /-- Evaluation ended, with a value or by unwinding: a scope it leaves drops what it owns. -/
 def Res.done : Res → Bool
   | .val _ | .abort _ _ => true
   | _ => false
+
+/-- Leaving a scope whose variable is in cell `c`: dropped on every way out but a timeout, or kept
+with the continuation taken in it. -/
+def leave (τ : Ty) (c : Nat) : Res × Store → Res × Store
+  | (.susp j ef vs ls K, σ) => (.susp j ef vs ls (.scopeK τ c :: K), σ)
+  | (r, σ) =>
+    if r.done then
+      match dropCell σ τ c with
+      | some σ' => (r, σ')
+      | none => (.stuck, σ)
+    else (r, σ)
+
+/-- A body's cleanup ended, the body having given `v`. -/
+def cleanV (τ : Ty) (v : Val) : Res × Store → Res × Store
+  | (.val (.int _), σ) => (.val v, σ)
+  | (.abort j k, σ) =>
+    match drop σ τ v with
+    | some σ' => (.abort j k, σ')
+    | none => (.stuck, σ)
+  | (.susp j ef vs ls K, σ) => (.susp j ef vs ls (.deferV τ v :: K), σ)
+  | (.val _, σ) => (.stuck, σ)
+  | r => r
+
+/-- A body's cleanup ended, the body unwinding to `j`. -/
+def cleanA (j : Nat) (k : Int) : Res × Store → Res × Store
+  | (.val (.int _), σ) => (.abort j k, σ)
+  | (.susp j' ef vs ls K, σ) => (.susp j' ef vs ls (.deferA j k :: K), σ)
+  | (.val _, σ) => (.stuck, σ)
+  | r => r
 
 /-- Allocates a cell for each value, binding the names to them. -/
 def allocAll (σ : Store) : List (Var × Val) → Env × Store
@@ -228,6 +320,37 @@ def allocAll (σ : Store) : List (Var × Val) → Env × Store
     let (c, σ1) := σ.alloc v
     let (env, σ2) := allocAll σ1 rest
     ((x, c) :: env, σ2)
+
+def Outcome.res : Outcome → Res
+  | .val v => .val v
+  | .abort j k => .abort j k
+
+/-- Code of type `τ` dropped as an arm unwound with `o`, by unwinding it to the barrier named `d`:
+once the unwinding reaches it, `o` goes on, unless the dropping itself unwound elsewhere; and if the
+code gave a value after all, the value is dropped. -/
+def dropRet (τ : Ty) (o : Outcome) (d : Nat) : Res × Store → Res × Store
+  | (.abort j k, σ) => if j = d then (o.res, σ) else (.abort j k, σ)
+  | (.val v, σ) =>
+    match drop σ τ v with
+    | some σ' => (o.res, σ')
+    | none => (.stuck, σ)
+  | (.susp j ef vs ls K, σ) => (.susp j ef vs ls (.dropK τ o d :: K), σ)
+  | r => r
+
+/-- An arm ended: its parameters are dropped, and the code its `handle` ran, `K`, goes on with
+the arm's value (`resuming`), or, if the arm unwinds with `o`, is dropped (`dropping`). -/
+def armEnd (τ : Ty) (cells : List (Ty × Nat)) (K : List Kont) (resuming : Store → Val → Res × Store)
+    (dropping : Store → Outcome → Res × Store) : Res × Store → Res × Store
+  | (.susp j ef vs ls K', σ) => (.susp j ef vs ls (.armK τ cells K :: K'), σ)
+  | (.val v, σ) =>
+    match dropCells σ cells with
+    | some σ' => resuming σ' v
+    | none => (.stuck, σ)
+  | (.abort j k, σ) =>
+    match dropCells σ cells with
+    | some σ' => dropping σ' (.abort j k)
+    | none => (.stuck, σ)
+  | r => r
 
 /-- An atom's value, and the store after: a move leaves its variable's cell marked moved. -/
 def evalAtom (σ : Store) (env : Env) : Atom → Option (Val × Store)
@@ -258,35 +381,7 @@ def evalAtoms (σ : Store) (env : Env) : List Atom → Option (List Val × Store
       | none => none
     | none => none
 
-/-- Leaving a scope whose variable is in cell `c`: dropped on every way out but a timeout. -/
-def leave (τ : Ty) (c : Nat) : Res × Store → Res × Store
-  | (r, σ) =>
-    if r.done then
-      match dropCell σ τ c with
-      | some σ' => (r, σ')
-      | none => (.stuck, σ)
-    else (r, σ)
-
-/-- Binds a function's or an arm's owned parameters in fresh cells, runs `body` with them, the
-places lent it and those of `post` — what an arm's `handle` lent it — then drops the parameters it
-owns. -/
-def enter (ev : Store → Env → Expr → Res × Store) (σ : Store)
-    (owns : List (Var × Ty)) (vs : List Val) (refs : List Var) (ls : List Nat) (post : Env) (body : Expr) :
-    Res × Store :=
-  let (cells, σ2) := allocAll σ (owns.map Prod.fst |>.zip vs)
-  match ev σ2 (cells ++ refs.zip ls ++ post) body with
-  | (r, σ3) =>
-    if r.done then
-      match dropCells σ3 (owns.map Prod.snd |>.zip (cells.map Prod.snd)) with
-      | some σ4 => (r, σ4)
-      | none => (.stuck, σ3)
-    else (r, σ3)
-
-/-- Catches an unwinding aimed at the handler installed at depth `d`, going on with `k`. -/
-def catchAt (d : Nat) : Res × Store → (Int → Store → Res × Store) → Res × Store
-  | (.abort id k, σ), h => if id = d then h k σ else (.abort id k, σ)
-  | r, _ => r
-
+mutual
 /-- The interpreter: the program's functions and operations, fuel, the handlers in force. -/
 def eval (F : List Fn) (O : List Op) : Nat → HS → Store → Env → Expr → Res × Store
   | 0, _, σ, _, _ => (.timeout, σ)
@@ -309,12 +404,7 @@ def eval (F : List Fn) (O : List Op) : Nat → HS → Store → Env → Expr →
         let (l, σ2) := σ1.alloc v
         (.val (.ptr l), σ2)
       | none => (.stuck, σ)
-    | .let_ x τ a b =>
-      match eval F O n hs σ env a with
-      | (.val v, σ1) =>
-        let (c, σ2) := σ1.alloc v
-        leave τ c (eval F O n hs σ2 ((x, c) :: env) b)
-      | r => r
+    | .let_ x τ a b => ret F O n hs (.letK x τ env b) (eval F O n hs σ env a)
     | .write p a =>
       match evalAtom σ env a with
       | some (.int k, σ1) =>
@@ -347,7 +437,9 @@ def eval (F : List Fn) (O : List Op) : Nat → HS → Store → Env → Expr →
           match lent.mapM (fun (_, p) => resolve σ1 env p) with
           | some ls =>
             if vs.length = d.owns.length ∧ ls.length = d.refs.length then
-              enter (eval F O n hs) σ1 d.owns vs (d.refs.map Prod.fst) ls [] d.body
+              let (cells, σ2) := allocAll σ1 ((d.owns.map Prod.fst).zip vs)
+              ret F O n hs (.callK ((d.owns.map Prod.snd).zip (cells.map Prod.snd)))
+                (eval F O n hs σ2 (cells ++ (d.refs.map Prod.fst).zip ls) d.body)
             else (.stuck, σ1)
           | none => (.stuck, σ1)
         | none => (.stuck, σ)
@@ -359,72 +451,132 @@ def eval (F : List Fn) (O : List Op) : Nat → HS → Store → Env → Expr →
       match evalAtom σ env a with
       | some (.int k, σ1) =>
         match find .fail hs with
-        | some (.abort _ id, _) => (.abort id k, σ1)
+        | some (.abort _ id) => (.abort id k, σ1)
         | _ => (.stuck, σ1)
       | _ => (.stuck, σ)
     | .try_ body x h =>
-      catchAt hs.length (eval F O n (.abort .fail hs.length :: hs) σ env body) fun k σ1 =>
-        let (c, σ2) := σ1.alloc (.int k)
-        leave .int c (eval F O n hs σ2 ((x, c) :: env) h)
-    | .while_ c b =>
-      match eval F O n hs σ env c with
-      | (.val (.int k), σ1) =>
-        if k = 0 then (.val (.int 0), σ1) else
-        match eval F O n hs σ1 env b with
-        | (.val (.int _), σ2) => eval F O n hs σ2 env (.while_ c b)
-        | (.val _, σ2) => (.stuck, σ2)
-        | r => r
-      | (.val _, σ1) => (.stuck, σ1)
-      | r => r
-    | .defer τ d body =>
-      match eval F O n hs σ env body with
-      | (.val v, σ1) =>
-        match eval F O n hs σ1 env d with
-        | (.val (.int _), σ2) => (.val v, σ2)
-        | (.abort i k, σ2) =>
-          match drop σ2 τ v with
-          | some σ3 => (.abort i k, σ3)
-          | none => (.stuck, σ2)
-        | (.val _, σ2) => (.stuck, σ2)
-        | r => r
-      | (.abort i k, σ1) =>
-        match eval F O n hs σ1 env d with
-        | (.val (.int _), σ2) => (.abort i k, σ2)
-        | (.val _, σ2) => (.stuck, σ2)
-        | r => r
-      | r => r
+      let (id, σ1) := σ.fresh
+      ret F O n hs (.catchK .fail id x env h) (eval F O n (.abort .fail id :: hs) σ1 env body)
+    | .while_ c b => ret F O n hs (.whileC env c b) (eval F O n hs σ env c)
+    | .defer τ d body => ret F O n hs (.deferK τ env d) (eval F O n hs σ env body)
     | .lend x _ p body =>
       match resolve σ env p with
-      | some l => eval F O n hs σ ((x, l) :: env) body
+      | some l => ret F O n hs .lendK (eval F O n hs σ ((x, l) :: env) body)
       | none => (.stuck, σ)
     | .perform ef owned lent =>
       match O[ef]? with
       | none => (.stuck, σ)
-      | some op =>
+      | some _ =>
         match evalAtoms σ env owned with
         | some (vs, σ1) =>
           match lent.mapM (fun (_, p) => resolve σ1 env p) with
           | some ls =>
             match find (.eff ef) hs with
-            | some (.resume _ caps os rs arm, rest) =>
-              if vs.length = os.length ∧ ls.length = rs.length then
-                enter (eval F O n rest) σ1 (os.zip op.owns) vs rs ls (caps.map fun c => (c.name, c.loc)) arm
-              else (.stuck, σ1)
-            | some (.abort _ id, _) =>
+            | some (.capture _ id) => (.susp id ef vs ls [], σ1)
+            | some (.abort _ id) =>
               match vs with
               | [.int k] => (.abort id k, σ1)
               | _ => (.stuck, σ1)
-            | none => (.stuck, σ1)
+            | _ => (.stuck, σ1)
           | none => (.stuck, σ1)
         | none => (.stuck, σ)
-    | .handle body ef caps os rs arm =>
+    | .handle τ body ef caps os rs arm =>
       match caps.mapM (fun c => resolve σ env c.loc) with
-      | some ls => eval F O n (.resume ef (List.zipWith (fun c l => ⟨c.name, c.mode, c.ty, l⟩) caps ls) os rs arm :: hs) σ env body
+      | some ls =>
+        let (id, σ1) := σ.fresh
+        ret F O n hs (.capK τ ef id (List.zipWith Cap.at caps ls) os rs arm)
+          (eval F O n (.capture ef id :: hs) σ1 env body)
       | none => (.stuck, σ)
     | .handleAbort body ef x h =>
-      catchAt hs.length (eval F O n (.abort (.eff ef) hs.length :: hs) σ env body) fun k σ1 =>
-        let (c, σ2) := σ1.alloc (.int k)
-        leave .int c (eval F O n hs σ2 ((x, c) :: env) h)
+      let (id, σ1) := σ.fresh
+      ret F O n hs (.catchK (.eff ef) id x env h) (eval F O n (.abort (.eff ef) id :: hs) σ1 env body)
+termination_by n _ _ _ _ => (n, 0, 0)
+
+/-- What frame `f` does with what the code it ran gave, under the handlers `hs` around it. -/
+def ret (F : List Fn) (O : List Op) (n : Nat) (hs : HS) : Kont → Res × Store → Res × Store
+  | .capK τ e id caps os rs arm, (.susp j ef vs ls K, σ) =>
+    if j ≠ id ∨ ef ≠ e then (.susp j ef vs ls (.capK τ e id caps os rs arm :: K), σ) else
+    match O[e]? with
+    | none => (.stuck, σ)
+    | some op =>
+      if vs.length = os.length ∧ ls.length = rs.length then
+        let K' := Kont.capK τ e id caps os rs arm :: K
+        let (cells, σ2) := allocAll σ (os.zip vs)
+        armEnd τ (op.owns.zip (cells.map Prod.snd)) K'
+          (fun σ v => match n with
+            | 0 => (.timeout, σ)
+            | m + 1 => evalK F O m hs σ K' (.val v))
+          (fun σ o => match n with
+            | 0 => (.timeout, σ)
+            | m + 1 =>
+              let (d, σ1) := σ.fresh
+              dropRet τ o d (evalK F O m (.abort .drop d :: hs) σ1 K' (.abort d 0)))
+          (eval F O n hs σ2 (cells ++ rs.zip ls ++ caps.map (fun c => (c.name, c.loc))) arm)
+      else (.stuck, σ)
+  | f, (.susp j ef vs ls K, σ) =>
+    match f with
+    | .scopeK τ c => leave τ c (.susp j ef vs ls K, σ)
+    | .deferV τ v => cleanV τ v (.susp j ef vs ls K, σ)
+    | .deferA j' k => cleanA j' k (.susp j ef vs ls K, σ)
+    | .armK τ cells K0 => (.susp j ef vs ls (.armK τ cells K0 :: K), σ)
+    | .dropK τ o d => dropRet τ o d (.susp j ef vs ls K, σ)
+    | f => (.susp j ef vs ls (f :: K), σ)
+  | _, (.stuck, σ) => (.stuck, σ)
+  | _, (.timeout, σ) => (.timeout, σ)
+  | .letK x τ env b, (.val v, σ) =>
+    let (c, σ2) := σ.alloc v
+    leave τ c (eval F O n hs σ2 ((x, c) :: env) b)
+  | .letK _ _ _ _, (.abort j k, σ) => (.abort j k, σ)
+  | .scopeK τ c, r => leave τ c r
+  | .callK cells, (r, σ) =>
+    match dropCells σ cells with
+    | some σ' => (r, σ')
+    | none => (.stuck, σ)
+  | .catchK _ id x env h, (.abort j k, σ) =>
+    if j = id then
+      let (c, σ2) := σ.alloc (.int k)
+      leave .int c (eval F O n hs σ2 ((x, c) :: env) h)
+    else (.abort j k, σ)
+  | .catchK _ _ _ _ _, (.val v, σ) => (.val v, σ)
+  | .whileC _ _ _, (.val (.int 0), σ) => (.val (.int 0), σ)
+  | .whileC env c b, (.val (.int _), σ) =>
+    match eval F O n hs σ env b with
+    | (.val (.int _), σ2) => eval F O n hs σ2 env (.while_ c b)
+    | (.susp j ef vs ls K, σ2) => (.susp j ef vs ls (.whileB env c b :: K), σ2)
+    | (.val _, σ2) => (.stuck, σ2)
+    | r => r
+  | .whileC _ _ _, (.val _, σ) => (.stuck, σ)
+  | .whileC _ _ _, (.abort j k, σ) => (.abort j k, σ)
+  | .whileB env c b, (.val (.int _), σ) => eval F O n hs σ env (.while_ c b)
+  | .whileB _ _ _, (.val _, σ) => (.stuck, σ)
+  | .whileB _ _ _, (.abort j k, σ) => (.abort j k, σ)
+  | .deferK τ env d, (.val v, σ) => cleanV τ v (eval F O n hs σ env d)
+  | .deferK _ env d, (.abort j k, σ) => cleanA j k (eval F O n hs σ env d)
+  | .deferV τ v, r => cleanV τ v r
+  | .deferA j k, r => cleanA j k r
+  | .lendK, r => r
+  | .capK _ _ _ _ _ _ _, (.val v, σ) => (.val v, σ)
+  | .capK _ _ _ _ _ _ _, (.abort j k, σ) => (.abort j k, σ)
+  | .armK τ cells K, r =>
+    armEnd τ cells K
+      (fun σ v => match n with
+        | 0 => (.timeout, σ)
+        | m + 1 => evalK F O m hs σ K (.val v))
+      (fun σ o => match n with
+        | 0 => (.timeout, σ)
+        | m + 1 =>
+          let (d, σ1) := σ.fresh
+          dropRet τ o d (evalK F O m (.abort .drop d :: hs) σ1 K (.abort d 0))) r
+  | .dropK τ o d, r => dropRet τ o d r
+termination_by _ _ => (n, 1, 0)
+
+/-- A continuation given what the code it was taken at gives: its frames, the outermost first, each
+putting in force the handler it did. -/
+def evalK (F : List Fn) (O : List Op) (n : Nat) (hs : HS) (σ : Store) : List Kont → Res → Res × Store
+  | [], r => (r, σ)
+  | f :: K, r => ret F O n hs f (evalK F O n (f.push hs) σ K r)
+termination_by K _ => (n, 1, sizeOf K + 1)
+end
 
 
 /-! ## Types -/
@@ -575,7 +727,7 @@ inductive Typed (F : List Fn) (O : List Op) : Ctx → Expr → Ty → Ctx → Ro
       Caps Γ caps ys → Exclusive ys → (os ++ rs ++ caps.map Cap.name).Nodup →
       Typed F O (armCtx os rs op (caps.map Cap.sig)) arm op.ret Γa r →
       Typed F O (freeze (hideAll Γ (roots .mut ys)) (roots .ro ys)) body τ Γb (.eff e :: r) →
-      Typed F O Γ (.handle body e caps os rs arm) τ
+      Typed F O Γ (.handle τ body e caps os rs arm) τ
         (unhideAll Γ (roots .mut ys) (thaw (hideAll Γ (roots .mut ys)) (roots .ro ys) Γb)) r
   /-- As for `try`, the arm starts where the body would have ended. -/
   | handleAbort : O[e]? = some op → op.owns = [.int] → op.refs = [] → lookup x Γb = none →

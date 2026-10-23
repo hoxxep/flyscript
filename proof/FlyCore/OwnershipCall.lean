@@ -10,13 +10,7 @@ lemmas here follow those steps; `eval_ok` puts them together.
 
 namespace FlyCore.Ownership
 
-/-- An unwinding is aimed at a frame of the stack. -/
-def AimedIn (id : Nat) (hs : HS) : Prop := ∃ l, Frame.abort l id ∈ hs
-
-/-- Every label of the row has a handler. -/
-def Covers (hs : HS) (r : Row) : Prop := ∀ l ∈ r, ∃ p, find l hs = some p
-
-/-! ## The handlers in force -/
+/-! ## What a `handle` lends its arm -/
 
 /-- The places a `handle` lent its arm, each holding a value of its type: `R` the cells of those
 lent `readonly`, `H` of those lent `mut`. -/
@@ -24,45 +18,6 @@ inductive CapsOk (σ : Store) : List (Cap Nat) → List Nat → List Nat → Pro
   | nil : CapsOk σ [] [] []
   | ro : LT σ a τ L → CapsOk σ rest R H → CapsOk σ (⟨x, .ro, τ, a⟩ :: rest) (L ++ R) H
   | mut : LT σ a τ L → CapsOk σ rest R H → CapsOk σ (⟨x, .mut, τ, a⟩ :: rest) R (L ++ H)
-
-/-- A handler stack whose frames are well formed: each unwinding one numbered by its depth; each
-resuming arm typed where it runs — its parameters, then the places its `handle` lent it, holding
-values of their types, its row covered by the frames below — and `R` the cells of those places
-lent `readonly`, `H` of those lent `mut`. -/
-inductive HSOk (F : List Fn) (O : List Op) (σ : Store) : HS → List Nat → List Nat → Prop
-  | nil : HSOk F O σ [] [] []
-  | abort : i = rest.length → (∀ e, l = .eff e → ∃ op, O[e]? = some op ∧ op.owns = [.int] ∧ op.refs = []) →
-      HSOk F O σ rest R H → HSOk F O σ (.abort l i :: rest) R H
-  | resume : O[e]? = some op → CapsOk σ caps Rc Hc → os.length = op.owns.length →
-      rs.length = op.refs.length → (os ++ rs ++ caps.map Cap.name).Nodup →
-      Typed F O (armCtx os rs op (caps.map Cap.sig)) arm op.ret Γa r → Covers rest r →
-      HSOk F O σ rest R H → HSOk F O σ (.resume e caps os rs arm :: rest) (Rc ++ R) (Hc ++ H)
-
-/-- The handlers' state: their frames well formed, `R` the cells their arms only read and `H` those
-they may change, neither of which is what the code `E` may change. -/
-structure Held (F : List Fn) (O : List Op) (σ : Store) (hs : HS) (R H E : List Nat) : Prop where
-  ok : HSOk F O σ hs R H
-  nodup : H.Nodup
-  disj : Disj H E
-  ro : Disj R (E ++ H)
-
-/-- Where code may run under `hs`, performing what `r` names: the handlers are well formed and handle
-every label of the row, what their arms may change is none of what the code may, or only read. -/
-def Ready (F : List Fn) (O : List Op) (σ : Store) (E S R H : List Nat) (hs : HS) (r : Row) : Prop :=
-  Held F O σ hs R H E ∧ Disj H S ∧ Covers hs r
-
-/-- What evaluating under the handlers `hs` may give: never stuck; a value, with the activation
-still well formed after, the value owning cells no variable does, and the step — the code's and the
-arms' it ran — accounted for; or an unwinding aimed at one of the handlers, everything the scopes it
-left owned dropped, the activation well formed as the expression would have left it. -/
-def Post (F : List Fn) (O : List Op) (σ : Store) (E S R H : List Nat) (Γ' : Ctx) (env : Env) (τ : Ty)
-    (hs : HS) : Res × Store → Prop
-  | (.stuck, _) => False
-  | (.timeout, _) => True
-  | (.val v, σ') => ∃ E' H' L, Inv σ' Γ' env E' S ∧ VT σ' τ v L ∧ Disj L (E' ++ H') ∧ Disj L S ∧
-      Moves σ (E ++ H) σ' (E' ++ H') L ∧ Held F O σ' hs R H' E'
-  | (.abort id _, σ') => AimedIn id hs ∧ ∃ E' H', Inv σ' Γ' env E' S ∧ Moves σ (E ++ H) σ' (E' ++ H') [] ∧
-      Held F O σ' hs R H' E'
 
 /-! ## Variables perhaps moved -/
 
@@ -220,17 +175,6 @@ theorem typed_weaker : Typed F O Γ e τ Γ' r → (Γ.map Prod.fst).Nodup → W
     cases this with
     | cons _ w => exact w.trans (typed_weaker hb hk)
 
-/-- What an expression may give, said of a context it leaves, holds of one that is weaker. -/
-theorem post_weaken {r : Res × Store} (h : Post F O σ E S R H Γ₁ env τ hs r) (w : Weaker Γ' Γ₁) :
-    Post F O σ E S R H Γ' env τ hs r := by
-  rcases r with ⟨r, σ'⟩
-  cases r with
-  | val v =>
-    obtain ⟨E', H', L, hI, hv, hd, hdS, hm, hh⟩ := h; exact ⟨E', H', L, hI.weaken w, hv, hd, hdS, hm, hh⟩
-  | abort id k => obtain ⟨haim, E', H', hI, hm, hh⟩ := h; exact ⟨haim, E', H', hI.weaken w, hm, hh⟩
-  | stuck => exact h
-  | timeout => trivial
-
 /-- A function's context: its owned parameters, live, then its borrowed ones. -/
 def fnCtx (d : Fn) : Ctx :=
   d.owns.map (fun p => (p.1, Slot.own p.2 true)) ++ d.refs.map (fun p => (p.1, Slot.ref p.2.1 p.2.2))
@@ -371,234 +315,6 @@ theorem CapsOk.det_ro : CapsOk σ caps R H → CapsOk σ' caps R' H' → Agree �
     obtain rfl := (hL.frame fun l hl => hag l (by simp [hl])).det hL'
     rw [hr.det_ro hr' fun l hl => hag l (by simp [hl])]
   | .mut _ hr, .mut _ hr', hag => hr.det_ro hr' hag
-
-/-- The frames below one that resumes, its places those of `Rc`, read where the store agrees with
-one it was well formed in. -/
-theorem HSOk.pop_resume (h : HSOk F O σ (.resume e caps os rs arm :: hs) (Rc ++ R) H) (hc : CapsOk σ0 caps Rc Hc0)
-    (hag : Agree σ0 σ Rc) : ∃ Hc Hr, H = Hc ++ Hr ∧ CapsOk σ caps Rc Hc ∧ HSOk F O σ hs R Hr := by
-  generalize hX : Rc ++ R = X at h
-  cases h with
-  | resume _ hc' _ _ _ _ _ hr =>
-    obtain rfl := hc.det_ro hc' hag
-    obtain rfl := List.append_cancel_left hX
-    exact ⟨_, _, rfl, hc', hr⟩
-
-theorem HSOk.frame : HSOk F O σ hs R H → Agree σ σ' (R ++ H) → HSOk F O σ' hs R H
-  | .nil, _ => .nil
-  | .abort hi ho hr, hag => .abort hi ho (hr.frame hag)
-  | .resume ho hc h1 h2 hn ht hcov hr, hag => .resume ho (hc.frame fun l hl => hag l (by
-        rcases List.mem_append.mp hl with h | h <;> simp [h]))
-      h1 h2 hn ht hcov (hr.frame fun l hl => hag l (by
-        rcases List.mem_append.mp hl with h | h <;> simp [h]))
-
-theorem HSOk.alloc : HSOk F O σ hs R H → ∀ l ∈ R ++ H, σ.mem l ≠ none
-  | .nil, _, h => by simp at h
-  | .abort _ _ hr, l, h => hr.alloc l h
-  | .resume _ hc _ _ _ _ _ hr, l, h => by
-    simp only [List.mem_append] at h
-    rcases h with (h | h) | (h | h)
-    · exact hc.alloc l (List.mem_append.mpr (.inl h))
-    · exact hr.alloc l (List.mem_append.mpr (.inl h))
-    · exact hc.alloc l (List.mem_append.mpr (.inr h))
-    · exact hr.alloc l (List.mem_append.mpr (.inr h))
-
-theorem Held.alloc (h : Held F O σ hs R H E) : ∀ l ∈ R ++ H, σ.mem l ≠ none := h.ok.alloc
-
-theorem Held.allocH (h : Held F O σ hs R H E) : ∀ l ∈ H, σ.mem l ≠ none :=
-  fun l hl => h.alloc l (List.mem_append.mpr (.inr hl))
-
-theorem Held.frame (h : Held F O σ hs R H E) (hag : Agree σ σ' (R ++ H)) : Held F O σ' hs R H E :=
-  ⟨h.ok.frame hag, h.nodup, h.disj, h.ro⟩
-
-theorem Held.sub (h : Held F O σ hs R H E) (hX : ∀ x ∈ X, x ∈ E) : Held F O σ hs R H X := by
-  refine ⟨h.ok, h.nodup, fun x hx hxX => h.disj x hx (hX x hxX), fun x hx hx' => h.ro x hx ?_⟩
-  rcases List.mem_append.mp hx' with h | h
-  · exact List.mem_append.mpr (.inl (hX x h))
-  · exact List.mem_append.mpr (.inr h)
-
-/-- What a step gives or leaves in its footprint is none of the handlers' cells. -/
-theorem Held.apart (h : Held F O σ hs R H E) (hwf : WF σ) (hm : Moves σ (E ++ H) σ' E' L) :
-    Disj R E' ∧ Disj R L := by
-  refine ⟨fun l hl hl' => ?_, fun l hl hl' => ?_⟩ <;>
-  · rcases hm.within l (by first | exact .inr hl' | exact .inl hl') with h' | h'
-    · exact h.ro l hl h'
-    · exact Nat.lt_irrefl _ (Nat.lt_of_lt_of_le (hwf l (h.alloc l (List.mem_append.mpr (.inl hl)))) h')
-
-/-- A step of the code alone, which changes nothing of the handlers'. -/
-theorem Held.local (h : Held F O σ hs R H E) (hwf : WF σ) (hm : Moves σ E σ' E' L) :
-    Moves σ (E ++ H) σ' (E' ++ H) L ∧ Held F O σ' hs R H E' ∧ Disj L H := by
-  have hd : Disj H E := h.disj
-  have hm' := (hm.widen h.allocH hd).congr_left (E₀ := E ++ H) fun x => by
-    simp only [List.mem_append]; exact Or.comm
-  obtain ⟨hdE, hdL⟩ := hm.apart hwf h.allocH hd
-  refine ⟨hm'.relabel fun x => by mem_iff, ⟨h.ok.frame fun l hl => hm.frame l (hwf l (h.alloc l hl)) ?_,
-    h.nodup, hdE, ?_⟩, hdL.symm⟩
-  · rcases List.mem_append.mp hl with hl | hl
-    · exact fun h' => h.ro l hl (List.mem_append.mpr (.inl h'))
-    · exact hd l hl
-  · obtain ⟨hR, -⟩ := h.apart hwf hm'
-    exact fun l hl h' => hR l hl (by
-      rcases List.mem_append.mp h' with h' | h'
-      · exact List.mem_append.mpr (.inr h')
-      · exact List.mem_append.mpr (.inl h'))
-
-/-- After a step, ready again for what the step left and gave. -/
-theorem Ready.post (h : Ready F O σ E S R H hs r) (hwf : WF σ) (hSE : Disj S E) (hSa : ∀ l ∈ S, σ.mem l ≠ none)
-    (hm : Moves σ (E ++ H) σ' (E' ++ H') L) (hh : Held F O σ' hs R H' E') (hdL : Disj L H')
-    (hX : ∀ x ∈ X, x ∈ E' ∨ x ∈ L) : Ready F O σ' X S R H' hs r := by
-  obtain ⟨hh0, hHS, hc⟩ := h
-  obtain ⟨-, hRL⟩ := hh0.apart hwf hm
-  refine ⟨⟨hh.ok, hh.nodup, fun x hx hxX => ?_, fun x hx hx' => ?_⟩, fun x hx hxS => ?_, hc⟩
-  · rcases hX x hxX with h | h
-    · exact hh.disj x hx h
-    · exact hdL x h hx
-  · rcases List.mem_append.mp hx' with h | h
-    · rcases hX x h with h | h
-      · exact hh.ro x hx (List.mem_append.mpr (.inl h))
-      · exact hRL x hx h
-    · exact hh.ro x hx (List.mem_append.mpr (.inr h))
-  · rcases hm.within x (.inr (List.mem_append.mpr (.inr hx))) with h | h
-    · rcases List.mem_append.mp h with h | h
-      · exact hSE x hxS h
-      · exact hHS x h hxS
-    · exact Nat.lt_irrefl _ (Nat.lt_of_lt_of_le (hwf x (hSa x hxS)) h)
-
-theorem Ready.sub (h : Ready F O σ E S R H hs r) (hX : ∀ x ∈ X, x ∈ E) (hY : ∀ y ∈ Y, y ∈ E ∨ y ∈ S) :
-    Ready F O σ X Y R H hs r := by
-  obtain ⟨hh, hHS, hc⟩ := h
-  refine ⟨⟨hh.ok, hh.nodup, fun x hx hxX => hh.disj x hx (hX x hxX), fun x hx hx' => hh.ro x hx ?_⟩,
-    fun x hx hxY => ?_, hc⟩
-  · rcases List.mem_append.mp hx' with h | h
-    · exact List.mem_append.mpr (.inl (hX x h))
-    · exact List.mem_append.mpr (.inr h)
-  · rcases hY x hxY with h | h
-    · exact hh.disj x hx h
-    · exact hHS x hx h
-
-theorem Ready.row (h : Ready F O σ E S R H hs r) (hr : ∀ l ∈ r', l ∈ r) : Ready F O σ E S R H hs r' :=
-  ⟨h.1, h.2.1, fun l hl => h.2.2 l (hr l hl)⟩
-
-theorem covers_cons (f : Frame) : Covers hs r → Covers (f :: hs) r := by
-  intro h l hl
-  obtain ⟨p, hp⟩ := h l hl
-  by_cases hf : f.handles l = true
-  · exact ⟨(f, hs), by simp [find, hf]⟩
-  · exact ⟨p, by simp [find, hf, hp]⟩
-
-theorem Held.push_abort (h : Held F O σ hs R H E)
-    (hl : ∀ e, l = .eff e → ∃ op, O[e]? = some op ∧ op.owns = [.int] ∧ op.refs = []) :
-    Held F O σ (.abort l hs.length :: hs) R H E :=
-  ⟨.abort rfl hl h.ok, h.nodup, h.disj, h.ro⟩
-
-theorem Held.pop_abort (h : Held F O σ (.abort l i :: hs) R H E) : Held F O σ hs R H E := by
-  obtain ⟨hok, hn, hd, hro⟩ := h
-  cases hok with
-  | abort _ _ hr => exact ⟨hr, hn, hd, hro⟩
-
-/-- Under an unwinding handler of `l` installed at the depth of the stack, `l` is handled too. -/
-theorem Ready.push_abort (h : Ready F O σ E S R H hs r)
-    (hl : ∀ e, l = .eff e → ∃ op, O[e]? = some op ∧ op.owns = [.int] ∧ op.refs = []) :
-    Ready F O σ E S R H (.abort l hs.length :: hs) (l :: r) := by
-  obtain ⟨hh, hHS, hc⟩ := h
-  refine ⟨hh.push_abort hl, hHS, ?_⟩
-  intro l' hl'
-  rcases List.mem_cons.mp hl' with rfl | hl'
-  · exact ⟨(.abort l' hs.length, hs), by simp [find, Frame.handles]⟩
-  · exact covers_cons _ hc l' hl'
-
-/-- Unwinding past a handler installed at depth `c`: an unwinding aimed elsewhere is aimed below. -/
-theorem aimed_pop : AimedIn i (.abort l c :: hs) → i ≠ c → AimedIn i hs := by
-  rintro ⟨l', hl⟩ hne
-  rcases List.mem_cons.mp hl with h | h
-  · cases h; exact absurd rfl hne
-  · exact ⟨l', h⟩
-
-theorem aimed_cons : AimedIn i hs → AimedIn i (f :: hs) := fun ⟨l, h⟩ => ⟨l, List.mem_cons_of_mem _ h⟩
-
-theorem find_mem : find l hs = some (f, rest) → f ∈ hs ∧ ∀ g ∈ rest, g ∈ hs := by
-  induction hs with
-  | nil => simp [find]
-  | cons g hs ih =>
-    intro h
-    simp only [find] at h
-    split at h
-    · simp at h
-      obtain ⟨rfl, rfl⟩ := h
-      exact ⟨List.mem_cons_self .., fun x hx => List.mem_cons_of_mem _ hx⟩
-    · obtain ⟨h1, h2⟩ := ih h
-      exact ⟨List.mem_cons_of_mem _ h1, fun x hx => List.mem_cons_of_mem _ (h2 x hx)⟩
-
-theorem find_handles : find l hs = some (f, rest) → f.handles l = true := by
-  induction hs with
-  | nil => simp [find]
-  | cons g hs ih =>
-    intro h
-    simp only [find] at h
-    split at h
-    · simp at h
-      obtain ⟨rfl, rfl⟩ := h
-      assumption
-    · exact ih h
-
-/-- The frame an unwinding handler of an operation is: its operation takes an integer and lends
-nothing. -/
-theorem find_abort_op (hR : HSOk F O σ hs R H) (hf : find (.eff e) hs = some (.abort l i, rest)) :
-    ∃ op, O[e]? = some op ∧ op.owns = [.int] ∧ op.refs = [] := by
-  induction hR generalizing rest with
-  | nil => simp [find] at hf
-  | abort _ ho _ ih =>
-    simp only [find] at hf
-    split at hf
-    · rename_i hh
-      simp only [Option.some.injEq, Prod.mk.injEq, Frame.abort.injEq] at hf
-      obtain ⟨⟨rfl, rfl⟩, rfl⟩ := hf
-      simp only [Frame.handles, beq_iff_eq] at hh
-      exact ho e hh
-    · exact ih hf
-  | resume _ _ _ _ _ _ _ _ ih =>
-    simp only [find] at hf
-    split at hf
-    · simp at hf
-    · exact ih hf
-
-/-- The frame a resuming handler of an operation is, with everything its arm needs to run: the
-state of the frames above it `Ha`, its own `Hc`, and below it `Hr`; and how the stack is put back
-together once the arm, run under the frames below, has changed its frame's state and theirs. -/
-theorem find_resume (hR : HSOk F O σ hs R H) (hf : find (.eff e) hs = some (.resume e' caps os rs arm, rest)) :
-    ∃ op Rc Hc Γa r R' Ha Hr, O[e]? = some op ∧ CapsOk σ caps Rc Hc ∧ os.length = op.owns.length ∧
-      rs.length = op.refs.length ∧ (os ++ rs ++ caps.map Cap.name).Nodup ∧
-      Typed F O (armCtx os rs op (caps.map Cap.sig)) arm op.ret Γa r ∧ Covers rest r ∧
-      HSOk F O σ rest R' Hr ∧ (∀ l ∈ Rc ++ R', l ∈ R) ∧ H = Ha ++ Hc ++ Hr ∧
-      ∀ σ' Hc' H', CapsOk σ' caps Rc Hc' → HSOk F O σ' rest R' H' → Agree σ σ' (R ++ Ha) →
-        HSOk F O σ' hs R (Ha ++ Hc' ++ H') := by
-  induction hR generalizing rest with
-  | nil => simp [find] at hf
-  | abort hi ho _ ih =>
-    simp only [find] at hf
-    split at hf
-    · simp at hf
-    · obtain ⟨op, Rc, Hc, Γa, r, R'', Ha, Hr, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11⟩ := ih hf
-      exact ⟨op, Rc, Hc, Γa, r, R'', Ha, Hr, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10,
-        fun σ' Hc' H' hc h hag => .abort hi ho (a11 σ' Hc' H' hc h hag)⟩
-  | @resume e₀ op₀ caps₀ Rc₀ Hc₀ os₀ rs₀ arm₀ Γa₀ r₀ rest₀ R₀ H₀ ho hc hl1 hl2 hn ht hcov hr ih =>
-    simp only [find] at hf
-    split at hf
-    · rename_i hh
-      simp only [Option.some.injEq, Prod.mk.injEq, Frame.resume.injEq] at hf
-      obtain ⟨⟨rfl, rfl, rfl, rfl, rfl⟩, rfl⟩ := hf
-      simp only [Frame.handles, beq_iff_eq] at hh
-      subst hh
-      exact ⟨_, _, _, _, _, _, [], _, ho, hc, hl1, hl2, hn, ht, hcov, hr, fun l h => h, by simp,
-        fun σ' Hc' H' hc' h _ => .resume ho hc' hl1 hl2 hn ht hcov h⟩
-    · obtain ⟨op, Rc, Hc, Γa, r, R'', Ha, Hr, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11⟩ := ih hf
-      refine ⟨op, Rc, Hc, Γa, r, R'', Hc₀ ++ Ha, Hr, a1, a2, a3, a4, a5, a6, a7, a8,
-        fun l h => List.mem_append.mpr (.inr (a9 l h)), by simp [a10], ?_⟩
-      intro σ' Hc' H' hc' h hag
-      have := HSOk.resume ho (hc.frame fun l hl => hag l (by
-          rcases List.mem_append.mp hl with h | h <;> simp [h])) hl1 hl2 hn ht hcov
-        (a11 σ' Hc' H' hc' h fun l hl => hag l (by
-          rcases List.mem_append.mp hl with h | h <;> simp [h]))
-      simpa [List.append_assoc] using this
 
 /-! ## Owned arguments -/
 
@@ -1466,9 +1182,6 @@ theorem Caps.roots_live : Caps Γ caps ys → ∀ p ∈ ys, ∀ τ, lookup p.2 �
 inductive Trees (σ : Store) (Γ : Ctx) (env : Env) : List Var → List Nat → Prop
   | nil : Trees σ Γ env [] []
   | cons : Entry σ Γ env y s a L → s.excl = true → Trees σ Γ env ys H → Trees σ Γ env (y :: ys) (L ++ H)
-
-/-- A capture as its frame has it: where its place was when the `handle` began. -/
-def Cap.at (c : Cap Place) (l : Nat) : Cap Nat := ⟨c.name, c.mode, c.ty, l⟩
 
 theorem roots_cons_ro : roots .mut ((.ro, y) :: ys) = roots .mut ys := by simp [roots]
 theorem roots_cons_mut : roots .mut ((.mut, y) :: ys) = y :: roots .mut ys := by simp [roots]
