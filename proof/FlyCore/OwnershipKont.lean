@@ -104,11 +104,12 @@ structure ParOk (F : List Fn) (ι : List Nat) (O : List Op) (σf : Store) (e : N
   hcb : τb.complete = true
 
 /-- What a generator keeps while it runs: the operations `eN`, by which its consumer asks, taking
-nothing and giving `#Some` of a `τy` or `#Done`, and `eY`, by which its producer yields a `τy`; and
-how the activation, `Γout`, is rebuilt from its consumer's, `Γin`, once the consumer ends — with
-what it froze for the consumer, `Fz`, as it was. -/
+nothing and giving `#Some` of a `τy` or `#Done`, and `eY`, by which its producer yields a `τy`; the
+places `caps` it lent its producer; and how the activation, `Γout`, is rebuilt from its consumer's,
+`Γin`, once both sides are done — with what it froze, `Fz`, as it was, and the trees the producer
+left at the places lent `mut`. `Rc` are the cells of the places lent `readonly`, which nothing changes. -/
 structure GenOk (F : List Fn) (ι : List Nat) (O : List Op) (σf : Store) (eN eY : Nat) (opN opY : Op) (τy τb : Ty)
-    (Γin Γout : Ctx) (env : Env) (Sin S Fz : List Nat) : Prop where
+    (caps : List (Cap Nat)) (Γin Γout : Ctx) (env : Env) (Sin S Fz Rc : List Nat) : Prop where
   hopN : O[eN]? = some opN
   hNowns : opN.owns = []
   hNrefs : opN.refs = []
@@ -121,8 +122,16 @@ structure GenOk (F : List Fn) (ι : List Nat) (O : List Op) (σf : Store) (eN eY
   hcb : τb.complete = true
   hSin : ∀ l ∈ Sin, l ∈ Fz ∨ l ∈ S
   hS : ∀ l ∈ S, l ∈ Sin
-  hre : ∀ σ1 Eb, Agree σf σ1 (Fz ++ S) → Disj Fz Eb → Inv F ι σ1 Γin env Eb Sin →
-    ∃ E', Inv F ι σ1 Γout env E' S ∧ ∀ z, z ∈ E' ↔ z ∈ Eb ∨ z ∈ Fz
+  hRc : ∀ l ∈ Rc, l ∈ Fz ∨ l ∈ S
+  hRcdet : ∀ σ1 Rc' Hc, Agree σf σ1 (Fz ++ S) → CapsOk F ι σ1 caps Rc' Hc → Rc' = Rc
+  hfns : ∀ c ∈ caps, c.mode = .mut → c.ty.isFn = false
+  hre : ∀ σ1 Eb Hc, Agree σf σ1 (Fz ++ S) → Disj (Fz ++ Hc) Eb → Disj S Hc → (Fz ++ Hc).Nodup →
+    CapsOk F ι σ1 caps Rc Hc → Inv F ι σ1 Γin env Eb Sin →
+    ∃ E', Inv F ι σ1 Γout env E' S ∧ ∀ z, z ∈ E' ↔ z ∈ Eb ∨ z ∈ Fz ∨ z ∈ Hc
+
+/-- The level a generator's producer is at, once its call ends: the places lent it. -/
+def capsLvlΓ (caps : List (Cap Nat)) : Ctx := capCtx (caps.map Cap.sig)
+def capsLvlEnv (caps : List (Cap Nat)) : Env := caps.map fun c => (c.name, c.loc)
 
 /-- What a producer being dropped, as its consumer ended with `o`, keeps: `o`'s cells, `Lo`. -/
 def OutOk (F : List Fn) (ι : List Nat) (σ : Store) (τ : Ty) : Outcome → List Nat → Prop
@@ -223,7 +232,7 @@ are the frame's own. -/
   | startK : Typed F O Γ b τ Γ' r → FrameOk F O ι ι σf (.startK env b) ⟨Γ, env, .int, S, r⟩ ⟨Γ', env, τ, S, r⟩ [] []
   /-- A task's call: as its body ends, the parameters it owns are dropped, leaving those it was lent,
   `readonly`. -/
-  | taskK : (∀ l ∈ d.row, l ∈ r) → (∀ x ∈ d.refs, x.2.1 = .ro) →
+  | taskK : (∀ l ∈ d.row, l ∈ r) →
       ((d.owns.map Prod.fst) ++ (d.refs.map Prod.fst)).Nodup → (∀ o ∈ d.owns, o.2.complete = true) →
       Typed F O (fnCtx d) d.body d.ret Γ'' d.row → cells.map Prod.fst = d.owns.map Prod.fst →
       FrameOk F O ι ι σf (.callK ((d.owns.map Prod.snd).zip (cells.map Prod.snd)))
@@ -246,18 +255,19 @@ are the frame's own. -/
       FrameOk F O ι ι σf (.parY e hid) ⟨Γ, env, τ, S, .eff e :: r⟩ ⟨Γ, env, τ, S, r⟩ [] []
   /-- A generator's consumer running, its producer waiting as `Kq` at its own level: the frame's
   cells are what it froze and the producer's. -/
-  | genC : GenOk F ι O σf eN eY opN opY τy τb Γin Γout env Sin S Fz → RoCtx Γo →
-      (∀ l ∈ So, l ∈ Fz ∨ l ∈ S) → FramesOk F O ι σf Kq opY ⟨Γo, envo, .int, So, .eff eY :: r⟩ Xp [] AK →
+  | genC : GenOk F ι O σf eN eY opN opY τy τb cz Γin Γout env Sin S Fz Rc →
+      (∀ l ∈ So, l ∈ Fz ∨ l ∈ S) →
+      FramesOk F O ι σf Kq opY ⟨capsLvlΓ cz, capsLvlEnv cz, .int, So, .eff eY :: r⟩ Xp [] AK →
       FrameOk F O ι ι σf (.genC eN eY hid τy τb (some Kq)) ⟨Γin, env, τb, Sin, .eff eN :: r⟩
         ⟨Γout, env, τb, S, r⟩ (Fz ++ Xp) AK
   /-- A generator's consumer running, its producer ended. -/
-  | genCd : GenOk F ι O σf eN eY opN opY τy τb Γin Γout env Sin S Fz →
+  | genCd : GenOk F ι O σf eN eY opN opY τy τb cz Γin Γout env Sin S Fz Rc → CapsOk F ι σf cz Rc Hc →
       FrameOk F O ι ι σf (.genC eN eY hid τy τb none) ⟨Γin, env, τb, Sin, .eff eN :: r⟩
-        ⟨Γout, env, τb, S, r⟩ Fz []
+        ⟨Γout, env, τb, S, r⟩ (Fz ++ Hc) []
   /-- A generator's producer running, its consumer waiting as `Kc` for what it asked. -/
-  | genP : GenOk F ι O σf eN eY opN opY τy τb Γin Γout env Sin S Fz → RoCtx Γo →
+  | genP : GenOk F ι O σf eN eY opN opY τy τb cz Γin Γout env Sin S Fz Rc →
       (∀ l ∈ So, l ∈ Fz ∨ l ∈ S) → FramesOk F O ι σf Kc opN ⟨Γin, env, τb, Sin, .eff eN :: r⟩ Xc [] AK →
-      FrameOk F O ι ι σf (.genP eN eY hid τy τb Kc) ⟨Γo, envo, .int, So, .eff eY :: r⟩
+      FrameOk F O ι ι σf (.genP eN eY hid τy τb Kc) ⟨capsLvlΓ cz, capsLvlEnv cz, .int, So, .eff eY :: r⟩
         ⟨Γout, env, τb, S, r⟩ (Fz ++ Xc) AK
   /-- A producer being dropped: what it yields is dropped. -/
   | genY : O[eY]? = some opY → opY.owns = [τy] → opY.refs = [] → opY.ret = .int → τy.complete = true →
@@ -265,10 +275,12 @@ are the frame's own. -/
   /-- A consumer being dropped: what it asks is answered `#Done`. -/
   | genN : O[eN]? = some opN → opN.owns = [] → opN.refs = [] → opN.ret = .sum .int τy → τy.complete = true →
       FrameOk F O ι ι σf (.genN eN hid τy) ⟨Γ, env, τ, S, .eff eN :: r⟩ ⟨Γ, env, τ, S, r⟩ [] []
-  /-- A producer being dropped as its consumer ended with `o`: the activation around, and `o`'s
-  cells, are the frame's. -/
-  | genE : Inv F ι σf Γout env Eo S → RoCtx Γo → (∀ l ∈ So, l ∈ Eo ∨ l ∈ S) → OutOk F ι σf τb o Lo →
-      FrameOk F O ι ι σf (.genE τb o d) ⟨Γo, envo, .int, So, r⟩ ⟨Γout, env, τb, S, r⟩ (Eo ++ Lo) o.aims
+  /-- A producer being dropped as its consumer ended with `o`: the consumer's activation, as it ended,
+  and `o`'s cells, are the frame's, the activation around rebuilt once the producer is dropped. -/
+  | genE : GenOk F ι O σf eN eY opN opY τy τb cz Γin Γout env Sin S Fz Rc → Inv F ι σf Γin env Eb Sin →
+      Disj Fz Eb → (∀ l ∈ So, l ∈ Fz ∨ l ∈ S) → OutOk F ι σf τb o Lo →
+      FrameOk F O ι ι σf (.genE τb o d) ⟨capsLvlΓ cz, capsLvlEnv cz, .int, So, r⟩ ⟨Γout, env, τb, S, r⟩
+        (Fz ++ Eb ++ Lo) o.aims
   /-- A region's body, its arena `a` innermost: as it ends, the arena and the region's cells are
   freed, and the activation is the code around's. -/
   | regionK : FrameOk F O (a :: ι) ι σf (.regionK a)

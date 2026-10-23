@@ -387,10 +387,11 @@ inductive Expr where
   /-- `{ const x = p[lo..hi]; body }`, `x` a `readonly` slice of the vector at `p`, its elements from
   `lo` up to `hi`, for as long as `body` runs; a panic if they are not there. -/
   | lendSlice (x : Var) (p : Place) (lo hi : Var) (body : Expr)
-  /-- `{ const g = generate(f(owned, lent)); body }`: `f` runs as `body` asks for its values, each a
+  /-- `{ const g = generate(f(owned, caps)); body }`: `f` runs as `body` asks for its values, each a
   `τy` it yields by performing `eY`; `body` asks by performing `eN`, which gives `#Some(v)`, or
-  `#Done` once `f` has ended. `body` has type `τb`; `f` is lent places only `readonly`. -/
-  | gen (eN eY : Nat) (τy τb : Ty) (f : Nat) (owned : List Atom) (lent : List Place) (body : Expr)
+  `#Done` once `f` has ended. `body` has type `τb`; `f` is lent the places of `caps`, `readonly` or,
+  whole bindings, `mut`. -/
+  | gen (eN eY : Nat) (τy τb : Ty) (f : Nat) (owned : List Atom) (caps : List (Cap Place)) (body : Expr)
   /-- `{ const x = p[z]; body }` with `x` a borrow — `readonly` or `mut` — of the element of the
   vector at `p` that the integer `z` names, for as long as `body` runs; a panic if there is none. -/
   | lendIdx (x : Var) (m : Mode) (p : Place) (z : Var) (body : Expr)
@@ -1117,12 +1118,12 @@ def eval (F : List Fn) (O : List Op) : Nat → HS → Store → Env → Expr →
           | none => (.stuck, σ1)
         | none => (.stuck, σ)
       | _, _ => (.stuck, σ)
-    | .gen eN eY τy τb f owned lent body =>
+    | .gen eN eY τy τb f owned caps body =>
       match F[f]? with
       | some d =>
         match evalAtoms σ env owned with
         | some (vs, σ1) =>
-          match lent.mapM (fun p => resolve σ1 env p) with
+          match caps.mapM (fun c => resolve σ1 env c.loc) with
           | some ls =>
             if vs.length = d.owns.length ∧ ls.length = d.refs.length then
               let (cP, σ2) := allocAll σ1 ((d.owns.map Prod.fst).zip vs)
@@ -1838,16 +1839,16 @@ inductive Typed (F : List Fn) (O : List Op) : Ctx → Expr → Ty → Ctx → Ro
       Typed F O ((x, .ref m τ) :: lendCtx m Γ y) body τb ((x, .ref m τ) :: Γb) r →
       Typed F O Γ (.lend x m p body) τb (thaw Γ [y] Γb) r
   /-- A generator: `body` asks for the values `f`'s run yields, each by `eN`, which gives `#Some` of
-  one or `#Done`; `f` yields each by `eY`, and is lent places only `readonly`, which `body` may then
-  only read. -/
+  one or `#Done`; `f` yields each by `eY`, and is lent the places of `caps` as a handler's arm is:
+  `readonly`, which `body` may then only read, or whole bindings `mut`, which it may not reach. -/
   | gen : O[eN]? = some opN → opN.owns = [] → opN.refs = [] → opN.ret = .sum .int τy →
       O[eY]? = some opY → opY.owns = [τy] → opY.refs = [] → opY.ret = .int → τy.complete = true →
       F[f]? = some d → d.retp = none → d.cap = none → d.ret = .int → (∀ l ∈ d.row, l ∈ .eff eY :: r) →
-      Label.eff eY ∈ d.row → (∀ x ∈ d.refs, x.2.1 = .ro) →
-      AtomsTy Γ owned (d.owns.map Prod.snd) Γ₁ →
-      Lends Γ₁ (lent.map fun p => (.ro, p)) (d.refs.map Prod.snd) ys →
-      Typed F O (freeze Γ₁ (ys.map Prod.snd)) body τb Γb (.eff eN :: r) → τb.complete = true →
-      Typed F O Γ (.gen eN eY τy τb f owned lent body) τb (thaw Γ₁ (ys.map Prod.snd) Γb) r
+      Label.eff eY ∈ d.row → d.refs = caps.map Cap.sig →
+      AtomsTy Γ owned (d.owns.map Prod.snd) Γ₁ → Caps Γ₁ caps ys → Exclusive ys →
+      Typed F O (freeze (hideAll Γ₁ (roots .mut ys)) (roots .ro ys)) body τb Γb (.eff eN :: r) → τb.complete = true →
+      Typed F O Γ (.gen eN eY τy τb f owned caps body) τb
+        (unhideAll Γ₁ (roots .mut ys) (thaw (hideAll Γ₁ (roots .mut ys)) (roots .ro ys) Γb)) r
   /-- A borrow of an element of a vector, for the code it is in scope for: it is a borrow of the
   whole vector, which is only read, or not reached, until it ends. -/
   | lendIdx : lookup x Γ = none → PlaceTy Γ p (.vec τ) w y → PlaceTy Γ (.var z) .int wz yz →

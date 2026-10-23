@@ -271,9 +271,10 @@ theorem typed_weaker : Typed F O Γ e τ Γ' r → (Γ.map Prod.fst).Nodup → W
       by rw [setSlot_keys]; exact hk⟩)
     cases this with
     | cons _ w => exact thaw_weaker_set w
-  | .gen _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ hargs _ hb _, hk => by
+  | .gen _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ hargs _ _ hb _, hk => by
     have hk₁ := (atoms_keys hargs).symm ▸ hk
-    exact (thaw_weaker (typed_weaker hb (by rw [freeze_keys]; exact hk₁))).trans (atoms_weaker hargs hk)
+    exact (unhideAll_weaker (thaw_weaker (typed_weaker hb (by rw [freeze_keys, hideAll_keys]; exact hk₁)))).trans
+      (atoms_weaker hargs hk)
   | .lendCloMut _ _ _ _ _ _ _ _ hx hb, hk => by
     have := typed_weaker hb (List.nodup_cons.mpr ⟨by rw [hide_keys]; exact lookup_none_keys hx,
       by rw [hide_keys]; exact hk⟩)

@@ -430,9 +430,8 @@ theorem typed_keys : Typed F O Γ e τ Γ' r → Γ'.map Prod.fst = Γ.map Prod.
     have := typed_keys hb
     simp only [List.map_cons, List.cons.injEq] at this
     exact thaw_keys (this.2.trans freeze_keys)
-  | .gen _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ hargs _ hb _ => by
-    have := typed_keys hb
-    exact (thaw_keys (this.trans freeze_keys)).trans (atoms_keys hargs)
+  | .gen _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ hargs _ _ hb _ =>
+    (unhideAll_keys ((thaw_keys ((typed_keys hb).trans freeze_keys)).trans hideAll_keys)).trans (atoms_keys hargs)
   | .lendCloMut _ _ _ _ _ _ _ _ _ hb => by
     have := typed_keys hb
     simp only [List.map_cons, List.cons.injEq] at this

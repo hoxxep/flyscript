@@ -1951,8 +1951,8 @@ theorem three_ok : FnsOk [three] genOps := by
 
 theorem genSum_typed : Typed [three] genOps [] genSum .int [] [.fail] := by
   refine .gen (Γ₁ := []) (ys := []) (Γb := []) rfl rfl rfl rfl rfl rfl rfl rfl rfl rfl rfl rfl rfl
-    (by simp [three]) (by simp [three]) (by simp [three]) .nil .nil ?_ rfl
-  simp only [List.map_nil, freeze]
+    (by simp [three]) (by simp [three]) (by simp [three]) .nil .nil List.Pairwise.nil ?_ rfl
+  simp only [roots, List.filter_nil, List.map_nil, hideAll, freeze]
   refine nextOr0_typed (live := true) (by simp) (by simp) (by simp) (by simp) ?_
   refine nextOr0_typed (live := true) (by simp) (by simp) (by simp) (by simp) ?_
   refine nextOr0_typed (live := true) (by simp) (by simp) (by simp) (by simp) ?_
@@ -1998,8 +1998,8 @@ theorem boxed_ok : FnsOk [boxed] genOps := by
 
 theorem genEarly_typed : Typed [boxed] genOps [] genEarly .int [] [.fail] := by
   refine .gen (Γ₁ := []) (ys := []) (Γb := []) rfl rfl rfl rfl rfl rfl rfl rfl rfl rfl rfl rfl rfl
-    (by simp [boxed]) (by simp [boxed]) (by simp [boxed]) .nil .nil ?_ rfl
-  simp only [List.map_nil, freeze]
+    (by simp [boxed]) (by simp [boxed]) (by simp [boxed]) .nil .nil List.Pairwise.nil ?_ rfl
+  simp only [roots, List.filter_nil, List.map_nil, hideAll, freeze]
   exact nextOr0_typed (live := true) (by simp) (by simp) (by simp) (by simp) (.atom (.read (.own rfl)))
 
 example : ∀ n, match eval [boxed] genOps n [.abort .fail 0] .empty [] genEarly with
@@ -2028,6 +2028,94 @@ example : value (eval [fails] genOps 60 [.abort .fail 0] .empty [] genFails) = s
   run [genFails, fails, nextOr0, genOps, nextOp, yieldOp]
 example : freed (eval [fails] genOps 60 [.abort .fail 0] .empty [] genFails) := by
   run [genFails, fails, nextOr0, genOps, nextOp, yieldOp]
+
+/-- What `v.pop()` gives, or 0 once `v` is empty, into `x`. -/
+def popOr0 (x : Var) (rest : Expr) : Expr :=
+  .let_ x .int (.let_ "a" (.sum .int .int) (.vpop (var "v"))
+    (.case "a" "y" .int .int (.atom (.read (var "y"))) (.atom (.read (var "y"))))) rest
+
+/-- `function* drain(v: mut Vec<int>) { yield v.pop() ?? 0; yield v.pop() ?? 0; }`: a producer
+lent a vector it changes. -/
+def drain : Fn :=
+  { owns := [], refs := [("v", .mut, .vec .int)], ret := .int, row := [.eff 1],
+    body := popOr0 "x" (.let_ "u" .int (.perform 1 [.read (var "x")] [])
+      (popOr0 "z" (.let_ "w" .int (.perform 1 [.read (var "z")] []) (.atom (.lit 0))))) }
+
+/-- `let v = [1, 1, 40]; const s = { const g = drain(mut v); (g.next() ?? 0) + (g.next() ?? 0) };
+s + v.len()`: the producer takes two elements out of the vector lent it, which is out of the
+consumer's reach meanwhile, and the vector, one element left, is the code around's again; 42. -/
+def genDrain : Expr :=
+  .let_ "v" (.vec .int) .vnew
+    (.let_ "u1" .int (.vpush (var "v") (.lit 1))
+      (.let_ "u2" .int (.vpush (var "v") (.lit 1))
+        (.let_ "u3" .int (.vpush (var "v") (.lit 40))
+          (.let_ "s" .int (.gen 0 1 .int .int 0 [] [⟨"v", .mut, .vec .int, .var "v"⟩]
+              (nextOr0 "x1" (nextOr0 "x2" (.add (.read (var "x1")) (.read (var "x2"))))))
+            (.let_ "n" .int (.vlen (var "v")) (.add (.read (var "s")) (.read (var "n"))))))))
+
+example : value (eval [drain] genOps 80 [.abort .fail 0] .empty [] genDrain) = some 42 := by
+  run [genDrain, drain, popOr0, nextOr0, genOps, nextOp, yieldOp]
+example : freed (eval [drain] genOps 80 [.abort .fail 0] .empty [] genDrain) := by
+  run [genDrain, drain, popOr0, nextOr0, genOps, nextOp, yieldOp]
+
+/-- `const x = v.pop() ?? 0; rest`, typed. -/
+theorem popOr0_typed (hv : lookup "v" Γ = some (.ref .mut (.vec .int))) (hx : x ∉ Γ.map Prod.fst)
+    (ha : "a" ∉ Γ.map Prod.fst) (hy : "y" ∉ Γ.map Prod.fst)
+    (hrest : Typed F O ((x, .own .int true) :: Γ) rest τ ((x, .own .int live) :: Γ') r) :
+    Typed F O Γ (popOr0 x rest) τ Γ' r := by
+  refine .let_ (lookup_none_of_keys hx) ?_ hrest
+  refine .let_ (live := false) (lookup_none_of_keys ha) (.vpop (.ref hv) rfl) ?_
+  have hset : setSlot (("a", Slot.own (.sum .int .int) true) :: Γ) "a" (.own (.sum .int .int) false) =
+      ("a", .own (.sum .int .int) false) :: Γ := setSlot_head Γ ha
+  refine .case (Γ₁ := ("a", .own (.sum .int .int) false) :: Γ) (Γ₂ := ("a", .own (.sum .int .int) false) :: Γ)
+    (l₁ := true) (l₂ := true) (by simp [lookup]) rfl
+    (by simp only [lookup]; rw [if_neg (by decide)]; exact lookup_none_of_keys hy) ?_ ?_ (Weaker.refl _) (Weaker.refl _)
+  · rw [hset]; exact .atom (.read (.own rfl))
+  · rw [hset]; exact .atom (.read (.own rfl))
+
+theorem drain_ok : FnsOk [drain] genOps := by
+  intro d hd
+  simp only [List.mem_singleton] at hd
+  subst hd
+  refine ⟨by decide, ?_⟩
+  simp only [drain, FnOk]
+  refine ⟨[("v", .ref .mut (.vec .int))], popOr0_typed (live := true) rfl (by decide) (by decide) (by decide) ?_⟩
+  refine .let_ (live := true) rfl (.perform (op := yieldOp) rfl (List.mem_singleton_self _)
+    (.cons (.read (.own rfl)) .nil) .nil .nil) ?_
+  refine popOr0_typed (live := true) rfl (by decide) (by decide) (by decide) ?_
+  exact .let_ (live := true) rfl (.perform (op := yieldOp) rfl (List.mem_singleton_self _)
+    (.cons (.read (.own rfl)) .nil) .nil .nil) (.atom .lit)
+
+theorem genDrain_typed : Typed [drain] genOps [] genDrain .int [] [.fail] := by
+  refine .let_ (live := true) rfl (.vnew rfl) ?_
+  refine .let_ (live := true) rfl (.vpush .lit (.own rfl)) ?_
+  refine .let_ (live := true) rfl (.vpush .lit (.own rfl)) ?_
+  refine .let_ (live := true) rfl (.vpush .lit (.own rfl)) ?_
+  let Γ0 : Ctx := [("u3", .own .int true), ("u2", .own .int true), ("u1", .own .int true), ("v", .own (.vec .int) true)]
+  have hg : Typed [drain] genOps Γ0 (.gen 0 1 .int .int 0 [] [⟨"v", .mut, .vec .int, .var "v"⟩]
+      (nextOr0 "x1" (nextOr0 "x2" (.add (.read (var "x1")) (.read (var "x2")))))) .int Γ0 [.fail] := by
+    have hb : Typed [drain] genOps (freeze (hideAll Γ0 (roots .mut [(.mut, "v")])) (roots .ro [(.mut, "v")]))
+        (nextOr0 "x1" (nextOr0 "x2" (.add (.read (var "x1")) (.read (var "x2"))))) .int (hide Γ0 "v")
+        (.eff 0 :: [.fail]) := by
+      simp only [roots, List.filter_cons, List.filter_nil, List.map_cons, List.map_nil, hideAll, freeze]
+      refine nextOr0_typed (live := true) (by simp [Γ0, hide, hideAll]) (by simp [Γ0, hide, hideAll]) (by simp [Γ0, hide, hideAll]) (by simp) ?_
+      refine nextOr0_typed (live := true) (by simp [Γ0, hide, hideAll]) (by simp [Γ0, hide, hideAll]) (by simp [Γ0, hide, hideAll]) (by simp) ?_
+      exact .add (.read (.own rfl)) (.read (.own rfl))
+    have h := Typed.gen (F := [drain]) (O := genOps) (Γ := Γ0) (Γ₁ := Γ0) (ys := [(.mut, "v")]) (r := [.fail])
+      (eN := 0) (eY := 1) (τy := .int) (τb := .int) (f := 0) (d := drain) rfl rfl rfl rfl rfl rfl rfl rfl rfl rfl rfl
+      rfl rfl (by simp [drain]) (by simp [drain]) rfl .nil (.mut (.own rfl) rfl rfl .nil) (by simp [Exclusive]) hb rfl
+    simpa [Γ0, roots, hideAll, unhideAll, hide, thaw, freeze] using h
+  refine .let_ (live := true) rfl hg ?_
+  exact .let_ (live := true) rfl (.vlen (.own rfl)) (.add (.read (.own rfl)) (.read (.own rfl)))
+
+example : ∀ n, match eval [drain] genOps n [.abort .fail 0] .empty [] genDrain with
+    | (.stuck, _) => False
+    | (.susp _ _ _ _ _, _) => False
+    | (.timeout, _) => True
+    | (.panic, _) => True
+    | (.val v, σ') => ∃ L, VT [drain] [] σ' .int v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
+    | (.abort _ _, σ') => ∀ l, σ'.mem l = none :=
+  program_ok drain_ok genDrain_typed
 
 /-- `region (R) { const l = RegionList.new(); l.push(40); l.push(2); l[0] + l[1] }`: a list of the
 region, its elements cells of the region, all released as it ends; 42. -/

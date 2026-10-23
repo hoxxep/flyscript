@@ -554,9 +554,10 @@ theorem eval_ok_succ (hF : FnsOk F O) (hE : EvalOk F O n) (hR : RetOk F O n) :
             simp only [List.mem_append, mem_keep] at *; grind
     | lend hx hp hm hmf hun hb => exact lend_ok hE hx hp hm hmf hun hb hI hwf hRdy
     | lendIdx hx hp hz hm hmf hun hb => exact lendIdx_ok hE hx hp hz hm hmf hun hb hI hwf hRdy
-    | gen hopN hNowns hNrefs hNret hopY hYowns hYrefs hYret hcy hfd hretp hcap hdret hrow hey hro hargs hlends hb hcb =>
-      exact gen_ok hF hE hR hopN hNowns hNrefs hNret hopY hYowns hYrefs hYret hcy hfd hretp hcap hdret hrow hey hro
-        hargs hlends hb hcb hI hwf hRdy
+    | gen hopN hNowns hNrefs hNret hopY hYowns hYrefs hYret hcy hfd hretp hcap hdret hrow hey hdrefs hargs hcaps hexcl
+        hb hcb =>
+      exact gen_ok hF hE hR hopN hNowns hNrefs hNret hopY hYowns hYrefs hYret hcy hfd hretp hcap hdret hrow hey hdrefs
+        hargs hcaps hexcl hb hcb hI hwf hRdy
     | lendField hx hy hty hsl _ hmf hb => exact lendField_ok hE hx hy hty hsl hmf hb hI hwf hRdy
     | handle hop hcomp hos hrs hcaps hexcl hnd harm hbody =>
       exact handle_ok hE hR hop hcomp hos hrs hcaps hexcl hnd harm hbody hI hwf hRdy
@@ -618,8 +619,8 @@ theorem ret_ok (hE : EvalOk F O n) (hKo : ∀ m, n = m + 1 → EvalKOk F O m ∧
   | capK hH hP hcaps => exact ret_capK hE hKo hH hP hcaps hR hwf hag halloc hnd hd hSa hSd hp
   | armK hH hP hK hro harm hcells => exact ret_armK hKo hH hP hK hro harm hcells hR hA hwf hag halloc hnd hd hSa hSd hp
   | startK hb => simpa using ret_startK hE hb hR hwf (by simpa [Kont.push] using hp)
-  | taskK hrow hro hkeys hoc hbody hcells =>
-    simpa using ret_taskK hrow hro hkeys hoc hbody hcells hR hwf (by simpa [Kont.push] using hp)
+  | taskK hrow hkeys hoc hbody hcells =>
+    simpa using ret_taskK hrow hkeys hoc hbody hcells hR hwf (by simpa [Kont.push] using hp)
   | parS hP hroR hroO hSr hSo hK => exact ret_parS hKo hP hroR hroO hSr hSo hK hR hA hwf hag halloc hnd hd hSa hSd hp
   | parD hP hro hSr hw => exact ret_parD hKo hP hro hSr hw hR hwf hag halloc hnd hd hSa hSd hp
   | parY hop howns hrefs hret =>
@@ -627,14 +628,14 @@ theorem ret_ok (hE : EvalOk F O n) (hKo : ∀ m, n = m + 1 → EvalKOk F O m ∧
   | parE hI hro hSo => exact ret_parE hI hro hSo hR hwf hag halloc hnd hd hSa hSd hp
   | regionK => exact ret_regionK hR hwf (by simpa using hag) hSa (by simpa using hSd) (by simpa [Kont.push] using hp)
   | postR hP hv => exact ret_postR hE hP hv hR hwf hag halloc hnd hd hSa hSd hp
-  | genC hG hro hSo hK => exact ret_genC hKo hG hro hSo hK hR hA hwf hag halloc hnd hd hSa hSd hp
-  | genCd hG => exact ret_genCd hKo hG hR hwf hag halloc hnd hd hSa hSd hp
-  | genP hG hro hSo hKc => exact ret_genP hKo hG hro hSo hKc hR hA hwf hag halloc hnd hd hSa hSd hp
+  | genC hG hSo hK => exact ret_genC hKo hG hSo hK hR hA hwf hag halloc hnd hd hSa hSd hp
+  | genCd hG hc => exact ret_genCd hKo hG hc hR hwf hag halloc hnd hd hSa hSd hp
+  | genP hG hSo hKc => exact ret_genP hKo hG hSo hKc hR hA hwf hag halloc hnd hd hSa hSd hp
   | genY hop howns hrefs hret hcy =>
     simpa using ret_genY hKo hop howns hrefs hret hcy hR hwf (by simpa using hag) hSa (by simpa using hSd) hp
   | genN hop howns hrefs hret hcy =>
     simpa using ret_genN hKo hop howns hrefs hret hcy hR hwf (by simpa using hag) hSa (by simpa using hSd) hp
-  | genE hI hro hSo ho => exact ret_genE hI hro hSo ho hR hA hwf hag halloc hnd hd hSa hSd hp
+  | genE hG hIc hdFE hSo ho => exact ret_genE hG hIc hdFE hSo ho hR hA hwf hag halloc hnd hd hSa hSd hp
 
 /-- Expressions, frames and continuations, at every fuel. -/
 theorem sound (hF : FnsOk F O) : ∀ n, EvalOk F O n ∧ RetOk F O n ∧ EvalKOk F O n

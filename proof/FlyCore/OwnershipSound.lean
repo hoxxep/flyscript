@@ -496,17 +496,17 @@ theorem FrameOk.S_sub (hf : FrameOk F O ιi ιo σf f inL outL Xf A) : ∀ l ∈
   | genCd hG =>
     intro l hl
     rcases hG.hSin l hl with h | h
-    · exact .inl h
+    · exact .inl (List.mem_append.mpr (.inl h))
     · exact .inr h
-  | genP _ _ hSo =>
+  | genP _ hSo =>
     intro l hl
     rcases hSo l hl with h | h
     · exact .inl (List.mem_append.mpr (.inl h))
     · exact .inr h
-  | genE _ _ hSo =>
+  | genE _ _ _ hSo =>
     intro l hl
     rcases hSo l hl with h | h
-    · exact .inl (List.mem_append.mpr (.inl h))
+    · exact .inl (by simp [h])
     · exact .inr h
   | _ => intro l hl; exact .inr hl
 
