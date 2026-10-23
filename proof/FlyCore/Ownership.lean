@@ -221,7 +221,7 @@ inductive Expr where
   type `C`; the code goes on under the `handle` to its end, and then function `post` runs, given what
   the arm carried and what the rest of the `handle` gave, the places of `caps` lent to it again, its
   value the `handle`'s. -/
-  | handleR (τ : Ty) (body : Expr) (e : Nat) (caps : List (Cap Place)) (owns : List Var) (arm : Expr)
+  | handleR (τ : Ty) (body : Expr) (e : Nat) (caps : List (Cap Place)) (owns refs : List Var) (arm : Expr)
       (C : Ty) (post : Nat)
   deriving Repr
 
@@ -383,7 +383,7 @@ inductive Outcome where
 /-- What a `handle` whose arm resumes in its midst runs after: the type of what the arm carries, the
 function that runs once the rest of the `handle` ends, and the `handle`'s variables and places it
 lends that function. -/
-abbrev PostR := Option (Ty × Nat × Env × List (Cap Place))
+abbrev PostR := Option (Ty × Ty × Nat × Env × List (Cap Place))
 
 /-- A frame of the code around what is being evaluated: what a construct does with what the code
 it runs gives. The frames between an operation and the `handle` that handles it are its
@@ -519,7 +519,14 @@ def Outcome.res : Outcome → Res
 once the unwinding reaches it, `o` goes on, unless the dropping itself unwound elsewhere; and if the
 code gave a value after all, the value is dropped. -/
 def dropRet (τ : Ty) (o : Outcome) (d : Nat) : Res × Store → Res × Store
-  | (.abort j k, σ) => if j = d then (o.res, σ) else (.abort j k, σ)
+  | (.abort j k, σ) =>
+    if j = d then (o.res, σ) else
+    match o with
+    | .val u =>
+      match drop σ τ u with
+      | some σ' => (.abort j k, σ')
+      | none => (.stuck, σ)
+    | .abort _ _ => (.abort j k, σ)
   | (.val v, σ) =>
     match drop σ τ v with
     | some σ' => (o.res, σ')
@@ -802,11 +809,11 @@ def eval (F : List Fn) (O : List Op) : Nat → HS → Store → Env → Expr →
     | .handleAbort body ef x h =>
       let (id, σ1) := σ.fresh
       ret F O n hs (.catchK (.eff ef) id x env h) (eval F O n (.abort (.eff ef) id :: hs) σ1 env body)
-    | .handleR τ body ef caps os arm C f =>
+    | .handleR τ body ef caps os rs arm C f =>
       match caps.mapM (fun c => resolve σ env c.loc) with
       | some ls =>
         let (id, σ1) := σ.fresh
-        ret F O n hs (.capK τ ef id (List.zipWith Cap.at caps ls) os [] arm (some (C, f, env, caps)))
+        ret F O n hs (.capK τ ef id (List.zipWith Cap.at caps ls) os rs arm (some (C, τ, f, env, caps)))
           (eval F O n (.capture ef id :: hs) σ1 env body)
       | none => (.stuck, σ)
 termination_by n _ _ _ _ => (n, 0, 0)
@@ -827,14 +834,24 @@ def ret (F : List Fn) (O : List Op) (n : Nat) (hs : HS) : Kont → Res × Store 
             | m + 1 =>
               match post with
               | none => evalK F O m hs σ K' (.val v)
-              | some (C, f, env', cps) =>
+              | some (C, _, f, env', cps) =>
                 match v with
-                | .pair b c =>
-                  match σ.mem b, σ.mem c with
-                  | some vr, some vc =>
-                    ret F O m hs (.postR C f vc env' cps)
-                      (evalK F O m hs ((σ.set b none).set c none) K' (.val vr))
-                  | _, _ => (.stuck, σ)
+                | .tag _ _ t l =>
+                  match σ.mem l with
+                  | some w =>
+                    if t then
+                      match w with
+                      | .pair b c =>
+                        match σ.mem b, σ.mem c with
+                        | some vr, some vc =>
+                          ret F O m hs (.postR C f vc env' cps)
+                            (evalK F O m hs (((σ.set l none).set b none).set c none) K' (.val vr))
+                        | _, _ => (.stuck, σ)
+                      | _ => (.stuck, σ)
+                    else
+                      let (d, σ1) := (σ.set l none).fresh
+                      dropRet τ (.val w) d (evalK F O m (.abort .drop d :: hs) σ1 K' (.abort d 0))
+                  | none => (.stuck, σ)
                 | _ => (.stuck, σ))
           (fun σ o => match n with
             | 0 => (.timeout, σ)
@@ -929,14 +946,24 @@ def ret (F : List Fn) (O : List Op) (n : Nat) (hs : HS) : Kont → Res × Store 
         | m + 1 =>
           match post with
           | none => evalK F O m hs σ K (.val v)
-          | some (C, f, env', cps) =>
+          | some (C, _, f, env', cps) =>
             match v with
-            | .pair b c =>
-              match σ.mem b, σ.mem c with
-              | some vr, some vc =>
-                ret F O m hs (.postR C f vc env' cps)
-                  (evalK F O m hs ((σ.set b none).set c none) K (.val vr))
-              | _, _ => (.stuck, σ)
+            | .tag _ _ t l =>
+              match σ.mem l with
+              | some w =>
+                if t then
+                  match w with
+                  | .pair b c =>
+                    match σ.mem b, σ.mem c with
+                    | some vr, some vc =>
+                      ret F O m hs (.postR C f vc env' cps)
+                        (evalK F O m hs (((σ.set l none).set b none).set c none) K (.val vr))
+                    | _, _ => (.stuck, σ)
+                  | _ => (.stuck, σ)
+                else
+                  let (d, σ1) := (σ.set l none).fresh
+                  dropRet τ (.val w) d (evalK F O m (.abort .drop d :: hs) σ1 K (.abort d 0))
+              | none => (.stuck, σ)
             | _ => (.stuck, σ))
       (fun σ o => match n with
         | 0 => (.timeout, σ)
@@ -1236,16 +1263,18 @@ inductive Typed (F : List Fn) (O : List Op) : Ctx → Expr → Ty → Ctx → Ro
       Typed F O (freeze (hideAll Γ (roots .mut ys)) (roots .ro ys)) body τ Γb (.eff e :: r) →
       Typed F O Γ (.handle τ body e caps os rs arm) τ
         (unhideAll Γ (roots .mut ys) (thaw (hideAll Γ (roots .mut ys)) (roots .ro ys) Γb)) r
-  /-- An arm that resumes in its midst: it takes the operation's owned arguments and the places of
-  `caps`, and gives what the code resumes with and what it carries; once the rest of the `handle` ends,
-  `post` takes what the arm carried and that value, the places lent to it again, as a call would. -/
-  | handleR : O[e]? = some op → op.refs = [] → (∀ τ ∈ op.owns, τ.complete = true) →
-      os.length = op.owns.length → Caps Γ caps ys → Exclusive ys → (os ++ caps.map Cap.name).Nodup →
+  /-- An arm that may resume in its midst: it takes the operation's arguments and the places of
+  `caps`, and gives `#Resume([v, c])`, what the code resumes with and what it carries, or `#Done(u)`,
+  the `handle`'s value, the code dropped; once the rest of a resumed `handle` ends, `post` takes what
+  the arm carried and that value, the places lent to it again, as a call would. -/
+  | handleR : O[e]? = some op → (∀ τ ∈ op.owns, τ.complete = true) →
+      os.length = op.owns.length → rs.length = op.refs.length → Caps Γ caps ys → Exclusive ys →
+      (os ++ rs ++ caps.map Cap.name).Nodup →
       F[f]? = some d → d.owns.map Prod.snd = [C, τ] → d.refs = caps.map Cap.sig → d.retp = none →
       d.cap = none → d.ret = τ → (∀ l ∈ d.row, l ∈ r) → C.complete = true →
-      Typed F O (armCtx os [] op (caps.map Cap.sig)) arm (.pair op.ret C) Γa r →
+      Typed F O (armCtx os rs op (caps.map Cap.sig)) arm (.sum (.pair op.ret C) τ) Γa r →
       Typed F O (freeze (hideAll Γ (roots .mut ys)) (roots .ro ys)) body τ Γb (.eff e :: r) →
-      Typed F O Γ (.handleR τ body e caps os arm C f) τ
+      Typed F O Γ (.handleR τ body e caps os rs arm C f) τ
         (unhideAll Γ (roots .mut ys) (thaw (hideAll Γ (roots .mut ys)) (roots .ro ys) Γb)) r
   /-- As for `try`, the arm starts where the body would have ended. -/
   | handleAbort : O[e]? = some op → op.owns = [.int] → op.refs = [] → lookup x Γb = none →

@@ -44,14 +44,14 @@ structure Lvl where
 resumption. -/
 def armTy (op : Op) : PostR → Ty
   | none => op.ret
-  | some (C, _) => .pair op.ret C
+  | some (C, τ, _) => .sum (.pair op.ret C) τ
 
 /-- What runs once the rest of a `handle` whose arm resumes in its midst ends: a function taking
 what the arm carried and that value, and the places of the `handle`'s scope, lent to it again, its
 value the `handle`'s. -/
 def PostOk (F : List Fn) (O : List Op) (Γ : Ctx) (env : Env) (τ : Ty) (r : Row) : PostR → Prop
   | none => True
-  | some (C, f, env', cps) => env' = env ∧ C.complete = true ∧ ∃ d ys, F[f]? = some d ∧
+  | some (C, τ', f, env', cps) => τ' = τ ∧ env' = env ∧ C.complete = true ∧ ∃ d ys, F[f]? = some d ∧
       d.owns.map Prod.snd = [C, τ] ∧ d.refs = cps.map Cap.sig ∧ d.retp = none ∧ d.cap = none ∧ d.ret = τ ∧
       (∀ l ∈ d.row, l ∈ r) ∧ Caps Γ cps ys ∧ Exclusive ys ∧
       ((d.owns.map Prod.fst) ++ (d.refs.map Prod.fst)).Nodup ∧ ∃ Γ'', Typed F O (fnCtx d) d.body d.ret Γ'' d.row
@@ -67,7 +67,6 @@ structure HandleOk (F : List Fn) (O : List Op) (σf : Store) (e : Nat) (caps : L
     (Fz Rc : List Nat) (op : Op) : Prop where
   hop : O[e]? = some op
   hcomp : ∀ τ ∈ op.owns, τ.complete = true
-  hpref : post ≠ none → op.refs = []
   hown : os.length = op.owns.length
   href : rs.length = op.refs.length
   hnames : (os ++ rs ++ caps.map Cap.name).Nodup
@@ -139,6 +138,8 @@ reached, while it lives. -/
       FrameOk F O σf (.deferV τ v) ⟨Γb, env, .int, S, r⟩ ⟨Γb, env, τ, S, r⟩ Lv []
   | deferA : FrameOk F O σf (.deferA hid k) ⟨Γb, env, .int, S, r⟩ ⟨Γb, env, τ, S, r⟩ [] [hid]
   | dropK : FrameOk F O σf (.dropK τ (.abort j k) d) ⟨Γ, env, τ, S, r⟩ ⟨Γ, env, τ', S, r⟩ [] [j]
+  /-- Code being dropped as an arm ends with `v` without resuming it: once it is, `v` goes on. -/
+  | dropKv : VT F σf τ v Lv → FrameOk F O σf (.dropK τ (.val v) d) ⟨Γ, env, τ, S, r⟩ ⟨Γ, env, τ, S, r⟩ Lv []
   /-- A borrow held for a while: as it ends, the borrow's activation is the lender's again, with the
 cells it kept from the borrow, `Xf`, as they were — what it froze, lent `readonly`, or the path to
 the place, lent `mut`. -/
@@ -170,7 +171,7 @@ what the `handle` froze. -/
         ⟨Γout, env, τ, S, r⟩ (X ++ Fz) AK
   /-- What an arm carried past its resumption, waiting for the rest of its `handle` to end: its cells
 are the frame's own. -/
-  | postR : PostOk F O Γ env τ r (some (C, f, env, cps)) → VT F σf C v Lv →
+  | postR : PostOk F O Γ env τ r (some (C, τ, f, env, cps)) → VT F σf C v Lv →
       FrameOk F O σf (.postR C f v env cps) ⟨Γ, env, τ, S, r⟩ ⟨Γ, env, τ, S, r⟩ Lv []
 
 /-- `FramesOk σs K op top X hos A`: the frames `K`, the outermost first, suspended where the store is
