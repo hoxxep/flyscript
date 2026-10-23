@@ -286,6 +286,7 @@ export function checkOwnership(p: mut Program, fid: usize): void {
   typed.capturedMoves = replace(mut o.capturedMoves, HashMap.new());
   typed.lentArms = replace(mut o.lentArms, HashSet.new());
   o.p.typed.insert(fid, typed);
+  o.p.owned.insert(fid);
 }
 
 // A function's parameters as a call instantiates them, given the call's generic arguments.

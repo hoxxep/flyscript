@@ -17,9 +17,16 @@ cc -std=gnu11 -O2 -o program program.c -lm
 # a native executable through LLVM, with debug information
 sh selfhost/llvm.sh selfhost/seed.js program.fly program
 ./program
+
+# the compiler itself, natively, which compiles four times as fast as on Node
+sh selfhost/llvm.sh selfhost/seed.js selfhost/main.fly flyc
+./flyc program.fly program.c . --time
+
+# C again whenever a module of the program changes
+./flyc program.fly program.c . --watch
 ```
 
-The last argument is the directory holding `std/` and `selfhost/`. A program's `main` takes the command line, each parameter as its type reads it, and a last parameter that is a list of strings takes every argument left.
+The third argument is the directory holding `std/` and `selfhost/`; `--time` reports how long each phase took, and `--watch` keeps compiling as the program changes (below). `llvm.sh` takes either compiler. A program's `main` takes the command line, each parameter as its type reads it, and a last parameter that is a list of strings takes every argument left.
 
 ## How it is put together
 
@@ -36,6 +43,7 @@ The last argument is the directory holding `std/` and `selfhost/`. A program's `
 | `llvm.fly` | The LLVM back end: a printer of the IR as LLVM IR, which calls the C back end's library routines through C it prints beside it. |
 | `js.fly`, `runtime.js` | The JavaScript back end: a printer of the IR, with effect handlers, generators and tasks as JavaScript generators. |
 | `main.fly` | The driver: check, then compile to the back end the output path names. |
+| `watch.fly` | `--watch`: the program kept between builds, compiled again as its modules change. |
 
 ## The core IR
 
@@ -63,15 +71,19 @@ Writing an output path ending in `.ll` makes the program's code an LLVM module, 
 
 The two sides pass values their own ways — the module a scalar as it is and anything bigger by pointer, C as C does — and functions in the C file translate between them. `llvm.sh` makes the C file LLVM IR without optimizing it, links the two modules into one, and optimizes that, so the translations inline away. Integer arithmetic uses LLVM's overflow intrinsics, the exact value of what overflowed computed only on the way to the panic that shows it. Debug information maps each instruction to its line, each variable to its place, and each type to how Flyscript writes it, tagged unions showing their tags by name.
 
-`corpus.sh --llvm` builds every test program through LLVM with the sanitizers. `examples/kernel/run.sh --llvm` builds the kernel through LLVM, cross-compiled for AArch64.
+An executable for the machine is built on every core: `llvm.sh` splits the linked module into a part per core, optimizes and compiles each apart, and links them with ThinLTO, which optimizes across the parts as one module would; the compiler builds this way in 6 seconds rather than 19, and runs as fast. `corpus.sh --llvm` builds every test program through LLVM with the sanitizers. `examples/kernel/run.sh --llvm` builds the kernel through LLVM, cross-compiled for AArch64.
 
 ## WebAssembly
 
-`wasm.sh` compiles a program's C to WebAssembly for WASI with clang, and `wasm.js` runs it under Node. WebAssembly cannot switch stacks itself, so the host does: each fiber runs as a call of its own, with JavaScript promise integration, on a shadow stack of its own in linear memory. The compiler compiles itself as WebAssembly to the same C as anywhere else.
+`wasm.sh` compiles a program to WebAssembly for WASI through LLVM, its pointers 32 bits wide, and `wasm.js` runs it under Node. WebAssembly cannot switch stacks itself, so the host does: each fiber runs as a call of its own, with JavaScript promise integration, on a shadow stack of its own in linear memory. The compiler compiles itself as WebAssembly to the same C as anywhere else.
 
 ## The JavaScript back end
 
 Values are JavaScript's: a struct an object, a list an array, a tag `{ $tag, $ }`, a `readonly` borrow the value it lends and a `mut` borrow a reference whose `v` reads and writes the place. A block's cleanups run in a `finally`, and only what a destructor can observe is dropped. A function that may suspend is a generator, and a loop over a generator steps it, passing on what it performs besides its items.
+
+## Compiling as a program changes
+
+`--watch` compiles the program to C, then reads its modules every 25 milliseconds and compiles it again when one changes. A change to the bodies of a module's functions alone is compiled from what the last build left: the module is parsed again, its functions checked again for types and ownership, their instances lowered and printed again, and whatever they now reach for the first time; the rest of the program, checked, lowered and printed, is as it was, and what the old bodies made apart — closures, handlers, `defer`s — stays in the C, unreached. A change to what a module declares or imports, to a template or to `comptime` code, an inferred effect that changes, or a build that did not compile, makes the next build start from scratch. On the compiler itself, a change to a function of its checker is compiled again in about 100 milliseconds, against 0.9 seconds from scratch.
 
 ## Building the compiler
 

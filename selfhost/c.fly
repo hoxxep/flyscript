@@ -187,7 +187,10 @@ export struct Cgen {
   // Constants made, by index.
   consts: HashMap<usize, String>;
   protos: String;
-  code: String;
+  // Each instance's definition, by instance: printed again, in a session, when its function changes.
+  fnCode: Vec<String>;
+  // Instances lowered and printed so far.
+  lowered: usize;
   // Code run apart, and closures.
   apartCode: String;
   aparts: usize;
@@ -2815,8 +2818,9 @@ impl Cgen {
     const rt = self.ctype(f.ret, f.span);
     const b = self.body(f, inits.asStr());
     const sig = `static ${rt} ${f.name}(${if (params.len() == 0) { "void".toString() } else { params.join(", ") }})`;
-    self.protos.push(`${sig};\n`);
-    self.code.push(`${sig} {\n${b}}\n`);
+    while (self.fnCode.len() <= i) { self.fnCode.push(String.new()); }
+    if (self.fnCode[i].len() == 0) { self.protos.push(`${sig};\n`); }
+    self.fnCode[i] = `${sig} {\n${b}}\n`;
   }
 
   // Closure `k`: its body a C function of its environment, which holds the values it holds and
@@ -2876,22 +2880,35 @@ impl Cgen {
   export function program(self: mut Self, entry: usize, runtime: str, freestanding: bool): String uses Fail<#Failed(String)> {
     const ent = self.lw.entry(entry, freestanding);
     const uncaught = self.uncaught(ent, entry);
-    let next: usize = 0;
-    while (next < self.lw.insts.len() || self.closuresDone < self.lw.closures.len()) {
-      if (next < self.lw.insts.len()) {
-        const i = next;
-        next += 1;
-        const r = try {
-          match (self.lw.func(i)) {
-            #Some(f) => {
-              self.module = f.module;
-              self.emit(i, f);
-            }
-            #None => {}
-          }
-          #Ok
-        } catch (d) { #Err(d) };
-        if (const #Err(d) = r) { throw self.failed(d, self.lw.module) }
+    self.drain();
+    self.assemble(ent, uncaught, runtime)
+  }
+
+  // The program again, in a session, after the bodies of `fids` changed and were checked again:
+  // their instances are lowered and printed again, and whatever they now reach for the first time.
+  // What the old bodies made apart — closures, `defer`s, handlers — stays, unreached.
+  export function again(self: mut Self, fids: readonly HashSet<usize>, entry: usize, runtime: str, freestanding: bool): String uses Fail<#Failed(String)> {
+    for (const i of 0..self.lowered) {
+      if (!fids.has(self.lw.insts[i].fid)) { continue; }
+      const prefix = `${self.lw.insts[i].name}:`;
+      let stale: Vec<String> = Vec.new();
+      for (const k of self.defers.keys()) { if (k.startsWith(prefix.asStr())) { stale.push(k.clone()); } }
+      for (const k of stale) { self.defers.remove(k); }
+      self.lowerOne(i);
+    }
+    const ent = self.lw.entry(entry, freestanding);
+    const uncaught = self.uncaught(ent, entry);
+    self.drain();
+    self.assemble(ent, uncaught, runtime)
+  }
+
+  // Lowers and prints every instance and closure not yet printed.
+  function drain(self: mut Self): void uses Fail<#Failed(String)> {
+    while (self.lowered < self.lw.insts.len() || self.closuresDone < self.lw.closures.len()) {
+      if (self.lowered < self.lw.insts.len()) {
+        const i = self.lowered;
+        self.lowered += 1;
+        self.lowerOne(i);
       } else {
         const k = self.closuresDone;
         self.closuresDone += 1;
@@ -2899,7 +2916,20 @@ impl Cgen {
         if (const #Err(d) = r) { throw self.failed(d, self.module) }
       }
     }
-    self.assemble(ent, uncaught, runtime)
+  }
+
+  function lowerOne(self: mut Self, i: usize): void uses Fail<#Failed(String)> {
+    const r = try {
+      match (self.lw.func(i)) {
+        #Some(f) => {
+          self.module = f.module;
+          self.emit(i, f);
+        }
+        #None => {}
+      }
+      #Ok
+    } catch (d) { #Err(d) };
+    if (const #Err(d) = r) { throw self.failed(d, self.lw.module) }
   }
 
   // What `main` does with a failure nothing caught: shows it, as the reference shows it.
@@ -2961,7 +2991,7 @@ impl Cgen {
     out.push(self.protos.asStr());
     out.push(self.dropCode.asStr());
     out.push(self.apartCode.asStr());
-    out.push(self.code.asStr());
+    for (const c of self.fnCode) { out.push(c.asStr()); }
     out.push(self.glue.asStr());
     out.push(exports.asStr());
     const main = match (ent.main) { #Some(m) => self.lw.insts[m].name.clone(), #None => return out };
@@ -3004,7 +3034,7 @@ export function newCgen(p: Prog): Cgen {
   Cgen {
     lw: newLower(p), closuresDone: 0, types: HashMap.new(), defined: HashSet.new(), pending: Vec.new(), typeFwd: String.new(),
     typeDefs: String.new(), tags: HashMap.new(), drops: HashMap.new(), anyDrops: HashSet.new(), dropCode: String.new(), convs: HashMap.new(),
-    helpers: HashMap.new(), consts: HashMap.new(), protos: String.new(), code: String.new(), apartCode: String.new(), aparts: 0,
+    helpers: HashMap.new(), consts: HashMap.new(), protos: String.new(), fnCode: Vec.new(), lowered: 0, apartCode: String.new(), aparts: 0,
     tmp: 0, cx: newCtx(Vec.new(), #Prim(#Void), #Fn), module: 0, defers: HashMap.new(), fnName: String.new(),
     argPlaces: Vec.new(), glue: String.new(),
   }

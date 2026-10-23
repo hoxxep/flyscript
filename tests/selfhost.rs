@@ -78,6 +78,66 @@ fn compiles_itself_natively() {
     }
 }
 
+/// `--watch` compiles a program again as its modules change: a change to bodies alone from what the
+/// last build left, anything else from scratch, and a build that fails leaves the C as it was.
+#[test]
+fn compiles_again_as_its_modules_change() {
+    if !has_node() || !has_cc() {
+        return;
+    }
+    let dir = out().join("watch");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let lib = dir.join("lib.fly");
+    std::fs::write(dir.join("main.fly"), "import { greet } from \"./lib\";\nimport { println } from \"std/io\";\nexport function main(): void uses Io { println(greet(\"world\").asStr()); }\n").unwrap();
+    std::fs::write(&lib, "export function greet(name: str): String { `hello ${name}` }\n").unwrap();
+    let c = dir.join("out.c");
+    let log = dir.join("watch.log");
+    let mut child = Command::new("node")
+        .arg("--stack-size=65500")
+        .arg(root().join("selfhost/seed.js"))
+        .arg(dir.join("main.fly"))
+        .arg(&c)
+        .arg(root())
+        .arg("--watch")
+        .stderr(std::fs::File::create(&log).unwrap())
+        .spawn()
+        .unwrap();
+    // Waits until the log has `n` lines and the last says `what`, then runs the C if it changed.
+    let step = |n: usize, what: &str, want: Option<&str>| {
+        let start = std::time::Instant::now();
+        loop {
+            let text = std::fs::read_to_string(&log).unwrap_or_default();
+            let lines: Vec<&str> = text.lines().collect();
+            if lines.len() >= n {
+                assert!(lines[n - 1].contains(what), "expected `{what}`, got:\n{text}");
+                break;
+            }
+            assert!(start.elapsed().as_secs() < 120, "no build after a change:\n{text}");
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        if let Some(want) = want {
+            let exe = dir.join("prog");
+            let built = Command::new("cc").args(["-std=gnu11", "-O1", "-w", "-o"]).arg(&exe).arg(&c).arg("-lm").output().unwrap();
+            assert!(built.status.success(), "{}", String::from_utf8_lossy(&built.stderr));
+            let r = Command::new(&exe).output().unwrap();
+            assert_eq!(String::from_utf8_lossy(&r.stdout), want);
+        }
+    };
+    step(1, "compiled in", Some("hello world\n"));
+    std::fs::write(&lib, "export function greet(name: str): String { `goodbye ${name}` }\n").unwrap();
+    step(2, "compiled again", Some("goodbye world\n"));
+    std::fs::write(&lib, "export function greet(name: str): String { exclaim(`hi ${name}`) }\nexport function exclaim(s: String): String { `${s}!` }\n").unwrap();
+    step(3, "compiled from scratch", Some("hi world!\n"));
+    std::fs::write(&lib, "export function greet(name: str): String { exclaim(1) }\nexport function exclaim(s: String): String { `${s}!` }\n").unwrap();
+    step(4, "lib.fly", Some("hi world!\n"));
+    std::fs::write(&lib, "export function greet(name: str): String { exclaim(`bye ${name}`) }\nexport function exclaim(s: String): String { `${s}!` }\n").unwrap();
+    let lines = std::fs::read_to_string(&log).unwrap().lines().count();
+    step(lines + 1, "compiled from scratch", Some("bye world!\n"));
+    child.kill().unwrap();
+    let _ = child.wait();
+}
+
 /// The slowest check, the interpreter running the whole compiler on itself: run it with
 /// `cargo test -- --ignored`, as before a release, or `selfhost/bootstrap.sh --from-flyc`.
 #[test]

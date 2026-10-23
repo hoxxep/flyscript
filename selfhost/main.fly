@@ -12,6 +12,7 @@ import { checkOwnership } from "./own";
 import { cProgram } from "./c";
 import { jsProgram } from "./js";
 import { llvmProgram } from "./llvm";
+import { watch } from "./watch";
 import { File, println, eprintln, writeFile, exit } from "std/io";
 
 // What stops a compilation: diagnostics, or a file that cannot be read or written.
@@ -105,9 +106,19 @@ function compile(entry: str, out: str, root: str, freestanding: bool, ptr: usize
 // `--freestanding`: a program without the C library, whose roots are the functions C calls.
 // `--wasm32`: through LLVM, for a target of 32-bit pointers, WebAssembly's.
 // `--time`: how long each phase took, on standard error.
+// `--watch`: compiled to C again whenever a module changes, until stopped (watch.fly).
 export function main(entry: str, out: str, root: str, flags: readonly String[]): void uses Io {
   try {
     const ptr: usize = if (flags.iter().some((f) => f == "--wasm32")) { 4 } else { 8 };
+    if (flags.iter().some((f) => f == "--watch")) {
+      if (!out.endsWith(".c")) {
+        println("error: `--watch` compiles to C: name a file ending in `.c`");
+        exit(2);
+      }
+      const h = readText(`${root}/selfhost/runtime.h`);
+      const c = readText(`${root}/selfhost/runtime.c`);
+      watch(entry, out, root, `${h}\n${c.asStr().replaceAll("#include \"runtime.h\"", "")}`.asStr());
+    }
     compile(entry, out, root, flags.iter().some((f) => f == "--freestanding"), ptr, flags.iter().some((f) => f == "--time"));
   } catch (e) {
     match (e) {

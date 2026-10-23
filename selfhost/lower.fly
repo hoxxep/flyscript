@@ -46,8 +46,6 @@ export struct Lower {
   p: Prog;
   insts: Vec<Inst>;
   instIndex: HashMap<String, usize>;
-  // How many functions the ownership pass had seen: specializations made since have not been.
-  owned: usize;
   // Closures lowered, each a function of its own.
   closures: Vec<Func>;
   // The function being lowered: its definition, its generic arguments, its module.
@@ -81,14 +79,14 @@ export struct Lower {
 export function newLower(p: Prog): Lower {
   const handlesIo = programHandlesIo(p);
   Lower {
-    p, insts: Vec.new(), instIndex: HashMap.new(), owned: 0, closures: Vec.new(), fid: 0, map: HashMap.new(), module: 0,
+    p, insts: Vec.new(), instIndex: HashMap.new(), closures: Vec.new(), fid: 0, map: HashMap.new(), module: 0,
     ret: #Prim(#Void), locals: Vec.new(), frames: Vec.new(), scopes: Vec.new(), loops: Vec.new(), labels: 0,
     captures: Vec.new(), regions: Vec.new(), yields: #None, homes: Vec.new(), lent: Vec.new(), handlesIo,
   }
 }
 
 // Whether a `handle` anywhere in the program handles `Io`.
-function programHandlesIo(p: readonly Prog): bool {
+export function programHandlesIo(p: readonly Prog): bool {
   for (const t of p.typed.values()) {
     for (const d of t.handled.values()) {
       if (p.defs[d].name == "Io" && p.modules[p.defs[d].module].isStd) { return true; }
@@ -434,7 +432,8 @@ impl Lower {
     const key = `${fid}|${keyArgs(args)}`;
     if (const #Some(i) = self.instIndex.get(key.asStr())) { return i; }
     if (!self.p.checked.has(fid)) { checkFn(mut self.p, fid); }
-    if (fid >= self.owned) { checkOwnership(mut self.p, fid); }
+    // A specialization made since the ownership pass ran over the program has not been through it.
+    if (!self.p.owned.has(fid)) { checkOwnership(mut self.p, fid); }
     const i = self.insts.len();
     const name = `${mangle(self.p.fns[fid].name.asStr())}_${i}`;
     self.insts.push({ fid, args, name });
@@ -2941,7 +2940,6 @@ impl Lower {
   // The program whose entry module is `entry`: `main`'s instance, and how it is run.
   // A program run on its own has `main`; a freestanding one is the functions C calls.
   export function entry(self: mut Self, entry: usize, freestanding: bool): Entry uses Fail<#Failed(String)> {
-    self.owned = self.p.fns.len();
     // The functions C calls are the program's too.
     let exports: Vec<usize> = Vec.new();
     for (const fid of 0..self.p.fns.len()) {

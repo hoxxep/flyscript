@@ -1,0 +1,231 @@
+// A compiler that keeps a program between builds: `--watch` compiles the program to C, then watches
+// its modules and compiles it again whenever one changes, writing the C anew each time.
+//
+// A change to the bodies of a module's functions alone — what most edits are — is compiled again
+// from what the last build left: those functions are checked again, types and ownership, and their
+// instances lowered and printed again, with whatever they now reach for the first time; the rest
+// of the program is as it was. Anything else compiles the whole program again: a change to what a
+// module declares or imports, a body of a template or of `comptime` code, an inferred effect that
+// changed, or a build before that did not compile.
+
+import { Diagnostic, render } from "./diag";
+import { Program } from "./env";
+import { checkFn } from "./check";
+import { checkOwnership } from "./own";
+import { Cgen, newCgen } from "./c";
+import { programHandlesIo } from "./lower";
+import { parseModule } from "./parse";
+import { Module as AstModule } from "./ast";
+import { EffRow } from "./types";
+import { File, eprintln, writeFile } from "std/io";
+import { HashSet } from "std/collections";
+
+// The program as the last build left it, compiling it again as its modules change.
+struct Session { cg: Cgen; main: usize; runtime: String }
+
+// What a build ended with: C to write, or what it reported instead.
+type Built = #Code(String) | #Failed;
+
+function readSource(path: str): Option<String> uses Io {
+  try {
+    let f = File.open(path);
+    #Some(f.readText())
+  } catch (_) { #None }
+}
+
+function report(p: readonly Program): void uses Io {
+  for (const [m, d] of p.diags) {
+    if (m < p.modules.len()) {
+      eprintln(render(d, p.modules[m].file.asStr(), p.modules[m].source.asStr()).asStr());
+    } else {
+      const #Diagnostic { span: _, message } = d;
+      eprintln(`error: ${message}`);
+    }
+  }
+}
+
+// A module's source with the body of every function and method in it left out: what it declares.
+function skeleton(src: str, ast: readonly AstModule): String {
+  let spans: Vec<[usize, usize]> = Vec.new();
+  for (const item of ast.items) {
+    match (item.kind) {
+      #Function(f) => { if (const #Some(b) = f.body) { spans.push([b.span.start, b.span.end]); } }
+      #Impl(imp) => {
+        for (const m of imp.methods) { if (const #Some(b) = m.decl.body) { spans.push([b.span.start, b.span.end]); } }
+      }
+      _ => {}
+    }
+  }
+  spans.sort();
+  let out = String.new();
+  let at: usize = 0;
+  for (const [start, end] of spans) {
+    out.push(src.slice(at, start));
+    out.push("{}");
+    at = end;
+  }
+  out.push(src.slice(at, src.len()));
+  out
+}
+
+// The whole program, checked and compiled from its sources; with the sources it read, so that a
+// build that did not compile is not tried again until one changes.
+function cold(entry: str, root: str, runtime: str): [Option<Session>, Built, Vec<[String, String]>] uses Io {
+  let p = Program.load([entry.toString()], `${root}/std`.asStr());
+  // Checking a function may specialize others, which are checked in turn.
+  let next: usize = 0;
+  while (p.diags.len() == 0 && next < p.fns.len()) {
+    checkFn(mut p, next);
+    next += 1;
+  }
+  if (p.diags.len() == 0) { for (const f of 0..p.fns.len()) { checkOwnership(mut p, f); } }
+  if (p.diags.len() > 0) {
+    report(p);
+    return [#None, #Failed, sources(p)];
+  }
+  const file = p.entryFile(entry);
+  const main = match (p.modules.iter().findIndex((m) => m.file == file)) { #Some(k) => k, #None => return [#None, #Failed, sources(p)] };
+  let cg = newCgen(p);
+  const r = try { #Ok(cg.program(main, runtime, false)) } catch (#Failed(message)) { #Err(message) };
+  match (r) {
+    #Ok(code) => [#Some(Session { cg, main, runtime: runtime.toString() }), #Code(code), Vec.new()],
+    #Err(message) => {
+      eprintln(message.asStr());
+      [#None, #Failed, sources(cg.lw.p)]
+    }
+  }
+}
+
+impl Session {
+  // The modules of the program's own whose sources changed, with their new sources.
+  function changed(self: readonly Self): Vec<[usize, String]> uses Io {
+    let out: Vec<[usize, String]> = Vec.new();
+    for (const [m, info] of self.cg.lw.p.modules.iter().enumerate()) {
+      if (info.isStd) { continue; }
+      match (readSource(info.file.asStr())) {
+        #Some(s) => { if (s != info.source) { out.push([m, s]); } }
+        // A module that cannot be read now: compiled from scratch, which reports it.
+        #None => { out.push([m, String.new()]); }
+      }
+    }
+    out
+  }
+
+  // The program again after `changes`, from what the last build left, if only bodies changed:
+  // `#None` if it must be compiled from scratch.
+  function again(self: mut Self, changes: Vec<[usize, String]>): Option<Built> uses Io {
+    let dirty: HashSet<usize> = HashSet.new();
+    for (const [m, source] of changes) {
+      const ast = try { parseModule(source.asStr()) } catch (_) { return #None };
+      const before = skeleton(self.cg.lw.p.modules[m].source.asStr(), self.cg.lw.p.modules[m].ast);
+      if (skeleton(source.asStr(), ast) != before) { return #None; }
+      for (const [f, info] of self.cg.lw.p.fns.iter().enumerate()) {
+        if (info.module == m && info.hasBody) { dirty.insert(f); }
+      }
+      self.cg.lw.p.modules[m].source = source.clone();
+      self.cg.lw.p.modules[m].ast = ast;
+    }
+    // Templates, `comptime` code and what was made of them are made again only from scratch.
+    for (const f of dirty.iter()) {
+      if (self.cg.lw.p.isTemplate(f) || self.cg.lw.p.bodies.has(f)) { return #None; }
+    }
+    for (const [_, t] of self.cg.lw.p.specOf.entries()) { if (dirty.has(t)) { return #None; } }
+    let effects: Vec<[usize, Option<EffRow>]> = Vec.new();
+    for (const f of dirty.iter()) {
+      effects.push([f, match (self.cg.lw.p.inferred.get(f)) { #Some(#Some(e)) => #Some(e.clone()), _ => #None }]);
+      self.cg.lw.p.checked.remove(f);
+      self.cg.lw.p.typed.remove(f);
+      self.cg.lw.p.inferred.remove(f);
+      self.cg.lw.p.assumedPure.remove(f);
+      self.cg.lw.p.owned.remove(f);
+    }
+    let order: Vec<usize> = Vec.new();
+    for (const f of dirty.iter()) { order.push(f); }
+    order.sort();
+    for (const f of order) { checkFn(mut self.cg.lw.p, f); }
+    if (self.cg.lw.p.diags.len() == 0) { for (const f of order) { checkOwnership(mut self.cg.lw.p, f); } }
+    if (self.cg.lw.p.diags.len() > 0) {
+      report(self.cg.lw.p);
+      return #Some(#Failed);
+    }
+    // A function whose effects are inferred and now differ changes what its callers perform.
+    for (const [f, before] of effects) {
+      const now: Option<EffRow> = match (self.cg.lw.p.inferred.get(f)) { #Some(#Some(e)) => #Some(e.clone()), _ => #None };
+      if (now != before) { return #None; }
+    }
+    if (programHandlesIo(self.cg.lw.p) != self.cg.lw.handlesIo) { return #None; }
+    const r = try { #Ok(self.cg.again(dirty, self.main, self.runtime.asStr(), false)) } catch (#Failed(message)) { #Err(message) };
+    match (r) {
+      #Ok(code) => #Some(#Code(code)),
+      #Err(message) => {
+        eprintln(message.asStr());
+        #Some(#Failed)
+      }
+    }
+  }
+}
+
+function write(out: str, built: readonly Built): void uses Io {
+  if (const #Code(code) = built) {
+    try { writeFile(out, code.asStr()); } catch (_) { eprintln(`error: cannot write ${out}`); }
+  }
+}
+
+// Whether a source differs from the text it had.
+function changedSince(seen: readonly Vec<[String, String]>): bool uses Io {
+  seen.iter().some(([path, text]) => match (readSource(path.asStr())) { #Some(t) => t != text, #None => true })
+}
+
+// Compiles `entry` to the C file `out`, and again whenever one of its modules changes, until
+// stopped. A build that did not compile leaves `out` as it was; the next is from scratch, once a
+// source changes.
+export function watch(entry: str, out: str, root: str, runtime: str): never uses Io {
+  let start = Io.now();
+  let [session, built, seen] = cold(entry, root, runtime);
+  write(out, built);
+  if (session.isSome()) { eprintln(`compiled in ${Io.now().since(start).toMs()} ms`); }
+  while (true) {
+    Io.sleep(Duration.ms(25));
+    match (session) {
+      #Some(s0) => {
+        let s = s0;
+        const changes = s.changed();
+        if (changes.len() == 0) { session = #Some(s); continue; }
+        start = Io.now();
+        match (s.again(changes)) {
+          #Some(#Code(code)) => {
+            write(out, #Code(code));
+            eprintln(`compiled again in ${Io.now().since(start).toMs()} ms`);
+            session = #Some(s);
+          }
+          #Some(#Failed) => {
+            seen = sources(s.cg.lw.p);
+            session = #None;
+          }
+          #None => {
+            const [next, b, read] = cold(entry, root, runtime);
+            write(out, b);
+            if (next.isSome()) { eprintln(`compiled from scratch in ${Io.now().since(start).toMs()} ms`); }
+            seen = read;
+            session = next;
+          }
+        }
+      }
+      #None => {
+        if (!changedSince(seen)) { continue; }
+        start = Io.now();
+        const [next, b, read] = cold(entry, root, runtime);
+        write(out, b);
+        if (next.isSome()) { eprintln(`compiled from scratch in ${Io.now().since(start).toMs()} ms`); }
+        seen = read;
+        session = next;
+      }
+    }
+  }
+}
+
+function sources(p: readonly Program): Vec<[String, String]> {
+  let out: Vec<[String, String]> = Vec.new();
+  for (const m of p.modules) { if (!m.isStd) { out.push([m.file.clone(), m.source.clone()]); } }
+  out
+}
