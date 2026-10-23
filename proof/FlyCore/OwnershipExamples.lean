@@ -2472,4 +2472,113 @@ theorem escape_rejected : ¬ Typed [] [] [] (.region "R" τ (.ralloc "R" false .
     obtain ⟨rfl, -⟩ := hs
     cases τ <;> simp [Ty.shiftBy] at ht
 
+/-! Kept continuations: a `handle` whose arm is given the rest of its body as a value, to resume or
+to drop. -/
+
+/-- `Emit`, taking an integer and giving one. -/
+def emitOp : Op := { owns := [.int], refs := [], ret := .int }
+
+/-- `function emits() { emit(10); emit(20); emit(12); return 0; }` -/
+def emits : Fn :=
+  { owns := [], refs := [], ret := .int, row := [.eff 0],
+    body := .let_ "u" .int (.perform 0 [.lit 10] [])
+      (.let_ "v" .int (.perform 0 [.lit 20] []) (.let_ "w" .int (.perform 0 [.lit 12] []) (.atom (.lit 0)))) }
+
+/-- The arm `(x, k) => x + k(0)`: what was emitted, and what the rest of the body comes to. -/
+def addRest : Fn :=
+  { owns := [("x", .int), ("k", .cont .int .int [])], refs := [], ret := .int, row := [],
+    body := .let_ "r" .int (.resume "k" (.lit 0)) (.add (.read (.var "x")) (.read (.var "r"))) }
+
+/-- `handle { emits() } with Emit { emit(x) resumes k => addRest(x, k) }`: each emission's arm resumes
+the body, which emits again, the arms nesting; 10 + (20 + (12 + 0)) = 42. -/
+def keptSum : Expr := .handleV .int 0 0 [] 1
+
+example : value (eval [emits, addRest] [emitOp] 80 [.abort .fail 0] .empty [] keptSum) = some 42 := by
+  run [keptSum, emits, addRest, emitOp, kfoot, Val.foot]
+example : freed (eval [emits, addRest] [emitOp] 80 [.abort .fail 0] .empty [] keptSum) := by
+  run [keptSum, emits, addRest, emitOp, kfoot, Val.foot]
+
+theorem emits_ok (harm : FnOk [emits, arm] [emitOp] arm) : FnsOk [emits, arm] [emitOp] := by
+  intro d hd
+  simp only [List.mem_cons, List.mem_singleton, List.not_mem_nil, or_false] at hd
+  rcases hd with rfl | rfl
+  · refine ⟨by decide, ?_⟩
+    simp only [emits, FnOk]
+    exact ⟨_, .let_ (live := true) rfl (.perform (op := emitOp) rfl (List.mem_singleton_self _) (.cons .lit .nil) .nil .nil)
+      (.let_ (live := true) rfl (.perform (op := emitOp) rfl (List.mem_singleton_self _) (.cons .lit .nil) .nil .nil)
+        (.let_ (live := true) rfl (.perform (op := emitOp) rfl (List.mem_singleton_self _) (.cons .lit .nil) .nil .nil)
+          (.atom .lit)))⟩
+  · exact harm
+
+theorem addRest_ok : FnOk [emits, addRest] [emitOp] addRest := by
+  refine ⟨by decide, ?_⟩
+  simp only [addRest, FnOk]
+  exact ⟨_, .let_ (live := true) rfl (.resume rfl (fun _ h => by simp at h) .lit)
+    (.add (.read (.own rfl)) (.read (.own rfl)))⟩
+
+/-- A `handle` of `Emit` whose body is a call of `body` and whose arm, `arm`, takes what is emitted and
+the continuation, typed. -/
+theorem kept_typed {body arm : Fn} (hbo : body.owns = []) (hbr : body.refs = []) (hbt : body.ret = .int)
+    (hbw : body.row = [.eff 0]) (hbp : body.retp = none) (hbc : body.cap = none)
+    (ha : arm.owns.map Prod.snd = [.int, .cont .int .int []]) (hr : arm.refs = []) (ht : arm.ret = .int)
+    (hw : arm.row = []) (hp : arm.retp = none) (hc : arm.cap = none) :
+    Typed [body, arm] [emitOp] [] (.handleV .int 0 0 [] 1) .int [] [.fail] :=
+  .handleV (op := emitOp) (da := arm) (d := body) (ra := []) rfl rfl rfl rfl (by simp [emitOp, Ty.cross]) rfl rfl
+    (by rw [ha]; rfl) hr ht hw hp hc (fun _ h => by simp at h) rfl hbr hbt hbp hbc (by simp [hbw]) (by simp [hbw])
+    (by simp [hbo]) (by rw [hbo]; exact .nil)
+
+example : ∀ n, match eval [emits, addRest] [emitOp] n [.abort .fail 0] .empty [] keptSum with
+    | (.stuck, _) => False
+    | (.susp _ _ _ _ _, _) => False
+    | (.timeout, _) => True
+    | (.panic, _) => True
+    | (.val v, σ') => ∃ L, VT [emits, addRest] ⟨[], Wstar [emits, addRest] [emitOp]⟩ σ' .int v L ∧
+        ∀ l, σ'.mem l ≠ none ↔ l ∈ L
+    | (.abort _ _, σ') => ∀ l, σ'.mem l = none :=
+  program_ok (emits_ok addRest_ok) (kept_typed rfl rfl rfl rfl rfl rfl rfl rfl rfl rfl rfl rfl)
+
+/-- `function boxEmits() { const b = Box.new(5); emit(*b); emit(7); return 0; }` -/
+def boxEmits : Fn :=
+  { owns := [], refs := [], ret := .int, row := [.eff 0],
+    body := .let_ "b" (.box .int) (.new (.lit 5))
+      (.let_ "u" .int (.perform 0 [.read (.deref (.var "b"))] [])
+        (.let_ "v" .int (.perform 0 [.lit 7] []) (.atom (.lit 0)))) }
+
+/-- The arm `(x, k) => x`: the continuation is never resumed, and is dropped as the arm returns. -/
+def firstOnly : Fn :=
+  { owns := [("x", .int), ("k", .cont .int .int [])], refs := [], ret := .int, row := [],
+    body := .atom (.read (.var "x")) }
+
+/-- `handle { boxEmits() } with Emit { emit(x) resumes k => firstOnly(x, k) }`: 5, and the body, which
+still owns its box where it waits, unwound as its continuation is dropped, the box freed. -/
+example : value (eval [boxEmits, firstOnly] [emitOp] 80 [.abort .fail 0] .empty [] keptSum) = some 5 := by
+  run [keptSum, boxEmits, firstOnly, emitOp, kfoot, Val.foot]
+example : freed (eval [boxEmits, firstOnly] [emitOp] 80 [.abort .fail 0] .empty [] keptSum) := by
+  run [keptSum, boxEmits, firstOnly, emitOp, kfoot, Val.foot]
+
+theorem boxEmits_ok : FnsOk [boxEmits, firstOnly] [emitOp] := by
+  intro d hd
+  simp only [List.mem_cons, List.mem_singleton, List.not_mem_nil, or_false] at hd
+  rcases hd with rfl | rfl
+  · refine ⟨by decide, ?_⟩
+    simp only [boxEmits, FnOk]
+    exact ⟨_, .let_ (live := true) rfl (.new .lit)
+      (.let_ (live := true) rfl (.perform (op := emitOp) rfl (List.mem_singleton_self _)
+          (.cons (.read (.deref (.own rfl))) .nil) .nil .nil)
+        (.let_ (live := true) rfl (.perform (op := emitOp) rfl (List.mem_singleton_self _) (.cons .lit .nil) .nil .nil)
+          (.atom .lit)))⟩
+  · refine ⟨by decide, ?_⟩
+    simp only [firstOnly, FnOk]
+    exact ⟨_, .atom (.read (.own rfl))⟩
+
+example : ∀ n, match eval [boxEmits, firstOnly] [emitOp] n [.abort .fail 0] .empty [] keptSum with
+    | (.stuck, _) => False
+    | (.susp _ _ _ _ _, _) => False
+    | (.timeout, _) => True
+    | (.panic, _) => True
+    | (.val v, σ') => ∃ L, VT [boxEmits, firstOnly] ⟨[], Wstar [boxEmits, firstOnly] [emitOp]⟩ σ' .int v L ∧
+        ∀ l, σ'.mem l ≠ none ↔ l ∈ L
+    | (.abort _ _, σ') => ∀ l, σ'.mem l = none :=
+  program_ok boxEmits_ok (kept_typed rfl rfl rfl rfl rfl rfl rfl rfl rfl rfl rfl rfl)
+
 end FlyCore.Ownership.Examples

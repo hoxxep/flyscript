@@ -16,5 +16,6 @@ import FlyCore.OwnershipRegions
 import FlyCore.OwnershipVec
 import FlyCore.OwnershipGen
 import FlyCore.OwnershipScope
+import FlyCore.OwnershipFiber
 import FlyCore.OwnershipMain
 import FlyCore.OwnershipExamples

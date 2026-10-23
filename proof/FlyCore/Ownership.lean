@@ -2335,6 +2335,23 @@ give way by `e` and start tasks by `eS`; what else they perform goes on to the c
       AtomsTy Γ (oa ++ ob) (da.owns.map Prod.snd ++ db.owns.map Prod.snd) Γ₁ →
       Lends Γ₁ ((la ++ lb).map fun p => (.ro, p)) (da.refs.map Prod.snd ++ db.refs.map Prod.snd) ys →
       Typed F O Γ (.par e fa oa la fb ob lb) (.pair da.ret db.ret) Γ₁ r
+  /-- A `handle` whose arm keeps its continuation: its body, a call of `f` given what may pass into
+  a fiber, performs only its operation, which no task gives way by, lends nothing, gives an integer
+  and takes what may pass out of a fiber; its value may pass out too; its arm, `fa`, takes what the
+  operation does and the continuation, and performs `ra`, which the code around may. -/
+  | handleV : O[e]? = some op → op.task = false → op.refs = [] → op.ret = .int →
+      (∀ τ' ∈ op.owns, τ'.cross = true) → τ.cross = true →
+      F[fa]? = some da → da.owns.map Prod.snd = op.owns ++ [.cont .int τ ra] → da.refs = [] → da.ret = τ →
+      da.row = ra → da.retp = none → da.cap = none → (∀ l ∈ ra, l ∈ r) →
+      F[f]? = some d → d.refs = [] → d.ret = τ → d.retp = none → d.cap = none → Label.eff e ∈ d.row →
+      (∀ l ∈ d.row, l = .eff e) → (∀ τ' ∈ d.owns.map Prod.snd, τ'.cross = true) →
+      AtomsTy Γ owned (d.owns.map Prod.snd) Γ₁ →
+      Typed F O Γ (.handleV τ e f owned fa) τ Γ₁ r
+  /-- A kept continuation resumed: it is moved out of its variable, and what it performs, the code
+  around may. -/
+  | resume : lookup x Γ = some (.own (.cont .int τ ra) true) → (∀ l ∈ ra, l ∈ r) →
+      AtomTy (setSlot Γ x (.own (.cont .int τ ra) false)) a .int Γ₁ →
+      Typed F O Γ (.resume x a) τ Γ₁ r
   /-- A region: its body sees its arena `R` as the innermost region, and the variables around it a
   region further out. Nothing the region holds outlives it: the type of its value, and what its body
   leaves of the variables around, are said of the code around. -/

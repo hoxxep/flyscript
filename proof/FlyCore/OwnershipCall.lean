@@ -327,6 +327,9 @@ theorem typed_weaker : Typed F O Γ e τ Γ' r → (Γ.map Prod.fst).Nodup → W
     cases this with
     | cons _ w => exact w.trans (typed_weaker hb hk)
   | .par _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ hargs _, hk => atoms_weaker hargs hk
+  | .handleV _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ hargs, hk => atoms_weaker hargs hk
+  | .resume hx _ ha, hk => (atom_weaker ha (by rw [setSlot_keys]; exact hk)).trans
+      (setSlot_weaker hk hx (.forget rfl))
   | .region hR _ hb, hk => by
     have w := typed_weaker hb (List.nodup_cons.mpr ⟨by
       simpa [Ctx.shift, Function.comp_def] using lookup_none_keys hR, by simpa [Ctx.shift, Function.comp_def] using hk⟩)

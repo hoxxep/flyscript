@@ -460,6 +460,8 @@ theorem typed_keys : Typed F O Γ e τ Γ' r → Γ'.map Prod.fst = Γ.map Prod.
     simp only [List.map_cons, List.cons.injEq] at this
     exact this.2.trans (typed_keys hb)
   | .par _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ hargs _ => atoms_keys hargs
+  | .handleV _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ hargs => atoms_keys hargs
+  | .resume _ _ ha => (atom_keys ha).trans (setSlot_keys _)
   | .region _ _ hb => by
     have := typed_keys hb
     simpa [Ctx.shift, Function.comp_def] using this

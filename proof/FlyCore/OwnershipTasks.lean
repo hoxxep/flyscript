@@ -40,12 +40,12 @@ theorem ret_startK [WorldOk F O ι.w] (hE : EvalOk F O n) (hb : Typed F O Γ b �
 theorem yield_resume [WorldOk F O ι.w] {e : Nat} (hKk : EvalKOk F O m) (hop : O[e]? = some op) (hrefs : op.refs = []) (hret : op.ret = .int)
     (hK : FramesOk F O ι σs K op top X hos A) (hR : Ready O hs top.r) (hA : ∀ a ∈ A, AimedIn a hs)
     (hwf : WF σr) (hag : Agree σs σr (X ++ top.S)) (hXa : ∀ l ∈ X ++ top.S, σs.mem l ≠ none) (hXn : X.Nodup)
-    (hdS : Disj top.S X) :
-    Post F ι O σr X top.S top.Γ top.env top.τ top.r hs (evalK F O m hs σr K (.val (.int 0))) := by
+    (hdS : Disj top.S X) (k : Int := 0) :
+    Post F ι O σr X top.S top.Γ top.env top.τ top.r hs (evalK F O m hs σr K (.val (.int k))) := by
   obtain ⟨-, -, -, -, -, -, -, -, hts, -, -, -, -⟩ := hK.base_of
   rw [hrefs] at hts
   obtain rfl : hos = [] := List.map_eq_nil_iff.mp hts
-  have h := hKk hs _ σs K top X [] A σr [] (.val (.int 0)) op [] hK hR hA hwf hag hXa hXn rfl
+  have h := hKk hs _ σs K top X [] A σr [] (.val (.int k)) op [] hK hR hA hwf hag hXa hXn rfl
     (fun _ h => by simp at h) (by simp [mutCells]) (by simp [mutCells, Disj])
     (by simp only [mutCells, List.flatMap_nil, List.append_nil]; exact fun l h1 h2 => hdS l h1 h2)
     (.inl ⟨_, rfl, by rw [hret]; exact .int, by simp [Disj]⟩)

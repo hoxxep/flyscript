@@ -1,4 +1,4 @@
-import FlyCore.OwnershipScope
+import FlyCore.OwnershipFiber
 
 /-!
 # Ownership: soundness
@@ -50,10 +50,13 @@ theorem preempt_ok (ht : Typed F O Γ e τ Γ' r) (hI : Inv F ι σ Γ env E S) 
   simp only [olds, mutCells, List.map_nil, List.flatMap_nil, List.flatten_nil, List.nil_append, List.append_nil]
   exact (Moves.freshen hwf hI.alloc).relabel fun x => by simp
 
-theorem eval_ok_succ (hF : FnsOk F O) (hE : EvalOk F O n) (hR : RetOk F O n) (hKo : ∀ m, n = m + 1 → EvalKOk F O m) :
-    EvalOk F O (n + 1) := by
+theorem eval_ok_succ (hF : FnsOk F O) (hE : EvalOk F O n) (hR : RetOk F O n)
+    (hKs : ∀ m, m < n → EvalOk F O m ∧ EvalKOk F O m) : EvalOk F O (n + 1) := by
   intro hs σ ι Γ env E S e τ Γ' r _ ht hI hwf hRdy
+  have hKo : ∀ m, n = m + 1 → EvalKOk F O m := fun m h => (hKs m (by omega)).2
   have hfl : ∀ ι, [WorldOk F O ι.w] → FlushOk F ι (flushR F O n) := fun _ _ => flushR_ok hKo
+  have hKv : ∀ ι, [WorldOk F O ι.w] → ∀ m, n = m + 1 → EvalOk F O m ∧ FlushOk F ι (flushR F O m) :=
+    fun _ _ m h => ⟨(hKs m (by omega)).1, flushR_ok fun k hk => (hKs k (by omega)).2⟩
   have hfl' : ∀ ι, [WorldOk F O ι.w] → FlushOk F ι (flush F O n) := fun _ _ => flush_ok (evalK_ok hR)
   -- A task may be stopped before anything it does, for another to run.
   rw [eval]
@@ -651,6 +654,11 @@ theorem eval_ok_succ (hF : FnsOk F O) (hE : EvalOk F O n) (hR : RetOk F O n) (hK
     | par hop _ howns hrefs hret hfa hfb hretpa hcapa hretpb hcapb hea heb hrowa hrowb hca hcb hargs hlends =>
       exact par_ok hF hR (evalK_ok hR) hop howns hrefs hret hfa hfb hretpa hcapa hretpb hcapb hea heb hrowa hrowb
         hca hcb hargs hlends hI hwf hRdy
+    | handleV hop htask hrefs hret howns hτ hfa hdowns hdrefs hdret hdrow hdretp hdcap hra hf hrefsd hretd hretpd
+        hcapd he hrow hcross hargs =>
+      exact handleV_ok hF (evalK_ok hR) (hKv _) hop htask hrefs hret howns hτ hfa hdowns hdrefs hdret hdrow hdretp
+        hdcap hra hf hrefsd hretd hretpd hcapd he hrow hcross hargs hI hwf hRdy
+    | resume hx hra ha => exact resumeV_ok hF (evalK_ok hR) (hKv _) hx hra ha hI hwf hRdy
 
 theorem ret_ok (hF : FnsOk F O) (hE : EvalOk F O n) (hKs : ∀ m, m < n → EvalKOk F O m ∧ RetOk F O m) :
     RetOk F O n := by
@@ -733,7 +741,7 @@ theorem sound (hF : FnsOk F O) : ∀ n, EvalOk F O n ∧ RetOk F O n ∧ EvalKOk
     ⟨hE, hR, evalK_ok hR⟩
   | n + 1 =>
     have ⟨hE, hR, hK⟩ := sound hF n
-    have hE' := eval_ok_succ hF hE hR fun m h => (sound hF m).2.2
+    have hE' := eval_ok_succ hF hE hR fun m h => let s := sound hF m; ⟨s.1, s.2.2⟩
     have hR' : RetOk F O (n + 1) := ret_ok hF hE' fun m h =>
       if hm : m = n then hm ▸ ⟨hK, hR⟩ else let s := sound hF m; ⟨s.2.2, s.2.1⟩
     ⟨hE', hR', evalK_ok hR'⟩
