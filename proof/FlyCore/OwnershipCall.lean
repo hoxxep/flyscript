@@ -257,6 +257,7 @@ theorem typed_weaker : Typed F O Γ e τ Γ' r → (Γ.map Prod.fst).Nodup → W
       by rw [typed_keys hb]; exact hk⟩)
     cases this with
     | cons _ w => exact w.trans (typed_weaker hb hk)
+  | .par _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ hargs _, hk => atoms_weaker hargs hk
 
 /-- A function's context: its owned parameters, live, then its borrowed ones. -/
 def fnCtx (d : Fn) : Ctx :=

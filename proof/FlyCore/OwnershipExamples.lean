@@ -1,4 +1,4 @@
-import FlyCore.OwnershipSound
+import FlyCore.OwnershipMain
 
 /-!
 The semantics computes what the language means: a program that lends and moves ends with every cell
@@ -34,7 +34,7 @@ syntax "run" "[" Lean.Parser.Tactic.simpLemma,* "]" : tactic
 macro_rules
   | `(tactic| run [$xs,*]) => `(tactic| simp [eval, ret, evalK, evalAtom, evalAtoms, resolve, leave, cleanV,
       cleanA, dropRet, armEnd, callRet, allocAll, dropCells, dropCell, drop, dropK, pick, Store.fresh, Store.alloc, Store.set, find,
-      Frame.handles, Kont.push, lookup, Res.done, Outcome.res, Cap.at, Store.empty, value, freed, freedBelow,
+      Frame.handles, Kont.push, lookup, Res.done, Outcome.res, Cap.at, Store.empty, Store.sched0, value, freed, freedBelow,
       isStuck, $xs,*])
 
 /-- `function add(b: Box<int>, r: mut Box<int>): int { *r = *r + *b; *r }` -/
@@ -1254,5 +1254,115 @@ example : ∀ n, match eval [] [] n [.abort .fail 0] .empty [] tagRef with
     | (.val v, σ') => ∃ L, VT [] σ' .int v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
     | (.abort _ _, σ') => ∀ l, σ'.mem l = none :=
   program_ok (by intro d hd; simp at hd) tagRef_typed
+
+/-! Two tasks, each giving way where it yields, in whatever order the schedule picks. -/
+
+/-- `Yield`, whose operation takes nothing and gives an integer. -/
+def yields : List Op := [{ owns := [], refs := [], ret := .int }]
+
+/-- `function step(k: int, b: readonly int): int { yield(); const a = k + b; yield(); a + k }` -/
+def step : Fn :=
+  { owns := [("k", .int)], refs := [("b", .ro, .int)], ret := .int, row := [.eff 0, .fail],
+    body := .let_ "t" .int (.perform 0 [] [])
+      (.let_ "a" .int (.add (.read (var "k")) (.read (var "b")))
+        (.let_ "u" .int (.perform 0 [] []) (.add (.read (var "a")) (.read (var "k"))))) }
+
+/-- `let base = 10; const [x, y] = [spawn step(1, base), spawn step(2, base)]; x + y`: 12 + 14,
+whichever task the schedule runs when. -/
+def tasks : Expr :=
+  .let_ "base" .int (.atom (.lit 10))
+    (.let_ "p" (.pair .int .int) (.par 0 0 [.lit 1] [var "base"] 0 [.lit 2] [var "base"])
+      (.add (.read (.fst (var "p"))) (.read (.snd (var "p")))))
+
+example : value (eval [step] yields 60 [] .empty [] tasks) = some 26 := by
+  run [tasks, step, yields]
+example : freed (eval [step] yields 60 [] .empty [] tasks) := by
+  run [tasks, step, yields]
+example : value (eval [step] yields 60 [] (Store.sched0 fun _ => false) [] tasks) = some 26 := by
+  run [tasks, step, yields]
+example : freed (eval [step] yields 60 [] (Store.sched0 fun _ => false) [] tasks) := by
+  run [tasks, step, yields]
+
+theorem step_ok : FnsOk [step] yields := by
+  intro d hd
+  simp only [List.mem_singleton] at hd
+  subst hd
+  exact ⟨by decide, _, .let_ (live := true) rfl (.perform (op := yields[0]) rfl (List.mem_cons_self ..) .nil .nil
+    List.Pairwise.nil) (.let_ (live := true) rfl (.add (.read (.own rfl)) (.read (.ref (m := .ro) rfl)))
+      (.let_ (live := true) rfl (.perform (op := yields[0]) rfl (List.mem_cons_self ..) .nil .nil List.Pairwise.nil)
+        (.add (.read (.own rfl)) (.read (.own rfl)))))⟩
+
+theorem tasks_typed : Typed [step] yields [] tasks .int [] [.fail] :=
+  .let_ (live := true) rfl (.atom .lit)
+    (.let_ (live := true) rfl (.par (op := yields[0]) (da := step) (db := step) rfl rfl rfl rfl rfl rfl rfl rfl rfl
+        rfl (by simp [step]) (by simp [step]) (by simp [step]) (by simp [step]) rfl rfl (.cons .lit (.cons .lit .nil))
+        (.cons (.own rfl) (fun h => by cases h) rfl (.cons (.own rfl) (fun h => by cases h) rfl .nil)))
+      (.add (.read (.fst (.own rfl))) (.read (.snd (.own rfl)))))
+
+/-- Under any schedule. -/
+example : ∀ s n, match eval [step] yields n [.abort .fail 0] (Store.sched0 s) [] tasks with
+    | (.stuck, _) => False
+    | (.susp _ _ _ _ _, _) => False
+    | (.timeout, _) => True
+    | (.val v, σ') => ∃ L, VT [step] σ' .int v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
+    | (.abort _ _, σ') => ∀ l, σ'.mem l = none :=
+  program_ok_sched step_ok tasks_typed
+
+/-- `function hold(x: Box<int>): int { yield(); yield(); *x }` -/
+def hold : Fn :=
+  { owns := [("x", .box .int)], refs := [], ret := .int, row := [.eff 0, .fail],
+    body := .let_ "t" .int (.perform 0 [] [])
+      (.let_ "u" .int (.perform 0 [] []) (.atom (.read (deref (var "x"))))) }
+
+/-- `function failing(k: int): int { yield(); throw k }` -/
+def failing : Fn :=
+  { owns := [("k", .int)], refs := [], ret := .int, row := [.eff 0, .fail],
+    body := .let_ "t" .int (.perform 0 [] []) (.throw_ (.read (var "k"))) }
+
+/-- `let b = Box.new(5); try { const [x, y] = [spawn hold(b), spawn failing(7)]; x + y } catch (z) { z }`:
+the second task fails, and the first, done or waiting where it gave way with the box it owns, is
+dropped. 7, and nothing left allocated, under either schedule. -/
+def cancel : Expr :=
+  .let_ "b" (.box .int) (.new (.lit 5))
+    (.try_ (.let_ "p" (.pair .int .int) (.par 0 0 [.move "b"] [] 1 [.lit 7] [])
+        (.add (.read (.fst (var "p"))) (.read (.snd (var "p")))))
+      "z" (.atom (.read (var "z"))))
+
+example : value (eval [hold, failing] yields 60 [] .empty [] cancel) = some 7 := by
+  run [cancel, hold, failing, yields]
+example : freed (eval [hold, failing] yields 60 [] .empty [] cancel) := by
+  run [cancel, hold, failing, yields]
+example : value (eval [hold, failing] yields 60 [] (Store.sched0 fun _ => false) [] cancel) = some 7 := by
+  run [cancel, hold, failing, yields]
+example : freed (eval [hold, failing] yields 60 [] (Store.sched0 fun _ => false) [] cancel) := by
+  run [cancel, hold, failing, yields]
+
+theorem cancel_fns : FnsOk [hold, failing] yields := by
+  intro d hd
+  simp only [List.mem_cons, List.not_mem_nil, or_false] at hd
+  rcases hd with rfl | rfl
+  · exact ⟨by decide, _, .let_ (live := true) rfl (.perform (op := yields[0]) rfl (List.mem_cons_self ..) .nil .nil
+      List.Pairwise.nil) (.let_ (live := true) rfl (.perform (op := yields[0]) rfl (List.mem_cons_self ..) .nil .nil
+        List.Pairwise.nil) (.atom (.read (.deref (.own rfl)))))⟩
+  · exact ⟨by decide, _, .let_ (live := true) rfl (.perform (op := yields[0]) rfl (List.mem_cons_self ..) .nil .nil
+      List.Pairwise.nil) (.throw_ (.read (.own rfl)) (List.mem_cons_of_mem _ (List.mem_cons_self ..)))⟩
+
+theorem cancel_typed : Typed [hold, failing] yields [] cancel .int [] [.fail] :=
+  .let_ (live := false) rfl (.new .lit)
+    (.try_ rfl
+      (.let_ (live := true) rfl (.par (op := yields[0]) (da := hold) (db := failing) rfl rfl rfl rfl rfl rfl rfl rfl
+          rfl rfl (by simp [hold]) (by simp [failing]) (by simp [hold]) (by simp [failing]) rfl rfl
+          (.cons (.move rfl rfl) (.cons .lit .nil)) .nil)
+        (.add (.read (.fst (.own rfl))) (.read (.snd (.own rfl)))))
+      (.atom (.read (.own rfl))))
+
+/-- Under any schedule. -/
+example : ∀ s n, match eval [hold, failing] yields n [.abort .fail 0] (Store.sched0 s) [] cancel with
+    | (.stuck, _) => False
+    | (.susp _ _ _ _ _, _) => False
+    | (.timeout, _) => True
+    | (.val v, σ') => ∃ L, VT [hold, failing] σ' .int v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
+    | (.abort _ _, σ') => ∀ l, σ'.mem l = none :=
+  program_ok_sched cancel_fns cancel_typed
 
 end FlyCore.Ownership.Examples

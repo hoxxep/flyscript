@@ -4,3 +4,4 @@ import FlyCore
 
 #print axioms FlyCore.Ownership.eval_ok
 #print axioms FlyCore.Ownership.program_ok
+#print axioms FlyCore.Ownership.program_ok_sched

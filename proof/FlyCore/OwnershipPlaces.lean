@@ -454,6 +454,7 @@ theorem typed_keys : Typed F O Γ e τ Γ' r → Γ'.map Prod.fst = Γ.map Prod.
     have := typed_keys hh
     simp only [List.map_cons, List.cons.injEq] at this
     exact this.2.trans (typed_keys hb)
+  | .par _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ hargs _ => atoms_keys hargs
 
 theorem lookup_det {α : Type} {x : Var} {a b : α} {env : List (Var × α)} : lookup x env = some a → lookup x env = some b → a = b := by
   intro h1 h2; rw [h1] at h2; exact Option.some.inj h2

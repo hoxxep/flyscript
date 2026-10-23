@@ -88,6 +88,21 @@ theorem HandleOk.transfer (h : HandleOk F O σf e caps os rs arm post Γin Γout
     hRcdet := fun σ1 Rc' Hc hag' => h.hRcdet σ1 Rc' Hc fun l hl => (hag' l hl).trans (hag l hl)
     hre := fun σ1 Eb Hc hag' => h.hre σ1 Eb Hc fun l hl => (hag' l hl).trans (hag l hl) }
 
+/-- A context of `readonly` borrows only: a task's once its body has run, which owns nothing. -/
+def RoCtx (Γ : Ctx) : Prop := ∀ p ∈ Γ, ∃ τ, p.2 = .ref .ro τ
+
+/-- What two tasks keep while they run: the operation `e` by which each gives way, which takes
+nothing and gives an integer; and the code around, `Γ₁` in `env`, whose cells `E₁` neither changes. -/
+structure ParOk (F : List Fn) (O : List Op) (σf : Store) (e : Nat) (op : Op) (Γ₁ : Ctx) (env : Env)
+    (E₁ S : List Nat) (τa τb : Ty) : Prop where
+  hop : O[e]? = some op
+  howns : op.owns = []
+  hrefs : op.refs = []
+  hret : op.ret = .int
+  hI : Inv F σf Γ₁ env E₁ S
+  hca : τa.complete = true
+  hcb : τb.complete = true
+
 mutual
 /-- `FrameOk σf f inL outL X A`: frame `f`, put in force where the store was `σf`, takes what the
 code it ran gives at level `inL` and gives what its construct does at level `outL`; the cells `X` are
@@ -173,6 +188,35 @@ what the `handle` froze. -/
 are the frame's own. -/
   | postR : PostOk F O Γ env τ r (some (C, τ, f, env, cps)) → VT F σf C v Lv →
       FrameOk F O σf (.postR C f v env cps) ⟨Γ, env, τ, S, r⟩ ⟨Γ, env, τ, S, r⟩ Lv []
+  /-- A task's body, run once the task is first given its turn. -/
+  | startK : Typed F O Γ b τ Γ' r → FrameOk F O σf (.startK env b) ⟨Γ, env, .int, S, r⟩ ⟨Γ', env, τ, S, r⟩ [] []
+  /-- A task's call: as its body ends, the parameters it owns are dropped, leaving those it was lent,
+  `readonly`. -/
+  | taskK : (∀ l ∈ d.row, l ∈ r) → (∀ x ∈ d.refs, x.2.1 = .ro) →
+      ((d.owns.map Prod.fst) ++ (d.refs.map Prod.fst)).Nodup → (∀ o ∈ d.owns, o.2.complete = true) →
+      Typed F O (fnCtx d) d.body d.ret Γ'' d.row → cells.map Prod.fst = d.owns.map Prod.fst →
+      FrameOk F O σf (.callK ((d.owns.map Prod.snd).zip (cells.map Prod.snd)))
+        ⟨Γ'', cells ++ (d.refs.map Prod.fst).zip ls, d.ret, St, d.row⟩
+        ⟨refCtx d.refs, (d.refs.map Prod.fst).zip ls, d.ret, St, r⟩ [] []
+  /-- Two tasks, one running, the other waiting as `K` where it last gave way: their own cells are
+  those of the code around and of `K`. -/
+  | parS : ParOk F O σf e op Γ₁ env E₁ S τa τb → RoCtx Γr → RoCtx Γo →
+      (∀ l ∈ Sr, l ∈ E₁ ∨ l ∈ S) → (∀ l ∈ So, l ∈ E₁ ∨ l ∈ S) →
+      FramesOk F O σf K op ⟨Γo, envo, (if side then τb else τa), So, .eff e :: r⟩ X [] AK →
+      FrameOk F O σf (.parS e hid τa τb side K) ⟨Γr, envr, (if side then τa else τb), Sr, .eff e :: r⟩
+        ⟨Γ₁, env, .pair τa τb, S, r⟩ (E₁ ++ X) AK
+  /-- Two tasks, one running, the other done with `w`. -/
+  | parD : ParOk F O σf e op Γ₁ env E₁ S τa τb → RoCtx Γr → (∀ l ∈ Sr, l ∈ E₁ ∨ l ∈ S) →
+      VT F σf (if side then τb else τa) w Lw →
+      FrameOk F O σf (.parD e hid τa τb side w) ⟨Γr, envr, (if side then τa else τb), Sr, .eff e :: r⟩
+        ⟨Γ₁, env, .pair τa τb, S, r⟩ (E₁ ++ Lw) []
+  /-- A task running alone as it is dropped. -/
+  | parY : O[e]? = some op → op.owns = [] → op.refs = [] → op.ret = .int →
+      FrameOk F O σf (.parY e hid) ⟨Γ, env, τ, S, .eff e :: r⟩ ⟨Γ, env, τ, S, r⟩ [] []
+  /-- The code around two tasks, one of which failed: once the other is dropped, the activation is
+  the code around's again, its cells as they were. -/
+  | parE : Inv F σf Γ₁ env E₁ S → RoCtx Γo → (∀ l ∈ So, l ∈ E₁ ∨ l ∈ S) →
+      FrameOk F O σf .parE ⟨Γo, envo, τ, So, r⟩ ⟨Γ₁, env, τ, S, r⟩ E₁ []
 
 /-- `FramesOk σs K op top X hos A`: the frames `K`, the outermost first, suspended where the store is
 `σs`, take the value of the operation `op` that suspended them and give what level `top` does;

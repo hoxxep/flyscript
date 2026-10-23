@@ -223,6 +223,10 @@ inductive Expr where
   value the `handle`'s. -/
   | handleR (τ : Ty) (body : Expr) (e : Nat) (caps : List (Cap Place)) (owns refs : List Var) (arm : Expr)
       (C : Ty) (post : Nat)
+  /-- `{ const a = spawn fa(…); const b = spawn fb(…); [await a, await b] }`: two tasks, calls of `fa`
+  and `fb`, given their owned arguments and lent places only `readonly`, run as one, each giving way
+  to the other wherever it performs `e`, and the pair of what they give is the value. -/
+  | par (e : Nat) (fa : Nat) (oa : List Atom) (la : List Place) (fb : Nat) (ob : List Atom) (lb : List Place)
   deriving Repr
 
 /-- A user effect's operation: what it takes, owned and lent, and what it gives. -/
@@ -271,6 +275,8 @@ structure Store where
   mem : Nat → Option Val
   next : Nat
   ids : Nat := 0
+  /-- Which task goes on at each point where one could give way to the other: any schedule. -/
+  sched : Nat → Bool := fun _ => true
 
 /-- A fresh name for a handler. -/
 def Store.fresh (σ : Store) : Nat × Store := (σ.ids, { σ with ids := σ.ids + 1 })
@@ -425,6 +431,17 @@ inductive Kont where
   /-- Code of type `τ` being dropped as an arm unwinds with `o`, by unwinding it to a barrier named
   `d`. -/
   | dropK (τ : Ty) (o : Outcome) (d : Nat)
+  /-- A task's body, run once the task is first given its turn. -/
+  | startK (env : Env) (b : Expr)
+  /-- Two tasks of types `τa` and `τb`, the one running `side` (the first if `true`), the other
+  waiting as `K` where it last gave way; each gives way by performing `e`, handled here as `id`. -/
+  | parS (e id : Nat) (τa τb : Ty) (side : Bool) (K : List Kont)
+  /-- Two tasks, the one running `side`, the other done with `w`. -/
+  | parD (e id : Nat) (τa τb : Ty) (side : Bool) (w : Val)
+  /-- A task running alone as it is dropped, its turns given back at once. -/
+  | parY (e id : Nat)
+  /-- The code around two tasks, one of which failed, the other being dropped. -/
+  | parE
 
 /-- A handler in force, by name: one that unwinds — an abortive arm, or a `try` — handling `l`; or
 one whose arm takes the code that performed `e` as its continuation, resuming it with its value.
@@ -451,6 +468,9 @@ def Kont.push : Kont → HS → HS
   | .catchK l id _ _ _, hs => .abort l id :: hs
   | .capK _ e id _ _ _ _ _, hs => .capture e id :: hs
   | .dropK _ _ d, hs => .abort .drop d :: hs
+  | .parS e id _ _ _ _, hs => .capture e id :: hs
+  | .parD e id _ _ _ _, hs => .capture e id :: hs
+  | .parY e id, hs => .capture e id :: hs
   | _, hs => hs
 
 inductive Res where
@@ -816,6 +836,28 @@ def eval (F : List Fn) (O : List Op) : Nat → HS → Store → Env → Expr →
         ret F O n hs (.capK τ ef id (List.zipWith Cap.at caps ls) os rs arm (some (C, τ, f, env, caps)))
           (eval F O n (.capture ef id :: hs) σ1 env body)
       | none => (.stuck, σ)
+    | .par ef fa oa la fb ob lb =>
+      match F[fa]?, F[fb]? with
+      | some da, some db =>
+        match evalAtoms σ env (oa ++ ob) with
+        | some (vs, σ1) =>
+          match (la ++ lb).mapM (fun p => resolve σ1 env p) with
+          | some ls =>
+            if vs.length = da.owns.length + db.owns.length ∧ ls.length = da.refs.length + db.refs.length then
+              let (cA, σ2) := allocAll σ1 ((da.owns.map Prod.fst).zip (vs.take da.owns.length))
+              let (cB, σ3) := allocAll σ2 ((db.owns.map Prod.fst).zip (vs.drop da.owns.length))
+              let (id, σ4) := σ3.fresh
+              ret F O n hs (.parS ef id da.ret db.ret true
+                  [.callK ((db.owns.map Prod.snd).zip (cB.map Prod.snd)),
+                    .startK (cB ++ (db.refs.map Prod.fst).zip (ls.drop da.refs.length)) db.body])
+                (evalK F O n (.capture ef id :: hs) σ4
+                  [.callK ((da.owns.map Prod.snd).zip (cA.map Prod.snd)),
+                    .startK (cA ++ (da.refs.map Prod.fst).zip (ls.take da.refs.length)) da.body]
+                  (.val (.int 0)))
+            else (.stuck, σ1)
+          | none => (.stuck, σ1)
+        | none => (.stuck, σ)
+      | _, _ => (.stuck, σ)
 termination_by n _ _ _ _ => (n, 0, 0)
 
 /-- What frame `f` does with what the code it ran gave, under the handlers `hs` around it. -/
@@ -860,6 +902,26 @@ def ret (F : List Fn) (O : List Op) (n : Nat) (hs : HS) : Kont → Res × Store 
               dropRet τ o d (evalK F O m (.abort .drop d :: hs) σ1 K' (.abort d 0)))
           (eval F O n hs σ2 (cells ++ rs.zip ls ++ caps.map (fun c => (c.name, c.loc))) arm)
       else (.stuck, σ)
+  | .parS e id τa τb side Ko, (.susp j ef vs ls K, σ) =>
+    if j ≠ id ∨ ef ≠ e then (.susp j ef vs ls (.parS e id τa τb side Ko :: K), σ) else
+    match n with
+    | 0 => (.timeout, σ)
+    | m + 1 =>
+      let (t, σ1) := σ.fresh
+      if σ.sched t then
+        ret F O m hs (.parS e id τa τb side Ko) (evalK F O m (.capture e id :: hs) σ1 K (.val (.int 0)))
+      else
+        ret F O m hs (.parS e id τa τb (!side) K) (evalK F O m (.capture e id :: hs) σ1 Ko (.val (.int 0)))
+  | .parD e id τa τb side w, (.susp j ef vs ls K, σ) =>
+    if j ≠ id ∨ ef ≠ e then (.susp j ef vs ls (.parD e id τa τb side w :: K), σ) else
+    match n with
+    | 0 => (.timeout, σ)
+    | m + 1 => ret F O m hs (.parD e id τa τb side w) (evalK F O m (.capture e id :: hs) σ K (.val (.int 0)))
+  | .parY e id, (.susp j ef vs ls K, σ) =>
+    if j ≠ id ∨ ef ≠ e then (.susp j ef vs ls (.parY e id :: K), σ) else
+    match n with
+    | 0 => (.timeout, σ)
+    | m + 1 => ret F O m hs (.parY e id) (evalK F O m (.capture e id :: hs) σ K (.val (.int 0)))
   | f, (.susp j ef vs ls K, σ) =>
     match f with
     | .scopeK τ c => leave τ c (.susp j ef vs ls K, σ)
@@ -971,6 +1033,30 @@ def ret (F : List Fn) (O : List Op) (n : Nat) (hs : HS) : Kont → Res × Store 
           let (d, σ1) := σ.fresh
           dropRet τ o d (evalK F O m (.abort .drop d :: hs) σ1 K (.abort d 0))) r
   | .dropK τ o d, r => dropRet τ o d r
+  | .startK env b, (.val _, σ) => eval F O n hs σ env b
+  | .startK _ _, (.abort j k, σ) => (.abort j k, σ)
+  | .parS e id τa τb side Ko, (.val v, σ) =>
+    match n with
+    | 0 => (.timeout, σ)
+    | m + 1 => ret F O m hs (.parD e id τa τb (!side) v) (evalK F O m (.capture e id :: hs) σ Ko (.val (.int 0)))
+  | .parS e id τa τb side Ko, (.abort j k, σ) =>
+    match n with
+    | 0 => (.timeout, σ)
+    | m + 1 =>
+      let (d, σ1) := σ.fresh
+      ret F O m hs .parE (dropRet (if side then τb else τa) (.abort j k) d
+        (ret F O m (.abort .drop d :: hs) (.parY e id)
+          (evalK F O m (.capture e id :: .abort .drop d :: hs) σ1 Ko (.abort d 0))))
+  | .parD _ _ _ _ side w, (.val v, σ) =>
+    let (la, σ1) := σ.alloc (if side then v else w)
+    let (lb, σ2) := σ1.alloc (if side then w else v)
+    (.val (.pair la lb), σ2)
+  | .parD _ _ τa τb side w, (.abort j k, σ) =>
+    match drop σ (if side then τb else τa) w with
+    | some σ' => (.abort j k, σ')
+    | none => (.stuck, σ)
+  | .parY _ _, r => r
+  | .parE, r => r
 termination_by _ _ => (n, 1, 0)
 
 /-- A continuation given what the code it was taken at gives: its frames, the outermost first, each
@@ -1281,6 +1367,17 @@ inductive Typed (F : List Fn) (O : List Op) : Ctx → Expr → Ty → Ctx → Ro
       Typed F O Γ body τ Γb (.eff e :: r) →
       Typed F O ((x, .own .int true) :: Γb) h τ ((x, .own .int live) :: Γh) r →
       Typed F O Γ (.handleAbort body e x h) τ Γh r
+
+  /-- Two tasks: calls that take their owned arguments and are lent places only `readonly`, both
+  of which the code around reads at most meanwhile; each may give way by performing `e`, which takes
+  nothing and gives an integer, and may perform what the code around may. -/
+  | par : O[e]? = some op → op.owns = [] → op.refs = [] → op.ret = .int →
+      F[fa]? = some da → F[fb]? = some db → da.retp = none → da.cap = none → db.retp = none → db.cap = none →
+      Label.eff e ∈ da.row → Label.eff e ∈ db.row → (∀ l ∈ da.row, l ∈ .eff e :: r) → (∀ l ∈ db.row, l ∈ .eff e :: r) →
+      da.ret.complete = true → db.ret.complete = true →
+      AtomsTy Γ (oa ++ ob) (da.owns.map Prod.snd ++ db.owns.map Prod.snd) Γ₁ →
+      Lends Γ₁ ((la ++ lb).map fun p => (.ro, p)) (da.refs.map Prod.snd ++ db.refs.map Prod.snd) ys →
+      Typed F O Γ (.par e fa oa la fb ob lb) (.pair da.ret db.ret) Γ₁ r
 
 
 end FlyCore.Ownership
