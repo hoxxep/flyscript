@@ -1,6 +1,6 @@
 # Roadmap
 
-Flyscript compiled itself, to JavaScript and to C, when this roadmap was written. Its steps take it from a self-hosted language to a systems platform: one intermediate form under every back end, kernels, LLVM, WebAssembly, every core of the machine, and a web framework that shows what all of it buys. Steps 0 to 5 are done, and each says what was built; steps 6 to 8 are next.
+Flyscript compiled itself, to JavaScript and to C, when this roadmap was written. Its steps take it from a self-hosted language to a systems platform: one intermediate form under every back end, kernels, LLVM, WebAssembly, every core of the machine, and a web framework that shows what all of it buys. Steps 0 to 5 are done, and each says what was built; steps 6 to 10 are next.
 
 ## 0. One core IR under every back end
 
@@ -75,7 +75,31 @@ Every page downloads the core, so a byte saved there is saved for every page of 
 - Nothing else of the C library that a page program does not call: what a page links is measured symbol by symbol, and each part kept is there for a reason.
 - Done when the core of the example site is measured smaller, the WebAssembly corpus and the site's browser tests still pass, and the compiler built for WebAssembly still compiles itself to the same output.
 
-## 8. The runtime in Flyscript
+## 8. Compile speed
+
+*Next.*
+
+The compiler checks and compiles itself, 24,000 lines, in 12 seconds hosted on JavaScript. The native compiler should take well under one:
+
+- `--time` reports each phase — parsing, checking, ownership, specialization, lowering and code generation — and the baselines are measured for the native and JavaScript compilers, on the compiler itself and on the test corpus.
+- What the profile shows is fixed where it is: string building, maps, substitution in the checker, specialization.
+- Function bodies are checked, lowered and compiled on every core with `par`, the output the same byte for byte, so the compiler still reproduces itself.
+- Each module's checked interface and code are kept by the hash of its source, and a change compiles only what changed and what depends on its interface, for `web/flynext dev` and an editor.
+- Done when the native compiler compiles itself in under a second from nothing and a change to one file is compiled again in under 200 milliseconds, with the fixpoint, every test and every corpus passing, and the numbers in [performance](performance.md).
+
+## 9. The proof joined to the compiler
+
+*Next.*
+
+The proof covers λ-fly; the compiler's checker is held to it by tests alone. This step checks the compiler's work by the proof:
+
+- A checker for λ-fly written in Lean, `check : Program → Bool`, proved sound: `check p = true` implies that `p` is well typed, and so has every guarantee the proof gives.
+- `--core` prints a program as the compiler elaborated it, as a λ-fly term in Lean.
+- Every test program in the part of the language λ-fly covers is certified on each build: Lean evaluates the proved checker on its term, in the kernel, with no `native_decide`. A disagreement is a bug on one side or the other.
+- What remains trusted is said in §9.5 of the spec: the elaboration from the surface language to λ-fly, lowering and code generation, each held to the others by differential tests.
+- Done when the corpus's programs in λ-fly's part of the language are certified on every build.
+
+## 10. The runtime in Flyscript
 
 *Next.*
 
