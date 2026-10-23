@@ -1,4 +1,4 @@
-import FlyCore.OwnershipBase
+import FlyCore.OwnershipJoin
 
 /-!
 # Ownership: places
@@ -98,6 +98,93 @@ theorem place_ok : PlaceTy Γ p τ w r → Foot F σ Γ env E S →
       obtain ⟨-, rfl⟩ := hsh h
       match s, h, hso with
       | .ref .mut (.fn _ _ _ _), _, hso => exact absurd (LT.det_ty hLr hso).1 (by simp)
+
+
+theorem PlaceTy.root_eq : PlaceTy Γ p τ w y → y = p.root := by
+  intro h
+  induction h with
+  | own => rfl
+  | ref => rfl
+  | deref _ ih => exact ih
+  | fst _ ih => exact ih
+  | snd _ ih => exact ih
+
+/-- A typed place denotes a location holding a tree of its type. -/
+theorem place_lt (hp : PlaceTy Γ p τ w y) (hf : Foot F σ Γ env E S) :
+    ∃ l R, resolve σ env p = some l ∧ LT F σ l τ R := by
+  obtain ⟨a, τr, Lr, P, l, -, -, hLr, hpath, hres, -⟩ := place_ok hp hf
+  obtain ⟨R, hR, -⟩ := path_split hpath hLr
+  exact ⟨l, R, hres, hR⟩
+
+/-- The tree at a place reached from another lies in the tree there. -/
+theorem place_within (hq : Place.Within q p) : PlaceTy Γ q τ w y → Foot F σ Γ env E S →
+    resolve σ env q = some l → LT F σ l τ R →
+    ∃ τp wp lp Rp, PlaceTy Γ p τp wp y ∧ resolve σ env p = some lp ∧ LT F σ lp τp Rp ∧ Sub R Rp := by
+  induction hq generalizing τ w l R with
+  | refl => intro ht _ hres hR; exact ⟨τ, w, l, R, ht, hres, hR, fun _ h => h⟩
+  | deref _ ih =>
+    intro ht hf hres hR
+    cases ht with
+    | deref ht0 =>
+      obtain ⟨l0, R0, hres0, hR0⟩ := place_lt ht0 hf
+      obtain ⟨τp, wp, lp, Rp, htp, hresp, hRp, hsub⟩ := ih ht0 hf hres0 hR0
+      cases hR0 with
+      | box hm hb _ =>
+        simp only [resolve, hres0, hm, Option.some.injEq] at hres
+        subst hres
+        obtain rfl := hb.det hR
+        exact ⟨τp, wp, lp, Rp, htp, hresp, hRp, fun z hz => hsub z (List.mem_cons_of_mem _ hz)⟩
+  | fst _ ih =>
+    intro ht hf hres hR
+    cases ht with
+    | fst ht0 =>
+      obtain ⟨l0, R0, hres0, hR0⟩ := place_lt ht0 hf
+      obtain ⟨τp, wp, lp, Rp, htp, hresp, hRp, hsub⟩ := ih ht0 hf hres0 hR0
+      cases hR0 with
+      | pair hm h1 _ _ _ =>
+        simp only [resolve, hres0, hm, Option.some.injEq] at hres
+        subst hres
+        obtain rfl := h1.det hR
+        exact ⟨τp, wp, lp, Rp, htp, hresp, hRp, fun z hz =>
+          hsub z (List.mem_cons_of_mem _ (List.mem_append.mpr (.inl hz)))⟩
+  | snd _ ih =>
+    intro ht hf hres hR
+    cases ht with
+    | snd ht0 =>
+      obtain ⟨l0, R0, hres0, hR0⟩ := place_lt ht0 hf
+      obtain ⟨τp, wp, lp, Rp, htp, hresp, hRp, hsub⟩ := ih ht0 hf hres0 hR0
+      cases hR0 with
+      | pair hm _ h2 _ _ =>
+        simp only [resolve, hres0, hm, Option.some.injEq] at hres
+        subst hres
+        obtain rfl := h2.det hR
+        exact ⟨τp, wp, lp, Rp, htp, hresp, hRp, fun z hz =>
+          hsub z (List.mem_cons_of_mem _ (List.mem_append.mpr (.inr hz)))⟩
+
+/-- Places in different fields of a pair hold trees apart. -/
+theorem place_apart (hap : Place.Apart p q) (hp : PlaceTy Γ p τ w y) (hq : PlaceTy Γ q τ' w' y')
+    (hf : Foot F σ Γ env E S) (hres : resolve σ env p = some l) (hres' : resolve σ env q = some l')
+    (hR : LT F σ l τ R) (hR' : LT F σ l' τ' R') : Disj R R' := by
+  -- The pair's fields hold trees apart, and each place's tree lies in its field's.
+  have key : ∀ {p q τ w y τ' w' y' l l' R R'} (r : Place), p.Within (.fst r) → q.Within (.snd r) →
+      PlaceTy Γ p τ w y → PlaceTy Γ q τ' w' y' → resolve σ env p = some l → resolve σ env q = some l' →
+      LT F σ l τ R → LT F σ l' τ' R' → Disj R R' := by
+    intro p q τ w y τ' w' y' l l' R R' r h1 h2 hp hq hres hres' hR hR'
+    obtain ⟨τ1, w1, l1, R1, ht1, hres1, hR1, hs1⟩ := place_within h1 hp hf hres hR
+    obtain ⟨τ2, w2, l2, R2, ht2, hres2, hR2, hs2⟩ := place_within h2 hq hf hres' hR'
+    cases ht1 with
+    | fst ht0 =>
+      obtain ⟨l0, R0, hres0, hR0⟩ := place_lt ht0 hf
+      cases hR0 with
+      | pair hm g1 g2 hd _ =>
+        simp only [resolve, hres0, hm, Option.some.injEq] at hres1 hres2
+        subst hres1 hres2
+        obtain rfl := g1.det hR1
+        obtain ⟨-, rfl⟩ := g2.det_ty hR2
+        exact fun z hz hz' => hd z (hs1 z hz) (hs2 z hz')
+  obtain ⟨r, ⟨h1, h2⟩ | ⟨h1, h2⟩⟩ := hap
+  · exact key r h1 h2 hp hq hres hres' hR hR'
+  · exact fun z hz hz' => key r h2 h1 hq hp hres' hres hR' hR z hz' hz
 
 
 /-! ## Changing one variable -/

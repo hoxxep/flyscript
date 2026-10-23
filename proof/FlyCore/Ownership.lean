@@ -891,6 +891,34 @@ inductive Lends (Γ : Ctx) : List (Mode × Place) → List (Mode × Ty) → List
   | cons : PlaceTy Γ p τ w y → (m = .mut → w = true) → Lends Γ rest ts ys →
       Lends Γ ((m, p) :: rest) ((m, τ) :: ts) ((m, y) :: ys)
 
+/-- The variable a place is rooted at. -/
+def Place.root : Place → Var
+  | .var x => x
+  | .deref p => p.root
+  | .fst p => p.root
+  | .snd p => p.root
+
+/-- `q` is `p`, or a place reached from it. -/
+inductive Place.Within : Place → Place → Prop
+  | refl : Place.Within p p
+  | deref : Place.Within q p → Place.Within (.deref q) p
+  | fst : Place.Within q p → Place.Within (.fst q) p
+  | snd : Place.Within q p → Place.Within (.snd q) p
+
+/-- Two places in different fields of one pair. -/
+def Place.Apart (p q : Place) : Prop :=
+  ∃ r, (p.Within (.fst r) ∧ q.Within (.snd r)) ∨ (p.Within (.snd r) ∧ q.Within (.fst r))
+
+theorem Place.Apart.not_var : ¬ Place.Apart (.var x) q := by
+  rintro ⟨r, ⟨h, -⟩ | ⟨h, -⟩⟩ <;> cases h
+
+theorem Place.apart_fields : Place.Apart (.fst p) (.snd p) := ⟨p, .inl ⟨.refl, .refl⟩⟩
+
+/-- No place is lent `mut` alongside another borrow of it, of what it holds, or of what holds it:
+two places rooted at one variable are both lent `readonly`, or in different fields of a pair. -/
+def LentApart (lent : List (Mode × Place)) : Prop :=
+  lent.Pairwise fun a b => a.2.root = b.2.root → (a.1 = .ro ∧ b.1 = .ro) ∨ Place.Apart a.2 b.2
+
 /-- No variable is lent `mut` alongside another borrow of it, or of what it holds: two places rooted
 at one variable are both lent `readonly`. -/
 def Exclusive (ys : List (Mode × Var)) : Prop :=
@@ -1001,7 +1029,7 @@ inductive Typed (F : List Fn) (O : List Op) : Ctx → Expr → Ty → Ctx → Ro
   | assign : AtomTy Γ a τ Γ₁ → PlaceTy Γ₁ p τ true y → (∀ s, lookup y Γ₁ = some s → s.shell = false) →
       Typed F O Γ (.assign p τ a) .int Γ₁ r
   | call : F[f]? = some d → d.retp = none → d.cap = none → (∀ l ∈ d.row, l ∈ r) → AtomsTy Γ owned (d.owns.map Prod.snd) Γ₁ →
-      Lends Γ₁ lent (d.refs.map Prod.snd) ys → Exclusive ys →
+      Lends Γ₁ lent (d.refs.map Prod.snd) ys → LentApart lent →
       Typed F O Γ (.call f owned lent) d.ret Γ₁ r
   /-- A closure captures a value, moved in, which may be a closure; its type says how it is called,
   what it takes and gives, and what it may perform, but not what it captured. -/
@@ -1033,7 +1061,7 @@ inductive Typed (F : List Fn) (O : List Op) : Ctx → Expr → Ty → Ctx → Ro
   which the callee picks as it runs: as for a borrow of a place, the variables those it may pick are
   rooted at, `zs`, are only read, or not reached, while the borrow lives. -/
   | lendCall : F[f]? = some d → d.retp = some (m, cs) → d.cap = none → (∀ l ∈ d.row, l ∈ r) →
-      AtomsTy Γ owned (d.owns.map Prod.snd) Γ₁ → Lends Γ₁ lent (d.refs.map Prod.snd) ys → Exclusive ys →
+      AtomsTy Γ owned (d.owns.map Prod.snd) Γ₁ → Lends Γ₁ lent (d.refs.map Prod.snd) ys → LentApart lent →
       Pairs (fun c z => ∃ mi, ys[c.1]? = some (mi, z) ∧ (m = .mut → mi = .mut)) cs zs →
       (m = .mut → zs.Nodup ∧ d.ret.isFn = false ∧ ∀ c ∈ cs, ∀ e, d.refs[c.1]? = some e → e.2.2.isFn = false) →
       lookup x Γ₁ = none →
@@ -1057,7 +1085,7 @@ inductive Typed (F : List Fn) (O : List Op) : Ctx → Expr → Ty → Ctx → Ro
   /-- Cleanup starts where the body would have ended, and moves nothing. -/
   | defer : Typed F O Γ body τ Γb r → Typed F O Γb d .int Γb r → Typed F O Γ (.defer τ d body) τ Γb r
   | perform : O[e]? = some op → Label.eff e ∈ r → AtomsTy Γ owned op.owns Γ₁ →
-      Lends Γ₁ lent op.refs ys → Exclusive ys → Typed F O Γ (.perform e owned lent) op.ret Γ₁ r
+      Lends Γ₁ lent op.refs ys → LentApart lent → Typed F O Γ (.perform e owned lent) op.ret Γ₁ r
   /-- The arm runs in the context of the `handle`: its row is the `handle`'s. What it is lent of
   the `handle`'s scope the body may only read, or, lent `mut`, not reach. -/
   | handle : O[e]? = some op → os.length = op.owns.length → rs.length = op.refs.length →

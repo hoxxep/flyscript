@@ -193,14 +193,14 @@ theorem Inv.apart (hI : Inv F σ Γ env E S) (hx : Entry F σ Γ env x s a L) (h
 
 /-- Every variable's footprint rebuilt at once, in a store where each holds a tree whose cells are
 those `nf` says: the shared parts as they were, the exclusive ones apart from each other. -/
-theorem Foot.rebuild (nf : Var → List Nat → List Nat) (h : Foot F σ Γ env E S)
+theorem Foot.rebuild (nf : Var → Nat → Prop) (h : Foot F σ Γ env E S)
     (hk : (Γ.map Prod.fst).Nodup)
     (hok : ∀ x s a L, Entry F σ Γ env x s a L → ∃ L', SlotOk F σ' s a L' ∧
-      sharedPart s L' = sharedPart s L ∧ ∀ z, z ∈ exclPart s L' ↔ z ∈ exclPart s (nf x L))
-    (hdisj : ∀ x s a L y t b L', Entry F σ Γ env x s a L → Entry F σ Γ env y t b L' → x ≠ y →
-      Disj (exclPart s (nf x L)) (exclPart t (nf y L'))) :
+      sharedPart s L' = sharedPart s L ∧ ∀ z, z ∈ exclPart s L' ↔ nf x z)
+    (hdisj : ∀ x s a L y t b L' z, Entry F σ Γ env x s a L → Entry F σ Γ env y t b L' → x ≠ y →
+      nf x z → nf y z → False) :
     ∃ E', Foot F σ' Γ env E' S ∧ E'.Nodup ∧
-      ∀ y, y ∈ E' ↔ ∃ x s a L, Entry F σ Γ env x s a L ∧ y ∈ exclPart s (nf x L) := by
+      ∀ y, y ∈ E' ↔ ∃ x s a L, Entry F σ Γ env x s a L ∧ nf x y := by
   revert hk hok hdisj
   induction h with
   | nil => intro _ _ _; exact ⟨[], .nil, List.nodup_nil, by simp [Entry, lookup]⟩
@@ -213,13 +213,13 @@ theorem Foot.rebuild (nf : Var → List Nat → List Nat) (h : Foot F σ Γ env 
       fun he => have hne : _ ≠ z := fun h => hz (h ▸ lookup_some_keys he.1)
         ⟨(entry_cons hz).mpr (.inr ⟨hne, he⟩), hne⟩
     obtain ⟨E', hf', hn', hmem'⟩ := ih hkt (fun x s a L he => hok x s a L (htail he).1)
-      (fun x s a L y t b L' hx hy hne => hdisj x s a L y t b L' (htail hx).1 (htail hy).1 hne)
+      (fun x s a L y t b L' w hx hy hne => hdisj x s a L y t b L' w (htail hx).1 (htail hy).1 hne)
     obtain ⟨M', hr', hsame, hmemM⟩ := hok z r c M hhead
     have hS : addS r M' S = addS r M S := by simp [addS, hsame]
     refine ⟨addE r M' E', hS ▸ Foot.cons hr' hf', ?_, ?_⟩
     · refine nodup_append_disj.mpr ⟨(parts_nodup hr'.nodup).1, hn', fun l hl hl' => ?_⟩
       obtain ⟨x, s, a, L, hx, hl'⟩ := (hmem' l).mp hl'
-      exact hdisj z r c M x s a L hhead (htail hx).1 (htail hx).2.symm l ((hmemM l).mp hl) hl'
+      exact hdisj z r c M x s a L l hhead (htail hx).1 (htail hx).2.symm ((hmemM l).mp hl) hl'
     · intro l
       rw [mem_addE, hmem', hmemM]
       constructor
@@ -228,7 +228,7 @@ theorem Foot.rebuild (nf : Var → List Nat → List Nat) (h : Foot F σ Γ env 
         · exact ⟨x, s, a, L, (htail hx).1, hl⟩
       · rintro ⟨x, s, a, L, hx, hl⟩
         rcases (entry_cons hz).mp hx with ⟨rfl, rfl, rfl, hL⟩ | ⟨-, hxt⟩
-        · exact .inl (hL.det hr ▸ hl)
+        · exact .inl hl
         · exact .inr ⟨x, s, a, L, hxt, hl⟩
 
 end FlyCore.Ownership

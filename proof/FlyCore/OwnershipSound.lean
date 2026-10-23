@@ -2004,6 +2004,7 @@ theorem ret_callLendK {d : Fn} {hos : List Hole} {cs : List (Nat × Place)} {zs 
     rename_i k
     obtain ⟨σ4, E'', ps, Eo, hdrop, hI₄, hm, hps, hnew4, hag4, hXM, rfl, hkeep4, hlt3, hro, hSM⟩ :=
       key σ3 Ec' hI₃ (by simpa using hm₃)
+    have hMn : (mutCells ps).Nodup := (nodup_append_disj.mp hI₃.nodup).2.1
     -- The place the callee picked.
     obtain ⟨p, hpick, hpm⟩ := pick_mem k (by simpa using hcne : cs.map Prod.snd ≠ [])
     obtain ⟨⟨i, p'⟩, hc, rfl⟩ := List.mem_map.mp hpm
@@ -2050,16 +2051,16 @@ theorem ret_callLendK {d : Fn} {hos : List Hole} {cs : List (Nat × Place)} {zs 
     -- closure borrowed `mut`, its parameter's type being no closure.
     have hafter : ∀ q' ∈ ps, ∀ c' ∈ cs, hos[c'.1]? = some q'.1 → q'.1.mode = .mut → m = .mut →
         ∃ s a τr, lookup q'.1.root Γ₁ = some s ∧ lookup q'.1.root env = some a ∧
-          s.excl = true ∧ s.shell = false ∧ Path F σ4 a τr q'.1.path q'.1.loc q'.1.ty ∧
-          ∃ L', LT F σ4 a τr L' ∧ L'.Perm (q'.1.path ++ q'.2) ∧ SlotOk F σ4 s a L' ∧
+          s.excl = true ∧ s.shell = false ∧ (∃ P, Path F σ4 a τr P q'.1.loc q'.1.ty) ∧
+          ∃ L', LT F σ4 a τr L' ∧ SlotOk F σ4 s a L' ∧
           ∀ σ'' L', LT F σ'' a τr L' → SlotOk F σ'' s a L' := by
       intro q' hq' c' hc' hhi' hm' hmm
       obtain ⟨xi', mi', τi', w', hd'', hri', -, -, hhi'', hmh', hdp'⟩ := hcs c' hc'
       rw [hhi'] at hhi''; cases hhi''
       have hqh' : q'.1 ∈ hos := List.mem_of_getElem? hhi'
-      obtain ⟨s, a, τr, L', hs, ha, hex, hpathH, hLT, hLp, hso, hslot⟩ :=
-        hole_after hI₁ hholes hpw hps hnew4 hag4 hXM hSM hq' hm'
-      refine ⟨s, a, τr, hs, ha, hex, ?_, hpathH, L', hLT, hLp, hso, hslot⟩
+      obtain ⟨s, a, τr, P, L', hs, ha, hex, hpathH, hLT, hso, hslot, -⟩ :=
+        hole_after hI₁ hholes hpw hps hnew4 hMn hag4 hXM hSM hqh'
+      refine ⟨s, a, τr, hs, ha, hex hm', ?_, ⟨P, hpathH⟩, L', hLT, hso, hslot⟩
       cases h : s.shell
       · rfl
       · have he : Entry F σf Γ₁ env q'.1.root s a q'.1.tree := by
@@ -2082,16 +2083,12 @@ theorem ret_callLendK {d : Fn} {hos : List Hole} {cs : List (Nat × Place)} {zs 
       cases m with
       | ro =>
         simp only [lendCtxs] at hb
-        by_cases hqm : q.1.mode = .mut
-        · obtain ⟨s, a, τr, L', hs, ha, -, hpathH, hLT, -, hso, -⟩ :=
-            hole_after hI₁ hholes hpw hps hnew4 hag4 hXM hSM hq hqm
-          exact lend_ro_all hE hx ha hs hLT (hpathH.trans hpath4) hso hzin hlive hb hI₄ hm.wf hR
-        · have hqr : q.1.mode = .ro := by cases h : q.1.mode <;> simp_all
-          obtain ⟨s, a, τr, hs, ha, hpathH, hLT, -, -, hso, -⟩ := hole_after_ro hI₁ hholes hpw hag4 hqh hqr
-          exact lend_ro_all hE hx ha hs hLT (hpathH.trans hpath4) hso hzin hlive hb hI₄ hm.wf hR
+        obtain ⟨s, a, τr, P, L', hs, ha, -, hpathH, hLT, hso, -, -⟩ :=
+          hole_after hI₁ hholes hpw hps hnew4 hMn hag4 hXM hSM hqh
+        exact lend_ro_all hE hx ha hs hLT (hpathH.trans hpath4) hso hzin hlive hb hI₄ hm.wf hR
       | «mut» =>
         simp only [lendCtxs] at hb
-        obtain ⟨s, a, τr, hs, ha, hex, hsh, hpathH, L', hLT, -, hso, hslot⟩ := hafter q hq _ hc hhi (hmh rfl).1 rfl
+        obtain ⟨s, a, τr, hs, ha, hex, hsh, ⟨P, hpathH⟩, L', hLT, hso, hslot⟩ := hafter q hq _ hc hhi (hmh rfl).1 rfl
         obtain ⟨H, htr⟩ := Trees.of_pairs hzs fun c' hc' z ⟨hd', hhi', hz⟩ => by
           obtain ⟨_, _, _, _, hd'', _, _, _, hhi'', hmh', _⟩ := hcs c' hc'
           rw [hhi'] at hhi''; cases hhi''
@@ -2099,7 +2096,7 @@ theorem ret_callLendK {d : Fn} {hos : List Hole} {cs : List (Nat × Place)} {zs 
             have : hd' ∈ ps.map Prod.fst := by rw [hps]; exact List.mem_of_getElem? hhi'
             simpa using this
           subst hqe
-          obtain ⟨s', a', τr', hs', ha', hex', hsh', -, L'', hLT', -, hso', -⟩ :=
+          obtain ⟨s', a', τr', hs', ha', hex', hsh', -, L'', hLT', hso', -⟩ :=
             hafter q' hq' c' hc' hhi' (hmh' rfl).1 rfl
           subst hz
           exact ⟨s', a', _, ⟨hs', ha', hso'⟩, hex', hsh'⟩
@@ -3083,9 +3080,7 @@ theorem eval_ok_succ (hF : FnsOk F O) (hE : EvalOk F O n) (hR : RetOk F O n) :
       obtain ⟨vs, σ1, E₁, Ls, hevs, hI₁, hvs, hLn, hdL, hdLS, hm₁⟩ := atoms_ok hargs hI hwf
       have hwf₁ := hm₁.wf
       simp only [eval, hfd, hevs]
-      obtain ⟨hos, hts, hys, hmap, hholes, hplain⟩ := lends_ok hlends hI₁.foot
-      have hpw : hos.Pairwise Apart := by
-        rw [← hys, Exclusive, List.pairwise_map] at hexcl; exact hexcl
+      obtain ⟨hos, hts, hys, hmap, hholes, hplain, hpw⟩ := lends_ok hlends hI₁.foot hexcl
       obtain ⟨hkeys, hbody⟩ := hF d (List.mem_of_getElem? hfd)
       rw [hcap, hretp] at hbody
       obtain ⟨Γ'', hbody⟩ := hbody
@@ -3237,9 +3232,7 @@ theorem eval_ok_succ (hF : FnsOk F O) (hE : EvalOk F O n) (hR : RetOk F O n) :
       obtain ⟨vs, σ1, E₁, Ls, hevs, hI₁, hvs, hLn, hdL, hdLS, hm₁⟩ := atoms_ok hargs hI hwf
       have hwf₁ := hm₁.wf
       simp only [eval, hfd, hevs, hretp]
-      obtain ⟨hos, hts, hys, hmap, hholes, hplain⟩ := lends_ok hlends hI₁.foot
-      have hpw : hos.Pairwise Apart := by
-        rw [← hys, Exclusive, List.pairwise_map] at hexcl; exact hexcl
+      obtain ⟨hos, hts, hys, hmap, hholes, hplain, hpw⟩ := lends_ok hlends hI₁.foot hexcl
       obtain ⟨hkeys, hbody⟩ := hF d (List.mem_of_getElem? hfd)
       rw [hcap, hretp] at hbody
       obtain ⟨hcne, Γ'', hbody, hcands⟩ := hbody
@@ -3378,9 +3371,7 @@ theorem eval_ok_succ (hF : FnsOk F O) (hE : EvalOk F O n) (hR : RetOk F O n) :
       exact ret_deferK hE hd hRdy hwf (hE _ _ _ _ _ _ _ _ _ _ hb hI hwf hRdy)
     | perform hop hlab hargs hlends hexcl =>
       obtain ⟨vs, σ1, E₁, Ls, hevs, hI₁, hvs, hLn, hdL, hdLS, hm₁⟩ := atoms_ok hargs hI hwf
-      obtain ⟨hos, hts, hys, hmap, hholes, hplain⟩ := lends_ok hlends hI₁.foot
-      have hpw : hos.Pairwise Apart := by
-        rw [← hys, Exclusive, List.pairwise_map] at hexcl; exact hexcl
+      obtain ⟨hos, hts, hys, hmap, hholes, hplain, hpw⟩ := lends_ok hlends hI₁.foot hexcl
       simp only [eval, hop, hevs, hmap]
       obtain ⟨f, hf⟩ := hRdy.2 _ hlab
       have hh := find_handles hf

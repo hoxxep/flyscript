@@ -1,5 +1,6 @@
 import FlyCore.Ownership
 import FlyCore.OwnershipBase
+import FlyCore.OwnershipJoin
 import FlyCore.OwnershipPlaces
 import FlyCore.OwnershipMoves
 import FlyCore.OwnershipFrames

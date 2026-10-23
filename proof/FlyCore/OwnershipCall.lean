@@ -676,30 +676,6 @@ theorem Hole.shared_ro {h : Hole} (hm : h.mode = .ro) : sharedPart h.slot L = L 
 theorem Hole.excl_ro {h : Hole} (hm : h.mode = .ro) : exclPart h.slot L = [] := by
   simp [Hole.slot, hm, exclPart, Slot.excl]
 
-/-- The places a call lends denote locations, each a hole in its root's tree. -/
-theorem lends_ok : Lends Γ lent ts ys → Foot F σ Γ env E S →
-    ∃ hs : List Hole, hs.map (fun h => (h.mode, h.ty)) = ts ∧ hs.map (fun h => (h.mode, h.root)) = ys ∧
-      lent.mapM (fun x => resolve σ env x.2) = some (hs.map Hole.loc) ∧ (∀ h ∈ hs, HoleOk F σ Γ env h) ∧
-      ∀ h ∈ hs, ∀ s, lookup h.root Γ = some s → s.shell = true → h.path = [] := by
-  intro hl hf
-  induction hl with
-  | nil => exact ⟨[], rfl, rfl, rfl, by simp, by simp⟩
-  | @cons p τ w y m rest ts ys hp hw _ ih =>
-    obtain ⟨hs, h1, h2, h3, h4, h5⟩ := ih
-    obtain ⟨a, τr, Lr, P, l, s, ha, hLr, hpath, hres, -, -, hs', hso, hex, hlt, hsh⟩ := place_ok hp hf
-    obtain ⟨R, hR, hLrp⟩ := path_split hpath hLr
-    refine ⟨⟨m, τ, y, l, P, R, Lr⟩ :: hs, by simp [h1], by simp [h2], ?_, ?_, ?_⟩
-    · simp [List.mapM_cons, hres, h3]
-    · intro h hh
-      rcases List.mem_cons.mp hh with rfl | hh
-      · exact ⟨s, a, τr, hs', ha, fun hm => hex (hw hm), hpath, hLr, hLrp, hso, hR, hlt, fun h => .inl (hsh h)⟩
-      · exact h4 h hh
-    · intro h hh s0 hs0 hsh0
-      rcases List.mem_cons.mp hh with rfl | hh
-      · obtain rfl := lookup_det hs' hs0
-        exact (hsh hsh0).1
-      · exact h5 h hh s0 hs0 hsh0
-
 def refCtx (refs : List (Var × Mode × Ty)) : Ctx := refs.map fun p => (p.1, Slot.ref p.2.1 p.2.2)
 
 /-- The cells of the trees lent that the callee may change, and of those it only reads. -/
@@ -791,10 +767,61 @@ theorem flatMap_apart {f : α → List Nat} :
       · exact fun x hx hx' => hd x hx' (hin ha' x hx)
       · exact flatMap_apart hl ha' hb' hne
 
-/-- Two holes rooted at one variable are both `readonly`. -/
-def Apart (h h' : Hole) : Prop := h.root = h'.root → h.mode = .ro ∧ h'.mode = .ro
+/-- Two holes rooted at one variable are both `readonly`, or hold trees apart. -/
+def Apart (h h' : Hole) : Prop := h.root = h'.root → (h.mode = .ro ∧ h'.mode = .ro) ∨ Disj h.old h'.old
 
-theorem Apart.symm : Apart h h' → Apart h' h := fun h e => (h e.symm).symm
+theorem Apart.symm : Apart h h' → Apart h' h := fun h e => (h e.symm).imp (fun ⟨a, b⟩ => ⟨b, a⟩) Disj.symm
+
+/-- The places a call lends denote locations, each a hole in its root's tree, from a place lent. -/
+theorem lends_holes : Lends Γ lent ts ys → Foot F σ Γ env E S → LentApart lent →
+    ∃ hs : List Hole, hs.map (fun h => (h.mode, h.ty)) = ts ∧ hs.map (fun h => (h.mode, h.root)) = ys ∧
+      lent.mapM (fun x => resolve σ env x.2) = some (hs.map Hole.loc) ∧ (∀ h ∈ hs, HoleOk F σ Γ env h) ∧
+      (∀ h ∈ hs, ∀ s, lookup h.root Γ = some s → s.shell = true → h.path = []) ∧ hs.Pairwise Apart ∧
+      ∀ h ∈ hs, ∃ p w, (h.mode, p) ∈ lent ∧ PlaceTy Γ p h.ty w h.root ∧ resolve σ env p = some h.loc := by
+  intro hl hf
+  induction hl with
+  | nil => intro _; exact ⟨[], rfl, rfl, rfl, by simp, by simp, .nil, by simp⟩
+  | @cons p τ w y m rest ts ys hp hw _ ih =>
+    intro hap
+    obtain ⟨hc, hap'⟩ := List.pairwise_cons.mp hap
+    obtain ⟨hs, h1, h2, h3, h4, h5, h6, h7⟩ := ih hap'
+    obtain ⟨a, τr, Lr, P, l, s, ha, hLr, hpath, hres, -, -, hs', hso, hex, hlt, hsh⟩ := place_ok hp hf
+    obtain ⟨R, hR, hLrp⟩ := path_split hpath hLr
+    refine ⟨⟨m, τ, y, l, P, R, Lr⟩ :: hs, by simp [h1], by simp [h2], ?_, ?_, ?_, ?_, ?_⟩
+    · simp [List.mapM_cons, hres, h3]
+    · intro h hh
+      rcases List.mem_cons.mp hh with rfl | hh
+      · exact ⟨s, a, τr, hs', ha, fun hm => hex (hw hm), hpath, hLr, hLrp, hso, hR, hlt, fun h => .inl (hsh h)⟩
+      · exact h4 h hh
+    · intro h hh s0 hs0 hsh0
+      rcases List.mem_cons.mp hh with rfl | hh
+      · obtain rfl := lookup_det hs' hs0
+        exact (hsh hsh0).1
+      · exact h5 h hh s0 hs0 hsh0
+    · refine List.pairwise_cons.mpr ⟨fun h' hh' => ?_, h6⟩
+      intro e
+      -- Lent with another place rooted at the same variable: both `readonly`, or apart.
+      obtain ⟨p', w', hmem, hp', hres'⟩ := h7 h' hh'
+      have hr : p.root = p'.root := by rw [← hp.root_eq, ← hp'.root_eq]; exact e
+      rcases hc _ hmem hr with hro | hA
+      · exact .inl hro
+      · obtain ⟨l', R', hres'', hR'⟩ := place_lt hp' hf
+        rw [hres'] at hres''; cases hres''
+        obtain ⟨_, _, _, _, _, _, _, _, _, _, hold', _⟩ := h4 h' hh'
+        obtain rfl := hold'.det hR'
+        exact .inr (place_apart hA hp hp' hf hres hres' hR hR')
+    · intro h hh
+      rcases List.mem_cons.mp hh with rfl | hh
+      · exact ⟨p, w, List.mem_cons_self .., hp, hres⟩
+      · obtain ⟨p', w', hmem, hp', hres'⟩ := h7 h hh
+        exact ⟨p', w', List.mem_cons_of_mem _ hmem, hp', hres'⟩
+
+theorem lends_ok (hl : Lends Γ lent ts ys) (hf : Foot F σ Γ env E S) (hap : LentApart lent) :
+    ∃ hs : List Hole, hs.map (fun h => (h.mode, h.ty)) = ts ∧ hs.map (fun h => (h.mode, h.root)) = ys ∧
+      lent.mapM (fun x => resolve σ env x.2) = some (hs.map Hole.loc) ∧ (∀ h ∈ hs, HoleOk F σ Γ env h) ∧
+      (∀ h ∈ hs, ∀ s, lookup h.root Γ = some s → s.shell = true → h.path = []) ∧ hs.Pairwise Apart :=
+  let ⟨hs, h1, h2, h3, h4, h5, h6, _⟩ := lends_holes hl hf hap
+  ⟨hs, h1, h2, h3, h4, h5, h6⟩
 
 /-- The trees as they were at the holes. -/
 def olds (hs : List Hole) : List (Hole × List Nat) := hs.map fun h => (h, h.old)
@@ -833,12 +860,14 @@ theorem hole_apart (hI : Inv F σ Γ env E S) (hok : HoleOk F σ Γ env h) (hok'
   obtain ⟨s', a', he', -⟩ := hok'.entry
   exact fun l hl hl' => hI.apart he he' hr l (hsub l hl) (hok'.mem_tree.mpr (List.mem_append.mp hl'))
 
-/-- Two holes, one lent `mut`, are the same hole or rooted at different variables. -/
-theorem hole_root {hs : List Hole} (hpw : hs.Pairwise Apart) (hh : h ∈ hs) (hh' : h' ∈ hs)
-    (hm : h.mode = .mut) (hne : h ≠ h') : h.root ≠ h'.root :=
-  fun e => by
-    have := (pairwise_of_mem (fun _ _ => Apart.symm) hpw hh hh' hne) e
-    rw [hm] at this; cases this.1
+/-- Two holes, one lent `mut`, are rooted at different variables or hold trees apart. -/
+theorem hole_sep {hs : List Hole} (hpw : hs.Pairwise Apart) (hh : h ∈ hs) (hh' : h' ∈ hs)
+    (hm : h.mode = .mut) (hne : h ≠ h') : h.root ≠ h'.root ∨ Disj h.old h'.old := by
+  by_cases e : h.root = h'.root
+  · rcases (pairwise_of_mem (fun _ _ => Apart.symm) hpw hh hh' hne) e with ⟨h1, -⟩ | hd
+    · rw [hm] at h1; cases h1
+    · exact .inr hd
+  · exact .inl e
 
 theorem HoleOk.old_lt (hok : HoleOk F σ Γ env h) : LT F σ h.loc h.ty h.old := by
   obtain ⟨_, _, _, _, _, _, _, _, _, _, hlt, _⟩ := hok
@@ -900,9 +929,12 @@ theorem olds_nodup (hI : Inv F σ Γ env E S) : ∀ {hs : List Hole}, (∀ h ∈
     intro l hl hl'
     have hm := (Hole.excl_mut hl).1
     obtain ⟨h', hh', hl'⟩ := mem_olds_mut.mp hl'
-    have hr : h.root ≠ h'.root := fun e => by have := hc h' hh' e; rw [hm] at this; cases this.1
-    exact hole_apart hI (hholes h (List.mem_cons_self ..)) (hholes h' (List.mem_cons_of_mem _ hh')) hr hm l
-      hl (List.mem_append.mpr (.inr (exclPart_sub hl')))
+    by_cases hr : h.root = h'.root
+    · rcases hc h' hh' hr with ⟨h1, -⟩ | hd
+      · rw [hm] at h1; cases h1
+      · exact hd l (exclPart_sub hl) (exclPart_sub hl')
+    · exact hole_apart hI (hholes h (List.mem_cons_self ..)) (hholes h' (List.mem_cons_of_mem _ hh')) hr hm l
+        hl (List.mem_append.mpr (.inr (exclPart_sub hl')))
 
 /-- What a hole lets the callee only read, no hole lets it change. -/
 theorem shared_not_mut (hI : Inv F σ Γ env E S) {hs : List Hole} (hholes : ∀ h ∈ hs, HoleOk F σ Γ env h)
@@ -913,8 +945,10 @@ theorem shared_not_mut (hI : Inv F σ Γ env E S) {hs : List Hole} (hholes : ∀
   by_cases hne : h' = h
   · subst hne
     exact parts_disj (hholes h' hh).old_nodup l hl' hl
-  · exact hole_apart hI (hholes h' hh') (hholes h hh) (hole_root hpw hh' hh hm' hne) hm' l
-      hl' (List.mem_append.mpr (.inr (sharedPart_sub hl)))
+  · rcases hole_sep hpw hh' hh hm' hne with hr | hd
+    · exact hole_apart hI (hholes h' hh') (hholes h hh) hr hm' l
+        hl' (List.mem_append.mpr (.inr (sharedPart_sub hl)))
+    · exact hd l (exclPart_sub hl') (sharedPart_sub hl)
 
 /-! ## The callee's activation -/
 
@@ -968,13 +1002,6 @@ theorem callee_inv {Eo Lall : List Nat} {hs : List Hole} (hI : Inv F σ1 Γ₁ e
 
 /-! ## The caller after the call -/
 
-/-- A variable's footprint after the call: if a place rooted at it was lent `mut`, the path to the
-hole and the tree the callee left there; otherwise as it was. -/
-def fill (ps : List (Hole × List Nat)) (x : Var) (L : List Nat) : List Nat :=
-  match ps.find? (fun p => p.1.root == x && p.1.mode == .mut) with
-  | some p => p.1.path ++ p.2
-  | none => L
-
 section rebuild
 variable {σ σ' : Store} {Γ : Ctx} {env : Env} {E S : List Nat} {hs : List Hole}
   {ps : List (Hole × List Nat)}
@@ -983,144 +1010,237 @@ theorem ps_pairwise (hpw : hs.Pairwise Apart) (hps : ps.map Prod.fst = hs) :
     ps.Pairwise fun p q => Apart p.1 q.1 := by
   rw [← hps] at hpw; exact List.pairwise_map.mp hpw
 
-theorem fill_of_mem (hpw : hs.Pairwise Apart) (hps : ps.map Prod.fst = hs) (hp : p ∈ ps)
-    (hm : p.1.mode = .mut) : fill ps p.1.root L = p.1.path ++ p.2 := by
-  unfold fill
-  split
-  · rename_i q hq
-    have hq' := List.find?_some hq
-    simp only [Bool.and_eq_true, beq_iff_eq] at hq'
-    by_cases hne : q = p
-    · rw [hne]
-    · have := pairwise_of_mem (fun _ _ => Apart.symm) (ps_pairwise hpw hps) (List.mem_of_find?_eq_some hq) hp hne hq'.1
-      rw [hq'.2] at this; cases this.1
-  · rename_i hn
-    have := List.find?_eq_none.mp hn p hp
-    simp [hm] at this
-
-theorem fill_cases (hholes : ∀ h ∈ hs, HoleOk F σ Γ env h) (hps : ps.map Prod.fst = hs)
-    (he : Entry F σ Γ env x s a L) :
-    (fill ps x L = L ∧ ∀ p ∈ ps, p.1.mode = .mut → p.1.root ≠ x) ∨
-    (∃ p ∈ ps, fill ps x L = p.1.path ++ p.2 ∧ p.1.root = x ∧ p.1.mode = .mut ∧
-      L = p.1.tree ∧ s.excl = true) := by
-  unfold fill
-  split
-  · rename_i q hq
-    have hq' := List.find?_some hq
-    simp only [Bool.and_eq_true, beq_iff_eq] at hq'
-    have hqm := List.mem_of_find?_eq_some hq
-    obtain ⟨s', a', he', hex⟩ := (hholes q.1 (hps ▸ List.mem_map_of_mem hqm)).entry
-    rw [hq'.1] at he'
-    obtain ⟨rfl, rfl, rfl⟩ := he.det he'
-    exact .inr ⟨q, hqm, rfl, hq'.1, hq'.2, rfl, hex hq'.2⟩
-  · rename_i hn
-    refine .inl ⟨rfl, fun p hp hm hr => ?_⟩
-    have := List.find?_eq_none.mp hn p hp
-    simp [hm, hr] at this
-
-/-- The path to a hole is no hole's to change: it is kept through the call. -/
-theorem path_ok (hI : Inv F σ Γ env E S) (hholes : ∀ h ∈ hs, HoleOk F σ Γ env h)
-    (hpw : hs.Pairwise Apart) (hh : h ∈ hs) :
-    ∀ l ∈ h.path, (l ∈ E ∨ l ∈ S) ∧ l ∉ mutCells (olds hs) := by
-  intro l hl
-  refine ⟨(hole_in hI (hholes h hh)).1 l (List.mem_append.mpr (.inl hl)), fun hM => ?_⟩
-  obtain ⟨h', hh', hl'⟩ := mem_olds_mut.mp hM
-  have hm' := (Hole.excl_mut hl').1
-  by_cases hne : h = h'
-  · subst hne
-    exact (hholes h hh).path_old l hl (exclPart_sub hl')
-  · exact hole_apart hI (hholes h' hh') (hholes h hh) (hole_root hpw hh' hh hm' (Ne.symm hne)) hm' l
-      hl' (List.mem_append.mpr (.inl hl))
-
-/-- The path to a `mut` hole rooted at a variable that is no closure borrowed `mut` is that
-variable's to change. -/
-theorem path_in_X (hI : Inv F σ Γ env E S) (hholes : ∀ h ∈ hs, HoleOk F σ Γ env h)
-    (hpw : hs.Pairwise Apart) (hh : h ∈ hs) (hm : h.mode = .mut) (he : Entry F σ Γ env h.root s a L)
-    (hsh : s.shell = false) :
-    ∀ l ∈ h.path, l ∈ E ∧ l ∉ mutCells (olds hs) := by
-  intro l hl
-  refine ⟨?_, (path_ok hI hholes hpw hh l hl).2⟩
-  obtain ⟨s', a', he', hex⟩ := (hholes h hh).entry
-  obtain ⟨rfl, rfl, rfl⟩ := he.det he'
-  exact (hI.foot.memE hI.keys l).mpr ⟨_, s, a, _, he, by
-    rw [exclPart_plain hsh, if_pos (hex hm)]; exact (hholes h hh).mem_tree.mpr (.inl hl)⟩
-
 theorem mem_keep {M : List Nat} : l ∈ E.filter (fun l => l ∉ M) ↔ l ∈ E ∧ l ∉ M := by
   simp [List.mem_filter]
 
-/-- The path to a `mut` hole is apart from the tree the callee left there: what the callee could
-change is new or its own, and the rest is the hole's location. -/
-theorem path_new_apart (hok : HoleOk F σ Γ env h) (hm : h.mode = .mut)
-    (hX : ∀ l ∈ h.path, l ∉ exclPart h.slot R') (hR' : ∃ R, R' = h.loc :: R) : Disj h.path R' := by
-  intro l hl hl'
-  rcases mem_parts (s := h.slot) hl' with h1 | h1
-  · exact hX l hl h1
-  · obtain ⟨R, rfl⟩ := hR'
-    obtain rfl := Hole.shared_mut_head hm h1
+/-- The places rooted at `x` lent `mut`, each with the tree it had and the tree the callee left. -/
+def cutsOf (ps : List (Hole × List Nat)) (x : Var) : List Cut :=
+  (ps.filter fun p => p.1.root == x && p.1.mode == .mut).map fun p => ⟨p.1.loc, p.1.ty, p.1.old, p.2⟩
+
+theorem mem_cutsOf {c : Cut} : c ∈ cutsOf ps x ↔
+    ∃ p ∈ ps, p.1.root = x ∧ p.1.mode = .mut ∧ c = ⟨p.1.loc, p.1.ty, p.1.old, p.2⟩ := by
+  simp only [cutsOf, List.mem_map, List.mem_filter, Bool.and_eq_true, beq_iff_eq]
+  constructor
+  · rintro ⟨p, ⟨hp, hr, hm⟩, rfl⟩; exact ⟨p, hp, hr, hm, rfl⟩
+  · rintro ⟨p, hp, hr, hm, rfl⟩; exact ⟨p, ⟨hp, hr, hm⟩, rfl⟩
+
+/-- What a slot may change of its footprint: all of it, if it may change any, but a closure's cell
+borrowed `mut`. -/
+theorem mem_exclPart_iff (h : SlotOk F σ s a L) :
+    z ∈ exclPart s L ↔ s.excl = true ∧ z ∈ L ∧ (s.shell = true → z ≠ a) := by
+  cases hsh : s.shell
+  · rw [exclPart_plain hsh]
+    by_cases hx : s.excl = true <;> simp [hx]
+  · have hex := Slot.shell_excl hsh
+    obtain ⟨R, rfl⟩ := h.cons_of_shell hsh
+    have ha := (List.nodup_cons.mp h.nodup).1
+    simp only [exclPart, hex, hsh, ↓reduceIte, List.tail_cons, List.mem_cons, true_and, forall_const]
+    constructor
+    · intro hz; exact ⟨.inr hz, fun e => ha (e ▸ hz)⟩
+    · rintro ⟨hz | hz, hne⟩
+      · exact absurd hz hne
+      · exact hz
+
+/-- A hole's root holds the hole's tree, and the path to it. -/
+theorem HoleOk.at (hok : HoleOk F σ Γ env h) (he : Entry F σ Γ env h.root s a L) (hLT : LT F σ a τr L) :
+    h.tree = L ∧ Path F σ a τr h.path h.loc h.ty := by
+  obtain ⟨s', a', τr', hs', ha', -, hpath, hLT', -, hso, -⟩ := hok
+  obtain ⟨rfl, rfl, rfl⟩ := he.det ⟨hs', ha', hso⟩
+  obtain ⟨rfl, -⟩ := hLT.det_ty hLT'
+  exact ⟨rfl, hpath⟩
+
+/-- A cell of a variable's tree in no place of it lent `mut` is in no tree the callee could change. -/
+theorem kept_in (hI : Inv F σ Γ env E S) (hholes : ∀ h ∈ hs, HoleOk F σ Γ env h) (hps : ps.map Prod.fst = hs)
+    (he : Entry F σ Γ env x s a L) (hz : z ∈ L) (hk : ∀ c ∈ cutsOf ps x, z ∉ c.old) :
+    (z ∈ exclPart s L ∧ z ∈ E.filter (fun l => l ∉ mutCells (olds hs))) ∨ (z ∈ sharedPart s L ∧ z ∈ S) := by
+  rcases hI.entry_sub he z hz with ⟨h1, hE⟩ | h2
+  · refine .inl ⟨h1, mem_keep.mpr ⟨hE, fun hM => ?_⟩⟩
+    obtain ⟨h', hh', hl'⟩ := mem_olds_mut.mp hM
+    have hm' := (Hole.excl_mut hl').1
+    obtain ⟨p, hp, rfl⟩ := List.mem_map.mp (hps ▸ hh' : h' ∈ ps.map Prod.fst)
+    by_cases hr : p.1.root = x
+    · exact hk _ (mem_cutsOf.mpr ⟨p, hp, hr, hm', rfl⟩) (exclPart_sub hl')
+    · obtain ⟨s', a', he', hsub⟩ := (hholes p.1 hh').excl_sub hm'
+      exact hI.apart he' he hr z (hsub z hl') hz
+  · exact .inr h2
+
+/-- What a hole lets the callee only read was kept. -/
+theorem shared_kept (hI : Inv F σ Γ env E S) (hholes : ∀ h ∈ hs, HoleOk F σ Γ env h)
+    (hpw : hs.Pairwise Apart) (hh : h ∈ hs) (hl : l ∈ sharedPart h.slot h.old) :
+    l ∈ E.filter (fun l => l ∉ mutCells (olds hs)) ∨ l ∈ S := by
+  rcases (hole_in hI (hholes h hh)).1 l (List.mem_append.mpr (.inr (sharedPart_sub hl))) with hE | hS
+  · exact .inl (mem_keep.mpr ⟨hE, shared_not_mut hI hholes hpw hh hl⟩)
+  · exact .inr hS
+
+/-- What the callee left at a `mut` hole: what it could change, or the hole's location, which it
+only read. -/
+theorem new_cases {p : Hole × List Nat} (hok : HoleOk F σ Γ env p.1) (hnew : LT F σ' p.1.loc p.1.ty p.2) (hm : p.1.mode = .mut)
+    (hz : z ∈ p.2) : z ∈ exclPart p.1.slot p.2 ∨ (z = p.1.loc ∧ z ∈ p.1.old ∧ z ∈ sharedPart p.1.slot p.1.old) := by
+  rcases mem_parts (s := p.1.slot) hz with h1 | h1
+  · exact .inl h1
+  · obtain ⟨R, hR⟩ := hnew.cons
     obtain ⟨R0, hR0⟩ := hok.old_head
-    exact hok.path_old _ hl (by rw [hR0]; exact List.mem_cons_self ..)
+    rw [hR] at h1
+    have he := Hole.shared_mut_head hm h1
+    subst he
+    exact .inr ⟨rfl, by rw [hR0]; exact List.mem_cons_self .., by rw [hR0]; exact Hole.shared_mut_swap hm h1⟩
 
-/-- The path to a hole is as it was after the call. -/
-theorem path_kept (hholes : ∀ h ∈ hs, HoleOk F σ Γ env h) (hpw : hs.Pairwise Apart)
-    (hag : Agree σ σ' (E.filter (fun l => l ∉ mutCells (olds hs)) ++ S)) (hh : h ∈ hs) (hI : Inv F σ Γ env E S := by assumption) :
-    Agree σ σ' h.path := fun l hl => by
-  obtain ⟨hES, hnM⟩ := path_ok hI hholes hpw hh l hl
-  rcases hES with hE | hS
-  · exact hag l (List.mem_append.mpr (.inl (mem_keep.mpr ⟨hE, hnM⟩)))
-  · exact hag l (List.mem_append.mpr (.inr hS))
-
-/-- The path to a hole is none of what the callee left that it could change. -/
-theorem path_clear (hholes : ∀ h ∈ hs, HoleOk F σ Γ env h) (hpw : hs.Pairwise Apart)
-    (hX : Disj (E.filter (fun l => l ∉ mutCells (olds hs))) (mutCells ps)) (hSX : Disj S (mutCells ps))
-    (hp : p ∈ ps) (hI : Inv F σ Γ env E S := by assumption) (hps : ps.map Prod.fst = hs := by assumption) :
-    ∀ l ∈ p.1.path, l ∉ exclPart p.1.slot p.2 := fun l hl hl' => by
-  have hph : p.1 ∈ hs := hps ▸ List.mem_map_of_mem hp
-  obtain ⟨hES, hnM⟩ := path_ok hI hholes hpw hph l hl
-  rcases hES with hE | hS
-  · exact hX l (mem_keep.mpr ⟨hE, hnM⟩) (mem_mutCells.mpr ⟨p, hp, hl'⟩)
-  · exact hSX l hS (mem_mutCells.mpr ⟨p, hp, hl'⟩)
-
-/-- After the call, what a place lent `mut` is rooted at holds the path to the place, as it was,
-then what the callee left there. -/
-theorem hole_after (hI : Inv F σ Γ env E S) (hholes : ∀ h ∈ hs, HoleOk F σ Γ env h)
+/-- After the call, a variable's tree is what it kept and what the callee left at the places of it
+lent `mut`; it reaches each of those places, and any other place `extra` names, apart from them and
+kept. -/
+theorem root_join (hI : Inv F σ Γ env E S) (hholes : ∀ h ∈ hs, HoleOk F σ Γ env h)
     (hpw : hs.Pairwise Apart) (hps : ps.map Prod.fst = hs)
-    (hnew : ∀ p ∈ ps, p.1.mode = .mut → LT F σ' p.1.loc p.1.ty p.2)
+    (hnew : ∀ p ∈ ps, p.1.mode = .mut → LT F σ' p.1.loc p.1.ty p.2) (hMn : (mutCells ps).Nodup)
     (hag : Agree σ σ' (E.filter (fun l => l ∉ mutCells (olds hs)) ++ S))
     (hX : Disj (E.filter (fun l => l ∉ mutCells (olds hs))) (mutCells ps)) (hSX : Disj S (mutCells ps))
-    (hp : p ∈ ps) (hm : p.1.mode = .mut) :
-    ∃ s a τr L', lookup p.1.root Γ = some s ∧ lookup p.1.root env = some a ∧ s.excl = true ∧
-      Path F σ' a τr p.1.path p.1.loc p.1.ty ∧ LT F σ' a τr L' ∧ L'.Perm (p.1.path ++ p.2) ∧
-      SlotOk F σ' s a L' ∧ ∀ σ'' L', LT F σ'' a τr L' → SlotOk F σ'' s a L' := by
-  have hph : p.1 ∈ hs := hps ▸ List.mem_map_of_mem hp
-  obtain ⟨s, a, τr, hs', ha', hex, hpath, -, -, -, -, hlt, -⟩ := hholes p.1 hph
-  obtain ⟨L', hLT', hp', hpath'⟩ := path_join hpath (nodup_append_disj.mp (hholes p.1 hph).tree_nodup).1
-    (path_kept hholes hpw hag hph) (hnew p hp hm)
-    (path_new_apart (hholes p.1 hph) hm (path_clear hholes hpw hX hSX hp) (hnew p hp hm).cons)
-  exact ⟨s, a, τr, L', hs', ha', hex hm, hpath', hLT', hp', hlt σ' _ hLT', hlt⟩
+    (he : Entry F σ Γ env x s a L) (hLT : LT F σ a τr L) (extra : List Cut)
+    (hepath : ∀ e ∈ extra, (∃ P, Path F σ a τr P e.loc e.ty) ∧ LT F σ e.loc e.ty e.old ∧ e.new = e.old)
+    (heXS : ∀ e ∈ extra, ∀ z ∈ e.old, z ∈ E.filter (fun l => l ∉ mutCells (olds hs)) ∨ z ∈ S)
+    (hed : ∀ e ∈ extra, ∀ c ∈ cutsOf ps x, Disj e.old c.old)
+    (hee : ∀ e ∈ extra, ∀ e' ∈ extra, e ≠ e' → Disj e.old e'.old) :
+    ∃ L', LT F σ' a τr L' ∧
+      (∀ z, z ∈ L' ↔ Kept L (cutsOf ps x ++ extra) z ∨ ∃ c ∈ cutsOf ps x ++ extra, z ∈ c.new) ∧
+      ∀ c ∈ cutsOf ps x ++ extra, ∃ P, Path F σ' a τr P c.loc c.ty := by
+  have hpsok : ∀ p ∈ ps, HoleOk F σ Γ env p.1 := fun p hp => hholes p.1 (hps ▸ List.mem_map_of_mem hp)
+  have hpsin : ∀ p ∈ ps, p.1 ∈ hs := fun p hp => hps ▸ List.mem_map_of_mem hp
+  have hMX : ∀ z, z ∈ mutCells ps → (z ∈ E.filter (fun l => l ∉ mutCells (olds hs)) ∨ z ∈ S) → False :=
+    fun z hM h => h.elim (fun h => hX z h hM) (fun h => hSX z h hM)
+  -- A place of `x` lent `mut`: on a path into its tree.
+  have hroot : ∀ p ∈ ps, p.1.root = x → p.1.tree = L ∧ Path F σ a τr p.1.path p.1.loc p.1.ty :=
+    fun p hp hr => (hpsok p hp).at (hr ▸ he) hLT
+  -- Two places of `x` lent `mut` hold trees apart.
+  have hdd : ∀ p ∈ ps, ∀ q ∈ ps, p ≠ q → p.1.root = x → q.1.root = x → p.1.mode = .mut →
+      Disj p.1.old q.1.old := by
+    intro p hp q hq hne hr hr' hm
+    rcases pairwise_of_mem (fun _ _ => Apart.symm) (ps_pairwise hpw hps) hp hq hne (hr.trans hr'.symm) with
+      ⟨h1, -⟩ | hd
+    · rw [hm] at h1; cases h1
+    · exact hd
+  -- A cell of `x`'s tree in none of the places lent: kept.
+  have hkept : ∀ z, Kept L (cutsOf ps x ++ extra) z →
+      z ∈ E.filter (fun l => l ∉ mutCells (olds hs)) ∨ z ∈ S := by
+    intro z hk
+    rcases kept_in hI hholes hps he hk.1 (fun c hc => hk.2 c (List.mem_append.mpr (.inl hc))) with h | h
+    · exact .inl h.2
+    · exact .inr h.2
+  -- What the callee left at a place lent `mut`.
+  have hnc : ∀ p ∈ ps, p.1.mode = .mut → ∀ z ∈ p.2, z ∈ exclPart p.1.slot p.2 ∨
+      (z ∈ p.1.old ∧ (z ∈ E.filter (fun l => l ∉ mutCells (olds hs)) ∨ z ∈ S)) := by
+    intro p hp hm z hz
+    rcases new_cases (hpsok p hp) (hnew p hp hm) hm hz with h | ⟨-, h1, h2⟩
+    · exact .inl h
+    · exact .inr ⟨h1, shared_kept hI hholes hpw (hpsin p hp) h2⟩
+  have hcut := fun {c} (h : c ∈ cutsOf ps x) => mem_cutsOf.mp h
+  refine multi_join hLT (cutsOf ps x ++ extra) ?_ ?_ ?_ ?_ ?_
+  · intro c hc
+    rcases List.mem_append.mp hc with hc | hc
+    · obtain ⟨p, hp, hr, hm, rfl⟩ := hcut hc
+      exact ⟨⟨_, (hroot p hp hr).2⟩, (hpsok p hp).old_lt, hnew p hp hm⟩
+    · obtain ⟨hpth, hold, hn⟩ := hepath c hc
+      refine ⟨hpth, hold, ?_⟩
+      rw [hn]
+      refine hold.frame fun z hz => ?_
+      rcases heXS c hc z hz with h1 | h1
+      · exact hag z (List.mem_append.mpr (.inl h1))
+      · exact hag z (List.mem_append.mpr (.inr h1))
+  · intro c hc d hd hne
+    rcases List.mem_append.mp hc with hc | hc <;> rcases List.mem_append.mp hd with hd | hd
+    · obtain ⟨p, hp, hr, hm, rfl⟩ := hcut hc
+      obtain ⟨q, hq, hr', -, rfl⟩ := hcut hd
+      exact hdd p hp q hq (fun e => hne (by rw [e])) hr hr' hm
+    · exact (hed d hd c hc).symm
+    · exact hed c hc d hd
+    · exact hee c hc d hd hne
+  · intro z hk
+    rcases hkept z hk with h | h
+    · exact hag z (List.mem_append.mpr (.inl h))
+    · exact hag z (List.mem_append.mpr (.inr h))
+  · intro c hc z hz hk
+    rcases List.mem_append.mp hc with hc' | hc'
+    · obtain ⟨p, hp, -, hm, rfl⟩ := hcut hc'
+      rcases hnc p hp hm z hz with h | ⟨h, -⟩
+      · exact hMX z (mem_mutCells.mpr ⟨p, hp, h⟩) (hkept z hk)
+      · exact hk.2 _ hc h
+    · rw [(hepath c hc').2.2] at hz
+      exact hk.2 c hc hz
+  · intro c hc d hd hne z hz hz'
+    rcases List.mem_append.mp hc with hc | hc <;> rcases List.mem_append.mp hd with hd | hd
+    · obtain ⟨p, hp, hr, hm, rfl⟩ := hcut hc
+      obtain ⟨q, hq, hr', hm', rfl⟩ := hcut hd
+      have hpq : p ≠ q := fun e => hne (by rw [e])
+      rcases hnc p hp hm z hz with h1 | ⟨h1, k1⟩ <;> rcases hnc q hq hm' z hz' with h2 | ⟨h2, k2⟩
+      · exact flatMap_apart (f := fun p : Hole × List Nat => exclPart p.1.slot p.2) hMn hp hq hpq z h1 h2
+      · exact hMX z (mem_mutCells.mpr ⟨p, hp, h1⟩) k2
+      · exact hMX z (mem_mutCells.mpr ⟨q, hq, h2⟩) k1
+      · exact hdd p hp q hq hpq hr hr' hm z h1 h2
+    · obtain ⟨p, hp, -, hm, rfl⟩ := hcut hc
+      rw [(hepath d hd).2.2] at hz'
+      rcases hnc p hp hm z hz with h1 | ⟨h1, -⟩
+      · exact hMX z (mem_mutCells.mpr ⟨p, hp, h1⟩) (heXS d hd z hz')
+      · exact hed d hd _ hc z hz' h1
+    · obtain ⟨q, hq, -, hm, rfl⟩ := hcut hd
+      rw [(hepath c hc).2.2] at hz
+      rcases hnc q hq hm z hz' with h1 | ⟨h1, -⟩
+      · exact hMX z (mem_mutCells.mpr ⟨q, hq, h1⟩) (heXS c hc z hz)
+      · exact hed c hc _ hd z hz h1
+    · rw [(hepath c hc).2.2] at hz
+      rw [(hepath d hd).2.2] at hz'
+      exact hee c hc d hd hne z hz hz'
 
-/-- After the call, what a place lent `readonly` is rooted at is as it was. -/
-theorem hole_after_ro (hI : Inv F σ Γ env E S) (hholes : ∀ h ∈ hs, HoleOk F σ Γ env h)
-    (hpw : hs.Pairwise Apart) (hag : Agree σ σ' (E.filter (fun l => l ∉ mutCells (olds hs)) ++ S))
-    (hh : h ∈ hs) (hm : h.mode = .ro) :
-    ∃ s a τr, lookup h.root Γ = some s ∧ lookup h.root env = some a ∧
-      Path F σ' a τr h.path h.loc h.ty ∧ LT F σ' a τr h.tree ∧ h.tree.Perm (h.path ++ h.old) ∧
-      LT F σ' h.loc h.ty h.old ∧ SlotOk F σ' s a h.tree ∧ ∀ σ'' L', LT F σ'' a τr L' → SlotOk F σ'' s a L' := by
-  obtain ⟨s, a, τr, hs', ha', -, hpath, hLT, hperm, hso, hold, hlt, -⟩ := hholes h hh
-  -- The root's tree is no hole's lent `mut`: it is kept as it was.
-  have hkeep : ∀ l ∈ h.path ++ h.old, σ'.mem l = σ.mem l := fun l hl => by
-    rcases (hole_in hI (hholes h hh)).1 l hl with hE | hS
-    · refine hag l (List.mem_append.mpr (.inl (mem_keep.mpr ⟨hE, fun hM => ?_⟩)))
-      obtain ⟨h', hh', hl'⟩ := mem_olds_mut.mp hM
-      have hm' := (Hole.excl_mut hl').1
-      have hne : h.root ≠ h'.root := fun e =>
-        hole_root hpw hh' hh hm' (fun e' => by rw [← e', hm'] at hm; cases hm) e.symm
-      exact hole_apart hI (hholes h' hh') (hholes h hh) (Ne.symm hne) hm' l hl' hl
-    · exact hag l (List.mem_append.mpr (.inr hS))
-  have hkeepT : Agree σ σ' h.tree := fun l hl => hkeep l (hperm.mem_iff.mp hl)
-  exact ⟨s, a, τr, hs', ha', hpath.frame fun l hl => hkeep l (List.mem_append.mpr (.inl hl)),
-    hLT.frame hkeepT, hperm, hold.frame fun l hl => hkeep l (List.mem_append.mpr (.inr hl)), hso.frame hkeepT, hlt⟩
+/-- After the call, what a place lent is rooted at reaches it, and holds a tree its slot accepts;
+a place lent `readonly` holds what it held. -/
+theorem hole_after (hI : Inv F σ Γ env E S) (hholes : ∀ h ∈ hs, HoleOk F σ Γ env h)
+    (hpw : hs.Pairwise Apart) (hps : ps.map Prod.fst = hs)
+    (hnew : ∀ p ∈ ps, p.1.mode = .mut → LT F σ' p.1.loc p.1.ty p.2) (hMn : (mutCells ps).Nodup)
+    (hag : Agree σ σ' (E.filter (fun l => l ∉ mutCells (olds hs)) ++ S))
+    (hX : Disj (E.filter (fun l => l ∉ mutCells (olds hs))) (mutCells ps)) (hSX : Disj S (mutCells ps))
+    (hh : h ∈ hs) :
+    ∃ s a τr P L', lookup h.root Γ = some s ∧ lookup h.root env = some a ∧ (h.mode = .mut → s.excl = true) ∧
+      Path F σ' a τr P h.loc h.ty ∧ LT F σ' a τr L' ∧ SlotOk F σ' s a L' ∧
+      (∀ σ'' L', LT F σ'' a τr L' → SlotOk F σ'' s a L') ∧ (h.mode = .ro → LT F σ' h.loc h.ty h.old) := by
+  obtain ⟨s, a, τr, hs', ha', hex, hpath, hLT, -, hso, hold, huniv, -⟩ := hholes h hh
+  have he : Entry F σ Γ env h.root s a h.tree := ⟨hs', ha', hso⟩
+  cases hm : h.mode
+  · -- The place is reached as other places lent `readonly` are: as one more, kept, place.
+    have hXS : ∀ z ∈ h.old, z ∈ E.filter (fun l => l ∉ mutCells (olds hs)) ∨ z ∈ S := by
+      intro z hz
+      rcases (hole_in hI (hholes h hh)).1 z (List.mem_append.mpr (.inr hz)) with hE | hS
+      · refine .inl (mem_keep.mpr ⟨hE, fun hM => ?_⟩)
+        obtain ⟨h', hh', hl'⟩ := mem_olds_mut.mp hM
+        have hm' := (Hole.excl_mut hl').1
+        have hne : h' ≠ h := fun e => by rw [e, hm] at hm'; cases hm'
+        rcases hole_sep hpw hh' hh hm' hne with hr | hd
+        · exact hole_apart hI (hholes h' hh') (hholes h hh) hr hm' z hl' (List.mem_append.mpr (.inr hz))
+        · exact hd z (exclPart_sub hl') hz
+      · exact .inr hS
+    have hold' : LT F σ' h.loc h.ty h.old := hold.frame fun z hz => by
+      rcases hXS z hz with h1 | h1
+      · exact hag z (List.mem_append.mpr (.inl h1))
+      · exact hag z (List.mem_append.mpr (.inr h1))
+    obtain ⟨L', hL', -, hpaths⟩ := root_join hI hholes hpw hps hnew hMn hag hX hSX he hLT
+      [⟨h.loc, h.ty, h.old, h.old⟩]
+      (by intro e he; simp only [List.mem_singleton] at he; subst he; exact ⟨⟨_, hpath⟩, hold, rfl⟩)
+      (by intro e he; simp only [List.mem_singleton] at he; subst he; exact hXS)
+      (by
+        intro e he c hc
+        simp only [List.mem_singleton] at he; subst he
+        obtain ⟨p, hp, hr, hm', rfl⟩ := mem_cutsOf.mp hc
+        have hph : p.1 ∈ hs := hps ▸ List.mem_map_of_mem hp
+        have hne : p.1 ≠ h := fun e => by rw [e, hm] at hm'; cases hm'
+        rcases hole_sep hpw hph hh hm' hne with hr' | hd
+        · exact absurd hr hr'
+        · exact hd.symm)
+      (by intro e he e' he' hne; simp only [List.mem_singleton] at he he'; exact absurd (he.trans he'.symm) hne)
+    obtain ⟨P, hP⟩ := hpaths _ (List.mem_append.mpr (.inr (List.mem_singleton_self _)))
+    exact ⟨s, a, τr, P, L', hs', ha', (fun h => by cases h), hP, hL', huniv σ' L' hL', huniv, fun _ => hold'⟩
+  · obtain ⟨p, hp, rfl⟩ := List.mem_map.mp (hps ▸ hh : h ∈ ps.map Prod.fst)
+    obtain ⟨L', hL', -, hpaths⟩ := root_join hI hholes hpw hps hnew hMn hag hX hSX he hLT []
+      (by simp) (by simp) (by simp) (by simp)
+    obtain ⟨P, hP⟩ := hpaths ⟨p.1.loc, p.1.ty, p.1.old, p.2⟩
+      (List.mem_append.mpr (.inl (mem_cutsOf.mpr ⟨p, hp, rfl, hm, rfl⟩)))
+    exact ⟨s, a, τr, P, L', hs', ha', (fun _ => hex hm), hP, hL', huniv σ' L' hL', huniv, (fun h => by cases h)⟩
 
-/-- After the call, the caller's variables hold what they held but for the holes lent `mut`, which
+/-- After the call, the caller's variables hold what they held but at the places lent `mut`, which
 hold what the callee left there. -/
 theorem caller_rebuild (hI : Inv F σ Γ env E S) (hholes : ∀ h ∈ hs, HoleOk F σ Γ env h)
     (hpw : hs.Pairwise Apart) (hps : ps.map Prod.fst = hs)
@@ -1132,215 +1252,124 @@ theorem caller_rebuild (hI : Inv F σ Γ env E S) (hholes : ∀ h ∈ hs, HoleOk
       ∀ l, l ∈ E' ↔ l ∈ E.filter (fun l => l ∉ mutCells (olds hs)) ∨ l ∈ mutCells ps := by
   have hpsok : ∀ p ∈ ps, HoleOk F σ Γ env p.1 := fun p hp => hholes p.1 (hps ▸ List.mem_map_of_mem hp)
   have hpsin : ∀ p ∈ ps, p.1 ∈ hs := fun p hp => hps ▸ List.mem_map_of_mem hp
-  have hagX : ∀ l, l ∈ E → l ∉ mutCells (olds hs) → σ'.mem l = σ.mem l :=
-    fun l h1 h2 => hag l (List.mem_append.mpr (.inl (mem_keep.mpr ⟨h1, h2⟩)))
-  -- A variable none of whose places was lent `mut` keeps its footprint clear of the holes.
-  have hclear : ∀ {x s a L}, Entry F σ Γ env x s a L → (∀ p ∈ ps, p.1.mode = .mut → p.1.root ≠ x) →
-      ∀ l ∈ L, l ∉ mutCells (olds hs) := by
-    intro x s a L he hn l hl hM
-    obtain ⟨h', hh', hl'⟩ := mem_olds_mut.mp hM
-    have hm' := (Hole.excl_mut hl').1
-    obtain ⟨p', hp', rfl⟩ := List.mem_map.mp (hps ▸ hh' : h' ∈ ps.map Prod.fst)
-    obtain ⟨s', a', he', hsub⟩ := (hpsok p' hp').excl_sub hm'
-    exact hI.apart he' he (fun e => hn p' hp' hm' e) l (hsub l hl') hl
-  -- The head of a tree a `mut` hole left: the hole's location, which the callee only read.
-  have hhead : ∀ p ∈ ps, p.1.mode = .mut → ∀ l ∈ sharedPart p.1.slot p.2,
-      l ∈ p.1.old ∧ l ∈ sharedPart p.1.slot p.1.old := by
-    intro p hp hm l hl
-    obtain ⟨R, hR⟩ := (hnew p hp hm).cons
-    obtain ⟨R0, hR0⟩ := (hpsok p hp).old_head
-    rw [hR] at hl
-    rw [hR0]
-    exact ⟨by rw [Hole.shared_mut_head hm hl]; exact List.mem_cons_self .., Hole.shared_mut_swap hm hl⟩
-  -- The head of a root's tree, and of what it is after the call, is the root's own cell.
-  have hroot_head : ∀ p ∈ ps, ∀ {s a}, Entry F σ Γ env p.1.root s a p.1.tree → s.shell = true →
-      p.1.mode = .mut → ∃ Q, p.1.path ++ p.2 = a :: Q := by
-    intro p hp s a he hsh hm
-    rcases (hpsok p hp).shell_root he hsh hm with ⟨hpath, -⟩ | hpath
-    · obtain ⟨_, a', _, hs', ha', -, hpth, -⟩ := hpsok p hp
-      obtain rfl := lookup_det ha' he.2.1
-      rw [hpath] at hpth ⊢
-      cases hpth
-      obtain ⟨R, hR⟩ := (hnew p hp hm).cons
-      exact ⟨R, by simp [hR]⟩
-    · exact ⟨p.2, by simp [hpath]⟩
-  -- What a variable may change after the call: as it was and kept, or what the callee left at
-  -- one of its holes.
-  have hsub : ∀ {x s a L}, Entry F σ Γ env x s a L → ∀ l ∈ exclPart s (fill ps x L),
-      (l ∈ exclPart s L ∧ l ∈ E.filter (fun l => l ∉ mutCells (olds hs))) ∨
-      ∃ p ∈ ps, p.1.root = x ∧ p.1.mode = .mut ∧ l ∈ exclPart p.1.slot p.2 := by
-    intro x s a L he l hl
-    rcases fill_cases hholes hps he with ⟨hf, hn⟩ | ⟨p, hp, hf, hr, hm, hL, hex⟩
-    · rw [hf] at hl
-      have hE := (hI.foot.memE hI.keys l).mpr ⟨x, s, a, L, he, hl⟩
-      exact .inl ⟨hl, mem_keep.mpr ⟨hE, hclear he hn l (exclPart_sub hl)⟩⟩
-    · rw [hf] at hl
-      have he' : Entry F σ Γ env p.1.root s a L := hr ▸ he
-      cases hsh : s.shell
-      · rw [exclPart_plain hsh, if_pos hex] at hl ⊢
-        rcases List.mem_append.mp hl with hl | hl
-        · exact .inl ⟨hL ▸ (hpsok p hp).mem_tree.mpr (.inl hl),
-            mem_keep.mpr (path_in_X hI hholes hpw (hpsin p hp) hm he' hsh l hl)⟩
-        · rcases mem_parts (s := p.1.slot) hl with h1 | h1
-          · exact .inr ⟨p, hp, hr, hm, h1⟩
-          · obtain ⟨hold, hsh'⟩ := hhead p hp hm l h1
-            have hlL : l ∈ L := hL ▸ (hpsok p hp).mem_tree.mpr (.inr hold)
-            have hE := (hI.foot.memE hI.keys l).mpr ⟨x, s, a, L, he, by rw [exclPart_plain hsh, if_pos hex]; exact hlL⟩
-            exact .inl ⟨hlL, mem_keep.mpr ⟨hE, shared_not_mut hI hholes hpw (hpsin p hp) hsh'⟩⟩
-      · rcases (hpsok p hp).shell_root (hL ▸ he') hsh hm with ⟨hpath, rfl⟩ | hpath
-        · rw [hpath] at hl
-          exact .inr ⟨p, hp, hr, hm, by simpa using hl⟩
-        · -- Through the closure's cell, only read: what the callee left is the closure's capture.
-          rw [hpath] at hl
-          have hl2 : l ∈ p.2 := by simpa [exclPart, Slot.shell_excl hsh, hsh] using hl
-          rcases mem_parts (s := p.1.slot) hl2 with h1 | h1
-          · exact .inr ⟨p, hp, hr, hm, h1⟩
-          · obtain ⟨hold, hsh'⟩ := hhead p hp hm l h1
-            -- The tree is the closure's cell, then what it captured: the old tree there.
-            have hT := (hpsok p hp).perm
-            rw [hpath] at hT
-            obtain ⟨T, hT'⟩ := (hL ▸ he').2.2.cons_of_shell hsh
-            have hlL : l ∈ exclPart s L := by
-              rw [hL]
-              have hroot : ∀ {x}, x ∈ (p.1.tree).tail ↔ x ∈ p.1.old := by
-                intro x
-                rw [hT'] at hT ⊢
-                simp only [List.tail_cons]
-                have : T.Perm p.1.old := by simpa using hT
-                exact this.mem_iff
-              simp [exclPart, Slot.shell_excl hsh, hsh, hroot.mpr hold]
-            have hE := (hI.foot.memE hI.keys l).mpr ⟨x, s, a, L, he, hlL⟩
-            exact .inl ⟨hlL, mem_keep.mpr ⟨hE, shared_not_mut hI hholes hpw (hpsin p hp) hsh'⟩⟩
-  obtain ⟨E', hf', hn', hmem'⟩ := hI.foot.rebuild (σ' := σ') (fill ps) hI.keys
+  -- A variable's tree after the call: what it kept and what the callee left at its places.
+  let nf : Var → Nat → Prop := fun x z => ∃ s a L, Entry F σ Γ env x s a L ∧ s.excl = true ∧
+    (s.shell = true → z ≠ a) ∧ (Kept L (cutsOf ps x) z ∨ ∃ c ∈ cutsOf ps x, z ∈ c.new)
+  have hnf : ∀ {x s a L z}, Entry F σ Γ env x s a L → (nf x z ↔ s.excl = true ∧
+      (s.shell = true → z ≠ a) ∧ (Kept L (cutsOf ps x) z ∨ ∃ c ∈ cutsOf ps x, z ∈ c.new)) := by
+    intro x s a L z he
+    constructor
+    · rintro ⟨s', a', L', he', h⟩
+      obtain ⟨rfl, rfl, rfl⟩ := he.det he'
+      exact h
+    · intro h; exact ⟨s, a, L, he, h⟩
+  -- What a variable may change after the call: kept, or what the callee left at a place of it.
+  have hsub : ∀ {x s a L z}, Entry F σ Γ env x s a L → nf x z →
+      (z ∈ exclPart s L ∧ z ∈ E.filter (fun l => l ∉ mutCells (olds hs))) ∨
+      ∃ p ∈ ps, p.1.root = x ∧ p.1.mode = .mut ∧ z ∈ exclPart p.1.slot p.2 := by
+    intro x s a L z he h
+    obtain ⟨hex, hsh, hk | ⟨c, hc, hz⟩⟩ := (hnf he).mp h
+    · have hzx : z ∈ exclPart s L := (mem_exclPart_iff he.2.2).mpr ⟨hex, hk.1, hsh⟩
+      rcases kept_in hI hholes hps he hk.1 hk.2 with h1 | ⟨h1, -⟩
+      · exact .inl h1
+      · exact absurd h1 (parts_disj he.2.2.nodup z hzx)
+    · obtain ⟨p, hp, hr, hm, rfl⟩ := mem_cutsOf.mp hc
+      rcases new_cases (hpsok p hp) (hnew p hp hm) hm hz with h1 | ⟨-, h1, h2⟩
+      · exact .inr ⟨p, hp, hr, hm, h1⟩
+      · obtain ⟨s', a', he', -⟩ := (hpsok p hp).entry
+        rw [hr] at he'
+        obtain ⟨rfl, rfl, hL⟩ := he.det he'
+        have hzL : z ∈ L := hL ▸ (hpsok p hp).mem_tree.mpr (.inr h1)
+        have hzx : z ∈ exclPart s L := (mem_exclPart_iff he.2.2).mpr ⟨hex, hzL, hsh⟩
+        rcases shared_kept hI hholes hpw (hpsin p hp) h2 with h3 | h3
+        · exact .inl ⟨hzx, h3⟩
+        · exact absurd ((hI.foot.memE hI.keys z).mpr ⟨x, s, a, L, he, hzx⟩) (hI.disj z h3)
+  obtain ⟨E', hf', hn', hmem'⟩ := hI.foot.rebuild (σ' := σ') nf hI.keys
     (by
       intro x s a L he
-      rcases fill_cases hholes hps he with ⟨hf, hn⟩ | ⟨p, hp, hf, hr, hm, hL, hex⟩
-      · rw [hf]
-        refine ⟨L, he.2.2.frame fun l hl => ?_, rfl, fun _ => .rfl⟩
-        rcases hI.entry_sub he l hl with ⟨-, hE⟩ | ⟨-, hS⟩
-        · exact hagX l hE (hclear he hn l hl)
-        · exact hag l (List.mem_append.mpr (.inr hS))
-      · rw [hf]
-        obtain ⟨s', a', τr, L', hs', ha', -, hpath, hLT', hp', hso', hlt⟩ :=
-          hole_after hI hholes hpw hps hnew hag hX hSX hp hm
+      by_cases hcx : cutsOf ps x = []
+      · -- Nothing of it lent `mut`: kept as it was.
+        refine ⟨L, he.2.2.frame fun l hl => ?_, rfl, fun z => ?_⟩
+        · rcases kept_in hI hholes hps he hl (by simp [hcx]) with ⟨-, h⟩ | ⟨-, h⟩
+          · exact hag l (List.mem_append.mpr (.inl h))
+          · exact hag l (List.mem_append.mpr (.inr h))
+        · rw [mem_exclPart_iff he.2.2, hnf he]
+          constructor
+          · rintro ⟨h1, h2, h3⟩; exact ⟨h1, h3, .inl ⟨h2, by simp [hcx]⟩⟩
+          · rintro ⟨h1, h3, ⟨h2, -⟩ | ⟨c, hc, -⟩⟩
+            · exact ⟨h1, h2, h3⟩
+            · rw [hcx] at hc; simp at hc
+      · obtain ⟨c, hc⟩ := List.exists_mem_of_ne_nil _ hcx
+        obtain ⟨p, hp, hr, hm, -⟩ := mem_cutsOf.mp hc
+        obtain ⟨s', a', τr, hs', ha', hex, -, hLT, -, hso, -, huniv, -⟩ := hpsok p hp
         rw [hr] at hs' ha'
-        obtain rfl := lookup_det he.1 hs'
-        obtain rfl := lookup_det he.2.1 ha'
-        refine ⟨L', hso', ?_, ?_⟩
+        obtain ⟨rfl, rfl, hL⟩ := he.det ⟨hs', ha', hso⟩
+        rw [← hL] at hLT
+        obtain ⟨L', hL', hmem, -⟩ := root_join hI hholes hpw hps hnew hMn hag hX hSX he hLT []
+          (by simp) (by simp) (by simp) (by simp)
+        simp only [List.append_nil] at hmem
+        have hso' := huniv σ' L' hL'
+        refine ⟨L', hso', ?_, fun z => ?_⟩
         · cases hsh : s.shell
-          · simp [sharedPart_plain hsh, hex]
-          · obtain ⟨R1, hR1⟩ := hLT'.cons
-            obtain ⟨R0, hR0⟩ := (hL ▸ he.2.2 : SlotOk F σ s a p.1.tree).cons_of_shell hsh
-            rw [hR1, hL, hR0]
-            simp [sharedPart, hex, hsh]
-        · intro z
-          cases hsh : s.shell
-          · simp only [exclPart_plain hsh, if_pos hex]
-            exact hp'.mem_iff
-          · obtain ⟨Q, hQ⟩ := hroot_head p hp (hr ▸ hL ▸ he) hsh hm
-            obtain ⟨R1, hR1⟩ := hLT'.cons
-            rw [hQ] at hp' ⊢
-            rw [hR1] at hp' ⊢
-            simp only [exclPart, Slot.shell_excl hsh, hsh, ↓reduceIte, List.tail_cons]
-            exact (List.Perm.cons_inv hp').mem_iff)
+          · simp [sharedPart_plain hsh, hex hm]
+          · obtain ⟨R1, hR1⟩ := hL'.cons
+            obtain ⟨R0, hR0⟩ := hLT.cons
+            rw [hR1, hR0]
+            simp [sharedPart, hex hm, hsh]
+        · rw [mem_exclPart_iff hso', hnf he, hmem]
+          constructor
+          · rintro ⟨h1, h2, h3⟩; exact ⟨h1, h3, h2⟩
+          · rintro ⟨h1, h3, h2⟩; exact ⟨h1, h2, h3⟩)
     (by
-      intro x s a L y t b L' hx hy hne l hl hl'
-      rcases hsub hx l hl with ⟨hlL, hlX⟩ | ⟨p, hp, hpr, hpm, hlp⟩ <;>
-        rcases hsub hy l hl' with ⟨hlL', hlX'⟩ | ⟨q, hq, hqr, hqm, hlq⟩
-      · exact hI.apart hx hy hne l hlL (exclPart_sub hlL')
-      · exact hX l hlX (mem_mutCells.mpr ⟨q, hq, hlq⟩)
-      · exact hX l hlX' (mem_mutCells.mpr ⟨p, hp, hlp⟩)
+      intro x s a L y t b L' z hx hy hne h h'
+      rcases hsub hx h with ⟨hlL, hlX⟩ | ⟨p, hp, hpr, hpm, hlp⟩ <;>
+        rcases hsub hy h' with ⟨hlL', hlX'⟩ | ⟨q, hq, hqr, hqm, hlq⟩
+      · exact hI.apart hx hy hne z hlL (exclPart_sub hlL')
+      · exact hX z hlX (mem_mutCells.mpr ⟨q, hq, hlq⟩)
+      · exact hX z hlX' (mem_mutCells.mpr ⟨p, hp, hlp⟩)
       · have hpq : p ≠ q := fun e => hne (hpr ▸ hqr ▸ e ▸ rfl)
-        exact flatMap_apart (f := fun p : Hole × List Nat => exclPart p.1.slot p.2) hMn hp hq hpq l hlp hlq)
-  refine ⟨E', ⟨hf', hn', fun l hS hl => ?_, hI.keys⟩, fun l => ?_⟩
-  · obtain ⟨x, s, a, L, he, hl⟩ := (hmem' l).mp hl
-    rcases hsub he l hl with ⟨-, hlX⟩ | ⟨p, hp, -, -, hlp⟩
-    · exact hI.disj l hS (mem_keep.mp hlX).1
-    · exact hSX l hS (mem_mutCells.mpr ⟨p, hp, hlp⟩)
+        exact flatMap_apart (f := fun p : Hole × List Nat => exclPart p.1.slot p.2) hMn hp hq hpq z hlp hlq)
+  have hto : ∀ l, l ∈ E' → l ∈ E.filter (fun l => l ∉ mutCells (olds hs)) ∨ l ∈ mutCells ps := by
+    intro l hl
+    obtain ⟨x, s, a, L, he, h⟩ := (hmem' l).mp hl
+    rcases hsub he h with ⟨-, h1⟩ | ⟨p, hp, -, -, h1⟩
+    · exact .inl h1
+    · exact .inr (mem_mutCells.mpr ⟨p, hp, h1⟩)
+  refine ⟨E', ⟨hf', hn', fun l hS hl => ?_, hI.keys⟩, fun l => ⟨hto l, ?_⟩⟩
+  · rcases hto l hl with h | h
+    · exact hI.disj l hS (mem_keep.mp h).1
+    · exact hSX l hS h
   · rw [hmem']
-    constructor
-    · rintro ⟨x, s, a, L, he, hl⟩
-      rcases hsub he l hl with ⟨-, hlX⟩ | ⟨p, hp, -, -, hlp⟩
-      · exact .inl hlX
-      · exact .inr (mem_mutCells.mpr ⟨p, hp, hlp⟩)
-    · rintro (hlX | hlM)
-      · obtain ⟨hE, hnM⟩ := mem_keep.mp hlX
-        obtain ⟨x, s, a, L, he, hl⟩ := (hI.foot.memE hI.keys l).mp hE
-        refine ⟨x, s, a, L, he, ?_⟩
-        rcases fill_cases hholes hps he with ⟨hf, -⟩ | ⟨p, hp, hf, hr, hm, hL, hex⟩
-        · rw [hf]; exact hl
-        · rw [hf]
-          -- What the root kept, or the head of what the callee left: the hole's location.
-          have hhd : l ∈ p.1.old → l ∉ exclPart p.1.slot p.1.old → l ∈ p.2 := fun hold hnx => by
-            rcases mem_parts (s := p.1.slot) hold with h1 | h1
-            · exact absurd h1 hnx
-            · obtain ⟨R0, hR0⟩ := (hpsok p hp).old_head
-              obtain ⟨R, hR⟩ := (hnew p hp hm).cons
-              rw [hR0] at h1
-              obtain rfl := Hole.shared_mut_head hm h1
-              rw [hR]; exact List.mem_cons_self ..
-          have hnx : l ∉ exclPart p.1.slot p.1.old := fun h => hnM (mem_olds_mut.mpr ⟨p.1, hpsin p hp, h⟩)
-          cases hsh : s.shell
-          · rw [exclPart_plain hsh, if_pos hex] at hl ⊢
-            rw [hL] at hl
-            rcases (hpsok p hp).mem_tree.mp hl with hl | hl
-            · exact List.mem_append.mpr (.inl hl)
-            · exact List.mem_append.mpr (.inr (hhd hl hnx))
-          · have he' : Entry F σ Γ env p.1.root s a p.1.tree := hr ▸ hL ▸ he
-            obtain ⟨Q, hQ⟩ := hroot_head p hp he' hsh hm
-            rw [hQ]
-            simp only [exclPart, Slot.shell_excl hsh, hsh, ↓reduceIte, List.tail_cons]
-            -- The tree after the root's cell is the old tree there, the path being the cell or nothing.
-            obtain ⟨T, hT⟩ := he'.2.2.cons_of_shell hsh
-            rw [hL, hT] at hl
-            simp only [exclPart, Slot.shell_excl hsh, hsh, ↓reduceIte, List.tail_cons] at hl
-            have hperm := (hpsok p hp).perm
-            rw [hT] at hperm
-            rcases (hpsok p hp).shell_root he' hsh hm with ⟨hpath, rfl⟩ | hpath
-            · -- The hole is the root: its old tree is the cell, then what the closure captured.
-              rw [hpath] at hperm hQ
-              simp only [List.nil_append] at hperm hQ
-              obtain ⟨R0, hR0⟩ := (hpsok p hp).old_head
-              have hloc : p.1.loc = a := by
-                obtain ⟨_, _, _, _, ha', -, hpth, -⟩ := hpsok p hp
-                obtain rfl := lookup_det ha' he'.2.1
-                rw [hpath] at hpth; cases hpth; rfl
-              rw [hR0, hloc] at hperm
-              have hTR := List.Perm.cons_inv hperm
-              have : l ∈ exclPart p.1.slot p.1.old := by
-                rw [hR0]
-                simp only [exclPart, Hole.slot, hm, Slot.excl, ↓reduceIte]
-                split
-                · exact hTR.mem_iff.mp hl
-                · exact List.mem_cons_of_mem _ (hTR.mem_iff.mp hl)
-              exact absurd this hnx
-            · rw [hpath] at hperm hQ
-              simp only [List.singleton_append, List.cons.injEq, true_and] at hQ
-              subst hQ
-              have hTp : T.Perm p.1.old := by simpa using hperm
-              exact hhd (hTp.mem_iff.mp hl) hnx
-      · obtain ⟨p, hp, hlp⟩ := mem_mutCells.mp hlM
-        have hpm := (Hole.excl_mut hlp).1
-        obtain ⟨s, a, he, hex⟩ := (hpsok p hp).entry
-        refine ⟨p.1.root, s, a, _, he, ?_⟩
-        rw [fill_of_mem hpw hps hp hpm]
-        cases hsh : s.shell
-        · rw [exclPart_plain hsh, if_pos (hex hpm)]
-          exact List.mem_append.mpr (.inr (exclPart_sub hlp))
-        · obtain ⟨Q, hQ⟩ := hroot_head p hp he hsh hpm
-          rw [hQ]
-          simp only [exclPart, Slot.shell_excl hsh, hsh, ↓reduceIte, List.tail_cons]
-          rcases (hpsok p hp).shell_root he hsh hpm with ⟨hpath, rfl⟩ | hpath
-          · rw [hpath] at hQ
-            simp only [List.nil_append] at hQ
-            have hp2 := hQ ▸ (exclPart_sub hlp : l ∈ p.2)
-            rw [hQ] at hlp
-            simp only [exclPart, Slot.shell_excl hsh, hsh, ↓reduceIte, List.tail_cons] at hlp
-            exact hlp
-          · rw [hpath] at hQ
-            simp only [List.singleton_append, List.cons.injEq, true_and] at hQ
-            subst hQ
-            exact exclPart_sub hlp
+    rintro (hlX | hlM)
+    · obtain ⟨hE, hnM⟩ := mem_keep.mp hlX
+      obtain ⟨x, s, a, L, he, hl⟩ := (hI.foot.memE hI.keys l).mp hE
+      obtain ⟨hex, hlL, hsh⟩ := (mem_exclPart_iff he.2.2).mp hl
+      refine ⟨x, s, a, L, he, (hnf he).mpr ⟨hex, hsh, ?_⟩⟩
+      by_cases hk : ∃ c ∈ cutsOf ps x, l ∈ c.old
+      · -- In a place lent `mut`, but not what the callee could change: the place's location.
+        obtain ⟨c, hc, hlc⟩ := hk
+        obtain ⟨p, hp, -, hm, rfl⟩ := mem_cutsOf.mp hc
+        refine .inr ⟨_, hc, ?_⟩
+        rcases mem_parts (s := p.1.slot) hlc with h1 | h1
+        · exact absurd (mem_olds_mut.mpr ⟨p.1, hpsin p hp, h1⟩) hnM
+        · obtain ⟨R0, hR0⟩ := (hpsok p hp).old_head
+          obtain ⟨R, hR⟩ := (hnew p hp hm).cons
+          rw [hR0] at h1
+          have := Hole.shared_mut_head hm h1
+          subst this
+          show p.1.loc ∈ p.2
+          rw [hR]; exact List.mem_cons_self ..
+      · exact .inl ⟨hlL, fun c hc h => hk ⟨c, hc, h⟩⟩
+    · obtain ⟨p, hp, hlp⟩ := mem_mutCells.mp hlM
+      have hpm := (Hole.excl_mut hlp).1
+      obtain ⟨s, a, he, hex⟩ := (hpsok p hp).entry
+      refine ⟨p.1.root, s, a, _, he, (hnf he).mpr ⟨hex hpm, fun hsh e => ?_,
+        .inr ⟨_, mem_cutsOf.mpr ⟨p, hp, rfl, hpm, rfl⟩, exclPart_sub hlp⟩⟩⟩
+      -- A closure's cell borrowed `mut` is only read.
+      obtain ⟨R, hR⟩ := he.2.2.cons_of_shell hsh
+      have haS : a ∈ S := (hI.foot.memS hI.keys a).mpr ⟨_, s, a, _, he, by
+        rw [hR]; simp [sharedPart, Slot.shell_excl hsh, hsh]⟩
+      exact hSX a haS (e ▸ hlM)
 
 end rebuild
 
