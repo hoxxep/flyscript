@@ -1,0 +1,17 @@
+// error: `show` lends its arguments, so its continuation `k` cannot leave the arm
+// A continuation that leaves its arm holds no borrow, so an operation whose arguments are lent by
+// the code that performed it cannot give it away (§5.3).
+effect Show { show(line: str): void; }
+enum Step { #Done, #More(Cont<void, Step>) }
+function shows(): Step {
+  handle {
+    const s = "one".toString();
+    Show.show(s.asStr());
+    #Done
+  } with Show {
+    show(line) resumes k => #More(k),
+  }
+}
+export function main(): void {
+  match (shows()) { #Done => {}, #More(k) => { const r = k(); } }
+}

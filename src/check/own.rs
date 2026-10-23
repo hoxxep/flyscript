@@ -1435,14 +1435,8 @@ impl<'p> Own<'p> {
             }
             ExprKind::Break | ExprKind::Continue => Val::default(),
             ExprKind::Region { body, .. } => self.block_as(body, how, e),
-            // The one thing `unsafe` vouches for in ownership: an operation's arguments may leave
-            // their arm, because the code around keeps the continuation they borrow from from
-            // being resumed while they live (§5.5's `generate`).
-            ExprKind::Unsafe(body) => {
-                let mut v = self.block_as(body, how, e);
-                v.loans.retain(|l| !self.lent_args.contains_key(&self.loans[*l].path.root));
-                v
-            }
+            // `unsafe` vouches for raw pointers and foreign code, not for ownership.
+            ExprKind::Unsafe(body) => self.block_as(body, how, e),
             ExprKind::Handle { body, arms, .. } => {
                 // The outer bindings that resuming can reach: those the body or any arm uses.
                 let mut reach: Vec<(String, Span)> = Vec::new();
@@ -1516,23 +1510,55 @@ impl<'p> Own<'p> {
                         self.check_outlives(&dying, &arm.body, &av);
                     }
                 }
-                // A continuation that leaves its arm takes its handler with it, so whatever has it
-                // borrows everything the handler's arms use (§5.3).
+                // A continuation that leaves its arm may be resumed wherever it goes, so it holds no
+                // borrow: the body borrows nothing it needs past an operation, the operation lends
+                // nothing to the arm, and the arms use nothing of the code around (§5.3).
                 if arms.iter().any(|a| a.resumes.as_ref().is_some_and(|k| escapes(&a.body, &k.name))) {
+                    if !v.loans.is_empty() || !across.is_empty() {
+                        let k = arms.iter().find_map(|a| a.resumes.as_ref().filter(|k| escapes(&a.body, &k.name))).unwrap();
+                        self.err(k.span, format!("`{}` leaves its arm, so it may hold no borrow, but the `handle`'s body borrows from the code around it past an operation", k.name));
+                    }
+                    for arm in arms {
+                        let Some(k) = &arm.resumes else { continue };
+                        if !escapes(&arm.body, &k.name) {
+                            continue;
+                        }
+                        for p in &arm.params {
+                            let ty = self.typed.bindings.get(&p.span).cloned().unwrap_or(Ty::Error);
+                            if self.may_hold(&ty) {
+                                self.err(p.span, format!("`{}` lends its arguments, so its continuation `{}` cannot leave the arm", arm.op.name, k.name));
+                            }
+                        }
+                        // Nor does what passes into and out of the body refer into a region, which
+                        // could end before the continuation is resumed.
+                        let kt = self.typed.bindings.get(&k.span).cloned().unwrap_or(Ty::Error);
+                        let params_region = arm.params.iter().any(|p| {
+                            self.typed.bindings.get(&p.span).is_some_and(mentions_any_region)
+                        });
+                        if mentions_any_region(&kt) || params_region {
+                            self.err(k.span, format!("`{}` leaves its arm, so what its operation passes and the `handle` gives may refer into no region", k.name));
+                        }
+                    }
+                    // What the body uses of the code around may refer into no region either.
+                    let mut body_uses: Vec<(String, Span)> = Vec::new();
+                    walk_block(body, &HashSet::new(), &mut body_uses);
+                    for (name, span) in body_uses {
+                        if let Some(var) = self.lookup(&name)
+                            && mentions_any_region(&self.vars[var].ty) {
+                                self.err(span, format!("`{name}` refers into a region, so this `handle`'s body cannot use it: its continuation leaves its arm"));
+                            }
+                    }
                     let mut arm_uses: Vec<(String, Span)> = Vec::new();
-                    let mut arm_changes = HashSet::new();
                     for arm in arms {
                         let mut bound: HashSet<String> = arm.params.iter().map(|p| p.name.clone()).collect();
                         if let Some(k) = &arm.resumes {
                             bound.insert(k.name.clone());
                         }
                         walk_block(&arm.body, &bound, &mut arm_uses);
-                        block_changes(&arm.body, &mut arm_changes);
                     }
                     for (name, span) in arm_uses {
-                        if let Some(var) = self.lookup(&name) {
-                            let l = self.new_loan(Path { root: var, fields: Vec::new() }, arm_changes.contains(&name), span);
-                            loans.insert(l);
+                        if self.lookup(&name).is_some() {
+                            self.err(span, format!("`{name}` cannot be used here: this `handle`'s continuation leaves its arm, and may be resumed after `{name}` is gone"));
                         }
                     }
                 }
@@ -2806,9 +2832,26 @@ fn block_diverges(b: &ast::Block) -> bool {
     b.stmts.iter().any(|s| matches!(s, Stmt::Expr(e) if diverges(e))) || b.tail.as_deref().is_some_and(diverges)
 }
 
+/// Whether a type refers into some region.
+fn mentions_any_region(t: &Ty) -> bool {
+    let arg = |a: &GArg| match a {
+        GArg::Ty(t) => mentions_any_region(t),
+        GArg::Region(_) => true,
+        _ => false,
+    };
+    match t {
+        Ty::Named(_, args) => args.iter().any(arg),
+        Ty::Record(r) | Ty::Union(r) => r.labels.values().any(mentions_any_region),
+        Ty::Tuple(ts) => ts.iter().any(mentions_any_region),
+        Ty::Array(t, _) | Ty::Slice(t) | Ty::Borrow(_, t) => mentions_any_region(t),
+        Ty::Fn(f) => f.params.iter().any(mentions_any_region) || mentions_any_region(&f.ret),
+        _ => false,
+    }
+}
+
 /// Whether an arm lets its continuation `k` go other than by calling it: returns it, stores it,
 /// passes it on.
-fn escapes(b: &ast::Block, k: &str) -> bool {
+pub fn escapes(b: &ast::Block, k: &str) -> bool {
     let mut uses = Vec::new();
     walk_block(b, &HashSet::new(), &mut uses);
     let mut calls = 0;

@@ -1,5 +1,5 @@
 // error: this value borrows `item`, which the code that performed `yield` lent only to this arm
-// Without `unsafe`, an arm cannot keep an operation's argument past itself (§5.3).
+// An arm cannot keep an operation's argument past itself (§5.3).
 view enum Step<T> { #Done, #Item { item: T, rest: Cont<void, Step<T>> } }
 function start<T>(producer: once () => void uses Yield<T>): Step<T> {
   handle { producer(); #Done } with Yield<T> { yield(item) resumes k => #Item { item, rest: k } }

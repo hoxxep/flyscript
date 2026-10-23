@@ -238,6 +238,8 @@ impl JsGen {
     match (t) {
       #Named(d, args) => {
         if (self.lw.p.hasDrop(d)) { return true; }
+        // A continuation's body has cleanup to run when it is dropped (§5.3).
+        if (self.lw.p.isKnown(d, "Cont")) { return true; }
         // What an `Arc` holds is shared, and dropped by no one clone.
         if (self.lw.p.isKnown(d, "Arc")) { return false; }
         for (const a of args) { if (const #Ty(x) = a) { if (self.needsDrop(x)) { return true; } } }
@@ -286,7 +288,9 @@ impl JsGen {
           const call = self.dropCall(t.clone(), span);
           body.push(`  ${call};\n`);
         }
-        if (self.lw.p.isKnown(d, "Box")) {
+        if (self.lw.p.isKnown(d, "Cont")) {
+          body.push("  v.$drop();\n");
+        } else if (self.lw.p.isKnown(d, "Box")) {
           if (const #Some(#Ty(inner)) = args.first() && self.needsDrop(inner)) {
             const f = self.dropFn(inner.clone(), span);
             body.push(`  ${f}(v);\n`);
@@ -809,10 +813,22 @@ impl JsGen {
       // A panic stops the task where it is: its cleanup does not run (§5.7).
       self.line("} finally { if ($rt.unwinds()) {");
       self.cx.indent += 1;
-      let k = b.cleanups.len();
+      // Each cleanup runs however the one before it ended: one that unwinds — a cancelled
+      // operation (§5.3) — does not keep the others from running.
+      let active: Vec<usize> = Vec.new();
+      for (const [i, c] of b.cleanups.iter().enumerate()) {
+        match (c) {
+          #Drop(l) => { const t = self.cx.locals[l].ty.clone(); if (self.drops(t)) { active.push(i); } }
+          #Defer(_, _) => active.push(i),
+          #Arena(_) => {}
+        }
+      }
+      let opened: usize = 0;
+      let k = active.len();
       while (k > 0) {
         k -= 1;
-        match (b.cleanups[k]) {
+        if (k > 0) { self.line("try {"); self.cx.indent += 1; }
+        match (b.cleanups[active[k]]) {
           #Drop(l) => {
             const t = self.cx.locals[l].ty.clone();
             if (self.drops(t)) {
@@ -835,7 +851,9 @@ impl JsGen {
           }
           #Arena(_) => {}
         }
+        if (k > 0) { self.cx.indent -= 1; self.line("} finally {"); self.cx.indent += 1; opened += 1; }
       }
+      while (opened > 0) { self.cx.indent -= 1; self.line("}"); opened -= 1; }
       self.cx.indent -= 1;
       self.line("} }");
     }
@@ -1107,7 +1125,8 @@ impl JsGen {
     }
     // A handler of `Io` says, while its body runs, that `Io`'s operations are the program's.
     const io = if (self.lw.p.defs[d].name == "Io" && self.lw.p.modules[self.lw.p.defs[d].module].isStd) { ", true" } else { "" };
-    const run = `$rt.handle(${id}, ${body}, { ${parts.join(", ")} }${io})`;
+    const kept = if (h.kept) { if (io.len() > 0) { ", true" } else { ", false, true" } } else { "" };
+    const run = `$rt.handle(${id}, ${body}, { ${parts.join(", ")} }${io}${kept})`;
     const call = if (self.cx.gen) { `(yield* ${run})` } else { `$rt.run(${run})` };
     const store = if (unitTy(b)) { "".toString() } else { `${self.local(h.result)} = ` };
     const leaves = JsGen.returnsIn(h.body) || h.arms.iter().some((a) => JsGen.returnsIn(a.body));

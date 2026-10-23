@@ -35,6 +35,10 @@ pub enum Cmd {
     Resume(Value),
     /// The result of an effect the driver performed for it, or a failure to raise there.
     Reply(Result<Value, Value>),
+    /// The continuation was dropped: unwind, running the body's cleanup.
+    Unwind,
+    /// What the body performed as it was dropped is cancelled: unwind from it (§5.3).
+    Cancel,
 }
 
 struct Co {
@@ -43,6 +47,9 @@ struct Co {
     arms: Vec<ast::HandlerArm>,
     env: Env,
     lex: Lex,
+    /// An arm lets its continuation leave it: the body, once dropped, is cut off (§5.3).
+    kept: bool,
+    effect: usize,
 }
 
 /// The coroutine's own end of its channels, used on its thread.
@@ -58,6 +65,17 @@ pub struct Cos {
 }
 
 const ENDED: &str = "\u{0}coroutine ended";
+const DROPPED: &str = "\u{0}continuation dropped";
+const CANCELLED: &str = "\u{0}operation cancelled";
+
+/// What the body is told to do instead of being answered.
+fn interrupted(cmd: Cmd) -> Ctl {
+    match cmd {
+        Cmd::Cancel => panic(CANCELLED),
+        Cmd::Unwind => panic(DROPPED),
+        _ => panic("a coroutine resumed out of turn"),
+    }
+}
 
 /// Whether a `handle`'s arms need its body run as a coroutine: some resumptive arm uses its
 /// continuation other than by calling it as its last act.
@@ -88,7 +106,15 @@ pub fn handle(it: &mut Interp, body: &ast::Block, effect: usize, arms: &[ast::Ha
     let (co_tx, from_co) = channel::<Evt>();
     it.cos.drivers.lock().expect("cos").insert(
         co,
-        Co { to: to_co, from: Arc::new(Mutex::new(from_co)), arms: arms.to_vec(), env: env.clone(), lex: it.lex.clone() },
+        Co {
+            to: to_co,
+            from: Arc::new(Mutex::new(from_co)),
+            arms: arms.to_vec(),
+            env: env.clone(),
+            lex: it.lex.clone(),
+            kept: arms.iter().any(|a| a.resumes.as_ref().is_some_and(|k| crate::check::own::escapes(&a.body, &k.name))),
+            effect,
+        },
     );
     it.cos.insides.lock().expect("cos").insert(co, Inside { to: co_tx.clone(), from: Arc::new(Mutex::new(co_rx)) });
     let mut child = it.fork_thread();
@@ -102,6 +128,7 @@ pub fn handle(it: &mut Interp, body: &ast::Block, effect: usize, arms: &[ast::Ha
         let evt = match child.home(|c| c.block(&body, &env)) {
             Ok(v) => Some(Evt::Done(v)),
             Err(Ctl::Panic(m)) if m == ENDED => None,
+            Err(Ctl::Panic(m)) if m == DROPPED || m == CANCELLED => Some(Evt::Done(Value::Unit)),
             Err(Ctl::Panic(m)) => Some(Evt::Panicked(m)),
             Err(other) => Some(Evt::Panicked(format!("cannot leave a suspended `handle` with {other:?}"))),
         };
@@ -129,7 +156,7 @@ pub fn op(it: &mut Interp, co: u64, name: &str, args: Vec<Value>) -> R {
     tell(it, co, Evt::Op(name.to_string(), args))?;
     match wait(it, co)? {
         Cmd::Resume(v) => Ok(v),
-        _ => Err(panic("a coroutine resumed out of turn")),
+        other => Err(interrupted(other)),
     }
 }
 
@@ -139,7 +166,31 @@ pub fn forward(it: &mut Interp, co: u64, evt: Evt) -> R {
     match wait(it, co)? {
         Cmd::Reply(Ok(v)) => Ok(v),
         Cmd::Reply(Err(e)) => it.raise(e),
-        _ => Err(panic("a coroutine resumed out of turn")),
+        other => Err(interrupted(other)),
+    }
+}
+
+/// Drops a continuation: its body, suspended, unwinds, its cleanup running under the handlers
+/// around where its arm gives it up — or, if it could leave its arm, cut off from every handler,
+/// what it performs cancelled and the cleanup unwinding from there (§5.3).
+pub fn drop_cont(it: &mut Interp, co: u64) -> Result<(), Ctl> {
+    let Some(c) = it.cos.drivers.lock().expect("cos").remove(&co) else { return Ok(()) };
+    let mut cmd = Cmd::Unwind;
+    loop {
+        if c.to.send(cmd).is_err() {
+            return Ok(());
+        }
+        match c.from.lock().expect("rx").recv() {
+            Ok(Evt::Op(name, args)) if !c.kept => cmd = Cmd::Resume(it.perform_op(c.effect, &name, args)?),
+            Ok(Evt::Perform(effect, name, args)) if !c.kept => cmd = Cmd::Reply(Ok(it.perform_op(effect, &name, args)?)),
+            Ok(Evt::Yield(v)) if !c.kept => {
+                it.yield_value(v)?;
+                cmd = Cmd::Reply(Ok(Value::Unit));
+            }
+            Ok(Evt::Op(..) | Evt::Perform(..) | Evt::Yield(_)) => cmd = Cmd::Cancel,
+            Ok(Evt::Panicked(m)) => return Err(panic(m)),
+            Ok(Evt::Done(_) | Evt::Failed(_)) | Err(_) => return Ok(()),
+        }
     }
 }
 

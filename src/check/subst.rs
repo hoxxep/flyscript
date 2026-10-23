@@ -359,11 +359,30 @@ impl Subst {
         }
     }
 
+    /// Whether row variable `v` is the tail of a row inside `t`: binding `v` to a row holding `t`
+    /// would make an infinite type.
+    fn row_occurs(&self, v: u32, t: &Ty) -> bool {
+        match self.resolve(t) {
+            Ty::Record(r) | Ty::Union(r) => {
+                let r = self.expand_row(&r);
+                r.tail == Tail::Var(v) || r.labels.values().any(|t| self.row_occurs(v, t))
+            }
+            Ty::Named(_, args) => args.iter().any(|a| matches!(a, GArg::Ty(t) if self.row_occurs(v, t))),
+            Ty::Tuple(ts) => ts.iter().any(|t| self.row_occurs(v, t)),
+            Ty::Array(t, _) | Ty::Slice(t) | Ty::Borrow(_, t) | Ty::Assoc(t, _) => self.row_occurs(v, &t),
+            Ty::Fn(f) => f.params.iter().any(|t| self.row_occurs(v, t)) || self.row_occurs(v, &f.ret),
+            _ => false,
+        }
+    }
+
     fn bind_row_tail(&mut self, tail: &Tail, labels: BTreeMap<String, Ty>, rest: Tail) -> UResult {
         match tail {
             Tail::Var(v) => {
                 if labels.is_empty() && rest == *tail {
                     return Ok(());
+                }
+                if labels.values().any(|t| self.row_occurs(*v, t)) {
+                    return Err(Mismatch);
                 }
                 self.rows[*v as usize] = Some(Row { labels, tail: rest });
                 Ok(())

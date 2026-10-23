@@ -91,8 +91,8 @@ const { $rt, $b } = (() => {
 
   // A `handle`: runs `body`, a generator, with `arms` handling `effect` (§5.2): deep, so a
   // continuation resumes the body with the handler still around it.
-  function* handle(effect, body, arms, io = false) {
-    return yield* resume(body(), undefined, effect, arms, io);
+  function* handle(effect, body, arms, io = false, kept = false) {
+    return yield* resume(body(), undefined, effect, arms, io, kept);
   }
   // How many handlers of `Io` of the program's own are around the running code: each counts while
   // its body runs, which is while the body's generator is stepped, so a suspended one does not.
@@ -109,7 +109,7 @@ const { $rt, $b } = (() => {
   // this one is left abruptly — an arm fails, or a handler around drops what this one is part of —
   // `g`'s cleanup runs. An arm that returns normally may have kept the continuation, which then
   // owns `g`.
-  function* resume(g, v, effect, arms, io) {
+  function* resume(g, v, effect, arms, io, kept) {
     let owned = true, abrupt = true;
     try {
       let r = stepIo(io, () => g.next(v));
@@ -125,23 +125,31 @@ const { $rt, $b } = (() => {
           if (arm.length <= args.length) {
             // An arm that does not resume: the body is done, its cleanup run first (§5.2).
             owned = false;
-            yield* finish(g, io);
+            yield* finish(g, io, kept);
             return yield* arm(...args);
           }
           const k = function* (x) {
             if (!owned) panic("a continuation resumed twice");
             owned = false;
-            return yield* resume(g, x, effect, arms, io);
+            return yield* resume(g, x, effect, arms, io, kept);
+          };
+          // A continuation that left its arm, dropped where its owner lets it go: the body unwinds,
+          // its cleanup cut off (§5.3). One its arm gives up unwinds once the arm is done.
+          k.$drop = () => {
+            if (!owned || !kept) return;
+            owned = false;
+            drive(finish(g, io, true));
           };
           const a = yield* arm(...args, k);
           abrupt = false;
+          if (owned && !kept) { owned = false; yield* finish(g, io, false); }
           return a;
         }
         const answer = yield op;
         r = stepIo(io, () => g.next(answer));
       }
     } finally {
-      if (owned && abrupt && !panicking) { owned = false; yield* finish(g, io); }
+      if (owned && abrupt && !panicking) { owned = false; yield* finish(g, io, kept); }
     }
   }
   // What a call of a function value gave: run, if it is a generator; its value, if it was a plain
@@ -149,12 +157,20 @@ const { $rt, $b } = (() => {
   function* lift(r) {
     return r !== null && typeof r === "object" && r[Symbol.toStringTag] === "Generator" ? yield* r : r;
   }
-  // Ends a suspended generator, running its cleanup, which may perform what is handled around.
-  function* finish(g, io = false) {
+  // Ends a suspended generator, running its cleanup, which may perform what is handled around — or,
+  // `cancel`, which is cut off from every handler: an operation it performs is cancelled, the cleanup
+  // unwinding from it (§5.3); its turns and `Io` go on.
+  const CANCEL = { name: "Cancel" };
+  function* finish(g, io = false, cancel = false) {
     if (!g.return) return;
-    for (let r = stepIo(io, () => g.return()); !r.done;) {
-      const answer = yield r.value;
-      r = stepIo(io, () => g.next(answer));
+    let r = stepIo(io, () => g.return());
+    while (!r.done) {
+      if (!cancel || r.value instanceof Point) {
+        const answer = yield r.value;
+        r = stepIo(io, () => g.next(answer));
+        continue;
+      }
+      try { r = stepIo(io, () => g.throw(CANCEL)); } catch (e) { if (e === CANCEL) return; throw e; }
     }
   }
   // Runs a destructor that may perform `Io` to its end, without letting other tasks in.

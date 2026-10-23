@@ -2559,7 +2559,7 @@ impl Cgen {
     self.apartCode.push(`static void hdrop_${n}(void* f) { ${frame}* env = f; fly_handle_unwind(&env->h); hrelease_${n}(env); }\n`);
     self.apartCode.push(resumes.asStr());
     const store = if (unitTy(b)) { "".toString() } else { `${self.local(h.result)} = v_; ` };
-    self.line(`{ ${frame}* f_ = fly_alloc(sizeof(${frame})); *f_ = (${frame}){ .refs = 1, .h = { .effect = ${d} }${if (inits.len() > 0) { ", " } else { "" }}${inits.join(", ")} }; fly_handle_start(&f_->h, hentry_${n}, f_); ${bc} v_ = hrun_${n}(f_); ${store}}`);
+    self.line(`{ ${frame}* f_ = fly_alloc(sizeof(${frame})); *f_ = (${frame}){ .refs = 1, .h = { .effect = ${d}${if (h.kept) { ", .kept = true" } else { "" }} }${if (inits.len() > 0) { ", " } else { "" }}${inits.join(", ")} }; fly_handle_start(&f_->h, hentry_${n}, f_); ${bc} v_ = hrun_${n}(f_); ${store}}`);
     self.dynamicExit();
     self.line(`if (fly_unwinding) goto ${self.target()}; if (FLY_FAILED) goto ${self.target()};`);
   }

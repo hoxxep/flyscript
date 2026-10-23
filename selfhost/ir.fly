@@ -202,6 +202,9 @@ export type Handle = {
   // Whether every arm resumes its continuation once, as the last thing it does: then the body may
   // run where the `handle` is, and each operation it performs call its arm, which returns to it.
   direct: bool;
+  // Whether an arm lets its continuation leave it: then the body, once dropped, is cut off from
+  // every handler, and what its cleanup performs is cancelled (§5.3).
+  kept: bool;
 };
 
 // An arm of a `handle`: the operation's index, the locals its arguments are bound to, its

@@ -1,0 +1,28 @@
+// expect: 1
+// expect: cleaned
+// expect: 0
+// A continuation dropped where its owner lets it go is cut off from every handler: an operation
+// its cleanup performs is cancelled, the cleanup unwinding from it, and the rest of the cleanup
+// runs as unwinding does (§5.3).
+import { println } from "std/io";
+effect Note { note(n: u32): void; }
+effect Tick { tick(): void; }
+enum Steps<row E> { #Done, #More(Cont<void, Steps<E>, E>) }
+function steps(): Steps<[Note, Io]> uses Note, Io {
+  handle {
+    defer { println("cleaned"); };
+    defer { Note.note(7); println("not reached"); };
+    Tick.tick();
+    #Done
+  } with Tick { tick() resumes k => #More(k) }
+}
+export function main(): void uses Io {
+  let noted: u32 = 0;
+  handle {
+    match (steps()) {
+      #More(k) => { println("1"); },
+      #Done => {},
+    }
+  } with Note { note(n) resumes k => { noted += n; k() } }
+  println(`${noted}`);
+}

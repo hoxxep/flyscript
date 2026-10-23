@@ -20,7 +20,8 @@ pub fn needs_drop(p: &Program, t: &Ty) -> bool {
 fn needs(p: &Program, t: &Ty, params: bool, seen: &mut HashSet<DefId>) -> bool {
     match t {
         Ty::Named(d, args) => {
-            if p.has_drop(*d) {
+            // A continuation's body has cleanup to run when it is dropped (§5.3).
+            if p.has_drop(*d) || p.known.get("Cont") == Some(d) {
                 return true;
             }
             if !seen.insert(*d) {
@@ -78,6 +79,12 @@ impl Interp {
             moved.iter().filter(|m| m.first().is_some_and(|f| f == name)).map(|m| m[1..].to_vec()).collect()
         };
         match ty {
+            Ty::Named(d, _) if self.prog.known.get("Cont") == Some(d) => {
+                if let Value::Native("Cont", co) = v.deref() {
+                    super::coroutine::drop_cont(self, co)?;
+                }
+                Ok(())
+            }
             Ty::Named(d, args) => {
                 // The type's own destructor first, then its parts.
                 if let Some(f) = self.prog.drop_method(*d) {

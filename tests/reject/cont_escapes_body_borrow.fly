@@ -1,0 +1,12 @@
+// error: `k` leaves its arm, so it may hold no borrow
+// A continuation that leaves its arm holds no borrow: here the body reads `v` after the operation,
+// so the continuation would borrow it (§5.3).
+effect Tick { tick(): void; }
+enum Step { #Done(usize), #More(Cont<void, Step>) }
+function steps(v: readonly Vec<i32>): Step {
+  handle { const s = v[0..2]; Tick.tick(); #Done(s.len()) } with Tick { tick() resumes k => #More(k) }
+}
+export function main(): void {
+  const v: Vec<i32> = Vec.new();
+  match (steps(v)) { #Done(_) => {}, #More(k) => { const r = k(); } }
+}

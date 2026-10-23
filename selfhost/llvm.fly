@@ -2364,6 +2364,7 @@ impl Lgen {
       const ya = self.gep(f.asStr(), ySlot);
       self.store("ptr", match (outerSink) { #Some(y) => y, #None => "null".toString() }.asStr(), ya.asStr());
     }
+    if (h.kept) { self.ins(`call void @fly_handle_keep(ptr ${f})`); }
     self.ins(`call void @fly_handle_start(ptr ${f}, ptr @hentry_${n}, ptr ${f})`);
     const dst = self.local(h.result);
     match (br) {
@@ -2926,7 +2927,7 @@ impl Lgen {
 
 // The size of the runtime's `fly_handler`, which a `handle`'s frame starts with; where in it the
 // handlers around it are, and a direct one's arms and frame.
-const HANDLER: usize = 64;
+const HANDLER: usize = 80;
 const HANDLER_OUTER: usize = 24;
 const HANDLER_DIRECT: usize = 48;
 const HANDLER_FRAME: usize = 56;
@@ -2948,6 +2949,7 @@ declare ptr @fly_alloc(i64)
 declare void @fly_arena_free(ptr)
 declare void @fly_perform(i32, i32, ptr, ptr)
 declare void @fly_handle_start(ptr, ptr, ptr)
+declare void @fly_handle_keep(ptr)
 declare void @fly_handle_resume(ptr)
 declare zeroext i1 @fly_handle_done(ptr)
 declare void @fly_handle_unwind(ptr)
@@ -2963,7 +2965,7 @@ const GLUE: str = "void flyg_cleanup_begin(fly_unwind_state* s) { *s = fly_clean
 void flyg_cleanup_end(fly_unwind_state* s) { fly_cleanup_end(*s); }
 void flyg_free(void* p) { free(p); }
 _Static_assert(sizeof(fly_unwind_state) <= 16 && _Alignof(fly_unwind_state) <= 8, \"fly_unwind_state\");
-_Static_assert(sizeof(fly_handler) == 64 && __builtin_offsetof(fly_handler, op) == 4 && __builtin_offsetof(fly_handler, args) == 8 && __builtin_offsetof(fly_handler, result) == 16 && __builtin_offsetof(fly_handler, outer) == 24 && __builtin_offsetof(fly_handler, direct) == 48 && __builtin_offsetof(fly_handler, frame) == 56, \"fly_handler\");
+_Static_assert(sizeof(fly_handler) == 80 && __builtin_offsetof(fly_handler, op) == 4 && __builtin_offsetof(fly_handler, args) == 8 && __builtin_offsetof(fly_handler, result) == 16 && __builtin_offsetof(fly_handler, outer) == 24 && __builtin_offsetof(fly_handler, direct) == 48 && __builtin_offsetof(fly_handler, frame) == 56, \"fly_handler\");
 _Static_assert(sizeof(fly_str) == 16 && sizeof(fly_slice) == 16 && __builtin_offsetof(fly_str, len) == 8 && __builtin_offsetof(fly_slice, len) == 8, \"views\");
 _Static_assert(sizeof(fly_String) == 24 && sizeof(fly_vec) == 24 && __builtin_offsetof(fly_String, len) == 8 && __builtin_offsetof(fly_vec, len) == 8, \"lists\");
 _Static_assert(sizeof(fly_fn) == 24 && __builtin_offsetof(fly_fn, drop) == 8 && __builtin_offsetof(fly_fn, fn) == 16, \"fly_fn\");

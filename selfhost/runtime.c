@@ -1057,7 +1057,13 @@ void fly_perform(uint32_t effect, int op, void* args, void* result) {
   fly_ctx* cx = fly_cx();
   fly_handler* inner = cx->handlers;
   fly_handler* h = inner;
-  while (h && h->effect != effect) h = h->outer;
+  while (h && h->effect != effect && !h->dying) h = h->outer;
+  // Code being dropped is cut off from every handler, its own and those around: the operation is
+  // cancelled, and the code unwinds from it (§5.3).
+  if (h && h->dying) {
+    cx->unwinding = true;
+    return;
+  }
   if (!h) fly_panic("an effect is performed that nothing handles");
   // A direct handler's arm runs here, in the context of its `handle`: what it performs goes to
   // the handlers around that. The arm runs on this task, so its context is this one.
@@ -1070,6 +1076,7 @@ void fly_perform(uint32_t effect, int op, void* args, void* result) {
   h->op = op;
   h->args = args;
   h->result = result;
+  h->from = inner;
   h->suspended = cur_fiber;
   switch_to(h->fiber->back);
 }
@@ -1081,8 +1088,11 @@ bool fly_handled(uint32_t effect) {
   return false;
 }
 
+void fly_handle_keep(fly_handler* h) { h->kept = true; }
+
 void fly_handle_start(fly_handler* h, void (*entry)(void*), void* arg) {
   h->outer = fly_handlers;
+  h->dying = false;
   h->op = -1;
   h->fiber = fiber_new(entry, arg, h);
   h->fiber->back = cur_fiber;
@@ -1109,6 +1119,12 @@ void fly_handle_unwind(fly_handler* h) {
   cx->err = NULL;
   cx->unwinding = true;
   cx->stopping = false;
+  // A body whose continuation could leave its arm, dropped, is cut off from every handler; so is
+  // such a body suspended in this one, taken through an operation of it (§5.3).
+  if (h->kept) h->dying = true;
+  for (fly_handler* x = h->from; x && x != h; x = x->outer) {
+    if (x->kept && x->fiber) x->dying = true;
+  }
   fly_handle_resume(h);
   cx = fly_cx_now();
   cx->err = saved.err;

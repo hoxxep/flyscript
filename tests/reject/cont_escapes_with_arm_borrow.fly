@@ -1,6 +1,6 @@
-// error: the result borrows `out`, which does not outlive this function
-// A continuation that leaves its arm takes the handler with it, and the handler's arm changes
-// `out`: whatever holds the continuation borrows `out` (§5.3).
+// error: `out` cannot be used here: this `handle`'s continuation leaves its arm
+// A continuation that leaves its arm may be resumed wherever it goes, so its arms use nothing of
+// the code around: here the arm would change `out` after `makeLogger` returned (§5.3).
 effect Log { info(msg: String): void; }
 enum Step { #Done, #More(Cont<void, Step>) }
 function makeLogger(): Step {

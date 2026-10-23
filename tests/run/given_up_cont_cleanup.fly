@@ -1,0 +1,16 @@
+// expect: 2
+// expect: 5
+// A continuation its arm gives up unwinds there, its cleanup under the handlers around the
+// `handle`: what it performs, they take (§5.3).
+import { println } from "std/io";
+effect Note { note(n: u32): void; }
+effect Tick { tick(): void; }
+function stops(): i32 uses Note {
+  handle { defer { Note.note(5); }; Tick.tick(); 1 } with Tick { tick() resumes k => 2 }
+}
+export function main(): void uses Io {
+  let noted: u32 = 0;
+  const v = handle { stops() } with Note { note(n) resumes k => { noted += n; k() } };
+  println(`${v}`);
+  println(`${noted}`);
+}

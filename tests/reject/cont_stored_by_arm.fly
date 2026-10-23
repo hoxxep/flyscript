@@ -1,0 +1,9 @@
+// error: `saved` cannot be used here: this `handle`'s continuation leaves its arm
+// A continuation that leaves its arm may be resumed wherever it goes, even where its arm would
+// change `saved` beside code that is using it: its arms use nothing of the code around (§5.3).
+effect Tick { tick(): void; }
+export function main(): void {
+  let saved: Option<Cont<void, i32>> = #None;
+  const first = handle { Tick.tick(); 7 } with Tick { tick() resumes k => { saved = #Some(k); 0 } };
+  match (saved) { #Some(k) => { const r = k(); }, #None => {} }
+}

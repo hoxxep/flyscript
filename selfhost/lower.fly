@@ -16,7 +16,7 @@ import { Program as Prog, Binding, DefKind, SubstMap, subst, substArg, substEffs
 import { Prim, Row, Tail, Eff, EffRow, FnTy, FnMode, Len, GArg, Ty, pure, isInt, isFloat, primName, labelGet, keyArgs, keyTy } from "./types";
 import { Binds } from "./impls";
 import { checkFn } from "./check";
-import { checkOwnership } from "./own";
+import { checkOwnership, escapes } from "./own";
 import {
   Local, LocalKind, Place, Root, Proj, ProjKind, Operand, Constant, Rvalue, Capture, Call, Callee, Stmt, Handle, Arm, Block,
   Cleanup, Func, ConstValue, MainArg, Uses, useStmt,
@@ -2861,7 +2861,8 @@ impl Lower {
     self.ret = ret;
     self.loops = loops;
     const direct = !handlesYield && isDirect(bodyBlock, out);
-    self.emit(#Handle({ effect: d, body: bodyBlock, value, arms: out, result: r, span: e.span, direct }));
+    const kept = arms.iter().some((a) => match (a.resumes) { #Some(k) => escapes(a.body, k.name.asStr()), #None => false });
+    self.emit(#Handle({ effect: d, body: bodyBlock, value, arms: out, result: r, span: e.span, direct, kept }));
     if (unitTy(b)) { unitOp() } else { self.useLocal(r) }
   }
 

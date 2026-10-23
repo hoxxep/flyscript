@@ -1,0 +1,13 @@
+// error: `n` refers into a region, so this `handle`'s body cannot use it
+// A continuation that leaves its arm may be resumed after a region its body reads from has ended:
+// its body uses nothing of the code around that refers into a region (§5.3).
+effect Tick { tick(): void; }
+enum Step { #Done(i32), #Paused(Cont<void, Step>) }
+export function main(): void {
+  let later: Step = #Done(0);
+  region (R) {
+    const n = alloc(5);
+    later = handle { Tick.tick(); #Done(n.get()) } with Tick { tick() resumes k => #Paused(k) };
+  }
+  match (later) { #Done(_) => {}, #Paused(k) => { const r = k(); } }
+}

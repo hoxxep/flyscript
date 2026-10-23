@@ -1181,14 +1181,8 @@ impl Own {
       }
       #Break | #Continue => ({ loans: Vec.new() }),
       #Region { name: _, body } => self.blockAs(body, how, e),
-      // The one thing `unsafe` vouches for in ownership: an operation's arguments may leave their
-      // arm, because the code around keeps the continuation they borrow from from being resumed
-      // while they live (§5.5's `generate`).
-      #Unsafe(body) => {
-        let v = self.blockAs(body, how, e);
-        v.loans.retain((l) => !self.lentArgs.has(self.loans[l].path.root));
-        v
-      }
+      // `unsafe` vouches for raw pointers and foreign code, not for ownership.
+      #Unsafe(body) => self.blockAs(body, how, e),
       #Handle { body, effect: _, arms } => self.handle(e, body, arms, how),
       #Comptime(inner) => self.expr(inner, how),
     }
@@ -1653,22 +1647,52 @@ impl Own {
         self.checkOutlives(dying, arm.body, av);
       }
     }
-    // A continuation that leaves its arm takes its handler with it, so whatever has it borrows
-    // everything the handler's arms use (§5.3).
+    // A continuation that leaves its arm may be resumed wherever it goes, so it holds no borrow:
+    // the body borrows nothing it needs past an operation, the operation lends nothing to the
+    // arm, and the arms use nothing of the code around (§5.3).
     if (arms.iter().some((a) => match (a.resumes) { #Some(k) => escapes(a.body, k.name.asStr()), #None => false })) {
+      for (const arm of arms) {
+        if (const #Some(k) = arm.resumes) {
+          if (escapes(arm.body, k.name.asStr())) {
+            if (v.loans.len() > 0 || across.len() > 0) {
+              self.err(k.span, `\`${k.name}\` leaves its arm, so it may hold no borrow, but the \`handle\`'s body borrows from the code around it past an operation`.asStr());
+            }
+            let regional = mentionsAnyRegion(self.nameTy(k.span.start));
+            for (const p of arm.params) {
+              const ty = self.nameTy(p.span.start);
+              if (self.mayHold(ty)) {
+                self.err(p.span, `\`${arm.op.name}\` lends its arguments, so its continuation \`${k.name}\` cannot leave the arm`.asStr());
+              }
+              if (mentionsAnyRegion(ty)) { regional = true; }
+            }
+            // Nor does what passes into and out of the body refer into a region, which could end
+            // before the continuation is resumed.
+            if (regional) {
+              self.err(k.span, `\`${k.name}\` leaves its arm, so what its operation passes and the \`handle\` gives may refer into no region`.asStr());
+            }
+          }
+        }
+      }
+      // What the body uses of the code around may refer into no region either.
+      let bodyUses: Vec<[String, Span]> = Vec.new();
+      walkBlock(body, HashSet.new(), mut bodyUses);
+      for (const [name, span] of bodyUses) {
+        if (const #Some(var) = self.lookup(name.asStr())) {
+          if (mentionsAnyRegion(self.vars[var].ty)) {
+            self.err(span, `\`${name}\` refers into a region, so this \`handle\`'s body cannot use it: its continuation leaves its arm`.asStr());
+          }
+        }
+      }
       let armUses: Vec<[String, Span]> = Vec.new();
-      let armChanged: HashSet<String> = HashSet.new();
       for (const arm of arms) {
         let bound: HashSet<String> = HashSet.new();
         for (const p of arm.params) { bound.insert(p.name.clone()); }
         if (const #Some(k) = arm.resumes) { bound.insert(k.name.clone()); }
         walkBlock(arm.body, bound, mut armUses);
-        syntacticBlockChanges(arm.body, mut armChanged);
       }
       for (const [name, span] of armUses) {
-        if (const #Some(var) = self.lookup(name.asStr())) {
-          const l = self.newLoan(Path { root: var, fields: Vec.new() }, armChanged.has(name.asStr()), span);
-          addLoan(mut loans, l);
+        if (self.lookup(name.asStr()).isSome()) {
+          self.err(span, `\`${name}\` cannot be used here: this \`handle\`'s continuation leaves its arm, and may be resumed after \`${name}\` is gone`.asStr());
         }
       }
     }
@@ -2732,7 +2756,19 @@ function blockDiverges(b: readonly Block): bool {
 
 // Whether an arm lets its continuation `k` go other than by calling it: returns it, stores it,
 // passes it on.
-function escapes(b: readonly Block, k: str): bool {
+// Whether a type refers into some region.
+function mentionsAnyRegion(t: readonly Ty): bool {
+  match (t) {
+    #Named(_, args) => args.iter().some((a) => match (a) { #Ty(x) => mentionsAnyRegion(x), #Region(_) => true, _ => false }),
+    #Record(r) | #Union(r) => r.labels.iter().some(([_, x]) => mentionsAnyRegion(x)),
+    #Tuple(ts) => ts.iter().some((x) => mentionsAnyRegion(x)),
+    #Array(x, _) | #Slice(x) | #Borrow(_, x) => mentionsAnyRegion(x.get()),
+    #Fn(f) => f.params.iter().some((x) => mentionsAnyRegion(x)) || mentionsAnyRegion(f.ret),
+    _ => false,
+  }
+}
+
+export function escapes(b: readonly Block, k: str): bool {
   let seen: Vec<[String, Span]> = Vec.new();
   walkBlock(b, HashSet.new(), mut seen);
   let calls: usize = 0;

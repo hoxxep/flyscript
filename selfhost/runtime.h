@@ -254,8 +254,16 @@ struct fly_handler {
   // frame, and returns with the result they give.
   void (*direct)(void* frame, int op, void* args, void* result);
   void* frame;
+  // The handlers in force where its body last performed one of its operations.
+  fly_handler* from;
+  // Its body is being dropped: cut off from every handler, what it performs is cancelled (§5.3).
+  bool dying;
+  // An arm lets its continuation leave it: the body, dropped, is cut off.
+  bool kept;
 };
 void fly_perform(uint32_t effect, int op, void* args, void* result);
+// Says that an arm of the handler lets its continuation leave it.
+void fly_handle_keep(fly_handler* h);
 // Whether a `handle` of `effect` is around the running code.
 bool fly_handled(uint32_t effect);
 // Cleanup — a `defer`, a destructor — runs to its end however its block is left: what is
