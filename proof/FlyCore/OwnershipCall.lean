@@ -173,27 +173,32 @@ theorem unhideAll_weaker : ∀ {Γ Γb : Ctx} {ys : List Var}, Weaker Γb (hideA
   | _, _, [], h => h
   | Γ, _, y :: ys, h => thaw_weaker_hide (unhideAll_weaker (Γ := hide Γ y) (ys := ys) h)
 
-mutual
-/-- Typing only ever moves: what an expression leaves is what it found, some owned variables perhaps
-moved. -/
-theorem typed_weaker : Typed F O Γ e τ Γ' r → (Γ.map Prod.fst).Nodup → Weaker Γ' Γ
+theorem atom_weaker : AtomTy Γ a τ Γ' → (Γ.map Prod.fst).Nodup → Weaker Γ' Γ
   | .lit, _ => Weaker.refl _
   | .read _, _ => Weaker.refl _
   | .move hx, hk => setSlot_weaker hk hx .forget
-  | .add ha hb, hk => (typed_weaker hb (by rw [typed_keys ha]; exact hk)).trans (typed_weaker ha hk)
-  | .new ha, hk => typed_weaker ha hk
+
+theorem atoms_weaker : AtomsTy Γ as τs Γ' → (Γ.map Prod.fst).Nodup → Weaker Γ' Γ
+  | .nil, _ => Weaker.refl _
+  | .cons ha hrest, hk => (atoms_weaker hrest (by rw [atom_keys ha]; exact hk)).trans (atom_weaker ha hk)
+
+/-- Typing only ever moves: what an expression leaves is what it found, some owned variables perhaps
+moved. -/
+theorem typed_weaker : Typed F O Γ e τ Γ' r → (Γ.map Prod.fst).Nodup → Weaker Γ' Γ
+  | .atom ha, hk => atom_weaker ha hk
+  | .add ha hb, hk => (atom_weaker hb (by rw [atom_keys ha]; exact hk)).trans (atom_weaker ha hk)
+  | .new ha, hk => atom_weaker ha hk
   | .let_ hx ha hb, hk => by
     have := typed_weaker hb (List.nodup_cons.mpr ⟨by rw [typed_keys ha]; exact lookup_none_keys hx,
       by rw [typed_keys ha]; exact hk⟩)
     cases this with
     | cons _ w => exact w.trans (typed_weaker ha hk)
-  | .write ha _, hk => typed_weaker ha hk
-  | .assign ha _, hk => typed_weaker ha hk
-  | .call _ _ hargs _ _, hk => args_weaker hargs hk
-  | .seq ha hb, hk => (typed_weaker hb (by rw [typed_keys ha]; exact hk)).trans (typed_weaker ha hk)
+  | .write ha _, hk => atom_weaker ha hk
+  | .assign ha _, hk => atom_weaker ha hk
+  | .call _ _ hargs _ _, hk => atoms_weaker hargs hk
   | .ite hc ha _ wa _, hk =>
-    wa.trans ((typed_weaker ha (by rw [typed_keys hc]; exact hk)).trans (typed_weaker hc hk))
-  | .throw_ ha _, hk => typed_weaker ha hk
+    wa.trans ((typed_weaker ha (by rw [atom_keys hc]; exact hk)).trans (atom_weaker hc hk))
+  | .throw_ ha _, hk => atom_weaker ha hk
   | .try_ hx hb hh, hk => by
     have := typed_weaker hh (List.nodup_cons.mpr ⟨by exact lookup_none_keys hx,
       by rw [typed_keys hb]; exact hk⟩)
@@ -206,7 +211,7 @@ theorem typed_weaker : Typed F O Γ e τ Γ' r → (Γ.map Prod.fst).Nodup → W
       by rw [lendCtx_keys]; exact hk⟩)
     cases this with
     | cons _ w => exact thaw_weaker_lend w
-  | .perform _ _ hargs _ _, hk => args_weaker hargs hk
+  | .perform _ _ hargs _ _, hk => atoms_weaker hargs hk
   | .handle _ _ _ _ _ _ _ hb, hk =>
     unhideAll_weaker (thaw_weaker (typed_weaker hb (by rw [freeze_keys, hideAll_keys]; exact hk)))
   | .handleAbort _ _ _ hx hb hh, hk => by
@@ -214,10 +219,6 @@ theorem typed_weaker : Typed F O Γ e τ Γ' r → (Γ.map Prod.fst).Nodup → W
       by rw [typed_keys hb]; exact hk⟩)
     cases this with
     | cons _ w => exact w.trans (typed_weaker hb hk)
-theorem args_weaker : Args F O Γ as τs Γ' r → (Γ.map Prod.fst).Nodup → Weaker Γ' Γ
-  | .nil, _ => Weaker.refl _
-  | .cons ha hrest, hk => (args_weaker hrest (by rw [typed_keys ha]; exact hk)).trans (typed_weaker ha hk)
-end
 
 /-- What an expression may give, said of a context it leaves, holds of one that is weaker. -/
 theorem post_weaken {r : Res × Store} (h : Post F O σ E S R H Γ₁ env τ hs r) (w : Weaker Γ' Γ₁) :
@@ -630,90 +631,6 @@ theorem Vals.length : Vals σ τs vs Ls → vs.length = τs.length := by
   induction h with
   | nil => rfl
   | cons _ _ ih => simp [ih]
-
-/-- The owned arguments, evaluated in order: never stuck; their values, each owning cells of no
-variable's, of no handler's and of no other value's; or a failure, the values before it dropped. -/
-theorem args_ok (ihn : ∀ σ Γ env E S H e τ Γ', Typed F O Γ e τ Γ' r → Inv σ Γ env E S → WF σ →
-      Ready F O σ E S R H hs r → Post F O σ E S R H Γ' env τ hs (eval F O n hs σ env e)) :
-    Args F O Γ as τs Γ' r → Inv σ Γ env E S → WF σ → Ready F O σ E S R H hs r →
-    match evalArgs (eval F O n hs) σ env as τs with
-    | (.inl vs, σ') => ∃ E' H' Ls, Inv σ' Γ' env E' S ∧ Vals σ' τs vs Ls ∧ Ls.flatten.Nodup ∧
-        Disj Ls.flatten (E' ++ H') ∧ Disj Ls.flatten S ∧ Moves σ (E ++ H) σ' (E' ++ H') Ls.flatten ∧
-        Held F O σ' hs R H' E'
-    | (.inr r, σ') => r = .timeout ∨ ∃ id k, r = .abort id k ∧ AimedIn id hs ∧
-        ∃ E' H', Inv σ' Γ' env E' S ∧ Moves σ (E ++ H) σ' (E' ++ H') [] ∧ Held F O σ' hs R H' E' := by
-  intro hargs
-  induction as generalizing Γ τs σ E H with
-  | nil =>
-    intro hI hwf hR
-    cases hargs
-    simp only [evalArgs]
-    exact ⟨E, H, [], hI, .nil, List.nodup_nil, disj_nil_left, disj_nil_left, Moves.refl hwf (fun l hl => by
-      rcases List.mem_append.mp hl with h | h
-      · exact hI.alloc l h
-      · exact hR.1.allocH l h), hR.1⟩
-  | cons a as ih =>
-    intro hI hwf hready
-    cases hargs with
-    | cons ha hrest =>
-    simp only [evalArgs]
-    have h1 := ihn _ _ _ _ _ _ _ _ _ ha hI hwf hready
-    generalize eval F O n hs σ env _ = r1 at h1 ⊢
-    rcases r1 with ⟨r1, σ1⟩
-    cases r1 with
-    | val v =>
-      dsimp only
-      obtain ⟨E₁, H₁, L₁, hI₁, hv₁, hd₁, hdS₁, hm₁, hh₁⟩ := h1
-      have hdH₁ : Disj L₁ H₁ := fun l hl h => hd₁ l hl (List.mem_append.mpr (.inr h))
-      obtain ⟨-, hRL₁⟩ := hready.1.apart hwf hm₁
-      have h2 := ih hrest hI₁ hm₁.wf (hready.post hwf hI.disj hI.allocS hm₁ hh₁ hdH₁ fun x hx => .inl hx)
-      generalize evalArgs (eval F O n hs) σ1 env _ _ = r2 at h2 ⊢
-      rcases r2 with ⟨r2, σ2⟩
-      cases r2 with
-      | inl vs =>
-        dsimp only
-        obtain ⟨E₂, H₂, Ls, hI₂, hvs, hn, hd₂, hdS₂, hm₂, hh₂⟩ := h2
-        obtain ⟨hdE, hdL⟩ := hm₂.apart hm₁.wf hv₁.alloc hd₁
-        refine ⟨E₂, H₂, L₁ :: Ls, hI₂, .cons (hv₁.frame (hm₂.keeps hm₁.wf hv₁.alloc hd₁)) hvs, ?_, ?_, ?_, ?_, hh₂⟩
-        · simp only [List.flatten_cons]
-          exact nodup_append_disj.mpr ⟨hv₁.nodup, hn, hdL⟩
-        · simp only [List.flatten_cons]
-          exact disj_append_left.mpr ⟨hdE, hd₂⟩
-        · simp only [List.flatten_cons]
-          exact disj_append_left.mpr ⟨hdS₁, hdS₂⟩
-        · simpa using hm₁.trans hm₂ hd₁ hwf
-      | inr r =>
-        rcases h2 with rfl | ⟨id, k, rfl, haim, E₂, H₂, hI₂, hm₂, hh₂⟩
-        · exact .inl rfl
-        -- A later argument failed: this one's value is dropped on the way out.
-        have hv₂ := hv₁.frame (hm₂.keeps hm₁.wf hv₁.alloc hd₁)
-        obtain ⟨hdE, -⟩ := hm₂.apart hm₁.wf hv₁.alloc hd₁
-        obtain ⟨σ3, hdrop, hn, hfree, hkeep⟩ := drop_ok _ σ2 v L₁ hv₂
-        simp only [Res.done, ↓reduceIte, hdrop]
-        have hdE₂ : Disj L₁ E₂ := fun l hl h => hdE l hl (List.mem_append.mpr (.inl h))
-        have hdH₂ : Disj L₁ H₂ := fun l hl h => hdE l hl (List.mem_append.mpr (.inr h))
-        refine .inr ⟨id, k, rfl, haim, E₂, H₂, ⟨hI₂.foot.frame fun l hl => hkeep l fun h => ?_, hI₂.nodup, hI₂.disj,
-          hI₂.keys⟩, ?_, hh₂.frame fun l hl => hkeep l fun h => ?_⟩
-        · rcases List.mem_append.mp hl with hl | hl
-          · exact hdE₂ l h hl
-          · exact hdS₁ l h hl
-        · refine ((hm₁.trans hm₂ hd₁ hwf).relabel (E'' := E₂ ++ H₂ ++ L₁) (L'' := []) fun x => by mem_iff).trans
-            (Moves.free (E := E₂ ++ H₂ ++ L₁) (E' := E₂ ++ H₂) (D := L₁) (WF.of_free hm₂.wf hn hfree hkeep) hn
-              (fun l hl => by
-                rcases List.mem_append.mp hl with hl | hl
-                · rcases List.mem_append.mp hl with hl | hl
-                  · exact hI₂.alloc l hl
-                  · exact hh₂.allocH l hl
-                · exact hv₂.alloc l hl)
-              (fun x => by simp [or_assoc]) hfree hkeep hdE.symm) disj_nil_left hwf |>.relabel fun x => by simp
-        · rcases List.mem_append.mp hl with hl | hl
-          · exact hRL₁ l hl h
-          · exact hdH₂ l h hl
-    | abort id k =>
-      obtain ⟨haim, E₁, H₁, hI₁, hm₁, hh₁⟩ := h1
-      exact .inr ⟨id, k, rfl, haim, E₁, H₁, hI₁.weaken (args_weaker hrest (by rw [typed_keys ha]; exact hI.keys)), hm₁, hh₁⟩
-    | stuck => simp [Post] at h1
-    | timeout => exact .inl rfl
 
 /-! ## Binding the owned parameters -/
 

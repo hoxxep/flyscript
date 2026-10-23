@@ -218,23 +218,28 @@ theorem unhideAll_keys : ∀ {Γ Γb : Ctx} {ys : List Var}, Γb.map Prod.fst = 
   | _, _, [], h => h
   | Γ, _, y :: ys, h => thaw_keys ((unhideAll_keys (Γ := hide Γ y) (ys := ys) (h.trans hide_keys.symm)).trans hide_keys)
 
-mutual
-theorem typed_keys : Typed F O Γ e τ Γ' r → Γ'.map Prod.fst = Γ.map Prod.fst
+theorem atom_keys : AtomTy Γ a τ Γ' → Γ'.map Prod.fst = Γ.map Prod.fst
   | .lit => rfl
   | .read _ => rfl
   | .move _ => setSlot_keys _
-  | .add ha hb => (typed_keys hb).trans (typed_keys ha)
-  | .new ha => typed_keys ha
+
+theorem atoms_keys : AtomsTy Γ as τs Γ' → Γ'.map Prod.fst = Γ.map Prod.fst
+  | .nil => rfl
+  | .cons ha hrest => (atoms_keys hrest).trans (atom_keys ha)
+
+theorem typed_keys : Typed F O Γ e τ Γ' r → Γ'.map Prod.fst = Γ.map Prod.fst
+  | .atom ha => atom_keys ha
+  | .add ha hb => (atom_keys hb).trans (atom_keys ha)
+  | .new ha => atom_keys ha
   | .let_ _ ha hb => by
     have := typed_keys hb
     simp only [List.map_cons, List.cons.injEq] at this
     exact this.2.trans (typed_keys ha)
-  | .write ha _ => typed_keys ha
-  | .assign ha _ => typed_keys ha
-  | .call _ _ hargs _ _ => args_keys hargs
-  | .seq ha hb => (typed_keys hb).trans (typed_keys ha)
-  | .ite hc ha _ wa _ => wa.keys.trans ((typed_keys ha).trans (typed_keys hc))
-  | .throw_ ha _ => typed_keys ha
+  | .write ha _ => atom_keys ha
+  | .assign ha _ => atom_keys ha
+  | .call _ _ hargs _ _ => atoms_keys hargs
+  | .ite hc ha _ wa _ => wa.keys.trans ((typed_keys ha).trans (atom_keys hc))
+  | .throw_ ha _ => atom_keys ha
   | .try_ _ hb hh => by
     have := typed_keys hh
     simp only [List.map_cons, List.cons.injEq] at this
@@ -245,17 +250,13 @@ theorem typed_keys : Typed F O Γ e τ Γ' r → Γ'.map Prod.fst = Γ.map Prod.
     have := typed_keys hb
     simp only [List.map_cons, List.cons.injEq] at this
     exact thaw_keys (this.2.trans lendCtx_keys)
-  | .perform _ _ hargs _ _ => args_keys hargs
+  | .perform _ _ hargs _ _ => atoms_keys hargs
   | .handle _ _ _ _ _ _ _ hb =>
     unhideAll_keys ((thaw_keys ((typed_keys hb).trans freeze_keys)).trans hideAll_keys)
   | .handleAbort _ _ _ _ hb hh => by
     have := typed_keys hh
     simp only [List.map_cons, List.cons.injEq] at this
     exact this.2.trans (typed_keys hb)
-theorem args_keys : Args F O Γ as τs Γ' r → Γ'.map Prod.fst = Γ.map Prod.fst
-  | .nil => rfl
-  | .cons ha hrest => (args_keys hrest).trans (typed_keys ha)
-end
 
 theorem lookup_det {α : Type} {x : Var} {a b : α} {env : List (Var × α)} : lookup x env = some a → lookup x env = some b → a = b := by
   intro h1 h2; rw [h1] at h2; exact Option.some.inj h2

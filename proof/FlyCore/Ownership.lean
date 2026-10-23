@@ -62,28 +62,35 @@ inductive Place where
   | deref (p : Place)
   deriving DecidableEq, Repr
 
-inductive Expr where
+/-- What an operation takes: a value had at once, with no evaluation of its own. -/
+inductive Atom where
   | lit (n : Int)
   /-- The integer at a place, copied. -/
   | read (p : Place)
   /-- The box in an owned variable, which is left moved. -/
   | move (x : Var)
-  | add (a b : Expr)
+  deriving Repr
+
+/-- Expressions in A-normal form: what an operation takes is an atom, and `let` is the one way to
+name what an expression gives, so that the code an expression is part of is a stack of `let`s and
+of the scopes, calls and handlers around them. -/
+inductive Expr where
+  | atom (a : Atom)
+  | add (a b : Atom)
   /-- `Box.new(a)`. -/
-  | new (a : Expr)
+  | new (a : Atom)
   /-- `let x: τ = a; b`, `x` dropped when `b` ends unless it was moved. -/
   | let_ (x : Var) (τ : Ty) (a b : Expr)
   /-- `p = a` for an integer place. -/
-  | write (p : Place) (a : Expr)
+  | write (p : Place) (a : Atom)
   /-- `p = a` for a place holding a `box τ`: what it held is dropped. -/
-  | assign (p : Place) (τ : Ty) (a : Expr)
-  /-- A call: the owned arguments, evaluated in order, then the places lent, each with its mode. -/
-  | call (f : Nat) (owned : List Expr) (lent : List (Mode × Place))
-  | seq (a b : Expr)
+  | assign (p : Place) (τ : Ty) (a : Atom)
+  /-- A call: the owned arguments, in order, then the places lent, each with its mode. -/
+  | call (f : Nat) (owned : List Atom) (lent : List (Mode × Place))
   /-- `if (c) a else b`: `b` when `c` is zero. -/
-  | ite (c a b : Expr)
+  | ite (c : Atom) (a b : Expr)
   /-- `throw a`: a failure carrying an integer. -/
-  | throw_ (a : Expr)
+  | throw_ (a : Atom)
   /-- `try { body } catch (x) { h }`: a failure of `body` is handled by `h`, `x` its payload. -/
   | try_ (body : Expr) (x : Var) (h : Expr)
   /-- `while (c) { body }`, while `c` is not zero. -/
@@ -95,7 +102,7 @@ inductive Expr where
   `body` runs. -/
   | lend (x : Var) (m : Mode) (p : Place) (body : Expr)
   /-- `E.op(…)`: the operation of user effect `e`, with its owned arguments and its places lent. -/
-  | perform (e : Nat) (owned : List Expr) (lent : List (Mode × Place))
+  | perform (e : Nat) (owned : List Atom) (lent : List (Mode × Place))
   /-- `handle { body } with E { op(…) resumes k => k(arm) }`: where `body` performs the operation,
   `arm` runs, its value the operation's result, given the operation's arguments — owned as `owns`,
   lent as `refs` — and the places of `caps`, each lent to it `readonly` or `mut` for as long as the
@@ -222,24 +229,34 @@ def allocAll (σ : Store) : List (Var × Val) → Env × Store
     let (env, σ2) := allocAll σ1 rest
     ((x, c) :: env, σ2)
 
-/-- The owned arguments of a call, in order, by `ev`, against the parameters' types: their values,
-or what stopped them, the values of those before dropped. -/
-def evalArgs (ev : Store → Env → Expr → Res × Store) :
-    Store → Env → List Expr → List Ty → (List Val ⊕ Res) × Store
-  | σ, _, [], _ => (.inl [], σ)
-  | σ, _, _ :: _, [] => (.inr .stuck, σ)
-  | σ, env, a :: rest, τ :: τs =>
-    match ev σ env a with
-    | (.val v, σ1) =>
-      match evalArgs ev σ1 env rest τs with
-      | (.inl vs, σ2) => (.inl (v :: vs), σ2)
-      | (.inr r, σ2) =>
-        if r.done then
-          match drop σ2 τ v with
-          | some σ3 => (.inr r, σ3)
-          | none => (.inr .stuck, σ2)
-        else (.inr r, σ2)
-    | (r, σ1) => (.inr r, σ1)
+/-- An atom's value, and the store after: a move leaves its variable's cell marked moved. -/
+def evalAtom (σ : Store) (env : Env) : Atom → Option (Val × Store)
+  | .lit k => some (.int k, σ)
+  | .read p =>
+    match resolve σ env p with
+    | some l =>
+      match σ.mem l with
+      | some (.int k) => some (.int k, σ)
+      | _ => none
+    | none => none
+  | .move x =>
+    match lookup x env with
+    | some c =>
+      match σ.mem c with
+      | some (.ptr l) => some (.ptr l, σ.set c (some .moved))
+      | _ => none
+    | none => none
+
+/-- The atoms' values, in order. -/
+def evalAtoms (σ : Store) (env : Env) : List Atom → Option (List Val × Store)
+  | [] => some ([], σ)
+  | a :: rest =>
+    match evalAtom σ env a with
+    | some (v, σ1) =>
+      match evalAtoms σ1 env rest with
+      | some (vs, σ2) => some (v :: vs, σ2)
+      | none => none
+    | none => none
 
 /-- Leaving a scope whose variable is in cell `c`: dropped on every way out but a timeout. -/
 def leave (τ : Ty) (c : Nat) : Res × Store → Res × Store
@@ -275,36 +292,23 @@ def eval (F : List Fn) (O : List Op) : Nat → HS → Store → Env → Expr →
   | 0, _, σ, _, _ => (.timeout, σ)
   | n + 1, hs, σ, env, e =>
     match e with
-    | .lit k => (.val (.int k), σ)
-    | .read p =>
-      match resolve σ env p with
-      | some l =>
-        match σ.mem l with
-        | some (.int k) => (.val (.int k), σ)
-        | _ => (.stuck, σ)
-      | none => (.stuck, σ)
-    | .move x =>
-      match lookup x env with
-      | some c =>
-        match σ.mem c with
-        | some (.ptr l) => (.val (.ptr l), σ.set c (some .moved))
-        | _ => (.stuck, σ)
+    | .atom a =>
+      match evalAtom σ env a with
+      | some (v, σ1) => (.val v, σ1)
       | none => (.stuck, σ)
     | .add a b =>
-      match eval F O n hs σ env a with
-      | (.val (.int x), σ1) =>
-        match eval F O n hs σ1 env b with
-        | (.val (.int y), σ2) => (.val (.int (x + y)), σ2)
-        | (.val _, σ2) => (.stuck, σ2)
-        | r => r
-      | (.val _, σ1) => (.stuck, σ1)
-      | r => r
+      match evalAtom σ env a with
+      | some (.int x, σ1) =>
+        match evalAtom σ1 env b with
+        | some (.int y, σ2) => (.val (.int (x + y)), σ2)
+        | _ => (.stuck, σ1)
+      | _ => (.stuck, σ)
     | .new a =>
-      match eval F O n hs σ env a with
-      | (.val v, σ1) =>
+      match evalAtom σ env a with
+      | some (v, σ1) =>
         let (l, σ2) := σ1.alloc v
         (.val (.ptr l), σ2)
-      | r => r
+      | none => (.stuck, σ)
     | .let_ x τ a b =>
       match eval F O n hs σ env a with
       | (.val v, σ1) =>
@@ -312,19 +316,18 @@ def eval (F : List Fn) (O : List Op) : Nat → HS → Store → Env → Expr →
         leave τ c (eval F O n hs σ2 ((x, c) :: env) b)
       | r => r
     | .write p a =>
-      match eval F O n hs σ env a with
-      | (.val (.int k), σ1) =>
+      match evalAtom σ env a with
+      | some (.int k, σ1) =>
         match resolve σ1 env p with
         | some l =>
           match σ1.mem l with
           | some (.int _) => (.val (.int 0), σ1.set l (some (.int k)))
           | _ => (.stuck, σ1)
         | none => (.stuck, σ1)
-      | (.val _, σ1) => (.stuck, σ1)
-      | r => r
+      | _ => (.stuck, σ)
     | .assign p τ a =>
-      match eval F O n hs σ env a with
-      | (.val v, σ1) =>
+      match evalAtom σ env a with
+      | some (v, σ1) =>
         match resolve σ1 env p with
         | some l =>
           match σ1.mem l with
@@ -334,38 +337,31 @@ def eval (F : List Fn) (O : List Op) : Nat → HS → Store → Env → Expr →
             | none => (.stuck, σ1)
           | none => (.stuck, σ1)
         | none => (.stuck, σ1)
-      | r => r
+      | none => (.stuck, σ)
     | .call f owned lent =>
       match F[f]? with
       | none => (.stuck, σ)
       | some d =>
-        match evalArgs (eval F O n hs) σ env owned (d.owns.map Prod.snd) with
-        | (.inl vs, σ1) =>
+        match evalAtoms σ env owned with
+        | some (vs, σ1) =>
           match lent.mapM (fun (_, p) => resolve σ1 env p) with
           | some ls =>
             if vs.length = d.owns.length ∧ ls.length = d.refs.length then
               enter (eval F O n hs) σ1 d.owns vs (d.refs.map Prod.fst) ls [] d.body
             else (.stuck, σ1)
           | none => (.stuck, σ1)
-        | (.inr r, σ1) => (r, σ1)
-    | .seq a b =>
-      match eval F O n hs σ env a with
-      | (.val (.int _), σ1) => eval F O n hs σ1 env b
-      | (.val _, σ1) => (.stuck, σ1)
-      | r => r
+        | none => (.stuck, σ)
     | .ite c a b =>
-      match eval F O n hs σ env c with
-      | (.val (.int k), σ1) => if k = 0 then eval F O n hs σ1 env b else eval F O n hs σ1 env a
-      | (.val _, σ1) => (.stuck, σ1)
-      | r => r
+      match evalAtom σ env c with
+      | some (.int k, σ1) => if k = 0 then eval F O n hs σ1 env b else eval F O n hs σ1 env a
+      | _ => (.stuck, σ)
     | .throw_ a =>
-      match eval F O n hs σ env a with
-      | (.val (.int k), σ1) =>
+      match evalAtom σ env a with
+      | some (.int k, σ1) =>
         match find .fail hs with
         | some (.abort _ id, _) => (.abort id k, σ1)
         | _ => (.stuck, σ1)
-      | (.val _, σ1) => (.stuck, σ1)
-      | r => r
+      | _ => (.stuck, σ)
     | .try_ body x h =>
       catchAt hs.length (eval F O n (.abort .fail hs.length :: hs) σ env body) fun k σ1 =>
         let (c, σ2) := σ1.alloc (.int k)
@@ -405,8 +401,8 @@ def eval (F : List Fn) (O : List Op) : Nat → HS → Store → Env → Expr →
       match O[ef]? with
       | none => (.stuck, σ)
       | some op =>
-        match evalArgs (eval F O n hs) σ env owned op.owns with
-        | (.inl vs, σ1) =>
+        match evalAtoms σ env owned with
+        | some (vs, σ1) =>
           match lent.mapM (fun (_, p) => resolve σ1 env p) with
           | some ls =>
             match find (.eff ef) hs with
@@ -420,7 +416,7 @@ def eval (F : List Fn) (O : List Op) : Nat → HS → Store → Env → Expr →
               | _ => (.stuck, σ1)
             | none => (.stuck, σ1)
           | none => (.stuck, σ1)
-        | (.inr r, σ1) => (r, σ1)
+        | none => (.stuck, σ)
     | .handle body ef caps os rs arm =>
       match caps.mapM (fun c => resolve σ env c.loc) with
       | some ls => eval F O n (.resume ef (List.zipWith (fun c l => ⟨c.name, c.mode, c.ty, l⟩) caps ls) os rs arm :: hs) σ env body
@@ -529,28 +525,35 @@ def armCtx (os : List Var) (rs : List Var) (op : Op) (caps : List (Var × Mode �
   (os.zip op.owns).map (fun p => (p.1, Slot.own p.2 true)) ++ (rs.zip op.refs).map (fun p => (p.1, Slot.ref p.2.1 p.2.2)) ++
     caps.map (fun c => (c.1, Slot.ref c.2.1 c.2.2))
 
-mutual
+/-- `AtomTy Γ a τ Γ'`: `a` has type `τ`, and leaves its variables as `Γ'` says. -/
+inductive AtomTy (Γ : Ctx) : Atom → Ty → Ctx → Prop
+  | lit : AtomTy Γ (.lit n) .int Γ
+  | read : PlaceTy Γ p .int w y → AtomTy Γ (.read p) .int Γ
+  | move : lookup x Γ = some (.own (.box τ) true) →
+      AtomTy Γ (.move x) (.box τ) (setSlot Γ x (.own (.box τ) false))
+
+/-- The owned arguments, in order, against the parameters' types. -/
+inductive AtomsTy : Ctx → List Atom → List Ty → Ctx → Prop
+  | nil : AtomsTy Γ [] [] Γ
+  | cons : AtomTy Γ a τ Γ₁ → AtomsTy Γ₁ as τs Γ₂ → AtomsTy Γ (a :: as) (τ :: τs) Γ₂
+
 /-- `Typed F O Γ e τ Γ' r`: `e` has type `τ`, leaves its variables as `Γ'` says — moved or not —
 and performs only what the row `r` names. -/
 inductive Typed (F : List Fn) (O : List Op) : Ctx → Expr → Ty → Ctx → Row → Prop
-  | lit : Typed F O Γ (.lit n) .int Γ r
-  | read : PlaceTy Γ p .int w y → Typed F O Γ (.read p) .int Γ r
-  | move : lookup x Γ = some (.own (.box τ) true) →
-      Typed F O Γ (.move x) (.box τ) (setSlot Γ x (.own (.box τ) false)) r
-  | add : Typed F O Γ a .int Γ₁ r → Typed F O Γ₁ b .int Γ₂ r → Typed F O Γ (.add a b) .int Γ₂ r
-  | new : Typed F O Γ a τ Γ₁ r → Typed F O Γ (.new a) (.box τ) Γ₁ r
+  | atom : AtomTy Γ a τ Γ₁ → Typed F O Γ (.atom a) τ Γ₁ r
+  | add : AtomTy Γ a .int Γ₁ → AtomTy Γ₁ b .int Γ₂ → Typed F O Γ (.add a b) .int Γ₂ r
+  | new : AtomTy Γ a τ Γ₁ → Typed F O Γ (.new a) (.box τ) Γ₁ r
   | let_ : lookup x Γ = none → Typed F O Γ a τ Γ₁ r →
       Typed F O ((x, .own τ true) :: Γ₁) b τb ((x, .own τ live) :: Γ₂) r → Typed F O Γ (.let_ x τ a b) τb Γ₂ r
-  | write : Typed F O Γ a .int Γ₁ r → PlaceTy Γ₁ p .int true y → Typed F O Γ (.write p a) .int Γ₁ r
-  | assign : Typed F O Γ a τ Γ₁ r → PlaceTy Γ₁ p τ true y → Typed F O Γ (.assign p τ a) .int Γ₁ r
-  | call : F[f]? = some d → (∀ l ∈ d.row, l ∈ r) → Args F O Γ owned (d.owns.map Prod.snd) Γ₁ r →
+  | write : AtomTy Γ a .int Γ₁ → PlaceTy Γ₁ p .int true y → Typed F O Γ (.write p a) .int Γ₁ r
+  | assign : AtomTy Γ a τ Γ₁ → PlaceTy Γ₁ p τ true y → Typed F O Γ (.assign p τ a) .int Γ₁ r
+  | call : F[f]? = some d → (∀ l ∈ d.row, l ∈ r) → AtomsTy Γ owned (d.owns.map Prod.snd) Γ₁ →
       Lends Γ₁ lent (d.refs.map Prod.snd) ys → Exclusive ys →
       Typed F O Γ (.call f owned lent) d.ret Γ₁ r
-  | seq : Typed F O Γ a .int Γ₁ r → Typed F O Γ₁ b τ Γ₂ r → Typed F O Γ (.seq a b) τ Γ₂ r
   /-- Where the branches disagree, a variable is perhaps moved. -/
-  | ite : Typed F O Γ c .int Γ₀ r → Typed F O Γ₀ a τ Γa r → Typed F O Γ₀ b τ Γb r → Weaker Γ' Γa →
+  | ite : AtomTy Γ c .int Γ₀ → Typed F O Γ₀ a τ Γa r → Typed F O Γ₀ b τ Γb r → Weaker Γ' Γa →
       Weaker Γ' Γb → Typed F O Γ (.ite c a b) τ Γ' r
-  | throw_ : Typed F O Γ a .int Γ₁ r → Label.fail ∈ r → Typed F O Γ (.throw_ a) τ Γ₁ r
+  | throw_ : AtomTy Γ a .int Γ₁ → Label.fail ∈ r → Typed F O Γ (.throw_ a) τ Γ₁ r
   /-- The handler starts where the body would have ended: what the body moves is perhaps moved. -/
   | try_ : lookup x Γb = none → Typed F O Γ body τ Γb (.fail :: r) →
       Typed F O ((x, .own .int true) :: Γb) h τ ((x, .own .int live) :: Γh) r →
@@ -564,7 +567,7 @@ inductive Typed (F : List Fn) (O : List Op) : Ctx → Expr → Ty → Ctx → Ro
       Typed F O Γ (.lend x m p body) τb (thaw Γ [y] Γb) r
   /-- Cleanup starts where the body would have ended, and moves nothing. -/
   | defer : Typed F O Γ body τ Γb r → Typed F O Γb d .int Γb r → Typed F O Γ (.defer τ d body) τ Γb r
-  | perform : O[e]? = some op → Label.eff e ∈ r → Args F O Γ owned op.owns Γ₁ r →
+  | perform : O[e]? = some op → Label.eff e ∈ r → AtomsTy Γ owned op.owns Γ₁ →
       Lends Γ₁ lent op.refs ys → Exclusive ys → Typed F O Γ (.perform e owned lent) op.ret Γ₁ r
   /-- The arm runs in the context of the `handle`: its row is the `handle`'s. What it is lent of
   the `handle`'s scope the body may only read, or, lent `mut`, not reach. -/
@@ -579,13 +582,6 @@ inductive Typed (F : List Fn) (O : List Op) : Ctx → Expr → Ty → Ctx → Ro
       Typed F O Γ body τ Γb (.eff e :: r) →
       Typed F O ((x, .own .int true) :: Γb) h τ ((x, .own .int live) :: Γh) r →
       Typed F O Γ (.handleAbort body e x h) τ Γh r
-
-/-- The owned arguments, in order, against the parameters' types. -/
-inductive Args (F : List Fn) (O : List Op) : Ctx → List Expr → List Ty → Ctx → Row → Prop
-  | nil : Args F O Γ [] [] Γ r
-  | cons : Typed F O Γ a τ Γ₁ r → Args F O Γ₁ as τs Γ₂ r → Args F O Γ (a :: as) (τ :: τs) Γ₂ r
-
-end
 
 
 end FlyCore.Ownership
