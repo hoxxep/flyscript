@@ -70,7 +70,7 @@ theorem atom_ok (h : AtomTy Γ a τ Γ') (hI : Inv F ι σ Γ env E S) (hwf : WF
     obtain ⟨a, τr, Lr, P, l, s, ha, hLr, hpath, hres, -⟩ := place_ok hp hI.foot
     obtain ⟨Rb, hRb, -⟩ := path_split hpath hLr
     cases hRb with
-    | @rref _ r _ _ hl hr =>
+    | @rref _ r _ _ _ hl hr =>
       exact ⟨.rptr r, σ, E, [], by simp [evalAtom, hres, hl], hI, .rref hr, disj_nil_left, disj_nil_left,
         Moves.refl hwf hI.alloc⟩
   | @move x τ hx hc =>

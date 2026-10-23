@@ -45,7 +45,7 @@ def RefOk (ι : List Nat) (σ : Store) (k : Nat) (τ : Ty) (l : Nat) : Prop :=
 /-- Data a region holds, of type `τ` said of that region, its arenas from it outwards `ι`. -/
 def RD (ι : List Nat) (σ : Store) : Ty → Val → Prop
   | .int, .int _ => True
-  | .rref k τ, .rptr l => RefOk ι σ k τ l
+  | .rref _ k τ, .rptr l => RefOk ι σ k τ l
   | _, _ => False
 
 /-- `a` holds a value of type `τ`, whose cells — `a` and every cell of its boxes — are `L`. -/
@@ -61,7 +61,7 @@ inductive LT (F : List Fn) (ι : List Nat) (σ : Store) : Nat → Ty → List Na
   | hole : LT F ι σ a (.hole τ) []
   /-- A reference into a region: the cell holding it is its holder's, the cell it refers to the
   region's. -/
-  | rref : σ.mem a = some (.rptr l) → RefOk ι σ k τ l → LT F ι σ a (.rref k τ) [a]
+  | rref : σ.mem a = some (.rptr l) → RefOk ι σ k τ l → LT F ι σ a (.rref c k τ) [a]
   /-- The arena of the region `k` regions out, which is `a`: its cells, every cell tagged as the
   region's, each holding data of the region. -/
   | arena : ι[k]? = some a → σ.mem a = some (.arena cs) → cs.Nodup → a ∉ cs →
@@ -76,7 +76,7 @@ inductive VT (F : List Fn) (ι : List Nat) (σ : Store) : Ty → Val → List Na
   | pair : LT F ι σ b A R₁ → LT F ι σ c B R₂ → (∀ x ∈ R₁, x ∉ R₂) → A.complete → B.complete →
       VT F ι σ (.pair A B) (.pair b c) (R₁ ++ R₂)
   | tag : LT F ι σ b (if t then A else B) R → A.complete → B.complete → VT F ι σ (.sum A B) (.tag A' B' t b) R
-  | rref : RefOk ι σ k τ l → VT F ι σ (.rref k τ) (.rptr l) []
+  | rref : RefOk ι σ k τ l → VT F ι σ (.rref c k τ) (.rptr l) []
 
 def Disj (A B : List Nat) : Prop := ∀ x ∈ A, x ∉ B
 

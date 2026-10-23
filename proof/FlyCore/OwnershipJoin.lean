@@ -118,7 +118,7 @@ theorem multi_join (hL : LT F ι σ a τ L) (hR : RtExt σ σ') : ∀ (cs : List
       · rintro (h | ⟨c, hc, -⟩)
         · exact h.1
         · exact absurd hc (fun h => hno c h)
-  | @rref a l k τ' ha hr =>
+  | @rref a l _ k τ' ha hr =>
     intro cs hcs hcc hd hag hfr hdn hnn
     by_cases hh : ∃ c ∈ cs, c.loc = a
     · obtain ⟨c, hc, hloc⟩ := hh

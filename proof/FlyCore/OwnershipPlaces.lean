@@ -459,6 +459,7 @@ theorem typed_keys : Typed F O Γ e τ Γ' r → Γ'.map Prod.fst = Γ.map Prod.
     simpa [Ctx.shift, Function.comp_def] using this
   | .ralloc _ _ _ _ => rfl
   | .rget _ _ _ => rfl
+  | .rset _ _ _ _ _ => rfl
 
 theorem lookup_det {α : Type} {x : Var} {a b : α} {env : List (Var × α)} : lookup x env = some a → lookup x env = some b → a = b := by
   intro h1 h2; rw [h1] at h2; exact Option.some.inj h2

@@ -63,7 +63,7 @@ inductive Ty where
   | hole (τ : Ty)
   /-- A reference into the region `k` regions out from here (`0` the innermost), to data of type
   `τ`, which is said of that region: its references count regions from there. -/
-  | rref (k : Nat) (τ : Ty)
+  | rref (c : Bool) (k : Nat) (τ : Ty)
   /-- The arena of the region `k` regions out from here. -/
   | arena (k : Nat)
   deriving DecidableEq, Repr
@@ -76,7 +76,7 @@ def Ty.data : Ty → Bool
   | .pair A B => A.data && B.data
   | .sum A B => A.data && B.data
   | .hole _ => false
-  | .rref _ _ => false
+  | .rref _ _ _ => false
   | .arena _ => false
 
 /-- A pair whose first field, or whose second, is lent. -/
@@ -90,7 +90,7 @@ def Ty.complete : Ty → Bool
   | .pair A B => A.complete && B.complete
   | .sum A B => A.complete && B.complete
   | .hole _ => false
-  | .rref _ _ => true
+  | .rref _ _ _ => true
   | .arena _ => false
 
 def Ty.isHole : Ty → Bool
@@ -109,7 +109,7 @@ theorem Ty.data_complete : ∀ {τ : Ty}, τ.data = true → τ.complete = true
     simp only [Ty.data, Bool.and_eq_true] at h
     simp only [Ty.complete, Bool.and_eq_true]; exact ⟨Ty.data_complete h.1, Ty.data_complete h.2⟩
   | .hole _, h => by simp [Ty.data] at h
-  | .rref _ _, h => by simp [Ty.data] at h
+  | .rref _ _ _, h => by simp [Ty.data] at h
   | .arena _, h => by simp [Ty.data] at h
 
 theorem Ty.complete_ite {t : Bool} {A B : Ty} (hA : A.complete = true) (hB : B.complete = true) :
@@ -137,7 +137,7 @@ def Ty.rfree : Ty → Bool
   | .pair A B => A.rfree && B.rfree
   | .sum A B => A.rfree && B.rfree
   | .hole τ => τ.rfree
-  | .rref _ _ => false
+  | .rref _ _ _ => false
   | .arena _ => false
 
 theorem Ty.data_rfree : ∀ {τ : Ty}, τ.data = true → τ.rfree = true
@@ -151,13 +151,13 @@ theorem Ty.data_rfree : ∀ {τ : Ty}, τ.data = true → τ.rfree = true
     simp only [Ty.data, Bool.and_eq_true] at h
     simp only [Ty.rfree, Bool.and_eq_true]; exact ⟨Ty.data_rfree h.1, Ty.data_rfree h.2⟩
   | .hole _, h => by simp [Ty.data] at h
-  | .rref _ _, h => by simp [Ty.data] at h
+  | .rref _ _ _, h => by simp [Ty.data] at h
   | .arena _, h => by simp [Ty.data] at h
 
 /-- Data a region may hold: integers, and references into it or the regions around it. -/
 def Ty.rdata : Ty → Bool
   | .int => true
-  | .rref _ τ => τ.rdata
+  | .rref _ _ τ => τ.rdata
   | _ => false
 
 /-- A type said of a place `n` regions further in: references count `n` more regions out. -/
@@ -168,7 +168,7 @@ def Ty.shiftBy (n : Nat) : Ty → Ty
   | .pair A B => .pair (A.shiftBy n) (B.shiftBy n)
   | .sum A B => .sum (A.shiftBy n) (B.shiftBy n)
   | .hole τ => .hole (τ.shiftBy n)
-  | .rref k τ => .rref (k + n) τ
+  | .rref c k τ => .rref c (k + n) τ
   | .arena k => .arena (k + n)
 
 theorem Ty.data_not_fn {τ : Ty} (h : τ.data = true) : τ.isFn = false := by
@@ -285,9 +285,12 @@ inductive Expr where
   | region (R : Var) (τ : Ty) (body : Expr)
   /-- `R.alloc(a)`: `a`, a `τ` said of the region of arena `R`, put in a new cell of the region; a
   reference to it. -/
-  | ralloc (R : Var) (τ : Ty) (a : Atom)
+  | ralloc (R : Var) (c : Bool) (τ : Ty) (a : Atom)
   /-- `*p` for a reference `p` into a region: a copy of what the cell holds. -/
   | rget (p : Place)
+  /-- `p.set(a)` for a `Cell` `p` of the region of arena `R`: `a` put in its cell in place of what it
+  held. -/
+  | rset (R : Var) (p : Place) (a : Atom)
   deriving Repr
 
 /-- A user effect's operation: what it takes, owned and lent, and what it gives. -/
@@ -411,7 +414,7 @@ first, and what a closure captured, which may hold closures in turn. `none` if a
 is not there, a double free, or it runs out of cells to spare. -/
 def dropK : Nat → Store → Ty → Val → Option Store
   | _, σ, .int, .int _ => some σ
-  | _, σ, .rref _ _, .rptr _ => some σ
+  | _, σ, .rref _ _ _, .rptr _ => some σ
   | k + 1, σ, .box τ, .ptr l =>
     match σ.mem l with
     | some w =>
@@ -953,7 +956,7 @@ def eval (F : List Fn) (O : List Op) : Nat → HS → Store → Env → Expr →
     | .region R _ body =>
       let (a, σ1) := σ.alloc (.arena [])
       ret F O n hs (.regionK a) (eval F O n hs σ1 ((R, a) :: env) body)
-    | .ralloc R τ a =>
+    | .ralloc R c τ a =>
       match lookup R env with
       | some c =>
         match σ.mem c with
@@ -974,6 +977,19 @@ def eval (F : List Fn) (O : List Op) : Nat → HS → Store → Env → Expr →
           | some v => (.val v, σ)
           | none => (.stuck, σ)
         | _ => (.stuck, σ)
+      | none => (.stuck, σ)
+    | .rset _ p a =>
+      match evalAtom σ env a with
+      | some (v, σ1) =>
+        match resolve σ1 env p with
+        | some c =>
+          match σ1.mem c with
+          | some (.rptr l) =>
+            match σ1.mem l with
+            | some _ => (.val (.int 0), σ1.set l (some v))
+            | none => (.stuck, σ)
+          | _ => (.stuck, σ)
+        | none => (.stuck, σ)
       | none => (.stuck, σ)
 termination_by n _ _ _ _ => (n, 0, 0)
 
@@ -1368,7 +1384,7 @@ inductive AtomTy (Γ : Ctx) : Atom → Ty → Ctx → Prop
   | lit : AtomTy Γ (.lit n) .int Γ
   | read : PlaceTy Γ p .int w y → AtomTy Γ (.read p) .int Γ
   /-- A reference into a region, copied. -/
-  | readRef : PlaceTy Γ p (.rref k τ) w y → AtomTy Γ (.read p) (.rref k τ) Γ
+  | readRef : PlaceTy Γ p (.rref c k τ) w y → AtomTy Γ (.read p) (.rref c k τ) Γ
   /-- A value moved out of its variable: a box, or a closure, passed or returned by value. -/
   | move : lookup x Γ = some (.own τ true) → τ.complete = true → AtomTy Γ (.move x) τ (setSlot Γ x (.own τ false))
 
@@ -1519,10 +1535,13 @@ inductive Typed (F : List Fn) (O : List Op) : Ctx → Expr → Ty → Ctx → Ro
       Typed F O Γ (.region R τ body) τ Γ' r
   /-- Allocating in a region, through its arena, owned or lent `mut`: data the region may hold. -/
   | ralloc : lookup R Γ = some s → (s = .own (.arena k) true ∨ s = .ref .mut (.arena k)) → τ.rdata = true →
-      AtomTy Γ a (τ.shiftBy k) Γ → Typed F O Γ (.ralloc R τ a) (.rref k τ) Γ r
+      AtomTy Γ a (τ.shiftBy k) Γ → Typed F O Γ (.ralloc R c τ a) (.rref c k τ) Γ r
   /-- Reading what a reference into a region refers to, its arena in reach. -/
-  | rget : PlaceTy Γ p (.rref k τ) w y → lookup R Γ = some s → (s = .own (.arena k) true ∨ ∃ m, s = .ref m (.arena k)) →
+  | rget : PlaceTy Γ p (.rref c k τ) w y → lookup R Γ = some s → (s = .own (.arena k) true ∨ ∃ m, s = .ref m (.arena k)) →
       Typed F O Γ (.rget p) (τ.shiftBy k) Γ r
+  /-- Changing what a `Cell` of a region holds, through its arena, owned or lent `mut`. -/
+  | rset : PlaceTy Γ p (.rref true k τ) w y → lookup R Γ = some s → (s = .own (.arena k) true ∨ s = .ref .mut (.arena k)) →
+      τ.rdata = true → AtomTy Γ a (τ.shiftBy k) Γ → Typed F O Γ (.rset R p a) .int Γ r
 
 
 end FlyCore.Ownership

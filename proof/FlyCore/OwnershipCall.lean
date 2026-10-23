@@ -177,7 +177,7 @@ theorem Ty.shiftBy_inj : ∀ {A B : Ty}, A.shiftBy n = B.shiftBy n → A = B
   | .sum A₁ A₂, B, h => by
     cases B <;> simp_all [Ty.shiftBy]; exact ⟨Ty.shiftBy_inj h.1, Ty.shiftBy_inj h.2⟩
   | .hole A, B, h => by cases B <;> simp_all [Ty.shiftBy]; exact Ty.shiftBy_inj h
-  | .rref k A, B, h => by cases B <;> simp_all [Ty.shiftBy]
+  | .rref c k A, B, h => by cases B <;> simp_all [Ty.shiftBy]
   | .arena k, B, h => by cases B <;> simp_all [Ty.shiftBy]
 
 theorem Slot.shiftBy_inj {s s' : Slot} (h : s.shiftBy n = s'.shiftBy n) : s = s' := by
@@ -309,6 +309,7 @@ theorem typed_weaker : Typed F O Γ e τ Γ' r → (Γ.map Prod.fst).Nodup → W
     | cons _ w => exact Weaker.unshift w
   | .ralloc _ _ _ _, _ => Weaker.refl _
   | .rget _ _ _, _ => Weaker.refl _
+  | .rset _ _ _ _ _, _ => Weaker.refl _
 
 /-- A function's context: its owned parameters, live, then its borrowed ones. -/
 def fnCtx (d : Fn) : Ctx :=

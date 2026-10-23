@@ -110,7 +110,7 @@ theorem LT.unshift : ∀ {τ : Ty} {c : Nat} {L : List Nat}, LT F (a :: ι) σ c
       · exact LT.unshift (τ := B) hb
       · exact LT.unshift (τ := A) hb
   | .hole τ, _, _, h => by simp only [Ty.shiftBy] at h; cases h; exact .hole
-  | .rref k τ, _, _, h => by
+  | .rref c k τ, _, _, h => by
     simp only [Ty.shiftBy] at h
     cases h with | rref ha hr => exact .rref ha (RefOk.shift_iff.mp hr)
   | .arena k, _, _, h => by
@@ -128,7 +128,7 @@ theorem Ty.complete_shift : ∀ {τ : Ty}, (τ.shiftBy n).complete = τ.complete
   | .pair A B => by simp [Ty.shiftBy, Ty.complete, Ty.complete_shift (τ := A), Ty.complete_shift (τ := B)]
   | .sum A B => by simp [Ty.shiftBy, Ty.complete, Ty.complete_shift (τ := A), Ty.complete_shift (τ := B)]
   | .hole _ => rfl
-  | .rref _ _ => rfl
+  | .rref _ _ _ => rfl
   | .arena _ => rfl
 
 theorem Ty.isHole_shift {τ : Ty} : (τ.shiftBy n).isHole = τ.isHole := by
@@ -171,7 +171,7 @@ theorem VT.unshift : ∀ {τ : Ty} {v : Val} {L : List Nat}, VT F (a :: ι) σ (
     | tag hb hA hB =>
       exact .tag (LT.unshift_ite hb) (by rwa [Ty.complete_shift] at hA) (by rwa [Ty.complete_shift] at hB)
   | .hole _, _, _, h => by simp only [Ty.shiftBy] at h; cases h
-  | .rref k τ, _, _, h => by
+  | .rref c k τ, _, _, h => by
     simp only [Ty.shiftBy] at h
     cases h with | rref hr => exact .rref (RefOk.shift_iff.mp hr)
   | .arena _, _, _, h => by simp only [Ty.shiftBy] at h; cases h

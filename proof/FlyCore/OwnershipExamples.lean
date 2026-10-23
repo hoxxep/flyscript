@@ -1373,9 +1373,9 @@ holding a reference to another of the region; 42, and once the region ends, noth
 allocated. -/
 def regionEx : Expr :=
   .region "R" .int
-    (.let_ "p" (.rref 0 .int) (.ralloc "R" .int (.lit 41))
-      (.let_ "q" (.rref 0 (.rref 0 .int)) (.ralloc "R" (.rref 0 .int) (.read (var "p")))
-        (.let_ "pp" (.rref 0 .int) (.rget (var "q"))
+    (.let_ "p" (.rref false 0 .int) (.ralloc "R" false .int (.lit 41))
+      (.let_ "q" (.rref false 0 (.rref false 0 .int)) (.ralloc "R" false (.rref false 0 .int) (.read (var "p")))
+        (.let_ "pp" (.rref false 0 .int) (.rget (var "q"))
           (.let_ "x" .int (.rget (var "pp"))
             (.add (.read (var "x")) (.lit 1))))))
 
@@ -1389,7 +1389,7 @@ theorem regionEx_typed : Typed [] [] [] regionEx .int [] [.fail] := by
   refine .region rfl rfl ?_
   exact .let_ (live := true) rfl (.ralloc rfl (.inl rfl) rfl .lit)
     (.let_ (live := true) rfl (.ralloc rfl (.inl rfl) rfl (.readRef (.own rfl)))
-      (.let_ (live := true) rfl (by simpa [Ty.shiftBy] using Typed.rget (R := "R") (k := 0) (τ := .rref 0 .int) (.own rfl) rfl (.inl rfl))
+      (.let_ (live := true) rfl (by simpa [Ty.shiftBy] using Typed.rget (R := "R") (k := 0) (τ := .rref false 0 .int) (.own rfl) rfl (.inl rfl))
         (.let_ (live := true) rfl (by simpa [Ty.shiftBy] using Typed.rget (R := "R") (k := 0) (τ := .int) (.own rfl) rfl (.inl rfl))
           (.add (.read (.own rfl)) .lit))))
 
@@ -1407,10 +1407,10 @@ it, and a failure that leaves both, releasing each; 42, and nothing left allocat
 def regionsUnwind : Expr :=
   .try_
     (.region "R" .int
-      (.let_ "p" (.rref 0 .int) (.ralloc "R" .int (.lit 41))
+      (.let_ "p" (.rref false 0 .int) (.ralloc "R" false .int (.lit 41))
         (.region "S" .int
-          (.let_ "q" (.rref 0 (.rref 1 .int)) (.ralloc "S" (.rref 1 .int) (.read (var "p")))
-            (.let_ "pp" (.rref 1 .int) (.rget (var "q"))
+          (.let_ "q" (.rref false 0 (.rref false 1 .int)) (.ralloc "S" false (.rref false 1 .int) (.read (var "p")))
+            (.let_ "pp" (.rref false 1 .int) (.rget (var "q"))
               (.let_ "x" .int (.rget (var "pp"))
                 (.let_ "y" .int (.add (.read (var "x")) (.lit 1))
                   (.throw_ (.read (var "y"))))))))))
@@ -1425,7 +1425,7 @@ theorem regionsUnwind_typed : Typed [] [] [] regionsUnwind .int [] [.fail] := by
   refine .try_ rfl (.region rfl rfl ?_) (.atom (.read (.own rfl)))
   refine .let_ (live := true) rfl (.ralloc rfl (.inl rfl) rfl .lit) (.region rfl rfl ?_)
   exact .let_ (live := true) rfl (.ralloc rfl (.inl rfl) rfl (.readRef (.own rfl)))
-    (.let_ (live := true) rfl (by simpa [Ty.shiftBy] using Typed.rget (R := "S") (k := 0) (τ := .rref 1 .int) (.own rfl) rfl (.inl rfl))
+    (.let_ (live := true) rfl (by simpa [Ty.shiftBy] using Typed.rget (R := "S") (k := 0) (τ := .rref false 1 .int) (.own rfl) rfl (.inl rfl))
       (.let_ (live := true) rfl (by simpa [Ty.shiftBy] using Typed.rget (R := "R") (k := 1) (τ := .int) (.own rfl) rfl (.inl rfl))
         (.let_ (live := true) rfl (.add (.read (.own rfl)) .lit)
           (.throw_ (.read (.own rfl)) (by simp)))))
@@ -1438,13 +1438,46 @@ example : ∀ n, match eval [] [] n [.abort .fail 0] .empty [] regionsUnwind wit
     | (.abort _ _, σ') => ∀ l, σ'.mem l = none :=
   program_ok (by intro d hd; simp at hd) regionsUnwind_typed
 
-theorem ralloc_ty (h : Typed F O Γ (.ralloc R τ a) t Γ' r) :
-    ∃ k s, t = .rref k τ ∧ lookup R Γ = some s ∧ (s = .own (.arena k) true ∨ s = .ref .mut (.arena k)) := by
+/-- `region (R) { const c = Cell.new(40); const r = R.alloc(c); const d = *r; d.set(41); c.get() + 1 }`:
+a `Cell` reached two ways, changed through one and read through the other; 42. -/
+def cellEx : Expr :=
+  .region "R" .int
+    (.let_ "c" (.rref true 0 .int) (.ralloc "R" true .int (.lit 40))
+      (.let_ "r" (.rref false 0 (.rref true 0 .int)) (.ralloc "R" false (.rref true 0 .int) (.read (var "c")))
+        (.let_ "d" (.rref true 0 .int) (.rget (var "r"))
+          (.let_ "u" .int (.rset "R" (var "d") (.lit 41))
+            (.let_ "x" .int (.rget (var "c"))
+              (.add (.read (var "x")) (.lit 1)))))))
+
+example : value (eval [] [] 40 [] .empty [] cellEx) = some 42 := by
+  run [cellEx]
+example : freed (eval [] [] 40 [] .empty [] cellEx) := by
+  run [cellEx]
+
+theorem cellEx_typed : Typed [] [] [] cellEx .int [] [.fail] := by
+  refine .region rfl rfl ?_
+  exact .let_ (live := true) rfl (.ralloc rfl (.inl rfl) rfl .lit)
+    (.let_ (live := true) rfl (.ralloc rfl (.inl rfl) rfl (.readRef (.own rfl)))
+      (.let_ (live := true) rfl (by simpa [Ty.shiftBy] using Typed.rget (R := "R") (k := 0) (τ := .rref true 0 .int) (.own rfl) rfl (.inl rfl))
+        (.let_ (live := true) rfl (.rset (.own rfl) rfl (.inl rfl) rfl .lit)
+          (.let_ (live := true) rfl (by simpa [Ty.shiftBy] using Typed.rget (R := "R") (k := 0) (τ := .int) (.own rfl) rfl (.inl rfl))
+            (.add (.read (.own rfl)) .lit)))))
+
+example : ∀ n, match eval [] [] n [.abort .fail 0] .empty [] cellEx with
+    | (.stuck, _) => False
+    | (.susp _ _ _ _ _, _) => False
+    | (.timeout, _) => True
+    | (.val v, σ') => ∃ L, VT [] [] σ' .int v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
+    | (.abort _ _, σ') => ∀ l, σ'.mem l = none :=
+  program_ok (by intro d hd; simp at hd) cellEx_typed
+
+theorem ralloc_ty (h : Typed F O Γ (.ralloc R c τ a) t Γ' r) :
+    ∃ k s, t = .rref c k τ ∧ lookup R Γ = some s ∧ (s = .own (.arena k) true ∨ s = .ref .mut (.arena k)) := by
   cases h; exact ⟨_, _, rfl, ‹_›, ‹_›⟩
 
 /-- `region (R) { R.alloc(1) }`: a reference into the region cannot be its value — no type said of the
 code around refers to the region. -/
-theorem escape_rejected : ¬ Typed [] [] [] (.region "R" τ (.ralloc "R" .int (.lit 1))) τ Γ' r := by
+theorem escape_rejected : ¬ Typed [] [] [] (.region "R" τ (.ralloc "R" false .int (.lit 1))) τ Γ' r := by
   intro h
   cases h with
   | region _ _ hb =>

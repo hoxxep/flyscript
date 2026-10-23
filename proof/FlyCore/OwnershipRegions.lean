@@ -46,13 +46,13 @@ theorem arena_of (hR : lookup R Γ = some s) (hs : s = .own (.arena k) true ∨ 
 
 /-! ## Reading -/
 
-theorem rget_ok (hp : PlaceTy Γ p (.rref k τ) w y) (hR : lookup R Γ = some s)
+theorem rget_ok (hp : PlaceTy Γ p (.rref c k τ) w y) (hR : lookup R Γ = some s)
     (hs : s = .own (.arena k) true ∨ ∃ m, s = .ref m (.arena k)) (hI : Inv F ι σ Γ env E S) (hwf : WF σ) :
     Post F ι O σ E S Γ env (τ.shiftBy k) r hs' (eval F O (n + 1) hs' σ env (.rget p)) := by
   obtain ⟨a, τr, Lr, P, l, s', ha, hLr, hpath, hres, -⟩ := place_ok hp hI.foot
   obtain ⟨Rb, hRb, -⟩ := path_split hpath hLr
   cases hRb with
-  | @rref _ c _ _ hl hr =>
+  | @rref _ c _ _ _ hl hr =>
     obtain ⟨a', hk, ht⟩ := hr
     obtain ⟨c', cs, -, hk', -, -, hcs, hex, -⟩ := arena_of hR hs hI
     obtain rfl : a' = c' := Option.some.inj (hk.symm.trans hk')
@@ -138,7 +138,7 @@ theorem AtomTy.same_store (h : AtomTy Γ a τ Γ') (hΓ : Γ' = Γ) (hev : evalA
 
 theorem ralloc_ok (hR : lookup R Γ = some s) (hs : s = .own (.arena k) true ∨ s = .ref .mut (.arena k))
     (hd : τ.rdata = true) (ha : AtomTy Γ a (τ.shiftBy k) Γ) (hI : Inv F ι σ Γ env E S) (hwf : WF σ) :
-    Post F ι O σ E S Γ env (.rref k τ) r hs' (eval F O (n + 1) hs' σ env (.ralloc R τ a)) := by
+    Post F ι O σ E S Γ env (.rref c k τ) r hs' (eval F O (n + 1) hs' σ env (.ralloc R c τ a)) := by
   obtain ⟨v, σ1, E₁, L₁, hev, -, hv₁, -, -, -⟩ := atom_ok ha hI hwf
   obtain rfl : σ = σ1 := (ha.same_store rfl hev).symm
   obtain ⟨rfl, hrd⟩ := hv₁.toRD hd
@@ -262,6 +262,66 @@ theorem ralloc_ok (hR : lookup R Γ = some s) (hs : s = .own (.arena k) true ∨
       simp at hx; subst hx; exact hfresh _ (hI.alloc _ hx') (by rw [hl])) hwf
     exact m123.relabel fun x => by
       rw [hE]; simp only [List.mem_append, List.mem_cons, List.mem_singleton, List.not_mem_nil, or_false, hl]; grind
+
+/-! ## Changing a cell -/
+
+/-- `p.set(a)`: the cell `p` refers to is one of its region's, which the arena it is changed through
+owns, so nothing else sees it change; what it holds next is data of the region as what it held was. -/
+theorem rset_ok (hp : PlaceTy Γ p (.rref true k τ) w y) (hR : lookup R Γ = some s)
+    (hs : s = .own (.arena k) true ∨ s = .ref .mut (.arena k)) (hd : τ.rdata = true)
+    (ha : AtomTy Γ a (τ.shiftBy k) Γ) (hI : Inv F ι σ Γ env E S) (hwf : WF σ) :
+    Post F ι O σ E S Γ env .int r hs' (eval F O (n + 1) hs' σ env (.rset R p a)) := by
+  obtain ⟨v, σ1, E₁, L₁, hev, -, hv₁, -, -, -⟩ := atom_ok ha hI hwf
+  obtain rfl : σ = σ1 := (ha.same_store rfl hev).symm
+  obtain ⟨-, hrd⟩ := hv₁.toRD hd
+  obtain ⟨a0, τr, Lr, P, q, s', -, hLr, hpath, hres, -⟩ := place_ok hp hI.foot
+  obtain ⟨Rb, hRb, -⟩ := path_split hpath hLr
+  cases hRb with
+  | @rref _ l _ _ _ hql hr =>
+  obtain ⟨a', hk, ht⟩ := hr
+  have hex' : s.excl = true ∧ s.shell = false := by rcases hs with rfl | rfl <;> simp [Slot.excl, Slot.shell]
+  obtain ⟨c0, LR, E₁a, E₂a, hc0, hsl, hE, hupd⟩ := foot_update hI.foot hI.keys hR hex'.1 hex'.2
+  obtain ⟨c, cs, hc, hk', hcm, hnd, hcs, hexa, hsl'⟩ :=
+    arena_of hR (by rcases hs with h | h; exact .inl h; exact .inr ⟨_, h⟩) hI
+  have hcc : c0 = c := by rw [hc] at hc0; exact (Option.some.inj hc0).symm
+  subst c0
+  have hac : a' = c := Option.some.inj (hk.symm.trans hk')
+  subst a'
+  have hLT : ∀ {σ' : Store} {L : List Nat}, SlotOk F ι σ' s c L → LT F ι σ' c (.arena k) L := fun h => by
+    rcases hs with rfl | rfl <;> exact h
+  obtain rfl : LR = c :: cs := (hLT hsl).det (hLT hsl')
+  have hlcs : l ∈ cs := hexa l τ ht
+  obtain ⟨τ', w0, ht', hw0, -⟩ := hcs l hlcs
+  simp only [eval, hev, hres, hql, hw0]
+  let σ' := σ.set l (some v)
+  have hm' : ∀ x, σ'.mem x = if x = l then some v else σ.mem x := by intro x; simp only [σ', Store.set]
+  have hrt' : σ'.rt = σ.rt := rfl
+  have hlc : l ≠ c := fun e => (List.nodup_cons.mp hnd).1 (e ▸ hlcs)
+  have hnd' := nodup_append_disj.mp (hE ▸ hI.nodup)
+  have hlE : l ∈ E := by rw [hE]; simp [hlcs]
+  have hout : ∀ x ∈ E₁a ++ E₂a ++ S, x ≠ l := by
+    intro x hx e
+    subst e
+    rcases List.mem_append.mp hx with hx | hx
+    · rcases List.mem_append.mp hx with hx | hx
+      · exact (nodup_append_disj.mp hnd'.1).2.2 x hx (by simp [hlcs])
+      · exact hnd'.2.2 x (by simp [hlcs]) hx
+    · exact hI.disj x hx hlE
+  have hag : Agree σ σ' (E₁a ++ E₂a ++ S) := Agree.of (fun x hx => by rw [hm', if_neg (hout x hx)]) hrt'
+  have hLT' : LT F ι σ' c (.arena k) (c :: cs) := by
+    refine .arena hk' (by rw [hm', if_neg (Ne.symm hlc)]; exact hcm) (List.nodup_cons.mp hnd).2
+      (List.nodup_cons.mp hnd).1 (fun x hx => ?_) (fun x y hx => hexa x y hx)
+    by_cases hxl : x = l
+    · subst hxl
+      rw [ht] at ht'
+      obtain ⟨-, rfl⟩ := Prod.mk.inj (Option.some.inj ht')
+      exact ⟨τ, v, ht, by rw [hm']; simp, hrd.frame (fun _ _ h => h)⟩
+    · obtain ⟨τ'', w, h1, h2, h3⟩ := hcs x hx
+      exact ⟨τ'', w, h1, by rw [hm', if_neg hxl]; exact h2, h3.frame (fun _ _ h => h)⟩
+  have hfoot := hupd σ' s (c :: cs) hex'.1 hex'.2 hag (by rcases hs with rfl | rfl <;> exact hLT')
+  rw [setSlot_same _ hI.keys hR, ← hE] at hfoot
+  exact ⟨E, [], ⟨hfoot, hI.nodup, hI.disj, hI.keys⟩, .int, disj_nil_left, disj_nil_left,
+    Moves.set hwf hI.alloc hlE⟩
 
 /-! ## A region's end -/
 
