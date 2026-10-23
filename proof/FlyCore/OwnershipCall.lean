@@ -150,8 +150,12 @@ theorem typed_weaker : Typed F O Γ e τ Γ' r → (Γ.map Prod.fst).Nodup → W
     | cons _ w => exact w.trans (typed_weaker ha hk)
   | .write ha _, hk => atom_weaker ha hk
   | .assign ha _, hk => atom_weaker ha hk
-  | .call _ _ _ hargs _ _, hk => atoms_weaker hargs hk
-  | .lendCall _ _ _ hargs _ _ _ _ hx hb, hk => by
+  | .call _ _ _ _ hargs _ _, hk => atoms_weaker hargs hk
+  | .lam _ _ _ _ _ _ ha, hk => atom_weaker ha hk
+  | .applyOnce hx _ ha, hk =>
+    (atom_weaker ha (by rw [setSlot_keys]; exact hk)).trans (setSlot_weaker hk hx .forget)
+  | .applyBorrow _ ha _ _ _, hk => atom_weaker ha hk
+  | .lendCall _ _ _ _ hargs _ _ _ _ hx hb, hk => by
     have hk₁ := hk
     rw [← atoms_keys hargs] at hk₁
     have := typed_weaker hb (List.nodup_cons.mpr ⟨by rw [lendCtx_keys]; exact lookup_none_keys hx,
@@ -192,10 +196,12 @@ returns is one of its result type, rooted at the borrowed parameter it says, and
 borrow is `mut`. -/
 def FnOk (F : List Fn) (O : List Op) (d : Fn) : Prop :=
   ((d.owns.map Prod.fst) ++ (d.refs.map Prod.fst)).Nodup ∧
-  match d.retp with
-  | none => ∃ Γ', Typed F O (fnCtx d) d.body d.ret Γ' d.row
-  | some (m, i, p) => ∃ Γ' x mi τi w, Typed F O (fnCtx d) d.body .int Γ' d.row ∧
+  match d.cap, d.retp with
+  | none, none => ∃ Γ', Typed F O (fnCtx d) d.body d.ret Γ' d.row
+  | none, some (m, i, p) => ∃ Γ' x mi τi w, Typed F O (fnCtx d) d.body .int Γ' d.row ∧
       d.refs[i]? = some (x, mi, τi) ∧ PlaceTy Γ' p d.ret w x ∧ (m = .mut → w = true)
+  | some (xc, τc, k), none => xc ∉ d.owns.map Prod.fst ∧ ∃ Γ', Typed F O (fnCtx (cloFn d xc τc k)) d.body d.ret Γ' d.row
+  | some _, some _ => False
 
 def FnsOk (F : List Fn) (O : List Op) : Prop := ∀ d ∈ F, FnOk F O d
 

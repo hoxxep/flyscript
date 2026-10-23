@@ -33,7 +33,7 @@ def isStuck : Res × Store → Bool
 syntax "run" "[" Lean.Parser.Tactic.simpLemma,* "]" : tactic
 macro_rules
   | `(tactic| run [$xs,*]) => `(tactic| simp [eval, ret, evalK, evalAtom, evalAtoms, resolve, leave, cleanV,
-      cleanA, dropRet, armEnd, allocAll, dropCells, dropCell, drop, Store.fresh, Store.alloc, Store.set, find,
+      cleanA, dropRet, armEnd, allocAll, dropCells, dropCell, drop, dropData, Store.fresh, Store.alloc, Store.set, find,
       Frame.handles, Kont.push, lookup, Res.done, Outcome.res, Cap.at, Store.empty, value, freed, freedBelow,
       isStuck, $xs,*])
 
@@ -82,7 +82,7 @@ theorem lends_typed : Typed [addInto] [] [] lends .int [] [.fail] := by
       (.call 0 [.move "y"] [(.mut, var "x")]) .int
       [("y", .own (.box .int) false), ("x", .own (.box .int) true)] [.fail] := by
     have := Typed.call (F := [addInto]) (O := []) (Γ := [("y", .own (.box .int) true), ("x", .own (.box .int) true)])
-      (f := 0) (d := addInto) (ys := [(.mut, "x")]) (r := [.fail]) rfl rfl (by simp [addInto])
+      (f := 0) (d := addInto) (ys := [(.mut, "x")]) (r := [.fail]) rfl rfl rfl (by simp [addInto])
       (.cons (.move (x := "y") rfl) .nil) (.cons (.own (by simp [lookup, setSlot])) (fun _ => rfl) .nil)
       (by simp [Exclusive])
     simpa [setSlot, addInto] using this
@@ -117,7 +117,7 @@ theorem aliased_rejected : ¬ Typed [clobber] O [] aliased τ Γ' r := by
   cases h with
   | let_ _ _ hb =>
     cases hb with
-    | call hf _ _ _ hl hx =>
+    | call hf _ _ _ _ hl hx =>
       simp at hf
       subst hf
       cases hl with
@@ -476,7 +476,7 @@ theorem returns_typed : Typed [inside] [] [] returns .int [] [.fail] := by
     (lent := [(.mut, var "x")]) (ys := [(.mut, "x")]) (mi := .mut) (y := "x") (x := "v")
     (body := .let_ "t" .int (.add (.read (var "v")) (.lit 41)) (.write (var "v") (.read (var "t"))))
     (τb := .int) (Γb := [("x", .lent (.box .int))])
-    rfl rfl (by simp [inside]) .nil (.cons (.own rfl) (fun _ => rfl) .nil) (by simp [Exclusive]) rfl
+    rfl rfl rfl (by simp [inside]) .nil (.cons (.own rfl) (fun _ => rfl) .nil) (by simp [Exclusive]) rfl
     (fun _ => rfl) rfl
     (.let_ (live := true) rfl (.add (.read (.ref rfl)) .lit) (.write (.read (.own rfl)) (.ref (m := .mut) rfl)))
   simp only [thaw] at this
@@ -505,7 +505,7 @@ theorem lendCall_inv : Typed F O Γ (.lendCall x m f owned lent body) τ Γ' r �
       Typed F O ((x, .ref m d.ret) :: lendCtx m Γ₁ y) body τ ((x, .ref m d.ret) :: Γb) r := by
   intro h
   cases h with
-  | lendCall hf hret _ ha hl _ hyi _ _ hb => exact ⟨_, _, _, _, _, _, _, _, hf, hret, ha, hl, hyi, hb⟩
+  | lendCall hf hret _ _ ha hl _ hyi _ _ hb => exact ⟨_, _, _, _, _, _, _, _, hf, hret, ha, hl, hyi, hb⟩
 
 theorem reachesReturned_rejected : ¬ Typed [inside] [] [] reachesReturned τ Γ' r := by
   intro h
@@ -534,5 +534,91 @@ theorem reachesReturned_rejected : ¬ Typed [inside] [] [] reachesReturned τ Γ
               cases hq with
               | own hx => simp [lendCtx, hide, lookup] at hx
               | ref hx => simp [lendCtx, hide, lookup] at hx
+
+/-! Closures that own what they captured. -/
+
+/-- `(x) => { *c = *c + x; *c }`, capturing a box `c`, called through a `mut` borrow: a counter. -/
+def bump : Fn :=
+  { owns := [("x", .int)], refs := [], ret := .int, row := [],
+    body := .let_ "t" .int (.add (.read (deref (var "c"))) (.read (var "x")))
+      (.let_ "u" .int (.write (deref (var "c")) (.read (var "t"))) (.atom (.read (deref (var "c"))))),
+    cap := some ("c", .box .int, .excl) }
+
+/-- `let b = Box.new(40); let f = (x) => { … }; f(1); f(1)`: the closure keeps its box from one call
+to the next; 42, and once `f` goes out of scope, its box with it: nothing left allocated. -/
+def counter : Expr :=
+  .let_ "b" (.box .int) (.new (.lit 40))
+    (.let_ "f" (.fn .excl .int .int []) (.lam 0 (.move "b"))
+      (.let_ "u" .int (.apply .excl (var "f") (.lit 1)) (.apply .excl (var "f") (.lit 1))))
+
+example : value (eval [bump] [] 30 [] .empty [] counter) = some 42 := by
+  run [counter, bump, cloFn]
+example : freed (eval [bump] [] 30 [] .empty [] counter) := by
+  run [counter, bump, cloFn]
+
+theorem bump_ok : FnsOk [bump] [] := by
+  intro d hd
+  simp only [List.mem_singleton] at hd
+  subst hd
+  refine ⟨by decide, by decide, _, .let_ (live := true) rfl (.add (.read (.deref (.ref (m := .mut) rfl))) (.read (.own rfl)))
+    (.let_ (live := true) rfl (.write (.read (.own rfl)) (.deref (.ref (m := .mut) rfl)))
+      (.atom (.read (.deref (.ref (m := .mut) rfl)))))⟩
+
+theorem counter_typed : Typed [bump] [] [] counter .int [] [.fail] := by
+  have hlam : Typed [bump] [] [("b", .own (.box .int) true)] (.lam 0 (.move "b")) (.fn .excl .int .int [])
+      [("b", .own (.box .int) false)] [.fail] := by
+    have := Typed.lam (F := [bump]) (O := []) (Γ := [("b", .own (.box .int) true)]) (f := 0) (d := bump)
+      (r := [.fail]) rfl rfl rfl rfl rfl rfl (.move (x := "b") rfl)
+    simpa [bump, setSlot] using this
+  exact .let_ (live := false) rfl (.new .lit)
+    (.let_ (live := true) rfl hlam
+      (.let_ (live := true) rfl (.applyBorrow (by decide) .lit (.own rfl) (fun _ => rfl) (by simp))
+        (.applyBorrow (by decide) .lit (.own rfl) (fun _ => rfl) (by simp))))
+
+example : ∀ n, match eval [bump] [] n [.abort .fail 0] .empty [] counter with
+    | (.stuck, _) => False
+    | (.susp _ _ _ _ _, _) => False
+    | (.timeout, _) => True
+    | (.val v, σ') => ∃ L, VT [bump] σ' .int v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
+    | (.abort _ _, σ') => ∀ l, σ'.mem l = none :=
+  program_ok bump_ok counter_typed
+
+/-- `(x) => *c + x`, capturing a box `c`, called once: the call consumes it, its box dropped as the
+body ends. -/
+def spend : Fn :=
+  { owns := [("x", .int)], refs := [], ret := .int, row := [],
+    body := .add (.read (deref (var "c"))) (.read (var "x")), cap := some ("c", .box .int, .once) }
+
+/-- `let b = Box.new(40); let f = (x) => *c + x; f(2)`: 42, and nothing left allocated. -/
+def spends : Expr :=
+  .let_ "b" (.box .int) (.new (.lit 40))
+    (.let_ "f" (.fn .once .int .int []) (.lam 0 (.move "b")) (.apply .once (var "f") (.lit 2)))
+
+example : value (eval [spend] [] 30 [] .empty [] spends) = some 42 := by
+  run [spends, spend, cloFn]
+example : freed (eval [spend] [] 30 [] .empty [] spends) := by
+  run [spends, spend, cloFn]
+
+/-- `f(2); f(2)` for a closure called once: the types reject the second call. -/
+def spendsTwice : Expr :=
+  .let_ "b" (.box .int) (.new (.lit 40))
+    (.let_ "f" (.fn .once .int .int []) (.lam 0 (.move "b"))
+      (.let_ "u" .int (.apply .once (var "f") (.lit 2)) (.apply .once (var "f") (.lit 2))))
+
+theorem spendsTwice_rejected : ¬ Typed [spend] [] [] spendsTwice τ Γ' r := by
+  intro h
+  cases h with
+  | let_ _ _ hb =>
+    cases hb with
+    | let_ _ _ hb =>
+      cases hb with
+      | let_ _ h1 h2 =>
+        cases h1 with
+        | applyBorrow hk => exact absurd rfl hk
+        | applyOnce hx _ ha =>
+          cases ha
+          cases h2 with
+          | applyBorrow hk => exact absurd rfl hk
+          | applyOnce hx' => simp [setSlot, lookup] at hx'
 
 end FlyCore.Ownership.Examples

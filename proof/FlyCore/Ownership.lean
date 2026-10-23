@@ -24,11 +24,6 @@ value is dropped exactly once.
 
 namespace FlyCore.Ownership
 
-inductive Ty where
-  | int
-  | box (τ : Ty)
-  deriving DecidableEq, Repr
-
 inductive Mode where
   | ro
   | mut
@@ -45,6 +40,28 @@ inductive Label where
   deriving DecidableEq, Repr
 
 abbrev Row := List Label
+
+/-- How a closure is called: once, consuming it; or through a borrow, `readonly` or `mut`, the
+same borrow of what it captured lent to its body. -/
+inductive Kind where
+  | once
+  | shared
+  | excl
+  deriving DecidableEq, Repr
+
+inductive Ty where
+  | int
+  | box (τ : Ty)
+  /-- A closure called as `k`, taking an `A` and giving a `B`, performing what `r` names: what it
+  captured is not part of its type. -/
+  | fn (k : Kind) (A B : Ty) (r : Row)
+  deriving DecidableEq, Repr
+
+/-- Plain data: integers and boxes of them, which a closure may capture. -/
+def Ty.data : Ty → Bool
+  | .int => true
+  | .box τ => τ.data
+  | .fn _ _ _ _ => false
 
 /-- What a `handle` lends its arm: the name the arm knows it by, the mode it is lent in, its type,
 and where it is — a place in the program, a location once the `handle` runs. -/
@@ -92,6 +109,11 @@ inductive Expr where
   | assign (p : Place) (τ : Ty) (a : Atom)
   /-- A call: the owned arguments, in order, then the places lent, each with its mode. -/
   | call (f : Nat) (owned : List Atom) (lent : List (Mode × Place))
+  /-- `(p) => body`, the closure of code `f`, capturing what `a` gives: plain data, moved in. -/
+  | lam (f : Nat) (a : Atom)
+  /-- `p(a)`, calling the closure at `p` as it is called: once, moving it out of the variable `p`;
+  or through a borrow of `p`. -/
+  | apply (k : Kind) (p : Place) (a : Atom)
   /-- `{ const x = f(…); body }` for a function that returns a borrow, `readonly` or `mut`, of one of
   the places it was lent: `x` is that borrow for as long as `body` runs. -/
   | lendCall (x : Var) (m : Mode) (f : Nat) (owned : List Atom) (lent : List (Mode × Place)) (body : Expr)
@@ -137,11 +159,23 @@ structure Fn where
   row : Row
   body : Expr
   retp : Option (Mode × Nat × Place) := none
+  /-- The code of a closure: the name its body knows what it captured by, of what type, and how the
+  closure is called. -/
+  cap : Option (Var × Ty × Kind) := none
+
+/-- A closure's code as a function: what it captured one more parameter, owned if the closure is
+called once, borrowed as the closure is otherwise. -/
+def cloFn (d : Fn) (xc : Var) (τc : Ty) : Kind → Fn
+  | .once => { d with owns := d.owns ++ [(xc, τc)], cap := none }
+  | .shared => { d with refs := [(xc, .ro, τc)], cap := none }
+  | .excl => { d with refs := [(xc, .mut, τc)], cap := none }
 
 inductive Val where
   | int (n : Int)
   | ptr (l : Nat)
   | moved
+  /-- A closure: its code, and the cell holding what it captured, a `τc`. -/
+  | clo (f : Nat) (c : Nat) (τc : Ty)
   deriving DecidableEq, Repr
 
 /-- The store: its cells, `none` once freed or before allocation, the next to allocate, and the
@@ -177,8 +211,21 @@ def resolve (σ : Store) (env : Env) : Place → Option Nat
       | _ => none
     | none => none
 
-/-- Drops a value of type `τ`: frees the cells of its boxes, innermost first. `none` if a cell it
+/-- Drops plain data of type `τ`: frees the cells of its boxes, innermost first. `none` if a cell it
 should free is not there: a double free. -/
+def dropData (σ : Store) : Ty → Val → Option Store
+  | .int, .int _ => some σ
+  | .box τ, .ptr l =>
+    match σ.mem l with
+    | some w =>
+      match dropData σ τ w with
+      | some σ' => some (σ'.set l none)
+      | none => none
+    | none => none
+  | _, _ => none
+
+/-- Drops a value of type `τ`: frees the cells of its boxes, innermost first, and what a closure
+captured. `none` if a cell it should free is not there: a double free. -/
 def drop (σ : Store) : Ty → Val → Option Store
   | .int, .int _ => some σ
   | .box τ, .ptr l =>
@@ -186,6 +233,13 @@ def drop (σ : Store) : Ty → Val → Option Store
     | some w =>
       match drop σ τ w with
       | some σ' => some (σ'.set l none)
+      | none => none
+    | none => none
+  | .fn _ _ _ _, .clo _ c τc =>
+    match σ.mem c with
+    | some w =>
+      match dropData σ τc w with
+      | some σ' => some (σ'.set c none)
       | none => none
     | none => none
   | _, _ => none
@@ -452,6 +506,61 @@ def eval (F : List Fn) (O : List Op) : Nat → HS → Store → Env → Expr →
             else (.stuck, σ1)
           | none => (.stuck, σ1)
         | none => (.stuck, σ)
+    | .lam f a =>
+      match F[f]?, evalAtom σ env a with
+      | some d, some (v, σ1) =>
+        match d.cap with
+        | some (_, τc, _) =>
+          let (c, σ2) := σ1.alloc v
+          (.val (.clo f c τc), σ2)
+        | none => (.stuck, σ1)
+      | _, _ => (.stuck, σ)
+    | .apply .once (.var x) a =>
+      match lookup x env with
+      | some cx =>
+        match σ.mem cx with
+        | some (.clo f c τc) =>
+          match evalAtom (σ.set cx (some .moved)) env a, F[f]? with
+          | some (v, σ1), some d =>
+            match d.cap, σ1.mem c with
+            | some (xc, _, _), some w =>
+              let d' := cloFn d xc τc .once
+              let vs := [v, w]
+              let ls : List Nat := []
+              if vs.length = d'.owns.length ∧ ls.length = d'.refs.length then
+                let (cells, σ2) := allocAll (σ1.set c none) ((d'.owns.map Prod.fst).zip vs)
+                ret F O n hs (.callK ((d'.owns.map Prod.snd).zip (cells.map Prod.snd)))
+                  (eval F O n hs σ2 (cells ++ (d'.refs.map Prod.fst).zip ls) d'.body)
+              else (.stuck, σ1)
+            | _, _ => (.stuck, σ1)
+          | _, _ => (.stuck, σ)
+        | _ => (.stuck, σ)
+      | none => (.stuck, σ)
+    | .apply .once _ _ => (.stuck, σ)
+    | .apply k p a =>
+      match evalAtom σ env a with
+      | some (v, σ1) =>
+        match resolve σ1 env p with
+        | some la =>
+          match σ1.mem la with
+          | some (.clo f c τc) =>
+            match F[f]? with
+            | some d =>
+              match d.cap with
+              | some (xc, _, _) =>
+                let d' := cloFn d xc τc k
+                let vs := [v]
+                let ls := [c]
+                if vs.length = d'.owns.length ∧ ls.length = d'.refs.length then
+                  let (cells, σ2) := allocAll σ1 ((d'.owns.map Prod.fst).zip vs)
+                  ret F O n hs (.callK ((d'.owns.map Prod.snd).zip (cells.map Prod.snd)))
+                    (eval F O n hs σ2 (cells ++ (d'.refs.map Prod.fst).zip ls) d'.body)
+                else (.stuck, σ1)
+              | none => (.stuck, σ1)
+            | none => (.stuck, σ1)
+          | _ => (.stuck, σ1)
+        | none => (.stuck, σ1)
+      | none => (.stuck, σ)
     | .lendCall x _ f owned lent body =>
       match F[f]? with
       | none => (.stuck, σ)
@@ -738,12 +847,23 @@ inductive Typed (F : List Fn) (O : List Op) : Ctx → Expr → Ty → Ctx → Ro
       Typed F O ((x, .own τ true) :: Γ₁) b τb ((x, .own τ live) :: Γ₂) r → Typed F O Γ (.let_ x τ a b) τb Γ₂ r
   | write : AtomTy Γ a .int Γ₁ → PlaceTy Γ₁ p .int true y → Typed F O Γ (.write p a) .int Γ₁ r
   | assign : AtomTy Γ a τ Γ₁ → PlaceTy Γ₁ p τ true y → Typed F O Γ (.assign p τ a) .int Γ₁ r
-  | call : F[f]? = some d → d.retp = none → (∀ l ∈ d.row, l ∈ r) → AtomsTy Γ owned (d.owns.map Prod.snd) Γ₁ →
+  | call : F[f]? = some d → d.retp = none → d.cap = none → (∀ l ∈ d.row, l ∈ r) → AtomsTy Γ owned (d.owns.map Prod.snd) Γ₁ →
       Lends Γ₁ lent (d.refs.map Prod.snd) ys → Exclusive ys →
       Typed F O Γ (.call f owned lent) d.ret Γ₁ r
+  /-- A closure captures plain data, moved in; its type says how it is called, what it takes and
+  gives, and what it may perform, but not what it captured. -/
+  | lam : F[f]? = some d → d.cap = some (xc, τc, k) → d.owns = [(pn, A)] → d.refs = [] →
+      d.retp = none → τc.data = true → AtomTy Γ a τc Γ₁ → Typed F O Γ (.lam f a) (.fn k A d.ret d.row) Γ₁ r
+  /-- A closure called once is moved out of its variable. -/
+  | applyOnce : lookup x Γ = some (.own (.fn .once A B r') true) → (∀ l ∈ r', l ∈ r) →
+      AtomTy (setSlot Γ x (.own (.fn .once A B r') false)) a A Γ₁ →
+      Typed F O Γ (.apply .once (.var x) a) B Γ₁ r
+  /-- A closure called through a borrow: `mut` for one that changes what it captured. -/
+  | applyBorrow : k ≠ .once → AtomTy Γ a A Γ₁ → PlaceTy Γ₁ p (.fn k A B r') w y → (k = .excl → w = true) →
+      (∀ l ∈ r', l ∈ r) → Typed F O Γ (.apply k p a) B Γ₁ r
   /-- The borrow a call returns is of what the caller lent it as its `i`th borrowed argument, rooted
   at `y`: as for a borrow of a place, `y` is only read, or not reached, while the borrow lives. -/
-  | lendCall : F[f]? = some d → d.retp = some (m, i, p) → (∀ l ∈ d.row, l ∈ r) →
+  | lendCall : F[f]? = some d → d.retp = some (m, i, p) → d.cap = none → (∀ l ∈ d.row, l ∈ r) →
       AtomsTy Γ owned (d.owns.map Prod.snd) Γ₁ → Lends Γ₁ lent (d.refs.map Prod.snd) ys → Exclusive ys →
       ys[i]? = some (mi, y) → (m = .mut → mi = .mut) → lookup x Γ₁ = none →
       Typed F O ((x, .ref m d.ret) :: lendCtx m Γ₁ y) body τb ((x, .ref m d.ret) :: Γb) r →
