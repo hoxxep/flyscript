@@ -173,13 +173,6 @@ def Ty.shell : Ty → Bool
   | .vec false _ => true
   | _ => false
 
-/-- What may pass into and out of a fiber as it is: an integer, or a continuation, whose cells are
-its own. -/
-def Ty.cross : Ty → Bool
-  | .int => true
-  | .cont _ _ _ => true
-  | _ => false
-
 /-- A type no region is part of, which says the same of a value wherever it is. -/
 def Ty.rfree : Ty → Bool
   | .int => true
@@ -192,6 +185,9 @@ def Ty.rfree : Ty → Bool
   | .arena _ => false
   | .vec _ τ => τ.rfree
   | .cont _ _ _ => true
+
+/-- What may pass into and out of a fiber: a value of no region and with no place lent out of it. -/
+def Ty.cross (τ : Ty) : Bool := τ.rfree && τ.complete
 
 theorem Ty.data_rfree : ∀ {τ : Ty}, τ.data = true → τ.rfree = true
   | .int, _ => rfl
@@ -592,12 +588,17 @@ inductive Kont where
   /-- A scope that failed, or whose body or task did, with `o`, of type `τ`: what is being dropped, of
   type `τd`, is unwinding to the barrier `d`; then each task of `Q` is, and `o` goes on. -/
   | scE (e eS id : Nat) (τ τd : Ty) (o : Outcome) (d : Nat) (Q : List (List Kont))
-  /-- The fiber of a `handle` whose arm keeps its continuation, its handler named `g`: its arm, the
-  function `fa`, is called with what the operation takes and the continuation. Since the fiber was
-  last entered, owning the cells `B`, the cells it allocated are those from `s` on. -/
-  | capV (τ : Ty) (e : Nat) (g : Nat) (fa : Nat) (B : List Nat) (s : Nat)
-  /-- A kept continuation being dropped: its operation, performed by its cleanup, goes on at once. -/
-  | capD (τ : Ty) (e : Nat) (g : Nat)
+  /-- The fiber of a `handle` whose arm keeps its continuation, its handler named `g`, which a failure
+  of its body unwinds to if `ff`: its arm, the function `fa`, is called with what the operation takes
+  and the continuation. Since the fiber was last entered, owning the cells `B`, the cells it allocated
+  are those from `s` on. -/
+  | capV (τ : Ty) (e : Nat) (g : Nat) (fa : Nat) (ff : Bool) (B : List Nat) (s : Nat)
+  /-- Such a fiber, given way by an operation of the code around, which lends it the places at `ls`:
+  once the code around answers, it is entered again, owning the cells `X` and what is at `ls` then. -/
+  | enterK (τ : Ty) (e : Nat) (g : Nat) (fa : Nat) (ff : Bool) (K : List Kont) (X : List Nat) (ls : List Nat)
+  /-- A kept continuation being dropped, unwinding to the barrier `d`: its operation, performed by its
+  cleanup, is cancelled, the cleanup unwinding from it. -/
+  | capD (τ : Ty) (e : Nat) (g : Nat) (d : Nat)
 end
 
 
@@ -755,6 +756,15 @@ def dropCell (σ : Store) (τ : Ty) (c : Nat) : Option Store :=
 or the last. -/
 def pick {α : Type} (ps : List α) (k : Int) : Option α := ps[min k.toNat (ps.length - 1)]?
 
+/-- Drops values of the types `τs`, in order. -/
+def dropAll (σ : Store) : List Ty → List Val → Option Store
+  | [], [] => some σ
+  | τ :: τs, v :: vs =>
+    match drop σ τ v with
+    | some σ' => dropAll σ' τs vs
+    | none => none
+  | _, _ => none
+
 def dropCells (σ : Store) : List (Ty × Nat) → Option Store
   | [] => some σ
   | (τ, c) :: rest =>
@@ -794,6 +804,11 @@ def kontsK : Nat → Store → Ty → Val → List Val
 
 def konts (σ : Store) (τ : Ty) (v : Val) : List Val := kontsK σ.next σ τ v
 
+/-- The continuations values of the types `τs` hold. -/
+def kontsAll (σ : Store) : List Ty → List Val → List Val
+  | τ :: τs, v :: vs => konts σ τ v ++ kontsAll σ τs vs
+  | _, _ => []
+
 /-- The continuations what a variable's cell holds holds. -/
 def cellKonts (σ : Store) (τ : Ty) (c : Nat) : List Val :=
   match σ.mem c with
@@ -815,12 +830,15 @@ wherever the code around it goes on. -/
 inductive Frame where
   | abort (l : Label) (id : Nat)
   | capture (e : Nat) (id : Nat)
+  /-- Code being dropped: every operation it performs is taken, by `id`, to be cancelled. -/
+  | cancel (id : Nat)
 
 abbrev HS := List Frame
 
 def Frame.handles : Frame → Label → Bool
   | .abort l _, l' => l == l'
   | .capture e _, .eff e' => e == e'
+  | .cancel _, .eff _ => true
   | _, _ => false
 
 /-- The innermost frame of tasks: a handler of an operation by which tasks give way. -/
@@ -837,8 +855,26 @@ def find (l : Label) : HS → Option Frame
   | [] => none
   | f :: rest => if f.handles l then some f else find l rest
 
+/-- The handlers in force for code running on a fiber whose continuation is kept: those of the code
+around, each operation taken as a continuation — one a handler there would end its `handle` with as
+well, which drops it — failures unwinding to the fiber's own handler `g`, if its body may fail. -/
+def hsConv : HS → HS
+  | [] => []
+  | .capture e id :: hs => .capture e id :: hsConv hs
+  | .cancel id :: hs => .cancel id :: hsConv hs
+  | .abort (.eff e) id :: hs => .capture e id :: hsConv hs
+  | .abort _ _ :: hs => hsConv hs
+
+def fiberHS (e g : Nat) (ff : Bool) (hs : HS) : HS :=
+  .capture e g :: ((if ff then [.abort .fail g] else []) ++ hsConv hs)
+
+/-- The handlers in force for a fiber `g` being dropped, unwinding to `d`: a failure unwinds on to
+`d`; what the fiber's frames were unwinding to, `g`, is aimed at as it was. -/
+def hsDie (g d : Nat) : HS := [.abort .fail d, .abort .drop d, .abort .drop g]
+
 /-- The frame a construct puts in force for the code it runs, if any. -/
 def Kont.push : Kont → HS → HS
+  | .catchK (.eff ef) id _ _ _, hs => .capture ef id :: .abort (.eff ef) id :: hs
   | .catchK l id _ _ _, hs => .abort l id :: hs
   | .capK _ e id _ _ _ _ _, hs => .capture e id :: hs
   | .dropK _ _ d, hs => .abort .drop d :: hs
@@ -855,20 +891,41 @@ def Kont.push : Kont → HS → HS
   | .scV e eS id _ _ _ _, hs => .capture e id :: .capture eS id :: hs
   | .scX e eS id, hs => .capture e id :: .capture eS id :: hs
   | .scE _ _ _ _ _ _ d _, hs => .abort .drop d :: hs
-  | .capV _ e g _ _ _, hs => .capture e g :: hs
-  | .capD _ e g, hs => .capture e g :: hs
+  | .capD _ _ g _, hs => .cancel g :: hs
   | _, hs => hs
 
-/-- The cells a value that may pass into or out of a fiber owns: a continuation's. -/
+/-- The cells a continuation kept as a value owns. -/
 def Val.foot : Val → List Nat
   | .kont _ X => X
   | _ => []
+
+/-- The cells a value owns, read off the store: those of its boxes, fields, tag, elements and
+capture, each with what it holds, and a continuation's. `k` bounds the depth. -/
+def treeK : Nat → Store → Val → List Nat
+  | _, _, .kont _ X => X
+  | k + 1, σ, .ptr b => b :: (σ.mem b).elim [] (treeK k σ)
+  | k + 1, σ, .clo _ c _ => c :: (σ.mem c).elim [] (treeK k σ)
+  | k + 1, σ, .tag _ _ _ b => b :: (σ.mem b).elim [] (treeK k σ)
+  | k + 1, σ, .pair b c => (b :: (σ.mem b).elim [] (treeK k σ)) ++ (c :: (σ.mem c).elim [] (treeK k σ))
+  | k + 1, σ, .vec cs => cs.flatMap fun c => c :: (σ.mem c).elim [] (treeK k σ)
+  | _, _, _ => []
+
+/-- The cells a value owns: no deeper than the store has cells. -/
+def Val.tree (σ : Store) (v : Val) : List Nat := treeK σ.next σ v
+
+/-- A list with each element once. -/
+def dedupL : List Nat → List Nat
+  | [] => []
+  | x :: xs => if x ∈ xs then dedupL xs else x :: dedupL xs
+
+/-- The cells of what the cell `l` holds, with `l`. -/
+def cellTree (σ : Store) (l : Nat) : List Nat := l :: (σ.mem l).elim [] (treeK σ.next σ)
 
 /-- What a fiber that was entered owning the cells `B`, and has allocated those from `s` on, owns
 where it gives way, the store `σ`, passing out the values `vs`: those of its cells still there that
 `vs` do not own. -/
 def kfoot (σ : Store) (B : List Nat) (s : Nat) (vs : List Val) : List Nat :=
-  (B ++ List.range' s (σ.next - s)).filter fun l => (σ.mem l).isSome && !(vs.flatMap Val.foot).contains l
+  (dedupL (B ++ List.range' s (σ.next - s))).filter fun l => (σ.mem l).isSome && !(vs.flatMap (Val.tree σ)).contains l
 
 inductive Res where
   | val (v : Val)
@@ -1117,7 +1174,7 @@ def evalS (F : List Fn) (O : List Op) (n : Nat) (hs : HS) (σ : Store) (env : En
           match σ1.mem l with
           | some old =>
             match drop σ1 τ old with
-            | some σ2 => andThen (flush F O n (konts σ1 τ old) σ2) fun σ3 => (.val (.int 0), σ3.set l (some v))
+            | some σ2 => andThen (flushR F O n (konts σ1 τ old) σ2) fun σ3 => (.val (.int 0), σ3.set l (some v))
             | none => (.stuck, σ1)
           | none => (.stuck, σ1)
         | none => (.stuck, σ1)
@@ -1259,6 +1316,7 @@ def evalS (F : List Fn) (O : List Op) (n : Nat) (hs : HS) (σ : Store) (env : En
           | some ls =>
             match find (.eff ef) hs with
             | some (.capture _ id) => (.susp id ef vs ls [], σ1)
+            | some (.cancel id) => (.susp id ef vs ls [], σ1)
             | some (.abort _ id) =>
               match vs with
               | [.int k] => (.abort id k, σ1)
@@ -1275,7 +1333,7 @@ def evalS (F : List Fn) (O : List Op) (n : Nat) (hs : HS) (σ : Store) (env : En
       | none => (.stuck, σ)
     | .handleAbort body ef x h =>
       let (id, σ1) := σ.fresh
-      ret F O n hs (.catchK (.eff ef) id x env h) (eval F O n (.abort (.eff ef) id :: hs) σ1 env body)
+      ret F O n hs (.catchK (.eff ef) id x env h) (eval F O n (.capture ef id :: .abort (.eff ef) id :: hs) σ1 env body)
     | .handleR τ body ef caps os rs arm C f =>
       match caps.mapM (fun c => resolve σ env c.loc) with
       | some ls =>
@@ -1319,10 +1377,11 @@ def evalS (F : List Fn) (O : List Op) (n : Nat) (hs : HS) (σ : Store) (env : En
         | some (vs, σ1) =>
           if vs.length = d.owns.length ∧ d.refs = [] then
             let (g, σ2) := σ1.fresh
-            let (cells, σ4) := allocAll σ2 ((d.owns.map Prod.fst).zip vs)
-            ret F O n hs (.capV τ e g fa (vs.flatMap Val.foot) σ2.next)
-              (evalK F O n [.capture e g] σ4
-                [.callK ((d.owns.map Prod.snd).zip (cells.map Prod.snd)), .startK cells d.body] (.val (.int 0)))
+            let ff := decide (Label.fail ∈ d.row)
+            ret F O n hs (.capV τ e g fa ff (vs.flatMap (Val.tree σ1)) σ2.next)
+              (let (cells, σ4) := allocAll σ2 ((d.owns.map Prod.fst).zip vs)
+               ret F O n (fiberHS e g ff hs) (.callK ((d.owns.map Prod.snd).zip (cells.map Prod.snd)))
+                 (eval F O n (fiberHS e g ff hs) σ4 cells d.body))
           else (.stuck, σ1)
         | none => (.stuck, σ)
       | none => (.stuck, σ)
@@ -1330,10 +1389,10 @@ def evalS (F : List Fn) (O : List Op) (n : Nat) (hs : HS) (σ : Store) (env : En
       match lookup x env with
       | some c =>
         match σ.mem c with
-        | some (.kont (.capV τ e g fa _ _ :: K) X) =>
+        | some (.kont (.capV τ e g fa ff _ _ :: K) X) =>
           match evalAtom (σ.set c (some .moved)) env a with
           | some (v, σ1) =>
-            ret F O n hs (.capV τ e g fa (X ++ v.foot) σ1.next) (evalK F O n [.capture e g] σ1 K (.val v))
+            ret F O n hs (.capV τ e g fa ff (X ++ v.tree σ1) σ1.next) (evalK F O n (fiberHS e g ff hs) σ1 K (.val v))
           | none => (.stuck, σ)
         | _ => (.stuck, σ)
       | none => (.stuck, σ)
@@ -1674,28 +1733,44 @@ def ret (F : List Fn) (O : List Op) (n : Nat) (hs : HS) : Kont → Res × Store 
         | _ => (.stuck, σ)
       else ret F O m hs (.scX e eS id) (evalK F O m (.capture e id :: .capture eS id :: hs) σ K (.val (.int 0)))
   | .scE e eS id τ τd o d Q, (.susp j ef vs ls K, σ) => (.susp j ef vs ls (.scE e eS id τ τd o d Q :: K), σ)
-  | .capV τ e g fa B s, (.susp j ef vs ls K, σ) =>
+  | .catchK l id x env h, (.susp j ef vs ls K, σ) =>
+    if l = .eff ef ∧ j = id then
+      match n, vs with
+      | 0, _ => (.timeout, σ)
+      | m + 1, [.int k] =>
+        ret F O m hs (.catchK l id x env h) (evalK F O m ((Kont.catchK l id x env h).push hs) σ K (.abort id k))
+      | _ + 1, _ => (.stuck, σ)
+    else (.susp j ef vs ls (.catchK l id x env h :: K), σ)
+  | .capV τ e g fa ff B s, (.susp j ef vs ls K, σ) =>
     if j = g ∧ ef = e then
       match n with
       | 0 => (.timeout, σ)
       | m + 1 =>
         match F[fa]? with
         | some da =>
-          let args := vs ++ [.kont (.capV τ e g fa B s :: K) (kfoot σ B s vs)]
+          let args := vs ++ [.kont (.capV τ e g fa ff B s :: K) (kfoot σ B s vs)]
           if args.length = da.owns.length ∧ ls = [] then
             let (cells, σ2) := allocAll σ ((da.owns.map Prod.fst).zip args)
             ret F O m hs (.callK ((da.owns.map Prod.snd).zip (cells.map Prod.snd))) (eval F O m hs σ2 cells da.body)
           else (.stuck, σ)
         | none => (.stuck, σ)
-    else (.susp j ef vs ls (.capV τ e g fa B s :: K), σ)
-  | .capD τ e g, (.susp j ef vs ls K, σ) =>
-    if j = g ∧ ef = e then
+    else (.susp j ef vs ls [.enterK τ e g fa ff K
+      ((kfoot σ B s vs).filter fun l => !(ls.flatMap (cellTree σ)).contains l) ls], σ)
+  | .capD τ e g d, (.susp j ef vs ls K, σ) =>
+    if j = g then
       match n with
       | 0 => (.timeout, σ)
       | m + 1 =>
-        andThen (flushR F O (m + 1) vs σ) fun σ1 =>
-          ret F O m hs (.capD τ e g) (evalK F O m (.capture e g :: hs) σ1 K (.val (.int 0)))
-    else (.susp j ef vs ls (.capD τ e g :: K), σ)
+        match O[ef]? with
+        | some op =>
+          match dropAll σ op.owns vs with
+          | some σ1 =>
+            andThen (flushR F O (m + 1) (kontsAll σ op.owns vs) σ1) fun σ2 =>
+              ret F O m hs (.capD τ e g d) (evalK F O m (.cancel g :: hs) σ2 K
+                (if op.task ∧ op.owns = [] ∧ op.refs = [] ∧ op.ret = .int then .val (.int 0) else .abort d 0))
+          | none => (.stuck, σ)
+        | none => (.stuck, σ)
+    else (.susp j ef vs ls (.capD τ e g d :: K), σ)
   | f, (.susp j ef vs ls K, σ) =>
     match f with
     | .scopeK τ c => leave (flushR F O n) τ c (.susp j ef vs ls K, σ)
@@ -1946,12 +2021,33 @@ def ret (F : List Fn) (O : List Op) (n : Nat) (hs : HS) : Kont → Res × Store 
     match σ.mem a with
     | some (.arena cs) => (r, (σ.freeAll cs).set a none)
     | _ => (.stuck, σ)
-  | .capV _ _ _ _ _ _, r => r
-  | .capD τ _ _, (.val v, σ) =>
+  | .capV _ _ g _ _ _ _, (.abort j k, σ) =>
+    if j = g then
+      match find .fail hs with
+      | some (.abort _ j') => (.abort j' k, σ)
+      | _ => (.stuck, σ)
+    else (.abort j k, σ)
+  | .capV _ _ _ _ _ _ _, r => r
+  | .enterK τ e g fa ff K X ls, (.val v, σ) =>
+    match n with
+    | 0 => (.timeout, σ)
+    | m + 1 =>
+      ret F O m hs (.capV τ e g fa ff (X ++ ls.flatMap (cellTree σ) ++ v.tree σ) σ.next)
+        (evalK F O m (fiberHS e g ff hs) σ K (.val v))
+  | .enterK τ e g _ _ K _ _, (.abort j k, σ) =>
+    match n with
+    | 0 => (.timeout, σ)
+    | m + 1 =>
+      let (d, σ1) := σ.fresh
+      match evalK F O m (hsDie g d) σ1 (.capD τ e g d :: K) (.abort d 0) with
+      | (.val _, σ2) => (.abort j k, σ2)
+      | (.abort _ _, σ2) => (.abort j k, σ2)
+      | r => r
+  | .capD τ _ _ _, (.val v, σ) =>
     match drop σ τ v with
     | some σ1 => andThen (flushR F O n (konts σ τ v) σ1) fun σ2 => (.val (.int 0), σ2)
     | none => (.stuck, σ)
-  | .capD _ _ _, (.abort j k, σ) => (.abort j k, σ)
+  | .capD _ _ _ _, (.abort j k, σ) => (.abort j k, σ)
 termination_by _ _ => (n, 1, 0)
 
 /-- A continuation given what the code it was taken at gives: its frames, the outermost first, each
@@ -1961,19 +2057,17 @@ def evalK (F : List Fn) (O : List Op) (n : Nat) (hs : HS) (σ : Store) : List Ko
   | f :: K, r => ret F O n hs f (evalK F O n (f.push hs) σ K r)
 termination_by K _ => (n, 1, sizeOf K + 1)
 
-/-- Drops the values `vs`, integers or continuations, each continuation unwound to a barrier of its
-own, its cleanup running. -/
+/-- Drops the continuations `vs`, each unwound to a barrier of its own, its cleanup running. -/
 def flush (F : List Fn) (O : List Op) (n : Nat) : List Val → Store → Res × Store
   | [], σ => (.val (.int 0), σ)
-  | .int _ :: vs, σ => flush F O n vs σ
-  | .kont (.capV τ e g _ _ _ :: K) _ :: vs, σ =>
+  | .kont (.capV τ e g _ _ _ _ :: K) _ :: vs, σ =>
     let (d, σ1) := σ.fresh
-    match evalK F O n [.abort .drop d] σ1 (.capD τ e g :: K) (.abort d 0) with
+    match evalK F O n (hsDie g d) σ1 (.capD τ e g d :: K) (.abort d 0) with
     | (.val _, σ2) => flush F O n vs σ2
     | (.abort _ _, σ2) => flush F O n vs σ2
     | r => r
   | _ :: _, σ => (.stuck, σ)
-termination_by vs _ => (n, 1, sizeOf vs + 1)
+termination_by vs _ => (n, 3, sizeOf vs)
 
 /-- Drops the values `vs` with what fuel is left. -/
 def flushR (F : List Fn) (O : List Op) (n : Nat) (ks : List Val) (σ : Store) : Res × Store :=
@@ -2336,21 +2430,22 @@ give way by `e` and start tasks by `eS`; what else they perform goes on to the c
       Lends Γ₁ ((la ++ lb).map fun p => (.ro, p)) (da.refs.map Prod.snd ++ db.refs.map Prod.snd) ys →
       Typed F O Γ (.par e fa oa la fb ob lb) (.pair da.ret db.ret) Γ₁ r
   /-- A `handle` whose arm keeps its continuation: its body, a call of `f` given what may pass into
-  a fiber, performs only its operation, which no task gives way by, lends nothing, gives an integer
-  and takes what may pass out of a fiber; its value may pass out too; its arm, `fa`, takes what the
-  operation does and the continuation, and performs `ra`, which the code around may. -/
-  | handleV : O[e]? = some op → op.task = false → op.refs = [] → op.ret = .int →
+  a fiber, performs its operation, which no task gives way by, lends nothing, gives what may pass
+  into a fiber and takes what may pass out of one, and what else the arm may; its value may pass out
+  too; its arm, `fa`, takes what the operation does and the continuation, and performs `ra`, which the
+  code around may. -/
+  | handleV : O[e]? = some op → op.task = false → op.refs = [] → op.ret.cross = true →
       (∀ τ' ∈ op.owns, τ'.cross = true) → τ.cross = true →
-      F[fa]? = some da → da.owns.map Prod.snd = op.owns ++ [.cont .int τ ra] → da.refs = [] → da.ret = τ →
+      F[fa]? = some da → da.owns.map Prod.snd = op.owns ++ [.cont op.ret τ ra] → da.refs = [] → da.ret = τ →
       da.row = ra → da.retp = none → da.cap = none → (∀ l ∈ ra, l ∈ r) →
       F[f]? = some d → d.refs = [] → d.ret = τ → d.retp = none → d.cap = none → Label.eff e ∈ d.row →
-      (∀ l ∈ d.row, l = .eff e) → (∀ τ' ∈ d.owns.map Prod.snd, τ'.cross = true) →
+      (∀ l ∈ d.row, l = .eff e ∨ (l ∈ ra ∧ l ≠ .drop)) → (∀ τ' ∈ d.owns.map Prod.snd, τ'.cross = true) →
       AtomsTy Γ owned (d.owns.map Prod.snd) Γ₁ →
       Typed F O Γ (.handleV τ e f owned fa) τ Γ₁ r
   /-- A kept continuation resumed: it is moved out of its variable, and what it performs, the code
   around may. -/
-  | resume : lookup x Γ = some (.own (.cont .int τ ra) true) → (∀ l ∈ ra, l ∈ r) →
-      AtomTy (setSlot Γ x (.own (.cont .int τ ra) false)) a .int Γ₁ →
+  | resume : lookup x Γ = some (.own (.cont A τ ra) true) → (∀ l ∈ ra, l ∈ r) →
+      AtomTy (setSlot Γ x (.own (.cont A τ ra) false)) a A Γ₁ →
       Typed F O Γ (.resume x a) τ Γ₁ r
   /-- A region: its body sees its arena `R` as the innermost region, and the variables around it a
   region further out. Nothing the region holds outlives it: the type of its value, and what its body

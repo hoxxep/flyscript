@@ -43,48 +43,58 @@ theorem flush_ok [WorldOk F O ι.w] (hK : EvalKOk F O n) : FlushOk F ι (flush F
     have hk' : KontsOk F ι σ vs := ⟨fun w hw => hall w (List.mem_cons_of_mem _ hw), hnr⟩
     have hra : ∀ l ∈ vs.flatMap Val.foot, σ.mem l ≠ none := fun l hl => by
       obtain ⟨w, hw, hl⟩ := List.mem_flatMap.mp hl
-      obtain ⟨τw, -, hvw⟩ := hk'.1 w hw
+      obtain ⟨_, _, _, hvw⟩ := hk'.1 w hw
       exact hvw.alloc l hl
-    obtain ⟨τ, hc, hv⟩ := hall v (List.mem_cons_self ..)
+    obtain ⟨At, Bt, rt, hv⟩ := hall v (List.mem_cons_self ..)
     -- What follows the first value's drop: the rest dropped as they were.
     have rest : ∀ σ2, Dropped σ v.foot σ2 →
         FlushGives (flush F O n vs σ2) σ (v.foot ++ vs.flatMap Val.foot) := fun σ2 hd =>
       FlushGives.trans hd (ih σ2 hd.wf (hk'.frame (hd.keeps hwf hra fun l h1 h2 => hdvr l h2 h1))) hwf hra
         fun l h1 h2 => hdvr l h2 h1
-    cases τ <;> simp only [Ty.cross, Bool.false_eq_true] at hc <;> cases hv
-    case int =>
-      rw [flush]
-      simpa [Val.foot] using rest σ (Moves.refl hwf (by simp [Val.foot]))
-    case kont X K hXn hXa hks =>
+    cases hv with
+    | @kont X K _ _ _ hXn hXa hks =>
     obtain ⟨σs, hkok, hagS⟩ := hks
-    obtain ⟨τh, e, g, fa, B', s', K', op, ra, X', rfl, hτ, hcv, hK', hperm⟩ :=
+    obtain ⟨τh, e, g, fa, ff, B', s', K', op, ra, rf, A, X', rfl, hτ, hcv, hrow, hA, hK', hperm⟩ :=
       ((WorldOk.ok (F := F) (O := O) (W := ι.w)) σs _ _ X).mp hkok
-    have hfr : FrameOk F O ⟨[], ι.w⟩ ⟨[], ι.w⟩ σs (.capD τh e g) ⟨[], [], τh, [], [.eff e]⟩ ⟨[], [], .int, [], []⟩
-        [] [] := .capD hcv.hop hcv.hret hcv.hrefs hcv.howns (Ty.cross_complete hcv.hτ)
-    have hFr := FramesOk.cons (A := []) hfr (Weaker.refl _) Agree.self (fun _ h => by simp at h) List.nodup_nil
-      disj_nil_left hK' (fun _ h => by simp at h) (fun _ h => by simp at h)
+    have hfr : FrameOk F O ⟨[], ι.w⟩ ⟨[], ι.w⟩ σs (.capD τh e g σ.fresh.1) ⟨[], [], τh, [], rf⟩
+        ⟨[], [], .int, [], [.fail]⟩ [] [σ.fresh.1] :=
+      .capD hcv.hop hcv.hrefs (Ty.cross_complete hcv.hτ) fun l hl => by
+        rcases hrow.1 l hl with rfl | ⟨-, hne⟩
+        · exact .inl ⟨e, rfl⟩
+        · cases l with
+          | fail => exact .inr (List.mem_singleton_self _)
+          | eff e' => exact .inl ⟨e', rfl⟩
+          | drop => exact absurd rfl hne
+    have hFr := FramesOk.cons (A := σ.fresh.1 :: A) hfr (Weaker.refl _) Agree.self (fun _ h => by simp at h)
+      List.nodup_nil disj_nil_left hK' (fun a h => by simp at h; simp [h])
+      (fun a ha => .inl (List.mem_cons_of_mem _ ha))
     simp only [List.nil_append] at hFr
     have hwf1 : WF σ.fresh.2 := hwf
     have hX'X : ∀ l, l ∈ X' ↔ l ∈ X := fun l => hperm.mem_iff.symm
     have hagF : Agree σ σ.fresh.2 X := Agree.of (fun _ _ => rfl) Store.fresh_rt
     have hagS1 : Agree σs σ.fresh.2 (X' ++ []) :=
       (hagS.trans hagF).mono fun l hl => (hX'X l).mp (by simpa using hl)
-    have hpost := hK [.abort .drop σ.fresh.1] ⟨[], ι.w⟩ σs (.capD τh e g :: K') ⟨[], [], .int, [], []⟩ X' [] []
-      σ.fresh.2 [] (.abort σ.fresh.1 0) op [] hFr ⟨.abort (by intro e h; cases h) .nil, fun _ h => by simp at h⟩
-      (fun _ h => by simp at h) hwf1 hagS1
+    have hpost := hK (hsDie g σ.fresh.1) ⟨[], ι.w⟩ σs (.capD τh e g σ.fresh.1 :: K') ⟨[], [], .int, [], [.fail]⟩ X'
+      [] (σ.fresh.1 :: A) σ.fresh.2 [] (.abort σ.fresh.1 0) op [] hFr
+      ⟨.abort (by intro e h; cases h) (.abort (by intro e h; cases h) (.abort (by intro e h; cases h) .nil)),
+        fun l hl => by simp at hl; subst hl; exact ⟨_, by simp [hsDie, find, Frame.handles]; rfl⟩⟩
+      (fun a h => by
+        rcases List.mem_cons.mp h with rfl | h
+        · exact ⟨.drop, by simp [hsDie]⟩
+        · obtain ⟨rfl, -⟩ := hA a h; exact ⟨.drop, by simp [hsDie]⟩) hwf1 hagS1
       (fun l hl => by
         have hl' := (hX'X l).mp (by simpa using hl)
         rw [← hagS l hl']; exact hXa l hl')
       (hperm.nodup_iff.mp hXn) rfl (fun _ hp => by simp at hp) (by simp [mutCells]) (by simp [mutCells, Disj])
-      (by simp [Disj]) (.inr ⟨σ.fresh.1, 0, rfl, ⟨.drop, by simp⟩, rfl⟩)
+      (by simp [Disj]) (.inr ⟨σ.fresh.1, 0, rfl, ⟨.drop, by simp [hsDie]⟩, rfl⟩)
     simp only [mutCells, List.flatMap_nil, List.append_nil] at hpost
     -- The fiber unwound: what it owned freed.
-    have hdone : ∀ σ2, Moves σ.fresh.2 X' σ2 [] [] → Dropped σ (Val.kont (.capV τh e g fa B' s' :: K') X).foot σ2 :=
+    have hdone : ∀ σ2, Moves σ.fresh.2 X' σ2 [] [] → Dropped σ (Val.kont (.capV τh e g fa ff B' s' :: K') X).foot σ2 :=
       fun σ2 hm => ((Moves.freshen (E := X') hwf (fun l hl => hXa l ((hX'X l).mp hl))).trans hm disj_nil_left
         hwf).congr_left fun x => by simp only [Val.foot]; exact hX'X x
     rw [flush]
     simp only [Store.fresh] at hpost hdone ⊢
-    generalize evalK F O n [.abort .drop σ.ids] { σ with ids := σ.ids + 1 } (.capD τh e g :: K') (.abort σ.ids 0) = res
+    generalize evalK F O n (hsDie g σ.ids) { σ with ids := σ.ids + 1 } (.capD τh e g σ.ids :: K') (.abort σ.ids 0) = res
       at hpost ⊢
     rcases res with ⟨res, σ2⟩
     cases res with
@@ -99,7 +109,7 @@ theorem flush_ok [WorldOk F O ι.w] (hK : EvalKOk F O n) : FlushOk F ι (flush F
       exact rest σ2 (hdone σ2 hm)
     | susp j ef ws ls K2 =>
       obtain ⟨-, -, -, -, -, hc, -⟩ := hpost
-      simp at hc
+      rcases hc with hc | hc <;> simp [hsDie] at hc
     | stuck => simp [Post] at hpost
     | timeout => exact .inl rfl
     | panic => exact .inr (.inl rfl)

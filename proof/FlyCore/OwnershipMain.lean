@@ -30,6 +30,10 @@ theorem preTarget_spec : ∀ {hs : HS}, preTarget O hs = some (e, j) →
     simp only [preTarget] at h
     obtain ⟨hm, h'⟩ := preTarget_spec h
     exact ⟨List.mem_cons_of_mem _ hm, h'⟩
+  | .cancel id :: hs, h => by
+    simp only [preTarget] at h
+    obtain ⟨hm, h'⟩ := preTarget_spec h
+    exact ⟨List.mem_cons_of_mem _ hm, h'⟩
 
 /-- A task stopped before `e`, for another to run: it waits, as if it had given way, to run `e`
 once it goes on, its cells as they were. -/
@@ -45,19 +49,19 @@ theorem preempt_ok (ht : Typed F O Γ e τ Γ' r) (hI : Inv F ι σ Γ env E S) 
       ([] ++ E.filter (· ∉ mutCells (olds []))) [] [] :=
     .cons (.startK ht) (Weaker.refl _) Agree.self (fun _ h => by simp at h) List.nodup_nil disj_nil_left hb
       (fun _ h => by simp at h) (fun _ h => by simp at h)
-  refine ⟨op, _, [], [], [], hm, hop, hRdy.2, fun _ h => by simp at h, hK, rfl, by rw [howns]; exact .nil,
+  refine ⟨op, _, [], [], [], .inl hm, hop, hRdy.2, fun _ h => by simp at h, hK, rfl, by rw [howns]; exact .nil,
     List.nodup_nil, disj_nil_left, disj_nil_left, ?_⟩
   simp only [olds, mutCells, List.map_nil, List.flatMap_nil, List.flatten_nil, List.nil_append, List.append_nil]
   exact (Moves.freshen hwf hI.alloc).relabel fun x => by simp
 
-theorem eval_ok_succ (hF : FnsOk F O) (hE : EvalOk F O n) (hR : RetOk F O n)
-    (hKs : ∀ m, m < n → EvalOk F O m ∧ EvalKOk F O m) : EvalOk F O (n + 1) := by
+theorem eval_ok_succ (hF : FnsOk F O) (hE : EvalOk F O n) (hR : RetOk F O n) (hK : EvalKOk F O n)
+    (hKs : ∀ m, m < n → EvalOk F O m ∧ EvalKOk F O m ∧ RetOk F O m) : EvalOk F O (n + 1) := by
   intro hs σ ι Γ env E S e τ Γ' r _ ht hI hwf hRdy
-  have hKo : ∀ m, n = m + 1 → EvalKOk F O m := fun m h => (hKs m (by omega)).2
+  have hKo : ∀ m, n = m + 1 → EvalKOk F O m := fun m h => (hKs m (by omega)).2.1
+  have hKR : ∀ m, n = m + 1 → EvalKOk F O m ∧ RetOk F O m := fun m h => (hKs m (by omega)).2
   have hfl : ∀ ι, [WorldOk F O ι.w] → FlushOk F ι (flushR F O n) := fun _ _ => flushR_ok hKo
   have hKv : ∀ ι, [WorldOk F O ι.w] → ∀ m, n = m + 1 → EvalOk F O m ∧ FlushOk F ι (flushR F O m) :=
-    fun _ _ m h => ⟨(hKs m (by omega)).1, flushR_ok fun k hk => (hKs k (by omega)).2⟩
-  have hfl' : ∀ ι, [WorldOk F O ι.w] → FlushOk F ι (flush F O n) := fun _ _ => flush_ok (evalK_ok hR)
+    fun _ _ m h => ⟨(hKs m (by omega)).1, flushR_ok fun k hk => (hKs k (by omega)).2.1⟩
   -- A task may be stopped before anything it does, for another to run.
   rw [eval]
   split
@@ -220,7 +224,7 @@ theorem eval_ok_succ (hF : FnsOk F O) (hE : EvalOk F O n) (hR : RetOk F O n)
       obtain ⟨v, σ1, E₁, L₁, hev, hI₁, hv₁, hd₁, hdS₁, hm₁⟩ := atom_ok ha hI hwf
       obtain ⟨l, Rb, P, A, B, hres, hRb, hE, hupd⟩ := replace_at hI₁ hp ha.complete (.inr hsh)
       obtain ⟨w, R', hw, hvw, rfl, hlR'⟩ := hRb.contents ha.complete
-      obtain ⟨σ2', hdrop, hfg⟩ := dropF (hfl' ι) hm₁.wf hvw
+      obtain ⟨σ2', hdrop, hfg⟩ := dropF (hfl ι) hm₁.wf hvw
       simp only [evalS, hev, hres, hw, hdrop]
       refine hfg.post fun σ2 hd2 => ?_
       have hkeep := hd2.keep hm₁.wf
@@ -555,6 +559,7 @@ theorem eval_ok_succ (hF : FnsOk F O) (hE : EvalOk F O n) (hR : RetOk F O n)
       have hh := find_handles hf
       cases f with
       | capture => simp [Frame.handles] at hh
+      | cancel => simp [Frame.handles] at hh
       | abort l i =>
         simp only [hf]
         exact ⟨⟨l, find_mem hf⟩, E₁, hI₁, by simpa using hm₁⟩
@@ -562,24 +567,17 @@ theorem eval_ok_succ (hF : FnsOk F O) (hE : EvalOk F O n) (hR : RetOk F O n)
       simp only [evalS]
       have hk := hI.keys
       rw [← typed_keys hb] at hk
-      exact post_after (Moves.freshen hwf hI.alloc) hwf (ret_catchK (hfl _) hE hx hk hh (by intro e h; cases h) hRdy
-        (hwf : WF _) (hE _ _ _ _ _ _ _ _ _ _ _ hb hI.fresh (hwf : WF _) ⟨.abort (by intro e h; cases h) hRdy.1,
-          fun l hl => by
-            rcases List.mem_cons.mp hl with rfl | hl
-            · exact find_head
-            · exact covers_cons _ hRdy.2 l hl⟩))
+      exact post_after (Moves.freshen hwf hI.alloc) hwf (ret_catchK (hfl _) hE hKR hx hk hh (by intro e h; cases h) hRdy
+        (hwf : WF _) hI.allocS hI.disj (hE _ _ _ _ _ _ _ _ _ _ _ hb hI.fresh (hwf : WF _)
+          ⟨catch_hsok (by intro e h; cases h) hRdy.1, catch_covers hRdy.2⟩))
     | handleAbort hop howns hrefs hx hb hh =>
       simp only [evalS]
       have hk := hI.keys
       rw [← typed_keys hb] at hk
-      exact post_after (Moves.freshen hwf hI.alloc) hwf (ret_catchK (hfl _) hE hx hk hh
-        (by intro e' h; cases h; exact ⟨_, hop, howns, hrefs⟩) hRdy
-        (hwf : WF _) (hE _ _ _ _ _ _ _ _ _ _ _ hb hI.fresh (hwf : WF _) ⟨.abort
-          (by intro e' h; cases h; exact ⟨_, hop, howns, hrefs⟩) hRdy.1,
-          fun l hl => by
-            rcases List.mem_cons.mp hl with rfl | hl
-            · exact find_head
-            · exact covers_cons _ hRdy.2 l hl⟩))
+      exact post_after (Moves.freshen hwf hI.alloc) hwf (ret_catchK (hfl _) hE hKR hx hk hh
+        (by intro e' h; cases h; exact ⟨_, hop, howns, hrefs⟩) hRdy (hwf : WF _) hI.allocS hI.disj
+        (hE _ _ _ _ _ _ _ _ _ _ _ hb hI.fresh (hwf : WF _)
+          ⟨catch_hsok (by intro e' h; cases h; exact ⟨_, hop, howns, hrefs⟩) hRdy.1, catch_covers hRdy.2⟩))
     | while_ hc hb =>
       simp only [evalS]
       exact ret_whileC hE hc hb hRdy hwf (hE _ _ _ _ _ _ _ _ _ _ _ hc hI hwf hRdy)
@@ -613,7 +611,22 @@ theorem eval_ok_succ (hF : FnsOk F O) (hE : EvalOk F O n) (hR : RetOk F O n)
         have hMin : ∀ l ∈ mutCells (olds hos), l ∈ E₁ := fun l hl => by
           obtain ⟨h, hh, hl⟩ := mem_olds_mut.mp hl
           exact (hole_in hI₁ (hholes h hh)).2 (Hole.excl_mut hl).1 l hl
-        refine ⟨_, E₁.filter (· ∉ mutCells (olds hos)), hos, [], Ls, find_mem hf, hop, hRdy.2,
+        refine ⟨_, E₁.filter (· ∉ mutCells (olds hos)), hos, [], Ls, .inl (find_mem hf), hop, hRdy.2,
+          fun _ h => by simp at h, .base hI₁ hholes hpw hop hts (Weaker.refl _), rfl, hvs, hLn, ?_, hdLS, ?_⟩
+        · intro l hl h
+          simp only [List.mem_append] at h
+          rcases h with h | h
+          · exact hdL l hl (mem_keep.mp h).1
+          · exact hdL l hl (hMin l h)
+        · exact hm₁.relabel fun x => by
+            have := hMin x
+            simp only [List.mem_append, mem_keep] at *; grind
+      | cancel i =>
+        simp only [hf]
+        have hMin : ∀ l ∈ mutCells (olds hos), l ∈ E₁ := fun l hl => by
+          obtain ⟨h, hh, hl⟩ := mem_olds_mut.mp hl
+          exact (hole_in hI₁ (hholes h hh)).2 (Hole.excl_mut hl).1 l hl
+        refine ⟨_, E₁.filter (· ∉ mutCells (olds hos)), hos, [], Ls, .inr (.inl (find_mem hf)), hop, hRdy.2,
           fun _ h => by simp at h, .base hI₁ hholes hpw hop hts (Weaker.refl _), rfl, hvs, hLn, ?_, hdLS, ?_⟩
         · intro l hl h
           simp only [List.mem_append] at h
@@ -652,13 +665,13 @@ theorem eval_ok_succ (hF : FnsOk F O) (hE : EvalOk F O n) (hR : RetOk F O n)
     | vpop hp hc => exact vpop_ok hp hc hI hwf
     | lendSlice hx hp hlo hhi hm hb => exact lendSlice_any hE hx hp hlo hhi hm hb hI hwf hRdy
     | par hop _ howns hrefs hret hfa hfb hretpa hcapa hretpb hcapb hea heb hrowa hrowb hca hcb hargs hlends =>
-      exact par_ok hF hR (evalK_ok hR) hop howns hrefs hret hfa hfb hretpa hcapa hretpb hcapb hea heb hrowa hrowb
+      exact par_ok hF hR hK hop howns hrefs hret hfa hfb hretpa hcapa hretpb hcapb hea heb hrowa hrowb
         hca hcb hargs hlends hI hwf hRdy
     | handleV hop htask hrefs hret howns hτ hfa hdowns hdrefs hdret hdrow hdretp hdcap hra hf hrefsd hretd hretpd
         hcapd he hrow hcross hargs =>
-      exact handleV_ok hF (evalK_ok hR) (hKv _) hop htask hrefs hret howns hτ hfa hdowns hdrefs hdret hdrow hdretp
+      exact handleV_ok hF hE hfl (hKv _) hop htask hrefs hret howns hτ hfa hdowns hdrefs hdret hdrow hdretp
         hdcap hra hf hrefsd hretd hretpd hcapd he hrow hcross hargs hI hwf hRdy
-    | resume hx hra ha => exact resumeV_ok hF (evalK_ok hR) (hKv _) hx hra ha hI hwf hRdy
+    | resume hx hra ha => exact resumeV_ok hF hK (hKv _) hx hra ha hI hwf hRdy
 
 theorem ret_ok (hF : FnsOk F O) (hE : EvalOk F O n) (hKs : ∀ m, m < n → EvalKOk F O m ∧ RetOk F O m) :
     RetOk F O n := by
@@ -679,7 +692,7 @@ theorem ret_ok (hF : FnsOk F O) (hE : EvalOk F O n) (hKs : ∀ m, m < n → Eval
     exact leave_ok' (hfl _) hτx hwf hx hk hp
   | callK hrow hI₁ hholes hpw hts hkeys hoc hbody hcells =>
     exact ret_callK (hfl _) hrow hI₁ hholes hpw hts hkeys hoc hbody hcells hR hwf hag hd hSa hSd hp
-  | catchK hx hk hh hl => exact ret_catchK (hfl _) hE hx hk hh hl hR hwf hp
+  | catchK hx hk hh hl => exact ret_catchK (hfl _) hE hKo hx hk hh hl hR hwf hSa (by simpa using hSd) hp
   | whileC hc hb => exact ret_whileC hE hc hb hR hwf hp
   | whileB hc hb => exact ret_whileB hE hc hb hR hwf hp
   | deferK hd' => exact ret_deferK (hfl _) hE hd' hR hwf hp
@@ -717,8 +730,9 @@ theorem ret_ok (hF : FnsOk F O) (hE : EvalOk F O n) (hKs : ∀ m, m < n → Eval
   | genP hG hSo hKc => exact ret_genP (hfl _) hKo hG hSo hKc hR hA hwf hag halloc hnd hd hSa hSd hp
   | genY hop howns hrefs hret hcy =>
     simpa using ret_genY (hfl _) hKo hop howns hrefs hret hcy hR hwf (by simpa using hag) hSa (by simpa using hSd) hp
-  | capD hop hret hrefs hcross hcτ =>
-    simpa using ret_capD (hfl _) hKo hop hret hrefs hcross hcτ hR hwf (by simpa using hag) hSa (by simpa using hSd) hp
+  | capD hop hrefs hcτ hrin =>
+    simpa using ret_capD (hfl _) hKo hop hrefs hcτ hrin (hA _ (List.mem_singleton_self _)) hR hwf (by simpa using hag)
+      hSa (by simpa using hSd) hp
   | genN hop howns hrefs hret hcy =>
     simpa using ret_genN hKo hop howns hrefs hret hcy hR hwf (by simpa using hag) hSa (by simpa using hSd) hp
   | genE hG hIc hdFE hSo ho => exact ret_genE (hfl _) hG hIc hdFE hSo ho hR hA hwf hag halloc hnd hd hSa hSd hp
@@ -738,13 +752,15 @@ theorem sound (hF : FnsOk F O) : ∀ n, EvalOk F O n ∧ RetOk F O n ∧ EvalKOk
   | 0 =>
     have hE : EvalOk F O 0 := by intro _ _ _ _ _ _ _ _ _ _ _ _ _ _ _; simp [eval, Post]
     have hR : RetOk F O 0 := ret_ok hF hE fun m h => absurd h (by omega)
-    ⟨hE, hR, evalK_ok hR⟩
+    ⟨hE, hR, evalK_ok hR (nest_ok hF fun m h => absurd h (by omega))⟩
   | n + 1 =>
     have ⟨hE, hR, hK⟩ := sound hF n
-    have hE' := eval_ok_succ hF hE hR fun m h => let s := sound hF m; ⟨s.1, s.2.2⟩
+    have hE' := eval_ok_succ hF hE hR hK fun m h => let s := sound hF m; ⟨s.1, s.2.2, s.2.1⟩
     have hR' : RetOk F O (n + 1) := ret_ok hF hE' fun m h =>
       if hm : m = n then hm ▸ ⟨hK, hR⟩ else let s := sound hF m; ⟨s.2.2, s.2.1⟩
-    ⟨hE', hR', evalK_ok hR'⟩
+    have hN' : NestOk F O (n + 1) := nest_ok hF fun m h =>
+      if hm : m = n then hm ▸ ⟨hE, hK, hR⟩ else let s := sound hF m; ⟨s.1, s.2.2, s.2.1⟩
+    ⟨hE', hR', evalK_ok hR' hN'⟩
 termination_by n => n
 decreasing_by all_goals omega
 
@@ -786,7 +802,7 @@ theorem program_ok_sched (hF : FnsOk F O) (ht : Typed F O [] e τ Γ' [.fail]) (
   | panic => trivial
   | susp j ef vs ls K =>
     obtain ⟨-, -, -, -, -, hc, -⟩ := h
-    simp at hc
+    rcases hc with hc | hc | hc <;> simp at hc
   | val v =>
     obtain ⟨E', L, hI, hv, -, -, hm⟩ := h
     cases hI.foot

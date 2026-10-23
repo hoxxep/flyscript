@@ -107,6 +107,59 @@ theorem dropCellsF (hfl : FlushOk F ι fl) (h : Foot F ι σ Γo eo Eo So) (hs :
     hwf⟩
 
 
+/-- The continuations values hold are found through cells they own, which another store that keeps
+them, with as many cells, gives as well. -/
+theorem kontsAll_frame (hn : σ'.next = σ.next) : ∀ {τs vs Ls}, Vals F ι σ τs vs Ls →
+    (∀ l ∈ Ls.flatten, σ'.mem l = σ.mem l) → kontsAll σ' τs vs = kontsAll σ τs vs
+  | _, _, _, .nil, _ => rfl
+  | _, _, _, .cons hv hr, hag => by
+    simp only [kontsAll, konts, hn]
+    rw [kontsK_frame _ _ _ _ _ hv σ' fun l hl => hag l (by simp [hl]),
+      kontsAll_frame hn hr fun l hl => hag l (by simp [hl])]
+
+/-- Dropping values in turn frees what they own but their continuations, which are left as they were. -/
+theorem dropAll_pure (hwf : WF σ) : ∀ {τs vs Ls}, Vals F ι σ τs vs Ls → Ls.flatten.Nodup →
+    ∃ σ', dropAll σ τs vs = some σ' ∧ Moves σ Ls.flatten σ' ((kontsAll σ τs vs).flatMap Val.foot) [] ∧
+      KontsOk F ι σ' (kontsAll σ τs vs) ∧ ∀ l ∈ (kontsAll σ τs vs).flatMap Val.foot, l ∈ Ls.flatten
+  | _, _, _, .nil, _ => ⟨σ, rfl, by simpa [kontsAll] using Moves.refl hwf (E := []) (by simp),
+      by simpa [kontsAll] using (KontsOk.nil : KontsOk F ι σ []), by simp [kontsAll]⟩
+  | _, _, _, .cons (τ := τ) (v := v) (L := L) (τs := τs) (vs := vs) (Ls := Ls) hv hr, hn => by
+    obtain ⟨σ1, hd, hnext, hfree, hkeep⟩ := drop_ok hwf τ v L hv
+    obtain ⟨hk1, hY1⟩ := konts_ok hv
+    have hm1 := Moves.ofDrop hwf hnext hv.alloc hY1 hfree hkeep (drop_rt hd)
+    simp only [List.flatten_cons] at hn
+    obtain ⟨-, hn2, hdLL⟩ := nodup_append_disj.mp hn
+    have hkeepL : ∀ l ∈ Ls.flatten, σ1.mem l = σ.mem l := fun l hl => hkeep l (.inl fun h => hdLL l h hl)
+    have hag1 : Agree σ σ1 Ls.flatten := Agree.of hkeepL (drop_rt hd)
+    have hr1 := hr.frame hag1
+    obtain ⟨σ2, hd2, hm2, hk2, hY2⟩ := dropAll_pure hm1.wf hr1 hn2
+    have hka : kontsAll σ1 τs vs = kontsAll σ τs vs := kontsAll_frame hnext hr hkeepL
+    rw [hka] at hm2 hk2 hY2
+    have hY1a : ∀ l ∈ (konts σ τ v).flatMap Val.foot, σ1.mem l ≠ none := fun l hl => by
+      rw [hkeep l (.inr hl)]; exact hv.alloc l (hY1 l hl)
+    have hdY1 : Disj ((konts σ τ v).flatMap Val.foot) Ls.flatten := fun l h1 h2 => hdLL l (hY1 l h1) h2
+    simp only [dropAll, hd, kontsAll, List.flatMap_append, List.flatten_cons]
+    refine ⟨σ2, hd2, ?_, ?_, ?_⟩
+    · have m1 := (hm1.widen (X := Ls.flatten) hr.alloc fun l h1 h2 => hdLL l h2 h1).relabel
+        (E'' := (konts σ τ v).flatMap Val.foot ++ Ls.flatten) (L'' := []) fun x => by
+          simp only [List.mem_append, List.not_mem_nil, or_false]; exact Or.comm
+      have m2 := hm2.widen (X := (konts σ τ v).flatMap Val.foot) hY1a hdY1
+      exact ((m1.trans m2 disj_nil_left hwf).congr_left fun x => by
+        simp only [List.mem_append]; exact Or.comm).relabel fun x => by simp
+    · have hk1' := (hk1.frame (Agree.of (fun l hl => hkeep l (.inr hl)) (drop_rt hd))).frame
+        (hm2.keeps hm1.wf hY1a hdY1)
+      exact hk1'.append hk2 fun l h1 h2 => hdLL l (hY1 l h1) (hY2 l h2)
+    · intro l hl
+      rcases List.mem_append.mp hl with h | h
+      · exact List.mem_append.mpr (.inl (hY1 l h))
+      · exact List.mem_append.mpr (.inr (hY2 l h))
+
+/-- Dropping values in turn, and then the continuations they held, frees what they own. -/
+theorem dropAllF (hfl : FlushOk F ι fl) (hwf : WF σ) (h : Vals F ι σ τs vs Ls) (hn : Ls.flatten.Nodup) :
+    ∃ σ', dropAll σ τs vs = some σ' ∧ FlushGives (fl (kontsAll σ τs vs) σ') σ Ls.flatten :=
+  let ⟨σ', hd, hm, hk, _⟩ := dropAll_pure hwf h hn
+  ⟨σ', hd, FlushGives.after hm (hfl σ' _ hm.wf hk) hwf⟩
+
 /-- A step, and then the cells `D` of its footprint dropped. -/
 theorem Moves.thenDrop (hm : Moves σ0 E σ1 (E₂ ++ D) L) (hd : Dropped σ1 D σ2)
     (hlive : ∀ l ∈ E₂ ++ L, σ1.mem l ≠ none) (hdisj : Disj (E₂ ++ L) D) (hwf : WF σ0) :
@@ -172,24 +225,10 @@ theorem Moves.ofDropped (hd : Dropped σ D σ') (hE : ∀ l ∈ E, σ.mem l ≠ 
   ((hd.widen (X := E') (fun l hl => hE l ((hsplit l).mpr (.inl hl))) hdisj).congr_left fun x => by
     rw [hsplit, List.mem_append]).relabel fun x => by simp
 
-theorem VT.foot_cross (h : VT F ι σ τ v L) (hc : τ.cross = true) : L = v.foot := by
-  cases h <;> simp_all [Ty.cross, Val.foot]
-
-/-- Values that may pass out of a fiber, each owning its continuation's cells. -/
-theorem Vals.konts : Vals F ι σ τs vs Ls → (∀ τ ∈ τs, τ.cross = true) → Ls.flatten.Nodup →
-    KontsOk F ι σ vs ∧ vs.flatMap Val.foot = Ls.flatten
-  | .nil, _, _ => ⟨KontsOk.nil, rfl⟩
-  | .cons hv hr, hc, hn => by
-    have hc1 := hc _ (List.mem_cons_self ..)
-    have hfoot := hv.foot_cross hc1
-    simp only [List.flatten_cons] at hn
-    obtain ⟨-, hn2, -⟩ := nodup_append_disj.mp hn
-    obtain ⟨hk, he⟩ := Vals.konts hr (fun τ hτ => hc τ (List.mem_cons_of_mem _ hτ)) hn2
-    refine ⟨⟨fun w hw => ?_, ?_⟩, ?_⟩
-    · rcases List.mem_cons.mp hw with rfl | hw
-      · exact ⟨_, hc1, hfoot ▸ hv⟩
-      · exact hk.1 w hw
-    · simp only [List.flatMap_cons, he, ← hfoot]; simpa using hn
-    · simp only [List.flatMap_cons, he, ← hfoot, List.flatten_cons]
+/-- Values, each owning the cells `treeK` reads off the store. -/
+theorem Vals.trees (hwf : WF σ) : Vals F ι σ τs vs Ls → vs.flatMap (Val.tree σ) = Ls.flatten
+  | .nil => rfl
+  | .cons hv hr => by
+    simp only [List.flatMap_cons, List.flatten_cons, hv.tree_eq hwf, Vals.trees hwf hr]
 
 end FlyCore.Ownership

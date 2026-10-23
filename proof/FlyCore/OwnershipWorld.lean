@@ -14,29 +14,17 @@ namespace FlyCore.Ownership
 
 variable {F : List Fn} {O : List Op}
 
-/-- What a `handle` whose arm keeps its continuation is, apart from its code: its operation, of
-effect `e`, which no task gives way by, lends nothing, gives an integer, and takes what may pass out
-of a fiber; its value, `τ`, which may pass out of it too; and its arm, the function `fa`, which takes
-what the operation does and the continuation, and performs `ra`. -/
-structure CapVOk (F : List Fn) (O : List Op) (e fa : Nat) (op : Op) (τ : Ty) (ra : Row) : Prop where
-  hop : O[e]? = some op
-  htask : op.task = false
-  hrefs : op.refs = []
-  hret : op.ret = .int
-  howns : ∀ τ' ∈ op.owns, τ'.cross = true
-  hτ : τ.cross = true
-  harm : ∃ da, F[fa]? = some da ∧ da.owns.map Prod.snd = op.owns ++ [.cont .int τ ra] ∧ da.refs = [] ∧
-    da.ret = τ ∧ da.row = ra ∧ da.retp = none ∧ da.cap = none
-
 /-- The continuations that are as their frames say in the world `W`: a fiber's frames, suspended
-where it performed its `handle`'s operation, at the store `σs`, owning the cells `X`. -/
+where it performed its `handle`'s operation, at the store `σs`, owning the cells `X`, each failure
+they are unwinding with aimed at the fiber's own handler. -/
 def Φ (F : List Fn) (O : List Op) (W : World) : World where
-  kok σs K τc X := ∃ τ e g fa B s K' op ra X', K = .capV τ e g fa B s :: K' ∧ τc = .cont .int τ ra ∧
-    CapVOk F O e fa op τ ra ∧ FramesOk F O ⟨[], W⟩ σs K' op ⟨[], [], τ, [], [.eff e]⟩ X' [] [] ∧ X.Perm X'
+  kok σs K τc X := ∃ τ e g fa ff B s K' op ra rf A X', K = .capV τ e g fa ff B s :: K' ∧ τc = .cont op.ret τ ra ∧
+    CapVOk F O e fa op τ ra ∧ FiberRow e ff ra rf ∧ (∀ a ∈ A, a = g ∧ ff = true) ∧
+    FramesOk F O ⟨[], W⟩ σs K' op ⟨[], [], τ, [], rf⟩ X' [] A ∧ X.Perm X'
 
 theorem Φ.mono (h : W.le W') : (Φ F O W).le (Φ F O W') := by
-  intro σs K τc X ⟨τ, e, g, fa, B, s, K', op, ra, X', hK, hτ, hc, hf, hX⟩
-  exact ⟨τ, e, g, fa, B, s, K', op, ra, X', hK, hτ, hc, hf.mono (W := W') h, hX⟩
+  intro σs K τc X ⟨τ, e, g, fa, ff, B, s, K', op, ra, rf, A, X', hK, hτ, hc, hr, hA, hf, hX⟩
+  exact ⟨τ, e, g, fa, ff, B, s, K', op, ra, rf, A, X', hK, hτ, hc, hr, hA, hf.mono (W := W') h, hX⟩
 
 /-- A world that takes exactly what it says it does. -/
 def WOk (F : List Fn) (O : List Op) (W : World) : Prop :=

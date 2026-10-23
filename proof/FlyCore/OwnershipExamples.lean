@@ -35,7 +35,8 @@ macro_rules
   | `(tactic| run [$xs,*]) => `(tactic| simp [eval, evalS, preTarget, ret, evalK, flushR, flush, andThen, konts, kontsK, cellKonts, cellsKonts, evalAtom, evalAtoms, resolve, leave, cleanV,
       cleanA, dropRet, armEnd, callRet, allocAll, dropCells, dropCell, drop, dropK, pick, Store.fresh, Store.alloc, Store.set, find,
       Frame.handles, Kont.push, lookup, Res.done, Outcome.res, Cap.at, Store.empty, Store.sched0, value, freed, freedBelow,
-      Store.tag, Store.freeAll, Store.moveAll, dropCellsWith,
+      Store.tag, Store.freeAll, Store.moveAll, dropCellsWith, fiberHS, hsConv, hsDie, dedupL, cellTree, treeK,
+      Val.tree, kfoot, Val.foot, dropAll, kontsAll,
       isStuck, $xs,*])
 
 /-- `function add(b: Box<int>, r: mut Box<int>): int { *r = *r + *b; *r }` -/
@@ -2523,7 +2524,8 @@ theorem kept_typed {body arm : Fn} (hbo : body.owns = []) (hbr : body.refs = [])
     (ha : arm.owns.map Prod.snd = [.int, .cont .int .int []]) (hr : arm.refs = []) (ht : arm.ret = .int)
     (hw : arm.row = []) (hp : arm.retp = none) (hc : arm.cap = none) :
     Typed [body, arm] [emitOp] [] (.handleV .int 0 0 [] 1) .int [] [.fail] :=
-  .handleV (op := emitOp) (da := arm) (d := body) (ra := []) rfl rfl rfl rfl (by simp [emitOp, Ty.cross]) rfl rfl
+  .handleV (op := emitOp) (da := arm) (d := body) (ra := []) rfl rfl rfl rfl
+    (by simp [emitOp, Ty.cross, Ty.rfree, Ty.complete]) rfl rfl
     (by rw [ha]; rfl) hr ht hw hp hc (fun _ h => by simp at h) rfl hbr hbt hbp hbc (by simp [hbw]) (by simp [hbw])
     (by simp [hbo]) (by rw [hbo]; exact .nil)
 
@@ -2580,5 +2582,191 @@ example : ∀ n, match eval [boxEmits, firstOnly] [emitOp] n [.abort .fail 0] .e
         ∀ l, σ'.mem l ≠ none ↔ l ∈ L
     | (.abort _ _, σ') => ∀ l, σ'.mem l = none :=
   program_ok boxEmits_ok (kept_typed rfl rfl rfl rfl rfl rfl rfl rfl rfl rfl rfl rfl)
+
+/-- `Swap`, taking a box and giving one back. -/
+def swapOp : Op := { owns := [.box .int], refs := [], ret := .box .int }
+
+/-- `function swaps() { const c = swap(Box.new(20)); return *c; }` -/
+def swaps : Fn :=
+  { owns := [], refs := [], ret := .int, row := [.eff 0],
+    body := .let_ "b" (.box .int) (.new (.lit 20))
+      (.let_ "c" (.box .int) (.perform 0 [.move "b"] []) (.atom (.read (.deref (.var "c"))))) }
+
+/-- The arm `(x, k) => k(Box.new(*x + 1))`: the box passed out read and dropped, a new one passed in. -/
+def bumpK : Fn :=
+  { owns := [("x", .box .int), ("k", .cont (.box .int) .int [])], refs := [], ret := .int, row := [],
+    body := .let_ "s" .int (.add (.read (.deref (.var "x"))) (.lit 1))
+      (.let_ "nb" (.box .int) (.new (.read (.var "s"))) (.resume "k" (.move "nb"))) }
+
+/-- `handle { swaps() } with Swap { swap(x) resumes k => bump(x, k) }`: boxes cross the fiber both
+ways; 21, and nothing left allocated. -/
+example : value (eval [swaps, bumpK] [swapOp] 80 [.abort .fail 0] .empty [] keptSum) = some 21 := by
+  run [keptSum, swaps, bumpK, swapOp, Val.tree, treeK, kfoot, Val.foot, dropAll, kontsAll]
+example : freed (eval [swaps, bumpK] [swapOp] 80 [.abort .fail 0] .empty [] keptSum) := by
+  run [keptSum, swaps, bumpK, swapOp, Val.tree, treeK, kfoot, Val.foot, dropAll, kontsAll]
+
+theorem swaps_ok : FnsOk [swaps, bumpK] [swapOp] := by
+  intro d hd
+  simp only [List.mem_cons, List.mem_singleton, List.not_mem_nil, or_false] at hd
+  rcases hd with rfl | rfl
+  · refine ⟨by decide, ?_⟩
+    simp only [swaps, FnOk]
+    exact ⟨_, .let_ (live := false) rfl (.new .lit)
+      (.let_ (live := true) rfl (.perform (op := swapOp) rfl (List.mem_singleton_self _)
+          (.cons (.move rfl rfl) .nil) .nil .nil)
+        (.atom (.read (.deref (.own rfl)))))⟩
+  · refine ⟨by decide, ?_⟩
+    simp only [bumpK, FnOk]
+    exact ⟨_, .let_ (live := true) rfl (.add (.read (.deref (.own rfl))) .lit)
+      (.let_ (live := false) rfl (.new (.read (.own rfl))) (.resume rfl (fun _ h => by simp at h) (.move rfl rfl)))⟩
+
+theorem swapSum_typed : Typed [swaps, bumpK] [swapOp] [] keptSum .int [] [.fail] :=
+  .handleV (op := swapOp) (da := bumpK) (d := swaps) (ra := []) rfl rfl rfl
+    (by simp [swapOp, Ty.cross, Ty.rfree, Ty.complete]) (by simp [swapOp, Ty.cross, Ty.rfree, Ty.complete]) rfl rfl
+    rfl rfl rfl rfl rfl rfl (fun _ h => by simp at h) rfl rfl rfl rfl rfl (by simp [swaps]) (by simp [swaps])
+    (by simp [swaps]) .nil
+
+example : ∀ n, match eval [swaps, bumpK] [swapOp] n [.abort .fail 0] .empty [] keptSum with
+    | (.stuck, _) => False
+    | (.susp _ _ _ _ _, _) => False
+    | (.timeout, _) => True
+    | (.panic, _) => True
+    | (.val v, σ') => ∃ L, VT [swaps, bumpK] ⟨[], Wstar [swaps, bumpK] [swapOp]⟩ σ' .int v L ∧
+        ∀ l, σ'.mem l ≠ none ↔ l ∈ L
+    | (.abort _ _, σ') => ∀ l, σ'.mem l = none :=
+  program_ok swaps_ok swapSum_typed
+
+/-! A kept continuation whose body performs what the code around handles, and fails. -/
+
+/-- `Emit`, the `handle`'s own operation, and `Ask`, which the code around answers. -/
+def fwdOps : List Op := [{ owns := [.int], refs := [], ret := .int }, { owns := [], refs := [], ret := .int }]
+
+/-- `function asksThenFails() { emit(ask()); throw 7; }` -/
+def askEmit : Fn :=
+  { owns := [], refs := [], ret := .int, row := [.eff 0, .eff 1, .fail],
+    body := .let_ "a" .int (.perform 1 [] [])
+      (.let_ "u" .int (.perform 0 [.read (.var "a")] []) (.throw_ (.lit 7))) }
+
+/-- The arm `(x, k) => x + k(0)`, which may ask, and fail. -/
+def addRestF : Fn :=
+  { owns := [("x", .int), ("k", .cont .int .int [.eff 1, .fail])], refs := [], ret := .int, row := [.eff 1, .fail],
+    body := .let_ "r" .int (.resume "k" (.lit 0)) (.add (.read (.var "x")) (.read (.var "r"))) }
+
+/-- `try { handle { handle { asksThenFails() } with Emit { emit(x) resumes k => addRestF(x, k) } } with
+Ask { ask() resumes k => k(5) } } catch (e) { e + 100 }`: the fiber's `ask` is taken by the handler
+around, with the fiber as one frame, which enters it again with 5; it emits 5, and the arm resumes it,
+when it fails: the failure leaves the fiber, the arm and the handler around for the `try`. 107, and
+nothing left allocated. -/
+def fwdFail : Expr :=
+  .try_ (.handle .int (.handleV .int 0 0 [] 1) 1 [] [] [] (.atom (.lit 5))) "e" (.add (.read (.var "e")) (.lit 100))
+
+example : value (eval [askEmit, addRestF] fwdOps 120 [.abort .fail 0] .empty [] fwdFail) = some 107 := by
+  run [fwdFail, askEmit, addRestF, fwdOps]
+example : freed (eval [askEmit, addRestF] fwdOps 120 [.abort .fail 0] .empty [] fwdFail) := by
+  run [fwdFail, askEmit, addRestF, fwdOps]
+
+theorem fwd_ok : FnsOk [askEmit, addRestF] fwdOps := by
+  intro d hd
+  simp only [List.mem_cons, List.mem_singleton, List.not_mem_nil, or_false] at hd
+  rcases hd with rfl | rfl
+  · refine ⟨by decide, ?_⟩
+    simp only [askEmit, FnOk]
+    exact ⟨_, .let_ (live := true) rfl (.perform (op := fwdOps[1]) rfl (by simp) .nil .nil .nil)
+      (.let_ (live := true) rfl (.perform (op := fwdOps[0]) rfl (by simp) (.cons (.read (.own rfl)) .nil) .nil .nil)
+        (.throw_ .lit (by simp)))⟩
+  · refine ⟨by decide, ?_⟩
+    simp only [addRestF, FnOk]
+    exact ⟨_, .let_ (live := true) rfl (.resume rfl (fun _ h => h) .lit) (.add (.read (.own rfl)) (.read (.own rfl)))⟩
+
+theorem fwdFail_typed : Typed [askEmit, addRestF] fwdOps [] fwdFail .int [] [.fail] := by
+  have hv : Typed [askEmit, addRestF] fwdOps [] (.handleV .int 0 0 [] 1) .int [] [.eff 1, .fail, .fail] :=
+    .handleV (op := fwdOps[0]) (da := addRestF) (d := askEmit) (ra := [.eff 1, .fail]) rfl rfl rfl
+      (by simp [fwdOps, Ty.cross, Ty.rfree, Ty.complete]) (by simp [fwdOps, Ty.cross, Ty.rfree, Ty.complete]) rfl rfl
+      rfl rfl rfl rfl rfl rfl (by simp) rfl rfl rfl rfl rfl (by simp [askEmit]) (by simp [askEmit]) (by simp [askEmit])
+      .nil
+  have hb := Typed.handle (F := [askEmit, addRestF]) (O := fwdOps) (Γ := []) (e := 1) (op := fwdOps[1])
+    (os := []) (rs := []) (caps := []) (ys := []) (r := [.fail, .fail]) (arm := .atom (.lit 5)) (Γa := [])
+    (body := .handleV .int 0 0 [] 1) (τ := .int) (Γb := [])
+    rfl rfl (by simp [fwdOps]) rfl rfl .nil (by simp [Exclusive]) (by decide) (.atom .lit)
+    (by simpa [roots, hideAll, freeze] using hv)
+  simp [thaw, unhideAll, hideAll, freeze, roots] at hb
+  exact .try_ rfl hb (.add (.read (.own rfl)) .lit)
+
+example : ∀ n, match eval [askEmit, addRestF] fwdOps n [.abort .fail 0] .empty [] fwdFail with
+    | (.stuck, _) => False
+    | (.susp _ _ _ _ _, _) => False
+    | (.timeout, _) => True
+    | (.panic, _) => True
+    | (.val v, σ') => ∃ L, VT [askEmit, addRestF] ⟨[], Wstar [askEmit, addRestF] fwdOps⟩ σ' .int v L ∧
+        ∀ l, σ'.mem l ≠ none ↔ l ∈ L
+    | (.abort _ _, σ') => ∀ l, σ'.mem l = none :=
+  program_ok fwd_ok fwdFail_typed
+
+/-- `Emit`, and `Bump`, which the code around answers, lent a place `mut`. -/
+def bumpOps : List Op := [{ owns := [.int], refs := [], ret := .int }, { owns := [], refs := [(.mut, .int)], ret := .int }]
+
+/-- `function bumps() { const c = Box.new(1); bump(mut *c); emit(*c); return 0; }` -/
+def bumpEmit : Fn :=
+  { owns := [], refs := [], ret := .int, row := [.eff 0, .eff 1],
+    body := .let_ "c" (.box .int) (.new (.lit 1))
+      (.let_ "u" .int (.perform 1 [] [(.mut, .deref (.var "c"))])
+        (.let_ "v" .int (.perform 0 [.read (.deref (.var "c"))] []) (.atom (.lit 0)))) }
+
+/-- `handle { handle { bumps() } with Emit { emit(x) resumes k => x + k(0) } } with
+Bump { bump(p) resumes k => { p = 41; k(0) } }`: the fiber lends its box's contents to the arm of the
+handler around, which changes them; entered again, it emits what it now holds. 41, and nothing left
+allocated. -/
+def fwdBump : Expr :=
+  .handle .int (.handleV .int 0 0 [] 1) 1 [] [] ["p"] (.let_ "w" .int (.write (.var "p") (.lit 41)) (.atom (.lit 0)))
+
+/-- The arm `(x, k) => x + k(0)`, whose resumption may bump. -/
+def addRestB : Fn :=
+  { owns := [("x", .int), ("k", .cont .int .int [.eff 1])], refs := [], ret := .int, row := [.eff 1],
+    body := .let_ "r" .int (.resume "k" (.lit 0)) (.add (.read (.var "x")) (.read (.var "r"))) }
+
+example : value (eval [bumpEmit, addRestB] bumpOps 120 [.abort .fail 0] .empty [] fwdBump) = some 41 := by
+  run [fwdBump, bumpEmit, addRestB, bumpOps]
+example : freed (eval [bumpEmit, addRestB] bumpOps 120 [.abort .fail 0] .empty [] fwdBump) := by
+  run [fwdBump, bumpEmit, addRestB, bumpOps]
+
+theorem bumpEmit_ok : FnsOk [bumpEmit, addRestB] bumpOps := by
+  intro d hd
+  simp only [List.mem_cons, List.mem_singleton, List.not_mem_nil, or_false] at hd
+  rcases hd with rfl | rfl
+  · refine ⟨by decide, ?_⟩
+    simp only [bumpEmit, FnOk]
+    exact ⟨_, .let_ (live := true) rfl (.new .lit) (.let_ (live := true) rfl
+      (.perform (op := bumpOps[1]) (ys := [(.mut, "c")]) rfl (by simp) .nil
+        (.cons (.deref (.own rfl)) (fun _ => rfl) rfl .nil) (by simp [LentApart]))
+      (.let_ (live := true) rfl (.perform (op := bumpOps[0]) rfl (by simp) (.cons (.read (.deref (.own rfl))) .nil)
+        .nil .nil) (.atom .lit)))⟩
+  · refine ⟨by decide, ?_⟩
+    simp only [addRestB, FnOk]
+    exact ⟨_, .let_ (live := true) rfl (.resume rfl (fun _ h => h) .lit) (.add (.read (.own rfl)) (.read (.own rfl)))⟩
+
+theorem fwdBump_typed : Typed [bumpEmit, addRestB] bumpOps [] fwdBump .int [] [.fail] := by
+  have hv : Typed [bumpEmit, addRestB] bumpOps [] (.handleV .int 0 0 [] 1) .int [] [.eff 1, .fail] :=
+    .handleV (op := bumpOps[0]) (da := addRestB) (d := bumpEmit) (ra := [.eff 1]) rfl rfl rfl
+      (by simp [bumpOps, Ty.cross, Ty.rfree, Ty.complete]) (by simp [bumpOps, Ty.cross, Ty.rfree, Ty.complete]) rfl rfl
+      rfl rfl rfl rfl rfl rfl (by simp) rfl rfl rfl rfl rfl (by simp [bumpEmit]) (by simp [bumpEmit])
+      (by simp [bumpEmit]) .nil
+  have hb := Typed.handle (F := [bumpEmit, addRestB]) (O := bumpOps) (Γ := []) (e := 1) (op := bumpOps[1])
+    (os := []) (rs := ["p"]) (caps := []) (ys := []) (r := [.fail])
+    (arm := .let_ "w" .int (.write (.var "p") (.lit 41)) (.atom (.lit 0)))
+    (body := .handleV .int 0 0 [] 1) (τ := .int) (Γb := [])
+    rfl rfl (by simp [bumpOps]) rfl rfl .nil (by simp [Exclusive]) (by decide)
+    (.let_ (live := true) rfl (.write .lit (.ref (m := .mut) rfl)) (.atom .lit))
+    (by simpa [roots, hideAll, freeze] using hv)
+  simpa [thaw, unhideAll, hideAll, freeze, roots, fwdBump] using hb
+
+example : ∀ n, match eval [bumpEmit, addRestB] bumpOps n [.abort .fail 0] .empty [] fwdBump with
+    | (.stuck, _) => False
+    | (.susp _ _ _ _ _, _) => False
+    | (.timeout, _) => True
+    | (.panic, _) => True
+    | (.val v, σ') => ∃ L, VT [bumpEmit, addRestB] ⟨[], Wstar [bumpEmit, addRestB] bumpOps⟩ σ' .int v L ∧
+        ∀ l, σ'.mem l ≠ none ↔ l ∈ L
+    | (.abort _ _, σ') => ∀ l, σ'.mem l = none :=
+  program_ok bumpEmit_ok fwdBump_typed
 
 end FlyCore.Ownership.Examples

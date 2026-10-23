@@ -26,6 +26,7 @@ inductive HSOk (O : List Op) : HS → Prop
   | abort : (∀ e, l = .eff e → ∃ op, O[e]? = some op ∧ op.owns = [.int] ∧ op.refs = []) →
       HSOk O rest → HSOk O (.abort l hid :: rest)
   | capture : (∃ op, O[e]? = some op) → HSOk O rest → HSOk O (.capture e hid :: rest)
+  | cancel : HSOk O rest → HSOk O (.cancel hid :: rest)
 
 /-- Where code may run under `hs`, performing what `r` names: the handlers are well formed and handle
 every label of the row. -/
@@ -168,6 +169,26 @@ def OutOk (F : List Fn) (ι : Iota) (σ : Store) (τ : Ty) : Outcome → List Na
 def Outcome.aims : Outcome → List Nat
   | .val _ => []
   | .abort j _ => [j]
+
+/-- What a `handle` whose arm keeps its continuation is, apart from its code: its operation, of
+effect `e`, which no task gives way by, lends nothing, gives what may pass into a fiber, and takes
+what may pass out of one; its value, `τ`, which may pass out of it too; and its arm, the function
+`fa`, which takes what the operation does and the continuation, and performs `ra`. -/
+structure CapVOk (F : List Fn) (O : List Op) (e fa : Nat) (op : Op) (τ : Ty) (ra : Row) : Prop where
+  hop : O[e]? = some op
+  htask : op.task = false
+  hrefs : op.refs = []
+  hret : op.ret.cross = true
+  howns : ∀ τ' ∈ op.owns, τ'.cross = true
+  hτ : τ.cross = true
+  harm : ∃ da, F[fa]? = some da ∧ da.owns.map Prod.snd = op.owns ++ [.cont op.ret τ ra] ∧ da.refs = [] ∧
+    da.ret = τ ∧ da.row = ra ∧ da.retp = none ∧ da.cap = none
+
+/-- What the code on such a fiber may perform, `rf`: its own operation, and what the code around
+handles for it, which a resumption may perform, `ra`; a failure only if `ff` says the fiber has a
+handler of its own for it, which unwinds on into the code around. -/
+def FiberRow (e : Nat) (ff : Bool) (ra rf : Row) : Prop :=
+  (∀ l ∈ rf, l = .eff e ∨ (l ∈ ra ∧ l ≠ .drop)) ∧ (ff = true → Label.fail ∈ ra) ∧ (Label.fail ∈ rf → ff = true)
 
 mutual
 /-- `FrameOk σf f inL outL X A`: frame `f`, put in force where the store was `σf`, takes what the
@@ -335,11 +356,11 @@ are the frame's own. -/
   | scX : O[e]? = some op → op.owns = [] → op.refs = [] → op.ret = .int →
       O[eS]? = some opS → opS.owns = [.fn .once .int .int rT R] → opS.refs = [] → opS.ret = .int →
       FrameOk F O ι ι σf (.scX e eS hid) ⟨Γ, env, τ, S, .eff e :: .eff eS :: r⟩ ⟨Γ, env, τ, S, r⟩ [] []
-  /-- A kept continuation being dropped: the operation its cleanup performs goes on at once, given an
-  integer, what it passed dropped; and if it ends with a value after all, that is dropped too. -/
-  | capD : O[e]? = some op → op.ret = .int → op.refs = [] → (∀ τ' ∈ op.owns, τ'.cross = true) →
-      τ.complete = true →
-      FrameOk F O ι ι σf (.capD τ e g) ⟨Γ, env, τ, S, .eff e :: r⟩ ⟨Γ, env, .int, S, r⟩ [] []
+  /-- A kept continuation being dropped, unwinding to `d`: the operation its cleanup performs is
+  cancelled, what it passed dropped and the cleanup unwinding from it; and if it ends with a value
+  after all, that is dropped too. -/
+  | capD : O[e]? = some op → op.refs = [] → τ.complete = true → (∀ l ∈ rin, (∃ e', l = .eff e') ∨ l ∈ r) →
+      FrameOk F O ι ι σf (.capD τ e g d) ⟨Γ, env, τ, S, rin⟩ ⟨Γ, env, .int, S, r⟩ [] [d]
   /-- A scope that failed, its body being dropped, its tasks to be. -/
   | scEb : ScOk O e eS op opS rT R r τ → TasksOk F O ι σf e eS r S Q Xq Aq →
       FrameOk F O ι ι σf (.scE e eS hid τ τ (.abort j k) d Q) ⟨Γ, env, τ, S, r⟩ ⟨Γ, env, τ, S, r⟩ Xq (j :: Aq)
@@ -362,6 +383,16 @@ inductive FramesOk (F : List Fn) (O : List Op) : Iota → Store → List Kont �
       FramesOk F O ιi σs K op0 mid XK hos AK → (∀ a ∈ Af, a ∈ A) →
       (∀ a ∈ AK, a ∈ A ∨ AimedIn a (f.push [])) →
       FramesOk F O ι σs (f :: K) op0 ⟨Γ', env, τ, S, r⟩ (Xf ++ XK) hos A
+  /-- A fiber whose continuation is kept, given way by an operation of the code around, `op0`, which
+  lends it what the fiber's frames lent: what the fiber performs, the code around may; its frames are
+  as they were where it gave way, and own what of `X` the places lent do not hold; the code around
+  is as it was where it entered the fiber. -/
+  | nest : CapVOk F O e fa op τ ra → FiberRow e ff ra rf → (∀ l ∈ ra, l ∈ r) → (∀ a ∈ Ai, a = g ∧ ff = true) →
+      FramesOk F O ⟨[], ι.w⟩ σs K op0 ⟨[], [], τ, [], rf⟩ Xi hos Ai →
+      Inv F ι σs Γ₁ env E₁ S → Weaker Γ' Γ₁ → Disj E₁ (Xi ++ mutCells (olds hos)) →
+      Disj S (Xi ++ mutCells (olds hos)) → Xr.Nodup →
+      (∀ l, l ∈ Xr ↔ (l ∈ Xi ∨ l ∈ mutCells (olds hos)) ∧ l ∉ hos.flatMap Hole.old) → ls = hos.map Hole.loc →
+      FramesOk F O ι σs [.enterK τ e g fa ff K Xr ls] op0 ⟨Γ', env, τ, S, r⟩ (E₁ ++ Xi) hos []
 
 /-- `TasksOk σf e eS r S Q X A`: a scope's tasks waiting, each where it gave way, at the level its
 call ends at, where it only reads what the code around only reads, `S`; their cells `X`, apart; the
@@ -468,13 +499,15 @@ theorem FrameOk.mono : FrameOk F O ιi ιo σf f inL outL Xf A → ιo.w.le W �
     .scV h1 (h2.mono hW) (h3.mono hW) (h4.mono hW) h5 h6 (h7.mono hW) h8 h9 h10
   | .scX h1 h2 h3 h4 h5 h6 h7 h8, _ => .scX h1 h2 h3 h4 h5 h6 h7 h8
   | .scEb h1 h2, hW => .scEb h1 (h2.mono hW)
-  | .capD h1 h2 h3 h4 h5, _ => .capD h1 h2 h3 h4 h5
+  | .capD h1 h2 h3 h4, _ => .capD h1 h2 h3 h4
   | .scEt h1 h2 h3 h4 h5 h6, hW => .scEt h1 (h2.mono hW) (h3.mono hW) h4 h5 h6
 
 theorem FramesOk.mono : FramesOk F O ι σs K op top X hos A → ι.w.le W → FramesOk F O (ι.inW W) σs K op top X hos A
   | .base h1 h2 h3 h4 h5 h6, hW => .base (h1.mono hW) (fun h hh => (h2 h hh).mono hW) h3 h4 h5 h6
   | .cons h1 h2 h3 h4 h5 h6 h7 h8 h9, hW =>
     .cons (h1.mono hW) h2 h3 h4 h5 h6 (h7.mono (h1.w_eq ▸ hW)) h8 h9
+  | .nest h1 h2 h3 h4 h5 h6 h7 h8 h9 h10 h11 h12, hW =>
+    .nest h1 h2 h3 h4 (h5.mono (W := W) hW) (h6.mono hW) h7 h8 h9 h10 h11 h12
 
 theorem TasksOk.mono : TasksOk F O ι σf e eS r S Q X A → ι.w.le W → TasksOk F O (ι.inW W) σf e eS r S Q X A
   | .nil, _ => .nil
@@ -488,6 +521,52 @@ theorem FramesOk.weaken (h : FramesOk F O ι σs K op0 ⟨Γ, env, τ, S, r⟩ X
   cases h with
   | base hI hholes hpw hop hts w' => exact .base hI hholes hpw hop hts (w.trans w')
   | cons hf w' hag ha hn hd hK h1 h2 => exact .cons hf (w.trans w') hag ha hn hd hK h1 h2
+  | nest h1 h2 h3 h4 h5 h6 w' h8 h9 h10 h11 h12 => exact .nest h1 h2 h3 h4 h5 h6 (w.trans w') h8 h9 h10 h11 h12
+
+/-- The handler named `j` takes an operation of effect `e`: as its continuation, to cancel it, or to
+end its `handle`, the continuation unwound from it. -/
+def Takes (hs : HS) (j e : Nat) : Prop :=
+  Frame.capture e j ∈ hs ∨ Frame.cancel j ∈ hs ∨ Frame.abort (.eff e) j ∈ hs
+
+theorem Takes.cons {hs : HS} {j e : Nat} {f : Frame} (h : Takes hs j e) : Takes (f :: hs) j e :=
+  h.imp (List.mem_cons_of_mem _) (Or.imp (List.mem_cons_of_mem _) (List.mem_cons_of_mem _))
+
+/-- Taken by the handler a frame put in force, or by one further out. -/
+theorem Takes.of_cons_capture {hs : HS} {j e e' c : Nat} (h : Takes (.capture e' c :: hs) j e) :
+    (j = c ∧ e = e') ∨ Takes hs j e := by
+  rcases h with h | h | h
+  · rcases List.mem_cons.mp h with h | h
+    · simp only [Frame.capture.injEq] at h; exact .inl ⟨h.2, h.1⟩
+    · exact .inr (.inl h)
+  · exact .inr (.inr (.inl ((List.mem_cons.mp h).resolve_left (by simp))))
+  · exact .inr (.inr (.inr ((List.mem_cons.mp h).resolve_left (by simp))))
+
+theorem Takes.of_cons_cancel {hs : HS} {j e c : Nat} (h : Takes (.cancel c :: hs) j e) : j = c ∨ Takes hs j e := by
+  rcases h with h | h | h
+  · exact .inr (.inl ((List.mem_cons.mp h).resolve_left (by simp)))
+  · rcases List.mem_cons.mp h with h | h
+    · simp only [Frame.cancel.injEq] at h; exact .inl h
+    · exact .inr (.inr (.inl h))
+  · exact .inr (.inr (.inr ((List.mem_cons.mp h).resolve_left (by simp))))
+
+theorem Takes.of_cons_abort {hs : HS} {j e c : Nat} {l : Label} (h : Takes (.abort l c :: hs) j e) :
+    (l = .eff e ∧ j = c) ∨ Takes hs j e := by
+  rcases h with h | h | h
+  · exact .inr (.inl ((List.mem_cons.mp h).resolve_left (by simp)))
+  · exact .inr (.inr (.inl ((List.mem_cons.mp h).resolve_left (by simp))))
+  · rcases List.mem_cons.mp h with h | h
+    · simp only [Frame.abort.injEq] at h; exact .inl ⟨h.1.symm, h.2⟩
+    · exact .inr (.inr (.inr h))
+
+theorem Takes.of_cons_drop {hs : HS} {j e c : Nat} (h : Takes (.abort .drop c :: hs) j e) : Takes hs j e := by
+  rcases h.of_cons_abort with ⟨h, -⟩ | h
+  · cases h
+  · exact h
+
+theorem Takes.of_cons_fail {hs : HS} {j e c : Nat} (h : Takes (.abort .fail c :: hs) j e) : Takes hs j e := by
+  rcases h.of_cons_abort with ⟨h, -⟩ | h
+  · cases h
+  · exact h
 
 /-- What evaluating under the handlers `hs` may give: never stuck; a value, with the activation
 still well formed after, the value owning cells no variable does, and the step accounted for; an
@@ -503,7 +582,7 @@ def Post (F : List Fn) (ι : Iota) (O : List Op) (σ : Store) (E S : List Nat) (
   | (.val v, σ') => ∃ E' L, Inv F ι σ' Γ' env E' S ∧ VT F ι σ' τ v L ∧ Disj L E' ∧ Disj L S ∧ Moves σ E σ' E' L
   | (.abort id _, σ') => AimedIn id hs ∧ ∃ E', Inv F ι σ' Γ' env E' S ∧ Moves σ E σ' E' []
   | (.susp id e vs ls K, σ') => ∃ op X hos A Lv,
-      Frame.capture e id ∈ hs ∧ O[e]? = some op ∧ Covers hs r ∧ (∀ a ∈ A, AimedIn a hs) ∧
+      Takes hs id e ∧ O[e]? = some op ∧ Covers hs r ∧ (∀ a ∈ A, AimedIn a hs) ∧
       FramesOk F O ι σ' K op ⟨Γ', env, τ, S, r⟩ X hos A ∧ ls = hos.map Hole.loc ∧
       Vals F ι σ' op.owns vs Lv ∧ Lv.flatten.Nodup ∧ Disj Lv.flatten (X ++ mutCells (olds hos)) ∧
       Disj Lv.flatten S ∧ Moves σ E σ' (X ++ mutCells (olds hos)) Lv.flatten

@@ -588,9 +588,112 @@ theorem nodup_length_le : ∀ (n : Nat) (L : List Nat), L.Nodup → (∀ x ∈ L
 theorem length_le_next {L : List Nat} (hwf : WF σ) (hn : L.Nodup) (ha : ∀ l ∈ L, σ.mem l ≠ none) : L.length ≤ σ.next :=
   nodup_length_le σ.next L hn fun l hl => hwf l (ha l hl)
 
-/-- The continuations — or integers — `vs`, each well formed, owning cells apart. -/
+/-- What a value owns is what `treeK` reads off the store, given depth enough. -/
+theorem VT.tree : ∀ (k : Nat) {τ : Ty} {v : Val} {L : List Nat}, VT F ι σ τ v L → L.length ≤ k → treeK k σ v = L := by
+  intro k
+  induction k with
+  | zero =>
+    intro τ v L h hl
+    have nz : ∀ {b τ R}, LT F ι σ b τ R → τ.complete = true → R.length ≠ 0 := fun hb hc => by
+      obtain ⟨_, _, _, _, rfl, _⟩ := hb.contents hc; simp
+    cases h with
+    | int => simp [treeK]
+    | rref => simp [treeK]
+    | kont => simp [treeK]
+    | box hb hc => exact absurd (Nat.le_zero.mp hl) (nz hb hc)
+    | clo hc' hb hc => exact absurd (Nat.le_zero.mp hl) (nz hb hc)
+    | tag hb hA hB => exact absurd (Nat.le_zero.mp hl) (nz hb (Ty.complete_ite hA hB))
+    | pair h1 h2 _ hA hB =>
+      simp only [List.length_append] at hl
+      exact absurd (by omega) (nz h1 hA)
+    | @vec τ' _ cs Rs hlen hel _ hc =>
+      cases cs with
+      | nil => obtain rfl : Rs = [] := List.eq_nil_of_length_eq_zero hlen; simp [treeK]
+      | cons c cs =>
+        cases Rs with
+        | nil => simp at hlen
+        | cons R Rs =>
+          have h0 := hel 0 (by simp) (by simp)
+          simp only [List.getElem_cons_zero] at h0
+          simp only [List.flatten_cons, List.length_append] at hl
+          exact absurd (by omega) (nz h0 hc)
+  | succ k ih =>
+    intro τ v L h hl
+    have sub : ∀ {b τ R}, LT F ι σ b τ R → τ.complete = true → R.length ≤ k + 1 →
+        b :: (σ.mem b).elim [] (treeK k σ) = R := by
+      intro b τ R hb hc hR
+      obtain ⟨w, R', hw, hv, rfl, -⟩ := hb.contents hc
+      simp only [hw, Option.elim, List.length_cons, Nat.add_le_add_iff_right] at hR ⊢
+      rw [ih hv hR]
+    cases h with
+    | int => simp [treeK]
+    | rref => simp [treeK]
+    | kont => simp [treeK]
+    | box hb hc => simp only [treeK]; exact sub hb hc hl
+    | clo hc' hb hc => simp only [treeK]; exact sub hb hc hl
+    | tag hb hA hB => simp only [treeK]; exact sub hb (Ty.complete_ite hA hB) hl
+    | pair h1 h2 _ hA hB =>
+      simp only [List.length_append] at hl
+      simp only [treeK]
+      rw [sub h1 hA (by omega), sub h2 hB (by omega)]
+    | @vec τ' _ cs Rs hlen hel _ hc =>
+      simp only [treeK]
+      have key : ∀ (cs : List Nat) (Rs : List (List Nat)), Rs.length = cs.length →
+          (∀ i (h : i < cs.length) (h' : i < Rs.length), LT F ι σ cs[i] τ' Rs[i]) → Rs.flatten.length ≤ k + 1 →
+          (cs.flatMap fun c => c :: (σ.mem c).elim [] (treeK k σ)) = Rs.flatten := by
+        intro cs
+        induction cs with
+        | nil => intro Rs hlen _ _; obtain rfl : Rs = [] := List.eq_nil_of_length_eq_zero hlen; rfl
+        | cons c cs ihc =>
+          intro Rs hlen hel hl
+          cases Rs with
+          | nil => simp at hlen
+          | cons R Rs =>
+            simp only [List.length_cons, Nat.add_right_cancel_iff] at hlen
+            simp only [List.flatten_cons, List.length_append] at hl
+            have h0 := hel 0 (by simp) (by simp)
+            simp only [List.getElem_cons_zero] at h0
+            simp only [List.flatMap_cons, List.flatten_cons]
+            rw [sub h0 hc (by omega), ihc Rs hlen (fun i h h' => hel (i + 1) (by simp; omega) (by simp; omega)) (by omega)]
+      exact key cs Rs hlen hel hl
+
+/-- What a value owns, read off the store. -/
+theorem VT.tree_eq (h : VT F ι σ τ v L) (hwf : WF σ) : v.tree σ = L :=
+  VT.tree _ h (length_le_next hwf h.nodup h.alloc)
+
+/-- What a cell holds, with the cell, read off the store. -/
+theorem LT.cell_tree (h : LT F ι σ a τ L) (hc : τ.complete = true) (hwf : WF σ) : cellTree σ a = L := by
+  obtain ⟨w, R', hw, hv, rfl, -⟩ := h.contents hc
+  simp only [cellTree, hw, Option.elim]
+  rw [VT.tree _ hv (length_le_next hwf hv.nodup hv.alloc)]
+
+theorem mem_dedupL : ∀ {l : List Nat}, x ∈ dedupL l ↔ x ∈ l
+  | [] => by simp [dedupL]
+  | y :: ys => by
+    simp only [dedupL]
+    split
+    · rename_i h
+      rw [mem_dedupL]
+      constructor
+      · exact List.mem_cons_of_mem _
+      · intro hx
+        rcases List.mem_cons.mp hx with rfl | hx
+        · exact h
+        · exact hx
+    · simp only [List.mem_cons, mem_dedupL]
+
+theorem nodup_dedupL : ∀ (l : List Nat), (dedupL l).Nodup
+  | [] => by simp [dedupL]
+  | y :: ys => by
+    simp only [dedupL]
+    split
+    · exact nodup_dedupL ys
+    · rename_i h
+      exact List.nodup_cons.mpr ⟨fun h' => h (mem_dedupL.mp h'), nodup_dedupL ys⟩
+
+/-- The continuations `vs`, each well formed, owning cells apart. -/
 def KontsOk (F : List Fn) (ι : Iota) (σ : Store) (vs : List Val) : Prop :=
-  (∀ v ∈ vs, ∃ τ, τ.cross = true ∧ VT F ι σ τ v v.foot) ∧ (vs.flatMap Val.foot).Nodup
+  (∀ v ∈ vs, ∃ A B r, VT F ι σ (.cont A B r) v v.foot) ∧ (vs.flatMap Val.foot).Nodup
 
 theorem KontsOk.nil : KontsOk F ι σ [] := ⟨by simp, by simp⟩
 
@@ -601,8 +704,8 @@ theorem KontsOk.append (h1 : KontsOk F ι σ vs) (h2 : KontsOk F ι σ ws)
 
 theorem KontsOk.frame (h : KontsOk F ι σ vs) (hag : Agree σ σ' (vs.flatMap Val.foot)) : KontsOk F ι σ' vs :=
   ⟨fun v hv => by
-    obtain ⟨τ, hc, hv'⟩ := h.1 v hv
-    exact ⟨τ, hc, hv'.frame (hag.mono fun l hl => List.mem_flatMap.mpr ⟨v, hv, hl⟩)⟩, h.2⟩
+    obtain ⟨A, B, r, hv'⟩ := h.1 v hv
+    exact ⟨A, B, r, hv'.frame (hag.mono fun l hl => List.mem_flatMap.mpr ⟨v, hv, hl⟩)⟩, h.2⟩
 
 theorem flatMap_congr' {α β : Type} {f g : α → List β} : ∀ {l : List α}, (∀ x ∈ l, f x = g x) →
     l.flatMap f = l.flatMap g
@@ -701,7 +804,7 @@ theorem kontsK_ok : ∀ (k : Nat) (τ : Ty) (σ : Store) v L, VT F ι σ τ v L 
       refine ⟨⟨fun v hv => ?_, by simpa [kontsK, Val.foot] using hnd⟩, by simp [kontsK, Val.foot]⟩
       simp only [kontsK, List.mem_singleton] at hv
       subst hv
-      exact ⟨_, rfl, .kont hnd hX hk⟩
+      exact ⟨_, _, _, .kont hnd hX hk⟩
     | _ => simp [kontsK, KontsOk.nil]
   | succ k ih =>
     intro τ σ v L h
@@ -712,7 +815,7 @@ theorem kontsK_ok : ∀ (k : Nat) (τ : Ty) (σ : Store) v L, VT F ι σ τ v L 
       refine ⟨⟨fun v hv => ?_, by simpa [kontsK, Val.foot] using hnd⟩, by simp [kontsK, Val.foot]⟩
       simp only [kontsK, List.mem_singleton] at hv
       subst hv
-      exact ⟨_, rfl, .kont hnd hX hk⟩
+      exact ⟨_, _, _, .kont hnd hX hk⟩
     | box hb hc =>
       obtain ⟨w, R', hw, hv, rfl, -⟩ := hb.contents hc
       obtain ⟨h1, h2⟩ := ih _ _ _ _ hv

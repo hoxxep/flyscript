@@ -74,10 +74,8 @@ theorem ret_parY [WorldOk F O ι.w] (hKo : ∀ m, n = m + 1 → EvalKOk F O m �
     · simpa using h
     · intro j ef vs ls K σ' h hc
       have h1 := hnot j ef vs ls K (congrArg Prod.fst h)
-      rcases List.mem_cons.mp hc with h | h
-      · simp only [Frame.capture.injEq] at h
-        obtain ⟨rfl, rfl⟩ := h
-        simp at h1
+      rcases hc.of_cons_capture with ⟨rfl, rfl⟩ | h
+      · simp at h1
       · exact h
   cases res with
   | val v => exact pass fun _ _ _ _ _ h => by cases h
@@ -227,7 +225,7 @@ theorem ret_taskK (hfl : FlushOk F ι (flushR F O n)) {d : Fn} {cells : Env} {ls
 continuation, its cells kept as they were. -/
 theorem post_susp {hsin : HS} (hf : FrameOk F O ι ι σf f ⟨Γin, envin, τin, Sin, rin⟩ ⟨Γout, envout, τout, S, r⟩ Xf Af)
     (hcov : Covers hs r) (hA : ∀ a, AimedIn a hsin → AimedIn a hs) (hAf : ∀ a ∈ Af, AimedIn a hs)
-    (hc' : Frame.capture ef j ∈ hsin → Frame.capture ef j ∈ hs)
+    (hc' : Takes hsin j ef → Takes hs j ef)
     (hwf : WF σ0) (hag : Agree σf σ0 (Xf ++ S)) (halloc : ∀ l ∈ Xf, σf.mem l ≠ none) (hnd : Xf.Nodup)
     (hd : Disj Xf Ein) (hSa : ∀ l ∈ S, σ0.mem l ≠ none) (hSd : Disj S (Xf ++ Ein))
     (hp : Post F ι O σ0 Ein Sin Γin envin τin rin hsin (.susp j ef vs ls K, σ1)) :
@@ -478,8 +476,8 @@ theorem ret_parD [WorldOk F O ι.w] (hfl : FlushOk F ι (flushR F O n)) (hKo : �
         rw [ret.eq_def]; simp [hc]
       rw [this]
       exact post_susp (.parD hP hro hSr hw) hR.2 (fun _ h => aimed_uncap h) (fun _ h => by simp at h) (fun h => by
-        rcases List.mem_cons.mp h with h | h
-        · simp only [Frame.capture.injEq] at h; obtain ⟨rfl, rfl⟩ := h; simp at hc
+        rcases h.of_cons_capture with ⟨rfl, rfl⟩ | h
+        · simp at hc
         · exact h) hwf hag halloc hnd hd hSa hSd hp
     simp only [ne_eq, not_or, Decidable.not_not] at hc
     obtain ⟨h1, h2⟩ := hc
@@ -711,8 +709,8 @@ theorem ret_parS [WorldOk F O ι.w] (hfl : FlushOk F ι (flushR F O n)) (hKo : �
         rw [ret.eq_def]; simp [hc]
       rw [this]
       exact post_susp (.parS hP hroR hroO hSr hSo hK) hR.2 (fun _ h => aimed_uncap h) hA (fun h => by
-        rcases List.mem_cons.mp h with h | h
-        · simp only [Frame.capture.injEq] at h; obtain ⟨rfl, rfl⟩ := h; simp at hc
+        rcases h.of_cons_capture with ⟨rfl, rfl⟩ | h
+        · simp at hc
         · exact h) hwf hag halloc hnd hd hSa hSd hp
     simp only [ne_eq, not_or, Decidable.not_not] at hc
     obtain ⟨h1, h2⟩ := hc

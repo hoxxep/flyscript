@@ -52,9 +52,9 @@ theorem ret_scX [WorldOk F O ι.w] (hfl : FlushOk F ι (flushR F O n)) (hKo : �
     · simpa using h
     · intro j ef vs ls K σ' h hc
       have h1 := hnot j ef vs ls K (congrArg Prod.fst h)
-      simp only [Kont.push, List.mem_cons, Frame.capture.injEq] at hc
-      rcases hc with ⟨rfl, rfl⟩ | ⟨rfl, rfl⟩ | hc
+      rcases hc.of_cons_capture with ⟨rfl, rfl⟩ | hc
       · simp at h1
+      rcases hc.of_cons_capture with ⟨rfl, rfl⟩ | hc
       · simp at h1
       · exact hc
   cases res with
@@ -489,7 +489,7 @@ theorem ret_scEt [WorldOk F O ι.w] (hKo : ∀ m, n = m + 1 → EvalKOk F O m �
       exact post_flushR_nil (rest hm (aimed_pop haim hj))
   | susp j' ef vs ls K =>
     simp only [ret]
-    exact post_susp_abort (.scEt hS hI hT hdT hSt hro) (fun _ => rfl) hR.2 hA hwf hag halloc hnd hd hSa hSd hp
+    exact post_susp_abort (.scEt hS hI hT hdT hSt hro) (fun _ => rfl) hR.2 hA (fun _ h => by cases h) hwf hag halloc hnd hd hSa hSd hp
   | stuck => simp [Post] at hp
   | timeout => simp [ret, Post]
   | panic => simp [ret, Post]
@@ -577,7 +577,7 @@ theorem ret_scEb [WorldOk F O ι.w] (hfl : FlushOk F ι (flushR F O n)) (hKo : �
       exact post_flushR_nil (rest hI' hm (aimed_pop haim hj))
   | susp j' ef vs ls K =>
     simp only [ret]
-    exact post_susp_abort (.scEb hS hT) (fun _ => rfl) hR.2 hA hwf hag halloc hnd hd hSa hSd hp
+    exact post_susp_abort (.scEb hS hT) (fun _ => rfl) hR.2 hA (fun _ h => by cases h) hwf hag halloc hnd hd hSa hSd hp
   | stuck => simp [Post] at hp
   | timeout => simp [ret, Post]
   | panic => simp [ret, Post]
@@ -709,9 +709,9 @@ theorem ret_scB [WorldOk F O ι.w] (hF : FnsOk F O) (hKo : ∀ m, n = m + 1 → 
         rw [ret.eq_def]; simp [hc]
       rw [this]
       exact post_susp (.scB hS hcz hT) hR.2 (fun _ h => aimed_uncap2 h) hA (fun h => by
-        simp only [List.mem_cons, Frame.capture.injEq] at h
-        rcases h with ⟨rfl, rfl⟩ | ⟨rfl, rfl⟩ | h
+        rcases h.of_cons_capture with ⟨rfl, rfl⟩ | h
         · simp at hc
+        rcases h.of_cons_capture with ⟨rfl, rfl⟩ | h
         · simp at hc
         · exact h) hwf hag halloc hnd hd hSa hSd hp
     have hj : j = hid := by
@@ -1072,9 +1072,9 @@ theorem ret_scW [WorldOk F O ι.w] (hF : FnsOk F O) (hKo : ∀ m, n = m + 1 → 
         rw [ret.eq_def]; simp [hc]
       rw [this]
       exact post_susp (.scW hS hcz hbr hbrefs hKb hagb hab hT hdbq hSt hro) hR.2 (fun _ h => aimed_uncap2 h) hA (fun h => by
-        simp only [List.mem_cons, Frame.capture.injEq] at h
-        rcases h with ⟨rfl, rfl⟩ | ⟨rfl, rfl⟩ | h
+        rcases h.of_cons_capture with ⟨rfl, rfl⟩ | h
         · simp at hc
+        rcases h.of_cons_capture with ⟨rfl, rfl⟩ | h
         · simp at hc
         · exact h) hwf hag halloc hnd hd hSa hSd hp
     have hj : j = hid := by
@@ -1425,9 +1425,9 @@ theorem ret_scV [WorldOk F O ι.w] (hfl : FlushOk F ι (flushR F O n)) (hF : Fns
         rw [ret.eq_def]; simp [hc]
       rw [this]
       exact post_susp (.scV hS hcz hIb hv hdLE hdLS hT hdq hSt hro) hR.2 (fun _ h => aimed_uncap2 h) hA (fun h => by
-        simp only [List.mem_cons, Frame.capture.injEq] at h
-        rcases h with ⟨rfl, rfl⟩ | ⟨rfl, rfl⟩ | h
+        rcases h.of_cons_capture with ⟨rfl, rfl⟩ | h
         · simp at hc
+        rcases h.of_cons_capture with ⟨rfl, rfl⟩ | h
         · simp at hc
         · exact h) hwf hag halloc hnd hd hSa hSd hp
     have hj : j = hid := by
