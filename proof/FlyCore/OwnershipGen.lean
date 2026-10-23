@@ -115,9 +115,9 @@ theorem ret_genY (hKo : ∀ m, n = m + 1 → EvalKOk F O m ∧ RetOk F O m) (hop
 
 
 /-- `#Done`, in a cell of its own. -/
-theorem done_vt (hb : σ.mem b = some (.int 0)) (hcy : τy.complete = true) (hf : σ.fb b = some ι.fiber) :
+theorem done_vt (hb : σ.mem b = some (.int 0)) (hcy : τy.complete = true) :
     VT F ι σ (.sum .int τy) (.tag .int τy true b) [b] :=
-  .tag (.int hb hf) rfl hcy
+  .tag (.int hb) rfl hcy
 
 /-- A consumer being dropped: whatever it asks is answered `#Done`. -/
 theorem ret_genN (hKo : ∀ m, n = m + 1 → EvalKOk F O m ∧ RetOk F O m) (hop : O[eN]? = some op)
@@ -203,7 +203,7 @@ theorem ret_genN (hKo : ∀ m, n = m + 1 → EvalKOk F O m ∧ RetOk F O m) (hop
       rcases List.mem_append.mp h2 with h2 | h2
       · exact hdSX l h1 h2
       · simp at h2; exact hfresh l (hSa1 l h1) h2)
-    (by rw [hret]; exact done_vt hbm hcy (by rw [← hσ2, hbn]; simp [Store.alloc]; first | (obtain ⟨_, _, _, _, _, hIK, -, -, -, -, -, -, -, hfK⟩ := hK.base_of; exact hIK.cur.trans hfK) | (obtain ⟨_, _, _, _, _, hIK, -, -, -, -, -, -, -, hfK⟩ := hK'.base_of; exact hIK.cur.trans hfK) | exact Inv.cur (by assumption)))
+    (by rw [hret]; exact done_vt hbm hcy)
     (fun l h1 h2 => by simp at h1; subst h1; exact hfresh _ (hXa1 _ h2) rfl)
   have hSa2 : ∀ l ∈ S, σ2.mem l ≠ none := fun l hl => by rw [hold l (hSa1 l hl)]; exact hSa1 l hl
   have h2 := hRr hs _ _ σ2 (.genN eN hid τy) ⟨Γ, env, τ, S, .eff eN :: r⟩ ⟨Γ, env, τ, S, r⟩ [] [] σ2 (X ++ [b]) _
@@ -503,7 +503,7 @@ theorem ret_genCd (hKo : ∀ m, n = m + 1 → EvalKOk F O m ∧ RetOk F O m)
       rcases List.mem_append.mp h2 with h2 | h2
       · exact hdSinX l h1 h2
       · simp at h2; exact hfresh l (hS1 l h1) h2)
-    (by rw [hG.hNret]; exact done_vt hbm hG.hcy (by rw [← hσ2, hbn]; simp [Store.alloc]; first | (obtain ⟨_, _, _, _, _, hIK, -, -, -, -, -, -, -, hfK⟩ := hK.base_of; exact hIK.cur.trans hfK) | (obtain ⟨_, _, _, _, _, hIK, -, -, -, -, -, -, -, hfK⟩ := hK'.base_of; exact hIK.cur.trans hfK) | exact Inv.cur (by assumption)))
+    (by rw [hG.hNret]; exact done_vt hbm hG.hcy)
     (fun l h1 h2 => by simp at h1; subst h1; exact hfresh _ (hXa1 _ h2) rfl)
   have hag2 : Agree σf σ2 (W ++ S) := Agree.trans hag1 (Agree.of (fun l hl => hold l (hFS1 l hl)) hrt2)
   have hFS2 : ∀ l ∈ W ++ S, σ2.mem l ≠ none := fun l hl => by rw [hold l (hFS1 l hl)]; exact hFS1 l hl
@@ -767,9 +767,9 @@ theorem ret_genC (hKo : ∀ m, n = m + 1 → EvalKOk F O m ∧ RetOk F O m)
 /-! ## The producer, its consumer waiting -/
 
 /-- `#Some(v)`, `v` moved into a cell of its own. -/
-theorem some_vt (hb : σ.mem b = some v) (hv : VT F ι σ τy v L) (hbL : b ∉ L) (hf : σ.fb b = some ι.fiber) :
+theorem some_vt (hb : σ.mem b = some v) (hv : VT F ι σ τy v L) (hbL : b ∉ L) :
     VT F ι σ (.sum .int τy) (.tag .int τy false b) (b :: L) :=
-  .tag (LT.of_contents hb hv hbL hf) rfl hv.complete
+  .tag (LT.of_contents hb hv hbL) rfl hv.complete
 
 /-- A producer whose consumer waits as `Kc` for what it asked: what it yields answers it; once it
 ends, its consumer's asking is answered `#Done`, the frame keeping what it left at the places lent
@@ -858,7 +858,7 @@ theorem ret_genP (hKo : ∀ m, n = m + 1 → EvalKOk F O m ∧ RetOk F O m)
       Agree.of (fun l hl => hold l (hT l hl)) hrt2
     have hag2 : Agree σf σ2 (Fz ++ Xc ++ S) := hag1.trans (hag12 _ hFa1)
     have hbm : σ2.mem b = some (.int 0) := by rw [← hσ2, hbn]; simp [Store.alloc]
-    have hres := resumeC m σ2 _ [b] hKk hwf2 hag2 (done_vt hbm hG.hcy (by rw [← hσ2, hbn]; simp [Store.alloc]; first | (obtain ⟨_, _, _, _, _, hIK, -, -, -, -, -, -, -, hfK⟩ := hK.base_of; exact hIK.cur.trans hfK) | (obtain ⟨_, _, _, _, _, hIK, -, -, -, -, -, -, -, hfK⟩ := hK'.base_of; exact hIK.cur.trans hfK) | exact Inv.cur (by assumption)))
+    have hres := resumeC m σ2 _ [b] hKk hwf2 hag2 (done_vt hbm hG.hcy)
       (fun l h1 h2 => by simp at h1; subst h1; exact hfresh _ (hFa1 _ h2) rfl)
     have hFEa : ∀ l ∈ Fz ++ Ep, σ1.mem l ≠ none := fun l hl => by
       rcases List.mem_append.mp hl with h | h
@@ -1033,7 +1033,7 @@ theorem ret_genP (hKo : ∀ m, n = m + 1 → EvalKOk F O m ∧ RetOk F O m)
       Agree.of (fun l hl => hold l (hT l hl)) hrt2
     have hbm : σ2.mem b = some v := by rw [← hσ2, hbn]; simp [Store.alloc]
     have hbL : b ∉ L := fun h => hfresh b (hLa1 b h) rfl
-    have hw := some_vt hbm (hv.frame (hag12 L hLa1)) hbL (by rw [← hσ2, hbn]; simp [Store.alloc]; first | (obtain ⟨_, _, _, _, _, hIK, -, -, -, -, -, -, -, hfK⟩ := hK.base_of; exact hIK.cur.trans hfK) | (obtain ⟨_, _, _, _, _, hIK, -, -, -, -, -, -, -, hfK⟩ := hK'.base_of; exact hIK.cur.trans hfK) | exact Inv.cur (by assumption))
+    have hw := some_vt hbm (hv.frame (hag12 L hLa1)) hbL
     have hres := resumeC m σ2 _ (b :: L) hKk hwf2 (hag1.trans (hag12 _ hFa1)) hw
       (fun l h1 h2 => by
         rcases List.mem_cons.mp h1 with rfl | h1
@@ -1129,7 +1129,7 @@ theorem gen_ok (hF : FnsOk F O) (hE : EvalOk F O n) (hR : RetOk F O n)
   rw [if_pos hlen']
   -- The producer's parameters.
   obtain ⟨Eo, hfo, hEo, hEom, hle, hwf₂, hold, hnew, -⟩ :=
-    allocAll_ok (names := d.owns.map Prod.fst) hvs (by simp) hwf₁ hLn (by cur_inv)
+    allocAll_ok (names := d.owns.map Prod.fst) hvs (by simp) hwf₁ hLn
   rw [zip_fst_snd] at hfo
   have hcells : (allocAll σ1 ((d.owns.map Prod.fst).zip vs)).1.map Prod.fst = d.owns.map Prod.fst := by
     rw [allocAll_fst]; exact List.map_fst_zip (by rw [hvs.length]; simp)

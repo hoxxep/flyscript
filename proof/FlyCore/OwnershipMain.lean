@@ -102,7 +102,7 @@ theorem eval_ok_succ (hF : FnsOk F O) (hE : EvalOk F O n) (hR : RetOk F O n) :
           · exact Nat.lt_irrefl _ (hm₁.wf _ (hI₁.alloc _ hl))
         · exact Nat.lt_irrefl _ (hm₁.wf _ (hI₁.allocS _ hl))
       refine post_val ⟨hI₁.foot.frame (hag.mono fun l hl => ?_), hI₁.nodup, hI₁.disj, hI₁.keys, hI₁.cur⟩
-        (.box (LT.of_contents (by simp [Store.alloc]) (hv₁.frame (hag.mono fun l hl => ?_)) ?_ (by simp [Store.alloc]; exact hI₁.cur)) hv₁.complete) ?_ ?_
+        (.box (LT.of_contents (by simp [Store.alloc]) (hv₁.frame (hag.mono fun l hl => ?_)) ?_) hv₁.complete) ?_ ?_
         ((hm₁.trans (Moves.allocate hm₁.wf hI₁.alloc) hd₁ hwf).relabel fun x => by
           simp only [List.mem_append, List.mem_cons, List.not_mem_nil, or_false,
             show (σ1.alloc v).1 = σ1.next from rfl]; grind)
@@ -137,7 +137,7 @@ theorem eval_ok_succ (hF : FnsOk F O) (hE : EvalOk F O n) (hR : RetOk F O n) :
           · exact Nat.lt_irrefl _ (hm₁.wf _ (hI₁.alloc _ hl))
         · exact Nat.lt_irrefl _ (hm₁.wf _ (hI₁.allocS _ hl))
       refine post_val ⟨hI₁.foot.frame (hag.mono fun l hl => ?_), hI₁.nodup, hI₁.disj, hI₁.keys, hI₁.cur⟩
-        (.tag (LT.of_contents (by simp [Store.alloc]) (hv₁.frame (hag.mono fun l hl => ?_)) ?_ (by simp [Store.alloc]; exact hI₁.cur))
+        (.tag (LT.of_contents (by simp [Store.alloc]) (hv₁.frame (hag.mono fun l hl => ?_)) ?_)
           (by simp only [Ty.complete, Bool.and_eq_true] at hAB; exact hAB.1)
           (by simp only [Ty.complete, Bool.and_eq_true] at hAB; exact hAB.2)) ?_ ?_
         ((hm₁.trans (Moves.allocate hm₁.wf hI₁.alloc) hd₁ hwf).relabel fun x => by
@@ -175,7 +175,7 @@ theorem eval_ok_succ (hF : FnsOk F O) (hE : EvalOk F O n) (hR : RetOk F O n) :
         · exact Nat.lt_irrefl _ (hm₁.wf _ (hI₁.allocS _ hl))
       refine post_val ⟨hI₁.foot.frame (hag.mono fun l hl => ?_), hI₁.nodup, hI₁.disj, hI₁.keys, hI₁.cur⟩
         (.clo ⟨_, _, _, hfd, hcap, hown, hrefs, hretp, rfl, rfl, hv₁.complete, hrf⟩
-          (LT.of_contents (by simp [Store.alloc]) (hv₁.frame (hag.mono fun l hl => ?_)) ?_ (by simp [Store.alloc]; exact hI₁.cur)) hv₁.complete) ?_ ?_
+          (LT.of_contents (by simp [Store.alloc]) (hv₁.frame (hag.mono fun l hl => ?_)) ?_) hv₁.complete) ?_ ?_
         ((hm₁.trans (Moves.allocate hm₁.wf hI₁.alloc) hd₁ hwf).relabel fun x => by
           simp only [List.mem_append, List.mem_cons, List.not_mem_nil, or_false,
             show (σ1.alloc v).1 = σ1.next from rfl]; grind)
@@ -192,7 +192,7 @@ theorem eval_ok_succ (hF : FnsOk F O) (hE : EvalOk F O n) (hR : RetOk F O n) :
       | @int k =>
       obtain ⟨l, Rb, P, A, B, hres, hRb, hE, hupd⟩ := replace_at hI₁ hp rfl (.inl rfl)
       cases hRb with
-      | int hl hfl =>
+      | int hl =>
         simp only [evalS, hev, hres, hl]
         have hnd := seg_nodup (hE.nodup_iff.mp hI₁.nodup)
         have hlE : l ∈ E₁ := hE.mem_iff.mpr (mem_seg.mpr (.inl (by simp)))
@@ -204,7 +204,7 @@ theorem eval_ok_succ (hF : FnsOk F O) (hE : EvalOk F O n) (hR : RetOk F O n) :
           simp only [List.mem_append, not_or] at hlAB ⊢
           exact ⟨⟨⟨hlAB.1, hlP⟩, hlAB.2⟩, hlS⟩
         obtain ⟨E'', hI'', hE''⟩ := hupd (σ1.set l (some (.int k))) [l] (agree_set hout)
-          (.int (n := k) (by simp [Store.set]) hfl) (by
+          (.int (n := k) (by simp [Store.set])) (by
             intro x hx; simp at hx; subst hx
             simp only [List.mem_append, not_or] at hout ⊢; exact hout.1) (by
             intro x hx; simp at hx; subst hx; exact hlS)
@@ -238,7 +238,7 @@ theorem eval_ok_succ (hF : FnsOk F O) (hE : EvalOk F O n) (hR : RetOk F O n) :
       have hagL : Agree σ1 σ3 L₁ := Agree.of' fun x hx =>
         hkeep3 x (fun h => hlL (h ▸ hx)) (fun h => hd₁ x hx (hR'E x h))
       have hLt : LT F ι σ3 l _ (l :: L₁) :=
-        LT.of_contents (by simp [σ3, Store.set]) (hv₁.frame hagL) hlL (by rw [hfb3]; exact hRb.fiber (List.mem_cons_self ..))
+        LT.of_contents (by simp [σ3, Store.set]) (hv₁.frame hagL) hlL
       have hwf2 : WF σ2 := by
         intro x hx
         by_cases hxR : x ∈ R'
@@ -379,7 +379,7 @@ theorem eval_ok_succ (hF : FnsOk F O) (hE : EvalOk F O n) (hR : RetOk F O n) :
         place_ok hp hI₁.foot
       obtain ⟨Rt, hRt, hLrPR⟩ := path_split hpath hLr
       cases hRt with
-      | @clo _ f c τc _ _ _ _ _ Rc hla hco hc hn hfc =>
+      | @clo _ f c τc _ _ _ _ _ Rc hla hco hc hn =>
       obtain ⟨d, xc, pn, hfd, hcap, hown, hrefs, hretp, hret, hrow', hτc⟩ := hco
       replace hrefs : d.refs = [] := by simpa [TyList.toList] using hrefs
       obtain ⟨hkeys0, hbody⟩ := hF d (List.mem_of_getElem? hfd)
@@ -395,7 +395,7 @@ theorem eval_ok_succ (hF : FnsOk F O) (hE : EvalOk F O n) (hR : RetOk F O n) :
       let h : Hole := ⟨md, τc, y, c, P ++ [la], Rc, Lr⟩
       have hco' : CloOk F f τc k A _ r' .nil := ⟨d, xc, pn, hfd, hcap, hown, by simp [hrefs, TyList.toList], hretp, hret, hrow', hτc⟩
       have hhole : HoleOk F ι σ1 Γ' env h := ⟨s, ra, τr, hsl, hra, fun hm => hexw (hmdw hm),
-        hpath.trans (.clo hla hco' .here hfc), hLr, by simpa [h] using hLrPR,
+        hpath.trans (.clo hla hco' .here), hLr, by simpa [h] using hLrPR,
         hso, hc, hslot, fun hs => .inr (by
           rcases hshp hs with ⟨rfl, -⟩ | ⟨-, P', rfl⟩
           · cases hpath; exact ⟨[], rfl⟩
@@ -469,7 +469,7 @@ theorem eval_ok_succ (hF : FnsOk F O) (hE : EvalOk F O n) (hR : RetOk F O n) :
         exact this
       simp only [hmap, hlen, and_self, ↓reduceIte]
       obtain ⟨Eo, hfo, hEo, hEomem, hle, hwf₂, hold, hnew, hlenc⟩ :=
-        allocAll_ok (names := d.owns.map Prod.fst) hvs (by simp) hwf₁ hLn (by cur_inv)
+        allocAll_ok (names := d.owns.map Prod.fst) hvs (by simp) hwf₁ hLn
       rw [zip_fst_snd] at hfo
       have hcells : (allocAll σ1 ((d.owns.map Prod.fst).zip vs)).1.map Prod.fst = d.owns.map Prod.fst := by
         rw [allocAll_fst]; exact List.map_fst_zip (by rw [hvs.length]; simp)

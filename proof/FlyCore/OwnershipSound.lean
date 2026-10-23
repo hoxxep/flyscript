@@ -199,7 +199,6 @@ theorem bind_ok (hI₁ : Inv F ι σ1 Γ₁ env E₁ S) (hv₁ : VT F ι σ1 τx
   have hcS : σ1.next ∉ S := fun h => hfresh _ (hI₁.allocS _ h) rfl
   have hLt : LT F ι (σ1.alloc v).2 σ1.next τx (σ1.next :: L₁) :=
     LT.of_contents (by simp [Store.alloc]) (hv₁.frame (hag.mono fun l hl => by simp [hl])) hcL
-      (by simp [Store.alloc]; exact hI₁.cur)
   refine ⟨⟨.cons (s := .own τx true) hLt (hI₁.foot.frame (hag.mono fun l hl => by
     simp only [List.mem_append] at hl ⊢; rcases hl with hl | hl <;> simp [hl])), ?_, ?_, ?_, by cur_inv⟩, ?_⟩
   · refine List.nodup_cons.mpr ⟨by simp [hcL, hcE], ?_⟩
@@ -623,7 +622,7 @@ theorem evalK_ok (hR : RetOk F O n) : EvalKOk F O n := by
         · rcases hSsub l h with h | h
           · exact halloc l (by simp [h])
           · exact halloc l (List.mem_append.mpr (.inr h)))
-      (List.nodup_append.mp hnd).2.1 hps (fun p hp hm => (hnew p hp hm).rfree_iota (hrf p hp) hf.fiber) hMn
+      (List.nodup_append.mp hnd).2.1 hps (fun p hp hm => (hnew p hp hm).rfree_iota (hrf p hp)) hMn
       (fun l hl h => hX l (by simp [hl]) h)
       (fun l hl h => by
         rcases hSsub l hl with h' | h'
@@ -637,7 +636,7 @@ theorem evalK_ok (hR : RetOk F O n) : EvalKOk F O n := by
         · exact hdS l h' (by simp only [List.mem_append] at h ⊢; grind))
       (by
         rcases hin with ⟨v, rfl, hv, hdv⟩ | ⟨a, k, rfl, ha, rfl⟩
-        · exact .inl ⟨v, rfl, hv.rfree_iota op0.ret_rfree hf.fiber, fun l hl h => hdv l hl (by simp only [List.mem_append] at h ⊢; grind)⟩
+        · exact .inl ⟨v, rfl, hv.rfree_iota op0.ret_rfree, fun l hl h => hdv l hl (by simp only [List.mem_append] at h ⊢; grind)⟩
         · exact .inr ⟨a, k, rfl, ha.push, rfl⟩)
     simp only [evalK]
     have := hR hs _ _ _ f _ _ _ _ σr (_ ++ mutCells ps ++ Lv) _ hf hR'
@@ -1477,10 +1476,8 @@ theorem pair_ok (ha : AtomTy Γ a A Γ₁) (hb : AtomTy Γ₁ b B Γ₂) (hI : I
       have hLwa := hw.alloc
       have hLv1 : LT F ι σ4 σ2.next A (σ2.next :: Lv) :=
         LT.of_contents hb4 (hv.frame <| Agree.of' fun z hz => hold4 z (hLva z hz)) (fun h => (hfresh _ (hLva _ h)).1 rfl)
-          (by simp only [σ4, σ3, Store.alloc]; simp; exact Inv.cur (by assumption))
       have hLw1 : LT F ι σ4 (σ2.next + 1) B ((σ2.next + 1) :: Lw) :=
         LT.of_contents hc4 (hw.frame <| Agree.of' fun z hz => hold4 z (hLwa z hz)) (fun h => (hfresh _ (hLwa _ h)).2 rfl)
-          (by simp only [σ4, σ3, Store.alloc]; simp; exact Inv.cur (by assumption))
       obtain ⟨hnv, hnw, hdvw⟩ := nodup_append_disj.mp hLn
       have hdisj : ∀ x ∈ σ2.next :: Lv, x ∉ (σ2.next + 1) :: Lw := by
         intro x hx hx'
@@ -1778,7 +1775,6 @@ theorem lendClo_ok (hE : EvalOk F O n) (hfd : F[f]? = some d) (hcap : d.cap = so
     ⟨d, xc, pn, hfd, hcap, hown, by simp [hrefs, TyList.toList], hretp, rfl, rfl, Ty.data_complete hdat, Ty.data_rfree hdat⟩
   have hLa : LT F ι (σ.alloc (.clo f l τc)).2 σ.next (.fn .shared A d.ret d.row .nil) (σ.next :: Rt) :=
     .clo (by simp [Store.alloc]) hco (hRt.frame <| Agree.of' fun z hz => hold z (hRta z hz)) haRt
-      (by simp [Store.alloc]; exact hI.cur)
   have hFza : ∀ z ∈ Fz, σ.mem z ≠ none := fun z hz => hI.alloc z (hFz z hz)
   have hSin : ∀ z ∈ (σ.next :: Rt) ++ Sb, z ∈ (σ.next :: Fz) ∨ z ∈ S := fun z hz => by
     rcases List.mem_append.mp hz with h | h
@@ -1909,7 +1905,6 @@ theorem lendCloMut_ok (hE : EvalOk F O n) (hfd : F[f]? = some d) (hcap : d.cap =
     ⟨d, xc, pn, hfd, hcap, hown, by simp [hrefs, TyList.toList], hretp, rfl, rfl, Ty.data_complete hdat, Ty.data_rfree hdat⟩
   have hLa : LT F ι (σ.alloc (.clo f l τc)).2 σ.next (.fn .excl A d.ret d.row .nil) (σ.next :: Rt) :=
     .clo (by simp [Store.alloc]) hco (hRt.frame <| Agree.of' fun z hz => hold z (hRta z hz)) haRt
-      (by simp [Store.alloc]; exact hI.cur)
   have hIb : Inv F ι (σ.alloc (.clo f l τc)).2 ((x, .ref .mut (.fn .excl A d.ret d.row .nil)) :: hide Γ y)
       ((x, σ.next) :: env) (Rt ++ Eh) (σ.next :: S) := by
     have hfoot := Foot.cons (s := .ref .mut (.fn .excl A d.ret d.row .nil)) (x := x) (a := σ.next) hLa
@@ -2091,8 +2086,8 @@ theorem caseRef_ok (hE : EvalOk F O n) (hx : lookup x Γ = none) (hp : PlaceTy �
   obtain ⟨a, τr, Lr, P, l0, s, ha, hLr, hpath, hres, -, hsubE, hsl, hso, hexw, hslot, hshp, hty⟩ := place_ok hp hI.foot
   obtain ⟨R0, hR0, -⟩ := path_split hpath hLr
   cases hR0 with
-  | @tag _ _ _ t l _ _ R hat _ hn hft =>
-  have hpath' := hpath.snocTag' rfl hat hft
+  | @tag _ _ _ t l _ _ R hat _ hn =>
+  have hpath' := hpath.snocTag' rfl hat
   simp only [evalS, hres, hat]
   -- The root is no closure borrowed `mut`: the place holds a tag.
   have hsh : s.shell = false := root_whole hsl hun hshp hty rfl
@@ -3285,7 +3280,7 @@ theorem ret_capK (hE : EvalOk F O n) (hKo : ∀ m, n = m + 1 → EvalKOk F O m �
   have hcf : (allocAll σ1 (os.zip vs)).1.map Prod.fst = os := by
     rw [allocAll_fst]; exact List.map_fst_zip (by omega)
   obtain ⟨Eo, hfo, hEo, hEomem, hle, hwf₂, hold, hnew, -⟩ :=
-    allocAll_ok (names := os) hvs (by rw [hH.hown]) hwf₁ hLn (by cur_inv)
+    allocAll_ok (names := os) hvs (by rw [hH.hown]) hwf₁ hLn
   have hrtAl := allocAll_rt σ1 (os.zip vs)
   have hfbtAl := allocAll_fbext σ1 (os.zip vs)
   have hcutAl := allocAll_cur σ1 (os.zip vs)
@@ -3340,7 +3335,7 @@ theorem ret_capK (hE : EvalOk F O n) (hKo : ∀ m, n = m + 1 → EvalKOk F O m �
       rcases hS₁ l h with h | h
       · exact hdLX l hl (by simp [h])
       · exact hdLS l hl h) hwf₁ hold (by rt_tac) (by fb_tac) (by cur_tac) hfib1.symm
-    (fun h hh L hL => by simpa using hL.rfree_iota (op.refs_rfree _ (by rw [← hts]; exact List.mem_map_of_mem hh)) hfib1.symm)
+    (fun h hh L hL => by simpa using hL.rfree_iota (op.refs_rfree _ (by rw [← hts]; exact List.mem_map_of_mem hh)))
   rw [hrs] at hIc
   have hro : ∀ l ∈ roCells (olds hos), l ∈ X ∨ l ∈ Sin := fun l hl => by
     obtain ⟨h, hh, hlo⟩ := mem_olds_ro.mp hl
@@ -3667,7 +3662,7 @@ theorem call_core (hE : EvalOk F O n) {d : Fn} {hos : List Hole} {vs : List Val}
     Vals.unshiftk (by simpa [List.map_map, Function.comp_def] using hvs₀)
   have hwf₁ := hm₁.wf
   obtain ⟨Eo, hfo, hEo, hEomem, hle, hwf₂, hold, hnew, hlenc⟩ :=
-    allocAll_ok (names := d.owns.map Prod.fst) hvs (by simp) hwf₁ hLn (by cur_inv)
+    allocAll_ok (names := d.owns.map Prod.fst) hvs (by simp) hwf₁ hLn
   rw [zip_fst_snd] at hfo
   have hcells : (allocAll σ1 ((d.owns.map Prod.fst).zip vs)).1.map Prod.fst = d.owns.map Prod.fst := by
     rw [allocAll_fst]; exact List.map_fst_zip (by rw [hvs.length]; simp)

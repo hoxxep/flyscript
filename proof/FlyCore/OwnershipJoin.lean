@@ -99,11 +99,11 @@ theorem multi_join (hL : LT F ι σ a τ L) (hR : RtExt σ σ') (hFb : FbExt σ 
     refine ⟨[], .hole, fun z => ?_, fun c hc => (hno c hc).elim⟩
     simp only [List.not_mem_nil, false_iff, not_or]
     exact ⟨fun h => by simpa using h.1, fun ⟨c, hc, _⟩ => hno c hc⟩
-  | @int a n ha hf =>
+  | @int a n ha =>
     intro cs hcs hcc hd hag hfr hdn hnn
     by_cases hh : ∃ c ∈ cs, c.loc = a
     · obtain ⟨c, hc, hloc⟩ := hh
-      exact join_here (.int ha hf) hc hloc hcs hcc hd
+      exact join_here (.int ha) hc hloc hcs hcc hd
     · -- An integer holds no hole but at itself.
       have hno : ∀ c ∈ cs, False := fun c hc => by
         obtain ⟨⟨P, hp⟩, -, -⟩ := hcs c hc
@@ -112,17 +112,17 @@ theorem multi_join (hL : LT F ι σ a τ L) (hR : RtExt σ σ') (hFb : FbExt σ 
         cases hp with
         | here => exact hh ⟨c, hc, hl⟩
       have hka : Kept [a] cs a := ⟨List.mem_singleton_self _, fun c hc => absurd hc (fun h => hno c h)⟩
-      refine ⟨[a], .int ((hag a hka).trans ha) (hFb _ _ hf), fun z => ?_, fun c hc => absurd hc (fun h => hno c h)⟩
+      refine ⟨[a], .int ((hag a hka).trans ha), fun z => ?_, fun c hc => absurd hc (fun h => hno c h)⟩
       constructor
       · intro h; simp at h; subst h; exact .inl hka
       · rintro (h | ⟨c, hc, -⟩)
         · exact h.1
         · exact absurd hc (fun h => hno c h)
-  | @rref a l _ k τ' ha hr hf =>
+  | @rref a l _ k τ' ha hr =>
     intro cs hcs hcc hd hag hfr hdn hnn
     by_cases hh : ∃ c ∈ cs, c.loc = a
     · obtain ⟨c, hc, hloc⟩ := hh
-      exact join_here (.rref ha hr hf) hc hloc hcs hcc hd
+      exact join_here (.rref ha hr) hc hloc hcs hcc hd
     · have hno : ∀ c ∈ cs, False := fun c hc => by
         obtain ⟨⟨P, hp⟩, -, -⟩ := hcs c hc
         generalize hl : c.loc = l at hp
@@ -130,17 +130,17 @@ theorem multi_join (hL : LT F ι σ a τ L) (hR : RtExt σ σ') (hFb : FbExt σ 
         cases hp with
         | here => exact hh ⟨c, hc, hl⟩
       have hka : Kept [a] cs a := ⟨List.mem_singleton_self _, fun c hc => absurd hc (fun h => hno c h)⟩
-      refine ⟨[a], .rref ((hag a hka).trans ha) (hr.frame hR) (hFb _ _ hf), fun z => ?_, fun c hc => absurd hc (fun h => hno c h)⟩
+      refine ⟨[a], .rref ((hag a hka).trans ha) (hr.frame hR), fun z => ?_, fun c hc => absurd hc (fun h => hno c h)⟩
       constructor
       · intro h; simp at h; subst h; exact .inl hka
       · rintro (h | ⟨c, hc, -⟩)
         · exact h.1
         · exact absurd hc (fun h => hno c h)
-  | @arena k a cs0 hk ha hnd hn hcs0 hex hf =>
+  | @arena k a cs0 hk ha hnd hn hcs0 hex =>
     intro cs hcs hcc hd hag hfr hdn hnn
     by_cases hh : ∃ c ∈ cs, c.loc = a
     · obtain ⟨c, hc, hloc⟩ := hh
-      exact join_here (.arena hk ha hnd hn hcs0 hex hf) hc hloc hcs hcc hd
+      exact join_here (.arena hk ha hnd hn hcs0 hex) hc hloc hcs hcc hd
     · have hno : ∀ c ∈ cs, False := fun c hc => by
         obtain ⟨⟨P, hp⟩, -, -⟩ := hcs c hc
         generalize hl : c.loc = l at hp
@@ -150,7 +150,7 @@ theorem multi_join (hL : LT F ι σ a τ L) (hR : RtExt σ σ') (hFb : FbExt σ 
       have hkz : ∀ z ∈ a :: cs0, Kept (a :: cs0) cs z := fun z hz =>
         ⟨hz, fun c hc => absurd hc (fun h => hno c h)⟩
       refine ⟨a :: cs0, .arena hk ((hag a (hkz a (List.mem_cons_self ..))).trans ha) hnd hn (fun l hl => ?_)
-        (fun l x hx => hex l x (hfr a (hkz a (List.mem_cons_self ..)) l x hx)) (fun l hl => hFb _ _ (hf l hl)), fun z => ?_,
+        (fun l x hx => hex l x (hfr a (hkz a (List.mem_cons_self ..)) l x hx)), fun z => ?_,
         fun c hc => absurd hc (fun h => hno c h)⟩
       · obtain ⟨τ, v, hrt, hv, hrd⟩ := hcs0 l hl
         exact ⟨τ, v, hR l _ hrt, (hag l (hkz l (List.mem_cons_of_mem _ hl))).trans hv, hrd.frame hR⟩
@@ -159,11 +159,11 @@ theorem multi_join (hL : LT F ι σ a τ L) (hR : RtExt σ σ') (hFb : FbExt σ 
         · rintro (h | ⟨c, hc, -⟩)
           · exact h.1
           · exact absurd hc (fun h => hno c h)
-  | @vec a τ' _ cs0 Rs ha hlen hel hnd hn hf _ =>
+  | @vec a τ' _ cs0 Rs ha hlen hel hnd hn _ =>
     intro cs hcs hcc hd hag hfr hdn hnn
     by_cases hh : ∃ c ∈ cs, c.loc = a
     · obtain ⟨c, hc, hloc⟩ := hh
-      exact join_here (.vec ha hlen hel hnd hn hf) hc hloc hcs hcc hd
+      exact join_here (.vec ha hlen hel hnd hn) hc hloc hcs hcc hd
     · have hno : ∀ c ∈ cs, False := fun c hc => by
         obtain ⟨⟨P, hp⟩, -, -⟩ := hcs c hc
         generalize hl : c.loc = l at hp
@@ -172,7 +172,7 @@ theorem multi_join (hL : LT F ι σ a τ L) (hR : RtExt σ σ') (hFb : FbExt σ 
         | here => exact hh ⟨c, hc, hl⟩
       have hkz : ∀ z ∈ a :: Rs.flatten, Kept (a :: Rs.flatten) cs z := fun z hz =>
         ⟨hz, fun c hc => absurd hc (fun h => hno c h)⟩
-      refine ⟨a :: Rs.flatten, .vec ((hag a (hkz a (List.mem_cons_self ..))).trans ha) hlen (fun i h h' => ?_) hnd hn (hFb _ _ hf),
+      refine ⟨a :: Rs.flatten, .vec ((hag a (hkz a (List.mem_cons_self ..))).trans ha) hlen (fun i h h' => ?_) hnd hn,
         fun z => ?_, fun c hc => absurd hc (fun h => hno c h)⟩
       · exact (hel i h h').frame ⟨fun l hl => hag l (hkz l (List.mem_cons_of_mem _ (mem_flatten_of h' hl))), hR,
           fun z hz l x hx => hfr z (hkz z (List.mem_cons_of_mem _ (mem_flatten_of h' hz))) l x hx, hFb, hCur⟩
@@ -181,11 +181,11 @@ theorem multi_join (hL : LT F ι σ a τ L) (hR : RtExt σ σ') (hFb : FbExt σ 
         · rintro (h | ⟨c, hc, -⟩)
           · exact h.1
           · exact absurd hc (fun h => hno c h)
-  | @box a b τ' R ha hb hn hf ih =>
+  | @box a b τ' R ha hb hn ih =>
     intro cs hcs hcc hd hag hfr hdn hnn
     by_cases hh : ∃ c ∈ cs, c.loc = a
     · obtain ⟨c, hc, hloc⟩ := hh
-      exact join_here (.box ha hb hn hf) hc hloc hcs hcc hd
+      exact join_here (.box ha hb hn) hc hloc hcs hcc hd
     · -- Every hole is below the node, in its child.
       have hno : ∀ c ∈ cs, c.loc ≠ a := fun c hc e => hh ⟨c, hc, e⟩
       have hcs' : ∀ c ∈ cs, (∃ P, Path F ι σ b (τ') P c.loc c.ty) ∧ LT F ι σ c.loc c.ty c.old ∧ LT F ι σ' c.loc c.ty c.new := by
@@ -210,7 +210,7 @@ theorem multi_join (hL : LT F ι σ a τ L) (hR : RtExt σ σ') (hFb : FbExt σ 
         rcases (hmem1 a).mp h with h | ⟨c, hc, h⟩
         · exact hn h.1
         · exact hdn c hc a h hka
-      refine ⟨a :: L1, .box ha' hL1 hnL (hFb _ _ hf), fun z => ?_, fun c hc => ?_⟩
+      refine ⟨a :: L1, .box ha' hL1 hnL, fun z => ?_, fun c hc => ?_⟩
       · rw [List.mem_cons, hmem1]
         constructor
         · rintro (rfl | h | h)
@@ -223,12 +223,12 @@ theorem multi_join (hL : LT F ι σ a τ L) (hR : RtExt σ σ') (hFb : FbExt σ 
             · exact .inr (.inl ⟨hz, hk⟩)
           · exact .inr (.inr h)
       · obtain ⟨P, hp⟩ := hpaths1 c hc
-        exact ⟨_, .step ha' hp (hFb _ _ hf)⟩
-  | @clo a f c0 τc k A B r Rf R ha hc0 hb hn hf ih =>
+        exact ⟨_, .step ha' hp⟩
+  | @clo a f c0 τc k A B r Rf R ha hc0 hb hn ih =>
     intro cs hcs hcc hd hag hfr hdn hnn
     by_cases hh : ∃ c ∈ cs, c.loc = a
     · obtain ⟨c, hc, hloc⟩ := hh
-      exact join_here (.clo ha hc0 hb hn hf) hc hloc hcs hcc hd
+      exact join_here (.clo ha hc0 hb hn) hc hloc hcs hcc hd
     · -- Every hole is below the node, in its child.
       have hno : ∀ c ∈ cs, c.loc ≠ a := fun c hc e => hh ⟨c, hc, e⟩
       have hcs' : ∀ c ∈ cs, (∃ P, Path F ι σ c0 (τc) P c.loc c.ty) ∧ LT F ι σ c.loc c.ty c.old ∧ LT F ι σ' c.loc c.ty c.new := by
@@ -253,7 +253,7 @@ theorem multi_join (hL : LT F ι σ a τ L) (hR : RtExt σ σ') (hFb : FbExt σ 
         rcases (hmem1 a).mp h with h | ⟨c, hc, h⟩
         · exact hn h.1
         · exact hdn c hc a h hka
-      refine ⟨a :: L1, .clo ha' hc0 hL1 hnL (hFb _ _ hf), fun z => ?_, fun c hc => ?_⟩
+      refine ⟨a :: L1, .clo ha' hc0 hL1 hnL, fun z => ?_, fun c hc => ?_⟩
       · rw [List.mem_cons, hmem1]
         constructor
         · rintro (rfl | h | h)
@@ -266,12 +266,12 @@ theorem multi_join (hL : LT F ι σ a τ L) (hR : RtExt σ σ') (hFb : FbExt σ 
             · exact .inr (.inl ⟨hz, hk⟩)
           · exact .inr (.inr h)
       · obtain ⟨P, hp⟩ := hpaths1 c hc
-        exact ⟨_, .clo ha' hc0 hp (hFb _ _ hf)⟩
-  | @tag a _ _ t b A B R ha hb hn hf ih =>
+        exact ⟨_, .clo ha' hc0 hp⟩
+  | @tag a _ _ t b A B R ha hb hn ih =>
     intro cs hcs hcc hd hag hfr hdn hnn
     by_cases hh : ∃ c ∈ cs, c.loc = a
     · obtain ⟨c, hc, hloc⟩ := hh
-      exact join_here (.tag ha hb hn hf) hc hloc hcs hcc hd
+      exact join_here (.tag ha hb hn) hc hloc hcs hcc hd
     · -- Every hole is below the node, in its child.
       have hno : ∀ c ∈ cs, c.loc ≠ a := fun c hc e => hh ⟨c, hc, e⟩
       have hcs' : ∀ c ∈ cs, (∃ P, Path F ι σ b (if t then A else B) P c.loc c.ty) ∧ LT F ι σ c.loc c.ty c.old ∧ LT F ι σ' c.loc c.ty c.new := by
@@ -296,7 +296,7 @@ theorem multi_join (hL : LT F ι σ a τ L) (hR : RtExt σ σ') (hFb : FbExt σ 
         rcases (hmem1 a).mp h with h | ⟨c, hc, h⟩
         · exact hn h.1
         · exact hdn c hc a h hka
-      refine ⟨a :: L1, .tag ha' hL1 hnL (hFb _ _ hf), fun z => ?_, fun c hc => ?_⟩
+      refine ⟨a :: L1, .tag ha' hL1 hnL, fun z => ?_, fun c hc => ?_⟩
       · rw [List.mem_cons, hmem1]
         constructor
         · rintro (rfl | h | h)
@@ -309,12 +309,12 @@ theorem multi_join (hL : LT F ι σ a τ L) (hR : RtExt σ σ') (hFb : FbExt σ 
             · exact .inr (.inl ⟨hz, hk⟩)
           · exact .inr (.inr h)
       · obtain ⟨P, hp⟩ := hpaths1 c hc
-        exact ⟨_, .tag ha' hp (hFb _ _ hf)⟩
-  | @pair a b c A R₁ B R₂ ha h1 h2 hd0 hn hf ih1 ih2 =>
+        exact ⟨_, .tag ha' hp⟩
+  | @pair a b c A R₁ B R₂ ha h1 h2 hd0 hn ih1 ih2 =>
     intro cs hcs hcc hd hag hfr hdn hnn
     by_cases hh : ∃ d ∈ cs, d.loc = a
     · obtain ⟨d, hd', hloc⟩ := hh
-      exact join_here (.pair ha h1 h2 hd0 hn hf) hd' hloc hcs hcc hd
+      exact join_here (.pair ha h1 h2 hd0 hn) hd' hloc hcs hcc hd
     · have hno : ∀ d ∈ cs, d.loc ≠ a := fun d hd' e => hh ⟨d, hd', e⟩
       -- Each hole lies in one field or the other.
       have hside : ∀ d ∈ cs, ((∃ P, Path F ι σ b A P d.loc d.ty) ∧ ∀ z ∈ d.old, z ∈ R₁) ∨
@@ -402,7 +402,7 @@ theorem multi_join (hL : LT F ι σ a τ L) (hR : RtExt σ σ') (hFb : FbExt σ 
         · rcases (hmem2 a).mp h with k | ⟨d, hd', n⟩
           · exact hn (List.mem_append.mpr (.inr k.1))
           · exact hdn d (hm₂.mp hd').1 a n hka
-      refine ⟨a :: (L1 ++ L2), .pair ha' hL1 hL2 hdisj hnL (hFb _ _ hf), fun z => ?_, fun d hd' => ?_⟩
+      refine ⟨a :: (L1 ++ L2), .pair ha' hL1 hL2 hdisj hnL, fun z => ?_, fun d hd' => ?_⟩
       · rw [List.mem_cons, List.mem_append, hmem1, hmem2]
         constructor
         · rintro (rfl | (h | ⟨d, hd', h⟩) | (h | ⟨d, hd', h⟩))
@@ -422,8 +422,8 @@ theorem multi_join (hL : LT F ι σ a τ L) (hR : RtExt σ σ') (hFb : FbExt σ 
             · exact .inr (.inr (.inr ⟨d, h', h⟩))
       · rcases hor d hd' with h' | h'
         · obtain ⟨P, hp⟩ := hpaths1 d h'
-          exact ⟨_, .fst ha' hL2 hp (hFb _ _ hf)⟩
+          exact ⟨_, .fst ha' hL2 hp⟩
         · obtain ⟨P, hp⟩ := hpaths2 d h'
-          exact ⟨_, .snd ha' hL1 hp (hFb _ _ hf)⟩
+          exact ⟨_, .snd ha' hL1 hp⟩
 
 end FlyCore.Ownership

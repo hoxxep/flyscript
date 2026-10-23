@@ -22,44 +22,41 @@ theorem RefOk.shift_iff : RefOk (ι.push a) σ (k + 1) τ l ↔ RefOk ι σ k τ
 
 /-! ## What no region is part of -/
 
-theorem LT.rfree_iota (h : LT F ι σ c τ L) (hr : τ.rfree = true) (hfib : ι'.fiber = ι.fiber := by first | rfl | assumption) :
-    LT F ι' σ c τ L := by
+theorem LT.rfree_iota (h : LT F ι σ c τ L) (hr : τ.rfree = true) : LT F ι' σ c τ L := by
   induction h with
-  | int ha hf => exact .int ha (by rw [hfib]; exact hf)
-  | box ha _ hn hf ih => exact .box ha (ih (by simpa [Ty.rfree] using hr)) hn (by rw [hfib]; exact hf)
-  | clo ha hc _ hn hf ih => exact .clo ha hc (ih hc.rfree) hn (by rw [hfib]; exact hf)
-  | pair ha _ _ hd hn hf ih1 ih2 =>
+  | int ha => exact .int ha
+  | box ha _ hn ih => exact .box ha (ih (by simpa [Ty.rfree] using hr)) hn
+  | clo ha hc _ hn ih => exact .clo ha hc (ih hc.rfree) hn
+  | pair ha _ _ hd hn ih1 ih2 =>
     simp only [Ty.rfree, Bool.and_eq_true] at hr
-    exact .pair ha (ih1 hr.1) (ih2 hr.2) hd hn (by rw [hfib]; exact hf)
-  | tag ha _ hn hf ih =>
+    exact .pair ha (ih1 hr.1) (ih2 hr.2) hd hn
+  | tag ha _ hn ih =>
     simp only [Ty.rfree, Bool.and_eq_true] at hr
-    exact .tag ha (ih (Ty.rfree_ite hr.1 hr.2)) hn (by rw [hfib]; exact hf)
+    exact .tag ha (ih (Ty.rfree_ite hr.1 hr.2)) hn
   | hole => exact .hole
   | rref => simp [Ty.rfree] at hr
   | arena => simp [Ty.rfree] at hr
-  | vec ha hlen _ hnd hn hf ih => exact .vec ha hlen (fun i h h' => ih i h h' (by simpa [Ty.rfree] using hr)) hnd hn (by rw [hfib]; exact hf)
+  | vec ha hlen _ hnd hn ih => exact .vec ha hlen (fun i h h' => ih i h h' (by simpa [Ty.rfree] using hr)) hnd hn
 
-theorem VT.rfree_iota (h : VT F ι σ τ v L) (hr : τ.rfree = true) (hfib : ι'.fiber = ι.fiber := by first | rfl | assumption) :
-    VT F ι' σ τ v L := by
+theorem VT.rfree_iota (h : VT F ι σ τ v L) (hr : τ.rfree = true) : VT F ι' σ τ v L := by
   cases h with
   | int => exact .int
-  | box h hc => exact .box (h.rfree_iota (by simpa [Ty.rfree] using hr) hfib) hc
-  | clo hc h hc' => exact .clo hc (h.rfree_iota hc.rfree hfib) hc'
+  | box h hc => exact .box (h.rfree_iota (by simpa [Ty.rfree] using hr)) hc
+  | clo hc h hc' => exact .clo hc (h.rfree_iota hc.rfree) hc'
   | pair h1 h2 hd hA hB =>
     simp only [Ty.rfree, Bool.and_eq_true] at hr
-    exact .pair (h1.rfree_iota hr.1 hfib) (h2.rfree_iota hr.2 hfib) hd hA hB
+    exact .pair (h1.rfree_iota hr.1) (h2.rfree_iota hr.2) hd hA hB
   | tag h hA hB =>
     simp only [Ty.rfree, Bool.and_eq_true] at hr
-    exact .tag (h.rfree_iota (Ty.rfree_ite hr.1 hr.2) hfib) hA hB
+    exact .tag (h.rfree_iota (Ty.rfree_ite hr.1 hr.2)) hA hB
   | rref => simp [Ty.rfree] at hr
-  | vec hlen hel hnd hc => exact .vec hlen (fun i h h' => (hel i h h').rfree_iota (by simpa [Ty.rfree] using hr) hfib) hnd hc
+  | vec hlen hel hnd hc => exact .vec hlen (fun i h h' => (hel i h h').rfree_iota (by simpa [Ty.rfree] using hr)) hnd hc
 
-theorem Vals.rfree_iota (h : Vals F ι σ τs vs Ls) (hr : ∀ τ ∈ τs, τ.rfree = true)
-    (hfib : ι'.fiber = ι.fiber := by first | rfl | assumption) : Vals F ι' σ τs vs Ls := by
+theorem Vals.rfree_iota (h : Vals F ι σ τs vs Ls) (hr : ∀ τ ∈ τs, τ.rfree = true) : Vals F ι' σ τs vs Ls := by
   induction h with
   | nil => exact .nil
   | cons hv _ ih =>
-    exact .cons (hv.rfree_iota (hr _ (List.mem_cons_self ..)) hfib) (ih fun τ hτ => hr τ (List.mem_cons_of_mem _ hτ))
+    exact .cons (hv.rfree_iota (hr _ (List.mem_cons_self ..))) (ih fun τ hτ => hr τ (List.mem_cons_of_mem _ hτ))
 
 theorem Op.owns_rfree (op : Op) : ∀ τ ∈ op.owns, τ.rfree = true := by
   have := op.rfree
@@ -80,56 +77,56 @@ theorem Op.ret_rfree (op : Op) : op.ret.rfree = true := by
 
 theorem LT.shift (h : LT F ι σ c τ L) : LT F (ι.push a) σ c (τ.shiftBy 1) L := by
   induction h with
-  | int ha hf => exact .int ha hf
-  | box ha _ hn hf ih => exact .box ha ih hn hf
-  | clo ha hc hb hn hf _ => exact .clo ha hc (hb.rfree_iota hc.rfree) hn hf
-  | pair ha _ _ hd hn hf ih1 ih2 => exact .pair ha ih1 ih2 hd hn hf
-  | tag ha _ hn hf ih =>
-    refine .tag ha ?_ hn hf
+  | int ha => exact .int ha
+  | box ha _ hn ih => exact .box ha ih hn
+  | clo ha hc hb hn _ => exact .clo ha hc (hb.rfree_iota hc.rfree) hn
+  | pair ha _ _ hd hn ih1 ih2 => exact .pair ha ih1 ih2 hd hn
+  | tag ha _ hn ih =>
+    refine .tag ha ?_ hn
     rw [← Ty.shiftBy_ite]; exact ih
   | hole => exact .hole
-  | rref ha hr hf => exact .rref ha (RefOk.shift_iff.mpr hr) hf
-  | arena hk ha hnd hn hcs hex hf =>
-    refine .arena (by simpa using hk) ha hnd hn (fun l hl => ?_) hex (fun l hl => by have := hf l hl; first | exact this | (subst_vars; exact this))
+  | rref ha hr => exact .rref ha (RefOk.shift_iff.mpr hr)
+  | arena hk ha hnd hn hcs hex =>
+    refine .arena (by simpa using hk) ha hnd hn (fun l hl => ?_) hex
     obtain ⟨τ, v, h1, h2, h3⟩ := hcs l hl
     exact ⟨τ, v, h1, h2, by simpa using h3⟩
-  | vec ha hlen _ hnd hn hf ih => exact .vec ha hlen ih hnd hn hf
+  | vec ha hlen _ hnd hn ih => exact .vec ha hlen ih hnd hn
 
 theorem LT.unshift : ∀ {τ : Ty} {c : Nat} {L : List Nat}, LT F (ι.push a) σ c (τ.shiftBy 1) L → LT F ι σ c τ L
-  | .int, _, _, h => by simp only [Ty.shiftBy] at h; cases h with | int ha hf => exact .int ha hf
+  | .int, _, _, h => by simp only [Ty.shiftBy] at h; cases h with | int ha => exact .int ha
   | .box τ, _, _, h => by
     simp only [Ty.shiftBy] at h
-    cases h with | box ha hb hn hf => exact .box ha (LT.unshift hb) hn hf
+    cases h with | box ha hb hn => exact .box ha (LT.unshift hb) hn
   | .fn _ _ _ _ _, _, _, h => by
     simp only [Ty.shiftBy] at h
-    cases h with | clo ha hc hb hn hf => exact .clo ha hc (hb.rfree_iota hc.rfree) hn hf
+    cases h with | clo ha hc hb hn => exact .clo ha hc (hb.rfree_iota hc.rfree) hn
   | .pair A B, _, _, h => by
     simp only [Ty.shiftBy] at h
-    cases h with | pair ha h1 h2 hd hn hf => exact .pair ha (LT.unshift h1) (LT.unshift h2) hd hn hf
+    cases h with | pair ha h1 h2 hd hn => exact .pair ha (LT.unshift h1) (LT.unshift h2) hd hn
   | .sum A B, _, _, h => by
     simp only [Ty.shiftBy] at h
     cases h with
-    | tag ha hb hn hf =>
+    | tag ha hb hn =>
       rename_i t _ _
-      refine .tag ha ?_ hn hf
+      refine .tag ha ?_ hn
       cases t
       · exact LT.unshift (τ := B) hb
       · exact LT.unshift (τ := A) hb
   | .hole τ, _, _, h => by simp only [Ty.shiftBy] at h; cases h; exact .hole
   | .rref c k τ, _, _, h => by
     simp only [Ty.shiftBy] at h
-    cases h with | rref ha hr hf => exact .rref ha (RefOk.shift_iff.mp hr) hf
+    cases h with | rref ha hr => exact .rref ha (RefOk.shift_iff.mp hr)
   | .arena k, _, _, h => by
     simp only [Ty.shiftBy] at h
     cases h with
-    | arena hk ha hnd hn hcs hex hf =>
-      refine .arena (by simpa using hk) ha hnd hn (fun l hl => ?_) hex (fun l hl => by have := hf l hl; first | exact this | (subst_vars; exact this))
+    | arena hk ha hnd hn hcs hex =>
+      refine .arena (by simpa using hk) ha hnd hn (fun l hl => ?_) hex
       obtain ⟨τ, v, h1, h2, h3⟩ := hcs l hl
       exact ⟨τ, v, h1, h2, by simpa using h3⟩
   | .vec _ τ, _, _, h => by
     simp only [Ty.shiftBy] at h
     cases h with
-    | vec ha hlen hel hnd hn hf => exact .vec ha hlen (fun i h h' => LT.unshift (hel i h h')) hnd hn hf
+    | vec ha hlen hel hnd hn => exact .vec ha hlen (fun i h h' => LT.unshift (hel i h h')) hnd hn
   | .cont _ _ _, _, _, h => by simp only [Ty.shiftBy] at h; cases h
 
 theorem Ty.complete_shift : ∀ {τ : Ty}, (τ.shiftBy n).complete = τ.complete
@@ -287,57 +284,57 @@ theorem drop_drop_add {ι : Iota} : (ι.drop k).drop j = ι.drop (j + k) := Iota
 theorem LT.shiftk (h : LT F (ι.drop k) σ c τ L) : LT F ι σ c (τ.shiftBy k) L := by
   generalize hι : ι.drop k = ι' at h
   induction h with
-  | int ha hf => exact .int ha (by subst hι; exact hf)
-  | box ha _ hn hf ih => exact .box ha ih hn (by subst hι; exact hf)
-  | clo ha hc hb hn hf _ => subst hι; exact .clo ha hc (hb.rfree_iota hc.rfree) hn hf
-  | pair ha _ _ hd hn hf ih1 ih2 => exact .pair ha ih1 ih2 hd hn (by subst hι; exact hf)
-  | tag ha _ hn hf ih =>
-    refine .tag ha ?_ hn (by subst hι; exact hf)
+  | int ha => exact .int ha
+  | box ha _ hn ih => exact .box ha ih hn
+  | clo ha hc hb hn _ => exact .clo ha hc (hb.rfree_iota hc.rfree) hn
+  | pair ha _ _ hd hn ih1 ih2 => exact .pair ha ih1 ih2 hd hn
+  | tag ha _ hn ih =>
+    refine .tag ha ?_ hn
     rw [← Ty.shiftBy_ite]; exact ih
   | hole => exact .hole
-  | rref ha hr hf => subst hι; exact .rref ha (RefOk.drop_iff.mpr hr) hf
-  | arena hk ha hnd hn hcs hex hf =>
+  | rref ha hr => subst hι; exact .rref ha (RefOk.drop_iff.mpr hr)
+  | arena hk ha hnd hn hcs hex =>
     subst hι
-    refine .arena (by simpa [List.getElem?_drop, Nat.add_comm] using hk) ha hnd hn (fun l hl => ?_) hex (fun l hl => by have := hf l hl; first | exact this | (subst_vars; exact this))
+    refine .arena (by simpa [List.getElem?_drop, Nat.add_comm] using hk) ha hnd hn (fun l hl => ?_) hex
     obtain ⟨τ, v, h1, h2, h3⟩ := hcs l hl
     exact ⟨τ, v, h1, h2, by rw [drop_drop_add] at h3; exact h3⟩
-  | vec ha hlen _ hnd hn hf ih => exact .vec ha hlen ih hnd hn (by subst hι; exact hf)
+  | vec ha hlen _ hnd hn ih => exact .vec ha hlen ih hnd hn
 
 theorem LT.unshiftk : ∀ {τ : Ty} {c : Nat} {L : List Nat}, LT F ι σ c (τ.shiftBy k) L → LT F (ι.drop k) σ c τ L
-  | .int, _, _, h => by simp only [Ty.shiftBy] at h; cases h with | int ha hf => exact .int ha hf
+  | .int, _, _, h => by simp only [Ty.shiftBy] at h; cases h with | int ha => exact .int ha
   | .box τ, _, _, h => by
     simp only [Ty.shiftBy] at h
-    cases h with | box ha hb hn hf => exact .box ha (LT.unshiftk hb) hn hf
+    cases h with | box ha hb hn => exact .box ha (LT.unshiftk hb) hn
   | .fn _ _ _ _ _, _, _, h => by
     simp only [Ty.shiftBy] at h
-    cases h with | clo ha hc hb hn hf => exact .clo ha hc (hb.rfree_iota hc.rfree) hn hf
+    cases h with | clo ha hc hb hn => exact .clo ha hc (hb.rfree_iota hc.rfree) hn
   | .pair A B, _, _, h => by
     simp only [Ty.shiftBy] at h
-    cases h with | pair ha h1 h2 hd hn hf => exact .pair ha (LT.unshiftk h1) (LT.unshiftk h2) hd hn hf
+    cases h with | pair ha h1 h2 hd hn => exact .pair ha (LT.unshiftk h1) (LT.unshiftk h2) hd hn
   | .sum A B, _, _, h => by
     simp only [Ty.shiftBy] at h
     cases h with
-    | tag ha hb hn hf =>
+    | tag ha hb hn =>
       rename_i t _ _
-      refine .tag ha ?_ hn hf
+      refine .tag ha ?_ hn
       cases t
       · exact LT.unshiftk (τ := B) hb
       · exact LT.unshiftk (τ := A) hb
   | .hole τ, _, _, h => by simp only [Ty.shiftBy] at h; cases h; exact .hole
   | .rref c j τ, _, _, h => by
     simp only [Ty.shiftBy] at h
-    cases h with | rref ha hr hf => exact .rref ha (RefOk.drop_iff.mp hr) hf
+    cases h with | rref ha hr => exact .rref ha (RefOk.drop_iff.mp hr)
   | .arena j, _, _, h => by
     simp only [Ty.shiftBy] at h
     cases h with
-    | arena hk ha hnd hn hcs hex hf =>
-      refine .arena (by simpa [List.getElem?_drop, Nat.add_comm] using hk) ha hnd hn (fun l hl => ?_) hex (fun l hl => by have := hf l hl; first | exact this | (subst_vars; exact this))
+    | arena hk ha hnd hn hcs hex =>
+      refine .arena (by simpa [List.getElem?_drop, Nat.add_comm] using hk) ha hnd hn (fun l hl => ?_) hex
       obtain ⟨τ, v, h1, h2, h3⟩ := hcs l hl
       exact ⟨τ, v, h1, h2, by rw [drop_drop_add]; exact h3⟩
   | .vec _ τ, _, _, h => by
     simp only [Ty.shiftBy] at h
     cases h with
-    | vec ha hlen hel hnd hn hf => exact .vec ha hlen (fun i h h' => LT.unshiftk (hel i h h')) hnd hn hf
+    | vec ha hlen hel hnd hn => exact .vec ha hlen (fun i h h' => LT.unshiftk (hel i h h')) hnd hn
   | .cont _ _ _, _, _, h => by simp only [Ty.shiftBy] at h; cases h
 
 theorem VT.shiftk (h : VT F (ι.drop k) σ τ v L) : VT F ι σ (τ.shiftBy k) v L := by
