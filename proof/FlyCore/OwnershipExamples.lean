@@ -82,7 +82,7 @@ theorem lends_typed : Typed [addInto] [] [] lends .int [] [.fail] := by
       (.call 0 [.move "y"] [(.mut, var "x")]) .int
       [("y", .own (.box .int) false), ("x", .own (.box .int) true)] [.fail] := by
     have := Typed.call (F := [addInto]) (O := []) (Γ := [("y", .own (.box .int) true), ("x", .own (.box .int) true)])
-      (f := 0) (d := addInto) (ys := [(.mut, "x")]) (r := [.fail]) rfl (by simp [addInto])
+      (f := 0) (d := addInto) (ys := [(.mut, "x")]) (r := [.fail]) rfl rfl (by simp [addInto])
       (.cons (.move (x := "y") rfl) .nil) (.cons (.own (by simp [lookup, setSlot])) (fun _ => rfl) .nil)
       (by simp [Exclusive])
     simpa [setSlot, addInto] using this
@@ -117,7 +117,7 @@ theorem aliased_rejected : ¬ Typed [clobber] O [] aliased τ Γ' r := by
   cases h with
   | let_ _ _ hb =>
     cases hb with
-    | call hf _ _ hl hx =>
+    | call hf _ _ _ hl hx =>
       simp at hf
       subst hf
       cases hl with
@@ -443,5 +443,96 @@ theorem reaches_rejected : ¬ Typed [] O [] reaches τ Γ' r := by
             cases hq with
             | own hx => simp [lendCtx, hide, lookup] at hx
             | ref hx => simp [lendCtx, hide, lookup] at hx
+
+/-! A borrow a function returns. -/
+
+/-- `function inside(r: mut Box<int>): mut int { r.* }`: a borrow of what the box it was lent holds. -/
+def inside : Fn :=
+  { owns := [], refs := [("r", .mut, .box .int)], ret := .int, row := [], body := .atom (.lit 0),
+    retp := some (.mut, 0, deref (var "r")) }
+
+/-- `let x = Box.new(1); { const v = inside(mut x); v = v + 41 }; *x`: the borrow the call returns
+changes what `x` holds, and once it ends `x` reads what it left; 42, and nothing left allocated. -/
+def returns : Expr :=
+  .let_ "x" (.box .int) (.new (.lit 1))
+    (.let_ "u" .int (.lendCall "v" .mut 0 [] [(.mut, var "x")]
+        (.let_ "t" .int (.add (.read (var "v")) (.lit 41)) (.write (var "v") (.read (var "t")))))
+      (.atom (.read (deref (var "x")))))
+
+example : value (eval [inside] [] 20 [] .empty [] returns) = some 42 := by
+  run [returns, inside]
+example : freed (eval [inside] [] 20 [] .empty [] returns) := by
+  run [returns, inside]
+
+theorem inside_ok : FnsOk [inside] [] := by
+  intro d hd
+  simp only [List.mem_singleton] at hd
+  subst hd
+  exact ⟨by decide, _, "r", .mut, .box .int, true, .atom .lit, rfl, .deref (.ref (m := .mut) rfl), fun _ => rfl⟩
+
+theorem returns_typed : Typed [inside] [] [] returns .int [] [.fail] := by
+  have := Typed.lendCall (F := [inside]) (O := []) (Γ := [("x", .own (.box .int) true)]) (f := 0) (d := inside)
+    (m := .mut) (i := 0) (p := deref (var "r")) (r := [.fail]) (owned := []) (Γ₁ := [("x", .own (.box .int) true)])
+    (lent := [(.mut, var "x")]) (ys := [(.mut, "x")]) (mi := .mut) (y := "x") (x := "v")
+    (body := .let_ "t" .int (.add (.read (var "v")) (.lit 41)) (.write (var "v") (.read (var "t"))))
+    (τb := .int) (Γb := [("x", .lent (.box .int))])
+    rfl rfl (by simp [inside]) .nil (.cons (.own rfl) (fun _ => rfl) .nil) (by simp [Exclusive]) rfl
+    (fun _ => rfl) rfl
+    (.let_ (live := true) rfl (.add (.read (.ref rfl)) .lit) (.write (.read (.own rfl)) (.ref (m := .mut) rfl)))
+  simp only [thaw] at this
+  exact .let_ (live := true) rfl (.new .lit) (.let_ (live := true) rfl (by simpa using this)
+    (.atom (.read (.deref (.own rfl)))))
+
+example : ∀ n, match eval [inside] [] n [.abort .fail 0] .empty [] returns with
+    | (.stuck, _) => False
+    | (.susp _ _ _ _ _, _) => False
+    | (.timeout, _) => True
+    | (.val v, σ') => ∃ L, VT σ' .int v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
+    | (.abort _ _, σ') => ∀ l, σ'.mem l = none :=
+  program_ok inside_ok returns_typed
+
+/-- `let x = Box.new(1); { const v = inside(mut x); *x }`: `x` reached while the borrow the call
+returned lives. The types reject it, as for a borrow of a place. -/
+def reachesReturned : Expr :=
+  .let_ "x" (.box .int) (.new (.lit 1))
+    (.lendCall "v" .mut 0 [] [(.mut, var "x")] (.atom (.read (deref (var "x")))))
+
+/-- What a call that returns a borrow lends, and the code the borrow is in scope for. -/
+theorem lendCall_inv : Typed F O Γ (.lendCall x m f owned lent body) τ Γ' r →
+    ∃ d i p Γ₁ ys mi y Γb, F[f]? = some d ∧ d.retp = some (m, i, p) ∧
+      AtomsTy Γ owned (d.owns.map Prod.snd) Γ₁ ∧ Lends Γ₁ lent (d.refs.map Prod.snd) ys ∧
+      ys[i]? = some (mi, y) ∧
+      Typed F O ((x, .ref m d.ret) :: lendCtx m Γ₁ y) body τ ((x, .ref m d.ret) :: Γb) r := by
+  intro h
+  cases h with
+  | lendCall hf hret _ ha hl _ hyi _ _ hb => exact ⟨_, _, _, _, _, _, _, _, hf, hret, ha, hl, hyi, hb⟩
+
+theorem reachesReturned_rejected : ¬ Typed [inside] [] [] reachesReturned τ Γ' r := by
+  intro h
+  cases h with
+  | let_ _ _ hb =>
+    obtain ⟨d, i, p, Γ₁, ys, mi, y, Γb, hf, hret, ha, hl, hyi, hbody⟩ := lendCall_inv hb
+    · simp only [List.getElem?_cons_zero, Option.some.injEq] at hf
+      subst hf
+      simp only [inside, Option.some.injEq, Prod.mk.injEq] at hret
+      obtain ⟨-, rfl, rfl⟩ := hret
+      cases ha
+      cases hl with
+      | cons hp _ hl =>
+        cases hl
+        simp at hyi
+        obtain ⟨-, rfl⟩ := hyi
+        cases hp with
+        | ref hx => simp [lookup] at hx
+        | own _ =>
+        cases hbody with
+        | atom ha =>
+          cases ha with
+          | read hq =>
+            cases hq with
+            | deref hq =>
+              cases hq with
+              | own hx => simp [lendCtx, hide, lookup] at hx
+              | ref hx => simp [lendCtx, hide, lookup] at hx
 
 end FlyCore.Ownership.Examples

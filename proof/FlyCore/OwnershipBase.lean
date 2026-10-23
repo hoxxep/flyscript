@@ -283,6 +283,22 @@ theorem Path.snoc' : Path σ a τa P l τl → τl = .box τ → σ.mem l = some
 theorem Path.snoc : Path σ a τa P l (.box τ) → σ.mem l = some (.ptr b) → Path σ a τa (P ++ [l]) b τ :=
   fun h => h.snoc' rfl
 
+/-- Two paths, the second from where the first ends, are one. -/
+theorem Path.trans : Path σ a τa P l τl → Path σ l τl P' b τ → Path σ a τa (P ++ P') b τ := by
+  intro h h'
+  induction h with
+  | here => exact h'
+  | step ha _ ih => exact .step ha (ih h')
+
+/-- A path stays where its cells do. -/
+theorem Path.frame : Path σ a τa P l τ → Agree σ σ' P → Path σ' a τa P l τ := by
+  intro h hag
+  induction h with
+  | here => exact .here
+  | step ha _ ih =>
+    exact .step (by rw [hag _ (List.mem_cons_self ..)]; exact ha)
+      (ih fun x hx => hag x (List.mem_cons_of_mem _ hx))
+
 /-- A tree is the cells on a path into it, then the tree where the path ends. -/
 theorem path_split : Path σ a τa P l τ → LT σ a τa L → ∃ R, LT σ l τ R ∧ L = P ++ R := by
   intro hp

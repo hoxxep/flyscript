@@ -150,7 +150,14 @@ theorem typed_weaker : Typed F O Γ e τ Γ' r → (Γ.map Prod.fst).Nodup → W
     | cons _ w => exact w.trans (typed_weaker ha hk)
   | .write ha _, hk => atom_weaker ha hk
   | .assign ha _, hk => atom_weaker ha hk
-  | .call _ _ hargs _ _, hk => atoms_weaker hargs hk
+  | .call _ _ _ hargs _ _, hk => atoms_weaker hargs hk
+  | .lendCall _ _ _ hargs _ _ _ _ hx hb, hk => by
+    have hk₁ := hk
+    rw [← atoms_keys hargs] at hk₁
+    have := typed_weaker hb (List.nodup_cons.mpr ⟨by rw [lendCtx_keys]; exact lookup_none_keys hx,
+      by rw [lendCtx_keys]; exact hk₁⟩)
+    cases this with
+    | cons _ w => exact (thaw_weaker_lend w).trans (atoms_weaker hargs hk)
   | .ite hc ha _ wa _, hk =>
     wa.trans ((typed_weaker ha (by rw [atom_keys hc]; exact hk)).trans (atom_weaker hc hk))
   | .throw_ ha _, hk => atom_weaker ha hk
@@ -180,9 +187,15 @@ def fnCtx (d : Fn) : Ctx :=
   d.owns.map (fun p => (p.1, Slot.own p.2 true)) ++ d.refs.map (fun p => (p.1, Slot.ref p.2.1 p.2.2))
 
 /-- A function whose parameters are named apart and whose body has its result type, performing
-only what its row names. -/
+only what its row names; or, for one that returns a borrow, whose body ends where the place it
+returns is one of its result type, rooted at the borrowed parameter it says, and changeable if the
+borrow is `mut`. -/
 def FnOk (F : List Fn) (O : List Op) (d : Fn) : Prop :=
-  ((d.owns.map Prod.fst) ++ (d.refs.map Prod.fst)).Nodup ∧ ∃ Γ', Typed F O (fnCtx d) d.body d.ret Γ' d.row
+  ((d.owns.map Prod.fst) ++ (d.refs.map Prod.fst)).Nodup ∧
+  match d.retp with
+  | none => ∃ Γ', Typed F O (fnCtx d) d.body d.ret Γ' d.row
+  | some (m, i, p) => ∃ Γ' x mi τi w, Typed F O (fnCtx d) d.body .int Γ' d.row ∧
+      d.refs[i]? = some (x, mi, τi) ∧ PlaceTy Γ' p d.ret w x ∧ (m = .mut → w = true)
 
 def FnsOk (F : List Fn) (O : List Op) : Prop := ∀ d ∈ F, FnOk F O d
 
@@ -853,6 +866,48 @@ theorem path_in_X (hI : Inv σ Γ env E S) (hholes : ∀ h ∈ hs, HoleOk σ Γ 
 
 theorem mem_keep {M : List Nat} : l ∈ E.filter (fun l => l ∉ M) ↔ l ∈ E ∧ l ∉ M := by
   simp [List.mem_filter]
+
+/-- After the call, what a place lent `mut` is rooted at holds the path to the place, as it was,
+then what the callee left there. -/
+theorem hole_after (hI : Inv σ Γ env E S) (hholes : ∀ h ∈ hs, HoleOk σ Γ env h)
+    (hpw : hs.Pairwise Apart) (hps : ps.map Prod.fst = hs)
+    (hnew : ∀ p ∈ ps, p.1.mode = .mut → LT σ' p.1.loc p.1.ty p.2)
+    (hag : Agree σ σ' (E.filter (fun l => l ∉ mutCells (olds hs)) ++ S))
+    (hX : Disj (E.filter (fun l => l ∉ mutCells (olds hs))) (mutCells ps)) (hp : p ∈ ps)
+    (hm : p.1.mode = .mut) :
+    ∃ s a τr, lookup p.1.root Γ = some s ∧ lookup p.1.root env = some a ∧ s.excl = true ∧
+      Path σ' a τr p.1.path p.1.loc p.1.ty ∧ LT σ' a τr (p.1.path ++ p.2) ∧
+      SlotOk σ' s a (p.1.path ++ p.2) ∧ ∀ σ'' L', LT σ'' a τr L' → SlotOk σ'' s a L' := by
+  have hph : p.1 ∈ hs := hps ▸ List.mem_map_of_mem hp
+  obtain ⟨s, a, τr, hs', ha', hex, hpath, hLT, -, -, hlt⟩ := hholes p.1 hph
+  have hagX : ∀ l, l ∈ E → l ∉ mutCells (olds hs) → σ'.mem l = σ.mem l :=
+    fun l h1 h2 => hag l (List.mem_append.mpr (.inl (mem_keep.mpr ⟨h1, h2⟩)))
+  have hX' := path_in_X hI hholes hpw hph hm
+  obtain ⟨hLT', hpath'⟩ := path_join hpath hLT (fun l hl => hagX l (hX' l hl).1 (hX' l hl).2)
+    (hnew p hp hm) (fun l hl hl' => hX l (mem_keep.mpr (hX' l hl)) (mem_mutCells.mpr ⟨p, hp, hm, hl'⟩))
+  exact ⟨s, a, τr, hs', ha', hex hm, hpath', hLT', hlt σ' _ hLT', hlt⟩
+
+/-- After the call, what a place lent `readonly` is rooted at is as it was. -/
+theorem hole_after_ro (hI : Inv σ Γ env E S) (hholes : ∀ h ∈ hs, HoleOk σ Γ env h)
+    (hpw : hs.Pairwise Apart) (hag : Agree σ σ' (E.filter (fun l => l ∉ mutCells (olds hs)) ++ S))
+    (hh : h ∈ hs) (hm : h.mode = .ro) :
+    ∃ s a τr, lookup h.root Γ = some s ∧ lookup h.root env = some a ∧
+      Path σ' a τr h.path h.loc h.ty ∧ LT σ' a τr (h.path ++ h.old) ∧ LT σ' h.loc h.ty h.old ∧
+      SlotOk σ' s a (h.path ++ h.old) ∧ ∀ σ'' L', LT σ'' a τr L' → SlotOk σ'' s a L' := by
+  obtain ⟨s, a, τr, hs', ha', -, hpath, hLT, hso, hold, hlt⟩ := hholes h hh
+  -- The root's tree is no hole's lent `mut`: it is kept as it was.
+  have hkeep : ∀ l ∈ h.path ++ h.old, σ'.mem l = σ.mem l := fun l hl => by
+    have hin := hole_in hI (hholes h hh) l hl
+    rcases hin.2 with hE | hS
+    · refine hag l (List.mem_append.mpr (.inl (mem_keep.mpr ⟨hE, fun hM => ?_⟩)))
+      obtain ⟨h', hh', hm', hl'⟩ := mem_olds_mut.mp hM
+      have hne : h.root ≠ h'.root := fun e =>
+        hole_root hpw hh' hh hm' (fun e' => by rw [← e', hm'] at hm; cases hm) e.symm
+      exact hole_apart hI (hholes h' hh') (hholes h hh) (Ne.symm hne) hm' l
+        (List.mem_append.mpr (.inr hl')) hl
+    · exact hag l (List.mem_append.mpr (.inr hS))
+  exact ⟨s, a, τr, hs', ha', hpath.frame fun l hl => hkeep l (List.mem_append.mpr (.inl hl)),
+    hLT.frame hkeep, hold.frame fun l hl => hkeep l (List.mem_append.mpr (.inr hl)), hso.frame hkeep, hlt⟩
 
 /-- After the call, the caller's variables hold what they held but for the holes lent `mut`, which
 hold what the callee left there. -/

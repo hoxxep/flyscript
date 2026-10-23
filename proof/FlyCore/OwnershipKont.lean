@@ -87,6 +87,21 @@ inductive FrameOk (F : List Fn) (O : List Op) : Store → Kont → Lvl → Lvl �
       FrameOk F O σf (.callK ((d.owns.map Prod.snd).zip (cells.map Prod.snd)))
         ⟨Γ'', cells ++ (d.refs.map Prod.fst).zip (hos.map Hole.loc), d.ret, roCells (olds hos), d.row⟩
         ⟨Γ₁, env, d.ret, S, r⟩ (E₁.filter (· ∉ mutCells (olds hos))) []
+  /-- The body of a call that returns a borrow of its `i`th borrowed parameter's place `p`, which
+the caller lent it as the hole `hd`: `body` runs with `x` the borrow, `hd`'s root only read, or not
+reached, while it lives. -/
+  | callLendK : (∀ l ∈ d.row, l ∈ r) → Inv σf Γ₁ env E₁ S → (∀ h ∈ hos, HoleOk σf Γ₁ env h) →
+      hos.Pairwise Apart → hos.map (fun h => (h.mode, h.ty)) = d.refs.map Prod.snd →
+      ((d.owns.map Prod.fst) ++ (d.refs.map Prod.fst)).Nodup →
+      Typed F O (fnCtx d) d.body .int Γ'' d.row → cells.map Prod.fst = d.owns.map Prod.fst →
+      d.refs[(i : Nat)]? = some (xi, mi, τi) → PlaceTy Γ'' p d.ret w xi → (m = .mut → w = true) →
+      hos[i]? = some (hd : Hole) → (m = .mut → hd.mode = .mut) →
+      (∀ τ', lookup hd.root Γ₁ ≠ some (.own τ' false)) → lookup x Γ₁ = none →
+      Typed F O ((x, .ref m d.ret) :: lendCtx m Γ₁ hd.root) body τb ((x, .ref m d.ret) :: Γb) r →
+      FrameOk F O σf (.callLendK x p (cells ++ (d.refs.map Prod.fst).zip (hos.map Hole.loc))
+          ((d.owns.map Prod.snd).zip (cells.map Prod.snd)) env body)
+        ⟨Γ'', cells ++ (d.refs.map Prod.fst).zip (hos.map Hole.loc), .int, roCells (olds hos), d.row⟩
+        ⟨thaw Γ₁ [hd.root] Γb, env, τb, S, r⟩ (E₁.filter (· ∉ mutCells (olds hos))) []
   | catchK : lookup x Γb = none → (Γb.map Prod.fst).Nodup →
       Typed F O ((x, .own .int true) :: Γb) h τ ((x, .own .int live) :: Γh) r →
       (∀ e, l = .eff e → ∃ op, O[e]? = some op ∧ op.owns = [.int] ∧ op.refs = []) →

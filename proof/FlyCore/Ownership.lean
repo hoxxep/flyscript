@@ -92,6 +92,9 @@ inductive Expr where
   | assign (p : Place) (τ : Ty) (a : Atom)
   /-- A call: the owned arguments, in order, then the places lent, each with its mode. -/
   | call (f : Nat) (owned : List Atom) (lent : List (Mode × Place))
+  /-- `{ const x = f(…); body }` for a function that returns a borrow, `readonly` or `mut`, of one of
+  the places it was lent: `x` is that borrow for as long as `body` runs. -/
+  | lendCall (x : Var) (m : Mode) (f : Nat) (owned : List Atom) (lent : List (Mode × Place)) (body : Expr)
   /-- `if (c) a else b`: `b` when `c` is zero. -/
   | ite (c : Atom) (a b : Expr)
   /-- `throw a`: a failure carrying an integer. -/
@@ -125,13 +128,15 @@ structure Op where
   ret : Ty
 
 /-- A function: its owned parameters, its borrowed ones, its result, the effects it may perform,
-its body. -/
+its body. A function that returns a borrow says which, `retp`: in a mode, of a place rooted at its
+`i`th borrowed parameter, taken once its body has run; `ret` is then the place's type. -/
 structure Fn where
   owns : List (Var × Ty)
   refs : List (Var × Mode × Ty)
   ret : Ty
   row : Row
   body : Expr
+  retp : Option (Mode × Nat × Place) := none
 
 inductive Val where
   | int (n : Int)
@@ -215,6 +220,10 @@ inductive Kont where
   | scopeK (τ : Ty) (c : Nat)
   /-- A call's body: the parameters it owns, dropped as it returns. -/
   | callK (cells : List (Ty × Nat))
+  /-- The body of a call that returns a borrow of `p`, in the callee's variables `cenv`: once it
+  ends, the borrow is taken, the parameters it owns dropped, and `body` runs in the caller's
+  variables `env` with `x` the borrow. -/
+  | callLendK (x : Var) (p : Place) (cenv : Env) (cells : List (Ty × Nat)) (env : Env) (body : Expr)
   /-- The body of a `try`, or of a `handle` whose arm ends it, handling `l`, its handler named `id`. -/
   | catchK (l : Label) (id : Nat) (x : Var) (env : Env) (h : Expr)
   /-- A loop's condition, and its body. -/
@@ -443,6 +452,22 @@ def eval (F : List Fn) (O : List Op) : Nat → HS → Store → Env → Expr →
             else (.stuck, σ1)
           | none => (.stuck, σ1)
         | none => (.stuck, σ)
+    | .lendCall x _ f owned lent body =>
+      match F[f]? with
+      | none => (.stuck, σ)
+      | some d =>
+        match d.retp, evalAtoms σ env owned with
+        | some (_, _, p), some (vs, σ1) =>
+          match lent.mapM (fun (_, p) => resolve σ1 env p) with
+          | some ls =>
+            if vs.length = d.owns.length ∧ ls.length = d.refs.length then
+              let (cells, σ2) := allocAll σ1 ((d.owns.map Prod.fst).zip vs)
+              let cenv := cells ++ (d.refs.map Prod.fst).zip ls
+              ret F O n hs (.callLendK x p cenv ((d.owns.map Prod.snd).zip (cells.map Prod.snd)) env body)
+                (eval F O n hs σ2 cenv d.body)
+            else (.stuck, σ1)
+          | none => (.stuck, σ1)
+        | _, _ => (.stuck, σ)
     | .ite c a b =>
       match evalAtom σ env c with
       | some (.int k, σ1) => if k = 0 then eval F O n hs σ1 env b else eval F O n hs σ1 env a
@@ -531,6 +556,20 @@ def ret (F : List Fn) (O : List Op) (n : Nat) (hs : HS) : Kont → Res × Store 
   | .callK cells, (r, σ) =>
     match dropCells σ cells with
     | some σ' => (r, σ')
+    | none => (.stuck, σ)
+  | .callLendK x p cenv cells env body, (.val _, σ) =>
+    match resolve σ cenv p with
+    | some l =>
+      match dropCells σ cells with
+      | some σ' =>
+        match eval F O n hs σ' ((x, l) :: env) body with
+        | (.susp j ef vs ls K, σ'') => (.susp j ef vs ls (.lendK :: K), σ'')
+        | r => r
+      | none => (.stuck, σ)
+    | none => (.stuck, σ)
+  | .callLendK _ _ _ cells _ _, (.abort j k, σ) =>
+    match dropCells σ cells with
+    | some σ' => (.abort j k, σ')
     | none => (.stuck, σ)
   | .catchK _ id x env h, (.abort j k, σ) =>
     if j = id then
@@ -699,9 +738,16 @@ inductive Typed (F : List Fn) (O : List Op) : Ctx → Expr → Ty → Ctx → Ro
       Typed F O ((x, .own τ true) :: Γ₁) b τb ((x, .own τ live) :: Γ₂) r → Typed F O Γ (.let_ x τ a b) τb Γ₂ r
   | write : AtomTy Γ a .int Γ₁ → PlaceTy Γ₁ p .int true y → Typed F O Γ (.write p a) .int Γ₁ r
   | assign : AtomTy Γ a τ Γ₁ → PlaceTy Γ₁ p τ true y → Typed F O Γ (.assign p τ a) .int Γ₁ r
-  | call : F[f]? = some d → (∀ l ∈ d.row, l ∈ r) → AtomsTy Γ owned (d.owns.map Prod.snd) Γ₁ →
+  | call : F[f]? = some d → d.retp = none → (∀ l ∈ d.row, l ∈ r) → AtomsTy Γ owned (d.owns.map Prod.snd) Γ₁ →
       Lends Γ₁ lent (d.refs.map Prod.snd) ys → Exclusive ys →
       Typed F O Γ (.call f owned lent) d.ret Γ₁ r
+  /-- The borrow a call returns is of what the caller lent it as its `i`th borrowed argument, rooted
+  at `y`: as for a borrow of a place, `y` is only read, or not reached, while the borrow lives. -/
+  | lendCall : F[f]? = some d → d.retp = some (m, i, p) → (∀ l ∈ d.row, l ∈ r) →
+      AtomsTy Γ owned (d.owns.map Prod.snd) Γ₁ → Lends Γ₁ lent (d.refs.map Prod.snd) ys → Exclusive ys →
+      ys[i]? = some (mi, y) → (m = .mut → mi = .mut) → lookup x Γ₁ = none →
+      Typed F O ((x, .ref m d.ret) :: lendCtx m Γ₁ y) body τb ((x, .ref m d.ret) :: Γb) r →
+      Typed F O Γ (.lendCall x m f owned lent body) τb (thaw Γ₁ [y] Γb) r
   /-- Where the branches disagree, a variable is perhaps moved. -/
   | ite : AtomTy Γ c .int Γ₀ → Typed F O Γ₀ a τ Γa r → Typed F O Γ₀ b τ Γb r → Weaker Γ' Γa →
       Weaker Γ' Γb → Typed F O Γ (.ite c a b) τ Γ' r
