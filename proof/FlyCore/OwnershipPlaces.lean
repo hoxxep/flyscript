@@ -239,6 +239,10 @@ theorem typed_keys : Typed F O Γ e τ Γ' r → Γ'.map Prod.fst = Γ.map Prod.
   | .assign ha _ => atom_keys ha
   | .call _ _ _ _ hargs _ _ => atoms_keys hargs
   | .lam _ _ _ _ _ _ ha => atom_keys ha
+  | .lendClo _ _ _ _ _ _ _ _ hb => by
+    have := typed_keys hb
+    simp only [List.map_cons, List.cons.injEq] at this
+    exact thaw_keys (this.2.trans freeze_keys)
   | .applyOnce _ _ ha => (atom_keys ha).trans (setSlot_keys _)
   | .applyBorrow _ ha _ _ _ => atom_keys ha
   | .lendCall _ _ _ _ hargs _ _ _ _ _ hb => by

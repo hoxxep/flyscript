@@ -114,6 +114,10 @@ inductive Expr where
   /-- `p(a)`, calling the closure at `p` as it is called: once, moving it out of the variable `p`;
   or through a borrow of `p`. -/
   | apply (k : Kind) (p : Place) (a : Atom)
+  /-- `{ const x = (q) => …; body }`, `x` the closure of code `f` over a `readonly` borrow of `p`,
+  for as long as `body` runs: it may be called, or lent on, but what `p` is rooted at is only read
+  meanwhile. -/
+  | lendClo (x : Var) (f : Nat) (p : Place) (body : Expr)
   /-- `{ const x = f(…); body }` for a function that returns a borrow, `readonly` or `mut`, of one of
   the places it was lent: `x` is that borrow for as long as `body` runs. -/
   | lendCall (x : Var) (m : Mode) (f : Nat) (owned : List Atom) (lent : List (Mode × Place)) (body : Expr)
@@ -290,6 +294,8 @@ inductive Kont where
   | deferA (j : Nat) (k : Int)
   /-- The code a borrow is in scope for. -/
   | lendK
+  /-- The code a closure over a borrow is in scope for, the closure in cell `a`, freed as it ends. -/
+  | cloK (a : Nat)
   /-- The body of a `handle` of type `τ` whose arm resumes, its handler named `id`. -/
   | capK (τ : Ty) (e : Nat) (id : Nat) (caps : List (Cap Nat)) (os rs : List Var) (arm : Expr)
   /-- An arm running, the parameters it owns dropped as it ends: then the code its `handle` (of type
@@ -561,6 +567,15 @@ def eval (F : List Fn) (O : List Op) : Nat → HS → Store → Env → Expr →
           | _ => (.stuck, σ1)
         | none => (.stuck, σ1)
       | none => (.stuck, σ)
+    | .lendClo x f p body =>
+      match F[f]?, resolve σ env p with
+      | some d, some l =>
+        match d.cap with
+        | some (_, τc, _) =>
+          let (a, σ1) := σ.alloc (.clo f l τc)
+          ret F O n hs (.cloK a) (eval F O n hs σ1 ((x, a) :: env) body)
+        | none => (.stuck, σ)
+      | _, _ => (.stuck, σ)
     | .lendCall x _ f owned lent body =>
       match F[f]? with
       | none => (.stuck, σ)
@@ -703,6 +718,10 @@ def ret (F : List Fn) (O : List Op) (n : Nat) (hs : HS) : Kont → Res × Store 
   | .deferV τ v, r => cleanV τ v r
   | .deferA j k, r => cleanA j k r
   | .lendK, r => r
+  | .cloK a, (r, σ) =>
+    match σ.mem a with
+    | some _ => (r, σ.set a none)
+    | none => (.stuck, σ)
   | .capK _ _ _ _ _ _ _, (.val v, σ) => (.val v, σ)
   | .capK _ _ _ _ _ _ _, (.abort j k, σ) => (.abort j k, σ)
   | .armK τ cells K, r =>
@@ -861,6 +880,13 @@ inductive Typed (F : List Fn) (O : List Op) : Ctx → Expr → Ty → Ctx → Ro
   /-- A closure called through a borrow: `mut` for one that changes what it captured. -/
   | applyBorrow : k ≠ .once → AtomTy Γ a A Γ₁ → PlaceTy Γ₁ p (.fn k A B r') w y → (k = .excl → w = true) →
       (∀ l ∈ r', l ∈ r) → Typed F O Γ (.apply k p a) B Γ₁ r
+  /-- A closure over a `readonly` borrow is a borrow too: it is in scope for `body`, which may call
+  it or lend it on, but not move it, and what the borrowed place is rooted at is only read meanwhile. -/
+  | lendClo : F[f]? = some d → d.cap = some (xc, τc, .shared) → d.owns = [(pn, A)] → d.refs = [] →
+      d.retp = none → τc.data = true → PlaceTy Γ p τc w y → lookup x Γ = none →
+      Typed F O ((x, .ref .ro (.fn .shared A d.ret d.row)) :: freeze Γ [y]) body τb
+        ((x, .ref .ro (.fn .shared A d.ret d.row)) :: Γb) r →
+      Typed F O Γ (.lendClo x f p body) τb (thaw Γ [y] Γb) r
   /-- The borrow a call returns is of what the caller lent it as its `i`th borrowed argument, rooted
   at `y`: as for a borrow of a place, `y` is only read, or not reached, while the borrow lives. -/
   | lendCall : F[f]? = some d → d.retp = some (m, i, p) → d.cap = none → (∀ l ∈ d.row, l ∈ r) →

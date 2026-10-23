@@ -621,4 +621,60 @@ theorem spendsTwice_rejected : ¬ Typed [spend] [] [] spendsTwice τ Γ' r := by
           | applyBorrow hk => exact absurd rfl hk
           | applyOnce hx' => simp [setSlot, lookup] at hx'
 
+/-! A closure over a borrow, and a function that takes one. -/
+
+/-- `(x) => x + *c`, over a `readonly` borrow `c` of a box. -/
+def addTo : Fn :=
+  { owns := [("x", .int)], refs := [], ret := .int, row := [],
+    body := .add (.read (var "x")) (.read (deref (var "c"))), cap := some ("c", .box .int, .shared) }
+
+/-- `function twice(x: int, g: readonly (int) => int): int { g(g(x)) }`. -/
+def twice : Fn :=
+  { owns := [("x", .int)], refs := [("g", .ro, .fn .shared .int .int [])], ret := .int, row := [],
+    body := .let_ "t" .int (.apply .shared (var "g") (.read (var "x"))) (.apply .shared (var "g") (.read (var "t"))) }
+
+/-- `let b = Box.new(20); let u = { const f = (x) => x + *b; twice(2, f) }; u + *b`: the closure reads
+`b`, lent on to `twice`, while `b` is only read; once it is gone, `b` is whole again; 62, and nothing
+left allocated. -/
+def higher : Expr :=
+  .let_ "b" (.box .int) (.new (.lit 20))
+    (.let_ "u" .int (.lendClo "f" 0 (var "b") (.call 1 [.lit 2] [(.ro, var "f")]))
+      (.add (.read (var "u")) (.read (deref (var "b")))))
+
+example : value (eval [addTo, twice] [] 30 [] .empty [] higher) = some 62 := by
+  run [higher, addTo, twice, cloFn]
+example : freed (eval [addTo, twice] [] 30 [] .empty [] higher) := by
+  run [higher, addTo, twice, cloFn]
+
+theorem higher_fns_ok : FnsOk [addTo, twice] [] := by
+  intro d hd
+  simp only [List.mem_cons, List.mem_singleton, List.not_mem_nil, or_false] at hd
+  rcases hd with rfl | rfl
+  · exact ⟨by decide, by decide, _, .add (.read (.own rfl)) (.read (.deref (.ref (m := .ro) rfl)))⟩
+  · exact ⟨by decide, _, .let_ (live := true) rfl
+      (.applyBorrow (by decide) (.read (.own rfl)) (.ref (m := .ro) rfl) (fun h => by cases h) (by simp))
+      (.applyBorrow (by decide) (.read (.own rfl)) (.ref (m := .ro) rfl) (fun h => by cases h) (by simp))⟩
+
+theorem higher_typed : Typed [addTo, twice] [] [] higher .int [] [.fail] := by
+  have hcall : Typed [addTo, twice] [] [("f", .ref .ro (.fn .shared .int .int [])), ("b", .ref .ro (.box .int))]
+      (.call 1 [.lit 2] [(.ro, var "f")]) .int
+      [("f", .ref .ro (.fn .shared .int .int [])), ("b", .ref .ro (.box .int))] [.fail] :=
+    .call (d := twice) rfl rfl rfl (by simp [twice]) (.cons .lit .nil)
+      (.cons (.ref (m := .ro) rfl) (fun h => by cases h) .nil) (by simp [Exclusive])
+  have hlc := Typed.lendClo (F := [addTo, twice]) (O := []) (Γ := [("b", .own (.box .int) true)]) (f := 0)
+    (d := addTo) (p := var "b") (y := "b") (x := "f") (r := [.fail]) (τb := .int)
+    (Γb := [("b", .ref .ro (.box .int))]) rfl rfl rfl rfl rfl rfl (.own rfl) rfl
+    (by simpa [addTo, freeze, Slot.ro] using hcall)
+  simp only [thaw] at hlc
+  exact .let_ (live := true) rfl (.new .lit) (.let_ (live := true) rfl (by simpa using hlc)
+    (.add (.read (.own rfl)) (.read (.deref (.own rfl)))))
+
+example : ∀ n, match eval [addTo, twice] [] n [.abort .fail 0] .empty [] higher with
+    | (.stuck, _) => False
+    | (.susp _ _ _ _ _, _) => False
+    | (.timeout, _) => True
+    | (.val v, σ') => ∃ L, VT [addTo, twice] σ' .int v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
+    | (.abort _ _, σ') => ∀ l, σ'.mem l = none :=
+  program_ok higher_fns_ok higher_typed
+
 end FlyCore.Ownership.Examples

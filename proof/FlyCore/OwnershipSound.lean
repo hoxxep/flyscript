@@ -425,6 +425,7 @@ theorem FrameOk.S_sub (hf : FrameOk F O σf f inL outL Xf A) : ∀ l ∈ inL.S, 
           (List.mem_append.mpr (.inr hl2)) (List.mem_append.mpr (.inr hlo))
     · exact .inr h'
   | lendK hSin => exact hSin
+  | cloK hSin => exact hSin
   | capK hH =>
     intro l hl
     rcases hH.hSin l hl with h | h
@@ -770,6 +771,105 @@ theorem post_pass (hf : FrameOk F O σf f ⟨Γin, envin, τ, Sin, rin⟩ ⟨Γo
     · exact (hm.widen hXa hd).relabel fun x => by simp only [List.mem_append, List.append_assoc]
   | stuck => simp [Post] at hp
   | timeout => simp [passK, Post]
+
+/-! ## A closure over a borrow -/
+
+/-- The code a closure over a borrow was in scope for ended: the closure's cell is freed, and the
+activation is the lender's again. -/
+theorem ret_cloK (hSin : ∀ l ∈ Sin, l ∈ Xf ∨ l ∈ S) (hSS : ∀ l ∈ S, l ∈ Sin) (haX : a ∈ Xf)
+    (hre : ∀ σ1 Eb, Agree σf σ1 (Xf ++ S) → Disj Xf Eb → Inv F σ1 Γin envin Eb Sin →
+      ∃ E', Inv F σ1 Γout env E' S ∧ ∀ z, z ∈ E' ↔ z ∈ Eb ∨ (z ∈ Xf ∧ z ≠ a))
+    (hcov : Covers hs r) (hwf : WF σ0) (hag : Agree σf σ0 (Xf ++ S)) (halloc : ∀ l ∈ Xf, σf.mem l ≠ none)
+    (hnd : Xf.Nodup) (hd : Disj Xf Ein) (hSa : ∀ l ∈ S, σ0.mem l ≠ none) (hSd : Disj S (Xf ++ Ein))
+    (hp : Post F O σ0 Ein Sin Γin envin τ r hs res) :
+    Post F O σ0 (Xf ++ Ein) S Γout env τ r hs (ret F O n hs (.cloK a) res) := by
+  have hXa : ∀ l ∈ Xf, σ0.mem l ≠ none := fun l hl => by
+    rw [hag l (List.mem_append.mpr (.inl hl))]; exact halloc l hl
+  have hXSa : ∀ l ∈ Xf ++ S, σ0.mem l ≠ none := fun l hl => by
+    rcases List.mem_append.mp hl with h | h
+    · exact hXa l h
+    · exact hSa l h
+  have hXSd : Disj (Xf ++ S) Ein := fun l hl h => by
+    rcases List.mem_append.mp hl with hl | hl
+    · exact hd l hl h
+    · exact hSd l hl (List.mem_append.mpr (.inr h))
+  have agree : ∀ {E' L σ1}, Moves σ0 Ein σ1 E' L → Agree σf σ1 (Xf ++ S) := fun hm l hl =>
+    (hm.keeps hwf hXSa hXSd l hl).trans (hag l hl)
+  have haS : a ∉ S := fun h => hSd a h (List.mem_append.mpr (.inl haX))
+  -- Freeing the closure's cell, which is the frame's and no one else's.
+  have free : ∀ {σ1 Eb L E'}, Moves σ0 Ein σ1 Eb L → Disj Xf Eb → Disj Xf L →
+      (∀ z, z ∈ E' ↔ z ∈ Eb ∨ (z ∈ Xf ∧ z ≠ a)) →
+      σ1.mem a ≠ none ∧ Agree σ1 (σ1.set a none) (E' ++ S ++ L) ∧
+        Moves σ0 (Xf ++ Ein) (σ1.set a none) E' L := by
+    intro σ1 Eb L E' hm hdE hdL hmem
+    have ha1 : σ1.mem a ≠ none := by rw [agree hm a (List.mem_append.mpr (.inl haX))]; exact halloc a haX
+    have hout : ∀ z ∈ E' ++ S ++ L, z ≠ a := fun z hz e => by
+      subst e
+      simp only [List.mem_append] at hz
+      rcases hz with (hz | hz) | hz
+      · rcases (hmem z).mp hz with h | h
+        · exact hdE z haX h
+        · exact h.2 rfl
+      · exact haS hz
+      · exact hdL z haX hz
+    refine ⟨ha1, fun z hz => by simp [Store.set, hout z hz], ?_⟩
+    have m1 := (hm.widen hXa hd).relabel (E'' := E' ++ L ++ [a]) (L'' := []) fun x => by
+      simp only [List.mem_append, List.mem_singleton, List.not_mem_nil, or_false, hmem]
+      by_cases hx : x = a
+      · subst hx; simp [haX]
+      · simp [hx]; grind
+    have m2 := Moves.free (σ := σ1) (σ' := σ1.set a none) (E := E' ++ L ++ [a]) (E' := E' ++ L) (D := [a])
+      (WF.set_none hm.wf) rfl (fun z hz => (m1.alloc z).mpr (.inr (.inl hz)))
+      (fun x => by simp only [List.mem_append, List.mem_singleton])
+      (fun z hz => by simp at hz; subst hz; simp [Store.set])
+      (fun z hz => by simp at hz; simp [Store.set, hz])
+      (fun z hz hz' => by
+        simp only [List.mem_singleton] at hz'
+        subst hz'
+        exact hout _ (by simp only [List.mem_append] at hz ⊢; grind) rfl)
+    exact (m1.trans m2 disj_nil_left hwf).relabel fun x => by simp
+  rcases res with ⟨res, σ1⟩
+  cases res with
+  | val v =>
+    obtain ⟨Eb, L, hI, hv, hdL, hdLS, hm⟩ := hp
+    obtain ⟨hdXE, hdXL⟩ := hm.apart hwf hXa hd
+    obtain ⟨E', hI', hmem⟩ := hre σ1 Eb (agree hm) hdXE hI
+    obtain ⟨ha1, hagf, hmf⟩ := free hm hdXE hdXL hmem
+    simp only [ret]
+    obtain ⟨w, hw⟩ := Option.ne_none_iff_exists'.mp ha1
+    simp only [hw]
+    refine ⟨E', L, ⟨hI'.foot.frame fun z hz => hagf z (by simp only [List.mem_append] at hz ⊢; grind),
+      hI'.nodup, hI'.disj, hI'.keys⟩, hv.frame fun z hz => hagf z (by simp [hz]), fun l hl h => ?_,
+      fun l hl h => hdLS l hl (hSS l h), hmf⟩
+    rcases (hmem l).mp h with h | h
+    · exact hdL l hl h
+    · exact hdXL l h.1 hl
+  | abort j k =>
+    obtain ⟨haim, Eb, hI, hm⟩ := hp
+    obtain ⟨E', hI', hmem⟩ := hre σ1 Eb (agree hm) (hm.apart hwf hXa hd).1 hI
+    obtain ⟨ha1, hagf, hmf⟩ := free (L := []) hm (hm.apart hwf hXa hd).1 disj_nil_right hmem
+    simp only [ret]
+    obtain ⟨w, hw⟩ := Option.ne_none_iff_exists'.mp ha1
+    simp only [hw]
+    exact ⟨haim, E', ⟨hI'.foot.frame fun z hz => hagf z (by simp only [List.mem_append] at hz ⊢; grind),
+      hI'.nodup, hI'.disj, hI'.keys⟩, hmf⟩
+  | susp j ef vs ls K =>
+    obtain ⟨op, X, hos, A, Lw, hc, hop, -, haim, hK, hls, hvs, hn, hdw, hdS, hm⟩ := hp
+    obtain ⟨hdX, hdL⟩ := hm.apart hwf hXa hd
+    have hK' := FramesOk.cons (A := A) (.cloK hSin hSS haX hre) (Weaker.refl _) (agree hm) halloc hnd hdX hK
+      (fun _ h => by simp at h) (fun a ha => .inl ha)
+    simp only [ret]
+    refine ⟨op, Xf ++ X, hos, A, Lw, hc, hop, hcov, haim, hK', hls, hvs, hn, ?_,
+      fun l hl h => hdS l hl (hSS l h), ?_⟩
+    · intro l hl h
+      simp only [List.mem_append] at h
+      rcases h with (h | h) | h
+      · exact hdL l h hl
+      · exact hdw l hl (by simp [h])
+      · exact hdw l hl (by simp [h])
+    · exact (hm.widen hXa hd).relabel fun x => by simp only [List.mem_append, List.append_assoc]
+  | stuck => simp [Post] at hp
+  | timeout => simp [ret, Post]
 
 /-! ## A borrow held for a while -/
 
@@ -1285,6 +1385,128 @@ theorem lend_mut_ok (hE : EvalOk F O n) (hx : lookup x Γ = none) (hp : PlaceTy 
   obtain ⟨a, τr, Lr, P, l, s, ha, hLr, hpath, hres, -, hsubE, hsl, hso, hexw, hslot⟩ := place_ok hp hI.foot
   simp only [hres]
   exact lend_mut_core hE hx ha hsl hLr hpath hso (hsubE rfl) (hexw rfl) hslot hb hI hwf hR
+
+/-- A closure over a `readonly` borrow, held for the scope of `body`: its cell is the frame's, and
+what the borrowed place is rooted at is only read while it lives; once it ends, the cell is freed. -/
+theorem lendClo_ok (hE : EvalOk F O n) (hfd : F[f]? = some d) (hcap : d.cap = some (xc, τc, .shared))
+    (hown : d.owns = [(pn, A)]) (hrefs : d.refs = []) (hretp : d.retp = none) (hdat : τc.data = true)
+    (hp : PlaceTy Γ p τc w y) (hx : lookup x Γ = none)
+    (hb : Typed F O ((x, .ref .ro (.fn .shared A d.ret d.row)) :: freeze Γ [y]) body τb
+      ((x, .ref .ro (.fn .shared A d.ret d.row)) :: Γb) r)
+    (hI : Inv F σ Γ env E S) (hwf : WF σ) (hR : Ready O hs r) :
+    Post F O σ E S (thaw Γ [y] Γb) env τb r hs (eval F O (n + 1) hs σ env (.lendClo x f p body)) := by
+  obtain ⟨a0, τr, Lr, P, l, s, ha0, hLr, hpath, hres, -, -, hsl, hso, -, -⟩ := place_ok hp hI.foot
+  obtain ⟨Rt, hRt, hLrPR⟩ := path_split hpath hLr
+  simp only [eval, hfd, hres, hcap]
+  have hxk : x ∉ (freeze Γ [y]).map Prod.fst := by rw [freeze_keys]; exact lookup_none_keys hx
+  have hwb := typed_weaker hb (List.nodup_cons.mpr ⟨hxk, by rw [freeze_keys]; exact hI.keys⟩)
+  cases hwb with
+  | cons _ hwb =>
+  obtain ⟨Eb, Sb, Fz, hfb, hEp, hS, hent, hthaw⟩ := hI.foot.handle (ys := [y]) hI.keys (by
+    intro y' hy' τ'; simp only [List.mem_singleton] at hy'; subst hy'; exact hp.root_live τ')
+  obtain ⟨hEbn, hFzn, hdEF⟩ := nodup_append_disj.mp (hEp.nodup_iff.mp hI.nodup)
+  have hEb : ∀ l ∈ Eb, l ∈ E := fun l h => hEp.mem_iff.mpr (List.mem_append.mpr (.inl h))
+  have hFz : ∀ l ∈ Fz, l ∈ E := fun l h => hEp.mem_iff.mpr (List.mem_append.mpr (.inr h))
+  have hRin : ∀ l ∈ Rt, l ∈ Fz ∨ l ∈ S := fun l hl =>
+    hent y s a0 Lr ⟨hsl, ha0, hso⟩ (List.mem_singleton_self _) l (hLrPR ▸ List.mem_append.mpr (.inr hl))
+  -- The closure's cell, new.
+  have hold : ∀ z, σ.mem z ≠ none → (σ.alloc (.clo f l τc)).2.mem z = σ.mem z := fun z hz => by
+    simp only [Store.alloc]; rw [if_neg (fun e => Nat.lt_irrefl _ (e ▸ hwf z hz))]
+  have hRta : ∀ z ∈ Rt, σ.mem z ≠ none := hRt.alloc
+  have hna : ∀ z, σ.mem z ≠ none → z ≠ σ.next := fun z hz e => Nat.lt_irrefl _ (e ▸ hwf z hz)
+  have haRt : σ.next ∉ Rt := fun h => hna _ (hRta _ h) rfl
+  have hco : CloOk F f τc .shared A d.ret d.row := ⟨d, xc, pn, hfd, hcap, hown, hrefs, hretp, rfl, rfl, hdat⟩
+  have hLa : LT F (σ.alloc (.clo f l τc)).2 σ.next (.fn .shared A d.ret d.row) (σ.next :: Rt) :=
+    .clo (by simp [Store.alloc]) hco (hRt.frame fun z hz => hold z (hRta z hz)) haRt
+  have hFza : ∀ z ∈ Fz, σ.mem z ≠ none := fun z hz => hI.alloc z (hFz z hz)
+  have hSin : ∀ z ∈ (σ.next :: Rt) ++ Sb, z ∈ (σ.next :: Fz) ∨ z ∈ S := fun z hz => by
+    rcases List.mem_append.mp hz with h | h
+    · rcases List.mem_cons.mp h with rfl | h
+      · exact .inl (List.mem_cons_self ..)
+      · rcases hRin z h with h | h
+        · exact .inl (List.mem_cons_of_mem _ h)
+        · exact .inr h
+    · rcases List.mem_append.mp (hS.mem_iff.mp h) with h | h
+      · exact .inl (List.mem_cons_of_mem _ h)
+      · exact .inr h
+  have hIb : Inv F (σ.alloc (.clo f l τc)).2 ((x, .ref .ro (.fn .shared A d.ret d.row)) :: freeze Γ [y])
+      ((x, σ.next) :: env) Eb ((σ.next :: Rt) ++ Sb) := by
+    have hfoot := Foot.cons (s := .ref .ro (.fn .shared A d.ret d.row)) (x := x) (a := σ.next) hLa
+      (hfb.frame fun z hz => hold z (hfb.alloc z (List.mem_append.mp hz)))
+    refine ⟨by simpa [addE, addS, Slot.excl] using hfoot, hEbn, ?_,
+      List.nodup_cons.mpr ⟨hxk, by rw [freeze_keys]; exact hI.keys⟩⟩
+    intro z hz hz'
+    rcases hSin z hz with h | h
+    · rcases List.mem_cons.mp h with rfl | h
+      · exact hna _ (hI.alloc _ (hEb _ hz')) rfl
+      · exact hdEF z hz' h
+    · exact hI.disj z h (hEb z hz')
+  have hkb : Γb.map Prod.fst = Γ.map Prod.fst := by
+    have := typed_keys hb
+    simp only [List.map_cons, List.cons.injEq] at this
+    rw [this.2, freeze_keys]
+  have hre : ∀ σ1 Eb', Agree (σ.alloc (.clo f l τc)).2 σ1 ((σ.next :: Fz) ++ S) → Disj (σ.next :: Fz) Eb' →
+      Inv F σ1 ((x, .ref .ro (.fn .shared A d.ret d.row)) :: Γb) ((x, σ.next) :: env) Eb' ((σ.next :: Rt) ++ Sb) →
+      ∃ E', Inv F σ1 (thaw Γ [y] Γb) env E' S ∧
+        ∀ z, z ∈ E' ↔ z ∈ Eb' ∨ (z ∈ σ.next :: Fz ∧ z ≠ σ.next) := by
+    intro σ1 Eb' hag hdX hI'
+    obtain ⟨L', Et, St, hL', hft, hEt, hSt⟩ := hI'.foot.uncons
+    simp only [addE, addS, Slot.excl, Bool.false_eq_true, ↓reduceIte] at hEt hSt
+    have hagR : Agree (σ.alloc (.clo f l τc)).2 σ1 (σ.next :: Rt) := fun z hz => hag z (by
+      rcases List.mem_cons.mp hz with rfl | h
+      · exact List.mem_append.mpr (.inl (List.mem_cons_self ..))
+      · rcases hRin z h with h | h
+        · exact List.mem_append.mpr (.inl (List.mem_cons_of_mem _ h))
+        · exact List.mem_append.mpr (.inr h))
+    have hRR := (hLa.frame hagR).det hL'
+    subst hRR
+    obtain rfl := List.append_cancel_left hSt
+    subst hEt
+    have hag0 : Agree σ σ1 (Fz ++ S) := fun z hz => by
+      rw [hag z (by simp only [List.mem_append, List.mem_cons] at hz ⊢; grind)]
+      rcases List.mem_append.mp hz with h | h
+      · exact hold z (hFza z h)
+      · exact hold z (hI.allocS z h)
+    obtain ⟨E', hf', hpe⟩ := hthaw σ1 Γb Eb' hft hwb hag0
+    refine ⟨E', ⟨hf', hpe.nodup_iff.mpr (nodup_append_disj.mpr ⟨hI'.nodup, hFzn,
+        fun z h h' => hdX z (List.mem_cons_of_mem _ h') h⟩), ?_, by rw [thaw_keys hkb]; exact hI.keys⟩,
+      fun z => ?_⟩
+    · intro z hz hz'
+      rcases List.mem_append.mp (hpe.mem_iff.mp hz') with h | h
+      · exact hI'.disj z (List.mem_append.mpr (.inr (hS.mem_iff.mpr (List.mem_append.mpr (.inr hz))))) h
+      · exact hI.disj z hz (hFz z h)
+    · rw [hpe.mem_iff, List.mem_append]
+      constructor
+      · rintro (h | h)
+        · exact .inl h
+        · exact .inr ⟨List.mem_cons_of_mem _ h, fun e => hna z (hFza z h) e⟩
+      · rintro (h | ⟨h, hne⟩)
+        · exact .inl h
+        · exact .inr ((List.mem_cons.mp h).resolve_left hne)
+  have hSS : ∀ z ∈ S, z ∈ (σ.next :: Rt) ++ Sb := fun z hz =>
+    List.mem_append.mpr (.inr (hS.mem_iff.mpr (List.mem_append.mpr (.inr hz))))
+  have hnd : (σ.next :: Fz).Nodup := List.nodup_cons.mpr ⟨fun h => hna _ (hFza _ h) rfl, hFzn⟩
+  have hd : Disj (σ.next :: Fz) Eb := fun z hz hz' => by
+    rcases List.mem_cons.mp hz with rfl | h
+    · exact hna _ (hI.alloc _ (hEb _ hz')) rfl
+    · exact hdEF z hz' h
+  have hwf1 : WF (σ.alloc (.clo f l τc)).2 := hwf.alloc
+  refine post_after (E₁ := (σ.next :: Fz) ++ Eb) ((Moves.allocate (v := .clo f l τc) hwf hI.alloc).relabel fun z => by
+    rw [hEp.mem_iff]; simp only [List.mem_append, List.mem_cons, List.mem_singleton, List.not_mem_nil, or_false,
+      show (σ.alloc (Val.clo f l τc)).1 = σ.next from rfl]; grind) hwf ?_
+  exact ret_cloK (σf := (σ.alloc (.clo f l τc)).2) hSin hSS (List.mem_cons_self ..) hre hR.2 hwf1 (fun _ _ => rfl)
+    (fun z hz => by
+      rcases List.mem_cons.mp hz with rfl | h
+      · simp [Store.alloc]
+      · rw [hold z (hFza z h)]; exact hFza z h)
+    hnd hd (fun z hz => by rw [hold z (hI.allocS z hz)]; exact hI.allocS z hz)
+    (fun z hz h => by
+      simp only [List.mem_append, List.mem_cons] at h
+      rcases h with (rfl | h) | h
+      · exact hna _ (hI.allocS _ hz) rfl
+      · exact hI.disj z hz (hFz z h)
+      · exact hI.disj z hz (hEb z h))
+    (hE _ _ _ _ _ _ _ _ _ _ hb hIb hwf1 hR)
 
 theorem lend_ok {m : Mode} (hE : EvalOk F O n) (hx : lookup x Γ = none) (hp : PlaceTy Γ p τ w y)
     (hm : m = .mut → w = true)
@@ -2291,6 +2513,8 @@ theorem eval_ok_succ (hF : FnsOk F O) (hE : EvalOk F O n) (hR : RetOk F O n) :
       · exact fun h => hfresh _ (List.mem_append.mpr (.inl (List.mem_append.mpr (.inl h)))) rfl
       · exact disj_cons_left.mpr ⟨fun h => hfresh _ (List.mem_append.mpr (.inl (List.mem_append.mpr (.inr h)))) rfl, hd₁⟩
       · exact disj_cons_left.mpr ⟨fun h => hfresh _ (List.mem_append.mpr (.inr h)) rfl, hdS₁⟩
+    | lendClo hfd hcap hown hrefs hretp hdat hp hx hb =>
+      exact lendClo_ok hE hfd hcap hown hrefs hretp hdat hp hx hb hI hwf hRdy
     | lam hfd hcap hown hrefs hretp hdat ha =>
       obtain ⟨v, σ1, E₁, L₁, hev, hI₁, hv₁, hd₁, hdS₁, hm₁⟩ := atom_ok ha hI hwf
       simp only [eval, hfd, hev, hcap]
@@ -2764,6 +2988,7 @@ theorem ret_ok (hE : EvalOk F O n) (hKo : ∀ m, n = m + 1 → EvalKOk F O m ∧
     exact ret_deferA (hA _ (List.mem_singleton_self _)) hp
   | dropK => exact ret_dropK (hA _ (List.mem_singleton_self _)) hR.2 hwf hp
   | lendK hSin hSS hre => exact ret_lendK hSin hSS hre hR.2 hwf hag halloc hnd hd hSa hSd hp
+  | cloK hSin hSS haX hre => exact ret_cloK hSin hSS haX hre hR.2 hwf hag halloc hnd hd hSa hSd hp
   | capK hH hcaps => exact ret_capK hE hKo hH hcaps hR hwf hag halloc hnd hd hSa hSd hp
   | armK hH hK hro harm hcells => exact ret_armK hKo hH hK hro harm hcells hR hA hwf hag halloc hnd hd hSa hSd hp
 

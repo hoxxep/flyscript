@@ -123,6 +123,12 @@ the place, lent `mut`. -/
       (∀ σ1 Eb, Agree σf σ1 (Xf ++ S) → Disj Xf Eb → Inv F σ1 Γin envin Eb Sin →
         ∃ E', Inv F σ1 Γout env E' S ∧ ∀ z, z ∈ E' ↔ z ∈ Eb ∨ z ∈ Xf) →
       FrameOk F O σf .lendK ⟨Γin, envin, τ, Sin, r⟩ ⟨Γout, env, τ, S, r⟩ Xf []
+  /-- The code a closure over a `readonly` borrow is in scope for: as it ends, the closure's cell
+`a`, one of the frame's own, is freed, and the activation is the lender's again. -/
+  | cloK : (∀ l ∈ Sin, l ∈ Xf ∨ l ∈ S) → (∀ l ∈ S, l ∈ Sin) → a ∈ Xf →
+      (∀ σ1 Eb, Agree σf σ1 (Xf ++ S) → Disj Xf Eb → Inv F σ1 Γin envin Eb Sin →
+        ∃ E', Inv F σ1 Γout env E' S ∧ ∀ z, z ∈ E' ↔ z ∈ Eb ∨ (z ∈ Xf ∧ z ≠ a)) →
+      FrameOk F O σf (.cloK a) ⟨Γin, envin, τ, Sin, r⟩ ⟨Γout, env, τ, S, r⟩ Xf []
   /-- The body of a `handle` whose arm resumes: its own cells are what it froze and the trees at
 the places its arm was lent `mut`. -/
   | capK : HandleOk F O σf e caps os rs arm Γin Γout env Sin S r Fz Rc op → CapsOk F σf caps Rc Hc →
