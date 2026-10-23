@@ -420,8 +420,12 @@ fn todo_site_serves_and_runs() {
     // A page the same for every request, rendered once, is still rendered whole and as its data.
     let about = String::from_utf8(get(port, "/about")).unwrap();
     assert!(about.starts_with("HTTP/1.1 200") && about.contains("<h1>About</h1>") && about.contains("Open for 0 s."), "{about}");
+    // A page in a group, `(info)`, whose address the group is no part of, taking the rest of it.
+    let help = String::from_utf8(get(port, "/help/links/following")).unwrap();
+    assert!(help.starts_with("HTTP/1.1 200") && help.contains("<p>On links/following:"), "{help}");
+    assert!(String::from_utf8(get(port, "/help")).unwrap().contains("<p>Pick a topic:</p>"), "a catch-all that may be empty does not answer its own address");
     let data = String::from_utf8(ask(port, "GET /about HTTP/1.1\r\nHost: here\r\nX-Fly-Data: 1\r\nConnection: close\r\n\r\n".to_string())).unwrap();
-    assert!(data.contains("\r\n\r\nabout\n/about\n"), "{data}");
+    assert!(data.contains("\r\n\r\n(info)/about\n/about\n"), "{data}");
     let body = r#"{"title":"Asked by the test"}"#;
     let answer = String::from_utf8(ask(port, format!("POST /_fly/rpc/Todos.add HTTP/1.1\r\nHost: here\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()))).unwrap();
     assert!(answer.starts_with("HTTP/1.1 200") && answer.contains("Asked by the test"), "{answer}");

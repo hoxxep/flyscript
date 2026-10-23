@@ -3,7 +3,12 @@
 // expect: todo a b, q: x y
 // expect: no match
 // expect: no match
-// Routes as their files name them: `index` answers its directory, `[id]` any one segment.
+// expect: docs a/b c
+// expect: no match
+// expect: all ''
+// expect: all x
+// Routes as their files name them: `index` answers its directory, `[id]` any one segment, `[...p]`
+// one or more, and `[[...p]]` any number.
 import { println } from "std/io";
 import { matches } from "../../web/router";
 
@@ -16,4 +21,8 @@ export function main(): void uses Io {
   }
   match (matches("/todos/[id]", "/todos")) { #Some(_) => println("matched"), #None => println("no match") }
   match (matches("/about", "/todos")) { #Some(_) => println("matched"), #None => println("no match") }
+  if (const #Some(p) = matches("/docs/[...path]", "/docs/a/b%20c")) { println(`docs ${p.get("path")}`); }
+  match (matches("/docs/[...path]", "/docs")) { #Some(_) => println("matched"), #None => println("no match") }
+  if (const #Some(p) = matches("/all/[[...path]]", "/all")) { println(`all '${p.get("path")}'`); }
+  if (const #Some(p) = matches("/all/[[...path]]", "/all/x")) { println(`all ${p.get("path")}`); }
 }

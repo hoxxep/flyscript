@@ -1,6 +1,8 @@
 // Routes: a page's address pattern, as its file's place under `app/routes` gives it, matched against
 // the address asked for. `todos/[id].fly` answers `/todos/[id]`, which `/todos/7` matches with `id`
-// "7"; `index.fly` answers its directory's address.
+// "7"; `index.fly` answers its directory's address. `docs/[...path].fly` answers `/docs/` and one
+// segment or more after it, `path` all of them, joined by `/`; `docs/[[...path]].fly` answers
+// `/docs` itself too, `path` then "".
 
 // What an address gave the page: the route's parameters, and the query after `?`.
 export struct Params {
@@ -90,12 +92,28 @@ function segments(path: str): Vec<String> {
 export function matches(pattern: str, url: str): Option<Params> {
   const want = segments(pattern);
   const have = segments(pathOf(url));
-  if (want.len() != have.len()) { return #None; }
   let names: Vec<String> = Vec.new();
   let values: Vec<String> = Vec.new();
+  // A pattern ending in a catch-all takes every segment from there on: one or more, or with
+  // `[[…]]` none too.
+  const last = if (want.len() > 0) { want[want.len() - 1].asStr() } else { "" };
+  const optional = last.startsWith("[[...") && last.endsWith("]]");
+  const rest = optional || (last.startsWith("[...") && last.endsWith("]"));
+  const fixed = if (rest) { want.len() - 1 } else { want.len() };
+  if (rest) {
+    if (have.len() < fixed || (!optional && have.len() == fixed)) { return #None; }
+  } else if (want.len() != have.len()) {
+    return #None;
+  }
   for (const [i, w] of want.iter().enumerate()) {
     const ws = w.asStr();
-    if (ws.startsWith("[") && ws.endsWith("]")) {
+    if (i == fixed) {
+      const name = if (optional) { ws.slice(5, ws.len() - 2) } else { ws.slice(4, ws.len() - 1) };
+      let parts: Vec<String> = Vec.new();
+      for (const h of have[fixed..have.len()]) { parts.push(decode(h.asStr(), false)); }
+      names.push(name.toString());
+      values.push(parts.join("/"));
+    } else if (ws.startsWith("[") && ws.endsWith("]")) {
       names.push(ws.slice(1, ws.len() - 1).toString());
       values.push(decode(have[i].asStr(), false));
     } else if (w != have[i]) {

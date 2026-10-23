@@ -17,6 +17,8 @@ app/
     index.fly        /
     about.fly        /about
     todos/[id].fly   /todos/7, with the parameter `id`
+    docs/[...path].fly  /docs/a/b, `path` "a/b": one segment or more; `[[...path]]` none too
+    (shop)/cart.fly  /cart: a directory in parentheses groups pages under a layout of its own
     api/todos.fly    an endpoint: it answers /api/todos itself
     404.fly          what an address nothing answers shows
     error.fly        what a page whose `load` failed shows

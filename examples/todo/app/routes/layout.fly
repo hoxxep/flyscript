@@ -16,6 +16,7 @@ export function layout<M>(path: str, body: () => void uses Ui<M>): void uses Ui<
       item("/", "Things to do", path == "/" || path.startsWith("/todos/"));
       item("/about", "About", path == "/about");
       item("/visits", "Visits", path == "/visits");
+      item("/help", "Help", path == "/help" || path.startsWith("/help/"));
     });
     body();
   });

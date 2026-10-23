@@ -2,7 +2,7 @@
 // component, a counter, kept in its model, and a timer, which counts the seconds it is open.
 
 import { Ui, Event, el, text, cls, map, every, link } from "web/ui";
-import { Counter, CounterMsg, counter, view as counterView, update as counterUpdate } from "../components/counter";
+import { Counter, CounterMsg, counter, view as counterView, update as counterUpdate } from "../../components/counter";
 
 export type Model = { counter: Counter; seconds: u32 };
 export type Msg = #Counter(CounterMsg) | #Tick;

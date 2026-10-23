@@ -99,11 +99,13 @@ function fnOf(m: readonly Module, name: str): Option<FnSig> {
   #None
 }
 
-// What a route's file says of the address it answers: `index` its directory's.
+// What a route's file says of the address it answers: `index` its directory's; a directory named in
+// parentheses, `(shop)`, groups pages, for a layout of their own, and is no part of the address.
 function patternOf(name: str): String {
   let parts: Vec<String> = Vec.new();
   for (const p of name.split("/")) {
-    if (p != "index" && p.len() > 0) { parts.push(p.clone()); }
+    const group = p.asStr().startsWith("(") && p.asStr().endsWith(")");
+    if (p != "index" && p.len() > 0 && !group) { parts.push(p.clone()); }
   }
   let out = String.new();
   for (const p of parts) {
@@ -209,8 +211,12 @@ function owned(ty: str): String {
   ty.toString()
 }
 
-// More specific routes are tried first: those with fewer parameters, then longer ones.
+// More specific routes are tried first: those without a catch-all, then those with fewer
+// parameters, then longer ones.
 function before(a: readonly Route, b: readonly Route): bool {
+  const ca = a.pattern.includes("[...") || a.pattern.includes("[[...");
+  const cb = b.pattern.includes("[...") || b.pattern.includes("[[...");
+  if (ca != cb) { return cb; }
   const pa = a.pattern.asStr().split("[").len();
   const pb = b.pattern.asStr().split("[").len();
   if (pa != pb) { return pa < pb; }

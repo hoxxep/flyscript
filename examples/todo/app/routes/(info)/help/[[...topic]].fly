@@ -1,0 +1,22 @@
+// Help, at `/help` and at any address under it: the topic is the rest of the address, if any. The
+// page is in the `(info)` group with About, a directory that groups pages and is no part of their
+// addresses.
+
+import { Ui, el, text, link } from "web/ui";
+import { Params } from "web/router";
+
+export type Model = { topic: String };
+
+export const title: str = "Help";
+
+export function load(p: readonly Params): Model { { topic: p.get("topic").toString() } }
+
+export function view(m: readonly Model): void uses Ui<#Nothing> {
+  el("h1", () => text("Help"));
+  if (m.topic.len() == 0) {
+    el("p", () => text("Pick a topic:"));
+    link("/help/links/following", () => text("Following links"));
+  } else {
+    el("p", () => text(`On ${m.topic}: a link within the site is followed without loading a page.`.asStr()));
+  }
+}
