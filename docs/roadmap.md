@@ -1,6 +1,6 @@
 # Roadmap
 
-Flyscript compiled itself, to JavaScript and to C, when this roadmap was written. Its steps take it from a self-hosted language to a systems platform: one intermediate form under every back end, kernels, LLVM, WebAssembly, every core of the machine, and a web framework that shows what all of it buys. Steps 0 to 5 are done, and each says what was built; steps 6 to 10 are next.
+Flyscript compiled itself, to JavaScript and to C, when this roadmap was written. Its steps take it from a self-hosted language to a systems platform: one intermediate form under every back end, kernels, LLVM, WebAssembly, every core of the machine, and a web framework that shows what all of it buys. Steps 0 to 5 are done, and each says what was built; steps 6 to 12 are next.
 
 ## 0. One core IR under every back end
 
@@ -99,8 +99,32 @@ The proof covers λ-fly; the compiler's checker is held to it by tests alone. Th
 - What remains trusted is said in §9.5 of the spec: the elaboration from the surface language to λ-fly, lowering and code generation, each held to the others by differential tests.
 - Done when the corpus's programs in λ-fly's part of the language are certified on every build.
 
-## 10. The runtime in Flyscript
+## 10. The standard library, filled out
 
 *Next.*
 
-The runtime's higher layers — the scheduler, channels, `Mutex`, buffered I/O and formatting — move from C into Flyscript, over a thin core of C and assembly that switches stacks, makes system calls and tells the sanitizers about fibers. The runtimes for JavaScript and the browser stay JavaScript. Channels, `Mutex` and atomics are already proved as handlers (§9.5 of the spec); written in Flyscript, the code that runs them is checked by the same type system the proof is about. Every back end must still interleave tasks the same way under the deterministic scheduler, for every test, from its seed.
+What programs need beyond the core, each part an effect or a pure library, so that a test handles the clock, the files or the network itself, with no mocking library, and the browser and WASI map it to their host as they map `Io`:
+
+- Files, directories and processes: paths, walking a directory, metadata, the environment, and child processes with pipes.
+- Time: a monotonic clock, the time of day, durations, and time zones from the system's tz database, written and read as ISO 8601.
+- Unicode: text that is always valid UTF-8, iterated by code point or by grapheme, normalized, and mapped between cases.
+- Regular expressions that run in time linear in their input, as RE2's do, written in Flyscript: with no backtracking, no input makes one run for ever.
+- An HTTP client over `std/net`, with TLS through bindings to an audited library.
+- Cryptography through bindings to the same library: hashes, HMAC, authenticated encryption, signatures and secure random numbers.
+- Done when each part is specified in [std.md](std.md), runs on every back end its host allows, and is tested against handlers of its own and against the real system.
+
+## 11. Packages, a lockfile and `fly`
+
+*Next.*
+
+- One command, `fly`, in place of the scripts: `new`, `build`, `run`, `test`, `add` and `fmt`.
+- `fly.toml` names a package and its dependencies, fetched from git by semantic version tag; a registry can come later.
+- `fly.lock` records the exact commit and the hash of the content of every dependency, so that a build is the same wherever it is made.
+- The lockfile also records the effects each dependency's exported functions perform, which their types already say: an update after which a package performs `Io` or `Unsafe` where it did not is shown, and stops the build, until it is accepted. A package's types are a statement of what it can do, and its lockfile holds it to that statement.
+- Done when the example site and the compiler build with `fly` from their manifests, a dependency's update that adds an effect stops the build, and two builds from one lockfile are the same.
+
+## 12. The runtime in Flyscript
+
+*Next.*
+
+The runtime's higher layers — the scheduler, channels, `Mutex`, buffered I/O and formatting — move from C into Flyscript, over a thin core of C and assembly that switches stacks, makes system calls and tells the sanitizers about fibers. The runtimes for JavaScript and the browser stay JavaScript; buffered I/O and formatting join the standard library step 10 fills out. Channels, `Mutex` and atomics are already proved as handlers (§9.5 of the spec); written in Flyscript, the code that runs them is checked by the same type system the proof is about. Every back end must still interleave tasks the same way under the deterministic scheduler, for every test, from its seed.
