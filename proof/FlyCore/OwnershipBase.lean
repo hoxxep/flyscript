@@ -50,20 +50,19 @@ theorem CloOk.det : CloOk F f τc k A B r R → CloOk F f τc' k' A' B' r' R' �
   exact ⟨hcap'.2.1, hcap'.2.2, hown'.2, hret.symm.trans hret', hrow.symm.trans hrow', map_ro_inj (hrefs.symm.trans hrefs')⟩
 
 /-- What the continuations a value may hold are taken to be: given the store their frames were
-suspended at, their frames, their fiber, their type and their cells. -/
+suspended at, their frames, their type and their cells. -/
 structure World where
-  kok : Store → List Kont → Nat → Ty → List Nat → Prop
+  kok : Store → List Kont → Ty → List Nat → Prop
 
-/-- Where code runs: the arenas of the regions it is in, the innermost first; the fiber it runs on;
-and the world it is checked in. -/
+/-- Where code runs: the arenas of the regions it is in, the innermost first, and the world it is
+checked in. -/
 structure Iota where
   arenas : List Nat
-  fiber : Nat := 0
-  w : World := ⟨fun _ _ _ _ _ => False⟩
+  w : World := ⟨fun _ _ _ _ => False⟩
 
 instance : EmptyCollection Iota := ⟨{ arenas := [] }⟩
 
-/-- The regions `k` out, in the same fiber and world. -/
+/-- The regions `k` out, in the same world. -/
 def Iota.drop (k : Nat) (ι : Iota) : Iota := { ι with arenas := ι.arenas.drop k }
 
 /-- One region in, its arena `a`. -/

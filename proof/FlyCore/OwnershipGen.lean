@@ -28,7 +28,7 @@ theorem value_resume (hKk : EvalKOk F O m) (hrefs : op.refs = [])
 /-! ## Dropping one side -/
 
 /-- A producer being dropped: each value it yields is dropped, and it goes on at once. -/
-theorem ret_genY (hKo : ∀ m, n = m + 1 → EvalKOk F O m ∧ RetOk F O m) (hop : O[eY]? = some op)
+theorem ret_genY (hfl : FlushOk F ι (flushR F O n)) (hKo : ∀ m, n = m + 1 → EvalKOk F O m ∧ RetOk F O m) (hop : O[eY]? = some op)
     (howns : op.owns = [τy]) (hrefs : op.refs = []) (hret : op.ret = .int) (hcy : τy.complete = true)
     (hR : Ready O hs r) (hwf : WF σ0) (hag : Agree σf σ0 S) (hSa : ∀ l ∈ S, σ0.mem l ≠ none) (hSd : Disj S Ein)
     (hp : Post F ι O σ0 Ein S Γ env τ (.eff eY :: r) (.capture eY hid :: hs) res) :
@@ -82,21 +82,22 @@ theorem ret_genY (hKo : ∀ m, n = m + 1 → EvalKOk F O m ∧ RetOk F O m) (hop
   | succ m =>
   obtain ⟨hKk, hRr⟩ := hKo m rfl
   have hwf₁ := hm.wf
-  obtain ⟨σ2, hdrop, hnext, hfree, hkeep⟩ := drop_ok hwf₁ τy v L hv
-  have hrt2 : σ2.rt = σ1.rt := drop_rt hdrop
+  obtain ⟨σ2', hdrop, hfg⟩ := dropF hfl hwf₁ hv
   simp only [ret, ne_eq, not_true_eq_false, or_self, ↓reduceIte, hdrop]
-  have hwf2 : WF σ2 := WF.of_free hwf₁ hnext hfree hkeep
+  refine hfg.post fun σ2 hd2 => ?_
+  have hwf2 : WF σ2 := hd2.wf
   have hSa1 : ∀ l ∈ S, σ1.mem l ≠ none := fun l hl => by
     rw [hm.keeps hwf hSa (fun l h1 h2 => hSd l h1 h2) l hl]; exact hSa l hl
   have hXa1 : ∀ l ∈ X, σ1.mem l ≠ none := fun l hl => (hm.alloc l).mpr (.inr (.inl hl))
-  have hag12 : Agree σ1 σ2 (X ++ S) := Agree.of (fun l hl => hkeep l fun h => by
+  have hag12 : Agree σ1 σ2 (X ++ S) := hd2.keeps hwf₁ (fun l hl => by
+      rcases List.mem_append.mp hl with hl | hl
+      · exact hXa1 l hl
+      · exact hSa1 l hl) fun l hl h => by
     rcases List.mem_append.mp hl with hl | hl
     · exact hdLX l h hl
-    · exact hdLS l h hl) hrt2
-  have hm2 : Moves σ1 (X ++ L) σ2 X [] := Moves.free hwf2 hnext (fun l hl => by
-      rcases List.mem_append.mp hl with h | h
-      · exact hXa1 l h
-      · exact hv.alloc l h) (fun l => by simp only [List.mem_append]) hfree hkeep (fun l h1 h2 => hdLX l h2 h1) hrt2
+    · exact hdLS l h hl
+  have hm2 : Moves σ1 (X ++ L) σ2 X [] :=
+    (hd2.widen (X := X) hXa1 (fun l h1 h2 => hdLX l h2 h1)).relabel fun x => by simp
   have hR' : Ready O (.capture eY hid :: hs) (.eff eY :: r) :=
     (FrameOk.genY (F := F) (ι := ι) (σf := σ2) (Γ := Γ) (env := env) (τ := τ) (S := S) (hid := hid) hop howns hrefs
       hret hcy).ready hR
@@ -282,7 +283,7 @@ theorem agree_after (hag : Agree σf σ0 (Xf ++ S)) (hm : Moves σ0 Ein σ1 E1 L
 /-- A producer dropped as its consumer ended with `o`: what it left at the places lent `mut`, and the
 consumer's activation as it ended, rebuild the activation around, and `o` goes on in it; if the
 dropping unwinds past the barrier, `o`'s value is dropped. -/
-theorem ret_genE (hG : GenOk F ι O σf eN eY opN opY τy τb cz Γin Γout env Sin S Fz Rc)
+theorem ret_genE (hfl : FlushOk F ι (flushR F O n)) (hG : GenOk F ι O σf eN eY opN opY τy τb cz Γin Γout env Sin S Fz Rc)
     (hIc : Inv F ι σf Γin env Eb Sin) (hdFE : Disj Fz Eb) (hSo : ∀ l ∈ So, l ∈ Fz ∨ l ∈ S)
     (ho : OutOk F ι σf τb o Lo) (hR : Ready O hs r) (hA : ∀ a ∈ o.aims, AimedIn a hs) (hwf : WF σ0)
     (hag : Agree σf σ0 (Fz ++ Eb ++ Lo ++ S)) (halloc : ∀ l ∈ Fz ++ Eb ++ Lo, σf.mem l ≠ none)
@@ -365,17 +366,11 @@ theorem ret_genE (hG : GenOk F ι O σf eN eY opN opY τy τb cz Γin Γout env 
         exact ⟨haim', E', hIo, hm1.relabel fun x => by simp⟩
       | val u =>
         have hu : VT F ι σ1 τb u Lo := (show VT F ι σf τb u Lo from ho).frame (hag1.mono fun l hl => by simp [hl])
-        obtain ⟨σ2, hdrop, hn, hfree, hkeep⟩ := drop_ok hm1.wf _ u Lo hu
+        obtain ⟨σ2, hdrop, hfg⟩ := dropF hfl hm1.wf hu
         simp only [hdrop]
-        refine ⟨haim', E', ⟨hIo.foot.frame (Agree.of' fun l hl => hkeep l fun h => ?_), hIo.nodup, hIo.disj, hIo.keys⟩, ?_⟩
-        · rcases List.mem_append.mp hl with hl | hl
-          · exact hdLE l h hl
-          · exact hdLS l h hl
-        · exact (hm1.relabel (E'' := E' ++ Lo) (L'' := []) fun x => by simp).trans
-            (Moves.free (E := E' ++ Lo) (E' := E') (D := Lo) (WF.of_free hm1.wf hn hfree hkeep) hn
-              (fun l hl => (hm1.alloc l).mpr (.inr (.inl hl)))
-              (fun x => by simp) hfree hkeep (fun l h1 h2 => hdLE l h2 h1)) disj_nil_left hwf |>.relabel
-            fun x => by simp
+        refine hfg.post fun σ3 hd3 => ⟨haim', E', hIo.dropped hd3 hm1.wf hdLE hdLS, ?_⟩
+        exact Moves.thenDrop (E₂ := E') (L := []) (hm1.relabel fun x => by simp) hd3
+          (fun l hl => hIo.alloc l (by simpa using hl)) (fun l hl h => hdLE l h (by simpa using hl)) hwf
   | susp j ef vs ls K =>
     simp only [ret]
     exact post_susp_abort (.genE hG hIc hdFE hSo ho) (fun _ => rfl) hR.2 hA hwf hag halloc hnd hd hSa hSd hp
@@ -610,7 +605,7 @@ theorem ret_genC (hKo : ∀ m, n = m + 1 → EvalKOk F O m ∧ RetOk F O m)
       | abort _ _ => exact ho
     have hdSE : Disj S Eb := fun l h1 h2 => hIc.disj l (hG.hS l h1) h2
     have hG2 := hG.transfer (hag2.mono fun l hl => by rcases List.mem_append.mp hl with h | h <;> simp [h])
-    have h4 := ret_genE (n := m) hG2 hIc2 (fun l h1 h2 => hdXE l (by simp [h1]) h2) hSo ho2 hR haims hwf2 Agree.self
+    have h4 := ret_genE (n := m) flushR_ok hG2 hIc2 (fun l h1 h2 => hdXE l (by simp [h1]) h2) hSo ho2 hR haims hwf2 Agree.self
       (fun l hl => by
         simp only [List.mem_append] at hl
         rcases hl with (h | h) | h
@@ -774,7 +769,7 @@ theorem some_vt (hb : σ.mem b = some v) (hv : VT F ι σ τy v L) (hbL : b ∉ 
 /-- A producer whose consumer waits as `Kc` for what it asked: what it yields answers it; once it
 ends, its consumer's asking is answered `#Done`, the frame keeping what it left at the places lent
 `mut`; if it fails, its consumer is dropped and the activation rebuilt, before the failure goes on. -/
-theorem ret_genP (hKo : ∀ m, n = m + 1 → EvalKOk F O m ∧ RetOk F O m)
+theorem ret_genP (hfl : FlushOk F ι (flushR F O n)) (hKo : ∀ m, n = m + 1 → EvalKOk F O m ∧ RetOk F O m)
     (hG : GenOk F ι O σf eN eY opN opY τy τb cz Γin Γout env Sin S Fz Rc) (hSo : ∀ l ∈ So, l ∈ Fz ∨ l ∈ S)
     (hKc : FramesOk F O ι σf Kc opN ⟨Γin, env, τb, Sin, .eff eN :: r⟩ Xc [] AK)
     (hR : Ready O hs r) (hA : ∀ a ∈ AK, AimedIn a hs) (hwf : WF σ0) (hag : Agree σf σ0 (Fz ++ Xc ++ S))
@@ -903,7 +898,7 @@ theorem ret_genP (hKo : ∀ m, n = m + 1 → EvalKOk F O m ∧ RetOk F O m)
     | succ m =>
     obtain ⟨hKk, hRr⟩ := hKo m rfl
     have : ret F O (m + 1) hs (.genP eN eY hid τy τb Kc) (.abort j k, σ1) =
-        ret F O m hs .lendK (dropRet τb (.abort j k) σ1.fresh.1 (ret F O m (.abort .drop σ1.fresh.1 :: hs) (.genN eN hid τy)
+        ret F O m hs .lendK (dropRet (flushR F O (m + 1)) τb (.abort j k) σ1.fresh.1 (ret F O m (.abort .drop σ1.fresh.1 :: hs) (.genN eN hid τy)
           (evalK F O m (.capture eN hid :: .abort .drop σ1.fresh.1 :: hs) σ1.fresh.2 Kc (.abort σ1.fresh.1 0)))) := by
       rw [ret.eq_def]
     rw [this]
@@ -933,8 +928,7 @@ theorem ret_genP (hKo : ∀ m, n = m + 1 → EvalKOk F O m ∧ RetOk F O m)
       (fun _ h => by simp at h) hwf2 Agree.self (fun _ h => by simp at h) List.nodup_nil disj_nil_left hSin2
       (by simpa using hdSinX) h1
     simp only [List.nil_append] at h2
-    rw [dropRet_eq (F := F) (O := O) (n := m) (hs := hs)]
-    have h3 := ret_dropK (τ' := τb) (n := m) (k := k) (aimed_uncap haim) hR.2 hwf2 h2
+    have h3 := ret_dropK (τ' := τb) (k := k) hfl (aimed_uncap haim) hR.2 hwf2 h2
     have hFa1 : ∀ l ∈ Fz ++ Xc ++ S, σ1.mem l ≠ none := fun l hl => by rw [hag1 l hl]; exact hfa l hl
     have hEa1 : ∀ l ∈ Ep, σ1.mem l ≠ none := fun l hl => hIb.alloc l hl
     have hFEa : ∀ l ∈ Fz ++ Ep, σ1.fresh.2.mem l ≠ none := fun l hl => by

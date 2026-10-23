@@ -18,6 +18,10 @@ theorem dropK_fn_row : ∀ {n : Nat} {σ : Store} {k : Kind} {A B : Ty} {r r' : 
 theorem drop_fn_row : drop σ (.fn k A B r R) v = drop σ (.fn k A B r' R') v := by
   simp only [drop]; exact dropK_fn_row
 
+theorem konts_fn_row : konts σ (.fn k A B r R) v = konts σ (.fn k A B r' R') v := by
+  simp only [konts]
+  cases σ.next <;> cases v <;> simp [kontsK]
+
 theorem aimed_uncap2 : AimedIn a (.capture e hid :: .capture eS hid :: hs) → AimedIn a hs :=
   fun h => aimed_uncap (aimed_uncap h)
 
@@ -25,7 +29,7 @@ theorem aimed_uncap2 : AimedIn a (.capture e hid :: .capture eS hid :: hs) → A
 
 /-- A scope's body or task being dropped: it goes on at once where it gives way, and each task it
 starts is dropped. -/
-theorem ret_scX (hKo : ∀ m, n = m + 1 → EvalKOk F O m ∧ RetOk F O m) (hop : O[e]? = some op)
+theorem ret_scX (hfl : FlushOk F ι (flushR F O n)) (hKo : ∀ m, n = m + 1 → EvalKOk F O m ∧ RetOk F O m) (hop : O[e]? = some op)
     (howns : op.owns = []) (hrefs : op.refs = []) (hret : op.ret = .int) (hopS : O[eS]? = some opS)
     (hSowns : opS.owns = [.fn .once .int .int rT R]) (hSrefs : opS.refs = []) (hSret : opS.ret = .int)
     (hR : Ready O hs r) (hwf : WF σ0) (hag : Agree σf σ0 S) (hSa : ∀ l ∈ S, σ0.mem l ≠ none) (hSd : Disj S Ein)
@@ -98,23 +102,25 @@ theorem ret_scX (hKo : ∀ m, n = m + 1 → EvalKOk F O m ∧ RetOk F O m) (hop 
     obtain rfl : hos = [] := List.map_eq_nil_iff.mp hts
     simp only [olds, mutCells, List.map_nil, List.flatMap_nil, List.append_nil, List.flatten_cons,
       List.flatten_nil] at hm hdLX hdLS hLn
-    obtain ⟨σ2, hdrop, hnext, hfree, hkeep⟩ := drop_ok hwf₁ _ w L hv
-    have hdrop' : drop σ1 (.fn .once .int .int [] .nil) w = some σ2 := by rw [drop_fn_row]; exact hdrop
-    have hrt2 : σ2.rt = σ1.rt := drop_rt hdrop
+    obtain ⟨σ2', hdrop, hfg⟩ := dropF hfl hwf₁ hv
+    have hdrop' : drop σ1 (.fn .once .int .int [] .nil) w = some σ2' := by rw [drop_fn_row]; exact hdrop
     have : ret F O (m + 1) hs (.scX e ef j) (.susp j ef [w] ls K, σ1) =
-        ret F O m hs (.scX e ef j) (evalK F O m (.capture e j :: .capture ef j :: hs) σ2 K (.val (.int 0))) := by
+        andThen (flushR F O (m + 1) (konts σ1 (.fn .once .int .int [] .nil) w) σ2') fun σ2 =>
+          ret F O m hs (.scX e ef j) (evalK F O m (.capture e j :: .capture ef j :: hs) σ2 K (.val (.int 0))) := by
       rw [ret.eq_def]; simp [hdrop']
-    rw [this]
-    have hwf2 : WF σ2 := WF.of_free hwf₁ hnext hfree hkeep
+    rw [this, konts_fn_row]
+    refine hfg.post fun σ2 hd2 => ?_
+    have hwf2 : WF σ2 := hd2.wf
     have hXa1 : ∀ l ∈ X, σ1.mem l ≠ none := fun l hl => (hm.alloc l).mpr (.inr (.inl hl))
-    have hag12 : Agree σ1 σ2 (X ++ S) := Agree.of (fun l hl => hkeep l fun h => by
+    have hag12 : Agree σ1 σ2 (X ++ S) := hd2.keeps hwf₁ (fun l hl => by
+        rcases List.mem_append.mp hl with hl | hl
+        · exact hXa1 l hl
+        · exact hSa1 l hl) fun l hl h => by
       rcases List.mem_append.mp hl with hl | hl
       · exact hdLX l h hl
-      · exact hdLS l h hl) hrt2
-    have hm2 : Moves σ1 (X ++ L) σ2 X [] := Moves.free hwf2 hnext (fun l hl => by
-        rcases List.mem_append.mp hl with h | h
-        · exact hXa1 l h
-        · exact hv.alloc l h) (fun l => by simp only [List.mem_append]) hfree hkeep (fun l h1 h2 => hdLX l h2 h1) hrt2
+      · exact hdLS l h hl
+    have hm2 : Moves σ1 (X ++ L) σ2 X [] :=
+      (hd2.widen (X := X) hXa1 (fun l h1 h2 => hdLX l h2 h1)).relabel fun x => by simp
     have hres := yield_resume (top := ⟨Γ, env, τ, S, .eff e :: .eff ef :: r⟩) hKk hopS hSrefs hSret hK hR' haim hwf2
       hag12 (fun l hl => by
         rcases List.mem_append.mp hl with h | h
@@ -470,15 +476,17 @@ theorem ret_scEt (hKo : ∀ m, n = m + 1 → EvalKOk F O m ∧ RetOk F O m) (hS 
     obtain rfl := foot_ro hI'.foot hro
     cases hv
     rw [ret.eq_def]
-    simp only [drop, dropK, Option.map_some]
-    exact rest (jj := j) (kk := k) hm (hA j (List.mem_cons_self ..))
+    simp only [drop, dropK, Option.map_some, konts_int]
+    exact post_flushR_nil (rest (jj := j) (kk := k) hm (hA j (List.mem_cons_self ..)))
   | abort j' k' =>
     obtain ⟨haim, E', hI', hm⟩ := hp
     obtain rfl := foot_ro hI'.foot hro
     rw [ret.eq_def]
     by_cases hj : j' = d
-    · simp only [hj, ↓reduceIte]; exact rest hm (hA j (List.mem_cons_self ..))
-    · simp only [hj, ↓reduceIte]; exact rest hm (aimed_pop haim hj)
+    · simp only [hj, ↓reduceIte]
+      exact post_flushR_nil (rest hm (hA j (List.mem_cons_self ..)))
+    · simp only [hj, ↓reduceIte]
+      exact post_flushR_nil (rest hm (aimed_pop haim hj))
   | susp j' ef vs ls K =>
     simp only [ret]
     exact post_susp_abort (.scEt hS hI hT hdT hSt hro) (fun _ => rfl) hR.2 hA hwf hag halloc hnd hd hSa hSd hp
@@ -511,7 +519,7 @@ theorem drop_rest (hKo : ∀ m, n = m + 1 → EvalKOk F O m ∧ RetOk F O m) (hS
 
 /-- A scope that failed, its body being dropped: once it is, its tasks are, and the failure goes on
 from the activation the body left. -/
-theorem ret_scEb (hKo : ∀ m, n = m + 1 → EvalKOk F O m ∧ RetOk F O m) (hS : ScOk O e eS op opS rT R r τ)
+theorem ret_scEb (hfl : FlushOk F ι (flushR F O n)) (hKo : ∀ m, n = m + 1 → EvalKOk F O m ∧ RetOk F O m) (hS : ScOk O e eS op opS rT R r τ)
     (hT : TasksOk F O ι σf e eS r S Q Xq Aq)
     (hR : Ready O hs r) (hA : ∀ a ∈ j :: Aq, AimedIn a hs) (hwf : WF σ0) (hag : Agree σf σ0 (Xq ++ S))
     (halloc : ∀ l ∈ Xq, σf.mem l ≠ none) (hnd : Xq.Nodup) (hd : Disj Xq Ein)
@@ -549,28 +557,24 @@ theorem ret_scEb (hKo : ∀ m, n = m + 1 → EvalKOk F O m ∧ RetOk F O m) (hS 
   | val v =>
     obtain ⟨E', L, hI', hv, hdLE, hdLS, hm⟩ := hp
     have hwf1 := hm.wf
-    obtain ⟨σ2, hdrop, hnext, hfree, hkeep⟩ := drop_ok hwf1 τ v L hv
-    have hrt2 : σ2.rt = σ1.rt := drop_rt hdrop
-    have hwf2 : WF σ2 := WF.of_free hwf1 hnext hfree hkeep
+    obtain ⟨σ2', hdrop, hfg⟩ := dropF hfl hwf1 hv
     rw [ret.eq_def]
     simp only [hdrop, Option.map_some]
+    refine hfg.post fun σ2 hd2 => ?_
     have hE'a : ∀ l ∈ E', σ1.mem l ≠ none := fun l hl => (hm.alloc l).mpr (.inr (.inl hl))
-    have hI2 : Inv F ι σ2 Γ env E' S := ⟨hI'.foot.frame (Agree.of (fun l hl => hkeep l fun h => by
-        rcases List.mem_append.mp hl with hl | hl
-        · exact hdLE l h hl
-        · exact hdLS l h hl) hrt2), hI'.nodup, hI'.disj, hI'.keys⟩
-    have hm2 : Moves σ1 (E' ++ L) σ2 E' [] := Moves.free hwf2 hnext (fun l hl => by
-        rcases List.mem_append.mp hl with h | h
-        · exact hE'a l h
-        · exact hv.alloc l h) (fun l => by simp only [List.mem_append]) hfree hkeep (fun l h1 h2 => hdLE l h2 h1) hrt2
+    have hI2 : Inv F ι σ2 Γ env E' S := hI'.dropped hd2 hwf1 hdLE hdLS
+    have hm2 : Moves σ1 (E' ++ L) σ2 E' [] :=
+      (hd2.widen (X := E') hE'a (fun l h1 h2 => hdLE l h2 h1)).relabel fun x => by simp
     have hm' : Moves σ0 Ein σ1 (E' ++ L) [] := hm.relabel fun x => by simp only [List.mem_append, List.not_mem_nil, or_false]
     exact rest hI2 (hm'.trans hm2 disj_nil_left hwf) (hA j (List.mem_cons_self ..))
   | abort j' k' =>
     obtain ⟨haim, E', hI', hm⟩ := hp
     rw [ret.eq_def]
     by_cases hj : j' = d
-    · simp only [hj, ↓reduceIte]; exact rest hI' hm (hA j (List.mem_cons_self ..))
-    · simp only [hj, ↓reduceIte]; exact rest hI' hm (aimed_pop haim hj)
+    · simp only [hj, ↓reduceIte]
+      exact post_flushR_nil (rest hI' hm (hA j (List.mem_cons_self ..)))
+    · simp only [hj, ↓reduceIte]
+      exact post_flushR_nil (rest hI' hm (aimed_pop haim hj))
   | susp j' ef vs ls K =>
     simp only [ret]
     exact post_susp_abort (.scEb hS hT) (fun _ => rfl) hR.2 hA hwf hag halloc hnd hd hSa hSd hp
@@ -1286,7 +1290,7 @@ theorem ret_scW (hF : FnsOk F O) (hKo : ∀ m, n = m + 1 → EvalKOk F O m ∧ R
 
 /-- A scope's task running, its body done with `v`, its activation `Eb` as it ended: once every task
 has ended, the scope gives `v`; if a task fails, `v` is dropped, then the other tasks. -/
-theorem ret_scV (hF : FnsOk F O) (hKo : ∀ m, n = m + 1 → EvalKOk F O m ∧ RetOk F O m)
+theorem ret_scV (hfl : FlushOk F ι (flushR F O n)) (hF : FnsOk F O) (hKo : ∀ m, n = m + 1 → EvalKOk F O m ∧ RetOk F O m)
     (hS : ScOk O e eS op opS rT R r τ) (hcz : ScCaps F ι σf cz R S Rc) (hIb : Inv F ι σf Γ env Eb S) (hv : VT F ι σf τ v Lv)
     (hdLE : Disj Lv Eb) (hdLS : Disj Lv S) (hT : TasksOk F O ι σf e eS r S Q Xq Aq) (hdq : Disj (Eb ++ Lv) Xq)
     (hSt : ∀ l ∈ St, l ∈ S) (hro : RoCtx Γt) (hR : Ready O hs r) (hA : ∀ a ∈ Aq, AimedIn a hs) (hwf : WF σ0) (hag : Agree σf σ0 (Eb ++ Lv ++ Xq ++ S))
@@ -1378,28 +1382,36 @@ theorem ret_scV (hF : FnsOk F O) (hKo : ∀ m, n = m + 1 → EvalKOk F O m ∧ R
     have hwf1 := hm.wf
     have hag1 : Agree σf σ1 (Eb ++ Lv ++ Xq ++ S) := hag.trans (hm.keeps hwf hXSa hXSd)
     obtain ⟨hI1, hv1, hT1⟩ := kept hag1
-    obtain ⟨σ2, hdrop, hnext, hfree, hkeep⟩ := drop_ok hwf1 τ v Lv hv1
-    have hrt2 : σ2.rt = σ1.rt := drop_rt hdrop
-    have hwf2 : WF σ2 := WF.of_free hwf1 hnext hfree hkeep
-    have hag12 : Agree σ1 σ2 (Eb ++ Xq ++ S) := Agree.of (fun l hl => hkeep l fun h => by
+    obtain ⟨σ2', hdrop, hfg⟩ := dropF hfl hwf1 hv1
+    rw [ret.eq_def]
+    simp only [hdrop]
+    refine hfg.post fun σ2 hd2 => ?_
+    have hwf2 : WF σ2 := hd2.wf
+    have hag12 : Agree σ1 σ2 (Eb ++ Xq ++ S) := hd2.keeps hwf1 (fun l hl => by
+        rw [hag1 l (by simp only [List.mem_append] at hl ⊢; rcases hl with (h | h) | h <;> simp [h])]
+        exact (by
+          simp only [List.mem_append] at hl
+          rcases hl with (h | h) | h
+          · exact halloc l (by simp [h])
+          · exact halloc l (by simp [h])
+          · rw [← hag l (by simp [h])]; exact hSa l h)) fun l hl h => by
       simp only [List.mem_append] at hl
       rcases hl with (hl | hl) | hl
       · exact hdLE l h hl
       · exact hdq l (by simp [h]) hl
-      · exact hdLS l h hl) hrt2
+      · exact hdLS l h hl
     have hI2 : Inv F ι σ2 Γ env Eb S := ⟨hI1.foot.frame (hag12.mono fun l hl => by
         rcases List.mem_append.mp hl with h | h <;> simp [h]), hI1.nodup, hI1.disj, hI1.keys⟩
-    rw [ret.eq_def]
-    simp only [hdrop]
-    have hm2 : Moves σ1 (Eb ++ Lv ++ Xq) σ2 (Eb ++ Xq) [] := Moves.free hwf2 hnext
-      (fun l hl => by
-        rw [hag1 l (List.mem_append.mpr (.inl hl))]; exact halloc l hl)
-      (fun l => by simp only [List.mem_append]; exact ⟨fun h => by rcases h with (h | h) | h <;> simp [h],
-        fun h => by rcases h with (h | h) | h <;> simp [h]⟩) hfree hkeep
+    have hm2 : Moves σ1 (Eb ++ Lv ++ Xq) σ2 (Eb ++ Xq) [] :=
+      ((hd2.widen (X := Eb ++ Xq) (fun l hl => by
+        rw [hag1 l (by simp only [List.mem_append] at hl ⊢; rcases hl with h | h <;> simp [h])]
+        exact halloc l (by simp only [List.mem_append] at hl ⊢; rcases hl with h | h <;> simp [h]))
       (fun l h1 h2 => by
         rcases List.mem_append.mp h1 with h1 | h1
         · exact hdLE l h2 h1
-        · exact hdq l (by simp [h2]) h1) hrt2
+        · exact hdq l (by simp [h2]) h1)).congr_left fun x => by
+          simp only [List.mem_append]; exact ⟨fun h => by rcases h with (h | h) | h <;> simp [h],
+            fun h => by rcases h with (h | h) | h <;> simp [h]⟩).relabel fun x => by simp
     have hm' : Moves σ0 (Eb ++ Lv ++ Xq ++ Ein) σ1 (Eb ++ Lv ++ Xq) [] := (hm.widen hXa hd).relabel fun x => by simp
     exact post_after (hm'.trans hm2 disj_nil_left hwf) hwf
       (drop_rest hKo hS hI2 hT1 (hag12.mono fun l hl => by

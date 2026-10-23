@@ -32,7 +32,7 @@ def isStuck : Res × Store → Bool
 /-- Runs a program: the evaluator unfolded by its equations. -/
 syntax "run" "[" Lean.Parser.Tactic.simpLemma,* "]" : tactic
 macro_rules
-  | `(tactic| run [$xs,*]) => `(tactic| simp [eval, evalS, preTarget, ret, Kont.enter, evalK, evalAtom, evalAtoms, resolve, leave, cleanV,
+  | `(tactic| run [$xs,*]) => `(tactic| simp [eval, evalS, preTarget, ret, evalK, flushR, flush, andThen, konts, kontsK, cellKonts, cellsKonts, evalAtom, evalAtoms, resolve, leave, cleanV,
       cleanA, dropRet, armEnd, callRet, allocAll, dropCells, dropCell, drop, dropK, pick, Store.fresh, Store.alloc, Store.set, find,
       Frame.handles, Kont.push, lookup, Res.done, Outcome.res, Cap.at, Store.empty, Store.sched0, value, freed, freedBelow,
       Store.tag, Store.freeAll, Store.moveAll, dropCellsWith,

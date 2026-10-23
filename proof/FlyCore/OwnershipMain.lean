@@ -53,6 +53,8 @@ theorem preempt_ok (ht : Typed F O Γ e τ Γ' r) (hI : Inv F ι σ Γ env E S) 
 theorem eval_ok_succ (hF : FnsOk F O) (hE : EvalOk F O n) (hR : RetOk F O n) :
     EvalOk F O (n + 1) := by
   intro hs σ ι Γ env E S e τ Γ' r ht hI hwf hRdy
+  have hfl : ∀ ι, FlushOk F ι (flushR F O n) := fun _ => flushR_ok
+  have hfl' : ∀ ι, FlushOk F ι (flush F O n) := fun _ => flush_ok
   -- A task may be stopped before anything it does, for another to run.
   rw [eval]
   split
@@ -115,7 +117,7 @@ theorem eval_ok_succ (hF : FnsOk F O) (hE : EvalOk F O n) (hR : RetOk F O n) :
       · exact disj_cons_left.mpr ⟨fun h => hfresh _ (List.mem_append.mpr (.inr h)) rfl, hdS₁⟩
     | pair ha hb =>
       exact pair_ok ha hb hI hwf
-    | case hx hAB hy h₁ h₂ w₁ w₂ => exact case_ok hE hx hAB hy h₁ h₂ w₁ w₂ hI hwf hRdy
+    | case hx hAB hy h₁ h₂ w₁ w₂ => exact case_ok (hfl _) hE hx hAB hy h₁ h₂ w₁ w₂ hI hwf hRdy
     | caseRef hx hp hun hm hmf h₁ h₂ w₁ w₂ => exact caseRef_ok hE hx hp hun hm hmf h₁ h₂ w₁ w₂ hI hwf hRdy
     | inj ha hAB =>
       obtain ⟨v, σ1, E₁, L₁, hev, hI₁, hv₁, hd₁, hdS₁, hm₁⟩ := atom_ok ha hI hwf
@@ -215,8 +217,11 @@ theorem eval_ok_succ (hF : FnsOk F O) (hE : EvalOk F O n) (hR : RetOk F O n) :
       obtain ⟨v, σ1, E₁, L₁, hev, hI₁, hv₁, hd₁, hdS₁, hm₁⟩ := atom_ok ha hI hwf
       obtain ⟨l, Rb, P, A, B, hres, hRb, hE, hupd⟩ := replace_at hI₁ hp ha.complete (.inr hsh)
       obtain ⟨w, R', hw, hvw, rfl, hlR'⟩ := hRb.contents ha.complete
-      obtain ⟨σ2, hdrop, hnext, hfree, hkeep⟩ := drop_ok hm₁.wf _ w R' hvw
+      obtain ⟨σ2', hdrop, hfg⟩ := dropF (hfl' ι) hm₁.wf hvw
       simp only [evalS, hev, hres, hw, hdrop]
+      refine hfg.post fun σ2 hd2 => ?_
+      have hkeep := hd2.keep hm₁.wf
+      have hfree := hd2.free
       have hlE : l ∈ E₁ := hE.mem_iff.mpr (mem_seg.mpr (.inl (by simp)))
       have hR'E : ∀ x ∈ R', x ∈ E₁ := fun x hx => hE.mem_iff.mpr (mem_seg.mpr (.inl (by simp [hx])))
       obtain ⟨hdR, -⟩ := seg3 (hE.nodup_iff.mp hI₁.nodup)
@@ -229,25 +234,32 @@ theorem eval_ok_succ (hF : FnsOk F O) (hE : EvalOk F O n) (hR : RetOk F O n) :
       let σ3 := σ2.set l (some v)
       have hkeep3 : ∀ x, x ≠ l → x ∉ R' → σ3.mem x = σ1.mem x := by
         intro x hx hxR; simp only [σ3, Store.set, hx, ite_false]; exact hkeep x hxR
-      have hag : Agree σ1 σ3 (A ++ P ++ B ++ S) := Agree.of' fun x hx => by
-        rcases List.mem_append.mp hx with hx | hx
-        · exact hkeep3 x (fun h => hlAPB (h ▸ hx)) (fun h => hdR' x h hx)
-        · exact hkeep3 x (fun h => hlS (h ▸ hx)) (fun h => hI₁.disj x hx (hR'E x h))
-      have hagL : Agree σ1 σ3 L₁ := Agree.of' fun x hx =>
-        hkeep3 x (fun h => hlL (h ▸ hx)) (fun h => hd₁ x hx (hR'E x h))
+      have hag : Agree σ1 σ3 (A ++ P ++ B ++ S) := Agree.trans (hd2.keeps hm₁.wf (fun x hx => by
+          rcases List.mem_append.mp hx with hx | hx
+          · exact hI₁.alloc x (hAPB x hx)
+          · exact hI₁.allocS x hx) (fun x hx h => by
+          rcases List.mem_append.mp hx with hx | hx
+          · exact hdR' x h hx
+          · exact hI₁.disj x hx (hR'E x h)))
+        (Agree.of' fun x hx => by
+          have hxl : x ≠ l := by
+            rcases List.mem_append.mp hx with hx | hx
+            · exact fun h => hlAPB (h ▸ hx)
+            · exact fun h => hlS (h ▸ hx)
+          simp only [σ3, Store.set, hxl, ite_false])
+      have hagL : Agree σ1 σ3 L₁ := Agree.trans (hd2.keeps hm₁.wf hv₁.alloc fun x hx h => hd₁ x hx (hR'E x h))
+        (Agree.of' fun x hx => by
+          have hxl : x ≠ l := fun h => hlL (h ▸ hx)
+          simp only [σ3, Store.set, hxl, ite_false])
       have hLt : LT F ι σ3 l _ (l :: L₁) :=
         LT.of_contents (by simp [σ3, Store.set]) (hv₁.frame hagL) hlL
-      have hwf2 : WF σ2 := by
-        intro x hx
-        by_cases hxR : x ∈ R'
-        · exact absurd (hfree x hxR) hx
-        · rw [hkeep x hxR] at hx; rw [hnext]; exact hm₁.wf x hx
-      have hm₂ := Moves.free (E := E₁ ++ L₁) (E' := A ++ (P ++ [l]) ++ B ++ L₁) (D := R') hwf2 hnext
+      have hwf2 : WF σ2 := hd2.wf
+      have hm₂ := Moves.ofDropped (E := E₁ ++ L₁) (E' := A ++ (P ++ [l]) ++ B ++ L₁) (D := R') hd2
         (fun x hx => by
           rcases List.mem_append.mp hx with hx | hx
           · exact hI₁.alloc x hx
           · exact hv₁.alloc x hx)
-        (fun x => by rw [List.mem_append, hE.mem_iff]; mem_iff) hfree hkeep (by
+        (fun x => by rw [List.mem_append, hE.mem_iff]; mem_iff) (by
           intro x hx hxR
           rcases List.mem_append.mp hx with hx | hx
           · simp only [List.mem_append, List.mem_singleton] at hx
@@ -269,7 +281,7 @@ theorem eval_ok_succ (hF : FnsOk F O) (hE : EvalOk F O n) (hR : RetOk F O n) :
         simp only [List.append_nil, hE''.mem_iff]
     | let_ hx ha hb =>
       simp only [evalS]
-      exact ret_letK hE (lookup_none_of_keys (by rw [typed_keys ha]; exact lookup_none_keys hx))
+      exact ret_letK (hfl _) hE (lookup_none_of_keys (by rw [typed_keys ha]; exact lookup_none_keys hx))
         (by rw [typed_keys ha]; exact hI.keys) hb hRdy hwf
         (hE _ _ _ _ _ _ _ _ _ _ _ ha hI hwf hRdy)
     | call hfd hretp hcap hrow hargs hlends hexcl =>
@@ -287,7 +299,7 @@ theorem eval_ok_succ (hF : FnsOk F O) (hE : EvalOk F O n) (hR : RetOk F O n) :
         simp only [List.length_map] at this ⊢
         exact this
       simp only [hmap, hlen, and_self, ↓reduceIte]
-      exact call_core hE hkeys hbody hrow hI₁ hwf hm₁ hvs hLn hdL hdLS hholes hpw hts hRdy
+      exact call_core (hfl _) hE hkeys hbody hrow hI₁ hwf hm₁ hvs hLn hdL hdLS hholes hpw hts hRdy
     | applyOnce hx hrow ha =>
       rename_i x r' A a
       obtain ⟨cx, f, c, τc, Rc, Em, hcx, hσcx, hco, hRc, hcxR, hIm, hdRE, hdRS, hmm⟩ := move_clo hx hI hwf
@@ -353,7 +365,7 @@ theorem eval_ok_succ (hF : FnsOk F O) (hE : EvalOk F O n) (hR : RetOk F O n) :
         simp only [cloFn, hrefs, List.map_cons, List.map_nil, List.append_nil, List.nodup_cons,
           List.mem_singleton, List.not_mem_nil, not_false_eq_true, List.nodup_nil, and_true]
         intro e; subst e; exact hxc (by simp [hown])
-      have hcore := call_core0 (d := cloFn d xc τc .once) (hos := []) (vs := [v, w]) (Ls := [L₁, Rw]) hE hkeys
+      have hcore := call_core0 (hfl _) (d := cloFn d xc τc .once) (hos := []) (vs := [v, w]) (Ls := [L₁, Rw]) hE hkeys
         (by simpa [cloFn] using hbody) (fun l hl => hrow l (hrow' ▸ by simpa [cloFn] using hl)) hI₂ hwf hm₂
         (by rw [hown']; exact hvs)
         (by simpa using nodup_append_disj.mpr ⟨hv₁.nodup, hvw1.nodup, hdLw⟩)
@@ -418,7 +430,7 @@ theorem eval_ok_succ (hF : FnsOk F O) (hE : EvalOk F O n) (hR : RetOk F O n) :
             simp only [List.map_cons, List.map_nil, List.cons_append, List.nil_append, List.nodup_cons,
               List.mem_singleton, List.not_mem_nil, not_false_eq_true, List.nodup_nil, and_self, and_true]
             intro e; subst e; exact hxc (by simp [hown])
-          have hcore := call_core0 (d := cloFn d xc τc k) (hos := [h]) (vs := [v]) (Ls := [L₁]) hE hkeys
+          have hcore := call_core0 (hfl _) (d := cloFn d xc τc k) (hos := [h]) (vs := [v]) (Ls := [L₁]) hE hkeys
             (by rw [hsame.1, hsame.2.1, hsame.2.2]; exact hbody)
             (fun l hl => hrow l (hrow' ▸ hsame.2.2 ▸ hl)) hI₁ hwf (by simpa using hm₁)
             (by rw [hown']; exact .cons hv₁ .nil) (by simpa using hv₁.nodup) (by simpa using hdL)
@@ -501,7 +513,7 @@ theorem eval_ok_succ (hF : FnsOk F O) (hE : EvalOk F O n) (hR : RetOk F O n) :
       have hSc : Disj S (Eo ++ mutCells (olds hos)) := hapart hI₁.allocS (fun l hl h => hdLS l h hl)
         (fun l hl h => hI₁.disj l hl (hMin l h))
       have h3 := hE _ _ _ _ _ _ _ _ _ _ _ hbody hIc hwf₂ ⟨hRdy.1, fun l hl => hRdy.2 l (hrow l hl)⟩
-      have h4 := ret_callLendK (n := n) (σf := σ1) (σ0 := σ2) (r := r) (hs := hs) hE hrow hI₁ hholes hpw hts
+      have h4 := ret_callLendK (hfl _) (n := n) (σf := σ1) (σ0 := σ2) (r := r) (hs := hs) hE hrow hI₁ hholes hpw hts
         hkeys hvs.owns_complete hbody hcells hcne hcs hzs (fun h => ⟨(hmz h).1, (hmz h).2.1⟩) hlive hx hb hRdy hwf₂ (by rw [hX]; exact Agree.of' fun l hl => hold l (hwf₁ l (by
           rcases List.mem_append.mp hl with h | h
           · exact hXa l h
@@ -547,7 +559,7 @@ theorem eval_ok_succ (hF : FnsOk F O) (hE : EvalOk F O n) (hR : RetOk F O n) :
       simp only [evalS]
       have hk := hI.keys
       rw [← typed_keys hb] at hk
-      exact post_after (Moves.freshen hwf hI.alloc) hwf (ret_catchK hE hx hk hh (by intro e h; cases h) hRdy
+      exact post_after (Moves.freshen hwf hI.alloc) hwf (ret_catchK (hfl _) hE hx hk hh (by intro e h; cases h) hRdy
         (hwf : WF _) (hE _ _ _ _ _ _ _ _ _ _ _ hb hI.fresh (hwf : WF _) ⟨.abort (by intro e h; cases h) hRdy.1,
           fun l hl => by
             rcases List.mem_cons.mp hl with rfl | hl
@@ -557,7 +569,7 @@ theorem eval_ok_succ (hF : FnsOk F O) (hE : EvalOk F O n) (hR : RetOk F O n) :
       simp only [evalS]
       have hk := hI.keys
       rw [← typed_keys hb] at hk
-      exact post_after (Moves.freshen hwf hI.alloc) hwf (ret_catchK hE hx hk hh
+      exact post_after (Moves.freshen hwf hI.alloc) hwf (ret_catchK (hfl _) hE hx hk hh
         (by intro e' h; cases h; exact ⟨_, hop, howns, hrefs⟩) hRdy
         (hwf : WF _) (hE _ _ _ _ _ _ _ _ _ _ _ hb hI.fresh (hwf : WF _) ⟨.abort
           (by intro e' h; cases h; exact ⟨_, hop, howns, hrefs⟩) hRdy.1,
@@ -570,7 +582,7 @@ theorem eval_ok_succ (hF : FnsOk F O) (hE : EvalOk F O n) (hR : RetOk F O n) :
       exact ret_whileC hE hc hb hRdy hwf (hE _ _ _ _ _ _ _ _ _ _ _ hc hI hwf hRdy)
     | defer hb hd =>
       simp only [evalS]
-      exact ret_deferK hE hd hRdy hwf (hE _ _ _ _ _ _ _ _ _ _ _ hb hI hwf hRdy)
+      exact ret_deferK (hfl _) hE hd hRdy hwf (hE _ _ _ _ _ _ _ _ _ _ _ hb hI hwf hRdy)
     | perform hop hlab hargs hlends hexcl =>
       obtain ⟨vs, σ1, E₁, Ls, hevs, hI₁, hvs, hLn, hdL, hdLS, hm₁⟩ := atoms_ok hargs hI hwf
       obtain ⟨hos, hts, hys, hmap, hholes, hplain, hpw⟩ := lends_ok hlends hI₁.foot hexcl
@@ -642,68 +654,69 @@ theorem eval_ok_succ (hF : FnsOk F O) (hE : EvalOk F O n) (hR : RetOk F O n) :
 
 theorem ret_ok (hF : FnsOk F O) (hE : EvalOk F O n) (hKo : ∀ m, n = m + 1 → EvalKOk F O m ∧ RetOk F O m) : RetOk F O n := by
   intro hs ιi ιo σf f inL outL Xf A σ0 Ein res hf hR hA hwf hag halloc hnd hd hSa hSd hp
+  have hfl : ∀ ι, FlushOk F ι (flushR F O n) := fun _ => flushR_ok
   cases hf with
-  | letK hx hk hb => exact ret_letK hE hx hk hb hR hwf hp
+  | letK hx hk hb => exact ret_letK (hfl _) hE hx hk hb hR hwf hp
   | callLendK hrow hI₁ hholes hpw hts hkeys hoc hbody hcells hcne hcs hzs hzm hlive hx hb =>
-    exact ret_callLendK hE hrow hI₁ hholes hpw hts hkeys hoc hbody hcells hcne hcs hzs hzm hlive hx hb hR hwf
+    exact ret_callLendK (hfl _) hE hrow hI₁ hholes hpw hts hkeys hoc hbody hcells hcne hcs hzs hzm hlive hx hb hR hwf
       hag hd hSa hSd hp
   | scopeK hx hk hτx =>
-    have : ∀ τ c, ret F O n hs (.scopeK τ c) res = leave τ c res := fun τ c => by
+    have : ∀ τ c, ret F O n hs (.scopeK τ c) res = leave (flushR F O n) τ c res := fun τ c => by
       rcases res with ⟨_ | _ | _ | _ | _, _⟩ <;> simp [ret, leave, Res.done]
     rw [this]
-    exact leave_ok' hτx hwf hx hk hp
+    exact leave_ok' (hfl _) hτx hwf hx hk hp
   | callK hrow hI₁ hholes hpw hts hkeys hoc hbody hcells =>
-    exact ret_callK hrow hI₁ hholes hpw hts hkeys hoc hbody hcells hR hwf hag hd hSa hSd hp
-  | catchK hx hk hh hl => exact ret_catchK hE hx hk hh hl hR hwf hp
+    exact ret_callK (hfl _) hrow hI₁ hholes hpw hts hkeys hoc hbody hcells hR hwf hag hd hSa hSd hp
+  | catchK hx hk hh hl => exact ret_catchK (hfl _) hE hx hk hh hl hR hwf hp
   | whileC hc hb => exact ret_whileC hE hc hb hR hwf hp
   | whileB hc hb => exact ret_whileB hE hc hb hR hwf hp
-  | deferK hd' => exact ret_deferK hE hd' hR hwf hp
+  | deferK hd' => exact ret_deferK (hfl _) hE hd' hR hwf hp
   | deferV hv =>
-    have : ∀ τ v, ret F O n hs (.deferV τ v) res = cleanV τ v res := fun τ v => by
+    have : ∀ τ v, ret F O n hs (.deferV τ v) res = cleanV (flushR F O n) τ v res := fun τ v => by
       rcases res with ⟨_ | _ | _ | _ | _, _⟩ <;> simp [ret, cleanV]
     rw [this]
-    exact ret_deferV hv hag halloc hnd hd (fun l h1 h2 => hSd l h1 (List.mem_append.mpr (.inl h2)))
+    exact ret_deferV (hfl _) hv hag halloc hnd hd (fun l h1 h2 => hSd l h1 (List.mem_append.mpr (.inl h2)))
       (fun l h1 h2 => hSd l h1 (List.mem_append.mpr (.inr h2))) hSa hwf hp
   | deferA =>
     have : ∀ j k, ret F O n hs (.deferA j k) res = cleanA j k res := fun j k => by
       rcases res with ⟨_ | _ | _ | _ | _, _⟩ <;> simp [ret, cleanA]
     rw [this]
     exact ret_deferA (hA _ (List.mem_singleton_self _)) hp
-  | dropK => exact ret_dropK (hA _ (List.mem_singleton_self _)) hR.2 hwf hp
+  | dropK => rw [← dropRet_eq]; exact ret_dropK (hfl _) (hA _ (List.mem_singleton_self _)) hR.2 hwf hp
   | dropKv hv =>
-    exact ret_dropKv hv hR.2 hag halloc hnd hd (fun l h1 h2 => hSd l h1 (List.mem_append.mpr (.inl h2)))
+    rw [← dropRet_eq]; exact ret_dropKv (hfl _) hv hR.2 hag halloc hnd hd (fun l h1 h2 => hSd l h1 (List.mem_append.mpr (.inl h2)))
       (fun l h1 h2 => hSd l h1 (List.mem_append.mpr (.inr h2))) hSa hwf hp
   | lendK hSin hSS hre => exact ret_lendK hSin hSS hre hR.2 hwf hag halloc hnd hd hSa hSd hp
   | cloK hSin hSS haX hre => exact ret_cloK hSin hSS haX hre hR.2 hwf hag halloc hnd hd hSa hSd hp
-  | capK hH hP hcaps => exact ret_capK hE hKo hH hP hcaps hR hwf hag halloc hnd hd hSa hSd hp
-  | armK hH hP hK hro harm hcells => exact ret_armK hKo hH hP hK hro harm hcells hR hA hwf hag halloc hnd hd hSa hSd hp
+  | capK hH hP hcaps => exact ret_capK (hfl _) hE hKo hH hP hcaps hR hwf hag halloc hnd hd hSa hSd hp
+  | armK hH hP hK hro harm hcells => exact ret_armK (hfl _) hKo hH hP hK hro harm hcells hR hA hwf hag halloc hnd hd hSa hSd hp
   | startK hb => simpa using ret_startK hE hb hR hwf (by simpa [Kont.push] using hp)
   | taskK hrow hkeys hoc hbody hcells =>
-    simpa using ret_taskK hrow hkeys hoc hbody hcells hR hwf (by simpa [Kont.push] using hp)
-  | parS hP hroR hroO hSr hSo hK => exact ret_parS hKo hP hroR hroO hSr hSo hK hR hA hwf hag halloc hnd hd hSa hSd hp
-  | parD hP hro hSr hw => exact ret_parD hKo hP hro hSr hw hR hwf hag halloc hnd hd hSa hSd hp
+    simpa using ret_taskK (hfl _) hrow hkeys hoc hbody hcells hR hwf (by simpa [Kont.push] using hp)
+  | parS hP hroR hroO hSr hSo hK => exact ret_parS (hfl _) hKo hP hroR hroO hSr hSo hK hR hA hwf hag halloc hnd hd hSa hSd hp
+  | parD hP hro hSr hw => exact ret_parD (hfl _) hKo hP hro hSr hw hR hwf hag halloc hnd hd hSa hSd hp
   | parY hop howns hrefs hret =>
     simpa using ret_parY hKo hop howns hrefs hret hR hwf (by simpa using hag) hSa (by simpa using hSd) hp
   | parE hI hro hSo => exact ret_parE hI hro hSo hR hwf hag halloc hnd hd hSa hSd hp
   | regionK => exact ret_regionK hR hwf (by simpa using hag) hSa (by simpa using hSd) (by simpa [Kont.push] using hp)
-  | postR hP hv => exact ret_postR hE hP hv hR hwf hag halloc hnd hd hSa hSd hp
+  | postR hP hv => exact ret_postR (hfl _) hE hP hv hR hwf hag halloc hnd hd hSa hSd hp
   | genC hG hSo hK => exact ret_genC hKo hG hSo hK hR hA hwf hag halloc hnd hd hSa hSd hp
   | genCd hG hc => exact ret_genCd hKo hG hc hR hwf hag halloc hnd hd hSa hSd hp
-  | genP hG hSo hKc => exact ret_genP hKo hG hSo hKc hR hA hwf hag halloc hnd hd hSa hSd hp
+  | genP hG hSo hKc => exact ret_genP (hfl _) hKo hG hSo hKc hR hA hwf hag halloc hnd hd hSa hSd hp
   | genY hop howns hrefs hret hcy =>
-    simpa using ret_genY hKo hop howns hrefs hret hcy hR hwf (by simpa using hag) hSa (by simpa using hSd) hp
+    simpa using ret_genY (hfl _) hKo hop howns hrefs hret hcy hR hwf (by simpa using hag) hSa (by simpa using hSd) hp
   | genN hop howns hrefs hret hcy =>
     simpa using ret_genN hKo hop howns hrefs hret hcy hR hwf (by simpa using hag) hSa (by simpa using hSd) hp
-  | genE hG hIc hdFE hSo ho => exact ret_genE hG hIc hdFE hSo ho hR hA hwf hag halloc hnd hd hSa hSd hp
+  | genE hG hIc hdFE hSo ho => exact ret_genE (hfl _) hG hIc hdFE hSo ho hR hA hwf hag halloc hnd hd hSa hSd hp
   | scB hS hcz hT => exact ret_scB hF hKo hS hcz hT hR hA hwf hag halloc hnd hd hSa hSd hp
   | scW hS hcz hbr hbrefs hKb hagb hab hT hdbq hSt hro =>
     exact ret_scW hF hKo hS hcz hbr hbrefs hKb hagb hab hT hdbq hSt hro hR hA hwf hag halloc hnd hd hSa hSd hp
   | scV hS hcz hIb hv hdLE hdLS hT hdq hSt hro =>
-    exact ret_scV hF hKo hS hcz hIb hv hdLE hdLS hT hdq hSt hro hR hA hwf hag halloc hnd hd hSa hSd hp
+    exact ret_scV (hfl _) hF hKo hS hcz hIb hv hdLE hdLS hT hdq hSt hro hR hA hwf hag halloc hnd hd hSa hSd hp
   | scX hop howns hrefs hret hopS hSowns hSrefs hSret =>
-    simpa using ret_scX hKo hop howns hrefs hret hopS hSowns hSrefs hSret hR hwf (by simpa using hag) hSa
+    simpa using ret_scX (hfl _) hKo hop howns hrefs hret hopS hSowns hSrefs hSret hR hwf (by simpa using hag) hSa
       (by simpa using hSd) hp
-  | scEb hS hT => exact ret_scEb hKo hS hT hR hA hwf hag halloc hnd hd hSa hSd hp
+  | scEb hS hT => exact ret_scEb (hfl _) hKo hS hT hR hA hwf hag halloc hnd hd hSa hSd hp
   | scEt hS hI hT hdT hSt hro => exact ret_scEt hKo hS hI hT hdT hR hA hwf hag halloc hnd hd hSa hSd hSt hro hp
 
 /-- Expressions, frames and continuations, at every fuel. -/

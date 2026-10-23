@@ -173,8 +173,8 @@ def Ty.shell : Ty → Bool
   | .vec false _ => true
   | _ => false
 
-/-- What may pass between fibers as it is: an integer, or a continuation, whose cells are its own
-fiber's. -/
+/-- What may pass into and out of a fiber as it is: an integer, or a continuation, whose cells are
+its own. -/
 def Ty.cross : Ty → Bool
   | .int => true
   | .cont _ _ _ => true
@@ -505,8 +505,8 @@ inductive Val where
   | arena (cs : List Nat)
   /-- A vector: the cells of its elements, in order. -/
   | vec (cs : List Nat)
-  /-- A continuation taken where a fiber gave way: its frames, the fiber, the cells it owns. -/
-  | kont (K : List Kont) (g : Nat) (X : List Nat)
+  /-- A continuation taken where a fiber gave way: its frames, and the cells it owns. -/
+  | kont (K : List Kont) (X : List Nat)
 
 /-- How a computation that was dropped ended: with a value, or unwinding. -/
 inductive Outcome where
@@ -592,9 +592,12 @@ inductive Kont where
   /-- A scope that failed, or whose body or task did, with `o`, of type `τ`: what is being dropped, of
   type `τd`, is unwinding to the barrier `d`; then each task of `Q` is, and `o` goes on. -/
   | scE (e eS id : Nat) (τ τd : Ty) (o : Outcome) (d : Nat) (Q : List (List Kont))
-  /-- The fiber `g` of a `handle` whose arm keeps its continuation: the code around runs on fiber
-  `r0`; its arm, the function `fa`, is called with what the operation takes and the continuation. -/
-  | capV (τ : Ty) (e : Nat) (g : Nat) (fa : Nat) (r0 : Nat)
+  /-- The fiber of a `handle` whose arm keeps its continuation, its handler named `g`: its arm, the
+  function `fa`, is called with what the operation takes and the continuation. Since the fiber was
+  last entered, owning the cells `B`, the cells it allocated are those from `s` on. -/
+  | capV (τ : Ty) (e : Nat) (g : Nat) (fa : Nat) (B : List Nat) (s : Nat)
+  /-- A kept continuation being dropped: its operation, performed by its cleanup, goes on at once. -/
+  | capD (τ : Ty) (e : Nat) (g : Nat)
 end
 
 
@@ -735,6 +738,7 @@ def dropK : Nat → Store → Ty → Val → Option Store
     | none => none
   | 0, σ, .vec _ _, .vec [] => some σ
   | k + 1, σ, .vec _ τ, .vec cs => dropCellsWith (fun σ w => dropK k σ τ w) σ cs
+  | _, σ, .cont _ _ _, .kont _ _ => some σ
   | _, _, _, _ => none
 
 /-- Drops a value of type `τ`: a value owns fewer cells than the store has. -/
@@ -757,6 +761,49 @@ def dropCells (σ : Store) : List (Ty × Nat) → Option Store
     match dropCell σ τ c with
     | some σ' => dropCells σ' rest
     | none => none
+
+/-- The continuations a value of type `τ` holds, which dropping it leaves to be dropped: they have
+cleanup to run. -/
+def kontsK : Nat → Store → Ty → Val → List (List Kont)
+  | _, _, .cont _ _ _, .kont K _ => [K]
+  | k + 1, σ, .box τ, .ptr l =>
+    match σ.mem l with
+    | some w => kontsK k σ τ w
+    | none => []
+  | k + 1, σ, .fn _ _ _ _ _, .clo _ c τc =>
+    match σ.mem c with
+    | some w => kontsK k σ τc w
+    | none => []
+  | k + 1, σ, .sum A B, .tag _ _ t l =>
+    match σ.mem l with
+    | some w => kontsK k σ (if t then A else B) w
+    | none => []
+  | k + 1, σ, .pair A B, .pair b c =>
+    (match σ.mem b with
+     | some w => kontsK k σ A w
+     | none => []) ++
+    (match σ.mem c with
+     | some u => kontsK k σ B u
+     | none => [])
+  | k + 1, σ, .vec _ τ, .vec cs =>
+    cs.flatMap fun c =>
+      match σ.mem c with
+      | some w => kontsK k σ τ w
+      | none => []
+  | _, _, _, _ => []
+
+def konts (σ : Store) (τ : Ty) (v : Val) : List (List Kont) := kontsK σ.next σ τ v
+
+/-- The continuations what a variable's cell holds holds. -/
+def cellKonts (σ : Store) (τ : Ty) (c : Nat) : List (List Kont) :=
+  match σ.mem c with
+  | some .moved => []
+  | some v => konts σ τ v
+  | none => []
+
+def cellsKonts (σ : Store) : List (Ty × Nat) → List (List Kont)
+  | [] => []
+  | (τ, c) :: rest => cellKonts σ τ c ++ cellsKonts σ rest
 
 
 
@@ -808,27 +855,20 @@ def Kont.push : Kont → HS → HS
   | .scV e eS id _ _ _ _, hs => .capture e id :: .capture eS id :: hs
   | .scX e eS id, hs => .capture e id :: .capture eS id :: hs
   | .scE _ _ _ _ _ _ d _, hs => .abort .drop d :: hs
-  | .capV _ e g _ _, hs => .capture e g :: hs
+  | .capV _ e g _ _ _, hs => .capture e g :: hs
+  | .capD _ e g, hs => .capture e g :: hs
   | _, hs => hs
 
-/-- The store as the code inside a frame runs on it: inside a fiber's frame, that fiber runs. -/
-def Kont.enter : Kont → Store → Store
-  | .capV _ _ g _ _, σ => { σ with cur := g }
-  | _, σ => σ
+/-- The cells a value that may pass into or out of a fiber owns: a continuation's. -/
+def Val.foot : Val → List Nat
+  | .kont _ X => X
+  | _ => []
 
-/-- The cells tagged with one of the fibers `ids`, still allocated. -/
-def tagged (σ : Store) (ids : List Nat) : List Nat :=
-  (List.range σ.next).filter fun l => (σ.mem l).isSome && ids.any fun h => σ.fb l == some h
-
-/-- What a fiber `g`, suspended as the frames `K`, owns: the cells of `g` and of the fibers running
-inside it, and what the continuations those cells hold own. -/
-def kfootK (σ : Store) (g : Nat) (K : List Kont) : List Nat :=
-  let ids := g :: K.filterMap fun f => match f with | .capV _ _ h _ _ => some h | _ => none
-  let G := tagged σ ids
-  G ++ G.flatMap fun c => match σ.mem c with | some (.kont _ _ X) => X | _ => []
-
-/-- A fiber's stack segment released as it ends: whatever of it is left. -/
-def Store.release (σ : Store) (g : Nat) : Store := σ.freeAll (kfootK σ g [])
+/-- What a fiber that was entered owning the cells `B`, and has allocated those from `s` on, owns
+where it gives way, the store `σ`, passing out the values `vs`: those of its cells still there that
+`vs` do not own. -/
+def kfoot (σ : Store) (B : List Nat) (s : Nat) (vs : List Val) : List Nat :=
+  (B ++ List.range' s (σ.next - s)).filter fun l => (σ.mem l).isSome && !(vs.flatMap Val.foot).contains l
 
 inductive Res where
   | val (v : Val)
@@ -853,23 +893,32 @@ def Res.done : Res → Bool
   | .val _ | .abort _ _ => true
   | _ => false
 
+/-- What goes on once the continuations a drop left have been dropped, `fl` dropping them. -/
+def andThen (x : Res × Store) (k : Store → Res × Store) : Res × Store :=
+  match x with
+  | (.val _, σ) => k σ
+  | x => x
+
+/-- How the continuations a drop leaves are dropped: unwinding each, its cleanup running. -/
+abbrev Flush := List (List Kont) → Store → Res × Store
+
 /-- Leaving a scope whose variable is in cell `c`: dropped on every way out but a timeout, or kept
 with the continuation taken in it. -/
-def leave (τ : Ty) (c : Nat) : Res × Store → Res × Store
+def leave (fl : Flush) (τ : Ty) (c : Nat) : Res × Store → Res × Store
   | (.susp j ef vs ls K, σ) => (.susp j ef vs ls (.scopeK τ c :: K), σ)
   | (r, σ) =>
     if r.done then
       match dropCell σ τ c with
-      | some σ' => (r, σ')
+      | some σ' => andThen (fl (cellKonts σ τ c) σ') fun σ'' => (r, σ'')
       | none => (.stuck, σ)
     else (r, σ)
 
 /-- A body's cleanup ended, the body having given `v`. -/
-def cleanV (τ : Ty) (v : Val) : Res × Store → Res × Store
+def cleanV (fl : Flush) (τ : Ty) (v : Val) : Res × Store → Res × Store
   | (.val (.int _), σ) => (.val v, σ)
   | (.abort j k, σ) =>
     match drop σ τ v with
-    | some σ' => (.abort j k, σ')
+    | some σ' => andThen (fl (konts σ τ v) σ') fun σ'' => (.abort j k, σ'')
     | none => (.stuck, σ)
   | (.susp j ef vs ls K, σ) => (.susp j ef vs ls (.deferV τ v :: K), σ)
   | (.val _, σ) => (.stuck, σ)
@@ -897,18 +946,18 @@ def Outcome.res : Outcome → Res
 /-- Code of type `τ` dropped as an arm unwound with `o`, by unwinding it to the barrier named `d`:
 once the unwinding reaches it, `o` goes on, unless the dropping itself unwound elsewhere; and if the
 code gave a value after all, the value is dropped. -/
-def dropRet (τ : Ty) (o : Outcome) (d : Nat) : Res × Store → Res × Store
+def dropRet (fl : Flush) (τ : Ty) (o : Outcome) (d : Nat) : Res × Store → Res × Store
   | (.abort j k, σ) =>
     if j = d then (o.res, σ) else
     match o with
     | .val u =>
       match drop σ τ u with
-      | some σ' => (.abort j k, σ')
+      | some σ' => andThen (fl (konts σ τ u) σ') fun σ'' => (.abort j k, σ'')
       | none => (.stuck, σ)
     | .abort _ _ => (.abort j k, σ)
   | (.val v, σ) =>
     match drop σ τ v with
-    | some σ' => (o.res, σ')
+    | some σ' => andThen (fl (konts σ τ v) σ') fun σ'' => (o.res, σ'')
     | none => (.stuck, σ)
   | (.susp j ef vs ls K, σ) => (.susp j ef vs ls (.dropK τ o d :: K), σ)
   | r => r
@@ -932,28 +981,28 @@ def mkTask (F : List Fn) (cz : List (Cap Nat)) (σ : Store) : Val → Option (Li
   | _ => none
 
 /-- A call's body ended: the parameters it owns are dropped; a continuation taken in it keeps them. -/
-def callRet (cells : List (Ty × Nat)) : Res × Store → Res × Store
+def callRet (fl : Flush) (cells : List (Ty × Nat)) : Res × Store → Res × Store
   | (.susp j ef vs ls K, σ) => (.susp j ef vs ls (.callK cells :: K), σ)
   | (.stuck, σ) => (.stuck, σ)
   | (.timeout, σ) => (.timeout, σ)
   | (.panic, σ) => (.panic, σ)
   | (r, σ) =>
     match dropCells σ cells with
-    | some σ' => (r, σ')
+    | some σ' => andThen (fl (cellsKonts σ cells) σ') fun σ'' => (r, σ'')
     | none => (.stuck, σ)
 
 /-- An arm ended: its parameters are dropped, and the code its `handle` ran, `K`, goes on with
 the arm's value (`resuming`), or, if the arm unwinds with `o`, is dropped (`dropping`). -/
-def armEnd (τ : Ty) (cells : List (Ty × Nat)) (K : List Kont) (post : PostR) (resuming : Store → Val → Res × Store)
-    (dropping : Store → Outcome → Res × Store) : Res × Store → Res × Store
+def armEnd (fl : Flush) (τ : Ty) (cells : List (Ty × Nat)) (K : List Kont) (post : PostR)
+    (resuming : Store → Val → Res × Store) (dropping : Store → Outcome → Res × Store) : Res × Store → Res × Store
   | (.susp j ef vs ls K', σ) => (.susp j ef vs ls (.armK τ cells K post :: K'), σ)
   | (.val v, σ) =>
     match dropCells σ cells with
-    | some σ' => resuming σ' v
+    | some σ' => andThen (fl (cellsKonts σ cells) σ') fun σ'' => resuming σ'' v
     | none => (.stuck, σ)
   | (.abort j k, σ) =>
     match dropCells σ cells with
-    | some σ' => dropping σ' (.abort j k)
+    | some σ' => andThen (fl (cellsKonts σ cells) σ') fun σ'' => dropping σ'' (.abort j k)
     | none => (.stuck, σ)
   | r => r
 
@@ -1068,7 +1117,7 @@ def evalS (F : List Fn) (O : List Op) (n : Nat) (hs : HS) (σ : Store) (env : En
           match σ1.mem l with
           | some old =>
             match drop σ1 τ old with
-            | some σ2 => (.val (.int 0), σ2.set l (some v))
+            | some σ2 => andThen (flush F O n (konts σ1 τ old) σ2) fun σ3 => (.val (.int 0), σ3.set l (some v))
             | none => (.stuck, σ1)
           | none => (.stuck, σ1)
         | none => (.stuck, σ1)
@@ -1270,9 +1319,9 @@ def evalS (F : List Fn) (O : List Op) (n : Nat) (hs : HS) (σ : Store) (env : En
         | some (vs, σ1) =>
           if vs.length = d.owns.length ∧ d.refs = [] then
             let (g, σ2) := σ1.fresh
-            let (cells, σ4) := allocAll { σ2 with cur := g } ((d.owns.map Prod.fst).zip vs)
-            ret F O n hs (.capV τ e g fa σ1.cur)
-              (evalK F O n (.capture e g :: hs) σ4
+            let (cells, σ4) := allocAll σ2 ((d.owns.map Prod.fst).zip vs)
+            ret F O n hs (.capV τ e g fa (vs.flatMap Val.foot) σ2.next)
+              (evalK F O n [.capture e g] σ4
                 [.callK ((d.owns.map Prod.snd).zip (cells.map Prod.snd)), .startK cells d.body] (.val (.int 0)))
           else (.stuck, σ1)
         | none => (.stuck, σ)
@@ -1281,9 +1330,10 @@ def evalS (F : List Fn) (O : List Op) (n : Nat) (hs : HS) (σ : Store) (env : En
       match lookup x env with
       | some c =>
         match σ.mem c with
-        | some (.kont (.capV τ e g fa _ :: K) _ _) =>
+        | some (.kont (.capV τ e g fa _ _ :: K) X) =>
           match evalAtom (σ.set c (some .moved)) env a with
-          | some (v, σ1) => evalK F O n hs σ1 (.capV τ e g fa σ.cur :: K) (.val v)
+          | some (v, σ1) =>
+            ret F O n hs (.capV τ e g fa (X ++ v.foot) σ1.next) (evalK F O n [.capture e g] σ1 K (.val v))
           | none => (.stuck, σ)
         | _ => (.stuck, σ)
       | none => (.stuck, σ)
@@ -1453,7 +1503,7 @@ def ret (F : List Fn) (O : List Op) (n : Nat) (hs : HS) : Kont → Res × Store 
       if vs.length = os.length ∧ ls.length = rs.length then
         let K' := Kont.capK τ e id caps os rs arm post :: K
         let (cells, σ2) := allocAll σ (os.zip vs)
-        armEnd τ (op.owns.zip (cells.map Prod.snd)) K' post
+        armEnd (flushR F O n) τ (op.owns.zip (cells.map Prod.snd)) K' post
           (fun σ v => match n with
             | 0 => (.timeout, σ)
             | m + 1 =>
@@ -1475,14 +1525,14 @@ def ret (F : List Fn) (O : List Op) (n : Nat) (hs : HS) : Kont → Res × Store 
                       | _ => (.stuck, σ)
                     else
                       let (d, σ1) := (σ.set l none).fresh
-                      dropRet τ (.val w) d (evalK F O m (.abort .drop d :: hs) σ1 K' (.abort d 0))
+                      dropRet (flushR F O (m + 1)) τ (.val w) d (evalK F O m (.abort .drop d :: hs) σ1 K' (.abort d 0))
                   | none => (.stuck, σ)
                 | _ => (.stuck, σ))
           (fun σ o => match n with
             | 0 => (.timeout, σ)
             | m + 1 =>
               let (d, σ1) := σ.fresh
-              dropRet τ o d (evalK F O m (.abort .drop d :: hs) σ1 K' (.abort d 0)))
+              dropRet (flushR F O (m + 1)) τ o d (evalK F O m (.abort .drop d :: hs) σ1 K' (.abort d 0)))
           (eval F O n hs σ2 (cells ++ rs.zip ls ++ caps.map (fun c => (c.name, c.loc))) arm)
       else (.stuck, σ)
   | .parS e id τa τb side Ko, (.susp j ef vs ls K, σ) =>
@@ -1529,7 +1579,9 @@ def ret (F : List Fn) (O : List Op) (n : Nat) (hs : HS) : Kont → Res × Store 
     | 0, _ => (.timeout, σ)
     | m + 1, [v] =>
       match drop σ τy v with
-      | some σ1 => ret F O m hs (.genY eY id τy) (evalK F O m (.capture eY id :: hs) σ1 K (.val (.int 0)))
+      | some σ1 =>
+        andThen (flushR F O (m + 1) (konts σ τy v) σ1) fun σ2 =>
+          ret F O m hs (.genY eY id τy) (evalK F O m (.capture eY id :: hs) σ2 K (.val (.int 0)))
       | none => (.stuck, σ)
     | _ + 1, _ => (.stuck, σ)
   | .genN eN id τy, (.susp j ef vs ls K, σ) =>
@@ -1615,44 +1667,54 @@ def ret (F : List Fn) (O : List Op) (n : Nat) (hs : HS) : Kont → Res × Store 
         match vs with
         | [w] =>
           match drop σ (.fn .once .int .int [] .nil) w with
-          | some σ1 => ret F O m hs (.scX e eS id) (evalK F O m (.capture e id :: .capture eS id :: hs) σ1 K (.val (.int 0)))
+          | some σ1 =>
+            andThen (flushR F O (m + 1) (konts σ (.fn .once .int .int [] .nil) w) σ1) fun σ2 =>
+              ret F O m hs (.scX e eS id) (evalK F O m (.capture e id :: .capture eS id :: hs) σ2 K (.val (.int 0)))
           | none => (.stuck, σ)
         | _ => (.stuck, σ)
       else ret F O m hs (.scX e eS id) (evalK F O m (.capture e id :: .capture eS id :: hs) σ K (.val (.int 0)))
   | .scE e eS id τ τd o d Q, (.susp j ef vs ls K, σ) => (.susp j ef vs ls (.scE e eS id τ τd o d Q :: K), σ)
-  | .capV τ e g fa r0, (.susp j ef vs ls K, σ) =>
+  | .capV τ e g fa B s, (.susp j ef vs ls K, σ) =>
     if j = g ∧ ef = e then
       match n with
       | 0 => (.timeout, σ)
       | m + 1 =>
         match F[fa]? with
         | some da =>
-          let args := vs ++ [.kont (.capV τ e g fa r0 :: K) g (kfootK σ g K)]
+          let args := vs ++ [.kont (.capV τ e g fa B s :: K) (kfoot σ B s vs)]
           if args.length = da.owns.length ∧ ls = [] then
-            let (cells, σ2) := allocAll { σ with cur := r0 } ((da.owns.map Prod.fst).zip args)
+            let (cells, σ2) := allocAll σ ((da.owns.map Prod.fst).zip args)
             ret F O m hs (.callK ((da.owns.map Prod.snd).zip (cells.map Prod.snd))) (eval F O m hs σ2 cells da.body)
           else (.stuck, σ)
         | none => (.stuck, σ)
-    else (.susp j ef vs ls (.capV τ e g fa r0 :: K), { σ with cur := r0 })
+    else (.susp j ef vs ls (.capV τ e g fa B s :: K), σ)
+  | .capD τ e g, (.susp j ef vs ls K, σ) =>
+    if j = g ∧ ef = e then
+      match n with
+      | 0 => (.timeout, σ)
+      | m + 1 =>
+        andThen (flushR F O (m + 1) (vs.filterMap fun v => match v with | .kont K' _ => some K' | _ => none) σ) fun σ1 =>
+          ret F O m hs (.capD τ e g) (evalK F O m (.capture e g :: hs) σ1 K (.val (.int 0)))
+    else (.susp j ef vs ls (.capD τ e g :: K), σ)
   | f, (.susp j ef vs ls K, σ) =>
     match f with
-    | .scopeK τ c => leave τ c (.susp j ef vs ls K, σ)
-    | .deferV τ v => cleanV τ v (.susp j ef vs ls K, σ)
+    | .scopeK τ c => leave (flushR F O n) τ c (.susp j ef vs ls K, σ)
+    | .deferV τ v => cleanV (flushR F O n) τ v (.susp j ef vs ls K, σ)
     | .deferA j' k => cleanA j' k (.susp j ef vs ls K, σ)
     | .armK τ cells K0 post => (.susp j ef vs ls (.armK τ cells K0 post :: K), σ)
-    | .dropK τ o d => dropRet τ o d (.susp j ef vs ls K, σ)
+    | .dropK τ o d => dropRet (flushR F O n) τ o d (.susp j ef vs ls K, σ)
     | f => (.susp j ef vs ls (f :: K), σ)
   | _, (.stuck, σ) => (.stuck, σ)
   | _, (.timeout, σ) => (.timeout, σ)
   | _, (.panic, σ) => (.panic, σ)
   | .letK x τ env b, (.val v, σ) =>
     let (c, σ2) := σ.alloc v
-    leave τ c (eval F O n hs σ2 ((x, c) :: env) b)
+    leave (flushR F O n) τ c (eval F O n hs σ2 ((x, c) :: env) b)
   | .letK _ _ _ _, (.abort j k, σ) => (.abort j k, σ)
-  | .scopeK τ c, r => leave τ c r
+  | .scopeK τ c, r => leave (flushR F O n) τ c r
   | .callK cells, (r, σ) =>
     match dropCells σ cells with
-    | some σ' => (r, σ')
+    | some σ' => andThen (flushR F O n (cellsKonts σ cells) σ') fun σ'' => (r, σ'')
     | none => (.stuck, σ)
   | .callLendK x ps cenv cells env body, (.val (.int k), σ) =>
     match pick ps k with
@@ -1661,21 +1723,22 @@ def ret (F : List Fn) (O : List Op) (n : Nat) (hs : HS) : Kont → Res × Store 
       | some l =>
         match dropCells σ cells with
         | some σ' =>
-          match eval F O n hs σ' ((x, l) :: env) body with
-          | (.susp j ef vs ls K, σ'') => (.susp j ef vs ls (.lendK :: K), σ'')
-          | r => r
+          andThen (flushR F O n (cellsKonts σ cells) σ') fun σ1 =>
+            match eval F O n hs σ1 ((x, l) :: env) body with
+            | (.susp j ef vs ls K, σ'') => (.susp j ef vs ls (.lendK :: K), σ'')
+            | r => r
         | none => (.stuck, σ)
       | none => (.stuck, σ)
     | none => (.stuck, σ)
   | .callLendK _ _ _ _ _ _, (.val _, σ) => (.stuck, σ)
   | .callLendK _ _ _ cells _ _, (.abort j k, σ) =>
     match dropCells σ cells with
-    | some σ' => (.abort j k, σ')
+    | some σ' => andThen (flushR F O n (cellsKonts σ cells) σ') fun σ'' => (.abort j k, σ'')
     | none => (.stuck, σ)
   | .catchK _ id x env h, (.abort j k, σ) =>
     if j = id then
       let (c, σ2) := σ.alloc (.int k)
-      leave .int c (eval F O n hs σ2 ((x, c) :: env) h)
+      leave (flushR F O n) .int c (eval F O n hs σ2 ((x, c) :: env) h)
     else (.abort j k, σ)
   | .catchK _ _ _ _ _, (.val v, σ) => (.val v, σ)
   | .whileC _ _ _, (.val (.int 0), σ) => (.val (.int 0), σ)
@@ -1690,9 +1753,9 @@ def ret (F : List Fn) (O : List Op) (n : Nat) (hs : HS) : Kont → Res × Store 
   | .whileB env c b, (.val (.int _), σ) => eval F O n hs σ env (.while_ c b)
   | .whileB _ _ _, (.val _, σ) => (.stuck, σ)
   | .whileB _ _ _, (.abort j k, σ) => (.abort j k, σ)
-  | .deferK τ env d, (.val v, σ) => cleanV τ v (eval F O n hs σ env d)
+  | .deferK τ env d, (.val v, σ) => cleanV (flushR F O n) τ v (eval F O n hs σ env d)
   | .deferK _ env d, (.abort j k, σ) => cleanA j k (eval F O n hs σ env d)
-  | .deferV τ v, r => cleanV τ v r
+  | .deferV τ v, r => cleanV (flushR F O n) τ v r
   | .deferA j k, r => cleanA j k r
   | .lendK, r => r
   | .cloK a, (r, σ) =>
@@ -1706,16 +1769,16 @@ def ret (F : List Fn) (O : List Op) (n : Nat) (hs : HS) : Kont → Res × Store 
     | some ls, some d =>
       if [vc, w].length = d.owns.length ∧ ls.length = d.refs.length then
         let (cells, σ2) := allocAll σ ((d.owns.map Prod.fst).zip [vc, w])
-        callRet ((d.owns.map Prod.snd).zip (cells.map Prod.snd))
+        callRet (flushR F O n) ((d.owns.map Prod.snd).zip (cells.map Prod.snd))
           (eval F O n hs σ2 (cells ++ (d.refs.map Prod.fst).zip ls) d.body)
       else (.stuck, σ)
     | _, _ => (.stuck, σ)
   | .postR C _ vc _ _, (.abort j k, σ) =>
     match drop σ C vc with
-    | some σ' => (.abort j k, σ')
+    | some σ' => andThen (flushR F O n (konts σ C vc) σ') fun σ'' => (.abort j k, σ'')
     | none => (.stuck, σ)
   | .armK τ cells K post, r =>
-    armEnd τ cells K post
+    armEnd (flushR F O n) τ cells K post
       (fun σ v => match n with
         | 0 => (.timeout, σ)
         | m + 1 =>
@@ -1737,15 +1800,15 @@ def ret (F : List Fn) (O : List Op) (n : Nat) (hs : HS) : Kont → Res × Store 
                   | _ => (.stuck, σ)
                 else
                   let (d, σ1) := (σ.set l none).fresh
-                  dropRet τ (.val w) d (evalK F O m (.abort .drop d :: hs) σ1 K (.abort d 0))
+                  dropRet (flushR F O (m + 1)) τ (.val w) d (evalK F O m (.abort .drop d :: hs) σ1 K (.abort d 0))
               | none => (.stuck, σ)
             | _ => (.stuck, σ))
       (fun σ o => match n with
         | 0 => (.timeout, σ)
         | m + 1 =>
           let (d, σ1) := σ.fresh
-          dropRet τ o d (evalK F O m (.abort .drop d :: hs) σ1 K (.abort d 0))) r
-  | .dropK τ o d, r => dropRet τ o d r
+          dropRet (flushR F O (m + 1)) τ o d (evalK F O m (.abort .drop d :: hs) σ1 K (.abort d 0))) r
+  | .dropK τ o d, r => dropRet (flushR F O n) τ o d r
   | .startK env b, (.val _, σ) => eval F O n hs σ env b
   | .startK _ _, (.abort j k, σ) => (.abort j k, σ)
   | .parS e id τa τb side Ko, (.val v, σ) =>
@@ -1757,7 +1820,7 @@ def ret (F : List Fn) (O : List Op) (n : Nat) (hs : HS) : Kont → Res × Store 
     | 0 => (.timeout, σ)
     | m + 1 =>
       let (d, σ1) := σ.fresh
-      ret F O m hs .parE (dropRet (if side then τb else τa) (.abort j k) d
+      ret F O m hs .parE (dropRet (flushR F O (m + 1)) (if side then τb else τa) (.abort j k) d
         (ret F O m (.abort .drop d :: hs) (.parY e id)
           (evalK F O m (.capture e id :: .abort .drop d :: hs) σ1 Ko (.abort d 0))))
   | .parD _ _ _ _ side w, (.val v, σ) =>
@@ -1766,7 +1829,7 @@ def ret (F : List Fn) (O : List Op) (n : Nat) (hs : HS) : Kont → Res × Store 
     (.val (.pair la lb), σ2)
   | .parD _ _ τa τb side w, (.abort j k, σ) =>
     match drop σ (if side then τb else τa) w with
-    | some σ' => (.abort j k, σ')
+    | some σ' => andThen (flushR F O n (konts σ (if side then τb else τa) w) σ') fun σ'' => (.abort j k, σ'')
     | none => (.stuck, σ)
   | .parY _ _, r => r
   | .parE, r => r
@@ -1801,7 +1864,7 @@ def ret (F : List Fn) (O : List Op) (n : Nat) (hs : HS) : Kont → Res × Store 
     | 0 => (.timeout, σ)
     | m + 1 =>
       let (d, σ1) := σ.fresh
-      ret F O m hs .lendK (dropRet τb (.abort j k) d (ret F O m (.abort .drop d :: hs) (.genN eN id τy)
+      ret F O m hs .lendK (dropRet (flushR F O (m + 1)) τb (.abort j k) d (ret F O m (.abort .drop d :: hs) (.genN eN id τy)
         (evalK F O m (.capture eN id :: .abort .drop d :: hs) σ1 Kc (.abort d 0))))
   | .genY _ _ _, r => r
   | .genN _ _ _, r => r
@@ -1810,7 +1873,7 @@ def ret (F : List Fn) (O : List Op) (n : Nat) (hs : HS) : Kont → Res × Store 
     match o with
     | .val u =>
       match drop σ τb u with
-      | some σ' => (.abort j k, σ')
+      | some σ' => andThen (flushR F O n (konts σ τb u) σ') fun σ'' => (.abort j k, σ'')
       | none => (.stuck, σ)
     | .abort _ _ => (.abort j k, σ)
   | .genE τb o _, (.val _, σ) => (o.res, σ)
@@ -1848,7 +1911,8 @@ def ret (F : List Fn) (O : List Op) (n : Nat) (hs : HS) : Kont → Res × Store 
   | .scV e eS id τ cz v Q, (.abort j k, σ) =>
     match drop σ τ v with
     | none => (.stuck, σ)
-    | some σ' =>
+    | some σ0 =>
+      andThen (flushR F O n (konts σ τ v) σ0) fun σ' =>
       match Q, n with
       | [], _ => (.abort j k, σ')
       | _ :: _, 0 => (.timeout, σ')
@@ -1858,18 +1922,19 @@ def ret (F : List Fn) (O : List Op) (n : Nat) (hs : HS) : Kont → Res × Store 
           (evalK F O m (.capture e id :: .capture eS id :: .abort .drop d :: hs) σ1 Kt (.abort d 0)))
   | .scX _ _ _, r => r
   | .scE e eS id τ τd o d Q, (r, σ) =>
-    let next : Option (Outcome × Store) :=
+    let next : Option (Outcome × Store × List (List Kont)) :=
       match r with
       | .abort j k =>
-        if j = d then some (o, σ) else
+        if j = d then some (o, σ, []) else
         match o with
-        | .val u => (drop σ τ u).map fun σ' => (.abort j k, σ')
-        | .abort _ _ => some (.abort j k, σ)
-      | .val v => (drop σ τd v).map fun σ' => (o, σ')
-      | _ => some (o, σ)
+        | .val u => (drop σ τ u).map fun σ' => (.abort j k, σ', konts σ τ u)
+        | .abort _ _ => some (.abort j k, σ, [])
+      | .val v => (drop σ τd v).map fun σ' => (o, σ', konts σ τd v)
+      | _ => some (o, σ, [])
     match next with
     | none => (.stuck, σ)
-    | some (o', σ') =>
+    | some (o', σ0, ks) =>
+      andThen (flushR F O n ks σ0) fun σ' =>
       match Q, n with
       | [], _ => (o'.res, σ')
       | _ :: _, 0 => (.timeout, σ')
@@ -1881,15 +1946,35 @@ def ret (F : List Fn) (O : List Op) (n : Nat) (hs : HS) : Kont → Res × Store 
     match σ.mem a with
     | some (.arena cs) => (r, (σ.freeAll cs).set a none)
     | _ => (.stuck, σ)
-  | .capV _ _ g _ r0, (r, σ) => (r, { σ.release g with cur := r0 })
+  | .capV _ _ _ _ _ _, r => r
+  | .capD _ _ _, r => r
 termination_by _ _ => (n, 1, 0)
 
 /-- A continuation given what the code it was taken at gives: its frames, the outermost first, each
 putting in force the handler it did. -/
 def evalK (F : List Fn) (O : List Op) (n : Nat) (hs : HS) (σ : Store) : List Kont → Res → Res × Store
   | [], r => (r, σ)
-  | f :: K, r => ret F O n hs f (evalK F O n (f.push hs) (f.enter σ) K r)
+  | f :: K, r => ret F O n hs f (evalK F O n (f.push hs) σ K r)
 termination_by K _ => (n, 1, sizeOf K + 1)
+
+/-- Drops the continuations `ks`, each unwound to a barrier of its own, its cleanup running. -/
+def flush (F : List Fn) (O : List Op) (n : Nat) : List (List Kont) → Store → Res × Store
+  | [], σ => (.val (.int 0), σ)
+  | (.capV τ e g _ _ _ :: K) :: ks, σ =>
+    let (d, σ1) := σ.fresh
+    match evalK F O n [.abort .drop d] σ1 (.capD τ e g :: K) (.abort d 0) with
+    | (.val _, σ2) => flush F O n ks σ2
+    | (.abort _ _, σ2) => flush F O n ks σ2
+    | r => r
+  | _ :: _, σ => (.stuck, σ)
+termination_by ks _ => (n, 1, sizeOf ks + 1)
+
+/-- Drops the continuations `ks` with what fuel is left. -/
+def flushR (F : List Fn) (O : List Op) (n : Nat) (ks : List (List Kont)) (σ : Store) : Res × Store :=
+  match n with
+  | 0 => (.timeout, σ)
+  | m + 1 => flush F O m ks σ
+termination_by (n, 0, 1)
 end
 
 

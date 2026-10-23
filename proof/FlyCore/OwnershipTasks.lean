@@ -147,7 +147,7 @@ theorem refCtx_keys {owns : List (Var × Ty)} {refs : List (Var × Mode × Ty)} 
 
 /-- A task's body ended: the parameters it owns are dropped, and what is left are the places it was
 lent `readonly`. -/
-theorem ret_taskK {d : Fn} {cells : Env} {ls : List Nat}
+theorem ret_taskK (hfl : FlushOk F ι (flushR F O n)) {d : Fn} {cells : Env} {ls : List Nat}
     (hrow : ∀ l ∈ d.row, l ∈ r)
     (hkeys : ((d.owns.map Prod.fst) ++ (d.refs.map Prod.fst)).Nodup) (hoc : ∀ o ∈ d.owns, o.2.complete = true)
     (hbody : Typed F O (fnCtx d) d.body d.ret Γ'' d.row) (hcells : cells.map Prod.fst = d.owns.map Prod.fst)
@@ -157,7 +157,9 @@ theorem ret_taskK {d : Fn} {cells : Env} {ls : List Nat}
       (ret F O n hs (.callK ((d.owns.map Prod.snd).zip (cells.map Prod.snd))) res) := by
   have key : ∀ σ3 Ec' Lw, Inv F ι σ3 Γ'' (cells ++ (d.refs.map Prod.fst).zip ls) Ec' St → Disj Lw Ec' →
       Moves σ0 Ein σ3 Ec' Lw →
-      ∃ σ4 Er, dropCells σ3 ((d.owns.map Prod.snd).zip (cells.map Prod.snd)) = some σ4 ∧
+      ∃ σ4', dropCells σ3 ((d.owns.map Prod.snd).zip (cells.map Prod.snd)) = some σ4' ∧ ∃ Ea,
+        FlushGives (flushR F O n (cellsKonts σ3 ((d.owns.map Prod.snd).zip (cells.map Prod.snd))) σ4') σ3 Ea ∧
+        ∀ σ4, Dropped σ3 Ea σ4 → ∃ Er,
         Inv F ι σ4 (refCtx d.refs) ((d.refs.map Prod.fst).zip ls) Er St ∧ Agree σ3 σ4 Lw ∧ Disj Lw Er ∧
         Moves σ0 Ein σ4 Er Lw := by
     intro σ3 Ec' Lw hI₃ hdw hm₃
@@ -169,37 +171,43 @@ theorem ret_taskK {d : Fn} {cells : Env} {ls : List Nat}
       rw [← shape_length, hΓa]; simpa [ownCtx] using (congrArg List.length hcells).symm
     obtain ⟨Ea, Sa, Er, Sr, hfa, hfr, rfl, rfl⟩ := hI₃.foot.split hla
     have hnd := nodup_append_disj.mp hI₃.nodup
-    obtain ⟨rfl, σ4, hdrop, hn4, hfree4, hkeep4⟩ := dropCells_ok hfa hΓa hnd.1 hm₃.wf hoc
+    obtain ⟨rfl, σ4', hdrop, hfg⟩ := dropCellsF hfl hfa hΓa hnd.1 hm₃.wf hoc
+    refine ⟨σ4', hdrop, Ea, hfg, fun σ4 hd4 => ?_⟩
     have hdisj := hI₃.disj
     simp only [List.nil_append] at hdisj ⊢
-    refine ⟨σ4, Er, hdrop, ⟨hfr.frame <| Agree.of' fun l hl => hkeep4 l fun h => ?_, hnd.2.1,
+    refine ⟨Er, ⟨hfr.frame <| hd4.keeps hm₃.wf (fun l hl => hfr.alloc l (List.mem_append.mp hl)) fun l hl h => ?_, hnd.2.1,
       fun l hl h => hdisj l hl (List.mem_append.mpr (.inr h)), refCtx_keys hkeys⟩,
-      Agree.of' fun l hl => hkeep4 l fun h => hdw l hl (List.mem_append.mpr (.inl h)),
+      hd4.keeps hm₃.wf (fun l hl => (hm₃.alloc l).mpr (.inr (.inr hl)))
+        (fun l hl h => hdw l hl (List.mem_append.mpr (.inl h))),
       fun l h1 h2 => hdw l h1 (List.mem_append.mpr (.inr h2)), ?_⟩
     · rcases List.mem_append.mp hl with hl | hl
       · exact hnd.2.2 l h hl
       · exact hdisj l hl (List.mem_append.mpr (.inl h))
     have m3 := hm₃.relabel (E'' := Lw ++ Er ++ Ea) (L'' := []) fun x => by
       simp only [List.mem_append, List.not_mem_nil, or_false]; grind
-    have m4 := Moves.free (E := Lw ++ Er ++ Ea) (E' := Lw ++ Er) (D := Ea)
-      (WF.of_free hm₃.wf hn4 hfree4 hkeep4) hn4 (fun l hl => (m3.alloc l).mpr (.inr (.inl hl)))
-      (fun x => by simp only [List.mem_append]) hfree4 hkeep4 (fun l h1 h2 => by
-        rcases List.mem_append.mp h1 with h1 | h1
-        · exact hdw l h1 (List.mem_append.mpr (.inl h2))
-        · exact hnd.2.2 l h2 h1)
+    have m4 : Moves σ3 (Lw ++ Er ++ Ea) σ4 (Lw ++ Er) [] :=
+      (hd4.widen (X := Lw ++ Er) (fun l hl => (m3.alloc l).mpr (.inr (.inl (List.mem_append.mpr (.inl hl)))))
+        (fun l h1 h2 => by
+          rcases List.mem_append.mp h1 with h1 | h1
+          · exact hdw l h1 (List.mem_append.mpr (.inl h2))
+          · exact hnd.2.2 l h2 h1)).relabel fun x => by simp
     exact (m3.trans m4 disj_nil_left hwf).relabel fun x => by
       simp only [List.mem_append, List.not_mem_nil, or_false, List.append_nil]; grind
   rcases res with ⟨res, σ3⟩
   cases res with
   | val w =>
     obtain ⟨Ec', Lw, hI₃, hvw, hdw, hdS, hm₃⟩ := hp
-    obtain ⟨σ4, Er, hdrop, hI₄, hag', hdLE, hm⟩ := key σ3 Ec' Lw hI₃ hdw hm₃
+    obtain ⟨σ4', hdrop, Ea, hfg, hk⟩ := key σ3 Ec' Lw hI₃ hdw hm₃
     simp only [ret, hdrop]
+    refine hfg.post fun σ4 hd4 => ?_
+    obtain ⟨Er, hI₄, hag', hdLE, hm⟩ := hk σ4 hd4
     exact ⟨Er, Lw, hI₄, hvw.frame hag', hdLE, hdS, hm⟩
   | abort i k =>
     obtain ⟨haim, Ec', hI₃, hm₃⟩ := hp
-    obtain ⟨σ4, Er, hdrop, hI₄, -, -, hm⟩ := key σ3 Ec' [] hI₃ disj_nil_left hm₃
+    obtain ⟨σ4', hdrop, Ea, hfg, hk⟩ := key σ3 Ec' [] hI₃ disj_nil_left hm₃
     simp only [ret, hdrop]
+    refine hfg.post fun σ4 hd4 => ?_
+    obtain ⟨Er, hI₄, -, -, hm⟩ := hk σ4 hd4
     exact ⟨haim, Er, hI₄, hm⟩
   | susp j ef vs ls' K =>
     obtain ⟨op, X', hos', A, Lv, hc, hop, hcov, haim, hK, hls, hvs, hn, hdv, hdSv, hm⟩ := hp
@@ -379,7 +387,7 @@ theorem aimed_uncap : AimedIn a (.capture e hid :: hs) → AimedIn a hs := fun �
 
 /-- Two tasks, the one running `side`, the other done with `w`: the running one gives way to no one,
 and once it is done too the pair of what they gave is the value; if it fails, `w` is dropped. -/
-theorem ret_parD (hKo : ∀ m, n = m + 1 → EvalKOk F O m ∧ RetOk F O m)
+theorem ret_parD (hfl : FlushOk F ι (flushR F O n)) (hKo : ∀ m, n = m + 1 → EvalKOk F O m ∧ RetOk F O m)
     (hP : ParOk F ι O σf e op Γ₁ env E₁ S τa τb) (hro : RoCtx Γr) (hSr : ∀ l ∈ Sr, l ∈ E₁ ∨ l ∈ S)
     (hw : VT F ι σf (if side then τb else τa) w Lw)
     (hR : Ready O hs r) (hwf : WF σ0) (hag : Agree σf σ0 (E₁ ++ Lw ++ S)) (halloc : ∀ l ∈ E₁ ++ Lw, σf.mem l ≠ none)
@@ -454,18 +462,15 @@ theorem ret_parD (hKo : ∀ m, n = m + 1 → EvalKOk F O m ∧ RetOk F O m)
     obtain rfl := foot_ro hIb.foot hro
     have hag1 := agreeM hm
     have hw1 := hw.frame (hag1.mono fun l hl => by simp [hl])
-    obtain ⟨σ3, hdrop, hn, hfree, hkeep⟩ := drop_ok hm.wf _ w Lw hw1
+    obtain ⟨σ3, hdrop, hfg⟩ := dropF hfl hm.wf hw1
     simp only [ret, hdrop]
-    have hI3 : Inv F ι σ3 Γ₁ env E₁ S := callerI <| Agree.trans (restrict hag1) <| Agree.of' fun l hl =>
-      hkeep l fun h => by
-        rcases List.mem_append.mp hl with hl | hl
-        · exact hE1L.2.2 l hl h
-        · exact hSd l hl (by simp [h])
-    refine ⟨aimed_uncap haim, E₁, hI3, ?_⟩
+    refine hfg.post fun σ4 hd4 => ?_
+    have hI1 := callerI (restrict hag1)
+    refine ⟨aimed_uncap haim, E₁, hI1.dropped hd4 hm.wf (fun l hl h => hE1L.2.2 l h hl)
+      (fun l hl h => hSd l h (by simp [hl])), ?_⟩
     have m1 := (hm.widen hXa hd).relabel (E'' := E₁ ++ Lw) (L'' := []) fun x => by simp
-    exact (m1.trans (Moves.free (E := E₁ ++ Lw) (E' := E₁) (D := Lw) (WF.of_free hm.wf hn hfree hkeep) hn
-      (fun l hl => (m1.alloc l).mpr (.inr (.inl hl))) (fun x => by simp) hfree hkeep hE1L.2.2)
-      disj_nil_left hwf).relabel fun x => by simp
+    exact Moves.thenDrop (E₂ := E₁) (L := []) m1 hd4 (fun l hl => hI1.alloc l (by simpa using hl))
+      (fun l hl h => hE1L.2.2 l (by simpa using hl) h) hwf
   | susp j ef vs ls K =>
     by_cases hc : j ≠ hid ∨ ef ≠ e
     · have : ret F O n hs (.parD e hid τa τb side w) (.susp j ef vs ls K, σ1) =
@@ -537,7 +542,7 @@ theorem ParOk.transfer (h : ParOk F ι O σf e op Γ₁ env E₁ S τa τb) (hag
 /-- Two tasks, the one running `side`, the other waiting as `Ko`: where the running one gives way,
 the schedule says which goes on; once it is done, the other runs alone; if it fails, the other is
 dropped, unwinding to a barrier, before the failure goes on. -/
-theorem ret_parS (hKo : ∀ m, n = m + 1 → EvalKOk F O m ∧ RetOk F O m)
+theorem ret_parS (hfl : FlushOk F ι (flushR F O n)) (hKo : ∀ m, n = m + 1 → EvalKOk F O m ∧ RetOk F O m)
     (hP : ParOk F ι O σf e op Γ₁ env E₁ S τa τb) (hroR : RoCtx Γr) (hroO : RoCtx Γo)
     (hSr : ∀ l ∈ Sr, l ∈ E₁ ∨ l ∈ S) (hSo : ∀ l ∈ So, l ∈ E₁ ∨ l ∈ S)
     (hK : FramesOk F O ι σf Ko op ⟨Γo, envo, (if side then τb else τa), So, .eff e :: r⟩ X [] AK)
@@ -642,7 +647,7 @@ theorem ret_parS (hKo : ∀ m, n = m + 1 → EvalKOk F O m ∧ RetOk F O m)
     | succ m =>
     obtain ⟨hKk, hRr⟩ := hKo m rfl
     have : ret F O (m + 1) hs (.parS e hid τa τb side Ko) (.abort j k, σ1) =
-        ret F O m hs .parE (dropRet (if side then τb else τa) (.abort j k) σ1.fresh.1
+        ret F O m hs .parE (dropRet (flushR F O (m + 1)) (if side then τb else τa) (.abort j k) σ1.fresh.1
           (ret F O m (.abort .drop σ1.fresh.1 :: hs) (.parY e hid)
             (evalK F O m (.capture e hid :: .abort .drop σ1.fresh.1 :: hs) σ1.fresh.2 Ko (.abort σ1.fresh.1 0)))) := by
       rw [ret.eq_def]
@@ -680,8 +685,7 @@ theorem ret_parS (hKo : ∀ m, n = m + 1 → EvalKOk F O m ∧ RetOk F O m)
       [] [] σ1.fresh.2 X _ (.parY hP.hop hP.howns hP.hrefs hP.hret) hR2 (fun _ h => by simp at h) hwf2 Agree.self
       (fun _ h => by simp at h) List.nodup_nil disj_nil_left hSo2 (by simpa using hdSoX) h1
     simp only [List.nil_append] at h2
-    rw [dropRet_eq (F := F) (O := O) (n := m) (hs := hs)]
-    have h3 := ret_dropK (τ' := .pair τa τb) (n := m) (k := k) (aimed_uncap haim) hR.2 hwf2 h2
+    have h3 := ret_dropK (τ' := .pair τa τb) (k := k) hfl (aimed_uncap haim) hR.2 hwf2 h2
     have hI2 : Inv F ι σ1.fresh.2 Γ₁ env E₁ S := ⟨hP.hI.foot.frame (restrict hag2), hP.hI.nodup, hP.hI.disj, hP.hI.keys⟩
     have hE1a : ∀ l ∈ E₁, σ1.fresh.2.mem l ≠ none := fun l hl => by
       show σ1.mem l ≠ none
