@@ -45,19 +45,19 @@ def Kept (L : List Nat) (cs : List Cut) (z : Nat) : Prop := z ∈ L ∧ ∀ c �
 /-- A hole at the root is the only hole, and the tree after is its new tree. -/
 theorem join_here (hL : LT F ι σ a τ L) (hc : c ∈ cs) (hloc : c.loc = a)
     (hcs : ∀ c ∈ cs, (∃ P, Path F ι σ a τ P c.loc c.ty) ∧ LT F ι σ c.loc c.ty c.old ∧ LT F ι σ' c.loc c.ty c.new)
-    (hcc : ∀ c ∈ cs, c.ty.complete = true)
+    (hcc : ∀ c ∈ cs, c.ty.whole = true)
     (hd : ∀ c ∈ cs, ∀ d ∈ cs, c ≠ d → Disj c.old d.old) :
     ∃ L', LT F ι σ' a τ L' ∧ (∀ z, z ∈ L' ↔ Kept L cs z ∨ ∃ c ∈ cs, z ∈ c.new) ∧
       ∀ c ∈ cs, ∃ P, Path F ι σ' a τ P c.loc c.ty := by
   obtain ⟨⟨P, hp⟩, hold, hnew⟩ := hcs c hc
   rw [hloc] at hold hnew hp
-  obtain ⟨-, rfl⟩ := hp.self hL (Ty.complete_not_hole (hcc c hc))
+  obtain ⟨-, rfl⟩ := hp.self hL (Ty.whole_not_hole (hcc c hc))
   obtain rfl := hold.det hL
   -- Any other hole lies in the root's tree, which is this hole's: apart from it, it is empty.
   have hsame : ∀ d ∈ cs, d = c := fun d hd' => by
     refine Classical.byContradiction fun hne => ?_
     obtain ⟨⟨P, hp⟩, hdo, -⟩ := hcs d hd'
-    obtain ⟨R, hR⟩ := hdo.cons (Ty.complete_not_hole (hcc d hd'))
+    obtain ⟨R, hR⟩ := hdo.cons (Ty.whole_not_hole (hcc d hd'))
     have := path_sub hp hL hdo d.loc (by rw [hR]; exact List.mem_cons_self ..)
     exact hd d hd' c hc hne d.loc (by rw [hR]; exact List.mem_cons_self ..) this
   refine ⟨c.new, hnew, fun z => ⟨fun h => .inr ⟨c, hc, h⟩, ?_⟩, fun d hd' => ?_⟩
@@ -78,7 +78,7 @@ theorem kept_up {L R : List Nat} (hRL : ∀ z ∈ R, z ∈ L) (hout : ∀ c ∈ 
 its cells those kept and the new trees', with a path to each hole. -/
 theorem multi_join (hL : LT F ι σ a τ L) (hR : RtExt σ σ') : ∀ (cs : List Cut),
     (∀ c ∈ cs, (∃ P, Path F ι σ a τ P c.loc c.ty) ∧ LT F ι σ c.loc c.ty c.old ∧ LT F ι σ' c.loc c.ty c.new) →
-    (∀ c ∈ cs, c.ty.complete = true) →
+    (∀ c ∈ cs, c.ty.whole = true) →
     (∀ c ∈ cs, ∀ d ∈ cs, c ≠ d → Disj c.old d.old) →
     (∀ z, Kept L cs z → σ'.mem z = σ.mem z) →
     (∀ z, Kept L cs z → ∀ l x, σ'.rt l = some (z, x) → σ.rt l = some (z, x)) →
@@ -95,7 +95,7 @@ theorem multi_join (hL : LT F ι σ a τ L) (hR : RtExt σ σ') : ∀ (cs : List
       have hc' := hcc c hc
       generalize c.ty = t at hp hc'
       cases hp with
-      | here => simp [Ty.complete] at hc'
+      | here => simp [Ty.whole, Ty.complete] at hc'
     refine ⟨[], .hole, fun z => ?_, fun c hc => (hno c hc).elim⟩
     simp only [List.not_mem_nil, false_iff, not_or]
     exact ⟨fun h => by simpa using h.1, fun ⟨c, hc, _⟩ => hno c hc⟩
@@ -313,7 +313,7 @@ theorem multi_join (hL : LT F ι σ a τ L) (hR : RtExt σ σ') : ∀ (cs : List
           exact .inr ⟨⟨_, hp'⟩, path_sub hp' h2 ho'⟩
       have hhead : ∀ d ∈ cs, d.loc ∈ d.old := fun d hd' => by
         obtain ⟨-, ho, -⟩ := hcs d hd'
-        obtain ⟨R, hR⟩ := ho.cons (Ty.complete_not_hole (hcc d hd'))
+        obtain ⟨R, hR⟩ := ho.cons (Ty.whole_not_hole (hcc d hd'))
         rw [hR]; exact List.mem_cons_self ..
       let cs₁ := cs.filter (fun d => decide (d.loc ∈ R₁))
       let cs₂ := cs.filter (fun d => decide (d.loc ∈ R₂))

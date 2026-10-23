@@ -1471,6 +1471,65 @@ example : ∀ n, match eval [] [] n [.abort .fail 0] .empty [] cellEx with
     | (.abort _ _, σ') => ∀ l, σ'.mem l = none :=
   program_ok (by intro d hd; simp at hd) cellEx_typed
 
+theorem Ty.shiftBy_zero : ∀ τ : Ty, τ.shiftBy 0 = τ
+  | .int => rfl
+  | .box τ => by simp [Ty.shiftBy, Ty.shiftBy_zero τ]
+  | .fn _ _ _ _ => rfl
+  | .pair A B => by simp [Ty.shiftBy, Ty.shiftBy_zero A, Ty.shiftBy_zero B]
+  | .sum A B => by simp [Ty.shiftBy, Ty.shiftBy_zero A, Ty.shiftBy_zero B]
+  | .hole τ => by simp [Ty.shiftBy, Ty.shiftBy_zero τ]
+  | .rref _ _ _ => rfl
+  | .arena _ => rfl
+
+/-- Reading through a reference into the innermost region. -/
+theorem Typed.rget0 (hp : PlaceTy Γ p (.rref c 0 τ) w y) (hR : lookup R Γ = some s)
+    (hs : s = .own (.arena 0) true ∨ ∃ m, s = .ref m (.arena 0)) : Typed F O Γ (.rget p) τ Γ r := by
+  simpa [Ty.shiftBy_zero] using Typed.rget (k := 0) hp hR hs
+
+/-- `function growR<region R>(p: Ref<R, int>): Ref<R, int> uses Region<R> { R.alloc(*p + 1) }`: a
+function of its caller's region, lent the arena to allocate in and read through. -/
+def growR : Fn :=
+  { owns := [("p", .rref false 0 .int)], refs := [("R", .mut, .arena 0)], ret := .rref false 0 .int, row := [],
+    body := .let_ "x" .int (.rget (var "p"))
+      (.let_ "y" .int (.add (.read (var "x")) (.lit 1)) (.ralloc "R" false .int (.read (var "y")))) }
+
+/-- `region (R) { const p = R.alloc(41); const q = growR(p); *q }`: 42. -/
+def growEx : Expr :=
+  .region "R" .int
+    (.let_ "p" (.rref false 0 .int) (.ralloc "R" false .int (.lit 41))
+      (.let_ "q" (.rref false 0 .int) (.call 0 [.read (var "p")] [(.mut, var "R")])
+        (.rget (var "q"))))
+
+example : value (eval [growR] [] 40 [] .empty [] growEx) = some 42 := by
+  run [growEx, growR]
+example : freed (eval [growR] [] 40 [] .empty [] growEx) := by
+  run [growEx, growR]
+
+theorem growR_ok : FnsOk [growR] [] := by
+  intro d hd
+  simp only [List.mem_singleton] at hd
+  subst hd
+  exact ⟨by decide, _, .let_ (live := true) rfl (Typed.rget0 (R := "R") (.own rfl) rfl (.inr ⟨_, rfl⟩))
+    (.let_ (live := true) rfl (.add (.read (.own rfl)) .lit) (.ralloc rfl (.inr rfl) rfl (.read (.own rfl))))⟩
+
+theorem growEx_typed : Typed [growR] [] [] growEx .int [] [.fail] := by
+  refine .region rfl rfl ?_
+  refine .let_ (live := true) rfl (.ralloc rfl (.inl rfl) rfl .lit) ?_
+  refine .let_ (live := true) rfl ?_ (by simpa [Ty.shiftBy] using Typed.rget (R := "R") (k := 0) (τ := .int) (.own rfl) rfl (.inl rfl))
+  have := Typed.call (F := [growR]) (O := []) (f := 0) (d := growR) (r := [.fail])
+    (Γ := [("p", .own (.rref false 0 .int) true), ("R", .own (.arena 0) true)])
+    rfl rfl rfl (by simp [growR]) (.cons (.readRef (.own (x := "p") rfl)) .nil)
+    (.cons (.own (x := "R") rfl) (fun _ => rfl) rfl .nil) (by simp [LentApart])
+  simpa [growR, Ctx.shift] using this
+
+example : ∀ n, match eval [growR] [] n [.abort .fail 0] .empty [] growEx with
+    | (.stuck, _) => False
+    | (.susp _ _ _ _ _, _) => False
+    | (.timeout, _) => True
+    | (.val v, σ') => ∃ L, VT [growR] [] σ' .int v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
+    | (.abort _ _, σ') => ∀ l, σ'.mem l = none :=
+  program_ok growR_ok growEx_typed
+
 theorem ralloc_ty (h : Typed F O Γ (.ralloc R c τ a) t Γ' r) :
     ∃ k s, t = .rref c k τ ∧ lookup R Γ = some s ∧ (s = .own (.arena k) true ∨ s = .ref .mut (.arena k)) := by
   cases h; exact ⟨_, _, rfl, ‹_›, ‹_›⟩

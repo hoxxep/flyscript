@@ -3627,8 +3627,8 @@ theorem Caps.lends : Caps Γ caps ys →
   intro h
   induction h with
   | nil => exact .nil
-  | ro hp hc _ ih => exact .cons hp (fun h => by cases h) hc ih
-  | «mut» hp _ hc _ ih => exact .cons hp (fun _ => rfl) hc ih
+  | ro hp hc _ ih => exact .cons hp (fun h => by cases h) (Ty.complete_whole hc) ih
+  | «mut» hp _ hc _ ih => exact .cons hp (fun _ => rfl) (Ty.complete_whole hc) ih
 
 theorem Caps.lentApart : Caps Γ caps ys → Exclusive ys → LentApart (caps.map fun c => (c.mode, c.loc)) := by
   intro h hx

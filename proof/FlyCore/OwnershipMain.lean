@@ -341,7 +341,7 @@ theorem eval_ok_succ (hF : FnsOk F O) (hE : EvalOk F O n) (hR : RetOk F O n) :
         hso, hc, hslot, fun hs => .inr (by
           rcases hshp hs with ⟨rfl, -⟩ | ⟨-, P', rfl⟩
           · cases hpath; exact ⟨[], rfl⟩
-          · exact ⟨_, rfl⟩), hτc.1, hty⟩
+          · exact ⟨_, rfl⟩), Ty.complete_whole hτc.1, hty⟩
       have hown' : (cloFn d xc τc k).owns = [(pn, A)] := by
         cases k with
         | once => exact absurd rfl hk

@@ -93,6 +93,14 @@ def Ty.complete : Ty → Bool
   | .rref _ _ _ => true
   | .arena _ => false
 
+/-- What a borrow may be of: a value with no place lent out of it, or a region's arena. -/
+def Ty.whole : Ty → Bool
+  | .arena _ => true
+  | τ => τ.complete
+
+theorem Ty.complete_whole {τ : Ty} (h : τ.complete = true) : τ.whole = true := by
+  cases τ <;> simp_all [Ty.whole, Ty.complete]
+
 def Ty.isHole : Ty → Bool
   | .hole _ => true
   | _ => false
@@ -121,6 +129,13 @@ theorem Ty.complete_not_hole {τ : Ty} (h : τ.complete = true) : τ.isHole = fa
 
 theorem Ty.lent1_complete : (Ty.lent1 t A B).complete = false := by
   cases t <;> simp [Ty.lent1, Ty.complete]
+
+theorem Ty.whole_not_hole {τ : Ty} (h : τ.whole = true) : τ.isHole = false := by
+  cases τ <;> simp_all [Ty.whole, Ty.complete, Ty.isHole]
+
+theorem Ty.lent1_whole : (Ty.lent1 t A B).whole = false := by
+  cases t <;> simp [Ty.lent1, Ty.whole, Ty.complete]
+
 
 theorem Ty.lent1_isHole : (Ty.lent1 t A B).isHole = false := by
   cases t <;> rfl
@@ -1269,7 +1284,7 @@ inductive Weaker : Ctx → Ctx → Prop
 each is lent in and the variable it is rooted at. -/
 inductive Lends (Γ : Ctx) : List (Mode × Place) → List (Mode × Ty) → List (Mode × Var) → Prop
   | nil : Lends Γ [] [] []
-  | cons : PlaceTy Γ p τ w y → (m = .mut → w = true) → τ.complete = true → Lends Γ rest ts ys →
+  | cons : PlaceTy Γ p τ w y → (m = .mut → w = true) → τ.whole = true → Lends Γ rest ts ys →
       Lends Γ ((m, p) :: rest) ((m, τ) :: ts) ((m, y) :: ys)
 
 /-- A field of the pair a variable holds: the first, or the second. -/

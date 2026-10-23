@@ -729,7 +729,7 @@ def HoleOk (F : List Fn) (ι : List Nat) (σ : Store) (Γ : Ctx) (env : Env) (h 
   ∃ s a τr, lookup h.root Γ = some s ∧ lookup h.root env = some a ∧ (h.mode = .mut → s.excl = true) ∧
     Path F ι σ a τr h.path h.loc h.ty ∧ LT F ι σ a τr h.tree ∧ h.tree.Perm (h.path ++ h.old) ∧
     SlotOk F ι σ s a h.tree ∧ LT F ι σ h.loc h.ty h.old ∧ (∀ σ' L', LT F ι σ' a τr L' → SlotOk F ι σ' s a L') ∧
-    (s.shell = true → (h.path = [] ∧ h.ty = τr) ∨ ∃ P, h.path = a :: P) ∧ h.ty.complete = true ∧ τr = s.ty
+    (s.shell = true → (h.path = [] ∧ h.ty = τr) ∨ ∃ P, h.path = a :: P) ∧ h.ty.whole = true ∧ τr = s.ty
 
 theorem HoleOk.entry (h : HoleOk F ι σ Γ env hl) :
     ∃ s a, Entry F ι σ Γ env hl.root s a hl.tree ∧ (hl.mode = .mut → s.excl = true) :=
@@ -771,7 +771,7 @@ theorem HoleOk.excl_sub (hok : HoleOk F ι σ Γ env h) (hm : h.mode = .mut) :
       rw [hp, List.nil_append] at hperm
       match s, hss, hso with
       | .half _ _ _, _, _ =>
-        rw [hty, hty'] at hcomp; simp [Slot.ty, Ty.lent1_complete] at hcomp
+        rw [hty, hty'] at hcomp; simp [Slot.ty, Ty.lent1_whole] at hcomp
       | .ref .mut (.fn k A B r), _, hso =>
         have := hso.ref_ty hLT
         simp only [Hole.slot, hm, hty, ← this] at hl
@@ -1013,12 +1013,12 @@ theorem HoleOk.path_old (hok : HoleOk F ι σ Γ env h) : Disj h.path h.old :=
   (nodup_append_disj.mp hok.tree_nodup).2.2
 
 /-- A hole's tree starts at its location. -/
-theorem HoleOk.complete (hok : HoleOk F ι σ Γ env h) : h.ty.complete = true := by
+theorem HoleOk.whole (hok : HoleOk F ι σ Γ env h) : h.ty.whole = true := by
   obtain ⟨_, _, _, _, _, _, _, _, _, _, _, _, _, h, _⟩ := hok
   exact h
 
 theorem HoleOk.old_head (hok : HoleOk F ι σ Γ env h) : ∃ R, h.old = h.loc :: R :=
-  hok.old_lt.cons (Ty.complete_not_hole hok.complete)
+  hok.old_lt.cons (Ty.whole_not_hole hok.whole)
 
 /-- A root that may change all but its first cell, lent `mut`: the hole is the root itself, a
 closure as the callee borrows it, or a place past that cell. -/
@@ -1032,7 +1032,7 @@ theorem HoleOk.shell_root (hok : HoleOk F ι σ Γ env h) (he : Entry F ι σ Γ
   · refine .inl ⟨hp, ?_⟩
     match s, hs, hso with
     | .half _ _ _, _, _ =>
-      rw [hty, hty'] at hcomp; simp [Slot.ty, Ty.lent1_complete] at hcomp
+      rw [hty, hty'] at hcomp; simp [Slot.ty, Ty.lent1_whole] at hcomp
     | .ref .mut (.fn k A B r), _, hso =>
       have := hso.ref_ty hLT
       simp only [Hole.slot, hm, hty, ← this]
@@ -1217,7 +1217,7 @@ theorem new_cases {p : Hole × List Nat} (hok : HoleOk F ι σ Γ env p.1) (hnew
     (hz : z ∈ p.2) : z ∈ exclPart p.1.slot p.2 ∨ (z = p.1.loc ∧ z ∈ p.1.old ∧ z ∈ sharedPart p.1.slot p.1.old) := by
   rcases mem_parts (s := p.1.slot) hz with h1 | h1
   · exact .inl h1
-  · obtain ⟨R, hR⟩ := hnew.cons (Ty.complete_not_hole hok.complete)
+  · obtain ⟨R, hR⟩ := hnew.cons (Ty.whole_not_hole hok.whole)
     obtain ⟨R0, hR0⟩ := hok.old_head
     rw [hR] at h1
     have he := Hole.shared_mut_head hm h1
@@ -1234,7 +1234,7 @@ theorem root_join (hI : Inv F ι σ Γ env E S) (hholes : ∀ h ∈ hs, HoleOk F
     (hX : Disj (E.filter (fun l => l ∉ mutCells (olds hs))) (mutCells ps)) (hSX : Disj S (mutCells ps))
     (he : Entry F ι σ Γ env x s a L) (hLT : LT F ι σ a τr L) (hτ : τr = s.ty) (extra : List Cut)
     (hepath : ∀ e ∈ extra, (∃ P, Path F ι σ a τr P e.loc e.ty) ∧ LT F ι σ e.loc e.ty e.old ∧ e.new = e.old ∧
-      e.ty.complete = true)
+      e.ty.whole = true)
     (heXS : ∀ e ∈ extra, ∀ z ∈ e.old, z ∈ E.filter (fun l => l ∉ mutCells (olds hs)) ∨ z ∈ S)
     (hed : ∀ e ∈ extra, ∀ c ∈ cutsOf ps x, Disj e.old c.old)
     (hee : ∀ e ∈ extra, ∀ e' ∈ extra, e ≠ e' → Disj e.old e'.old) :
@@ -1286,7 +1286,7 @@ theorem root_join (hI : Inv F ι σ Γ env E S) (hholes : ∀ h ∈ hs, HoleOk F
   · intro c hc
     rcases List.mem_append.mp hc with hc | hc
     · obtain ⟨p, hp, -, -, rfl⟩ := hcut hc
-      exact (hpsok p hp).complete
+      exact (hpsok p hp).whole
     · exact (hepath c hc).2.2.2
   · intro c hc d hd hne
     rcases List.mem_append.mp hc with hc | hc <;> rcases List.mem_append.mp hd with hd | hd
@@ -1505,7 +1505,7 @@ theorem caller_rebuild (hI : Inv F ι σ Γ env E S) (hholes : ∀ h ∈ hs, Hol
         rcases mem_parts (s := p.1.slot) hlc with h1 | h1
         · exact absurd (mem_olds_mut.mpr ⟨p.1, hpsin p hp, h1⟩) hnM
         · obtain ⟨R0, hR0⟩ := (hpsok p hp).old_head
-          obtain ⟨R, hR⟩ := (hnew p hp hm).cons (Ty.complete_not_hole (hpsok p hp).complete)
+          obtain ⟨R, hR⟩ := (hnew p hp hm).cons (Ty.whole_not_hole (hpsok p hp).whole)
           rw [hR0] at h1
           have := Hole.shared_mut_head hm h1
           subst this
