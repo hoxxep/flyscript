@@ -995,11 +995,38 @@ impl Checker {
     }
   }
 
+  // One tag's payload, if the type has it, and the tail of its tags: an enum's substituted.
+  function tagPayload(self: mut Self, scrut: readonly Ty, name: str): Option<[Option<Ty>, Tail]> {
+    match (self.strip(scrut)) {
+      #Named(d, args) => match (self.p.defs[d].kind) {
+        #Enum { tags } => match (labelGet(tags, name)) {
+          #Some(t) => #Some([#Some(substParams(t, self.p.defs[d].params, args)), #Closed]),
+          #None => #Some([#None, #Closed]),
+        },
+        _ => #None,
+      },
+      #Union(r) => {
+        const x = self.s.expandRow(r);
+        #Some([labelGet(x.labels, name), x.tail])
+      }
+      _ => #None,
+    }
+  }
+
+  // The tail of a type's tags: closed for an enum.
+  function tagTail(self: mut Self, scrut: readonly Ty): Option<Tail> {
+    match (self.strip(scrut)) {
+      #Named(d, _) => match (self.p.defs[d].kind) { #Enum { tags: _ } => #Some(#Closed), _ => #None },
+      #Union(r) => #Some(self.s.expandRow(r).tail),
+      _ => #None,
+    }
+  }
+
   function tag(self: mut Self, name: str, args: readonly TagArgs, expected: Option<Ty>, span: Span, id: usize): Ty {
     // The payload type expected for this tag, if the context names it.
     let known: Option<Option<Ty>> = #None;
-    if (const #Some(x) = expected && const #Some([tags, tail]) = self.tagPayloads(x)) {
-      match (labelGet(tags, name)) {
+    if (const #Some(x) = expected && const #Some([found, tail]) = self.tagPayload(x, name)) {
+      match (found) {
         #Some(t) => { known = #Some(#Some(t)); }
         #None => { if (tail == #Closed) { known = #Some(#None); } }
       }
@@ -2383,8 +2410,8 @@ impl Checker {
         }
       }
       #Tag { name, args } => {
-        const payload: Ty = match (self.tagPayloads(inner)) {
-          #Some([tags, tail]) => match (labelGet(tags, name.asStr())) {
+        const payload: Ty = match (self.tagPayload(inner, name.asStr())) {
+          #Some([found, tail]) => match (found) {
             #Some(p) => p,
             #None => {
               if (tail == #Closed) {
@@ -2456,13 +2483,13 @@ impl Checker {
   // usefulness algorithm); if not, reports a value they miss.
   function exhaustive(self: mut Self, scrut: readonly Ty, arms: readonly Vec<MatchArm>, span: Span): void {
     const st = self.strip(scrut);
-    if (const #Some([_, #Var(_)]) = self.tagPayloads(st)) {
+    if (const #Some(#Var(_)) = self.tagTail(st)) {
       // Final types: nothing can add tags now (see `pendingMatches`).
       self.s.closeUnion(st);
     }
     let unguarded: Vec<Pattern> = Vec.new();
     for (const a of arms) { if (a.guard.isNone()) { unguarded.push(a.pat.clone()); } }
-    if (const #Some([_, #Param(_)]) = self.tagPayloads(st) && !unguarded.iter().some((p) => match (p.kind) { #Wild | #Bind(_) => true, _ => false })) {
+    if (const #Some(#Param(_)) = self.tagTail(st) && !unguarded.iter().some((p) => match (p.kind) { #Wild | #Bind(_) => true, _ => false })) {
       const shown = self.show(st);
       self.err(span, `this \`match\` needs a \`_\` arm: \`${shown}\` may hold more tags`.asStr());
       return;
@@ -2563,8 +2590,7 @@ impl Checker {
         #Ctor(#Record, subs)
       }
       #Tag { name, args } => {
-        const tags = match (self.tagPayloads(t)) { #Some([tags, _]) => tags, #None => return #Never };
-        const payload = match (labelGet(tags, name.asStr())) { #Some(x) => self.s.resolve(x), #None => return #Never };
+        const payload = match (self.tagPayload(t, name.asStr())) { #Some([#Some(x), _]) => self.s.resolve(x), _ => return #Never };
         const fields = payloadFields(payload);
         const subs: Vec<Pat> = match ([args, payload.clone()]) {
           [#None, _] => {

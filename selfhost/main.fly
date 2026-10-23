@@ -12,7 +12,7 @@ import { checkOwnership } from "./own";
 import { cProgram } from "./c";
 import { jsProgram } from "./js";
 import { llvmProgram } from "./llvm";
-import { File, println, writeFile, exit } from "std/io";
+import { File, println, eprintln, writeFile, exit } from "std/io";
 
 // What stops a compilation: diagnostics, or a file that cannot be read or written.
 type Stop = #Failed | #Unreadable { path: String };
@@ -36,8 +36,21 @@ function readText(path: String): String uses Io, Fail<Stop> {
   } catch (_) { throw #Unreadable { path } }
 }
 
-function compile(entry: str, out: str, root: str, freestanding: bool, ptr: usize): void uses Io, Fail<Stop> {
+// With `--time`, how long each phase took, on standard error.
+struct Clock { on: bool; at: Instant }
+
+impl Clock {
+  function lap(self: mut Self, phase: str): void uses Io {
+    const now = Io.now();
+    if (self.on) { eprintln(`${phase}: ${now.since(self.at).toMs()} ms`); }
+    self.at = now;
+  }
+}
+
+function compile(entry: str, out: str, root: str, freestanding: bool, ptr: usize, time: bool): void uses Io, Fail<Stop> {
+  let clock = Clock { on: time, at: Io.now() };
   let p = Program.load([entry.toString()], `${root}/std`.asStr());
+  clock.lap("load");
   if (p.diags.len() == 0) {
     let fid: usize = 0;
     while (fid < p.fns.len()) {
@@ -45,10 +58,12 @@ function compile(entry: str, out: str, root: str, freestanding: bool, ptr: usize
       fid += 1;
     }
   }
+  clock.lap("check");
   // Ownership needs well-typed bodies.
   if (p.diags.len() == 0) {
     for (const f of 0..p.fns.len()) { checkOwnership(mut p, f); }
   }
+  clock.lap("ownership");
   if (p.diags.len() > 0) {
     report(p);
     throw #Failed;
@@ -70,8 +85,10 @@ function compile(entry: str, out: str, root: str, freestanding: bool, ptr: usize
       println(message.asStr());
       throw #Failed
     };
+    clock.lap("code");
     const companion = `${out.slice(0, out.len() - 3)}.c`;
     try { writeFile(out, ll.asStr()); writeFile(companion.asStr(), c.asStr()); } catch (_) { throw #Unreadable { path: out.toString() } };
+    clock.lap("write");
     return;
   }
   const code = try {
@@ -80,15 +97,18 @@ function compile(entry: str, out: str, root: str, freestanding: bool, ptr: usize
     println(message.asStr());
     throw #Failed
   };
+  clock.lap("code");
   try { writeFile(out, code.asStr()); } catch (_) { throw #Unreadable { path: out.toString() } };
+  clock.lap("write");
 }
 
 // `--freestanding`: a program without the C library, whose roots are the functions C calls.
 // `--wasm32`: through LLVM, for a target of 32-bit pointers, WebAssembly's.
+// `--time`: how long each phase took, on standard error.
 export function main(entry: str, out: str, root: str, flags: readonly String[]): void uses Io {
   try {
     const ptr: usize = if (flags.iter().some((f) => f == "--wasm32")) { 4 } else { 8 };
-    compile(entry, out, root, flags.iter().some((f) => f == "--freestanding"), ptr);
+    compile(entry, out, root, flags.iter().some((f) => f == "--freestanding"), ptr, flags.iter().some((f) => f == "--time"));
   } catch (e) {
     match (e) {
       #Failed => {}

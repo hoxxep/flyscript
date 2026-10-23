@@ -390,6 +390,20 @@ impl Lower {
     out
   }
 
+  // The payload type of tag `name` of `t`, an enum's substituted.
+  export function tagOf(self: readonly Self, t: readonly Ty, name: str): Option<Ty> {
+    match (t) {
+      #Named(d, args) => {
+        if (const #Enum { tags } = self.p.defs[d].kind && const #Some([_, x]) = tags.iter().find(([k, _]) => k == name)) {
+          return #Some(substParams(x, self.p.defs[d].params, args));
+        }
+        #None
+      }
+      #Union(r) => match (r.labels.iter().find(([k, _]) => k == name)) { #Some([_, x]) => #Some(x.clone()), #None => #None },
+      _ => #None,
+    }
+  }
+
   // Whether values of the type are tagged: a union, or an enum.
   export function tagged(self: readonly Self, t: readonly Ty): bool {
     match (t) {
@@ -406,7 +420,7 @@ impl Lower {
 
   // The payload of tag `name` of a union.
   export function payloadOf(self: readonly Self, t: readonly Ty, name: str): Ty {
-    match (self.tagsOf(t).iter().find(([k, _]) => k == name)) { #Some([_, x]) => self.payloadTy(x), #None => #Error }
+    match (self.tagOf(t, name)) { #Some(x) => self.payloadTy(x), #None => #Error }
   }
 
   // The type of a field of a struct-like type, or of a tuple's element.
@@ -1498,7 +1512,7 @@ impl Lower {
 
   function tag(self: mut Self, e: readonly Expr, name: str, args: readonly TagArgs): Operand uses Fail<Diagnostic> {
     const t = self.exprTy(e.id);
-    const pt: Ty = match (self.tagsOf(t).iter().find(([k, _]) => k == name)) { #Some([_, x]) => x.clone(), #None => #Error };
+    const pt: Ty = match (self.tagOf(t, name)) { #Some(x) => x, #None => #Error };
     const vs: Vec<Operand> = match (args) {
       #None => Vec.new(),
       #Tuple(es) => {

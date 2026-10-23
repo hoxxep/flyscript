@@ -288,6 +288,18 @@ export function checkOwnership(p: mut Program, fid: usize): void {
   o.p.typed.insert(fid, typed);
 }
 
+// A function's parameters as a call instantiates them, given the call's generic arguments.
+function instParams(s: readonly Scheme, targs: Option<readonly Vec<GArg>>): Vec<[String, Ty]> {
+  let params: Vec<[String, Ty]> = Vec.new();
+  match (targs) {
+    #Some(a) if a.len() == s.tparams.len() => {
+      for (const [n, t] of s.params) { params.push([n.clone(), substParams(t, s.tparams, a)]); }
+    }
+    _ => { for (const [n, t] of s.params) { params.push([n.clone(), t.clone()]); } }
+  }
+  params
+}
+
 // Parameters' declaration sites: above any position in a source, counting down.
 const PARAM_SITES: usize = 1 << 51;
 
@@ -1771,20 +1783,11 @@ impl Own {
 
   function call(self: mut Self, e: readonly Expr, callee: readonly Expr, args: readonly Vec<Expr>): Val {
     const fid: Option<usize> = match (self.typed.calls.get(e.id)) { #Some(f) => #Some(f), #None => #None };
-    const scheme: Option<Scheme> = match (fid) { #Some(f) => #Some(self.p.fns[f].scheme.clone()), #None => #None };
     // The parameters as instantiated at this call: `push(x)` on a `Vec<i64>` takes an `i64`; a
     // function value's come from its type.
     let params: Vec<[String, Ty]> = Vec.new();
-    match (scheme) {
-      #Some(s) => {
-        const targs: Option<Vec<GArg>> = match (self.typed.targs.get(e.id)) { #Some(a) => #Some(a.clone()), #None => #None };
-        match (targs) {
-          #Some(a) if a.len() == s.tparams.len() => {
-            for (const [n, t] of s.params) { params.push([n.clone(), substParams(t, s.tparams, a)]); }
-          }
-          _ => { for (const [n, t] of s.params) { params.push([n.clone(), t.clone()]); } }
-        }
-      }
+    match (fid) {
+      #Some(f) => { params = instParams(self.p.fns[f].scheme, self.typed.targs.get(e.id)); }
       #None => {
         if (const #Fn(f) = stripBorrow(self.tyOf(callee))) {
           for (const t of f.params) { params.push([String.new(), t.clone()]); }
@@ -1815,7 +1818,7 @@ impl Own {
     const isMethod = match (callee.kind) { #Field { target: _ } => true, _ => false };
     if (hasSelf && isMethod) {
       // The receiver of a method call, borrowed in two phases (§4.1).
-      const target: Expr = match (callee.kind) { #Field { target, name: _ } => target.get().clone(), _ => callee.clone() };
+      const target: readonly Expr = match (callee.kind) { #Field { target, name: _ } => target.get(), _ => callee };
       const selfTy = params.remove(0)[1].clone();
       const want = self.argUse(selfTy, self.tyOf(target));
       if (const #Some(path) = self.place(target)) {
