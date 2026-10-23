@@ -17,8 +17,21 @@ structure Cut where
   old : List Nat
   new : List Nat
 
-theorem LT.ne_nil (h : LT F σ a τ L) : L ≠ [] := by
-  obtain ⟨R, rfl⟩ := h.cons; simp
+theorem LT.ne_nil (h : LT F σ a τ L) (hτ : τ.isHole = false) : L ≠ [] := by
+  obtain ⟨R, rfl⟩ := h.cons hτ; simp
+
+/-- A path from a location to itself passes no cell. -/
+theorem Path.self (hp : Path F σ a τ P a τ') (hL : LT F σ a τ L) (hτ : τ'.isHole = false) : P = [] ∧ τ = τ' := by
+  obtain ⟨R, hR, hperm⟩ := path_split hp hL
+  obtain ⟨R', rfl⟩ := hR.cons hτ
+  have hn := hperm.nodup_iff.mp hL.nodup
+  cases hp with
+  | here => exact ⟨rfl, rfl⟩
+  | step => simp at hn
+  | clo => simp at hn
+  | fst => simp at hn
+  | snd => simp at hn
+  | tag => simp at hn
 
 /-- A tree the path into it passes through holds the tree where the path ends. -/
 theorem path_sub (hp : Path F σ a τa P l τ) (hL : LT F σ a τa L) (hR : LT F σ l τ R) : ∀ z ∈ R, z ∈ L := by
@@ -32,17 +45,19 @@ def Kept (L : List Nat) (cs : List Cut) (z : Nat) : Prop := z ∈ L ∧ ∀ c �
 /-- A hole at the root is the only hole, and the tree after is its new tree. -/
 theorem join_here (hL : LT F σ a τ L) (hc : c ∈ cs) (hloc : c.loc = a)
     (hcs : ∀ c ∈ cs, (∃ P, Path F σ a τ P c.loc c.ty) ∧ LT F σ c.loc c.ty c.old ∧ LT F σ' c.loc c.ty c.new)
+    (hcc : ∀ c ∈ cs, c.ty.complete = true)
     (hd : ∀ c ∈ cs, ∀ d ∈ cs, c ≠ d → Disj c.old d.old) :
     ∃ L', LT F σ' a τ L' ∧ (∀ z, z ∈ L' ↔ Kept L cs z ∨ ∃ c ∈ cs, z ∈ c.new) ∧
       ∀ c ∈ cs, ∃ P, Path F σ' a τ P c.loc c.ty := by
-  obtain ⟨-, hold, hnew⟩ := hcs c hc
-  rw [hloc] at hold hnew
-  obtain ⟨rfl, rfl⟩ := hold.det_ty hL
+  obtain ⟨⟨P, hp⟩, hold, hnew⟩ := hcs c hc
+  rw [hloc] at hold hnew hp
+  obtain ⟨-, rfl⟩ := hp.self hL (Ty.complete_not_hole (hcc c hc))
+  obtain rfl := hold.det hL
   -- Any other hole lies in the root's tree, which is this hole's: apart from it, it is empty.
   have hsame : ∀ d ∈ cs, d = c := fun d hd' => by
     refine Classical.byContradiction fun hne => ?_
     obtain ⟨⟨P, hp⟩, hdo, -⟩ := hcs d hd'
-    obtain ⟨R, hR⟩ := hdo.cons
+    obtain ⟨R, hR⟩ := hdo.cons (Ty.complete_not_hole (hcc d hd'))
     have := path_sub hp hL hdo d.loc (by rw [hR]; exact List.mem_cons_self ..)
     exact hd d hd' c hc hne d.loc (by rw [hR]; exact List.mem_cons_self ..) this
   refine ⟨c.new, hnew, fun z => ⟨fun h => .inr ⟨c, hc, h⟩, ?_⟩, fun d hd' => ?_⟩
@@ -63,6 +78,7 @@ theorem kept_up {L R : List Nat} (hRL : ∀ z ∈ R, z ∈ L) (hout : ∀ c ∈ 
 its cells those kept and the new trees', with a path to each hole. -/
 theorem multi_join (hL : LT F σ a τ L) : ∀ (cs : List Cut),
     (∀ c ∈ cs, (∃ P, Path F σ a τ P c.loc c.ty) ∧ LT F σ c.loc c.ty c.old ∧ LT F σ' c.loc c.ty c.new) →
+    (∀ c ∈ cs, c.ty.complete = true) →
     (∀ c ∈ cs, ∀ d ∈ cs, c ≠ d → Disj c.old d.old) →
     (∀ z, Kept L cs z → σ'.mem z = σ.mem z) →
     (∀ c ∈ cs, ∀ z ∈ c.new, ¬ Kept L cs z) →
@@ -70,11 +86,23 @@ theorem multi_join (hL : LT F σ a τ L) : ∀ (cs : List Cut),
     ∃ L', LT F σ' a τ L' ∧ (∀ z, z ∈ L' ↔ Kept L cs z ∨ ∃ c ∈ cs, z ∈ c.new) ∧
       ∀ c ∈ cs, ∃ P, Path F σ' a τ P c.loc c.ty := by
   induction hL with
+  | hole =>
+    intro cs hcs hcc hd hag hdn hnn
+    -- A place lent holds no place lent again.
+    have hno : ∀ c ∈ cs, False := fun c hc => by
+      obtain ⟨⟨P, hp⟩, -, -⟩ := hcs c hc
+      have hc' := hcc c hc
+      generalize c.ty = t at hp hc'
+      cases hp with
+      | here => simp [Ty.complete] at hc'
+    refine ⟨[], .hole, fun z => ?_, fun c hc => (hno c hc).elim⟩
+    simp only [List.not_mem_nil, false_iff, not_or]
+    exact ⟨fun h => by simpa using h.1, fun ⟨c, hc, _⟩ => hno c hc⟩
   | @int a n ha =>
-    intro cs hcs hd hag hdn hnn
+    intro cs hcs hcc hd hag hdn hnn
     by_cases hh : ∃ c ∈ cs, c.loc = a
     · obtain ⟨c, hc, hloc⟩ := hh
-      exact join_here (.int ha) hc hloc hcs hd
+      exact join_here (.int ha) hc hloc hcs hcc hd
     · -- An integer holds no hole but at itself.
       have hno : ∀ c ∈ cs, False := fun c hc => by
         obtain ⟨⟨P, hp⟩, -, -⟩ := hcs c hc
@@ -90,10 +118,10 @@ theorem multi_join (hL : LT F σ a τ L) : ∀ (cs : List Cut),
         · exact h.1
         · exact absurd hc (fun h => hno c h)
   | @box a b τ' R ha hb hn ih =>
-    intro cs hcs hd hag hdn hnn
+    intro cs hcs hcc hd hag hdn hnn
     by_cases hh : ∃ c ∈ cs, c.loc = a
     · obtain ⟨c, hc, hloc⟩ := hh
-      exact join_here (.box ha hb hn) hc hloc hcs hd
+      exact join_here (.box ha hb hn) hc hloc hcs hcc hd
     · -- Every hole is below the node, in its child.
       have hno : ∀ c ∈ cs, c.loc ≠ a := fun c hc e => hh ⟨c, hc, e⟩
       have hcs' : ∀ c ∈ cs, (∃ P, Path F σ b (τ') P c.loc c.ty) ∧ LT F σ c.loc c.ty c.old ∧ LT F σ' c.loc c.ty c.new := by
@@ -110,7 +138,7 @@ theorem multi_join (hL : LT F σ a τ L) : ∀ (cs : List Cut),
         obtain ⟨⟨P, hp⟩, ho, -⟩ := hcs' c hc
         exact path_sub hp hb ho z hz
       have hkept : ∀ {z}, Kept R cs z → Kept (a :: R) cs z := fun h => ⟨List.mem_cons_of_mem _ h.1, h.2⟩
-      obtain ⟨L1, hL1, hmem1, hpaths1⟩ := ih cs hcs' hd (fun z h => hag z (hkept h))
+      obtain ⟨L1, hL1, hmem1, hpaths1⟩ := ih cs hcs' hcc hd (fun z h => hag z (hkept h))
         (fun c hc z hz h => hdn c hc z hz (hkept h)) hnn
       have hka : Kept (a :: R) cs a := ⟨List.mem_cons_self .., fun c hc h => hn (hsub c hc a h)⟩
       have ha' := (hag a hka).trans ha
@@ -133,10 +161,10 @@ theorem multi_join (hL : LT F σ a τ L) : ∀ (cs : List Cut),
       · obtain ⟨P, hp⟩ := hpaths1 c hc
         exact ⟨_, .step ha' hp⟩
   | @clo a f c0 τc k A B r R ha hc0 hb hn ih =>
-    intro cs hcs hd hag hdn hnn
+    intro cs hcs hcc hd hag hdn hnn
     by_cases hh : ∃ c ∈ cs, c.loc = a
     · obtain ⟨c, hc, hloc⟩ := hh
-      exact join_here (.clo ha hc0 hb hn) hc hloc hcs hd
+      exact join_here (.clo ha hc0 hb hn) hc hloc hcs hcc hd
     · -- Every hole is below the node, in its child.
       have hno : ∀ c ∈ cs, c.loc ≠ a := fun c hc e => hh ⟨c, hc, e⟩
       have hcs' : ∀ c ∈ cs, (∃ P, Path F σ c0 (τc) P c.loc c.ty) ∧ LT F σ c.loc c.ty c.old ∧ LT F σ' c.loc c.ty c.new := by
@@ -153,7 +181,7 @@ theorem multi_join (hL : LT F σ a τ L) : ∀ (cs : List Cut),
         obtain ⟨⟨P, hp⟩, ho, -⟩ := hcs' c hc
         exact path_sub hp hb ho z hz
       have hkept : ∀ {z}, Kept R cs z → Kept (a :: R) cs z := fun h => ⟨List.mem_cons_of_mem _ h.1, h.2⟩
-      obtain ⟨L1, hL1, hmem1, hpaths1⟩ := ih cs hcs' hd (fun z h => hag z (hkept h))
+      obtain ⟨L1, hL1, hmem1, hpaths1⟩ := ih cs hcs' hcc hd (fun z h => hag z (hkept h))
         (fun c hc z hz h => hdn c hc z hz (hkept h)) hnn
       have hka : Kept (a :: R) cs a := ⟨List.mem_cons_self .., fun c hc h => hn (hsub c hc a h)⟩
       have ha' := (hag a hka).trans ha
@@ -176,10 +204,10 @@ theorem multi_join (hL : LT F σ a τ L) : ∀ (cs : List Cut),
       · obtain ⟨P, hp⟩ := hpaths1 c hc
         exact ⟨_, .clo ha' hc0 hp⟩
   | @tag a A B t b R ha hb hn ih =>
-    intro cs hcs hd hag hdn hnn
+    intro cs hcs hcc hd hag hdn hnn
     by_cases hh : ∃ c ∈ cs, c.loc = a
     · obtain ⟨c, hc, hloc⟩ := hh
-      exact join_here (.tag ha hb hn) hc hloc hcs hd
+      exact join_here (.tag ha hb hn) hc hloc hcs hcc hd
     · -- Every hole is below the node, in its child.
       have hno : ∀ c ∈ cs, c.loc ≠ a := fun c hc e => hh ⟨c, hc, e⟩
       have hcs' : ∀ c ∈ cs, (∃ P, Path F σ b (if t then A else B) P c.loc c.ty) ∧ LT F σ c.loc c.ty c.old ∧ LT F σ' c.loc c.ty c.new := by
@@ -196,7 +224,7 @@ theorem multi_join (hL : LT F σ a τ L) : ∀ (cs : List Cut),
         obtain ⟨⟨P, hp⟩, ho, -⟩ := hcs' c hc
         exact path_sub hp hb ho z hz
       have hkept : ∀ {z}, Kept R cs z → Kept (a :: R) cs z := fun h => ⟨List.mem_cons_of_mem _ h.1, h.2⟩
-      obtain ⟨L1, hL1, hmem1, hpaths1⟩ := ih cs hcs' hd (fun z h => hag z (hkept h))
+      obtain ⟨L1, hL1, hmem1, hpaths1⟩ := ih cs hcs' hcc hd (fun z h => hag z (hkept h))
         (fun c hc z hz h => hdn c hc z hz (hkept h)) hnn
       have hka : Kept (a :: R) cs a := ⟨List.mem_cons_self .., fun c hc h => hn (hsub c hc a h)⟩
       have ha' := (hag a hka).trans ha
@@ -219,10 +247,10 @@ theorem multi_join (hL : LT F σ a τ L) : ∀ (cs : List Cut),
       · obtain ⟨P, hp⟩ := hpaths1 c hc
         exact ⟨_, .tag ha' hp⟩
   | @pair a b c A R₁ B R₂ ha h1 h2 hd0 hn ih1 ih2 =>
-    intro cs hcs hd hag hdn hnn
+    intro cs hcs hcc hd hag hdn hnn
     by_cases hh : ∃ d ∈ cs, d.loc = a
     · obtain ⟨d, hd', hloc⟩ := hh
-      exact join_here (.pair ha h1 h2 hd0 hn) hd' hloc hcs hd
+      exact join_here (.pair ha h1 h2 hd0 hn) hd' hloc hcs hcc hd
     · have hno : ∀ d ∈ cs, d.loc ≠ a := fun d hd' e => hh ⟨d, hd', e⟩
       -- Each hole lies in one field or the other.
       have hside : ∀ d ∈ cs, ((∃ P, Path F σ b A P d.loc d.ty) ∧ ∀ z ∈ d.old, z ∈ R₁) ∨
@@ -243,7 +271,7 @@ theorem multi_join (hL : LT F σ a τ L) : ∀ (cs : List Cut),
           exact .inr ⟨⟨_, hp'⟩, path_sub hp' h2 ho'⟩
       have hhead : ∀ d ∈ cs, d.loc ∈ d.old := fun d hd' => by
         obtain ⟨-, ho, -⟩ := hcs d hd'
-        obtain ⟨R, hR⟩ := ho.cons
+        obtain ⟨R, hR⟩ := ho.cons (Ty.complete_not_hole (hcc d hd'))
         rw [hR]; exact List.mem_cons_self ..
       let cs₁ := cs.filter (fun d => decide (d.loc ∈ R₁))
       let cs₂ := cs.filter (fun d => decide (d.loc ∈ R₂))
@@ -276,11 +304,13 @@ theorem multi_join (hL : LT F σ a τ L) : ∀ (cs : List Cut),
         · exact h.2 d h' hz
       obtain ⟨L1, hL1, hmem1, hpaths1⟩ := ih1 cs₁
         (fun d hd' => ⟨(hin₁ d (hm₁.mp hd').1 (hm₁.mp hd').2).1, (hcs d (hm₁.mp hd').1).2⟩)
+        (fun d hd' => hcc d (hm₁.mp hd').1)
         (fun d hd' e he => hd d (hm₁.mp hd').1 e (hm₁.mp he).1)
         (fun z h => hag z (hup₁ h)) (fun d hd' z hz h => hdn d (hm₁.mp hd').1 z hz (hup₁ h))
         (fun d hd' e he => hnn d (hm₁.mp hd').1 e (hm₁.mp he).1)
       obtain ⟨L2, hL2, hmem2, hpaths2⟩ := ih2 cs₂
         (fun d hd' => ⟨(hin₂ d (hm₂.mp hd').1 (hm₂.mp hd').2).1, (hcs d (hm₂.mp hd').1).2⟩)
+        (fun d hd' => hcc d (hm₂.mp hd').1)
         (fun d hd' e he => hd d (hm₂.mp hd').1 e (hm₂.mp he).1)
         (fun z h => hag z (hup₂ h)) (fun d hd' z hz h => hdn d (hm₂.mp hd').1 z hz (hup₂ h))
         (fun d hd' e he => hnn d (hm₂.mp hd').1 e (hm₂.mp he).1)

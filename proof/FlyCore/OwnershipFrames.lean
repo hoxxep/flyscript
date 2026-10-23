@@ -22,17 +22,17 @@ theorem Foot.uncons : Foot F σ ((x, s) :: Γ) ((x, a) :: env) E S →
   intro h; cases h; exact ⟨_, _, _, ‹_›, ‹_›, rfl, rfl⟩
 
 /-- Dropping an owned variable's cell, live or moved, frees exactly its footprint. -/
-theorem dropCell_own (hwf : WF σ) : SlotOk F σ (.own τ live) c L →
+theorem dropCell_own (hwf : WF σ) (hτ : τ.complete = true) : SlotOk F σ (.own τ live) c L →
     ∃ σ', dropCell σ τ c = some σ' ∧ σ'.next = σ.next ∧ (∀ l ∈ L, σ'.mem l = none) ∧
       ∀ l, l ∉ L → σ'.mem l = σ.mem l := by
   intro h
   cases live with
-  | true => exact dropCell_live hwf h
+  | true => exact dropCell_live hwf h hτ
   | false =>
-    rcases h with ⟨hc, rfl⟩ | h
+    rcases h with ⟨hc, rfl⟩ | ⟨h, -⟩
     · obtain ⟨σ', hd, hn, hfree, hkeep⟩ := dropCell_moved (τ := τ) hc
       exact ⟨σ', hd, hn, by simpa using hfree, fun l hl => hkeep l (by simpa using hl)⟩
-    · exact dropCell_live hwf h
+    · exact dropCell_live hwf h hτ
 
 theorem WF.of_free {D : List Nat} (hwf : WF σ) (hnext : σ'.next = σ.next) (hfree : ∀ l ∈ D, σ'.mem l = none)
     (hkeep : ∀ l, l ∉ D → σ'.mem l = σ.mem l) : WF σ' := by

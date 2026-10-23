@@ -50,6 +50,7 @@ structure HandleOk (F : List Fn) (O : List Op) (σf : Store) (e : Nat) (caps : L
     (os rs : List Var) (arm : Expr) (Γin Γout : Ctx) (env : Env) (Sin S : List Nat) (r : Row)
     (Fz Rc : List Nat) (op : Op) : Prop where
   hop : O[e]? = some op
+  hcomp : ∀ τ ∈ op.owns, τ.complete = true
   hown : os.length = op.owns.length
   href : rs.length = op.refs.length
   hnames : (os ++ rs ++ caps.map Cap.name).Nodup
@@ -79,11 +80,11 @@ inductive FrameOk (F : List Fn) (O : List Op) : Store → Kont → Lvl → Lvl �
   | letK : lookup x Γ₁ = none → (Γ₁.map Prod.fst).Nodup →
       Typed F O ((x, .own τx true) :: Γ₁) b τb ((x, .own τx live) :: Γ₂) r →
       FrameOk F O σf (.letK x τx env b) ⟨Γ₁, env, τx, S, r⟩ ⟨Γ₂, env, τb, S, r⟩ [] []
-  | scopeK : x ∉ Γ₂.map Prod.fst → (Γ₂.map Prod.fst).Nodup →
+  | scopeK : x ∉ Γ₂.map Prod.fst → (Γ₂.map Prod.fst).Nodup → τx.complete = true →
       FrameOk F O σf (.scopeK τx c) ⟨(x, .own τx live) :: Γ₂, (x, c) :: env, τ, S, r⟩ ⟨Γ₂, env, τ, S, r⟩ [] []
   | callK : (∀ l ∈ d.row, l ∈ r) → Inv F σf Γ₁ env E₁ S → (∀ h ∈ hos, HoleOk F σf Γ₁ env h) →
       hos.Pairwise Apart → hos.map (fun h => (h.mode, h.ty)) = d.refs.map Prod.snd →
-      ((d.owns.map Prod.fst) ++ (d.refs.map Prod.fst)).Nodup →
+      ((d.owns.map Prod.fst) ++ (d.refs.map Prod.fst)).Nodup → (∀ o ∈ d.owns, o.2.complete = true) →
       Typed F O (fnCtx d) d.body d.ret Γ'' d.row → cells.map Prod.fst = d.owns.map Prod.fst →
       FrameOk F O σf (.callK ((d.owns.map Prod.snd).zip (cells.map Prod.snd)))
         ⟨Γ'', cells ++ (d.refs.map Prod.fst).zip (hos.map Hole.loc), d.ret, roCells (olds hos), d.row⟩
@@ -93,12 +94,12 @@ the caller lent it as the hole `hd`: `body` runs with `x` the borrow, `hd`'s roo
 reached, while it lives. -/
   | callLendK : (∀ l ∈ d.row, l ∈ r) → Inv F σf Γ₁ env E₁ S → (∀ h ∈ hos, HoleOk F σf Γ₁ env h) →
       hos.Pairwise Apart → hos.map (fun h => (h.mode, h.ty)) = d.refs.map Prod.snd →
-      ((d.owns.map Prod.fst) ++ (d.refs.map Prod.fst)).Nodup →
+      ((d.owns.map Prod.fst) ++ (d.refs.map Prod.fst)).Nodup → (∀ o ∈ d.owns, o.2.complete = true) →
       Typed F O (fnCtx d) d.body .int Γ'' d.row → cells.map Prod.fst = d.owns.map Prod.fst →
       (cs : List (Nat × Place)) ≠ [] →
       (∀ c ∈ cs, ∃ xi mi τi w hd, d.refs[c.1]? = some (xi, mi, τi) ∧ PlaceTy Γ'' c.2 d.ret w xi ∧
         (m = .mut → w = true) ∧ hos[c.1]? = some (hd : Hole) ∧ (m = .mut → hd.mode = .mut ∧ τi.isFn = false) ∧
-        ∀ s, lookup hd.root Γ₁ = some s → s.shell = true → hd.path = []) →
+        (m = .mut → ∀ s, lookup hd.root Γ₁ = some s → s.shell = true → hd.path = [])) →
       Pairs (fun c z => ∃ hd : Hole, hos[c.1]? = some hd ∧ hd.root = z) cs zs →
       (m = .mut → zs.Nodup ∧ d.ret.isFn = false) →
       (∀ z ∈ zs, ∀ τ', lookup z Γ₁ ≠ some (.own τ' false)) → lookup x Γ₁ = none →

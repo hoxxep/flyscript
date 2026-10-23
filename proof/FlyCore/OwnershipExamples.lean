@@ -83,7 +83,7 @@ theorem lends_typed : Typed [addInto] [] [] lends .int [] [.fail] := by
       [("y", .own (.box .int) false), ("x", .own (.box .int) true)] [.fail] := by
     have := Typed.call (F := [addInto]) (O := []) (Γ := [("y", .own (.box .int) true), ("x", .own (.box .int) true)])
       (f := 0) (d := addInto) (ys := [(.mut, "x")]) (r := [.fail]) rfl rfl rfl (by simp [addInto])
-      (.cons (.move (x := "y") rfl) .nil) (.cons (.own (by simp [lookup, setSlot])) (fun _ => rfl) .nil)
+      (.cons (.move (x := "y") rfl rfl) .nil) (.cons (.own (by simp [lookup, setSlot])) (fun _ => rfl) rfl .nil)
       (by simp [LentApart])
     simpa [setSlot, addInto] using this
   exact .let_ rfl (.new .lit) (.let_ rfl (.new .lit) hc)
@@ -121,13 +121,14 @@ theorem aliased_rejected : ¬ Typed [clobber] O [] aliased τ Γ' r := by
       simp at hf
       subst hf
       cases hl with
-      | cons hp _ hl =>
+      | cons hp _ _ hl =>
         cases hl with
-        | cons hp' _ hl =>
+        | cons hp' _ _ hl =>
           cases hl
           cases hp
           · cases hp' with
             | deref hq => cases hq <;> simp_all [LentApart, Place.root, Place.Apart.not_var]
+          · simp_all [lookup]
           · simp_all [lookup]
 
 /-! Effects and ownership together. -/
@@ -157,7 +158,7 @@ theorem asks_typed : Typed [] ops [] asks .int [] [.fail] := by
     (arm := .add (.read (var "b")) (.lit 1)) (Γa := [("b", .ref .ro .int)])
     (body := .let_ "a" .int (.perform 0 [] []) (.add (.read (var "a")) (.read (deref (var "base"))))) (τ := .int)
     (Γb := [("base", .ref .ro (.box .int))])
-    rfl rfl rfl (.ro (.deref (.own rfl)) .nil) (by simp [Exclusive]) (by decide)
+    rfl (by simp [ops]) rfl rfl (.ro (.deref (.own rfl)) rfl .nil) (by simp [Exclusive]) (by decide)
     (.add (.read (.ref rfl)) .lit)
     (.let_ rfl (.perform (op := { owns := [], refs := [], ret := .int }) rfl (List.mem_cons_self ..) .nil .nil
       List.Pairwise.nil) (.add (.read (.own rfl)) (.read (.deref (.ref rfl)))))
@@ -216,7 +217,7 @@ theorem drops_typed : Typed [] ops [] drops .int [] [.fail] := by
       (.let_ "y" (.box .int) (.new (.lit 2))
         (.let_ "a" .int (.perform 0 [] []) (.add (.read (var "a")) (.read (deref (var "y")))))))
     (τ := .int) (Γb := [("x", .own (.box .int) true)])
-    rfl rfl rfl .nil (by simp [Exclusive]) (by decide) (.throw_ .lit (List.mem_cons_self ..))
+    rfl (by simp [ops]) rfl rfl .nil (by simp [Exclusive]) (by decide) (.throw_ .lit (List.mem_cons_self ..))
     (.defer (.let_ (live := true) rfl (.new .lit)
         (.let_ (live := true) rfl (.perform (op := { owns := [], refs := [], ret := .int }) rfl
           (List.mem_cons_self ..) .nil .nil List.Pairwise.nil) (.add (.read (.own rfl)) (.read (.deref (.own rfl))))))
@@ -243,14 +244,15 @@ def clobbers : Expr :=
 
 /-- A variable that may be changed through is owned and live, or a `mut` borrow. -/
 theorem var_writable (h : PlaceTy Γ (var x) τ w y) (hw : w = true) :
-    lookup x Γ = some (.own τ true) ∨ lookup x Γ = some (.ref .mut τ) := by
+    lookup x Γ = some (.own τ true) ∨ lookup x Γ = some (.ref .mut τ) ∨ ∃ t A B, lookup x Γ = some (.half t A B) := by
   cases h with
   | own hx => exact .inl hx
   | ref hx =>
     rename_i m
     cases m with
     | ro => simp at hw
-    | «mut» => exact .inr hx
+    | «mut» => exact .inr (.inl hx)
+  | half hx _ => exact .inr (.inr ⟨_, _, _, hx⟩)
 
 /-- What a `handle` lends its arm, and its body, typed where those places lent `readonly` are only
 read and those lent `mut` out of reach. -/
@@ -258,7 +260,7 @@ theorem handle_inv : Typed F O Γ (.handle τ body e caps os rs arm) τ' Γ' r �
     ∃ ys Γb, Caps Γ caps ys ∧ Typed F O (freeze (hideAll Γ (roots .mut ys)) (roots .ro ys)) body τ Γb (.eff e :: r) := by
   intro h
   cases h with
-  | handle _ _ _ hc _ _ _ hb => exact ⟨_, _, hc, hb⟩
+  | handle _ _ _ _ hc _ _ _ hb => exact ⟨_, _, hc, hb⟩
 
 theorem clobbers_rejected : ¬ Typed [] ops [] clobbers τ Γ' r := by
   intro h
@@ -269,7 +271,7 @@ theorem clobbers_rejected : ¬ Typed [] ops [] clobbers τ Γ' r := by
     cases h0
     obtain ⟨ys, Γb, hc, hbody⟩ := handle_inv hb
     cases hc with
-    | ro hp hc =>
+    | ro hp _ hc =>
       cases hc
       simp only [roots, List.filter] at hbody
       have hroot : ∀ {Γ τ w y}, PlaceTy Γ (deref (var "x")) τ w y → y = "x" := by
@@ -285,7 +287,9 @@ theorem clobbers_rejected : ¬ Typed [] ops [] clobbers τ Γ' r := by
             cases ha with
             | assign hv hp' =>
               cases hv
-              rcases var_writable hp' rfl with h | h <;> simp [lookup, freeze, hideAll, setSlot, Slot.ro] at h
+              rename_i hc
+              rcases var_writable hp' rfl with h | h | ⟨_, _, _, h⟩ <;>
+                simp [lookup, freeze, hideAll, setSlot, Slot.ro] at h
 
 /-- `let n = 0; (handle { Ask.ask() + Ask.ask() } with Ask { ask() resumes k => { c = c + 1; k(c) } }) + n`,
 the arm lent `n` as `c`, `mut`: state an arm keeps from one operation to the next, which the body
@@ -312,7 +316,7 @@ theorem counts_typed : Typed [] ops [] counts .int [] [.fail] := by
     (Γa := [("c", .ref .mut .int)])
     (body := .let_ "a" .int (.perform 0 [] []) (.let_ "b" .int (.perform 0 [] []) (.add (.read (var "a")) (.read (var "b")))))
     (τ := .int) (Γb := [("n", .lent .int)])
-    rfl rfl rfl (.mut (.own rfl) rfl .nil) (by simp [Exclusive]) (by decide)
+    rfl (by simp [ops]) rfl rfl (.mut (.own rfl) rfl rfl .nil) (by simp [Exclusive]) (by decide)
     (.let_ (live := true) rfl (.add (.read (.ref rfl)) .lit)
       (.let_ (live := true) rfl (.write (.read (.own rfl)) (.ref (m := .mut) rfl)) (.atom (.read (.ref rfl)))))
     (.let_ (live := true) rfl (.perform (op := { owns := [], refs := [], ret := .int }) rfl (List.mem_cons_self ..)
@@ -354,7 +358,7 @@ theorem meddles_rejected : ¬ Typed [] ops [] meddles τ Γ' r := by
     cases ha
     obtain ⟨ys, Γb, hc, hbody⟩ := handle_inv hb
     cases hc with
-    | «mut» hp _ hc =>
+    | «mut» hp _ _ hc =>
       cases hc
       cases hbody with
       | let_ _ ha _ =>
@@ -401,6 +405,7 @@ theorem borrows_typed : Typed [] [] [] borrows .int [] [.fail] := by
     (p := deref (var "x")) (τ := .int) (w := true) (y := "x") (r := [.fail])
     (body := .let_ "t" .int (.add (.read (var "r")) (.lit 41)) (.write (var "r") (.read (var "t")))) (τb := .int)
     (Γb := [("x", .lent (.box .int))]) rfl (.deref (.own rfl)) (fun _ => rfl) (fun _ => rfl)
+    (fun _ _ _ _ h => by simp [lookup] at h)
     (.let_ (live := true) rfl (.add (.read (.ref rfl)) .lit) (.write (.read (.own rfl)) (.ref (m := .mut) rfl)))
   simp only [thaw] at this
   exact .let_ (live := true) rfl (.new .lit) (.let_ (live := true) rfl (by simpa using this)
@@ -421,17 +426,18 @@ def reaches : Expr :=
   .let_ "x" (.box .int) (.new (.lit 1)) (.lend "r" .mut (deref (var "x")) (.atom (.read (deref (var "x")))))
 
 /-- What a borrow is of, and the code it is in scope for, typed with its root out of reach. -/
-theorem lend_inv : Typed F O Γ (.lend x m p body) τ Γ' r →
+theorem lend_inv (hnf : ∀ t y, p ≠ fieldOf t y) : Typed F O Γ (.lend x m p body) τ Γ' r →
     ∃ τp w y Γb, PlaceTy Γ p τp w y ∧ Typed F O ((x, .ref m τp) :: lendCtx m Γ y) body τ ((x, .ref m τp) :: Γb) r := by
   intro h
   cases h with
-  | lend _ hp _ _ hb => exact ⟨_, _, _, _, hp, hb⟩
+  | lend _ hp _ _ _ hb => exact ⟨_, _, _, _, hp, hb⟩
+  | lendField => exact absurd rfl (hnf _ _)
 
 theorem reaches_rejected : ¬ Typed [] O [] reaches τ Γ' r := by
   intro h
   cases h with
   | let_ _ _ hb =>
-    obtain ⟨τp, w, y, Γb, hp, hbody⟩ := lend_inv hb
+    obtain ⟨τp, w, y, Γb, hp, hbody⟩ := lend_inv (fun t y h => by cases t <;> simp [fieldOf] at h) hb
     have hy : y = "x" := by cases hp with | deref hq => cases hq <;> rfl
     subst hy
     · cases hbody with
@@ -443,6 +449,7 @@ theorem reaches_rejected : ¬ Typed [] O [] reaches τ Γ' r := by
             cases hq with
             | own hx => simp [lendCtx, hide, lookup] at hx
             | ref hx => simp [lendCtx, hide, lookup] at hx
+            | half hx => simp [lendCtx, hide, lookup] at hx
 
 /-! A borrow a function returns. -/
 
@@ -479,8 +486,9 @@ theorem returns_typed : Typed [inside] [] [] returns .int [] [.fail] := by
     (lent := [(.mut, var "x")]) (ys := [(.mut, "x")]) (zs := ["x"]) (x := "v")
     (body := .let_ "t" .int (.add (.read (var "v")) (.lit 41)) (.write (var "v") (.read (var "t"))))
     (τb := .int) (Γb := [("x", .lent (.box .int))])
-    rfl rfl rfl (by simp [inside]) .nil (.cons (.own rfl) (fun _ => rfl) .nil) (by simp [LentApart])
-    (.cons ⟨.mut, rfl, fun _ => rfl⟩ .nil) (fun _ => ⟨by simp, rfl, by simp [inside, Ty.isFn]⟩) rfl
+    rfl rfl rfl (by simp [inside]) .nil (.cons (.own rfl) (fun _ => rfl) rfl .nil) (by simp [LentApart])
+    (.cons ⟨.mut, rfl, fun _ => rfl⟩ .nil)
+    (fun _ => ⟨by simp, rfl, by simp [inside, Ty.isFn], fun z hz t A B h => by simp at hz; subst hz; simp [lookup] at h⟩) rfl
     (.let_ (live := true) rfl (.add (.read (.ref rfl)) .lit) (.write (.read (.own rfl)) (.ref (m := .mut) rfl)))
   simp only [unlend, unhideAll, thaw] at this
   exact .let_ (live := true) rfl (.new .lit) (.let_ (live := true) rfl (by simpa using this)
@@ -531,6 +539,7 @@ theorem reachesReturned_rejected : ¬ Typed [inside] [] [] reachesReturned τ Γ
         obtain ⟨-, rfl⟩ := hyi
         cases hp with
         | ref hx => simp [lookup] at hx
+        | half hx => simp [lookup] at hx
         | own _ =>
         cases hbody with
         | atom ha =>
@@ -541,6 +550,7 @@ theorem reachesReturned_rejected : ¬ Typed [inside] [] [] reachesReturned τ Γ
               cases hq with
               | own hx => simp [lendCtx, lendCtxs, hideAll, hide, lookup] at hx
               | ref hx => simp [lendCtx, lendCtxs, hideAll, hide, lookup] at hx
+              | half hx => simp [lendCtx, lendCtxs, hideAll, hide, lookup] at hx
 
 /-! Closures that own what they captured. -/
 
@@ -575,7 +585,7 @@ theorem counter_typed : Typed [bump] [] [] counter .int [] [.fail] := by
   have hlam : Typed [bump] [] [("b", .own (.box .int) true)] (.lam 0 (.move "b")) (.fn .excl .int .int [])
       [("b", .own (.box .int) false)] [.fail] := by
     have := Typed.lam (F := [bump]) (O := []) (Γ := [("b", .own (.box .int) true)]) (f := 0) (d := bump)
-      (r := [.fail]) rfl rfl rfl rfl rfl (.move (x := "b") rfl)
+      (r := [.fail]) rfl rfl rfl rfl rfl (.move (x := "b") rfl rfl)
     simpa [bump, setSlot] using this
   exact .let_ (live := false) rfl (.new .lit)
     (.let_ (live := true) rfl hlam
@@ -667,7 +677,7 @@ theorem higher_typed : Typed [addTo, twice] [] [] higher .int [] [.fail] := by
       (.call 1 [.lit 2] [(.ro, var "f")]) .int
       [("f", .ref .ro (.fn .shared .int .int [])), ("b", .ref .ro (.box .int))] [.fail] :=
     .call (d := twice) rfl rfl rfl (by simp [twice]) (.cons .lit .nil)
-      (.cons (.ref (m := .ro) rfl) (fun h => by cases h) .nil) (by simp [LentApart])
+      (.cons (.ref (m := .ro) rfl) (fun h => by cases h) rfl .nil) (by simp [LentApart])
   have hlc := Typed.lendClo (F := [addTo, twice]) (O := []) (Γ := [("b", .own (.box .int) true)]) (f := 0)
     (d := addTo) (p := var "b") (y := "b") (x := "f") (r := [.fail]) (τb := .int)
     (Γb := [("b", .ref .ro (.box .int))]) rfl rfl rfl rfl rfl rfl (.own rfl) rfl
@@ -721,10 +731,10 @@ theorem tally_typed : Typed [bump, callsTwice] [] [] tally .int [] [.fail] := by
       (.call 1 [] [(.mut, var "f")]) .int
       [("f", .ref .mut (.fn .excl .int .int [])), ("b", .lent (.box .int))] [.fail] :=
     .call (d := callsTwice) rfl rfl rfl (by simp [callsTwice]) .nil
-      (.cons (.ref (m := .mut) rfl) (fun _ => rfl) .nil) (by simp [LentApart])
+      (.cons (.ref (m := .mut) rfl) (fun _ => rfl) rfl .nil) (by simp [LentApart])
   have hlc := Typed.lendCloMut (F := [bump, callsTwice]) (O := []) (Γ := [("b", .own (.box .int) true)]) (f := 0)
     (d := bump) (p := var "b") (y := "b") (x := "f") (r := [.fail]) (τb := .int)
-    (Γb := [("b", .lent (.box .int))]) rfl rfl rfl rfl rfl rfl (.own rfl) rfl
+    (Γb := [("b", .lent (.box .int))]) rfl rfl rfl rfl rfl rfl (.own rfl) (fun _ _ _ h => by simp [lookup] at h) rfl
     (by simpa [bump, hide, Slot.ty] using hcall)
   simp only [thaw] at hlc
   exact .let_ (live := true) rfl (.new .lit) (.let_ (live := true) rfl (by simpa using hlc)
@@ -750,7 +760,7 @@ theorem swapClosure_rejected : ¬ Typed [bump] [] [("b", .own (.box .int) true)]
   intro h
   cases h with
   | lendClo hfd hcap => simp at hfd; subst hfd; simp [bump] at hcap
-  | lendCloMut _ _ _ _ _ _ _ _ hb =>
+  | lendCloMut _ _ _ _ _ _ _ _ _ hb =>
     cases hb with
     | assign _ hp hsh =>
       obtain rfl := placeTy_var_root hp
@@ -784,14 +794,14 @@ theorem handOff_fns_ok : FnsOk [spend, make, useOnce] [] := by
   simp only [List.mem_cons, List.mem_singleton, List.not_mem_nil, or_false] at hd
   rcases hd with rfl | rfl | rfl
   · exact ⟨by decide, by decide, _, .add (.read (.deref (.own rfl))) (.read (.own rfl))⟩
-  · exact ⟨by decide, _, .lam (d := spend) rfl rfl rfl rfl rfl (.move rfl)⟩
+  · exact ⟨by decide, _, .lam (d := spend) rfl rfl rfl rfl rfl (.move rfl rfl)⟩
   · exact ⟨by decide, _, .applyOnce rfl (by simp) .lit⟩
 
 theorem handOff_typed : Typed [spend, make, useOnce] [] [] handOff .int [] [.fail] :=
   .let_ (live := false) rfl (.new .lit)
-    (.let_ (live := false) rfl (.call (d := make) rfl rfl rfl (by simp [make]) (.cons (.move rfl) .nil) .nil
+    (.let_ (live := false) rfl (.call (d := make) rfl rfl rfl (by simp [make]) (.cons (.move rfl rfl) .nil) .nil
         (by simp [LentApart]))
-      (.call (d := useOnce) rfl rfl rfl (by simp [useOnce]) (.cons (.move rfl) .nil) .nil (by simp [LentApart])))
+      (.call (d := useOnce) rfl rfl rfl (by simp [useOnce]) (.cons (.move rfl rfl) .nil) .nil (by simp [LentApart])))
 
 example : ∀ n, match eval [spend, make, useOnce] [] n [.abort .fail 0] .empty [] handOff with
     | (.stuck, _) => False
@@ -837,8 +847,8 @@ theorem nested_fns_ok : FnsOk [addBox, twiceOf] [] := by
 
 theorem nested_typed : Typed [addBox, twiceOf] [] [] nested .int [] [.fail] :=
   .let_ (live := false) rfl (.new .lit)
-    (.let_ (live := false) rfl (.lam (d := addBox) rfl rfl rfl rfl rfl (.move rfl))
-      (.let_ (live := true) rfl (.lam (d := twiceOf) rfl rfl rfl rfl rfl (.move rfl))
+    (.let_ (live := false) rfl (.lam (d := addBox) rfl rfl rfl rfl rfl (.move rfl rfl))
+      (.let_ (live := true) rfl (.lam (d := twiceOf) rfl rfl rfl rfl rfl (.move rfl rfl))
         (.applyBorrow (by decide) .lit (.own rfl) (fun h => by cases h) (by simp))))
 
 example : ∀ n, match eval [addBox, twiceOf] [] n [.abort .fail 0] .empty [] nested with
@@ -887,9 +897,10 @@ theorem picks_typed : Typed [either] [] [] picks .int [] [.fail] := by
     (lent := [(.mut, var "a"), (.mut, var "b")]) (ys := [(.mut, "a"), (.mut, "b")]) (zs := ["a", "b"]) (x := "v")
     (body := .write (var "v") (.lit 10)) (τb := .int) (Γb := [("b", .lent (.box .int)), ("a", .lent (.box .int))])
     rfl rfl rfl (by simp [either]) (.cons .lit .nil)
-    (.cons (.own rfl) (fun _ => rfl) (.cons (.own rfl) (fun _ => rfl) .nil)) (by simp [LentApart, Place.root])
+    (.cons (.own rfl) (fun _ => rfl) rfl (.cons (.own rfl) (fun _ => rfl) rfl .nil)) (by simp [LentApart, Place.root])
     (.cons ⟨.mut, rfl, fun _ => rfl⟩ (.cons ⟨.mut, rfl, fun _ => rfl⟩ .nil))
-    (fun _ => ⟨by simp, rfl, by intro c hc e he; simp at hc; rcases hc with rfl | rfl <;> (simp [either] at he; subst he; rfl)⟩) rfl
+    (fun _ => ⟨by simp, rfl, by intro c hc e he; simp at hc; rcases hc with rfl | rfl <;> (simp [either] at he; subst he; rfl),
+      fun z hz t A B h => by simp at hz; rcases hz with rfl | rfl <;> simp [lookup] at h⟩) rfl
     (.write .lit (.ref (m := .mut) rfl))
   simp only [unlend, unhideAll, thaw, hide] at this
   exact .let_ (live := true) rfl (.new .lit) (.let_ (live := true) rfl (.new .lit)
@@ -934,7 +945,7 @@ theorem inc_ok : FnsOk [inc] [] := by
 theorem fields_typed : Typed [inc] [] [] fields .int [] [.fail] :=
   .let_ (live := true) rfl (.pair .lit .lit)
     (.let_ (live := true) rfl
-      (.call (d := inc) rfl rfl rfl (by simp [inc]) .nil (.cons (.fst (.own rfl)) (fun _ => rfl) .nil)
+      (.call (d := inc) rfl rfl rfl (by simp [inc]) .nil (.cons (.fst (.own rfl)) (fun _ => rfl) rfl .nil)
         (by simp [LentApart]))
       (.add (.read (.fst (.own rfl))) (.read (.snd (.own rfl)))))
 
@@ -988,11 +999,11 @@ theorem fieldPairs_typed : Typed [swap, addField] [] [] fieldPairs .int [] [.fai
   .let_ (live := true) rfl (.pair .lit .lit)
     (.let_ (live := true) rfl
       (.call (d := swap) rfl rfl rfl (by simp [swap]) .nil
-        (.cons (.fst (.own rfl)) (fun _ => rfl) (.cons (.snd (.own rfl)) (fun _ => rfl) .nil))
+        (.cons (.fst (.own rfl)) (fun _ => rfl) rfl (.cons (.snd (.own rfl)) (fun _ => rfl) rfl .nil))
         (by simp [LentApart, Place.apart_fields]))
       (.let_ (live := true) rfl
         (.call (d := addField) rfl rfl rfl (by simp [addField]) .nil
-          (.cons (.fst (.own rfl)) (fun _ => rfl) (.cons (.snd (.own rfl)) (fun _ => rfl) .nil))
+          (.cons (.fst (.own rfl)) (fun _ => rfl) rfl (.cons (.snd (.own rfl)) (fun _ => rfl) rfl .nil))
           (by simp [LentApart, Place.apart_fields]))
         (.add (.read (.fst (.own rfl))) (.read (.snd (.own rfl))))))
 
@@ -1010,6 +1021,48 @@ theorem sameField_rejected : ¬ LentApart [(.mut, .fst (var "p")), (.mut, .fst (
   simp [LentApart, Place.root] at h
   obtain ⟨r, ⟨-, h⟩ | ⟨h, -⟩⟩ := h <;> (cases h with | fst h => cases h)
 
+/-! A field borrowed for a while, the field beside it read and changed meanwhile. -/
+
+/-- `let p = [1, 40]; { const r = mut p[0]; r = r + p[1]; p[1] = 2; } p[0] + p[1]`: while `r` borrows
+the first field, the second is read and written; 43, and nothing left allocated. -/
+def fieldBorrow : Expr :=
+  .let_ "p" (.pair .int .int) (.pair (.lit 1) (.lit 40))
+    (.let_ "u" .int (.lend "r" .mut (fieldOf true "p")
+        (.let_ "t" .int (.add (.read (var "r")) (.read (.snd (var "p"))))
+          (.let_ "v" .int (.write (var "r") (.read (var "t")))
+            (.write (.snd (var "p")) (.lit 2)))))
+      (.add (.read (.fst (var "p"))) (.read (.snd (var "p")))))
+
+example : value (eval [] [] 30 [] .empty [] fieldBorrow) = some 43 := by
+  run [fieldBorrow, fieldOf]
+example : freed (eval [] [] 30 [] .empty [] fieldBorrow) := by
+  run [fieldBorrow, fieldOf]
+
+theorem fieldBorrow_typed : Typed [] [] [] fieldBorrow .int [] [.fail] := by
+  have hbody : Typed [] [] [("r", .ref .mut .int), ("p", .half true .int .int)]
+      (.let_ "t" .int (.add (.read (var "r")) (.read (.snd (var "p"))))
+        (.let_ "v" .int (.write (var "r") (.read (var "t"))) (.write (.snd (var "p")) (.lit 2))))
+      .int [("r", .ref .mut .int), ("p", .half true .int .int)] [.fail] :=
+    .let_ (live := true) rfl (.add (.read (.ref (m := .mut) rfl)) (.read (.snd (.half rfl rfl))))
+      (.let_ (live := true) rfl (.write (.read (.own rfl)) (.ref (m := .mut) rfl))
+        (.write .lit (.snd (.half rfl rfl))))
+  have hlend := Typed.lendField (F := []) (O := []) (Γ := [("p", .own (.pair .int .int) true)]) (x := "r") (y := "p")
+    (s := .own (.pair .int .int) true) (A := .int) (B := .int) (t := true) (m := .mut) (r := [.fail])
+    (Γb := [("p", .half true .int .int)]) rfl rfl rfl (.inl ⟨_, rfl⟩) rfl (fun _ => rfl)
+    (by simpa [setSlot] using hbody)
+  simp only [thaw] at hlend
+  exact .let_ (live := true) rfl (.pair .lit .lit)
+    (.let_ (live := true) rfl (by simpa using hlend)
+      (.add (.read (.fst (.own rfl))) (.read (.snd (.own rfl)))))
+
+example : ∀ n, match eval [] [] n [.abort .fail 0] .empty [] fieldBorrow with
+    | (.stuck, _) => False
+    | (.susp _ _ _ _ _, _) => False
+    | (.timeout, _) => True
+    | (.val v, σ') => ∃ L, VT [] σ' .int v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
+    | (.abort _ _, σ') => ∀ l, σ'.mem l = none :=
+  program_ok (fun _ h => by simp at h) fieldBorrow_typed
+
 /-! Tags, and matching them. -/
 
 /-- `let b = Box.new(5); let v: #L(int) | #R(Box<int>) = #R(b); match (v) { #L(y) => y, #R(y) => *y }`:
@@ -1026,8 +1079,8 @@ example : freed (eval [] [] 30 [] .empty [] tags) := by
 
 theorem tags_typed : Typed [] [] [] tags .int [] [.fail] :=
   .let_ (live := false) rfl (.new .lit)
-    (.let_ (live := false) rfl (.inj (t := false) (.move rfl))
-      (.case rfl rfl (l₁ := true) (l₂ := true) (.atom (.read (.own rfl))) (.atom (.read (.deref (.own rfl))))
+    (.let_ (live := false) rfl (.inj (t := false) (.move rfl rfl) rfl)
+      (.case rfl rfl rfl (l₁ := true) (l₂ := true) (.atom (.read (.own rfl))) (.atom (.read (.deref (.own rfl))))
         (Weaker.refl _) (Weaker.refl _)))
 
 example : ∀ n, match eval [] [] n [.abort .fail 0] .empty [] tags with
@@ -1055,12 +1108,13 @@ theorem tagRef_typed : Typed [] [] [] tagRef .int [] [.fail] := by
     (p := var "v") (A := .int) (B := .int) (w := true) (y := "v") (τ := .int) (r := [.fail])
     (e₁ := .write (var "x") (.lit 41)) (e₂ := .write (var "x") (.lit 0))
     (Γb₁ := [("v", .lent (.sum .int .int))]) (Γb₂ := [("v", .lent (.sum .int .int))])
-    (Γb := [("v", .lent (.sum .int .int))]) rfl (.own rfl) (fun _ => rfl) (fun _ => ⟨rfl, rfl⟩)
+    (Γb := [("v", .lent (.sum .int .int))]) rfl (.own rfl) (fun _ _ _ h => by simp [lookup] at h) (fun _ => rfl)
+    (fun _ => ⟨rfl, rfl⟩)
     (.write .lit (.ref (m := .mut) rfl)) (.write .lit (.ref (m := .mut) rfl)) (Weaker.refl _) (Weaker.refl _)
   simp only [thaw] at this
-  exact .let_ (live := false) rfl (.inj (t := true) .lit)
+  exact .let_ (live := false) rfl (.inj (t := true) .lit rfl)
     (.let_ (live := true) rfl (by simpa using this)
-      (.case rfl rfl (l₁ := true) (l₂ := true) (.atom (.read (.own rfl))) (.atom (.read (.own rfl)))
+      (.case rfl rfl rfl (l₁ := true) (l₂ := true) (.atom (.read (.own rfl))) (.atom (.read (.own rfl)))
         (Weaker.refl _) (Weaker.refl _)))
 
 example : ∀ n, match eval [] [] n [.abort .fail 0] .empty [] tagRef with

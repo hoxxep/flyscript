@@ -17,12 +17,16 @@ namespace FlyCore.Ownership
 what `r` names, having captured a value of type `τc`. -/
 def CloOk (F : List Fn) (f : Nat) (τc : Ty) (k : Kind) (A B : Ty) (r : Row) : Prop :=
   ∃ d xc pn, F[f]? = some d ∧ d.cap = some (xc, τc, k) ∧ d.owns = [(pn, A)] ∧ d.refs = [] ∧
-    d.retp = none ∧ d.ret = B ∧ d.row = r
+    d.retp = none ∧ d.ret = B ∧ d.row = r ∧ τc.complete = true
+
+/-- What a closure captured has no place lent out of it. -/
+theorem CloOk.complete : CloOk F f τc k A B r → τc.complete = true :=
+  fun ⟨_, _, _, _, _, _, _, _, _, _, h⟩ => h
 
 /-- A closure's code says its type. -/
 theorem CloOk.det : CloOk F f τc k A B r → CloOk F f τc' k' A' B' r' →
     τc = τc' ∧ k = k' ∧ A = A' ∧ B = B' ∧ r = r' := by
-  rintro ⟨d, xc, pn, hd, hcap, hown, -, -, hret, hrow⟩ ⟨d', xc', pn', hd', hcap', hown', -, -, hret', hrow'⟩
+  rintro ⟨d, xc, pn, hd, hcap, hown, -, -, hret, hrow, -⟩ ⟨d', xc', pn', hd', hcap', hown', -, -, hret', hrow', -⟩
   rw [hd] at hd'
   cases hd'
   rw [hcap] at hcap'
@@ -39,14 +43,17 @@ inductive LT (F : List Fn) (σ : Store) : Nat → Ty → List Nat → Prop
   | pair : σ.mem a = some (.pair b c) → LT F σ b A R₁ → LT F σ c B R₂ → (∀ x ∈ R₁, x ∉ R₂) →
       a ∉ R₁ ++ R₂ → LT F σ a (.pair A B) (a :: (R₁ ++ R₂))
   | tag : σ.mem a = some (.tag A B t b) → LT F σ b (if t then A else B) R → a ∉ R → LT F σ a (.sum A B) (a :: R)
+  /-- A place lent: what is there is the borrow's. -/
+  | hole : LT F σ a (.hole τ) []
 
 /-- A value of type `τ`, and the cells it owns. -/
 inductive VT (F : List Fn) (σ : Store) : Ty → Val → List Nat → Prop
   | int : VT F σ .int (.int n) []
-  | box : LT F σ b τ R → VT F σ (.box τ) (.ptr b) R
-  | clo : CloOk F f τc k A B r → LT F σ c τc R → VT F σ (.fn k A B r) (.clo f c τc) R
-  | pair : LT F σ b A R₁ → LT F σ c B R₂ → (∀ x ∈ R₁, x ∉ R₂) → VT F σ (.pair A B) (.pair b c) (R₁ ++ R₂)
-  | tag : LT F σ b (if t then A else B) R → VT F σ (.sum A B) (.tag A B t b) R
+  | box : LT F σ b τ R → τ.complete → VT F σ (.box τ) (.ptr b) R
+  | clo : CloOk F f τc k A B r → LT F σ c τc R → τc.complete → VT F σ (.fn k A B r) (.clo f c τc) R
+  | pair : LT F σ b A R₁ → LT F σ c B R₂ → (∀ x ∈ R₁, x ∉ R₂) → A.complete → B.complete →
+      VT F σ (.pair A B) (.pair b c) (R₁ ++ R₂)
+  | tag : LT F σ b (if t then A else B) R → A.complete → B.complete → VT F σ (.sum A B) (.tag A B t b) R
 
 def Disj (A B : List Nat) : Prop := ∀ x ∈ A, x ∉ B
 
@@ -105,17 +112,18 @@ theorem nodup_append_disj : (A ++ B).Nodup ↔ A.Nodup ∧ B.Nodup ∧ Disj A B 
 
 /-! ## Trees -/
 
-theorem LT.head : LT F σ a τ L → a ∈ L := by
-  intro h
-  cases h <;> simp
+theorem LT.head : LT F σ a τ L → τ.isHole = false → a ∈ L := by
+  intro h hτ
+  cases h <;> simp_all [Ty.isHole]
 
-theorem LT.cons : LT F σ a τ L → ∃ R, L = a :: R := by
-  intro h
-  cases h <;> exact ⟨_, rfl⟩
+theorem LT.cons : LT F σ a τ L → τ.isHole = false → ∃ R, L = a :: R := by
+  intro h hτ
+  cases h <;> simp_all [Ty.isHole]
 
 theorem LT.alloc : LT F σ a τ L → ∀ l ∈ L, σ.mem l ≠ none := by
   intro h
   induction h with
+  | hole => intro l hl; simp at hl
   | int ha => intro l hl; simp at hl; subst hl; simp [ha]
   | box ha _ _ ih | clo ha _ _ _ ih | tag ha _ _ ih =>
     intro l hl
@@ -133,6 +141,7 @@ theorem LT.alloc : LT F σ a τ L → ∀ l ∈ L, σ.mem l ≠ none := by
 theorem LT.nodup : LT F σ a τ L → L.Nodup := by
   intro h
   induction h with
+  | hole => simp
   | int => simp
   | box _ _ hn ih | clo _ _ _ hn ih | tag _ _ hn ih => exact List.nodup_cons.mpr ⟨hn, ih⟩
   | pair _ _ _ hd hn ih1 ih2 =>
@@ -141,6 +150,7 @@ theorem LT.nodup : LT F σ a τ L → L.Nodup := by
 theorem LT.frame : LT F σ a τ L → Agree σ σ' L → LT F σ' a τ L := by
   intro h
   induction h with
+  | hole => intro _; exact .hole
   | int ha =>
     intro hag
     exact .int (by rw [hag _ (List.mem_singleton_self _)]; exact ha)
@@ -162,6 +172,7 @@ theorem LT.frame : LT F σ a τ L → Agree σ σ' L → LT F σ' a τ L := by
 theorem LT.det : LT F σ a τ L → LT F σ a τ L' → L = L' := by
   intro h
   induction h generalizing L' with
+  | hole => intro h'; cases h'; rfl
   | int => intro h'; cases h'; rfl
   | box ha _ _ ih =>
     intro h'
@@ -192,30 +203,34 @@ theorem LT.det : LT F σ a τ L → LT F σ a τ L' → L = L' := by
       cases ha'
       rw [ih hb']
 
-/-- What a location holds says its type, too. -/
-theorem LT.det_ty : LT F σ a τ L → LT F σ a τ' L' → τ = τ' ∧ L = L' := by
+/-- What a location holds says its type, too, if no place of it is lent. -/
+theorem LT.det_ty : LT F σ a τ L → LT F σ a τ' L' → τ.complete = true → τ'.complete = true →
+    τ = τ' ∧ L = L' := by
   intro h
   induction h generalizing τ' L' with
-  | int ha => intro h'; cases h' with
+  | hole => intro _ hc; simp [Ty.complete] at hc
+  | int ha => intro h' _ hc'; cases h' with
     | int => exact ⟨rfl, rfl⟩
     | box ha' => rw [ha] at ha'; cases ha'
     | clo ha' => rw [ha] at ha'; cases ha'
     | pair ha' => rw [ha] at ha'; cases ha'
     | tag ha' => rw [ha] at ha'; cases ha'
+    | hole => simp [Ty.complete] at hc'
   | box ha _ _ ih =>
-    intro h'
+    intro h' hc hc'
     cases h' with
     | int ha' => rw [ha] at ha'; cases ha'
     | box ha' hb' _ =>
       rw [ha] at ha'
       cases ha'
-      obtain ⟨rfl, rfl⟩ := ih hb'
+      obtain ⟨rfl, rfl⟩ := ih hb' (by simpa [Ty.complete] using hc) (by simpa [Ty.complete] using hc')
       exact ⟨rfl, rfl⟩
     | clo ha' => rw [ha] at ha'; cases ha'
     | pair ha' => rw [ha] at ha'; cases ha'
     | tag ha' => rw [ha] at ha'; cases ha'
-  | clo ha hc _ _ ih =>
-    intro h'
+    | hole => simp [Ty.complete] at hc'
+  | clo ha hc hb _ _ =>
+    intro h' _ hc'
     cases h' with
     | int ha' => rw [ha] at ha'; cases ha'
     | box ha' => rw [ha] at ha'; cases ha'
@@ -223,12 +238,13 @@ theorem LT.det_ty : LT F σ a τ L → LT F σ a τ' L' → τ = τ' ∧ L = L' 
       rw [ha] at ha'
       cases ha'
       obtain ⟨-, rfl, rfl, rfl, rfl⟩ := hc.det hc'
-      obtain ⟨-, rfl⟩ := ih hb'
+      rw [LT.det hb hb']
       exact ⟨rfl, rfl⟩
     | pair ha' => rw [ha] at ha'; cases ha'
     | tag ha' => rw [ha] at ha'; cases ha'
+    | hole => simp [Ty.complete] at hc'
   | pair ha _ _ _ _ ih1 ih2 =>
-    intro h'
+    intro h' hc hc'
     cases h' with
     | int ha' => rw [ha] at ha'; cases ha'
     | box ha' => rw [ha] at ha'; cases ha'
@@ -236,12 +252,14 @@ theorem LT.det_ty : LT F σ a τ L → LT F σ a τ' L' → τ = τ' ∧ L = L' 
     | pair ha' h1 h2 _ _ =>
       rw [ha] at ha'
       cases ha'
-      obtain ⟨rfl, rfl⟩ := ih1 h1
-      obtain ⟨rfl, rfl⟩ := ih2 h2
+      simp only [Ty.complete, Bool.and_eq_true] at hc hc'
+      obtain ⟨rfl, rfl⟩ := ih1 h1 hc.1 hc'.1
+      obtain ⟨rfl, rfl⟩ := ih2 h2 hc.2 hc'.2
       exact ⟨rfl, rfl⟩
     | tag ha' => rw [ha] at ha'; cases ha'
-  | tag ha _ _ ih =>
-    intro h'
+    | hole => simp [Ty.complete] at hc'
+  | tag ha hb _ _ =>
+    intro h' _ hc'
     cases h' with
     | int ha' => rw [ha] at ha'; cases ha'
     | box ha' => rw [ha] at ha'; cases ha'
@@ -250,8 +268,41 @@ theorem LT.det_ty : LT F σ a τ L → LT F σ a τ' L' → τ = τ' ∧ L = L' 
     | tag ha' hb' _ =>
       rw [ha] at ha'
       cases ha'
-      obtain ⟨-, rfl⟩ := ih hb'
+      rw [LT.det hb hb']
       exact ⟨rfl, rfl⟩
+    | hole => simp [Ty.complete] at hc'
+
+/-- What holds a closure is a closure, unless it is lent. -/
+theorem LT.det_fn : LT F σ a (.fn k A B r) L → LT F σ a τ L' → τ.isHole = false →
+    τ = .fn k A B r ∧ L = L' := by
+  intro h h' hτ
+  cases h with
+  | clo ha hc hb _ =>
+    cases h' with
+    | int ha' => rw [ha] at ha'; cases ha'
+    | box ha' => rw [ha] at ha'; cases ha'
+    | pair ha' => rw [ha] at ha'; cases ha'
+    | tag ha' => rw [ha] at ha'; cases ha'
+    | hole => simp [Ty.isHole] at hτ
+    | clo ha' hc' hb' _ =>
+      rw [ha] at ha'
+      cases ha'
+      obtain ⟨-, rfl, rfl, rfl, rfl⟩ := hc'.det hc
+      rw [LT.det hb hb']
+      exact ⟨rfl, rfl⟩
+
+/-- A location holding a tree with a cell holds no place lent. -/
+theorem LT.nonhole_of (h : LT F σ a τ L) (h' : LT F σ a τ' L) (hτ' : τ'.isHole = false) : τ.isHole = false := by
+  cases hτ : τ.isHole
+  · rfl
+  · obtain ⟨R, rfl⟩ := h'.cons hτ'
+    cases τ <;> simp [Ty.isHole] at hτ
+    cases h
+
+/-- A value has no place lent out of it. -/
+theorem VT.complete : VT F σ τ v L → τ.complete = true := by
+  intro h
+  cases h <;> simp_all [Ty.complete]
 
 theorem VT.alloc : VT F σ τ v L → ∀ l ∈ L, σ.mem l ≠ none := by
   intro h
@@ -275,13 +326,13 @@ theorem VT.frame : VT F σ τ v L → Agree σ σ' L → VT F σ' τ v L := by
   intro h hag
   cases h with
   | int => exact .int
-  | box h => exact .box (h.frame hag)
-  | clo hc h => exact .clo hc (h.frame hag)
-  | tag h => exact .tag (h.frame hag)
-  | pair h1 h2 hd =>
+  | box h hc => exact .box (h.frame hag) hc
+  | clo hc h hc' => exact .clo hc (h.frame hag) hc'
+  | tag h hA hB => exact .tag (h.frame hag) hA hB
+  | pair h1 h2 hd hA hB =>
     have e1 := h1.frame (σ' := σ') fun l hl => hag l (List.mem_append.mpr (.inl hl))
     have e2 := h2.frame (σ' := σ') fun l hl => hag l (List.mem_append.mpr (.inr hl))
-    exact .pair e1 e2 hd
+    exact .pair e1 e2 hd hA hB
 
 theorem agree_set : l ∉ L → Agree σ (σ.set l v) L := by
   intro h x hx
@@ -319,14 +370,20 @@ theorem WF.alloc (hwf : WF σ) : WF (σ.alloc v).2 := by
   · exact Nat.lt_succ_of_lt (hwf x hx)
 
 /-- What a location holds: a value of its type, owning the rest of its footprint. -/
-theorem LT.contents : LT F σ b τ R → ∃ w R', σ.mem b = some w ∧ VT F σ τ w R' ∧ R = b :: R' ∧ b ∉ R' := by
-  intro h
+theorem LT.contents : LT F σ b τ R → τ.complete = true →
+    ∃ w R', σ.mem b = some w ∧ VT F σ τ w R' ∧ R = b :: R' ∧ b ∉ R' := by
+  intro h hc
   cases h with
   | int ha => exact ⟨_, [], ha, .int, rfl, by simp⟩
-  | box ha hb hn => exact ⟨_, _, ha, .box hb, rfl, hn⟩
-  | clo ha hc hb hn => exact ⟨_, _, ha, .clo hc hb, rfl, hn⟩
-  | pair ha h1 h2 hd hn => exact ⟨_, _, ha, .pair h1 h2 hd, rfl, hn⟩
-  | tag ha hb hn => exact ⟨_, _, ha, .tag hb, rfl, hn⟩
+  | box ha hb hn => exact ⟨_, _, ha, .box hb (by simpa [Ty.complete] using hc), rfl, hn⟩
+  | clo ha hc' hb hn => exact ⟨_, _, ha, .clo hc' hb (CloOk.complete hc'), rfl, hn⟩
+  | pair ha h1 h2 hd hn =>
+    simp only [Ty.complete, Bool.and_eq_true] at hc
+    exact ⟨_, _, ha, .pair h1 h2 hd hc.1 hc.2, rfl, hn⟩
+  | tag ha hb hn =>
+    simp only [Ty.complete, Bool.and_eq_true] at hc
+    exact ⟨_, _, ha, .tag hb hc.1 hc.2, rfl, hn⟩
+  | hole => simp [Ty.complete] at hc
 
 theorem LT.of_contents : σ.mem b = some w → VT F σ τ w R' → b ∉ R' → LT F σ b τ (b :: R') := by
   intro ha hv hn
@@ -366,16 +423,16 @@ theorem dropK_ok : ∀ (k : Nat) (τ : Ty) (σ : Store) v L, VT F σ τ v L → 
     intro τ σ v L h hk
     cases h with
     | int => exact ⟨σ, by simp [dropK], rfl, by simp, fun _ _ => rfl⟩
-    | box hb => obtain ⟨R, rfl⟩ := hb.cons; simp at hk
-    | clo _ hb => obtain ⟨R, rfl⟩ := hb.cons; simp at hk
-    | pair h1 _ _ => obtain ⟨R, rfl⟩ := h1.cons; simp at hk
-    | tag hb => obtain ⟨R, rfl⟩ := hb.cons; simp at hk
+    | box hb hc => obtain ⟨R, rfl⟩ := hb.cons (Ty.complete_not_hole hc); simp at hk
+    | clo _ hb hc => obtain ⟨R, rfl⟩ := hb.cons (Ty.complete_not_hole hc); simp at hk
+    | pair h1 _ _ hc _ => obtain ⟨R, rfl⟩ := h1.cons (Ty.complete_not_hole hc); simp at hk
+    | tag hb hA hB => obtain ⟨R, rfl⟩ := hb.cons (Ty.complete_not_hole (Ty.complete_ite hA hB)); simp at hk
   | succ k ih =>
     intro τ σ v L h hk
     cases h with
     | int => exact ⟨σ, by simp [dropK], rfl, by simp, fun _ _ => rfl⟩
-    | @tag b A B t _ hb =>
-      obtain ⟨w, R', hw, hv, rfl, hn⟩ := hb.contents
+    | @tag b A B t _ hb hA hB =>
+      obtain ⟨w, R', hw, hv, rfl, hn⟩ := hb.contents (Ty.complete_ite hA hB)
       obtain ⟨σ1, hd, hnext, hfree, hkeep⟩ := ih _ σ w R' hv (by simpa using hk)
       refine ⟨σ1.set b none, by simp [dropK, hw, hd], by simp [Store.set, hnext], ?_, ?_⟩
       · intro l hl
@@ -390,8 +447,8 @@ theorem dropK_ok : ∀ (k : Nat) (τ : Ty) (σ : Store) v L, VT F σ τ v L → 
         split
         · subst_vars; simp at hl
         · exact hkeep l (fun h => hl (List.mem_cons_of_mem _ h))
-    | @box b _ _ hb =>
-      obtain ⟨w, R', hw, hv, rfl, hn⟩ := hb.contents
+    | @box b _ _ hb hc =>
+      obtain ⟨w, R', hw, hv, rfl, hn⟩ := hb.contents hc
       obtain ⟨σ1, hd, hnext, hfree, hkeep⟩ := ih _ σ w R' hv (by simpa using hk)
       refine ⟨σ1.set b none, by simp [dropK, hw, hd], by simp [Store.set, hnext], ?_, ?_⟩
       · intro l hl
@@ -406,8 +463,8 @@ theorem dropK_ok : ∀ (k : Nat) (τ : Ty) (σ : Store) v L, VT F σ τ v L → 
         split
         · subst_vars; simp at hl
         · exact hkeep l (fun h => hl (List.mem_cons_of_mem _ h))
-    | @clo f τc _ _ _ _ c _ hc hb =>
-      obtain ⟨w, R', hw, hv, rfl, hn⟩ := hb.contents
+    | @clo f τc _ _ _ _ c _ hc hb hcc =>
+      obtain ⟨w, R', hw, hv, rfl, hn⟩ := hb.contents hcc
       obtain ⟨σ1, hd, hnext, hfree, hkeep⟩ := ih _ σ w R' hv (by simpa using hk)
       refine ⟨σ1.set c none, by simp [dropK, hw, hd], by simp [Store.set, hnext], ?_, ?_⟩
       · intro l hl
@@ -422,9 +479,9 @@ theorem dropK_ok : ∀ (k : Nat) (τ : Ty) (σ : Store) v L, VT F σ τ v L → 
         split
         · subst_vars; simp at hl
         · exact hkeep l (fun h => hl (List.mem_cons_of_mem _ h))
-    | @pair b A R₁ c B R₂ h1 h2 hd =>
-      obtain ⟨w, R₁', hw, hv1, rfl, hn1⟩ := h1.contents
-      obtain ⟨u, R₂', hu, hv2, rfl, hn2⟩ := h2.contents
+    | @pair b A R₁ c B R₂ h1 h2 hd hA hB =>
+      obtain ⟨w, R₁', hw, hv1, rfl, hn1⟩ := h1.contents hA
+      obtain ⟨u, R₂', hu, hv2, rfl, hn2⟩ := h2.contents hB
       simp only [List.length_append, List.length_cons] at hk
       obtain ⟨σ1, hd1, hnext1, hfree1, hkeep1⟩ := ih _ σ w R₁' hv1 (by omega)
       have hcR : c ∉ R₁' := fun h => hd _ (List.mem_cons_of_mem _ h) (List.mem_cons_self ..)
@@ -467,11 +524,11 @@ theorem drop_ok (hwf : WF σ) : ∀ (τ : Ty) v L, VT F σ τ v L →
   fun τ v L h => dropK_ok σ.next τ σ v L h (length_le_next hwf h.nodup h.alloc)
 
 /-- Dropping a variable's cell frees its footprint: the cell, and what a live value in it owns. -/
-theorem dropCell_live (hwf : WF σ) : LT F σ c τ L →
+theorem dropCell_live (hwf : WF σ) : LT F σ c τ L → τ.complete = true →
     ∃ σ', dropCell σ τ c = some σ' ∧ σ'.next = σ.next ∧ (∀ l ∈ L, σ'.mem l = none) ∧
       ∀ l, l ∉ L → σ'.mem l = σ.mem l := by
-  intro h
-  obtain ⟨w, R', hw, hv, rfl, hn⟩ := h.contents
+  intro h hc
+  obtain ⟨w, R', hw, hv, rfl, hn⟩ := h.contents hc
   obtain ⟨σ1, hd, hnext, hfree, hkeep⟩ := drop_ok hwf τ w R' hv
   refine ⟨σ1.set c none, ?_, by simp [Store.set, hnext], ?_, ?_⟩
   · cases hv <;> simp [dropCell, hw, hd]
@@ -729,15 +786,17 @@ def Slot.excl : Slot → Bool
   | .ref .mut _ => true
   | .ref .ro _ => false
   | .lent _ => false
+  | .half _ _ _ => true
 
 /-- The footprint a slot has: what an owned live variable or a borrow holds, owning the rest. A
 variable perhaps moved holds the mark a move leaves, its footprint its cell alone, or still its
 value: which, only running the program tells, and dropping it at the end of its scope looks. -/
 def SlotOk (F : List Fn) (σ : Store) : Slot → Nat → List Nat → Prop
   | .own τ true, a, L => LT F σ a τ L
-  | .own τ false, a, L => (σ.mem a = some .moved ∧ L = [a]) ∨ LT F σ a τ L
+  | .own τ false, a, L => (σ.mem a = some .moved ∧ L = [a]) ∨ (LT F σ a τ L ∧ τ.isHole = false)
   | .ref _ τ, a, L => LT F σ a τ L
   | .lent _, _, L => L = []
+  | .half t A B, a, L => LT F σ a (.lent1 t A B) L
 
 /-- The part of a slot's footprint that may be changed, and the part that is only read: a `mut`
 borrow of a closure only reads the closure's cell, the head of its footprint. -/
@@ -763,55 +822,59 @@ structure Inv (F : List Fn) (σ : Store) (Γ : Ctx) (env : Env) (E S : List Nat)
   disj : Disj S E
   keys : (Γ.map Prod.fst).Nodup
 
-theorem LT.not_moved : LT F σ a τ L → σ.mem a ≠ some .moved := by
-  intro h
-  cases h <;> simp_all
+theorem LT.not_moved : LT F σ a τ L → τ.isHole = false → σ.mem a ≠ some .moved := by
+  intro h hτ
+  cases h <;> simp_all [Ty.isHole]
 
 theorem SlotOk.alloc : SlotOk F σ s a L → ∀ l ∈ L, σ.mem l ≠ none := by
   intro h
-  rcases s with ⟨τ, live⟩ | ⟨m, τ⟩ | τ
+  rcases s with ⟨τ, live⟩ | ⟨m, τ⟩ | τ | ⟨t, A, B⟩
   · cases live
-    · rcases h with ⟨ha, rfl⟩ | h
+    · rcases h with ⟨ha, rfl⟩ | ⟨h, -⟩
       · intro l hl; simp at hl; subst hl; simp [ha]
       · exact LT.alloc h
     · exact LT.alloc h
   · exact LT.alloc h
   · simp only [SlotOk] at h; subst h; simp
+  · exact LT.alloc h
 
 theorem SlotOk.frame : SlotOk F σ s a L → Agree σ σ' L → SlotOk F σ' s a L := by
   intro h hag
-  rcases s with ⟨τ, live⟩ | ⟨m, τ⟩ | τ
+  rcases s with ⟨τ, live⟩ | ⟨m, τ⟩ | τ | ⟨t, A, B⟩
   · cases live
     · rcases h with ⟨ha, rfl⟩ | h
       · exact .inl ⟨by rw [hag _ (by simp)]; exact ha, rfl⟩
-      · exact .inr (LT.frame h hag)
+      · exact .inr ⟨LT.frame h.1 hag, h.2⟩
     · exact LT.frame h hag
   · exact LT.frame h hag
   · exact h
+  · exact LT.frame h hag
 
 theorem SlotOk.nodup : SlotOk F σ s a L → L.Nodup := by
   intro h
-  rcases s with ⟨τ, live⟩ | ⟨m, τ⟩ | τ
+  rcases s with ⟨τ, live⟩ | ⟨m, τ⟩ | τ | ⟨t, A, B⟩
   · cases live
-    · rcases h with ⟨_, rfl⟩ | h
+    · rcases h with ⟨_, rfl⟩ | ⟨h, -⟩
       · simp
       · exact LT.nodup h
     · exact LT.nodup h
   · exact LT.nodup h
   · simp only [SlotOk] at h; subst h; simp
+  · exact LT.nodup h
 
 theorem SlotOk.det : SlotOk F σ s a L → SlotOk F σ s a L' → L = L' := by
   intro h h'
-  rcases s with ⟨τ, live⟩ | ⟨m, τ⟩ | τ
+  rcases s with ⟨τ, live⟩ | ⟨m, τ⟩ | τ | ⟨t, A, B⟩
   · cases live
-    · rcases h with ⟨ha, rfl⟩ | h <;> rcases h' with ⟨ha', rfl⟩ | h'
+    · rcases h with ⟨ha, rfl⟩ | ⟨h, hh⟩ <;> rcases h' with ⟨ha', rfl⟩ | ⟨h', hh'⟩
       · rfl
-      · exact absurd ha h'.not_moved
-      · exact absurd ha' h.not_moved
+      · exact absurd ha (h'.not_moved hh')
+      · exact absurd ha' (h.not_moved hh)
       · exact LT.det h h'
     · exact LT.det h h'
   · exact LT.det h h'
   · simp only [SlotOk] at h h'; rw [h, h']
+  · exact LT.det h h'
 
 theorem mem_addE : l ∈ addE s L E ↔ l ∈ exclPart s L ∨ l ∈ E := by
   simp [addE]
@@ -872,6 +935,7 @@ theorem Slot.shell_lent : (Slot.lent τ).shell = false := rfl
 theorem Slot.shell_excl {s : Slot} : s.shell = true → s.excl = true := by
   intro h; match s, h with
   | .ref .mut (.fn _ _ _ _), _ => rfl
+  | .half _ _ _, _ => rfl
 
 /-- A footprint without duplicates splits into disjoint parts. -/
 theorem parts_disj : L.Nodup → Disj (exclPart s L) (sharedPart s L) := by

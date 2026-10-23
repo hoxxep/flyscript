@@ -59,6 +59,8 @@ inductive Ty where
   | pair (A B : Ty)
   /-- A value of one type or the other, and which: a union of two tags. -/
   | sum (A B : Ty)
+  /-- A place lent to a borrow: what holds it holds a `τ` there, but not for now. -/
+  | hole (τ : Ty)
   deriving DecidableEq, Repr
 
 /-- Plain data: integers and boxes of them, which a closure may capture. -/
@@ -68,6 +70,49 @@ def Ty.data : Ty → Bool
   | .fn _ _ _ _ => false
   | .pair A B => A.data && B.data
   | .sum A B => A.data && B.data
+  | .hole _ => false
+
+/-- A pair whose first field, or whose second, is lent. -/
+def Ty.lent1 (t : Bool) (A B : Ty) : Ty := if t then .pair (.hole A) B else .pair A (.hole B)
+
+/-- A type with no place lent out of it. -/
+def Ty.complete : Ty → Bool
+  | .int => true
+  | .box τ => τ.complete
+  | .fn _ _ _ _ => true
+  | .pair A B => A.complete && B.complete
+  | .sum A B => A.complete && B.complete
+  | .hole _ => false
+
+def Ty.isHole : Ty → Bool
+  | .hole _ => true
+  | _ => false
+
+/-- Plain data has no place lent out of it. -/
+theorem Ty.data_complete : ∀ {τ : Ty}, τ.data = true → τ.complete = true
+  | .int, _ => rfl
+  | .box τ, h => by simp only [Ty.data] at h; simp only [Ty.complete]; exact Ty.data_complete h
+  | .fn _ _ _ _, h => by simp [Ty.data] at h
+  | .pair A B, h => by
+    simp only [Ty.data, Bool.and_eq_true] at h
+    simp only [Ty.complete, Bool.and_eq_true]; exact ⟨Ty.data_complete h.1, Ty.data_complete h.2⟩
+  | .sum A B, h => by
+    simp only [Ty.data, Bool.and_eq_true] at h
+    simp only [Ty.complete, Bool.and_eq_true]; exact ⟨Ty.data_complete h.1, Ty.data_complete h.2⟩
+  | .hole _, h => by simp [Ty.data] at h
+
+theorem Ty.complete_ite {t : Bool} {A B : Ty} (hA : A.complete = true) (hB : B.complete = true) :
+    (if t then A else B).complete = true := by
+  cases t <;> simpa
+
+theorem Ty.complete_not_hole {τ : Ty} (h : τ.complete = true) : τ.isHole = false := by
+  cases τ <;> simp_all [Ty.complete, Ty.isHole]
+
+theorem Ty.lent1_complete : (Ty.lent1 t A B).complete = false := by
+  cases t <;> simp [Ty.lent1, Ty.complete]
+
+theorem Ty.lent1_isHole : (Ty.lent1 t A B).isHole = false := by
+  cases t <;> rfl
 
 def Ty.isFn : Ty → Bool
   | .fn _ _ _ _ => true
@@ -843,21 +888,27 @@ end
 
 /-! ## Types -/
 
-/-- What a variable is to the code it is in scope in: owned, live or moved; a borrow; or lent `mut`
-to a borrow the code holds for a while, and not to be reached until it ends. -/
+/-- What a variable is to the code it is in scope in: owned, live or moved; a borrow; lent `mut`
+to a borrow the code holds for a while, and not to be reached until it ends; or one field of the pair
+it holds lent to such a borrow, the field a hole in its type. -/
 inductive Slot where
   | own (τ : Ty) (live : Bool)
   | ref (m : Mode) (τ : Ty)
   | lent (τ : Ty)
+  | half (t : Bool) (A B : Ty)
   deriving DecidableEq, Repr
 
 def Slot.ty : Slot → Ty
   | .own τ _ | .ref _ τ | .lent τ => τ
+  | .half t A B => .lent1 t A B
 
-/-- A `mut` borrow of a closure: it may call the closure, changing what it captured, but not put
-another closure in its place. -/
+/-- A slot that may change what it holds but not its own first cell: a `mut` borrow of a closure,
+which may call the closure, changing what it captured, but not put another closure in its place; or
+a variable one field of whose pair is lent, which may change the other field but not the pair's
+cell, which says where the field lent is. -/
 def Slot.shell : Slot → Bool
   | .ref .mut (.fn _ _ _ _) => true
+  | .half _ _ _ => true
   | _ => false
 
 abbrev Ctx := List (Var × Slot)
@@ -869,6 +920,7 @@ def setSlot (Γ : Ctx) (x : Var) (s : Slot) : Ctx :=
 inductive PlaceTy (Γ : Ctx) : Place → Ty → Bool → Var → Prop
   | own : lookup x Γ = some (.own τ true) → PlaceTy Γ (.var x) τ true x
   | ref : lookup x Γ = some (.ref m τ) → PlaceTy Γ (.var x) τ (m == .mut) x
+  | half : lookup x Γ = some (.half t A B) → τ = .lent1 t A B → PlaceTy Γ (.var x) τ true x
   | deref : PlaceTy Γ p (.box τ) w r → PlaceTy Γ (.deref p) τ w r
   | fst : PlaceTy Γ p (.pair A B) w r → PlaceTy Γ (.fst p) A w r
   | snd : PlaceTy Γ p (.pair A B) w r → PlaceTy Γ (.snd p) B w r
@@ -877,7 +929,7 @@ inductive PlaceTy (Γ : Ctx) : Place → Ty → Bool → Var → Prop
 disagree, or where a failure may have left. -/
 inductive Slot.Le : Slot → Slot → Prop
   | refl : Slot.Le s s
-  | forget : Slot.Le (.own τ false) (.own τ true)
+  | forget : τ.isHole = false → Slot.Le (.own τ false) (.own τ true)
 
 /-- `Γ'` is `Γ` with some owned variables perhaps moved. -/
 inductive Weaker : Ctx → Ctx → Prop
@@ -888,8 +940,11 @@ inductive Weaker : Ctx → Ctx → Prop
 each is lent in and the variable it is rooted at. -/
 inductive Lends (Γ : Ctx) : List (Mode × Place) → List (Mode × Ty) → List (Mode × Var) → Prop
   | nil : Lends Γ [] [] []
-  | cons : PlaceTy Γ p τ w y → (m = .mut → w = true) → Lends Γ rest ts ys →
+  | cons : PlaceTy Γ p τ w y → (m = .mut → w = true) → τ.complete = true → Lends Γ rest ts ys →
       Lends Γ ((m, p) :: rest) ((m, τ) :: ts) ((m, y) :: ys)
+
+/-- A field of the pair a variable holds: the first, or the second. -/
+def fieldOf (t : Bool) (y : Var) : Place := if t then .fst (.var y) else .snd (.var y)
 
 /-- The variable a place is rooted at. -/
 def Place.root : Place → Var
@@ -914,6 +969,9 @@ theorem Place.Apart.not_var : ¬ Place.Apart (.var x) q := by
 
 theorem Place.apart_fields : Place.Apart (.fst p) (.snd p) := ⟨p, .inl ⟨.refl, .refl⟩⟩
 
+/-- No field of `y`'s pair is lent: what it holds is whole. -/
+def Unsplit (Γ : Ctx) (y : Var) : Prop := ∀ t A B, lookup y Γ ≠ some (.half t A B)
+
 /-- No place is lent `mut` alongside another borrow of it, of what it holds, or of what holds it:
 two places rooted at one variable are both lent `readonly`, or in different fields of a pair. -/
 def LentApart (lent : List (Mode × Place)) : Prop :=
@@ -929,6 +987,7 @@ def Slot.ro : Slot → Slot
   | .own τ _ => .ref .ro τ
   | .ref _ τ => .ref .ro τ
   | .lent τ => .lent τ
+  | .half t A B => .ref .ro (.lent1 t A B)
 
 /-- `Γ` with the variables `ys` only read. -/
 def freeze (Γ : Ctx) (ys : List Var) : Ctx :=
@@ -981,8 +1040,8 @@ the mode it is lent in. What is lent `mut` is a whole variable the arm may chang
 `mut` borrow. -/
 inductive Caps (Γ : Ctx) : List (Cap Place) → List (Mode × Var) → Prop
   | nil : Caps Γ [] []
-  | ro : PlaceTy Γ p τ w y → Caps Γ rest ys → Caps Γ (⟨x, .ro, τ, p⟩ :: rest) ((.ro, y) :: ys)
-  | mut : PlaceTy Γ (.var y) τ true y → τ.isFn = false → Caps Γ rest ys →
+  | ro : PlaceTy Γ p τ w y → τ.complete = true → Caps Γ rest ys → Caps Γ (⟨x, .ro, τ, p⟩ :: rest) ((.ro, y) :: ys)
+  | mut : PlaceTy Γ (.var y) τ true y → τ.isFn = false → τ.complete = true → Caps Γ rest ys →
       Caps Γ (⟨x, .mut, τ, .var y⟩ :: rest) ((.mut, y) :: ys)
 
 /-- An arm's context: the operation's owned arguments, live, then its borrowed ones, then the
@@ -996,7 +1055,7 @@ inductive AtomTy (Γ : Ctx) : Atom → Ty → Ctx → Prop
   | lit : AtomTy Γ (.lit n) .int Γ
   | read : PlaceTy Γ p .int w y → AtomTy Γ (.read p) .int Γ
   /-- A value moved out of its variable: a box, or a closure, passed or returned by value. -/
-  | move : lookup x Γ = some (.own τ true) → AtomTy Γ (.move x) τ (setSlot Γ x (.own τ false))
+  | move : lookup x Γ = some (.own τ true) → τ.complete = true → AtomTy Γ (.move x) τ (setSlot Γ x (.own τ false))
 
 /-- The owned arguments, in order, against the parameters' types. -/
 inductive AtomsTy : Ctx → List Atom → List Ty → Ctx → Prop
@@ -1010,14 +1069,15 @@ inductive Typed (F : List Fn) (O : List Op) : Ctx → Expr → Ty → Ctx → Ro
   | add : AtomTy Γ a .int Γ₁ → AtomTy Γ₁ b .int Γ₂ → Typed F O Γ (.add a b) .int Γ₂ r
   | new : AtomTy Γ a τ Γ₁ → Typed F O Γ (.new a) (.box τ) Γ₁ r
   | pair : AtomTy Γ a A Γ₁ → AtomTy Γ₁ b B Γ₂ → Typed F O Γ (.pair a b) (.pair A B) Γ₂ r
-  | inj : AtomTy Γ a (if t then A else B) Γ₁ → Typed F O Γ (.inj A B t a) (.sum A B) Γ₁ r
+  | inj : AtomTy Γ a (if t then A else B) Γ₁ → (Ty.sum A B).complete = true →
+      Typed F O Γ (.inj A B t a) (.sum A B) Γ₁ r
   /-- Each arm owns what the tag carried; where they disagree, a variable is perhaps moved. -/
-  | case : lookup x Γ = some (.own (.sum A B) true) → lookup y Γ = none →
+  | case : lookup x Γ = some (.own (.sum A B) true) → (Ty.sum A B).complete = true → lookup y Γ = none →
       Typed F O ((y, .own A true) :: setSlot Γ x (.own (.sum A B) false)) e₁ τ ((y, .own A l₁) :: Γ₁) r →
       Typed F O ((y, .own B true) :: setSlot Γ x (.own (.sum A B) false)) e₂ τ ((y, .own B l₂) :: Γ₂) r →
       Weaker Γ' Γ₁ → Weaker Γ' Γ₂ → Typed F O Γ (.case x y A B e₁ e₂) τ Γ' r
   /-- Each arm borrows what the tag carries, as a borrow of a place does. -/
-  | caseRef : lookup x Γ = none → PlaceTy Γ p (.sum A B) w y → (m = .mut → w = true) →
+  | caseRef : lookup x Γ = none → PlaceTy Γ p (.sum A B) w y → Unsplit Γ y → (m = .mut → w = true) →
       (m = .mut → A.isFn = false ∧ B.isFn = false) →
       Typed F O ((x, .ref m A) :: lendCtx m Γ y) e₁ τ ((x, .ref m A) :: Γb₁) r →
       Typed F O ((x, .ref m B) :: lendCtx m Γ y) e₂ τ ((x, .ref m B) :: Γb₂) r →
@@ -1053,7 +1113,7 @@ inductive Typed (F : List Fn) (O : List Op) : Ctx → Expr → Ty → Ctx → Ro
   captured, or lend it on, but not move it or put another closure in its place; what the borrowed
   place is rooted at is out of reach meanwhile. -/
   | lendCloMut : F[f]? = some d → d.cap = some (xc, τc, .excl) → d.owns = [(pn, A)] → d.refs = [] →
-      d.retp = none → τc.data = true → PlaceTy Γ p τc true y → lookup x Γ = none →
+      d.retp = none → τc.data = true → PlaceTy Γ p τc true y → Unsplit Γ y → lookup x Γ = none →
       Typed F O ((x, .ref .mut (.fn .excl A d.ret d.row)) :: hide Γ y) body τb
         ((x, .ref .mut (.fn .excl A d.ret d.row)) :: Γb) r →
       Typed F O Γ (.lendClo x f p body) τb (thaw Γ [y] Γb) r
@@ -1063,7 +1123,8 @@ inductive Typed (F : List Fn) (O : List Op) : Ctx → Expr → Ty → Ctx → Ro
   | lendCall : F[f]? = some d → d.retp = some (m, cs) → d.cap = none → (∀ l ∈ d.row, l ∈ r) →
       AtomsTy Γ owned (d.owns.map Prod.snd) Γ₁ → Lends Γ₁ lent (d.refs.map Prod.snd) ys → LentApart lent →
       Pairs (fun c z => ∃ mi, ys[c.1]? = some (mi, z) ∧ (m = .mut → mi = .mut)) cs zs →
-      (m = .mut → zs.Nodup ∧ d.ret.isFn = false ∧ ∀ c ∈ cs, ∀ e, d.refs[c.1]? = some e → e.2.2.isFn = false) →
+      (m = .mut → zs.Nodup ∧ d.ret.isFn = false ∧ (∀ c ∈ cs, ∀ e, d.refs[c.1]? = some e → e.2.2.isFn = false) ∧
+        ∀ z ∈ zs, Unsplit Γ₁ z) →
       lookup x Γ₁ = none →
       Typed F O ((x, .ref m d.ret) :: lendCtxs m Γ₁ zs) body τb ((x, .ref m d.ret) :: Γb) r →
       Typed F O Γ (.lendCall x m f owned lent body) τb (unlend m Γ₁ zs Γb) r
@@ -1080,15 +1141,27 @@ inductive Typed (F : List Fn) (O : List Op) : Ctx → Expr → Ty → Ctx → Ro
   /-- A borrow lives as long as the code it is in scope for: what the place is rooted at is only
   read, or not reached, until it ends. -/
   | lend : lookup x Γ = none → PlaceTy Γ p τ w y → (m = .mut → w = true) → (m = .mut → τ.isFn = false) →
+      (m = .mut → Unsplit Γ y) →
       Typed F O ((x, .ref m τ) :: lendCtx m Γ y) body τb ((x, .ref m τ) :: Γb) r →
       Typed F O Γ (.lend x m p body) τb (thaw Γ [y] Γb) r
+  /-- A borrow of one field of a variable's pair, for the code it is in scope for: the variable
+  stays in reach, the field a hole in its type, and the field beside it may be read, changed or
+  lent meanwhile. -/
+  | lendField : lookup x Γ = none → lookup y Γ = some s →
+      s.ty = .pair A B → ((∃ τ, s = .own τ true) ∨ (∃ τ, s = .ref .mut τ) ∨ ∃ t' A' B', s = .half t' A' B') →
+      (if t then A else B).complete = true → (m = .mut → (if t then A else B).isFn = false) →
+      Typed F O ((x, .ref m (if t then A else B)) ::
+          setSlot Γ y (.half t A B)) body τb
+        ((x, .ref m (if t then A else B)) :: Γb) r →
+      Typed F O Γ (.lend x m (fieldOf t y) body) τb (thaw Γ [y] Γb) r
   /-- Cleanup starts where the body would have ended, and moves nothing. -/
   | defer : Typed F O Γ body τ Γb r → Typed F O Γb d .int Γb r → Typed F O Γ (.defer τ d body) τ Γb r
   | perform : O[e]? = some op → Label.eff e ∈ r → AtomsTy Γ owned op.owns Γ₁ →
       Lends Γ₁ lent op.refs ys → LentApart lent → Typed F O Γ (.perform e owned lent) op.ret Γ₁ r
   /-- The arm runs in the context of the `handle`: its row is the `handle`'s. What it is lent of
   the `handle`'s scope the body may only read, or, lent `mut`, not reach. -/
-  | handle : O[e]? = some op → os.length = op.owns.length → rs.length = op.refs.length →
+  | handle : O[e]? = some op → (∀ τ ∈ op.owns, τ.complete = true) → os.length = op.owns.length →
+      rs.length = op.refs.length →
       Caps Γ caps ys → Exclusive ys → (os ++ rs ++ caps.map Cap.name).Nodup →
       Typed F O (armCtx os rs op (caps.map Cap.sig)) arm op.ret Γa r →
       Typed F O (freeze (hideAll Γ (roots .mut ys)) (roots .ro ys)) body τ Γb (.eff e :: r) →
