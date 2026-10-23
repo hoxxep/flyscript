@@ -92,7 +92,7 @@ example : ∀ n, match eval [addInto] [] n [.abort .fail 0] .empty [] lends with
     | (.stuck, _) => False
     | (.susp _ _ _ _ _, _) => False
     | (.timeout, _) => True
-    | (.val v, σ') => ∃ L, VT σ' .int v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
+    | (.val v, σ') => ∃ L, VT [addInto] σ' .int v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
     | (.abort _ _, σ') => ∀ l, σ'.mem l = none :=
   program_ok addInto_ok lends_typed
 
@@ -167,7 +167,7 @@ example : ∀ n, match eval [] ops n [.abort .fail 0] .empty [] asks with
     | (.stuck, _) => False
     | (.susp _ _ _ _ _, _) => False
     | (.timeout, _) => True
-    | (.val v, σ') => ∃ L, VT σ' .int v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
+    | (.val v, σ') => ∃ L, VT [] σ' .int v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
     | (.abort _ _, σ') => ∀ l, σ'.mem l = none :=
   program_ok (fun _ h => by simp at h) asks_typed
 
@@ -228,7 +228,7 @@ example : ∀ n, match eval [] ops n [.abort .fail 0] .empty [] drops with
     | (.stuck, _) => False
     | (.susp _ _ _ _ _, _) => False
     | (.timeout, _) => True
-    | (.val v, σ') => ∃ L, VT σ' .int v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
+    | (.val v, σ') => ∃ L, VT [] σ' .int v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
     | (.abort _ _, σ') => ∀ l, σ'.mem l = none :=
   program_ok (fun _ h => by simp at h) drops_typed
 
@@ -328,7 +328,7 @@ example : ∀ n, match eval [] ops n [.abort .fail 0] .empty [] counts with
     | (.stuck, _) => False
     | (.susp _ _ _ _ _, _) => False
     | (.timeout, _) => True
-    | (.val v, σ') => ∃ L, VT σ' .int v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
+    | (.val v, σ') => ∃ L, VT [] σ' .int v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
     | (.abort _ _, σ') => ∀ l, σ'.mem l = none :=
   program_ok (fun _ h => by simp at h) counts_typed
 
@@ -487,7 +487,7 @@ example : ∀ n, match eval [inside] [] n [.abort .fail 0] .empty [] returns wit
     | (.stuck, _) => False
     | (.susp _ _ _ _ _, _) => False
     | (.timeout, _) => True
-    | (.val v, σ') => ∃ L, VT σ' .int v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
+    | (.val v, σ') => ∃ L, VT [inside] σ' .int v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
     | (.abort _ _, σ') => ∀ l, σ'.mem l = none :=
   program_ok inside_ok returns_typed
 

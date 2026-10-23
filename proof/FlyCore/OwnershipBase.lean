@@ -12,14 +12,14 @@ of what is only read may overlap each other, but nothing that may be changed.
 namespace FlyCore.Ownership
 
 /-- `a` holds a value of type `τ`, whose cells — `a` and every cell of its boxes — are `L`. -/
-inductive LT (σ : Store) : Nat → Ty → List Nat → Prop
-  | int : σ.mem a = some (.int n) → LT σ a .int [a]
-  | box : σ.mem a = some (.ptr b) → LT σ b τ R → a ∉ R → LT σ a (.box τ) (a :: R)
+inductive LT (F : List Fn) (σ : Store) : Nat → Ty → List Nat → Prop
+  | int : σ.mem a = some (.int n) → LT F σ a .int [a]
+  | box : σ.mem a = some (.ptr b) → LT F σ b τ R → a ∉ R → LT F σ a (.box τ) (a :: R)
 
 /-- A value of type `τ`, and the cells it owns. -/
-inductive VT (σ : Store) : Ty → Val → List Nat → Prop
-  | int : VT σ .int (.int n) []
-  | box : LT σ b τ R → VT σ (.box τ) (.ptr b) R
+inductive VT (F : List Fn) (σ : Store) : Ty → Val → List Nat → Prop
+  | int : VT F σ .int (.int n) []
+  | box : LT F σ b τ R → VT F σ (.box τ) (.ptr b) R
 
 def Disj (A B : List Nat) : Prop := ∀ x ∈ A, x ∉ B
 
@@ -78,11 +78,11 @@ theorem nodup_append_disj : (A ++ B).Nodup ↔ A.Nodup ∧ B.Nodup ∧ Disj A B 
 
 /-! ## Trees -/
 
-theorem LT.head : LT σ a τ L → a ∈ L := by
+theorem LT.head : LT F σ a τ L → a ∈ L := by
   intro h
   cases h <;> simp
 
-theorem LT.alloc : LT σ a τ L → ∀ l ∈ L, σ.mem l ≠ none := by
+theorem LT.alloc : LT F σ a τ L → ∀ l ∈ L, σ.mem l ≠ none := by
   intro h
   induction h with
   | int ha => intro l hl; simp at hl; subst hl; simp [ha]
@@ -92,13 +92,13 @@ theorem LT.alloc : LT σ a τ L → ∀ l ∈ L, σ.mem l ≠ none := by
     · simp [ha]
     · exact ih l hl
 
-theorem LT.nodup : LT σ a τ L → L.Nodup := by
+theorem LT.nodup : LT F σ a τ L → L.Nodup := by
   intro h
   induction h with
   | int => simp
   | box _ _ hn ih => exact List.nodup_cons.mpr ⟨hn, ih⟩
 
-theorem LT.frame : LT σ a τ L → Agree σ σ' L → LT σ' a τ L := by
+theorem LT.frame : LT F σ a τ L → Agree σ σ' L → LT F σ' a τ L := by
   intro h
   induction h with
   | int ha =>
@@ -108,7 +108,7 @@ theorem LT.frame : LT σ a τ L → Agree σ σ' L → LT σ' a τ L := by
     intro hag
     refine .box (by rw [hag _ (List.mem_cons_self ..)]; exact ha) (ih fun l hl => hag l (List.mem_cons_of_mem _ hl)) hn
 
-theorem LT.det : LT σ a τ L → LT σ a τ L' → L = L' := by
+theorem LT.det : LT F σ a τ L → LT F σ a τ L' → L = L' := by
   intro h
   induction h generalizing L' with
   | int => intro h'; cases h'; rfl
@@ -121,7 +121,7 @@ theorem LT.det : LT σ a τ L → LT σ a τ L' → L = L' := by
       rw [ih hb']
 
 /-- What a location holds says its type, too. -/
-theorem LT.det_ty : LT σ a τ L → LT σ a τ' L' → τ = τ' ∧ L = L' := by
+theorem LT.det_ty : LT F σ a τ L → LT F σ a τ' L' → τ = τ' ∧ L = L' := by
   intro h
   induction h generalizing τ' L' with
   | int ha => intro h'; cases h' with
@@ -137,19 +137,19 @@ theorem LT.det_ty : LT σ a τ L → LT σ a τ' L' → τ = τ' ∧ L = L' := b
       obtain ⟨rfl, rfl⟩ := ih hb'
       exact ⟨rfl, rfl⟩
 
-theorem VT.alloc : VT σ τ v L → ∀ l ∈ L, σ.mem l ≠ none := by
+theorem VT.alloc : VT F σ τ v L → ∀ l ∈ L, σ.mem l ≠ none := by
   intro h
   cases h with
   | int => simp
   | box h => exact h.alloc
 
-theorem VT.nodup : VT σ τ v L → L.Nodup := by
+theorem VT.nodup : VT F σ τ v L → L.Nodup := by
   intro h
   cases h with
   | int => simp
   | box h => exact h.nodup
 
-theorem VT.frame : VT σ τ v L → Agree σ σ' L → VT σ' τ v L := by
+theorem VT.frame : VT F σ τ v L → Agree σ σ' L → VT F σ' τ v L := by
   intro h hag
   cases h with
   | int => exact .int
@@ -191,13 +191,13 @@ theorem WF.alloc (hwf : WF σ) : WF (σ.alloc v).2 := by
   · exact Nat.lt_succ_of_lt (hwf x hx)
 
 /-- What a location holds: a value of its type, owning the rest of its footprint. -/
-theorem LT.contents : LT σ b τ R → ∃ w R', σ.mem b = some w ∧ VT σ τ w R' ∧ R = b :: R' ∧ b ∉ R' := by
+theorem LT.contents : LT F σ b τ R → ∃ w R', σ.mem b = some w ∧ VT F σ τ w R' ∧ R = b :: R' ∧ b ∉ R' := by
   intro h
   cases h with
   | int ha => exact ⟨_, [], ha, .int, rfl, by simp⟩
   | box ha hb hn => exact ⟨_, _, ha, .box hb, rfl, hn⟩
 
-theorem LT.of_contents : σ.mem b = some w → VT σ τ w R' → b ∉ R' → LT σ b τ (b :: R') := by
+theorem LT.of_contents : σ.mem b = some w → VT F σ τ w R' → b ∉ R' → LT F σ b τ (b :: R') := by
   intro ha hv hn
   cases hv with
   | int => exact .int ha
@@ -206,7 +206,7 @@ theorem LT.of_contents : σ.mem b = some w → VT σ τ w R' → b ∉ R' → LT
 /-! ## Dropping -/
 
 /-- Dropping a value frees exactly the cells it owns. -/
-theorem drop_ok : ∀ (τ : Ty) (σ : Store) v L, VT σ τ v L →
+theorem drop_ok : ∀ (τ : Ty) (σ : Store) v L, VT F σ τ v L →
     ∃ σ', drop σ τ v = some σ' ∧ σ'.next = σ.next ∧ (∀ l ∈ L, σ'.mem l = none) ∧
       ∀ l, l ∉ L → σ'.mem l = σ.mem l := by
   intro τ
@@ -236,7 +236,7 @@ theorem drop_ok : ∀ (τ : Ty) (σ : Store) v L, VT σ τ v L →
         · exact hkeep l (fun h => hl (List.mem_cons_of_mem _ h))
 
 /-- Dropping a variable's cell frees its footprint: the cell, and what a live value in it owns. -/
-theorem dropCell_live : LT σ c τ L →
+theorem dropCell_live : LT F σ c τ L →
     ∃ σ', dropCell σ τ c = some σ' ∧ σ'.next = σ.next ∧ (∀ l ∈ L, σ'.mem l = none) ∧
       ∀ l, l ∉ L → σ'.mem l = σ.mem l := by
   intro h
@@ -300,7 +300,7 @@ theorem Path.frame : Path σ a τa P l τ → Agree σ σ' P → Path σ' a τa 
       (ih fun x hx => hag x (List.mem_cons_of_mem _ hx))
 
 /-- A tree is the cells on a path into it, then the tree where the path ends. -/
-theorem path_split : Path σ a τa P l τ → LT σ a τa L → ∃ R, LT σ l τ R ∧ L = P ++ R := by
+theorem path_split : Path σ a τa P l τ → LT F σ a τa L → ∃ R, LT F σ l τ R ∧ L = P ++ R := by
   intro hp
   induction hp generalizing L with
   | here => intro h; exact ⟨L, h, rfl⟩
@@ -315,8 +315,8 @@ theorem path_split : Path σ a τa P l τ → LT σ a τa L → ∃ R, LT σ l �
 
 /-- Replacing the tree where a path ends keeps a tree: the cells on the way are unchanged, and the
 new tree shares none of them. -/
-theorem path_join : Path σ a τa P l τ → LT σ a τa (P ++ R) → Agree σ σ' P → LT σ' l τ R' →
-    Disj P R' → LT σ' a τa (P ++ R') ∧ Path σ' a τa P l τ := by
+theorem path_join : Path σ a τa P l τ → LT F σ a τa (P ++ R) → Agree σ σ' P → LT F σ' l τ R' →
+    Disj P R' → LT F σ' a τa (P ++ R') ∧ Path σ' a τa P l τ := by
   intro hp
   induction hp with
   | here => intro _ _ h _; exact ⟨h, .here⟩
@@ -349,10 +349,10 @@ def Slot.excl : Slot → Bool
 /-- The footprint a slot has: what an owned live variable or a borrow holds, owning the rest. A
 variable perhaps moved holds the mark a move leaves, its footprint its cell alone, or still its
 value: which, only running the program tells, and dropping it at the end of its scope looks. -/
-def SlotOk (σ : Store) : Slot → Nat → List Nat → Prop
-  | .own τ true, a, L => LT σ a τ L
-  | .own τ false, a, L => (σ.mem a = some .moved ∧ L = [a]) ∨ LT σ a τ L
-  | .ref _ τ, a, L => LT σ a τ L
+def SlotOk (F : List Fn) (σ : Store) : Slot → Nat → List Nat → Prop
+  | .own τ true, a, L => LT F σ a τ L
+  | .own τ false, a, L => (σ.mem a = some .moved ∧ L = [a]) ∨ LT F σ a τ L
+  | .ref _ τ, a, L => LT F σ a τ L
   | .lent _, _, L => L = []
 
 /-- Adds a footprint to the exclusive ones or to the shared ones, as the slot says. -/
@@ -361,24 +361,24 @@ def addS (s : Slot) (L S : List Nat) : List Nat := if s.excl then S else L ++ S
 
 /-- The footprints of an activation's variables, in order: of those that may be changed — owned
 variables and `mut` borrows — and of those that may only be read, `readonly` borrows. -/
-inductive Foot (σ : Store) : Ctx → Env → List Nat → List Nat → Prop
-  | nil : Foot σ [] [] [] []
-  | cons : SlotOk σ s a L → Foot σ Γ env E S →
-      Foot σ ((x, s) :: Γ) ((x, a) :: env) (addE s L E) (addS s L S)
+inductive Foot (F : List Fn) (σ : Store) : Ctx → Env → List Nat → List Nat → Prop
+  | nil : Foot F σ [] [] [] []
+  | cons : SlotOk F σ s a L → Foot F σ Γ env E S →
+      Foot F σ ((x, s) :: Γ) ((x, a) :: env) (addE s L E) (addS s L S)
 
 /-- The invariant of an activation: its variables' footprints, those that may be changed disjoint
 from each other and from those that may be read. -/
-structure Inv (σ : Store) (Γ : Ctx) (env : Env) (E S : List Nat) : Prop where
-  foot : Foot σ Γ env E S
+structure Inv (F : List Fn) (σ : Store) (Γ : Ctx) (env : Env) (E S : List Nat) : Prop where
+  foot : Foot F σ Γ env E S
   nodup : E.Nodup
   disj : Disj S E
   keys : (Γ.map Prod.fst).Nodup
 
-theorem LT.not_moved : LT σ a τ L → σ.mem a ≠ some .moved := by
+theorem LT.not_moved : LT F σ a τ L → σ.mem a ≠ some .moved := by
   intro h
   cases h <;> simp_all
 
-theorem SlotOk.alloc : SlotOk σ s a L → ∀ l ∈ L, σ.mem l ≠ none := by
+theorem SlotOk.alloc : SlotOk F σ s a L → ∀ l ∈ L, σ.mem l ≠ none := by
   intro h
   rcases s with ⟨τ, live⟩ | ⟨m, τ⟩ | τ
   · cases live
@@ -389,7 +389,7 @@ theorem SlotOk.alloc : SlotOk σ s a L → ∀ l ∈ L, σ.mem l ≠ none := by
   · exact LT.alloc h
   · simp only [SlotOk] at h; subst h; simp
 
-theorem SlotOk.frame : SlotOk σ s a L → Agree σ σ' L → SlotOk σ' s a L := by
+theorem SlotOk.frame : SlotOk F σ s a L → Agree σ σ' L → SlotOk F σ' s a L := by
   intro h hag
   rcases s with ⟨τ, live⟩ | ⟨m, τ⟩ | τ
   · cases live
@@ -400,7 +400,7 @@ theorem SlotOk.frame : SlotOk σ s a L → Agree σ σ' L → SlotOk σ' s a L :
   · exact LT.frame h hag
   · exact h
 
-theorem SlotOk.nodup : SlotOk σ s a L → L.Nodup := by
+theorem SlotOk.nodup : SlotOk F σ s a L → L.Nodup := by
   intro h
   rcases s with ⟨τ, live⟩ | ⟨m, τ⟩ | τ
   · cases live
@@ -411,7 +411,7 @@ theorem SlotOk.nodup : SlotOk σ s a L → L.Nodup := by
   · exact LT.nodup h
   · simp only [SlotOk] at h; subst h; simp
 
-theorem SlotOk.det : SlotOk σ s a L → SlotOk σ s a L' → L = L' := by
+theorem SlotOk.det : SlotOk F σ s a L → SlotOk F σ s a L' → L = L' := by
   intro h h'
   rcases s with ⟨τ, live⟩ | ⟨m, τ⟩ | τ
   · cases live
@@ -430,7 +430,7 @@ theorem mem_addE : l ∈ addE s L E ↔ (s.excl ∧ l ∈ L) ∨ l ∈ E := by
 theorem mem_addS : l ∈ addS s L S ↔ (s.excl = false ∧ l ∈ L) ∨ l ∈ S := by
   unfold addS; split <;> simp_all
 
-theorem Foot.alloc : Foot σ Γ env E S → ∀ l, l ∈ E ∨ l ∈ S → σ.mem l ≠ none := by
+theorem Foot.alloc : Foot F σ Γ env E S → ∀ l, l ∈ E ∨ l ∈ S → σ.mem l ≠ none := by
   intro h
   induction h with
   | nil => intro l h; simp at h
@@ -444,7 +444,7 @@ theorem Foot.alloc : Foot σ Γ env E S → ∀ l, l ∈ E ∨ l ∈ S → σ.me
       · exact hs.alloc l hl
       · exact ih l (.inr hl)
 
-theorem Foot.frame : Foot σ Γ env E S → Agree σ σ' (E ++ S) → Foot σ' Γ env E S := by
+theorem Foot.frame : Foot F σ Γ env E S → Agree σ σ' (E ++ S) → Foot F σ' Γ env E S := by
   intro h
   induction h with
   | nil => intro _; exact .nil

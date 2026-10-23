@@ -11,18 +11,18 @@ variable's footprint may be rebuilt at once — as a call that lent several plac
 
 namespace FlyCore.Ownership
 
-theorem Inv.alloc (h : Inv σ Γ env E S) : ∀ l ∈ E, σ.mem l ≠ none :=
+theorem Inv.alloc (h : Inv F σ Γ env E S) : ∀ l ∈ E, σ.mem l ≠ none :=
   fun l hl => h.foot.alloc l (.inl hl)
 
-theorem Inv.allocS (h : Inv σ Γ env E S) : ∀ l ∈ S, σ.mem l ≠ none :=
+theorem Inv.allocS (h : Inv F σ Γ env E S) : ∀ l ∈ S, σ.mem l ≠ none :=
   fun l hl => h.foot.alloc l (.inr hl)
 
-theorem Foot.uncons : Foot σ ((x, s) :: Γ) ((x, a) :: env) E S →
-    ∃ L E' S', SlotOk σ s a L ∧ Foot σ Γ env E' S' ∧ E = addE s L E' ∧ S = addS s L S' := by
+theorem Foot.uncons : Foot F σ ((x, s) :: Γ) ((x, a) :: env) E S →
+    ∃ L E' S', SlotOk F σ s a L ∧ Foot F σ Γ env E' S' ∧ E = addE s L E' ∧ S = addS s L S' := by
   intro h; cases h; exact ⟨_, _, _, ‹_›, ‹_›, rfl, rfl⟩
 
 /-- Dropping an owned variable's cell, live or moved, frees exactly its footprint. -/
-theorem dropCell_own : SlotOk σ (.own τ live) c L →
+theorem dropCell_own : SlotOk F σ (.own τ live) c L →
     ∃ σ', dropCell σ τ c = some σ' ∧ σ'.next = σ.next ∧ (∀ l ∈ L, σ'.mem l = none) ∧
       ∀ l, l ∉ L → σ'.mem l = σ.mem l := by
   intro h
@@ -58,8 +58,8 @@ theorem lookup_cons_ne {α : Type} {Γ : List (Var × α)} {t : α} (h : x ≠ y
     lookup x ((y, t) :: Γ) = lookup x Γ := by
   simp [lookup, h]
 
-theorem Foot.append : Foot σ Γa ea Ea Sa → Foot σ Γb eb Eb Sb →
-    Foot σ (Γa ++ Γb) (ea ++ eb) (Ea ++ Eb) (Sa ++ Sb) := by
+theorem Foot.append : Foot F σ Γa ea Ea Sa → Foot F σ Γb eb Eb Sb →
+    Foot F σ (Γa ++ Γb) (ea ++ eb) (Ea ++ Eb) (Sa ++ Sb) := by
   intro ha hb
   induction ha with
   | nil => simpa using hb
@@ -67,9 +67,9 @@ theorem Foot.append : Foot σ Γa ea Ea Sa → Foot σ Γb eb Eb Sb →
     have := Foot.cons (x := x) hs ih
     cases he : s.excl <;> simpa [addE, addS, he] using this
 
-theorem Foot.split : ∀ {Γa : Ctx} {ea : Env} {E S}, Foot σ (Γa ++ Γb) (ea ++ eb) E S →
+theorem Foot.split : ∀ {Γa : Ctx} {ea : Env} {E S}, Foot F σ (Γa ++ Γb) (ea ++ eb) E S →
     Γa.length = ea.length →
-    ∃ Ea Sa Eb Sb, Foot σ Γa ea Ea Sa ∧ Foot σ Γb eb Eb Sb ∧ E = Ea ++ Eb ∧ S = Sa ++ Sb
+    ∃ Ea Sa Eb Sb, Foot F σ Γa ea Ea Sa ∧ Foot F σ Γb eb Eb Sb ∧ E = Ea ++ Eb ∧ S = Sa ++ Sb
   | [], [], E, S, h, _ => ⟨[], [], E, S, .nil, by simpa using h, rfl, rfl⟩
   | (x, s) :: Γa, (y, a) :: ea, E, S, h, hl => by
     simp only [List.cons_append] at h
@@ -82,10 +82,10 @@ theorem Foot.split : ∀ {Γa : Ctx} {ea : Env} {E S}, Foot σ (Γa ++ Γb) (ea 
   | _ :: _, [], _, _, _, hl => by simp at hl
 
 /-- A variable of the activation, bound at `a` with footprint `L`. -/
-def Entry (σ : Store) (Γ : Ctx) (env : Env) (x : Var) (s : Slot) (a : Nat) (L : List Nat) : Prop :=
-  lookup x Γ = some s ∧ lookup x env = some a ∧ SlotOk σ s a L
+def Entry (F : List Fn) (σ : Store) (Γ : Ctx) (env : Env) (x : Var) (s : Slot) (a : Nat) (L : List Nat) : Prop :=
+  lookup x Γ = some s ∧ lookup x env = some a ∧ SlotOk F σ s a L
 
-theorem Entry.det (h : Entry σ Γ env x s a L) (h' : Entry σ Γ env x s' a' L') :
+theorem Entry.det (h : Entry F σ Γ env x s a L) (h' : Entry F σ Γ env x s' a' L') :
     s = s' ∧ a = a' ∧ L = L' := by
   obtain ⟨hs, ha, hL⟩ := h
   obtain ⟨hs', ha', hL'⟩ := h'
@@ -95,8 +95,8 @@ theorem Entry.det (h : Entry σ Γ env x s a L) (h' : Entry σ Γ env x s' a' L'
 
 /-- The head of an activation's variables, and the rest, which do not see it. -/
 theorem entry_cons (hx : x ∉ Γ.map Prod.fst) :
-    Entry σ ((x, s) :: Γ) ((x, a) :: env) y t b L ↔
-      (y = x ∧ t = s ∧ b = a ∧ SlotOk σ s a L) ∨ (y ≠ x ∧ Entry σ Γ env y t b L) := by
+    Entry F σ ((x, s) :: Γ) ((x, a) :: env) y t b L ↔
+      (y = x ∧ t = s ∧ b = a ∧ SlotOk F σ s a L) ∨ (y ≠ x ∧ Entry F σ Γ env y t b L) := by
   unfold Entry
   by_cases hy : y = x
   · subst hy
@@ -115,8 +115,8 @@ theorem entry_cons (hx : x ∉ Γ.map Prod.fst) :
       · exact h
 
 /-- A cell is in the exclusive footprints just when it is in an exclusive variable's. -/
-theorem Foot.memE : Foot σ Γ env E S → (Γ.map Prod.fst).Nodup → ∀ y,
-    (y ∈ E ↔ ∃ x s a L, Entry σ Γ env x s a L ∧ s.excl = true ∧ y ∈ L) := by
+theorem Foot.memE : Foot F σ Γ env E S → (Γ.map Prod.fst).Nodup → ∀ y,
+    (y ∈ E ↔ ∃ x s a L, Entry F σ Γ env x s a L ∧ s.excl = true ∧ y ∈ L) := by
   intro h
   induction h with
   | nil => intro _ y; simp [Entry, lookup]
@@ -136,8 +136,8 @@ theorem Foot.memE : Foot σ Γ env E S → (Γ.map Prod.fst).Nodup → ∀ y,
       · exact .inr ⟨x', s', a', L', he', hex, hy⟩
 
 /-- A cell is in the shared footprints just when it is in a shared variable's. -/
-theorem Foot.memS : Foot σ Γ env E S → (Γ.map Prod.fst).Nodup → ∀ y,
-    (y ∈ S ↔ ∃ x s a L, Entry σ Γ env x s a L ∧ s.excl = false ∧ y ∈ L) := by
+theorem Foot.memS : Foot F σ Γ env E S → (Γ.map Prod.fst).Nodup → ∀ y,
+    (y ∈ S ↔ ∃ x s a L, Entry F σ Γ env x s a L ∧ s.excl = false ∧ y ∈ L) := by
   intro h
   induction h with
   | nil => intro _ y; simp [Entry, lookup]
@@ -156,7 +156,7 @@ theorem Foot.memS : Foot σ Γ env E S → (Γ.map Prod.fst).Nodup → ∀ y,
       · exact .inl ⟨hex, hL.det hs ▸ hy⟩
       · exact .inr ⟨x', s', a', L', he', hex, hy⟩
 
-theorem Inv.entry_sub (hI : Inv σ Γ env E S) (he : Entry σ Γ env x s a L) :
+theorem Inv.entry_sub (hI : Inv F σ Γ env E S) (he : Entry F σ Γ env x s a L) :
     ∀ y ∈ L, (s.excl = true ∧ y ∈ E) ∨ (s.excl = false ∧ y ∈ S) := by
   intro y hy
   cases hs : s.excl
@@ -164,8 +164,8 @@ theorem Inv.entry_sub (hI : Inv σ Γ env E S) (he : Entry σ Γ env x s a L) :
   · exact .inl ⟨rfl, (hI.foot.memE hI.keys y).mpr ⟨x, s, a, L, he, hs, hy⟩⟩
 
 /-- The head variable's footprint is apart from a later one's when either may be changed. -/
-theorem foot_head_apart (hrest : Foot σ Γ env E S) (hk : (Γ.map Prod.fst).Nodup)
-    (hn : (addE r M E).Nodup) (hd : Disj (addS r M S) (addE r M E)) (hy : Entry σ Γ env y t b L')
+theorem foot_head_apart (hrest : Foot F σ Γ env E S) (hk : (Γ.map Prod.fst).Nodup)
+    (hn : (addE r M E).Nodup) (hd : Disj (addS r M S) (addE r M E)) (hy : Entry F σ Γ env y t b L')
     (he : r.excl = true ∨ t.excl = true) : Disj M L' := by
   intro l hl hl'
   cases ht : t.excl
@@ -179,7 +179,7 @@ theorem foot_head_apart (hrest : Foot σ Γ env E S) (hk : (Γ.map Prod.fst).Nod
       exact (nodup_append_disj.mp hn).2.2 l hl hE
 
 /-- Two variables' footprints are apart when either may be changed. -/
-theorem Inv.apart (hI : Inv σ Γ env E S) (hx : Entry σ Γ env x s a L) (hy : Entry σ Γ env y t b L')
+theorem Inv.apart (hI : Inv F σ Γ env E S) (hx : Entry F σ Γ env x s a L) (hy : Entry F σ Γ env y t b L')
     (hne : x ≠ y) (he : s.excl = true ∨ t.excl = true) : Disj L L' := by
   obtain ⟨hf, hn, hd, hk⟩ := hI
   revert hn hd hk
@@ -204,13 +204,13 @@ theorem Inv.apart (hI : Inv σ Γ env E S) (hx : Entry σ Γ env x s a L) (hy : 
 
 /-- Every variable's footprint rebuilt at once, in a store where each holds what `nf` says: the
 shared ones as they were, the exclusive ones apart from each other. -/
-theorem Foot.rebuild (nf : Var → List Nat → List Nat) (h : Foot σ Γ env E S)
+theorem Foot.rebuild (nf : Var → List Nat → List Nat) (h : Foot F σ Γ env E S)
     (hk : (Γ.map Prod.fst).Nodup)
-    (hok : ∀ x s a L, Entry σ Γ env x s a L → SlotOk σ' s a (nf x L) ∧ (s.excl = false → nf x L = L))
-    (hdisj : ∀ x s a L y t b L', Entry σ Γ env x s a L → Entry σ Γ env y t b L' → x ≠ y →
+    (hok : ∀ x s a L, Entry F σ Γ env x s a L → SlotOk F σ' s a (nf x L) ∧ (s.excl = false → nf x L = L))
+    (hdisj : ∀ x s a L y t b L', Entry F σ Γ env x s a L → Entry F σ Γ env y t b L' → x ≠ y →
       s.excl = true → t.excl = true → Disj (nf x L) (nf y L')) :
-    ∃ E', Foot σ' Γ env E' S ∧ E'.Nodup ∧
-      ∀ y, y ∈ E' ↔ ∃ x s a L, Entry σ Γ env x s a L ∧ s.excl = true ∧ y ∈ nf x L := by
+    ∃ E', Foot F σ' Γ env E' S ∧ E'.Nodup ∧
+      ∀ y, y ∈ E' ↔ ∃ x s a L, Entry F σ Γ env x s a L ∧ s.excl = true ∧ y ∈ nf x L := by
   revert hk hok hdisj
   induction h with
   | nil => intro _ _ _; exact ⟨[], .nil, List.nodup_nil, by simp [Entry, lookup]⟩
@@ -218,8 +218,8 @@ theorem Foot.rebuild (nf : Var → List Nat → List Nat) (h : Foot σ Γ env E 
     intro hk hok hdisj
     simp only [List.map_cons] at hk
     obtain ⟨hz, hkt⟩ := List.nodup_cons.mp hk
-    have hhead : Entry σ ((z, r) :: Γ) ((z, c) :: env) z r c M := (entry_cons hz).mpr (.inl ⟨rfl, rfl, rfl, hr⟩)
-    have htail : ∀ {x s a L}, Entry σ Γ env x s a L → Entry σ ((z, r) :: Γ) ((z, c) :: env) x s a L ∧ x ≠ z :=
+    have hhead : Entry F σ ((z, r) :: Γ) ((z, c) :: env) z r c M := (entry_cons hz).mpr (.inl ⟨rfl, rfl, rfl, hr⟩)
+    have htail : ∀ {x s a L}, Entry F σ Γ env x s a L → Entry F σ ((z, r) :: Γ) ((z, c) :: env) x s a L ∧ x ≠ z :=
       fun he => have hne : _ ≠ z := fun h => hz (h ▸ lookup_some_keys he.1)
         ⟨(entry_cons hz).mpr (.inr ⟨hne, he⟩), hne⟩
     obtain ⟨E', hf', hn', hmem'⟩ := ih hkt (fun x s a L he => hok x s a L (htail he).1)

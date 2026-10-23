@@ -14,10 +14,10 @@ namespace FlyCore.Ownership
 
 /-- The places a `handle` lent its arm, each holding a value of its type: `R` the cells of those
 lent `readonly`, `H` of those lent `mut`. -/
-inductive CapsOk (σ : Store) : List (Cap Nat) → List Nat → List Nat → Prop
-  | nil : CapsOk σ [] [] []
-  | ro : LT σ a τ L → CapsOk σ rest R H → CapsOk σ (⟨x, .ro, τ, a⟩ :: rest) (L ++ R) H
-  | mut : LT σ a τ L → CapsOk σ rest R H → CapsOk σ (⟨x, .mut, τ, a⟩ :: rest) R (L ++ H)
+inductive CapsOk (F : List Fn) (σ : Store) : List (Cap Nat) → List Nat → List Nat → Prop
+  | nil : CapsOk F σ [] [] []
+  | ro : LT F σ a τ L → CapsOk F σ rest R H → CapsOk F σ (⟨x, .ro, τ, a⟩ :: rest) (L ++ R) H
+  | mut : LT F σ a τ L → CapsOk F σ rest R H → CapsOk F σ (⟨x, .mut, τ, a⟩ :: rest) R (L ++ H)
 
 /-! ## Variables perhaps moved -/
 
@@ -25,7 +25,7 @@ theorem Slot.Le.excl : Slot.Le s' s → s'.excl = s.excl
   | .refl => rfl
   | .forget => rfl
 
-theorem SlotOk.weaken : Slot.Le s' s → SlotOk σ s a L → SlotOk σ s' a L
+theorem SlotOk.weaken : Slot.Le s' s → SlotOk F σ s a L → SlotOk F σ s' a L
   | .refl, h => h
   | .forget, h => .inr h
 
@@ -41,7 +41,7 @@ theorem Weaker.trans : Weaker Γ₁ Γ₂ → Weaker Γ₂ Γ₃ → Weaker Γ�
   | .nil, .nil => .nil
   | .cons h₁ w₁, .cons h₂ w₂ => .cons (h₁.trans h₂) (w₁.trans w₂)
 
-theorem Foot.weaken : Foot σ Γ env E S → Weaker Γ' Γ → Foot σ Γ' env E S := by
+theorem Foot.weaken : Foot F σ Γ env E S → Weaker Γ' Γ → Foot F σ Γ' env E S := by
   intro h
   induction h generalizing Γ' with
   | nil => intro w; cases w; exact .nil
@@ -53,7 +53,7 @@ theorem Foot.weaken : Foot σ Γ env E S → Weaker Γ' Γ → Foot σ Γ' env E
       simp only [addE, addS, hle.excl] at this ⊢
       exact this
 
-theorem Inv.weaken (h : Inv σ Γ env E S) (w : Weaker Γ' Γ) : Inv σ Γ' env E S :=
+theorem Inv.weaken (h : Inv F σ Γ env E S) (w : Weaker Γ' Γ) : Inv F σ Γ' env E S :=
   ⟨h.foot.weaken w, h.nodup, h.disj, w.keys ▸ h.keys⟩
 
 theorem setSlot_weaker : ∀ {Γ : Ctx}, (Γ.map Prod.fst).Nodup → lookup x Γ = some s → Slot.Le s' s →
@@ -300,14 +300,14 @@ theorem Moves.congr_left (h : Moves σ E σ' E' L) (hE : ∀ x, x ∈ E ↔ x �
   frame := fun l hl hn => h.frame l hl fun h' => hn ((hE l).mp h')
   alloc := fun l => by rw [h.alloc l, hE l]
 
-theorem CapsOk.frame : CapsOk σ caps R H → Agree σ σ' (R ++ H) → CapsOk σ' caps R H
+theorem CapsOk.frame : CapsOk F σ caps R H → Agree σ σ' (R ++ H) → CapsOk F σ' caps R H
   | .nil, _ => .nil
   | .ro hL hr, hag => .ro (hL.frame fun l hl => hag l (by simp [hl]))
       (hr.frame fun l hl => hag l (by rcases List.mem_append.mp hl with h | h <;> simp [h]))
   | .mut hL hr, hag => .mut (hL.frame fun l hl => hag l (by simp [hl]))
       (hr.frame fun l hl => hag l (by rcases List.mem_append.mp hl with h | h <;> simp [h]))
 
-theorem CapsOk.alloc : CapsOk σ caps R H → ∀ l ∈ R ++ H, σ.mem l ≠ none
+theorem CapsOk.alloc : CapsOk F σ caps R H → ∀ l ∈ R ++ H, σ.mem l ≠ none
   | .nil, _, h => by simp at h
   | .ro hL hr, l, h => by
     simp only [List.mem_append, or_assoc] at h
@@ -322,7 +322,7 @@ theorem CapsOk.alloc : CapsOk σ caps R H → ∀ l ∈ R ++ H, σ.mem l ≠ non
     · exact hr.alloc l (List.mem_append.mpr (.inr h))
 
 /-- What a frame's arm only reads is as it was, wherever the store agrees on it. -/
-theorem CapsOk.det_ro : CapsOk σ caps R H → CapsOk σ' caps R' H' → Agree σ σ' R → R' = R
+theorem CapsOk.det_ro : CapsOk F σ caps R H → CapsOk F σ' caps R' H' → Agree σ σ' R → R' = R
   | .nil, .nil, _ => rfl
   | .ro hL hr, .ro hL' hr', hag => by
     obtain rfl := (hL.frame fun l hl => hag l (by simp [hl])).det hL'
@@ -332,11 +332,11 @@ theorem CapsOk.det_ro : CapsOk σ caps R H → CapsOk σ' caps R' H' → Agree �
 /-! ## Owned arguments -/
 
 /-- Values of the given types, each owning its cells. -/
-inductive Vals (σ : Store) : List Ty → List Val → List (List Nat) → Prop
-  | nil : Vals σ [] [] []
-  | cons : VT σ τ v L → Vals σ τs vs Ls → Vals σ (τ :: τs) (v :: vs) (L :: Ls)
+inductive Vals (F : List Fn) (σ : Store) : List Ty → List Val → List (List Nat) → Prop
+  | nil : Vals F σ [] [] []
+  | cons : VT F σ τ v L → Vals F σ τs vs Ls → Vals F σ (τ :: τs) (v :: vs) (L :: Ls)
 
-theorem Vals.frame : Vals σ τs vs Ls → Agree σ σ' Ls.flatten → Vals σ' τs vs Ls := by
+theorem Vals.frame : Vals F σ τs vs Ls → Agree σ σ' Ls.flatten → Vals F σ' τs vs Ls := by
   intro h hag
   induction h with
   | nil => exact .nil
@@ -345,7 +345,7 @@ theorem Vals.frame : Vals σ τs vs Ls → Agree σ σ' Ls.flatten → Vals σ' 
     exact .cons (hv.frame fun l hl => hag l (List.mem_append.mpr (.inl hl)))
       (ih fun l hl => hag l (List.mem_append.mpr (.inr hl)))
 
-theorem Vals.alloc : Vals σ τs vs Ls → ∀ l ∈ Ls.flatten, σ.mem l ≠ none := by
+theorem Vals.alloc : Vals F σ τs vs Ls → ∀ l ∈ Ls.flatten, σ.mem l ≠ none := by
   intro h
   induction h with
   | nil => simp
@@ -355,7 +355,7 @@ theorem Vals.alloc : Vals σ τs vs Ls → ∀ l ∈ Ls.flatten, σ.mem l ≠ no
     · exact hv.alloc l hl
     · exact ih l hl
 
-theorem Vals.length : Vals σ τs vs Ls → vs.length = τs.length := by
+theorem Vals.length : Vals F σ τs vs Ls → vs.length = τs.length := by
   intro h
   induction h with
   | nil => rfl
@@ -367,9 +367,9 @@ def ownCtx (ps : List (Var × Ty)) : Ctx := ps.map fun p => (p.1, Slot.own p.2 t
 
 /-- Each owned argument in a fresh cell: the cells, and what the values owned, are the footprint of
 the callee's owned parameters. -/
-theorem allocAll_ok : ∀ {σ : Store} {names : List Var} {τs vs Ls}, Vals σ τs vs Ls →
+theorem allocAll_ok : ∀ {σ : Store} {names : List Var} {τs vs Ls}, Vals F σ τs vs Ls →
     names.length = τs.length → WF σ → Ls.flatten.Nodup →
-    ∃ Eo, Foot (allocAll σ (names.zip vs)).2 (ownCtx (names.zip τs)) (allocAll σ (names.zip vs)).1 Eo [] ∧
+    ∃ Eo, Foot F (allocAll σ (names.zip vs)).2 (ownCtx (names.zip τs)) (allocAll σ (names.zip vs)).1 Eo [] ∧
       Eo.Nodup ∧ (∀ l, l ∈ Eo ↔ l ∈ Ls.flatten ∨ (σ.next ≤ l ∧ l < (allocAll σ (names.zip vs)).2.next)) ∧
       σ.next ≤ (allocAll σ (names.zip vs)).2.next ∧ WF (allocAll σ (names.zip vs)).2 ∧
       (∀ l, l < σ.next → (allocAll σ (names.zip vs)).2.mem l = σ.mem l) ∧
@@ -409,7 +409,7 @@ theorem allocAll_ok : ∀ {σ : Store} {names : List Var} {τs vs Ls}, Vals σ �
       obtain ⟨cells, σ2⟩ := r
       dsimp only at hf hmem hle hwf2 hold hnew hlen ⊢
       have hcL : σ.next ∉ L := fun h => Nat.lt_irrefl _ (hlow _ (List.mem_append.mpr (.inl h)))
-      have hLt : LT σ2 σ.next τ (σ.next :: L) := by
+      have hLt : LT F σ2 σ.next τ (σ.next :: L) := by
         refine (LT.of_contents (by simp [Store.alloc]) (hv.frame fun l hl => hag l
           (List.mem_append.mpr (.inl hl))) hcL).frame fun l hl => hold l ?_
         rcases List.mem_cons.mp hl with rfl | hl
@@ -503,7 +503,7 @@ theorem shape_split : ∀ (A : Ctx) {Γ : Ctx}, shape Γ = A ++ B → (∀ p ∈
 
 /-- Dropping the callee's owned parameters, live or moved, frees exactly their footprints. -/
 theorem dropCells_ok : ∀ {Γo : Ctx} {σ : Store} {eo : Env} {Eo So} {owns : List (Var × Ty)},
-    Foot σ Γo eo Eo So → shape Γo = ownCtx owns → Eo.Nodup →
+    Foot F σ Γo eo Eo So → shape Γo = ownCtx owns → Eo.Nodup →
     So = [] ∧ ∃ σ', dropCells σ ((owns.map Prod.snd).zip (eo.map Prod.snd)) = some σ' ∧
       σ'.next = σ.next ∧ (∀ l ∈ Eo, σ'.mem l = none) ∧ ∀ l, l ∉ Eo → σ'.mem l = σ.mem l
   | [], σ, _, _, _, owns, h, hs, _ => by
@@ -553,20 +553,20 @@ structure Hole where
   path : List Nat
   old : List Nat
 
-def HoleOk (σ : Store) (Γ : Ctx) (env : Env) (h : Hole) : Prop :=
+def HoleOk (F : List Fn) (σ : Store) (Γ : Ctx) (env : Env) (h : Hole) : Prop :=
   ∃ s a τr, lookup h.root Γ = some s ∧ lookup h.root env = some a ∧ (h.mode = .mut → s.excl = true) ∧
-    Path σ a τr h.path h.loc h.ty ∧ LT σ a τr (h.path ++ h.old) ∧ SlotOk σ s a (h.path ++ h.old) ∧
-    LT σ h.loc h.ty h.old ∧ ∀ σ' L', LT σ' a τr L' → SlotOk σ' s a L'
+    Path σ a τr h.path h.loc h.ty ∧ LT F σ a τr (h.path ++ h.old) ∧ SlotOk F σ s a (h.path ++ h.old) ∧
+    LT F σ h.loc h.ty h.old ∧ ∀ σ' L', LT F σ' a τr L' → SlotOk F σ' s a L'
 
-theorem HoleOk.entry (h : HoleOk σ Γ env hl) :
-    ∃ s a, Entry σ Γ env hl.root s a (hl.path ++ hl.old) ∧ (hl.mode = .mut → s.excl = true) :=
+theorem HoleOk.entry (h : HoleOk F σ Γ env hl) :
+    ∃ s a, Entry F σ Γ env hl.root s a (hl.path ++ hl.old) ∧ (hl.mode = .mut → s.excl = true) :=
   let ⟨s, a, _, hs, ha, hm, _, _, hso, _⟩ := h
   ⟨s, a, ⟨hs, ha, hso⟩, hm⟩
 
 /-- The places a call lends denote locations, each a hole in its root's tree. -/
-theorem lends_ok : Lends Γ lent ts ys → Foot σ Γ env E S →
+theorem lends_ok : Lends Γ lent ts ys → Foot F σ Γ env E S →
     ∃ hs : List Hole, hs.map (fun h => (h.mode, h.ty)) = ts ∧ hs.map (fun h => (h.mode, h.root)) = ys ∧
-      lent.mapM (fun x => resolve σ env x.2) = some (hs.map Hole.loc) ∧ ∀ h ∈ hs, HoleOk σ Γ env h := by
+      lent.mapM (fun x => resolve σ env x.2) = some (hs.map Hole.loc) ∧ ∀ h ∈ hs, HoleOk F σ Γ env h := by
   intro hl hf
   induction hl with
   | nil => exact ⟨[], rfl, rfl, rfl, by simp⟩
@@ -609,8 +609,8 @@ theorem mem_roCells : l ∈ roCells ps ↔ ∃ p ∈ ps, p.1.mode = .ro ∧ l �
 /-- The callee's borrowed parameters, bound to the holes: each holds the tree at its hole. -/
 theorem foot_refs : ∀ {refs : List (Var × Mode × Ty)} {hs : List Hole} {E S : List Nat},
     refs.map Prod.snd = hs.map (fun h => (h.mode, h.ty)) →
-    (Foot σ (refCtx refs) ((refs.map Prod.fst).zip (hs.map Hole.loc)) E S ↔
-      ∃ ps : List (Hole × List Nat), ps.map Prod.fst = hs ∧ (∀ p ∈ ps, LT σ p.1.loc p.1.ty p.2) ∧
+    (Foot F σ (refCtx refs) ((refs.map Prod.fst).zip (hs.map Hole.loc)) E S ↔
+      ∃ ps : List (Hole × List Nat), ps.map Prod.fst = hs ∧ (∀ p ∈ ps, LT F σ p.1.loc p.1.ty p.2) ∧
         E = mutCells ps ∧ S = roCells ps)
   | [], [], E, S, _ => by
     constructor
@@ -703,7 +703,7 @@ theorem mem_olds_ro : l ∈ roCells (olds hs) ↔ ∃ h ∈ hs, h.mode = .ro ∧
   · rintro ⟨h, hh, hm, hl⟩; exact ⟨_, ⟨h, hh, rfl⟩, hm, hl⟩
 
 /-- A hole's tree is in the caller's footprints, the exclusive ones if it is lent `mut`. -/
-theorem hole_in (hI : Inv σ Γ env E S) (hok : HoleOk σ Γ env h) :
+theorem hole_in (hI : Inv F σ Γ env E S) (hok : HoleOk F σ Γ env h) :
     ∀ l ∈ h.path ++ h.old, (h.mode = .mut → l ∈ E) ∧ (l ∈ E ∨ l ∈ S) := by
   intro l hl
   obtain ⟨s, a, he, hm⟩ := hok.entry
@@ -712,7 +712,7 @@ theorem hole_in (hI : Inv σ Γ env E S) (hok : HoleOk σ Γ env h) :
   · exact ⟨fun h' => (by rw [hm h'] at hs; cases hs), .inr h1⟩
 
 /-- Holes rooted at different variables, one of them lent `mut`, are apart. -/
-theorem hole_apart (hI : Inv σ Γ env E S) (hok : HoleOk σ Γ env h) (hok' : HoleOk σ Γ env h')
+theorem hole_apart (hI : Inv F σ Γ env E S) (hok : HoleOk F σ Γ env h) (hok' : HoleOk F σ Γ env h')
     (hr : h.root ≠ h'.root) (hm : h.mode = .mut) : Disj (h.path ++ h.old) (h'.path ++ h'.old) := by
   obtain ⟨s, a, he, hx⟩ := hok.entry
   obtain ⟨s', a', he', -⟩ := hok'.entry
@@ -725,7 +725,7 @@ theorem hole_root {hs : List Hole} (hpw : hs.Pairwise Apart) (hh : h ∈ hs) (hh
     have := (pairwise_of_mem (fun _ _ => Apart.symm) hpw hh hh' hne) e
     rw [hm] at this; cases this.1
 
-theorem olds_nodup (hI : Inv σ Γ env E S) : ∀ {hs : List Hole}, (∀ h ∈ hs, HoleOk σ Γ env h) →
+theorem olds_nodup (hI : Inv F σ Γ env E S) : ∀ {hs : List Hole}, (∀ h ∈ hs, HoleOk F σ Γ env h) →
     hs.Pairwise Apart → (mutCells (olds hs)).Nodup
   | [], _, _ => by simp [mutCells, olds]
   | h :: hs, hholes, hpw => by
@@ -749,7 +749,7 @@ theorem olds_nodup (hI : Inv σ Γ env E S) : ∀ {hs : List Hole}, (∀ h ∈ h
 
 /-- Each hole's cells were allocated before the call and are no argument's: not in the footprint of
 the callee's owned parameters. -/
-theorem hole_out {Eo Lall : List Nat} (hI : Inv σ Γ env E S) (hok : HoleOk σ Γ env h) (hwf : WF σ)
+theorem hole_out {Eo Lall : List Nat} (hI : Inv F σ Γ env E S) (hok : HoleOk F σ Γ env h) (hwf : WF σ)
     (hEo_in : ∀ l ∈ Eo, l ∈ Lall ∨ σ.next ≤ l) (hdL : Disj Lall E) (hdLS : Disj Lall S) :
     ∀ l ∈ h.path ++ h.old, σ.mem l ≠ none ∧ l ∉ Eo := by
   intro l hl
@@ -769,16 +769,16 @@ theorem fnCtx_eq (d : Fn) : fnCtx d = ownCtx d.owns ++ refCtx d.refs := rfl
 
 /-- The callee starts with its owned parameters' footprints, the trees lent `mut` exclusive and those
 lent `readonly` shared. -/
-theorem callee_inv {Eo Lall : List Nat} {hs : List Hole} (hI : Inv σ1 Γ₁ env E₁ S) (hholes : ∀ h ∈ hs, HoleOk σ1 Γ₁ env h)
+theorem callee_inv {Eo Lall : List Nat} {hs : List Hole} (hI : Inv F σ1 Γ₁ env E₁ S) (hholes : ∀ h ∈ hs, HoleOk F σ1 Γ₁ env h)
     (hpw : hs.Pairwise Apart) (hrefs : d.refs.map Prod.snd = hs.map fun h => (h.mode, h.ty))
     (hkeys : ((d.owns.map Prod.fst) ++ (d.refs.map Prod.fst)).Nodup)
-    (hfo : Foot σ2 (ownCtx d.owns) cells Eo []) (hEo : Eo.Nodup)
+    (hfo : Foot F σ2 (ownCtx d.owns) cells Eo []) (hEo : Eo.Nodup)
     (hEo_in : ∀ l ∈ Eo, l ∈ Lall ∨ σ1.next ≤ l) (hdL : Disj Lall E₁) (hdLS : Disj Lall S) (hwf : WF σ1)
     (hold : ∀ l, l < σ1.next → σ2.mem l = σ1.mem l) :
-    Inv σ2 (fnCtx d) (cells ++ (d.refs.map Prod.fst).zip (hs.map Hole.loc))
+    Inv F σ2 (fnCtx d) (cells ++ (d.refs.map Prod.fst).zip (hs.map Hole.loc))
       (Eo ++ mutCells (olds hs)) (roCells (olds hs)) := by
   have hout := fun h hh => hole_out hI (hholes h hh) hwf hEo_in hdL hdLS
-  have hfr := (foot_refs (σ := σ2) hrefs).mpr ⟨olds hs, by simp [olds, Function.comp_def], ?_, rfl, rfl⟩
+  have hfr := (foot_refs (F := F) (σ := σ2) hrefs).mpr ⟨olds hs, by simp [olds, Function.comp_def], ?_, rfl, rfl⟩
   · rw [fnCtx_eq]
     refine ⟨by simpa using hfo.append hfr, ?_, ?_, ?_⟩
     · refine nodup_append_disj.mpr ⟨hEo, olds_nodup hI hholes hpw, fun l hl hl' => ?_⟩
@@ -831,8 +831,8 @@ theorem fill_of_mem (hpw : hs.Pairwise Apart) (hps : ps.map Prod.fst = hs) (hp :
     have := List.find?_eq_none.mp hn p hp
     simp [hm] at this
 
-theorem fill_cases (hholes : ∀ h ∈ hs, HoleOk σ Γ env h) (hps : ps.map Prod.fst = hs)
-    (he : Entry σ Γ env x s a L) :
+theorem fill_cases (hholes : ∀ h ∈ hs, HoleOk F σ Γ env h) (hps : ps.map Prod.fst = hs)
+    (he : Entry F σ Γ env x s a L) :
     (fill ps x L = L ∧ ∀ p ∈ ps, p.1.mode = .mut → p.1.root ≠ x) ∨
     (∃ p ∈ ps, fill ps x L = p.1.path ++ p.2 ∧ p.1.root = x ∧ p.1.mode = .mut ∧
       L = p.1.path ++ p.1.old ∧ s.excl = true) := by
@@ -851,7 +851,7 @@ theorem fill_cases (hholes : ∀ h ∈ hs, HoleOk σ Γ env h) (hps : ps.map Pro
     have := List.find?_eq_none.mp hn p hp
     simp [hm, hr] at this
 
-theorem path_in_X (hI : Inv σ Γ env E S) (hholes : ∀ h ∈ hs, HoleOk σ Γ env h)
+theorem path_in_X (hI : Inv F σ Γ env E S) (hholes : ∀ h ∈ hs, HoleOk F σ Γ env h)
     (hpw : hs.Pairwise Apart) (hh : h ∈ hs) (hm : h.mode = .mut) :
     ∀ l ∈ h.path, l ∈ E ∧ l ∉ mutCells (olds hs) := by
   intro l hl
@@ -869,15 +869,15 @@ theorem mem_keep {M : List Nat} : l ∈ E.filter (fun l => l ∉ M) ↔ l ∈ E 
 
 /-- After the call, what a place lent `mut` is rooted at holds the path to the place, as it was,
 then what the callee left there. -/
-theorem hole_after (hI : Inv σ Γ env E S) (hholes : ∀ h ∈ hs, HoleOk σ Γ env h)
+theorem hole_after (hI : Inv F σ Γ env E S) (hholes : ∀ h ∈ hs, HoleOk F σ Γ env h)
     (hpw : hs.Pairwise Apart) (hps : ps.map Prod.fst = hs)
-    (hnew : ∀ p ∈ ps, p.1.mode = .mut → LT σ' p.1.loc p.1.ty p.2)
+    (hnew : ∀ p ∈ ps, p.1.mode = .mut → LT F σ' p.1.loc p.1.ty p.2)
     (hag : Agree σ σ' (E.filter (fun l => l ∉ mutCells (olds hs)) ++ S))
     (hX : Disj (E.filter (fun l => l ∉ mutCells (olds hs))) (mutCells ps)) (hp : p ∈ ps)
     (hm : p.1.mode = .mut) :
     ∃ s a τr, lookup p.1.root Γ = some s ∧ lookup p.1.root env = some a ∧ s.excl = true ∧
-      Path σ' a τr p.1.path p.1.loc p.1.ty ∧ LT σ' a τr (p.1.path ++ p.2) ∧
-      SlotOk σ' s a (p.1.path ++ p.2) ∧ ∀ σ'' L', LT σ'' a τr L' → SlotOk σ'' s a L' := by
+      Path σ' a τr p.1.path p.1.loc p.1.ty ∧ LT F σ' a τr (p.1.path ++ p.2) ∧
+      SlotOk F σ' s a (p.1.path ++ p.2) ∧ ∀ σ'' L', LT F σ'' a τr L' → SlotOk F σ'' s a L' := by
   have hph : p.1 ∈ hs := hps ▸ List.mem_map_of_mem hp
   obtain ⟨s, a, τr, hs', ha', hex, hpath, hLT, -, -, hlt⟩ := hholes p.1 hph
   have hagX : ∀ l, l ∈ E → l ∉ mutCells (olds hs) → σ'.mem l = σ.mem l :=
@@ -888,12 +888,12 @@ theorem hole_after (hI : Inv σ Γ env E S) (hholes : ∀ h ∈ hs, HoleOk σ Γ
   exact ⟨s, a, τr, hs', ha', hex hm, hpath', hLT', hlt σ' _ hLT', hlt⟩
 
 /-- After the call, what a place lent `readonly` is rooted at is as it was. -/
-theorem hole_after_ro (hI : Inv σ Γ env E S) (hholes : ∀ h ∈ hs, HoleOk σ Γ env h)
+theorem hole_after_ro (hI : Inv F σ Γ env E S) (hholes : ∀ h ∈ hs, HoleOk F σ Γ env h)
     (hpw : hs.Pairwise Apart) (hag : Agree σ σ' (E.filter (fun l => l ∉ mutCells (olds hs)) ++ S))
     (hh : h ∈ hs) (hm : h.mode = .ro) :
     ∃ s a τr, lookup h.root Γ = some s ∧ lookup h.root env = some a ∧
-      Path σ' a τr h.path h.loc h.ty ∧ LT σ' a τr (h.path ++ h.old) ∧ LT σ' h.loc h.ty h.old ∧
-      SlotOk σ' s a (h.path ++ h.old) ∧ ∀ σ'' L', LT σ'' a τr L' → SlotOk σ'' s a L' := by
+      Path σ' a τr h.path h.loc h.ty ∧ LT F σ' a τr (h.path ++ h.old) ∧ LT F σ' h.loc h.ty h.old ∧
+      SlotOk F σ' s a (h.path ++ h.old) ∧ ∀ σ'' L', LT F σ'' a τr L' → SlotOk F σ'' s a L' := by
   obtain ⟨s, a, τr, hs', ha', -, hpath, hLT, hso, hold, hlt⟩ := hholes h hh
   -- The root's tree is no hole's lent `mut`: it is kept as it was.
   have hkeep : ∀ l ∈ h.path ++ h.old, σ'.mem l = σ.mem l := fun l hl => by
@@ -911,20 +911,20 @@ theorem hole_after_ro (hI : Inv σ Γ env E S) (hholes : ∀ h ∈ hs, HoleOk σ
 
 /-- After the call, the caller's variables hold what they held but for the holes lent `mut`, which
 hold what the callee left there. -/
-theorem caller_rebuild (hI : Inv σ Γ env E S) (hholes : ∀ h ∈ hs, HoleOk σ Γ env h)
+theorem caller_rebuild (hI : Inv F σ Γ env E S) (hholes : ∀ h ∈ hs, HoleOk F σ Γ env h)
     (hpw : hs.Pairwise Apart) (hps : ps.map Prod.fst = hs)
-    (hnew : ∀ p ∈ ps, p.1.mode = .mut → LT σ' p.1.loc p.1.ty p.2) (hMn : (mutCells ps).Nodup)
+    (hnew : ∀ p ∈ ps, p.1.mode = .mut → LT F σ' p.1.loc p.1.ty p.2) (hMn : (mutCells ps).Nodup)
     (hag : Agree σ σ' (E.filter (fun l => l ∉ mutCells (olds hs)) ++ S))
     (hX : Disj (E.filter (fun l => l ∉ mutCells (olds hs))) (mutCells ps))
     (hSX : Disj S (mutCells ps)) :
-    ∃ E', Inv σ' Γ env E' S ∧
+    ∃ E', Inv F σ' Γ env E' S ∧
       ∀ l, l ∈ E' ↔ l ∈ E.filter (fun l => l ∉ mutCells (olds hs)) ∨ l ∈ mutCells ps := by
-  have hpsok : ∀ p ∈ ps, HoleOk σ Γ env p.1 := fun p hp => hholes p.1 (hps ▸ List.mem_map_of_mem hp)
+  have hpsok : ∀ p ∈ ps, HoleOk F σ Γ env p.1 := fun p hp => hholes p.1 (hps ▸ List.mem_map_of_mem hp)
   have hpsin : ∀ p ∈ ps, p.1 ∈ hs := fun p hp => hps ▸ List.mem_map_of_mem hp
   have hagX : ∀ l, l ∈ E → l ∉ mutCells (olds hs) → σ'.mem l = σ.mem l :=
     fun l h1 h2 => hag l (List.mem_append.mpr (.inl (mem_keep.mpr ⟨h1, h2⟩)))
   -- A variable none of whose places was lent `mut` keeps its footprint clear of the holes.
-  have hclear : ∀ {x s a L}, Entry σ Γ env x s a L → (∀ p ∈ ps, p.1.mode = .mut → p.1.root ≠ x) →
+  have hclear : ∀ {x s a L}, Entry F σ Γ env x s a L → (∀ p ∈ ps, p.1.mode = .mut → p.1.root ≠ x) →
       ∀ l ∈ L, l ∈ E → l ∉ mutCells (olds hs) := by
     intro x s a L he hn l hl _ hM
     obtain ⟨h', hh', hm', hl'⟩ := mem_olds_mut.mp hM
@@ -932,7 +932,7 @@ theorem caller_rebuild (hI : Inv σ Γ env E S) (hholes : ∀ h ∈ hs, HoleOk �
     obtain ⟨s', a', he', hex'⟩ := (hpsok p' hp').entry
     exact hI.apart he he' (fun e => hn p' hp' hm' e.symm) (.inr (hex' hm')) l hl
       (List.mem_append.mpr (.inr hl'))
-  have hsub : ∀ {x s a L}, Entry σ Γ env x s a L → s.excl = true → ∀ l ∈ fill ps x L,
+  have hsub : ∀ {x s a L}, Entry F σ Γ env x s a L → s.excl = true → ∀ l ∈ fill ps x L,
       (l ∈ L ∧ l ∈ E.filter (fun l => l ∉ mutCells (olds hs))) ∨
       ∃ p ∈ ps, p.1.root = x ∧ p.1.mode = .mut ∧ l ∈ p.2 := by
     intro x s a L he hex l hl
@@ -1027,7 +1027,7 @@ theorem perm_front {A B L : List Nat} : (L ++ (A ++ B)).Perm (A ++ (L ++ B)) := 
 theorem perm_assoc {A B L : List Nat} : (L ++ (A ++ B)).Perm (L ++ A ++ B) :=
   List.Perm.of_eq (List.append_assoc _ _ _).symm
 
-theorem SlotOk.ro {s : Slot} (h : SlotOk σ s a L) (hs : ∀ τ, s ≠ .own τ false) : SlotOk σ s.ro a L := by
+theorem SlotOk.ro {s : Slot} (h : SlotOk F σ s a L) (hs : ∀ τ, s ≠ .own τ false) : SlotOk F σ s.ro a L := by
   rcases s with ⟨τ, live⟩ | ⟨m, τ⟩ | τ
   · cases live
     · exact absurd rfl (hs τ)
@@ -1035,7 +1035,7 @@ theorem SlotOk.ro {s : Slot} (h : SlotOk σ s a L) (hs : ∀ τ, s ≠ .own τ f
   · exact h
   · exact h
 
-theorem SlotOk.unro {s : Slot} (h : SlotOk σ s.ro a L) (hs : ∀ τ, s ≠ .own τ false) : SlotOk σ s a L := by
+theorem SlotOk.unro {s : Slot} (h : SlotOk F σ s.ro a L) (hs : ∀ τ, s ≠ .own τ false) : SlotOk F σ s a L := by
   rcases s with ⟨τ, live⟩ | ⟨m, τ⟩ | τ
   · cases live
     · exact absurd rfl (hs τ)
@@ -1062,12 +1062,12 @@ theorem Slot.Le.of_ro {s s' : Slot} (h : Slot.Le s' s.ro) : s' = s.ro := by
 /-- The variables `ys` only read, as a `handle`'s body has them: what they owned, `Fz`, is shared
 while the body runs, and given back once it ends, as it was, if nothing changed it or what the
 activation only reads. -/
-theorem Foot.handle (h : Foot σ Γ env E S) (hk : (Γ.map Prod.fst).Nodup)
+theorem Foot.handle (h : Foot F σ Γ env E S) (hk : (Γ.map Prod.fst).Nodup)
     (hok : ∀ y ∈ ys, ∀ τ, lookup y Γ ≠ some (.own τ false)) :
-    ∃ Eb Sb Fz, Foot σ (freeze Γ ys) env Eb Sb ∧ E.Perm (Eb ++ Fz) ∧ Sb.Perm (Fz ++ S) ∧
-      (∀ y s a L, Entry σ Γ env y s a L → y ∈ ys → ∀ l ∈ L, l ∈ Fz ∨ l ∈ S) ∧
-      ∀ σ' Γb Eb', Foot σ' Γb env Eb' Sb → Weaker Γb (freeze Γ ys) → Agree σ σ' (Fz ++ S) →
-        ∃ E', Foot σ' (thaw Γ ys Γb) env E' S ∧ E'.Perm (Eb' ++ Fz) := by
+    ∃ Eb Sb Fz, Foot F σ (freeze Γ ys) env Eb Sb ∧ E.Perm (Eb ++ Fz) ∧ Sb.Perm (Fz ++ S) ∧
+      (∀ y s a L, Entry F σ Γ env y s a L → y ∈ ys → ∀ l ∈ L, l ∈ Fz ∨ l ∈ S) ∧
+      ∀ σ' Γb Eb', Foot F σ' Γb env Eb' Sb → Weaker Γb (freeze Γ ys) → Agree σ σ' (Fz ++ S) →
+        ∃ E', Foot F σ' (thaw Γ ys Γb) env E' S ∧ E'.Perm (Eb' ++ Fz) := by
   induction h with
   | nil =>
     refine ⟨[], [], [], .nil, .refl _, .refl _, fun y s a L he => absurd he.1 (by simp [lookup]), ?_⟩
@@ -1088,8 +1088,8 @@ theorem Foot.handle (h : Foot σ Γ env E S) (hk : (Γ.map Prod.fst).Nodup)
       by_cases h : x ∈ ys <;> simp [freeze, h]
     have hkeys' : x ∉ (freeze Γ ys).map Prod.fst := by rw [freeze_keys]; exact hx
     -- Entries of the head and of the rest.
-    have hentry : ∀ y t b L', Entry σ ((x, s) :: Γ) ((x, a) :: env) y t b L' →
-        (y = x ∧ t = s ∧ L' = L) ∨ (y ≠ x ∧ Entry σ Γ env y t b L') := by
+    have hentry : ∀ y t b L', Entry F σ ((x, s) :: Γ) ((x, a) :: env) y t b L' →
+        (y = x ∧ t = s ∧ L' = L) ∨ (y ≠ x ∧ Entry F σ Γ env y t b L') := by
       intro y t b L' he
       rcases (entry_cons hx).mp he with ⟨rfl, rfl, rfl, hL⟩ | ⟨hne, he⟩
       · exact .inl ⟨rfl, rfl, hL.det hs⟩
@@ -1120,7 +1120,7 @@ theorem Foot.handle (h : Foot σ Γ env E S) (hk : (Γ.map Prod.fst).Nodup)
           obtain rfl := hle.of_ro
           obtain ⟨L', Et, St, hs', hft, rfl, hSt⟩ := hb.uncons
           simp only [addS, Slot.ro_excl, Bool.false_eq_true, ↓reduceIte] at hSt
-          have hLs : SlotOk σ' s.ro a L := hsro.frame fun l hl => hag l (by simp [addS, hex, hl])
+          have hLs : SlotOk F σ' s.ro a L := hsro.frame fun l hl => hag l (by simp [addS, hex, hl])
           obtain rfl := hLs.det hs'
           obtain rfl := List.append_cancel_left hSt
           obtain ⟨E', hf', hp⟩ := hthaw σ' Γb' Et hft hw' (fun l hl => hag l (by
@@ -1153,7 +1153,7 @@ theorem Foot.handle (h : Foot σ Γ env E S) (hk : (Γ.map Prod.fst).Nodup)
           obtain rfl := hle.of_ro
           obtain ⟨L', Et, St, hs', hft, rfl, hSt⟩ := hb.uncons
           simp only [addS, Slot.ro_excl, Bool.false_eq_true, ↓reduceIte] at hSt
-          have hLs : SlotOk σ' s.ro a L := hsro.frame fun l hl => hag l (by simp [hl])
+          have hLs : SlotOk F σ' s.ro a L := hsro.frame fun l hl => hag l (by simp [hl])
           obtain rfl := hLs.det hs'
           obtain rfl := List.append_cancel_left hSt
           obtain ⟨E', hf', hp⟩ := hthaw σ' Γb' Et hft hw' (fun l hl => hag l (by
@@ -1193,7 +1193,7 @@ theorem Foot.handle (h : Foot σ Γ env E S) (hk : (Γ.map Prod.fst).Nodup)
             | refl => rfl
             | forget => simp [Slot.excl] at hex
           subst hle'
-          have hLs : SlotOk σ' s a L := hs.frame fun l hl => hag l (by simp [addS, hex, hl])
+          have hLs : SlotOk F σ' s a L := hs.frame fun l hl => hag l (by simp [addS, hex, hl])
           obtain rfl := hLs.det hs'
           simp only [addS, hex, Bool.false_eq_true, ↓reduceIte] at hSt
           obtain rfl := List.append_cancel_left hSt
@@ -1234,9 +1234,9 @@ theorem Caps.roots_live : Caps Γ caps ys → ∀ p ∈ ys, ∀ τ, lookup p.2 �
     · exact hr.roots_live p h τ
 
 /-- The variables `ys`, in order, each changeable, with the trees they own in turn: `H`. -/
-inductive Trees (σ : Store) (Γ : Ctx) (env : Env) : List Var → List Nat → Prop
-  | nil : Trees σ Γ env [] []
-  | cons : Entry σ Γ env y s a L → s.excl = true → Trees σ Γ env ys H → Trees σ Γ env (y :: ys) (L ++ H)
+inductive Trees (F : List Fn) (σ : Store) (Γ : Ctx) (env : Env) : List Var → List Nat → Prop
+  | nil : Trees F σ Γ env [] []
+  | cons : Entry F σ Γ env y s a L → s.excl = true → Trees F σ Γ env ys H → Trees F σ Γ env (y :: ys) (L ++ H)
 
 theorem roots_cons_ro : roots .mut ((.ro, y) :: ys) = roots .mut ys := by simp [roots]
 theorem roots_cons_mut : roots .mut ((.mut, y) :: ys) = y :: roots .mut ys := by simp [roots]
@@ -1246,12 +1246,12 @@ theorem roots_cons_mut' : roots .ro ((.mut, y) :: ys) = roots .ro ys := by simp 
 /-- The places a `handle` lends its arm, in the activation it is in: each holds a value of its
 type; those lent `readonly` among the footprints of the variables they are rooted at, those lent
 `mut` the trees of their variables, as they are now and as they will be. -/
-theorem caps_ok (hc : Caps Γ caps ys) (hf : Foot σ Γ env E S) :
+theorem caps_ok (hc : Caps Γ caps ys) (hf : Foot F σ Γ env E S) :
     ∃ ls Rc Hc, caps.mapM (fun c => resolve σ env c.loc) = some ls ∧ ls.length = caps.length ∧
-      CapsOk σ (List.zipWith Cap.at caps ls) Rc Hc ∧
-      (∀ l ∈ Rc, ∃ y, (.ro, y) ∈ ys ∧ ∃ s a L, Entry σ Γ env y s a L ∧ l ∈ L) ∧
-      Trees σ Γ env (roots .mut ys) Hc ∧
-      ∀ σ' Rc' Hc', CapsOk σ' (List.zipWith Cap.at caps ls) Rc' Hc' → Trees σ' Γ env (roots .mut ys) Hc' := by
+      CapsOk F σ (List.zipWith Cap.at caps ls) Rc Hc ∧
+      (∀ l ∈ Rc, ∃ y, (.ro, y) ∈ ys ∧ ∃ s a L, Entry F σ Γ env y s a L ∧ l ∈ L) ∧
+      Trees F σ Γ env (roots .mut ys) Hc ∧
+      ∀ σ' Rc' Hc', CapsOk F σ' (List.zipWith Cap.at caps ls) Rc' Hc' → Trees F σ' Γ env (roots .mut ys) Hc' := by
   induction hc with
   | nil => exact ⟨[], [], [], rfl, rfl, .nil, by simp, .nil, fun _ _ _ h => by cases h; exact .nil⟩
   | @ro p τ w y rest ys' x hp _ ih =>
@@ -1342,11 +1342,11 @@ theorem thaw_absent : ∀ {Γ Γb : Ctx}, y ∉ Γ.map Prod.fst → Γb.map Prod
 /-- A variable lent `mut` to a borrow: what it owned, `Ly`, is the borrow's while the borrow lives,
 and the variable owns again, once the borrow ends, what the borrow left there, the rest of the
 activation as it was. -/
-theorem Foot.hidden (h : Foot σ Γ env E S) (hk : (Γ.map Prod.fst).Nodup) (he : Entry σ Γ env y s a Ly)
+theorem Foot.hidden (h : Foot F σ Γ env E S) (hk : (Γ.map Prod.fst).Nodup) (he : Entry F σ Γ env y s a Ly)
     (hex : s.excl = true) :
-    ∃ Eh, Foot σ (hide Γ y) env Eh S ∧ E.Perm (Ly ++ Eh) ∧
-      ∀ σ' Γb Eb' Ly', Foot σ' Γb env Eb' S → Weaker Γb (hide Γ y) → Agree σ σ' S →
-        SlotOk σ' s a Ly' → ∃ E', Foot σ' (thaw Γ [y] Γb) env E' S ∧ E'.Perm (Ly' ++ Eb') := by
+    ∃ Eh, Foot F σ (hide Γ y) env Eh S ∧ E.Perm (Ly ++ Eh) ∧
+      ∀ σ' Γb Eb' Ly', Foot F σ' Γb env Eb' S → Weaker Γb (hide Γ y) → Agree σ σ' S →
+        SlotOk F σ' s a Ly' → ∃ E', Foot F σ' (thaw Γ [y] Γb) env E' S ∧ E'.Perm (Ly' ++ Eb') := by
   induction h with
   | nil => exact absurd he.1 (by simp [lookup])
   | @cons s0 a0 L0 Γ env E S x hs hrest ih =>
@@ -1439,7 +1439,7 @@ theorem lookup_hideAll : ∀ {ys : List Var} {Γ : Ctx}, z ∉ ys → lookup z (
     simp only [List.mem_cons, not_or] at h
     rw [hideAll, lookup_hideAll h.2, lookup_hide_ne h.1]
 
-theorem Trees.hide : Trees σ Γ env ys H → y ∉ ys → Trees σ (hide Γ y) env ys H
+theorem Trees.hide : Trees F σ Γ env ys H → y ∉ ys → Trees F σ (hide Γ y) env ys H
   | .nil, _ => .nil
   | .cons ⟨hl, ha, hs⟩ hex hr, h => by
     simp only [List.mem_cons, not_or] at h
@@ -1447,11 +1447,11 @@ theorem Trees.hide : Trees σ Γ env ys H → y ∉ ys → Trees σ (hide Γ y) 
 
 /-- The variables `ys`, each changeable, hidden from the code in turn: what the code may change is
 the rest; once it ends, they are given back, each with the tree it has then. -/
-theorem Foot.hiddenAll : ∀ {ys : List Var} {Γ : Ctx} {E H : List Nat}, Foot σ Γ env E S → (Γ.map Prod.fst).Nodup →
-    Trees σ Γ env ys H → ys.Nodup →
-    ∃ Eh, Foot σ (hideAll Γ ys) env Eh S ∧ E.Perm (H ++ Eh) ∧
-      ∀ σ' Γb Eb' H', Foot σ' Γb env Eb' S → Weaker Γb (hideAll Γ ys) → Agree σ σ' S →
-        Trees σ' Γ env ys H' → ∃ E', Foot σ' (unhideAll Γ ys Γb) env E' S ∧ E'.Perm (H' ++ Eb')
+theorem Foot.hiddenAll : ∀ {ys : List Var} {Γ : Ctx} {E H : List Nat}, Foot F σ Γ env E S → (Γ.map Prod.fst).Nodup →
+    Trees F σ Γ env ys H → ys.Nodup →
+    ∃ Eh, Foot F σ (hideAll Γ ys) env Eh S ∧ E.Perm (H ++ Eh) ∧
+      ∀ σ' Γb Eb' H', Foot F σ' Γb env Eb' S → Weaker Γb (hideAll Γ ys) → Agree σ σ' S →
+        Trees F σ' Γ env ys H' → ∃ E', Foot F σ' (unhideAll Γ ys Γb) env E' S ∧ E'.Perm (H' ++ Eb')
   | [], Γ, E, H, h, _, ht, _ => by
     cases ht
     refine ⟨E, h, .refl _, fun σ' Γb Eb' H' hb _ _ ht' => ?_⟩
@@ -1527,7 +1527,7 @@ theorem Exclusive.roots_ok : ∀ {ys : List (Mode × Var)}, Exclusive ys →
       · have := hy _ (hmem _ hz) rfl; cases this.1
       · exact ih2 z hz hz'
 
-theorem Entry.to_hidden (h : Entry σ Γ env y s a L) (hy : y ∉ ys) : Entry σ (hideAll Γ ys) env y s a L :=
+theorem Entry.to_hidden (h : Entry F σ Γ env y s a L) (hy : y ∉ ys) : Entry F σ (hideAll Γ ys) env y s a L :=
   ⟨by rw [lookup_hideAll hy]; exact h.1, h.2.1, h.2.2⟩
 
 theorem mem_roots {m : Mode} : y ∈ roots m ys ↔ (m, y) ∈ ys := by
@@ -1561,18 +1561,18 @@ theorem capCtx_ref : RefCtx (capCtx caps) := by
 
 /-- What a frame's arm is lent, as the footprint of its variables: those lent `mut` its own, those
 lent `readonly` read. -/
-theorem CapsOk.foot : CapsOk σ caps R H → Foot σ (capCtx (caps.map Cap.sig)) (caps.map fun c => (c.name, c.loc)) H R
+theorem CapsOk.foot : CapsOk F σ caps R H → Foot F σ (capCtx (caps.map Cap.sig)) (caps.map fun c => (c.name, c.loc)) H R
   | .nil => .nil
-  | @CapsOk.ro _ a τ L rest R' H' x hL hr => by
+  | @CapsOk.ro _ _ a τ L rest R' H' x hL hr => by
     have := Foot.cons (s := .ref .ro τ) (x := x) (env := rest.map fun c => (c.name, c.loc)) hL hr.foot
     simpa [capCtx, Cap.sig, addE, addS, Slot.excl] using this
-  | @CapsOk.mut _ a τ L rest R' H' x hL hr => by
+  | @CapsOk.mut _ _ a τ L rest R' H' x hL hr => by
     have := Foot.cons (s := .ref .mut τ) (x := x) (env := rest.map fun c => (c.name, c.loc)) hL hr.foot
     simpa [capCtx, Cap.sig, addE, addS, Slot.excl] using this
 
 /-- And back: the footprint of an arm's captured variables is its frame's state. -/
 theorem Foot.capsOk : ∀ {caps : List (Cap Nat)} {E S},
-    Foot σ (capCtx (caps.map Cap.sig)) (caps.map fun c => (c.name, c.loc)) E S → CapsOk σ caps S E
+    Foot F σ (capCtx (caps.map Cap.sig)) (caps.map fun c => (c.name, c.loc)) E S → CapsOk F σ caps S E
   | [], _, _, h => by cases h; exact .nil
   | ⟨x, m, τ, a⟩ :: caps, _, _, h => by
     simp only [capCtx, Cap.sig, List.map_cons] at h

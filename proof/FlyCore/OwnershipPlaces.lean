@@ -15,8 +15,8 @@ def Sub (A B : List Nat) : Prop := ∀ x ∈ A, x ∈ B
 
 /-- Each variable the types know is bound in the environment, with the footprint its slot says,
 among the exclusive footprints or the shared ones as its slot says. -/
-theorem foot_lookup : Foot σ Γ env E S → lookup x Γ = some s →
-    ∃ a L, lookup x env = some a ∧ SlotOk σ s a L ∧ Sub L (if s.excl then E else S) := by
+theorem foot_lookup : Foot F σ Γ env E S → lookup x Γ = some s →
+    ∃ a L, lookup x env = some a ∧ SlotOk F σ s a L ∧ Sub L (if s.excl then E else S) := by
   intro h
   induction h with
   | nil => simp [lookup]
@@ -37,11 +37,11 @@ theorem foot_lookup : Foot σ Γ env E S → lookup x Γ = some s →
 
 /-- A typed place: where it is, on a path into the tree of its root, and, if it may be changed, in
 the exclusive footprint. -/
-theorem place_ok : PlaceTy Γ p τ w r → Foot σ Γ env E S →
-    ∃ a τr Lr P l s, lookup r env = some a ∧ LT σ a τr Lr ∧ Path σ a τr P l τ ∧
+theorem place_ok : PlaceTy Γ p τ w r → Foot F σ Γ env E S →
+    ∃ a τr Lr P l s, lookup r env = some a ∧ LT F σ a τr Lr ∧ Path σ a τr P l τ ∧
       resolve σ env p = some l ∧ (Sub Lr E ∨ Sub Lr S) ∧ (w = true → Sub Lr E) ∧
-      lookup r Γ = some s ∧ SlotOk σ s a Lr ∧ (w = true → s.excl = true) ∧
-      ∀ σ' L', LT σ' a τr L' → SlotOk σ' s a L' := by
+      lookup r Γ = some s ∧ SlotOk F σ s a Lr ∧ (w = true → s.excl = true) ∧
+      ∀ σ' L', LT F σ' a τr L' → SlotOk F σ' s a L' := by
   intro hp hf
   induction hp with
   | own hx =>
@@ -100,11 +100,11 @@ theorem setSlot_tail (Γ : Ctx) : y ≠ x → setSlot ((y, t) :: Γ) x s = (y, t
 
 /-- An exclusive variable's footprint is one segment of the exclusive footprints. It may be
 replaced, as the variable changes, in a store that changed nothing else, and the rest stands. -/
-theorem foot_update : Foot σ Γ env E S → (Γ.map Prod.fst).Nodup → lookup x Γ = some s →
+theorem foot_update : Foot F σ Γ env E S → (Γ.map Prod.fst).Nodup → lookup x Γ = some s →
     s.excl = true →
-    ∃ a L E₁ E₂, lookup x env = some a ∧ SlotOk σ s a L ∧ E = E₁ ++ L ++ E₂ ∧
-      ∀ σ' s' L', s'.excl = true → Agree σ σ' (E₁ ++ E₂ ++ S) → SlotOk σ' s' a L' →
-        Foot σ' (setSlot Γ x s') env (E₁ ++ L' ++ E₂) S := by
+    ∃ a L E₁ E₂, lookup x env = some a ∧ SlotOk F σ s a L ∧ E = E₁ ++ L ++ E₂ ∧
+      ∀ σ' s' L', s'.excl = true → Agree σ σ' (E₁ ++ E₂ ++ S) → SlotOk F σ' s' a L' →
+        Foot F σ' (setSlot Γ x s') env (E₁ ++ L' ++ E₂) S := by
   intro h
   induction h with
   | nil => simp [lookup]
@@ -267,10 +267,10 @@ theorem lookup_det {α : Type} {x : Var} {a b : α} {env : List (Var × α)} : l
 
 /-- At a place that may be changed, what the location holds may be replaced: the rest of the
 activation stands, the variable the place is rooted at now owning the new tree. -/
-theorem replace_at (hI : Inv σ Γ env E S) (hp : PlaceTy Γ p τ true r) :
-    ∃ l R P E₁ E₂, resolve σ env p = some l ∧ LT σ l τ R ∧ E = E₁ ++ (P ++ R) ++ E₂ ∧
-      ∀ σ' R', Agree σ σ' (E₁ ++ P ++ E₂ ++ S) → LT σ' l τ R' → Disj R' (E₁ ++ P ++ E₂) →
-        Disj R' S → Inv σ' Γ env (E₁ ++ (P ++ R') ++ E₂) S := by
+theorem replace_at (hI : Inv F σ Γ env E S) (hp : PlaceTy Γ p τ true r) :
+    ∃ l R P E₁ E₂, resolve σ env p = some l ∧ LT F σ l τ R ∧ E = E₁ ++ (P ++ R) ++ E₂ ∧
+      ∀ σ' R', Agree σ σ' (E₁ ++ P ++ E₂ ++ S) → LT F σ' l τ R' → Disj R' (E₁ ++ P ++ E₂) →
+        Disj R' S → Inv F σ' Γ env (E₁ ++ (P ++ R') ++ E₂) S := by
   obtain ⟨a, τr, Lr, P, l, s, ha, hLr, hpath, hres, -, -, hs, hso, hex, hlt⟩ := place_ok hp hI.foot
   obtain ⟨R, hR, rfl⟩ := path_split hpath hLr
   obtain ⟨a', L', E₁, E₂, ha', hso', hE, hupd⟩ := foot_update hI.foot hI.keys hs (hex rfl)

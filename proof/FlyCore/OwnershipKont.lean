@@ -57,10 +57,10 @@ structure HandleOk (F : List Fn) (O : List Op) (σf : Store) (e : Nat) (caps : L
   hSin : ∀ l ∈ Sin, l ∈ Fz ∨ l ∈ S
   hS : ∀ l ∈ S, l ∈ Sin
   hRc : ∀ l ∈ Rc, l ∈ Fz ∨ l ∈ S
-  hRcdet : ∀ σ1 Rc' Hc, Agree σf σ1 (Fz ++ S) → CapsOk σ1 caps Rc' Hc → Rc' = Rc
+  hRcdet : ∀ σ1 Rc' Hc, Agree σf σ1 (Fz ++ S) → CapsOk F σ1 caps Rc' Hc → Rc' = Rc
   hre : ∀ σ1 Eb Hc, Agree σf σ1 (Fz ++ S) → Disj (Fz ++ Hc) Eb → Disj S Hc → (Fz ++ Hc).Nodup →
-    CapsOk σ1 caps Rc Hc → Inv σ1 Γin env Eb Sin →
-    ∃ E', Inv σ1 Γout env E' S ∧ ∀ z, z ∈ E' ↔ z ∈ Eb ∨ z ∈ Fz ∨ z ∈ Hc
+    CapsOk F σ1 caps Rc Hc → Inv F σ1 Γin env Eb Sin →
+    ∃ E', Inv F σ1 Γout env E' S ∧ ∀ z, z ∈ E' ↔ z ∈ Eb ∨ z ∈ Fz ∨ z ∈ Hc
 
 /-- What a `handle` keeps holds wherever what it froze, and what its activation only reads, are as
 they were. -/
@@ -80,7 +80,7 @@ inductive FrameOk (F : List Fn) (O : List Op) : Store → Kont → Lvl → Lvl �
       FrameOk F O σf (.letK x τx env b) ⟨Γ₁, env, τx, S, r⟩ ⟨Γ₂, env, τb, S, r⟩ [] []
   | scopeK : x ∉ Γ₂.map Prod.fst → (Γ₂.map Prod.fst).Nodup →
       FrameOk F O σf (.scopeK τx c) ⟨(x, .own τx live) :: Γ₂, (x, c) :: env, τ, S, r⟩ ⟨Γ₂, env, τ, S, r⟩ [] []
-  | callK : (∀ l ∈ d.row, l ∈ r) → Inv σf Γ₁ env E₁ S → (∀ h ∈ hos, HoleOk σf Γ₁ env h) →
+  | callK : (∀ l ∈ d.row, l ∈ r) → Inv F σf Γ₁ env E₁ S → (∀ h ∈ hos, HoleOk F σf Γ₁ env h) →
       hos.Pairwise Apart → hos.map (fun h => (h.mode, h.ty)) = d.refs.map Prod.snd →
       ((d.owns.map Prod.fst) ++ (d.refs.map Prod.fst)).Nodup →
       Typed F O (fnCtx d) d.body d.ret Γ'' d.row → cells.map Prod.fst = d.owns.map Prod.fst →
@@ -90,7 +90,7 @@ inductive FrameOk (F : List Fn) (O : List Op) : Store → Kont → Lvl → Lvl �
   /-- The body of a call that returns a borrow of its `i`th borrowed parameter's place `p`, which
 the caller lent it as the hole `hd`: `body` runs with `x` the borrow, `hd`'s root only read, or not
 reached, while it lives. -/
-  | callLendK : (∀ l ∈ d.row, l ∈ r) → Inv σf Γ₁ env E₁ S → (∀ h ∈ hos, HoleOk σf Γ₁ env h) →
+  | callLendK : (∀ l ∈ d.row, l ∈ r) → Inv F σf Γ₁ env E₁ S → (∀ h ∈ hos, HoleOk F σf Γ₁ env h) →
       hos.Pairwise Apart → hos.map (fun h => (h.mode, h.ty)) = d.refs.map Prod.snd →
       ((d.owns.map Prod.fst) ++ (d.refs.map Prod.fst)).Nodup →
       Typed F O (fnCtx d) d.body .int Γ'' d.row → cells.map Prod.fst = d.owns.map Prod.fst →
@@ -112,7 +112,7 @@ reached, while it lives. -/
       FrameOk F O σf (.whileB env c b) ⟨Γ, env, .int, S, r⟩ ⟨Γ, env, .int, S, r⟩ [] []
   | deferK : Typed F O Γb d .int Γb r →
       FrameOk F O σf (.deferK τ env d) ⟨Γb, env, τ, S, r⟩ ⟨Γb, env, τ, S, r⟩ [] []
-  | deferV : VT σf τ v Lv →
+  | deferV : VT F σf τ v Lv →
       FrameOk F O σf (.deferV τ v) ⟨Γb, env, .int, S, r⟩ ⟨Γb, env, τ, S, r⟩ Lv []
   | deferA : FrameOk F O σf (.deferA hid k) ⟨Γb, env, .int, S, r⟩ ⟨Γb, env, τ, S, r⟩ [] [hid]
   | dropK : FrameOk F O σf (.dropK τ (.abort j k) d) ⟨Γ, env, τ, S, r⟩ ⟨Γ, env, τ', S, r⟩ [] [j]
@@ -120,12 +120,12 @@ reached, while it lives. -/
 cells it kept from the borrow, `Xf`, as they were — what it froze, lent `readonly`, or the path to
 the place, lent `mut`. -/
   | lendK : (∀ l ∈ Sin, l ∈ Xf ∨ l ∈ S) → (∀ l ∈ S, l ∈ Sin) →
-      (∀ σ1 Eb, Agree σf σ1 (Xf ++ S) → Disj Xf Eb → Inv σ1 Γin envin Eb Sin →
-        ∃ E', Inv σ1 Γout env E' S ∧ ∀ z, z ∈ E' ↔ z ∈ Eb ∨ z ∈ Xf) →
+      (∀ σ1 Eb, Agree σf σ1 (Xf ++ S) → Disj Xf Eb → Inv F σ1 Γin envin Eb Sin →
+        ∃ E', Inv F σ1 Γout env E' S ∧ ∀ z, z ∈ E' ↔ z ∈ Eb ∨ z ∈ Xf) →
       FrameOk F O σf .lendK ⟨Γin, envin, τ, Sin, r⟩ ⟨Γout, env, τ, S, r⟩ Xf []
   /-- The body of a `handle` whose arm resumes: its own cells are what it froze and the trees at
 the places its arm was lent `mut`. -/
-  | capK : HandleOk F O σf e caps os rs arm Γin Γout env Sin S r Fz Rc op → CapsOk σf caps Rc Hc →
+  | capK : HandleOk F O σf e caps os rs arm Γin Γout env Sin S r Fz Rc op → CapsOk F σf caps Rc Hc →
       FrameOk F O σf (.capK τ e hid caps os rs arm) ⟨Γin, env, τ, Sin, .eff e :: r⟩ ⟨Γout, env, τ, S, r⟩
         (Fz ++ Hc) []
   /-- An arm running, the body of its `handle` suspended as `K`: its own cells are those of `K` and
@@ -144,7 +144,7 @@ what the `handle` froze. -/
 their own cells are `X`; the code that performed the operation lent its handler the places `hos`;
 and they may unwind to the handlers `A`. -/
 inductive FramesOk (F : List Fn) (O : List Op) : Store → List Kont → Op → Lvl → List Nat → List Hole → List Nat → Prop
-  | base : Inv σs Γ₁ env E₁ S → (∀ h ∈ hos, HoleOk σs Γ₁ env h) → hos.Pairwise Apart →
+  | base : Inv F σs Γ₁ env E₁ S → (∀ h ∈ hos, HoleOk F σs Γ₁ env h) → hos.Pairwise Apart →
       O[e]? = some op → hos.map (fun h => (h.mode, h.ty)) = op.refs → Label.eff e ∈ r → Weaker Γ' Γ₁ →
       FramesOk F O σs [] op ⟨Γ', env, op.ret, S, r⟩ (E₁.filter (· ∉ mutCells (olds hos))) hos []
   | cons : FrameOk F O σf f mid ⟨Γ, env, τ, S, r⟩ Xf Af → Weaker Γ' Γ → Agree σf σs (Xf ++ S) →
@@ -172,12 +172,12 @@ def Post (F : List Fn) (O : List Op) (σ : Store) (E S : List Nat) (Γ' : Ctx) (
     (r : Row) (hs : HS) : Res × Store → Prop
   | (.stuck, _) => False
   | (.timeout, _) => True
-  | (.val v, σ') => ∃ E' L, Inv σ' Γ' env E' S ∧ VT σ' τ v L ∧ Disj L E' ∧ Disj L S ∧ Moves σ E σ' E' L
-  | (.abort id _, σ') => AimedIn id hs ∧ ∃ E', Inv σ' Γ' env E' S ∧ Moves σ E σ' E' []
+  | (.val v, σ') => ∃ E' L, Inv F σ' Γ' env E' S ∧ VT F σ' τ v L ∧ Disj L E' ∧ Disj L S ∧ Moves σ E σ' E' L
+  | (.abort id _, σ') => AimedIn id hs ∧ ∃ E', Inv F σ' Γ' env E' S ∧ Moves σ E σ' E' []
   | (.susp id e vs ls K, σ') => ∃ op X hos A Lv,
       Frame.capture e id ∈ hs ∧ O[e]? = some op ∧ Covers hs r ∧ (∀ a ∈ A, AimedIn a hs) ∧
       FramesOk F O σ' K op ⟨Γ', env, τ, S, r⟩ X hos A ∧ ls = hos.map Hole.loc ∧
-      Vals σ' op.owns vs Lv ∧ Lv.flatten.Nodup ∧ Disj Lv.flatten (X ++ mutCells (olds hos)) ∧
+      Vals F σ' op.owns vs Lv ∧ Lv.flatten.Nodup ∧ Disj Lv.flatten (X ++ mutCells (olds hos)) ∧
       Disj Lv.flatten S ∧ Moves σ E σ' (X ++ mutCells (olds hos)) Lv.flatten
 
 end FlyCore.Ownership
