@@ -5,3 +5,6 @@ import FlyCore
 #print axioms FlyCore.Ownership.eval_ok
 #print axioms FlyCore.Ownership.program_ok
 #print axioms FlyCore.Ownership.program_ok_sched
+#print axioms FlyCore.Ownership.Concurrency.atomicEx_ok
+#print axioms FlyCore.Ownership.Concurrency.chanEx_ok
+#print axioms FlyCore.Ownership.Concurrency.mutexEx_ok
