@@ -178,12 +178,12 @@ theorem Moves.rewrite {D : List Nat} (hwf : WF σ) (hwf' : WF σ') (hn : σ.next
 /-! ## Making, measuring and growing a vector -/
 
 theorem vnew_ok (hc : τ.complete = true) (hI : Inv F ι σ Γ env E S) (hwf : WF σ) :
-    Post F ι O σ E S Γ env (.vec τ) r hs (eval F O (n + 1) hs σ env .vnew) := by
+    Post F ι O σ E S Γ env (.vec true τ) r hs (eval F O (n + 1) hs σ env .vnew) := by
   simp only [eval]
   exact ⟨E, [], hI, .vec (Rs := []) rfl (fun i h => by simp at h) List.nodup_nil hc, disj_nil_left, disj_nil_left,
     Moves.refl hwf hI.alloc⟩
 
-theorem vlen_ok (hp : PlaceTy Γ p (.vec τ) w y) (hI : Inv F ι σ Γ env E S) (hwf : WF σ) :
+theorem vlen_ok (hp : PlaceTy Γ p (.vec g τ) w y) (hI : Inv F ι σ Γ env E S) (hwf : WF σ) :
     Post F ι O σ E S Γ env .int r hs (eval F O (n + 1) hs σ env (.vlen p)) := by
   obtain ⟨a, τr, Lr, P, l, s', ha, hLr, hpath, hres, -⟩ := place_ok hp hI.foot
   obtain ⟨Rb, hRb, -⟩ := path_split hpath hLr
@@ -194,7 +194,7 @@ theorem vlen_ok (hp : PlaceTy Γ p (.vec τ) w y) (hI : Inv F ι σ Γ env E S) 
 
 /-- `p.push(a)`: the vector's elements move to new cells, the old ones freed, and `a` goes in one
 more; the tree of the variable `p` is rooted at changes there alone. -/
-theorem vpush_ok (ha : AtomTy Γ a τ Γ₁) (hp : PlaceTy Γ₁ p (.vec τ) true y) (hI : Inv F ι σ Γ env E S) (hwf : WF σ) :
+theorem vpush_ok (ha : AtomTy Γ a τ Γ₁) (hp : PlaceTy Γ₁ p (.vec true τ) true y) (hI : Inv F ι σ Γ env E S) (hwf : WF σ) :
     Post F ι O σ E S Γ₁ env .int r hs (eval F O (n + 1) hs σ env (.vpush p a)) := by
   obtain ⟨v, σ1, E₁, L₁, hev, hI₁, hv₁, hd₁, hdS₁, hm₁⟩ := atom_ok ha hI hwf
   have hcτ : τ.complete = true := hv₁.complete
@@ -243,7 +243,7 @@ theorem vpush_ok (ha : AtomTy Γ a τ Γ₁) (hp : PlaceTy Γ₁ p (.vec τ) tru
     hrt4
   have hlL : l ∉ L₁ := fun h => by have := hltL l h; omega
   -- The vector, one element more.
-  have hLT : LT F ι σ4 c (.vec τ) (c :: (Rs' ++ [l :: L₁]).flatten) := by
+  have hLT : LT F ι σ4 c (.vec true τ) (c :: (Rs' ++ [l :: L₁]).flatten) := by
     refine .vec (cs := List.range' σ1.next cs.length ++ [l]) (by rw [hm4]; simp) (by simp [hlen']) (fun i h h' => ?_) ?_ ?_
     · simp only [List.length_append, List.length_range', List.length_singleton] at h
       by_cases hi : i < cs.length
@@ -396,7 +396,7 @@ theorem vpush_ok (ha : AtomTy Γ a τ Γ₁) (hp : PlaceTy Γ₁ p (.vec τ) tru
 
 /-- `p.pop()`: an empty vector gives `#None`; otherwise its last element's tree moves out of the
 vector into the value, `#Some` of it, and the vector keeps the rest. -/
-theorem vpop_ok (hp : PlaceTy Γ p (.vec τ) true y) (hcτ : τ.complete = true) (hI : Inv F ι σ Γ env E S)
+theorem vpop_ok (hp : PlaceTy Γ p (.vec true τ) true y) (hcτ : τ.complete = true) (hI : Inv F ι σ Γ env E S)
     (hwf : WF σ) :
     Post F ι O σ E S Γ env (.sum .int τ) r hs (eval F O (n + 1) hs σ env (.vpop p)) := by
   obtain ⟨c, Rb, P, A, B, hres, hRb, hE, hupd⟩ := replace_at hI hp (by simpa [Ty.complete] using hcτ) (.inl rfl)
@@ -458,7 +458,7 @@ theorem vpop_ok (hp : PlaceTy Γ p (.vec τ) true y) (hcτ : τ.complete = true)
     have hcD : c ∉ Rs.dropLast.flatten := fun h => hcn (List.mem_append.mpr (.inl h))
     have hagR : Agree σ σ' (Rs.getLast hRne) := Agree.of (fun x hx => by
       rw [hm', if_neg (fun (e : x = c) => hcl (e ▸ hx))]) hrt'
-    have hLT' : LT F ι σ' c (.vec τ) (c :: Rs.dropLast.flatten) := by
+    have hLT' : LT F ι σ' c (.vec true τ) (c :: Rs.dropLast.flatten) := by
       refine .vec (cs := cs.dropLast) (by rw [hm']; simp) (by simp [hlen]) (fun j hj hj' => ?_) hnd2.1 hcD
       have hj1 : j < cs.length := by simp at hj; omega
       have := hel j hj1 (by rw [hlen]; exact hj1)
@@ -519,7 +519,7 @@ theorem mem_flatten_set {Rs : List (List Nat)} (hj : j < Rs.length) (hji : j ≠
 
 /-- An element of a vector a path reaches: the root's tree is the element's, the path's cells, the
 vector's cell and the other elements'; and given a new tree for the element, it is that and those. -/
-theorem elem_reach (hp : Path F ι σ a τr P c (.vec τ)) (hLr : LT F ι σ a τr Lr) (hcm : σ.mem c = some (.vec cs))
+theorem elem_reach (hp : Path F ι σ a τr P c (.vec g τ)) (hLr : LT F ι σ a τr Lr) (hcm : σ.mem c = some (.vec cs))
     (hi : i < cs.length) : ∃ Os, Reach F ι σ a τr (P ++ c :: Os) cs[i] τ := by
   obtain ⟨Rc, hRc, hperm⟩ := path_split hp hLr
   cases hRc with
@@ -540,7 +540,7 @@ theorem elem_reach (hp : Path F ι σ a τr P c (.vec τ)) (hLr : LT F ι σ a �
     have hOs : ((Rs.set i []).flatten).Nodup := (List.nodup_cons.mp hn'.2.1).2
     have hcOs : c ∉ (Rs.set i []).flatten := (List.nodup_cons.mp hn'.2.1).1
     have hagc : σ'.mem c = σ.mem c := hag c (by simp)
-    have hLc : LT F ι σ' c (.vec τ) (c :: (Rs.set i R').flatten) := by
+    have hLc : LT F ι σ' c (.vec g τ) (c :: (Rs.set i R').flatten) := by
       refine .vec (by rw [hagc]; exact hcm) (by simp [hlen]) (fun j hj hj' => ?_) ?_ ?_
       · rw [List.getElem_set]
         by_cases hji : i = j
@@ -571,15 +571,197 @@ theorem elem_reach (hp : Path F ι σ a τr P c (.vec τ)) (hLr : LT F ι σ a �
       omega
 
 
+/-! ## Through a shell -/
+
+/-- A variable that may be changed, out of reach for now: what it may change is the borrow's, and
+what it only reads — the first cell of a closure or a slice borrowed `mut` — stays shared meanwhile;
+it takes back a footprint that shares the same. -/
+theorem Foot.hiddenX (h : Foot F ι σ Γ env E S) (hk : (Γ.map Prod.fst).Nodup) (he : Entry F ι σ Γ env y s a Ly)
+    (hex : s.excl = true) :
+    ∃ Eh, Foot F ι σ (hide Γ y) env Eh S ∧ E.Perm (exclPart s Ly ++ Eh) ∧
+      ∀ σ' Γb Eb' Ly', Foot F ι σ' Γb env Eb' S → Weaker Γb (hide Γ y) → Agree σ σ' S →
+        SlotOk F ι σ' s a Ly' → sharedPart s Ly' = sharedPart s Ly →
+        ∃ E', Foot F ι σ' (thaw Γ [y] Γb) env E' S ∧ E'.Perm (exclPart s Ly' ++ Eb') := by
+  induction h with
+  | nil => exact absurd he.1 (by simp [lookup])
+  | @cons s0 a0 L0 Γ env E S x hs hrest ih =>
+    simp only [List.map_cons, List.nodup_cons] at hk
+    obtain ⟨hx, hk⟩ := hk
+    rcases (entry_cons hx).mp he with ⟨rfl, rfl, rfl, hL⟩ | ⟨hne, he'⟩
+    · -- The variable lent is this one.
+      obtain rfl := hL.det hs
+      have hhide : hide ((y, s) :: Γ) y = (y, .lent s.ty s.shell) :: Γ := by
+        simp only [hide, List.map_cons, ↓reduceIte, List.cons.injEq, true_and]
+        exact hide_absent hx
+      have hlent : ∀ {σ'} {L : List Nat}, SlotOk F ι σ' s a L →
+          SlotOk F ι σ' (.lent s.ty s.shell) a (sharedPart s L) := by
+        intro σ' L hL
+        cases hsh : s.shell
+        · simp [SlotOk, sharedPart, hex, hsh]
+        · obtain ⟨R, rfl⟩ := hL.head_of_shell hsh
+          exact ⟨by simp [sharedPart, hex, hsh], hL.alloc a (by simp)⟩
+      have hro : ∀ {L}, sharedPart (.lent s.ty s.shell) L = L := sharedPart_of_ro rfl
+      have hnoE : ∀ {L}, exclPart (.lent s.ty s.shell) L = [] := by simp [exclPart, Slot.excl]
+      refine ⟨E, ?_, .of_eq rfl, ?_⟩
+      · rw [hhide]
+        have := Foot.cons (x := y) (hlent hs) hrest
+        simpa only [addE, addS, hro, hnoE, List.nil_append] using this
+      · intro σ' Γb Eb' Ly' hb hw hag hs' hsheq
+        rw [hhide] at hw
+        obtain ⟨s', Γb', rfl, hle, hw'⟩ := Weaker.cons_inv hw
+        cases hle
+        obtain ⟨L', Et, St, hL', hft, rfl, hSt⟩ := hb.uncons
+        obtain rfl : L' = sharedPart s Ly' := hL'.det (hlent hs')
+        simp only [addS, hro, hsheq] at hSt
+        obtain rfl := List.append_cancel_left hSt
+        refine ⟨addE s Ly' Eb', ?_, .of_eq rfl⟩
+        rw [thaw_cons]
+        simp only [List.mem_singleton, ↓reduceIte]
+        rw [thaw_absent hx (by rw [hw'.keys])]
+        have := Foot.cons (x := y) hs' hft
+        simpa only [addS, hsheq] using this
+    · -- Another: as it was.
+      obtain ⟨Eh, hfh, hp, hthaw⟩ := ih hk he'
+      have hhide : hide ((x, s0) :: Γ) y = (x, s0) :: hide Γ y := by
+        simp only [hide, List.map_cons, List.cons.injEq]
+        simp [Ne.symm hne]
+      refine ⟨addE s0 L0 Eh, by rw [hhide]; exact .cons hs hfh, ?_, ?_⟩
+      · simp only [addE]; exact (hp.append_left _).trans perm_front
+      · intro σ' Γb Eb' Ly' hb hw hag hs' hsheq
+        rw [hhide] at hw
+        obtain ⟨s', Γb', rfl, hle, hw'⟩ := Weaker.cons_inv hw
+        obtain ⟨L', Et, St, hL', hft, rfl, hSt⟩ := hb.uncons
+        have hex' : s'.excl = s0.excl := hle.excl
+        cases hx0 : s0.excl
+        · -- Only read: the same slot, with the same tree.
+          have hsame : s' = s0 := by
+            cases hle with
+            | refl => rfl
+            | forget => simp [Slot.excl] at hx0
+          subst hsame
+          have hsh0 : s'.shell = false := by
+            cases h : s'.shell
+            · rfl
+            · rw [Slot.shell_excl h] at hx0; cases hx0
+          have hro : ∀ {L}, sharedPart s' L = L := by simp [sharedPart_plain hsh0, hx0]
+          have hLL := (hs.frame (hag.mono fun l hl => mem_addS.mpr (.inl (by rw [hro]; exact hl)))).det hL'
+          subst hLL
+          simp only [addS, hro] at hSt
+          have hSS := List.append_cancel_left hSt
+          subst hSS
+          obtain ⟨E', hf', hp'⟩ := hthaw σ' Γb' Et Ly' hft hw' ((hag.mono fun l hl => mem_addS.mpr (.inr hl))) hs'
+            hsheq
+          refine ⟨E', ?_, by simpa [addE, exclPart, hx0] using hp'⟩
+          rw [thaw_cons]
+          simp only [List.mem_singleton, Ne.symm hne, ↓reduceIte]
+          simpa [addE, exclPart, hx0] using Foot.cons (x := x) hL' hf'
+        · have hsheq' := SlotOk.shared_eq hs hL' hle.shell hx0 (hex'.trans hx0)
+          simp only [addS, hsheq'] at hSt
+          obtain rfl := List.append_cancel_left hSt
+          obtain ⟨E', hf', hp'⟩ := hthaw σ' Γb' Et Ly' hft hw' ((hag.mono fun l hl => mem_addS.mpr (.inr hl))) hs'
+            hsheq
+          refine ⟨addE s' L' E', ?_, ?_⟩
+          · rw [thaw_cons]
+            simp only [List.mem_singleton, Ne.symm hne, ↓reduceIte]
+            have := Foot.cons (x := x) hL' hf'
+            rwa [show ∀ X, addS s' L' X = addS s0 L0 X from fun X => by simp [addS, hsheq']] at this
+          · simp only [addE]
+            exact (hp'.append_left _).trans perm_front
+
+/-- A `mut` borrow of a place past the first cell of a variable that may change all but that cell —
+an element of a slice borrowed `mut`: the variable is out of reach while the borrow lives, its
+first cell still shared; once it ends, the variable owns again its path to the place and what the
+borrow left there. -/
+theorem lend_mut_sh (hE : EvalOk F O n) (hx : lookup x Γ = none) (ha : lookup y env = some a)
+    (hsl : lookup y Γ = some s) (hLr : LT F ι σ a τr Lr) (hpath : Reach F ι σ a τr (a :: P) l τ)
+    (hso : SlotOk F ι σ s a Lr) (hsx : s.excl = true) (hsh : s.shell = true) (haS : a ∈ S)
+    (hslot : ∀ σ' L', LT F ι σ' a τr L' → SlotOk F ι σ' s a L') (hτ : τ.shell = false)
+    (hb : Typed F O ((x, .ref .mut τ) :: lendCtx .mut Γ y) body τb ((x, .ref .mut τ) :: Γb) r)
+    (hI : Inv F ι σ Γ env E S) (hwf : WF σ) (hR : Ready O hs r) :
+    Post F ι O σ E S (thaw Γ [y] Γb) env τb r hs (ret F O n hs .lendK (eval F O n hs σ ((x, l) :: env) body)) := by
+  simp only [lendCtx] at hb
+  obtain ⟨Rt, hRt, hLrp⟩ := hpath.split hLr
+  obtain ⟨R0, rfl⟩ := hso.head_of_shell hsh
+  have hR0p : R0.Perm (P ++ Rt) := by simpa using hLrp
+  have hexcl : ∀ {R}, exclPart s (a :: R) = R := by simp [exclPart, hsx, hsh]
+  have hshr : ∀ {R}, sharedPart s (a :: R) = [a] := by simp [sharedPart, hsx, hsh]
+  have hxk : x ∉ (hide Γ y).map Prod.fst := by rw [hide_keys]; exact lookup_none_keys hx
+  have hwb := typed_weaker hb (List.nodup_cons.mpr ⟨hxk, by rw [hide_keys]; exact hI.keys⟩)
+  cases hwb with
+  | cons _ hwb =>
+  obtain ⟨Eh, hfh, hEh, hreb⟩ := hI.foot.hiddenX hI.keys ⟨hsl, ha, hso⟩ hsx
+  rw [hexcl] at hEh
+  have hxs : (Slot.ref .mut τ).shell = false := by simp [Slot.shell_ref, hτ]
+  -- `E` is the borrowed tree, the rest of the activation and the path to the place.
+  have hEp : E.Perm (Rt ++ Eh ++ P) := hEh.trans (by
+    refine (hR0p.append_right Eh).trans ?_
+    exact List.perm_iff_count.mpr fun z => by simp only [List.count_append]; omega)
+  have hEn := hEp.nodup_iff.mp hI.nodup
+  obtain ⟨hBn, hPn, hdBP⟩ := nodup_append_disj.mp hEn
+  have hmemE : ∀ z, z ∈ E ↔ z ∈ Rt ++ Eh ++ P := fun z => hEp.mem_iff
+  have hPE : ∀ z ∈ P, z ∈ E := fun z h => (hmemE z).mpr (List.mem_append.mpr (.inr h))
+  have hBE : ∀ z ∈ Rt ++ Eh, z ∈ E := fun z h => (hmemE z).mpr (List.mem_append.mpr (.inl h))
+  have hPa : ∀ z ∈ P, σ.mem z ≠ none := fun z h => hI.alloc z (hPE z h)
+  have haP : a ∉ P := fun h => hI.disj a haS (hPE a h)
+  have hIb : Inv F ι σ ((x, .ref .mut τ) :: hide Γ y) ((x, l) :: env) (Rt ++ Eh) S := by
+    refine ⟨by simpa [addE, addS, Slot.excl, exclPart_plain hxs, sharedPart_plain hxs] using
+        Foot.cons (s := .ref .mut τ) (x := x) hRt hfh, hBn, fun z hz h => hI.disj z hz (hBE z h),
+      List.nodup_cons.mpr ⟨hxk, by rw [hide_keys]; exact hI.keys⟩⟩
+  have hkb : Γb.map Prod.fst = Γ.map Prod.fst := by
+    have := typed_keys hb
+    simp only [List.map_cons, List.cons.injEq] at this
+    rw [this.2]; exact hide_keys
+  have hre : ∀ σ1 Eb', Agree σ σ1 (P ++ S) → Disj P Eb' →
+      Inv F ι σ1 ((x, .ref .mut τ) :: Γb) ((x, l) :: env) Eb' S →
+      ∃ E', Inv F ι σ1 (thaw Γ [y] Γb) env E' S ∧ ∀ z, z ∈ E' ↔ z ∈ Eb' ∨ z ∈ P := by
+    intro σ1 Eb' hag hdX hI'
+    obtain ⟨R', Et, St, hR', hft, hEt, hSt⟩ := hI'.foot.uncons
+    simp only [addE, addS, Slot.excl, ↓reduceIte, exclPart_plain hxs, sharedPart_plain hxs, List.nil_append] at hEt hSt
+    subst hEt
+    rw [← hSt] at hft
+    have hagS : Agree σ σ1 S := hag.mono fun z hz => List.mem_append.mpr (.inr hz)
+    have hagP : Agree σ σ1 (a :: P) := hag.mono fun z hz => by
+      rcases List.mem_cons.mp hz with rfl | hz
+      · exact List.mem_append.mpr (.inr haS)
+      · exact List.mem_append.mpr (.inl hz)
+    have haR : a ∉ R' := fun h => hI'.disj a haS (List.mem_append.mpr (.inl h))
+    obtain ⟨L', hLT', hL'p⟩ := hpath.join (List.nodup_cons.mpr ⟨haP, hPn⟩) σ1 _ hagP hR' (fun z hz h => by
+      rcases List.mem_cons.mp hz with rfl | hz
+      · exact haR h
+      · exact hdX z hz (List.mem_append.mpr (.inl h)))
+    have hso' := hslot σ1 _ hLT'
+    obtain ⟨R1, rfl⟩ := hso'.head_of_shell hsh
+    have hR1p : R1.Perm (P ++ R') := by simpa using hL'p
+    obtain ⟨E', hf', hp'⟩ := hreb σ1 Γb Et (a :: R1) hft hwb hagS hso' (by rw [hshr, hshr])
+    rw [hexcl] at hp'
+    have hp'' : E'.Perm ((R' ++ Et) ++ P) := hp'.trans (by
+      refine (hR1p.append_right Et).trans ?_
+      exact List.perm_iff_count.mpr fun z => by simp only [List.count_append]; omega)
+    refine ⟨E', ⟨hf', hp''.nodup_iff.mpr (nodup_append_disj.mpr ⟨hI'.nodup, hPn, fun z h h' => hdX z h' h⟩),
+      ?_, by rw [thaw_keys hkb]; exact hI.keys⟩, fun z => by rw [hp''.mem_iff, List.mem_append]⟩
+    intro z hz hz'
+    rcases List.mem_append.mp (hp''.mem_iff.mp hz') with h | h
+    · exact hI'.disj z hz h
+    · exact hI.disj z hz (hPE z h)
+  refine post_relabel (E₁ := P ++ (Rt ++ Eh)) hwf hI.alloc (fun z => by
+    rw [hmemE z]; simp only [List.mem_append]; grind) ?_
+  exact ret_lendK (fun z hz => .inr hz) (fun z hz => hz) hre hR.2 hwf Agree.self hPa hPn
+    (fun z hz h => hdBP z h hz) hI.allocS
+    (fun z hz h => by
+      rcases List.mem_append.mp h with h | h
+      · exact hI.disj z hz (hPE z h)
+      · exact hI.disj z hz (hBE z h))
+    (hE _ _ _ _ _ _ _ _ _ _ _ hb hIb hwf hR)
+
 /-- `{ const x = m p[z]; body }`: out of bounds, a panic; else a borrow of the element, the vector's
 root only read, or out of reach, while it lives, as for a borrow of the vector. -/
-theorem lendIdx_ok {m : Mode} (hE : EvalOk F O n) (hx : lookup x Γ = none) (hp : PlaceTy Γ p (.vec τ) w y)
-    (hz : PlaceTy Γ (.var z) .int wz yz) (hm : m = .mut → w = true) (hmf : m = .mut → τ.isFn = false)
+theorem lendIdx_ok {m : Mode} (hE : EvalOk F O n) (hx : lookup x Γ = none) (hp : PlaceTy Γ p (.vec g τ) w y)
+    (hz : PlaceTy Γ (.var z) .int wz yz) (hm : m = .mut → w = true) (hmf : m = .mut → τ.shell = false)
     (hun : m = .mut → Unsplit Γ y)
     (hb : Typed F O ((x, .ref m τ) :: lendCtx m Γ y) body τb ((x, .ref m τ) :: Γb) r)
     (hI : Inv F ι σ Γ env E S) (hwf : WF σ) (hR : Ready O hs r) :
     Post F ι O σ E S (thaw Γ [y] Γb) env τb r hs (eval F O (n + 1) hs σ env (.lendIdx x m p z body)) := by
-  obtain ⟨a, τr, Lr, P, c, s, ha, hLr, hpath, hres, -, hsubE, hsl, hso, hexw, hslot, hshp, hty⟩ := place_ok hp hI.foot
+  obtain ⟨a, τr, Lr, P, c, s, ha, hLr, hpath, hres, hsub, hsubE, hsl, hso, hexw, hslot, hshp, hty⟩ := place_ok hp hI.foot
   obtain ⟨Rc, hRc, -⟩ := path_split hpath hLr
   cases hRc with
   | vec hcm =>
@@ -600,8 +782,18 @@ theorem lendIdx_ok {m : Mode} (hE : EvalOk F O n) (hx : lookup x Γ = none) (hp 
       | ro => exact lend_ro_core hE hx ha hsl hLr hreach hso hp.root_live hb hI hwf hR
       | «mut» =>
         obtain rfl := hm rfl
-        have hsh : s.shell = false := root_whole hsl (hun rfl) hshp hty rfl
-        exact lend_mut_core hE hx ha hsl hLr hreach hso (hsubE rfl hsh) (hexw rfl) hslot hsh (hmf rfl) hb hI hwf hR
+        cases hsh : s.shell
+        · exact lend_mut_core hE hx ha hsl hLr hreach hso (hsubE rfl hsh) (hexw rfl) hslot hsh (hmf rfl) hb hI hwf hR
+        · -- A slice borrowed `mut`: the element lies past its cell, which stays shared.
+          obtain ⟨R0, rfl⟩ := hso.head_of_shell hsh
+          have haS : a ∈ S := hsub.2 a (by simp [sharedPart, hexw rfl, hsh])
+          have hpa : ∃ P', P ++ c :: Os = a :: P' := by
+            rcases hshp hsh with ⟨rfl, -⟩ | ⟨-, P', rfl⟩
+            · cases hpath; exact ⟨Os, rfl⟩
+            · exact ⟨P' ++ c :: Os, rfl⟩
+          obtain ⟨P', hP'⟩ := hpa
+          rw [hP'] at hreach
+          exact lend_mut_sh hE hx ha hsl hLr hreach hso (hexw rfl) hsh haS hslot (hmf rfl) hb hI hwf hR
     · simp [Post]
   · simp [Post]
 
@@ -616,13 +808,102 @@ theorem flatten_mid (Rs : List (List Nat)) (i m : Nat) :
   simp only [List.flatten_append, List.append_assoc] at this
   simpa [List.append_assoc] using this
 
+/-- A run of `m` elements of a vector, from the `i`th, a path reaches: the root's tree is theirs, the
+path's cells, the vector's cell and the other elements'; given new trees for them, it is those and
+these. -/
+theorem range_reach (hp : Path F ι σ a τr P c (.vec g τ)) (hLr : LT F ι σ a τr Lr) (hcm : σ.mem c = some (.vec cs))
+    (him : i + m ≤ cs.length) :
+    ∃ (Os : List Nat) (Rm : List (List Nat)), Lr.Perm (P ++ c :: Os ++ Rm.flatten) ∧ Rm.length = m ∧
+      (∀ k (h : k < m) (h' : k < Rm.length), LT F ι σ (cs[i + k]'(by omega)) τ Rm[k]) ∧
+      ∀ σ' (Rn : List (List Nat)), (P ++ c :: Os).Nodup → Agree σ σ' (P ++ c :: Os) → Rn.length = m →
+        (∀ k (h : k < m) (h' : k < Rn.length), LT F ι σ' (cs[i + k]'(by omega)) τ Rn[k]) → Rn.flatten.Nodup →
+        Disj (P ++ c :: Os) Rn.flatten →
+        ∃ L', LT F ι σ' a τr L' ∧ L'.Perm (P ++ c :: Os ++ Rn.flatten) := by
+  obtain ⟨Rc, hRc, hperm⟩ := path_split hp hLr
+  cases hRc with
+  | vec hcm' hlen hel hnd hcn =>
+  rename_i cs' Rs
+  rw [hcm] at hcm'
+  cases hcm'
+  have hRl : Rs.length = cs.length := hlen
+  -- The run, and the elements before and after it.
+  have hmid := flatten_mid Rs i m
+  refine ⟨(Rs.take i).flatten ++ ((Rs.drop i).drop m).flatten, (Rs.drop i).take m, ?_, by simp; omega,
+    fun k h h' => ?_, fun σ' Rn hn hag hRn hel' hRnn hd => ?_⟩
+  · refine hperm.trans ?_
+    rw [hmid]
+    exact List.perm_iff_count.mpr fun z => by simp only [List.count_append, List.count_cons]; omega
+  · have e : ((Rs.drop i).take m)[k] = Rs[i + k]'(by omega) := by simp
+    rw [e]
+    exact hel (i + k) (by omega) (by omega)
+  · -- The vector's cell, holding the same cells, the run's trees new.
+    have hn' := List.nodup_append.mp hn
+    have hcOs := List.nodup_cons.mp hn'.2.1
+    have hagc : σ'.mem c = σ.mem c := hag c (by simp)
+    have hOs : ∀ z ∈ (Rs.take i).flatten ++ ((Rs.drop i).drop m).flatten, z ∈ P ++ c :: ((Rs.take i).flatten ++ ((Rs.drop i).drop m).flatten) :=
+      fun z hz => List.mem_append.mpr (.inr (List.mem_cons_of_mem _ hz))
+    generalize hRs' : Rs.take i ++ Rn ++ (Rs.drop i).drop m = Rs'
+    have hlen' : Rs'.length = cs.length := by subst hRs'; simp; omega
+    have hflat : Rs'.flatten.Perm (Rn.flatten ++ ((Rs.take i).flatten ++ ((Rs.drop i).drop m).flatten)) := by
+      subst hRs'
+      simp only [List.flatten_append]
+      exact List.perm_iff_count.mpr fun z => by simp only [List.count_append]; omega
+    have hLc : LT F ι σ' c (.vec g τ) (c :: Rs'.flatten) := by
+      refine .vec (by rw [hagc]; exact hcm) hlen' (fun k hk hk' => ?_) ?_ ?_
+      · subst hRs'
+        by_cases h1 : k < i
+        · have e : (Rs.take i ++ Rn ++ (Rs.drop i).drop m)[k] = Rs[k]'(by omega) := by
+            rw [List.getElem_append_left (by simp; omega), List.getElem_append_left (by simp; omega)]; simp
+          rw [e]
+          refine (hel k hk (by omega)).frame (hag.mono fun z hz => ?_)
+          refine hOs z (List.mem_append.mpr (.inl (mem_flatten_of (i := k) (by simp; omega) ?_)))
+          simpa using hz
+        · by_cases h2 : k < i + m
+          · have e : (Rs.take i ++ Rn ++ (Rs.drop i).drop m)[k] = Rn[k - i]'(by omega) := by
+              rw [List.getElem_append_left (by simp; omega), List.getElem_append_right (by simp; omega)]
+              simp only [List.length_take]; congr 1; omega
+            rw [e]
+            have := hel' (k - i) (by omega) (by omega)
+            have ec : cs[i + (k - i)]'(by omega) = cs[k] := by congr 1; omega
+            rwa [ec] at this
+          · have e : (Rs.take i ++ Rn ++ (Rs.drop i).drop m)[k] = Rs[k]'(by omega) := by
+              rw [List.getElem_append_right (by simp; omega)]
+              simp only [List.getElem_drop, List.length_append, List.length_take]
+              congr 1; omega
+            rw [e]
+            refine (hel k hk (by omega)).frame (hag.mono fun z hz => ?_)
+            refine hOs z (List.mem_append.mpr (.inr (mem_flatten_of (i := k - i - m) (by simp; omega) ?_)))
+            have e2 : ((Rs.drop i).drop m)[k - i - m]'(by simp; omega) = Rs[k]'(by omega) := by
+              simp only [List.getElem_drop]; congr 1; omega
+            rw [e2]; exact hz
+      · refine hflat.nodup_iff.mpr (List.nodup_append.mpr ⟨hRnn, hcOs.2, ?_⟩)
+        intro x hx y hy e; subst e
+        exact hd x (List.mem_append.mpr (.inr (List.mem_cons_of_mem _ hy))) hx
+      · intro h
+        rcases List.mem_append.mp (hflat.mem_iff.mp h) with h | h
+        · exact hd c (by simp) h
+        · exact hcOs.1 h
+    have hdP : Disj P (c :: Rs'.flatten) := by
+      intro z hz hz'
+      rcases List.mem_cons.mp hz' with rfl | hz'
+      · exact hn'.2.2 z hz z (List.mem_cons_self ..) rfl
+      · rcases List.mem_append.mp (hflat.mem_iff.mp hz') with h | h
+        · exact hd z (List.mem_append.mpr (.inl hz)) h
+        · exact hn'.2.2 z hz z (List.mem_cons_of_mem _ h) rfl
+    obtain ⟨L', hL', hperm', -⟩ := path_join hp hn'.1 (hag.mono fun z hz => List.mem_append.mpr (.inl hz)) hLc hdP
+    refine ⟨L', hL', hperm'.trans ?_⟩
+    exact List.perm_iff_count.mpr fun z => by
+      have h := hflat.count_eq z
+      simp only [List.count_append, List.count_cons] at h ⊢
+      omega
+
 /-- `{ const x = p[lo..hi]; body }`: out of bounds, a panic; else a vector of its own, whose cell is
 the frame's, of the elements from `lo` up to `hi`, the vector's root only read while it lives. -/
-theorem lendSlice_ok (hE : EvalOk F O n) (hx : lookup x Γ = none) (hp : PlaceTy Γ p (.vec τ) w y)
+theorem lendSlice_ok (hE : EvalOk F O n) (hx : lookup x Γ = none) (hp : PlaceTy Γ p (.vec g τ) w y)
     (hlo : PlaceTy Γ (.var lo) .int w1 y1) (hhi : PlaceTy Γ (.var hi) .int w2 y2)
-    (hb : Typed F O ((x, .ref .ro (.vec τ)) :: freeze Γ [y]) body τb ((x, .ref .ro (.vec τ)) :: Γb) r)
+    (hb : Typed F O ((x, .ref .ro (.vec false τ)) :: freeze Γ [y]) body τb ((x, .ref .ro (.vec false τ)) :: Γb) r)
     (hI : Inv F ι σ Γ env E S) (hwf : WF σ) (hR : Ready O hs r) :
-    Post F ι O σ E S (thaw Γ [y] Γb) env τb r hs (eval F O (n + 1) hs σ env (.lendSlice x p lo hi body)) := by
+    Post F ι O σ E S (thaw Γ [y] Γb) env τb r hs (eval F O (n + 1) hs σ env (.lendSlice x .ro p lo hi body)) := by
   obtain ⟨a0, τr, Lr, P, c, s, ha0, hLr, hpath, hres, -, -, hsl, hso, -, -⟩ := place_ok hp hI.foot
   obtain ⟨Rc, hRc, hLrPR⟩ := path_split hpath hLr
   have hRc' := hRc
@@ -669,7 +950,7 @@ theorem lendSlice_ok (hE : EvalOk F O n) (hx : lookup x Γ = none) (hp : PlaceTy
   have hna : ∀ z, σ.mem z ≠ none → z ≠ σ.next := fun z hz e => Nat.lt_irrefl _ (e ▸ hwf z hz)
   have haRt : σ.next ∉ Rsub.flatten := fun h => hna _ (hRta _ h) rfl
   have hk : i.toNat ≤ cs.length ∧ j.toNat ≤ cs.length ∧ i.toNat ≤ j.toNat := by omega
-  have hLa : LT F ι (σ.alloc (.vec sub)).2 σ.next (.vec τ) (σ.next :: Rsub.flatten) := by
+  have hLa : LT F ι (σ.alloc (.vec sub)).2 σ.next (.vec false τ) (σ.next :: Rsub.flatten) := by
     refine .vec (cs := sub) (by simp [Store.alloc]) (by rw [← hsub, ← hRsub]; simp [hlen]) (fun k hk1 hk2 => ?_)
       hRsubn haRt
     have hk1' : i.toNat + k < cs.length := by rw [← hsub] at hk1; simp at hk1; omega
@@ -689,11 +970,11 @@ theorem lendSlice_ok (hE : EvalOk F O n) (hx : lookup x Γ = none) (hp : PlaceTy
     · rcases List.mem_append.mp (hS.mem_iff.mp h) with h | h
       · exact .inl (List.mem_cons_of_mem _ h)
       · exact .inr h
-  have hIb : Inv F ι (σ.alloc (.vec sub)).2 ((x, .ref .ro (.vec τ)) :: freeze Γ [y])
+  have hIb : Inv F ι (σ.alloc (.vec sub)).2 ((x, .ref .ro (.vec false τ)) :: freeze Γ [y])
       ((x, σ.next) :: env) Eb ((σ.next :: Rsub.flatten) ++ Sb) := by
-    have hfoot := Foot.cons (s := .ref .ro (.vec τ)) (x := x) (a := σ.next) hLa
+    have hfoot := Foot.cons (s := .ref .ro (.vec false τ)) (x := x) (a := σ.next) hLa
       (hfb.frame <| Agree.of' fun z hz => hold z (hfb.alloc z (List.mem_append.mp hz)))
-    refine ⟨by simpa [addE, addS, Slot.excl, exclPart, sharedPart, Slot.shell, Bool.false_eq_true] using hfoot, hEbn, ?_,
+    refine ⟨by simpa [addE, addS, Slot.excl, exclPart, sharedPart, Slot.shell, Ty.shell, Bool.false_eq_true] using hfoot, hEbn, ?_,
       List.nodup_cons.mpr ⟨hxk, by rw [freeze_keys]; exact hI.keys⟩⟩
     intro z hz hz'
     rcases hSin z hz with h | h
@@ -706,12 +987,12 @@ theorem lendSlice_ok (hE : EvalOk F O n) (hx : lookup x Γ = none) (hp : PlaceTy
     simp only [List.map_cons, List.cons.injEq] at this
     rw [this.2, freeze_keys]
   have hre : ∀ σ1 Eb', Agree (σ.alloc (.vec sub)).2 σ1 ((σ.next :: Fz) ++ S) → Disj (σ.next :: Fz) Eb' →
-      Inv F ι σ1 ((x, .ref .ro (.vec τ)) :: Γb) ((x, σ.next) :: env) Eb' ((σ.next :: Rsub.flatten) ++ Sb) →
+      Inv F ι σ1 ((x, .ref .ro (.vec false τ)) :: Γb) ((x, σ.next) :: env) Eb' ((σ.next :: Rsub.flatten) ++ Sb) →
       ∃ E', Inv F ι σ1 (thaw Γ [y] Γb) env E' S ∧
         ∀ z, z ∈ E' ↔ z ∈ Eb' ∨ (z ∈ σ.next :: Fz ∧ z ≠ σ.next) := by
     intro σ1 Eb' hag hdX hI'
     obtain ⟨L', Et, St, hL', hft, hEt, hSt⟩ := hI'.foot.uncons
-    simp only [addE, addS, Slot.excl, Bool.false_eq_true, ↓reduceIte, exclPart, sharedPart, Slot.shell] at hEt hSt
+    simp only [addE, addS, Slot.excl, Bool.false_eq_true, ↓reduceIte, exclPart, sharedPart, Slot.shell, Ty.shell] at hEt hSt
     have hagR : Agree (σ.alloc (.vec sub)).2 σ1 (σ.next :: Rsub.flatten) := (hag.mono fun z hz => by
       rcases List.mem_cons.mp hz with rfl | h
       · exact List.mem_append.mpr (.inl (List.mem_cons_self ..))
@@ -768,5 +1049,216 @@ theorem lendSlice_ok (hE : EvalOk F O n) (hx : lookup x Γ = none) (hp : PlaceTy
       · exact hI.disj z hz (hFz z h)
       · exact hI.disj z hz (hEb z h))
     (hE _ _ _ _ _ _ _ _ _ _ _ hb hIb hwf1 hR)
+
+
+/-- `{ const x = mut p[lo..hi]; body }`: out of bounds, a panic; else a slice of its own, whose cell
+is the frame's and only read, of the elements from `lo` up to `hi`, which the slice may change, the
+vector's root out of reach while it lives; once it ends, the root owns again the vector and the
+elements as the slice left them. -/
+theorem lendSliceMut_ok (hE : EvalOk F O n) (hx : lookup x Γ = none) (hp : PlaceTy Γ p (.vec g τ) true y)
+    (hlo : PlaceTy Γ (.var lo) .int w1 y1) (hhi : PlaceTy Γ (.var hi) .int w2 y2)
+    (hb : Typed F O ((x, .ref .mut (.vec false τ)) :: hide Γ y) body τb ((x, .ref .mut (.vec false τ)) :: Γb) r)
+    (hI : Inv F ι σ Γ env E S) (hwf : WF σ) (hR : Ready O hs r) :
+    Post F ι O σ E S (thaw Γ [y] Γb) env τb r hs (eval F O (n + 1) hs σ env (.lendSlice x .mut p lo hi body)) := by
+  obtain ⟨a0, τr, Lr, P, c, s, ha0, hLr, hpath, hres, hsub, hsubE, hsl, hso, hexw, hslot, hshp, hty⟩ := place_ok hp hI.foot
+  have hsx := hexw rfl
+  obtain ⟨Rc, hRc, -⟩ := path_split hpath hLr
+  cases hRc with
+  | vec hcm hlen hel hnd hcn =>
+  rename_i cs Rs
+  have intOf : ∀ {v w' yv}, PlaceTy Γ (.var v) .int w' yv → ∃ l k, lookup v env = some l ∧ σ.mem l = some (.int k) := by
+    intro v w' yv hv
+    obtain ⟨az, τz, Lz, Pz, lz, sz, -, hLz, hpathz, hresz, -⟩ := place_ok hv hI.foot
+    obtain ⟨Rz, hRz, -⟩ := path_split hpathz hLz
+    cases hRz with
+    | int hk => exact ⟨lz, _, hresz, hk⟩
+  obtain ⟨l1, i, hl1, hi⟩ := intOf hlo
+  obtain ⟨l2, j, hl2, hj⟩ := intOf hhi
+  simp only [eval, hres, hl1, hl2, hcm, hi, hj]
+  split
+  case isFalse => simp [Post]
+  rename_i hbd
+  obtain ⟨hi0, hij, hjn⟩ := hbd
+  obtain ⟨Os, Rm, hLrp, hRml, hRmel, hjoin⟩ :=
+    range_reach (i := i.toNat) (m := j.toNat - i.toNat) hpath hLr hcm (by omega)
+  generalize hsubd : (cs.drop i.toNat).take (j.toNat - i.toNat) = sub
+  -- The path's cells: those the slice's frame keeps, `Pk`, and the root's first cell, `Ph`, if the
+  -- root is a shell, which stays shared.
+  have hsplit : ∃ Ph Pk, P ++ c :: Os = Ph ++ Pk ∧ sharedPart s Lr = Ph ∧
+      (exclPart s Lr).Perm (Pk ++ Rm.flatten) := by
+    cases hsh : s.shell
+    · refine ⟨[], P ++ c :: Os, rfl, by simp [sharedPart_plain hsh, hsx], ?_⟩
+      rw [exclPart_plain hsh, if_pos hsx]; simpa using hLrp
+    · obtain ⟨R0, rfl⟩ := hso.head_of_shell hsh
+      have hpa : ∃ Pt, P ++ c :: Os = a0 :: Pt := by
+        rcases hshp hsh with ⟨rfl, -⟩ | ⟨-, P', rfl⟩
+        · cases hpath; exact ⟨Os, rfl⟩
+        · exact ⟨P' ++ c :: Os, rfl⟩
+      obtain ⟨Pt, hPt⟩ := hpa
+      refine ⟨[a0], Pt, hPt, by simp [sharedPart, hsx, hsh], ?_⟩
+      simp only [exclPart, hsx, hsh, ↓reduceIte, List.tail_cons]
+      rw [hPt] at hLrp
+      simpa using hLrp
+  obtain ⟨Ph, Pk, hPP, hPh, hPk⟩ := hsplit
+  have hPhS : ∀ z ∈ Ph, z ∈ S := fun z hz => hsub.2 z (hPh ▸ hz)
+  have hPkE : ∀ z ∈ Pk, z ∈ E := fun z hz => hsub.1 z (hPk.mem_iff.mpr (List.mem_append.mpr (.inl hz)))
+  have hRmE : ∀ z ∈ Rm.flatten, z ∈ E := fun z hz => hsub.1 z (hPk.mem_iff.mpr (List.mem_append.mpr (.inr hz)))
+  -- The root out of reach.
+  have hxk : x ∉ (hide Γ y).map Prod.fst := by rw [hide_keys]; exact lookup_none_keys hx
+  have hwb := typed_weaker hb (List.nodup_cons.mpr ⟨hxk, by rw [hide_keys]; exact hI.keys⟩)
+  cases hwb with
+  | cons _ hwb =>
+  obtain ⟨Eh, hfh, hEh, hreb⟩ := hI.foot.hiddenX hI.keys ⟨hsl, ha0, hso⟩ hsx
+  have hEp : E.Perm (Rm.flatten ++ Eh ++ Pk) := hEh.trans (by
+    refine (hPk.append_right Eh).trans ?_
+    exact List.perm_iff_count.mpr fun z => by simp only [List.count_append]; omega)
+  obtain ⟨hBn, hPkn, hdBP⟩ := nodup_append_disj.mp (hEp.nodup_iff.mp hI.nodup)
+  obtain ⟨hRmn, hEhn, hdRE⟩ := nodup_append_disj.mp hBn
+  have hEhE : ∀ z ∈ Eh, z ∈ E := fun z h => hEp.mem_iff.mpr (by simp [h])
+  have hBE : ∀ z ∈ Rm.flatten ++ Eh, z ∈ E := fun z h => hEp.mem_iff.mpr (List.mem_append.mpr (.inl h))
+  -- The slice's cell, new.
+  have hold : ∀ z, σ.mem z ≠ none → (σ.alloc (.vec sub)).2.mem z = σ.mem z := fun z hz => by
+    simp only [Store.alloc]; rw [if_neg (fun e => Nat.lt_irrefl _ (e ▸ hwf z hz))]
+  have hna : ∀ z, σ.mem z ≠ none → z ≠ σ.next := fun z hz e => Nat.lt_irrefl _ (e ▸ hwf z hz)
+  have hRma : ∀ z ∈ Rm.flatten, σ.mem z ≠ none := fun z hz => hI.alloc z (hRmE z hz)
+  have hbRm : σ.next ∉ Rm.flatten := fun h => hna _ (hRma _ h) rfl
+  have hLb : LT F ι (σ.alloc (.vec sub)).2 σ.next (.vec false τ) (σ.next :: Rm.flatten) := by
+    refine .vec (cs := sub) (by simp [Store.alloc]) (by rw [← hsubd, hRml]; simp; omega) (fun k hk1 hk2 => ?_)
+      hRmn hbRm
+    have hk' : k < j.toNat - i.toNat := by rw [← hsubd] at hk1; simp at hk1; omega
+    have e1 : sub[k] = cs[i.toNat + k]'(by omega) := by subst hsubd; simp
+    rw [e1]
+    exact (hRmel k hk' hk2).frame (Agree.of' fun z hz => hold z (hRma z (mem_flatten_of hk2 hz)))
+  have hIb : Inv F ι (σ.alloc (.vec sub)).2 ((x, .ref .mut (.vec false τ)) :: hide Γ y) ((x, σ.next) :: env)
+      (Rm.flatten ++ Eh) (σ.next :: S) := by
+    have hfoot := Foot.cons (s := .ref .mut (.vec false τ)) (x := x) (a := σ.next) hLb
+      (hfh.frame <| Agree.of' fun z hz => hold z (hfh.alloc z (List.mem_append.mp hz)))
+    refine ⟨by simpa [addE, addS, exclPart, sharedPart, Slot.excl, Slot.shell, Ty.shell] using hfoot, hBn, ?_,
+      List.nodup_cons.mpr ⟨hxk, by rw [hide_keys]; exact hI.keys⟩⟩
+    intro z hz hz'
+    rcases List.mem_cons.mp hz with rfl | h
+    · exact hna _ (hI.alloc _ (hBE _ hz')) rfl
+    · exact hI.disj z h (hBE z hz')
+  have hkb : Γb.map Prod.fst = Γ.map Prod.fst := by
+    have := typed_keys hb
+    simp only [List.map_cons, List.cons.injEq] at this
+    rw [this.2]; exact hide_keys
+  have hPPa : ∀ z ∈ P ++ c :: Os, σ.mem z ≠ none := fun z hz =>
+    hLr.alloc z (hLrp.mem_iff.mpr (List.mem_append.mpr (.inl hz)))
+  have hPn : (P ++ c :: Os).Nodup := (nodup_append_disj.mp (hLrp.nodup_iff.mp hLr.nodup)).1
+  have hre : ∀ σ2 Eb', Agree (σ.alloc (.vec sub)).2 σ2 ((σ.next :: Pk) ++ S) → Disj (σ.next :: Pk) Eb' →
+      Inv F ι σ2 ((x, .ref .mut (.vec false τ)) :: Γb) ((x, σ.next) :: env) Eb' (σ.next :: S) →
+      ∃ E', Inv F ι σ2 (thaw Γ [y] Γb) env E' S ∧ ∀ z, z ∈ E' ↔ z ∈ Eb' ∨ (z ∈ σ.next :: Pk ∧ z ≠ σ.next) := by
+    intro σ2 Eb' hag hdX hI'
+    obtain ⟨L', Et, St, hL', hft, hEt, hSt⟩ := hI'.foot.uncons
+    -- The slice's cell holds the cells it was made of: it was only read.
+    have hb2 : σ2.mem σ.next = some (.vec sub) := by
+      rw [hag _ (List.mem_append.mpr (.inl (List.mem_cons_self ..)))]; simp [Store.alloc]
+    simp only [SlotOk] at hL'
+    cases hL' with
+    | vec hcm2 hlen2 hel2 hnd2 hn2 =>
+    rename_i cs2 Rn
+    rw [hb2] at hcm2
+    cases hcm2
+    simp only [addE, addS, exclPart, sharedPart, Slot.excl, Slot.shell, Ty.shell, ↓reduceIte, List.tail_cons,
+      List.take_succ_cons, List.take_zero, List.singleton_append, List.cons.injEq, true_and] at hEt hSt
+    subst hEt hSt
+    have hagσ : ∀ L, (∀ z ∈ L, σ.mem z ≠ none) → (∀ z ∈ L, z ∈ σ.next :: Pk ∨ z ∈ S) → Agree σ σ2 L :=
+      fun L hL hLX => (Agree.of' fun z hz => hold z (hL z hz)).trans (hag.mono fun z hz => by
+        rcases hLX z hz with h | h
+        · exact List.mem_append.mpr (.inl h)
+        · exact List.mem_append.mpr (.inr h))
+    have hagP : Agree σ σ2 (P ++ c :: Os) := hagσ _ hPPa (fun z hz => by
+      rw [hPP] at hz
+      rcases List.mem_append.mp hz with h | h
+      · exact .inr (hPhS z h)
+      · exact .inl (List.mem_cons_of_mem _ h))
+    have hRnl : Rn.length = j.toNat - i.toNat := by rw [hlen2, ← hsubd]; simp; omega
+    have hel3 : ∀ k (h : k < j.toNat - i.toNat) (h' : k < Rn.length),
+        LT F ι σ2 (cs[i.toNat + k]'(by omega)) τ Rn[k] := by
+      intro k h h'
+      have hk2 : k < sub.length := by rw [← hsubd]; simp; omega
+      have e1 : sub[k] = cs[i.toNat + k]'(by omega) := by subst hsubd; simp
+      rw [← e1]; exact hel2 k hk2 h'
+    have hdR : Disj (P ++ c :: Os) Rn.flatten := fun z hz h => by
+      rw [hPP] at hz
+      rcases List.mem_append.mp hz with hz | hz
+      · exact hI'.disj z (List.mem_cons_of_mem _ (hPhS z hz)) (List.mem_append.mpr (.inl h))
+      · exact hdX z (List.mem_cons_of_mem _ hz) (List.mem_append.mpr (.inl h))
+    obtain ⟨L'', hL'', hL''p⟩ := hjoin σ2 Rn hPn hagP hRnl hel3 hnd2 hdR
+    have hso'' := hslot σ2 _ hL''
+    have hsheq : sharedPart s L'' = sharedPart s Lr := SlotOk.shared_eq hso hso'' rfl hsx hsx
+    have hagS : Agree σ σ2 S := hagσ S hI.allocS (fun z hz => .inr hz)
+    obtain ⟨E', hf', hp'⟩ := hreb σ2 Γb Et L'' hft hwb hagS hso'' hsheq
+    have hexL : (exclPart s L'').Perm (Pk ++ Rn.flatten) := by
+      rw [hPP] at hL''p
+      cases hsh : s.shell
+      · have hPh0 : Ph = [] := by rw [← hPh]; simp [sharedPart_plain hsh, hsx]
+        subst hPh0
+        rw [exclPart_plain hsh, if_pos hsx]; simpa using hL''p
+      · obtain ⟨R1, rfl⟩ := hso''.head_of_shell hsh
+        have hPh1 : Ph = [a0] := by
+          rw [← hPh]; obtain ⟨R0, rfl⟩ := hso.head_of_shell hsh; simp [sharedPart, hsx, hsh]
+        subst hPh1
+        simp only [exclPart, hsx, hsh, ↓reduceIte, List.tail_cons]
+        simpa using hL''p
+    have hp'' : E'.Perm ((Rn.flatten ++ Et) ++ Pk) := hp'.trans (by
+      refine (hexL.append_right Et).trans ?_
+      exact List.perm_iff_count.mpr fun z => by simp only [List.count_append]; omega)
+    refine ⟨E', ⟨hf', hp''.nodup_iff.mpr (nodup_append_disj.mpr ⟨hI'.nodup, hPkn,
+        fun z h h' => hdX z (List.mem_cons_of_mem _ h') h⟩), ?_, by rw [thaw_keys hkb]; exact hI.keys⟩,
+      fun z => ?_⟩
+    · intro z hz hz'
+      rcases List.mem_append.mp (hp''.mem_iff.mp hz') with h | h
+      · exact hI'.disj z (List.mem_cons_of_mem _ hz) h
+      · exact hI.disj z hz (hPkE z h)
+    · rw [hp''.mem_iff, List.mem_append]
+      constructor
+      · rintro (h | h)
+        · exact .inl h
+        · exact .inr ⟨List.mem_cons_of_mem _ h, fun e => hna z (hI.alloc z (hPkE z h)) e⟩
+      · rintro (h | ⟨h, hne⟩)
+        · exact .inl h
+        · exact .inr ((List.mem_cons.mp h).resolve_left hne)
+  have hSin : ∀ z ∈ σ.next :: S, z ∈ (σ.next :: Pk) ∨ z ∈ S := fun z hz => by
+    rcases List.mem_cons.mp hz with rfl | h
+    · exact .inl (List.mem_cons_self ..)
+    · exact .inr h
+  have hPka : ∀ z ∈ Pk, σ.mem z ≠ none := fun z h => hI.alloc z (hPkE z h)
+  have hnd : (σ.next :: Pk).Nodup := List.nodup_cons.mpr ⟨fun h => hna _ (hPka _ h) rfl, hPkn⟩
+  have hd : Disj (σ.next :: Pk) (Rm.flatten ++ Eh) := fun z hz hz' => by
+    rcases List.mem_cons.mp hz with rfl | h
+    · exact hna _ (hI.alloc _ (hBE _ hz')) rfl
+    · exact hdBP z hz' h
+  have hwf1 : WF (σ.alloc (.vec sub)).2 := hwf.alloc
+  refine post_after (E₁ := (σ.next :: Pk) ++ (Rm.flatten ++ Eh))
+    ((Moves.allocate (v := .vec sub) hwf hI.alloc).relabel fun z => by
+      rw [hEp.mem_iff]; simp only [List.mem_append, List.mem_cons, List.not_mem_nil, or_false,
+        show (σ.alloc (Val.vec sub)).1 = σ.next from rfl]; grind) hwf ?_
+  exact ret_cloK (σf := (σ.alloc (.vec sub)).2) hSin (fun z hz => List.mem_cons_of_mem _ hz)
+    (List.mem_cons_self ..) hre hR.2 hwf1 Agree.self
+    (fun z hz => by
+      rcases List.mem_cons.mp hz with rfl | h
+      · simp [Store.alloc]
+      · rw [hold z (hPka z h)]; exact hPka z h)
+    hnd hd (fun z hz => by rw [hold z (hI.allocS z hz)]; exact hI.allocS z hz)
+    (fun z hz h => by
+      simp only [List.mem_append, List.mem_cons] at h
+      rcases h with (rfl | h) | h | h
+      · exact hna _ (hI.allocS _ hz) rfl
+      · exact hI.disj z hz (hPkE z h)
+      · exact hI.disj z hz (hRmE z h)
+      · exact hI.disj z hz (hEhE z h))
+    (hE _ _ _ _ _ _ _ _ _ _ _ hb hIb hwf1 hR)
+
+
+theorem lendSlice_any {m : Mode} (hE : EvalOk F O n) (hx : lookup x Γ = none) (hp : PlaceTy Γ p (.vec g τ) w y)
+    (hlo : PlaceTy Γ (.var lo) .int w1 y1) (hhi : PlaceTy Γ (.var hi) .int w2 y2) (hm : m = .mut → w = true)
+    (hb : Typed F O ((x, .ref m (.vec false τ)) :: lendCtx m Γ y) body τb ((x, .ref m (.vec false τ)) :: Γb) r)
+    (hI : Inv F ι σ Γ env E S) (hwf : WF σ) (hR : Ready O hs r) :
+    Post F ι O σ E S (thaw Γ [y] Γb) env τb r hs (eval F O (n + 1) hs σ env (.lendSlice x m p lo hi body)) := by
+  cases m with
+  | ro => exact lendSlice_ok hE hx hp hlo hhi hb hI hwf hR
+  | «mut» => obtain rfl := hm rfl; exact lendSliceMut_ok hE hx hp hlo hhi hb hI hwf hR
 
 end FlyCore.Ownership

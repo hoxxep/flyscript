@@ -36,19 +36,6 @@ theorem exclPart_of_noshell (he : s.excl = true) (hs : s.shell = false) : exclPa
 theorem sharedPart_of_ro (he : s.excl = false) : sharedPart s L = L := by
   simp [sharedPart, he]
 
-/-- A closure borrowed `mut` holds a closure. -/
-theorem SlotOk.shell_fn (h : SlotOk F ι σ s a L) (hL : LT F ι σ a τ L) (hs : s.shell = true)
-    (hh : ∀ t A B, s ≠ .half t A B) : τ.isFn = true := by
-  match s, hs, h with
-  | .half t A B, _, _ => exact absurd rfl (hh t A B)
-  | .ref .mut (.fn _ _ _ _), _, h =>
-    cases hτ : τ.isHole
-    · rw [(LT.det_fn h hL hτ).1]; rfl
-    · exfalso
-      cases τ <;> simp [Ty.isHole] at hτ
-      cases hL
-      cases h
-
 /-- A typed place: where it is, on a path into the tree of its root, and, if it may be changed, in
 the exclusive footprint — but for a closure borrowed `mut`, which is the place itself, its cell only
 read. -/
@@ -58,14 +45,14 @@ theorem place_ok : PlaceTy Γ p τ w r → Foot F ι σ Γ env E S →
       (w = true → s.shell = false → Sub Lr E) ∧
       lookup r Γ = some s ∧ SlotOk F ι σ s a Lr ∧ (w = true → s.excl = true) ∧
       (∀ σ' L', LT F ι σ' a τr L' → SlotOk F ι σ' s a L') ∧
-      (s.shell = true → (P = [] ∧ τ = τr) ∨ (τr.isFn = false ∧ ∃ P', P = a :: P')) ∧ τr = s.ty := by
+      (s.shell = true → (P = [] ∧ τ = τr) ∨ (τr.shell = false ∧ ∃ P', P = a :: P')) ∧ τr = s.ty := by
   intro hp hf
   induction hp with
   | own hx =>
     obtain ⟨a, L, ha, hL, hE, hS⟩ := foot_lookup hf hx
     exact ⟨a, _, L, [], a, _, ha, hL, .here, ha, ⟨hE, hS⟩,
-      fun _ _ => by simpa [exclPart, Slot.excl, Slot.shell] using hE, hx, hL, fun _ => rfl,
-      fun _ _ h => h, fun h => by simp [Slot.shell] at h, rfl⟩
+      fun _ _ => by simpa [exclPart, Slot.excl, Slot.shell, Ty.shell] using hE, hx, hL, fun _ => rfl,
+      fun _ _ h => h, fun h => by simp [Slot.shell, Ty.shell] at h, rfl⟩
   | @ref x m τ hx =>
     obtain ⟨a, L, ha, hL, hE, hS⟩ := foot_lookup hf hx
     refine ⟨a, τ, L, [], a, _, ha, hL, .here, ha, ⟨hE, hS⟩, ?_, hx, hL, ?_, fun _ _ h => h, fun _ => .inl ⟨rfl, rfl⟩, rfl⟩
@@ -79,7 +66,7 @@ theorem place_ok : PlaceTy Γ p τ w r → Foot F ι σ Γ env E S →
   | @half x t A B τ hx hτ =>
     subst hτ
     obtain ⟨a, L, ha, hL, hE, hS⟩ := foot_lookup hf hx
-    exact ⟨a, .lent1 t A B, L, [], a, _, ha, hL, .here, ha, ⟨hE, hS⟩, fun _ hsh => by simp [Slot.shell] at hsh, hx, hL,
+    exact ⟨a, .lent1 t A B, L, [], a, _, ha, hL, .here, ha, ⟨hE, hS⟩, fun _ hsh => by simp [Slot.shell, Ty.shell] at hsh, hx, hL,
       fun _ => rfl, fun _ _ h => h, fun _ => .inl ⟨rfl, rfl⟩, rfl⟩
   | deref hq ih =>
     obtain ⟨a, τr, Lr, P, l, s, ha, hLr, hpath, hres, hsub, hw, hs, hso, hex, hlt, hsh, hty⟩ := ih
@@ -420,10 +407,10 @@ theorem typed_keys : Typed F O Γ e τ Γ' r → Γ'.map Prod.fst = Γ.map Prod.
   | .vlen _ => rfl
   | .vpush ha _ => atom_keys ha
   | .vpop _ _ => rfl
-  | .lendSlice _ _ _ _ hb => by
+  | .lendSlice _ _ _ _ _ hb => by
     have := typed_keys hb
     simp only [List.map_cons, List.cons.injEq] at this
-    exact thaw_keys (this.2.trans freeze_keys)
+    exact thaw_keys (this.2.trans lendCtx_keys)
   | .call _ _ _ _ hargs _ _ => atoms_keys hargs
   | .lam _ _ _ _ _ ha _ => atom_keys ha
   | .lendClo _ _ _ _ _ _ _ _ hb => by
@@ -528,6 +515,7 @@ theorem split_field (t : Bool) (hL : LT F ι σ a (.pair A B) L) :
 theorem SlotOk.head_of_shell (h : SlotOk F ι σ s a L) (hs : s.shell = true) : ∃ R, L = a :: R := by
   match s, hs, h with
   | .ref .mut (.fn _ _ _ _), _, h => exact LT.cons h rfl
+  | .ref .mut (.vec false _), _, h => exact LT.cons h rfl
   | .half _ _ _, _, h => exact LT.cons h Ty.lent1_isHole
 
 /-- A variable that may change all but its first cell, changed: the rest of the activation stands,
@@ -582,7 +570,7 @@ theorem foot_update_sh : Foot F ι σ Γ env E S → (Γ.map Prod.fst).Nodup →
 activation stands, the variable the place is rooted at now owning the new tree. The place holds no
 closure or no place lent, or is rooted at a variable that may change all it holds. -/
 theorem replace_at (hI : Inv F ι σ Γ env E S) (hp : PlaceTy Γ p τ true r) (hc : τ.complete = true)
-    (hτ : τ.isFn = false ∨ ∀ k A B r', lookup r Γ ≠ some (.ref .mut (.fn k A B r'))) :
+    (hτ : τ.shell = false ∨ ∀ τ', lookup r Γ = some (.ref .mut τ') → τ'.shell = false) :
     ∃ l R P E₁ E₂, resolve σ env p = some l ∧ LT F ι σ l τ R ∧ E.Perm (E₁ ++ (P ++ R) ++ E₂) ∧
       ∀ σ' R', Agree σ σ' (E₁ ++ P ++ E₂ ++ S) → LT F ι σ' l τ R' → Disj R' (E₁ ++ P ++ E₂) →
         Disj R' S → ∃ E', Inv F ι σ' Γ env E' S ∧ E'.Perm (E₁ ++ (P ++ R') ++ E₂) := by
@@ -617,10 +605,11 @@ theorem replace_at (hI : Inv F ι σ Γ env E S) (hp : PlaceTy Γ p τ true r) (
           rw [hty] at hc
           match s, hshb, hs with
           | .half _ _ _, _, _ => simp [Slot.ty, Ty.lent1_complete] at hc
-          | .ref .mut (.fn _ _ _ _), _, hs =>
+          | .ref .mut τ', hsh, hs =>
+            have hsh' : τ'.shell = true := hsh
             rcases hτ with hfn | h
-            · rw [hty] at hfn; simp [Slot.ty, Ty.isFn] at hfn
-            · exact h _ _ _ _ hs
+            · rw [hty] at hfn; simp only [Slot.ty] at hfn; rw [hfn] at hsh'; cases hsh'
+            · rw [h _ hs] at hsh'; cases hsh'
         · exact ⟨P', hP'⟩
       obtain ⟨P', rfl⟩ := hpast
       obtain ⟨a', R0, E₁, E₂, ha', hso', hE, haS, hupd⟩ := foot_update_sh hI.foot hI.keys hs hshb
@@ -641,7 +630,7 @@ theorem replace_at (hI : Inv F ι σ Γ env E S) (hp : PlaceTy Γ p τ true r) (
         · exact hd x hx' (by simp [hx])
       obtain ⟨L'', hlt', hL''p, -⟩ := path_join hpath hPn hagP hR' hdP
       have hτr : τr.isHole = false := by rw [hty]; match s, hshb with
-        | .ref .mut (.fn _ _ _ _), _ => rfl
+        | .ref .mut τ', hsh => cases τ' <;> simp_all [Slot.shell, Ty.shell, Slot.ty, Ty.isHole]
         | .half _ _ _, _ => exact Ty.lent1_isHole
       obtain ⟨R'', rfl⟩ := hlt'.cons hτr
       have hfoot := hupd σ' R'' ((hag.mono fun x hx => by

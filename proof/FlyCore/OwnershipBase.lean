@@ -47,7 +47,7 @@ data, or, for a list of the region, its elements' cells, each a cell of the regi
 def RD (ι : List Nat) (σ : Store) : Ty → Val → Prop
   | .int, .int _ => True
   | .rref _ k τ, .rptr l => RefOk ι σ k τ l
-  | .vec τ, .vec ls => ∀ l ∈ ls, RefOk ι σ 0 τ l
+  | .vec _ τ, .vec ls => ∀ l ∈ ls, RefOk ι σ 0 τ l
   | _, _ => False
 
 /-- `a` holds a value of type `τ`, whose cells — `a` and every cell of its boxes — are `L`. -/
@@ -72,7 +72,7 @@ inductive LT (F : List Fn) (ι : List Nat) (σ : Store) : Nat → Ty → List Na
   /-- A vector: its cell holds its elements' cells, each holding a `τ`, their trees apart. -/
   | vec {cs : List Nat} {Rs : List (List Nat)} : σ.mem a = some (.vec cs) → Rs.length = cs.length →
       (∀ i (h : i < cs.length) (h' : i < Rs.length), LT F ι σ cs[i] τ Rs[i]) → Rs.flatten.Nodup →
-      a ∉ Rs.flatten → LT F ι σ a (.vec τ) (a :: Rs.flatten)
+      a ∉ Rs.flatten → LT F ι σ a (.vec g τ) (a :: Rs.flatten)
 
 /-- A value of type `τ`, and the cells it owns. -/
 inductive VT (F : List Fn) (ι : List Nat) (σ : Store) : Ty → Val → List Nat → Prop
@@ -84,7 +84,7 @@ inductive VT (F : List Fn) (ι : List Nat) (σ : Store) : Ty → Val → List Na
   | tag : LT F ι σ b (if t then A else B) R → A.complete → B.complete → VT F ι σ (.sum A B) (.tag A' B' t b) R
   | rref : RefOk ι σ k τ l → VT F ι σ (.rref c k τ) (.rptr l) []
   | vec {cs : List Nat} {Rs : List (List Nat)} : Rs.length = cs.length → (∀ i (h : i < cs.length) (h' : i < Rs.length), LT F ι σ cs[i] τ Rs[i]) →
-      Rs.flatten.Nodup → τ.complete → VT F ι σ (.vec τ) (.vec cs) Rs.flatten
+      Rs.flatten.Nodup → τ.complete → VT F ι σ (.vec g τ) (.vec cs) Rs.flatten
 
 def Disj (A B : List Nat) : Prop := ∀ x ∈ A, x ∉ B
 
@@ -1049,7 +1049,7 @@ def Slot.excl : Slot → Bool
   | .own _ _ => true
   | .ref .mut _ => true
   | .ref .ro _ => false
-  | .lent _ => false
+  | .lent _ _ => false
   | .half _ _ _ => true
 
 /-- The footprint a slot has: what an owned live variable or a borrow holds, owning the rest. A
@@ -1059,7 +1059,8 @@ def SlotOk (F : List Fn) (ι : List Nat) (σ : Store) : Slot → Nat → List Na
   | .own τ true, a, L => LT F ι σ a τ L
   | .own τ false, a, L => (σ.mem a = some .moved ∧ L = [a]) ∨ (LT F ι σ a τ L ∧ τ.isHole = false)
   | .ref _ τ, a, L => LT F ι σ a τ L
-  | .lent _, _, L => L = []
+  | .lent _ false, _, L => L = []
+  | .lent _ true, a, L => L = [a] ∧ σ.mem a ≠ none
   | .half t A B, a, L => LT F ι σ a (.lent1 t A B) L
 
 /-- The part of a slot's footprint that may be changed, and the part that is only read: a `mut`
@@ -1092,43 +1093,49 @@ theorem LT.not_moved : LT F ι σ a τ L → τ.isHole = false → σ.mem a ≠ 
 
 theorem SlotOk.alloc : SlotOk F ι σ s a L → ∀ l ∈ L, σ.mem l ≠ none := by
   intro h
-  rcases s with ⟨τ, live⟩ | ⟨m, τ⟩ | τ | ⟨t, A, B⟩
+  rcases s with ⟨τ, live⟩ | ⟨m, τ⟩ | ⟨τ, hd⟩ | ⟨t, A, B⟩
   · cases live
     · rcases h with ⟨ha, rfl⟩ | ⟨h, -⟩
       · intro l hl; simp at hl; subst hl; simp [ha]
       · exact LT.alloc h
     · exact LT.alloc h
   · exact LT.alloc h
-  · simp only [SlotOk] at h; subst h; simp
+  · cases hd
+    · simp only [SlotOk] at h; subst h; simp
+    · obtain ⟨rfl, ha⟩ := h; simpa using ha
   · exact LT.alloc h
 
 theorem SlotOk.frame : SlotOk F ι σ s a L → Agree σ σ' L → SlotOk F ι σ' s a L := by
   intro h hag
-  rcases s with ⟨τ, live⟩ | ⟨m, τ⟩ | τ | ⟨t, A, B⟩
+  rcases s with ⟨τ, live⟩ | ⟨m, τ⟩ | ⟨τ, hd⟩ | ⟨t, A, B⟩
   · cases live
     · rcases h with ⟨ha, rfl⟩ | h
       · exact .inl ⟨by rw [hag _ (by simp)]; exact ha, rfl⟩
       · exact .inr ⟨LT.frame h.1 hag, h.2⟩
     · exact LT.frame h hag
   · exact LT.frame h hag
-  · exact h
+  · cases hd
+    · exact h
+    · exact ⟨h.1, by rw [hag a (by simp [h.1])]; exact h.2⟩
   · exact LT.frame h hag
 
 theorem SlotOk.nodup : SlotOk F ι σ s a L → L.Nodup := by
   intro h
-  rcases s with ⟨τ, live⟩ | ⟨m, τ⟩ | τ | ⟨t, A, B⟩
+  rcases s with ⟨τ, live⟩ | ⟨m, τ⟩ | ⟨τ, hd⟩ | ⟨t, A, B⟩
   · cases live
     · rcases h with ⟨_, rfl⟩ | ⟨h, -⟩
       · simp
       · exact LT.nodup h
     · exact LT.nodup h
   · exact LT.nodup h
-  · simp only [SlotOk] at h; subst h; simp
+  · cases hd
+    · simp only [SlotOk] at h; subst h; simp
+    · rw [h.1]; simp
   · exact LT.nodup h
 
 theorem SlotOk.det : SlotOk F ι σ s a L → SlotOk F ι σ s a L' → L = L' := by
   intro h h'
-  rcases s with ⟨τ, live⟩ | ⟨m, τ⟩ | τ | ⟨t, A, B⟩
+  rcases s with ⟨τ, live⟩ | ⟨m, τ⟩ | ⟨τ, hd⟩ | ⟨t, A, B⟩
   · cases live
     · rcases h with ⟨ha, rfl⟩ | ⟨h, hh⟩ <;> rcases h' with ⟨ha', rfl⟩ | ⟨h', hh'⟩
       · rfl
@@ -1137,7 +1144,9 @@ theorem SlotOk.det : SlotOk F ι σ s a L → SlotOk F ι σ s a L' → L = L' :
       · exact LT.det h h'
     · exact LT.det h h'
   · exact LT.det h h'
-  · simp only [SlotOk] at h h'; rw [h, h']
+  · cases hd
+    · simp only [SlotOk] at h h'; rw [h, h']
+    · rw [h.1, h'.1]
   · exact LT.det h h'
 
 theorem mem_addE : l ∈ addE s L E ↔ l ∈ exclPart s L ∨ l ∈ E := by
@@ -1189,16 +1198,20 @@ theorem exclPart_plain (hs : s.shell = false) : exclPart s L = if s.excl then L 
 theorem sharedPart_plain (hs : s.shell = false) : sharedPart s L = if s.excl then [] else L := by
   simp [sharedPart, hs]
 
-theorem Slot.shell_ref : (Slot.ref m τ).shell = (m == .mut && τ.isFn) := by
+theorem Slot.shell_ref : (Slot.ref m τ).shell = (m == .mut && τ.shell) := by
   cases m <;> cases τ <;> rfl
+
+theorem Ty.shell_nonhole {τ : Ty} (h : τ.shell = true) : τ.isHole = false := by
+  cases τ <;> simp_all [Ty.shell, Ty.isHole]
 
 theorem Slot.shell_own : (Slot.own τ l).shell = false := rfl
 
-theorem Slot.shell_lent : (Slot.lent τ).shell = false := rfl
+theorem Slot.shell_lent : (Slot.lent τ h).shell = false := rfl
 
 theorem Slot.shell_excl {s : Slot} : s.shell = true → s.excl = true := by
   intro h; match s, h with
   | .ref .mut (.fn _ _ _ _), _ => rfl
+  | .ref .mut (.vec false _), _ => rfl
   | .half _ _ _, _ => rfl
 
 /-- A footprint without duplicates splits into disjoint parts. -/

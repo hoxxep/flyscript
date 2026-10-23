@@ -17,7 +17,7 @@ lent `readonly`, `H` of those lent `mut`. -/
 inductive CapsOk (F : List Fn) (ι : List Nat) (σ : Store) : List (Cap Nat) → List Nat → List Nat → Prop
   | nil : CapsOk F ι σ [] [] []
   | ro : LT F ι σ a τ L → CapsOk F ι σ rest R H → CapsOk F ι σ (⟨x, .ro, τ, a⟩ :: rest) (L ++ R) H
-  | mut : LT F ι σ a τ L → τ.isFn = false → CapsOk F ι σ rest R H → CapsOk F ι σ (⟨x, .mut, τ, a⟩ :: rest) R (L ++ H)
+  | mut : LT F ι σ a τ L → τ.shell = false → CapsOk F ι σ rest R H → CapsOk F ι σ (⟨x, .mut, τ, a⟩ :: rest) R (L ++ H)
 
 /-! ## Variables perhaps moved -/
 
@@ -179,7 +179,7 @@ theorem Ty.shiftBy_inj : ∀ {A B : Ty}, A.shiftBy n = B.shiftBy n → A = B
   | .hole A, B, h => by cases B <;> simp_all [Ty.shiftBy]; exact Ty.shiftBy_inj h
   | .rref c k A, B, h => by cases B <;> simp_all [Ty.shiftBy]
   | .arena k, B, h => by cases B <;> simp_all [Ty.shiftBy]
-  | .vec A, B, h => by cases B <;> simp_all [Ty.shiftBy]; exact Ty.shiftBy_inj h
+  | .vec _ A, B, h => by cases B <;> simp_all [Ty.shiftBy]; exact Ty.shiftBy_inj h.2
 
 theorem Slot.shiftBy_inj {s s' : Slot} (h : s.shiftBy n = s'.shiftBy n) : s = s' := by
   cases s <;> cases s' <;> simp only [Slot.shiftBy, Slot.own.injEq, Slot.ref.injEq, Slot.lent.injEq,
@@ -254,11 +254,11 @@ theorem typed_weaker : Typed F O Γ e τ Γ' r → (Γ.map Prod.fst).Nodup → W
   | .vlen _, _ => Weaker.refl _
   | .vpush ha _, hk => atom_weaker ha hk
   | .vpop _ _, _ => Weaker.refl _
-  | .lendSlice hx _ _ _ hb, hk => by
-    have := typed_weaker hb (List.nodup_cons.mpr ⟨by rw [freeze_keys]; exact lookup_none_keys hx,
-      by rw [freeze_keys]; exact hk⟩)
+  | .lendSlice hx _ _ _ _ hb, hk => by
+    have := typed_weaker hb (List.nodup_cons.mpr ⟨by rw [lendCtx_keys]; exact lookup_none_keys hx,
+      by rw [lendCtx_keys]; exact hk⟩)
     cases this with
-    | cons _ w => exact thaw_weaker w
+    | cons _ w => exact thaw_weaker_lend w
   | .call _ _ _ _ hargs _ _, hk => atoms_weaker hargs hk
   | .lam _ _ _ _ _ ha _, hk => atom_weaker ha hk
   | .lendClo _ _ _ _ _ _ _ hx hb, hk => by
@@ -609,7 +609,7 @@ theorem allocAll_ok : ∀ {σ : Store} {names : List Var} {τs vs Ls}, Vals F ι
           exact ⟨by omega, fun h' => by have := hlow l (List.mem_append.mpr (.inl h')); omega⟩
       refine ⟨(σ.next :: L) ++ Eo, ?_, ?_, ?_, by rw [hn1] at hle; omega, hwf2, ?_, ?_, by simp [hlen]⟩
       · have := Foot.cons (x := x) (s := .own τ true) hLt hf
-        simpa [ownCtx, addE, addS, Slot.excl, exclPart, sharedPart, Slot.shell, Bool.false_eq_true] using this
+        simpa [ownCtx, addE, addS, Slot.excl, exclPart, sharedPart, Slot.shell, Ty.shell, Bool.false_eq_true] using this
       · refine nodup_append_disj.mpr ⟨List.nodup_cons.mpr ⟨hcL, hnL⟩, hnd, ?_⟩
         intro l hl hl'
         rcases List.mem_cons.mp hl with rfl | hl
@@ -644,7 +644,7 @@ theorem allocAll_ok : ∀ {σ : Store} {names : List Var} {τs vs Ls}, Vals F ι
 def Slot.shape : Slot → Slot
   | .own τ _ => .own τ true
   | .ref m τ => .ref m τ
-  | .lent τ => .lent τ
+  | .lent τ h => .lent τ h
   | .half t A B => .half t A B
 
 def shape (Γ : Ctx) : Ctx := Γ.map fun p => (p.1, p.2.shape)
@@ -713,7 +713,7 @@ theorem dropCells_ok : ∀ {Γo : Ctx} {σ : Store} {eo : Env} {Eo So} {owns : L
     | own τ live =>
     simp only [Slot.shape, Slot.own.injEq] at hrs
     obtain ⟨rfl, -⟩ := hrs
-    simp only [addE, addS, Slot.excl, ↓reduceIte, exclPart, sharedPart, Slot.shell, Bool.false_eq_true] at hn ⊢
+    simp only [addE, addS, Slot.excl, ↓reduceIte, exclPart, sharedPart, Slot.shell, Ty.shell, Bool.false_eq_true] at hn ⊢
     obtain ⟨hnM, hnE, hdME⟩ := nodup_append_disj.mp hn
     have hc' : ∀ o ∈ owns, o.2.complete = true := fun o ho => hc o (List.mem_cons_of_mem _ ho)
     obtain ⟨σ1, hd1, hn1, hfree1, hkeep1⟩ := dropCell_own hwf (hc _ (List.mem_cons_self ..)) hr
@@ -786,7 +786,7 @@ theorem HoleOk.excl_sub (hok : HoleOk F ι σ Γ env h) (hm : h.mode = .mut) :
   · have hnh : τr.isHole = false := by
       rw [hty']
       match s, hss with
-      | .ref .mut (.fn _ _ _ _), _ => rfl
+      | .ref .mut _, h => exact Ty.shell_nonhole h
       | .half _ _ _, _ => exact Ty.lent1_isHole
     obtain ⟨R0, hR0⟩ := hLT.cons hnh
     rcases hsh hss with ⟨hp, hty⟩ | ⟨P, hp⟩
@@ -795,16 +795,17 @@ theorem HoleOk.excl_sub (hok : HoleOk F ι σ Γ env h) (hm : h.mode = .mut) :
       match s, hss, hso with
       | .half _ _ _, _, _ =>
         rw [hty, hty'] at hcomp; simp [Slot.ty, Ty.lent1_whole] at hcomp
-      | .ref .mut (.fn k A B r), _, hso =>
-        have := hso.ref_ty hLT
+      | .ref .mut τ', hsh, hso =>
+        have hsh' : τ'.shell = true := hsh
+        have : τ' = τr := hty'.symm
         simp only [Hole.slot, hm, hty, ← this] at hl
-        obtain ⟨R1, hR1⟩ := hold.cons (by rw [hty, ← this]; rfl)
+        obtain ⟨R1, hR1⟩ := hold.cons (by rw [hty, ← this]; exact Ty.shell_nonhole hsh')
         rw [hR0] at hperm ⊢
         rw [hR1] at hperm hl
         have hla : h.loc = a := by rw [hp] at hpath; cases hpath; rfl
         subst hla
         have := (List.Perm.cons_inv hperm)
-        simp only [exclPart, Slot.excl, Slot.shell, ↓reduceIte, List.tail_cons] at hl ⊢
+        simp only [exclPart, Slot.excl, Slot.shell, hsh', ↓reduceIte, List.tail_cons] at hl ⊢
         exact this.mem_iff.mpr hl
     · -- Past the root's first cell, which is only read.
       rw [hp] at hperm
@@ -925,7 +926,7 @@ theorem Apart.symm : Apart h h' → Apart h' h := fun h e => (h e.symm).imp (fun
 theorem lends_holes : Lends Γ lent ts ys → Foot F ι σ Γ env E S → LentApart lent →
     ∃ hs : List Hole, hs.map (fun h => (h.mode, h.ty)) = ts ∧ hs.map (fun h => (h.mode, h.root)) = ys ∧
       lent.mapM (fun x => resolve σ env x.2) = some (hs.map Hole.loc) ∧ (∀ h ∈ hs, HoleOk F ι σ Γ env h) ∧
-      (∀ h ∈ hs, ∀ s, lookup h.root Γ = some s → s.shell = true → s.ty.isFn = true → h.path = []) ∧
+      (∀ h ∈ hs, ∀ s, lookup h.root Γ = some s → s.shell = true → s.ty.shell = true → h.path = []) ∧
       hs.Pairwise Apart ∧ ∀ h ∈ hs, ∃ p w, (h.mode, p) ∈ lent ∧ PlaceTy Γ p h.ty w h.root ∧ resolve σ env p = some h.loc := by
   intro hl hf
   induction hl with
@@ -971,7 +972,7 @@ theorem lends_holes : Lends Γ lent ts ys → Foot F ι σ Γ env E S → LentAp
 theorem lends_ok (hl : Lends Γ lent ts ys) (hf : Foot F ι σ Γ env E S) (hap : LentApart lent) :
     ∃ hs : List Hole, hs.map (fun h => (h.mode, h.ty)) = ts ∧ hs.map (fun h => (h.mode, h.root)) = ys ∧
       lent.mapM (fun x => resolve σ env x.2) = some (hs.map Hole.loc) ∧ (∀ h ∈ hs, HoleOk F ι σ Γ env h) ∧
-      (∀ h ∈ hs, ∀ s, lookup h.root Γ = some s → s.shell = true → s.ty.isFn = true → h.path = []) ∧
+      (∀ h ∈ hs, ∀ s, lookup h.root Γ = some s → s.shell = true → s.ty.shell = true → h.path = []) ∧
       hs.Pairwise Apart :=
   let ⟨hs, h1, h2, h3, h4, h5, h6, _⟩ := lends_holes hl hf hap
   ⟨hs, h1, h2, h3, h4, h5, h6⟩
@@ -1056,8 +1057,8 @@ theorem HoleOk.shell_root (hok : HoleOk F ι σ Γ env h) (he : Entry F ι σ Γ
     match s, hs, hso with
     | .half _ _ _, _, _ =>
       rw [hty, hty'] at hcomp; simp [Slot.ty, Ty.lent1_whole] at hcomp
-    | .ref .mut (.fn k A B r), _, hso =>
-      have := hso.ref_ty hLT
+    | .ref .mut τ', _, hso =>
+      have : τ' = τr := hty'.symm
       simp only [Hole.slot, hm, hty, ← this]
   · exact .inr hp
 
@@ -1139,7 +1140,7 @@ theorem Hole.lower_parts (h : Hole) :
     exclPart (h.lower k).slot L = exclPart h.slot L ∧ sharedPart (h.lower k).slot L = sharedPart h.slot L := by
   obtain ⟨m, τ, _, _, _, _, _⟩ := h
   simp only [Hole.lower, Hole.slot, exclPart, sharedPart]
-  cases m <;> cases τ <;> exact ⟨rfl, rfl⟩
+  cases m <;> cases τ <;> first | exact ⟨rfl, rfl⟩ | (rename_i g _; cases g <;> exact ⟨rfl, rfl⟩)
 
 theorem olds_lower : mutCells (olds (hs.map (Hole.lower k))) = mutCells (olds hs) ∧
     roCells (olds (hs.map (Hole.lower k))) = roCells (olds hs) := by
@@ -1531,7 +1532,7 @@ theorem caller_rebuild (hI : Inv F ι σ Γ env E S) (hholes : ∀ h ∈ hs, Hol
         · cases hsh : s.shell
           · simp [sharedPart_plain hsh, hex hm]
           · have hnh : τr.isHole = false := match s, hsh, he.2.2 with
-              | .ref .mut (.fn _ _ _ _), _, hso => hLT.nonhole_of hso rfl
+              | .ref .mut _, h, hso => hLT.nonhole_of hso (Ty.shell_nonhole h)
               | .half _ _ _, _, hso => hLT.nonhole_of hso Ty.lent1_isHole
             obtain ⟨R1, hR1⟩ := hL'.cons hnh
             obtain ⟨R0, hR0⟩ := hLT.cons hnh
@@ -1616,7 +1617,7 @@ theorem perm_assoc {A B L : List Nat} : (L ++ (A ++ B)).Perm (L ++ A ++ B) :=
   List.Perm.of_eq (List.append_assoc _ _ _).symm
 
 theorem SlotOk.ro {s : Slot} (h : SlotOk F ι σ s a L) (hs : ∀ τ, s ≠ .own τ false) : SlotOk F ι σ s.ro a L := by
-  rcases s with ⟨τ, live⟩ | ⟨m, τ⟩ | τ | ⟨t, A, B⟩
+  rcases s with ⟨τ, live⟩ | ⟨m, τ⟩ | ⟨τ, hd⟩ | ⟨t, A, B⟩
   · cases live
     · exact absurd rfl (hs τ)
     · exact h
@@ -1625,7 +1626,7 @@ theorem SlotOk.ro {s : Slot} (h : SlotOk F ι σ s a L) (hs : ∀ τ, s ≠ .own
   · exact h
 
 theorem SlotOk.unro {s : Slot} (h : SlotOk F ι σ s.ro a L) (hs : ∀ τ, s ≠ .own τ false) : SlotOk F ι σ s a L := by
-  rcases s with ⟨τ, live⟩ | ⟨m, τ⟩ | τ | ⟨t, A, B⟩
+  rcases s with ⟨τ, live⟩ | ⟨m, τ⟩ | ⟨τ, hd⟩ | ⟨t, A, B⟩
   · cases live
     · exact absurd rfl (hs τ)
     · exact h
@@ -1634,11 +1635,11 @@ theorem SlotOk.unro {s : Slot} (h : SlotOk F ι σ s.ro a L) (hs : ∀ τ, s ≠
   · exact h
 
 theorem Slot.ro_excl {s : Slot} : s.ro.excl = false := by
-  rcases s with ⟨τ, live⟩ | ⟨m, τ⟩ | τ | ⟨t, A, B⟩ <;> rfl
+  rcases s with ⟨τ, live⟩ | ⟨m, τ⟩ | ⟨τ, hd⟩ | ⟨t, A, B⟩ <;> rfl
 
 /-- A slot not changeable is its own `ro`. -/
 theorem Slot.ro_of_excl {s : Slot} (h : s.excl = false) : s.ro = s := by
-  rcases s with ⟨τ, live⟩ | ⟨m, τ⟩ | τ | ⟨t, A, B⟩
+  rcases s with ⟨τ, live⟩ | ⟨m, τ⟩ | ⟨τ, hd⟩ | ⟨t, A, B⟩
   · simp [Slot.excl] at h
   · cases m
     · rfl
@@ -1648,7 +1649,7 @@ theorem Slot.ro_of_excl {s : Slot} (h : s.excl = false) : s.ro = s := by
 
 /-- Only read, a slot is weakened by nothing. -/
 theorem Slot.Le.of_ro {s s' : Slot} (h : Slot.Le s' s.ro) : s' = s.ro := by
-  rcases s with ⟨τ, live⟩ | ⟨m, τ⟩ | τ | ⟨t, A, B⟩ <;> (simp only [Slot.ro] at h ⊢; cases h; rfl)
+  rcases s with ⟨τ, live⟩ | ⟨m, τ⟩ | ⟨τ, hd⟩ | ⟨t, A, B⟩ <;> (simp only [Slot.ro] at h ⊢; cases h; rfl)
 
 /-- The variables `ys` only read, as a `handle`'s body has them: what they owned, `Fz`, is shared
 while the body runs, and given back once it ends, as it was, if nothing changed it or what the
@@ -1948,7 +1949,7 @@ theorem caps_ok (hc : Caps Γ caps ys) (hf : Foot F ι σ Γ env E S) :
       cases h : s.shell
       · rfl
       · match s, h, hso with
-        | .ref .mut (.fn _ _ _ _), _, hso => rw [← (hso.ref_ty hR)] at hfn; cases hfn
+        | .ref .mut τ', h, hso => rw [hty] at hfn; simp only [Slot.ty] at hfn; simp [Slot.shell, hfn] at h
         | .half _ _ _, _, _ => simp [hty, Slot.ty, Ty.lent1_complete] at hτc
     refine ⟨a :: ls, Rc, _ ++ Hc, by simp [List.mapM_cons, resolve, ha, hmap], by simp [hlen], .mut hR hfn hcok, ?_,
       by rw [roots_cons_mut]; exact .cons ⟨hs, ha, hso⟩ (hexw rfl) hsh htr, ?_⟩
@@ -2032,7 +2033,7 @@ theorem Foot.hidden (h : Foot F ι σ Γ env E S) (hk : (Γ.map Prod.fst).Nodup)
     rcases (entry_cons hx).mp he with ⟨rfl, rfl, rfl, hL⟩ | ⟨hne, he'⟩
     · -- The variable lent is this one.
       obtain rfl := hL.det hs
-      have hhide : hide ((y, s) :: Γ) y = (y, .lent s.ty) :: Γ := by
+      have hhide : hide ((y, s) :: Γ) y = (y, .lent s.ty s.shell) :: Γ := by
         simp only [hide, List.map_cons, ↓reduceIte, List.cons.injEq, true_and]
         exact hide_absent hx
       have hS : ∀ {L S}, addS s L S = S := by simp [addS, sharedPart_plain hsh, hex]
@@ -2040,13 +2041,13 @@ theorem Foot.hidden (h : Foot F ι σ Γ env E S) (hk : (Γ.map Prod.fst).Nodup)
       rw [hS, hE]
       refine ⟨E, ?_, .refl _, ?_⟩
       · rw [hhide]
-        simpa [addE, addS, Slot.excl, exclPart, sharedPart, Slot.shell, Bool.false_eq_true] using Foot.cons (s := .lent s.ty) (x := y) (L := []) (a := a) rfl hrest
+        simpa [addE, addS, Slot.excl, exclPart, sharedPart, Slot.shell, Ty.shell, Bool.false_eq_true] using Foot.cons (s := .lent s.ty s.shell) (x := y) (L := []) (a := a) (by simp [SlotOk, hsh]) hrest
       · intro σ' Γb Eb' Ly' hb hw hag hs'
         rw [hhide] at hw
         obtain ⟨s', Γb', rfl, hle, hw'⟩ := Weaker.cons_inv hw
         cases hle
         obtain ⟨L', Et, St, hL', hft, rfl, hSt⟩ := hb.uncons
-        simp only [SlotOk] at hL'
+        simp only [SlotOk, hsh] at hL'
         subst hL'
         simp only [addS, Slot.excl, Bool.false_eq_true, ↓reduceIte, List.nil_append, sharedPart] at hSt
         subst hSt
@@ -2344,7 +2345,7 @@ theorem CapsOk.foot : CapsOk F ι σ caps R H → Foot F ι σ (capCtx (caps.map
       sharedPart_plain (s := .ref .mut τ) (by simp [Slot.shell_ref, hfn])] using this
 
 /-- The places an arm was lent `mut` are no closures. -/
-def CapsFns (caps : List (Cap Nat)) : Prop := ∀ c ∈ caps, c.mode = .mut → c.ty.isFn = false
+def CapsFns (caps : List (Cap Nat)) : Prop := ∀ c ∈ caps, c.mode = .mut → c.ty.shell = false
 
 theorem CapsOk.fns : CapsOk F ι σ caps R H → CapsFns caps
   | .nil => fun _ h => by simp at h
@@ -2369,7 +2370,7 @@ theorem Foot.capsOk : ∀ {caps : List (Cap Nat)} {E S}, CapsFns caps →
       cases m with
       | ro => simpa [addE, addS, Slot.excl, exclPart, sharedPart] using CapsOk.ro (x := x) hs (Foot.capsOk hfn' hrest)
       | «mut» =>
-        have hf : τ.isFn = false := hfn _ (List.mem_cons_self ..) rfl
+        have hf : τ.shell = false := hfn _ (List.mem_cons_self ..) rfl
         simpa [addE, addS, Slot.excl, exclPart_plain (s := .ref .mut τ) (by simp [Slot.shell_ref, hf]),
           sharedPart_plain (s := .ref .mut τ) (by simp [Slot.shell_ref, hf])] using CapsOk.mut (x := x) hs hf (Foot.capsOk hfn' hrest)
 

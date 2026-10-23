@@ -66,8 +66,9 @@ inductive Ty where
   | rref (c : Bool) (k : Nat) (τ : Ty)
   /-- The arena of the region `k` regions out from here. -/
   | arena (k : Nat)
-  /-- A vector of `τ`s, each in a cell of its own, which grows as it is pushed to. -/
-  | vec (τ : Ty)
+  /-- A vector of `τ`s, each in a cell of its own: a `Vec`, which grows as it is pushed to, or, not
+  `g`, a slice `τ[]`, a run of some vector's elements, which does not. -/
+  | vec (g : Bool) (τ : Ty)
   deriving DecidableEq, Repr
 
 /-- Plain data: integers and boxes of them, which a closure may capture. -/
@@ -80,7 +81,7 @@ def Ty.data : Ty → Bool
   | .hole _ => false
   | .rref _ _ _ => false
   | .arena _ => false
-  | .vec _ => false
+  | .vec _ _ => false
 
 /-- A pair whose first field, or whose second, is lent. -/
 def Ty.lent1 (t : Bool) (A B : Ty) : Ty := if t then .pair (.hole A) B else .pair A (.hole B)
@@ -95,7 +96,7 @@ def Ty.complete : Ty → Bool
   | .hole _ => false
   | .rref _ _ _ => true
   | .arena _ => false
-  | .vec τ => τ.complete
+  | .vec _ τ => τ.complete
 
 /-- What a borrow may be of: a value with no place lent out of it, or a region's arena. -/
 def Ty.whole : Ty → Bool
@@ -123,7 +124,7 @@ theorem Ty.data_complete : ∀ {τ : Ty}, τ.data = true → τ.complete = true
   | .hole _, h => by simp [Ty.data] at h
   | .rref _ _ _, h => by simp [Ty.data] at h
   | .arena _, h => by simp [Ty.data] at h
-  | .vec _, h => by simp [Ty.data] at h
+  | .vec _ _, h => by simp [Ty.data] at h
 
 theorem Ty.complete_ite {t : Bool} {A B : Ty} (hA : A.complete = true) (hB : B.complete = true) :
     (if t then A else B).complete = true := by
@@ -145,8 +146,12 @@ theorem Ty.lent1_whole : (Ty.lent1 t A B).whole = false := by
 theorem Ty.lent1_isHole : (Ty.lent1 t A B).isHole = false := by
   cases t <;> rfl
 
-def Ty.isFn : Ty → Bool
+/-- A type whose `mut` borrow is a shell, which may change what it holds but not its own first cell:
+a closure, which may be called, changing what it captured, but not replaced; or a slice, whose
+elements may be changed but not which run of them it is. -/
+def Ty.shell : Ty → Bool
   | .fn _ _ _ _ => true
+  | .vec false _ => true
   | _ => false
 
 /-- A type no region is part of, which says the same of a value wherever it is. -/
@@ -159,7 +164,7 @@ def Ty.rfree : Ty → Bool
   | .hole τ => τ.rfree
   | .rref _ _ _ => false
   | .arena _ => false
-  | .vec τ => τ.rfree
+  | .vec _ τ => τ.rfree
 
 theorem Ty.data_rfree : ∀ {τ : Ty}, τ.data = true → τ.rfree = true
   | .int, _ => rfl
@@ -174,13 +179,13 @@ theorem Ty.data_rfree : ∀ {τ : Ty}, τ.data = true → τ.rfree = true
   | .hole _, h => by simp [Ty.data] at h
   | .rref _ _ _, h => by simp [Ty.data] at h
   | .arena _, h => by simp [Ty.data] at h
-  | .vec _, h => by simp [Ty.data] at h
+  | .vec _ _, h => by simp [Ty.data] at h
 
 /-- Data a region may hold: integers, and references into it or the regions around it, to data or to
 a list of data. -/
 def Ty.rdata : Ty → Bool
   | .int => true
-  | .rref _ _ (.vec τ) => τ.rdata
+  | .rref _ _ (.vec _ τ) => τ.rdata
   | .rref _ _ τ => τ.rdata
   | _ => false
 
@@ -194,7 +199,7 @@ def Ty.shiftBy (n : Nat) : Ty → Ty
   | .hole τ => .hole (τ.shiftBy n)
   | .rref c k τ => .rref c (k + n) τ
   | .arena k => .arena (k + n)
-  | .vec τ => .vec (τ.shiftBy n)
+  | .vec g τ => .vec g (τ.shiftBy n)
 
 /-- A type said of a place `n` regions further out: what `shiftBy n` undoes. -/
 def Ty.lowerBy (n : Nat) : Ty → Ty
@@ -206,7 +211,7 @@ def Ty.lowerBy (n : Nat) : Ty → Ty
   | .hole τ => .hole (τ.lowerBy n)
   | .rref c k τ => .rref c (k - n) τ
   | .arena k => .arena (k - n)
-  | .vec τ => .vec (τ.lowerBy n)
+  | .vec g τ => .vec g (τ.lowerBy n)
 
 @[simp] theorem Ty.lowerBy_shiftBy : ∀ {τ : Ty}, (τ.shiftBy n).lowerBy n = τ
   | .int => rfl
@@ -217,7 +222,7 @@ def Ty.lowerBy (n : Nat) : Ty → Ty
   | .hole τ => by simp [Ty.shiftBy, Ty.lowerBy, Ty.lowerBy_shiftBy (τ := τ)]
   | .rref _ _ _ => by simp [Ty.shiftBy, Ty.lowerBy]
   | .arena _ => by simp [Ty.shiftBy, Ty.lowerBy]
-  | .vec τ => by simp [Ty.shiftBy, Ty.lowerBy, Ty.lowerBy_shiftBy (τ := τ)]
+  | .vec _ τ => by simp [Ty.shiftBy, Ty.lowerBy, Ty.lowerBy_shiftBy (τ := τ)]
 
 @[simp] theorem Ty.shiftBy_zero : ∀ {τ : Ty}, τ.shiftBy 0 = τ
   | .int => rfl
@@ -228,7 +233,7 @@ def Ty.lowerBy (n : Nat) : Ty → Ty
   | .hole τ => by simp [Ty.shiftBy, Ty.shiftBy_zero (τ := τ)]
   | .rref _ _ _ => rfl
   | .arena _ => rfl
-  | .vec τ => by simp [Ty.shiftBy, Ty.shiftBy_zero (τ := τ)]
+  | .vec _ τ => by simp [Ty.shiftBy, Ty.shiftBy_zero (τ := τ)]
 
 @[simp] theorem Ty.lowerBy_zero : ∀ {τ : Ty}, τ.lowerBy 0 = τ
   | .int => rfl
@@ -239,13 +244,14 @@ def Ty.lowerBy (n : Nat) : Ty → Ty
   | .hole τ => by simp [Ty.lowerBy, Ty.lowerBy_zero (τ := τ)]
   | .rref _ _ _ => rfl
   | .arena _ => rfl
-  | .vec τ => by simp [Ty.lowerBy, Ty.lowerBy_zero (τ := τ)]
+  | .vec _ τ => by simp [Ty.lowerBy, Ty.lowerBy_zero (τ := τ)]
 
-theorem Ty.isFn_lowerBy {τ : Ty} : (τ.lowerBy n).isFn = τ.isFn := by
-  cases τ <;> rfl
+theorem Ty.shell_lowerBy {τ : Ty} : (τ.lowerBy n).shell = τ.shell := by
+  cases τ <;> try rfl
+  rename_i g τ; cases g <;> rfl
 
-theorem Ty.data_not_fn {τ : Ty} (h : τ.data = true) : τ.isFn = false := by
-  cases τ <;> simp_all [Ty.data, Ty.isFn]
+theorem Ty.data_not_fn {τ : Ty} (h : τ.data = true) : τ.shell = false := by
+  cases τ <;> simp_all [Ty.data, Ty.shell]
 
 /-- What a `handle` lends its arm: the name the arm knows it by, the mode it is lent in, its type,
 and where it is — a place in the program, a location once the `handle` runs. -/
@@ -384,9 +390,9 @@ inductive Expr where
   /-- `p.pop()`: the last element of the vector at `p`, moved out, as `#Some`, or `#None` if it is
   empty. -/
   | vpop (p : Place)
-  /-- `{ const x = p[lo..hi]; body }`, `x` a `readonly` slice of the vector at `p`, its elements from
-  `lo` up to `hi`, for as long as `body` runs; a panic if they are not there. -/
-  | lendSlice (x : Var) (p : Place) (lo hi : Var) (body : Expr)
+  /-- `{ const x = m p[lo..hi]; body }`, `x` a slice, `readonly` or `mut`, of the vector at `p`, its
+  elements from `lo` up to `hi`, for as long as `body` runs; a panic if they are not there. -/
+  | lendSlice (x : Var) (m : Mode) (p : Place) (lo hi : Var) (body : Expr)
   /-- `{ const g = generate(f(owned, caps)); body }`: `f` runs as `body` asks for its values, each a
   `τy` it yields by performing `eY`; `body` asks by performing `eN`, which gives `#Some(v)`, or
   `#Done` once `f` has ended. `body` has type `τb`; `f` is lent the places of `caps`, `readonly` or,
@@ -579,8 +585,8 @@ def dropK : Nat → Store → Ty → Val → Option Store
         | none => none
       | none => none
     | none => none
-  | 0, σ, .vec _, .vec [] => some σ
-  | k + 1, σ, .vec τ, .vec cs => dropCellsWith (fun σ w => dropK k σ τ w) σ cs
+  | 0, σ, .vec _ _, .vec [] => some σ
+  | k + 1, σ, .vec _ τ, .vec cs => dropCellsWith (fun σ w => dropK k σ τ w) σ cs
   | _, _, _, _ => none
 
 /-- Drops a value of type `τ`: a value owns fewer cells than the store has. -/
@@ -1179,7 +1185,7 @@ def eval (F : List Fn) (O : List Op) : Nat → HS → Store → Env → Expr →
         match σ.mem c with
         | some (.arena cs) =>
           let (l, σ2) := σ.alloc (.vec [])
-          (.val (.rptr l), (σ2.set c (some (.arena (cs ++ [l])))).tag l c (.vec τ))
+          (.val (.rptr l), (σ2.set c (some (.arena (cs ++ [l])))).tag l c (.vec true τ))
         | _ => (.stuck, σ)
       | none => (.stuck, σ)
     | .rpush R τ p a =>
@@ -1234,7 +1240,7 @@ def eval (F : List Fn) (O : List Op) : Nat → HS → Store → Env → Expr →
         | some (.vec cs) => (.val (.int cs.length), σ)
         | _ => (.stuck, σ)
       | none => (.stuck, σ)
-    | .lendSlice x p lo hi body =>
+    | .lendSlice x _ p lo hi body =>
       match resolve σ env p, lookup lo env, lookup hi env with
       | some c, some l1, some l2 =>
         match σ.mem c, σ.mem l1, σ.mem l2 with
@@ -1574,12 +1580,12 @@ it holds lent to such a borrow, the field a hole in its type. -/
 inductive Slot where
   | own (τ : Ty) (live : Bool)
   | ref (m : Mode) (τ : Ty)
-  | lent (τ : Ty)
+  | lent (τ : Ty) (head : Bool)
   | half (t : Bool) (A B : Ty)
   deriving DecidableEq, Repr
 
 def Slot.ty : Slot → Ty
-  | .own τ _ | .ref _ τ | .lent τ => τ
+  | .own τ _ | .ref _ τ | .lent τ _ => τ
   | .half t A B => .lent1 t A B
 
 /-- A slot that may change what it holds but not its own first cell: a `mut` borrow of a closure,
@@ -1587,7 +1593,7 @@ which may call the closure, changing what it captured, but not put another closu
 a variable one field of whose pair is lent, which may change the other field but not the pair's
 cell, which says where the field lent is. -/
 def Slot.shell : Slot → Bool
-  | .ref .mut (.fn _ _ _ _) => true
+  | .ref .mut τ => τ.shell
   | .half _ _ _ => true
   | _ => false
 
@@ -1597,7 +1603,7 @@ abbrev Ctx := List (Var × Slot)
 def Slot.shiftBy (n : Nat) : Slot → Slot
   | .own τ live => .own (τ.shiftBy n) live
   | .ref m τ => .ref m (τ.shiftBy n)
-  | .lent τ => .lent (τ.shiftBy n)
+  | .lent τ h => .lent (τ.shiftBy n) h
   | .half t A B => .half t (A.shiftBy n) (B.shiftBy n)
 
 /-- A context said of the body of a region inside it. -/
@@ -1676,7 +1682,7 @@ def Exclusive (ys : List (Mode × Var)) : Prop :=
 def Slot.ro : Slot → Slot
   | .own τ _ => .ref .ro τ
   | .ref _ τ => .ref .ro τ
-  | .lent τ => .lent τ
+  | .lent τ h => .lent τ h
   | .half t A B => .ref .ro (.lent1 t A B)
 
 /-- `Γ` with the variables `ys` only read. -/
@@ -1685,7 +1691,7 @@ def freeze (Γ : Ctx) (ys : List Var) : Ctx :=
 
 /-- `Γ` with the variable `y` lent `mut` to a borrow: not to be reached while the borrow lives. -/
 def hide (Γ : Ctx) (y : Var) : Ctx :=
-  Γ.map fun (z, s) => if z = y then (z, .lent s.ty) else (z, s)
+  Γ.map fun (z, s) => if z = y then (z, .lent s.ty s.shell) else (z, s)
 
 /-- What the code a borrow of a place rooted at `y` is in scope for sees of `y`: only read, if the
 borrow is `readonly`, and nothing, if it is `mut`. -/
@@ -1731,7 +1737,7 @@ the mode it is lent in. What is lent `mut` is a whole variable the arm may chang
 inductive Caps (Γ : Ctx) : List (Cap Place) → List (Mode × Var) → Prop
   | nil : Caps Γ [] []
   | ro : PlaceTy Γ p τ w y → τ.complete = true → Caps Γ rest ys → Caps Γ (⟨x, .ro, τ, p⟩ :: rest) ((.ro, y) :: ys)
-  | mut : PlaceTy Γ (.var y) τ true y → τ.isFn = false → τ.complete = true → Caps Γ rest ys →
+  | mut : PlaceTy Γ (.var y) τ true y → τ.shell = false → τ.complete = true → Caps Γ rest ys →
       Caps Γ (⟨x, .mut, τ, .var y⟩ :: rest) ((.mut, y) :: ys)
 
 /-- An arm's context: the operation's owned arguments, live, then its borrowed ones, then the
@@ -1770,7 +1776,7 @@ inductive Typed (F : List Fn) (O : List Op) : Ctx → Expr → Ty → Ctx → Ro
       Weaker Γ' Γ₁ → Weaker Γ' Γ₂ → Typed F O Γ (.case x y A B e₁ e₂) τ Γ' r
   /-- Each arm borrows what the tag carries, as a borrow of a place does. -/
   | caseRef : lookup x Γ = none → PlaceTy Γ p (.sum A B) w y → Unsplit Γ y → (m = .mut → w = true) →
-      (m = .mut → A.isFn = false ∧ B.isFn = false) →
+      (m = .mut → A.shell = false ∧ B.shell = false) →
       Typed F O ((x, .ref m A) :: lendCtx m Γ y) e₁ τ ((x, .ref m A) :: Γb₁) r →
       Typed F O ((x, .ref m B) :: lendCtx m Γ y) e₂ τ ((x, .ref m B) :: Γb₂) r →
       Weaker Γb Γb₁ → Weaker Γb Γb₂ → Typed F O Γ (.caseRef x m p e₁ e₂) τ (thaw Γ [y] Γb) r
@@ -1778,7 +1784,7 @@ inductive Typed (F : List Fn) (O : List Op) : Ctx → Expr → Ty → Ctx → Ro
       Typed F O ((x, .own τ true) :: Γ₁) b τb ((x, .own τ live) :: Γ₂) r → Typed F O Γ (.let_ x τ a b) τb Γ₂ r
   | write : AtomTy Γ a .int Γ₁ → PlaceTy Γ₁ p .int true y → Typed F O Γ (.write p a) .int Γ₁ r
   /-- Nothing is put in place of a closure borrowed `mut`, or of what it captured. -/
-  | assign : AtomTy Γ a τ Γ₁ → PlaceTy Γ₁ p τ true y → (∀ k A B r', lookup y Γ₁ ≠ some (.ref .mut (.fn k A B r'))) →
+  | assign : AtomTy Γ a τ Γ₁ → PlaceTy Γ₁ p τ true y → (∀ τ', lookup y Γ₁ = some (.ref .mut τ') → τ'.shell = false) →
       Typed F O Γ (.assign p τ a) .int Γ₁ r
   /-- A call: the function's regions are those of the code around, the `k`th of them its innermost. -/
   | call : F[f]? = some d → d.retp = none → d.cap = none → (∀ l ∈ d.row, l ∈ r) →
@@ -1817,7 +1823,7 @@ inductive Typed (F : List Fn) (O : List Op) : Ctx → Expr → Ty → Ctx → Ro
   | lendCall : F[f]? = some d → d.retp = some (m, cs) → d.cap = none → (∀ l ∈ d.row, l ∈ r) →
       AtomsTy Γ owned (d.owns.map Prod.snd) Γ₁ → Lends Γ₁ lent (d.refs.map Prod.snd) ys → LentApart lent →
       Pairs (fun c z => ∃ mi, ys[c.1]? = some (mi, z) ∧ (m = .mut → mi = .mut)) cs zs →
-      (m = .mut → zs.Nodup ∧ d.ret.isFn = false ∧ (∀ c ∈ cs, ∀ e, d.refs[c.1]? = some e → e.2.2.isFn = false) ∧
+      (m = .mut → zs.Nodup ∧ d.ret.shell = false ∧ (∀ c ∈ cs, ∀ e, d.refs[c.1]? = some e → e.2.2.shell = false) ∧
         ∀ z ∈ zs, Unsplit Γ₁ z) →
       lookup x Γ₁ = none →
       Typed F O ((x, .ref m d.ret) :: lendCtxs m Γ₁ zs) body τb ((x, .ref m d.ret) :: Γb) r →
@@ -1834,7 +1840,7 @@ inductive Typed (F : List Fn) (O : List Op) : Ctx → Expr → Ty → Ctx → Ro
   | while_ : Typed F O Γ c .int Γ r → Typed F O Γ b .int Γ r → Typed F O Γ (.while_ c b) .int Γ r
   /-- A borrow lives as long as the code it is in scope for: what the place is rooted at is only
   read, or not reached, until it ends. -/
-  | lend : lookup x Γ = none → PlaceTy Γ p τ w y → (m = .mut → w = true) → (m = .mut → τ.isFn = false) →
+  | lend : lookup x Γ = none → PlaceTy Γ p τ w y → (m = .mut → w = true) → (m = .mut → τ.shell = false) →
       (m = .mut → Unsplit Γ y) →
       Typed F O ((x, .ref m τ) :: lendCtx m Γ y) body τb ((x, .ref m τ) :: Γb) r →
       Typed F O Γ (.lend x m p body) τb (thaw Γ [y] Γb) r
@@ -1851,8 +1857,8 @@ inductive Typed (F : List Fn) (O : List Op) : Ctx → Expr → Ty → Ctx → Ro
         (unhideAll Γ₁ (roots .mut ys) (thaw (hideAll Γ₁ (roots .mut ys)) (roots .ro ys) Γb)) r
   /-- A borrow of an element of a vector, for the code it is in scope for: it is a borrow of the
   whole vector, which is only read, or not reached, until it ends. -/
-  | lendIdx : lookup x Γ = none → PlaceTy Γ p (.vec τ) w y → PlaceTy Γ (.var z) .int wz yz →
-      (m = .mut → w = true) → (m = .mut → τ.isFn = false) → (m = .mut → Unsplit Γ y) →
+  | lendIdx : lookup x Γ = none → PlaceTy Γ p (.vec g τ) w y → PlaceTy Γ (.var z) .int wz yz →
+      (m = .mut → w = true) → (m = .mut → τ.shell = false) → (m = .mut → Unsplit Γ y) →
       Typed F O ((x, .ref m τ) :: lendCtx m Γ y) body τb ((x, .ref m τ) :: Γb) r →
       Typed F O Γ (.lendIdx x m p z body) τb (thaw Γ [y] Γb) r
   /-- A borrow of one field of a variable's pair, for the code it is in scope for: the variable
@@ -1860,7 +1866,7 @@ inductive Typed (F : List Fn) (O : List Op) : Ctx → Expr → Ty → Ctx → Ro
   lent meanwhile. -/
   | lendField : lookup x Γ = none → lookup y Γ = some s →
       s.ty = .pair A B → ((∃ τ, s = .own τ true) ∨ (∃ τ, s = .ref .mut τ) ∨ ∃ t' A' B', s = .half t' A' B') →
-      (if t then A else B).complete = true → (m = .mut → (if t then A else B).isFn = false) →
+      (if t then A else B).complete = true → (m = .mut → (if t then A else B).shell = false) →
       Typed F O ((x, .ref m (if t then A else B)) ::
           setSlot Γ y (.half t A B)) body τb
         ((x, .ref m (if t then A else B)) :: Γb) r →
@@ -1921,32 +1927,33 @@ inductive Typed (F : List Fn) (O : List Op) : Ctx → Expr → Ty → Ctx → Ro
       τ.rdata = true → Typed F O Γ (.rget p) (τ.shiftBy k) Γ r
   /-- A new list of a region, through its arena, owned or lent `mut`, of data the region may hold. -/
   | rlnew : lookup R Γ = some s → (s = .own (.arena k) true ∨ s = .ref .mut (.arena k)) → τ.rdata = true →
-      Typed F O Γ (.rlnew R τ) (.rref false k (.vec τ)) Γ r
+      Typed F O Γ (.rlnew R τ) (.rref false k (.vec true τ)) Γ r
   /-- Pushing to a list of a region, through its arena, owned or lent `mut`. -/
-  | rpush : PlaceTy Γ p (.rref c k (.vec τ)) w y → lookup R Γ = some s →
+  | rpush : PlaceTy Γ p (.rref c k (.vec true τ)) w y → lookup R Γ = some s →
       (s = .own (.arena k) true ∨ s = .ref .mut (.arena k)) → τ.rdata = true → AtomTy Γ a (τ.shiftBy k) Γ →
       Typed F O Γ (.rpush R τ p a) .int Γ r
   /-- Reading an element of a list of a region, its arena in reach. -/
-  | rnth : PlaceTy Γ p (.rref c k (.vec τ)) w y → PlaceTy Γ (.var z) .int wz yz → lookup R Γ = some s →
+  | rnth : PlaceTy Γ p (.rref c k (.vec true τ)) w y → PlaceTy Γ (.var z) .int wz yz → lookup R Γ = some s →
       (s = .own (.arena k) true ∨ ∃ m, s = .ref m (.arena k)) → τ.rdata = true →
       Typed F O Γ (.rnth R p z) (τ.shiftBy k) Γ r
   /-- A list's length, its arena in reach. -/
-  | rlen : PlaceTy Γ p (.rref c k (.vec τ)) w y → lookup R Γ = some s →
+  | rlen : PlaceTy Γ p (.rref c k (.vec true τ)) w y → lookup R Γ = some s →
       (s = .own (.arena k) true ∨ ∃ m, s = .ref m (.arena k)) → Typed F O Γ (.rlen R p) .int Γ r
   /-- An empty vector. -/
-  | vnew : τ.complete = true → Typed F O Γ .vnew (.vec τ) Γ r
+  | vnew : τ.complete = true → Typed F O Γ .vnew (.vec true τ) Γ r
   /-- A vector's length, which reading it says. -/
-  | vlen : PlaceTy Γ p (.vec τ) w y → Typed F O Γ (.vlen p) .int Γ r
+  | vlen : PlaceTy Γ p (.vec g τ) w y → Typed F O Γ (.vlen p) .int Γ r
   /-- Pushing to a vector at a place that may be changed, the element moved in. -/
-  | vpush : AtomTy Γ a τ Γ₁ → PlaceTy Γ₁ p (.vec τ) true y → Typed F O Γ (.vpush p a) .int Γ₁ r
-  /-- A `readonly` slice of a vector, for the code it is in scope for: a vector of its own, of some of
-  the vector's elements, which is only read meanwhile. -/
-  | lendSlice : lookup x Γ = none → PlaceTy Γ p (.vec τ) w y → PlaceTy Γ (.var lo) .int w1 y1 →
-      PlaceTy Γ (.var hi) .int w2 y2 →
-      Typed F O ((x, .ref .ro (.vec τ)) :: freeze Γ [y]) body τb ((x, .ref .ro (.vec τ)) :: Γb) r →
-      Typed F O Γ (.lendSlice x p lo hi body) τb (thaw Γ [y] Γb) r
+  | vpush : AtomTy Γ a τ Γ₁ → PlaceTy Γ₁ p (.vec true τ) true y → Typed F O Γ (.vpush p a) .int Γ₁ r
+  /-- A slice of a vector, for the code it is in scope for: a run of the vector's elements, which it may
+  change if it is `mut`, but not which run it is; the vector is only read, or not reached,
+  meanwhile. -/
+  | lendSlice : lookup x Γ = none → PlaceTy Γ p (.vec g τ) w y → PlaceTy Γ (.var lo) .int w1 y1 →
+      PlaceTy Γ (.var hi) .int w2 y2 → (m = .mut → w = true) →
+      Typed F O ((x, .ref m (.vec false τ)) :: lendCtx m Γ y) body τb ((x, .ref m (.vec false τ)) :: Γb) r →
+      Typed F O Γ (.lendSlice x m p lo hi body) τb (thaw Γ [y] Γb) r
   /-- Taking the last element out of a vector at a place that may be changed. -/
-  | vpop : PlaceTy Γ p (.vec τ) true y → τ.complete = true → Typed F O Γ (.vpop p) (.sum .int τ) Γ r
+  | vpop : PlaceTy Γ p (.vec true τ) true y → τ.complete = true → Typed F O Γ (.vpop p) (.sum .int τ) Γ r
   /-- Changing what a `Cell` of a region holds, through its arena, owned or lent `mut`. -/
   | rset : PlaceTy Γ p (.rref true k τ) w y → lookup R Γ = some s → (s = .own (.arena k) true ∨ s = .ref .mut (.arena k)) →
       τ.rdata = true → AtomTy Γ a (τ.shiftBy k) Γ → Typed F O Γ (.rset R p a) .int Γ r

@@ -124,7 +124,7 @@ structure GenOk (F : List Fn) (ι : List Nat) (O : List Op) (σf : Store) (eN eY
   hS : ∀ l ∈ S, l ∈ Sin
   hRc : ∀ l ∈ Rc, l ∈ Fz ∨ l ∈ S
   hRcdet : ∀ σ1 Rc' Hc, Agree σf σ1 (Fz ++ S) → CapsOk F ι σ1 caps Rc' Hc → Rc' = Rc
-  hfns : ∀ c ∈ caps, c.mode = .mut → c.ty.isFn = false
+  hfns : ∀ c ∈ caps, c.mode = .mut → c.ty.shell = false
   hre : ∀ σ1 Eb Hc, Agree σf σ1 (Fz ++ S) → Disj (Fz ++ Hc) Eb → Disj S Hc → (Fz ++ Hc).Nodup →
     CapsOk F ι σ1 caps Rc Hc → Inv F ι σ1 Γin env Eb Sin →
     ∃ E', Inv F ι σ1 Γout env E' S ∧ ∀ z, z ∈ E' ↔ z ∈ Eb ∨ z ∈ Fz ∨ z ∈ Hc
@@ -169,10 +169,10 @@ reached, while it lives. -/
       Typed F O (fnCtx d) d.body .int Γ'' d.row → cells.map Prod.fst = d.owns.map Prod.fst →
       (cs : List (Nat × Place)) ≠ [] →
       (∀ c ∈ cs, ∃ xi mi τi w hd, d.refs[c.1]? = some (xi, mi, τi) ∧ PlaceTy Γ'' c.2 d.ret w xi ∧
-        (m = .mut → w = true) ∧ hos[c.1]? = some (hd : Hole) ∧ (m = .mut → hd.mode = .mut ∧ τi.isFn = false) ∧
+        (m = .mut → w = true) ∧ hos[c.1]? = some (hd : Hole) ∧ (m = .mut → hd.mode = .mut ∧ τi.shell = false) ∧
         (m = .mut → ∀ s, lookup hd.root Γ₁ = some s → s.shell = true → hd.path = [])) →
       Pairs (fun c z => ∃ hd : Hole, hos[c.1]? = some hd ∧ hd.root = z) cs zs →
-      (m = .mut → zs.Nodup ∧ d.ret.isFn = false) →
+      (m = .mut → zs.Nodup ∧ d.ret.shell = false) →
       (∀ z ∈ zs, ∀ τ', lookup z Γ₁ ≠ some (.own τ' false)) → lookup x Γ₁ = none →
       Typed F O ((x, .ref m d.ret) :: lendCtxs m Γ₁ zs) body τb ((x, .ref m d.ret) :: Γb) r →
       FrameOk F O ι ι σf (.callLendK x (cs.map Prod.snd) (cells ++ (d.refs.map Prod.fst).zip (hos.map Hole.loc))

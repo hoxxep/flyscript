@@ -223,7 +223,7 @@ theorem drop_var (hτx : τx.complete = true) (hI₃ : Inv F ι σ3 ((x, .own τ
     ∃ σ4 E₂, dropCell σ3 τx c = some σ4 ∧ Inv F ι σ4 Γ₂ env E₂ S ∧ Agree σ3 σ4 L₃ ∧ Disj L₃ E₂ ∧
       Moves σ E σ4 E₂ L₃ := by
   obtain ⟨Lx, E₂, S₂, hs, hfoot, hE₃, hS₃⟩ := hI₃.foot.uncons
-  simp only [addE, addS, Slot.excl, ↓reduceIte, exclPart, sharedPart, Slot.shell, Bool.false_eq_true, ↓reduceIte, List.nil_append] at hE₃ hS₃
+  simp only [addE, addS, Slot.excl, ↓reduceIte, exclPart, sharedPart, Slot.shell, Ty.shell, Bool.false_eq_true, ↓reduceIte, List.nil_append] at hE₃ hS₃
   subst hE₃ hS₃
   obtain ⟨σ4, hdrop, hnext, hfree, hkeep⟩ := dropCell_own hm.wf hτx hs
   have hnd := nodup_append_disj.mp hI₃.nodup
@@ -1535,7 +1535,7 @@ theorem lend_ro_all (hE : EvalOk F O n) (hx : lookup x Γ = none) (ha : lookup y
     · exact hRin l h
     · exact List.mem_append.mp (hS.mem_iff.mp h)
   have hIb : Inv F ι σ ((x, .ref .ro τ) :: freeze Γ ys) ((x, l) :: env) Eb (Rt ++ Sb) := by
-    refine ⟨by simpa [addE, addS, Slot.excl, exclPart, sharedPart, Slot.shell, Bool.false_eq_true] using Foot.cons (s := .ref .ro τ) (x := x) hRt hfb, hEbn, ?_,
+    refine ⟨by simpa [addE, addS, Slot.excl, exclPart, sharedPart, Slot.shell, Ty.shell, Bool.false_eq_true] using Foot.cons (s := .ref .ro τ) (x := x) hRt hfb, hEbn, ?_,
       List.nodup_cons.mpr ⟨hxk, by rw [freeze_keys]; exact hI.keys⟩⟩
     intro l hl hl'
     rcases hSin l hl with h | h
@@ -1550,7 +1550,7 @@ theorem lend_ro_all (hE : EvalOk F O n) (hx : lookup x Γ = none) (ha : lookup y
       ∃ E', Inv F ι σ1 (thaw Γ ys Γb) env E' S ∧ ∀ z, z ∈ E' ↔ z ∈ Eb' ∨ z ∈ Fz := by
     intro σ1 Eb' hag hdX hI'
     obtain ⟨L', Et, St, hL', hft, hEt, hSt⟩ := hI'.foot.uncons
-    simp only [addE, addS, Slot.excl, Bool.false_eq_true, ↓reduceIte, exclPart, sharedPart, Slot.shell] at hEt hSt
+    simp only [addE, addS, Slot.excl, Bool.false_eq_true, ↓reduceIte, exclPart, sharedPart, Slot.shell, Ty.shell] at hEt hSt
     -- The borrow's tree is as it was: shared, it was not changed.
     have hRR := (hRt.frame (hag.mono fun l hl => List.mem_append.mpr (hRin l hl))).det hL'
     subst hRR
@@ -1591,7 +1591,7 @@ ends, each owns again what it had, `y` its path to `l` and what the borrow left 
 theorem lend_mut_all (hE : EvalOk F O n) (hx : lookup x Γ = none) (ha : lookup y env = some a)
     (hsl : lookup y Γ = some s) (hLr : LT F ι σ a τr Lr) (hpath : Reach F ι σ a τr P l τ)
     (hso : SlotOk F ι σ s a Lr)
-    (hslot : ∀ σ' L', LT F ι σ' a τr L' → SlotOk F ι σ' s a L') (hτ : τ.isFn = false)
+    (hslot : ∀ σ' L', LT F ι σ' a τr L' → SlotOk F ι σ' s a L') (hτ : τ.shell = false)
     (hys : y ∈ ys) (hn : ys.Nodup) (htr : Trees F ι σ Γ env ys H)
     (hb : Typed F O ((x, .ref .mut τ) :: hideAll Γ ys) body τb ((x, .ref .mut τ) :: Γb) r)
     (hI : Inv F ι σ Γ env E S) (hwf : WF σ) (hR : Ready O hs r) :
@@ -1664,7 +1664,7 @@ theorem lend_mut_all (hE : EvalOk F O n) (hx : lookup x Γ = none) (ha : lookup 
 theorem lend_mut_core (hE : EvalOk F O n) (hx : lookup x Γ = none) (ha : lookup y env = some a)
     (hsl : lookup y Γ = some s) (hLr : LT F ι σ a τr Lr) (hpath : Reach F ι σ a τr P l τ) (hso : SlotOk F ι σ s a Lr)
     (hsubE : ∀ l ∈ Lr, l ∈ E) (hsx : s.excl = true) (hslot : ∀ σ' L', LT F ι σ' a τr L' → SlotOk F ι σ' s a L')
-    (hsh : s.shell = false) (hτ : τ.isFn = false)
+    (hsh : s.shell = false) (hτ : τ.shell = false)
     (hb : Typed F O ((x, .ref .mut τ) :: lendCtx .mut Γ y) body τb ((x, .ref .mut τ) :: Γb) r)
     (hI : Inv F ι σ Γ env E S) (hwf : WF σ) (hR : Ready O hs r) :
     Post F ι O σ E S (thaw Γ [y] Γb) env τb r hs (ret F O n hs .lendK (eval F O n hs σ ((x, l) :: env) body)) :=
@@ -1683,30 +1683,31 @@ theorem lend_ro_ok (hE : EvalOk F O n) (hx : lookup x Γ = none) (hp : PlaceTy �
 /-- A place holding no closure, rooted at a variable no field of which is lent, is rooted at a
 variable that may change all it holds: a closure borrowed `mut` lends only itself, a closure. -/
 theorem root_whole (hsl : lookup y Γ = some s) (hun : Unsplit Γ y)
-    (hshp : s.shell = true → (P = [] ∧ τ = τr) ∨ (τr.isFn = false ∧ ∃ P', P = a :: P')) (hty : τr = s.ty)
-    (hτ : τ.isFn = false) : s.shell = false := by
+    (hshp : s.shell = true → (P = [] ∧ τ = τr) ∨ (τr.shell = false ∧ ∃ P', P = a :: P')) (hty : τr = s.ty)
+    (hτ : τ.shell = false) : s.shell = false := by
   cases h : s.shell
   · rfl
   · exfalso
     match s, h, hsl with
     | .half t A B, _, hsl => exact hun t A B hsl
-    | .ref .mut (.fn _ _ _ _), h, _ =>
+    | .ref .mut τ', h, _ =>
+      have h' : τ'.shell = true := h
       rcases hshp h with ⟨-, rfl⟩ | ⟨hfn, -⟩
-      · simp [hty, Slot.ty, Ty.isFn] at hτ
-      · simp [hty, Slot.ty, Ty.isFn] at hfn
+      · simp only [hty, Slot.ty] at hτ; rw [hτ] at h'; cases h'
+      · simp only [hty, Slot.ty] at hfn; rw [hfn] at h'; cases h'
 
-/-- A variable none of whose fields is lent, that may change all but its first cell, is a closure
-borrowed `mut`. -/
-theorem shell_fn_of (hsl : lookup y Γ = some s) (hun : Unsplit Γ y) (h : s.shell = true) : s.ty.isFn = true := by
+/-- A variable none of whose fields is lent, that may change all but its first cell, is a closure or a
+slice borrowed `mut`. -/
+theorem shell_fn_of (hsl : lookup y Γ = some s) (hun : Unsplit Γ y) (h : s.shell = true) : s.ty.shell = true := by
   match s, h, hsl with
   | .half t A B, _, hsl => exact absurd hsl (hun t A B)
-  | .ref .mut (.fn _ _ _ _), _, _ => rfl
+  | .ref .mut _, h, _ => exact h
 
 /-- A `mut` borrow held for the scope of `body`: the borrow owns the place's tree while it lives,
 and what the place is rooted at is out of reach; once it ends, the root owns again its path to the
 place and what the borrow left there. -/
 theorem lend_mut_ok (hE : EvalOk F O n) (hx : lookup x Γ = none) (hp : PlaceTy Γ p τ true y)
-    (hτ : τ.isFn = false) (hun : Unsplit Γ y)
+    (hτ : τ.shell = false) (hun : Unsplit Γ y)
     (hb : Typed F O ((x, .ref .mut τ) :: lendCtx .mut Γ y) body τb ((x, .ref .mut τ) :: Γb) r)
     (hI : Inv F ι σ Γ env E S) (hwf : WF σ) (hR : Ready O hs r) :
     Post F ι O σ E S (thaw Γ [y] Γb) env τb r hs (eval F O (n + 1) hs σ env (.lend x .mut p body)) := by
@@ -1764,7 +1765,7 @@ theorem lendClo_ok (hE : EvalOk F O n) (hfd : F[f]? = some d) (hcap : d.cap = so
       ((x, σ.next) :: env) Eb ((σ.next :: Rt) ++ Sb) := by
     have hfoot := Foot.cons (s := .ref .ro (.fn .shared A d.ret d.row)) (x := x) (a := σ.next) hLa
       (hfb.frame <| Agree.of' fun z hz => hold z (hfb.alloc z (List.mem_append.mp hz)))
-    refine ⟨by simpa [addE, addS, Slot.excl, exclPart, sharedPart, Slot.shell, Bool.false_eq_true] using hfoot, hEbn, ?_,
+    refine ⟨by simpa [addE, addS, Slot.excl, exclPart, sharedPart, Slot.shell, Ty.shell, Bool.false_eq_true] using hfoot, hEbn, ?_,
       List.nodup_cons.mpr ⟨hxk, by rw [freeze_keys]; exact hI.keys⟩⟩
     intro z hz hz'
     rcases hSin z hz with h | h
@@ -1782,7 +1783,7 @@ theorem lendClo_ok (hE : EvalOk F O n) (hfd : F[f]? = some d) (hcap : d.cap = so
         ∀ z, z ∈ E' ↔ z ∈ Eb' ∨ (z ∈ σ.next :: Fz ∧ z ≠ σ.next) := by
     intro σ1 Eb' hag hdX hI'
     obtain ⟨L', Et, St, hL', hft, hEt, hSt⟩ := hI'.foot.uncons
-    simp only [addE, addS, Slot.excl, Bool.false_eq_true, ↓reduceIte, exclPart, sharedPart, Slot.shell] at hEt hSt
+    simp only [addE, addS, Slot.excl, Bool.false_eq_true, ↓reduceIte, exclPart, sharedPart, Slot.shell, Ty.shell] at hEt hSt
     have hagR : Agree (σ.alloc (.clo f l τc)).2 σ1 (σ.next :: Rt) := (hag.mono fun z hz => by
       rcases List.mem_cons.mp hz with rfl | h
       · exact List.mem_append.mpr (.inl (List.mem_cons_self ..))
@@ -1883,7 +1884,7 @@ theorem lendCloMut_ok (hE : EvalOk F O n) (hfd : F[f]? = some d) (hcap : d.cap =
       ((x, σ.next) :: env) (Rt ++ Eh) (σ.next :: S) := by
     have hfoot := Foot.cons (s := .ref .mut (.fn .excl A d.ret d.row)) (x := x) (a := σ.next) hLa
       (hfh.frame <| Agree.of' fun z hz => hold z (hfh.alloc z (List.mem_append.mp hz)))
-    refine ⟨by simpa [addE, addS, exclPart, sharedPart, Slot.excl, Slot.shell] using hfoot,
+    refine ⟨by simpa [addE, addS, exclPart, sharedPart, Slot.excl, Slot.shell, Ty.shell] using hfoot,
       nodup_append_disj.mpr ⟨hRn, hEhn, fun z h h' => hdLrEh z (List.mem_append.mpr (.inr h)) h'⟩, ?_,
       List.nodup_cons.mpr ⟨hxk, by rw [hide_keys]; exact hI.keys⟩⟩
     intro z hz hz'
@@ -1911,7 +1912,7 @@ theorem lendCloMut_ok (hE : EvalOk F O n) (hfd : F[f]? = some d) (hcap : d.cap =
     | @clo _ f' c' τc' _ _ _ _ R' ha' _ hR' hn' =>
     rw [ha1] at ha'
     cases ha'
-    simp only [addE, addS, exclPart, sharedPart, Slot.excl, Slot.shell, ↓reduceIte, List.tail_cons,
+    simp only [addE, addS, exclPart, sharedPart, Slot.excl, Slot.shell, Ty.shell, ↓reduceIte, List.tail_cons,
       List.take_succ_cons, List.take_zero, List.singleton_append, List.cons.injEq, true_and] at hEt hSt
     subst hEt hSt
     have hagS : Agree σ σ1 S := Agree.ofPre (by rt_tac) hag (fun z hz => List.mem_append.mpr (.inr hz)) (fun z hz => by
@@ -2012,7 +2013,7 @@ theorem case_ok (hE : EvalOk F O n) (hx : lookup x Γ = some (.own (.sum A B) tr
         (R ++ (E₁ ++ [a] ++ E₂)) S := by
     intro Ay hAy
     subst hAy
-    refine ⟨by simpa [addE, addS, exclPart, sharedPart, Slot.excl, Slot.shell] using Foot.cons (x := y) (s := .own _ true) hR1 hfoot, ?_, ?_, ?_⟩
+    refine ⟨by simpa [addE, addS, exclPart, sharedPart, Slot.excl, Slot.shell, Ty.shell] using Foot.cons (x := y) (s := .own _ true) hR1 hfoot, ?_, ?_, ?_⟩
     · refine nodup_append_disj.mpr ⟨hRp.nodup, seg_replace hnd.2.2 (by simp) (disj_cons_left.mpr ⟨ha12, disj_nil_left⟩), ?_⟩
       intro z hz hz'
       rcases mem_seg.mp hz' with hz' | hz'
@@ -2051,7 +2052,7 @@ theorem case_ok (hE : EvalOk F O n) (hx : lookup x Γ = some (.own (.sum A B) tr
 /-- Matching a tag through a borrow: the arm borrows what it carries, as a borrow of a place does. -/
 theorem caseRef_ok (hE : EvalOk F O n) (hx : lookup x Γ = none) (hp : PlaceTy Γ p (.sum A B) w y)
     (hun : Unsplit Γ y)
-    (hm : m = .mut → w = true) (hmf : m = .mut → A.isFn = false ∧ B.isFn = false)
+    (hm : m = .mut → w = true) (hmf : m = .mut → A.shell = false ∧ B.shell = false)
     (h₁ : Typed F O ((x, .ref m A) :: lendCtx m Γ y) e₁ τ ((x, .ref m A) :: Γb₁) r)
     (h₂ : Typed F O ((x, .ref m B) :: lendCtx m Γ y) e₂ τ ((x, .ref m B) :: Γb₂) r)
     (w₁ : Weaker Γb Γb₁) (w₂ : Weaker Γb Γb₂)
@@ -2087,7 +2088,7 @@ theorem caseRef_ok (hE : EvalOk F O n) (hx : lookup x Γ = none) (hp : PlaceTy �
         (hmf rfl).2 h₂ hI hwf hR) (thaw_mono w₂)
 
 theorem lend_ok {m : Mode} (hE : EvalOk F O n) (hx : lookup x Γ = none) (hp : PlaceTy Γ p τ w y)
-    (hm : m = .mut → w = true) (hmf : m = .mut → τ.isFn = false) (hun : m = .mut → Unsplit Γ y)
+    (hm : m = .mut → w = true) (hmf : m = .mut → τ.shell = false) (hun : m = .mut → Unsplit Γ y)
     (hb : Typed F O ((x, .ref m τ) :: lendCtx m Γ y) body τb ((x, .ref m τ) :: Γb) r)
     (hI : Inv F ι σ Γ env E S) (hwf : WF σ) (hR : Ready O hs r) :
     Post F ι O σ E S (thaw Γ [y] Γb) env τb r hs (eval F O (n + 1) hs σ env (.lend x m p body)) := by
@@ -2107,7 +2108,7 @@ cell, only read, and the other field, which it may read, change or lend meanwhil
 ends, the variable owns the field again, as the borrow left it. -/
 theorem lendField_ok (hE : EvalOk F O n) (hx : lookup x Γ = none) (hy : lookup y Γ = some s)
     (hty : s.ty = .pair A B) (hsl : (∃ τ, s = .own τ true) ∨ (∃ τ, s = .ref .mut τ) ∨ ∃ t' A' B', s = .half t' A' B')
-    (hmf : m = .mut → (if t then A else B).isFn = false)
+    (hmf : m = .mut → (if t then A else B).shell = false)
     (hb : Typed F O ((x, .ref m (if t then A else B)) :: setSlot Γ y (.half t A B)) body τb
       ((x, .ref m (if t then A else B)) :: Γb) r)
     (hI : Inv F ι σ Γ env E S) (hwf : WF σ) (hR : Ready O hs r) :
@@ -2141,7 +2142,7 @@ theorem lendField_ok (hE : EvalOk F O n) (hx : lookup x Γ = none) (hy : lookup 
     hI.foot.swap hI.keys ⟨hy, ha, hso⟩ (s' := .half t A B) hLh rfl (by simp) ⟨Ro, rfl⟩
   have hhx : (Slot.half t A B).excl = true := rfl
   obtain ⟨hEh, hSh⟩ := parts_head (s := .half t A B) (a := a) (R := Ro) hhx
-  simp only [Slot.shell, ↓reduceIte, List.nil_append] at hEh hSh
+  simp only [Slot.shell, Ty.shell, ↓reduceIte, List.nil_append] at hEh hSh
   rw [hEh] at hE'p
   rw [hSh] at hS'p
   -- What the frame keeps: the pair's cell, if the variable may change it, and the field, if the
@@ -2215,7 +2216,7 @@ theorem lendField_ok (hE : EvalOk F O n) (hx : lookup x Γ = none) (hy : lookup 
       ((hag.mono fun z hz => List.mem_append.mpr (.inr (hSp.mem_iff.mpr (List.mem_append.mpr (.inr hz))))))
     obtain ⟨Ro', rfl⟩ := LT.cons (hLb : LT F ι σ1 a (Ty.lent1 t A B) Lb) Ty.lent1_isHole
     obtain ⟨hEh', -⟩ := parts_head (s := .half t A B) (a := a) (R := Ro') hhx
-    simp only [Slot.shell, ↓reduceIte, List.nil_append] at hEh'
+    simp only [Slot.shell, Ty.shell, ↓reduceIte, List.nil_append] at hEh'
     rw [hEh'] at hEtp
     simp only [addE] at hEb
     have hEbn := hI'.nodup
@@ -2343,10 +2344,10 @@ theorem ret_callLendK {d : Fn} {hos : List Hole} {cs : List (Nat × Place)} {zs 
     (hbody : Typed F O (fnCtx d) d.body .int Γ'' d.row) (hcells : cells.map Prod.fst = d.owns.map Prod.fst)
     (hcne : cs ≠ [])
     (hcs : ∀ c ∈ cs, ∃ xi mi τi w hd, d.refs[c.1]? = some (xi, mi, τi) ∧ PlaceTy Γ'' c.2 d.ret w xi ∧
-      (m = .mut → w = true) ∧ hos[c.1]? = some (hd : Hole) ∧ (m = .mut → hd.mode = .mut ∧ τi.isFn = false) ∧
+      (m = .mut → w = true) ∧ hos[c.1]? = some (hd : Hole) ∧ (m = .mut → hd.mode = .mut ∧ τi.shell = false) ∧
       (m = .mut → ∀ s, lookup hd.root Γ₁ = some s → s.shell = true → hd.path = []))
     (hzs : Pairs (fun c z => ∃ hd : Hole, hos[c.1]? = some hd ∧ hd.root = z) cs zs)
-    (hzm : m = .mut → zs.Nodup ∧ d.ret.isFn = false)
+    (hzm : m = .mut → zs.Nodup ∧ d.ret.shell = false)
     (hlive : ∀ z ∈ zs, ∀ τ', lookup z Γ₁ ≠ some (.own τ' false)) (hx : lookup x Γ₁ = none)
     (hb : Typed F O ((x, .ref m d.ret) :: lendCtxs m Γ₁ zs) body τb ((x, .ref m d.ret) :: Γb) r)
     (hR : Ready O hs r) (hwf : WF σ0)
@@ -2517,7 +2518,7 @@ theorem ret_callLendK {d : Fn} {hos : List Hole} {cs : List (Nat × Place)} {zs 
           obtain rfl := lookup_det ha ha'
           exact ⟨hs', ha', hso'⟩
         rcases (hholes q'.1 hqh').shell_root he h hm' with ⟨-, rfl⟩ | hp1
-        · have hτ' : τi'.isFn = false := (hmh' hmm).2
+        · have hτ' : τi'.shell = false := (hmh' hmm).2
           have hty : q'.1.ty = τi' := by
             have h1 : (hos.map (fun h => (h.mode, h.ty)))[c'.1]? = some (q'.1.mode, q'.1.ty) := by simp [hhi']
             have h2 : (d.refs.map Prod.snd)[c'.1]? = some (mi', τi') := by simp [hri']

@@ -123,7 +123,7 @@ theorem LT.unshift : ∀ {τ : Ty} {c : Nat} {L : List Nat}, LT F (a :: ι) σ c
       refine .arena (by simpa using hk) ha hnd hn (fun l hl => ?_) hex
       obtain ⟨τ, v, h1, h2, h3⟩ := hcs l hl
       exact ⟨τ, v, h1, h2, by simpa using h3⟩
-  | .vec τ, _, _, h => by
+  | .vec _ τ, _, _, h => by
     simp only [Ty.shiftBy] at h
     cases h with
     | vec ha hlen hel hnd hn => exact .vec ha hlen (fun i h h' => LT.unshift (hel i h h')) hnd hn
@@ -137,7 +137,7 @@ theorem Ty.complete_shift : ∀ {τ : Ty}, (τ.shiftBy n).complete = τ.complete
   | .hole _ => rfl
   | .rref _ _ _ => rfl
   | .arena _ => rfl
-  | .vec τ => by simp [Ty.shiftBy, Ty.complete, Ty.complete_shift (τ := τ)]
+  | .vec _ τ => by simp [Ty.shiftBy, Ty.complete, Ty.complete_shift (τ := τ)]
 
 theorem Ty.isHole_shift {τ : Ty} : (τ.shiftBy n).isHole = τ.isHole := by
   cases τ <;> rfl
@@ -184,7 +184,7 @@ theorem VT.unshift : ∀ {τ : Ty} {v : Val} {L : List Nat}, VT F (a :: ι) σ (
     simp only [Ty.shiftBy] at h
     cases h with | rref hr => exact .rref (RefOk.shift_iff.mp hr)
   | .arena _, _, _, h => by simp only [Ty.shiftBy] at h; cases h
-  | .vec τ, _, _, h => by
+  | .vec _ τ, _, _, h => by
     simp only [Ty.shiftBy] at h
     cases h with
     | vec hlen hel hnd hc => exact .vec hlen (fun i h h' => LT.unshift (hel i h h')) hnd (by rwa [Ty.complete_shift] at hc)
@@ -199,7 +199,7 @@ theorem Slot.excl_shift {s : Slot} : (s.shiftBy n).excl = s.excl := by
 theorem Slot.shell_shift {s : Slot} : (s.shiftBy n).shell = s.shell := by
   cases s with
   | own => rfl
-  | ref m τ => cases m <;> cases τ <;> rfl
+  | ref m τ => cases m <;> cases τ <;> first | rfl | (rename_i g _; cases g <;> rfl)
   | lent => rfl
   | half => rfl
 
@@ -222,7 +222,7 @@ theorem SlotOk.shift (h : SlotOk F ι σ s c L) : SlotOk F (a :: ι) σ (s.shift
       · exact .inl h
       · exact .inr ⟨h.shift, by rw [Ty.isHole_shift]; exact hh⟩
   | ref m τ => exact LT.shift (τ := τ) h
-  | lent τ => exact h
+  | lent τ hd => cases hd <;> exact h
   | half t A B =>
     simp only [Slot.shiftBy, SlotOk] at h ⊢
     rw [← Ty.lent1_shift]; exact h.shift
@@ -237,7 +237,7 @@ theorem SlotOk.unshift (h : SlotOk F (a :: ι) σ (s.shiftBy 1) c L) : SlotOk F 
       · exact .inl h
       · exact .inr ⟨LT.unshift h, by rw [Ty.isHole_shift] at hh; exact hh⟩
   | ref m τ => exact LT.unshift (τ := τ) h
-  | lent τ => exact h
+  | lent τ hd => cases hd <;> exact h
   | half t A B =>
     simp only [Slot.shiftBy, SlotOk] at h ⊢
     rw [← Ty.lent1_shift] at h; exact LT.unshift h
@@ -329,7 +329,7 @@ theorem LT.unshiftk : ∀ {τ : Ty} {c : Nat} {L : List Nat}, LT F ι σ c (τ.s
       refine .arena (by simpa [List.getElem?_drop, Nat.add_comm] using hk) ha hnd hn (fun l hl => ?_) hex
       obtain ⟨τ, v, h1, h2, h3⟩ := hcs l hl
       exact ⟨τ, v, h1, h2, by rw [drop_drop_add]; exact h3⟩
-  | .vec τ, _, _, h => by
+  | .vec _ τ, _, _, h => by
     simp only [Ty.shiftBy] at h
     cases h with
     | vec ha hlen hel hnd hn => exact .vec ha hlen (fun i h h' => LT.unshiftk (hel i h h')) hnd hn
@@ -376,7 +376,7 @@ theorem VT.unshiftk : ∀ {τ : Ty} {v : Val} {L : List Nat}, VT F ι σ (τ.shi
     simp only [Ty.shiftBy] at h
     cases h with | rref hr => exact .rref (RefOk.drop_iff.mp hr)
   | .arena _, _, _, h => by simp only [Ty.shiftBy] at h; cases h
-  | .vec τ, _, _, h => by
+  | .vec _ τ, _, _, h => by
     simp only [Ty.shiftBy] at h
     cases h with
     | vec hlen hel hnd hc => exact .vec hlen (fun i h h' => LT.unshiftk (hel i h h')) hnd (by rwa [Ty.complete_shift] at hc)

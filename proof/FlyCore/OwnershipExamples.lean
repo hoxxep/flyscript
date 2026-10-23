@@ -319,7 +319,7 @@ theorem counts_typed : Typed [] ops [] counts .int [] [.fail] := by
       (.atom (.read (var "c")))))
     (Γa := [("c", .ref .mut .int)])
     (body := .let_ "a" .int (.perform 0 [] []) (.let_ "b" .int (.perform 0 [] []) (.add (.read (var "a")) (.read (var "b")))))
-    (τ := .int) (Γb := [("n", .lent .int)])
+    (τ := .int) (Γb := [("n", .lent .int false)])
     rfl (by simp [ops]) rfl rfl (.mut (.own rfl) rfl rfl .nil) (by simp [Exclusive]) (by decide)
     (.let_ (live := true) rfl (.add (.read (.ref rfl)) .lit)
       (.let_ (live := true) rfl (.write (.read (.own rfl)) (.ref (m := .mut) rfl)) (.atom (.read (.ref rfl)))))
@@ -351,7 +351,7 @@ def meddles : Expr :=
         (.atom (.read (var "c"))))))
 
 /-- A variable out of reach is no place. -/
-theorem lent_unreachable (h : lookup x Γ = some (.lent τ')) : ¬ PlaceTy Γ (var x) τ w y := by
+theorem lent_unreachable (h : lookup x Γ = some (.lent τ' hd)) : ¬ PlaceTy Γ (var x) τ w y := by
   intro hp; cases hp <;> simp_all
 
 theorem meddles_rejected : ¬ Typed [] ops [] meddles τ Γ' r := by
@@ -370,7 +370,7 @@ theorem meddles_rejected : ¬ Typed [] ops [] meddles τ Γ' r := by
         cases ha with
         | write ha hq =>
           cases ha
-          exact lent_unreachable (τ' := .int) (by decide) hq
+          exact lent_unreachable (τ' := .int) (hd := false) (by decide) hq
 
 /-- `let x = Box.new(1); try { defer { *x = 5 }; let y = Box.new(2); throw *y } catch (e) { e + *x }`:
 the cleanup runs as the failure leaves its block, before the handler, which sees what it wrote; 7,
@@ -409,7 +409,7 @@ theorem borrows_typed : Typed [] [] [] borrows .int [] [.fail] := by
   have := Typed.lend (F := []) (O := []) (Γ := [("x", .own (.box .int) true)]) (x := "r") (m := .mut)
     (p := deref (var "x")) (τ := .int) (w := true) (y := "x") (r := [.fail])
     (body := .let_ "t" .int (.add (.read (var "r")) (.lit 41)) (.write (var "r") (.read (var "t")))) (τb := .int)
-    (Γb := [("x", .lent (.box .int))]) rfl (.deref (.own rfl)) (fun _ => rfl) (fun _ => rfl)
+    (Γb := [("x", .lent (.box .int) false)]) rfl (.deref (.own rfl)) (fun _ => rfl) (fun _ => rfl)
     (fun _ _ _ _ h => by simp [lookup] at h)
     (.let_ (live := true) rfl (.add (.read (.ref rfl)) .lit) (.write (.read (.own rfl)) (.ref (m := .mut) rfl)))
   simp only [thaw] at this
@@ -490,10 +490,10 @@ theorem returns_typed : Typed [inside] [] [] returns .int [] [.fail] := by
     (m := .mut) (cs := [(0, deref (var "r"))]) (r := [.fail]) (owned := []) (Γ₁ := [("x", .own (.box .int) true)])
     (lent := [(.mut, var "x")]) (ys := [(.mut, "x")]) (zs := ["x"]) (x := "v")
     (body := .let_ "t" .int (.add (.read (var "v")) (.lit 41)) (.write (var "v") (.read (var "t"))))
-    (τb := .int) (Γb := [("x", .lent (.box .int))])
+    (τb := .int) (Γb := [("x", .lent (.box .int) false)])
     rfl rfl rfl (by simp [inside]) .nil (.cons (.own rfl) (fun _ => rfl) rfl .nil) (by simp [LentApart])
     (.cons ⟨.mut, rfl, fun _ => rfl⟩ .nil)
-    (fun _ => ⟨by simp, rfl, by simp [inside, Ty.isFn], fun z hz t A B h => by simp at hz; subst hz; simp [lookup] at h⟩) rfl
+    (fun _ => ⟨by simp, rfl, by simp [inside, Ty.shell], fun z hz t A B h => by simp at hz; subst hz; simp [lookup] at h⟩) rfl
     (.let_ (live := true) rfl (.add (.read (.ref rfl)) .lit) (.write (.read (.own rfl)) (.ref (m := .mut) rfl)))
   simp only [unlend, unhideAll, thaw] at this
   exact .let_ (live := true) rfl (.new .lit) (.let_ (live := true) rfl (by simpa using this)
@@ -735,15 +735,15 @@ theorem tally_fns_ok : FnsOk [bump, callsTwice] [] := by
       (.applyBorrow (by decide) .lit (.ref (m := .mut) rfl) (fun _ => rfl) (by simp))⟩
 
 theorem tally_typed : Typed [bump, callsTwice] [] [] tally .int [] [.fail] := by
-  have hcall : Typed [bump, callsTwice] [] [("f", .ref .mut (.fn .excl .int .int [])), ("b", .lent (.box .int))]
+  have hcall : Typed [bump, callsTwice] [] [("f", .ref .mut (.fn .excl .int .int [])), ("b", .lent (.box .int) false)]
       (.call 1 [] [(.mut, var "f")]) .int
-      [("f", .ref .mut (.fn .excl .int .int [])), ("b", .lent (.box .int))] [.fail] :=
+      [("f", .ref .mut (.fn .excl .int .int [])), ("b", .lent (.box .int) false)] [.fail] :=
     .call (k := 0) (d := callsTwice) rfl rfl rfl (by simp [callsTwice]) .nil
       (.cons (.ref (m := .mut) rfl) (fun _ => rfl) rfl .nil) (by simp [LentApart])
   have hlc := Typed.lendCloMut (F := [bump, callsTwice]) (O := []) (Γ := [("b", .own (.box .int) true)]) (f := 0)
     (d := bump) (p := var "b") (y := "b") (x := "f") (r := [.fail]) (τb := .int)
-    (Γb := [("b", .lent (.box .int))]) rfl rfl rfl rfl rfl rfl (.own rfl) (fun _ _ _ h => by simp [lookup] at h) rfl
-    (by simpa [bump, hide, Slot.ty] using hcall)
+    (Γb := [("b", .lent (.box .int) false)]) rfl rfl rfl rfl rfl rfl (.own rfl) (fun _ _ _ h => by simp [lookup] at h) rfl
+    (by simpa [bump, hide, Slot.ty, Slot.shell] using hcall)
   simp only [thaw] at hlc
   exact .let_ (live := true) rfl (.new .lit) (.let_ (live := true) rfl (by simpa using hlc)
     (.add (.read (.own rfl)) (.read (.deref (.own rfl)))))
@@ -775,7 +775,7 @@ theorem swapClosure_rejected : ¬ Typed [bump] [] [("b", .own (.box .int) true)]
       obtain rfl := placeTy_var_root hp
       rcases var_writable hp rfl with h | h | ⟨_, _, _, h⟩
       · simp [lookup] at h
-      · exact hsh _ _ _ _ h
+      · have := hsh _ h; simp [Ty.shell] at this
       · simp [lookup] at h
 
 /-! Closures returned and passed by value. -/
@@ -909,7 +909,7 @@ theorem picks_typed : Typed [either] [] [] picks .int [] [.fail] := by
     (f := 0) (d := either) (m := .mut) (cs := [(0, deref (var "a")), (1, deref (var "b"))]) (r := [.fail])
     (owned := [.lit 1]) (Γ₁ := [("b", .own (.box .int) true), ("a", .own (.box .int) true)])
     (lent := [(.mut, var "a"), (.mut, var "b")]) (ys := [(.mut, "a"), (.mut, "b")]) (zs := ["a", "b"]) (x := "v")
-    (body := .write (var "v") (.lit 10)) (τb := .int) (Γb := [("b", .lent (.box .int)), ("a", .lent (.box .int))])
+    (body := .write (var "v") (.lit 10)) (τb := .int) (Γb := [("b", .lent (.box .int) false), ("a", .lent (.box .int) false)])
     rfl rfl rfl (by simp [either]) (.cons .lit .nil)
     (.cons (.own rfl) (fun _ => rfl) rfl (.cons (.own rfl) (fun _ => rfl) rfl .nil)) (by simp [LentApart, Place.root])
     (.cons ⟨.mut, rfl, fun _ => rfl⟩ (.cons ⟨.mut, rfl, fun _ => rfl⟩ .nil))
@@ -1184,16 +1184,16 @@ theorem tallies_typed : Typed [after] ticks [] tallies .int [] [.fail] := by
       (.let_ (live := true) rfl (.write (.read (.own rfl)) (.ref (m := .mut) rfl))
         (.let_ (live := false) rfl (.pair (.read (.ref (m := .mut) rfl)) (.read (.ref (m := .mut) rfl)))
           (.inj (t := true) (.move rfl rfl) rfl)))
-  have hbody : Typed [after] ticks [("n", .lent .int)]
+  have hbody : Typed [after] ticks [("n", .lent .int false)]
       (.let_ "a" .int (.perform 0 [] []) (.let_ "b" .int (.perform 0 [] [])
         (.add (.read (var "a")) (.read (var "b")))))
-      .int [("n", .lent .int)] [.eff 0, .fail] :=
+      .int [("n", .lent .int false)] [.eff 0, .fail] :=
     .let_ (live := true) rfl (.perform (op := ticks[0]) rfl (List.mem_cons_self ..) .nil .nil List.Pairwise.nil)
       (.let_ (live := true) rfl (.perform (op := ticks[0]) rfl (List.mem_cons_self ..) .nil .nil List.Pairwise.nil)
         (.add (.read (.own rfl)) (.read (.own rfl))))
   have h := Typed.handleR (F := [after]) (O := ticks) (Γ := [("n", .own .int true)]) (e := 0) (op := ticks[0])
     (caps := [⟨"m", .mut, .int, var "n"⟩]) (os := []) (rs := []) (ys := [(.mut, "n")]) (f := 0) (d := after) (C := .int)
-    (τ := .int) (r := [.fail]) (Γa := [("m", .ref .mut .int)]) (Γb := [("n", .lent .int)])
+    (τ := .int) (r := [.fail]) (Γa := [("m", .ref .mut .int)]) (Γb := [("n", .lent .int false)])
     (arm := .let_ "t" .int (.add (.read (var "m")) (.lit 1))
         (.let_ "u" .int (.write (var "m") (.read (var "t")))
           (.let_ "p" (.pair .int .int) (.pair (.read (var "m")) (.read (var "m")))
@@ -1201,7 +1201,7 @@ theorem tallies_typed : Typed [after] ticks [] tallies .int [] [.fail] := by
     (body := .let_ "a" .int (.perform 0 [] []) (.let_ "b" .int (.perform 0 [] [])
         (.add (.read (var "a")) (.read (var "b")))))
     rfl (by simp [ticks]) rfl rfl (.mut (.own rfl) rfl rfl .nil) (by simp [Exclusive]) (by decide)
-    rfl rfl rfl rfl rfl rfl (by simp [after]) rfl harm (by simpa [roots, hideAll, hide, freeze, Slot.ty] using hbody)
+    rfl rfl rfl rfl rfl rfl (by simp [after]) rfl harm (by simpa [roots, hideAll, hide, freeze, Slot.ty, Slot.shell] using hbody)
   simp only [roots, hideAll, hide, freeze, thaw, unhideAll, Slot.ty] at h
   exact .let_ (live := true) rfl (.atom .lit) (by simpa [thaw, hide, hideAll, unhideAll] using h)
 
@@ -1277,16 +1277,16 @@ theorem tallies2_typed : Typed [after2] ticks [] tallies2 .int [] [.fail] := by
               (.inj (.pair .int .int) .int true (.move "p"))))))
       (.sum (.pair .int .int) .int) [("m", .ref .mut .int)] [.fail] := by
     simpa [armCtx, lendCtx, hide, thaw] using harm0
-  have hbody : Typed [after2] ticks [("n", .lent .int)]
+  have hbody : Typed [after2] ticks [("n", .lent .int false)]
       (.let_ "a" .int (.perform 0 [] []) (.let_ "b" .int (.perform 0 [] [])
         (.add (.read (var "a")) (.read (var "b")))))
-      .int [("n", .lent .int)] [.eff 0, .fail] :=
+      .int [("n", .lent .int false)] [.eff 0, .fail] :=
     .let_ (live := true) rfl (.perform (op := ticks[0]) rfl (List.mem_cons_self ..) .nil .nil List.Pairwise.nil)
       (.let_ (live := true) rfl (.perform (op := ticks[0]) rfl (List.mem_cons_self ..) .nil .nil List.Pairwise.nil)
         (.add (.read (.own rfl)) (.read (.own rfl))))
   have h := Typed.handleR (F := [after2]) (O := ticks) (Γ := [("n", .own .int true)]) (e := 0) (op := ticks[0])
     (caps := [⟨"m", .mut, .int, var "n"⟩]) (os := []) (rs := []) (ys := [(.mut, "n")]) (f := 0) (d := after2) (C := .int)
-    (τ := .int) (r := [.fail]) (Γa := [("m", .ref .mut .int)]) (Γb := [("n", .lent .int)])
+    (τ := .int) (r := [.fail]) (Γa := [("m", .ref .mut .int)]) (Γb := [("n", .lent .int false)])
     (arm := .lend "q" .mut (var "m")
         (.let_ "t" .int (.add (.read (var "q")) (.lit 1))
           (.let_ "u" .int (.write (var "q") (.read (var "t")))
@@ -1295,7 +1295,7 @@ theorem tallies2_typed : Typed [after2] ticks [] tallies2 .int [] [.fail] := by
     (body := .let_ "a" .int (.perform 0 [] []) (.let_ "b" .int (.perform 0 [] [])
         (.add (.read (var "a")) (.read (var "b")))))
     rfl (by simp [ticks]) rfl rfl (.mut (.own rfl) rfl rfl .nil) (by simp [Exclusive]) (by decide)
-    rfl rfl rfl rfl rfl rfl (by simp [after2]) rfl harm (by simpa [roots, hideAll, hide, freeze, Slot.ty] using hbody)
+    rfl rfl rfl rfl rfl rfl (by simp [after2]) rfl harm (by simpa [roots, hideAll, hide, freeze, Slot.ty, Slot.shell] using hbody)
   simp only [roots, hideAll, hide, freeze, thaw, unhideAll, Slot.ty] at h
   exact .let_ (live := true) rfl (.atom .lit) (by simpa [thaw, hide, hideAll, unhideAll] using h)
 
@@ -1333,19 +1333,19 @@ theorem early_typed : Typed [after] ticks [] early .int [] [.fail] := by
     .let_ (live := true) rfl (.add (.read (.ref (m := .mut) rfl)) .lit)
       (.let_ (live := true) rfl (.write (.read (.own rfl)) (.ref (m := .mut) rfl))
         (.inj (t := false) (.read (.ref (m := .mut) rfl)) rfl))
-  have hbody : Typed [after] ticks [("n", .lent .int)]
+  have hbody : Typed [after] ticks [("n", .lent .int false)]
       (.let_ "a" .int (.perform 0 [] []) (.add (.read (var "a")) (.lit 1000)))
-      .int [("n", .lent .int)] [.eff 0, .fail] :=
+      .int [("n", .lent .int false)] [.eff 0, .fail] :=
     .let_ (live := true) rfl (.perform (op := ticks[0]) rfl (List.mem_cons_self ..) .nil .nil List.Pairwise.nil)
       (.add (.read (.own rfl)) .lit)
   have h := Typed.handleR (F := [after]) (O := ticks) (Γ := [("n", .own .int true)]) (e := 0) (op := ticks[0])
     (caps := [⟨"m", .mut, .int, var "n"⟩]) (os := []) (rs := []) (ys := [(.mut, "n")]) (f := 0) (d := after) (C := .int)
-    (τ := .int) (r := [.fail]) (Γa := [("m", .ref .mut .int)]) (Γb := [("n", .lent .int)])
+    (τ := .int) (r := [.fail]) (Γa := [("m", .ref .mut .int)]) (Γb := [("n", .lent .int false)])
     (arm := .let_ "t" .int (.add (.read (var "m")) (.lit 1))
         (.let_ "u" .int (.write (var "m") (.read (var "t"))) (.inj (.pair .int .int) .int false (.read (var "m")))))
     (body := .let_ "a" .int (.perform 0 [] []) (.add (.read (var "a")) (.lit 1000)))
     rfl (by simp [ticks]) rfl rfl (.mut (.own rfl) rfl rfl .nil) (by simp [Exclusive]) (by decide)
-    rfl rfl rfl rfl rfl rfl (by simp [after]) rfl harm (by simpa [roots, hideAll, hide, freeze, Slot.ty] using hbody)
+    rfl rfl rfl rfl rfl rfl (by simp [after]) rfl harm (by simpa [roots, hideAll, hide, freeze, Slot.ty, Slot.shell] using hbody)
   simp only [roots, hideAll, hide, freeze, thaw, unhideAll, Slot.ty] at h
   exact .let_ (live := true) rfl (.atom .lit) (by simpa [thaw, hide, hideAll, unhideAll] using h)
 
@@ -1403,8 +1403,8 @@ theorem tagRef_typed : Typed [] [] [] tagRef .int [] [.fail] := by
   have := Typed.caseRef (F := []) (O := []) (Γ := [("v", .own (.sum .int .int) true)]) (x := "x") (m := .mut)
     (p := var "v") (A := .int) (B := .int) (w := true) (y := "v") (τ := .int) (r := [.fail])
     (e₁ := .write (var "x") (.lit 41)) (e₂ := .write (var "x") (.lit 0))
-    (Γb₁ := [("v", .lent (.sum .int .int))]) (Γb₂ := [("v", .lent (.sum .int .int))])
-    (Γb := [("v", .lent (.sum .int .int))]) rfl (.own rfl) (fun _ _ _ h => by simp [lookup] at h) (fun _ => rfl)
+    (Γb₁ := [("v", .lent (.sum .int .int) false)]) (Γb₂ := [("v", .lent (.sum .int .int) false)])
+    (Γb := [("v", .lent (.sum .int .int) false)]) rfl (.own rfl) (fun _ _ _ h => by simp [lookup] at h) (fun _ => rfl)
     (fun _ => ⟨rfl, rfl⟩)
     (.write .lit (.ref (m := .mut) rfl)) (.write .lit (.ref (m := .mut) rfl)) (Weaker.refl _) (Weaker.refl _)
   simp only [thaw] at this
@@ -1729,7 +1729,7 @@ example : ∀ n, match eval [growR] [] n [.abort .fail 0] .empty [] growOuter wi
 
 /-- `let v = []; v.push(Box.new(1)); v.push(Box.new(2)); v.len()`: 2, and nothing left allocated. -/
 def vecEx : Expr :=
-  .let_ "v" (.vec (.box .int)) .vnew
+  .let_ "v" (.vec true (.box .int)) .vnew
     (.let_ "a" (.box .int) (.new (.lit 1))
       (.let_ "u" .int (.vpush (var "v") (.move "a"))
         (.let_ "b" (.box .int) (.new (.lit 2))
@@ -1761,7 +1761,7 @@ example : ∀ n, match eval [] [] n [.abort .fail 0] .empty [] vecEx with
 /-- `let v = []; v.push(Box.new(41)); match (v.pop()) { #None => 0, #Some(b) => *b + 1 }`: the element
 taken back out of the vector, owned by the arm; 42, and nothing left allocated. -/
 def vecPop : Expr :=
-  .let_ "v" (.vec (.box .int)) .vnew
+  .let_ "v" (.vec true (.box .int)) .vnew
     (.let_ "a" (.box .int) (.new (.lit 41))
       (.let_ "u" .int (.vpush (var "v") (.move "a"))
         (.let_ "o" (.sum .int (.box .int)) (.vpop (var "v"))
@@ -1775,14 +1775,14 @@ example : freed (eval [] [] 40 [] .empty [] vecPop) := by
 /-- `let v = [1, 2, 40]; { const s = v[1..3]; s.len() + s[1] }`: a slice of the vector, a vector of
 its own whose cell is freed as it ends; 42, and nothing left allocated. -/
 def vecSlice : Expr :=
-  .let_ "v" (.vec .int) .vnew
+  .let_ "v" (.vec true .int) .vnew
     (.let_ "u1" .int (.vpush (var "v") (.lit 1))
       (.let_ "u2" .int (.vpush (var "v") (.lit 2))
         (.let_ "u3" .int (.vpush (var "v") (.lit 40))
           (.let_ "lo" .int (.atom (.lit 1))
             (.let_ "hi" .int (.atom (.lit 3))
               (.let_ "k" .int (.atom (.lit 1))
-                (.lendSlice "s" (var "v") "lo" "hi"
+                (.lendSlice "s" .ro (var "v") "lo" "hi"
                   (.let_ "n" .int (.vlen (var "s"))
                     (.lendIdx "e" .ro (var "s") "k" (.add (.read (var "e")) (.read (var "n"))))))))))))
 
@@ -1800,16 +1800,16 @@ theorem vecSlice_typed : Typed [] [] [] vecSlice .int [] [.fail] := by
   refine .let_ (live := true) rfl (.atom .lit) ?_
   refine .let_ (live := true) rfl (.atom .lit) ?_
   let Γ0 : Ctx := [("k", .own .int true), ("hi", .own .int true), ("lo", .own .int true), ("u3", .own .int true),
-      ("u2", .own .int true), ("u1", .own .int true), ("v", .own (.vec .int) true)]
-  let Γs : Ctx := ("n", .own .int true) :: ("s", .ref .ro (.vec .int)) :: freeze Γ0 ["v"]
+      ("u2", .own .int true), ("u1", .own .int true), ("v", .own (.vec true .int) true)]
+  let Γs : Ctx := ("n", .own .int true) :: ("s", .ref .ro (.vec false .int)) :: freeze Γ0 ["v"]
   have hIdx : Typed [] [] Γs (.lendIdx "e" .ro (var "s") "k" (.add (.read (var "e")) (.read (var "n")))) .int Γs [.fail] := by
     have := Typed.lendIdx (F := []) (O := []) (Γ := Γs) (x := "e") (m := .ro) (y := "s") (τ := .int) (τb := .int)
       (r := [.fail]) (Γb := lendCtx .ro Γs "s") rfl (.ref rfl) (.own (x := "k") rfl) (fun h => by cases h)
       (fun h => by cases h) (fun h => by cases h) (.add (.read (.ref (x := "e") rfl)) (.read (.own (x := "n") rfl)))
     simpa [Γs, Γ0, thaw, lendCtx, freeze, Slot.ro] using this
-  have h := Typed.lendSlice (F := []) (O := []) (x := "s") (y := "v") (τ := .int) (r := [.fail]) (τb := .int)
-    (Γ := Γ0) (Γb := freeze Γ0 ["v"]) rfl (.own rfl) (.own (x := "lo") rfl) (.own (x := "hi") rfl)
-    (.let_ (live := true) rfl (.vlen (.ref (x := "s") (m := .ro) rfl)) hIdx)
+  have h := Typed.lendSlice (F := []) (O := []) (x := "s") (m := .ro) (y := "v") (τ := .int) (r := [.fail])
+    (τb := .int) (Γ := Γ0) (Γb := freeze Γ0 ["v"]) rfl (.own rfl) (.own (x := "lo") rfl) (.own (x := "hi") rfl)
+    (fun h => by cases h) (.let_ (live := true) rfl (.vlen (.ref (x := "s") (m := .ro) rfl)) hIdx)
   simpa [Γ0, thaw, freeze, Slot.ro] using h
 
 example : ∀ n, match eval [] [] n [.abort .fail 0] .empty [] vecSlice with
@@ -1821,10 +1821,125 @@ example : ∀ n, match eval [] [] n [.abort .fail 0] .empty [] vecSlice with
     | (.abort _ _, σ') => ∀ l, σ'.mem l = none :=
   program_ok (by intro d hd; simp at hd) vecSlice_typed
 
+/-- `let v = [5, 1, 2, 30]; { const s = mut v[1..3]; s[0] += 4; s[1] += 5 }; v[1] + v[3] + v[2]`: a
+`mut` slice changing the elements it is of, through borrows of them, the vector out of reach
+meanwhile and its own again after; 42. -/
+def vecSliceMut : Expr :=
+  .let_ "v" (.vec true .int) .vnew
+    (.let_ "u1" .int (.vpush (var "v") (.lit 5))
+      (.let_ "u2" .int (.vpush (var "v") (.lit 1))
+        (.let_ "u3" .int (.vpush (var "v") (.lit 2))
+          (.let_ "u4" .int (.vpush (var "v") (.lit 30))
+            (.let_ "lo" .int (.atom (.lit 1))
+              (.let_ "hi" .int (.atom (.lit 3))
+                (.let_ "k0" .int (.atom (.lit 0))
+                  (.let_ "k1" .int (.atom (.lit 1))
+                    (.let_ "t" .int
+                      (.lendSlice "s" .mut (var "v") "lo" "hi"
+                        (.let_ "a" .int
+                          (.lendIdx "e" .mut (var "s") "k0"
+                            (.let_ "q" .int (.add (.read (var "e")) (.lit 4)) (.write (var "e") (.read (var "q")))))
+                          (.lendIdx "f" .mut (var "s") "k1"
+                            (.let_ "q" .int (.add (.read (var "f")) (.lit 5)) (.write (var "f") (.read (var "q")))))))
+                      (.let_ "x" .int (.lendIdx "r" .ro (var "v") "lo" (.atom (.read (var "r"))))
+                        (.let_ "z" .int (.lendIdx "r" .ro (var "v") "hi" (.atom (.read (var "r"))))
+                          (.let_ "k2" .int (.atom (.lit 2))
+                            (.let_ "w" .int (.lendIdx "r" .ro (var "v") "k2" (.atom (.read (var "r"))))
+                              (.let_ "y" .int (.add (.read (var "x")) (.read (var "z")))
+                                (.add (.read (var "y")) (.read (var "w")))))))))))))))))
+
+example : value (eval [] [] 80 [] .empty [] vecSliceMut) = some 42 := by
+  run [vecSliceMut]
+example : freed (eval [] [] 80 [] .empty [] vecSliceMut) := by
+  run [vecSliceMut]
+
+theorem vecSliceMut_typed : Typed [] [] [] vecSliceMut .int [] [.fail] := by
+  refine .let_ (live := true) rfl (.vnew rfl) ?_
+  refine .let_ (live := true) rfl (.vpush .lit (.own rfl)) ?_
+  refine .let_ (live := true) rfl (.vpush .lit (.own rfl)) ?_
+  refine .let_ (live := true) rfl (.vpush .lit (.own rfl)) ?_
+  refine .let_ (live := true) rfl (.vpush .lit (.own rfl)) ?_
+  refine .let_ (live := true) rfl (.atom .lit) ?_
+  refine .let_ (live := true) rfl (.atom .lit) ?_
+  refine .let_ (live := true) rfl (.atom .lit) ?_
+  refine .let_ (live := true) rfl (.atom .lit) ?_
+  let Γ0 : Ctx := [("k1", .own .int true), ("k0", .own .int true), ("hi", .own .int true), ("lo", .own .int true),
+    ("u4", .own .int true), ("u3", .own .int true), ("u2", .own .int true), ("u1", .own .int true),
+    ("v", .own (.vec true .int) true)]
+  let Γs : Ctx := ("s", .ref .mut (.vec false .int)) :: hide Γ0 "v"
+  -- `{ const e = mut s[k]; *e = *e + d }`, in the slice's scope.
+  have bump : ∀ (Γ : Ctx) (e k : Var) (d : Int), lookup e Γ = none → lookup k Γ = some (.own .int true) →
+      lookup "s" Γ = some (.ref .mut (.vec false .int)) → e ≠ "q" → lookup "q" (lendCtx .mut Γ "s") = none →
+      Typed [] [] Γ (.lendIdx e .mut (var "s") k
+        (.let_ "q" .int (.add (.read (var e)) (.lit d)) (.write (var e) (.read (var "q"))))) .int
+        (thaw Γ ["s"] (lendCtx .mut Γ "s")) [.fail] := by
+    intro Γ e k d he hk hs heq hq
+    have hq' : lookup "q" ((e, .ref .mut .int) :: lendCtx .mut Γ "s") = none := by
+      simp only [lookup]; rw [if_neg (Ne.symm heq)]; exact hq
+    have he' : lookup e (("q", .own .int true) :: (e, .ref .mut .int) :: lendCtx .mut Γ "s") = some (.ref .mut .int) := by
+      simp only [lookup]; rw [if_neg heq]; simp
+    exact Typed.lendIdx (F := []) (O := []) (Γ := Γ) (x := e) (m := .mut) (y := "s") (z := k) (τ := .int)
+      (τb := .int) (r := [.fail]) (Γb := lendCtx .mut Γ "s") he (.ref hs) (.own hk) (fun _ => rfl) (fun _ => rfl)
+      (fun _ _ _ _ h => by rw [hs] at h; cases h)
+      (.let_ (live := true) hq' (.add (.read (.ref (x := e) (m := .mut) (by simp [lookup]))) .lit)
+        (.write (.read (.own (x := "q") (by simp [lookup]))) (.ref (x := e) (m := .mut) he')))
+  have hbody : Typed [] [] ((("s", .ref .mut (.vec false .int)) :: lendCtx .mut Γ0 "v"))
+      (.let_ "a" .int
+        (.lendIdx "e" .mut (var "s") "k0"
+          (.let_ "q" .int (.add (.read (var "e")) (.lit 4)) (.write (var "e") (.read (var "q")))))
+        (.lendIdx "f" .mut (var "s") "k1"
+          (.let_ "q" .int (.add (.read (var "f")) (.lit 5)) (.write (var "f") (.read (var "q"))))))
+      .int (("s", .ref .mut (.vec false .int)) :: hide Γ0 "v") [.fail] := by
+    have h1 := bump (("s", .ref .mut (.vec false .int)) :: lendCtx .mut Γ0 "v") "e" "k0" 4
+      (by simp [Γ0, lendCtx, hide, lookup]) (by simp [Γ0, lendCtx, hide, lookup, Slot.ty])
+      (by simp [lookup]) (by decide) (by simp [Γ0, lendCtx, hide, lookup])
+    have h2 := bump (("a", .own .int true) :: ("s", .ref .mut (.vec false .int)) :: lendCtx .mut Γ0 "v") "f" "k1" 5
+      (by simp [Γ0, lendCtx, hide, lookup]) (by simp [Γ0, lendCtx, hide, lookup, Slot.ty])
+      (by simp [lookup]) (by decide) (by simp [Γ0, lendCtx, hide, lookup])
+    refine .let_ (live := true) (by simp [Γ0, lendCtx, hide, lookup]) (by simpa [Γ0, lendCtx, hide, thaw, Slot.ty,
+      Slot.shell, Ty.shell] using h1) ?_
+    simpa [Γ0, lendCtx, hide, thaw, Slot.ty, Slot.shell, Ty.shell] using h2
+  have h := Typed.lendSlice (F := []) (O := []) (x := "s") (m := .mut) (y := "v") (τ := .int) (r := [.fail])
+    (τb := .int) (Γ := Γ0) (Γb := hide Γ0 "v") rfl (.own rfl) (.own (x := "lo") rfl) (.own (x := "hi") rfl)
+    (fun _ => rfl) hbody
+  refine .let_ (live := true) rfl (by simpa [Γ0, thaw, hide, Slot.ty, Slot.shell] using h) ?_
+  refine .let_ (live := true) rfl (.lendIdx rfl (.own rfl) (.own rfl) (fun h => by cases h) (fun h => by cases h)
+    (fun h => by cases h) (.atom (.read (.ref rfl)))) ?_
+  refine .let_ (live := true) rfl (.lendIdx rfl (.own rfl) (.own rfl) (fun h => by cases h) (fun h => by cases h)
+    (fun h => by cases h) (.atom (.read (.ref rfl)))) ?_
+  refine .let_ (live := true) rfl (.atom .lit) ?_
+  refine .let_ (live := true) rfl (.lendIdx rfl (.own rfl) (.own rfl) (fun h => by cases h) (fun h => by cases h)
+    (fun h => by cases h) (.atom (.read (.ref rfl)))) ?_
+  exact .let_ (live := true) rfl (.add (.read (.own rfl)) (.read (.own rfl))) (.add (.read (.own rfl)) (.read (.own rfl)))
+
+example : ∀ n, match eval [] [] n [.abort .fail 0] .empty [] vecSliceMut with
+    | (.stuck, _) => False
+    | (.susp _ _ _ _ _, _) => False
+    | (.timeout, _) => True
+    | (.panic, _) => True
+    | (.val v, σ') => ∃ L, VT [] [] σ' .int v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
+    | (.abort _ _, σ') => ∀ l, σ'.mem l = none :=
+  program_ok (by intro d hd; simp at hd) vecSliceMut_typed
+
+/-- A slice does not grow: pushing to one is rejected, for it would move the elements it shares with
+its vector. -/
+theorem slice_push_rejected : ¬ Typed F O [("s", .ref .mut (.vec false .int))] (.vpush (var "s") (.lit 1)) τ Γ' r := by
+  have key : ∀ w y, ¬ PlaceTy [("s", .ref .mut (.vec false .int))] (var "s") (.vec true .int) w y := by
+    intro w y hp
+    cases hp with
+    | own h => simp [lookup] at h
+    | ref h => simp [lookup] at h
+    | half h => simp [lookup] at h
+  intro h
+  cases h with
+  | vpush ha hp =>
+    cases ha
+    exact key _ _ hp
+
 /-- `let v = []; v.push(1); v.push(41); const i = 1; { const e = mut v[i]; *e = *e + 1 }; v[i]`:
 an element changed and read through borrows of it; 42. -/
 def vecIdx : Expr :=
-  .let_ "v" (.vec .int) .vnew
+  .let_ "v" (.vec true .int) .vnew
     (.let_ "u" .int (.vpush (var "v") (.lit 1))
       (.let_ "w" .int (.vpush (var "v") (.lit 41))
         (.let_ "i" .int (.atom (.lit 1))
@@ -1860,7 +1975,7 @@ example : ∀ n, match eval [] [] n [.abort .fail 0] .empty [] vecIdx with
 
 /-- `let v = []; v.push(1); const i = 5; v[i]`: out of bounds, a panic. -/
 def vecOob : Expr :=
-  .let_ "v" (.vec .int) .vnew
+  .let_ "v" (.vec true .int) .vnew
     (.let_ "u" .int (.vpush (var "v") (.lit 1))
       (.let_ "i" .int (.atom (.lit 5))
         (.lendIdx "r" .ro (var "v") "i" (.atom (.read (var "r"))))))
@@ -1871,10 +1986,10 @@ example : (eval [] [] 40 [] .empty [] vecOob).1 = .panic := by
 /-- Pushing to a vector while one of its elements is borrowed `mut`: the vector is out of reach
 while the borrow lives, so the push, which would move the element, does not check. -/
 theorem pushWhileBorrowed_rejected :
-    ¬ Typed [] [] [("i", .own .int true), ("v", .own (.vec .int) true)]
+    ¬ Typed [] [] [("i", .own .int true), ("v", .own (.vec true .int) true)]
       (.lendIdx "e" .mut (var "v") "i" (.vpush (var "v") (.lit 1))) τ Γ' r := by
   have key : ∀ {τe τ w y}, PlaceTy (("e", .ref .mut τe) ::
-      lendCtx .mut [("i", .own .int true), ("v", .own (.vec .int) true)] "v") (var "v") τ w y → False := by
+      lendCtx .mut [("i", .own .int true), ("v", .own (.vec true .int) true)] "v") (var "v") τ w y → False := by
     intro τe τ w y hp
     cases hp <;> simp_all [lookup, lendCtx, hide]
   intro h
@@ -2037,7 +2152,7 @@ def popOr0 (x : Var) (rest : Expr) : Expr :=
 /-- `function* drain(v: mut Vec<int>) { yield v.pop() ?? 0; yield v.pop() ?? 0; }`: a producer
 lent a vector it changes. -/
 def drain : Fn :=
-  { owns := [], refs := [("v", .mut, .vec .int)], ret := .int, row := [.eff 1],
+  { owns := [], refs := [("v", .mut, .vec true .int)], ret := .int, row := [.eff 1],
     body := popOr0 "x" (.let_ "u" .int (.perform 1 [.read (var "x")] [])
       (popOr0 "z" (.let_ "w" .int (.perform 1 [.read (var "z")] []) (.atom (.lit 0))))) }
 
@@ -2045,11 +2160,11 @@ def drain : Fn :=
 s + v.len()`: the producer takes two elements out of the vector lent it, which is out of the
 consumer's reach meanwhile, and the vector, one element left, is the code around's again; 42. -/
 def genDrain : Expr :=
-  .let_ "v" (.vec .int) .vnew
+  .let_ "v" (.vec true .int) .vnew
     (.let_ "u1" .int (.vpush (var "v") (.lit 1))
       (.let_ "u2" .int (.vpush (var "v") (.lit 1))
         (.let_ "u3" .int (.vpush (var "v") (.lit 40))
-          (.let_ "s" .int (.gen 0 1 .int .int 0 [] [⟨"v", .mut, .vec .int, .var "v"⟩]
+          (.let_ "s" .int (.gen 0 1 .int .int 0 [] [⟨"v", .mut, .vec true .int, .var "v"⟩]
               (nextOr0 "x1" (nextOr0 "x2" (.add (.read (var "x1")) (.read (var "x2"))))))
             (.let_ "n" .int (.vlen (var "v")) (.add (.read (var "s")) (.read (var "n"))))))))
 
@@ -2059,7 +2174,7 @@ example : freed (eval [drain] genOps 80 [.abort .fail 0] .empty [] genDrain) := 
   run [genDrain, drain, popOr0, nextOr0, genOps, nextOp, yieldOp]
 
 /-- `const x = v.pop() ?? 0; rest`, typed. -/
-theorem popOr0_typed (hv : lookup "v" Γ = some (.ref .mut (.vec .int))) (hx : x ∉ Γ.map Prod.fst)
+theorem popOr0_typed (hv : lookup "v" Γ = some (.ref .mut (.vec true .int))) (hx : x ∉ Γ.map Prod.fst)
     (ha : "a" ∉ Γ.map Prod.fst) (hy : "y" ∉ Γ.map Prod.fst)
     (hrest : Typed F O ((x, .own .int true) :: Γ) rest τ ((x, .own .int live) :: Γ') r) :
     Typed F O Γ (popOr0 x rest) τ Γ' r := by
@@ -2079,7 +2194,7 @@ theorem drain_ok : FnsOk [drain] genOps := by
   subst hd
   refine ⟨by decide, ?_⟩
   simp only [drain, FnOk]
-  refine ⟨[("v", .ref .mut (.vec .int))], popOr0_typed (live := true) rfl (by decide) (by decide) (by decide) ?_⟩
+  refine ⟨[("v", .ref .mut (.vec true .int))], popOr0_typed (live := true) rfl (by decide) (by decide) (by decide) ?_⟩
   refine .let_ (live := true) rfl (.perform (op := yieldOp) rfl (List.mem_singleton_self _)
     (.cons (.read (.own rfl)) .nil) .nil .nil) ?_
   refine popOr0_typed (live := true) rfl (by decide) (by decide) (by decide) ?_
@@ -2091,8 +2206,8 @@ theorem genDrain_typed : Typed [drain] genOps [] genDrain .int [] [.fail] := by
   refine .let_ (live := true) rfl (.vpush .lit (.own rfl)) ?_
   refine .let_ (live := true) rfl (.vpush .lit (.own rfl)) ?_
   refine .let_ (live := true) rfl (.vpush .lit (.own rfl)) ?_
-  let Γ0 : Ctx := [("u3", .own .int true), ("u2", .own .int true), ("u1", .own .int true), ("v", .own (.vec .int) true)]
-  have hg : Typed [drain] genOps Γ0 (.gen 0 1 .int .int 0 [] [⟨"v", .mut, .vec .int, .var "v"⟩]
+  let Γ0 : Ctx := [("u3", .own .int true), ("u2", .own .int true), ("u1", .own .int true), ("v", .own (.vec true .int) true)]
+  have hg : Typed [drain] genOps Γ0 (.gen 0 1 .int .int 0 [] [⟨"v", .mut, .vec true .int, .var "v"⟩]
       (nextOr0 "x1" (nextOr0 "x2" (.add (.read (var "x1")) (.read (var "x2")))))) .int Γ0 [.fail] := by
     have hb : Typed [drain] genOps (freeze (hideAll Γ0 (roots .mut [(.mut, "v")])) (roots .ro [(.mut, "v")]))
         (nextOr0 "x1" (nextOr0 "x2" (.add (.read (var "x1")) (.read (var "x2"))))) .int (hide Γ0 "v")
@@ -2121,7 +2236,7 @@ example : ∀ n, match eval [drain] genOps n [.abort .fail 0] .empty [] genDrain
 region, its elements cells of the region, all released as it ends; 42. -/
 def regionList : Expr :=
   .region "R" .int
-    (.let_ "l" (.rref false 0 (.vec .int)) (.rlnew "R" .int)
+    (.let_ "l" (.rref false 0 (.vec true .int)) (.rlnew "R" .int)
       (.let_ "u" .int (.rpush "R" .int (var "l") (.lit 40))
         (.let_ "v" .int (.rpush "R" .int (var "l") (.lit 2))
           (.let_ "i" .int (.atom (.lit 0))
@@ -2144,11 +2259,11 @@ theorem regionList_typed : Typed [] [] [] regionList .int [] [.fail] := by
   refine .let_ (live := true) rfl (.atom .lit) ?_
   have hx := Typed.rnth (F := []) (O := []) (r := [.fail]) (k := 0) (τ := .int) (R := "R") (c := false) (z := "i")
     (Γ := [("j", .own .int true), ("i", .own .int true), ("v", .own .int true), ("u", .own .int true),
-      ("l", .own (.rref false 0 (.vec .int)) true), ("R", .own (.arena 0) true)]) (.own (x := "l") rfl) (.own rfl) rfl (.inl rfl) rfl
+      ("l", .own (.rref false 0 (.vec true .int)) true), ("R", .own (.arena 0) true)]) (.own (x := "l") rfl) (.own rfl) rfl (.inl rfl) rfl
   refine .let_ (live := true) rfl (by simpa [Ctx.shift] using hx) ?_
   have hy := Typed.rnth (F := []) (O := []) (r := [.fail]) (k := 0) (τ := .int) (R := "R") (c := false) (z := "j")
     (Γ := [("x", .own .int true), ("j", .own .int true), ("i", .own .int true), ("v", .own .int true),
-      ("u", .own .int true), ("l", .own (.rref false 0 (.vec .int)) true), ("R", .own (.arena 0) true)])
+      ("u", .own .int true), ("l", .own (.rref false 0 (.vec true .int)) true), ("R", .own (.arena 0) true)])
     (.own (x := "l") rfl) (.own rfl) rfl (.inl rfl) rfl
   refine .let_ (live := true) rfl (by simpa [Ctx.shift] using hy) ?_
   exact .add (.read (.own rfl)) (.read (.own rfl))

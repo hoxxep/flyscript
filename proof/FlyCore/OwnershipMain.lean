@@ -388,7 +388,7 @@ theorem eval_ok_succ (hF : FnsOk F O) (hE : EvalOk F O n) (hR : RetOk F O n) :
         obtain ⟨hd, h1, h2, h3⟩ := this
         exact ⟨hd, h1, h2, h3⟩
       have hcs : ∀ c ∈ cs, ∃ xi mi τi w hd, d.refs[c.1]? = some (xi, mi, τi) ∧ PlaceTy Γ'' c.2 d.ret w xi ∧
-          (m = .mut → w = true) ∧ hos[c.1]? = some (hd : Hole) ∧ (m = .mut → hd.mode = .mut ∧ τi.isFn = false) ∧
+          (m = .mut → w = true) ∧ hos[c.1]? = some (hd : Hole) ∧ (m = .mut → hd.mode = .mut ∧ τi.shell = false) ∧
           (m = .mut → ∀ s, lookup hd.root Γ₁ = some s → s.shell = true → hd.path = []) := by
         intro c hc
         obtain ⟨xi, mi, τi, w, hri, hpt, hmw⟩ := hcands c hc
@@ -576,7 +576,7 @@ theorem eval_ok_succ (hF : FnsOk F O) (hE : EvalOk F O n) (hR : RetOk F O n) :
     | vlen hp => exact vlen_ok hp hI hwf
     | vpush ha hp => exact vpush_ok ha hp hI hwf
     | vpop hp hc => exact vpop_ok hp hc hI hwf
-    | lendSlice hx hp hlo hhi hb => exact lendSlice_ok hE hx hp hlo hhi hb hI hwf hRdy
+    | lendSlice hx hp hlo hhi hm hb => exact lendSlice_any hE hx hp hlo hhi hm hb hI hwf hRdy
     | par hop howns hrefs hret hfa hfb hretpa hcapa hretpb hcapb hea heb hrowa hrowb hca hcb hargs hlends =>
       exact par_ok hF hR (evalK_ok hR) hop howns hrefs hret hfa hfb hretpa hcapa hretpb hcapb hea heb hrowa hrowb
         hca hcb hargs hlends hI hwf hRdy

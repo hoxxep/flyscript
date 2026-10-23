@@ -149,7 +149,7 @@ theorem region_alloc (hR : lookup R Γ = some s) (hs : s = .own (.arena k) true 
     Post F ι O σ E S Γ env (.rref b k τ) r hs'
       (let (l, σ2) := σ.alloc v
        (.val (.rptr l), (σ2.set c1 (some (.arena (cs ++ [l])))).tag l c1 τ)) := by
-  have hex' : s.excl = true ∧ s.shell = false := by rcases hs with rfl | rfl <;> simp [Slot.excl, Slot.shell]
+  have hex' : s.excl = true ∧ s.shell = false := by rcases hs with rfl | rfl <;> simp [Slot.excl, Slot.shell, Ty.shell]
   obtain ⟨c0, LR, E₁a, E₂a, hc0, hsl, hE, hupd⟩ := foot_update hI.foot hI.keys hR hex'.1 hex'.2
   obtain ⟨c, cs', hc, hk, hcm, hnd, hcs, hexa, hsl'⟩ :=
     arena_of hR (by rcases hs with h | h; exact .inl h; exact .inr ⟨_, h⟩) hI
@@ -289,7 +289,7 @@ theorem region_set (hR : lookup R Γ = some s) (hs : s = .own (.arena k) true �
     (hk : ι[k]? = some a') (ht : σ.rt l = some (a', τ)) (hrd : RD (ι.drop k) σ τ v)
     (hI : Inv F ι σ Γ env E S) (hwf : WF σ) :
     Inv F ι (σ.set l (some v)) Γ env E S ∧ Moves σ E (σ.set l (some v)) E [] ∧ ∃ w, σ.mem l = some w := by
-  have hex' : s.excl = true ∧ s.shell = false := by rcases hs with rfl | rfl <;> simp [Slot.excl, Slot.shell]
+  have hex' : s.excl = true ∧ s.shell = false := by rcases hs with rfl | rfl <;> simp [Slot.excl, Slot.shell, Ty.shell]
   obtain ⟨c0, LR, E₁a, E₂a, hc0, hsl, hE, hupd⟩ := foot_update hI.foot hI.keys hR hex'.1 hex'.2
   obtain ⟨c, cs, hc, hk', hcm, hnd, hcs, hexa, hsl'⟩ :=
     arena_of hR (by rcases hs with h | h; exact .inl h; exact .inr ⟨_, h⟩) hI
@@ -355,17 +355,17 @@ theorem rset_ok (hp : PlaceTy Γ p (.rref true k τ) w y) (hR : lookup R Γ = so
 /-- `RegionList.new()`: a new cell of the region, an empty list of it. -/
 theorem rlnew_ok (hR : lookup R Γ = some s) (hs : s = .own (.arena k) true ∨ s = .ref .mut (.arena k))
     (hI : Inv F ι σ Γ env E S) (hwf : WF σ) :
-    Post F ι O σ E S Γ env (.rref false k (.vec τ)) r hs' (eval F O (n + 1) hs' σ env (.rlnew R τ)) := by
+    Post F ι O σ E S Γ env (.rref false k (.vec true τ)) r hs' (eval F O (n + 1) hs' σ env (.rlnew R τ)) := by
   obtain ⟨c1, cs, hc1, -, hcm1, -⟩ := arena_of hR (by rcases hs with h | h; exact .inl h; exact .inr ⟨_, h⟩) hI
   simp only [eval, hc1, hcm1]
-  exact region_alloc (v := .vec []) (τ := .vec τ) hR hs (by simp [RD]) hc1 hcm1 hI hwf
+  exact region_alloc (v := .vec []) (τ := .vec true τ) hR hs (by simp [RD]) hc1 hcm1 hI hwf
 
 /-- A list of a region a place holds a reference to: its cell holds its elements' cells, each a cell
 of the region holding a `τ`. -/
-theorem list_of (hp : PlaceTy Γ p (.rref c k (.vec τ)) w y) (hR : lookup R Γ = some s)
+theorem list_of (hp : PlaceTy Γ p (.rref c k (.vec true τ)) w y) (hR : lookup R Γ = some s)
     (hs : s = .own (.arena k) true ∨ ∃ m, s = .ref m (.arena k)) (hI : Inv F ι σ Γ env E S) :
     ∃ q lc ls a cs, resolve σ env p = some q ∧ σ.mem q = some (.rptr lc) ∧ σ.mem lc = some (.vec ls) ∧
-      σ.rt lc = some (a, .vec τ) ∧ ι[k]? = some a ∧ lookup R env = some a ∧ σ.mem a = some (.arena cs) ∧
+      σ.rt lc = some (a, .vec true τ) ∧ ι[k]? = some a ∧ lookup R env = some a ∧ σ.mem a = some (.arena cs) ∧
       (∀ l ∈ ls, l ∈ cs ∧ σ.rt l = some (a, τ)) ∧
       (∀ l ∈ cs, ∃ τ v, σ.rt l = some (a, τ) ∧ σ.mem l = some v ∧ RD (ι.drop k) σ τ v) := by
   obtain ⟨a0, τr, Lr, P, q, s', -, hLr, hpath, hres, -⟩ := place_ok hp hI.foot
@@ -387,7 +387,7 @@ theorem list_of (hp : PlaceTy Γ p (.rref c k (.vec τ)) w y) (hR : lookup R Γ 
   exact ⟨hexa l _ htl, htl⟩
 
 /-- `p[z]` for a list: out of bounds, a panic; else a copy of the element, data of the region. -/
-theorem rnth_ok (hp : PlaceTy Γ p (.rref c k (.vec τ)) w y) (hz : PlaceTy Γ (.var z) .int wz yz)
+theorem rnth_ok (hp : PlaceTy Γ p (.rref c k (.vec true τ)) w y) (hz : PlaceTy Γ (.var z) .int wz yz)
     (hR : lookup R Γ = some s) (hs : s = .own (.arena k) true ∨ ∃ m, s = .ref m (.arena k))
     (hd : τ.rdata = true) (hI : Inv F ι σ Γ env E S) (hwf : WF σ) :
     Post F ι O σ E S Γ env (τ.shiftBy k) r hs' (eval F O (n + 1) hs' σ env (.rnth R p z)) := by
@@ -413,7 +413,7 @@ theorem rnth_ok (hp : PlaceTy Γ p (.rref c k (.vec τ)) w y) (hz : PlaceTy Γ (
   · simp [Post]
 
 /-- `p.len()` for a list. -/
-theorem rlen_ok (hp : PlaceTy Γ p (.rref c k (.vec τ)) w y) (hR : lookup R Γ = some s)
+theorem rlen_ok (hp : PlaceTy Γ p (.rref c k (.vec true τ)) w y) (hR : lookup R Γ = some s)
     (hs : s = .own (.arena k) true ∨ ∃ m, s = .ref m (.arena k)) (hI : Inv F ι σ Γ env E S) (hwf : WF σ) :
     Post F ι O σ E S Γ env .int r hs' (eval F O (n + 1) hs' σ env (.rlen R p)) := by
   obtain ⟨q, lc, ls, -, -, hres, hq, hlc, -⟩ := list_of hp hR hs hI
@@ -422,7 +422,7 @@ theorem rlen_ok (hp : PlaceTy Γ p (.rref c k (.vec τ)) w y) (hR : lookup R Γ 
 
 /-- `p.push(a)` for a list: `a` in a new cell of the region, tagged as holding a `τ`, and the list's
 cell given that cell at its end. -/
-theorem rpush_ok (hp : PlaceTy Γ p (.rref c k (.vec τ)) w y) (hR : lookup R Γ = some s)
+theorem rpush_ok (hp : PlaceTy Γ p (.rref c k (.vec true τ)) w y) (hR : lookup R Γ = some s)
     (hs : s = .own (.arena k) true ∨ s = .ref .mut (.arena k)) (hd : τ.rdata = true)
     (ha : AtomTy Γ a (τ.shiftBy k) Γ) (hI : Inv F ι σ Γ env E S) (hwf : WF σ) :
     Post F ι O σ E S Γ env .int r hs' (eval F O (n + 1) hs' σ env (.rpush R τ p a)) := by
@@ -468,7 +468,7 @@ theorem ret_regionK (hR : Ready O hs r) (hwf : WF σ0) (hag : Agree σf σ0 S) (
     cases hsl with
     | arena hk ha hnd hn hcs hex =>
     rename_i cs
-    simp only [addE, addS, exclPart, sharedPart, Slot.excl, Slot.shell, ↓reduceIte, Bool.false_eq_true,
+    simp only [addE, addS, exclPart, sharedPart, Slot.excl, Slot.shell, Ty.shell, ↓reduceIte, Bool.false_eq_true,
       List.nil_append] at hE' hS'
     subst hE' hS'
     have hnd' := nodup_append_disj.mp hI.nodup
@@ -563,7 +563,7 @@ theorem region_ok (hE : EvalOk F O n) (hR : RetOk F O n) (hx : lookup R Γ = non
   have hxs : R ∉ (Ctx.shift Γ).map Prod.fst := by rw [Ctx.shift_keys]; exact lookup_none_keys hx
   have hI1 : Inv F (a :: ι) σ1 ((R, .own (.arena 0) true) :: Ctx.shift Γ) ((R, a) :: env) (a :: E) S := by
     have hf := Foot.cons (s := .own (.arena 0) true) (x := R) (a := a) hLa ((hI.shift (a := a)).foot.frame hag1)
-    refine ⟨by simpa [addE, addS, exclPart, sharedPart, Slot.excl, Slot.shell] using hf,
+    refine ⟨by simpa [addE, addS, exclPart, sharedPart, Slot.excl, Slot.shell, Ty.shell] using hf,
       List.nodup_cons.mpr ⟨fun h => hfresh a (hI.alloc a h) rfl, hI.nodup⟩, fun x hx hx' => ?_,
       List.nodup_cons.mpr ⟨hxs, by rw [Ctx.shift_keys]; exact hI.keys⟩⟩
     rcases List.mem_cons.mp hx' with rfl | hx'
