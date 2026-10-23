@@ -40,6 +40,22 @@ structure Lvl where
   S : List Nat
   r : Row
 
+/-- What an arm gives: what the code it took resumes with, or that and what it carries past the
+resumption. -/
+def armTy (op : Op) : PostR → Ty
+  | none => op.ret
+  | some (C, _) => .pair op.ret C
+
+/-- What runs once the rest of a `handle` whose arm resumes in its midst ends: a function taking
+what the arm carried and that value, and the places of the `handle`'s scope, lent to it again, its
+value the `handle`'s. -/
+def PostOk (F : List Fn) (O : List Op) (Γ : Ctx) (env : Env) (τ : Ty) (r : Row) : PostR → Prop
+  | none => True
+  | some (C, f, env', cps) => env' = env ∧ C.complete = true ∧ ∃ d ys, F[f]? = some d ∧
+      d.owns.map Prod.snd = [C, τ] ∧ d.refs = cps.map Cap.sig ∧ d.retp = none ∧ d.cap = none ∧ d.ret = τ ∧
+      (∀ l ∈ d.row, l ∈ r) ∧ Caps Γ cps ys ∧ Exclusive ys ∧
+      ((d.owns.map Prod.fst) ++ (d.refs.map Prod.fst)).Nodup ∧ ∃ Γ'', Typed F O (fnCtx d) d.body d.ret Γ'' d.row
+
 /-- What a `handle` whose arm resumes keeps while its body runs, its places resolved to `caps`: the
 operation `op` it handles; an arm that takes the operation's arguments and the places and gives the
 operation's result; and how the `handle`'s activation, `Γout`, is rebuilt from its body's, `Γin`, once
@@ -47,14 +63,15 @@ the body ends — with what it froze for the body, `Fz`, as it was, and with the
 at the places it was lent `mut`. `Rc` are the cells of the places lent `readonly`, which nothing
 changes while the `handle` runs. -/
 structure HandleOk (F : List Fn) (O : List Op) (σf : Store) (e : Nat) (caps : List (Cap Nat))
-    (os rs : List Var) (arm : Expr) (Γin Γout : Ctx) (env : Env) (Sin S : List Nat) (r : Row)
+    (os rs : List Var) (arm : Expr) (post : PostR) (Γin Γout : Ctx) (env : Env) (Sin S : List Nat) (r : Row)
     (Fz Rc : List Nat) (op : Op) : Prop where
   hop : O[e]? = some op
   hcomp : ∀ τ ∈ op.owns, τ.complete = true
+  hpref : post ≠ none → op.refs = []
   hown : os.length = op.owns.length
   href : rs.length = op.refs.length
   hnames : (os ++ rs ++ caps.map Cap.name).Nodup
-  harm : ∃ Γa, Typed F O (armCtx os rs op (caps.map Cap.sig)) arm op.ret Γa r
+  harm : ∃ Γa, Typed F O (armCtx os rs op (caps.map Cap.sig)) arm (armTy op post) Γa r
   hSin : ∀ l ∈ Sin, l ∈ Fz ∨ l ∈ S
   hS : ∀ l ∈ S, l ∈ Sin
   hRc : ∀ l ∈ Rc, l ∈ Fz ∨ l ∈ S
@@ -66,8 +83,8 @@ structure HandleOk (F : List Fn) (O : List Op) (σf : Store) (e : Nat) (caps : L
 
 /-- What a `handle` keeps holds wherever what it froze, and what its activation only reads, are as
 they were. -/
-theorem HandleOk.transfer (h : HandleOk F O σf e caps os rs arm Γin Γout env Sin S r Fz Rc op)
-    (hag : Agree σf σ' (Fz ++ S)) : HandleOk F O σ' e caps os rs arm Γin Γout env Sin S r Fz Rc op :=
+theorem HandleOk.transfer (h : HandleOk F O σf e caps os rs arm post Γin Γout env Sin S r Fz Rc op)
+    (hag : Agree σf σ' (Fz ++ S)) : HandleOk F O σ' e caps os rs arm post Γin Γout env Sin S r Fz Rc op :=
   { h with
     hRcdet := fun σ1 Rc' Hc hag' => h.hRcdet σ1 Rc' Hc fun l hl => (hag' l hl).trans (hag l hl)
     hre := fun σ1 Eb Hc hag' => h.hre σ1 Eb Hc fun l hl => (hag' l hl).trans (hag l hl) }
@@ -137,19 +154,24 @@ the place, lent `mut`. -/
       FrameOk F O σf (.cloK a) ⟨Γin, envin, τ, Sin, r⟩ ⟨Γout, env, τ, S, r⟩ Xf []
   /-- The body of a `handle` whose arm resumes: its own cells are what it froze and the trees at
 the places its arm was lent `mut`. -/
-  | capK : HandleOk F O σf e caps os rs arm Γin Γout env Sin S r Fz Rc op → CapsOk F σf caps Rc Hc →
-      FrameOk F O σf (.capK τ e hid caps os rs arm) ⟨Γin, env, τ, Sin, .eff e :: r⟩ ⟨Γout, env, τ, S, r⟩
+  | capK : HandleOk F O σf e caps os rs arm post Γin Γout env Sin S r Fz Rc op → PostOk F O Γout env τ r post →
+      CapsOk F σf caps Rc Hc →
+      FrameOk F O σf (.capK τ e hid caps os rs arm post) ⟨Γin, env, τ, Sin, .eff e :: r⟩ ⟨Γout, env, τ, S, r⟩
         (Fz ++ Hc) []
   /-- An arm running, the body of its `handle` suspended as `K`: its own cells are those of `K` and
 what the `handle` froze. -/
-  | armK : HandleOk F O σf e caps os rs arm Γin Γout env Sin S r Fz Rc op →
+  | armK : HandleOk F O σf e caps os rs arm post Γin Γout env Sin S r Fz Rc op → PostOk F O Γout env τ r post →
       FramesOk F O σf K op ⟨Γin, env, τ, Sin, .eff e :: r⟩ X hos AK →
       (∀ l ∈ roCells (olds hos), l ∈ X ∨ l ∈ Sin) →
-      Typed F O (armCtx os rs op (caps.map Cap.sig)) arm op.ret Γa r → cells.map Prod.fst = os →
-      FrameOk F O σf (.armK τ (op.owns.zip (cells.map Prod.snd)) (.capK τ e hid caps os rs arm :: K))
-        ⟨Γa, cells ++ rs.zip (hos.map Hole.loc) ++ caps.map (fun c => (c.name, c.loc)), op.ret,
+      Typed F O (armCtx os rs op (caps.map Cap.sig)) arm (armTy op post) Γa r → cells.map Prod.fst = os →
+      FrameOk F O σf (.armK τ (op.owns.zip (cells.map Prod.snd)) (.capK τ e hid caps os rs arm post :: K) post)
+        ⟨Γa, cells ++ rs.zip (hos.map Hole.loc) ++ caps.map (fun c => (c.name, c.loc)), armTy op post,
           roCells (olds hos) ++ Rc, r⟩
         ⟨Γout, env, τ, S, r⟩ (X ++ Fz) AK
+  /-- What an arm carried past its resumption, waiting for the rest of its `handle` to end: its cells
+are the frame's own. -/
+  | postR : PostOk F O Γ env τ r (some (C, f, env, cps)) → VT F σf C v Lv →
+      FrameOk F O σf (.postR C f v env cps) ⟨Γ, env, τ, S, r⟩ ⟨Γ, env, τ, S, r⟩ Lv []
 
 /-- `FramesOk σs K op top X hos A`: the frames `K`, the outermost first, suspended where the store is
 `σs`, take the value of the operation `op` that suspended them and give what level `top` does;

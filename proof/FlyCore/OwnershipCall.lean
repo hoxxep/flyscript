@@ -250,6 +250,8 @@ theorem typed_weaker : Typed F O Γ e τ Γ' r → (Γ.map Prod.fst).Nodup → W
   | .perform _ _ hargs _ _, hk => atoms_weaker hargs hk
   | .handle _ _ _ _ _ _ _ _ hb, hk =>
     unhideAll_weaker (thaw_weaker (typed_weaker hb (by rw [freeze_keys, hideAll_keys]; exact hk)))
+  | .handleR _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ hb, hk =>
+    unhideAll_weaker (thaw_weaker (typed_weaker hb (by rw [freeze_keys, hideAll_keys]; exact hk)))
   | .handleAbort _ _ _ hx hb hh, hk => by
     have := typed_weaker hh (List.nodup_cons.mpr ⟨by exact lookup_none_keys hx,
       by rw [typed_keys hb]; exact hk⟩)

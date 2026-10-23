@@ -215,6 +215,14 @@ inductive Expr where
   /-- `handle { body } with E { op(x) => h }`: where `body` performs the operation, whose argument
   is an integer, it unwinds, and `h` gives the `handle`'s value. -/
   | handleAbort (body : Expr) (e : Nat) (x : Var) (h : Expr)
+  /-- `handle { body } with E { op(xs) resumes k => { const [v, c] = arm; const r = k(v); post(c, r) } }`:
+  where `body` performs the operation, `arm` runs, given the operation's owned arguments and the places
+  of `caps`, and gives the value to resume the code with and what it carries past the resumption, of
+  type `C`; the code goes on under the `handle` to its end, and then function `post` runs, given what
+  the arm carried and what the rest of the `handle` gave, the places of `caps` lent to it again, its
+  value the `handle`'s. -/
+  | handleR (τ : Ty) (body : Expr) (e : Nat) (caps : List (Cap Place)) (owns : List Var) (arm : Expr)
+      (C : Ty) (post : Nat)
   deriving Repr
 
 /-- A user effect's operation: what it takes, owned and lent, and what it gives. -/
@@ -372,6 +380,11 @@ inductive Outcome where
   | abort (j : Nat) (k : Int)
   deriving Repr
 
+/-- What a `handle` whose arm resumes in its midst runs after: the type of what the arm carries, the
+function that runs once the rest of the `handle` ends, and the `handle`'s variables and places it
+lends that function. -/
+abbrev PostR := Option (Ty × Nat × Env × List (Cap Place))
+
 /-- A frame of the code around what is being evaluated: what a construct does with what the code
 it runs gives. The frames between an operation and the `handle` that handles it are its
 continuation, taken whole when the operation is performed, and given back when it is resumed. -/
@@ -401,10 +414,14 @@ inductive Kont where
   /-- The code a closure over a borrow is in scope for, the closure in cell `a`, freed as it ends. -/
   | cloK (a : Nat)
   /-- The body of a `handle` of type `τ` whose arm resumes, its handler named `id`. -/
-  | capK (τ : Ty) (e : Nat) (id : Nat) (caps : List (Cap Nat)) (os rs : List Var) (arm : Expr)
+  | capK (τ : Ty) (e : Nat) (id : Nat) (caps : List (Cap Nat)) (os rs : List Var) (arm : Expr) (post : PostR)
   /-- An arm running, the parameters it owns dropped as it ends: then the code its `handle` (of type
   `τ`) ran, `K`, goes on with the arm's value, or, if the arm unwinds, is dropped. -/
-  | armK (τ : Ty) (cells : List (Ty × Nat)) (K : List Kont)
+  | armK (τ : Ty) (cells : List (Ty × Nat)) (K : List Kont) (post : PostR)
+  /-- What a `handle`'s arm carried, `v` of type `C`, waiting for the rest of the `handle` to end: then
+  function `f` runs, given `v` and that value, the places `caps` of the `handle`'s scope, in `env`, lent
+  to it. -/
+  | postR (C : Ty) (f : Nat) (v : Val) (env : Env) (caps : List (Cap Place))
   /-- Code of type `τ` being dropped as an arm unwinds with `o`, by unwinding it to a barrier named
   `d`. -/
   | dropK (τ : Ty) (o : Outcome) (d : Nat)
@@ -432,7 +449,7 @@ def find (l : Label) : HS → Option Frame
 /-- The frame a construct puts in force for the code it runs, if any. -/
 def Kont.push : Kont → HS → HS
   | .catchK l id _ _ _, hs => .abort l id :: hs
-  | .capK _ e id _ _ _ _, hs => .capture e id :: hs
+  | .capK _ e id _ _ _ _ _, hs => .capture e id :: hs
   | .dropK _ _ d, hs => .abort .drop d :: hs
   | _, hs => hs
 
@@ -510,11 +527,21 @@ def dropRet (τ : Ty) (o : Outcome) (d : Nat) : Res × Store → Res × Store
   | (.susp j ef vs ls K, σ) => (.susp j ef vs ls (.dropK τ o d :: K), σ)
   | r => r
 
+/-- A call's body ended: the parameters it owns are dropped; a continuation taken in it keeps them. -/
+def callRet (cells : List (Ty × Nat)) : Res × Store → Res × Store
+  | (.susp j ef vs ls K, σ) => (.susp j ef vs ls (.callK cells :: K), σ)
+  | (.stuck, σ) => (.stuck, σ)
+  | (.timeout, σ) => (.timeout, σ)
+  | (r, σ) =>
+    match dropCells σ cells with
+    | some σ' => (r, σ')
+    | none => (.stuck, σ)
+
 /-- An arm ended: its parameters are dropped, and the code its `handle` ran, `K`, goes on with
 the arm's value (`resuming`), or, if the arm unwinds with `o`, is dropped (`dropping`). -/
-def armEnd (τ : Ty) (cells : List (Ty × Nat)) (K : List Kont) (resuming : Store → Val → Res × Store)
+def armEnd (τ : Ty) (cells : List (Ty × Nat)) (K : List Kont) (post : PostR) (resuming : Store → Val → Res × Store)
     (dropping : Store → Outcome → Res × Store) : Res × Store → Res × Store
-  | (.susp j ef vs ls K', σ) => (.susp j ef vs ls (.armK τ cells K :: K'), σ)
+  | (.susp j ef vs ls K', σ) => (.susp j ef vs ls (.armK τ cells K post :: K'), σ)
   | (.val v, σ) =>
     match dropCells σ cells with
     | some σ' => resuming σ' v
@@ -769,28 +796,46 @@ def eval (F : List Fn) (O : List Op) : Nat → HS → Store → Env → Expr →
       match caps.mapM (fun c => resolve σ env c.loc) with
       | some ls =>
         let (id, σ1) := σ.fresh
-        ret F O n hs (.capK τ ef id (List.zipWith Cap.at caps ls) os rs arm)
+        ret F O n hs (.capK τ ef id (List.zipWith Cap.at caps ls) os rs arm none)
           (eval F O n (.capture ef id :: hs) σ1 env body)
       | none => (.stuck, σ)
     | .handleAbort body ef x h =>
       let (id, σ1) := σ.fresh
       ret F O n hs (.catchK (.eff ef) id x env h) (eval F O n (.abort (.eff ef) id :: hs) σ1 env body)
+    | .handleR τ body ef caps os arm C f =>
+      match caps.mapM (fun c => resolve σ env c.loc) with
+      | some ls =>
+        let (id, σ1) := σ.fresh
+        ret F O n hs (.capK τ ef id (List.zipWith Cap.at caps ls) os [] arm (some (C, f, env, caps)))
+          (eval F O n (.capture ef id :: hs) σ1 env body)
+      | none => (.stuck, σ)
 termination_by n _ _ _ _ => (n, 0, 0)
 
 /-- What frame `f` does with what the code it ran gave, under the handlers `hs` around it. -/
 def ret (F : List Fn) (O : List Op) (n : Nat) (hs : HS) : Kont → Res × Store → Res × Store
-  | .capK τ e id caps os rs arm, (.susp j ef vs ls K, σ) =>
-    if j ≠ id ∨ ef ≠ e then (.susp j ef vs ls (.capK τ e id caps os rs arm :: K), σ) else
+  | .capK τ e id caps os rs arm post, (.susp j ef vs ls K, σ) =>
+    if j ≠ id ∨ ef ≠ e then (.susp j ef vs ls (.capK τ e id caps os rs arm post :: K), σ) else
     match O[e]? with
     | none => (.stuck, σ)
     | some op =>
       if vs.length = os.length ∧ ls.length = rs.length then
-        let K' := Kont.capK τ e id caps os rs arm :: K
+        let K' := Kont.capK τ e id caps os rs arm post :: K
         let (cells, σ2) := allocAll σ (os.zip vs)
-        armEnd τ (op.owns.zip (cells.map Prod.snd)) K'
+        armEnd τ (op.owns.zip (cells.map Prod.snd)) K' post
           (fun σ v => match n with
             | 0 => (.timeout, σ)
-            | m + 1 => evalK F O m hs σ K' (.val v))
+            | m + 1 =>
+              match post with
+              | none => evalK F O m hs σ K' (.val v)
+              | some (C, f, env', cps) =>
+                match v with
+                | .pair b c =>
+                  match σ.mem b, σ.mem c with
+                  | some vr, some vc =>
+                    ret F O m hs (.postR C f vc env' cps)
+                      (evalK F O m hs ((σ.set b none).set c none) K' (.val vr))
+                  | _, _ => (.stuck, σ)
+                | _ => (.stuck, σ))
           (fun σ o => match n with
             | 0 => (.timeout, σ)
             | m + 1 =>
@@ -803,7 +848,7 @@ def ret (F : List Fn) (O : List Op) (n : Nat) (hs : HS) : Kont → Res × Store 
     | .scopeK τ c => leave τ c (.susp j ef vs ls K, σ)
     | .deferV τ v => cleanV τ v (.susp j ef vs ls K, σ)
     | .deferA j' k => cleanA j' k (.susp j ef vs ls K, σ)
-    | .armK τ cells K0 => (.susp j ef vs ls (.armK τ cells K0 :: K), σ)
+    | .armK τ cells K0 post => (.susp j ef vs ls (.armK τ cells K0 post :: K), σ)
     | .dropK τ o d => dropRet τ o d (.susp j ef vs ls K, σ)
     | f => (.susp j ef vs ls (f :: K), σ)
   | _, (.stuck, σ) => (.stuck, σ)
@@ -862,13 +907,37 @@ def ret (F : List Fn) (O : List Op) (n : Nat) (hs : HS) : Kont → Res × Store 
     match σ.mem a with
     | some _ => (r, σ.set a none)
     | none => (.stuck, σ)
-  | .capK _ _ _ _ _ _ _, (.val v, σ) => (.val v, σ)
-  | .capK _ _ _ _ _ _ _, (.abort j k, σ) => (.abort j k, σ)
-  | .armK τ cells K, r =>
-    armEnd τ cells K
+  | .capK _ _ _ _ _ _ _ _, (.val v, σ) => (.val v, σ)
+  | .capK _ _ _ _ _ _ _ _, (.abort j k, σ) => (.abort j k, σ)
+  | .postR _ f vc env' cps, (.val w, σ) =>
+    match cps.mapM (fun c => resolve σ env' c.loc), F[f]? with
+    | some ls, some d =>
+      if [vc, w].length = d.owns.length ∧ ls.length = d.refs.length then
+        let (cells, σ2) := allocAll σ ((d.owns.map Prod.fst).zip [vc, w])
+        callRet ((d.owns.map Prod.snd).zip (cells.map Prod.snd))
+          (eval F O n hs σ2 (cells ++ (d.refs.map Prod.fst).zip ls) d.body)
+      else (.stuck, σ)
+    | _, _ => (.stuck, σ)
+  | .postR C _ vc _ _, (.abort j k, σ) =>
+    match drop σ C vc with
+    | some σ' => (.abort j k, σ')
+    | none => (.stuck, σ)
+  | .armK τ cells K post, r =>
+    armEnd τ cells K post
       (fun σ v => match n with
         | 0 => (.timeout, σ)
-        | m + 1 => evalK F O m hs σ K (.val v))
+        | m + 1 =>
+          match post with
+          | none => evalK F O m hs σ K (.val v)
+          | some (C, f, env', cps) =>
+            match v with
+            | .pair b c =>
+              match σ.mem b, σ.mem c with
+              | some vr, some vc =>
+                ret F O m hs (.postR C f vc env' cps)
+                  (evalK F O m hs ((σ.set b none).set c none) K (.val vr))
+              | _, _ => (.stuck, σ)
+            | _ => (.stuck, σ))
       (fun σ o => match n with
         | 0 => (.timeout, σ)
         | m + 1 =>
@@ -1166,6 +1235,17 @@ inductive Typed (F : List Fn) (O : List Op) : Ctx → Expr → Ty → Ctx → Ro
       Typed F O (armCtx os rs op (caps.map Cap.sig)) arm op.ret Γa r →
       Typed F O (freeze (hideAll Γ (roots .mut ys)) (roots .ro ys)) body τ Γb (.eff e :: r) →
       Typed F O Γ (.handle τ body e caps os rs arm) τ
+        (unhideAll Γ (roots .mut ys) (thaw (hideAll Γ (roots .mut ys)) (roots .ro ys) Γb)) r
+  /-- An arm that resumes in its midst: it takes the operation's owned arguments and the places of
+  `caps`, and gives what the code resumes with and what it carries; once the rest of the `handle` ends,
+  `post` takes what the arm carried and that value, the places lent to it again, as a call would. -/
+  | handleR : O[e]? = some op → op.refs = [] → (∀ τ ∈ op.owns, τ.complete = true) →
+      os.length = op.owns.length → Caps Γ caps ys → Exclusive ys → (os ++ caps.map Cap.name).Nodup →
+      F[f]? = some d → d.owns.map Prod.snd = [C, τ] → d.refs = caps.map Cap.sig → d.retp = none →
+      d.cap = none → d.ret = τ → (∀ l ∈ d.row, l ∈ r) → C.complete = true →
+      Typed F O (armCtx os [] op (caps.map Cap.sig)) arm (.pair op.ret C) Γa r →
+      Typed F O (freeze (hideAll Γ (roots .mut ys)) (roots .ro ys)) body τ Γb (.eff e :: r) →
+      Typed F O Γ (.handleR τ body e caps os arm C f) τ
         (unhideAll Γ (roots .mut ys) (thaw (hideAll Γ (roots .mut ys)) (roots .ro ys) Γb)) r
   /-- As for `try`, the arm starts where the body would have ended. -/
   | handleAbort : O[e]? = some op → op.owns = [.int] → op.refs = [] → lookup x Γb = none →

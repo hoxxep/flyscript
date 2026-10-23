@@ -33,7 +33,7 @@ def isStuck : Res × Store → Bool
 syntax "run" "[" Lean.Parser.Tactic.simpLemma,* "]" : tactic
 macro_rules
   | `(tactic| run [$xs,*]) => `(tactic| simp [eval, ret, evalK, evalAtom, evalAtoms, resolve, leave, cleanV,
-      cleanA, dropRet, armEnd, allocAll, dropCells, dropCell, drop, dropK, pick, Store.fresh, Store.alloc, Store.set, find,
+      cleanA, dropRet, armEnd, callRet, allocAll, dropCells, dropCell, drop, dropK, pick, Store.fresh, Store.alloc, Store.set, find,
       Frame.handles, Kont.push, lookup, Res.done, Outcome.res, Cap.at, Store.empty, value, freed, freedBelow,
       isStuck, $xs,*])
 
@@ -1065,6 +1065,78 @@ example : ∀ n, match eval [] [] n [.abort .fail 0] .empty [] fieldBorrow with
     | (.val v, σ') => ∃ L, VT [] σ' .int v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
     | (.abort _ _, σ') => ∀ l, σ'.mem l = none :=
   program_ok (fun _ h => by simp at h) fieldBorrow_typed
+
+/-! An arm that resumes in its midst, and goes on after the rest of its `handle`. -/
+
+/-- `Tick`, whose operation takes nothing and gives an integer. -/
+def ticks : List Op := [{ owns := [], refs := [], ret := .int }]
+
+/-- `function after(c: int, r: int, m: mut int): int { m = r + c; m }`: what runs once the rest of the
+`handle` ends, given what the arm carried and that value. -/
+def after : Fn :=
+  { owns := [("c", .int), ("r", .int)], refs := [("m", .mut, .int)], ret := .int, row := [],
+    body := .let_ "t" .int (.add (.read (var "r")) (.read (var "c")))
+      (.let_ "u" .int (.write (var "m") (.read (var "t"))) (.atom (.read (var "m")))) }
+
+/-- `let n = 0; handle { tick() + tick() } with Tick { tick() resumes k => { n = n + 1; const r =
+k(n); after(n, r) } }`: each arm counts, resumes with the count, and once the rest of the `handle`
+ends adds what it carried; the second arm's runs first. 1 + 2 = 3, then 3 + 2 = 5, then 5 + 1 = 6. -/
+def tallies : Expr :=
+  .let_ "n" .int (.atom (.lit 0))
+    (.handleR .int
+      (.let_ "a" .int (.perform 0 [] []) (.let_ "b" .int (.perform 0 [] [])
+        (.add (.read (var "a")) (.read (var "b")))))
+      0 [⟨"m", .mut, .int, var "n"⟩] []
+      (.let_ "t" .int (.add (.read (var "m")) (.lit 1))
+        (.let_ "u" .int (.write (var "m") (.read (var "t"))) (.pair (.read (var "m")) (.read (var "m")))))
+      .int 0)
+
+example : value (eval [after] ticks 60 [] .empty [] tallies) = some 6 := by
+  run [tallies, after, ticks]
+example : freed (eval [after] ticks 60 [] .empty [] tallies) := by
+  run [tallies, after, ticks]
+
+theorem after_ok : FnsOk [after] ticks := by
+  intro d hd
+  simp only [List.mem_singleton] at hd
+  subst hd
+  exact ⟨by decide, _, .let_ (live := true) rfl (.add (.read (.own rfl)) (.read (.own rfl)))
+    (.let_ (live := true) rfl (.write (.read (.own rfl)) (.ref (m := .mut) rfl)) (.atom (.read (.ref (m := .mut) rfl))))⟩
+
+theorem tallies_typed : Typed [after] ticks [] tallies .int [] [.fail] := by
+  have harm : Typed [after] ticks (armCtx [] [] ticks[0] [("m", .mut, .int)])
+      (.let_ "t" .int (.add (.read (var "m")) (.lit 1))
+        (.let_ "u" .int (.write (var "m") (.read (var "t"))) (.pair (.read (var "m")) (.read (var "m")))))
+      (.pair .int .int) [("m", .ref .mut .int)] [.fail] :=
+    .let_ (live := true) rfl (.add (.read (.ref (m := .mut) rfl)) .lit)
+      (.let_ (live := true) rfl (.write (.read (.own rfl)) (.ref (m := .mut) rfl))
+        (.pair (.read (.ref (m := .mut) rfl)) (.read (.ref (m := .mut) rfl))))
+  have hbody : Typed [after] ticks [("n", .lent .int)]
+      (.let_ "a" .int (.perform 0 [] []) (.let_ "b" .int (.perform 0 [] [])
+        (.add (.read (var "a")) (.read (var "b")))))
+      .int [("n", .lent .int)] [.eff 0, .fail] :=
+    .let_ (live := true) rfl (.perform (op := ticks[0]) rfl (List.mem_cons_self ..) .nil .nil List.Pairwise.nil)
+      (.let_ (live := true) rfl (.perform (op := ticks[0]) rfl (List.mem_cons_self ..) .nil .nil List.Pairwise.nil)
+        (.add (.read (.own rfl)) (.read (.own rfl))))
+  have h := Typed.handleR (F := [after]) (O := ticks) (Γ := [("n", .own .int true)]) (e := 0) (op := ticks[0])
+    (caps := [⟨"m", .mut, .int, var "n"⟩]) (os := []) (ys := [(.mut, "n")]) (f := 0) (d := after) (C := .int)
+    (τ := .int) (r := [.fail]) (Γa := [("m", .ref .mut .int)]) (Γb := [("n", .lent .int)])
+    (arm := .let_ "t" .int (.add (.read (var "m")) (.lit 1))
+        (.let_ "u" .int (.write (var "m") (.read (var "t"))) (.pair (.read (var "m")) (.read (var "m")))))
+    (body := .let_ "a" .int (.perform 0 [] []) (.let_ "b" .int (.perform 0 [] [])
+        (.add (.read (var "a")) (.read (var "b")))))
+    rfl rfl (by simp [ticks]) rfl (.mut (.own rfl) rfl rfl .nil) (by simp [Exclusive]) (by decide)
+    rfl rfl rfl rfl rfl rfl (by simp [after]) rfl harm (by simpa [roots, hideAll, hide, freeze, Slot.ty] using hbody)
+  simp only [roots, hideAll, hide, freeze, thaw, unhideAll, Slot.ty] at h
+  exact .let_ (live := true) rfl (.atom .lit) (by simpa [thaw, hide, hideAll, unhideAll] using h)
+
+example : ∀ n, match eval [after] ticks n [.abort .fail 0] .empty [] tallies with
+    | (.stuck, _) => False
+    | (.susp _ _ _ _ _, _) => False
+    | (.timeout, _) => True
+    | (.val v, σ') => ∃ L, VT [after] σ' .int v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
+    | (.abort _ _, σ') => ∀ l, σ'.mem l = none :=
+  program_ok after_ok tallies_typed
 
 /-! Tags, and matching them. -/
 

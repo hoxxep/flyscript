@@ -448,6 +448,8 @@ theorem typed_keys : Typed F O Γ e τ Γ' r → Γ'.map Prod.fst = Γ.map Prod.
   | .perform _ _ hargs _ _ => atoms_keys hargs
   | .handle _ _ _ _ _ _ _ _ hb =>
     unhideAll_keys ((thaw_keys ((typed_keys hb).trans freeze_keys)).trans hideAll_keys)
+  | .handleR _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ hb =>
+    unhideAll_keys ((thaw_keys ((typed_keys hb).trans freeze_keys)).trans hideAll_keys)
   | .handleAbort _ _ _ _ hb hh => by
     have := typed_keys hh
     simp only [List.map_cons, List.cons.injEq] at this
