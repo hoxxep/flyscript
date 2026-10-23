@@ -147,6 +147,7 @@ theorem typed_weaker : Typed F O Γ e τ Γ' r → (Γ.map Prod.fst).Nodup → W
   | .atom ha, hk => atom_weaker ha hk
   | .add ha hb, hk => (atom_weaker hb (by rw [atom_keys ha]; exact hk)).trans (atom_weaker ha hk)
   | .new ha, hk => atom_weaker ha hk
+  | .pair ha hb, hk => (atom_weaker hb (by rw [atom_keys ha]; exact hk)).trans (atom_weaker ha hk)
   | .let_ hx ha hb, hk => by
     have := typed_weaker hb (List.nodup_cons.mpr ⟨by rw [typed_keys ha]; exact lookup_none_keys hx,
       by rw [typed_keys ha]; exact hk⟩)
@@ -576,20 +577,34 @@ structure Hole where
   loc : Nat
   path : List Nat
   old : List Nat
+  /-- The root's tree: the path, the fields it passes by, and the tree at the hole. -/
+  tree : List Nat
 
 /-- What the borrow of a hole is to the callee. -/
 def Hole.slot (h : Hole) : Slot := .ref h.mode h.ty
 
 def HoleOk (F : List Fn) (σ : Store) (Γ : Ctx) (env : Env) (h : Hole) : Prop :=
   ∃ s a τr, lookup h.root Γ = some s ∧ lookup h.root env = some a ∧ (h.mode = .mut → s.excl = true) ∧
-    Path σ a τr h.path h.loc h.ty ∧ LT F σ a τr (h.path ++ h.old) ∧ SlotOk F σ s a (h.path ++ h.old) ∧
-    LT F σ h.loc h.ty h.old ∧ (∀ σ' L', LT F σ' a τr L' → SlotOk F σ' s a L') ∧
+    Path F σ a τr h.path h.loc h.ty ∧ LT F σ a τr h.tree ∧ h.tree.Perm (h.path ++ h.old) ∧
+    SlotOk F σ s a h.tree ∧ LT F σ h.loc h.ty h.old ∧ (∀ σ' L', LT F σ' a τr L' → SlotOk F σ' s a L') ∧
     (s.shell = true → (h.path = [] ∧ h.ty = τr) ∨ h.path = [a])
 
 theorem HoleOk.entry (h : HoleOk F σ Γ env hl) :
-    ∃ s a, Entry F σ Γ env hl.root s a (hl.path ++ hl.old) ∧ (hl.mode = .mut → s.excl = true) :=
-  let ⟨s, a, _, hs, ha, hm, _, _, hso, _⟩ := h
+    ∃ s a, Entry F σ Γ env hl.root s a hl.tree ∧ (hl.mode = .mut → s.excl = true) :=
+  let ⟨s, a, _, hs, ha, hm, _, _, _, hso, _⟩ := h
   ⟨s, a, ⟨hs, ha, hso⟩, hm⟩
+
+theorem HoleOk.perm (h : HoleOk F σ Γ env hl) : hl.tree.Perm (hl.path ++ hl.old) :=
+  let ⟨_, _, _, _, _, _, _, _, hp, _⟩ := h
+  hp
+
+theorem HoleOk.mem_tree (h : HoleOk F σ Γ env hl) : l ∈ hl.tree ↔ l ∈ hl.path ∨ l ∈ hl.old := by
+  rw [h.perm.mem_iff, List.mem_append]
+
+/-- A closure borrowed `mut` holds the closure's cell first. -/
+theorem SlotOk.cons_of_shell (h : SlotOk F σ s a L) (hs : s.shell = true) : ∃ R, L = a :: R := by
+  match s, hs, h with
+  | .ref .mut (.fn _ _ _ _), _, h => exact LT.cons h
 
 /-- A `mut` borrow's slot is a ref slot of the type its footprint says. -/
 theorem SlotOk.ref_ty (h : SlotOk F σ (.ref m τ') a L) (hL : LT F σ a τ L) : τ' = τ :=
@@ -597,24 +612,35 @@ theorem SlotOk.ref_ty (h : SlotOk F σ (.ref m τ') a L) (hL : LT F σ a τ L) :
 
 /-- What a `mut` hole lets the callee change lies in what its root may change. -/
 theorem HoleOk.excl_sub (hok : HoleOk F σ Γ env h) (hm : h.mode = .mut) :
-    ∃ s a, Entry F σ Γ env h.root s a (h.path ++ h.old) ∧
-      ∀ l ∈ exclPart h.slot h.old, l ∈ exclPart s (h.path ++ h.old) := by
-  obtain ⟨s, a, τr, hs, ha, hex, hpath, hLT, hso, hold, -, hsh⟩ := hok
+    ∃ s a, Entry F σ Γ env h.root s a h.tree ∧
+      ∀ l ∈ exclPart h.slot h.old, l ∈ exclPart s h.tree := by
+  obtain ⟨s, a, τr, hs, ha, hex, hpath, hLT, hperm, hso, hold, -, hsh⟩ := hok
   refine ⟨s, a, ⟨hs, ha, hso⟩, fun l hl => ?_⟩
   cases hss : s.shell
   · rw [exclPart_plain hss, if_pos (hex hm)]
-    exact List.mem_append.mpr (.inr (exclPart_sub hl))
-  · rcases hsh hss with ⟨hp, hty⟩ | hp
-    · rw [hp] at hso hLT ⊢
-      simp only [List.nil_append] at hso hLT ⊢
+    exact hperm.mem_iff.mpr (List.mem_append.mpr (.inr (exclPart_sub hl)))
+  · obtain ⟨R0, hR0⟩ := hLT.cons
+    rcases hsh hss with ⟨hp, hty⟩ | hp
+    · -- The hole is the root itself: the same tree, the same slot.
+      rw [hp, List.nil_append] at hperm
       match s, hss, hso with
       | .ref .mut (.fn k A B r), _, hso =>
         have := hso.ref_ty hLT
         simp only [Hole.slot, hm, hty, ← this] at hl
-        exact hl
+        obtain ⟨R1, hR1⟩ := hold.cons
+        rw [hR0] at hperm ⊢
+        rw [hR1] at hperm hl
+        have hla : h.loc = a := by rw [hp] at hpath; cases hpath; rfl
+        subst hla
+        have := (List.Perm.cons_inv hperm)
+        simp only [exclPart, Slot.excl, Slot.shell, ↓reduceIte, List.tail_cons] at hl ⊢
+        exact this.mem_iff.mpr hl
     · -- The closure's capture, through the closure's cell, which is only read.
-      rw [hp]
-      simp [exclPart, Slot.shell_excl hss, hss, exclPart_sub hl]
+      rw [hp] at hperm
+      rw [hR0] at hperm ⊢
+      have : R0.Perm h.old := by simpa using hperm
+      simp only [exclPart, Slot.shell_excl hss, hss, ↓reduceIte, List.tail_cons]
+      exact this.mem_iff.mpr (exclPart_sub hl)
 
 theorem Hole.excl_mut {h : Hole} (hl : l ∈ exclPart h.slot L) : h.mode = .mut ∧ l ∈ L := by
   refine ⟨?_, exclPart_sub hl⟩
@@ -639,12 +665,12 @@ theorem lends_ok : Lends Γ lent ts ys → Foot F σ Γ env E S →
   | @cons p τ w y m rest ts ys hp hw _ ih =>
     obtain ⟨hs, h1, h2, h3, h4, h5⟩ := ih
     obtain ⟨a, τr, Lr, P, l, s, ha, hLr, hpath, hres, -, -, hs', hso, hex, hlt, hsh⟩ := place_ok hp hf
-    obtain ⟨R, hR, rfl⟩ := path_split hpath hLr
-    refine ⟨⟨m, τ, y, l, P, R⟩ :: hs, by simp [h1], by simp [h2], ?_, ?_, ?_⟩
+    obtain ⟨R, hR, hLrp⟩ := path_split hpath hLr
+    refine ⟨⟨m, τ, y, l, P, R, Lr⟩ :: hs, by simp [h1], by simp [h2], ?_, ?_, ?_⟩
     · simp [List.mapM_cons, hres, h3]
     · intro h hh
       rcases List.mem_cons.mp hh with rfl | hh
-      · exact ⟨s, a, τr, hs', ha, fun hm => hex (hw hm), hpath, hLr, hso, hR, hlt, fun h => .inl (hsh h)⟩
+      · exact ⟨s, a, τr, hs', ha, fun hm => hex (hw hm), hpath, hLr, hLrp, hso, hR, hlt, fun h => .inl (hsh h)⟩
       · exact h4 h hh
     · intro h hh s0 hs0 hsh0
       rcases List.mem_cons.mp hh with rfl | hh
@@ -771,7 +797,7 @@ theorem hole_in (hI : Inv F σ Γ env E S) (hok : HoleOk F σ Γ env h) :
     (∀ l ∈ h.path ++ h.old, l ∈ E ∨ l ∈ S) ∧ (h.mode = .mut → ∀ l ∈ exclPart h.slot h.old, l ∈ E) := by
   refine ⟨fun l hl => ?_, fun hm l hl => ?_⟩
   · obtain ⟨s, a, he, -⟩ := hok.entry
-    rcases hI.entry_sub he l hl with ⟨-, h1⟩ | ⟨-, h1⟩
+    rcases hI.entry_sub he l (hok.mem_tree.mpr (List.mem_append.mp hl)) with ⟨-, h1⟩ | ⟨-, h1⟩
     · exact .inl h1
     · exact .inr h1
   · obtain ⟨s, a, he, hsub⟩ := hok.excl_sub hm
@@ -783,7 +809,7 @@ theorem hole_apart (hI : Inv F σ Γ env E S) (hok : HoleOk F σ Γ env h) (hok'
     (hr : h.root ≠ h'.root) (hm : h.mode = .mut) : Disj (exclPart h.slot h.old) (h'.path ++ h'.old) := by
   obtain ⟨s, a, he, hsub⟩ := hok.excl_sub hm
   obtain ⟨s', a', he', -⟩ := hok'.entry
-  exact fun l hl hl' => hI.apart he he' hr l (hsub l hl) hl'
+  exact fun l hl hl' => hI.apart he he' hr l (hsub l hl) (hok'.mem_tree.mpr (List.mem_append.mp hl'))
 
 /-- Two holes, one lent `mut`, are the same hole or rooted at different variables. -/
 theorem hole_root {hs : List Hole} (hpw : hs.Pairwise Apart) (hh : h ∈ hs) (hh' : h' ∈ hs)
@@ -792,31 +818,32 @@ theorem hole_root {hs : List Hole} (hpw : hs.Pairwise Apart) (hh : h ∈ hs) (hh
     have := (pairwise_of_mem (fun _ _ => Apart.symm) hpw hh hh' hne) e
     rw [hm] at this; cases this.1
 
-theorem HoleOk.old_nodup (hok : HoleOk F σ Γ env h) : h.old.Nodup := by
-  obtain ⟨-, -, -, -, -, -, -, -, -, hlt, -⟩ := hok
-  exact hlt.nodup
+theorem HoleOk.old_lt (hok : HoleOk F σ Γ env h) : LT F σ h.loc h.ty h.old := by
+  obtain ⟨_, _, _, _, _, _, _, _, _, _, hlt, _⟩ := hok
+  exact hlt
 
-theorem HoleOk.path_old (hok : HoleOk F σ Γ env h) : Disj h.path h.old := by
-  obtain ⟨_, _, _, _, _, _, _, hLT, _⟩ := hok
-  exact (nodup_append_disj.mp (LT.nodup hLT)).2.2
+theorem HoleOk.old_nodup (hok : HoleOk F σ Γ env h) : h.old.Nodup := hok.old_lt.nodup
+
+theorem HoleOk.tree_nodup (hok : HoleOk F σ Γ env h) : (h.path ++ h.old).Nodup := by
+  obtain ⟨_, _, _, _, _, _, _, hLT, hp, _⟩ := hok
+  exact hp.nodup_iff.mp (LT.nodup hLT)
+
+theorem HoleOk.path_old (hok : HoleOk F σ Γ env h) : Disj h.path h.old :=
+  (nodup_append_disj.mp hok.tree_nodup).2.2
 
 /-- A hole's tree starts at its location. -/
-theorem HoleOk.old_head (hok : HoleOk F σ Γ env h) : ∃ R, h.old = h.loc :: R := by
-  obtain ⟨-, -, -, -, -, -, -, -, -, hlt, -⟩ := hok
-  exact hlt.cons
+theorem HoleOk.old_head (hok : HoleOk F σ Γ env h) : ∃ R, h.old = h.loc :: R := hok.old_lt.cons
 
 /-- A root that is a closure borrowed `mut`, lent `mut`: the hole is the root itself, as the
 callee borrows it, or what the closure captured, through the closure's cell. -/
 theorem HoleOk.shell_root (hok : HoleOk F σ Γ env h) (he : Entry F σ Γ env h.root s a L)
     (hs : s.shell = true) (hm : h.mode = .mut) :
     (h.path = [] ∧ s = h.slot) ∨ h.path = [a] := by
-  obtain ⟨s', a', τr, hs', ha', -, -, hLT, hso, -, -, hsh⟩ := hok
+  obtain ⟨s', a', τr, hs', ha', -, -, hLT, -, hso, -, -, hsh⟩ := hok
   rw [lookup_det hs' he.1] at hso hsh
   rw [lookup_det ha' he.2.1] at hso hsh hLT
   rcases hsh hs with ⟨hp, hty⟩ | hp
   · refine .inl ⟨hp, ?_⟩
-    rw [hp] at hLT hso
-    simp only [List.nil_append] at hLT hso
     match s, hs, hso with
     | .ref .mut (.fn k A B r), _, hso =>
       have := hso.ref_ty hLT
@@ -915,8 +942,7 @@ theorem callee_inv {Eo Lall : List Nat} {hs : List Hole} (hI : Inv F σ1 Γ₁ e
   · intro p hp
     simp only [olds, List.mem_map] at hp
     obtain ⟨h, hh, rfl⟩ := hp
-    obtain ⟨-, -, -, -, -, -, -, -, -, hlt, -⟩ := hholes h hh
-    exact hlt.frame fun l hl => hold l (hwf l (hout h hh l (List.mem_append.mpr (.inr hl))).1)
+    exact (hholes h hh).old_lt.frame fun l hl => hold l (hwf l (hout h hh l (List.mem_append.mpr (.inr hl))).1)
 
 /-! ## The caller after the call -/
 
@@ -954,7 +980,7 @@ theorem fill_cases (hholes : ∀ h ∈ hs, HoleOk F σ Γ env h) (hps : ps.map P
     (he : Entry F σ Γ env x s a L) :
     (fill ps x L = L ∧ ∀ p ∈ ps, p.1.mode = .mut → p.1.root ≠ x) ∨
     (∃ p ∈ ps, fill ps x L = p.1.path ++ p.2 ∧ p.1.root = x ∧ p.1.mode = .mut ∧
-      L = p.1.path ++ p.1.old ∧ s.excl = true) := by
+      L = p.1.tree ∧ s.excl = true) := by
   unfold fill
   split
   · rename_i q hq
@@ -995,7 +1021,7 @@ theorem path_in_X (hI : Inv F σ Γ env E S) (hholes : ∀ h ∈ hs, HoleOk F σ
   obtain ⟨s', a', he', hex⟩ := (hholes h hh).entry
   obtain ⟨rfl, rfl, rfl⟩ := he.det he'
   exact (hI.foot.memE hI.keys l).mpr ⟨_, s, a, _, he, by
-    rw [exclPart_plain hsh, if_pos (hex hm)]; exact List.mem_append.mpr (.inl hl)⟩
+    rw [exclPart_plain hsh, if_pos (hex hm)]; exact (hholes h hh).mem_tree.mpr (.inl hl)⟩
 
 theorem mem_keep {M : List Nat} : l ∈ E.filter (fun l => l ∉ M) ↔ l ∈ E ∧ l ∉ M := by
   simp [List.mem_filter]
@@ -1040,26 +1066,24 @@ theorem hole_after (hI : Inv F σ Γ env E S) (hholes : ∀ h ∈ hs, HoleOk F �
     (hag : Agree σ σ' (E.filter (fun l => l ∉ mutCells (olds hs)) ++ S))
     (hX : Disj (E.filter (fun l => l ∉ mutCells (olds hs))) (mutCells ps)) (hSX : Disj S (mutCells ps))
     (hp : p ∈ ps) (hm : p.1.mode = .mut) :
-    ∃ s a τr, lookup p.1.root Γ = some s ∧ lookup p.1.root env = some a ∧ s.excl = true ∧
-      Path σ' a τr p.1.path p.1.loc p.1.ty ∧ LT F σ' a τr (p.1.path ++ p.2) ∧
-      SlotOk F σ' s a (p.1.path ++ p.2) ∧ ∀ σ'' L', LT F σ'' a τr L' → SlotOk F σ'' s a L' := by
+    ∃ s a τr L', lookup p.1.root Γ = some s ∧ lookup p.1.root env = some a ∧ s.excl = true ∧
+      Path F σ' a τr p.1.path p.1.loc p.1.ty ∧ LT F σ' a τr L' ∧ L'.Perm (p.1.path ++ p.2) ∧
+      SlotOk F σ' s a L' ∧ ∀ σ'' L', LT F σ'' a τr L' → SlotOk F σ'' s a L' := by
   have hph : p.1 ∈ hs := hps ▸ List.mem_map_of_mem hp
-  obtain ⟨s, a, τr, hs', ha', hex, hpath, hLT, -, -, hlt, -⟩ := hholes p.1 hph
-  have hagX : ∀ l, l ∈ E → l ∉ mutCells (olds hs) → σ'.mem l = σ.mem l :=
-    fun l h1 h2 => hag l (List.mem_append.mpr (.inl (mem_keep.mpr ⟨h1, h2⟩)))
-  obtain ⟨hLT', hpath'⟩ := path_join hpath hLT (path_kept hholes hpw hag hph)
-    (hnew p hp hm) (path_new_apart (hholes p.1 hph) hm (path_clear hholes hpw hX hSX hp)
-      (hnew p hp hm).cons)
-  exact ⟨s, a, τr, hs', ha', hex hm, hpath', hLT', hlt σ' _ hLT', hlt⟩
+  obtain ⟨s, a, τr, hs', ha', hex, hpath, -, -, -, -, hlt, -⟩ := hholes p.1 hph
+  obtain ⟨L', hLT', hp', hpath'⟩ := path_join hpath (nodup_append_disj.mp (hholes p.1 hph).tree_nodup).1
+    (path_kept hholes hpw hag hph) (hnew p hp hm)
+    (path_new_apart (hholes p.1 hph) hm (path_clear hholes hpw hX hSX hp) (hnew p hp hm).cons)
+  exact ⟨s, a, τr, L', hs', ha', hex hm, hpath', hLT', hp', hlt σ' _ hLT', hlt⟩
 
 /-- After the call, what a place lent `readonly` is rooted at is as it was. -/
 theorem hole_after_ro (hI : Inv F σ Γ env E S) (hholes : ∀ h ∈ hs, HoleOk F σ Γ env h)
     (hpw : hs.Pairwise Apart) (hag : Agree σ σ' (E.filter (fun l => l ∉ mutCells (olds hs)) ++ S))
     (hh : h ∈ hs) (hm : h.mode = .ro) :
     ∃ s a τr, lookup h.root Γ = some s ∧ lookup h.root env = some a ∧
-      Path σ' a τr h.path h.loc h.ty ∧ LT F σ' a τr (h.path ++ h.old) ∧ LT F σ' h.loc h.ty h.old ∧
-      SlotOk F σ' s a (h.path ++ h.old) ∧ ∀ σ'' L', LT F σ'' a τr L' → SlotOk F σ'' s a L' := by
-  obtain ⟨s, a, τr, hs', ha', -, hpath, hLT, hso, hold, hlt, -⟩ := hholes h hh
+      Path F σ' a τr h.path h.loc h.ty ∧ LT F σ' a τr h.tree ∧ h.tree.Perm (h.path ++ h.old) ∧
+      LT F σ' h.loc h.ty h.old ∧ SlotOk F σ' s a h.tree ∧ ∀ σ'' L', LT F σ'' a τr L' → SlotOk F σ'' s a L' := by
+  obtain ⟨s, a, τr, hs', ha', -, hpath, hLT, hperm, hso, hold, hlt, -⟩ := hholes h hh
   -- The root's tree is no hole's lent `mut`: it is kept as it was.
   have hkeep : ∀ l ∈ h.path ++ h.old, σ'.mem l = σ.mem l := fun l hl => by
     rcases (hole_in hI (hholes h hh)).1 l hl with hE | hS
@@ -1070,8 +1094,9 @@ theorem hole_after_ro (hI : Inv F σ Γ env E S) (hholes : ∀ h ∈ hs, HoleOk 
         hole_root hpw hh' hh hm' (fun e' => by rw [← e', hm'] at hm; cases hm) e.symm
       exact hole_apart hI (hholes h' hh') (hholes h hh) (Ne.symm hne) hm' l hl' hl
     · exact hag l (List.mem_append.mpr (.inr hS))
+  have hkeepT : Agree σ σ' h.tree := fun l hl => hkeep l (hperm.mem_iff.mp hl)
   exact ⟨s, a, τr, hs', ha', hpath.frame fun l hl => hkeep l (List.mem_append.mpr (.inl hl)),
-    hLT.frame hkeep, hold.frame fun l hl => hkeep l (List.mem_append.mpr (.inr hl)), hso.frame hkeep, hlt⟩
+    hLT.frame hkeepT, hperm, hold.frame fun l hl => hkeep l (List.mem_append.mpr (.inr hl)), hso.frame hkeepT, hlt⟩
 
 /-- After the call, the caller's variables hold what they held but for the holes lent `mut`, which
 hold what the callee left there. -/
@@ -1105,6 +1130,18 @@ theorem caller_rebuild (hI : Inv F σ Γ env E S) (hholes : ∀ h ∈ hs, HoleOk
     rw [hR] at hl
     rw [hR0]
     exact ⟨by rw [Hole.shared_mut_head hm hl]; exact List.mem_cons_self .., Hole.shared_mut_swap hm hl⟩
+  -- The head of a root's tree, and of what it is after the call, is the root's own cell.
+  have hroot_head : ∀ p ∈ ps, ∀ {s a}, Entry F σ Γ env p.1.root s a p.1.tree → s.shell = true →
+      p.1.mode = .mut → ∃ Q, p.1.path ++ p.2 = a :: Q := by
+    intro p hp s a he hsh hm
+    rcases (hpsok p hp).shell_root he hsh hm with ⟨hpath, -⟩ | hpath
+    · obtain ⟨_, a', _, hs', ha', -, hpth, -⟩ := hpsok p hp
+      obtain rfl := lookup_det ha' he.2.1
+      rw [hpath] at hpth ⊢
+      cases hpth
+      obtain ⟨R, hR⟩ := (hnew p hp hm).cons
+      exact ⟨R, by simp [hR]⟩
+    · exact ⟨p.2, by simp [hpath]⟩
   -- What a variable may change after the call: as it was and kept, or what the callee left at
   -- one of its holes.
   have hsub : ∀ {x s a L}, Entry F σ Γ env x s a L → ∀ l ∈ exclPart s (fill ps x L),
@@ -1120,12 +1157,12 @@ theorem caller_rebuild (hI : Inv F σ Γ env E S) (hholes : ∀ h ∈ hs, HoleOk
       cases hsh : s.shell
       · rw [exclPart_plain hsh, if_pos hex] at hl ⊢
         rcases List.mem_append.mp hl with hl | hl
-        · exact .inl ⟨hL ▸ List.mem_append.mpr (.inl hl),
+        · exact .inl ⟨hL ▸ (hpsok p hp).mem_tree.mpr (.inl hl),
             mem_keep.mpr (path_in_X hI hholes hpw (hpsin p hp) hm he' hsh l hl)⟩
         · rcases mem_parts (s := p.1.slot) hl with h1 | h1
           · exact .inr ⟨p, hp, hr, hm, h1⟩
           · obtain ⟨hold, hsh'⟩ := hhead p hp hm l h1
-            have hlL : l ∈ L := hL ▸ List.mem_append.mpr (.inr hold)
+            have hlL : l ∈ L := hL ▸ (hpsok p hp).mem_tree.mpr (.inr hold)
             have hE := (hI.foot.memE hI.keys l).mpr ⟨x, s, a, L, he, by rw [exclPart_plain hsh, if_pos hex]; exact hlL⟩
             exact .inl ⟨hlL, mem_keep.mpr ⟨hE, shared_not_mut hI hholes hpw (hpsin p hp) hsh'⟩⟩
       · rcases (hpsok p hp).shell_root (hL ▸ he') hsh hm with ⟨hpath, rfl⟩ | hpath
@@ -1137,8 +1174,19 @@ theorem caller_rebuild (hI : Inv F σ Γ env E S) (hholes : ∀ h ∈ hs, HoleOk
           rcases mem_parts (s := p.1.slot) hl2 with h1 | h1
           · exact .inr ⟨p, hp, hr, hm, h1⟩
           · obtain ⟨hold, hsh'⟩ := hhead p hp hm l h1
+            -- The tree is the closure's cell, then what it captured: the old tree there.
+            have hT := (hpsok p hp).perm
+            rw [hpath] at hT
+            obtain ⟨T, hT'⟩ := (hL ▸ he').2.2.cons_of_shell hsh
             have hlL : l ∈ exclPart s L := by
-              rw [hL, hpath]; simp [exclPart, Slot.shell_excl hsh, hsh, hold]
+              rw [hL]
+              have hroot : ∀ {x}, x ∈ (p.1.tree).tail ↔ x ∈ p.1.old := by
+                intro x
+                rw [hT'] at hT ⊢
+                simp only [List.tail_cons]
+                have : T.Perm p.1.old := by simpa using hT
+                exact this.mem_iff
+              simp [exclPart, Slot.shell_excl hsh, hsh, hroot.mpr hold]
             have hE := (hI.foot.memE hI.keys l).mpr ⟨x, s, a, L, he, hlL⟩
             exact .inl ⟨hlL, mem_keep.mpr ⟨hE, shared_not_mut hI hholes hpw (hpsin p hp) hsh'⟩⟩
   obtain ⟨E', hf', hn', hmem'⟩ := hI.foot.rebuild (σ' := σ') (fill ps) hI.keys
@@ -1146,29 +1194,33 @@ theorem caller_rebuild (hI : Inv F σ Γ env E S) (hholes : ∀ h ∈ hs, HoleOk
       intro x s a L he
       rcases fill_cases hholes hps he with ⟨hf, hn⟩ | ⟨p, hp, hf, hr, hm, hL, hex⟩
       · rw [hf]
-        refine ⟨he.2.2.frame fun l hl => ?_, rfl⟩
+        refine ⟨L, he.2.2.frame fun l hl => ?_, rfl, fun _ => .rfl⟩
         rcases hI.entry_sub he l hl with ⟨-, hE⟩ | ⟨-, hS⟩
         · exact hagX l hE (hclear he hn l hl)
         · exact hag l (List.mem_append.mpr (.inr hS))
       · rw [hf]
-        obtain ⟨s', a', τr, hs', ha', -, hpath, hLT, -, -, hlt, -⟩ := hpsok p hp
+        obtain ⟨s', a', τr, L', hs', ha', -, hpath, hLT', hp', hso', hlt⟩ :=
+          hole_after hI hholes hpw hps hnew hag hX hSX hp hm
         rw [hr] at hs' ha'
         obtain rfl := lookup_det he.1 hs'
         obtain rfl := lookup_det he.2.1 ha'
-        obtain ⟨hLT', -⟩ := path_join hpath hLT (path_kept hholes hpw hag (hpsin p hp))
-          (hnew p hp hm) (path_new_apart (hpsok p hp) hm (path_clear hholes hpw hX hSX hp)
-            (hnew p hp hm).cons)
-        refine ⟨hlt σ' _ hLT', ?_⟩
-        rw [hL]
-        cases hsh : s.shell
-        · simp [sharedPart_plain hsh, hex]
-        · rcases (hpsok p hp).shell_root (hr ▸ hL ▸ he) hsh hm with ⟨hpe, -⟩ | hpe
-          · obtain ⟨R, hR⟩ := (hnew p hp hm).cons
-            obtain ⟨R0, hR0⟩ := (hpsok p hp).old_head
-            rw [hpe, hR, hR0]
+        refine ⟨L', hso', ?_, ?_⟩
+        · cases hsh : s.shell
+          · simp [sharedPart_plain hsh, hex]
+          · obtain ⟨R1, hR1⟩ := hLT'.cons
+            obtain ⟨R0, hR0⟩ := (hL ▸ he.2.2 : SlotOk F σ s a p.1.tree).cons_of_shell hsh
+            rw [hR1, hL, hR0]
             simp [sharedPart, hex, hsh]
-          · rw [hpe]
-            simp [sharedPart, hex, hsh])
+        · intro z
+          cases hsh : s.shell
+          · simp only [exclPart_plain hsh, if_pos hex]
+            exact hp'.mem_iff
+          · obtain ⟨Q, hQ⟩ := hroot_head p hp (hr ▸ hL ▸ he) hsh hm
+            obtain ⟨R1, hR1⟩ := hLT'.cons
+            rw [hQ] at hp' ⊢
+            rw [hR1] at hp' ⊢
+            simp only [exclPart, Slot.shell_excl hsh, hsh, ↓reduceIte, List.tail_cons]
+            exact (List.Perm.cons_inv hp').mem_iff)
     (by
       intro x s a L y t b L' hx hy hne l hl hl'
       rcases hsub hx l hl with ⟨hlL, hlX⟩ | ⟨p, hp, hpr, hpm, hlp⟩ <;>
@@ -1196,33 +1248,55 @@ theorem caller_rebuild (hI : Inv F σ Γ env E S) (hholes : ∀ h ∈ hs, HoleOk
         rcases fill_cases hholes hps he with ⟨hf, -⟩ | ⟨p, hp, hf, hr, hm, hL, hex⟩
         · rw [hf]; exact hl
         · rw [hf]
+          -- What the root kept, or the head of what the callee left: the hole's location.
+          have hhd : l ∈ p.1.old → l ∉ exclPart p.1.slot p.1.old → l ∈ p.2 := fun hold hnx => by
+            rcases mem_parts (s := p.1.slot) hold with h1 | h1
+            · exact absurd h1 hnx
+            · obtain ⟨R0, hR0⟩ := (hpsok p hp).old_head
+              obtain ⟨R, hR⟩ := (hnew p hp hm).cons
+              rw [hR0] at h1
+              obtain rfl := Hole.shared_mut_head hm h1
+              rw [hR]; exact List.mem_cons_self ..
+          have hnx : l ∉ exclPart p.1.slot p.1.old := fun h => hnM (mem_olds_mut.mpr ⟨p.1, hpsin p hp, h⟩)
           cases hsh : s.shell
           · rw [exclPart_plain hsh, if_pos hex] at hl ⊢
             rw [hL] at hl
-            rcases List.mem_append.mp hl with hl | hl
+            rcases (hpsok p hp).mem_tree.mp hl with hl | hl
             · exact List.mem_append.mpr (.inl hl)
-            · rcases mem_parts (s := p.1.slot) hl with h1 | h1
-              · exact absurd (mem_olds_mut.mpr ⟨p.1, hpsin p hp, h1⟩) hnM
-              · obtain ⟨R0, hR0⟩ := (hpsok p hp).old_head
-                obtain ⟨R, hR⟩ := (hnew p hp hm).cons
-                rw [hR0] at h1
-                obtain rfl := Hole.shared_mut_head hm h1
-                exact List.mem_append.mpr (.inr (by rw [hR]; exact List.mem_cons_self ..))
-          · have he' : Entry F σ Γ env p.1.root s a L := hr ▸ he
-            rcases (hpsok p hp).shell_root (hL ▸ he') hsh hm with ⟨hpath, rfl⟩ | hpath
-            · rw [hL, hpath] at hl
-              simp only [List.nil_append] at hl
-              exact absurd (mem_olds_mut.mpr ⟨p.1, hpsin p hp, hl⟩) hnM
-            · rw [hL, hpath] at hl
-              have hl2 : l ∈ p.1.old := by simpa [exclPart, Slot.shell_excl hsh, hsh] using hl
-              rcases mem_parts (s := p.1.slot) hl2 with h1 | h1
-              · exact absurd (mem_olds_mut.mpr ⟨p.1, hpsin p hp, h1⟩) hnM
-              · obtain ⟨R0, hR0⟩ := (hpsok p hp).old_head
-                obtain ⟨R, hR⟩ := (hnew p hp hm).cons
-                rw [hR0] at h1
-                obtain rfl := Hole.shared_mut_head hm h1
-                rw [hpath, hR]
-                simp [exclPart, Slot.shell_excl hsh, hsh]
+            · exact List.mem_append.mpr (.inr (hhd hl hnx))
+          · have he' : Entry F σ Γ env p.1.root s a p.1.tree := hr ▸ hL ▸ he
+            obtain ⟨Q, hQ⟩ := hroot_head p hp he' hsh hm
+            rw [hQ]
+            simp only [exclPart, Slot.shell_excl hsh, hsh, ↓reduceIte, List.tail_cons]
+            -- The tree after the root's cell is the old tree there, the path being the cell or nothing.
+            obtain ⟨T, hT⟩ := he'.2.2.cons_of_shell hsh
+            rw [hL, hT] at hl
+            simp only [exclPart, Slot.shell_excl hsh, hsh, ↓reduceIte, List.tail_cons] at hl
+            have hperm := (hpsok p hp).perm
+            rw [hT] at hperm
+            rcases (hpsok p hp).shell_root he' hsh hm with ⟨hpath, rfl⟩ | hpath
+            · -- The hole is the root: its old tree is the cell, then what the closure captured.
+              rw [hpath] at hperm hQ
+              simp only [List.nil_append] at hperm hQ
+              obtain ⟨R0, hR0⟩ := (hpsok p hp).old_head
+              have hloc : p.1.loc = a := by
+                obtain ⟨_, _, _, _, ha', -, hpth, -⟩ := hpsok p hp
+                obtain rfl := lookup_det ha' he'.2.1
+                rw [hpath] at hpth; cases hpth; rfl
+              rw [hR0, hloc] at hperm
+              have hTR := List.Perm.cons_inv hperm
+              have : l ∈ exclPart p.1.slot p.1.old := by
+                rw [hR0]
+                simp only [exclPart, Hole.slot, hm, Slot.excl, ↓reduceIte]
+                split
+                · exact hTR.mem_iff.mp hl
+                · exact List.mem_cons_of_mem _ (hTR.mem_iff.mp hl)
+              exact absurd this hnx
+            · rw [hpath] at hperm hQ
+              simp only [List.singleton_append, List.cons.injEq, true_and] at hQ
+              subst hQ
+              have hTp : T.Perm p.1.old := by simpa using hperm
+              exact hhd (hTp.mem_iff.mp hl) hnx
       · obtain ⟨p, hp, hlp⟩ := mem_mutCells.mp hlM
         have hpm := (Hole.excl_mut hlp).1
         obtain ⟨s, a, he, hex⟩ := (hpsok p hp).entry
@@ -1231,12 +1305,20 @@ theorem caller_rebuild (hI : Inv F σ Γ env E S) (hholes : ∀ h ∈ hs, HoleOk
         cases hsh : s.shell
         · rw [exclPart_plain hsh, if_pos (hex hpm)]
           exact List.mem_append.mpr (.inr (exclPart_sub hlp))
-        · rcases (hpsok p hp).shell_root he hsh hpm with ⟨hpath, rfl⟩ | hpath
-          · rw [hpath]
-            simpa using hlp
-          · rw [hpath]
-            have hl2 : l ∈ p.2 := exclPart_sub hlp
-            simp [exclPart, Slot.shell_excl hsh, hsh, hl2]
+        · obtain ⟨Q, hQ⟩ := hroot_head p hp he hsh hpm
+          rw [hQ]
+          simp only [exclPart, Slot.shell_excl hsh, hsh, ↓reduceIte, List.tail_cons]
+          rcases (hpsok p hp).shell_root he hsh hpm with ⟨hpath, rfl⟩ | hpath
+          · rw [hpath] at hQ
+            simp only [List.nil_append] at hQ
+            have hp2 := hQ ▸ (exclPart_sub hlp : l ∈ p.2)
+            rw [hQ] at hlp
+            simp only [exclPart, Slot.shell_excl hsh, hsh, ↓reduceIte, List.tail_cons] at hlp
+            exact hlp
+          · rw [hpath] at hQ
+            simp only [List.singleton_append, List.cons.injEq, true_and] at hQ
+            subst hQ
+            exact exclPart_sub hlp
 
 end rebuild
 
@@ -1455,6 +1537,8 @@ theorem PlaceTy.root_live : PlaceTy Γ p τ w y → ∀ τ', lookup y Γ ≠ som
   | .own h, τ', h' => by rw [h] at h'; cases h'
   | .ref h, τ', h' => by rw [h] at h'; cases h'
   | .deref hp, τ', h' => hp.root_live τ' h'
+  | .fst hp, τ', h' => hp.root_live τ' h'
+  | .snd hp, τ', h' => hp.root_live τ' h'
 
 theorem Caps.roots_live : Caps Γ caps ys → ∀ p ∈ ys, ∀ τ, lookup p.2 Γ ≠ some (.own τ false)
   | .nil, _, h, _ => by simp at h
@@ -1563,12 +1647,12 @@ theorem caps_ok (hc : Caps Γ caps ys) (hf : Foot F σ Γ env E S) :
   | @ro p τ w y rest ys' x hp _ ih =>
     obtain ⟨ls, Rc, Hc, hmap, hlen, hcok, hin, htr, hnew⟩ := ih
     obtain ⟨a, τr, Lr, P, l, s, ha, hLr, hpath, hres, -, -, hs, hso, -, -⟩ := place_ok hp hf
-    obtain ⟨R, hR, rfl⟩ := path_split hpath hLr
+    obtain ⟨R, hR, hLrp⟩ := path_split hpath hLr
     refine ⟨l :: ls, R ++ Rc, Hc, by simp [List.mapM_cons, hres, hmap], by simp [hlen], .ro hR hcok, ?_,
       by rw [roots_cons_ro]; exact htr, ?_⟩
     · intro l' hl'
       rcases List.mem_append.mp hl' with h | h
-      · exact ⟨y, List.mem_cons_self .., s, a, P ++ R, ⟨hs, ha, hso⟩, List.mem_append.mpr (.inr h)⟩
+      · exact ⟨y, List.mem_cons_self .., s, a, Lr, ⟨hs, ha, hso⟩, hLrp.mem_iff.mpr (List.mem_append.mpr (.inr h))⟩
       · obtain ⟨y', hy', s', a', L', he, hl⟩ := hin l' h
         exact ⟨y', List.mem_cons_of_mem _ hy', s', a', L', he, hl⟩
     · intro σ' Rc' Hc' h
@@ -1578,22 +1662,18 @@ theorem caps_ok (hc : Caps Γ caps ys) (hf : Foot F σ Γ env E S) :
   | @«mut» y τ rest ys' x hp hfn _ ih =>
     obtain ⟨ls, Rc, Hc, hmap, hlen, hcok, hin, htr, hnew⟩ := ih
     obtain ⟨a, τr, Lr, P, l, s, ha, hLr, hpath, hres, -, -, hs, hso, hexw, hslot, -⟩ := place_ok hp hf
-    obtain ⟨R, hR, rfl⟩ := path_split hpath hLr
+    obtain ⟨R, hR, -⟩ := path_split hpath hLr
     simp only [resolve] at hres
     rw [ha] at hres
     cases hres
-    obtain ⟨rfl, hPR⟩ := hLr.det_ty hR
-    obtain rfl : P = [] := by
-      have := congrArg List.length hPR; simp only [List.length_append] at this
-      exact List.eq_nil_of_length_eq_zero (by omega)
-    simp only [List.nil_append] at hso hslot ⊢
+    obtain ⟨rfl, rfl⟩ := hLr.det_ty hR
     -- A variable lent `mut` to an arm is no closure, and so no closure borrowed `mut`.
     have hsh : s.shell = false := by
       cases h : s.shell
       · rfl
       · match s, h, hso with
         | .ref .mut (.fn _ _ _ _), _, hso => rw [← (hso.ref_ty hR)] at hfn; cases hfn
-    refine ⟨a :: ls, Rc, R ++ Hc, by simp [List.mapM_cons, resolve, ha, hmap], by simp [hlen], .mut hR hfn hcok, ?_,
+    refine ⟨a :: ls, Rc, _ ++ Hc, by simp [List.mapM_cons, resolve, ha, hmap], by simp [hlen], .mut hR hfn hcok, ?_,
       by rw [roots_cons_mut]; exact .cons ⟨hs, ha, hso⟩ (hexw rfl) hsh htr, ?_⟩
     · intro l' hl'
       obtain ⟨y', hy', s', a', L', he, hl⟩ := hin l' hl'
@@ -1629,6 +1709,8 @@ theorem PlaceTy.frozen (h : PlaceTy (freeze Γ ys) p τ w y) (hy : y ∈ ys) : w
     · simp only [Slot.ro, Slot.ref.injEq] at hs; obtain ⟨rfl, -⟩ := hs; rfl
     · simp [Slot.ro] at hs
   | deref _ ih => exact ih hy
+  | fst _ ih => exact ih hy
+  | snd _ ih => exact ih hy
 
 theorem hide_absent : y ∉ Γ.map Prod.fst → hide Γ y = Γ := by
   induction Γ with

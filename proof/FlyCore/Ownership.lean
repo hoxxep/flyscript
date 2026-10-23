@@ -55,6 +55,8 @@ inductive Ty where
   /-- A closure called as `k`, taking an `A` and giving a `B`, performing what `r` names: what it
   captured is not part of its type. -/
   | fn (k : Kind) (A B : Ty) (r : Row)
+  /-- Two values, each in a cell of its own: a record of two fields. -/
+  | pair (A B : Ty)
   deriving DecidableEq, Repr
 
 /-- Plain data: integers and boxes of them, which a closure may capture. -/
@@ -62,6 +64,7 @@ def Ty.data : Ty → Bool
   | .int => true
   | .box τ => τ.data
   | .fn _ _ _ _ => false
+  | .pair A B => A.data && B.data
 
 def Ty.isFn : Ty → Bool
   | .fn _ _ _ _ => true
@@ -85,10 +88,12 @@ def Cap.sig (c : Cap α) : Var × Mode × Ty := (c.name, c.mode, c.ty)
 /-- A capture as its frame has it: where its place was when the `handle` began. -/
 def Cap.at (c : Cap Place) (l : Nat) : Cap Nat := ⟨c.name, c.mode, c.ty, l⟩
 
-/-- A place: a variable, or what a box at a place points to. -/
+/-- A place: a variable, what a box at a place points to, or a field of a pair at a place. -/
 inductive Place where
   | var (x : Var)
   | deref (p : Place)
+  | fst (p : Place)
+  | snd (p : Place)
   deriving DecidableEq, Repr
 
 /-- What an operation takes: a value had at once, with no evaluation of its own. -/
@@ -108,6 +113,8 @@ inductive Expr where
   | add (a b : Atom)
   /-- `Box.new(a)`. -/
   | new (a : Atom)
+  /-- A pair of two values, each put in a cell of its own. -/
+  | pair (a b : Atom)
   /-- `let x: τ = a; b`, `x` dropped when `b` ends unless it was moved. -/
   | let_ (x : Var) (τ : Ty) (a b : Expr)
   /-- `p = a` for an integer place. -/
@@ -188,6 +195,8 @@ inductive Val where
   | moved
   /-- A closure: its code, and the cell holding what it captured, a `τc`. -/
   | clo (f : Nat) (c : Nat) (τc : Ty)
+  /-- A pair: the cells of its fields. -/
+  | pair (b c : Nat)
   deriving DecidableEq, Repr
 
 /-- The store: its cells, `none` once freed or before allocation, the next to allocate, and the
@@ -222,6 +231,20 @@ def resolve (σ : Store) (env : Env) : Place → Option Nat
       | some (.ptr l') => some l'
       | _ => none
     | none => none
+  | .fst p =>
+    match resolve σ env p with
+    | some l =>
+      match σ.mem l with
+      | some (.pair b _) => some b
+      | _ => none
+    | none => none
+  | .snd p =>
+    match resolve σ env p with
+    | some l =>
+      match σ.mem l with
+      | some (.pair _ c) => some c
+      | _ => none
+    | none => none
 
 /-- Drops a value of type `τ` with `k` cells to spare: frees the cells of its boxes, innermost
 first, and what a closure captured, which may hold closures in turn. `none` if a cell it should free
@@ -240,6 +263,19 @@ def dropK : Nat → Store → Ty → Val → Option Store
     | some w =>
       match dropK k σ τc w with
       | some σ' => some (σ'.set c none)
+      | none => none
+    | none => none
+  | k + 1, σ, .pair A B, .pair b c =>
+    match σ.mem b with
+    | some w =>
+      match dropK k σ A w with
+      | some σ1 =>
+        match σ1.mem c with
+        | some u =>
+          match dropK k (σ1.set b none) B u with
+          | some σ2 => some (σ2.set c none)
+          | none => none
+        | none => none
       | none => none
     | none => none
   | _, _, _, _ => none
@@ -475,6 +511,16 @@ def eval (F : List Fn) (O : List Op) : Nat → HS → Store → Env → Expr →
       | some (v, σ1) =>
         let (l, σ2) := σ1.alloc v
         (.val (.ptr l), σ2)
+      | none => (.stuck, σ)
+    | .pair a b =>
+      match evalAtom σ env a with
+      | some (v, σ1) =>
+        match evalAtom σ1 env b with
+        | some (w, σ2) =>
+          let (lb, σ3) := σ2.alloc v
+          let (lc, σ4) := σ3.alloc w
+          (.val (.pair lb lc), σ4)
+        | none => (.stuck, σ)
       | none => (.stuck, σ)
     | .let_ x τ a b => ret F O n hs (.letK x τ env b) (eval F O n hs σ env a)
     | .write p a =>
@@ -782,6 +828,8 @@ inductive PlaceTy (Γ : Ctx) : Place → Ty → Bool → Var → Prop
   | own : lookup x Γ = some (.own τ true) → PlaceTy Γ (.var x) τ true x
   | ref : lookup x Γ = some (.ref m τ) → PlaceTy Γ (.var x) τ (m == .mut) x
   | deref : PlaceTy Γ p (.box τ) w r → PlaceTy Γ (.deref p) τ w r
+  | fst : PlaceTy Γ p (.pair A B) w r → PlaceTy Γ (.fst p) A w r
+  | snd : PlaceTy Γ p (.pair A B) w r → PlaceTy Γ (.snd p) B w r
 
 /-- `s'` is `s`, or, for an owned variable, `s` with what it holds perhaps moved: where branches
 disagree, or where a failure may have left. -/
@@ -891,6 +939,7 @@ inductive Typed (F : List Fn) (O : List Op) : Ctx → Expr → Ty → Ctx → Ro
   | atom : AtomTy Γ a τ Γ₁ → Typed F O Γ (.atom a) τ Γ₁ r
   | add : AtomTy Γ a .int Γ₁ → AtomTy Γ₁ b .int Γ₂ → Typed F O Γ (.add a b) .int Γ₂ r
   | new : AtomTy Γ a τ Γ₁ → Typed F O Γ (.new a) (.box τ) Γ₁ r
+  | pair : AtomTy Γ a A Γ₁ → AtomTy Γ₁ b B Γ₂ → Typed F O Γ (.pair a b) (.pair A B) Γ₂ r
   | let_ : lookup x Γ = none → Typed F O Γ a τ Γ₁ r →
       Typed F O ((x, .own τ true) :: Γ₁) b τb ((x, .own τ live) :: Γ₂) r → Typed F O Γ (.let_ x τ a b) τb Γ₂ r
   | write : AtomTy Γ a .int Γ₁ → PlaceTy Γ₁ p .int true y → Typed F O Γ (.write p a) .int Γ₁ r

@@ -61,7 +61,7 @@ theorem atom_ok (h : AtomTy Γ a τ Γ') (hI : Inv F σ Γ env E S) (hwf : WF σ
   | lit => exact ⟨_, σ, E, [], rfl, hI, .int, disj_nil_left, disj_nil_left, Moves.refl hwf hI.alloc⟩
   | read hp =>
     obtain ⟨a, τr, Lr, P, l, s, ha, hLr, hpath, hres, -⟩ := place_ok hp hI.foot
-    obtain ⟨Rb, hRb, rfl⟩ := path_split hpath hLr
+    obtain ⟨Rb, hRb, -⟩ := path_split hpath hLr
     cases hRb with
     | @int _ k hl =>
       exact ⟨.int k, σ, E, [], by simp [evalAtom, hres, hl], hI, .int, disj_nil_left, disj_nil_left,
@@ -1212,6 +1212,90 @@ theorem allocAll_fst : ∀ (σ : Store) (xs : List (Var × Val)), (allocAll σ x
   | _, [] => rfl
   | σ, (x, v) :: rest => by simp [allocAll, allocAll_fst _ rest]
 
+/-- A pair: its two values, each put in a fresh cell, which the pair owns with what they own. -/
+theorem pair_ok (ha : AtomTy Γ a A Γ₁) (hb : AtomTy Γ₁ b B Γ₂) (hI : Inv F σ Γ env E S) (hwf : WF σ) :
+    Post F O σ E S Γ₂ env (.pair A B) r hs (eval F O (n + 1) hs σ env (.pair a b)) := by
+  obtain ⟨vs, σ2a, E₂, Ls, hevs, hI₂, hvs, hLn, hdL, hdLS, hm₂⟩ := atoms_ok (.cons ha (.cons hb .nil)) hI hwf
+  cases hvs with
+  | @cons _ v0 Lv _ _ _ hv hrest =>
+  cases hrest with
+  | @cons _ w0 Lw _ _ _ hw hnil =>
+  cases hnil
+  simp only [List.flatten_cons, List.flatten_nil, List.append_nil] at hLn hdL hdLS hm₂
+  -- The atoms, one after the other.
+  cases hea : evalAtom σ env a with
+  | none => simp [evalAtoms, hea] at hevs
+  | some p =>
+    obtain ⟨v, σ1⟩ := p
+    cases heb : evalAtom σ1 env b with
+    | none => simp [evalAtoms, hea, heb] at hevs
+    | some q =>
+      obtain ⟨w, σ2⟩ := q
+      simp only [evalAtoms, hea, heb, Option.some.injEq, Prod.mk.injEq, List.cons.injEq, and_true] at hevs
+      obtain ⟨⟨rfl, rfl⟩, rfl⟩ := hevs
+      have hwf2 := hm₂.wf
+      let σ3 := (σ2.alloc v).2
+      let σ4 := (σ3.alloc w).2
+      have hn3 : σ3.next = σ2.next + 1 := rfl
+      -- The cells allocated before, and the two new ones.
+      have hold3 : ∀ z, σ2.mem z ≠ none → σ3.mem z = σ2.mem z := fun z hz => by
+        simp only [σ3, Store.alloc]; rw [if_neg (fun e => Nat.lt_irrefl _ (e ▸ hwf2 z hz))]
+      have hold4 : ∀ z, σ2.mem z ≠ none → σ4.mem z = σ2.mem z := fun z hz => by
+        simp only [σ4, Store.alloc]
+        rw [if_neg (fun e => by have := hwf2 z hz; simp [σ3, Store.alloc] at e; omega)]
+        exact hold3 z hz
+      have hb4 : σ4.mem σ2.next = some v := by
+        simp only [σ4, σ3, Store.alloc]; simp
+      have hc4 : σ4.mem (σ2.next + 1) = some w := by
+        simp only [σ4, σ3, Store.alloc]; simp
+      have hfresh : ∀ z, σ2.mem z ≠ none → z ≠ σ2.next ∧ z ≠ σ2.next + 1 := fun z hz =>
+        ⟨fun e => Nat.lt_irrefl _ (e ▸ hwf2 z hz), fun e => by have := hwf2 z hz; omega⟩
+      have hLva := hv.alloc
+      have hLwa := hw.alloc
+      have hLv1 : LT F σ4 σ2.next A (σ2.next :: Lv) :=
+        LT.of_contents hb4 (hv.frame fun z hz => hold4 z (hLva z hz)) (fun h => (hfresh _ (hLva _ h)).1 rfl)
+      have hLw1 : LT F σ4 (σ2.next + 1) B ((σ2.next + 1) :: Lw) :=
+        LT.of_contents hc4 (hw.frame fun z hz => hold4 z (hLwa z hz)) (fun h => (hfresh _ (hLwa _ h)).2 rfl)
+      obtain ⟨hnv, hnw, hdvw⟩ := nodup_append_disj.mp hLn
+      have hdisj : ∀ x ∈ σ2.next :: Lv, x ∉ (σ2.next + 1) :: Lw := by
+        intro x hx hx'
+        rcases List.mem_cons.mp hx with rfl | hx <;> rcases List.mem_cons.mp hx' with e | hx'
+        · omega
+        · exact (hfresh _ (hLwa _ hx')).1 rfl
+        · exact (hfresh _ (hLva _ hx)).2 e
+        · exact hdvw x hx hx'
+      simp only [eval, hea, heb]
+      refine post_val (L := (σ2.next :: Lv) ++ ((σ2.next + 1) :: Lw)) (E' := E₂) ?_ (.pair hLv1 hLw1 hdisj) ?_ ?_ ?_
+      · exact ⟨hI₂.foot.frame fun z hz => hold4 z (hI₂.foot.alloc z (List.mem_append.mp hz)), hI₂.nodup,
+          hI₂.disj, hI₂.keys⟩
+      · intro x hx hx'
+        have hxa := hI₂.alloc x hx'
+        simp only [List.mem_append, List.mem_cons] at hx
+        rcases hx with (rfl | hx) | (rfl | hx)
+        · exact (hfresh _ hxa).1 rfl
+        · exact hdL x (List.mem_append.mpr (.inl hx)) hx'
+        · exact (hfresh _ hxa).2 rfl
+        · exact hdL x (List.mem_append.mpr (.inr hx)) hx'
+      · intro x hx hx'
+        have hxa := hI₂.allocS x hx'
+        simp only [List.mem_append, List.mem_cons] at hx
+        rcases hx with (rfl | hx) | (rfl | hx)
+        · exact (hfresh _ hxa).1 rfl
+        · exact hdLS x (List.mem_append.mpr (.inl hx)) hx'
+        · exact (hfresh _ hxa).2 rfl
+        · exact hdLS x (List.mem_append.mpr (.inr hx)) hx'
+      · have m3 := hm₂.trans (Moves.allocate (v := v) hwf2 hI₂.alloc) hdL hwf
+        have m4 := m3.trans (Moves.allocate (σ := σ3) (v := w) hwf2.alloc (fun z hz => by
+            rw [hold3 z (hI₂.alloc z hz)]; exact hI₂.alloc z hz))
+          (fun x hx hx' => by
+            rcases List.mem_append.mp hx with hx | hx
+            · exact hdL x hx hx'
+            · simp at hx; subst hx; exact (hfresh _ (hI₂.alloc _ hx')).1 rfl) hwf
+        exact m4.relabel fun x => by
+          simp only [List.mem_append, List.mem_cons, List.mem_singleton, List.not_mem_nil, or_false,
+            show (σ2.alloc v).1 = σ2.next from rfl, show (σ3.alloc w).1 = σ3.next from rfl, hn3]
+          grind
+
 /-- What a step gives, said of the cells it started with in another order. -/
 theorem post_relabel {r : Res × Store} (hwf : WF σ) (hE : ∀ l ∈ E, σ.mem l ≠ none) (hEE : ∀ x, x ∈ E₁ ↔ x ∈ E)
     (h : Post F O σ E₁ S Γ' env τ rw hs r) : Post F O σ E S Γ' env τ rw hs r :=
@@ -1220,7 +1304,7 @@ theorem post_relabel {r : Res × Store} (hwf : WF σ) (hE : ∀ l ∈ E, σ.mem 
 /-- A `readonly` borrow held for the scope of `body`: what the place is rooted at is only read
 while it lives. -/
 theorem lend_ro_all (hE : EvalOk F O n) (hx : lookup x Γ = none) (ha : lookup y env = some a)
-    (hsl : lookup y Γ = some s) (hLr : LT F σ a τr Lr) (hpath : Path σ a τr P l τ) (hso : SlotOk F σ s a Lr)
+    (hsl : lookup y Γ = some s) (hLr : LT F σ a τr Lr) (hpath : Path F σ a τr P l τ) (hso : SlotOk F σ s a Lr)
     (hys : y ∈ ys) (hlive : ∀ y' ∈ ys, ∀ τ', lookup y' Γ ≠ some (.own τ' false))
     (hb : Typed F O ((x, .ref .ro τ) :: freeze Γ ys) body τb ((x, .ref .ro τ) :: Γb) r)
     (hI : Inv F σ Γ env E S) (hwf : WF σ) (hR : Ready O hs r) :
@@ -1236,7 +1320,7 @@ theorem lend_ro_all (hE : EvalOk F O n) (hx : lookup x Γ = none) (ha : lookup y
   have hFz : ∀ l ∈ Fz, l ∈ E := fun l h => hEp.mem_iff.mpr (List.mem_append.mpr (.inr h))
   -- The borrow's tree is among the root's: frozen, or read already.
   have hRin : ∀ l ∈ Rt, l ∈ Fz ∨ l ∈ S := fun l hl =>
-    hent y s a Lr ⟨hsl, ha, hso⟩ hys l (hLrPR ▸ List.mem_append.mpr (.inr hl))
+    hent y s a Lr ⟨hsl, ha, hso⟩ hys l (hLrPR.mem_iff.mpr (List.mem_append.mpr (.inr hl)))
   have hSin : ∀ l ∈ Rt ++ Sb, l ∈ Fz ∨ l ∈ S := fun l hl => by
     rcases List.mem_append.mp hl with h | h
     · exact hRin l h
@@ -1284,165 +1368,26 @@ theorem lend_ro_all (hE : EvalOk F O n) (hx : lookup x Γ = none) (ha : lookup y
     (hE _ _ _ _ _ _ _ _ _ _ hb hIb hwf hR)
 
 theorem lend_ro_core (hE : EvalOk F O n) (hx : lookup x Γ = none) (ha : lookup y env = some a)
-    (hsl : lookup y Γ = some s) (hLr : LT F σ a τr Lr) (hpath : Path σ a τr P l τ) (hso : SlotOk F σ s a Lr)
+    (hsl : lookup y Γ = some s) (hLr : LT F σ a τr Lr) (hpath : Path F σ a τr P l τ) (hso : SlotOk F σ s a Lr)
     (hlive : ∀ τ', lookup y Γ ≠ some (.own τ' false))
     (hb : Typed F O ((x, .ref .ro τ) :: lendCtx .ro Γ y) body τb ((x, .ref .ro τ) :: Γb) r)
     (hI : Inv F σ Γ env E S) (hwf : WF σ) (hR : Ready O hs r) :
-    Post F O σ E S (thaw Γ [y] Γb) env τb r hs (ret F O n hs .lendK (eval F O n hs σ ((x, l) :: env) body)) := by
-  simp only [lendCtx] at hb
-  obtain ⟨Rt, hRt, hLrPR⟩ := path_split hpath hLr
-  have hxk : x ∉ (freeze Γ [y]).map Prod.fst := by rw [freeze_keys]; exact lookup_none_keys hx
-  have hwb := typed_weaker hb (List.nodup_cons.mpr ⟨hxk, by rw [freeze_keys]; exact hI.keys⟩)
-  cases hwb with
-  | cons _ hwb =>
-  obtain ⟨Eb, Sb, Fz, hfb, hEp, hS, hent, hthaw⟩ := hI.foot.handle (ys := [y]) hI.keys (by
-    intro y' hy' τ'; simp only [List.mem_singleton] at hy'; subst hy'; exact hlive τ')
-  obtain ⟨hEbn, hFzn, hdEF⟩ := nodup_append_disj.mp (hEp.nodup_iff.mp hI.nodup)
-  have hEb : ∀ l ∈ Eb, l ∈ E := fun l h => hEp.mem_iff.mpr (List.mem_append.mpr (.inl h))
-  have hFz : ∀ l ∈ Fz, l ∈ E := fun l h => hEp.mem_iff.mpr (List.mem_append.mpr (.inr h))
-  -- The borrow's tree is among the root's: frozen, or read already.
-  have hRin : ∀ l ∈ Rt, l ∈ Fz ∨ l ∈ S := fun l hl =>
-    hent y s a Lr ⟨hsl, ha, hso⟩ (List.mem_singleton_self _) l (hLrPR ▸ List.mem_append.mpr (.inr hl))
-  have hSin : ∀ l ∈ Rt ++ Sb, l ∈ Fz ∨ l ∈ S := fun l hl => by
-    rcases List.mem_append.mp hl with h | h
-    · exact hRin l h
-    · exact List.mem_append.mp (hS.mem_iff.mp h)
-  have hIb : Inv F σ ((x, .ref .ro τ) :: freeze Γ [y]) ((x, l) :: env) Eb (Rt ++ Sb) := by
-    refine ⟨by simpa [addE, addS, Slot.excl, exclPart, sharedPart, Slot.shell, Bool.false_eq_true] using Foot.cons (s := .ref .ro τ) (x := x) hRt hfb, hEbn, ?_,
-      List.nodup_cons.mpr ⟨hxk, by rw [freeze_keys]; exact hI.keys⟩⟩
-    intro l hl hl'
-    rcases hSin l hl with h | h
-    · exact hdEF l hl' h
-    · exact hI.disj l h (hEb l hl')
-  have hkb : Γb.map Prod.fst = Γ.map Prod.fst := by
-    have := typed_keys hb
-    simp only [List.map_cons, List.cons.injEq] at this
-    rw [this.2, freeze_keys]
-  have hre : ∀ σ1 Eb', Agree σ σ1 (Fz ++ S) → Disj Fz Eb' →
-      Inv F σ1 ((x, .ref .ro τ) :: Γb) ((x, l) :: env) Eb' (Rt ++ Sb) →
-      ∃ E', Inv F σ1 (thaw Γ [y] Γb) env E' S ∧ ∀ z, z ∈ E' ↔ z ∈ Eb' ∨ z ∈ Fz := by
-    intro σ1 Eb' hag hdX hI'
-    obtain ⟨L', Et, St, hL', hft, hEt, hSt⟩ := hI'.foot.uncons
-    simp only [addE, addS, Slot.excl, Bool.false_eq_true, ↓reduceIte, exclPart, sharedPart, Slot.shell] at hEt hSt
-    -- The borrow's tree is as it was: shared, it was not changed.
-    have hRR := (hRt.frame fun l hl => hag l (List.mem_append.mpr (hRin l hl))).det hL'
-    subst hRR
-    obtain rfl := List.append_cancel_left hSt
-    subst hEt
-    obtain ⟨E', hf', hp⟩ := hthaw σ1 Γb Eb' hft hwb hag
-    refine ⟨E', ⟨hf', hp.nodup_iff.mpr (nodup_append_disj.mpr ⟨hI'.nodup, hFzn,
-        fun l h h' => hdX l h' h⟩), ?_, by rw [thaw_keys hkb]; exact hI.keys⟩,
-      fun z => by rw [hp.mem_iff, List.mem_append]⟩
-    intro l hl hl'
-    rcases List.mem_append.mp (hp.mem_iff.mp hl') with h | h
-    · exact hI'.disj l (List.mem_append.mpr (.inr (hS.mem_iff.mpr (List.mem_append.mpr (.inr hl))))) h
-    · exact hI.disj l hl (hFz l h)
-  have hSS : ∀ l ∈ S, l ∈ Rt ++ Sb := fun l hl =>
-    List.mem_append.mpr (.inr (hS.mem_iff.mpr (List.mem_append.mpr (.inr hl))))
-  refine post_relabel (E₁ := Fz ++ Eb) hwf hI.alloc (fun z => by
-    rw [hEp.mem_iff]; simp only [List.mem_append]; exact Or.comm) ?_
-  exact ret_lendK hSin hSS hre hR.2 hwf (fun _ _ => rfl) (fun l h => hI.alloc l (hFz l h)) hFzn
-    (fun l h h' => hdEF l h' h) hI.allocS
-    (fun l hl h => by
-      rcases List.mem_append.mp h with h | h
-      · exact hI.disj l hl (hFz l h)
-      · exact hI.disj l hl (hEb l h))
-    (hE _ _ _ _ _ _ _ _ _ _ hb hIb hwf hR)
-
-/-- A `mut` borrow of the tree at `l`, on a path from the variable `y`, held for the scope of `body`:
-the borrow owns the tree while it lives, and `y` is out of reach; once it ends, `y` owns again its
-path to `l` and what the borrow left there. -/
-theorem lend_mut_core (hE : EvalOk F O n) (hx : lookup x Γ = none) (ha : lookup y env = some a)
-    (hsl : lookup y Γ = some s) (hLr : LT F σ a τr Lr) (hpath : Path σ a τr P l τ) (hso : SlotOk F σ s a Lr)
-    (hsubE : ∀ l ∈ Lr, l ∈ E) (hsx : s.excl = true) (hslot : ∀ σ' L', LT F σ' a τr L' → SlotOk F σ' s a L')
-    (hsh : s.shell = false) (hτ : τ.isFn = false)
-    (hb : Typed F O ((x, .ref .mut τ) :: lendCtx .mut Γ y) body τb ((x, .ref .mut τ) :: Γb) r)
-    (hI : Inv F σ Γ env E S) (hwf : WF σ) (hR : Ready O hs r) :
-    Post F O σ E S (thaw Γ [y] Γb) env τb r hs (ret F O n hs .lendK (eval F O n hs σ ((x, l) :: env) body)) := by
-  simp only [lendCtx] at hb
-  obtain ⟨Rt, hRt, hLrPR⟩ := path_split hpath hLr
-  subst hLrPR
-  have hLrE : ∀ l ∈ P ++ Rt, l ∈ E := hsubE
-  have hxk : x ∉ (hide Γ y).map Prod.fst := by rw [hide_keys]; exact lookup_none_keys hx
-  have hwb := typed_weaker hb (List.nodup_cons.mpr ⟨hxk, by rw [hide_keys]; exact hI.keys⟩)
-  cases hwb with
-  | cons _ hwb =>
-  obtain ⟨Eh, hfh, hEh, hrebuild⟩ := hI.foot.hidden hI.keys ⟨hsl, ha, hso⟩ hsx hsh
-  have hxs : (Slot.ref .mut τ).shell = false := by simp [Slot.shell_ref, hτ]
-  obtain ⟨hLrn, hEhn, hdLrEh⟩ := nodup_append_disj.mp (hEh.nodup_iff.mp hI.nodup)
-  obtain ⟨hPn, hRn, hdPR⟩ := nodup_append_disj.mp hLrn
-  have hEhE : ∀ l ∈ Eh, l ∈ E := fun l h => hEh.mem_iff.mpr (List.mem_append.mpr (.inr h))
-  have hPE : ∀ l ∈ P, l ∈ E := fun l h => hLrE l (List.mem_append.mpr (.inl h))
-  have hRE : ∀ l ∈ Rt, l ∈ E := fun l h => hLrE l (List.mem_append.mpr (.inr h))
-  have hPa : ∀ l ∈ P, σ.mem l ≠ none := fun l h => hLr.alloc l (List.mem_append.mpr (.inl h))
-  -- The borrow's activation: it owns the place's tree; the root is out of reach.
-  have hIb : Inv F σ ((x, .ref .mut τ) :: hide Γ y) ((x, l) :: env) (Rt ++ Eh) S := by
-    refine ⟨by simpa [addE, addS, Slot.excl, exclPart_plain hxs, sharedPart_plain hxs] using Foot.cons (s := .ref .mut τ) (x := x) hRt hfh, ?_, ?_,
-      List.nodup_cons.mpr ⟨hxk, by rw [hide_keys]; exact hI.keys⟩⟩
-    · exact nodup_append_disj.mpr ⟨hRn, hEhn, fun l h h' => hdLrEh l (List.mem_append.mpr (.inr h)) h'⟩
-    · intro l hl hl'
-      rcases List.mem_append.mp hl' with h | h
-      · exact hI.disj l hl (hRE l h)
-      · exact hI.disj l hl (hEhE l h)
-  have hkb : Γb.map Prod.fst = Γ.map Prod.fst := by
-    have := typed_keys hb
-    simp only [List.map_cons, List.cons.injEq] at this
-    rw [this.2, hide_keys]
-  have hre : ∀ σ1 Eb', Agree σ σ1 (P ++ S) → Disj P Eb' →
-      Inv F σ1 ((x, .ref .mut τ) :: Γb) ((x, l) :: env) Eb' S →
-      ∃ E', Inv F σ1 (thaw Γ [y] Γb) env E' S ∧ ∀ z, z ∈ E' ↔ z ∈ Eb' ∨ z ∈ P := by
-    intro σ1 Eb' hag hdX hI'
-    obtain ⟨R', Et, St, hR', hft, hEt, hSt⟩ := hI'.foot.uncons
-    simp only [addE, addS, Slot.excl, ↓reduceIte, exclPart_plain hxs, sharedPart_plain hxs, List.nil_append] at hEt hSt
-    subst hEt
-    rw [← hSt] at hft
-    have hagP : Agree σ σ1 P := fun l hl => hag l (List.mem_append.mpr (.inl hl))
-    have hagS : Agree σ σ1 S := fun l hl => hag l (List.mem_append.mpr (.inr hl))
-    -- What the body left it may change is its own, or new: not on the path.
-    have hPnew : ∀ z ∈ P, z ∉ R' ++ Et := fun z hz h => hdX z hz h
-    obtain ⟨hLT', -⟩ := path_join hpath hLr hagP hR' (fun z hz h => hPnew z hz (by simp [h]))
-    obtain ⟨E', hf', hp'⟩ := hrebuild σ1 Γb Et (P ++ R') hft hwb hagS (hslot σ1 _ hLT')
-    refine ⟨E', ⟨hf', hp'.nodup_iff.mpr ?_, ?_, by rw [thaw_keys hkb]; exact hI.keys⟩, ?_⟩
-    · rw [List.append_assoc]
-      exact nodup_append_disj.mpr ⟨hPn, hI'.nodup, fun z hz h => hPnew z hz h⟩
-    · intro z hz hz'
-      rcases List.mem_append.mp (hp'.mem_iff.mp hz') with h | h
-      · rcases List.mem_append.mp h with h | h
-        · exact hI.disj z hz (hPE z h)
-        · exact hI'.disj z hz (List.mem_append.mpr (.inl h))
-      · exact hI'.disj z hz (List.mem_append.mpr (.inr h))
-    · intro z
-      rw [hp'.mem_iff]
-      simp only [List.mem_append]
-      grind
-  refine post_relabel (E₁ := P ++ (Rt ++ Eh)) hwf hI.alloc (fun z => by
-    rw [hEh.mem_iff]; simp only [List.mem_append, or_assoc]) ?_
-  exact ret_lendK (fun l hl => .inr hl) (fun l hl => hl) hre hR.2 hwf (fun _ _ => rfl) hPa hPn
-    (fun z hz h => by
-      rcases List.mem_append.mp h with h | h
-      · exact hdPR z hz h
-      · exact hdLrEh z (List.mem_append.mpr (.inl hz)) h)
-    hI.allocS
-    (fun z hz h => by
-      rcases List.mem_append.mp h with h | h
-      · exact hI.disj z hz (hPE z h)
-      · rcases List.mem_append.mp h with h | h
-        · exact hI.disj z hz (hRE z h)
-        · exact hI.disj z hz (hEhE z h))
-    (hE _ _ _ _ _ _ _ _ _ _ hb hIb hwf hR)
+    Post F O σ E S (thaw Γ [y] Γb) env τb r hs (ret F O n hs .lendK (eval F O n hs σ ((x, l) :: env) body)) :=
+  lend_ro_all hE hx ha hsl hLr hpath hso (List.mem_singleton_self y)
+    (fun y' hy' => by simp only [List.mem_singleton] at hy'; subst hy'; exact hlive) hb hI hwf hR
 
 /-- A `mut` borrow of the tree at `l`, on a path from `y`, one of the variables `ys` hidden from
 `body` while it runs: the borrow owns the tree, the others keep theirs out of reach, and once it
 ends, each owns again what it had, `y` its path to `l` and what the borrow left there. -/
 theorem lend_mut_all (hE : EvalOk F O n) (hx : lookup x Γ = none) (ha : lookup y env = some a)
-    (hsl : lookup y Γ = some s) (hLr : LT F σ a τr Lr) (hpath : Path σ a τr P l τ)
+    (hsl : lookup y Γ = some s) (hLr : LT F σ a τr Lr) (hpath : Path F σ a τr P l τ)
     (hso : SlotOk F σ s a Lr)
     (hslot : ∀ σ' L', LT F σ' a τr L' → SlotOk F σ' s a L') (hτ : τ.isFn = false)
     (hys : y ∈ ys) (hn : ys.Nodup) (htr : Trees F σ Γ env ys H)
     (hb : Typed F O ((x, .ref .mut τ) :: hideAll Γ ys) body τb ((x, .ref .mut τ) :: Γb) r)
     (hI : Inv F σ Γ env E S) (hwf : WF σ) (hR : Ready O hs r) :
     Post F O σ E S (unhideAll Γ ys Γb) env τb r hs (ret F O n hs .lendK (eval F O n hs σ ((x, l) :: env) body)) := by
-  obtain ⟨Rt, hRt, rfl⟩ := path_split hpath hLr
+  obtain ⟨Rt, hRt, hLrp⟩ := path_split hpath hLr
   have hxk : x ∉ (hideAll Γ ys).map Prod.fst := by rw [hideAll_keys]; exact lookup_none_keys hx
   have hwb := typed_weaker hb (List.nodup_cons.mpr ⟨hxk, by rw [hideAll_keys]; exact hI.keys⟩)
   cases hwb with
@@ -1453,6 +1398,7 @@ theorem lend_mut_all (hE : EvalOk F O n) (hx : lookup x Γ = none) (ha : lookup 
   -- `E` is the borrowed tree, the path to it, the others' trees and the rest.
   have hEp : E.Perm (Rt ++ Eh ++ (P ++ Hr)) := hEh.trans (by
     refine ((hHr.append_right Eh).trans ?_)
+    refine (((hLrp.append_right Hr).append_right Eh)).trans ?_
     exact List.perm_iff_count.mpr fun z => by simp only [List.count_append]; omega)
   have hEn := hEp.nodup_iff.mp hI.nodup
   obtain ⟨hBn, hXn, hdBX⟩ := nodup_append_disj.mp hEn
@@ -1482,11 +1428,13 @@ theorem lend_mut_all (hE : EvalOk F O n) (hx : lookup x Γ = none) (ha : lookup 
     have hagH : Agree σ σ1 Hr := fun z hz => hag z (by simp [hz])
     have hagS : Agree σ σ1 S := fun z hz => hag z (List.mem_append.mpr (.inr hz))
     have hPnew : ∀ z ∈ P, z ∉ R' ++ Et := fun z hz h => hdX z (by simp [hz]) h
-    obtain ⟨hLT', -⟩ := path_join hpath hLr hagP hR' (fun z hz h => hPnew z hz (by simp [h]))
+    have hPn : P.Nodup := (nodup_append_disj.mp hXn).1
+    obtain ⟨L', hLT', hL'p, -⟩ := path_join hpath hPn hagP hR' (fun z hz h => hPnew z hz (by simp [h]))
     obtain ⟨H', ht', hH'⟩ := hsplit σ1 _ hagH (hslot σ1 _ hLT')
     obtain ⟨E', hf', hp'⟩ := hrebuild σ1 Γb Et H' hft hwb hagS ht'
     have hp'' : E'.Perm ((R' ++ Et) ++ (P ++ Hr)) := hp'.trans (by
       refine (hH'.append_right Et).trans ?_
+      refine (((hL'p.append_right Hr).append_right Et)).trans ?_
       exact List.perm_iff_count.mpr fun z => by simp only [List.count_append]; omega)
     refine ⟨E', ⟨hf', hp''.nodup_iff.mpr (nodup_append_disj.mpr ⟨hI'.nodup, hXn, fun z h h' => hdX z h' h⟩),
       ?_, by rw [unhideAll_keys hkb]; exact hI.keys⟩, fun z => by rw [hp''.mem_iff, List.mem_append]⟩
@@ -1503,6 +1451,16 @@ theorem lend_mut_all (hE : EvalOk F O n) (hx : lookup x Γ = none) (ha : lookup 
       · exact hI.disj z hz (hXE z h)
       · exact hI.disj z hz (hBE z h))
     (hE _ _ _ _ _ _ _ _ _ _ hb hIb hwf hR)
+
+theorem lend_mut_core (hE : EvalOk F O n) (hx : lookup x Γ = none) (ha : lookup y env = some a)
+    (hsl : lookup y Γ = some s) (hLr : LT F σ a τr Lr) (hpath : Path F σ a τr P l τ) (hso : SlotOk F σ s a Lr)
+    (hsubE : ∀ l ∈ Lr, l ∈ E) (hsx : s.excl = true) (hslot : ∀ σ' L', LT F σ' a τr L' → SlotOk F σ' s a L')
+    (hsh : s.shell = false) (hτ : τ.isFn = false)
+    (hb : Typed F O ((x, .ref .mut τ) :: lendCtx .mut Γ y) body τb ((x, .ref .mut τ) :: Γb) r)
+    (hI : Inv F σ Γ env E S) (hwf : WF σ) (hR : Ready O hs r) :
+    Post F O σ E S (thaw Γ [y] Γb) env τb r hs (ret F O n hs .lendK (eval F O n hs σ ((x, l) :: env) body)) :=
+  lend_mut_all hE hx ha hsl hLr hpath hso hslot hτ (List.mem_singleton_self y) (by simp)
+    (.cons ⟨hsl, ha, hso⟩ hsx hsh .nil) hb hI hwf hR
 
 theorem lend_ro_ok (hE : EvalOk F O n) (hx : lookup x Γ = none) (hp : PlaceTy Γ p τ w y)
     (hb : Typed F O ((x, .ref .ro τ) :: lendCtx .ro Γ y) body τb ((x, .ref .ro τ) :: Γb) r)
@@ -1552,7 +1510,7 @@ theorem lendClo_ok (hE : EvalOk F O n) (hfd : F[f]? = some d) (hcap : d.cap = so
   have hEb : ∀ l ∈ Eb, l ∈ E := fun l h => hEp.mem_iff.mpr (List.mem_append.mpr (.inl h))
   have hFz : ∀ l ∈ Fz, l ∈ E := fun l h => hEp.mem_iff.mpr (List.mem_append.mpr (.inr h))
   have hRin : ∀ l ∈ Rt, l ∈ Fz ∨ l ∈ S := fun l hl =>
-    hent y s a0 Lr ⟨hsl, ha0, hso⟩ (List.mem_singleton_self _) l (hLrPR ▸ List.mem_append.mpr (.inr hl))
+    hent y s a0 Lr ⟨hsl, ha0, hso⟩ (List.mem_singleton_self _) l (hLrPR.mem_iff.mpr (List.mem_append.mpr (.inr hl)))
   -- The closure's cell, new.
   have hold : ∀ z, σ.mem z ≠ none → (σ.alloc (.clo f l τc)).2.mem z = σ.mem z := fun z hz => by
     simp only [Store.alloc]; rw [if_neg (fun e => Nat.lt_irrefl _ (e ▸ hwf z hz))]
@@ -1672,24 +1630,24 @@ theorem lendCloMut_ok (hE : EvalOk F O n) (hfd : F[f]? = some d) (hcap : d.cap =
       rw [hso.shell_fn hLr h] at this; cases this
   have hLrE := hsubE rfl hsh
   obtain ⟨Rt, hRt, hLrPR⟩ := path_split hpath hLr
-  subst hLrPR
   simp only [eval, hfd, hres, hcap]
   have hxk : x ∉ (hide Γ y).map Prod.fst := by rw [hide_keys]; exact lookup_none_keys hx
   have hwb := typed_weaker hb (List.nodup_cons.mpr ⟨hxk, by rw [hide_keys]; exact hI.keys⟩)
   cases hwb with
   | cons _ hwb =>
-  obtain ⟨Eh, hfh, hEh, hrebuild⟩ := hI.foot.hidden hI.keys ⟨hsl, ha0, hso⟩ (hexw rfl) hsh
+  obtain ⟨Eh, hfh, hEh0, hrebuild⟩ := hI.foot.hidden hI.keys ⟨hsl, ha0, hso⟩ (hexw rfl) hsh
+  have hEh : E.Perm ((P ++ Rt) ++ Eh) := hEh0.trans (hLrPR.append_right Eh)
   obtain ⟨hLrn, hEhn, hdLrEh⟩ := nodup_append_disj.mp (hEh.nodup_iff.mp hI.nodup)
   obtain ⟨hPn, hRn, hdPR⟩ := nodup_append_disj.mp hLrn
   have hEhE : ∀ z ∈ Eh, z ∈ E := fun z h => hEh.mem_iff.mpr (List.mem_append.mpr (.inr h))
-  have hPE : ∀ z ∈ P, z ∈ E := fun z h => hLrE z (List.mem_append.mpr (.inl h))
-  have hRE : ∀ z ∈ Rt, z ∈ E := fun z h => hLrE z (List.mem_append.mpr (.inr h))
+  have hPE : ∀ z ∈ P, z ∈ E := fun z h => hLrE z (hLrPR.mem_iff.mpr (List.mem_append.mpr (.inl h)))
+  have hRE : ∀ z ∈ Rt, z ∈ E := fun z h => hLrE z (hLrPR.mem_iff.mpr (List.mem_append.mpr (.inr h)))
   -- The closure's cell, new.
   have hold : ∀ z, σ.mem z ≠ none → (σ.alloc (.clo f l τc)).2.mem z = σ.mem z := fun z hz => by
     simp only [Store.alloc]; rw [if_neg (fun e => Nat.lt_irrefl _ (e ▸ hwf z hz))]
   have hna : ∀ z, σ.mem z ≠ none → z ≠ σ.next := fun z hz e => Nat.lt_irrefl _ (e ▸ hwf z hz)
   have hRta : ∀ z ∈ Rt, σ.mem z ≠ none := hRt.alloc
-  have hPa : ∀ z ∈ P, σ.mem z ≠ none := fun z h => hLr.alloc z (List.mem_append.mpr (.inl h))
+  have hPa : ∀ z ∈ P, σ.mem z ≠ none := fun z h => hLr.alloc z (hLrPR.mem_iff.mpr (List.mem_append.mpr (.inl h)))
   have haRt : σ.next ∉ Rt := fun h => hna _ (hRta _ h) rfl
   have haP : σ.next ∉ P := fun h => hna _ (hPa _ h) rfl
   have hco : CloOk F f τc .excl A d.ret d.row := ⟨d, xc, pn, hfd, hcap, hown, hrefs, hretp, rfl, rfl⟩
@@ -1735,8 +1693,9 @@ theorem lendCloMut_ok (hE : EvalOk F O n) (hfd : F[f]? = some d) (hcap : d.cap =
     have hagP : Agree σ σ1 P := fun z hz => by
       rw [hag z (List.mem_append.mpr (.inl (List.mem_cons_of_mem _ hz)))]; exact hold z (hPa z hz)
     have hPnew : ∀ z ∈ P, z ∉ R' ++ Et := fun z hz h => hdX z (List.mem_cons_of_mem _ hz) h
-    obtain ⟨hLT', -⟩ := path_join hpath hLr hagP hR' (fun z hz h => hPnew z hz (by simp [h]))
-    obtain ⟨E', hf', hp'⟩ := hrebuild σ1 Γb Et (P ++ R') hft hwb hagS (hslot σ1 _ hLT')
+    obtain ⟨L'', hLT', hL''p, -⟩ := path_join hpath hPn hagP hR' (fun z hz h => hPnew z hz (by simp [h]))
+    obtain ⟨E', hf', hp0⟩ := hrebuild σ1 Γb Et L'' hft hwb hagS (hslot σ1 _ hLT')
+    have hp' : E'.Perm ((P ++ R') ++ Et) := hp0.trans (hL''p.append_right Et)
     refine ⟨E', ⟨hf', hp'.nodup_iff.mpr ?_, ?_, by rw [thaw_keys hkb]; exact hI.keys⟩, ?_⟩
     · rw [List.append_assoc]
       exact nodup_append_disj.mpr ⟨hPn, hI'.nodup, fun z hz h => hPnew z hz h⟩
@@ -1974,8 +1933,8 @@ theorem ret_callLendK {d : Fn} {hos : List Hole} {cs : List (Nat × Place)} {zs 
       rcases mem_cells_of hq hz with hM | hR
       · exact (nodup_append_disj.mp hI₃.nodup).2.2 z hEo hM
       · exact hI₃.disj z (hro ▸ hR) (List.mem_append.mpr (.inl hEo))
-    have hpath4 : Path σ4 q.1.loc q.1.ty P' l d.ret := hpath'.frame fun z hz =>
-      hkeep4 z (hqEo z (hPR ▸ List.mem_append.mpr (.inl hz)))
+    have hpath4 : Path F σ4 q.1.loc q.1.ty P' l d.ret := hpath'.frame fun z hz =>
+      hkeep4 z (hqEo z (hPR.mem_iff.mpr (List.mem_append.mpr (.inl hz))))
     have hqh : q.1 ∈ hos := hps ▸ List.mem_map_of_mem hq
     refine post_after hm hwf ?_
     simp only [ret, hpick, hres, hdrop]
@@ -1983,20 +1942,20 @@ theorem ret_callLendK {d : Fn} {hos : List Hole} {cs : List (Nat × Place)} {zs 
     -- closure borrowed `mut`, its parameter's type being no closure.
     have hafter : ∀ q' ∈ ps, ∀ c' ∈ cs, hos[c'.1]? = some q'.1 → q'.1.mode = .mut → m = .mut →
         ∃ s a τr, lookup q'.1.root Γ₁ = some s ∧ lookup q'.1.root env = some a ∧
-          s.excl = true ∧ s.shell = false ∧ Path σ4 a τr q'.1.path q'.1.loc q'.1.ty ∧
-          LT F σ4 a τr (q'.1.path ++ q'.2) ∧ SlotOk F σ4 s a (q'.1.path ++ q'.2) ∧
+          s.excl = true ∧ s.shell = false ∧ Path F σ4 a τr q'.1.path q'.1.loc q'.1.ty ∧
+          ∃ L', LT F σ4 a τr L' ∧ L'.Perm (q'.1.path ++ q'.2) ∧ SlotOk F σ4 s a L' ∧
           ∀ σ'' L', LT F σ'' a τr L' → SlotOk F σ'' s a L' := by
       intro q' hq' c' hc' hhi' hm' hmm
       obtain ⟨xi', mi', τi', w', hd'', hri', -, -, hhi'', hmh', hdp'⟩ := hcs c' hc'
       rw [hhi'] at hhi''; cases hhi''
       have hqh' : q'.1 ∈ hos := List.mem_of_getElem? hhi'
-      obtain ⟨s, a, τr, hs, ha, hex, hpathH, hLT, hso, hslot⟩ :=
+      obtain ⟨s, a, τr, L', hs, ha, hex, hpathH, hLT, hLp, hso, hslot⟩ :=
         hole_after hI₁ hholes hpw hps hnew4 hag4 hXM hSM hq' hm'
-      refine ⟨s, a, τr, hs, ha, hex, ?_, hpathH, hLT, hso, hslot⟩
+      refine ⟨s, a, τr, hs, ha, hex, ?_, hpathH, L', hLT, hLp, hso, hslot⟩
       cases h : s.shell
       · rfl
-      · have he : Entry F σf Γ₁ env q'.1.root s a (q'.1.path ++ q'.1.old) := by
-          obtain ⟨s', a', -, hs', ha', -, -, -, hso', -⟩ := hholes q'.1 hqh'
+      · have he : Entry F σf Γ₁ env q'.1.root s a q'.1.tree := by
+          obtain ⟨s', a', -, hs', ha', -, -, -, -, hso', -⟩ := hholes q'.1 hqh'
           obtain rfl := lookup_det hs hs'
           obtain rfl := lookup_det ha ha'
           exact ⟨hs', ha', hso'⟩
@@ -2016,15 +1975,15 @@ theorem ret_callLendK {d : Fn} {hos : List Hole} {cs : List (Nat × Place)} {zs 
       | ro =>
         simp only [lendCtxs] at hb
         by_cases hqm : q.1.mode = .mut
-        · obtain ⟨s, a, τr, hs, ha, -, hpathH, hLT, hso, -⟩ :=
+        · obtain ⟨s, a, τr, L', hs, ha, -, hpathH, hLT, -, hso, -⟩ :=
             hole_after hI₁ hholes hpw hps hnew4 hag4 hXM hSM hq hqm
           exact lend_ro_all hE hx ha hs hLT (hpathH.trans hpath4) hso hzin hlive hb hI₄ hm.wf hR
         · have hqr : q.1.mode = .ro := by cases h : q.1.mode <;> simp_all
-          obtain ⟨s, a, τr, hs, ha, hpathH, hLT, -, hso, -⟩ := hole_after_ro hI₁ hholes hpw hag4 hqh hqr
+          obtain ⟨s, a, τr, hs, ha, hpathH, hLT, -, -, hso, -⟩ := hole_after_ro hI₁ hholes hpw hag4 hqh hqr
           exact lend_ro_all hE hx ha hs hLT (hpathH.trans hpath4) hso hzin hlive hb hI₄ hm.wf hR
       | «mut» =>
         simp only [lendCtxs] at hb
-        obtain ⟨s, a, τr, hs, ha, hex, hsh, hpathH, hLT, hso, hslot⟩ := hafter q hq _ hc hhi (hmh rfl).1 rfl
+        obtain ⟨s, a, τr, hs, ha, hex, hsh, hpathH, L', hLT, -, hso, hslot⟩ := hafter q hq _ hc hhi (hmh rfl).1 rfl
         obtain ⟨H, htr⟩ := Trees.of_pairs hzs fun c' hc' z ⟨hd', hhi', hz⟩ => by
           obtain ⟨_, _, _, _, hd'', _, _, _, hhi'', hmh', _⟩ := hcs c' hc'
           rw [hhi'] at hhi''; cases hhi''
@@ -2032,7 +1991,7 @@ theorem ret_callLendK {d : Fn} {hos : List Hole} {cs : List (Nat × Place)} {zs 
             have : hd' ∈ ps.map Prod.fst := by rw [hps]; exact List.mem_of_getElem? hhi'
             simpa using this
           subst hqe
-          obtain ⟨s', a', τr', hs', ha', hex', hsh', -, hLT', hso', -⟩ :=
+          obtain ⟨s', a', τr', hs', ha', hex', hsh', -, L'', hLT', -, hso', -⟩ :=
             hafter q' hq' c' hc' hhi' (hmh' rfl).1 rfl
           subst hz
           exact ⟨s', a', _, ⟨hs', ha', hso'⟩, hex', hsh'⟩
@@ -2853,6 +2812,8 @@ theorem eval_ok_succ (hF : FnsOk F O) (hE : EvalOk F O n) (hR : RetOk F O n) :
       · exact fun h => hfresh _ (List.mem_append.mpr (.inl (List.mem_append.mpr (.inl h)))) rfl
       · exact disj_cons_left.mpr ⟨fun h => hfresh _ (List.mem_append.mpr (.inl (List.mem_append.mpr (.inr h)))) rfl, hd₁⟩
       · exact disj_cons_left.mpr ⟨fun h => hfresh _ (List.mem_append.mpr (.inr h)) rfl, hdS₁⟩
+    | pair ha hb =>
+      exact pair_ok ha hb hI hwf
     | lendClo hfd hcap hown hrefs hretp hdat hp hx hb =>
       exact lendClo_ok hE hfd hcap hown hrefs hretp hdat hp hx hb hI hwf hRdy
     | lendCloMut hfd hcap hown hrefs hretp hdat hp hx hb =>
@@ -2897,8 +2858,8 @@ theorem eval_ok_succ (hF : FnsOk F O) (hE : EvalOk F O n) (hR : RetOk F O n) :
       cases hRb with
       | int hl =>
         simp only [eval, hev, hres, hl]
-        have hnd := seg_nodup (hE ▸ hI₁.nodup)
-        have hlE : l ∈ E₁ := hE ▸ mem_seg.mpr (.inl (by simp))
+        have hnd := seg_nodup (hE.nodup_iff.mp hI₁.nodup)
+        have hlE : l ∈ E₁ := hE.mem_iff.mpr (mem_seg.mpr (.inl (by simp)))
         have hlP : l ∉ P := by
           have := hnd.1; rw [nodup_append_disj] at this; exact fun h => this.2.2 l h (by simp)
         have hlAB : l ∉ A ++ B := hnd.2.1 l (by simp)
@@ -2906,28 +2867,28 @@ theorem eval_ok_succ (hF : FnsOk F O) (hE : EvalOk F O n) (hR : RetOk F O n) :
         have hout : l ∉ A ++ P ++ B ++ S := by
           simp only [List.mem_append, not_or] at hlAB ⊢
           exact ⟨⟨⟨hlAB.1, hlP⟩, hlAB.2⟩, hlS⟩
-        refine post_val ?_ .int disj_nil_left disj_nil_left
-          ((hm₁.trans (Moves.set hm₁.wf hI₁.alloc hlE) disj_nil_left hwf).relabel (E'' := E₁) (L'' := [])
-            (by simp))
-        have := hupd (σ1.set l (some (.int k))) [l] (agree_set hout) (.int (n := k) (by simp [Store.set])) (by
-          intro x hx; simp at hx; subst hx
-          simp only [List.mem_append, not_or] at hout ⊢; exact hout.1) (by
-          intro x hx; simp at hx; subst hx; exact hlS)
-        rwa [← hE] at this
+        obtain ⟨E'', hI'', hE''⟩ := hupd (σ1.set l (some (.int k))) [l] (agree_set hout)
+          (.int (n := k) (by simp [Store.set])) (by
+            intro x hx; simp at hx; subst hx
+            simp only [List.mem_append, not_or] at hout ⊢; exact hout.1) (by
+            intro x hx; simp at hx; subst hx; exact hlS)
+        refine post_val hI'' .int disj_nil_left disj_nil_left
+          ((hm₁.trans (Moves.set hm₁.wf hI₁.alloc hlE) disj_nil_left hwf).relabel (E'' := E'') (L'' := [])
+            (fun x => by simp only [List.append_nil, hE''.mem_iff, ← hE.mem_iff]))
     | assign ha hp hsh =>
       obtain ⟨v, σ1, E₁, L₁, hev, hI₁, hv₁, hd₁, hdS₁, hm₁⟩ := atom_ok ha hI hwf
       obtain ⟨l, Rb, P, A, B, hres, hRb, hE, hupd⟩ := replace_at hI₁ hp (.inr hsh)
       obtain ⟨w, R', hw, hvw, rfl, hlR'⟩ := hRb.contents
       obtain ⟨σ2, hdrop, hnext, hfree, hkeep⟩ := drop_ok hm₁.wf _ w R' hvw
       simp only [eval, hev, hres, hw, hdrop]
-      have hlE : l ∈ E₁ := hE ▸ mem_seg.mpr (.inl (by simp))
-      have hR'E : ∀ x ∈ R', x ∈ E₁ := fun x hx => hE ▸ mem_seg.mpr (.inl (by simp [hx]))
-      obtain ⟨hdR, -⟩ := seg3 (hE ▸ hI₁.nodup)
+      have hlE : l ∈ E₁ := hE.mem_iff.mpr (mem_seg.mpr (.inl (by simp)))
+      have hR'E : ∀ x ∈ R', x ∈ E₁ := fun x hx => hE.mem_iff.mpr (mem_seg.mpr (.inl (by simp [hx])))
+      obtain ⟨hdR, -⟩ := seg3 (hE.nodup_iff.mp hI₁.nodup)
       have hlAPB : l ∉ A ++ P ++ B := hdR l (by simp)
       have hdR' : Disj R' (A ++ P ++ B) := fun x hx => hdR x (by simp [hx])
       have hlL : l ∉ L₁ := fun h => hd₁ l h hlE
       have hlS : l ∉ S := fun h => hI₁.disj l h hlE
-      have hAPB : ∀ x ∈ A ++ P ++ B, x ∈ E₁ := fun x hx => hE ▸ (by
+      have hAPB : ∀ x ∈ A ++ P ++ B, x ∈ E₁ := fun x hx => hE.mem_iff.mpr (by
         simp only [List.mem_append] at hx ⊢; rcases hx with (hx | hx) | hx <;> simp [hx])
       let σ3 := σ2.set l (some v)
       have hkeep3 : ∀ x, x ≠ l → x ∉ R' → σ3.mem x = σ1.mem x := by
@@ -2951,7 +2912,7 @@ theorem eval_ok_succ (hF : FnsOk F O) (hE : EvalOk F O n) (hR : RetOk F O n) :
           rcases List.mem_append.mp hx with hx | hx
           · exact hI₁.alloc x hx
           · exact hv₁.alloc x hx)
-        (fun x => by rw [hE]; mem_iff) hfree hkeep (by
+        (fun x => by rw [List.mem_append, hE.mem_iff]; mem_iff) hfree hkeep (by
           intro x hx hxR
           rcases List.mem_append.mp hx with hx | hx
           · simp only [List.mem_append, List.mem_singleton] at hx
@@ -2963,13 +2924,14 @@ theorem eval_ok_succ (hF : FnsOk F O) (hE : EvalOk F O n) (hR : RetOk F O n) :
           · exact hd₁ x hx (hR'E x hxR))
       have hm₃ := Moves.set (v := v) hwf2 (fun x hx => (hm₂.alloc x).mpr (.inr (.inl hx)))
         (l := l) (by simp)
-      refine post_val (hupd σ3 _ hag hLt ?_ ?_) .int disj_nil_left disj_nil_left ?_
-      · exact disj_cons_left.mpr ⟨hlAPB, fun x hx hx' => hd₁ x hx (hAPB x hx')⟩
-      · exact disj_cons_left.mpr ⟨hlS, hdS₁⟩
-      · have := (hm₁.relabel (E'' := E₁ ++ L₁) (L'' := []) fun x => by mem_iff).trans
-          ((hm₂.trans hm₃ disj_nil_left hm₁.wf).relabel (E'' := A ++ (P ++ (l :: L₁)) ++ B) (L'' := [])
-            fun x => by mem_iff) disj_nil_left hwf
-        simpa using this
+      obtain ⟨E'', hI'', hE''⟩ := hupd σ3 _ hag hLt (disj_cons_left.mpr ⟨hlAPB, fun x hx hx' => hd₁ x hx (hAPB x hx')⟩)
+        (disj_cons_left.mpr ⟨hlS, hdS₁⟩)
+      refine post_val hI'' .int disj_nil_left disj_nil_left ?_
+      have := (hm₁.relabel (E'' := E₁ ++ L₁) (L'' := []) fun x => by mem_iff).trans
+        ((hm₂.trans hm₃ disj_nil_left hm₁.wf).relabel (E'' := A ++ (P ++ (l :: L₁)) ++ B) (L'' := [])
+          fun x => by mem_iff) disj_nil_left hwf
+      exact (by simpa using this : Moves σ E _ (A ++ (P ++ (l :: L₁)) ++ B) []).relabel fun x => by
+        simp only [List.append_nil, hE''.mem_iff]
     | let_ hx ha hb =>
       simp only [eval]
       exact ret_letK hE (lookup_none_of_keys (by rw [typed_keys ha]; exact lookup_none_keys hx))
@@ -3092,10 +3054,11 @@ theorem eval_ok_succ (hF : FnsOk F O) (hE : EvalOk F O n) (hR : RetOk F O n) :
         | once => exact absurd rfl hk
         | shared => exact ⟨.ro, rfl, fun h => by cases h⟩
         | excl => exact ⟨.mut, rfl, fun _ => hw rfl⟩
-      let h : Hole := ⟨md, τc, y, c, P ++ [la], Rc⟩
+      let h : Hole := ⟨md, τc, y, c, P ++ [la], Rc, Lr⟩
+      have hco' : CloOk F f τc k A _ r' := ⟨d, xc, pn, hfd, hcap, hown, hrefs, hretp, hret, hrow'⟩
       have hhole : HoleOk F σ1 Γ' env h := ⟨s, ra, τr, hsl, hra, fun hm => hexw (hmdw hm),
-        hpath.trans (.clo hla .here), by simpa [h, hLrPR] using hLr,
-        by simpa [h, hLrPR] using hso, hc, hslot, fun hs => .inr (by
+        hpath.trans (.clo hla hco' .here), hLr, by simpa [h] using hLrPR,
+        hso, hc, hslot, fun hs => .inr (by
           obtain ⟨rfl, -⟩ := hshp hs
           cases hpath
           rfl)⟩

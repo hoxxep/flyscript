@@ -191,11 +191,12 @@ theorem Inv.apart (hI : Inv F σ Γ env E S) (hx : Entry F σ Γ env x s a L) (h
         · exact hd l (mem_addS.mpr (.inl h)) (mem_addE.mpr (.inr hE))
       · exact ih hxt hyt hne hn' hd' hkt
 
-/-- Every variable's footprint rebuilt at once, in a store where each holds what `nf` says: the
-shared parts as they were, the exclusive ones apart from each other. -/
+/-- Every variable's footprint rebuilt at once, in a store where each holds a tree whose cells are
+those `nf` says: the shared parts as they were, the exclusive ones apart from each other. -/
 theorem Foot.rebuild (nf : Var → List Nat → List Nat) (h : Foot F σ Γ env E S)
     (hk : (Γ.map Prod.fst).Nodup)
-    (hok : ∀ x s a L, Entry F σ Γ env x s a L → SlotOk F σ' s a (nf x L) ∧ sharedPart s (nf x L) = sharedPart s L)
+    (hok : ∀ x s a L, Entry F σ Γ env x s a L → ∃ L', SlotOk F σ' s a L' ∧
+      sharedPart s L' = sharedPart s L ∧ ∀ z, z ∈ exclPart s L' ↔ z ∈ exclPart s (nf x L))
     (hdisj : ∀ x s a L y t b L', Entry F σ Γ env x s a L → Entry F σ Γ env y t b L' → x ≠ y →
       Disj (exclPart s (nf x L)) (exclPart t (nf y L'))) :
     ∃ E', Foot F σ' Γ env E' S ∧ E'.Nodup ∧
@@ -213,14 +214,14 @@ theorem Foot.rebuild (nf : Var → List Nat → List Nat) (h : Foot F σ Γ env 
         ⟨(entry_cons hz).mpr (.inr ⟨hne, he⟩), hne⟩
     obtain ⟨E', hf', hn', hmem'⟩ := ih hkt (fun x s a L he => hok x s a L (htail he).1)
       (fun x s a L y t b L' hx hy hne => hdisj x s a L y t b L' (htail hx).1 (htail hy).1 hne)
-    obtain ⟨hr', hsame⟩ := hok z r c M hhead
-    have hS : addS r (nf z M) S = addS r M S := by simp [addS, hsame]
-    refine ⟨addE r (nf z M) E', hS ▸ Foot.cons hr' hf', ?_, ?_⟩
+    obtain ⟨M', hr', hsame, hmemM⟩ := hok z r c M hhead
+    have hS : addS r M' S = addS r M S := by simp [addS, hsame]
+    refine ⟨addE r M' E', hS ▸ Foot.cons hr' hf', ?_, ?_⟩
     · refine nodup_append_disj.mpr ⟨(parts_nodup hr'.nodup).1, hn', fun l hl hl' => ?_⟩
       obtain ⟨x, s, a, L, hx, hl'⟩ := (hmem' l).mp hl'
-      exact hdisj z r c M x s a L hhead (htail hx).1 (htail hx).2.symm l hl hl'
+      exact hdisj z r c M x s a L hhead (htail hx).1 (htail hx).2.symm l ((hmemM l).mp hl) hl'
     · intro l
-      rw [mem_addE, hmem']
+      rw [mem_addE, hmem', hmemM]
       constructor
       · rintro (hl | ⟨x, s, a, L, hx, hl⟩)
         · exact ⟨z, r, c, M, hhead, hl⟩

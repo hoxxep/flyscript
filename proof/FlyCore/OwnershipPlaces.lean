@@ -45,7 +45,7 @@ theorem SlotOk.shell_fn (h : SlotOk F σ s a L) (hL : LT F σ a τ L) (hs : s.sh
 the exclusive footprint — but for a closure borrowed `mut`, which is the place itself, its cell only
 read. -/
 theorem place_ok : PlaceTy Γ p τ w r → Foot F σ Γ env E S →
-    ∃ a τr Lr P l s, lookup r env = some a ∧ LT F σ a τr Lr ∧ Path σ a τr P l τ ∧
+    ∃ a τr Lr P l s, lookup r env = some a ∧ LT F σ a τr Lr ∧ Path F σ a τr P l τ ∧
       resolve σ env p = some l ∧ (Sub (exclPart s Lr) E ∧ Sub (sharedPart s Lr) S) ∧
       (w = true → s.shell = false → Sub Lr E) ∧
       lookup r Γ = some s ∧ SlotOk F σ s a Lr ∧ (w = true → s.excl = true) ∧
@@ -69,15 +69,36 @@ theorem place_ok : PlaceTy Γ p τ w r → Foot F σ Γ env E S →
       · rfl
   | deref hq ih =>
     obtain ⟨a, τr, Lr, P, l, s, ha, hLr, hpath, hres, hsub, hw, hs, hso, hex, hlt, hsh⟩ := ih
-    obtain ⟨R, hR, rfl⟩ := path_split hpath hLr
+    obtain ⟨R, hR, -⟩ := path_split hpath hLr
     cases hR with
     | box hl hb _ =>
-      refine ⟨a, τr, _, P ++ [l], _, s, ha, hLr, hpath.snoc hl, by simp [resolve, hres, hl], hsub, hw, hs,
+      refine ⟨a, τr, Lr, P ++ [l], _, s, ha, hLr, hpath.snoc hl, by simp [resolve, hres, hl], hsub, hw, hs,
         hso, hex, hlt, fun h => ?_⟩
       -- A closure's cell holds no box to follow.
       obtain ⟨-, rfl⟩ := hsh h
       match s, h, hso with
       | .ref .mut (.fn _ _ _ _), _, hso => exact absurd (LT.det_ty hLr hso).1 (by simp)
+  | fst hq ih =>
+    obtain ⟨a, τr, Lr, P, l, s, ha, hLr, hpath, hres, hsub, hw, hs, hso, hex, hlt, hsh⟩ := ih
+    obtain ⟨R, hR, -⟩ := path_split hpath hLr
+    cases hR with
+    | pair hl h1 h2 _ _ =>
+      refine ⟨a, τr, Lr, _, _, s, ha, hLr, hpath.snocFst' rfl hl h2, by simp [resolve, hres, hl], hsub, hw, hs,
+        hso, hex, hlt, fun h => ?_⟩
+      obtain ⟨-, rfl⟩ := hsh h
+      match s, h, hso with
+      | .ref .mut (.fn _ _ _ _), _, hso => exact absurd (LT.det_ty hLr hso).1 (by simp)
+  | snd hq ih =>
+    obtain ⟨a, τr, Lr, P, l, s, ha, hLr, hpath, hres, hsub, hw, hs, hso, hex, hlt, hsh⟩ := ih
+    obtain ⟨R, hR, -⟩ := path_split hpath hLr
+    cases hR with
+    | pair hl h1 h2 _ _ =>
+      refine ⟨a, τr, Lr, _, _, s, ha, hLr, hpath.snocSnd' rfl hl h1, by simp [resolve, hres, hl], hsub, hw, hs,
+        hso, hex, hlt, fun h => ?_⟩
+      obtain ⟨-, rfl⟩ := hsh h
+      match s, h, hso with
+      | .ref .mut (.fn _ _ _ _), _, hso => exact absurd (LT.det_ty hLr hso).1 (by simp)
+
 
 /-! ## Changing one variable -/
 
@@ -252,6 +273,7 @@ theorem typed_keys : Typed F O Γ e τ Γ' r → Γ'.map Prod.fst = Γ.map Prod.
   | .atom ha => atom_keys ha
   | .add ha hb => (atom_keys hb).trans (atom_keys ha)
   | .new ha => atom_keys ha
+  | .pair ha hb => (atom_keys hb).trans (atom_keys ha)
   | .let_ _ ha hb => by
     have := typed_keys hb
     simp only [List.map_cons, List.cons.injEq] at this
@@ -301,9 +323,9 @@ theorem lookup_det {α : Type} {x : Var} {a b : α} {env : List (Var × α)} : l
 activation stands, the variable the place is rooted at now owning the new tree. -/
 theorem replace_at (hI : Inv F σ Γ env E S) (hp : PlaceTy Γ p τ true r)
     (hτ : τ.isFn = false ∨ ∀ s, lookup r Γ = some s → s.shell = false) :
-    ∃ l R P E₁ E₂, resolve σ env p = some l ∧ LT F σ l τ R ∧ E = E₁ ++ (P ++ R) ++ E₂ ∧
+    ∃ l R P E₁ E₂, resolve σ env p = some l ∧ LT F σ l τ R ∧ E.Perm (E₁ ++ (P ++ R) ++ E₂) ∧
       ∀ σ' R', Agree σ σ' (E₁ ++ P ++ E₂ ++ S) → LT F σ' l τ R' → Disj R' (E₁ ++ P ++ E₂) →
-        Disj R' S → Inv F σ' Γ env (E₁ ++ (P ++ R') ++ E₂) S := by
+        Disj R' S → ∃ E', Inv F σ' Γ env E' S ∧ E'.Perm (E₁ ++ (P ++ R') ++ E₂) := by
   obtain ⟨a, τr, Lr, P, l, s, ha, hLr, hpath, hres, -, -, hs, hso, hex, hlt, hshp⟩ := place_ok hp hI.foot
   have hsh : ∀ s', lookup r Γ = some s' → s'.shell = false := by
     rcases hτ with hτ | h
@@ -313,47 +335,49 @@ theorem replace_at (hI : Inv F σ Γ env E S) (hp : PlaceTy Γ p τ true r)
       · rfl
       · obtain ⟨-, rfl⟩ := hshp h; rw [hso.shell_fn hLr h] at hτ; cases hτ
     · exact h
-  obtain ⟨R, hR, rfl⟩ := path_split hpath hLr
+  obtain ⟨R, hR, hLrp⟩ := path_split hpath hLr
   obtain ⟨a', L', E₁, E₂, ha', hso', hE, hupd⟩ := foot_update hI.foot hI.keys hs (hex rfl) (hsh s hs)
   cases lookup_det ha ha'
   cases hso.det hso'
-  refine ⟨l, R, P, E₁, E₂, hres, hR, hE, ?_⟩
+  have hEp : E.Perm (E₁ ++ (P ++ R) ++ E₂) := by
+    rw [hE]; exact (hLrp.append_left E₁).append_right E₂
+  refine ⟨l, R, P, E₁, E₂, hres, hR, hEp, ?_⟩
   intro σ' R' hag hR' hd hdS
-  have hnd := hE ▸ hI.nodup
-  rw [nodup_append_disj, nodup_append_disj] at hnd
-  have hPR := hLr.nodup
-  rw [nodup_append_disj] at hPR
+  have hnd := hEp.nodup_iff.mp hI.nodup
+  have hPn : P.Nodup := (nodup_append_disj.mp (hLrp.nodup_iff.mp hLr.nodup)).1
   have hagP : Agree σ σ' P := fun x hx => hag x (by simp [hx])
   have hdP : Disj P R' := fun x hx hx' => hd x hx' (by simp [hx])
-  obtain ⟨hlt', -⟩ := path_join hpath hLr hagP hR' hdP
-  have hfoot := hupd σ' s (P ++ R') (hex rfl) (hsh s hs) (fun x hx => hag x (by
+  obtain ⟨L'', hlt', hL''p, -⟩ := path_join hpath hPn hagP hR' hdP
+  have hfoot := hupd σ' s L'' (hex rfl) (hsh s hs) (fun x hx => hag x (by
     simp only [List.mem_append] at hx ⊢
     rcases hx with (hx | hx) | hx
     · exact .inl (.inl (.inl hx))
     · exact .inl (.inr hx)
     · exact .inr hx)) (hlt σ' _ hlt')
   rw [setSlot_same Γ hI.keys hs] at hfoot
-  refine ⟨hfoot, ?_, ?_, hI.keys⟩
-  · rw [nodup_append_disj, nodup_append_disj, nodup_append_disj]
-    obtain ⟨⟨h1, -, h1PR⟩, h2, h12⟩ := hnd
-    refine ⟨⟨h1, ⟨hPR.1, hR'.nodup, hdP⟩, ?_⟩, h2, ?_⟩
-    · intro x hx hx'
-      rcases List.mem_append.mp hx' with hx' | hx'
-      · exact h1PR x hx (List.mem_append.mpr (.inl hx'))
-      · exact hd x hx' (by simp [hx])
-    · intro x hx hx'
-      rcases List.mem_append.mp hx with hx | hx
-      · exact h12 x (List.mem_append.mpr (.inl hx)) hx'
-      · rcases List.mem_append.mp hx with hx | hx
-        · exact h12 x (List.mem_append.mpr (.inr (List.mem_append.mpr (.inl hx)))) hx'
-        · exact hd x hx (by simp [hx'])
+  have hE' : (E₁ ++ L'' ++ E₂).Perm (E₁ ++ (P ++ R') ++ E₂) := (hL''p.append_left E₁).append_right E₂
+  refine ⟨_, ⟨hfoot, hE'.nodup_iff.mpr ?_, ?_, hI.keys⟩, hE'⟩
+  · simp only [List.nodup_append, List.mem_append] at hnd ⊢
+    obtain ⟨⟨h1, ⟨hP, -, -⟩, h1PR⟩, h2, h12⟩ := hnd
+    refine ⟨⟨h1, ⟨hP, hR'.nodup, fun x hx y hy e => hdP x hx (e ▸ hy)⟩, ?_⟩, h2, ?_⟩
+    · intro x hx y hy e
+      subst e
+      rcases hy with hy | hy
+      · exact h1PR x hx x (.inl hy) rfl
+      · exact hd x hy (by simp [hx])
+    · intro x hx y hy e
+      subst e
+      rcases hx with hx | hx | hx
+      · exact h12 x (.inl hx) x hy rfl
+      · exact h12 x (.inr (.inl hx)) x hy rfl
+      · exact hd x hx (by simp [hy])
   · intro x hxS hx
-    rcases List.mem_append.mp hx with hx | hx
+    rcases List.mem_append.mp (hE'.mem_iff.mp hx) with hx | hx
     · rcases List.mem_append.mp hx with hx | hx
-      · exact hI.disj x hxS (hE ▸ by simp [hx])
+      · exact hI.disj x hxS (hEp.mem_iff.mpr (by simp [hx]))
       · rcases List.mem_append.mp hx with hx | hx
-        · exact hI.disj x hxS (hE ▸ by simp [hx])
+        · exact hI.disj x hxS (hEp.mem_iff.mpr (by simp [hx]))
         · exact hdS x hx hxS
-    · exact hI.disj x hxS (hE ▸ by simp [hx])
+    · exact hI.disj x hxS (hEp.mem_iff.mpr (by simp [hx]))
 
 end FlyCore.Ownership

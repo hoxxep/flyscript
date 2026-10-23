@@ -904,4 +904,46 @@ example : ∀ n, match eval [either] [] n [.abort .fail 0] .empty [] picks with
     | (.abort _ _, σ') => ∀ l, σ'.mem l = none :=
   program_ok either_ok picks_typed
 
+/-! Pairs, and a borrow of one field. -/
+
+/-- `function inc(r: mut int): int { r = r + 1; r }`. -/
+def inc : Fn :=
+  { owns := [], refs := [("r", .mut, .int)], ret := .int, row := [],
+    body := .let_ "t" .int (.add (.read (var "r")) (.lit 1))
+      (.let_ "u" .int (.write (var "r") (.read (var "t"))) (.atom (.read (var "r")))) }
+
+/-- `let p = [1, 40]; inc(mut p[0]); p[0] + p[1]`: the call borrows one field of the pair and leaves
+the other as it is; 42, and nothing left allocated. -/
+def fields : Expr :=
+  .let_ "p" (.pair .int .int) (.pair (.lit 1) (.lit 40))
+    (.let_ "u" .int (.call 0 [] [(.mut, .fst (var "p"))])
+      (.add (.read (.fst (var "p"))) (.read (.snd (var "p")))))
+
+example : value (eval [inc] [] 30 [] .empty [] fields) = some 42 := by
+  run [fields, inc]
+example : freed (eval [inc] [] 30 [] .empty [] fields) := by
+  run [fields, inc]
+
+theorem inc_ok : FnsOk [inc] [] := by
+  intro d hd
+  simp only [List.mem_singleton] at hd
+  subst hd
+  exact ⟨by decide, _, .let_ (live := true) rfl (.add (.read (.ref (m := .mut) rfl)) .lit)
+    (.let_ (live := true) rfl (.write (.read (.own rfl)) (.ref (m := .mut) rfl)) (.atom (.read (.ref (m := .mut) rfl))))⟩
+
+theorem fields_typed : Typed [inc] [] [] fields .int [] [.fail] :=
+  .let_ (live := true) rfl (.pair .lit .lit)
+    (.let_ (live := true) rfl
+      (.call (d := inc) rfl rfl rfl (by simp [inc]) .nil (.cons (.fst (.own rfl)) (fun _ => rfl) .nil)
+        (by simp [Exclusive]))
+      (.add (.read (.fst (.own rfl))) (.read (.snd (.own rfl)))))
+
+example : ∀ n, match eval [inc] [] n [.abort .fail 0] .empty [] fields with
+    | (.stuck, _) => False
+    | (.susp _ _ _ _ _, _) => False
+    | (.timeout, _) => True
+    | (.val v, σ') => ∃ L, VT [inc] σ' .int v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
+    | (.abort _ _, σ') => ∀ l, σ'.mem l = none :=
+  program_ok inc_ok fields_typed
+
 end FlyCore.Ownership.Examples
