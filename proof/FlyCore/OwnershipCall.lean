@@ -169,13 +169,17 @@ theorem typed_weaker : Typed F O Γ e τ Γ' r → (Γ.map Prod.fst).Nodup → W
   | .applyOnce hx _ ha, hk =>
     (atom_weaker ha (by rw [setSlot_keys]; exact hk)).trans (setSlot_weaker hk hx .forget)
   | .applyBorrow _ ha _ _ _, hk => atom_weaker ha hk
-  | .lendCall _ _ _ _ hargs _ _ _ _ _ hx hb, hk => by
+  | .lendCall (m := m) _ _ _ _ hargs _ _ _ _ hx hb, hk => by
     have hk₁ := hk
     rw [← atoms_keys hargs] at hk₁
-    have := typed_weaker hb (List.nodup_cons.mpr ⟨by rw [lendCtx_keys]; exact lookup_none_keys hx,
-      by rw [lendCtx_keys]; exact hk₁⟩)
+    have := typed_weaker hb (List.nodup_cons.mpr ⟨by rw [lendCtxs_keys]; exact lookup_none_keys hx,
+      by rw [lendCtxs_keys]; exact hk₁⟩)
     cases this with
-    | cons _ w => exact (thaw_weaker_lend w).trans (atoms_weaker hargs hk)
+    | cons _ w =>
+      refine Weaker.trans ?_ (atoms_weaker hargs hk)
+      cases m
+      · exact thaw_weaker w
+      · exact unhideAll_weaker w
   | .ite hc ha _ wa _, hk =>
     wa.trans ((typed_weaker ha (by rw [atom_keys hc]; exact hk)).trans (atom_weaker hc hk))
   | .throw_ ha _, hk => atom_weaker ha hk
@@ -212,8 +216,8 @@ def FnOk (F : List Fn) (O : List Op) (d : Fn) : Prop :=
   ((d.owns.map Prod.fst) ++ (d.refs.map Prod.fst)).Nodup ∧
   match d.cap, d.retp with
   | none, none => ∃ Γ', Typed F O (fnCtx d) d.body d.ret Γ' d.row
-  | none, some (m, i, p) => ∃ Γ' x mi τi w, Typed F O (fnCtx d) d.body .int Γ' d.row ∧
-      d.refs[i]? = some (x, mi, τi) ∧ PlaceTy Γ' p d.ret w x ∧ (m = .mut → w = true)
+  | none, some (m, cs) => cs ≠ [] ∧ ∃ Γ', Typed F O (fnCtx d) d.body .int Γ' d.row ∧
+      ∀ c ∈ cs, ∃ x mi τi w, d.refs[c.1]? = some (x, mi, τi) ∧ PlaceTy Γ' c.2 d.ret w x ∧ (m = .mut → w = true)
   | some (xc, τc, k), none => xc ∉ d.owns.map Prod.fst ∧ ∃ Γ', Typed F O (fnCtx (cloFn d xc τc k)) d.body d.ret Γ' d.row
   | some _, some _ => False
 
@@ -1468,6 +1472,77 @@ inductive Trees (F : List Fn) (σ : Store) (Γ : Ctx) (env : Env) : List Var →
   | nil : Trees F σ Γ env [] []
   | cons : Entry F σ Γ env y s a L → s.excl = true → s.shell = false → Trees F σ Γ env ys H →
       Trees F σ Γ env (y :: ys) (L ++ H)
+
+theorem Trees.frame : Trees F σ Γ env ys H → Agree σ σ' H → Trees F σ' Γ env ys H
+  | .nil, _ => .nil
+  | .cons ⟨hl, ha, hs⟩ hex hsh hr, hag =>
+    .cons ⟨hl, ha, hs.frame fun l hl => hag l (List.mem_append.mpr (.inl hl))⟩ hex hsh
+      (hr.frame fun l hl => hag l (List.mem_append.mpr (.inr hl)))
+
+theorem Trees.nodup_keys : Trees F σ Γ env ys H → ∀ y ∈ ys, ∃ s a L, Entry F σ Γ env y s a L
+  | .nil, _, h => by simp at h
+  | .cons he _ _ hr, y, h => by
+    rcases List.mem_cons.mp h with rfl | h
+    · exact ⟨_, _, _, he⟩
+    · exact hr.nodup_keys y h
+
+/-- One of the variables `ys`, its tree taken out of theirs: the rest, `Hr`, and once it holds
+another tree, in a store that kept the rest, the trees of `ys` again. -/
+theorem Trees.split : Trees F σ Γ env ys H → y ∈ ys → ys.Nodup → Entry F σ Γ env y s a L →
+    ∃ Hr, H.Perm (L ++ Hr) ∧ ∀ σ' L', Agree σ σ' Hr → SlotOk F σ' s a L' →
+      ∃ H', Trees F σ' Γ env ys H' ∧ H'.Perm (L' ++ Hr)
+  | .nil, h, _, _ => by simp at h
+  | @Trees.cons _ _ _ _ z s0 a0 L0 zs Hz he0 hex0 hsh0 hr, h, hn, he => by
+    obtain ⟨hz, hn'⟩ := List.nodup_cons.mp hn
+    rcases List.mem_cons.mp h with rfl | h
+    · obtain ⟨rfl, rfl, rfl⟩ := he.det he0
+      refine ⟨Hz, .refl _, fun σ' L' hag hs' => ⟨L' ++ Hz, .cons ⟨he0.1, he0.2.1, hs'⟩ hex0 hsh0 (hr.frame hag), .refl _⟩⟩
+    · obtain ⟨Hr, hp, hre⟩ := hr.split h hn' he
+      refine ⟨L0 ++ Hr, ?_, fun σ' L' hag hs' => ?_⟩
+      · exact (hp.append_left L0).trans perm_front
+      · obtain ⟨H', ht', hp'⟩ := hre σ' L' (fun l hl => hag l (List.mem_append.mpr (.inr hl))) hs'
+        refine ⟨L0 ++ H', .cons ⟨he0.1, he0.2.1, he0.2.2.frame fun l hl => hag l (List.mem_append.mpr (.inl hl))⟩
+          hex0 hsh0 ht', (hp'.append_left L0).trans perm_front⟩
+
+theorem pick_mem {α : Type} {ps : List α} (k : Int) (h : ps ≠ []) : ∃ p, pick ps k = some p ∧ p ∈ ps := by
+  have hlt : min k.toNat (ps.length - 1) < ps.length := by
+    have : ps.length ≠ 0 := by simpa using h
+    omega
+  exact ⟨_, List.getElem?_eq_getElem hlt, List.getElem_mem hlt⟩
+
+theorem Pairs.mem_left {α β : Type} {R : α → β → Prop} {as : List α} {bs : List β} {a : α} :
+    Pairs R as bs → a ∈ as → ∃ b ∈ bs, R a b
+  | .nil, h => by simp at h
+  | .cons hr hrest, h => by
+    rcases List.mem_cons.mp h with rfl | h
+    · exact ⟨_, List.mem_cons_self .., hr⟩
+    · obtain ⟨b, hb, hab⟩ := hrest.mem_left h
+      exact ⟨b, List.mem_cons_of_mem _ hb, hab⟩
+
+theorem Pairs.mem_right {α β : Type} {R : α → β → Prop} {as : List α} {bs : List β} {b : β} :
+    Pairs R as bs → b ∈ bs → ∃ a ∈ as, R a b
+  | .nil, h => by simp at h
+  | .cons hr hrest, h => by
+    rcases List.mem_cons.mp h with rfl | h
+    · exact ⟨_, List.mem_cons_self .., hr⟩
+    · obtain ⟨a, ha, hab⟩ := hrest.mem_right h
+      exact ⟨a, List.mem_cons_of_mem _ ha, hab⟩
+
+theorem Pairs.imp {α β : Type} {R R' : α → β → Prop} {as : List α} {bs : List β} :
+    Pairs R as bs → (∀ a ∈ as, ∀ b, R a b → R' a b) → Pairs R' as bs
+  | .nil, _ => .nil
+  | .cons hr hrest, h => .cons (h _ (List.mem_cons_self ..) _ hr)
+      (hrest.imp fun a ha => h a (List.mem_cons_of_mem _ ha))
+
+/-- Variables, each paired with something that makes it changeable, have trees. -/
+theorem Trees.of_pairs {α : Type} {R : α → Var → Prop} {as : List α} {zs : List Var} :
+    Pairs R as zs → (∀ a ∈ as, ∀ z, R a z → ∃ s b L, Entry F σ Γ env z s b L ∧ s.excl = true ∧ s.shell = false) →
+    ∃ H, Trees F σ Γ env zs H
+  | .nil, _ => ⟨[], .nil⟩
+  | .cons hr hrest, h => by
+    obtain ⟨s, b, L, he, hex, hsh⟩ := h _ (List.mem_cons_self ..) _ hr
+    obtain ⟨H, ht⟩ := Trees.of_pairs hrest fun a ha => h a (List.mem_cons_of_mem _ ha)
+    exact ⟨L ++ H, .cons he hex hsh ht⟩
 
 theorem roots_cons_ro : roots .mut ((.ro, y) :: ys) = roots .mut ys := by simp [roots]
 theorem roots_cons_mut : roots .mut ((.mut, y) :: ys) = y :: roots .mut ys := by simp [roots]

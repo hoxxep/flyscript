@@ -95,16 +95,18 @@ reached, while it lives. -/
       hos.Pairwise Apart → hos.map (fun h => (h.mode, h.ty)) = d.refs.map Prod.snd →
       ((d.owns.map Prod.fst) ++ (d.refs.map Prod.fst)).Nodup →
       Typed F O (fnCtx d) d.body .int Γ'' d.row → cells.map Prod.fst = d.owns.map Prod.fst →
-      d.refs[(i : Nat)]? = some (xi, mi, τi) → PlaceTy Γ'' p d.ret w xi → (m = .mut → w = true) →
-      (m = .mut → d.ret.isFn = false ∧ τi.isFn = false) →
-      hos[i]? = some (hd : Hole) → (m = .mut → hd.mode = .mut) →
-      (∀ s, lookup hd.root Γ₁ = some s → s.shell = true → hd.path = []) →
-      (∀ τ', lookup hd.root Γ₁ ≠ some (.own τ' false)) → lookup x Γ₁ = none →
-      Typed F O ((x, .ref m d.ret) :: lendCtx m Γ₁ hd.root) body τb ((x, .ref m d.ret) :: Γb) r →
-      FrameOk F O σf (.callLendK x p (cells ++ (d.refs.map Prod.fst).zip (hos.map Hole.loc))
+      (cs : List (Nat × Place)) ≠ [] →
+      (∀ c ∈ cs, ∃ xi mi τi w hd, d.refs[c.1]? = some (xi, mi, τi) ∧ PlaceTy Γ'' c.2 d.ret w xi ∧
+        (m = .mut → w = true) ∧ hos[c.1]? = some (hd : Hole) ∧ (m = .mut → hd.mode = .mut ∧ τi.isFn = false) ∧
+        ∀ s, lookup hd.root Γ₁ = some s → s.shell = true → hd.path = []) →
+      Pairs (fun c z => ∃ hd : Hole, hos[c.1]? = some hd ∧ hd.root = z) cs zs →
+      (m = .mut → zs.Nodup ∧ d.ret.isFn = false) →
+      (∀ z ∈ zs, ∀ τ', lookup z Γ₁ ≠ some (.own τ' false)) → lookup x Γ₁ = none →
+      Typed F O ((x, .ref m d.ret) :: lendCtxs m Γ₁ zs) body τb ((x, .ref m d.ret) :: Γb) r →
+      FrameOk F O σf (.callLendK x (cs.map Prod.snd) (cells ++ (d.refs.map Prod.fst).zip (hos.map Hole.loc))
           ((d.owns.map Prod.snd).zip (cells.map Prod.snd)) env body)
         ⟨Γ'', cells ++ (d.refs.map Prod.fst).zip (hos.map Hole.loc), .int, roCells (olds hos), d.row⟩
-        ⟨thaw Γ₁ [hd.root] Γb, env, τb, S, r⟩ (E₁.filter (· ∉ mutCells (olds hos))) []
+        ⟨unlend m Γ₁ zs Γb, env, τb, S, r⟩ (E₁.filter (· ∉ mutCells (olds hos))) []
   | catchK : lookup x Γb = none → (Γb.map Prod.fst).Nodup →
       Typed F O ((x, .own .int true) :: Γb) h τ ((x, .own .int live) :: Γh) r →
       (∀ e, l = .eff e → ∃ op, O[e]? = some op ∧ op.owns = [.int] ∧ op.refs = []) →

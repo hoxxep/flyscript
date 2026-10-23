@@ -229,6 +229,16 @@ theorem unhideAll_keys : ∀ {Γ Γb : Ctx} {ys : List Var}, Γb.map Prod.fst = 
   | _, _, [], h => h
   | Γ, _, y :: ys, h => thaw_keys ((unhideAll_keys (Γ := hide Γ y) (ys := ys) (h.trans hide_keys.symm)).trans hide_keys)
 
+theorem lendCtxs_keys : (lendCtxs m Γ ys).map Prod.fst = Γ.map Prod.fst := by
+  cases m
+  · exact freeze_keys
+  · exact hideAll_keys
+
+theorem unlend_keys (h : Γb.map Prod.fst = Γ.map Prod.fst) : (unlend m Γ ys Γb).map Prod.fst = Γ.map Prod.fst := by
+  cases m
+  · exact thaw_keys h
+  · exact unhideAll_keys h
+
 theorem atom_keys : AtomTy Γ a τ Γ' → Γ'.map Prod.fst = Γ.map Prod.fst
   | .lit => rfl
   | .read _ => rfl
@@ -260,10 +270,10 @@ theorem typed_keys : Typed F O Γ e τ Γ' r → Γ'.map Prod.fst = Γ.map Prod.
     exact thaw_keys (this.2.trans hide_keys)
   | .applyOnce _ _ ha => (atom_keys ha).trans (setSlot_keys _)
   | .applyBorrow _ ha _ _ _ => atom_keys ha
-  | .lendCall _ _ _ _ hargs _ _ _ _ _ _ hb => by
+  | .lendCall (m := m) _ _ _ _ hargs _ _ _ _ _ hb => by
     have := typed_keys hb
     simp only [List.map_cons, List.cons.injEq] at this
-    exact (thaw_keys (this.2.trans lendCtx_keys)).trans (atoms_keys hargs)
+    exact (unlend_keys (m := m) (this.2.trans lendCtxs_keys)).trans (atoms_keys hargs)
   | .ite hc ha _ wa _ => wa.keys.trans ((typed_keys ha).trans (atom_keys hc))
   | .throw_ ha _ => atom_keys ha
   | .try_ _ hb hh => by

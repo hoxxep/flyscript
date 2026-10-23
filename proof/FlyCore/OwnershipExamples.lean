@@ -33,7 +33,7 @@ def isStuck : Res × Store → Bool
 syntax "run" "[" Lean.Parser.Tactic.simpLemma,* "]" : tactic
 macro_rules
   | `(tactic| run [$xs,*]) => `(tactic| simp [eval, ret, evalK, evalAtom, evalAtoms, resolve, leave, cleanV,
-      cleanA, dropRet, armEnd, allocAll, dropCells, dropCell, drop, dropK, Store.fresh, Store.alloc, Store.set, find,
+      cleanA, dropRet, armEnd, allocAll, dropCells, dropCell, drop, dropK, pick, Store.fresh, Store.alloc, Store.set, find,
       Frame.handles, Kont.push, lookup, Res.done, Outcome.res, Cap.at, Store.empty, value, freed, freedBelow,
       isStuck, $xs,*])
 
@@ -449,7 +449,7 @@ theorem reaches_rejected : ¬ Typed [] O [] reaches τ Γ' r := by
 /-- `function inside(r: mut Box<int>): mut int { r.* }`: a borrow of what the box it was lent holds. -/
 def inside : Fn :=
   { owns := [], refs := [("r", .mut, .box .int)], ret := .int, row := [], body := .atom (.lit 0),
-    retp := some (.mut, 0, deref (var "r")) }
+    retp := some (.mut, [(0, deref (var "r"))]) }
 
 /-- `let x = Box.new(1); { const v = inside(mut x); v = v + 41 }; *x`: the borrow the call returns
 changes what `x` holds, and once it ends `x` reads what it left; 42, and nothing left allocated. -/
@@ -468,18 +468,21 @@ theorem inside_ok : FnsOk [inside] [] := by
   intro d hd
   simp only [List.mem_singleton] at hd
   subst hd
-  exact ⟨by decide, _, "r", .mut, .box .int, true, .atom .lit, rfl, .deref (.ref (m := .mut) rfl), fun _ => rfl⟩
+  refine ⟨by decide, by simp, _, .atom .lit, fun c hc => ?_⟩
+  simp only [List.mem_singleton] at hc
+  subst hc
+  exact ⟨"r", .mut, .box .int, true, rfl, .deref (.ref (m := .mut) rfl), fun _ => rfl⟩
 
 theorem returns_typed : Typed [inside] [] [] returns .int [] [.fail] := by
   have := Typed.lendCall (F := [inside]) (O := []) (Γ := [("x", .own (.box .int) true)]) (f := 0) (d := inside)
-    (m := .mut) (i := 0) (p := deref (var "r")) (r := [.fail]) (owned := []) (Γ₁ := [("x", .own (.box .int) true)])
-    (lent := [(.mut, var "x")]) (ys := [(.mut, "x")]) (mi := .mut) (y := "x") (x := "v")
+    (m := .mut) (cs := [(0, deref (var "r"))]) (r := [.fail]) (owned := []) (Γ₁ := [("x", .own (.box .int) true)])
+    (lent := [(.mut, var "x")]) (ys := [(.mut, "x")]) (zs := ["x"]) (x := "v")
     (body := .let_ "t" .int (.add (.read (var "v")) (.lit 41)) (.write (var "v") (.read (var "t"))))
     (τb := .int) (Γb := [("x", .lent (.box .int))])
-    rfl rfl rfl (by simp [inside]) .nil (.cons (.own rfl) (fun _ => rfl) .nil) (by simp [Exclusive]) rfl
-    (fun _ => rfl) (fun _ => ⟨rfl, by simp [inside, Ty.isFn]⟩) rfl
+    rfl rfl rfl (by simp [inside]) .nil (.cons (.own rfl) (fun _ => rfl) .nil) (by simp [Exclusive])
+    (.cons ⟨.mut, rfl, fun _ => rfl⟩ .nil) (fun _ => ⟨by simp, rfl, by simp [inside, Ty.isFn]⟩) rfl
     (.let_ (live := true) rfl (.add (.read (.ref rfl)) .lit) (.write (.read (.own rfl)) (.ref (m := .mut) rfl)))
-  simp only [thaw] at this
+  simp only [unlend, unhideAll, thaw] at this
   exact .let_ (live := true) rfl (.new .lit) (.let_ (live := true) rfl (by simpa using this)
     (.atom (.read (.deref (.own rfl)))))
 
@@ -499,27 +502,31 @@ def reachesReturned : Expr :=
 
 /-- What a call that returns a borrow lends, and the code the borrow is in scope for. -/
 theorem lendCall_inv : Typed F O Γ (.lendCall x m f owned lent body) τ Γ' r →
-    ∃ d i p Γ₁ ys mi y Γb, F[f]? = some d ∧ d.retp = some (m, i, p) ∧
+    ∃ d cs Γ₁ ys zs Γb, F[f]? = some d ∧ d.retp = some (m, cs) ∧
       AtomsTy Γ owned (d.owns.map Prod.snd) Γ₁ ∧ Lends Γ₁ lent (d.refs.map Prod.snd) ys ∧
-      ys[i]? = some (mi, y) ∧
-      Typed F O ((x, .ref m d.ret) :: lendCtx m Γ₁ y) body τ ((x, .ref m d.ret) :: Γb) r := by
+      Pairs (fun c z => ∃ mi, ys[c.1]? = some (mi, z) ∧ (m = .mut → mi = .mut)) cs zs ∧
+      Typed F O ((x, .ref m d.ret) :: lendCtxs m Γ₁ zs) body τ ((x, .ref m d.ret) :: Γb) r := by
   intro h
   cases h with
-  | lendCall hf hret _ _ ha hl _ hyi _ _ _ hb => exact ⟨_, _, _, _, _, _, _, _, hf, hret, ha, hl, hyi, hb⟩
+  | lendCall hf hret _ _ ha hl _ hp _ _ hb => exact ⟨_, _, _, _, _, _, hf, hret, ha, hl, hp, hb⟩
 
 theorem reachesReturned_rejected : ¬ Typed [inside] [] [] reachesReturned τ Γ' r := by
   intro h
   cases h with
   | let_ _ _ hb =>
-    obtain ⟨d, i, p, Γ₁, ys, mi, y, Γb, hf, hret, ha, hl, hyi, hbody⟩ := lendCall_inv hb
+    obtain ⟨d, cs, Γ₁, ys, zs, Γb, hf, hret, ha, hl, hpairs, hbody⟩ := lendCall_inv hb
     · simp only [List.getElem?_cons_zero, Option.some.injEq] at hf
       subst hf
       simp only [inside, Option.some.injEq, Prod.mk.injEq] at hret
-      obtain ⟨-, rfl, rfl⟩ := hret
+      obtain ⟨-, rfl⟩ := hret
       cases ha
       cases hl with
       | cons hp _ hl =>
         cases hl
+        cases hpairs with
+        | cons hyi hrest =>
+        cases hrest
+        obtain ⟨mi, hyi, -⟩ := hyi
         simp at hyi
         obtain ⟨-, rfl⟩ := hyi
         cases hp with
@@ -532,8 +539,8 @@ theorem reachesReturned_rejected : ¬ Typed [inside] [] [] reachesReturned τ Γ
             cases hq with
             | deref hq =>
               cases hq with
-              | own hx => simp [lendCtx, hide, lookup] at hx
-              | ref hx => simp [lendCtx, hide, lookup] at hx
+              | own hx => simp [lendCtx, lendCtxs, hideAll, hide, lookup] at hx
+              | ref hx => simp [lendCtx, lendCtxs, hideAll, hide, lookup] at hx
 
 /-! Closures that own what they captured. -/
 
@@ -841,5 +848,60 @@ example : ∀ n, match eval [addBox, twiceOf] [] n [.abort .fail 0] .empty [] ne
     | (.val v, σ') => ∃ L, VT [addBox, twiceOf] σ' .int v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
     | (.abort _ _, σ') => ∀ l, σ'.mem l = none :=
   program_ok nested_fns_ok nested_typed
+
+/-! A borrow a function picks as it runs. -/
+
+/-- `function either(k: int, a: mut Box<int>, b: mut Box<int>): mut int { k == 0 ? a.* : b.* }`. -/
+def either : Fn :=
+  { owns := [("k", .int)], refs := [("a", .mut, .box .int), ("b", .mut, .box .int)], ret := .int, row := [],
+    body := .atom (.read (var "k")), retp := some (.mut, [(0, deref (var "a")), (1, deref (var "b"))]) }
+
+/-- `let a = Box.new(1); let b = Box.new(2); { const v = either(1, mut a, mut b); v = 10 }; *a + *b`:
+which box the borrow changes, the callee picks as it runs, so neither may be reached while it lives;
+1 + 10, and nothing left allocated. -/
+def picks : Expr :=
+  .let_ "a" (.box .int) (.new (.lit 1))
+    (.let_ "b" (.box .int) (.new (.lit 2))
+      (.let_ "u" .int (.lendCall "v" .mut 0 [.lit 1] [(.mut, var "a"), (.mut, var "b")] (.write (var "v") (.lit 10)))
+        (.add (.read (deref (var "a"))) (.read (deref (var "b"))))))
+
+example : value (eval [either] [] 30 [] .empty [] picks) = some 11 := by
+  run [picks, either]
+example : freed (eval [either] [] 30 [] .empty [] picks) := by
+  run [picks, either]
+
+theorem either_ok : FnsOk [either] [] := by
+  intro d hd
+  simp only [List.mem_singleton] at hd
+  subst hd
+  refine ⟨by decide, by simp, _, .atom (.read (.own rfl)), fun c hc => ?_⟩
+  simp only [List.mem_cons, List.mem_singleton, List.not_mem_nil, or_false] at hc
+  rcases hc with rfl | rfl
+  · exact ⟨"a", .mut, .box .int, true, rfl, .deref (.ref (m := .mut) rfl), fun _ => rfl⟩
+  · exact ⟨"b", .mut, .box .int, true, rfl, .deref (.ref (m := .mut) rfl), fun _ => rfl⟩
+
+theorem picks_typed : Typed [either] [] [] picks .int [] [.fail] := by
+  have := Typed.lendCall (F := [either]) (O := []) (Γ := [("b", .own (.box .int) true), ("a", .own (.box .int) true)])
+    (f := 0) (d := either) (m := .mut) (cs := [(0, deref (var "a")), (1, deref (var "b"))]) (r := [.fail])
+    (owned := [.lit 1]) (Γ₁ := [("b", .own (.box .int) true), ("a", .own (.box .int) true)])
+    (lent := [(.mut, var "a"), (.mut, var "b")]) (ys := [(.mut, "a"), (.mut, "b")]) (zs := ["a", "b"]) (x := "v")
+    (body := .write (var "v") (.lit 10)) (τb := .int) (Γb := [("b", .lent (.box .int)), ("a", .lent (.box .int))])
+    rfl rfl rfl (by simp [either]) (.cons .lit .nil)
+    (.cons (.own rfl) (fun _ => rfl) (.cons (.own rfl) (fun _ => rfl) .nil)) (by simp [Exclusive])
+    (.cons ⟨.mut, rfl, fun _ => rfl⟩ (.cons ⟨.mut, rfl, fun _ => rfl⟩ .nil))
+    (fun _ => ⟨by simp, rfl, by intro c hc e he; simp at hc; rcases hc with rfl | rfl <;> (simp [either] at he; subst he; rfl)⟩) rfl
+    (.write .lit (.ref (m := .mut) rfl))
+  simp only [unlend, unhideAll, thaw, hide] at this
+  exact .let_ (live := true) rfl (.new .lit) (.let_ (live := true) rfl (.new .lit)
+    (.let_ (live := true) rfl (by simpa using this)
+      (.add (.read (.deref (.own rfl))) (.read (.deref (.own rfl))))))
+
+example : ∀ n, match eval [either] [] n [.abort .fail 0] .empty [] picks with
+    | (.stuck, _) => False
+    | (.susp _ _ _ _ _, _) => False
+    | (.timeout, _) => True
+    | (.val v, σ') => ∃ L, VT [either] σ' .int v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
+    | (.abort _ _, σ') => ∀ l, σ'.mem l = none :=
+  program_ok either_ok picks_typed
 
 end FlyCore.Ownership.Examples
