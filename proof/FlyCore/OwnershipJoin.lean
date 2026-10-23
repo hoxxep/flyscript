@@ -159,6 +159,28 @@ theorem multi_join (hL : LT F ι σ a τ L) (hR : RtExt σ σ') : ∀ (cs : List
         · rintro (h | ⟨c, hc, -⟩)
           · exact h.1
           · exact absurd hc (fun h => hno c h)
+  | @vec a τ' cs0 Rs ha hlen hel hnd hn _ =>
+    intro cs hcs hcc hd hag hfr hdn hnn
+    by_cases hh : ∃ c ∈ cs, c.loc = a
+    · obtain ⟨c, hc, hloc⟩ := hh
+      exact join_here (.vec ha hlen hel hnd hn) hc hloc hcs hcc hd
+    · have hno : ∀ c ∈ cs, False := fun c hc => by
+        obtain ⟨⟨P, hp⟩, -, -⟩ := hcs c hc
+        generalize hl : c.loc = l at hp
+        generalize c.ty = t at hp
+        cases hp with
+        | here => exact hh ⟨c, hc, hl⟩
+      have hkz : ∀ z ∈ a :: Rs.flatten, Kept (a :: Rs.flatten) cs z := fun z hz =>
+        ⟨hz, fun c hc => absurd hc (fun h => hno c h)⟩
+      refine ⟨a :: Rs.flatten, .vec ((hag a (hkz a (List.mem_cons_self ..))).trans ha) hlen (fun i h h' => ?_) hnd hn,
+        fun z => ?_, fun c hc => absurd hc (fun h => hno c h)⟩
+      · exact (hel i h h').frame ⟨fun l hl => hag l (hkz l (List.mem_cons_of_mem _ (mem_flatten_of h' hl))), hR,
+          fun z hz l x hx => hfr z (hkz z (List.mem_cons_of_mem _ (mem_flatten_of h' hz))) l x hx⟩
+      · constructor
+        · intro h; exact .inl (hkz z h)
+        · rintro (h | ⟨c, hc, -⟩)
+          · exact h.1
+          · exact absurd hc (fun h => hno c h)
   | @box a b τ' R ha hb hn ih =>
     intro cs hcs hcc hd hag hfr hdn hnn
     by_cases hh : ∃ c ∈ cs, c.loc = a

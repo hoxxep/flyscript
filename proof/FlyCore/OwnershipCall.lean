@@ -179,6 +179,7 @@ theorem Ty.shiftBy_inj : ∀ {A B : Ty}, A.shiftBy n = B.shiftBy n → A = B
   | .hole A, B, h => by cases B <;> simp_all [Ty.shiftBy]; exact Ty.shiftBy_inj h
   | .rref c k A, B, h => by cases B <;> simp_all [Ty.shiftBy]
   | .arena k, B, h => by cases B <;> simp_all [Ty.shiftBy]
+  | .vec A, B, h => by cases B <;> simp_all [Ty.shiftBy]; exact Ty.shiftBy_inj h
 
 theorem Slot.shiftBy_inj {s s' : Slot} (h : s.shiftBy n = s'.shiftBy n) : s = s' := by
   cases s <;> cases s' <;> simp only [Slot.shiftBy, Slot.own.injEq, Slot.ref.injEq, Slot.lent.injEq,
@@ -245,6 +246,9 @@ theorem typed_weaker : Typed F O Γ e τ Γ' r → (Γ.map Prod.fst).Nodup → W
     | cons _ w => exact w.trans (typed_weaker ha hk)
   | .write ha _, hk => atom_weaker ha hk
   | .assign ha _ _, hk => atom_weaker ha hk
+  | .vnew _, _ => Weaker.refl _
+  | .vlen _, _ => Weaker.refl _
+  | .vpush ha _, hk => atom_weaker ha hk
   | .call _ _ _ _ hargs _ _, hk => atoms_weaker hargs hk
   | .lam _ _ _ _ _ ha _, hk => atom_weaker ha hk
   | .lendClo _ _ _ _ _ _ _ hx hb, hk => by
@@ -287,6 +291,11 @@ theorem typed_weaker : Typed F O Γ e τ Γ' r → (Γ.map Prod.fst).Nodup → W
   | .while_ _ _, _ => Weaker.refl _
   | .defer hb _, hk => typed_weaker hb hk
   | .lend hx _ _ _ _ hb, hk => by
+    have := typed_weaker hb (List.nodup_cons.mpr ⟨by rw [lendCtx_keys]; exact lookup_none_keys hx,
+      by rw [lendCtx_keys]; exact hk⟩)
+    cases this with
+    | cons _ w => exact thaw_weaker_lend w
+  | .lendIdx hx _ _ _ _ _ hb, hk => by
     have := typed_weaker hb (List.nodup_cons.mpr ⟨by rw [lendCtx_keys]; exact lookup_none_keys hx,
       by rw [lendCtx_keys]; exact hk⟩)
     cases this with

@@ -32,6 +32,7 @@ theorem ret_startK (hE : EvalOk F O n) (hb : Typed F O Γ b τ Γ' r) (hR : Read
   | susp j ef vs ls K => simp only [ret]; exact post_frame hp (.startK hb)
   | stuck => simp [Post] at hp
   | timeout => simp [ret, Post]
+  | panic => simp [ret, Post]
 
 /-! ## Giving way -/
 
@@ -83,6 +84,7 @@ theorem ret_parY (hKo : ∀ m, n = m + 1 → EvalKOk F O m ∧ RetOk F O m) (hop
   | abort j k => exact pass fun _ _ _ _ _ h => by cases h
   | stuck => exact pass fun _ _ _ _ _ h => by cases h
   | timeout => exact pass fun _ _ _ _ _ h => by cases h
+  | panic => exact pass fun _ _ _ _ _ h => by cases h
   | susp j ef vs ls K =>
   by_cases hc : j ≠ hid ∨ ef ≠ e
   · exact pass fun _ _ _ _ _ h => by cases h; exact hc
@@ -201,6 +203,7 @@ theorem ret_taskK {d : Fn} {cells : Env} {ls : List Nat}
     exact ⟨op, X', hos', A, Lv, hc, hop, hR.2, haim, hK', hls, hvs, hn, hdv, hdSv, hm⟩
   | stuck => simp [Post] at hp
   | timeout => simp [ret, Post]
+  | panic => simp [ret, Post]
 
 /-! ## Frames that pass a suspension on -/
 
@@ -287,6 +290,7 @@ theorem ret_parE (hI : Inv F ι σf Γ₁ env E₁ S) (hro : RoCtx Γo) (hSo : �
       hSd hp
   | stuck => simp [Post] at hp
   | timeout => simp [ret, Post]
+  | panic => simp [ret, Post]
 
 /-! ## Two values made a pair -/
 
@@ -514,6 +518,7 @@ theorem ret_parD (hKo : ∀ m, n = m + 1 → EvalKOk F O m ∧ RetOk F O m)
     exact post_after ((hm.widen hXa hd).relabel fun x => by simp) hwf h2
   | stuck => simp [Post] at hp
   | timeout => simp [ret, Post]
+  | panic => simp [ret, Post]
 
 /-! ## Two tasks, both running -/
 
@@ -790,6 +795,7 @@ theorem ret_parS (hKo : ∀ m, n = m + 1 → EvalKOk F O m ∧ RetOk F O m)
       exact post_after (hm2.relabel fun x => by simp only [List.mem_append]; grind) hwf h2
   | stuck => simp [Post] at hp
   | timeout => simp [ret, Post]
+  | panic => simp [ret, Post]
 
 /-! ## Two tasks started -/
 

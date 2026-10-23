@@ -35,7 +35,7 @@ macro_rules
   | `(tactic| run [$xs,*]) => `(tactic| simp [eval, ret, evalK, evalAtom, evalAtoms, resolve, leave, cleanV,
       cleanA, dropRet, armEnd, callRet, allocAll, dropCells, dropCell, drop, dropK, pick, Store.fresh, Store.alloc, Store.set, find,
       Frame.handles, Kont.push, lookup, Res.done, Outcome.res, Cap.at, Store.empty, Store.sched0, value, freed, freedBelow,
-      Store.tag, Store.freeAll,
+      Store.tag, Store.freeAll, Store.moveAll, dropCellsWith,
       isStuck, $xs,*])
 
 /-- `function add(b: Box<int>, r: mut Box<int>): int { *r = *r + *b; *r }` -/
@@ -93,6 +93,7 @@ example : ∀ n, match eval [addInto] [] n [.abort .fail 0] .empty [] lends with
     | (.stuck, _) => False
     | (.susp _ _ _ _ _, _) => False
     | (.timeout, _) => True
+    | (.panic, _) => True
     | (.val v, σ') => ∃ L, VT [addInto] [] σ' .int v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
     | (.abort _ _, σ') => ∀ l, σ'.mem l = none :=
   program_ok addInto_ok lends_typed
@@ -169,6 +170,7 @@ example : ∀ n, match eval [] ops n [.abort .fail 0] .empty [] asks with
     | (.stuck, _) => False
     | (.susp _ _ _ _ _, _) => False
     | (.timeout, _) => True
+    | (.panic, _) => True
     | (.val v, σ') => ∃ L, VT [] [] σ' .int v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
     | (.abort _ _, σ') => ∀ l, σ'.mem l = none :=
   program_ok (fun _ h => by simp at h) asks_typed
@@ -230,6 +232,7 @@ example : ∀ n, match eval [] ops n [.abort .fail 0] .empty [] drops with
     | (.stuck, _) => False
     | (.susp _ _ _ _ _, _) => False
     | (.timeout, _) => True
+    | (.panic, _) => True
     | (.val v, σ') => ∃ L, VT [] [] σ' .int v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
     | (.abort _ _, σ') => ∀ l, σ'.mem l = none :=
   program_ok (fun _ h => by simp at h) drops_typed
@@ -333,6 +336,7 @@ example : ∀ n, match eval [] ops n [.abort .fail 0] .empty [] counts with
     | (.stuck, _) => False
     | (.susp _ _ _ _ _, _) => False
     | (.timeout, _) => True
+    | (.panic, _) => True
     | (.val v, σ') => ∃ L, VT [] [] σ' .int v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
     | (.abort _ _, σ') => ∀ l, σ'.mem l = none :=
   program_ok (fun _ h => by simp at h) counts_typed
@@ -499,6 +503,7 @@ example : ∀ n, match eval [inside] [] n [.abort .fail 0] .empty [] returns wit
     | (.stuck, _) => False
     | (.susp _ _ _ _ _, _) => False
     | (.timeout, _) => True
+    | (.panic, _) => True
     | (.val v, σ') => ∃ L, VT [inside] [] σ' .int v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
     | (.abort _ _, σ') => ∀ l, σ'.mem l = none :=
   program_ok inside_ok returns_typed
@@ -597,6 +602,7 @@ example : ∀ n, match eval [bump] [] n [.abort .fail 0] .empty [] counter with
     | (.stuck, _) => False
     | (.susp _ _ _ _ _, _) => False
     | (.timeout, _) => True
+    | (.panic, _) => True
     | (.val v, σ') => ∃ L, VT [bump] [] σ' .int v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
     | (.abort _ _, σ') => ∀ l, σ'.mem l = none :=
   program_ok bump_ok counter_typed
@@ -691,6 +697,7 @@ example : ∀ n, match eval [addTo, twice] [] n [.abort .fail 0] .empty [] highe
     | (.stuck, _) => False
     | (.susp _ _ _ _ _, _) => False
     | (.timeout, _) => True
+    | (.panic, _) => True
     | (.val v, σ') => ∃ L, VT [addTo, twice] [] σ' .int v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
     | (.abort _ _, σ') => ∀ l, σ'.mem l = none :=
   program_ok higher_fns_ok higher_typed
@@ -745,6 +752,7 @@ example : ∀ n, match eval [bump, callsTwice] [] n [.abort .fail 0] .empty [] t
     | (.stuck, _) => False
     | (.susp _ _ _ _ _, _) => False
     | (.timeout, _) => True
+    | (.panic, _) => True
     | (.val v, σ') => ∃ L, VT [bump, callsTwice] [] σ' .int v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
     | (.abort _ _, σ') => ∀ l, σ'.mem l = none :=
   program_ok tally_fns_ok tally_typed
@@ -811,6 +819,7 @@ example : ∀ n, match eval [spend, make, useOnce] [] n [.abort .fail 0] .empty 
     | (.stuck, _) => False
     | (.susp _ _ _ _ _, _) => False
     | (.timeout, _) => True
+    | (.panic, _) => True
     | (.val v, σ') => ∃ L, VT [spend, make, useOnce] [] σ' .int v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
     | (.abort _ _, σ') => ∀ l, σ'.mem l = none :=
   program_ok handOff_fns_ok handOff_typed
@@ -859,6 +868,7 @@ example : ∀ n, match eval [addBox, twiceOf] [] n [.abort .fail 0] .empty [] ne
     | (.stuck, _) => False
     | (.susp _ _ _ _ _, _) => False
     | (.timeout, _) => True
+    | (.panic, _) => True
     | (.val v, σ') => ∃ L, VT [addBox, twiceOf] [] σ' .int v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
     | (.abort _ _, σ') => ∀ l, σ'.mem l = none :=
   program_ok nested_fns_ok nested_typed
@@ -915,6 +925,7 @@ example : ∀ n, match eval [either] [] n [.abort .fail 0] .empty [] picks with
     | (.stuck, _) => False
     | (.susp _ _ _ _ _, _) => False
     | (.timeout, _) => True
+    | (.panic, _) => True
     | (.val v, σ') => ∃ L, VT [either] [] σ' .int v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
     | (.abort _ _, σ') => ∀ l, σ'.mem l = none :=
   program_ok either_ok picks_typed
@@ -957,6 +968,7 @@ example : ∀ n, match eval [inc] [] n [.abort .fail 0] .empty [] fields with
     | (.stuck, _) => False
     | (.susp _ _ _ _ _, _) => False
     | (.timeout, _) => True
+    | (.panic, _) => True
     | (.val v, σ') => ∃ L, VT [inc] [] σ' .int v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
     | (.abort _ _, σ') => ∀ l, σ'.mem l = none :=
   program_ok inc_ok fields_typed
@@ -1015,6 +1027,7 @@ example : ∀ n, match eval [swap, addField] [] n [.abort .fail 0] .empty [] fie
     | (.stuck, _) => False
     | (.susp _ _ _ _ _, _) => False
     | (.timeout, _) => True
+    | (.panic, _) => True
     | (.val v, σ') => ∃ L, VT [swap, addField] [] σ' .int v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
     | (.abort _ _, σ') => ∀ l, σ'.mem l = none :=
   program_ok swap_ok fieldPairs_typed
@@ -1063,6 +1076,7 @@ example : ∀ n, match eval [] [] n [.abort .fail 0] .empty [] fieldBorrow with
     | (.stuck, _) => False
     | (.susp _ _ _ _ _, _) => False
     | (.timeout, _) => True
+    | (.panic, _) => True
     | (.val v, σ') => ∃ L, VT [] [] σ' .int v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
     | (.abort _ _, σ') => ∀ l, σ'.mem l = none :=
   program_ok (fun _ h => by simp at h) fieldBorrow_typed
@@ -1142,6 +1156,7 @@ example : ∀ n, match eval [after] ticks n [.abort .fail 0] .empty [] tallies w
     | (.stuck, _) => False
     | (.susp _ _ _ _ _, _) => False
     | (.timeout, _) => True
+    | (.panic, _) => True
     | (.val v, σ') => ∃ L, VT [after] [] σ' .int v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
     | (.abort _ _, σ') => ∀ l, σ'.mem l = none :=
   program_ok after_ok tallies_typed
@@ -1190,6 +1205,7 @@ example : ∀ n, match eval [after] ticks n [.abort .fail 0] .empty [] early wit
     | (.stuck, _) => False
     | (.susp _ _ _ _ _, _) => False
     | (.timeout, _) => True
+    | (.panic, _) => True
     | (.val v, σ') => ∃ L, VT [after] [] σ' .int v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
     | (.abort _ _, σ') => ∀ l, σ'.mem l = none :=
   program_ok after_ok early_typed
@@ -1218,6 +1234,7 @@ example : ∀ n, match eval [] [] n [.abort .fail 0] .empty [] tags with
     | (.stuck, _) => False
     | (.susp _ _ _ _ _, _) => False
     | (.timeout, _) => True
+    | (.panic, _) => True
     | (.val v, σ') => ∃ L, VT [] [] σ' .int v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
     | (.abort _ _, σ') => ∀ l, σ'.mem l = none :=
   program_ok (by intro d hd; simp at hd) tags_typed
@@ -1252,6 +1269,7 @@ example : ∀ n, match eval [] [] n [.abort .fail 0] .empty [] tagRef with
     | (.stuck, _) => False
     | (.susp _ _ _ _ _, _) => False
     | (.timeout, _) => True
+    | (.panic, _) => True
     | (.val v, σ') => ∃ L, VT [] [] σ' .int v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
     | (.abort _ _, σ') => ∀ l, σ'.mem l = none :=
   program_ok (by intro d hd; simp at hd) tagRef_typed
@@ -1305,6 +1323,7 @@ example : ∀ s n, match eval [step] yields n [.abort .fail 0] (Store.sched0 s) 
     | (.stuck, _) => False
     | (.susp _ _ _ _ _, _) => False
     | (.timeout, _) => True
+    | (.panic, _) => True
     | (.val v, σ') => ∃ L, VT [step] [] σ' .int v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
     | (.abort _ _, σ') => ∀ l, σ'.mem l = none :=
   program_ok_sched step_ok tasks_typed
@@ -1362,6 +1381,7 @@ example : ∀ s n, match eval [hold, failing] yields n [.abort .fail 0] (Store.s
     | (.stuck, _) => False
     | (.susp _ _ _ _ _, _) => False
     | (.timeout, _) => True
+    | (.panic, _) => True
     | (.val v, σ') => ∃ L, VT [hold, failing] [] σ' .int v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
     | (.abort _ _, σ') => ∀ l, σ'.mem l = none :=
   program_ok_sched cancel_fns cancel_typed
@@ -1397,6 +1417,7 @@ example : ∀ n, match eval [] [] n [.abort .fail 0] .empty [] regionEx with
     | (.stuck, _) => False
     | (.susp _ _ _ _ _, _) => False
     | (.timeout, _) => True
+    | (.panic, _) => True
     | (.val v, σ') => ∃ L, VT [] [] σ' .int v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
     | (.abort _ _, σ') => ∀ l, σ'.mem l = none :=
   program_ok (by intro d hd; simp at hd) regionEx_typed
@@ -1434,6 +1455,7 @@ example : ∀ n, match eval [] [] n [.abort .fail 0] .empty [] regionsUnwind wit
     | (.stuck, _) => False
     | (.susp _ _ _ _ _, _) => False
     | (.timeout, _) => True
+    | (.panic, _) => True
     | (.val v, σ') => ∃ L, VT [] [] σ' .int v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
     | (.abort _ _, σ') => ∀ l, σ'.mem l = none :=
   program_ok (by intro d hd; simp at hd) regionsUnwind_typed
@@ -1467,6 +1489,7 @@ example : ∀ n, match eval [] [] n [.abort .fail 0] .empty [] cellEx with
     | (.stuck, _) => False
     | (.susp _ _ _ _ _, _) => False
     | (.timeout, _) => True
+    | (.panic, _) => True
     | (.val v, σ') => ∃ L, VT [] [] σ' .int v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
     | (.abort _ _, σ') => ∀ l, σ'.mem l = none :=
   program_ok (by intro d hd; simp at hd) cellEx_typed
@@ -1516,6 +1539,7 @@ example : ∀ n, match eval [growR] [] n [.abort .fail 0] .empty [] growEx with
     | (.stuck, _) => False
     | (.susp _ _ _ _ _, _) => False
     | (.timeout, _) => True
+    | (.panic, _) => True
     | (.val v, σ') => ∃ L, VT [growR] [] σ' .int v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
     | (.abort _ _, σ') => ∀ l, σ'.mem l = none :=
   program_ok growR_ok growEx_typed
@@ -1547,9 +1571,111 @@ example : ∀ n, match eval [growR] [] n [.abort .fail 0] .empty [] growOuter wi
     | (.stuck, _) => False
     | (.susp _ _ _ _ _, _) => False
     | (.timeout, _) => True
+    | (.panic, _) => True
     | (.val v, σ') => ∃ L, VT [growR] [] σ' .int v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
     | (.abort _ _, σ') => ∀ l, σ'.mem l = none :=
   program_ok growR_ok growOuter_typed
+
+/-! Vectors: elements moved in, moved again as the vector grows, and dropped with it. -/
+
+/-- `let v = []; v.push(Box.new(1)); v.push(Box.new(2)); v.len()`: 2, and nothing left allocated. -/
+def vecEx : Expr :=
+  .let_ "v" (.vec (.box .int)) .vnew
+    (.let_ "a" (.box .int) (.new (.lit 1))
+      (.let_ "u" .int (.vpush (var "v") (.move "a"))
+        (.let_ "b" (.box .int) (.new (.lit 2))
+          (.let_ "w" .int (.vpush (var "v") (.move "b"))
+            (.vlen (var "v"))))))
+
+example : value (eval [] [] 40 [] .empty [] vecEx) = some 2 := by
+  run [vecEx]
+example : freed (eval [] [] 40 [] .empty [] vecEx) := by
+  run [vecEx]
+
+theorem vecEx_typed : Typed [] [] [] vecEx .int [] [.fail] :=
+  .let_ (live := true) rfl (.vnew rfl)
+    (.let_ (live := false) rfl (.new .lit)
+      (.let_ (live := true) rfl (.vpush (.move rfl rfl) (.own rfl))
+        (.let_ (live := false) rfl (.new .lit)
+          (.let_ (live := true) rfl (.vpush (.move rfl rfl) (.own rfl))
+            (.vlen (.own rfl))))))
+
+example : ∀ n, match eval [] [] n [.abort .fail 0] .empty [] vecEx with
+    | (.stuck, _) => False
+    | (.susp _ _ _ _ _, _) => False
+    | (.timeout, _) => True
+    | (.panic, _) => True
+    | (.val v, σ') => ∃ L, VT [] [] σ' .int v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
+    | (.abort _ _, σ') => ∀ l, σ'.mem l = none :=
+  program_ok (by intro d hd; simp at hd) vecEx_typed
+
+/-- `let v = []; v.push(1); v.push(41); const i = 1; { const e = mut v[i]; *e = *e + 1 }; v[i]`:
+an element changed and read through borrows of it; 42. -/
+def vecIdx : Expr :=
+  .let_ "v" (.vec .int) .vnew
+    (.let_ "u" .int (.vpush (var "v") (.lit 1))
+      (.let_ "w" .int (.vpush (var "v") (.lit 41))
+        (.let_ "i" .int (.atom (.lit 1))
+          (.let_ "t" .int
+            (.lendIdx "e" .mut (var "v") "i"
+              (.let_ "s" .int (.add (.read (var "e")) (.lit 1)) (.write (var "e") (.read (var "s")))))
+            (.lendIdx "r" .ro (var "v") "i" (.atom (.read (var "r"))))))))
+
+example : value (eval [] [] 40 [] .empty [] vecIdx) = some 42 := by
+  run [vecIdx]
+example : freed (eval [] [] 40 [] .empty [] vecIdx) := by
+  run [vecIdx]
+
+theorem vecIdx_typed : Typed [] [] [] vecIdx .int [] [.fail] :=
+  .let_ (live := true) rfl (.vnew rfl)
+    (.let_ (live := true) rfl (.vpush .lit (.own rfl))
+      (.let_ (live := true) rfl (.vpush .lit (.own rfl))
+        (.let_ (live := true) rfl (.atom .lit)
+          (.let_ (live := true) rfl
+            (.lendIdx rfl (.own rfl) (.own rfl) (fun _ => rfl) (fun _ => rfl) (fun _ _ _ _ h => by simp [lookup] at h)
+              (.let_ (live := true) rfl (.add (.read (.ref rfl)) .lit) (.write (.read (.own rfl)) (.ref (m := .mut) rfl))))
+            (.lendIdx rfl (.own rfl) (.own rfl) (fun h => by cases h) (fun h => by cases h) (fun h => by cases h)
+              (.atom (.read (.ref rfl))))))))
+
+example : ∀ n, match eval [] [] n [.abort .fail 0] .empty [] vecIdx with
+    | (.stuck, _) => False
+    | (.susp _ _ _ _ _, _) => False
+    | (.timeout, _) => True
+    | (.panic, _) => True
+    | (.val v, σ') => ∃ L, VT [] [] σ' .int v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
+    | (.abort _ _, σ') => ∀ l, σ'.mem l = none :=
+  program_ok (by intro d hd; simp at hd) vecIdx_typed
+
+/-- `let v = []; v.push(1); const i = 5; v[i]`: out of bounds, a panic. -/
+def vecOob : Expr :=
+  .let_ "v" (.vec .int) .vnew
+    (.let_ "u" .int (.vpush (var "v") (.lit 1))
+      (.let_ "i" .int (.atom (.lit 5))
+        (.lendIdx "r" .ro (var "v") "i" (.atom (.read (var "r"))))))
+
+example : (eval [] [] 40 [] .empty [] vecOob).1 = .panic := by
+  run [vecOob]
+
+/-- Pushing to a vector while one of its elements is borrowed `mut`: the vector is out of reach
+while the borrow lives, so the push, which would move the element, does not check. -/
+theorem pushWhileBorrowed_rejected :
+    ¬ Typed [] [] [("i", .own .int true), ("v", .own (.vec .int) true)]
+      (.lendIdx "e" .mut (var "v") "i" (.vpush (var "v") (.lit 1))) τ Γ' r := by
+  have key : ∀ {τe τ w y}, PlaceTy (("e", .ref .mut τe) ::
+      lendCtx .mut [("i", .own .int true), ("v", .own (.vec .int) true)] "v") (var "v") τ w y → False := by
+    intro τe τ w y hp
+    cases hp <;> simp_all [lookup, lendCtx, hide]
+  intro h
+  cases h with
+  | lendIdx _ hpv _ _ _ _ hb =>
+    cases hpv with
+    | own hv =>
+      cases hb with
+      | vpush ha hp =>
+        cases ha
+        exact key hp
+    | ref hv => simp [lookup] at hv
+    | half hv => simp [lookup] at hv
 
 theorem ralloc_ty (h : Typed F O Γ (.ralloc R c τ a) t Γ' r) :
     ∃ k s, t = .rref c k τ ∧ lookup R Γ = some s ∧ (s = .own (.arena k) true ∨ s = .ref .mut (.arena k)) := by

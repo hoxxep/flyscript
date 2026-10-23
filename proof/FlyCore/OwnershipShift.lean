@@ -36,6 +36,7 @@ theorem LT.rfree_iota (h : LT F ι σ c τ L) (hr : τ.rfree = true) : LT F ι' 
   | hole => exact .hole
   | rref => simp [Ty.rfree] at hr
   | arena => simp [Ty.rfree] at hr
+  | vec ha hlen _ hnd hn ih => exact .vec ha hlen (fun i h h' => ih i h h' (by simpa [Ty.rfree] using hr)) hnd hn
 
 theorem VT.rfree_iota (h : VT F ι σ τ v L) (hr : τ.rfree = true) : VT F ι' σ τ v L := by
   cases h with
@@ -49,6 +50,7 @@ theorem VT.rfree_iota (h : VT F ι σ τ v L) (hr : τ.rfree = true) : VT F ι' 
     simp only [Ty.rfree, Bool.and_eq_true] at hr
     exact .tag (h.rfree_iota (Ty.rfree_ite hr.1 hr.2)) hA hB
   | rref => simp [Ty.rfree] at hr
+  | vec hlen hel hnd hc => exact .vec hlen (fun i h h' => (hel i h h').rfree_iota (by simpa [Ty.rfree] using hr)) hnd hc
 
 theorem Vals.rfree_iota (h : Vals F ι σ τs vs Ls) (hr : ∀ τ ∈ τs, τ.rfree = true) : Vals F ι' σ τs vs Ls := by
   induction h with
@@ -88,6 +90,7 @@ theorem LT.shift (h : LT F ι σ c τ L) : LT F (a :: ι) σ c (τ.shiftBy 1) L 
     refine .arena (by simpa using hk) ha hnd hn (fun l hl => ?_) hex
     obtain ⟨τ, v, h1, h2, h3⟩ := hcs l hl
     exact ⟨τ, v, h1, h2, by simpa using h3⟩
+  | vec ha hlen _ hnd hn ih => exact .vec ha hlen ih hnd hn
 
 theorem LT.unshift : ∀ {τ : Ty} {c : Nat} {L : List Nat}, LT F (a :: ι) σ c (τ.shiftBy 1) L → LT F ι σ c τ L
   | .int, _, _, h => by simp only [Ty.shiftBy] at h; cases h with | int ha => exact .int ha
@@ -120,6 +123,10 @@ theorem LT.unshift : ∀ {τ : Ty} {c : Nat} {L : List Nat}, LT F (a :: ι) σ c
       refine .arena (by simpa using hk) ha hnd hn (fun l hl => ?_) hex
       obtain ⟨τ, v, h1, h2, h3⟩ := hcs l hl
       exact ⟨τ, v, h1, h2, by simpa using h3⟩
+  | .vec τ, _, _, h => by
+    simp only [Ty.shiftBy] at h
+    cases h with
+    | vec ha hlen hel hnd hn => exact .vec ha hlen (fun i h h' => LT.unshift (hel i h h')) hnd hn
 
 theorem Ty.complete_shift : ∀ {τ : Ty}, (τ.shiftBy n).complete = τ.complete
   | .int => rfl
@@ -130,6 +137,7 @@ theorem Ty.complete_shift : ∀ {τ : Ty}, (τ.shiftBy n).complete = τ.complete
   | .hole _ => rfl
   | .rref _ _ _ => rfl
   | .arena _ => rfl
+  | .vec τ => by simp [Ty.shiftBy, Ty.complete, Ty.complete_shift (τ := τ)]
 
 theorem Ty.isHole_shift {τ : Ty} : (τ.shiftBy n).isHole = τ.isHole := by
   cases τ <;> rfl
@@ -151,6 +159,7 @@ theorem VT.shift (h : VT F ι σ τ v L) : VT F (a :: ι) σ (τ.shiftBy 1) v L 
     exact .tag (by rw [← Ty.shiftBy_ite]; exact h.shift) (by rw [Ty.complete_shift]; exact hA)
       (by rw [Ty.complete_shift]; exact hB)
   | rref hr => exact .rref (RefOk.shift_iff.mpr hr)
+  | vec hlen hel hnd hc => exact .vec hlen (fun i h h' => (hel i h h').shift) hnd (by rw [Ty.complete_shift]; exact hc)
 
 theorem VT.unshift : ∀ {τ : Ty} {v : Val} {L : List Nat}, VT F (a :: ι) σ (τ.shiftBy 1) v L → VT F ι σ τ v L
   | .int, _, _, h => by simp only [Ty.shiftBy] at h; cases h; exact .int
@@ -175,6 +184,10 @@ theorem VT.unshift : ∀ {τ : Ty} {v : Val} {L : List Nat}, VT F (a :: ι) σ (
     simp only [Ty.shiftBy] at h
     cases h with | rref hr => exact .rref (RefOk.shift_iff.mp hr)
   | .arena _, _, _, h => by simp only [Ty.shiftBy] at h; cases h
+  | .vec τ, _, _, h => by
+    simp only [Ty.shiftBy] at h
+    cases h with
+    | vec hlen hel hnd hc => exact .vec hlen (fun i h h' => LT.unshift (hel i h h')) hnd (by rwa [Ty.complete_shift] at hc)
 
 theorem Slot.excl_shift {s : Slot} : (s.shiftBy n).excl = s.excl := by
   cases s with
@@ -283,6 +296,7 @@ theorem LT.shiftk (h : LT F (ι.drop k) σ c τ L) : LT F ι σ c (τ.shiftBy k)
     refine .arena (by simpa [List.getElem?_drop, Nat.add_comm] using hk) ha hnd hn (fun l hl => ?_) hex
     obtain ⟨τ, v, h1, h2, h3⟩ := hcs l hl
     exact ⟨τ, v, h1, h2, by rw [drop_drop_add] at h3; exact h3⟩
+  | vec ha hlen _ hnd hn ih => exact .vec ha hlen ih hnd hn
 
 theorem LT.unshiftk : ∀ {τ : Ty} {c : Nat} {L : List Nat}, LT F ι σ c (τ.shiftBy k) L → LT F (ι.drop k) σ c τ L
   | .int, _, _, h => by simp only [Ty.shiftBy] at h; cases h with | int ha => exact .int ha
@@ -315,6 +329,10 @@ theorem LT.unshiftk : ∀ {τ : Ty} {c : Nat} {L : List Nat}, LT F ι σ c (τ.s
       refine .arena (by simpa [List.getElem?_drop, Nat.add_comm] using hk) ha hnd hn (fun l hl => ?_) hex
       obtain ⟨τ, v, h1, h2, h3⟩ := hcs l hl
       exact ⟨τ, v, h1, h2, by rw [drop_drop_add]; exact h3⟩
+  | .vec τ, _, _, h => by
+    simp only [Ty.shiftBy] at h
+    cases h with
+    | vec ha hlen hel hnd hn => exact .vec ha hlen (fun i h h' => LT.unshiftk (hel i h h')) hnd hn
 
 theorem VT.shiftk (h : VT F (ι.drop k) σ τ v L) : VT F ι σ (τ.shiftBy k) v L := by
   cases h with
@@ -327,6 +345,7 @@ theorem VT.shiftk (h : VT F (ι.drop k) σ τ v L) : VT F ι σ (τ.shiftBy k) v
     exact .tag (by rw [← Ty.shiftBy_ite]; exact h.shiftk) (by rw [Ty.complete_shift]; exact hA)
       (by rw [Ty.complete_shift]; exact hB)
   | rref hr => exact .rref (RefOk.drop_iff.mpr hr)
+  | vec hlen hel hnd hc => exact .vec hlen (fun i h h' => (hel i h h').shiftk) hnd (by rw [Ty.complete_shift]; exact hc)
 
 theorem LT.unshiftk_ite {t : Bool} (h : LT F ι σ c (if t then A.shiftBy k else B.shiftBy k) L) :
     LT F (ι.drop k) σ c (if t then A else B) L := by
@@ -357,6 +376,10 @@ theorem VT.unshiftk : ∀ {τ : Ty} {v : Val} {L : List Nat}, VT F ι σ (τ.shi
     simp only [Ty.shiftBy] at h
     cases h with | rref hr => exact .rref (RefOk.drop_iff.mp hr)
   | .arena _, _, _, h => by simp only [Ty.shiftBy] at h; cases h
+  | .vec τ, _, _, h => by
+    simp only [Ty.shiftBy] at h
+    cases h with
+    | vec hlen hel hnd hc => exact .vec hlen (fun i h h' => LT.unshiftk (hel i h h')) hnd (by rwa [Ty.complete_shift] at hc)
 
 theorem Vals.unshiftk : ∀ {τs : List Ty} {vs : List Val} {Ls : List (List Nat)},
     Vals F ι σ (τs.map (Ty.shiftBy k)) vs Ls → Vals F (ι.drop k) σ τs vs Ls

@@ -66,6 +66,8 @@ inductive Ty where
   | rref (c : Bool) (k : Nat) (τ : Ty)
   /-- The arena of the region `k` regions out from here. -/
   | arena (k : Nat)
+  /-- A vector of `τ`s, each in a cell of its own, which grows as it is pushed to. -/
+  | vec (τ : Ty)
   deriving DecidableEq, Repr
 
 /-- Plain data: integers and boxes of them, which a closure may capture. -/
@@ -78,6 +80,7 @@ def Ty.data : Ty → Bool
   | .hole _ => false
   | .rref _ _ _ => false
   | .arena _ => false
+  | .vec _ => false
 
 /-- A pair whose first field, or whose second, is lent. -/
 def Ty.lent1 (t : Bool) (A B : Ty) : Ty := if t then .pair (.hole A) B else .pair A (.hole B)
@@ -92,6 +95,7 @@ def Ty.complete : Ty → Bool
   | .hole _ => false
   | .rref _ _ _ => true
   | .arena _ => false
+  | .vec τ => τ.complete
 
 /-- What a borrow may be of: a value with no place lent out of it, or a region's arena. -/
 def Ty.whole : Ty → Bool
@@ -119,6 +123,7 @@ theorem Ty.data_complete : ∀ {τ : Ty}, τ.data = true → τ.complete = true
   | .hole _, h => by simp [Ty.data] at h
   | .rref _ _ _, h => by simp [Ty.data] at h
   | .arena _, h => by simp [Ty.data] at h
+  | .vec _, h => by simp [Ty.data] at h
 
 theorem Ty.complete_ite {t : Bool} {A B : Ty} (hA : A.complete = true) (hB : B.complete = true) :
     (if t then A else B).complete = true := by
@@ -154,6 +159,7 @@ def Ty.rfree : Ty → Bool
   | .hole τ => τ.rfree
   | .rref _ _ _ => false
   | .arena _ => false
+  | .vec τ => τ.rfree
 
 theorem Ty.data_rfree : ∀ {τ : Ty}, τ.data = true → τ.rfree = true
   | .int, _ => rfl
@@ -168,6 +174,7 @@ theorem Ty.data_rfree : ∀ {τ : Ty}, τ.data = true → τ.rfree = true
   | .hole _, h => by simp [Ty.data] at h
   | .rref _ _ _, h => by simp [Ty.data] at h
   | .arena _, h => by simp [Ty.data] at h
+  | .vec _, h => by simp [Ty.data] at h
 
 /-- Data a region may hold: integers, and references into it or the regions around it. -/
 def Ty.rdata : Ty → Bool
@@ -185,6 +192,7 @@ def Ty.shiftBy (n : Nat) : Ty → Ty
   | .hole τ => .hole (τ.shiftBy n)
   | .rref c k τ => .rref c (k + n) τ
   | .arena k => .arena (k + n)
+  | .vec τ => .vec (τ.shiftBy n)
 
 /-- A type said of a place `n` regions further out: what `shiftBy n` undoes. -/
 def Ty.lowerBy (n : Nat) : Ty → Ty
@@ -196,6 +204,7 @@ def Ty.lowerBy (n : Nat) : Ty → Ty
   | .hole τ => .hole (τ.lowerBy n)
   | .rref c k τ => .rref c (k - n) τ
   | .arena k => .arena (k - n)
+  | .vec τ => .vec (τ.lowerBy n)
 
 @[simp] theorem Ty.lowerBy_shiftBy : ∀ {τ : Ty}, (τ.shiftBy n).lowerBy n = τ
   | .int => rfl
@@ -206,6 +215,7 @@ def Ty.lowerBy (n : Nat) : Ty → Ty
   | .hole τ => by simp [Ty.shiftBy, Ty.lowerBy, Ty.lowerBy_shiftBy (τ := τ)]
   | .rref _ _ _ => by simp [Ty.shiftBy, Ty.lowerBy]
   | .arena _ => by simp [Ty.shiftBy, Ty.lowerBy]
+  | .vec τ => by simp [Ty.shiftBy, Ty.lowerBy, Ty.lowerBy_shiftBy (τ := τ)]
 
 @[simp] theorem Ty.shiftBy_zero : ∀ {τ : Ty}, τ.shiftBy 0 = τ
   | .int => rfl
@@ -216,6 +226,7 @@ def Ty.lowerBy (n : Nat) : Ty → Ty
   | .hole τ => by simp [Ty.shiftBy, Ty.shiftBy_zero (τ := τ)]
   | .rref _ _ _ => rfl
   | .arena _ => rfl
+  | .vec τ => by simp [Ty.shiftBy, Ty.shiftBy_zero (τ := τ)]
 
 @[simp] theorem Ty.lowerBy_zero : ∀ {τ : Ty}, τ.lowerBy 0 = τ
   | .int => rfl
@@ -226,6 +237,7 @@ def Ty.lowerBy (n : Nat) : Ty → Ty
   | .hole τ => by simp [Ty.lowerBy, Ty.lowerBy_zero (τ := τ)]
   | .rref _ _ _ => rfl
   | .arena _ => rfl
+  | .vec τ => by simp [Ty.lowerBy, Ty.lowerBy_zero (τ := τ)]
 
 theorem Ty.isFn_lowerBy {τ : Ty} : (τ.lowerBy n).isFn = τ.isFn := by
   cases τ <;> rfl
@@ -350,6 +362,16 @@ inductive Expr where
   /-- `p.set(a)` for a `Cell` `p` of the region of arena `R`: `a` put in its cell in place of what it
   held. -/
   | rset (R : Var) (p : Place) (a : Atom)
+  /-- `[]`, an empty vector. -/
+  | vnew
+  /-- `p.len()`: how many elements the vector at `p` has. -/
+  | vlen (p : Place)
+  /-- `p.push(a)`: `a` moved to the end of the vector at `p`, whose elements move to new cells as it
+  grows. -/
+  | vpush (p : Place) (a : Atom)
+  /-- `{ const x = p[z]; body }` with `x` a borrow — `readonly` or `mut` — of the element of the
+  vector at `p` that the integer `z` names, for as long as `body` runs; a panic if there is none. -/
+  | lendIdx (x : Var) (m : Mode) (p : Place) (z : Var) (body : Expr)
   deriving Repr
 
 /-- A user effect's operation: what it takes, owned and lent, and what it gives. -/
@@ -397,6 +419,8 @@ inductive Val where
   | rptr (l : Nat)
   /-- A region's arena: the cells allocated in it. -/
   | arena (cs : List Nat)
+  /-- A vector: the cells of its elements, in order. -/
+  | vec (cs : List Nat)
   deriving DecidableEq, Repr
 
 /-- The store: its cells, `none` once freed or before allocation, the next to allocate, and the
@@ -437,6 +461,19 @@ def Store.alloc (σ : Store) (v : Val) : Nat × Store :=
   (σ.next, { σ with mem := fun k => if k = σ.next then some v else σ.mem k, next := σ.next + 1,
                     rtwf := fun l a x h => ⟨Nat.lt_succ_of_lt (σ.rtwf l a x h).1, Nat.lt_succ_of_lt (σ.rtwf l a x h).2⟩ })
 
+/-- Moves what each of the cells `cs` holds to a fresh cell, freeing it: a vector's elements, as it
+grows into new storage. -/
+def Store.moveAll (σ : Store) : List Nat → Option (List Nat × Store)
+  | [] => some ([], σ)
+  | c :: cs =>
+    match σ.mem c with
+    | some w =>
+      let (c', σ1) := σ.alloc w
+      match (σ1.set c none).moveAll cs with
+      | some (cs', σ2) => some (c' :: cs', σ2)
+      | none => none
+    | none => none
+
 abbrev Env := List (Var × Nat)
 
 def lookup {α : Type} (x : Var) : List (Var × α) → Option α
@@ -466,6 +503,17 @@ def resolve (σ : Store) (env : Env) : Place → Option Nat
       match σ.mem l with
       | some (.pair _ c) => some c
       | _ => none
+    | none => none
+
+/-- Drops the cells `cs` in order, with `drop1` for what each holds. -/
+def dropCellsWith (drop1 : Store → Val → Option Store) : Store → List Nat → Option Store
+  | σ, [] => some σ
+  | σ, c :: cs =>
+    match σ.mem c with
+    | some w =>
+      match drop1 σ w with
+      | some σ' => dropCellsWith drop1 (σ'.set c none) cs
+      | none => none
     | none => none
 
 /-- Drops a value of type `τ` with `k` cells to spare: frees the cells of its boxes, innermost
@@ -508,6 +556,8 @@ def dropK : Nat → Store → Ty → Val → Option Store
         | none => none
       | none => none
     | none => none
+  | 0, σ, .vec _, .vec [] => some σ
+  | k + 1, σ, .vec τ, .vec cs => dropCellsWith (fun σ w => dropK k σ τ w) σ cs
   | _, _, _, _ => none
 
 /-- Drops a value of type `τ`: a value owns fewer cells than the store has. -/
@@ -636,6 +686,8 @@ inductive Res where
   | susp (id : Nat) (e : Nat) (vs : List Val) (ls : List Nat) (K : List Kont)
   | stuck
   | timeout
+  /-- The program ends at once, nothing dropped and no cleanup run: an index out of bounds. -/
+  | panic
 
 /-- The value of a result, if it is one. -/
 def Res.value? : Res → Option Val
@@ -712,6 +764,7 @@ def callRet (cells : List (Ty × Nat)) : Res × Store → Res × Store
   | (.susp j ef vs ls K, σ) => (.susp j ef vs ls (.callK cells :: K), σ)
   | (.stuck, σ) => (.stuck, σ)
   | (.timeout, σ) => (.timeout, σ)
+  | (.panic, σ) => (.panic, σ)
   | (r, σ) =>
     match dropCells σ cells with
     | some σ' => (r, σ')
@@ -956,6 +1009,18 @@ def eval (F : List Fn) (O : List Op) : Nat → HS → Store → Env → Expr →
       match resolve σ env p with
       | some l => ret F O n hs .lendK (eval F O n hs σ ((x, l) :: env) body)
       | none => (.stuck, σ)
+    | .lendIdx x _ p z body =>
+      match resolve σ env p, lookup z env with
+      | some c, some lz =>
+        match σ.mem c, σ.mem lz with
+        | some (.vec cs), some (.int k) =>
+          if 0 ≤ k then
+            match cs[k.toNat]? with
+            | some l => ret F O n hs .lendK (eval F O n hs σ ((x, l) :: env) body)
+            | none => (.panic, σ)
+          else (.panic, σ)
+        | _, _ => (.stuck, σ)
+      | _, _ => (.stuck, σ)
     | .perform ef owned lent =>
       match O[ef]? with
       | none => (.stuck, σ)
@@ -1050,6 +1115,29 @@ def eval (F : List Fn) (O : List Op) : Nat → HS → Store → Env → Expr →
           | _ => (.stuck, σ)
         | none => (.stuck, σ)
       | none => (.stuck, σ)
+    | .vnew => (.val (.vec []), σ)
+    | .vlen p =>
+      match resolve σ env p with
+      | some c =>
+        match σ.mem c with
+        | some (.vec cs) => (.val (.int cs.length), σ)
+        | _ => (.stuck, σ)
+      | none => (.stuck, σ)
+    | .vpush p a =>
+      match evalAtom σ env a with
+      | some (v, σ1) =>
+        match resolve σ1 env p with
+        | some c =>
+          match σ1.mem c with
+          | some (.vec cs) =>
+            match σ1.moveAll cs with
+            | some (cs', σ2) =>
+              let (l, σ3) := σ2.alloc v
+              (.val (.int 0), σ3.set c (some (.vec (cs' ++ [l]))))
+            | none => (.stuck, σ1)
+          | _ => (.stuck, σ1)
+        | none => (.stuck, σ1)
+      | none => (.stuck, σ)
 termination_by n _ _ _ _ => (n, 0, 0)
 
 /-- What frame `f` does with what the code it ran gave, under the handlers `hs` around it. -/
@@ -1124,6 +1212,7 @@ def ret (F : List Fn) (O : List Op) (n : Nat) (hs : HS) : Kont → Res × Store 
     | f => (.susp j ef vs ls (f :: K), σ)
   | _, (.stuck, σ) => (.stuck, σ)
   | _, (.timeout, σ) => (.timeout, σ)
+  | _, (.panic, σ) => (.panic, σ)
   | .letK x τ env b, (.val v, σ) =>
     let (c, σ2) := σ.alloc v
     leave τ c (eval F O n hs σ2 ((x, c) :: env) b)
@@ -1536,6 +1625,12 @@ inductive Typed (F : List Fn) (O : List Op) : Ctx → Expr → Ty → Ctx → Ro
       (m = .mut → Unsplit Γ y) →
       Typed F O ((x, .ref m τ) :: lendCtx m Γ y) body τb ((x, .ref m τ) :: Γb) r →
       Typed F O Γ (.lend x m p body) τb (thaw Γ [y] Γb) r
+  /-- A borrow of an element of a vector, for the code it is in scope for: it is a borrow of the
+  whole vector, which is only read, or not reached, until it ends. -/
+  | lendIdx : lookup x Γ = none → PlaceTy Γ p (.vec τ) w y → PlaceTy Γ (.var z) .int wz yz →
+      (m = .mut → w = true) → (m = .mut → τ.isFn = false) → (m = .mut → Unsplit Γ y) →
+      Typed F O ((x, .ref m τ) :: lendCtx m Γ y) body τb ((x, .ref m τ) :: Γb) r →
+      Typed F O Γ (.lendIdx x m p z body) τb (thaw Γ [y] Γb) r
   /-- A borrow of one field of a variable's pair, for the code it is in scope for: the variable
   stays in reach, the field a hole in its type, and the field beside it may be read, changed or
   lent meanwhile. -/
@@ -1600,6 +1695,12 @@ inductive Typed (F : List Fn) (O : List Op) : Ctx → Expr → Ty → Ctx → Ro
   /-- Reading what a reference into a region refers to, its arena in reach. -/
   | rget : PlaceTy Γ p (.rref c k τ) w y → lookup R Γ = some s → (s = .own (.arena k) true ∨ ∃ m, s = .ref m (.arena k)) →
       Typed F O Γ (.rget p) (τ.shiftBy k) Γ r
+  /-- An empty vector. -/
+  | vnew : τ.complete = true → Typed F O Γ .vnew (.vec τ) Γ r
+  /-- A vector's length, which reading it says. -/
+  | vlen : PlaceTy Γ p (.vec τ) w y → Typed F O Γ (.vlen p) .int Γ r
+  /-- Pushing to a vector at a place that may be changed, the element moved in. -/
+  | vpush : AtomTy Γ a τ Γ₁ → PlaceTy Γ₁ p (.vec τ) true y → Typed F O Γ (.vpush p a) .int Γ₁ r
   /-- Changing what a `Cell` of a region holds, through its arena, owned or lent `mut`. -/
   | rset : PlaceTy Γ p (.rref true k τ) w y → lookup R Γ = some s → (s = .own (.arena k) true ∨ s = .ref .mut (.arena k)) →
       τ.rdata = true → AtomTy Γ a (τ.shiftBy k) Γ → Typed F O Γ (.rset R p a) .int Γ r

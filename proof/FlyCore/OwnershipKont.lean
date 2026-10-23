@@ -255,6 +255,7 @@ def Post (F : List Fn) (ι : List Nat) (O : List Op) (σ : Store) (E S : List Na
     (r : Row) (hs : HS) : Res × Store → Prop
   | (.stuck, _) => False
   | (.timeout, _) => True
+  | (.panic, _) => True
   | (.val v, σ') => ∃ E' L, Inv F ι σ' Γ' env E' S ∧ VT F ι σ' τ v L ∧ Disj L E' ∧ Disj L S ∧ Moves σ E σ' E' L
   | (.abort id _, σ') => AimedIn id hs ∧ ∃ E', Inv F ι σ' Γ' env E' S ∧ Moves σ E σ' E' []
   | (.susp id e vs ls K, σ') => ∃ op X hos A Lv,

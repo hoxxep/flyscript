@@ -67,6 +67,10 @@ inductive LT (F : List Fn) (ι : List Nat) (σ : Store) : Nat → Ty → List Na
   | arena : ι[k]? = some a → σ.mem a = some (.arena cs) → cs.Nodup → a ∉ cs →
       (∀ l ∈ cs, ∃ τ v, σ.rt l = some (a, τ) ∧ σ.mem l = some v ∧ RD (ι.drop k) σ τ v) →
       (∀ l x, σ.rt l = some (a, x) → l ∈ cs) → LT F ι σ a (.arena k) (a :: cs)
+  /-- A vector: its cell holds its elements' cells, each holding a `τ`, their trees apart. -/
+  | vec {cs : List Nat} {Rs : List (List Nat)} : σ.mem a = some (.vec cs) → Rs.length = cs.length →
+      (∀ i (h : i < cs.length) (h' : i < Rs.length), LT F ι σ cs[i] τ Rs[i]) → Rs.flatten.Nodup →
+      a ∉ Rs.flatten → LT F ι σ a (.vec τ) (a :: Rs.flatten)
 
 /-- A value of type `τ`, and the cells it owns. -/
 inductive VT (F : List Fn) (ι : List Nat) (σ : Store) : Ty → Val → List Nat → Prop
@@ -77,6 +81,8 @@ inductive VT (F : List Fn) (ι : List Nat) (σ : Store) : Ty → Val → List Na
       VT F ι σ (.pair A B) (.pair b c) (R₁ ++ R₂)
   | tag : LT F ι σ b (if t then A else B) R → A.complete → B.complete → VT F ι σ (.sum A B) (.tag A' B' t b) R
   | rref : RefOk ι σ k τ l → VT F ι σ (.rref c k τ) (.rptr l) []
+  | vec {cs : List Nat} {Rs : List (List Nat)} : Rs.length = cs.length → (∀ i (h : i < cs.length) (h' : i < Rs.length), LT F ι σ cs[i] τ Rs[i]) →
+      Rs.flatten.Nodup → τ.complete → VT F ι σ (.vec τ) (.vec cs) Rs.flatten
 
 def Disj (A B : List Nat) : Prop := ∀ x ∈ A, x ∉ B
 
@@ -179,6 +185,18 @@ theorem nodup_append_disj : (A ++ B).Nodup ↔ A.Nodup ∧ B.Nodup ∧ Disj A B 
 
 /-! ## Trees -/
 
+theorem mem_flatten_idx {Rs : List (List Nat)} : l ∈ Rs.flatten ↔ ∃ i, ∃ h : i < Rs.length, l ∈ Rs[i] := by
+  simp only [List.mem_flatten]
+  constructor
+  · rintro ⟨R, hR, hl⟩
+    obtain ⟨i, hi, rfl⟩ := List.getElem_of_mem hR
+    exact ⟨i, hi, hl⟩
+  · rintro ⟨i, hi, hl⟩
+    exact ⟨_, List.getElem_mem hi, hl⟩
+
+theorem mem_flatten_of {Rs : List (List Nat)} {i : Nat} (hi : i < Rs.length) (hl : l ∈ Rs[i]) : l ∈ Rs.flatten :=
+  mem_flatten_idx.mpr ⟨i, hi, hl⟩
+
 theorem LT.head : LT F ι σ a τ L → τ.isHole = false → a ∈ L := by
   intro h hτ
   cases h <;> simp_all [Ty.isHole]
@@ -218,6 +236,12 @@ theorem LT.alloc : LT F ι σ a τ L → ∀ l ∈ L, σ.mem l ≠ none := by
     · simp [ha]
     · obtain ⟨_, _, _, hv, _⟩ := hcs l hl
       simp [hv]
+  | vec ha hlen _ _ _ ih =>
+    intro l hl
+    rcases List.mem_cons.mp hl with rfl | hl
+    · simp [ha]
+    · obtain ⟨i, hi, hl⟩ := mem_flatten_idx.mp hl
+      exact ih i (hlen ▸ hi) hi l hl
 
 theorem LT.nodup : LT F ι σ a τ L → L.Nodup := by
   intro h
@@ -229,6 +253,7 @@ theorem LT.nodup : LT F ι σ a τ L → L.Nodup := by
     exact List.nodup_cons.mpr ⟨hn, List.nodup_append.mpr ⟨ih1, ih2, fun x hx y hy e => hd x hx (e ▸ hy)⟩⟩
   | rref => simp
   | arena _ _ hnd hn => exact List.nodup_cons.mpr ⟨hn, hnd⟩
+  | vec _ _ _ hnd hn => exact List.nodup_cons.mpr ⟨hn, hnd⟩
 
 theorem LT.frame : LT F ι σ a τ L → Agree σ σ' L → LT F ι σ' a τ L := by
   intro h
@@ -260,6 +285,10 @@ theorem LT.frame : LT F ι σ a τ L → Agree σ σ' L → LT F ι σ' a τ L :
       (fun l x hx => hex l x (hag.fresh _ (List.mem_cons_self ..) l x hx))
     obtain ⟨τ, v, hrt, hv, hrd⟩ := hcs l hl
     exact ⟨τ, v, hag.rt l _ hrt, by rw [hag l (List.mem_cons_of_mem _ hl)]; exact hv, hrd.frame hag.rt⟩
+  | vec ha hlen _ hnd hn ih =>
+    intro hag
+    exact .vec (by rw [hag _ (List.mem_cons_self ..)]; exact ha) hlen
+      (fun i h h' => ih i h h' (hag.mono fun l hl => List.mem_cons_of_mem _ (mem_flatten_of h' hl))) hnd hn
 
 theorem LT.det : LT F ι σ a τ L → LT F ι σ a τ L' → L = L' := by
   intro h
@@ -302,6 +331,14 @@ theorem LT.det : LT F ι σ a τ L → LT F ι σ a τ L' → L = L' := by
       rw [ha] at ha'
       cases ha'
       rfl
+  | vec ha hlen _ _ _ ih =>
+    intro h'
+    cases h' with
+    | vec ha' hlen' hel' _ _ =>
+      rw [ha] at ha'
+      cases ha'
+      congr 2
+      exact List.ext_getElem (hlen.trans hlen'.symm) fun i h1 h2 => ih i (hlen ▸ h1) h1 (hel' i (hlen ▸ h1) h2)
 
 /-- What holds a closure is a closure, unless it is lent. -/
 theorem LT.det_fn : LT F ι σ a (.fn k A B r) L → LT F ι σ a τ L' → τ.isHole = false →
@@ -317,6 +354,7 @@ theorem LT.det_fn : LT F ι σ a (.fn k A B r) L → LT F ι σ a τ L' → τ.i
     | hole => simp [Ty.isHole] at hτ
     | rref ha' => rw [ha] at ha'; cases ha'
     | arena _ ha' => rw [ha] at ha'; cases ha'
+    | vec ha' => rw [ha] at ha'; cases ha'
     | clo ha' hc' hb' _ =>
       rw [ha] at ha'
       cases ha'
@@ -348,6 +386,10 @@ theorem VT.alloc : VT F ι σ τ v L → ∀ l ∈ L, σ.mem l ≠ none := by
     · exact h1.alloc l hl
     · exact h2.alloc l hl
   | rref => simp
+  | vec hlen hel _ _ =>
+    intro l hl
+    obtain ⟨i, hi, hl⟩ := mem_flatten_idx.mp hl
+    exact (hel i (hlen ▸ hi) hi).alloc l hl
 
 theorem VT.nodup : VT F ι σ τ v L → L.Nodup := by
   intro h
@@ -356,6 +398,7 @@ theorem VT.nodup : VT F ι σ τ v L → L.Nodup := by
   | box h | clo _ h | tag h => exact h.nodup
   | pair h1 h2 hd => exact List.nodup_append.mpr ⟨h1.nodup, h2.nodup, fun x hx y hy e => hd x hx (e ▸ hy)⟩
   | rref => simp
+  | vec _ _ hnd _ => exact hnd
 
 theorem VT.frame : VT F ι σ τ v L → Agree σ σ' L → VT F ι σ' τ v L := by
   intro h hag
@@ -369,6 +412,8 @@ theorem VT.frame : VT F ι σ τ v L → Agree σ σ' L → VT F ι σ' τ v L :
     have e2 := h2.frame (σ' := σ') (hag.mono fun l hl => List.mem_append.mpr (.inr hl))
     exact .pair e1 e2 hd hA hB
   | rref h => exact .rref (h.frame hag.rt)
+  | vec hlen hel hnd hc =>
+    exact .vec hlen (fun i h h' => (hel i h h').frame (hag.mono fun l hl => mem_flatten_of h' hl)) hnd hc
 
 theorem agree_set : l ∉ L → Agree σ (σ.set l v) L := by
   intro h
@@ -423,6 +468,7 @@ theorem LT.contents : LT F ι σ b τ R → τ.complete = true →
   | hole => simp [Ty.complete] at hc
   | rref ha hr => exact ⟨_, [], ha, .rref hr, rfl, by simp⟩
   | arena => simp [Ty.complete] at hc
+  | vec ha hlen hel hnd hn => exact ⟨_, _, ha, .vec hlen hel hnd (by simpa [Ty.complete] using hc), rfl, hn⟩
 
 theorem LT.of_contents : σ.mem b = some w → VT F ι σ τ w R' → b ∉ R' → LT F ι σ b τ (b :: R') := by
   intro ha hv hn
@@ -433,8 +479,61 @@ theorem LT.of_contents : σ.mem b = some w → VT F ι σ τ w R' → b ∉ R' �
   | pair h1 h2 hd => exact .pair ha h1 h2 hd hn
   | tag hb => exact .tag ha hb hn
   | rref hr => exact .rref ha hr
+  | vec hlen hel hnd => exact .vec ha hlen hel hnd hn
 
 /-! ## Dropping -/
+
+/-- Dropping a vector's elements in order frees exactly their cells. -/
+theorem dropElems_ok
+    (ih : ∀ (τ : Ty) (σ : Store) v L, VT F ι σ τ v L → L.length ≤ k →
+      ∃ σ', dropK k σ τ v = some σ' ∧ σ'.next = σ.next ∧ (∀ l ∈ L, σ'.mem l = none) ∧
+        (∀ l, l ∉ L → σ'.mem l = σ.mem l) ∧ σ'.rt = σ.rt) (hc : τ.complete = true) :
+    ∀ (cs : List Nat) (Rs : List (List Nat)) (σ : Store), Rs.length = cs.length →
+      (∀ i (h : i < cs.length) (h' : i < Rs.length), LT F ι σ cs[i] τ Rs[i]) → Rs.flatten.Nodup →
+      Rs.flatten.length ≤ k + 1 →
+      ∃ σ', dropCellsWith (fun σ w => dropK k σ τ w) σ cs = some σ' ∧ σ'.next = σ.next ∧ (∀ l ∈ Rs.flatten, σ'.mem l = none) ∧
+        (∀ l, l ∉ Rs.flatten → σ'.mem l = σ.mem l) ∧ σ'.rt = σ.rt
+  | [], Rs, σ, hlen, _, _, _ => by
+    obtain rfl : Rs = [] := List.eq_nil_of_length_eq_zero hlen
+    exact ⟨σ, rfl, rfl, by simp, fun _ _ => rfl, rfl⟩
+  | c :: cs, Rs, σ, hlen, hel, hnd, hk => by
+    cases Rs with
+    | nil => simp at hlen
+    | cons R Rs =>
+    simp only [List.length_cons, Nat.add_right_cancel_iff] at hlen
+    simp only [List.flatten_cons, List.length_append] at hk hnd
+    have hdisj := (List.nodup_append.mp hnd)
+    have h0 := hel 0 (by simp) (by simp)
+    simp only [List.getElem_cons_zero] at h0
+    obtain ⟨w, R', hw, hv, rfl, hn⟩ := h0.contents hc
+    simp only [List.length_cons] at hk
+    obtain ⟨σ1, hd, hnext1, hfree1, hkeep1, hrt1⟩ := ih τ σ w R' hv (by omega)
+    have hout : ∀ l ∈ Rs.flatten, l ∉ c :: R' := fun l hl h => hdisj.2.2 l h l hl rfl
+    have hag : ∀ l ∈ Rs.flatten, (σ1.set c none).mem l = σ.mem l := fun l hl => by
+      have h1 := hout l hl
+      simp only [List.mem_cons, not_or] at h1
+      simp only [Store.set, h1.1, ↓reduceIte]
+      exact hkeep1 l h1.2
+    have hel' : ∀ i (h : i < cs.length) (h' : i < Rs.length), LT F ι (σ1.set c none) cs[i] τ Rs[i] := fun i h h' =>
+      (hel (i + 1) (by simp; omega) (by simp; omega)).frame (Agree.of (fun l hl => hag l (mem_flatten_of h' hl))
+        (by simp [hrt1]))
+    obtain ⟨σ2, hd2, hnext2, hfree2, hkeep2, hrt2⟩ := dropElems_ok ih hc cs Rs (σ1.set c none) hlen hel' hdisj.2.1 (by omega)
+    refine ⟨σ2, by simp [dropCellsWith, hw, hd, hd2], by simp [hnext2, Store.set, hnext1], ?_, ?_, by simp [hrt2, hrt1]⟩
+    · intro l hl
+      rcases List.mem_append.mp hl with hl | hl
+      · have : l ∉ Rs.flatten := fun h => hout l h hl
+        rw [hkeep2 l this]
+        rcases List.mem_cons.mp hl with rfl | hl
+        · simp [Store.set]
+        · have hlc : l ≠ c := fun e => hn (e ▸ hl)
+          simp [Store.set, hlc, hfree1 l hl]
+      · exact hfree2 l hl
+    · intro l hl
+      simp only [List.flatten_cons, List.mem_append, List.mem_cons, not_or] at hl
+      obtain ⟨⟨hlc, hl1⟩, hl2⟩ := hl
+      rw [hkeep2 l hl2]
+      simp only [Store.set, hlc, ↓reduceIte]
+      exact hkeep1 l hl1
 
 /-- Distinct numbers below `n` are at most `n` of them. -/
 theorem nodup_length_le : ∀ (n : Nat) (L : List Nat), L.Nodup → (∀ x ∈ L, x < n) → L.length ≤ n
@@ -468,11 +567,27 @@ theorem dropK_ok : ∀ (k : Nat) (τ : Ty) (σ : Store) v L, VT F ι σ τ v L �
     | clo _ hb hc => obtain ⟨R, rfl⟩ := hb.cons (Ty.complete_not_hole hc); simp at hk
     | pair h1 _ _ hc _ => obtain ⟨R, rfl⟩ := h1.cons (Ty.complete_not_hole hc); simp at hk
     | tag hb hA hB => obtain ⟨R, rfl⟩ := hb.cons (Ty.complete_not_hole (Ty.complete_ite hA hB)); simp at hk
+    | vec hlen hel hnd hc =>
+      rename_i τ' cs Rs
+      cases cs with
+      | nil =>
+        obtain rfl : Rs = [] := List.eq_nil_of_length_eq_zero hlen
+        exact ⟨σ, by simp [dropK], rfl, by simp, fun _ _ => rfl, rfl⟩
+      | cons c cs =>
+        have h0 := hel 0 (by simp) (by simp [hlen])
+        obtain ⟨R, hR⟩ := h0.cons (Ty.complete_not_hole hc)
+        have := List.length_pos_of_mem (mem_flatten_of (Rs := Rs) (i := 0) (by simp [hlen])
+          (by rw [hR]; exact List.mem_cons_self ..))
+        omega
   | succ k ih =>
     intro τ σ v L h hk
     cases h with
     | int => exact ⟨σ, by simp [dropK], rfl, by simp, fun _ _ => rfl, rfl⟩
     | rref => exact ⟨σ, by simp [dropK], rfl, by simp, fun _ _ => rfl, rfl⟩
+    | vec hlen hel hnd hc =>
+      rename_i τ' cs Rs
+      obtain ⟨σ', h1, h2, h3, h4, h5⟩ := dropElems_ok ih hc cs Rs σ hlen hel hnd hk
+      exact ⟨σ', by simpa [dropK] using h1, h2, h3, h4, h5⟩
     | @tag b t A B _ _ _ hb hA hB =>
       obtain ⟨w, R', hw, hv, rfl, hn⟩ := hb.contents (Ty.complete_ite hA hB)
       obtain ⟨σ1, hd, hnext, hfree, hkeep, hrt⟩ := ih _ σ w R' hv (by simpa using hk)
@@ -568,18 +683,34 @@ theorem drop_ok (hwf : WF σ) : ∀ (τ : Ty) v L, VT F ι σ τ v L →
     let ⟨σ', h1, h2, h3, h4, _⟩ := dropK_ok σ.next τ σ v L h (length_le_next hwf h.nodup h.alloc)
     ⟨σ', h1, h2, h3, h4⟩
 
+theorem dropCellsWith_rt (h1 : ∀ σ w σ', drop1 σ w = some σ' → Store.rt σ' = σ.rt) :
+    ∀ (σ : Store) (cs : List Nat) σ', dropCellsWith drop1 σ cs = some σ' → σ'.rt = σ.rt
+  | σ, [], σ', h => by simp [dropCellsWith] at h; subst h; rfl
+  | σ, c :: cs, σ', h => by
+    simp only [dropCellsWith] at h
+    split at h
+    · split at h
+      · rename_i σ1 hd
+        exact (dropCellsWith_rt h1 _ cs σ' h).trans (by simp only [Store.set_rt]; exact h1 _ _ _ hd)
+      · cases h
+    · cases h
+
 /-- Dropping a value changes no region tag. -/
 theorem dropK_rt : ∀ (k : Nat) (σ : Store) (τ : Ty) (v : Val) (σ' : Store), dropK k σ τ v = some σ' → σ'.rt = σ.rt := by
   intro k
   induction k with
   | zero =>
     intro σ τ v σ' h
-    cases τ <;> cases v <;> simp [dropK] at h
-    all_goals (subst h; rfl)
+    cases τ <;> cases v <;> (try simp [dropK] at h)
+    all_goals try (subst h; rfl)
+    rename_i cs
+    cases cs <;> simp [dropK] at h
+    subst h; rfl
   | succ k ih =>
     intro σ τ v σ' h
     cases τ <;> cases v <;> simp only [dropK, reduceCtorEq] at h
     all_goals try (cases h; rfl)
+    all_goals try (exact dropCellsWith_rt (fun σ w σ' h' => ih σ _ w σ' h') _ _ _ h)
     all_goals
       revert h
       repeat' split

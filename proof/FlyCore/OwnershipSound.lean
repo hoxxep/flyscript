@@ -281,6 +281,7 @@ theorem post_after {r : Res × Store} (hm : Moves σ E σ1 E₁ []) (hwf : WF σ
       (hm.trans hm' disj_nil_left hwf).relabel fun x => by simp⟩
   | stuck => exact h
   | timeout => trivial
+  | panic => trivial
 
 /-- What an expression may give, said of a context it leaves, holds of one that is weaker. -/
 theorem post_weaken {r : Res × Store} (h : Post F ι O σ E S Γ₁ env τ rw hs r) (w : Weaker Γ' Γ₁) :
@@ -294,6 +295,7 @@ theorem post_weaken {r : Res × Store} (h : Post F ι O σ E S Γ₁ env τ rw h
     exact ⟨op, X, hos, A, Lv, hc, hop, hcov, haim, hK.weaken w, hls, hvs, hn, hd, hdS, hm⟩
   | stuck => exact h
   | timeout => trivial
+  | panic => trivial
 
 /-- A frame of no cells of its own joins a continuation taken through its construct. -/
 theorem post_frame (h : Post F ι O σ E S Γ₁ env₁ τ₁ r hs (.susp j ef vs ls K, σ'))
@@ -330,6 +332,7 @@ theorem leave_ok {r : Res × Store} (hτx : τx.complete = true) (hm : Moves σ 
     exact post_after hm hwf (post_frame h (.scopeK hx hk hτx))
   | stuck => exact h
   | timeout => simp [leave, Res.done, Post]
+  | panic => simp [leave, Res.done, Post]
 
 /-- Leaving a scope, said of where its code started. -/
 theorem leave_ok' {r : Res × Store} (hτx : τx.complete = true) (hwf : WF σ) (hx : x ∉ Γ₂.map Prod.fst) (hk : (Γ₂.map Prod.fst).Nodup)
@@ -352,6 +355,7 @@ theorem leave_ok' {r : Res × Store} (hτx : τx.complete = true) (hwf : WF σ) 
     exact post_frame h (.scopeK hx hk hτx)
   | stuck => exact h
   | timeout => simp [leave, Res.done, Post]
+  | panic => simp [leave, Res.done, Post]
 
 /-! ## The statements, by fuel -/
 
@@ -619,6 +623,7 @@ theorem ret_letK (hE : EvalOk F O n) (hx : lookup x Γ₁ = none) (hk : (Γ₁.m
     exact post_frame h (.letK hx hk hb)
   | stuck => simp [Post] at h
   | timeout => simp [ret, Post]
+  | panic => simp [ret, Post]
 
 /-- Unwinding past a handler named `c`: an unwinding aimed elsewhere is aimed below. -/
 theorem aimed_pop : AimedIn i (.abort l c :: hs) → i ≠ c → AimedIn i hs := by
@@ -687,6 +692,7 @@ theorem ret_catchK (hE : EvalOk F O n) (hx : lookup x Γb = none) (hk : (Γb.map
     exact post_frame_abort hp (.catchK hx hk hh hl) (fun _ => rfl) (fun _ h => by simp at h) hR.2
   | stuck => simp [Post] at hp
   | timeout => simp [ret, Post]
+  | panic => simp [ret, Post]
 
 /-- A loop's body ended: the loop goes round again. -/
 theorem ret_whileB (hE : EvalOk F O n) (hc : Typed F O Γ c .int Γ r) (hb : Typed F O Γ b .int Γ r)
@@ -704,6 +710,7 @@ theorem ret_whileB (hE : EvalOk F O n) (hc : Typed F O Γ c .int Γ r) (hb : Typ
   | susp j ef vs ls K => simp only [ret]; exact post_frame hp (.whileB hc hb)
   | stuck => simp [Post] at hp
   | timeout => simp [ret, Post]
+  | panic => simp [ret, Post]
 
 /-- A loop's condition ended: zero ends the loop; anything else runs the body, and the loop goes
 round again. -/
@@ -736,10 +743,12 @@ theorem ret_whileC (hE : EvalOk F O n) (hc : Typed F O Γ c .int Γ r) (hb : Typ
         | susp j ef vs ls K => exact post_after (by simpa using hm₁) hwf (post_frame h2 (.whileB hc hb))
         | stuck => simp [Post] at h2
         | timeout => simp [Post]
+        | panic => simp [Post]
   | abort j k => simp only [ret]; exact hp
   | susp j ef vs ls K => simp only [ret]; exact post_frame hp (.whileC hc hb)
   | stuck => simp [Post] at hp
   | timeout => simp [ret, Post]
+  | panic => simp [ret, Post]
 
 /-! ## Frames that only pass on what their code gives -/
 
@@ -804,6 +813,7 @@ theorem post_pass (hf : FrameOk F O ι ι σf f ⟨Γin, envin, τ, Sin, rin⟩ 
     · exact (hm.widen hXa hd).relabel fun x => by simp only [List.mem_append, List.append_assoc]
   | stuck => simp [Post] at hp
   | timeout => simp [passK, Post]
+  | panic => simp [passK, Post]
 
 /-! ## A closure over a borrow -/
 
@@ -902,6 +912,7 @@ theorem ret_cloK (hSin : ∀ l ∈ Sin, l ∈ Xf ∨ l ∈ S) (hSS : ∀ l ∈ S
     · exact (hm.widen hXa hd).relabel fun x => by simp only [List.mem_append, List.append_assoc]
   | stuck => simp [Post] at hp
   | timeout => simp [ret, Post]
+  | panic => simp [ret, Post]
 
 /-! ## A borrow held for a while -/
 
@@ -982,6 +993,7 @@ theorem ret_deferV (hv : VT F ι σf τ v Lv) (hag : Agree σf σ0 (Lv ++ S)) (h
     · exact (hm.widen hLa hd).relabel fun x => by simp only [List.mem_append, List.append_assoc]
   | stuck => simp [Post] at hp
   | timeout => simp [cleanV, Post]
+  | panic => simp [cleanV, Post]
 
 /-- A cleanup ended as the body unwound to `j`: the unwinding goes on, unless the cleanup unwound
 itself; a continuation taken in the cleanup keeps the unwinding. -/
@@ -1007,6 +1019,7 @@ theorem ret_deferA (haim : AimedIn j hs) (hp : Post F ι O σ0 Ein S Γb env .in
     · exact haim' a ha
   | stuck => simp [Post] at hp
   | timeout => simp [cleanA, Post]
+  | panic => simp [cleanA, Post]
 
 /-- `{ defer { d }; □ }`: the cleanup runs as the body ends, with a value or unwinding. -/
 theorem ret_deferK (hE : EvalOk F O n) (hd : Typed F O Γb d .int Γb r) (hR : Ready O hs r)
@@ -1027,6 +1040,7 @@ theorem ret_deferK (hE : EvalOk F O n) (hd : Typed F O Γb d .int Γb r) (hR : R
   | susp j ef vs ls K => simp only [ret]; exact post_frame hp (.deferK hd)
   | stuck => simp [Post] at hp
   | timeout => simp [ret, Post]
+  | panic => simp [ret, Post]
 
 /-- Code of type `τ` dropped as an arm unwound to `j`: once its unwinding reaches the barrier, the
 arm's goes on. -/
@@ -1062,6 +1076,7 @@ theorem ret_dropK (haim : AimedIn j hs) (hcov : Covers hs r) (hwf : WF σ0)
     exact post_frame_abort hp .dropK (fun _ => rfl) (fun a ha => by simp at ha; subst ha; exact haim) hcov
   | stuck => simp [Post] at hp
   | timeout => simp [ret, Post]
+  | panic => simp [ret, Post]
 
 /-- An arm ended without resuming, giving `v`, whose cells `Lv` the continuation cannot reach: the
 continuation unwound to its barrier, `v` again; an unwinding past the barrier drops `v` and goes on; a
@@ -1153,6 +1168,7 @@ theorem ret_dropKv (hv : VT F ι σf τ v Lv) (hcov : Covers hs r) (hag : Agree 
     · exact (hm.widen hLa hd).relabel fun x => by simp only [List.mem_append, List.append_assoc]
   | stuck => simp [Post] at hp
   | timeout => simp [ret, Post]
+  | panic => simp [ret, Post]
 
 /-! ## Calls -/
 
@@ -1286,6 +1302,7 @@ theorem ret_callK {d : Fn} {hos : List Hole} {cells : Env}
     · exact (hm.widen hXa hdX).relabel fun x => by simp only [List.mem_append, List.append_assoc]
   | stuck => simp [Post] at hp
   | timeout => simp [ret, Post]
+  | panic => simp [ret, Post]
 
 /-! ## Expressions -/
 
@@ -1444,15 +1461,27 @@ theorem post_relabel {r : Res × Store} (hwf : WF σ) (hE : ∀ l ∈ E, σ.mem 
     (h : Post F ι O σ E₁ S Γ' env τ rw hs r) : Post F ι O σ E S Γ' env τ rw hs r :=
   post_after ((Moves.refl hwf hE).relabel fun x => by simp [hEE]) hwf h
 
+/-- The tree at `a` reaches the tree at `l`: it is that tree and the cells `P`; and given a new tree
+at `l`, in a store that kept `P`, it is that tree and `P` again. -/
+structure Reach (F : List Fn) (ι : List Nat) (σ : Store) (a : Nat) (τr : Ty) (P : List Nat) (l : Nat) (τ : Ty) :
+    Prop where
+  split : ∀ {Lr}, LT F ι σ a τr Lr → ∃ Rt, LT F ι σ l τ Rt ∧ Lr.Perm (P ++ Rt)
+  join : P.Nodup → ∀ σ' R', Agree σ σ' P → LT F ι σ' l τ R' → Disj P R' →
+    ∃ L', LT F ι σ' a τr L' ∧ L'.Perm (P ++ R')
+
+theorem Path.reach (hp : Path F ι σ a τr P l τ) : Reach F ι σ a τr P l τ :=
+  ⟨fun h => path_split hp h, fun hn _ _ hag h hd =>
+    let ⟨L', h1, h2, _⟩ := path_join hp hn hag h hd; ⟨L', h1, h2⟩⟩
+
 /-- A `readonly` borrow held for the scope of `body`: what the place is rooted at is only read
 while it lives. -/
 theorem lend_ro_all (hE : EvalOk F O n) (hx : lookup x Γ = none) (ha : lookup y env = some a)
-    (hsl : lookup y Γ = some s) (hLr : LT F ι σ a τr Lr) (hpath : Path F ι σ a τr P l τ) (hso : SlotOk F ι σ s a Lr)
+    (hsl : lookup y Γ = some s) (hLr : LT F ι σ a τr Lr) (hpath : Reach F ι σ a τr P l τ) (hso : SlotOk F ι σ s a Lr)
     (hys : y ∈ ys) (hlive : ∀ y' ∈ ys, ∀ τ', lookup y' Γ ≠ some (.own τ' false))
     (hb : Typed F O ((x, .ref .ro τ) :: freeze Γ ys) body τb ((x, .ref .ro τ) :: Γb) r)
     (hI : Inv F ι σ Γ env E S) (hwf : WF σ) (hR : Ready O hs r) :
     Post F ι O σ E S (thaw Γ ys Γb) env τb r hs (ret F O n hs .lendK (eval F O n hs σ ((x, l) :: env) body)) := by
-  obtain ⟨Rt, hRt, hLrPR⟩ := path_split hpath hLr
+  obtain ⟨Rt, hRt, hLrPR⟩ := hpath.split hLr
   have hxk : x ∉ (freeze Γ ys).map Prod.fst := by rw [freeze_keys]; exact lookup_none_keys hx
   have hwb := typed_weaker hb (List.nodup_cons.mpr ⟨hxk, by rw [freeze_keys]; exact hI.keys⟩)
   cases hwb with
@@ -1511,7 +1540,7 @@ theorem lend_ro_all (hE : EvalOk F O n) (hx : lookup x Γ = none) (ha : lookup y
     (hE _ _ _ _ _ _ _ _ _ _ _ hb hIb hwf hR)
 
 theorem lend_ro_core (hE : EvalOk F O n) (hx : lookup x Γ = none) (ha : lookup y env = some a)
-    (hsl : lookup y Γ = some s) (hLr : LT F ι σ a τr Lr) (hpath : Path F ι σ a τr P l τ) (hso : SlotOk F ι σ s a Lr)
+    (hsl : lookup y Γ = some s) (hLr : LT F ι σ a τr Lr) (hpath : Reach F ι σ a τr P l τ) (hso : SlotOk F ι σ s a Lr)
     (hlive : ∀ τ', lookup y Γ ≠ some (.own τ' false))
     (hb : Typed F O ((x, .ref .ro τ) :: lendCtx .ro Γ y) body τb ((x, .ref .ro τ) :: Γb) r)
     (hI : Inv F ι σ Γ env E S) (hwf : WF σ) (hR : Ready O hs r) :
@@ -1523,14 +1552,14 @@ theorem lend_ro_core (hE : EvalOk F O n) (hx : lookup x Γ = none) (ha : lookup 
 `body` while it runs: the borrow owns the tree, the others keep theirs out of reach, and once it
 ends, each owns again what it had, `y` its path to `l` and what the borrow left there. -/
 theorem lend_mut_all (hE : EvalOk F O n) (hx : lookup x Γ = none) (ha : lookup y env = some a)
-    (hsl : lookup y Γ = some s) (hLr : LT F ι σ a τr Lr) (hpath : Path F ι σ a τr P l τ)
+    (hsl : lookup y Γ = some s) (hLr : LT F ι σ a τr Lr) (hpath : Reach F ι σ a τr P l τ)
     (hso : SlotOk F ι σ s a Lr)
     (hslot : ∀ σ' L', LT F ι σ' a τr L' → SlotOk F ι σ' s a L') (hτ : τ.isFn = false)
     (hys : y ∈ ys) (hn : ys.Nodup) (htr : Trees F ι σ Γ env ys H)
     (hb : Typed F O ((x, .ref .mut τ) :: hideAll Γ ys) body τb ((x, .ref .mut τ) :: Γb) r)
     (hI : Inv F ι σ Γ env E S) (hwf : WF σ) (hR : Ready O hs r) :
     Post F ι O σ E S (unhideAll Γ ys Γb) env τb r hs (ret F O n hs .lendK (eval F O n hs σ ((x, l) :: env) body)) := by
-  obtain ⟨Rt, hRt, hLrp⟩ := path_split hpath hLr
+  obtain ⟨Rt, hRt, hLrp⟩ := hpath.split hLr
   have hxk : x ∉ (hideAll Γ ys).map Prod.fst := by rw [hideAll_keys]; exact lookup_none_keys hx
   have hwb := typed_weaker hb (List.nodup_cons.mpr ⟨hxk, by rw [hideAll_keys]; exact hI.keys⟩)
   cases hwb with
@@ -1572,7 +1601,7 @@ theorem lend_mut_all (hE : EvalOk F O n) (hx : lookup x Γ = none) (ha : lookup 
     have hagS : Agree σ σ1 S := (hag.mono fun z hz => List.mem_append.mpr (.inr hz))
     have hPnew : ∀ z ∈ P, z ∉ R' ++ Et := fun z hz h => hdX z (by simp [hz]) h
     have hPn : P.Nodup := (nodup_append_disj.mp hXn).1
-    obtain ⟨L', hLT', hL'p, -⟩ := path_join hpath hPn hagP hR' (fun z hz h => hPnew z hz (by simp [h]))
+    obtain ⟨L', hLT', hL'p⟩ := hpath.join hPn σ1 _ hagP hR' (fun z hz h => hPnew z hz (by simp [h]))
     obtain ⟨H', ht', hH'⟩ := hsplit σ1 _ hagH (hslot σ1 _ hLT')
     obtain ⟨E', hf', hp'⟩ := hrebuild σ1 Γb Et H' hft hwb hagS ht'
     have hp'' : E'.Perm ((R' ++ Et) ++ (P ++ Hr)) := hp'.trans (by
@@ -1596,7 +1625,7 @@ theorem lend_mut_all (hE : EvalOk F O n) (hx : lookup x Γ = none) (ha : lookup 
     (hE _ _ _ _ _ _ _ _ _ _ _ hb hIb hwf hR)
 
 theorem lend_mut_core (hE : EvalOk F O n) (hx : lookup x Γ = none) (ha : lookup y env = some a)
-    (hsl : lookup y Γ = some s) (hLr : LT F ι σ a τr Lr) (hpath : Path F ι σ a τr P l τ) (hso : SlotOk F ι σ s a Lr)
+    (hsl : lookup y Γ = some s) (hLr : LT F ι σ a τr Lr) (hpath : Reach F ι σ a τr P l τ) (hso : SlotOk F ι σ s a Lr)
     (hsubE : ∀ l ∈ Lr, l ∈ E) (hsx : s.excl = true) (hslot : ∀ σ' L', LT F ι σ' a τr L' → SlotOk F ι σ' s a L')
     (hsh : s.shell = false) (hτ : τ.isFn = false)
     (hb : Typed F O ((x, .ref .mut τ) :: lendCtx .mut Γ y) body τb ((x, .ref .mut τ) :: Γb) r)
@@ -1612,7 +1641,7 @@ theorem lend_ro_ok (hE : EvalOk F O n) (hx : lookup x Γ = none) (hp : PlaceTy �
   simp only [eval]
   obtain ⟨a, τr, Lr, P, l, s, ha, hLr, hpath, hres, -, -, hsl, hso, -, -⟩ := place_ok hp hI.foot
   simp only [hres]
-  exact lend_ro_core hE hx ha hsl hLr hpath hso hp.root_live hb hI hwf hR
+  exact lend_ro_core hE hx ha hsl hLr hpath.reach hso hp.root_live hb hI hwf hR
 
 /-- A place holding no closure, rooted at a variable no field of which is lent, is rooted at a
 variable that may change all it holds: a closure borrowed `mut` lends only itself, a closure. -/
@@ -1648,7 +1677,7 @@ theorem lend_mut_ok (hE : EvalOk F O n) (hx : lookup x Γ = none) (hp : PlaceTy 
   obtain ⟨a, τr, Lr, P, l, s, ha, hLr, hpath, hres, -, hsubE, hsl, hso, hexw, hslot, hshp, hty⟩ := place_ok hp hI.foot
   simp only [hres]
   have hsh : s.shell = false := root_whole hsl hun hshp hty hτ
-  exact lend_mut_core hE hx ha hsl hLr hpath hso (hsubE rfl hsh) (hexw rfl) hslot hsh hτ hb hI hwf hR
+  exact lend_mut_core hE hx ha hsl hLr hpath.reach hso (hsubE rfl hsh) (hexw rfl) hslot hsh hτ hb hI hwf hR
 
 /-- A closure over a `readonly` borrow, held for the scope of `body`: its cell is the frame's, and
 what the borrowed place is rooted at is only read while it lives; once it ends, the cell is freed. -/
@@ -2004,20 +2033,20 @@ theorem caseRef_ok (hE : EvalOk F O n) (hx : lookup x Γ = none) (hp : PlaceTy �
     cases t with
     | true =>
       simp only [↓reduceIte]
-      exact post_weaken (lend_ro_core hE hx ha hsl hLr hpath' hso hp.root_live h₁ hI hwf hR) (thaw_mono w₁)
+      exact post_weaken (lend_ro_core hE hx ha hsl hLr hpath'.reach hso hp.root_live h₁ hI hwf hR) (thaw_mono w₁)
     | false =>
       simp only [Bool.false_eq_true, ↓reduceIte]
-      exact post_weaken (lend_ro_core hE hx ha hsl hLr hpath' hso hp.root_live h₂ hI hwf hR) (thaw_mono w₂)
+      exact post_weaken (lend_ro_core hE hx ha hsl hLr hpath'.reach hso hp.root_live h₂ hI hwf hR) (thaw_mono w₂)
   | «mut» =>
     obtain rfl := hm rfl
     cases t with
     | true =>
       simp only [↓reduceIte]
-      exact post_weaken (lend_mut_core hE hx ha hsl hLr hpath' hso (hsubE rfl hsh) (hexw rfl) hslot hsh
+      exact post_weaken (lend_mut_core hE hx ha hsl hLr hpath'.reach hso (hsubE rfl hsh) (hexw rfl) hslot hsh
         (hmf rfl).1 h₁ hI hwf hR) (thaw_mono w₁)
     | false =>
       simp only [Bool.false_eq_true, ↓reduceIte]
-      exact post_weaken (lend_mut_core hE hx ha hsl hLr hpath' hso (hsubE rfl hsh) (hexw rfl) hslot hsh
+      exact post_weaken (lend_mut_core hE hx ha hsl hLr hpath'.reach hso (hsubE rfl hsh) (hexw rfl) hslot hsh
         (hmf rfl).2 h₂ hI hwf hR) (thaw_mono w₂)
 
 theorem lend_ok {m : Mode} (hE : EvalOk F O n) (hx : lookup x Γ = none) (hp : PlaceTy Γ p τ w y)
@@ -2468,7 +2497,7 @@ theorem ret_callLendK {d : Fn} {hos : List Hole} {cs : List (Nat × Place)} {zs 
         simp only [lendCtxs] at hb
         obtain ⟨s, a, τr, P, L', hs, ha, -, hpathH, hLT, hso, -, -⟩ :=
           hole_after hI₁ hholes hpw hps hnew4 hMn hag4 hXM hSM hqh
-        exact lend_ro_all hE hx ha hs hLT (hpathH.trans hpath4) hso hzin hlive hb hI₄ hm.wf hR
+        exact lend_ro_all hE hx ha hs hLT (hpathH.trans hpath4).reach hso hzin hlive hb hI₄ hm.wf hR
       | «mut» =>
         simp only [lendCtxs] at hb
         obtain ⟨s, a, τr, hs, ha, hex, hsh, ⟨P, hpathH⟩, L', hLT, hso, hslot⟩ := hafter q hq _ hc hhi (hmh rfl).1 rfl
@@ -2483,7 +2512,7 @@ theorem ret_callLendK {d : Fn} {hos : List Hole} {cs : List (Nat × Place)} {zs 
             hafter q' hq' c' hc' hhi' (hmh' rfl).1 rfl
           subst hz
           exact ⟨s', a', _, ⟨hs', ha', hso'⟩, hex', hsh'⟩
-        exact lend_mut_all hE hx ha hs hLT (hpathH.trans hpath4) hso hslot (hzm rfl).2 hzin (hzm rfl).1 htr
+        exact lend_mut_all hE hx ha hs hLT (hpathH.trans hpath4).reach hso hslot (hzm rfl).2 hzin (hzm rfl).1 htr
           hb hI₄ hm.wf hR
     generalize eval F O n hs σ4 ((x, l) :: env) body = res at hcore ⊢
     rcases res with ⟨_ | _ | _ | _ | _, σq⟩ <;> simpa [ret] using hcore
@@ -2513,6 +2542,7 @@ theorem ret_callLendK {d : Fn} {hos : List Hole} {cs : List (Nat × Place)} {zs 
     · exact (hm.widen hXa hdX).relabel fun x => by simp only [List.mem_append, List.append_assoc]
   | stuck => simp [Post] at hp
   | timeout => simp [ret, Post]
+  | panic => simp [ret, Post]
 
 /-! ## Arms -/
 
@@ -3072,6 +3102,7 @@ theorem ret_armK {cells : Env} (hKo : ∀ m, n = m + 1 → EvalKOk F O m ∧ Ret
     · exact (hm.widen hXa hd).relabel fun x => by simp only [List.mem_append, List.append_assoc]
   | stuck => simp [Post] at hp
   | timeout => simp [ret, Post]
+  | panic => simp [ret, Post]
 
 theorem ret_armK_eq : ret F O n hs (.armK τ cells K post) res =
     armEnd τ cells K post
@@ -3165,6 +3196,7 @@ theorem ret_capK (hE : EvalOk F O n) (hKo : ∀ m, n = m + 1 → EvalKOk F O m �
   | abort j k => exact pass fun _ _ _ _ _ h => by cases h
   | stuck => exact pass fun _ _ _ _ _ h => by cases h
   | timeout => exact pass fun _ _ _ _ _ h => by cases h
+  | panic => exact pass fun _ _ _ _ _ h => by cases h
   | susp j ef vs ls K =>
   by_cases hc : j ≠ hid ∨ ef ≠ e
   · exact pass fun _ _ _ _ _ h => by cases h; exact hc
@@ -3777,5 +3809,6 @@ theorem ret_postR (hE : EvalOk F O n) (hP : PostOk F O Γ env τ r (some (C, τ,
     · exact (hm.widen hLa hd).relabel fun x => by simp only [List.mem_append, List.append_assoc]
   | stuck => simp [Post] at hp
   | timeout => simp [ret, Post]
+  | panic => simp [ret, Post]
 
 end FlyCore.Ownership

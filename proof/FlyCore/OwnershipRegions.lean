@@ -400,6 +400,7 @@ theorem ret_regionK (hR : Ready O hs r) (hwf : WF σ0) (hag : Agree σf σ0 S) (
     exact ⟨op, X, hos, A, Lw, hc, hop, hR.2, haim, hK', hls, hvs.rfree_iota op.owns_rfree, hn, hdw, hdS, hm⟩
   | stuck => simp [Post] at hp
   | timeout => simp [ret, Post]
+  | panic => simp [ret, Post]
 
 /-! ## Entering a region -/
 

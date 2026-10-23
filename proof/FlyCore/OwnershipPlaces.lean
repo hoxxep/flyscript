@@ -412,6 +412,9 @@ theorem typed_keys : Typed F O Γ e τ Γ' r → Γ'.map Prod.fst = Γ.map Prod.
     exact this.2.trans (typed_keys ha)
   | .write ha _ => atom_keys ha
   | .assign ha _ _ => atom_keys ha
+  | .vnew _ => rfl
+  | .vlen _ => rfl
+  | .vpush ha _ => atom_keys ha
   | .call _ _ _ _ hargs _ _ => atoms_keys hargs
   | .lam _ _ _ _ _ ha _ => atom_keys ha
   | .lendClo _ _ _ _ _ _ _ _ hb => by
@@ -437,6 +440,10 @@ theorem typed_keys : Typed F O Γ e τ Γ' r → Γ'.map Prod.fst = Γ.map Prod.
   | .while_ _ _ => rfl
   | .defer hb _ => typed_keys hb
   | .lend _ _ _ _ _ hb => by
+    have := typed_keys hb
+    simp only [List.map_cons, List.cons.injEq] at this
+    exact thaw_keys (this.2.trans lendCtx_keys)
+  | .lendIdx _ _ _ _ _ _ hb => by
     have := typed_keys hb
     simp only [List.map_cons, List.cons.injEq] at this
     exact thaw_keys (this.2.trans lendCtx_keys)

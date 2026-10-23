@@ -1,4 +1,4 @@
-import FlyCore.OwnershipRegions
+import FlyCore.OwnershipVec
 
 /-!
 # Ownership: soundness
@@ -553,6 +553,7 @@ theorem eval_ok_succ (hF : FnsOk F O) (hE : EvalOk F O n) (hR : RetOk F O n) :
             have := hMin x
             simp only [List.mem_append, mem_keep] at *; grind
     | lend hx hp hm hmf hun hb => exact lend_ok hE hx hp hm hmf hun hb hI hwf hRdy
+    | lendIdx hx hp hz hm hmf hun hb => exact lendIdx_ok hE hx hp hz hm hmf hun hb hI hwf hRdy
     | lendField hx hy hty hsl _ hmf hb => exact lendField_ok hE hx hy hty hsl hmf hb hI hwf hRdy
     | handle hop hcomp hos hrs hcaps hexcl hnd harm hbody =>
       exact handle_ok hE hR hop hcomp hos hrs hcaps hexcl hnd harm hbody hI hwf hRdy
@@ -563,6 +564,9 @@ theorem eval_ok_succ (hF : FnsOk F O) (hE : EvalOk F O n) (hR : RetOk F O n) :
     | ralloc hRl hs hd ha => exact ralloc_ok hRl hs hd ha hI hwf
     | rget hp hRl hs => exact rget_ok hp hRl hs hI hwf
     | rset hp hRl hs hd ha => exact rset_ok hp hRl hs hd ha hI hwf
+    | vnew hc => exact vnew_ok hc hI hwf
+    | vlen hp => exact vlen_ok hp hI hwf
+    | vpush ha hp => exact vpush_ok ha hp hI hwf
     | par hop howns hrefs hret hfa hfb hretpa hcapa hretpb hcapb hea heb hrowa hrowb hca hcb hargs hlends =>
       exact par_ok hF hR (evalK_ok hR) hop howns hrefs hret hfa hfb hretpa hcapa hretpb hcapb hea heb hrowa hrowb
         hca hcb hargs hlends hI hwf hRdy
@@ -644,6 +648,7 @@ theorem program_ok_sched (hF : FnsOk F O) (ht : Typed F O [] e τ Γ' [.fail]) (
     | (.stuck, _) => False
     | (.susp _ _ _ _ _, _) => False
     | (.timeout, _) => True
+    | (.panic, _) => True
     | (.val v, σ') => ∃ L, VT F [] σ' τ v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
     | (.abort _ _, σ') => ∀ l, σ'.mem l = none := by
   have hR : Ready O [.abort .fail 0] [.fail] :=
@@ -658,6 +663,7 @@ theorem program_ok_sched (hF : FnsOk F O) (ht : Typed F O [] e τ Γ' [.fail]) (
   cases r with
   | stuck => exact h
   | timeout => trivial
+  | panic => trivial
   | susp j ef vs ls K =>
     obtain ⟨-, -, -, -, -, hc, -⟩ := h
     simp at hc
@@ -679,6 +685,7 @@ theorem program_ok (hF : FnsOk F O) (ht : Typed F O [] e τ Γ' [.fail]) (n : Na
     | (.stuck, _) => False
     | (.susp _ _ _ _ _, _) => False
     | (.timeout, _) => True
+    | (.panic, _) => True
     | (.val v, σ') => ∃ L, VT F [] σ' τ v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
     | (.abort _ _, σ') => ∀ l, σ'.mem l = none :=
   program_ok_sched hF ht (fun _ => true) n
