@@ -2,6 +2,7 @@
 // server answers `Todos`, for its pages as it renders them and for their calls.
 
 import { Mutex } from "std/sync";
+import { Http } from "web/request";
 import { Todo, TodoErr, Todos } from "./api";
 
 type Store = { todos: Vec<Todo>; next: u32 };
@@ -62,21 +63,36 @@ function toggleIn(s: mut Store, id: u32): Vec<Todo> {
   s.todos.clone()
 }
 
-// Runs `body` with `Todos` answered from the store.
-export function provide<T, row E>(db: readonly State, body: once () => T uses Todos, Io, ...E): T uses Io, ...E {
+// Runs `body` with `Todos` answered from the store. A change to the list revalidates the page that
+// counts it, which the server keeps until then.
+export function provide<T, row E>(db: readonly State, body: once () => T uses Todos, Io, Http, ...E): T uses Io, Http, ...E {
   handle { body() } with Todos {
     list() resumes k => k(db.lock((s) => s.todos.clone())),
     get(id) resumes k => k(db.lock((s) => find(s, id))),
     add(title) resumes k => {
       const t = title.clone();
-      k(db.lock((s) => addTo(mut s, t)))
+      const r = db.lock((s) => addTo(mut s, t));
+      Http.revalidate("/progress");
+      k(r)
     }
     rename(id, title) resumes k => {
       const t = title.clone();
       k(db.lock((s) => renameIn(mut s, id, t)))
     }
-    toggle(id) resumes k => k(db.lock((s) => toggleIn(mut s, id))),
-    remove(id) resumes k => k(db.lock((s) => { s.todos.retain((t) => t.id != id); s.todos.clone() })),
-    clearDone() resumes k => k(db.lock((s) => { s.todos.retain((t) => !t.done); s.todos.clone() })),
+    toggle(id) resumes k => {
+      const r = db.lock((s) => toggleIn(mut s, id));
+      Http.revalidate("/progress");
+      k(r)
+    }
+    remove(id) resumes k => {
+      const r = db.lock((s) => { s.todos.retain((t) => t.id != id); s.todos.clone() });
+      Http.revalidate("/progress");
+      k(r)
+    }
+    clearDone() resumes k => {
+      const r = db.lock((s) => { s.todos.retain((t) => !t.done); s.todos.clone() });
+      Http.revalidate("/progress");
+      k(r)
+    }
   }
 }

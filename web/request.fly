@@ -14,4 +14,7 @@ export effect Http {
   // Answers instead by sending the browser to `url`: from a page's `load`, the page at `url` is
   // shown in its place, by the server or, following a link, by the page's program.
   redirect(url: String): never;
+  // Drops what the server keeps of the page at `path` for a page that exports `revalidate`, at
+  // every query: it is rendered again the next time it is asked for.
+  revalidate(path: str): void;
 }

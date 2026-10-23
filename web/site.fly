@@ -3,7 +3,9 @@
 // the site's files, and the address of a build, which a page in development watches to reload.
 
 import { File } from "std/io";
-import { stringify } from "std/json";
+import { Mutex } from "std/sync";
+import { HashMap } from "std/collections";
+import { stringify, ToJson } from "std/json";
 import { Request, Response, Conn } from "./http";
 import { Ui, Event, html, escape, messages } from "./ui";
 import { Page } from "./dom";
@@ -29,6 +31,14 @@ export function wantsData(req: readonly Request): bool {
 // A page as a browser gets it: the view rendered, what the page's program starts from, and the
 // program, which takes the page over (web/dom.fly).
 export function document<M>(shell: readonly Shell, route: str, url: str, title: str, description: str, state: str, view: () => void uses Ui<M>): String {
+  let out = opening(shell, title, description, view);
+  out.push("</div>");
+  closing(mut out, shell, route, url, title, description, state);
+  out
+}
+
+// A page's document up to the end of what its view shows, which is left open.
+function opening<M>(shell: readonly Shell, title: str, description: str, view: () => void uses Ui<M>): String {
   let out = "<!doctype html>\n<html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>".toString();
   escape(title, mut out);
   out.push("</title>");
@@ -48,10 +58,16 @@ export function document<M>(shell: readonly Shell, route: str, url: str, title: 
   out.push(shell.head.asStr());
   out.push("<link rel=\"modulepreload\" href=\"/_fly/flynext.js\"></head><body><div id=\"app\">");
   html(mut out, view);
+  out
+}
+
+// The rest of a page's document, after what its view shows: what the program starts from, and the
+// program.
+function closing(out: mut String, shell: readonly Shell, route: str, url: str, title: str, description: str, state: str): void {
   // What the program starts from is text a script holds: `</` in it would end the script, and is
   // `<\/` in JSON, which reads it as the same.
   // The form a button posts its message with, without the page's program (web/ui.fly's `posting`).
-  out.push("</div><form id=\"_fly\" method=\"post\" hidden></form><script type=\"text/plain\" id=\"fly-page\">");
+  out.push("<form id=\"_fly\" method=\"post\" hidden></form><script type=\"text/plain\" id=\"fly-page\">");
   out.push(arrival(route, url, title, description, state).asStr().replaceAll("</", "<\\/").asStr());
   out.push("</script><script type=\"module\">import { start } from \"/_fly/flynext.js\"; start(\"/_fly/app.wasm\");</script>");
   if (shell.build.len() > 0) {
@@ -61,7 +77,40 @@ export function document<M>(shell: readonly Shell, route: str, url: str, title: 
     out.push("; for (;;) { await new Promise((r) => setTimeout(r, 400)); try { const now = await (await fetch(\"/_fly/build\")).text(); if (now !== was) { location.reload(); return; } } catch (_) {} } })();</script>");
   }
   out.push("</body></html>\n");
-  out
+}
+
+// A page whose model is made in two steps, streamed: what `first` shows — the model as `load`
+// left it, its view showing what is still to come as it likes — at once, to a browser; then, once
+// `rest` has made the rest of the model, what `view` shows of it, which takes the first's place
+// before the program takes the page over, as if the page had been rendered whole. To a page's
+// program, the page's data once the model is whole. If `rest` sends the browser elsewhere, it goes.
+export function stream<Model extends ToJson, M>(conn: mut Conn, req: readonly Request, shell: readonly Shell, route: str, url: str, title: str, description: str, cookies: readonly Vec<String>, m: Model, view: (m: readonly Model) => void uses Ui<M>, rest: once (m: Model) => Result<Model, String> uses Io, Fail<IoErr>): void uses Io, Fail<IoErr> {
+  if (wantsData(req)) {
+    return match (rest(m)) {
+      #Ok(model) => respond(mut conn, req, shell, 200, route, url, title, description, stringify(model).asStr(), cookies, () => view(model)),
+      #Err(to) => redirect(mut conn, to.asStr(), cookies),
+    };
+  }
+  let r = Response.new(200, "text/html; charset=utf-8", String.new());
+  r.header("Cache-Control", "no-store");
+  setCookies(mut r, cookies);
+  conn.start(r);
+  let first = opening(shell, title, description, () => view(m));
+  first.push("</div>");
+  conn.send(first.asStr());
+  const model = match (rest(m)) {
+    #Ok(model) => model,
+    #Err(to) => {
+      conn.send(`<script>location.replace(${stringify(to.asStr()).replaceAll("</", "<\\/")})</script>`.asStr());
+      return conn.end();
+    }
+  };
+  let out = "<template id=\"fly-later\">".toString();
+  html(mut out, () => view(model));
+  out.push("</template><script>document.getElementById(\"app\").replaceChildren(document.getElementById(\"fly-later\").content);document.getElementById(\"fly-later\").remove();</script>");
+  closing(mut out, shell, route, url, title, description, stringify(model).asStr());
+  conn.send(out.asStr());
+  conn.end();
 }
 
 // Answers for a page: its data, to a page's program, or the page, to a browser; with the cookies
@@ -97,6 +146,55 @@ export function answerFixed(conn: mut Conn, req: readonly Request, f: readonly F
   r.header("Cache-Control", "no-store");
   setCookies(mut r, cookies);
   conn.write(r);
+}
+
+// ---- pages kept for a while ----
+
+// A page that exports `revalidate` is the same for every request for that many seconds after it is
+// rendered, unless its `load` read the request — its headers or cookies — or set a cookie: then it
+// is the request's own. What is kept is kept by address, its query too.
+export type Kept = { page: Fixed; at: Instant; path: String };
+export type Cache = Mutex<HashMap<String, Kept>>;
+
+export function newCache(): Cache { Mutex.new(HashMap.new()) }
+
+// The page kept for `url`, if it was rendered less than `secs` seconds before `now`.
+export function kept(cache: readonly Cache, url: str, secs: u64, now: Instant): Option<Fixed> uses Io {
+  const key = url.toString();
+  cache.lock((c) => match (c.get(key)) {
+    #Some(k) => if (now.since(k.at) < Duration.secs(secs)) { #Some(k.page.clone()) } else { #None },
+    #None => #None,
+  })
+}
+
+export function keep(cache: readonly Cache, url: str, path: str, page: Fixed, now: Instant): void uses Io {
+  const key = url.toString();
+  const k: Kept = { page, at: now, path: path.toString() };
+  cache.lock((c) => { c.insert(key, k); });
+}
+
+// Answers with a page kept, or rendered to be: `X-Fly-Cache` says which, as a shared cache may keep
+// it for `secs` seconds, unless the answer sets a cookie.
+export function answerKept(conn: mut Conn, req: readonly Request, f: readonly Fixed, cookies: readonly Vec<String>, secs: u64, hit: bool): void uses Io, Fail<IoErr> {
+  let r = if (wantsData(req)) {
+    Response.new(200, "text/plain; charset=utf-8", f.data.clone())
+  } else {
+    Response.new(200, "text/html; charset=utf-8", f.doc.clone())
+  };
+  if (cookies.len() > 0) { r.header("Cache-Control", "no-store"); } else { r.header("Cache-Control", `public, max-age=0, s-maxage=${secs}`.asStr()); }
+  r.header("X-Fly-Cache", if (hit) { "HIT" } else { "MISS" });
+  setCookies(mut r, cookies);
+  conn.write(r);
+}
+
+// Drops every page kept for `path`, at any query.
+export function drop(cache: readonly Cache, path: str): void uses Io {
+  const p = path.toString();
+  cache.lock((c) => {
+    let gone: Vec<String> = Vec.new();
+    for (const [url, k] of c.entries()) { if (k.path == p) { gone.push(url.clone()); } }
+    for (const url of gone) { c.remove(url); }
+  });
 }
 
 // ---- the request ----
@@ -139,16 +237,27 @@ export function setCookies(r: mut Response, cookies: readonly Vec<String>): void
 }
 
 // Runs `body` with `Http` answered from `req`: what it gives, or, if it sent the browser
-// elsewhere, where; the cookies it sets added to `set`.
-export function withHttp<T, row E>(req: readonly Request, set: mut Vec<String>, body: once () => T uses Http, ...E): Result<T, String> uses ...E {
+// elsewhere, where; the cookies it sets added to `set`, and whether it read the request — a header
+// or a cookie — in `read`. The pages it revalidates are dropped from `cache`.
+export function withHttp<T, row E>(req: readonly Request, set: mut Vec<String>, read: mut bool, cache: readonly Cache, body: once () => T uses Http, ...E): Result<T, String> uses Io, ...E {
   handle { #Ok(body()) } with Http {
-    header(name) resumes k => k(match (req.header(name)) { #Some(v) => #Some(v.toString()), #None => #None }),
-    cookie(name) resumes k => k(cookieOf(req, name)),
+    header(name) resumes k => {
+      read = true;
+      k(match (req.header(name)) { #Some(v) => #Some(v.toString()), #None => #None })
+    }
+    cookie(name) resumes k => {
+      read = true;
+      k(cookieOf(req, name))
+    }
     setCookie(name, value, maxAge) resumes k => {
       set.push(cookie(name, value, maxAge));
       k()
     }
     redirect(url) => #Err(url),
+    revalidate(path) resumes k => {
+      drop(cache, path);
+      k()
+    }
   }
 }
 

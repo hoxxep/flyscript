@@ -1,6 +1,6 @@
 # FlyNext: a web framework, in Flyscript
 
-What Next.js and React are for a JavaScript site, in one Flyscript app: pages rendered on the server and taken over in the browser, routes from files, layouts, data loaded on the server with the request's headers and cookies, titles and descriptions for search engines and link previews, middleware, redirects, endpoints, server functions called from the page as if they were local, links followed without loading a page, timers, and forms that work before the page's program has loaded, or without it. The server is native code; the browser runs one WebAssembly program for every page of the site. [examples/todo](../examples/todo/) is an app built with it.
+What Next.js and React are for a JavaScript site, in one Flyscript app: pages rendered on the server and taken over in the browser, streamed where part of a page is slow, or kept and revalidated where it is the same for everyone, routes from files, layouts, data loaded on the server with the request's headers and cookies, titles and descriptions for search engines and link previews, middleware, redirects, endpoints, server functions called from the page as if they were local, links followed without loading a page, timers, and forms that work before the page's program has loaded, or without it. The server is native code; the browser runs one WebAssembly program for every page of the site. [examples/todo](../examples/todo/) is an app built with it.
 
 ```sh
 web/flynext dev app            # serves the app on :3000, rebuilding and reloading pages as it changes
@@ -32,6 +32,24 @@ app/
 
 **A page** exports its `Model` and `Msg` types, a `view` that performs `Ui<Msg>`, and how its model is made: `load`, which the server runs — given the address's `Params`, performing the app's effects, and failing with `#NotFound` for an address it has nothing for, which is then the 404 page, and with anything else for a page that failed, which is then the error page, with the status 500 — or `initial`, which needs nothing. A page made by `initial` at an address with no parameters is the same for every request: the server renders it once, as it starts, and answers with that. It may export an `update`, which changes the model for each message its view gives, and a `title` and a `description`, each a constant or a function of the model: the description goes in the page's head as what a search engine or a link preview shows (`description`, `og:description`, with the title as `og:title`), and following a link changes both, as it changes the title.
 
+**A page with something slow to show** exports `later`, which makes the rest of its model once `load` has made what is quick: `export function later(m: mut Model): void uses Todos { … }`, given the address's `Params` too if it asks for them. The server sends the page as `load` left it at once — its view showing what is still to come as it likes, a field of the model `#None`, say — and then, in the same answer, the page as it is once `later` has filled the model in, which takes the first's place before the page's program takes it over: what React's `Suspense` does on the server, with one model and one view rather than boundaries of their own. Following a link, the program asks for the page whole, and shows `loading.fly`'s view meanwhile. By the time `later` runs the answer's headers are gone, so it cannot fail — what went wrong is for its model to say — nor set a cookie, which panics; if it performs `Http.redirect`, the browser goes there.
+
+```ts
+export type Model = { todos: Vec<Todo>; summary: Option<String> };
+export function load(): Model uses Todos { { todos: Todos.list(), summary: #None } }
+export function later(m: mut Model): void uses Io { m.summary = #Some(summarize(m.todos)); }
+```
+
+**A page kept for a while** exports `revalidate`, a number of seconds: `export const revalidate: u64 = 3600;`. The server renders it at an address once and answers every request for the address with that render, as HTML or as the page's data, until the seconds have passed, and tells shared caches they may keep it as long (`s-maxage`); `X-Fly-Cache` says whether an answer was kept (`HIT`) or rendered (`MISS`). Which pages are the same for every request needs no guessing: a page is the request's own exactly when its `load` performs `Http` to read the request — a header or a cookie — or sets a cookie, and then the server renders it for each request as it does a page that does not export `revalidate`. `Http.revalidate(path)` drops what is kept for `path`, so a change the server makes — in a handler of the app's effects, say — is shown at once:
+
+```ts
+add(title) resumes k => {
+  const r = db.lock((s) => addTo(mut s, title));
+  Http.revalidate("/progress");
+  k(r)
+}
+```
+
 ```ts
 export type Model = { todo: Todo; draft: String };
 export type Msg = #Draft | #Rename;
@@ -52,7 +70,7 @@ export function update(m: mut Model, msg: Msg, ev: readonly Event): void uses To
 
 **An endpoint** is a route file that exports `handle(req: readonly Request, p: readonly Params): Response`, performing what the app's server handles, rather than a view: it answers any request for its address itself, with JSON, say.
 
-**The request** is an effect too, `Http` (`request.fly`), which the server handles around a page's `load`, an endpoint's `handle`, and its own handlers of the app's effects: `Http.header(name)` and `Http.cookie(name)` read the request, `Http.setCookie(name, value, maxAge)` sets a cookie on the answer, its value percent-encoded where a cookie may not hold a byte (and `Http.cookie` decodes it), and `Http.redirect(url)` answers instead by sending the browser to `url` — from a `load`, the page there is shown in its place, whether the browser asked for the page or the program followed a link to it.
+**The request** is an effect too, `Http` (`request.fly`), which the server handles around a page's `load`, an endpoint's `handle`, and its own handlers of the app's effects: `Http.header(name)` and `Http.cookie(name)` read the request, `Http.setCookie(name, value, maxAge)` sets a cookie on the answer, its value percent-encoded where a cookie may not hold a byte (and `Http.cookie` decodes it), `Http.redirect(url)` answers instead by sending the browser to `url` — from a `load`, the page there is shown in its place, whether the browser asked for the page or the program followed a link to it — and `Http.revalidate(path)` drops the page kept for `path`.
 
 **What shows when nothing else does**: `404.fly` and `error.fly` export a `Model`, an `initial` that makes it, and a `view`, shown inside the outermost layout; `loading.fly` exports a `view` of nothing.
 
@@ -80,7 +98,7 @@ export function update(m: mut Model, msg: Msg, ev: readonly Event): void uses To
 | `request.fly` | `Http`, the effect of the request being answered: its headers and cookies, cookies set, redirects. |
 | `dom.fly` | The browser's side of `Ui`, in WebAssembly: a render recorded as the flat list of the view's operations and diffed against the last, keyed children matched by key — across pages too; the first render taking over the server's DOM; and `run`, which waits for an event, gives its message to `update`, and renders again, until a link leads elsewhere. |
 | `router.fly` | Routes: patterns from files, matched against addresses, with their parameters and the query. |
-| `site.fly` | What every site's server does: a page answered whole to a browser, or as its data to the program; `Http` handled from the request; a form posted without the program, replayed through the page's update; the site's files; the build a page in development watches. |
+| `site.fly` | What every site's server does: a page answered whole to a browser, or as its data to the program; pages streamed, and pages kept for a while; `Http` handled from the request; a form posted without the program, replayed through the page's update; the site's files; the build a page in development watches. |
 | `flynext.fly` | The app compiler: it reads the app's pages, layouts and effects, with the compiler's own parser, and writes the server and the program. |
 | `flynext` | The command that builds, serves, and rebuilds in development. |
 | `flynext.js` | The page's host for the program: WASI as far as a page can, fibers and waiting by JavaScript promise integration, the DOM, events, links and the history, and the server. |

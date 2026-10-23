@@ -1,0 +1,26 @@
+// How far along the list is: a page the server keeps for an hour and answers every request with,
+// rendered again only when the list changes, which the server says by revalidating it (server.fly).
+
+import { Ui, el, text, cls } from "web/ui";
+import { Todos } from "../api";
+
+export type Model = { total: u32; done: u32 };
+export type Msg = #Nothing;
+
+export const title: str = "Progress";
+export const revalidate: u64 = 3600;
+
+export function load(): Model uses Todos {
+  const ts = Todos.list();
+  let done: u32 = 0;
+  for (const t of ts) { if (t.done) { done += 1; } }
+  { total: ts.len() as u32, done }
+}
+
+export function view(m: readonly Model): void uses Ui<Msg> {
+  el("h1", () => text("Progress"));
+  el("p", () => {
+    cls("progress");
+    text(`${m.done} of ${m.total} done.`.asStr());
+  });
+}

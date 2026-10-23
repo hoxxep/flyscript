@@ -1,0 +1,54 @@
+// A page with something slow to work out: the server sends it as `load` left it, the list, at once,
+// and the summary, once `later` has worked it out, in the same answer, in its place.
+
+import { Ui, Event, el, text, cls, on } from "web/ui";
+import { Todo, Todos } from "../api";
+
+export type Model = { todos: Vec<Todo>; summary: Option<String>; listed: bool };
+export type Msg = #List;
+
+export const title: str = "Report";
+
+export function load(): Model uses Todos {
+  { todos: Todos.list(), summary: #None, listed: true }
+}
+
+// As if it took a while: a model asked to summarize, say.
+export function later(m: mut Model): void uses Io {
+  Io.sleep(Duration.ms(300));
+  let left: u32 = 0;
+  for (const t of m.todos) { if (!t.done) { left += 1; } }
+  m.summary = #Some(if (left == 0) { "Everything is done.".toString() } else { `${left} still to do, the next: ${firstLeft(m.todos)}.` });
+}
+
+function firstLeft(ts: readonly Vec<Todo>): String {
+  for (const t of ts) { if (!t.done) { return t.title.clone(); } }
+  String.new()
+}
+
+export function view(m: readonly Model): void uses Ui<Msg> {
+  el("h1", () => text("Report"));
+  el("button", () => {
+    cls("list");
+    on("click", #List);
+    text(if (m.listed) { "Hide the list" } else { "Show the list" });
+  });
+  if (m.listed) {
+    el("ul", () => {
+      for (const t of m.todos) { el("li", () => text(t.title.asStr())); }
+    });
+  }
+  el("p", () => {
+    cls("summary");
+    match (m.summary) {
+      #Some(s) => text(s.asStr()),
+      #None => text("Working out a summary…"),
+    }
+  });
+}
+
+export function update(m: mut Model, msg: Msg, ev: readonly Event): void {
+  match (msg) {
+    #List => m.listed = !m.listed,
+  }
+}

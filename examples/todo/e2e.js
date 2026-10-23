@@ -107,6 +107,16 @@ const check = (ok, what) => { if (!ok) throw new Error(`FAILED: ${what}`); conso
   await page.waitForFunction(() => document.querySelector("p.visits")?.textContent === "You have opened this page 2 times.", null, { timeout: 5000 });
   check(true, "a cookie set as a link is followed is the browser's, sent back with the next request");
 
+  // A page the server keeps, followed to, as the list stands after the changes above.
+  await page.click("nav a[href='/progress']");
+  await page.waitForFunction(() => document.querySelector("p.progress")?.textContent === "3 of 4 done.", null, { timeout: 5000 });
+  check(true, "a page the server keeps counts the list as it was changed");
+
+  // A page streamed: followed to, the program asks for it whole.
+  await page.click("nav a[href='/report']");
+  await page.waitForFunction(() => document.querySelector("p.summary")?.textContent === "1 still to do, the next: Ship the web framework, completely.", null, { timeout: 5000 });
+  check(true, "a page whose summary comes later is shown whole when a link is followed to it");
+
   // Removing an item goes back to the list, from a page the browser loaded whole.
   await page.goto(`${base}/todos/4`);
   await page.waitForFunction(() => document.querySelector(".actions button")?.__fly?.click !== undefined, null, { timeout: 10000 });
@@ -114,6 +124,19 @@ const check = (ok, what) => { if (!ok) throw new Error(`FAILED: ${what}`); conso
   await page.click(".actions button");
   await page.waitForFunction(() => location.pathname === "/" && document.querySelectorAll("li").length === 3, null, { timeout: 5000 });
   check(!(await titles()).some((t) => t.startsWith("Ship")), "removing it asks the server, and the page goes back to the list");
+  // Loaded whole, its first part shows at once, the rest takes its place, and the program takes over
+  // the page as the server finished it.
+  await page.goto(`${base}/report`);
+  await page.waitForFunction(() => document.querySelector("button.list")?.__fly?.click !== undefined, null, { timeout: 10000 });
+  check(await page.evaluate(() => document.querySelector("p.summary")?.textContent === "Everything is done." && globalThis.flyRebuilt === undefined && !document.getElementById("fly-later")),
+    "a streamed page is taken over as the server finished it");
+  await page.click("button.list");
+  await page.waitForFunction(() => document.querySelector("button.list")?.textContent === "Show the list" && !document.querySelector("main ul"), null, { timeout: 5000 });
+  check(true, "and runs as any page does");
+  await page.goto(`${base}/`);
+  await ready();
+  const kept = await fetch(`${base}/progress`);
+  check(kept.headers.get("x-fly-cache") === "MISS" && (await kept.text()).includes("3 of 3 done."), "removing revalidates the page the server keeps");
 
   // A link to nothing, followed, shows the page for nothing found.
   await page.evaluate(() => { const a = document.createElement("a"); a.href = "/todos/999"; a.id = "lost"; a.textContent = "lost"; document.querySelector("footer").append(a); });

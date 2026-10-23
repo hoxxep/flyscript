@@ -8,6 +8,9 @@ export type Model = { visits: u32 };
 export type Msg = #Nothing;
 
 export const title: str = "Visits";
+// Kept for a minute, were it the same for every request; but its `load` reads the request, so each
+// is rendered for its own.
+export const revalidate: u64 = 60;
 
 export function load(): Model uses Http {
   const before: u32 = match (Http.cookie("visits")) {

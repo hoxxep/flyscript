@@ -438,10 +438,46 @@ fn todo_site_serves_and_runs() {
     assert!(lost.starts_with("HTTP/1.1 404") && lost.contains("\r\nSet-Cookie: from=x;"), "{lost}");
     let data = String::from_utf8(ask(port, "GET /about HTTP/1.1\r\nHost: here\r\nX-Fly-Data: 1\r\nConnection: close\r\n\r\n".to_string())).unwrap();
     assert!(data.contains("\r\n\r\n(info)/about\n/about\n"), "{data}");
+    // A page that exports `revalidate` is rendered once and kept, for a request with cookies too, as
+    // its data as well; a change to the list revalidates it. One whose load reads the request is
+    // each request's own.
+    let progress = String::from_utf8(get(port, "/progress")).unwrap();
+    assert!(progress.contains("\r\nX-Fly-Cache: MISS\r\n") && progress.contains("s-maxage=3600") && progress.contains("2 of 3 done."), "{progress}");
+    let progress = String::from_utf8(ask(port, "GET /progress HTTP/1.1\r\nHost: here\r\nCookie: a=b\r\nConnection: close\r\n\r\n".to_string())).unwrap();
+    assert!(progress.contains("\r\nX-Fly-Cache: HIT\r\n") && progress.contains("2 of 3 done."), "{progress}");
+    let progress = String::from_utf8(ask(port, "GET /progress HTTP/1.1\r\nHost: here\r\nX-Fly-Data: 1\r\nConnection: close\r\n\r\n".to_string())).unwrap();
+    assert!(progress.contains("\r\nX-Fly-Cache: HIT\r\n") && progress.contains("\r\n\r\nprogress\n/progress\n"), "{progress}");
+    for _ in 0..2 {
+        let visits = String::from_utf8(ask(port, "GET /visits HTTP/1.1\r\nHost: here\r\nCookie: visits=3\r\nConnection: close\r\n\r\n".to_string())).unwrap();
+        assert!(!visits.contains("X-Fly-Cache") && visits.contains("You have opened this page 4 times."), "a page that reads the request was kept: {visits}");
+    }
+    // A page with `later` is streamed: what `load` made at once, the rest in its place once `later`
+    // has made it, in the same answer; to the page's program, its data whole.
+    {
+        let mut s = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+        s.write_all(b"GET /report HTTP/1.1\r\nHost: here\r\nConnection: close\r\n\r\n").unwrap();
+        let mut first = Vec::new();
+        let mut buf = [0u8; 65536];
+        while !String::from_utf8_lossy(&first).contains("Working out a summary") {
+            let n = s.read(&mut buf).unwrap();
+            assert!(n > 0, "the page ended before its first part: {}", String::from_utf8_lossy(&first));
+            first.extend_from_slice(&buf[..n]);
+        }
+        let first = String::from_utf8(first).unwrap();
+        assert!(first.contains("Transfer-Encoding: chunked") && !first.contains("still to do"), "the first part waited for the rest: {first}");
+        let mut rest = Vec::new();
+        s.read_to_end(&mut rest).unwrap();
+        let rest = String::from_utf8(rest).unwrap();
+        assert!(rest.contains("<template id=\"fly-later\">") && rest.contains("1 still to do") && rest.contains("\"summary\":\"1 still to do"), "{rest}");
+    }
+    let data = String::from_utf8(ask(port, "GET /report HTTP/1.1\r\nHost: here\r\nX-Fly-Data: 1\r\nConnection: close\r\n\r\n".to_string())).unwrap();
+    assert!(data.contains("\"summary\":\"1 still to do"), "{data}");
     let body = r#"{"title":"Asked by the test"}"#;
     let answer = String::from_utf8(ask(port, format!("POST /_fly/rpc/Todos.add HTTP/1.1\r\nHost: here\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()))).unwrap();
     assert!(answer.starts_with("HTTP/1.1 200") && answer.contains("Asked by the test"), "{answer}");
     assert!(String::from_utf8(get(port, "/")).unwrap().contains("Asked by the test"), "the server did not keep what it was asked to add");
+    let progress = String::from_utf8(get(port, "/progress")).unwrap();
+    assert!(progress.contains("\r\nX-Fly-Cache: MISS\r\n") && progress.contains("2 of 4 done."), "adding did not revalidate the page: {progress}");
     let wasm = get(port, "/_fly/app.wasm");
     let at = wasm.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
     assert!(wasm.starts_with(b"HTTP/1.1 200") && wasm[at..].starts_with(b"\0asm"), "the page's program is not served as WebAssembly");

@@ -15,6 +15,8 @@ export function layout<M>(path: str, body: () => void uses Ui<M>): void uses Ui<
       el("span", () => { cls("brand"); text("Flyscript"); });
       item("/", "Things to do", path == "/" || path.startsWith("/todos/"));
       item("/about", "About", path == "/about");
+      item("/progress", "Progress", path == "/progress");
+      item("/report", "Report", path == "/report");
       item("/visits", "Visits", path == "/visits");
       item("/help", "Help", path == "/help" || path.startsWith("/help/"));
     });

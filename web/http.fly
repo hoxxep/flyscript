@@ -176,9 +176,13 @@ impl Conn {
     self.socket.write(body);
   }
 
-  // Starts a response streamed in chunks, as `send` gives them, until `end`.
-  export function start(self: mut Self, status: u16, contentType: str): void uses Io, Fail<IoErr> {
-    const head = `HTTP/1.1 ${status} ${reason(status)}\r\nContent-Type: ${contentType}\r\n${self.connection()}Transfer-Encoding: chunked\r\n\r\n`;
+  // Starts `r` streamed: its status and headers, then its body in chunks, as `send` gives them,
+  // until `end`; what `r` holds as its body is not sent.
+  export function start(self: mut Self, r: readonly Response): void uses Io, Fail<IoErr> {
+    let head = `HTTP/1.1 ${r.status} ${reason(r.status)}\r\n`;
+    for (const h of r.headers) { head.push(`${h.name}: ${h.value}\r\n`); }
+    head.push(self.connection().asStr());
+    head.push("Transfer-Encoding: chunked\r\n\r\n");
     self.socket.write(head.asStr().asBytes());
   }
 
