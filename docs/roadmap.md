@@ -1,6 +1,6 @@
 # Roadmap
 
-Flyscript compiled itself, to JavaScript and to C, when this roadmap was written. Its steps take it from a self-hosted language to a systems platform: one intermediate form under every back end, kernels, LLVM, WebAssembly, every core of the machine, and a web framework that shows what all of it buys. Every step is done; each section says what was built.
+Flyscript compiled itself, to JavaScript and to C, when this roadmap was written. Its steps take it from a self-hosted language to a systems platform: one intermediate form under every back end, kernels, LLVM, WebAssembly, every core of the machine, and a web framework that shows what all of it buys. Steps 0 to 5 are done, and each says what was built; steps 6 to 8 are next.
 
 ## 0. One core IR under every back end
 
@@ -51,4 +51,32 @@ A proof of concept of what Next.js and React do, in one Flyscript component tree
 - Components are functions that perform `Ui<Msg>`: elements, text, `keyed` children, and events as `Msg` values, with `onInput` taking a function from the input's text to a `Msg`. `if`, `for` and `match` work inside the tree.
 - The server renders natively, streaming HTML from a per-request region; the client hydrates the same tree in WebAssembly and updates the DOM by a keyed diff of flat operation lists, with no virtual DOM objects.
 - Server functions are an effect shared by both sides: handled against the database on the server, over `fetch` on the client, with typed failures re-raised where they were called.
-- Routes are files, each its own WebAssembly module over a shared core.
+- Routes are files. The browser runs one WebAssembly program for the whole site; loading each route's code as it is needed is step 6.
+
+## 6. Pages loaded by route
+
+*Next.*
+
+A page downloads the code it runs and no more, as a Next.js page does, while the server goes on rendering every page natively:
+
+- The site compiles to a core module and a module per route. The core holds the runtime, the C library, the standard library, the DOM's handler of `Ui`, the layouts, and everything two routes or more use, generic instantiations among them; a route's module holds only what that route alone uses. The compiler makes the split after specialization, so each instantiation is in exactly one module.
+- Route modules are linked dynamically, as WebAssembly side modules: position-independent code that imports the core's memory, function table and stack pointer, and its symbols through a table of offsets the loader fills in. The loader is part of `web/flynext.js`, and fibers switch across modules as within one, since every module shares the one memory and its shadow stacks.
+- The server's HTML names the core and the page's own module, so the browser fetches both at once; following a link fetches the next route's module with its data, prefetched as the pointer nears the link, as data is now. Each module is cached on its own, so a change to one page leaves every other's cached code valid.
+- Done when the example site's first page downloads only the core and its own module, every test of the site passes in a browser, and the cost is measured: what the first page downloads, before and after, and the speed of code built position-independent.
+
+## 7. A smaller shared base
+
+*Next.*
+
+Every page downloads the core, so a byte saved there is saved for every page of every site. Of the example site's 165 KB program (48 KB compressed), a site of one page still needs 110 KB (37 KB); about 32 KB of that is the C library, the most of it `printf` and `dlmalloc`.
+
+- Numbers formatted by the standard library in Flyscript, as the language already defines them, so that a page program links no `printf`.
+- An allocator for one thread, made for the sizes Flyscript allocates — classes of small blocks and pages for large ones — in place of `dlmalloc` where there are no threads.
+- Nothing else of the C library that a page program does not call: what a page links is measured symbol by symbol, and each part kept is there for a reason.
+- Done when the core of the example site is measured smaller, the WebAssembly corpus and the site's browser tests still pass, and the compiler built for WebAssembly still compiles itself to the same output.
+
+## 8. The runtime in Flyscript
+
+*Next.*
+
+The runtime's higher layers — the scheduler, channels, `Mutex`, buffered I/O and formatting — move from C into Flyscript, over a thin core of C and assembly that switches stacks, makes system calls and tells the sanitizers about fibers. The runtimes for JavaScript and the browser stay JavaScript. Channels, `Mutex` and atomics are already proved as handlers (§9.5 of the spec); written in Flyscript, the code that runs them is checked by the same type system the proof is about. Every back end must still interleave tasks the same way under the deterministic scheduler, for every test, from its seed.
