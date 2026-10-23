@@ -186,6 +186,50 @@ def Ty.shiftBy (n : Nat) : Ty → Ty
   | .rref c k τ => .rref c (k + n) τ
   | .arena k => .arena (k + n)
 
+/-- A type said of a place `n` regions further out: what `shiftBy n` undoes. -/
+def Ty.lowerBy (n : Nat) : Ty → Ty
+  | .int => .int
+  | .box τ => .box (τ.lowerBy n)
+  | .fn k A B r => .fn k A B r
+  | .pair A B => .pair (A.lowerBy n) (B.lowerBy n)
+  | .sum A B => .sum (A.lowerBy n) (B.lowerBy n)
+  | .hole τ => .hole (τ.lowerBy n)
+  | .rref c k τ => .rref c (k - n) τ
+  | .arena k => .arena (k - n)
+
+@[simp] theorem Ty.lowerBy_shiftBy : ∀ {τ : Ty}, (τ.shiftBy n).lowerBy n = τ
+  | .int => rfl
+  | .box τ => by simp [Ty.shiftBy, Ty.lowerBy, Ty.lowerBy_shiftBy (τ := τ)]
+  | .fn _ _ _ _ => rfl
+  | .pair A B => by simp [Ty.shiftBy, Ty.lowerBy, Ty.lowerBy_shiftBy (τ := A), Ty.lowerBy_shiftBy (τ := B)]
+  | .sum A B => by simp [Ty.shiftBy, Ty.lowerBy, Ty.lowerBy_shiftBy (τ := A), Ty.lowerBy_shiftBy (τ := B)]
+  | .hole τ => by simp [Ty.shiftBy, Ty.lowerBy, Ty.lowerBy_shiftBy (τ := τ)]
+  | .rref _ _ _ => by simp [Ty.shiftBy, Ty.lowerBy]
+  | .arena _ => by simp [Ty.shiftBy, Ty.lowerBy]
+
+@[simp] theorem Ty.shiftBy_zero : ∀ {τ : Ty}, τ.shiftBy 0 = τ
+  | .int => rfl
+  | .box τ => by simp [Ty.shiftBy, Ty.shiftBy_zero (τ := τ)]
+  | .fn _ _ _ _ => rfl
+  | .pair A B => by simp [Ty.shiftBy, Ty.shiftBy_zero (τ := A), Ty.shiftBy_zero (τ := B)]
+  | .sum A B => by simp [Ty.shiftBy, Ty.shiftBy_zero (τ := A), Ty.shiftBy_zero (τ := B)]
+  | .hole τ => by simp [Ty.shiftBy, Ty.shiftBy_zero (τ := τ)]
+  | .rref _ _ _ => rfl
+  | .arena _ => rfl
+
+@[simp] theorem Ty.lowerBy_zero : ∀ {τ : Ty}, τ.lowerBy 0 = τ
+  | .int => rfl
+  | .box τ => by simp [Ty.lowerBy, Ty.lowerBy_zero (τ := τ)]
+  | .fn _ _ _ _ => rfl
+  | .pair A B => by simp [Ty.lowerBy, Ty.lowerBy_zero (τ := A), Ty.lowerBy_zero (τ := B)]
+  | .sum A B => by simp [Ty.lowerBy, Ty.lowerBy_zero (τ := A), Ty.lowerBy_zero (τ := B)]
+  | .hole τ => by simp [Ty.lowerBy, Ty.lowerBy_zero (τ := τ)]
+  | .rref _ _ _ => rfl
+  | .arena _ => rfl
+
+theorem Ty.isFn_lowerBy {τ : Ty} : (τ.lowerBy n).isFn = τ.isFn := by
+  cases τ <;> rfl
+
 theorem Ty.data_not_fn {τ : Ty} (h : τ.data = true) : τ.isFn = false := by
   cases τ <;> simp_all [Ty.data, Ty.isFn]
 
@@ -1434,9 +1478,11 @@ inductive Typed (F : List Fn) (O : List Op) : Ctx → Expr → Ty → Ctx → Ro
   /-- Nothing is put in place of a closure borrowed `mut`, or of what it captured. -/
   | assign : AtomTy Γ a τ Γ₁ → PlaceTy Γ₁ p τ true y → (∀ k A B r', lookup y Γ₁ ≠ some (.ref .mut (.fn k A B r'))) →
       Typed F O Γ (.assign p τ a) .int Γ₁ r
-  | call : F[f]? = some d → d.retp = none → d.cap = none → (∀ l ∈ d.row, l ∈ r) → AtomsTy Γ owned (d.owns.map Prod.snd) Γ₁ →
-      Lends Γ₁ lent (d.refs.map Prod.snd) ys → LentApart lent →
-      Typed F O Γ (.call f owned lent) d.ret Γ₁ r
+  /-- A call: the function's regions are those of the code around, the `k`th of them its innermost. -/
+  | call : F[f]? = some d → d.retp = none → d.cap = none → (∀ l ∈ d.row, l ∈ r) →
+      AtomsTy Γ owned (d.owns.map fun p => p.2.shiftBy k) Γ₁ →
+      Lends Γ₁ lent (d.refs.map fun p => (p.2.1, p.2.2.shiftBy k)) ys → LentApart lent →
+      Typed F O Γ (.call f owned lent) (d.ret.shiftBy k) Γ₁ r
   /-- A closure captures a value, moved in, which may be a closure; its type says how it is called,
   what it takes and gives, and what it may perform, but not what it captured. -/
   | lam : F[f]? = some d → d.cap = some (xc, τc, k) → d.owns = [(pn, A)] → d.refs = [] →

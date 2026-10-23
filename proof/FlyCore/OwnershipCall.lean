@@ -1109,20 +1109,66 @@ theorem hole_out {Eo Lall : List Nat} (hI : Inv F ι σ Γ env E S) (hok : HoleO
 
 theorem fnCtx_eq (d : Fn) : fnCtx d = ownCtx d.owns ++ refCtx d.refs := rfl
 
+/-- A hole as a callee whose innermost region is the caller's `k`th sees it. -/
+def Hole.lower (k : Nat) (h : Hole) : Hole := { h with ty := h.ty.lowerBy k }
+
+theorem Hole.lower_parts (h : Hole) :
+    exclPart (h.lower k).slot L = exclPart h.slot L ∧ sharedPart (h.lower k).slot L = sharedPart h.slot L := by
+  obtain ⟨m, τ, _, _, _, _, _⟩ := h
+  simp only [Hole.lower, Hole.slot, exclPart, sharedPart]
+  cases m <;> cases τ <;> exact ⟨rfl, rfl⟩
+
+theorem olds_lower : mutCells (olds (hs.map (Hole.lower k))) = mutCells (olds hs) ∧
+    roCells (olds (hs.map (Hole.lower k))) = roCells (olds hs) := by
+  induction hs with
+  | nil => exact ⟨rfl, rfl⟩
+  | cons h hs ih =>
+    simp only [olds, List.map_map, List.map_cons, mutCells, roCells, List.flatMap_cons] at ih ⊢
+    exact ⟨by rw [ih.1, (h.lower_parts).1]; rfl, by rw [ih.2, (h.lower_parts).2]; rfl⟩
+
+/-- What a callee whose innermost region is the caller's `k`th leaves at the places it was lent. -/
+theorem foot_refs_lower : ∀ {refs : List (Var × Mode × Ty)} {hs : List Hole} {E S : List Nat},
+    refs.map Prod.snd = hs.map (fun h => (h.mode, h.ty.lowerBy k)) →
+    Foot F ι σ (refCtx refs) ((refs.map Prod.fst).zip (hs.map Hole.loc)) E S →
+    ∃ ps : List (Hole × List Nat), ps.map Prod.fst = hs ∧ (∀ p ∈ ps, LT F ι σ p.1.loc (p.1.ty.lowerBy k) p.2) ∧
+      E = mutCells ps ∧ S = roCells ps
+  | [], [], E, S, _, hf => by cases hf; exact ⟨[], rfl, by simp, rfl, rfl⟩
+  | [], _ :: _, _, _, h, _ => by simp at h
+  | _ :: _, [], _, _, h, _ => by simp at h
+  | (x, m, τ) :: refs, h :: hs, E, S, heq, hf => by
+    simp only [List.map_cons, List.cons.injEq, Prod.mk.injEq] at heq
+    obtain ⟨⟨rfl, rfl⟩, heq⟩ := heq
+    simp only [refCtx, List.map_cons, List.zip_cons_cons] at hf
+    cases hf with
+    | @cons _ _ L _ _ _ _ _ hs' hrest =>
+      obtain ⟨ps, h1, h2, rfl, rfl⟩ := foot_refs_lower heq hrest
+      refine ⟨(h, L) :: ps, by simp [h1], ?_, ?_, ?_⟩
+      · intro p hp
+        rcases List.mem_cons.mp hp with rfl | hp
+        · exact hs'
+        · exact h2 p hp
+      · simp only [addE, mutCells, List.flatMap_cons]
+        rw [← (h.lower_parts (k := k) (L := L)).1]; rfl
+      · simp only [addS, roCells, List.flatMap_cons]
+        rw [← (h.lower_parts (k := k) (L := L)).2]; rfl
+
 /-- The callee starts with its owned parameters' footprints, the trees lent `mut` exclusive and those
 lent `readonly` shared. -/
 theorem callee_inv {Eo Lall : List Nat} {hs : List Hole} (hI : Inv F ι₁ σ1 Γ₁ env E₁ S) (hholes : ∀ h ∈ hs, HoleOk F ι₁ σ1 Γ₁ env h)
-    (hpw : hs.Pairwise Apart) (hrefs : d.refs.map Prod.snd = hs.map fun h => (h.mode, h.ty))
+    (hpw : hs.Pairwise Apart) (hrefs : d.refs.map Prod.snd = hs.map fun h => (h.mode, h.ty.lowerBy k))
     (hkeys : ((d.owns.map Prod.fst) ++ (d.refs.map Prod.fst)).Nodup)
     (hfo : Foot F ι σ2 (ownCtx d.owns) cells Eo []) (hEo : Eo.Nodup)
     (hEo_in : ∀ l ∈ Eo, l ∈ Lall ∨ σ1.next ≤ l) (hdL : Disj Lall E₁) (hdLS : Disj Lall S) (hwf : WF σ1)
     (hold : ∀ l, l < σ1.next → σ2.mem l = σ1.mem l) (hrt : σ2.rt = σ1.rt)
-    (hconv : ∀ h ∈ hs, ∀ L, LT F ι₁ σ2 h.loc h.ty L → LT F ι σ2 h.loc h.ty L) :
+    (hconv : ∀ h ∈ hs, ∀ L, LT F ι₁ σ2 h.loc h.ty L → LT F ι σ2 h.loc (h.ty.lowerBy k) L) :
     Inv F ι σ2 (fnCtx d) (cells ++ (d.refs.map Prod.fst).zip (hs.map Hole.loc))
       (Eo ++ mutCells (olds hs)) (roCells (olds hs)) := by
   have hout := fun h hh => hole_out hI (hholes h hh) hwf hEo_in hdL hdLS
-  have hfr := (foot_refs (F := F) (ι := ι) (σ := σ2) hrefs).mpr ⟨olds hs, by simp [olds, Function.comp_def], ?_, rfl, rfl⟩
-  · rw [fnCtx_eq]
+  have hfr := (foot_refs (F := F) (ι := ι) (σ := σ2) (hs := hs.map (Hole.lower k))
+    (by rw [hrefs]; simp [Hole.lower, Function.comp_def])).mpr
+    ⟨olds (hs.map (Hole.lower k)), by simp [olds, Function.comp_def], ?_, rfl, rfl⟩
+  · rw [olds_lower.1, olds_lower.2, List.map_map, show Hole.loc ∘ Hole.lower k = Hole.loc from rfl] at hfr
+    rw [fnCtx_eq]
     refine ⟨by simpa using hfo.append hfr, ?_, ?_, ?_⟩
     · refine nodup_append_disj.mpr ⟨hEo, olds_nodup hI hholes hpw, fun l hl hl' => ?_⟩
       obtain ⟨h, hh, hl'⟩ := mem_olds_mut.mp hl'
@@ -1135,7 +1181,7 @@ theorem callee_inv {Eo Lall : List Nat} {hs : List Hole} (hI : Inv F ι₁ σ1 �
     · simpa [ownCtx, refCtx, List.map_map, Function.comp_def] using hkeys
   · intro p hp
     simp only [olds, List.mem_map] at hp
-    obtain ⟨h, hh, rfl⟩ := hp
+    obtain ⟨_, ⟨h, hh, rfl⟩, rfl⟩ := hp
     exact hconv h hh _ ((hholes h hh).old_lt.frame
       (Agree.of (fun l hl => hold l (hwf l (hout h hh l (List.mem_append.mpr (.inr hl))).1)) hrt))
 

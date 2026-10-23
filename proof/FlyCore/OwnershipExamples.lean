@@ -82,7 +82,7 @@ theorem lends_typed : Typed [addInto] [] [] lends .int [] [.fail] := by
   have hc : Typed [addInto] [] [("y", .own (.box .int) true), ("x", .own (.box .int) true)]
       (.call 0 [.move "y"] [(.mut, var "x")]) .int
       [("y", .own (.box .int) false), ("x", .own (.box .int) true)] [.fail] := by
-    have := Typed.call (F := [addInto]) (O := []) (Γ := [("y", .own (.box .int) true), ("x", .own (.box .int) true)])
+    have := Typed.call (k := 0) (F := [addInto]) (O := []) (Γ := [("y", .own (.box .int) true), ("x", .own (.box .int) true)])
       (f := 0) (d := addInto) (ys := [(.mut, "x")]) (r := [.fail]) rfl rfl rfl (by simp [addInto])
       (.cons (.move (x := "y") rfl rfl) .nil) (.cons (.own (by simp [lookup, setSlot])) (fun _ => rfl) rfl .nil)
       (by simp [LentApart])
@@ -677,7 +677,7 @@ theorem higher_typed : Typed [addTo, twice] [] [] higher .int [] [.fail] := by
   have hcall : Typed [addTo, twice] [] [("f", .ref .ro (.fn .shared .int .int [])), ("b", .ref .ro (.box .int))]
       (.call 1 [.lit 2] [(.ro, var "f")]) .int
       [("f", .ref .ro (.fn .shared .int .int [])), ("b", .ref .ro (.box .int))] [.fail] :=
-    .call (d := twice) rfl rfl rfl (by simp [twice]) (.cons .lit .nil)
+    .call (k := 0) (d := twice) rfl rfl rfl (by simp [twice]) (.cons .lit .nil)
       (.cons (.ref (m := .ro) rfl) (fun h => by cases h) rfl .nil) (by simp [LentApart])
   have hlc := Typed.lendClo (F := [addTo, twice]) (O := []) (Γ := [("b", .own (.box .int) true)]) (f := 0)
     (d := addTo) (p := var "b") (y := "b") (x := "f") (r := [.fail]) (τb := .int)
@@ -731,7 +731,7 @@ theorem tally_typed : Typed [bump, callsTwice] [] [] tally .int [] [.fail] := by
   have hcall : Typed [bump, callsTwice] [] [("f", .ref .mut (.fn .excl .int .int [])), ("b", .lent (.box .int))]
       (.call 1 [] [(.mut, var "f")]) .int
       [("f", .ref .mut (.fn .excl .int .int [])), ("b", .lent (.box .int))] [.fail] :=
-    .call (d := callsTwice) rfl rfl rfl (by simp [callsTwice]) .nil
+    .call (k := 0) (d := callsTwice) rfl rfl rfl (by simp [callsTwice]) .nil
       (.cons (.ref (m := .mut) rfl) (fun _ => rfl) rfl .nil) (by simp [LentApart])
   have hlc := Typed.lendCloMut (F := [bump, callsTwice]) (O := []) (Γ := [("b", .own (.box .int) true)]) (f := 0)
     (d := bump) (p := var "b") (y := "b") (x := "f") (r := [.fail]) (τb := .int)
@@ -803,9 +803,9 @@ theorem handOff_fns_ok : FnsOk [spend, make, useOnce] [] := by
 
 theorem handOff_typed : Typed [spend, make, useOnce] [] [] handOff .int [] [.fail] :=
   .let_ (live := false) rfl (.new .lit)
-    (.let_ (live := false) rfl (.call (d := make) rfl rfl rfl (by simp [make]) (.cons (.move rfl rfl) .nil) .nil
+    (.let_ (live := false) rfl (.call (k := 0) (d := make) rfl rfl rfl (by simp [make]) (.cons (.move rfl rfl) .nil) .nil
         (by simp [LentApart]))
-      (.call (d := useOnce) rfl rfl rfl (by simp [useOnce]) (.cons (.move rfl rfl) .nil) .nil (by simp [LentApart])))
+      (.call (k := 0) (d := useOnce) rfl rfl rfl (by simp [useOnce]) (.cons (.move rfl rfl) .nil) .nil (by simp [LentApart])))
 
 example : ∀ n, match eval [spend, make, useOnce] [] n [.abort .fail 0] .empty [] handOff with
     | (.stuck, _) => False
@@ -949,7 +949,7 @@ theorem inc_ok : FnsOk [inc] [] := by
 theorem fields_typed : Typed [inc] [] [] fields .int [] [.fail] :=
   .let_ (live := true) rfl (.pair .lit .lit)
     (.let_ (live := true) rfl
-      (.call (d := inc) rfl rfl rfl (by simp [inc]) .nil (.cons (.fst (.own rfl)) (fun _ => rfl) rfl .nil)
+      (.call (k := 0) (d := inc) rfl rfl rfl (by simp [inc]) .nil (.cons (.fst (.own rfl)) (fun _ => rfl) rfl .nil)
         (by simp [LentApart]))
       (.add (.read (.fst (.own rfl))) (.read (.snd (.own rfl)))))
 
@@ -1002,11 +1002,11 @@ theorem swap_ok : FnsOk [swap, addField] [] := by
 theorem fieldPairs_typed : Typed [swap, addField] [] [] fieldPairs .int [] [.fail] :=
   .let_ (live := true) rfl (.pair .lit .lit)
     (.let_ (live := true) rfl
-      (.call (d := swap) rfl rfl rfl (by simp [swap]) .nil
+      (.call (k := 0) (d := swap) rfl rfl rfl (by simp [swap]) .nil
         (.cons (.fst (.own rfl)) (fun _ => rfl) rfl (.cons (.snd (.own rfl)) (fun _ => rfl) rfl .nil))
         (by simp [LentApart, Place.apart_fields]))
       (.let_ (live := true) rfl
-        (.call (d := addField) rfl rfl rfl (by simp [addField]) .nil
+        (.call (k := 0) (d := addField) rfl rfl rfl (by simp [addField]) .nil
           (.cons (.fst (.own rfl)) (fun _ => rfl) rfl (.cons (.snd (.own rfl)) (fun _ => rfl) rfl .nil))
           (by simp [LentApart, Place.apart_fields]))
         (.add (.read (.fst (.own rfl))) (.read (.snd (.own rfl))))))
@@ -1471,16 +1471,6 @@ example : ∀ n, match eval [] [] n [.abort .fail 0] .empty [] cellEx with
     | (.abort _ _, σ') => ∀ l, σ'.mem l = none :=
   program_ok (by intro d hd; simp at hd) cellEx_typed
 
-theorem Ty.shiftBy_zero : ∀ τ : Ty, τ.shiftBy 0 = τ
-  | .int => rfl
-  | .box τ => by simp [Ty.shiftBy, Ty.shiftBy_zero τ]
-  | .fn _ _ _ _ => rfl
-  | .pair A B => by simp [Ty.shiftBy, Ty.shiftBy_zero A, Ty.shiftBy_zero B]
-  | .sum A B => by simp [Ty.shiftBy, Ty.shiftBy_zero A, Ty.shiftBy_zero B]
-  | .hole τ => by simp [Ty.shiftBy, Ty.shiftBy_zero τ]
-  | .rref _ _ _ => rfl
-  | .arena _ => rfl
-
 /-- Reading through a reference into the innermost region. -/
 theorem Typed.rget0 (hp : PlaceTy Γ p (.rref c 0 τ) w y) (hR : lookup R Γ = some s)
     (hs : s = .own (.arena 0) true ∨ ∃ m, s = .ref m (.arena 0)) : Typed F O Γ (.rget p) τ Γ r := by
@@ -1516,7 +1506,7 @@ theorem growEx_typed : Typed [growR] [] [] growEx .int [] [.fail] := by
   refine .region rfl rfl ?_
   refine .let_ (live := true) rfl (.ralloc rfl (.inl rfl) rfl .lit) ?_
   refine .let_ (live := true) rfl ?_ (by simpa [Ty.shiftBy] using Typed.rget (R := "R") (k := 0) (τ := .int) (.own rfl) rfl (.inl rfl))
-  have := Typed.call (F := [growR]) (O := []) (f := 0) (d := growR) (r := [.fail])
+  have := Typed.call (k := 0) (F := [growR]) (O := []) (f := 0) (d := growR) (r := [.fail])
     (Γ := [("p", .own (.rref false 0 .int) true), ("R", .own (.arena 0) true)])
     rfl rfl rfl (by simp [growR]) (.cons (.readRef (.own (x := "p") rfl)) .nil)
     (.cons (.own (x := "R") rfl) (fun _ => rfl) rfl .nil) (by simp [LentApart])
@@ -1529,6 +1519,37 @@ example : ∀ n, match eval [growR] [] n [.abort .fail 0] .empty [] growEx with
     | (.val v, σ') => ∃ L, VT [growR] [] σ' .int v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
     | (.abort _ _, σ') => ∀ l, σ'.mem l = none :=
   program_ok growR_ok growEx_typed
+
+/-- `region (R) { const p = R.alloc(41); region (S) { const q = growR(p); *q } }`: from inside `S`, `growR`
+allocates in `R`, the region around; 42. -/
+def growOuter : Expr :=
+  .region "R" .int
+    (.let_ "p" (.rref false 0 .int) (.ralloc "R" false .int (.lit 41))
+      (.region "S" .int
+        (.let_ "q" (.rref false 1 .int) (.call 0 [.read (var "p")] [(.mut, var "R")])
+          (.rget (var "q")))))
+
+example : value (eval [growR] [] 40 [] .empty [] growOuter) = some 42 := by
+  run [growOuter, growR]
+
+theorem growOuter_typed : Typed [growR] [] [] growOuter .int [] [.fail] := by
+  refine .region rfl rfl ?_
+  refine .let_ (live := true) rfl (.ralloc rfl (.inl rfl) rfl .lit) (.region rfl rfl ?_)
+  refine .let_ (live := true) rfl ?_
+    (by simpa [Ty.shiftBy] using Typed.rget (R := "R") (k := 1) (τ := .int) (.own (x := "q") rfl) rfl (.inl rfl))
+  have := Typed.call (k := 1) (F := [growR]) (O := []) (f := 0) (d := growR) (r := [.fail])
+    (Γ := [("S", .own (.arena 0) true), ("p", .own (.rref false 1 .int) true), ("R", .own (.arena 1) true)])
+    rfl rfl rfl (by simp [growR]) (.cons (.readRef (.own (x := "p") rfl)) .nil)
+    (.cons (.own (x := "R") rfl) (fun _ => rfl) rfl .nil) (by simp [LentApart])
+  simpa [growR, Ctx.shift, Slot.shiftBy, Ty.shiftBy] using this
+
+example : ∀ n, match eval [growR] [] n [.abort .fail 0] .empty [] growOuter with
+    | (.stuck, _) => False
+    | (.susp _ _ _ _ _, _) => False
+    | (.timeout, _) => True
+    | (.val v, σ') => ∃ L, VT [growR] [] σ' .int v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
+    | (.abort _ _, σ') => ∀ l, σ'.mem l = none :=
+  program_ok growR_ok growOuter_typed
 
 theorem ralloc_ty (h : Typed F O Γ (.ralloc R c τ a) t Γ' r) :
     ∃ k s, t = .rref c k τ ∧ lookup R Γ = some s ∧ (s = .own (.arena k) true ∨ s = .ref .mut (.arena k)) := by

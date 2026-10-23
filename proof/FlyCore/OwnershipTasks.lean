@@ -943,10 +943,10 @@ theorem par_ok (hF : FnsOk F O) (hR : RetOk F O n) (hKk : EvalKOk F O n)
     exact this
   have hmA := mutCells_ro (hmodes htsA hroa)
   have hmB := mutCells_ro (hmodes htsB hrob)
-  have hIA := callee_inv (d := da) hI₁ (fun h hh => hholes h (List.mem_append.mpr (.inl hh))) hpw2.1 htsA.symm hkA
-    hfoA hEoA hEoAin hdLA hdLSA hwf₁ holdA hrtA (fun _ _ _ h => h)
-  have hIB := callee_inv (d := db) hI₁ (fun h hh => hholes h (List.mem_append.mpr (.inr hh))) hpw2.2.1 htsB.symm hkB
-    hfoB hEoB hEoBin hdLB hdLSB hwf₁ hold31 (hrtB.trans hrtA) (fun _ _ _ h => h)
+  have hIA := callee_inv (k := 0) (d := da) hI₁ (fun h hh => hholes h (List.mem_append.mpr (.inl hh))) hpw2.1
+    (by simpa using htsA.symm) hkA hfoA hEoA hEoAin hdLA hdLSA hwf₁ holdA hrtA (fun _ _ _ h => by simpa using h)
+  have hIB := callee_inv (k := 0) (d := db) hI₁ (fun h hh => hholes h (List.mem_append.mpr (.inr hh))) hpw2.2.1
+    (by simpa using htsB.symm) hkB hfoB hEoB hEoBin hdLB hdLSB hwf₁ hold31 (hrtB.trans hrtA) (fun _ _ _ h => by simpa using h)
   rw [hmA, List.append_nil] at hIA
   rw [hmB, List.append_nil] at hIB
   -- Everything at the start of the tasks, where the first is given its turn.

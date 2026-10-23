@@ -114,12 +114,12 @@ inductive FrameOk (F : List Fn) (O : List Op) : List Nat → List Nat → Store 
   | scopeK : x ∉ Γ₂.map Prod.fst → (Γ₂.map Prod.fst).Nodup → τx.complete = true →
       FrameOk F O ι ι σf (.scopeK τx c) ⟨(x, .own τx live) :: Γ₂, (x, c) :: env, τ, S, r⟩ ⟨Γ₂, env, τ, S, r⟩ [] []
   | callK : (∀ l ∈ d.row, l ∈ r) → Inv F ι σf Γ₁ env E₁ S → (∀ h ∈ hos, HoleOk F ι σf Γ₁ env h) →
-      hos.Pairwise Apart → hos.map (fun h => (h.mode, h.ty)) = d.refs.map Prod.snd →
+      hos.Pairwise Apart → hos.map (fun h => (h.mode, h.ty)) = d.refs.map (fun p => (p.2.1, p.2.2.shiftBy k)) →
       ((d.owns.map Prod.fst) ++ (d.refs.map Prod.fst)).Nodup → (∀ o ∈ d.owns, o.2.complete = true) →
       Typed F O (fnCtx d) d.body d.ret Γ'' d.row → cells.map Prod.fst = d.owns.map Prod.fst →
-      FrameOk F O ι ι σf (.callK ((d.owns.map Prod.snd).zip (cells.map Prod.snd)))
+      FrameOk F O (ι.drop k) ι σf (.callK ((d.owns.map Prod.snd).zip (cells.map Prod.snd)))
         ⟨Γ'', cells ++ (d.refs.map Prod.fst).zip (hos.map Hole.loc), d.ret, roCells (olds hos), d.row⟩
-        ⟨Γ₁, env, d.ret, S, r⟩ (E₁.filter (· ∉ mutCells (olds hos))) []
+        ⟨Γ₁, env, d.ret.shiftBy k, S, r⟩ (E₁.filter (· ∉ mutCells (olds hos))) []
   /-- The body of a call that returns a borrow of its `i`th borrowed parameter's place `p`, which
 the caller lent it as the hole `hd`: `body` runs with `x` the borrow, `hd`'s root only read, or not
 reached, while it lives. -/

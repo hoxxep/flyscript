@@ -254,4 +254,115 @@ theorem Inv.shift (h : Inv F ι σ Γ env E S) : Inv F (a :: ι) σ (Ctx.shift �
 theorem Inv.unshift (h : Inv F (a :: ι) σ (Ctx.shift Γ) env E S) : Inv F ι σ Γ env E S :=
   ⟨h.foot.unshift, h.nodup, h.disj, by rw [← Ctx.shift_keys]; exact h.keys⟩
 
+
+/-! ## Regions further out
+
+A function called for a region the code around it is inside of sees only that region and those
+around it: `ι.drop k`. -/
+
+theorem RefOk.drop_iff : RefOk ι σ (j + k) τ l ↔ RefOk (ι.drop k) σ j τ l := by
+  simp [RefOk, List.getElem?_drop, Nat.add_comm]
+
+theorem drop_drop_add {ι : List Nat} : (ι.drop k).drop j = ι.drop (j + k) := by
+  rw [List.drop_drop, Nat.add_comm]
+
+theorem LT.shiftk (h : LT F (ι.drop k) σ c τ L) : LT F ι σ c (τ.shiftBy k) L := by
+  generalize hι : ι.drop k = ι' at h
+  induction h with
+  | int ha => exact .int ha
+  | box ha _ hn ih => exact .box ha ih hn
+  | clo ha hc hb hn _ => exact .clo ha hc (hb.rfree_iota hc.rfree) hn
+  | pair ha _ _ hd hn ih1 ih2 => exact .pair ha ih1 ih2 hd hn
+  | tag ha _ hn ih =>
+    refine .tag ha ?_ hn
+    rw [← Ty.shiftBy_ite]; exact ih
+  | hole => exact .hole
+  | rref ha hr => subst hι; exact .rref ha (RefOk.drop_iff.mpr hr)
+  | arena hk ha hnd hn hcs hex =>
+    subst hι
+    refine .arena (by simpa [List.getElem?_drop, Nat.add_comm] using hk) ha hnd hn (fun l hl => ?_) hex
+    obtain ⟨τ, v, h1, h2, h3⟩ := hcs l hl
+    exact ⟨τ, v, h1, h2, by rw [drop_drop_add] at h3; exact h3⟩
+
+theorem LT.unshiftk : ∀ {τ : Ty} {c : Nat} {L : List Nat}, LT F ι σ c (τ.shiftBy k) L → LT F (ι.drop k) σ c τ L
+  | .int, _, _, h => by simp only [Ty.shiftBy] at h; cases h with | int ha => exact .int ha
+  | .box τ, _, _, h => by
+    simp only [Ty.shiftBy] at h
+    cases h with | box ha hb hn => exact .box ha (LT.unshiftk hb) hn
+  | .fn _ _ _ _, _, _, h => by
+    simp only [Ty.shiftBy] at h
+    cases h with | clo ha hc hb hn => exact .clo ha hc (hb.rfree_iota hc.rfree) hn
+  | .pair A B, _, _, h => by
+    simp only [Ty.shiftBy] at h
+    cases h with | pair ha h1 h2 hd hn => exact .pair ha (LT.unshiftk h1) (LT.unshiftk h2) hd hn
+  | .sum A B, _, _, h => by
+    simp only [Ty.shiftBy] at h
+    cases h with
+    | tag ha hb hn =>
+      rename_i t _ _
+      refine .tag ha ?_ hn
+      cases t
+      · exact LT.unshiftk (τ := B) hb
+      · exact LT.unshiftk (τ := A) hb
+  | .hole τ, _, _, h => by simp only [Ty.shiftBy] at h; cases h; exact .hole
+  | .rref c j τ, _, _, h => by
+    simp only [Ty.shiftBy] at h
+    cases h with | rref ha hr => exact .rref ha (RefOk.drop_iff.mp hr)
+  | .arena j, _, _, h => by
+    simp only [Ty.shiftBy] at h
+    cases h with
+    | arena hk ha hnd hn hcs hex =>
+      refine .arena (by simpa [List.getElem?_drop, Nat.add_comm] using hk) ha hnd hn (fun l hl => ?_) hex
+      obtain ⟨τ, v, h1, h2, h3⟩ := hcs l hl
+      exact ⟨τ, v, h1, h2, by rw [drop_drop_add]; exact h3⟩
+
+theorem VT.shiftk (h : VT F (ι.drop k) σ τ v L) : VT F ι σ (τ.shiftBy k) v L := by
+  cases h with
+  | int => exact .int
+  | box h hc => exact .box h.shiftk (by rw [Ty.complete_shift]; exact hc)
+  | clo hc h hc' => exact .clo hc (h.rfree_iota hc.rfree) hc'
+  | pair h1 h2 hd hA hB =>
+    exact .pair h1.shiftk h2.shiftk hd (by rw [Ty.complete_shift]; exact hA) (by rw [Ty.complete_shift]; exact hB)
+  | tag h hA hB =>
+    exact .tag (by rw [← Ty.shiftBy_ite]; exact h.shiftk) (by rw [Ty.complete_shift]; exact hA)
+      (by rw [Ty.complete_shift]; exact hB)
+  | rref hr => exact .rref (RefOk.drop_iff.mpr hr)
+
+theorem LT.unshiftk_ite {t : Bool} (h : LT F ι σ c (if t then A.shiftBy k else B.shiftBy k) L) :
+    LT F (ι.drop k) σ c (if t then A else B) L := by
+  cases t
+  · exact LT.unshiftk (τ := B) h
+  · exact LT.unshiftk (τ := A) h
+
+theorem VT.unshiftk : ∀ {τ : Ty} {v : Val} {L : List Nat}, VT F ι σ (τ.shiftBy k) v L → VT F (ι.drop k) σ τ v L
+  | .int, _, _, h => by simp only [Ty.shiftBy] at h; cases h; exact .int
+  | .box τ, _, _, h => by
+    simp only [Ty.shiftBy] at h
+    cases h with | box hb hc => exact .box (LT.unshiftk hb) (by rwa [Ty.complete_shift] at hc)
+  | .fn _ _ _ _, _, _, h => by
+    simp only [Ty.shiftBy] at h
+    cases h with | clo hc hb hc' => exact .clo hc (hb.rfree_iota hc.rfree) hc'
+  | .pair A B, _, _, h => by
+    simp only [Ty.shiftBy] at h
+    cases h with
+    | pair h1 h2 hd hA hB =>
+      exact .pair (LT.unshiftk h1) (LT.unshiftk h2) hd (by rwa [Ty.complete_shift] at hA) (by rwa [Ty.complete_shift] at hB)
+  | .sum A B, _, _, h => by
+    simp only [Ty.shiftBy] at h
+    cases h with
+    | tag hb hA hB =>
+      exact .tag (LT.unshiftk_ite hb) (by rwa [Ty.complete_shift] at hA) (by rwa [Ty.complete_shift] at hB)
+  | .hole _, _, _, h => by simp only [Ty.shiftBy] at h; cases h
+  | .rref c j τ, _, _, h => by
+    simp only [Ty.shiftBy] at h
+    cases h with | rref hr => exact .rref (RefOk.drop_iff.mp hr)
+  | .arena _, _, _, h => by simp only [Ty.shiftBy] at h; cases h
+
+theorem Vals.unshiftk : ∀ {τs : List Ty} {vs : List Val} {Ls : List (List Nat)},
+    Vals F ι σ (τs.map (Ty.shiftBy k)) vs Ls → Vals F (ι.drop k) σ τs vs Ls
+  | [], _, _, h => by cases h; exact .nil
+  | τ :: τs, _, _, h => by
+    cases h with
+    | cons hv hr => exact .cons hv.unshiftk (Vals.unshiftk hr)
+
 end FlyCore.Ownership

@@ -219,7 +219,7 @@ theorem eval_ok_succ (hF : FnsOk F O) (hE : EvalOk F O n) (hR : RetOk F O n) :
         (by rw [typed_keys ha]; exact hI.keys) hb hRdy hwf
         (hE _ _ _ _ _ _ _ _ _ _ _ ha hI hwf hRdy)
     | call hfd hretp hcap hrow hargs hlends hexcl =>
-      rename_i f d owned lent ys
+      rename_i f d owned k lent ys
       obtain ⟨vs, σ1, E₁, Ls, hevs, hI₁, hvs, hLn, hdL, hdLS, hm₁⟩ := atoms_ok hargs hI hwf
       have hwf₁ := hm₁.wf
       simp only [eval, hfd, hevs]
@@ -298,7 +298,7 @@ theorem eval_ok_succ (hF : FnsOk F O) (hE : EvalOk F O n) (hR : RetOk F O n) :
         simp only [cloFn, hrefs, List.map_cons, List.map_nil, List.append_nil, List.nodup_cons,
           List.mem_singleton, List.not_mem_nil, not_false_eq_true, List.nodup_nil, and_true]
         intro e; subst e; exact hxc (by simp [hown])
-      have hcore := call_core (d := cloFn d xc τc .once) (hos := []) (vs := [v, w]) (Ls := [L₁, Rw]) hE hkeys
+      have hcore := call_core0 (d := cloFn d xc τc .once) (hos := []) (vs := [v, w]) (Ls := [L₁, Rw]) hE hkeys
         (by simpa [cloFn] using hbody) (fun l hl => hrow l (hrow' ▸ by simpa [cloFn] using hl)) hI₂ hwf hm₂
         (by rw [hown']; exact hvs)
         (by simpa using nodup_append_disj.mpr ⟨hv₁.nodup, hvw1.nodup, hdLw⟩)
@@ -362,7 +362,7 @@ theorem eval_ok_succ (hF : FnsOk F O) (hE : EvalOk F O n) (hR : RetOk F O n) :
             simp only [List.map_cons, List.map_nil, List.cons_append, List.nil_append, List.nodup_cons,
               List.mem_singleton, List.not_mem_nil, not_false_eq_true, List.nodup_nil, and_self, and_true]
             intro e; subst e; exact hxc (by simp [hown])
-          have hcore := call_core (d := cloFn d xc τc k) (hos := [h]) (vs := [v]) (Ls := [L₁]) hE hkeys
+          have hcore := call_core0 (d := cloFn d xc τc k) (hos := [h]) (vs := [v]) (Ls := [L₁]) hE hkeys
             (by rw [hsame.1, hsame.2.1, hsame.2.2]; exact hbody)
             (fun l hl => hrow l (hrow' ▸ hsame.2.2 ▸ hl)) hI₁ hwf (by simpa using hm₁)
             (by rw [hown']; exact .cons hv₁ .nil) (by simpa using hv₁.nodup) (by simpa using hdL)
@@ -426,8 +426,8 @@ theorem eval_ok_succ (hF : FnsOk F O) (hE : EvalOk F O n) (hR : RetOk F O n) :
         rcases (hEomem l).mp hl with h | h
         · exact .inl h
         · exact .inr h.1
-      have hIc := callee_inv (d := d) hI₁ hholes hpw hts.symm hkeys hfo hEo hEoin hdL
-        hdLS hwf₁ hold (by rt_tac) (fun _ _ _ h => h)
+      have hIc := callee_inv (k := 0) (d := d) hI₁ hholes hpw (by simpa using hts.symm) hkeys hfo hEo hEoin hdL
+        hdLS hwf₁ hold (by rt_tac) (fun _ _ _ h => by simpa using h)
       have hlow : ∀ l, σ1.mem l ≠ none → σ2.mem l ≠ none := fun l h => by rw [hold l (hwf₁ l h)]; exact h
       have hapart : ∀ {Y : List Nat}, (∀ l ∈ Y, σ1.mem l ≠ none) → Disj Y Ls.flatten →
           Disj Y (mutCells (olds hos)) → Disj Y (Eo ++ mutCells (olds hos)) := by
