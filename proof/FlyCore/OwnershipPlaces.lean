@@ -648,7 +648,7 @@ theorem replace_at (hI : Inv F ι σ Γ env E S) (hp : PlaceTy Γ p τ true r) (
   have hdP : Disj P R' := fun x hx hx' => hd x hx' (by simp [hx])
   obtain ⟨M, hfoot, hMp⟩ := hupd σ' R' hag hR' hd hdS
   have hE' : (E₁ ++ M ++ E₂).Perm (E₁ ++ (P ++ R') ++ E₂) := (hMp.append_left E₁).append_right E₂
-  refine ⟨_, ⟨hfoot, hE'.nodup_iff.mpr ?_, ?_, hI.keys, hag.cur.trans hI.cur⟩, hE'⟩
+  refine ⟨_, ⟨hfoot, hE'.nodup_iff.mpr ?_, ?_, hI.keys⟩, hE'⟩
   · simp only [List.nodup_append, List.mem_append] at hnd ⊢
     obtain ⟨⟨h1, ⟨hP, -, -⟩, h1PR⟩, h2, h12⟩ := hnd
     refine ⟨⟨h1, ⟨hP, hR'.nodup, fun x hx y hy e => hdP x hx (e ▸ hy)⟩, ?_⟩, h2, ?_⟩

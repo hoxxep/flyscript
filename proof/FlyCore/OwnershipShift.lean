@@ -265,10 +265,10 @@ theorem Ctx.shift_keys (Γ : Ctx) : (Ctx.shift Γ).map Prod.fst = Γ.map Prod.fs
   simp [Ctx.shift, Function.comp_def]
 
 theorem Inv.shift (h : Inv F ι σ Γ env E S) : Inv F (ι.push a) σ (Ctx.shift Γ) env E S :=
-  ⟨h.foot.shift, h.nodup, h.disj, by rw [Ctx.shift_keys]; exact h.keys, h.cur⟩
+  ⟨h.foot.shift, h.nodup, h.disj, by rw [Ctx.shift_keys]; exact h.keys⟩
 
 theorem Inv.unshift (h : Inv F (ι.push a) σ (Ctx.shift Γ) env E S) : Inv F ι σ Γ env E S :=
-  ⟨h.foot.unshift, h.nodup, h.disj, by rw [← Ctx.shift_keys]; exact h.keys, h.cur⟩
+  ⟨h.foot.unshift, h.nodup, h.disj, by rw [← Ctx.shift_keys]; exact h.keys⟩
 
 
 /-! ## Regions further out

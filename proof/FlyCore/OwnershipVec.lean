@@ -15,40 +15,6 @@ theorem LT.alloc_lt (h : LT F ι σ a τ L) (hwf : WF σ) : ∀ x ∈ L, x < σ.
   fun x hx => hwf x (h.alloc x hx)
 
 /-- Moving each element to a fresh cell keeps each element's tree, rooted at its new cell. -/
-theorem moveAll_cur : ∀ (cs : List Nat) (σ σ' : Store) (cs' : List Nat), σ.moveAll cs = some (cs', σ') → σ'.cur = σ.cur
-  | [], σ, σ', cs', h => by
-    simp only [Store.moveAll, Option.some.injEq, Prod.mk.injEq] at h
-    obtain ⟨-, rfl⟩ := h
-    rfl
-  | c :: cs, σ, σ', cs', h => by
-    simp only [Store.moveAll] at h
-    split at h
-    · rename_i w hw
-      split at h
-      · rename_i cs2 σ2 h2
-        simp only [Option.some.injEq, Prod.mk.injEq] at h
-        obtain ⟨-, rfl⟩ := h
-        exact (moveAll_cur cs _ _ _ h2).trans rfl
-      · cases h
-    · cases h
-
-theorem moveAll_fbext : ∀ (cs : List Nat) (σ σ' : Store) (cs' : List Nat), σ.moveAll cs = some (cs', σ') → FbExt σ σ'
-  | [], σ, σ', cs', h => by
-    simp only [Store.moveAll, Option.some.injEq, Prod.mk.injEq] at h
-    obtain ⟨-, rfl⟩ := h
-    exact FbExt.refl
-  | c :: cs, σ, σ', cs', h => by
-    simp only [Store.moveAll] at h
-    split at h
-    · rename_i w hw
-      split at h
-      · rename_i cs2 σ2 h2
-        simp only [Option.some.injEq, Prod.mk.injEq] at h
-        obtain ⟨-, rfl⟩ := h
-        exact fun l g h => moveAll_fbext cs _ _ _ h2 l g (FbExt.alloc (v := w) l g h)
-      · cases h
-    · cases h
-
 theorem moveAll_ok {τ : Ty} (hc : τ.complete = true) : ∀ (cs : List Nat) (Rs : List (List Nat)) (σ : Store),
     WF σ → Rs.length = cs.length → (∀ i (h : i < cs.length) (h' : i < Rs.length), LT F ι σ cs[i] τ Rs[i]) →
     Rs.flatten.Nodup →
@@ -89,14 +55,12 @@ theorem moveAll_ok {τ : Ty} (hc : τ.complete = true) : ∀ (cs : List Nat) (Rs
     have hel2 : ∀ i (h : i < cs.length) (h' : i < Rs.length), LT F ι σ2 cs[i] τ Rs[i] := fun i h h' => by
       have hi := hel (i + 1) (by simp; omega) (by simp; omega)
       simp only [List.getElem_cons_succ] at hi
-      refine hi.frame (Agree.of (fun x hx => ?_) rfl (fun l g h => FbExt.alloc (v := w) l g h))
+      refine hi.frame (Agree.of (fun x hx => ?_) rfl)
       have hxc : x ≠ c := fun e => hnd'.2.2 c (List.mem_cons_self ..) x (mem_flatten_of h' hx) e.symm
       have hxn : x ≠ σ.next := fun e => Nat.lt_irrefl _ (e ▸ hi.alloc_lt hwf x hx)
       rw [hm2]; simp [hxc, hxn]
     obtain ⟨Rs'', σ3, hmv, hlen', hel', hnd'', hmem'', hfree, hkeep, hn3, hrt3, hwf3⟩ :=
       moveAll_ok hc cs Rs σ2 hwf2 hlen hel2 hnd'.2.1
-    have hfb3 : FbExt σ σ3 := fun l g h => moveAll_fbext _ _ _ _ hmv l g (FbExt.alloc (v := w) l g h)
-    have hcur3 : σ3.cur = σ.cur := (moveAll_cur _ _ _ _ hmv).trans rfl
     rw [hn2] at hmv hel' hmem'' hn3
     -- The moved element: its new cell holds what the old one did, and its tree is as it was.
     have hRsn : ∀ x ∈ Rs.flatten, x < σ.next := fun x hx => by
@@ -180,12 +144,9 @@ changes no cell outside `E`. -/
 theorem Moves.rewrite {D : List Nat} (hwf : WF σ) (hwf' : WF σ') (hn : σ.next ≤ σ'.next)
     (hframe : ∀ l, l < σ.next → l ∉ E → σ'.mem l = σ.mem l) (hD : ∀ l ∈ D, σ'.mem l = none)
     (hlive : ∀ l ∈ E, l ∉ D → σ'.mem l ≠ none) (hnew : ∀ l, σ.next ≤ l → l < σ'.next → σ'.mem l ≠ none)
-    (hE' : ∀ l, l ∈ E' ↔ (l ∈ E ∧ l ∉ D) ∨ (σ.next ≤ l ∧ l < σ'.next)) (hrt : σ'.rt = σ.rt)
-    (hfb : FbExt σ σ' := by fb_tac) (hcur : σ'.cur = σ.cur := by cur_tac) :
+    (hE' : ∀ l, l ∈ E' ↔ (l ∈ E ∧ l ∉ D) ∨ (σ.next ≤ l ∧ l < σ'.next)) (hrt : σ'.rt = σ.rt) :
     Moves σ E σ' E' [] where
   rt := fun l x h => by rw [hrt]; exact h
-  fb := hfb
-  cur := hcur
   fresh := fun _ _ _ h h0 => by rw [hrt, h0] at h; cases h
   within := by
     intro l hl
@@ -244,8 +205,6 @@ theorem vpush_ok (ha : AtomTy Γ a τ Γ₁) (hp : PlaceTy Γ₁ p (.vec true τ
   have hwf₁ := hm₁.wf
   obtain ⟨Rs', σ2, hmv, hlen', hel', hnd', hmem', hfree, hkeep, hn2, hrt2, hwf2⟩ :=
     moveAll_ok hcτ cs Rs σ1 hwf₁ hlen hel hnd
-  have hfb2 : FbExt σ1 σ2 := moveAll_fbext _ _ _ _ hmv
-  have hcur2 : σ2.cur = σ1.cur := moveAll_cur _ _ _ _ hmv
   simp only [evalS, hev, hres, hcm, hmv]
   -- Where everything is.
   have hndE := hE.nodup_iff.mp hI₁.nodup
@@ -272,10 +231,6 @@ theorem vpush_ok (ha : AtomTy Γ a τ Γ₁) (hp : PlaceTy Γ₁ p (.vec true τ
   have hn4 : σ4.next = l + 1 := by rw [← hσ4, ← hl]; rfl
   have hrt4 : σ4.rt = σ1.rt := by rw [← hσ4]; exact hrt2
   have hwf4 : WF σ4 := by rw [← hσ4]; exact (hwf2.alloc).set (by show c < σ2.next + 1; omega)
-  have hfb24 : FbExt σ2 σ4 := by rw [← hσ4]; exact fun l g h => FbExt.alloc (v := v) l g h
-  have hfb4 : FbExt σ1 σ4 := hfb2.trans hfb24
-  have hcur24 : σ4.cur = σ2.cur := by rw [← hσ4]; rfl
-  have hcur4 : σ4.cur = σ1.cur := hcur24.trans hcur2
   -- Cells older than the push, but the vector's and its elements' heads, are as they were.
   have hold : ∀ x, x < σ1.next → x ≠ c → x ∉ cs → σ4.mem x = σ1.mem x := fun x h1 h2 h3 => by
     rw [hm4, if_neg h2, if_neg (by omega), hkeep x h3 h1]
@@ -468,7 +423,7 @@ theorem vpop_ok (hp : PlaceTy Γ p (.vec true τ) true y) (hcτ : τ.complete = 
       rcases List.mem_append.mp hl with h | h
       · exact hold l (hI.alloc l h)
       · exact hold l (hI.allocS l h)) (by rw [← hσ1]; rfl)
-    refine ⟨E, [b], ⟨hI.foot.frame hag, hI.nodup, hI.disj, hI.keys, hag.cur.trans hI.cur⟩, .tag (.int hbm) rfl hcτ,
+    refine ⟨E, [b], ⟨hI.foot.frame hag, hI.nodup, hI.disj, hI.keys⟩, .tag (.int hbm) rfl hcτ,
       fun l h1 h2 => ?_, fun l h1 h2 => ?_, ?_⟩
     · simp at h1; subst h1; exact hfresh _ (hI.alloc _ h2) rfl
     · simp at h1; subst h1; exact hfresh _ (hI.allocS _ h2) rfl
@@ -751,7 +706,7 @@ theorem lend_mut_sh (hE : EvalOk F O n) (hx : lookup x Γ = none) (ha : lookup y
   have hIb : Inv F ι σ ((x, .ref .mut τ) :: hide Γ y) ((x, l) :: env) (Rt ++ Eh) S := by
     refine ⟨by simpa [addE, addS, Slot.excl, exclPart_plain hxs, sharedPart_plain hxs] using
         Foot.cons (s := .ref .mut τ) (x := x) hRt hfh, hBn, fun z hz h => hI.disj z hz (hBE z h),
-      List.nodup_cons.mpr ⟨hxk, by rw [hide_keys]; exact hI.keys⟩, by cur_inv⟩
+      List.nodup_cons.mpr ⟨hxk, by rw [hide_keys]; exact hI.keys⟩⟩
   have hkb : Γb.map Prod.fst = Γ.map Prod.fst := by
     have := typed_keys hb
     simp only [List.map_cons, List.cons.injEq] at this
@@ -783,7 +738,7 @@ theorem lend_mut_sh (hE : EvalOk F O n) (hx : lookup x Γ = none) (ha : lookup y
       refine (hR1p.append_right Et).trans ?_
       exact List.perm_iff_count.mpr fun z => by simp only [List.count_append]; omega)
     refine ⟨E', ⟨hf', hp''.nodup_iff.mpr (nodup_append_disj.mpr ⟨hI'.nodup, hPn, fun z h h' => hdX z h' h⟩),
-      ?_, by rw [thaw_keys hkb]; exact hI.keys, by cur_inv⟩, fun z => by rw [hp''.mem_iff, List.mem_append]⟩
+      ?_, by rw [thaw_keys hkb]; exact hI.keys⟩, fun z => by rw [hp''.mem_iff, List.mem_append]⟩
     intro z hz hz'
     rcases List.mem_append.mp (hp''.mem_iff.mp hz') with h | h
     · exact hI'.disj z hz h
@@ -1020,7 +975,7 @@ theorem lendSlice_ok (hE : EvalOk F O n) (hx : lookup x Γ = none) (hp : PlaceTy
     have hfoot := Foot.cons (s := .ref .ro (.vec false τ)) (x := x) (a := σ.next) hLa
       (hfb.frame <| Agree.of' fun z hz => hold z (hfb.alloc z (List.mem_append.mp hz)))
     refine ⟨by simpa [addE, addS, Slot.excl, exclPart, sharedPart, Slot.shell, Ty.shell, Bool.false_eq_true] using hfoot, hEbn, ?_,
-      List.nodup_cons.mpr ⟨hxk, by rw [freeze_keys]; exact hI.keys⟩, by cur_inv⟩
+      List.nodup_cons.mpr ⟨hxk, by rw [freeze_keys]; exact hI.keys⟩⟩
     intro z hz hz'
     rcases hSin z hz with h | h
     · rcases List.mem_cons.mp h with rfl | h
@@ -1056,7 +1011,7 @@ theorem lendSlice_ok (hE : EvalOk F O n) (hx : lookup x Γ = none) (hp : PlaceTy
       · exact hold z (hI.allocS z h))
     obtain ⟨E', hf', hpe⟩ := hthaw σ1 Γb Eb' hft hwb hag0
     refine ⟨E', ⟨hf', hpe.nodup_iff.mpr (nodup_append_disj.mpr ⟨hI'.nodup, hFzn,
-        fun z h h' => hdX z (List.mem_cons_of_mem _ h') h⟩), ?_, by rw [thaw_keys hkb]; exact hI.keys, by cur_inv⟩,
+        fun z h h' => hdX z (List.mem_cons_of_mem _ h') h⟩), ?_, by rw [thaw_keys hkb]; exact hI.keys⟩,
       fun z => ?_⟩
     · intro z hz hz'
       rcases List.mem_append.mp (hpe.mem_iff.mp hz') with h | h
@@ -1179,7 +1134,7 @@ theorem lendSliceMut_ok (hE : EvalOk F O n) (hx : lookup x Γ = none) (hp : Plac
     have hfoot := Foot.cons (s := .ref .mut (.vec false τ)) (x := x) (a := σ.next) hLb
       (hfh.frame <| Agree.of' fun z hz => hold z (hfh.alloc z (List.mem_append.mp hz)))
     refine ⟨by simpa [addE, addS, exclPart, sharedPart, Slot.excl, Slot.shell, Ty.shell] using hfoot, hBn, ?_,
-      List.nodup_cons.mpr ⟨hxk, by rw [hide_keys]; exact hI.keys⟩, by cur_inv⟩
+      List.nodup_cons.mpr ⟨hxk, by rw [hide_keys]; exact hI.keys⟩⟩
     intro z hz hz'
     rcases List.mem_cons.mp hz with rfl | h
     · exact hna _ (hI.alloc _ (hBE _ hz')) rfl
@@ -1251,7 +1206,7 @@ theorem lendSliceMut_ok (hE : EvalOk F O n) (hx : lookup x Γ = none) (hp : Plac
       refine (hexL.append_right Et).trans ?_
       exact List.perm_iff_count.mpr fun z => by simp only [List.count_append]; omega)
     refine ⟨E', ⟨hf', hp''.nodup_iff.mpr (nodup_append_disj.mpr ⟨hI'.nodup, hPkn,
-        fun z h h' => hdX z (List.mem_cons_of_mem _ h') h⟩), ?_, by rw [thaw_keys hkb]; exact hI.keys, by cur_inv⟩,
+        fun z h h' => hdX z (List.mem_cons_of_mem _ h') h⟩), ?_, by rw [thaw_keys hkb]; exact hI.keys⟩,
       fun z => ?_⟩
     · intro z hz hz'
       rcases List.mem_append.mp (hp''.mem_iff.mp hz') with h | h

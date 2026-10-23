@@ -37,7 +37,7 @@ theorem preempt_ok (ht : Typed F O Γ e τ Γ' r) (hI : Inv F ι σ Γ env E S) 
     (hp : preTarget O hs = some (e0, j)) :
     Post F ι O σ E S Γ' env τ r hs (.susp j e0 [] [] [.startK env e], σ.fresh.2) := by
   obtain ⟨hm, op, hop, howns, hrefs, hret⟩ := preTarget_spec hp
-  have hI1 : Inv F ι σ.fresh.2 Γ env E S := ⟨hI.foot.frame (Agree.of' fun _ _ => rfl), hI.nodup, hI.disj, hI.keys, hI.cur⟩
+  have hI1 : Inv F ι σ.fresh.2 Γ env E S := ⟨hI.foot.frame (Agree.of' fun _ _ => rfl), hI.nodup, hI.disj, hI.keys⟩
   have hb : FramesOk F O ι σ.fresh.2 [] op ⟨Γ, env, op.ret, S, r⟩ (E.filter (· ∉ mutCells (olds []))) [] [] :=
     .base hI1 (fun _ h => by simp at h) List.Pairwise.nil hop (by simp [hrefs]) (Weaker.refl _)
   rw [hret] at hb
@@ -61,7 +61,7 @@ theorem eval_ok_succ (hF : FnsOk F O) (hE : EvalOk F O n) (hR : RetOk F O n) :
     · exact preempt_ok ht hI hwf hRdy hpt
     · cases hpt
   -- Each step is a point the schedule may stop it at, which it counts.
-  have hI1 : Inv F ι σ.fresh.2 Γ env E S := ⟨hI.foot.frame (Agree.of' fun _ _ => rfl), hI.nodup, hI.disj, hI.keys, hI.cur⟩
+  have hI1 : Inv F ι σ.fresh.2 Γ env E S := ⟨hI.foot.frame (Agree.of' fun _ _ => rfl), hI.nodup, hI.disj, hI.keys⟩
   refine post_after (Moves.freshen hwf hI.alloc) hwf ?_
   suffices h : ∀ σ, Inv F ι σ Γ env E S → WF σ → Post F ι O σ E S Γ' env τ r hs (evalS F O n hs σ env e) from
     h _ hI1 hwf
@@ -101,7 +101,7 @@ theorem eval_ok_succ (hF : FnsOk F O) (hE : EvalOk F O n) (hR : RetOk F O n) :
           · exact Nat.lt_irrefl _ (hm₁.wf _ (hL₁ _ hl))
           · exact Nat.lt_irrefl _ (hm₁.wf _ (hI₁.alloc _ hl))
         · exact Nat.lt_irrefl _ (hm₁.wf _ (hI₁.allocS _ hl))
-      refine post_val ⟨hI₁.foot.frame (hag.mono fun l hl => ?_), hI₁.nodup, hI₁.disj, hI₁.keys, hI₁.cur⟩
+      refine post_val ⟨hI₁.foot.frame (hag.mono fun l hl => ?_), hI₁.nodup, hI₁.disj, hI₁.keys⟩
         (.box (LT.of_contents (by simp [Store.alloc]) (hv₁.frame (hag.mono fun l hl => ?_)) ?_) hv₁.complete) ?_ ?_
         ((hm₁.trans (Moves.allocate hm₁.wf hI₁.alloc) hd₁ hwf).relabel fun x => by
           simp only [List.mem_append, List.mem_cons, List.not_mem_nil, or_false,
@@ -136,7 +136,7 @@ theorem eval_ok_succ (hF : FnsOk F O) (hE : EvalOk F O n) (hR : RetOk F O n) :
           · exact Nat.lt_irrefl _ (hm₁.wf _ (hL₁ _ hl))
           · exact Nat.lt_irrefl _ (hm₁.wf _ (hI₁.alloc _ hl))
         · exact Nat.lt_irrefl _ (hm₁.wf _ (hI₁.allocS _ hl))
-      refine post_val ⟨hI₁.foot.frame (hag.mono fun l hl => ?_), hI₁.nodup, hI₁.disj, hI₁.keys, hI₁.cur⟩
+      refine post_val ⟨hI₁.foot.frame (hag.mono fun l hl => ?_), hI₁.nodup, hI₁.disj, hI₁.keys⟩
         (.tag (LT.of_contents (by simp [Store.alloc]) (hv₁.frame (hag.mono fun l hl => ?_)) ?_)
           (by simp only [Ty.complete, Bool.and_eq_true] at hAB; exact hAB.1)
           (by simp only [Ty.complete, Bool.and_eq_true] at hAB; exact hAB.2)) ?_ ?_
@@ -173,7 +173,7 @@ theorem eval_ok_succ (hF : FnsOk F O) (hE : EvalOk F O n) (hR : RetOk F O n) :
           · exact Nat.lt_irrefl _ (hm₁.wf _ (hL₁ _ hl))
           · exact Nat.lt_irrefl _ (hm₁.wf _ (hI₁.alloc _ hl))
         · exact Nat.lt_irrefl _ (hm₁.wf _ (hI₁.allocS _ hl))
-      refine post_val ⟨hI₁.foot.frame (hag.mono fun l hl => ?_), hI₁.nodup, hI₁.disj, hI₁.keys, hI₁.cur⟩
+      refine post_val ⟨hI₁.foot.frame (hag.mono fun l hl => ?_), hI₁.nodup, hI₁.disj, hI₁.keys⟩
         (.clo ⟨_, _, _, hfd, hcap, hown, hrefs, hretp, rfl, rfl, hv₁.complete, hrf⟩
           (LT.of_contents (by simp [Store.alloc]) (hv₁.frame (hag.mono fun l hl => ?_)) ?_) hv₁.complete) ?_ ?_
         ((hm₁.trans (Moves.allocate hm₁.wf hI₁.alloc) hd₁ hwf).relabel fun x => by
@@ -227,8 +227,6 @@ theorem eval_ok_succ (hF : FnsOk F O) (hE : EvalOk F O n) (hR : RetOk F O n) :
       have hAPB : ∀ x ∈ A ++ P ++ B, x ∈ E₁ := fun x hx => hE.mem_iff.mpr (by
         simp only [List.mem_append] at hx ⊢; rcases hx with (hx | hx) | hx <;> simp [hx])
       let σ3 := σ2.set l (some v)
-      have hfb3 : σ3.fb = σ1.fb := by simp only [σ3, Store.set_fb]; exact drop_fb hdrop
-      have hcur3 : σ3.cur = σ1.cur := by simp only [σ3, Store.set_cur]; exact drop_cur hdrop
       have hkeep3 : ∀ x, x ≠ l → x ∉ R' → σ3.mem x = σ1.mem x := by
         intro x hx hxR; simp only [σ3, Store.set, hx, ite_false]; exact hkeep x hxR
       have hag : Agree σ1 σ3 (A ++ P ++ B ++ S) := Agree.of' fun x hx => by
@@ -326,7 +324,7 @@ theorem eval_ok_succ (hF : FnsOk F O) (hE : EvalOk F O n) (hR : RetOk F O n) :
           subst e
           rcases List.mem_append.mp hl with h | h
           · exact hcE₁ h
-          · exact hcS h, hI₁.nodup, hI₁.disj, hI₁.keys, hI₁.cur⟩
+          · exact hcS h, hI₁.nodup, hI₁.disj, hI₁.keys⟩
       have hvs : Vals F ι (σ1.set c none) [A, τc] [v, w] [L₁, Rw] :=
         .cons (hv₁.frame <| Agree.of' fun l hl => hag2 l fun e => hcL₁ (e ▸ hl))
           (.cons (hvw1.frame <| Agree.of' fun l hl => hag2 l fun e => hcRw (e ▸ hl)) .nil)
@@ -474,9 +472,7 @@ theorem eval_ok_succ (hF : FnsOk F O) (hE : EvalOk F O n) (hR : RetOk F O n) :
       have hcells : (allocAll σ1 ((d.owns.map Prod.fst).zip vs)).1.map Prod.fst = d.owns.map Prod.fst := by
         rw [allocAll_fst]; exact List.map_fst_zip (by rw [hvs.length]; simp)
       have hrtAl := allocAll_rt σ1 ((d.owns.map Prod.fst).zip vs)
-      have hfbtAl := allocAll_fbext σ1 ((d.owns.map Prod.fst).zip vs)
-      have hcutAl := allocAll_cur σ1 ((d.owns.map Prod.fst).zip vs)
-      generalize allocAll σ1 ((d.owns.map Prod.fst).zip vs) = al at hfo hEomem hle hwf₂ hold hnew hlenc hcells hrtAl hfbtAl hcutAl ⊢
+      generalize allocAll σ1 ((d.owns.map Prod.fst).zip vs) = al at hfo hEomem hle hwf₂ hold hnew hlenc hcells hrtAl ⊢
       obtain ⟨cells, σ2⟩ := al
       dsimp only at hfo hEomem hle hwf₂ hold hnew hlenc hcells hrtAl ⊢
       have hMin : ∀ l ∈ mutCells (olds hos), l ∈ E₁ := fun l hl => by
@@ -487,7 +483,7 @@ theorem eval_ok_succ (hF : FnsOk F O) (hE : EvalOk F O n) (hR : RetOk F O n) :
         · exact .inl h
         · exact .inr h.1
       have hIc := callee_inv (k := 0) (d := d) hI₁ hholes hpw (by simpa using hts.symm) hkeys hfo hEo hEoin hdL
-        hdLS hwf₁ hold (by rt_tac) (by fb_tac) (by cur_tac) rfl (fun _ _ _ h => by simpa using h)
+        hdLS hwf₁ hold (by rt_tac) (fun _ _ _ h => by simpa using h)
       have hlow : ∀ l, σ1.mem l ≠ none → σ2.mem l ≠ none := fun l h => by rw [hold l (hwf₁ l h)]; exact h
       have hapart : ∀ {Y : List Nat}, (∀ l ∈ Y, σ1.mem l ≠ none) → Disj Y Ls.flatten →
           Disj Y (mutCells (olds hos)) → Disj Y (Eo ++ mutCells (olds hos)) := by
@@ -749,7 +745,7 @@ theorem program_ok_sched (hF : FnsOk F O) (ht : Typed F O [] e τ Γ' [.fail]) (
     ⟨.abort (by intro e h; cases h) .nil, fun l hl => by
       simp only [List.mem_singleton] at hl; subst hl; exact find_head⟩
   have h := eval_ok hF n [.abort .fail 0] (Store.sched0 s p) ∅ [] [] [] [] e τ Γ' [.fail] ht
-    ⟨.nil, List.nodup_nil, disj_nil_left, List.nodup_nil, rfl⟩ Store.sched0_wf hR
+    ⟨.nil, List.nodup_nil, disj_nil_left, List.nodup_nil⟩ Store.sched0_wf hR
   generalize eval F O n [.abort .fail 0] (Store.sched0 s p) [] e = r at h ⊢
   rcases r with ⟨r, σ'⟩
   have hΓ : Γ' = [] := List.eq_nil_of_map_eq_nil (typed_keys ht)

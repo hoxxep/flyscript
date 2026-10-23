@@ -132,215 +132,12 @@ def WF (σ : Store) : Prop := ∀ l, σ.mem l ≠ none → l < σ.next
 /-- What region cells are tagged with stays so. -/
 def RtExt (σ σ' : Store) : Prop := ∀ l x, σ.rt l = some x → σ'.rt l = some x
 
-/-- What fiber cells were allocated on stays so. -/
-def FbExt (σ σ' : Store) : Prop := ∀ l g, σ.fb l = some g → σ'.fb l = some g
-
-theorem FbExt.refl : FbExt σ σ := fun _ _ h => h
-theorem FbExt.trans (h₁ : FbExt σ σ') (h₂ : FbExt σ' σ'') : FbExt σ σ'' := fun l g h => h₂ l g (h₁ l g h)
-theorem FbExt.of_eq (h : σ'.fb = σ.fb) : FbExt σ σ' := fun l g hx => by rw [h]; exact hx
-theorem FbExt.alloc : FbExt σ (σ.alloc v).2 := fun l g h => by
-  have := σ.fbwf l g h
-  simp only [Store.alloc, Nat.ne_of_lt this, ↓reduceIte, h]
-
-@[simp] theorem Store.set_fb {σ : Store} : (σ.set l v).fb = σ.fb := rfl
-@[simp] theorem Store.fresh_fb {σ : Store} : σ.fresh.2.fb = σ.fb := rfl
-@[simp] theorem Store.set_cur {σ : Store} : (σ.set l v).cur = σ.cur := rfl
-@[simp] theorem Store.alloc_cur {σ : Store} : (σ.alloc v).2.cur = σ.cur := rfl
-@[simp] theorem Store.fresh_cur {σ : Store} : σ.fresh.2.cur = σ.cur := rfl
-@[simp] theorem Store.freeAll_fb : ∀ {σ : Store} {cs : List Nat}, (σ.freeAll cs).fb = σ.fb
-  | _, [] => rfl
-  | σ, _ :: cs => (Store.freeAll_fb (σ := σ.set _ none) (cs := cs))
-
-theorem allocAll_cur : ∀ (σ : Store) (xs : List (Var × Val)), (allocAll σ xs).2.cur = σ.cur
-  | _, [] => rfl
-  | σ, (_, v) :: rest => by simp only [allocAll]; rw [allocAll_cur]; rfl
-
-theorem allocAll_fbext : ∀ (σ : Store) (xs : List (Var × Val)), FbExt σ (allocAll σ xs).2
-  | _, [] => FbExt.refl
-  | σ, (_, v) :: rest => by simp only [allocAll]; exact FbExt.alloc.trans (allocAll_fbext _ rest)
-
-theorem dropCellsWith_fb (h1 : ∀ σ w σ', drop1 σ w = some σ' → Store.fb σ' = σ.fb) :
-    ∀ (σ : Store) (cs : List Nat) σ', dropCellsWith drop1 σ cs = some σ' → σ'.fb = σ.fb
-  | σ, [], σ', h => by simp [dropCellsWith] at h; subst h; rfl
-  | σ, c :: cs, σ', h => by
-    simp only [dropCellsWith] at h
-    split at h
-    · split at h
-      · rename_i σ1 hd
-        exact (dropCellsWith_fb h1 _ cs σ' h).trans (by simp only [Store.set_fb]; exact h1 _ _ _ hd)
-      · cases h
-    · cases h
-
-/-- Dropping a value changes no region tag. -/
-theorem dropK_fb : ∀ (k : Nat) (σ : Store) (τ : Ty) (v : Val) (σ' : Store), dropK k σ τ v = some σ' → σ'.fb = σ.fb := by
-  intro k
-  induction k with
-  | zero =>
-    intro σ τ v σ' h
-    cases τ <;> cases v <;> (try simp [dropK] at h)
-    all_goals try (subst h; rfl)
-    rename_i cs
-    cases cs <;> simp [dropK] at h
-    subst h; rfl
-  | succ k ih =>
-    intro σ τ v σ' h
-    cases τ <;> cases v <;> simp only [dropK, reduceCtorEq] at h
-    all_goals try (cases h; rfl)
-    all_goals try (exact dropCellsWith_fb (fun σ w σ' h' => ih σ _ w σ' h') _ _ _ h)
-    all_goals
-      revert h
-      repeat' split
-      all_goals intro h
-      all_goals (try simp at h)
-    all_goals (subst h; simp only [Store.set_fb]
-               first
-               | exact ih _ _ _ _ (by assumption)
-               | (refine (ih _ _ _ _ (by assumption)).trans ?_; simp only [Store.set_fb]; exact ih _ _ _ _ (by assumption)))
-
-theorem drop_fb (h : drop σ τ v = some σ') : σ'.fb = σ.fb := dropK_fb _ _ _ _ _ h
-
-theorem dropCell_fb (h : dropCell σ τ c = some σ') : σ'.fb = σ.fb := by
-  unfold dropCell at h
-  split at h
-  · cases h; rfl
-  · obtain ⟨σ'', h1, rfl⟩ := Option.map_eq_some_iff.mp h
-    exact (Store.set_fb).trans (drop_fb h1)
-  · cases h
-
-theorem dropCells_fb : ∀ (σ : Store) (cs : List (Ty × Nat)) (σ' : Store), dropCells σ cs = some σ' → σ'.fb = σ.fb
-  | _, [], _, h => by cases h; rfl
-  | σ, (τ, c) :: rest, σ', h => by
-    simp only [dropCells] at h
-    split at h
-    · rename_i σ1 h1
-      exact (dropCells_fb σ1 rest σ' h).trans (dropCell_fb h1)
-    · cases h
-
-@[simp] theorem Store.freeAll_cur : ∀ {σ : Store} {cs : List Nat}, (σ.freeAll cs).cur = σ.cur
-  | _, [] => rfl
-  | σ, _ :: cs => (Store.freeAll_cur (σ := σ.set _ none) (cs := cs))
-
-theorem dropCellsWith_cur (h1 : ∀ σ w σ', drop1 σ w = some σ' → Store.cur σ' = σ.cur) :
-    ∀ (σ : Store) (cs : List Nat) σ', dropCellsWith drop1 σ cs = some σ' → σ'.cur = σ.cur
-  | σ, [], σ', h => by simp [dropCellsWith] at h; subst h; rfl
-  | σ, c :: cs, σ', h => by
-    simp only [dropCellsWith] at h
-    split at h
-    · split at h
-      · rename_i σ1 hd
-        exact (dropCellsWith_cur h1 _ cs σ' h).trans (by simp only [Store.set_cur]; exact h1 _ _ _ hd)
-      · cases h
-    · cases h
-
-/-- Dropping a value changes no region tag. -/
-theorem dropK_cur : ∀ (k : Nat) (σ : Store) (τ : Ty) (v : Val) (σ' : Store), dropK k σ τ v = some σ' → σ'.cur = σ.cur := by
-  intro k
-  induction k with
-  | zero =>
-    intro σ τ v σ' h
-    cases τ <;> cases v <;> (try simp [dropK] at h)
-    all_goals try (subst h; rfl)
-    rename_i cs
-    cases cs <;> simp [dropK] at h
-    subst h; rfl
-  | succ k ih =>
-    intro σ τ v σ' h
-    cases τ <;> cases v <;> simp only [dropK, reduceCtorEq] at h
-    all_goals try (cases h; rfl)
-    all_goals try (exact dropCellsWith_cur (fun σ w σ' h' => ih σ _ w σ' h') _ _ _ h)
-    all_goals
-      revert h
-      repeat' split
-      all_goals intro h
-      all_goals (try simp at h)
-    all_goals (subst h; simp only [Store.set_cur]
-               first
-               | exact ih _ _ _ _ (by assumption)
-               | (refine (ih _ _ _ _ (by assumption)).trans ?_; simp only [Store.set_cur]; exact ih _ _ _ _ (by assumption)))
-
-theorem drop_cur (h : drop σ τ v = some σ') : σ'.cur = σ.cur := dropK_cur _ _ _ _ _ h
-
-theorem dropCell_cur (h : dropCell σ τ c = some σ') : σ'.cur = σ.cur := by
-  unfold dropCell at h
-  split at h
-  · cases h; rfl
-  · obtain ⟨σ'', h1, rfl⟩ := Option.map_eq_some_iff.mp h
-    exact (Store.set_cur).trans (drop_cur h1)
-  · cases h
-
-theorem dropCells_cur : ∀ (σ : Store) (cs : List (Ty × Nat)) (σ' : Store), dropCells σ cs = some σ' → σ'.cur = σ.cur
-  | _, [], _, h => by cases h; rfl
-  | σ, (τ, c) :: rest, σ', h => by
-    simp only [dropCells] at h
-    split at h
-    · rename_i σ1 h1
-      exact (dropCells_cur σ1 rest σ' h).trans (dropCell_cur h1)
-    · cases h
-
-/-- The fiber running in a store made from another by the interpreter, without a switch. -/
-macro "cur_core" : tactic => `(tactic| first
-  | rfl
-  | assumption
-  | exact (by assumption : _ = _).symm
-  | (simp only [Store.set_cur, Store.fresh_cur, Store.alloc_cur, Store.freeAll_cur, allocAll_cur]; done)
-  | exact allocAll_cur _ _
-  | exact (allocAll_cur _ _).trans (by assumption)
-  | exact drop_cur (by assumption)
-  | exact dropK_cur _ _ _ _ _ (by assumption)
-  | exact dropCells_cur _ _ _ (by assumption)
-  | exact dropCell_cur (by assumption)
-  | (simp only [Store.set_cur, Store.fresh_cur, Store.alloc_cur, Store.freeAll_cur]
-     first
-     | exact drop_cur (by assumption)
-     | exact dropK_cur _ _ _ _ _ (by assumption)
-     | exact dropCells_cur _ _ _ (by assumption)
-     | exact dropCell_cur (by assumption)
-     | exact (dropK_cur _ _ _ _ _ (by assumption)).trans (dropK_cur _ _ _ _ _ (by assumption))))
-
-macro "cur_tac" : tactic => `(tactic| first | cur_core | (subst_vars; cur_core))
-
-/-- The fiber tags of a store kept by one made from it by the interpreter. -/
-macro "fb_core" : tactic => `(tactic| first
-  | exact FbExt.refl
-  | exact FbExt.alloc
-  | exact allocAll_fbext _ _
-  | assumption
-  | exact FbExt.alloc.trans (by assumption)
-  | exact FbExt.alloc.trans FbExt.alloc
-  | exact (FbExt.alloc.trans FbExt.alloc).trans FbExt.alloc
-  | exact (by assumption : FbExt _ _).trans FbExt.alloc
-  | exact FbExt.of_eq (by assumption)
-  | exact fun l g h => FbExt.alloc l g h
-  | exact fun l g h => (by assumption : FbExt _ _) l g (FbExt.alloc l g h)
-  | exact fun l g h => FbExt.alloc l g ((by assumption : FbExt _ _) l g h)
-  | exact (by assumption : FbExt _ _).trans (FbExt.alloc.trans (FbExt.of_eq rfl))
-  | exact ((by assumption : FbExt _ _).trans FbExt.alloc).trans (FbExt.of_eq rfl)
-  | (apply FbExt.of_eq
-     first
-     | rfl
-     | (simp only [Store.set_fb, Store.fresh_fb, Store.freeAll_fb]; done)
-     | exact drop_fb (by assumption)
-     | exact dropK_fb _ _ _ _ _ (by assumption)
-     | exact dropCells_fb _ _ _ (by assumption)
-     | exact dropCell_fb (by assumption)
-     | (simp only [Store.set_fb, Store.fresh_fb, Store.freeAll_fb]
-        first
-        | exact drop_fb (by assumption)
-        | exact dropK_fb _ _ _ _ _ (by assumption)
-        | exact dropCells_fb _ _ _ (by assumption)
-        | exact dropCell_fb (by assumption)
-        | exact (dropK_fb _ _ _ _ _ (by assumption)).trans (dropK_fb _ _ _ _ _ (by assumption)))))
-
-macro "fb_tac" : tactic => `(tactic| first | fb_core | (subst_vars; fb_core))
-
-/-- Two stores agree at the cells `L`, and the later keeps the region and fiber tags of the earlier. -/
+/-- Two stores agree at the cells `L`, and the later keeps the region tags of the earlier. -/
 structure Agree (σ σ' : Store) (L : List Nat) : Prop where
   mem : ∀ l ∈ L, σ'.mem l = σ.mem l
   rt : RtExt σ σ'
   /-- No region whose arena cell is among `L` gained a cell. -/
   fresh : ∀ a ∈ L, ∀ l x, σ'.rt l = some (a, x) → σ.rt l = some (a, x)
-  fb : FbExt σ σ'
-  cur : σ'.cur = σ.cur
 
 instance : CoeFun (Agree σ σ' L) (fun _ => ∀ l ∈ L, σ'.mem l = σ.mem l) := ⟨Agree.mem⟩
 
@@ -352,32 +149,27 @@ theorem RtExt.of_eq (h : σ'.rt = σ.rt) : RtExt σ σ' := fun l x hx => by rw [
 
 /-- Agreement at fewer cells. -/
 theorem Agree.mono (h : Agree σ σ' L) (hL : ∀ l ∈ L', l ∈ L) : Agree σ σ' L' :=
-  ⟨fun l hl => h l (hL l hl), h.rt, fun a ha => h.fresh a (hL a ha), h.fb, h.cur⟩
+  ⟨fun l hl => h l (hL l hl), h.rt, fun a ha => h.fresh a (hL a ha)⟩
 
 theorem Agree.trans (h₁ : Agree σ σ' L) (h₂ : Agree σ' σ'' L) : Agree σ σ'' L :=
   ⟨fun l hl => (h₂ l hl).trans (h₁ l hl), h₁.rt.trans h₂.rt,
-    fun a ha l x hx => h₁.fresh a ha l x (h₂.fresh a ha l x hx), h₁.fb.trans h₂.fb, h₂.cur.trans h₁.cur⟩
+    fun a ha l x hx => h₁.fresh a ha l x (h₂.fresh a ha l x hx)⟩
 
 /-- Stores with the same region tags agree wherever their cells do. -/
-theorem Agree.of (h : ∀ l ∈ L, σ'.mem l = σ.mem l) (hrt : σ'.rt = σ.rt) (hfb : FbExt σ σ' := by fb_tac)
-    (hcur : σ'.cur = σ.cur := by cur_tac) : Agree σ σ' L :=
-  ⟨h, fun l x hx => by rw [hrt]; exact hx, fun _ _ l x hx => by rw [← hrt]; exact hx, hfb, hcur⟩
+theorem Agree.of (h : ∀ l ∈ L, σ'.mem l = σ.mem l) (hrt : σ'.rt = σ.rt) : Agree σ σ' L :=
+  ⟨h, fun l x hx => by rw [hrt]; exact hx, fun _ _ l x hx => by rw [← hrt]; exact hx⟩
 
-theorem Agree.self : Agree σ σ L := ⟨fun _ _ => rfl, RtExt.refl, fun _ _ _ _ h => h, FbExt.refl, rfl⟩
+theorem Agree.self : Agree σ σ L := ⟨fun _ _ => rfl, RtExt.refl, fun _ _ _ _ h => h⟩
 
 /-- Agreement through a store that kept the region tags of one that agreed. -/
 theorem Agree.ofTrans {L0 : List Nat} (h : Agree σ σ1 L0) (hL : ∀ l ∈ L, l ∈ L0)
-    (hmem : ∀ l ∈ L, σ'.mem l = σ.mem l) (hrt : σ'.rt = σ1.rt) (hfb : FbExt σ1 σ' := by fb_tac)
-    (hcur : σ'.cur = σ1.cur := by cur_tac) : Agree σ σ' L :=
-  ⟨hmem, h.rt.trans (RtExt.of_eq hrt), fun a ha l x hx => h.fresh a (hL a ha) l x (by rw [← hrt]; exact hx),
-    h.fb.trans hfb, hcur.trans h.cur⟩
+    (hmem : ∀ l ∈ L, σ'.mem l = σ.mem l) (hrt : σ'.rt = σ1.rt) : Agree σ σ' L :=
+  ⟨hmem, h.rt.trans (RtExt.of_eq hrt), fun a ha l x hx => h.fresh a (hL a ha) l x (by rw [← hrt]; exact hx)⟩
 
 /-- Agreement through a store with the region tags of the first, which then agreed with the last. -/
 theorem Agree.ofPre {L0 : List Nat} (hrt : σ1.rt = σ.rt) (h : Agree σ1 σ' L0) (hL : ∀ l ∈ L, l ∈ L0)
-    (hmem : ∀ l ∈ L, σ'.mem l = σ.mem l) (hfb : FbExt σ σ1 := by fb_tac) (hcur : σ1.cur = σ.cur := by cur_tac) :
-    Agree σ σ' L :=
-  ⟨hmem, (RtExt.of_eq hrt).trans h.rt, fun a ha l x hx => by rw [← hrt]; exact h.fresh a (hL a ha) l x hx,
-    hfb.trans h.fb, h.cur.trans hcur⟩
+    (hmem : ∀ l ∈ L, σ'.mem l = σ.mem l) : Agree σ σ' L :=
+  ⟨hmem, (RtExt.of_eq hrt).trans h.rt, fun a ha l x hx => by rw [← hrt]; exact h.fresh a (hL a ha) l x hx⟩
 
 @[simp] theorem Store.set_rt {σ : Store} : (σ.set l v).rt = σ.rt := rfl
 @[simp] theorem Store.alloc_rt {σ : Store} : (σ.alloc v).2.rt = σ.rt := rfl
@@ -1030,9 +822,8 @@ macro "rt_tac" : tactic => `(tactic| first
       | assumption))
 
 /-- Agreement of stores with the same region tags. -/
-theorem Agree.of' (h : ∀ l ∈ L, σ'.mem l = σ.mem l) (hrt : σ'.rt = σ.rt := by rt_tac)
-    (hfb : FbExt σ σ' := by fb_tac) (hcur : σ'.cur = σ.cur := by cur_tac) : Agree σ σ' L :=
-  Agree.of h hrt hfb hcur
+theorem Agree.of' (h : ∀ l ∈ L, σ'.mem l = σ.mem l) (hrt : σ'.rt = σ.rt := by rt_tac) : Agree σ σ' L :=
+  Agree.of h hrt
 
 /-- Dropping a variable's cell frees its footprint: the cell, and what a live value in it owns. -/
 theorem dropCell_live (hwf : WF σ) : LT F ι σ c τ L → τ.complete = true →
@@ -1333,8 +1124,6 @@ structure Inv (F : List Fn) (ι : Iota) (σ : Store) (Γ : Ctx) (env : Env) (E S
   nodup : E.Nodup
   disj : Disj S E
   keys : (Γ.map Prod.fst).Nodup
-  /-- The fiber running is the one the code runs on. -/
-  cur : σ.cur = ι.fiber
 
 theorem LT.not_moved : LT F ι σ a τ L → τ.isHole = false → σ.mem a ≠ some .moved := by
   intro h hτ

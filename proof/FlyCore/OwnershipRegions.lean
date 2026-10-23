@@ -75,12 +75,6 @@ theorem Store.tag_mem {σ : Store} : (σ.tag l a τ).mem = σ.mem := by
 theorem Store.tag_next {σ : Store} : (σ.tag l a τ).next = σ.next := by
   unfold Store.tag; split <;> rfl
 
-@[simp] theorem Store.tag_fb {σ : Store} : (σ.tag l a τ).fb = σ.fb := by
-  unfold Store.tag; split <;> rfl
-
-@[simp] theorem Store.tag_cur {σ : Store} : (σ.tag l a τ).cur = σ.cur := by
-  unfold Store.tag; split <;> rfl
-
 theorem Store.tag_rt {σ : Store} (h : a < σ.next ∧ l < σ.next) :
     (σ.tag l a τ).rt = fun k => if k = l then some (a, τ) else σ.rt k := by
   unfold Store.tag; rw [dif_pos h]
@@ -88,8 +82,6 @@ theorem Store.tag_rt {σ : Store} (h : a < σ.next ∧ l < σ.next) :
 /-- Tagging a cell, never tagged, as a cell of a region whose arena the step may change. -/
 theorem Moves.tag (hwf : WF σ) (hE : ∀ l ∈ E, σ.mem l ≠ none) (ha : a ∈ E) (hl : l < σ.next)
     (hn : σ.rt l = none) : Moves σ E (σ.tag l a τ) E [] where
-  fb := FbExt.of_eq Store.tag_fb
-  cur := Store.tag_cur
   within := by intro x h; simp at h; exact .inl h
   next := by rw [Store.tag_next]; exact Nat.le_refl _
   wf := by intro x hx; rw [Store.tag_mem] at hx; rw [Store.tag_next]; exact hwf x hx
@@ -237,7 +229,7 @@ theorem region_alloc (hR : lookup R Γ = some s) (hs : s = .own (.arena k) true 
       · exact hfresh x (hI.alloc x (by rw [hE]; rcases List.mem_append.mp hx with h | h <;> simp [h])) rfl
       · exact hfresh x (hI.allocS x hx) rfl
   have hag : Agree σ (σ3.tag l c τ) (E₁a ++ E₂a ++ S) := by
-    refine ⟨fun x hx => ?_, fun z y hz => ?_, fun b hb z y hz => ?_, (FbExt.alloc (v := v)).trans (FbExt.of_eq (by simp only [σ3, σ2, Store.tag_fb, Store.set_fb])), by simp only [σ3, σ2, Store.tag_cur, Store.set_cur, Store.alloc_cur]⟩
+    refine ⟨fun x hx => ?_, fun z y hz => ?_, fun b hb z y hz => ?_⟩
     · rw [hmem', hm3, if_neg (hout x hx).1, if_neg (hout x hx).2]
     · rw [hrt']; simp only; split
       · subst_vars; rw [hrtl] at hz; cases hz
@@ -255,7 +247,7 @@ theorem region_alloc (hR : lookup R Γ = some s) (hs : s = .own (.arena k) true 
       rw [this]; exact List.perm_middle
     refine hp.nodup_iff.mpr (List.nodup_cons.mpr ⟨fun h => ?_, h0⟩)
     exact hfresh l (hI.alloc l (hE ▸ h)) rfl
-  refine ⟨E₁a ++ (c :: (cs ++ [l])) ++ E₂a, [], ⟨hfoot, hnd2, ?_, hI.keys, by cur_inv⟩, .rref ⟨c, hk, by rw [hrt']; simp⟩,
+  refine ⟨E₁a ++ (c :: (cs ++ [l])) ++ E₂a, [], ⟨hfoot, hnd2, ?_, hI.keys⟩, .rref ⟨c, hk, by rw [hrt']; simp⟩,
     disj_nil_left, disj_nil_left, ?_⟩
   · intro x hx hx'
     rcases List.mem_append.mp hx' with hx' | hx'
@@ -337,7 +329,7 @@ theorem region_set (hR : lookup R Γ = some s) (hs : s = .own (.arena k) true �
       exact ⟨τ'', w, h1, by rw [hm', if_neg hxl]; exact h2, h3.frame (fun _ _ h => h)⟩
   have hfoot := hupd σ' s (c :: cs) hex'.1 hex'.2 hag (by rcases hs with rfl | rfl <;> exact hLT')
   rw [setSlot_same _ hI.keys hR, ← hE] at hfoot
-  exact ⟨⟨hfoot, hI.nodup, hI.disj, hI.keys, hI.cur⟩, Moves.set hwf hI.alloc hlE, w0, hw0⟩
+  exact ⟨⟨hfoot, hI.nodup, hI.disj, hI.keys⟩, Moves.set hwf hI.alloc hlE, w0, hw0⟩
 
 /-- `p.set(a)`: the cell `p` refers to is one of its region's, which the arena it is changed through
 owns, so nothing else sees it change; what it holds next is data of the region as what it held was. -/
@@ -490,8 +482,6 @@ theorem ret_regionK (hR : Ready O hs r) (hwf : WF σ0) (hag : Agree σf σ0 S) (
       · simp
       · simp [hx]
     have hrt2 : σ2.rt = σ1.rt := by simp only [σ2, Store.set_rt, Store.freeAll_rt]
-    have hfb2 : σ2.fb = σ1.fb := by simp only [σ2, Store.set_fb, Store.freeAll_fb]
-    have hcur2 : σ2.cur = σ1.cur := by simp only [σ2, Store.set_cur, Store.freeAll_cur]
     have hn2 : σ2.next = σ1.next := by simp only [σ2, Store.set, Store.freeAll_next]
     have hag2 : Agree σ1 σ2 (E'' ++ S) := Agree.of (fun x hx => hkeep x fun h => by
       rcases List.mem_append.mp hx with hx | hx
@@ -501,7 +491,7 @@ theorem ret_regionK (hR : Ready O hs r) (hwf : WF σ0) (hag : Agree σf σ0 S) (
       have := (List.nodup_cons.mp hI.keys).2
       simpa [Ctx.shift, Function.comp_def] using this
     refine ⟨cs, E'', ha, ⟨hfoot.unshift.frame hag2, hnd'.2.1, fun x hx h => hI.disj x hx (List.mem_append.mpr (.inr h)),
-      hkeysΓ, hcur2.trans hI.cur⟩, Agree.of (fun x hx => hkeep x fun h => hdL x hx (List.mem_append.mpr (.inl h))) hrt2,
+      hkeysΓ⟩, Agree.of (fun x hx => hkeep x fun h => hdL x hx (List.mem_append.mpr (.inl h))) hrt2,
       fun x hx h => hdL x hx (List.mem_append.mpr (.inr h)), ?_⟩
     have m3 := hm.relabel (E'' := L ++ ((a :: cs) ++ E'')) (L'' := []) fun x => by
       simp only [List.mem_append, List.not_mem_nil, or_false]; grind
@@ -575,7 +565,7 @@ theorem region_ok (hE : EvalOk F O n) (hR : RetOk F O n) (hx : lookup R Γ = non
     have hf := Foot.cons (s := .own (.arena 0) true) (x := R) (a := a) hLa ((hI.shift (a := a)).foot.frame hag1)
     refine ⟨by simpa [addE, addS, exclPart, sharedPart, Slot.excl, Slot.shell, Ty.shell] using hf,
       List.nodup_cons.mpr ⟨fun h => hfresh a (hI.alloc a h) rfl, hI.nodup⟩, fun x hx hx' => ?_,
-      List.nodup_cons.mpr ⟨hxs, by rw [Ctx.shift_keys]; exact hI.keys⟩, hag1.cur.trans hI.cur⟩
+      List.nodup_cons.mpr ⟨hxs, by rw [Ctx.shift_keys]; exact hI.keys⟩⟩
     rcases List.mem_cons.mp hx' with rfl | hx'
     · exact hfresh x (hI.allocS x hx) rfl
     · exact hI.disj x hx hx'

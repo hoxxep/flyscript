@@ -613,11 +613,6 @@ structure Store where
   rt : Nat → Option (Nat × Ty) := fun _ => none
   /-- A region is named by its arena's cell: a tagged cell, and its region's arena, were allocated. -/
   rtwf : ∀ l a x, rt l = some (a, x) → a < next ∧ l < next := by intro l a x h; simp at h
-  /-- The fiber each cell was allocated on, kept once set: a fiber's stack segment is its cells. -/
-  fb : Nat → Option Nat := fun _ => none
-  /-- The fiber running. -/
-  cur : Nat := 0
-  fbwf : ∀ l g, fb l = some g → l < next := by intro l g h; simp at h
 
 /-- A fresh name for a handler. -/
 def Store.fresh (σ : Store) : Nat × Store := (σ.ids, { σ with ids := σ.ids + 1 })
@@ -642,12 +637,7 @@ def Store.freeAll (σ : Store) : List Nat → Store
 
 def Store.alloc (σ : Store) (v : Val) : Nat × Store :=
   (σ.next, { σ with mem := fun k => if k = σ.next then some v else σ.mem k, next := σ.next + 1,
-                    rtwf := fun l a x h => ⟨Nat.lt_succ_of_lt (σ.rtwf l a x h).1, Nat.lt_succ_of_lt (σ.rtwf l a x h).2⟩,
-                    fb := fun k => if k = σ.next then some σ.cur else σ.fb k,
-                    fbwf := fun l g h => by
-                      split at h
-                      · rename_i hl; subst hl; exact Nat.lt_succ_self _
-                      · exact Nat.lt_succ_of_lt (σ.fbwf l g h) })
+                    rtwf := fun l a x h => ⟨Nat.lt_succ_of_lt (σ.rtwf l a x h).1, Nat.lt_succ_of_lt (σ.rtwf l a x h).2⟩ })
 
 /-- Moves what each of the cells `cs` holds to a fresh cell, freeing it: a vector's elements, as it
 grows into new storage. -/

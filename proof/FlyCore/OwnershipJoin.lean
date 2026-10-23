@@ -76,7 +76,7 @@ theorem kept_up {L R : List Nat} (hRL : ∀ z ∈ R, z ∈ L) (hout : ∀ c ∈ 
 
 /-- Replacing the trees at holes apart from each other, in a store that kept the rest, keeps a tree:
 its cells those kept and the new trees', with a path to each hole. -/
-theorem multi_join (hL : LT F ι σ a τ L) (hR : RtExt σ σ') (hFb : FbExt σ σ') (hCur : σ'.cur = σ.cur) : ∀ (cs : List Cut),
+theorem multi_join (hL : LT F ι σ a τ L) (hR : RtExt σ σ') : ∀ (cs : List Cut),
     (∀ c ∈ cs, (∃ P, Path F ι σ a τ P c.loc c.ty) ∧ LT F ι σ c.loc c.ty c.old ∧ LT F ι σ' c.loc c.ty c.new) →
     (∀ c ∈ cs, c.ty.whole = true) →
     (∀ c ∈ cs, ∀ d ∈ cs, c ≠ d → Disj c.old d.old) →
@@ -175,7 +175,7 @@ theorem multi_join (hL : LT F ι σ a τ L) (hR : RtExt σ σ') (hFb : FbExt σ 
       refine ⟨a :: Rs.flatten, .vec ((hag a (hkz a (List.mem_cons_self ..))).trans ha) hlen (fun i h h' => ?_) hnd hn,
         fun z => ?_, fun c hc => absurd hc (fun h => hno c h)⟩
       · exact (hel i h h').frame ⟨fun l hl => hag l (hkz l (List.mem_cons_of_mem _ (mem_flatten_of h' hl))), hR,
-          fun z hz l x hx => hfr z (hkz z (List.mem_cons_of_mem _ (mem_flatten_of h' hz))) l x hx, hFb, hCur⟩
+          fun z hz l x hx => hfr z (hkz z (List.mem_cons_of_mem _ (mem_flatten_of h' hz))) l x hx⟩
       · constructor
         · intro h; exact .inl (hkz z h)
         · rintro (h | ⟨c, hc, -⟩)
