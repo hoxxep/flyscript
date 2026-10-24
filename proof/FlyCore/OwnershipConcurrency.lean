@@ -18,7 +18,7 @@ set_option linter.unusedSimpArgs false
 /-- `run`, for programs whose runs take more rewriting steps. -/
 syntax "runLong" "[" Lean.Parser.Tactic.simpLemma,* "]" : tactic
 macro_rules
-  | `(tactic| runLong [$xs,*]) => `(tactic| simp (config := { maxSteps := 20000000 }) [eval, evalS, preTarget, ret, evalK,
+  | `(tactic| runLong [$xs,*]) => `(tactic| simp (config := { maxSteps := 20000000 }) [eval, evalS, IntOp.apply, preTarget, ret, evalK,
       flushR, flush, andThen, konts, kontsK, cellKonts, cellsKonts, evalAtom, evalAtoms, resolve, leave, cleanV,
       cleanA, dropRet, armEnd, callRet, allocAll, dropCells, dropCell, drop, dropK, pick, Store.fresh, Store.alloc, Store.set, find,
       Frame.handles, Kont.push, lookup, Res.done, Outcome.res, Cap.at, Store.empty, Store.sched0, value, freed, freedBelow,

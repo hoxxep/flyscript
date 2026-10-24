@@ -314,12 +314,31 @@ inductive Atom where
   | move (x : Var)
   deriving Repr
 
+/-- An operation on two integers: arithmetic, or a comparison, which gives `1` or `0`. -/
+inductive IntOp where
+  | add | sub | mul | div | rem | eq | ne | lt | le
+  deriving DecidableEq, Repr
+
+/-- What it gives; nothing for a division by zero, which panics. Division and remainder truncate
+toward zero, as Flyscript's do. -/
+def IntOp.apply : IntOp → Int → Int → Option Int
+  | .add, x, y => some (x + y)
+  | .sub, x, y => some (x - y)
+  | .mul, x, y => some (x * y)
+  | .div, x, y => if y = 0 then none else some (x.tdiv y)
+  | .rem, x, y => if y = 0 then none else some (x.tmod y)
+  | .eq, x, y => some (if x = y then 1 else 0)
+  | .ne, x, y => some (if x = y then 0 else 1)
+  | .lt, x, y => some (if x < y then 1 else 0)
+  | .le, x, y => some (if x ≤ y then 1 else 0)
+
 /-- Expressions in A-normal form: what an operation takes is an atom, and `let` is the one way to
 name what an expression gives, so that the code an expression is part of is a stack of `let`s and
 of the scopes, calls and handlers around them. -/
 inductive Expr where
   | atom (a : Atom)
-  | add (a b : Atom)
+  /-- An operation on two integers. -/
+  | arith (o : IntOp) (a b : Atom)
   /-- `Box.new(a)`. -/
   | new (a : Atom)
   /-- A pair of two values, each put in a cell of its own. -/
@@ -442,6 +461,9 @@ inductive Expr where
   vector at `p` that the integer `z` names, for as long as `body` runs; a panic if there is none. -/
   | lendIdx (x : Var) (m : Mode) (p : Place) (z : Var) (body : Expr)
   deriving Repr
+
+/-- `a + b`. -/
+@[match_pattern] abbrev Expr.add (a b : Atom) : Expr := .arith .add a b
 
 /-- A user effect's operation: what it takes, owned and lent, and what it gives. -/
 structure Op where
@@ -1110,11 +1132,14 @@ def evalS (F : List Fn) (O : List Op) (n : Nat) (hs : HS) (σ : Store) (env : En
       match evalAtom σ env a with
       | some (v, σ1) => (.val v, σ1)
       | none => (.stuck, σ)
-    | .add a b =>
+    | .arith o a b =>
       match evalAtom σ env a with
       | some (.int x, σ1) =>
         match evalAtom σ1 env b with
-        | some (.int y, σ2) => (.val (.int (x + y)), σ2)
+        | some (.int y, σ2) =>
+          match o.apply x y with
+          | some z => (.val (.int z), σ2)
+          | none => (.panic, σ2)
         | _ => (.stuck, σ1)
       | _ => (.stuck, σ)
     | .new a =>
@@ -2270,7 +2295,7 @@ inductive AtomsTy : Ctx → List Atom → List Ty → Ctx → Prop
 and performs only what the row `r` names. -/
 inductive Typed (F : List Fn) (O : List Op) : Ctx → Expr → Ty → Ctx → Row → Prop
   | atom : AtomTy Γ a τ Γ₁ → Typed F O Γ (.atom a) τ Γ₁ r
-  | add : AtomTy Γ a .int Γ₁ → AtomTy Γ₁ b .int Γ₂ → Typed F O Γ (.add a b) .int Γ₂ r
+  | add : AtomTy Γ a .int Γ₁ → AtomTy Γ₁ b .int Γ₂ → Typed F O Γ (.arith o a b) .int Γ₂ r
   | new : AtomTy Γ a τ Γ₁ → Typed F O Γ (.new a) (.box τ) Γ₁ r
   | pair : AtomTy Γ a A Γ₁ → AtomTy Γ₁ b B Γ₂ → Typed F O Γ (.pair a b) (.pair A B) Γ₂ r
   | inj : AtomTy Γ a (if t then A else B) Γ₁ → (Ty.sum A B).complete = true →

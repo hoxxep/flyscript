@@ -1,0 +1,29 @@
+// expect: 112
+// core: run
+// In λ-fly's part of the language, and certified by the proof's checker (tests/proof.rs): a failure
+// raised where a function finds it and caught by the code that called it, the code between left.
+import { println } from "std/io";
+
+function half(n: i64): i64 uses Fail<#Odd(i64)> {
+  if (n % 2 != 0) { throw #Odd(n); }
+  n / 2
+}
+
+function halves(n: i64): i64 uses Fail<#Odd(i64)> {
+  let k: i64 = n;
+  let count: i64 = 0;
+  while (k > 1) {
+    k = half(k);
+    count += 1;
+  }
+  count
+}
+
+function run(): i64 {
+  const whole = try { halves(64) } catch (#Odd(e)) { 0 - e };
+  const odd = try { halves(12) } catch (#Odd(e)) { e * 100 };
+  const one = try { halves(1) } catch (_) { 7 };
+  whole + odd + one - 194
+}
+
+export function main(): void uses Io { println(`${run()}`); }

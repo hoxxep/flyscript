@@ -1,0 +1,437 @@
+// A program elaborated into λ-fly (spec §9), written as Lean for the proof's checker to certify:
+// `--core root` (proof/FlyCore/Check.lean). The program is the functions `root` reaches, `root`
+// called with nothing; a function is in λ-fly's part of the language when what it takes, gives
+// and holds are integers and booleans (as integers), boxes, vectors and structs of two fields, and
+// it is made of what λ-fly has: bindings, assignments, `if`, `while`, arithmetic and comparisons,
+// calls that move their owned arguments and lend their borrowed ones, `throw` and `try` of an
+// integer, `Box.new` and `get`, and a vector's `push` and `len`. Anything else is refused, with
+// where it is.
+//
+// The checker decides what the program's types and moves are by λ-fly's rules, so what is written
+// is only the program: it is certified if the checker, proved sound, accepts it, and then it never
+// gets stuck (the proof's `certified`).
+
+import { Program } from "./env";
+import { Ty, Prim, GArg, EffRow } from "./types";
+import { Span } from "./diag";
+import { Block, Expr, ExprKind, Stmt, Pattern, PatternKind, FnDecl } from "./ast";
+import { HashMap } from "std/collections";
+
+// What stops elaboration: what is outside λ-fly's part, and where.
+export type Outside = #Outside(Span, String);
+
+// A binding made on the way to an atom: its name, its type and the expression it binds.
+type Bind = { name: String; ty: String; expr: String };
+
+// What a function becomes, by function: its index in the program's list.
+struct Elab {
+  p: Program;
+  order: Vec<usize>;
+  index: HashMap<usize, usize>;
+  fid: usize;
+  // The bindings in scope, innermost last: each a name of the source's, its name in λ-fly and type.
+  scopes: Vec<HashMap<String, [String, Ty]>>;
+  next: usize;
+}
+
+impl Elab {
+  function out(self: readonly Self, span: Span, what: str): never uses Fail<Outside> {
+    throw #Outside(self.p.sourceSpan(span), what.toString())
+  }
+
+  function fresh(self: mut Self, base: str): String {
+    self.next += 1;
+    `${base}_${self.next}`
+  }
+
+  function tyOf(self: readonly Self, e: readonly Expr): Ty {
+    match (self.p.typed.get(self.fid)) {
+      #Some(t) => match (t.exprs.get(e.id)) { #Some(x) => x.clone(), #None => #Error },
+      #None => #Error,
+    }
+  }
+
+  function bindingTy(self: readonly Self, id: usize): Ty {
+    match (self.p.typed.get(self.fid)) {
+      #Some(t) => match (t.bindings.get(id)) { #Some(x) => x.clone(), #None => #Error },
+      #None => #Error,
+    }
+  }
+
+  function known(self: readonly Self, d: usize, name: str): bool {
+    self.p.defs[d].name == name && self.p.modules[self.p.defs[d].module].isStd
+  }
+
+  // A type as λ-fly has it.
+  function coreTy(self: readonly Self, t: readonly Ty, span: Span): String uses Fail<Outside> {
+    match (t) {
+      #Prim(#Void) | #Prim(#Bool) | #Prim(#I8) | #Prim(#I16) | #Prim(#I32) | #Prim(#I64) | #Prim(#Isize)
+        | #Prim(#U8) | #Prim(#U16) | #Prim(#U32) | #Prim(#U64) | #Prim(#Usize) => ".int".toString(),
+      #Named(d, args) if self.known(d, "Box") || self.known(d, "Vec") => {
+        const inner = match (args.first()) { #Some(#Ty(x)) => self.coreTy(x, span), _ => self.out(span, "a box or vector of no type") };
+        if (self.known(d, "Box")) { `(.box ${inner})` } else { `(.vec true ${inner})` }
+      }
+      #Named(d, args) => match (self.p.structFields(d, args)) {
+        #Some(fs) if fs.len() == 2 => `(.pair ${self.coreTy(fs[0][1], span)} ${self.coreTy(fs[1][1], span)})`,
+        _ => self.out(span, `\`${self.p.show(t)}\` is not of λ-fly's types: integers, booleans, boxes, vectors and structs of two fields`),
+      },
+      _ => self.out(span, `\`${self.p.show(t)}\` is not of λ-fly's types: integers, booleans, boxes, vectors and structs of two fields`),
+    }
+  }
+
+  // The nominal type whose impl a method is of.
+  function implTarget(self: readonly Self, fid: usize): Option<usize> {
+    match (self.p.fns[fid].implId) {
+      #Some(i) => match (self.p.impls[i].target) { #Named(d, _) => #Some(d), _ => #None },
+      #None => #None,
+    }
+  }
+
+  function onSlice(self: readonly Self, fid: usize): bool {
+    match (self.p.fns[fid].implId) { #Some(i) => match (self.p.impls[i].target) { #Slice(_) => true, _ => false }, #None => false }
+  }
+
+  // A union of one tag of one integer: what λ-fly fails with.
+  function oneInt(self: readonly Self, t: readonly Ty): bool {
+    match (t) {
+      #Union(r) => r.labels.len() == 1 && match (r.labels[0][1]) { #Tuple(ts) => ts.len() == 1 && self.isInt(ts[0]), x => self.isInt(x) },
+      _ => false,
+    }
+  }
+
+  function isInt(self: readonly Self, t: readonly Ty): bool {
+    match (t) { #Prim(#F32) | #Prim(#F64) | #Prim(#Str) | #Prim(#Never) | #Prim(#Type) => false, #Prim(_) => true, _ => false }
+  }
+
+  function lookupVar(self: readonly Self, name: str): Option<[String, Ty]> {
+    let k = self.scopes.len();
+    while (k > 0) {
+      k -= 1;
+      if (const #Some(b) = self.scopes[k].get(name)) { return #Some(b.clone()); }
+    }
+    #None
+  }
+
+  // The place an expression is, as λ-fly writes it: a variable, a field of a struct of two, what a
+  // box holds.
+  function place(self: mut Self, e: readonly Expr): Option<String> uses Fail<Outside> {
+    match (e.kind) {
+      #Ident(n) => match (self.lookupVar(n.asStr())) { #Some([v, _]) => #Some(`(.var "${v}")`), #None => #None },
+      #Field { target, name } => {
+        const t = self.tyOf(target.get());
+        const inner = match (self.place(target.get())) { #Some(q) => q, #None => return #None };
+        match (stripBorrow(t)) {
+          #Named(d, args) => match (self.p.structFields(d, args)) {
+            #Some(fs) if fs.len() == 2 => {
+              if (fs[0][0] == name.name) { #Some(`(.fst ${inner})`) } else if (fs[1][0] == name.name) { #Some(`(.snd ${inner})`) } else { #None }
+            }
+            _ => #None,
+          },
+          _ => #None,
+        }
+      }
+      #Call { callee, typeArgs: _, args } if args.len() == 0 => {
+        if (const #Field { target, name } = callee.get().kind && name.name == "get") {
+          if (const #Named(d, _) = stripBorrow(self.tyOf(target.get())) && self.known(d, "Box")) {
+            match (self.place(target.get())) { #Some(q) => #Some(`(.deref ${q})`), #None => #None }
+          } else { #None }
+        } else { #None }
+      }
+      _ => #None,
+    }
+  }
+
+  // An atom: what an operation takes. Anything else is bound to a name of its own first.
+  function atom(self: mut Self, e: readonly Expr, binds: mut Vec<Bind>): String uses Fail<Outside> {
+    match (e.kind) {
+      #Int(s) => return `(.lit ${s.replaceAll("_", "")})`,
+      #Bool(b) => return if (b) { "(.lit 1)".toString() } else { "(.lit 0)".toString() },
+      _ => {}
+    }
+    const t = self.tyOf(e);
+    if (const #Some(q) = self.place(e)) {
+      if (self.isInt(stripBorrow(t))) { return `(.read ${q})`; }
+      // An owned value named by a variable moves.
+      if (const #Ident(n) = e.kind && const #Some([v, _]) = self.lookupVar(n.asStr())) { return `(.move "${v}")`; }
+      return self.out(e.span, "only a variable's value moves: a part of one cannot be moved out of it in λ-fly");
+    }
+    const ty = self.coreTy(t, e.span);
+    const x = self.expr(e, binds);
+    const name = self.fresh("t");
+    binds.push({ name: name.clone(), ty, expr: x });
+    if (self.isInt(t)) { `(.read (.var "${name}"))` } else { `(.move "${name}")` }
+  }
+
+  // An expression, as λ-fly's `Expr`, the bindings on the way to it added to `binds`.
+  function expr(self: mut Self, e: readonly Expr, binds: mut Vec<Bind>): String uses Fail<Outside> {
+    match (e.kind) {
+      #Int(_) | #Bool(_) | #Ident(_) | #Field { target: _, name: _ } => `(.atom ${self.atom(e, mut binds)})`,
+      #Unary { op, operand } => {
+        const a = self.atom(operand.get(), mut binds);
+        match (op.asStr()) {
+          "-" => `(.arith .sub (.lit 0) ${a})`,
+          "!" => `(.arith .eq ${a} (.lit 0))`,
+          _ => self.out(e.span, `\`${op}\` is not of λ-fly's operations`),
+        }
+      }
+      #Binary { op, lhs, rhs } => {
+        if (op == "&&" || op == "||") {
+          // Each side as a branch: what the right one does happens only if it is reached.
+          const a = self.atom(lhs.get(), mut binds);
+          let more: Vec<Bind> = Vec.new();
+          const b = self.expr(rhs.get(), mut more);
+          const right = wrap(more, b);
+          return if (op == "&&") { `(.ite ${a} ${right} (.atom (.lit 0)))` } else { `(.ite ${a} (.atom (.lit 1)) ${right})` };
+        }
+        const a = self.atom(lhs.get(), mut binds);
+        const b = self.atom(rhs.get(), mut binds);
+        match (op.asStr()) {
+          "+" => `(.arith .add ${a} ${b})`,
+          "-" => `(.arith .sub ${a} ${b})`,
+          "*" => `(.arith .mul ${a} ${b})`,
+          "/" => `(.arith .div ${a} ${b})`,
+          "%" => `(.arith .rem ${a} ${b})`,
+          "==" => `(.arith .eq ${a} ${b})`,
+          "!=" => `(.arith .ne ${a} ${b})`,
+          "<" => `(.arith .lt ${a} ${b})`,
+          "<=" => `(.arith .le ${a} ${b})`,
+          ">" => `(.arith .lt ${b} ${a})`,
+          ">=" => `(.arith .le ${b} ${a})`,
+          _ => self.out(e.span, `\`${op}\` is not of λ-fly's operations`),
+        }
+      }
+      #Assign { op, target, value } => {
+        const q = match (self.place(target.get())) { #Some(q) => q, #None => self.out(target.span, "only a place is assigned to") };
+        const t = self.tyOf(target.get());
+        if (op == "=") {
+          const a = self.atom(value.get(), mut binds);
+          if (self.isInt(stripBorrow(t))) { `(.write ${q} ${a})` } else { `(.assign ${q} ${self.coreTy(stripBorrow(t), e.span)} ${a})` }
+        } else {
+          const o = match (op.asStr()) { "+=" => ".add", "-=" => ".sub", "*=" => ".mul", "/=" => ".div", "%=" => ".rem", _ => self.out(e.span, `\`${op}\` is not of λ-fly's operations`) };
+          const b = self.atom(value.get(), mut binds);
+          const name = self.fresh("t");
+          binds.push({ name: name.clone(), ty: ".int".toString(), expr: `(.arith ${o} (.read ${q}) ${b})` });
+          `(.write ${q} (.read (.var "${name}")))`
+        }
+      }
+      #Block(b) => self.block(b),
+      #If { cond, then, otherwise } => {
+        const c = self.atom(cond.get(), mut binds);
+        const a = self.block(then);
+        const b = match (otherwise) {
+          #Some(o) => {
+            let ob: Vec<Bind> = Vec.new();
+            const x = self.expr(o.get(), mut ob);
+            wrap(ob, x)
+          }
+          #None => "(.atom (.lit 0))".toString(),
+        };
+        `(.ite ${c} ${a} ${b})`
+      }
+      #While { cond, body } => {
+        let cb: Vec<Bind> = Vec.new();
+        const c = self.atom(cond.get(), mut cb);
+        `(.while_ ${wrap(cb, `(.atom ${c})`)} ${self.block(body)})`
+      }
+      // A failure is a tag of one integer, which λ-fly throws as the integer.
+      #Throw(x) => match (x.kind) {
+        #Tag { name: _, args: #Tuple(xs) } if xs.len() == 1 => `(.throw_ ${self.atom(xs[0], mut binds)})`,
+        _ => self.out(x.span, "λ-fly fails with an integer: a tag of one integer"),
+      },
+      #Try { body, pat, handler } => {
+        const b = self.block(body);
+        const n = match (pat.kind) {
+          #Wild => "_".toString(),
+          #Tag { name: _, args: #Tuple(ps) } if ps.len() == 1 => match (ps[0].kind) { #Bind(n) => n.clone(), #Wild => "_".toString(), _ => self.out(pat.span, "the integer of a failure is caught by a name") },
+          _ => self.out(pat.span, "λ-fly catches a failure of one integer, by a name"),
+        };
+        const v = self.fresh(n.asStr());
+        let s: HashMap<String, [String, Ty]> = HashMap.new();
+        s.insert(n, [v.clone(), #Prim(#I64)]);
+        self.scopes.push(s);
+        const h = self.block(handler);
+        self.scopes.pop();
+        `(.try_ ${b} "${v}" ${h})`
+      }
+      #Call { callee, typeArgs: _, args } => self.call(e, callee.get(), args, mut binds),
+      #Record { name: _, fields } => {
+        const t = self.tyOf(e);
+        const fs = match (t) { #Named(d, a) => match (self.p.structFields(d, a)) { #Some(fs) if fs.len() == 2 => fs, _ => self.out(e.span, "only a struct of two fields is a pair") }, _ => self.out(e.span, "only a struct of two fields is a pair") };
+        let parts: Vec<String> = Vec.new();
+        for (const [n, _] of fs) {
+          const f = match (fields.iter().find((x) => x.name.name == n)) { #Some(f) => f, #None => self.out(e.span, "a field is missing") };
+          const v: Expr = match (f.value) { #Some(v) => v.clone(), #None => ({ kind: #Ident(n.clone()), span: f.name.span, id: e.id }) };
+          parts.push(self.atom(v, mut binds));
+        }
+        `(.pair ${parts[0]} ${parts[1]})`
+      }
+      _ => self.out(e.span, "this is not of λ-fly's part of the language"),
+    }
+  }
+
+  function call(self: mut Self, e: readonly Expr, callee: readonly Expr, args: readonly Vec<Expr>, binds: mut Vec<Bind>): String uses Fail<Outside> {
+    const fid = match (self.p.typed.get(self.fid)) {
+      #Some(t) => match (t.calls.get(e.id)) { #Some(f) => f, #None => self.out(e.span, "a call of a function value is not of λ-fly's part") },
+      #None => self.out(e.span, "no types"),
+    };
+    const name = self.p.fns[fid].name.clone();
+    // What the standard library gives that λ-fly has.
+    // A vector's length, through the slice it lends.
+    if (name == "len" && self.onSlice(fid)) {
+      const target = match (callee.kind) { #Field { target, name: _ } => target.get().clone(), _ => self.out(e.span, "a vector's method") };
+      return match (self.place(target)) { #Some(q) => `(.vlen ${q})`, #None => self.out(e.span, "a vector at a place") };
+    }
+    if (const #Some(d) = self.implTarget(fid)) {
+      if (self.known(d, "Box") && name == "new") { return `(.new ${self.atom(args[0], mut binds)})`; }
+      if (self.known(d, "Box") && name == "get") {
+        return match (self.place(e)) { #Some(q) => `(.atom (.read ${q}))`, #None => self.out(e.span, "what a box holds is read where it is") };
+      }
+      if (self.known(d, "Vec") && name == "new") { return "(.vnew)".toString(); }
+      if (self.known(d, "Vec") && (name == "push" || name == "len")) {
+        const target = match (callee.kind) { #Field { target, name: _ } => target.get().clone(), _ => self.out(e.span, "a vector's method") };
+        const q = match (self.place(target)) { #Some(q) => q, #None => self.out(e.span, "a vector at a place") };
+        return if (name == "len") { `(.vlen ${q})` } else { `(.vpush ${q} ${self.atom(args[0], mut binds)})` };
+      }
+      return self.out(e.span, `\`${self.p.defs[d].name}.${name}\` is not of λ-fly's part`);
+    }
+    if (self.p.fns[fid].implId.isSome()) { return self.out(e.span, `the method \`${name}\` is not of λ-fly's part`); }
+    const k = match (self.index.get(fid)) {
+      #Some(k) => k,
+      #None => {
+        const k = self.order.len();
+        self.order.push(fid);
+        self.index.insert(fid, k);
+        k
+      }
+    };
+    let owned: Vec<String> = Vec.new();
+    let lent: Vec<String> = Vec.new();
+    const params = self.p.fns[fid].scheme.params.clone();
+    for (const [i, [_, pt]] of params.iter().enumerate()) {
+      const a: Expr = match (args[i].kind) { #BorrowMut(x) => x.get().clone(), _ => args[i].clone() };
+      match (pt) {
+        #Borrow(m, _) => {
+          const q = match (self.place(a)) { #Some(q) => q, #None => self.out(a.span, "what is lent is a place") };
+          lent.push(`(${if (m) { ".mut" } else { ".ro" }}, ${q})`);
+        }
+        _ => owned.push(self.atom(a, mut binds)),
+      }
+    }
+    `(.call ${k} [${owned.join(", ")}] [${lent.join(", ")}])`
+  }
+
+  // A block: its statements, each binding what it gives, then its value.
+  function block(self: mut Self, b: readonly Block): String uses Fail<Outside> {
+    self.scopes.push(HashMap.new());
+    const out = self.stmts(b, 0);
+    self.scopes.pop();
+    out
+  }
+
+  function stmts(self: mut Self, b: readonly Block, i: usize): String uses Fail<Outside> {
+    if (i == b.stmts.len()) {
+      return match (b.tail) {
+        #Some(t) => {
+          let binds: Vec<Bind> = Vec.new();
+          const x = self.expr(t.get(), mut binds);
+          wrap(binds, x)
+        }
+        #None => "(.atom (.lit 0))".toString(),
+      };
+    }
+    match (b.stmts[i]) {
+      #Let { mutable: _, pat, ty: _, init, span } => {
+        const n = match (pat.kind) { #Bind(n) => n.clone(), _ => self.out(span, "a binding of λ-fly's names one variable") };
+        const t = self.bindingTy(pat.id);
+        const ty = self.coreTy(t, span);
+        let binds: Vec<Bind> = Vec.new();
+        const x = self.expr(init, mut binds);
+        const v = self.fresh(n.asStr());
+        const k = self.scopes.len() - 1;
+        self.scopes[k].insert(n, [v.clone(), t]);
+        const rest = self.stmts(b, i + 1);
+        wrap(binds, `(.let_ "${v}" ${ty} ${x} ${rest})`)
+      }
+      #Defer(_) => self.out(b.span, "a `defer` is not of the part of λ-fly certified yet"),
+      #Expr(e) => {
+        let binds: Vec<Bind> = Vec.new();
+        const x = self.expr(e, mut binds);
+        const t = self.tyOf(e);
+        const ty = match (t) { #Prim(#Never) => ".int".toString(), _ => self.coreTy(t, e.span) };
+        const rest = self.stmts(b, i + 1);
+        wrap(binds, `(.let_ "${self.fresh("s")}" ${ty} ${x} ${rest})`)
+      }
+    }
+  }
+
+  // A function as λ-fly's `Fn`.
+  function func(self: mut Self, fid: usize): String uses Fail<Outside> {
+    const decl: FnDecl = match (self.p.fnDecl(fid)) { #Some(d) => d, #None => self.out({ start: 0, end: 0 }, "a function without a body") };
+    const body = match (decl.body) { #Some(b) => b, #None => self.out(decl.sig.span, "a function without a body") };
+    self.fid = fid;
+    self.scopes = [HashMap.new()];
+    const scheme = self.p.fns[fid].scheme.clone();
+    let owns: Vec<String> = Vec.new();
+    let refs: Vec<String> = Vec.new();
+    for (const [n, t] of scheme.params) {
+      self.scopes[0].insert(n.clone(), [n.clone(), t.clone()]);
+      match (t) {
+        #Borrow(m, inner) => refs.push(`("${n}", ${if (m) { ".mut" } else { ".ro" }}, ${self.coreTy(inner.get(), decl.sig.span)})`),
+        _ => owns.push(`("${n}", ${self.coreTy(t, decl.sig.span)})`),
+      }
+    }
+    if (scheme.tparams.len() > 0) { return self.out(decl.sig.span, "a generic function is not of the part of λ-fly certified yet"); }
+    const row = self.row(scheme.effects, decl.sig.span);
+    const ret = self.coreTy(scheme.ret, decl.sig.span);
+    const b = self.block(body);
+    `  { owns := [${owns.join(", ")}], refs := [${refs.join(", ")}], ret := ${ret}, row := ${row},\n    body := ${b} }`
+  }
+
+  // What a function performs: nothing, or failing with an integer.
+  function row(self: readonly Self, effects: readonly Option<EffRow>, span: Span): String uses Fail<Outside> {
+    const r = match (effects) { #Some(r) => r.clone(), #None => match (self.p.inferred.get(self.fid)) { #Some(#Some(r)) => r.clone(), _ => return "[]".toString() } };
+    if (r.effs.len() == 0) { return "[]".toString(); }
+    if (r.effs.len() == 1 && self.known(r.effs[0].def, "Fail") && r.effs[0].args.len() == 1 && self.oneInt(r.effs[0].args[0])) { return "[.fail]".toString(); }
+    self.out(span, "a function of λ-fly performs nothing, or fails with an integer")
+  }
+}
+
+function stripBorrow(t: readonly Ty): Ty {
+  match (t) { #Borrow(_, x) => stripBorrow(x.get()), _ => t.clone() }
+}
+
+// The bindings around an expression, the first outermost.
+function wrap(binds: readonly Vec<Bind>, inner: str): String {
+  let out = inner.toString();
+  let k = binds.len();
+  while (k > 0) {
+    k -= 1;
+    out = `(.let_ "${binds[k].name}" ${binds[k].ty} ${binds[k].expr} ${out})`;
+  }
+  out
+}
+
+// The program `root` reaches, as a Lean module that states the proof's checker accepts it.
+export function coreProgram(p: Program, module: usize, root: str): String uses Fail<Outside> {
+  const fid = match (p.fns.iter().findIndex((f) => f.module == module && f.name == root && f.implId.isNone())) {
+    #Some(f) => f,
+    #None => throw #Outside({ start: 0, end: 0 }, `no function \`${root}\``.toString()),
+  };
+  let e = Elab { p, order: [fid], index: HashMap.new(), fid, scopes: Vec.new(), next: 0 };
+  e.index.insert(fid, 0);
+  const ret = e.coreTy(e.p.fns[fid].scheme.ret, { start: 0, end: 0 });
+  let fns: Vec<String> = Vec.new();
+  let k: usize = 0;
+  while (k < e.order.len()) {
+    const f = e.order[k];
+    fns.push(e.func(f));
+    k += 1;
+  }
+  let out = "-- λ-fly, as the compiler elaborated the program (`--core`); the proof's checker certifies it.\nimport FlyCore.Check\nopen FlyCore.Ownership FlyCore.Ownership.Check\n\n".toString();
+  out.push(`def F : List Fn := [\n${fns.join(",\n")}\n]\n\n`.asStr());
+  out.push("def program : Expr := .call 0 [] []\n\n");
+  out.push("/-- The checker accepts the program, so it never gets stuck: `certified checks.1 checks.2`. -/\n");
+  out.push(`theorem checks : fnsOk F [] = true ∧ infer F [] [] program none [.fail] = some (${ret}, []) := ⟨by rfl, by rfl⟩\n\n`.asStr());
+  out.push("example (n : Nat) := certified checks.1 checks.2 n\n");
+  out
+}

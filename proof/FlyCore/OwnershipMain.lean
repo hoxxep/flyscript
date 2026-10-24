@@ -89,8 +89,10 @@ theorem eval_ok_succ (hF : FnsOk F O) (hE : EvalOk F O n) (hR : RetOk F O n) (hK
       cases hv₂ with
       | int =>
       simp only [evalS, hev, hev2]
-      exact post_val hI₂ .int disj_nil_left disj_nil_left
-        ((hm₁.trans hm₂ disj_nil_left hwf).relabel (by simp))
+      split
+      · exact post_val hI₂ .int disj_nil_left disj_nil_left
+          ((hm₁.trans hm₂ disj_nil_left hwf).relabel (by simp))
+      · simp [Post]
     | new ha =>
       obtain ⟨v, σ1, E₁, L₁, hev, hI₁, hv₁, hd₁, hdS₁, hm₁⟩ := atom_ok ha hI hwf
       simp only [evalS, hev]

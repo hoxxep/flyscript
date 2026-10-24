@@ -1,0 +1,30 @@
+// expect: 236
+// core: run
+// In λ-fly's part of the language, and certified by the proof's checker (tests/proof.rs): boxes made,
+// moved into functions and out of them, and dropped; a struct of two changed through a `mut` borrow.
+import { println } from "std/io";
+
+struct Pair { a: i64; b: i64 }
+
+function make(n: i64): Box<i64> { Box.new(n * 3) }
+
+function open(b: Box<i64>): i64 { b.get() + 1 }
+
+function twice(b: Box<i64>): Box<i64> { Box.new(b.get() * 2) }
+
+function settle(p: mut Pair, n: i64): void {
+  p.a = n;
+  p.b = p.a + n;
+}
+
+function run(): i64 {
+  const b = make(7);
+  const c = twice(b);
+  const n = open(c);
+  let p = Pair { a: 0, b: 0 };
+  settle(mut p, n);
+  const kept = make(1);
+  p.a + p.b + n + kept.get() + 61
+}
+
+export function main(): void uses Io { println(`${run()}`); }

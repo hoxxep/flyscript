@@ -32,7 +32,7 @@ def isStuck : Res × Store → Bool
 /-- Runs a program: the evaluator unfolded by its equations. -/
 syntax "run" "[" Lean.Parser.Tactic.simpLemma,* "]" : tactic
 macro_rules
-  | `(tactic| run [$xs,*]) => `(tactic| simp [eval, evalS, preTarget, ret, evalK, flushR, flush, andThen, konts, kontsK, cellKonts, cellsKonts, evalAtom, evalAtoms, resolve, leave, cleanV,
+  | `(tactic| run [$xs,*]) => `(tactic| simp [eval, evalS, IntOp.apply, preTarget, ret, evalK, flushR, flush, andThen, konts, kontsK, cellKonts, cellsKonts, evalAtom, evalAtoms, resolve, leave, cleanV,
       cleanA, dropRet, armEnd, callRet, allocAll, dropCells, dropCell, drop, dropK, pick, Store.fresh, Store.alloc, Store.set, find,
       Frame.handles, Kont.push, lookup, Res.done, Outcome.res, Cap.at, Store.empty, Store.sched0, value, freed, freedBelow,
       Store.tag, Store.freeAll, Store.moveAll, dropCellsWith, fiberHS, hsConv, hsDie, dedupL, cellTree, treeK,
@@ -1813,7 +1813,7 @@ theorem vecSlice_typed : Typed [] [] [] vecSlice .int [] [.fail] := by
   have hIdx : Typed [] [] Γs (.lendIdx "e" .ro (var "s") "k" (.add (.read (var "e")) (.read (var "n")))) .int Γs [.fail] := by
     have := Typed.lendIdx (F := []) (O := []) (Γ := Γs) (x := "e") (m := .ro) (y := "s") (τ := .int) (τb := .int)
       (r := [.fail]) (Γb := lendCtx .ro Γs "s") rfl (.ref rfl) (.own (x := "k") rfl) (fun h => by cases h)
-      (fun h => by cases h) (fun h => by cases h) (.add (.read (.ref (x := "e") rfl)) (.read (.own (x := "n") rfl)))
+      (fun h => by cases h) (fun h => by cases h) (.add (o := .add) (.read (.ref (x := "e") rfl)) (.read (.own (x := "n") rfl)))
     simpa [Γs, Γ0, thaw, lendCtx, freeze, Slot.ro] using this
   have h := Typed.lendSlice (F := []) (O := []) (x := "s") (m := .ro) (y := "v") (τ := .int) (r := [.fail])
     (τb := .int) (Γ := Γ0) (Γb := freeze Γ0 ["v"]) rfl (.own rfl) (.own (x := "lo") rfl) (.own (x := "hi") rfl)

@@ -5,7 +5,7 @@
 // runtime, and what the module calls of it — beside it, its name ending in `.c` instead. `root` is
 // the directory that holds `std/` and `selfhost/`.
 
-import { Diagnostic, render } from "./diag";
+import { Diagnostic, render, diag } from "./diag";
 import { Program } from "./env";
 import { checkFn } from "./check";
 import { checkOwnership } from "./own";
@@ -13,6 +13,7 @@ import { cProgram } from "./c";
 import { jsProgram } from "./js";
 import { llvmProgram } from "./llvm";
 import { watch } from "./watch";
+import { coreProgram } from "./core";
 import { File, println, eprintln, writeFile, exit } from "std/io";
 
 // What stops a compilation: diagnostics, or a file that cannot be read or written.
@@ -48,7 +49,7 @@ impl Clock {
   }
 }
 
-function compile(entry: str, out: str, root: str, freestanding: bool, ptr: usize, time: bool): void uses Io, Fail<Stop> {
+function compile(entry: str, out: str, root: str, freestanding: bool, ptr: usize, time: bool, core: Option<String>): void uses Io, Fail<Stop> {
   let clock = Clock { on: time, at: Io.now() };
   let p = Program.load([entry.toString()], `${root}/std`.asStr());
   clock.lap("load");
@@ -68,6 +69,19 @@ function compile(entry: str, out: str, root: str, freestanding: bool, ptr: usize
   if (p.diags.len() > 0) {
     report(p);
     throw #Failed;
+  }
+  // `--core=root`: the program `root` reaches, elaborated into λ-fly, for the proof to certify.
+  if (const #Some(root) = core) {
+    const file = p.entryFile(entry);
+    const m = match (p.modules.iter().findIndex((x) => x.file == file)) { #Some(k) => k, #None => throw #Unreadable { path: file } };
+    const name = p.modules[m].file.clone();
+    const source = p.modules[m].source.clone();
+    const text = try { coreProgram(p, m, root.asStr()) } catch (#Outside(span, why)) {
+      println(render(diag(span, why.asStr()), name.asStr(), source.asStr()).asStr());
+      throw #Failed
+    };
+    try { writeFile(out, text.asStr()); } catch (_) { throw #Unreadable { path: out.toString() } };
+    return;
   }
   const file = p.entryFile(entry);
   const main = match (p.modules.iter().findIndex((m) => m.file == file)) { #Some(k) => k, #None => throw #Unreadable { path: file } };
@@ -107,6 +121,7 @@ function compile(entry: str, out: str, root: str, freestanding: bool, ptr: usize
 // `--wasm32`: through LLVM, for a target of 32-bit pointers, WebAssembly's.
 // `--time`: how long each phase took, on standard error.
 // `--watch`: compiled to C again whenever a module changes, until stopped (watch.fly).
+// `--core=root`: the program `root` reaches, as λ-fly in Lean, for the proof to certify (core.fly).
 export function main(entry: str, out: str, root: str, flags: readonly String[]): void uses Io {
   try {
     const ptr: usize = if (flags.iter().some((f) => f == "--wasm32")) { 4 } else { 8 };
@@ -119,7 +134,8 @@ export function main(entry: str, out: str, root: str, flags: readonly String[]):
       const c = readText(`${root}/selfhost/runtime.c`);
       watch(entry, out, root, `${h}\n${c.asStr().replaceAll("#include \"runtime.h\"", "")}`.asStr());
     }
-    compile(entry, out, root, flags.iter().some((f) => f == "--freestanding"), ptr, flags.iter().some((f) => f == "--time"));
+    const core: Option<String> = match (flags.iter().find((f) => f.startsWith("--core="))) { #Some(f) => #Some(f.slice(7, f.len()).toString()), #None => #None };
+    compile(entry, out, root, flags.iter().some((f) => f == "--freestanding"), ptr, flags.iter().some((f) => f == "--time"), core);
   } catch (e) {
     match (e) {
       #Failed => {}

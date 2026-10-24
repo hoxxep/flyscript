@@ -1,6 +1,6 @@
 # Roadmap
 
-Flyscript compiled itself, to JavaScript and to C, when this roadmap was written. Its steps take it from a self-hosted language to a systems platform: one intermediate form under every back end, kernels, LLVM, WebAssembly, every core of the machine, and a web framework that shows what all of it buys. Steps 0 to 8 are done, and each says what was built; the others are next.
+Flyscript compiled itself, to JavaScript and to C, when this roadmap was written. Its steps take it from a self-hosted language to a systems platform: one intermediate form under every back end, kernels, LLVM, WebAssembly, every core of the machine, and a web framework that shows what all of it buys. Steps 0 to 9 are done, and each says what was built; the others are next.
 
 ## 0. One core IR under every back end
 
@@ -86,15 +86,15 @@ Every page downloads the core, so a byte saved there is saved for every page of 
 
 ## 9. The proof joined to the compiler
 
-*Next.*
+*Done: a checker for λ-fly in Lean, proved sound, certifies on every build the test programs the compiler elaborates into λ-fly.*
 
-The proof covers λ-fly; the compiler's checker is held to it by tests alone. This step checks the compiler's work by the proof:
+The proof covers λ-fly; the compiler's checker was held to it by tests alone. Now the compiler's work is checked by the proof:
 
-- A checker for λ-fly written in Lean, `check : Program → Bool`, proved sound: `check p = true` implies that `p` is well typed, and so has every guarantee the proof gives.
-- `--core` prints a program as the compiler elaborated it, as a λ-fly term in Lean.
-- Every test program in the part of the language λ-fly covers is certified on each build: Lean evaluates the proved checker on its term, in the kernel, with no `native_decide`. A disagreement is a bug on one side or the other.
-- What remains trusted is said in §9.5 of the spec: the elaboration from the surface language to λ-fly, lowering and code generation, each held to the others by differential tests.
-- Done when the corpus's programs in λ-fly's part of the language are certified on every build.
+- `proof/FlyCore/Check.lean` is a checker for λ-fly's first-order part, `infer`, which decides an expression's type and what it leaves of its variables by λ-fly's rules, choosing where they leave a choice open: where branches disagree about a move, the variable is moved. It is proved sound, `infer_sound`: whatever it accepts is well typed, so, with the program's functions checked by it too, the program never gets stuck (`certified`).
+- λ-fly's integers have the operations the language's do — arithmetic and comparisons, booleans as integers — so that ordinary code is in its part; a division by zero panics.
+- `--core=f` writes the program `f` reaches as λ-fly, in Lean (`selfhost/core.fly`): integers, booleans, boxes, vectors and structs of two fields; bindings, assignments, branches, loops and arithmetic; calls that move and lend; failures of one integer. Anything else is refused with where it is.
+- Each test program marked `// core: f` is certified on every build (`tests/proof.rs`): the checker runs in Lean's kernel, with no `native_decide`, on what the compiler made of it, and the certificate rests on Lean's standard axioms alone. The same programs run on every back end.
+- What remains trusted is said in §9.5 of the spec: the elaboration from the source to λ-fly, and below it lowering and code generation. Closures, handlers, regions, tasks and generators are in λ-fly and its proof, but not yet in the checker, which answers for them `none`.
 
 ## 10. The standard library, filled out
 
