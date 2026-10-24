@@ -1,6 +1,6 @@
 # Roadmap
 
-Flyscript compiled itself, to JavaScript and to C, when this roadmap was written. Its steps take it from a self-hosted language to a systems platform: one intermediate form under every back end, kernels, LLVM, WebAssembly, every core of the machine, and a web framework that shows what all of it buys. Steps 0 to 12 are done, and each says what was built. Steps 13 to 19 take what remains between Flyscript and the languages it is measured against: a parked task as small as a Rust future, a panic that ends one task rather than the server, portable SIMD, and the last costs the runtime and the compiler still pay.
+Flyscript compiled itself, to JavaScript and to C, when this roadmap was written. Its steps take it from a self-hosted language to a systems platform: one intermediate form under every back end, kernels, LLVM, WebAssembly, every core of the machine, and a web framework that shows what all of it buys. Steps 0 to 12 are done, and each says what was built. Steps 13 to 19 close what remains between Flyscript and every language it is measured against; [what they are for](#what-steps-13-to-19-are-for) comes first.
 
 ## 0. One core IR under every back end
 
@@ -127,63 +127,116 @@ The proof covers λ-fly; the compiler's checker was held to it by tests alone. N
 - Buffered I/O (`std/io`, in Flyscript): `File` reads ahead into a buffer of its own and streams a file a line at a time, and `Writer` gathers writes, over `Io`'s descriptors, which a test may answer itself; `String.fromUtf8Lossy`, `Vec.extend` and `slice.copyFrom` came with it.
 - What the move found: `String.fromUtf8` did not check its bytes in compiled code; a loop over a generator leaked what an outer binding held when it assigned it; a range of a list lent `mut` changed a copy in JavaScript; a punned field was not a move in the reference; a closure missed the names in a range; and a program that starts tasks did not link when built split across cores, which `fly build` does.
 
+## What steps 13 to 19 are for
+
+The aim is a language with no remaining technical reason to choose another one for systems work: as fast and as small as Rust and C, with Erlang's fault tolerance, TypeScript's surface, and a mechanized proof under all of it. Measured against each neighbor, what is left is this:
+
+| Against | What Flyscript has | What it still gives up, until these steps |
+|---|---|---|
+| Rust | No lifetime parameters, no `async` colouring or `Pin`, cyclic data in regions, error sets by union, `comptime` instead of procedural macros, deterministic simulation, a mechanized proof | A parked task keeps a whole stack where a Rust future keeps only what lives across its `.await`s (step 16); horizontal SIMD (step 17); failures returned through memory and aliasing LLVM is never told (step 19) |
+| Erlang | Native speed, no garbage collector, types | A bug in one connection ends the whole server (step 15) |
+| C and Zig | Memory and data-race safety, effects, closures | Nothing at the language level; the runtime's last costs (step 13) |
+| TypeScript and Go | No garbage collector, unboxed layouts, real sum types, race freedom | Nothing |
+
+Once these steps are done, what Rust has that Flyscript lacks is its ecosystem, which C libraries reach through `extern "C"` until native packages grow, and nothing in the language. Each step below says what it is for, what it changes, and what it must measure to be done: a step is done when its bar is met on every back end, not when its code is written.
+
 ## 13. Parity with the runtime it replaced
 
-The runtime moved into Flyscript at a cost in two places, and this step removes both.
+**Goal.** Moving the runtime into Flyscript (step 12) must cost nothing. A language that claims C's speed cannot run its own scheduler or read its own files slower than the C it replaced; if it does, the claim is false where it is easiest to check.
 
-- The simulated scheduler runs a channel ping-pong in 1.2 times the C scheduler's time, switching as often. It is to match it: a request answered without a switch wherever no choice of who runs next is made, and no allocation on the path of a send or receive.
-- `File.readLine` takes 1.33 times the CPU of the C reader it replaced, which did not check its text. It is to match it while still checking: the search for the end of a line and the check of its bytes in one pass, eight bytes at a time.
-- Every back end interleaves the same from a seed: a program whose output is its interleaving, run on each back end across many seeds, prints the same, as a test of the suite.
+- **The simulated scheduler** runs a channel ping-pong in 1.2 times the old C scheduler's time, with as many switches. The simulated world is how every concurrent program is tested and replayed, so it is on the path of every test run. Every request that needs no choice of who runs next is to be answered without a switch, and a send or receive is to allocate nothing.
+- **The line reader** takes 1.33 times the CPU of the C reader it replaced, which did not check that its text was UTF-8. It is to match that reader while still checking, finding a line's end and checking its bytes in one pass, eight bytes at a time and, after step 17, sixteen.
+- **The same interleaving everywhere.** The reference evaluator, JavaScript, C, LLVM and WebAssembly must interleave tasks identically from any seed (§11.1's promise). A program whose output is its own interleaving is to run under many seeds on every implementation, as a test in the suite.
+
+**Done when:** the ping-pong and the line reader are within the run-to-run noise of the C they replaced, or faster, and the interleaving test passes on all five implementations for every seed it tries.
 
 ## 14. The spec brought up to date
 
+**Goal.** The spec is the product as much as the compiler is, and it should be the clearest statement of a language anyone has written: short where things are simple, exact where they are not, and with nothing that is no longer true. Every claim it makes about what is proved, what is open and what Flyscript gives up should be current.
+
 - `generate` and `next`, primitives since 0.106, in the core calculus of §9.1.
-- §12.3's third question says what is proved now: continuations kept in a value and tasks that synchronize through `Io` are.
-- `RegionList<region R, T>` in its one order throughout.
-- §0.1 says what the current version is and what the last few changed; the full record of revisions moves to `docs/history/`.
-- Re-exports, `export { a, b } from "./internal/a"`, so a package gives one face to the files behind it.
+- §12.3's third question says what is proved now: continuations kept in a value, and tasks that synchronize through `Io`, are.
+- `RegionList<region R, T>` in one order throughout.
+- §0.1 says what the current version is and what the last few versions changed; the full record of revisions moves to `docs/history/`.
+- **Re-exports**, `export { a, b } from "./internal/a"`: a package presents one public face over the files behind it, as Rust's `pub use` lets a crate do, in one line of grammar and with ES modules otherwise unchanged.
+
+**Done when:** every section agrees with the compiler and the proof, §0.1 fits on a screen, and re-exports work on every back end.
 
 ## 15. A panic ends its task
 
-A panic — an index out of bounds, an overflow, division by zero, `unwrap()` of `#None`, `panic(message)` — unwinds the task it happens in to the task's root, and only that task. No handler, `try` or `catch` in the task can stop it. As it unwinds, everything the task owns is dropped and its `defer`s run, and an operation a `defer` performs is cancelled, so unwinding cannot wait on anything: a socket it owned closes, a channel it was the last sender of closes and wakes its receiver, its regions are released. Then:
+**Goal.** Erlang's fault tolerance at Rust's speed. Today a panic ends the whole program, so a server holding 5,000 connections drops all of them when one request hits an index out of bounds or an overflow, and anyone who finds that one input can take the server down at will. Erlang never has that problem, because a crash ends only its process; but Erlang pays for it with a garbage collector and copied messages. Flyscript can have the isolation without paying for it, because its types already prove what Erlang gets by copying: a task shares nothing mutable with another except through a `Mutex`, and everything it owns is its own.
 
-- **in `main`**, the message is printed and the program exits with a failure status, having leaked nothing;
-- **in a task started with `fork`**, the scope is cancelled and the panic goes on in the task that opened it, from `Io.scope`;
-- **in a task started with `spawn`**, it ends there: the message is reported, and the scope and every other task go on. A server that spawns its connections survives a connection that hits a bug, as it survives one that fails. A scope may be given a supervisor, called with the message of each spawned task that panicked, so long-lived actors can be restarted as a library (§12.3's second question).
-- **inside `Mutex.lock`'s body**, the value the lock lent is dropped rather than given back, and the mutex is poisoned: locking it again panics, unless a fresh value is put in it.
+**The unification.** Today a computation stops early in one of three ways:
 
-What makes Erlang's processes dependable, beyond a crash staying in its process, comes with it:
+1. `throw`, which unwinds to a `try`/`catch` or a `fork`, running drops and `defer`s;
+2. a dropped continuation (proved in 0.105), which unwinds to the continuation's root, running drops and `defer`s, with every operation a `defer` performs cancelled, so that unwinding can never wait;
+3. a panic, which stops everything and drops nothing.
 
-- **One task stopped.** `spawn` returns a handle that cancels that task alone, so a task given too long can be ended without its scope.
-- **A loop that never waits can still be stopped.** Compiled code checks for cancellation where a loop goes round and where a function is entered, a load and a branch, so a cancelled task stops even in code that performs nothing; it costs no more than the noise of the benchmarks, or it is not done this way.
-- **A stack overflow is a panic of its task**, found by a check where a function is entered, not the end of the program.
-- **Supervision** (`std/supervise`): children given as functions that make them afresh, since a task that panicked leaves nothing to resume; restarted one for one, all for one or the rest for one; and a limit on restarts in a span of time, past which the supervisor itself panics, to its own supervisor.
+The third becomes a case of the second: **a panic drops the continuation of the task it happens in.** This removes a mechanism rather than adding one. A panic — an index out of bounds, an overflow, division by zero, `unwrap()` of `#None`, `panic(message)` — unwinds the task to its root, and no handler, `try` or `catch` inside the task can stop it. Everything the task owns is dropped and its `defer`s run with their operations cancelled. A socket it owned closes; a channel it was the last sender of closes, and its receiver wakes; its regions are released. Then:
 
-A panic in a `Drop`, or while a panic is already unwinding, ends the program; a freestanding program's panics go to the handler it names.
+- **in `main`**, the message is printed and the program exits with a failure status, having leaked nothing, so even a panicking program passes the leak checker;
+- **in a task started with `fork`**, the scope is cancelled and the panic carries on in the task that opened it, from `Io.scope`, because that task asked for the result;
+- **in a task started with `spawn`**, it ends there: the message is reported, and the scope and every other task go on. A server that spawns its connections survives a connection that hits a bug, as it already survives one that fails;
+- **inside `Mutex.lock`'s body**, the value the lock lent is dropped rather than given back, and the mutex is poisoned: locking it again panics, unless a fresh value is put in it. This falls out of the proof's model of a mutex, where `lock` moves the value to the task and a panic drops what the task owns.
 
-Every back end unwinds the same way. The reference evaluator unwinds as for a failure that nothing catches. LLVM uses `invoke` and landing pads, which cost nothing until a panic happens. C, which has no unwinding of its own, returns a panic as a failure that only a task's root catches. JavaScript throws. The proof gains a panic as a step from any expression, which drops the task's continuation as a dropped continuation already does (§9.5); what every task owns is still dropped exactly once, under every schedule, now with panics among the ways a task ends.
+**The rest of what makes Erlang dependable.** A crash staying in its process is half of it. The other half is dealing with a process that is stuck, and restarting what crashed:
+
+- **Stopping one task.** `spawn` returns a handle that cancels that task alone, so a task that has run too long can be ended without ending its scope.
+- **Stopping a loop that never waits.** Compiled code checks for cancellation where a loop goes round and where a function is entered, a load and a branch, so a cancelled task stops even in code that performs nothing. Erlang gets this from preemption; Flyscript's tasks are cooperative, so without it a pure infinite loop could be neither stopped nor killed. It must cost no more than the benchmarks' noise, or it is done another way.
+- **Stack overflow as a panic of its task**, found where a function is entered, rather than the end of the program.
+- **Supervision**, in `std/supervise`. Children are given as functions that build them afresh, since a task that panicked leaves nothing to resume. They are restarted one for one, all for one, or the rest for one, with a limit on restarts in a span of time; past the limit the supervisor itself panics, to its own supervisor. This answers §12.3's second question, supervision beyond scopes, as a library.
+
+A panic inside a `Drop`, or while a panic is already unwinding, ends the program; a freestanding program's panics go to the handler it names. Panics remain outside the effect system: `xs[i]` and `a + b` stay pure, so `par` and every pure function stay as they are, and `xs.get(i)` stays the way to index with a number that came from outside.
+
+**Every back end.** The reference evaluator unwinds as it does for a failure nothing catches. LLVM uses `invoke` and landing pads, which cost nothing until a panic happens. C, which has no unwinding of its own, returns a panic as a failure that only a task's root catches. JavaScript throws. WebAssembly uses its exception handling.
+
+**The proof.** A panic becomes a step from any expression, not only from an operation, because panics happen in pure code. It drops the task's continuation as a dropped continuation already does (§9.5). The theorem then says more than it does now: even when a spawned task panics, everything it owned is dropped exactly once, nothing leaks, and every other task goes on, under every schedule.
+
+**Done when:** a server under load keeps every other connection when one panics, a test shows it on every back end, the theorem covers panics, and §5.7, §6.1, §6.2 and §12.3 say so.
 
 ## 16. Parked tasks as small as a future
 
-A task, a pull generator and a handler that suspends today run on a stack of their own, which a parked task keeps whole. Flyscript knows, from each function's effects after specialization, which calls can suspend: those that perform `Io`, `Yield`, or an effect whose handler does not resume as its last act. Only frames on a path to such a call need to outlive a suspension.
+**Goal.** Win the last comparison Rust still wins. §12.1 says Flyscript gives up "stackful tasks instead of compiler-built state machines": a parked Rust future holds only the variables live across its `.await`s, a few hundred bytes, while a parked Flyscript task holds a whole stack. At ten million idle connections that is the difference between about 2 GB and 8 to 16 GB. Rust pays for its small futures with `async`, `await`, `Pin`, `'static` task bounds and a standard library split in two (`std` and `tokio`). Flyscript can have the small futures and pay none of that, because it already knows what Rust makes the programmer write down: after specialization, each function's effects say whether it can suspend — whether it performs `Io`, `Yield`, or an effect whose handler does not resume as its last act — and the calls in its body that can suspend are its `.await`s.
 
-- A function that cannot suspend runs on the worker's own stack, wherever it is called from.
-- A function that can is compiled to a state machine: its locals that live across a suspension, laid out in a frame, overlapping where their lifetimes do not, and a resume function that goes on from where it stopped. A call from one to another nests the callee's frame in the caller's, so a task's frames from its root to its deepest suspension are one allocation of known size, made where the task starts and never moved; a borrow held across a suspension points into it, safely, with no `Pin`.
-- A cycle of suspending calls, or a call through `dyn` to a function that suspends, takes its frame from the task's own stack of frames.
+- **A function that cannot suspend** runs on the worker's own stack, wherever it is called from. It takes no room in a parked task.
+- **A function that can suspend** is compiled to a state machine: a frame holding the locals that live across a suspension, overlapping where their lifetimes do not, and a function that resumes it from where it stopped. A call from one such function to another nests the callee's frame in the caller's. A task's frames, from its root to its deepest suspension, become one allocation of a size known at compile time, made where the task starts and never moved. Because user code never holds the frame by value, a borrow held across a suspension (`conn.read(mut buf)`) points into it safely, and there is no `Pin`.
+- **A cycle of suspending calls**, or a call through `dyn` to a function that suspends, takes its frame from the task's own stack of frames, exactly sized, without the programmer writing anything like Rust's `Box::pin`.
+- **Fast paths stay in registers.** An uncontended `Mutex.lock`, a buffered read with bytes waiting, and a channel receive with a message waiting do not suspend. They are compiled inline as ordinary code, so the common case never reaches the scheduler.
+- **Small machines.** A program whose tasks have no recursion and no `dyn` suspension has every task's state of known size. It can be placed in static memory with no allocator, as Rust's embedded async runtimes do on microcontrollers with a few kilobytes of RAM.
 
-A parked task then costs what a Rust future costs, a few hundred bytes for a connection handler, and no language change is needed: there is no `async` and no `await`, as there were none. JavaScript already runs effects as generators; WebAssembly no longer needs stack switching from its host. §8.2, §8.3, §11.3 and §12.1 say so.
+No language change is needed. There was no `async` and no `await`, and there still is none. JavaScript already runs effects as generators, and WebAssembly no longer needs stack switching from its host.
+
+**Done when:** a parked connection handler costs what the equivalent Rust future costs, within tens of bytes, measured; a million parked tasks fit in the memory a million Rust futures take; nothing that does not suspend runs slower; and §8.2, §8.3, §11.3 and §12.1 say so.
 
 ## 17. Portable SIMD
 
-`std/simd` (§12.3's first question): `Simd<T, comptime N>`, `N` lanes of a scalar, and `Mask<comptime N>`, each `Copy` and `Send`, lowered to LLVM's vector types, to SSE and AVX, NEON and WebAssembly's 128-bit SIMD. Construction from a value or a slice, checked once for all its lanes; lane-wise arithmetic, bitwise operations, `min`, `max` and saturating arithmetic; comparisons to a mask; reductions; shuffles by indices known at compile time and byte lookups by a vector of indices; and on a mask, `select`, `any`, `all`, `firstTrue` and `bitmask`, `firstTrue` lowered on ARM so that it costs no more than on x86. JavaScript and the reference evaluator run it a lane at a time. The JSON scanner, UTF-8 checking and the line reader use it.
+**Goal.** Close §12.3's first question. `Soa<T>`, `par` and LLVM's auto-vectorizer already handle vertical arithmetic, the same operation on every element. They cannot do horizontal work, where lanes talk to each other: scanning sixteen bytes at a time for a quote or a newline as simdjson does, checking UTF-8, reductions, and shuffles. That work is where the fastest parsers in any language get their speed. It must be portable without an emulation cliff. ARM's NEON has no single instruction for x86's `movemask`, so code written around one is slower on ARM than plain scalar code, unless the API also offers what ARM does well.
+
+`std/simd`: `Simd<T, comptime N>`, `N` lanes of a scalar, and `Mask<comptime N>`, both `Copy` and `Send`, lowered to LLVM's vector types and so to SSE and AVX, NEON, and WebAssembly's 128-bit SIMD. The surface:
+- construction from a value or from a slice, bounds-checked once for all lanes;
+- lane-wise arithmetic, bitwise operations, `min`, `max` and saturating arithmetic;
+- comparisons that return a mask, and reductions;
+- shuffles by indices known at compile time, and byte lookup by a vector of indices;
+- on a mask: `select`, `any`, `all`, `firstTrue` and `bitmask`. `firstTrue` is lowered on ARM in two instructions (`shrn`, then count trailing zeros), so finding the first match costs no more there than on x86.
+
+No grammar change is needed; `comptime N` is already in the language. JavaScript and the reference evaluator run SIMD a lane at a time.
+
+**Done when:** the JSON scanner, UTF-8 checking and the line reader use it and are measurably faster on x86-64, AArch64 and WebAssembly, and no target is slower than scalar code.
 
 ## 18. FlyNext, order-free and faster
 
-- An element's attributes, classes, key and listeners may be given anywhere in its body, after its text and its children too: the server writes an element's opening tag once its attributes are all known, and the browser reads an element's props past its children.
-- Each recorded `#Open` knows where its element ends, so finding an element's span is a lookup, not a scan.
-- Strings go to the DOM as a pointer and a length into the module's memory, not copied into a new buffer each.
+**Goal.** FlyNext's architecture is already faster than React's: the server streams HTML straight into a buffer with no tree, and the browser diffs two flat arrays in linear memory instead of a tree of objects the garbage collector must chase. Two things stand between it and a framework without footguns or wasted work.
+
+- **Props anywhere in an element's body.** Today an attribute, class, key or listener given after an element's text or first child is silently wrong. The server writes it into the element's text (`<button>Save class="primary"</button>`) and the browser ignores it. This is a correctness bug that looks like a style rule. Order inside `el(...)` must not matter: the server writes an element's opening tag once its attributes are all known, and the browser reads an element's props past its children.
+- **No wasted work in the diff.** Each recorded `#Open` knows where its element ends, so finding an element's span is a lookup rather than a scan, which removes the quadratic cost on deep pages. Strings go to the DOM as a pointer and a length into the module's memory rather than being copied into a new buffer each time.
+
+**Done when:** props in any order render identically on the server and in the browser, by test, and diffing a 1,000-row table is measurably faster.
 
 ## 19. What LLVM is told
 
-- A function that can fail returns its failure beside its value, in registers, rather than through memory.
-- A `mut` parameter is `noalias`, and a `readonly` one `noalias readonly` where nothing in it can change through a cell, so LLVM vectorizes and keeps values in registers across what it could not before.
+**Goal.** Give LLVM everything Flyscript's types already know, so that generated code is as good as hand-written C or Rust, or better, since Rust cannot promise what `readonly` promises.
+
+- **Failures returned in registers.** A function that can fail returns its failure beside its value, in two registers, rather than through memory, so the path that does not fail costs what a plain return costs.
+- **Aliasing.** A `mut` parameter is `noalias`. A `readonly` one is `noalias readonly` wherever nothing in it can change through a `Cell`. LLVM can then vectorize loops and keep values in registers across stores and calls where it could not before.
+
+**Done when:** the compiler benchmark and the numeric examples are measurably faster, and the code LLVM produces for the vectorizable loops is vectorized.
