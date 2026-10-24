@@ -625,7 +625,8 @@ impl Cgen {
         } else {
           if (self.lw.p.hasDrop(d)) {
             const call = self.dropCall(t, span);
-            body.push(`  if (v->live) { v->live = false; fly_unwind_state u_ = fly_cleanup_begin(); ${call}; fly_cleanup_end(u_); }\n`);
+            // A destructor does not unwind: a panic out of one ends the program (§5.7).
+            body.push(`  if (v->live) { v->live = false; fly_unwind_state u_ = fly_cleanup_begin(); fly_destroy_begin(); ${call}; fly_destroy_end(); fly_cleanup_end(u_); }\n`);
           }
           match (self.lw.p.defs[d].kind) {
             #Enum { tags: _ } => self.dropTags(mut body, t, span),

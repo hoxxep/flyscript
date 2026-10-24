@@ -853,7 +853,13 @@ const { $rt, $b } = (() => {
     Gen_enumerate: (g) => new Gen((function* () { let i = 0; for (let s = step(g); s !== undefined; s = step(g)) yield new Yielded([i++, s.item]); })()),
     Gen_collect(g) { const out = []; for (let s = step(g); s !== undefined; s = step(g)) out.push(s.item); return out; },
     *Gen_each(g) { yield* g.it; },
-    Gen_drop(r) { if (r.v.it.return) r.v.it.return(); },
+    Gen_drop(r) { if (r.v.it.return) $b.destructor(() => r.v.it.return()); },
+    // A destructor does not unwind (§5.7): a panic that escapes one — a `Drop` impl, or the cleanup
+    // of a continuation or generator a value's dropping unwinds — ends the program.
+    destructor(f) {
+      try { f(); }
+      catch (e0) { const e = asPanic(e0); if (e instanceof Panic) end(`${e.message}, in a destructor`); throw e; }
+    },
 
     // A descriptor let go of, as a dropped file does.
     Fd_release(fd) { const n = (fd.v ?? fd).n; if (n > 2) { try { fs.closeSync(n); } catch {} } },
@@ -1349,54 +1355,54 @@ function $rem(x, y) { if (y === 0) $rt.panic("division by zero"); return x % y; 
 
 function $drop0(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 const $const73 = ["format.fly", "sched.fly", "mt.fly"];
 function $copy1(v) { return [v[0], v[1]]; }
 const $const74 = 1;
 function $drop2(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $drop3(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $copy4(v) { return ({ end: v.end, start: v.start }); }
 function $drop5(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $copy6(v) { return [v[0], v[1]]; }
 function $drop7(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $copy8(v) { return [v[0], v[1]]; }
 function $drop9(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $drop10(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $drop11(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $copy12(v) { return [v[0], v[1]]; }
 function $drop13(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $drop14(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $drop15(v) {
   if (v === undefined) return;
-  drop_56({ v: v });
+  $b.destructor(() => drop_56({ v: v }));
 }
 function $copy16(v) { return ({ dir: v.dir, modified: v.modified, size: v.size }); }
 const $const71 = $usize(1 * 2 ** 40);
@@ -1406,598 +1412,598 @@ function $copy18(v) { return [v[0], v[1]]; }
 const $const81 = $usize(1 * 2 ** 51);
 function $drop19(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $drop20(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $drop21(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $drop22(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $drop23(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $drop24(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $drop25(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $copy26(v) { return ({ n: v.n }); }
 function $copy27(v) { return [v[0], v[1]]; }
 function $drop28(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $drop29(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $copy30(v) { return [v[0], v[1]]; }
 function $drop31(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $drop32(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $drop33(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $copy34(v) { return ({ trail: v.trail, tys: v.tys, rows: v.rows, effs: v.effs, regions: v.regions, lens: v.lens }); }
 function $drop35(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $drop36(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $copy37(v) { return [v[0], v[1]]; }
 function $drop38(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $drop39(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $drop40(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $copy41(v) { return [v[0], v[1]]; }
 function $drop42(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $drop43(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $copy44(v) { return [v[0], v[1]]; }
 function $drop45(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $drop46(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 const $const83 = "void flyg_cleanup_begin(fly_unwind_state* s) { *s = fly_cleanup_begin(); }\nvoid flyg_cleanup_end(fly_unwind_state* s) { fly_cleanup_end(*s); }\nvoid flyg_free(void* p) { free(p); }\n";
 const $const82 = "declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1)\ndeclare void @llvm.memset.p0.i64(ptr, i8, i64, i1)\ndeclare void @fly_out_of_bounds(i64, i64) noreturn\ndeclare void @fly_overflow(i128, ptr) noreturn\ndeclare i128 @fly_add128(i128, i128)\ndeclare i128 @fly_sub128(i128, i128)\ndeclare i128 @fly_mul128(i128, i128)\ndeclare void @fly_div_zero() noreturn\ndeclare void @fly_panic(ptr) noreturn\ndeclare void @fly_err_box(i32, ptr, SIZE)\ndeclare i32 @fly_err_tag()\ndeclare void @fly_err_take(ptr, SIZE)\ndeclare ptr @fly_alloc(SIZE)\ndeclare void @fly_arena_free(ptr)\ndeclare void @fly_perform(i32, i32, ptr, ptr)\ndeclare void @fly_handle_start(ptr, ptr, ptr)\ndeclare void @fly_handle_keep(ptr)\ndeclare void @fly_handle_resume(ptr)\ndeclare zeroext i1 @fly_handle_done(ptr)\ndeclare void @fly_handle_unwind(ptr)\ndeclare void @fly_handle_free(ptr)\ndeclare void @flyg_cleanup_begin(ptr)\ndeclare void @flyg_cleanup_end(ptr)\ndeclare void @flyg_free(ptr)\n";
 function $copy47(v) { return [v[0], v[1]]; }
 function $drop48(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $copy49(v) { return [v[0], v[1]]; }
 function $drop50(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $drop51(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $drop52(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $drop53(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $copy54(v) { return [v[0], v[1]]; }
 function $drop55(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $drop56(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $drop57(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $drop58(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $drop59(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $drop60(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $drop61(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $copy62(v) { return ({ item: v.item, method: v.method, module: v.module }); }
 function $drop63(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $drop64(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $drop65(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $drop66(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $drop67(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $drop68(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $drop69(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $copy70(v) { return [v[0], v[1]]; }
 function $drop71(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $drop72(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $drop73(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $copy74(v) { return [v[0], v[1]]; }
 function $drop75(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $copy76(v) { return [v[0], v[1]]; }
 function $drop77(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $drop78(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $drop79(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $copy80(v) { return [v[0], v[1]]; }
 function $drop81(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $drop82(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $copy83(v) { return [v[0], v[1]]; }
 function $drop84(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $drop85(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $copy86(v) { return [v[0], v[1]]; }
 function $drop87(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $drop88(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $copy89(v) { return [v[0], v[1]]; }
 function $drop90(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $copy91(v) { return [v[0], v[1]]; }
 function $drop92(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $drop93(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $copy94(v) { return [v[0], v[1]]; }
 function $drop95(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $copy96(v) { return [v[0], v[1]]; }
 function $drop97(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $copy98(v) { return [v[0], v[1]]; }
 function $drop99(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 const $const0 = 65536;
 function $copy100(v) { return [v[0], v[1]]; }
 function $drop101(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $drop102(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $drop103(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 const $const75 = ["len", "isEmpty", "enumerate", "map", "filter", "any"];
 function $copy104(v) { return [v[0], v[1]]; }
 function $drop105(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 const $const68 = ["i8", "i16", "i32", "i64", "i128", "isize", "u8", "u16", "u32", "u64", "usize", "f32", "f64", "bool", "str", "void", "never", "Type"];
 function $drop106(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $drop107(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $drop108(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $copy109(v) { return [v[0], v[1], v[2]]; }
 function $drop110(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 const $const69 = ["as", "break", "catch", "comptime", "const", "continue", "defer", "dyn", "else", "enum", "export", "extends", "extern", "false", "for", "function", "if", "impl", "import", "interface", "let", "mut", "once", "readonly", "return", "struct", "throw", "true", "try", "type", "unsafe", "uses", "while", "yield"];
 const $const70 = ["...", "..", "=>", "==", "!=", "<=", ">=", "&&", "||", "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "{", "}", "(", ")", "[", "]", "<", ">", ",", ";", ":", ".", "=", "+", "-", "*", "/", "%", "&", "|", "^", "!", "?", "@", "~"];
 function $copy111(v) { return [v[0], v[1]]; }
 function $drop112(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $drop113(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $copy114(v) { return [v[0], v[1]]; }
 function $drop115(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $drop116(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 const $const79 = ["auto", "break", "case", "char", "const", "continue", "default", "do", "double", "else", "enum", "extern", "float", "for", "goto", "if", "inline", "int", "long", "register", "restrict", "return", "short", "signed", "sizeof", "static", "struct", "switch", "typedef", "union", "unsigned", "void", "volatile", "while", "main", "bool", "true", "false", "errno", "free", "exit"];
 const $const78 = ["=", "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^="];
 function $drop117(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $drop118(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $drop119(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $copy120(v) { return [v[0], v[1]]; }
 function $drop121(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 const $const80 = $usize(1 * 2 ** 52);
 function $copy122(v) { return [v[0], v[1]]; }
 function $drop123(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $copy124(v) { return [v[0], v[1]]; }
 function $drop125(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $drop126(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $copy127(v) { return [v[0], v[1]]; }
 function $drop128(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $drop129(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $drop130(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $drop131(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $drop132(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 const $const84 = ["arguments", "await", "case", "catch", "class", "debugger", "default", "delete", "do", "else", "enum", "eval", "export", "extends", "finally", "function", "implements", "import", "in", "instanceof", "interface", "let", "new", "null", "package", "private", "protected", "public", "static", "super", "switch", "this", "typeof", "undefined", "var", "void", "with", "yield", "NaN", "Infinity"];
 function $drop133(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $drop134(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $copy135(v) { return [v[0], v[1]]; }
 function $drop136(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 const $const76 = 1000000n;
 function $drop137(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $copy138(v) { return [v[0], v[1]]; }
 function $drop139(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $drop140(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $drop141(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $copy142(v) { return [v[0], $copy4(v[1])]; }
 function $drop143(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $drop144(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $drop145(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $drop146(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $copy147(v) { return [v[0], v[1]]; }
 function $drop148(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $copy149(v) { return ({ label: v.label }); }
 function $copy150(v) { return [v[0], v[1]]; }
 function $drop151(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $drop152(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 const $const85 = "0123456789abcdef";
 function $drop153(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $drop154(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $drop155(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 const $const77 = [["||"], ["&&"], ["==", "!=", "<", ">", "<=", ">="], ["|"], ["^"], ["&"], ["<<", ">>"], ["+", "-"], ["*", "/", "%"]];
 function $drop156(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $copy157(v) { return [v[0], v[1]]; }
 function $drop158(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $drop159(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $copy160(v) { return [v[0], v[1]]; }
 function $copy161(v) { return [v[0], v[1]]; }
 function $drop162(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $copy163(v) { return [v[0], v[1]]; }
 function $drop164(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $drop165(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $drop166(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $drop167(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $copy168(v) { return [v[0], v[1]]; }
 function $drop169(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $drop170(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $drop171(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $copy172(v) { return [v[0], v[1]]; }
 function $drop173(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $drop174(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $drop175(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $drop176(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $drop177(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $copy178(v) { return [v[0], v[1]]; }
 function $drop179(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $drop180(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $drop181(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $copy182(v) { return [v[0], v[1]]; }
 function $drop183(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $drop184(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $drop185(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $drop186(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $drop187(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $drop188(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $copy189(v) { return [v[0], v[1]]; }
 function $drop190(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $copy191(v) { return [v[0], v[1]]; }
 function $drop192(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $drop193(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $drop194(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $copy195(v) { return [v[0], v[1]]; }
 function $drop196(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $drop197(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $copy198(v) { return [v[0], v[1]]; }
 function $drop199(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function $drop200(v) {
   if (v === undefined) return;
-  $b.Gen_drop({ v: v });
+  $b.destructor(() => $b.Gen_drop({ v: v }));
 }
 function main__0($1, $2, $3, $4) {
   {
@@ -2170,21 +2176,21 @@ function main__0($1, $2, $3, $4) {
             compile_5(v61_t, v60_t, v59_t, v48_t, v58_t, v52_t, v57_t, v56_t);
           } finally { if ($rt.unwinds()) {
             try {
-              $drop0(v53_t);
+              if ($rt.unwinds()) $drop0(v53_t);
             } finally {
               try {
-                $drop0(v49_t);
+                if ($rt.unwinds()) $drop0(v49_t);
               } finally {
                 try {
-                  $drop0(v45_t);
+                  if ($rt.unwinds()) $drop0(v45_t);
                 } finally {
                   try {
-                    $drop0(v29_t);
+                    if ($rt.unwinds()) $drop0(v29_t);
                   } finally {
                     try {
-                      $drop0(v13_t);
+                      if ($rt.unwinds()) $drop0(v13_t);
                     } finally {
-                      $drop0(v5_t);
+                      if ($rt.unwinds()) $drop0(v5_t);
                     }
                   }
                 }
@@ -2284,14 +2290,14 @@ function some_1($12, $13) {
               }
             }
           } finally { if ($rt.unwinds()) {
-            $drop0(v4_t.v);
+            if ($rt.unwinds()) $drop0(v4_t.v);
           } }
         }
         v3_t = false;
       }
       v2_ret = v3_t;
     } finally { if ($rt.unwinds()) {
-      $drop0(v0_self);
+      if ($rt.unwinds()) $drop0(v0_self);
     } }
   }
   return v2_ret;
@@ -2697,7 +2703,7 @@ function find_4($21, $22) {
               }
             }
           } finally { if ($rt.unwinds()) {
-            $drop0(v4_t.v);
+            if ($rt.unwinds()) $drop0(v4_t.v);
           } }
         }
         v13_t = { $tag: "None" };
@@ -2705,7 +2711,7 @@ function find_4($21, $22) {
       }
       v2_ret = v3_t;
     } finally { if ($rt.unwinds()) {
-      $drop0(v0_self);
+      if ($rt.unwinds()) $drop0(v0_self);
     } }
   }
   return v2_ret;
@@ -2846,12 +2852,12 @@ function compile_5($23, $24, $25, $26, $27, $28, $29, $30) {
                 }
               } finally { if ($rt.unwinds()) {
                 try {
-                  $drop2(v34_t.v);
+                  if ($rt.unwinds()) $drop2(v34_t.v);
                 } finally {
                   try {
-                    $drop2(v33_t);
+                    if ($rt.unwinds()) $drop2(v33_t);
                   } finally {
-                    $drop3(v32_t);
+                    if ($rt.unwinds()) $drop3(v32_t);
                   }
                 }
               } }
@@ -3135,7 +3141,7 @@ function compile_5($23, $24, $25, $26, $27, $28, $29, $30) {
                 }
                 return undefined;
               } finally { if ($rt.unwinds()) {
-                $drop5(v120_t);
+                if ($rt.unwinds()) $drop5(v120_t);
               } }
             }
             break L4;
@@ -3420,7 +3426,7 @@ function compile_5($23, $24, $25, $26, $27, $28, $29, $30) {
         v289_t = v13_clock;
         lap_20(v289_t, "write");
       } finally { if ($rt.unwinds()) {
-        $drop5(v178_t);
+        if ($rt.unwinds()) $drop5(v178_t);
       } }
     }
   }
@@ -3714,7 +3720,7 @@ function cold_6($40, $41, $42) {
         }
         v4_t = v105_t;
       } finally { if ($rt.unwinds()) {
-        $drop5(v78_t);
+        if ($rt.unwinds()) $drop5(v78_t);
       } }
     }
     v3_ret = v4_t;
@@ -3920,12 +3926,12 @@ function changed_11($52) {
           }
         } finally { if ($rt.unwinds()) {
           try {
-            $drop7(v8_t.v);
+            if ($rt.unwinds()) $drop7(v8_t.v);
           } finally {
             try {
-              $drop7(v7_t);
+              if ($rt.unwinds()) $drop7(v7_t);
             } finally {
-              $drop5(v6_t);
+              if ($rt.unwinds()) $drop5(v6_t);
             }
           }
         } }
@@ -4075,12 +4081,12 @@ function again_12($53, $54) {
                     }
                   } finally { if ($rt.unwinds()) {
                     try {
-                      $drop9(v41_t.v);
+                      if ($rt.unwinds()) $drop9(v41_t.v);
                     } finally {
                       try {
-                        $drop9(v40_t);
+                        if ($rt.unwinds()) $drop9(v40_t);
                       } finally {
-                        $drop10(v39_t);
+                        if ($rt.unwinds()) $drop10(v39_t);
                       }
                     }
                   } }
@@ -4156,9 +4162,9 @@ function again_12($53, $54) {
           }
         } finally { if ($rt.unwinds()) {
           try {
-            $drop11(v57_t.v);
+            if ($rt.unwinds()) $drop11(v57_t.v);
           } finally {
-            $drop11(v56_t);
+            if ($rt.unwinds()) $drop11(v56_t);
           }
         } }
       }
@@ -4209,9 +4215,9 @@ function again_12($53, $54) {
           }
         } finally { if ($rt.unwinds()) {
           try {
-            $drop13(v73_t.v);
+            if ($rt.unwinds()) $drop13(v73_t.v);
           } finally {
-            $drop13(v72_t);
+            if ($rt.unwinds()) $drop13(v72_t);
           }
         } }
       }
@@ -4303,9 +4309,9 @@ function again_12($53, $54) {
           }
         } finally { if ($rt.unwinds()) {
           try {
-            $drop11(v88_t.v);
+            if ($rt.unwinds()) $drop11(v88_t.v);
           } finally {
-            $drop11(v87_t);
+            if ($rt.unwinds()) $drop11(v87_t);
           }
         } }
       }
@@ -4349,9 +4355,9 @@ function again_12($53, $54) {
           }
         } finally { if ($rt.unwinds()) {
           try {
-            $drop11(v129_t.v);
+            if ($rt.unwinds()) $drop11(v129_t.v);
           } finally {
-            $drop11(v128_t);
+            if ($rt.unwinds()) $drop11(v128_t);
           }
         } }
       }
@@ -4738,7 +4744,7 @@ function changedSince_14($58) {
         v7_t = some_53($rt.take(v4_t, v4_t = undefined), v6_t);
         v2_t = v7_t;
       } finally { if ($rt.unwinds()) {
-        $drop14(v4_t);
+        if ($rt.unwinds()) $drop14(v4_t);
       } }
     }
     v1_ret = v2_t;
@@ -4768,9 +4774,9 @@ function readText_15($60) {
             v4_t = v10_t;
           } finally { if ($rt.unwinds()) {
             try {
-              $drop15(v8_f.v);
+              if ($rt.unwinds()) $drop15(v8_f.v);
             } finally {
-              $drop15(v7_t);
+              if ($rt.unwinds()) $drop15(v7_t);
             }
           } }
         }
@@ -5464,7 +5470,7 @@ function load_19($67, $68) {
                       }
                     }
                   } finally { if ($rt.unwinds()) {
-                    $drop5(v137_t);
+                    if ($rt.unwinds()) $drop5(v137_t);
                   } }
                 }
                 break L8;
@@ -5560,12 +5566,12 @@ function load_19($67, $68) {
           }
         } finally { if ($rt.unwinds()) {
           try {
-            $drop9(v237_t.v);
+            if ($rt.unwinds()) $drop9(v237_t.v);
           } finally {
             try {
-              $drop9(v236_t);
+              if ($rt.unwinds()) $drop9(v236_t);
             } finally {
-              $drop10(v235_t);
+              if ($rt.unwinds()) $drop10(v235_t);
             }
           }
         } }
@@ -6402,12 +6408,12 @@ function checkOwnership_22($74, $75) {
                     }
                   } finally { if ($rt.unwinds()) {
                     try {
-                      $drop19(v112_t.v);
+                      if ($rt.unwinds()) $drop19(v112_t.v);
                     } finally {
                       try {
-                        $drop19(v111_t);
+                        if ($rt.unwinds()) $drop19(v111_t);
                       } finally {
-                        $drop20(v110_t);
+                        if ($rt.unwinds()) $drop20(v110_t);
                       }
                     }
                   } }
@@ -6621,9 +6627,9 @@ function writeFile_24($77, $78) {
         close_108(v7_t);
       } finally { if ($rt.unwinds()) {
         try {
-          $drop15(v4_f.v);
+          if ($rt.unwinds()) $drop15(v4_f.v);
         } finally {
-          $drop15(v3_t);
+          if ($rt.unwinds()) $drop15(v3_t);
         }
       } }
     }
@@ -6739,7 +6745,7 @@ function interfaceOf_25($79) {
                         v41_t = some_110($rt.take(v38_t, v38_t = undefined), v40_t);
                         v32_t = v41_t;
                       } finally { if ($rt.unwinds()) {
-                        $drop21(v38_t);
+                        if ($rt.unwinds()) $drop21(v38_t);
                       } }
                     }
                     v31_t = v32_t;
@@ -6975,12 +6981,12 @@ function interfaceOf_25($79) {
           }
         } finally { if ($rt.unwinds()) {
           try {
-            $drop22(v10_t.v);
+            if ($rt.unwinds()) $drop22(v10_t.v);
           } finally {
             try {
-              $drop22(v9_t);
+              if ($rt.unwinds()) $drop22(v9_t);
             } finally {
-              $drop23(v8_t);
+              if ($rt.unwinds()) $drop23(v8_t);
             }
           }
         } }
@@ -7057,7 +7063,7 @@ function findIndex_27($84, $85) {
               }
             }
           } finally { if ($rt.unwinds()) {
-            $drop5(v5_t.v);
+            if ($rt.unwinds()) $drop5(v5_t.v);
           } }
         }
         v15_t = { $tag: "None" };
@@ -7065,7 +7071,7 @@ function findIndex_27($84, $85) {
       }
       v2_ret = v3_t;
     } finally { if ($rt.unwinds()) {
-      $drop5(v0_self);
+      if ($rt.unwinds()) $drop5(v0_self);
     } }
   }
   return v2_ret;
@@ -7254,7 +7260,7 @@ function coreProgram_29($88, $89, $90) {
         $b.String_push(v94_t, "example (n : Nat) := certified checks.1 checks.2 n\n");
         v4_t = v58_out.v;
       } finally { if ($rt.unwinds()) {
-        $drop10(v6_t);
+        if ($rt.unwinds()) $drop10(v6_t);
       } }
     }
     v3_ret = v4_t;
@@ -7768,9 +7774,9 @@ function readSource_39($118) {
             v4_t = v9_t;
           } finally { if ($rt.unwinds()) {
             try {
-              $drop15(v6_f.v);
+              if ($rt.unwinds()) $drop15(v6_f.v);
             } finally {
-              $drop15(v5_t);
+              if ($rt.unwinds()) $drop15(v5_t);
             }
           } }
         }
@@ -8078,12 +8084,12 @@ function iter_44($125) {
           v4_t = $b.HashMap_keys(v3_t);
           v2_t = $rt.take(v4_t, v4_t = undefined);
         } finally { if ($rt.unwinds()) {
-          $drop11(v4_t);
+          if ($rt.unwinds()) $drop11(v4_t);
         } }
       }
       v1_ret = $rt.take(v2_t, v2_t = undefined);
     } finally { if ($rt.unwinds()) {
-      $drop11(v2_t);
+      if ($rt.unwinds()) $drop11(v2_t);
     } }
   }
   return v1_ret;
@@ -8119,7 +8125,7 @@ function isTemplate_45($126, $127) {
           v13_t = some_136($rt.take(v10_t, v10_t = undefined), v12_t);
           v8_t = v13_t;
         } finally { if ($rt.unwinds()) {
-          $drop24(v10_t);
+          if ($rt.unwinds()) $drop24(v10_t);
         } }
       }
       v3_t = v8_t;
@@ -8351,9 +8357,9 @@ function programHandlesIo_51($139) {
                       }
                     } finally { if ($rt.unwinds()) {
                       try {
-                        $drop11(v14_t.v);
+                        if ($rt.unwinds()) $drop11(v14_t.v);
                       } finally {
-                        $drop11(v13_t);
+                        if ($rt.unwinds()) $drop11(v13_t);
                       }
                     } }
                   }
@@ -8365,9 +8371,9 @@ function programHandlesIo_51($139) {
           }
         } finally { if ($rt.unwinds()) {
           try {
-            $drop25(v5_t.v);
+            if ($rt.unwinds()) $drop25(v5_t.v);
           } finally {
-            $drop25(v4_t);
+            if ($rt.unwinds()) $drop25(v4_t);
           }
         } }
       }
@@ -8478,9 +8484,9 @@ function again_52($140, $141, $142, $143, $144) {
                     }
                   } finally { if ($rt.unwinds()) {
                     try {
-                      $drop0(v28_t.v);
+                      if ($rt.unwinds()) $drop0(v28_t.v);
                     } finally {
-                      $drop0(v27_t);
+                      if ($rt.unwinds()) $drop0(v27_t);
                     }
                   } }
                 }
@@ -8597,14 +8603,14 @@ function some_53($145, $146) {
               }
             }
           } finally { if ($rt.unwinds()) {
-            $drop14(v4_t.v);
+            if ($rt.unwinds()) $drop14(v4_t.v);
           } }
         }
         v3_t = false;
       }
       v2_ret = v3_t;
     } finally { if ($rt.unwinds()) {
-      $drop14(v0_self);
+      if ($rt.unwinds()) $drop14(v0_self);
     } }
   }
   return v2_ret;
@@ -8621,12 +8627,12 @@ function open_54($147) {
           v3_t = opened_142(v0_path, 0);
           v2_t = $rt.take(v3_t, v3_t = undefined);
         } finally { if ($rt.unwinds()) {
-          $drop15(v3_t);
+          if ($rt.unwinds()) $drop15(v3_t);
         } }
       }
       v1_ret = $rt.take(v2_t, v2_t = undefined);
     } finally { if ($rt.unwinds()) {
-      $drop15(v2_t);
+      if ($rt.unwinds()) $drop15(v2_t);
     } }
   }
   return v1_ret;
@@ -8840,9 +8846,9 @@ function readFile_60($154) {
             v4_t = v9_t;
           } finally { if ($rt.unwinds()) {
             try {
-              $drop15(v6_f.v);
+              if ($rt.unwinds()) $drop15(v6_f.v);
             } finally {
-              $drop15(v5_t);
+              if ($rt.unwinds()) $drop15(v5_t);
             }
           } }
         }
@@ -9192,14 +9198,14 @@ function some_64($166, $167) {
               }
             }
           } finally { if ($rt.unwinds()) {
-            $drop5(v4_t.v);
+            if ($rt.unwinds()) $drop5(v4_t.v);
           } }
         }
         v3_t = false;
       }
       v2_ret = v3_t;
     } finally { if ($rt.unwinds()) {
-      $drop5(v0_self);
+      if ($rt.unwinds()) $drop5(v0_self);
     } }
   }
   return v2_ret;
@@ -9624,12 +9630,12 @@ function declare_67($171) {
                     }
                   } finally { if ($rt.unwinds()) {
                     try {
-                      $drop28(v15_t.v);
+                      if ($rt.unwinds()) $drop28(v15_t.v);
                     } finally {
                       try {
-                        $drop28(v14_t);
+                        if ($rt.unwinds()) $drop28(v14_t);
                       } finally {
-                        $drop29(v13_t);
+                        if ($rt.unwinds()) $drop29(v13_t);
                       }
                     }
                   } }
@@ -9856,9 +9862,9 @@ function declare_67($171) {
           }
         } finally { if ($rt.unwinds()) {
           try {
-            $drop31(v232_t.v);
+            if ($rt.unwinds()) $drop31(v232_t.v);
           } finally {
-            $drop31(v231_t);
+            if ($rt.unwinds()) $drop31(v231_t);
           }
         } }
       }
@@ -10278,7 +10284,7 @@ function declare_67($171) {
                                                   v437_t = $b.String_asStr(v436_t);
                                                   error_152(v440_t, v439_t, v438_t, v437_t);
                                                 } finally { if ($rt.unwinds()) {
-                                                  $drop23(v386_t);
+                                                  if ($rt.unwinds()) $drop23(v386_t);
                                                 } }
                                               }
                                               break L18;
@@ -10515,12 +10521,12 @@ function declare_67($171) {
                     }
                   } finally { if ($rt.unwinds()) {
                     try {
-                      $drop28(v477_t.v);
+                      if ($rt.unwinds()) $drop28(v477_t.v);
                     } finally {
                       try {
-                        $drop28(v476_t);
+                        if ($rt.unwinds()) $drop28(v476_t);
                       } finally {
-                        $drop29(v475_t);
+                        if ($rt.unwinds()) $drop29(v475_t);
                       }
                     }
                   } }
@@ -10826,7 +10832,7 @@ function declare_67($171) {
                                           }
                                           $ix(v0_self.v.fns, v583_id).scheme = v591_s;
                                         } finally { if ($rt.unwinds()) {
-                                          $drop32(v586_t);
+                                          if ($rt.unwinds()) $drop32(v586_t);
                                         } }
                                       }
                                       break L33;
@@ -10856,12 +10862,12 @@ function declare_67($171) {
                     }
                   } finally { if ($rt.unwinds()) {
                     try {
-                      $drop28(v554_t.v);
+                      if ($rt.unwinds()) $drop28(v554_t.v);
                     } finally {
                       try {
-                        $drop28(v553_t);
+                        if ($rt.unwinds()) $drop28(v553_t);
                       } finally {
-                        $drop29(v552_t);
+                        if ($rt.unwinds()) $drop29(v552_t);
                       }
                     }
                   } }
@@ -11519,7 +11525,7 @@ function blockHasComptime_74($181) {
         }
         v2_t = v8_t;
       } finally { if ($rt.unwinds()) {
-        $drop33(v4_t);
+        if ($rt.unwinds()) $drop33(v4_t);
       } }
     }
     v1_ret = v2_t;
@@ -12798,7 +12804,7 @@ function coerce_91($207, $208, $209, $210) {
                         v168_t = every_221($rt.take(v165_t, v165_t = undefined), v167_t);
                         v163_t = v168_t;
                       } finally { if ($rt.unwinds()) {
-                        $drop35(v165_t);
+                        if ($rt.unwinds()) $drop35(v165_t);
                       } }
                     }
                     if (v163_t)
@@ -14473,7 +14479,7 @@ function finish_92($213, $214, $215, $216) {
                   v623_t = new $rt.FieldRef(v0_self.v.typed, "targs");
                   $b.HashMap_insert(v623_t, v537_id, v605_rest.v);
                 } finally { if ($rt.unwinds()) {
-                  $drop36(v574_t);
+                  if ($rt.unwinds()) $drop36(v574_t);
                 } }
               }
             }
@@ -14579,9 +14585,9 @@ function finish_92($213, $214, $215, $216) {
           }
         } finally { if ($rt.unwinds()) {
           try {
-            $drop38(v650_t.v);
+            if ($rt.unwinds()) $drop38(v650_t.v);
           } finally {
-            $drop38(v649_t);
+            if ($rt.unwinds()) $drop38(v649_t);
           }
         } }
       }
@@ -14634,9 +14640,9 @@ function finish_92($213, $214, $215, $216) {
           }
         } finally { if ($rt.unwinds()) {
           try {
-            $drop38(v671_t.v);
+            if ($rt.unwinds()) $drop38(v671_t.v);
           } finally {
-            $drop38(v670_t);
+            if ($rt.unwinds()) $drop38(v670_t);
           }
         } }
       }
@@ -14689,9 +14695,9 @@ function finish_92($213, $214, $215, $216) {
           }
         } finally { if ($rt.unwinds()) {
           try {
-            $drop38(v692_t.v);
+            if ($rt.unwinds()) $drop38(v692_t.v);
           } finally {
-            $drop38(v691_t);
+            if ($rt.unwinds()) $drop38(v691_t);
           }
         } }
       }
@@ -14740,9 +14746,9 @@ function finish_92($213, $214, $215, $216) {
           }
         } finally { if ($rt.unwinds()) {
           try {
-            $drop38(v713_t.v);
+            if ($rt.unwinds()) $drop38(v713_t.v);
           } finally {
-            $drop38(v712_t);
+            if ($rt.unwinds()) $drop38(v712_t);
           }
         } }
       }
@@ -14935,9 +14941,9 @@ function finish_92($213, $214, $215, $216) {
           }
         } finally { if ($rt.unwinds()) {
           try {
-            $drop38(v767_t.v);
+            if ($rt.unwinds()) $drop38(v767_t.v);
           } finally {
-            $drop38(v766_t);
+            if ($rt.unwinds()) $drop38(v766_t);
           }
         } }
       }
@@ -15007,9 +15013,9 @@ function finish_92($213, $214, $215, $216) {
           }
         } finally { if ($rt.unwinds()) {
           try {
-            $drop38(v788_t.v);
+            if ($rt.unwinds()) $drop38(v788_t.v);
           } finally {
-            $drop38(v787_t);
+            if ($rt.unwinds()) $drop38(v787_t);
           }
         } }
       }
@@ -15451,7 +15457,7 @@ function sendParamsOf_94($224, $225) {
                             v2_t = v11_t;
                             break L1;
                           } finally { if ($rt.unwinds()) {
-                            $drop39(v8_t);
+                            if ($rt.unwinds()) $drop39(v8_t);
                           } }
                         }
                         {
@@ -15476,7 +15482,7 @@ function sendParamsOf_94($224, $225) {
                     }
                   }
                 } finally { if ($rt.unwinds()) {
-                  $drop40(v18_t);
+                  if ($rt.unwinds()) $drop40(v18_t);
                 } }
               }
             }
@@ -16368,9 +16374,9 @@ function block_103($245, $246, $247) {
                 }
               } finally { if ($rt.unwinds()) {
                 try {
-                  $drop42(v209_t.v);
+                  if ($rt.unwinds()) $drop42(v209_t.v);
                 } finally {
-                  $drop42(v208_t);
+                  if ($rt.unwinds()) $drop42(v208_t);
                 }
               } }
             }
@@ -16606,7 +16612,7 @@ function checkReturn_104($248, $249, $250) {
                   v88_t = $b.String_asStr(v87_t);
                   err_276(v90_t, v89_t, v88_t);
                 } finally { if ($rt.unwinds()) {
-                  $drop43(v27_t);
+                  if ($rt.unwinds()) $drop43(v27_t);
                 } }
               }
             }
@@ -16795,12 +16801,12 @@ function create_106($256) {
           v3_t = opened_142(v0_path, 1);
           v2_t = $rt.take(v3_t, v3_t = undefined);
         } finally { if ($rt.unwinds()) {
-          $drop15(v3_t);
+          if ($rt.unwinds()) $drop15(v3_t);
         } }
       }
       v1_ret = $rt.take(v2_t, v2_t = undefined);
     } finally { if ($rt.unwinds()) {
-      $drop15(v2_t);
+      if ($rt.unwinds()) $drop15(v2_t);
     } }
   }
   return v1_ret;
@@ -16935,14 +16941,14 @@ function some_110($261, $262) {
               }
             }
           } finally { if ($rt.unwinds()) {
-            $drop21(v4_t.v);
+            if ($rt.unwinds()) $drop21(v4_t.v);
           } }
         }
         v3_t = false;
       }
       v2_ret = v3_t;
     } finally { if ($rt.unwinds()) {
-      $drop21(v0_self);
+      if ($rt.unwinds()) $drop21(v0_self);
     } }
   }
   return v2_ret;
@@ -17364,12 +17370,12 @@ function writeEffs_115($270, $271, $272) {
           }
         } finally { if ($rt.unwinds()) {
           try {
-            $drop45(v7_t.v);
+            if ($rt.unwinds()) $drop45(v7_t.v);
           } finally {
             try {
-              $drop45(v6_t);
+              if ($rt.unwinds()) $drop45(v6_t);
             } finally {
-              $drop46(v5_t);
+              if ($rt.unwinds()) $drop46(v5_t);
             }
           }
         } }
@@ -17475,7 +17481,7 @@ function findIndex_117($276, $277) {
               }
             }
           } finally { if ($rt.unwinds()) {
-            $drop10(v5_t.v);
+            if ($rt.unwinds()) $drop10(v5_t.v);
           } }
         }
         v15_t = { $tag: "None" };
@@ -17483,7 +17489,7 @@ function findIndex_117($276, $277) {
       }
       v2_ret = v3_t;
     } finally { if ($rt.unwinds()) {
-      $drop10(v0_self);
+      if ($rt.unwinds()) $drop10(v0_self);
     } }
   }
   return v2_ret;
@@ -18744,9 +18750,9 @@ function program_125($294, $295, $296, $297) {
           }
         } finally { if ($rt.unwinds()) {
           try {
-            $drop48(v107_t.v);
+            if ($rt.unwinds()) $drop48(v107_t.v);
           } finally {
-            $drop48(v106_t);
+            if ($rt.unwinds()) $drop48(v106_t);
           }
         } }
       }
@@ -19222,12 +19228,12 @@ function program_128($303, $304, $305) {
           }
         } finally { if ($rt.unwinds()) {
           try {
-            $drop50(v51_t.v);
+            if ($rt.unwinds()) $drop50(v51_t.v);
           } finally {
             try {
-              $drop50(v50_t);
+              if ($rt.unwinds()) $drop50(v50_t);
             } finally {
-              $drop51(v49_t);
+              if ($rt.unwinds()) $drop51(v49_t);
             }
           }
         } }
@@ -19713,12 +19719,12 @@ function entry_130($310, $311, $312) {
           }
         } finally { if ($rt.unwinds()) {
           try {
-            $drop19(v54_t.v);
+            if ($rt.unwinds()) $drop19(v54_t.v);
           } finally {
             try {
-              $drop19(v53_t);
+              if ($rt.unwinds()) $drop19(v53_t);
             } finally {
-              $drop20(v52_t);
+              if ($rt.unwinds()) $drop20(v52_t);
             }
           }
         } }
@@ -20312,12 +20318,12 @@ function assemble_133($319, $320, $321, $322) {
           }
         } finally { if ($rt.unwinds()) {
           try {
-            $drop50(v42_t.v);
+            if ($rt.unwinds()) $drop50(v42_t.v);
           } finally {
             try {
-              $drop50(v41_t);
+              if ($rt.unwinds()) $drop50(v41_t);
             } finally {
-              $drop51(v40_t);
+              if ($rt.unwinds()) $drop51(v40_t);
             }
           }
         } }
@@ -20725,14 +20731,14 @@ function some_136($330, $331) {
               }
             }
           } finally { if ($rt.unwinds()) {
-            $drop24(v4_t.v);
+            if ($rt.unwinds()) $drop24(v4_t.v);
           } }
         }
         v3_t = false;
       }
       v2_ret = v3_t;
     } finally { if ($rt.unwinds()) {
-      $drop24(v0_self);
+      if ($rt.unwinds()) $drop24(v0_self);
     } }
   }
   return v2_ret;
@@ -21041,7 +21047,7 @@ function opened_142($341, $342) {
                 v7_t = $rt.take(v10_t, v10_t = undefined);
                 break L1;
               } finally { if ($rt.unwinds()) {
-                $drop15(v10_t);
+                if ($rt.unwinds()) $drop15(v10_t);
               } }
             }
             v11_t = (v6_t.$tag === "Err");
@@ -21057,12 +21063,12 @@ function opened_142($341, $342) {
           }
           v3_t = $rt.take(v7_t, v7_t = undefined);
         } finally { if ($rt.unwinds()) {
-          $drop15(v7_t);
+          if ($rt.unwinds()) $drop15(v7_t);
         } }
       }
       v2_ret = $rt.take(v3_t, v3_t = undefined);
     } finally { if ($rt.unwinds()) {
-      $drop15(v3_t);
+      if ($rt.unwinds()) $drop15(v3_t);
     } }
   }
   return v2_ret;
@@ -21411,7 +21417,7 @@ function error_152($354, $355, $356, $357) {
           }
         }
       } finally { if ($rt.unwinds()) {
-        $drop52(v30_t);
+        if ($rt.unwinds()) $drop52(v30_t);
       } }
     }
   }
@@ -21492,7 +21498,7 @@ function moduleNamed_154($361, $362) {
         v8_t = findIndex_27($rt.take(v5_t, v5_t = undefined), v7_t);
         v3_t = v8_t;
       } finally { if ($rt.unwinds()) {
-        $drop5(v5_t);
+        if ($rt.unwinds()) $drop5(v5_t);
       } }
     }
     v2_ret = v3_t;
@@ -21548,7 +21554,7 @@ function find_155($365, $366) {
               }
             }
           } finally { if ($rt.unwinds()) {
-            $drop23(v4_t.v);
+            if ($rt.unwinds()) $drop23(v4_t.v);
           } }
         }
         v13_t = { $tag: "None" };
@@ -21556,7 +21562,7 @@ function find_155($365, $366) {
       }
       v2_ret = v3_t;
     } finally { if ($rt.unwinds()) {
-      $drop23(v0_self);
+      if ($rt.unwinds()) $drop23(v0_self);
     } }
   }
   return v2_ret;
@@ -22037,7 +22043,7 @@ function elaborateDef_158($373, $374, $375) {
                   v88_t = v95_t;
                   break L8;
                 } finally { if ($rt.unwinds()) {
-                  $drop53(v92_t);
+                  if ($rt.unwinds()) $drop53(v92_t);
                 } }
               }
               v96_t = (v47_s.fields.$tag === "None");
@@ -22072,7 +22078,7 @@ function elaborateDef_158($373, $374, $375) {
                 v103_t = some_136($rt.take(v100_t, v100_t = undefined), v102_t);
                 v98_t = v103_t;
               } finally { if ($rt.unwinds()) {
-                $drop24(v100_t);
+                if ($rt.unwinds()) $drop24(v100_t);
               } }
             }
             if (v98_t)
@@ -23521,18 +23527,18 @@ function elaborateImpl_161($380, $381, $382, $383) {
             }
           } finally { if ($rt.unwinds()) {
             try {
-              $drop55(v158_t.v);
+              if ($rt.unwinds()) $drop55(v158_t.v);
             } finally {
               try {
-                $drop55(v157_t);
+                if ($rt.unwinds()) $drop55(v157_t);
               } finally {
-                $drop56(v156_t);
+                if ($rt.unwinds()) $drop56(v156_t);
               }
             }
           } }
         }
       } finally { if ($rt.unwinds()) {
-        $drop32(v88_t);
+        if ($rt.unwinds()) $drop32(v88_t);
       } }
     }
   }
@@ -23909,12 +23915,12 @@ function foreignScheme_163($389, $390, $391, $392) {
           }
         } finally { if ($rt.unwinds()) {
           try {
-            $drop57(v12_t.v);
+            if ($rt.unwinds()) $drop57(v12_t.v);
           } finally {
             try {
-              $drop57(v11_t);
+              if ($rt.unwinds()) $drop57(v11_t);
             } finally {
-              $drop35(v10_t);
+              if ($rt.unwinds()) $drop35(v10_t);
             }
           }
         } }
@@ -24169,14 +24175,14 @@ function some_164($393, $394) {
               }
             }
           } finally { if ($rt.unwinds()) {
-            $drop32(v4_t.v);
+            if ($rt.unwinds()) $drop32(v4_t.v);
           } }
         }
         v3_t = false;
       }
       v2_ret = v3_t;
     } finally { if ($rt.unwinds()) {
-      $drop32(v0_self);
+      if ($rt.unwinds()) $drop32(v0_self);
     } }
   }
   return v2_ret;
@@ -24258,7 +24264,7 @@ function checkImpls_165($395) {
                     v23_t = some_164($rt.take(v20_t, v20_t = undefined), v22_t);
                     v18_t = v23_t;
                   } finally { if ($rt.unwinds()) {
-                    $drop32(v20_t);
+                    if ($rt.unwinds()) $drop32(v20_t);
                   } }
                 }
                 if (v18_t)
@@ -25063,7 +25069,7 @@ function checkImpls_165($395) {
                               $rt.panic("no arm matched");
                             }
                           } finally { if ($rt.unwinds()) {
-                            $drop39(v65_t);
+                            if ($rt.unwinds()) $drop39(v65_t);
                           } }
                         }
                       }
@@ -25180,7 +25186,7 @@ function checkImpls_165($395) {
                               }
                             }
                           } finally { if ($rt.unwinds()) {
-                            $drop58(v445_t);
+                            if ($rt.unwinds()) $drop58(v445_t);
                           } }
                         }
                       }
@@ -25298,7 +25304,7 @@ function hasDrop_167($400, $401) {
         v12_t = some_368($rt.take(v9_t, v9_t = undefined), v11_t);
         v3_t = v12_t;
       } finally { if ($rt.unwinds()) {
-        $drop59(v9_t);
+        if ($rt.unwinds()) $drop59(v9_t);
       } }
     }
     v2_ret = v3_t;
@@ -25520,7 +25526,7 @@ function hidesIn_171($411, $412, $413, $414, $415) {
               v16_t = (!v15_t);
               v10_t = v16_t;
             } finally { if ($rt.unwinds()) {
-              $drop60(v12_t);
+              if ($rt.unwinds()) $drop60(v12_t);
             } }
           }
           v7_t = v10_t;
@@ -25683,7 +25689,7 @@ function hidesIn_171($411, $412, $413, $414, $415) {
                     v51_t = v58_t;
                     break L2;
                   } finally { if ($rt.unwinds()) {
-                    $drop40(v55_t);
+                    if ($rt.unwinds()) $drop40(v55_t);
                   } }
                 }
                 v59_t = (v50_t.$tag === "None");
@@ -25697,9 +25703,9 @@ function hidesIn_171($411, $412, $413, $414, $415) {
               v24_t = v51_t;
             } finally { if ($rt.unwinds()) {
               try {
-                $drop40(v42_t);
+                if ($rt.unwinds()) $drop40(v42_t);
               } finally {
-                $drop61(v32_t);
+                if ($rt.unwinds()) $drop61(v32_t);
               }
             } }
           }
@@ -25729,7 +25735,7 @@ function hidesIn_171($411, $412, $413, $414, $415) {
             v7_t = v66_t;
             break L1;
           } finally { if ($rt.unwinds()) {
-            $drop40(v63_t);
+            if ($rt.unwinds()) $drop40(v63_t);
           } }
         }
         v67_t = false;
@@ -25809,7 +25815,7 @@ function hidesIn_171($411, $412, $413, $414, $415) {
             v7_t = v80_t;
             break L1;
           } finally { if ($rt.unwinds()) {
-            $drop35(v77_t);
+            if ($rt.unwinds()) $drop35(v77_t);
           } }
         }
         v81_t = false;
@@ -26587,14 +26593,14 @@ function some_185($440, $441) {
               }
             }
           } finally { if ($rt.unwinds()) {
-            $drop33(v4_t.v);
+            if ($rt.unwinds()) $drop33(v4_t.v);
           } }
         }
         v3_t = false;
       }
       v2_ret = v3_t;
     } finally { if ($rt.unwinds()) {
-      $drop33(v0_self);
+      if ($rt.unwinds()) $drop33(v0_self);
     } }
   }
   return v2_ret;
@@ -26682,7 +26688,7 @@ function exprHas_186($442) {
             v3_t = v14_t;
             break L1;
           } finally { if ($rt.unwinds()) {
-            $drop63(v11_t);
+            if ($rt.unwinds()) $drop63(v11_t);
           } }
         }
         v15_t = (v0_e.kind.$tag === "Tag");
@@ -26722,7 +26728,7 @@ function exprHas_186($442) {
                 v17_t = v25_t;
                 break L2;
               } finally { if ($rt.unwinds()) {
-                $drop64(v22_t);
+                if ($rt.unwinds()) $drop64(v22_t);
               } }
             }
             v26_t = (v16_args.$tag === "Record");
@@ -26771,7 +26777,7 @@ function exprHas_186($442) {
             v3_t = v38_t;
             break L1;
           } finally { if ($rt.unwinds()) {
-            $drop64(v35_t);
+            if ($rt.unwinds()) $drop64(v35_t);
           } }
         }
         v39_t = (v0_e.kind.$tag === "Field");
@@ -26839,7 +26845,7 @@ function exprHas_186($442) {
               v62_t = some_379($rt.take(v59_t, v59_t = undefined), v61_t);
               v57_t = v62_t;
             } finally { if ($rt.unwinds()) {
-              $drop64(v59_t);
+              if ($rt.unwinds()) $drop64(v59_t);
             } }
           }
           v63_t = v57_t;
@@ -26866,7 +26872,7 @@ function exprHas_186($442) {
               v68_t = some_381($rt.take(v65_t, v65_t = undefined), v67_t);
               v63_t = v68_t;
             } finally { if ($rt.unwinds()) {
-              $drop65(v65_t);
+              if ($rt.unwinds()) $drop65(v65_t);
             } }
           }
           v3_t = v63_t;
@@ -27326,7 +27332,7 @@ function exprHas_186($442) {
               v167_t = some_383($rt.take(v164_t, v164_t = undefined), v166_t);
               v162_t = v167_t;
             } finally { if ($rt.unwinds()) {
-              $drop66(v164_t);
+              if ($rt.unwinds()) $drop66(v164_t);
             } }
           }
           v3_t = v162_t;
@@ -27393,7 +27399,7 @@ function exprHas_186($442) {
               v186_t = some_385($rt.take(v183_t, v183_t = undefined), v185_t);
               v181_t = v186_t;
             } finally { if ($rt.unwinds()) {
-              $drop67(v183_t);
+              if ($rt.unwinds()) $drop67(v183_t);
             } }
           }
           v3_t = v181_t;
@@ -27467,7 +27473,7 @@ function tyHas_187($450) {
             v3_t = v10_t;
             break L1;
           } finally { if ($rt.unwinds()) {
-            $drop68(v7_t);
+            if ($rt.unwinds()) $drop68(v7_t);
           } }
         }
         v11_t = (v0_t.kind.$tag === "Path");
@@ -27493,7 +27499,7 @@ function tyHas_187($450) {
             v3_t = v17_t;
             break L1;
           } finally { if ($rt.unwinds()) {
-            $drop65(v14_t);
+            if ($rt.unwinds()) $drop65(v14_t);
           } }
         }
         v18_t = (v0_t.kind.$tag === "Tuple");
@@ -27519,7 +27525,7 @@ function tyHas_187($450) {
             v3_t = v24_t;
             break L1;
           } finally { if ($rt.unwinds()) {
-            $drop65(v21_t);
+            if ($rt.unwinds()) $drop65(v21_t);
           } }
         }
         v25_t = false;
@@ -34172,14 +34178,14 @@ function every_221($521, $522) {
               }
             }
           } finally { if ($rt.unwinds()) {
-            $drop35(v4_t.v);
+            if ($rt.unwinds()) $drop35(v4_t.v);
           } }
         }
         v3_t = true;
       }
       v2_ret = v3_t;
     } finally { if ($rt.unwinds()) {
-      $drop35(v0_self);
+      if ($rt.unwinds()) $drop35(v0_self);
     } }
   }
   return v2_ret;
@@ -34333,7 +34339,7 @@ function enumHint_223($525, $526, $527) {
         v59_t = { $tag: "Some", $: v40_t.v };
         v4_t = v59_t;
       } finally { if ($rt.unwinds()) {
-        $drop35(v31_t);
+        if ($rt.unwinds()) $drop35(v31_t);
       } }
     }
     v3_ret = v4_t;
@@ -34776,7 +34782,7 @@ function settled_225($531) {
               v26_t = every_221($rt.take(v23_t, v23_t = undefined), v25_t);
               v21_t = v26_t;
             } finally { if ($rt.unwinds()) {
-              $drop35(v23_t);
+              if ($rt.unwinds()) $drop35(v23_t);
             } }
           }
           v3_t = v21_t;
@@ -34805,7 +34811,7 @@ function settled_225($531) {
             v3_t = v33_t;
             break L1;
           } finally { if ($rt.unwinds()) {
-            $drop40(v30_t);
+            if ($rt.unwinds()) $drop40(v30_t);
           } }
         }
         v34_t = false;
@@ -34930,7 +34936,7 @@ function settled_225($531) {
             v3_t = v54_t;
             break L1;
           } finally { if ($rt.unwinds()) {
-            $drop61(v51_t);
+            if ($rt.unwinds()) $drop61(v51_t);
           } }
         }
         {
@@ -36333,7 +36339,7 @@ function exhaustive_232($546, $547, $548, $549) {
               v47_t = (!v46_t);
               v41_t = v47_t;
             } finally { if ($rt.unwinds()) {
-              $drop69(v43_t);
+              if ($rt.unwinds()) $drop69(v43_t);
             } }
           }
           if (v41_t)
@@ -36993,9 +36999,9 @@ function clone_237($560) {
           }
         } finally { if ($rt.unwinds()) {
           try {
-            $drop71(v6_t.v);
+            if ($rt.unwinds()) $drop71(v6_t.v);
           } finally {
-            $drop71(v5_t);
+            if ($rt.unwinds()) $drop71(v5_t);
           }
         } }
       }
@@ -37219,7 +37225,7 @@ function deriveRequest_240($567, $568, $569) {
         v9_t = some_368($rt.take(v6_t, v6_t = undefined), v8_t);
         v4_t = v9_t;
       } finally { if ($rt.unwinds()) {
-        $drop59(v6_t);
+        if ($rt.unwinds()) $drop59(v6_t);
       } }
     }
     v3_ret = v4_t;
@@ -37778,7 +37784,7 @@ function find_244($582, $583) {
               }
             }
           } finally { if ($rt.unwinds()) {
-            $drop36(v4_t.v);
+            if ($rt.unwinds()) $drop36(v4_t.v);
           } }
         }
         v13_t = { $tag: "None" };
@@ -37786,7 +37792,7 @@ function find_244($582, $583) {
       }
       v2_ret = v3_t;
     } finally { if ($rt.unwinds()) {
-      $drop36(v0_self);
+      if ($rt.unwinds()) $drop36(v0_self);
     } }
   }
   return v2_ret;
@@ -37865,7 +37871,7 @@ function containsParams_245($584) {
             v3_t = v13_t;
             break L1;
           } finally { if ($rt.unwinds()) {
-            $drop72(v10_t);
+            if ($rt.unwinds()) $drop72(v10_t);
           } }
         }
         v14_t = (v0_t.$tag === "Tuple");
@@ -37891,7 +37897,7 @@ function containsParams_245($584) {
             v3_t = v20_t;
             break L1;
           } finally { if ($rt.unwinds()) {
-            $drop73(v17_t);
+            if ($rt.unwinds()) $drop73(v17_t);
           } }
         }
         v21_t = false;
@@ -37971,7 +37977,7 @@ function containsParams_245($584) {
             v3_t = v34_t;
             break L1;
           } finally { if ($rt.unwinds()) {
-            $drop20(v31_t);
+            if ($rt.unwinds()) $drop20(v31_t);
           } }
         }
         v35_t = false;
@@ -38321,14 +38327,14 @@ function some_250($597, $598) {
               }
             }
           } finally { if ($rt.unwinds()) {
-            $drop40(v4_t.v);
+            if ($rt.unwinds()) $drop40(v4_t.v);
           } }
         }
         v3_t = false;
       }
       v2_ret = v3_t;
     } finally { if ($rt.unwinds()) {
-      $drop40(v0_self);
+      if ($rt.unwinds()) $drop40(v0_self);
     } }
   }
   return v2_ret;
@@ -38379,14 +38385,14 @@ function some_251($599, $600) {
               }
             }
           } finally { if ($rt.unwinds()) {
-            $drop39(v4_t.v);
+            if ($rt.unwinds()) $drop39(v4_t.v);
           } }
         }
         v3_t = false;
       }
       v2_ret = v3_t;
     } finally { if ($rt.unwinds()) {
-      $drop39(v0_self);
+      if ($rt.unwinds()) $drop39(v0_self);
     } }
   }
   return v2_ret;
@@ -40110,9 +40116,9 @@ function endTemps_267($637, $638, $639, $640, $641, $642) {
           }
         } finally { if ($rt.unwinds()) {
           try {
-            $drop75(v41_t.v);
+            if ($rt.unwinds()) $drop75(v41_t.v);
           } finally {
-            $drop75(v40_t);
+            if ($rt.unwinds()) $drop75(v40_t);
           }
         } }
       }
@@ -40486,14 +40492,14 @@ function some_273($656, $657) {
               }
             }
           } finally { if ($rt.unwinds()) {
-            $drop43(v4_t.v);
+            if ($rt.unwinds()) $drop43(v4_t.v);
           } }
         }
         v3_t = false;
       }
       v2_ret = v3_t;
     } finally { if ($rt.unwinds()) {
-      $drop43(v0_self);
+      if ($rt.unwinds()) $drop43(v0_self);
     } }
   }
   return v2_ret;
@@ -41070,12 +41076,12 @@ function writeEff_285($682, $683, $684) {
               }
             } finally { if ($rt.unwinds()) {
               try {
-                $drop77(v18_t.v);
+                if ($rt.unwinds()) $drop77(v18_t.v);
               } finally {
                 try {
-                  $drop77(v17_t);
+                  if ($rt.unwinds()) $drop77(v17_t);
                 } finally {
-                  $drop78(v16_t);
+                  if ($rt.unwinds()) $drop78(v16_t);
                 }
               }
             } }
@@ -41616,9 +41622,9 @@ function func_293($705, $706) {
                 }
               } finally { if ($rt.unwinds()) {
                 try {
-                  $drop79(v35_t.v);
+                  if ($rt.unwinds()) $drop79(v35_t.v);
                 } finally {
-                  $drop79(v34_t);
+                  if ($rt.unwinds()) $drop79(v34_t);
                 }
               } }
             }
@@ -41663,9 +41669,9 @@ function func_293($705, $706) {
                 }
               } finally { if ($rt.unwinds()) {
                 try {
-                  $drop79(v49_t.v);
+                  if ($rt.unwinds()) $drop79(v49_t.v);
                 } finally {
-                  $drop79(v48_t);
+                  if ($rt.unwinds()) $drop79(v48_t);
                 }
               } }
             }
@@ -41839,12 +41845,12 @@ function func_293($705, $706) {
           }
         } finally { if ($rt.unwinds()) {
           try {
-            $drop81(v114_t.v);
+            if ($rt.unwinds()) $drop81(v114_t.v);
           } finally {
             try {
-              $drop81(v113_t);
+              if ($rt.unwinds()) $drop81(v113_t);
             } finally {
-              $drop82(v112_t);
+              if ($rt.unwinds()) $drop82(v112_t);
             }
           }
         } }
@@ -42253,12 +42259,12 @@ function emitClosure_296($713, $714) {
           }
         } finally { if ($rt.unwinds()) {
           try {
-            $drop84(v37_t.v);
+            if ($rt.unwinds()) $drop84(v37_t.v);
           } finally {
             try {
-              $drop84(v36_t);
+              if ($rt.unwinds()) $drop84(v36_t);
             } finally {
-              $drop85(v35_t);
+              if ($rt.unwinds()) $drop85(v35_t);
             }
           }
         } }
@@ -42340,12 +42346,12 @@ function emitClosure_296($713, $714) {
           }
         } finally { if ($rt.unwinds()) {
           try {
-            $drop87(v131_t.v);
+            if ($rt.unwinds()) $drop87(v131_t.v);
           } finally {
             try {
-              $drop87(v130_t);
+              if ($rt.unwinds()) $drop87(v130_t);
             } finally {
-              $drop88(v129_t);
+              if ($rt.unwinds()) $drop88(v129_t);
             }
           }
         } }
@@ -42888,9 +42894,9 @@ function checking_301($725, $726) {
           }
         } finally { if ($rt.unwinds()) {
           try {
-            $drop90(v14_t.v);
+            if ($rt.unwinds()) $drop90(v14_t.v);
           } finally {
-            $drop90(v13_t);
+            if ($rt.unwinds()) $drop90(v13_t);
           }
         } }
       }
@@ -42997,9 +43003,9 @@ function checking_301($725, $726) {
           }
         } finally { if ($rt.unwinds()) {
           try {
-            $drop0(v49_t.v);
+            if ($rt.unwinds()) $drop0(v49_t.v);
           } finally {
-            $drop0(v48_t);
+            if ($rt.unwinds()) $drop0(v48_t);
           }
         } }
       }
@@ -44054,9 +44060,9 @@ function startsTasks_315($754) {
                             }
                           } finally { if ($rt.unwinds()) {
                             try {
-                              $drop92(v21_t.v);
+                              if ($rt.unwinds()) $drop92(v21_t.v);
                             } finally {
-                              $drop92(v20_t);
+                              if ($rt.unwinds()) $drop92(v20_t);
                             }
                           } }
                         }
@@ -44068,9 +44074,9 @@ function startsTasks_315($754) {
                 }
               } finally { if ($rt.unwinds()) {
                 try {
-                  $drop93(v8_t.v);
+                  if ($rt.unwinds()) $drop93(v8_t.v);
                 } finally {
-                  $drop93(v7_t);
+                  if ($rt.unwinds()) $drop93(v7_t);
                 }
               } }
             }
@@ -44122,9 +44128,9 @@ function startsTasks_315($754) {
           }
         } finally { if ($rt.unwinds()) {
           try {
-            $drop39(v54_t.v);
+            if ($rt.unwinds()) $drop39(v54_t.v);
           } finally {
-            $drop39(v53_t);
+            if ($rt.unwinds()) $drop39(v53_t);
           }
         } }
       }
@@ -44942,12 +44948,12 @@ function ifaceCall_318($761, $762, $763, $764, $765, $766) {
           }
         } finally { if ($rt.unwinds()) {
           try {
-            $drop95(v35_t.v);
+            if ($rt.unwinds()) $drop95(v35_t.v);
           } finally {
             try {
-              $drop95(v34_t);
+              if ($rt.unwinds()) $drop95(v34_t);
             } finally {
-              $drop0(v33_t);
+              if ($rt.unwinds()) $drop0(v33_t);
             }
           }
         } }
@@ -45154,12 +45160,12 @@ function emitClosure_319($767, $768) {
           }
         } finally { if ($rt.unwinds()) {
           try {
-            $drop84(v29_t.v);
+            if ($rt.unwinds()) $drop84(v29_t.v);
           } finally {
             try {
-              $drop84(v28_t);
+              if ($rt.unwinds()) $drop84(v28_t);
             } finally {
-              $drop85(v27_t);
+              if ($rt.unwinds()) $drop85(v27_t);
             }
           }
         } }
@@ -45370,12 +45376,12 @@ function emitClosure_319($767, $768) {
           }
         } finally { if ($rt.unwinds()) {
           try {
-            $drop97(v207_t.v);
+            if ($rt.unwinds()) $drop97(v207_t.v);
           } finally {
             try {
-              $drop97(v206_t);
+              if ($rt.unwinds()) $drop97(v206_t);
             } finally {
-              $drop11(v205_t);
+              if ($rt.unwinds()) $drop11(v205_t);
             }
           }
         } }
@@ -45617,12 +45623,12 @@ function exportWrapper_321($771, $772) {
           }
         } finally { if ($rt.unwinds()) {
           try {
-            $drop99(v28_t.v);
+            if ($rt.unwinds()) $drop99(v28_t.v);
           } finally {
             try {
-              $drop99(v27_t);
+              if ($rt.unwinds()) $drop99(v27_t);
             } finally {
-              $drop73(v26_t);
+              if ($rt.unwinds()) $drop73(v26_t);
             }
           }
         } }
@@ -46453,12 +46459,12 @@ function emit_326($779, $780, $781) {
           }
         } finally { if ($rt.unwinds()) {
           try {
-            $drop97(v19_t.v);
+            if ($rt.unwinds()) $drop97(v19_t.v);
           } finally {
             try {
-              $drop97(v18_t);
+              if ($rt.unwinds()) $drop97(v18_t);
             } finally {
-              $drop11(v17_t);
+              if ($rt.unwinds()) $drop11(v17_t);
             }
           }
         } }
@@ -46662,12 +46668,12 @@ function made_327($782) {
           v5_t = { fd: v4_t, open: true, buf: v3_t, at: 0, end: 0, done: false };
           v2_t = $rt.take(v5_t, v5_t = undefined);
         } finally { if ($rt.unwinds()) {
-          $drop15(v5_t);
+          if ($rt.unwinds()) $drop15(v5_t);
         } }
       }
       v1_ret = $rt.take(v2_t, v2_t = undefined);
     } finally { if ($rt.unwinds()) {
-      $drop15(v2_t);
+      if ($rt.unwinds()) $drop15(v2_t);
     } }
   }
   return v1_ret;
@@ -47308,14 +47314,14 @@ function some_333($789, $790) {
               }
             }
           } finally { if ($rt.unwinds()) {
-            $drop52(v4_t.v);
+            if ($rt.unwinds()) $drop52(v4_t.v);
           } }
         }
         v3_t = false;
       }
       v2_ret = v3_t;
     } finally { if ($rt.unwinds()) {
-      $drop52(v0_self);
+      if ($rt.unwinds()) $drop52(v0_self);
     } }
   }
   return v2_ret;
@@ -47864,14 +47870,14 @@ function some_337($797, $798) {
               }
             }
           } finally { if ($rt.unwinds()) {
-            $drop53(v4_t.v);
+            if ($rt.unwinds()) $drop53(v4_t.v);
           } }
         }
         v3_t = false;
       }
       v2_ret = v3_t;
     } finally { if ($rt.unwinds()) {
-      $drop53(v0_self);
+      if ($rt.unwinds()) $drop53(v0_self);
     } }
   }
   return v2_ret;
@@ -48991,7 +48997,7 @@ function unknown_347($819, $820, $821) {
         }
         v4_t = v11_t;
       } finally { if ($rt.unwinds()) {
-        $drop5(v6_t);
+        if ($rt.unwinds()) $drop5(v6_t);
       } }
     }
     v3_ret = v4_t;
@@ -49454,7 +49460,7 @@ function cRepresentable_352($830, $831) {
                     v29_t = v36_t;
                     break L3;
                   } finally { if ($rt.unwinds()) {
-                    $drop20(v33_t);
+                    if ($rt.unwinds()) $drop20(v33_t);
                   } }
                 }
                 v37_t = (v28_t.$tag === "None");
@@ -49658,7 +49664,7 @@ function find_356($836, $837) {
               }
             }
           } finally { if ($rt.unwinds()) {
-            $drop39(v4_t.v);
+            if ($rt.unwinds()) $drop39(v4_t.v);
           } }
         }
         v13_t = { $tag: "None" };
@@ -49666,7 +49672,7 @@ function find_356($836, $837) {
       }
       v2_ret = v3_t;
     } finally { if ($rt.unwinds()) {
-      $drop39(v0_self);
+      if ($rt.unwinds()) $drop39(v0_self);
     } }
   }
   return v2_ret;
@@ -49901,9 +49907,9 @@ function clone_360($842) {
           }
         } finally { if ($rt.unwinds()) {
           try {
-            $drop101(v6_t.v);
+            if ($rt.unwinds()) $drop101(v6_t.v);
           } finally {
-            $drop101(v5_t);
+            if ($rt.unwinds()) $drop101(v5_t);
           }
         } }
       }
@@ -51588,7 +51594,7 @@ function beyond_366($853, $854, $855) {
                                             v10_t = (!v9_t);
                                             v2_t = v10_t;
                                           } finally { if ($rt.unwinds()) {
-                                            $drop35(v6_t);
+                                            if ($rt.unwinds()) $drop35(v6_t);
                                           } }
                                         }
                                         v1_ret = v2_t;
@@ -51599,7 +51605,7 @@ function beyond_366($853, $854, $855) {
                                     v66_t = some_373($rt.take(v63_t, v63_t = undefined), v65_t);
                                     v61_t = v66_t;
                                   } finally { if ($rt.unwinds()) {
-                                    $drop35(v63_t);
+                                    if ($rt.unwinds()) $drop35(v63_t);
                                   } }
                                 }
                                 if (v61_t)
@@ -51633,7 +51639,7 @@ function beyond_366($853, $854, $855) {
                     }
                   }
                 } finally { if ($rt.unwinds()) {
-                  $drop102(v25_t);
+                  if ($rt.unwinds()) $drop102(v25_t);
                 } }
               }
             }
@@ -51698,14 +51704,14 @@ function some_367($859, $860) {
               }
             }
           } finally { if ($rt.unwinds()) {
-            $drop58(v4_t.v);
+            if ($rt.unwinds()) $drop58(v4_t.v);
           } }
         }
         v3_t = false;
       }
       v2_ret = v3_t;
     } finally { if ($rt.unwinds()) {
-      $drop58(v0_self);
+      if ($rt.unwinds()) $drop58(v0_self);
     } }
   }
   return v2_ret;
@@ -51756,14 +51762,14 @@ function some_368($861, $862) {
               }
             }
           } finally { if ($rt.unwinds()) {
-            $drop59(v4_t.v);
+            if ($rt.unwinds()) $drop59(v4_t.v);
           } }
         }
         v3_t = false;
       }
       v2_ret = v3_t;
     } finally { if ($rt.unwinds()) {
-      $drop59(v0_self);
+      if ($rt.unwinds()) $drop59(v0_self);
     } }
   }
   return v2_ret;
@@ -51814,14 +51820,14 @@ function some_369($863, $864) {
               }
             }
           } finally { if ($rt.unwinds()) {
-            $drop60(v4_t.v);
+            if ($rt.unwinds()) $drop60(v4_t.v);
           } }
         }
         v3_t = false;
       }
       v2_ret = v3_t;
     } finally { if ($rt.unwinds()) {
-      $drop60(v0_self);
+      if ($rt.unwinds()) $drop60(v0_self);
     } }
   }
   return v2_ret;
@@ -51894,14 +51900,14 @@ function some_371($868, $869) {
               }
             }
           } finally { if ($rt.unwinds()) {
-            $drop61(v4_t.v);
+            if ($rt.unwinds()) $drop61(v4_t.v);
           } }
         }
         v3_t = false;
       }
       v2_ret = v3_t;
     } finally { if ($rt.unwinds()) {
-      $drop61(v0_self);
+      if ($rt.unwinds()) $drop61(v0_self);
     } }
   }
   return v2_ret;
@@ -52114,14 +52120,14 @@ function some_373($873, $874) {
               }
             }
           } finally { if ($rt.unwinds()) {
-            $drop35(v4_t.v);
+            if ($rt.unwinds()) $drop35(v4_t.v);
           } }
         }
         v3_t = false;
       }
       v2_ret = v3_t;
     } finally { if ($rt.unwinds()) {
-      $drop35(v0_self);
+      if ($rt.unwinds()) $drop35(v0_self);
     } }
   }
   return v2_ret;
@@ -52315,14 +52321,14 @@ function some_378($879, $880) {
               }
             }
           } finally { if ($rt.unwinds()) {
-            $drop63(v4_t.v);
+            if ($rt.unwinds()) $drop63(v4_t.v);
           } }
         }
         v3_t = false;
       }
       v2_ret = v3_t;
     } finally { if ($rt.unwinds()) {
-      $drop63(v0_self);
+      if ($rt.unwinds()) $drop63(v0_self);
     } }
   }
   return v2_ret;
@@ -52373,14 +52379,14 @@ function some_379($881, $882) {
               }
             }
           } finally { if ($rt.unwinds()) {
-            $drop64(v4_t.v);
+            if ($rt.unwinds()) $drop64(v4_t.v);
           } }
         }
         v3_t = false;
       }
       v2_ret = v3_t;
     } finally { if ($rt.unwinds()) {
-      $drop64(v0_self);
+      if ($rt.unwinds()) $drop64(v0_self);
     } }
   }
   return v2_ret;
@@ -52450,7 +52456,7 @@ function initsHave_380($883) {
         v7_t = some_650($rt.take(v4_t, v4_t = undefined), v6_t);
         v2_t = v7_t;
       } finally { if ($rt.unwinds()) {
-        $drop103(v4_t);
+        if ($rt.unwinds()) $drop103(v4_t);
       } }
     }
     v1_ret = v2_t;
@@ -52503,14 +52509,14 @@ function some_381($885, $886) {
               }
             }
           } finally { if ($rt.unwinds()) {
-            $drop65(v4_t.v);
+            if ($rt.unwinds()) $drop65(v4_t.v);
           } }
         }
         v3_t = false;
       }
       v2_ret = v3_t;
     } finally { if ($rt.unwinds()) {
-      $drop65(v0_self);
+      if ($rt.unwinds()) $drop65(v0_self);
     } }
   }
   return v2_ret;
@@ -52595,14 +52601,14 @@ function some_383($888, $889) {
               }
             }
           } finally { if ($rt.unwinds()) {
-            $drop66(v4_t.v);
+            if ($rt.unwinds()) $drop66(v4_t.v);
           } }
         }
         v3_t = false;
       }
       v2_ret = v3_t;
     } finally { if ($rt.unwinds()) {
-      $drop66(v0_self);
+      if ($rt.unwinds()) $drop66(v0_self);
     } }
   }
   return v2_ret;
@@ -52704,14 +52710,14 @@ function some_385($891, $892) {
               }
             }
           } finally { if ($rt.unwinds()) {
-            $drop67(v4_t.v);
+            if ($rt.unwinds()) $drop67(v4_t.v);
           } }
         }
         v3_t = false;
       }
       v2_ret = v3_t;
     } finally { if ($rt.unwinds()) {
-      $drop67(v0_self);
+      if ($rt.unwinds()) $drop67(v0_self);
     } }
   }
   return v2_ret;
@@ -52762,14 +52768,14 @@ function some_386($893, $894) {
               }
             }
           } finally { if ($rt.unwinds()) {
-            $drop68(v4_t.v);
+            if ($rt.unwinds()) $drop68(v4_t.v);
           } }
         }
         v3_t = false;
       }
       v2_ret = v3_t;
     } finally { if ($rt.unwinds()) {
-      $drop68(v0_self);
+      if ($rt.unwinds()) $drop68(v0_self);
     } }
   }
   return v2_ret;
@@ -55576,9 +55582,9 @@ function clone_402($914) {
           }
         } finally { if ($rt.unwinds()) {
           try {
-            $drop105(v6_t.v);
+            if ($rt.unwinds()) $drop105(v6_t.v);
           } finally {
-            $drop105(v5_t);
+            if ($rt.unwinds()) $drop105(v5_t);
           }
         } }
       }
@@ -56192,7 +56198,7 @@ function ensureInstance_409($925, $926, $927) {
           v33_t = (!v32_t);
           v27_t = v33_t;
         } finally { if ($rt.unwinds()) {
-          $drop72(v29_t);
+          if ($rt.unwinds()) $drop72(v29_t);
         } }
       }
       if (v27_t)
@@ -56486,7 +56492,7 @@ function ensureInstance_409($925, $926, $927) {
               $rt.panic("no arm matched");
             }
           } finally { if ($rt.unwinds()) {
-            $drop20(v129_t);
+            if ($rt.unwinds()) $drop20(v129_t);
           } }
         }
       }
@@ -58010,7 +58016,7 @@ function exprInner_413($938, $939, $940) {
               v561_t = voidTy_208();
               v503_t = v561_t;
             } finally { if ($rt.unwinds()) {
-              $drop102(v515_t);
+              if ($rt.unwinds()) $drop102(v515_t);
             } }
           }
           v6_t = v503_t;
@@ -58613,7 +58619,7 @@ function field_418($953, $954, $955, $956) {
                             v103_t = some_273($rt.take(v100_t, v100_t = undefined), v102_t);
                             v98_t = v103_t;
                           } finally { if ($rt.unwinds()) {
-                            $drop43(v100_t);
+                            if ($rt.unwinds()) $drop43(v100_t);
                           } }
                         }
                         v104_t = v98_t;
@@ -58671,7 +58677,7 @@ function field_418($953, $954, $955, $956) {
                     $rt.panic("no arm matched");
                   }
                 } finally { if ($rt.unwinds()) {
-                  $drop35(v90_t);
+                  if ($rt.unwinds()) $drop35(v90_t);
                 } }
               }
               break L5;
@@ -60370,7 +60376,7 @@ function labelIndex_437($1002, $1003) {
         v8_t = findIndex_725($rt.take(v5_t, v5_t = undefined), v7_t);
         v3_t = v8_t;
       } finally { if ($rt.unwinds()) {
-        $drop20(v5_t);
+        if ($rt.unwinds()) $drop20(v5_t);
       } }
     }
     v2_ret = v3_t;
@@ -60559,14 +60565,14 @@ function every_440($1010, $1011) {
               }
             }
           } finally { if ($rt.unwinds()) {
-            $drop40(v4_t.v);
+            if ($rt.unwinds()) $drop40(v4_t.v);
           } }
         }
         v3_t = true;
       }
       v2_ret = v3_t;
     } finally { if ($rt.unwinds()) {
-      $drop40(v0_self);
+      if ($rt.unwinds()) $drop40(v0_self);
     } }
   }
   return v2_ret;
@@ -60618,14 +60624,14 @@ function every_441($1012, $1013) {
               }
             }
           } finally { if ($rt.unwinds()) {
-            $drop61(v4_t.v);
+            if ($rt.unwinds()) $drop61(v4_t.v);
           } }
         }
         v3_t = true;
       }
       v2_ret = v3_t;
     } finally { if ($rt.unwinds()) {
-      $drop61(v0_self);
+      if ($rt.unwinds()) $drop61(v0_self);
     } }
   }
   return v2_ret;
@@ -62083,14 +62089,14 @@ function some_457($1049, $1050) {
               }
             }
           } finally { if ($rt.unwinds()) {
-            $drop69(v4_t.v);
+            if ($rt.unwinds()) $drop69(v4_t.v);
           } }
         }
         v3_t = false;
       }
       v2_ret = v3_t;
     } finally { if ($rt.unwinds()) {
-      $drop69(v0_self);
+      if ($rt.unwinds()) $drop69(v0_self);
     } }
   }
   return v2_ret;
@@ -62564,7 +62570,7 @@ function lowerPat_458($1051, $1052, $1053) {
                           $rt.panic("no arm matched");
                         }
                       } finally { if ($rt.unwinds()) {
-                        $drop106(v154_t);
+                        if ($rt.unwinds()) $drop106(v154_t);
                       } }
                     }
                   }
@@ -63068,7 +63074,7 @@ function lowerPat_458($1051, $1052, $1053) {
                                 $rt.panic("no arm matched");
                               }
                             } finally { if ($rt.unwinds()) {
-                              $drop106(v310_t);
+                              if ($rt.unwinds()) $drop106(v310_t);
                             } }
                           }
                         }
@@ -63542,7 +63548,7 @@ function missing_459($1058, $1059, $1060) {
               v136_t = every_741($rt.take(v133_t, v133_t = undefined), v135_t);
               v130_t = v136_t;
             } finally { if ($rt.unwinds()) {
-              $drop107(v133_t);
+              if ($rt.unwinds()) $drop107(v133_t);
             } }
           }
           if (v130_t)
@@ -64113,7 +64119,7 @@ function missing_459($1058, $1059, $1060) {
               v318_t = { $tag: "Some", $: v304_out.v };
               v265_t = v318_t;
             } finally { if ($rt.unwinds()) {
-              $drop107(v275_t);
+              if ($rt.unwinds()) $drop107(v275_t);
             } }
           }
           v128_t = v265_t;
@@ -64384,7 +64390,7 @@ function showWitness_460($1063) {
               $b.String_push(v72_t, ")");
               v17_t = v57_t.v;
             } finally { if ($rt.unwinds()) {
-              $drop108(v29_t);
+              if ($rt.unwinds()) $drop108(v29_t);
             } }
           }
           v3_t = v17_t;
@@ -64547,7 +64553,7 @@ function copyIn_461($1065, $1066, $1067) {
             v5_t = v16_t;
             break L1;
           } finally { if ($rt.unwinds()) {
-            $drop40(v13_t);
+            if ($rt.unwinds()) $drop40(v13_t);
           } }
         }
         v17_t = false;
@@ -64627,7 +64633,7 @@ function copyIn_461($1065, $1066, $1067) {
             v5_t = v30_t;
             break L1;
           } finally { if ($rt.unwinds()) {
-            $drop35(v27_t);
+            if ($rt.unwinds()) $drop35(v27_t);
           } }
         }
         v31_t = (v1_t.$tag === "Array");
@@ -64732,7 +64738,7 @@ function copyIn_461($1065, $1066, $1067) {
                   v58_t = v65_t;
                   break L2;
                 } finally { if ($rt.unwinds()) {
-                  $drop40(v62_t);
+                  if ($rt.unwinds()) $drop40(v62_t);
                 } }
               }
               v66_t = (v57_t.$tag === "None");
@@ -64965,7 +64971,7 @@ function satisfiesDepth_463($1075, $1076, $1077, $1078, $1079) {
                         v2_t = v11_t;
                         break L1;
                       } finally { if ($rt.unwinds()) {
-                        $drop39(v8_t);
+                        if ($rt.unwinds()) $drop39(v8_t);
                       } }
                     }
                     {
@@ -64990,7 +64996,7 @@ function satisfiesDepth_463($1075, $1076, $1077, $1078, $1079) {
                 }
               }
             } finally { if ($rt.unwinds()) {
-              $drop40(v20_t);
+              if ($rt.unwinds()) $drop40(v20_t);
             } }
           }
           break L2;
@@ -65340,7 +65346,7 @@ function satisfiesDepth_463($1075, $1076, $1077, $1078, $1079) {
             v91_t = v100_t;
             break L9;
           } finally { if ($rt.unwinds()) {
-            $drop40(v97_t);
+            if ($rt.unwinds()) $drop40(v97_t);
           } }
         }
         v101_t = false;
@@ -65425,7 +65431,7 @@ function isTemplateImpl_465($1089, $1090) {
         v8_t = some_136($rt.take(v5_t, v5_t = undefined), v7_t);
         v3_t = v8_t;
       } finally { if ($rt.unwinds()) {
-        $drop24(v5_t);
+        if ($rt.unwinds()) $drop24(v5_t);
       } }
     }
     v2_ret = v3_t;
@@ -65559,14 +65565,14 @@ function some_467($1096, $1097) {
               }
             }
           } finally { if ($rt.unwinds()) {
-            $drop72(v4_t.v);
+            if ($rt.unwinds()) $drop72(v4_t.v);
           } }
         }
         v3_t = false;
       }
       v2_ret = v3_t;
     } finally { if ($rt.unwinds()) {
-      $drop72(v0_self);
+      if ($rt.unwinds()) $drop72(v0_self);
     } }
   }
   return v2_ret;
@@ -65617,14 +65623,14 @@ function some_468($1098, $1099) {
               }
             }
           } finally { if ($rt.unwinds()) {
-            $drop73(v4_t.v);
+            if ($rt.unwinds()) $drop73(v4_t.v);
           } }
         }
         v3_t = false;
       }
       v2_ret = v3_t;
     } finally { if ($rt.unwinds()) {
-      $drop73(v0_self);
+      if ($rt.unwinds()) $drop73(v0_self);
     } }
   }
   return v2_ret;
@@ -65675,14 +65681,14 @@ function some_469($1100, $1101) {
               }
             }
           } finally { if ($rt.unwinds()) {
-            $drop20(v4_t.v);
+            if ($rt.unwinds()) $drop20(v4_t.v);
           } }
         }
         v3_t = false;
       }
       v2_ret = v3_t;
     } finally { if ($rt.unwinds()) {
-      $drop20(v0_self);
+      if ($rt.unwinds()) $drop20(v0_self);
     } }
   }
   return v2_ret;
@@ -69074,7 +69080,7 @@ function checkOutlivesAt_489($1149, $1150, $1151, $1152, $1153, $1154) {
                       $rt.panic("no arm matched");
                     }
                   } finally { if ($rt.unwinds()) {
-                    $drop39(v25_t);
+                    if ($rt.unwinds()) $drop39(v25_t);
                   } }
                 }
                 break L1;
@@ -69128,9 +69134,9 @@ function checkOutlivesAt_489($1149, $1150, $1151, $1152, $1153, $1154) {
           }
         } finally { if ($rt.unwinds()) {
           try {
-            $drop39(v78_t.v);
+            if ($rt.unwinds()) $drop39(v78_t.v);
           } finally {
-            $drop39(v77_t);
+            if ($rt.unwinds()) $drop39(v77_t);
           }
         } }
       }
@@ -69346,9 +69352,9 @@ function checkOutlivesAt_489($1149, $1150, $1151, $1152, $1153, $1154) {
                   }
                 } finally { if ($rt.unwinds()) {
                   try {
-                    $drop39(v127_t);
+                    if ($rt.unwinds()) $drop39(v127_t);
                   } finally {
-                    $drop110(v113_t);
+                    if ($rt.unwinds()) $drop110(v113_t);
                   }
                 } }
               }
@@ -69405,9 +69411,9 @@ function checkOutlivesAt_489($1149, $1150, $1151, $1152, $1153, $1154) {
           }
         } finally { if ($rt.unwinds()) {
           try {
-            $drop75(v183_t.v);
+            if ($rt.unwinds()) $drop75(v183_t.v);
           } finally {
-            $drop75(v182_t);
+            if ($rt.unwinds()) $drop75(v182_t);
           }
         } }
       }
@@ -69572,7 +69578,7 @@ function checkOutlivesAt_489($1149, $1150, $1151, $1152, $1153, $1154) {
                     $rt.panic("no arm matched");
                   }
                 } finally { if ($rt.unwinds()) {
-                  $drop39(v207_t);
+                  if ($rt.unwinds()) $drop39(v207_t);
                 } }
               }
             }
@@ -69926,7 +69932,7 @@ function fieldType_493($1166, $1167, $1168) {
                 v42_t = v51_t;
                 break L5;
               } finally { if ($rt.unwinds()) {
-                $drop35(v46_t);
+                if ($rt.unwinds()) $drop35(v46_t);
               } }
             }
             v58_t = (v41_t.$tag === "None");
@@ -70334,7 +70340,7 @@ function run_494($1171) {
                                 $rt.panic("no arm matched");
                               }
                             } finally { if ($rt.unwinds()) {
-                              $drop3(v88_t);
+                              if ($rt.unwinds()) $drop3(v88_t);
                             } }
                           }
                         }
@@ -70534,12 +70540,12 @@ function writeTy_496($1175, $1176, $1177) {
                     }
                   } finally { if ($rt.unwinds()) {
                     try {
-                      $drop112(v39_t.v);
+                      if ($rt.unwinds()) $drop112(v39_t.v);
                     } finally {
                       try {
-                        $drop112(v38_t);
+                        if ($rt.unwinds()) $drop112(v38_t);
                       } finally {
-                        $drop72(v37_t);
+                        if ($rt.unwinds()) $drop72(v37_t);
                       }
                     }
                   } }
@@ -70706,12 +70712,12 @@ function writeTy_496($1175, $1176, $1177) {
                 }
               } finally { if ($rt.unwinds()) {
                 try {
-                  $drop19(v79_t.v);
+                  if ($rt.unwinds()) $drop19(v79_t.v);
                 } finally {
                   try {
-                    $drop19(v78_t);
+                    if ($rt.unwinds()) $drop19(v78_t);
                   } finally {
-                    $drop20(v77_t);
+                    if ($rt.unwinds()) $drop20(v77_t);
                   }
                 }
               } }
@@ -71088,12 +71094,12 @@ function writeList_499($1182, $1183, $1184) {
           }
         } finally { if ($rt.unwinds()) {
           try {
-            $drop113(v7_t.v);
+            if ($rt.unwinds()) $drop113(v7_t.v);
           } finally {
             try {
-              $drop113(v6_t);
+              if ($rt.unwinds()) $drop113(v6_t);
             } finally {
-              $drop40(v5_t);
+              if ($rt.unwinds()) $drop40(v5_t);
             }
           }
         } }
@@ -71971,7 +71977,7 @@ function regionsOf_507($1199, $1200) {
                                         }
                                       }
                                     } finally { if ($rt.unwinds()) {
-                                      $drop88(v30_t);
+                                      if ($rt.unwinds()) $drop88(v30_t);
                                     } }
                                   }
                                   break L3;
@@ -72861,12 +72867,12 @@ function params_519($1228, $1229, $1230, $1231) {
           }
         } finally { if ($rt.unwinds()) {
           try {
-            $drop97(v8_t.v);
+            if ($rt.unwinds()) $drop97(v8_t.v);
           } finally {
             try {
-              $drop97(v7_t);
+              if ($rt.unwinds()) $drop97(v7_t);
             } finally {
-              $drop11(v6_t);
+              if ($rt.unwinds()) $drop11(v6_t);
             }
           }
         } }
@@ -73404,12 +73410,12 @@ function cWrapper_522($1236, $1237, $1238, $1239, $1240, $1241, $1242, $1243, $1
           }
         } finally { if ($rt.unwinds()) {
           try {
-            $drop99(v38_t.v);
+            if ($rt.unwinds()) $drop99(v38_t.v);
           } finally {
             try {
-              $drop99(v37_t);
+              if ($rt.unwinds()) $drop99(v37_t);
             } finally {
-              $drop73(v36_t);
+              if ($rt.unwinds()) $drop73(v36_t);
             }
           }
         } }
@@ -74428,12 +74434,12 @@ function dropFn_526($1252, $1253, $1254) {
                                           v256_t = $b.String_new();
                                           v255_t.v = v256_t;
                                           v257_t = v255_t;
-                                          $b.String_push(v257_t, "  if (v->live) { v->live = false; fly_unwind_state u_ = fly_cleanup_begin(); ");
+                                          $b.String_push(v257_t, "  if (v->live) { v->live = false; fly_unwind_state u_ = fly_cleanup_begin(); fly_destroy_begin(); ");
                                           v259_t = v253_call;
                                           v260_t = v255_t;
                                           $b.String_push(v260_t, v259_t);
                                           v262_t = v255_t;
-                                          $b.String_push(v262_t, "; fly_cleanup_end(u_); }\n");
+                                          $b.String_push(v262_t, "; fly_destroy_end(); fly_cleanup_end(u_); }\n");
                                           v264_t = v255_t.v;
                                           v265_t = v264_t;
                                           $b.String_push(v254_t, v265_t);
@@ -74773,9 +74779,9 @@ function visit_532($1261, $1262, $1263) {
                 }
               } finally { if ($rt.unwinds()) {
                 try {
-                  $drop43(v32_t.v);
+                  if ($rt.unwinds()) $drop43(v32_t.v);
                 } finally {
-                  $drop43(v31_t);
+                  if ($rt.unwinds()) $drop43(v31_t);
                 }
               } }
             }
@@ -75053,12 +75059,12 @@ function iter_533($1266) {
           v4_t = $b.HashMap_keys(v3_t);
           v2_t = $rt.take(v4_t, v4_t = undefined);
         } finally { if ($rt.unwinds()) {
-          $drop0(v4_t);
+          if ($rt.unwinds()) $drop0(v4_t);
         } }
       }
       v1_ret = $rt.take(v2_t, v2_t = undefined);
     } finally { if ($rt.unwinds()) {
-      $drop0(v2_t);
+      if ($rt.unwinds()) $drop0(v2_t);
     } }
   }
   return v1_ret;
@@ -75959,7 +75965,7 @@ function block_540($1278, $1279, $1280) {
     let v0_self, v1_b, v2_span, v3_ret;
     v0_self = $1278; v1_b = $1279; v2_span = $1280; 
     {
-      let v4_t, v5_t, v6_t, v7_t, v8_t, v9_t, v10_pro, v11_t, v12_t, v13_t, v18_t, v19_t, v161_t, v162_t;
+      let v4_t, v5_t, v6_t, v7_t, v8_t, v9_t, v10_pro, v11_t, v12_t, v13_t, v18_t, v19_t, v163_t, v164_t;
       line_538(v0_self, "{");
       v5_t = $usize(v0_self.v.cx.indent + 1);
       v0_self.v.cx.indent = v5_t;
@@ -76029,7 +76035,7 @@ function block_540($1278, $1279, $1280) {
       {
         {
           const v48_active = { v: undefined };
-          let v31_t, v32_t, v44_t, v45_t, v46_t, v47_t, v74_opened, v75_t, v76_t, v77_k, v159_t, v160_t;
+          let v31_t, v32_t, v44_t, v45_t, v46_t, v47_t, v74_opened, v75_t, v76_t, v77_k, v161_t, v162_t;
           line_538(v0_self, "try {");
           v32_t = $usize(v0_self.v.cx.indent + 1);
           v0_self.v.cx.indent = v32_t;
@@ -76158,12 +76164,12 @@ function block_540($1278, $1279, $1280) {
               }
             } finally { if ($rt.unwinds()) {
               try {
-                $drop115(v52_t.v);
+                if ($rt.unwinds()) $drop115(v52_t.v);
               } finally {
                 try {
-                  $drop115(v51_t);
+                  if ($rt.unwinds()) $drop115(v51_t);
                 } finally {
-                  $drop116(v50_t);
+                  if ($rt.unwinds()) $drop116(v50_t);
                 }
               }
             } }
@@ -76185,7 +76191,7 @@ function block_540($1278, $1279, $1280) {
                 break L5;
               }
               {
-                let v79_t, v80_t, v150_t;
+                let v79_t, v80_t, v152_t;
                 v79_t = $usize(v77_k - 1);
                 v77_k = v79_t;
                 v80_t = (v77_k > 0);
@@ -76200,7 +76206,7 @@ function block_540($1278, $1279, $1280) {
                 }
                 L6:
                 {
-                  let v83_t, v112_t, v149_t;
+                  let v83_t, v114_t, v151_t;
                   v83_t = ($ix(v1_b.cleanups, $ix(v48_active.v, v77_k)).$tag === "Drop");
                   if (v83_t)
                   {
@@ -76218,84 +76224,86 @@ function block_540($1278, $1279, $1280) {
                       {
                         {
                           const v93_t = { v: undefined };
-                          let v91_t, v92_f, v94_t, v95_t, v96_t, v97_t, v98_t, v99_t, v100_t, v101_t, v102_t, v103_t, v104_t, v105_t, v106_t, v107_t, v108_t, v109_t, v110_t, v111_t;
+                          let v91_t, v92_f, v94_t, v95_t, v96_t, v97_t, v98_t, v99_t, v100_t, v101_t, v102_t, v103_t, v104_t, v105_t, v106_t, v107_t, v108_t, v109_t, v110_t, v111_t, v112_t, v113_t;
                           v91_t = dropFn_862(v0_self, v87_t, $copy4(v2_span));
                           v92_f = v91_t;
-                          v110_t = v0_self;
+                          v112_t = v0_self;
                           v94_t = $b.String_new();
                           v93_t.v = v94_t;
-                          v95_t = v92_f;
-                          v96_t = v93_t;
-                          $b.String_push(v96_t, v95_t);
+                          v95_t = v93_t;
+                          $b.String_push(v95_t, "if ($rt.unwinds()) ");
+                          v97_t = v92_f;
                           v98_t = v93_t;
-                          $b.String_push(v98_t, "(");
-                          v100_t = v0_self.v;
-                          v101_t = local_537(v100_t, v84_l);
-                          v102_t = v101_t;
-                          v103_t = v102_t;
-                          v104_t = v93_t;
-                          $b.String_push(v104_t, v103_t);
+                          $b.String_push(v98_t, v97_t);
+                          v100_t = v93_t;
+                          $b.String_push(v100_t, "(");
+                          v102_t = v0_self.v;
+                          v103_t = local_537(v102_t, v84_l);
+                          v104_t = v103_t;
+                          v105_t = v104_t;
                           v106_t = v93_t;
-                          $b.String_push(v106_t, ");");
-                          v108_t = v93_t.v;
-                          v109_t = v108_t;
-                          line_538(v110_t, v109_t);
+                          $b.String_push(v106_t, v105_t);
+                          v108_t = v93_t;
+                          $b.String_push(v108_t, ");");
+                          v110_t = v93_t.v;
+                          v111_t = v110_t;
+                          line_538(v112_t, v111_t);
                         }
                       }
                     }
                     break L6;
                   }
-                  v112_t = ($ix(v1_b.cleanups, $ix(v48_active.v, v77_k)).$tag === "Defer");
-                  if (v112_t)
+                  v114_t = ($ix(v1_b.cleanups, $ix(v48_active.v, v77_k)).$tag === "Defer");
+                  if (v114_t)
                   {
-                    let v113_flag, v114_body;
-                    v113_flag = $ix(v1_b.cleanups, $ix(v48_active.v, v77_k)).$[0];
-                    v114_body = $ix(v1_b.cleanups, $ix(v48_active.v, v77_k)).$[1];
+                    let v115_flag, v116_body;
+                    v115_flag = $ix(v1_b.cleanups, $ix(v48_active.v, v77_k)).$[0];
+                    v116_body = $ix(v1_b.cleanups, $ix(v48_active.v, v77_k)).$[1];
                     {
-                      const v118_t = { v: undefined };
-                      const v132_t = { v: undefined };
-                      let v115_t, v116_t, v117_fl, v119_t, v120_t, v121_t, v122_t, v123_t, v124_t, v125_t, v126_t, v127_t, v128_t, v129_t, v130_t, v131_t, v133_t, v134_t, v135_t, v136_t, v137_t, v138_t, v139_t, v140_t, v141_t, v142_t, v143_t, v144_t, v145_t, v146_t, v147_t, v148_t;
-                      v115_t = v0_self.v;
-                      v116_t = local_537(v115_t, v113_flag);
-                      v117_fl = v116_t;
-                      v129_t = v0_self;
-                      v119_t = $b.String_new();
-                      v118_t.v = v119_t;
-                      v120_t = v118_t;
-                      $b.String_push(v120_t, "if (");
-                      v122_t = v117_fl;
-                      v123_t = v118_t;
-                      $b.String_push(v123_t, v122_t);
-                      v125_t = v118_t;
-                      $b.String_push(v125_t, ") {");
-                      v127_t = v118_t.v;
-                      v128_t = v127_t;
-                      line_538(v129_t, v128_t);
-                      v131_t = $usize(v0_self.v.cx.indent + 1);
-                      v0_self.v.cx.indent = v131_t;
-                      v141_t = v0_self;
-                      v133_t = $b.String_new();
-                      v132_t.v = v133_t;
-                      v134_t = v117_fl;
-                      v135_t = v132_t;
-                      $b.String_push(v135_t, v134_t);
-                      v137_t = v132_t;
-                      $b.String_push(v137_t, " = false;");
-                      v139_t = v132_t.v;
-                      v140_t = v139_t;
-                      line_538(v141_t, v140_t);
+                      const v120_t = { v: undefined };
+                      const v134_t = { v: undefined };
+                      let v117_t, v118_t, v119_fl, v121_t, v122_t, v123_t, v124_t, v125_t, v126_t, v127_t, v128_t, v129_t, v130_t, v131_t, v132_t, v133_t, v135_t, v136_t, v137_t, v138_t, v139_t, v140_t, v141_t, v142_t, v143_t, v144_t, v145_t, v146_t, v147_t, v148_t, v149_t, v150_t;
+                      v117_t = v0_self.v;
+                      v118_t = local_537(v117_t, v115_flag);
+                      v119_fl = v118_t;
+                      v131_t = v0_self;
+                      v121_t = $b.String_new();
+                      v120_t.v = v121_t;
+                      v122_t = v120_t;
+                      $b.String_push(v122_t, "if (");
+                      v124_t = v119_fl;
+                      v125_t = v120_t;
+                      $b.String_push(v125_t, v124_t);
+                      v127_t = v120_t;
+                      $b.String_push(v127_t, " && $rt.unwinds()) {");
+                      v129_t = v120_t.v;
+                      v130_t = v129_t;
+                      line_538(v131_t, v130_t);
+                      v133_t = $usize(v0_self.v.cx.indent + 1);
+                      v0_self.v.cx.indent = v133_t;
+                      v143_t = v0_self;
+                      v135_t = $b.String_new();
+                      v134_t.v = v135_t;
+                      v136_t = v119_fl;
+                      v137_t = v134_t;
+                      $b.String_push(v137_t, v136_t);
+                      v139_t = v134_t;
+                      $b.String_push(v139_t, " = false;");
+                      v141_t = v134_t.v;
+                      v142_t = v141_t;
+                      line_538(v143_t, v142_t);
                       line_538(v0_self, "$rt.cleaning(1);");
                       line_538(v0_self, "try {");
-                      block_540(v0_self, v114_body, $copy4(v2_span));
+                      block_540(v0_self, v116_body, $copy4(v2_span));
                       line_538(v0_self, "} finally { $rt.cleaning(-1); }");
-                      v147_t = $usize(v0_self.v.cx.indent - 1);
-                      v0_self.v.cx.indent = v147_t;
+                      v149_t = $usize(v0_self.v.cx.indent - 1);
+                      v0_self.v.cx.indent = v149_t;
                       line_538(v0_self, "}");
                     }
                     break L6;
                   }
-                  v149_t = ($ix(v1_b.cleanups, $ix(v48_active.v, v77_k)).$tag === "Arena");
-                  if (v149_t)
+                  v151_t = ($ix(v1_b.cleanups, $ix(v48_active.v, v77_k)).$tag === "Arena");
+                  if (v151_t)
                   {
                     {
                     }
@@ -76303,18 +76311,18 @@ function block_540($1278, $1279, $1280) {
                   }
                   $rt.panic("no arm matched");
                 }
-                v150_t = (v77_k > 0);
-                if (v150_t)
+                v152_t = (v77_k > 0);
+                if (v152_t)
                 {
                   {
-                    let v151_t, v152_t, v153_t, v154_t;
-                    v151_t = $usize(v0_self.v.cx.indent - 1);
-                    v0_self.v.cx.indent = v151_t;
-                    line_538(v0_self, "} finally {");
-                    v153_t = $usize(v0_self.v.cx.indent + 1);
+                    let v153_t, v154_t, v155_t, v156_t;
+                    v153_t = $usize(v0_self.v.cx.indent - 1);
                     v0_self.v.cx.indent = v153_t;
-                    v154_t = $usize(v74_opened + 1);
-                    v74_opened = v154_t;
+                    line_538(v0_self, "} finally {");
+                    v155_t = $usize(v0_self.v.cx.indent + 1);
+                    v0_self.v.cx.indent = v155_t;
+                    v156_t = $usize(v74_opened + 1);
+                    v74_opened = v156_t;
                   }
                 }
               }
@@ -76325,9 +76333,9 @@ function block_540($1278, $1279, $1280) {
           L7: for (;;) {
             C7:
             {
-              let v155_t;
-              v155_t = (v74_opened > 0);
-              if (v155_t)
+              let v157_t;
+              v157_t = (v74_opened > 0);
+              if (v157_t)
               {
               }
               else
@@ -76335,24 +76343,24 @@ function block_540($1278, $1279, $1280) {
                 break L7;
               }
               {
-                let v156_t, v157_t, v158_t;
-                v156_t = $usize(v0_self.v.cx.indent - 1);
-                v0_self.v.cx.indent = v156_t;
+                let v158_t, v159_t, v160_t;
+                v158_t = $usize(v0_self.v.cx.indent - 1);
+                v0_self.v.cx.indent = v158_t;
                 line_538(v0_self, "}");
-                v158_t = $usize(v74_opened - 1);
-                v74_opened = v158_t;
+                v160_t = $usize(v74_opened - 1);
+                v74_opened = v160_t;
               }
             }
             {
             }
           }
-          v159_t = $usize(v0_self.v.cx.indent - 1);
-          v0_self.v.cx.indent = v159_t;
+          v161_t = $usize(v0_self.v.cx.indent - 1);
+          v0_self.v.cx.indent = v161_t;
           line_538(v0_self, "} }");
         }
       }
-      v161_t = $usize(v0_self.v.cx.indent - 1);
-      v0_self.v.cx.indent = v161_t;
+      v163_t = $usize(v0_self.v.cx.indent - 1);
+      v0_self.v.cx.indent = v163_t;
       line_538(v0_self, "}");
     }
   }
@@ -76523,7 +76531,7 @@ function rowSuspends_543($1284, $1285) {
         v8_t = some_863($rt.take(v5_t, v5_t = undefined), v7_t);
         v3_t = v8_t;
       } finally { if ($rt.unwinds()) {
-        $drop102(v5_t);
+        if ($rt.unwinds()) $drop102(v5_t);
       } }
     }
     v2_ret = v3_t;
@@ -76579,7 +76587,7 @@ function mangle_544($1287) {
         }
         v2_t = v7_t;
       } finally { if ($rt.unwinds()) {
-        $drop3(v3_t);
+        if ($rt.unwinds()) $drop3(v3_t);
       } }
     }
     v1_ret = v2_t;
@@ -76748,12 +76756,12 @@ function iter_546($1292) {
           v4_t = $b.HashMap_keys(v3_t);
           v2_t = $rt.take(v4_t, v4_t = undefined);
         } finally { if ($rt.unwinds()) {
-          $drop39(v4_t);
+          if ($rt.unwinds()) $drop39(v4_t);
         } }
       }
       v1_ret = $rt.take(v2_t, v2_t = undefined);
     } finally { if ($rt.unwinds()) {
-      $drop39(v2_t);
+      if ($rt.unwinds()) $drop39(v2_t);
     } }
   }
   return v1_ret;
@@ -78916,7 +78924,7 @@ function expr_582($1366) {
         }
         v2_t = v20_t;
       } finally { if ($rt.unwinds()) {
-        $drop3(v15_t);
+        if ($rt.unwinds()) $drop3(v15_t);
       } }
     }
     v1_ret = v2_t;
@@ -80912,7 +80920,7 @@ function find_624($1419, $1420) {
               }
             }
           } finally { if ($rt.unwinds()) {
-            $drop5(v4_t.v);
+            if ($rt.unwinds()) $drop5(v4_t.v);
           } }
         }
         v13_t = { $tag: "None" };
@@ -80920,7 +80928,7 @@ function find_624($1419, $1420) {
       }
       v2_ret = v3_t;
     } finally { if ($rt.unwinds()) {
-      $drop5(v0_self);
+      if ($rt.unwinds()) $drop5(v0_self);
     } }
   }
   return v2_ret;
@@ -81409,14 +81417,14 @@ function every_630($1428, $1429) {
               }
             }
           } finally { if ($rt.unwinds()) {
-            $drop20(v4_t.v);
+            if ($rt.unwinds()) $drop20(v4_t.v);
           } }
         }
         v3_t = true;
       }
       v2_ret = v3_t;
     } finally { if ($rt.unwinds()) {
-      $drop20(v0_self);
+      if ($rt.unwinds()) $drop20(v0_self);
     } }
   }
   return v2_ret;
@@ -82118,7 +82126,7 @@ function find_645($1458, $1459) {
               }
             }
           } finally { if ($rt.unwinds()) {
-            $drop102(v4_t.v);
+            if ($rt.unwinds()) $drop102(v4_t.v);
           } }
         }
         v13_t = { $tag: "None" };
@@ -82126,7 +82134,7 @@ function find_645($1458, $1459) {
       }
       v2_ret = v3_t;
     } finally { if ($rt.unwinds()) {
-      $drop102(v0_self);
+      if ($rt.unwinds()) $drop102(v0_self);
     } }
   }
   return v2_ret;
@@ -82301,14 +82309,14 @@ function some_650($1468, $1469) {
               }
             }
           } finally { if ($rt.unwinds()) {
-            $drop103(v4_t.v);
+            if ($rt.unwinds()) $drop103(v4_t.v);
           } }
         }
         v3_t = false;
       }
       v2_ret = v3_t;
     } finally { if ($rt.unwinds()) {
-      $drop103(v0_self);
+      if ($rt.unwinds()) $drop103(v0_self);
     } }
   }
   return v2_ret;
@@ -83468,7 +83476,7 @@ function isCt_661($1488, $1489) {
                     v68_t = every_950($rt.take(v65_t, v65_t = undefined), v67_t);
                     v63_t = v68_t;
                   } finally { if ($rt.unwinds()) {
-                    $drop64(v65_t);
+                    if ($rt.unwinds()) $drop64(v65_t);
                   } }
                 }
                 v39_t = v63_t;
@@ -86608,14 +86616,14 @@ function every_688($1542, $1543) {
               }
             }
           } finally { if ($rt.unwinds()) {
-            $drop72(v4_t.v);
+            if ($rt.unwinds()) $drop72(v4_t.v);
           } }
         }
         v3_t = true;
       }
       v2_ret = v3_t;
     } finally { if ($rt.unwinds()) {
-      $drop72(v0_self);
+      if ($rt.unwinds()) $drop72(v0_self);
     } }
   }
   return v2_ret;
@@ -86763,7 +86771,7 @@ function find_691($1548, $1549) {
               }
             }
           } finally { if ($rt.unwinds()) {
-            $drop20(v4_t.v);
+            if ($rt.unwinds()) $drop20(v4_t.v);
           } }
         }
         v13_t = { $tag: "None" };
@@ -86771,7 +86779,7 @@ function find_691($1548, $1549) {
       }
       v2_ret = v3_t;
     } finally { if ($rt.unwinds()) {
-      $drop20(v0_self);
+      if ($rt.unwinds()) $drop20(v0_self);
     } }
   }
   return v2_ret;
@@ -88133,7 +88141,7 @@ function record_696($1563, $1564, $1565, $1566, $1567) {
                       v120_t = v129_t;
                       break L9;
                     } finally { if ($rt.unwinds()) {
-                      $drop35(v124_t);
+                      if ($rt.unwinds()) $drop35(v124_t);
                     } }
                   }
                   v136_t = (v49_wanted.$tag === "None");
@@ -90770,12 +90778,12 @@ function lambda_701($1589, $1590, $1591, $1592) {
           }
         } finally { if ($rt.unwinds()) {
           try {
-            $drop117(v55_t.v);
+            if ($rt.unwinds()) $drop117(v55_t.v);
           } finally {
             try {
-              $drop117(v54_t);
+              if ($rt.unwinds()) $drop117(v54_t);
             } finally {
-              $drop118(v53_t);
+              if ($rt.unwinds()) $drop118(v53_t);
             }
           }
         } }
@@ -91810,7 +91818,7 @@ function forOf_708($1606, $1607, $1608, $1609) {
                       $rt.panic("no arm matched");
                     }
                   } finally { if ($rt.unwinds()) {
-                    $drop102(v175_t);
+                    if ($rt.unwinds()) $drop102(v175_t);
                   } }
                 }
               }
@@ -91838,7 +91846,7 @@ function forOf_708($1606, $1607, $1608, $1609) {
         v204_t = voidTy_208();
         v5_t = v204_t;
       } finally { if ($rt.unwinds()) {
-        $drop102(v93_t);
+        if ($rt.unwinds()) $drop102(v93_t);
       } }
     }
     v4_ret = v5_t;
@@ -93311,7 +93319,7 @@ function perform_712($1628, $1629, $1630, $1631) {
                           v282_t = (!v281_t);
                           v276_t = v282_t;
                         } finally { if ($rt.unwinds()) {
-                          $drop102(v278_t);
+                          if ($rt.unwinds()) $drop102(v278_t);
                         } }
                       }
                       v283_cleanup = v276_t;
@@ -93574,7 +93582,7 @@ function perform_712($1628, $1629, $1630, $1631) {
                       }
                       v376_t = v387_t;
                     } finally { if ($rt.unwinds()) {
-                      $drop102(v382_t);
+                      if ($rt.unwinds()) $drop102(v382_t);
                     } }
                   }
                   v375_t = v376_t;
@@ -93718,7 +93726,7 @@ function perform_712($1628, $1629, $1630, $1631) {
           $rt.panic("no arm matched");
         }
       } finally { if ($rt.unwinds()) {
-        $drop102(v120_t);
+        if ($rt.unwinds()) $drop102(v120_t);
       } }
     }
   }
@@ -93885,9 +93893,9 @@ function region_713($1638, $1639, $1640, $1641, $1642, $1643) {
                     }
                   } finally { if ($rt.unwinds()) {
                     try {
-                      $drop119(v97_t.v);
+                      if ($rt.unwinds()) $drop119(v97_t.v);
                     } finally {
-                      $drop119(v96_t);
+                      if ($rt.unwinds()) $drop119(v96_t);
                     }
                   } }
                 }
@@ -94324,7 +94332,7 @@ function handle_714($1644, $1645, $1646, $1647, $1648, $1649) {
                 v10_t = (!v9_t);
                 v2_t = v10_t;
               } finally { if ($rt.unwinds()) {
-                $drop67(v6_t);
+                if ($rt.unwinds()) $drop67(v6_t);
               } }
             }
             v1_ret = v2_t;
@@ -94388,7 +94396,7 @@ function handle_714($1644, $1645, $1646, $1647, $1648, $1649) {
                   v167_t = some_863($rt.take(v164_t, v164_t = undefined), v166_t);
                   v162_t = v167_t;
                 } finally { if ($rt.unwinds()) {
-                  $drop102(v164_t);
+                  if ($rt.unwinds()) $drop102(v164_t);
                 } }
               }
               if (v162_t)
@@ -94431,7 +94439,7 @@ function handle_714($1644, $1645, $1646, $1647, $1648, $1649) {
                       }
                     }
                   } finally { if ($rt.unwinds()) {
-                    $drop102(v178_t);
+                    if ($rt.unwinds()) $drop102(v178_t);
                   } }
                 }
               }
@@ -94702,7 +94710,7 @@ function handle_714($1644, $1645, $1646, $1647, $1648, $1649) {
         }
         v7_t = v90_result;
       } finally { if ($rt.unwinds()) {
-        $drop58(v148_t);
+        if ($rt.unwinds()) $drop58(v148_t);
       } }
     }
     v6_ret = v7_t;
@@ -94923,7 +94931,7 @@ function failedInstance_718($1664, $1665, $1666) {
           v12_t = every_688($rt.take(v9_t, v9_t = undefined), v11_t);
           v7_t = v12_t;
         } finally { if ($rt.unwinds()) {
-          $drop72(v9_t);
+          if ($rt.unwinds()) $drop72(v9_t);
         } }
       }
       v13_t = v7_t;
@@ -95005,7 +95013,7 @@ function find_719($1668, $1669) {
               }
             }
           } finally { if ($rt.unwinds()) {
-            $drop35(v4_t.v);
+            if ($rt.unwinds()) $drop35(v4_t.v);
           } }
         }
         v13_t = { $tag: "None" };
@@ -95013,7 +95021,7 @@ function find_719($1668, $1669) {
       }
       v2_ret = v3_t;
     } finally { if ($rt.unwinds()) {
-      $drop35(v0_self);
+      if ($rt.unwinds()) $drop35(v0_self);
     } }
   }
   return v2_ret;
@@ -95076,7 +95084,7 @@ function assocImpl_720($1670, $1671, $1672) {
                         v19_t = some_273($rt.take(v16_t, v16_t = undefined), v18_t);
                         v13_t = v19_t;
                       } finally { if ($rt.unwinds()) {
-                        $drop43(v16_t);
+                        if ($rt.unwinds()) $drop43(v16_t);
                       } }
                     }
                     if (v13_t)
@@ -95194,9 +95202,9 @@ function bindsKey_721($1675) {
           }
         } finally { if ($rt.unwinds()) {
           try {
-            $drop121(v6_t.v);
+            if ($rt.unwinds()) $drop121(v6_t.v);
           } finally {
-            $drop121(v5_t);
+            if ($rt.unwinds()) $drop121(v5_t);
           }
         } }
       }
@@ -95326,9 +95334,9 @@ function bindsMap_722($1678) {
           }
         } finally { if ($rt.unwinds()) {
           try {
-            $drop121(v6_t.v);
+            if ($rt.unwinds()) $drop121(v6_t.v);
           } finally {
-            $drop121(v5_t);
+            if ($rt.unwinds()) $drop121(v5_t);
           }
         } }
       }
@@ -95517,7 +95525,7 @@ function findIndex_725($1683, $1684) {
               }
             }
           } finally { if ($rt.unwinds()) {
-            $drop20(v5_t.v);
+            if ($rt.unwinds()) $drop20(v5_t.v);
           } }
         }
         v15_t = { $tag: "None" };
@@ -95525,7 +95533,7 @@ function findIndex_725($1683, $1684) {
       }
       v2_ret = v3_t;
     } finally { if ($rt.unwinds()) {
-      $drop20(v0_self);
+      if ($rt.unwinds()) $drop20(v0_self);
     } }
   }
   return v2_ret;
@@ -95703,7 +95711,7 @@ function occurs_729($1692, $1693, $1694) {
             v7_t = v17_t;
             break L1;
           } finally { if ($rt.unwinds()) {
-            $drop61(v14_t);
+            if ($rt.unwinds()) $drop61(v14_t);
           } }
         }
         v18_t = false;
@@ -95787,7 +95795,7 @@ function occurs_729($1692, $1693, $1694) {
             v7_t = v35_t;
             break L1;
           } finally { if ($rt.unwinds()) {
-            $drop35(v32_t);
+            if ($rt.unwinds()) $drop35(v32_t);
           } }
         }
         v36_t = (v6_t.$tag === "Tuple");
@@ -95813,7 +95821,7 @@ function occurs_729($1692, $1693, $1694) {
             v7_t = v42_t;
             break L1;
           } finally { if ($rt.unwinds()) {
-            $drop40(v39_t);
+            if ($rt.unwinds()) $drop40(v39_t);
           } }
         }
         v43_t = false;
@@ -95960,7 +95968,7 @@ function occurs_729($1692, $1693, $1694) {
             v7_t = v69_t;
             break L1;
           } finally { if ($rt.unwinds()) {
-            $drop40(v65_t);
+            if ($rt.unwinds()) $drop40(v65_t);
           } }
         }
         {
@@ -96888,7 +96896,7 @@ function find_736($1716, $1717) {
               }
             }
           } finally { if ($rt.unwinds()) {
-            $drop106(v4_t.v);
+            if ($rt.unwinds()) $drop106(v4_t.v);
           } }
         }
         v13_t = { $tag: "None" };
@@ -96896,7 +96904,7 @@ function find_736($1716, $1717) {
       }
       v2_ret = v3_t;
     } finally { if ($rt.unwinds()) {
-      $drop106(v0_self);
+      if ($rt.unwinds()) $drop106(v0_self);
     } }
   }
   return v2_ret;
@@ -97223,14 +97231,14 @@ function every_741($1722, $1723) {
               }
             }
           } finally { if ($rt.unwinds()) {
-            $drop107(v4_t.v);
+            if ($rt.unwinds()) $drop107(v4_t.v);
           } }
         }
         v3_t = true;
       }
       v2_ret = v3_t;
     } finally { if ($rt.unwinds()) {
-      $drop107(v0_self);
+      if ($rt.unwinds()) $drop107(v0_self);
     } }
   }
   return v2_ret;
@@ -97498,7 +97506,7 @@ function find_745($1729, $1730) {
               }
             }
           } finally { if ($rt.unwinds()) {
-            $drop107(v4_t.v);
+            if ($rt.unwinds()) $drop107(v4_t.v);
           } }
         }
         v13_t = { $tag: "None" };
@@ -97506,7 +97514,7 @@ function find_745($1729, $1730) {
       }
       v2_ret = v3_t;
     } finally { if ($rt.unwinds()) {
-      $drop107(v0_self);
+      if ($rt.unwinds()) $drop107(v0_self);
     } }
   }
   return v2_ret;
@@ -97589,14 +97597,14 @@ function every_747($1732, $1733) {
               }
             }
           } finally { if ($rt.unwinds()) {
-            $drop108(v4_t.v);
+            if ($rt.unwinds()) $drop108(v4_t.v);
           } }
         }
         v3_t = true;
       }
       v2_ret = v3_t;
     } finally { if ($rt.unwinds()) {
-      $drop108(v0_self);
+      if ($rt.unwinds()) $drop108(v0_self);
     } }
   }
   return v2_ret;
@@ -100133,7 +100141,7 @@ function assign_767($1778, $1779, $1780, $1781, $1782) {
                     }
                   }
                 } finally { if ($rt.unwinds()) {
-                  $drop110(v106_t);
+                  if ($rt.unwinds()) $drop110(v106_t);
                 } }
               }
             }
@@ -100462,7 +100470,7 @@ function call_768($1785, $1786, $1787, $1788) {
                     v58_t = every_950($rt.take(v55_t, v55_t = undefined), v57_t);
                     v53_t = v58_t;
                   } finally { if ($rt.unwinds()) {
-                    $drop64(v55_t);
+                    if ($rt.unwinds()) $drop64(v55_t);
                   } }
                 }
                 if (v53_t)
@@ -101981,12 +101989,12 @@ function call_768($1785, $1786, $1787, $1788) {
           }
         } finally { if ($rt.unwinds()) {
           try {
-            $drop123(v373_t.v);
+            if ($rt.unwinds()) $drop123(v373_t.v);
           } finally {
             try {
-              $drop123(v372_t);
+              if ($rt.unwinds()) $drop123(v372_t);
             } finally {
-              $drop64(v371_t);
+              if ($rt.unwinds()) $drop64(v371_t);
             }
           }
         } }
@@ -102216,7 +102224,7 @@ function call_768($1785, $1786, $1787, $1788) {
                               v688_t = v695_t;
                               break L49;
                             } finally { if ($rt.unwinds()) {
-                              $drop43(v692_t);
+                              if ($rt.unwinds()) $drop43(v692_t);
                             } }
                           }
                           v696_t = (v683_name.$tag === "None");
@@ -102640,9 +102648,9 @@ function lambda_770($1797, $1798, $1799, $1800) {
                     }
                   } finally { if ($rt.unwinds()) {
                     try {
-                      $drop42(v54_t.v);
+                      if ($rt.unwinds()) $drop42(v54_t.v);
                     } finally {
-                      $drop42(v53_t);
+                      if ($rt.unwinds()) $drop42(v53_t);
                     }
                   } }
                 }
@@ -102780,7 +102788,7 @@ function lambda_770($1797, $1798, $1799, $1800) {
                       v12_t = some_251($rt.take(v9_t, v9_t = undefined), v11_t);
                       v7_t = v12_t;
                     } finally { if ($rt.unwinds()) {
-                      $drop39(v9_t);
+                      if ($rt.unwinds()) $drop39(v9_t);
                     } }
                   }
                   v13_t = v7_t;
@@ -102842,7 +102850,7 @@ function lambda_770($1797, $1798, $1799, $1800) {
               $rt.panic("no arm matched");
             }
           } finally { if ($rt.unwinds()) {
-            $drop39(v124_t);
+            if ($rt.unwinds()) $drop39(v124_t);
           } }
         }
       }
@@ -102989,9 +102997,9 @@ function lambda_770($1797, $1798, $1799, $1800) {
           }
         } finally { if ($rt.unwinds()) {
           try {
-            $drop125(v170_t.v);
+            if ($rt.unwinds()) $drop125(v170_t.v);
           } finally {
-            $drop125(v169_t);
+            if ($rt.unwinds()) $drop125(v169_t);
           }
         } }
       }
@@ -103042,9 +103050,9 @@ function lambda_770($1797, $1798, $1799, $1800) {
           }
         } finally { if ($rt.unwinds()) {
           try {
-            $drop125(v221_t.v);
+            if ($rt.unwinds()) $drop125(v221_t.v);
           } finally {
-            $drop125(v220_t);
+            if ($rt.unwinds()) $drop125(v220_t);
           }
         } }
       }
@@ -103382,7 +103390,7 @@ function lambda_770($1797, $1798, $1799, $1800) {
                               }
                             }
                           } finally { if ($rt.unwinds()) {
-                            $drop35(v398_t);
+                            if ($rt.unwinds()) $drop35(v398_t);
                           } }
                         }
                         break L12;
@@ -103627,7 +103635,7 @@ function diverges_773($1811) {
               v37_t = every_1040($rt.take(v34_t, v34_t = undefined), v36_t);
               v32_t = v37_t;
             } finally { if ($rt.unwinds()) {
-              $drop66(v34_t);
+              if ($rt.unwinds()) $drop66(v34_t);
             } }
           }
           v3_t = v32_t;
@@ -103716,7 +103724,7 @@ function blockDiverges_774($1813) {
         }
         v2_t = v8_t;
       } finally { if ($rt.unwinds()) {
-        $drop126(v4_t);
+        if ($rt.unwinds()) $drop126(v4_t);
       } }
     }
     v1_ret = v2_t;
@@ -103833,9 +103841,9 @@ function join_775($1815, $1816) {
           }
         } finally { if ($rt.unwinds()) {
           try {
-            $drop75(v18_t.v);
+            if ($rt.unwinds()) $drop75(v18_t.v);
           } finally {
-            $drop75(v17_t);
+            if ($rt.unwinds()) $drop75(v17_t);
           }
         } }
       }
@@ -104065,9 +104073,9 @@ function forOf_777($1819, $1820, $1821, $1822) {
                           }
                         } finally { if ($rt.unwinds()) {
                           try {
-                            $drop42(v73_t.v);
+                            if ($rt.unwinds()) $drop42(v73_t.v);
                           } finally {
-                            $drop42(v72_t);
+                            if ($rt.unwinds()) $drop42(v72_t);
                           }
                         } }
                       }
@@ -104173,7 +104181,7 @@ function matchExpr_778($1825, $1826, $1827, $1828, $1829) {
                 v25_t = some_383($rt.take(v22_t, v22_t = undefined), v24_t);
                 v20_t = v25_t;
               } finally { if ($rt.unwinds()) {
-                $drop66(v22_t);
+                if ($rt.unwinds()) $drop66(v22_t);
               } }
             }
             v26_m = v20_t;
@@ -104253,7 +104261,7 @@ function matchExpr_778($1825, $1826, $1827, $1828, $1829) {
                 v52_t = some_383($rt.take(v49_t, v49_t = undefined), v51_t);
                 v47_t = v52_t;
               } finally { if ($rt.unwinds()) {
-                $drop66(v49_t);
+                if ($rt.unwinds()) $drop66(v49_t);
               } }
             }
             v53_m = v47_t;
@@ -104511,7 +104519,7 @@ function matchExpr_778($1825, $1826, $1827, $1828, $1829) {
                         v142_t = v150_t;
                         break L5;
                       } finally { if ($rt.unwinds()) {
-                        $drop110(v146_t);
+                        if ($rt.unwinds()) $drop110(v146_t);
                       } }
                     }
                     v157_t = (v77_place.$tag === "None");
@@ -104887,9 +104895,9 @@ function matchExpr_778($1825, $1826, $1827, $1828, $1829) {
                                 }
                               } finally { if ($rt.unwinds()) {
                                 try {
-                                  $drop42(v286_t.v);
+                                  if ($rt.unwinds()) $drop42(v286_t.v);
                                 } finally {
-                                  $drop42(v285_t);
+                                  if ($rt.unwinds()) $drop42(v285_t);
                                 }
                               } }
                             }
@@ -104967,9 +104975,9 @@ function matchExpr_778($1825, $1826, $1827, $1828, $1829) {
                             }
                           } finally { if ($rt.unwinds()) {
                             try {
-                              $drop42(v313_t.v);
+                              if ($rt.unwinds()) $drop42(v313_t.v);
                             } finally {
-                              $drop42(v312_t);
+                              if ($rt.unwinds()) $drop42(v312_t);
                             }
                           } }
                         }
@@ -105002,12 +105010,12 @@ function matchExpr_778($1825, $1826, $1827, $1828, $1829) {
           }
         } finally { if ($rt.unwinds()) {
           try {
-            $drop128(v129_t.v);
+            if ($rt.unwinds()) $drop128(v129_t.v);
           } finally {
             try {
-              $drop128(v128_t);
+              if ($rt.unwinds()) $drop128(v128_t);
             } finally {
-              $drop66(v127_t);
+              if ($rt.unwinds()) $drop66(v127_t);
             }
           }
         } }
@@ -105524,7 +105532,7 @@ function handle_782($1843, $1844, $1845, $1846, $1847) {
                             }
                           }
                         } finally { if ($rt.unwinds()) {
-                          $drop129(v87_t);
+                          if ($rt.unwinds()) $drop129(v87_t);
                         } }
                       }
                       break L6;
@@ -105895,9 +105903,9 @@ function handle_782($1843, $1844, $1845, $1846, $1847) {
                             }
                           } finally { if ($rt.unwinds()) {
                             try {
-                              $drop42(v256_t.v);
+                              if ($rt.unwinds()) $drop42(v256_t.v);
                             } finally {
-                              $drop42(v255_t);
+                              if ($rt.unwinds()) $drop42(v255_t);
                             }
                           } }
                         }
@@ -106452,7 +106460,7 @@ function handle_782($1843, $1844, $1845, $1846, $1847) {
         v493_t = { loans: v146_loans.v };
         v6_t = v493_t;
       } finally { if ($rt.unwinds()) {
-        $drop67(v275_t);
+        if ($rt.unwinds()) $drop67(v275_t);
       } }
     }
     v5_ret = v6_t;
@@ -106549,14 +106557,14 @@ function some_786($1861, $1862) {
               }
             }
           } finally { if ($rt.unwinds()) {
-            $drop110(v4_t.v);
+            if ($rt.unwinds()) $drop110(v4_t.v);
           } }
         }
         v3_t = false;
       }
       v2_ret = v3_t;
     } finally { if ($rt.unwinds()) {
-      $drop110(v0_self);
+      if ($rt.unwinds()) $drop110(v0_self);
     } }
   }
   return v2_ret;
@@ -106629,7 +106637,7 @@ function liveAfter_788($1865, $1866, $1867) {
             v9_t = v16_t;
             break L1;
           } finally { if ($rt.unwinds()) {
-            $drop130(v13_t);
+            if ($rt.unwinds()) $drop130(v13_t);
           } }
         }
         v17_t = (v8_t.$tag === "None");
@@ -107599,7 +107607,7 @@ function find_801($1892, $1893) {
               }
             }
           } finally { if ($rt.unwinds()) {
-            $drop3(v4_t.v);
+            if ($rt.unwinds()) $drop3(v4_t.v);
           } }
         }
         v13_t = { $tag: "None" };
@@ -107607,7 +107615,7 @@ function find_801($1892, $1893) {
       }
       v2_ret = v3_t;
     } finally { if ($rt.unwinds()) {
-      $drop3(v0_self);
+      if ($rt.unwinds()) $drop3(v0_self);
     } }
   }
   return v2_ret;
@@ -109445,7 +109453,7 @@ function expr_808($1906, $1907, $1908) {
                         v717_t = atom_1075(v716_t, v715_t, v2_binds);
                         $b.Vec_push(v714_t, v717_t);
                       } finally { if ($rt.unwinds()) {
-                        $drop131(v693_t);
+                        if ($rt.unwinds()) $drop131(v693_t);
                       } }
                     }
                   }
@@ -110285,7 +110293,7 @@ function ensureAssoc_814($1920, $1921, $1922) {
         v113_t = subst_362(v108_t, v112_t);
         $b.HashMap_insert(v107_t, v114_t, v113_t);
       } finally { if ($rt.unwinds()) {
-        $drop132(v41_t);
+        if ($rt.unwinds()) $drop132(v41_t);
       } }
     }
   }
@@ -110626,14 +110634,14 @@ function some_816($1926, $1927) {
               }
             }
           } finally { if ($rt.unwinds()) {
-            $drop88(v4_t.v);
+            if ($rt.unwinds()) $drop88(v4_t.v);
           } }
         }
         v3_t = false;
       }
       v2_ret = v3_t;
     } finally { if ($rt.unwinds()) {
-      $drop88(v0_self);
+      if ($rt.unwinds()) $drop88(v0_self);
     } }
   }
   return v2_ret;
@@ -113462,9 +113470,9 @@ function block_839($1980, $1981, $1982) {
                 }
               } finally { if ($rt.unwinds()) {
                 try {
-                  $drop11(v149_t.v);
+                  if ($rt.unwinds()) $drop11(v149_t.v);
                 } finally {
-                  $drop11(v148_t);
+                  if ($rt.unwinds()) $drop11(v148_t);
                 }
               } }
             }
@@ -114286,12 +114294,12 @@ function iter_853($2012) {
           v4_t = $b.HashMap_keys(v3_t);
           v2_t = $rt.take(v4_t, v4_t = undefined);
         } finally { if ($rt.unwinds()) {
-          $drop43(v4_t);
+          if ($rt.unwinds()) $drop43(v4_t);
         } }
       }
       v1_ret = $rt.take(v2_t, v2_t = undefined);
     } finally { if ($rt.unwinds()) {
-      $drop43(v2_t);
+      if ($rt.unwinds()) $drop43(v2_t);
     } }
   }
   return v1_ret;
@@ -114463,7 +114471,7 @@ function mangle_857($2019) {
         }
         v2_t = v7_t;
       } finally { if ($rt.unwinds()) {
-        $drop133(v3_t);
+        if ($rt.unwinds()) $drop133(v3_t);
       } }
     }
     v1_ret = v2_t;
@@ -115684,12 +115692,12 @@ function dropFn_862($2031, $2032, $2033) {
                 v44_t = $b.String_new();
                 v43_t.v = v44_t;
                 v45_t = v43_t;
-                $b.String_push(v45_t, "  ");
+                $b.String_push(v45_t, "  $b.destructor(() => ");
                 v47_t = v41_call;
                 v48_t = v43_t;
                 $b.String_push(v48_t, v47_t);
                 v50_t = v43_t;
-                $b.String_push(v50_t, ";\n");
+                $b.String_push(v50_t, ");\n");
                 v52_t = v43_t.v;
                 v53_t = v52_t;
                 $b.String_push(v42_t, v53_t);
@@ -115702,7 +115710,7 @@ function dropFn_862($2031, $2032, $2033) {
               {
                 let v57_t, v58_t;
                 v57_t = v31_body;
-                $b.String_push(v57_t, "  v.$drop();\n");
+                $b.String_push(v57_t, "  $b.destructor(() => v.$drop());\n");
               }
             }
             else
@@ -116398,12 +116406,12 @@ function dropFn_862($2031, $2032, $2033) {
                 }
               } finally { if ($rt.unwinds()) {
                 try {
-                  $drop99(v327_t.v);
+                  if ($rt.unwinds()) $drop99(v327_t.v);
                 } finally {
                   try {
-                    $drop99(v326_t);
+                    if ($rt.unwinds()) $drop99(v326_t);
                   } finally {
-                    $drop73(v325_t);
+                    if ($rt.unwinds()) $drop73(v325_t);
                   }
                 }
               } }
@@ -116527,14 +116535,14 @@ function some_863($2034, $2035) {
               }
             }
           } finally { if ($rt.unwinds()) {
-            $drop102(v4_t.v);
+            if ($rt.unwinds()) $drop102(v4_t.v);
           } }
         }
         v3_t = false;
       }
       v2_ret = v3_t;
     } finally { if ($rt.unwinds()) {
-      $drop102(v0_self);
+      if ($rt.unwinds()) $drop102(v0_self);
     } }
   }
   return v2_ret;
@@ -116585,14 +116593,14 @@ function some_864($2036, $2037) {
               }
             }
           } finally { if ($rt.unwinds()) {
-            $drop3(v4_t.v);
+            if ($rt.unwinds()) $drop3(v4_t.v);
           } }
         }
         v3_t = false;
       }
       v2_ret = v3_t;
     } finally { if ($rt.unwinds()) {
-      $drop3(v0_self);
+      if ($rt.unwinds()) $drop3(v0_self);
     } }
   }
   return v2_ret;
@@ -117678,7 +117686,7 @@ function stdDef_879($2066, $2067, $2068) {
         }
         v4_t = v11_t;
       } finally { if ($rt.unwinds()) {
-        $drop134(v6_t);
+        if ($rt.unwinds()) $drop134(v6_t);
       } }
     }
     v3_ret = v4_t;
@@ -118659,9 +118667,9 @@ function cleanupReads_885($2083, $2084) {
                           }
                         } finally { if ($rt.unwinds()) {
                           try {
-                            $drop39(v35_t.v);
+                            if ($rt.unwinds()) $drop39(v35_t.v);
                           } finally {
-                            $drop39(v34_t);
+                            if ($rt.unwinds()) $drop39(v34_t);
                           }
                         } }
                       }
@@ -119354,9 +119362,9 @@ function block_886($2085, $2086, $2087) {
                 }
               } finally { if ($rt.unwinds()) {
                 try {
-                  $drop11(v185_t.v);
+                  if ($rt.unwinds()) $drop11(v185_t.v);
                 } finally {
-                  $drop11(v184_t);
+                  if ($rt.unwinds()) $drop11(v184_t);
                 }
               } }
             }
@@ -119511,9 +119519,9 @@ function withLanding_887($2088, $2089, $2090) {
           }
         } finally { if ($rt.unwinds()) {
           try {
-            $drop11(v24_t.v);
+            if ($rt.unwinds()) $drop11(v24_t.v);
           } finally {
-            $drop11(v23_t);
+            if ($rt.unwinds()) $drop11(v23_t);
           }
         } }
       }
@@ -119752,9 +119760,9 @@ function withLanding_887($2088, $2089, $2090) {
           }
         } finally { if ($rt.unwinds()) {
           try {
-            $drop136(v138_t.v);
+            if ($rt.unwinds()) $drop136(v138_t.v);
           } finally {
-            $drop136(v137_t);
+            if ($rt.unwinds()) $drop136(v137_t);
           }
         } }
       }
@@ -124511,14 +124519,14 @@ function every_950($2184, $2185) {
               }
             }
           } finally { if ($rt.unwinds()) {
-            $drop64(v4_t.v);
+            if ($rt.unwinds()) $drop64(v4_t.v);
           } }
         }
         v3_t = true;
       }
       v2_ret = v3_t;
     } finally { if ($rt.unwinds()) {
-      $drop64(v0_self);
+      if ($rt.unwinds()) $drop64(v0_self);
     } }
   }
   return v2_ret;
@@ -125796,7 +125804,7 @@ function recordGet_958($2204, $2205) {
         }
         v3_t = v10_t;
       } finally { if ($rt.unwinds()) {
-        $drop137(v5_t);
+        if ($rt.unwinds()) $drop137(v5_t);
       } }
     }
     v2_ret = v3_t;
@@ -127660,12 +127668,12 @@ function callFn_969($2235, $2236, $2237, $2238, $2239, $2240, $2241, $2242) {
           }
         } finally { if ($rt.unwinds()) {
           try {
-            $drop139(v111_t.v);
+            if ($rt.unwinds()) $drop139(v111_t.v);
           } finally {
             try {
-              $drop139(v110_t);
+              if ($rt.unwinds()) $drop139(v110_t);
             } finally {
-              $drop32(v109_t);
+              if ($rt.unwinds()) $drop32(v109_t);
             }
           }
         } }
@@ -128337,9 +128345,9 @@ function callOnType_970($2245, $2246, $2247, $2248, $2249, $2250, $2251) {
           }
         } finally { if ($rt.unwinds()) {
           try {
-            $drop42(v54_t.v);
+            if ($rt.unwinds()) $drop42(v54_t.v);
           } finally {
-            $drop42(v53_t);
+            if ($rt.unwinds()) $drop42(v53_t);
           }
         } }
       }
@@ -128587,7 +128595,7 @@ function callStatic_971($2252, $2253, $2254, $2255, $2256, $2257, $2258) {
             }
             break L1;
           } finally { if ($rt.unwinds()) {
-            $drop58(v12_t);
+            if ($rt.unwinds()) $drop58(v12_t);
           } }
         }
         {
@@ -129074,7 +129082,7 @@ function callMethod_972($2261, $2262, $2263, $2264, $2265, $2266, $2267, $2268) 
                 }
                 break L3;
               } finally { if ($rt.unwinds()) {
-                $drop140(v63_t);
+                if ($rt.unwinds()) $drop140(v63_t);
               } }
             }
             {
@@ -129117,7 +129125,7 @@ function callMethod_972($2261, $2262, $2263, $2264, $2265, $2266, $2267, $2268) 
                   v116_t = some_1141($rt.take(v113_t, v113_t = undefined), v115_t);
                   v111_t = v116_t;
                 } finally { if ($rt.unwinds()) {
-                  $drop133(v113_t);
+                  if ($rt.unwinds()) $drop133(v113_t);
                 } }
               }
               if (v111_t)
@@ -129559,7 +129567,7 @@ function breaksIn_975($2279, $2280) {
               v64_t = some_383($rt.take(v61_t, v61_t = undefined), v63_t);
               v59_t = v64_t;
             } finally { if ($rt.unwinds()) {
-              $drop66(v61_t);
+              if ($rt.unwinds()) $drop66(v61_t);
             } }
           }
           v4_t = v59_t;
@@ -129617,7 +129625,7 @@ function breaksIn_975($2279, $2280) {
               v80_t = some_385($rt.take(v77_t, v77_t = undefined), v79_t);
               v75_t = v80_t;
             } finally { if ($rt.unwinds()) {
-              $drop67(v77_t);
+              if ($rt.unwinds()) $drop67(v77_t);
             } }
           }
           v4_t = v75_t;
@@ -129716,7 +129724,7 @@ function findIndex_976($2288, $2289) {
               }
             }
           } finally { if ($rt.unwinds()) {
-            $drop102(v5_t.v);
+            if ($rt.unwinds()) $drop102(v5_t.v);
           } }
         }
         v15_t = { $tag: "None" };
@@ -129724,7 +129732,7 @@ function findIndex_976($2288, $2289) {
       }
       v2_ret = v3_t;
     } finally { if ($rt.unwinds()) {
-      $drop102(v0_self);
+      if ($rt.unwinds()) $drop102(v0_self);
     } }
   }
   return v2_ret;
@@ -129970,9 +129978,9 @@ function findMethod_977($2290, $2291, $2292) {
           }
         } finally { if ($rt.unwinds()) {
           try {
-            $drop42(v75_t.v);
+            if ($rt.unwinds()) $drop42(v75_t.v);
           } finally {
-            $drop42(v74_t);
+            if ($rt.unwinds()) $drop42(v74_t);
           }
         } }
       }
@@ -130456,7 +130464,7 @@ function wholeTags_980($2297, $2298) {
                   v6_t = v14_t;
                   break L2;
                 } finally { if ($rt.unwinds()) {
-                  $drop69(v11_t);
+                  if ($rt.unwinds()) $drop69(v11_t);
                 } }
               }
               v15_t = (v5_args.$tag === "Record");
@@ -130507,7 +130515,7 @@ function wholeTags_980($2297, $2298) {
                   v6_t = v21_t;
                   break L2;
                 } finally { if ($rt.unwinds()) {
-                  $drop106(v18_t);
+                  if ($rt.unwinds()) $drop106(v18_t);
                 } }
               }
               $rt.panic("no arm matched");
@@ -130716,7 +130724,7 @@ function withoutTags_981($2301, $2302, $2303) {
                           }
                         }
                       } finally { if ($rt.unwinds()) {
-                        $drop43(v53_t);
+                        if ($rt.unwinds()) $drop43(v53_t);
                       } }
                     }
                   }
@@ -131161,7 +131169,7 @@ function mentionsRegion_987($2313, $2314) {
             v4_t = v11_t;
             break L1;
           } finally { if ($rt.unwinds()) {
-            $drop61(v8_t);
+            if ($rt.unwinds()) $drop61(v8_t);
           } }
         }
         v12_t = false;
@@ -131241,7 +131249,7 @@ function mentionsRegion_987($2313, $2314) {
             v4_t = v25_t;
             break L1;
           } finally { if ($rt.unwinds()) {
-            $drop35(v22_t);
+            if ($rt.unwinds()) $drop35(v22_t);
           } }
         }
         v26_t = (v0_t.$tag === "Tuple");
@@ -131267,7 +131275,7 @@ function mentionsRegion_987($2313, $2314) {
             v4_t = v32_t;
             break L1;
           } finally { if ($rt.unwinds()) {
-            $drop40(v29_t);
+            if ($rt.unwinds()) $drop40(v29_t);
           } }
         }
         v33_t = false;
@@ -131386,7 +131394,7 @@ function mentionsRegion_987($2313, $2314) {
             v4_t = v54_t;
             break L1;
           } finally { if ($rt.unwinds()) {
-            $drop40(v50_t);
+            if ($rt.unwinds()) $drop40(v50_t);
           } }
         }
         {
@@ -131927,7 +131935,7 @@ function handleParts_991($2324, $2325, $2326, $2327, $2328, $2329) {
                   v200_t = new $rt.FieldRef(v0_self.v, "scopes");
                   v201_t = $b.Vec_pop(v200_t);
                 } finally { if ($rt.unwinds()) {
-                  $drop58(v83_t);
+                  if ($rt.unwinds()) $drop58(v83_t);
                 } }
               }
             }
@@ -132179,11 +132187,11 @@ function ownRow_992($2331, $2332, $2333) {
                         }
                       }
                     } finally { if ($rt.unwinds()) {
-                      $drop102(v80_t);
+                      if ($rt.unwinds()) $drop102(v80_t);
                     } }
                   }
                 } finally { if ($rt.unwinds()) {
-                  $drop102(v44_t);
+                  if ($rt.unwinds()) $drop102(v44_t);
                 } }
               }
             }
@@ -132269,7 +132277,7 @@ function find_993($2336, $2337) {
               }
             }
           } finally { if ($rt.unwinds()) {
-            $drop58(v4_t.v);
+            if ($rt.unwinds()) $drop58(v4_t.v);
           } }
         }
         v13_t = { $tag: "None" };
@@ -132277,7 +132285,7 @@ function find_993($2336, $2337) {
       }
       v2_ret = v3_t;
     } finally { if ($rt.unwinds()) {
-      $drop58(v0_self);
+      if ($rt.unwinds()) $drop58(v0_self);
     } }
   }
   return v2_ret;
@@ -132756,7 +132764,7 @@ function sendIn_1005($2354, $2355, $2356, $2357) {
             v6_t = v16_t;
             break L1;
           } finally { if ($rt.unwinds()) {
-            $drop40(v13_t);
+            if ($rt.unwinds()) $drop40(v13_t);
           } }
         }
         v17_t = false;
@@ -132836,7 +132844,7 @@ function sendIn_1005($2354, $2355, $2356, $2357) {
             v6_t = v30_t;
             break L1;
           } finally { if ($rt.unwinds()) {
-            $drop35(v27_t);
+            if ($rt.unwinds()) $drop35(v27_t);
           } }
         }
         v31_t = false;
@@ -133011,7 +133019,7 @@ function sendIn_1005($2354, $2355, $2356, $2357) {
                       v72_t = v79_t;
                       break L2;
                     } finally { if ($rt.unwinds()) {
-                      $drop40(v76_t);
+                      if ($rt.unwinds()) $drop40(v76_t);
                     } }
                   }
                   v80_t = (v71_t.$tag === "None");
@@ -133026,7 +133034,7 @@ function sendIn_1005($2354, $2355, $2356, $2357) {
               }
               v49_t = v69_t;
             } finally { if ($rt.unwinds()) {
-              $drop40(v65_t);
+              if ($rt.unwinds()) $drop40(v65_t);
             } }
           }
           v6_t = v49_t;
@@ -133120,7 +133128,7 @@ function isBlanket_1006($2362, $2363) {
             v4_t = v11_t;
             break L1;
           } finally { if ($rt.unwinds()) {
-            $drop24(v8_t);
+            if ($rt.unwinds()) $drop24(v8_t);
           } }
         }
         {
@@ -134429,7 +134437,7 @@ function usePlaceAs_1011($2376, $2377, $2378, $2379, $2380) {
                       $rt.panic("no arm matched");
                     }
                   } finally { if ($rt.unwinds()) {
-                    $drop141(v174_t);
+                    if ($rt.unwinds()) $drop141(v174_t);
                   } }
                 }
               }
@@ -134633,7 +134641,7 @@ function usePlaceAs_1011($2376, $2377, $2378, $2379, $2380) {
                             v313_t = clone_174(v312_t);
                             $b.HashMap_insert(v311_t, v314_t, v313_t);
                           } finally { if ($rt.unwinds()) {
-                            $drop141(v301_t);
+                            if ($rt.unwinds()) $drop141(v301_t);
                           } }
                         }
                       }
@@ -134731,7 +134739,7 @@ function usePlaceAs_1011($2376, $2377, $2378, $2379, $2380) {
         }
         v6_t = v223_t;
       } finally { if ($rt.unwinds()) {
-        $drop110(v92_t);
+        if ($rt.unwinds()) $drop110(v92_t);
       } }
     }
     v5_ret = v6_t;
@@ -136103,9 +136111,9 @@ function checkLent_1025($2415, $2416, $2417, $2418) {
                       }
                     } finally { if ($rt.unwinds()) {
                       try {
-                        $drop75(v30_t.v);
+                        if ($rt.unwinds()) $drop75(v30_t.v);
                       } finally {
-                        $drop75(v29_t);
+                        if ($rt.unwinds()) $drop75(v29_t);
                       }
                     } }
                   }
@@ -136260,7 +136268,7 @@ function checkLent_1025($2415, $2416, $2417, $2418) {
                     $rt.panic("no arm matched");
                   }
                 } finally { if ($rt.unwinds()) {
-                  $drop39(v42_t);
+                  if ($rt.unwinds()) $drop39(v42_t);
                 } }
               }
             }
@@ -136860,7 +136868,7 @@ function taskCaptures_1029($2427, $2428, $2429) {
           }
         }
       } finally { if ($rt.unwinds()) {
-        $drop143(v23_t);
+        if ($rt.unwinds()) $drop143(v23_t);
       } }
     }
   }
@@ -137025,7 +137033,7 @@ function hasLoan_1031($2433, $2434) {
         v8_t = some_251($rt.take(v5_t, v5_t = undefined), v7_t);
         v3_t = v8_t;
       } finally { if ($rt.unwinds()) {
-        $drop39(v5_t);
+        if ($rt.unwinds()) $drop39(v5_t);
       } }
     }
     v2_ret = v3_t;
@@ -137164,9 +137172,9 @@ function liveLoans_1032($2437, $2438, $2439) {
           }
         } finally { if ($rt.unwinds()) {
           try {
-            $drop75(v33_t.v);
+            if ($rt.unwinds()) $drop75(v33_t.v);
           } finally {
-            $drop75(v32_t);
+            if ($rt.unwinds()) $drop75(v32_t);
           }
         } }
       }
@@ -137494,7 +137502,7 @@ function hasRegion_1037($2449) {
             v3_t = v10_t;
             break L1;
           } finally { if ($rt.unwinds()) {
-            $drop61(v7_t);
+            if ($rt.unwinds()) $drop61(v7_t);
           } }
         }
         v11_t = false;
@@ -137574,7 +137582,7 @@ function hasRegion_1037($2449) {
             v3_t = v24_t;
             break L1;
           } finally { if ($rt.unwinds()) {
-            $drop35(v21_t);
+            if ($rt.unwinds()) $drop35(v21_t);
           } }
         }
         v25_t = (v0_t.$tag === "Tuple");
@@ -137600,7 +137608,7 @@ function hasRegion_1037($2449) {
             v3_t = v31_t;
             break L1;
           } finally { if ($rt.unwinds()) {
-            $drop40(v28_t);
+            if ($rt.unwinds()) $drop40(v28_t);
           } }
         }
         v32_t = false;
@@ -137802,9 +137810,9 @@ function clone_1039($2454) {
           }
         } finally { if ($rt.unwinds()) {
           try {
-            $drop144(v6_t.v);
+            if ($rt.unwinds()) $drop144(v6_t.v);
           } finally {
-            $drop144(v5_t);
+            if ($rt.unwinds()) $drop144(v5_t);
           }
         } }
       }
@@ -137861,14 +137869,14 @@ function every_1040($2455, $2456) {
               }
             }
           } finally { if ($rt.unwinds()) {
-            $drop66(v4_t.v);
+            if ($rt.unwinds()) $drop66(v4_t.v);
           } }
         }
         v3_t = true;
       }
       v2_ret = v3_t;
     } finally { if ($rt.unwinds()) {
-      $drop66(v0_self);
+      if ($rt.unwinds()) $drop66(v0_self);
     } }
   }
   return v2_ret;
@@ -137919,14 +137927,14 @@ function some_1041($2457, $2458) {
               }
             }
           } finally { if ($rt.unwinds()) {
-            $drop126(v4_t.v);
+            if ($rt.unwinds()) $drop126(v4_t.v);
           } }
         }
         v3_t = false;
       }
       v2_ret = v3_t;
     } finally { if ($rt.unwinds()) {
-      $drop126(v0_self);
+      if ($rt.unwinds()) $drop126(v0_self);
     } }
   }
   return v2_ret;
@@ -138133,9 +138141,9 @@ function matchArms_1044($2463, $2464, $2465, $2466, $2467) {
                             }
                           } finally { if ($rt.unwinds()) {
                             try {
-                              $drop42(v65_t.v);
+                              if ($rt.unwinds()) $drop42(v65_t.v);
                             } finally {
-                              $drop42(v64_t);
+                              if ($rt.unwinds()) $drop42(v64_t);
                             }
                           } }
                         }
@@ -138168,12 +138176,12 @@ function matchArms_1044($2463, $2464, $2465, $2466, $2467) {
           }
         } finally { if ($rt.unwinds()) {
           try {
-            $drop128(v20_t.v);
+            if ($rt.unwinds()) $drop128(v20_t.v);
           } finally {
             try {
-              $drop128(v19_t);
+              if ($rt.unwinds()) $drop128(v19_t);
             } finally {
-              $drop66(v18_t);
+              if ($rt.unwinds()) $drop66(v18_t);
             }
           }
         } }
@@ -138390,7 +138398,7 @@ function howForScrutinee_1046($2470) {
         }
         v2_t = v8_t;
       } finally { if ($rt.unwinds()) {
-        $drop66(v4_t);
+        if ($rt.unwinds()) $drop66(v4_t);
       } }
     }
     v1_ret = v2_t;
@@ -138487,7 +138495,7 @@ function takesOwned_1048($2473, $2474) {
         v13_t = some_251($rt.take(v10_t, v10_t = undefined), v12_t);
         v3_t = v13_t;
       } finally { if ($rt.unwinds()) {
-        $drop39(v10_t);
+        if ($rt.unwinds()) $drop39(v10_t);
       } }
     }
     v2_ret = v3_t;
@@ -138626,7 +138634,7 @@ function destructuresDrop_1050($2478, $2479, $2480) {
               v19_t = some_1259($rt.take(v16_t, v16_t = undefined), v18_t);
               v14_t = v19_t;
             } finally { if ($rt.unwinds()) {
-              $drop106(v16_t);
+              if ($rt.unwinds()) $drop106(v16_t);
             } }
           }
           v11_t = v14_t;
@@ -138691,9 +138699,9 @@ function destructuresDrop_1050($2478, $2479, $2480) {
                 break L3;
               } finally { if ($rt.unwinds()) {
                 try {
-                  $drop145(v28_t);
+                  if ($rt.unwinds()) $drop145(v28_t);
                 } finally {
-                  $drop69(v27_t);
+                  if ($rt.unwinds()) $drop69(v27_t);
                 }
               } }
             }
@@ -138729,7 +138737,7 @@ function destructuresDrop_1050($2478, $2479, $2480) {
             v11_t = v38_t;
             break L2;
           } finally { if ($rt.unwinds()) {
-            $drop69(v35_t);
+            if ($rt.unwinds()) $drop69(v35_t);
           } }
         }
         {
@@ -139112,12 +139120,12 @@ function guard_1054($2490, $2491, $2492) {
                   v13_t = (!v12_t);
                   v7_t = v13_t;
                 } finally { if ($rt.unwinds()) {
-                  $drop110(v9_t);
+                  if ($rt.unwinds()) $drop110(v9_t);
                 } }
               }
               v1_ret = v7_t;
             } finally { if ($rt.unwinds()) {
-              $drop39(v3_t);
+              if ($rt.unwinds()) $drop39(v3_t);
             } }
           }
           return v1_ret;
@@ -139162,9 +139170,9 @@ function guard_1054($2490, $2491, $2492) {
         }
       } finally { if ($rt.unwinds()) {
         try {
-          $drop43(v49_t);
+          if ($rt.unwinds()) $drop43(v49_t);
         } finally {
-          $drop110(v37_t);
+          if ($rt.unwinds()) $drop110(v37_t);
         }
       } }
     }
@@ -139657,14 +139665,14 @@ function some_1060($2507, $2508) {
               }
             }
           } finally { if ($rt.unwinds()) {
-            $drop129(v4_t.v);
+            if ($rt.unwinds()) $drop129(v4_t.v);
           } }
         }
         v3_t = false;
       }
       v2_ret = v3_t;
     } finally { if ($rt.unwinds()) {
-      $drop129(v0_self);
+      if ($rt.unwinds()) $drop129(v0_self);
     } }
   }
   return v2_ret;
@@ -139853,7 +139861,7 @@ function mentionsAnyRegion_1064($2513) {
             v3_t = v10_t;
             break L1;
           } finally { if ($rt.unwinds()) {
-            $drop61(v7_t);
+            if ($rt.unwinds()) $drop61(v7_t);
           } }
         }
         v11_t = false;
@@ -139933,7 +139941,7 @@ function mentionsAnyRegion_1064($2513) {
             v3_t = v24_t;
             break L1;
           } finally { if ($rt.unwinds()) {
-            $drop35(v21_t);
+            if ($rt.unwinds()) $drop35(v21_t);
           } }
         }
         v25_t = (v0_t.$tag === "Tuple");
@@ -139959,7 +139967,7 @@ function mentionsAnyRegion_1064($2513) {
             v3_t = v31_t;
             break L1;
           } finally { if ($rt.unwinds()) {
-            $drop40(v28_t);
+            if ($rt.unwinds()) $drop40(v28_t);
           } }
         }
         v32_t = false;
@@ -140078,7 +140086,7 @@ function mentionsAnyRegion_1064($2513) {
             v3_t = v53_t;
             break L1;
           } finally { if ($rt.unwinds()) {
-            $drop40(v49_t);
+            if ($rt.unwinds()) $drop40(v49_t);
           } }
         }
         {
@@ -140213,7 +140221,7 @@ function dropsIn_1065($2518, $2519, $2520) {
                     v26_t = v33_t;
                     break L2;
                   } finally { if ($rt.unwinds()) {
-                    $drop35(v30_t);
+                    if ($rt.unwinds()) $drop35(v30_t);
                   } }
                 }
                 v34_t = (v25_t.$tag === "None");
@@ -140227,9 +140235,9 @@ function dropsIn_1065($2518, $2519, $2520) {
               v9_t = v26_t;
             } finally { if ($rt.unwinds()) {
               try {
-                $drop61(v20_t);
+                if ($rt.unwinds()) $drop61(v20_t);
               } finally {
-                $drop40(v12_t);
+                if ($rt.unwinds()) $drop40(v12_t);
               }
             } }
           }
@@ -140259,7 +140267,7 @@ function dropsIn_1065($2518, $2519, $2520) {
             v5_t = v41_t;
             break L1;
           } finally { if ($rt.unwinds()) {
-            $drop40(v38_t);
+            if ($rt.unwinds()) $drop40(v38_t);
           } }
         }
         v42_t = false;
@@ -140339,7 +140347,7 @@ function dropsIn_1065($2518, $2519, $2520) {
             v5_t = v55_t;
             break L1;
           } finally { if ($rt.unwinds()) {
-            $drop35(v52_t);
+            if ($rt.unwinds()) $drop35(v52_t);
           } }
         }
         v56_t = (v1_t.$tag === "Array");
@@ -140411,14 +140419,14 @@ function some_1066($2526, $2527) {
               }
             }
           } finally { if ($rt.unwinds()) {
-            $drop130(v4_t.v);
+            if ($rt.unwinds()) $drop130(v4_t.v);
           } }
         }
         v3_t = false;
       }
       v2_ret = v3_t;
     } finally { if ($rt.unwinds()) {
-      $drop130(v0_self);
+      if ($rt.unwinds()) $drop130(v0_self);
     } }
   }
   return v2_ret;
@@ -140522,7 +140530,7 @@ function reachable_1067($2528, $2529, $2530, $2531, $2532, $2533) {
                     v38_t = (!v37_t);
                     v32_t = v38_t;
                   } finally { if ($rt.unwinds()) {
-                    $drop146(v34_t);
+                    if ($rt.unwinds()) $drop146(v34_t);
                   } }
                 }
                 if (v32_t)
@@ -142556,12 +142564,12 @@ function call_1078($2553, $2554, $2555, $2556, $2557) {
           }
         } finally { if ($rt.unwinds()) {
           try {
-            $drop19(v235_t.v);
+            if ($rt.unwinds()) $drop19(v235_t.v);
           } finally {
             try {
-              $drop19(v234_t);
+              if ($rt.unwinds()) $drop19(v234_t);
             } finally {
-              $drop20(v233_t);
+              if ($rt.unwinds()) $drop20(v233_t);
             }
           }
         } }
@@ -142645,7 +142653,7 @@ function find_1079($2558, $2559) {
               }
             }
           } finally { if ($rt.unwinds()) {
-            $drop131(v4_t.v);
+            if ($rt.unwinds()) $drop131(v4_t.v);
           } }
         }
         v13_t = { $tag: "None" };
@@ -142653,7 +142661,7 @@ function find_1079($2558, $2559) {
       }
       v2_ret = v3_t;
     } finally { if ($rt.unwinds()) {
-      $drop131(v0_self);
+      if ($rt.unwinds()) $drop131(v0_self);
     } }
   }
   return v2_ret;
@@ -142707,7 +142715,7 @@ function find_1080($2560, $2561) {
               }
             }
           } finally { if ($rt.unwinds()) {
-            $drop132(v4_t.v);
+            if ($rt.unwinds()) $drop132(v4_t.v);
           } }
         }
         v13_t = { $tag: "None" };
@@ -142715,7 +142723,7 @@ function find_1080($2560, $2561) {
       }
       v2_ret = v3_t;
     } finally { if ($rt.unwinds()) {
-      $drop132(v0_self);
+      if ($rt.unwinds()) $drop132(v0_self);
     } }
   }
   return v2_ret;
@@ -143419,7 +143427,7 @@ function keep_1090($2579, $2580, $2581) {
               v28_t = { $tag: "Drop", $: v15_l };
               $b.Vec_insert(v27_t, v29_t, v28_t);
             } finally { if ($rt.unwinds()) {
-              $drop148(v18_t);
+              if ($rt.unwinds()) $drop148(v18_t);
             } }
           }
         }
@@ -147050,12 +147058,12 @@ function fieldsOf_1118($2645, $2646) {
                 }
               } finally { if ($rt.unwinds()) {
                 try {
-                  $drop99(v53_t.v);
+                  if ($rt.unwinds()) $drop99(v53_t.v);
                 } finally {
                   try {
-                    $drop99(v52_t);
+                    if ($rt.unwinds()) $drop99(v52_t);
                   } finally {
-                    $drop73(v51_t);
+                    if ($rt.unwinds()) $drop73(v51_t);
                   }
                 }
               } }
@@ -148752,9 +148760,9 @@ function stmt_1124($2661, $2662, $2663) {
                     }
                   } finally { if ($rt.unwinds()) {
                     try {
-                      $drop11(v166_t.v);
+                      if ($rt.unwinds()) $drop11(v166_t.v);
                     } finally {
-                      $drop11(v165_t);
+                      if ($rt.unwinds()) $drop11(v165_t);
                     }
                   } }
                 }
@@ -148840,9 +148848,9 @@ function stmt_1124($2661, $2662, $2663) {
                 }
               } finally { if ($rt.unwinds()) {
                 try {
-                  $drop11(v191_t.v);
+                  if ($rt.unwinds()) $drop11(v191_t.v);
                 } finally {
-                  $drop11(v190_t);
+                  if ($rt.unwinds()) $drop11(v190_t);
                 }
               } }
             }
@@ -148958,9 +148966,9 @@ function stmt_1124($2661, $2662, $2663) {
                 }
               } finally { if ($rt.unwinds()) {
                 try {
-                  $drop11(v262_t.v);
+                  if ($rt.unwinds()) $drop11(v262_t.v);
                 } finally {
-                  $drop11(v261_t);
+                  if ($rt.unwinds()) $drop11(v261_t);
                 }
               } }
             }
@@ -149479,9 +149487,9 @@ function stmt_1124($2661, $2662, $2663) {
                     }
                   } finally { if ($rt.unwinds()) {
                     try {
-                      $drop11(v537_t.v);
+                      if ($rt.unwinds()) $drop11(v537_t.v);
                     } finally {
-                      $drop11(v536_t);
+                      if ($rt.unwinds()) $drop11(v536_t);
                     }
                   } }
                 }
@@ -150681,14 +150689,14 @@ function some_1141($2701, $2702) {
               }
             }
           } finally { if ($rt.unwinds()) {
-            $drop133(v4_t.v);
+            if ($rt.unwinds()) $drop133(v4_t.v);
           } }
         }
         v3_t = false;
       }
       v2_ret = v3_t;
     } finally { if ($rt.unwinds()) {
-      $drop133(v0_self);
+      if ($rt.unwinds()) $drop133(v0_self);
     } }
   }
   return v2_ret;
@@ -151259,12 +151267,12 @@ function lvalueParts_1144($2710, $2711, $2712, $2713) {
           }
         } finally { if ($rt.unwinds()) {
           try {
-            $drop151(v36_t.v);
+            if ($rt.unwinds()) $drop151(v36_t.v);
           } finally {
             try {
-              $drop151(v35_t);
+              if ($rt.unwinds()) $drop151(v35_t);
             } finally {
-              $drop152(v34_t);
+              if ($rt.unwinds()) $drop152(v34_t);
             }
           }
         } }
@@ -152284,7 +152292,7 @@ function handle_1150($2729, $2730) {
           v175_t = some_1371($rt.take(v172_t, v172_t = undefined), v174_t);
           v170_t = v175_t;
         } finally { if ($rt.unwinds()) {
-          $drop153(v172_t);
+          if ($rt.unwinds()) $drop153(v172_t);
         } }
       }
       v176_leaves = v170_t;
@@ -152736,12 +152744,12 @@ function dropPayload_1155($2743, $2744, $2745, $2746, $2747) {
                     }
                   } finally { if ($rt.unwinds()) {
                     try {
-                      $drop99(v43_t.v);
+                      if ($rt.unwinds()) $drop99(v43_t.v);
                     } finally {
                       try {
-                        $drop99(v42_t);
+                        if ($rt.unwinds()) $drop99(v42_t);
                       } finally {
-                        $drop73(v41_t);
+                        if ($rt.unwinds()) $drop73(v41_t);
                       }
                     }
                   } }
@@ -152839,7 +152847,7 @@ function findIndex_1156($2748, $2749) {
               }
             }
           } finally { if ($rt.unwinds()) {
-            $drop134(v5_t.v);
+            if ($rt.unwinds()) $drop134(v5_t.v);
           } }
         }
         v15_t = { $tag: "None" };
@@ -152847,7 +152855,7 @@ function findIndex_1156($2748, $2749) {
       }
       v2_ret = v3_t;
     } finally { if ($rt.unwinds()) {
-      $drop134(v0_self);
+      if ($rt.unwinds()) $drop134(v0_self);
     } }
   }
   return v2_ret;
@@ -152902,9 +152910,9 @@ function clone_1157($2750) {
           }
         } finally { if ($rt.unwinds()) {
           try {
-            $drop154(v6_t.v);
+            if ($rt.unwinds()) $drop154(v6_t.v);
           } finally {
-            $drop154(v5_t);
+            if ($rt.unwinds()) $drop154(v5_t);
           }
         } }
       }
@@ -153098,7 +153106,7 @@ function needsIn_1158($2751, $2752, $2753) {
                       v45_t = v52_t;
                       break L3;
                     } finally { if ($rt.unwinds()) {
-                      $drop35(v49_t);
+                      if ($rt.unwinds()) $drop35(v49_t);
                     } }
                   }
                   v53_t = (v44_t.$tag === "None");
@@ -153147,7 +153155,7 @@ function needsIn_1158($2751, $2752, $2753) {
                   v40_t = v60_t;
                   break L2;
                 } finally { if ($rt.unwinds()) {
-                  $drop35(v57_t);
+                  if ($rt.unwinds()) $drop35(v57_t);
                 } }
               }
               {
@@ -153238,7 +153246,7 @@ function needsIn_1158($2751, $2752, $2753) {
             v5_t = v74_t;
             break L1;
           } finally { if ($rt.unwinds()) {
-            $drop35(v71_t);
+            if ($rt.unwinds()) $drop35(v71_t);
           } }
         }
         v75_t = (v1_t.$tag === "Tuple");
@@ -153264,7 +153272,7 @@ function needsIn_1158($2751, $2752, $2753) {
             v5_t = v81_t;
             break L1;
           } finally { if ($rt.unwinds()) {
-            $drop40(v78_t);
+            if ($rt.unwinds()) $drop40(v78_t);
           } }
         }
         v82_t = (v1_t.$tag === "Array");
@@ -154025,9 +154033,9 @@ function stmt_1162($2766, $2767, $2768) {
                     }
                   } finally { if ($rt.unwinds()) {
                     try {
-                      $drop11(v153_t.v);
+                      if ($rt.unwinds()) $drop11(v153_t.v);
                     } finally {
-                      $drop11(v152_t);
+                      if ($rt.unwinds()) $drop11(v152_t);
                     }
                   } }
                 }
@@ -154108,9 +154116,9 @@ function stmt_1162($2766, $2767, $2768) {
                 }
               } finally { if ($rt.unwinds()) {
                 try {
-                  $drop11(v174_t.v);
+                  if ($rt.unwinds()) $drop11(v174_t.v);
                 } finally {
-                  $drop11(v173_t);
+                  if ($rt.unwinds()) $drop11(v173_t);
                 }
               } }
             }
@@ -154215,9 +154223,9 @@ function stmt_1162($2766, $2767, $2768) {
                 }
               } finally { if ($rt.unwinds()) {
                 try {
-                  $drop11(v234_t.v);
+                  if ($rt.unwinds()) $drop11(v234_t.v);
                 } finally {
-                  $drop11(v233_t);
+                  if ($rt.unwinds()) $drop11(v233_t);
                 }
               } }
             }
@@ -154836,9 +154844,9 @@ function stmt_1162($2766, $2767, $2768) {
                     }
                   } finally { if ($rt.unwinds()) {
                     try {
-                      $drop11(v597_t.v);
+                      if ($rt.unwinds()) $drop11(v597_t.v);
                     } finally {
-                      $drop11(v596_t);
+                      if ($rt.unwinds()) $drop11(v596_t);
                     }
                   } }
                 }
@@ -155377,9 +155385,9 @@ function panicLanding_1164($2770, $2771, $2772, $2773) {
                           }
                         } finally { if ($rt.unwinds()) {
                           try {
-                            $drop11(v43_t.v);
+                            if ($rt.unwinds()) $drop11(v43_t.v);
                           } finally {
-                            $drop11(v42_t);
+                            if ($rt.unwinds()) $drop11(v42_t);
                           }
                         } }
                       }
@@ -155905,9 +155913,9 @@ function tyAtom_1168($2782) {
                       }
                     } finally { if ($rt.unwinds()) {
                       try {
-                        $drop155(v52_t.v);
+                        if ($rt.unwinds()) $drop155(v52_t.v);
                       } finally {
-                        $drop155(v51_t);
+                        if ($rt.unwinds()) $drop155(v51_t);
                       }
                     } }
                   }
@@ -157617,9 +157625,9 @@ function primary_1180($2797) {
                       }
                     } finally { if ($rt.unwinds()) {
                       try {
-                        $drop156(v156_t.v);
+                        if ($rt.unwinds()) $drop156(v156_t.v);
                       } finally {
-                        $drop156(v155_t);
+                        if ($rt.unwinds()) $drop156(v155_t);
                       }
                     } }
                   }
@@ -160189,12 +160197,12 @@ function method_1207($2840, $2841, $2842, $2843, $2844) {
                     }
                   } finally { if ($rt.unwinds()) {
                     try {
-                      $drop158(v27_t.v);
+                      if ($rt.unwinds()) $drop158(v27_t.v);
                     } finally {
                       try {
-                        $drop158(v26_t);
+                        if ($rt.unwinds()) $drop158(v26_t);
                       } finally {
-                        $drop159(v25_t);
+                        if ($rt.unwinds()) $drop159(v25_t);
                       }
                     }
                   } }
@@ -161001,7 +161009,7 @@ function find_1209($2851, $2852) {
               }
             }
           } finally { if ($rt.unwinds()) {
-            $drop137(v4_t.v);
+            if ($rt.unwinds()) $drop137(v4_t.v);
           } }
         }
         v13_t = { $tag: "None" };
@@ -161009,7 +161017,7 @@ function find_1209($2851, $2852) {
       }
       v2_ret = v3_t;
     } finally { if ($rt.unwinds()) {
-      $drop137(v0_self);
+      if ($rt.unwinds()) $drop137(v0_self);
     } }
   }
   return v2_ret;
@@ -162526,7 +162534,7 @@ function find_1220($2878, $2879) {
               }
             }
           } finally { if ($rt.unwinds()) {
-            $drop140(v4_t.v);
+            if ($rt.unwinds()) $drop140(v4_t.v);
           } }
         }
         v13_t = { $tag: "None" };
@@ -162534,7 +162542,7 @@ function find_1220($2878, $2879) {
       }
       v2_ret = v3_t;
     } finally { if ($rt.unwinds()) {
-      $drop140(v0_self);
+      if ($rt.unwinds()) $drop140(v0_self);
     } }
   }
   return v2_ret;
@@ -163500,14 +163508,14 @@ function every_1225($2887, $2888) {
               }
             }
           } finally { if ($rt.unwinds()) {
-            $drop69(v4_t.v);
+            if ($rt.unwinds()) $drop69(v4_t.v);
           } }
         }
         v3_t = true;
       }
       v2_ret = v3_t;
     } finally { if ($rt.unwinds()) {
-      $drop69(v0_self);
+      if ($rt.unwinds()) $drop69(v0_self);
     } }
   }
   return v2_ret;
@@ -163569,7 +163577,7 @@ function irrefutable_1226($2889) {
             v3_t = v13_t;
             break L1;
           } finally { if ($rt.unwinds()) {
-            $drop69(v10_t);
+            if ($rt.unwinds()) $drop69(v10_t);
           } }
         }
         v14_t = (v0_p.kind.$tag === "Record");
@@ -163620,7 +163628,7 @@ function irrefutable_1226($2889) {
             v3_t = v20_t;
             break L1;
           } finally { if ($rt.unwinds()) {
-            $drop106(v17_t);
+            if ($rt.unwinds()) $drop106(v17_t);
           } }
         }
         {
@@ -163682,14 +163690,14 @@ function every_1227($2892, $2893) {
               }
             }
           } finally { if ($rt.unwinds()) {
-            $drop106(v4_t.v);
+            if ($rt.unwinds()) $drop106(v4_t.v);
           } }
         }
         v3_t = true;
       }
       v2_ret = v3_t;
     } finally { if ($rt.unwinds()) {
-      $drop106(v0_self);
+      if ($rt.unwinds()) $drop106(v0_self);
     } }
   }
   return v2_ret;
@@ -163820,9 +163828,9 @@ function escapes_1229($2895, $2896, $2897) {
                     }
                   } finally { if ($rt.unwinds()) {
                     try {
-                      $drop40(v20_t.v);
+                      if ($rt.unwinds()) $drop40(v20_t.v);
                     } finally {
-                      $drop40(v19_t);
+                      if ($rt.unwinds()) $drop40(v19_t);
                     }
                   } }
                 }
@@ -164503,7 +164511,7 @@ function find_1238($2911, $2912) {
               }
             }
           } finally { if ($rt.unwinds()) {
-            $drop110(v4_t.v);
+            if ($rt.unwinds()) $drop110(v4_t.v);
           } }
         }
         v13_t = { $tag: "None" };
@@ -164511,7 +164519,7 @@ function find_1238($2911, $2912) {
       }
       v2_ret = v3_t;
     } finally { if ($rt.unwinds()) {
-      $drop110(v0_self);
+      if ($rt.unwinds()) $drop110(v0_self);
     } }
   }
   return v2_ret;
@@ -164581,7 +164589,7 @@ function find_1240($2915, $2916) {
               }
             }
           } finally { if ($rt.unwinds()) {
-            $drop141(v4_t.v);
+            if ($rt.unwinds()) $drop141(v4_t.v);
           } }
         }
         v13_t = { $tag: "None" };
@@ -164589,7 +164597,7 @@ function find_1240($2915, $2916) {
       }
       v2_ret = v3_t;
     } finally { if ($rt.unwinds()) {
-      $drop141(v0_self);
+      if ($rt.unwinds()) $drop141(v0_self);
     } }
   }
   return v2_ret;
@@ -164747,14 +164755,14 @@ function some_1242($2919, $2920) {
               }
             }
           } finally { if ($rt.unwinds()) {
-            $drop141(v4_t.v);
+            if ($rt.unwinds()) $drop141(v4_t.v);
           } }
         }
         v3_t = false;
       }
       v2_ret = v3_t;
     } finally { if ($rt.unwinds()) {
-      $drop141(v0_self);
+      if ($rt.unwinds()) $drop141(v0_self);
     } }
   }
   return v2_ret;
@@ -165175,14 +165183,14 @@ function some_1252($2934, $2935) {
               }
             }
           } finally { if ($rt.unwinds()) {
-            $drop143(v4_t.v);
+            if ($rt.unwinds()) $drop143(v4_t.v);
           } }
         }
         v3_t = false;
       }
       v2_ret = v3_t;
     } finally { if ($rt.unwinds()) {
-      $drop143(v0_self);
+      if ($rt.unwinds()) $drop143(v0_self);
     } }
   }
   return v2_ret;
@@ -165346,7 +165354,7 @@ function carriesCode_1254($2939, $2940, $2941) {
                     v33_t = v40_t;
                     break L2;
                   } finally { if ($rt.unwinds()) {
-                    $drop35(v37_t);
+                    if ($rt.unwinds()) $drop35(v37_t);
                   } }
                 }
                 v41_t = (v32_t.$tag === "None");
@@ -165360,9 +165368,9 @@ function carriesCode_1254($2939, $2940, $2941) {
               v10_t = v33_t;
             } finally { if ($rt.unwinds()) {
               try {
-                $drop61(v27_t);
+                if ($rt.unwinds()) $drop61(v27_t);
               } finally {
-                $drop40(v19_t);
+                if ($rt.unwinds()) $drop40(v19_t);
               }
             } }
           }
@@ -165392,7 +165400,7 @@ function carriesCode_1254($2939, $2940, $2941) {
             v5_t = v48_t;
             break L1;
           } finally { if ($rt.unwinds()) {
-            $drop40(v45_t);
+            if ($rt.unwinds()) $drop40(v45_t);
           } }
         }
         v49_t = false;
@@ -165472,7 +165480,7 @@ function carriesCode_1254($2939, $2940, $2941) {
             v5_t = v62_t;
             break L1;
           } finally { if ($rt.unwinds()) {
-            $drop35(v59_t);
+            if ($rt.unwinds()) $drop35(v59_t);
           } }
         }
         v63_t = false;
@@ -165620,9 +165628,9 @@ function clone_1255($2947) {
           }
         } finally { if ($rt.unwinds()) {
           try {
-            $drop162(v6_t.v);
+            if ($rt.unwinds()) $drop162(v6_t.v);
           } finally {
-            $drop162(v5_t);
+            if ($rt.unwinds()) $drop162(v5_t);
           }
         } }
       }
@@ -165672,7 +165680,7 @@ function armUses_1256($2948, $2949, $2950) {
         v21_t = some_273($rt.take(v18_t, v18_t = undefined), v20_t);
         v4_t = v21_t;
       } finally { if ($rt.unwinds()) {
-        $drop43(v18_t);
+        if ($rt.unwinds()) $drop43(v18_t);
       } }
     }
     v3_ret = v4_t;
@@ -165766,7 +165774,7 @@ function patternBinds_1257($2952) {
             v3_t = v18_t;
             break L1;
           } finally { if ($rt.unwinds()) {
-            $drop69(v15_t);
+            if ($rt.unwinds()) $drop69(v15_t);
           } }
         }
         v19_t = (v0_p.kind.$tag === "Record");
@@ -165817,7 +165825,7 @@ function patternBinds_1257($2952) {
             v3_t = v25_t;
             break L1;
           } finally { if ($rt.unwinds()) {
-            $drop106(v22_t);
+            if ($rt.unwinds()) $drop106(v22_t);
           } }
         }
         v26_t = (v0_p.kind.$tag === "Tag");
@@ -165857,7 +165865,7 @@ function patternBinds_1257($2952) {
                 v28_t = v36_t;
                 break L2;
               } finally { if ($rt.unwinds()) {
-                $drop69(v33_t);
+                if ($rt.unwinds()) $drop69(v33_t);
               } }
             }
             v37_t = (v27_args.$tag === "Record");
@@ -165908,7 +165916,7 @@ function patternBinds_1257($2952) {
                 v28_t = v43_t;
                 break L2;
               } finally { if ($rt.unwinds()) {
-                $drop106(v40_t);
+                if ($rt.unwinds()) $drop106(v40_t);
               } }
             }
             $rt.panic("no arm matched");
@@ -166288,14 +166296,14 @@ function some_1259($2959, $2960) {
               }
             }
           } finally { if ($rt.unwinds()) {
-            $drop106(v4_t.v);
+            if ($rt.unwinds()) $drop106(v4_t.v);
           } }
         }
         v3_t = false;
       }
       v2_ret = v3_t;
     } finally { if ($rt.unwinds()) {
-      $drop106(v0_self);
+      if ($rt.unwinds()) $drop106(v0_self);
     } }
   }
   return v2_ret;
@@ -166348,14 +166356,14 @@ function some_1260($2961, $2962) {
               }
             }
           } finally { if ($rt.unwinds()) {
-            $drop145(v4_t.v);
+            if ($rt.unwinds()) $drop145(v4_t.v);
           } }
         }
         v3_t = false;
       }
       v2_ret = v3_t;
     } finally { if ($rt.unwinds()) {
-      $drop145(v0_self);
+      if ($rt.unwinds()) $drop145(v0_self);
     } }
   }
   return v2_ret;
@@ -167236,12 +167244,12 @@ function usesBeyondRead_1263($2967, $2968, $2969, $2970, $2971) {
                 }
               } finally { if ($rt.unwinds()) {
                 try {
-                  $drop123(v165_t.v);
+                  if ($rt.unwinds()) $drop123(v165_t.v);
                 } finally {
                   try {
-                    $drop123(v164_t);
+                    if ($rt.unwinds()) $drop123(v164_t);
                   } finally {
-                    $drop64(v163_t);
+                    if ($rt.unwinds()) $drop64(v163_t);
                   }
                 }
               } }
@@ -167289,7 +167297,7 @@ function usesBeyondRead_1263($2967, $2968, $2969, $2970, $2971) {
                 v216_t = some_383($rt.take(v213_t, v213_t = undefined), v215_t);
                 v211_t = v216_t;
               } finally { if ($rt.unwinds()) {
-                $drop66(v213_t);
+                if ($rt.unwinds()) $drop66(v213_t);
               } }
             }
             if (v211_t)
@@ -168651,14 +168659,14 @@ function some_1270($2995, $2996) {
               }
             }
           } finally { if ($rt.unwinds()) {
-            $drop146(v4_t.v);
+            if ($rt.unwinds()) $drop146(v4_t.v);
           } }
         }
         v3_t = false;
       }
       v2_ret = v3_t;
     } finally { if ($rt.unwinds()) {
-      $drop146(v0_self);
+      if ($rt.unwinds()) $drop146(v0_self);
     } }
   }
   return v2_ret;
@@ -169115,12 +169123,12 @@ function test_1276($3008, $3009, $3010, $3011) {
                           }
                         } finally { if ($rt.unwinds()) {
                           try {
-                            $drop164(v106_t.v);
+                            if ($rt.unwinds()) $drop164(v106_t.v);
                           } finally {
                             try {
-                              $drop164(v105_t);
+                              if ($rt.unwinds()) $drop164(v105_t);
                             } finally {
-                              $drop165(v104_t);
+                              if ($rt.unwinds()) $drop165(v104_t);
                             }
                           }
                         } }
@@ -169284,12 +169292,12 @@ function test_1276($3008, $3009, $3010, $3011) {
                 }
               } finally { if ($rt.unwinds()) {
                 try {
-                  $drop164(v171_t.v);
+                  if ($rt.unwinds()) $drop164(v171_t.v);
                 } finally {
                   try {
-                    $drop164(v170_t);
+                    if ($rt.unwinds()) $drop164(v170_t);
                   } finally {
-                    $drop165(v169_t);
+                    if ($rt.unwinds()) $drop165(v169_t);
                   }
                 }
               } }
@@ -169678,12 +169686,12 @@ function binds_1279($3013, $3014, $3015, $3016, $3017, $3018) {
                           }
                         } finally { if ($rt.unwinds()) {
                           try {
-                            $drop164(v40_t.v);
+                            if ($rt.unwinds()) $drop164(v40_t.v);
                           } finally {
                             try {
-                              $drop164(v39_t);
+                              if ($rt.unwinds()) $drop164(v39_t);
                             } finally {
-                              $drop165(v38_t);
+                              if ($rt.unwinds()) $drop165(v38_t);
                             }
                           }
                         } }
@@ -169762,12 +169770,12 @@ function binds_1279($3013, $3014, $3015, $3016, $3017, $3018) {
                 }
               } finally { if ($rt.unwinds()) {
                 try {
-                  $drop164(v68_t.v);
+                  if ($rt.unwinds()) $drop164(v68_t.v);
                 } finally {
                   try {
-                    $drop164(v67_t);
+                    if ($rt.unwinds()) $drop164(v67_t);
                   } finally {
-                    $drop165(v66_t);
+                    if ($rt.unwinds()) $drop165(v66_t);
                   }
                 }
               } }
@@ -170314,7 +170322,7 @@ function findIndex_1280($3019, $3020) {
               }
             }
           } finally { if ($rt.unwinds()) {
-            $drop148(v5_t.v);
+            if ($rt.unwinds()) $drop148(v5_t.v);
           } }
         }
         v15_t = { $tag: "None" };
@@ -170322,7 +170330,7 @@ function findIndex_1280($3019, $3020) {
       }
       v2_ret = v3_t;
     } finally { if ($rt.unwinds()) {
-      $drop148(v0_self);
+      if ($rt.unwinds()) $drop148(v0_self);
     } }
   }
   return v2_ret;
@@ -170388,7 +170396,7 @@ function matchExpr_1281($3021, $3022, $3023, $3024, $3025) {
                     v6_t = some_1454($rt.take(v3_t, v3_t = undefined), v5_t);
                     v1_ret = v6_t;
                   } finally { if ($rt.unwinds()) {
-                    $drop166(v3_t);
+                    if ($rt.unwinds()) $drop166(v3_t);
                   } }
                 }
                 return v1_ret;
@@ -170397,7 +170405,7 @@ function matchExpr_1281($3021, $3022, $3023, $3024, $3025) {
               v28_t = some_1452($rt.take(v25_t, v25_t = undefined), v27_t);
               v23_t = v28_t;
             } finally { if ($rt.unwinds()) {
-              $drop167(v25_t);
+              if ($rt.unwinds()) $drop167(v25_t);
             } }
           }
           v14_t = v23_t;
@@ -171570,7 +171578,7 @@ function storedTy_1290($3047, $3048) {
                   v16_t = v48_t;
                   break L2;
                 } finally { if ($rt.unwinds()) {
-                  $drop35(v43_t);
+                  if ($rt.unwinds()) $drop35(v43_t);
                 } }
               }
               $rt.panic("no arm matched");
@@ -173319,7 +173327,7 @@ function recordOf_1296($3071, $3072, $3073, $3074) {
                     v115_t = [v114_t, v113_t, v112_t];
                     $b.Vec_push(v110_t, v115_t);
                   } finally { if ($rt.unwinds()) {
-                    $drop20(v32_t);
+                    if ($rt.unwinds()) $drop20(v32_t);
                   } }
                 }
               }
@@ -173329,12 +173337,12 @@ function recordOf_1296($3071, $3072, $3073, $3074) {
           }
         } finally { if ($rt.unwinds()) {
           try {
-            $drop169(v16_t.v);
+            if ($rt.unwinds()) $drop169(v16_t.v);
           } finally {
             try {
-              $drop169(v15_t);
+              if ($rt.unwinds()) $drop169(v15_t);
             } finally {
-              $drop131(v14_t);
+              if ($rt.unwinds()) $drop131(v14_t);
             }
           }
         } }
@@ -173387,12 +173395,12 @@ function recordOf_1296($3071, $3072, $3073, $3074) {
           }
         } finally { if ($rt.unwinds()) {
           try {
-            $drop95(v124_t.v);
+            if ($rt.unwinds()) $drop95(v124_t.v);
           } finally {
             try {
-              $drop95(v123_t);
+              if ($rt.unwinds()) $drop95(v123_t);
             } finally {
-              $drop0(v122_t);
+              if ($rt.unwinds()) $drop0(v122_t);
             }
           }
         } }
@@ -174561,9 +174569,9 @@ function lambda_1301($3093, $3094, $3095, $3096, $3097) {
                 break L3;
               } finally { if ($rt.unwinds()) {
                 try {
-                  $drop170(v50_t);
+                  if ($rt.unwinds()) $drop170(v50_t);
                 } finally {
-                  $drop20(v47_t);
+                  if ($rt.unwinds()) $drop20(v47_t);
                 }
               } }
             }
@@ -174799,9 +174807,9 @@ function lambda_1301($3093, $3094, $3095, $3096, $3097) {
                           $b.Vec_push(v125_t, v129_t);
                         } finally { if ($rt.unwinds()) {
                           try {
-                            $drop0(v93_t);
+                            if ($rt.unwinds()) $drop0(v93_t);
                           } finally {
-                            $drop0(v87_t);
+                            if ($rt.unwinds()) $drop0(v87_t);
                           }
                         } }
                       }
@@ -174816,9 +174824,9 @@ function lambda_1301($3093, $3094, $3095, $3096, $3097) {
                   }
                 } finally { if ($rt.unwinds()) {
                   try {
-                    $drop85(v76_t);
+                    if ($rt.unwinds()) $drop85(v76_t);
                   } finally {
-                    $drop82(v71_t);
+                    if ($rt.unwinds()) $drop82(v71_t);
                   }
                 } }
               }
@@ -174899,12 +174907,12 @@ function lambda_1301($3093, $3094, $3095, $3096, $3097) {
           }
         } finally { if ($rt.unwinds()) {
           try {
-            $drop81(v152_t.v);
+            if ($rt.unwinds()) $drop81(v152_t.v);
           } finally {
             try {
-              $drop81(v151_t);
+              if ($rt.unwinds()) $drop81(v151_t);
             } finally {
-              $drop82(v150_t);
+              if ($rt.unwinds()) $drop82(v150_t);
             }
           }
         } }
@@ -175415,7 +175423,7 @@ function handle_1302($3104, $3105, $3106, $3107) {
                     v189_t = { op: v114_oi, params: v117_ps.v, cont: v165_cont, body: v187_ab, value: v171_av };
                     $b.Vec_push(v188_t, v189_t);
                   } finally { if ($rt.unwinds()) {
-                    $drop171(v105_t);
+                    if ($rt.unwinds()) $drop171(v105_t);
                   } }
                 }
               }
@@ -175711,7 +175719,7 @@ function handle_1302($3104, $3105, $3106, $3107) {
                       v344_t = { op: v343_t, params: v342_t, cont: v341_t, body: v339_ab, value: v323_av };
                       $b.Vec_push(v340_t, v344_t);
                     } finally { if ($rt.unwinds()) {
-                      $drop173(v238_t);
+                      if ($rt.unwinds()) $drop173(v238_t);
                     } }
                   }
                 }
@@ -175721,12 +175729,12 @@ function handle_1302($3104, $3105, $3106, $3107) {
             }
           } finally { if ($rt.unwinds()) {
             try {
-              $drop174(v228_t.v);
+              if ($rt.unwinds()) $drop174(v228_t.v);
             } finally {
               try {
-                $drop174(v227_t);
+                if ($rt.unwinds()) $drop174(v227_t);
               } finally {
-                $drop171(v226_t);
+                if ($rt.unwinds()) $drop171(v226_t);
               }
             }
           } }
@@ -175810,7 +175818,7 @@ function handle_1302($3104, $3105, $3106, $3107) {
         }
         v5_t = v364_t;
       } finally { if ($rt.unwinds()) {
-        $drop173(v353_t);
+        if ($rt.unwinds()) $drop173(v353_t);
       } }
     }
     v4_ret = v5_t;
@@ -175927,7 +175935,7 @@ function lookup_1303($3111, $3112) {
         }
         v3_t = v22_t;
       } finally { if ($rt.unwinds()) {
-        $drop175(v17_t);
+        if ($rt.unwinds()) $drop175(v17_t);
       } }
     }
     v2_ret = v3_t;
@@ -176568,9 +176576,9 @@ function clone_1312($3131) {
           }
         } finally { if ($rt.unwinds()) {
           try {
-            $drop176(v6_t.v);
+            if ($rt.unwinds()) $drop176(v6_t.v);
           } finally {
-            $drop176(v5_t);
+            if ($rt.unwinds()) $drop176(v5_t);
           }
         } }
       }
@@ -178381,9 +178389,9 @@ function assignedIn_1330($3178, $3179, $3180) {
           }
         } finally { if ($rt.unwinds()) {
           try {
-            $drop39(v21_t.v);
+            if ($rt.unwinds()) $drop39(v21_t.v);
           } finally {
-            $drop39(v20_t);
+            if ($rt.unwinds()) $drop39(v20_t);
           }
         } }
       }
@@ -178434,7 +178442,7 @@ function inReach_1331($3181, $3182) {
         v8_t = some_1513($rt.take(v5_t, v5_t = undefined), v7_t);
         v3_t = v8_t;
       } finally { if ($rt.unwinds()) {
-        $drop177(v5_t);
+        if ($rt.unwinds()) $drop177(v5_t);
       } }
     }
     v2_ret = v3_t;
@@ -179820,12 +179828,12 @@ function forGen_1348($3228, $3229, $3230, $3231, $3232, $3233) {
           }
         } finally { if ($rt.unwinds()) {
           try {
-            $drop179(v294_t.v);
+            if ($rt.unwinds()) $drop179(v294_t.v);
           } finally {
             try {
-              $drop179(v293_t);
+              if ($rt.unwinds()) $drop179(v293_t);
             } finally {
-              $drop180(v292_t);
+              if ($rt.unwinds()) $drop180(v292_t);
             }
           }
         } }
@@ -180221,12 +180229,12 @@ function perform_1349($3234, $3235, $3236, $3237, $3238, $3239) {
               }
             } finally { if ($rt.unwinds()) {
               try {
-                $drop179(v42_t.v);
+                if ($rt.unwinds()) $drop179(v42_t.v);
               } finally {
                 try {
-                  $drop179(v41_t);
+                  if ($rt.unwinds()) $drop179(v41_t);
                 } finally {
-                  $drop180(v40_t);
+                  if ($rt.unwinds()) $drop180(v40_t);
                 }
               }
             } }
@@ -181053,12 +181061,12 @@ function handle_1350($3240, $3241) {
                         }
                       } finally { if ($rt.unwinds()) {
                         try {
-                          $drop97(v380_t.v);
+                          if ($rt.unwinds()) $drop97(v380_t.v);
                         } finally {
                           try {
-                            $drop97(v379_t);
+                            if ($rt.unwinds()) $drop97(v379_t);
                           } finally {
-                            $drop11(v378_t);
+                            if ($rt.unwinds()) $drop11(v378_t);
                           }
                         }
                       } }
@@ -184646,12 +184654,12 @@ function copyFn_1367($3278, $3279, $3280) {
                 }
               } finally { if ($rt.unwinds()) {
                 try {
-                  $drop99(v46_t.v);
+                  if ($rt.unwinds()) $drop99(v46_t.v);
                 } finally {
                   try {
-                    $drop99(v45_t);
+                    if ($rt.unwinds()) $drop99(v45_t);
                   } finally {
-                    $drop73(v44_t);
+                    if ($rt.unwinds()) $drop73(v44_t);
                   }
                 }
               } }
@@ -185524,7 +185532,7 @@ function returnsIn_1370($3291) {
                         v73_t = some_1560($rt.take(v70_t, v70_t = undefined), v72_t);
                         v68_t = v73_t;
                       } finally { if ($rt.unwinds()) {
-                        $drop181(v70_t);
+                        if ($rt.unwinds()) $drop181(v70_t);
                       } }
                     }
                     v27_t = v68_t;
@@ -185605,14 +185613,14 @@ function some_1371($3293, $3294) {
               }
             }
           } finally { if ($rt.unwinds()) {
-            $drop153(v4_t.v);
+            if ($rt.unwinds()) $drop153(v4_t.v);
           } }
         }
         v3_t = false;
       }
       v2_ret = v3_t;
     } finally { if ($rt.unwinds()) {
-      $drop153(v0_self);
+      if ($rt.unwinds()) $drop153(v0_self);
     } }
   }
   return v2_ret;
@@ -187557,9 +187565,9 @@ function assignedIn_1379($3314, $3315, $3316) {
           }
         } finally { if ($rt.unwinds()) {
           try {
-            $drop39(v21_t.v);
+            if ($rt.unwinds()) $drop39(v21_t.v);
           } finally {
-            $drop39(v20_t);
+            if ($rt.unwinds()) $drop39(v20_t);
           }
         } }
       }
@@ -188883,12 +188891,12 @@ function perform_1388($3337, $3338, $3339, $3340, $3341, $3342) {
               }
             } finally { if ($rt.unwinds()) {
               try {
-                $drop95(v92_t.v);
+                if ($rt.unwinds()) $drop95(v92_t.v);
               } finally {
                 try {
-                  $drop95(v91_t);
+                  if ($rt.unwinds()) $drop95(v91_t);
                 } finally {
-                  $drop0(v90_t);
+                  if ($rt.unwinds()) $drop0(v90_t);
                 }
               }
             } }
@@ -189659,12 +189667,12 @@ function handle_1389($3343, $3344) {
                         }
                       } finally { if ($rt.unwinds()) {
                         try {
-                          $drop97(v348_t.v);
+                          if ($rt.unwinds()) $drop97(v348_t.v);
                         } finally {
                           try {
-                            $drop97(v347_t);
+                            if ($rt.unwinds()) $drop97(v347_t);
                           } finally {
-                            $drop11(v346_t);
+                            if ($rt.unwinds()) $drop11(v346_t);
                           }
                         }
                       } }
@@ -190092,12 +190100,12 @@ function handle_1389($3343, $3344) {
           }
         } finally { if ($rt.unwinds()) {
           try {
-            $drop174(v619_t.v);
+            if ($rt.unwinds()) $drop174(v619_t.v);
           } finally {
             try {
-              $drop174(v618_t);
+              if ($rt.unwinds()) $drop174(v618_t);
             } finally {
-              $drop171(v617_t);
+              if ($rt.unwinds()) $drop171(v617_t);
             }
           }
         } }
@@ -194820,9 +194828,9 @@ function clone_1435($3420) {
           }
         } finally { if ($rt.unwinds()) {
           try {
-            $drop183(v6_t.v);
+            if ($rt.unwinds()) $drop183(v6_t.v);
           } finally {
-            $drop183(v5_t);
+            if ($rt.unwinds()) $drop183(v5_t);
           }
         } }
       }
@@ -195420,7 +195428,7 @@ function fieldTy_1443($3443, $3444, $3445) {
         }
         v4_t = v13_t;
       } finally { if ($rt.unwinds()) {
-        $drop35(v8_t);
+        if ($rt.unwinds()) $drop35(v8_t);
       } }
     }
     v3_ret = v4_t;
@@ -195580,7 +195588,7 @@ function testAll_1445($3451, $3452) {
         v27_t = { $tag: "Some", $: v26_t };
         v3_t = v27_t;
       } finally { if ($rt.unwinds()) {
-        $drop184(v5_t);
+        if ($rt.unwinds()) $drop184(v5_t);
       } }
     }
     v2_ret = v3_t;
@@ -196154,7 +196162,7 @@ function bindingTyOf_1451($3477, $3478, $3479) {
         }
         v4_t = v16_t;
       } finally { if ($rt.unwinds()) {
-        $drop185(v11_t);
+        if ($rt.unwinds()) $drop185(v11_t);
       } }
     }
     v3_ret = v4_t;
@@ -196207,14 +196215,14 @@ function some_1452($3482, $3483) {
               }
             }
           } finally { if ($rt.unwinds()) {
-            $drop167(v4_t.v);
+            if ($rt.unwinds()) $drop167(v4_t.v);
           } }
         }
         v3_t = false;
       }
       v2_ret = v3_t;
     } finally { if ($rt.unwinds()) {
-      $drop167(v0_self);
+      if ($rt.unwinds()) $drop167(v0_self);
     } }
   }
   return v2_ret;
@@ -196232,12 +196240,12 @@ function iter_1453($3484) {
           v4_t = $b.HashMap_keys(v3_t);
           v2_t = $rt.take(v4_t, v4_t = undefined);
         } finally { if ($rt.unwinds()) {
-          $drop167(v4_t);
+          if ($rt.unwinds()) $drop167(v4_t);
         } }
       }
       v1_ret = $rt.take(v2_t, v2_t = undefined);
     } finally { if ($rt.unwinds()) {
-      $drop167(v2_t);
+      if ($rt.unwinds()) $drop167(v2_t);
     } }
   }
   return v1_ret;
@@ -196288,14 +196296,14 @@ function some_1454($3485, $3486) {
               }
             }
           } finally { if ($rt.unwinds()) {
-            $drop166(v4_t.v);
+            if ($rt.unwinds()) $drop166(v4_t.v);
           } }
         }
         v3_t = false;
       }
       v2_ret = v3_t;
     } finally { if ($rt.unwinds()) {
-      $drop166(v0_self);
+      if ($rt.unwinds()) $drop166(v0_self);
     } }
   }
   return v2_ret;
@@ -196453,7 +196461,7 @@ function stringTy_1457($3490) {
         }
         v2_t = v9_t;
       } finally { if ($rt.unwinds()) {
-        $drop134(v4_t);
+        if ($rt.unwinds()) $drop134(v4_t);
       } }
     }
     v1_ret = v2_t;
@@ -197172,12 +197180,12 @@ function perform_1465($3510, $3511, $3512, $3513, $3514) {
           }
         } finally { if ($rt.unwinds()) {
           try {
-            $drop186(v35_t.v);
+            if ($rt.unwinds()) $drop186(v35_t.v);
           } finally {
             try {
-              $drop186(v34_t);
+              if ($rt.unwinds()) $drop186(v34_t);
             } finally {
-              $drop187(v33_t);
+              if ($rt.unwinds()) $drop187(v33_t);
             }
           }
         } }
@@ -197510,7 +197518,7 @@ function mayFail_1468($3524, $3525) {
         v8_t = some_1609($rt.take(v5_t, v5_t = undefined), v7_t);
         v3_t = v8_t;
       } finally { if ($rt.unwinds()) {
-        $drop46(v5_t);
+        if ($rt.unwinds()) $drop46(v5_t);
       } }
     }
     v2_ret = v3_t;
@@ -197585,7 +197593,7 @@ function suspends_1469($3527, $3528) {
         v8_t = some_1609($rt.take(v5_t, v5_t = undefined), v7_t);
         v3_t = v8_t;
       } finally { if ($rt.unwinds()) {
-        $drop46(v5_t);
+        if ($rt.unwinds()) $drop46(v5_t);
       } }
     }
     v2_ret = v3_t;
@@ -198037,7 +198045,7 @@ function tagOf_1473($3544, $3545, $3546) {
                   }
                   break L2;
                 } finally { if ($rt.unwinds()) {
-                  $drop20(v13_t);
+                  if ($rt.unwinds()) $drop20(v13_t);
                 } }
               }
               {
@@ -198107,7 +198115,7 @@ function tagOf_1473($3544, $3545, $3546) {
             v5_t = v33_t;
             break L1;
           } finally { if ($rt.unwinds()) {
-            $drop20(v28_t);
+            if ($rt.unwinds()) $drop20(v28_t);
           } }
         }
         {
@@ -198231,12 +198239,12 @@ function tupleOf_1474($3551, $3552, $3553, $3554) {
           }
         } finally { if ($rt.unwinds()) {
           try {
-            $drop179(v34_t.v);
+            if ($rt.unwinds()) $drop179(v34_t.v);
           } finally {
             try {
-              $drop179(v33_t);
+              if ($rt.unwinds()) $drop179(v33_t);
             } finally {
-              $drop180(v32_t);
+              if ($rt.unwinds()) $drop180(v32_t);
             }
           }
         } }
@@ -198338,12 +198346,12 @@ function operands_1475($3555, $3556, $3557) {
           }
         } finally { if ($rt.unwinds()) {
           try {
-            $drop186(v10_t.v);
+            if ($rt.unwinds()) $drop186(v10_t.v);
           } finally {
             try {
-              $drop186(v9_t);
+              if ($rt.unwinds()) $drop186(v9_t);
             } finally {
-              $drop187(v8_t);
+              if ($rt.unwinds()) $drop187(v8_t);
             }
           }
         } }
@@ -199831,7 +199839,7 @@ function freeNames_1486($3602, $3603) {
                 }
               }
             } finally { if ($rt.unwinds()) {
-              $drop43(v6_t);
+              if ($rt.unwinds()) $drop43(v6_t);
             } }
           }
           break L1;
@@ -200540,7 +200548,7 @@ function freeNames_1486($3602, $3603) {
                                     }
                                   }
                                 } finally { if ($rt.unwinds()) {
-                                  $drop43(v197_t);
+                                  if ($rt.unwinds()) $drop43(v197_t);
                                 } }
                               }
                               break L16;
@@ -200647,7 +200655,7 @@ function freeNames_1486($3602, $3603) {
                                 }
                               }
                             } finally { if ($rt.unwinds()) {
-                              $drop43(v224_t);
+                              if ($rt.unwinds()) $drop43(v224_t);
                             } }
                           }
                           break L18;
@@ -201223,14 +201231,14 @@ function some_1488($3609, $3610) {
               }
             }
           } finally { if ($rt.unwinds()) {
-            $drop82(v4_t.v);
+            if ($rt.unwinds()) $drop82(v4_t.v);
           } }
         }
         v3_t = false;
       }
       v2_ret = v3_t;
     } finally { if ($rt.unwinds()) {
-      $drop82(v0_self);
+      if ($rt.unwinds()) $drop82(v0_self);
     } }
   }
   return v2_ret;
@@ -201281,14 +201289,14 @@ function some_1489($3611, $3612) {
               }
             }
           } finally { if ($rt.unwinds()) {
-            $drop85(v4_t.v);
+            if ($rt.unwinds()) $drop85(v4_t.v);
           } }
         }
         v3_t = false;
       }
       v2_ret = v3_t;
     } finally { if ($rt.unwinds()) {
-      $drop85(v0_self);
+      if ($rt.unwinds()) $drop85(v0_self);
     } }
   }
   return v2_ret;
@@ -201421,7 +201429,7 @@ function findIndex_1492($3616, $3617) {
               }
             }
           } finally { if ($rt.unwinds()) {
-            $drop171(v5_t.v);
+            if ($rt.unwinds()) $drop171(v5_t.v);
           } }
         }
         v15_t = { $tag: "None" };
@@ -201429,7 +201437,7 @@ function findIndex_1492($3616, $3617) {
       }
       v2_ret = v3_t;
     } finally { if ($rt.unwinds()) {
-      $drop171(v0_self);
+      if ($rt.unwinds()) $drop171(v0_self);
     } }
   }
   return v2_ret;
@@ -201544,14 +201552,14 @@ function some_1494($3620, $3621) {
               }
             }
           } finally { if ($rt.unwinds()) {
-            $drop173(v4_t.v);
+            if ($rt.unwinds()) $drop173(v4_t.v);
           } }
         }
         v3_t = false;
       }
       v2_ret = v3_t;
     } finally { if ($rt.unwinds()) {
-      $drop173(v0_self);
+      if ($rt.unwinds()) $drop173(v0_self);
     } }
   }
   return v2_ret;
@@ -201808,7 +201816,7 @@ function performOp_1495($3622, $3623, $3624, $3625, $3626, $3627, $3628) {
         }
         v8_t = v135_t;
       } finally { if ($rt.unwinds()) {
-        $drop171(v18_t);
+        if ($rt.unwinds()) $drop171(v18_t);
       } }
     }
     v7_ret = v8_t;
@@ -202042,7 +202050,7 @@ function findIndex_1498($3634, $3635) {
               }
             }
           } finally { if ($rt.unwinds()) {
-            $drop175(v5_t.v);
+            if ($rt.unwinds()) $drop175(v5_t.v);
           } }
         }
         v15_t = { $tag: "None" };
@@ -202050,7 +202058,7 @@ function findIndex_1498($3634, $3635) {
       }
       v2_ret = v3_t;
     } finally { if ($rt.unwinds()) {
-      $drop175(v0_self);
+      if ($rt.unwinds()) $drop175(v0_self);
     } }
   }
   return v2_ret;
@@ -202546,7 +202554,7 @@ function call_1502($3642, $3643) {
             v35_t = v44_t;
             break L3;
           } finally { if ($rt.unwinds()) {
-            $drop73(v41_t);
+            if ($rt.unwinds()) $drop73(v41_t);
           } }
         }
         $rt.panic("no arm matched");
@@ -202794,12 +202802,12 @@ function call_1502($3642, $3643) {
                 }
               } finally { if ($rt.unwinds()) {
                 try {
-                  $drop179(v107_t.v);
+                  if ($rt.unwinds()) $drop179(v107_t.v);
                 } finally {
                   try {
-                    $drop179(v106_t);
+                    if ($rt.unwinds()) $drop179(v106_t);
                   } finally {
-                    $drop180(v105_t);
+                    if ($rt.unwinds()) $drop180(v105_t);
                   }
                 }
               } }
@@ -204179,14 +204187,14 @@ function some_1513($3674, $3675) {
               }
             }
           } finally { if ($rt.unwinds()) {
-            $drop177(v4_t.v);
+            if ($rt.unwinds()) $drop177(v4_t.v);
           } }
         }
         v3_t = false;
       }
       v2_ret = v3_t;
     } finally { if ($rt.unwinds()) {
-      $drop177(v0_self);
+      if ($rt.unwinds()) $drop177(v0_self);
     } }
   }
   return v2_ret;
@@ -204443,9 +204451,9 @@ function noteJump_1517($3685, $3686) {
           }
         } finally { if ($rt.unwinds()) {
           try {
-            $drop39(v17_t.v);
+            if ($rt.unwinds()) $drop39(v17_t.v);
           } finally {
-            $drop39(v16_t);
+            if ($rt.unwinds()) $drop39(v16_t);
           }
         } }
       }
@@ -204722,9 +204730,9 @@ function apart_1520($3691, $3692) {
           }
         } finally { if ($rt.unwinds()) {
           try {
-            $drop39(v30_t.v);
+            if ($rt.unwinds()) $drop39(v30_t.v);
           } finally {
-            $drop39(v29_t);
+            if ($rt.unwinds()) $drop39(v29_t);
           }
         } }
       }
@@ -204830,9 +204838,9 @@ function apart_1520($3691, $3692) {
           }
         } finally { if ($rt.unwinds()) {
           try {
-            $drop188(v72_t.v);
+            if ($rt.unwinds()) $drop188(v72_t.v);
           } finally {
-            $drop188(v71_t);
+            if ($rt.unwinds()) $drop188(v71_t);
           }
         } }
       }
@@ -206458,12 +206466,12 @@ function handleDirect_1531($3725, $3726) {
                               }
                             } finally { if ($rt.unwinds()) {
                               try {
-                                $drop97(v237_t.v);
+                                if ($rt.unwinds()) $drop97(v237_t.v);
                               } finally {
                                 try {
-                                  $drop97(v236_t);
+                                  if ($rt.unwinds()) $drop97(v236_t);
                                 } finally {
-                                  $drop11(v235_t);
+                                  if ($rt.unwinds()) $drop11(v235_t);
                                 }
                               }
                             } }
@@ -206541,12 +206549,12 @@ function handleDirect_1531($3725, $3726) {
             }
           } finally { if ($rt.unwinds()) {
             try {
-              $drop190(v127_t.v);
+              if ($rt.unwinds()) $drop190(v127_t.v);
             } finally {
               try {
-                $drop190(v126_t);
+                if ($rt.unwinds()) $drop190(v126_t);
               } finally {
-                $drop153(v125_t);
+                if ($rt.unwinds()) $drop153(v125_t);
               }
             }
           } }
@@ -206716,12 +206724,12 @@ function handleDirect_1531($3725, $3726) {
                 }
               } finally { if ($rt.unwinds()) {
                 try {
-                  $drop190(v356_t.v);
+                  if ($rt.unwinds()) $drop190(v356_t.v);
                 } finally {
                   try {
-                    $drop190(v355_t);
+                    if ($rt.unwinds()) $drop190(v355_t);
                   } finally {
-                    $drop153(v354_t);
+                    if ($rt.unwinds()) $drop153(v354_t);
                   }
                 }
               } }
@@ -206984,9 +206992,9 @@ function handleDirect_1531($3725, $3726) {
                   }
                 } finally { if ($rt.unwinds()) {
                   try {
-                    $drop11(v569_t.v);
+                    if ($rt.unwinds()) $drop11(v569_t.v);
                   } finally {
-                    $drop11(v568_t);
+                    if ($rt.unwinds()) $drop11(v568_t);
                   }
                 } }
               }
@@ -207237,12 +207245,12 @@ function handleDirect_1531($3725, $3726) {
                                         }
                                       } finally { if ($rt.unwinds()) {
                                         try {
-                                          $drop97(v709_t.v);
+                                          if ($rt.unwinds()) $drop97(v709_t.v);
                                         } finally {
                                           try {
-                                            $drop97(v708_t);
+                                            if ($rt.unwinds()) $drop97(v708_t);
                                           } finally {
-                                            $drop11(v707_t);
+                                            if ($rt.unwinds()) $drop11(v707_t);
                                           }
                                         }
                                       } }
@@ -207349,12 +207357,12 @@ function handleDirect_1531($3725, $3726) {
                       }
                     } finally { if ($rt.unwinds()) {
                       try {
-                        $drop190(v644_t.v);
+                        if ($rt.unwinds()) $drop190(v644_t.v);
                       } finally {
                         try {
-                          $drop190(v643_t);
+                          if ($rt.unwinds()) $drop190(v643_t);
                         } finally {
-                          $drop153(v642_t);
+                          if ($rt.unwinds()) $drop153(v642_t);
                         }
                       }
                     } }
@@ -207388,7 +207396,7 @@ function handleDirect_1531($3725, $3726) {
           $rt.panic("no arm matched");
         }
       } finally { if ($rt.unwinds()) {
-        $drop153(v40_t);
+        if ($rt.unwinds()) $drop153(v40_t);
       } }
     }
   }
@@ -208940,12 +208948,12 @@ function builtin_1549($3757, $3758, $3759, $3760) {
           }
         } finally { if ($rt.unwinds()) {
           try {
-            $drop95(v12_t.v);
+            if ($rt.unwinds()) $drop95(v12_t.v);
           } finally {
             try {
-              $drop95(v11_t);
+              if ($rt.unwinds()) $drop95(v11_t);
             } finally {
-              $drop0(v10_t);
+              if ($rt.unwinds()) $drop0(v10_t);
             }
           }
         } }
@@ -211190,12 +211198,12 @@ function closure_1554($3778, $3779, $3780, $3781) {
           }
         } finally { if ($rt.unwinds()) {
           try {
-            $drop192(v54_t.v);
+            if ($rt.unwinds()) $drop192(v54_t.v);
           } finally {
             try {
-              $drop192(v53_t);
+              if ($rt.unwinds()) $drop192(v53_t);
             } finally {
-              $drop193(v52_t);
+              if ($rt.unwinds()) $drop193(v52_t);
             }
           }
         } }
@@ -211428,12 +211436,12 @@ function closure_1554($3778, $3779, $3780, $3781) {
               }
             } finally { if ($rt.unwinds()) {
               try {
-                $drop84(v154_t.v);
+                if ($rt.unwinds()) $drop84(v154_t.v);
               } finally {
                 try {
-                  $drop84(v153_t);
+                  if ($rt.unwinds()) $drop84(v153_t);
                 } finally {
-                  $drop85(v152_t);
+                  if ($rt.unwinds()) $drop85(v152_t);
                 }
               }
             } }
@@ -211926,14 +211934,14 @@ function some_1560($3796, $3797) {
               }
             }
           } finally { if ($rt.unwinds()) {
-            $drop181(v4_t.v);
+            if ($rt.unwinds()) $drop181(v4_t.v);
           } }
         }
         v3_t = false;
       }
       v2_ret = v3_t;
     } finally { if ($rt.unwinds()) {
-      $drop181(v0_self);
+      if ($rt.unwinds()) $drop181(v0_self);
     } }
   }
   return v2_ret;
@@ -212981,7 +212989,7 @@ function call_1566($3809, $3810, $3811) {
             v53_t = v62_t;
             break L5;
           } finally { if ($rt.unwinds()) {
-            $drop73(v59_t);
+            if ($rt.unwinds()) $drop73(v59_t);
           } }
         }
         $rt.panic("no arm matched");
@@ -215040,9 +215048,9 @@ function noteJump_1571($3823, $3824) {
           }
         } finally { if ($rt.unwinds()) {
           try {
-            $drop39(v17_t.v);
+            if ($rt.unwinds()) $drop39(v17_t.v);
           } finally {
-            $drop39(v16_t);
+            if ($rt.unwinds()) $drop39(v16_t);
           }
         } }
       }
@@ -215193,9 +215201,9 @@ function apart_1573($3826, $3827, $3828) {
           }
         } finally { if ($rt.unwinds()) {
           try {
-            $drop11(v37_t.v);
+            if ($rt.unwinds()) $drop11(v37_t.v);
           } finally {
-            $drop11(v36_t);
+            if ($rt.unwinds()) $drop11(v36_t);
           }
         } }
       }
@@ -215505,9 +215513,9 @@ function apart_1573($3826, $3827, $3828) {
           }
         } finally { if ($rt.unwinds()) {
           try {
-            $drop136(v191_t.v);
+            if ($rt.unwinds()) $drop136(v191_t.v);
           } finally {
-            $drop136(v190_t);
+            if ($rt.unwinds()) $drop136(v190_t);
           }
         } }
       }
@@ -215894,12 +215902,12 @@ function handleDirect_1577($3839, $3840) {
             }
           } finally { if ($rt.unwinds()) {
             try {
-              $drop190(v64_t.v);
+              if ($rt.unwinds()) $drop190(v64_t.v);
             } finally {
               try {
-                $drop190(v63_t);
+                if ($rt.unwinds()) $drop190(v63_t);
               } finally {
-                $drop153(v62_t);
+                if ($rt.unwinds()) $drop153(v62_t);
               }
             }
           } }
@@ -216226,12 +216234,12 @@ function handleDirect_1577($3839, $3840) {
                         }
                       } finally { if ($rt.unwinds()) {
                         try {
-                          $drop97(v262_t.v);
+                          if ($rt.unwinds()) $drop97(v262_t.v);
                         } finally {
                           try {
-                            $drop97(v261_t);
+                            if ($rt.unwinds()) $drop97(v261_t);
                           } finally {
-                            $drop11(v260_t);
+                            if ($rt.unwinds()) $drop11(v260_t);
                           }
                         }
                       } }
@@ -216299,12 +216307,12 @@ function handleDirect_1577($3839, $3840) {
             }
           } finally { if ($rt.unwinds()) {
             try {
-              $drop190(v205_t.v);
+              if ($rt.unwinds()) $drop190(v205_t.v);
             } finally {
               try {
-                $drop190(v204_t);
+                if ($rt.unwinds()) $drop190(v204_t);
               } finally {
-                $drop153(v203_t);
+                if ($rt.unwinds()) $drop153(v203_t);
               }
             }
           } }
@@ -216733,9 +216741,9 @@ function handleDirect_1577($3839, $3840) {
                   }
                 } finally { if ($rt.unwinds()) {
                   try {
-                    $drop11(v633_t.v);
+                    if ($rt.unwinds()) $drop11(v633_t.v);
                   } finally {
-                    $drop11(v632_t);
+                    if ($rt.unwinds()) $drop11(v632_t);
                   }
                 } }
               }
@@ -216957,12 +216965,12 @@ function handleDirect_1577($3839, $3840) {
                                   }
                                 } finally { if ($rt.unwinds()) {
                                   try {
-                                    $drop97(v719_t.v);
+                                    if ($rt.unwinds()) $drop97(v719_t.v);
                                   } finally {
                                     try {
-                                      $drop97(v718_t);
+                                      if ($rt.unwinds()) $drop97(v718_t);
                                     } finally {
-                                      $drop11(v717_t);
+                                      if ($rt.unwinds()) $drop11(v717_t);
                                     }
                                   }
                                 } }
@@ -217099,12 +217107,12 @@ function handleDirect_1577($3839, $3840) {
                       }
                     } finally { if ($rt.unwinds()) {
                       try {
-                        $drop190(v704_t.v);
+                        if ($rt.unwinds()) $drop190(v704_t.v);
                       } finally {
                         try {
-                          $drop190(v703_t);
+                          if ($rt.unwinds()) $drop190(v703_t);
                         } finally {
-                          $drop153(v702_t);
+                          if ($rt.unwinds()) $drop153(v702_t);
                         }
                       }
                     } }
@@ -217135,7 +217143,7 @@ function handleDirect_1577($3839, $3840) {
           $rt.panic("no arm matched");
         }
       } finally { if ($rt.unwinds()) {
-        $drop153(v46_t);
+        if ($rt.unwinds()) $drop153(v46_t);
       } }
     }
   }
@@ -217831,9 +217839,9 @@ function chainHead_1582($3850) {
               }
             } finally { if ($rt.unwinds()) {
               try {
-                $drop156(v81_t.v);
+                if ($rt.unwinds()) $drop156(v81_t.v);
               } finally {
-                $drop156(v80_t);
+                if ($rt.unwinds()) $drop156(v80_t);
               }
             } }
           }
@@ -218942,7 +218950,7 @@ function refutable_1599($3879) {
             v3_t = v13_t;
             break L1;
           } finally { if ($rt.unwinds()) {
-            $drop69(v10_t);
+            if ($rt.unwinds()) $drop69(v10_t);
           } }
         }
         v14_t = (v0_p.kind.$tag === "Record");
@@ -218993,7 +219001,7 @@ function refutable_1599($3879) {
             v3_t = v20_t;
             break L1;
           } finally { if ($rt.unwinds()) {
-            $drop106(v17_t);
+            if ($rt.unwinds()) $drop106(v17_t);
           } }
         }
         {
@@ -219054,14 +219062,14 @@ function some_1600($3882, $3883) {
               }
             }
           } finally { if ($rt.unwinds()) {
-            $drop184(v4_t.v);
+            if ($rt.unwinds()) $drop184(v4_t.v);
           } }
         }
         v3_t = false;
       }
       v2_ret = v3_t;
     } finally { if ($rt.unwinds()) {
-      $drop184(v0_self);
+      if ($rt.unwinds()) $drop184(v0_self);
     } }
   }
   return v2_ret;
@@ -219349,7 +219357,7 @@ function find_1602($3888, $3889) {
               }
             }
           } finally { if ($rt.unwinds()) {
-            $drop185(v4_t.v);
+            if ($rt.unwinds()) $drop185(v4_t.v);
           } }
         }
         v13_t = { $tag: "None" };
@@ -219357,7 +219365,7 @@ function find_1602($3888, $3889) {
       }
       v2_ret = v3_t;
     } finally { if ($rt.unwinds()) {
-      $drop185(v0_self);
+      if ($rt.unwinds()) $drop185(v0_self);
     } }
   }
   return v2_ret;
@@ -219724,12 +219732,12 @@ function callOf_1605($3900, $3901, $3902, $3903, $3904, $3905, $3906, $3907) {
           }
         } finally { if ($rt.unwinds()) {
           try {
-            $drop97(v73_t.v);
+            if ($rt.unwinds()) $drop97(v73_t.v);
           } finally {
             try {
-              $drop97(v72_t);
+              if ($rt.unwinds()) $drop97(v72_t);
             } finally {
-              $drop11(v71_t);
+              if ($rt.unwinds()) $drop11(v71_t);
             }
           }
         } }
@@ -220055,14 +220063,14 @@ function some_1609($3917, $3918) {
               }
             }
           } finally { if ($rt.unwinds()) {
-            $drop46(v4_t.v);
+            if ($rt.unwinds()) $drop46(v4_t.v);
           } }
         }
         v3_t = false;
       }
       v2_ret = v3_t;
     } finally { if ($rt.unwinds()) {
-      $drop46(v0_self);
+      if ($rt.unwinds()) $drop46(v0_self);
     } }
   }
   return v2_ret;
@@ -220218,7 +220226,7 @@ function ioRow_1611($3921) {
         }
         v2_t = v9_t;
       } finally { if ($rt.unwinds()) {
-        $drop194(v4_t);
+        if ($rt.unwinds()) $drop194(v4_t);
       } }
     }
     v1_ret = v2_t;
@@ -221991,7 +221999,7 @@ function returns_1618($3943) {
                         v73_t = some_1560($rt.take(v70_t, v70_t = undefined), v72_t);
                         v68_t = v73_t;
                       } finally { if ($rt.unwinds()) {
-                        $drop181(v70_t);
+                        if ($rt.unwinds()) $drop181(v70_t);
                       } }
                     }
                     v27_t = v68_t;
@@ -222441,7 +222449,7 @@ function fails_1619($3945) {
                         v88_t = some_1560($rt.take(v85_t, v85_t = undefined), v87_t);
                         v83_t = v88_t;
                       } finally { if ($rt.unwinds()) {
-                        $drop181(v85_t);
+                        if ($rt.unwinds()) $drop181(v85_t);
                       } }
                     }
                     v27_t = v83_t;
@@ -223025,7 +223033,7 @@ function mentions_1622($3951, $3952) {
                         }
                         v81_t = v93_t;
                       } finally { if ($rt.unwinds()) {
-                        $drop39(v89_t);
+                        if ($rt.unwinds()) $drop39(v89_t);
                       } }
                     }
                     v14_t = v81_t;
@@ -223183,12 +223191,12 @@ function routine_1624($3955, $3956, $3957, $3958) {
           }
         } finally { if ($rt.unwinds()) {
           try {
-            $drop179(v14_t.v);
+            if ($rt.unwinds()) $drop179(v14_t.v);
           } finally {
             try {
-              $drop179(v13_t);
+              if ($rt.unwinds()) $drop179(v13_t);
             } finally {
-              $drop180(v12_t);
+              if ($rt.unwinds()) $drop180(v12_t);
             }
           }
         } }
@@ -223541,12 +223549,12 @@ function callValue_1625($3959, $3960, $3961, $3962, $3963) {
           }
         } finally { if ($rt.unwinds()) {
           try {
-            $drop179(v20_t.v);
+            if ($rt.unwinds()) $drop179(v20_t.v);
           } finally {
             try {
-              $drop179(v19_t);
+              if ($rt.unwinds()) $drop179(v19_t);
             } finally {
-              $drop180(v18_t);
+              if ($rt.unwinds()) $drop180(v18_t);
             }
           }
         } }
@@ -224278,12 +224286,12 @@ function rvalueMem_1627($3968, $3969, $3970, $3971, $3972) {
                     }
                   } finally { if ($rt.unwinds()) {
                     try {
-                      $drop179(v151_t.v);
+                      if ($rt.unwinds()) $drop179(v151_t.v);
                     } finally {
                       try {
-                        $drop179(v150_t);
+                        if ($rt.unwinds()) $drop179(v150_t);
                       } finally {
-                        $drop180(v149_t);
+                        if ($rt.unwinds()) $drop180(v149_t);
                       }
                     }
                   } }
@@ -224371,12 +224379,12 @@ function rvalueMem_1627($3968, $3969, $3970, $3971, $3972) {
                     }
                   } finally { if ($rt.unwinds()) {
                     try {
-                      $drop179(v192_t.v);
+                      if ($rt.unwinds()) $drop179(v192_t.v);
                     } finally {
                       try {
-                        $drop179(v191_t);
+                        if ($rt.unwinds()) $drop179(v191_t);
                       } finally {
-                        $drop180(v190_t);
+                        if ($rt.unwinds()) $drop180(v190_t);
                       }
                     }
                   } }
@@ -225446,7 +225454,7 @@ function rowYields_1639($3993, $3994) {
         v8_t = some_863($rt.take(v5_t, v5_t = undefined), v7_t);
         v3_t = v8_t;
       } finally { if ($rt.unwinds()) {
-        $drop102(v5_t);
+        if ($rt.unwinds()) $drop102(v5_t);
       } }
     }
     v2_ret = v3_t;
@@ -227904,7 +227912,7 @@ function conversion_1649($4021, $4022, $4023, $4024) {
                     }
                   }
                 } finally { if ($rt.unwinds()) {
-                  $drop20(v66_t);
+                  if ($rt.unwinds()) $drop20(v66_t);
                 } }
               }
             }
@@ -228096,12 +228104,12 @@ function closure_1650($4026, $4027, $4028, $4029, $4030) {
           }
         } finally { if ($rt.unwinds()) {
           try {
-            $drop196(v16_t.v);
+            if ($rt.unwinds()) $drop196(v16_t.v);
           } finally {
             try {
-              $drop196(v15_t);
+              if ($rt.unwinds()) $drop196(v15_t);
             } finally {
-              $drop197(v14_t);
+              if ($rt.unwinds()) $drop197(v14_t);
             }
           }
         } }
@@ -228388,12 +228396,12 @@ function fnValue_1651($4031, $4032, $4033) {
           }
         } finally { if ($rt.unwinds()) {
           try {
-            $drop99(v21_t.v);
+            if ($rt.unwinds()) $drop99(v21_t.v);
           } finally {
             try {
-              $drop99(v20_t);
+              if ($rt.unwinds()) $drop99(v20_t);
             } finally {
-              $drop73(v19_t);
+              if ($rt.unwinds()) $drop73(v19_t);
             }
           }
         } }
@@ -228987,9 +228995,9 @@ function clone_1655($4040) {
           }
         } finally { if ($rt.unwinds()) {
           try {
-            $drop199(v6_t.v);
+            if ($rt.unwinds()) $drop199(v6_t.v);
           } finally {
-            $drop199(v5_t);
+            if ($rt.unwinds()) $drop199(v5_t);
           }
         } }
       }
@@ -229049,9 +229057,9 @@ function clone_1656($4041) {
           }
         } finally { if ($rt.unwinds()) {
           try {
-            $drop136(v6_t.v);
+            if ($rt.unwinds()) $drop136(v6_t.v);
           } finally {
-            $drop136(v5_t);
+            if ($rt.unwinds()) $drop136(v5_t);
           }
         } }
       }
@@ -229904,7 +229912,7 @@ function findIndex_1666($4053, $4054) {
               }
             }
           } finally { if ($rt.unwinds()) {
-            $drop194(v5_t.v);
+            if ($rt.unwinds()) $drop194(v5_t.v);
           } }
         }
         v15_t = { $tag: "None" };
@@ -229912,7 +229920,7 @@ function findIndex_1666($4053, $4054) {
       }
       v2_ret = v3_t;
     } finally { if ($rt.unwinds()) {
-      $drop194(v0_self);
+      if ($rt.unwinds()) $drop194(v0_self);
     } }
   }
   return v2_ret;
@@ -231963,12 +231971,12 @@ function closure_1675($4083, $4084, $4085, $4086, $4087, $4088) {
             }
           } finally { if ($rt.unwinds()) {
             try {
-              $drop87(v48_t.v);
+              if ($rt.unwinds()) $drop87(v48_t.v);
             } finally {
               try {
-                $drop87(v47_t);
+                if ($rt.unwinds()) $drop87(v47_t);
               } finally {
-                $drop88(v46_t);
+                if ($rt.unwinds()) $drop88(v46_t);
               }
             }
           } }
@@ -232180,12 +232188,12 @@ function closure_1675($4083, $4084, $4085, $4086, $4087, $4088) {
             }
           } finally { if ($rt.unwinds()) {
             try {
-              $drop196(v163_t.v);
+              if ($rt.unwinds()) $drop196(v163_t.v);
             } finally {
               try {
-                $drop196(v162_t);
+                if ($rt.unwinds()) $drop196(v162_t);
               } finally {
-                $drop197(v161_t);
+                if ($rt.unwinds()) $drop197(v161_t);
               }
             }
           } }
@@ -232242,7 +232250,7 @@ function closure_1675($4083, $4084, $4085, $4086, $4087, $4088) {
         v215_t = $b.String_asStr(v214_t);
         store_1134(v216_t, "ptr", v215_t, v4_dest);
       } finally { if ($rt.unwinds()) {
-        $drop197(v38_t);
+        if ($rt.unwinds()) $drop197(v38_t);
       } }
     }
   }
@@ -232354,12 +232362,12 @@ function fnValue_1676($4090, $4091, $4092) {
           }
         } finally { if ($rt.unwinds()) {
           try {
-            $drop99(v35_t.v);
+            if ($rt.unwinds()) $drop99(v35_t.v);
           } finally {
             try {
-              $drop99(v34_t);
+              if ($rt.unwinds()) $drop99(v34_t);
             } finally {
-              $drop73(v33_t);
+              if ($rt.unwinds()) $drop73(v33_t);
             }
           }
         } }
@@ -239870,14 +239878,14 @@ function some_1720($4200, $4201) {
               }
             }
           } finally { if ($rt.unwinds()) {
-            $drop197(v4_t.v);
+            if ($rt.unwinds()) $drop197(v4_t.v);
           } }
         }
         v3_t = false;
       }
       v2_ret = v3_t;
     } finally { if ($rt.unwinds()) {
-      $drop197(v0_self);
+      if ($rt.unwinds()) $drop197(v0_self);
     } }
   }
   return v2_ret;
@@ -247502,12 +247510,12 @@ function ioRaise_1744($4276, $4277) {
           }
         } finally { if ($rt.unwinds()) {
           try {
-            $drop200(v11_t.v);
+            if ($rt.unwinds()) $drop200(v11_t.v);
           } finally {
             try {
-              $drop200(v10_t);
+              if ($rt.unwinds()) $drop200(v10_t);
             } finally {
-              $drop133(v9_t);
+              if ($rt.unwinds()) $drop133(v9_t);
             }
           }
         } }

@@ -102,8 +102,9 @@ typedef struct fly_unw fly_unw;
 // stops; the handlers in force, innermost first; and, for a panic (§5.7), the records of the
 // functions it would unwind, innermost first, and the message of the panic unwinding them, if one
 // is. The last two are each fiber's own.
-// And the limit of the stack it runs on now (below).
-typedef struct fly_ctx { void* err; bool unwinding, stopping; fly_handler* handlers; fly_unw* unw; char* panic; uintptr_t limit; } fly_ctx;
+// And the limit of the stack it runs on now (below), and how deep in destructors it is, from which
+// a panic does not unwind (§5.7): each fiber's own, as the panic is.
+typedef struct fly_ctx { void* err; bool unwinding, stopping; fly_handler* handlers; fly_unw* unw; char* panic; uintptr_t limit; int destroying; } fly_ctx;
 #ifdef FLY_THREADS
 // The context of the task running. Within one call of a function it is always the same, wherever
 // the task goes on, so it is `const`: a compiler may compute it once a call. It is computed afresh
@@ -143,6 +144,10 @@ _Noreturn void fly_panic(const char* message);
 #define FLY_HEADROOM (64u << 10)
 _Noreturn void fly_stack_overflow(void);
 void fly_stack_at(uintptr_t sp);
+// A destructor does not unwind: a panic that escapes one ends the program (§5.7). What drops a
+// value runs a `Drop` impl, or unwinds a continuation or a generator, between these.
+#define fly_destroy_begin() (fly_cx()->destroying++)
+#define fly_destroy_end() (fly_cx()->destroying--)
 static inline __attribute__((always_inline)) void fly_stack_check(uintptr_t sp) {
   if (__builtin_expect(sp < fly_cx()->limit, 0)) fly_stack_overflow();
 }

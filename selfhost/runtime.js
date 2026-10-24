@@ -853,7 +853,13 @@ const { $rt, $b } = (() => {
     Gen_enumerate: (g) => new Gen((function* () { let i = 0; for (let s = step(g); s !== undefined; s = step(g)) yield new Yielded([i++, s.item]); })()),
     Gen_collect(g) { const out = []; for (let s = step(g); s !== undefined; s = step(g)) out.push(s.item); return out; },
     *Gen_each(g) { yield* g.it; },
-    Gen_drop(r) { if (r.v.it.return) r.v.it.return(); },
+    Gen_drop(r) { if (r.v.it.return) $b.destructor(() => r.v.it.return()); },
+    // A destructor does not unwind (§5.7): a panic that escapes one — a `Drop` impl, or the cleanup
+    // of a continuation or generator a value's dropping unwinds — ends the program.
+    destructor(f) {
+      try { f(); }
+      catch (e0) { const e = asPanic(e0); if (e instanceof Panic) end(`${e.message}, in a destructor`); throw e; }
+    },
 
     // A descriptor let go of, as a dropped file does.
     Fd_release(fd) { const n = (fd.v ?? fd).n; if (n > 2) { try { fs.closeSync(n); } catch {} } },

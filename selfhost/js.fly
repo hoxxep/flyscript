@@ -284,12 +284,13 @@ impl JsGen {
     let body = "  if (v === undefined) return;\n".toString();
     match (t) {
       #Named(d, args) => {
+        // A destructor does not unwind: a panic out of one ends the program (§5.7).
         if (self.lw.p.hasDrop(d)) {
           const call = self.dropCall(t.clone(), span);
-          body.push(`  ${call};\n`);
+          body.push(`  $b.destructor(() => ${call});\n`);
         }
         if (self.lw.p.isKnown(d, "Cont")) {
-          body.push("  v.$drop();\n");
+          body.push("  $b.destructor(() => v.$drop());\n");
         } else if (self.lw.p.isKnown(d, "Box")) {
           if (const #Some(#Ty(inner)) = args.first() && self.needsDrop(inner)) {
             const f = self.dropFn(inner.clone(), span);
@@ -810,7 +811,8 @@ impl JsGen {
       self.cx.indent += 1;
       for (const s of b.stmts) { self.stmt(s, span); }
       self.cx.indent -= 1;
-      // A panic stops the task where it is: its cleanup does not run (§5.7).
+      // The end of the program stops every task where it is, its cleanup not run (§5.7): each
+      // cleanup asks first, for the one before may have ended it.
       self.line("} finally { if ($rt.unwinds()) {");
       self.cx.indent += 1;
       // Each cleanup runs however the one before it ended: one that unwinds — a cancelled
@@ -833,13 +835,13 @@ impl JsGen {
             const t = self.cx.locals[l].ty.clone();
             if (self.drops(t)) {
               const f = self.dropFn(t, span);
-              self.line(`${f}(${self.local(l)});`);
+              self.line(`if ($rt.unwinds()) ${f}(${self.local(l)});`);
             }
           }
           #Defer(flag, body) => {
             const fl = self.local(flag);
             // A `defer` runs to its end: a cancellation meanwhile waits for it (§5.6).
-            self.line(`if (${fl}) {`);
+            self.line(`if (${fl} && $rt.unwinds()) {`);
             self.cx.indent += 1;
             self.line(`${fl} = false;`);
             self.line("$rt.cleaning(1);");

@@ -1,0 +1,23 @@
+// A destructor does not unwind (§5.7): a panic that escapes one ends the program, cleanup and all,
+// for dropping a value halfway would leave the rest of it undropped, or drop it twice.
+// expect: dropping a guard
+// expect: <panic: index 5 out of bounds (length 2), in a destructor>
+import { println } from "std/io";
+
+struct Guard { xs: Vec<u32> }
+
+impl Drop for Guard {
+  function drop(self: mut Self): void {
+    const i: usize = 5;
+    self.xs[0] = self.xs[i];
+  }
+}
+
+export function main(): void uses Io {
+  defer println("not reached: the program ended in the destructor");
+  {
+    const g = Guard { xs: [1, 2] };
+    println("dropping a guard");
+  }
+  println("not reached: after the guard");
+}

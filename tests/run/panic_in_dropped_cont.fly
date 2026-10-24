@@ -1,0 +1,27 @@
+// expect: kept
+// expect: <panic: index 3 out of bounds (length 1), in a destructor>
+// A continuation kept as a value is dropped where its owner lets it go, and its cleanup runs as
+// it unwinds: that is a destructor's work, so a panic there ends the program (§5.7), the owner's
+// own cleanup not run.
+import { println } from "std/io";
+effect Tick { tick(): void; }
+enum Steps<row E> { #Done, #More(Cont<void, Steps<E>, E>) }
+function boom(): void uses Io {
+  const xs = [1];
+  const i: usize = 3;
+  println(`not reached: ${xs[i]}`);
+}
+function steps(): Steps<[Io]> uses Io {
+  handle {
+    defer { boom(); };
+    Tick.tick();
+    #Done
+  } with Tick { tick() resumes k => #More(k) }
+}
+export function main(): void uses Io {
+  defer println("not reached: the program ended in the destructor");
+  match (steps()) {
+    #More(k) => { println("kept"); },
+    #Done => {},
+  }
+}

@@ -312,6 +312,13 @@ _Noreturn void fly_panic(const char* message) {
     snprintf(both, n, "%s, while unwinding from a panic: %s", message, c->panic);
     panic_exit(both);
   }
+  if (c->destroying) {
+    size_t n = strlen(message) + 20;
+    char* in = malloc(n);
+    if (!in) panic_exit(message);
+    snprintf(in, n, "%s, in a destructor", message);
+    panic_exit(in);
+  }
   c->panic = strdup(message);
   if (!c->panic) c->panic = out_of_memory;
   if (FLY_UNCAUGHT(c)) panic_exit(c->panic);
@@ -1624,7 +1631,7 @@ void* fly_iter_new(void* base, size_t len, size_t stride) {
 }
 
 void fly_gen_drop(fly_gen* g) {
-  if (g->drop) g->drop(g->st);
+  if (g->drop) { fly_destroy_begin(); g->drop(g->st); fly_destroy_end(); }
   *g = (fly_gen){ 0 };
 }
 
@@ -1691,8 +1698,9 @@ struct fly_fiber {
   void (*entry)(void* arg);
   void* arg;
   // The stack limit (runtime.h): what it is now, lowered as a panic for an overflow unwinds the
-  // fiber, and what it is otherwise.
+  // fiber, and what it is otherwise; and how deep in destructors it is, while another fiber runs.
   uintptr_t limit, limit0;
+  int destroying;
   fly_fiber* back;
   fly_handler* handlers;
   // Its records and the panic unwinding it, while another fiber runs (runtime.h); and a panic that
@@ -1813,6 +1821,8 @@ static void switch_to(fly_fiber* to) {
   cx->unw = to->unw;
   from->panic = cx->panic;
   cx->panic = to->panic;
+  from->destroying = cx->destroying;
+  cx->destroying = to->destroying;
   cur_fiber = to;
   cx->limit = to->limit;
 #if defined(FLY_ASAN)
@@ -2039,7 +2049,7 @@ void fly_cleanup_end(fly_unwind_state s) {
 }
 
 void fly_cont_drop(fly_cont* k) {
-  if (k->drop) k->drop(k->frame);
+  if (k->drop) { fly_destroy_begin(); k->drop(k->frame); fly_destroy_end(); }
   *k = (fly_cont){ 0 };
 }
 

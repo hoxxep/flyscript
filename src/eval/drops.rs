@@ -6,7 +6,7 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use super::interp::{Ctl, Interp, TEnv};
+use super::interp::{Ctl, Interp, TEnv, end_program, is_panic};
 use super::value::*;
 use crate::check::env::{DefKind, Program, SubstMap, subst_params};
 use crate::check::types::*;
@@ -40,6 +40,16 @@ fn needs(p: &Program, t: &Ty, params: bool, seen: &mut HashSet<DefId>) -> bool {
         Ty::Array(e, _) => needs(p, e, params, seen),
         Ty::Param(_) => params,
         _ => false,
+    }
+}
+
+/// A destructor does not unwind (§5.7): a panic that escapes one — a `Drop` impl, or the cleanup
+/// of a continuation a value's dropping unwinds — ends the program, for dropping a value halfway
+/// would leave the rest of it undropped.
+fn destructor(r: Result<(), Ctl>) -> Result<(), Ctl> {
+    match r {
+        Err(Ctl::Panic(m)) if is_panic(&Err(Ctl::Panic(m.clone()))) => Err(end_program(format!("{m}, in a destructor"))),
+        other => other,
     }
 }
 
@@ -81,7 +91,7 @@ impl Interp {
         match ty {
             Ty::Named(d, _) if self.prog.known.get("Cont") == Some(d) => {
                 if let Value::Native("Cont", co) = v.deref() {
-                    super::coroutine::drop_cont(self, co)?;
+                    destructor(super::coroutine::drop_cont(self, co))?;
                 }
                 Ok(())
             }
@@ -91,7 +101,7 @@ impl Interp {
                     let place = Place { root: shared(v.clone()), path: Vec::new() };
                     let params = &self.prog.fns[f].scheme.tparams;
                     let tenv: TEnv = std::sync::Arc::new(params.iter().zip(args).map(|(g, a)| (g.sym.id, a.clone())).collect());
-                    self.call_fn_with(f, vec![Value::Ptr(place)], tenv)?;
+                    destructor(self.call_fn_with(f, vec![Value::Ptr(place)], tenv).map(|_| ()))?;
                 }
                 let def_kind = &self.prog.defs[*d].kind;
                 match (def_kind, v.deref()) {
