@@ -41,8 +41,12 @@ out=$(mktemp -d)
 [ $# -eq 0 ] && set -- "$root"/tests/run/*.fly
 pass=0; total=0
 for f in "$@"; do
+  # A program needing what WASI does not have says so.
+  if $wasm && grep -q '^// skip: wasm' "$f"; then continue; fi
   total=$((total + 1))
   name=$(basename "$f" .fly)
+  # `// env: NAME=value` lines are its environment.
+  envs=$(grep '^// env: ' "$f" | sed 's#^// env: ##' | tr '\n' ' ')
   grep '^// expect: ' "$f" | sed 's#^// expect: ##' > "$out/$name.want"
   # `// file: name=text` lines are files the program finds in its working directory.
   mkdir -p "$out/$name.cwd"
@@ -83,11 +87,12 @@ for f in "$@"; do
   if $threads; then
     [ -s "$out/$name.err" ] || (cd "$out/$name.cwd" && FLY_THREADS=4 $run) > "$out/$name.got" 2>&1
   else
-    [ -s "$out/$name.err" ] || (cd "$out/$name.cwd" && FLY_WORLD="$world" $run) > "$out/$name.got" 2>&1
+    # shellcheck disable=SC2086
+    [ -s "$out/$name.err" ] || (cd "$out/$name.cwd" && FLY_WORLD="$world" env $envs $run) > "$out/$name.got" 2>&1
   fi
   if $c && $leaks && [ ! -s "$out/$name.err" ] && ! grep -q '<panic' "$out/$name.want"; then
     cc -std=gnu11 -g -O1 -w -DFLY_SYSTEM_MALLOC -o "$out/$name.plain" "$out/$name.c" -lm &&
-      (cd "$out/$name.cwd" && FLY_WORLD="$world" leaks --atExit -- "$out/$name.plain" 2>&1) | grep -q ' 0 leaks for ' ||
+      (cd "$out/$name.cwd" && FLY_WORLD="$world" env $envs leaks --atExit -- "$out/$name.plain" 2>&1) | grep -q ' 0 leaks for ' ||
       echo "leaks" >> "$out/$name.err"
   fi
   if [ ! -s "$out/$name.err" ] && cmp -s "$out/$name.want" "$out/$name.got"; then

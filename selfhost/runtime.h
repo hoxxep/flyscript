@@ -129,6 +129,19 @@ void fly_err_take(void* out, size_t size);
 _Noreturn void fly_panic(const char* message);
 // Bytes to standard output.
 void fly_out(fly_str s);
+
+// ---- the file system and the process, for `Io` (std/fs, std/process) ----
+// Each gives 0, or what went wrong as one of `IoErr`'s tags: 1 `#NotFound`, 2 `#PermissionDenied`,
+// 3 `#Exists`, 4 `#NotEmpty`, 5 `#Unsupported`.
+int fly_io_stat(fly_str path, uint64_t* size, bool* dir, int64_t* modified);
+int fly_io_list(fly_str path, fly_vec* names);
+int fly_io_mkdir(fly_str path);
+int fly_io_remove(fly_str path);
+int fly_io_rename(fly_str from, fly_str to);
+bool fly_io_env(fly_str name, fly_String* value);
+fly_String fly_io_cwd(void);
+int fly_io_run(fly_str program, fly_slice args, fly_str input, int32_t* status, fly_String* out, fly_String* err);
+int64_t fly_io_wall(void);
 _Noreturn void fly_exit(int32_t code);
 _Noreturn void fly_panicf(const char* fmt, ...);
 

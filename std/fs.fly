@@ -1,0 +1,112 @@
+// The file system (std.md): what is at a path, a directory's entries, and making, moving and
+// removing them. Each is an operation of `Io`, which a program, or a test, may handle itself.
+// Paths are text, `/` between their parts; a relative one is from the working directory.
+
+// What is at `path`, or `#NotFound`.
+export function stat(path: str): Stat uses Io, Fail<IoErr> {
+  match (Io.stat(path)) { #Ok(s) => s, #Err(e) => throw e }
+}
+
+export function exists(path: str): bool uses Io {
+  match (Io.stat(path)) { #Ok(_) => true, #Err(_) => false }
+}
+
+export function isDir(path: str): bool uses Io {
+  match (Io.stat(path)) { #Ok(s) => s.dir, #Err(_) => false }
+}
+
+// A directory's entries, their names alone, in order.
+export function listDir(path: str): Vec<String> uses Io, Fail<IoErr> {
+  match (Io.list(path)) { #Ok(names) => names, #Err(e) => throw e }
+}
+
+// A directory, whose parent is there; `#Exists` if something is at `path`.
+export function createDir(path: str): void uses Io, Fail<IoErr> {
+  match (Io.mkdir(path)) { #Ok => {}, #Err(e) => throw e }
+}
+
+// A directory, and each directory above it that is not there.
+export function createDirAll(path: str): void uses Io, Fail<IoErr> {
+  let at = String.new();
+  for (const part of path.split("/")) {
+    if (part.len() == 0) {
+      if (at.len() == 0) { at.push("/"); }
+      continue;
+    }
+    if (at.len() > 0 && !at.endsWith("/")) { at.push("/"); }
+    at.push(part);
+    if (!isDir(at.asStr())) { createDir(at.asStr()); }
+  }
+}
+
+// A file, or a directory with nothing in it: `#NotEmpty` otherwise.
+export function remove(path: str): void uses Io, Fail<IoErr> {
+  match (Io.remove(path)) { #Ok => {}, #Err(e) => throw e }
+}
+
+// A file, or a directory and everything in it.
+export function removeAll(path: str): void uses Io, Fail<IoErr> {
+  if (isDir(path)) {
+    for (const name of listDir(path)) { removeAll(join(path, name.asStr()).asStr()); }
+  }
+  remove(path);
+}
+
+export function rename(from: str, to: str): void uses Io, Fail<IoErr> {
+  match (Io.rename(from, to)) { #Ok => {}, #Err(e) => throw e }
+}
+
+// The files under `root`, depth first, each directory's entries in order: their paths from `root`.
+export function walk(root: str): void uses Io, Fail<IoErr>, Yield<String> {
+  for (const name of listDir(root)) {
+    const path = join(root, name.asStr());
+    if (isDir(path.asStr())) {
+      for (const inner of walk(path.asStr())) { yield inner; }
+    } else {
+      yield path;
+    }
+  }
+}
+
+// ---- paths ----
+
+// `b` after `a`, one `/` between them; `b` itself if it is absolute.
+export function join(a: str, b: str): String {
+  if (b.startsWith("/") || a.len() == 0) { return b.toString(); }
+  if (a.endsWith("/")) { `${a}${b}` } else { `${a}/${b}` }
+}
+
+// What holds the path: all but its last part, or `""` for a path of one part.
+export function parent(path: str): String {
+  const p = noSlash(path);
+  match (p.lastIndexOf("/")) {
+    #Some(0) => "/".toString(),
+    #Some(i) => p.slice(0, i).toString(),
+    #None => String.new(),
+  }
+}
+
+// The path without the `/`s it ends in, but for the root.
+function noSlash(path: str): str from path {
+  let n = path.len();
+  while (n > 1 && path.slice(n - 1, n) == "/") { n -= 1; }
+  path.slice(0, n)
+}
+
+// The path's last part.
+export function fileName(path: str): String {
+  const p = noSlash(path);
+  match (p.lastIndexOf("/")) {
+    #Some(i) => p.slice(i + 1, p.len()).toString(),
+    #None => p.toString(),
+  }
+}
+
+// What follows the last `.` of the last part, if one does and the part does not start with it.
+export function extension(path: str): Option<String> {
+  const name = fileName(path);
+  match (name.lastIndexOf(".")) {
+    #Some(i) if i > 0 => #Some(name.slice(i + 1, name.len()).toString()),
+    _ => #None,
+  }
+}

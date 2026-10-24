@@ -932,7 +932,45 @@ const { $rt, $b } = (() => {
       return { $tag: "Ok", $: s.length };
     },
     Io_read: () => ({ $tag: "Ok", $: 0 }),
+    // The file system and the process, the machine's (std/fs, std/process). A string is its bytes,
+    // one to a character; the system's text is UTF-8.
+    Io_stat(p) {
+      return io(() => {
+        const st = fs.statSync(sysPath(p));
+        return { size: BigInt(st.size), dir: st.isDirectory(), modified: BigInt(Math.trunc(st.mtimeMs)) * 1000000n };
+      });
+    },
+    Io_list: (p) => io(() => fs.readdirSync(sysPath(p)).map(fromSys).sort(byBytes)),
+    Io_mkdir: (p) => io(() => { fs.mkdirSync(sysPath(p)); }),
+    Io_remove: (p) => io(() => { const q = sysPath(p); if (fs.lstatSync(q).isDirectory()) fs.rmdirSync(q); else fs.unlinkSync(q); }),
+    Io_rename: (a, b) => io(() => { fs.renameSync(sysPath(a), sysPath(b)); }),
+    Io_env(name) {
+      const v = process.env[Buffer.from(name, "latin1").toString("utf8")];
+      return v === undefined ? { $tag: "None" } : { $tag: "Some", $: fromSys(v) };
+    },
+    Io_cwd: () => fromSys(process.cwd()),
+    Io_wall: () => BigInt(Date.now()) * 1000000n + BigInt(Math.trunc((performance.now() % 1) * 1e6)) % 1000000n,
+    Io_run(program, args, input) {
+      return io(() => {
+        const r = require("child_process").spawnSync(sysPath(program), args.map(sysPath), { input: Buffer.from(input, "latin1") });
+        if (r.error) throw r.error;
+        return { status: r.status ?? 128, out: r.stdout.toString("latin1"), err: r.stderr.toString("latin1") };
+      });
+    },
   };
+  const sysPath = (p) => Buffer.from(p.length === 0 ? "." : p, "latin1").toString("utf8");
+  const fromSys = (s) => Buffer.from(s, "utf8").toString("latin1");
+  const byBytes = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
+  // What an operation gives, `#Ok`, or what went wrong as an `IoErr`.
+  function io(f) {
+    try {
+      const v = f();
+      return v === undefined ? { $tag: "Ok" } : { $tag: "Ok", $: v };
+    } catch (e) {
+      const tag = { ENOENT: "NotFound", ENOTDIR: "NotFound", EEXIST: "Exists", ENOTEMPTY: "NotEmpty" }[e.code] ?? "PermissionDenied";
+      return { $tag: "Err", $: { $tag: tag } };
+    }
+  }
   // The root `Io` operations are scheduling points. Sleeping waits for the virtual clock, which
   // passes only when no task can run.
   $b.Io_sleep$g = function* (d) {
@@ -940,7 +978,7 @@ const { $rt, $b } = (() => {
     else if (sched.on) yield* block(["until", clock + d.nanos]);
     else clock += d.nanos;
   };
-  for (const op of ["Io_now", "Io_write", "Io_read"]) {
+  for (const op of ["Io_now", "Io_write", "Io_read", "Io_stat", "Io_list", "Io_mkdir", "Io_remove", "Io_rename", "Io_env", "Io_cwd", "Io_wall", "Io_run"]) {
     const f = $b[op];
     $b[op + "$g"] = function* (...args) { yield* point(); return f(...args); };
   }

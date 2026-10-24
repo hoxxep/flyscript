@@ -36,6 +36,10 @@ fn world_for(source: &str) -> (World, Vec<String>) {
                 let (name, contents) = value.split_once('=').expect("file: name=contents");
                 world.files.insert(name.to_string(), unescape(contents));
             }
+            "env" => {
+                let (name, v) = value.split_once('=').expect("env: name=value");
+                world.env.insert(name.to_string(), v.to_string());
+            }
             "request" => world.incoming.push_back(unescape(value).into_bytes()),
             "peer" => {
                 let (peer, reply) = value.split_once('=').expect("peer: host:port=reply");

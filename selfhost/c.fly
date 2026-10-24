@@ -1699,11 +1699,46 @@ impl Cgen {
         const ok = self.tagId("Ok");
         `({ fly_slice b_ = ${vs[1]}; fly_point(); fly_out((fly_str){ b_.ptr, b_.len }); (${rc}){ .tag = ${ok}, .u.Ok = b_.len }; })`
       }
+      "wall" => `fly_io_wall()`,
+      "cwd" => `fly_io_cwd()`,
+      "env" => {
+        const some = self.tagId("Some");
+        const none = self.tagId("None");
+        `({ fly_String v_ = { 0 }; fly_io_env(${vs[0]}, &v_) ? (${rc}){ .tag = ${some}, .u.Some = v_ } : (${rc}){ .tag = ${none} }; })`
+      }
+      "stat" => {
+        const st = self.ctype(self.lw.payloadOf(c.ret, "Ok"), c.span);
+        self.ioResult(c, "uint64_t s_ = 0; bool d_ = 0; int64_t m_ = 0;", `fly_io_stat(${vs[0]}, &s_, &d_, &m_)`, `(${st}){ .size = s_, .dir = d_, .modified = m_ }`)
+      }
+      "list" => self.ioResult(c, "fly_vec v_ = { 0 };", `fly_io_list(${vs[0]}, &v_)`, "v_"),
+      "mkdir" => self.ioResult(c, "", `fly_io_mkdir(${vs[0]})`, ""),
+      "remove" => self.ioResult(c, "", `fly_io_remove(${vs[0]})`, ""),
+      "rename" => self.ioResult(c, "", `fly_io_rename(${vs[0]}, ${vs[1]})`, ""),
+      "run" => {
+        const o = self.ctype(self.lw.payloadOf(c.ret, "Ok"), c.span);
+        self.ioResult(c, "int32_t st_ = 0; fly_String so_ = { 0 }, se_ = { 0 };", `fly_io_run(${vs[0]}, ${vs[1]}, ${vs[2]}, &st_, &so_, &se_)`, `(${o}){ .status = st_, .out = so_, .err = se_ }`)
+      }
       _ => {
         const ok = self.tagId("Ok");
         `({ fly_point(); (${rc}){ .tag = ${ok}, .u.Ok = 0 }; })`
       }
     }
+  }
+
+  // A `Result<T, IoErr>` of a runtime call that gives 0 or the error's code (runtime.h): `ok` the
+  // `T`, or empty for a `void` one.
+  function ioResult(self: mut Self, c: readonly Call, decls: str, call: str, ok: str): String uses Fail<Diagnostic> {
+    const rc = self.ctype(c.ret, c.span);
+    const errTy = self.lw.payloadOf(c.ret, "Err");
+    const ec = self.ctype(errTy, c.span);
+    let tag = `${self.tagId("PermissionDenied")}`;
+    for (const [k, n] of [[1, "NotFound"], [3, "Exists"], [4, "NotEmpty"], [5, "Unsupported"]]) {
+      tag = `k_ == ${k} ? ${self.tagId(n)} : ${tag}`;
+    }
+    const okTag = self.tagId("Ok");
+    const errTag = self.tagId("Err");
+    const value = if (ok.len() == 0) { `(${rc}){ .tag = ${okTag} }` } else { `(${rc}){ .tag = ${okTag}, .u.Ok = ${ok} }` };
+    `({ ${decls} int k_ = ${call}; k_ ? (${rc}){ .tag = ${errTag}, .u.Err = (${ec}){ .tag = ${tag} } } : ${value}; })`
   }
 
   // A call of the library's regions: what places a value in one is given its arena.

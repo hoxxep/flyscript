@@ -1,0 +1,25 @@
+// env: GREETING=hello
+// skip: wasm
+// expect: hello none
+// expect: 0 hi there
+// expect: SHOUT
+// expect: 1
+// expect: #NotFound
+// expect: true
+// The process (std/process): its environment, and programs run to their end, given what they read.
+// WASI runs no programs, so not as WebAssembly.
+import { println } from "std/io";
+import { run, runWith, env, cwd } from "std/process";
+
+function show(v: Option<String>): String { match (v) { #Some(s) => s, #None => "none".toString() } }
+
+export function main(): void uses Io, Fail<IoErr> {
+  println(`${show(env("GREETING"))} ${show(env("FLY_NOT_SET_ANYWHERE"))}`);
+  const echo = run("echo", ["hi".toString(), "there".toString()]);
+  println(`${echo.status} ${echo.out.asStr().trimEnd()}`);
+  const up = runWith("tr", ["a-z".toString(), "A-Z".toString()], "shout");
+  println(up.out.asStr());
+  println(`${run("false", []).status}`);
+  try { run("fly-no-such-program", []); } catch (e) { println(`${e}`); }
+  println(`${cwd().len() > 0}`);
+}

@@ -939,7 +939,9 @@ impl Own {
     };
     if (!passesEscape && self.escaping) { return self.contained(e, how); }
     if (how != #Move && self.lendsTemporary(e)) {
-      const v = self.value(e, how);
+      // A temporary is a value of its own, which owns what it is made of: what a branch, an arm or
+      // a block gives into it is moved there, not read, or it would be dropped twice.
+      const v = self.value(e, if (self.madeOfParts(e)) { #Move } else { how });
       return self.temporary(e, v, how);
     }
     self.value(e, how)
@@ -947,6 +949,14 @@ impl Own {
 
   // Whether lending `e` lends a temporary: a value with no place of its own, not a borrow already
   // (§5.6).
+  // A construct whose value is what one of its parts gives: a block, a branch, an arm.
+  function madeOfParts(self: readonly Self, e: readonly Expr): bool {
+    match (e.kind) {
+      #Block(_) | #If { cond: _ } | #Match { scrutinee: _ } | #Try { body: _ } | #Unsafe(_) => true,
+      _ => false,
+    }
+  }
+
   function lendsTemporary(self: readonly Self, e: readonly Expr): bool {
     const fresh = match (e.kind) {
       #Ident(_) | #Field { target: _ } | #FieldAt { target: _ } | #TagAt { name: _ } | #Index { target: _ } | #BorrowMut(_)

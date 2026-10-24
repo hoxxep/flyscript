@@ -483,6 +483,45 @@ impl Interp {
                 Value::tag("Ok", Value::Tuple(vec![Value::Int(n as i128)].into()))
             }
             "read" => Value::tag("Ok", Value::Tuple(vec![Value::Int(0)].into())),
+            "wall" => Value::Int(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos() as i128)),
+            "cwd" => Value::text(&if w.real_fs { std::env::current_dir().map(|d| d.display().to_string()).unwrap_or_default() } else { "/".to_string() }),
+            "env" => {
+                let name = args.first().map(|a| a.as_text().to_string()).unwrap_or_default();
+                let found = w.env.get(&name).cloned().or_else(|| if w.real_fs { std::env::var(&name).ok() } else { None });
+                match found {
+                    Some(v) => Value::tag("Some", Value::Tuple(vec![Value::text(&v)].into())),
+                    None => Value::tag("None", Value::Unit),
+                }
+            }
+            "stat" | "list" | "mkdir" | "remove" | "rename" => {
+                let path = |i: usize| -> String {
+                    let p = args.get(i).map(|a| a.as_text().to_string()).unwrap_or_default();
+                    let p = p.trim_start_matches("./").trim_end_matches('/');
+                    if p == "." { String::new() } else { p.to_string() }
+                };
+                let result: Result<Value, &str> = if w.real_fs { real_fs(op, &path(0), &path(1)) } else { sim_fs(&mut w, op, &path(0), &path(1)) };
+                match result {
+                    Ok(v) => Value::tag("Ok", Value::Tuple(vec![v].into())),
+                    Err(e) => Value::tag("Err", Value::Tuple(vec![Value::tag(e, Value::Unit)].into())),
+                }
+            }
+            "run" => {
+                let program = args.first().map(|a| a.as_text().to_string()).unwrap_or_default();
+                let list: Vec<String> = match args.get(1).map(|a| a.deref()) {
+                    Some(Value::List(vs)) => vs.iter().map(|v| v.as_text().to_string()).collect(),
+                    _ => Vec::new(),
+                };
+                let input = args.get(2).map(|a| a.as_text().to_string()).unwrap_or_default();
+                // A simulated world has no programs of its own: the machine's run, as they would.
+                match run_program(&program, &list, &input) {
+                    Ok((status, out, err)) => Value::tag("Ok", Value::Tuple(vec![Value::Record([
+                        ("status".to_string(), Value::Int(status as i128)),
+                        ("out".to_string(), Value::text(&out)),
+                        ("err".to_string(), Value::text(&err)),
+                    ].into_iter().collect::<BTreeMap<_, _>>().into())].into())),
+                    Err(e) => Value::tag("Err", Value::Tuple(vec![Value::tag(e, Value::Unit)].into())),
+                }
+            }
             _ => Value::Unit,
         })
     }
@@ -1673,4 +1712,131 @@ fn is_range_index(e: &Expr) -> bool {
 /// it is.
 fn is_place(e: &Expr) -> bool {
     matches!(e.kind, ExprKind::Ident(_) | ExprKind::Field { .. } | ExprKind::Index { .. })
+}
+
+
+/// What is at a path, as `Io.stat` gives it.
+fn stat_value(size: u64, dir: bool, modified: i128) -> Value {
+    Value::Record([
+        ("size".to_string(), Value::Int(size as i128)),
+        ("dir".to_string(), Value::Bool(dir)),
+        ("modified".to_string(), Value::Int(modified)),
+    ].into_iter().collect::<BTreeMap<_, _>>().into())
+}
+
+fn io_err(e: &std::io::Error) -> &'static str {
+    use std::io::ErrorKind::*;
+    match e.kind() {
+        NotFound => "NotFound",
+        AlreadyExists => "Exists",
+        DirectoryNotEmpty => "NotEmpty",
+        PermissionDenied => "PermissionDenied",
+        _ => "PermissionDenied",
+    }
+}
+
+/// The file system's operations, on the machine's.
+fn real_fs(op: &str, a: &str, b: &str) -> Result<Value, &'static str> {
+    let a = if a.is_empty() { "." } else { a };
+    match op {
+        "stat" => {
+            let m = std::fs::metadata(a).map_err(|e| io_err(&e))?;
+            let modified = m.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_nanos() as i128);
+            Ok(stat_value(m.len(), m.is_dir(), modified))
+        }
+        "list" => {
+            let mut names: Vec<String> = std::fs::read_dir(a).map_err(|e| io_err(&e))?.filter_map(|e| e.ok()).map(|e| e.file_name().to_string_lossy().to_string()).collect();
+            names.sort();
+            Ok(Value::List(names.iter().map(|n| Value::text(n)).collect::<Vec<_>>().into()))
+        }
+        "mkdir" => std::fs::create_dir(a).map(|_| Value::Unit).map_err(|e| io_err(&e)),
+        "remove" => {
+            let m = std::fs::symlink_metadata(a).map_err(|e| io_err(&e))?;
+            if m.is_dir() { std::fs::remove_dir(a) } else { std::fs::remove_file(a) }.map(|_| Value::Unit).map_err(|e| io_err(&e))
+        }
+        _ => std::fs::rename(a, b).map(|_| Value::Unit).map_err(|e| io_err(&e)),
+    }
+}
+
+/// The same, on a simulated world's, which tests keep deterministic: what is there changed nothing.
+fn sim_fs(w: &mut crate::eval::World, op: &str, a: &str, b: &str) -> Result<Value, &'static str> {
+    match op {
+        "stat" => {
+            if let Some(f) = w.files.get(a) {
+                Ok(stat_value(f.len() as u64, false, 0))
+            } else if w.is_dir(a) {
+                Ok(stat_value(0, true, 0))
+            } else {
+                Err("NotFound")
+            }
+        }
+        "list" => {
+            if w.files.contains_key(a) || !w.is_dir(a) {
+                return Err("NotFound");
+            }
+            Ok(Value::List(w.entries(a).iter().map(|n| Value::text(n)).collect::<Vec<_>>().into()))
+        }
+        "mkdir" => {
+            if w.files.contains_key(a) || w.is_dir(a) {
+                return Err("Exists");
+            }
+            let parent = a.rsplit_once('/').map_or("", |(p, _)| p);
+            if !w.is_dir(parent) {
+                return Err("NotFound");
+            }
+            w.dirs.insert(a.to_string());
+            Ok(Value::Unit)
+        }
+        "remove" => {
+            if w.files.remove(a).is_some() {
+                return Ok(Value::Unit);
+            }
+            if !w.is_dir(a) || a.is_empty() {
+                return Err("NotFound");
+            }
+            if !w.entries(a).is_empty() {
+                return Err("NotEmpty");
+            }
+            w.dirs.remove(a);
+            Ok(Value::Unit)
+        }
+        _ => {
+            if let Some(content) = w.files.remove(a) {
+                w.files.insert(b.to_string(), content);
+                Ok(Value::Unit)
+            } else if w.is_dir(a) && !a.is_empty() {
+                let from = format!("{a}/");
+                let moved: Vec<(String, String)> = w.files.iter().filter(|(k, _)| k.starts_with(&from)).map(|(k, v)| (k.clone(), v.clone())).collect();
+                for (k, v) in moved {
+                    w.files.remove(&k);
+                    w.files.insert(format!("{b}/{}", &k[from.len()..]), v);
+                }
+                let dirs: Vec<String> = w.dirs.iter().filter(|d| *d == a || d.starts_with(&from)).cloned().collect();
+                for d in dirs {
+                    w.dirs.remove(&d);
+                    w.dirs.insert(if d == a { b.to_string() } else { format!("{b}/{}", &d[from.len()..]) });
+                }
+                Ok(Value::Unit)
+            } else {
+                Err("NotFound")
+            }
+        }
+    }
+}
+
+/// Runs a program of the machine's to its end, given what it reads.
+fn run_program(program: &str, args: &[String], input: &str) -> Result<(i32, String, String), &'static str> {
+    use std::io::Write;
+    let mut child = std::process::Command::new(program)
+        .args(args)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| io_err(&e))?;
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(input.as_bytes());
+    }
+    let out = child.wait_with_output().map_err(|e| io_err(&e))?;
+    Ok((out.status.code().unwrap_or(-1), String::from_utf8_lossy(&out.stdout).into_owned(), String::from_utf8_lossy(&out.stderr).into_owned()))
 }

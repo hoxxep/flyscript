@@ -1036,6 +1036,209 @@ _Noreturn void fly_exit(int32_t code) {
 }
 #endif
 
+#ifndef FLY_FREESTANDING
+// ---- the file system and the process, for `Io` ----
+
+#include <dirent.h>
+#include <errno.h>
+#include <sys/stat.h>
+#ifndef __wasm__
+#include <poll.h>
+#include <spawn.h>
+#include <sys/wait.h>
+extern char** environ;
+#endif
+
+static int io_errno(void) {
+  switch (errno) {
+    case ENOENT: case ENOTDIR: return 1;
+    case EEXIST: return 3;
+    case ENOTEMPTY: return 4;
+#ifdef ENOSYS
+    case ENOSYS: return 5;
+#endif
+#ifdef ENOTSUP
+    case ENOTSUP: return 5;
+#endif
+    default: return 2;
+  }
+}
+
+// A path as C has it, the working directory for an empty one; freed by the caller.
+static char* io_path(fly_str s) {
+  if (s.len == 0) s = (fly_str){ (const uint8_t*)".", 1 };
+  char* p = malloc(s.len + 1);
+  if (!p) fly_panic("out of memory");
+  memcpy(p, s.ptr, s.len);
+  p[s.len] = 0;
+  return p;
+}
+
+int fly_io_stat(fly_str path, uint64_t* size, bool* dir, int64_t* modified) {
+  fly_point();
+  char* p = io_path(path);
+  struct stat st;
+  int r = stat(p, &st);
+  free(p);
+  if (r != 0) return io_errno();
+  *size = (uint64_t)st.st_size;
+  *dir = S_ISDIR(st.st_mode);
+#ifdef __APPLE__
+  *modified = (int64_t)st.st_mtimespec.tv_sec * 1000000000 + st.st_mtimespec.tv_nsec;
+#else
+  *modified = (int64_t)st.st_mtim.tv_sec * 1000000000 + st.st_mtim.tv_nsec;
+#endif
+  return 0;
+}
+
+static int io_name_cmp(const void* a, const void* b) {
+  const fly_String* x = a;
+  const fly_String* y = b;
+  size_t n = x->len < y->len ? x->len : y->len;
+  int c = memcmp(x->ptr, y->ptr, n);
+  return c ? c : (x->len < y->len ? -1 : x->len > y->len);
+}
+
+int fly_io_list(fly_str path, fly_vec* names) {
+  fly_point();
+  char* p = io_path(path);
+  DIR* d = opendir(p);
+  free(p);
+  if (!d) return io_errno();
+  fly_vec v = { 0 };
+  struct dirent* e;
+  while ((e = readdir(d))) {
+    if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+    fly_String n = fly_String_from((fly_str){ (const uint8_t*)e->d_name, strlen(e->d_name) });
+    fly_vec_push(&v, &n, sizeof(fly_String));
+  }
+  closedir(d);
+  if (v.len) qsort(v.ptr, v.len, sizeof(fly_String), io_name_cmp);
+  *names = v;
+  return 0;
+}
+
+int fly_io_mkdir(fly_str path) {
+  fly_point();
+  char* p = io_path(path);
+  int r = mkdir(p, 0777);
+  free(p);
+  return r == 0 ? 0 : io_errno();
+}
+
+int fly_io_remove(fly_str path) {
+  fly_point();
+  char* p = io_path(path);
+  struct stat st;
+  int r = lstat(p, &st);
+  if (r == 0) r = S_ISDIR(st.st_mode) ? rmdir(p) : unlink(p);
+  int k = r == 0 ? 0 : io_errno();
+  free(p);
+  return k;
+}
+
+int fly_io_rename(fly_str from, fly_str to) {
+  fly_point();
+  char* a = io_path(from);
+  char* b = io_path(to);
+  int r = rename(a, b);
+  int k = r == 0 ? 0 : io_errno();
+  free(a);
+  free(b);
+  return k;
+}
+
+bool fly_io_env(fly_str name, fly_String* value) {
+  fly_point();
+  char* n = io_path(name);
+  const char* v = getenv(n);
+  free(n);
+  if (!v) return false;
+  *value = fly_String_from((fly_str){ (const uint8_t*)v, strlen(v) });
+  return true;
+}
+
+fly_String fly_io_cwd(void) {
+  fly_point();
+  char buf[4096];
+  if (!getcwd(buf, sizeof buf)) return fly_String_from(fly_str_lit("/", 1));
+  return fly_String_from((fly_str){ (const uint8_t*)buf, strlen(buf) });
+}
+
+int64_t fly_io_wall(void) {
+  fly_point();
+  struct timespec t;
+  clock_gettime(CLOCK_REALTIME, &t);
+  return (int64_t)t.tv_sec * 1000000000 + t.tv_nsec;
+}
+
+int fly_io_run(fly_str program, fly_slice args, fly_str input, int32_t* status, fly_String* out, fly_String* err) {
+  fly_point();
+#ifdef __wasm__
+  (void)program; (void)args; (void)input; (void)status; (void)out; (void)err;
+  return 5;
+#else
+  int in[2], o[2], e[2];
+  if (pipe(in) || pipe(o) || pipe(e)) return io_errno();
+  char** argv = malloc((args.len + 2) * sizeof(char*));
+  argv[0] = io_path(program);
+  for (size_t i = 0; i < args.len; i++) argv[i + 1] = io_path(fly_String_as_str(&((fly_String*)args.ptr)[i]));
+  argv[args.len + 1] = NULL;
+  posix_spawn_file_actions_t fa;
+  posix_spawn_file_actions_init(&fa);
+  posix_spawn_file_actions_adddup2(&fa, in[0], 0);
+  posix_spawn_file_actions_adddup2(&fa, o[1], 1);
+  posix_spawn_file_actions_adddup2(&fa, e[1], 2);
+  int fds[6] = { in[0], in[1], o[0], o[1], e[0], e[1] };
+  for (int i = 0; i < 6; i++) posix_spawn_file_actions_addclose(&fa, fds[i]);
+  pid_t pid;
+  int r = posix_spawnp(&pid, argv[0], &fa, NULL, argv, environ);
+  posix_spawn_file_actions_destroy(&fa);
+  for (size_t i = 0; i < args.len + 1; i++) free(argv[i]);
+  free(argv);
+  close(in[0]);
+  close(o[1]);
+  close(e[1]);
+  if (r != 0) {
+    close(in[1]);
+    close(o[0]);
+    close(e[0]);
+    errno = r;
+    return io_errno();
+  }
+  // What it reads, given while what it writes is taken, so that neither side waits on the other.
+  fly_String so = fly_String_new(), se = fly_String_new();
+  size_t given = 0;
+  if (input.len == 0) { close(in[1]); in[1] = -1; }
+  int open = 2;
+  while (open > 0) {
+    struct pollfd ps[3] = { { o[0], POLLIN, 0 }, { e[0], POLLIN, 0 }, { in[1], POLLOUT, 0 } };
+    int n = in[1] >= 0 ? 3 : 2;
+    if (poll(ps, (nfds_t)n, -1) < 0) { if (errno == EINTR) continue; break; }
+    for (int i = 0; i < 2; i++) {
+      if (ps[i].fd < 0 || !(ps[i].revents & (POLLIN | POLLHUP | POLLERR))) continue;
+      uint8_t buf[4096];
+      ssize_t k = read(ps[i].fd, buf, sizeof buf);
+      if (k > 0) fly_String_push(i == 0 ? &so : &se, (fly_str){ buf, (size_t)k });
+      else { close(ps[i].fd); if (i == 0) o[0] = -1; else e[0] = -1; open--; }
+    }
+    if (n == 3 && (ps[2].revents & (POLLOUT | POLLHUP | POLLERR))) {
+      ssize_t k = (ps[2].revents & POLLOUT) ? write(in[1], input.ptr + given, input.len - given) : -1;
+      if (k > 0) given += (size_t)k;
+      if (k <= 0 || given == input.len) { close(in[1]); in[1] = -1; }
+    }
+  }
+  if (in[1] >= 0) close(in[1]);
+  int ws = 0;
+  while (waitpid(pid, &ws, 0) < 0 && errno == EINTR) {}
+  *status = WIFEXITED(ws) ? WEXITSTATUS(ws) : 128 + (WIFSIGNALED(ws) ? WTERMSIG(ws) : 0);
+  *out = so;
+  *err = se;
+  return 0;
+#endif
+}
+#endif
+
 static bool space(uint8_t c) { return c == ' ' || c == '\t' || c == '\n' || c == '\r'; }
 
 // As the reference's `lines()`: split at `\n`, a last empty line dropped, a `\r` before `\n` too.

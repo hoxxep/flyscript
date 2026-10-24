@@ -330,7 +330,27 @@ export effect Io {
   sleep(d: Duration): void;
   // The primitive under locks, channels and `join`.
   park(on: WaitKey): void;
+  // The file system (std/fs): what is at a path, a directory's entries, in order, and changing them.
+  stat(path: str): Result<Stat, IoErr>;
+  list(path: str): Result<Vec<String>, IoErr>;
+  mkdir(path: str): Result<void, IoErr>;
+  remove(path: str): Result<void, IoErr>;
+  rename(from: str, to: str): Result<void, IoErr>;
+  // The process (std/process): a variable of its environment, its working directory, and running
+  // another program to its end, given what it reads and giving what it wrote.
+  env(name: str): Option<String>;
+  cwd(): String;
+  run(program: str, args: readonly String[], input: str): Result<Output, IoErr>;
+  // The time of day: nanoseconds since 1970 began, in UTC.
+  wall(): i64;
 }
+
+// What is at a path: its size in bytes, whether it is a directory, and when it last changed, in
+// nanoseconds since 1970 began.
+export type Stat = { size: u64; dir: bool; modified: i64 };
+// What a program that was run did: the status it ended with, and what it wrote to its standard
+// output and its standard error.
+export type Output = { status: i32; out: String; err: String };
 
 // ---- Floats: the arithmetic of the C library's <math.h>, and fixed-point text ----
 impl f64 {
@@ -413,7 +433,9 @@ impl Ord for Instant;
 // A file descriptor, and what a parked task waits on: handles the runtime gives out.
 export struct Fd { private n: u32 }
 export struct WaitKey { private n: u64 }
-export type IoErr = #Reset | #TimedOut | #BrokenPipe | #NotFound | #PermissionDenied | #AddrInUse | #Refused;
+// What can go wrong with I/O. `#Exists`: a path that is already there; `#NotEmpty`: a directory
+// removed with entries in it; `#Unsupported`: what the host cannot do, as a page cannot run programs.
+export type IoErr = #Reset | #TimedOut | #BrokenPipe | #NotFound | #PermissionDenied | #AddrInUse | #Refused | #Exists | #NotEmpty | #Unsupported;
 
 impl<E> Fail<E> {
   export function capture<T, row R>(body: once () => T uses Fail<E>, ...R): Result<T, E> uses ...R;

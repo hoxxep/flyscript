@@ -1,0 +1,20 @@
+// The process (std.md): its environment, its working directory, and running other programs. Each
+// is an operation of `Io`, which a program, or a test, may handle itself.
+
+// A variable of the process's environment.
+export function env(name: str): Option<String> uses Io { Io.env(name) }
+
+// The working directory, as an absolute path.
+export function cwd(): String uses Io { Io.cwd() }
+
+// Runs `program`, found as the system finds programs, with `args`, to its end, reading nothing; what
+// it ended with and what it wrote. `#NotFound` if there is no such program, `#Unsupported` where
+// the host runs none.
+export function run(program: str, args: readonly String[]): Output uses Io, Fail<IoErr> {
+  runWith(program, args, "")
+}
+
+// The same, the program given `input` to read.
+export function runWith(program: str, args: readonly String[], input: str): Output uses Io, Fail<IoErr> {
+  match (Io.run(program, args, input)) { #Ok(o) => o, #Err(e) => throw e }
+}

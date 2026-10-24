@@ -1,0 +1,36 @@
+// expect: false true
+// expect: ["a", "b.txt", "c"]
+// expect: 5 false
+// expect: true
+// expect: w/a/x.md w/b.txt w/c/d/e.txt
+// expect: #NotEmpty
+// expect: ["b.txt", "c", "z"]
+// expect: false
+// expect: w/c/d c txt
+// expect: lib/fs.fly lib
+// The file system (std/fs): directories made, listed, walked, renamed and removed.
+import { println, writeFile } from "std/io";
+import { createDir, createDirAll, listDir, exists, isDir, stat, remove, removeAll, rename, walk, join, parent, fileName, extension } from "std/fs";
+
+export function main(): void uses Io, Fail<IoErr> {
+  println(`${exists("w")} ${exists(".")}`);
+  createDirAll("w/a");
+  createDirAll("w/c/d");
+  writeFile("w/b.txt", "hello");
+  writeFile("w/a/x.md", "# x");
+  writeFile("w/c/d/e.txt", "e");
+  println(`${listDir("w")}`);
+  const s = stat("w/b.txt");
+  println(`${s.size} ${s.dir}`);
+  println(`${isDir("w/c")}`);
+  let found: Vec<String> = Vec.new();
+  for (const f of walk("w")) { found.push(f); }
+  println(found.join(" "));
+  try { remove("w/c"); } catch (e) { println(`${e}`); }
+  rename("w/a", "w/z");
+  println(`${listDir("w")}`);
+  removeAll("w");
+  println(`${exists("w")}`);
+  println(`${parent("w/c/d/e.txt")} ${fileName("w/c/")} ${match (extension("e.txt")) { #Some(x) => x, #None => "".toString() }}`);
+  println(`${join("lib", "fs.fly")} ${parent("lib/fs.fly")}`);
+}

@@ -86,6 +86,8 @@ Every integer type has `wrappingAdd`, `wrappingSub` and `wrappingMul`, which wra
 
 `Fd` names a file or socket to `Io.read` and `Io.write`, and `WaitKey` names what `Io.park` waits for (spec §5.1). Their fields are private: library code makes and uses them, and programs use the library.
 
+`Io`'s other operations are the host's file system, process and clock, on which `std/fs` and `std/process` are built: `stat(path)`, `list(path)`, `mkdir(path)`, `remove(path)`, `rename(from, to)`, `env(name)`, `cwd()`, `run(program, args, input)` and `wall()`. A program, or a test, may handle any of them itself, as it may `Io`'s others: `handle { … } with Io { stat(p) resumes k => k(#Ok(fake)) }` answers `stat` and passes every other operation on. Each is a scheduling point. `Stat` is what is at a path: `size` in bytes, `dir`, and `modified`, in nanoseconds since 1970 began. `Output` is what a program that was run did: its exit `status`, and what it wrote to standard output, `out`, and standard error, `err`. `IoErr` is what can go wrong: `#Reset`, `#TimedOut`, `#BrokenPipe`, `#NotFound`, `#PermissionDenied`, `#AddrInUse`, `#Refused`, `#Exists` (something is already at a path), `#NotEmpty` (a directory removed with entries in it) and `#Unsupported` (what the host cannot do: WebAssembly runs no programs).
+
 ### 1.9 Iteration
 
 `Gen<T, row E>` is a pull iterator over what a generator yields (spec §5.5). `generate(producer)` makes one; nothing runs until the first `next()`.
@@ -205,7 +207,38 @@ Against a simulated world, files are the world's (spec §6.4).
 
 ---
 
-## 5. `std/net`
+## 5. `std/fs`
+
+The file system, over `Io`'s operations. Paths are text with `/` between their parts; a relative one is from the working directory. Against a simulated world the file system is the world's, files and the directories made, so a test needs no directory of its own (spec §6.4).
+
+| Function | Contract |
+| :--- | :--- |
+| `stat(path): Stat` | What is at `path`: `#NotFound`. |
+| `exists(path): bool`, `isDir(path): bool` | Whether anything, or a directory, is at `path`. |
+| `listDir(path): Vec<String>` | A directory's entries, their names alone, in the order of their bytes: `#NotFound` if it is not a directory. |
+| `createDir(path)` | A directory, whose parent is there: `#Exists`, `#NotFound`. |
+| `createDirAll(path)` | A directory, and each directory above it that is not there. |
+| `remove(path)` | A file, or a directory with nothing in it: `#NotEmpty`, `#NotFound`. |
+| `removeAll(path)` | A file, or a directory and everything in it. |
+| `rename(from, to)` | Moves a file or a directory to another path, replacing a file there. |
+| `walk(root)` | A generator of the files under `root`, depth first, each directory's entries in order: each its path from `root`, which is part of it. |
+| `join(a, b): String` | `b` after `a`, one `/` between them; `b` itself if it is absolute. |
+| `parent(path): String` | All but the last part, `"/"` for a part of the root, `""` for one part. |
+| `fileName(path): String` | The last part, a trailing `/` ignored. |
+| `extension(path): Option<String>` | What follows the last `.` of the last part, unless that part starts with it. |
+
+## 6. `std/process`
+
+| Function | Contract |
+| :--- | :--- |
+| `env(name): Option<String>` | A variable of the process's environment; against a simulated world, the world's. |
+| `cwd(): String` | The working directory, an absolute path. |
+| `run(program, args): Output` | Runs `program`, found as the system finds programs, with `args`, to its end, reading nothing: `#NotFound` if there is no such program, `#Unsupported` where the host runs none. A simulated world has no programs of its own, and runs the machine's. |
+| `runWith(program, args, input): Output` | The same, the program given `input` to read; what it writes is taken as it writes it, so neither side waits on the other. |
+
+---
+
+## 7. `std/net`
 
 TCP. Every operation that waits for the network performs `Io` and is a scheduling point; a task waiting for a socket gives its core to others until the kernel says the socket is ready.
 
@@ -231,7 +264,7 @@ Against a simulated world, a listener's connections are the world's requests, a 
 
 ---
 
-## 6. `std/par`
+## 8. `std/par`
 
 Data parallelism over pure closures (spec §6.5).
 
@@ -242,19 +275,19 @@ Data parallelism over pure closures (spec §6.5).
 
 ---
 
-## 7. `std/layout`
+## 9. `std/layout`
 
 `Soa<T>` keeps a struct's fields in planes, one for each field: a `Vec` for a scalar field and a nested `Soa` for a struct field (spec §7.4). It has `Soa.new()`, `push(v)`, `len()`, `at(i)`, a `SoaView` that lends each field of one element, and `splitAt(at)`; `SoaSlice`, `SoaView` and `SoaRead` are its `ParSplit` views.
 
 ---
 
-## 8. `std/region`
+## 10. `std/region`
 
 Mutable slots in a region (spec §4.6). `Cell<R, T extends Copy>`: `Cell.new(v)`, `c.get()`, `c.set(v)`. `RegionList<R, T>`: `RegionList.new()`, `push(v)`, `len()`, and iteration. Both are handles, `Copy`; reading and writing through one performs `Region<R>`.
 
 ---
 
-## 9. `std/json`
+## 11. `std/json`
 
 JSON as library code (spec §7.5).
 
@@ -265,12 +298,12 @@ JSON as library code (spec §7.5).
 
 ---
 
-## 10. `std/world`
+## 12. `std/world`
 
 Services only a simulated world provides (spec §6.4), for examples and tests: `Db.connect(): Db`; `db.fetchProfile(user): Profile`, where a `Profile` is `{ displayName: String }`, failing with `#NotFound` for a user the world does not know; and `db.checkQuota(token): Quota`, where a `Quota` is `{ allowed: bool }`. Each performs `Io` and may fail as the world's faults say.
 
 ---
 
-## 11. The web framework
+## 13. The web framework
 
 The web framework, FlyNext, is a package shipped with the compiler and specified in [web/README.md](../web/README.md): `web/http` (requests, responses and `serve`), `web/ui` (the `Ui<M>` effect, links, components and HTML), `web/dom` (pages in the browser), `web/router` (routes and their parameters) and `web/site` (pages and files answered), with the app compiler `web/flynext`.

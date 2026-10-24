@@ -20,6 +20,10 @@ pub struct Socket {
 pub struct World {
     pub out: Vec<String>,
     pub files: HashMap<String, String>,
+    /// The directories made, beside those the files' paths imply.
+    pub dirs: std::collections::BTreeSet<String>,
+    /// The process's environment.
+    pub env: HashMap<String, String>,
     /// Requests waiting to be accepted, each becoming a socket.
     pub incoming: VecDeque<Vec<u8>>,
     /// The hosts a program may connect to, `host:port`, each with what it sends back.
@@ -50,6 +54,8 @@ impl World {
         World {
             out: Vec::new(),
             files: HashMap::new(),
+            dirs: std::collections::BTreeSet::new(),
+            env: HashMap::new(),
             incoming: VecDeque::new(),
             peers: HashMap::new(),
             sockets: Vec::new(),
@@ -69,6 +75,28 @@ impl World {
         self.rng ^= self.rng >> 7;
         self.rng ^= self.rng << 17;
         self.rng % 100 < self.fault_percent
+    }
+
+    /// Whether `path` is a directory of the simulated file system: the working directory, one made,
+    /// or one a file's path passes through.
+    pub fn is_dir(&self, path: &str) -> bool {
+        path.is_empty() || self.dirs.contains(path) || self.files.keys().any(|f| f.starts_with(&format!("{path}/"))) || self.dirs.iter().any(|d| d.starts_with(&format!("{path}/")))
+    }
+
+    /// The entries of a directory of the simulated file system, in order.
+    pub fn entries(&self, path: &str) -> Vec<String> {
+        let prefix = if path.is_empty() { String::new() } else { format!("{path}/") };
+        let mut names: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        for p in self.files.keys().chain(self.dirs.iter()) {
+            if let Some(rest) = p.strip_prefix(&prefix) {
+                if let Some(first) = rest.split('/').next() {
+                    if !first.is_empty() {
+                        names.insert(first.to_string());
+                    }
+                }
+            }
+        }
+        names.into_iter().collect()
     }
 
     pub fn open_socket(&mut self, input: Vec<u8>) -> u64 {

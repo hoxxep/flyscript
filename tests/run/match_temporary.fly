@@ -1,0 +1,20 @@
+// expect: txt
+// expect: a b
+// A `match` or an `if` made a temporary, as a template shows it: what it gives is moved
+// into it, so it is dropped once.
+import { println } from "std/io";
+
+function ext(name: String): Option<String> {
+  match (name.lastIndexOf(".")) {
+    #Some(i) if i > 0 => #Some(name.slice(i + 1, name.len()).toString()),
+    _ => #None,
+  }
+}
+
+export function main(): void uses Io {
+  const o = ext("e.txt".toString());
+  println(`${match (o) { #Some(x) => x, #None => "".toString() }}`);
+  const s = "a".toString();
+  const t = "b".toString();
+  println(`${if (s.len() > 0) { s } else { "".toString() }} ${match (t.len()) { 1 => t, _ => "".toString() }}`);
+}

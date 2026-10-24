@@ -2,6 +2,6 @@
 import { Socket } from "std/net";
 export function send(s: mut Socket): u16 uses Io {
   try { s.writeStatus(200, "ok"); 200 } catch (e) {
-    match (e) { #TimedOut => 504, #BrokenPipe | #NotFound | #PermissionDenied | #AddrInUse | #Refused => 502 }
+    match (e) { #TimedOut => 504, #BrokenPipe | #NotFound | #PermissionDenied | #AddrInUse | #Refused | #Exists | #NotEmpty | #Unsupported => 502 }
   }
 }
