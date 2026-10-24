@@ -1,0 +1,188 @@
+// Files and the standard streams (std.md), over `Io`'s descriptors: what is read is read ahead
+// into a buffer, what is written goes to the descriptor as it is written, unless through a
+// `Writer`, which gathers it until it is flushed.
+
+// A file open for reading or for writing.
+export struct File {
+  private fd: Fd;
+  private open: bool;
+  // What has been read ahead and not yet given out: `buf[at..end]`.
+  private buf: Vec<u8>;
+  private at: usize;
+  private end: usize;
+  // Whether a read found the end.
+  private done: bool;
+}
+
+const AHEAD: usize = 65536;
+
+// A file dropped open is let go of; closing it, which may fail, is `close`.
+impl Drop for File {
+  function drop(self: mut Self): void { if (self.open) { self.fd.release(); } }
+}
+
+function made(fd: Fd): File { File { fd, open: true, buf: Vec.new(), at: 0, end: 0, done: false } }
+
+function opened(path: str, mode: u8): File uses Io, Fail<IoErr> {
+  match (Io.open(path, mode)) { #Ok(fd) => made(fd), #Err(e) => throw e }
+}
+
+impl File {
+  // The file at `path`, to read: `#NotFound` if there is none.
+  export function open(path: str): File uses Io, Fail<IoErr> { opened(path, 0) }
+  // The file at `path`, made empty, or made, to write.
+  export function create(path: str): File uses Io, Fail<IoErr> { opened(path, 1) }
+  // The file at `path`, made if it is not there, to write at its end.
+  export function append(path: str): File uses Io, Fail<IoErr> { opened(path, 2) }
+  // The program's standard input.
+  export function stdin(): File { made(Fd.stdin()) }
+
+  // Whether more can be read: fills the buffer if it is empty, false at the end.
+  function fill(self: mut Self): bool uses Io, Fail<IoErr> {
+    if (self.at < self.end) { return true; }
+    if (self.done || !self.open) { return false; }
+    if (self.buf.len() < AHEAD) {
+      const zeros: u8[4096] = repeat(0 as u8);
+      while (self.buf.len() < AHEAD) { self.buf.extend(zeros); }
+    }
+    const n = match (Io.read(self.fd, mut self.buf)) { #Ok(n) => n, #Err(e) => throw e };
+    self.at = 0;
+    self.end = n;
+    if (n == 0) { self.done = true; }
+    n > 0
+  }
+
+  // Reads what is there, at most `into.len()` bytes, waiting for at least one: how many, `0` at the end.
+  export function read(self: mut Self, into: mut u8[]): usize uses Io, Fail<IoErr> {
+    if (into.len() == 0 || !self.fill()) { return 0; }
+    const n = if (self.end - self.at < into.len()) { self.end - self.at } else { into.len() };
+    into[0..n].copyFrom(self.buf[self.at..self.at + n]);
+    self.at += n;
+    n
+  }
+
+  // The next line, without its `\n` or `\r\n`; `#None` at the end. A last line with nothing after
+  // its `\n` is not one.
+  export function readLine(self: mut Self): Option<String> uses Io, Fail<IoErr> {
+    let line: Vec<u8> = Vec.new();
+    let any = false;
+    while (self.fill()) {
+      any = true;
+      let k = self.at;
+      while (k < self.end && self.buf[k] != 10) { k += 1; }
+      line.extend(self.buf[self.at..k]);
+      if (k < self.end) {
+        self.at = k + 1;
+        if (line.len() > 0 && line[line.len() - 1] == 13) { line.pop(); }
+        return #Some(text(line));
+      }
+      self.at = k;
+    }
+    if (any && line.len() > 0) { #Some(text(line)) } else { #None }
+  }
+
+  // Each line in turn, as `readLine` reads them.
+  export function lines(self: mut Self): void uses Io, Fail<IoErr>, Yield<String> {
+    while (const #Some(l) = self.readLine()) { yield l; }
+  }
+
+  // The rest of the file, as bytes.
+  export function readBytes(self: mut Self): Vec<u8> uses Io, Fail<IoErr> {
+    let out: Vec<u8> = Vec.new();
+    while (self.fill()) {
+      out.extend(self.buf[self.at..self.end]);
+      self.at = self.end;
+    }
+    out
+  }
+
+  // The rest of the file, as text: each byte that begins no UTF-8 sequence as U+FFFD.
+  export function readText(self: mut Self): String uses Io, Fail<IoErr> { text(self.readBytes()) }
+
+  // Writes all of `bytes`.
+  export function write(self: mut Self, bytes: readonly u8[]): void uses Io, Fail<IoErr> {
+    let done: usize = 0;
+    while (done < bytes.len()) {
+      match (Io.write(self.fd, bytes[done..bytes.len()])) {
+        #Ok(n) => { done += n; }
+        #Err(e) => throw e,
+      }
+    }
+  }
+
+  export function writeText(self: mut Self, s: str): void uses Io, Fail<IoErr> { self.write(s.asBytes()); }
+
+  // Closes the file; closing it again does nothing.
+  export function close(self: mut Self): void uses Io {
+    if (self.open) {
+      self.open = false;
+      Io.close(self.fd);
+    }
+  }
+}
+
+// Writes that gather in a buffer and go to their file a buffer at a time. Flush it, or close it,
+// to be sure what was written is there: what it holds when it is dropped is lost, as a destructor
+// performs nothing.
+export struct Writer {
+  private file: File;
+  private buf: Vec<u8>;
+}
+
+impl Writer {
+  // A writer to `file`, which it owns.
+  export function new(file: File): Writer { Writer { file, buf: Vec.new() } }
+  // A writer to the program's standard output.
+  export function stdout(): Writer { Writer { file: made(Fd.stdout()), buf: Vec.new() } }
+
+  export function write(self: mut Self, bytes: readonly u8[]): void uses Io, Fail<IoErr> {
+    self.buf.extend(bytes);
+    if (self.buf.len() >= AHEAD) { self.flush(); }
+  }
+
+  export function writeText(self: mut Self, s: str): void uses Io, Fail<IoErr> { self.write(s.asBytes()); }
+
+  // `s` and a line break.
+  export function writeLine(self: mut Self, s: str): void uses Io, Fail<IoErr> {
+    self.write(s.asBytes());
+    self.buf.push(10);
+    if (self.buf.len() >= AHEAD) { self.flush(); }
+  }
+
+  // Writes what it holds to its file.
+  export function flush(self: mut Self): void uses Io, Fail<IoErr> {
+    if (self.buf.len() == 0) { return; }
+    self.file.write(self.buf);
+    self.buf.truncate(0);
+  }
+
+  // Flushes it, then closes its file.
+  export function close(self: mut Self): void uses Io, Fail<IoErr> {
+    self.flush();
+    self.file.close();
+  }
+}
+
+// The whole file at `path`, as text.
+export function readFile(path: str): String uses Io, Fail<IoErr> {
+  let f = File.open(path);
+  const t = f.readText();
+  f.close();
+  t
+}
+
+// Writes `content` to the file at `path`, replacing what was there.
+export function writeFile(path: str, content: str): void uses Io, Fail<IoErr> {
+  let f = File.create(path);
+  f.writeText(content);
+  f.close();
+}
+
+function text(b: Vec<u8>): String { String.fromUtf8Lossy(b) }
+
+// A line to standard output; on threads, each line is written whole.
+export function println(s: str): void uses Io;
+// A line to standard error, which is not buffered.
+export function eprintln(s: str): void uses Io;
+// Ends the program at once, with `code` its exit status: no cleanup runs, as for a panic.
+export function exit(code: i32): never uses Io;

@@ -810,7 +810,7 @@ impl Lower {
       #Ident(n) => self.ident(n.asStr(), e),
       #Field { target: _, name: _ } | #Index { target: _, index: _ } => {
         if (const #Index { target: _, index } = e.kind) {
-          if (const #Range { lo: _, hi: _ } = index.kind) { return self.sliceOf(e); }
+          if (const #Range { lo: _, hi: _ } = index.kind) { return self.sliceOf(e, false); }
         }
         const t = self.exprTy(e.id);
         // A part that holds a borrow gives it; a part lent gives a borrow of it.
@@ -1082,6 +1082,12 @@ impl Lower {
         },
         _ => {}
       }
+      // A range of a list lent `mut` is a view through which what is written lands in the list.
+      if (isMutBorrowTy(want)) {
+        if (const #Index { target: _, index } = e.kind) {
+          if (const #Range { lo: _, hi: _ } = index.kind) { return self.sliceOf(e, true); }
+        }
+      }
       // A view lent `mut` is passed on as it is lent.
       if (isMutBorrowTy(want) && isMutBorrowTy(have)) { return self.ex(e); }
       return self.valueOf(e);
@@ -1136,6 +1142,7 @@ impl Lower {
   function borrow(self: mut Self, e: readonly Expr, m: bool): Operand uses Fail<Diagnostic> {
     match (e.kind) {
       #BorrowMut(x) => return self.borrow(x, m),
+      #Index { target: _, index } if m => { if (const #Range { lo: _, hi: _ } = index.kind) { return self.sliceOf(e, true); } }
       _ => {}
     }
     const t = self.exprTy(e.id);
@@ -1268,8 +1275,9 @@ impl Lower {
     self.throughBoxes(p, t, #Error)
   }
 
-  // `s[lo..hi]`: a `str` or a slice of part of what `s` holds.
-  function sliceOf(self: mut Self, e: readonly Expr): Operand uses Fail<Diagnostic> {
+  // `s[lo..hi]`: a `str` or a slice of part of what `s` holds; `mutable`, one lent `mut`, through
+  // which what is written lands in what `s` holds, however a back end represents slices.
+  function sliceOf(self: mut Self, e: readonly Expr, mutable: bool): Operand uses Fail<Diagnostic> {
     const [target, lo, hi]: [Expr, Option<Box<Expr>>, Option<Box<Expr>>] = match (e.kind) {
       #Index { target, index } => match (index.kind) {
         #Range { lo, hi } => [target.get().clone(), lo.clone(), hi.clone()],
@@ -1295,7 +1303,8 @@ impl Lower {
     const fixed = self.settle([[l, usize.clone(), atL], [h0, usize.clone(), self.mark()]]);
     const l2 = fixed[0].clone();
     const h = fixed[1].clone();
-    self.builtinCall(if (isStr) { "str_slice" } else { "slice_range" }, [s, l2, h], [rt.clone(), usize.clone(), usize], rt, false, e.span)
+    const key = if (isStr) { "str_slice" } else if (mutable) { "slice_rangeMut" } else { "slice_range" };
+    self.builtinCall(key, [s, l2, h], [rt.clone(), usize.clone(), usize], rt, false, e.span)
   }
 
   // ---- operators ----
@@ -2521,15 +2530,9 @@ impl Lower {
     if (args.len() > 0) { return false; }
     const target: Expr = match (callee.kind) { #Field { target, name: _ } => target.get().clone(), _ => return false };
     const k = match (self.builtinOf(iter)) { #Some(k) => k, #None => return false };
-    if (k != "str_lines" && k != "str_splitWhitespace" && k != "str_bytes" && k != "File_lines") { return false; }
+    if (k != "str_lines" && k != "str_splitWhitespace" && k != "str_bytes") { return false; }
     const str: Ty = #Prim(#Str);
-    // A file's lines are its text's, each its own `String`.
-    const s = if (k == "File_lines") {
-      const fp = self.place(target);
-      const ft = stripBorrow(self.exprTy(target.id));
-      const fb = self.value(#Borrow(false, fp), #Borrow(false, Box.new(ft.clone())));
-      self.builtinCall("File_text", [fb], [#Borrow(false, Box.new(ft))], str.clone(), false, iter.span)
-    } else { self.exAs(target, str) };
+    const s = self.exAs(target, str);
     const rest = self.temp(str.clone());
     self.emit(#Let(rest, #Use(s)));
     if (k == "str_bytes") {
@@ -2544,18 +2547,7 @@ impl Lower {
     const rp: Operand = #Copy(localPlace(rest));
     const ot = optionTy(str.clone());
     const o = self.builtinCall(if (k == "str_splitWhitespace") { "str_nextWord" } else { "str_nextLine" }, [rp], [rb], ot.clone(), false, iter.span);
-    if (k == "File_lines") {
-      const ol = self.temp(ot.clone());
-      self.emit(#Let(ol, #Use(o)));
-      const some = self.value(#IsTag(localPlace(ol), "Some".toString()), #Prim(#Bool));
-      self.exitUnless(some, l);
-      const x = extend(localPlace(ol), #Payload("Some".toString()), str.clone());
-      const st = self.stringTy();
-      const line = self.builtinCall("str_toString", [#Copy(x)], [str.clone()], st.clone(), false, iter.span);
-      self.iteration(pat, st, line, body);
-    } else {
-      self.nextItem(l, pat, o, ot, str, body);
-    }
+    self.nextItem(l, pat, o, ot, str, body);
     const loopBody = self.pop();
     self.loops.pop();
     self.emit(#Loop(l, loopBody, emptyBlock()));
@@ -2643,6 +2635,42 @@ impl Lower {
     }
   }
 
+  // The type a method's impl is for, by its definition.
+  function implTarget(self: readonly Self, f: usize): Option<usize> {
+    match (self.p.fns[f].implId) {
+      #Some(i) => match (self.p.impls[i].target) { #Named(d, _) => #Some(d), _ => #None },
+      #None => #None,
+    }
+  }
+
+  // `for` over a channel's messages, `rx.each()`: a loop that asks its receiver for the next, by its
+  // `recv`, until there is none.
+  function forReceiver(self: mut Self, l: usize, pat: readonly Pattern, rx: readonly Expr, each: usize, cargs: Vec<GArg>, itemTy: Ty, body: readonly AstBlock, span: Span): bool uses Fail<Diagnostic> {
+    // `each` is `Iterable`'s, implemented for the receiver; `recv` its own, of another impl.
+    const want = self.implTarget(each);
+    let recv: Option<usize> = #None;
+    if (const #Some(fs) = self.p.methods.get("recv")) {
+      for (const f of fs) { if (want.isSome() && self.implTarget(f) == want) { recv = #Some(f); } }
+    }
+    const rf = match (recv) { #Some(f) => f, #None => return self.unsupported(span, "iterating a channel without its `recv`") };
+    const ptys = self.paramTys(rf, cargs);
+    const r = self.exAs(rx, ptys[0].clone());
+    const row = substEffs(self.fnEffects(rf), substMap(self.p.fns[rf].scheme.tparams, cargs));
+    const ot = optionTy(itemTy.clone());
+    self.loops.push({ label: l });
+    self.push();
+    const c: Call = {
+      callee: #Builtin("Receiver_recv".toString()), args: [r], params: ptys.clone(), argTys: ptys, ret: ot.clone(), regions: Vec.new(),
+      fails: false, suspends: self.suspends(row), yields: false, row, targs: Vec.new(), span,
+    };
+    const o = self.value(#Call(c), ot.clone());
+    self.nextItem(l, pat, o, ot, itemTy, body);
+    const loopBody = self.pop();
+    self.loops.pop();
+    self.emit(#Loop(l, loopBody, emptyBlock()));
+    true
+  }
+
   // `for` over a call of a generator function, or a value whose `Iterable.each` is one: the body is
   // given each item the generator yields.
   function forGen(self: mut Self, l: usize, pat: readonly Pattern, iter: readonly Expr, body: readonly AstBlock): bool uses Fail<Diagnostic> {
@@ -2677,6 +2705,7 @@ impl Lower {
       #Builtin(k) => {
         // The library's `each` of a list is the list.
         if (k == "Vec_each" || k == "slice_each" || k == "array_each" || k == "Gen_each" || k == "RegionList_each") { return false; }
+        if (k == "Receiver_each" && all.len() == 1) { return self.forReceiver(l, pat, all[0], fid, cargs, itemTy, body, iter.span); }
         return self.unsupported(iter.span, `iterating with \`${k}\``);
       }
       _ => return false,

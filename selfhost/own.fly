@@ -1756,10 +1756,11 @@ impl Own {
           const x = self.escape(v, use);
           addLoans(mut loans, x.loans);
         }
+        // A punned field is `{ x: x }`, checked as that is.
         #None => {
           const e: Expr = { kind: #Ident(f.name.name.clone()), span: f.name.span, id: NO_ID };
           const use = self.slotUse(e);
-          const x = self.expr(e, use);
+          const x = self.escape(e, use);
           addLoans(mut loans, x.loans);
         }
       }
@@ -1772,7 +1773,14 @@ impl Own {
   function slotUse(self: readonly Self, e: readonly Expr): Use {
     const ty = self.tyOf(e);
     match (self.typed.slots.get(e.id)) {
-      #Some(t) => if (isBorrow(ty) || isShared(ty)) { #Move } else { self.argUse(t, ty) },
+      // A borrow of a `Copy` value, where the slot holds the value, is read through: the literal
+      // holds a copy.
+      #Some(t) => match (ty) {
+        #Borrow(_, inner) if self.p.isCopy(inner.get()) && !isBorrow(t) => #Read,
+        // A borrow put where the slot holds one is lent on, as an argument is.
+        #Borrow(_, _) if isBorrow(t) => self.argUse(t, ty),
+        _ => if (isBorrow(ty) || isShared(ty)) { #Move } else { self.argUse(t, ty) },
+      },
       #None => #Move,
     }
   }

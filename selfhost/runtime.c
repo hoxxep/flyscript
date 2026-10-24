@@ -17,6 +17,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 #else
+#include <fcntl.h>
 #include <sys/uio.h>
 #include <unistd.h>
 #endif
@@ -756,6 +757,55 @@ int fly_io_rename(fly_str from, fly_str to) {
   return k;
 }
 
+// Files by descriptor (std/io), the standard streams among them: written, standard output and
+// error go where `println` and `eprintln` write, in order with them.
+int fly_io_open(fly_str path, uint8_t mode, uint32_t* fd) {
+  fly_point();
+  char* p = io_path(path);
+  int flags = mode == 0 ? O_RDONLY : mode == 1 ? (O_WRONLY | O_CREAT | O_TRUNC) : (O_WRONLY | O_CREAT | O_APPEND);
+#ifdef O_CLOEXEC
+  flags |= O_CLOEXEC;
+#endif
+  int f;
+  do { f = open(p, flags, 0666); } while (f < 0 && errno == EINTR);
+  int k = f < 0 ? io_errno() : 0;
+  free(p);
+  if (f >= 0) *fd = (uint32_t)f;
+  return k;
+}
+
+int fly_io_read(uint32_t fd, fly_slice buf, uint64_t* n) {
+  fly_point();
+  for (;;) {
+    ssize_t k = read((int)fd, buf.ptr, buf.len);
+    if (k >= 0) { *n = (uint64_t)k; return 0; }
+    if (errno != EINTR) return io_errno();
+  }
+}
+
+int fly_io_write(uint32_t fd, fly_slice buf, uint64_t* n) {
+  fly_point();
+  if (fd == 1 || fd == 2) {
+    struct iovec part = { buf.ptr, buf.len };
+    write_out((int)fd, &part, 1);
+    *n = buf.len;
+    return 0;
+  }
+  for (;;) {
+    ssize_t k = write((int)fd, buf.ptr, buf.len);
+    if (k >= 0) { *n = (uint64_t)k; return 0; }
+    if (errno != EINTR) return io_errno();
+  }
+}
+
+void fly_io_close(uint32_t fd) {
+  fly_point();
+  if (fd > 2) close((int)fd);
+}
+
+// What a dropped file does: no scheduling point, as a destructor performs nothing.
+void fly_fd_release(uint32_t fd) { if (fd > 2) close((int)fd); }
+
 bool fly_io_env(fly_str name, fly_String* value) {
   fly_point();
   char* n = io_path(name);
@@ -1003,6 +1053,18 @@ void fly_vec_push(fly_vec* v, const void* elem, size_t size) {
   vreserve(v, 1, size);
   memcpy((char*)v->ptr + v->len * size, elem, size);
   v->len++;
+}
+
+void fly_vec_extend(fly_vec* v, const void* elems, size_t n, size_t size) {
+  if (n == 0) return;
+  vreserve(v, n, size);
+  memcpy((char*)v->ptr + v->len * size, elems, n * size);
+  v->len += n;
+}
+
+void fly_slice_copy(fly_slice to, fly_slice from, size_t size) {
+  if (to.len != from.len) fly_panicf("copyFrom: %zu elements in place of %zu", from.len, to.len);
+  memmove(to.ptr, from.ptr, to.len * size);
 }
 
 bool fly_vec_pop(fly_vec* v, void* out, size_t size) {
@@ -2548,6 +2610,9 @@ static task_t** core_tasks;
 static size_t core_cap;
 static task_t* core_cur;
 
+// What `fly_rt_answer` gives for what only the scheduler, on its own stack, can answer.
+#define FLY_LATER (-INT64_C(0x7fffffffffffffff))
+
 // The request the running task left, and its answer (rt/sched.fly's numbering).
 enum { REQ_POINT = 1, REQ_SLEEP, REQ_SPAWN, REQ_JOIN_WAIT, REQ_JOIN_TAKE, REQ_SCOPE_OPEN, REQ_SCOPE_FAILED, REQ_SCOPE_TASK, REQ_SCOPE_TAKE,
        REQ_UNCANCEL, REQ_CHANNEL, REQ_SEND, REQ_RECV, REQ_CLOSE, REQ_SENDER_DROP, REQ_SENDER_CLONE, REQ_DEAFEN, REQ_TAKE_ITEMS };
@@ -2555,11 +2620,20 @@ static struct { int kind; int64_t a[2]; void* p; } req;
 
 void fly_panic_deadlock(void) { fly_panic("deadlock: every task is waiting"); }
 
+// The scheduler, while it runs a task: what the task may ask of it on its own stack.
+static uint8_t* core_sched;
+void fly_core_sched(uint8_t* state) { core_sched = state; }
+
 static int64_t ask(int kind, int64_t a, int64_t b, void* p) {
   req.kind = kind;
   req.a[0] = a;
   req.a[1] = b;
   req.p = p;
+  // What needs no choice of who runs next is answered here, without a switch.
+  if (kind != REQ_POINT && kind != REQ_SLEEP && kind != REQ_SPAWN && kind != REQ_CLOSE) {
+    int64_t r = fly_rt_answer(core_sched, kind);
+    if (r != FLY_LATER) return r;
+  }
   task_t* me = core_cur;
   me->reply = 0;
   me->suspended = cur_fiber;
@@ -2576,6 +2650,7 @@ int32_t fly_core_kind(void) { return req.kind; }
 int64_t fly_core_arg(int32_t i) { return req.a[i]; }
 uint8_t* fly_core_ptr(int32_t i) { (void)i; return req.p; }
 void fly_core_reply(int64_t v) { core_cur->reply = v; }
+void fly_core_answer(int32_t id, int64_t v) { core_tasks[id]->reply = v; }
 uint64_t fly_core_clock(void) { return fly_clock; }
 void fly_core_set_clock(uint64_t t) { fly_clock = t; }
 int32_t fly_core_cleaning(int32_t id) { return core_tasks[id]->cleaning; }
@@ -4118,6 +4193,46 @@ void* fly_rlist_at(const fly_rlist* l, size_t i) {
   fly_panic("a region list's element out of bounds");
 }
 
+// Bytes as text: each maximal part of them that begins no well-formed sequence is U+FFFD, as
+// WHATWG's decoder and Rust's `from_utf8_lossy` have it. Bytes that are UTF-8 become the string's.
+fly_String fly_utf8_lossy(fly_vec b) {
+  if (fly_utf8_valid((fly_slice){ b.ptr, b.len })) return (fly_String){ (uint8_t*)b.ptr, b.len, b.cap };
+  const uint8_t* p = b.ptr;
+  fly_String out = fly_String_new();
+  size_t i = 0;
+  while (i < b.len) {
+    uint8_t c = p[i];
+    if (c < 0x80) { fly_String_push_byte(&out, c); i++; continue; }
+    // How many bytes follow, and the range the first of them may take.
+    size_t need = 0;
+    uint8_t lo = 0x80, hi = 0xbf;
+    if (c >= 0xc2 && c <= 0xdf) need = 1;
+    else if (c == 0xe0) { need = 2; lo = 0xa0; }
+    else if ((c >= 0xe1 && c <= 0xec) || c == 0xee || c == 0xef) need = 2;
+    else if (c == 0xed) { need = 2; hi = 0x9f; }
+    else if (c == 0xf0) { need = 3; lo = 0x90; }
+    else if (c >= 0xf1 && c <= 0xf3) need = 3;
+    else if (c == 0xf4) { need = 3; hi = 0x8f; }
+    size_t j = i + 1;
+    bool ok = need > 0;
+    for (size_t k = 0; ok && k < need; k++, j++) {
+      if (j >= b.len || p[j] < lo || p[j] > hi) { ok = false; break; }
+      lo = 0x80;
+      hi = 0xbf;
+    }
+    if (ok) {
+      fly_String_push(&out, (fly_str){ p + i, j - i });
+      i = j;
+    } else {
+      fly_String_push(&out, (fly_str){ (const uint8_t*)"\xef\xbf\xbd", 3 });
+      // The byte that broke the sequence starts the next, unless it was the first.
+      i = j > i + 1 ? j : i + 1;
+    }
+  }
+  free(b.ptr);
+  return out;
+}
+
 // Well-formed UTF-8: no overlong forms, surrogates, or code points past U+10FFFF.
 bool fly_utf8_valid(fly_slice b) {
   const uint8_t* p = b.ptr;
@@ -4144,38 +4259,6 @@ bool fly_utf8_valid(fly_slice b) {
 }
 
 #ifndef FLY_FREESTANDING
-// ---- files ----
-
-static char* cpath(fly_str path) {
-  char* p = fly_alloc(path.len + 1);
-  memcpy(p, path.ptr, path.len);
-  return p;
-}
-
-bool fly_read_file(fly_str path, fly_String* out) {
-  char* p = cpath(path);
-  FILE* f = fopen(p, "rb");
-  free(p);
-  if (!f) return false;
-  *out = fly_String_new();
-  uint8_t buf[65536];
-  size_t n;
-  while ((n = fread(buf, 1, sizeof buf, f)) > 0) fly_String_push(out, (fly_str){ buf, n });
-  fclose(f);
-  return true;
-}
-
-bool fly_write_file(fly_str path, fly_str content) {
-  char* p = cpath(path);
-  FILE* f = fopen(p, "wb");
-  free(p);
-  if (!f) return false;
-  bool ok = fwrite(content.ptr, 1, content.len, f) == content.len;
-  return fclose(f) == 0 && ok;
-}
-
-void fly_File_drop(fly_File* f) { fly_String_drop(&f->text); }
-
 // ---- the program ----
 
 int fly_argc;

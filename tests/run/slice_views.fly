@@ -1,0 +1,25 @@
+// expect: [1, 4, 3, 2, 5]
+// expect: [0, 1, 2, 3, 0]
+// expect: [7, 8, 9, 3, 0]
+// expect: [1, 2, 3, 4, 5, 6]
+// expect: [5, 2, 3, 4, 1, 6]
+// A range of a list lent `mut` is a view of the list: what a method writes through it, or a
+// function given it, lands in the list (§4.1); `extend` copies a slice onto a `Vec`.
+import { println } from "std/io";
+function fill(into: mut u8[]): void { const src: u8[3] = [7, 8, 9]; into[0..3].copyFrom(src); }
+export function main(): void uses Io {
+  let a: u8[5] = [1, 2, 3, 4, 5];
+  a[1..4].reverse();
+  println(`${a}`);
+  let b: u8[5] = repeat(0 as u8);
+  b[1..4].copyFrom([1, 2, 3]);
+  println(`${b}`);
+  fill(mut b);
+  println(`${b}`);
+  let v: Vec<i64> = [1, 2, 3];
+  const more: i64[3] = [4, 5, 6];
+  v.extend(more);
+  println(`${v}`);
+  v[0..5].swap(0, 4);
+  println(`${v}`);
+}

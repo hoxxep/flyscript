@@ -303,33 +303,9 @@ function parse(b: Vec<u8>, head: bool, url: str): Response uses Fail<HttpErr> {
   Response { status, headers, body, url: url.toString() }
 }
 
-// Bytes as text, each that starts no UTF-8 sequence, or a sequence cut short, as U+FFFD.
+// Bytes as text, each maximal part that begins no UTF-8 sequence U+FFFD.
 function lossy(b: readonly u8[]): String {
-  let out: Vec<u8> = Vec.new();
-  let i: usize = 0;
-  while (i < b.len()) {
-    const c = b[i] as u32;
-    const n: usize = if (c < 0x80) { 1 } else if (c >= 0xC2 && c < 0xE0) { 2 } else if (c >= 0xE0 && c < 0xF0) { 3 } else if (c >= 0xF0 && c < 0xF5) { 4 } else { 0 };
-    let ok = n > 0 && i + n <= b.len();
-    let cp = if (n == 2) { c & 0x1F } else if (n == 3) { c & 0x0F } else { c & 0x07 };
-    if (ok) {
-      for (const k of 1..n) {
-        if ((b[i + k] & 0xC0) != 0x80) { ok = false; }
-        cp = (cp << 6) | ((b[i + k] as u32) & 0x3F);
-      }
-    }
-    // No longer a sequence than its code point needs, and no surrogate.
-    if (ok && n == 3) { ok = cp >= 0x800 && (cp < 0xD800 || cp > 0xDFFF); }
-    if (ok && n == 4) { ok = cp >= 0x10000 && cp <= 0x10FFFF; }
-    if (ok) {
-      for (const k of 0..n) { out.push(b[i + k]); }
-      i += n;
-    } else {
-      out.push(0xEF);
-      out.push(0xBF);
-      out.push(0xBD);
-      i += 1;
-    }
-  }
-  match (String.fromUtf8(out)) { #Some(t) => t, #None => String.new() }
+  let v: Vec<u8> = Vec.new();
+  v.extend(b);
+  String.fromUtf8Lossy(v)
 }

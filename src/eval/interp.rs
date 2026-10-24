@@ -474,15 +474,88 @@ impl Interp {
         Ok(match op {
             "now" => Value::Record([("nanos".to_string(), Value::Int(now as i128))].into_iter().collect::<BTreeMap<_, _>>().into()),
             "write" => {
+                let fd = fd_of(args.first());
                 let bytes: Vec<u8> = match args.get(1).map(|b| b.deref()) {
                     Some(Value::List(vs)) => vs.iter().map(|b| b.as_int() as u8).collect(),
+                    Some(Value::Text(t)) => t.as_bytes().to_vec(),
                     _ => Vec::new(),
                 };
                 let n = bytes.len();
-                w.out.push(String::from_utf8_lossy(&bytes).into_owned());
-                Value::tag("Ok", Value::Tuple(vec![Value::Int(n as i128)].into()))
+                let ok = |n: usize| Value::tag("Ok", Value::Tuple(vec![Value::Int(n as i128)].into()));
+                if fd == 1 || fd == 2 {
+                    w.out.push(String::from_utf8_lossy(&bytes).into_owned());
+                    ok(n)
+                } else {
+                    match w.fds.get_mut(&fd) {
+                        Some(f) if f.writing => {
+                            f.data.extend_from_slice(&bytes);
+                            let (path, data) = (f.path.clone(), f.data.clone());
+                            // A file written is the world's as it is written, as the machine's is.
+                            if w.real_fs {
+                                if std::fs::write(&path, &data).is_err() {
+                                    return Ok(Value::tag("Err", Value::Tuple(vec![Value::tag("PermissionDenied", Value::Unit)].into())));
+                                }
+                            } else {
+                                w.files.insert(path, String::from_utf8_lossy(&data).into_owned());
+                            }
+                            ok(n)
+                        }
+                        _ => Value::tag("Err", Value::Tuple(vec![Value::tag("PermissionDenied", Value::Unit)].into())),
+                    }
+                }
             }
-            "read" => Value::tag("Ok", Value::Tuple(vec![Value::Int(0)].into())),
+            "read" => {
+                let fd = fd_of(args.first());
+                let buf = super::builtins::place_of(&args[1])?;
+                let mut target = get(&buf);
+                let Value::List(cells) = &mut target else { return Err(panic("read into a non-buffer")) };
+                let mut chunk: Vec<u8> = Vec::new();
+                if fd == 0 && w.real_fs {
+                    use std::io::Read;
+                    let mut b = vec![0u8; cells.len()];
+                    let k = std::io::stdin().read(&mut b).unwrap_or(0);
+                    chunk.extend_from_slice(&b[..k]);
+                } else if let Some(f) = w.fds.get_mut(&fd) {
+                    let k = cells.len().min(f.data.len().saturating_sub(f.pos));
+                    chunk.extend_from_slice(&f.data[f.pos..f.pos + k]);
+                    f.pos += k;
+                }
+                for (cell, b) in Arc::make_mut(cells).iter_mut().zip(&chunk) {
+                    *cell = Value::Int(*b as i128);
+                }
+                drop(w);
+                set(&buf, target);
+                Value::tag("Ok", Value::Tuple(vec![Value::Int(chunk.len() as i128)].into()))
+            }
+            "open" => {
+                let path = args.first().map(|a| a.as_text().to_string()).unwrap_or_default();
+                let mode = args.get(1).map_or(0, |m| m.as_int());
+                let found = w.files.get(&path).map(|t| t.as_bytes().to_vec()).or_else(|| if w.real_fs { std::fs::read(&path).ok() } else { None });
+                let err = |tag: &str| Value::tag("Err", Value::Tuple(vec![Value::tag(tag, Value::Unit)].into()));
+                let data = match (mode, found) {
+                    (0, Some(d)) => d,
+                    (0, None) => return Ok(err("NotFound")),
+                    (2, Some(d)) => d,
+                    _ => Vec::new(),
+                };
+                if mode != 0 {
+                    // Made, or made empty, at once, as the machine's would be.
+                    if w.real_fs {
+                        if std::fs::write(&path, &data).is_err() { return Ok(err("PermissionDenied")); }
+                    } else {
+                        w.files.insert(path.clone(), String::from_utf8_lossy(&data).into_owned());
+                    }
+                }
+                let fd = w.next_fd;
+                w.next_fd += 1;
+                w.fds.insert(fd, super::world::OpenFile { path, data, pos: 0, writing: mode != 0 });
+                Value::tag("Ok", Value::Tuple(vec![fd_value(fd)].into()))
+            }
+            "close" => {
+                let fd = fd_of(args.first());
+                w.fds.remove(&fd);
+                Value::Unit
+            }
             "random" => {
                 let buf = super::builtins::place_of(&args[0])?;
                 let mut target = get(&buf);
@@ -1247,9 +1320,11 @@ impl Interp {
             _ => None,
         };
         for f in fields {
+            // A punned field is the binding it names, moved out of it as the checker says, as
+            // `{ x: x }` would be.
             let v = match &f.value {
                 Some(x) => self.expr(x, env)?,
-                None => lookup(env, &f.name.name).map(|c| c.lock().expect("cell").clone()).unwrap_or(Value::Unit),
+                None => self.expr(&Expr { kind: ExprKind::Ident(f.name.name.clone()), span: f.name.span }, env)?,
             };
             let want = labels.as_ref().and_then(|ls| ls.get(&f.name.name)).cloned();
             out.insert(f.name.name.clone(), self.held(v, want));
@@ -1765,6 +1840,18 @@ fn is_place(e: &Expr) -> bool {
     matches!(e.kind, ExprKind::Ident(_) | ExprKind::Field { .. } | ExprKind::Index { .. })
 }
 
+
+/// A descriptor's number, from an `Fd`.
+fn fd_of(v: Option<&Value>) -> u32 {
+    match v.map(|v| v.deref()) {
+        Some(Value::Record(fs)) => fs.get("n").map_or(0, |n| n.as_int() as u32),
+        _ => 0,
+    }
+}
+
+fn fd_value(n: u32) -> Value {
+    Value::Record([("n".to_string(), Value::Int(n as i128))].into_iter().collect::<BTreeMap<_, _>>().into())
+}
 
 /// What is at a path, as `Io.stat` gives it.
 fn stat_value(size: u64, dir: bool, modified: i128) -> Value {

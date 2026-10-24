@@ -1,0 +1,22 @@
+// expect: got 1
+// expect: got 2
+// expect: got 3
+// expect: 6 done
+// A channel's messages, in a loop: each as it comes, until every sender is gone (std/sync).
+import { println } from "std/io";
+import { channel } from "std/sync";
+export function main(): void uses Io {
+  const [tx, rx] = channel();
+  let total: i64 = 0;
+  Io.scope((s) => {
+    s.spawn(() => {
+      for (const i of 1..4) { tx.send(i); }
+      tx.close();
+    });
+    for (const v of rx.each()) {
+      println(`got ${v}`);
+      total += v;
+    }
+  });
+  println(`${total} done`);
+}

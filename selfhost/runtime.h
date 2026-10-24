@@ -142,6 +142,11 @@ bool fly_io_env(fly_str name, fly_String* value);
 fly_String fly_io_cwd(void);
 int fly_io_run(fly_str program, fly_slice args, fly_str input, int32_t* status, fly_String* out, fly_String* err);
 int64_t fly_io_wall(void);
+int fly_io_open(fly_str path, uint8_t mode, uint32_t* fd);
+int fly_io_read(uint32_t fd, fly_slice buf, uint64_t* n);
+int fly_io_write(uint32_t fd, fly_slice buf, uint64_t* n);
+void fly_io_close(uint32_t fd);
+void fly_fd_release(uint32_t fd);
 // Secure random bytes, of the world's seed against a simulated world.
 void fly_io_random(fly_slice buf);
 
@@ -162,15 +167,30 @@ _Noreturn void fly_exit(int32_t code);
 _Noreturn void fly_panicf(const char* fmt, ...);
 
 // ---- the runtime's Flyscript (selfhost/rt), which every native and WebAssembly program has ----
-// A `usize` is 64 bits wide on every target, WebAssembly's too: `uint64_t`, not `size_t`.
+// A `usize` is 64 bits wide on every target, WebAssembly's too: `uint64_t`, not `size_t`. Each
+// is named by its symbol, as the program's C defines it, so that LLVM sees one function, not two
+// that meet only once linked: a build split across cores would lose them.
 // Numbers as text (rt/format.fly): each writes at `out`, which has room enough, and gives how much.
-uint64_t fly_rt_show_f64(double v, uint8_t* out);
-uint64_t fly_rt_float_fixed(double v, uint32_t places, uint8_t* out);
-bool fly_rt_parse_float(const uint8_t* text, uint64_t len, double* out);
-uint64_t fly_rt_show_int(bool negative, uint64_t high, uint64_t low, uint8_t* out);
+uint64_t fly_rt_show_f64(double v, uint8_t* out) FLY_SYMBOL(fly_rt_show_f64);
+uint64_t fly_rt_float_fixed(double v, uint32_t places, uint8_t* out) FLY_SYMBOL(fly_rt_float_fixed);
+bool fly_rt_parse_float(const uint8_t* text, uint64_t len, double* out) FLY_SYMBOL(fly_rt_parse_float);
+uint64_t fly_rt_show_int(bool negative, uint64_t high, uint64_t low, uint8_t* out) FLY_SYMBOL(fly_rt_show_int);
 // The scheduler of a simulated world (rt/sched.fly): runs the tasks until the main one, whose
 // record is `main`, ends.
-void fly_rt_tasks(uint64_t seed, uint8_t* main);
+void fly_rt_tasks(uint64_t seed, uint8_t* main) FLY_SYMBOL(fly_rt_tasks);
+int64_t fly_rt_answer(uint8_t* state, int32_t kind) FLY_SYMBOL(fly_rt_answer);
+// What the runtime's Flyscript calls of it (rt/sched.fly), by symbol, as Flyscript's C imports it.
+int32_t fly_core_run(int32_t id, bool deadlock, bool cancel) FLY_SYMBOL(fly_core_run);
+void fly_core_adopt(int32_t id, uint8_t* record) FLY_SYMBOL(fly_core_adopt);
+int32_t fly_core_cleaning(int32_t id) FLY_SYMBOL(fly_core_cleaning);
+void fly_core_sched(uint8_t* state) FLY_SYMBOL(fly_core_sched);
+uint64_t fly_core_clock(void) FLY_SYMBOL(fly_core_clock);
+void fly_core_set_clock(uint64_t t) FLY_SYMBOL(fly_core_set_clock);
+int32_t fly_core_kind(void) FLY_SYMBOL(fly_core_kind);
+int64_t fly_core_arg(int32_t i) FLY_SYMBOL(fly_core_arg);
+uint8_t* fly_core_ptr(int32_t i) FLY_SYMBOL(fly_core_ptr);
+void fly_core_reply(int64_t v) FLY_SYMBOL(fly_core_reply);
+void fly_core_answer(int32_t id, int64_t v) FLY_SYMBOL(fly_core_answer);
 
 // ---- integers ----
 
@@ -225,6 +245,8 @@ bool fly_parse_float(fly_str s, double* out);
 void* fly_vec_at(const fly_vec* v, size_t i, size_t size);
 _Noreturn void fly_out_of_bounds(uint64_t i, uint64_t len);
 void fly_vec_push(fly_vec* v, const void* elem, size_t size);
+void fly_vec_extend(fly_vec* v, const void* elems, size_t n, size_t size);
+void fly_slice_copy(fly_slice to, fly_slice from, size_t size);
 // Room for `extra` more elements, or false if there is no memory for it.
 bool fly_vec_try_reserve(fly_vec* v, size_t extra, size_t size);
 bool fly_vec_pop(fly_vec* v, void* out, size_t size);
@@ -450,6 +472,7 @@ typedef struct fly_rchunk { struct fly_rchunk* next; size_t len, cap, pad; } fly
 typedef struct { fly_arena* arena; size_t len, size; fly_rchunk *first, *last; } fly_rlist;
 fly_rlist* fly_rlist_new(fly_arena* a, size_t size);
 bool fly_utf8_valid(fly_slice b);
+fly_String fly_utf8_lossy(fly_vec b);
 void fly_rlist_push(fly_rlist* l, const void* v);
 // The address of element `i`, which exists: chunks double, so few are passed on the way.
 void* fly_rlist_at(const fly_rlist* l, size_t i);
@@ -459,10 +482,6 @@ void* fly_rlist_at(const fly_rlist* l, size_t i);
 // ---- files ----
 
 // A file opened: all its text, read when it was opened.
-typedef struct { fly_String text; } fly_File;
-bool fly_read_file(fly_str path, fly_String* out);
-bool fly_write_file(fly_str path, fly_str content);
-void fly_File_drop(fly_File* f);
 
 // ---- the program ----
 

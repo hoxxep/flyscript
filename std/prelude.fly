@@ -324,8 +324,14 @@ export effect Fail<E> { raise(err: E): never; }
 export effect Yield<T> { yield(item: T): void; }
 export effect Region<region R> {}
 export effect Io {
+  // A descriptor's bytes: as many as are there, at most `buf.len()`, waiting for one, `0` at the
+  // end; and some of `buf` written, how many.
   read(fd: Fd, buf: mut u8[]): Result<usize, IoErr>;
   write(fd: Fd, buf: readonly u8[]): Result<usize, IoErr>;
+  // A file opened (std/io): `mode` 0 to read, 1 to write it anew, made if need be, 2 to write at
+  // its end, made if need be; and a descriptor closed.
+  open(path: str, mode: u8): Result<Fd, IoErr>;
+  close(fd: Fd): void;
   now(): Instant;
   sleep(d: Duration): void;
   // The primitive under locks, channels and `join`.
@@ -434,6 +440,16 @@ impl Eq for Instant;
 impl Ord for Instant;
 // A file descriptor, and what a parked task waits on: handles the runtime gives out.
 export struct Fd { private n: u32 }
+impl Copy for Fd;
+
+impl Fd {
+  export function stdin(): Fd { Fd { n: 0 } }
+  export function stdout(): Fd { Fd { n: 1 } }
+  export function stderr(): Fd { Fd { n: 2 } }
+  // Lets go of a descriptor without saying whether closing it went well, as a destructor may:
+  // what a dropped file does.
+  export function release(self: Self): void;
+}
 export struct WaitKey { private n: u64 }
 // What can go wrong with I/O. `#Exists`: a path that is already there; `#NotEmpty`: a directory
 // removed with entries in it; `#Unsupported`: what the host cannot do, as a page cannot run programs.
@@ -561,6 +577,8 @@ impl String {
   export function asStr(self: readonly Self): str from self;
   // The string these bytes spell, if they are UTF-8.
   export function fromUtf8(bytes: Vec<u8>): Option<String>;
+  // The bytes as text, each maximal part of them that begins no UTF-8 sequence U+FFFD.
+  export function fromUtf8Lossy(bytes: Vec<u8>): String;
 }
 impl str {
   // Bytes `lo` to `hi`, which must fall on character boundaries.
@@ -682,6 +700,10 @@ impl<T extends Eq> T[] {
     #None
   }
 }
+impl<T extends Copy> T[] {
+  // `src`'s elements in place of these, which panics unless there are as many.
+  export function copyFrom(self: mut Self, src: readonly T[]): void;
+}
 impl<T extends Show> T[] {
   // Each element shown, with `sep` between them: `["a", "b"].join(", ")` is `"a, b"`.
   export function join(self: readonly Self, sep: str): String {
@@ -694,6 +716,10 @@ impl<T extends Show> T[] {
     }
     out
   }
+}
+impl<T extends Copy> Vec<T> {
+  // A copy of each of `items`, pushed in order: amortized O(items.len()).
+  export function extend(self: mut Self, items: readonly T[]): void;
 }
 impl<T> Iterable<readonly T> for T[] {
   function each(self: readonly Self): void uses Yield<readonly T>;
@@ -883,6 +909,8 @@ impl<T> Ptr<T> {
   export function storeRelease(self: Self, v: T): void uses Unsafe;
   export function compareExchange(self: Self, expected: T, desired: T): [T, bool] uses Unsafe;
   export function fetchAdd(self: Self, v: T): T uses Unsafe;
+  // What is there, lent `mut` to `body` for as long as it runs: what it changes changes there.
+  export function with<R>(self: Self, body: once (v: mut T) => R): R uses Unsafe;
 }
 
 // The bytes a value of `T` takes, and the alignment it needs, as C lays it out.

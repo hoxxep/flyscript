@@ -1,0 +1,21 @@
+// expect: [1, 2] 3
+// A borrow put in a field that holds one is lent on, written out or punned (§4.2).
+import { println } from "std/io";
+view struct Log { log: mut Vec<u32>; n: u32 }
+function explicit(log: mut Vec<u32>, n: u32): Log from log { Log { log: log, n: n } }
+function punned(log: mut Vec<u32>, n: u32): Log from log { Log { log, n } }
+export function main(): void uses Io {
+  let v: Vec<u32> = Vec.new();
+  let total: u32 = 0;
+  {
+    const a = explicit(mut v, 1);
+    a.log.push(a.n);
+    total += a.n;
+  }
+  {
+    const b = punned(mut v, 2);
+    b.log.push(b.n);
+    total += b.n;
+  }
+  println(`${v} ${total}`);
+}

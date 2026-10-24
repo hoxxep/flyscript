@@ -271,7 +271,6 @@ impl Cgen {
         if (self.namedIs(t, "HashMap")) { return "fly_map".toString(); }
         if (self.namedIs(t, "Gen")) { return "fly_gen".toString(); }
         if (self.namedIs(t, "Hasher")) { return "fly_Hasher".toString(); }
-        if (self.namedIs(t, "File")) { return "fly_File".toString(); }
         // A region's handles point into its arena; a raw pointer is C's.
         if (self.lw.p.isKnown(d, "Ref") || self.namedIs(t, "Cell") || self.lw.p.isKnown(d, "Arc") || self.lw.p.isKnown(d, "Ptr")) {
           const inner: Ty = match (args.last()) { #Some(#Ty(x)) => x.clone(), _ => #Error };
@@ -428,8 +427,6 @@ impl Cgen {
           body.push("  fly_String_drop(v);\n");
         } else if (self.namedIs(t, "Gen")) {
           body.push("  fly_gen_drop(v);\n");
-        } else if (self.namedIs(t, "File")) {
-          body.push("  fly_File_drop(v);\n");
         } else if (self.lw.p.isKnown(d, "Cont")) {
           body.push("  fly_cont_drop(v);\n");
         } else if (self.lw.p.isKnown(d, "Arc")) {
@@ -1114,7 +1111,10 @@ impl Cgen {
       #Drop(p) => {
         const t = self.placeTy(p);
         const whole: Option<usize> = if (p.path.len() == 0 && const #Local(l) = p.root) { #Some(l) } else { #None };
-        const known = match (whole) { #Some(l) => self.cx.live.has(l) || !self.lw.owned(self.cx.locals[l].ty), #None => true };
+        // A local of the frame around code apart — a loop's body over a generator, a `defer` — may
+        // hold a value whatever this code knows: its storage is zeroed when moved from, so it is
+        // dropped.
+        const known = match (whole) { #Some(l) => self.cx.live.has(l) || !self.lw.owned(self.cx.locals[l].ty) || self.cx.names.has(l), #None => true };
         if (known && self.needsDrop(t)) {
           const d = self.dropFn(t, span);
           const lv = self.lvalue(p, span);
@@ -1562,11 +1562,11 @@ impl Cgen {
         const at = self.placeArg(c, 0);
         `({ fly_str x_; ${next}(&${at}, &x_) ? ${yes} : ${no}; })`
       }
-      "slice_range" => {
+      // A slice is a pointer into what it is of, lent `mut` or not.
+      "slice_range" | "slice_rangeMut" => {
         const ec = self.ctype(match (rt) { #Slice(x) => x.get().clone(), _ => #Error }, span);
         `fly_slice_range(${arg(0)}, ${arg(1)}, ${arg(2)}, sizeof(${ec}))`
       }
-      "File_text" => `fly_String_as_str(&(${arg(0)})->text)`,
       "Listener_next" => {
         const yes = self.some(rt, "x_", span);
         const no = self.none(rt, span);
@@ -1695,10 +1695,14 @@ impl Cgen {
       // Sleeping waits for the virtual clock, which is its scheduling point.
       "sleep" => `({ __auto_type d_ = ${vs[0]}; fly_sleep(d_.nanos); (fly_unit)0; })`,
       "park" => "((fly_unit)0)".toString(),
-      "write" => {
-        const ok = self.tagId("Ok");
-        `({ fly_slice b_ = ${vs[1]}; fly_point(); fly_out((fly_str){ b_.ptr, b_.len }); (${rc}){ .tag = ${ok}, .u.Ok = b_.len }; })`
+      // A descriptor's bytes: standard output and error go where `println` and `eprintln` do.
+      "write" => self.ioResult(c, "uint64_t n_ = 0;", `fly_io_write((${vs[0]}).n, ${vs[1]}, &n_)`, "n_"),
+      "read" => self.ioResult(c, "uint64_t n_ = 0;", `fly_io_read((${vs[0]}).n, ${vs[1]}, &n_)`, "n_"),
+      "open" => {
+        const fdC = self.ctype(self.lw.payloadOf(c.ret, "Ok"), c.span);
+        self.ioResult(c, "uint32_t f_ = 0;", `fly_io_open(${vs[0]}, ${vs[1]}, &f_)`, `(${fdC}){ .n = f_ }`)
       }
+      "close" => `({ fly_io_close((${vs[0]}).n); (fly_unit)0; })`,
       "wall" => `fly_io_wall()`,
       "random" => `({ fly_io_random(${vs[0]}); (fly_unit)0; })`,
       "cwd" => `fly_io_cwd()`,
@@ -1850,10 +1854,12 @@ impl Cgen {
         `({ uint64_t i_; fly_str_find(${arg(0)}, ${arg(1)}, &i_) ? ${yes} : ${no}; })`
       }
       "String_fromUtf8" => {
-        // The bytes become the string's: a `Vec<u8>` and a `String` are laid out alike.
+        // The bytes become the string's, if they are UTF-8: a `Vec<u8>` and a `String` are laid out alike.
         const yes = self.some(rt, "(fly_String){ (uint8_t*)b_.ptr, b_.len, b_.cap }", span);
-        `({ fly_vec b_ = ${arg(0)}; ${yes}; })`
+        const no = self.none(rt, span);
+        `({ fly_vec b_ = ${arg(0)}; fly_utf8_valid((fly_slice){ b_.ptr, b_.len }) ? ${yes} : ({ fly_vec_free(&b_); ${no}; }); })`
       }
+      "String_fromUtf8Lossy" => `fly_utf8_lossy(${arg(0)})`,
       "parseInt" => {
         const yes = self.some(rt, "v_", span);
         const no = self.none(rt, span);
@@ -1893,6 +1899,8 @@ impl Cgen {
         `({ fly_slice s_ = ${whole}; uint64_t i_ = ${arg(1)}; ${at}; })`
       }
       "slice_reverse" => `({ fly_slice_reverse(${arg(0)}, sizeof(${ec})); (fly_unit)0; })`,
+      "slice_copyFrom" => `({ fly_slice_copy(${arg(0)}, ${arg(1)}, sizeof(${ec})); (fly_unit)0; })`,
+      "Vec_extend" => `({ fly_slice s_ = ${arg(1)}; fly_vec_extend(${arg(0)}, s_.ptr, s_.len, sizeof(${ec})); (fly_unit)0; })`,
       "slice_splitAt" => {
         const tc = self.ctype(rt, span);
         `({ fly_slice s_ = ${arg(0)}; uint64_t i_ = ${arg(1)}; if (i_ > s_.len) fly_panicf("index %llu out of bounds (length %zu)", (unsigned long long)i_, s_.len); (${tc}){ .f0 = { s_.ptr, i_ }, .f1 = { (uint8_t*)s_.ptr + i_ * sizeof(${ec}), s_.len - i_ } }; })`
@@ -1928,16 +1936,7 @@ impl Cgen {
         const d = if (self.needsDrop(elem)) { `else ${self.dropFn(elem, span)}(x_); ` } else { "" };
         `({ fly_vec* v_ = ${arg(0)}; fly_fn f_ = ${arg(1)}; size_t j_ = 0; for (size_t i_ = 0; i_ < v_->len; i_++) { ${ec}* x_ = &((${ec}*)v_->ptr)[i_]; if (((bool (*)(void*, ${pc}))f_.fn)(f_.env, ${x})) { ((${ec}*)v_->ptr)[j_++] = *x_; } ${d}} v_->len = j_; (fly_unit)0; })`
       }
-      "writeFile" => {
-        const boxed = self.ioErr("PermissionDenied");
-        `({ if (!fly_write_file(${arg(0)}, ${arg(1)})) { ${boxed}} (fly_unit)0; })`
-      }
-      "File_open" => {
-        const boxed = self.ioErr("NotFound");
-        `({ fly_File f_ = { 0 }; if (!fly_read_file(${arg(0)}, &f_.text)) { ${boxed}} f_; })`
-      }
-      "File_readText" => `fly_String_clone(&(${arg(0)})->text)`,
-      "File_readBytes" => `({ fly_File* f_ = ${arg(0)}; fly_vec_from(f_->text.ptr, f_->text.len, 1); })`,
+      "Fd_release" => `({ fly_fd_release((${arg(0)}).n); (fly_unit)0; })`,
       // `std/crypto`: OpenSSL's libcrypto, or the host's under WebAssembly.
       "sha256" => `fly_crypto_sha256(${arg(0)})`,
       "sha384" => `fly_crypto_sha384(${arg(0)})`,
@@ -2116,6 +2115,11 @@ impl Cgen {
       "Mutex_new" => {
         const tc = self.ctype(typeArg(rt, 0), span);
         `({ ${tc} v_ = ${arg(0)}; (${tc}*)fly_mutex_new(&v_, sizeof(${tc})); })`
+      }
+      "Ptr_with" => {
+        const tc = self.ctype(rt, span);
+        const pc = match (stripBorrow(ptys[1])) { #Fn(f) => match (f.params.first()) { #Some(p) => self.ctype(p, span), #None => "void*".toString() }, _ => "void*".toString() };
+        `({ __auto_type p_ = ${arg(0)}; fly_fn f_ = ${arg(1)}; ${tc} r_ = ((${tc} (*)(void*, ${pc}))f_.fn)(f_.env, p_); if (f_.drop) f_.drop(f_.env); r_; })`
       }
       "Mutex_lock" => {
         const tc = self.ctype(rt, span);

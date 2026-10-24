@@ -1189,7 +1189,10 @@ impl<'p> Checker<'p> {
                 }
                 (Some(v), None) => self.expr(v, None),
                 (None, w) => {
+                    // A punned field is the binding it names, typed as `{ x: x }`'s `x` is, so
+                    // that ownership sees it moved.
                     let t = self.ident(&f.name.name, f.name.span);
+                    self.typed.exprs.insert(f.name.span, t.clone());
                     if let Some(w) = w {
                         self.coerce(&t, w, f.name.span);
                         self.typed.slots.insert(f.name.span, w.clone());

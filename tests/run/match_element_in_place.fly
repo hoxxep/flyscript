@@ -16,6 +16,8 @@ function report(spans: mut Vec<Option<Span>>): { at: Span } {
   match (spans[0]) {
     #Some(at) => {
       const r: { at: Span } = { at };
+      const same: { at: Span } = { at: at };
+      if (same.at.end != r.at.end) { panic("a copy differs"); }
       spans.truncate(0);
       r
     }

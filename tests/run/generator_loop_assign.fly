@@ -1,0 +1,14 @@
+// expect: 99 4950
+// A binding of the code around a loop over a generator, assigned in its body, drops what it held
+// (§5.6): under the leak check, nothing is left over.
+import { println } from "std/io";
+function numbers(n: usize): void uses Yield<String> { for (const i of 0..n) { yield `${i}`; } }
+export function main(): void uses Io {
+  let last = String.new();
+  let sum: usize = 0;
+  for (const s of numbers(100)) {
+    sum += match (parseInt(s.asStr())) { #Some(v) => v as usize, #None => 0 };
+    last = s;
+  }
+  println(`${last} ${sum}`);
+}

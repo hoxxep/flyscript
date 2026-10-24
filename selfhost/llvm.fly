@@ -46,8 +46,10 @@ type Apart = { locals: Vec<usize>; captures: Vec<usize>; arenas: Vec<u32> };
 
 type Lctx = {
   locals: Vec<Local>;
-  // Each local's address, where it is not an alloca of its own.
+  // Each local's address, where it is not an alloca of its own; and those of the frame around code
+  // apart, reached through its environment.
   addrs: HashMap<usize, String>;
+  outer: HashSet<usize>;
   // Each capture's address.
   captures: Vec<String>;
   capTys: Vec<Ty>;
@@ -86,7 +88,7 @@ type Lctx = {
 
 function newCtx(locals: Vec<Local>, ret: Ty, mode: Mode): Lctx {
   {
-    locals, addrs: HashMap.new(), captures: Vec.new(), capTys: Vec.new(), allocas: String.new(), out: String.new(), open: true, tmp: 0,
+    locals, addrs: HashMap.new(), outer: HashSet.new(), captures: Vec.new(), capTys: Vec.new(), allocas: String.new(), out: String.new(), open: true, tmp: 0,
     scopes: Vec.new(), targets: Vec.new(), mode, sink: #None, arenas: HashMap.new(), ret: ret.clone(), retSlot: String.new(), fnRet: ret,
     oret: String.new(), code: String.new(), hoisted: HashSet.new(), declared: HashSet.new(), prologue: String.new(), live: HashSet.new(),
     reachable: true, liveAt: HashMap.new(), sp: String.new(), loc: String.new(), direct: false,
@@ -148,7 +150,7 @@ function cLayout(c: str, ptr: usize): Option<[usize, usize]> {
     "int64_t" | "uint64_t" | "double" | "fly_Hasher" => #Some([8, 8]),
     "fly_i128" => #Some([16, 16]),
     "fly_str" | "fly_slice" | "fly_yield" => #Some([2 * ptr, ptr]),
-    "fly_String" | "fly_vec" | "fly_fn" | "fly_gen" | "fly_cont" | "fly_File" => #Some([3 * ptr, ptr]),
+    "fly_String" | "fly_vec" | "fly_fn" | "fly_gen" | "fly_cont" => #Some([3 * ptr, ptr]),
     "fly_socket" => #Some([10 * ptr, ptr]),
     "fly_map" => #Some([6 * ptr, ptr]),
     "fly_arena" => #Some([ptr, ptr]),
@@ -1423,7 +1425,9 @@ impl Lgen {
       #Drop(p) => {
         const t = self.placeTy(p);
         const whole: Option<usize> = if (p.path.len() == 0 && const #Local(l) = p.root) { #Some(l) } else { #None };
-        const known = match (whole) { #Some(l) => self.cx.live.has(l) || !self.c.lw.owned(self.cx.locals[l].ty), #None => true };
+        // A local of the frame around code apart may hold a value whatever this code knows: its
+        // storage is zeroed when moved from, so it is dropped (c.fly's `#Drop`).
+        const known = match (whole) { #Some(l) => self.cx.live.has(l) || !self.c.lw.owned(self.cx.locals[l].ty) || self.cx.outer.has(l), #None => true };
         if (known && self.needsDrop(t)) {
           const a = self.addr(p, span);
           self.drop(a.asStr(), t, span);
@@ -1928,6 +1932,7 @@ impl Lgen {
     for (const l of ap.locals) {
       cx.allocas.push(`  %env.l${l}.at = getelementptr inbounds i8, ptr %env, i64 ${i}\n  %env.l${l} = load ptr, ptr %env.l${l}.at\n`);
       cx.addrs.insert(l, `%env.l${l}`);
+      cx.outer.insert(l);
       i += self.ptr;
     }
     for (const _ of 0..self.cx.captures.len()) { cx.captures.push("null".toString()); }
@@ -2996,7 +3001,7 @@ _Static_assert(sizeof(fly_String) == ${p3} && sizeof(fly_vec) == ${p3} && __buil
 _Static_assert(sizeof(fly_fn) == ${p3} && __builtin_offsetof(fly_fn, drop) == ${ptr} && __builtin_offsetof(fly_fn, fn) == ${p2}, \"fly_fn\");
 _Static_assert(sizeof(fly_cont) == ${p3} && __builtin_offsetof(fly_cont, resume) == ${ptr} && __builtin_offsetof(fly_cont, drop) == ${p2}, \"fly_cont\");
 _Static_assert(sizeof(fly_yield) == ${p2} && __builtin_offsetof(fly_yield, fn) == ${ptr}, \"fly_yield\");
-_Static_assert(sizeof(fly_gen) == ${p3} && sizeof(fly_File) == ${p3} && sizeof(fly_socket) == ${10 * ptr} && sizeof(fly_map) == ${6 * ptr}, \"runtime structs\");
+_Static_assert(sizeof(fly_gen) == ${p3} && sizeof(fly_socket) == ${10 * ptr} && sizeof(fly_map) == ${6 * ptr}, \"runtime structs\");
 _Static_assert(sizeof(fly_arena) == ${ptr} && sizeof(fly_chan) == 4 && sizeof(fly_Hasher) == 8 && _Alignof(fly_i128) == 16, \"runtime scalars\");
 `
 }

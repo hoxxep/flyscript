@@ -59,16 +59,16 @@ Every integer type has `wrappingAdd`, `wrappingSub` and `wrappingMul`, which wra
 
 `str` is a borrowed run of UTF-8; `String` an owned, growable one, which lends `str`.
 
-- `String.new()`; `s.len()`, in bytes; `s.push(t)`, amortized O(length of `t`); `s.asStr()`; `s.tryReserve(n)`, room for `n` more bytes or `#OutOfMemory`; `String.fromUtf8(bytes): Option<String>`, `#None` if the bytes are not UTF-8.
+- `String.new()`; `s.len()`, in bytes; `s.push(t)`, amortized O(length of `t`); `s.asStr()`; `s.tryReserve(n)`, room for `n` more bytes or `#OutOfMemory`; `String.fromUtf8(bytes): Option<String>`, `#None` if the bytes are not UTF-8; `String.fromUtf8Lossy(bytes): String`, each maximal part of the bytes that begins no UTF-8 sequence U+FFFD, as WHATWG's decoder has it, and the bytes the string's own where they are UTF-8.
 - On a `str`: `len()`; `slice(lo, hi)`, which panics unless `lo <= hi <= len()`; `toString()`; `asBytes()`; the generators `bytes()`, `lines()` (each line without its `\n` or `\r\n`; a last empty line is not one) and `splitWhitespace()`; `split(sep): Vec<String>`; `trim()`, `trimStart()`, `trimEnd()`; `includes(needle)`, `startsWith(prefix)`, `endsWith(suffix)`, `indexOf(needle)`, `lastIndexOf(needle)`; `replaceAll(from, to)`; `repeat(n)`; `padStart(width)` and `padEnd(width)`, which pad with spaces to `width` characters; and `toUpperCase()` and `toLowerCase()`, which change ASCII letters only, leaving every other character as it is.
 - `String` is `Eq`, `Ord` (by bytes), `Hash`, `Show` and `Clone`.
 
 ### 1.5 Arrays, slices and `Vec`
 
-`T[N]` is an array, `T[]` a slice (a borrowed run), `Vec<T>` an owned, growable list. Arrays and `Vec`s lend slices, and every method of a slice is theirs too.
+`T[N]` is an array, `T[]` a slice (a borrowed run), `Vec<T>` an owned, growable list. Arrays and `Vec`s lend slices, and every method of a slice is theirs too; a range of one, `xs[lo..hi]`, lent `mut`, is a view of it, so what is written through it lands in `xs`.
 
-- A slice: `len()`, `iter()`, `iterMut()`, `get(i): Option<readonly T>`, `first()`, `last()`; `splitAt(at)`, two disjoint `mut` slices, which panics if `at > len()`; `swap(i, j)`; `reverse()`; `sortBy(cmp)`, stable and O(n log n); with `T extends Ord`, `sort()`; with `T extends Eq`, `includes(x)` and `indexOf(x)`; with `T extends Show`, `join(sep)`, each element shown, strings as they are. `xs[i]` panics if `i >= len()`, as `xs[lo..hi]` does outside the slice.
-- A `Vec`: `Vec.new()`; `push(v)`, amortized O(1); `pop(): Option<T>`; `remove(i): T` and `insert(i, v)`, O(length), which panic if `i` is out of range; `retain(keep)`, in place; `truncate(n)`, dropping the elements past `n`; `drain()`, a generator taking every element out in order and leaving the `Vec` empty; `len()`; `iter()`; `iterMut()`; `tryReserve(n)`.
+- A slice: `len()`, `iter()`, `iterMut()`, `get(i): Option<readonly T>`, `first()`, `last()`; `splitAt(at)`, two disjoint `mut` slices, which panics if `at > len()`; `swap(i, j)`; `reverse()`; with `T extends Copy`, `copyFrom(src)`, `src`'s elements in place of these, which panics unless there are as many; `sortBy(cmp)`, stable and O(n log n); with `T extends Ord`, `sort()`; with `T extends Eq`, `includes(x)` and `indexOf(x)`; with `T extends Show`, `join(sep)`, each element shown, strings as they are. `xs[i]` panics if `i >= len()`, as `xs[lo..hi]` does outside the slice.
+- A `Vec`: `Vec.new()`; `push(v)`, amortized O(1); with `T extends Copy`, `extend(items)`, a copy of each of a slice's elements pushed in order, amortized O(`items.len()`); `pop(): Option<T>`; `remove(i): T` and `insert(i, v)`, O(length), which panic if `i` is out of range; `retain(keep)`, in place; `truncate(n)`, dropping the elements past `n`; `drain()`, a generator taking every element out in order and leaving the `Vec` empty; `len()`; `iter()`; `iterMut()`; `tryReserve(n)`.
 - `repeat<T extends Copy, N>(v): T[N]`, `N` copies of `v`.
 - Arrays, slices and `Vec`s are `Iterable` of `readonly T`, and have every derived interface their elements have.
 
@@ -86,7 +86,7 @@ Every integer type has `wrappingAdd`, `wrappingSub` and `wrappingMul`, which wra
 
 `Fd` names a file or socket to `Io.read` and `Io.write`, and `WaitKey` names what `Io.park` waits for (spec §5.1). Their fields are private: library code makes and uses them, and programs use the library.
 
-`Io`'s other operations are the host's file system, process, clock and randomness, on which `std/fs`, `std/process` and `std/crypto` are built: `stat(path)`, `list(path)`, `mkdir(path)`, `remove(path)`, `rename(from, to)`, `env(name)`, `cwd()`, `run(program, args, input)`, `wall()` and `random(buf)`, which fills `buf` from the system's cryptographically secure generator (`getentropy`, WASI's `random_get`, `crypto.getRandomValues` in a page) — against a simulated world, with bytes of the world's seed, so that a run replays. A program, or a test, may handle any of them itself, as it may `Io`'s others: `handle { … } with Io { stat(p) resumes k => k(#Ok(fake)) }` answers `stat` and passes every other operation on. Each is a scheduling point. `Stat` is what is at a path: `size` in bytes, `dir`, and `modified`, in nanoseconds since 1970 began. `Output` is what a program that was run did: its exit `status`, and what it wrote to standard output, `out`, and standard error, `err`. `IoErr` is what can go wrong: `#Reset`, `#TimedOut`, `#BrokenPipe`, `#NotFound`, `#PermissionDenied`, `#AddrInUse`, `#Refused`, `#Exists` (something is already at a path), `#NotEmpty` (a directory removed with entries in it), `#Unsupported` (what the host cannot do: WebAssembly runs no programs) and `#Untrusted` (a TLS peer whose certificate the system does not trust for the host).
+`Io.read(fd, buf)` and `Io.write(fd, buf)` move a descriptor's bytes — as many as are there, at most `buf.len()`, waiting for at least one, `0` at the end; and some of `buf`, how many — and `Io.open(path, mode)` gives one for a file, `mode` `0` to read, `1` to write it anew and `2` to write at its end, each made if need be, which `Io.close(fd)` closes: `std/io` is built on them. `Fd.stdin()`, `Fd.stdout()` and `Fd.stderr()` are the standard streams, whose writes go where `println` and `eprintln` write, in order with them; `fd.release()` lets go of a descriptor without saying whether closing it went well, and performs nothing, as a destructor may. `Io`'s other operations are the host's file system, process, clock and randomness, on which `std/fs`, `std/process` and `std/crypto` are built: `stat(path)`, `list(path)`, `mkdir(path)`, `remove(path)`, `rename(from, to)`, `env(name)`, `cwd()`, `run(program, args, input)`, `wall()` and `random(buf)`, which fills `buf` from the system's cryptographically secure generator (`getentropy`, WASI's `random_get`, `crypto.getRandomValues` in a page) — against a simulated world, with bytes of the world's seed, so that a run replays. A program, or a test, may handle any of them itself, as it may `Io`'s others: `handle { … } with Io { stat(p) resumes k => k(#Ok(fake)) }` answers `stat` and passes every other operation on. Each is a scheduling point. `Stat` is what is at a path: `size` in bytes, `dir`, and `modified`, in nanoseconds since 1970 began. `Output` is what a program that was run did: its exit `status`, and what it wrote to standard output, `out`, and standard error, `err`. `IoErr` is what can go wrong: `#Reset`, `#TimedOut`, `#BrokenPipe`, `#NotFound`, `#PermissionDenied`, `#AddrInUse`, `#Refused`, `#Exists` (something is already at a path), `#NotEmpty` (a directory removed with entries in it), `#Unsupported` (what the host cannot do: WebAssembly runs no programs) and `#Untrusted` (a TLS peer whose certificate the system does not trust for the host).
 
 ### 1.9 Iteration
 
@@ -192,15 +192,25 @@ An integer or a flag that tasks share, for `T` `i64` or `bool`: `T extends Atomi
 
 ## 4. `std/io`
 
-| Function | Contract |
+Files and the standard streams, in Flyscript over `Io`'s descriptors (§1.8). A `File` reads ahead into a buffer of its own, so a file of any size is read a line at a time; what is written to it goes to its descriptor as it is written. A `Writer` gathers writes and sends them a buffer at a time, until it is flushed or closed. A destructor performs nothing (spec §5.6), so a `File` dropped open lets go of its descriptor without closing it the way `close` does, and a `Writer` dropped with writes in it loses them: `defer w.close();` is the habit.
+
+| | Contract |
 | :--- | :--- |
 | `println(s)` | Writes `s` and a line break to standard output. Each line is written whole, so lines from tasks on different cores never mix; on worker threads, standard output is flushed at each line. |
 | `eprintln(s)` | The same, to standard error, which is not buffered. |
 | `exit(code): never` | Ends the program at once, every task with it, with `code` its exit status; standard output is flushed first. No cleanup runs, as for a panic (spec §5.7). |
-| `File.open(path): File` | Opens a file to read: `#NotFound`, `#PermissionDenied`. |
-| `f.lines()` | A generator of the file's lines, as `str.lines()` splits them. |
-| `f.readText(): String` | The whole file, as text. |
-| `f.readBytes(): Vec<u8>` | The whole file. |
+| `File.open(path)`, `File.create(path)`, `File.append(path)` | A file to read; one made empty, or made, to write; one made if it is not there, to write at its end: `#NotFound`, `#PermissionDenied`. |
+| `File.stdin()` | The program's standard input, to read. |
+| `f.read(into): usize` | What is there, at most `into.len()` bytes, waiting for at least one: how many, `0` at the end. |
+| `f.readLine(): Option<String>` | The next line, without its `\n` or `\r\n`, `#None` at the end; a last line with nothing after its `\n` is not one. |
+| `f.lines()` | A generator of each line in turn, as `readLine` reads them. |
+| `f.readText(): String`, `f.readBytes(): Vec<u8>` | The rest of the file: as text, each maximal part that begins no UTF-8 sequence U+FFFD, as `String.fromUtf8Lossy` reads it, or as bytes. |
+| `f.write(bytes)`, `f.writeText(s)` | Writes all of them. |
+| `f.close()` | Closes the file; closing it again does nothing. |
+| `Writer.new(file)`, `Writer.stdout()` | A writer to a file it owns, or to standard output, which it writes to in order with `println`. |
+| `w.write(bytes)`, `w.writeText(s)`, `w.writeLine(s)` | Gathers them, a line break after `writeLine`'s, sending them on once 64 KB have gathered. |
+| `w.flush()`, `w.close()` | Sends what it holds to its file; and that, then closes the file. |
+| `readFile(path): String` | The whole file, as text. |
 | `writeFile(path, content)` | Creates the file, or replaces what it held: `#PermissionDenied`, or `#NotFound` for a missing directory. |
 
 Against a simulated world, files are the world's (spec §6.4).
@@ -366,7 +376,7 @@ An HTTP/1.1 client over `std/net`, written in Flyscript: `http` URLs over TCP an
 | `parseUrl(url): Url` | `http://` or `https://`, a host — a name, an address, an IPv6 address in brackets — an optional port from 1 to 65535, and the target, its path and query, `/` if there is none, the fragment left out. A URL with credentials in it, `user@host`, is refused, as they would be sent in the clear. |
 | `Url` | `{ https, host, port, target }`. |
 | `Header` | `{ name, value }`. |
-| `Response` | `status`, `headers` in the order they came, `body` as bytes, and `url`, where it came from after any redirects; `header(name)`, the first value of that name, ignoring ASCII case; `text()`, the body as UTF-8, each byte that begins no UTF-8 sequence as U+FFFD. |
+| `Response` | `status`, `headers` in the order they came, `body` as bytes, and `url`, where it came from after any redirects; `header(name)`, the first value of that name, ignoring ASCII case; `text()`, the body as UTF-8, each maximal part that begins no UTF-8 sequence U+FFFD, as `String.fromUtf8Lossy` reads it. |
 | `HttpErr` | `#BadUrl(why) \| #Io(IoErr) \| #BadResponse(why) \| #TooManyRedirects`. |
 
 ---

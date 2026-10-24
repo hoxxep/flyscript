@@ -479,6 +479,10 @@ impl Interp {
                 Ok(Value::Unit)
             }
             "Hasher.finish" => Ok(Value::Int(a(0).deref().as_int() as u64 as i128)),
+            "String.fromUtf8Lossy" => {
+                let bytes: Vec<u8> = with_list(&a(0), |vs| vs.iter().map(|v| v.deref().as_int() as u8).collect());
+                Ok(Value::text(&String::from_utf8_lossy(&bytes)))
+            }
             "String.fromUtf8" => {
                 let bytes: Vec<u8> = match a(0).deref() {
                     Value::List(vs) => vs.iter().map(|v| v.deref().as_int() as u8).collect(),
@@ -675,6 +679,26 @@ impl Interp {
                 };
                 let sorted = merge_sort(self, Arc::unwrap_or_clone(items), &a(1))?;
                 set(&p, Value::List(sorted.into()));
+                Ok(Value::Unit)
+            }
+            "Vec.extend" => {
+                let p = place_of(&a(0))?;
+                let items: Vec<Value> = with_list(&a(1), |vs| vs.to_vec());
+                update(&p, |l| {
+                    if let Value::List(vs) = l {
+                        Arc::make_mut(vs).extend(items);
+                    }
+                });
+                Ok(Value::Unit)
+            }
+            "slice.copyFrom" => {
+                let p = place_of(&a(0))?;
+                let items: Vec<Value> = with_list(&a(1), |vs| vs.to_vec());
+                let n = with_list(&get(&p), |vs| vs.len());
+                if n != items.len() {
+                    return Err(panic(format!("copyFrom: {} elements in place of {n}", items.len())));
+                }
+                set(&p, Value::List(items.into()));
                 Ok(Value::Unit)
             }
             "Vec.push" => {
@@ -902,29 +926,13 @@ impl Interp {
                 self.world.lock().expect("world").exit = Some(a(0).as_int() as i32);
                 Err(panic(EXITED))
             }
-            "File.open" => {
-                let path = a(0).as_text().to_string();
-                let mut w = self.world.lock().expect("world");
-                let found = w.files.get(&path).cloned().or_else(|| if w.real_fs { std::fs::read_to_string(&path).ok() } else { None });
-                match found {
-                    Some(content) => {
-                        let id = w.open_socket(content.into_bytes());
-                        Ok(Value::Native("File", id))
-                    }
-                    None => {
-                        drop(w);
-                        self.raise(Value::tag("NotFound", Value::Unit))
-                    }
+            // A descriptor let go of, as a dropped file does.
+            "Fd.release" => {
+                if let Value::Record(fs) = a(0).deref() {
+                    let n = fs.get("n").map_or(0, |n| n.as_int() as u32);
+                    self.world.lock().expect("world").fds.remove(&n);
                 }
-            }
-            "File.readText" => {
-                let id = native(&a(0), "File")? as usize;
-                Ok(Value::text(&String::from_utf8_lossy(&self.world.lock().expect("world").sockets[id].input)))
-            }
-            "File.readBytes" => {
-                let id = native(&a(0), "File")? as usize;
-                let bytes: Vec<Value> = self.world.lock().expect("world").sockets[id].input.iter().map(|b| Value::Int(*b as i128)).collect();
-                Ok(Value::List(bytes.into()))
+                Ok(Value::Unit)
             }
             // `std/crypto`: OpenSSL's libcrypto, as natively.
             "sha256" | "sha384" | "sha512" | "hmacSha256" | "hmacSha512" | "hkdfSha256" | "aesGcmSeal" | "aesGcmOpen" | "ed25519PublicKey" | "ed25519Sign" | "ed25519Verify" | "constantTimeEqual" => {
@@ -949,27 +957,6 @@ impl Interp {
                     }
                 };
                 r.map_err(panic)
-            }
-            "writeFile" => {
-                let (path, content) = (a(0).as_text().to_string(), a(1).as_text().to_string());
-                let mut w = self.world.lock().expect("world");
-                if w.real_fs {
-                    if std::fs::write(&path, &content).is_err() {
-                        drop(w);
-                        return self.raise(Value::tag("PermissionDenied", Value::Unit));
-                    }
-                } else {
-                    w.files.insert(path, content);
-                }
-                Ok(Value::Unit)
-            }
-            "File.lines" => {
-                let id = native(&a(0), "File")? as usize;
-                let content = String::from_utf8_lossy(&self.world.lock().expect("world").sockets[id].input).to_string();
-                for line in content.lines() {
-                    self.yield_value(Value::text(line))?;
-                }
-                Ok(Value::Unit)
             }
             "Listener.bind" => Ok(Value::Native("Listener", a(0).as_int() as u64)),
             "Listener.port" => Ok(Value::Int(native(&a(0), "Listener")? as i128)),

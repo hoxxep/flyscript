@@ -524,6 +524,29 @@ fn llvm_programs_run_as_expected() {
     assert!(failed.is_empty(), "failed through LLVM:\n{}", failed.join("\n"));
 }
 
+/// Programs that start tasks, built through LLVM as `fly build` builds them — the module split into
+/// a part per core and linked by ThinLTO — link, the runtime's C and its Flyscript one program,
+/// and run as the simulated world and the machine's threads have them.
+#[test]
+fn tasks_link_and_run_through_split_llvm() {
+    if !has_llvm() {
+        return;
+    }
+    let dir = out().join("split");
+    std::fs::create_dir_all(&dir).unwrap();
+    for name in ["channel_each", "kv_actor", "receiver_gone"] {
+        let program = root().join(format!("tests/run/{name}.fly"));
+        let exe = dir.join(name);
+        let built = Command::new("sh").arg(root().join("selfhost/llvm.sh")).arg(root().join("selfhost/seed.js")).arg(&program).arg(&exe).output().unwrap();
+        assert!(built.status.success(), "{name}: {}{}", String::from_utf8_lossy(&built.stdout), String::from_utf8_lossy(&built.stderr));
+        let want: String = std::fs::read_to_string(&program).unwrap().lines().filter_map(|l| l.strip_prefix("// expect: ")).map(|l| format!("{l}\n")).collect();
+        let r = Command::new(&exe).env("FLY_WORLD", "{}").output().unwrap();
+        assert_eq!(String::from_utf8_lossy(&r.stdout), want, "{name} in a simulated world");
+        let threaded = Command::new(&exe).env_remove("FLY_WORLD").env("FLY_THREADS", "4").output().unwrap();
+        assert!(threaded.status.success(), "{name} on threads: {}", String::from_utf8_lossy(&threaded.stderr));
+    }
+}
+
 /// The compiler, compiled through LLVM, compiles itself to the LLVM module, the C beside it, and
 /// the JavaScript the seed makes of it.
 #[test]

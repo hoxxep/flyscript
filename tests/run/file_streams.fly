@@ -1,0 +1,40 @@
+// file: crlf.txt=one\r\ntwo\r\n\r\nlast
+// expect: 20000 lines, 148890 bytes, last line 19999 x
+// expect: one|two||last
+// expect: first second
+// expect: 9 [48, 32, 120, 10, 49, 32, 120, 10, 50]
+// expect: #NotFound
+// Files read through a buffer of their own, line by line, larger than it; written through a
+// `Writer`, which gathers what is written until it is flushed; and appended to (std/io).
+import { println, File, Writer, readFile, writeFile } from "std/io";
+
+export function main(): void uses Io, Fail<IoErr> {
+  let w = Writer.new(File.create("big.txt"));
+  for (const i of 0..20000) { w.writeLine(`${i} x`); }
+  w.close();
+  let r = File.open("big.txt");
+  let n: usize = 0;
+  let bytes: usize = 0;
+  let last = String.new();
+  for (const line of r.lines()) {
+    n += 1;
+    bytes += line.len() + 1;
+    last = line;
+  }
+  r.close();
+  println(`${n} lines, ${bytes} bytes, last line ${last}`);
+  let c = File.open("crlf.txt");
+  let parts: Vec<String> = Vec.new();
+  while (const #Some(l) = c.readLine()) { parts.push(l); }
+  println(parts.join("|"));
+  writeFile("log.txt", "first");
+  let a = File.append("log.txt");
+  a.writeText(" second");
+  a.close();
+  println(readFile("log.txt").asStr());
+  let s = File.open("big.txt");
+  let buf: u8[9] = repeat(0 as u8);
+  const k = s.read(mut buf);
+  println(`${k} ${buf}`);
+  try { File.open("nowhere.txt"); } catch (e) { println(`${e}`); }
+}

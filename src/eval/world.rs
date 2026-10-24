@@ -16,8 +16,21 @@ pub struct Socket {
     pub peer: Option<String>,
 }
 
+/// A file open on a descriptor: all of it, read from or written to at `pos`, and for a write, put
+/// back where it came from as it is written.
+#[derive(Default, Debug)]
+pub struct OpenFile {
+    pub path: String,
+    pub data: Vec<u8>,
+    pub pos: usize,
+    pub writing: bool,
+}
+
 #[derive(Debug)]
 pub struct World {
+    /// Files open on descriptors, by number, and the next number.
+    pub fds: HashMap<u32, OpenFile>,
+    pub next_fd: u32,
     pub out: Vec<String>,
     pub files: HashMap<String, String>,
     /// The directories made, beside those the files' paths imply.
@@ -55,6 +68,8 @@ impl World {
     pub fn seeded(seed: u64) -> World {
         World {
             out: Vec::new(),
+            fds: HashMap::new(),
+            next_fd: 3,
             files: HashMap::new(),
             dirs: std::collections::BTreeSet::new(),
             env: HashMap::new(),

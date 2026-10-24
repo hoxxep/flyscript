@@ -1016,6 +1016,8 @@ impl JsGen {
       "str_eq" => return `(${arg(0)} === ${arg(1)})`,
       "str_cmp" => return `$rt.strCmp(${arg(0)}, ${arg(1)})`,
       "slice_range" => return `$rt.slice(${arg(0)}, ${arg(1)}, ${arg(2)})`,
+      // A range lent `mut` is a view of the list, which what is written through lands in.
+      "slice_rangeMut" => return `$rt.rangeRef(${arg(0)}, ${arg(1)}, ${arg(2)})`,
       "String_pushShown" => {
         const f = match (c.argTys.get(1)) { #Some(t) => floatTy(t), #None => false };
         const shown = if (f) { `$rt.showFloat(${arg(1)})` } else { `String(${arg(1)})` };

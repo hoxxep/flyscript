@@ -1624,10 +1624,11 @@ impl<'p> Own<'p> {
                     let how = self.slot_use(v);
                     loans.extend(self.escape(|o| o.expr(v, how)).loans)
                 }
+                // A punned field is `{ x: x }`, checked as that is.
                 None => {
                     let e = Expr { kind: ExprKind::Ident(f.name.name.clone()), span: f.name.span };
                     let how = self.slot_use(&e);
-                    loans.extend(self.expr(&e, how).loans);
+                    loans.extend(self.escape(|o| o.expr(&e, how)).loans);
                 }
             }
         }
@@ -1639,6 +1640,11 @@ impl<'p> Own<'p> {
     fn slot_use(&self, e: &Expr) -> Use {
         let ty = self.ty_of(e);
         match self.typed.slots.get(&e.span) {
+            // A borrow of a `Copy` value, where the slot holds the value, is read through: the
+            // literal holds a copy.
+            Some(t) if matches!(&ty, Ty::Borrow(_, inner) if self.p.is_copy(inner)) && !matches!(t, Ty::Borrow(..)) => Use::Read,
+            // A borrow put where the slot holds one is lent on, as an argument is.
+            Some(t) if matches!(t, Ty::Borrow(..)) && matches!(ty, Ty::Borrow(..)) => self.arg_use(t, &ty),
             Some(t) if !matches!(ty, Ty::Borrow(..) | Ty::Slice(_) | Ty::Prim(Prim::Str)) => self.arg_use(t, &ty),
             _ => Use::Move,
         }

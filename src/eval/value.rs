@@ -457,7 +457,17 @@ fn write_in_range(vs: &mut [Value], lo: usize, rest: &[Seg], new: Value) {
     match rest.split_first() {
         Some((Seg::Index(i), rest2)) => write_at(&mut vs[lo + i], rest2, new),
         Some((Seg::Range(l2, _), rest2)) => write_in_range(vs, lo + l2, rest2, new),
-        _ => {}
+        // The whole range, as an operation that fills a slice writes it.
+        None => {
+            if let Value::List(items) = new {
+                for (k, x) in items.iter().enumerate() {
+                    if lo + k < vs.len() {
+                        vs[lo + k] = x.clone();
+                    }
+                }
+            }
+        }
+        Some(_) => {}
     }
 }
 

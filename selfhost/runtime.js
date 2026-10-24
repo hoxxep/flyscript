@@ -643,10 +643,6 @@ const { $rt, $b } = (() => {
     println(s) { process.stdout.write(Buffer.from(s + "\n", "latin1")); },
     eprintln(s) { process.stderr.write(Buffer.from(s + "\n", "latin1")); },
     exit(code) { process.exit(code); },
-    writeFile(path, content) {
-      try { fs.writeFileSync(Buffer.from(path, "latin1").toString("utf8"), Buffer.from(content, "latin1")); }
-      catch (e) { throw new Fail({ $tag: "PermissionDenied" }); }
-    },
     parseInt(s) { return /^[+-]?\d+$/.test(s) ? some(BigInt(s)) : none(); },
     // An optional sign, digits with a point among or before or after them, and an exponent.
     parseFloat(s) { return /^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$/.test(s) ? some(Number(s)) : none(); },
@@ -678,7 +674,13 @@ const { $rt, $b } = (() => {
     String_push(r, s) { r.v = r.v + s; },
     String_asStr: (s) => s,
     String_clone: (s) => s,
-    String_fromUtf8: (bytes) => some(String.fromCharCode(...bytes)),
+    // A string's text is its bytes, one to a character, the bytes always UTF-8.
+    String_fromUtf8(bytes) {
+      const b = Buffer.from(itemsOf(bytes));
+      try { new TextDecoder("utf-8", { fatal: true }).decode(b); } catch { return none(); }
+      return some(b.toString("latin1"));
+    },
+    String_fromUtf8Lossy: (bytes) => Buffer.from(Buffer.from(itemsOf(bytes)).toString("utf8"), "utf8").toString("latin1"),
     str_slice: (s, i, j) => slice(s, i, j),
     str_len: (s) => (s.length),
     str_toString: (s) => s,
@@ -733,6 +735,12 @@ const { $rt, $b } = (() => {
 
     Vec_new: () => [],
     Vec_push(r, x) { r.v.push(x); },
+    Vec_extend(r, items) { const v = r.v, s = itemsOf(items); for (let i = 0; i < s.length; i++) v.push(s[i]); },
+    slice_copyFrom(r, src) {
+      const a = r.v, s = itemsOf(src);
+      if (a.length !== s.length) panic(`copyFrom: ${s.length} elements in place of ${a.length}`);
+      for (let i = 0; i < s.length; i++) a[i] = s[i];
+    },
     Vec_pop(r) { const a = r.v; return a.length === 0 ? none() : some(a.pop()); },
     Vec_remove(r, i) { const a = r.v; return a.splice(at(a, i), 1)[0]; },
     Vec_insert(r, i, x) { const a = r.v; if (i < 0 || i > a.length) panic(`index ${i} out of bounds (length ${a.length})`); a.splice(Number(i), 0, x); },
@@ -799,13 +807,8 @@ const { $rt, $b } = (() => {
     *Gen_each(g) { yield* g.it; },
     Gen_drop(r) { if (r.v.it.return) r.v.it.return(); },
 
-    File_open(path) {
-      try { return { text: fs.readFileSync(Buffer.from(path, "latin1").toString("utf8")).toString("latin1") }; }
-      catch (e) { throw new Fail({ $tag: "NotFound" }); }
-    },
-    File_readText: (r) => r.v.text,
-    File_readBytes: (r) => Array.from(r.v.text, (c) => c.charCodeAt(0)),
-    *File_lines(r) { yield* $b.str_lines(r.v.text); },
+    // A descriptor let go of, as a dropped file does.
+    Fd_release(fd) { const n = (fd.v ?? fd).n; if (n > 2) { try { fs.closeSync(n); } catch {} } },
 
     // `std/par`'s two pure halves, one after the other: the order cannot be seen.
     join: (a, b) => [a(), b()],
@@ -970,11 +973,25 @@ const { $rt, $b } = (() => {
     Io_now: () => ({ nanos: clock }),
     Io_sleep(d) { clock += d.nanos; },
     Io_write(fd, buf) {
-      const s = buf instanceof Bytes ? buf.s : String.fromCharCode(...buf.map(Number));
-      process.stdout.write(Buffer.from(s, "latin1"));
-      return { $tag: "Ok", $: s.length };
+      const b = bytesOf(buf);
+      if (fd.n === 1) { process.stdout.write(b); return { $tag: "Ok", $: b.length }; }
+      if (fd.n === 2) { process.stderr.write(b); return { $tag: "Ok", $: b.length }; }
+      return io(() => fs.writeSync(fd.n, b));
     },
-    Io_read: () => ({ $tag: "Ok", $: 0 }),
+    // Files by descriptor (std/io); written, standard output and error go where `println` and
+    // `eprintln` write.
+    Io_read(fd, buf) {
+      const cells = buf.v;
+      return io(() => {
+        const b = Buffer.alloc(cells.length);
+        const n = fs.readSync(fd.n, b, 0, cells.length, null);
+        for (let i = 0; i < n; i++) cells[i] = b[i];
+        buf.v = cells;
+        return n;
+      });
+    },
+    Io_open(p, mode) { return io(() => ({ n: fs.openSync(sysPath(p), ["r", "w", "a"][mode]) })); },
+    Io_close(fd) { if (fd.n > 2) { try { fs.closeSync(fd.n); } catch {} } },
     // The file system and the process, the machine's (std/fs, std/process). A string is its bytes,
     // one to a character; the system's text is UTF-8.
     Io_stat(p) {
@@ -1021,6 +1038,8 @@ const { $rt, $b } = (() => {
       });
     },
   };
+  // The elements of a slice: a list, or a string's bytes, one to a character.
+  const itemsOf = (x) => { const b = x?.v ?? x; return b instanceof Bytes ? b.items() : typeof b === "string" ? Array.from(b, (c) => c.charCodeAt(0)) : b; };
   const nodeCrypto = () => require("node:crypto");
   // The bytes of a slice: a list of them, or a string's, one to a character.
   const bytesOf = (x) => {
@@ -1056,7 +1075,7 @@ const { $rt, $b } = (() => {
     else if (sched.on) yield* block(["until", clock + d.nanos]);
     else clock += d.nanos;
   };
-  for (const op of ["Io_now", "Io_write", "Io_read", "Io_stat", "Io_list", "Io_mkdir", "Io_remove", "Io_rename", "Io_env", "Io_cwd", "Io_wall", "Io_run", "Io_random"]) {
+  for (const op of ["Io_now", "Io_write", "Io_read", "Io_stat", "Io_list", "Io_mkdir", "Io_remove", "Io_rename", "Io_env", "Io_cwd", "Io_wall", "Io_run", "Io_random", "Io_open", "Io_close"]) {
     const f = $b[op];
     $b[op + "$g"] = function* (...args) { yield* point(); return f(...args); };
   }

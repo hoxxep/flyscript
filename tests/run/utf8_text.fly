@@ -1,0 +1,17 @@
+// expect: #Some("é") #None #None
+// expect: a�b �� x�y ok� 3
+// Text from bytes: `String.fromUtf8` only for UTF-8, and `fromUtf8Lossy`, each maximal part of
+// the bytes that begins no sequence one U+FFFD, as WHATWG's decoder has it (std, §1.4).
+import { println } from "std/io";
+export function main(): void uses Io {
+  const ok: Vec<u8> = [0xC3, 0xA9];
+  const lone: Vec<u8> = [0xC3];
+  const surrogate: Vec<u8> = [0xED, 0xA0, 0x80];
+  println(`${String.fromUtf8(ok)} ${String.fromUtf8(lone)} ${String.fromUtf8(surrogate)}`);
+  const cut: Vec<u8> = [0x61, 0xE2, 0x82, 0x62];
+  const two: Vec<u8> = [0xFF, 0xFE];
+  const bad: Vec<u8> = [0x78, 0xF0, 0x9F, 0x98, 0x79];
+  const tail: Vec<u8> = [0x6F, 0x6B, 0xC3];
+  const kept: Vec<u8> = [0xE2, 0x82, 0xAC];
+  println(`${String.fromUtf8Lossy(cut)} ${String.fromUtf8Lossy(two)} ${String.fromUtf8Lossy(bad)} ${String.fromUtf8Lossy(tail)} ${String.fromUtf8Lossy(kept).len()}`);
+}

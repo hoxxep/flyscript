@@ -14,7 +14,7 @@ const STD: &[(&str, &str)] = &[
     ("std/prelude.fly", include_str!("../../std/prelude.fly")),
     ("std/region.d.fly", include_str!("../../std/region.d.fly")),
     ("std/net.d.fly", include_str!("../../std/net.d.fly")),
-    ("std/io.d.fly", include_str!("../../std/io.d.fly")),
+    ("std/io.fly", include_str!("../../std/io.fly")),
     ("std/collections.d.fly", include_str!("../../std/collections.d.fly")),
     ("std/par.fly", include_str!("../../std/par.fly")),
     ("std/layout.fly", include_str!("../../std/layout.fly")),
