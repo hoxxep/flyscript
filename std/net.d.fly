@@ -8,6 +8,9 @@ impl Socket {
   // Connects to `host`, a name or an address, on `port`: `#NotFound` if the name does not
   // resolve, `#Refused` if nothing listens there.
   export function connect(host: str, port: u16): Socket uses Io, Fail<IoErr>;
+  // Connects as `connect` does, then speaks TLS, 1.2 or later: `#Untrusted` unless the peer's
+  // certificate is valid for `host` and signed by a root the system trusts.
+  export function connectTls(host: str, port: u16): Socket uses Io, Fail<IoErr>;
   export function read(self: mut Self, buf: mut u8[]): usize uses Io, Fail<IoErr>;
   // Writes all of `bytes`.
   export function write(self: mut Self, bytes: readonly u8[]): void uses Io, Fail<IoErr>;

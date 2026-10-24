@@ -27,6 +27,7 @@ const STD: &[(&str, &str)] = &[
     ("std/unicode.fly", include_str!("../../std/unicode.fly")),
     ("std/regex.fly", include_str!("../../std/regex.fly")),
     ("std/crypto.d.fly", include_str!("../../std/crypto.d.fly")),
+    ("std/http.fly", include_str!("../../std/http.fly")),
 ];
 
 pub struct Module {

@@ -887,6 +887,8 @@ const { $rt, $b } = (() => {
       if (input === undefined) throw new Fail({ $tag: "Refused" });
       return { input, pos: 0, peer };
     },
+    // A simulated world's peers answer in the clear, as if TLS were there.
+    Socket_connectTls(host, port) { return $b.Socket_connect(host, port); },
     Socket_read(r, buf) {
       if (fault()) throw new Fail({ $tag: "TimedOut" });
       const sock = r.v, cells = buf.v, n = Math.min(cells.length, sock.input.length - sock.pos);
@@ -1264,7 +1266,7 @@ function $drop11(v) {
   $b.Gen_drop({ v: v });
 }
 const $const68 = $usize(1 * 2 ** 40);
-const $const69 = ["std/prelude.fly", "std/region.d.fly", "std/net.d.fly", "std/io.d.fly", "std/collections.d.fly", "std/par.fly", "std/layout.fly", "std/sync.d.fly", "std/json.fly", "std/world.d.fly", "std/fs.fly", "std/process.fly", "std/time.fly", "std/unicode.fly", "std/regex.fly", "std/crypto.d.fly"];
+const $const69 = ["std/prelude.fly", "std/region.d.fly", "std/net.d.fly", "std/io.d.fly", "std/collections.d.fly", "std/par.fly", "std/layout.fly", "std/sync.d.fly", "std/json.fly", "std/world.d.fly", "std/fs.fly", "std/process.fly", "std/time.fly", "std/unicode.fly", "std/regex.fly", "std/crypto.d.fly", "std/http.fly"];
 function $copy12(v) { return ({ nanos: v.nanos }); }
 function $copy13(v) { return [v[0], v[1]]; }
 const $const78 = $usize(1 * 2 ** 51);
@@ -40144,7 +40146,7 @@ function layoutChecks_263($647) {
       (v112_t.v += String(v6_p3), undefined);
       v114_t = v7_t;
       $b.String_push(v114_t, " && sizeof(fly_socket) == ");
-      v116_t = $usize(9 * v0_ptr);
+      v116_t = $usize(10 * v0_ptr);
       v117_t = v7_t;
       (v117_t.v += String(v116_t), undefined);
       v119_t = v7_t;
@@ -140351,7 +140353,7 @@ function cLayout_1063($2535, $2536) {
         if (v52_t)
         {
           let v53_t, v54_t, v55_t;
-          v53_t = $usize(9 * v1_ptr);
+          v53_t = $usize(10 * v1_ptr);
           v54_t = [v53_t, v1_ptr];
           v55_t = { $tag: "Some", $: v54_t };
           v4_t = v55_t;
@@ -237798,10 +237800,10 @@ function prelude_1695($4150, $4151, $4152, $4153) {
 function tasksLib_1696($4155, $4156, $4157, $4158) {
   let v4_ret;
   {
-    let v0_self, v1_key, v2_c, v3_vs, v5_t, v40_t, v62_t, v69_t, v167_t, v174_t, v206_t, v268_t, v280_t, v302_t, v314_t, v349_t, v381_t, v403_t, v415_t, v440_t, v484_t, v491_t, v531_t, v553_t, v565_t, v572_t, v584_t, v591_t, v608_t, v615_t, v622_t, v639_t, v646_t, v663_t, v680_t, v692_t, v707_t, v714_t, v734_t, v741_t, v761_t, v768_t, v788_t, v795_t, v802_t, v828_t, v867_t;
+    let v0_self, v1_key, v2_c, v3_vs, v5_t, v40_t, v62_t, v69_t, v167_t, v174_t, v206_t, v268_t, v280_t, v302_t, v314_t, v349_t, v381_t, v403_t, v415_t, v440_t, v484_t, v491_t, v531_t, v553_t, v565_t, v572_t, v584_t, v591_t, v608_t, v615_t, v622_t, v639_t, v646_t, v663_t, v680_t, v692_t, v707_t, v714_t, v734_t, v741_t, v761_t, v768_t, v788_t, v795_t, v815_t, v822_t, v829_t, v855_t, v894_t;
     v0_self = $4155; v1_key = $4156; v2_c = $4157; v3_vs = $4158; 
     {
-      let v6_t, v7_t, v8_ptys, v9_span, v10_t, v11_t, v12_rt, v13_t, v14_arg, v15_t, v16_t, v17_t, v18_t, v22_t, v27_carried, v28_t, v889_t;
+      let v6_t, v7_t, v8_ptys, v9_span, v10_t, v11_t, v12_rt, v13_t, v14_arg, v15_t, v16_t, v17_t, v18_t, v22_t, v27_carried, v28_t, v916_t;
       v6_t = v2_c.params;
       v7_t = clone_71(v6_t);
       v8_ptys = v7_t;
@@ -237875,7 +237877,7 @@ function tasksLib_1696($4155, $4156, $4157, $4158) {
       v27_carried = v18_t;
       L2:
       {
-        let v29_t, v56_t, v75_t, v190_t, v212_t, v257_t, v291_t, v325_t, v370_t, v397_t, v409_t, v421_t, v456_t, v512_t, v547_t, v559_t, v578_t, v597_t, v633_t, v652_t, v654_t, v674_t, v686_t, v698_t, v725_t, v752_t, v779_t, v813_t, v854_t;
+        let v29_t, v56_t, v75_t, v190_t, v212_t, v257_t, v291_t, v325_t, v370_t, v397_t, v409_t, v421_t, v456_t, v512_t, v547_t, v559_t, v578_t, v597_t, v633_t, v652_t, v654_t, v674_t, v686_t, v698_t, v725_t, v752_t, v779_t, v806_t, v840_t, v881_t;
         v29_t = (v1_key === "Io_scope");
         if (v29_t)
         {
@@ -238888,7 +238890,7 @@ function tasksLib_1696($4155, $4156, $4157, $4158) {
           v28_t = v699_t;
           break L2;
         }
-        v725_t = (v1_key === "Socket_read");
+        v725_t = (v1_key === "Socket_connectTls");
         if (v725_t)
         {
           let v726_t;
@@ -238900,7 +238902,7 @@ function tasksLib_1696($4155, $4156, $4157, $4158) {
             v730_t = $b.String_new();
             v729_t.v = v730_t;
             v731_t = v729_t;
-            $b.String_push(v731_t, "({ uint64_t n_ = 0; int e_ = fly_sock_read(");
+            $b.String_push(v731_t, "({ fly_socket s_; int e_ = fly_connect_tls(");
             v733_t = v14_arg(0);
             v734_t = v733_t;
             v735_t = v734_t;
@@ -238914,18 +238916,18 @@ function tasksLib_1696($4155, $4156, $4157, $4158) {
             v743_t = v729_t;
             $b.String_push(v743_t, v742_t);
             v745_t = v729_t;
-            $b.String_push(v745_t, ", &n_); if (e_) { ");
+            $b.String_push(v745_t, ", &s_); if (e_) { ");
             v747_t = v728_raise;
             v748_t = v729_t;
             $b.String_push(v748_t, v747_t);
             v750_t = v729_t;
-            $b.String_push(v750_t, "} n_; })");
+            $b.String_push(v750_t, "} s_; })");
             v726_t = v729_t.v;
           }
           v28_t = v726_t;
           break L2;
         }
-        v752_t = (v1_key === "Socket_write");
+        v752_t = (v1_key === "Socket_read");
         if (v752_t)
         {
           let v753_t;
@@ -238937,7 +238939,7 @@ function tasksLib_1696($4155, $4156, $4157, $4158) {
             v757_t = $b.String_new();
             v756_t.v = v757_t;
             v758_t = v756_t;
-            $b.String_push(v758_t, "({ int e_ = fly_sock_write(");
+            $b.String_push(v758_t, "({ uint64_t n_ = 0; int e_ = fly_sock_read(");
             v760_t = v14_arg(0);
             v761_t = v760_t;
             v762_t = v761_t;
@@ -238951,30 +238953,30 @@ function tasksLib_1696($4155, $4156, $4157, $4158) {
             v770_t = v756_t;
             $b.String_push(v770_t, v769_t);
             v772_t = v756_t;
-            $b.String_push(v772_t, "); if (e_) { ");
+            $b.String_push(v772_t, ", &n_); if (e_) { ");
             v774_t = v755_raise;
             v775_t = v756_t;
             $b.String_push(v775_t, v774_t);
             v777_t = v756_t;
-            $b.String_push(v777_t, "} (fly_unit)0; })");
+            $b.String_push(v777_t, "} n_; })");
             v753_t = v756_t.v;
           }
           v28_t = v753_t;
           break L2;
         }
-        v779_t = (v1_key === "Socket_writeStatus");
+        v779_t = (v1_key === "Socket_write");
         if (v779_t)
         {
           let v780_t;
           {
             const v783_t = { v: undefined };
-            let v781_t, v782_raise, v784_t, v785_t, v786_t, v787_t, v789_t, v790_t, v791_t, v792_t, v793_t, v794_t, v796_t, v797_t, v798_t, v799_t, v800_t, v801_t, v803_t, v804_t, v805_t, v806_t, v807_t, v808_t, v809_t, v810_t, v811_t, v812_t;
+            let v781_t, v782_raise, v784_t, v785_t, v786_t, v787_t, v789_t, v790_t, v791_t, v792_t, v793_t, v794_t, v796_t, v797_t, v798_t, v799_t, v800_t, v801_t, v802_t, v803_t, v804_t, v805_t;
             v781_t = ioRaise_1707(v0_self, "e_");
             v782_raise = v781_t;
             v784_t = $b.String_new();
             v783_t.v = v784_t;
             v785_t = v783_t;
-            $b.String_push(v785_t, "({ int e_ = fly_sock_status(");
+            $b.String_push(v785_t, "({ int e_ = fly_sock_write(");
             v787_t = v14_arg(0);
             v788_t = v787_t;
             v789_t = v788_t;
@@ -238988,130 +238990,167 @@ function tasksLib_1696($4155, $4156, $4157, $4158) {
             v797_t = v783_t;
             $b.String_push(v797_t, v796_t);
             v799_t = v783_t;
-            $b.String_push(v799_t, ", ");
-            v801_t = v14_arg(2);
-            v802_t = v801_t;
-            v803_t = v802_t;
+            $b.String_push(v799_t, "); if (e_) { ");
+            v801_t = v782_raise;
+            v802_t = v783_t;
+            $b.String_push(v802_t, v801_t);
             v804_t = v783_t;
-            $b.String_push(v804_t, v803_t);
-            v806_t = v783_t;
-            $b.String_push(v806_t, "); if (e_) { ");
-            v808_t = v782_raise;
-            v809_t = v783_t;
-            $b.String_push(v809_t, v808_t);
-            v811_t = v783_t;
-            $b.String_push(v811_t, "} (fly_unit)0; })");
+            $b.String_push(v804_t, "} (fly_unit)0; })");
             v780_t = v783_t.v;
           }
           v28_t = v780_t;
           break L2;
         }
-        v813_t = (v1_key === "Db_fetchProfile");
-        if (v813_t)
+        v806_t = (v1_key === "Socket_writeStatus");
+        if (v806_t)
         {
-          let v814_t;
+          let v807_t;
           {
-            const v823_t = { v: undefined };
-            let v815_t, v816_t, v817_t, v818_tc, v819_t, v820_timedOut, v821_t, v822_notFound, v824_t, v825_t, v826_t, v827_t, v829_t, v830_t, v831_t, v832_t, v833_t, v834_t, v835_t, v836_t, v837_t, v838_t, v839_t, v840_t, v841_t, v842_t, v843_t, v844_t, v845_t, v846_t, v847_t, v848_t, v849_t, v850_t, v851_t, v852_t, v853_t;
-            v816_t = v0_self;
-            v815_t = v12_rt;
-            v817_t = ctype_279(v816_t, v815_t, $copy1(v9_span));
-            v818_tc = v817_t;
-            v819_t = ioErr_1704(v0_self, "TimedOut");
-            v820_timedOut = v819_t;
-            v821_t = ioErr_1704(v0_self, "NotFound");
-            v822_notFound = v821_t;
-            v824_t = $b.String_new();
-            v823_t.v = v824_t;
-            v825_t = v823_t;
-            $b.String_push(v825_t, "({ fly_str u_ = ");
-            v827_t = v14_arg(1);
-            v828_t = v827_t;
+            const v810_t = { v: undefined };
+            let v808_t, v809_raise, v811_t, v812_t, v813_t, v814_t, v816_t, v817_t, v818_t, v819_t, v820_t, v821_t, v823_t, v824_t, v825_t, v826_t, v827_t, v828_t, v830_t, v831_t, v832_t, v833_t, v834_t, v835_t, v836_t, v837_t, v838_t, v839_t;
+            v808_t = ioRaise_1707(v0_self, "e_");
+            v809_raise = v808_t;
+            v811_t = $b.String_new();
+            v810_t.v = v811_t;
+            v812_t = v810_t;
+            $b.String_push(v812_t, "({ int e_ = fly_sock_status(");
+            v814_t = v14_arg(0);
+            v815_t = v814_t;
+            v816_t = v815_t;
+            v817_t = v810_t;
+            $b.String_push(v817_t, v816_t);
+            v819_t = v810_t;
+            $b.String_push(v819_t, ", ");
+            v821_t = v14_arg(1);
+            v822_t = v821_t;
+            v823_t = v822_t;
+            v824_t = v810_t;
+            $b.String_push(v824_t, v823_t);
+            v826_t = v810_t;
+            $b.String_push(v826_t, ", ");
+            v828_t = v14_arg(2);
             v829_t = v828_t;
-            v830_t = v823_t;
-            $b.String_push(v830_t, v829_t);
-            v832_t = v823_t;
-            $b.String_push(v832_t, "; fly_str n_; ");
-            v834_t = v818_tc;
-            v835_t = v823_t;
-            $b.String_push(v835_t, v834_t);
-            v837_t = v823_t;
-            $b.String_push(v837_t, " r_ = { 0 }; if (fly_fault()) { ");
-            v839_t = v820_timedOut;
-            v840_t = v823_t;
-            $b.String_push(v840_t, v839_t);
-            v842_t = v823_t;
-            $b.String_push(v842_t, "} else if (!fly_world_profile(u_, &n_)) { ");
-            v844_t = v822_notFound;
-            v845_t = v823_t;
-            $b.String_push(v845_t, v844_t);
-            v847_t = v823_t;
-            $b.String_push(v847_t, "} else r_ = (");
-            v849_t = v818_tc;
-            v850_t = v823_t;
-            $b.String_push(v850_t, v849_t);
-            v852_t = v823_t;
-            $b.String_push(v852_t, "){ .displayName = fly_String_from(n_) }; r_; })");
-            v814_t = v823_t.v;
+            v830_t = v829_t;
+            v831_t = v810_t;
+            $b.String_push(v831_t, v830_t);
+            v833_t = v810_t;
+            $b.String_push(v833_t, "); if (e_) { ");
+            v835_t = v809_raise;
+            v836_t = v810_t;
+            $b.String_push(v836_t, v835_t);
+            v838_t = v810_t;
+            $b.String_push(v838_t, "} (fly_unit)0; })");
+            v807_t = v810_t.v;
           }
-          v28_t = v814_t;
+          v28_t = v807_t;
           break L2;
         }
-        v854_t = (v1_key === "Db_checkQuota");
-        if (v854_t)
+        v840_t = (v1_key === "Db_fetchProfile");
+        if (v840_t)
         {
-          let v855_t;
+          let v841_t;
           {
-            const v862_t = { v: undefined };
-            let v856_t, v857_t, v858_t, v859_tc, v860_t, v861_timedOut, v863_t, v864_t, v865_t, v866_t, v868_t, v869_t, v870_t, v871_t, v872_t, v873_t, v874_t, v875_t, v876_t, v877_t, v878_t, v879_t, v880_t, v881_t, v882_t, v883_t, v884_t, v885_t, v886_t, v887_t;
-            v857_t = v0_self;
-            v856_t = v12_rt;
-            v858_t = ctype_279(v857_t, v856_t, $copy1(v9_span));
-            v859_tc = v858_t;
-            v860_t = ioErr_1704(v0_self, "TimedOut");
-            v861_timedOut = v860_t;
-            v863_t = $b.String_new();
-            v862_t.v = v863_t;
-            v864_t = v862_t;
-            $b.String_push(v864_t, "({ fly_str t_ = ");
-            v866_t = v14_arg(1);
-            v867_t = v866_t;
-            v868_t = v867_t;
-            v869_t = v862_t;
-            $b.String_push(v869_t, v868_t);
-            v871_t = v862_t;
-            $b.String_push(v871_t, "; ");
-            v873_t = v859_tc;
-            v874_t = v862_t;
-            $b.String_push(v874_t, v873_t);
-            v876_t = v862_t;
-            $b.String_push(v876_t, " r_ = { 0 }; if (fly_fault()) { ");
-            v878_t = v861_timedOut;
-            v879_t = v862_t;
-            $b.String_push(v879_t, v878_t);
-            v881_t = v862_t;
-            $b.String_push(v881_t, "} else r_ = (");
-            v883_t = v859_tc;
-            v884_t = v862_t;
-            $b.String_push(v884_t, v883_t);
-            v886_t = v862_t;
-            $b.String_push(v886_t, "){ .allowed = fly_world_quota(t_) }; r_; })");
-            v855_t = v862_t.v;
+            const v850_t = { v: undefined };
+            let v842_t, v843_t, v844_t, v845_tc, v846_t, v847_timedOut, v848_t, v849_notFound, v851_t, v852_t, v853_t, v854_t, v856_t, v857_t, v858_t, v859_t, v860_t, v861_t, v862_t, v863_t, v864_t, v865_t, v866_t, v867_t, v868_t, v869_t, v870_t, v871_t, v872_t, v873_t, v874_t, v875_t, v876_t, v877_t, v878_t, v879_t, v880_t;
+            v843_t = v0_self;
+            v842_t = v12_rt;
+            v844_t = ctype_279(v843_t, v842_t, $copy1(v9_span));
+            v845_tc = v844_t;
+            v846_t = ioErr_1704(v0_self, "TimedOut");
+            v847_timedOut = v846_t;
+            v848_t = ioErr_1704(v0_self, "NotFound");
+            v849_notFound = v848_t;
+            v851_t = $b.String_new();
+            v850_t.v = v851_t;
+            v852_t = v850_t;
+            $b.String_push(v852_t, "({ fly_str u_ = ");
+            v854_t = v14_arg(1);
+            v855_t = v854_t;
+            v856_t = v855_t;
+            v857_t = v850_t;
+            $b.String_push(v857_t, v856_t);
+            v859_t = v850_t;
+            $b.String_push(v859_t, "; fly_str n_; ");
+            v861_t = v845_tc;
+            v862_t = v850_t;
+            $b.String_push(v862_t, v861_t);
+            v864_t = v850_t;
+            $b.String_push(v864_t, " r_ = { 0 }; if (fly_fault()) { ");
+            v866_t = v847_timedOut;
+            v867_t = v850_t;
+            $b.String_push(v867_t, v866_t);
+            v869_t = v850_t;
+            $b.String_push(v869_t, "} else if (!fly_world_profile(u_, &n_)) { ");
+            v871_t = v849_notFound;
+            v872_t = v850_t;
+            $b.String_push(v872_t, v871_t);
+            v874_t = v850_t;
+            $b.String_push(v874_t, "} else r_ = (");
+            v876_t = v845_tc;
+            v877_t = v850_t;
+            $b.String_push(v877_t, v876_t);
+            v879_t = v850_t;
+            $b.String_push(v879_t, "){ .displayName = fly_String_from(n_) }; r_; })");
+            v841_t = v850_t.v;
           }
-          v28_t = v855_t;
+          v28_t = v841_t;
+          break L2;
+        }
+        v881_t = (v1_key === "Db_checkQuota");
+        if (v881_t)
+        {
+          let v882_t;
+          {
+            const v889_t = { v: undefined };
+            let v883_t, v884_t, v885_t, v886_tc, v887_t, v888_timedOut, v890_t, v891_t, v892_t, v893_t, v895_t, v896_t, v897_t, v898_t, v899_t, v900_t, v901_t, v902_t, v903_t, v904_t, v905_t, v906_t, v907_t, v908_t, v909_t, v910_t, v911_t, v912_t, v913_t, v914_t;
+            v884_t = v0_self;
+            v883_t = v12_rt;
+            v885_t = ctype_279(v884_t, v883_t, $copy1(v9_span));
+            v886_tc = v885_t;
+            v887_t = ioErr_1704(v0_self, "TimedOut");
+            v888_timedOut = v887_t;
+            v890_t = $b.String_new();
+            v889_t.v = v890_t;
+            v891_t = v889_t;
+            $b.String_push(v891_t, "({ fly_str t_ = ");
+            v893_t = v14_arg(1);
+            v894_t = v893_t;
+            v895_t = v894_t;
+            v896_t = v889_t;
+            $b.String_push(v896_t, v895_t);
+            v898_t = v889_t;
+            $b.String_push(v898_t, "; ");
+            v900_t = v886_tc;
+            v901_t = v889_t;
+            $b.String_push(v901_t, v900_t);
+            v903_t = v889_t;
+            $b.String_push(v903_t, " r_ = { 0 }; if (fly_fault()) { ");
+            v905_t = v888_timedOut;
+            v906_t = v889_t;
+            $b.String_push(v906_t, v905_t);
+            v908_t = v889_t;
+            $b.String_push(v908_t, "} else r_ = (");
+            v910_t = v886_tc;
+            v911_t = v889_t;
+            $b.String_push(v911_t, v910_t);
+            v913_t = v889_t;
+            $b.String_push(v913_t, "){ .allowed = fly_world_quota(t_) }; r_; })");
+            v882_t = v889_t.v;
+          }
+          v28_t = v882_t;
           break L2;
         }
         {
-          let v888_t;
-          v888_t = { $tag: "None" };
-          return v888_t;
+          let v915_t;
+          v915_t = { $tag: "None" };
+          return v915_t;
           v28_t = undefined;
           break L2;
         }
         $rt.panic("no arm matched");
       }
-      v889_t = { $tag: "Some", $: v28_t };
-      v5_t = v889_t;
+      v916_t = { $tag: "Some", $: v28_t };
+      v5_t = v916_t;
     }
     v4_ret = v5_t;
   }
@@ -239995,7 +240034,7 @@ function ioRaise_1707($4183, $4184) {
       const v42_t = { v: undefined };
       const v50_t = { v: undefined };
       let v4_t, v5_names, v6_t, v41_t, v43_t, v44_t, v45_t, v46_t, v47_t, v48_t, v49_t, v51_t, v52_t, v53_t, v54_t, v55_t, v56_t, v57_t, v58_t;
-      v4_t = ["Reset", "TimedOut", "BrokenPipe", "NotFound", "PermissionDenied", "AddrInUse", "Refused"];
+      v4_t = ["Reset", "TimedOut", "BrokenPipe", "NotFound", "PermissionDenied", "AddrInUse", "Refused", "Untrusted"];
       v5_names = v4_t;
       v6_t = $b.String_new();
       v7_pick.v = v6_t;

@@ -1,0 +1,335 @@
+// An HTTP/1.1 client (std.md) over std/net: `http` URLs over TCP, `https` over TLS, whose
+// certificates are checked against the system's roots. One request a connection, redirects
+// followed, bodies by length, chunked or to the end.
+
+import { Socket } from "std/net";
+
+export type Header = { name: String; value: String };
+
+export type HttpErr = #BadUrl(String) | #Io(IoErr) | #BadResponse(String) | #TooManyRedirects;
+
+// What a URL names: whether it is `https`, the host, the port, and the target, its path and query.
+export type Url = { https: bool; host: String; port: u16; target: String };
+
+export struct Response {
+  status: u16;
+  headers: Vec<Header>;
+  body: Vec<u8>;
+  // The URL it came from, after any redirects.
+  url: String;
+}
+
+impl Response {
+  // The value of the first header of that name, which is matched ignoring ASCII case.
+  export function header(self: readonly Self, name: str): Option<str> from self {
+    const want = name.toLowerCase();
+    for (const h of self.headers.iter()) {
+      if (h.name.asStr().toLowerCase() == want) { return #Some(h.value.asStr()); }
+    }
+    #None
+  }
+
+  // The body as text, each byte that is not UTF-8 as U+FFFD.
+  export function text(self: readonly Self): String { lossy(self.body) }
+}
+
+// `GET` of `url`.
+export function get(url: str): Response uses Io, Fail<HttpErr> {
+  const none: Header[] = [];
+  const empty: u8[] = [];
+  request("GET", url, none, empty)
+}
+
+// A request of `method` for `url`, with `headers` beside those every request has and `body`, and
+// the response, after at most ten redirects: 301, 302 and 303 as `GET`s, without the body, but a
+// `HEAD`; 307 and 308 as they were.
+export function request(method: str, url: str, headers: readonly Header[], body: readonly u8[]): Response uses Io, Fail<HttpErr> {
+  let m = method.toString();
+  let at = url.toString();
+  let sent: Vec<u8> = Vec.new();
+  for (const b of body) { sent.push(b); }
+  for (const _ of 0..11) {
+    const u = parseUrl(at.asStr());
+    const r = exchange(m.asStr(), u, at.asStr(), headers, sent);
+    const s = r.status;
+    if (s != 301 && s != 302 && s != 303 && s != 307 && s != 308) { return r; }
+    const next = match (r.header("location")) { #Some(l) => resolve(u, l), #None => return r };
+    if ((s == 303 || s <= 302) && m != "HEAD") {
+      m = "GET".toString();
+      sent = Vec.new();
+    }
+    at = next;
+  }
+  throw #TooManyRedirects
+}
+
+// `http://host:port/path?query`, or `https://`; the port the scheme's if not said, `/` the path.
+export function parseUrl(url: str): Url uses Fail<HttpErr> {
+  const bad = (why: str) => #BadUrl(`${url}: ${why}`);
+  const lower = url.toLowerCase();
+  const https = lower.startsWith("https://");
+  if (!https && !lower.startsWith("http://")) { throw bad("not an http or https URL"); }
+  const rest = url.slice(if (https) { 8 } else { 7 }, url.len());
+  const b = rest.asBytes();
+  let end: usize = 0;
+  while (end < b.len() && b[end] != b'/' && b[end] != b'?' && b[end] != b'#') { end += 1; }
+  const authority = rest.slice(0, end);
+  let target = rest.slice(end, rest.len());
+  match (target.indexOf("#")) { #Some(k) => { target = target.slice(0, k); } #None => {} }
+  if (authority.includes("@")) { throw bad("credentials in a URL are not sent"); }
+  let host = authority;
+  let port: u16 = if (https) { 443 } else { 80 };
+  // `[::1]:8080`: an IPv6 address in brackets, then the port.
+  const a = authority.asBytes();
+  let colon: Option<usize> = #None;
+  if (a.len() > 0 && a[0] == b'[') {
+    const close = match (authority.indexOf("]")) { #Some(k) => k, #None => throw bad("an unclosed `[`") };
+    host = authority.slice(1, close);
+    if (close + 1 < a.len()) {
+      if (a[close + 1] != b':') { throw bad("a bad port"); }
+      colon = #Some(close + 1);
+    }
+  } else {
+    match (authority.lastIndexOf(":")) {
+      #Some(k) => { host = authority.slice(0, k); colon = #Some(k); }
+      #None => {}
+    }
+  }
+  if (const #Some(k) = colon) {
+    const digits = authority.slice(k + 1, authority.len());
+    let n: u32 = 0;
+    if (digits.len() == 0 || digits.len() > 5) { throw bad("a bad port"); }
+    for (const d of digits.bytes()) {
+      if (d < b'0' || d > b'9') { throw bad("a bad port"); }
+      n = n * 10 + ((d - b'0') as u32);
+    }
+    if (n == 0 || n > 65535) { throw bad("a bad port"); }
+    port = n as u16;
+  }
+  if (host.len() == 0) { throw bad("no host"); }
+  const path = if (target.len() == 0) { "/".toString() } else if (target.startsWith("?")) { `/${target}` } else { target.toString() };
+  { https, host: host.toString(), port, target: path }
+}
+
+// Where a `Location` sends a request for `base`: a URL, a path on the same host, or one relative
+// to the base's.
+function resolve(base: readonly Url, location: str): String {
+  const lower = location.toLowerCase();
+  if (lower.startsWith("http://") || lower.startsWith("https://")) { return location.toString(); }
+  const scheme = if (base.https) { "https" } else { "http" };
+  if (location.startsWith("//")) { return `${scheme}:${location}`; }
+  const defaultPort: u16 = if (base.https) { 443 } else { 80 };
+  const host = if (base.host.asStr().includes(":")) { `[${base.host}]` } else { base.host.clone() };
+  const origin = if (base.port == defaultPort) { `${scheme}://${host}` } else { `${scheme}://${host}:${base.port}` };
+  if (location.startsWith("/")) { return `${origin}${location}`; }
+  const path = match (base.target.asStr().indexOf("?")) { #Some(k) => base.target.asStr().slice(0, k), #None => base.target.asStr() };
+  const dir = match (path.lastIndexOf("/")) { #Some(k) => path.slice(0, k + 1), #None => "/" };
+  `${origin}${dir}${location}`
+}
+
+function exchange(method: str, u: readonly Url, url: str, headers: readonly Header[], body: readonly Vec<u8>): Response uses Io, Fail<HttpErr> {
+  let s = Fail.map(() => if (u.https) { Socket.connectTls(u.host.asStr(), u.port) } else { Socket.connect(u.host.asStr(), u.port) }, (e) => #Io(e));
+  const defaultPort: u16 = if (u.https) { 443 } else { 80 };
+  const name = if (u.host.asStr().includes(":")) { `[${u.host}]` } else { u.host.clone() };
+  const host = if (u.port == defaultPort) { name } else { `${name}:${u.port}` };
+  let head = `${method} ${u.target} HTTP/1.1\r\nHost: ${host}\r\n`;
+  if (!named(headers, "user-agent")) { head.push("User-Agent: flyscript\r\n"); }
+  if (!named(headers, "accept-encoding")) { head.push("Accept-Encoding: identity\r\n"); }
+  head.push("Connection: close\r\n");
+  for (const h of headers) {
+    if (h.name.asStr().includes("\r") || h.name.asStr().includes("\n") || h.value.asStr().includes("\r") || h.value.asStr().includes("\n")) {
+      throw #BadUrl(`${url}: a header with a line break in it`);
+    }
+    head.push(`${h.name}: ${h.value}\r\n`);
+  }
+  if (body.len() > 0 || method == "POST" || method == "PUT" || method == "PATCH") { head.push(`Content-Length: ${body.len()}\r\n`); }
+  head.push("\r\n");
+  Fail.map(() => {
+    s.write(head.asStr().asBytes());
+    if (body.len() > 0) { s.write(body); }
+  }, (e) => #Io(e));
+  const got = Fail.map(() => readResponse(mut s, method == "HEAD"), (e) => #Io(e));
+  s.close();
+  parse(got, method == "HEAD", url)
+}
+
+// Whether a header of that name, in lower case, is among `headers`.
+function named(headers: readonly Header[], name: str): bool {
+  for (const h of headers) { if (h.name.asStr().toLowerCase() == name) { return true; } }
+  false
+}
+
+// Everything the server sends, up to the end of the response if it says where that is.
+function readResponse(s: mut Socket, head: bool): Vec<u8> uses Io, Fail<IoErr> {
+  let got: Vec<u8> = Vec.new();
+  let buf: u8[16384] = repeat(0 as u8);
+  while (true) {
+    const n = s.read(mut buf);
+    if (n == 0) { break; }
+    for (const i of 0..n) { got.push(buf[i]); }
+    if (complete(got, head)) { break; }
+  }
+  got
+}
+
+// Where a response's head ends, after its blank line.
+function headEnd(b: readonly Vec<u8>): Option<usize> {
+  if (b.len() < 4) { return #None; }
+  for (const i of 0..b.len() - 3) {
+    if (b[i] == 13 && b[i + 1] == 10 && b[i + 2] == 13 && b[i + 3] == 10) { return #Some(i + 4); }
+  }
+  #None
+}
+
+// Whether all of a response has come, by what its head says.
+function complete(b: readonly Vec<u8>, head: bool): bool {
+  const end = match (headEnd(b)) { #Some(e) => e, #None => return false };
+  const text = lossy(b[0..end]);
+  const status = statusOf(text.asStr());
+  if (head || status == 204 || status == 304 || (status >= 100 && status < 200)) { return true; }
+  match (field(text.asStr(), "transfer-encoding")) {
+    #Some(te) => { if (te.asStr().toLowerCase().includes("chunked")) { return endsChunks(b, end); } }
+    #None => {}
+  }
+  match (field(text.asStr(), "content-length")) {
+    #Some(n) => match (number(n.asStr())) { #Some(k) => b.len() >= end + k, #None => false },
+    #None => false,
+  }
+}
+
+function endsChunks(b: readonly Vec<u8>, from: usize): bool {
+  match (dechunk(b, from)) { #Some(_) => true, #None => false }
+}
+
+// A chunked body, if all of it is there.
+function dechunk(b: readonly Vec<u8>, from: usize): Option<Vec<u8>> {
+  let out: Vec<u8> = Vec.new();
+  let i = from;
+  while (true) {
+    let n: usize = 0;
+    let digits: usize = 0;
+    while (i < b.len()) {
+      const c = b[i];
+      const d: usize = if (c >= b'0' && c <= b'9') { (c - b'0') as usize } else if (c >= b'a' && c <= b'f') { (c - 87) as usize } else if (c >= b'A' && c <= b'F') { (c - 55) as usize } else { break };
+      if (n > 0x7ffffff) { return #None; }
+      n = n * 16 + d;
+      digits += 1;
+      i += 1;
+    }
+    if (digits == 0) { return #None; }
+    // A chunk's extensions, then its line's end.
+    while (i < b.len() && b[i] != 10) { i += 1; }
+    if (i >= b.len()) { return #None; }
+    i += 1;
+    if (n == 0) {
+      // The trailer's fields, then a blank line.
+      while (true) {
+        if (i + 1 < b.len() && b[i] == 13 && b[i + 1] == 10) { return #Some(out); }
+        if (i < b.len() && b[i] == 10) { return #Some(out); }
+        while (i < b.len() && b[i] != 10) { i += 1; }
+        if (i >= b.len()) { return #None; }
+        i += 1;
+      }
+    }
+    if (i + n + 2 > b.len()) { return #None; }
+    for (const k of i..i + n) { out.push(b[k]); }
+    i += n + 2;
+  }
+  #None
+}
+
+function statusOf(head: str): u16 {
+  const line = match (head.indexOf("\r\n")) { #Some(k) => head.slice(0, k), #None => head };
+  const parts = line.split(" ");
+  if (parts.len() < 2) { return 0; }
+  match (number(parts[1].asStr())) { #Some(n) => if (n < 1000) { n as u16 } else { 0 }, #None => 0 }
+}
+
+// The value of the first field of that name in a head.
+function field(head: str, name: str): Option<String> {
+  let first = true;
+  for (const line of head.lines()) {
+    if (first) { first = false; continue; }
+    match (line.indexOf(":")) {
+      #Some(k) => { if (line.slice(0, k).trim().toLowerCase() == name) { return #Some(line.slice(k + 1, line.len()).trim().toString()); } }
+      #None => {}
+    }
+  }
+  #None
+}
+
+function number(s: str): Option<usize> {
+  if (s.len() == 0 || s.len() > 15) { return #None; }
+  let n: usize = 0;
+  for (const d of s.bytes()) {
+    if (d < b'0' || d > b'9') { return #None; }
+    n = n * 10 + ((d - b'0') as usize);
+  }
+  #Some(n)
+}
+
+function parse(b: Vec<u8>, head: bool, url: str): Response uses Fail<HttpErr> {
+  const end = match (headEnd(b)) { #Some(e) => e, #None => throw #BadResponse(`${url}: the response ended before its head did`) };
+  const text = lossy(b[0..end]);
+  if (!text.asStr().startsWith("HTTP/1.")) { throw #BadResponse(`${url}: not an HTTP/1 response`); }
+  const status = statusOf(text.asStr());
+  if (status < 100) { throw #BadResponse(`${url}: a bad status line`); }
+  let headers: Vec<Header> = Vec.new();
+  let first = true;
+  for (const line of text.asStr().lines()) {
+    if (first) { first = false; continue; }
+    if (line.len() == 0) { break; }
+    match (line.indexOf(":")) {
+      #Some(k) => headers.push({ name: line.slice(0, k).trim().toString(), value: line.slice(k + 1, line.len()).trim().toString() }),
+      #None => throw #BadResponse(`${url}: a header line without a \`:\``),
+    }
+  }
+  let body: Vec<u8> = Vec.new();
+  if (!(head || status == 204 || status == 304 || status < 200)) {
+    const chunked = match (field(text.asStr(), "transfer-encoding")) { #Some(te) => te.asStr().toLowerCase().includes("chunked"), #None => false };
+    if (chunked) {
+      body = match (dechunk(b, end)) { #Some(x) => x, #None => throw #BadResponse(`${url}: a chunked body cut short`) };
+    } else {
+      match (field(text.asStr(), "content-length")) {
+        #Some(n) => {
+          const k = match (number(n.asStr())) { #Some(k) => k, #None => throw #BadResponse(`${url}: a bad Content-Length`) };
+          if (b.len() < end + k) { throw #BadResponse(`${url}: the body ended before its Content-Length`); }
+          for (const i of end..end + k) { body.push(b[i]); }
+        }
+        #None => { for (const i of end..b.len()) { body.push(b[i]); } }
+      }
+    }
+  }
+  Response { status, headers, body, url: url.toString() }
+}
+
+// Bytes as text, each that starts no UTF-8 sequence, or a sequence cut short, as U+FFFD.
+function lossy(b: readonly u8[]): String {
+  let out: Vec<u8> = Vec.new();
+  let i: usize = 0;
+  while (i < b.len()) {
+    const c = b[i] as u32;
+    const n: usize = if (c < 0x80) { 1 } else if (c >= 0xC2 && c < 0xE0) { 2 } else if (c >= 0xE0 && c < 0xF0) { 3 } else if (c >= 0xF0 && c < 0xF5) { 4 } else { 0 };
+    let ok = n > 0 && i + n <= b.len();
+    let cp = if (n == 2) { c & 0x1F } else if (n == 3) { c & 0x0F } else { c & 0x07 };
+    if (ok) {
+      for (const k of 1..n) {
+        if ((b[i + k] & 0xC0) != 0x80) { ok = false; }
+        cp = (cp << 6) | ((b[i + k] as u32) & 0x3F);
+      }
+    }
+    // No longer a sequence than its code point needs, and no surrogate.
+    if (ok && n == 3) { ok = cp >= 0x800 && (cp < 0xD800 || cp > 0xDFFF); }
+    if (ok && n == 4) { ok = cp >= 0x10000 && cp <= 0x10FFFF; }
+    if (ok) {
+      for (const k of 0..n) { out.push(b[i + k]); }
+      i += n;
+    } else {
+      out.push(0xEF);
+      out.push(0xBF);
+      out.push(0xBD);
+      i += 1;
+    }
+  }
+  match (String.fromUtf8(out)) { #Some(t) => t, #None => String.new() }
+}

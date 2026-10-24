@@ -170,6 +170,69 @@ export function main(): void uses Io {
     assert!(said.contains("<panic: cryptography needs OpenSSL 3 or later"), "{said}");
 }
 
+/// `std/http` over TLS against a real server, OpenSSL's own `s_server`, whose certificate a CA made
+/// for the test signs: trusted when `SSL_CERT_FILE` names that CA, `#Untrusted` when it does not.
+#[test]
+fn speaks_https_to_a_real_server() {
+    let has_openssl = Command::new("openssl").arg("version").output().is_ok_and(|o| o.status.success());
+    if !has_node() || !has_cc() || !has_openssl {
+        return;
+    }
+    let dir = out().join("https");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let openssl = |args: &[&str]| {
+        let r = Command::new("openssl").args(args).current_dir(&dir).output().unwrap();
+        assert!(r.status.success(), "openssl {args:?}: {}", String::from_utf8_lossy(&r.stderr));
+    };
+    openssl(&["req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256", "-nodes", "-keyout", "ca.key", "-out", "ca.pem", "-days", "2", "-subj", "/CN=Fly Test CA", "-addext", "basicConstraints=critical,CA:TRUE", "-addext", "keyUsage=critical,keyCertSign"]);
+    openssl(&["req", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256", "-nodes", "-keyout", "key.pem", "-out", "req.pem", "-subj", "/CN=localhost"]);
+    std::fs::write(dir.join("ext.cnf"), "subjectAltName=DNS:localhost,IP:127.0.0.1\nbasicConstraints=CA:FALSE\nextendedKeyUsage=serverAuth\n").unwrap();
+    openssl(&["x509", "-req", "-in", "req.pem", "-CA", "ca.pem", "-CAkey", "ca.key", "-CAcreateserial", "-out", "cert.pem", "-days", "2", "-extfile", "ext.cnf"]);
+    let mut server = Command::new("openssl")
+        .args(["s_server", "-accept", "0", "-cert", "cert.pem", "-key", "key.pem", "-www"])
+        .current_dir(&dir)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    // It says the port it took: `ACCEPT [::]:51062`.
+    let mut lines = std::io::BufRead::lines(std::io::BufReader::new(server.stdout.take().unwrap()));
+    let port = loop {
+        let line = lines.next().expect("s_server said no port").unwrap();
+        if let Some(p) = line.strip_prefix("ACCEPT ").and_then(|a| a.rsplit(':').next()) {
+            break p.to_string();
+        }
+    };
+    let program = dir.join("https.fly");
+    std::fs::write(&program, r#"import { println } from "std/io";
+import { get } from "std/http";
+export function main(url: str): void uses Io {
+  try {
+    const r = get(url);
+    println(`${r.status} ${r.text().asStr().includes("s_server")}`);
+  } catch (e) { println(`${e}`); }
+}
+"#).unwrap();
+    let c = dir.join("https.c");
+    compile(&root().join("selfhost/seed.js"), &program, &c);
+    let exe = dir.join("https");
+    let built = Command::new("cc").args(["-std=gnu11", "-O1", "-w", "-o"]).arg(&exe).arg(&c).arg("-lm").output().unwrap();
+    assert!(built.status.success(), "{}", String::from_utf8_lossy(&built.stderr));
+    let fetch = |host: &str, roots: &Path| {
+        let r = Command::new(&exe).arg(format!("https://{host}:{port}/")).env_remove("FLY_WORLD").env("SSL_CERT_FILE", roots).env_remove("SSL_CERT_DIR").output().unwrap();
+        String::from_utf8_lossy(&r.stdout).into_owned()
+    };
+    let by_name = fetch("localhost", &dir.join("ca.pem"));
+    let by_address = fetch("127.0.0.1", &dir.join("ca.pem"));
+    let untrusted = fetch("localhost", &dir.join("cert.pem"));
+    let _ = server.kill();
+    let _ = server.wait();
+    assert_eq!(by_name, "200 true\n");
+    assert_eq!(by_address, "200 true\n");
+    assert_eq!(untrusted, "#Io(#Untrusted)\n");
+}
+
 /// `std/regex` finds what Rust's `regex` crate, of RE2's semantics, finds: the same matches and
 /// groups in 9000 cases of random patterns and texts (tests/regex, written by tools/regex-cases).
 #[test]

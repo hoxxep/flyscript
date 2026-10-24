@@ -979,7 +979,8 @@ impl Interp {
                 let id = self.world.lock().expect("world").open_socket(input);
                 self.yield_value(Value::Native("Socket", id))?;
             },
-            "Socket.connect" => {
+            // A simulated world's peers answer in the clear, as if TLS were there.
+            "Socket.connect" | "Socket.connectTls" => {
                 let peer = format!("{}:{}", a(0).as_text(), a(1).as_int());
                 let mut w = self.world.lock().expect("world");
                 if w.fault() {

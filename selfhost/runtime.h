@@ -393,10 +393,11 @@ void fly_panic_deadlock(void);
 typedef struct { int ch; } fly_chan;
 // A connection. Against a simulated world: what the other end sent, how much has been read, what
 // was written to it, which is the program's output once it closes, and the peer it was made to,
-// if the program connected. Otherwise its descriptor, plus one, so that a socket of zeros has none.
-typedef struct { fly_str input; size_t pos; int fd; fly_String out; fly_str peer; } fly_socket;
+// if the program connected. Otherwise its descriptor, plus one, so that a socket of zeros has none,
+// and its TLS session, libssl's, if it has one.
+typedef struct { fly_str input; size_t pos; int fd; fly_String out; fly_str peer; void* tls; } fly_socket;
 // What a socket operation failed with: an `IoErr`, by its tag's name, or nothing.
-enum { FLY_IO_OK, FLY_IO_RESET, FLY_IO_TIMED_OUT, FLY_IO_BROKEN_PIPE, FLY_IO_NOT_FOUND, FLY_IO_PERMISSION_DENIED, FLY_IO_ADDR_IN_USE, FLY_IO_REFUSED };
+enum { FLY_IO_OK, FLY_IO_RESET, FLY_IO_TIMED_OUT, FLY_IO_BROKEN_PIPE, FLY_IO_NOT_FOUND, FLY_IO_PERMISSION_DENIED, FLY_IO_ADDR_IN_USE, FLY_IO_REFUSED, FLY_IO_UNTRUSTED };
 // A listener: against a simulated world, its port; otherwise its descriptor, plus one. Negative,
 // what binding failed with.
 int fly_listen(uint16_t port);
@@ -405,6 +406,8 @@ uint16_t fly_listener_port(int listener);
 bool fly_accept(int listener, fly_socket* out);
 // A connection to `host` on `port`, or what connecting failed with.
 int fly_connect(fly_str host, uint16_t port, fly_socket* out);
+// A connection over TLS: the peer's certificate verified, for `host`, against the system's roots.
+int fly_connect_tls(fly_str host, uint16_t port, fly_socket* out);
 int fly_sock_read(fly_socket* s, fly_slice buf, uint64_t* n);
 int fly_sock_write(fly_socket* s, fly_slice bytes);
 // A whole HTTP response of `code`, with `body`: in a simulated world, a line of the output.

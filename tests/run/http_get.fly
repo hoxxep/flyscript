@@ -1,0 +1,44 @@
+// peer: example.com:443=HTTP/1.1 301 Moved Permanently\r\nLocation: https://www.example.com/start\r\nContent-Length: 0\r\n\r\n
+// peer: www.example.com:443=HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n7;x=1\r\n, world\r\n0\r\nX-Trailer: t\r\n\r\n
+// peer: api.example.com:8080=HTTP/1.1 201 Created\r\nContent-Length: 2\r\nX-Id: 7\r\n\r\nokEXTRA
+// expect: -> example.com:443: GET / HTTP/1.1
+// expect: Host: example.com
+// expect: User-Agent: flyscript
+// expect: Accept-Encoding: identity
+// expect: Connection: close
+// expect: -> www.example.com:443: GET /start HTTP/1.1
+// expect: Host: www.example.com
+// expect: User-Agent: flyscript
+// expect: Accept-Encoding: identity
+// expect: Connection: close
+// expect: 200 https://www.example.com/start text/plain: hello, world
+// expect: -> api.example.com:8080: POST /items?x=1 HTTP/1.1
+// expect: Host: api.example.com:8080
+// expect: User-Agent: flyscript
+// expect: Accept-Encoding: identity
+// expect: Connection: close
+// expect: Content-Type: application/json
+// expect: Content-Length: 8
+// expect: 
+// expect: {"a": 1}
+// expect: 201 7 ok
+// expect: #BadUrl("ftp://x: not an http or https URL") #BadUrl("http://h:99999/: a bad port") #Io(#Refused)
+// expect: { host: "::1", https: false, port: 8080, target: "/a?b" }
+// An HTTP client (std/http): `https` over TLS, whose peers the simulated world answers in the
+// clear; a redirect followed; a chunked body and one of a length; what the program sends shown.
+import { println } from "std/io";
+import { get, request, parseUrl, Header, HttpErr } from "std/http";
+
+function attempt(url: str): String uses Io {
+  try { get(url); "ok".toString() } catch (e) { `${e}` }
+}
+
+export function main(): void uses Io, Fail<HttpErr> {
+  const r = get("https://example.com");
+  println(`${r.status} ${r.url} ${r.header("content-type").unwrapOr("")}: ${r.text()}`);
+  const headers: Header[] = [{ name: "Content-Type".toString(), value: "application/json".toString() }];
+  const made = request("POST", "http://api.example.com:8080/items?x=1", headers, "{\"a\": 1}".asBytes());
+  println(`${made.status} ${made.header("x-id").unwrapOr("")} ${made.text()}`);
+  println(`${attempt("ftp://x")} ${attempt("http://h:99999/")} ${attempt("http://nowhere.example/")}`);
+  println(`${parseUrl("http://[::1]:8080/a?b#frag")}`);
+}

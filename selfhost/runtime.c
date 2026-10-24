@@ -2407,6 +2407,8 @@ static void crypto_load(void) {
   if (!h) fly_panic("cryptography needs OpenSSL 3 or later (libcrypto), which was not found: set FLY_LIBCRYPTO to it");
 #define CRYPTO_LOAD(R, name, args) \
   if (!(ossl.name = (R(*) args)dlsym(h, #name))) fly_panicf("this libcrypto has no %s: cryptography needs OpenSSL 3 or later", #name);
+#define CRYPTO_LOAD_SSL(R, name, args) \
+  if (!(tls.name = (R(*) args)dlsym(h, #name))) fly_panicf("this libssl has no %s: TLS needs OpenSSL 3 or later", #name);
   CRYPTO_FNS(CRYPTO_LOAD)
   __atomic_store_n(&ossl_state, 2, __ATOMIC_RELEASE);
 }
@@ -2544,6 +2546,116 @@ bool fly_crypto_equal(fly_slice a, fly_slice b) {
   return d == 0;
 }
 
+// ---- TLS (std/net's `connectTls`): OpenSSL's libssl, found when first used ----
+
+#ifndef __wasm__
+#define TLS_FNS(X) \
+  X(const void*, TLS_client_method, (void)) X(void*, SSL_CTX_new, (const void*)) \
+  X(int, SSL_CTX_set_default_verify_paths, (void*)) X(void, SSL_CTX_set_verify, (void*, int, void*)) \
+  X(long, SSL_CTX_ctrl, (void*, int, long, void*)) X(uint64_t, SSL_CTX_set_options, (void*, uint64_t)) \
+  X(void*, SSL_new, (void*)) X(void, SSL_free, (void*)) X(int, SSL_set_fd, (void*, int)) \
+  X(long, SSL_ctrl, (void*, int, long, void*)) X(int, SSL_set1_host, (void*, const char*)) \
+  X(void*, SSL_get0_param, (void*)) X(int, X509_VERIFY_PARAM_set1_ip_asc, (void*, const char*)) \
+  X(int, SSL_connect, (void*)) X(int, SSL_get_error, (const void*, int)) X(long, SSL_get_verify_result, (const void*)) \
+  X(int, SSL_read, (void*, void*, int)) X(int, SSL_write, (void*, const void*, int)) X(int, SSL_shutdown, (void*))
+
+static struct {
+  TLS_FNS(CRYPTO_FIELD)
+} tls;
+static void* tls_ctx;
+static int tls_state;
+
+static void tls_load(void) {
+  if (__atomic_load_n(&tls_state, __ATOMIC_ACQUIRE) == 2) return;
+  static const char* const names[] = {
+#ifdef __APPLE__
+    "libssl.3.dylib", "/opt/homebrew/opt/openssl@3/lib/libssl.3.dylib", "/usr/local/opt/openssl@3/lib/libssl.3.dylib",
+    "libssl.4.dylib", "/opt/homebrew/opt/openssl@4/lib/libssl.4.dylib", "/usr/local/opt/openssl@4/lib/libssl.4.dylib",
+#else
+    "libssl.so.3", "libssl.so.4",
+#endif
+    NULL };
+  int expected = 0;
+  if (!__atomic_compare_exchange_n(&tls_state, &expected, 1, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+    while (__atomic_load_n(&tls_state, __ATOMIC_ACQUIRE) != 2) {}
+    return;
+  }
+  void* h = fly_openssl_open("FLY_LIBSSL", names);
+  if (!h) fly_panic("TLS needs OpenSSL 3 or later (libssl), which was not found: set FLY_LIBSSL to it");
+  // libssl's own functions, and libcrypto's, which it brings: `dlsym` searches both.
+  TLS_FNS(CRYPTO_LOAD_SSL)
+  tls_ctx = tls.SSL_CTX_new(tls.TLS_client_method());
+  if (!tls_ctx) fly_panic("libssl failed to start");
+  // Verify the peer (SSL_VERIFY_PEER) against the system's roots, or those `SSL_CERT_FILE` and
+  // `SSL_CERT_DIR` name; TLS 1.2 at least (SSL_CTRL_SET_MIN_PROTO_VERSION); and a peer that closes
+  // without saying so ends the stream (SSL_OP_IGNORE_UNEXPECTED_EOF), as HTTP's lengths guard it.
+  tls.SSL_CTX_set_default_verify_paths(tls_ctx);
+  tls.SSL_CTX_set_verify(tls_ctx, 1, NULL);
+  tls.SSL_CTX_ctrl(tls_ctx, 123, 0x0303, NULL);
+  tls.SSL_CTX_set_options(tls_ctx, 1ull << 7);
+  __atomic_store_n(&tls_state, 2, __ATOMIC_RELEASE);
+}
+
+// libssl's error codes: SSL_ERROR_SSL, SSL_ERROR_WANT_READ, SSL_ERROR_WANT_WRITE,
+// SSL_ERROR_SYSCALL, SSL_ERROR_ZERO_RETURN.
+enum { TLS_FAILED = 1, TLS_WANT_READ = 2, TLS_WANT_WRITE = 3, TLS_SYSCALL = 5, TLS_CLOSED = 6 };
+
+// Waits until the socket can go on as libssl asks; false if the task was cancelled meanwhile.
+static bool tls_wait(int fd, int err) {
+#ifdef FLY_THREADS
+  if (nonblocking()) return io_wait(fd, err == TLS_WANT_WRITE);
+#endif
+  (void)fd; (void)err;
+  return true;
+}
+
+static bool is_address(const char* name) {
+  for (const char* p = name; *p; p++) if (*p == ':') return true;
+  for (const char* p = name; *p; p++) if (!(*p == '.' || (*p >= '0' && *p <= '9'))) return false;
+  return true;
+}
+#endif
+
+int fly_connect_tls(fly_str host, uint16_t port, fly_socket* out) {
+  int e = fly_connect(host, port, out);
+  // A simulated world's peers answer in the clear, as if TLS were there.
+  if (e || !out->fd) return e;
+#ifdef __wasm__
+  return FLY_IO_PERMISSION_DENIED;
+#else
+  tls_load();
+  int fd = out->fd - 1;
+  char name[256];
+  memcpy(name, host.ptr, host.len);
+  name[host.len] = 0;
+  void* s = tls.SSL_new(tls_ctx);
+  tls.SSL_set_fd(s, fd);
+  // A name is sent as SNI (SSL_CTRL_SET_TLSEXT_HOSTNAME) and checked against the certificate's
+  // names; an address against its addresses.
+  if (is_address(name)) {
+    tls.X509_VERIFY_PARAM_set1_ip_asc(tls.SSL_get0_param(s), name);
+  } else {
+    tls.SSL_ctrl(s, 55, 0, name);
+    tls.SSL_set1_host(s, name);
+  }
+  for (;;) {
+    int r = tls.SSL_connect(s);
+    if (r == 1) break;
+    int err = tls.SSL_get_error(s, r);
+    if ((err == TLS_WANT_READ || err == TLS_WANT_WRITE) && tls_wait(fd, err)) continue;
+    bool cancelled = err == TLS_WANT_READ || err == TLS_WANT_WRITE;
+    // X509_V_OK is 0: anything else is a certificate the system does not trust for this host.
+    int k = cancelled ? FLY_IO_OK : tls.SSL_get_verify_result(s) != 0 ? FLY_IO_UNTRUSTED : err == TLS_SYSCALL && errno ? io_error(errno) : FLY_IO_RESET;
+    tls.SSL_free(s);
+    close(fd);
+    *out = (fly_socket){ 0 };
+    return k;
+  }
+  out->tls = s;
+  return FLY_IO_OK;
+#endif
+}
+
 int fly_connect(fly_str host, uint16_t port, fly_socket* out) {
   world_load();
   *out = (fly_socket){ 0 };
@@ -2628,6 +2740,21 @@ int fly_sock_read(fly_socket* s, fly_slice buf, uint64_t* n) {
 #ifdef __wasm__
   return FLY_IO_PERMISSION_DENIED;
 #else
+  if (s->tls) {
+    int len = buf.len > 0x40000000 ? 0x40000000 : (int)buf.len;
+    for (;;) {
+      int k = tls.SSL_read(s->tls, buf.ptr, len);
+      if (k > 0) { *n = (uint64_t)k; return FLY_IO_OK; }
+      int err = tls.SSL_get_error(s->tls, k);
+      if (err == TLS_CLOSED) return FLY_IO_OK;
+      if (err == TLS_WANT_READ || err == TLS_WANT_WRITE) {
+        if (!tls_wait(s->fd - 1, err)) return FLY_IO_OK;
+        continue;
+      }
+      if (err == TLS_SYSCALL && errno == EINTR) continue;
+      return err == TLS_SYSCALL && errno ? io_error(errno) : FLY_IO_RESET;
+    }
+  }
   for (;;) {
     ssize_t k = read(s->fd - 1, buf.ptr, buf.len);
     if (k >= 0) { *n = (uint64_t)k; return FLY_IO_OK; }
@@ -2654,6 +2781,20 @@ int fly_sock_write(fly_socket* s, fly_slice bytes) {
   return FLY_IO_PERMISSION_DENIED;
 #else
   size_t done = 0;
+  // libssl writes all it is given, or nothing; after it asks to wait, it is given the same again.
+  while (s->tls && done < bytes.len) {
+    size_t left = bytes.len - done;
+    int len = left > 0x40000000 ? 0x40000000 : (int)left;
+    int k = tls.SSL_write(s->tls, (const uint8_t*)bytes.ptr + done, len);
+    if (k > 0) { done += (size_t)k; continue; }
+    int err = tls.SSL_get_error(s->tls, k);
+    if (err == TLS_WANT_READ || err == TLS_WANT_WRITE) {
+      if (!tls_wait(s->fd - 1, err)) return FLY_IO_OK;
+      continue;
+    }
+    if (err == TLS_SYSCALL && errno == EINTR) continue;
+    return err == TLS_SYSCALL && errno == EPIPE ? FLY_IO_BROKEN_PIPE : err == TLS_SYSCALL && errno ? io_error(errno) : FLY_IO_RESET;
+  }
   while (done < bytes.len) {
     ssize_t k = write(s->fd - 1, (const uint8_t*)bytes.ptr + done, bytes.len - done);
     if (k >= 0) { done += (size_t)k; continue; }
@@ -2719,6 +2860,12 @@ void fly_sock_close(fly_socket* s) {
     return;
   }
 #ifndef __wasm__
+  // A TLS session says it is ending, if it can at once, and is freed.
+  if (s->tls) {
+    tls.SSL_shutdown(s->tls);
+    tls.SSL_free(s->tls);
+    s->tls = NULL;
+  }
   close(s->fd - 1);
 #endif
   s->fd = 0;

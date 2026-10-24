@@ -149,7 +149,7 @@ function cLayout(c: str, ptr: usize): Option<[usize, usize]> {
     "fly_i128" => #Some([16, 16]),
     "fly_str" | "fly_slice" | "fly_yield" => #Some([2 * ptr, ptr]),
     "fly_String" | "fly_vec" | "fly_fn" | "fly_gen" | "fly_cont" | "fly_File" => #Some([3 * ptr, ptr]),
-    "fly_socket" => #Some([9 * ptr, ptr]),
+    "fly_socket" => #Some([10 * ptr, ptr]),
     "fly_map" => #Some([6 * ptr, ptr]),
     "fly_arena" => #Some([ptr, ptr]),
     _ => if (c.endsWith("*")) { #Some([ptr, ptr]) } else { #None },
@@ -2996,7 +2996,7 @@ _Static_assert(sizeof(fly_String) == ${p3} && sizeof(fly_vec) == ${p3} && __buil
 _Static_assert(sizeof(fly_fn) == ${p3} && __builtin_offsetof(fly_fn, drop) == ${ptr} && __builtin_offsetof(fly_fn, fn) == ${p2}, \"fly_fn\");
 _Static_assert(sizeof(fly_cont) == ${p3} && __builtin_offsetof(fly_cont, resume) == ${ptr} && __builtin_offsetof(fly_cont, drop) == ${p2}, \"fly_cont\");
 _Static_assert(sizeof(fly_yield) == ${p2} && __builtin_offsetof(fly_yield, fn) == ${ptr}, \"fly_yield\");
-_Static_assert(sizeof(fly_gen) == ${p3} && sizeof(fly_File) == ${p3} && sizeof(fly_socket) == ${9 * ptr} && sizeof(fly_map) == ${6 * ptr}, \"runtime structs\");
+_Static_assert(sizeof(fly_gen) == ${p3} && sizeof(fly_File) == ${p3} && sizeof(fly_socket) == ${10 * ptr} && sizeof(fly_map) == ${6 * ptr}, \"runtime structs\");
 _Static_assert(sizeof(fly_arena) == ${ptr} && sizeof(fly_chan) == 4 && sizeof(fly_Hasher) == 8 && _Alignof(fly_i128) == 16, \"runtime scalars\");
 `
 }

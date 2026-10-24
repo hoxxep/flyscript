@@ -437,7 +437,7 @@ export struct Fd { private n: u32 }
 export struct WaitKey { private n: u64 }
 // What can go wrong with I/O. `#Exists`: a path that is already there; `#NotEmpty`: a directory
 // removed with entries in it; `#Unsupported`: what the host cannot do, as a page cannot run programs.
-export type IoErr = #Reset | #TimedOut | #BrokenPipe | #NotFound | #PermissionDenied | #AddrInUse | #Refused | #Exists | #NotEmpty | #Unsupported;
+export type IoErr = #Reset | #TimedOut | #BrokenPipe | #NotFound | #PermissionDenied | #AddrInUse | #Refused | #Exists | #NotEmpty | #Unsupported | #Untrusted;
 
 impl<E> Fail<E> {
   export function capture<T, row R>(body: once () => T uses Fail<E>, ...R): Result<T, E> uses ...R;

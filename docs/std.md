@@ -7,7 +7,7 @@ This document specifies the standard library as [the language specification](spe
 Throughout:
 
 - **Effects are the contract.** A function with no `uses` clause is pure (spec §5.1): it observes nothing outside its arguments and allocates only what it returns. One that synchronizes with other tasks performs `Io` and is a *scheduling point*: another task may run there, and a cancellation may be delivered there (spec §6.1).
-- **Failures are typed.** `Fail<E>` lists what a function throws. `IoErr` is `#Reset | #TimedOut | #BrokenPipe | #NotFound | #PermissionDenied | #AddrInUse | #Refused`.
+- **Failures are typed.** `Fail<E>` lists what a function throws. `IoErr` is `#Reset | #TimedOut | #BrokenPipe | #NotFound | #PermissionDenied | #AddrInUse | #Refused | #Exists | #NotEmpty | #Unsupported | #Untrusted` (§1.8).
 - **Panics are bugs.** An index out of bounds, `unwrap()` of `#None`, integer overflow and heap exhaustion panic (spec §5.7); a function that can panic otherwise says when.
 - **Positions in text are byte offsets**, and text is UTF-8. A position inside a character, where a function would split one, panics.
 - **Complexity** is stated where it is a promise; *amortized* is over a sequence of calls on one value.
@@ -86,7 +86,7 @@ Every integer type has `wrappingAdd`, `wrappingSub` and `wrappingMul`, which wra
 
 `Fd` names a file or socket to `Io.read` and `Io.write`, and `WaitKey` names what `Io.park` waits for (spec §5.1). Their fields are private: library code makes and uses them, and programs use the library.
 
-`Io`'s other operations are the host's file system, process, clock and randomness, on which `std/fs`, `std/process` and `std/crypto` are built: `stat(path)`, `list(path)`, `mkdir(path)`, `remove(path)`, `rename(from, to)`, `env(name)`, `cwd()`, `run(program, args, input)`, `wall()` and `random(buf)`, which fills `buf` from the system's cryptographically secure generator (`getentropy`, WASI's `random_get`, `crypto.getRandomValues` in a page) — against a simulated world, with bytes of the world's seed, so that a run replays. A program, or a test, may handle any of them itself, as it may `Io`'s others: `handle { … } with Io { stat(p) resumes k => k(#Ok(fake)) }` answers `stat` and passes every other operation on. Each is a scheduling point. `Stat` is what is at a path: `size` in bytes, `dir`, and `modified`, in nanoseconds since 1970 began. `Output` is what a program that was run did: its exit `status`, and what it wrote to standard output, `out`, and standard error, `err`. `IoErr` is what can go wrong: `#Reset`, `#TimedOut`, `#BrokenPipe`, `#NotFound`, `#PermissionDenied`, `#AddrInUse`, `#Refused`, `#Exists` (something is already at a path), `#NotEmpty` (a directory removed with entries in it) and `#Unsupported` (what the host cannot do: WebAssembly runs no programs).
+`Io`'s other operations are the host's file system, process, clock and randomness, on which `std/fs`, `std/process` and `std/crypto` are built: `stat(path)`, `list(path)`, `mkdir(path)`, `remove(path)`, `rename(from, to)`, `env(name)`, `cwd()`, `run(program, args, input)`, `wall()` and `random(buf)`, which fills `buf` from the system's cryptographically secure generator (`getentropy`, WASI's `random_get`, `crypto.getRandomValues` in a page) — against a simulated world, with bytes of the world's seed, so that a run replays. A program, or a test, may handle any of them itself, as it may `Io`'s others: `handle { … } with Io { stat(p) resumes k => k(#Ok(fake)) }` answers `stat` and passes every other operation on. Each is a scheduling point. `Stat` is what is at a path: `size` in bytes, `dir`, and `modified`, in nanoseconds since 1970 began. `Output` is what a program that was run did: its exit `status`, and what it wrote to standard output, `out`, and standard error, `err`. `IoErr` is what can go wrong: `#Reset`, `#TimedOut`, `#BrokenPipe`, `#NotFound`, `#PermissionDenied`, `#AddrInUse`, `#Refused`, `#Exists` (something is already at a path), `#NotEmpty` (a directory removed with entries in it), `#Unsupported` (what the host cannot do: WebAssembly runs no programs) and `#Untrusted` (a TLS peer whose certificate the system does not trust for the host).
 
 ### 1.9 Iteration
 
@@ -345,16 +345,33 @@ A connection. A `Socket` is `Send` and has one owner, so it is never read by one
 | Function | Contract |
 | :--- | :--- |
 | `Socket.connect(host, port): Socket` | Connects to `host`, a name or an address, on `port`, trying each address the name has in turn. `#NotFound` if the name does not resolve, `#Refused` if nothing listens, `#TimedOut`. Resolving a name may hold the task's core while the system's resolver answers. |
+| `Socket.connectTls(host, port): Socket` | Connects as `connect` does, then speaks TLS 1.2 or later through OpenSSL's libssl, found as `std/crypto` finds libcrypto (`FLY_LIBSSL`): the name is sent as SNI, and the peer's certificate must be valid for `host` — a name, or an address — and chain to a root the system trusts, or to those `SSL_CERT_FILE` and `SSL_CERT_DIR` name; else `#Untrusted`. What it reads and writes is the plaintext. |
 | `s.read(buf): usize` | Reads what has arrived, at most `buf.len()` bytes, waiting for at least one; `0` once the other end has sent all it will. `#Reset`, `#TimedOut`. |
 | `s.write(bytes)` | Writes all of `bytes`, waiting as the other end takes them. `#BrokenPipe` once it has gone, `#Reset`. |
 | `s.writeStatus(code, body)` | Writes a whole HTTP/1.1 response: status `code`, `Content-Length`, `Connection: close`, and `body`. |
 | `s.close()` | Closes the connection; dropping a socket closes it too. |
 
-Against a simulated world, a listener's connections are the world's requests, a connection to `host` on `port` reaches the world's peer of that name, which answers what the world says it does (`#Refused` if the world has none), and what a program writes to a connection is its output, shown when the connection closes.
+Against a simulated world, a listener's connections are the world's requests, a connection to `host` on `port` — with TLS or without, which the world's peers speak in the clear — reaches the world's peer of that name, which answers what the world says it does (`#Refused` if the world has none), and what a program writes to a connection is its output, shown when the connection closes.
 
 ---
 
-## 12. `std/par`
+## 12. `std/http`
+
+An HTTP/1.1 client over `std/net`, written in Flyscript: `http` URLs over TCP and `https` over `connectTls`, one request a connection (`Connection: close`). Every function performs `Io`, and against a simulated world talks to its peers, which a test describes, as `std/net` does.
+
+| | Contract |
+| :--- | :--- |
+| `get(url): Response` | `request("GET", url, [], [])`. |
+| `request(method, url, headers, body): Response` | Sends `method` for `url` with `Host`, `User-Agent: flyscript` and `Accept-Encoding: identity` unless `headers` has its own, `Connection: close`, each of `headers`, and `Content-Length` if there is a body or the method is `POST`, `PUT` or `PATCH`; reads the response, by its `Content-Length`, chunked (`Transfer-Encoding`), or to the end; and follows up to ten redirects, 301, 302 and 303 as `GET`s without the body (a `HEAD` stays one), 307 and 308 as they were, to a URL, a path on the same host, or one relative to the last. `#TooManyRedirects` past ten; `#Io(e)` for what `std/net` throws; `#BadResponse(why)` for a response that is not HTTP/1, ends before its head or its length, or has a header line without a `:`; `#BadUrl(why)` for a URL `parseUrl` refuses, or a header with a line break in it. |
+| `parseUrl(url): Url` | `http://` or `https://`, a host — a name, an address, an IPv6 address in brackets — an optional port from 1 to 65535, and the target, its path and query, `/` if there is none, the fragment left out. A URL with credentials in it, `user@host`, is refused, as they would be sent in the clear. |
+| `Url` | `{ https, host, port, target }`. |
+| `Header` | `{ name, value }`. |
+| `Response` | `status`, `headers` in the order they came, `body` as bytes, and `url`, where it came from after any redirects; `header(name)`, the first value of that name, ignoring ASCII case; `text()`, the body as UTF-8, each byte that begins no UTF-8 sequence as U+FFFD. |
+| `HttpErr` | `#BadUrl(why) \| #Io(IoErr) \| #BadResponse(why) \| #TooManyRedirects`. |
+
+---
+
+## 13. `std/par`
 
 Data parallelism over pure closures (spec §6.5).
 
@@ -365,19 +382,19 @@ Data parallelism over pure closures (spec §6.5).
 
 ---
 
-## 13. `std/layout`
+## 14. `std/layout`
 
 `Soa<T>` keeps a struct's fields in planes, one for each field: a `Vec` for a scalar field and a nested `Soa` for a struct field (spec §7.4). It has `Soa.new()`, `push(v)`, `len()`, `at(i)`, a `SoaView` that lends each field of one element, and `splitAt(at)`; `SoaSlice`, `SoaView` and `SoaRead` are its `ParSplit` views.
 
 ---
 
-## 14. `std/region`
+## 15. `std/region`
 
 Mutable slots in a region (spec §4.6). `Cell<R, T extends Copy>`: `Cell.new(v)`, `c.get()`, `c.set(v)`. `RegionList<R, T>`: `RegionList.new()`, `push(v)`, `len()`, and iteration. Both are handles, `Copy`; reading and writing through one performs `Region<R>`.
 
 ---
 
-## 15. `std/json`
+## 16. `std/json`
 
 JSON as library code (spec §7.5).
 
@@ -388,12 +405,12 @@ JSON as library code (spec §7.5).
 
 ---
 
-## 16. `std/world`
+## 17. `std/world`
 
 Services only a simulated world provides (spec §6.4), for examples and tests: `Db.connect(): Db`; `db.fetchProfile(user): Profile`, where a `Profile` is `{ displayName: String }`, failing with `#NotFound` for a user the world does not know; and `db.checkQuota(token): Quota`, where a `Quota` is `{ allowed: bool }`. Each performs `Io` and may fail as the world's faults say.
 
 ---
 
-## 17. The web framework
+## 18. The web framework
 
 The web framework, FlyNext, is a package shipped with the compiler and specified in [web/README.md](../web/README.md): `web/http` (requests, responses and `serve`), `web/ui` (the `Ui<M>` effect, links, components and HTML), `web/dom` (pages in the browser), `web/router` (routes and their parameters) and `web/site` (pages and files answered), with the app compiler `web/flynext`.

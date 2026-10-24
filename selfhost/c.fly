@@ -1491,7 +1491,7 @@ impl Cgen {
 
   // Statements raising the `IoErr` whose code, a runtime `FLY_IO_…`, is the C expression `code`.
   function ioRaise(self: mut Self, code: str): String {
-    const names = ["Reset", "TimedOut", "BrokenPipe", "NotFound", "PermissionDenied", "AddrInUse", "Refused"];
+    const names = ["Reset", "TimedOut", "BrokenPipe", "NotFound", "PermissionDenied", "AddrInUse", "Refused", "Untrusted"];
     let pick = String.new();
     for (const [i, n] of names.iter().enumerate()) { pick.push(`(${code}) == ${i + 1} ? ${self.tagId(n)} : `); }
     pick.push(`${self.tagId("Reset")}`);
@@ -2146,6 +2146,10 @@ impl Cgen {
       "Socket_connect" => {
         const raise = self.ioRaise("e_");
         `({ fly_socket s_; int e_ = fly_connect(${arg(0)}, ${arg(1)}, &s_); if (e_) { ${raise}} s_; })`
+      }
+      "Socket_connectTls" => {
+        const raise = self.ioRaise("e_");
+        `({ fly_socket s_; int e_ = fly_connect_tls(${arg(0)}, ${arg(1)}, &s_); if (e_) { ${raise}} s_; })`
       }
       "Socket_read" => {
         const raise = self.ioRaise("e_");

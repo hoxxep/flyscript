@@ -1,6 +1,6 @@
 # Roadmap
 
-Flyscript compiled itself, to JavaScript and to C, when this roadmap was written. Its steps take it from a self-hosted language to a systems platform: one intermediate form under every back end, kernels, LLVM, WebAssembly, every core of the machine, and a web framework that shows what all of it buys. Steps 0 to 9 are done, and each says what was built; the others are next.
+Flyscript compiled itself, to JavaScript and to C, when this roadmap was written. Its steps take it from a self-hosted language to a systems platform: one intermediate form under every back end, kernels, LLVM, WebAssembly, every core of the machine, and a web framework that shows what all of it buys. Steps 0 to 10 are done, and each says what was built; the others are next.
 
 ## 0. One core IR under every back end
 
@@ -98,17 +98,14 @@ The proof covers λ-fly; the compiler's checker was held to it by tests alone. N
 
 ## 10. The standard library, filled out
 
-*Next.*
+*Done: files, processes, time zones, Unicode, regular expressions, an HTTP client over TLS and cryptography, each specified in [std.md](std.md) and tested on every back end its host allows, against handlers of its own and against the real system.*
 
-What programs need beyond the core, each part an effect or a pure library, so that a test handles the clock, the files or the network itself, with no mocking library, and the browser and WASI map it to their host as they map `Io`:
-
-- Files, directories and processes: paths, walking a directory, metadata, the environment, and child processes with pipes.
-- Time: a monotonic clock, the time of day, durations, and time zones from the system's tz database, written and read as ISO 8601.
-- Unicode: text that is always valid UTF-8, iterated by code point or by grapheme, normalized, and mapped between cases.
-- Regular expressions that run in time linear in their input, as RE2's do, written in Flyscript: with no backtracking, no input makes one run for ever.
-- An HTTP client over `std/net`, with TLS through bindings to an audited library.
-- Cryptography through bindings to the same library: hashes, HMAC, authenticated encryption, signatures and secure random numbers.
-- Done when each part is specified in [std.md](std.md), runs on every back end its host allows, and is tested against handlers of its own and against the real system.
+- Files, directories and processes are `Io`'s own operations — `stat`, `list`, `mkdir`, `remove`, `rename`, `env`, `cwd`, `run` — so a test answers them in a handler, or the reference simulates a file system for it; `std/fs` walks trees and `std/process` runs programs, given what they read, and gives back what they wrote.
+- `std/time` reads zones from the system's tz database, RFC 8536's files and POSIX's rules after their last change, and writes and reads ISO 8601. `Io.wall` is the time of day, virtual against a simulated world.
+- `std/unicode` iterates code points and grapheme clusters by UAX #29, normalizes to NFC and NFD, and maps cases, from tables of Unicode 18.0.0 that `tools/unicode.py` writes; it passes Unicode's own tests of clusters and of normalization.
+- `std/regex`, in Flyscript, compiles RE2's syntax to a program that a Pike VM runs, every thread at once, so a search takes time linear in its text: no pattern makes one backtrack. It finds what RE2 finds, leftmost-first, groups and all, in 9000 cases written by `tools/regex-cases` with Rust's `regex` crate, after 129,000 checked; a literal prefix and the bytes a match can start with let it skip what cannot match.
+- `std/crypto` binds OpenSSL's libcrypto, loaded when first used natively and by the reference, Node's in JavaScript and under WASI, WebCrypto in a page: SHA-2, HMAC, HKDF, AES-256-GCM and Ed25519, each pure, and secure random bytes as `Io.random`, which a simulated world gives from its seed so that a run replays. Each host passes the standards' own test vectors.
+- `std/http`, in Flyscript, is an HTTP/1.1 client over `std/net`, with `Socket.connectTls` through libssl, the certificate checked against the system's roots for the host; it is tested against a simulated world's peers on every back end and, natively, against a real TLS server.
 
 ## 11. Packages, a lockfile and `fly`
 

@@ -887,6 +887,8 @@ const { $rt, $b } = (() => {
       if (input === undefined) throw new Fail({ $tag: "Refused" });
       return { input, pos: 0, peer };
     },
+    // A simulated world's peers answer in the clear, as if TLS were there.
+    Socket_connectTls(host, port) { return $b.Socket_connect(host, port); },
     Socket_read(r, buf) {
       if (fault()) throw new Fail({ $tag: "TimedOut" });
       const sock = r.v, cells = buf.v, n = Math.min(cells.length, sock.input.length - sock.pos);
