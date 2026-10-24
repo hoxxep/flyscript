@@ -1,25 +1,29 @@
-// Checks a program as `flyc check` does — types and effects, then, if they are sound, ownership —
-// printing its diagnostics in the form the tests compare with the Rust prototype's:
-// `main(entry, std)`.
+// Checks programs as `flyc check` does — types and effects, then, if they are sound, ownership —
+// printing each one's diagnostics in the form the tests compare with the Rust prototype's, after a
+// line `program <entry>`: `main(std, entries...)`. Each is checked as a program of its own, many to
+// a run only because starting Node is most of what checking a small one costs.
 
 import { Program } from "./env";
 import { checkFn } from "./check";
 import { checkOwnership } from "./own";
 import { println } from "std/io";
 
-export function main(entry: str, std: str): void uses Io {
-  let p = Program.load([entry.toString()], std);
-  let fid: usize = 0;
-  while (fid < p.fns.len()) {
-    checkFn(mut p, fid);
-    fid += 1;
-  }
-  // Ownership needs well-typed bodies.
-  if (p.diags.len() == 0) {
-    for (const f of 0..p.fns.len()) { checkOwnership(mut p, f); }
-  }
-  for (const [m, d] of p.diags) {
-    const #Diagnostic { span, message } = d;
-    println(`error ${m} ${span.start}..${span.end}: ${message}`);
+export function main(std: str, entries: readonly String[]): void uses Io {
+  for (const entry of entries) {
+    println(`program ${entry}`);
+    let p = Program.load([entry.toString()], std);
+    let fid: usize = 0;
+    while (fid < p.fns.len()) {
+      checkFn(mut p, fid);
+      fid += 1;
+    }
+    // Ownership needs well-typed bodies.
+    if (p.diags.len() == 0) {
+      for (const f of 0..p.fns.len()) { checkOwnership(mut p, f); }
+    }
+    for (const [m, d] of p.diags) {
+      const #Diagnostic { span, message } = d;
+      println(`error ${m} ${span.start}..${span.end}: ${message}`);
+    }
   }
 }

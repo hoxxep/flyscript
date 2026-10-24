@@ -11,6 +11,9 @@ use std::process::Command;
 use flyscript::check::check_files;
 use flyscript::eval::{Value, World, run};
 
+mod common;
+use common::on_every_core;
+
 fn root() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR"))
 }
@@ -40,6 +43,24 @@ fn has_node() -> bool {
 fn compile(compiler: &Path, entry: &Path, js: &Path) {
     let r = Command::new("node").arg("--stack-size=65500").arg(compiler).arg(entry).arg(js).arg(root()).output().unwrap();
     assert!(r.status.success() && r.stdout.is_empty(), "{}{}", String::from_utf8_lossy(&r.stdout), String::from_utf8_lossy(&r.stderr));
+}
+
+/// The machine, held by a test that keeps every core busy for its whole run. Two such at once take
+/// no less time than one after the other, and more: on macOS the hundreds of processes they make
+/// between them, many under the address sanitizer, spend most of their time in the kernel.
+fn every_core() -> std::sync::MutexGuard<'static, ()> {
+    static MACHINE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    MACHINE.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// The C the seed makes of the compiler, made once for the tests that compare with it.
+fn seed_c() -> &'static Path {
+    static MADE: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    MADE.get_or_init(|| {
+        let c = out().join("seed-self.c");
+        compile(&root().join("selfhost/seed.js"), &root().join("selfhost/main.fly"), &c);
+        c
+    })
 }
 
 #[test]
@@ -73,17 +94,22 @@ fn compiles_itself_natively() {
         return;
     }
     let main = root().join("selfhost/main.fly");
-    let c = out().join("native.c");
-    compile(&root().join("selfhost/seed.js"), &main, &c);
+    let c = seed_c();
     let exe = out().join("native");
-    let built = cc().args(["-std=gnu11", "-O1", "-w", "-o"]).arg(&exe).arg(&c).arg("-lm").output().unwrap();
+    let built = cc().args(["-std=gnu11", "-O1", "-w", "-o"]).arg(&exe).arg(c).arg("-lm").output().unwrap();
     assert!(built.status.success(), "{}", String::from_utf8_lossy(&built.stderr));
-    for (name, want) in [("native-again.c", &c), ("native.js", &root().join("selfhost/seed.js"))] {
-        let again = out().join(name);
-        let r = Command::new(&exe).arg(&main).arg(&again).arg(root()).output().unwrap();
-        assert!(r.status.success() && r.stdout.is_empty(), "{}{}", String::from_utf8_lossy(&r.stdout), String::from_utf8_lossy(&r.stderr));
-        assert!(std::fs::read(&again).unwrap() == std::fs::read(want).unwrap(), "the native compiler makes other than {}", want.display());
-    }
+    let seed = root().join("selfhost/seed.js");
+    std::thread::scope(|s| {
+        for (name, want) in [("native-again.c", c), ("native.js", &seed)] {
+            let (exe, main) = (&exe, &main);
+            s.spawn(move || {
+                let again = out().join(name);
+                let r = Command::new(exe).arg(main).arg(&again).arg(root()).output().unwrap();
+                assert!(r.status.success() && r.stdout.is_empty(), "{}{}", String::from_utf8_lossy(&r.stdout), String::from_utf8_lossy(&r.stderr));
+                assert!(std::fs::read(&again).unwrap() == std::fs::read(want).unwrap(), "the native compiler makes other than {}", want.display());
+            });
+        }
+    });
 }
 
 /// `std/time` reads the machine's own tz database: zones as their files say, their changes and the
@@ -274,7 +300,15 @@ fn compiles_again_as_its_modules_change() {
     std::fs::write(&lib, "export function greet(name: str): String { `hello ${name}` }\n").unwrap();
     let c = dir.join("out.c");
     let log = dir.join("watch.log");
-    let mut child = Command::new("node")
+    // Stopped however the test ends: the compiler watches until it is killed.
+    struct Watching(std::process::Child);
+    impl Drop for Watching {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let compiler = Command::new("node")
         .arg("--stack-size=65500")
         .arg(root().join("selfhost/seed.js"))
         .arg(dir.join("main.fly"))
@@ -284,6 +318,7 @@ fn compiles_again_as_its_modules_change() {
         .stderr(std::fs::File::create(&log).unwrap())
         .spawn()
         .unwrap();
+    let _watching = Watching(compiler);
     // Waits until the log has `n` lines and the last says `what`, then runs the C if it changed.
     let step = |n: usize, what: &str, want: Option<&str>| {
         let start = std::time::Instant::now();
@@ -315,8 +350,6 @@ fn compiles_again_as_its_modules_change() {
     std::fs::write(&lib, "export function greet(name: str): String { exclaim(`bye ${name}`) }\nexport function exclaim(s: String): String { `${s}!` }\n").unwrap();
     let lines = std::fs::read_to_string(&log).unwrap().lines().count();
     step(lines + 1, "compiled from scratch", Some("bye world!\n"));
-    child.kill().unwrap();
-    let _ = child.wait();
 }
 
 /// The slowest check, the interpreter running the whole compiler on itself: run it with
@@ -359,6 +392,34 @@ fn programs() -> Vec<PathBuf> {
     programs
 }
 
+/// Runs a driver of the self-hosted checker, `main(std, entries...)`, over every program, and gives
+/// `differs` each program with the lines printed after its `program <entry>`. A Node process takes
+/// a core's share of the programs: starting one costs more than checking a small program.
+fn compare_each(driver: &Path, differs: impl Fn(&Path, Vec<String>) -> Option<String> + Sync) -> Vec<String> {
+    let programs = programs();
+    let cores = std::thread::available_parallelism().map_or(4, |n| n.get());
+    let shares: Vec<&[PathBuf]> = programs.chunks(programs.len().div_ceil(cores)).collect();
+    on_every_core(&shares, |share| {
+        let r = Command::new("node").arg("--stack-size=65500").arg(driver).arg(root().join("std")).args(*share).output().unwrap();
+        assert!(r.status.success(), "{}: {}", driver.display(), String::from_utf8_lossy(&r.stderr));
+        let mut printed: Vec<Vec<String>> = Vec::new();
+        for line in String::from_utf8_lossy(&r.stdout).lines() {
+            match line.strip_prefix("program ") {
+                Some(entry) => {
+                    assert_eq!(Path::new(entry), share[printed.len()]);
+                    printed.push(Vec::new());
+                }
+                None => printed.last_mut().expect("a line before any program").push(line.to_string()),
+            }
+        }
+        assert_eq!(printed.len(), share.len(), "{} stopped early", driver.display());
+        share.iter().zip(printed).filter_map(|(f, lines)| differs(f, lines)).collect::<Vec<String>>()
+    })
+    .into_iter()
+    .flatten()
+    .collect()
+}
+
 /// The self-hosted checker reports what the Rust prototype's reports: `flyc check` and
 /// selfhost/typecheck.fly print the same diagnostics, of types and effects and then of ownership.
 /// Ownership's are compared as a set: each pass meets some bindings in a hash map's order.
@@ -369,9 +430,9 @@ fn checks_as_flyc_does() {
     }
     let typecheck = out().join("typecheck.js");
     compile(&root().join("selfhost/seed.js"), &root().join("selfhost/typecheck.fly"), &typecheck);
-    let mut differ = Vec::new();
-    for f in programs() {
-        let mut p = flyscript::check::env::Program::load(std::slice::from_ref(&f));
+    let _machine = every_core();
+    let differ = compare_each(&typecheck, |f, mut ours| {
+        let mut p = flyscript::check::env::Program::load(&[f.to_path_buf()]);
         let mut fid = 0;
         while fid < p.fns.len() {
             flyscript::check::expr::check_fn(&mut p, fid);
@@ -383,14 +444,10 @@ fn checks_as_flyc_does() {
             }
         }
         let mut rust: Vec<String> = p.diags.iter().map(|(m, d)| format!("error {m} {}..{}: {}", d.span.start, d.span.end, d.message)).collect();
-        let js = Command::new("node").arg("--stack-size=65500").arg(&typecheck).arg(&f).arg(root().join("std")).output().unwrap();
-        let mut ours: Vec<String> = String::from_utf8_lossy(&js.stdout).lines().map(str::to_string).collect();
         rust.sort();
         ours.sort();
-        if ours != rust {
-            differ.push(format!("{}\n  flyc: {rust:?}\n  ours: {ours:?}", f.display()));
-        }
-    }
+        (ours != rust).then(|| format!("{}\n  flyc: {rust:?}\n  ours: {ours:?}", f.display()))
+    });
     assert!(differ.is_empty(), "checked differently:\n{}", differ.join("\n"));
 }
 
@@ -403,14 +460,11 @@ fn elaborates_as_flyc_does() {
     }
     let schemes = out().join("schemes.js");
     compile(&root().join("selfhost/seed.js"), &root().join("selfhost/schemes.fly"), &schemes);
-    let mut differ = Vec::new();
-    for f in programs() {
-        let rust = flyscript::check::env::describe(&flyscript::check::env::Program::load(std::slice::from_ref(&f))).join("\n");
-        let js = Command::new("node").arg("--stack-size=65500").arg(&schemes).arg(&f).arg(root().join("std")).output().unwrap();
-        if String::from_utf8_lossy(&js.stdout).trim_end() != rust {
-            differ.push(f.display().to_string());
-        }
-    }
+    let _machine = every_core();
+    let differ = compare_each(&schemes, |f, ours| {
+        let rust = flyscript::check::env::describe(&flyscript::check::env::Program::load(&[f.to_path_buf()])).join("\n");
+        (ours.join("\n").trim_end() != rust).then(|| f.display().to_string())
+    });
     assert!(differ.is_empty(), "elaborated differently:\n{}", differ.join("\n"));
 }
 
@@ -421,6 +475,7 @@ fn compiled_programs_run_as_expected() {
     if !has_node() {
         return;
     }
+    let _machine = every_core();
     let r = Command::new("sh").arg(root().join("selfhost/corpus.sh")).arg(root().join("selfhost/seed.js")).args(suite(&["tests/run", "tests/web"])).output().unwrap();
     let report = String::from_utf8_lossy(&r.stdout);
     let failed: Vec<&str> = report.lines().filter_map(|l| l.strip_prefix("FAIL ")).collect();
@@ -434,6 +489,7 @@ fn native_programs_run_as_expected() {
     if !has_node() || !has_cc() {
         return;
     }
+    let _machine = every_core();
     // The run suite, and the programs that run only natively: those with raw memory and C (§8.2).
     let mut files: Vec<PathBuf> = Vec::new();
     for dir in ["tests/run", "tests/web", "tests/native"] {
@@ -480,6 +536,7 @@ fn wasm_programs_run_as_expected() {
     if !has_wasm() {
         return;
     }
+    let _machine = every_core();
     let r = Command::new("sh").arg(root().join("selfhost/corpus.sh")).arg("--wasm").arg(root().join("selfhost/seed.js")).args(suite(&["tests/run", "tests/web"])).output().unwrap();
     let report = String::from_utf8_lossy(&r.stdout);
     let failed: Vec<&str> = report.lines().filter_map(|l| l.strip_prefix("FAIL ")).collect();
@@ -492,17 +549,17 @@ fn compiles_itself_in_wasm() {
     if !has_wasm() {
         return;
     }
-    let dir = out();
-    let wasm = dir.join("flyc.wasm");
+    let wasm = out().join("flyc.wasm");
+    // The C to compare with is made meanwhile.
+    let want = std::thread::spawn(seed_c);
     let built = Command::new("sh").arg(root().join("selfhost/wasm.sh")).arg(root().join("selfhost/seed.js")).arg(root().join("selfhost/main.fly")).arg(&wasm).output().unwrap();
     assert!(built.status.success(), "{}", String::from_utf8_lossy(&built.stderr));
     // WASI reaches only the working directory: the compiler writes its C there.
     let made = "target/selfhost-test/wasm-self.c";
     let r = Command::new("node").args(["--no-warnings", "--stack-size=65500"]).arg(root().join("selfhost/wasm.js")).arg(&wasm).args(["selfhost/main.fly", made, "."]).current_dir(root()).output().unwrap();
     assert!(r.status.success() && r.stdout.is_empty(), "{}{}", String::from_utf8_lossy(&r.stdout), String::from_utf8_lossy(&r.stderr));
-    let want = dir.join("seed-self.c");
-    compile(&root().join("selfhost/seed.js"), &root().join("selfhost/main.fly"), &want);
-    assert!(std::fs::read(root().join(made)).unwrap() == std::fs::read(&want).unwrap(), "the compiler in WebAssembly made other C than the seed");
+    let want = want.join().unwrap();
+    assert!(std::fs::read(root().join(made)).unwrap() == std::fs::read(want).unwrap(), "the compiler in WebAssembly made other C than the seed");
 }
 
 /// LLVM's tools, where `selfhost/llvm.sh` finds them: `LLVM_BIN`, or Homebrew's llvm.
@@ -520,6 +577,7 @@ fn llvm_programs_run_as_expected() {
     if !has_llvm() {
         return;
     }
+    let _machine = every_core();
     let mut files: Vec<PathBuf> = Vec::new();
     for dir in ["tests/run", "tests/web", "tests/native"] {
         let mut fs: Vec<PathBuf> = std::fs::read_dir(root().join(dir)).unwrap().map(|e| e.unwrap().path()).filter(|f| f.extension().is_some_and(|e| e == "fly")).collect();
@@ -609,18 +667,26 @@ fn compiles_itself_through_llvm() {
     let dir = out();
     let exe = dir.join("flyc-llvm");
     let main = root().join("selfhost/main.fly");
-    let built = Command::new("sh").arg(root().join("selfhost/llvm.sh")).arg(root().join("selfhost/seed.js")).arg(&main).arg(&exe).output().unwrap();
+    // What to compare with is made while the compiler is built.
+    let built = std::thread::scope(|s| {
+        s.spawn(|| compile(&root().join("selfhost/seed.js"), &main, &dir.join("seed-llvm.ll")));
+        Command::new("sh").arg(root().join("selfhost/llvm.sh")).arg(root().join("selfhost/seed.js")).arg(&main).arg(&exe).output().unwrap()
+    });
     assert!(built.status.success(), "{}{}", String::from_utf8_lossy(&built.stdout), String::from_utf8_lossy(&built.stderr));
-    compile(&root().join("selfhost/seed.js"), &main, &dir.join("seed-llvm.ll"));
     let seed = root().join("selfhost/seed.js");
     let checks = [("llvm-self.ll", vec![(dir.join("llvm-self.ll"), dir.join("seed-llvm.ll")), (dir.join("llvm-self.c"), dir.join("seed-llvm.c"))]), ("llvm-self.js", vec![(dir.join("llvm-self.js"), seed)])];
-    for (made, pairs) in checks {
-        let r = Command::new(&exe).arg(&main).arg(dir.join(made)).arg(root()).output().unwrap();
-        assert!(r.status.success() && r.stdout.is_empty(), "{}{}", String::from_utf8_lossy(&r.stdout), String::from_utf8_lossy(&r.stderr));
-        for (got, want) in pairs {
-            assert!(std::fs::read(&got).unwrap() == std::fs::read(&want).unwrap(), "the compiler built through LLVM makes other than {}", want.display());
+    std::thread::scope(|s| {
+        for (made, pairs) in checks {
+            let (exe, main, dir) = (&exe, &main, &dir);
+            s.spawn(move || {
+                let r = Command::new(exe).arg(main).arg(dir.join(made)).arg(root()).output().unwrap();
+                assert!(r.status.success() && r.stdout.is_empty(), "{}{}", String::from_utf8_lossy(&r.stdout), String::from_utf8_lossy(&r.stderr));
+                for (got, want) in pairs {
+                    assert!(std::fs::read(&got).unwrap() == std::fs::read(&want).unwrap(), "the compiler built through LLVM makes other than {}", want.display());
+                }
+            });
         }
-    }
+    });
 }
 
 /// The programs of tests/threads print the same however their tasks interleave: against the
@@ -631,14 +697,16 @@ fn threaded_programs_run_as_expected() {
     if !has_node() || !has_cc() {
         return;
     }
+    let _machine = every_core();
     let mut files: Vec<PathBuf> = std::fs::read_dir(root().join("tests/threads")).unwrap().map(|e| e.unwrap().path()).filter(|f| f.extension().is_some_and(|e| e == "fly")).collect();
     files.sort();
     let mut ways: Vec<&[&str]> = vec![&[], &["--c"], &["--c", "--threads"]];
     if has_llvm() {
         ways.push(&["--llvm", "--threads"]);
     }
-    for way in ways {
-        let r = Command::new("sh").arg(root().join("selfhost/corpus.sh")).args(way).arg(root().join("selfhost/seed.js")).args(&files).output().unwrap();
+    // Each way has fewer programs than there are cores: the ways run at once.
+    let reports = on_every_core(&ways, |way| Command::new("sh").arg(root().join("selfhost/corpus.sh")).args(*way).arg(root().join("selfhost/seed.js")).args(&files).output().unwrap());
+    for (way, r) in ways.iter().zip(reports) {
         let report = String::from_utf8_lossy(&r.stdout);
         let failed: Vec<&str> = report.lines().filter_map(|l| l.strip_prefix("FAIL ")).collect();
         assert!(failed.is_empty(), "failed ({way:?}):\n{}", failed.join("\n"));

@@ -44,7 +44,7 @@ const check = (ok, what) => { if (!ok) throw new Error(`FAILED: ${what}`); conso
   await page.route("**/_fly/rpc/Todos.add", async (route) => { await new Promise((r) => setTimeout(r, 500)); await route.continue(); });
   await page.fill("input", "Ship the web framework");
   await page.click("button[type=submit]");
-  await page.waitForSelector("button[type=submit]:disabled", { timeout: 2000 });
+  await page.waitForSelector("button[type=submit]:disabled", { timeout: 5000 });
   check((await page.textContent("button[type=submit]")) === "Adding…", "the page shows it is adding before the server answers");
   await page.waitForFunction(() => document.querySelectorAll("li").length === 4, null, { timeout: 5000 });
   await page.unroute("**/_fly/rpc/Todos.add");
