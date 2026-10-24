@@ -1,0 +1,39 @@
+// std/regex against what Rust's `regex` crate, of RE2's semantics, finds in the same cases:
+// `conformance cases.txt` prints how many agree, and the first that do not (tools/regex-cases).
+import { File, println } from "std/io";
+import { Regex, Match } from "std/regex";
+
+function unescape(s: str): String { s.replaceAll("%0A", "\n").replaceAll("%09", "\t").replaceAll("%25", "%") }
+
+function span(m: readonly Option<Match>): String {
+  match (m) { #Some(m) => `${m.start}-${m.end}`, #None => "-".toString() }
+}
+
+export function main(cases: str): void uses Io, Fail<IoErr> {
+  let pass: usize = 0;
+  let fail: usize = 0;
+  let f = File.open(cases);
+  for (const line of f.lines()) {
+    const fields = line.split("\t");
+    const pattern = unescape(fields[0].asStr());
+    const text = unescape(fields[1].asStr());
+    let got = String.new();
+    try {
+      const re = Regex.new(pattern.asStr());
+      for (const c of re.capturesAll(text.asStr())) {
+        if (got.len() > 0) { got.push(";"); }
+        for (const [g, m] of c.iter().enumerate()) {
+          if (g > 0) { got.push(","); }
+          got.push(span(m).asStr());
+        }
+      }
+    } catch (e) {
+      got = `${e}`;
+    }
+    if (got == fields[2]) { pass += 1; } else {
+      fail += 1;
+      if (fail <= 10) { println(`failure: ${pattern} on ${text}: want ${fields[2]}, got ${got}`); }
+    }
+  }
+  println(`regex ${pass}/${pass + fail}`);
+}

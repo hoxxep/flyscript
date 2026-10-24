@@ -1,0 +1,73 @@
+// expect: true false
+// expect: #Some({ end: 17, start: 5 }) nick@fly.dev
+// expect: nick fly.dev 2 #Some(2) #None
+// expect: [3, 4] [9, 10]
+// expect: fly.dev:nick, example.org:ada; $
+// expect: a|b|c||d
+// expect: a|b
+// expect: Ⅻ ΣΊΣΥΦΟΣ k K K
+// expect: 2026-10-24 2027-01-01
+// expect: false 0
+// expect: a$b ${x [x] [] $
+// expect: #BadRegex([3, "a repetition of a repetition"])
+// expect: #BadRegex([0, "an unclosed `(`"])
+// expect: #BadRegex([3, "backreferences are not supported: no linear-time matcher has them"])
+// expect: #BadRegex([0, "an unknown Unicode category"])
+// Regular expressions (std/regex): RE2's syntax, in time linear in the text, and Unicode's case
+// folding and categories.
+import { println } from "std/io";
+import { Regex, RegexErr, Match } from "std/regex";
+
+function show(text: str, m: readonly Option<Match>): str from text {
+  match (m) { #Some(m) => text.slice(m.start, m.end), #None => "" }
+}
+
+function compiles(pattern: str): void uses Io {
+  try { Regex.new(pattern); println("compiled"); } catch (e) { println(`${e}`); }
+}
+
+export function main(): void uses Io, Fail<RegexErr> {
+  const email = Regex.new("(?P<user>\\w+)@(?<host>[a-z]+(?:\\.[a-z]+)+)");
+  println(`${email.isMatch("write to nick@fly.dev")} ${email.isMatch("no address")}`);
+  const text = "mail nick@fly.dev now";
+  const m = email.find(text);
+  println(`${m} ${show(text, m)}`);
+  const c = email.captures(text).unwrap();
+  println(`${show(text, c[1])} ${show(text, c[2])} ${email.groups()} ${email.groupIndex("host")} ${email.groupIndex("nobody")}`);
+  // Empty matches: none right where the last match ended.
+  let spans: Vec<[usize, usize]> = Vec.new();
+  for (const n of Regex.new("\\d+").findAll("ab 1 two 3")) { spans.push([n.start, n.end]); }
+  println(`${spans[0]} ${spans[1]}`);
+  println(email.replaceAll("nick@fly.dev, ada@example.org; $", "${host}:$user"));
+  let parts: Vec<String> = Vec.new();
+  for (const p of Regex.new(",\\s*").split("a, b,c,,d")) { parts.push(p.toString()); }
+  println(parts.join("|"));
+  let pieces: Vec<String> = Vec.new();
+  for (const p of Regex.new("x*").split("ab")) { pieces.push(p.toString()); }
+  println(pieces.join("|"));
+  // Case is folded by Unicode's orbits — `k`, `K` and the Kelvin sign are one — and categories
+  // are Unicode's.
+  const roman = Regex.new("\\p{Nl}+").find("year Ⅻ").unwrap();
+  const sigma = Regex.new("(?i)σίσυφος").find("ΣΊΣΥΦΟΣ").unwrap();
+  let folds: Vec<String> = Vec.new();
+  const ks = "k K \u{212A}";
+  for (const k of Regex.new("(?i)k").findAll(ks)) { folds.push(ks.slice(k.start, k.end).toString()); }
+  println(`${"year Ⅻ".slice(roman.start, roman.end)} ${"ΣΊΣΥΦΟΣ".slice(sigma.start, sigma.end)} ${folds.join(" ")}`);
+  let dates: Vec<String> = Vec.new();
+  const log = "from 2026-10-24 to 2027-01-01";
+  for (const d of Regex.new("\\b\\d{4}-\\d{2}-\\d{2}\\b").findAll(log)) { dates.push(log.slice(d.start, d.end).toString()); }
+  println(dates.join(" "));
+  // What would take a backtracking matcher exponential time takes this one linear time.
+  const evil = Regex.new("^(a+)+$");
+  let long = String.new();
+  for (const _ of 0..5000) { long.push("a"); }
+  long.push("!");
+  println(`${evil.isMatch(long.asStr())} ${Regex.new("(x+x+)+y").captures(long.asStr()).map((g) => g.len()).unwrapOr(0)}`);
+  // `$` before nothing that names a group stands for itself; a group there is not is nothing.
+  const x = Regex.new("(?P<x>x)");
+  println(`${x.replaceAll("x", "a$$b")} ${x.replaceAll("x", "${x")} ${x.replaceAll("x", "[$x]")} ${x.replaceAll("x", "[$nope]")} ${x.replaceAll("x", "$")}`);
+  compiles("ab**");
+  compiles("(ab");
+  compiles("(a)\\1");
+  compiles("\\p{Xx}");
+}

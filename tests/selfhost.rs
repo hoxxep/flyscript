@@ -131,6 +131,24 @@ fn passes_unicodes_conformance_tests() {
     assert_eq!(String::from_utf8_lossy(&r.stdout), "graphemes 853/853\nnormalization 4793/4793\n");
 }
 
+/// `std/regex` finds what Rust's `regex` crate, of RE2's semantics, finds: the same matches and
+/// groups in 9000 cases of random patterns and texts (tests/regex, written by tools/regex-cases).
+#[test]
+fn agrees_with_re2s_semantics() {
+    if !has_node() || !has_cc() {
+        return;
+    }
+    let dir = out().join("regex");
+    std::fs::create_dir_all(&dir).unwrap();
+    let c = dir.join("conformance.c");
+    compile(&root().join("selfhost/seed.js"), &root().join("tests/regex/conformance.fly"), &c);
+    let exe = dir.join("conformance");
+    let built = Command::new("cc").args(["-std=gnu11", "-O1", "-w", "-o"]).arg(&exe).arg(&c).arg("-lm").output().unwrap();
+    assert!(built.status.success(), "{}", String::from_utf8_lossy(&built.stderr));
+    let r = Command::new(&exe).arg(root().join("tests/regex/cases.txt")).output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&r.stdout), "regex 9000/9000\n");
+}
+
 /// `--watch` compiles a program again as its modules change: a change to bodies alone from what the
 /// last build left, anything else from scratch, and a build that fails leaves the C as it was.
 #[test]

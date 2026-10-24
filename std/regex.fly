@@ -1,0 +1,1010 @@
+// Regular expressions (std.md): RE2's syntax, matched in time linear in the text. A pattern compiles
+// to a program, and a Pike VM runs every thread of it at once, one code point at a time, each
+// instruction at most once a step: no text makes it backtrack. Positions are byte offsets.
+
+import { simpleFold, categoryRanges } from "std/unicode";
+
+export type RegexErr = #BadRegex(usize, String);
+
+// Where a match, or a group of one, is in the text: `text.slice(start, end)`.
+export type Match = { start: usize; end: usize };
+
+// An instruction. Jumps are relative to the instruction they are in, so a fragment of a program
+// is the same wherever it is put.
+type Inst = { op: u8; x: i32; y: i32 };
+
+const MATCH: u8 = 0;
+// A code point from `x` to `y`.
+const RANGE: u8 = 1;
+// A code point in `classes[x]`.
+const CLASS: u8 = 2;
+// Any code point but `\n`, and any at all.
+const ANY: u8 = 3;
+const ANY_ALL: u8 = 4;
+// Go on at `x`, and at `y` with less priority.
+const SPLIT: u8 = 5;
+const JMP: u8 = 6;
+// Record the position in slot `x`.
+const SAVE: u8 = 7;
+// Go on only where the assertion `x` holds.
+const ASSERT: u8 = 8;
+
+const BEGIN_TEXT: i32 = 0;
+const END_TEXT: i32 = 1;
+const BEGIN_LINE: i32 = 2;
+const END_LINE: i32 = 3;
+const WORD_BOUNDARY: i32 = 4;
+const NOT_WORD_BOUNDARY: i32 = 5;
+
+const FOLD: u8 = 1;
+const MULTILINE: u8 = 2;
+const DOT_ALL: u8 = 4;
+const UNGREEDY: u8 = 8;
+
+const MAX_REPEAT: u32 = 1000;
+const MAX_PROGRAM: usize = 100000;
+const MAX_DEPTH: usize = 1000;
+
+export struct Regex {
+  private source: String;
+  private prog: Vec<Inst>;
+  // Each class as sorted, disjoint ranges, `lo, hi, lo, hi, ...`.
+  private classes: Vec<Vec<u32>>;
+  private names: Vec<Option<String>>;
+  // What every match starts with, to skip to where one could.
+  private prefix: String;
+  // Whether every match starts where the text does.
+  private anchored: bool;
+  // The bytes a match can start with, empty if it can start with any or with none.
+  private first: Vec<bool>;
+}
+
+impl Regex {
+  // The pattern compiled, or `#BadRegex(at, why)`, `at` the byte offset in it where it went wrong.
+  export function new(pattern: str): Regex uses Fail<RegexErr> {
+    let p = parser(pattern);
+    const body = p.alternation();
+    if (p.at < p.src.len()) { throw p.bad("a `)` with no `(`"); }
+    let prog: Vec<Inst> = [inst(SAVE, 0, 0)];
+    append(mut prog, body);
+    prog.push(inst(SAVE, 1, 0));
+    prog.push(inst(MATCH, 0, 0));
+    if (prog.len() > MAX_PROGRAM) { throw #BadRegex(0, "the pattern is too large".toString()); }
+    // The literal code points every path through the program starts with.
+    let prefix: Vec<u32> = Vec.new();
+    let pc: usize = 0;
+    let anchored = false;
+    while (pc < prog.len()) {
+      const i = prog[pc];
+      if (i.op == SAVE) { pc += 1; continue; }
+      if (i.op == ASSERT && i.x == BEGIN_TEXT && prefix.len() == 0) { anchored = true; pc += 1; continue; }
+      if (i.op != RANGE || i.x != i.y) { break; }
+      prefix.push(i.x as u32);
+      pc += 1;
+    }
+    const first = firstBytes(prog, p.classes);
+    Regex { source: pattern.toString(), prog, classes: p.classes, names: p.names, prefix: utf8(prefix), anchored, first }
+  }
+
+  export function pattern(self: readonly Self): str from self { self.source.asStr() }
+
+  // How many groups capture, not counting the whole match.
+  export function groups(self: readonly Self): usize { self.names.len() }
+
+  // The number of the group of that name, `(?P<name>...)` or `(?<name>...)`.
+  export function groupIndex(self: readonly Self, name: str): Option<usize> {
+    for (const [i, n] of self.names.iter().enumerate()) {
+      if (const #Some(m) = n) { if (m == name) { return #Some(i + 1); } }
+    }
+    #None
+  }
+
+  // Whether the pattern matches anywhere in `text`.
+  export function isMatch(self: readonly Self, text: str): bool {
+    let vm = self.vm(0);
+    self.run(mut vm, text, 0)
+  }
+
+  // The leftmost match, the one a backtracking matcher would find first.
+  export function find(self: readonly Self, text: str): Option<Match> {
+    let vm = self.vm(2);
+    if (self.run(mut vm, text, 0)) { vm.whole() } else { #None }
+  }
+
+  // Each match in turn, none overlapping, and no empty one where the one before it ended.
+  export function findAll(self: readonly Self, text: str): void uses Yield<Match> {
+    let vm = self.vm(2);
+    let pos: usize = 0;
+    let last: usize = text.len() + 1;
+    while (pos <= text.len() && self.run(mut vm, text, pos)) {
+      const m = match (vm.whole()) { #Some(m) => m, #None => return };
+      if (m.end == m.start) {
+        pos = m.end + width(text.asBytes(), m.end);
+        if (m.start == last) { continue; }
+      } else {
+        pos = m.end;
+      }
+      last = m.end;
+      yield m;
+    }
+  }
+
+  // The leftmost match and where each group of it matched, `#None` for a group that took no part:
+  // the whole match first, then the groups by their `(`s.
+  export function captures(self: readonly Self, text: str): Option<Vec<Option<Match>>> {
+    let vm = self.vm(2 * (self.names.len() + 1));
+    if (self.run(mut vm, text, 0)) { #Some(vm.groups()) } else { #None }
+  }
+
+  // The captures of each match `findAll` yields.
+  export function capturesAll(self: readonly Self, text: str): void uses Yield<Vec<Option<Match>>> {
+    let vm = self.vm(2 * (self.names.len() + 1));
+    let pos: usize = 0;
+    let last: usize = text.len() + 1;
+    while (pos <= text.len() && self.run(mut vm, text, pos)) {
+      const m = match (vm.whole()) { #Some(m) => m, #None => return };
+      if (m.end == m.start) {
+        pos = m.end + width(text.asBytes(), m.end);
+        if (m.start == last) { continue; }
+      } else {
+        pos = m.end;
+      }
+      last = m.end;
+      yield vm.groups();
+    }
+  }
+
+  // `text` with each match replaced by `with`, in which `$1` or `${1}` is what a group matched,
+  // `$name` or `${name}` what a named group did, and `$$` a `$`; a group that took no part, or that
+  // there is not, is nothing.
+  export function replaceAll(self: readonly Self, text: str, with: str): String {
+    let out = String.new();
+    let done: usize = 0;
+    for (const c of self.capturesAll(text)) {
+      const m = match (c[0]) { #Some(m) => m, #None => continue };
+      out.push(text.slice(done, m.start));
+      self.expand(mut out, text, c, with);
+      done = m.end;
+    }
+    out.push(text.slice(done, text.len()));
+    out
+  }
+
+  // The pieces of `text` between the matches, as Go's `Split` has them.
+  export function split(self: readonly Self, text: str): void uses Yield<str> {
+    let begin: usize = 0;
+    let end: usize = 0;
+    let any = false;
+    for (const m of self.findAll(text)) {
+      any = true;
+      end = m.start;
+      if (m.end != 0) { yield text.slice(begin, end); }
+      begin = m.end;
+    }
+    if (!any || end != text.len()) { yield text.slice(begin, text.len()); }
+  }
+
+  // A VM for this program that records `nslots` slots; one serves every search of a `findAll`.
+  function vm(self: readonly Self, nslots: usize): Vm {
+    const n = self.prog.len();
+    let cur: Vec<usize> = Vec.new();
+    for (const _ of 0..nslots) { cur.push(0); }
+    let out: Vec<usize> = Vec.new();
+    for (const _ of 0..nslots) { out.push(0); }
+    Vm { clist: threads(n, nslots), nlist: threads(n, nslots), cur, stack: Vec.new(), out }
+  }
+
+  function expand(self: readonly Self, out: mut String, text: str, c: readonly Vec<Option<Match>>, with: str): void {
+    const b = with.asBytes();
+    let i: usize = 0;
+    let plain: usize = 0;
+    while (i < b.len()) {
+      if (b[i] != b'$' || i + 1 >= b.len()) { i += 1; continue; }
+      if (b[i + 1] == b'$') { out.push(with.slice(plain, i)); out.push("$"); i += 2; plain = i; continue; }
+      let j = i + 1;
+      let name = "";
+      if (b[j] == b'{') {
+        let k = j + 1;
+        while (k < b.len() && b[k] != b'}') { k += 1; }
+        if (k >= b.len()) { i += 1; continue; }
+        name = with.slice(j + 1, k);
+        j = k + 1;
+      } else {
+        // As in Go, the longest name there is: `$1x` is `${1x}`, not `${1}x`.
+        let k = j;
+        while (k < b.len() && isWord(b[k])) { k += 1; }
+        if (k == j) { i += 1; continue; }
+        name = with.slice(j, k);
+        j = k;
+      }
+      out.push(with.slice(plain, i));
+      const group: Option<usize> = match (decimal(name)) { #Some(g) => #Some(g), #None => self.groupIndex(name) };
+      if (const #Some(g) = group) {
+        if (g < c.len()) { if (const #Some(m) = c[g]) { out.push(text.slice(m.start, m.end)); } }
+      }
+      i = j;
+      plain = j;
+    }
+    out.push(with.slice(plain, b.len()));
+  }
+
+  // The Pike VM, from `from`: whether there is a match, and if so its slots in `vm.out`.
+  function run(self: readonly Self, vm: mut Vm, text: str, from: usize): bool {
+    const b = text.asBytes();
+    const nslots = vm.cur.len();
+    vm.clist.n = 0;
+    let matched = false;
+    let pos = from;
+    while (true) {
+      if (!matched && (!self.anchored || pos == 0)) {
+        if (vm.clist.n == 0 && self.prefix.len() > 0) {
+          match (text.slice(pos, b.len()).indexOf(self.prefix.asStr())) {
+            #Some(k) => { pos += k; }
+            #None => break,
+          }
+        } else if (vm.clist.n == 0 && self.first.len() > 0) {
+          while (pos < b.len() && !self.first[b[pos] as usize]) { pos += 1; }
+          if (pos == b.len()) { break; }
+        }
+        for (const k of 0..nslots) { vm.cur[k] = 0; }
+        self.add(mut vm.clist, mut vm.stack, mut vm.cur, 0, b, pos);
+      }
+      if (vm.clist.n == 0) { break; }
+      const [c, w] = if (pos < b.len()) { decode(b, pos) } else { [0x110000, 0] };
+      vm.nlist.n = 0;
+      for (const t of 0..vm.clist.n) {
+        const pc = vm.clist.dense[t] as usize;
+        const i = self.prog[pc];
+        if (i.op == MATCH) {
+          if (nslots == 0) { return true; }
+          for (const k of 0..nslots) { vm.out[k] = vm.clist.caps[pc * nslots + k]; }
+          matched = true;
+          // The threads after this one have less priority: they are cut.
+          break;
+        }
+        const ok = if (i.op == RANGE) { c >= (i.x as u32) && c <= (i.y as u32) }
+          else if (i.op == CLASS) { inClass(self.classes[i.x as usize], c) }
+          else if (i.op == ANY) { c != 0x110000 && c != 10 }
+          else if (i.op == ANY_ALL) { c != 0x110000 }
+          // The instructions that read nothing are in the list only so as to be added once.
+          else { false };
+        if (ok) {
+          for (const k of 0..nslots) { vm.cur[k] = vm.clist.caps[pc * nslots + k]; }
+          self.add(mut vm.nlist, mut vm.stack, mut vm.cur, pc + 1, b, pos + w);
+        }
+      }
+      if (pos >= b.len()) { break; }
+      swap(mut vm.clist, mut vm.nlist);
+      pos += w;
+    }
+    matched
+  }
+
+  // Adds the thread at `pc0`, and every one it reaches without reading, in order of priority: a
+  // `SPLIT`'s first way at once, its second from `stack` once the first is done.
+  function add(self: readonly Self, list: mut Threads, stack: mut Vec<[u8, usize, usize]>, cur: mut Vec<usize>, pc0: usize, b: readonly u8[], pos: usize): void {
+    const nslots = cur.len();
+    let pc = pc0;
+    while (true) {
+      const at = list.sparse[pc] as usize;
+      let next = false;
+      if (at < list.n && list.dense[at] as usize == pc) {
+        next = true;
+      } else {
+        list.sparse[pc] = list.n as u32;
+        list.dense[list.n] = pc as u32;
+        list.n += 1;
+        const i = self.prog[pc];
+        if (i.op == JMP) {
+          pc = jump(pc, i.x);
+        } else if (i.op == SPLIT) {
+          stack.push([0, jump(pc, i.y), 0]);
+          pc = jump(pc, i.x);
+        } else if (i.op == SAVE) {
+          const slot = i.x as usize;
+          if (slot < nslots) {
+            stack.push([1, slot, cur[slot]]);
+            cur[slot] = pos + 1;
+          }
+          pc += 1;
+        } else if (i.op == ASSERT && holds(i.x, b, pos)) {
+          pc += 1;
+        } else {
+          if (i.op != ASSERT) { for (const k of 0..nslots) { list.caps[pc * nslots + k] = cur[k]; } }
+          next = true;
+        }
+      }
+      if (!next) { continue; }
+      // The way left waiting longest; a slot to set back as it was, once what follows its `SAVE`
+      // is added, on the way.
+      while (true) {
+        match (stack.pop()) {
+          #Some([kind, a, v]) => {
+            if (kind == 1) { cur[a] = v; continue; }
+            pc = a;
+            break;
+          }
+          #None => return,
+        }
+      }
+    }
+  }
+}
+
+// What a search keeps from one step to the next: the threads now and next, the slots of the thread
+// being added and the ways it has still to take, and the slots of the match.
+struct Vm { clist: Threads; nlist: Threads; cur: Vec<usize>; stack: Vec<[u8, usize, usize]>; out: Vec<usize> }
+
+impl Vm {
+  function whole(self: readonly Self): Option<Match> {
+    if (self.out[0] == 0 || self.out[1] == 0) { #None } else { #Some({ start: self.out[0] - 1, end: self.out[1] - 1 }) }
+  }
+
+  function groups(self: readonly Self): Vec<Option<Match>> {
+    let out: Vec<Option<Match>> = Vec.new();
+    for (const g of 0..self.out.len() / 2) {
+      const [s, e] = [self.out[2 * g], self.out[2 * g + 1]];
+      out.push(if (s == 0 || e == 0) { #None } else { #Some({ start: s - 1, end: e - 1 }) });
+    }
+    out
+  }
+}
+
+// A list of threads, one an instruction at most, in order of priority, as a sparse set.
+struct Threads { dense: Vec<u32>; sparse: Vec<u32>; n: usize; caps: Vec<usize> }
+
+function threads(n: usize, nslots: usize): Threads {
+  let dense: Vec<u32> = Vec.new();
+  let sparse: Vec<u32> = Vec.new();
+  for (const _ of 0..n) { dense.push(0); sparse.push(0); }
+  let caps: Vec<usize> = Vec.new();
+  for (const _ of 0..n * nslots) { caps.push(0); }
+  Threads { dense, sparse, n: 0, caps }
+}
+
+function jump(pc: usize, by: i32): usize { ((pc as i64) + (by as i64)) as usize }
+
+function inst(op: u8, x: i32, y: i32): Inst { { op, x, y } }
+
+function append(to: mut Vec<Inst>, frag: readonly Vec<Inst>): void { for (const i of frag) { to.push(i); } }
+
+function isWord(b: u8): bool { (b >= b'0' && b <= b'9') || (b >= b'A' && b <= b'Z') || (b >= b'a' && b <= b'z') || b == b'_' }
+
+function holds(kind: i32, b: readonly u8[], pos: usize): bool {
+  if (kind == BEGIN_TEXT) { return pos == 0; }
+  if (kind == END_TEXT) { return pos == b.len(); }
+  if (kind == BEGIN_LINE) { return pos == 0 || b[pos - 1] == 10; }
+  if (kind == END_LINE) { return pos == b.len() || b[pos] == 10; }
+  const boundary = (pos > 0 && isWord(b[pos - 1])) != (pos < b.len() && isWord(b[pos]));
+  if (kind == WORD_BOUNDARY) { boundary } else { !boundary }
+}
+
+function inClass(ranges: readonly Vec<u32>, c: u32): bool {
+  let lo: usize = 0;
+  let hi = ranges.len() / 2;
+  while (lo < hi) {
+    const mid = (lo + hi) / 2;
+    if (ranges[2 * mid + 1] < c) { lo = mid + 1; } else { hi = mid; }
+  }
+  lo < ranges.len() / 2 && ranges[2 * lo] <= c
+}
+
+// The code point at byte `i` of UTF-8, and how many bytes it takes.
+function decode(b: readonly u8[], i: usize): [u32, usize] {
+  const c = b[i] as u32;
+  if (c < 0x80) { return [c, 1]; }
+  if (c < 0xE0) { return [((c & 0x1F) << 6) | ((b[i + 1] as u32) & 0x3F), 2]; }
+  if (c < 0xF0) { return [((c & 0x0F) << 12) | (((b[i + 1] as u32) & 0x3F) << 6) | ((b[i + 2] as u32) & 0x3F), 3]; }
+  [((c & 0x07) << 18) | (((b[i + 1] as u32) & 0x3F) << 12) | (((b[i + 2] as u32) & 0x3F) << 6) | ((b[i + 3] as u32) & 0x3F), 4]
+}
+
+// How far past `i` the next code point starts: one past the end at the end.
+function width(b: readonly u8[], i: usize): usize { if (i < b.len()) { decode(b, i)[1] } else { 1 } }
+
+function utf8(cps: readonly Vec<u32>): String {
+  let out: Vec<u8> = Vec.new();
+  for (const cp of cps) {
+    if (cp < 0x80) {
+      out.push(cp as u8);
+    } else if (cp < 0x800) {
+      out.push((0xC0 | (cp >> 6)) as u8);
+      out.push((0x80 | (cp & 0x3F)) as u8);
+    } else if (cp < 0x10000) {
+      out.push((0xE0 | (cp >> 12)) as u8);
+      out.push((0x80 | ((cp >> 6) & 0x3F)) as u8);
+      out.push((0x80 | (cp & 0x3F)) as u8);
+    } else {
+      out.push((0xF0 | (cp >> 18)) as u8);
+      out.push((0x80 | ((cp >> 12) & 0x3F)) as u8);
+      out.push((0x80 | ((cp >> 6) & 0x3F)) as u8);
+      out.push((0x80 | (cp & 0x3F)) as u8);
+    }
+  }
+  match (String.fromUtf8(out)) { #Some(s) => s, #None => String.new() }
+}
+
+// A group's number, if `s` is one.
+function decimal(s: str): Option<usize> {
+  if (s.len() == 0) { return #None; }
+  let n: usize = 0;
+  for (const d of s.bytes()) {
+    if (d < b'0' || d > b'9' || n > 100000) { return #None; }
+    n = n * 10 + ((d - b'0') as usize);
+  }
+  #Some(n)
+}
+
+// ---- classes ----
+
+// Ranges sorted by where they start and joined where they touch or overlap.
+function normalize(ranges: mut Vec<[u32, u32]>): Vec<u32> {
+  ranges.sortBy((a, b) => a[0].cmp(b[0]));
+  let out: Vec<u32> = Vec.new();
+  for (const [lo, hi] of ranges.iter()) {
+    const n = out.len();
+    if (n > 0 && lo <= out[n - 1] + 1) {
+      if (hi > out[n - 1]) { out[n - 1] = hi; }
+    } else {
+      out.push(lo);
+      out.push(hi);
+    }
+  }
+  out
+}
+
+// The code points not in normalized ranges.
+function complement(flat: readonly Vec<u32>): Vec<[u32, u32]> {
+  let out: Vec<[u32, u32]> = Vec.new();
+  let next: u32 = 0;
+  for (const k of 0..flat.len() / 2) {
+    if (flat[2 * k] > next) { out.push([next, flat[2 * k] - 1]); }
+    next = flat[2 * k + 1] + 1;
+  }
+  if (next <= 0x10FFFF) { out.push([next, 0x10FFFF]); }
+  out
+}
+
+// Ranges with every code point's case orbit added. Only code points from `A` to the last that
+// folds have orbits of more than themselves.
+function folded(ranges: readonly Vec<[u32, u32]>): Vec<[u32, u32]> {
+  let out: Vec<[u32, u32]> = Vec.new();
+  for (const r of ranges.iter()) {
+    out.push(r);
+    const lo = if (r[0] < 0x41) { 0x41 } else { r[0] };
+    const hi = if (r[1] > 0x1E943) { 0x1E943 } else { r[1] };
+    if (lo > hi) { continue; }
+    for (const cp of lo..hi + 1) {
+      let f = simpleFold(cp);
+      while (f != cp) {
+        if (f < r[0] || f > r[1]) { out.push([f, f]); }
+        f = simpleFold(f);
+      }
+    }
+  }
+  out
+}
+
+function perl(c: u32): Option<Vec<[u32, u32]>> {
+  if (c == b'd' as u32) { return #Some([[48, 57]]); }
+  if (c == b'w' as u32) { return #Some([[48, 57], [65, 90], [95, 95], [97, 122]]); }
+  if (c == b's' as u32) { return #Some([[9, 10], [12, 13], [32, 32]]); }
+  #None
+}
+
+function posix(name: str): Option<Vec<[u32, u32]>> {
+  const r: Vec<[u32, u32]> = if (name == "alnum") { [[48, 57], [65, 90], [97, 122]] }
+    else if (name == "alpha") { [[65, 90], [97, 122]] }
+    else if (name == "ascii") { [[0, 127]] }
+    else if (name == "blank") { [[9, 9], [32, 32]] }
+    else if (name == "cntrl") { [[0, 31], [127, 127]] }
+    else if (name == "digit") { [[48, 57]] }
+    else if (name == "graph") { [[33, 126]] }
+    else if (name == "lower") { [[97, 122]] }
+    else if (name == "print") { [[32, 126]] }
+    else if (name == "punct") { [[33, 47], [58, 64], [91, 96], [123, 126]] }
+    else if (name == "space") { [[9, 13], [32, 32]] }
+    else if (name == "upper") { [[65, 90]] }
+    else if (name == "word") { [[48, 57], [65, 90], [95, 95], [97, 122]] }
+    else if (name == "xdigit") { [[48, 57], [65, 70], [97, 102]] }
+    else { return #None };
+  #Some(r)
+}
+
+// ---- the parser, which compiles as it reads ----
+
+struct Parser {
+  src: Vec<u32>;
+  // The byte offset of each code point of the pattern, and of its end.
+  offs: Vec<usize>;
+  at: usize;
+  flags: u8;
+  depth: usize;
+  names: Vec<Option<String>>;
+  classes: Vec<Vec<u32>>;
+}
+
+function parser(pattern: str): Parser {
+  let src: Vec<u32> = Vec.new();
+  let offs: Vec<usize> = Vec.new();
+  const b = pattern.asBytes();
+  let i: usize = 0;
+  while (i < b.len()) {
+    const [c, w] = decode(b, i);
+    src.push(c);
+    offs.push(i);
+    i += w;
+  }
+  offs.push(b.len());
+  Parser { src, offs, at: 0, flags: 0, depth: 0, names: Vec.new(), classes: Vec.new() }
+}
+
+impl Parser {
+  function bad(self: readonly Self, why: str): RegexErr { #BadRegex(self.offs[self.at], why.toString()) }
+
+  function peek(self: readonly Self): u32 { if (self.at < self.src.len()) { self.src[self.at] } else { 0x110000 } }
+
+  function eat(self: mut Self, c: u8): bool {
+    if (self.peek() == c as u32) { self.at += 1; true } else { false }
+  }
+
+  // `a|b|...`.
+  function alternation(self: mut Self): Vec<Inst> uses Fail<RegexErr> {
+    self.depth += 1;
+    if (self.depth > MAX_DEPTH) { throw self.bad("the pattern nests too deeply"); }
+    let alts: Vec<Vec<Inst>> = [self.concatenation()];
+    while (self.eat(b'|')) { alts.push(self.concatenation()); }
+    self.depth -= 1;
+    // From the last alternative back: `SPLIT` to this one or the rest, and a jump past the rest.
+    let rest = match (alts.pop()) { #Some(r) => r, #None => Vec.new() };
+    while (const #Some(a) = alts.pop()) {
+      let f: Vec<Inst> = [inst(SPLIT, 1, (a.len() + 2) as i32)];
+      append(mut f, a);
+      f.push(inst(JMP, (rest.len() + 1) as i32, 0));
+      append(mut f, rest);
+      rest = f;
+      if (rest.len() > MAX_PROGRAM) { throw self.bad("the pattern is too large"); }
+    }
+    rest
+  }
+
+  function concatenation(self: mut Self): Vec<Inst> uses Fail<RegexErr> {
+    let out: Vec<Inst> = Vec.new();
+    while (self.at < self.src.len()) {
+      const c = self.peek();
+      if (c == b'|' as u32 || c == b')' as u32) { break; }
+      const start = self.at;
+      // A change of flags lasts to the end of the group it is in.
+      if (c == b'(' as u32 && self.at + 1 < self.src.len() && self.src[self.at + 1] == b'?' as u32) {
+        if (const #Some(f) = self.flagsOnly()) { self.flags = f; continue; }
+      }
+      const atom = self.atom();
+      append(mut out, self.repeated(atom, start));
+      if (out.len() > MAX_PROGRAM) { throw self.bad("the pattern is too large"); }
+    }
+    out
+  }
+
+  // `(?flags)` alone, if that is what is here: the flags it leaves.
+  function flagsOnly(self: mut Self): Option<u8> uses Fail<RegexErr> {
+    let k = self.at + 2;
+    while (k < self.src.len() && self.src[k] != b')' as u32 && self.src[k] != b':' as u32) { k += 1; }
+    if (k >= self.src.len() || self.src[k] != b')' as u32) { return #None; }
+    const save = self.at;
+    self.at += 2;
+    const f = self.flagList();
+    if (!self.eat(b')')) { self.at = save; return #None; }
+    #Some(f)
+  }
+
+  // Flags `imsU`, a `-` before those to clear: what they make of the flags now.
+  function flagList(self: mut Self): u8 uses Fail<RegexErr> {
+    let f = self.flags;
+    let clear = false;
+    let any = false;
+    while (true) {
+      const c = self.peek();
+      const bit: u8 = if (c == b'i' as u32) { FOLD } else if (c == b'm' as u32) { MULTILINE } else if (c == b's' as u32) { DOT_ALL } else if (c == b'U' as u32) { UNGREEDY }
+        else if (c == b'-' as u32 && !clear) { clear = true; any = false; self.at += 1; continue; }
+        else { break };
+      self.at += 1;
+      any = true;
+      if (clear) { f = f & (255 - bit); } else { f = f | bit; }
+    }
+    if (clear && !any) { throw self.bad("missing flags after `-`"); }
+    f
+  }
+
+  // An atom with the repetitions after it.
+  function repeated(self: mut Self, atom: Vec<Inst>, start: usize): Vec<Inst> uses Fail<RegexErr> {
+    let a = atom;
+    let repeats = 0;
+    while (true) {
+      const here = self.at;
+      const c = self.peek();
+      let min: u32 = 0;
+      let max: Option<u32> = #None;
+      if (c == b'*' as u32) { self.at += 1; }
+      else if (c == b'+' as u32) { self.at += 1; min = 1; }
+      else if (c == b'?' as u32) { self.at += 1; max = #Some(1); }
+      else if (c == b'{' as u32) {
+        match (self.counts()) {
+          #Some([lo, hi]) => { min = lo; max = hi; }
+          #None => break,
+        }
+      } else { break; }
+      repeats += 1;
+      if (repeats > 1) { self.at = here; throw self.bad("a repetition of a repetition"); }
+      let greedy = !self.eat(b'?');
+      if ((self.flags & UNGREEDY) != 0) { greedy = !greedy; }
+      if (min > MAX_REPEAT || (if (const #Some(m) = max) { m > MAX_REPEAT } else { false })) { self.at = here; throw self.bad("a repetition count over 1000"); }
+      a = repetition(a, min, max, greedy);
+      if (a.len() > MAX_PROGRAM) { self.at = start; throw self.bad("the pattern is too large"); }
+    }
+    a
+  }
+
+  // `{n}`, `{n,}` or `{n,m}`: `#None`, and nothing read, if it is not one, and the `{` is literal.
+  function counts(self: mut Self): Option<[u32, Option<u32>]> uses Fail<RegexErr> {
+    const save = self.at;
+    self.at += 1;
+    const lo = match (self.number()) { #Some(n) => n, #None => { self.at = save; return #None } };
+    let hi: Option<u32> = #Some(lo);
+    if (self.eat(b',')) {
+      hi = if (self.peek() == b'}' as u32) { #None } else { match (self.number()) { #Some(n) => #Some(n), #None => { self.at = save; return #None } } };
+    }
+    if (!self.eat(b'}')) { self.at = save; return #None; }
+    if (const #Some(h) = hi) { if (h < lo) { self.at = save; throw self.bad("a repetition's maximum is less than its minimum"); } }
+    #Some([lo, hi])
+  }
+
+  function number(self: mut Self): Option<u32> {
+    let n: u32 = 0;
+    let any = false;
+    while (self.peek() >= 48 && self.peek() <= 57) {
+      if (n < 100000) { n = n * 10 + (self.peek() - 48); }
+      self.at += 1;
+      any = true;
+    }
+    if (any) { #Some(n) } else { #None }
+  }
+
+  function atom(self: mut Self): Vec<Inst> uses Fail<RegexErr> {
+    const c = self.peek();
+    if (c == b'(' as u32) { return self.group(); }
+    if (c == b'[' as u32) { return self.bracket(); }
+    if (c == b'*' as u32 || c == b'+' as u32 || c == b'?' as u32) { throw self.bad("a repetition of nothing"); }
+    self.at += 1;
+    if (c == b'.' as u32) { return [inst(if ((self.flags & DOT_ALL) != 0) { ANY_ALL } else { ANY }, 0, 0)]; }
+    if (c == b'^' as u32) { return [inst(ASSERT, if ((self.flags & MULTILINE) != 0) { BEGIN_LINE } else { BEGIN_TEXT }, 0)]; }
+    if (c == b'$' as u32) { return [inst(ASSERT, if ((self.flags & MULTILINE) != 0) { END_LINE } else { END_TEXT }, 0)]; }
+    if (c != b'\\' as u32) { return self.literal(c); }
+    const e = self.peek();
+    if (e == 0x110000) { throw self.bad("a `\\` at the end"); }
+    self.at += 1;
+    if (e == b'A' as u32) { return [inst(ASSERT, BEGIN_TEXT, 0)]; }
+    if (e == b'z' as u32) { return [inst(ASSERT, END_TEXT, 0)]; }
+    if (e == b'b' as u32) { return [inst(ASSERT, WORD_BOUNDARY, 0)]; }
+    if (e == b'B' as u32) { return [inst(ASSERT, NOT_WORD_BOUNDARY, 0)]; }
+    if (e == b'Q' as u32) {
+      // Literal text up to `\E` or the end.
+      let out: Vec<Inst> = Vec.new();
+      while (self.at < self.src.len()) {
+        if (self.peek() == b'\\' as u32 && self.at + 1 < self.src.len() && self.src[self.at + 1] == b'E' as u32) { self.at += 2; break; }
+        const l = self.peek();
+        self.at += 1;
+        append(mut out, self.literal(l));
+      }
+      return out;
+    }
+    self.at -= 1;
+    match (self.escapeClass()) {
+      #Some(r) => self.classOf(r, false),
+      #None => {
+        const l = self.escapeChar();
+        self.literal(l)
+      }
+    }
+  }
+
+  function literal(self: mut Self, c: u32): Vec<Inst> {
+    if ((self.flags & FOLD) != 0 && simpleFold(c) != c) { return self.classOf(self.set([[c, c]], false), false); }
+    [inst(RANGE, c as i32, c as i32)]
+  }
+
+  // A set of code points, of a class or of an item of one: its case orbits added if case is
+  // ignored, and only then the complement taken, so that `(?i)\W` is what `(?i)\w` is not.
+  function set(self: readonly Self, ranges: Vec<[u32, u32]>, negated: bool): Vec<[u32, u32]> {
+    let r = if ((self.flags & FOLD) != 0) { folded(ranges) } else { ranges };
+    if (!negated) { return r; }
+    let flat = normalize(mut r);
+    complement(flat)
+  }
+
+  // The instruction that reads a code point of the ranges, or of what they leave out.
+  function classOf(self: mut Self, ranges: Vec<[u32, u32]>, negated: bool): Vec<Inst> {
+    let r = ranges;
+    let flat = normalize(mut r);
+    if (negated) {
+      let c = complement(flat);
+      flat = normalize(mut c);
+    }
+    if (flat.len() == 2) { return [inst(RANGE, flat[0] as i32, flat[1] as i32)]; }
+    self.classes.push(flat);
+    [inst(CLASS, (self.classes.len() - 1) as i32, 0)]
+  }
+
+  // After `\`, a class of code points: `\d`, `\pL`, `\P{Greek}`; `#None`, and nothing read, if it
+  // is not one.
+  function escapeClass(self: mut Self): Option<Vec<[u32, u32]>> uses Fail<RegexErr> {
+    const e = self.peek();
+    const lower = if (e >= 65 && e <= 90) { e + 32 } else { e };
+    if (const #Some(r) = perl(lower)) {
+      self.at += 1;
+      return #Some(self.set(r, e != lower));
+    }
+    if (e != b'p' as u32 && e != b'P' as u32) { return #None; }
+    const start = self.at - 1;
+    self.at += 1;
+    let negated = e == b'P' as u32;
+    let name: Vec<u32> = Vec.new();
+    if (self.eat(b'{')) {
+      if (self.eat(b'^')) { negated = !negated; }
+      while (self.at < self.src.len() && self.peek() != b'}' as u32) { name.push(self.peek()); self.at += 1; }
+      if (!self.eat(b'}')) { self.at = start; throw self.bad("an unclosed `\\p{`"); }
+    } else if (self.at < self.src.len()) {
+      name.push(self.peek());
+      self.at += 1;
+    }
+    const text = utf8(name);
+    let r: Vec<[u32, u32]> = if (text == "Any") { [[0, 0x10FFFF]] } else {
+      match (categoryRanges(text.asStr())) {
+        #Some(r) => r,
+        #None => { self.at = start; throw self.bad("an unknown Unicode category") }
+      }
+    };
+    #Some(self.set(r, negated))
+  }
+
+  // After `\`, one code point.
+  function escapeChar(self: mut Self): u32 uses Fail<RegexErr> {
+    const start = self.at - 1;
+    const e = self.peek();
+    self.at += 1;
+    if (e == b'a' as u32) { return 7; }
+    if (e == b'f' as u32) { return 12; }
+    if (e == b't' as u32) { return 9; }
+    if (e == b'n' as u32) { return 10; }
+    if (e == b'r' as u32) { return 13; }
+    if (e == b'v' as u32) { return 11; }
+    if (e == b'x' as u32) {
+      let v: u32 = 0;
+      if (self.eat(b'{')) {
+        let any = false;
+        while (self.peek() != b'}' as u32) {
+          const d = match (hexDigit(self.peek())) { #Some(d) => d, #None => { self.at = start; throw self.bad("a bad `\\x{...}`") } };
+          v = v * 16 + d;
+          if (v > 0x10FFFF) { self.at = start; throw self.bad("a code point past U+10FFFF"); }
+          self.at += 1;
+          any = true;
+        }
+        self.at += 1;
+        if (!any) { self.at = start; throw self.bad("a bad `\\x{...}`"); }
+        return v;
+      }
+      for (const _ of 0..2) {
+        const d = match (hexDigit(self.peek())) { #Some(d) => d, #None => { self.at = start; throw self.bad("a bad `\\x`") } };
+        v = v * 16 + d;
+        self.at += 1;
+      }
+      return v;
+    }
+    if (e >= b'1' as u32 && e <= b'9' as u32) { self.at = start; throw self.bad("backreferences are not supported: no linear-time matcher has them"); }
+    // Any punctuation stands for itself.
+    if (e < 128 && !((e >= 48 && e <= 57) || (e >= 65 && e <= 90) || (e >= 97 && e <= 122))) { return e; }
+    self.at = start;
+    throw self.bad("an unknown escape")
+  }
+
+  // `(...)`, `(?:...)`, `(?P<name>...)`, `(?<name>...)` or `(?flags:...)`.
+  function group(self: mut Self): Vec<Inst> uses Fail<RegexErr> {
+    const open = self.at;
+    self.at += 1;
+    const saved = self.flags;
+    let slot: Option<usize> = #None;
+    if (self.eat(b'?')) {
+      if (self.peek() == b'P' as u32 || (self.peek() == b'<' as u32)) {
+        self.eat(b'P');
+        if (!self.eat(b'<')) { self.at = open; throw self.bad("a bad group"); }
+        let name: Vec<u32> = Vec.new();
+        while (self.at < self.src.len() && self.peek() != b'>' as u32) {
+          const c = self.peek();
+          if (!(c < 128 && isWord(c as u8))) { self.at = open; throw self.bad("a group's name is letters, digits and `_`"); }
+          name.push(c);
+          self.at += 1;
+        }
+        if (!self.eat(b'>') || name.len() == 0) { self.at = open; throw self.bad("a bad group name"); }
+        const n = utf8(name);
+        for (const m of self.names.iter()) {
+          if (const #Some(x) = m) { if (x == n) { self.at = open; throw self.bad("two groups of the same name"); } }
+        }
+        self.names.push(#Some(n));
+        slot = #Some(self.names.len());
+      } else {
+        self.flags = self.flagList();
+        if (!self.eat(b':')) { self.at = open; throw self.bad("a bad group"); }
+      }
+    } else {
+      self.names.push(#None);
+      slot = #Some(self.names.len());
+    }
+    const body = self.alternation();
+    self.flags = saved;
+    if (!self.eat(b')')) { self.at = open; throw self.bad("an unclosed `(`"); }
+    match (slot) {
+      #Some(g) => {
+        let out: Vec<Inst> = [inst(SAVE, (2 * g) as i32, 0)];
+        append(mut out, body);
+        out.push(inst(SAVE, (2 * g + 1) as i32, 0));
+        out
+      }
+      #None => body,
+    }
+  }
+
+  // `[...]` or `[^...]`.
+  function bracket(self: mut Self): Vec<Inst> uses Fail<RegexErr> {
+    const open = self.at;
+    self.at += 1;
+    const negated = self.eat(b'^');
+    // Classes within it, each made already, and the code points and ranges of it.
+    let ranges: Vec<[u32, u32]> = Vec.new();
+    let plain: Vec<[u32, u32]> = Vec.new();
+    let first = true;
+    while (true) {
+      if (self.at >= self.src.len()) { self.at = open; throw self.bad("an unclosed `[`"); }
+      const c = self.peek();
+      if (c == b']' as u32 && !first) { self.at += 1; break; }
+      first = false;
+      if (c == b'[' as u32 && self.at + 1 < self.src.len() && self.src[self.at + 1] == b':' as u32) {
+        if (const #Some(r) = self.posixClass()) { for (const x of r.iter()) { ranges.push(x); } continue; }
+      }
+      if (c == b'\\' as u32) {
+        self.at += 1;
+        if (const #Some(r) = self.escapeClass()) { for (const x of r.iter()) { ranges.push(x); } continue; }
+        self.at -= 1;
+      }
+      const lo = self.classChar();
+      if (self.peek() == b'-' as u32 && self.at + 1 < self.src.len() && self.src[self.at + 1] != b']' as u32) {
+        const dash = self.at;
+        self.at += 1;
+        const hi = self.classChar();
+        if (hi < lo) { self.at = dash; throw self.bad("a range that ends before it starts"); }
+        plain.push([lo, hi]);
+      } else {
+        plain.push([lo, lo]);
+      }
+    }
+    for (const x of self.set(plain, false).iter()) { ranges.push(x); }
+    self.classOf(ranges, negated)
+  }
+
+  function classChar(self: mut Self): u32 uses Fail<RegexErr> {
+    const c = self.peek();
+    self.at += 1;
+    if (c != b'\\' as u32) { return c; }
+    if (self.at >= self.src.len()) { throw self.bad("a `\\` at the end"); }
+    self.escapeChar()
+  }
+
+  // `[:name:]` or `[:^name:]`: `#None`, and nothing read, if it is not one.
+  function posixClass(self: mut Self): Option<Vec<[u32, u32]>> uses Fail<RegexErr> {
+    const start = self.at;
+    self.at += 2;
+    const negated = self.eat(b'^');
+    let name: Vec<u32> = Vec.new();
+    while (self.at < self.src.len() && self.peek() >= 97 && self.peek() <= 122) { name.push(self.peek()); self.at += 1; }
+    if (!(self.eat(b':') && self.eat(b']'))) { self.at = start; return #None; }
+    const r = match (posix(utf8(name).asStr())) { #Some(r) => r, #None => { self.at = start; throw self.bad("an unknown POSIX class") } };
+    #Some(self.set(r, negated))
+  }
+}
+
+function hexDigit(c: u32): Option<u32> {
+  if (c >= 48 && c <= 57) { return #Some(c - 48); }
+  if (c >= 65 && c <= 70) { return #Some(c - 55); }
+  if (c >= 97 && c <= 102) { return #Some(c - 87); }
+  #None
+}
+
+// The bytes a match can start with, its assertions taken to hold: empty if it can match without
+// reading, or start with any byte.
+function firstBytes(prog: readonly Vec<Inst>, classes: readonly Vec<Vec<u32>>): Vec<bool> {
+  let first: Vec<bool> = Vec.new();
+  for (const _ of 0..256) { first.push(false); }
+  let seen: Vec<bool> = Vec.new();
+  for (const _ of 0..prog.len()) { seen.push(false); }
+  let todo: Vec<usize> = [0];
+  while (const #Some(pc) = todo.pop()) {
+    if (seen[pc]) { continue; }
+    seen[pc] = true;
+    const i = prog[pc];
+    if (i.op == JMP) { todo.push(jump(pc, i.x)); }
+    else if (i.op == SPLIT) { todo.push(jump(pc, i.x)); todo.push(jump(pc, i.y)); }
+    else if (i.op == SAVE || i.op == ASSERT) { todo.push(pc + 1); }
+    else if (i.op == RANGE) { leads(mut first, i.x as u32, i.y as u32); }
+    else if (i.op == CLASS) {
+      const c = i.x as usize;
+      for (const k of 0..classes[c].len() / 2) { leads(mut first, classes[c][2 * k], classes[c][2 * k + 1]); }
+    } else { return Vec.new(); }
+  }
+  let every = true;
+  for (const x of first.iter()) { if (!x) { every = false; } }
+  if (every) { Vec.new() } else { first }
+}
+
+// Marks the bytes the code points from `lo` to `hi` start with in UTF-8, which rise with them.
+function leads(first: mut Vec<bool>, lo: u32, hi: u32): void {
+  const a = lead(lo);
+  const z = lead(hi);
+  for (const k of a..z + 1) { first[k] = true; }
+}
+
+function lead(cp: u32): usize {
+  if (cp < 0x80) { cp as usize } else if (cp < 0x800) { (0xC0 | (cp >> 6)) as usize } else if (cp < 0x10000) { (0xE0 | (cp >> 12)) as usize } else { (0xF0 | (cp >> 18)) as usize }
+}
+
+// Whether a fragment can match without reading, its assertions taken to hold.
+function nullable(a: readonly Vec<Inst>): bool {
+  let seen: Vec<bool> = Vec.new();
+  for (const _ of 0..a.len()) { seen.push(false); }
+  let todo: Vec<usize> = [0];
+  while (const #Some(pc) = todo.pop()) {
+    if (pc >= a.len()) { return true; }
+    if (seen[pc]) { continue; }
+    seen[pc] = true;
+    const i = a[pc];
+    if (i.op == JMP) { todo.push(jump(pc, i.x)); }
+    else if (i.op == SPLIT) { todo.push(jump(pc, i.x)); todo.push(jump(pc, i.y)); }
+    else if (i.op == SAVE || i.op == ASSERT) { todo.push(pc + 1); }
+  }
+  false
+}
+
+// `a` repeated from `min` to `max` times, as many as it can if `greedy`, else as few.
+function repetition(a: readonly Vec<Inst>, min: u32, max: Option<u32>, greedy: bool): Vec<Inst> {
+  const n = a.len() as i32;
+  let out: Vec<Inst> = Vec.new();
+  const split = (more: i32, skip: i32) => if (greedy) { inst(SPLIT, more, skip) } else { inst(SPLIT, skip, more) };
+  match (max) {
+    #None => {
+      if (min == 0 && nullable(a)) {
+        // `a*` of an `a` that can match nothing is `(a+)?`: as `a*` its first empty pass would end
+        // where it began, at an instruction already added, and leave its groups as they were.
+        return repetition(repetition(a, 1, #None, greedy), 0, #Some(1), greedy);
+      } else if (min == 0) {
+        // `a*`: L: SPLIT a, end; a; JMP L.
+        out.push(split(1, n + 2));
+        append(mut out, a);
+        out.push(inst(JMP, -(n + 1), 0));
+      } else {
+        for (const _ of 0..min - 1) { append(mut out, a); }
+        // `a+`: a; SPLIT back to it, on.
+        append(mut out, a);
+        out.push(split(-n, 1));
+      }
+    }
+    #Some(hi) => {
+      for (const _ of 0..min) { append(mut out, a); }
+      // `a?` nested `hi - min` times: each one's `SPLIT` skips to the end.
+      let rest: Vec<Inst> = Vec.new();
+      for (const _ of min..hi) {
+        let f: Vec<Inst> = [split(1, n + (rest.len() as i32) + 1)];
+        append(mut f, a);
+        append(mut f, rest);
+        rest = f;
+      }
+      append(mut out, rest);
+    }
+  }
+  out
+}

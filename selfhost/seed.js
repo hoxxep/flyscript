@@ -1187,11 +1187,11 @@ function $drop11(v) {
   if (v === undefined) return;
   $b.Gen_drop({ v: v });
 }
-const $const41 = $usize(1 * 2 ** 40);
-const $const42 = ["std/prelude.fly", "std/region.d.fly", "std/net.d.fly", "std/io.d.fly", "std/collections.d.fly", "std/par.fly", "std/layout.fly", "std/sync.d.fly", "std/json.fly", "std/world.d.fly", "std/fs.fly", "std/process.fly", "std/time.fly", "std/unicode.fly"];
+const $const68 = $usize(1 * 2 ** 40);
+const $const69 = ["std/prelude.fly", "std/region.d.fly", "std/net.d.fly", "std/io.d.fly", "std/collections.d.fly", "std/par.fly", "std/layout.fly", "std/sync.d.fly", "std/json.fly", "std/world.d.fly", "std/fs.fly", "std/process.fly", "std/time.fly", "std/unicode.fly", "std/regex.fly"];
 function $copy12(v) { return ({ nanos: v.nanos }); }
 function $copy13(v) { return [v[0], v[1]]; }
-const $const51 = $usize(1 * 2 ** 51);
+const $const78 = $usize(1 * 2 ** 51);
 function $drop14(v) {
   if (v === undefined) return;
   $b.Gen_drop({ v: v });
@@ -1265,8 +1265,8 @@ function $drop35(v) {
   if (v === undefined) return;
   $b.Gen_drop({ v: v });
 }
-const $const53 = "void flyg_cleanup_begin(fly_unwind_state* s) { *s = fly_cleanup_begin(); }\nvoid flyg_cleanup_end(fly_unwind_state* s) { fly_cleanup_end(*s); }\nvoid flyg_free(void* p) { free(p); }\n";
-const $const52 = "declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1)\ndeclare void @llvm.memset.p0.i64(ptr, i8, i64, i1)\ndeclare void @fly_out_of_bounds(i64, i64) noreturn\ndeclare void @fly_overflow(i128, ptr) noreturn\ndeclare i128 @fly_add128(i128, i128)\ndeclare i128 @fly_sub128(i128, i128)\ndeclare i128 @fly_mul128(i128, i128)\ndeclare void @fly_div_zero() noreturn\ndeclare void @fly_panic(ptr) noreturn\ndeclare void @fly_err_box(i32, ptr, SIZE)\ndeclare i32 @fly_err_tag()\ndeclare void @fly_err_take(ptr, SIZE)\ndeclare ptr @fly_alloc(SIZE)\ndeclare void @fly_arena_free(ptr)\ndeclare void @fly_perform(i32, i32, ptr, ptr)\ndeclare void @fly_handle_start(ptr, ptr, ptr)\ndeclare void @fly_handle_keep(ptr)\ndeclare void @fly_handle_resume(ptr)\ndeclare zeroext i1 @fly_handle_done(ptr)\ndeclare void @fly_handle_unwind(ptr)\ndeclare void @fly_handle_free(ptr)\ndeclare void @flyg_cleanup_begin(ptr)\ndeclare void @flyg_cleanup_end(ptr)\ndeclare void @flyg_free(ptr)\n";
+const $const80 = "void flyg_cleanup_begin(fly_unwind_state* s) { *s = fly_cleanup_begin(); }\nvoid flyg_cleanup_end(fly_unwind_state* s) { fly_cleanup_end(*s); }\nvoid flyg_free(void* p) { free(p); }\n";
+const $const79 = "declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1)\ndeclare void @llvm.memset.p0.i64(ptr, i8, i64, i1)\ndeclare void @fly_out_of_bounds(i64, i64) noreturn\ndeclare void @fly_overflow(i128, ptr) noreturn\ndeclare i128 @fly_add128(i128, i128)\ndeclare i128 @fly_sub128(i128, i128)\ndeclare i128 @fly_mul128(i128, i128)\ndeclare void @fly_div_zero() noreturn\ndeclare void @fly_panic(ptr) noreturn\ndeclare void @fly_err_box(i32, ptr, SIZE)\ndeclare i32 @fly_err_tag()\ndeclare void @fly_err_take(ptr, SIZE)\ndeclare ptr @fly_alloc(SIZE)\ndeclare void @fly_arena_free(ptr)\ndeclare void @fly_perform(i32, i32, ptr, ptr)\ndeclare void @fly_handle_start(ptr, ptr, ptr)\ndeclare void @fly_handle_keep(ptr)\ndeclare void @fly_handle_resume(ptr)\ndeclare zeroext i1 @fly_handle_done(ptr)\ndeclare void @fly_handle_unwind(ptr)\ndeclare void @fly_handle_free(ptr)\ndeclare void @flyg_cleanup_begin(ptr)\ndeclare void @flyg_cleanup_end(ptr)\ndeclare void @flyg_free(ptr)\n";
 function $copy36(v) { return [v[0], v[1]]; }
 function $drop37(v) {
   if (v === undefined) return;
@@ -1433,13 +1433,13 @@ function $drop87(v) {
   if (v === undefined) return;
   $b.Gen_drop({ v: v });
 }
-const $const43 = ["len", "isEmpty", "enumerate", "map", "filter", "any"];
+const $const70 = ["len", "isEmpty", "enumerate", "map", "filter", "any"];
 function $copy88(v) { return [v[0], v[1]]; }
 function $drop89(v) {
   if (v === undefined) return;
   $b.Gen_drop({ v: v });
 }
-const $const40 = ["i8", "i16", "i32", "i64", "i128", "isize", "u8", "u16", "u32", "u64", "usize", "f32", "f64", "bool", "str", "void", "never", "Type"];
+const $const67 = ["i8", "i16", "i32", "i64", "i128", "isize", "u8", "u16", "u32", "u64", "usize", "f32", "f64", "bool", "str", "void", "never", "Type"];
 function $copy90(v) { return [v[0], v[1]]; }
 function $drop91(v) {
   if (v === undefined) return;
@@ -1484,12 +1484,12 @@ function $drop103(v) {
   if (v === undefined) return;
   $b.Gen_drop({ v: v });
 }
-const $const49 = ["auto", "break", "case", "char", "const", "continue", "default", "do", "double", "else", "enum", "extern", "float", "for", "goto", "if", "inline", "int", "long", "register", "restrict", "return", "short", "signed", "sizeof", "static", "struct", "switch", "typedef", "union", "unsigned", "void", "volatile", "while", "main", "bool", "true", "false", "errno", "free", "exit"];
+const $const76 = ["auto", "break", "case", "char", "const", "continue", "default", "do", "double", "else", "enum", "extern", "float", "for", "goto", "if", "inline", "int", "long", "register", "restrict", "return", "short", "signed", "sizeof", "static", "struct", "switch", "typedef", "union", "unsigned", "void", "volatile", "while", "main", "bool", "true", "false", "errno", "free", "exit"];
 function $drop104(v) {
   if (v === undefined) return;
   $b.Gen_drop({ v: v });
 }
-const $const46 = ["=", "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^="];
+const $const73 = ["=", "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^="];
 function $drop105(v) {
   if (v === undefined) return;
   $b.Gen_drop({ v: v });
@@ -1516,7 +1516,7 @@ function $drop112(v) {
   if (v === undefined) return;
   $b.Gen_drop({ v: v });
 }
-const $const50 = $usize(1 * 2 ** 52);
+const $const77 = $usize(1 * 2 ** 52);
 function $copy113(v) { return [v[0], v[1]]; }
 function $drop114(v) {
   if (v === undefined) return;
@@ -1552,7 +1552,7 @@ function $drop123(v) {
   if (v === undefined) return;
   $b.Gen_drop({ v: v });
 }
-const $const54 = ["arguments", "await", "case", "catch", "class", "debugger", "default", "delete", "do", "else", "enum", "eval", "export", "extends", "finally", "function", "implements", "import", "in", "instanceof", "interface", "let", "new", "null", "package", "private", "protected", "public", "static", "super", "switch", "this", "typeof", "undefined", "var", "void", "with", "yield", "NaN", "Infinity"];
+const $const81 = ["arguments", "await", "case", "catch", "class", "debugger", "default", "delete", "do", "else", "enum", "eval", "export", "extends", "finally", "function", "implements", "import", "in", "instanceof", "interface", "let", "new", "null", "package", "private", "protected", "public", "static", "super", "switch", "this", "typeof", "undefined", "var", "void", "with", "yield", "NaN", "Infinity"];
 function $drop124(v) {
   if (v === undefined) return;
   $b.Gen_drop({ v: v });
@@ -1561,9 +1561,9 @@ function $drop125(v) {
   if (v === undefined) return;
   $b.Gen_drop({ v: v });
 }
-const $const47 = ["as", "break", "catch", "comptime", "const", "continue", "defer", "dyn", "else", "enum", "export", "extends", "extern", "false", "for", "function", "if", "impl", "import", "interface", "let", "mut", "once", "readonly", "return", "struct", "throw", "true", "try", "type", "unsafe", "uses", "while", "yield"];
-const $const48 = ["...", "..", "=>", "==", "!=", "<=", ">=", "&&", "||", "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "{", "}", "(", ")", "[", "]", "<", ">", ",", ";", ":", ".", "=", "+", "-", "*", "/", "%", "&", "|", "^", "!", "?", "@", "~"];
-const $const44 = 1000000n;
+const $const74 = ["as", "break", "catch", "comptime", "const", "continue", "defer", "dyn", "else", "enum", "export", "extends", "extern", "false", "for", "function", "if", "impl", "import", "interface", "let", "mut", "once", "readonly", "return", "struct", "throw", "true", "try", "type", "unsafe", "uses", "while", "yield"];
+const $const75 = ["...", "..", "=>", "==", "!=", "<=", ">=", "&&", "||", "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "{", "}", "(", ")", "[", "]", "<", ">", ",", ";", ":", ".", "=", "+", "-", "*", "/", "%", "&", "|", "^", "!", "?", "@", "~"];
+const $const71 = 1000000n;
 function $drop126(v) {
   if (v === undefined) return;
   $b.Gen_drop({ v: v });
@@ -1613,7 +1613,7 @@ function $drop141(v) {
   if (v === undefined) return;
   $b.Gen_drop({ v: v });
 }
-const $const55 = "0123456789abcdef";
+const $const82 = "0123456789abcdef";
 function $drop142(v) {
   if (v === undefined) return;
   $b.Gen_drop({ v: v });
@@ -1626,7 +1626,7 @@ function $drop144(v) {
   if (v === undefined) return;
   $b.Gen_drop({ v: v });
 }
-const $const45 = [["||"], ["&&"], ["==", "!=", "<", ">", "<=", ">="], ["|"], ["^"], ["&"], ["<<", ">>"], ["+", "-"], ["*", "/", "%"]];
+const $const72 = [["||"], ["&&"], ["==", "!=", "<", ">", "<=", ">="], ["|"], ["^"], ["&"], ["<<", ">>"], ["+", "-"], ["*", "/", "%"]];
 function $drop145(v) {
   if (v === undefined) return;
   $b.Gen_drop({ v: v });
@@ -4379,11 +4379,11 @@ function load_15($56, $57) {
       v30_t = parent_48(v1_std);
       v31_t = $b.Vec_new();
       v32_t = $b.HashMap_new();
-      v33_t = { modules: v4_t, defs: v5_t, consts: v6_t, fns: v7_t, impls: v8_t, diags: v9_t, nextSym: 0, known: v10_t, inferred: v11_t, checked: v12_t, typed: v13_t, owned: v14_t, ifaceFns: v15_t, spliced: v16_t, bodies: v17_t, synth: v18_t, nextSynth: $const41, nextId: v19_t, specs: v20_t, assocInstances: v21_t, instances: v22_t, specOf: v23_t, specNotes: v24_t, specRequested: v25_t, assumedPure: v26_t, pendingAliases: v27_t, aliasing: v28_t, note: v29_t, root: v30_t, shapes: v31_t, methods: v32_t };
+      v33_t = { modules: v4_t, defs: v5_t, consts: v6_t, fns: v7_t, impls: v8_t, diags: v9_t, nextSym: 0, known: v10_t, inferred: v11_t, checked: v12_t, typed: v13_t, owned: v14_t, ifaceFns: v15_t, spliced: v16_t, bodies: v17_t, synth: v18_t, nextSynth: $const68, nextId: v19_t, specs: v20_t, assocInstances: v21_t, instances: v22_t, specOf: v23_t, specNotes: v24_t, specRequested: v25_t, assumedPure: v26_t, pendingAliases: v27_t, aliasing: v28_t, note: v29_t, root: v30_t, shapes: v31_t, methods: v32_t };
       v34_p.v = v33_t;
       {
         let v35_t, v36_t, v37_t, v38_t;
-        v35_t = $const42;
+        v35_t = $const69;
         v36_t = $b.slice_len(v35_t);
         v37_t = v36_t;
         v38_t = 0;
@@ -5621,7 +5621,7 @@ function checkOwnership_18($63, $64) {
                             v121_t = v91_o;
                             v122_t = $b.String_asStr(v119_name);
                             v123_t = clone_59(v120_ty);
-                            v124_t = $usize($const51 - v118_i);
+                            v124_t = $usize($const78 - v118_i);
                             v125_t = declareVar_87(v121_t, v122_t, v123_t, true, true, v124_t);
                             v126_id = v125_t;
                             v127_t = v91_o.v.p.v;
@@ -16622,7 +16622,7 @@ function program_102($250, $251, $252, $253) {
       v65_t = v64_glue;
       $b.String_push(v65_t, "\n// ---- what the LLVM module calls, and checks of what it assumes ----\n");
       v67_t = v64_glue;
-      $b.String_push(v67_t, $const53);
+      $b.String_push(v67_t, $const80);
       v69_t = v64_glue;
       v70_t = layoutChecks_263(v0_self.v.ptr);
       v71_t = v70_t;
@@ -16647,7 +16647,7 @@ function program_102($250, $251, $252, $253) {
       v89_ll.v = v88_t;
       v90_t = v89_ll;
       v91_t = sizeTy_264(v0_self.v.ptr);
-      v92_t = $b.str_replaceAll($const52, "SIZE", v91_t);
+      v92_t = $b.str_replaceAll($const79, "SIZE", v91_t);
       v93_t = v92_t;
       v94_t = v93_t;
       v95_t = $b.String_asStr(v94_t);
@@ -44203,7 +44203,7 @@ function sourceSpan_294($706, $707) {
     v0_self = $706; v1_span = $707; 
     {
       let v4_t, v5_t, v6_t, v7_t, v8_t, v9_t;
-      v4_t = (v1_span.start < $const41);
+      v4_t = (v1_span.start < $const68);
       if (v4_t)
       {
         {
@@ -50476,7 +50476,7 @@ function expr_355($821, $822) {
                     let v208_t, v209_t, v210_t;
                     v208_t = v203_name.name;
                     v209_t = $b.String_asStr(v208_t);
-                    v210_t = includes_607($const43, v209_t);
+                    v210_t = includes_607($const70, v209_t);
                     v207_t = v210_t;
                   }
                   v201_t = v207_t;
@@ -52646,7 +52646,7 @@ function primFromName_367($836) {
     v0_s = $836; 
     {
       let v3_t, v4_t, v5_t;
-      v3_t = indexOf_647($const40, v0_s);
+      v3_t = indexOf_647($const67, v0_s);
       v4_t = v3_t;
       L1:
       {
@@ -72174,7 +72174,7 @@ function mangle_502($1195) {
     {
       let v3_t, v4_t, v5_t, v6_t, v7_t;
       try {
-        v3_t = $b.slice_iter($const49);
+        v3_t = $b.slice_iter($const76);
         v4_t = (($1196) => ($1197) => {
           let v1_ret;
           {
@@ -74692,7 +74692,7 @@ function expr_542($1279) {
             throw new $rt.Fail(v14_t);
           }
         }
-        v15_t = $b.slice_iter($const46);
+        v15_t = $b.slice_iter($const73);
         v16_t = (($1280) => {
           let v1_ret;
           {
@@ -96487,7 +96487,7 @@ function fieldInits_732($1705, $1706) {
                       v26_t = v14_f.name.name;
                       v27_t = $b.String_clone(v26_t);
                       v28_t = { $tag: "Ident", $: v27_t };
-                      v29_t = { kind: v28_t, span: $copy1(v14_f.name.span), id: $const50 };
+                      v29_t = { kind: v28_t, span: $copy1(v14_f.name.span), id: $const77 };
                       v30_e = v29_t;
                       v31_t = v0_self.v;
                       v32_t = v30_e;
@@ -96529,7 +96529,7 @@ function assign_733($1707, $1708, $1709, $1710, $1711) {
     v0_self = $1707; v1_e = $1708; v2_op = $1709; v3_target = $1710; v4_value = $1711; 
     {
       const v18_t = { v: undefined };
-      let v7_t, v11_t, v15_through, v16_t, v17_t, v19_t, v34_placeTy, v35_t, v36_t, v37_t, v38_t, v39_t, v40_t, v41_t, v42_use, v43_t, v44_v, v45_t, v46_t, v47_t, v182_t, v183_t;
+      let v7_t, v11_t, v15_through, v16_t, v17_t, v19_t, v34_placeTy, v35_t, v36_t, v37_t, v38_t, v39_t, v40_t, v41_t, v42_use, v43_t, v44_v, v45_t, v46_t, v47_t, v166_t, v189_t, v190_t;
       L1:
       {
         let v8_t;
@@ -96622,7 +96622,7 @@ function assign_733($1707, $1708, $1709, $1710, $1711) {
       v47_t = v46_t;
       L3:
       {
-        let v48_t, v177_t;
+        let v48_t, v184_t;
         v48_t = (v47_t.$tag === "Some");
         if (v48_t)
         {
@@ -96840,7 +96840,7 @@ function assign_733($1707, $1708, $1709, $1710, $1711) {
             }
             else
             {
-              let v155_t, v156_t, v157_t, v158_t;
+              let v155_t, v156_t, v157_t, v158_t, v162_t;
               v155_t = v49_path.v.fields;
               v156_t = $b.slice_len(v155_t);
               v157_t = (v156_t > 0);
@@ -96853,37 +96853,49 @@ function assign_733($1707, $1708, $1709, $1710, $1711) {
                 v161_t = (v160_t > 0);
                 v158_t = v161_t;
               }
-              if (v158_t)
+              v162_t = v158_t;
+              if (v162_t)
+              {
+                let v163_t, v164_t, v165_t, v167_t, v168_t;
+                v163_t = v0_self.v;
+                v164_t = v0_self.v;
+                v165_t = tyOf_236(v164_t, v4_value);
+                v166_t = v165_t;
+                v167_t = v166_t;
+                v168_t = mayHold_247(v163_t, v167_t);
+                v162_t = v168_t;
+              }
+              if (v162_t)
               {
                 {
-                  let v162_t, v163_t, v164_t, v165_t;
-                  v162_t = new $rt.FieldRef(v0_self.v.state, "holds");
-                  v163_t = v49_path.v.root;
-                  v164_t = $b.HashMap_getMut(v162_t, v163_t);
-                  v165_t = v164_t;
+                  let v169_t, v170_t, v171_t, v172_t;
+                  v169_t = new $rt.FieldRef(v0_self.v.state, "holds");
+                  v170_t = v49_path.v.root;
+                  v171_t = $b.HashMap_getMut(v169_t, v170_t);
+                  v172_t = v171_t;
                   L5:
                   {
-                    let v166_t, v171_t;
-                    v166_t = (v165_t.$tag === "Some");
-                    if (v166_t)
+                    let v173_t, v178_t;
+                    v173_t = (v172_t.$tag === "Some");
+                    if (v173_t)
                     {
-                      let v167_ls, v168_t, v169_t, v170_t;
-                      v167_ls = v165_t.$;
-                      v169_t = v167_ls;
-                      v168_t = v44_v.loans;
-                      addLoans_966(v169_t, v168_t);
+                      let v174_ls, v175_t, v176_t, v177_t;
+                      v174_ls = v172_t.$;
+                      v176_t = v174_ls;
+                      v175_t = v44_v.loans;
+                      addLoans_966(v176_t, v175_t);
                       break L5;
                     }
-                    v171_t = (v165_t.$tag === "None");
-                    if (v171_t)
+                    v178_t = (v172_t.$tag === "None");
+                    if (v178_t)
                     {
                       {
-                        let v172_t, v173_t, v174_t, v175_t, v176_t;
-                        v172_t = new $rt.FieldRef(v0_self.v.state, "holds");
-                        v175_t = v49_path.v.root;
-                        v173_t = v44_v.loans;
-                        v174_t = clone_317(v173_t);
-                        $b.HashMap_insert(v172_t, v175_t, v174_t);
+                        let v179_t, v180_t, v181_t, v182_t, v183_t;
+                        v179_t = new $rt.FieldRef(v0_self.v.state, "holds");
+                        v182_t = v49_path.v.root;
+                        v180_t = v44_v.loans;
+                        v181_t = clone_317(v180_t);
+                        $b.HashMap_insert(v179_t, v182_t, v181_t);
                       }
                       break L5;
                     }
@@ -96895,23 +96907,23 @@ function assign_733($1707, $1708, $1709, $1710, $1711) {
           }
           break L3;
         }
-        v177_t = (v47_t.$tag === "None");
-        if (v177_t)
+        v184_t = (v47_t.$tag === "None");
+        if (v184_t)
         {
           {
-            let v178_t, v179_t, v180_t, v181_t;
-            v180_t = v0_self;
-            v179_t = v3_target;
-            v178_t = { $tag: "Mut" };
-            v181_t = expr_237(v180_t, v179_t, v178_t);
+            let v185_t, v186_t, v187_t, v188_t;
+            v187_t = v0_self;
+            v186_t = v3_target;
+            v185_t = { $tag: "Mut" };
+            v188_t = expr_237(v187_t, v186_t, v185_t);
           }
           break L3;
         }
         $rt.panic("no arm matched");
       }
-      v182_t = $b.Vec_new();
-      v183_t = { loans: v182_t };
-      v6_t = v183_t;
+      v189_t = $b.Vec_new();
+      v190_t = { loans: v189_t };
+      v6_t = v190_t;
     }
     v5_ret = v6_t;
   }
@@ -101206,7 +101218,7 @@ function matchExpr_744($1754, $1755, $1756, $1757, $1758) {
                             let v188_t, v189_t, v190_t, v191_at, v192_t, v193_t, v194_ty, v195_t, v196_t, v197_t, v198_t, v199_t;
                             v188_t = v1_scrutinee.kind;
                             v189_t = clone_293(v188_t);
-                            v190_t = { kind: v189_t, span: $copy1(v136_arm.pat.span), id: $const50 };
+                            v190_t = { kind: v189_t, span: $copy1(v136_arm.pat.span), id: $const77 };
                             v191_at = v190_t;
                             v192_t = v0_self.v;
                             v193_t = tyOf_236(v192_t, v1_scrutinee);
@@ -109579,7 +109591,7 @@ function mangle_803($1912) {
     {
       let v3_t, v4_t, v5_t, v6_t, v7_t;
       try {
-        v3_t = $b.slice_iter($const54);
+        v3_t = $b.slice_iter($const81);
         v4_t = (($1913) => ($1914) => {
           let v1_ret;
           {
@@ -113967,7 +113979,7 @@ function run_832($1979) {
                   v32_word = v31_t;
                   v33_t = v32_word;
                   v34_t = $b.String_asStr(v33_t);
-                  v35_t = includes_607($const47, v34_t);
+                  v35_t = includes_607($const74, v34_t);
                   if (v35_t)
                   {
                     let v37_t;
@@ -114111,7 +114123,7 @@ function run_832($1979) {
                           {
                             let v88_t, v89_t, v90_t, v91_t, v92_t;
                             try {
-                              v88_t = $b.slice_iter($const48);
+                              v88_t = $b.slice_iter($const75);
                               v89_t = (($1980) => {
                                 let v1_ret;
                                 {
@@ -118858,7 +118870,7 @@ function tick_900($2080, $2081) {
       let v3_t, v4_t;
       v3_t = $rt.u64(v0_self.v.steps + 1n);
       v0_self.v.steps = v3_t;
-      v4_t = (v0_self.v.steps > $const44);
+      v4_t = (v0_self.v.steps > $const71);
       if (v4_t)
       {
         {
@@ -145020,12 +145032,12 @@ function quote_1093($2612) {
                         v43_t = v6_out;
                         v45_t = v37_h;
                         v44_t = $usize(v37_h + 1);
-                        v46_t = $b.str_slice($const55, v45_t, v44_t);
+                        v46_t = $b.str_slice($const82, v45_t, v44_t);
                         $b.String_push(v43_t, v46_t);
                         v48_t = v6_out;
                         v50_t = v40_l;
                         v49_t = $usize(v40_l + 1);
-                        v51_t = $b.str_slice($const55, v50_t, v49_t);
+                        v51_t = $b.str_slice($const82, v50_t, v49_t);
                         $b.String_push(v48_t, v51_t);
                       }
                     }
@@ -150261,7 +150273,7 @@ function binary_1130($2698, $2699) {
     {
       let v4_t, v5_t, v6_t, v8_t, v9_t, v10_start, v11_t, v12_t, v13_t, v14_lhs;
       v5_t = v1_level;
-      v4_t = $b.slice_len($const45);
+      v4_t = $b.slice_len($const72);
       v6_t = (v5_t === v4_t);
       if (v6_t)
       {
@@ -185032,7 +185044,7 @@ function binaryOp_1361($3279, $3280) {
       let v4_t, v33_t;
       {
         let v5_t, v6_t, v7_t, v8_t;
-        v4_t = $const45;
+        v4_t = $const72;
         v5_t = $ix(v4_t, v1_level);
         v6_t = $b.slice_len(v5_t);
         v7_t = v6_t;

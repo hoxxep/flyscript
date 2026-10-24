@@ -272,11 +272,45 @@ Text as Unicode sees it: its code points, the characters a reader sees in it —
 | `graphemeCount(s): usize` | How many clusters `graphemes(s)` yields. |
 | `nfd(s): String`, `nfc(s): String` | `s` decomposed canonically, its marks in canonical order, and, for NFC, composed again; Hangul by arithmetic. Linear in `s`, but for a run of marks, which is sorted. |
 | `isNfd(s)`, `isNfc(s)` | Whether `s` is in that form already. |
+| `simpleFold(cp): u32` | The next code point after `cp` of its orbit under simple case folding, the code points that fold to the same one, from the least again after the greatest: `K`, `k`, U+212A KELVIN SIGN, then `K`. `cp` itself if it is alone. |
+| `generalCategory(cp): str` | Its General_Category, by the two-letter name: `"Lu"`, `"Nd"`, `"Cn"` for one unassigned. |
+| `categoryRanges(name)` | The code points of a category, `"Lu"`, or of every category of a letter, `"L"`, as sorted `[first, last]` ranges in a `Vec`: `#None` if there is none of that name. |
 | `lower(s): String`, `upper(s): String` | The full, unconditional case mappings of SpecialCasing, `upper("straße")` `"STRASSE"`, and the final sigma: a capital sigma lowers to `ς` at the end of a word, after a cased letter and not before one, `case-ignorable` characters between. They depend on no locale, so the Turkish and Lithuanian rules are not applied. `str`'s own `toUpperCase` and `toLowerCase` change ASCII alone. |
 
 ---
 
-## 9. `std/net`
+## 9. `std/regex`
+
+Regular expressions of RE2's syntax, matched in time linear in the text: the time a search takes is at most proportional to the length of the text times the size of the pattern, whatever either is, so no pattern and no text can make one run for ever. A pattern compiles to a program run by a Pike VM, every thread of it at once, one code point at a time. What it finds is what a backtracking matcher would find first (*leftmost-first*), and the groups are where the last pass through each matched; the repository checks both against RE2's semantics on random patterns and texts. Every function is pure. Positions are byte offsets of UTF-8 text.
+
+The syntax is RE2's:
+
+- A code point stands for itself; `.` for any but `\n`; `\` before punctuation for the punctuation; `\a \f \t \n \r \v`, `\x41` and `\x{1F600}` for those code points; `\Q...\E` for the text between, literally.
+- Classes: `[abc]`, `[a-z]`, `[^...]`; `\d \w \s` and their complements `\D \W \S`, which are ASCII's (`[0-9]`, `[0-9A-Za-z_]`, `[\t\n\f\r ]`), within a class too; `[[:alpha:]]` and the other POSIX classes, ASCII's, `[[:^alpha:]]` the complement; `\pL`, `\p{Lu}`, `\PL`, `\p{^Lu}`: Unicode's General_Category, a letter for every category of it, `Any` for every code point.
+- Repetition: `x*`, `x+`, `x?`, `x{n}`, `x{n,}`, `x{n,m}`, as many as can be; with a `?` after, as few. A count is at most 1000, and a `{` that does not begin one stands for itself.
+- `x|y`; `(x)` a group that captures, numbered by its `(`; `(?P<name>x)` and `(?<name>x)` one with a name; `(?:x)` one that does not capture.
+- Assertions: `^` and `$` at the start and end of the text, of a line too under `m`; `\A` and `\z` at the start and end of the text always; `\b` and `\B` at an ASCII word boundary and not at one.
+- Flags: `(?flags)` to the end of the group it is in, `(?flags:x)` for `x`: `i` ignores case by Unicode's simple case folding, every code point matching its orbit (`std/unicode`'s `simpleFold`), a class folded before it is complemented; `m` makes `^` and `$` match at lines; `s` makes `.` match `\n`; `U` swaps as many and as few. A `-` before flags clears them.
+- Backreferences and lookaround, which no linear-time matcher has, are errors.
+
+| | Contract |
+| :--- | :--- |
+| `Regex.new(pattern): Regex` | The pattern compiled, or `#BadRegex(at, why)`, `at` the byte offset in the pattern where it went wrong. A program of more than 100,000 instructions, from repetitions of repetitions, or groups nested more than 1000 deep, are errors too. |
+| `pattern()`, `groups()` | The pattern; how many groups capture, not counting the whole match. |
+| `groupIndex(name): Option<usize>` | The number of the group of that name. |
+| `isMatch(text): bool` | Whether it matches anywhere in `text`. |
+| `find(text): Option<Match>` | The leftmost-first match. |
+| `findAll(text)` | Yields each `Match` in turn, from the end of the last: none overlap, and an empty one is not yielded where the one before it ended. A generator, `uses Yield<Match>`. |
+| `captures(text): Option<Vec<Option<Match>>>` | The leftmost-first match, then where each group of it matched, `#None` for one that took no part. |
+| `capturesAll(text)` | Yields the captures of each match `findAll` would. |
+| `replaceAll(text, with): String` | `text` with each match replaced by `with`, in which `$1` or `${1}` is what a group matched, `$name` or `${name}` what a named group did, the longest name there is, and `$$` a `$`. A group that took no part, or that there is not, is nothing; a `$` before nothing that names one stands for itself. |
+| `split(text)` | Yields the text between the matches as `str`s lent from it, as Go's `Split` has them: no empty piece before an empty match at the start, none after the last match if it ends the text. |
+| `Match` | `{ start, end }`: the match is `text.slice(start, end)`. |
+| `RegexErr` | `#BadRegex(at, why)`. |
+
+---
+
+## 10. `std/net`
 
 TCP. Every operation that waits for the network performs `Io` and is a scheduling point; a task waiting for a socket gives its core to others until the kernel says the socket is ready.
 
@@ -302,7 +336,7 @@ Against a simulated world, a listener's connections are the world's requests, a 
 
 ---
 
-## 10. `std/par`
+## 11. `std/par`
 
 Data parallelism over pure closures (spec §6.5).
 
@@ -313,19 +347,19 @@ Data parallelism over pure closures (spec §6.5).
 
 ---
 
-## 11. `std/layout`
+## 12. `std/layout`
 
 `Soa<T>` keeps a struct's fields in planes, one for each field: a `Vec` for a scalar field and a nested `Soa` for a struct field (spec §7.4). It has `Soa.new()`, `push(v)`, `len()`, `at(i)`, a `SoaView` that lends each field of one element, and `splitAt(at)`; `SoaSlice`, `SoaView` and `SoaRead` are its `ParSplit` views.
 
 ---
 
-## 12. `std/region`
+## 13. `std/region`
 
 Mutable slots in a region (spec §4.6). `Cell<R, T extends Copy>`: `Cell.new(v)`, `c.get()`, `c.set(v)`. `RegionList<R, T>`: `RegionList.new()`, `push(v)`, `len()`, and iteration. Both are handles, `Copy`; reading and writing through one performs `Region<R>`.
 
 ---
 
-## 13. `std/json`
+## 14. `std/json`
 
 JSON as library code (spec §7.5).
 
@@ -336,12 +370,12 @@ JSON as library code (spec §7.5).
 
 ---
 
-## 14. `std/world`
+## 15. `std/world`
 
 Services only a simulated world provides (spec §6.4), for examples and tests: `Db.connect(): Db`; `db.fetchProfile(user): Profile`, where a `Profile` is `{ displayName: String }`, failing with `#NotFound` for a user the world does not know; and `db.checkQuota(token): Quota`, where a `Quota` is `{ allowed: bool }`. Each performs `Io` and may fail as the world's faults say.
 
 ---
 
-## 15. The web framework
+## 16. The web framework
 
 The web framework, FlyNext, is a package shipped with the compiler and specified in [web/README.md](../web/README.md): `web/http` (requests, responses and `serve`), `web/ui` (the `Ui<M>` effect, links, components and HTML), `web/dom` (pages in the browser), `web/router` (routes and their parameters) and `web/site` (pages and files answered), with the app compiler `web/flynext`.

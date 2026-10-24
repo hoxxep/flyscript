@@ -1,0 +1,13 @@
+# Writes tests/regex/cases.txt: random patterns and texts, and what Rust's `regex` crate, which
+# has RE2's syntax and semantics, finds in them. It is its own package, so the compiler depends on
+# nothing: `cargo run --release --manifest-path tools/regex-cases/Cargo.toml > tests/regex/cases.txt`.
+[package]
+name = "regex-cases"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+regex = "=1.12.4"
+
+[workspace]

@@ -4,7 +4,7 @@
     python3 tools/unicode.py UCD_DIR
 
 UCD_DIR holds the files of one version of the database, as https://www.unicode.org/Public/UCD/latest/
-has them: UnicodeData.txt, SpecialCasing.txt, DerivedNormalizationProps.txt, DerivedCoreProperties.txt,
+has them: UnicodeData.txt, SpecialCasing.txt, CaseFolding.txt, DerivedNormalizationProps.txt, DerivedCoreProperties.txt,
 GraphemeBreakProperty.txt (auxiliary/) and emoji-data.txt (emoji/). The tables replace everything
 in std/unicode.fly after the line that starts them, so the code above it is left as written.
 """
@@ -15,6 +15,8 @@ import sys
 
 MARK = "// ---- tables, written by tools/unicode.py from the Unicode Character Database"
 MAX = 0x110000
+CATEGORIES = ["Cn", "Lu", "Ll", "Lt", "Lm", "Lo", "Mn", "Mc", "Me", "Nd", "Nl", "No", "Pc", "Pd", "Ps", "Pe", "Pi", "Pf", "Po",
+              "Sm", "Sc", "Sk", "So", "Zs", "Zl", "Zp", "Cc", "Cf", "Cs", "Co"]
 
 
 def rows(path):
@@ -74,6 +76,7 @@ def main(ucd):
     data = list(rows(os.path.join(ucd, "UnicodeData.txt")))
     # UnicodeData lists a range by its first and last code points.
     ccc = [0] * MAX
+    category = [CATEGORIES.index("Cn")] * MAX
     decomp, upper, lower = {}, {}, {}
     i = 0
     while i < len(data):
@@ -84,6 +87,7 @@ def main(ucd):
             i += 1
         for cp in cps:
             ccc[cp] = int(f[3])
+            category[cp] = CATEGORIES.index(f[2])
             if f[5] and not f[5].startswith("<"):
                 decomp[cp] = [int(x, 16) for x in f[5].split()]
             if f[12]:
@@ -141,7 +145,21 @@ def main(ucd):
             for cp in span(f[0]):
                 case[cp] |= 2
 
+    # Simple case folding's orbits: the code points that fold to the same one, and it, each pointing
+    # at the next of its orbit, the last at the first.
+    orbits = {}
+    for f in rows(os.path.join(ucd, "CaseFolding.txt")):
+        if f[1] in ("C", "S"):
+            orbits.setdefault(int(f[2], 16), {int(f[2], 16)}).add(int(f[0], 16))
+    fold = {}
+    for members in orbits.values():
+        m = sorted(members)
+        for a, b in zip(m, m[1:] + m[:1]):
+            fold[a] = b
+    fold_cps = sorted(fold)
+
     g_at, g_is = runs(grapheme)
+    gc_at, gc_is = runs(category)
     c_at, c_is = runs(ccc)
     k_at, k_is = runs(case)
     keys = sorted(compose)
@@ -164,6 +182,13 @@ def main(ucd):
         "// Primary composites: `first << 21 | second`, sorted, and what the two compose to.\n",
         table("COMPOSE_KEY", "u64", keys, 8),
         table("COMPOSE_TO", "u32", [compose[k] for k in keys]),
+        "// General_Category, by runs, as the index of its name in `CATEGORIES`.\n",
+        "const CATEGORIES: str[] = [" + ", ".join(f'"{c}"' for c in CATEGORIES) + "];\n",
+        table("CATEGORY_AT", "u32", gc_at),
+        table("CATEGORY_IS", "u8", gc_is),
+        "// Simple case folding's orbits: each code point in one, sorted, and the next in its orbit.\n",
+        table("FOLD_CP", "u32", fold_cps),
+        table("FOLD_NEXT", "u32", [fold[c] for c in fold_cps]),
         "// Full case mappings, where they are unconditional.\n",
         mapping("LOWER", lower),
         mapping("UPPER", upper),

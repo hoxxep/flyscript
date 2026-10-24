@@ -1199,7 +1199,8 @@ impl<'p> Own<'p> {
                             // A binding assigned anew holds only the new value's loans; one
                             // assigned on several paths holds the union, where the paths join (§4.1).
                             self.state.holds.insert(path.root, v.loans.clone());
-                        } else if !path.fields.is_empty() && !v.loans.is_empty() {
+                        } else if !path.fields.is_empty() && !v.loans.is_empty() && self.may_hold(&self.ty_of(value)) {
+                            // A value whose type holds no borrow stores none, however it was reached.
                             self.state.holds.entry(path.root).or_default().extend(v.loans.iter().copied());
                         }
                     }

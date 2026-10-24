@@ -1255,7 +1255,8 @@ impl Own {
           // A binding assigned anew holds only the new value's loans; one assigned on several
           // paths holds the union, where the paths join (§4.1).
           self.state.holds.insert(path.root, v.loans.clone());
-        } else if (path.fields.len() > 0 && v.loans.len() > 0) {
+        } else if (path.fields.len() > 0 && v.loans.len() > 0 && self.mayHold(self.tyOf(value))) {
+          // A value whose type holds no borrow stores none, however it was reached.
           match (self.state.holds.getMut(path.root)) {
             #Some(ls) => addLoans(mut ls, v.loans),
             #None => { self.state.holds.insert(path.root, v.loans.clone()); }
