@@ -524,6 +524,50 @@ fn llvm_programs_run_as_expected() {
     assert!(failed.is_empty(), "failed through LLVM:\n{}", failed.join("\n"));
 }
 
+/// Tasks interleave alike on every implementation, from any seed (§6.4, §11.1): the reference,
+/// and the compiler's JavaScript, C, LLVM and WebAssembly, each print the order in which four
+/// tasks' messages arrived, which the seed chooses, the same for every seed tried.
+#[test]
+fn interleaves_alike_from_any_seed() {
+    if !has_wasm() || !has_cc() {
+        return;
+    }
+    let program = root().join("tests/run/interleave_by_seed.fly");
+    let dir = out().join("interleave");
+    std::fs::create_dir_all(&dir).unwrap();
+    let seed = root().join("selfhost/seed.js");
+    compile(&seed, &program, &dir.join("p.js"));
+    compile(&seed, &program, &dir.join("p.c"));
+    let cc = Command::new("cc").args(["-std=gnu11", "-O1", "-w", "-o"]).arg(dir.join("c")).arg(dir.join("p.c")).arg("-lm").output().unwrap();
+    assert!(cc.status.success(), "{}", String::from_utf8_lossy(&cc.stderr));
+    for (script, made) in [("selfhost/llvm.sh", "llvm"), ("selfhost/wasm.sh", "p.wasm")] {
+        let r = Command::new("sh").arg(root().join(script)).arg(&seed).arg(&program).arg(dir.join(made)).output().unwrap();
+        assert!(r.status.success(), "{script}: {}{}", String::from_utf8_lossy(&r.stdout), String::from_utf8_lossy(&r.stderr));
+    }
+    let mut orders = std::collections::HashSet::new();
+    for s in 1..=25u64 {
+        let world = format!("{{\"seed\":{s}}}");
+        // `run` consumes the program it is given, so each seed checks it afresh.
+        let checked = check_files(std::slice::from_ref(&program));
+        assert!(checked.errors.is_empty(), "{:?}", checked.render());
+        let (r, w) = run(checked.program, "main", Vec::new(), World::from_json(&world).unwrap());
+        assert!(matches!(r, Ok(Value::Unit)), "{r:?}");
+        let want: String = w.out.iter().map(|l| format!("{l}\n")).collect();
+        let runs: [(&str, Command); 4] = [
+            ("JavaScript", { let mut c = Command::new("node"); c.arg(dir.join("p.js")); c }),
+            ("C", Command::new(dir.join("c"))),
+            ("LLVM", Command::new(dir.join("llvm"))),
+            ("WebAssembly", { let mut c = Command::new("node"); c.arg("--no-warnings").arg(root().join("selfhost/wasm.js")).arg(dir.join("p.wasm")); c }),
+        ];
+        for (name, mut cmd) in runs {
+            let got = cmd.env("FLY_WORLD", &world).output().unwrap();
+            assert_eq!(String::from_utf8_lossy(&got.stdout), want, "{name} interleaves otherwise than the reference from seed {s}");
+        }
+        orders.insert(want);
+    }
+    assert!(orders.len() > 20, "the seed hardly changes the interleaving: {} orders from 25 seeds", orders.len());
+}
+
 /// Programs that start tasks, built through LLVM as `fly build` builds them — the module split into
 /// a part per core and linked by ThinLTO — link, the runtime's C and its Flyscript one program,
 /// and run as the simulated world and the machine's threads have them.

@@ -64,6 +64,130 @@ impl Default for World {
     }
 }
 
+/// A value of a world's JSON (§6.4), as `FLY_WORLD` gives it.
+enum Json {
+    Str(String),
+    Num(u64),
+    Bool(bool),
+    Arr(Vec<Json>),
+    Obj(Vec<(String, Json)>),
+    Null,
+}
+
+struct JsonReader<'a> {
+    s: &'a [u8],
+    at: usize,
+}
+
+impl JsonReader<'_> {
+    fn space(&mut self) {
+        while self.at < self.s.len() && self.s[self.at].is_ascii_whitespace() {
+            self.at += 1;
+        }
+    }
+
+    fn eat(&mut self, c: u8) -> Result<(), String> {
+        self.space();
+        if self.s.get(self.at) == Some(&c) {
+            self.at += 1;
+            Ok(())
+        } else {
+            Err(format!("FLY_WORLD: `{}` expected at byte {}", c as char, self.at))
+        }
+    }
+
+    fn value(&mut self) -> Result<Json, String> {
+        self.space();
+        match self.s.get(self.at) {
+            Some(b'"') => self.string().map(Json::Str),
+            Some(b'[') => {
+                self.at += 1;
+                let mut items = Vec::new();
+                self.space();
+                if self.s.get(self.at) == Some(&b']') {
+                    self.at += 1;
+                    return Ok(Json::Arr(items));
+                }
+                loop {
+                    items.push(self.value()?);
+                    self.space();
+                    match self.s.get(self.at) {
+                        Some(b',') => self.at += 1,
+                        _ => break,
+                    }
+                }
+                self.eat(b']')?;
+                Ok(Json::Arr(items))
+            }
+            Some(b'{') => {
+                self.at += 1;
+                let mut pairs = Vec::new();
+                self.space();
+                if self.s.get(self.at) == Some(&b'}') {
+                    self.at += 1;
+                    return Ok(Json::Obj(pairs));
+                }
+                loop {
+                    self.space();
+                    let k = self.string()?;
+                    self.eat(b':')?;
+                    pairs.push((k, self.value()?));
+                    self.space();
+                    match self.s.get(self.at) {
+                        Some(b',') => self.at += 1,
+                        _ => break,
+                    }
+                }
+                self.eat(b'}')?;
+                Ok(Json::Obj(pairs))
+            }
+            _ => {
+                let start = self.at;
+                while self.at < self.s.len() && !matches!(self.s[self.at], b',' | b']' | b'}') && !self.s[self.at].is_ascii_whitespace() {
+                    self.at += 1;
+                }
+                let word = std::str::from_utf8(&self.s[start..self.at]).unwrap_or("");
+                match word {
+                    "true" => Ok(Json::Bool(true)),
+                    "false" => Ok(Json::Bool(false)),
+                    "null" => Ok(Json::Null),
+                    _ => word.parse().map(Json::Num).map_err(|_| format!("FLY_WORLD: `{word}` is not a value the world reads")),
+                }
+            }
+        }
+    }
+
+    fn string(&mut self) -> Result<String, String> {
+        self.eat(b'"')?;
+        let mut out = String::new();
+        let mut chars = std::str::from_utf8(&self.s[self.at..]).map_err(|_| "FLY_WORLD: not UTF-8".to_string())?.char_indices();
+        while let Some((i, c)) = chars.next() {
+            match c {
+                '"' => {
+                    self.at += i + 1;
+                    return Ok(out);
+                }
+                '\\' => match chars.next().map(|(_, e)| e) {
+                    Some('n') => out.push('\n'),
+                    Some('r') => out.push('\r'),
+                    Some('t') => out.push('\t'),
+                    Some('b') => out.push('\u{8}'),
+                    Some('f') => out.push('\u{c}'),
+                    Some('u') => {
+                        let hex: String = (0..4).filter_map(|_| chars.next().map(|(_, h)| h)).collect();
+                        let v = u32::from_str_radix(&hex, 16).map_err(|_| "FLY_WORLD: a bad `\\u` escape".to_string())?;
+                        out.push(char::from_u32(v).unwrap_or('\u{fffd}'));
+                    }
+                    Some(e) => out.push(e),
+                    None => break,
+                },
+                c => out.push(c),
+            }
+        }
+        Err("FLY_WORLD: a string is not closed".to_string())
+    }
+}
+
 impl World {
     pub fn seeded(seed: u64) -> World {
         World {
@@ -85,6 +209,54 @@ impl World {
             real_fs: false,
             exit: None,
         }
+    }
+
+    /// The world `FLY_WORLD` describes (§6.4), as every back end reads it: the requests that
+    /// arrive, the peers and what each answers, the profiles and quotas of its database, the
+    /// percentage of operations that fail, and the seed, which also chooses who runs next.
+    pub fn from_json(text: &str) -> Result<World, String> {
+        let mut r = JsonReader { s: text.as_bytes(), at: 0 };
+        let Json::Obj(pairs) = r.value()? else { return Err("FLY_WORLD: an object was expected".to_string()) };
+        let mut world = World::default();
+        let mut faults = 0;
+        for (k, v) in pairs {
+            match (k.as_str(), v) {
+                ("incoming", Json::Arr(items)) => {
+                    for item in items {
+                        if let Json::Str(s) = item {
+                            world.incoming.push_back(s.into_bytes());
+                        }
+                    }
+                }
+                ("peers", Json::Obj(ps)) => {
+                    for (host, reply) in ps {
+                        if let Json::Str(s) = reply {
+                            world.peers.insert(host, s.into_bytes());
+                        }
+                    }
+                }
+                ("profiles", Json::Obj(ps)) => {
+                    for (user, name) in ps {
+                        if let Json::Str(s) = name {
+                            world.profiles.insert(user, s);
+                        }
+                    }
+                }
+                ("quotas", Json::Obj(ps)) => {
+                    for (token, allowed) in ps {
+                        world.quotas.insert(token, matches!(allowed, Json::Bool(true)));
+                    }
+                }
+                ("faults", Json::Num(n)) => faults = n,
+                ("seed", Json::Num(n)) => {
+                    world.seed = n;
+                    world.rng = n.max(1);
+                }
+                _ => {}
+            }
+        }
+        world.fault_percent = faults;
+        Ok(world)
     }
 
     /// Whether the next I/O operation fails (xorshift, so a seed gives the same run every time).

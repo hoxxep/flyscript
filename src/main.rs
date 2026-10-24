@@ -101,8 +101,18 @@ fn run(args: &[String]) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    // A program run from the command line sees the real file system.
-    let mut world = flyscript::eval::World::default();
+    // A program run from the command line sees the real file system, and the world `FLY_WORLD`
+    // describes, if it is given one, as compiled programs do (§6.4).
+    let mut world = match std::env::var("FLY_WORLD") {
+        Ok(text) if !text.is_empty() => match flyscript::eval::World::from_json(&text) {
+            Ok(w) => w,
+            Err(e) => {
+                eprintln!("{e}");
+                return ExitCode::FAILURE;
+            }
+        },
+        _ => flyscript::eval::World::default(),
+    };
     world.real_fs = true;
     let (result, world) = flyscript::eval::run(checked.program, name, values, world);
     for line in &world.out {

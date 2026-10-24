@@ -133,36 +133,14 @@ The aim is a language with no remaining technical reason to choose another one f
 
 | Against | What Flyscript has | What it still gives up, until these steps |
 |---|---|---|
-| Rust | No lifetime parameters, no `async` colouring or `Pin`, cyclic data in regions, error sets by union, `comptime` instead of procedural macros, deterministic simulation, a mechanized proof | A parked task keeps a whole stack where a Rust future keeps only what lives across its `.await`s (step 16); horizontal SIMD (step 17); failures returned through memory and aliasing LLVM is never told (step 19) |
-| Erlang | Native speed, no garbage collector, types | A bug in one connection ends the whole server (step 15) |
-| C and Zig | Memory and data-race safety, effects, closures | Nothing at the language level; the runtime's last costs (step 13) |
+| Rust | No lifetime parameters, no `async` colouring or `Pin`, cyclic data in regions, error sets by union, `comptime` instead of procedural macros, deterministic simulation, a mechanized proof | A parked task keeps a whole stack where a Rust future keeps only what lives across its `.await`s (step 15); horizontal SIMD (step 17); failures returned through memory and aliasing LLVM is never told (step 19) |
+| Erlang | Native speed, no garbage collector, types | A bug in one connection ends the whole server (step 13) |
+| C and Zig | Memory and data-race safety, effects, closures | Nothing at the language level; the runtime's last costs (step 16) |
 | TypeScript and Go | No garbage collector, unboxed layouts, real sum types, race freedom | Nothing |
 
 Once these steps are done, what Rust has that Flyscript lacks is its ecosystem, which C libraries reach through `extern "C"` until native packages grow, and nothing in the language. Each step below says what it is for, what it changes, and what it must measure to be done: a step is done when its bar is met on every back end, not when its code is written.
 
-## 13. Parity with the runtime it replaced
-
-**Goal.** Moving the runtime into Flyscript (step 12) must cost nothing. A language that claims C's speed cannot run its own scheduler or read its own files slower than the C it replaced; if it does, the claim is false where it is easiest to check.
-
-- **The simulated scheduler** runs a channel ping-pong in 1.2 times the old C scheduler's time, with as many switches. The simulated world is how every concurrent program is tested and replayed, so it is on the path of every test run. Every request that needs no choice of who runs next is to be answered without a switch, and a send or receive is to allocate nothing.
-- **The line reader** takes 1.33 times the CPU of the C reader it replaced, which did not check that its text was UTF-8. It is to match that reader while still checking, finding a line's end and checking its bytes in one pass, eight bytes at a time and, after step 17, sixteen.
-- **The same interleaving everywhere.** The reference evaluator, JavaScript, C, LLVM and WebAssembly must interleave tasks identically from any seed (§11.1's promise). A program whose output is its own interleaving is to run under many seeds on every implementation, as a test in the suite.
-
-**Done when:** the ping-pong and the line reader are within the run-to-run noise of the C they replaced, or faster, and the interleaving test passes on all five implementations for every seed it tries.
-
-## 14. The spec brought up to date
-
-**Goal.** The spec is the product as much as the compiler is, and it should be the clearest statement of a language anyone has written: short where things are simple, exact where they are not, and with nothing that is no longer true. Every claim it makes about what is proved, what is open and what Flyscript gives up should be current.
-
-- `generate` and `next`, primitives since 0.106, in the core calculus of §9.1.
-- §12.3's third question says what is proved now: continuations kept in a value, and tasks that synchronize through `Io`, are.
-- `RegionList<region R, T>` in one order throughout.
-- §0.1 says what the current version is and what the last few versions changed; the full record of revisions moves to `docs/history/`.
-- **Re-exports**, `export { a, b } from "./internal/a"`: a package presents one public face over the files behind it, as Rust's `pub use` lets a crate do, in one line of grammar and with ES modules otherwise unchanged.
-
-**Done when:** every section agrees with the compiler and the proof, §0.1 fits on a screen, and re-exports work on every back end.
-
-## 15. A panic ends its task
+## 13. A panic ends its task
 
 **Goal.** Erlang's fault tolerance at Rust's speed. Today a panic ends the whole program, so a server holding 5,000 connections drops all of them when one request hits an index out of bounds or an overflow, and anyone who finds that one input can take the server down at will. Erlang never has that problem, because a crash ends only its process; but Erlang pays for it with a garbage collector and copied messages. Flyscript can have the isolation without paying for it, because its types already prove what Erlang gets by copying: a task shares nothing mutable with another except through a `Mutex`, and everything it owns is its own.
 
@@ -207,7 +185,19 @@ A panic inside a `Drop`, or while a panic is already unwinding, ends the program
 
 **Done when:** a server under load keeps every other connection when one panics, a test shows it on every back end, the theorem covers panics, and §5.7, §6.1, §6.2 and §12.3 say so.
 
-## 16. Parked tasks as small as a future
+## 14. The spec brought up to date
+
+**Goal.** The spec is the product as much as the compiler is, and it should be the clearest statement of a language anyone has written: short where things are simple, exact where they are not, and with nothing that is no longer true. Every claim it makes about what is proved, what is open and what Flyscript gives up should be current.
+
+- `generate` and `next`, primitives since 0.106, in the core calculus of §9.1.
+- §12.3's third question says what is proved now: continuations kept in a value, and tasks that synchronize through `Io`, are.
+- `RegionList<region R, T>` in one order throughout.
+- §0.1 says what the current version is and what the last few versions changed; the full record of revisions moves to `docs/history/`.
+- **Re-exports**, `export { a, b } from "./internal/a"`: a package presents one public face over the files behind it, as Rust's `pub use` lets a crate do, in one line of grammar and with ES modules otherwise unchanged.
+
+**Done when:** every section agrees with the compiler and the proof, §0.1 fits on a screen, and re-exports work on every back end.
+
+## 15. Parked tasks as small as a future
 
 **Goal.** Win the last comparison Rust still wins. §12.1 says Flyscript gives up "stackful tasks instead of compiler-built state machines": a parked Rust future holds only the variables live across its `.await`s, a few hundred bytes, while a parked Flyscript task holds a whole stack. At ten million idle connections that is the difference between about 2 GB and 8 to 16 GB. Rust pays for its small futures with `async`, `await`, `Pin`, `'static` task bounds and a standard library split in two (`std` and `tokio`). Flyscript can have the small futures and pay none of that, because it already knows what Rust makes the programmer write down: after specialization, each function's effects say whether it can suspend — whether it performs `Io`, `Yield`, or an effect whose handler does not resume as its last act — and the calls in its body that can suspend are its `.await`s.
 
@@ -222,6 +212,17 @@ A panic inside a `Drop`, or while a panic is already unwinding, ends the program
 No language change is needed. There was no `async` and no `await`, and there still is none. JavaScript already runs effects as generators, and WebAssembly no longer needs stack switching from its host.
 
 **Done when:** a parked connection handler costs what the equivalent Rust future costs, within tens of bytes, measured; a million parked tasks fit in the memory a million Rust futures take; nothing that does not suspend runs slower; fibers are gone from the native runtime; and §8.2, §8.3, §11.3 and §12.1 say so.
+
+## 16. Parity with the runtime it replaced
+
+**Goal.** Moving the runtime into Flyscript (step 12) must cost nothing. This step comes after state machines (step 15) because the simulated scheduler's remaining cost is in the path step 15 rewrites: fibers, and the switch to the scheduler and back. A language that claims C's speed cannot run its own scheduler or read its own files slower than the C it replaced; if it does, the claim is false where it is easiest to check.
+
+- **The simulated scheduler** runs a channel ping-pong in 1.2 times the old C scheduler's time, with as many switches. The simulated world is how every concurrent program is tested and replayed, so it is on the path of every test run. Every request that needs no choice of who runs next is to be answered without a switch, and a send or receive is to allocate nothing.
+- **The line reader** takes 1.33 times the CPU of the C reader it replaced, which did not check that its text was UTF-8. It is to match that reader while still checking, finding a line's end and checking its bytes in one pass, eight bytes at a time and, after step 17, sixteen.
+- **The same interleaving everywhere.** Done: the reference evaluator, JavaScript, C, LLVM and WebAssembly interleave tasks identically from any seed (§11.1's promise), which a test of the suite checks across 25 seeds.
+- **Closures that are only called live in their caller's frame.** A closure literal passed to a function that takes a `once` closure (`with`, `Io.scope`, `Mutex.lock`) has its environment allocated on the heap, though the callee only calls it. Rust never pays this, because each closure is its own type and lives on the stack unless boxed. The compiler is to find which closure parameters a function only calls, and put those closures' environments in the caller's frame.
+
+**Done when:** the ping-pong and the line reader are within the run-to-run noise of the C they replaced, or faster, and the interleaving test passes on all five implementations for every seed it tries.
 
 ## 17. Portable SIMD
 

@@ -1,0 +1,25 @@
+// expect:  0 10 1 11 12 2 30 20 21 22 31 32 3 4 23 24 5 13 25 33 14 34 35 15
+// Four tasks send to one channel, sleeping now and then; the seed chooses who runs at each turn,
+// so what arrives, in order, is the interleaving. Every implementation prints the same from any
+// seed (tests/selfhost.rs, `interleaves_alike_from_any_seed`).
+import { println } from "std/io";
+import { channel } from "std/sync";
+export function main(): void uses Io {
+  const [tx, rx] = channel();
+  Io.scope((s) => {
+    for (const t of 0..4) {
+      const out = tx.clone();
+      s.spawn(() => {
+        for (const i of 0..6) {
+          out.send(t * 10 + i);
+          if (i % 3 == 2) { Io.sleep(Duration.ms(1)); }
+        }
+        out.close();
+      });
+    }
+    tx.close();
+    let line = "".toString();
+    for (const v of rx.each()) { line = `${line} ${v}`; }
+    println(line);
+  });
+}
