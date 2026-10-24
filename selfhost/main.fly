@@ -98,6 +98,16 @@ function packageFiles(dir: str, out: mut Vec<String>): void uses Io {
   }
 }
 
+// The C runtime, its header and its code made one file. A freestanding program's does without the C
+// library; a program's whole C unwinds a panic by C's cleanups (runtime.c's FLY_C_UNWIND), and the
+// C beside a module made through LLVM by the module's landing pads, as its build says.
+function cRuntime(root: str, freestanding: bool, toLlvm: bool): String uses Io, Fail<Stop> {
+  const h = readText(`${root}/selfhost/runtime.h`);
+  const c = readText(`${root}/selfhost/runtime.c`);
+  const mode = if (freestanding) { "#define FLY_FREESTANDING 1\n" } else if (!toLlvm) { "#define FLY_C_UNWIND 1\n" } else { "" };
+  `${mode}${h}\n${c.asStr().replaceAll("#include \"runtime.h\"", "")}`
+}
+
 function compile(entry: str, out: str, root: str, freestanding: bool, ptr: usize, time: bool, core: Option<String>, interfaces: bool): void uses Io, Fail<Stop> {
   let clock = Clock { on: time, at: Io.now() };
   // With `--interface`, an entry that is a directory is a package with no program: all of it.
@@ -150,14 +160,7 @@ function compile(entry: str, out: str, root: str, freestanding: bool, ptr: usize
   const toLlvm = out.endsWith(".ll");
   const toC = out.endsWith(".c") || toLlvm;
   // The C runtime is its header and its code, made one file.
-  const rt: String = if (toC) {
-    const h = readText(`${root}/selfhost/runtime.h`);
-    const c = readText(`${root}/selfhost/runtime.c`);
-    // A freestanding program's runtime does without the C library.
-    // A program's whole C unwinds a panic by the platform's tables (runtime.c's FLY_C_UNWIND).
-    const mode = if (freestanding) { "#define FLY_FREESTANDING 1\n" } else if (!toLlvm) { "#define FLY_C_UNWIND 1\n" } else { "" };
-    `${mode}${h}\n${c.asStr().replaceAll("#include \"runtime.h\"", "")}`
-  } else { readText(`${root}/selfhost/runtime.js`) };
+  const rt: String = if (toC) { cRuntime(root, freestanding, toLlvm) } else { readText(`${root}/selfhost/runtime.js`) };
   if (toLlvm) {
     const [ll, c] = try { llvmProgram(p, main, rt.asStr(), freestanding, ptr) } catch (#Failed(message)) {
       println(message.asStr());
@@ -194,9 +197,7 @@ export function main(entry: str, out: str, root: str, flags: readonly String[]):
         println("error: `--watch` compiles to C: name a file ending in `.c`");
         exit(2);
       }
-      const h = readText(`${root}/selfhost/runtime.h`);
-      const c = readText(`${root}/selfhost/runtime.c`);
-      watch(entry, out, root, `${h}\n${c.asStr().replaceAll("#include \"runtime.h\"", "")}`.asStr());
+      watch(entry, out, root, cRuntime(root, false, false).asStr());
     }
     const core: Option<String> = match (flags.iter().find((f) => f.startsWith("--core="))) { #Some(f) => #Some(f.slice(7, f.len()).toString()), #None => #None };
     compile(entry, out, root, flags.iter().some((f) => f == "--freestanding"), ptr, flags.iter().some((f) => f == "--time"), core, flags.iter().some((f) => f == "--interface"));
