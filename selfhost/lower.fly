@@ -3232,7 +3232,12 @@ function freeNames(e: readonly Expr, out: mut Vec<String>): void {
   match (e.kind) {
     #Ident(n) => { if (!out.iter().some((x) => x == n)) { out.push(n.clone()); } }
     #Field { target, name: _ } => freeNames(target, mut out),
+    #FieldAt { target, name } => { freeNames(target, mut out); freeNames(name, mut out); }
     #Index { target, index } => { freeNames(target, mut out); freeNames(index, mut out); }
+    #Range { lo, hi } => {
+      if (const #Some(x) = lo) { freeNames(x, mut out); }
+      if (const #Some(x) = hi) { freeNames(x, mut out); }
+    }
     #Call { callee, typeArgs: _, args } => { freeNames(callee, mut out); for (const a of args) { freeNames(a, mut out); } }
     #Unary { op: _, operand } => freeNames(operand, mut out),
     #Binary { op: _, lhs, rhs } => { freeNames(lhs, mut out); freeNames(rhs, mut out); }
@@ -3242,6 +3247,14 @@ function freeNames(e: readonly Expr, out: mut Vec<String>): void {
     #Return(v) => { if (const #Some(x) = v) { freeNames(x, mut out); } }
     #Template(parts) => { for (const p of parts) { if (const #Expr(x) = p) { freeNames(x, mut out); } } }
     #List(items) => { for (const x of items) { freeNames(x, mut out); } }
+    #TagAt { name, args } => {
+      freeNames(name, mut out);
+      match (args) {
+        #Tuple(es) => { for (const x of es) { freeNames(x, mut out); } }
+        #Record(fs) => { for (const f of fs) { if (const #Some(v) = f.value) { freeNames(v, mut out); } } }
+        #None => {}
+      }
+    }
     #Tag { name: _, args } => match (args) {
       #Tuple(es) => { for (const x of es) { freeNames(x, mut out); } }
       #Record(fs) => { for (const f of fs) { match (f.value) { #Some(v) => freeNames(v, mut out), #None => { if (!out.iter().some((x) => x == f.name.name)) { out.push(f.name.name.clone()); } } } } }

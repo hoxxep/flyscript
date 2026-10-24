@@ -168,6 +168,9 @@ uint64_t fly_rt_show_f64(double v, uint8_t* out);
 uint64_t fly_rt_float_fixed(double v, uint32_t places, uint8_t* out);
 bool fly_rt_parse_float(const uint8_t* text, uint64_t len, double* out);
 uint64_t fly_rt_show_int(bool negative, uint64_t high, uint64_t low, uint8_t* out);
+// The scheduler of a simulated world (rt/sched.fly): runs the tasks until the main one, whose
+// record is `main`, ends.
+void fly_rt_tasks(uint64_t seed, uint8_t* main);
 
 // ---- integers ----
 

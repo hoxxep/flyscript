@@ -1233,7 +1233,7 @@ function $drop0(v) {
   if (v === undefined) return;
   $b.Gen_drop({ v: v });
 }
-const $const72 = ["format.fly"];
+const $const72 = ["format.fly", "sched.fly"];
 function $copy1(v) { return ({ end: v.end, start: v.start }); }
 function $drop2(v) {
   if (v === undefined) return;
@@ -194939,7 +194939,7 @@ function freeNames_1458($3539, $3540) {
     {
       L1:
       {
-        let v3_t, v14_t, v18_t, v25_t, v41_t, v45_t, v52_t, v59_t, v63_t, v80_t, v86_t, v101_t, v114_t, v156_t, v182_t, v192_t, v195_t, v206_t, v212_t, v218_t, v238_t, v243_t, v247_t;
+        let v3_t, v14_t, v18_t, v25_t, v32_t, v43_t, v59_t, v63_t, v70_t, v77_t, v81_t, v98_t, v104_t, v119_t, v132_t, v166_t, v208_t, v234_t, v244_t, v247_t, v258_t, v264_t, v270_t, v290_t, v295_t, v299_t;
         v3_t = (v0_e.kind.$tag === "Ident");
         if (v3_t)
         {
@@ -194987,242 +194987,77 @@ function freeNames_1458($3539, $3540) {
           freeNames_1458(v16_t, v1_out);
           break L1;
         }
-        v18_t = (v0_e.kind.$tag === "Index");
+        v18_t = (v0_e.kind.$tag === "FieldAt");
         if (v18_t)
         {
-          let v19_target, v20_index;
+          let v19_target, v20_name;
           v19_target = v0_e.kind.$.target;
-          v20_index = v0_e.kind.$.index;
+          v20_name = v0_e.kind.$.name;
           {
             let v21_t, v22_t, v23_t, v24_t;
             v21_t = v19_target;
             freeNames_1458(v21_t, v1_out);
-            v23_t = v20_index;
+            v23_t = v20_name;
             freeNames_1458(v23_t, v1_out);
           }
           break L1;
         }
-        v25_t = (v0_e.kind.$tag === "Call");
+        v25_t = (v0_e.kind.$tag === "Index");
         if (v25_t)
         {
-          let v26_callee, v27_args;
-          v26_callee = v0_e.kind.$.callee;
-          v27_args = v0_e.kind.$.args;
+          let v26_target, v27_index;
+          v26_target = v0_e.kind.$.target;
+          v27_index = v0_e.kind.$.index;
           {
-            let v28_t, v29_t;
-            v28_t = v26_callee;
+            let v28_t, v29_t, v30_t, v31_t;
+            v28_t = v26_target;
             freeNames_1458(v28_t, v1_out);
+            v30_t = v27_index;
+            freeNames_1458(v30_t, v1_out);
+          }
+          break L1;
+        }
+        v32_t = (v0_e.kind.$tag === "Range");
+        if (v32_t)
+        {
+          let v33_lo, v34_hi;
+          v33_lo = v0_e.kind.$.lo;
+          v34_hi = v0_e.kind.$.hi;
+          {
+            L2:
             {
-              let v30_t, v31_t, v32_t, v33_t, v34_t;
-              v30_t = v27_args;
-              v31_t = v30_t;
-              v32_t = $b.slice_len(v31_t);
-              v33_t = v32_t;
-              v34_t = 0;
-              L2: for (;;) {
-                C2:
+              let v35_t;
+              v35_t = (v33_lo.$tag === "Some");
+              if (v35_t)
+              {
+                let v36_x;
+                v36_x = v33_lo.$;
                 {
-                  let v35_t, v36_t;
-                  v35_t = (v34_t < v33_t);
-                  if (v35_t)
-                  {
-                  }
-                  else
-                  {
-                    break L2;
-                  }
-                  v36_t = $ix(v31_t, v34_t);
-                  {
-                    let v37_t, v38_a;
-                    v37_t = v36_t;
-                    v38_a = v37_t;
-                    {
-                      let v39_t;
-                      freeNames_1458(v38_a, v1_out);
-                    }
-                  }
+                  let v37_t, v38_t;
+                  v37_t = v36_x;
+                  freeNames_1458(v37_t, v1_out);
                 }
-                {
-                  let v40_t;
-                  v40_t = $usize(v34_t + 1);
-                  v34_t = v40_t;
-                }
+                break L2;
               }
+              {
+                {
+                }
+                break L2;
+              }
+              $rt.panic("no arm matched");
             }
-          }
-          break L1;
-        }
-        v41_t = (v0_e.kind.$tag === "Unary");
-        if (v41_t)
-        {
-          let v42_operand, v43_t, v44_t;
-          v42_operand = v0_e.kind.$.operand;
-          v43_t = v42_operand;
-          freeNames_1458(v43_t, v1_out);
-          break L1;
-        }
-        v45_t = (v0_e.kind.$tag === "Binary");
-        if (v45_t)
-        {
-          let v46_lhs, v47_rhs;
-          v46_lhs = v0_e.kind.$.lhs;
-          v47_rhs = v0_e.kind.$.rhs;
-          {
-            let v48_t, v49_t, v50_t, v51_t;
-            v48_t = v46_lhs;
-            freeNames_1458(v48_t, v1_out);
-            v50_t = v47_rhs;
-            freeNames_1458(v50_t, v1_out);
-          }
-          break L1;
-        }
-        v52_t = (v0_e.kind.$tag === "Assign");
-        if (v52_t)
-        {
-          let v53_target, v54_value;
-          v53_target = v0_e.kind.$.target;
-          v54_value = v0_e.kind.$.value;
-          {
-            let v55_t, v56_t, v57_t, v58_t;
-            v55_t = v53_target;
-            freeNames_1458(v55_t, v1_out);
-            v57_t = v54_value;
-            freeNames_1458(v57_t, v1_out);
-          }
-          break L1;
-        }
-        v59_t = (v0_e.kind.$tag === "Cast");
-        if (v59_t)
-        {
-          let v60_expr, v61_t, v62_t;
-          v60_expr = v0_e.kind.$.expr;
-          v61_t = v60_expr;
-          freeNames_1458(v61_t, v1_out);
-          break L1;
-        }
-        v63_t = false;
-        if (v63_t)
-        {
-        }
-        else
-        {
-          let v64_t;
-          v64_t = (v0_e.kind.$tag === "BorrowMut");
-          v63_t = v64_t;
-        }
-        if (v63_t)
-        {
-        }
-        else
-        {
-          let v65_t;
-          v65_t = (v0_e.kind.$tag === "Throw");
-          v63_t = v65_t;
-        }
-        if (v63_t)
-        {
-        }
-        else
-        {
-          let v66_t;
-          v66_t = (v0_e.kind.$tag === "Yield");
-          v63_t = v66_t;
-        }
-        if (v63_t)
-        {
-        }
-        else
-        {
-          let v67_t;
-          v67_t = (v0_e.kind.$tag === "Comptime");
-          v63_t = v67_t;
-        }
-        if (v63_t)
-        {
-          let v68_x, v69_t, v78_t, v79_t;
-          v69_t = false;
-          if (v69_t)
-          {
-          }
-          else
-          {
-            let v70_t;
-            v70_t = (v0_e.kind.$tag === "BorrowMut");
-            if (v70_t)
-            {
-              let v71_x;
-              v71_x = v0_e.kind.$;
-              v68_x = v71_x;
-              v69_t = true;
-            }
-          }
-          if (v69_t)
-          {
-          }
-          else
-          {
-            let v72_t;
-            v72_t = (v0_e.kind.$tag === "Throw");
-            if (v72_t)
-            {
-              let v73_x;
-              v73_x = v0_e.kind.$;
-              v68_x = v73_x;
-              v69_t = true;
-            }
-          }
-          if (v69_t)
-          {
-          }
-          else
-          {
-            let v74_t;
-            v74_t = (v0_e.kind.$tag === "Yield");
-            if (v74_t)
-            {
-              let v75_x;
-              v75_x = v0_e.kind.$;
-              v68_x = v75_x;
-              v69_t = true;
-            }
-          }
-          if (v69_t)
-          {
-          }
-          else
-          {
-            let v76_t;
-            v76_t = (v0_e.kind.$tag === "Comptime");
-            if (v76_t)
-            {
-              let v77_x;
-              v77_x = v0_e.kind.$;
-              v68_x = v77_x;
-              v69_t = true;
-            }
-          }
-          v78_t = v68_x;
-          freeNames_1458(v78_t, v1_out);
-          break L1;
-        }
-        v80_t = (v0_e.kind.$tag === "Return");
-        if (v80_t)
-        {
-          let v81_v;
-          v81_v = v0_e.kind.$;
-          {
             L3:
             {
-              let v82_t;
-              v82_t = (v81_v.$tag === "Some");
-              if (v82_t)
+              let v39_t;
+              v39_t = (v34_hi.$tag === "Some");
+              if (v39_t)
               {
-                let v83_x;
-                v83_x = v81_v.$;
+                let v40_x;
+                v40_x = v34_hi.$;
                 {
-                  let v84_t, v85_t;
-                  v84_t = v83_x;
-                  freeNames_1458(v84_t, v1_out);
+                  let v41_t, v42_t;
+                  v41_t = v40_x;
+                  freeNames_1458(v41_t, v1_out);
                 }
                 break L3;
               }
@@ -195236,55 +195071,289 @@ function freeNames_1458($3539, $3540) {
           }
           break L1;
         }
-        v86_t = (v0_e.kind.$tag === "Template");
-        if (v86_t)
+        v43_t = (v0_e.kind.$tag === "Call");
+        if (v43_t)
         {
-          let v87_parts;
-          v87_parts = v0_e.kind.$;
+          let v44_callee, v45_args;
+          v44_callee = v0_e.kind.$.callee;
+          v45_args = v0_e.kind.$.args;
           {
+            let v46_t, v47_t;
+            v46_t = v44_callee;
+            freeNames_1458(v46_t, v1_out);
             {
-              let v88_t, v89_t, v90_t, v91_t, v92_t;
-              v88_t = v87_parts;
-              v89_t = v88_t;
-              v90_t = $b.slice_len(v89_t);
-              v91_t = v90_t;
-              v92_t = 0;
+              let v48_t, v49_t, v50_t, v51_t, v52_t;
+              v48_t = v45_args;
+              v49_t = v48_t;
+              v50_t = $b.slice_len(v49_t);
+              v51_t = v50_t;
+              v52_t = 0;
               L4: for (;;) {
                 C4:
                 {
-                  let v93_t, v94_t;
-                  v93_t = (v92_t < v91_t);
-                  if (v93_t)
+                  let v53_t, v54_t;
+                  v53_t = (v52_t < v51_t);
+                  if (v53_t)
                   {
                   }
                   else
                   {
                     break L4;
                   }
-                  v94_t = $ix(v89_t, v92_t);
+                  v54_t = $ix(v49_t, v52_t);
                   {
-                    let v95_t, v96_p;
-                    v95_t = v94_t;
-                    v96_p = v95_t;
+                    let v55_t, v56_a;
+                    v55_t = v54_t;
+                    v56_a = v55_t;
                     {
-                      L5:
+                      let v57_t;
+                      freeNames_1458(v56_a, v1_out);
+                    }
+                  }
+                }
+                {
+                  let v58_t;
+                  v58_t = $usize(v52_t + 1);
+                  v52_t = v58_t;
+                }
+              }
+            }
+          }
+          break L1;
+        }
+        v59_t = (v0_e.kind.$tag === "Unary");
+        if (v59_t)
+        {
+          let v60_operand, v61_t, v62_t;
+          v60_operand = v0_e.kind.$.operand;
+          v61_t = v60_operand;
+          freeNames_1458(v61_t, v1_out);
+          break L1;
+        }
+        v63_t = (v0_e.kind.$tag === "Binary");
+        if (v63_t)
+        {
+          let v64_lhs, v65_rhs;
+          v64_lhs = v0_e.kind.$.lhs;
+          v65_rhs = v0_e.kind.$.rhs;
+          {
+            let v66_t, v67_t, v68_t, v69_t;
+            v66_t = v64_lhs;
+            freeNames_1458(v66_t, v1_out);
+            v68_t = v65_rhs;
+            freeNames_1458(v68_t, v1_out);
+          }
+          break L1;
+        }
+        v70_t = (v0_e.kind.$tag === "Assign");
+        if (v70_t)
+        {
+          let v71_target, v72_value;
+          v71_target = v0_e.kind.$.target;
+          v72_value = v0_e.kind.$.value;
+          {
+            let v73_t, v74_t, v75_t, v76_t;
+            v73_t = v71_target;
+            freeNames_1458(v73_t, v1_out);
+            v75_t = v72_value;
+            freeNames_1458(v75_t, v1_out);
+          }
+          break L1;
+        }
+        v77_t = (v0_e.kind.$tag === "Cast");
+        if (v77_t)
+        {
+          let v78_expr, v79_t, v80_t;
+          v78_expr = v0_e.kind.$.expr;
+          v79_t = v78_expr;
+          freeNames_1458(v79_t, v1_out);
+          break L1;
+        }
+        v81_t = false;
+        if (v81_t)
+        {
+        }
+        else
+        {
+          let v82_t;
+          v82_t = (v0_e.kind.$tag === "BorrowMut");
+          v81_t = v82_t;
+        }
+        if (v81_t)
+        {
+        }
+        else
+        {
+          let v83_t;
+          v83_t = (v0_e.kind.$tag === "Throw");
+          v81_t = v83_t;
+        }
+        if (v81_t)
+        {
+        }
+        else
+        {
+          let v84_t;
+          v84_t = (v0_e.kind.$tag === "Yield");
+          v81_t = v84_t;
+        }
+        if (v81_t)
+        {
+        }
+        else
+        {
+          let v85_t;
+          v85_t = (v0_e.kind.$tag === "Comptime");
+          v81_t = v85_t;
+        }
+        if (v81_t)
+        {
+          let v86_x, v87_t, v96_t, v97_t;
+          v87_t = false;
+          if (v87_t)
+          {
+          }
+          else
+          {
+            let v88_t;
+            v88_t = (v0_e.kind.$tag === "BorrowMut");
+            if (v88_t)
+            {
+              let v89_x;
+              v89_x = v0_e.kind.$;
+              v86_x = v89_x;
+              v87_t = true;
+            }
+          }
+          if (v87_t)
+          {
+          }
+          else
+          {
+            let v90_t;
+            v90_t = (v0_e.kind.$tag === "Throw");
+            if (v90_t)
+            {
+              let v91_x;
+              v91_x = v0_e.kind.$;
+              v86_x = v91_x;
+              v87_t = true;
+            }
+          }
+          if (v87_t)
+          {
+          }
+          else
+          {
+            let v92_t;
+            v92_t = (v0_e.kind.$tag === "Yield");
+            if (v92_t)
+            {
+              let v93_x;
+              v93_x = v0_e.kind.$;
+              v86_x = v93_x;
+              v87_t = true;
+            }
+          }
+          if (v87_t)
+          {
+          }
+          else
+          {
+            let v94_t;
+            v94_t = (v0_e.kind.$tag === "Comptime");
+            if (v94_t)
+            {
+              let v95_x;
+              v95_x = v0_e.kind.$;
+              v86_x = v95_x;
+              v87_t = true;
+            }
+          }
+          v96_t = v86_x;
+          freeNames_1458(v96_t, v1_out);
+          break L1;
+        }
+        v98_t = (v0_e.kind.$tag === "Return");
+        if (v98_t)
+        {
+          let v99_v;
+          v99_v = v0_e.kind.$;
+          {
+            L5:
+            {
+              let v100_t;
+              v100_t = (v99_v.$tag === "Some");
+              if (v100_t)
+              {
+                let v101_x;
+                v101_x = v99_v.$;
+                {
+                  let v102_t, v103_t;
+                  v102_t = v101_x;
+                  freeNames_1458(v102_t, v1_out);
+                }
+                break L5;
+              }
+              {
+                {
+                }
+                break L5;
+              }
+              $rt.panic("no arm matched");
+            }
+          }
+          break L1;
+        }
+        v104_t = (v0_e.kind.$tag === "Template");
+        if (v104_t)
+        {
+          let v105_parts;
+          v105_parts = v0_e.kind.$;
+          {
+            {
+              let v106_t, v107_t, v108_t, v109_t, v110_t;
+              v106_t = v105_parts;
+              v107_t = v106_t;
+              v108_t = $b.slice_len(v107_t);
+              v109_t = v108_t;
+              v110_t = 0;
+              L6: for (;;) {
+                C6:
+                {
+                  let v111_t, v112_t;
+                  v111_t = (v110_t < v109_t);
+                  if (v111_t)
+                  {
+                  }
+                  else
+                  {
+                    break L6;
+                  }
+                  v112_t = $ix(v107_t, v110_t);
+                  {
+                    let v113_t, v114_p;
+                    v113_t = v112_t;
+                    v114_p = v113_t;
+                    {
+                      L7:
                       {
-                        let v97_t;
-                        v97_t = (v96_p.$tag === "Expr");
-                        if (v97_t)
+                        let v115_t;
+                        v115_t = (v114_p.$tag === "Expr");
+                        if (v115_t)
                         {
-                          let v98_x;
-                          v98_x = v96_p.$;
+                          let v116_x;
+                          v116_x = v114_p.$;
                           {
-                            let v99_t;
-                            freeNames_1458(v98_x, v1_out);
+                            let v117_t;
+                            freeNames_1458(v116_x, v1_out);
                           }
-                          break L5;
+                          break L7;
                         }
                         {
                           {
                           }
-                          break L5;
+                          break L7;
                         }
                         $rt.panic("no arm matched");
                       }
@@ -195292,195 +195361,331 @@ function freeNames_1458($3539, $3540) {
                   }
                 }
                 {
-                  let v100_t;
-                  v100_t = $usize(v92_t + 1);
-                  v92_t = v100_t;
+                  let v118_t;
+                  v118_t = $usize(v110_t + 1);
+                  v110_t = v118_t;
                 }
               }
             }
           }
           break L1;
         }
-        v101_t = (v0_e.kind.$tag === "List");
-        if (v101_t)
+        v119_t = (v0_e.kind.$tag === "List");
+        if (v119_t)
         {
-          let v102_items;
-          v102_items = v0_e.kind.$;
+          let v120_items;
+          v120_items = v0_e.kind.$;
           {
             {
-              let v103_t, v104_t, v105_t, v106_t, v107_t;
-              v103_t = v102_items;
-              v104_t = v103_t;
-              v105_t = $b.slice_len(v104_t);
-              v106_t = v105_t;
-              v107_t = 0;
-              L6: for (;;) {
-                C6:
+              let v121_t, v122_t, v123_t, v124_t, v125_t;
+              v121_t = v120_items;
+              v122_t = v121_t;
+              v123_t = $b.slice_len(v122_t);
+              v124_t = v123_t;
+              v125_t = 0;
+              L8: for (;;) {
+                C8:
                 {
-                  let v108_t, v109_t;
-                  v108_t = (v107_t < v106_t);
-                  if (v108_t)
+                  let v126_t, v127_t;
+                  v126_t = (v125_t < v124_t);
+                  if (v126_t)
                   {
                   }
                   else
                   {
-                    break L6;
+                    break L8;
                   }
-                  v109_t = $ix(v104_t, v107_t);
+                  v127_t = $ix(v122_t, v125_t);
                   {
-                    let v110_t, v111_x;
-                    v110_t = v109_t;
-                    v111_x = v110_t;
+                    let v128_t, v129_x;
+                    v128_t = v127_t;
+                    v129_x = v128_t;
                     {
-                      let v112_t;
-                      freeNames_1458(v111_x, v1_out);
+                      let v130_t;
+                      freeNames_1458(v129_x, v1_out);
                     }
                   }
                 }
                 {
-                  let v113_t;
-                  v113_t = $usize(v107_t + 1);
-                  v107_t = v113_t;
+                  let v131_t;
+                  v131_t = $usize(v125_t + 1);
+                  v125_t = v131_t;
                 }
               }
             }
           }
           break L1;
         }
-        v114_t = (v0_e.kind.$tag === "Tag");
-        if (v114_t)
+        v132_t = (v0_e.kind.$tag === "TagAt");
+        if (v132_t)
         {
-          let v115_args;
-          v115_args = v0_e.kind.$.args;
-          L7:
+          let v133_name, v134_args;
+          v133_name = v0_e.kind.$.name;
+          v134_args = v0_e.kind.$.args;
           {
-            let v116_t, v129_t, v155_t;
-            v116_t = (v115_args.$tag === "Tuple");
-            if (v116_t)
+            let v135_t, v136_t;
+            v135_t = v133_name;
+            freeNames_1458(v135_t, v1_out);
+            L9:
             {
-              let v117_es;
-              v117_es = v115_args.$;
+              let v137_t, v150_t, v165_t;
+              v137_t = (v134_args.$tag === "Tuple");
+              if (v137_t)
+              {
+                let v138_es;
+                v138_es = v134_args.$;
+                {
+                  {
+                    let v139_t, v140_t, v141_t, v142_t, v143_t;
+                    v139_t = v138_es;
+                    v140_t = v139_t;
+                    v141_t = $b.slice_len(v140_t);
+                    v142_t = v141_t;
+                    v143_t = 0;
+                    L10: for (;;) {
+                      C10:
+                      {
+                        let v144_t, v145_t;
+                        v144_t = (v143_t < v142_t);
+                        if (v144_t)
+                        {
+                        }
+                        else
+                        {
+                          break L10;
+                        }
+                        v145_t = $ix(v140_t, v143_t);
+                        {
+                          let v146_t, v147_x;
+                          v146_t = v145_t;
+                          v147_x = v146_t;
+                          {
+                            let v148_t;
+                            freeNames_1458(v147_x, v1_out);
+                          }
+                        }
+                      }
+                      {
+                        let v149_t;
+                        v149_t = $usize(v143_t + 1);
+                        v143_t = v149_t;
+                      }
+                    }
+                  }
+                }
+                break L9;
+              }
+              v150_t = (v134_args.$tag === "Record");
+              if (v150_t)
+              {
+                let v151_fs;
+                v151_fs = v134_args.$;
+                {
+                  {
+                    let v152_t, v153_t, v154_t, v155_t, v156_t;
+                    v152_t = v151_fs;
+                    v153_t = v152_t;
+                    v154_t = $b.slice_len(v153_t);
+                    v155_t = v154_t;
+                    v156_t = 0;
+                    L11: for (;;) {
+                      C11:
+                      {
+                        let v157_t, v158_t;
+                        v157_t = (v156_t < v155_t);
+                        if (v157_t)
+                        {
+                        }
+                        else
+                        {
+                          break L11;
+                        }
+                        v158_t = $ix(v153_t, v156_t);
+                        {
+                          let v159_t, v160_f;
+                          v159_t = v158_t;
+                          v160_f = v159_t;
+                          {
+                            L12:
+                            {
+                              let v161_t;
+                              v161_t = (v160_f.value.$tag === "Some");
+                              if (v161_t)
+                              {
+                                let v162_v;
+                                v162_v = v160_f.value.$;
+                                {
+                                  let v163_t;
+                                  freeNames_1458(v162_v, v1_out);
+                                }
+                                break L12;
+                              }
+                              {
+                                {
+                                }
+                                break L12;
+                              }
+                              $rt.panic("no arm matched");
+                            }
+                          }
+                        }
+                      }
+                      {
+                        let v164_t;
+                        v164_t = $usize(v156_t + 1);
+                        v156_t = v164_t;
+                      }
+                    }
+                  }
+                }
+                break L9;
+              }
+              v165_t = (v134_args.$tag === "None");
+              if (v165_t)
               {
                 {
-                  let v118_t, v119_t, v120_t, v121_t, v122_t;
-                  v118_t = v117_es;
-                  v119_t = v118_t;
-                  v120_t = $b.slice_len(v119_t);
-                  v121_t = v120_t;
-                  v122_t = 0;
-                  L8: for (;;) {
-                    C8:
+                }
+                break L9;
+              }
+              $rt.panic("no arm matched");
+            }
+          }
+          break L1;
+        }
+        v166_t = (v0_e.kind.$tag === "Tag");
+        if (v166_t)
+        {
+          let v167_args;
+          v167_args = v0_e.kind.$.args;
+          L13:
+          {
+            let v168_t, v181_t, v207_t;
+            v168_t = (v167_args.$tag === "Tuple");
+            if (v168_t)
+            {
+              let v169_es;
+              v169_es = v167_args.$;
+              {
+                {
+                  let v170_t, v171_t, v172_t, v173_t, v174_t;
+                  v170_t = v169_es;
+                  v171_t = v170_t;
+                  v172_t = $b.slice_len(v171_t);
+                  v173_t = v172_t;
+                  v174_t = 0;
+                  L14: for (;;) {
+                    C14:
                     {
-                      let v123_t, v124_t;
-                      v123_t = (v122_t < v121_t);
-                      if (v123_t)
+                      let v175_t, v176_t;
+                      v175_t = (v174_t < v173_t);
+                      if (v175_t)
                       {
                       }
                       else
                       {
-                        break L8;
+                        break L14;
                       }
-                      v124_t = $ix(v119_t, v122_t);
+                      v176_t = $ix(v171_t, v174_t);
                       {
-                        let v125_t, v126_x;
-                        v125_t = v124_t;
-                        v126_x = v125_t;
+                        let v177_t, v178_x;
+                        v177_t = v176_t;
+                        v178_x = v177_t;
                         {
-                          let v127_t;
-                          freeNames_1458(v126_x, v1_out);
+                          let v179_t;
+                          freeNames_1458(v178_x, v1_out);
                         }
                       }
                     }
                     {
-                      let v128_t;
-                      v128_t = $usize(v122_t + 1);
-                      v122_t = v128_t;
+                      let v180_t;
+                      v180_t = $usize(v174_t + 1);
+                      v174_t = v180_t;
                     }
                   }
                 }
               }
-              break L7;
+              break L13;
             }
-            v129_t = (v115_args.$tag === "Record");
-            if (v129_t)
+            v181_t = (v167_args.$tag === "Record");
+            if (v181_t)
             {
-              let v130_fs;
-              v130_fs = v115_args.$;
+              let v182_fs;
+              v182_fs = v167_args.$;
               {
                 {
-                  let v131_t, v132_t, v133_t, v134_t, v135_t;
-                  v131_t = v130_fs;
-                  v132_t = v131_t;
-                  v133_t = $b.slice_len(v132_t);
-                  v134_t = v133_t;
-                  v135_t = 0;
-                  L9: for (;;) {
-                    C9:
+                  let v183_t, v184_t, v185_t, v186_t, v187_t;
+                  v183_t = v182_fs;
+                  v184_t = v183_t;
+                  v185_t = $b.slice_len(v184_t);
+                  v186_t = v185_t;
+                  v187_t = 0;
+                  L15: for (;;) {
+                    C15:
                     {
-                      let v136_t, v137_t;
-                      v136_t = (v135_t < v134_t);
-                      if (v136_t)
+                      let v188_t, v189_t;
+                      v188_t = (v187_t < v186_t);
+                      if (v188_t)
                       {
                       }
                       else
                       {
-                        break L9;
+                        break L15;
                       }
-                      v137_t = $ix(v132_t, v135_t);
+                      v189_t = $ix(v184_t, v187_t);
                       {
-                        let v138_t, v139_f;
-                        v138_t = v137_t;
-                        v139_f = v138_t;
+                        let v190_t, v191_f;
+                        v190_t = v189_t;
+                        v191_f = v190_t;
                         {
-                          L10:
+                          L16:
                           {
-                            let v140_t, v143_t;
-                            v140_t = (v139_f.value.$tag === "Some");
-                            if (v140_t)
+                            let v192_t, v195_t;
+                            v192_t = (v191_f.value.$tag === "Some");
+                            if (v192_t)
                             {
-                              let v141_v, v142_t;
-                              v141_v = v139_f.value.$;
-                              freeNames_1458(v141_v, v1_out);
-                              break L10;
+                              let v193_v, v194_t;
+                              v193_v = v191_f.value.$;
+                              freeNames_1458(v193_v, v1_out);
+                              break L16;
                             }
-                            v143_t = (v139_f.value.$tag === "None");
-                            if (v143_t)
+                            v195_t = (v191_f.value.$tag === "None");
+                            if (v195_t)
                             {
                               {
-                                let v144_t, v145_t, v146_t, v147_t, v148_t, v149_t;
+                                let v196_t, v197_t, v198_t, v199_t, v200_t, v201_t;
                                 try {
-                                  v144_t = v1_out.v;
-                                  v145_t = $b.slice_iter(v144_t);
-                                  v146_t = (($3542) => {
+                                  v196_t = v1_out.v;
+                                  v197_t = $b.slice_iter(v196_t);
+                                  v198_t = (($3542) => {
                                     let v1_ret;
                                     {
                                       let v0_x, v2_t, v3_t, v4_t;
                                       v0_x = $3542; 
                                       v3_t = v0_x;
-                                      v2_t = v139_f.name.name;
+                                      v2_t = v191_f.name.name;
                                       v4_t = eq_26(v3_t, v2_t);
                                       v1_ret = v4_t;
                                     }
                                     return v1_ret;
                                   });
-                                  v147_t = v146_t;
-                                  v148_t = some_262($rt.take(v145_t, v145_t = undefined), v147_t);
-                                  v149_t = (!v148_t);
-                                  if (v149_t)
+                                  v199_t = v198_t;
+                                  v200_t = some_262($rt.take(v197_t, v197_t = undefined), v199_t);
+                                  v201_t = (!v200_t);
+                                  if (v201_t)
                                   {
                                     {
-                                      let v150_t, v151_t, v152_t, v153_t;
-                                      v152_t = v1_out;
-                                      v150_t = v139_f.name.name;
-                                      v151_t = $b.String_clone(v150_t);
-                                      $b.Vec_push(v152_t, v151_t);
+                                      let v202_t, v203_t, v204_t, v205_t;
+                                      v204_t = v1_out;
+                                      v202_t = v191_f.name.name;
+                                      v203_t = $b.String_clone(v202_t);
+                                      $b.Vec_push(v204_t, v203_t);
                                     }
                                   }
                                 } finally { if ($rt.unwinds()) {
-                                  $drop38(v145_t);
+                                  $drop38(v197_t);
                                 } }
                               }
-                              break L10;
+                              break L16;
                             }
                             $rt.panic("no arm matched");
                           }
@@ -195488,106 +195693,106 @@ function freeNames_1458($3539, $3540) {
                       }
                     }
                     {
-                      let v154_t;
-                      v154_t = $usize(v135_t + 1);
-                      v135_t = v154_t;
+                      let v206_t;
+                      v206_t = $usize(v187_t + 1);
+                      v187_t = v206_t;
                     }
                   }
                 }
               }
-              break L7;
+              break L13;
             }
-            v155_t = (v115_args.$tag === "None");
-            if (v155_t)
+            v207_t = (v167_args.$tag === "None");
+            if (v207_t)
             {
               {
               }
-              break L7;
+              break L13;
             }
             $rt.panic("no arm matched");
           }
           break L1;
         }
-        v156_t = (v0_e.kind.$tag === "Record");
-        if (v156_t)
+        v208_t = (v0_e.kind.$tag === "Record");
+        if (v208_t)
         {
-          let v157_fields;
-          v157_fields = v0_e.kind.$.fields;
+          let v209_fields;
+          v209_fields = v0_e.kind.$.fields;
           {
             {
-              let v158_t, v159_t, v160_t, v161_t, v162_t;
-              v158_t = v157_fields;
-              v159_t = v158_t;
-              v160_t = $b.slice_len(v159_t);
-              v161_t = v160_t;
-              v162_t = 0;
-              L11: for (;;) {
-                C11:
+              let v210_t, v211_t, v212_t, v213_t, v214_t;
+              v210_t = v209_fields;
+              v211_t = v210_t;
+              v212_t = $b.slice_len(v211_t);
+              v213_t = v212_t;
+              v214_t = 0;
+              L17: for (;;) {
+                C17:
                 {
-                  let v163_t, v164_t;
-                  v163_t = (v162_t < v161_t);
-                  if (v163_t)
+                  let v215_t, v216_t;
+                  v215_t = (v214_t < v213_t);
+                  if (v215_t)
                   {
                   }
                   else
                   {
-                    break L11;
+                    break L17;
                   }
-                  v164_t = $ix(v159_t, v162_t);
+                  v216_t = $ix(v211_t, v214_t);
                   {
-                    let v165_t, v166_f;
-                    v165_t = v164_t;
-                    v166_f = v165_t;
+                    let v217_t, v218_f;
+                    v217_t = v216_t;
+                    v218_f = v217_t;
                     {
-                      L12:
+                      L18:
                       {
-                        let v167_t, v170_t;
-                        v167_t = (v166_f.value.$tag === "Some");
-                        if (v167_t)
+                        let v219_t, v222_t;
+                        v219_t = (v218_f.value.$tag === "Some");
+                        if (v219_t)
                         {
-                          let v168_v, v169_t;
-                          v168_v = v166_f.value.$;
-                          freeNames_1458(v168_v, v1_out);
-                          break L12;
+                          let v220_v, v221_t;
+                          v220_v = v218_f.value.$;
+                          freeNames_1458(v220_v, v1_out);
+                          break L18;
                         }
-                        v170_t = (v166_f.value.$tag === "None");
-                        if (v170_t)
+                        v222_t = (v218_f.value.$tag === "None");
+                        if (v222_t)
                         {
                           {
-                            let v171_t, v172_t, v173_t, v174_t, v175_t, v176_t;
+                            let v223_t, v224_t, v225_t, v226_t, v227_t, v228_t;
                             try {
-                              v171_t = v1_out.v;
-                              v172_t = $b.slice_iter(v171_t);
-                              v173_t = (($3543) => {
+                              v223_t = v1_out.v;
+                              v224_t = $b.slice_iter(v223_t);
+                              v225_t = (($3543) => {
                                 let v1_ret;
                                 {
                                   let v0_x, v2_t, v3_t, v4_t;
                                   v0_x = $3543; 
                                   v3_t = v0_x;
-                                  v2_t = v166_f.name.name;
+                                  v2_t = v218_f.name.name;
                                   v4_t = eq_26(v3_t, v2_t);
                                   v1_ret = v4_t;
                                 }
                                 return v1_ret;
                               });
-                              v174_t = v173_t;
-                              v175_t = some_262($rt.take(v172_t, v172_t = undefined), v174_t);
-                              v176_t = (!v175_t);
-                              if (v176_t)
+                              v226_t = v225_t;
+                              v227_t = some_262($rt.take(v224_t, v224_t = undefined), v226_t);
+                              v228_t = (!v227_t);
+                              if (v228_t)
                               {
                                 {
-                                  let v177_t, v178_t, v179_t, v180_t;
-                                  v179_t = v1_out;
-                                  v177_t = v166_f.name.name;
-                                  v178_t = $b.String_clone(v177_t);
-                                  $b.Vec_push(v179_t, v178_t);
+                                  let v229_t, v230_t, v231_t, v232_t;
+                                  v231_t = v1_out;
+                                  v229_t = v218_f.name.name;
+                                  v230_t = $b.String_clone(v229_t);
+                                  $b.Vec_push(v231_t, v230_t);
                                 }
                               }
                             } finally { if ($rt.unwinds()) {
-                              $drop38(v172_t);
+                              $drop38(v224_t);
                             } }
                           }
-                          break L12;
+                          break L18;
                         }
                         $rt.panic("no arm matched");
                       }
@@ -195595,282 +195800,282 @@ function freeNames_1458($3539, $3540) {
                   }
                 }
                 {
-                  let v181_t;
-                  v181_t = $usize(v162_t + 1);
-                  v162_t = v181_t;
+                  let v233_t;
+                  v233_t = $usize(v214_t + 1);
+                  v214_t = v233_t;
                 }
               }
             }
           }
           break L1;
         }
-        v182_t = false;
-        if (v182_t)
+        v234_t = false;
+        if (v234_t)
         {
         }
         else
         {
-          let v183_t;
-          v183_t = (v0_e.kind.$tag === "Block");
-          v182_t = v183_t;
+          let v235_t;
+          v235_t = (v0_e.kind.$tag === "Block");
+          v234_t = v235_t;
         }
-        if (v182_t)
+        if (v234_t)
         {
         }
         else
         {
-          let v184_t;
-          v184_t = (v0_e.kind.$tag === "Unsafe");
-          v182_t = v184_t;
+          let v236_t;
+          v236_t = (v0_e.kind.$tag === "Unsafe");
+          v234_t = v236_t;
         }
-        if (v182_t)
+        if (v234_t)
         {
-          let v185_b, v186_t, v191_t;
-          v186_t = false;
-          if (v186_t)
+          let v237_b, v238_t, v243_t;
+          v238_t = false;
+          if (v238_t)
           {
           }
           else
           {
-            let v187_t;
-            v187_t = (v0_e.kind.$tag === "Block");
-            if (v187_t)
+            let v239_t;
+            v239_t = (v0_e.kind.$tag === "Block");
+            if (v239_t)
             {
-              let v188_b;
-              v188_b = v0_e.kind.$;
-              v185_b = v188_b;
-              v186_t = true;
+              let v240_b;
+              v240_b = v0_e.kind.$;
+              v237_b = v240_b;
+              v238_t = true;
             }
           }
-          if (v186_t)
+          if (v238_t)
           {
           }
           else
           {
-            let v189_t;
-            v189_t = (v0_e.kind.$tag === "Unsafe");
-            if (v189_t)
+            let v241_t;
+            v241_t = (v0_e.kind.$tag === "Unsafe");
+            if (v241_t)
             {
-              let v190_b;
-              v190_b = v0_e.kind.$;
-              v185_b = v190_b;
-              v186_t = true;
+              let v242_b;
+              v242_b = v0_e.kind.$;
+              v237_b = v242_b;
+              v238_t = true;
             }
           }
-          blockNames_1580(v185_b, v1_out);
+          blockNames_1580(v237_b, v1_out);
           break L1;
         }
-        v192_t = (v0_e.kind.$tag === "Region");
-        if (v192_t)
+        v244_t = (v0_e.kind.$tag === "Region");
+        if (v244_t)
         {
-          let v193_body, v194_t;
-          v193_body = v0_e.kind.$.body;
-          blockNames_1580(v193_body, v1_out);
+          let v245_body, v246_t;
+          v245_body = v0_e.kind.$.body;
+          blockNames_1580(v245_body, v1_out);
           break L1;
         }
-        v195_t = (v0_e.kind.$tag === "If");
-        if (v195_t)
+        v247_t = (v0_e.kind.$tag === "If");
+        if (v247_t)
         {
-          let v196_cond, v197_then, v198_otherwise;
-          v196_cond = v0_e.kind.$.cond;
-          v197_then = v0_e.kind.$.then;
-          v198_otherwise = v0_e.kind.$.otherwise;
+          let v248_cond, v249_then, v250_otherwise;
+          v248_cond = v0_e.kind.$.cond;
+          v249_then = v0_e.kind.$.then;
+          v250_otherwise = v0_e.kind.$.otherwise;
           {
-            let v199_t, v200_t, v201_t;
-            v199_t = v196_cond;
-            freeNames_1458(v199_t, v1_out);
-            blockNames_1580(v197_then, v1_out);
-            L13:
+            let v251_t, v252_t, v253_t;
+            v251_t = v248_cond;
+            freeNames_1458(v251_t, v1_out);
+            blockNames_1580(v249_then, v1_out);
+            L19:
             {
-              let v202_t;
-              v202_t = (v198_otherwise.$tag === "Some");
-              if (v202_t)
+              let v254_t;
+              v254_t = (v250_otherwise.$tag === "Some");
+              if (v254_t)
               {
-                let v203_o;
-                v203_o = v198_otherwise.$;
+                let v255_o;
+                v255_o = v250_otherwise.$;
                 {
-                  let v204_t, v205_t;
-                  v204_t = v203_o;
-                  freeNames_1458(v204_t, v1_out);
+                  let v256_t, v257_t;
+                  v256_t = v255_o;
+                  freeNames_1458(v256_t, v1_out);
                 }
-                break L13;
+                break L19;
               }
               {
                 {
                 }
-                break L13;
+                break L19;
               }
               $rt.panic("no arm matched");
             }
           }
           break L1;
         }
-        v206_t = (v0_e.kind.$tag === "While");
-        if (v206_t)
+        v258_t = (v0_e.kind.$tag === "While");
+        if (v258_t)
         {
-          let v207_cond, v208_body;
-          v207_cond = v0_e.kind.$.cond;
-          v208_body = v0_e.kind.$.body;
+          let v259_cond, v260_body;
+          v259_cond = v0_e.kind.$.cond;
+          v260_body = v0_e.kind.$.body;
           {
-            let v209_t, v210_t, v211_t;
-            v209_t = v207_cond;
-            freeNames_1458(v209_t, v1_out);
-            blockNames_1580(v208_body, v1_out);
+            let v261_t, v262_t, v263_t;
+            v261_t = v259_cond;
+            freeNames_1458(v261_t, v1_out);
+            blockNames_1580(v260_body, v1_out);
           }
           break L1;
         }
-        v212_t = (v0_e.kind.$tag === "For");
-        if (v212_t)
+        v264_t = (v0_e.kind.$tag === "For");
+        if (v264_t)
         {
-          let v213_iter, v214_body;
-          v213_iter = v0_e.kind.$.iter;
-          v214_body = v0_e.kind.$.body;
+          let v265_iter, v266_body;
+          v265_iter = v0_e.kind.$.iter;
+          v266_body = v0_e.kind.$.body;
           {
-            let v215_t, v216_t, v217_t;
-            v215_t = v213_iter;
-            freeNames_1458(v215_t, v1_out);
-            blockNames_1580(v214_body, v1_out);
+            let v267_t, v268_t, v269_t;
+            v267_t = v265_iter;
+            freeNames_1458(v267_t, v1_out);
+            blockNames_1580(v266_body, v1_out);
           }
           break L1;
         }
-        v218_t = (v0_e.kind.$tag === "Match");
-        if (v218_t)
+        v270_t = (v0_e.kind.$tag === "Match");
+        if (v270_t)
         {
-          let v219_scrutinee, v220_arms;
-          v219_scrutinee = v0_e.kind.$.scrutinee;
-          v220_arms = v0_e.kind.$.arms;
+          let v271_scrutinee, v272_arms;
+          v271_scrutinee = v0_e.kind.$.scrutinee;
+          v272_arms = v0_e.kind.$.arms;
           {
-            let v221_t, v222_t;
-            v221_t = v219_scrutinee;
-            freeNames_1458(v221_t, v1_out);
+            let v273_t, v274_t;
+            v273_t = v271_scrutinee;
+            freeNames_1458(v273_t, v1_out);
             {
-              let v223_t, v224_t, v225_t, v226_t, v227_t;
-              v223_t = v220_arms;
-              v224_t = v223_t;
-              v225_t = $b.slice_len(v224_t);
-              v226_t = v225_t;
-              v227_t = 0;
-              L14: for (;;) {
-                C14:
+              let v275_t, v276_t, v277_t, v278_t, v279_t;
+              v275_t = v272_arms;
+              v276_t = v275_t;
+              v277_t = $b.slice_len(v276_t);
+              v278_t = v277_t;
+              v279_t = 0;
+              L20: for (;;) {
+                C20:
                 {
-                  let v228_t, v229_t;
-                  v228_t = (v227_t < v226_t);
-                  if (v228_t)
+                  let v280_t, v281_t;
+                  v280_t = (v279_t < v278_t);
+                  if (v280_t)
                   {
                   }
                   else
                   {
-                    break L14;
+                    break L20;
                   }
-                  v229_t = $ix(v224_t, v227_t);
+                  v281_t = $ix(v276_t, v279_t);
                   {
-                    let v230_t, v231_a;
-                    v230_t = v229_t;
-                    v231_a = v230_t;
+                    let v282_t, v283_a;
+                    v282_t = v281_t;
+                    v283_a = v282_t;
                     {
-                      let v235_t, v236_t;
-                      L15:
+                      let v287_t, v288_t;
+                      L21:
                       {
-                        let v232_t;
-                        v232_t = (v231_a.guard.$tag === "Some");
-                        if (v232_t)
+                        let v284_t;
+                        v284_t = (v283_a.guard.$tag === "Some");
+                        if (v284_t)
                         {
-                          let v233_g;
-                          v233_g = v231_a.guard.$;
+                          let v285_g;
+                          v285_g = v283_a.guard.$;
                           {
-                            let v234_t;
-                            freeNames_1458(v233_g, v1_out);
+                            let v286_t;
+                            freeNames_1458(v285_g, v1_out);
                           }
-                          break L15;
+                          break L21;
                         }
                         {
                           {
                           }
-                          break L15;
+                          break L21;
                         }
                         $rt.panic("no arm matched");
                       }
-                      v235_t = v231_a.body;
-                      freeNames_1458(v235_t, v1_out);
+                      v287_t = v283_a.body;
+                      freeNames_1458(v287_t, v1_out);
                     }
                   }
                 }
                 {
-                  let v237_t;
-                  v237_t = $usize(v227_t + 1);
-                  v227_t = v237_t;
+                  let v289_t;
+                  v289_t = $usize(v279_t + 1);
+                  v279_t = v289_t;
                 }
               }
             }
           }
           break L1;
         }
-        v238_t = (v0_e.kind.$tag === "Try");
-        if (v238_t)
+        v290_t = (v0_e.kind.$tag === "Try");
+        if (v290_t)
         {
-          let v239_body, v240_handler;
-          v239_body = v0_e.kind.$.body;
-          v240_handler = v0_e.kind.$.handler;
+          let v291_body, v292_handler;
+          v291_body = v0_e.kind.$.body;
+          v292_handler = v0_e.kind.$.handler;
           {
-            let v241_t, v242_t;
-            blockNames_1580(v239_body, v1_out);
-            blockNames_1580(v240_handler, v1_out);
+            let v293_t, v294_t;
+            blockNames_1580(v291_body, v1_out);
+            blockNames_1580(v292_handler, v1_out);
           }
           break L1;
         }
-        v243_t = (v0_e.kind.$tag === "Lambda");
-        if (v243_t)
+        v295_t = (v0_e.kind.$tag === "Lambda");
+        if (v295_t)
         {
-          let v244_body, v245_t, v246_t;
-          v244_body = v0_e.kind.$.body;
-          v245_t = v244_body;
-          freeNames_1458(v245_t, v1_out);
+          let v296_body, v297_t, v298_t;
+          v296_body = v0_e.kind.$.body;
+          v297_t = v296_body;
+          freeNames_1458(v297_t, v1_out);
           break L1;
         }
-        v247_t = (v0_e.kind.$tag === "Handle");
-        if (v247_t)
+        v299_t = (v0_e.kind.$tag === "Handle");
+        if (v299_t)
         {
-          let v248_body, v249_arms;
-          v248_body = v0_e.kind.$.body;
-          v249_arms = v0_e.kind.$.arms;
+          let v300_body, v301_arms;
+          v300_body = v0_e.kind.$.body;
+          v301_arms = v0_e.kind.$.arms;
           {
-            let v250_t;
-            blockNames_1580(v248_body, v1_out);
+            let v302_t;
+            blockNames_1580(v300_body, v1_out);
             {
-              let v251_t, v252_t, v253_t, v254_t, v255_t;
-              v251_t = v249_arms;
-              v252_t = v251_t;
-              v253_t = $b.slice_len(v252_t);
-              v254_t = v253_t;
-              v255_t = 0;
-              L16: for (;;) {
-                C16:
+              let v303_t, v304_t, v305_t, v306_t, v307_t;
+              v303_t = v301_arms;
+              v304_t = v303_t;
+              v305_t = $b.slice_len(v304_t);
+              v306_t = v305_t;
+              v307_t = 0;
+              L22: for (;;) {
+                C22:
                 {
-                  let v256_t, v257_t;
-                  v256_t = (v255_t < v254_t);
-                  if (v256_t)
+                  let v308_t, v309_t;
+                  v308_t = (v307_t < v306_t);
+                  if (v308_t)
                   {
                   }
                   else
                   {
-                    break L16;
+                    break L22;
                   }
-                  v257_t = $ix(v252_t, v255_t);
+                  v309_t = $ix(v304_t, v307_t);
                   {
-                    let v258_t, v259_a;
-                    v258_t = v257_t;
-                    v259_a = v258_t;
+                    let v310_t, v311_a;
+                    v310_t = v309_t;
+                    v311_a = v310_t;
                     {
-                      let v260_t, v261_t;
-                      v260_t = v259_a.body;
-                      blockNames_1580(v260_t, v1_out);
+                      let v312_t, v313_t;
+                      v312_t = v311_a.body;
+                      blockNames_1580(v312_t, v1_out);
                     }
                   }
                 }
                 {
-                  let v262_t;
-                  v262_t = $usize(v255_t + 1);
-                  v255_t = v262_t;
+                  let v314_t;
+                  v314_t = $usize(v307_t + 1);
+                  v307_t = v314_t;
                 }
               }
             }

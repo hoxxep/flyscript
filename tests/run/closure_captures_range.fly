@@ -1,0 +1,17 @@
+// expect: 10 15
+// A closure captures what a range in it names (§4.3).
+import { println } from "std/io";
+function sum(n: i64): i64 {
+  const total = () => {
+    let t: i64 = 0;
+    for (const i of 0..n) { t += i; }
+    t
+  };
+  total()
+}
+export function main(): void uses Io {
+  const lo: usize = 2;
+  const xs: i64[6] = [0, 1, 2, 3, 4, 5];
+  const tail = () => { let t: i64 = 0; for (const x of xs[lo..]) { t += x; } t };
+  println(`${sum(5)} ${tail() + 1}`);
+}

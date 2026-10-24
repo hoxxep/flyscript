@@ -2520,10 +2520,13 @@ static void* mt_task_result(mt_task* t);
 static void* mt_task_closure(mt_task* t);
 #endif
 
-enum { WAIT_NONE, WAIT_TASK, WAIT_CHANNEL, WAIT_UNTIL };
+// The scheduler of a simulated world is the runtime's Flyscript (rt/sched.fly), on the program's
+// own stack: what is here is what it runs on. Each task is a record of what compiled code gave
+// it — its entry, closure and result — its fiber, and how deep it is in cleanup; it asks the
+// scheduler for anything that touches another task, a scope, a channel or the clock, by a request
+// it leaves here and a switch to the scheduler's stack (`ask`), and is resumed with the answer.
 
 typedef struct {
-  int id, scope;
   fly_fiber* fiber;
   fly_fiber* suspended;
   void (*entry)(void* task, void* closure);
@@ -2531,151 +2534,107 @@ typedef struct {
   void* result;
   size_t size;
   fly_failure* error;
-  bool started, finished, cancelled, deliver_cancel, deliver_deadlock;
   // How deep it is in cleanup, which a cancellation waits for.
   int cleaning;
-  int wait_kind, wait_id;
-  uint64_t until;
+  // What the scheduler delivers as it resumes the task, and its answer to what the task asked:
+  // the task's own, for others ask while it waits.
+  bool deliver_cancel, deliver_deadlock;
+  int64_t reply;
 } task_t;
 
-// A channel: what was sent and not yet received, its senders, whether its receiver is gone, and
-// what drops a message, which it does to those no one will receive.
-typedef struct { uint8_t* items; size_t len, head, size; long senders; bool closed, deaf; void (*drop)(void*); } chan_t;
-typedef struct { int owner; int* tasks; size_t ntasks; fly_failure* failure; } scope_t;
-
 bool fly_tasks_on = false;
-static struct {
-  int current, next, scope_ids;
-  int* ready;
-  size_t nready, capready;
-  int* blocked;
-  size_t nblocked, capblocked;
-  uint64_t rng;
-  task_t** tasks;
-  chan_t** chans;
-  size_t cap;
-  scope_t** scopes;
-  size_t capscopes;
-} sched = { .next = 1, .scope_ids = 1 };
+// The records by the scheduler's numbering, which channels share; and the one running.
+static task_t** core_tasks;
+static size_t core_cap;
+static task_t* core_cur;
 
-static void grow_ids(int id) {
-  if ((size_t)id < sched.cap) return;
-  size_t cap = sched.cap ? sched.cap : 16;
-  while (cap <= (size_t)id) cap *= 2;
-  sched.tasks = realloc(sched.tasks, cap * sizeof(task_t*));
-  sched.chans = realloc(sched.chans, cap * sizeof(chan_t*));
-  memset(sched.tasks + sched.cap, 0, (cap - sched.cap) * sizeof(task_t*));
-  memset(sched.chans + sched.cap, 0, (cap - sched.cap) * sizeof(chan_t*));
-  sched.cap = cap;
-}
-
-static void push_ready(int t) {
-  if (sched.nready == sched.capready) { sched.capready = sched.capready ? sched.capready * 2 : 16; sched.ready = realloc(sched.ready, sched.capready * sizeof(int)); }
-  sched.ready[sched.nready++] = t;
-}
-
-static void push_blocked(int t) {
-  if (sched.nblocked == sched.capblocked) { sched.capblocked = sched.capblocked ? sched.capblocked * 2 : 16; sched.blocked = realloc(sched.blocked, sched.capblocked * sizeof(int)); }
-  sched.blocked[sched.nblocked++] = t;
-}
-
-static bool remove_blocked(int t) {
-  for (size_t i = 0; i < sched.nblocked; i++) {
-    if (sched.blocked[i] == t) {
-      memmove(sched.blocked + i, sched.blocked + i + 1, (sched.nblocked - i - 1) * sizeof(int));
-      sched.nblocked--;
-      return true;
-    }
-  }
-  return false;
-}
-
-static void wake(int kind, int id);
-static void wake_until(uint64_t t);
-
-// Hands the baton to a ready task, chosen by the seed; false if none can run. With none ready,
-// time passes to the earliest sleeper's wake time, waking every task due then.
-static bool pass(void) {
-  if (sched.nready == 0) {
-    bool any = false;
-    uint64_t due = 0;
-    for (size_t i = 0; i < sched.nblocked; i++) {
-      task_t* t = sched.tasks[sched.blocked[i]];
-      if (t->wait_kind == WAIT_UNTIL && (!any || t->until < due)) { due = t->until; any = true; }
-    }
-    if (any) {
-      if (due > fly_clock) fly_clock = due;
-      wake_until(due);
-    }
-  }
-  if (sched.nready == 0) return false;
-  uint64_t r = xorshift(&sched.rng);
-  size_t i = (size_t)(r % sched.nready);
-  sched.current = sched.ready[i];
-  memmove(sched.ready + i, sched.ready + i + 1, (sched.nready - i - 1) * sizeof(int));
-  sched.nready--;
-  return true;
-}
-
-static void wake(int kind, int id) {
-  for (size_t i = 0; i < sched.nblocked;) {
-    task_t* t = sched.tasks[sched.blocked[i]];
-    if (t->wait_kind == kind && t->wait_id == id) {
-      int me = sched.blocked[i];
-      memmove(sched.blocked + i, sched.blocked + i + 1, (sched.nblocked - i - 1) * sizeof(int));
-      sched.nblocked--;
-      push_ready(me);
-    } else i++;
-  }
-}
-
-static void wake_until(uint64_t due) {
-  for (size_t i = 0; i < sched.nblocked;) {
-    task_t* t = sched.tasks[sched.blocked[i]];
-    if (t->wait_kind == WAIT_UNTIL && t->until == due) {
-      int me = sched.blocked[i];
-      memmove(sched.blocked + i, sched.blocked + i + 1, (sched.nblocked - i - 1) * sizeof(int));
-      sched.nblocked--;
-      push_ready(me);
-    } else i++;
-  }
-}
-
-static void cancel(int t) {
-  sched.tasks[t]->cancelled = true;
-  if (!sched.tasks[t]->cleaning && remove_blocked(t)) push_ready(t);
-}
+// The request the running task left, and its answer (rt/sched.fly's numbering).
+enum { REQ_POINT = 1, REQ_SLEEP, REQ_SPAWN, REQ_JOIN_WAIT, REQ_JOIN_TAKE, REQ_SCOPE_OPEN, REQ_SCOPE_FAILED, REQ_SCOPE_TASK, REQ_SCOPE_TAKE,
+       REQ_UNCANCEL, REQ_CHANNEL, REQ_SEND, REQ_RECV, REQ_CLOSE, REQ_SENDER_DROP, REQ_SENDER_CLONE, REQ_DEAFEN, REQ_TAKE_ITEMS };
+static struct { int kind; int64_t a[2]; void* p; } req;
 
 void fly_panic_deadlock(void) { fly_panic("deadlock: every task is waiting"); }
 
-// Suspends the running task back to the scheduler, waiting for `kind`/`id` or not at all; when it
-// is resumed, a cancellation or a deadlock is delivered to it.
-static void suspend_task(int kind, int id) {
-  task_t* t = sched.tasks[sched.current];
-  t->wait_kind = kind;
-  t->wait_id = id;
-  t->suspended = cur_fiber;
+static int64_t ask(int kind, int64_t a, int64_t b, void* p) {
+  req.kind = kind;
+  req.a[0] = a;
+  req.a[1] = b;
+  req.p = p;
+  task_t* me = core_cur;
+  me->reply = 0;
+  me->suspended = cur_fiber;
   switch_to(&main_fiber);
-  task_t* me = sched.tasks[sched.current];
   if (me->deliver_deadlock) fly_panic_deadlock();
   if (me->deliver_cancel) {
     me->deliver_cancel = false;
     fly_unwinding = true;
   }
+  return me->reply;
+}
+
+int32_t fly_core_kind(void) { return req.kind; }
+int64_t fly_core_arg(int32_t i) { return req.a[i]; }
+uint8_t* fly_core_ptr(int32_t i) { (void)i; return req.p; }
+void fly_core_reply(int64_t v) { core_cur->reply = v; }
+uint64_t fly_core_clock(void) { return fly_clock; }
+void fly_core_set_clock(uint64_t t) { fly_clock = t; }
+int32_t fly_core_cleaning(int32_t id) { return core_tasks[id]->cleaning; }
+
+void fly_core_adopt(int32_t id, uint8_t* record) {
+  if ((size_t)id >= core_cap) {
+    size_t cap = core_cap ? core_cap : 16;
+    while (cap <= (size_t)id) cap *= 2;
+    core_tasks = realloc(core_tasks, cap * sizeof(task_t*));
+    memset(core_tasks + core_cap, 0, (cap - core_cap) * sizeof(task_t*));
+    core_cap = cap;
+  }
+  core_tasks[id] = (task_t*)record;
+}
+
+static void task_main(void* arg) {
+  task_t* t = arg;
+  t->entry(t, t->closure);
+  if (FLY_FAILED) { t->error = fly_err; fly_err = NULL; }
+  fly_unwinding = false;
+}
+
+// Runs task `id` until it asks again, 0, or ends, 1, or ends failing, 2.
+int32_t fly_core_run(int32_t id, bool deadlock, bool cancel) {
+  task_t* t = core_tasks[id];
+  if (!t->fiber) {
+    t->fiber = fiber_new(task_main, t, NULL);
+    t->suspended = t->fiber;
+  }
+  t->deliver_deadlock = deadlock;
+  t->deliver_cancel = cancel;
+  t->fiber->back = &main_fiber;
+  core_cur = t;
+  switch_to(t->suspended);
+  if (!t->fiber->done) return 0;
+  return t->error ? 2 : 1;
+}
+
+static task_t* new_task(void (*entry)(void* task, void* closure), void* closure, size_t size) {
+  task_t* t = fly_alloc(sizeof(task_t));
+  t->entry = entry;
+  t->closure = closure;
+  t->size = size;
+  t->result = fly_alloc(size ? size : 1);
+  return t;
 }
 
 void fly_point(void) {
 #ifdef FLY_THREADS
   if (threads) { mt_point(); return; }
 #endif
-  if (fly_tasks_on) suspend_task(WAIT_NONE, 0);
+  if (fly_tasks_on) ask(REQ_POINT, 0, 0, NULL);
 }
 
 static void cleaning(int d) {
 #ifdef FLY_THREADS
   if (threads) { mt_cleaning(d); return; }
 #endif
-  if (fly_tasks_on) sched.tasks[sched.current]->cleaning += d;
+  if (fly_tasks_on) core_cur->cleaning += d;
 }
 
 // Sleeping waits for the virtual clock, which passes only when no task can run; without a
@@ -2691,37 +2650,7 @@ void fly_sleep(uint64_t nanos) {
     return;
   }
   if (!fly_tasks_on) { fly_clock += nanos; return; }
-  if (nanos == 0) { fly_point(); return; }
-  sched.tasks[sched.current]->until = fly_clock + nanos;
-  suspend_task(WAIT_UNTIL, 0);
-}
-
-static void block(int kind, int id) {
-  if (!fly_tasks_on) fly_panic_deadlock();
-  suspend_task(kind, id);
-}
-
-// Task `me` has finished: its outcome goes to its scope, and its joiners wake.
-static void end_task(int me) {
-  task_t* t = sched.tasks[me];
-  scope_t* st = sched.scopes[t->scope];
-  // The first failure cancels the scope: its body and its other tasks (§6.1).
-  if (t->error && !st->failure) {
-    cancel(st->owner);
-    for (size_t i = 0; i < st->ntasks; i++) if (st->tasks[i] != me) cancel(st->tasks[i]);
-  }
-  // A failure is the scope's to raise, unless a join raises it first: it is raised once.
-  if (t->error && !st->failure) st->failure = t->error;
-  t->finished = true;
-  wake(WAIT_TASK, me);
-  if (!pass()) fly_panic_deadlock();
-}
-
-static void task_main(void* arg) {
-  task_t* t = arg;
-  t->entry(t, t->closure);
-  if (FLY_FAILED) { t->error = fly_err; fly_err = NULL; }
-  fly_unwinding = false;
+  ask(REQ_SLEEP, (int64_t)nanos, 0, NULL);
 }
 
 static void main_entry(void* task, void* closure) { (void)task; ((void (*)(void))closure)(); }
@@ -2732,73 +2661,16 @@ void fly_tasks_run(void (*main)(void)) {
 #ifdef FLY_THREADS
   if (!world.simulated) { mt_run(main, main_entry); return; }
 #endif
-  sched.rng = world.seed > 1 ? world.seed : 1;
-  grow_ids(0);
-  task_t* t0 = fly_alloc(sizeof(task_t));
-  t0->entry = main_entry;
-  t0->closure = (void*)main;
-  sched.tasks[0] = t0;
-  sched.current = 0;
-  for (;;) {
-    int me = sched.current;
-    task_t* t = sched.tasks[me];
-    // A cancelled task unwinds at its next scheduling point; one not started never runs.
-    if (!t->deliver_deadlock && t->cancelled && !t->cleaning) t->deliver_cancel = true;
-    if (!t->started) {
-      t->started = true;
-      if (t->deliver_cancel) {
-        t->deliver_cancel = false;
-        end_task(me);
-        continue;
-      }
-      t->fiber = fiber_new(task_main, t, NULL);
-      t->suspended = t->fiber;
-    }
-    t->fiber->back = &main_fiber;
-    switch_to(t->suspended);
-    if (t->fiber->done) {
-      if (me == 0) {
-        if (t->error) fly_err = t->error;
-        return;
-      }
-      end_task(me);
-      continue;
-    }
-    if (t->wait_kind == WAIT_NONE) {
-      push_ready(me);
-      pass();
-    } else {
-      push_blocked(me);
-      if (!pass()) {
-        // Nothing else can run, so nothing can ever wake this task: reported, not waited on.
-        remove_blocked(me);
-        sched.current = me;
-        t->deliver_deadlock = true;
-      }
-    }
-  }
+  task_t* t0 = new_task(main_entry, (void*)main, 0);
+  fly_rt_tasks(world.seed, (uint8_t*)t0);
+  if (t0->error) fly_err = t0->error;
 }
 
 int fly_spawn(int scope, void (*entry)(void* task, void* closure), void* closure, size_t size) {
 #ifdef FLY_THREADS
   if (threads) return mt_spawn(scope, entry, closure, size);
 #endif
-  int id = sched.next++;
-  grow_ids(id);
-  task_t* t = fly_alloc(sizeof(task_t));
-  t->id = id;
-  t->scope = scope;
-  t->entry = entry;
-  t->closure = closure;
-  t->size = size;
-  t->result = fly_alloc(size ? size : 1);
-  sched.tasks[id] = t;
-  push_ready(id);
-  scope_t* st = sched.scopes[scope];
-  st->tasks = realloc(st->tasks, (st->ntasks + 1) * sizeof(int));
-  st->tasks[st->ntasks++] = id;
-  fly_point();
-  return id;
+  return (int)ask(REQ_SPAWN, scope, 0, new_task(entry, closure, size));
 }
 
 void fly_task_void(void* task, void* closure) {
@@ -2822,21 +2694,16 @@ void* fly_task_closure(void* task) {
   return ((task_t*)task)->closure;
 }
 
-static void join_task(int task) {
-  if (!sched.tasks[task]->finished) block(WAIT_TASK, task);
-}
-
 // A forked task's value, or its failure, raised.
 void fly_join(int task, void* out) {
 #ifdef FLY_THREADS
   if (threads) { mt_join(task, out); return; }
 #endif
-  join_task(task);
+  ask(REQ_JOIN_WAIT, task, 0, NULL);
   if (fly_unwinding) return;
-  task_t* t = sched.tasks[task];
+  task_t* t = core_tasks[task];
   if (t->error) {
-    scope_t* st = sched.scopes[t->scope];
-    if (st && st->failure == t->error) st->failure = NULL;
+    ask(REQ_JOIN_TAKE, task, 0, NULL);
     fly_err = t->error;
     t->error = NULL;
     return;
@@ -2848,17 +2715,7 @@ int fly_scope_open(void) {
 #ifdef FLY_THREADS
   if (threads) return mt_scope_open();
 #endif
-  int sid = sched.scope_ids++;
-  if ((size_t)sid >= sched.capscopes) {
-    size_t cap = sched.capscopes ? sched.capscopes * 2 : 16;
-    while (cap <= (size_t)sid) cap *= 2;
-    sched.scopes = realloc(sched.scopes, cap * sizeof(scope_t*));
-    sched.capscopes = cap;
-  }
-  scope_t* st = fly_alloc(sizeof(scope_t));
-  st->owner = sched.current;
-  sched.scopes[sid] = st;
-  return sid;
+  return (int)ask(REQ_SCOPE_OPEN, 0, 0, NULL);
 }
 
 // The end of a scope's body, however it ended: every task started in it is waited for, then
@@ -2868,50 +2725,50 @@ void fly_scope_close(int sid, bool body_failed) {
 #ifdef FLY_THREADS
   if (threads) { mt_scope_close(sid); return; }
 #endif
-  scope_t* st = sched.scopes[sid];
-  task_t* me = sched.tasks[sched.current];
   // The body unwound because a task failed: the scope raises that instead.
-  bool unwound = fly_unwinding && !st->failure;
+  bool unwound = fly_unwinding && !ask(REQ_SCOPE_FAILED, sid, 0, NULL);
   fly_unwinding = false;
   void* err = fly_err;
   fly_err = NULL;
-  me->cancelled = false;
-  for (size_t i = 0; i < st->ntasks; i++) {
+  ask(REQ_UNCANCEL, 0, 0, NULL);
+  for (int64_t i = 0;; i++) {
+    int64_t task = ask(REQ_SCOPE_TASK, sid, i, NULL);
+    if (task < 0) break;
     for (;;) {
-      join_task(st->tasks[i]);
+      ask(REQ_JOIN_WAIT, task, 0, NULL);
       if (!fly_unwinding) break;
       fly_unwinding = false;
-      me->cancelled = false;
+      ask(REQ_UNCANCEL, 0, 0, NULL);
     }
   }
-  me->cancelled = false;
+  ask(REQ_UNCANCEL, 0, 0, NULL);
   if (unwound) { fly_unwinding = true; if (err) free(err); return; }
   if (err) { fly_err = err; return; }
-  if (st->failure) { fly_err = st->failure; st->failure = NULL; }
+  int64_t failed = ask(REQ_SCOPE_TAKE, sid, 0, NULL);
+  if (failed >= 0) { fly_err = core_tasks[failed]->error; core_tasks[failed]->error = NULL; }
 }
 
 // ---- channels ----
+//
+// The scheduler keeps what is sent; a channel's ends here are its number, and what drops a
+// message it will not deliver, which a channel's receiving end keeps (`fly_receiver_drop`).
+
+static void (**chan_drops)(void*);
+static size_t chan_cap;
 
 fly_chan fly_channel(void (*drop)(void*)) {
 #ifdef FLY_THREADS
   if (threads) return mt_channel(drop);
 #endif
-  int id = sched.next++;
-  grow_ids(id);
-  chan_t* c = fly_alloc(sizeof(chan_t));
-  c->senders = 1;
-  c->drop = drop;
-  sched.chans[id] = c;
+  int id = (int)ask(REQ_CHANNEL, 0, 0, NULL);
+  if ((size_t)id >= chan_cap) {
+    size_t cap = chan_cap ? chan_cap : 16;
+    while (cap <= (size_t)id) cap *= 2;
+    chan_drops = realloc(chan_drops, cap * sizeof(*chan_drops));
+    chan_cap = cap;
+  }
+  chan_drops[id] = drop;
   return (fly_chan){ id };
-}
-
-// A channel both of whose ends are gone is freed.
-static void chan_maybe_free(int id) {
-  chan_t* c = sched.chans[id];
-  if (c->senders > 0 || !c->deaf) return;
-  free(c->items);
-  free(c);
-  sched.chans[id] = NULL;
 }
 
 // Whether the message went to the channel: once its receiver is gone, it is dropped instead.
@@ -2919,19 +2776,10 @@ bool fly_send(fly_chan ch, const void* v, size_t size) {
 #ifdef FLY_THREADS
   if (threads) return mt_send(ch, v, size);
 #endif
-  chan_t* c = sched.chans[ch.ch];
-  bool ok = !c->deaf;
-  if (ok) {
-    c->size = size;
-    c->items = realloc(c->items, (c->len + 1) * (size ? size : 1));
-    memcpy(c->items + c->len * size, v, size);
-    c->len++;
-    wake(WAIT_CHANNEL, ch.ch);
-  } else if (c->drop) {
-    c->drop((void*)v);
-  }
+  if (ask(REQ_SEND, ch.ch, (int64_t)size, (void*)v)) return true;
+  if (chan_drops[ch.ch]) chan_drops[ch.ch]((void*)v);
   fly_point();
-  return ok;
+  return false;
 }
 
 // The next message, or false once the channel is closed and drained (or the task unwinds).
@@ -2939,52 +2787,37 @@ bool fly_recv(fly_chan ch, void* out, size_t size) {
 #ifdef FLY_THREADS
   if (threads) return mt_recv(ch, out, size);
 #endif
+  (void)size;
   for (;;) {
-    chan_t* c = sched.chans[ch.ch];
-    if (c->head < c->len) {
-      memcpy(out, c->items + c->head * size, size);
-      c->head++;
-      return true;
-    }
-    if (c->closed) return false;
-    block(WAIT_CHANNEL, ch.ch);
+    int64_t r = ask(REQ_RECV, ch.ch, 0, out);
+    if (r != 2) return r == 1;
     if (fly_unwinding) return false;
   }
 }
 
-static void sender_gone(chan_t* c, int id) {
-  c->senders = c->senders > 0 ? c->senders - 1 : 0;
-  if (c->senders == 0) { c->closed = true; wake(WAIT_CHANNEL, id); }
-  chan_maybe_free(id);
-}
-
 // The receiving end dropped: what is sent from now on is dropped, and the channel freed once its
-// senders are gone too.
+// senders are gone too. What it holds is dropped now: a message may hold a reply someone waits
+// for. It is taken out first, as dropping one may reach this channel.
 void fly_receiver_drop(fly_chan* ch) {
 #ifdef FLY_THREADS
   if (threads) { if (ch->ch) mt_receiver_gone(*ch); ch->ch = 0; return; }
 #endif
   if (!ch->ch) return;
-  chan_t* c = sched.chans[ch->ch];
-  c->deaf = true;
-  // What is in it is dropped now: a message may hold a reply someone waits for. It is taken out
-  // first, as dropping one may reach this channel.
-  uint8_t* items = c->items;
-  size_t head = c->head, len = c->len, size = c->size;
-  c->items = NULL;
-  c->head = c->len = 0;
-  if (c->drop) for (size_t i = head; i < len; i++) c->drop(items + i * size);
-  free(items);
-  chan_maybe_free(ch->ch);
+  int id = ch->ch;
   ch->ch = 0;
+  int64_t held = ask(REQ_DEAFEN, id, 0, NULL);
+  size_t n = (size_t)(held >> 32), size = (size_t)(held & 0xffffffff);
+  uint8_t* items = fly_alloc(n * size + 1);
+  ask(REQ_TAKE_ITEMS, id, 0, items);
+  if (chan_drops[id]) for (size_t i = 0; i < n; i++) chan_drops[id](items + i * size);
+  free(items);
 }
 
 void fly_close(fly_chan ch) {
 #ifdef FLY_THREADS
   if (threads) { mt_sender_gone(ch); mt_point(); return; }
 #endif
-  sender_gone(sched.chans[ch.ch], ch.ch);
-  fly_point();
+  ask(REQ_CLOSE, ch.ch, 0, NULL);
 }
 
 // A destructor does not suspend: a sender dropped closes its channel then and there.
@@ -2992,7 +2825,7 @@ void fly_sender_drop(fly_chan* ch) {
 #ifdef FLY_THREADS
   if (threads) { if (ch->ch) mt_sender_gone(*ch); ch->ch = 0; return; }
 #endif
-  if (ch->ch) sender_gone(sched.chans[ch->ch], ch->ch);
+  if (ch->ch) ask(REQ_SENDER_DROP, ch->ch, 0, NULL);
   ch->ch = 0;
 }
 
@@ -3000,7 +2833,7 @@ fly_chan fly_sender_clone(const fly_chan* ch) {
 #ifdef FLY_THREADS
   if (threads) { mt_sender_clone(*ch); return *ch; }
 #endif
-  sched.chans[ch->ch]->senders++;
+  ask(REQ_SENDER_CLONE, ch->ch, 0, NULL);
   return *ch;
 }
 

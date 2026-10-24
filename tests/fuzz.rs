@@ -918,11 +918,9 @@ fn random_programs_agree_and_mutants_are_rejected() {
     }
     eprintln!("{} programs, {mutants} mutants", paths.len());
     if tool("node") && tool("cc") && failures.is_empty() {
-        let compiler = root().join("target/selfhost/stage2.js");
-        if !compiler.exists() {
-            let built = Command::new("bash").arg(root().join("selfhost/bootstrap.sh")).output().unwrap();
-            assert!(built.status.success(), "{}", String::from_utf8_lossy(&built.stderr));
-        }
+        // The committed seed, which is the compiler at its fixpoint: a build left in target/ may be
+        // older than the runtime beside it.
+        let compiler = root().join("selfhost/seed.js");
         let mut modes: Vec<Vec<&str>> = vec![vec![], vec!["--c", "--leaks"]];
         if Path::new(&format!("{}/bin/llvm-link", String::from_utf8_lossy(&Command::new("brew").args(["--prefix", "llvm"]).output().map(|o| o.stdout).unwrap_or_default()).trim())).exists() {
             modes.push(vec!["--llvm"]);
