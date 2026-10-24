@@ -49,11 +49,14 @@ struct Inner {
     /// A panic that ends the program: every task meets it at its next scheduling point, and none
     /// runs its cleanup (§5.7).
     aborted: Option<String>,
+    /// What each waiting task's thread waits on, so that passing the baton wakes only the task
+    /// that takes it: with one for all, each pass woke every thread, and a program of hundreds of
+    /// tasks spent nearly all its time in the kernel.
+    turns: HashMap<u64, Arc<Condvar>>,
 }
 
 pub struct Sched {
     inner: Mutex<Inner>,
-    turn: Condvar,
 }
 
 impl Sched {
@@ -75,8 +78,8 @@ impl Sched {
                 cleaning: HashMap::new(),
                 deaf: HashMap::new(),
                 aborted: None,
+                turns: HashMap::new(),
             }),
-            turn: Condvar::new(),
         })
     }
 
@@ -103,8 +106,22 @@ impl Sched {
         inner.current = inner.ready.remove(i);
     }
 
+    /// Wakes the task holding the baton, if it waits for it.
+    fn hand_over(inner: &Inner) {
+        if let Some(turn) = inner.turns.get(&inner.current) {
+            turn.notify_all();
+        }
+    }
+
+    /// Wakes every waiting task, to meet the end of the program.
+    fn wake_all(inner: &Inner) {
+        for turn in inner.turns.values() {
+            turn.notify_all();
+        }
+    }
+
     fn wait_turn(&self, me: u64, mut inner: std::sync::MutexGuard<'_, Inner>) -> Result<(), Ctl> {
-        self.turn.notify_all();
+        Self::hand_over(&inner);
         loop {
             if let Some(m) = &inner.aborted {
                 return Err(panic(m.clone()));
@@ -115,7 +132,8 @@ impl Sched {
             if inner.deadlocked {
                 return Err(end_program("deadlock: every task is waiting"));
             }
-            inner = self.turn.wait(inner).expect("scheduler");
+            let turn = inner.turns.entry(me).or_default().clone();
+            inner = turn.wait(inner).expect("scheduler");
         }
         if inner.cancelled.contains(&me) && !inner.cleaning.contains_key(&me) {
             return Err(Ctl::Cancelled);
@@ -127,7 +145,7 @@ impl Sched {
     pub fn abort(&self, message: &str) {
         let mut inner = self.inner.lock().expect("scheduler");
         inner.aborted.get_or_insert_with(|| message.to_string());
-        self.turn.notify_all();
+        Self::wake_all(&inner);
     }
 
     /// Cancels task `t`: if it is waiting, it wakes, and at its next scheduling point it unwinds.
@@ -193,7 +211,7 @@ impl Sched {
         // Nothing else can run, so nothing can ever wake this task: a deadlock, reported rather
         // than waited on.
         if inner.deadlocked {
-            self.turn.notify_all();
+            Self::wake_all(&inner);
             return Err(end_program("deadlock: every task is waiting"));
         }
         self.wait_turn(me, inner)
@@ -232,7 +250,11 @@ impl Sched {
         inner.finished.insert(me);
         Self::wake(&mut inner, &Wait::Task(me));
         Self::pass(&mut inner);
-        self.turn.notify_all();
+        if inner.deadlocked {
+            Self::wake_all(&inner);
+        } else {
+            Self::hand_over(&inner);
+        }
     }
 
     /// Waits for task `t` to finish.
