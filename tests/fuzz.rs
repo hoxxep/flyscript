@@ -14,6 +14,9 @@ use std::process::Command;
 use flyscript::check::check_files;
 use flyscript::eval::{World, run};
 
+mod common;
+use common::on_every_core;
+
 struct Rng(u64);
 
 impl Rng {
@@ -881,10 +884,10 @@ fn random_programs_agree_and_mutants_are_rejected() {
     let dir = root().join("target/fuzz");
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    let mut failures = Vec::new();
-    let mut paths: Vec<PathBuf> = Vec::new();
-    let mut mutants = 0;
-    for seed in first..first + count {
+    let seeds: Vec<u64> = (first..first + count).collect();
+    // Each seed's program, if the checker accepts it, what went wrong, and how many mutants it made.
+    let made = on_every_core(&seeds, |&seed| {
+        let mut failures = Vec::new();
         let mut g = Gen::new(seed);
         let source = g.program();
         let path = dir.join(format!("p{seed}.fly"));
@@ -892,7 +895,7 @@ fn random_programs_agree_and_mutants_are_rejected() {
         let checked = check_files(std::slice::from_ref(&path));
         if !checked.errors.is_empty() {
             failures.push(format!("seed {seed}: the checker rejects a well-typed program ({}):\n{}", path.display(), checked.render().join("\n")));
-            continue;
+            return (None, failures, 0);
         }
         let (result, world) = run(checked.program, "main", Vec::new(), World::default());
         let mut out: Vec<String> = world.out.iter().flat_map(|s| s.split('\n').map(String::from)).collect();
@@ -905,16 +908,23 @@ fn random_programs_agree_and_mutants_are_rejected() {
             let _ = writeln!(header, "// expect: {l}");
         }
         std::fs::write(&path, format!("{header}{source}")).unwrap();
-        paths.push(path);
         for (k, site) in g.sites.iter().enumerate() {
             let m = dir.join(format!("m{seed}_{k}.fly"));
             std::fs::write(&m, g.mutant(site)).unwrap();
-            mutants += 1;
             let c = check_files(std::slice::from_ref(&m));
             if c.errors.is_empty() {
                 failures.push(format!("seed {seed}: the checker accepts {} ({})", site.what, m.display()));
             }
         }
+        (Some(path), failures, g.sites.len())
+    });
+    let mut failures = Vec::new();
+    let mut paths: Vec<PathBuf> = Vec::new();
+    let mut mutants = 0;
+    for (path, failed, n) in made {
+        paths.extend(path);
+        failures.extend(failed);
+        mutants += n;
     }
     eprintln!("{} programs, {mutants} mutants", paths.len());
     if tool("node") && tool("cc") && failures.is_empty() {
@@ -925,16 +935,19 @@ fn random_programs_agree_and_mutants_are_rejected() {
         if Path::new(&format!("{}/bin/llvm-link", String::from_utf8_lossy(&Command::new("brew").args(["--prefix", "llvm"]).output().map(|o| o.stdout).unwrap_or_default()).trim())).exists() {
             modes.push(vec!["--llvm"]);
         }
-        for mode in modes {
+        // The modes run at once: at the default count, each has fewer programs than there are cores.
+        let texts = on_every_core(&modes, |mode| {
             let out = Command::new("sh")
                 .arg(root().join("selfhost/corpus.sh"))
-                .args(&mode)
+                .args(mode)
                 .arg(&compiler)
                 .args(&paths)
                 .current_dir(root())
                 .output()
                 .unwrap();
-            let text = String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
+            String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr)
+        });
+        for (mode, text) in modes.iter().zip(texts) {
             if text.contains("FAIL") {
                 failures.push(format!("{mode:?}:\n{text}"));
             }

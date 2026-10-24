@@ -130,17 +130,28 @@ fn builds_the_example_site_and_the_compiler_from_their_manifests() {
     }
     let home = scratch("manifests");
     let site = root().join("examples/todo");
-    assert!(ok(fly(&site, &home, &["build"])).starts_with("built todo"));
+    let compiler = root().join("selfhost");
+    // The two build at once: neither uses every core for long.
+    let (site_built, compiler_built) = std::thread::scope(|s| {
+        let site_built = s.spawn(|| fly(&site, &home, &["build"]));
+        let compiler_built = fly(&compiler, &home, &["build"]);
+        (site_built.join().unwrap(), compiler_built)
+    });
+    assert!(ok(site_built).starts_with("built todo"));
     for f in ["target/site/server", "target/site/_fly/app.wasm", "target/site/_fly/flynext.js"] {
         assert!(site.join(f).exists(), "the site's build has no {f}");
     }
-    let compiler = root().join("selfhost");
-    assert!(ok(fly(&compiler, &home, &["build"])).starts_with("built flyc"));
+    assert!(ok(compiler_built).starts_with("built flyc"));
     // The compiler fly built compiles the compiler to what the launcher's does.
     let (a, b) = (home.join("a.c"), home.join("b.c"));
-    for (exe, out) in [(compiler.join("target/flyc"), &a), (root().join("target/fly/flyc"), &b)] {
-        let o = Command::new(exe).arg(compiler.join("main.fly")).arg(out).arg(root()).output().unwrap();
-        assert!(o.status.success(), "{}", said(&o));
-    }
+    std::thread::scope(|s| {
+        for (exe, out) in [(compiler.join("target/flyc"), &a), (root().join("target/fly/flyc"), &b)] {
+            let compiler = &compiler;
+            s.spawn(move || {
+                let o = Command::new(exe).arg(compiler.join("main.fly")).arg(out).arg(root()).output().unwrap();
+                assert!(o.status.success(), "{}", said(&o));
+            });
+        }
+    });
     assert!(std::fs::read(a).unwrap() == std::fs::read(b).unwrap());
 }

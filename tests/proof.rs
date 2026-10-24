@@ -8,6 +8,9 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+mod common;
+use common::on_every_core;
+
 fn lake() -> Option<PathBuf> {
     let home = std::env::var("HOME").unwrap_or_default();
     [PathBuf::from("lake"), Path::new(&home).join(".elan/bin/lake")]
@@ -47,15 +50,14 @@ fn the_core_is_proved() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let out_dir = root.join("target/proof-core");
     std::fs::create_dir_all(&out_dir).unwrap();
-    let mut certified = 0;
     let mut files: Vec<PathBuf> = std::fs::read_dir(root.join("tests/run")).unwrap().map(|e| e.unwrap().path()).collect();
     files.sort();
-    for file in files {
-        let text = std::fs::read_to_string(&file).unwrap();
-        let Some(f) = text.lines().find_map(|l| l.strip_prefix("// core: ")) else { continue };
+    let certified = on_every_core(&files, |file| {
+        let text = std::fs::read_to_string(file).unwrap();
+        let Some(f) = text.lines().find_map(|l| l.strip_prefix("// core: ")) else { return false };
         let name = file.file_stem().unwrap().to_string_lossy().to_string();
         let lean = out_dir.join(format!("{name}.lean"));
-        let made = Command::new("node").arg("--stack-size=65500").arg(root.join("selfhost/seed.js")).arg(&file).arg(&lean).arg(root).arg(format!("--core={f}")).output().unwrap();
+        let made = Command::new("node").arg("--stack-size=65500").arg(root.join("selfhost/seed.js")).arg(file).arg(&lean).arg(root).arg(format!("--core={f}")).output().unwrap();
         assert!(made.status.success() && made.stdout.is_empty(), "{name} is not in λ-fly's part:\n{}{}", String::from_utf8_lossy(&made.stdout), String::from_utf8_lossy(&made.stderr));
         let mut source = std::fs::read_to_string(&lean).unwrap();
         source.push_str("#print axioms checks\n");
@@ -69,7 +71,10 @@ fn the_core_is_proved() {
                 assert!(["propext", "Classical.choice", "Quot.sound"].contains(&ax), "{name}: {line}");
             }
         }
-        certified += 1;
-    }
+        true
+    })
+    .into_iter()
+    .filter(|&c| c)
+    .count();
     assert!(certified >= 3, "the certified corpus is missing");
 }

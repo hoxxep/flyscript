@@ -18,6 +18,9 @@ use std::path::Path;
 use flyscript::check::check_files;
 use flyscript::eval::{World, command_line, run};
 
+mod common;
+use common::on_every_core;
+
 fn unescape(s: &str) -> String {
     s.replace("\\r", "\r").replace("\\n", "\n")
 }
@@ -87,14 +90,12 @@ fn programs_run() {
     let mut multi: Vec<_> = fs::read_dir(&examples).unwrap().map(|e| e.unwrap().path().join("main.fly")).filter(|p| p.exists()).collect();
     multi.sort();
     paths.extend(multi);
-    let mut failures = Vec::new();
-    for path in paths {
-        let source = fs::read_to_string(&path).unwrap();
+    let failures: Vec<String> = on_every_core(&paths, |path| {
+        let source = fs::read_to_string(path).unwrap();
         let (world, expected) = world_for(&source);
-        let checked = check_files(std::slice::from_ref(&path));
+        let checked = check_files(std::slice::from_ref(path));
         if !checked.errors.is_empty() {
-            failures.push(format!("{} does not check:\n{}", path.display(), checked.render().join("\n")));
-            continue;
+            return Some(format!("{} does not check:\n{}", path.display(), checked.render().join("\n")));
         }
         // `main` is given an empty command line, as it reads one.
         let args = command_line(&checked.program, "main", &[]).unwrap_or_default();
@@ -104,9 +105,10 @@ fn programs_run() {
         if let Err(e) = result {
             out.push(format!("<{e}>"));
         }
-        if out != expected {
-            failures.push(format!("{}:\n  expected: {expected:?}\n  printed:  {out:?}", path.display()));
-        }
-    }
+        (out != expected).then(|| format!("{}:\n  expected: {expected:?}\n  printed:  {out:?}", path.display()))
+    })
+    .into_iter()
+    .flatten()
+    .collect();
     assert!(failures.is_empty(), "\n{}", failures.join("\n\n"));
 }
