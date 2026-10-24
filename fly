@@ -8,7 +8,7 @@ out="$root/target/fly"
 mkdir -p "$out"
 # Whether `bin` is older than the compiler's source, the library's, or the runtime.
 stale() {
-  [ ! -x "$1" ] || [ -n "$(find "$root/selfhost" "$root/std" -newer "$1" \( -name '*.fly' -o -name 'runtime.*' -o -name seed.js \) 2>/dev/null | head -1)" ]
+  [ ! -x "$1" ] || [ -n "$(find "$root/selfhost" "$root/std" -newer "$1" -type f \( -name '*.fly' -o -name 'runtime.*' -o -name seed.js \) 2>/dev/null | head -1)" ]
 }
 # `program.fly` made `exe` with `compiler`: through LLVM, which uses every core, or through C.
 make() {
