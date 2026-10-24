@@ -335,12 +335,27 @@ const { $rt, $b } = (() => {
 
   // ---- display ----
 
+  // The fewest digits that read back as the float, as JavaScript finds them, written out in full:
+  // never with an exponent.
   function showFloat(f) {
-    if (Number.isInteger(f) && Math.abs(f) < 1e15) return f.toFixed(1);
+    if (Number.isInteger(f) && Math.abs(f) < 1e15) return Object.is(f, -0) ? "-0.0" : f.toFixed(1);
     if (Number.isNaN(f)) return "NaN";
     if (f === Infinity) return "inf";
     if (f === -Infinity) return "-inf";
-    return String(f);
+    const s = String(f);
+    const e = s.indexOf("e");
+    if (e < 0) return s;
+    const neg = s[0] === "-";
+    const mant = s.slice(neg ? 1 : 0, e);
+    const exp = Number(s.slice(e + 1));
+    const dot = mant.indexOf(".");
+    const digits = dot < 0 ? mant : mant.slice(0, dot) + mant.slice(dot + 1);
+    const point = (dot < 0 ? mant.length : dot) + exp;
+    let out;
+    if (point <= 0) out = `0.${"0".repeat(-point)}${digits}`;
+    else if (point >= digits.length) out = digits + "0".repeat(point - digits.length);
+    else out = `${digits.slice(0, point)}.${digits.slice(point)}`;
+    return neg ? `-${out}` : out;
   }
   function quoted(s) {
     return "\"" + s.replace(/[\\"\n\t\r]/g, (c) => ({ "\\": "\\\\", "\"": "\\\"", "\n": "\\n", "\t": "\\t", "\r": "\\r" })[c]) + "\"";
@@ -632,7 +647,8 @@ const { $rt, $b } = (() => {
       catch (e) { throw new Fail({ $tag: "PermissionDenied" }); }
     },
     parseInt(s) { return /^[+-]?\d+$/.test(s) ? some(BigInt(s)) : none(); },
-    parseFloat(s) { const f = Number(s); return s.trim() !== "" && !Number.isNaN(f) ? some(f) : none(); },
+    // An optional sign, digits with a point among or before or after them, and an exponent.
+    parseFloat(s) { return /^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$/.test(s) ? some(Number(s)) : none(); },
     replace(r, v) { const old = r.v; r.v = v; return old; },
     swap(a, b) { const t = a.v; a.v = b.v; b.v = t; },
     alloc: (v) => v,
@@ -972,7 +988,11 @@ const { $rt, $b } = (() => {
   // found exactly: the float is m·2^e, and halfway when 2·x·10^d is an odd integer.
   function fixed(x, d) {
     d = Math.min(d, 100);
-    const s = x.toFixed(d);
+    if (Number.isNaN(x)) return "NaN";
+    if (!Number.isFinite(x)) return x > 0 ? "inf" : "-inf";
+    // Past 10^21 JavaScript writes an exponent; such a float is a whole number.
+    if (Math.abs(x) >= 1e21) return `${BigInt(x)}${d > 0 ? `.${"0".repeat(d)}` : ""}`;
+    const s = Object.is(x, -0) || (x < 0 && Number(x.toFixed(d)) === 0) ? `-${(-x).toFixed(d)}` : x.toFixed(d);
     if (!Number.isFinite(x) || x === 0) return s;
     const bits = new DataView(new ArrayBuffer(8));
     bits.setFloat64(0, Math.abs(x));
@@ -16203,7 +16223,7 @@ function uncaught_99($241, $242, $243) {
         if (v9_t)
         {
           let v10_t;
-          v10_t = $b.str_toString("  if (FLY_FAILED) { printf(\"<uncaught failure>\\n\"); return 1; }\n");
+          v10_t = $b.str_toString("  if (FLY_FAILED) { fly_out(fly_str_lit(\"<uncaught failure>\\n\", 19)); return 1; }\n");
           return v10_t;
           v5_t = undefined;
           break L1;
@@ -16254,7 +16274,7 @@ function uncaught_99($241, $242, $243) {
           v48_t = v33_t;
           $b.String_push(v48_t, v47_t);
           v50_t = v33_t;
-          $b.String_push(v50_t, ";\n    printf(\"<uncaught: %.*s>\\n\", (int)s.len, (const char*)s.ptr);\n    return 1;\n  }\n");
+          $b.String_push(v50_t, ";\n    fly_out(fly_str_lit(\"<uncaught: \", 11));\n    fly_out(fly_String_as_str(&s));\n    fly_out(fly_str_lit(\">\\n\", 2));\n    return 1;\n  }\n");
           v52_t = { $tag: "Ok", $: v33_t.v };
           v13_t = v52_t;
         }
@@ -221962,7 +221982,7 @@ function ioOp_1628($3951, $3952, $3953, $3954) {
             v42_t = v37_t;
             $b.String_push(v42_t, v41_t);
             v44_t = v37_t;
-            $b.String_push(v44_t, "; fly_point(); fwrite(b_.ptr, 1, b_.len, stdout); (");
+            $b.String_push(v44_t, "; fly_point(); fly_out((fly_str){ b_.ptr, b_.len }); (");
             v46_t = v9_rc;
             v47_t = v37_t;
             $b.String_push(v47_t, v46_t);

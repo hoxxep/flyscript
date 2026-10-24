@@ -16,6 +16,9 @@
 #include <sys/mman.h>
 #include <sys/socket.h>
 #include <unistd.h>
+#else
+#include <sys/uio.h>
+#include <unistd.h>
 #endif
 #endif
 
@@ -76,6 +79,43 @@ _Noreturn void fly_panic(const char* message) { panic_exit(message); }
 
 #ifdef FLY_FREESTANDING
 static _Noreturn void panic_exit(const char* message) { fly_os_panic(message, strlen(message)); }
+#else
+// Bytes to a stream of the program's, whole. In WebAssembly the C library's streams are left out:
+// each line goes to the host as it is written.
+static void write_out(int fd, const struct iovec* parts, int n) {
+#ifdef __wasm__
+  struct iovec left[4];
+  for (int i = 0; i < n; i++) left[i] = parts[i];
+  int k = 0;
+  while (k < n) {
+    ssize_t w = writev(fd, left + k, n - k);
+    if (w < 0) return;
+    while (k < n && (size_t)w >= left[k].iov_len) { w -= (ssize_t)left[k].iov_len; k++; }
+    if (k < n) { left[k].iov_base = (char*)left[k].iov_base + w; left[k].iov_len -= (size_t)w; }
+  }
+#else
+  FILE* f = fd == 2 ? stderr : stdout;
+  for (int i = 0; i < n; i++) fwrite(parts[i].iov_base, 1, parts[i].iov_len, f);
+#endif
+}
+
+void fly_out(fly_str s) {
+  struct iovec part = { (void*)s.ptr, s.len };
+  write_out(1, &part, 1);
+}
+
+static _Noreturn void panic_exit(const char* message) {
+  // On worker threads, the first to panic reports it; the others wait for the end.
+  static int reporting;
+  if (__atomic_exchange_n(&reporting, 1, __ATOMIC_ACQ_REL)) for (;;) {}
+  struct iovec parts[3] = { { "<panic: ", 8 }, { (void*)message, strlen(message) }, { ">\n", 2 } };
+  write_out(1, parts, 3);
+#ifndef __wasm__
+  fflush(stdout);
+#endif
+  _Exit(101);
+}
+#endif
 
 // What a panic's message needs: `%d`, `%u`, `%llu`, `%lld`, `%zu`, `%s`, `%.*s` and `%%`.
 static void format(char* out, size_t cap, const char* fmt, va_list ap) {
@@ -92,7 +132,7 @@ static void format(char* out, size_t cap, const char* fmt, va_list ap) {
     if (size) f++;
     if (*f == 's') {
       const char* s = va_arg(ap, const char*);
-      for (int i = 0; s[i] && (prec < 0 || i < prec); i++) PUT(s[i]);
+      for (int i = 0; (prec < 0 || i < prec) && s[i]; i++) PUT(s[i]);
     } else if (*f == 'd' || *f == 'u') {
       unsigned long long u;
       bool neg = false;
@@ -115,19 +155,15 @@ static void format(char* out, size_t cap, const char* fmt, va_list ap) {
 #undef PUT
   out[n] = 0;
 }
-#else
-static _Noreturn void panic_exit(const char* message) {
-  // On worker threads, the first to panic reports it; the others wait for the end.
-  static int reporting;
-  if (__atomic_exchange_n(&reporting, 1, __ATOMIC_ACQ_REL)) for (;;) {}
-  fflush(stdout);
-  printf("<panic: %s>\n", message);
-  fflush(stdout);
-  _Exit(101);
-}
 
-static void format(char* out, size_t cap, const char* fmt, va_list ap) { vsnprintf(out, cap, fmt, ap); }
-#endif
+// As `snprintf`, with the formats `format` knows: the length written.
+static int fmt_text(char* out, size_t cap, const char* fmt, ...) {
+  va_list ap;
+  va_start(ap, fmt);
+  format(out, cap, fmt, ap);
+  va_end(ap);
+  return (int)strlen(out);
+}
 
 _Noreturn void fly_panicf(const char* fmt, ...) {
   char buf[512];
@@ -186,6 +222,10 @@ _Noreturn void fly_div_zero(void) { fly_panic("division by zero"); }
 // thread shares, and an empty one takes a batch from there, or from a span. Larger blocks, and
 // every block once the reservation is used up, are the C library's, which a block's address tells
 // apart. Memory freed stays the program's, to allocate again.
+//
+// In WebAssembly, where the allocator is the C library's too, spans are the pages memory grows by,
+// and a larger block is a run of whole pages, which says how many in its first 16 bytes; a run
+// freed is kept, and the first kept that is long enough is used again, its rest kept apart.
 #define FLY_SPAN ((size_t)64 << 10)
 #define FLY_CLASSES 36
 #define FLY_SMALL_MAX ((size_t)16 << 10)
@@ -226,6 +266,17 @@ static void fly_spin_lock(int* l) {
 }
 static void fly_spin_unlock(int* l) { __atomic_store_n(l, 0, __ATOMIC_RELEASE); }
 
+#ifdef __wasm__
+// `n` spans more, from memory grown by as many pages.
+static uint8_t* fly_spans(size_t n) {
+  size_t at = __builtin_wasm_memory_grow(0, n);
+  if (at == (size_t)-1) return NULL;
+  uint8_t* p = (uint8_t*)(at * FLY_SPAN);
+  if (!fly_heap_lo) fly_heap_lo = p;
+  fly_heap_hi = p + n * FLY_SPAN;
+  return p;
+}
+#else
 // The reservation, made once, by whichever thread allocates first: 64 GiB, or 4 if the system will
 // not give that, or none, and every block the C library's.
 static void fly_heap_init(void) {
@@ -247,10 +298,51 @@ static void fly_heap_init(void) {
   }
 }
 
+// A span of the reservation, if any is left.
+static uint8_t* fly_spans(size_t n) {
+  if (__atomic_load_n(&fly_heap_state, __ATOMIC_ACQUIRE) != 2) fly_heap_init();
+  if (!fly_heap_lo) return NULL;
+  uint8_t* span = __atomic_fetch_add(&fly_heap_next, n * FLY_SPAN, __ATOMIC_RELAXED);
+  return span + n * FLY_SPAN <= fly_heap_hi ? span : NULL;
+}
+#endif
+
+#ifdef __wasm__
+#define FLY_RUN 0xffffffffu
+// A run of pages: `FLY_RUN`, how many, and the next run kept, in its first 16 bytes.
+typedef struct fly_run { uint32_t mark; uint32_t spans; struct fly_run* next; } fly_run;
+static fly_run* fly_runs;
+
+static void* fly_large(size_t n) {
+  size_t k = (n + 16 + FLY_SPAN - 1) / FLY_SPAN;
+  fly_run** at = &fly_runs;
+  while (*at && (*at)->spans < k) at = &(*at)->next;
+  fly_run* r = *at;
+  if (r) {
+    *at = r->next;
+    if (r->spans > k) {
+      fly_run* rest = (fly_run*)((uint8_t*)r + k * FLY_SPAN);
+      rest->mark = FLY_RUN;
+      rest->spans = r->spans - (uint32_t)k;
+      rest->next = fly_runs;
+      fly_runs = rest;
+      r->spans = (uint32_t)k;
+    }
+  } else {
+    r = (fly_run*)fly_spans(k);
+    if (!r) return NULL;
+    r->mark = FLY_RUN;
+    r->spans = (uint32_t)k;
+  }
+  return (uint8_t*)r + 16;
+}
+#else
+static void* fly_large(size_t n) { return fly_sys_malloc(n); }
+#endif
+
 // A thread's list of class `c` is empty: a batch from the class's, or carved from its span, or
 // from a new span. Holds the class's lock while it does.
 static void* fly_refill(fly_cache* t, unsigned c, size_t n) {
-  if (__atomic_load_n(&fly_heap_state, __ATOMIC_ACQUIRE) != 2) fly_heap_init();
   fly_central* k = &fly_centrals[c];
   size_t size = fly_class_size(c);
   fly_spin_lock(&k->lock);
@@ -264,8 +356,8 @@ static void* fly_refill(fly_cache* t, unsigned c, size_t n) {
   }
   while (got < FLY_BATCH) {
     if (k->bump + size > k->end) {
-      uint8_t* span = fly_heap_lo ? __atomic_fetch_add(&fly_heap_next, FLY_SPAN, __ATOMIC_RELAXED) : NULL;
-      if (!span || span + FLY_SPAN > fly_heap_hi) break;
+      uint8_t* span = fly_spans(1);
+      if (!span) break;
       *(uint32_t*)span = c;
       k->bump = span + 16;
       k->end = span + FLY_SPAN;
@@ -277,7 +369,7 @@ static void* fly_refill(fly_cache* t, unsigned c, size_t n) {
     got++;
   }
   fly_spin_unlock(&k->lock);
-  if (!got) return fly_sys_malloc(n);
+  if (!got) return fly_large(n);
   t->n[c] += got;
   void* p = t->head[c];
   t->head[c] = *(void**)p;
@@ -303,7 +395,7 @@ static inline bool fly_small(const void* p) { return (const uint8_t*)p >= fly_he
 static inline unsigned fly_class_at(const void* p) { return *(const uint32_t*)((uintptr_t)p & ~(uintptr_t)(FLY_SPAN - 1)); }
 
 void* fly_mem_alloc(size_t n) {
-  if (n > FLY_SMALL_MAX) return fly_sys_malloc(n);
+  if (n > FLY_SMALL_MAX) return fly_large(n);
   unsigned c = fly_class_of(n);
   fly_cache* t = fly_cache_ref();
   void* p = t->head[c];
@@ -315,8 +407,19 @@ void* fly_mem_alloc(size_t n) {
 
 void fly_mem_free(void* p) {
   if (!p) return;
+  unsigned c;
+#ifdef __wasm__
+  c = fly_class_at(p);
+  if (c == FLY_RUN) {
+    fly_run* r = (fly_run*)((uint8_t*)p - 16);
+    r->next = fly_runs;
+    fly_runs = r;
+    return;
+  }
+#else
   if (!fly_small(p)) { fly_sys_free(p); return; }
-  unsigned c = fly_class_at(p);
+  c = fly_class_at(p);
+#endif
   fly_cache* t = fly_cache_ref();
   *(void**)p = t->head[c];
   t->head[c] = p;
@@ -333,6 +436,18 @@ void* fly_mem_calloc(size_t n, size_t size) {
 
 void* fly_mem_realloc(void* p, size_t n) {
   if (!p) return fly_mem_alloc(n);
+#ifdef __wasm__
+  if (fly_class_at(p) == FLY_RUN) {
+    fly_run* r = (fly_run*)((uint8_t*)p - 16);
+    size_t room = (size_t)r->spans * FLY_SPAN - 16;
+    if (n <= room) return p;
+    void* q = fly_mem_alloc(n);
+    if (!q) return NULL;
+    memcpy(q, p, room);
+    fly_mem_free(p);
+    return q;
+  }
+#else
   if (!fly_small(p)) {
     if (n > FLY_SMALL_MAX) return fly_sys_realloc(p, n);
     // Shrunk to a small block: what it keeps is all of `n`, as the old block is larger.
@@ -342,6 +457,7 @@ void* fly_mem_realloc(void* p, size_t n) {
     fly_sys_free(p);
     return q;
   }
+#endif
   size_t have = fly_class_size(fly_class_at(p));
   if (n <= have) return p;
   void* q = fly_mem_alloc(n);
@@ -350,6 +466,14 @@ void* fly_mem_realloc(void* p, size_t n) {
   fly_mem_free(p);
   return q;
 }
+
+#ifdef __wasm__
+// The program's allocator, the C library's code's too.
+void* malloc(size_t n) { return fly_mem_alloc(n); }
+void* calloc(size_t n, size_t size) { return fly_mem_calloc(n, size); }
+void* realloc(void* p, size_t n) { return fly_mem_realloc(p, n); }
+void free(void* p) { fly_mem_free(p); }
+#endif
 #endif
 
 void* fly_alloc(size_t size) {
@@ -483,94 +607,431 @@ fly_String fly_show_u128(unsigned __int128 v) {
   return fly_String_from((fly_str){ (const uint8_t*)buf, (size_t)n });
 }
 
-// As the reference prints a float: one decimal place when it is integral, else the shortest digits
-// that read back as it.
-#ifdef FLY_FREESTANDING
-// Without the C library: the integer part and up to six decimals.
-fly_String fly_show_f64(double v) {
-  fly_String s = fly_String_new();
-  if (v != v) { fly_String_push(&s, fly_str_lit("NaN", 3)); return s; }
-  if (v < 0) { fly_String_push_byte(&s, '-'); v = -v; }
-  if (v > 1e18) { fly_String_push(&s, fly_str_lit("inf", 3)); return s; }
-  uint64_t whole = (uint64_t)v;
-  fly_String w = fly_show_u128(whole);
-  fly_String_push(&s, fly_String_as_str(&w));
-  fly_String_drop(&w);
-  uint64_t frac = (uint64_t)((v - (double)whole) * 1e6 + 0.5);
-  fly_String_push_byte(&s, '.');
-  char d[6];
-  for (int k = 5; k >= 0; k--) { d[k] = (char)('0' + frac % 10); frac /= 10; }
-  int last = 5;
-  while (last > 0 && d[last] == '0') last--;
-  for (int k = 0; k <= last; k++) fly_String_push_byte(&s, (uint8_t)d[k]);
-  return s;
+// ---- floats as text ----
+//
+// Exactly, and without the C library: a float is m·2^e, and the decimal digits are found with
+// integers as large as they need to be. Shown, a float is the fewest digits that read back as it,
+// the nearest of them to it, written out in full without an exponent; `toFixed` rounds to the
+// nearest, a value exactly halfway to the even; text is read as the nearest float, halfway to the
+// even.
+
+// An unsigned integer of up to 5,120 bits, its 32-bit digits least significant first.
+typedef struct { uint32_t n; uint32_t d[160]; } fly_bignum;
+
+static void big_set(fly_bignum* a, uint64_t v) {
+  a->n = 0;
+  while (v) { a->d[a->n++] = (uint32_t)v; v >>= 32; }
 }
-// `digits` digits after the point, rounded, without the C library: the fraction scaled to an
-// integer, which holds 18 of them.
-fly_String fly_float_fixed(double v, uint32_t digits) {
-  fly_String s = fly_String_new();
-  if (v != v) { fly_String_push(&s, fly_str_lit("NaN", 3)); return s; }
-  if (v < 0) { fly_String_push_byte(&s, '-'); v = -v; }
-  if (digits > 18) digits = 18;
-  double scale = 1;
-  for (uint32_t k = 0; k < digits; k++) scale *= 10;
-  uint64_t whole = (uint64_t)v;
-  uint64_t frac = (uint64_t)((v - (double)whole) * scale + 0.5);
-  if ((double)frac >= scale) { whole += 1; frac = 0; }
-  fly_String w = fly_show_u128(whole);
-  fly_String_push(&s, fly_String_as_str(&w));
-  fly_String_drop(&w);
-  if (digits > 0) {
-    fly_String_push_byte(&s, '.');
-    char d[18];
-    for (int k = (int)digits - 1; k >= 0; k--) { d[k] = (char)('0' + frac % 10); frac /= 10; }
-    for (uint32_t k = 0; k < digits; k++) fly_String_push_byte(&s, (uint8_t)d[k]);
+
+static void big_mul(fly_bignum* a, uint32_t m) {
+  uint64_t c = 0;
+  for (uint32_t i = 0; i < a->n; i++) {
+    uint64_t t = (uint64_t)a->d[i] * m + c;
+    a->d[i] = (uint32_t)t;
+    c = t >> 32;
   }
-  return s;
+  if (c) a->d[a->n++] = (uint32_t)c;
 }
-#else
-fly_String fly_float_fixed(double v, uint32_t digits) {
-  char buf[400];
-  int n = snprintf(buf, sizeof buf, "%.*f", (int)(digits > 100 ? 100 : digits), v);
-  return fly_String_from((fly_str){ (const uint8_t*)buf, (size_t)(n < (int)sizeof buf ? n : (int)sizeof buf - 1) });
+
+static void big_add_small(fly_bignum* a, uint32_t m) {
+  uint64_t c = m;
+  for (uint32_t i = 0; i < a->n && c; i++) {
+    uint64_t t = (uint64_t)a->d[i] + c;
+    a->d[i] = (uint32_t)t;
+    c = t >> 32;
+  }
+  if (c) a->d[a->n++] = (uint32_t)c;
+}
+
+static void big_pow10(fly_bignum* a, int k) {
+  static const uint32_t p[] = { 1, 10, 100, 1000, 10000, 100000, 1000000, 10000000, 100000000 };
+  for (; k >= 9; k -= 9) big_mul(a, 1000000000);
+  if (k > 0) big_mul(a, p[k]);
+}
+
+static void big_shl(fly_bignum* a, int bits) {
+  if (a->n == 0 || bits <= 0) return;
+  int w = bits / 32, b = bits % 32;
+  if (b) {
+    uint32_t c = 0;
+    for (uint32_t i = 0; i < a->n; i++) {
+      uint32_t t = a->d[i];
+      a->d[i] = (t << b) | c;
+      c = t >> (32 - b);
+    }
+    if (c) a->d[a->n++] = c;
+  }
+  if (w) {
+    for (int i = (int)a->n - 1; i >= 0; i--) a->d[i + w] = a->d[i];
+    for (int i = 0; i < w; i++) a->d[i] = 0;
+    a->n += (uint32_t)w;
+  }
+}
+
+static int big_cmp(const fly_bignum* a, const fly_bignum* b) {
+  if (a->n != b->n) return a->n < b->n ? -1 : 1;
+  for (int i = (int)a->n - 1; i >= 0; i--) if (a->d[i] != b->d[i]) return a->d[i] < b->d[i] ? -1 : 1;
+  return 0;
+}
+
+// a + b compared with c.
+static int big_cmp_sum(const fly_bignum* a, const fly_bignum* b, const fly_bignum* c) {
+  fly_bignum s = *a;
+  uint64_t carry = 0;
+  uint32_t n = a->n > b->n ? a->n : b->n;
+  for (uint32_t i = 0; i < n; i++) {
+    uint64_t t = (uint64_t)(i < a->n ? a->d[i] : 0) + (i < b->n ? b->d[i] : 0) + carry;
+    s.d[i] = (uint32_t)t;
+    carry = t >> 32;
+  }
+  s.n = n;
+  if (carry) s.d[s.n++] = (uint32_t)carry;
+  return big_cmp(&s, c);
+}
+
+// a -= b, where a >= b.
+static void big_sub(fly_bignum* a, const fly_bignum* b) {
+  int64_t borrow = 0;
+  for (uint32_t i = 0; i < a->n; i++) {
+    int64_t t = (int64_t)a->d[i] - (i < b->n ? b->d[i] : 0) - borrow;
+    borrow = t < 0;
+    a->d[i] = (uint32_t)(t + (borrow << 32));
+  }
+  while (a->n && a->d[a->n - 1] == 0) a->n--;
+}
+
+static bool big_bit(const fly_bignum* a, int i) {
+  return i >= 0 && (uint32_t)(i / 32) < a->n && ((a->d[i / 32] >> (i % 32)) & 1);
+}
+
+// Whether any of the bits below bit `i` is set.
+static bool big_any_below(const fly_bignum* a, int i) {
+  for (int w = 0; w < i / 32 && (uint32_t)w < a->n; w++) if (a->d[w]) return true;
+  int b = i % 32;
+  return b && (uint32_t)(i / 32) < a->n && (a->d[i / 32] & ((1u << b) - 1));
+}
+
+static void big_shr(fly_bignum* a, int bits) {
+  int w = bits / 32, b = bits % 32;
+  if ((uint32_t)w >= a->n) { a->n = 0; return; }
+  for (uint32_t i = 0; i + (uint32_t)w < a->n; i++) a->d[i] = a->d[i + w];
+  a->n -= (uint32_t)w;
+  if (b) for (uint32_t i = 0; i < a->n; i++) a->d[i] = (a->d[i] >> b) | (i + 1 < a->n ? a->d[i + 1] << (32 - b) : 0);
+  while (a->n && a->d[a->n - 1] == 0) a->n--;
+}
+
+static int big_bits(const fly_bignum* a) {
+  return a->n ? (int)(a->n - 1) * 32 + 32 - __builtin_clz(a->d[a->n - 1]) : 0;
+}
+
+// a /= m, giving the remainder.
+static uint32_t big_div(fly_bignum* a, uint32_t m) {
+  uint64_t r = 0;
+  for (int i = (int)a->n - 1; i >= 0; i--) {
+    uint64_t t = (r << 32) | a->d[i];
+    a->d[i] = (uint32_t)(t / m);
+    r = t % m;
+  }
+  while (a->n && a->d[a->n - 1] == 0) a->n--;
+  return (uint32_t)r;
+}
+
+// The quotient num / den, which is below 2^64; num becomes the remainder.
+static uint64_t big_quot(fly_bignum* num, const fly_bignum* den) {
+  uint64_t q = 0;
+  int s = big_bits(num) - big_bits(den);
+  for (; s >= 0; s--) {
+    fly_bignum t = *den;
+    big_shl(&t, s);
+    if (big_cmp(&t, num) <= 0) {
+      big_sub(num, &t);
+      q |= (uint64_t)1 << s;
+    }
+  }
+  return q;
+}
+
+// The mantissa and exponent of a finite float that is not negative: v = m·2^e.
+static void float_parts(double v, uint64_t* m, int* e) {
+  uint64_t bits;
+  memcpy(&bits, &v, 8);
+  int be = (int)((bits >> 52) & 0x7ff);
+  uint64_t frac = bits & (((uint64_t)1 << 52) - 1);
+  if (be == 0) { *m = frac; *e = -1074; }
+  else { *m = frac | ((uint64_t)1 << 52); *e = be - 1075; }
+}
+
+// The fewest decimal digits that read back as `v`, finite and positive, the nearest of them to it:
+// v ≈ 0.d₁d₂…dₙ × 10^k. Steele and White's method: r/s is what is left to write, and m⁻/s and m⁺/s
+// how far below and above it a float still reads as `v`.
+static int shortest(double v, char* digits, int* k) {
+  uint64_t f;
+  int e;
+  float_parts(v, &f, &e);
+  bool even = (f & 1) == 0;
+  // At a power of two the floats below are closer together than those above.
+  bool tight = f == ((uint64_t)1 << 52) && e > -1074;
+  fly_bignum r, s, mp, mm;
+  big_set(&r, f);
+  big_set(&s, 1);
+  big_set(&mp, 1);
+  big_set(&mm, 1);
+  if (e >= 0) {
+    big_shl(&r, e + (tight ? 2 : 1));
+    big_set(&s, tight ? 4 : 2);
+    big_shl(&mp, e + (tight ? 1 : 0));
+    big_shl(&mm, e);
+  } else {
+    big_shl(&r, tight ? 2 : 1);
+    big_shl(&s, (tight ? 2 : 1) - e);
+    if (tight) big_set(&mp, 2);
+  }
+  // k from the number of bits, then exactly.
+  int kk = (int)(((int64_t)(e + 63 - __builtin_clzll(f)) * 78913) >> 18);
+  if (kk >= 0) big_pow10(&s, kk);
+  else { big_pow10(&r, -kk); big_pow10(&mp, -kk); big_pow10(&mm, -kk); }
+  for (;;) {
+    int c = big_cmp_sum(&r, &mp, &s);
+    if (even ? c >= 0 : c > 0) { big_mul(&s, 10); kk++; continue; }
+    fly_bignum t = r;
+    big_mul(&t, 10);
+    fly_bignum u = mp;
+    big_mul(&u, 10);
+    c = big_cmp_sum(&t, &u, &s);
+    if (even ? c < 0 : c <= 0) { r = t; mp = u; big_mul(&mm, 10); kk--; continue; }
+    break;
+  }
+  int n = 0;
+  for (;;) {
+    big_mul(&r, 10);
+    big_mul(&mp, 10);
+    big_mul(&mm, 10);
+    int d = 0;
+    while (big_cmp(&r, &s) >= 0) { big_sub(&r, &s); d++; }
+    int lo = big_cmp(&r, &mm);
+    bool low = even ? lo <= 0 : lo < 0;
+    int hi = big_cmp_sum(&r, &mp, &s);
+    bool high = even ? hi >= 0 : hi > 0;
+    if (!low && !high) { digits[n++] = (char)('0' + d); continue; }
+    if (low && high) {
+      fly_bignum twice = r;
+      big_mul(&twice, 2);
+      int c = big_cmp(&twice, &s);
+      if (c > 0 || (c == 0 && (d & 1))) d++;
+    } else if (high) {
+      d++;
+    }
+    digits[n++] = (char)('0' + d);
+    break;
+  }
+  // A last digit rounded up to ten carries into those before it.
+  for (int i = n - 1; i > 0 && digits[i] > '9'; i--) { digits[i] = '0'; digits[i - 1]++; }
+  if (digits[0] > '9') {
+    digits[0] = '1';
+    for (int i = 1; i < n; i++) digits[i] = '0';
+    kk++;
+  }
+  while (n > 1 && digits[n - 1] == '0') n--;
+  *k = kk;
+  return n;
 }
 
 fly_String fly_show_f64(double v) {
-  char buf[64];
-  if (isnan(v)) snprintf(buf, sizeof buf, "NaN");
-  else if (isinf(v)) snprintf(buf, sizeof buf, v > 0 ? "inf" : "-inf");
-  else if (v == floor(v) && fabs(v) < 1e15) snprintf(buf, sizeof buf, "%.1f", v);
-  else {
-    for (int p = 1; p <= 17; p++) {
-      snprintf(buf, sizeof buf, "%.*g", p, v);
-      if (strtod(buf, NULL) == v) break;
+  fly_String s = fly_String_new();
+  if (v != v) { fly_String_push(&s, fly_str_lit("NaN", 3)); return s; }
+  uint64_t bits;
+  memcpy(&bits, &v, 8);
+  if (bits >> 63) { fly_String_push_byte(&s, '-'); v = -v; }
+  if (v > 1.7976931348623157e308) { fly_String_push(&s, fly_str_lit("inf", 3)); return s; }
+  uint64_t f;
+  int e;
+  float_parts(v, &f, &e);
+  // An integral value below 10^15 shows one decimal place.
+  if (v < 1e15 && (e >= 0 || (e > -64 && (f & ((((uint64_t)1) << -e) - 1)) == 0))) {
+    uint64_t w = e >= 0 ? f << e : f >> -e;
+    fly_String n = fly_show_u128(w);
+    fly_String_push(&s, fly_String_as_str(&n));
+    fly_String_drop(&n);
+    fly_String_push(&s, fly_str_lit(".0", 2));
+    return s;
+  }
+  if (v == 0) { fly_String_push(&s, fly_str_lit("0.0", 3)); return s; }
+  char d[20];
+  int k;
+  int n = shortest(v, d, &k);
+  if (k <= 0) {
+    fly_String_push(&s, fly_str_lit("0.", 2));
+    for (int i = 0; i < -k; i++) fly_String_push_byte(&s, '0');
+    fly_String_push(&s, (fly_str){ (const uint8_t*)d, (size_t)n });
+  } else if (k >= n) {
+    fly_String_push(&s, (fly_str){ (const uint8_t*)d, (size_t)n });
+    for (int i = n; i < k; i++) fly_String_push_byte(&s, '0');
+  } else {
+    fly_String_push(&s, (fly_str){ (const uint8_t*)d, (size_t)k });
+    fly_String_push_byte(&s, '.');
+    fly_String_push(&s, (fly_str){ (const uint8_t*)d + k, (size_t)(n - k) });
+  }
+  return s;
+}
+
+// The digits of `a`, which is emptied.
+static void big_decimal(fly_bignum* a, fly_String* out) {
+  char buf[1600];
+  int n = 0;
+  do {
+    uint32_t chunk = big_div(a, 1000000000);
+    for (int i = 0; i < 9; i++) { buf[n++] = (char)('0' + chunk % 10); chunk /= 10; }
+  } while (a->n);
+  while (n > 1 && buf[n - 1] == '0') n--;
+  for (int i = n - 1; i >= 0; i--) fly_String_push_byte(out, (uint8_t)buf[i]);
+}
+
+fly_String fly_float_fixed(double v, uint32_t digits) {
+  fly_String s = fly_String_new();
+  if (v != v) { fly_String_push(&s, fly_str_lit("NaN", 3)); return s; }
+  uint64_t bits;
+  memcpy(&bits, &v, 8);
+  if (bits >> 63) { fly_String_push_byte(&s, '-'); v = -v; }
+  if (v > 1.7976931348623157e308) { fly_String_push(&s, fly_str_lit("inf", 3)); return s; }
+  if (digits > 100) digits = 100;
+  uint64_t f;
+  int e;
+  float_parts(v, &f, &e);
+  // v·10^digits, rounded to the nearest integer, halfway to the even.
+  fly_bignum q;
+  big_set(&q, f);
+  big_pow10(&q, (int)digits);
+  if (e >= 0) {
+    big_shl(&q, e);
+  } else {
+    // q >>= -e, the bits shifted out deciding the rounding: the first of them is a half.
+    int drop = -e;
+    bool half = big_bit(&q, drop - 1), rest = big_any_below(&q, drop - 1);
+    big_shr(&q, drop);
+    if (half && (rest || (q.n && (q.d[0] & 1)))) big_add_small(&q, 1);
+  }
+  fly_String num = fly_String_new();
+  big_decimal(&q, &num);
+  // At least one digit before the point.
+  size_t len = num.len;
+  if (len <= digits) {
+    fly_String_push_byte(&s, '0');
+    if (digits) {
+      fly_String_push_byte(&s, '.');
+      for (size_t i = len; i < digits; i++) fly_String_push_byte(&s, '0');
+      fly_String_push(&s, fly_String_as_str(&num));
+    }
+  } else {
+    fly_String_push(&s, (fly_str){ num.ptr, len - digits });
+    if (digits) {
+      fly_String_push_byte(&s, '.');
+      fly_String_push(&s, (fly_str){ num.ptr + len - digits, digits });
     }
   }
-  return fly_String_from((fly_str){ (const uint8_t*)buf, strlen(buf) });
+  fly_String_drop(&num);
+  return s;
 }
-#endif
+
+// Decimal text as the nearest float, halfway to the even: an optional sign, digits with a point
+// among or before or after them, and an exponent, nothing else.
+bool fly_parse_float(fly_str t, double* out) {
+  size_t i = 0;
+  bool neg = false;
+  if (i < t.len && (t.ptr[i] == '+' || t.ptr[i] == '-')) { neg = t.ptr[i] == '-'; i++; }
+  // The significant digits, up to 800, and whether any beyond them is not zero.
+  char sig[801];
+  int n = 0, exp10 = 0;
+  bool any = false, more = false, point = false;
+  for (; i < t.len; i++) {
+    uint8_t c = t.ptr[i];
+    if (c == '.' && !point) { point = true; continue; }
+    if (c < '0' || c > '9') break;
+    any = true;
+    if (n == 0 && c == '0') { if (point) exp10--; continue; }
+    if (n < 800) { sig[n++] = (char)c; if (point) exp10--; }
+    else { if (c != '0') more = true; if (!point) exp10++; }
+  }
+  if (!any) return false;
+  if (i < t.len && (t.ptr[i] == 'e' || t.ptr[i] == 'E')) {
+    i++;
+    bool eneg = false;
+    if (i < t.len && (t.ptr[i] == '+' || t.ptr[i] == '-')) { eneg = t.ptr[i] == '-'; i++; }
+    if (i == t.len || t.ptr[i] < '0' || t.ptr[i] > '9') return false;
+    long x = 0;
+    for (; i < t.len && t.ptr[i] >= '0' && t.ptr[i] <= '9'; i++) if (x < 100000) x = x * 10 + (t.ptr[i] - '0');
+    exp10 += (int)(eneg ? -x : x);
+  }
+  if (i != t.len) return false;
+  double v;
+  if (n == 0) v = 0;
+  else if (n + exp10 > 310) v = 1.0 / 0.0;
+  else if (n + exp10 < -326) v = 0;
+  else {
+    // A digit 1 past the 800th stands for the rest, which only breaks a tie.
+    if (more) { sig[n++] = '1'; exp10--; }
+    fly_bignum num, den;
+    big_set(&num, 0);
+    for (int k = 0; k < n; k++) {
+      big_mul(&num, 10);
+      big_add_small(&num, (uint32_t)(sig[k] - '0'));
+    }
+    big_set(&den, 1);
+    if (exp10 >= 0) big_pow10(&num, exp10);
+    else big_pow10(&den, -exp10);
+    // num / den = q·2^b, with 2^52 <= q < 2^53, or b = -1074 for a subnormal.
+    int b = big_bits(&num) - big_bits(&den) - 53;
+    uint64_t q;
+    fly_bignum rem, d;
+    for (;;) {
+      if (b < -1074) b = -1074;
+      rem = num;
+      d = den;
+      if (b >= 0) big_shl(&d, b);
+      else big_shl(&rem, -b);
+      q = big_quot(&rem, &d);
+      if (q >= ((uint64_t)1 << 53)) { b++; continue; }
+      if (q < ((uint64_t)1 << 52) && b > -1074) { b--; continue; }
+      break;
+    }
+    fly_bignum twice = rem;
+    big_mul(&twice, 2);
+    int c = big_cmp(&twice, &d);
+    if (c > 0 || (c == 0 && (q & 1))) q++;
+    if (q == ((uint64_t)1 << 53)) { q >>= 1; b++; }
+    if (b > 971) v = 1.0 / 0.0;
+    else {
+      uint64_t bits = q < ((uint64_t)1 << 52) ? q : ((uint64_t)(b + 1075) << 52) | (q & (((uint64_t)1 << 52) - 1));
+      memcpy(&v, &bits, 8);
+    }
+  }
+  *out = neg ? -v : v;
+  return true;
+}
 
 fly_String fly_show_bool(bool v) { return fly_String_from(v ? fly_str_lit("true", 4) : fly_str_lit("false", 5)); }
 
 #ifndef FLY_FREESTANDING
 // A line written whole, under the stream's lock, so lines from tasks on other cores never mix.
-static void write_line(FILE* f, fly_str s) {
-#ifndef __wasm__
+static void write_line(int fd, fly_str s) {
+  struct iovec parts[2] = { { (void*)s.ptr, s.len }, { "\n", 1 } };
+#ifdef __wasm__
+  write_out(fd, parts, 2);
+#else
+  FILE* f = fd == 2 ? stderr : stdout;
   flockfile(f);
-#endif
-  fwrite(s.ptr, 1, s.len, f);
-  fputc('\n', f);
-#ifndef __wasm__
+  write_out(fd, parts, 2);
   funlockfile(f);
 #endif
 }
 
-void fly_println(fly_str s) { write_line(stdout, s); }
-void fly_eprintln(fly_str s) { write_line(stderr, s); }
+void fly_println(fly_str s) { write_line(1, s); }
+void fly_eprintln(fly_str s) { write_line(2, s); }
 
 // The program ends here, with the status asked for: no cleanup runs, as for a panic (§5.7).
 _Noreturn void fly_exit(int32_t code) {
+#ifndef __wasm__
   fflush(stdout);
+#endif
   _Exit(code);
 }
 #endif
@@ -693,50 +1154,6 @@ bool fly_parse_int(fly_str s, int64_t* out) {
   return true;
 }
 
-#ifdef FLY_FREESTANDING
-// Without the C library: digits, a point and digits, an exponent.
-bool fly_parse_float(fly_str s, double* out) {
-  fly_str t = fly_str_trim(s);
-  size_t i = 0;
-  if (t.len == 0) return false;
-  bool neg = t.ptr[0] == '-';
-  if (neg || t.ptr[0] == '+') i++;
-  double v = 0;
-  bool digits = false;
-  while (i < t.len && t.ptr[i] >= '0' && t.ptr[i] <= '9') { v = v * 10 + (t.ptr[i++] - '0'); digits = true; }
-  if (i < t.len && t.ptr[i] == '.') {
-    i++;
-    double scale = 0.1;
-    while (i < t.len && t.ptr[i] >= '0' && t.ptr[i] <= '9') { v += (t.ptr[i++] - '0') * scale; scale /= 10; digits = true; }
-  }
-  if (!digits) return false;
-  if (i < t.len && (t.ptr[i] == 'e' || t.ptr[i] == 'E')) {
-    i++;
-    bool eneg = i < t.len && t.ptr[i] == '-';
-    if (i < t.len && (t.ptr[i] == '-' || t.ptr[i] == '+')) i++;
-    int e = 0;
-    while (i < t.len && t.ptr[i] >= '0' && t.ptr[i] <= '9') e = e * 10 + (t.ptr[i++] - '0');
-    while (e-- > 0) v = eneg ? v / 10 : v * 10;
-  }
-  if (i != t.len) return false;
-  *out = neg ? -v : v;
-  return true;
-}
-#else
-// As JavaScript's `Number(s)` on text that is not blank.
-bool fly_parse_float(fly_str s, double* out) {
-  fly_str t = fly_str_trim(s);
-  if (t.len == 0 || t.len > 255) return false;
-  char buf[256];
-  memcpy(buf, t.ptr, t.len);
-  buf[t.len] = 0;
-  char* end;
-  double v = strtod(buf, &end);
-  if (*end != 0 || isnan(v)) return false;
-  *out = v;
-  return true;
-}
-#endif
 
 // ---- lists ----
 
@@ -961,30 +1378,14 @@ void fly_Hasher_writeInt(fly_Hasher* h, int64_t v) {
   for (int k = 0; k < 8; k++) b[k] = (uint8_t)((uint64_t)v >> (8 * k));
   hash_bytes(h, b, 8);
 }
-#ifdef FLY_FREESTANDING
-// Without the C library: by its bits, `-0.0` as `0.0`.
+// A float hashes by its bits, as `Eq` sees it: `-0.0` as `0.0`, every `NaN` as one.
 void fly_Hasher_writeFloat(fly_Hasher* h, double v) {
   if (v == 0) v = 0;
+  if (v != v) v = __builtin_nan("");
   uint8_t b[8];
   memcpy(b, &v, 8);
   hash_bytes(h, b, 8);
 }
-#else
-// A float hashes as the reference shows it, so `-0.0` hashes as `0.0`.
-void fly_Hasher_writeFloat(fly_Hasher* h, double v) {
-  char buf[64];
-  if (v == 0) v = 0;
-  if (isnan(v)) snprintf(buf, sizeof buf, "NaN");
-  else if (v == floor(v) && fabs(v) < 1e21) snprintf(buf, sizeof buf, "%.0f", v);
-  else {
-    for (int p = 1; p <= 17; p++) {
-      snprintf(buf, sizeof buf, "%.*g", p, v);
-      if (strtod(buf, NULL) == v) break;
-    }
-  }
-  hash_bytes(h, (const uint8_t*)buf, strlen(buf));
-}
-#endif
 void fly_Hasher_writeBool(fly_Hasher* h, bool v) { uint8_t b = v; hash_bytes(h, &b, 1); }
 void fly_Hasher_writeStr(fly_Hasher* h, fly_str s) { hash_bytes(h, s.ptr, s.len); }
 uint64_t fly_Hasher_finish(const fly_Hasher* h) { return h->h; }
@@ -1701,7 +2102,7 @@ int fly_connect(fly_str host, uint16_t port, fly_socket* out) {
   if (world.simulated) {
     if (fly_fault()) return FLY_IO_TIMED_OUT;
     char key[300];
-    int k = snprintf(key, sizeof key, "%.*s:%u", (int)host.len, (const char*)host.ptr, (unsigned)port);
+    int k = fmt_text(key, sizeof key, "%.*s:%u", (int)host.len, (const char*)host.ptr, (unsigned)port);
     for (size_t i = 0; i < world.npeers; i++) {
       if (fly_str_eq(world.peers[i].key, (fly_str){ (const uint8_t*)key, (size_t)k })) {
         out->input = world.peers[i].val;
@@ -1719,7 +2120,7 @@ int fly_connect(fly_str host, uint16_t port, fly_socket* out) {
   if (host.len >= sizeof name) return FLY_IO_NOT_FOUND;
   memcpy(name, host.ptr, host.len);
   name[host.len] = 0;
-  snprintf(service, sizeof service, "%u", (unsigned)port);
+  fmt_text(service, sizeof service, "%u", (unsigned)port);
   struct addrinfo hints = { 0 }, *found = NULL;
   hints.ai_family = AF_UNSPEC;
   hints.ai_socktype = SOCK_STREAM;
@@ -1821,14 +2222,33 @@ int fly_sock_write(fly_socket* s, fly_slice bytes) {
 #endif
 }
 
+// What the simulated world shows of what a program sends: `-> status body`, `-> peer: text`, or
+// `-> text`, on standard output with the program's own lines.
+static void sim_line(fly_str peer, long code, fly_str text) {
+  fly_String line = fly_String_from(fly_str_lit("-> ", 3));
+  if (code >= 0) {
+    fly_String n = fly_show_u128((unsigned __int128)code);
+    fly_String_push(&line, fly_String_as_str(&n));
+    fly_String_drop(&n);
+    fly_String_push(&line, fly_str_lit(" ", 1));
+  } else if (peer.len) {
+    fly_String_push(&line, peer);
+    fly_String_push(&line, fly_str_lit(": ", 2));
+  }
+  fly_String_push(&line, text);
+  fly_String_push(&line, fly_str_lit("\n", 1));
+  fly_out(fly_String_as_str(&line));
+  fly_String_drop(&line);
+}
+
 int fly_sock_status(fly_socket* s, unsigned code, fly_str body) {
   if (!s->fd) {
     if (fly_fault()) return FLY_IO_BROKEN_PIPE;
-    printf("-> %u %.*s\n", code, (int)body.len, (const char*)body.ptr);
+    sim_line(fly_str_lit("", 0), code, body);
     return FLY_IO_OK;
   }
   char head[96];
-  int n = snprintf(head, sizeof head, "HTTP/1.1 %u %s\r\nContent-Length: %zu\r\nConnection: close\r\n\r\n", code, code < 400 ? "OK" : "Error", body.len);
+  int n = fmt_text(head, sizeof head, "HTTP/1.1 %u %s\r\nContent-Length: %zu\r\nConnection: close\r\n\r\n", code, code < 400 ? "OK" : "Error", body.len);
   int e = fly_sock_write(s, (fly_slice){ head, (size_t)n });
   return e ? e : fly_sock_write(s, (fly_slice){ (void*)body.ptr, body.len });
 }
@@ -1844,8 +2264,7 @@ void fly_sock_close(fly_socket* s) {
       }
       size_t n = text.len;
       while (n > 0 && text.ptr[n - 1] == '\n') n--;
-      if (s->peer.len) printf("-> %.*s: %.*s\n", (int)s->peer.len, (const char*)s->peer.ptr, (int)n, (const char*)text.ptr);
-      else printf("-> %.*s\n", (int)n, (const char*)text.ptr);
+      sim_line(s->peer, -1, (fly_str){ text.ptr, n });
       fly_String_drop(&text);
     }
     fly_String_drop(&s->out);
@@ -3741,9 +4160,8 @@ int64_t fly_arg_int(int i) {
 
 double fly_arg_float(int i) {
   fly_str s = fly_arg_str(i);
-  char* end;
-  double v = strtod((const char*)s.ptr, &end);
-  if (*end != 0) fly_panicf("argument %d is not a number", i + 1);
+  double v;
+  if (!fly_parse_float(s, &v)) fly_panicf("argument %d is not a number", i + 1);
   return v;
 }
 

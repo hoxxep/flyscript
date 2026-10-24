@@ -621,7 +621,7 @@ impl Interp {
                 let (ty, op) = k.split_once('.').expect("a method key");
                 let x = a(0).as_float();
                 if op == "toFixed" {
-                    let digits = a(1).as_int() as usize;
+                    let digits = (a(1).as_int() as usize).min(100);
                     return Ok(Value::text(&format!("{x:.digits$}")));
                 }
                 let r = match op {

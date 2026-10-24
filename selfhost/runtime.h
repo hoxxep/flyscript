@@ -36,9 +36,10 @@ void fly_mem_free(void* p);
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-// Natively, blocks come from the runtime's own allocator (runtime.c), which the C library's names
-// are made to mean here; under a sanitizer, in WebAssembly, and built with `FLY_SYSTEM_MALLOC`,
-// from the C library's, so that a sanitizer, or a checker of leaks, sees every block.
+// Blocks come from the runtime's own allocator (runtime.c). Natively the C library's names are made
+// to mean it here, its own code keeping the C library's; in WebAssembly it is the program's
+// `malloc`, the C library's too. Under a sanitizer, and built with `FLY_SYSTEM_MALLOC`, blocks are
+// the C library's, so that a sanitizer, or a checker of leaks, sees every one.
 #if defined(__has_feature)
 #if __has_feature(address_sanitizer) || __has_feature(thread_sanitizer)
 #define FLY_SANITIZED 1
@@ -47,7 +48,9 @@ void fly_mem_free(void* p);
 #if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__)
 #define FLY_SANITIZED 1
 #endif
-#if !defined(__wasm__) && !defined(FLY_SANITIZED) && !defined(FLY_SYSTEM_MALLOC)
+#if defined(__wasm__) && !defined(FLY_SANITIZED) && !defined(FLY_SYSTEM_MALLOC)
+#define FLY_MALLOC 1
+#elif !defined(FLY_SANITIZED) && !defined(FLY_SYSTEM_MALLOC)
 #define FLY_MALLOC 1
 static inline void* fly_sys_malloc(size_t n) { return malloc(n); }
 static inline void* fly_sys_realloc(void* p, size_t n) { return realloc(p, n); }
@@ -124,6 +127,8 @@ uint32_t fly_err_tag(void);
 void fly_err_take(void* out, size_t size);
 
 _Noreturn void fly_panic(const char* message);
+// Bytes to standard output.
+void fly_out(fly_str s);
 _Noreturn void fly_exit(int32_t code);
 _Noreturn void fly_panicf(const char* fmt, ...);
 

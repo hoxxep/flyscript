@@ -1697,7 +1697,7 @@ impl Cgen {
       "park" => "((fly_unit)0)".toString(),
       "write" => {
         const ok = self.tagId("Ok");
-        `({ fly_slice b_ = ${vs[1]}; fly_point(); fwrite(b_.ptr, 1, b_.len, stdout); (${rc}){ .tag = ${ok}, .u.Ok = b_.len }; })`
+        `({ fly_slice b_ = ${vs[1]}; fly_point(); fly_out((fly_str){ b_.ptr, b_.len }); (${rc}){ .tag = ${ok}, .u.Ok = b_.len }; })`
       }
       _ => {
         const ok = self.tagId("Ok");
@@ -2934,12 +2934,12 @@ impl Cgen {
 
   // What `main` does with a failure nothing caught: shows it, as the reference shows it.
   export function uncaught(self: mut Self, ent: readonly Entry, entry: usize): String uses Fail<#Failed(String)> {
-    const errTy = match (ent.fails) { #Some(t) => t.clone(), #None => return "  if (FLY_FAILED) { printf(\"<uncaught failure>\\n\"); return 1; }\n".toString() };
+    const errTy = match (ent.fails) { #Some(t) => t.clone(), #None => return "  if (FLY_FAILED) { fly_out(fly_str_lit(\"<uncaught failure>\\n\", 19)); return 1; }\n".toString() };
     const r = try {
       const ec = self.ctype(errTy, { start: 0, end: 0 });
       const take = self.takeErr("e", errTy);
       const show = self.ifaceCall("Show", "show", errTy, ["(&e)".toString(), "(&s)".toString()], { start: 0, end: 0 });
-      #Ok(`  if (FLY_FAILED) {\n    ${ec} e;\n    memset(&e, 0, sizeof e);\n    ${take}\n    fly_String s = fly_String_new();\n    ${show};\n    printf("<uncaught: %.*s>\\n", (int)s.len, (const char*)s.ptr);\n    return 1;\n  }\n`)
+      #Ok(`  if (FLY_FAILED) {\n    ${ec} e;\n    memset(&e, 0, sizeof e);\n    ${take}\n    fly_String s = fly_String_new();\n    ${show};\n    fly_out(fly_str_lit("<uncaught: ", 11));\n    fly_out(fly_String_as_str(&s));\n    fly_out(fly_str_lit(">\\n", 2));\n    return 1;\n  }\n`)
     } catch (d) { #Err(d) };
     match (r) {
       #Ok(u) => u,

@@ -42,11 +42,11 @@ The todo app in [examples/todo](../examples/todo/) is built twice, with FlyNext 
 
 | Server | Page `/` | Page `/todos/2` | Page `/about`, the same for every request | JSON endpoint `/api/todos` | Memory after |
 | :--- | :--- | :--- | :--- | :--- | ---: |
-| FlyNext, 1 core | 119,150 req/s, p50 0.53 ms, p99 0.69 ms | 125,639 req/s, p50 0.50 ms, p99 0.64 ms | 184,665 req/s, p50 0.33 ms, p99 0.58 ms | 173,971 req/s, p50 0.36 ms, p99 0.47 ms | 3 MB |
-| FlyNext, every core | 115,054 req/s, p50 0.39 ms, p99 0.75 ms | 117,649 req/s, p50 0.37 ms, p99 0.64 ms | 120,020 req/s, p50 0.37 ms, p99 0.65 ms | 117,128 req/s, p50 0.38 ms, p99 0.69 ms | 17 MB |
-| Next.js | 2,421 req/s, p50 25.02 ms, p99 134.07 ms | 2,123 req/s, p50 29.30 ms, p99 49.58 ms | 6,994 req/s, p50 8.58 ms, p99 15.36 ms | 7,421 req/s, p50 7.90 ms, p99 55.03 ms | 566 MB |
+| FlyNext, 1 core | 120,838 req/s, p50 0.52 ms, p99 0.65 ms | 127,724 req/s, p50 0.49 ms, p99 0.60 ms | 190,691 req/s, p50 0.33 ms, p99 0.51 ms | 180,741 req/s, p50 0.34 ms, p99 0.72 ms | 3 MB |
+| FlyNext, every core | 115,121 req/s, p50 0.39 ms, p99 0.73 ms | 116,650 req/s, p50 0.38 ms, p99 0.68 ms | 121,615 req/s, p50 0.37 ms, p99 0.64 ms | 117,655 req/s, p50 0.38 ms, p99 0.71 ms | 13 MB |
+| Next.js | 2,459 req/s, p50 24.94 ms, p99 110.77 ms | 2,173 req/s, p50 28.81 ms, p99 53.46 ms | 7,080 req/s, p50 8.53 ms, p99 13.00 ms | 7,316 req/s, p50 7.95 ms, p99 53.66 ms | 626 MB |
 
-On one core, FlyNext renders 49 to 59 times as many pages a second as Next.js and answers 23 times as many calls of an endpoint, with a p99 latency under a millisecond where Next.js's pages take 50 to 134, in 3 MB of memory to Next.js's 566 MB. No request failed on either. Middleware costs FlyNext 2 to 4 percent of its pages a second, being a call on the request's own stack; with it, Next.js serves 19 to 43 percent fewer. A page the same for every request — `/about`, whose model is its `initial` — each renders once and serves from then on: Next.js as it builds, FlyNext as its server starts, which answers it 26 times as often. Each FlyNext page renders inside the handlers of the request — its headers, cookies and redirects — and of the view; their arms each resume where they end or end the `handle`, so they run as calls on the request's own stack, with no fiber of their own.
+On one core, FlyNext renders 49 to 59 times as many pages a second as Next.js and answers 25 times as many calls of an endpoint, with a p99 latency under a millisecond where Next.js's pages take 53 to 111, in 3 MB of memory to Next.js's 626 MB. No request failed on either. Middleware costs FlyNext 2 to 4 percent of its pages a second, being a call on the request's own stack; with it, Next.js serves 19 to 43 percent fewer. A page the same for every request — `/about`, whose model is its `initial` — each renders once and serves from then on: Next.js as it builds, FlyNext as its server starts, which answers it 27 times as often. Each FlyNext page renders inside the handlers of the request — its headers, cookies and redirects — and of the view; their arms each resume where they end or end the `handle`, so they run as calls on the request's own stack, with no fiber of their own.
 
 On every core FlyNext answers no more requests than on one, because the load generator shares the machine: client and server contend for the same cores and the same loopback interface, and past a few server threads the contention costs more than the threads add. Go's `net/http`, serving the same page on the same machine to the same load, shows the same curve, and FlyNext stays ahead of it at every size:
 
@@ -59,10 +59,10 @@ In the browser, each site's first page is loaded with nothing cached, and a link
 
 | Site | Scripts | Downloaded | Gzipped | Interactive after | Link followed in |
 | :--- | ---: | ---: | ---: | ---: | ---: |
-| FlyNext | 2 | 153 KB | 49 KB | 23 ms | 67 ms |
-| Next.js | 7 | 454 KB | 135 KB | 36 ms | 77 ms |
+| FlyNext | 2 | 146 KB | 41 KB | 27 ms | 64 ms |
+| Next.js | 7 | 454 KB | 135 KB | 34 ms | 81 ms |
 
-A FlyNext page is interactive once its one WebAssembly program has taken over the HTML the server rendered: it downloads a third as much as the Next.js page and is ready 13 milliseconds sooner. Following a link costs both sites a request for the next page's data and a render in place, about the same.
+A FlyNext page is interactive once its one WebAssembly program has taken over the HTML the server rendered: it downloads under a third as much as the Next.js page and is ready sooner. Its program is 140 KB, 38 KB compressed, of which the C library is 7 KB: it prints and panics with no `printf`, and allocates from the runtime's own allocator rather than `dlmalloc` (the roadmap's step 7). Following a link costs both sites a request for the next page's data and a render in place, a little less on FlyNext.
 
 ## Running them
 

@@ -49,9 +49,11 @@ In scope in every module without an import.
 
 ### 1.3 Numbers
 
-`f64` and `f32` have the arithmetic of C's `<math.h>`: `sqrt()`, `abs()`, `floor()`, `ceil()`, `round()` (halves away from zero), `trunc()`, `sin()`, `cos()`, `tan()`, `atan2(x)`, `exp()`, `ln()`, `pow(e)`, and `min(other)` and `max(other)`, which take the number when the other is `NaN`; and `toFixed(digits): String`, the number with `digits` digits after the point (at most 100), rounded to the nearest, a value exactly halfway to the even one: `(0.125).toFixed(2)` is `"0.12"`. An `f32`'s results are rounded to its precision.
+`f64` and `f32` have the arithmetic of C's `<math.h>`: `sqrt()`, `abs()`, `floor()`, `ceil()`, `round()` (halves away from zero), `trunc()`, `sin()`, `cos()`, `tan()`, `atan2(x)`, `exp()`, `ln()`, `pow(e)`, and `min(other)` and `max(other)`, which take the number when the other is `NaN`; and `toFixed(digits): String`, the number with `digits` digits after the point (at most 100), rounded to the nearest, a value exactly halfway to the even one: `(0.125).toFixed(2)` is `"0.12"`, and `NaN`, `inf` and `-inf` are written so. An `f32`'s results are rounded to its precision.
 
-Every integer type has `wrappingAdd`, `wrappingSub` and `wrappingMul`, which wrap at the type's width where `+`, `-` and `*` panic. `parseInt(s): Option<i64>` and `parseFloat(s): Option<f64>` read decimal text as TypeScript's functions do, without `NaN`: an optional sign and digits (for a float, a fraction and an exponent too), and nothing else, not even spaces; `#None` otherwise, or for an integer that does not fit.
+A float is written — in a template, by `println`, by `Show` — as `NaN`, `inf` or `-inf`; a whole number smaller than 10^15 with `.0` after it, `-0.0` for negative zero; and otherwise as the fewest digits that read back as the same float, the nearest of them to it, written out in full and never with an exponent: `0.1 + 0.2` is `0.30000000000000004`, `1.5e-7` is `0.00000015` and `1e21` is `1000000000000000000000`. Every implementation writes and reads floats exactly, with no help from the C library's `printf` or `strtod`.
+
+Every integer type has `wrappingAdd`, `wrappingSub` and `wrappingMul`, which wrap at the type's width where `+`, `-` and `*` panic. `parseInt(s): Option<i64>` and `parseFloat(s): Option<f64>` read decimal text as TypeScript's functions do, without `NaN`: an optional sign and digits, and nothing else, not even spaces; `#None` otherwise, or for an integer that does not fit. A float's digits may have a point among them, before them or after them (`1.5`, `.5`, `5.`), and an exponent after them (`2.5e-3`, `1E6`); it reads as the nearest float, a value exactly halfway to the even one, and as `inf` past the largest.
 
 ### 1.4 Strings
 

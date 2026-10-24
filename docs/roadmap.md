@@ -1,6 +1,6 @@
 # Roadmap
 
-Flyscript compiled itself, to JavaScript and to C, when this roadmap was written. Its steps take it from a self-hosted language to a systems platform: one intermediate form under every back end, kernels, LLVM, WebAssembly, every core of the machine, and a web framework that shows what all of it buys. Steps 0 to 5 and 8 are done, and each says what was built; the others are next.
+Flyscript compiled itself, to JavaScript and to C, when this roadmap was written. Its steps take it from a self-hosted language to a systems platform: one intermediate form under every back end, kernels, LLVM, WebAssembly, every core of the machine, and a web framework that shows what all of it buys. Steps 0 to 5, 7 and 8 are done, and each says what was built; the others are next.
 
 ## 0. One core IR under every back end
 
@@ -66,14 +66,13 @@ A page downloads the code it runs and no more, as a Next.js page does, while the
 
 ## 7. A smaller shared base
 
-*Next.*
+*Done: the example site's program is 140 KB, 38 KB compressed, from 165 KB and 48 KB; the C library's part of it is 7 KB, from 32.*
 
-Every page downloads the core, so a byte saved there is saved for every page of every site. Of the example site's 165 KB program (48 KB compressed), a site of one page still needs 110 KB (37 KB); about 32 KB of that is the C library, the most of it `printf` and `dlmalloc`.
+Every page downloads the core, so a byte saved there is saved for every page of every site.
 
-- Numbers formatted by the standard library in Flyscript, as the language already defines them, so that a page program links no `printf`.
-- An allocator for one thread, made for the sizes Flyscript allocates — classes of small blocks and pages for large ones — in place of `dlmalloc` where there are no threads.
-- Nothing else of the C library that a page program does not call: what a page links is measured symbol by symbol, and each part kept is there for a reason.
-- Done when the core of the example site is measured smaller, the WebAssembly corpus and the site's browser tests still pass, and the compiler built for WebAssembly still compiles itself to the same output.
+- No `printf` anywhere in the runtime. A panic's message is put together by a formatter of the runtime's own, and in WebAssembly a line goes to the host whole by `writev`, with none of the C library's streams. Floats are written and read exactly by the runtime, with integers as large as the digits need, rather than by `printf` and `strtod`; the standard library now says what a float's text is, and the reference, C, LLVM, WebAssembly and JavaScript all write it alike (std, spec 0.109).
+- One allocator, the runtime's, which in WebAssembly is the program's `malloc`, the C library's own code's too: classes of sizes from the pages memory grows by, and runs of whole pages for larger blocks, in place of `dlmalloc`.
+- What is left of the C library is measured symbol by symbol: 128-bit division for showing the widest integers, the start of a WASI program and its preopened directories, `writev`, and the few streams the start of a program links.
 
 ## 8. Compile speed
 
