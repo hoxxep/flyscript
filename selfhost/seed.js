@@ -1256,7 +1256,7 @@ function $drop1(v) {
   if (v === undefined) return;
   drop_8({ v: v });
 }
-const $const73 = ["format.fly", "sched.fly"];
+const $const73 = ["format.fly", "sched.fly", "mt.fly"];
 function $copy2(v) { return [v[0], v[1]]; }
 const $const74 = 1;
 function $drop3(v) {

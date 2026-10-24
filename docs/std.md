@@ -107,7 +107,7 @@ Every integer type has `wrappingAdd`, `wrappingSub` and `wrappingMul`, which wra
 
 ### 1.12 Foreign code
 
-`Ptr<T>` is a raw pointer (spec §8.2): `Ptr.fromMut(r)`, `Ptr.fromRef(r)`, `Ptr.at(address)`, `p.address()`, `p.add(n)` (`n` elements on), `p.cast<U>()`, all safe; and, performing `Unsafe`, `p.read()`, `p.write(v)` (which drops nothing), `readVolatile`, `writeVolatile`, and the atomic `loadAcquire`, `storeRelease`, `compareExchange(expected, desired): [T, bool]` (what was there, and whether it was `expected` and is now `desired`) and `fetchAdd(v)` (what was there). `sizeOf<T>()` and `alignOf<T>()` measure a type as C lays it out; `zeroed<T>()` is a value of zero bits (`Unsafe`); `fence()`, `fenceAcquire()` and `fenceRelease()` order memory. `Unsafe` is the effect `unsafe { … }` handles.
+`Ptr<T>` is a raw pointer (spec §8.2): `Ptr.fromMut(r)`, `Ptr.fromRef(r)`, `Ptr.at(address)`, `p.address()`, `p.add(n)` (`n` elements on), `p.cast<U>()`, all safe; and, performing `Unsafe`, `p.read()`, `p.write(v)` (which drops nothing), `readVolatile`, `writeVolatile`, and the atomic `loadAcquire`, `storeRelease`, `compareExchange(expected, desired): [T, bool]` (what was there, and whether it was `expected` and is now `desired`) and `fetchAdd(v)` (what was there); and `p.with(body)`, which lends what is at `p`, `mut`, to `body` for as long as it runs, so that what it changes changes there. `sizeOf<T>()` and `alignOf<T>()` measure a type as C lays it out; `zeroed<T>()` is a value of zero bits (`Unsafe`); `fence()`, `fenceAcquire()` and `fenceRelease()` order memory. `Unsafe` is the effect `unsafe { … }` handles.
 
 ### 1.13 Reflection
 

@@ -68,9 +68,14 @@ impl File {
     let any = false;
     while (self.fill()) {
       any = true;
-      let k = self.at;
-      while (k < self.end && self.buf[k] != 10) { k += 1; }
-      line.extend(self.buf[self.at..k]);
+      // Scanned as a slice of its own, so the scan reads nothing else.
+      let k: usize = 0;
+      {
+        const ahead = self.buf[self.at..self.end];
+        while (k < ahead.len() && ahead[k] != 10) { k += 1; }
+        line.extend(ahead[0..k]);
+      }
+      k += self.at;
       if (k < self.end) {
         self.at = k + 1;
         if (line.len() > 0 && line[line.len() - 1] == 13) { line.pop(); }

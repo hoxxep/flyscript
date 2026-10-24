@@ -910,7 +910,7 @@ impl<T> Ptr<T> {
   export function compareExchange(self: Self, expected: T, desired: T): [T, bool] uses Unsafe;
   export function fetchAdd(self: Self, v: T): T uses Unsafe;
   // What is there, lent `mut` to `body` for as long as it runs: what it changes changes there.
-  export function with<R>(self: Self, body: once (v: mut T) => R): R uses Unsafe;
+  export function with<R, row E>(self: Self, body: once (v: mut T) => R uses ...E): R uses Unsafe, ...E;
 }
 
 // The bytes a value of `T` takes, and the alignment it needs, as C lays it out.

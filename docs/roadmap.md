@@ -1,6 +1,6 @@
 # Roadmap
 
-Flyscript compiled itself, to JavaScript and to C, when this roadmap was written. Its steps take it from a self-hosted language to a systems platform: one intermediate form under every back end, kernels, LLVM, WebAssembly, every core of the machine, and a web framework that shows what all of it buys. Steps 0 to 11 are done, and each says what was built; the last is next.
+Flyscript compiled itself, to JavaScript and to C, when this roadmap was written. Its steps take it from a self-hosted language to a systems platform: one intermediate form under every back end, kernels, LLVM, WebAssembly, every core of the machine, and a web framework that shows what all of it buys. Steps 0 to 12 are done, and each says what was built.
 
 ## 0. One core IR under every back end
 
@@ -119,6 +119,10 @@ The proof covers λ-fly; the compiler's checker was held to it by tests alone. N
 
 ## 12. The runtime in Flyscript
 
-*Next.*
+*Done: the runtime's higher layers are Flyscript, in `selfhost/rt`, over a C core that switches stacks, makes system calls, parks and wakes threads, and tells the sanitizers about fibers; every back end interleaves tasks as before, from a seed, on every test.*
 
-The runtime's higher layers — the scheduler, channels, `Mutex`, buffered I/O and formatting — move from C into Flyscript, over a thin core of C and assembly that switches stacks, makes system calls and tells the sanitizers about fibers. The runtimes for JavaScript and the browser stay JavaScript; buffered I/O and formatting join the standard library step 10 fills out. Channels, `Mutex` and atomics are already proved as handlers (§9.5 of the spec); written in Flyscript, the code that runs them is checked by the same type system the proof is about. Every back end must still interleave tasks the same way under the deterministic scheduler, for every test, from its seed.
+- Numbers as text (`rt/format.fly`): floats shown in the fewest digits that read back, fixed to the even, read to the nearest, over bignums of its own, and integers of up to 128 bits. Byte for byte what the C did, and what the JavaScript runtime does, on 200,000 random floats.
+- The scheduler of a simulated world (`rt/sched.fly`): ready and waiting tasks, the seeded choice at each scheduling point, waits and wakes, scopes and their failures, cancellation, the virtual clock and channels, all of it values the scheduler owns. A task asks it as a handler is asked, by a request and a switch to the scheduler's stack; what needs no choice of who runs next is answered on the task's own stack, through `Ptr.with`, and a task woken from a receive is resumed with its message. It switches as often as the C scheduler did, and runs a channel ping-pong within 1.2 times its time; the simulated world is for tests and replay, and programs on the machine run on the scheduler for every core.
+- Channels and `Mutex` on every core (`rt/mt.fly`): what a channel holds and decides — its messages, senders, closing, a receiver gone, whom a message wakes — and how a `Mutex` is taken and given back, over the core's monitors: a lock held for a few instructions and the tasks parked under it. As fast as the C they replace, faster on a channel ping-pong. The core keeps what only threads and the operating system need: the workers and their work-stealing deques, parking and inboxes, timers and the poller.
+- Buffered I/O (`std/io`, in Flyscript): `File` reads ahead into a buffer of its own and streams a file a line at a time, and `Writer` gathers writes, over `Io`'s descriptors, which a test may answer itself; `String.fromUtf8Lossy`, `Vec.extend` and `slice.copyFrom` came with it.
+- What the move found: `String.fromUtf8` did not check its bytes in compiled code; a loop over a generator leaked what an outer binding held when it assigned it; a range of a list lent `mut` changed a copy in JavaScript; a punned field was not a move in the reference; a closure missed the names in a range; and a program that starts tasks did not link when built split across cores, which `fly build` does.

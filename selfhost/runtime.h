@@ -191,6 +191,24 @@ int64_t fly_core_arg(int32_t i) FLY_SYMBOL(fly_core_arg);
 uint8_t* fly_core_ptr(int32_t i) FLY_SYMBOL(fly_core_ptr);
 void fly_core_reply(int64_t v) FLY_SYMBOL(fly_core_reply);
 void fly_core_answer(int32_t id, int64_t v) FLY_SYMBOL(fly_core_answer);
+uint8_t* fly_core_alloc(uint64_t size) FLY_SYMBOL(fly_core_alloc);
+void fly_core_free(uint8_t* p) FLY_SYMBOL(fly_core_free);
+// Channels and `Mutex` on every core (rt/mt.fly), over the C core's monitors.
+uint8_t* fly_rt_mt_channel(void) FLY_SYMBOL(fly_rt_mt_channel);
+void fly_rt_mt_free(uint8_t* state) FLY_SYMBOL(fly_rt_mt_free);
+bool fly_rt_mt_send(uint8_t* m, uint8_t* state, uint8_t* v, uint64_t size) FLY_SYMBOL(fly_rt_mt_send);
+int32_t fly_rt_mt_recv(uint8_t* m, uint8_t* state, uint8_t* out) FLY_SYMBOL(fly_rt_mt_recv);
+bool fly_rt_mt_deafen(uint8_t* m, uint8_t* state, uint8_t** items, uint64_t* n, uint64_t* size) FLY_SYMBOL(fly_rt_mt_deafen);
+bool fly_rt_mt_sender_gone(uint8_t* m, uint8_t* state) FLY_SYMBOL(fly_rt_mt_sender_gone);
+void fly_rt_mt_sender_clone(uint8_t* m, uint8_t* state) FLY_SYMBOL(fly_rt_mt_sender_clone);
+void fly_rt_mt_lock(uint8_t* m, int32_t* held) FLY_SYMBOL(fly_rt_mt_lock);
+void fly_rt_mt_unlock(uint8_t* m, int32_t* held) FLY_SYMBOL(fly_rt_mt_unlock);
+void fly_mon_lock(uint8_t* m) FLY_SYMBOL(fly_mon_lock);
+void fly_mon_unlock(uint8_t* m) FLY_SYMBOL(fly_mon_unlock);
+bool fly_mon_wait(uint8_t* m, bool cancellable) FLY_SYMBOL(fly_mon_wait);
+void fly_mon_wake_one(uint8_t* m) FLY_SYMBOL(fly_mon_wake_one);
+void fly_mon_wake_all(uint8_t* m) FLY_SYMBOL(fly_mon_wake_all);
+void fly_core_relax(void) FLY_SYMBOL(fly_core_relax);
 
 // ---- integers ----
 

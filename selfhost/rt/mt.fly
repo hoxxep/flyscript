@@ -1,0 +1,183 @@
+// Channels and `Mutex` on every core, for the native runtime: what a channel holds and decides —
+// its messages, its senders, whether it is closed, whether its receiver is gone, whom a message
+// wakes — and how a `Mutex` is taken and given back. Beneath it, the C core does only what threads
+// need of the machine: a lock held for a few instructions, a queue of the tasks waiting under it,
+// parking a task and waking one (runtime.c's monitors). Every function here runs with the lock of
+// what it works on held whenever it reads or changes what is behind the pointer it was given.
+
+// The C core: a monitor's lock; waiting under it, which gives the lock up while the task waits and
+// says whether it was cancelled meanwhile, the lock then not held; waking the first waiter, or
+// every one, the lock held; memory; spinning a moment; and a message's destructor run.
+extern "C" function fly_mon_lock(m: u8*): void;
+extern "C" function fly_mon_unlock(m: u8*): void;
+extern "C" function fly_mon_wait(m: u8*, cancellable: bool): bool;
+extern "C" function fly_mon_wake_one(m: u8*): void;
+extern "C" function fly_mon_wake_all(m: u8*): void;
+extern "C" function fly_core_alloc(size: usize): u8*;
+extern "C" function fly_core_free(p: u8*): void;
+extern "C" function fly_core_relax(): void;
+
+// A channel: the messages not yet received, one after another, `size` bytes each, from byte
+// `head`; its senders; whether every sender is gone, and whether its receiver is.
+type Chan = { items: Vec<u8>; head: usize; size: usize; senders: i64; closed: bool; deaf: bool };
+
+// A new channel's state, which the C core keeps beside its monitor.
+export extern "C" function fly_rt_mt_channel(): u8* {
+  unsafe {
+    const p = fly_core_alloc(sizeOf<Chan>()).cast<Chan>();
+    p.write({ items: Vec.new(), head: 0, size: 0, senders: 1, closed: false, deaf: false });
+    p.cast<u8>()
+  }
+}
+
+// A channel's state let go of, once both its ends are gone.
+export extern "C" function fly_rt_mt_free(state: u8*): void {
+  unsafe {
+    // What it held is dropped as the copy read out of it goes.
+    const held = state.cast<Chan>().read();
+    fly_core_free(state);
+    held.items.len();
+  }
+}
+
+// Sends `size` bytes at `v`: true; false, sending nothing, if the receiver is gone, which leaves
+// the message for its sender to drop.
+export extern "C" function fly_rt_mt_send(m: u8*, state: u8*, v: u8*, size: usize): bool {
+  unsafe {
+    fly_mon_lock(m);
+    const sent = state.cast<Chan>().with((c) => {
+      if (c.deaf) { return false; }
+      for (const i of 0..size) { c.items.push(v.add(i).read()); }
+      c.size = size;
+      true
+    });
+    if (sent) { fly_mon_wake_one(m); }
+    fly_mon_unlock(m);
+    sent
+  }
+}
+
+// The next message, at `out`: 1; 0 once the channel is closed and drained, or the task is
+// cancelled while it waits, from which it unwinds.
+export extern "C" function fly_rt_mt_recv(m: u8*, state: u8*, out: u8*): i32 {
+  unsafe {
+    fly_mon_lock(m);
+    while (true) {
+      const r = state.cast<Chan>().with((c) => {
+        if (c.head < c.items.len()) {
+          for (const i of 0..c.size) { out.add(i).write(c.items[c.head + i]); }
+          c.head += c.size;
+          if (c.head == c.items.len()) {
+            c.items.truncate(0);
+            c.head = 0;
+          } else if (c.head >= 4096 && c.head * 2 >= c.items.len()) {
+            let rest: Vec<u8> = Vec.new();
+            rest.extend(c.items[c.head..c.items.len()]);
+            c.items = rest;
+            c.head = 0;
+          }
+          return 1;
+        }
+        if (c.closed) { 0 } else { 2 }
+      });
+      if (r != 2) {
+        fly_mon_unlock(m);
+        return r;
+      }
+      if (fly_mon_wait(m, true)) { return 0; }
+      fly_mon_lock(m);
+    }
+    0
+  }
+}
+
+// The receiving end gone: what is sent from now on is dropped. What it holds is taken out, into
+// memory the C core frees once it has dropped each message there, outside the lock, as dropping
+// one may reach the channel again: how many, at `n`, and how large, at `size`. Whether the senders
+// are gone too, so that the channel is to be freed.
+export extern "C" function fly_rt_mt_deafen(m: u8*, state: u8*, items: u8**, n: usize*, size: usize*): bool {
+  unsafe {
+    fly_mon_lock(m);
+    const gone = state.cast<Chan>().with((c) => {
+      c.deaf = true;
+      const k = if (c.size == 0) { 0 } else { (c.items.len() - c.head) / c.size };
+      const buf = fly_core_alloc(k * c.size + 1);
+      for (const i of c.head..c.items.len()) { buf.add(i - c.head).write(c.items[i]); }
+      items.write(buf);
+      n.write(k);
+      size.write(c.size);
+      c.items = Vec.new();
+      c.head = 0;
+      c.senders == 0
+    });
+    fly_mon_unlock(m);
+    gone
+  }
+}
+
+// A sender gone: the last of them closes the channel, waking every receiver. Whether the receiver
+// is gone too, so that the channel is to be freed.
+export extern "C" function fly_rt_mt_sender_gone(m: u8*, state: u8*): bool {
+  unsafe {
+    fly_mon_lock(m);
+    const [closed, gone] = state.cast<Chan>().with((c) => {
+      let now = false;
+      if (c.senders > 0) {
+        c.senders -= 1;
+        if (c.senders == 0) { c.closed = true; now = true; }
+      }
+      [now, c.senders == 0 && c.deaf]
+    });
+    if (closed) { fly_mon_wake_all(m); }
+    fly_mon_unlock(m);
+    gone
+  }
+}
+
+export extern "C" function fly_rt_mt_sender_clone(m: u8*, state: u8*): void {
+  unsafe {
+    fly_mon_lock(m);
+    state.cast<Chan>().with((c) => { c.senders += 1; });
+    fly_mon_unlock(m);
+  }
+}
+
+// ---- `Mutex` ----
+
+// Takes a `Mutex`, whose monitor is `m` and whose flag `held` says whether it is taken. Its body
+// performs nothing, so it is held briefly and never across a scheduling point: a task that finds
+// it held spins a little, then waits under its monitor, giving its core to others, and is woken in
+// turn.
+export extern "C" function fly_rt_mt_lock(m: u8*, held: i32*): void {
+  unsafe {
+    for (const _ of 0..64) {
+      if (held.loadAcquire() == 0 && tryLock(m, held)) { return; }
+      fly_core_relax();
+    }
+    fly_mon_lock(m);
+    while (held.read() != 0) {
+      fly_mon_wait(m, false);
+      fly_mon_lock(m);
+    }
+    held.storeRelease(1);
+    fly_mon_unlock(m);
+  }
+}
+
+function tryLock(m: u8*, held: i32*): bool uses Unsafe {
+  fly_mon_lock(m);
+  const free = held.read() == 0;
+  if (free) { held.storeRelease(1); }
+  fly_mon_unlock(m);
+  free
+}
+
+// Gives a `Mutex` back, waking the first task that waits for it.
+export extern "C" function fly_rt_mt_unlock(m: u8*, held: i32*): void {
+  unsafe {
+    fly_mon_lock(m);
+    held.storeRelease(0);
+    fly_mon_wake_one(m);
+    fly_mon_unlock(m);
+  }
+}
