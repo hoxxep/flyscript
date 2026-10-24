@@ -7,6 +7,7 @@ pub mod drops;
 pub mod generators;
 pub mod interp;
 pub mod sched;
+pub mod stack;
 pub mod value;
 pub mod world;
 
@@ -31,8 +32,10 @@ pub fn run(program: Program, name: &str, args: Vec<Value>, world: World) -> (Res
         None => Err(format!("no function `{name}`")),
         Some(fid) => {
             let mut it = Interp::new(Arc::new(program), world.clone());
-            match it.call_fn(fid, args) {
-                Ok(v) => Ok(v.deref()),
+            // On a thread of the evaluator's own, whose stack it knows the size of.
+            let r = stack::spawn(move || it.call_fn(fid, args).map(|v| v.deref())).join().unwrap_or_else(|e| std::panic::resume_unwind(e));
+            match r {
+                Ok(v) => Ok(v),
                 Err(Ctl::Panic(m)) if m == interp::EXITED => Ok(Value::Unit),
                 Err(Ctl::Panic(m)) => Err(format!("panic: {}", m.trim_start_matches(interp::ENDS))),
                 Err(other) => Err(format!("{other:?}")),

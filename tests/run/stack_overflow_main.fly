@@ -1,0 +1,15 @@
+// Overflowing the program's own stack, outside any task, is a panic of `main` (§5.7): its cleanup
+// runs, and the program ends with the panic.
+// skip: wasm — in WebAssembly the engine's call stack runs out first, a trap (stack_overflow.fly).
+// expect: main cleans up
+// expect: <panic: stack overflow>
+import { println } from "std/io";
+
+function down(n: u64): u64 {
+  if (n == 0) { 1 } else { (down(n - 1) % 1000003) * 7 + n % 13 }
+}
+
+export function main(): void uses Io {
+  defer println("main cleans up");
+  println(`not reached: ${down(1 << 40)}`);
+}

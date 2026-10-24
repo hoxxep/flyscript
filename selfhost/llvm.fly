@@ -23,7 +23,7 @@ import {
   Local, LocalKind, Place, Root, Proj, ProjKind, Operand, Constant, Rvalue, Capture, Call, Callee, Stmt, Handle, Arm, Block,
   Cleanup, Func, Uses, ownedIn, useBlock,
 } from "./ir";
-import { Cgen, newCgen, cquote } from "./c";
+import { Cgen, newCgen, cquote, checking, pruneChecks } from "./c";
 import { HashMap, HashSet } from "std/collections";
 
 // What the code being printed is part of, as in the C back end.
@@ -91,6 +91,10 @@ type Lctx = {
   // printed now, innermost last; and the landing pads made, by the innermost block and what may
   // hold a value where a call unwinds to them, with their code.
   landing: bool;
+  // Whether the function makes a call that may lead back to it, so that it checks its stack as
+  // it starts (runtime.h); and where it starts.
+  calls: bool;
+  entryLoc: String;
   pcleanups: Vec<Vec<Cleanup>>;
   pspan: Option<Span>;
   lpads: HashMap<String, String>;
@@ -105,7 +109,7 @@ function newCtx(locals: Vec<Local>, ret: Ty, mode: Mode): Lctx {
     scopes: Vec.new(), targets: Vec.new(), mode, sink: #None, arenas: HashMap.new(), ret: ret.clone(), retSlot: String.new(), fnRet: ret,
     oret: String.new(), code: String.new(), hoisted: HashSet.new(), declared: HashSet.new(), prologue: String.new(), live: HashSet.new(),
     reachable: true, liveAt: HashMap.new(), sp: String.new(), loc: String.new(), direct: false,
-    pblocks: Vec.new(), landing: false, pcleanups: Vec.new(), pspan: #None, lpads: HashMap.new(), lpadCode: String.new(), ptok: String.new(),
+    pblocks: Vec.new(), calls: false, entryLoc: String.new(), landing: false, pcleanups: Vec.new(), pspan: #None, lpads: HashMap.new(), lpadCode: String.new(), ptok: String.new(),
   }
 }
 
@@ -265,6 +269,12 @@ export struct Lgen {
   // The `defer`s made functions of their own, by function and flag: the function, and what it reaches.
   defers: HashMap<String, [String, Apart]>;
   fnName: String;
+  // The calls each function makes, a function and the code apart it makes as one: of functions
+  // of the program, by name; and whether it calls through a function value, or gives one to the
+  // runtime, which may call back. Only a function that may be reached again before it returns —
+  // in a cycle of calls, or calling what it cannot see — checks its stack (`pruneChecks`).
+  callees: HashMap<String, HashSet<String>>;
+  indirect: HashSet<String>;
   module: usize;
   cx: Lctx;
   // Whether a panic unwinds, through landing pads: not in a freestanding program, whose panic goes
@@ -1873,6 +1883,25 @@ impl Lgen {
       }
     }
     if (c.yields && self.cx.sink.isNone()) { self.fail(span, "a generator is called by `for`, or by a generator"); }
+    const recurs = match (c.callee) {
+      #Inst(_) | #Value(_, _) => true,
+      #Builtin(_) => c.argTys.iter().some((t) => match (stripBorrow(t)) { #Fn(_) => true, _ => false }),
+    };
+    if (recurs) { self.cx.calls = true; }
+    match (c.callee) {
+      #Inst(i) => {
+        const callee = self.c.lw.insts[i].name.clone();
+        match (self.callees.getMut(self.fnName.asStr())) {
+          #Some(set) => { set.insert(callee); }
+          #None => {
+            let set: HashSet<String> = HashSet.new();
+            set.insert(callee);
+            self.callees.insert(self.fnName.clone(), set);
+          }
+        }
+      }
+      _ => { if (recurs) { self.indirect.insert(self.fnName.clone()); } }
+    }
     const r = match (c.callee) {
       #Inst(i) => {
         const name = self.c.lw.insts[i].name.clone();
@@ -2140,6 +2169,13 @@ impl Lgen {
   // on — natively by `resume`, in WebAssembly by `cleanupret`.
   function define(self: mut Self, head: str): void {
     const dbg = if (self.cx.sp.len() > 0) { ` !dbg ${self.cx.sp}` } else { String.new() };
+    // Overflowing the stack is a panic, which a function that calls others checks for first.
+    if (self.unwinds && self.cx.calls) {
+      self.declare("llvm.stacksave.p0", "declare ptr @llvm.stacksave.p0()");
+      self.declare("fly_stack_at", `declare void @fly_stack_at(${sizeTy(self.ptr)})`);
+      const dl = if (self.cx.entryLoc.len() > 0) { `, !dbg ${self.cx.entryLoc}` } else { String.new() };
+      self.cx.allocas.push(`;\u{1}sk<${self.fnName}>\n  %sk.p = call ptr @llvm.stacksave.p0()${dl}\n  %sk.a = ptrtoint ptr %sk.p to ${sizeTy(self.ptr)}\n  call void @fly_stack_at(${sizeTy(self.ptr)} %sk.a)${dl}\n;\u{1}sk.\n`);
+    }
     if (self.cx.lpads.len() == 0) {
       self.code.push(`${head} #0${dbg} {\nentry:\n${self.cx.allocas}${self.cx.out}}\n\n`);
       return;
@@ -3081,7 +3117,7 @@ impl Lgen {
     ll.push("\n");
     ll.push(self.globals.asStr());
     ll.push("\n");
-    ll.push(self.code.asStr());
+    ll.push(pruneChecks(self.code, checking(self.callees, self.indirect), ";\u{1}sk<", ">\n", ";\u{1}sk.\n").asStr());
     // The runtime's catch point, which C cannot write: what `f(a)` raises as a panic is caught here;
     // in WebAssembly, what else is thrown — the host's exception by which the program ends — passes.
     if (self.funclets) {
@@ -3168,7 +3204,7 @@ export function llvmProgram(p: Prog, entry: usize, runtime: str, freestanding: b
   let g = Lgen {
     c: newCgen(p), ptr, shapes: HashMap.new(), glue: HashMap.new(), glueCode: String.new(), asserts: String.new(),
     declared: HashMap.new(), globals: String.new(), strs: HashMap.new(), code: String.new(), closuresDone: 0, aparts: 0,
-    defers: HashMap.new(), fnName: String.new(), module: 0, cx: newCtx(Vec.new(), #Prim(#Void), #Fn), unwinds: !freestanding, funclets: !freestanding && ptr == 4,
+    defers: HashMap.new(), fnName: String.new(), callees: HashMap.new(), indirect: HashSet.new(), module: 0, cx: newCtx(Vec.new(), #Prim(#Void), #Fn), unwinds: !freestanding, funclets: !freestanding && ptr == 4,
     meta: String.new(), metaN: 0, files: HashMap.new(), lineStarts: HashMap.new(), locs: HashMap.new(), cu: String.new(),
     diTypes: HashMap.new(),
   };
@@ -3230,6 +3266,7 @@ impl Lgen {
     self.cx.sp = sp;
     self.cx.loc = String.new();
     self.at(span);
+    self.cx.entryLoc = self.cx.loc.clone();
   }
 
   // The code printed next comes from `span`.

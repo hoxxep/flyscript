@@ -102,7 +102,8 @@ typedef struct fly_unw fly_unw;
 // stops; the handlers in force, innermost first; and, for a panic (§5.7), the records of the
 // functions it would unwind, innermost first, and the message of the panic unwinding them, if one
 // is. The last two are each fiber's own.
-typedef struct fly_ctx { void* err; bool unwinding, stopping; fly_handler* handlers; fly_unw* unw; char* panic; } fly_ctx;
+// And the limit of the stack it runs on now (below).
+typedef struct fly_ctx { void* err; bool unwinding, stopping; fly_handler* handlers; fly_unw* unw; char* panic; uintptr_t limit; } fly_ctx;
 #ifdef FLY_THREADS
 // The context of the task running. Within one call of a function it is always the same, wherever
 // the task goes on, so it is `const`: a compiler may compute it once a call. It is computed afresh
@@ -130,6 +131,21 @@ uint32_t fly_err_tag(void);
 void fly_err_take(void* out, size_t size);
 
 _Noreturn void fly_panic(const char* message);
+
+// ---- the stack (§5.7) ----
+// Overflowing a stack is a panic of its task. A function that calls others checks, as it starts,
+// that its stack pointer is above the limit of the stack it runs on: that stack's lowest address
+// and FLY_HEADROOM. As a panic for an overflow unwinds, half the headroom is the cleanups'; the
+// catch point that takes the panic up gives it back. The limit is the task's context's, which the
+// runtime sets as it switches stacks: a variable of the thread's could not be read by compiled
+// code, which may go on on another thread after a call, the variable's address computed before.
+// A freestanding program does not check.
+#define FLY_HEADROOM (64u << 10)
+_Noreturn void fly_stack_overflow(void);
+void fly_stack_at(uintptr_t sp);
+static inline __attribute__((always_inline)) void fly_stack_check(uintptr_t sp) {
+  if (__builtin_expect(sp < fly_cx()->limit, 0)) fly_stack_overflow();
+}
 // The end of the program, out of memory (§5.7).
 _Noreturn void fly_out_of_memory(void);
 

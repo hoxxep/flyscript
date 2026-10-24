@@ -1,0 +1,32 @@
+// Overflowing the stack is a panic of its task (§5.7), however large a frame is: a recursion whose
+// frames each hold a buffer fills the program's own stack — in WebAssembly too, where the buffer
+// lives in memory — and panics before it reaches the end.
+// expect: the task cleans up
+// expect: deep: panicked: stack overflow
+// expect: the program goes on
+import { println } from "std/io";
+
+function said(e: TaskEnd): String {
+  match (e) {
+    #Done => "done".toString(),
+    #Cancelled => "cancelled".toString(),
+    #Panicked(m) => `panicked: ${m}`,
+  }
+}
+
+function fill(n: u64, seed: u8): u64 {
+  let buf: u8[4096] = repeat(seed);
+  buf[(n % 4096) as usize] = (n % 251) as u8;
+  if (n == 0) { buf[7] as u64 } else { fill(n - 1, buf[(n * 31 % 4096) as usize]) + buf[(n % 4096) as usize] as u64 }
+}
+
+export function main(): void uses Io {
+  Io.scope((s) => {
+    const deep = s.spawn(() => {
+      defer println("the task cleans up");
+      println(`not reached: ${fill(1 << 40, 1)}`);
+    });
+    println(`deep: ${said(deep.wait())}`);
+  });
+  println("the program goes on");
+}

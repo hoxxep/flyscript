@@ -120,7 +120,7 @@ pub fn handle(it: &mut Interp, body: &ast::Block, effect: usize, arms: &[ast::Ha
     let mut child = it.fork_thread();
     let body = body.clone();
     let env = env.clone();
-    std::thread::spawn(move || {
+    super::stack::spawn(move || {
         if wait(&child, co).is_err() {
             return;
         }

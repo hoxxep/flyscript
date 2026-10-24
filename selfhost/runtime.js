@@ -18,6 +18,9 @@ const { $rt, $b } = (() => {
   // (§5.7). The end of the program — `exit`, a deadlock, a panic while a panic unwinds — runs no
   // one's cleanup.
   class Panic extends Error {}
+  // Overflowing JavaScript's stack is overflowing the program's (§5.7): a panic of its task, as it
+  // is caught; the `finally` blocks on the way have run the cleanups.
+  const asPanic = (e) => (e instanceof RangeError && /call stack/i.test(e.message) ? new Panic("stack overflow") : e);
   class End extends Error {}
   let ending = false;
   const unwinds = () => !ending;
@@ -553,7 +556,8 @@ const { $rt, $b } = (() => {
         t.input = undefined;
         if (error instanceof End) ending = true;
         r = error !== undefined ? t.gen.throw(error) : t.gen.next(input);
-      } catch (e) {
+      } catch (e0) {
+        const e = asPanic(e0);
         // The end of the program ends every task with it; a panic has unwound its task.
         if (me === 0 || e instanceof End) throw e;
         unwinding.delete(me);
@@ -864,7 +868,8 @@ const { $rt, $b } = (() => {
       sched.scopes.set(sid, st);
       let result, error;
       try { result = yield* body(f, { v: { sid } }); }
-      catch (e) {
+      catch (e0) {
+        const e = asPanic(e0);
         if (e instanceof End) throw e;
         // The body left by unwinding — a panic, a failure, a cancellation — cancels the scope's
         // tasks, and the unwinding goes on once they have finished (§5.7, §6.1).
@@ -958,7 +963,7 @@ const { $rt, $b } = (() => {
       yield* point();
       if (m.poisoned) panic("locked a `Mutex` that a panic left poisoned");
       try { return yield* body(f, m); }
-      catch (e) { if (e instanceof Panic) m.poisoned = true; throw e; }
+      catch (e0) { const e = asPanic(e0); if (e instanceof Panic) m.poisoned = true; throw e; }
     },
     // A fresh value, the old one dropped, and the poison cleared.
     Mutex_reset(m, v, drop) { const old = m.v; m.v = v; m.poisoned = false; if (drop) drop(old); },
@@ -1284,7 +1289,8 @@ const { $rt, $b } = (() => {
         const r = main();
         if (suspends) for (let s = r.next(); !s.done; s = r.next()) panic("an effect performed that nothing handles");
       }
-    } catch (e) {
+    } catch (e0) {
+      const e = asPanic(e0);
       if (e instanceof Panic || e instanceof End) { process.stdout.write(Buffer.from(`<panic: ${e.message}>\n`, "latin1")); process.exit(101); }
       if (e instanceof Fail) { process.stdout.write(Buffer.from(`<uncaught: ${show(e.value)}>\n`, "latin1")); process.exit(1); }
       throw e;

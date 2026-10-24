@@ -1,0 +1,37 @@
+// Overflowing the stack is a panic of its task (§5.7): a recursion with no end — on hostile input,
+// say — ends the task that made it, its cleanup run, and the program goes on. The room a panic
+// takes to unwind is given back once it is caught, so it may happen again.
+// skip: wasm — in WebAssembly the engine's own call stack runs out first, for frames that keep
+// their values in its locals, and that is a trap, which ends the program; stack_overflow_frames
+// shows the check of the program's own stack there.
+// expect: the deep task cleans up
+// expect: deep: panicked: stack overflow
+// expect: and again: panicked: stack overflow
+// expect: the program goes on
+import { println } from "std/io";
+
+function said(e: TaskEnd): String {
+  match (e) {
+    #Done => "done".toString(),
+    #Cancelled => "cancelled".toString(),
+    #Panicked(m) => `panicked: ${m}`,
+  }
+}
+
+// Each call keeps a frame: what it gives is no sum a compiler could turn into a loop.
+function down(n: u64): u64 {
+  if (n == 0) { 1 } else { (down(n - 1) % 1000003) * 7 + n % 13 }
+}
+
+export function main(): void uses Io {
+  Io.scope((s) => {
+    const deep = s.spawn(() => {
+      defer println("the deep task cleans up");
+      println(`not reached: ${down(1 << 40)}`);
+    });
+    println(`deep: ${said(deep.wait())}`);
+    const again = s.spawn(() => { println(`not reached: ${down(1 << 40)}`); });
+    println(`and again: ${said(again.wait())}`);
+  });
+  println("the program goes on");
+}

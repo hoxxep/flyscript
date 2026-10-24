@@ -69,7 +69,7 @@ pub fn generate(it: &Interp, f: Value) -> Value {
     let id = it.fresh_id();
     it.gens.producers.lock().expect("gens").insert(id, Producer { to: gen_tx.clone(), from: Arc::new(Mutex::new(gen_rx)) });
     let mut child = it.fork_thread();
-    std::thread::spawn(move || {
+    super::stack::spawn(move || {
         let from = child.gens.producers.lock().expect("gens").get(&id).map(|p| p.from.clone());
         let Some(from) = from else { return };
         // Wait to be started by the first `next()`.

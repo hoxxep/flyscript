@@ -12,6 +12,7 @@
 #include <netdb.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
+#include <pthread.h>
 #include <signal.h>
 #include <sys/mman.h>
 #include <sys/socket.h>
@@ -346,7 +347,9 @@ bool fly_try(void (*f)(void* a), void* a) {
 #endif
 
 // The panic a catch point has taken up, which no longer unwinds its fiber; and its message let go.
+static void stack_restore(void);
 static char* panic_take(void) {
+  stack_restore();
   fly_ctx* c = fly_cx_now();
   char* m = c->panic;
   c->panic = NULL;
@@ -1687,6 +1690,9 @@ struct fly_fiber {
   size_t size;
   void (*entry)(void* arg);
   void* arg;
+  // The stack limit (runtime.h): what it is now, lowered as a panic for an overflow unwinds the
+  // fiber, and what it is otherwise.
+  uintptr_t limit, limit0;
   fly_fiber* back;
   fly_handler* handlers;
   // Its records and the panic unwinding it, while another fiber runs (runtime.h); and a panic that
@@ -1704,6 +1710,52 @@ static fly_fiber main_fiber = { .base = true };
 // The fiber running on this thread.
 FLY_THREAD_VAR(fly_fiber*, cur_fiber, &main_fiber)
 #define cur_fiber (*cur_fiber_ref())
+
+// The limit of the stack of the thread running, which `base` stands for: none if its bounds are
+// not to be had.
+static void thread_stack_limit(fly_fiber* base) {
+  uintptr_t low = 0;
+#if defined(FLY_FREESTANDING)
+#elif defined(__wasm__)
+  extern char __stack_low;
+  low = (uintptr_t)&__stack_low;
+#elif defined(__APPLE__)
+  pthread_t self = pthread_self();
+  low = (uintptr_t)pthread_get_stackaddr_np(self) - pthread_get_stacksize_np(self);
+#elif defined(__linux__)
+  pthread_attr_t a;
+  void* addr;
+  size_t size;
+  if (pthread_getattr_np(pthread_self(), &a) == 0) {
+    if (pthread_attr_getstack(&a, &addr, &size) == 0) low = (uintptr_t)addr;
+    pthread_attr_destroy(&a);
+  }
+#endif
+  base->limit = base->limit0 = low ? low + FLY_HEADROOM : 0;
+}
+
+__attribute__((constructor)) static void main_stack_limit(void) {
+  thread_stack_limit(&main_fiber);
+  fly_ctx0.limit = main_fiber.limit;
+}
+
+// Half the headroom is the cleanups' as the panic unwinds the fiber, until a catch point takes it
+// up (`stack_restore`).
+_Noreturn void fly_stack_overflow(void) {
+  fly_fiber* f = cur_fiber;
+  if (f->limit == f->limit0) f->limit = f->limit0 - FLY_HEADROOM / 2;
+  fly_cx_now()->limit = f->limit;
+  fly_panic("stack overflow");
+}
+
+// The check, for code made through LLVM, which inlines it.
+void fly_stack_at(uintptr_t sp) { fly_stack_check(sp); }
+
+static void stack_restore(void) {
+  fly_fiber* f = cur_fiber;
+  f->limit = f->limit0;
+  fly_cx_now()->limit = f->limit;
+}
 
 void fly_switch(void** save, void* to);
 void fly_fiber_trampoline(void);
@@ -1762,6 +1814,7 @@ static void switch_to(fly_fiber* to) {
   from->panic = cx->panic;
   cx->panic = to->panic;
   cur_fiber = to;
+  cx->limit = to->limit;
 #if defined(FLY_ASAN)
   void* fake = NULL;
   __sanitizer_start_switch_fiber(from->done ? NULL : &fake, to->stack, to->size);
@@ -1841,6 +1894,7 @@ static fly_fiber* fiber_new(void (*entry)(void*), void* arg, fly_handler* handle
   fly_fiber* f = fly_alloc(sizeof(fly_fiber));
   f->size = FLY_STACK;
   f->stack = stack_new(f->size);
+  f->limit = f->limit0 = (uintptr_t)f->stack + FLY_HEADROOM;
   f->entry = entry;
   f->arg = arg;
   f->handlers = handlers;
@@ -4447,6 +4501,8 @@ static void* worker_thread(void* arg) {
   this_worker = w;
   fly_cur = w->idle_ctx;
   cur_fiber = w->base;
+  thread_stack_limit(w->base);
+  fly_cur->limit = w->base->limit;
   work(w);
   return NULL;
 }

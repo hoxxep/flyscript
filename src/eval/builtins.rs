@@ -284,7 +284,7 @@ impl Interp {
                 child.task = tid;
                 child.handlers.clear();
                 let task = a(1);
-                std::thread::spawn(move || {
+                super::stack::spawn(move || {
                     // A task cancelled before it starts does not run, but still finishes.
                     let id = child.fresh_id();
                     let r = match child.sched.start(tid) {

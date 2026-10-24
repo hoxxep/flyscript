@@ -313,6 +313,9 @@ impl Interp {
     }
 
     pub fn call_fn_with(&mut self, fid: FnId, args: Vec<Value>, tenv: TEnv) -> R {
+        if !super::stack::room() {
+            return Err(panic("stack overflow"));
+        }
         let module = self.prog.fns[fid].module;
         let facts = self.facts(fid);
         let Some(fdecl) = &facts.decl else { return Err(panic("not a function")) };
@@ -364,6 +367,9 @@ impl Interp {
     pub fn call_value(&mut self, f: &Value, args: Vec<Value>) -> R {
         match f.deref() {
             Value::Closure(c) => {
+                if !super::stack::room() {
+                    return Err(panic("stack overflow"));
+                }
                 let base = scope_in(c.scope.clone(), c.env.clone());
                 // A `once` closure's call is its end: what it owns is dropped with it (§5.6).
                 if c.once {

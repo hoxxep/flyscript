@@ -95,6 +95,8 @@ type Ctx = {
   hoist: HashSet<usize>;
   // Whether the code made now is what a panic goes to.
   landing: bool;
+  // Whether the function makes a call that may lead back to it.
+  calls: bool;
   // The C type of the function's `env`, which the code a panic goes to reads through its frame
   // record: none if it has none.
   envType: String;
@@ -110,7 +112,7 @@ function newCtx(locals: Vec<Local>, ret: Ty, mode: Mode): Ctx {
     names: HashMap.new(), locals, captures: Vec.new(), decls: String.new(), scopes: Vec.new(), targets: Vec.new(), mode,
     sink: #None, arenas: HashMap.new(), ret: ret.clone(), fnRet: ret, oret: "ret_".toString(), capTys: Vec.new(), out: String.new(),
     hoisted: HashSet.new(), prologue: String.new(), live: HashSet.new(), reachable: true, liveAt: HashMap.new(), direct: false,
-    unwinds: false, landing: false, hoist: HashSet.new(), envType: String.new(), pblocks: Vec.new(), punw: String.new(), pcases: Vec.new(), pread: HashSet.new(), declared: HashSet.new(),
+    unwinds: false, landing: false, calls: false, hoist: HashSet.new(), envType: String.new(), pblocks: Vec.new(), punw: String.new(), pcases: Vec.new(), pread: HashSet.new(), declared: HashSet.new(),
   }
 }
 
@@ -131,6 +133,86 @@ function hasCleanups(b: readonly Block): bool {
     if (found) { return true; }
   }
   false
+}
+
+// The functions that check their stack as they start (runtime.h): those in a cycle of calls, a
+// strongly connected component of more than one or one that calls itself, and those that call what
+// they cannot see. Any other's calls end before the stack can grow without bound.
+export function checking(callees: readonly HashMap<String, HashSet<String>>, indirect: readonly HashSet<String>): HashSet<String> {
+  let t = Tarjan { index: HashMap.new(), low: HashMap.new(), stack: Vec.new(), on: HashSet.new(), next: 0, cyclic: HashSet.new() };
+  let names: Vec<String> = Vec.new();
+  for (const [f, _] of callees.entries()) { names.push(f.clone()); }
+  names.sortBy((a, b) => a.cmp(b));
+  for (const f of names) { if (!t.index.has(f.asStr())) { t.visit(f.clone(), callees); } }
+  let out = t.cyclic;
+  for (const f of indirect.iter()) { out.insert(f.clone()); }
+  out
+}
+
+// Tarjan's strongly connected components, of the functions by name.
+struct Tarjan {
+  index: HashMap<String, usize>;
+  low: HashMap<String, usize>;
+  stack: Vec<String>;
+  on: HashSet<String>;
+  next: usize;
+  cyclic: HashSet<String>;
+}
+
+impl Tarjan {
+  function at(m: readonly HashMap<String, usize>, k: str): usize { match (m.get(k)) { #Some(n) => n + 0, #None => 0 } }
+
+  function visit(self: mut Self, v: String, g: readonly HashMap<String, HashSet<String>>): void {
+    const i = self.next;
+    self.next += 1;
+    self.index.insert(v.clone(), i);
+    self.low.insert(v.clone(), i);
+    self.stack.push(v.clone());
+    self.on.insert(v.clone());
+    let ws: Vec<String> = Vec.new();
+    if (const #Some(set) = g.get(v.asStr())) { for (const w of set.iter()) { ws.push(w.clone()); } }
+    ws.sortBy((a, b) => a.cmp(b));
+    for (const w of ws) {
+      if (w == v) { self.cyclic.insert(v.clone()); }
+      if (!self.index.has(w.asStr())) {
+        self.visit(w.clone(), g);
+        const lw = Tarjan.at(self.low, w.asStr());
+        if (lw < Tarjan.at(self.low, v.asStr())) { self.low.insert(v.clone(), lw); }
+      } else if (self.on.has(w.asStr())) {
+        const iw = Tarjan.at(self.index, w.asStr());
+        if (iw < Tarjan.at(self.low, v.asStr())) { self.low.insert(v.clone(), iw); }
+      }
+    }
+    if (Tarjan.at(self.low, v.asStr()) == i) {
+      let comp: Vec<String> = Vec.new();
+      while (true) {
+        const w = match (self.stack.pop()) { #Some(w) => w, #None => break };
+        self.on.remove(w.asStr());
+        const last = w == v;
+        comp.push(w);
+        if (last) { break; }
+      }
+      if (comp.len() > 1) { for (const c of comp) { self.cyclic.insert(c.clone()); } }
+    }
+  }
+}
+
+// `code` with the stack checks of the functions in `keep` — each between `open`, its function's
+// name and `named`, and `close` — and without the rest.
+export function pruneChecks(code: readonly String, keep: readonly HashSet<String>, open: str, named: str, close: str): String {
+  const s = code.asStr();
+  let out = String.new();
+  let at: usize = 0;
+  while (true) {
+    const o = match (s.slice(at, s.len()).indexOf(open)) { #Some(k) => at + k, #None => break };
+    out.push(s.slice(at, o));
+    const n = match (s.slice(o, s.len()).indexOf(named)) { #Some(k) => o + k, #None => break };
+    const c = match (s.slice(o, s.len()).indexOf(close)) { #Some(k) => o + k, #None => break };
+    if (keep.has(s.slice(o + open.len(), n))) { out.push(s.slice(n + named.len(), c)); }
+    at = c + close.len();
+  }
+  out.push(s.slice(at, s.len()));
+  out
 }
 
 // What the code a panic goes to may read, in any block of `b`: what the blocks' cleanups drop,
@@ -262,6 +344,10 @@ export struct Cgen {
   tmp: usize;
   // A freestanding program does not unwind: a panic ends it (§5.7).
   freestanding: bool;
+  // The calls each function makes, of functions by name, and whether it calls what it cannot see
+  // (`checking`).
+  callees: HashMap<String, HashSet<String>>;
+  indirect: HashSet<String>;
   // The function being printed.
   cx: Ctx;
   // The module of the function being printed, for its diagnostics.
@@ -1536,6 +1622,28 @@ impl Cgen {
         #Some(y) => arenas.push(y.clone()),
         #None => self.fail(span, "a generator is called by `for`, or by a generator"),
       }
+    }
+    // A call that may lead back here, as one of a function of the program's does, makes the
+    // function check its stack as it starts (runtime.h).
+    const recurs = match (c.callee) {
+      #Inst(_) | #Value(_, _) => true,
+      #Builtin(_) => c.argTys.iter().some((t) => match (stripBorrow(t)) { #Fn(_) => true, _ => false }),
+    };
+    if (recurs) { self.cx.calls = true; }
+    // What the function calls, it and the code apart it makes as one (`checking`).
+    match (c.callee) {
+      #Inst(i) => {
+        const callee = self.lw.insts[i].name.clone();
+        match (self.callees.getMut(self.fnName.asStr())) {
+          #Some(set) => { set.insert(callee); }
+          #None => {
+            let set: HashSet<String> = HashSet.new();
+            set.insert(callee);
+            self.callees.insert(self.fnName.clone(), set);
+          }
+        }
+      }
+      _ => { if (recurs) { self.indirect.insert(self.fnName.clone()); } }
     }
     const expr = match (c.callee) {
       #Inst(i) => {
@@ -3099,7 +3207,9 @@ impl Cgen {
     const leave = land;
     const value = if (unitTy(f.ret)) { "(fly_unit)0".toString() } else { self.local(f.value) };
     const more = replace(mut self.cx.decls, String.new());
-    `${decls}${more}  ${rt} ret_ = { 0 };\n${start}${code}  ${leave}return ${value};\nfail: ${leave}return (${rt}){ 0 };\nret: ${leave}return ret_;\n`
+    // Overflowing the stack is a panic, which a function that calls others checks for first.
+    const check = if (self.cx.calls && !self.freestanding) { `/*\u{1}sk<${self.fnName}>*/  fly_stack_check((uintptr_t)__builtin_frame_address(0));\n/*\u{1}sk.*/` } else { String.new() };
+    `${check}${decls}${more}  ${rt} ret_ = { 0 };\n${start}${code}  ${leave}return ${value};\nfail: ${leave}return (${rt}){ 0 };\nret: ${leave}return ret_;\n`
   }
 
   // Function instance `i`, lowered as `f`.
@@ -3301,8 +3411,11 @@ impl Cgen {
     out.push(self.typeDefs.asStr());
     out.push(self.protos.asStr());
     out.push(self.dropCode.asStr());
-    out.push(self.apartCode.asStr());
-    for (const c of self.fnCode) { out.push(c.asStr()); }
+    // Only a function that may be reached again before it returns checks its stack. Its marks
+    // begin with a byte no literal of the program's is printed with.
+    const keep = checking(self.callees, self.indirect);
+    out.push(pruneChecks(self.apartCode, keep, "/*\u{1}sk<", ">*/", "/*\u{1}sk.*/").asStr());
+    for (const c of self.fnCode) { out.push(pruneChecks(c, keep, "/*\u{1}sk<", ">*/", "/*\u{1}sk.*/").asStr()); }
     out.push(self.glue.asStr());
     out.push(exports.asStr());
     const main = match (ent.main) { #Some(m) => self.lw.insts[m].name.clone(), #None => return out };
@@ -3346,7 +3459,7 @@ export function newCgen(p: Prog): Cgen {
     lw: newLower(p), closuresDone: 0, types: HashMap.new(), defined: HashSet.new(), pending: Vec.new(), typeFwd: String.new(),
     typeDefs: String.new(), tags: HashMap.new(), drops: HashMap.new(), anyDrops: HashSet.new(), dropCode: String.new(), convs: HashMap.new(),
     helpers: HashMap.new(), consts: HashMap.new(), protos: String.new(), fnCode: Vec.new(), lowered: 0, apartCode: String.new(), aparts: 0,
-    tmp: 0, freestanding: false, cx: newCtx(Vec.new(), #Prim(#Void), #Fn), module: 0, defers: HashMap.new(), fnName: String.new(),
+    tmp: 0, freestanding: false, callees: HashMap.new(), indirect: HashSet.new(), cx: newCtx(Vec.new(), #Prim(#Void), #Fn), module: 0, defers: HashMap.new(), fnName: String.new(),
     argPlaces: Vec.new(), glue: String.new(),
   }
 }
