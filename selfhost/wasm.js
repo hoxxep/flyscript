@@ -4,6 +4,11 @@
 // call of its own on a shadow stack of its own, by JavaScript promise integration.
 const fs = require("node:fs");
 const { WASI } = require("node:wasi");
+// Every call the host makes runs on a stack of promise integration's, 984 KB unless told otherwise,
+// however much stack Node itself was given. A program that recurses deeply, as the compiler does,
+// needs as much room there as natively; and which frames are larger depends on when V8 compiles a
+// function again, optimized, so too small a stack overflows only now and then.
+require("node:v8").setFlagsFromString("--wasm-stack-switching-stack-size=65536");
 
 async function main() {
   const [path, ...args] = process.argv.slice(2);
@@ -40,7 +45,13 @@ async function main() {
     waiting.delete(f);
     saved.delete(f);
   };
-  const instance = await WebAssembly.instantiate(module, { wasi_snapshot_preview1: wasi.wasiImport, fly: { switch: switchTo, free } });
+  // WASI's calls are made on Node's own stack, not promise integration's: Node's WASI tells V8 of
+  // memory it allocates, which may start a collection that V8 runs only on its own stack.
+  const host = {};
+  for (const [name, f] of Object.entries(wasi.wasiImport)) {
+    host[name] = name === "proc_exit" ? f : new WebAssembly.Suspending(async (...args) => f(...args));
+  }
+  const instance = await WebAssembly.instantiate(module, { wasi_snapshot_preview1: host, fly: { switch: switchTo, free } });
   exports = instance.exports;
   runFiber = WebAssembly.promising(exports.fly_fiber_run);
   // WASI learns the memory from a command it starts: one that does nothing. `_start` itself runs
