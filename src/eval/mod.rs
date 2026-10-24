@@ -2,6 +2,7 @@
 
 pub mod builtins;
 pub mod coroutine;
+pub mod crypto;
 pub mod drops;
 pub mod generators;
 pub mod interp;

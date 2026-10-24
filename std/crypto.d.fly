@@ -1,0 +1,31 @@
+// Cryptography (std.md): hashes, HMAC, HKDF, authenticated encryption and signatures, each pure,
+// through bindings to OpenSSL's libcrypto, the audited library hosts share — natively and in the
+// reference loaded when first needed, and in a JavaScript host Node's, which is OpenSSL's too.
+// Secure random bytes are `Io.random`, an operation a test may answer itself.
+
+// SHA-256, SHA-384 and SHA-512 of `data` (FIPS 180-4): 32, 48 and 64 bytes.
+export function sha256(data: readonly u8[]): Vec<u8>;
+export function sha384(data: readonly u8[]): Vec<u8>;
+export function sha512(data: readonly u8[]): Vec<u8>;
+
+// HMAC (RFC 2104) of `data` under `key`, by SHA-256 or SHA-512.
+export function hmacSha256(key: readonly u8[], data: readonly u8[]): Vec<u8>;
+export function hmacSha512(key: readonly u8[], data: readonly u8[]): Vec<u8>;
+
+// HKDF (RFC 5869) by SHA-256: `length` bytes, at most 8160, of keying material from `secret`.
+export function hkdfSha256(secret: readonly u8[], salt: readonly u8[], info: readonly u8[], length: usize): Vec<u8>;
+
+// AES-256-GCM: `plaintext` encrypted under a 32-byte `key` and a 12-byte `nonce`, which must never
+// be used twice with one key, and authenticated with `aad`: the ciphertext, then its 16-byte tag.
+export function aesGcmSeal(key: readonly u8[], nonce: readonly u8[], plaintext: readonly u8[], aad: readonly u8[]): Vec<u8>;
+// What `aesGcmSeal` sealed, `#None` if it or `aad` was changed, or the key or nonce is not its.
+export function aesGcmOpen(key: readonly u8[], nonce: readonly u8[], sealed: readonly u8[], aad: readonly u8[]): Option<Vec<u8>>;
+
+// Ed25519 (RFC 8032): the 32-byte public key of a 32-byte secret key, a 64-byte signature of
+// `message`, and whether a signature is one of `message` by the secret key of `publicKey`.
+export function ed25519PublicKey(secret: readonly u8[]): Vec<u8>;
+export function ed25519Sign(secret: readonly u8[], message: readonly u8[]): Vec<u8>;
+export function ed25519Verify(publicKey: readonly u8[], message: readonly u8[], signature: readonly u8[]): bool;
+
+// Whether `a` and `b` are the same bytes, in a time that depends on their lengths alone.
+export function constantTimeEqual(a: readonly u8[], b: readonly u8[]): bool;

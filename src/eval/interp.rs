@@ -483,6 +483,18 @@ impl Interp {
                 Value::tag("Ok", Value::Tuple(vec![Value::Int(n as i128)].into()))
             }
             "read" => Value::tag("Ok", Value::Tuple(vec![Value::Int(0)].into())),
+            "random" => {
+                let buf = super::builtins::place_of(&args[0])?;
+                let mut target = get(&buf);
+                let Value::List(cells) = &mut target else { return Err(panic("random bytes into a non-buffer")) };
+                let bytes = w.random(cells.len());
+                for (cell, b) in Arc::make_mut(cells).iter_mut().zip(bytes) {
+                    *cell = Value::Int(b as i128);
+                }
+                drop(w);
+                set(&buf, target);
+                Value::Unit
+            }
             "wall" => Value::Int(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos() as i128)),
             "cwd" => Value::text(&if w.real_fs { std::env::current_dir().map(|d| d.display().to_string()).unwrap_or_default() } else { "/".to_string() }),
             "env" => {

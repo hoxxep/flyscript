@@ -99,6 +99,49 @@ export async function start(url, root = document.getElementById("app")) {
       if (!linked.has(k)) linked.set(k, link(k));
       return linked.get(k);
     }),
+    // The runtime's cryptography (runtime.c's `crypto_op`) by the page's WebCrypto, which answers
+    // later: the program waits for it, by promise integration.
+    crypto: new WebAssembly.Suspending(async (op, a, na, b, nb, c, nc, d, nd, out, cap) => {
+      const at = (p, n) => mem().slice(p, p + n);
+      const [A, B, C, D] = [at(a, na), at(b, nb), at(c, nc), at(d, nd)];
+      const give = (buf) => { const bytes = new Uint8Array(buf); mem().set(bytes.subarray(0, cap), out); return Math.min(bytes.length, cap); };
+      const s = crypto.subtle;
+      const hash = { 1: "SHA-256", 2: "SHA-384", 3: "SHA-512" }[op];
+      if (hash) return give(await s.digest(hash, A));
+      if (op === 4 || op === 5) {
+        // A key of no bytes is, padded to the block, the key of one zero byte, which WebCrypto takes.
+        const key = await s.importKey("raw", A.length ? A : new Uint8Array(1), { name: "HMAC", hash: op === 4 ? "SHA-256" : "SHA-512" }, false, ["sign"]);
+        return give(await s.sign("HMAC", key, B));
+      }
+      if (op === 6) {
+        if (cap === 0) return 0;
+        const key = await s.importKey("raw", A, "HKDF", false, ["deriveBits"]);
+        return give(await s.deriveBits({ name: "HKDF", hash: "SHA-256", salt: B, info: C }, key, cap * 8));
+      }
+      if (op === 7 || op === 8) {
+        if (A.length !== 32 || B.length !== 12) return -2;
+        const key = await s.importKey("raw", A, "AES-GCM", false, [op === 7 ? "encrypt" : "decrypt"]);
+        const how = { name: "AES-GCM", iv: B, additionalData: D, tagLength: 128 };
+        if (op === 7) return give(await s.encrypt(how, key, C));
+        try { return give(await s.decrypt(how, key, C)); } catch { return -1; }
+      }
+      const pkcs8 = (k) => { const der = new Uint8Array(48); der.set([0x30, 0x2e, 2, 1, 0, 0x30, 5, 6, 3, 0x2b, 0x65, 0x70, 4, 0x22, 4, 0x20]); der.set(k, 16); return der; };
+      if (op === 9 || op === 10) {
+        if (A.length !== 32) return -2;
+        const key = await s.importKey("pkcs8", pkcs8(A), "Ed25519", true, ["sign"]);
+        if (op === 10) return give(await s.sign("Ed25519", key, B));
+        const x = (await s.exportKey("jwk", key)).x.replaceAll("-", "+").replaceAll("_", "/");
+        return give(Uint8Array.from(atob(x), (ch) => ch.charCodeAt(0)));
+      }
+      if (op === 11) {
+        if (A.length !== 32 || C.length !== 64) return -1;
+        try {
+          const key = await s.importKey("raw", A, "Ed25519", false, ["verify"]);
+          return (await s.verify("Ed25519", key, C, B)) ? 0 : -1;
+        } catch { return -1; }
+      }
+      return -2;
+    }),
   };
 
   // ---- routes: modules linked as WebAssembly's dynamic linking lays them out ----

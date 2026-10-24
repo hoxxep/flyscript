@@ -36,6 +36,8 @@ pub struct World {
     /// The seed, also used by the task scheduler.
     pub seed: u64,
     rng: u64,
+    /// The generator of `Io.random`'s bytes, from the seed, `0` before the first.
+    random_rng: u64,
     /// Whether files not in `files` are read from, and written to, the real file system: so
     /// for `flyc run`, never for tests, which stay deterministic (§6.4).
     pub real_fs: bool,
@@ -64,12 +66,41 @@ impl World {
             fault_percent: 0,
             seed,
             rng: seed.max(1),
+            random_rng: 0,
             real_fs: false,
             exit: None,
         }
     }
 
     /// Whether the next I/O operation fails (xorshift, so a seed gives the same run every time).
+    /// `n` bytes of `Io.random`: of the seed, as every back end makes them against a simulated
+    /// world, so that a run replays; of the system's generator for `flyc run`.
+    pub fn random(&mut self, n: usize) -> Vec<u8> {
+        if self.real_fs {
+            use std::io::Read;
+            let mut b = vec![0; n];
+            std::fs::File::open("/dev/urandom").and_then(|mut f| f.read_exact(&mut b)).expect("the system's secure random generator");
+            return b;
+        }
+        if self.random_rng == 0 {
+            self.random_rng = (self.seed ^ 0x9E37_79B9_7F4A_7C15) | 1;
+        }
+        let mut out = Vec::with_capacity(n);
+        while out.len() < n {
+            let mut r = self.random_rng;
+            r ^= r << 13;
+            r ^= r >> 7;
+            r ^= r << 17;
+            self.random_rng = r;
+            for k in 0..8 {
+                if out.len() < n {
+                    out.push((r >> (8 * k)) as u8);
+                }
+            }
+        }
+        out
+    }
+
     pub fn fault(&mut self) -> bool {
         self.rng ^= self.rng << 13;
         self.rng ^= self.rng >> 7;

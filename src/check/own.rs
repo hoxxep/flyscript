@@ -424,6 +424,11 @@ impl<'p> Own<'p> {
             if loan.external || !loan.path.overlaps(path) {
                 continue;
             }
+            // An arm's parameter holds a loan of itself, by which resuming finds what still uses
+            // it; using the parameter is no conflict with that (§5.3).
+            if loan.path.fields.is_empty() && loan.path.root == path.root && self.lent_args.contains_key(&path.root) {
+                continue;
+            }
             if loan.mutable || write {
                 if self.vars[path.root].temp {
                     self.err(at, "this pass through the loop makes this value again, dropping the one made on an earlier pass, which is still borrowed: bind it with `const` before the loop");

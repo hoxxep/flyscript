@@ -30,7 +30,7 @@ fn some(v: Value) -> Value {
     Value::tag("Some", Value::Tuple(vec![v].into()))
 }
 
-fn place_of(v: &Value) -> Result<Place, Ctl> {
+pub(crate) fn place_of(v: &Value) -> Result<Place, Ctl> {
     match v {
         Value::Ptr(p) => Ok(resolve(p.clone())),
         Value::Ref(r) => Ok(Place { root: r.clone(), path: Vec::new() }),
@@ -925,6 +925,30 @@ impl Interp {
                 let id = native(&a(0), "File")? as usize;
                 let bytes: Vec<Value> = self.world.lock().expect("world").sockets[id].input.iter().map(|b| Value::Int(*b as i128)).collect();
                 Ok(Value::List(bytes.into()))
+            }
+            // `std/crypto`: OpenSSL's libcrypto, as natively.
+            "sha256" | "sha384" | "sha512" | "hmacSha256" | "hmacSha512" | "hkdfSha256" | "aesGcmSeal" | "aesGcmOpen" | "ed25519PublicKey" | "ed25519Sign" | "ed25519Verify" | "constantTimeEqual" => {
+                use super::crypto;
+                let b = |i: usize| -> Vec<u8> { with_list(&a(i), |vs| vs.iter().map(|v| v.as_int() as u8).collect()) };
+                let list = |v: Vec<u8>| Value::List(v.into_iter().map(|x| Value::Int(x as i128)).collect::<Vec<_>>().into());
+                let r = match key.as_str() {
+                    "sha256" => crypto::digest(256, &b(0)).map(list),
+                    "sha384" => crypto::digest(384, &b(0)).map(list),
+                    "sha512" => crypto::digest(512, &b(0)).map(list),
+                    "hmacSha256" => crypto::hmac(256, &b(0), &b(1)).map(list),
+                    "hmacSha512" => crypto::hmac(512, &b(0), &b(1)).map(list),
+                    "hkdfSha256" => crypto::hkdf(&b(0), &b(1), &b(2), a(3).as_int() as usize).map(list),
+                    "aesGcmSeal" => crypto::gcm(true, &b(0), &b(1), &b(2), &b(3)).map(|v| list(v.unwrap_or_default())),
+                    "aesGcmOpen" => crypto::gcm(false, &b(0), &b(1), &b(2), &b(3)).map(|v| v.map_or_else(none, |v| some(list(v)))),
+                    "ed25519PublicKey" => crypto::ed25519(&b(0), None).map(list),
+                    "ed25519Sign" => crypto::ed25519(&b(0), Some(&b(1))).map(list),
+                    "ed25519Verify" => crypto::ed25519_verify(&b(0), &b(1), &b(2)).map(Value::Bool),
+                    _ => {
+                        let (x, y) = (b(0), b(1));
+                        Ok(Value::Bool(x.len() == y.len() && x.iter().zip(&y).fold(0u8, |d, (p, q)| d | (p ^ q)) == 0))
+                    }
+                };
+                r.map_err(panic)
             }
             "writeFile" => {
                 let (path, content) = (a(0).as_text().to_string(), a(1).as_text().to_string());

@@ -446,6 +446,7 @@ const { $rt, $b } = (() => {
   const world = Object.assign({ incoming: [], peers: {}, profiles: {}, quotas: {}, faults: 0, seed: 0x5eed },
     process.env.FLY_WORLD ? JSON.parse(process.env.FLY_WORLD) : {});
   let faultRng = BigInt(Math.max(1, world.seed));
+  let randomRng = 0n;
   // Whether the next I/O operation fails.
   function fault() {
     let r = faultRng;
@@ -913,6 +914,46 @@ const { $rt, $b } = (() => {
       sock.out = "";
     },
     Db_connect: () => ({ db: 0 }),
+
+    // ---- cryptography (std/crypto): Node's, which is OpenSSL's ----
+    sha256: (d) => digest("sha256", d),
+    sha384: (d) => digest("sha384", d),
+    sha512: (d) => digest("sha512", d),
+    hmacSha256: (k, d) => Array.from(nodeCrypto().createHmac("sha256", bytesOf(k)).update(bytesOf(d)).digest()),
+    hmacSha512: (k, d) => Array.from(nodeCrypto().createHmac("sha512", bytesOf(k)).update(bytesOf(d)).digest()),
+    hkdfSha256(secret, salt, info, length) {
+      const n = Number(length);
+      if (n > 255 * 32) panic("HKDF-SHA-256 makes at most 8160 bytes");
+      return n === 0 ? [] : Array.from(new Uint8Array(nodeCrypto().hkdfSync("sha256", bytesOf(secret), bytesOf(salt), bytesOf(info), n)));
+    },
+    aesGcmSeal(key, nonce, plaintext, aad) {
+      const c = nodeCrypto().createCipheriv("aes-256-gcm", gcmKey(key), gcmNonce(nonce));
+      c.setAAD(bytesOf(aad));
+      return Array.from(Buffer.concat([c.update(bytesOf(plaintext)), c.final(), c.getAuthTag()]));
+    },
+    aesGcmOpen(key, nonce, sealed, aad) {
+      const k = gcmKey(key), iv = gcmNonce(nonce), b = bytesOf(sealed);
+      if (b.length < 16) return none();
+      const d = nodeCrypto().createDecipheriv("aes-256-gcm", k, iv);
+      d.setAAD(bytesOf(aad));
+      d.setAuthTag(b.subarray(b.length - 16));
+      try { return some(Array.from(Buffer.concat([d.update(b.subarray(0, b.length - 16)), d.final()]))); }
+      catch { return none(); }
+    },
+    ed25519PublicKey: (secret) => Array.from(nodeCrypto().createPublicKey(edSecret(secret)).export({ format: "der", type: "spki" }).subarray(12)),
+    ed25519Sign: (secret, message) => Array.from(nodeCrypto().sign(null, bytesOf(message), edSecret(secret))),
+    ed25519Verify(publicKey, message, signature) {
+      const k = bytesOf(publicKey), sig = bytesOf(signature);
+      if (k.length !== 32 || sig.length !== 64) return false;
+      try {
+        const key = nodeCrypto().createPublicKey({ key: Buffer.concat([Buffer.from("302a300506032b6570032100", "hex"), k]), format: "der", type: "spki" });
+        return nodeCrypto().verify(null, bytesOf(message), key, sig);
+      } catch { return false; }
+    },
+    constantTimeEqual(a, b) {
+      const x = bytesOf(a), y = bytesOf(b);
+      return x.length === y.length && nodeCrypto().timingSafeEqual(x, y);
+    },
     Db_fetchProfile(db, user) {
       if (fault()) throw new Fail({ $tag: "TimedOut" });
       const name = world.profiles[user];
@@ -949,6 +990,26 @@ const { $rt, $b } = (() => {
       return v === undefined ? { $tag: "None" } : { $tag: "Some", $: fromSys(v) };
     },
     Io_cwd: () => fromSys(process.cwd()),
+    // Against a simulated world, bytes of its seed, as natively, so that a run replays; else the
+    // system's secure generator.
+    Io_random(buf) {
+      const cells = buf.v;
+      if (process.env.FLY_WORLD) {
+        if (randomRng === 0n) randomRng = BigInt.asUintN(64, BigInt(world.seed) ^ 0x9E3779B97F4A7C15n) | 1n;
+        for (let i = 0; i < cells.length; i += 8) {
+          let r = randomRng;
+          r = BigInt.asUintN(64, r ^ (r << 13n));
+          r = BigInt.asUintN(64, r ^ (r >> 7n));
+          r = BigInt.asUintN(64, r ^ (r << 17n));
+          randomRng = r;
+          for (let k = 0; k < 8 && i + k < cells.length; k++) cells[i + k] = Number((r >> BigInt(8 * k)) & 0xffn);
+        }
+      } else {
+        const b = require("node:crypto").randomBytes(cells.length);
+        for (let i = 0; i < cells.length; i++) cells[i] = b[i];
+      }
+      buf.v = cells;
+    },
     Io_wall: () => BigInt(Date.now()) * 1000000n + BigInt(Math.trunc((performance.now() % 1) * 1e6)) % 1000000n,
     Io_run(program, args, input) {
       return io(() => {
@@ -957,6 +1018,21 @@ const { $rt, $b } = (() => {
         return { status: r.status ?? 128, out: r.stdout.toString("latin1"), err: r.stderr.toString("latin1") };
       });
     },
+  };
+  const nodeCrypto = () => require("node:crypto");
+  // The bytes of a slice: a list of them, or a string's, one to a character.
+  const bytesOf = (x) => {
+    const b = x?.v ?? x;
+    return b instanceof Bytes ? Buffer.from(b.s, "latin1") : typeof b === "string" ? Buffer.from(b, "latin1") : Buffer.from(Array.from(b, Number));
+  };
+  const digest = (alg, d) => Array.from(nodeCrypto().createHash(alg).update(bytesOf(d)).digest());
+  const gcmKey = (k) => { const b = bytesOf(k); if (b.length !== 32) panic("AES-256-GCM takes a 32-byte key and a 12-byte nonce"); return b; };
+  const gcmNonce = (n) => { const b = bytesOf(n); if (b.length !== 12) panic("AES-256-GCM takes a 32-byte key and a 12-byte nonce"); return b; };
+  // An Ed25519 secret key, as PKCS #8 has it.
+  const edSecret = (secret) => {
+    const b = bytesOf(secret);
+    if (b.length !== 32) panic("an Ed25519 secret key is 32 bytes");
+    return nodeCrypto().createPrivateKey({ key: Buffer.concat([Buffer.from("302e020100300506032b657004220420", "hex"), b]), format: "der", type: "pkcs8" });
   };
   const sysPath = (p) => Buffer.from(p.length === 0 ? "." : p, "latin1").toString("utf8");
   const fromSys = (s) => Buffer.from(s, "utf8").toString("latin1");
@@ -978,7 +1054,7 @@ const { $rt, $b } = (() => {
     else if (sched.on) yield* block(["until", clock + d.nanos]);
     else clock += d.nanos;
   };
-  for (const op of ["Io_now", "Io_write", "Io_read", "Io_stat", "Io_list", "Io_mkdir", "Io_remove", "Io_rename", "Io_env", "Io_cwd", "Io_wall", "Io_run"]) {
+  for (const op of ["Io_now", "Io_write", "Io_read", "Io_stat", "Io_list", "Io_mkdir", "Io_remove", "Io_rename", "Io_env", "Io_cwd", "Io_wall", "Io_run", "Io_random"]) {
     const f = $b[op];
     $b[op + "$g"] = function* (...args) { yield* point(); return f(...args); };
   }

@@ -86,7 +86,7 @@ Every integer type has `wrappingAdd`, `wrappingSub` and `wrappingMul`, which wra
 
 `Fd` names a file or socket to `Io.read` and `Io.write`, and `WaitKey` names what `Io.park` waits for (spec §5.1). Their fields are private: library code makes and uses them, and programs use the library.
 
-`Io`'s other operations are the host's file system, process and clock, on which `std/fs` and `std/process` are built: `stat(path)`, `list(path)`, `mkdir(path)`, `remove(path)`, `rename(from, to)`, `env(name)`, `cwd()`, `run(program, args, input)` and `wall()`. A program, or a test, may handle any of them itself, as it may `Io`'s others: `handle { … } with Io { stat(p) resumes k => k(#Ok(fake)) }` answers `stat` and passes every other operation on. Each is a scheduling point. `Stat` is what is at a path: `size` in bytes, `dir`, and `modified`, in nanoseconds since 1970 began. `Output` is what a program that was run did: its exit `status`, and what it wrote to standard output, `out`, and standard error, `err`. `IoErr` is what can go wrong: `#Reset`, `#TimedOut`, `#BrokenPipe`, `#NotFound`, `#PermissionDenied`, `#AddrInUse`, `#Refused`, `#Exists` (something is already at a path), `#NotEmpty` (a directory removed with entries in it) and `#Unsupported` (what the host cannot do: WebAssembly runs no programs).
+`Io`'s other operations are the host's file system, process, clock and randomness, on which `std/fs`, `std/process` and `std/crypto` are built: `stat(path)`, `list(path)`, `mkdir(path)`, `remove(path)`, `rename(from, to)`, `env(name)`, `cwd()`, `run(program, args, input)`, `wall()` and `random(buf)`, which fills `buf` from the system's cryptographically secure generator (`getentropy`, WASI's `random_get`, `crypto.getRandomValues` in a page) — against a simulated world, with bytes of the world's seed, so that a run replays. A program, or a test, may handle any of them itself, as it may `Io`'s others: `handle { … } with Io { stat(p) resumes k => k(#Ok(fake)) }` answers `stat` and passes every other operation on. Each is a scheduling point. `Stat` is what is at a path: `size` in bytes, `dir`, and `modified`, in nanoseconds since 1970 began. `Output` is what a program that was run did: its exit `status`, and what it wrote to standard output, `out`, and standard error, `err`. `IoErr` is what can go wrong: `#Reset`, `#TimedOut`, `#BrokenPipe`, `#NotFound`, `#PermissionDenied`, `#AddrInUse`, `#Refused`, `#Exists` (something is already at a path), `#NotEmpty` (a directory removed with entries in it) and `#Unsupported` (what the host cannot do: WebAssembly runs no programs).
 
 ### 1.9 Iteration
 
@@ -310,7 +310,25 @@ The syntax is RE2's:
 
 ---
 
-## 10. `std/net`
+## 10. `std/crypto`
+
+Cryptography through bindings to OpenSSL's libcrypto, the audited library that every host here already relies on: natively, and in the reference interpreter, the program finds it when it first uses it — `libcrypto.so.3` and later, or on macOS Homebrew's, never the system's unversioned stub — or where `FLY_LIBCRYPTO` names it, and panics if there is none; a program that uses no cryptography needs no OpenSSL. In JavaScript, and in WebAssembly under WASI, the host's is Node's, which is OpenSSL's; in a page, the browser's WebCrypto. Every function is pure: the same bytes in give the same bytes out, on every host. Keys, nonces and tokens come from `Io.random`. A key or nonce of the wrong length panics, as an index out of bounds does.
+
+| | Contract |
+| :--- | :--- |
+| `sha256(data)`, `sha384(data)`, `sha512(data)` | SHA-2 (FIPS 180-4): 32, 48 and 64 bytes, as a `Vec<u8>`. |
+| `hmacSha256(key, data)`, `hmacSha512(key, data)` | HMAC (RFC 2104) by SHA-256 or SHA-512; a key of any length. |
+| `hkdfSha256(secret, salt, info, length)` | HKDF (RFC 5869) by SHA-256: `length` bytes of keying material, at most 8160, which panics past that. |
+| `aesGcmSeal(key, nonce, plaintext, aad)` | AES-256-GCM: `plaintext` encrypted under a 32-byte key and a 12-byte nonce and authenticated with `aad`, the ciphertext followed by its 16-byte tag. A nonce must never be used twice with one key; 12 random bytes from `Io.random` are safe for 2^32 messages a key. |
+| `aesGcmOpen(key, nonce, sealed, aad)` | What `aesGcmSeal` sealed, or `#None` if the sealed bytes or `aad` were changed, or the key or nonce is not the one it was sealed with. Nothing of a forgery is returned. |
+| `ed25519PublicKey(secret)` | Ed25519 (RFC 8032): the 32-byte public key of a 32-byte secret key. |
+| `ed25519Sign(secret, message)` | The 64-byte signature of `message`, which is deterministic. |
+| `ed25519Verify(publicKey, message, signature)` | Whether `signature` is one of `message` by the secret key of `publicKey`: `false`, not a panic, for a key or signature of the wrong length. |
+| `constantTimeEqual(a, b)` | Whether `a` and `b` are the same bytes, in a time that depends on their lengths alone: for comparing a MAC or a token. |
+
+---
+
+## 11. `std/net`
 
 TCP. Every operation that waits for the network performs `Io` and is a scheduling point; a task waiting for a socket gives its core to others until the kernel says the socket is ready.
 
@@ -336,7 +354,7 @@ Against a simulated world, a listener's connections are the world's requests, a 
 
 ---
 
-## 11. `std/par`
+## 12. `std/par`
 
 Data parallelism over pure closures (spec §6.5).
 
@@ -347,19 +365,19 @@ Data parallelism over pure closures (spec §6.5).
 
 ---
 
-## 12. `std/layout`
+## 13. `std/layout`
 
 `Soa<T>` keeps a struct's fields in planes, one for each field: a `Vec` for a scalar field and a nested `Soa` for a struct field (spec §7.4). It has `Soa.new()`, `push(v)`, `len()`, `at(i)`, a `SoaView` that lends each field of one element, and `splitAt(at)`; `SoaSlice`, `SoaView` and `SoaRead` are its `ParSplit` views.
 
 ---
 
-## 13. `std/region`
+## 14. `std/region`
 
 Mutable slots in a region (spec §4.6). `Cell<R, T extends Copy>`: `Cell.new(v)`, `c.get()`, `c.set(v)`. `RegionList<R, T>`: `RegionList.new()`, `push(v)`, `len()`, and iteration. Both are handles, `Copy`; reading and writing through one performs `Region<R>`.
 
 ---
 
-## 14. `std/json`
+## 15. `std/json`
 
 JSON as library code (spec §7.5).
 
@@ -370,12 +388,12 @@ JSON as library code (spec §7.5).
 
 ---
 
-## 15. `std/world`
+## 16. `std/world`
 
 Services only a simulated world provides (spec §6.4), for examples and tests: `Db.connect(): Db`; `db.fetchProfile(user): Profile`, where a `Profile` is `{ displayName: String }`, failing with `#NotFound` for a user the world does not know; and `db.checkQuota(token): Quota`, where a `Quota` is `{ allowed: bool }`. Each performs `Io` and may fail as the world's faults say.
 
 ---
 
-## 16. The web framework
+## 17. The web framework
 
 The web framework, FlyNext, is a package shipped with the compiler and specified in [web/README.md](../web/README.md): `web/http` (requests, responses and `serve`), `web/ui` (the `Ui<M>` effect, links, components and HTML), `web/dom` (pages in the browser), `web/router` (routes and their parameters) and `web/site` (pages and files answered), with the app compiler `web/flynext`.

@@ -343,6 +343,8 @@ export effect Io {
   run(program: str, args: readonly String[], input: str): Result<Output, IoErr>;
   // The time of day: nanoseconds since 1970 began, in UTC.
   wall(): i64;
+  // `buf` filled from the system's cryptographically secure generator: keys, nonces, tokens.
+  random(buf: mut u8[]): void;
 }
 
 // What is at a path: its size in bytes, whether it is a directory, and when it last changed, in

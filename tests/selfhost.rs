@@ -131,6 +131,45 @@ fn passes_unicodes_conformance_tests() {
     assert_eq!(String::from_utf8_lossy(&r.stdout), "graphemes 853/853\nnormalization 4793/4793\n");
 }
 
+/// Natively, `Io.random` is the system's generator, and `std/crypto` OpenSSL's libcrypto, found
+/// when first used: a program that cannot find it says so and stops.
+#[test]
+fn draws_on_the_systems_randomness_and_libcrypto() {
+    if !has_node() || !has_cc() {
+        return;
+    }
+    let dir = out().join("system_crypto");
+    std::fs::create_dir_all(&dir).unwrap();
+    let program = dir.join("system_crypto.fly");
+    std::fs::write(&program, r#"import { println } from "std/io";
+import { sha256 } from "std/crypto";
+export function main(): void uses Io {
+  let key: u8[32] = repeat(0 as u8);
+  Io.random(mut key);
+  let zeros: usize = 0;
+  for (const b of key) { if (b == 0) { zeros += 1; } }
+  println(`${key} ${zeros < 8} ${sha256("abc".asBytes())[0]}`);
+}
+"#).unwrap();
+    let c = dir.join("system_crypto.c");
+    compile(&root().join("selfhost/seed.js"), &program, &c);
+    let exe = dir.join("system_crypto");
+    let built = Command::new("cc").args(["-std=gnu11", "-O1", "-w", "-o"]).arg(&exe).arg(&c).arg("-lm").output().unwrap();
+    assert!(built.status.success(), "{}", String::from_utf8_lossy(&built.stderr));
+    let run = || {
+        let r = Command::new(&exe).env_remove("FLY_WORLD").output().unwrap();
+        assert!(r.status.success(), "{}", String::from_utf8_lossy(&r.stderr));
+        String::from_utf8_lossy(&r.stdout).into_owned()
+    };
+    let (a, b) = (run(), run());
+    assert!(a.ends_with(" true 186\n"), "{a}");
+    assert_ne!(a, b, "two runs drew the same key");
+    let missing = Command::new(&exe).env_remove("FLY_WORLD").env("FLY_LIBCRYPTO", "/nonexistent/libcrypto").output().unwrap();
+    assert!(!missing.status.success());
+    let said = format!("{}{}", String::from_utf8_lossy(&missing.stdout), String::from_utf8_lossy(&missing.stderr));
+    assert!(said.contains("<panic: cryptography needs OpenSSL 3 or later"), "{said}");
+}
+
 /// `std/regex` finds what Rust's `regex` crate, of RE2's semantics, finds: the same matches and
 /// groups in 9000 cases of random patterns and texts (tests/regex, written by tools/regex-cases).
 #[test]

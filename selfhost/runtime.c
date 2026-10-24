@@ -2299,6 +2299,251 @@ bool fly_accept(int listener, fly_socket* out) {
 #endif
 }
 
+// ---- secure random bytes, for `Io.random` ----
+
+static uint64_t random_rng;
+
+#ifndef __wasm__
+#include <sys/random.h>
+#endif
+
+// Against a simulated world, bytes of its seed, so that a run replays (§6.4); else the system's
+// generator, which never fails once the system has seeded it.
+void fly_io_random(fly_slice buf) {
+  fly_point();
+  world_load();
+  uint8_t* p = buf.ptr;
+  if (world.simulated) {
+    if (!random_rng) random_rng = (world.seed ^ 0x9E3779B97F4A7C15ull) | 1;
+    for (size_t i = 0; i < buf.len; i += 8) {
+      uint64_t x = xorshift(&random_rng);
+      for (size_t k = 0; k < 8 && i + k < buf.len; k++) p[i + k] = (uint8_t)(x >> (8 * k));
+    }
+    return;
+  }
+  // `getentropy` gives at most 256 bytes a call.
+  for (size_t i = 0; i < buf.len; i += 256) {
+    size_t n = buf.len - i < 256 ? buf.len - i : 256;
+    if (getentropy(p + i, n) != 0) fly_panic("the system's secure random generator failed");
+  }
+}
+
+// ---- cryptography (std/crypto) ----
+// Each operation is one of a few, numbered as the host import under WebAssembly numbers them,
+// given up to four byte strings and room for what it makes: how much it made, or -1 if what it
+// opened was forged (or, for a signature, is not one), -2 if its input cannot be what it takes.
+
+enum { CRYPTO_SHA256 = 1, CRYPTO_SHA384, CRYPTO_SHA512, CRYPTO_HMAC256, CRYPTO_HMAC512, CRYPTO_HKDF256, CRYPTO_SEAL, CRYPTO_OPEN, CRYPTO_ED_PUBLIC, CRYPTO_ED_SIGN, CRYPTO_ED_VERIFY };
+
+#ifdef __wasm__
+__attribute__((import_module("fly"), import_name("crypto"))) int32_t fly_host_crypto(int32_t op, const void* a, size_t na, const void* b, size_t nb, const void* c, size_t nc, const void* d, size_t nd, void* out, size_t cap);
+static long crypto_op(int op, fly_slice a, fly_slice b, fly_slice c, fly_slice d, uint8_t* out, size_t cap) {
+  return fly_host_crypto(op, a.ptr, a.len, b.ptr, b.len, c.ptr, c.len, d.ptr, d.len, out, cap);
+}
+#else
+#include <dlfcn.h>
+
+// libcrypto's functions, by name, found when cryptography is first used: a program that uses none
+// needs no OpenSSL. `FLY_LIBCRYPTO` names the library if it is not where the system keeps it.
+#define CRYPTO_FNS(X) \
+  X(void*, EVP_sha256, (void)) X(void*, EVP_sha384, (void)) X(void*, EVP_sha512, (void)) \
+  X(int, EVP_Digest, (const void*, size_t, unsigned char*, unsigned*, const void*, void*)) \
+  X(unsigned char*, EVP_Q_mac, (void*, const char*, const char*, const char*, const void*, const void*, size_t, const unsigned char*, size_t, unsigned char*, size_t, size_t*)) \
+  X(void*, EVP_KDF_fetch, (void*, const char*, const char*)) X(void, EVP_KDF_free, (void*)) \
+  X(void*, EVP_KDF_CTX_new, (void*)) X(void, EVP_KDF_CTX_free, (void*)) \
+  X(int, EVP_KDF_derive, (void*, unsigned char*, size_t, const void*)) \
+  X(void*, EVP_aes_256_gcm, (void)) X(void*, EVP_CIPHER_CTX_new, (void)) X(void, EVP_CIPHER_CTX_free, (void*)) \
+  X(int, EVP_CIPHER_CTX_ctrl, (void*, int, int, void*)) \
+  X(int, EVP_EncryptInit_ex, (void*, const void*, void*, const unsigned char*, const unsigned char*)) \
+  X(int, EVP_EncryptUpdate, (void*, unsigned char*, int*, const unsigned char*, int)) \
+  X(int, EVP_EncryptFinal_ex, (void*, unsigned char*, int*)) \
+  X(int, EVP_DecryptInit_ex, (void*, const void*, void*, const unsigned char*, const unsigned char*)) \
+  X(int, EVP_DecryptUpdate, (void*, unsigned char*, int*, const unsigned char*, int)) \
+  X(int, EVP_DecryptFinal_ex, (void*, unsigned char*, int*)) \
+  X(void*, EVP_PKEY_new_raw_private_key, (int, void*, const unsigned char*, size_t)) \
+  X(void*, EVP_PKEY_new_raw_public_key, (int, void*, const unsigned char*, size_t)) \
+  X(int, EVP_PKEY_get_raw_public_key, (const void*, unsigned char*, size_t*)) X(void, EVP_PKEY_free, (void*)) \
+  X(void*, EVP_MD_CTX_new, (void)) X(void, EVP_MD_CTX_free, (void*)) \
+  X(int, EVP_DigestSignInit, (void*, void**, const void*, void*, void*)) \
+  X(int, EVP_DigestSign, (void*, unsigned char*, size_t*, const unsigned char*, size_t)) \
+  X(int, EVP_DigestVerifyInit, (void*, void**, const void*, void*, void*)) \
+  X(int, EVP_DigestVerify, (void*, const unsigned char*, size_t, const unsigned char*, size_t))
+
+static struct {
+#define CRYPTO_FIELD(R, name, args) R(*name) args;
+  CRYPTO_FNS(CRYPTO_FIELD)
+} ossl;
+static int ossl_state;
+
+// A library of OpenSSL's: the one `env` names, else the first of `names` the loader finds.
+void* fly_openssl_open(const char* env, const char* const* names) {
+  const char* own = getenv(env);
+  if (own && *own) return dlopen(own, RTLD_NOW | RTLD_LOCAL);
+  for (const char* const* n = names; *n; n++) {
+    void* h = dlopen(*n, RTLD_NOW | RTLD_LOCAL);
+    if (h) return h;
+  }
+  return NULL;
+}
+
+static void crypto_load(void) {
+  if (__atomic_load_n(&ossl_state, __ATOMIC_ACQUIRE) == 2) return;
+  static const char* const names[] = {
+#ifdef __APPLE__
+    // Never the system's unversioned libcrypto, which ends any program that loads it.
+    "libcrypto.3.dylib", "/opt/homebrew/opt/openssl@3/lib/libcrypto.3.dylib", "/usr/local/opt/openssl@3/lib/libcrypto.3.dylib",
+    "libcrypto.4.dylib", "/opt/homebrew/opt/openssl@4/lib/libcrypto.4.dylib", "/usr/local/opt/openssl@4/lib/libcrypto.4.dylib",
+#else
+    "libcrypto.so.3", "libcrypto.so.4",
+#endif
+    NULL };
+  // One thread loads it; the others wait for it.
+  int expected = 0;
+  if (!__atomic_compare_exchange_n(&ossl_state, &expected, 1, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+    while (__atomic_load_n(&ossl_state, __ATOMIC_ACQUIRE) != 2) {}
+    return;
+  }
+  void* h = fly_openssl_open("FLY_LIBCRYPTO", names);
+  if (!h) fly_panic("cryptography needs OpenSSL 3 or later (libcrypto), which was not found: set FLY_LIBCRYPTO to it");
+#define CRYPTO_LOAD(R, name, args) \
+  if (!(ossl.name = (R(*) args)dlsym(h, #name))) fly_panicf("this libcrypto has no %s: cryptography needs OpenSSL 3 or later", #name);
+  CRYPTO_FNS(CRYPTO_LOAD)
+  __atomic_store_n(&ossl_state, 2, __ATOMIC_RELEASE);
+}
+
+// OpenSSL's parameter of an operation, as `OSSL_PARAM` lays it out.
+typedef struct { const char* key; unsigned type; void* data; size_t size, returned; } ossl_param;
+
+static long crypto_cipher(bool seal, fly_slice key, fly_slice nonce, fly_slice text, fly_slice aad, uint8_t* out) {
+  if (key.len != 32 || nonce.len != 12 || text.len > 0x7fffffff - 16 || aad.len > 0x7fffffff) return -2;
+  if (!seal && text.len < 16) return -1;
+  size_t n = seal ? text.len : text.len - 16;
+  void* ctx = ossl.EVP_CIPHER_CTX_new();
+  int k = 0, ok = 1;
+  ok &= (seal ? ossl.EVP_EncryptInit_ex : ossl.EVP_DecryptInit_ex)(ctx, ossl.EVP_aes_256_gcm(), NULL, key.ptr, nonce.ptr);
+  int (*update)(void*, unsigned char*, int*, const unsigned char*, int) = seal ? ossl.EVP_EncryptUpdate : ossl.EVP_DecryptUpdate;
+  if (aad.len) ok &= update(ctx, NULL, &k, aad.ptr, (int)aad.len);
+  if (n) ok &= update(ctx, out, &k, text.ptr, (int)n);
+  // EVP_CTRL_GCM_SET_TAG and EVP_CTRL_GCM_GET_TAG: the tag is checked before the end, made after.
+  if (!seal) ok &= ossl.EVP_CIPHER_CTX_ctrl(ctx, 0x11, 16, (uint8_t*)text.ptr + n);
+  int done = (seal ? ossl.EVP_EncryptFinal_ex : ossl.EVP_DecryptFinal_ex)(ctx, out + n, &k);
+  if (seal) ok &= done > 0 && ossl.EVP_CIPHER_CTX_ctrl(ctx, 0x10, 16, out + n);
+  ossl.EVP_CIPHER_CTX_free(ctx);
+  if (!seal && done <= 0) return -1;
+  if (!ok) fly_panic("libcrypto failed to run AES-256-GCM");
+  return (long)(seal ? n + 16 : n);
+}
+
+static long crypto_op(int op, fly_slice a, fly_slice b, fly_slice c, fly_slice d, uint8_t* out, size_t cap) {
+  crypto_load();
+  switch (op) {
+    case CRYPTO_SHA256: case CRYPTO_SHA384: case CRYPTO_SHA512: {
+      void* md = op == CRYPTO_SHA256 ? ossl.EVP_sha256() : op == CRYPTO_SHA384 ? ossl.EVP_sha384() : ossl.EVP_sha512();
+      unsigned n = 0;
+      if (!ossl.EVP_Digest(a.ptr, a.len, out, &n, md, NULL)) fly_panic("libcrypto failed to hash");
+      return n;
+    }
+    case CRYPTO_HMAC256: case CRYPTO_HMAC512: {
+      size_t n = 0;
+      if (!ossl.EVP_Q_mac(NULL, "HMAC", NULL, op == CRYPTO_HMAC256 ? "SHA256" : "SHA512", NULL, a.ptr, a.len, b.ptr, b.len, out, cap, &n)) fly_panic("libcrypto failed to run HMAC");
+      return (long)n;
+    }
+    case CRYPTO_HKDF256: {
+      if (cap > 255 * 32) return -2;
+      void* kdf = ossl.EVP_KDF_fetch(NULL, "HKDF", NULL);
+      void* ctx = kdf ? ossl.EVP_KDF_CTX_new(kdf) : NULL;
+      // OSSL_PARAM_UTF8_STRING 4, OSSL_PARAM_OCTET_STRING 5; a salt of none is one of zeros.
+      uint8_t none = 0;
+      ossl_param ps[] = {
+        { "digest", 4, "SHA256", 6, (size_t)-1 }, { "key", 5, a.ptr ? a.ptr : &none, a.len, (size_t)-1 },
+        { "salt", 5, b.ptr ? b.ptr : &none, b.len, (size_t)-1 }, { "info", 5, c.ptr ? c.ptr : &none, c.len, (size_t)-1 }, { NULL, 0, NULL, 0, 0 } };
+      int ok = ctx && (cap == 0 || ossl.EVP_KDF_derive(ctx, out, cap, ps) > 0);
+      if (ctx) ossl.EVP_KDF_CTX_free(ctx);
+      if (kdf) ossl.EVP_KDF_free(kdf);
+      if (!ok) fly_panic("libcrypto failed to run HKDF");
+      return (long)cap;
+    }
+    case CRYPTO_SEAL: case CRYPTO_OPEN:
+      return crypto_cipher(op == CRYPTO_SEAL, a, b, c, d, out);
+    case CRYPTO_ED_PUBLIC: case CRYPTO_ED_SIGN: {
+      // EVP_PKEY_ED25519, which is NID_ED25519.
+      if (a.len != 32) return -2;
+      void* key = ossl.EVP_PKEY_new_raw_private_key(1087, NULL, a.ptr, 32);
+      if (!key) fly_panic("libcrypto failed to make an Ed25519 key");
+      size_t n = cap;
+      int ok;
+      if (op == CRYPTO_ED_PUBLIC) {
+        ok = ossl.EVP_PKEY_get_raw_public_key(key, out, &n);
+      } else {
+        void* m = ossl.EVP_MD_CTX_new();
+        ok = ossl.EVP_DigestSignInit(m, NULL, NULL, NULL, key) > 0 && ossl.EVP_DigestSign(m, out, &n, b.ptr, b.len) > 0;
+        ossl.EVP_MD_CTX_free(m);
+      }
+      ossl.EVP_PKEY_free(key);
+      if (!ok) fly_panic("libcrypto failed to sign with Ed25519");
+      return (long)n;
+    }
+    case CRYPTO_ED_VERIFY: {
+      if (a.len != 32 || c.len != 64) return -1;
+      void* key = ossl.EVP_PKEY_new_raw_public_key(1087, NULL, a.ptr, 32);
+      if (!key) return -1;
+      void* m = ossl.EVP_MD_CTX_new();
+      int ok = ossl.EVP_DigestVerifyInit(m, NULL, NULL, NULL, key) > 0 && ossl.EVP_DigestVerify(m, c.ptr, 64, b.ptr, b.len) == 1;
+      ossl.EVP_MD_CTX_free(m);
+      ossl.EVP_PKEY_free(key);
+      return ok ? 0 : -1;
+    }
+  }
+  return -2;
+}
+#endif
+
+static const fly_slice no_bytes = { NULL, 0 };
+
+// The bytes an operation makes, at most `cap` of them; `what` says what its input must be.
+static fly_vec crypto_bytes(int op, fly_slice a, fly_slice b, fly_slice c, fly_slice d, size_t cap, const char* what) {
+  uint8_t* out = fly_alloc(cap ? cap : 1);
+  long n = crypto_op(op, a, b, c, d, out, cap);
+  if (n < 0) fly_panic(what);
+  fly_vec v = fly_vec_from(out, (size_t)n, 1);
+  free(out);
+  return v;
+}
+
+fly_vec fly_crypto_sha256(fly_slice data) { return crypto_bytes(CRYPTO_SHA256, data, no_bytes, no_bytes, no_bytes, 32, ""); }
+fly_vec fly_crypto_sha384(fly_slice data) { return crypto_bytes(CRYPTO_SHA384, data, no_bytes, no_bytes, no_bytes, 48, ""); }
+fly_vec fly_crypto_sha512(fly_slice data) { return crypto_bytes(CRYPTO_SHA512, data, no_bytes, no_bytes, no_bytes, 64, ""); }
+fly_vec fly_crypto_hmac_sha256(fly_slice key, fly_slice data) { return crypto_bytes(CRYPTO_HMAC256, key, data, no_bytes, no_bytes, 32, ""); }
+fly_vec fly_crypto_hmac_sha512(fly_slice key, fly_slice data) { return crypto_bytes(CRYPTO_HMAC512, key, data, no_bytes, no_bytes, 64, ""); }
+fly_vec fly_crypto_hkdf_sha256(fly_slice secret, fly_slice salt, fly_slice info, uint64_t length) {
+  if (length > 255 * 32) fly_panic("HKDF-SHA-256 makes at most 8160 bytes");
+  return crypto_bytes(CRYPTO_HKDF256, secret, salt, info, no_bytes, (size_t)length, "");
+}
+fly_vec fly_crypto_seal(fly_slice key, fly_slice nonce, fly_slice plaintext, fly_slice aad) {
+  return crypto_bytes(CRYPTO_SEAL, key, nonce, plaintext, aad, plaintext.len + 16, "AES-256-GCM takes a 32-byte key and a 12-byte nonce");
+}
+bool fly_crypto_open(fly_slice key, fly_slice nonce, fly_slice sealed, fly_slice aad, fly_vec* plaintext) {
+  uint8_t* out = fly_alloc(sealed.len ? sealed.len : 1);
+  long n = crypto_op(CRYPTO_OPEN, key, nonce, sealed, aad, out, sealed.len);
+  if (n == -2) fly_panic("AES-256-GCM takes a 32-byte key and a 12-byte nonce");
+  if (n >= 0) *plaintext = fly_vec_from(out, (size_t)n, 1);
+  free(out);
+  return n >= 0;
+}
+fly_vec fly_crypto_ed25519_public(fly_slice secret) { return crypto_bytes(CRYPTO_ED_PUBLIC, secret, no_bytes, no_bytes, no_bytes, 32, "an Ed25519 secret key is 32 bytes"); }
+fly_vec fly_crypto_ed25519_sign(fly_slice secret, fly_slice message) { return crypto_bytes(CRYPTO_ED_SIGN, secret, message, no_bytes, no_bytes, 64, "an Ed25519 secret key is 32 bytes"); }
+bool fly_crypto_ed25519_verify(fly_slice key, fly_slice message, fly_slice signature) {
+  uint8_t none;
+  return crypto_op(CRYPTO_ED_VERIFY, key, message, signature, no_bytes, &none, 0) == 0;
+}
+
+bool fly_crypto_equal(fly_slice a, fly_slice b) {
+  if (a.len != b.len) return false;
+  volatile uint8_t d = 0;
+  for (size_t i = 0; i < a.len; i++) d |= ((const uint8_t*)a.ptr)[i] ^ ((const uint8_t*)b.ptr)[i];
+  return d == 0;
+}
+
 int fly_connect(fly_str host, uint16_t port, fly_socket* out) {
   world_load();
   *out = (fly_socket){ 0 };

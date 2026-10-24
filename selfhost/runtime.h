@@ -142,6 +142,22 @@ bool fly_io_env(fly_str name, fly_String* value);
 fly_String fly_io_cwd(void);
 int fly_io_run(fly_str program, fly_slice args, fly_str input, int32_t* status, fly_String* out, fly_String* err);
 int64_t fly_io_wall(void);
+// Secure random bytes, of the world's seed against a simulated world.
+void fly_io_random(fly_slice buf);
+
+// ---- cryptography (std/crypto): OpenSSL's libcrypto natively, the host's under WebAssembly ----
+fly_vec fly_crypto_sha256(fly_slice data);
+fly_vec fly_crypto_sha384(fly_slice data);
+fly_vec fly_crypto_sha512(fly_slice data);
+fly_vec fly_crypto_hmac_sha256(fly_slice key, fly_slice data);
+fly_vec fly_crypto_hmac_sha512(fly_slice key, fly_slice data);
+fly_vec fly_crypto_hkdf_sha256(fly_slice secret, fly_slice salt, fly_slice info, uint64_t length);
+fly_vec fly_crypto_seal(fly_slice key, fly_slice nonce, fly_slice plaintext, fly_slice aad);
+bool fly_crypto_open(fly_slice key, fly_slice nonce, fly_slice sealed, fly_slice aad, fly_vec* plaintext);
+fly_vec fly_crypto_ed25519_public(fly_slice secret);
+fly_vec fly_crypto_ed25519_sign(fly_slice secret, fly_slice message);
+bool fly_crypto_ed25519_verify(fly_slice key, fly_slice message, fly_slice signature);
+bool fly_crypto_equal(fly_slice a, fly_slice b);
 _Noreturn void fly_exit(int32_t code);
 _Noreturn void fly_panicf(const char* fmt, ...);
 
