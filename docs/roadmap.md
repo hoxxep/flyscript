@@ -1,6 +1,6 @@
 # Roadmap
 
-Flyscript compiled itself, to JavaScript and to C, when this roadmap was written. Its steps take it from a self-hosted language to a systems platform: one intermediate form under every back end, kernels, LLVM, WebAssembly, every core of the machine, and a web framework that shows what all of it buys. Steps 0 to 12 are done, and each says what was built.
+Flyscript compiled itself, to JavaScript and to C, when this roadmap was written. Its steps take it from a self-hosted language to a systems platform: one intermediate form under every back end, kernels, LLVM, WebAssembly, every core of the machine, and a web framework that shows what all of it buys. Steps 0 to 12 are done, and each says what was built. Steps 13 to 19 take what remains between Flyscript and the languages it is measured against: a parked task as small as a Rust future, a panic that ends one task rather than the server, portable SIMD, and the last costs the runtime and the compiler still pay.
 
 ## 0. One core IR under every back end
 
@@ -126,3 +126,56 @@ The proof covers λ-fly; the compiler's checker was held to it by tests alone. N
 - Channels and `Mutex` on every core (`rt/mt.fly`): what a channel holds and decides — its messages, senders, closing, a receiver gone, whom a message wakes — and how a `Mutex` is taken and given back, over the core's monitors: a lock held for a few instructions and the tasks parked under it. As fast as the C they replace, faster on a channel ping-pong. The core keeps what only threads and the operating system need: the workers and their work-stealing deques, parking and inboxes, timers and the poller.
 - Buffered I/O (`std/io`, in Flyscript): `File` reads ahead into a buffer of its own and streams a file a line at a time, and `Writer` gathers writes, over `Io`'s descriptors, which a test may answer itself; `String.fromUtf8Lossy`, `Vec.extend` and `slice.copyFrom` came with it.
 - What the move found: `String.fromUtf8` did not check its bytes in compiled code; a loop over a generator leaked what an outer binding held when it assigned it; a range of a list lent `mut` changed a copy in JavaScript; a punned field was not a move in the reference; a closure missed the names in a range; and a program that starts tasks did not link when built split across cores, which `fly build` does.
+
+## 13. Parity with the runtime it replaced
+
+The runtime moved into Flyscript at a cost in two places, and this step removes both.
+
+- The simulated scheduler runs a channel ping-pong in 1.2 times the C scheduler's time, switching as often. It is to match it: a request answered without a switch wherever no choice of who runs next is made, and no allocation on the path of a send or receive.
+- `File.readLine` takes 1.33 times the CPU of the C reader it replaced, which did not check its text. It is to match it while still checking: the search for the end of a line and the check of its bytes in one pass, eight bytes at a time.
+- Every back end interleaves the same from a seed: a program whose output is its interleaving, run on each back end across many seeds, prints the same, as a test of the suite.
+
+## 14. The spec brought up to date
+
+- `generate` and `next`, primitives since 0.106, in the core calculus of §9.1.
+- §12.3's third question says what is proved now: continuations kept in a value and tasks that synchronize through `Io` are.
+- `RegionList<region R, T>` in its one order throughout.
+- §0.1 says what the current version is and what the last few changed; the full record of revisions moves to `docs/history/`.
+
+## 15. A panic ends its task
+
+A panic — an index out of bounds, an overflow, division by zero, `unwrap()` of `#None`, `panic(message)` — unwinds the task it happens in to the task's root, and only that task. No handler, `try` or `catch` in the task can stop it. As it unwinds, everything the task owns is dropped and its `defer`s run, and an operation a `defer` performs is cancelled, so unwinding cannot wait on anything: a socket it owned closes, a channel it was the last sender of closes and wakes its receiver, its regions are released. Then:
+
+- **in `main`**, the message is printed and the program exits with a failure status, having leaked nothing;
+- **in a task started with `fork`**, the scope is cancelled and the panic goes on in the task that opened it, from `Io.scope`;
+- **in a task started with `spawn`**, it ends there: the message is reported, and the scope and every other task go on. A server that spawns its connections survives a connection that hits a bug, as it survives one that fails. A scope may be given a supervisor, called with the message of each spawned task that panicked, so long-lived actors can be restarted as a library (§12.3's second question).
+- **inside `Mutex.lock`'s body**, the value the lock lent is dropped rather than given back, and the mutex is poisoned: locking it again panics, unless a fresh value is put in it.
+
+A panic in a `Drop`, or while a panic is already unwinding, ends the program, as does stack exhaustion; a freestanding program's panics go to the handler it names.
+
+Every back end unwinds the same way. The reference evaluator unwinds as for a failure that nothing catches. LLVM uses `invoke` and landing pads, which cost nothing until a panic happens. C, which has no unwinding of its own, returns a panic as a failure that only a task's root catches. JavaScript throws. The proof gains a panic as a step from any expression, which drops the task's continuation as a dropped continuation already does (§9.5); what every task owns is still dropped exactly once, under every schedule, now with panics among the ways a task ends.
+
+## 16. Parked tasks as small as a future
+
+A task, a pull generator and a handler that suspends today run on a stack of their own, which a parked task keeps whole. Flyscript knows, from each function's effects after specialization, which calls can suspend: those that perform `Io`, `Yield`, or an effect whose handler does not resume as its last act. Only frames on a path to such a call need to outlive a suspension.
+
+- A function that cannot suspend runs on the worker's own stack, wherever it is called from.
+- A function that can is compiled to a state machine: its locals that live across a suspension, laid out in a frame, overlapping where their lifetimes do not, and a resume function that goes on from where it stopped. A call from one to another nests the callee's frame in the caller's, so a task's frames from its root to its deepest suspension are one allocation of known size, made where the task starts and never moved; a borrow held across a suspension points into it, safely, with no `Pin`.
+- A cycle of suspending calls, or a call through `dyn` to a function that suspends, takes its frame from the task's own stack of frames.
+
+A parked task then costs what a Rust future costs, a few hundred bytes for a connection handler, and no language change is needed: there is no `async` and no `await`, as there were none. JavaScript already runs effects as generators; WebAssembly no longer needs stack switching from its host. §8.2, §8.3, §11.3 and §12.1 say so.
+
+## 17. Portable SIMD
+
+`std/simd` (§12.3's first question): `Simd<T, comptime N>`, `N` lanes of a scalar, and `Mask<comptime N>`, each `Copy` and `Send`, lowered to LLVM's vector types, to SSE and AVX, NEON and WebAssembly's 128-bit SIMD. Construction from a value or a slice, checked once for all its lanes; lane-wise arithmetic, bitwise operations, `min`, `max` and saturating arithmetic; comparisons to a mask; reductions; shuffles by indices known at compile time and byte lookups by a vector of indices; and on a mask, `select`, `any`, `all`, `firstTrue` and `bitmask`, `firstTrue` lowered on ARM so that it costs no more than on x86. JavaScript and the reference evaluator run it a lane at a time. The JSON scanner, UTF-8 checking and the line reader use it.
+
+## 18. FlyNext, order-free and faster
+
+- An element's attributes, classes, key and listeners may be given anywhere in its body, after its text and its children too: the server writes an element's opening tag once its attributes are all known, and the browser reads an element's props past its children.
+- Each recorded `#Open` knows where its element ends, so finding an element's span is a lookup, not a scan.
+- Strings go to the DOM as a pointer and a length into the module's memory, not copied into a new buffer each.
+
+## 19. What LLVM is told
+
+- A function that can fail returns its failure beside its value, in registers, rather than through memory.
+- A `mut` parameter is `noalias`, and a `readonly` one `noalias readonly` where nothing in it can change through a cell, so LLVM vectorizes and keeps values in registers across what it could not before.
