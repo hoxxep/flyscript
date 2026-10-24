@@ -1,0 +1,778 @@
+// fly: builds, runs and tests a Flyscript package from its manifest, `fly.toml`, and keeps its
+// lockfile, `fly.lock`, which holds each dependency to the commit, the content and the effects it
+// was accepted with (docs/fly.md).
+//
+//   fly new name                     a package of that name, in a directory of its name
+//   fly build                        the package's program, natively, in `target/`
+//   fly run [args...]                the program, built, run with `args`
+//   fly test                         each program in `tests/`, built, run, and held to its `// expect:` lines
+//   fly add name source [version]    a dependency: a git URL, and a version it must have, or a path
+//   fly update [name]                dependencies moved to the newest versions they allow
+//   fly accept name                  what a dependency performs now, accepted
+//
+// `FLY_ROOT` is the installation — `std/`, `selfhost/`, and the native compiler, `target/fly/flyc`
+// — which the `fly` launcher sets; `FLY_HOME`, `~/.fly` unless it says otherwise, holds what is
+// fetched.
+
+import { println, eprintln, exit, File, writeFile } from "std/io";
+import { run, env, cwd } from "std/process";
+import { exists, isDir, createDirAll, removeAll, rename, walk, join, parent, fileName, listDir } from "std/fs";
+import { sha256 } from "std/crypto";
+import { parse, get, getStr, getTable, quote, Value, TomlErr } from "./toml";
+
+type Stop = #Stop(String);
+
+type Dep = { name: String; git: String; path: String; req: String };
+
+type Manifest = { dir: String; name: String; version: String; kind: String; entry: String; app: String; deps: Vec<Dep> };
+
+// A dependency from git as the lock holds it: what effects its exported functions were accepted
+// performing, each `module function: effects`, and whether it vouched for code the compiler cannot
+// check; `#None` until a build has seen it.
+type Locked = { name: String; version: String; git: String; commit: String; hash: String; effects: Option<Vec<String>>; vouches: Option<bool> };
+
+// A dependency as a build has it: its files, and, from git, what the lock says of it.
+type Resolved = { name: String; dir: String; locked: Option<Locked> };
+
+export function main(args: readonly String[]): void uses Io {
+  try {
+    command(args);
+  } catch (#Stop(why)) {
+    eprintln(`error: ${why}`);
+    exit(1);
+  }
+}
+
+function command(args: readonly String[]): void uses Io, Fail<Stop> {
+  if (args.len() == 0) { usage(); return; }
+  const cmd = args[0].asStr();
+  if (cmd == "new") {
+    if (args.len() != 2) { throw #Stop("fly new name".toString()); }
+    create(args[1].asStr());
+  } else if (cmd == "build") {
+    build(manifestHere(), false);
+  } else if (cmd == "run") {
+    // Quietly: what it prints is the program's alone.
+    const m = manifestHere();
+    const exe = build(m, true);
+    let rest: Vec<String> = Vec.new();
+    for (const a of args[1..args.len()]) { rest.push(a.clone()); }
+    execute(exe.asStr(), rest);
+  } else if (cmd == "test") {
+    test(manifestHere());
+  } else if (cmd == "add") {
+    if (args.len() < 3 || args.len() > 4) { throw #Stop("fly add name source [version]".toString()); }
+    add(manifestHere(), args[1].asStr(), args[2].asStr(), if (args.len() == 4) { args[3].asStr() } else { "" });
+  } else if (cmd == "update") {
+    update(manifestHere(), if (args.len() > 1) { args[1].asStr() } else { "" });
+  } else if (cmd == "accept") {
+    if (args.len() != 2) { throw #Stop("fly accept name".toString()); }
+    accept(manifestHere(), args[1].asStr());
+  } else {
+    usage();
+    throw #Stop(`no command \`${cmd}\``);
+  }
+}
+
+function usage(): void uses Io {
+  println("fly new name | build | run [args...] | test | add name source [version] | update [name] | accept name");
+}
+
+// ---- the installation and the machine ----
+
+function root(): String uses Io, Fail<Stop> {
+  match (env("FLY_ROOT")) { #Some(r) => r, #None => throw #Stop("FLY_ROOT is not set: run fly through its launcher".toString()) }
+}
+
+function home(): String uses Io, Fail<Stop> {
+  match (env("FLY_HOME")) {
+    #Some(h) => h,
+    #None => match (env("HOME")) { #Some(h) => join(h.asStr(), ".fly"), #None => throw #Stop("neither FLY_HOME nor HOME is set".toString()) },
+  }
+}
+
+function absolute(path: str): String uses Io {
+  if (path.startsWith("/")) { return clean(path); }
+  clean(join(cwd().asStr(), path).asStr())
+}
+
+// `a/./b/../c` as `a/c`.
+function clean(path: str): String {
+  let parts: Vec<String> = Vec.new();
+  for (const p of path.split("/")) {
+    if (p == "" || p == ".") { continue; }
+    if (p == "..") { parts.pop(); continue; }
+    parts.push(p.clone());
+  }
+  let out = String.new();
+  for (const p of parts) { out.push("/"); out.push(p.asStr()); }
+  if (out.len() == 0) { "/".toString() } else { out }
+}
+
+// Runs `program` to its end: what it wrote, or why it failed, with what it wrote to say so.
+function check(program: str, args: readonly Vec<String>, what: str): String uses Io, Fail<Stop> {
+  const o = try { run(program, args) } catch (e) { throw #Stop(`${what}: cannot run \`${program}\`: ${e}`) };
+  if (o.status != 0) {
+    const said = if (o.err.len() > 0) { o.err.clone() } else { o.out.clone() };
+    throw #Stop(`${what} failed:\n${said.asStr().trimEnd()}`);
+  }
+  o.out
+}
+
+function git(args: Vec<String>, what: str): String uses Io, Fail<Stop> { check("git", args, what) }
+
+function readText(path: str): String uses Io, Fail<Stop> {
+  try { let f = File.open(path); f.readText() } catch (_) { throw #Stop(`cannot read ${path}`) }
+}
+
+function write(path: str, text: str): void uses Io, Fail<Stop> {
+  try { writeFile(path, text); } catch (_) { throw #Stop(`cannot write ${path}`) }
+}
+
+function strings(xs: readonly str[]): Vec<String> {
+  let out: Vec<String> = Vec.new();
+  for (const x of xs) { out.push(x.toString()); }
+  out
+}
+
+// ---- the manifest ----
+
+// The package whose directory, or one around it, the command is run in.
+function manifestHere(): Manifest uses Io, Fail<Stop> {
+  let dir = cwd();
+  while (true) {
+    if (exists(join(dir.asStr(), "fly.toml").asStr())) { return readManifest(dir.asStr()); }
+    if (dir == "/") { throw #Stop("no fly.toml here or in a directory around it".toString()); }
+    dir = parent(dir.asStr());
+  }
+  throw #Stop("no fly.toml".toString())
+}
+
+function readManifest(dir: str): Manifest uses Io, Fail<Stop> {
+  const file = join(dir, "fly.toml");
+  const doc = try { parse(readText(file.asStr()).asStr()) } catch (#BadToml(line, why)) { throw #Stop(`${file}:${line}: ${why}`) };
+  const pkg = match (getTable(doc, "package")) { #Some(p) => p, #None => throw #Stop(`${file}: no [package]`) };
+  const name = match (getStr(pkg, "name")) { #Some(n) => n.toString(), #None => throw #Stop(`${file}: the package has no name`) };
+  const text = (k: str, d: str) => match (getStr(pkg, k)) { #Some(v) => v.toString(), #None => d.toString() };
+  const kind = text("kind", "bin");
+  if (kind != "bin" && kind != "lib" && kind != "site") { throw #Stop(`${file}: a package's kind is bin, lib or site, not ${kind}`); }
+  let deps: Vec<Dep> = Vec.new();
+  if (const #Some(ds) = getTable(doc, "dependencies")) {
+    for (const [dname, v] of ds.iter()) {
+      const t = match (v) { #Table(t) => t, _ => throw #Stop(`${file}: dependency ${dname} names a git URL and a version, or a path: { git = "...", version = "1.2" }`) };
+      const git = match (getStr(t, "git")) { #Some(g) => g.toString(), #None => String.new() };
+      const path = match (getStr(t, "path")) { #Some(p) => p.toString(), #None => String.new() };
+      const req = match (getStr(t, "version")) { #Some(r) => r.toString(), #None => "*".toString() };
+      if ((git.len() == 0) == (path.len() == 0)) { throw #Stop(`${file}: dependency ${dname} names a git URL or a path, one of them`); }
+      if (git.len() > 0 && parseReq(req.asStr()).isNone()) { throw #Stop(`${file}: dependency ${dname}: ${req} is not a version requirement`); }
+      deps.push({ name: dname.clone(), git, path, req });
+    }
+  }
+  { dir: dir.toString(), name, version: text("version", "0.0.0"), kind, entry: text("entry", "main.fly"), app: text("app", "app"), deps }
+}
+
+// ---- versions: semantic versioning, and requirements as Cargo writes them ----
+
+type Version = { major: u64; minor: u64; patch: u64; pre: String };
+
+function parseVersion(text: str): Option<Version> {
+  const s = if (text.startsWith("v")) { text.slice(1, text.len()) } else { text };
+  const [core, pre] = match (s.indexOf("-")) { #Some(k) => [s.slice(0, k), s.slice(k + 1, s.len())], #None => [s, ""] };
+  const parts = core.split(".");
+  if (parts.len() != 3) { return #None; }
+  let n: Vec<u64> = Vec.new();
+  for (const p of parts) {
+    match (digits(p.asStr())) { #Some(x) => n.push(x), #None => return #None }
+  }
+  #Some({ major: n[0], minor: n[1], patch: n[2], pre: pre.toString() })
+}
+
+function digits(s: str): Option<u64> {
+  if (s.len() == 0 || s.len() > 18) { return #None; }
+  let n: u64 = 0;
+  for (const d of s.bytes()) {
+    if (d < b'0' || d > b'9') { return #None; }
+    n = n * 10 + ((d - b'0') as u64);
+  }
+  #Some(n)
+}
+
+// Negative, zero or positive as `a` is before, the same as, or after `b`; a pre-release before
+// its release.
+function compare(a: readonly Version, b: readonly Version): i32 {
+  for (const [x, y] of [[a.major, b.major], [a.minor, b.minor], [a.patch, b.patch]]) {
+    if (x < y) { return -1; }
+    if (x > y) { return 1; }
+  }
+  if (a.pre == b.pre) { return 0; }
+  if (a.pre.len() == 0) { return 1; }
+  if (b.pre.len() == 0) { return -1; }
+  if (a.pre.cmp(b.pre) == #Less) { -1 } else { 1 }
+}
+
+function show(v: readonly Version): String {
+  if (v.pre.len() > 0) { `${v.major}.${v.minor}.${v.patch}-${v.pre}` } else { `${v.major}.${v.minor}.${v.patch}` }
+}
+
+// A requirement: `1.2` (`^1.2`), `~1.2`, `=1.2.3`, `>=1.2` or `*`; `parts` how many numbers it gave.
+type Req = { op: u8; v: Version; parts: u8 };
+
+function parseReq(text: str): Option<Req> {
+  const t = text.trim();
+  if (t == "*") { return #Some({ op: b'*', v: { major: 0, minor: 0, patch: 0, pre: String.new() }, parts: 0 }); }
+  const [op, rest]: [u8, str] = if (t.startsWith(">=")) { [b'>', t.slice(2, t.len())] } else if (t.startsWith("^")) { [b'^', t.slice(1, t.len())] }
+    else if (t.startsWith("~")) { [b'~', t.slice(1, t.len())] } else if (t.startsWith("=")) { [b'=', t.slice(1, t.len())] } else { [b'^', t] };
+  const r = rest.trim();
+  const [core, pre] = match (r.indexOf("-")) { #Some(k) => [r.slice(0, k), r.slice(k + 1, r.len())], #None => [r, ""] };
+  const parts = core.split(".");
+  if (parts.len() == 0 || parts.len() > 3) { return #None; }
+  let n: Vec<u64> = Vec.new();
+  for (const p of parts) { match (digits(p.asStr())) { #Some(x) => n.push(x), #None => return #None } }
+  while (n.len() < 3) { n.push(0); }
+  #Some({ op, v: { major: n[0], minor: n[1], patch: n[2], pre: pre.toString() }, parts: parts.len() as u8 })
+}
+
+function satisfies(r: readonly Req, v: readonly Version): bool {
+  // A pre-release is had only by asking for it exactly.
+  if (v.pre.len() > 0 && !(r.v.pre.len() > 0 && r.v.major == v.major && r.v.minor == v.minor && r.v.patch == v.patch)) { return false; }
+  if (r.op == b'*') { return true; }
+  if (r.op == b'=') { return compare(r.v, v) == 0; }
+  if (compare(v, r.v) < 0) { return false; }
+  if (r.op == b'>') { return true; }
+  const below: Version = if (r.op == b'~') {
+    if (r.parts <= 1) { { major: r.v.major + 1, minor: 0, patch: 0, pre: String.new() } } else { { major: r.v.major, minor: r.v.minor + 1, patch: 0, pre: String.new() } }
+  } else if (r.v.major > 0 || r.parts <= 1) {
+    { major: r.v.major + 1, minor: 0, patch: 0, pre: String.new() }
+  } else if (r.v.minor > 0 || r.parts <= 2) {
+    { major: 0, minor: r.v.minor + 1, patch: 0, pre: String.new() }
+  } else {
+    { major: 0, minor: 0, patch: r.v.patch + 1, pre: String.new() }
+  };
+  compare(v, below) < 0 || (v.pre.len() > 0 && compare(v, r.v) >= 0 && v.major == r.v.major && v.minor == r.v.minor && v.patch == r.v.patch)
+}
+
+// ---- git ----
+
+// The repository's tags that are versions, with the commit each names.
+function tags(url: str): Vec<[Version, String]> uses Io, Fail<Stop> {
+  const out = git(strings(["ls-remote", "--tags", url]), `listing the tags of ${url}`);
+  let found: Vec<[Version, String]> = Vec.new();
+  for (const line of out.asStr().lines()) {
+    const [commit, name] = match (line.indexOf("\t")) { #Some(k) => [line.slice(0, k), line.slice(k + 1, line.len())], #None => continue };
+    if (!name.startsWith("refs/tags/")) { continue; }
+    let tag = name.slice(10, name.len());
+    // An annotated tag, `^{}`, names its commit after the tag object itself.
+    const peeled = tag.endsWith("^{}");
+    if (peeled) { tag = tag.slice(0, tag.len() - 3); }
+    const v = match (parseVersion(tag)) { #Some(v) => v, #None => continue };
+    let replaced = false;
+    for (const f of found.iterMut()) {
+      if (compare(f[0], v) == 0) {
+        if (peeled) { f[1] = commit.toString(); }
+        replaced = true;
+      }
+    }
+    if (!replaced) { found.push([v, commit.toString()]); }
+  }
+  found
+}
+
+// The newest version the requirement allows, and its commit.
+function newest(name: str, url: str, req: str): [Version, String] uses Io, Fail<Stop> {
+  const r = match (parseReq(req)) { #Some(r) => r, #None => throw #Stop(`${name}: ${req} is not a version requirement`) };
+  let best: Option<[Version, String]> = #None;
+  for (const [v, c] of tags(url)) {
+    if (!satisfies(r, v)) { continue; }
+    const better = match (best) { #Some([b, _]) => compare(v, b) > 0, #None => true };
+    if (better) { best = #Some([v.clone(), c.clone()]); }
+  }
+  match (best) { #Some(b) => b, #None => throw #Stop(`${name}: no tag of ${url} is a version ${req} allows`) }
+}
+
+// The files of a commit, fetched once into `FLY_HOME` and kept: where they are.
+function checkout(name: str, url: str, commit: str): String uses Io, Fail<Stop> {
+  const dir = join(join(home().asStr(), "packages").asStr(), `${name}-${commit.slice(0, 12)}`.asStr());
+  if (isDir(dir.asStr())) { return dir; }
+  const partial = `${dir}.partial`;
+  try {
+    if (exists(partial.asStr())) { removeAll(partial.asStr()); }
+    createDirAll(parent(partial.asStr()).asStr());
+  } catch (e) { throw #Stop(`cannot make ${partial}: ${e}`) };
+  git(strings(["clone", "--quiet", url, partial.asStr()]), `fetching ${name} from ${url}`);
+  git(strings(["-C", partial.asStr(), "-c", "advice.detachedHead=false", "checkout", "--quiet", "--detach", commit]), `checking out ${name} at ${commit}`);
+  try {
+    removeAll(join(partial.asStr(), ".git").asStr());
+    rename(partial.asStr(), dir.asStr());
+  } catch (e) { throw #Stop(`cannot keep ${name} in ${dir}: ${e}`) };
+  dir
+}
+
+// The hash of a package's files: SHA-256 of each one's path from the package and its bytes, in
+// the order of their paths, so that the same files hash the same wherever they are.
+function contentHash(dir: str): String uses Io, Fail<Stop> {
+  let files: Vec<String> = Vec.new();
+  try {
+    for (const f of walk(dir)) {
+      const rel = f.slice(dir.len() + 1, f.len());
+      if (rel.startsWith(".git/") || rel.startsWith("target/")) { continue; }
+      files.push(rel.toString());
+    }
+  } catch (e) { throw #Stop(`cannot read ${dir}: ${e}`) };
+  files.sort();
+  let all: Vec<u8> = Vec.new();
+  for (const rel of files) {
+    const bytes = try { let f = File.open(join(dir, rel.asStr()).asStr()); f.readBytes() } catch (_) { throw #Stop(`cannot read ${dir}/${rel}`) };
+    for (const b of rel.asStr().bytes()) { all.push(b); }
+    all.push(0);
+    for (const b of `${bytes.len()}`.asStr().bytes()) { all.push(b); }
+    all.push(0);
+    for (const b of bytes) { all.push(b); }
+  }
+  `sha256-${hex(sha256(all))}`
+}
+
+function hex(b: readonly u8[]): String {
+  const digits = "0123456789abcdef".asBytes();
+  let out: Vec<u8> = Vec.new();
+  for (const x of b) { out.push(digits[(x >> 4) as usize]); out.push(digits[(x & 15) as usize]); }
+  match (String.fromUtf8(out)) { #Some(s) => s, #None => String.new() }
+}
+
+// ---- the lockfile ----
+
+function readLock(dir: str): Vec<Locked> uses Io, Fail<Stop> {
+  const file = join(dir, "fly.lock");
+  if (!exists(file.asStr())) { return Vec.new(); }
+  const doc = try { parse(readText(file.asStr()).asStr()) } catch (#BadToml(line, why)) { throw #Stop(`${file}:${line}: ${why}`) };
+  let out: Vec<Locked> = Vec.new();
+  match (get(doc, "package")) {
+    #Some(#Array(ps)) => {
+      for (const p of ps.iter()) {
+        const t = match (p) { #Table(t) => t, _ => continue };
+        const s = (k: str) => match (getStr(t, k)) { #Some(v) => v.toString(), #None => String.new() };
+        const effects: Option<Vec<String>> = match (get(t, "effects")) {
+          #Some(#Array(xs)) => {
+            let es: Vec<String> = Vec.new();
+            for (const x of xs.iter()) { if (const #Str(e) = x) { es.push(e.clone()); } }
+            #Some(es)
+          }
+          _ => #None,
+        };
+        const vouches: Option<bool> = match (get(t, "unsafe")) { #Some(#Bool(b)) => #Some(b), _ => #None };
+        out.push({ name: s("name"), version: s("version"), git: s("git"), commit: s("commit"), hash: s("hash"), effects, vouches });
+      }
+    }
+    _ => {}
+  }
+  out
+}
+
+function lockText(locked: readonly Vec<Locked>): String {
+  let sorted = locked.clone();
+  sorted.sortBy((a, b) => a.name.cmp(b.name));
+  let out = "# Written by fly: each dependency's exact source and content, and what its exported functions\n# perform, which a build holds it to (docs/fly.md). `fly update` and `fly accept` change it.\nversion = 1\n".toString();
+  for (const l of sorted) {
+    out.push(`\n[[package]]\nname = ${quote(l.name.asStr())}\nversion = ${quote(l.version.asStr())}\ngit = ${quote(l.git.asStr())}\ncommit = ${quote(l.commit.asStr())}\nhash = ${quote(l.hash.asStr())}\n`);
+    if (const #Some(v) = l.vouches) { out.push(`unsafe = ${v}\n`); }
+    if (const #Some(es) = l.effects) {
+      out.push("effects = [\n");
+      for (const e of es) { out.push(`  ${quote(e.asStr())},\n`); }
+      out.push("]\n");
+    }
+  }
+  out
+}
+
+function writeLock(dir: str, locked: readonly Vec<Locked>): void uses Io, Fail<Stop> {
+  const file = join(dir, "fly.lock");
+  const text = lockText(locked);
+  const before = if (exists(file.asStr())) { readText(file.asStr()) } else { String.new() };
+  if (before != text) { write(file.asStr(), text.asStr()); }
+}
+
+// ---- resolving: every dependency, and theirs, at the commit the lock names or the newest allowed ----
+
+// `fresh` names a dependency to move to its newest version, `*` every one.
+function resolve(m: readonly Manifest, fresh: str): Vec<Resolved> uses Io, Fail<Stop> {
+  const lock = readLock(m.dir.asStr());
+  let out: Vec<Resolved> = Vec.new();
+  visit(m, lock, fresh, mut out);
+  let locked: Vec<Locked> = Vec.new();
+  for (const r of out.iter()) { if (const #Some(l) = r.locked) { locked.push(l.clone()); } }
+  writeLock(m.dir.asStr(), locked);
+  out
+}
+
+function visit(m: readonly Manifest, lock: readonly Vec<Locked>, fresh: str, out: mut Vec<Resolved>): void uses Io, Fail<Stop> {
+  for (const d of m.deps.iter()) {
+    let r: Resolved = if (d.path.len() > 0) {
+      { name: d.name.clone(), dir: absolute(join(m.dir.asStr(), d.path.asStr()).asStr()), locked: #None }
+    } else {
+      const req = match (parseReq(d.req.asStr())) { #Some(r) => r, #None => throw #Stop(`${d.name}: ${d.req} is not a version requirement`) };
+      let held: Option<Locked> = #None;
+      for (const l of lock.iter()) { if (l.name == d.name && l.git == d.git) { held = #Some(l.clone()); } }
+      const keep = match (held) {
+        #Some(l) => fresh != "*" && fresh != d.name && (match (parseVersion(l.version.asStr())) { #Some(v) => satisfies(req, v), #None => false }),
+        #None => false,
+      };
+      if (keep) {
+        const l = held.unwrap();
+        const dir = checkout(d.name.asStr(), d.git.asStr(), l.commit.asStr());
+        const h = contentHash(dir.asStr());
+        if (h != l.hash) { throw #Stop(`${d.name} ${l.version} is not what fly.lock says: its files hash to ${h}, not ${l.hash}`); }
+        { name: d.name.clone(), dir, locked: #Some(l) }
+      } else {
+        const [v, commit] = newest(d.name.asStr(), d.git.asStr(), d.req.asStr());
+        const dir = checkout(d.name.asStr(), d.git.asStr(), commit.asStr());
+        // What a dependency was accepted performing stays accepted across an update, which the
+        // build then holds the new version to.
+        const [effects, vouches] = match (held) { #Some(l) => [l.effects.clone(), l.vouches], #None => [#None, #None] };
+        { name: d.name.clone(), dir: dir.clone(), locked: #Some({ name: d.name.clone(), version: show(v), git: d.git.clone(), commit, hash: contentHash(dir.asStr()), effects, vouches }) }
+      }
+    };
+    let seen = false;
+    for (const o of out.iter()) {
+      if (o.name == r.name) {
+        if (o.dir != r.dir) { throw #Stop(`two packages are named ${r.name}: ${o.dir} and ${r.dir}`); }
+        seen = true;
+      }
+    }
+    if (seen) { continue; }
+    const dir = r.dir.clone();
+    out.push(r);
+    if (exists(join(dir.asStr(), "fly.toml").asStr())) {
+      const sub = readManifest(dir.asStr());
+      visit(sub, lock, fresh, mut out);
+    }
+  }
+}
+
+// `name=dir:name=dir`, for the compiler (§8.1).
+function packagesOf(deps: readonly Vec<Resolved>): String {
+  let s = String.new();
+  for (const d of deps.iter()) {
+    if (s.len() > 0) { s.push(":"); }
+    s.push(`${d.name}=${d.dir}`);
+  }
+  s
+}
+
+// ---- what packages perform, held to the lock ----
+
+// A module of a package as the compiler's `--interface` describes it.
+type Module = { file: String; vouches: bool; fns: Vec<String> };
+
+function interfaceOf(m: readonly Manifest, deps: readonly Vec<Resolved>, entry: str): Vec<Module> uses Io, Fail<Stop> {
+  const out = join(m.dir.asStr(), "target/.fly/interface.txt");
+  try { createDirAll(parent(out.asStr()).asStr()); } catch (e) { throw #Stop(`cannot make ${out}: ${e}`) };
+  const flyc = compiler();
+  compile(deps, strings([flyc.asStr(), entry, out.asStr(), root().asStr(), "--interface"]), "checking the program");
+  let mods: Vec<Module> = Vec.new();
+  for (const line of readText(out.asStr()).asStr().lines()) {
+    if (line.startsWith("module ")) {
+      mods.push({ file: line.slice(7, line.len()).toString(), vouches: false, fns: Vec.new() });
+    } else if (line == "unsafe") {
+      const n = mods.len();
+      if (n > 0) { mods[n - 1].vouches = true; }
+    } else if (line.startsWith("fn ")) {
+      const n = mods.len();
+      if (n > 0) { mods[n - 1].fns.push(line.slice(3, line.len()).toString()); }
+    }
+  }
+  mods
+}
+
+// The effects a function performs, by name, from `module function: A, B<C, D>`.
+function performed(entry: str): Vec<String> {
+  let out: Vec<String> = Vec.new();
+  const at = match (entry.indexOf(": ")) { #Some(k) => k + 2, #None => return out };
+  const b = entry.asBytes();
+  let depth: usize = 0;
+  let start = at;
+  for (const i of at..b.len() + 1) {
+    const c: u8 = if (i < b.len()) { b[i] } else { b',' };
+    if (c == b'<') { depth += 1; }
+    if (c == b'>' && depth > 0) { depth -= 1; }
+    if (c == b',' && depth == 0) {
+      const e = entry.slice(start, i).trim();
+      const name = match (e.indexOf("<")) { #Some(k) => e.slice(0, k), #None => e };
+      if (name.len() > 0) { out.push(name.toString()); }
+      start = i + 1;
+    }
+  }
+  out
+}
+
+function key(entry: str): str from entry { match (entry.indexOf(":")) { #Some(k) => entry.slice(0, k), #None => entry } }
+
+// Holds each dependency from git to what the lock accepted of it: one that performs `Io` or
+// `Unsafe` where it did not, or vouches for code the compiler cannot check where it did not,
+// stops the build. Anything else it records. `accepting` names a dependency to accept as it is.
+function hold(m: readonly Manifest, deps: mut Vec<Resolved>, entry: str, accepting: str): void uses Io, Fail<Stop> {
+  const mods = interfaceOf(m, deps, entry);
+  let refused = String.new();
+  for (const d of deps.iterMut()) {
+    const l = match (d.locked) { #Some(l) => l, #None => continue };
+    const prefix = `${d.dir}/`;
+    let effects: Vec<String> = Vec.new();
+    let vouches = false;
+    let where = String.new();
+    for (const md of mods.iter()) {
+      if (!md.file.asStr().startsWith(prefix.asStr())) { continue; }
+      const rel = md.file.slice(prefix.len(), md.file.len() - 4);
+      if (md.vouches && !vouches) { vouches = true; where = rel.toString(); }
+      for (const f of md.fns.iter()) { effects.push(`${rel} ${f}`); }
+    }
+    effects.sort();
+    const accept = accepting == d.name.asStr();
+    match (l.effects) {
+      #Some(before) if !accept => {
+        let news = String.new();
+        for (const e of effects.iter()) {
+          let had: Vec<String> = Vec.new();
+          for (const b of before.iter()) { if (key(b.asStr()) == key(e.asStr())) { had = performed(b.asStr()); } }
+          for (const p of performed(e.asStr())) {
+            if ((p == "Io" || p == "Unsafe") && !had.includes(p)) { news.push(`\n    ${key(e.asStr())} now performs ${p}`); }
+          }
+        }
+        if (vouches && !(l.vouches == #Some(true))) { news.push(`\n    ${where} now vouches for code the compiler cannot check: \`unsafe\` or \`extern\``); }
+        if (news.len() > 0) {
+          refused.push(`\n  ${d.name} ${l.version} performs what the version accepted did not:${news}`);
+          continue;
+        }
+      }
+      _ => {}
+    }
+    l.effects = #Some(effects);
+    l.vouches = #Some(vouches);
+  }
+  let locked: Vec<Locked> = Vec.new();
+  for (const r of deps.iter()) { if (const #Some(l) = r.locked) { locked.push(l.clone()); } }
+  writeLock(m.dir.asStr(), locked);
+  if (refused.len() > 0) {
+    throw #Stop(`a dependency's update asks for more than it had:${refused}\nRead what changed; to accept it, \`fly accept name\`.`);
+  }
+}
+
+// ---- building ----
+
+function compiler(): String uses Io, Fail<Stop> {
+  const c = join(root().asStr(), "target/fly/flyc");
+  if (!exists(c.asStr())) { throw #Stop(`${c} is missing: run fly through its launcher, which builds it`); }
+  c
+}
+
+// Runs a compiling step with the packages in its environment, through `env`.
+function compile(deps: readonly Vec<Resolved>, cmd: Vec<String>, what: str): String uses Io, Fail<Stop> {
+  let args: Vec<String> = [`FLY_PACKAGES=${packagesOf(deps)}`];
+  for (const c of cmd) { args.push(c.clone()); }
+  check("env", args, what)
+}
+
+// Where LLVM's tools are, if they are: `LLVM_BIN`, or Homebrew's.
+function llvm(): Option<String> uses Io {
+  const bin: Option<String> = match (env("LLVM_BIN")) {
+    #Some(b) => #Some(b),
+    #None => try {
+      const o = run("brew", strings(["--prefix", "llvm"]));
+      if (o.status == 0) { #Some(join(o.out.asStr().trim(), "bin")) } else { #None }
+    } catch (_) { #None },
+  };
+  match (bin) {
+    #Some(b) => if (exists(join(b.asStr(), "llvm-link").asStr()) && exists(join(b.asStr(), "clang").asStr())) { #Some(b) } else { #None },
+    #None => #None,
+  }
+}
+
+// A native executable of `entry` at `out`: through LLVM if it is here, else through C.
+function native(deps: readonly Vec<Resolved>, entry: str, out: str): void uses Io, Fail<Stop> {
+  try { createDirAll(parent(out).asStr()); } catch (e) { throw #Stop(`cannot make ${parent(out)}: ${e}`) };
+  const flyc = compiler();
+  match (llvm()) {
+    #Some(bin) => {
+      compile(deps, strings([`LLVM_BIN=${bin}`.asStr(), "sh", join(root().asStr(), "selfhost/llvm.sh").asStr(), flyc.asStr(), entry, out]), "compiling");
+    }
+    #None => {
+      const c = `${out}.c`;
+      compile(deps, strings([flyc.asStr(), entry, c.asStr(), root().asStr()]), "compiling");
+      check("cc", strings(["-std=gnu11", "-O2", "-w", "-o", out, c.asStr(), "-lm"]), "compiling the C");
+    }
+  }
+}
+
+// Builds the package; for a program, where it is.
+function build(m: readonly Manifest, quiet: bool): String uses Io, Fail<Stop> {
+  let deps = resolve(m, "");
+  const target = join(m.dir.asStr(), "target");
+  if (m.kind == "lib") {
+    hold(m, mut deps, m.dir.asStr(), "");
+    if (!quiet) { println(`checked ${m.name} ${m.version}`); }
+    return String.new();
+  }
+  if (m.kind == "site") {
+    const app = join(m.dir.asStr(), m.app.asStr());
+    const out = join(target.asStr(), "site");
+    compile(deps, strings([`FLY_COMPILER=${compiler()}`.asStr(), "sh", join(root().asStr(), "web/flynext").asStr(), "build", app.asStr(), out.asStr()]), "building the site");
+    hold(m, mut deps, join(app.asStr(), ".flynext/server.fly").asStr(), "");
+    hold(m, mut deps, join(app.asStr(), ".flynext/client.fly").asStr(), "");
+    if (!quiet) { println(`built ${m.name} ${m.version}: ${out}`); }
+    return out;
+  }
+  const entry = join(m.dir.asStr(), m.entry.asStr());
+  hold(m, mut deps, entry.asStr(), "");
+  const exe = join(target.asStr(), m.name.asStr());
+  native(deps, entry.asStr(), exe.asStr());
+  if (!quiet) { println(`built ${m.name} ${m.version}: ${exe}`); }
+  exe
+}
+
+// ---- running: the program takes the process's place, its terminal and its status ----
+
+extern "C" function execvp(file: u8*, argv: u8**): i32;
+
+function execute(program: str, args: Vec<String>): void uses Io, Fail<Stop> {
+  let texts: Vec<Vec<u8>> = Vec.new();
+  let all: Vec<String> = [program.toString()];
+  for (const a of args) { all.push(a.clone()); }
+  for (const a of all.iter()) {
+    let b: Vec<u8> = Vec.new();
+    for (const c of a.asStr().bytes()) { b.push(c); }
+    b.push(0);
+    texts.push(b);
+  }
+  let argv: Vec<u8*> = Vec.new();
+  for (const t of texts.iter()) { argv.push(Ptr.fromRef(t[0])); }
+  argv.push(Ptr.at(0));
+  unsafe { execvp(argv[0], Ptr.fromRef(argv[0])); }
+  throw #Stop(`cannot run ${program}`)
+}
+
+// ---- testing ----
+
+function test(m: readonly Manifest): void uses Io, Fail<Stop> {
+  let deps = resolve(m, "");
+  const dir = join(m.dir.asStr(), "tests");
+  let names: Vec<String> = Vec.new();
+  if (isDir(dir.asStr())) {
+    for (const n of try { listDir(dir.asStr()) } catch (e) { throw #Stop(`cannot read ${dir}: ${e}`) }) {
+      if (n.asStr().endsWith(".fly")) { names.push(n.clone()); }
+    }
+  }
+  names.sort();
+  if (names.len() == 0) { println("no tests: each is a program in tests/"); return; }
+  let failed: usize = 0;
+  const flyc = compiler();
+  for (const n of names) {
+    const file = join(dir.asStr(), n.asStr());
+    const base = n.slice(0, n.len() - 4);
+    const exe = join(m.dir.asStr(), `target/tests/${base}`.asStr());
+    const c = `${exe}.c`;
+    const why: Option<String> = try {
+      try { createDirAll(parent(exe.asStr()).asStr()); } catch (e) { throw #Stop(`cannot make ${parent(exe.asStr())}: ${e}`) };
+      compile(deps, strings([flyc.asStr(), file.asStr(), c.asStr(), root().asStr()]), "compiling");
+      check("cc", strings(["-std=gnu11", "-O1", "-w", "-o", exe.asStr(), c.asStr(), "-lm"]), "compiling the C");
+      const o = try { run(exe.asStr(), Vec.new()) } catch (e) { throw #Stop(`cannot run it: ${e}`) };
+      let want = String.new();
+      let expects = false;
+      for (const line of readText(file.asStr()).asStr().lines()) {
+        if (line.startsWith("// expect: ")) { want.push(line.slice(11, line.len())); want.push("\n"); expects = true; }
+        else if (line == "// expect:") { want.push("\n"); expects = true; }
+      }
+      if (o.status != 0) { #Some(`it ended with status ${o.status}:\n${o.out}${o.err}`) }
+      else if (expects && o.out != want) { #Some(`it printed:\n${o.out}which is not what it expects:\n${want}`) }
+      else { #None }
+    } catch (#Stop(w)) { #Some(w) };
+    match (why) {
+      #Some(w) => { failed += 1; println(`FAIL ${base}: ${w.asStr().trimEnd()}`); }
+      #None => println(`ok   ${base}`),
+    }
+  }
+  println(`${names.len() - failed}/${names.len()} passed`);
+  if (failed > 0) { throw #Stop(`${failed} failed`); }
+}
+
+// ---- making, adding, updating, accepting ----
+
+function create(name: str): void uses Io, Fail<Stop> {
+  const dir = absolute(name);
+  if (exists(dir.asStr())) { throw #Stop(`${dir} is there already`); }
+  try { createDirAll(join(dir.asStr(), "tests").asStr()); } catch (e) { throw #Stop(`cannot make ${dir}: ${e}`) };
+  const pkg = fileName(dir.asStr());
+  write(join(dir.asStr(), "fly.toml").asStr(), `[package]\nname = ${quote(pkg.asStr())}\nversion = "0.1.0"\n\n[dependencies]\n`.asStr());
+  write(join(dir.asStr(), "main.fly").asStr(), `import { println } from "std/io";\n\nexport function main(): void uses Io {\n  println("Hello from ${pkg}!");\n}\n`.asStr());
+  write(join(dir.asStr(), "tests/hello.fly").asStr(), "// expect: hello\nimport { println } from \"std/io\";\n\nexport function main(): void uses Io {\n  println(\"hello\");\n}\n");
+  write(join(dir.asStr(), ".gitignore").asStr(), "target/\n");
+  println(`made ${pkg} in ${dir}`);
+}
+
+function add(m: readonly Manifest, name: str, source: str, version: str): void uses Io, Fail<Stop> {
+  for (const d of m.deps.iter()) { if (d.name == name) { throw #Stop(`${name} is a dependency already`); } }
+  const fromGit = source.includes("://") || source.startsWith("git@") || source.endsWith(".git");
+  const line = if (fromGit) {
+    const req: String = if (version.len() > 0) { version.toString() } else {
+      const [v, _] = newest(name, source, "*");
+      if (v.major > 0) { `${v.major}.${v.minor}` } else { `0.${v.minor}.${v.patch}` }
+    };
+    if (parseReq(req.asStr()).isNone()) { throw #Stop(`${req} is not a version requirement`); }
+    `${name} = { git = ${quote(source)}, version = ${quote(req.asStr())} }`
+  } else {
+    if (version.len() > 0) { throw #Stop("a dependency by path has no version".toString()); }
+    `${name} = { path = ${quote(source)} }`
+  };
+  const file = join(m.dir.asStr(), "fly.toml");
+  const text = readText(file.asStr());
+  write(file.asStr(), withDependency(text.asStr(), line.asStr()).asStr());
+  build(readManifest(m.dir.asStr()), true);
+  println(`added ${line}`);
+}
+
+// The manifest's text with a line added at the end of its `[dependencies]`, made if it has none.
+function withDependency(text: str, line: str): String {
+  let lines: Vec<String> = Vec.new();
+  for (const l of text.lines()) { lines.push(l.toString()); }
+  let at: Option<usize> = #None;
+  for (const [i, l] of lines.iter().enumerate()) { if (l.asStr().trim() == "[dependencies]") { at = #Some(i); } }
+  match (at) {
+    #Some(start) => {
+      // After the last line of the table that is not blank.
+      let end = start + 1;
+      let last = start;
+      while (end < lines.len() && !lines[end].asStr().trim().startsWith("[")) {
+        if (lines[end].asStr().trim().len() > 0) { last = end; }
+        end += 1;
+      }
+      lines.insert(last + 1, line.toString());
+    }
+    #None => {
+      if (lines.len() > 0 && lines[lines.len() - 1].len() > 0) { lines.push(String.new()); }
+      lines.push("[dependencies]".toString());
+      lines.push(line.toString());
+    }
+  }
+  let out = String.new();
+  for (const l of lines) { out.push(l.asStr()); out.push("\n"); }
+  out
+}
+
+function update(m: readonly Manifest, name: str): void uses Io, Fail<Stop> {
+  const before = readLock(m.dir.asStr());
+  const fresh = if (name.len() > 0) { name } else { "*" };
+  let deps = resolve(m, fresh);
+  for (const d of deps.iter()) {
+    const l = match (d.locked) { #Some(l) => l, #None => continue };
+    for (const b of before.iter()) {
+      if (b.name == l.name && b.commit != l.commit) { println(`${l.name}: ${b.version} -> ${l.version}`); }
+    }
+  }
+  build(m, true);
+}
+
+function accept(m: readonly Manifest, name: str): void uses Io, Fail<Stop> {
+  let deps = resolve(m, "");
+  let found = false;
+  for (const d of deps.iter()) { if (d.name == name && d.locked.isSome()) { found = true; } }
+  if (!found) { throw #Stop(`${name} is not a dependency from git`); }
+  const entry = if (m.kind == "lib") { m.dir.clone() } else if (m.kind == "site") { join(m.dir.asStr(), join(m.app.asStr(), ".flynext/server.fly").asStr()) } else { join(m.dir.asStr(), m.entry.asStr()) };
+  hold(m, mut deps, entry.asStr(), name);
+  println(`accepted what ${name} performs`);
+}

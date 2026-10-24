@@ -9,20 +9,28 @@
 # `app` is the app's directory (by default `app`), with its pages in `routes/`, the effects pages
 # ask the server for in `api.fly`, how the server answers them in `server.fly`, and its files in
 # `public/`. A build goes to `out`, by default `app/.flynext/build`. The compiler is
-# selfhost/seed.js unless FLY_COMPILER says otherwise. Needs node, a C compiler, and what
-# selfhost/wasm.sh needs.
+# selfhost/seed.js unless FLY_COMPILER says otherwise, its JavaScript or a native build of it, as
+# `fly` gives. Needs node, a C compiler, and what selfhost/wasm.sh needs.
 set -e
 web=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$web/.." && pwd)
 compiler=${FLY_COMPILER:-$root/selfhost/seed.js}
 cmd=${1:-build}
 
+# Runs the compiler: its JavaScript by Node, or a native build of it.
+flyc() {
+  case "$compiler" in
+    *.js) node --stack-size=65500 "$compiler" "$@" ;;
+    *) "$compiler" "$@" ;;
+  esac
+}
+
 # The app compiler, built once and again only when its source has changed.
 gen() {
   bin="$root/target/flynext/flynext-gen"
   mkdir -p "$root/target/flynext"
   if [ ! -x "$bin" ] || [ -n "$(find "$web/flynext.fly" "$root/selfhost/parse.fly" "$root/selfhost/ast.fly" "$root/selfhost/lex.fly" "$compiler" -newer "$bin" 2>/dev/null)" ]; then
-    node --stack-size=65500 "$compiler" "$web/flynext.fly" "$bin.c" "$root"
+    flyc "$web/flynext.fly" "$bin.c" "$root"
     cc -std=gnu11 -O2 -w -o "$bin" "$bin.c" -lm
     rm -f "$bin.c"
   fi
@@ -38,7 +46,7 @@ build() {
   files=$(cd "$app/routes" && find . -name '*.fly' | sort)
   # shellcheck disable=SC2086
   "$(gen)" "$app" "${3:-}" $files || return 1
-  node --stack-size=65500 "$compiler" "$app/.flynext/server.fly" "$out/server.c" "$root" || return 1
+  flyc "$app/.flynext/server.fly" "$out/server.c" "$root" || return 1
   cc -std=gnu11 -O2 -w -o "$out/server" "$out/server.c" -lm || return 1
   rm -f "$out/server.c"
   # The pages' program: a core, and each page's own code a module of its own, loaded as it is shown.

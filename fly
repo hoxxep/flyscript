@@ -1,0 +1,28 @@
+#!/bin/sh
+# fly: builds, runs and tests Flyscript packages (docs/fly.md). This launcher builds the tool and
+# the native compiler into target/fly whenever their source is newer than they are, then runs the
+# tool with FLY_ROOT, the installation, set. Put this directory on PATH to have `fly` everywhere.
+set -e
+root=$(cd "$(dirname "$0")" && pwd)
+out="$root/target/fly"
+mkdir -p "$out"
+# Whether `bin` is older than the compiler's source, the library's, or the runtime.
+stale() {
+  [ ! -x "$1" ] || [ -n "$(find "$root/selfhost" "$root/std" -newer "$1" \( -name '*.fly' -o -name 'runtime.*' -o -name seed.js \) 2>/dev/null | head -1)" ]
+}
+# `program.fly` made `exe` with `compiler`: through LLVM, which uses every core, or through C.
+make() {
+  sh "$root/selfhost/llvm.sh" "$1" "$2" "$3" > "$out/build.log" 2>&1 && return 0
+  case "$1" in
+    *.js) node --stack-size=65500 "$1" "$2" "$3.c" "$root" ;;
+    *) "$1" "$2" "$3.c" "$root" ;;
+  esac && cc -std=gnu11 -O2 -w -o "$3" "$3.c" -lm && rm -f "$3.c"
+}
+if stale "$out/flyc"; then
+  echo "fly: building the compiler" >&2
+  make "$root/selfhost/seed.js" "$root/selfhost/main.fly" "$out/flyc"
+fi
+if stale "$out/fly" || [ "$out/flyc" -nt "$out/fly" ]; then
+  make "$out/flyc" "$root/selfhost/fly.fly" "$out/fly"
+fi
+FLY_ROOT="$root" exec "$out/fly" "$@"

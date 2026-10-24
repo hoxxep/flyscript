@@ -1,0 +1,5 @@
+# The compiler: `fly build` makes it, natively, in target/flyc, from the compiler's own source.
+[package]
+name = "flyc"
+version = "0.111.0"
+entry = "main.fly"

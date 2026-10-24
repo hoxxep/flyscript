@@ -1,0 +1,345 @@
+// TOML, as `fly` reads manifests and lockfiles (docs/fly.md): tables, arrays of tables, dotted
+// keys, basic and literal strings, integers, booleans, arrays and inline tables. Dates and floats,
+// which neither file has, are not read.
+
+export enum Value { #Str(String), #Int(i64), #Bool(bool), #Array(Vec<Value>), #Table(Vec<[String, Value]>) }
+impl Clone for Value;
+impl Show for Value;
+
+export type TomlErr = #BadToml(usize, String);
+
+// The value of `key` in a table.
+export function get(t: readonly Vec<[String, Value]>, key: str): Option<readonly Value> from t {
+  for (const e of t.iter()) { if (e[0] == key) { return #Some(e[1]); } }
+  #None
+}
+
+export function getStr(t: readonly Vec<[String, Value]>, key: str): Option<str> from t {
+  match (get(t, key)) { #Some(#Str(s)) => #Some(s.asStr()), _ => #None }
+}
+
+export function getTable(t: readonly Vec<[String, Value]>, key: str): Option<readonly Vec<[String, Value]>> from t {
+  match (get(t, key)) { #Some(#Table(x)) => #Some(x), _ => #None }
+}
+
+// The document's root table.
+export function parse(text: str): Vec<[String, Value]> uses Fail<TomlErr> {
+  let bytes: Vec<u8> = Vec.new();
+  for (const c of text.bytes()) { bytes.push(c); }
+  let r = Reader { b: bytes, at: 0, line: 1 };
+  let root: Vec<[String, Value]> = Vec.new();
+  // The path of the table the keys go in now; `[[x]]` makes `x`'s last element that table.
+  let current: Vec<String> = Vec.new();
+  while (true) {
+    r.blank();
+    if (r.at >= r.b.len()) { break; }
+    if (r.peek() == b'[') {
+      r.at += 1;
+      const many = r.peek() == b'[';
+      if (many) { r.at += 1; }
+      r.space();
+      const path = r.keyPath();
+      r.space();
+      if (!r.eat(b']') || (many && !r.eat(b']'))) { throw r.bad("a table's header ends in `]`"); }
+      r.endLine();
+      if (many) {
+        // A new table, at the end of the array of that name.
+        if (!pushTable(mut root, path, 0)) { throw r.bad("an array of tables of a name that is not one"); }
+      } else {
+        if (!makeTable(mut root, path, 0)) { throw r.bad("a table of a name that is something else"); }
+      }
+      current = path;
+      continue;
+    }
+    const path = r.keyPath();
+    r.space();
+    if (!r.eat(b'=')) { throw r.bad("a key and its value have `=` between them"); }
+    r.space();
+    const v = r.value();
+    const line = r.line;
+    r.endLine();
+    let full = current.clone();
+    for (const p of path.iter()) { full.push(p.clone()); }
+    if (!insert(mut root, full, 0, v)) { throw #BadToml(line, "a key given twice, or within what is not a table".toString()); }
+  }
+  root
+}
+
+// Makes the table at `path` if it is not there, through the last of an array of tables on the
+// way: false if the way passes through what is not a table.
+function makeTable(t: mut Vec<[String, Value]>, path: readonly Vec<String>, i: usize): bool {
+  if (i >= path.len()) { return true; }
+  for (const e of t.iterMut()) {
+    if (e[0] == path[i]) {
+      return match (e[1]) {
+        #Table(inner) => makeTable(mut inner, path, i + 1),
+        #Array(xs) => match (xs.last()) { #Some(_) => lastTable(mut xs, path, i + 1), #None => false },
+        _ => false,
+      };
+    }
+  }
+  let inner: Vec<[String, Value]> = Vec.new();
+  const ok = makeTable(mut inner, path, i + 1);
+  t.push([path[i].clone(), #Table(inner)]);
+  ok
+}
+
+function lastTable(xs: mut Vec<Value>, path: readonly Vec<String>, i: usize): bool {
+  const n = xs.len();
+  match (xs[n - 1]) {
+    #Table(inner) => makeTable(mut inner, path, i),
+    _ => false,
+  }
+}
+
+// Puts a new table at the end of the array of tables at `path`.
+function pushTable(t: mut Vec<[String, Value]>, path: readonly Vec<String>, i: usize): bool {
+  if (i + 1 == path.len()) {
+    for (const e of t.iterMut()) {
+      if (e[0] == path[i]) {
+        return match (e[1]) {
+          #Array(xs) => { xs.push(#Table(Vec.new())); true }
+          _ => false,
+        };
+      }
+    }
+    t.push([path[i].clone(), #Array([#Table(Vec.new())])]);
+    return true;
+  }
+  for (const e of t.iterMut()) {
+    if (e[0] == path[i]) {
+      return match (e[1]) {
+        #Table(inner) => pushTable(mut inner, path, i + 1),
+        #Array(xs) => {
+          const n = xs.len();
+          if (n == 0) { return false; }
+          match (xs[n - 1]) { #Table(inner) => pushTable(mut inner, path, i + 1), _ => false }
+        }
+        _ => false,
+      };
+    }
+  }
+  let inner: Vec<[String, Value]> = Vec.new();
+  const ok = pushTable(mut inner, path, i + 1);
+  t.push([path[i].clone(), #Table(inner)]);
+  ok
+}
+
+// Puts `v` at `path`, through tables and the last of arrays of tables: false if it is there
+// already, or the way passes through what is not a table.
+function insert(t: mut Vec<[String, Value]>, path: Vec<String>, i: usize, v: Value): bool {
+  if (i + 1 == path.len()) {
+    for (const e of t.iter()) { if (e[0] == path[i]) { return false; } }
+    t.push([path[i].clone(), v]);
+    return true;
+  }
+  for (const e of t.iterMut()) {
+    if (e[0] == path[i]) {
+      return match (e[1]) {
+        #Table(inner) => insert(mut inner, path, i + 1, v),
+        #Array(xs) => {
+          const n = xs.len();
+          if (n == 0) { return false; }
+          match (xs[n - 1]) { #Table(inner) => insert(mut inner, path, i + 1, v), _ => false }
+        }
+        _ => false,
+      };
+    }
+  }
+  let inner: Vec<[String, Value]> = Vec.new();
+  const ok = insert(mut inner, path.clone(), i + 1, v);
+  t.push([path[i].clone(), #Table(inner)]);
+  ok
+}
+
+struct Reader { b: Vec<u8>; at: usize; line: usize }
+
+impl Reader {
+  function bad(self: readonly Self, why: str): TomlErr { #BadToml(self.line, why.toString()) }
+
+  function peek(self: readonly Self): u8 { if (self.at < self.b.len()) { self.b[self.at] } else { 0 } }
+
+  function eat(self: mut Self, c: u8): bool {
+    if (self.peek() == c) { self.at += 1; true } else { false }
+  }
+
+  // Spaces and tabs.
+  function space(self: mut Self): void { while (self.peek() == b' ' || self.peek() == b'\t') { self.at += 1; } }
+
+  // Spaces, line ends and comments.
+  function blank(self: mut Self): void {
+    while (self.at < self.b.len()) {
+      const c = self.peek();
+      if (c == b' ' || c == b'\t' || c == b'\r') { self.at += 1; }
+      else if (c == b'\n') { self.at += 1; self.line += 1; }
+      else if (c == b'#') { while (self.at < self.b.len() && self.peek() != b'\n') { self.at += 1; } }
+      else { break; }
+    }
+  }
+
+  // What may follow a value or a header on its line: spaces and a comment.
+  function endLine(self: mut Self): void uses Fail<TomlErr> {
+    self.space();
+    if (self.peek() == b'#') { while (self.at < self.b.len() && self.peek() != b'\n') { self.at += 1; } }
+    if (self.peek() == b'\r') { self.at += 1; }
+    if (self.at < self.b.len() && !self.eat(b'\n')) { throw self.bad("more on a line than one key and its value"); }
+    self.line += 1;
+  }
+
+  // `a.b."c d"`.
+  function keyPath(self: mut Self): Vec<String> uses Fail<TomlErr> {
+    let path: Vec<String> = [self.key()];
+    while (true) {
+      self.space();
+      if (!self.eat(b'.')) { break; }
+      self.space();
+      path.push(self.key());
+    }
+    path
+  }
+
+  function key(self: mut Self): String uses Fail<TomlErr> {
+    const c = self.peek();
+    if (c == b'"') { return self.basic(); }
+    if (c == b'\'') { return self.literal(); }
+    const start = self.at;
+    while (true) {
+      const d = self.peek();
+      if (!((d >= b'a' && d <= b'z') || (d >= b'A' && d <= b'Z') || (d >= b'0' && d <= b'9') || d == b'_' || d == b'-')) { break; }
+      self.at += 1;
+    }
+    if (self.at == start) { throw self.bad("a key is letters, digits, `_` and `-`, or quoted"); }
+    self.text(start, self.at)
+  }
+
+  function text(self: readonly Self, from: usize, to: usize): String {
+    let v: Vec<u8> = Vec.new();
+    for (const i of from..to) { v.push(self.b[i]); }
+    match (String.fromUtf8(v)) { #Some(s) => s, #None => String.new() }
+  }
+
+  function value(self: mut Self): Value uses Fail<TomlErr> {
+    const c = self.peek();
+    if (c == b'"') { return #Str(self.basic()); }
+    if (c == b'\'') { return #Str(self.literal()); }
+    if (c == b'[') {
+      self.at += 1;
+      let xs: Vec<Value> = Vec.new();
+      while (true) {
+        self.blank();
+        if (self.eat(b']')) { break; }
+        xs.push(self.value());
+        self.blank();
+        if (self.eat(b']')) { break; }
+        if (!self.eat(b',')) { throw self.bad("an array's values have `,` between them"); }
+      }
+      return #Array(xs);
+    }
+    if (c == b'{') {
+      self.at += 1;
+      let t: Vec<[String, Value]> = Vec.new();
+      self.space();
+      if (self.eat(b'}')) { return #Table(t); }
+      while (true) {
+        self.space();
+        const path = self.keyPath();
+        self.space();
+        if (!self.eat(b'=')) { throw self.bad("a key and its value have `=` between them"); }
+        self.space();
+        const v = self.value();
+        if (!insert(mut t, path, 0, v)) { throw self.bad("a key given twice in an inline table"); }
+        self.space();
+        if (self.eat(b'}')) { break; }
+        if (!self.eat(b',')) { throw self.bad("an inline table's keys have `,` between them"); }
+      }
+      return #Table(t);
+    }
+    if (self.matches("true")) { self.at += 4; return #Bool(true); }
+    if (self.matches("false")) { self.at += 5; return #Bool(false); }
+    if (c == b'-' || c == b'+' || (c >= b'0' && c <= b'9')) {
+      const negative = self.eat(b'-');
+      if (!negative) { self.eat(b'+'); }
+      let n: i64 = 0;
+      let any = false;
+      while (true) {
+        const d = self.peek();
+        if (d == b'_') { self.at += 1; continue; }
+        if (d < b'0' || d > b'9') { break; }
+        if (n > 922337203685477580) { throw self.bad("an integer too large"); }
+        n = n * 10 + ((d - b'0') as i64);
+        self.at += 1;
+        any = true;
+      }
+      if (!any) { throw self.bad("a bad number"); }
+      return #Int(if (negative) { -n } else { n });
+    }
+    throw self.bad("a value is a string, an integer, a boolean, an array or an inline table")
+  }
+
+  function matches(self: readonly Self, word: str): bool {
+    const w = word.asBytes();
+    if (self.at + w.len() > self.b.len()) { return false; }
+    for (const [i, c] of w.iter().enumerate()) { if (self.b[self.at + i] != c) { return false; } }
+    true
+  }
+
+  // `"..."`, with its escapes.
+  function basic(self: mut Self): String uses Fail<TomlErr> {
+    self.at += 1;
+    let v: Vec<u8> = Vec.new();
+    while (true) {
+      if (self.at >= self.b.len() || self.peek() == b'\n') { throw self.bad("an unclosed string"); }
+      const c = self.peek();
+      self.at += 1;
+      if (c == b'"') { break; }
+      if (c != b'\\') { v.push(c); continue; }
+      const e = self.peek();
+      self.at += 1;
+      if (e == b'n') { v.push(10); }
+      else if (e == b't') { v.push(9); }
+      else if (e == b'r') { v.push(13); }
+      else if (e == b'"' || e == b'\\') { v.push(e); }
+      else if (e == b'u' || e == b'U') {
+        const n: usize = if (e == b'u') { 4 } else { 8 };
+        let cp: u32 = 0;
+        for (const _ of 0..n) {
+          const d = self.peek();
+          const x: u32 = if (d >= b'0' && d <= b'9') { (d - b'0') as u32 } else if (d >= b'a' && d <= b'f') { (d - 87) as u32 } else if (d >= b'A' && d <= b'F') { (d - 55) as u32 } else { throw self.bad("a bad `\\u` escape") };
+          cp = cp * 16 + x;
+          self.at += 1;
+        }
+        utf8(mut v, cp);
+      } else { throw self.bad("an unknown escape"); }
+    }
+    match (String.fromUtf8(v)) { #Some(s) => s, #None => throw self.bad("a string that is not UTF-8") }
+  }
+
+  // `'...'`, as it is.
+  function literal(self: mut Self): String uses Fail<TomlErr> {
+    self.at += 1;
+    const start = self.at;
+    while (self.at < self.b.len() && self.peek() != b'\'' && self.peek() != b'\n') { self.at += 1; }
+    if (!self.eat(b'\'')) { throw self.bad("an unclosed string"); }
+    self.text(start, self.at - 1)
+  }
+}
+
+function utf8(v: mut Vec<u8>, cp: u32): void {
+  if (cp < 0x80) { v.push(cp as u8); }
+  else if (cp < 0x800) { v.push((0xC0 | (cp >> 6)) as u8); v.push((0x80 | (cp & 0x3F)) as u8); }
+  else if (cp < 0x10000) { v.push((0xE0 | (cp >> 12)) as u8); v.push((0x80 | ((cp >> 6) & 0x3F)) as u8); v.push((0x80 | (cp & 0x3F)) as u8); }
+  else { v.push((0xF0 | (cp >> 18)) as u8); v.push((0x80 | ((cp >> 12) & 0x3F)) as u8); v.push((0x80 | ((cp >> 6) & 0x3F)) as u8); v.push((0x80 | (cp & 0x3F)) as u8); }
+}
+
+// A string as TOML writes it.
+export function quote(s: str): String {
+  let out: Vec<u8> = [b'"'];
+  for (const c of s.bytes()) {
+    if (c == b'"' || c == b'\\') { out.push(b'\\'); out.push(c); }
+    else if (c == 10) { out.push(b'\\'); out.push(b'n'); }
+    else if (c == 9) { out.push(b'\\'); out.push(b't'); }
+    else { out.push(c); }
+  }
+  out.push(b'"');
+  match (String.fromUtf8(out)) { #Some(t) => t, #None => String.new() }
+}

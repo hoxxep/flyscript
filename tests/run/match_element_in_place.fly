@@ -1,0 +1,33 @@
+// expect: [#N(1), #L([1, 9])]
+// expect: { at: { end: 2, start: 1 } } []
+// A match on an element lent `mut` changes it where it is; a `Copy` part it binds, put in a
+// record, is a copy, which the record keeps however the element changes after (§4.1).
+import { println } from "std/io";
+type Span = { start: usize; end: usize };
+enum V { #N(i64), #L(Vec<i64>) }
+impl Show for V;
+
+function grow(xs: mut Vec<V>): void {
+  const n = xs.len();
+  match (xs[n - 1]) { #L(inner) => inner.push(9), _ => {} }
+}
+
+function report(spans: mut Vec<Option<Span>>): { at: Span } {
+  match (spans[0]) {
+    #Some(at) => {
+      const r: { at: Span } = { at };
+      spans.truncate(0);
+      r
+    }
+    #None => { { at: { start: 0, end: 0 } } }
+  }
+}
+
+export function main(): void uses Io {
+  let xs: Vec<V> = [#N(1), #L([1])];
+  grow(mut xs);
+  println(`${xs}`);
+  let spans: Vec<Option<Span>> = [#Some({ start: 1, end: 2 })];
+  const r = report(mut spans);
+  println(`${r} ${spans}`);
+}

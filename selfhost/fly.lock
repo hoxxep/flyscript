@@ -1,0 +1,3 @@
+# Written by fly: each dependency's exact source and content, and what its exported functions
+# perform, which a build holds it to (docs/fly.md). `fly update` and `fly accept` change it.
+version = 1

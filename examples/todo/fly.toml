@@ -1,0 +1,10 @@
+# The example site: `fly build` makes its server and its pages' program in target/site, and
+# `target/site/server 8080 target/site` serves them.
+[package]
+name = "todo"
+version = "0.1.0"
+kind = "site"
+app = "app"
+
+[dependencies]
+web = { path = "../../web" }

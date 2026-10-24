@@ -989,17 +989,25 @@ impl Interp {
                 },
             },
             ExprKind::Tag { name, args } => {
+                // The payload's type, where the tag's union says it.
+                let payload_ty = match self.ty_of(e.span).map(|t| self.frame_ty(&t)) {
+                    Some(Ty::Union(row)) => row.labels.get(name).cloned(),
+                    _ => None,
+                };
                 let payload = match args {
                     TagArgs::None => Value::Unit,
                     TagArgs::Tuple(items) if self.prog.typed.get(&self.lex.owner).is_some_and(|t| t.whole.contains(&e.span)) => {
                         self.owned_all(items, env)?.into_iter().next().unwrap_or(Value::Unit)
                     }
                     TagArgs::Tuple(items) => Value::Tuple(self.owned_all(items, env)?.into()),
-                    TagArgs::Record(fields) => self.record(fields, env)?,
+                    TagArgs::Record(fields) => self.record(fields, env, payload_ty)?,
                 };
                 Ok(Value::tag(name, payload))
             }
-            ExprKind::Record { fields, .. } => self.record(fields, env),
+            ExprKind::Record { fields, .. } => {
+                let ty = self.ty_of(e.span).map(|t| self.frame_ty(&t));
+                self.record(fields, env, ty)
+            }
             ExprKind::List(items) => {
                 let vs = self.owned_all(items, env)?;
                 Ok(match self.ty_of(e.span) {
@@ -1153,9 +1161,13 @@ impl Interp {
             ExprKind::Match { scrutinee, arms } => {
                 // A place is matched where it is: an arm that takes what it binds moves it out,
                 // and any other borrows it, writing in place through a `mut` borrow (§4.1).
-                let place = match self.place_fields(scrutinee) {
-                    Some(_) => Some(self.place(scrutinee, env)?),
-                    None => None,
+                // An element, `xs[i]`, lent `mut`, too: an arm changes it where it is, as the
+                // compiled code does.
+                let lent_mut = self.prog.typed.get(&self.lex.owner).is_some_and(|t| t.lent_scrutinees.get(&scrutinee.span) == Some(&true));
+                let place = if self.place_fields(scrutinee).is_some() || (lent_mut && matched_in_place(scrutinee)) {
+                    Some(self.place(scrutinee, env)?)
+                } else {
+                    None
                 };
                 let v = match &place {
                     Some(p) => get(p),
@@ -1227,16 +1239,32 @@ impl Interp {
         }
     }
 
-    fn record(&mut self, fields: &[ast::FieldInit], env: &Env) -> R {
+    /// A record literal of type `ty`, if it is known.
+    fn record(&mut self, fields: &[ast::FieldInit], env: &Env, ty: Option<Ty>) -> R {
         let mut out = std::collections::BTreeMap::new();
+        let labels = match ty {
+            Some(Ty::Record(row)) => Some(row.labels),
+            _ => None,
+        };
         for f in fields {
             let v = match &f.value {
                 Some(x) => self.expr(x, env)?,
                 None => lookup(env, &f.name.name).map(|c| c.lock().expect("cell").clone()).unwrap_or(Value::Unit),
             };
-            out.insert(f.name.name.clone(), v);
+            let want = labels.as_ref().and_then(|ls| ls.get(&f.name.name)).cloned();
+            out.insert(f.name.name.clone(), self.held(v, want));
         }
         Ok(Value::Record(out.into()))
+    }
+
+    /// A value as a literal holds it, as a field of type `want`: a borrow of a `Copy` value where
+    /// the field holds the value — the checker copied it out of a binding made by matching through
+    /// a borrow, say — is read, so that the literal keeps it whatever later happens to the place.
+    fn held(&self, v: Value, want: Option<Ty>) -> Value {
+        match (&v, want) {
+            (Value::Ptr(p), Some(t)) if !matches!(t, Ty::Borrow(..)) && self.prog.is_copy(&t) => get(p),
+            _ => v,
+        }
     }
 
     fn owned_all(&mut self, items: &[Expr], env: &Env) -> Result<Vec<Value>, Ctl> {
@@ -1682,6 +1710,17 @@ impl Interp {
             }
             _ => None,
         }
+    }
+}
+
+/// Whether `e` denotes a place — a binding, a field of one, an element of one — so that a `match`
+/// on it borrows it rather than copying it.
+fn matched_in_place(e: &Expr) -> bool {
+    match &e.kind {
+        ExprKind::Ident(_) => true,
+        ExprKind::Field { target, .. } => matched_in_place(target),
+        ExprKind::Index { target, index } => !matches!(index.kind, ExprKind::Range { .. }) && matched_in_place(target),
+        _ => false,
     }
 }
 

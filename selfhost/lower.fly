@@ -1559,9 +1559,13 @@ impl Lower {
       const ft: Ty = match (fs.iter().find(([k, _]) => k == f.name.name)) { #Some([_, x]) => x.clone(), #None => #Error };
       const v = match (f.value) {
         #Some(x) => self.exAs(x, ft),
-        // A punned field takes the binding it names.
+        // A punned field takes the binding it names; a borrow of what the field holds by value is
+        // read through, as `{ at: at }` reads it.
         #None => match (self.lookup(f.name.name.asStr())) {
-          #Some(var) => if (self.owned(var.ty)) { #Move(var.place) } else { #Copy(var.place) },
+          #Some(var) => match ([var.ty.clone(), ft.clone()]) {
+            [#Borrow(_, _), want] if !isBorrow(want) => self.through(#Copy(var.place.clone()), var.ty.clone()),
+            _ => if (self.owned(var.ty)) { #Move(var.place) } else { #Copy(var.place) },
+          },
           #None => self.fail(f.name.span, `unknown name \`${f.name.name}\``),
         },
       };

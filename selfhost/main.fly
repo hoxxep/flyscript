@@ -14,7 +14,10 @@ import { jsProgram } from "./js";
 import { llvmProgram } from "./llvm";
 import { watch } from "./watch";
 import { coreProgram } from "./core";
+import { lex, Tok } from "./lex";
+import { writeEffs } from "./types";
 import { File, println, eprintln, writeFile, exit } from "std/io";
+import { isDir, listDir, join } from "std/fs";
 
 // What stops a compilation: diagnostics, or a file that cannot be read or written.
 type Stop = #Failed | #Unreadable { path: String };
@@ -49,9 +52,58 @@ impl Clock {
   }
 }
 
-function compile(entry: str, out: str, root: str, freestanding: bool, ptr: usize, time: bool, core: Option<String>): void uses Io, Fail<Stop> {
+// `--interface`: what each module but the standard library's offers, for `fly`'s lockfile to hold
+// a package to (docs/fly.md): `module` and its file, `unsafe` if it vouches for raw pointers or
+// foreign code — an `unsafe` block, an `extern` function — then `fn` and each exported function,
+// a method by its type, with the effects it declares, in order.
+function interfaceOf(p: readonly Program): String {
+  const names = p.defNames();
+  let out = String.new();
+  for (const [m, info] of p.modules.iter().enumerate()) {
+    if (info.isStd) { continue; }
+    out.push(`module ${info.file}\n`);
+    const vouches = try {
+      lex(info.source.asStr()).iter().some((t) => t.tok == #Kw("unsafe".toString()) || t.tok == #Kw("extern".toString()))
+    } catch (_) { true };
+    if (vouches) { out.push("unsafe\n"); }
+    let fns: Vec<String> = Vec.new();
+    for (const f of p.fns.iter()) {
+      if (f.module != m || !f.exported) { continue; }
+      let line = match (f.implId) { #Some(i) => `fn ${p.show(p.impls[i].target)}.${f.name}:`, #None => `fn ${f.name}:` };
+      if (const #Some(r) = f.scheme.effects) {
+        if (r.effs.len() > 0 || r.tail != #Closed) {
+          line.push(" ");
+          writeEffs(r, names, mut line);
+        }
+      }
+      fns.push(line);
+    }
+    fns.sort();
+    for (const l of fns) { out.push(l); out.push("\n"); }
+  }
+  out
+}
+
+// The modules of a package's directory, for `--interface`: every `.fly` file under it but those of
+// its tests and what it builds.
+function packageFiles(dir: str, out: mut Vec<String>): void uses Io {
+  const names = try { listDir(dir) } catch (_) { return };
+  for (const n of names) {
+    const path = join(dir, n.asStr());
+    if (isDir(path.asStr())) {
+      if (n != "tests" && n != "target" && !n.asStr().startsWith(".")) { packageFiles(path.asStr(), mut out); }
+    } else if (n.asStr().endsWith(".fly") && !n.asStr().endsWith(".d.fly")) {
+      out.push(path);
+    }
+  }
+}
+
+function compile(entry: str, out: str, root: str, freestanding: bool, ptr: usize, time: bool, core: Option<String>, interfaces: bool): void uses Io, Fail<Stop> {
   let clock = Clock { on: time, at: Io.now() };
-  let p = Program.load([entry.toString()], `${root}/std`.asStr());
+  // With `--interface`, an entry that is a directory is a package with no program: all of it.
+  let entries: Vec<String> = Vec.new();
+  if (interfaces && isDir(entry)) { packageFiles(entry, mut entries); } else { entries.push(entry.toString()); }
+  let p = Program.load(entries, `${root}/std`.asStr());
   clock.lap("load");
   if (p.diags.len() == 0) {
     let fid: usize = 0;
@@ -69,6 +121,10 @@ function compile(entry: str, out: str, root: str, freestanding: bool, ptr: usize
   if (p.diags.len() > 0) {
     report(p);
     throw #Failed;
+  }
+  if (interfaces) {
+    try { writeFile(out, interfaceOf(p).asStr()); } catch (_) { throw #Unreadable { path: out.toString() } };
+    return;
   }
   // `--core=root`: the program `root` reaches, elaborated into λ-fly, for the proof to certify.
   if (const #Some(root) = core) {
@@ -122,6 +178,7 @@ function compile(entry: str, out: str, root: str, freestanding: bool, ptr: usize
 // `--time`: how long each phase took, on standard error.
 // `--watch`: compiled to C again whenever a module changes, until stopped (watch.fly).
 // `--core=root`: the program `root` reaches, as λ-fly in Lean, for the proof to certify (core.fly).
+// `--interface`: what each module but the standard library's offers, for `fly` (`interfaceOf`).
 export function main(entry: str, out: str, root: str, flags: readonly String[]): void uses Io {
   try {
     const ptr: usize = if (flags.iter().some((f) => f == "--wasm32")) { 4 } else { 8 };
@@ -135,7 +192,7 @@ export function main(entry: str, out: str, root: str, flags: readonly String[]):
       watch(entry, out, root, `${h}\n${c.asStr().replaceAll("#include \"runtime.h\"", "")}`.asStr());
     }
     const core: Option<String> = match (flags.iter().find((f) => f.startsWith("--core="))) { #Some(f) => #Some(f.slice(7, f.len()).toString()), #None => #None };
-    compile(entry, out, root, flags.iter().some((f) => f == "--freestanding"), ptr, flags.iter().some((f) => f == "--time"), core);
+    compile(entry, out, root, flags.iter().some((f) => f == "--freestanding"), ptr, flags.iter().some((f) => f == "--time"), core, flags.iter().some((f) => f == "--interface"));
   } catch (e) {
     match (e) {
       #Failed => {}

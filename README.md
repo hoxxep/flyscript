@@ -90,8 +90,19 @@ The compiler is written in Flyscript and compiles itself — to JavaScript, to n
 - [A site](examples/todo/) — a list of things to do: a native server rendering pages, and a WebAssembly program for each page that takes it over, both from the same views.
 - [A kernel](examples/kernel/) — Flyscript with no operating system under it, booting on QEMU: page tables, a UART driven through its registers, its own memory allocator, effect handlers on fibers.
 - [Example programs](examples/) — a JSON parser, derived JSON encoding and decoding, an inventory service, a web server, a key–value actor, a browser UI, generators, parallel physics.
+- [fly](docs/fly.md) — one command to make, build, run and test packages, and a lockfile that holds every dependency to the power it was accepted with.
 - [The roadmap](docs/roadmap.md) — what comes next, and why in that order.
 - [The self-hosted compiler](selfhost/) — a lexer, parser, type and effect checker, `comptime` interpreter, and JavaScript, C and LLVM back ends, in Flyscript.
+
+## Packages, with fly
+
+```sh
+./fly new hello && cd hello
+../fly run                          # Hello from hello!
+../fly add json https://github.com/example/fly-json
+```
+
+`fly` fetches dependencies from git by version, and its lockfile records each one's commit, a hash of its files, and what its exported functions perform. A dependency whose update starts performing `Io` or calling C — a JSON parser reaching for the network — stops the build until someone reads the change and accepts it. Types already say what code can do; `fly` makes your dependencies keep their word.
 
 ## Build from source
 

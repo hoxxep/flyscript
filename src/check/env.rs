@@ -333,7 +333,7 @@ impl Program {
                     if is_relative(from) {
                         queue.push(normalize(&path.parent().unwrap_or(Path::new(".")).join(format!("{from}.fly"))));
                     } else if !from.starts_with("std/") {
-                        queue.push(normalize(&package_root().join(format!("{from}.fly"))));
+                        queue.push(normalize(&package_file(&format!("{from}.fly"))));
                     }
                 }
             }
@@ -551,7 +551,7 @@ impl Program {
                     self.module_named(from)
                 } else {
                     // A package's module is known by its file, however it was reached.
-                    self.module_named(&normalize(&package_root().join(from)).to_string_lossy())
+                    self.module_named(&normalize(&package_file(from)).to_string_lossy())
                 };
                 let Some(target) = target else {
                     self.error(m, item.span, format!("no module `{from}`"));
@@ -1378,9 +1378,20 @@ impl Program {
     }
 }
 
-/// Where packages are found: the installation, beside its `std` (§8.1).
-fn package_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+/// Where a package's module is: in the directory the build names for the package, in
+/// `FLY_PACKAGES` (`name=dir:name=dir`, as `fly` sets it), or else the installation's, beside its
+/// `std` (§8.1). `path` is the import's, `web/ui`, or its file's, `web/ui.fly`.
+fn package_file(path: &str) -> PathBuf {
+    let (name, rest) = path.split_once('/').unwrap_or((path, ""));
+    if let Ok(map) = std::env::var("FLY_PACKAGES") {
+        for entry in map.split(':') {
+            if let Some((n, dir)) = entry.split_once('=')
+                && n == name {
+                    return PathBuf::from(dir).join(rest);
+                }
+        }
+    }
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(path)
 }
 
 fn is_relative(import: &str) -> bool {

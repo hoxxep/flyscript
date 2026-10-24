@@ -1,6 +1,6 @@
 # Roadmap
 
-Flyscript compiled itself, to JavaScript and to C, when this roadmap was written. Its steps take it from a self-hosted language to a systems platform: one intermediate form under every back end, kernels, LLVM, WebAssembly, every core of the machine, and a web framework that shows what all of it buys. Steps 0 to 10 are done, and each says what was built; the others are next.
+Flyscript compiled itself, to JavaScript and to C, when this roadmap was written. Its steps take it from a self-hosted language to a systems platform: one intermediate form under every back end, kernels, LLVM, WebAssembly, every core of the machine, and a web framework that shows what all of it buys. Steps 0 to 11 are done, and each says what was built; the last is next.
 
 ## 0. One core IR under every back end
 
@@ -109,13 +109,13 @@ The proof covers λ-fly; the compiler's checker was held to it by tests alone. N
 
 ## 11. Packages, a lockfile and `fly`
 
-*Next.*
+*Done: `fly new`, `build`, `run`, `test`, `add`, `update` and `accept` ([fly.md](fly.md)); the example site and the compiler build from their manifests, an update that adds an effect stops the build, and two builds from one lockfile are the same, byte for byte.*
 
-- One command, `fly`, in place of the scripts: `new`, `build`, `run`, `test` and `add`.
-- `fly.toml` names a package and its dependencies, fetched from git by semantic version tag; a registry can come later.
-- `fly.lock` records the exact commit and the hash of the content of every dependency, so that a build is the same wherever it is made.
-- The lockfile also records the effects each dependency's exported functions perform, which their types already say: an update after which a package performs `Io` or `Unsafe` where it did not is shown, and stops the build, until it is accepted. A package's types are a statement of what it can do, and its lockfile holds it to that statement.
-- Done when the example site and the compiler build with `fly` from their manifests, a dependency's update that adds an effect stops the build, and two builds from one lockfile are the same.
+- `fly` is a Flyscript program, `selfhost/fly.fly`, with a reader of TOML of its own; the launcher in the repository's root builds it and the native compiler when their source changes.
+- `fly.toml` names a package, its kind — a program, a library or a site — and its dependencies, from git by a semantic version requirement, or by path. Both compilers find a package's modules where the build says it is, by `FLY_PACKAGES` (spec §8.1).
+- `fly.lock` records each dependency's version, the commit its tag named, and SHA-256 of its files, which every build checks; a commit is fetched once, into `FLY_HOME`.
+- It records too what each exported function performs, from the compiler's `--interface`, and whether the package vouches for unchecked code. An update after which a function performs `Io` or `Unsafe` where it did not, or a module has an `unsafe` block or an `extern` function where none did, stops the build and says where, until `fly accept` records it.
+- `tests/fly.rs` makes a package and a repository to depend on, adds it, runs the package's tests, updates the dependency into `Io` and into foreign code and sees both stopped, changes its fetched files and sees that stopped, and builds twice from one lockfile, fetching afresh the second time, to the same bytes; and builds the site and the compiler from their manifests.
 
 ## 12. The runtime in Flyscript
 
