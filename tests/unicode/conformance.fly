@@ -1,0 +1,67 @@
+// Unicode's own tests of std/unicode: `conformance GraphemeBreakTest.txt NormalizationTest.txt` prints
+// how many cases of each pass, and the first that fail (tests/selfhost.rs).
+import { File, println } from "std/io";
+import { graphemes, nfc, nfd, fromCodePoints } from "std/unicode";
+
+function hex(s: str): u32 {
+  let v: u32 = 0;
+  for (const b of s.asBytes()) {
+    const d: u32 = if (b >= 48 && b <= 57) { (b - 48) as u32 } else if (b >= 65 && b <= 70) { (b - 55) as u32 } else { (b - 87) as u32 };
+    v = v * 16 + d;
+  }
+  v
+}
+
+function text(field: str): String {
+  let cps: Vec<u32> = Vec.new();
+  for (const w of field.splitWhitespace()) { cps.push(hex(w)); }
+  fromCodePoints(cps)
+}
+
+export function main(breaks: str, forms: str): void uses Io, Fail<IoErr> {
+  let pass: usize = 0;
+  let fail: usize = 0;
+  let f = File.open(breaks);
+  for (const full of f.lines()) {
+    if (!full.startsWith("÷")) { continue; }
+    const line = full.split("#")[0].clone();
+    // `÷` before a cluster, `×` within one.
+    let want: Vec<String> = Vec.new();
+    let cur: Vec<u32> = Vec.new();
+    let all: Vec<u32> = Vec.new();
+    for (const w of line.splitWhitespace()) {
+      if (w == "÷") {
+        if (cur.len() > 0) { want.push(fromCodePoints(cur)); cur = Vec.new(); }
+      } else if (w != "×" && w.len() > 0) {
+        const cp = hex(w);
+        cur.push(cp);
+        all.push(cp);
+      }
+    }
+    const s = fromCodePoints(all);
+    let got: Vec<String> = Vec.new();
+    for (const g of graphemes(s.asStr())) { got.push(g.toString()); }
+    if (got == want) { pass += 1; } else {
+      fail += 1;
+      if (fail <= 5) { println(`grapheme failure: ${line}`); }
+    }
+  }
+  println(`graphemes ${pass}/${pass + fail}`);
+  pass = 0;
+  fail = 0;
+  let g = File.open(forms);
+  for (const full of g.lines()) {
+    if (full.startsWith("#") || full.startsWith("@")) { continue; }
+    const line = full.split("#")[0].clone();
+    let c: Vec<String> = Vec.new();
+    for (const field of line.split(";")) { if (c.len() < 5) { c.push(text(field.asStr())); } }
+    if (c.len() < 5) { continue; }
+    const ok = nfc(c[0].asStr()) == c[1] && nfc(c[1].asStr()) == c[1] && nfc(c[2].asStr()) == c[1] && nfc(c[3].asStr()) == c[3] && nfc(c[4].asStr()) == c[3]
+      && nfd(c[0].asStr()) == c[2] && nfd(c[1].asStr()) == c[2] && nfd(c[2].asStr()) == c[2] && nfd(c[3].asStr()) == c[4] && nfd(c[4].asStr()) == c[4];
+    if (ok) { pass += 1; } else {
+      fail += 1;
+      if (fail <= 5) { println(`normalization failure: ${line}`); }
+    }
+  }
+  println(`normalization ${pass}/${pass + fail}`);
+}

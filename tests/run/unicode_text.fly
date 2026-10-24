@@ -1,0 +1,43 @@
+// expect: 18.0.0
+// expect: 5 [104, 233, 108, 108, 111] héllo
+// expect: é|👩‍👩‍👧 2
+// expect: 🇬🇧|🇫🇷|🇩
+// expect: क्‍षि|क
+// expect: true false true false
+// expect: true 1 true
+// expect: ΣΊΣΥΦΟΣ σίσυφος STRASSE ǆ
+// Unicode (std/unicode): text as code points, as the grapheme clusters a reader sees, in its normal
+// forms, and in its cases.
+import { println } from "std/io";
+import { version, codePoints, fromCodePoints, graphemes, graphemeCount, nfc, nfd, isNfc, isNfd, lower, upper } from "std/unicode";
+
+function clusters(s: str): String {
+  let out = String.new();
+  for (const g of graphemes(s)) {
+    if (out.len() > 0) { out.push("|"); }
+    out.push(g);
+  }
+  out
+}
+
+export function main(): void uses Io {
+  println(version());
+  let cps: Vec<u32> = Vec.new();
+  for (const cp of codePoints("héllo")) { cps.push(cp); }
+  println(`${cps.len()} ${cps} ${fromCodePoints(cps)}`);
+  // `e` and a combining acute are one cluster; a family joined by ZWJ is another.
+  const family = "e\u{301}\u{1F469}\u{200D}\u{1F469}\u{200D}\u{1F467}";
+  println(`${clusters(family)} ${graphemeCount(family)}`);
+  // Regional indicators pair up; a lone one is its own cluster.
+  println(clusters("\u{1F1EC}\u{1F1E7}\u{1F1EB}\u{1F1F7}\u{1F1E9}"));
+  // A virama between consonants joins them (GB9c), and a spacing mark stays with what it follows;
+  // a consonant after a vowel sign starts a cluster.
+  println(clusters("\u{915}\u{94D}\u{200D}\u{937}\u{93F}\u{915}"));
+  const composed = "\u{E9}";
+  const decomposed = "e\u{301}";
+  println(`${isNfc(composed)} ${isNfc(decomposed)} ${isNfd(decomposed)} ${isNfd(composed)}`);
+  // Hangul is composed and decomposed by arithmetic: 한 is three jamo, which are one cluster.
+  println(`${nfd("한") == "\u{1112}\u{1161}\u{11AB}"} ${graphemeCount(nfd("한"))} ${nfc(nfd("한글")) == "한글"}`);
+  // A final sigma lowers to ς; ß uppers to two letters; a titlecase digraph lowers.
+  println(`${upper("σίσυφος")} ${lower("ΣΊΣΥΦΟΣ")} ${upper("straße")} ${lower("ǅ")}`);
+}

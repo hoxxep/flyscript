@@ -259,7 +259,24 @@ Instants of the time of day, dates and times of the calendar, time zones and ISO
 
 ---
 
-## 8. `std/net`
+## 8. `std/unicode`
+
+Text as Unicode sees it: its code points, the characters a reader sees in it — *grapheme clusters*, as UAX #29 finds them — its normal forms NFC and NFD (UAX #15), and its cases. Every function is pure, and its tables are the Unicode Character Database's, of the version `version()` names; the repository checks them against that version's own tests of clusters and of normalization.
+
+| | Contract |
+| :--- | :--- |
+| `version(): str` | The version of Unicode the tables are of, `"18.0.0"`. |
+| `codePoints(s)` | Yields the code points of `s`, in order: a generator, `uses Yield<u32>`. |
+| `fromCodePoints(cps): String` | Text of the code points, each as UTF-8; a surrogate or a number past U+10FFFF as U+FFFD. |
+| `graphemes(s)` | Yields each grapheme cluster of `s` as a `str` lent from it, in order, by the extended clusters' rules: a letter and its marks, a pair of regional indicators, an emoji sequence joined by U+200D, a Hangul syllable of jamo, an Indic conjunct (rule GB9c) are each one. Linear in `s`. |
+| `graphemeCount(s): usize` | How many clusters `graphemes(s)` yields. |
+| `nfd(s): String`, `nfc(s): String` | `s` decomposed canonically, its marks in canonical order, and, for NFC, composed again; Hangul by arithmetic. Linear in `s`, but for a run of marks, which is sorted. |
+| `isNfd(s)`, `isNfc(s)` | Whether `s` is in that form already. |
+| `lower(s): String`, `upper(s): String` | The full, unconditional case mappings of SpecialCasing, `upper("straße")` `"STRASSE"`, and the final sigma: a capital sigma lowers to `ς` at the end of a word, after a cased letter and not before one, `case-ignorable` characters between. They depend on no locale, so the Turkish and Lithuanian rules are not applied. `str`'s own `toUpperCase` and `toLowerCase` change ASCII alone. |
+
+---
+
+## 9. `std/net`
 
 TCP. Every operation that waits for the network performs `Io` and is a scheduling point; a task waiting for a socket gives its core to others until the kernel says the socket is ready.
 
@@ -285,7 +302,7 @@ Against a simulated world, a listener's connections are the world's requests, a 
 
 ---
 
-## 9. `std/par`
+## 10. `std/par`
 
 Data parallelism over pure closures (spec §6.5).
 
@@ -296,19 +313,19 @@ Data parallelism over pure closures (spec §6.5).
 
 ---
 
-## 10. `std/layout`
+## 11. `std/layout`
 
 `Soa<T>` keeps a struct's fields in planes, one for each field: a `Vec` for a scalar field and a nested `Soa` for a struct field (spec §7.4). It has `Soa.new()`, `push(v)`, `len()`, `at(i)`, a `SoaView` that lends each field of one element, and `splitAt(at)`; `SoaSlice`, `SoaView` and `SoaRead` are its `ParSplit` views.
 
 ---
 
-## 11. `std/region`
+## 12. `std/region`
 
 Mutable slots in a region (spec §4.6). `Cell<R, T extends Copy>`: `Cell.new(v)`, `c.get()`, `c.set(v)`. `RegionList<R, T>`: `RegionList.new()`, `push(v)`, `len()`, and iteration. Both are handles, `Copy`; reading and writing through one performs `Region<R>`.
 
 ---
 
-## 12. `std/json`
+## 13. `std/json`
 
 JSON as library code (spec §7.5).
 
@@ -319,12 +336,12 @@ JSON as library code (spec §7.5).
 
 ---
 
-## 13. `std/world`
+## 14. `std/world`
 
 Services only a simulated world provides (spec §6.4), for examples and tests: `Db.connect(): Db`; `db.fetchProfile(user): Profile`, where a `Profile` is `{ displayName: String }`, failing with `#NotFound` for a user the world does not know; and `db.checkQuota(token): Quota`, where a `Quota` is `{ allowed: bool }`. Each performs `Io` and may fail as the world's faults say.
 
 ---
 
-## 14. The web framework
+## 15. The web framework
 
 The web framework, FlyNext, is a package shipped with the compiler and specified in [web/README.md](../web/README.md): `web/http` (requests, responses and `serve`), `web/ui` (the `Ui<M>` effect, links, components and HTML), `web/dom` (pages in the browser), `web/router` (routes and their parameters) and `web/site` (pages and files answered), with the app compiler `web/flynext`.

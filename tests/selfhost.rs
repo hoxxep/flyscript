@@ -112,6 +112,25 @@ export function main(): void uses Io, Fail<ZoneErr> {
     );
 }
 
+/// `std/unicode` passes the Unicode Character Database's own tests of grapheme clusters and of
+/// normalization: every case of the first, and a sample of the second (tests/unicode).
+#[test]
+fn passes_unicodes_conformance_tests() {
+    if !has_node() || !has_cc() {
+        return;
+    }
+    let dir = out().join("unicode");
+    std::fs::create_dir_all(&dir).unwrap();
+    let c = dir.join("conformance.c");
+    compile(&root().join("selfhost/seed.js"), &root().join("tests/unicode/conformance.fly"), &c);
+    let exe = dir.join("conformance");
+    let built = Command::new("cc").args(["-std=gnu11", "-O1", "-w", "-o"]).arg(&exe).arg(&c).arg("-lm").output().unwrap();
+    assert!(built.status.success(), "{}", String::from_utf8_lossy(&built.stderr));
+    let tests = root().join("tests/unicode");
+    let r = Command::new(&exe).arg(tests.join("GraphemeBreakTest.txt")).arg(tests.join("NormalizationTest.txt")).output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&r.stdout), "graphemes 853/853\nnormalization 4793/4793\n");
+}
+
 /// `--watch` compiles a program again as its modules change: a change to bodies alone from what the
 /// last build left, anything else from scratch, and a build that fails leaves the C as it was.
 #[test]

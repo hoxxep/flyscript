@@ -130,4 +130,6 @@ Licensed under either of
 
 at your option.
 
+The tables of `std/unicode.fly` and the files of `tests/unicode` come from the Unicode Character Database, under the [Unicode License v3](LICENSE-UNICODE).
+
 Unless you explicitly state otherwise, any contribution intentionally submitted for inclusion in the work by you, as defined in the Apache-2.0 license, shall be dual licensed as above, without any additional terms or conditions.
