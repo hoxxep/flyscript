@@ -63,6 +63,8 @@ lld() { [ -x "$bin/$1" ] || command -v "$1" > /dev/null 2>&1; }
 [ "$jobs" -gt 1 ] && [ -x "$bin/llvm-split" ] && { lld ld64.lld || lld ld.lld; } || split=false
 if $split; then
   parts="$out.parts"
+  # Emptied first: a build that failed leaves its parts, which the link below would take too.
+  rm -rf "$parts"
   mkdir -p "$parts"
   "$bin/llvm-split" -j "$jobs" -o "$parts/p" "$out.bc"
   ls "$parts"/p* | xargs -P "$jobs" -I{} "$bin/clang" -x ir -g -O2 -flto=thin $ccflags "$@" -c {} -o {}.o

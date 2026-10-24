@@ -225,6 +225,7 @@ int64_t fly_rt_answer(uint8_t* state, int32_t kind) FLY_SYMBOL(fly_rt_answer);
 int32_t fly_core_run(int32_t id, bool deadlock, bool cancel) FLY_SYMBOL(fly_core_run);
 void fly_core_adopt(int32_t id, uint8_t* record) FLY_SYMBOL(fly_core_adopt);
 int32_t fly_core_cleaning(int32_t id) FLY_SYMBOL(fly_core_cleaning);
+void fly_core_end(int32_t id, bool ran) FLY_SYMBOL(fly_core_end);
 void fly_core_sched(uint8_t* state) FLY_SYMBOL(fly_core_sched);
 uint64_t fly_core_clock(void) FLY_SYMBOL(fly_core_clock);
 void fly_core_set_clock(uint64_t t) FLY_SYMBOL(fly_core_set_clock);
