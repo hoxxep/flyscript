@@ -10,7 +10,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Condvar, Mutex};
 
-use super::interp::{Ctl, panic};
+use super::interp::{Ctl, end_program, panic};
 use crate::check::types::Ty;
 use super::value::Value;
 
@@ -113,7 +113,7 @@ impl Sched {
                 break;
             }
             if inner.deadlocked {
-                return Err(panic("deadlock: every task is waiting"));
+                return Err(end_program("deadlock: every task is waiting"));
             }
             inner = self.turn.wait(inner).expect("scheduler");
         }
@@ -194,7 +194,7 @@ impl Sched {
         // than waited on.
         if inner.deadlocked {
             self.turn.notify_all();
-            return Err(panic("deadlock: every task is waiting"));
+            return Err(end_program("deadlock: every task is waiting"));
         }
         self.wait_turn(me, inner)
     }

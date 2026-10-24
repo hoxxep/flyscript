@@ -1,0 +1,18 @@
+// An assignment evaluates its value before it drops what the place held (§5.6): a panic while the
+// value is made leaves the place holding what it held, which unwinding then drops, once, as the
+// sanitizers and the leak check of the native builds see.
+// expect: before
+// expect: <panic: index 5 out of bounds (length 2)>
+import { println } from "std/io";
+
+function pick(xs: readonly Vec<String>, i: usize): Vec<String> {
+  [xs[i].clone()]
+}
+
+export function main(): void uses Io {
+  const src: Vec<String> = ["a".toString(), "b".toString()];
+  let held: Vec<String> = ["c".toString(), "d".toString(), "e".toString()];
+  println("before");
+  held = pick(src, 5);
+  println(`not reached ${held.len()}`);
+}

@@ -31,7 +31,7 @@ gen() {
   mkdir -p "$root/target/flynext"
   if [ ! -x "$bin" ] || [ -n "$(find "$web/flynext.fly" "$root/selfhost/parse.fly" "$root/selfhost/ast.fly" "$root/selfhost/lex.fly" "$compiler" -newer "$bin" 2>/dev/null)" ]; then
     flyc "$web/flynext.fly" "$bin.c" "$root"
-    cc -std=gnu11 -O2 -w -o "$bin" "$bin.c" -lm
+    cc -std=gnu11 -O2 -w $(sh "$root/selfhost/ccflags.sh") -o "$bin" "$bin.c" -lm
     rm -f "$bin.c"
   fi
   echo "$bin"
@@ -47,7 +47,7 @@ build() {
   # shellcheck disable=SC2086
   "$(gen)" "$app" "${3:-}" $files || return 1
   flyc "$app/.flynext/server.fly" "$out/server.c" "$root" || return 1
-  cc -std=gnu11 -O2 -w -o "$out/server" "$out/server.c" -lm || return 1
+  cc -std=gnu11 -O2 -w $(sh "$root/selfhost/ccflags.sh") -o "$out/server" "$out/server.c" -lm || return 1
   rm -f "$out/server.c"
   # The pages' program: a core, and each page's own code a module of its own, loaded as it is shown.
   rm -rf "$out/_fly/routes"

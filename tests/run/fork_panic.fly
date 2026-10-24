@@ -1,0 +1,27 @@
+// A panic in a forked task is its scope's, as a failure would be (§5.7): the scope is cancelled,
+// its body and its other tasks unwinding at their next `Io` operation, and once every task has
+// finished the panic goes on from `Io.scope`, unwinding the task that opened it.
+// expect: the sleeper cleans up
+// expect: the body cleans up
+// expect: main cleans up
+// expect: <panic: the forked task gave up>
+import { println } from "std/io";
+
+export function main(): void uses Io {
+  defer println("main cleans up");
+  Io.scope((s) => {
+    defer println("the body cleans up");
+    s.spawn(() => {
+      defer println("the sleeper cleans up");
+      Io.sleep(Duration.secs(60));
+      println("not reached: the sleeper was cancelled");
+    });
+    const f = s.fork(() => {
+      Io.sleep(Duration.ms(1));
+      panic("the forked task gave up");
+      0
+    });
+    println(`not reached: joined ${f.join()}`);
+  });
+  println("not reached: the scope panicked");
+}

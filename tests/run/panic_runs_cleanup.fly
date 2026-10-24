@@ -1,0 +1,27 @@
+// expect: working
+// expect: inner defer
+// expect: middle defer
+// expect: outer defer
+// expect: <panic: index 9 out of bounds (length 3)>
+// A panic unwinds its task as a failure nothing can catch would (§5.7): each block it leaves runs
+// its `defer`s and drops what it owns, innermost first, and then the program ends. That what it
+// owns is dropped shows where dropping it does something, as in panic_closes_its_channels.
+import { println } from "std/io";
+
+function look(xs: readonly i32[], i: usize): i32 uses Io {
+  defer { println("inner defer"); };
+  xs[i]
+}
+
+function middle(xs: readonly i32[]): i32 uses Io {
+  defer { println("middle defer"); };
+  look(xs, 9) + 1
+}
+
+export function main(): void uses Io {
+  defer { println("outer defer"); };
+  println("working");
+  const xs = [1, 2, 3];
+  println(`${middle(xs)}`);
+  println("not reached");
+}

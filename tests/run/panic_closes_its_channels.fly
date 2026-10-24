@@ -1,0 +1,28 @@
+// expect: got 1
+// expect: got 2
+// expect: <panic in a spawned task: division by zero>
+// expect: drained, the channel closed
+// expect: the scope goes on
+// A panicking task drops what it owns as it unwinds (§5.7): its sender among them, so the channel
+// closes and the task reading it finishes instead of waiting forever.
+import { channel } from "std/sync";
+import { println } from "std/io";
+
+export function main(): void uses Io {
+  const [tx, rx] = channel<i32>();
+  Io.scope((s) => {
+    s.spawn(() => {
+      for (const msg of rx) { println(`got ${msg}`); }
+      println("drained, the channel closed");
+    });
+    s.spawn(() => {
+      const out = tx;
+      out.send(1);
+      out.send(2);
+      Io.sleep(Duration.ms(1));
+      const zero: i32 = 0;
+      out.send(1 / zero);
+    });
+  });
+  println("the scope goes on");
+}

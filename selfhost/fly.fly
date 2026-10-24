@@ -129,6 +129,19 @@ function write(path: str, text: str): void uses Io, Fail<Stop> {
   try { writeFile(path, text); } catch (_) { throw #Stop(`cannot write ${path}`) }
 }
 
+// The C compiler's arguments for the C a build made: `first`, what every build adds
+// (selfhost/ccflags.sh), and `rest`.
+function ccArgs(first: readonly str[], rest: readonly str[]): Vec<String> uses Io, Fail<Stop> {
+  let out = strings(first);
+  const flags = check("sh", strings([join(root().asStr(), "selfhost/ccflags.sh").asStr()]), "asking what the C needs");
+  for (const f of flags.asStr().split(" ")) {
+    const w = f.trim();
+    if (w.len() > 0) { out.push(w.toString()); }
+  }
+  for (const x of rest) { out.push(x.toString()); }
+  out
+}
+
 function strings(xs: readonly str[]): Vec<String> {
   let out: Vec<String> = Vec.new();
   for (const x of xs) { out.push(x.toString()); }
@@ -595,7 +608,7 @@ function native(deps: readonly Vec<Resolved>, entry: str, out: str): void uses I
     #None => {
       const c = `${out}.c`;
       compile(deps, strings([flyc.asStr(), entry, c.asStr(), root().asStr()]), "compiling");
-      check("cc", strings(["-std=gnu11", "-O2", "-w", "-o", out, c.asStr(), "-lm"]), "compiling the C");
+      check("cc", ccArgs(["-std=gnu11", "-O2", "-w"], ["-o", out, c.asStr(), "-lm"]), "compiling the C");
     }
   }
 }
@@ -670,7 +683,7 @@ function test(m: readonly Manifest): void uses Io, Fail<Stop> {
     const why: Option<String> = try {
       try { createDirAll(parent(exe.asStr()).asStr()); } catch (e) { throw #Stop(`cannot make ${parent(exe.asStr())}: ${e}`) };
       compile(deps, strings([flyc.asStr(), file.asStr(), c.asStr(), root().asStr()]), "compiling");
-      check("cc", strings(["-std=gnu11", "-O1", "-w", "-o", exe.asStr(), c.asStr(), "-lm"]), "compiling the C");
+      check("cc", ccArgs(["-std=gnu11", "-O1", "-w"], ["-o", exe.asStr(), c.asStr(), "-lm"]), "compiling the C");
       const o = try { run(exe.asStr(), Vec.new()) } catch (e) { throw #Stop(`cannot run it: ${e}`) };
       let want = String.new();
       let expects = false;

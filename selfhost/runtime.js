@@ -14,13 +14,25 @@ const { $rt, $b } = (() => {
   class Fail {
     constructor(value) { this.value = value; }
   }
+  // A panic unwinds its task, running its cleanup on the way, as a failure nothing catches would
+  // (§5.7). The end of the program — `exit`, a deadlock, a panic while a panic unwinds — runs no
+  // one's cleanup.
   class Panic extends Error {}
-  // Whether a panic is passing: it ends the program, running no one's cleanup on the way (§5.7).
-  let panicking = false;
-  const unwinds = () => !panicking;
+  class End extends Error {}
+  let ending = false;
+  const unwinds = () => !ending;
+  // The panic each task is unwinding from, by task, and the program's before tasks begin.
+  const unwinding = new Map();
   function panic(message) {
-    panicking = true;
+    const me = sched.current;
+    const first = unwinding.get(me);
+    if (first !== undefined) end(`${message}, while unwinding from a panic: ${first}`);
+    unwinding.set(me, message);
     throw new Panic(message);
+  }
+  function end(message) {
+    ending = true;
+    throw new End(message);
   }
   function raise(value) { throw new Fail(value); }
 
@@ -149,7 +161,7 @@ const { $rt, $b } = (() => {
         r = stepIo(io, () => g.next(answer));
       }
     } finally {
-      if (owned && abrupt && !panicking) { owned = false; yield* finish(g, io, kept); }
+      if (owned && abrupt && !ending) { owned = false; yield* finish(g, io, kept); }
     }
   }
   // What a call of a function value gave: run, if it is a generator; its value, if it was a plain
@@ -528,11 +540,12 @@ const { $rt, $b } = (() => {
         const error = t.error, input = t.input;
         t.error = undefined;
         t.input = undefined;
-        if (error instanceof Panic) panicking = true;
+        if (error instanceof End) ending = true;
         r = error !== undefined ? t.gen.throw(error) : t.gen.next(input);
       } catch (e) {
-        // A panic ends the program, every task with it.
-        if (me === 0 || e instanceof Panic) throw e;
+        // The end of the program ends every task with it; a panic has unwound its task.
+        if (me === 0 || e instanceof End) throw e;
+        unwinding.delete(me);
         endTask(me, { error: e });
         continue;
       }
@@ -551,7 +564,7 @@ const { $rt, $b } = (() => {
           // Nothing else can run, so nothing can ever wake this task: reported, not waited on.
           sched.blocked.delete(me);
           sched.current = me;
-          t.error = new Panic("deadlock: every task is waiting");
+          t.error = new End("deadlock: every task is waiting");
         }
       }
     }
@@ -560,22 +573,28 @@ const { $rt, $b } = (() => {
   function endTask(me, outcome) {
     const t = sched.tasks.get(me);
     const st = sched.scopes.get(t.scope);
-    // The first failure cancels the scope: its body and its other tasks.
-    if (outcome.error instanceof Fail && st.failure === undefined) {
+    // A spawned task's panic ends with it, reported, its scope going on; a forked task's is its
+    // scope's, as a failure would be (§5.7).
+    if (outcome.error instanceof Panic && !t.forked) {
+      $b.println(`<panic in a spawned task: ${outcome.error.message}>`);
+      outcome = { value: undefined };
+    }
+    // The first failure or panic cancels the scope: its body and its other tasks.
+    if ((outcome.error instanceof Fail || outcome.error instanceof Panic) && st.failure === undefined) {
       cancel(st.owner);
       for (const o of st.tasks) if (o !== me) cancel(o);
     }
     if (outcome.error === undefined) {
       st.fibers.set(me, { value: outcome.value });
-    } else if (outcome.error instanceof Fail) {
+    } else if (outcome.error instanceof Fail || outcome.error instanceof Panic) {
       if (st.failure === undefined) st.failure = outcome.error;
-      st.fibers.set(me, { error: outcome.error });
+      if (outcome.error instanceof Fail) st.fibers.set(me, { error: outcome.error });
     } else if (!(outcome.error instanceof Cancelled)) {
       throw outcome.error;
     }
     sched.finished.add(me);
     wake("task", me);
-    if (!pass()) panic("deadlock: every task is waiting");
+    if (!pass()) end("deadlock: every task is waiting");
   }
   function* join(t) {
     if (!sched.finished.has(t)) yield* block(["task", t]);
@@ -586,10 +605,10 @@ const { $rt, $b } = (() => {
     if (r !== null && typeof r === "object" && typeof r.next === "function" && typeof r[Symbol.iterator] === "function") return yield* r;
     return r;
   }
-  function spawnTask(sid, task) {
+  function spawnTask(sid, task, forked) {
     const id = sched.next++;
     sched.ready.push(id);
-    sched.tasks.set(id, { gen: body(task), input: undefined, error: undefined, scope: sid });
+    sched.tasks.set(id, { gen: body(task), input: undefined, error: undefined, scope: sid, forked });
     sched.scopes.get(sid).tasks.push(id);
     return id;
   }
@@ -821,9 +840,11 @@ const { $rt, $b } = (() => {
       let result, error;
       try { result = yield* body(f, { v: { sid } }); }
       catch (e) {
-        // A panic ends the program at once, not waiting for the tasks.
-        if (e instanceof Panic) throw e;
-        // The body unwound because a task failed: the scope rethrows that.
+        if (e instanceof End) throw e;
+        // A panic in the body cancels the scope's tasks, as a failure does, and goes on once they
+        // have finished (§5.7).
+        if (e instanceof Panic) for (const t of st.tasks) cancel(t);
+        // The body unwound because a task failed or panicked: the scope raises that.
         if (!(e instanceof Cancelled && st.failure !== undefined)) error = e;
       }
       sched.cancelled.delete(sched.current);
@@ -840,15 +861,16 @@ const { $rt, $b } = (() => {
       if (st.failure !== undefined) throw st.failure;
       return result;
     },
-    *Scope_spawn$g(r, task) { spawnTask(r.v.sid, task); yield* point(); },
-    *Scope_fork$g(r, task) { const t = spawnTask(r.v.sid, task); yield* point(); return { task: t }; },
+    *Scope_spawn$g(r, task) { spawnTask(r.v.sid, task, false); yield* point(); },
+    *Scope_fork$g(r, task) { const t = spawnTask(r.v.sid, task, true); yield* point(); return { task: t }; },
     *Fiber_join$g(f) {
       yield* join(f.task);
       for (const st of sched.scopes.values()) {
         const o = st.fibers.get(f.task);
         if (o !== undefined) { if (o.error !== undefined) throw o.error; return o.value; }
       }
-      panic("a joined task did not finish");
+      // It panicked, which cancels the scope and the joiner with it.
+      throw new Cancelled();
     },
     channel: (drop) => { const ch = channel(drop); return [{ ch }, { ch }]; },
     Reply_new: (drop) => { const ch = channel(drop); return [{ ch }, { ch }]; },
@@ -868,8 +890,18 @@ const { $rt, $b } = (() => {
     Pending_drop(r) { if (r.v) receiverGone(r.v.ch); },
     Sender_clone: (s) => { sched.senders.set(s.ch, (sched.senders.get(s.ch) || 0) + 1); return { ch: s.ch }; },
     *Receiver_each(rx) { for (let m = yield* recv(rx.ch); m !== undefined; m = yield* recv(rx.ch)) yield new Yielded(m.v); },
-    Mutex_new: (v) => ({ v }),
-    *Mutex_lock$g(m, f) { yield* point(); return yield* body(f, m); },
+    Mutex_new: (v) => ({ v, poisoned: false }),
+    // A panic while the value is lent may leave it half changed: the mutex keeps it, poisoned, and
+    // no one may lock it until it is reset (§6.2).
+    *Mutex_lock$g(m, f) {
+      yield* point();
+      if (m.poisoned) panic("locked a `Mutex` that a panic left poisoned");
+      try { return yield* body(f, m); }
+      catch (e) { if (e instanceof Panic) m.poisoned = true; throw e; }
+    },
+    // A fresh value, the old one dropped, and the poison cleared.
+    Mutex_reset(m, v, drop) { const old = m.v; m.v = v; m.poisoned = false; if (drop) drop(old); },
+    *Mutex_reset$g(m, v, drop) { yield* point(); $b.Mutex_reset(m, v, drop); },
     // An atomic's operations are scheduling points, each then taking effect whole.
     Atomic_new: (v) => ({ v }),
     *Atomic_load$g(a) { yield* point(); return a.v; },
@@ -1192,7 +1224,7 @@ const { $rt, $b } = (() => {
         if (suspends) for (let s = r.next(); !s.done; s = r.next()) panic("an effect performed that nothing handles");
       }
     } catch (e) {
-      if (e instanceof Panic) { process.stdout.write(Buffer.from(`<panic: ${e.message}>\n`, "latin1")); process.exit(101); }
+      if (e instanceof Panic || e instanceof End) { process.stdout.write(Buffer.from(`<panic: ${e.message}>\n`, "latin1")); process.exit(101); }
       if (e instanceof Fail) { process.stdout.write(Buffer.from(`<uncaught: ${show(e.value)}>\n`, "latin1")); process.exit(1); }
       throw e;
     }

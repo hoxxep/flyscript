@@ -15,12 +15,15 @@ sysroot=${WASI_SYSROOT:-$(brew --prefix wasi-libc 2>/dev/null)/share/wasi-sysroo
 builtins=${WASI_BUILTINS:-$(ls "$(brew --prefix wasi-runtimes 2>/dev/null)"/share/wasi-runtimes/lib/wasm32-unknown-wasip1/libclang_rt.builtins.a 2>/dev/null | head -1)}
 out=$3
 imports=""
-opt="-O2"
+# A panic unwinds through `setjmp` and `longjmp` (runtime.h), which WebAssembly has by its
+# exception handling.
+sjlj="-mllvm -wasm-enable-sjlj -mexception-handling"
+opt="-O2 $sjlj"
 link=""
 # A page's program is downloaded: it is made small, and its names left out.
 if [ "$4" = "--imports" ] || [ "$4" = "--split" ]; then
   imports="--allow-undefined"
-  opt="-Os -ffunction-sections -fdata-sections"
+  opt="-Os -ffunction-sections -fdata-sections $sjlj"
   link="--gc-sections --strip-all"
 fi
 libc="$sysroot/lib/wasm32-wasip1/crt1-command.o"
@@ -29,7 +32,7 @@ if [ "$4" != "--split" ]; then
   # shellcheck disable=SC2086
   sh "$root/selfhost/llvm.sh" "$1" "$2" "$out.o" --target=wasm32-wasip1 --sysroot="$sysroot" $opt
   # shellcheck disable=SC2086
-  wasm-ld -m wasm32 $imports $link "$libc" "$out.o" -L"$sysroot/lib/wasm32-wasip1" -lc "$builtins" $exports -o "$out"
+  wasm-ld -m wasm32 $imports $link "$libc" "$out.o" -L"$sysroot/lib/wasm32-wasip1" -lsetjmp -lc "$builtins" $exports -o "$out"
   rm -f "$out.o"
   exit 0
 fi
@@ -53,13 +56,15 @@ node "$root/selfhost/wasm-split.js" "$work/app.opt.ll" "$work" "${prefix}(\\d+)_
 "$bin/llvm-extract" --delete $(cat "$work/core.args") "$work/all.bc" -o "$work/core0.bc"
 "$bin/llvm-as" "$work/stubs.ll" -o "$work/stubs.bc"
 "$bin/llvm-link" "$work/core0.bc" "$work/stubs.bc" -o "$work/core.bc"
-"$bin/clang" --target=wasm32-wasip1 -O2 -ffunction-sections -fdata-sections -c "$work/core.bc" -o "$work/core.o"
+"$bin/clang" --target=wasm32-wasip1 -O2 $sjlj -ffunction-sections -fdata-sections -c "$work/core.bc" -o "$work/core.o"
 # The core gives the routes its memory, its table of functions, and what they take of its own.
 take=""
 for s in $(cat "$work/exports.txt") calloc; do take="$take --export-if-defined=$s"; done
-for s in $(cat "$work/undefined.txt"); do take="$take --undefined=$s --export-if-defined=$s"; done
+# A route that catches a panic takes the core's `setjmp` and the tag its `longjmp` throws, which
+# are made below the IR the split sees.
+for s in $(cat "$work/undefined.txt") __wasm_setjmp __wasm_setjmp_test __wasm_longjmp __c_longjmp; do take="$take --undefined=$s --export-if-defined=$s"; done
 # shellcheck disable=SC2086
-wasm-ld -m wasm32 $imports $link "$libc" "$work/core.o" -L"$sysroot/lib/wasm32-wasip1" -lc "$builtins" $exports \
+wasm-ld -m wasm32 $imports $link "$libc" "$work/core.o" -L"$sysroot/lib/wasm32-wasip1" -lsetjmp -lc "$builtins" $exports \
   --export-table --growable-table $take -o "$out"
 manifest="{"
 for k in $(cat "$work/routes.txt"); do
@@ -67,7 +72,7 @@ for k in $(cat "$work/routes.txt"); do
   "$bin/llvm-extract" $(cat "$work/route$k.args") "$work/all.bc" -o "$work/route$k.0.bc"
   # What is the route's alone is its own: only what is the core's is reached through the loader.
   "$bin/opt" -passes='internalize,globaldce' -internalize-public-api-list="$fn" "$work/route$k.0.bc" -o "$work/route$k.bc"
-  "$bin/clang" --target=wasm32-wasip1 -O2 -fPIC -ffunction-sections -fdata-sections -c "$work/route$k.bc" -o "$work/route$k.o"
+  "$bin/clang" --target=wasm32-wasip1 -O2 $sjlj -fPIC -ffunction-sections -fdata-sections -c "$work/route$k.bc" -o "$work/route$k.o"
   wasm-ld -m wasm32 --experimental-pic -shared --unresolved-symbols=import-dynamic --strip-all "$work/route$k.o" -o "$work/route$k.wasm"
   hash=$(shasum -a 256 "$work/route$k.wasm" | cut -c1-12)
   cp "$work/route$k.wasm" "$dir/route$k.$hash.wasm"

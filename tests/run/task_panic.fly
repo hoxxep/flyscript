@@ -1,8 +1,13 @@
-// A panic in a task ends the program at once (§5.7): the other tasks stop where they are, and
-// none runs its cleanup, which could wait forever on what the panicking task never let go of.
+// A panic in a spawned task ends that task alone (§5.7): it unwinds, running its cleanup, the
+// panic is reported, and its scope and the other tasks go on. A server that spawns its connections
+// survives one that hits a bug, as it survives one that fails.
 // expect: slow task starts
 // expect: body ends
-// expect: <panic: index 7 out of bounds (length 3)>
+// expect: risky task cleans up
+// expect: <panic in a spawned task: index 7 out of bounds (length 3)>
+// expect: slow task ends
+// expect: slow task cleans up
+// expect: the scope ended normally
 import { println } from "std/io";
 
 function risky(n: u32): u32 uses Io {
@@ -14,13 +19,16 @@ function risky(n: u32): u32 uses Io {
 export function main(): void uses Io {
   Io.scope((s) => {
     s.spawn(() => {
-      defer println("not reached: a panic runs no cleanup");
+      defer println("slow task cleans up");
       println("slow task starts");
       Io.sleep(Duration.ms(10));
       println("slow task ends");
     });
-    s.spawn(() => { println(`got ${risky(7)}`); });
+    s.spawn(() => {
+      defer println("risky task cleans up");
+      println(`got ${risky(7)}`);
+    });
     println("body ends");
   });
-  println("never printed");
+  println("the scope ended normally");
 }

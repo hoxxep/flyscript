@@ -5,7 +5,7 @@
 //! no stack capture. Continuations that must be stored — a `Gen` pulled with `next()` — run the
 //! generator on its own thread, handing control back and forth (see `gen`).
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -183,6 +183,9 @@ pub struct Interp {
     /// from the code around it, innermost last, with where each was made: each is dropped when its
     /// statement ends, or when the same code makes the next (§5.6).
     pub temps: Vec<Vec<(Value, Ty, Span)>>,
+    /// The `Mutex`es a panic left while their value was lent, by the address of their cell: each
+    /// keeps its value, and locking it panics until `reset` gives it a new one (§6.2).
+    pub poisoned: Arc<Mutex<HashSet<usize>>>,
 }
 
 /// Facts about the program the interpreter derives once and keeps, rather than per call.
@@ -246,6 +249,7 @@ impl Interp {
             task: 0,
             memo: Arc::default(),
             temps: Vec::new(),
+            poisoned: Arc::default(),
         }
     }
 
@@ -266,6 +270,7 @@ impl Interp {
             task: self.task,
             memo: self.memo.clone(),
             temps: Vec::new(),
+            poisoned: self.poisoned.clone(),
         }
     }
 
@@ -336,14 +341,7 @@ impl Interp {
         // What the body's value lends of its temporaries lives until it is given back.
         let r = self.home(|o| o.block(body, &env));
         // Parameters the body did not move are dropped as it returns (§5.6).
-        let c = self.cleanup(&r, &env);
-        let r = match (r, c) {
-            (Ok(v), Err(e)) => {
-                let _ = v;
-                Err(e)
-            }
-            (r, _) => r,
-        };
+        let r = self.cleanup(r, &env);
         // An owned result is never a borrow: `clone` gives a `Copy` value back as `self`, which
         // here may be a pointer into its source.
         let owned = !matches!(self.frame_ty(&self.prog.fns[fid].scheme.ret), Ty::Borrow(..) | Ty::Param(_) | Ty::Assoc(..));
@@ -374,11 +372,7 @@ impl Interp {
                 let frame = self.fresh_id();
                 let saved = std::mem::replace(&mut self.lex, Lex { frame, loops: Vec::new(), owner: c.owner, module: c.module, tenv: c.tenv.clone() });
                 let r = self.expr(&c.body, &env);
-                let c = self.cleanup(&r, &base);
-                let r = match (r, c) {
-                    (Ok(_), Err(e)) => Err(e),
-                    (r, _) => r,
-                };
+                let r = self.cleanup(r, &base);
                 self.lex = saved;
                 match r {
                     Err(Ctl::Return(f, v)) if f == frame => Ok(v),
@@ -730,10 +724,10 @@ impl Interp {
                 None => Ok(Value::Unit),
             };
         }
-        // `defer`s run in reverse order however the block exits (§5.6), and to their end: a
-        // cancellation meanwhile takes effect after them. A panic stops the task where it is, its
-        // cleanup not run (§5.7).
-        if is_panic(&result) {
+        // `defer`s run in reverse order however the block exits (§5.6), a panic too (§5.7), and to
+        // their end: a cancellation meanwhile takes effect after them. Only the end of the program
+        // stops a task without its cleanup.
+        if ends_program(&result) {
             return result;
         }
         let cleans = !defers.is_empty() || !env.lock().owned.is_empty();
@@ -741,17 +735,18 @@ impl Interp {
             self.sched.cleaning(self.task, true);
         }
         for d in defers.iter().rev() {
-            if let Err(e) = self.home(|o| o.expr(d, &env))
-                && result.is_ok() {
-                    result = Err(e);
+            if let Err(e) = self.home(|o| o.expr(d, &env)) {
+                result = outcome(result, e);
+                if ends_program(&result) {
+                    return result;
                 }
+            }
         }
         // Then the block's owned bindings that were not moved out, newest first, each just
         // before the temporaries it held borrows of.
-        if let Err(e) = self.drop_scope(&env)
-            && result.is_ok() {
-                result = Err(e);
-            }
+        if let Err(e) = self.drop_scope(&env) {
+            result = outcome(result, e);
+        }
         if cleans {
             self.sched.cleaning(self.task, false);
         }
@@ -786,46 +781,54 @@ impl Interp {
     }
 
     /// The statement, or the call's body, whose temporaries are the innermost has ended with `r`:
-    /// they are dropped, the last made first, unless a panic is passing (§5.7).
+    /// they are dropped, the last made first, however it ended but by the end of the program.
     fn end_temps(&mut self, r: R) -> R {
         let temps = self.temps.pop().unwrap_or_default();
-        if is_panic(&r) {
+        if ends_program(&r) {
             return r;
         }
         let mut r = r;
         for (v, t, _) in temps.into_iter().rev() {
-            if let Err(e) = self.drop_value(v, &t, &[])
-                && r.is_ok() {
-                    r = Err(e);
+            if let Err(e) = self.drop_value(v, &t, &[]) {
+                r = outcome(r, e);
+                if ends_program(&r) {
+                    return r;
                 }
+            }
         }
         r
     }
 
-    /// The cleanup of a scope left with `r`: its owned bindings dropped, unless a panic is passing,
-    /// which stops the task where it is (§5.7).
-    fn cleanup(&mut self, r: &R, env: &Env) -> Result<(), Ctl> {
-        if is_panic(r) {
-            return Ok(());
+    /// The cleanup of a scope left with `r`: its owned bindings dropped, however it was left but
+    /// by the end of the program. What it gives is what the scope is left with.
+    fn cleanup(&mut self, r: R, env: &Env) -> R {
+        if ends_program(&r) {
+            return r;
         }
-        self.drop_scope(env)
+        match self.drop_scope(env) {
+            Err(e) => outcome(r, e),
+            Ok(()) => r,
+        }
     }
 
     /// Drops the owned bindings of a scope, newest first, except what was moved out of them. A
-    /// destructor that panics leaves the others to run; the first panic is the scope's.
+    /// destructor that panics leaves the others to run; the first panic is the scope's, and a
+    /// second ends the program (§5.7).
     fn drop_scope(&mut self, env: &Env) -> Result<(), Ctl> {
         let owned = std::mem::take(&mut env.lock().owned);
-        let mut result = Ok(());
+        let mut result = Ok(Value::Unit);
         for (name, ty) in owned.into_iter().rev() {
             let moved = env.lock().moved.get(&name).cloned().unwrap_or_default();
             let Some(cell) = env.lock().vars.iter().rev().find(|(n, _)| *n == name).map(|(_, c)| c.clone()) else { continue };
             let v = cell.lock().expect("cell").clone();
-            if let Err(e) = self.drop_value(v, &ty, &moved)
-                && result.is_ok() {
-                    result = Err(e);
+            if let Err(e) = self.drop_value(v, &ty, &moved) {
+                result = outcome(result, e);
+                if ends_program(&result) {
+                    break;
                 }
+            }
         }
-        result
+        result.map(|_| ())
     }
 
     /// A value bound to an owned binding is read out of any borrow it arrived as.
@@ -1265,11 +1268,7 @@ impl Interp {
                             }
                         // What the arm took and did not move on is dropped as it ends (§5.6).
                         let r = self.expr(&arm.body, &aenv);
-                        let c = self.cleanup(&r, &aenv);
-                        return match (r, c) {
-                            (Ok(_), Err(e)) => Err(e),
-                            (r, _) => r,
-                        };
+                        return self.cleanup(r, &aenv);
                     }
                 }
                 Err(panic(format!("no arm matched {}", v.show())))
@@ -1419,11 +1418,7 @@ impl Interp {
                 // An item the body did not move on is dropped as the iteration ends (§5.6), after
                 // the temporaries the iteration made.
                 let r = self.home(|o| o.block(body, &benv));
-                let c = self.cleanup(&r, &benv);
-                let r = match (r, c) {
-                    (Ok(_), Err(e)) => Err(e),
-                    (r, _) => r,
-                };
+                let r = self.cleanup(r, &benv);
                 match r {
                     Ok(_) => {}
                     Err(Ctl::Continue(l)) if l == id => {}
@@ -1704,10 +1699,43 @@ pub fn binary(op: &str, a: &Value, b: &Value) -> R {
     })
 }
 
-/// Whether `r` is a panic passing, which stops its task without cleanup (§5.7). A generator or
-/// coroutine ended early unwinds by a panic of its own, marked with a NUL, and runs its cleanup.
-fn is_panic(r: &R) -> bool {
-    matches!(r, Err(Ctl::Panic(m)) if !m.starts_with('\u{0}'))
+/// Whether `r` is a panic of the program's (§5.7), not a generator or coroutine ended early, which
+/// unwinds by a panic of its own, marked with a NUL.
+pub fn is_panic(r: &R) -> bool {
+    matches!(r, Err(Ctl::Panic(m)) if !m.starts_with('\u{0}') && !m.starts_with(ENDS))
+}
+
+/// What marks a panic that ends the program at once, every task where it is and no cleanup run:
+/// `exit`, a deadlock, and a panic while a panic unwinds.
+pub const ENDS: char = '\u{1}';
+
+/// The end of the program at once, with `message` (see `ENDS`).
+pub fn end_program(message: impl Into<String>) -> Ctl {
+    Ctl::Panic(format!("{ENDS}{}", message.into()))
+}
+
+/// Whether `r` ends the program at once (see `ENDS`).
+pub fn ends_program(r: &R) -> bool {
+    matches!(r, Err(Ctl::Panic(m)) if m.starts_with(ENDS) || m == EXITED)
+}
+
+/// What code left as `r` is left with once its cleanup has given `e`. A panic outranks every other
+/// way out, a failure or a `return` included, and a panic while a panic unwinds ends the program
+/// (§5.7); otherwise the first way out stands.
+fn outcome(r: R, e: Ctl) -> R {
+    let panicking = |c: &Ctl| matches!(c, Ctl::Panic(m) if !m.starts_with('\u{0}') && !m.starts_with(ENDS) && m != EXITED);
+    match (&r, &e) {
+        _ if ends_program(&r) => r,
+        (_, Ctl::Panic(m)) if m.starts_with(ENDS) || m == EXITED => Err(e),
+        (Err(first), Ctl::Panic(second)) if panicking(first) && panicking(&e) => {
+            let Ctl::Panic(first) = first else { unreachable!() };
+            Err(end_program(format!("{second}, while unwinding from a panic: {first}")))
+        }
+        (Err(first), _) if panicking(first) => r,
+        _ if panicking(&e) => Err(e),
+        (Ok(_), _) => Err(e),
+        _ => r,
+    }
 }
 
 fn compare(op: &str, o: std::cmp::Ordering) -> bool {

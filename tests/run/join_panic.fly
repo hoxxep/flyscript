@@ -1,0 +1,16 @@
+// A panic in one half of `join` waits for the other half, and what that half gave is dropped,
+// before the panic goes on (§6.5): nothing either half borrows goes while the other may use it.
+// expect: main cleans up
+// expect: <panic: index 3 out of bounds (length 1)>
+import { println } from "std/io";
+import { join } from "std/par";
+
+export function main(): void uses Io {
+  defer println("main cleans up");
+  const [a, b] = join(() => "left".toString(), () => {
+    const xs = [1];
+    const i: usize = 3;
+    xs[i]
+  });
+  println(`not reached ${a} ${b}`);
+}

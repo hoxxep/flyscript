@@ -1,0 +1,19 @@
+// `reset` drops the value it replaces (§6.2): here the only sender of a channel, so the task
+// reading it sees the end.
+// expect: the reader saw the end
+// expect: done
+import { println } from "std/io";
+import { Mutex, Sender, channel } from "std/sync";
+
+export function main(): void uses Io {
+  const [tx, rx] = channel<i32>();
+  const m = Mutex.new<Option<Sender<i32>>>(#Some(tx));
+  Io.scope((s) => {
+    s.spawn(() => {
+      for (const _ of rx) {}
+      println("the reader saw the end");
+    });
+    m.reset(#None);
+  });
+  println("done");
+}

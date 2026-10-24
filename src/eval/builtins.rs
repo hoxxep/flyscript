@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use super::generators::{self as gens_mod, GenKind};
-use super::interp::{Ctl, Handler, Interp, R, panic, EXITED};
+use super::interp::{Ctl, Handler, Interp, R, ends_program, is_panic, panic, EXITED};
 use super::value::*;
 use crate::check::env::FnId;
 use crate::check::types::{GArg, Prim, Ty};
@@ -16,6 +16,9 @@ pub struct ScopeState {
     /// The task running the scope's body, cancelled with the rest when a task fails.
     pub owner: u64,
     pub failure: Option<Value>,
+    /// The message of a forked task's panic, which the scope raises again once its tasks have
+    /// finished (§5.7). A scope has at most one of a failure and a panic: the first.
+    pub panic: Option<String>,
     /// Every task started in the scope; the scope waits for all of them.
     pub tasks: Vec<u64>,
     /// Forked tasks' outcomes, by task.
@@ -195,16 +198,23 @@ impl Interp {
                 let sid = self.fresh_id();
                 self.scopes.lock().expect("scopes").insert(sid, ScopeState { owner: self.task, ..Default::default() });
                 let r = self.call_value(&a(0), vec![Value::Native("Scope", sid)]);
-                // A panic ends the program at once, not waiting for the tasks (§5.7).
-                if let Err(Ctl::Panic(m)) = &r
-                    && !m.starts_with('\u{0}')
-                {
-                    self.sched.abort(m);
+                if ends_program(&r) {
+                    if let Err(Ctl::Panic(m)) = &r {
+                        self.sched.abort(m);
+                    }
                     return r;
                 }
-                // The body unwound because a task failed: the scope rethrows that.
+                // A panic in the body cancels the scope's tasks, as a failure does, and goes on once
+                // they have finished (§5.7).
+                if is_panic(&r) {
+                    let tasks = self.scopes.lock().expect("scopes").get(&sid).map(|s| s.tasks.clone()).unwrap_or_default();
+                    for t in tasks {
+                        self.sched.cancel(t);
+                    }
+                }
+                // The body unwound because a task failed or panicked: the scope raises that.
                 let r = match r {
-                    Err(Ctl::Cancelled) if self.scopes.lock().expect("scopes").get(&sid).is_some_and(|s| s.failure.is_some()) => {
+                    Err(Ctl::Cancelled) if self.scopes.lock().expect("scopes").get(&sid).is_some_and(|s| s.failure.is_some() || s.panic.is_some()) => {
                         self.sched.uncancel(self.task);
                         Ok(Value::Unit)
                     }
@@ -223,9 +233,10 @@ impl Interp {
                 }
                 self.sched.uncancel(self.task);
                 let st = self.scopes.lock().expect("scopes").remove(&sid).unwrap_or_default();
-                match (r, st.failure) {
-                    (Ok(_), Some(f)) => self.raise(f),
-                    (r, _) => r,
+                match (r, st.failure, st.panic) {
+                    (Ok(_), _, Some(m)) => Err(panic(m)),
+                    (Ok(_), Some(f), None) => self.raise(f),
+                    (r, _, _) => r,
                 }
             }
             "Scope.spawn" | "Scope.fork" => {
@@ -249,18 +260,29 @@ impl Interp {
                         }
                         Err(e) => Err(e),
                     };
-                    // A panic ends the program, every task with it (§5.7).
-                    if let Err(Ctl::Panic(m)) = &r
-                        && !m.starts_with('\u{0}')
+                    // `exit`, a deadlock or a second panic ends the program, every task with it.
+                    if ends_program(&r)
+                        && let Err(Ctl::Panic(m)) = &r
                     {
                         child.sched.abort(m);
+                    }
+                    // A panic has unwound the task (§5.7). A spawned task's ends with it, reported,
+                    // and its scope goes on; a forked task's is its scope's, as a failure would be.
+                    let panicked = match &r {
+                        Err(Ctl::Panic(m)) if is_panic(&r) => Some(m.clone()),
+                        _ => None,
+                    };
+                    if let Some(m) = &panicked
+                        && !forked
+                    {
+                        child.world.lock().expect("world").out.push(format!("<panic in a spawned task: {m}>"));
                     }
                     {
                         let mut scopes = child.scopes.lock().expect("scopes");
                         let st = scopes.entry(sid).or_default();
-                        // The first failure cancels the scope: its body and other tasks.
-                        let ends = matches!(&r, Err(Ctl::Unwind(h, _)) if *h == id);
-                        if ends && st.failure.is_none() {
+                        // The first failure or panic cancels the scope: its body and other tasks.
+                        let ends = matches!(&r, Err(Ctl::Unwind(h, _)) if *h == id) || (forked && panicked.is_some());
+                        if ends && st.failure.is_none() && st.panic.is_none() {
                             child.sched.cancel(st.owner);
                             for t in st.tasks.iter().filter(|t| **t != tid) {
                                 child.sched.cancel(*t);
@@ -271,8 +293,15 @@ impl Interp {
                                 st.fibers.insert(tid, Ok(v));
                             }
                             Err(Ctl::Unwind(h, e)) if h == id => {
-                                st.failure.get_or_insert_with(|| e.clone());
+                                if st.panic.is_none() {
+                                    st.failure.get_or_insert_with(|| e.clone());
+                                }
                                 st.fibers.insert(tid, Err(e));
+                            }
+                            Err(Ctl::Panic(m)) if forked && panicked.is_some() => {
+                                if st.failure.is_none() {
+                                    st.panic.get_or_insert(m);
+                                }
                             }
                             Err(_) => {}
                         }
@@ -291,7 +320,8 @@ impl Interp {
                     Some(Ok(v)) => Ok(v),
                     // The scope is cancelled; its first failure is rethrown (§6.1).
                     Some(Err(e)) => self.raise(e),
-                    None => Err(panic("a joined task did not finish")),
+                    // It panicked, which cancels the scope and the joiner with it.
+                    None => Err(Ctl::Cancelled),
                 }
             }
 
@@ -376,7 +406,30 @@ impl Interp {
                     other => return Err(panic(format!("not a mutex: {}", other.show()))),
                 };
                 self.sched.yield_now(self.task)?;
-                self.call_value(&a(1), vec![Value::Ptr(Place { root, path: Vec::new() })])
+                let at = Arc::as_ptr(&root) as usize;
+                if self.poisoned.lock().expect("poisoned").contains(&at) {
+                    return Err(panic("locked a `Mutex` that a panic left poisoned"));
+                }
+                let r = self.call_value(&a(1), vec![Value::Ptr(Place { root, path: Vec::new() })]);
+                // A panic while the value is lent may leave it half changed: the mutex keeps it, but
+                // no one may lock it again until it is reset (§6.2).
+                if is_panic(&r) {
+                    self.poisoned.lock().expect("poisoned").insert(at);
+                }
+                r
+            }
+            "Mutex.reset" => {
+                let root = match a(0).deref_once() {
+                    Value::Ref(r) => r,
+                    other => return Err(panic(format!("not a mutex: {}", other.show()))),
+                };
+                self.sched.yield_now(self.task)?;
+                let old = std::mem::replace(&mut *root.lock().expect("mutex"), a(1).deref());
+                self.poisoned.lock().expect("poisoned").remove(&(Arc::as_ptr(&root) as usize));
+                match self.type_arg(fid, 0) {
+                    Some(t) => self.drop_value(old, &t, &[]).map(|()| Value::Unit),
+                    None => Ok(Value::Unit),
+                }
             }
             // An atomic is a cell its borrowers share; each operation is a scheduling point and
             // then takes effect whole, under the cell's lock (§6.2).

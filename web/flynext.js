@@ -198,6 +198,7 @@ export async function start(url, root = document.getElementById("app")) {
     };
     for (const i of WebAssembly.Module.imports(mod)) {
       if (i.module === "env" && i.kind === "function") imports.env[i.name] = exports[i.name] ?? env[i.name];
+      else if (i.module === "env" && i.kind === "tag") imports.env[i.name] = exports[i.name];
       else if (i.module === "GOT.mem") imports["GOT.mem"][i.name] = got(exports[i.name].value);
       else if (i.module === "GOT.func") imports["GOT.func"][i.name] = got(slotOf(exports[i.name]));
     }

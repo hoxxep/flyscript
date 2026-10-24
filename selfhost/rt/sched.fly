@@ -50,6 +50,7 @@ const SENDER_DROP: i32 = 15;
 const SENDER_CLONE: i32 = 16;
 const DEAFEN: i32 = 17;
 const TAKE_ITEMS: i32 = 18;
+const SCOPE_CANCEL: i32 = 19;
 
 // What `now` gives for a request it cannot answer without the scheduler's choosing who runs.
 const LATER: i64 = -0x7fffffffffffffff;
@@ -289,6 +290,12 @@ impl Sched {
     }
     if (kind == UNCANCEL) {
       self.t(me).cancelled = false;
+      return 0;
+    }
+    // A panic unwound the scope's body: its tasks are cancelled, as a failure would cancel them.
+    if (kind == SCOPE_CANCEL) {
+      const tasks = self.s(arg(0) as i32).tasks.clone();
+      for (const t of tasks) { if (!self.t(t).finished) { self.cancel(t); } }
       return 0;
     }
     if (kind == CHANNEL) {

@@ -34,7 +34,7 @@ pub fn run(program: Program, name: &str, args: Vec<Value>, world: World) -> (Res
             match it.call_fn(fid, args) {
                 Ok(v) => Ok(v.deref()),
                 Err(Ctl::Panic(m)) if m == interp::EXITED => Ok(Value::Unit),
-                Err(Ctl::Panic(m)) => Err(format!("panic: {m}")),
+                Err(Ctl::Panic(m)) => Err(format!("panic: {}", m.trim_start_matches(interp::ENDS))),
                 Err(other) => Err(format!("{other:?}")),
             }
         }

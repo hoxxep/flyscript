@@ -1,0 +1,14 @@
+// A panic outranks a failure (§5.7): a `defer` that panics while a failure unwinds turns the
+// unwinding into a panic's, which no `catch` stops.
+// expect: cleaning up after the failure
+// expect: <panic: a bug in cleanup>
+import { println } from "std/io";
+
+function risky(): void uses Io, Fail<#Nope> {
+  defer { println("cleaning up after the failure"); panic("a bug in cleanup"); };
+  throw #Nope;
+}
+
+export function main(): void uses Io {
+  try { risky(); } catch (_) { println("not reached: a panic is not caught"); }
+}

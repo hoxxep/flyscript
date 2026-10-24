@@ -1055,6 +1055,11 @@ impl JsGen {
       _ => {}
     }
     let all = vs.clone();
+    // What a `Mutex`'s reset replaces is dropped.
+    if (key == "Mutex_reset") {
+      const t = match (c.argTys.get(1)) { #Some(t) => stripBorrow(t), #None => #Error };
+      all.push(if (self.drops(t)) { self.dropFn(t, span) } else { "undefined".toString() });
+    }
     // `repeat` makes an array of the length its type has.
     if (key == "repeat") {
       match (c.ret) {

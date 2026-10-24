@@ -84,6 +84,25 @@ type Lctx = {
   loc: String;
   // In a direct handler's arms: a resumption gives its argument back to the operation performed.
   direct: bool;
+  // A panic (§5.7): the blocks with cleanups around the code printed now, innermost last; the code
+  // a panic goes to, a basic block for each such block, which runs every cleanup of the block and
+  // goes on to the one around it; those blocks; and the locals that code reads, which must live in
+  // memory.
+  pblocks: Vec<String>;
+  punw: String;
+  pcases: Vec<String>;
+  pread: HashSet<usize>;
+  // Where the function starts, for what it does there and as a panic leaves it.
+  entryLoc: String;
+  // With landing pads: whether the code printed now is cleanup a panic runs, whose calls are not
+  // made to unwind to a landing pad of their own; the cleanups of the blocks around the code
+  // printed now, innermost last; and the landing pads made, by the innermost block and what may
+  // hold a value where a call unwinds to them, with their code.
+  landing: bool;
+  pcleanups: Vec<Vec<Cleanup>>;
+  pspan: Option<Span>;
+  lpads: HashMap<String, String>;
+  lpadCode: String;
 };
 
 function newCtx(locals: Vec<Local>, ret: Ty, mode: Mode): Lctx {
@@ -92,6 +111,7 @@ function newCtx(locals: Vec<Local>, ret: Ty, mode: Mode): Lctx {
     scopes: Vec.new(), targets: Vec.new(), mode, sink: #None, arenas: HashMap.new(), ret: ret.clone(), retSlot: String.new(), fnRet: ret,
     oret: String.new(), code: String.new(), hoisted: HashSet.new(), declared: HashSet.new(), prologue: String.new(), live: HashSet.new(),
     reachable: true, liveAt: HashMap.new(), sp: String.new(), loc: String.new(), direct: false,
+    pblocks: Vec.new(), punw: String.new(), pcases: Vec.new(), pread: HashSet.new(), entryLoc: String.new(), landing: false, pcleanups: Vec.new(), pspan: #None, lpads: HashMap.new(), lpadCode: String.new(),
   }
 }
 
@@ -253,6 +273,11 @@ export struct Lgen {
   fnName: String;
   module: usize;
   cx: Lctx;
+  // Whether a panic unwinds: not in a freestanding program, whose panic goes to `fly_os_panic`; and
+  // how: in native code, through landing pads, the platform unwinding each frame by its tables
+  // (`pads`); in WebAssembly, by records taken up with `setjmp` (runtime.h).
+  unwinds: bool;
+  pads: bool;
   // Debug information: metadata nodes, numbered from 1; each module's file, and where its lines start.
   meta: String;
   metaN: usize;
@@ -384,8 +409,38 @@ impl Lgen {
     self.cx.open = true;
   }
 
-  // An instruction, in a basic block of its own if the last one has ended.
+  // An instruction, in a basic block of its own if the last one has ended. With landing pads, a
+  // call where a block's cleanups are live may unwind to them: it is an `invoke`, the code going on
+  // in a block of its own.
   function ins(self: mut Self, s: str): void {
+    if (self.pads && !self.cx.landing && self.cx.pblocks.len() > 0) {
+      const at = if (s.startsWith("call ")) { #Some(0) } else { match (s.indexOf(" = call ")) { #Some(i) => #Some(i + 3), #None => #None } };
+      if (const #Some(i) = at) {
+        if (s.indexOf("@llvm.").isNone() && s.indexOf(" asm ").isNone()) {
+          const sp = match (self.cx.pspan.clone()) { #Some(sp) => sp, #None => return self.plain(s) };
+          const pad = match (try { #Ok(self.landingPad(sp)) } catch (d) { #Err(d) }) { #Ok(p) => p, #Err(_) => return self.plain(s) };
+          const next = self.newLabel("goes");
+          let inv = s.slice(0, i).toString();
+          inv.push("invoke ");
+          inv.push(s.slice(i + 5, s.len()));
+          inv.push(` to label %${next} unwind label %${pad}`);
+          self.reopen();
+          self.cx.out.push("  ");
+          self.cx.out.push(inv.asStr());
+          if (self.cx.loc.len() > 0) {
+            self.cx.out.push(", !dbg ");
+            self.cx.out.push(self.cx.loc.asStr());
+          }
+          self.cx.out.push("\n");
+          self.cx.out.push(`${next}:\n`);
+          return;
+        }
+      }
+    }
+    self.plain(s);
+  }
+
+  function plain(self: mut Self, s: str): void {
     self.reopen();
     self.cx.out.push("  ");
     self.cx.out.push(s);
@@ -1266,6 +1321,16 @@ impl Lgen {
         const t = self.cx.locals[l].ty.clone();
         if (!self.needsDrop(t)) { return; }
         const a = self.local(l);
+        // A landing pad drops a copy: the local's own address given to a call there would keep it
+        // in memory everywhere else too, where it may otherwise live in registers.
+        if (self.pads && self.cx.landing) {
+          const size = self.sizeOf(t, span);
+          const s = self.shape(t, span);
+          const tmp = self.alloca(size, s.align);
+          self.ins(`call void @llvm.memcpy.p0.p0.i64(ptr ${tmp}, ptr ${a}, i64 ${size}, i1 false)`);
+          self.drop(tmp.asStr(), t, span);
+          return;
+        }
         self.drop(a.asStr(), t, span);
       }
       #Defer(flag, body) => {
@@ -1366,6 +1431,38 @@ impl Lgen {
     }
   }
 
+  // The code a panic goes to in block `k`, whose cleanups are `cs`: every one of them, whatever has
+  // run already — a flag says whether a `defer` has, and dropping what holds nothing does nothing —
+  // and then the block around it's.
+  function panicLanding(self: mut Self, k: str, cs: readonly Vec<Cleanup>, span: Span): void uses Fail<Diagnostic> {
+    let all: HashSet<usize> = HashSet.new();
+    for (const c of cs) {
+      match (c) {
+        #Drop(l) | #Arena(l) => { all.insert(l); self.cx.pread.insert(l); }
+        #Defer(flag, body) => {
+          self.cx.pread.insert(flag);
+          let u: Uses = { locals: HashSet.new(), captures: HashSet.new() };
+          useBlock(body, mut u);
+          for (const l of u.locals.iter()) { self.cx.pread.insert(l); }
+        }
+      }
+    }
+    const parent = match (self.cx.pblocks.last()) { #Some(p) => `punw${p}`, #None => "punw_out".toString() };
+    const saved = replace(mut self.cx.out, String.new());
+    const open = self.cx.open;
+    const landing = self.cx.landing;
+    self.cx.open = false;
+    self.cx.landing = true;
+    self.label(`punw${k}`.asStr());
+    self.cleanups(cs, all, span);
+    self.jump(parent.asStr());
+    const code = replace(mut self.cx.out, saved);
+    self.cx.open = open;
+    self.cx.landing = landing;
+    self.cx.punw.push(code.asStr());
+    self.cx.pcases.push(k.toString());
+  }
+
   function block(self: mut Self, b: readonly Block, span: Span): void uses Fail<Diagnostic> {
     self.declarations(b, span);
     const pro = replace(mut self.cx.prologue, String.new());
@@ -1382,6 +1479,18 @@ impl Lgen {
     const unw = `unw${k}`;
     self.cx.scopes.push(#Cleanups(b.cleanups.clone()));
     self.cx.targets.push(unw.clone());
+    // A panic in the block runs its cleanups (§5.7), even one in the cleanups as the block is left,
+    // which find what has run already done.
+    if (self.unwinds) {
+      if (self.pads) {
+        self.cx.pcleanups.push(b.cleanups.clone());
+        self.cx.pspan = #Some(span);
+      } else {
+        self.ins(`store i32 ${k}, ptr %unw`);
+        self.panicLanding(k, b.cleanups, span);
+      }
+      self.cx.pblocks.push(k.clone());
+    }
     for (const s of b.stmts) { self.stmt(s, span); }
     self.cx.targets.pop();
     self.cx.scopes.pop();
@@ -1404,7 +1513,46 @@ impl Lgen {
       self.cx.liveAt.insert(parent.clone(), set);
       self.label(end.asStr());
     }
+    if (self.unwinds) {
+      self.cx.pblocks.pop();
+      if (self.pads) { self.cx.pcleanups.pop(); }
+    }
     for (const l of b.locals) { self.cx.live.remove(l); }
+  }
+
+  // The landing pad a call here unwinds to: it drops what may hold a value here, as Rust's do, and
+  // runs the `defer`s of every block around, innermost first, and then the unwinding goes on.
+  // Each is made once for the innermost block and what may hold a value.
+  function landingPad(self: mut Self, span: Span): String uses Fail<Diagnostic> {
+    let held: Vec<usize> = Vec.new();
+    for (const cs of self.cx.pcleanups) {
+      for (const c of cs) { if (const #Drop(l) = c) { if (self.cx.live.has(l)) { held.push(l); } } }
+    }
+    let key = match (self.cx.pblocks.last()) { #Some(k) => k.clone(), #None => String.new() };
+    for (const l of held) { key.push(`.${l}`); }
+    if (const #Some(l) = self.cx.lpads.get(key.asStr())) { return l.clone(); }
+    const name = `lpad${self.cx.lpads.len()}`;
+    self.cx.lpads.insert(key, name.clone());
+    const live = self.cx.live.clone();
+    const saved = replace(mut self.cx.out, String.new());
+    const open = self.cx.open;
+    const landing = self.cx.landing;
+    self.cx.open = false;
+    self.cx.landing = true;
+    self.cx.out.push(`${name}:\n  %${name}.v = landingpad { ptr, i32 } cleanup\n  store { ptr, i32 } %${name}.v, ptr %exn\n`);
+    self.cx.open = true;
+    let i = self.cx.pcleanups.len();
+    while (i > 0) {
+      i -= 1;
+      const cs = self.cx.pcleanups[i].clone();
+      self.cleanups(cs, live, span);
+    }
+    self.jump("punw_out");
+    const code = replace(mut self.cx.out, saved);
+    self.cx.open = open;
+    self.cx.landing = landing;
+    self.cx.lpadCode.push(code.asStr());
+    name
   }
 
   function stmt(self: mut Self, s: readonly Stmt, span: Span): void uses Fail<Diagnostic> {
@@ -1976,6 +2124,7 @@ impl Lgen {
     }
     self.jump("ret");
     self.label("ret");
+    if (self.cx.pcases.len() > 0 && !self.pads) { self.ins("call void @fly_unw_leave(ptr %unw)"); }
     match (self.cx.mode) {
       #Body => {
         const r = self.cx.retSlot.clone();
@@ -2011,9 +2160,45 @@ impl Lgen {
   }
 
   // The function printed, its text in `self.code`.
+  // A function with cleanup to run as a panic unwinds takes up a record as it starts (runtime.h's
+  // `fly_unw`), and has the code a panic goes to after its own.
   function define(self: mut Self, head: str): void {
     const dbg = if (self.cx.sp.len() > 0) { ` !dbg ${self.cx.sp}` } else { String.new() };
-    self.code.push(`${head} #0${dbg} {\nentry:\n${self.cx.allocas}${self.cx.out}}\n\n`);
+    if ((!self.pads && self.cx.pcases.len() == 0) || (self.pads && self.cx.lpads.len() == 0)) {
+      self.code.push(`${head} #0${dbg} {\nentry:\n${self.cx.allocas}${self.cx.out}}\n\n`);
+      return;
+    }
+    if (self.pads) {
+      // Each block whose calls may unwind has a landing pad, which keeps the exception and runs the
+      // block's cleanups and its outer blocks', and then the unwinding goes on.
+      self.declare("__gcc_personality_v0", "declare i32 @__gcc_personality_v0(...)");
+      let land = self.cx.lpadCode.clone();
+      land.push("punw_out:\n  %exn.v = load { ptr, i32 }, ptr %exn\n  resume { ptr, i32 } %exn.v\n");
+      self.code.push(`${head} #0 personality ptr @__gcc_personality_v0${dbg} {\nentry:\n  %exn = alloca { ptr, i32 }, align 8\n${self.cx.allocas}${self.cx.out}${land}}\n\n`);
+      return;
+    }
+    self.declare("fly_unw_enter", "declare void @fly_unw_enter(ptr)");
+    self.declare("fly_unw_leave", "declare void @fly_unw_leave(ptr)");
+    self.declare("fly_unwind_on", "declare void @fly_unwind_on() noreturn");
+    self.declare("_setjmp", "declare i32 @_setjmp(ptr) returns_twice");
+    const dl = if (self.cx.entryLoc.len() > 0) { `, !dbg ${self.cx.entryLoc}` } else { String.new() };
+    let start = `  %unw = alloca [512 x i8], align 16\n  call void @fly_unw_enter(ptr %unw)${dl}\n`;
+    // What the landing reads is made to live in memory: a value kept in a register would not be what
+    // it is when a panic comes back here.
+    for (const l of self.cx.pread.iter()) {
+      const at = match (self.cx.addrs.get(l)) {
+        #Some(a) => a.clone(),
+        #None => if (self.cx.declared.has(l)) { `%l${l}` } else { continue },
+      };
+      start.push(`  call void asm sideeffect "", "r,~{memory}"(ptr ${at})\n`);
+    }
+    start.push(`  %unw.buf = getelementptr inbounds i8, ptr %unw, i64 32\n  %unw.sj = call i32 @_setjmp(ptr %unw.buf) #1${dl}\n  %unw.hit = icmp ne i32 %unw.sj, 0\n  br i1 %unw.hit, label %punw_, label %unw.start\nunw.start:\n`);
+    let land = "punw_:\n  call void asm sideeffect \"\", \"~{memory}\"()\n  %unw.at = load i32, ptr %unw\n  switch i32 %unw.at, label %punw_out [\n".toString();
+    for (const k of self.cx.pcases) { land.push(`    i32 ${k}, label %punw${k}\n`); }
+    land.push("  ]\n");
+    land.push(self.cx.punw.asStr());
+    land.push(`punw_out:\n  call void @fly_unw_leave(ptr %unw)${dl}\n  call void @fly_unwind_on()${dl}\n  unreachable\n`);
+    self.code.push(`${head} #0${dbg} {\nentry:\n${self.cx.allocas}${start}${self.cx.out}${land}}\n\n`);
   }
 
   // A hoisted local: the value of a function, or of a `handle`'s part, read once its blocks end.
@@ -2936,7 +3121,9 @@ impl Lgen {
     ll.push(self.code.asStr());
     ll.push("!0 = !{!\"branch_weights\", i32 1, i32 2000}\n");
     // What the target is, the build adds: the C compiler's, so the two inline into each other.
-    ll.push("attributes #0 = { nounwind }\n");
+    // With landing pads, every function may unwind, and has the tables to.
+    ll.push(if (self.pads) { "attributes #0 = { uwtable }\n" } else { "attributes #0 = { nounwind }\n" });
+    ll.push("attributes #1 = { returns_twice }\n");
     if (self.cu.len() > 0) {
       const a = self.node("!{i32 7, !\"Dwarf Version\", i32 5}");
       const b = self.node("!{i32 2, !\"Debug Info Version\", i32 3}");
@@ -3012,7 +3199,7 @@ export function llvmProgram(p: Prog, entry: usize, runtime: str, freestanding: b
   let g = Lgen {
     c: newCgen(p), ptr, shapes: HashMap.new(), glue: HashMap.new(), glueCode: String.new(), asserts: String.new(),
     declared: HashMap.new(), globals: String.new(), strs: HashMap.new(), code: String.new(), closuresDone: 0, aparts: 0,
-    defers: HashMap.new(), fnName: String.new(), module: 0, cx: newCtx(Vec.new(), #Prim(#Void), #Fn),
+    defers: HashMap.new(), fnName: String.new(), module: 0, cx: newCtx(Vec.new(), #Prim(#Void), #Fn), unwinds: !freestanding, pads: !freestanding && ptr == 8,
     meta: String.new(), metaN: 0, files: HashMap.new(), lineStarts: HashMap.new(), locs: HashMap.new(), cu: String.new(),
     diTypes: HashMap.new(),
   };
@@ -3074,6 +3261,7 @@ impl Lgen {
     self.cx.sp = sp;
     self.cx.loc = String.new();
     self.at(span);
+    self.cx.entryLoc = self.cx.loc.clone();
   }
 
   // The code printed next comes from `span`.

@@ -53,6 +53,14 @@ fn seed_reproduces_itself() {
     assert!(std::fs::read(&again).unwrap() == std::fs::read(&seed).unwrap(), "the seed is stale: run selfhost/bootstrap.sh --update-seed");
 }
 
+/// The C compiler, with what every build of the compiler's C adds (selfhost/ccflags.sh).
+fn cc() -> Command {
+    let mut c = Command::new("cc");
+    let flags = Command::new("sh").arg(root().join("selfhost/ccflags.sh")).output().map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default();
+    c.args(flags.split_whitespace());
+    c
+}
+
 fn has_cc() -> bool {
     Command::new("cc").arg("--version").output().is_ok()
 }
@@ -68,7 +76,7 @@ fn compiles_itself_natively() {
     let c = out().join("native.c");
     compile(&root().join("selfhost/seed.js"), &main, &c);
     let exe = out().join("native");
-    let built = Command::new("cc").args(["-std=gnu11", "-O1", "-w", "-o"]).arg(&exe).arg(&c).arg("-lm").output().unwrap();
+    let built = cc().args(["-std=gnu11", "-O1", "-w", "-o"]).arg(&exe).arg(&c).arg("-lm").output().unwrap();
     assert!(built.status.success(), "{}", String::from_utf8_lossy(&built.stderr));
     for (name, want) in [("native-again.c", &c), ("native.js", &root().join("selfhost/seed.js"))] {
         let again = out().join(name);
@@ -103,7 +111,7 @@ export function main(): void uses Io, Fail<ZoneErr> {
     let c = dir.join("zones.c");
     compile(&root().join("selfhost/seed.js"), &program, &c);
     let exe = dir.join("zones");
-    let built = Command::new("cc").args(["-std=gnu11", "-O1", "-w", "-o"]).arg(&exe).arg(&c).arg("-lm").output().unwrap();
+    let built = cc().args(["-std=gnu11", "-O1", "-w", "-o"]).arg(&exe).arg(&c).arg("-lm").output().unwrap();
     assert!(built.status.success(), "{}", String::from_utf8_lossy(&built.stderr));
     let r = Command::new(&exe).output().unwrap();
     assert_eq!(
@@ -124,7 +132,7 @@ fn passes_unicodes_conformance_tests() {
     let c = dir.join("conformance.c");
     compile(&root().join("selfhost/seed.js"), &root().join("tests/unicode/conformance.fly"), &c);
     let exe = dir.join("conformance");
-    let built = Command::new("cc").args(["-std=gnu11", "-O1", "-w", "-o"]).arg(&exe).arg(&c).arg("-lm").output().unwrap();
+    let built = cc().args(["-std=gnu11", "-O1", "-w", "-o"]).arg(&exe).arg(&c).arg("-lm").output().unwrap();
     assert!(built.status.success(), "{}", String::from_utf8_lossy(&built.stderr));
     let tests = root().join("tests/unicode");
     let r = Command::new(&exe).arg(tests.join("GraphemeBreakTest.txt")).arg(tests.join("NormalizationTest.txt")).output().unwrap();
@@ -154,7 +162,7 @@ export function main(): void uses Io {
     let c = dir.join("system_crypto.c");
     compile(&root().join("selfhost/seed.js"), &program, &c);
     let exe = dir.join("system_crypto");
-    let built = Command::new("cc").args(["-std=gnu11", "-O1", "-w", "-o"]).arg(&exe).arg(&c).arg("-lm").output().unwrap();
+    let built = cc().args(["-std=gnu11", "-O1", "-w", "-o"]).arg(&exe).arg(&c).arg("-lm").output().unwrap();
     assert!(built.status.success(), "{}", String::from_utf8_lossy(&built.stderr));
     let run = || {
         let r = Command::new(&exe).env_remove("FLY_WORLD").output().unwrap();
@@ -217,7 +225,7 @@ export function main(url: str): void uses Io {
     let c = dir.join("https.c");
     compile(&root().join("selfhost/seed.js"), &program, &c);
     let exe = dir.join("https");
-    let built = Command::new("cc").args(["-std=gnu11", "-O1", "-w", "-o"]).arg(&exe).arg(&c).arg("-lm").output().unwrap();
+    let built = cc().args(["-std=gnu11", "-O1", "-w", "-o"]).arg(&exe).arg(&c).arg("-lm").output().unwrap();
     assert!(built.status.success(), "{}", String::from_utf8_lossy(&built.stderr));
     let fetch = |host: &str, roots: &Path| {
         let r = Command::new(&exe).arg(format!("https://{host}:{port}/")).env_remove("FLY_WORLD").env("SSL_CERT_FILE", roots).env_remove("SSL_CERT_DIR").output().unwrap();
@@ -245,7 +253,7 @@ fn agrees_with_re2s_semantics() {
     let c = dir.join("conformance.c");
     compile(&root().join("selfhost/seed.js"), &root().join("tests/regex/conformance.fly"), &c);
     let exe = dir.join("conformance");
-    let built = Command::new("cc").args(["-std=gnu11", "-O1", "-w", "-o"]).arg(&exe).arg(&c).arg("-lm").output().unwrap();
+    let built = cc().args(["-std=gnu11", "-O1", "-w", "-o"]).arg(&exe).arg(&c).arg("-lm").output().unwrap();
     assert!(built.status.success(), "{}", String::from_utf8_lossy(&built.stderr));
     let r = Command::new(&exe).arg(root().join("tests/regex/cases.txt")).output().unwrap();
     assert_eq!(String::from_utf8_lossy(&r.stdout), "regex 9000/9000\n");
@@ -291,7 +299,7 @@ fn compiles_again_as_its_modules_change() {
         }
         if let Some(want) = want {
             let exe = dir.join("prog");
-            let built = Command::new("cc").args(["-std=gnu11", "-O1", "-w", "-o"]).arg(&exe).arg(&c).arg("-lm").output().unwrap();
+            let built = cc().args(["-std=gnu11", "-O1", "-w", "-o"]).arg(&exe).arg(&c).arg("-lm").output().unwrap();
             assert!(built.status.success(), "{}", String::from_utf8_lossy(&built.stderr));
             let r = Command::new(&exe).output().unwrap();
             assert_eq!(String::from_utf8_lossy(&r.stdout), want);
@@ -538,7 +546,7 @@ fn interleaves_alike_from_any_seed() {
     let seed = root().join("selfhost/seed.js");
     compile(&seed, &program, &dir.join("p.js"));
     compile(&seed, &program, &dir.join("p.c"));
-    let cc = Command::new("cc").args(["-std=gnu11", "-O1", "-w", "-o"]).arg(dir.join("c")).arg(dir.join("p.c")).arg("-lm").output().unwrap();
+    let cc = cc().args(["-std=gnu11", "-O1", "-w", "-o"]).arg(dir.join("c")).arg(dir.join("p.c")).arg("-lm").output().unwrap();
     assert!(cc.status.success(), "{}", String::from_utf8_lossy(&cc.stderr));
     for (script, made) in [("selfhost/llvm.sh", "llvm"), ("selfhost/wasm.sh", "p.wasm")] {
         let r = Command::new("sh").arg(root().join(script)).arg(&seed).arg(&program).arg(dir.join(made)).output().unwrap();
@@ -649,7 +657,7 @@ fn serves_http_on_threads() {
     let c = dir.join("hello_server.c");
     compile(&root().join("selfhost/seed.js"), &root().join("tests/web/hello_server.fly"), &c);
     let exe = dir.join("hello_server");
-    let built = Command::new("cc").args(["-std=gnu11", "-O1", "-w", "-o"]).arg(&exe).arg(&c).arg("-lm").output().unwrap();
+    let built = cc().args(["-std=gnu11", "-O1", "-w", "-o"]).arg(&exe).arg(&c).arg("-lm").output().unwrap();
     assert!(built.status.success(), "{}", String::from_utf8_lossy(&built.stderr));
     let mut server = Command::new(&exe).arg("0").env_remove("FLY_WORLD").stdout(std::process::Stdio::piped()).spawn().unwrap();
     let mut first = String::new();

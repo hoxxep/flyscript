@@ -38,6 +38,7 @@ $threads && sanitize="-fsanitize=thread"
 sanitize=${FLY_SANITIZE-$sanitize}
 compiler=$1; shift
 root=$(cd "$(dirname "$0")/.." && pwd)
+ccflags=$(sh "$root/selfhost/ccflags.sh")
 # Run as `--one out file`, it checks one program, leaving `name.pass` or `name.fail` in `out`.
 if [ "$1" = "--one" ]; then
 f=$3; out=$2
@@ -59,7 +60,7 @@ elif $llvm; then
   run="$out/$name.exe"
 elif $c; then
   node --stack-size=65500 "$compiler" "$f" "$out/$name.c" "$root" > "$out/$name.err" 2>&1 &&
-    cc -std=gnu11 -g -O1 -w $sanitize -o "$out/$name.exe" "$out/$name.c" -lm >> "$out/$name.err" 2>&1
+    cc -std=gnu11 -g -O1 -w $ccflags $sanitize -o "$out/$name.exe" "$out/$name.c" -lm >> "$out/$name.err" 2>&1
   run="$out/$name.exe"
 else
   node --stack-size=65500 "$compiler" "$f" "$out/$name.js" "$root" > "$out/$name.err" 2>&1
@@ -88,7 +89,7 @@ else
   [ -s "$out/$name.err" ] || (cd "$out/$name.cwd" && FLY_WORLD="$world" env $envs $run) > "$out/$name.got" 2>&1
 fi
 if $c && $leaks && [ ! -s "$out/$name.err" ] && ! grep -q '<panic' "$out/$name.want"; then
-  cc -std=gnu11 -g -O1 -w -DFLY_SYSTEM_MALLOC -o "$out/$name.plain" "$out/$name.c" -lm &&
+  cc -std=gnu11 -g -O1 -w $ccflags -DFLY_SYSTEM_MALLOC -o "$out/$name.plain" "$out/$name.c" -lm &&
     (cd "$out/$name.cwd" && FLY_WORLD="$world" env $envs leaks --atExit -- "$out/$name.plain" 2>&1) | grep -q ' 0 leaks for ' ||
     echo "leaks" >> "$out/$name.err"
 fi

@@ -1,0 +1,28 @@
+// A panic while a `Mutex` lends its value poisons it (§6.2): the value may be half changed, so it
+// stays where it is and locking it panics, until `reset` puts a fresh value in.
+// expect: <panic in a spawned task: halfway>
+// expect: <panic in a spawned task: locked a `Mutex` that a panic left poisoned>
+// expect: after reset: 0 0
+import { println } from "std/io";
+import { Mutex } from "std/sync";
+
+type Pair = { a: i64; b: i64 };
+
+export function main(): void uses Io {
+  const m = Mutex.new<Pair>({ a: 0, b: 0 });
+  Io.scope((s) => {
+    s.spawn(() => {
+      m.lock((p) => {
+        p.a += 1;
+        if (p.a > 0) { panic("halfway"); }
+        p.b += 1;
+      });
+    });
+  });
+  Io.scope((s) => {
+    s.spawn(() => { m.lock((p) => { p.b += 1; }); });
+  });
+  m.reset({ a: 0, b: 0 });
+  const [a, b] = m.lock((p) => [p.a, p.b]);
+  println(`after reset: ${a} ${b}`);
+}

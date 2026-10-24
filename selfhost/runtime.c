@@ -75,8 +75,163 @@ void fly_err_take(void* out, size_t size) {
 
 static _Noreturn void panic_exit(const char* message);
 
-// A panic ends the program where it is, every task with it, running no one's cleanup (§5.7).
-_Noreturn void fly_panic(const char* message) { panic_exit(message); }
+// What a panic's message is when there is no memory to copy it into.
+static char out_of_memory[] = "out of memory";
+
+// Running out of memory ends the program (§5.7): unwinding would itself need memory, and nearly
+// every function allocates, which would make nearly every one a function a panic may leave.
+_Noreturn void fly_out_of_memory(void) { panic_exit("out of memory"); }
+
+#if defined(FLY_LANDING_PADS) && !defined(FLY_FREESTANDING)
+#include <unwind.h>
+#if defined(__has_feature)
+#if __has_feature(address_sanitizer)
+#define FLY_UNWIND_ASAN 1
+#endif
+#endif
+#if defined(__SANITIZE_ADDRESS__)
+#define FLY_UNWIND_ASAN 1
+#endif
+#ifdef FLY_UNWIND_ASAN
+void __asan_handle_no_return(void);
+#endif
+// The frames between a panic and the innermost catch point unwind by the platform's tables, each
+// frame's landing pad running its cleanups and going on (`resume`); at the catch point's frame the
+// unwinding stops, and goes on there. This is a forced unwind, as a thread's cancellation is: no
+// handler is searched for, so cleanups need only C's personality, and a landing pad runs as the
+// code of its own frame, the unwinder's state in the exception, so a cleanup may wait, letting other
+// fibers run and unwind panics of their own. Each fiber's panic has an exception of its own.
+static _Unwind_Reason_Code unwind_stop(int version, _Unwind_Action actions, _Unwind_Exception_Class cls,
+                                       struct _Unwind_Exception* e, struct _Unwind_Context* ctx, void* arg) {
+  (void)version; (void)cls; (void)arg;
+  fly_unw* u = fly_cx_now()->unw;
+  if ((actions & _UA_END_OF_STACK) || _Unwind_GetCFA(ctx) > u->frame) {
+    free(e);
+    _longjmp(u->buf, 1);
+  }
+  return _URC_NO_REASON;
+}
+static _Noreturn void unwind_to_catch(void) {
+#ifdef FLY_UNWIND_ASAN
+  // The frames given up without running their epilogues leave nothing poisoned behind.
+  __asan_handle_no_return();
+#endif
+  struct _Unwind_Exception* e = calloc(1, sizeof *e);
+  if (!e) _longjmp(fly_cx_now()->unw->buf, 1);
+  e->exception_class = 0x464c590050414e43ull;
+  _Unwind_ForcedUnwind(e, unwind_stop, NULL);
+  // Frames the tables do not cover: nothing of them can be cleaned up, so the catch point is all.
+  free(e);
+  _longjmp(fly_cx_now()->unw->buf, 1);
+}
+#define FLY_GO_ON(c) unwind_to_catch()
+#else
+#define FLY_GO_ON(c) _longjmp((c)->unw->buf, 1)
+#endif
+
+// A panic unwinds the fiber it happens on (§5.7): it goes to the innermost record of a function
+// with cleanup to run, whose code goes on to the next once its cleanup is done (`fly_unwind_on`);
+// or, in native code made through LLVM, to the innermost catch point, the frames between running
+// their cleanups as they unwind. A panic while one unwinds the same fiber ends the program, as
+// does one with nowhere to go.
+_Noreturn void fly_panic(const char* message) {
+#ifdef FLY_FREESTANDING
+  panic_exit(message);
+#else
+  fly_ctx* c = fly_cx_now();
+  if (c->panic) {
+    size_t n = strlen(message) + strlen(c->panic) + 40;
+    char* both = malloc(n);
+    if (!both) panic_exit(message);
+    snprintf(both, n, "%s, while unwinding from a panic: %s", message, c->panic);
+    panic_exit(both);
+  }
+  c->panic = strdup(message);
+  if (!c->panic) c->panic = out_of_memory;
+  if (!c->unw) panic_exit(c->panic);
+  FLY_GO_ON(c);
+#endif
+}
+
+void fly_unw_enter(fly_unw* u) { fly_unw_push(u); }
+void fly_unw_leave(fly_unw* u) { fly_unw_pop(u); }
+#ifndef FLY_FREESTANDING
+_Static_assert(offsetof(fly_unw, at) == 0 && offsetof(fly_unw, prev) == 8 && offsetof(fly_unw, buf) == 32 && sizeof(fly_unw) <= FLY_UNW_SIZE, "a record as LLVM IR reaches it");
+#endif
+
+_Noreturn void fly_unwind_on(void) {
+#ifdef FLY_FREESTANDING
+  panic_exit("a panic");
+#else
+  fly_ctx* c = fly_cx_now();
+  if (!c->unw) panic_exit(c->panic ? c->panic : "a panic");
+  FLY_GO_ON(c);
+#endif
+}
+
+// The panic a catch point has taken up, which no longer unwinds its fiber; and its message let go.
+static char* panic_take(void) {
+  fly_ctx* c = fly_cx_now();
+  char* m = c->panic;
+  c->panic = NULL;
+  // A failure or a cancellation it overtook is over too.
+  if (c->err) { free(c->err); c->err = NULL; }
+  c->unwinding = false;
+  return m;
+}
+static void panic_free(char* m) { if (m && m != out_of_memory) free(m); }
+// A panic taken up raised again, on the fiber running now.
+static _Noreturn void panic_again(char* m) {
+#ifdef FLY_FREESTANDING
+  panic_exit(m ? m : "a panic");
+#else
+  char buf[512];
+  snprintf(buf, sizeof buf, "%s", m ? m : "a panic");
+  panic_free(m);
+  fly_panic(buf);
+#endif
+}
+
+// ---- `join`'s halves (§6.5) ----
+// Each half of a `join` is a closure, `f` a `fly_fn`, its result written at `out`. A panic in one
+// ends the other first, so nothing they borrow goes while either may use it: the other half, not
+// yet begun, is dropped without running; once done, what it gave is dropped; and then the first
+// panic goes on.
+
+// Runs half `h`, taking up a panic that unwinds it, whose closure is then dropped: the panic's
+// message, or NULL.
+static char* run_half(void (*h)(void* f, void* out), void* f, void* out) {
+#ifdef FLY_FREESTANDING
+  h(f, out);
+  return NULL;
+#else
+  fly_unw u;
+  fly_unw_push(&u);
+  if (FLY_UNW_CATCH(&u)) {
+    fly_cx_now()->unw = u.prev;
+    char* m = panic_take();
+    fly_fn* fn = f;
+    if (fn->drop) fn->drop(fn->env);
+    return m;
+  }
+  h(f, out);
+  fly_unw_pop(&u);
+  return NULL;
+#endif
+}
+
+static void drop_half(void* f) {
+  fly_fn* fn = f;
+  if (fn->drop) fn->drop(fn->env);
+}
+
+static void join_in_order(void (*a)(void* f, void* out), void* fa, void* oa, void (*da)(void* out),
+                          void (*b)(void* f, void* out), void* fb, void* ob, void (*db)(void* out)) {
+  char* m = run_half(a, fa, oa);
+  if (m) { drop_half(fb); panic_again(m); }
+  m = run_half(b, fb, ob);
+  if (m) { if (da) da(oa); panic_again(m); }
+}
 
 #ifdef FLY_FREESTANDING
 static _Noreturn void panic_exit(const char* message) { fly_os_panic(message, strlen(message)); }
@@ -115,6 +270,20 @@ static _Noreturn void panic_exit(const char* message) {
   fflush(stdout);
 #endif
   _Exit(101);
+}
+
+// A spawned task's panic, which ends that task alone, reported as one line written whole.
+static void report_spawned_panic(const char* message) {
+  const char* head = "<panic in a spawned task: ";
+  size_t h = strlen(head), m = strlen(message);
+  char* line = malloc(h + m + 3);
+  if (!line) return;
+  memcpy(line, head, h);
+  memcpy(line + h, message, m);
+  memcpy(line + h + m, ">\n", 3);
+  struct iovec part = { line, h + m + 2 };
+  write_out(1, &part, 1);
+  free(line);
 }
 #endif
 
@@ -474,7 +643,7 @@ void free(void* p) { fly_mem_free(p); }
 
 void* fly_alloc(size_t size) {
   void* p = calloc(1, size ? size : 1);
-  if (!p) fly_panic("out of memory");
+  if (!p) fly_out_of_memory();
   return p;
 }
 
@@ -495,7 +664,7 @@ void* fly_box(const void* value, size_t size) {
 }
 
 // A `Mutex`'s state follows a header of its own: its lock, and the tasks waiting for it.
-#define MUTEX_HEADER 32
+#define MUTEX_HEADER 48
 
 void* fly_mutex_new(const void* value, size_t size) {
   uint8_t* p = fly_alloc(MUTEX_HEADER + size);
@@ -507,6 +676,17 @@ void* fly_mutex_new(const void* value, size_t size) {
 void fly_mutex_free(void* state) {
   if (state) free((uint8_t*)state - MUTEX_HEADER);
 }
+
+// Whether a panic left a `Mutex`'s state while lending it (§6.2): the last byte of its header,
+// read and written under its lock. Locking a poisoned mutex gives the lock back and panics.
+static uint8_t* poison_of(const void* state) { return (uint8_t*)state - 1; }
+void fly_mutex_check(const void* state) {
+  if (*poison_of(state)) {
+    fly_unlock(state);
+    fly_panic("locked a `Mutex` that a panic left poisoned");
+  }
+}
+void fly_mutex_poison(const void* state, bool poisoned) { *poison_of(state) = poisoned; }
 
 int64_t fly_atomic_add(int64_t* a, int64_t v) {
   int64_t old = __atomic_load_n(a, __ATOMIC_SEQ_CST), sum;
@@ -529,7 +709,7 @@ static void reserve(fly_String* s, size_t extra) {
   size_t cap = s->cap ? s->cap * 2 : 16;
   while (cap < s->len + extra) cap *= 2;
   s->ptr = realloc(s->ptr, cap);
-  if (!s->ptr) fly_panic("out of memory");
+  if (!s->ptr) fly_out_of_memory();
   s->cap = cap;
 }
 
@@ -677,7 +857,7 @@ static int io_errno(void) {
 static char* io_path(fly_str s) {
   if (s.len == 0) s = (fly_str){ (const uint8_t*)".", 1 };
   char* p = malloc(s.len + 1);
-  if (!p) fly_panic("out of memory");
+  if (!p) fly_out_of_memory();
   memcpy(p, s.ptr, s.len);
   p[s.len] = 0;
   return p;
@@ -1032,7 +1212,7 @@ static void vreserve(fly_vec* v, size_t extra, size_t size) {
   size_t cap = v->cap ? v->cap * 2 : 4;
   while (cap < v->len + extra) cap *= 2;
   v->ptr = realloc(v->ptr, cap * size);
-  if (!v->ptr) fly_panic("out of memory");
+  if (!v->ptr) fly_out_of_memory();
   v->cap = cap;
 }
 
@@ -1212,7 +1392,7 @@ void* fly_map_append(fly_map* m, uint64_t h, size_t esize) {
     m->cap = m->cap ? m->cap * 2 : 8;
     m->entries = realloc(m->entries, m->cap * esize);
     m->hashes = realloc(m->hashes, m->cap * sizeof(uint64_t));
-    if (!m->entries || !m->hashes) fly_panic("out of memory");
+    if (!m->entries || !m->hashes) fly_out_of_memory();
   }
   size_t i = m->len++;
   m->hashes[i] = h;
@@ -1340,6 +1520,11 @@ struct fly_fiber {
   void* arg;
   fly_fiber* back;
   fly_handler* handlers;
+  // Its records and the panic unwinding it, while another fiber runs (runtime.h); and a panic that
+  // unwound a fiber it resumed, to go on with in it.
+  fly_unw* unw;
+  char* panic;
+  char* panic_in;
   bool done;
 #ifdef FLY_TSAN
   void* tsan;
@@ -1403,6 +1588,10 @@ static void switch_to(fly_fiber* to) {
   fly_ctx* cx = fly_cx_now();
   from->handlers = cx->handlers;
   cx->handlers = to->handlers;
+  from->unw = cx->unw;
+  cx->unw = to->unw;
+  from->panic = cx->panic;
+  cx->panic = to->panic;
   cur_fiber = to;
 #if defined(FLY_ASAN)
   void* fake = NULL;
@@ -1418,6 +1607,11 @@ static void switch_to(fly_fiber* to) {
 #else
   fly_switch(&from->sp, to->sp);
 #endif
+  if (from->panic_in) {
+    char* m = from->panic_in;
+    from->panic_in = NULL;
+    panic_again(m);
+  }
 }
 
 void fly_fiber_start(fly_fiber* f) {
@@ -1432,7 +1626,16 @@ void fly_fiber_start(fly_fiber* f) {
     f->back->size = size;
   }
 #endif
-  f->entry(f->arg);
+  // A panic that unwinds what the fiber runs goes on in the fiber that resumed it.
+  fly_unw u;
+  fly_unw_push(&u);
+  if (FLY_UNW_CATCH(&u)) {
+    f->back->panic_in = panic_take();
+    fly_cx_now()->unw = NULL;
+  } else {
+    f->entry(f->arg);
+    fly_unw_pop(&u);
+  }
   f->done = true;
   switch_to(f->back);
 }
@@ -1442,7 +1645,7 @@ void fly_fiber_start(fly_fiber* f) {
 #define FLY_STACK (256u << 10)
 static void* stack_new(size_t size) {
   void* p = malloc(size);
-  if (!p) fly_panic("out of memory");
+  if (!p) fly_out_of_memory();
   return p;
 }
 static void stack_free(void* p, size_t size) { (void)size; free(p); }
@@ -1462,7 +1665,7 @@ FLY_THREAD_VAR(stack_pool_t, stack_pool, { 0 })
 static void* stack_new(size_t size) {
   if (stack_pool.n > 0) return stack_pool.stacks[--stack_pool.n];
   void* p = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON | MAP_NORESERVE, -1, 0);
-  if (p == MAP_FAILED) fly_panic("out of memory");
+  if (p == MAP_FAILED) fly_out_of_memory();
   return p;
 }
 static void stack_free(void* p, size_t size) {
@@ -2571,6 +2774,7 @@ static int mt_spawn(int scope, void (*entry)(void* task, void* closure), void* c
 static void mt_join(int task, void* out);
 static int mt_scope_open(void);
 static void mt_scope_close(int scope);
+static void mt_scope_cancel(int scope);
 static fly_chan mt_channel(void (*drop)(void*));
 static void mt_receiver_gone(fly_chan ch);
 static bool mt_send(fly_chan ch, const void* v, size_t size);
@@ -2596,6 +2800,9 @@ typedef struct {
   void* result;
   size_t size;
   fly_failure* error;
+  // The panic it ended with, if it was forked; a spawned task's is reported where it ends (§5.7).
+  char* panic;
+  bool forked;
   // How deep it is in cleanup, which a cancellation waits for.
   int cleaning;
   // What the scheduler delivers as it resumes the task, and its answer to what the task asked:
@@ -2615,7 +2822,8 @@ static task_t* core_cur;
 
 // The request the running task left, and its answer (rt/sched.fly's numbering).
 enum { REQ_POINT = 1, REQ_SLEEP, REQ_SPAWN, REQ_JOIN_WAIT, REQ_JOIN_TAKE, REQ_SCOPE_OPEN, REQ_SCOPE_FAILED, REQ_SCOPE_TASK, REQ_SCOPE_TAKE,
-       REQ_UNCANCEL, REQ_CHANNEL, REQ_SEND, REQ_RECV, REQ_CLOSE, REQ_SENDER_DROP, REQ_SENDER_CLONE, REQ_DEAFEN, REQ_TAKE_ITEMS };
+       REQ_UNCANCEL, REQ_CHANNEL, REQ_SEND, REQ_RECV, REQ_CLOSE, REQ_SENDER_DROP, REQ_SENDER_CLONE, REQ_DEAFEN, REQ_TAKE_ITEMS,
+       REQ_SCOPE_CANCEL };
 static struct { int kind; int64_t a[2]; void* p; } req;
 
 void fly_panic_deadlock(void) { fly_panic("deadlock: every task is waiting"); }
@@ -2668,9 +2876,33 @@ void fly_core_adopt(int32_t id, uint8_t* record) {
   core_tasks[id] = (task_t*)record;
 }
 
+static void main_entry(void* task, void* closure);
+
+// A task's closure, boxed, which its entry drops once it has run: dropped here if a panic ended it
+// first.
+static void drop_task_closure(void* c) {
+  fly_fn* f = c;
+  if (f->drop) f->drop(f->env);
+  free(f);
+}
+
+// A task's panic ends it (§5.7): a spawned task's is reported, and its scope goes on; a forked
+// task's ends it as a failure would, its scope cancelled, and goes on in the task that opened the
+// scope once every task in it has finished.
 static void task_main(void* arg) {
   task_t* t = arg;
+  fly_unw u;
+  fly_unw_push(&u);
+  if (FLY_UNW_CATCH(&u)) {
+    fly_cx_now()->unw = NULL;
+    char* m = panic_take();
+    if (t->entry != main_entry) drop_task_closure(t->closure);
+    if (t->forked) t->panic = m;
+    else { report_spawned_panic(m); panic_free(m); }
+    return;
+  }
   t->entry(t, t->closure);
+  fly_unw_pop(&u);
   if (FLY_FAILED) { t->error = fly_err; fly_err = NULL; }
   fly_unwinding = false;
 }
@@ -2688,11 +2920,12 @@ int32_t fly_core_run(int32_t id, bool deadlock, bool cancel) {
   core_cur = t;
   switch_to(t->suspended);
   if (!t->fiber->done) return 0;
-  return t->error ? 2 : 1;
+  return t->error || t->panic ? 2 : 1;
 }
 
 static task_t* new_task(void (*entry)(void* task, void* closure), void* closure, size_t size) {
   task_t* t = fly_alloc(sizeof(task_t));
+  t->forked = entry != fly_task_void;
   t->entry = entry;
   t->closure = closure;
   t->size = size;
@@ -2732,6 +2965,19 @@ void fly_sleep(uint64_t nanos) {
 
 static void main_entry(void* task, void* closure) { (void)task; ((void (*)(void))closure)(); }
 
+// The program's root (§5.7): a panic that unwinds `run` ends here, and with it the program.
+void fly_root(void (*run)(void)) {
+#ifdef FLY_FREESTANDING
+  run();
+#else
+  fly_unw u;
+  fly_unw_push(&u);
+  if (FLY_UNW_CATCH(&u)) panic_exit(fly_cx_now()->panic);
+  run();
+  fly_unw_pop(&u);
+#endif
+}
+
 void fly_tasks_run(void (*main)(void)) {
   fly_tasks_on = true;
   world_load();
@@ -2740,6 +2986,7 @@ void fly_tasks_run(void (*main)(void)) {
 #endif
   task_t* t0 = new_task(main_entry, (void*)main, 0);
   fly_rt_tasks(world.seed, (uint8_t*)t0);
+  if (t0->panic) panic_again(t0->panic);
   if (t0->error) fly_err = t0->error;
 }
 
@@ -2779,6 +3026,8 @@ void fly_join(int task, void* out) {
   ask(REQ_JOIN_WAIT, task, 0, NULL);
   if (fly_unwinding) return;
   task_t* t = core_tasks[task];
+  // It panicked, which cancels the scope and the joiner with it.
+  if (t->panic) { fly_unwinding = true; return; }
   if (t->error) {
     ask(REQ_JOIN_TAKE, task, 0, NULL);
     fly_err = t->error;
@@ -2822,7 +3071,36 @@ void fly_scope_close(int sid, bool body_failed) {
   if (unwound) { fly_unwinding = true; if (err) free(err); return; }
   if (err) { fly_err = err; return; }
   int64_t failed = ask(REQ_SCOPE_TAKE, sid, 0, NULL);
+  if (failed >= 0 && core_tasks[failed]->panic) {
+    char* m = core_tasks[failed]->panic;
+    core_tasks[failed]->panic = NULL;
+    panic_again(m);
+  }
   if (failed >= 0) { fly_err = core_tasks[failed]->error; core_tasks[failed]->error = NULL; }
+}
+
+// A panic unwound the body of scope `sid` (§5.7): its tasks are cancelled, as a failure would
+// cancel them, and once every one has finished the panic goes on.
+_Noreturn void fly_scope_panicked(int sid) {
+  char* m = panic_take();
+#ifdef FLY_THREADS
+  if (threads) { mt_scope_cancel(sid); mt_scope_close(sid); panic_again(m); }
+#endif
+  ask(REQ_SCOPE_CANCEL, sid, 0, NULL);
+  for (int64_t i = 0;; i++) {
+    int64_t task = ask(REQ_SCOPE_TASK, sid, i, NULL);
+    if (task < 0) break;
+    for (;;) {
+      ask(REQ_JOIN_WAIT, task, 0, NULL);
+      if (!fly_unwinding) break;
+      fly_unwinding = false;
+      ask(REQ_UNCANCEL, 0, 0, NULL);
+    }
+  }
+  ask(REQ_UNCANCEL, 0, 0, NULL);
+  int64_t failed = ask(REQ_SCOPE_TAKE, sid, 0, NULL);
+  if (failed >= 0) { panic_free(core_tasks[failed]->panic); core_tasks[failed]->panic = NULL; free(core_tasks[failed]->error); core_tasks[failed]->error = NULL; }
+  panic_again(m);
 }
 
 // ---- channels ----
@@ -3069,8 +3347,10 @@ struct mt_task {
   worker* home;
   fly_fiber* fiber;
   fly_fiber* suspended;
-  // How it ended: its failure, if it failed.
+  // How it ended: its failure, if it failed; its panic, if it was forked and panicked (§5.7).
   fly_failure* error;
+  char* panic;
+  bool forked;
   // Who still refers to it: itself while it lives, its scope while it does, and a forked task's
   // `Fiber` until it is joined.
   int refs;
@@ -3401,7 +3681,18 @@ static void fire_alarms(void) {
 
 static void mt_task_main(void* arg) {
   mt_task* t = arg;
+  fly_unw u;
+  fly_unw_push(&u);
+  if (FLY_UNW_CATCH(&u)) {
+    fly_cx_now()->unw = NULL;
+    char* m = panic_take();
+    if (t->entry != main_entry) drop_task_closure(t->closure);
+    if (t->forked) t->panic = m;
+    else { report_spawned_panic(m); panic_free(m); }
+    return;
+  }
   t->entry(t, t->closure);
+  fly_unw_pop(&u);
   if (FLY_FAILED) { t->error = fly_err; fly_err = NULL; }
   fly_unwinding = false;
 }
@@ -3424,7 +3715,8 @@ static void mt_end(mt_task* t) {
   mt_task** cancels = NULL;
   size_t ncancels = 0;
   spin_lock(&sc->q.lock);
-  if (t->error && !sc->failer) {
+  bool failed = t->error || t->panic;
+  if (failed && !sc->failer) {
     cancels = fly_alloc((sc->nlive + 1) * sizeof(mt_task*));
     if (!sc->closing && sc->owner) {
       __atomic_fetch_add(&sc->owner->refs, 1, __ATOMIC_RELAXED);
@@ -3436,7 +3728,7 @@ static void mt_end(mt_task* t) {
       cancels[ncancels++] = o;
     }
   }
-  if (t->error && !sc->failer) {
+  if (failed && !sc->failer) {
     __atomic_fetch_add(&t->refs, 1, __ATOMIC_RELAXED);
     sc->failer = t;
   }
@@ -3674,10 +3966,11 @@ static bool io_wait(int fd, bool write) {
 // ---- `par` ----
 
 // Work `join` lets another worker take: the second of the two, run where it is taken.
-typedef struct { void (*run)(void* f, void* out); void* f; void* out; int done; } job_t;
+typedef struct { void (*run)(void* f, void* out); void* f; void* out; int done; char* panic; } job_t;
 
+// A job's panic is taken up where it runs, and goes on in the `join` that made it.
 static void run_job(job_t* j) {
-  j->run(j->f, j->out);
+  j->panic = run_half(j->run, j->f, j->out);
   __atomic_store_n(&j->done, 1, __ATOMIC_RELEASE);
 }
 
@@ -3719,21 +4012,22 @@ static mt_task* steal_task(worker* w) {
   return NULL;
 }
 
-static void par_join(void (*a)(void*, void*), void* fa, void* oa, void (*b)(void*, void*), void* fb, void* ob) {
+static void par_join(void (*a)(void*, void*), void* fa, void* oa, void (*da)(void*), void (*b)(void*, void*), void* fb, void* ob, void (*db)(void*)) {
   worker* w = this_worker;
   // With work enough waiting to be taken here already, this pair runs here, in order.
   if (dq_size(&w->jobs) >= 4) {
-    a(fa, oa);
-    b(fb, ob);
+    join_in_order(a, fa, oa, da, b, fb, ob, db);
     return;
   }
-  job_t jb = { b, fb, ob, 0 };
+  job_t jb = { b, fb, ob, 0, NULL };
   dq_push(&w->jobs, &jb);
   notify();
-  a(fa, oa);
+  char* ma = run_half(a, fa, oa);
   // Only what `a` pushed was above `b`, and `a` took it back: `b` is next, unless it was taken.
   if (dq_pop(&w->jobs) == &jb) {
-    b(fb, ob);
+    if (ma) { drop_half(fb); panic_again(ma); }
+    char* mb = run_half(b, fb, ob);
+    if (mb) { if (da) da(oa); panic_again(mb); }
     return;
   }
   // Taken: help with other work until it is done.
@@ -3742,6 +4036,12 @@ static void par_join(void (*a)(void*, void*), void* fa, void* oa, void (*b)(void
     if (j) { run_job(j); n = 0; }
     else if (n < 128) relax();
     else sched_yield();
+  }
+  if (ma || jb.panic) {
+    if (!ma && da) da(oa);
+    if (!jb.panic && db) db(ob);
+    if (ma && jb.panic) panic_free(jb.panic);
+    panic_again(ma ? ma : jb.panic);
   }
 }
 
@@ -3867,6 +4167,8 @@ static void mt_run(void (*main)(void), void (*entry)(void* task, void* closure))
   t->entry = entry;
   t->closure = (void*)main;
   t->refs = 1;
+  // Its panic goes on once the workers have stopped, and ends the program.
+  t->forked = true;
   main_task = t;
   runnable = alive = 1;
   inbox_push(&workers[0], t);
@@ -3881,6 +4183,7 @@ static void mt_run(void (*main)(void), void (*entry)(void* task, void* closure))
   }
   pthread_attr_destroy(&attr);
   work(&workers[0]);
+  if (t->panic) panic_again(t->panic);
   if (t->error) fly_err = t->error;
 }
 
@@ -3894,6 +4197,7 @@ static int mt_spawn(int scope, void (*entry)(void* task, void* closure), void* c
   t->size = size;
   t->result = fly_alloc(size ? size : 1);
   t->scope = sc;
+  t->forked = entry != fly_task_void;
   // A forked task's `Fiber` refers to it too.
   t->refs = entry == fly_task_void ? 2 : 3;
   int id = obj_new(t);
@@ -3920,7 +4224,10 @@ static void mt_join(int task, void* out) {
     spin_lock(&t->joiners.lock);
   }
   spin_unlock(&t->joiners.lock);
-  if (t->error) {
+  if (t->panic) {
+    // It panicked, which cancels the scope and the joiner with it; the scope raises the panic.
+    fly_unwinding = true;
+  } else if (t->error) {
     // Raised here, so not again by the scope.
     fly_err = t->error;
     t->error = NULL;
@@ -3958,16 +4265,39 @@ static void mt_scope_close(int id) {
   mt_task* failer = sc->failer;
   obj_clear(id);
   free(sc);
+  char* panic = NULL;
   if (unwound) {
     fly_unwinding = true;
     if (err) free(err);
   } else if (err) {
     fly_err = err;
+  } else if (failer && failer->panic) {
+    panic = failer->panic;
+    failer->panic = NULL;
   } else if (failer && failer->error) {
     fly_err = failer->error;
     failer->error = NULL;
   }
   if (failer) task_unref(failer);
+  if (panic) panic_again(panic);
+}
+
+// A panic unwound scope `id`'s body: its tasks still alive are cancelled.
+static void mt_scope_cancel(int id) {
+  mt_scope* sc = obj_get(id);
+  spin_lock(&sc->q.lock);
+  mt_task** cancels = fly_alloc((sc->nlive + 1) * sizeof(mt_task*));
+  size_t n = 0;
+  for (mt_task* o = sc->live; o; o = o->snext) {
+    __atomic_fetch_add(&o->refs, 1, __ATOMIC_RELAXED);
+    cancels[n++] = o;
+  }
+  spin_unlock(&sc->q.lock);
+  for (size_t i = 0; i < n; i++) {
+    cancel_task(cancels[i]);
+    task_unref(cancels[i]);
+  }
+  free(cancels);
 }
 
 static fly_chan mt_channel(void (*drop)(void*)) {
@@ -4023,7 +4353,7 @@ static void mt_sender_clone(fly_chan ch) {
 // A `Mutex`'s monitor and whether it is held, in the header before its state; how it is taken and
 // given back is the runtime's Flyscript's (rt/mt.fly).
 typedef struct { waitq q; int32_t held; } mt_mutex;
-_Static_assert(sizeof(mt_mutex) <= MUTEX_HEADER, "a mutex's header holds its lock");
+_Static_assert(sizeof(mt_mutex) < MUTEX_HEADER, "a mutex's header holds its lock, and its poison after");
 
 static mt_mutex* mutex_of(const void* state) { return (mt_mutex*)((uint8_t*)state - MUTEX_HEADER); }
 
@@ -4042,10 +4372,10 @@ void fly_unlock(const void* state) {
 static void* mt_task_result(mt_task* t) { return t->result; }
 static void* mt_task_closure(mt_task* t) { return t->closure; }
 
-void fly_par_join(void (*a)(void* f, void* out), void* fa, void* oa, void (*b)(void* f, void* out), void* fb, void* ob) {
-  if (threads && nworkers > 1 && this_worker) { par_join(a, fa, oa, b, fb, ob); return; }
-  a(fa, oa);
-  b(fb, ob);
+void fly_par_join(void (*a)(void* f, void* out), void* fa, void* oa, void (*da)(void* out),
+                  void (*b)(void* f, void* out), void* fb, void* ob, void (*db)(void* out)) {
+  if (threads && nworkers > 1 && this_worker) { par_join(a, fa, oa, da, b, fb, ob, db); return; }
+  join_in_order(a, fa, oa, da, b, fb, ob, db);
 }
 #endif
 
@@ -4065,9 +4395,9 @@ void fly_core_relax(void) {}
 #endif
 void fly_lock(const void* state) { (void)state; }
 void fly_unlock(const void* state) { (void)state; }
-void fly_par_join(void (*a)(void* f, void* out), void* fa, void* oa, void (*b)(void* f, void* out), void* fb, void* ob) {
-  a(fa, oa);
-  b(fb, ob);
+void fly_par_join(void (*a)(void* f, void* out), void* fa, void* oa, void (*da)(void* out),
+                  void (*b)(void* f, void* out), void* fb, void* ob, void (*db)(void* out)) {
+  join_in_order(a, fa, oa, da, b, fb, ob, db);
 }
 #endif
 

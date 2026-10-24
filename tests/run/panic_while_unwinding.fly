@@ -1,0 +1,13 @@
+// A panic while a panic unwinds ends the program at once (§5.7): the cleanup that panicked was
+// running because of the first, and what is left to run is not to be trusted to end.
+// expect: unwinding
+// expect: <panic: the cleanup failed too, while unwinding from a panic: first>
+import { println } from "std/io";
+
+export function main(): void uses Io {
+  defer println("not reached: the program ended at the second panic");
+  {
+    defer { println("unwinding"); panic("the cleanup failed too"); };
+    panic("first");
+  }
+}

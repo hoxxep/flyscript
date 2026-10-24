@@ -16,7 +16,7 @@ make() {
   case "$1" in
     *.js) node --stack-size=65500 "$1" "$2" "$3.c" "$root" ;;
     *) "$1" "$2" "$3.c" "$root" ;;
-  esac && cc -std=gnu11 -O2 -w -o "$3" "$3.c" -lm && rm -f "$3.c"
+  esac && cc -std=gnu11 -O2 -w $(sh "$root/selfhost/ccflags.sh") -o "$3" "$3.c" -lm && rm -f "$3.c"
 }
 if stale "$out/flyc"; then
   echo "fly: building the compiler" >&2

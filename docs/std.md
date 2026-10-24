@@ -8,7 +8,7 @@ Throughout:
 
 - **Effects are the contract.** A function with no `uses` clause is pure (spec §5.1): it observes nothing outside its arguments and allocates only what it returns. One that synchronizes with other tasks performs `Io` and is a *scheduling point*: another task may run there, and a cancellation may be delivered there (spec §6.1).
 - **Failures are typed.** `Fail<E>` lists what a function throws. `IoErr` is `#Reset | #TimedOut | #BrokenPipe | #NotFound | #PermissionDenied | #AddrInUse | #Refused | #Exists | #NotEmpty | #Unsupported | #Untrusted` (§1.8).
-- **Panics are bugs.** An index out of bounds, `unwrap()` of `#None`, integer overflow and heap exhaustion panic (spec §5.7); a function that can panic otherwise says when.
+- **Panics are bugs.** An index out of bounds, `unwrap()` of `#None` and integer overflow panic, ending the task they happen in once it has unwound (spec §5.7); running out of memory ends the program. A function that can panic otherwise says when.
 - **Positions in text are byte offsets**, and text is UTF-8. A position inside a character, where a function would split one, panics.
 - **Complexity** is stated where it is a promise; *amortized* is over a sequence of calls on one value.
 - **Simulated and real worlds.** Every `Io` operation means the same against the machine and against a simulated world (spec §6.4); where what they can observe differs, both are stated.
@@ -171,7 +171,8 @@ What tasks share (spec §6.2). Every operation that waits for another task perfo
 State shared by tasks, reached only inside `lock`.
 
 - `Mutex.new(v)`, for `T extends Send`.
-- `m.lock(body): R uses Io` lends the state `mut` to `body`, a closure that performs no effects and gives back a `Send` value, and gives back what `body` gives. Because `body` performs nothing, no lock is held across a scheduling point, so no `Mutex` takes part in a deadlock. A body that panics ends the program (spec §5.7).
+- `m.lock(body): R uses Io` lends the state `mut` to `body`, a closure that performs no effects and gives back a `Send` value, and gives back what `body` gives. Because `body` performs nothing, no lock is held across a scheduling point, so no `Mutex` takes part in a deadlock. A body that panics poisons the mutex: the state, which may be half changed, stays where it is, and every `lock` from then on panics (spec §6.2).
+- `m.reset(v) uses Io` puts `v` in the mutex, dropping what was there, and clears the poison: for code that knows how to start afresh after a panic.
 - `lock` is a scheduling point before it takes the lock. A task that finds the lock held spins briefly, then waits without a core, and waiting tasks are woken in the order they began to wait.
 - Each `Mutex` has a lock of its own: locking one never waits for another.
 
@@ -198,7 +199,7 @@ Files and the standard streams, in Flyscript over `Io`'s descriptors (§1.8). A 
 | :--- | :--- |
 | `println(s)` | Writes `s` and a line break to standard output. Each line is written whole, so lines from tasks on different cores never mix; on worker threads, standard output is flushed at each line. |
 | `eprintln(s)` | The same, to standard error, which is not buffered. |
-| `exit(code): never` | Ends the program at once, every task with it, with `code` its exit status; standard output is flushed first. No cleanup runs, as for a panic (spec §5.7). |
+| `exit(code): never` | Ends the program at once, every task with it, with `code` its exit status; standard output is flushed first. No cleanup runs (spec §5.7). |
 | `File.open(path)`, `File.create(path)`, `File.append(path)` | A file to read; one made empty, or made, to write; one made if it is not there, to write at its end: `#NotFound`, `#PermissionDenied`. |
 | `File.stdin()` | The program's standard input, to read. |
 | `f.read(into): usize` | What is there, at most `into.len()` bytes, waiting for at least one: how many, `0` at the end. |

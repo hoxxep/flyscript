@@ -1,7 +1,10 @@
-// expect: <panic: index 9 out of bounds (length 3)>
-// A body panics while it holds its lock, with another task asleep holding cleanup that takes the
-// lock: the panic ends the program at once, on whatever core it happens (§5.7). No cleanup runs,
-// so none can wait for a lock the panicking task never gave back.
+// expect: <panic in a spawned task: index 9 out of bounds (length 3)>
+// expect: the next task to lock it panics
+// expect: <panic in a spawned task: locked a `Mutex` that a panic left poisoned>
+// expect: after reset: 7
+// A body panics while it holds its lock, on whatever core (§5.7, §6.2): its task unwinds, and the
+// mutex, whose value it may have left half changed, is poisoned rather than given back. The next
+// task to lock it panics too, until `reset` puts a fresh value in.
 import { println } from "std/io";
 import { Mutex } from "std/sync";
 
@@ -9,18 +12,17 @@ export function main(): void uses Io {
   const counter = Mutex.new(0 as u64);
   Io.scope((s) => {
     s.spawn(() => {
-      defer {
-        const n = counter.lock((c) => c + 0);
-        println(`not reached: a panic runs no cleanup: ${n}`);
-      };
-      counter.lock((c) => { c += 1; });
-      Io.sleep(Duration.secs(60));
-    });
-    s.spawn(() => {
-      while (counter.lock((c) => c + 0) < 1) { Io.sleep(Duration.ms(1)); }
       const xs = [1, 2, 3];
       const i: usize = 9;
-      counter.lock((c) => { c += xs[i]; });
+      counter.lock((c) => { c += 1; c += xs[i]; });
     });
   });
+  Io.scope((s) => {
+    s.spawn(() => {
+      defer println("the next task to lock it panics");
+      counter.lock((c) => { c += 1; });
+    });
+  });
+  counter.reset(7);
+  println(`after reset: ${counter.lock((c) => c + 0)}`);
 }
