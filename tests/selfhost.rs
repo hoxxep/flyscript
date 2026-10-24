@@ -78,6 +78,40 @@ fn compiles_itself_natively() {
     }
 }
 
+/// `std/time` reads the machine's own tz database: zones as their files say, their changes and the
+/// rule after them, against what is known of them.
+#[test]
+fn reads_the_systems_time_zones() {
+    if !has_node() || !has_cc() || !Path::new("/usr/share/zoneinfo/Europe/London").exists() {
+        return;
+    }
+    let dir = out().join("zones");
+    std::fs::create_dir_all(&dir).unwrap();
+    let program = dir.join("zones.fly");
+    std::fs::write(&program, r#"import { println } from "std/io";
+import { Timestamp, ZoneErr, zone, local, format } from "std/time";
+export function main(): void uses Io, Fail<ZoneErr> {
+  for (const name of ["Europe/London", "America/New_York", "Asia/Tokyo", "UTC"]) {
+    const z = zone(name);
+    const winter = z.kindAt(Timestamp.fromSeconds(1704110400));
+    const summer = z.kindAt(Timestamp.fromSeconds(1719835200));
+    println(`${name} ${winter.offset} ${summer.offset} ${format(local(Timestamp.fromSeconds(1719835200), z))}`);
+  }
+  try { zone("No/Such_Zone"); } catch (e) { println(`${e}`); }
+}
+"#).unwrap();
+    let c = dir.join("zones.c");
+    compile(&root().join("selfhost/seed.js"), &program, &c);
+    let exe = dir.join("zones");
+    let built = Command::new("cc").args(["-std=gnu11", "-O1", "-w", "-o"]).arg(&exe).arg(&c).arg("-lm").output().unwrap();
+    assert!(built.status.success(), "{}", String::from_utf8_lossy(&built.stderr));
+    let r = Command::new(&exe).output().unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&r.stdout),
+        "Europe/London 0 3600 2024-07-01T13:00:00+01:00\nAmerica/New_York -18000 -14400 2024-07-01T08:00:00-04:00\nAsia/Tokyo 32400 32400 2024-07-01T21:00:00+09:00\nUTC 0 0 2024-07-01T12:00:00Z\n#UnknownZone(\"No/Such_Zone\")\n"
+    );
+}
+
 /// `--watch` compiles a program again as its modules change: a change to bodies alone from what the
 /// last build left, anything else from scratch, and a build that fails leaves the C as it was.
 #[test]

@@ -1,0 +1,52 @@
+// expect: 20750 6 true false
+// expect: 2026-10-24T00:00:00Z 1969-12-31T23:59:59Z
+// expect: GMT 0 BST 3600 BST GMT
+// expect: GMT BST BST GMT
+// expect: 2026-07-01T13:00:00+01:00
+// expect: EDT -14400 EST -18000
+// expect: 2026-10-24T12:05:09.25Z 2026-10-24T12:05:09.25Z
+// expect: 2026-10-24T00:00:00Z
+// expect: #BadTime(8) #BadTime(11) #BadTime(16)
+// expect: #BadZone("Test/Zone: not a TZif file")
+// Time (std/time): dates of the calendar, a zone read from a file of the tz database — its changes,
+// then the POSIX rule after them — and ISO 8601 text. The file is made here, so the test is the
+// same on every host.
+import { println } from "std/io";
+import { Timestamp, DateTime, Zone, ZoneErr, TimeErr, civil, instant, local, format, parse, daysFromCivil, weekday, isLeapYear } from "std/time";
+
+const TZIF: u8[] = [
+  84, 90, 105, 102, 50, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 4, 0, 0, 0, 0, 0, 0, 71, 77, 84, 0, 84, 90, 105, 102,
+  50, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+  2, 0, 0, 0, 2, 0, 0, 0, 8, 0, 0, 0, 0, 59, 154, 202, 0, 0, 0, 0, 0, 65, 144, 171, 0, 1, 0, 0,
+  0, 0, 0, 0, 0, 0, 0, 14, 16, 1, 4, 71, 77, 84, 0, 66, 83, 84, 0, 10, 71, 77, 84, 48, 66, 83,
+  84, 44, 77, 51, 46, 53, 46, 48, 47, 49, 44, 77, 49, 48, 46, 53, 46, 48, 10];
+
+function at(z: readonly Zone, s: i64): String {
+  const k = z.kindAt(Timestamp.fromSeconds(s));
+  k.name
+}
+
+function show(r: Result<DateTime, TimeErr>): String {
+  match (r) { #Ok(d) => format(d), #Err(e) => `${e}` }
+}
+
+export function main(): void uses Io, Fail<ZoneErr | TimeErr> {
+  println(`${daysFromCivil(2026, 10, 24)} ${weekday(2026, 10, 24)} ${isLeapYear(2024)} ${isLeapYear(1900)}`);
+  println(`${format(civil(Timestamp.fromSeconds(1792800000), 0))} ${format(civil(Timestamp.fromSeconds(-1), 0))}`);
+  const z = Zone.fromTzif("Test/Zone", TZIF);
+  const k1 = z.kindAt(Timestamp.fromSeconds(999999999));
+  const k2 = z.kindAt(Timestamp.fromSeconds(1000000000));
+  println(`${k1.name} ${k1.offset} ${k2.name} ${k2.offset} ${at(z, 1099999999)} ${at(z, 1100000000)}`);
+  println(`${at(z, 1774745999)} ${at(z, 1774746000)} ${at(z, 1792889999)} ${at(z, 1792890000)}`);
+  println(format(local(Timestamp.fromSeconds(1782907200), z)));
+  const ny = Zone.fromRule("EST5EDT,M3.2.0,M11.1.0");
+  const summer = ny.kindAt(Timestamp.fromSeconds(1782907200));
+  const winter = ny.kindAt(Timestamp.fromSeconds(1768478400));
+  println(`${summer.name} ${summer.offset} ${winter.name} ${winter.offset}`);
+  const t = instant(parse("2026-10-24T13:05:09.25+01:00"));
+  println(`${format(civil(t, 0))} ${format(civil(instant(parse("2026-10-24 12:05:09,25")), 0))}`);
+  println(format(parse("2026-10-24")));
+  println(`${show(Fail.capture(() => parse("2026-02-30")))} ${show(Fail.capture(() => parse("2026-10-24T25:00")))} ${show(Fail.capture(() => parse("2026-10-24T10:00x")))}`);
+  try { Zone.fromTzif("Test/Zone", [1, 2, 3]); } catch (e) { println(`${e}`); }
+}

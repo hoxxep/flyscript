@@ -1188,7 +1188,7 @@ function $drop11(v) {
   $b.Gen_drop({ v: v });
 }
 const $const3 = $usize(1 * 2 ** 40);
-const $const4 = ["std/prelude.fly", "std/region.d.fly", "std/net.d.fly", "std/io.d.fly", "std/collections.d.fly", "std/par.fly", "std/layout.fly", "std/sync.d.fly", "std/json.fly", "std/world.d.fly", "std/fs.fly", "std/process.fly"];
+const $const4 = ["std/prelude.fly", "std/region.d.fly", "std/net.d.fly", "std/io.d.fly", "std/collections.d.fly", "std/par.fly", "std/layout.fly", "std/sync.d.fly", "std/json.fly", "std/world.d.fly", "std/fs.fly", "std/process.fly", "std/time.fly"];
 function $copy12(v) { return ({ nanos: v.nanos }); }
 function $copy13(v) { return [v[0], v[1]]; }
 const $const13 = $usize(1 * 2 ** 51);

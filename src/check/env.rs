@@ -22,6 +22,7 @@ const STD: &[(&str, &str)] = &[
     ("std/json.fly", include_str!("../../std/json.fly")),
     ("std/fs.fly", include_str!("../../std/fs.fly")),
     ("std/process.fly", include_str!("../../std/process.fly")),
+    ("std/time.fly", include_str!("../../std/time.fly")),
     ("std/world.d.fly", include_str!("../../std/world.d.fly")),
 ];
 

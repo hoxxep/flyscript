@@ -236,9 +236,30 @@ The file system, over `Io`'s operations. Paths are text with `/` between their p
 | `run(program, args): Output` | Runs `program`, found as the system finds programs, with `args`, to its end, reading nothing: `#NotFound` if there is no such program, `#Unsupported` where the host runs none. A simulated world has no programs of its own, and runs the machine's. |
 | `runWith(program, args, input): Output` | The same, the program given `input` to read; what it writes is taken as it writes it, so neither side waits on the other. |
 
+## 7. `std/time`
+
+Instants of the time of day, dates and times of the calendar, time zones and ISO 8601 text. Only `Timestamp.now` and `zone` reach the host; the rest is arithmetic, the same on every host.
+
+| | Contract |
+| :--- | :--- |
+| `Timestamp` | An instant: nanoseconds since 1970 began, in UTC, before it negative. `now()`, by `Io.wall`; `fromNanos(n)`, `fromSeconds(s)`, `toNanos()`, `seconds()` (rounded down), `plus(d)` and `minus(d)` by a `Duration`, `nanosSince(earlier)`. Equal and ordered as their instants are. |
+| `DateTime` | A date of the proleptic Gregorian calendar and a time of day, `year`, `month`, `day`, `hour`, `minute`, `second`, `nanos`, as a clock `offset` seconds east of UTC shows them. |
+| `civil(t, offset): DateTime` | What a clock `offset` seconds east of UTC shows at `t`. |
+| `instant(d): Timestamp` | The instant a `DateTime` is, at its offset. |
+| `daysFromCivil(year, month, day)`, `civilFromDays(days)` | Days since 1970 began of a date, and the date of a day. |
+| `weekday(year, month, day)` | The day of the week, `0` Sunday. |
+| `isLeapYear(year)` | Divisible by 4, and by 400 if by 100. |
+| `Zone` | A time zone: when its kind of local time changes, and the rule it keeps after its last change. `Zone.utc()`; `Zone.fromRule(tz)`, a zone that keeps a rule of POSIX's `TZ` — `"CET-1CEST,M3.5.0,M10.5.0/3"`, its months, weeks and days, Julian days `Jn` and days `n`, and times after `/` — or `#BadZone`; `Zone.fromTzif(name, bytes)`, a zone as a file of the tz database has it (RFC 8536, version 2 or later, its 64-bit times), or `#BadZone`; `name()`; `kindAt(t)` and `offsetAt(t)`. Before its first change a zone keeps its first kind that is not daylight saving time. |
+| `ZoneKind` | A kind of local time: its `offset` east of UTC in seconds, whether it is daylight saving time (`dst`), and its `name`, `"BST"`. |
+| `zone(name): Zone` | A zone of the system's tz database, `zone("Europe/London")`, from the directory `TZDIR` names or `/usr/share/zoneinfo`: `#UnknownZone` if it has none of that name. `"UTC"` is always there. |
+| `local(t, z): DateTime` | What a clock in the zone `z` shows at `t`. |
+| `format(d): String` | ISO 8601: `2026-10-24T13:05:09Z`, `2026-10-24T14:05:09.25+01:00`, a fraction of a second only if there is one, its trailing zeros left out, and `Z` for an offset of none. |
+| `parse(text): DateTime` | ISO 8601's dates, `2026-10-24`, and dates and times, `T` or a space between them, the seconds and a fraction of them, after `.` or `,`, optional, then `Z`, an offset `±hh:mm` or `±hhmm`, or nothing, which is UTC. A date that is not on the calendar, or anything else, is `#BadTime(at)`, `at` the offset in the text where it went wrong. |
+| `ZoneErr`, `TimeErr` | `#UnknownZone(name) \| #BadZone(why)`; `#BadTime(at)`. |
+
 ---
 
-## 7. `std/net`
+## 8. `std/net`
 
 TCP. Every operation that waits for the network performs `Io` and is a scheduling point; a task waiting for a socket gives its core to others until the kernel says the socket is ready.
 
@@ -264,7 +285,7 @@ Against a simulated world, a listener's connections are the world's requests, a 
 
 ---
 
-## 8. `std/par`
+## 9. `std/par`
 
 Data parallelism over pure closures (spec §6.5).
 
@@ -275,19 +296,19 @@ Data parallelism over pure closures (spec §6.5).
 
 ---
 
-## 9. `std/layout`
+## 10. `std/layout`
 
 `Soa<T>` keeps a struct's fields in planes, one for each field: a `Vec` for a scalar field and a nested `Soa` for a struct field (spec §7.4). It has `Soa.new()`, `push(v)`, `len()`, `at(i)`, a `SoaView` that lends each field of one element, and `splitAt(at)`; `SoaSlice`, `SoaView` and `SoaRead` are its `ParSplit` views.
 
 ---
 
-## 10. `std/region`
+## 11. `std/region`
 
 Mutable slots in a region (spec §4.6). `Cell<R, T extends Copy>`: `Cell.new(v)`, `c.get()`, `c.set(v)`. `RegionList<R, T>`: `RegionList.new()`, `push(v)`, `len()`, and iteration. Both are handles, `Copy`; reading and writing through one performs `Region<R>`.
 
 ---
 
-## 11. `std/json`
+## 12. `std/json`
 
 JSON as library code (spec §7.5).
 
@@ -298,12 +319,12 @@ JSON as library code (spec §7.5).
 
 ---
 
-## 12. `std/world`
+## 13. `std/world`
 
 Services only a simulated world provides (spec §6.4), for examples and tests: `Db.connect(): Db`; `db.fetchProfile(user): Profile`, where a `Profile` is `{ displayName: String }`, failing with `#NotFound` for a user the world does not know; and `db.checkQuota(token): Quota`, where a `Quota` is `{ allowed: bool }`. Each performs `Io` and may fail as the world's faults say.
 
 ---
 
-## 13. The web framework
+## 14. The web framework
 
 The web framework, FlyNext, is a package shipped with the compiler and specified in [web/README.md](../web/README.md): `web/http` (requests, responses and `serve`), `web/ui` (the `Ui<M>` effect, links, components and HTML), `web/dom` (pages in the browser), `web/router` (routes and their parameters) and `web/site` (pages and files answered), with the app compiler `web/flynext`.

@@ -1,0 +1,463 @@
+// Time (std.md): instants of the day as UTC has them, dates and times of the calendar, time zones
+// from the system's tz database, and ISO 8601 text. Only `now` and `zone` reach the host; the rest
+// is arithmetic.
+
+import { File } from "std/io";
+
+// An instant: nanoseconds since 1970 began, in UTC, before it negative.
+export struct Timestamp { private nanos: i64 }
+
+impl Timestamp {
+  // The time of day now.
+  export function now(): Timestamp uses Io { Timestamp { nanos: Io.wall() } }
+  export function fromNanos(n: i64): Timestamp { Timestamp { nanos: n } }
+  export function fromSeconds(s: i64): Timestamp { Timestamp { nanos: s * 1000000000 } }
+  export function toNanos(self: readonly Self): i64 { self.nanos }
+  // Whole seconds since 1970 began, rounded down.
+  export function seconds(self: readonly Self): i64 { floorDiv(self.nanos, 1000000000) }
+  export function plus(self: readonly Self, d: readonly Duration): Timestamp { Timestamp { nanos: self.nanos + (d.toNanos() as i64) } }
+  export function minus(self: readonly Self, d: readonly Duration): Timestamp { Timestamp { nanos: self.nanos - (d.toNanos() as i64) } }
+  // How long after `earlier` this is, in nanoseconds, before it negative.
+  export function nanosSince(self: readonly Self, earlier: readonly Timestamp): i64 { self.nanos - earlier.nanos }
+}
+impl Eq for Timestamp;
+impl Ord for Timestamp;
+
+// A date and a time of day, as a clock `offset` seconds east of UTC shows them.
+export type DateTime = { year: i64; month: u8; day: u8; hour: u8; minute: u8; second: u8; nanos: u32; offset: i32 };
+
+function floorDiv(a: i64, b: i64): i64 {
+  const q = a / b;
+  if ((a % b != 0) && ((a < 0) != (b < 0))) { q - 1 } else { q }
+}
+
+function floorMod(a: i64, b: i64): i64 { a - floorDiv(a, b) * b }
+
+// Days since 1970 began of a date of the proleptic Gregorian calendar (Hinnant's `days_from_civil`).
+export function daysFromCivil(year: i64, month: u8, day: u8): i64 {
+  const y = if (month <= 2) { year - 1 } else { year };
+  const era = floorDiv(y, 400);
+  const yoe = y - era * 400;
+  const m = month as i64;
+  const doy = (153 * (if (m > 2) { m - 3 } else { m + 9 }) + 2) / 5 + (day as i64) - 1;
+  const doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+  era * 146097 + doe - 719468
+}
+
+// The date `days` days after 1970 began (Hinnant's `civil_from_days`).
+export function civilFromDays(days: i64): [i64, u8, u8] {
+  const z = days + 719468;
+  const era = floorDiv(z, 146097);
+  const doe = z - era * 146097;
+  const yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+  const doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+  const mp = (5 * doy + 2) / 153;
+  const d = doy - (153 * mp + 2) / 5 + 1;
+  const m = if (mp < 10) { mp + 3 } else { mp - 9 };
+  [if (m <= 2) { yoe + era * 400 + 1 } else { yoe + era * 400 }, m as u8, d as u8]
+}
+
+// The day of the week, `0` Sunday.
+export function weekday(year: i64, month: u8, day: u8): u8 { floorMod(daysFromCivil(year, month, day) + 4, 7) as u8 }
+
+export function isLeapYear(year: i64): bool { year % 4 == 0 && (year % 100 != 0 || year % 400 == 0) }
+
+// What a clock `offset` seconds east of UTC shows at `t`.
+export function civil(t: readonly Timestamp, offset: i32): DateTime {
+  const local = t.nanos + (offset as i64) * 1000000000;
+  const secs = floorDiv(local, 1000000000);
+  const nanos = floorMod(local, 1000000000) as u32;
+  const days = floorDiv(secs, 86400);
+  const rem = floorMod(secs, 86400);
+  const [year, month, day] = civilFromDays(days);
+  { year, month, day, hour: (rem / 3600) as u8, minute: (rem % 3600 / 60) as u8, second: (rem % 60) as u8, nanos, offset }
+}
+
+// The instant a date and time are, at their offset.
+export function instant(d: readonly DateTime): Timestamp {
+  const days = daysFromCivil(d.year, d.month, d.day);
+  const secs = days * 86400 + (d.hour as i64) * 3600 + (d.minute as i64) * 60 + (d.second as i64) - (d.offset as i64);
+  Timestamp { nanos: secs * 1000000000 + (d.nanos as i64) }
+}
+
+// ---- time zones ----
+
+// A kind of local time a zone keeps: its offset east of UTC in seconds, whether it is daylight
+// saving time, and what it is called.
+export type ZoneKind = { offset: i32; dst: bool; name: String };
+
+// A rule of POSIX's `TZ`: standard time, and daylight saving time from one moment of each year to
+// another, each said in local time.
+type Rule = { std: ZoneKind; dst: Option<ZoneKind>; start: Moment; end: Moment };
+type Moment = { kind: u8; month: u8; week: u8; day: u16; seconds: i64 };
+
+// A time zone: the moments its kind of local time changes, and the rule it keeps after the last.
+export struct Zone {
+  private name: String;
+  private at: Vec<i64>;
+  private which: Vec<u8>;
+  private kinds: Vec<ZoneKind>;
+  private rule: Option<Rule>;
+}
+
+export type ZoneErr = #UnknownZone(String) | #BadZone(String);
+
+impl Zone {
+  export function utc(): Zone {
+    const k: ZoneKind = { offset: 0, dst: false, name: "UTC".toString() };
+    Zone { name: "UTC".toString(), at: Vec.new(), which: Vec.new(), kinds: [k.clone()], rule: #Some({ std: k, dst: #None, start: noMoment(), end: noMoment() }) }
+  }
+
+  // A zone that keeps POSIX's rule `tz`: `"CET-1CEST,M3.5.0,M10.5.0/3"`.
+  export function fromRule(tz: str): Zone uses Fail<ZoneErr> {
+    const r = match (parseRule(tz)) { #Some(r) => r, #None => throw #BadZone(tz.toString()) };
+    Zone { name: tz.toString(), at: Vec.new(), which: Vec.new(), kinds: [r.std.clone()], rule: #Some(r) }
+  }
+
+  // A zone as a file of the tz database has it (RFC 8536, version 2 or later).
+  export function fromTzif(name: str, b: readonly u8[]): Zone uses Fail<ZoneErr> {
+    const bad = (why: str) => #BadZone(`${name}: ${why}`);
+    if (b.len() < 44 || b[0] != 84 || b[1] != 90 || b[2] != 105 || b[3] != 102) { throw bad("not a TZif file"); }
+    if (b[4] < 50) { throw bad("version 1 holds only 32-bit times"); }
+    // The first, 32-bit, block is skipped: its counts say how long it is.
+    const v1 = 44 + countsLength(b, 20, 4);
+    if (b.len() < v1 + 44) { throw bad("truncated"); }
+    const h = v1 + 20;
+    const isut = be32(b, h) as usize;
+    const isstd = be32(b, h + 4) as usize;
+    const leap = be32(b, h + 8) as usize;
+    const time = be32(b, h + 12) as usize;
+    const types = be32(b, h + 16) as usize;
+    const chars = be32(b, h + 20) as usize;
+    let p = v1 + 44;
+    if (b.len() < p + time * 9 + types * 6 + chars + leap * 12 + isstd + isut) { throw bad("truncated"); }
+    let at: Vec<i64> = Vec.new();
+    for (const i of 0..time) { at.push(be64(b, p + i * 8)); }
+    p += time * 8;
+    let which: Vec<u8> = Vec.new();
+    for (const i of 0..time) { which.push(b[p + i]); }
+    p += time;
+    let raw: Vec<[i32, bool, usize]> = Vec.new();
+    for (const i of 0..types) {
+      raw.push([be32(b, p) as i32, b[p + 4] != 0, b[p + 5] as usize]);
+      p += 6;
+    }
+    let kinds: Vec<ZoneKind> = Vec.new();
+    for (const [offset, dst, ai] of raw) {
+      let end = p + ai;
+      while (end < p + chars && b[end] != 0) { end += 1; }
+      kinds.push({ offset, dst, name: bytesText(b, p + ai, end) });
+    }
+    p += chars + leap * 12 + isstd + isut;
+    // The footer: the rule kept after the last change, between line breaks.
+    let rule: Option<Rule> = #None;
+    if (p < b.len() && b[p] == 10) {
+      let end = p + 1;
+      while (end < b.len() && b[end] != 10) { end += 1; }
+      if (end > p + 1) { rule = parseRule(bytesText(b, p + 1, end).asStr()); }
+    }
+    if (kinds.len() == 0) { throw bad("no kinds of local time"); }
+    for (const w of which) { if ((w as usize) >= kinds.len()) { throw bad("a change to a kind it does not have"); } }
+    Zone { name: name.toString(), at, which, kinds, rule }
+  }
+
+  export function name(self: readonly Self): String { self.name.clone() }
+
+  // The kind of local time the zone keeps at `t`.
+  export function kindAt(self: readonly Self, t: readonly Timestamp): ZoneKind {
+    const s = t.seconds();
+    if (self.at.len() == 0 || s >= self.at[self.at.len() - 1]) {
+      if (const #Some(r) = self.rule) { return ruleKind(r, s); }
+      if (self.at.len() == 0) { return self.kinds[0].clone(); }
+    }
+    if (s < self.at[0]) {
+      // Before the first change: the first kind that is not daylight saving time.
+      for (const k of self.kinds) { if (!k.dst) { return k.clone(); } }
+      return self.kinds[0].clone();
+    }
+    // The last change at or before `s`.
+    let lo: usize = 0;
+    let hi = self.at.len();
+    while (hi - lo > 1) {
+      const mid = (lo + hi) / 2;
+      if (self.at[mid] <= s) { lo = mid; } else { hi = mid; }
+    }
+    self.kinds[self.which[lo] as usize].clone()
+  }
+
+  export function offsetAt(self: readonly Self, t: readonly Timestamp): i32 { self.kindAt(t).offset }
+}
+
+// What a clock in `z` shows at `t`.
+export function local(t: readonly Timestamp, z: readonly Zone): DateTime { civil(t, z.offsetAt(t)) }
+
+// A zone of the system's tz database, by its name: `zone("Europe/London")`. The database is the
+// directory `TZDIR` names, or `/usr/share/zoneinfo`.
+export function zone(name: str): Zone uses Io, Fail<ZoneErr> {
+  if (name == "UTC" || name == "Etc/UTC") { return Zone.utc(); }
+  if (name.includes("..") || name.startsWith("/")) { throw #UnknownZone(name.toString()); }
+  const dir = match (Io.env("TZDIR")) { #Some(d) => d, #None => "/usr/share/zoneinfo".toString() };
+  const bytes = try {
+    let f = File.open(`${dir}/${name}`.asStr());
+    f.readBytes()
+  } catch (_) { throw #UnknownZone(name.toString()) };
+  Zone.fromTzif(name, bytes)
+}
+
+function countsLength(b: readonly u8[], at: usize, timeSize: usize): usize {
+  const isut = be32(b, at) as usize;
+  const isstd = be32(b, at + 4) as usize;
+  const leap = be32(b, at + 8) as usize;
+  const time = be32(b, at + 12) as usize;
+  const types = be32(b, at + 16) as usize;
+  const chars = be32(b, at + 20) as usize;
+  time * timeSize + time + types * 6 + chars + leap * (timeSize + 4) + isstd + isut
+}
+
+function be32(b: readonly u8[], at: usize): i64 {
+  const u = ((b[at] as i64) << 24) | ((b[at + 1] as i64) << 16) | ((b[at + 2] as i64) << 8) | (b[at + 3] as i64);
+  if (u >= 2147483648) { u - 4294967296 } else { u }
+}
+
+function be64(b: readonly u8[], at: usize): i64 {
+  const hi = be32(b, at);
+  const lo = be32(b, at + 4);
+  hi * 4294967296 + (if (lo < 0) { lo + 4294967296 } else { lo })
+}
+
+function bytesText(b: readonly u8[], from: usize, to: usize): String {
+  let v: Vec<u8> = Vec.new();
+  for (const i of from..to) { v.push(b[i]); }
+  match (String.fromUtf8(v)) { #Some(s) => s, #None => String.new() }
+}
+
+function cursor(text: str): Cursor {
+  let v: Vec<u8> = Vec.new();
+  for (const b of text.asBytes()) { v.push(b); }
+  Cursor { text: v, at: 0 }
+}
+
+function noMoment(): Moment { { kind: 0, month: 0, week: 0, day: 0, seconds: 0 } }
+
+// ---- POSIX's TZ rules ----
+
+// A cursor over a rule's text.
+struct Cursor { text: Vec<u8>; at: usize }
+
+impl Cursor {
+  function peek(self: readonly Self): u8 { if (self.at < self.text.len()) { self.text[self.at] } else { 0 } }
+  function digit(self: readonly Self): bool { const c = self.peek(); c >= 48 && c <= 57 }
+  function number(self: mut Self): i64 {
+    let n: i64 = 0;
+    while (self.digit()) { n = n * 10 + ((self.peek() - 48) as i64); self.at += 1; }
+    n
+  }
+  // A zone's name: letters, or anything between `<` and `>`.
+  function name(self: mut Self): Option<String> {
+    let v: Vec<u8> = Vec.new();
+    if (self.peek() == 60) {
+      self.at += 1;
+      while (self.at < self.text.len() && self.peek() != 62) { v.push(self.peek()); self.at += 1; }
+      if (self.peek() != 62) { return #None; }
+      self.at += 1;
+    } else {
+      while (true) {
+        const c = self.peek();
+        if (!((c >= 65 && c <= 90) || (c >= 97 && c <= 122))) { break; }
+        v.push(c);
+        self.at += 1;
+      }
+    }
+    if (v.len() < 3) { return #None; }
+    String.fromUtf8(v)
+  }
+  // `n` digits, as a number.
+  function digits(self: mut Self, n: usize): i64 uses Fail<TimeErr> {
+    let v: i64 = 0;
+    for (const _ of 0..n) {
+      if (!self.digit()) { throw #BadTime(self.at); }
+      v = v * 10 + ((self.peek() - 48) as i64);
+      self.at += 1;
+    }
+    v
+  }
+  function expect(self: mut Self, b: u8): void uses Fail<TimeErr> {
+    if (self.peek() != b) { throw #BadTime(self.at); }
+    self.at += 1;
+  }
+  // `[+-]hh[:mm[:ss]]`, in seconds.
+  function clock(self: mut Self): Option<i64> {
+    let sign: i64 = 1;
+    if (self.peek() == 45) { sign = -1; self.at += 1; } else if (self.peek() == 43) { self.at += 1; }
+    if (!self.digit()) { return #None; }
+    let s = self.number() * 3600;
+    if (self.peek() == 58) { self.at += 1; s += self.number() * 60; }
+    if (self.peek() == 58) { self.at += 1; s += self.number(); }
+    #Some(sign * s)
+  }
+  // `Jn`, `n` or `Mm.w.d`, with `/time` after it, two hours if not said.
+  function moment(self: mut Self): Option<Moment> {
+    let m = noMoment();
+    if (self.peek() == 74) {
+      self.at += 1;
+      m.kind = 1;
+      m.day = self.number() as u16;
+    } else if (self.peek() == 77) {
+      self.at += 1;
+      m.kind = 3;
+      m.month = self.number() as u8;
+      if (self.peek() != 46) { return #None; }
+      self.at += 1;
+      m.week = self.number() as u8;
+      if (self.peek() != 46) { return #None; }
+      self.at += 1;
+      m.day = self.number() as u16;
+    } else if (self.digit()) {
+      m.kind = 2;
+      m.day = self.number() as u16;
+    } else { return #None; }
+    m.seconds = 7200;
+    if (self.peek() == 47) {
+      self.at += 1;
+      m.seconds = match (self.clock()) { #Some(s) => s, #None => return #None };
+    }
+    #Some(m)
+  }
+}
+
+function parseRule(tz: str): Option<Rule> {
+  let c = cursor(tz);
+  const stdName = match (c.name()) { #Some(n) => n, #None => return #None };
+  // POSIX says how far west of UTC; a zone's offset is how far east.
+  const stdOffset = match (c.clock()) { #Some(s) => -s, #None => return #None };
+  const std: ZoneKind = { offset: stdOffset as i32, dst: false, name: stdName };
+  if (c.at == c.text.len()) { return #Some({ std, dst: #None, start: noMoment(), end: noMoment() }); }
+  const dstName = match (c.name()) { #Some(n) => n, #None => return #None };
+  let dstOffset = stdOffset + 3600;
+  if (c.peek() != 44 && c.at < c.text.len()) {
+    dstOffset = match (c.clock()) { #Some(s) => -s, #None => return #None };
+  }
+  if (c.peek() != 44) { return #None; }
+  c.at += 1;
+  const start = match (c.moment()) { #Some(m) => m, #None => return #None };
+  if (c.peek() != 44) { return #None; }
+  c.at += 1;
+  const end = match (c.moment()) { #Some(m) => m, #None => return #None };
+  if (c.at != c.text.len()) { return #None; }
+  #Some({ std, dst: #Some({ offset: dstOffset as i32, dst: true, name: dstName }), start, end })
+}
+
+// The second, since 1970 began in UTC, a moment of `year` is, local time at `offset`.
+function momentIn(m: readonly Moment, year: i64, offset: i64): i64 {
+  const jan1 = daysFromCivil(year, 1, 1);
+  const day: i64 = match (m.kind) {
+    1 => jan1 + (m.day as i64) - 1 + (if (isLeapYear(year) && m.day >= 60) { 1 } else { 0 }),
+    2 => jan1 + (m.day as i64),
+    _ => {
+      // The `week`th `day` of `month`, the fifth the last.
+      const first = daysFromCivil(year, m.month, 1);
+      const wd = floorMod(first + 4, 7);
+      let d = first + floorMod((m.day as i64) - wd, 7) + ((m.week as i64) - 1) * 7;
+      const next = if (m.month == 12) { daysFromCivil(year + 1, 1, 1) } else { daysFromCivil(year, m.month + 1, 1) };
+      while (d >= next) { d -= 7; }
+      d
+    }
+  };
+  day * 86400 + m.seconds - offset
+}
+
+function ruleKind(r: readonly Rule, s: i64): ZoneKind {
+  match (r.dst) {
+    #None => r.std.clone(),
+    #Some(dst) => {
+      const [year, _, _] = civilFromDays(floorDiv(s + (r.std.offset as i64), 86400));
+      const start = momentIn(r.start, year, r.std.offset as i64);
+      const end = momentIn(r.end, year, dst.offset as i64);
+      const inDst = if (start < end) { s >= start && s < end } else { s >= start || s < end };
+      if (inDst) { dst.clone() } else { r.std.clone() }
+    }
+  }
+}
+
+// ---- ISO 8601 ----
+
+function pad(n: i64, width: usize): String {
+  let s = `${n}`;
+  while (s.len() < width) { s = `0${s}`; }
+  s
+}
+
+// `2026-10-24T13:05:09Z`, `2026-10-24T14:05:09.25+01:00`: a fraction of a second only if there is one.
+export function format(d: readonly DateTime): String {
+  let s = if (d.year < 0) { `-${pad(-d.year, 4)}` } else { pad(d.year, 4) };
+  s.push(`-${pad(d.month as i64, 2)}-${pad(d.day as i64, 2)}T${pad(d.hour as i64, 2)}:${pad(d.minute as i64, 2)}:${pad(d.second as i64, 2)}`.asStr());
+  if (d.nanos > 0) {
+    let f = pad(d.nanos as i64, 9);
+    while (f.asStr().endsWith("0")) { f = f.asStr().slice(0, f.len() - 1).toString(); }
+    s.push(`.${f}`.asStr());
+  }
+  if (d.offset == 0) {
+    s.push("Z");
+  } else {
+    const o = if (d.offset < 0) { -(d.offset as i64) } else { d.offset as i64 };
+    s.push(`${if (d.offset < 0) { "-" } else { "+" }}${pad(o / 3600, 2)}:${pad(o % 3600 / 60, 2)}`.asStr());
+  }
+  s
+}
+
+export type TimeErr = #BadTime(usize);
+
+// A date and time as ISO 8601 writes them: `2026-10-24`, or with a time of day, `T` or a space
+// before it, seconds and a fraction optional, and `Z` or an offset after it, UTC if there is none.
+export function parse(text: str): DateTime uses Fail<TimeErr> {
+  let c = cursor(text);
+  const year = c.digits(4);
+  c.expect(45);
+  const month = c.digits(2);
+  c.expect(45);
+  const day = c.digits(2);
+  if (month < 1 || month > 12) { throw #BadTime(5); }
+  const days = if (month == 2) { if (isLeapYear(year)) { 29 } else { 28 } } else if (month == 4 || month == 6 || month == 9 || month == 11) { 30 } else { 31 };
+  if (day < 1 || day > days) { throw #BadTime(8); }
+  let d: DateTime = { year, month: month as u8, day: day as u8, hour: 0, minute: 0, second: 0, nanos: 0, offset: 0 };
+  if (c.at == c.text.len()) { return d; }
+  if (c.peek() != 84 && c.peek() != 32) { throw #BadTime(c.at); }
+  c.at += 1;
+  const hour = c.digits(2);
+  c.expect(58);
+  const minute = c.digits(2);
+  let second: i64 = 0;
+  if (c.peek() == 58) {
+    c.at += 1;
+    second = c.digits(2);
+    if (c.peek() == 46 || c.peek() == 44) {
+      c.at += 1;
+      let n: i64 = 0;
+      let k: usize = 0;
+      if (!c.digit()) { throw #BadTime(c.at); }
+      while (c.digit()) {
+        if (k < 9) { n = n * 10 + ((c.peek() - 48) as i64); k += 1; }
+        c.at += 1;
+      }
+      while (k < 9) { n *= 10; k += 1; }
+      d.nanos = n as u32;
+    }
+  }
+  if (hour > 23 || minute > 59 || second > 59) { throw #BadTime(11); }
+  d.hour = hour as u8;
+  d.minute = minute as u8;
+  d.second = second as u8;
+  if (c.peek() == 90) {
+    c.at += 1;
+  } else if (c.peek() == 43 || c.peek() == 45) {
+    const sign: i64 = if (c.peek() == 45) { -1 } else { 1 };
+    c.at += 1;
+    const oh = c.digits(2);
+    if (c.peek() == 58) { c.at += 1; }
+    const om = c.digits(2);
+    if (oh > 23 || om > 59) { throw #BadTime(c.at); }
+    d.offset = (sign * (oh * 3600 + om * 60)) as i32;
+  }
+  if (c.at != c.text.len()) { throw #BadTime(c.at); }
+  d
+}
