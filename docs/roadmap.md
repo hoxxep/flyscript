@@ -141,6 +141,7 @@ The runtime moved into Flyscript at a cost in two places, and this step removes 
 - §12.3's third question says what is proved now: continuations kept in a value and tasks that synchronize through `Io` are.
 - `RegionList<region R, T>` in its one order throughout.
 - §0.1 says what the current version is and what the last few changed; the full record of revisions moves to `docs/history/`.
+- Re-exports, `export { a, b } from "./internal/a"`, so a package gives one face to the files behind it.
 
 ## 15. A panic ends its task
 
@@ -151,7 +152,14 @@ A panic — an index out of bounds, an overflow, division by zero, `unwrap()` of
 - **in a task started with `spawn`**, it ends there: the message is reported, and the scope and every other task go on. A server that spawns its connections survives a connection that hits a bug, as it survives one that fails. A scope may be given a supervisor, called with the message of each spawned task that panicked, so long-lived actors can be restarted as a library (§12.3's second question).
 - **inside `Mutex.lock`'s body**, the value the lock lent is dropped rather than given back, and the mutex is poisoned: locking it again panics, unless a fresh value is put in it.
 
-A panic in a `Drop`, or while a panic is already unwinding, ends the program, as does stack exhaustion; a freestanding program's panics go to the handler it names.
+What makes Erlang's processes dependable, beyond a crash staying in its process, comes with it:
+
+- **One task stopped.** `spawn` returns a handle that cancels that task alone, so a task given too long can be ended without its scope.
+- **A loop that never waits can still be stopped.** Compiled code checks for cancellation where a loop goes round and where a function is entered, a load and a branch, so a cancelled task stops even in code that performs nothing; it costs no more than the noise of the benchmarks, or it is not done this way.
+- **A stack overflow is a panic of its task**, found by a check where a function is entered, not the end of the program.
+- **Supervision** (`std/supervise`): children given as functions that make them afresh, since a task that panicked leaves nothing to resume; restarted one for one, all for one or the rest for one; and a limit on restarts in a span of time, past which the supervisor itself panics, to its own supervisor.
+
+A panic in a `Drop`, or while a panic is already unwinding, ends the program; a freestanding program's panics go to the handler it names.
 
 Every back end unwinds the same way. The reference evaluator unwinds as for a failure that nothing catches. LLVM uses `invoke` and landing pads, which cost nothing until a panic happens. C, which has no unwinding of its own, returns a panic as a failure that only a task's root catches. JavaScript throws. The proof gains a panic as a step from any expression, which drops the task's continuation as a dropped continuation already does (§9.5); what every task owns is still dropped exactly once, under every schedule, now with panics among the ways a task ends.
 
