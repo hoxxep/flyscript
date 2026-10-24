@@ -267,7 +267,7 @@ function imports(out: mut String, routes: readonly Vec<Route>, layouts: readonly
   out.push("import { stringify, parse, FromJson, JsonError } from \"std/json\";\n");
   out.push("import { serve, Handler, Request, Response, Conn } from \"web/http\";\n");
   out.push(`import { Params, matches } from "web/router";\n`.asStr());
-  out.push(`import { Shell, Loaded, Fixed, Cache, newCache, kept, keep, answerKept, stream, respond, fixed, answerFixed, document, arrival, file, withHttp, redirect, setCookies, fields, postedMessage, submitted } from "web/site";\n`.asStr());
+  out.push(`import { Shell, Loaded, Fixed, Cache, newCache, kept, keep, answerKept, stream, respond, fixed, answerFixed, document, arrival, file, withHttp, redirect, setCookies, fields, postedMessage, submitted, modulesIn } from "web/site";\n`.asStr());
   out.push(`import { Http } from "web/request";\n`.asStr());
   out.push("import { State, init, provide } from \"../server\";\n");
   if (names.len() > 0) {
@@ -496,7 +496,7 @@ function server(build: str, head: str, routes: readonly Vec<Route>, layouts: rea
   out.push("  const port: u16 = if (args.len() > 0) { match (parseInt(args[0].asStr())) { #Some(n) => n as u16, #None => 3000 } } else { 3000 };\n");
   out.push("  const dir = if (args.len() > 1) { args[1].clone() } else { \".\".toString() };\n");
   out.push("  try {\n    let l = Listener.bind(port);\n    println(`listening on ${l.port()}`);\n");
-  out.push("    const shell: Shell = { head: HEAD.toString(), build: BUILD.toString() };\n");
+  out.push("    const shell: Shell = { head: HEAD.toString(), build: BUILD.toString(), modules: modulesIn(dir.asStr()) };\n");
   // The pages that are the same for every request, rendered once.
   out.push("    let rendered: Vec<Fixed> = Vec.new();\n");
   for (const [i, r] of routes.iter().enumerate()) {
@@ -517,7 +517,7 @@ function client(routes: readonly Vec<Route>, layouts: readonly Vec<String>, effs
   let out = "// Made by flynext from the app: change the app, not this.\n\n".toString();
   out.push("import { stringify, parse, FromJson } from \"std/json\";\n");
   out.push(`import { Event } from "web/ui";\n`.asStr());
-  out.push(`import { run, show, still, nothing, initial, fetch, get, arrived, arrival, Page, Go } from "web/dom";\n`.asStr());
+  out.push(`import { run, show, still, nothing, initial, fetch, get, arrived, arrival, Page, Go, Render, Arrival } from "web/dom";\n`.asStr());
   if (names.len() > 0) {
     out.push("import { ");
     out.push(names.join(", ").asStr());
@@ -544,14 +544,20 @@ function client(routes: readonly Vec<Route>, layouts: readonly Vec<String>, effs
   out.push("  body()\n");
   out.push(close.asStr());
   out.push("}\n\n");
+  // Each page's own code, a function of its own, which a page build loads as a module of its own the
+  // first time the page is shown (selfhost/wasm-split.js).
+  for (const [i, r] of routes.iter().enumerate()) {
+    if (r.endpoint) { continue; }
+    const update = if (r.update) { `update${i}` } else { "still".toString() };
+    out.push(`function flyRoute${i}(shown: mut Render, at: readonly Arrival): Go uses Io {\n  const url = at.url.clone();\n  const m: Model${i} = state(at.state.asStr());\n  server(() => run(mut shown, m, (m) => ${shown(r, i, layouts, "url.asStr()")}, ${update}))\n}\n\n`.asStr());
+  }
   // What a page arrives as.
   out.push("export function main(): void uses Io {\n  let shown = nothing();\n");
   out.push("  let at = arrival(initial().asStr());\n");
   out.push("  while (true) {\n    const url = at.url.clone();\n    const go: Go = match (at.route.asStr()) {\n");
   for (const [i, r] of routes.iter().enumerate()) {
     if (r.endpoint) { continue; }
-    const update = if (r.update) { `update${i}` } else { "still".toString() };
-    out.push(`      ${quoted(r.name.asStr())} => {\n        const m: Model${i} = state(at.state.asStr());\n        server(() => run(mut shown, m, (m) => ${shown(r, i, layouts, "url.asStr()")}, ${update}))\n      }\n`.asStr());
+    out.push(`      ${quoted(r.name.asStr())} => flyRoute${i}(mut shown, at),\n`.asStr());
   }
   if (sp.error) {
     out.push(`      "error" => {\n        const m: Model_err = state(at.state.asStr());\n        run(mut shown, m, (m) => ${aroundTop(layouts, "url.asStr()", "view_err(m)")}, still)\n      }\n`.asStr());
@@ -625,6 +631,10 @@ export function main(args: readonly String[]): void uses Io {
   try {
     writeFile(`${app}/.flynext/server.fly`.asStr(), server(build, head.asStr(), routes, layouts, effs, apiNames, sp).asStr());
     writeFile(`${app}/.flynext/client.fly`.asStr(), client(routes, layouts, effs, apiNames, sp).asStr());
+    // Which route each page is, by its name: a page build loads that route's module (web/flynext.js).
+    let names: Vec<String> = Vec.new();
+    for (const [i, r] of routes.iter().enumerate()) { if (!r.endpoint) { names.push(`${quoted(r.name.asStr())}: ${i}`); } }
+    writeFile(`${app}/.flynext/routes.json`.asStr(), `{ ${names.join(", ")} }\n`.asStr());
   } catch (e) { stop(`cannot write ${app}/.flynext: ${e}`.asStr()); }
   println(`${routes.len()} pages, ${layouts.len()} layouts, ${effs.len()} server effects`);
 }

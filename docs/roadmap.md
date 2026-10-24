@@ -1,6 +1,6 @@
 # Roadmap
 
-Flyscript compiled itself, to JavaScript and to C, when this roadmap was written. Its steps take it from a self-hosted language to a systems platform: one intermediate form under every back end, kernels, LLVM, WebAssembly, every core of the machine, and a web framework that shows what all of it buys. Steps 0 to 5, 7 and 8 are done, and each says what was built; the others are next.
+Flyscript compiled itself, to JavaScript and to C, when this roadmap was written. Its steps take it from a self-hosted language to a systems platform: one intermediate form under every back end, kernels, LLVM, WebAssembly, every core of the machine, and a web framework that shows what all of it buys. Steps 0 to 8 are done, and each says what was built; the others are next.
 
 ## 0. One core IR under every back end
 
@@ -51,18 +51,19 @@ A proof of concept of what Next.js and React do, in one Flyscript component tree
 - Components are functions that perform `Ui<Msg>`: elements, text, `keyed` children, and events as `Msg` values, with `onInput` taking a function from the input's text to a `Msg`. `if`, `for` and `match` work inside the tree.
 - The server renders natively, streaming HTML from a per-request region; the client hydrates the same tree in WebAssembly and updates the DOM by a keyed diff of flat operation lists, with no virtual DOM objects.
 - Server functions are an effect shared by both sides: handled against the database on the server, over `fetch` on the client, with typed failures re-raised where they were called.
-- Routes are files. The browser runs one WebAssembly program for the whole site; loading each route's code as it is needed is step 6.
+- Routes are files, and each one's code a WebAssembly module of its own over a shared core (step 6).
 
 ## 6. Pages loaded by route
 
-*Next.*
+*Done: the example site's list page downloads a core of 20 KB and its own module of 7 KB, compressed, where it downloaded the whole site's 41 KB, and is ready as soon.*
 
 A page downloads the code it runs and no more, as a Next.js page does, while the server goes on rendering every page natively:
 
-- The site compiles to a core module and a module per route. The core holds the runtime, the C library, the standard library, the DOM's handler of `Ui`, the layouts, and everything two routes or more use, generic instantiations among them; a route's module holds only what that route alone uses. The compiler makes the split after specialization, so each instantiation is in exactly one module.
-- Route modules are linked dynamically, as WebAssembly side modules: position-independent code that imports the core's memory, function table and stack pointer, and its symbols through a table of offsets the loader fills in. The loader is part of `web/flynext.js`, and fibers switch across modules as within one, since every module shares the one memory and its shadow stacks.
-- The server's HTML names the core and the page's own module, so the browser fetches both at once; following a link fetches the next route's module with its data, prefetched as the pointer nears the link, as data is now. Each module is cached on its own, so a change to one page leaves every other's cached code valid.
-- Done when the example site's first page downloads only the core and its own module, every test of the site passes in a browser, and the cost is measured: what the first page downloads, before and after, and the speed of code built position-independent.
+- Each route's code is a function of its own in the client program the app compiler writes. `selfhost/wasm-split.js` cuts the program, optimized whole, at those functions: what one route alone reaches goes into that route's module, and everything else — the runtime, the C library, the standard library, the DOM's handler of `Ui`, the layouts, and whatever two routes share — stays in the core. The cut is made in the LLVM module after specialization, so each instance of a generic function is in exactly one module.
+- In the core, a route's function becomes a stub of the same type, which asks the host for the route's module and calls the function there through the table of functions the two share: WebAssembly calling WebAssembly, so a fiber suspends through it as through any call. The program is the same program; only where its code is changes.
+- A route's module is a WebAssembly side module, position-independent, linked by `web/flynext.js` as WebAssembly's dynamic linking lays it out: the core's memory and table, its part of each given it, and what it takes of the core found among the core's exports. Each module's file is named by the hash of what it holds, so a change to one page leaves every other's cached code valid.
+- The server names the program and the page's own module in the page's head, so the browser fetches both as it reads the page; pointing at a link asks for the next page's data, and with it its module.
+- The browser test checks that the first page downloads its own module and no other's, and that following a link downloads the next page's, once.
 
 ## 7. A smaller shared base
 

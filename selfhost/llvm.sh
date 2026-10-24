@@ -1,8 +1,9 @@
 #!/bin/sh
 # Compiles a Flyscript program to a native executable through LLVM: `selfhost/llvm.sh compiler
 # program.fly out [--freestanding] [cc flags...]`, the compiler its JavaScript or a native build,
-# or to an object file to link, for an `out` ending in `.o`. The compiler writes the program's code as an LLVM module and the C it links with — the
-# runtime, and what the module calls of it — beside it; the two are linked into one module before
+# or to an object file to link, for an `out` ending in `.o`, or to the linked module, not yet
+# optimized, for one in `.bc`. The compiler writes the program's code as an LLVM module and the C
+# it links with — the runtime, and what the module calls of it — beside it; the two are linked into one module before
 # they are optimized together, so the calls between them are inlined. The cc flags choose the
 # target, as for C. Needs clang and llvm-link of one LLVM version: LLVM_BIN, or Homebrew's llvm.
 set -e
@@ -34,6 +35,13 @@ case " $* " in *" -Os "*) target="$target optsize" ;; *" -Oz "*) target="$target
 case " $* " in *-fsanitize=*address*) target="$target sanitize_address" ;; esac
 case " $* " in *-fsanitize=*thread*) target="$target sanitize_thread" ;; esac
 sed "s/^attributes #0 = { nounwind }/attributes #0 = { nounwind$target }/" "$out.ll" | cat "$out.target.ll" - > "$out.prog.ll"
+# For an `out` ending in `.bc`, the linked module, not yet optimized, is what is made.
+case "$out" in
+  *.bc)
+    "$bin/llvm-link" "$out.c.ll" "$out.prog.ll" -o "$out"
+    rm -f "$out.ll" "$out.c" "$out.c.ll" "$out.target.ll" "$out.prog.ll"
+    exit 0 ;;
+esac
 "$bin/llvm-link" "$out.c.ll" "$out.prog.ll" -o "$out.bc"
 # An executable for the machine is built on every core: the module is split into a part per core,
 # each optimized and compiled apart, then optimized again across the parts as they are linked, by

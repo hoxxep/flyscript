@@ -12,9 +12,22 @@ import { Page } from "./dom";
 import { decode } from "./router";
 import { Http } from "./request";
 
-// What every page of the site has around what it shows: what goes in its `<head>`, and, in
-// development, the build it was made by.
-export type Shell = { head: String; build: String };
+// What every page of the site has around what it shows: what goes in its `<head>`; in development,
+// the build it was made by; and the file of each route's own module (web/flynext.js), by route.
+export type Shell = { head: String; build: String; modules: HashMap<String, String> };
+
+// The routes' modules, as a build lists them in `_fly/routes/modules.txt`: a route and its file a line.
+export function modulesIn(dir: str): HashMap<String, String> uses Io {
+  let out: HashMap<String, String> = HashMap.new();
+  const text = try {
+    let f = File.open(`${dir}/_fly/routes/modules.txt`.asStr());
+    f.readText()
+  } catch (_) { String.new() };
+  for (const line of text.split("\n")) {
+    if (const #Some(at) = line.lastIndexOf(" ")) { out.insert(line.slice(0, at).toString(), line.slice(at + 1, line.len()).toString()); }
+  }
+  out
+}
 
 // What a page's program is told of a page: the route that answers it, its address, its title and
 // description, and the state its view starts from, as JSON. One line each, the title and the
@@ -31,14 +44,14 @@ export function wantsData(req: readonly Request): bool {
 // A page as a browser gets it: the view rendered, what the page's program starts from, and the
 // program, which takes the page over (web/dom.fly).
 export function document<M>(shell: readonly Shell, route: str, url: str, title: str, description: str, state: str, view: () => void uses Ui<M>): String {
-  let out = opening(shell, title, description, view);
+  let out = opening(shell, route, title, description, view);
   out.push("</div>");
   closing(mut out, shell, route, url, title, description, state);
   out
 }
 
 // A page's document up to the end of what its view shows, which is left open.
-function opening<M>(shell: readonly Shell, title: str, description: str, view: () => void uses Ui<M>): String {
+function opening<M>(shell: readonly Shell, route: str, title: str, description: str, view: () => void uses Ui<M>): String {
   let out = "<!doctype html>\n<html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>".toString();
   escape(title, mut out);
   out.push("</title>");
@@ -56,7 +69,14 @@ function opening<M>(shell: readonly Shell, title: str, description: str, view: (
     out.push("\">");
   }
   out.push(shell.head.asStr());
-  out.push("<link rel=\"modulepreload\" href=\"/_fly/flynext.js\"></head><body><div id=\"app\">");
+  // The page's program and its own module, fetched as the page is read.
+  out.push("<link rel=\"modulepreload\" href=\"/_fly/flynext.js\"><link rel=\"preload\" href=\"/_fly/app.wasm\" as=\"fetch\" crossorigin>");
+  if (const #Some(file) = shell.modules.get(route)) {
+    out.push("<link rel=\"preload\" href=\"/_fly/routes/");
+    out.push(file.asStr());
+    out.push("\" as=\"fetch\" crossorigin>");
+  }
+  out.push("</head><body><div id=\"app\">");
   html(mut out, view);
   out
 }
@@ -95,7 +115,7 @@ export function stream<Model extends ToJson, M>(conn: mut Conn, req: readonly Re
   r.header("Cache-Control", "no-store");
   setCookies(mut r, cookies);
   conn.start(r);
-  let first = opening(shell, title, description, () => view(m));
+  let first = opening(shell, route, title, description, () => view(m));
   first.push("</div>");
   conn.send(first.asStr());
   const model = match (rest(m)) {

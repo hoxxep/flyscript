@@ -12,6 +12,20 @@ export async function start(url, root = document.getElementById("app")) {
   if (!WebAssembly.Suspending || !WebAssembly.promising) {
     throw new Error("this browser has no WebAssembly promise integration (JSPI)");
   }
+  // Each page's own code is a module of its own (selfhost/wasm-split.js), fetched as soon as the page
+  // is known: this one's at once, beside the program's.
+  const base = new URL(url, location.href);
+  const modules = new Map();
+  const moduleOf = (k) => {
+    const file = typeof ROUTES === "undefined" ? null : ROUTES.modules[k]?.file;
+    if (!file) return null;
+    if (!modules.has(k)) modules.set(k, fetch(new URL(`routes/${file}`, base)).then((r) => r.arrayBuffer()).then((b) => WebAssembly.compile(b)));
+    return modules.get(k);
+  };
+  const routeOf = (name) => (typeof ROUTES === "undefined" ? undefined : ROUTES.names[name]);
+  // A page as the server describes it starts with the name of its route (web/dom.fly's `arrival`).
+  const routeIn = (text) => routeOf(text.slice(0, (text.indexOf("\n") + 1 || text.length + 1) - 1));
+  { const k = routeIn(document.getElementById("fly-page")?.textContent ?? ""); if (k !== undefined) moduleOf(k); }
   const module = await WebAssembly.compile(await (await fetch(url)).arrayBuffer());
   let exports;
   const mem = () => new Uint8Array(exports.memory.buffer);
@@ -79,6 +93,75 @@ export async function start(url, root = document.getElementById("app")) {
       sp.value = saved.get(from);
     }),
     free: (f) => { waiting.delete(f); saved.delete(f); },
+    // A route's function, from its module, linked into the program the first time: its place in the
+    // table of functions the two share, which the program calls it through.
+    route: new WebAssembly.Suspending(async (k) => {
+      if (!linked.has(k)) linked.set(k, link(k));
+      return linked.get(k);
+    }),
+  };
+
+  // ---- routes: modules linked as WebAssembly's dynamic linking lays them out ----
+  const linked = new Map();
+  let slots = null;
+  // A function's place in the table, given one if it has none.
+  const slotOf = (f) => {
+    const table = exports.__indirect_function_table;
+    if (!slots) {
+      slots = new Map();
+      for (let i = 0; i < table.length; i++) { const g = table.get(i); if (g && !slots.has(g)) slots.set(g, i); }
+    }
+    let i = slots.get(f);
+    if (i === undefined) { i = table.grow(1); table.set(i, f); slots.set(f, i); }
+    return i;
+  };
+  // `dylink.0`'s first part: the memory and the table a module needs of its own.
+  const needs = (mod) => {
+    const sec = WebAssembly.Module.customSections(mod, "dylink.0")[0];
+    const out = { memory: 0, memoryAlign: 0, table: 0, tableAlign: 0 };
+    if (!sec) return out;
+    const b = new Uint8Array(sec);
+    let at = 0;
+    const leb = () => { let v = 0, shift = 0, x; do { x = b[at++]; v |= (x & 0x7f) << shift; shift += 7; } while (x & 0x80); return v >>> 0; };
+    while (at < b.length) {
+      const type = b[at++], size = leb(), end = at + size;
+      if (type === 1) { out.memory = leb(); out.memoryAlign = leb(); out.table = leb(); out.tableAlign = leb(); }
+      at = end;
+    }
+    return out;
+  };
+  const link = async (k) => {
+    const mod = await moduleOf(k);
+    const need = needs(mod);
+    const align = 2 ** need.memoryAlign;
+    const raw = need.memory ? exports.calloc(need.memory + align, 1) : 0;
+    const memoryBase = (raw + align - 1) & ~(align - 1);
+    const table = exports.__indirect_function_table;
+    const tableBase = table.length;
+    if (need.table) table.grow(need.table);
+    const got = (value) => new WebAssembly.Global({ value: "i32", mutable: true }, value);
+    const imports = {
+      env: {
+        memory: exports.memory,
+        __indirect_function_table: table,
+        __stack_pointer: exports.__stack_pointer,
+        __memory_base: new WebAssembly.Global({ value: "i32", mutable: false }, memoryBase),
+        __table_base: new WebAssembly.Global({ value: "i32", mutable: false }, tableBase),
+      },
+      "GOT.mem": {},
+      "GOT.func": {},
+      fly,
+      wasi_snapshot_preview1: wasiImports,
+    };
+    for (const i of WebAssembly.Module.imports(mod)) {
+      if (i.module === "env" && i.kind === "function") imports.env[i.name] = exports[i.name] ?? env[i.name];
+      else if (i.module === "GOT.mem") imports["GOT.mem"][i.name] = got(exports[i.name].value);
+      else if (i.module === "GOT.func") imports["GOT.func"][i.name] = got(slotOf(exports[i.name]));
+    }
+    const instance = await WebAssembly.instantiate(mod, imports);
+    instance.exports.__wasm_apply_data_relocs?.();
+    instance.exports.__wasm_call_ctors?.();
+    return slotOf(instance.exports[ROUTES.modules[k].fn]);
   };
 
   // ---- the page ----
@@ -135,7 +218,13 @@ export async function start(url, root = document.getElementById("app")) {
     if (!ours(a)) return;
     const url = `${a.pathname}${a.search}`;
     if (!prefetched.has(url)) {
-      prefetched.set(url, ask(url).catch(() => null));
+      // With the page's data, its module, so following the link waits for neither.
+      const early = ask(url).then((text) => {
+        const k = routeIn(text);
+        if (k !== undefined) moduleOf(k);
+        return text;
+      });
+      prefetched.set(url, early.catch(() => null));
       setTimeout(() => prefetched.delete(url), 10000);
     }
   };

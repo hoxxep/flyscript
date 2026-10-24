@@ -41,8 +41,14 @@ build() {
   node --stack-size=65500 "$compiler" "$app/.flynext/server.fly" "$out/server.c" "$root" || return 1
   cc -std=gnu11 -O2 -w -o "$out/server" "$out/server.c" -lm || return 1
   rm -f "$out/server.c"
-  sh "$root/selfhost/wasm.sh" "$compiler" "$app/.flynext/client.fly" "$out/_fly/app.wasm" --imports || return 1
-  cp "$web/flynext.js" "$out/_fly/"
+  # The pages' program: a core, and each page's own code a module of its own, loaded as it is shown.
+  rm -rf "$out/_fly/routes"
+  sh "$root/selfhost/wasm.sh" "$compiler" "$app/.flynext/client.fly" "$out/_fly/app.wasm" --split "$out/_fly/routes" flyRoute || return 1
+  { cat "$web/flynext.js"; printf 'const ROUTES = { names: %s, modules: %s };\n' "$(cat "$app/.flynext/routes.json")" "$(cat "$out/_fly/routes/routes.json")"; } > "$out/_fly/flynext.js"
+  # The server names each page's module in the page, for the browser to fetch beside the program.
+  node -e 'const [names, mods] = process.argv.slice(1).map((f) => JSON.parse(require("fs").readFileSync(f, "utf8"))); for (const [n, k] of Object.entries(names)) if (mods[k]) console.log(`${n} ${mods[k].file}`);' \
+    "$app/.flynext/routes.json" "$out/_fly/routes/routes.json" > "$out/_fly/routes/modules.txt"
+  rm -f "$out/_fly/routes/routes.json"
   if [ -d "$app/public" ]; then cp -R "$app/public/." "$out/"; fi
 }
 

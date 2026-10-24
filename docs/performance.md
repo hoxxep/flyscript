@@ -59,10 +59,10 @@ In the browser, each site's first page is loaded with nothing cached, and a link
 
 | Site | Scripts | Downloaded | Gzipped | Interactive after | Link followed in |
 | :--- | ---: | ---: | ---: | ---: | ---: |
-| FlyNext | 2 | 146 KB | 41 KB | 27 ms | 64 ms |
-| Next.js | 7 | 454 KB | 135 KB | 34 ms | 81 ms |
+| FlyNext | 3 | 82 KB | 32 KB | 24 ms | 67 ms |
+| Next.js | 7 | 454 KB | 135 KB | 35 ms | 78 ms |
 
-A FlyNext page is interactive once its one WebAssembly program has taken over the HTML the server rendered: it downloads under a third as much as the Next.js page and is ready sooner. Its program is 140 KB, 38 KB compressed, of which the C library is 7 KB: it prints and panics with no `printf`, and allocates from the runtime's own allocator rather than `dlmalloc` (the roadmap's step 7). Following a link costs both sites a request for the next page's data and a render in place, a little less on FlyNext.
+A FlyNext page is interactive once its program has taken over the HTML the server rendered: a core of 50 KB, 20 KB compressed, which every page shares, and the page's own module, 3 to 18 KB, which the page names for the browser to fetch beside the core and which the core links in as it shows the page (the roadmap's step 6). The list page downloads a quarter as much as the Next.js page, and is ready sooner. Built as one program for every page it was 146 KB, 41 KB compressed, and ready in 27 milliseconds: splitting it costs nothing to see. Of the core, the C library is 7 KB: the runtime prints and panics with no `printf`, and allocates from its own allocator rather than `dlmalloc` (step 7). Following a link costs both sites a request for the next page's data and a render in place, and FlyNext the next page's module the first time, which it asks for with the data as soon as the link is pointed at.
 
 ## Running them
 

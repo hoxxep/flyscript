@@ -28,10 +28,14 @@ const check = (ok, what) => { if (!ok) throw new Error(`FAILED: ${what}`); conso
   page.on("console", (m) => { if ((m.type() === "error" || m.type() === "warning") && !m.text().startsWith("Failed to load resource")) logs.push(`${m.type()}: ${m.text()}`); });
   page.on("response", (r) => { if (r.status() >= 400 && !r.url().endsWith("/todos/999")) logs.push(`${r.status()}: ${r.url()}`); });
   page.on("pageerror", (e) => logs.push(`pageerror: ${e.message}`));
+  // Each page's own code is a module of its own, fetched when the page is shown or about to be.
+  const modules = [];
+  page.on("request", (r) => { const m = /\/_fly\/(routes\/route\d+)\.[0-9a-f]+\.wasm$/.exec(r.url()); if (m) modules.push(m[1]); });
   const ready = () => page.waitForFunction(() => document.querySelector("li .check")?.__fly?.click !== undefined, null, { timeout: 10000 });
   await page.goto(`${base}/`);
   await ready();
   check(await page.evaluate(() => globalThis.flyRebuilt === undefined), "the page takes over the server's DOM without rebuilding it");
+  check(modules.length === 1, `the first page downloads its own module and no other's (${modules.join(", ")})`);
   const titles = async () => page.$$eval("li .title", (els) => els.map((e) => e.textContent));
   check((await titles()).length === 3, "three things to do");
   await shoot(page, "list");
@@ -59,6 +63,7 @@ const check = (ok, what) => { if (!ok) throw new Error(`FAILED: ${what}`); conso
   await page.click("a[href='/todos/4']");
   await page.waitForFunction(() => location.pathname === "/todos/4" && document.querySelector("h1")?.textContent === "Ship the web framework", null, { timeout: 5000 });
   check(await page.evaluate(() => globalThis.stillHere === true), "a link is followed without loading a page");
+  check(modules.length === 2 && modules[1] !== modules[0], "following it downloads the next page's module, once");
   check(await page.evaluate(() => document.querySelector("nav") === globalThis.oldNav), "the layout around both pages is kept as it was");
   check((await page.title()) === "Ship the web framework", "the title is the page's");
   check(await page.evaluate(() => document.querySelector("meta[name=description]")?.content) === "To do: Ship the web framework",

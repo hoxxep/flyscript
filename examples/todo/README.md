@@ -1,6 +1,6 @@
 # A site in Flyscript
 
-A list of things to do, as one FlyNext app ([web](../../web/)): a server compiled to native code, which renders each page from its store, and one WebAssembly program, which takes over the page the server rendered and from then on renders the pages links lead to itself.
+A list of things to do, as one FlyNext app ([web](../../web/)): a server compiled to native code, which renders each page from its store, and a WebAssembly program, which takes over the page the server rendered and from then on renders the pages links lead to itself, each page's own code a module it loads the first time the page is shown.
 
 ```sh
 web/flynext dev examples/todo/app 8080
