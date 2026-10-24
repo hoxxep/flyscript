@@ -1,0 +1,111 @@
+// A server keeps every other connection when one hits a bug (§5.7): forty requests at once, of
+// which one makes its handler index past the end of a table. That panic ends its connection's
+// task alone: the task unwinds, closing its socket, and the panic is reported; every other request
+// is answered, and the server goes on. The scheduler's seed fixes the interleaving.
+// request: 0
+// request: 1
+// request: 2
+// request: 3
+// request: 0
+// request: 1
+// request: 2
+// request: 3
+// request: 0
+// request: 1
+// request: 2
+// request: 3
+// request: 0
+// request: 1
+// request: 2
+// request: 3
+// request: 0
+// request: 1
+// request: 2
+// request: 3
+// request: 7
+// request: 1
+// request: 2
+// request: 3
+// request: 0
+// request: 1
+// request: 2
+// request: 3
+// request: 0
+// request: 1
+// request: 2
+// request: 3
+// request: 0
+// request: 1
+// request: 2
+// request: 3
+// request: 0
+// request: 1
+// request: 2
+// request: 3
+// expect: -> 200 7
+// expect: -> 200 5
+// expect: -> 200 5
+// expect: -> 200 7
+// expect: -> 200 11
+// expect: -> 200 11
+// expect: -> 200 3
+// expect: -> 200 3
+// expect: -> 200 7
+// expect: -> 200 11
+// expect: -> 200 11
+// expect: -> 200 11
+// expect: -> 200 5
+// expect: -> 200 3
+// expect: -> 200 5
+// expect: -> 200 7
+// expect: -> 200 5
+// expect: <panic in a spawned task: index 7 out of bounds (length 4)>
+// expect: -> 200 7
+// expect: -> 200 7
+// expect: -> 200 3
+// expect: -> 200 3
+// expect: -> 200 5
+// expect: -> 200 11
+// expect: -> 200 11
+// expect: -> 200 3
+// expect: -> 200 7
+// expect: -> 200 7
+// expect: -> 200 7
+// expect: -> 200 5
+// expect: -> 200 7
+// expect: -> 200 3
+// expect: -> 200 3
+// expect: -> 200 3
+// expect: -> 200 5
+// expect: -> 200 11
+// expect: -> 200 5
+// expect: -> 200 11
+// expect: -> 200 11
+// expect: -> 200 5
+// expect: the server served every connection
+import { Listener, Socket } from "std/net";
+import { println } from "std/io";
+
+const PRICES: u32[4] = [3, 5, 7, 11];
+
+function serveOne(conn: Socket): void uses Io {
+  let c = conn;
+  let buf: u8[8] = repeat(0);
+  const n = try { c.read(mut buf) } catch (_) { 0 };
+  if (n == 0) { return; }
+  Io.sleep(Duration.ms(1));
+  const price = PRICES[(buf[0] - 48) as usize];
+  try { c.writeStatus(200, `${price}`); } catch (_) {}
+}
+
+export function main(): void uses Io {
+  try {
+    let listener = Listener.bind(8080);
+    Io.scope((s) => {
+      for (const conn of listener.accept()) {
+        s.spawn(() => serveOne(conn));
+      }
+    });
+  } catch (e) { println(`server stopped: ${e}`); }
+  println("the server served every connection");
+}

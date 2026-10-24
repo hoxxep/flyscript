@@ -1,0 +1,82 @@
+// Supervision (§6.1), as library code over `Task`: a supervisor starts its children, and restarts
+// them as they end, by a strategy, within a limit on how often. Past the limit it panics, which
+// cancels its children and goes to its own supervisor, if it has one, as a child's end.
+
+// Which children one's end restarts: itself; every child; or itself and those started after it.
+export type Strategy = #OneForOne | #AllForOne | #RestForOne;
+// Whether a child is restarted as it ends: whatever ended it; only a panic; never.
+export type Restart = #Permanent | #Transient | #Temporary;
+// A child: its name, for what a supervisor says, and a function that builds it afresh each time it
+// starts, given what the children share. A task that panicked leaves nothing to resume.
+export type Child<C> = { name: String; restart: Restart; start: (ctx: readonly C) => void uses Io };
+// At most `restarts` restarts within any span of time as long as `within`.
+export type Limit = { restarts: u32; within: Duration };
+
+// A span of time, as a person would write it.
+function span(d: Duration): String {
+  const ms = d.toMs();
+  if (ms % 1000 == 0) { `${ms / 1000}s` } else { `${ms}ms` }
+}
+
+// Runs a child until it ends, its function lent.
+function run<C>(start: readonly (ctx: readonly C) => void uses Io, ctx: readonly C): void uses Io { start(ctx) }
+
+// Runs `children`, in their order, until none is left to run: each ends, and is not restarted.
+export function supervise<C extends Send>(ctx: readonly C, strategy: Strategy, children: Vec<Child<C>>, limit: Limit): void uses Io {
+  Io.scope((s) => {
+    // The tasks running, and the child each runs, in the order they started.
+    let tasks: Vec<Task> = Vec.new();
+    let running: Vec<usize> = Vec.new();
+    // When each restart within the limit's span was.
+    let restarts: Vec<Instant> = Vec.new();
+    for (const i of 0..children.len()) {
+      tasks.push(s.spawn(() => run(children[i].start, ctx)));
+      running.push(i);
+    }
+    while (tasks.len() > 0) {
+      const k = Task.any(tasks);
+      const i = running[k];
+      const end = tasks[k].wait();
+      tasks.remove(k);
+      running.remove(k);
+      const again = match (children[i].restart) {
+        #Permanent => true,
+        #Transient => match (end) { #Panicked(_) => true, _ => false },
+        #Temporary => false,
+      };
+      if (!again) { continue; }
+      const now = Io.now();
+      while (restarts.len() > 0 && now.since(restarts[0]) >= limit.within) { restarts.remove(0); }
+      restarts.push(now);
+      if (restarts.len() > limit.restarts as usize) {
+        panic(`${children[i].name} needed more than ${limit.restarts} restarts within ${span(limit.within)}`);
+      }
+      // The children to start again: those the strategy stops, last started first, each waited for
+      // before the next is stopped, and then, in their order, with the one that ended.
+      let again: Vec<usize> = [i];
+      const stops = match (strategy) {
+        #OneForOne => false,
+        #AllForOne | #RestForOne => true,
+      };
+      if (stops) {
+        let j = tasks.len();
+        while (j > 0) {
+          j -= 1;
+          const c = running[j];
+          const stopped = match (strategy) { #RestForOne => c > i, _ => true };
+          if (!stopped) { continue; }
+          tasks[j].cancel();
+          tasks[j].wait();
+          tasks.remove(j);
+          running.remove(j);
+          if (match (children[c].restart) { #Temporary => false, _ => true }) { again.push(c); }
+        }
+      }
+      again.sortBy((a, b) => a.cmp(b));
+      for (const c of again) {
+        tasks.push(s.spawn(() => run(children[c].start, ctx)));
+        running.push(c);
+      }
+    }
+  });
+}

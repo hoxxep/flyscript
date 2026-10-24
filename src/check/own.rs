@@ -2073,8 +2073,10 @@ impl<'p> Own<'p> {
             self.record_use(v, span);
             // The capture happens where the closure is made: a binding moved in leaves its
             // scope's ownership then, not when the closure runs.
+            // As the binding's own type: the expression at the closure's span is the closure.
             let ident = Expr { kind: ExprKind::Ident(self.vars[v].name.clone()), span: e.span };
-            let val = self.use_place(&ident, Path { root: v, fields: Vec::new() }, how);
+            let var_ty = self.vars[v].ty.clone();
+            let val = self.use_place_as(&ident, Path { root: v, fields: Vec::new() }, how, var_ty);
             if self.moves.remove(&e.span).is_some() {
                 let (name, ty) = (self.vars[v].name.clone(), self.vars[v].ty.clone());
                 // A loop's body is checked twice; the closure captures once.

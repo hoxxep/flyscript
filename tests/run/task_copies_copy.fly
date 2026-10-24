@@ -1,0 +1,17 @@
+// A task copies a `Copy` value declared inside its scope (§4.3, §6.1): the binding stays usable.
+// Captures were checked as the closure's type, which is never `Copy`, so each counted as a move.
+// expect: kept 0, 1, 2
+import { println } from "std/io";
+import { Atomic } from "std/sync";
+
+export function main(): void uses Io {
+  const sum: Atomic<i64> = Atomic.new(0);
+  let kept: Vec<String> = Vec.new();
+  Io.scope((s) => {
+    for (const i of 0..3) {
+      s.spawn(() => { sum.fetchAdd(i as i64); });
+      kept.push(`${i}`);
+    }
+  });
+  println(`kept ${kept.join(", ")}`);
+}

@@ -2216,8 +2216,10 @@ impl Own {
       self.recordUse(v, span);
       // The capture happens where the closure is made: a binding moved in leaves its scope's
       // ownership then, not when the closure runs.
+      // As the binding's own type: the expression at the closure's span is the closure.
       const ident: Expr = { kind: #Ident(self.vars[v].name.clone()), span: e.span, id: e.id };
-      const val = self.usePlace(ident, Path { root: v, fields: Vec.new() }, how);
+      const varTy = self.vars[v].ty.clone();
+      const val = self.usePlaceAs(ident, Path { root: v, fields: Vec.new() }, how, varTy);
       if (self.moves.remove(e.span).isSome()) {
         const name = self.vars[v].name.clone();
         const ty = self.vars[v].ty.clone();

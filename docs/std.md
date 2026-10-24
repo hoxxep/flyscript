@@ -393,6 +393,17 @@ Data parallelism over pure closures (spec §6.5).
 
 ---
 
+## 13a. `std/supervise`
+
+Supervision as library code over `Task` (spec §6.1): Erlang's supervisors, for tasks whose types already prove they share nothing unguarded.
+
+- `supervise(ctx, strategy, children, limit)` starts `children`, a `Vec<Child<C>>`, in their order, in a scope of its own, and restarts them as they end, until none is left to run. Each child is `{ name, restart, start }`: `start(ctx)` builds it afresh each time, since a task that panicked leaves nothing to resume, and is given `ctx`, what the children share (`C extends Send`), rather than capturing it.
+- `Strategy`: `#OneForOne` restarts the child that ended; `#AllForOne` stops every other child, the last started first, each waited for, and starts them all again in their order; `#RestForOne` does that for the children started after it.
+- `Restart`: `#Permanent` children are restarted however they end, `#Transient` ones only after a panic, `#Temporary` ones never; a temporary child stopped by its siblings' restart stays stopped.
+- `Limit { restarts, within }`: past `restarts` restarts within any span `within` long, the supervisor panics, saying which child needed them. Its scope's children are cancelled as the panic unwinds it, and a supervisor that is itself a supervised child is restarted, or not, by its own supervisor, which sees the panic in its `wait`.
+
+---
+
 ## 14. `std/layout`
 
 `Soa<T>` keeps a struct's fields in planes, one for each field: a `Vec` for a scalar field and a nested `Soa` for a struct field (spec §7.4). It has `Soa.new()`, `push(v)`, `len()`, `at(i)`, a `SoaView` that lends each field of one element, and `splitAt(at)`; `SoaSlice`, `SoaView` and `SoaRead` are its `ParSplit` views.

@@ -1394,7 +1394,7 @@ function $drop15(v) {
 }
 function $copy16(v) { return ({ dir: v.dir, modified: v.modified, size: v.size }); }
 const $const71 = $usize(1 * 2 ** 40);
-const $const72 = ["std/prelude.fly", "std/region.d.fly", "std/net.d.fly", "std/io.fly", "std/collections.d.fly", "std/par.fly", "std/layout.fly", "std/sync.d.fly", "std/json.fly", "std/world.d.fly", "std/fs.fly", "std/process.fly", "std/time.fly", "std/unicode.fly", "std/regex.fly", "std/crypto.d.fly", "std/http.fly"];
+const $const72 = ["std/prelude.fly", "std/region.d.fly", "std/net.d.fly", "std/io.fly", "std/collections.d.fly", "std/par.fly", "std/layout.fly", "std/sync.d.fly", "std/json.fly", "std/world.d.fly", "std/fs.fly", "std/process.fly", "std/time.fly", "std/unicode.fly", "std/regex.fly", "std/crypto.d.fly", "std/http.fly", "std/supervise.fly"];
 function $copy17(v) { return ({ nanos: v.nanos }); }
 function $copy18(v) { return [v[0], v[1]]; }
 const $const81 = $usize(1 * 2 ** 51);
@@ -101600,7 +101600,7 @@ function lambda_765($1780, $1781, $1782, $1783) {
       const v216_loans = { v: undefined };
       const v218_captures = { v: undefined };
       const v234_t = { v: undefined };
-      let v6_escapes, v7_t, v8_t, v9_t, v10_role, v11_t, v12_outsideScope, v13_t, v14_t, v15_t, v16_t, v17_t, v40_t, v41_t, v42_t, v64_t, v65_t, v66_t, v67_t, v68_t, v69_t, v70_t, v71_savedState, v72_t, v73_t, v74_t, v75_savedTemps, v76_t, v77_t, v78_t, v79_savedDeferred, v80_t, v81_t, v82_t, v83_t, v107_t, v108_t, v109_mark, v110_t, v111_t, v112_t, v113_t, v114_result, v115_t, v116_t, v117_t, v118_t, v119_t, v120_t, v121_t, v122_t, v149_t, v150_t, v151_t, v152_t, v153_t, v154_t, v161_frame, v162_t, v163_t, v164_t, v165_t, v166_t, v167_mode, v213_t, v214_t, v215_t, v217_t, v233_t, v235_t, v236_t, v237_t, v238_t, v413_t;
+      let v6_escapes, v7_t, v8_t, v9_t, v10_role, v11_t, v12_outsideScope, v13_t, v14_t, v15_t, v16_t, v17_t, v40_t, v41_t, v42_t, v64_t, v65_t, v66_t, v67_t, v68_t, v69_t, v70_t, v71_savedState, v72_t, v73_t, v74_t, v75_savedTemps, v76_t, v77_t, v78_t, v79_savedDeferred, v80_t, v81_t, v82_t, v83_t, v107_t, v108_t, v109_mark, v110_t, v111_t, v112_t, v113_t, v114_result, v115_t, v116_t, v117_t, v118_t, v119_t, v120_t, v121_t, v122_t, v149_t, v150_t, v151_t, v152_t, v153_t, v154_t, v161_frame, v162_t, v163_t, v164_t, v165_t, v166_t, v167_mode, v213_t, v214_t, v215_t, v217_t, v233_t, v235_t, v236_t, v237_t, v238_t, v416_t;
       v6_escapes = v0_self.v.escaping;
       v7_t = new $rt.FieldRef(v0_self.v, "nextRole");
       v8_t = { $tag: "Plain" };
@@ -102203,7 +102203,7 @@ function lambda_765($1780, $1781, $1782, $1783) {
               v248_how0 = v246_t[1];
               v249_span = $copy4(v246_t[2]);
               {
-                let v250_how, v267_t, v269_t, v332_t, v333_t, v334_t, v335_t, v336_t, v337_t, v340_t, v343_t, v363_t, v364_t, v365_t, v366_t, v367_t, v368_ident, v369_t, v370_t, v371_t, v372_t, v373_t, v374_t, v375_val, v376_t, v377_t, v378_t, v379_t, v380_t, v381_t, v409_t, v410_t, v411_t;
+                let v250_how, v267_t, v269_t, v332_t, v333_t, v334_t, v335_t, v336_t, v337_t, v340_t, v343_t, v363_t, v364_t, v365_t, v366_t, v367_t, v368_ident, v369_t, v370_t, v371_varTy, v372_t, v373_t, v374_t, v375_t, v376_t, v377_t, v378_val, v379_t, v380_t, v381_t, v382_t, v383_t, v384_t, v412_t, v413_t, v414_t;
                 v250_how = v248_how0;
                 if (v6_escapes)
                 {
@@ -102419,47 +102419,50 @@ function lambda_765($1780, $1781, $1782, $1783) {
                 v366_t = { $tag: "Ident", $: v365_t };
                 v367_t = { kind: v366_t, span: $copy4(v1_e.span), id: v1_e.id };
                 v368_ident = v367_t;
-                v373_t = v0_self;
-                v369_t = v368_ident;
-                v371_t = v247_v;
-                v370_t = $b.Vec_new();
-                v372_t = { root: v371_t, fields: v370_t };
-                v374_t = usePlace_755(v373_t, v369_t, v372_t, v250_how);
-                v375_val = v374_t;
-                v376_t = new $rt.FieldRef(v0_self.v, "moves");
-                v377_t = v1_e.span;
-                v378_t = $b.HashMap_remove(v376_t, v377_t);
-                v379_t = v378_t;
-                v380_t = v379_t;
-                v381_t = $b.Option_isSome(v380_t);
-                if (v381_t)
+                v369_t = $ix(v0_self.v.vars, v247_v).ty;
+                v370_t = clone_71(v369_t);
+                v371_varTy = v370_t;
+                v376_t = v0_self;
+                v372_t = v368_ident;
+                v374_t = v247_v;
+                v373_t = $b.Vec_new();
+                v375_t = { root: v374_t, fields: v373_t };
+                v377_t = usePlaceAs_1003(v376_t, v372_t, v375_t, v250_how, v371_varTy);
+                v378_val = v377_t;
+                v379_t = new $rt.FieldRef(v0_self.v, "moves");
+                v380_t = v1_e.span;
+                v381_t = $b.HashMap_remove(v379_t, v380_t);
+                v382_t = v381_t;
+                v383_t = v382_t;
+                v384_t = $b.Option_isSome(v383_t);
+                if (v384_t)
                 {
                   {
-                    let v382_t, v383_t, v384_name, v385_t, v386_t, v387_ty, v388_t, v389_t, v390_t, v391_t;
-                    v382_t = $ix(v0_self.v.vars, v247_v).name;
-                    v383_t = $b.String_clone(v382_t);
-                    v384_name = v383_t;
-                    v385_t = $ix(v0_self.v.vars, v247_v).ty;
-                    v386_t = clone_71(v385_t);
-                    v387_ty = v386_t;
-                    v388_t = new $rt.FieldRef(v0_self.v, "capturedMoves");
-                    v389_t = v1_e.span;
-                    v390_t = $b.HashMap_getMut(v388_t, v389_t);
-                    v391_t = v390_t;
+                    let v385_t, v386_t, v387_name, v388_t, v389_t, v390_ty, v391_t, v392_t, v393_t, v394_t;
+                    v385_t = $ix(v0_self.v.vars, v247_v).name;
+                    v386_t = $b.String_clone(v385_t);
+                    v387_name = v386_t;
+                    v388_t = $ix(v0_self.v.vars, v247_v).ty;
+                    v389_t = clone_71(v388_t);
+                    v390_ty = v389_t;
+                    v391_t = new $rt.FieldRef(v0_self.v, "capturedMoves");
+                    v392_t = v1_e.span;
+                    v393_t = $b.HashMap_getMut(v391_t, v392_t);
+                    v394_t = v393_t;
                     L12:
                     {
-                      let v392_t, v403_t;
-                      v392_t = (v391_t.$tag === "Some");
-                      if (v392_t)
+                      let v395_t, v406_t;
+                      v395_t = (v394_t.$tag === "Some");
+                      if (v395_t)
                       {
-                        let v393_list;
-                        v393_list = v391_t.$;
+                        let v396_list;
+                        v396_list = v394_t.$;
                         {
-                          let v394_t, v395_t, v396_t, v397_t, v398_t, v399_t;
+                          let v397_t, v398_t, v399_t, v400_t, v401_t, v402_t;
                           try {
-                            v394_t = v393_list.v;
-                            v395_t = $b.slice_iter(v394_t);
-                            v396_t = (($1788) => {
+                            v397_t = v396_list.v;
+                            v398_t = $b.slice_iter(v397_t);
+                            v399_t = (($1788) => {
                               let v1_ret;
                               {
                                 let v0_$0, v2_t;
@@ -102469,7 +102472,7 @@ function lambda_765($1780, $1781, $1782, $1783) {
                                   v3_t = v0_$0;
                                   v4_n = v3_t[0];
                                   v6_t = v4_n;
-                                  v5_t = v384_name;
+                                  v5_t = v387_name;
                                   v7_t = eq_28(v6_t, v5_t);
                                   v2_t = v7_t;
                                 }
@@ -102477,34 +102480,34 @@ function lambda_765($1780, $1781, $1782, $1783) {
                               }
                               return v1_ret;
                             });
-                            v397_t = v396_t;
-                            v398_t = some_371($rt.take(v395_t, v395_t = undefined), v397_t);
-                            v399_t = (!v398_t);
-                            if (v399_t)
+                            v400_t = v399_t;
+                            v401_t = some_371($rt.take(v398_t, v398_t = undefined), v400_t);
+                            v402_t = (!v401_t);
+                            if (v402_t)
                             {
                               {
-                                let v400_t, v401_t, v402_t;
-                                v401_t = v393_list;
-                                v400_t = [v384_name, v387_ty];
-                                $b.Vec_push(v401_t, v400_t);
+                                let v403_t, v404_t, v405_t;
+                                v404_t = v396_list;
+                                v403_t = [v387_name, v390_ty];
+                                $b.Vec_push(v404_t, v403_t);
                               }
                             }
                           } finally { if ($rt.unwinds()) {
-                            $drop35(v395_t);
+                            $drop35(v398_t);
                           } }
                         }
                         break L12;
                       }
-                      v403_t = (v391_t.$tag === "None");
-                      if (v403_t)
+                      v406_t = (v394_t.$tag === "None");
+                      if (v406_t)
                       {
                         {
-                          let v404_t, v405_t, v406_t, v407_t, v408_t;
-                          v404_t = new $rt.FieldRef(v0_self.v, "capturedMoves");
-                          v407_t = $copy4(v1_e.span);
-                          v405_t = [v384_name, v387_ty];
-                          v406_t = [v405_t];
-                          $b.HashMap_insert(v404_t, v407_t, v406_t);
+                          let v407_t, v408_t, v409_t, v410_t, v411_t;
+                          v407_t = new $rt.FieldRef(v0_self.v, "capturedMoves");
+                          v410_t = $copy4(v1_e.span);
+                          v408_t = [v387_name, v390_ty];
+                          v409_t = [v408_t];
+                          $b.HashMap_insert(v407_t, v410_t, v409_t);
                         }
                         break L12;
                       }
@@ -102512,21 +102515,21 @@ function lambda_765($1780, $1781, $1782, $1783) {
                     }
                   }
                 }
-                v409_t = v216_loans;
-                v410_t = v375_val.loans;
-                addLoans_1006(v409_t, v410_t);
+                v412_t = v216_loans;
+                v413_t = v378_val.loans;
+                addLoans_1006(v412_t, v413_t);
               }
             }
           }
           {
-            let v412_t;
-            v412_t = $usize(v243_t + 1);
-            v243_t = v412_t;
+            let v415_t;
+            v415_t = $usize(v243_t + 1);
+            v243_t = v415_t;
           }
         }
       }
-      v413_t = { loans: v216_loans.v };
-      v5_t = v413_t;
+      v416_t = { loans: v216_loans.v };
+      v5_t = v416_t;
     }
     v4_ret = v5_t;
   }

@@ -1,0 +1,75 @@
+// Supervision (std/supervise): children restarted as they end, by strategy and restart policy,
+// within a limit, past which the supervisor panics to whoever waits for it.
+// expect: flaky starts, attempt 0
+// expect: flaky starts, attempt 1
+// expect: flaky starts, attempt 2
+// expect: flaky settles
+// expect: one for one: done
+// expect: worker starts
+// expect: crasher starts
+// expect: worker stops
+// expect: worker starts
+// expect: crasher starts
+// expect: crasher settles
+// expect: worker settles
+// expect: all for one: done
+// expect: hopeless starts
+// expect: hopeless starts
+// expect: hopeless starts
+// expect: past the limit: panicked: hopeless needed more than 2 restarts within 60s
+import { println } from "std/io";
+import { Atomic } from "std/sync";
+import { supervise } from "std/supervise";
+
+function said(e: TaskEnd): String {
+  match (e) {
+    #Done => "done".toString(),
+    #Cancelled => "cancelled".toString(),
+    #Panicked(m) => `panicked: ${m}`,
+  }
+}
+
+export function main(): void uses Io {
+  const limit = { restarts: 2, within: Duration.secs(60) };
+  // One for one: a transient child that panics until its third attempt is restarted until it
+  // returns, and then left.
+  const attempts: Atomic<i64> = Atomic.new(0);
+  supervise(attempts, #OneForOne, [
+    { name: "flaky".toString(), restart: #Transient, start: (n) => {
+      const k = n.fetchAdd(1);
+      println(`flaky starts, attempt ${k}`);
+      if (k < 2) { panic("not yet"); }
+      println("flaky settles");
+    } },
+  ], limit);
+  println("one for one: done");
+  // All for one: a child's panic stops its sibling, and both start again.
+  const crashes: Atomic<i64> = Atomic.new(0);
+  supervise(crashes, #AllForOne, [
+    { name: "worker".toString(), restart: #Transient, start: (n) => {
+      defer { if (n.load() == 1) { println("worker stops"); } };
+      println("worker starts");
+      Io.sleep(Duration.ms(20));
+      println("worker settles");
+    } },
+    { name: "crasher".toString(), restart: #Transient, start: (n) => {
+      Io.sleep(Duration.ms(5));
+      println("crasher starts");
+      if (n.fetchAdd(1) == 0) { panic("first time"); }
+      println("crasher settles");
+    } },
+  ], limit);
+  println("all for one: done");
+  // Past the limit, the supervisor panics: as a spawned task, its `Task` says so.
+  Io.scope((s) => {
+    const t = s.spawn(() => {
+      supervise(0, #OneForOne, [
+        { name: "hopeless".toString(), restart: #Permanent, start: (_) => {
+          println("hopeless starts");
+          panic("never works");
+        } },
+      ], limit);
+    });
+    println(`past the limit: ${said(t.wait())}`);
+  });
+}

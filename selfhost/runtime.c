@@ -3316,10 +3316,13 @@ int fly_scope_open(void) {
 // cancels them, and waits on.
 static void scope_wait(int sid) {
   for (;;) {
-    ask(REQ_SCOPE_WAIT, sid, 0, NULL);
-    if (!fly_unwinding) return;
-    fly_unwinding = false;
-    ask(REQ_SCOPE_CANCEL, sid, 0, NULL);
+    int64_t more = ask(REQ_SCOPE_WAIT, sid, 0, NULL);
+    if (fly_unwinding) {
+      fly_unwinding = false;
+      ask(REQ_SCOPE_CANCEL, sid, 0, NULL);
+    } else if (!more) {
+      return;
+    }
   }
 }
 

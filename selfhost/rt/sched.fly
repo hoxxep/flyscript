@@ -64,9 +64,8 @@ const WAIT_NONE: u8 = 0;
 const WAIT_TASK: u8 = 1;
 const WAIT_CHANNEL: u8 = 2;
 const WAIT_UNTIL: u8 = 3;
-// Any of several tasks ending (`Task.any`); every task of a scope (`SCOPE_WAIT`).
+// Any of several tasks ending (`Task.any`).
 const WAIT_ANY: u8 = 4;
-const WAIT_SCOPE: u8 = 5;
 
 type Task = {
   scope: i32;
@@ -249,12 +248,10 @@ impl Sched {
     }
     const st2 = self.s(sid);
     if (const #Some(i) = st2.tasks.indexOf(me)) { st2.tasks.remove(i); }
-    const last = st2.tasks.len() == 0;
     self.t(me).finished = true;
     // Its joiners, and those waiting for any of several tasks it is among, in the order they
-    // began to wait; and the scope's owner, waiting for its last task.
+    // began to wait.
     self.wake(WAIT_TASK, me);
-    if (last) { self.wake(WAIT_SCOPE, sid); }
     unsafe { fly_core_end(me, ran); }
     if (!self.t(me).forked) {
       self.tasks[me as usize] = #None;
@@ -424,7 +421,14 @@ impl Sched {
       return self.giveWay(WAIT_NONE, 0);
     }
     if (kind == JOIN_WAIT) { return self.giveWay(WAIT_TASK, arg(0) as i32); }
-    if (kind == SCOPE_WAIT) { return self.giveWay(WAIT_SCOPE, arg(0) as i32); }
+    // The end of a scope waits for its tasks one by one, in the order they started, as every back
+    // end does, so that a seed gives one interleaving everywhere.
+    if (kind == SCOPE_WAIT) {
+      const first = self.s(arg(0) as i32).tasks[0];
+      // Woken, the scope's end asks again: `1` says it has more to wait for.
+      unsafe { fly_core_reply(1); }
+      return self.giveWay(WAIT_TASK, first);
+    }
     if (kind == TASK_ANY) {
       const p = unsafe { fly_core_ptr(0).cast<i32>() };
       let ids: Vec<i32> = Vec.new();
