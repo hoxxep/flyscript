@@ -1,0 +1,36 @@
+// expect: done 100, cancelled 100, panicked 100
+// expect: any found 300 ended tasks
+// Tasks on many cores, each waited for by its `Task`: a third run to their end, a third are
+// cancelled as they sleep, a third panic, which `wait` gives rather than reports.
+import { println } from "std/io";
+
+export function main(): void uses Io {
+  let done: u32 = 0;
+  let cancelled: u32 = 0;
+  let panicked: u32 = 0;
+  let found: u32 = 0;
+  Io.scope((s) => {
+    let ts: Vec<Task> = Vec.new();
+    for (const i of 0..300) {
+      ts.push(match (i % 3) {
+        0 => s.spawn(() => { Io.sleep(Duration.ms(1)); }),
+        1 => s.spawn(() => { Io.sleep(Duration.secs(60)); }),
+        _ => s.spawn(() => { panic("gave up"); }),
+      });
+    }
+    for (const [i, t] of ts.iter().enumerate()) { if (i % 3 == 1) { t.cancel(); } }
+    // Each `Task.any` finds a task that has ended; it is then waited for, and left out.
+    while (ts.len() > 0) {
+      const k = Task.any(ts);
+      const t = ts.remove(k);
+      found += 1;
+      match (t.wait()) {
+        #Done => { done += 1; }
+        #Cancelled => { cancelled += 1; }
+        #Panicked(_) => { panicked += 1; }
+      }
+    }
+  });
+  println(`done ${done}, cancelled ${cancelled}, panicked ${panicked}`);
+  println(`any found ${found} ended tasks`);
+}

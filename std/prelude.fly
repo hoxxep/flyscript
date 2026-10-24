@@ -549,17 +549,39 @@ export interface Iterable<T, row E = []> {
 // A task runs on a new fiber, where only `Io` and its scope's capture of failures are handled.
 export struct Scope<X>;
 export struct Fiber<T>;
+// A spawned task, for cancelling it alone and learning how it ended: a reference to the task's
+// record, which lasts while one does. Dropping it leaves the task running.
+export struct Task;
+// How a task ended: it returned; it unwound from a cancellation; it panicked, saying this.
+export type TaskEnd = #Done | #Cancelled | #Panicked(String);
 impl Io {
   // The body, like its tasks, performs only `Io` and failures: an outer region is frozen while tasks run (§6.1).
   export function scope<T, X>(body: once (s: mut Scope<X>) => T uses Io, Fail<X>): T uses Io, Fail<X>;
 }
 impl<X> Scope<X> {
   // Starting a task is a scheduling point (§6.4).
-  export function spawn(self: mut Self, task: once () => void uses Io): void uses Io;
+  export function spawn(self: mut Self, task: once () => void uses Io): Task uses Io;
   export function fork<T extends Send>(self: mut Self, task: once () => T uses Io, Fail<X>): Fiber<T> uses Io;
 }
 impl<T> Fiber<T> {
   export function join(self: Self): T uses Io;
+}
+impl Task {
+  // The task unwinds from its next `Io` operation, once any cleanup it is in has run; nothing, once
+  // it has ended.
+  export function cancel(self: readonly Self): void uses Io;
+  // How it ended, once it has and its cleanup has run. A panic `wait` gives is not reported.
+  export function wait(self: readonly Self): TaskEnd uses Io;
+  // The index of the first of `tasks` to have ended, once one has.
+  export function any(tasks: readonly Task[]): usize uses Io;
+}
+// A spawned task's panic no `wait` gave is reported once nothing can ask for it: as the task ends,
+// or as the last `Task` for it is dropped (§5.7).
+impl Drop for Task {
+  function drop(self: mut Self): void;
+}
+impl Clone for Task {
+  function clone(self: readonly Self): Self;
 }
 
 // ---- Owned containers and strings (§3.1) ----

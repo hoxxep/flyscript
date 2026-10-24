@@ -2934,6 +2934,12 @@ static void mt_point(void);
 static void mt_cleaning(int d);
 static void mt_sleep(uint64_t nanos);
 static int mt_spawn(int scope, void (*entry)(void* task, void* closure), void* closure, size_t size);
+static void* mt_task_spawn(int scope, void* closure);
+static void mt_task_cancel(void* h);
+static int32_t mt_task_wait(void* h, fly_String* message);
+static size_t mt_task_any(void* const* ts, size_t n);
+static void mt_task_clone(void* h);
+static void mt_task_drop(void* h);
 static void mt_join(int task, void* out);
 static int mt_scope_open(void);
 static void mt_scope_close(int scope);
@@ -2963,9 +2969,16 @@ typedef struct {
   void* result;
   size_t size;
   fly_failure* error;
-  // The panic it ended with, if it was forked; a spawned task's is reported where it ends (§5.7).
+  // The panic it ended with, if it was forked.
   char* panic;
   bool forked;
+  // A spawned task, as its `Task`s see it: its number while it runs; how many refer to it; how it
+  // ended (FLY_TASK_*), with its panic's message, and whether that has been told.
+  int32_t id;
+  int handles;
+  int8_t how;
+  bool told;
+  char* message;
   // How deep it is in cleanup, which a cancellation waits for.
   int cleaning;
   // What the scheduler delivers as it resumes the task, and its answer to what the task asked:
@@ -2984,9 +2997,9 @@ static task_t* core_cur;
 #define FLY_LATER (-INT64_C(0x7fffffffffffffff))
 
 // The request the running task left, and its answer (rt/sched.fly's numbering).
-enum { REQ_POINT = 1, REQ_SLEEP, REQ_SPAWN, REQ_JOIN_WAIT, REQ_JOIN_TAKE, REQ_SCOPE_OPEN, REQ_SCOPE_FAILED, REQ_SCOPE_TASK, REQ_SCOPE_TAKE,
+enum { REQ_POINT = 1, REQ_SLEEP, REQ_SPAWN, REQ_JOIN_WAIT, REQ_JOIN_TAKE, REQ_SCOPE_OPEN, REQ_SCOPE_FAILED, REQ_SCOPE_WAIT, REQ_SCOPE_TAKE,
        REQ_UNCANCEL, REQ_CHANNEL, REQ_SEND, REQ_RECV, REQ_CLOSE, REQ_SENDER_DROP, REQ_SENDER_CLONE, REQ_DEAFEN, REQ_TAKE_ITEMS,
-       REQ_SCOPE_CANCEL };
+       REQ_SCOPE_CANCEL, REQ_TASK_KILL, REQ_TASK_ANY, REQ_IS_CANCELLED };
 static struct { int kind; int64_t a[2]; void* p; } req;
 
 void fly_panic_deadlock(void) { fly_panic("deadlock: every task is waiting"); }
@@ -3026,7 +3039,7 @@ void fly_core_reply(int64_t v) { core_cur->reply = v; }
 void fly_core_answer(int32_t id, int64_t v) { core_tasks[id]->reply = v; }
 uint64_t fly_core_clock(void) { return fly_clock; }
 void fly_core_set_clock(uint64_t t) { fly_clock = t; }
-int32_t fly_core_cleaning(int32_t id) { return core_tasks[id]->cleaning; }
+int32_t fly_core_cleaning(int32_t id) { return core_tasks[id] ? core_tasks[id]->cleaning : 0; }
 
 void fly_core_adopt(int32_t id, uint8_t* record) {
   if ((size_t)id >= core_cap) {
@@ -3060,11 +3073,35 @@ static void task_main(void* arg) {
     char* m = panic_take();
     if (t->entry != main_entry) drop_task_closure(t->closure);
     if (t->forked) t->panic = m;
-    else { report_spawned_panic(m); panic_free(m); }
+    else { t->how = FLY_TASK_PANICKED; t->message = m; }
     return;
   }
   if (FLY_FAILED) { t->error = fly_err; fly_err = NULL; }
+  if (!t->forked) t->how = fly_unwinding ? FLY_TASK_CANCELLED : FLY_TASK_DONE;
   fly_unwinding = false;
+}
+
+// A spawned task's record is let go once it has ended and no `Task` refers to it, its panic, if no
+// `wait` gave it, reported then (§5.7).
+static void task_release(task_t* t) {
+  if (t->how == FLY_TASK_PANICKED && !t->told) report_spawned_panic(t->message);
+  panic_free(t->message);
+  free(t->result);
+  free(t);
+}
+
+// Task `id` has ended, having run or not (cancelled before it began): its fiber is let go, and a
+// spawned task's number, which the scheduler gives out again.
+void fly_core_end(int32_t id, bool ran) {
+  task_t* t = core_tasks[id];
+  if (!ran) {
+    drop_task_closure(t->closure);
+    if (!t->forked) t->how = FLY_TASK_CANCELLED;
+  }
+  if (t->fiber) { fiber_free(t->fiber); t->fiber = NULL; }
+  if (t->forked) return;
+  core_tasks[id] = NULL;
+  if (t->handles == 0) task_release(t);
 }
 
 // Runs task `id` until it asks again, 0, or ends, 1, or ends failing, 2.
@@ -3150,7 +3187,80 @@ int fly_spawn(int scope, void (*entry)(void* task, void* closure), void* closure
 #ifdef FLY_THREADS
   if (threads) return mt_spawn(scope, entry, closure, size);
 #endif
-  return (int)ask(REQ_SPAWN, scope, 0, new_task(entry, closure, size));
+  return (int)ask(REQ_SPAWN, scope, 1, new_task(entry, closure, size));
+}
+
+// ---- `Task` (§6.1): a spawned task's record, which its `Task`s refer to ----
+
+void* fly_task_spawn(int scope, void* closure) {
+#ifdef FLY_THREADS
+  if (threads) return mt_task_spawn(scope, closure);
+#endif
+  task_t* t = new_task(fly_task_void, closure, 0);
+  t->how = FLY_TASK_RUNNING;
+  t->handles = 1;
+  t->id = (int32_t)ask(REQ_SPAWN, scope, 0, t);
+  return t;
+}
+
+void fly_task_cancel(void* h) {
+#ifdef FLY_THREADS
+  if (threads) { mt_task_cancel(h); return; }
+#endif
+  task_t* t = h;
+  if (t->how == FLY_TASK_RUNNING) ask(REQ_TASK_KILL, t->id, 0, NULL);
+}
+
+// How the task ended, once it has: FLY_TASK_*, a panic's message written at `message`.
+int32_t fly_task_wait(void* h, fly_String* message) {
+#ifdef FLY_THREADS
+  if (threads) return mt_task_wait(h, message);
+#endif
+  task_t* t = h;
+  while (t->how == FLY_TASK_RUNNING) {
+    ask(REQ_JOIN_WAIT, t->id, 0, NULL);
+    if (fly_unwinding) return FLY_TASK_DONE;
+  }
+  if (t->how == FLY_TASK_PANICKED) {
+    t->told = true;
+    *message = fly_String_from(fly_str_lit(t->message, strlen(t->message)));
+  }
+  return t->how;
+}
+
+// The index of the first of `ts` to have ended, once one has.
+size_t fly_task_any(void* const* ts, size_t n) {
+  if (n == 0) fly_panic("waited for any of no tasks");
+#ifdef FLY_THREADS
+  if (threads) return mt_task_any(ts, n);
+#endif
+  int32_t* ids = fly_alloc(n * sizeof(int32_t));
+  for (;;) {
+    for (size_t i = 0; i < n; i++) {
+      task_t* t = ts[i];
+      if (t->how != FLY_TASK_RUNNING) { free(ids); return i; }
+      ids[i] = t->id;
+    }
+    ask(REQ_TASK_ANY, (int64_t)n, 0, ids);
+    if (fly_unwinding) { free(ids); return 0; }
+  }
+}
+
+void* fly_task_clone(void* h) {
+#ifdef FLY_THREADS
+  if (threads) { mt_task_clone(h); return h; }
+#endif
+  ((task_t*)h)->handles++;
+  return h;
+}
+
+void fly_task_drop(void* h) {
+  if (!h) return;
+#ifdef FLY_THREADS
+  if (threads) { mt_task_drop(h); return; }
+#endif
+  task_t* t = h;
+  if (--t->handles == 0 && t->how != FLY_TASK_RUNNING) task_release(t);
 }
 
 void fly_task_void(void* task, void* closure) {
@@ -3202,29 +3312,35 @@ int fly_scope_open(void) {
 
 // The end of a scope's body, however it ended: every task started in it is waited for, then
 // the scope fails as its body or its first failed task did (§6.1).
+// Waits until every task started in scope `sid` has finished. Cancelled while it waits, the task
+// cancels them, and waits on.
+static void scope_wait(int sid) {
+  for (;;) {
+    ask(REQ_SCOPE_WAIT, sid, 0, NULL);
+    if (!fly_unwinding) return;
+    fly_unwinding = false;
+    ask(REQ_SCOPE_CANCEL, sid, 0, NULL);
+  }
+}
+
 void fly_scope_close(int sid, bool body_failed) {
   (void)body_failed;
 #ifdef FLY_THREADS
   if (threads) { mt_scope_close(sid); return; }
 #endif
-  // The body unwound because a task failed: the scope raises that instead.
-  bool unwound = fly_unwinding && !ask(REQ_SCOPE_FAILED, sid, 0, NULL);
+  // The body left by unwinding — a failure, a cancellation — cancels the scope's tasks (§6.1).
+  bool unwinding = fly_unwinding;
   fly_unwinding = false;
   void* err = fly_err;
   fly_err = NULL;
-  ask(REQ_UNCANCEL, 0, 0, NULL);
-  for (int64_t i = 0;; i++) {
-    int64_t task = ask(REQ_SCOPE_TASK, sid, i, NULL);
-    if (task < 0) break;
-    for (;;) {
-      ask(REQ_JOIN_WAIT, task, 0, NULL);
-      if (!fly_unwinding) break;
-      fly_unwinding = false;
-      ask(REQ_UNCANCEL, 0, 0, NULL);
-    }
-  }
-  ask(REQ_UNCANCEL, 0, 0, NULL);
-  if (unwound) { fly_unwinding = true; if (err) free(err); return; }
+  if (unwinding || err) ask(REQ_SCOPE_CANCEL, sid, 0, NULL);
+  scope_wait(sid);
+  // The body unwound because a task failed: the scope raises that instead, the cancellation its
+  // failure made over. Otherwise one from outside — its own scope's, or its `Task`'s — goes on,
+  // whether it came in the body or as the task waited.
+  bool failed_scope = ask(REQ_SCOPE_FAILED, sid, 0, NULL);
+  if (unwinding && !failed_scope) { fly_unwinding = true; if (err) free(err); return; }
+  if (failed_scope) ask(REQ_UNCANCEL, 0, 0, NULL);
   if (err) { fly_err = err; return; }
   int64_t failed = ask(REQ_SCOPE_TAKE, sid, 0, NULL);
   if (failed >= 0 && core_tasks[failed]->panic) {
@@ -3232,7 +3348,8 @@ void fly_scope_close(int sid, bool body_failed) {
     core_tasks[failed]->panic = NULL;
     panic_again(m);
   }
-  if (failed >= 0) { fly_err = core_tasks[failed]->error; core_tasks[failed]->error = NULL; }
+  if (failed >= 0) { fly_err = core_tasks[failed]->error; core_tasks[failed]->error = NULL; return; }
+  if (ask(REQ_IS_CANCELLED, 0, 0, NULL)) fly_unwinding = true;
 }
 
 // A panic unwound the body of scope `sid` (§5.7): its tasks are cancelled, as a failure would
@@ -3243,16 +3360,7 @@ _Noreturn void fly_scope_panicked(int sid) {
   if (threads) { mt_scope_cancel(sid); mt_scope_close(sid); panic_again(m); }
 #endif
   ask(REQ_SCOPE_CANCEL, sid, 0, NULL);
-  for (int64_t i = 0;; i++) {
-    int64_t task = ask(REQ_SCOPE_TASK, sid, i, NULL);
-    if (task < 0) break;
-    for (;;) {
-      ask(REQ_JOIN_WAIT, task, 0, NULL);
-      if (!fly_unwinding) break;
-      fly_unwinding = false;
-      ask(REQ_UNCANCEL, 0, 0, NULL);
-    }
-  }
+  scope_wait(sid);
   ask(REQ_UNCANCEL, 0, 0, NULL);
   int64_t failed = ask(REQ_SCOPE_TAKE, sid, 0, NULL);
   if (failed >= 0) { panic_free(core_tasks[failed]->panic); core_tasks[failed]->panic = NULL; free(core_tasks[failed]->error); core_tasks[failed]->error = NULL; }
@@ -3507,10 +3615,19 @@ struct mt_task {
   fly_failure* error;
   char* panic;
   bool forked;
+  // A spawned task, as its `Task`s see it, which share one reference: how many there are; how it
+  // ended (FLY_TASK_*) with its panic's message; whether that has been told, which whoever tells
+  // it first sets; and those waiting for any of several tasks it is among, under its joiners' lock.
+  int handles;
+  int8_t how;
+  bool told;
+  char* message;
+  struct mt_any* anys;
   // Who still refers to it: itself while it lives, its scope while it does, and a forked task's
   // `Fiber` until it is joined.
   int refs;
-  bool started, cancelled, yielded;
+  // Cancelled by its scope, which may take that back, or by its `Task`, for good (`killed`).
+  bool started, cancelled, killed, yielded;
   // How deep it is in cleanup, which a cancellation waits for.
   int cleaning;
   // Its joiners, and whether it has finished, under their queue's lock.
@@ -3529,6 +3646,9 @@ struct mt_task {
   fly_ctx ctx;
   uint64_t sleep_gen;
 };
+
+// One waiting for any of several tasks, among one of them's: it is told by `fired` and woken in `q`.
+struct mt_any { struct mt_any* next; waitq* q; bool fired; };
 
 // A scope: its tasks still alive, and how it fails. Its queue holds its owner while the owner waits
 // for them at the scope's end; the queue's lock guards it all.
@@ -3621,6 +3741,7 @@ static void notify_all(void) {
 
 static void task_unref(mt_task* t) {
   if (__atomic_sub_fetch(&t->refs, 1, __ATOMIC_ACQ_REL) > 0) return;
+  panic_free(t->message);
   free(t->result);
   free(t);
 }
@@ -3656,6 +3777,10 @@ static void unpark(mt_task* t) {
   // only for those after it.
   if (w && w->harvesting && w->harvested++ == 0) return;
   notify();
+}
+
+static bool is_cancelled(mt_task* t) {
+  return __atomic_load_n(&t->cancelled, __ATOMIC_ACQUIRE) || __atomic_load_n(&t->killed, __ATOMIC_ACQUIRE);
 }
 
 static void q_append(waitq* q, mt_task* t) {
@@ -3697,7 +3822,7 @@ static void wait_in(waitq* q, bool cancellable) {
   mt_task* t = running;
   q_append(q, t);
   __atomic_store_n(&t->waiting, q, __ATOMIC_SEQ_CST);
-  if (cancellable && __atomic_load_n(&t->cancelled, __ATOMIC_SEQ_CST) && !__atomic_load_n(&t->cleaning, __ATOMIC_SEQ_CST)) {
+  if (cancellable && is_cancelled(t) && !__atomic_load_n(&t->cleaning, __ATOMIC_SEQ_CST)) {
     q_remove(q, t);
     __atomic_store_n(&t->waiting, NULL, __ATOMIC_SEQ_CST);
     spin_unlock(&q->lock);
@@ -3711,7 +3836,7 @@ static void wait_in(waitq* q, bool cancellable) {
 // Whether the running task has been cancelled: it unwinds from here (§6.1).
 static bool cancelled_here(void) {
   mt_task* t = running;
-  if (t && __atomic_load_n(&t->cancelled, __ATOMIC_ACQUIRE) && !__atomic_load_n(&t->cleaning, __ATOMIC_SEQ_CST)) {
+  if (t && is_cancelled(t) && !__atomic_load_n(&t->cleaning, __ATOMIC_SEQ_CST)) {
     fly_unwinding = true;
     return true;
   }
@@ -3731,9 +3856,21 @@ void fly_mon_wake_one(uint8_t* m) { wake_one((waitq*)m); }
 void fly_mon_wake_all(uint8_t* m) { wake_all((waitq*)m); }
 void fly_core_relax(void) { relax(); }
 
+// A task waiting is woken to see that it is cancelled; one in cleanup is left to finish it.
+static void wake_cancelled(mt_task* t);
+
 // Cancels a task: one running or queued sees it at its next scheduling point; one waiting is woken.
 static void cancel_task(mt_task* t) {
   __atomic_store_n(&t->cancelled, true, __ATOMIC_SEQ_CST);
+  wake_cancelled(t);
+}
+
+static void kill_task(mt_task* t) {
+  __atomic_store_n(&t->killed, true, __ATOMIC_SEQ_CST);
+  wake_cancelled(t);
+}
+
+static void wake_cancelled(mt_task* t) {
   // One in cleanup is left to finish it; it sees the cancellation at its next scheduling point.
   if (__atomic_load_n(&t->cleaning, __ATOMIC_SEQ_CST)) return;
   for (;;) {
@@ -3843,11 +3980,18 @@ static void mt_task_main(void* arg) {
     char* m = panic_take();
     if (t->entry != main_entry) drop_task_closure(t->closure);
     if (t->forked) t->panic = m;
-    else { report_spawned_panic(m); panic_free(m); }
+    else { t->message = m; __atomic_store_n(&t->how, FLY_TASK_PANICKED, __ATOMIC_RELEASE); }
     return;
   }
   if (FLY_FAILED) { t->error = fly_err; fly_err = NULL; }
+  if (!t->forked) __atomic_store_n(&t->how, fly_unwinding ? FLY_TASK_CANCELLED : FLY_TASK_DONE, __ATOMIC_RELEASE);
   fly_unwinding = false;
+}
+
+// A spawned task's panic no `wait` gave is told once nothing can ask for it: by whichever of its
+// end and its last `Task`'s drop comes second, only once.
+static void tell_panic(mt_task* t) {
+  if (__atomic_load_n(&t->how, __ATOMIC_ACQUIRE) == FLY_TASK_PANICKED && !__atomic_exchange_n(&t->told, true, __ATOMIC_ACQ_REL)) report_spawned_panic(t->message);
 }
 
 // Task `t` has ended: its outcome goes to its scope, its joiners wake, and the first failure or
@@ -3898,7 +4042,14 @@ static void mt_end(mt_task* t) {
   spin_lock(&t->joiners.lock);
   t->finished = true;
   wake_all(&t->joiners);
+  for (struct mt_any* a = t->anys; a; a = a->next) {
+    __atomic_store_n(&a->fired, true, __ATOMIC_SEQ_CST);
+    spin_lock(&a->q->lock);
+    wake_one(a->q);
+    spin_unlock(&a->q->lock);
+  }
   spin_unlock(&t->joiners.lock);
+  if (!t->forked && __atomic_load_n(&t->handles, __ATOMIC_ACQUIRE) == 0) tell_panic(t);
   __atomic_fetch_sub(&alive, 1, __ATOMIC_SEQ_CST);
   __atomic_fetch_sub(&runnable, 1, __ATOMIC_SEQ_CST);
   // Its scope no longer refers to it, nor does it to itself.
@@ -3914,8 +4065,10 @@ static void run_task(worker* w, mt_task* t) {
   if (!t->started) {
     t->started = true;
     // A task cancelled before it began never runs.
-    if (__atomic_load_n(&t->cancelled, __ATOMIC_ACQUIRE)) {
+    if (is_cancelled(t)) {
       running = NULL;
+      drop_task_closure(t->closure);
+      if (!t->forked) __atomic_store_n(&t->how, FLY_TASK_CANCELLED, __ATOMIC_RELEASE);
       mt_end(t);
       return;
     }
@@ -4342,7 +4495,8 @@ static void mt_run(void (*main)(void), void (*entry)(void* task, void* closure))
 
 // ---- what compiled code calls, without a simulated world ----
 
-static int mt_spawn(int scope, void (*entry)(void* task, void* closure), void* closure, size_t size) {
+// A task started in scope `scope`, which itself and its scope refer to, and `refs` more.
+static mt_task* mt_start(int scope, void (*entry)(void* task, void* closure), void* closure, size_t size, int refs) {
   mt_scope* sc = obj_get(scope);
   mt_task* t = fly_alloc(sizeof(mt_task));
   t->entry = entry;
@@ -4351,9 +4505,8 @@ static int mt_spawn(int scope, void (*entry)(void* task, void* closure), void* c
   t->result = fly_alloc(size ? size : 1);
   t->scope = sc;
   t->forked = entry != fly_task_void;
-  // A forked task's `Fiber` refers to it too.
-  t->refs = entry == fly_task_void ? 2 : 3;
-  int id = obj_new(t);
+  t->how = FLY_TASK_RUNNING;
+  t->refs = 2 + refs;
   spin_lock(&sc->q.lock);
   t->snext = sc->live;
   if (sc->live) sc->live->sprev = t;
@@ -4364,8 +4517,100 @@ static int mt_spawn(int scope, void (*entry)(void* task, void* closure), void* c
   __atomic_fetch_add(&alive, 1, __ATOMIC_SEQ_CST);
   dq_push(&this_worker->fresh, t);
   notify();
+  return t;
+}
+
+static int mt_spawn(int scope, void (*entry)(void* task, void* closure), void* closure, size_t size) {
+  // A forked task's `Fiber` refers to it too, by its number.
+  mt_task* t = mt_start(scope, entry, closure, size, 1);
+  int id = obj_new(t);
   mt_point();
   return id;
+}
+
+// ---- `Task`, with threads ----
+
+static void* mt_task_spawn(int scope, void* closure) {
+  // Its `Task`s share one reference.
+  mt_task* t = mt_start(scope, fly_task_void, closure, 0, 1);
+  t->handles = 1;
+  mt_point();
+  return t;
+}
+
+static void mt_task_cancel(void* h) {
+  mt_task* t = h;
+  if (__atomic_load_n(&t->how, __ATOMIC_ACQUIRE) == FLY_TASK_RUNNING) kill_task(t);
+}
+
+static int32_t mt_task_wait(void* h, fly_String* message) {
+  mt_task* t = h;
+  spin_lock(&t->joiners.lock);
+  while (!t->finished) {
+    wait_in(&t->joiners, true);
+    if (cancelled_here()) return FLY_TASK_DONE;
+    spin_lock(&t->joiners.lock);
+  }
+  spin_unlock(&t->joiners.lock);
+  int32_t how = __atomic_load_n(&t->how, __ATOMIC_ACQUIRE);
+  if (how == FLY_TASK_PANICKED) {
+    __atomic_store_n(&t->told, true, __ATOMIC_RELEASE);
+    *message = fly_String_from(fly_str_lit(t->message, strlen(t->message)));
+  }
+  return how;
+}
+
+static size_t mt_task_any(void* const* ts, size_t n) {
+  struct mt_any* as = fly_alloc(n * sizeof(struct mt_any));
+  for (;;) {
+    waitq q = { 0 };
+    size_t found = n, k = 0;
+    for (; k < n; k++) {
+      mt_task* t = ts[k];
+      spin_lock(&t->joiners.lock);
+      if (t->finished) { spin_unlock(&t->joiners.lock); found = k; break; }
+      as[k] = (struct mt_any){ t->anys, &q, false };
+      t->anys = &as[k];
+      spin_unlock(&t->joiners.lock);
+    }
+    bool cancelled = false;
+    if (found == n) {
+      // A task that ends from here on sets `fired` before it takes the lock this one holds.
+      spin_lock(&q.lock);
+      bool fired = false;
+      for (size_t i = 0; i < n; i++) fired = fired || __atomic_load_n(&as[i].fired, __ATOMIC_SEQ_CST);
+      if (fired) spin_unlock(&q.lock); else wait_in(&q, true);
+      cancelled = cancelled_here();
+    }
+    for (size_t i = 0; i < k; i++) {
+      mt_task* t = ts[i];
+      spin_lock(&t->joiners.lock);
+      for (struct mt_any** p = &t->anys; *p; p = &(*p)->next) {
+        if (*p == &as[i]) { *p = as[i].next; break; }
+      }
+      spin_unlock(&t->joiners.lock);
+    }
+    if (cancelled) { free(as); return 0; }
+    for (size_t i = 0; i < n; i++) {
+      mt_task* t = ts[i];
+      spin_lock(&t->joiners.lock);
+      bool finished = t->finished;
+      spin_unlock(&t->joiners.lock);
+      if (finished) { free(as); return i; }
+    }
+  }
+}
+
+static void mt_task_clone(void* h) { __atomic_fetch_add(&((mt_task*)h)->handles, 1, __ATOMIC_RELAXED); }
+
+static void mt_task_drop(void* h) {
+  mt_task* t = h;
+  if (__atomic_sub_fetch(&t->handles, 1, __ATOMIC_ACQ_REL) > 0) return;
+  spin_lock(&t->joiners.lock);
+  bool finished = t->finished;
+  spin_unlock(&t->joiners.lock);
+  if (finished) tell_panic(t);
+  task_unref(t);
 }
 
 static void mt_join(int task, void* out) {
@@ -4400,22 +4645,35 @@ static int mt_scope_open(void) {
 static void mt_scope_close(int id) {
   mt_scope* sc = obj_get(id);
   mt_task* me = running;
-  spin_lock(&sc->q.lock);
-  // The body unwound because a task failed: the scope raises that instead.
-  bool unwound = fly_unwinding && !sc->failer;
-  sc->closing = true;
-  spin_unlock(&sc->q.lock);
+  bool unwinding = fly_unwinding;
   fly_unwinding = false;
   void* err = fly_err;
   fly_err = NULL;
+  // The body left by unwinding — a failure, a cancellation — cancels the scope's tasks (§6.1).
+  if (unwinding || err) mt_scope_cancel(id);
   spin_lock(&sc->q.lock);
+  sc->closing = true;
+  // Every task started in it is waited for. Cancelled while it waits, the task cancels them, once,
+  // and waits on.
+  bool spread = unwinding || err;
   while (sc->nlive > 0) {
-    wait_in(&sc->q, false);
+    if (!spread && is_cancelled(me)) {
+      spread = true;
+      spin_unlock(&sc->q.lock);
+      mt_scope_cancel(id);
+      spin_lock(&sc->q.lock);
+      continue;
+    }
+    wait_in(&sc->q, !spread);
     spin_lock(&sc->q.lock);
   }
   spin_unlock(&sc->q.lock);
-  __atomic_store_n(&me->cancelled, false, __ATOMIC_SEQ_CST);
+  // The body unwound because a task failed: the scope raises that instead, the cancellation its
+  // failure made over. Otherwise one from outside goes on, whether it came in the body or as the
+  // task waited.
   mt_task* failer = sc->failer;
+  bool unwound = unwinding && !failer;
+  if (failer) __atomic_store_n(&me->cancelled, false, __ATOMIC_SEQ_CST);
   obj_clear(id);
   free(sc);
   char* panic = NULL;
@@ -4433,6 +4691,7 @@ static void mt_scope_close(int id) {
   }
   if (failer) task_unref(failer);
   if (panic) panic_again(panic);
+  if (!unwound && !err && !failer && is_cancelled(me)) fly_unwinding = true;
 }
 
 // A panic unwound scope `id`'s body: its tasks still alive are cancelled.

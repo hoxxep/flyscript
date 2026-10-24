@@ -158,6 +158,15 @@ _Noreturn void fly_unwind_on(void);
 // LLVM it is the module's own, with a landing pad that catches a panic (llvm.fly); elsewhere it
 // takes up a record.
 bool fly_try(void (*f)(void* a), void* a);
+// A spawned task's `Task` (§6.1): the task's record, which lasts while it runs or a `Task` refers
+// to it. How it ended is TaskEnd's tags, in their order.
+enum { FLY_TASK_RUNNING = -1, FLY_TASK_DONE = 0, FLY_TASK_CANCELLED = 1, FLY_TASK_PANICKED = 2 };
+void* fly_task_spawn(int scope, void* closure);
+void fly_task_cancel(void* t);
+int32_t fly_task_wait(void* t, fly_String* message);
+size_t fly_task_any(void* const* ts, size_t n);
+void* fly_task_clone(void* t);
+void fly_task_drop(void* t);
 // The program's root: a panic that unwinds `run` ends the program there.
 void fly_root(void (*run)(void));
 // Bytes to standard output.

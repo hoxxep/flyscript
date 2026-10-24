@@ -173,6 +173,8 @@ pub struct Interp {
     pub gens: Arc<super::generators::Gens>,
     pub cos: Arc<super::coroutine::Cos>,
     pub scopes: Arc<Mutex<HashMap<u64, super::builtins::ScopeState>>>,
+    /// Spawned tasks some `Task` still refers to, or that have not yet ended.
+    pub spawned: Arc<Mutex<HashMap<u64, super::builtins::Spawned>>>,
     /// The span of the call being made, so a builtin can see its expected result type.
     pub call_span: Option<Span>,
     pub sched: Arc<super::sched::Sched>,
@@ -244,6 +246,7 @@ impl Interp {
             gens: Arc::new(super::generators::Gens::default()),
             cos: Arc::new(super::coroutine::Cos::default()),
             scopes: Arc::new(Mutex::new(HashMap::new())),
+            spawned: Arc::default(),
             call_span: None,
             sched: super::sched::Sched::new(seed),
             task: 0,
@@ -265,6 +268,7 @@ impl Interp {
             gens: self.gens.clone(),
             cos: self.cos.clone(),
             scopes: self.scopes.clone(),
+            spawned: self.spawned.clone(),
             call_span: None,
             sched: self.sched.clone(),
             task: self.task,

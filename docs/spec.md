@@ -1,6 +1,6 @@
 # Flyscript
 
-**Language specification, version 0.114**
+**Language specification, version 0.115**
 
 *Affine values, one row calculus, handlers for everything, and `comptime`: Church on the outside, Turing on the inside.*
 
@@ -616,7 +616,7 @@ Integer division by zero, integer overflow (in every build; `wrappingAdd`, `wrap
 **A panic ends its task.** It unwinds the task it happens in, from where it happens to the task's root, as a failure that nothing catches would: each block it leaves runs its `defer`s and drops what it owns, temporaries included, innermost first, under the same rules as any other way out (§5.6) — cleanup runs to its end, `Io` and all. What the task owned is then gone: its sockets closed, its regions released, the channels it was the last sender of closed, so a task reading one sees its end rather than waiting forever. Where the unwinding ends depends on how the task began (§6.1):
 
 - **`main`**, or code with no task around it: the message is printed, and the program exits with a failure status, having dropped everything it owned.
-- **A task started with `spawn`**: the task ends there, and the panic is reported; its scope and the scope's other tasks go on. A server that spawns its connections survives one that hits a bug, as it survives one that fails.
+- **A task started with `spawn`**: the task ends there; its scope and the scope's other tasks go on. A server that spawns its connections survives one that hits a bug, as it survives one that fails. Its `Task`'s `wait` gives the panic (§6.1); a panic no `wait` gives is reported once nothing can ask for it — as the task ends, if no `Task` refers to it any more, or else as the last `Task` for it is dropped — so a task spawned and forgotten reports its panic, and one supervised does not report it twice.
 - **A task started with `fork`**: its panic is its scope's, as a failure would be. The scope is cancelled, and once every task in it has finished, the panic goes on from `Io.scope`, in the task that opened the scope.
 - **The body of `Io.scope`**: the scope's tasks are cancelled, and the panic goes on once they have finished.
 
@@ -636,25 +636,40 @@ Concurrency is structured. `Io.scope((s) => body)` opens a scope, and a scope st
 
 ```ts
 function scope<T, X>(body: once (s: mut Scope<X>) => T uses Io, Fail<X>): T uses Io, Fail<X>;
-interface Scope<X> {
-  // Fire and forget: the task cannot fail, so it cannot cancel the scope.
-  function spawn(self: mut Self, task: once () => void uses Io): void uses Io;
+struct Scope<X>;
+impl<X> Scope<X> {
+  // A task that cannot fail, so it cannot cancel the scope; its `Task` cancels it alone and says
+  // how it ended.
+  function spawn(self: mut Self, task: once () => void uses Io): Task uses Io;
   // Work whose result or failure the scope waits for; its failures `X` are rethrown by the scope.
   function fork<T extends Send>(self: mut Self, task: once () => T uses Io, Fail<X>): Fiber<T> uses Io;
 }
-interface Fiber<T> {
+struct Fiber<T>;
+impl<T> Fiber<T> {
   function join(self: Self): T uses Io;
+}
+// `Clone` and `Send`: copies of a `Task` refer to one task, from any task.
+struct Task;
+type TaskEnd = #Done | #Cancelled | #Panicked(String);
+impl Task {
+  function cancel(self: readonly Self): void uses Io;
+  function wait(self: readonly Self): TaskEnd uses Io;
+  function any(tasks: readonly Task[]): usize uses Io;
 }
 ```
 
 The rules:
 
-1. **A scope owns its tasks.** `Io.scope` returns only when every task started in it has finished. A `Fiber` is a handle to a forked task's result, not to the task: dropping it leaves the task running.
+1. **A scope owns its tasks.** `Io.scope` returns only when every task started in it has finished. A `Fiber` is a handle to a forked task's result, not to the task: dropping it leaves the task running. A `Task` is a handle to a spawned task; dropping it leaves the task running too.
 2. **Isolation is a type.** `spawn` accepts only a task whose effects are `Io`, which cannot fail. A server that must survive a bad connection spawns its connections, and the type checker proves they cannot take the scope down: a connection handler that let an error escape would not be accepted by `spawn`, and one that panics ends alone (§5.7).
-3. **Failure cancels the scope.** A forked task's failures `X` are rethrown by `Io.scope`. If a forked task fails, the scope is cancelled: the body and every other task stop at their next `Io` operation and unwind — a task in cleanup finishes it first (§5.6) — and once all have finished the first failure is rethrown from `Io.scope`. A forked task's panic cancels the scope as a failure does, and goes on from `Io.scope` once every task has finished; a spawned task's ends that task alone (§5.7). `join` therefore never fails by itself: it returns the result, or the joiner is cancelled along with the rest of the scope.
+3. **Failure cancels the scope.** A forked task's failures `X` are rethrown by `Io.scope`. If a forked task fails, the scope is cancelled: the body and every other task stop at their next `Io` operation and unwind — a task in cleanup finishes it first (§5.6) — and once all have finished the first failure is rethrown from `Io.scope`. A forked task's panic cancels the scope as a failure does, and goes on from `Io.scope` once every task has finished; a spawned task's ends that task alone (§5.7). `join` therefore never fails by itself: it returns the result, or the joiner is cancelled along with the rest of the scope. **Cancelling a task cancels what it started**: the body of a scope left by unwinding — a failure, a panic, a cancellation — cancels the scope's tasks, and so does a cancellation that reaches the body's task as it waits for them at the scope's end. The task goes on waiting, since a scope returns only when its tasks have finished, and then goes on unwinding from `Io.scope`, which is the `Io` operation the cancellation reached.
 4. **A task performs only what its fiber can handle.** A task runs on a new fiber, where the only handlers are the runtime's `Io` and the scope's capture of failures, so its effects are `Io` and `Fail` and nothing else. It cannot allocate in its parent's region or perform an effect whose handler lives in the parent fiber.
 5. **Outer regions are frozen while tasks run.** The body of a scope runs on the parent's fiber, but like its tasks it performs only `Io` and failures: it cannot write to a region outside the scope while tasks may be reading it, nor suspend to an outer handler that could. A task or the body may still open and use regions of its own, and anything else is done before or after the scope.
 6. **Captures.** A task is a `once` closure. What is declared outside the scope it may borrow `readonly` — never `mut`, since the other tasks may be reading it — since the scope outlives every task; what is declared inside the scope — a loop's `const tx2 = tx.clone()`, a buffer made for one task — it moves in, since the task may outlive it. Either way, what it captures must be `Send`. So the natural fan-out needs no ceremony, and a binding used again after a task took it is an error that says to declare it before `Io.scope`. Only inside the body of its `Io.scope` is it known what outlives the scope: a task started elsewhere — by a helper function given `mut Scope<X>` — moves in everything it captures and cannot capture anything that borrows, since a borrowed parameter of the helper may come from a local of the scope's body, which ends before the scope waits for its tasks.
+
+**Stopping one task.** `task.cancel()` cancels the spawned task its `Task` refers to, alone: it unwinds from its next `Io` operation, after any cleanup it is in (§5.6), as a task of a failed scope does. Cancellation acts only at `Io` operations, as in Go, Tokio, Trio and Kotlin: pure code runs to its end. Stopping a pure loop where it stands would interrupt a `defer` or a destructor, would poison every `Mutex` whose body it was in (§6.2) and so take down the tasks sharing it for a timeout, and could not happen in the deterministic simulator, in which pure code is a single step. A cancelled task may not take its cancellation back, as a scope does that ends its own tasks: only a scope's own failure takes back the cancellation it made. `cancel` on a task that has ended does nothing, and is no scheduling point.
+
+`task.wait()` waits until the task has finished, cleanup included, and says how: `#Done` if it returned; `#Cancelled` if a cancellation unwound it (one cancelled that returned anyway is `#Done`); `#Panicked(message)` if it panicked (§5.7). `Task.any(tasks)` waits until one of `tasks` has finished, and gives the index of the first of them that has, in their order; waiting for any of no tasks panics. Both return at once, with no scheduling point, for tasks that have ended. Every copy of a `Task` refers to the same task, and a `Task` may outlive the task's scope, whose tasks have all finished by then: `wait` then returns at once. Together they are a monitor in Erlang's sense, on which supervision is built (`std/supervise`).
 
 `scope`, `spawn`, `fork` and `join` are library code over the runtime's scheduler and `Io.park`; nursery semantics are not built into the language.
 

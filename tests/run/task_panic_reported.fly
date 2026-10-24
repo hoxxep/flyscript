@@ -1,0 +1,21 @@
+// A spawned task's panic that no `wait` gives is reported once nothing can ask for it (§5.7): as
+// the task ends, if no `Task` for it is left, or else as the last is dropped.
+// expect: <panic in a spawned task: first>
+// expect: kept
+// expect: <panic in a spawned task: second>
+// expect: dropped
+import { println } from "std/io";
+
+export function main(): void uses Io {
+  Io.scope((s) => {
+    s.spawn(() => { panic("first"); });
+    Io.sleep(Duration.ms(1));
+    {
+      const t = s.spawn(() => { panic("second"); });
+      Io.sleep(Duration.ms(1));
+      println("kept");
+      t.cancel();
+    }
+    println("dropped");
+  });
+}

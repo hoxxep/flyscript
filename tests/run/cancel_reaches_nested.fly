@@ -1,0 +1,48 @@
+// Cancelling a task cancels what it started (§6.1): leaving a scope's body by unwinding cancels the
+// scope's tasks, and so does a cancellation that reaches a task as it waits for them.
+// expect: the grandchild cleans up
+// expect: the child cleans up
+// expect: in the body: cancelled
+// expect: the waiting grandchild cleans up
+// expect: the waiting child cleans up
+// expect: at the end: cancelled
+import { println } from "std/io";
+
+function said(e: TaskEnd): String {
+  match (e) {
+    #Done => "done".toString(),
+    #Cancelled => "cancelled".toString(),
+    #Panicked(m) => `panicked: ${m}`,
+  }
+}
+
+export function main(): void uses Io {
+  Io.scope((s) => {
+    const child = s.spawn(() => {
+      defer println("the child cleans up");
+      Io.scope((inner) => {
+        inner.spawn(() => {
+          defer println("the grandchild cleans up");
+          Io.sleep(Duration.secs(60));
+        });
+        Io.sleep(Duration.secs(60));
+      });
+    });
+    Io.sleep(Duration.ms(1));
+    child.cancel();
+    println(`in the body: ${said(child.wait())}`);
+    const waiting = s.spawn(() => {
+      defer println("the waiting child cleans up");
+      Io.scope((inner) => {
+        inner.spawn(() => {
+          defer println("the waiting grandchild cleans up");
+          Io.sleep(Duration.secs(60));
+        });
+      });
+      println("not reached: the waiting child was cancelled");
+    });
+    Io.sleep(Duration.ms(1));
+    waiting.cancel();
+    println(`at the end: ${said(waiting.wait())}`);
+  });
+}

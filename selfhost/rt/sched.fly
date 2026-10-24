@@ -15,6 +15,7 @@
 extern "C" function fly_core_run(id: i32, deadlock: bool, cancel: bool): i32;
 extern "C" function fly_core_adopt(id: i32, record: u8*): void;
 extern "C" function fly_core_cleaning(id: i32): i32;
+extern "C" function fly_core_end(id: i32, ran: bool): void;
 extern "C" function fly_core_sched(state: u8*): void;
 extern "C" function fly_core_clock(): u64;
 extern "C" function fly_core_set_clock(t: u64): void;
@@ -39,7 +40,7 @@ const JOIN_WAIT: i32 = 4;
 const JOIN_TAKE: i32 = 5;
 const SCOPE_OPEN: i32 = 6;
 const SCOPE_FAILED: i32 = 7;
-const SCOPE_TASK: i32 = 8;
+const SCOPE_WAIT: i32 = 8;
 const SCOPE_TAKE: i32 = 9;
 const UNCANCEL: i32 = 10;
 const CHANNEL: i32 = 11;
@@ -51,6 +52,9 @@ const SENDER_CLONE: i32 = 16;
 const DEAFEN: i32 = 17;
 const TAKE_ITEMS: i32 = 18;
 const SCOPE_CANCEL: i32 = 19;
+const TASK_KILL: i32 = 20;
+const TASK_ANY: i32 = 21;
+const IS_CANCELLED: i32 = 22;
 
 // What `now` gives for a request it cannot answer without the scheduler's choosing who runs.
 const LATER: i64 = -0x7fffffffffffffff;
@@ -60,18 +64,28 @@ const WAIT_NONE: u8 = 0;
 const WAIT_TASK: u8 = 1;
 const WAIT_CHANNEL: u8 = 2;
 const WAIT_UNTIL: u8 = 3;
+// Any of several tasks ending (`Task.any`); every task of a scope (`SCOPE_WAIT`).
+const WAIT_ANY: u8 = 4;
+const WAIT_SCOPE: u8 = 5;
 
 type Task = {
   scope: i32;
-  started: bool; finished: bool; cancelled: bool;
+  // Whether its scope waits for its value or failure; else, as it ends, it is forgotten, and its
+  // number given out again.
+  forked: bool;
+  // Cancelled by its scope, which may take that back (`UNCANCEL`), or by its `Task`, for good.
+  started: bool; finished: bool; cancelled: bool; killed: bool;
   deliverCancel: bool; deliverDeadlock: bool;
   waitKind: u8; waitId: i32; until: u64;
   // A receive it waits in: the channel, `-1` for none, and where the message goes. Resumed, it is
   // given the message then, rather than asking again.
   recv: i32; into: u8*;
+  // The tasks it waits for any of.
+  anyOf: Vec<i32>;
 };
 
-// A scope: the task that opened it, the tasks started in it, and the task whose failure it raises.
+// A scope: the task that opened it, the tasks started in it still running, and the task whose
+// failure it raises.
 type Scope = { owner: i32; tasks: Vec<i32>; failure: i32 };
 
 // A channel: the messages not yet received, one after another, `size` bytes each, from byte
@@ -82,6 +96,8 @@ struct Sched {
   current: i32;
   // Tasks and channels share one numbering, as they do on every back end.
   next: i32;
+  // Numbers given back, given out again first.
+  free: Vec<i32>;
   tasks: Vec<Option<Task>>;
   chans: Vec<Option<Chan>>;
   scopes: Vec<Option<Scope>>;
@@ -91,7 +107,7 @@ struct Sched {
 }
 
 function task(): Task {
-  { scope: 0, started: false, finished: false, cancelled: false, deliverCancel: false, deliverDeadlock: false, waitKind: WAIT_NONE, waitId: 0, until: 0, recv: -1, into: Ptr.at(0) }
+  { scope: 0, forked: true, started: false, finished: false, cancelled: false, killed: false, deliverCancel: false, deliverDeadlock: false, waitKind: WAIT_NONE, waitId: 0, until: 0, recv: -1, into: Ptr.at(0), anyOf: Vec.new() }
 }
 
 // What the scheduler does once a request is answered: the asking task goes on at once, or it has
@@ -112,6 +128,7 @@ impl Sched {
   }
 
   function fresh(self: mut Self): i32 {
+    if (const #Some(id) = self.free.pop()) { return id; }
     const id = self.next;
     self.next += 1;
     while (self.tasks.len() <= id as usize) { self.tasks.push(#None); self.chans.push(#None); }
@@ -155,7 +172,10 @@ impl Sched {
     let i: usize = 0;
     while (i < self.blocked.len()) {
       const b = self.blocked[i];
-      const hit = match (self.tasks[b as usize]) { #Some(t) => t.waitKind == kind && t.waitId == id, #None => false };
+      const hit = match (self.tasks[b as usize]) {
+        #Some(t) => (t.waitKind == kind && t.waitId == id) || (kind == WAIT_TASK && t.waitKind == WAIT_ANY && t.anyOf.includes(id)),
+        #None => false,
+      };
       if (hit) { self.blocked.remove(i); self.ready.push(b); } else { i += 1; }
     }
   }
@@ -176,8 +196,20 @@ impl Sched {
     }
   }
 
+  // Whether task `id` has ended: forgotten, or finished.
+  function ended(self: readonly Self, id: i32): bool {
+    match (self.tasks[id as usize]) { #Some(t) => t.finished, #None => true }
+  }
+
   function cancel(self: mut Self, id: i32): void {
+    if (self.ended(id)) { return; }
     self.t(id).cancelled = true;
+    if (unsafe { fly_core_cleaning(id) } == 0 && self.unblock(id)) { self.ready.push(id); }
+  }
+
+  function kill(self: mut Self, id: i32): void {
+    if (self.ended(id)) { return; }
+    self.t(id).killed = true;
     if (unsafe { fly_core_cleaning(id) } == 0 && self.unblock(id)) { self.ready.push(id); }
   }
 
@@ -202,8 +234,8 @@ impl Sched {
     #Switch
   }
 
-  // Task `me` has ended: its outcome goes to its scope, and its joiners wake.
-  function end(self: mut Self, me: i32, failed: bool): void {
+  // Task `me` has ended, having run or not: its outcome goes to its scope, and its joiners wake.
+  function end(self: mut Self, me: i32, failed: bool, ran: bool): void {
     const sid = self.t(me).scope;
     const st = self.s(sid);
     // The first failure cancels the scope: its body and its other tasks (§6.1); it is the
@@ -215,8 +247,19 @@ impl Sched {
       self.cancel(owner);
       for (const o of others) { if (o != me) { self.cancel(o); } }
     }
+    const st2 = self.s(sid);
+    if (const #Some(i) = st2.tasks.indexOf(me)) { st2.tasks.remove(i); }
+    const last = st2.tasks.len() == 0;
     self.t(me).finished = true;
+    // Its joiners, and those waiting for any of several tasks it is among, in the order they
+    // began to wait; and the scope's owner, waiting for its last task.
     self.wake(WAIT_TASK, me);
+    if (last) { self.wake(WAIT_SCOPE, sid); }
+    unsafe { fly_core_end(me, ran); }
+    if (!self.t(me).forked) {
+      self.tasks[me as usize] = #None;
+      self.free.push(me);
+    }
     if (!self.pass()) { panic("deadlock: every task is waiting"); }
   }
 
@@ -255,7 +298,10 @@ impl Sched {
   // A channel both of whose ends are gone is forgotten.
   function maybeFree(self: mut Self, ch: i32): void {
     const gone = match (self.chans[ch as usize]) { #Some(c) => c.senders == 0 && c.deaf, #None => false };
-    if (gone) { self.chans[ch as usize] = #None; }
+    if (gone) {
+      self.chans[ch as usize] = #None;
+      self.free.push(ch);
+    }
   }
 
   // Answers a request that needs no decision of who runs next, on the asking task's own stack: what
@@ -263,7 +309,7 @@ impl Sched {
   function now(self: mut Self, kind: i32): i64 {
     const arg = (i: i32) => unsafe { fly_core_arg(i) };
     const me = self.current;
-    if (kind == JOIN_WAIT) { return if (self.t(arg(0) as i32).finished) { 0 } else { LATER }; }
+    if (kind == JOIN_WAIT) { return if (self.ended(arg(0) as i32)) { 0 } else { LATER }; }
     if (kind == JOIN_TAKE) {
       // A failure a join raises is raised once: its scope no longer does.
       const id = arg(0) as i32;
@@ -277,10 +323,21 @@ impl Sched {
       return sid as i64;
     }
     if (kind == SCOPE_FAILED) { return if (self.s(arg(0) as i32).failure >= 0) { 1 } else { 0 }; }
-    if (kind == SCOPE_TASK) {
-      const st = self.s(arg(0) as i32);
-      const i = arg(1) as usize;
-      return if (i < st.tasks.len()) { st.tasks[i] as i64 } else { -1 };
+    if (kind == SCOPE_WAIT) { return if (self.s(arg(0) as i32).tasks.len() == 0) { 0 } else { LATER }; }
+    if (kind == TASK_KILL) {
+      self.kill(arg(0) as i32);
+      return 0;
+    }
+    if (kind == IS_CANCELLED) {
+      const t = self.t(me);
+      return if (t.cancelled || t.killed) { 1 } else { 0 };
+    }
+    if (kind == TASK_ANY) {
+      const p = unsafe { fly_core_ptr(0).cast<i32>() };
+      for (const i of 0..(arg(0) as usize)) {
+        if (self.ended(unsafe { p.add(i).read() })) { return i as i64; }
+      }
+      return LATER;
     }
     if (kind == SCOPE_TAKE) {
       const st = self.s(arg(0) as i32);
@@ -295,7 +352,7 @@ impl Sched {
     // A panic unwound the scope's body: its tasks are cancelled, as a failure would cancel them.
     if (kind == SCOPE_CANCEL) {
       const tasks = self.s(arg(0) as i32).tasks.clone();
-      for (const t of tasks) { if (!self.t(t).finished) { self.cancel(t); } }
+      for (const t of tasks) { self.cancel(t); }
       return 0;
     }
     if (kind == CHANNEL) {
@@ -358,6 +415,7 @@ impl Sched {
       unsafe { fly_core_adopt(id, fly_core_ptr(0)); }
       let t = task();
       t.scope = sid;
+      t.forked = arg(1) != 0;
       self.tasks[id as usize] = #Some(t);
       self.ready.push(id);
       self.s(sid).tasks.push(id);
@@ -366,6 +424,14 @@ impl Sched {
       return self.giveWay(WAIT_NONE, 0);
     }
     if (kind == JOIN_WAIT) { return self.giveWay(WAIT_TASK, arg(0) as i32); }
+    if (kind == SCOPE_WAIT) { return self.giveWay(WAIT_SCOPE, arg(0) as i32); }
+    if (kind == TASK_ANY) {
+      const p = unsafe { fly_core_ptr(0).cast<i32>() };
+      let ids: Vec<i32> = Vec.new();
+      for (const i of 0..(arg(0) as usize)) { ids.push(unsafe { p.add(i).read() }); }
+      self.t(me).anyOf = ids;
+      return self.giveWay(WAIT_ANY, 0);
+    }
     if (kind == SEND) {
       const ch = arg(0) as i32;
       const size = arg(1) as usize;
@@ -403,7 +469,7 @@ export extern "C" function fly_rt_answer(state: u8*, kind: i32): i64 {
 
 // Runs the program's tasks until its main task ends, the C record of which is `main`.
 export extern "C" function fly_rt_tasks(seed: u64, main: u8*): void {
-  let s = Sched { current: 0, next: 1, tasks: [#Some(task())], chans: [#None], scopes: [#None], ready: Vec.new(), blocked: Vec.new(), rng: if (seed > 1) { seed } else { 1 } };
+  let s = Sched { current: 0, next: 1, free: Vec.new(), tasks: [#Some(task())], chans: [#None], scopes: [#None], ready: Vec.new(), blocked: Vec.new(), rng: if (seed > 1) { seed } else { 1 } };
   unsafe {
     fly_core_adopt(0, main);
     // The tasks answer what they can themselves, through it (`fly_rt_answer`).
@@ -418,7 +484,7 @@ export extern "C" function fly_rt_tasks(seed: u64, main: u8*): void {
     let cancel = false;
     {
       const t = s.t(me);
-      if (!t.deliverDeadlock && t.cancelled && cleaning == 0) { t.deliverCancel = true; }
+      if (!t.deliverDeadlock && (t.cancelled || t.killed) && cleaning == 0) { t.deliverCancel = true; }
       if (!t.started) {
         t.started = true;
         if (t.deliverCancel) { t.deliverCancel = false; skip = true; }
@@ -439,7 +505,7 @@ export extern "C" function fly_rt_tasks(seed: u64, main: u8*): void {
       }
     }
     if (skip) {
-      s.end(me, false);
+      s.end(me, false, false);
       continue;
     }
     let outcome = unsafe { fly_core_run(me, deadlock, cancel) };
@@ -455,6 +521,6 @@ export extern "C" function fly_rt_tasks(seed: u64, main: u8*): void {
     }
     if (outcome == ASKED) { continue; }
     if (me == 0) { return; }
-    s.end(me, outcome == FAILED);
+    s.end(me, outcome == FAILED, true);
   }
 }

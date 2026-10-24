@@ -480,6 +480,9 @@ const { $rt, $b } = (() => {
   const sched = {
     on: false, current: 0, ready: [], blocked: new Map(), finished: new Set(), rng: BigInt(Math.max(1, world.seed)), next: 1,
     tasks: new Map(), channels: new Map(), closed: new Set(), senders: new Map(), deaf: new Set(), drops: new Map(), cancelled: new Set(), scopes: new Map(), scopeIds: 1,
+    // Tasks cancelled by their `Task`, which no scope's end clears; and spawned tasks as their
+    // `Task`s see them: how many refer to each, how it ended, whether its panic has been told.
+    killed: new Set(), spawned: new Map(),
   };
   // Hands the baton to a ready task, chosen by the seed; `false` if none can run. With none
   // ready, time passes to the earliest sleeper's wake time, waking every task due then.
@@ -521,6 +524,14 @@ const { $rt, $b } = (() => {
     if (sched.tasks.get(t)?.cleaning) return;
     if (sched.blocked.delete(t)) sched.ready.push(t);
   }
+  // Cancels task `t` by its `Task`, for good: nothing, once it has finished.
+  function kill(t) {
+    if (sched.finished.has(t)) return;
+    sched.killed.add(t);
+    if (sched.tasks.get(t)?.cleaning) return;
+    if (sched.blocked.delete(t)) sched.ready.push(t);
+  }
+  const isCancelled = (t) => sched.cancelled.has(t) || sched.killed.has(t);
   function cleaning(d) {
     if (!sched.on) return;
     const t = sched.tasks.get(sched.current);
@@ -536,7 +547,7 @@ const { $rt, $b } = (() => {
       let r;
       try {
         // A cancelled task unwinds at its next scheduling point; one not started never runs.
-        if (t.error === undefined && sched.cancelled.has(me) && !t.cleaning) t.error = new Cancelled();
+        if (t.error === undefined && isCancelled(me) && !t.cleaning) t.error = new Cancelled();
         const error = t.error, input = t.input;
         t.error = undefined;
         t.input = undefined;
@@ -573,11 +584,19 @@ const { $rt, $b } = (() => {
   function endTask(me, outcome) {
     const t = sched.tasks.get(me);
     const st = sched.scopes.get(t.scope);
-    // A spawned task's panic ends with it, reported, its scope going on; a forked task's is its
-    // scope's, as a failure would be (§5.7).
-    if (outcome.error instanceof Panic && !t.forked) {
-      $b.println(`<panic in a spawned task: ${outcome.error.message}>`);
-      outcome = { value: undefined };
+    // A spawned task's end is its `Task`s', its scope going on; a panic no `Task` can ask for any
+    // more is reported. A forked task's panic is its scope's, as a failure would be (§5.7).
+    if (!t.forked) {
+      const end = outcome.error instanceof Panic ? { $tag: "Panicked", $: outcome.error.message }
+        : outcome.error instanceof Cancelled ? { $tag: "Cancelled" } : { $tag: "Done" };
+      const rec = sched.spawned.get(me);
+      if (rec.handles === 0) {
+        if (end.$tag === "Panicked") $b.println(`<panic in a spawned task: ${end.$}>`);
+        sched.spawned.delete(me);
+      } else {
+        rec.end = end;
+      }
+      if (outcome.error instanceof Panic) outcome = { value: undefined };
     }
     // The first failure or panic cancels the scope: its body and its other tasks.
     if ((outcome.error instanceof Fail || outcome.error instanceof Panic) && st.failure === undefined) {
@@ -593,7 +612,13 @@ const { $rt, $b } = (() => {
       throw outcome.error;
     }
     sched.finished.add(me);
-    wake("task", me);
+    sched.killed.delete(me);
+    sched.tasks.delete(me);
+    // Its joiners and those waiting for any of several tasks it is among, in the order they began
+    // to wait.
+    for (const [b, w] of [...sched.blocked]) {
+      if ((w[0] === "task" && w[1] === me) || (w[0] === "any" && w[1].includes(me))) { sched.blocked.delete(b); sched.ready.push(b); }
+    }
     if (!pass()) end("deadlock: every task is waiting");
   }
   function* join(t) {
@@ -841,27 +866,63 @@ const { $rt, $b } = (() => {
       try { result = yield* body(f, { v: { sid } }); }
       catch (e) {
         if (e instanceof End) throw e;
-        // A panic in the body cancels the scope's tasks, as a failure does, and goes on once they
-        // have finished (§5.7).
-        if (e instanceof Panic) for (const t of st.tasks) cancel(t);
+        // The body left by unwinding — a panic, a failure, a cancellation — cancels the scope's
+        // tasks, and the unwinding goes on once they have finished (§5.7, §6.1).
+        for (const t of st.tasks) cancel(t);
         // The body unwound because a task failed or panicked: the scope raises that.
         if (!(e instanceof Cancelled && st.failure !== undefined)) error = e;
       }
-      sched.cancelled.delete(sched.current);
-      // A scope returns only when every task started in it has finished (§6.1).
+      // A scope returns only when every task started in it has finished (§6.1). Cancelled while it
+      // waits, it cancels the scope's tasks, and waits on.
       for (const t of st.tasks) {
         for (;;) {
           try { yield* join(t); break; }
-          catch (e) { if (!(e instanceof Cancelled)) throw e; sched.cancelled.delete(sched.current); }
+          catch (e) { if (!(e instanceof Cancelled)) throw e; for (const o of st.tasks) cancel(o); }
         }
       }
-      sched.cancelled.delete(sched.current);
+      // A cancellation the scope's own failure made is over; one from outside that reached the
+      // task as it waited goes on from here.
+      if (st.failure !== undefined) sched.cancelled.delete(sched.current);
+      else if (error === undefined && isCancelled(sched.current)) error = new Cancelled();
       sched.scopes.delete(sid);
       if (error !== undefined) throw error;
       if (st.failure !== undefined) throw st.failure;
       return result;
     },
-    *Scope_spawn$g(r, task) { spawnTask(r.v.sid, task, false); yield* point(); },
+    *Scope_spawn$g(r, task) {
+      const id = spawnTask(r.v.sid, task, false);
+      sched.spawned.set(id, { handles: 1, end: undefined, told: false });
+      yield* point();
+      return { task: id };
+    },
+    Task_cancel(t) { kill(t.task); },
+    *Task_cancel$g(t) { kill(t.task); },
+    *Task_wait$g(t) {
+      yield* join(t.task);
+      const rec = sched.spawned.get(t.task);
+      if (rec.end.$tag === "Panicked") rec.told = true;
+      return rec.end;
+    },
+    *Task_any$g(ts) {
+      if (ts.length === 0) panic("waited for any of no tasks");
+      const ids = ts.map((t) => t.task);
+      for (;;) {
+        const i = ids.findIndex((id) => sched.finished.has(id));
+        if (i >= 0) return i;
+        yield* block(["any", ids]);
+      }
+    },
+    Task_clone(t) { sched.spawned.get(t.task).handles++; return { task: t.task }; },
+    // A panic no `wait` gave is reported as the last `Task` for it is dropped.
+    Task_drop(r) {
+      if (!r.v) return;
+      const rec = sched.spawned.get(r.v.task);
+      rec.handles--;
+      if (rec.handles === 0 && rec.end !== undefined) {
+        if (rec.end.$tag === "Panicked" && !rec.told) $b.println(`<panic in a spawned task: ${rec.end.$}>`);
+        sched.spawned.delete(r.v.task);
+      }
+    },
     *Scope_fork$g(r, task) { const t = spawnTask(r.v.sid, task, true); yield* point(); return { task: t }; },
     *Fiber_join$g(f) {
       yield* join(f.task);

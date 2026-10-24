@@ -25,6 +25,24 @@ pub struct ScopeState {
     pub fibers: HashMap<u64, Result<Value, Value>>,
 }
 
+/// A spawned task, as its `Task`s see it.
+#[derive(Default)]
+pub struct Spawned {
+    /// How many `Task`s refer to it.
+    pub handles: usize,
+    /// How it ended, once it has.
+    pub end: Option<End>,
+    /// Whether its panic has been given by `wait`, or reported.
+    pub told: bool,
+}
+
+#[derive(Clone)]
+pub enum End {
+    Done,
+    Cancelled,
+    Panicked(String),
+}
+
 fn none() -> Value {
     Value::tag("None", Value::Unit)
 }
@@ -204,9 +222,9 @@ impl Interp {
                     }
                     return r;
                 }
-                // A panic in the body cancels the scope's tasks, as a failure does, and goes on once
-                // they have finished (§5.7).
-                if is_panic(&r) {
+                // The body left by unwinding — a panic, a failure, a cancellation — cancels the
+                // scope's tasks, and the unwinding goes on once they have finished (§5.7, §6.1).
+                if r.is_err() {
                     let tasks = self.scopes.lock().expect("scopes").get(&sid).map(|s| s.tasks.clone()).unwrap_or_default();
                     for t in tasks {
                         self.sched.cancel(t);
@@ -226,13 +244,28 @@ impl Interp {
                     // A failing task cancels the body even while it waits here; it waits on.
                     loop {
                         match self.sched.join(self.task, t) {
-                            Err(Ctl::Cancelled) => self.sched.uncancel(self.task),
+                            // Cancelled while it waits, it cancels the scope's tasks, and waits on.
+                            Err(Ctl::Cancelled) => {
+                                let tasks = self.scopes.lock().expect("scopes").get(&sid).map(|s| s.tasks.clone()).unwrap_or_default();
+                                for t in tasks {
+                                    self.sched.cancel(t);
+                                }
+                            }
                             other => break other?,
                         }
                     }
                 }
-                self.sched.uncancel(self.task);
                 let st = self.scopes.lock().expect("scopes").remove(&sid).unwrap_or_default();
+                // A cancellation the scope's own failure made is over; one from outside — its own
+                // scope's, or its `Task`'s — that reached the task as it waited goes on from here.
+                let r = if st.failure.is_some() || st.panic.is_some() {
+                    self.sched.uncancel(self.task);
+                    r
+                } else if r.is_ok() && self.sched.is_cancelled(self.task) {
+                    Err(Ctl::Cancelled)
+                } else {
+                    r
+                };
                 match (r, st.failure, st.panic) {
                     (Ok(_), _, Some(m)) => Err(panic(m)),
                     (Ok(_), Some(f), None) => self.raise(f),
@@ -244,6 +277,9 @@ impl Interp {
                 let forked = key == "Scope.fork";
                 let tid = self.sched.spawn();
                 self.scopes.lock().expect("scopes").entry(sid).or_default().tasks.push(tid);
+                if !forked {
+                    self.spawned.lock().expect("spawned").insert(tid, Spawned { handles: 1, ..Default::default() });
+                }
                 let mut child = self.fork_thread();
                 child.task = tid;
                 child.handlers.clear();
@@ -272,10 +308,24 @@ impl Interp {
                         Err(Ctl::Panic(m)) if is_panic(&r) => Some(m.clone()),
                         _ => None,
                     };
-                    if let Some(m) = &panicked
-                        && !forked
-                    {
-                        child.world.lock().expect("world").out.push(format!("<panic in a spawned task: {m}>"));
+                    // A spawned task's end is its `Task`s'; a panic no `Task` can ask for any more is
+                    // reported.
+                    if !forked {
+                        let end = match (&r, &panicked) {
+                            (_, Some(m)) => End::Panicked(m.clone()),
+                            (Err(Ctl::Cancelled), _) => End::Cancelled,
+                            _ => End::Done,
+                        };
+                        let mut spawned = child.spawned.lock().expect("spawned");
+                        let rec = spawned.entry(tid).or_default();
+                        if rec.handles == 0 {
+                            if let End::Panicked(m) = &end {
+                                child.world.lock().expect("world").out.push(format!("<panic in a spawned task: {m}>"));
+                            }
+                            spawned.remove(&tid);
+                        } else {
+                            rec.end = Some(end);
+                        }
                     }
                     {
                         let mut scopes = child.scopes.lock().expect("scopes");
@@ -310,7 +360,50 @@ impl Interp {
                 });
                 // Starting a task is a scheduling point.
                 self.sched.yield_now(self.task)?;
-                Ok(if forked { Value::Native("Fiber", tid) } else { Value::Unit })
+                Ok(if forked { Value::Native("Fiber", tid) } else { Value::Native("Task", tid) })
+            }
+            "Task.cancel" => {
+                self.sched.kill(native(&a(0), "Task")?);
+                Ok(Value::Unit)
+            }
+            "Task.wait" => {
+                let tid = native(&a(0), "Task")?;
+                self.sched.join(self.task, tid)?;
+                let mut spawned = self.spawned.lock().expect("spawned");
+                let rec = spawned.entry(tid).or_default();
+                Ok(match rec.end.clone() {
+                    Some(End::Panicked(m)) => {
+                        rec.told = true;
+                        Value::tag("Panicked", Value::Tuple(vec![Value::text(&m)].into()))
+                    }
+                    Some(End::Cancelled) => Value::tag("Cancelled", Value::Unit),
+                    _ => Value::tag("Done", Value::Unit),
+                })
+            }
+            "Task.any" => {
+                let tids = list(&a(0)).iter().map(|t| native(t, "Task")).collect::<Result<Vec<_>, _>>()?;
+                if tids.is_empty() {
+                    return Err(panic("waited for any of no tasks"));
+                }
+                Ok(Value::Int(self.sched.join_any(self.task, &tids)? as i128))
+            }
+            "Task.clone" => {
+                let tid = native(&a(0), "Task")?;
+                self.spawned.lock().expect("spawned").entry(tid).or_default().handles += 1;
+                Ok(Value::Native("Task", tid))
+            }
+            "Task.drop" => {
+                let tid = native(&a(0), "Task")?;
+                let mut spawned = self.spawned.lock().expect("spawned");
+                let rec = spawned.entry(tid).or_default();
+                rec.handles = rec.handles.saturating_sub(1);
+                if rec.handles == 0 && rec.end.is_some() {
+                    if let (Some(End::Panicked(m)), false) = (&rec.end, rec.told) {
+                        self.world.lock().expect("world").out.push(format!("<panic in a spawned task: {m}>"));
+                    }
+                    spawned.remove(&tid);
+                }
+                Ok(Value::Unit)
             }
             "Fiber.join" => {
                 let tid = native(&a(0), "Fiber")?;

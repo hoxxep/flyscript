@@ -1,0 +1,34 @@
+// A spawned task's `Task` cancels it alone and says how it ended (§6.1); a panic `wait` gives is
+// not reported.
+// expect: a runs
+// expect: a: done
+// expect: b cleans up
+// expect: b: cancelled
+// expect: c: panicked: c gave up
+// expect: the scope ended
+import { println } from "std/io";
+
+function said(e: TaskEnd): String {
+  match (e) {
+    #Done => "done".toString(),
+    #Cancelled => "cancelled".toString(),
+    #Panicked(m) => `panicked: ${m}`,
+  }
+}
+
+export function main(): void uses Io {
+  Io.scope((s) => {
+    const a = s.spawn(() => { println("a runs"); });
+    const b = s.spawn(() => {
+      defer println("b cleans up");
+      Io.sleep(Duration.secs(60));
+      println("not reached: b was cancelled");
+    });
+    const c = s.spawn(() => { panic("c gave up"); });
+    println(`a: ${said(a.wait())}`);
+    b.cancel();
+    println(`b: ${said(b.wait())}`);
+    println(`c: ${said(c.wait())}`);
+  });
+  println("the scope ended");
+}

@@ -20,6 +20,8 @@ pub enum Wait {
     Channel(u64),
     /// Task `id` finishing.
     Task(u64),
+    /// Any of these tasks finishing (`Task.any`).
+    Any(Vec<u64>),
     /// The virtual clock reaching this many nanoseconds.
     Until(u64),
 }
@@ -42,6 +44,8 @@ struct Inner {
     senders: HashMap<u64, usize>,
     /// Tasks whose scope was cancelled: they unwind at their next scheduling point.
     cancelled: HashSet<u64>,
+    /// Tasks cancelled by their `Task`: as for `cancelled`, but no scope's end clears it.
+    killed: HashSet<u64>,
     /// How deep each task is in cleanup, which runs to its end: a cancellation waits for it.
     cleaning: HashMap<u64, u32>,
     /// Channels whose receiver is gone: what is sent to them is dropped, as a value of this type.
@@ -75,6 +79,7 @@ impl Sched {
                 closed: HashSet::new(),
                 senders: HashMap::new(),
                 cancelled: HashSet::new(),
+                killed: HashSet::new(),
                 cleaning: HashMap::new(),
                 deaf: HashMap::new(),
                 aborted: None,
@@ -135,7 +140,7 @@ impl Sched {
             let turn = inner.turns.entry(me).or_default().clone();
             inner = turn.wait(inner).expect("scheduler");
         }
-        if inner.cancelled.contains(&me) && !inner.cleaning.contains_key(&me) {
+        if (inner.cancelled.contains(&me) || inner.killed.contains(&me)) && !inner.cleaning.contains_key(&me) {
             return Err(Ctl::Cancelled);
         }
         Ok(())
@@ -160,6 +165,28 @@ impl Sched {
             inner.blocked.remove(i);
             inner.ready.push(t);
         }
+    }
+
+    /// Cancels task `t` by its `Task`, as `cancel` does, for good: nothing, once it has finished.
+    pub fn kill(&self, t: u64) {
+        let mut inner = self.inner.lock().expect("scheduler");
+        if inner.finished.contains(&t) {
+            return;
+        }
+        inner.killed.insert(t);
+        if inner.cleaning.contains_key(&t) {
+            return;
+        }
+        if let Some(i) = inner.blocked.iter().position(|(b, _)| *b == t) {
+            inner.blocked.remove(i);
+            inner.ready.push(t);
+        }
+    }
+
+    /// Whether task `t` was cancelled, by its scope or its `Task`.
+    pub fn is_cancelled(&self, t: u64) -> bool {
+        let inner = self.inner.lock().expect("scheduler");
+        inner.cancelled.contains(&t) || inner.killed.contains(&t)
     }
 
     /// Task `t` has unwound to the scope that cancelled it, and runs on.
@@ -248,7 +275,23 @@ impl Sched {
     pub fn finish(&self, me: u64) {
         let mut inner = self.inner.lock().expect("scheduler");
         inner.finished.insert(me);
-        Self::wake(&mut inner, &Wait::Task(me));
+        inner.killed.remove(&me);
+        // Its joiners and those waiting for any of several tasks it is among, in the order they
+        // began to wait.
+        let mut i = 0;
+        while i < inner.blocked.len() {
+            let hit = match &inner.blocked[i].1 {
+                Wait::Task(t) => *t == me,
+                Wait::Any(ts) => ts.contains(&me),
+                _ => false,
+            };
+            if hit {
+                let (t, _) = inner.blocked.remove(i);
+                inner.ready.push(t);
+            } else {
+                i += 1;
+            }
+        }
         Self::pass(&mut inner);
         if inner.deadlocked {
             Self::wake_all(&inner);
@@ -263,6 +306,19 @@ impl Sched {
             return Ok(());
         }
         self.block(me, Wait::Task(t))
+    }
+
+    /// Waits for any of `ts` to finish: the index of the first that has.
+    pub fn join_any(&self, me: u64, ts: &[u64]) -> Result<usize, Ctl> {
+        loop {
+            {
+                let inner = self.inner.lock().expect("scheduler");
+                if let Some(i) = ts.iter().position(|t| inner.finished.contains(t)) {
+                    return Ok(i);
+                }
+            }
+            self.block(me, Wait::Any(ts.to_vec()))?;
+        }
     }
 
     pub fn channel(&self) -> u64 {

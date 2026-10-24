@@ -301,7 +301,8 @@ impl Cgen {
       #Borrow(_, _) => true,
       #Named(d, _) => self.lw.p.isKnown(d, "Box") || self.lw.p.isKnown(d, "Ref") || self.lw.p.isKnown(d, "Arc") || self.lw.p.isKnown(d, "Ptr") || self.namedIs(t, "Cell") || self.namedIs(t, "RegionList")
         || self.namedIs(t, "Scope") || self.namedIs(t, "Fiber") || self.namedIs(t, "Sender") || self.namedIs(t, "Receiver")
-        || self.namedIs(t, "Reply") || self.namedIs(t, "Pending") || self.namedIs(t, "Mutex") || self.namedIs(t, "Atomic") || self.namedIs(t, "Listener") || self.namedIs(t, "Db"),
+        || self.namedIs(t, "Reply") || self.namedIs(t, "Pending") || self.namedIs(t, "Mutex") || self.namedIs(t, "Atomic") || self.namedIs(t, "Listener") || self.namedIs(t, "Db")
+        || self.namedIs(t, "Task"),
       _ => false,
     }
   }
@@ -349,6 +350,8 @@ impl Cgen {
         // The scheduler's handles: a scope or a task by its number, a channel's ends.
         if (self.namedIs(t, "Scope") || self.namedIs(t, "Fiber") || self.namedIs(t, "Listener") || self.namedIs(t, "Db")) { return "int".toString(); }
         if (self.namedIs(t, "Sender") || self.namedIs(t, "Receiver") || self.namedIs(t, "Reply") || self.namedIs(t, "Pending")) { return "fly_chan".toString(); }
+        // A spawned task's record, which its `Task`s share.
+        if (self.namedIs(t, "Task")) { return "void*".toString(); }
         if (self.namedIs(t, "Socket")) { return "fly_socket".toString(); }
         // A lock holds its state on the heap, shared by the tasks that borrow it.
         if (self.namedIs(t, "Mutex") || self.namedIs(t, "Atomic")) {
@@ -502,6 +505,8 @@ impl Cgen {
           body.push(`  if (*v && fly_arc_release(*v)) { ${d2}fly_arc_free(*v); }\n  *v = NULL;\n`);
         } else if (self.namedIs(t, "Sender") || self.namedIs(t, "Reply")) {
           body.push("  fly_sender_drop(v);\n");
+        } else if (self.namedIs(t, "Task")) {
+          body.push("  fly_task_drop(*v);\n  *v = NULL;\n");
         } else if (self.namedIs(t, "Receiver") || self.namedIs(t, "Pending")) {
           body.push("  fly_receiver_drop(v);\n");
         } else if (self.namedIs(t, "Mutex")) {
@@ -2256,7 +2261,14 @@ impl Cgen {
         // A panic in the body cancels the scope's tasks and goes on once they have finished (§5.7).
         `({ int sid_ = fly_scope_open(); int s_ = sid_; ${b}_t x_ = { .f = ${arg(0)}, .s = &s_ }; if (fly_try(${b}, &x_)) { if (x_.f.drop) x_.f.drop(x_.f.env); fly_scope_panicked(sid_); } if (x_.f.drop) x_.f.drop(x_.f.env); fly_scope_close(sid_, false); x_.r; })`
       }
-      "Scope_spawn" => `({ int* s_ = ${arg(0)}; fly_fn f_ = ${arg(1)}; fly_spawn(*s_, fly_task_void, fly_box(&f_, sizeof f_), 0); (fly_unit)0; })`,
+      "Scope_spawn" => `({ int* s_ = ${arg(0)}; fly_fn f_ = ${arg(1)}; fly_task_spawn(*s_, fly_box(&f_, sizeof f_)); })`,
+      "Task_cancel" => `({ fly_task_cancel(${arg(0)}); (fly_unit)0; })`,
+      "Task_wait" => {
+        const tc = self.ctype(rt, span);
+        `({ fly_String m_ = { 0 }; int32_t k_ = fly_task_wait(${arg(0)}, &m_); k_ == FLY_TASK_PANICKED ? ((${tc}){ .tag = ${self.tagId("Panicked")}, .u.Panicked = m_ }) : k_ == FLY_TASK_CANCELLED ? ((${tc}){ .tag = ${self.tagId("Cancelled")} }) : ((${tc}){ .tag = ${self.tagId("Done")} }); })`
+      }
+      "Task_any" => `({ fly_slice s_ = ${arg(0)}; fly_task_any((void* const*)s_.ptr, s_.len); })`,
+      "Task_clone" => `fly_task_clone(${arg(0)})`,
       "Scope_fork" => {
         const t = typeArg(rt, 0);
         const tc = self.ctype(t, span);

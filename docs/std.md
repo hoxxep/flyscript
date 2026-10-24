@@ -103,7 +103,7 @@ Every integer type has `wrappingAdd`, `wrappingSub` and `wrappingMul`, which wra
 
 ### 1.11 Tasks
 
-`Io.scope(body)`, `Scope.spawn(task)`, `Scope.fork(task): Fiber<T>` and `Fiber.join()` are specified in spec §6.1; each is a scheduling point.
+`Io.scope(body)`, `Scope.spawn(task): Task`, `Scope.fork(task): Fiber<T>` and `Fiber.join()` are specified in spec §6.1; each is a scheduling point. A `Task` (`Clone`, `Send`) refers to a spawned task: `task.cancel()` cancels it alone, `task.wait()` gives how it ended, a `TaskEnd` (`#Done`, `#Cancelled` or `#Panicked(message)`), and `Task.any(tasks)` the index of the first of several to have ended. `wait` and `any` wait only for tasks still running, and `cancel` is never a scheduling point. A spawned task's panic that no `wait` gives is reported once nothing can ask for it (spec §5.7).
 
 ### 1.12 Foreign code
 

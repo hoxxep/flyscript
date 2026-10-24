@@ -480,6 +480,9 @@ const { $rt, $b } = (() => {
   const sched = {
     on: false, current: 0, ready: [], blocked: new Map(), finished: new Set(), rng: BigInt(Math.max(1, world.seed)), next: 1,
     tasks: new Map(), channels: new Map(), closed: new Set(), senders: new Map(), deaf: new Set(), drops: new Map(), cancelled: new Set(), scopes: new Map(), scopeIds: 1,
+    // Tasks cancelled by their `Task`, which no scope's end clears; and spawned tasks as their
+    // `Task`s see them: how many refer to each, how it ended, whether its panic has been told.
+    killed: new Set(), spawned: new Map(),
   };
   // Hands the baton to a ready task, chosen by the seed; `false` if none can run. With none
   // ready, time passes to the earliest sleeper's wake time, waking every task due then.
@@ -521,6 +524,14 @@ const { $rt, $b } = (() => {
     if (sched.tasks.get(t)?.cleaning) return;
     if (sched.blocked.delete(t)) sched.ready.push(t);
   }
+  // Cancels task `t` by its `Task`, for good: nothing, once it has finished.
+  function kill(t) {
+    if (sched.finished.has(t)) return;
+    sched.killed.add(t);
+    if (sched.tasks.get(t)?.cleaning) return;
+    if (sched.blocked.delete(t)) sched.ready.push(t);
+  }
+  const isCancelled = (t) => sched.cancelled.has(t) || sched.killed.has(t);
   function cleaning(d) {
     if (!sched.on) return;
     const t = sched.tasks.get(sched.current);
@@ -536,7 +547,7 @@ const { $rt, $b } = (() => {
       let r;
       try {
         // A cancelled task unwinds at its next scheduling point; one not started never runs.
-        if (t.error === undefined && sched.cancelled.has(me) && !t.cleaning) t.error = new Cancelled();
+        if (t.error === undefined && isCancelled(me) && !t.cleaning) t.error = new Cancelled();
         const error = t.error, input = t.input;
         t.error = undefined;
         t.input = undefined;
@@ -573,11 +584,19 @@ const { $rt, $b } = (() => {
   function endTask(me, outcome) {
     const t = sched.tasks.get(me);
     const st = sched.scopes.get(t.scope);
-    // A spawned task's panic ends with it, reported, its scope going on; a forked task's is its
-    // scope's, as a failure would be (§5.7).
-    if (outcome.error instanceof Panic && !t.forked) {
-      $b.println(`<panic in a spawned task: ${outcome.error.message}>`);
-      outcome = { value: undefined };
+    // A spawned task's end is its `Task`s', its scope going on; a panic no `Task` can ask for any
+    // more is reported. A forked task's panic is its scope's, as a failure would be (§5.7).
+    if (!t.forked) {
+      const end = outcome.error instanceof Panic ? { $tag: "Panicked", $: outcome.error.message }
+        : outcome.error instanceof Cancelled ? { $tag: "Cancelled" } : { $tag: "Done" };
+      const rec = sched.spawned.get(me);
+      if (rec.handles === 0) {
+        if (end.$tag === "Panicked") $b.println(`<panic in a spawned task: ${end.$}>`);
+        sched.spawned.delete(me);
+      } else {
+        rec.end = end;
+      }
+      if (outcome.error instanceof Panic) outcome = { value: undefined };
     }
     // The first failure or panic cancels the scope: its body and its other tasks.
     if ((outcome.error instanceof Fail || outcome.error instanceof Panic) && st.failure === undefined) {
@@ -593,7 +612,13 @@ const { $rt, $b } = (() => {
       throw outcome.error;
     }
     sched.finished.add(me);
-    wake("task", me);
+    sched.killed.delete(me);
+    sched.tasks.delete(me);
+    // Its joiners and those waiting for any of several tasks it is among, in the order they began
+    // to wait.
+    for (const [b, w] of [...sched.blocked]) {
+      if ((w[0] === "task" && w[1] === me) || (w[0] === "any" && w[1].includes(me))) { sched.blocked.delete(b); sched.ready.push(b); }
+    }
     if (!pass()) end("deadlock: every task is waiting");
   }
   function* join(t) {
@@ -841,27 +866,63 @@ const { $rt, $b } = (() => {
       try { result = yield* body(f, { v: { sid } }); }
       catch (e) {
         if (e instanceof End) throw e;
-        // A panic in the body cancels the scope's tasks, as a failure does, and goes on once they
-        // have finished (§5.7).
-        if (e instanceof Panic) for (const t of st.tasks) cancel(t);
+        // The body left by unwinding — a panic, a failure, a cancellation — cancels the scope's
+        // tasks, and the unwinding goes on once they have finished (§5.7, §6.1).
+        for (const t of st.tasks) cancel(t);
         // The body unwound because a task failed or panicked: the scope raises that.
         if (!(e instanceof Cancelled && st.failure !== undefined)) error = e;
       }
-      sched.cancelled.delete(sched.current);
-      // A scope returns only when every task started in it has finished (§6.1).
+      // A scope returns only when every task started in it has finished (§6.1). Cancelled while it
+      // waits, it cancels the scope's tasks, and waits on.
       for (const t of st.tasks) {
         for (;;) {
           try { yield* join(t); break; }
-          catch (e) { if (!(e instanceof Cancelled)) throw e; sched.cancelled.delete(sched.current); }
+          catch (e) { if (!(e instanceof Cancelled)) throw e; for (const o of st.tasks) cancel(o); }
         }
       }
-      sched.cancelled.delete(sched.current);
+      // A cancellation the scope's own failure made is over; one from outside that reached the
+      // task as it waited goes on from here.
+      if (st.failure !== undefined) sched.cancelled.delete(sched.current);
+      else if (error === undefined && isCancelled(sched.current)) error = new Cancelled();
       sched.scopes.delete(sid);
       if (error !== undefined) throw error;
       if (st.failure !== undefined) throw st.failure;
       return result;
     },
-    *Scope_spawn$g(r, task) { spawnTask(r.v.sid, task, false); yield* point(); },
+    *Scope_spawn$g(r, task) {
+      const id = spawnTask(r.v.sid, task, false);
+      sched.spawned.set(id, { handles: 1, end: undefined, told: false });
+      yield* point();
+      return { task: id };
+    },
+    Task_cancel(t) { kill(t.task); },
+    *Task_cancel$g(t) { kill(t.task); },
+    *Task_wait$g(t) {
+      yield* join(t.task);
+      const rec = sched.spawned.get(t.task);
+      if (rec.end.$tag === "Panicked") rec.told = true;
+      return rec.end;
+    },
+    *Task_any$g(ts) {
+      if (ts.length === 0) panic("waited for any of no tasks");
+      const ids = ts.map((t) => t.task);
+      for (;;) {
+        const i = ids.findIndex((id) => sched.finished.has(id));
+        if (i >= 0) return i;
+        yield* block(["any", ids]);
+      }
+    },
+    Task_clone(t) { sched.spawned.get(t.task).handles++; return { task: t.task }; },
+    // A panic no `wait` gave is reported as the last `Task` for it is dropped.
+    Task_drop(r) {
+      if (!r.v) return;
+      const rec = sched.spawned.get(r.v.task);
+      rec.handles--;
+      if (rec.handles === 0 && rec.end !== undefined) {
+        if (rec.end.$tag === "Panicked" && !rec.told) $b.println(`<panic in a spawned task: ${rec.end.$}>`);
+        sched.spawned.delete(r.v.task);
+      }
+    },
     *Scope_fork$g(r, task) { const t = spawnTask(r.v.sid, task, true); yield* point(); return { task: t }; },
     *Fiber_join$g(f) {
       yield* join(f.task);
@@ -43707,13 +43768,13 @@ function startsTasks_313($745) {
 function ctype_314($746, $747, $748) {
   let v3_ret;
   {
-    let v0_self, v1_t, v2_span, v4_t, v183_t, v189_t, v210_t, v216_t;
+    let v0_self, v1_t, v2_span, v4_t, v186_t, v192_t, v213_t, v219_t;
     v0_self = $746; v1_t = $747; v2_span = $748; 
     {
       let v5_t;
       L1:
       {
-        let v6_t, v10_t, v21_t, v43_t, v45_t, v47_t, v193_t, v197_t, v199_t, v201_t;
+        let v6_t, v10_t, v21_t, v43_t, v45_t, v47_t, v196_t, v200_t, v202_t, v204_t;
         v6_t = (v1_t.$tag === "Prim");
         if (v6_t)
         {
@@ -43831,7 +43892,7 @@ function ctype_314($746, $747, $748) {
           v48_d = v1_t.$[0];
           v49_args = v1_t.$[1];
           {
-            let v51_t, v52_t, v54_t, v55_t, v57_t, v58_t, v60_t, v61_t, v63_t, v64_t, v66_t, v67_t, v68_t, v71_t, v74_t, v98_t, v99_t, v101_t, v102_t, v104_t, v105_t, v106_t, v109_t, v112_t, v116_t, v117_t, v118_t, v121_t, v124_t, v128_t, v129_t, v131_t, v132_t, v133_t, v149_t, v150_t, v170_t;
+            let v51_t, v52_t, v54_t, v55_t, v57_t, v58_t, v60_t, v61_t, v63_t, v64_t, v66_t, v67_t, v68_t, v71_t, v74_t, v98_t, v99_t, v101_t, v102_t, v104_t, v105_t, v106_t, v109_t, v112_t, v116_t, v117_t, v118_t, v121_t, v124_t, v128_t, v129_t, v131_t, v132_t, v134_t, v135_t, v136_t, v152_t, v153_t, v173_t;
             v51_t = v0_self.v.lw.p;
             v52_t = isKnown_168(v51_t, v48_d, "String");
             if (v52_t)
@@ -44073,226 +44134,236 @@ function ctype_314($746, $747, $748) {
               }
             }
             v128_t = v0_self.v;
-            v129_t = namedIs_545(v128_t, v1_t, "Socket");
+            v129_t = namedIs_545(v128_t, v1_t, "Task");
             if (v129_t)
             {
               {
                 let v130_t;
-                v130_t = $b.str_toString("fly_socket");
+                v130_t = $b.str_toString("void*");
                 return v130_t;
               }
             }
             v131_t = v0_self.v;
-            v132_t = namedIs_545(v131_t, v1_t, "Mutex");
-            v133_t = v132_t;
-            if (v133_t)
+            v132_t = namedIs_545(v131_t, v1_t, "Socket");
+            if (v132_t)
+            {
+              {
+                let v133_t;
+                v133_t = $b.str_toString("fly_socket");
+                return v133_t;
+              }
+            }
+            v134_t = v0_self.v;
+            v135_t = namedIs_545(v134_t, v1_t, "Mutex");
+            v136_t = v135_t;
+            if (v136_t)
             {
             }
             else
             {
-              let v134_t, v135_t;
-              v134_t = v0_self.v;
-              v135_t = namedIs_545(v134_t, v1_t, "Atomic");
-              v133_t = v135_t;
+              let v137_t, v138_t;
+              v137_t = v0_self.v;
+              v138_t = namedIs_545(v137_t, v1_t, "Atomic");
+              v136_t = v138_t;
             }
-            if (v133_t)
+            if (v136_t)
             {
               {
-                const v142_t = { v: undefined };
-                let v136_t, v137_t, v138_t, v139_t, v140_t, v141_c, v143_t, v144_t, v145_t, v146_t, v147_t, v148_t;
-                v139_t = v0_self;
-                v136_t = typeArg_546(v1_t, 0);
-                v137_t = v136_t;
-                v138_t = v137_t;
-                v140_t = ctypeRef_544(v139_t, v138_t, $copy4(v2_span));
-                v141_c = v140_t;
-                v143_t = $b.String_new();
-                v142_t.v = v143_t;
-                v144_t = v141_c;
-                v145_t = v142_t;
-                $b.String_push(v145_t, v144_t);
-                v147_t = v142_t;
-                $b.String_push(v147_t, "*");
-                return v142_t.v;
+                const v145_t = { v: undefined };
+                let v139_t, v140_t, v141_t, v142_t, v143_t, v144_c, v146_t, v147_t, v148_t, v149_t, v150_t, v151_t;
+                v142_t = v0_self;
+                v139_t = typeArg_546(v1_t, 0);
+                v140_t = v139_t;
+                v141_t = v140_t;
+                v143_t = ctypeRef_544(v142_t, v141_t, $copy4(v2_span));
+                v144_c = v143_t;
+                v146_t = $b.String_new();
+                v145_t.v = v146_t;
+                v147_t = v144_c;
+                v148_t = v145_t;
+                $b.String_push(v148_t, v147_t);
+                v150_t = v145_t;
+                $b.String_push(v150_t, "*");
+                return v145_t.v;
               }
             }
-            v149_t = v0_self.v.lw.p;
-            v150_t = isKnown_168(v149_t, v48_d, "Box");
-            if (v150_t)
+            v152_t = v0_self.v.lw.p;
+            v153_t = isKnown_168(v152_t, v48_d, "Box");
+            if (v153_t)
             {
               {
-                let v151_t, v152_t, v153_t, v154_t;
-                v151_t = v49_args;
-                v152_t = first_226(v151_t);
-                v153_t = v152_t;
+                let v154_t, v155_t, v156_t, v157_t;
+                v154_t = v49_args;
+                v155_t = first_226(v154_t);
+                v156_t = v155_t;
                 L4:
                 {
-                  let v155_t;
-                  v155_t = (v153_t.$tag === "Some");
-                  if (v155_t)
+                  let v158_t;
+                  v158_t = (v156_t.$tag === "Some");
+                  if (v158_t)
                   {
-                    let v156_t;
-                    v156_t = (v153_t.$.$tag === "Ty");
-                    v155_t = v156_t;
+                    let v159_t;
+                    v159_t = (v156_t.$.$tag === "Ty");
+                    v158_t = v159_t;
                   }
-                  if (v155_t)
+                  if (v158_t)
                   {
-                    let v157_x, v158_t;
-                    v157_x = v153_t.$.$;
+                    let v160_x, v161_t;
+                    v160_x = v156_t.$.$;
                     {
-                      const v161_t = { v: undefined };
-                      let v159_t, v160_c, v162_t, v163_t, v164_t, v165_t, v166_t, v167_t;
-                      v159_t = ctypeRef_544(v0_self, v157_x, $copy4(v2_span));
-                      v160_c = v159_t;
-                      v162_t = $b.String_new();
-                      v161_t.v = v162_t;
-                      v163_t = v160_c;
-                      v164_t = v161_t;
-                      $b.String_push(v164_t, v163_t);
-                      v166_t = v161_t;
-                      $b.String_push(v166_t, "*");
-                      v158_t = v161_t.v;
+                      const v164_t = { v: undefined };
+                      let v162_t, v163_c, v165_t, v166_t, v167_t, v168_t, v169_t, v170_t;
+                      v162_t = ctypeRef_544(v0_self, v160_x, $copy4(v2_span));
+                      v163_c = v162_t;
+                      v165_t = $b.String_new();
+                      v164_t.v = v165_t;
+                      v166_t = v163_c;
+                      v167_t = v164_t;
+                      $b.String_push(v167_t, v166_t);
+                      v169_t = v164_t;
+                      $b.String_push(v169_t, "*");
+                      v161_t = v164_t.v;
                     }
-                    v154_t = v158_t;
+                    v157_t = v161_t;
                     break L4;
                   }
                   {
-                    let v168_t, v169_t;
-                    v168_t = v0_self.v;
-                    fail_547(v168_t, $copy4(v2_span), "a `Box` without a type");
-                    v154_t = undefined;
+                    let v171_t, v172_t;
+                    v171_t = v0_self.v;
+                    fail_547(v171_t, $copy4(v2_span), "a `Box` without a type");
+                    v157_t = undefined;
                     break L4;
                   }
                   $rt.panic("no arm matched");
                 }
-                return v154_t;
+                return v157_t;
               }
             }
             L5:
             {
-              let v171_t, v174_t;
-              v171_t = ($ix(v0_self.v.lw.p.defs, v48_d).kind.$tag === "Struct");
-              if (v171_t)
-              {
-                let v172_t;
-                v172_t = ($ix(v0_self.v.lw.p.defs, v48_d).kind.$.fields.$tag === "Some");
-                v171_t = v172_t;
-              }
-              if (v171_t)
-              {
-                let v173_t;
-                v173_t = structType_548(v0_self, v1_t, $copy4(v2_span));
-                v170_t = v173_t;
-                break L5;
-              }
-              v174_t = ($ix(v0_self.v.lw.p.defs, v48_d).kind.$tag === "Enum");
+              let v174_t, v177_t;
+              v174_t = ($ix(v0_self.v.lw.p.defs, v48_d).kind.$tag === "Struct");
               if (v174_t)
               {
                 let v175_t;
-                v175_t = unionType_549(v0_self, v1_t, $copy4(v2_span));
-                v170_t = v175_t;
+                v175_t = ($ix(v0_self.v.lw.p.defs, v48_d).kind.$.fields.$tag === "Some");
+                v174_t = v175_t;
+              }
+              if (v174_t)
+              {
+                let v176_t;
+                v176_t = structType_548(v0_self, v1_t, $copy4(v2_span));
+                v173_t = v176_t;
+                break L5;
+              }
+              v177_t = ($ix(v0_self.v.lw.p.defs, v48_d).kind.$tag === "Enum");
+              if (v177_t)
+              {
+                let v178_t;
+                v178_t = unionType_549(v0_self, v1_t, $copy4(v2_span));
+                v173_t = v178_t;
                 break L5;
               }
               {
-                const v177_t = { v: undefined };
-                let v176_t, v178_t, v179_t, v180_t, v181_t, v182_t, v184_t, v185_t, v186_t, v187_t, v188_t, v190_t, v191_t, v192_t;
-                v176_t = v0_self.v;
-                v191_t = $copy4(v2_span);
-                v178_t = $b.String_new();
-                v177_t.v = v178_t;
-                v179_t = v177_t;
-                $b.String_push(v179_t, "the type `");
-                v181_t = v0_self.v.lw.p;
-                v182_t = show_113(v181_t, v1_t);
-                v183_t = v182_t;
-                v184_t = v183_t;
-                v185_t = v177_t;
-                $b.String_push(v185_t, v184_t);
-                v187_t = v177_t;
-                $b.String_push(v187_t, "`");
-                v189_t = v177_t.v;
-                v190_t = v189_t;
-                unsupported_550(v176_t, v191_t, v190_t);
-                v170_t = undefined;
+                const v180_t = { v: undefined };
+                let v179_t, v181_t, v182_t, v183_t, v184_t, v185_t, v187_t, v188_t, v189_t, v190_t, v191_t, v193_t, v194_t, v195_t;
+                v179_t = v0_self.v;
+                v194_t = $copy4(v2_span);
+                v181_t = $b.String_new();
+                v180_t.v = v181_t;
+                v182_t = v180_t;
+                $b.String_push(v182_t, "the type `");
+                v184_t = v0_self.v.lw.p;
+                v185_t = show_113(v184_t, v1_t);
+                v186_t = v185_t;
+                v187_t = v186_t;
+                v188_t = v180_t;
+                $b.String_push(v188_t, v187_t);
+                v190_t = v180_t;
+                $b.String_push(v190_t, "`");
+                v192_t = v180_t.v;
+                v193_t = v192_t;
+                unsupported_550(v179_t, v194_t, v193_t);
+                v173_t = undefined;
                 break L5;
               }
               $rt.panic("no arm matched");
             }
-            v50_t = v170_t;
+            v50_t = v173_t;
           }
           v5_t = v50_t;
           break L1;
         }
-        v193_t = false;
-        if (v193_t)
+        v196_t = false;
+        if (v196_t)
         {
         }
         else
         {
-          let v194_t;
-          v194_t = (v1_t.$tag === "Record");
-          v193_t = v194_t;
+          let v197_t;
+          v197_t = (v1_t.$tag === "Record");
+          v196_t = v197_t;
         }
-        if (v193_t)
+        if (v196_t)
         {
         }
         else
-        {
-          let v195_t;
-          v195_t = (v1_t.$tag === "Tuple");
-          v193_t = v195_t;
-        }
-        if (v193_t)
-        {
-          let v196_t;
-          v196_t = structType_548(v0_self, v1_t, $copy4(v2_span));
-          v5_t = v196_t;
-          break L1;
-        }
-        v197_t = (v1_t.$tag === "Union");
-        if (v197_t)
         {
           let v198_t;
-          v198_t = unionType_549(v0_self, v1_t, $copy4(v2_span));
-          v5_t = v198_t;
+          v198_t = (v1_t.$tag === "Tuple");
+          v196_t = v198_t;
+        }
+        if (v196_t)
+        {
+          let v199_t;
+          v199_t = structType_548(v0_self, v1_t, $copy4(v2_span));
+          v5_t = v199_t;
           break L1;
         }
-        v199_t = (v1_t.$tag === "Array");
-        if (v199_t)
+        v200_t = (v1_t.$tag === "Union");
+        if (v200_t)
         {
-          let v200_t;
-          v200_t = structType_548(v0_self, v1_t, $copy4(v2_span));
-          v5_t = v200_t;
+          let v201_t;
+          v201_t = unionType_549(v0_self, v1_t, $copy4(v2_span));
+          v5_t = v201_t;
           break L1;
         }
-        v201_t = (v1_t.$tag === "Error");
-        if (v201_t)
+        v202_t = (v1_t.$tag === "Array");
+        if (v202_t)
         {
-          let v202_t;
-          v202_t = $b.str_toString("fly_unit");
-          v5_t = v202_t;
+          let v203_t;
+          v203_t = structType_548(v0_self, v1_t, $copy4(v2_span));
+          v5_t = v203_t;
+          break L1;
+        }
+        v204_t = (v1_t.$tag === "Error");
+        if (v204_t)
+        {
+          let v205_t;
+          v205_t = $b.str_toString("fly_unit");
+          v5_t = v205_t;
           break L1;
         }
         {
-          const v204_t = { v: undefined };
-          let v203_t, v205_t, v206_t, v207_t, v208_t, v209_t, v211_t, v212_t, v213_t, v214_t, v215_t, v217_t, v218_t, v219_t;
-          v203_t = v0_self.v;
-          v218_t = $copy4(v2_span);
-          v205_t = $b.String_new();
-          v204_t.v = v205_t;
-          v206_t = v204_t;
-          $b.String_push(v206_t, "the type `");
-          v208_t = v0_self.v.lw.p;
-          v209_t = show_113(v208_t, v1_t);
-          v210_t = v209_t;
-          v211_t = v210_t;
-          v212_t = v204_t;
-          $b.String_push(v212_t, v211_t);
-          v214_t = v204_t;
-          $b.String_push(v214_t, "`");
-          v216_t = v204_t.v;
-          v217_t = v216_t;
-          unsupported_550(v203_t, v218_t, v217_t);
+          const v207_t = { v: undefined };
+          let v206_t, v208_t, v209_t, v210_t, v211_t, v212_t, v214_t, v215_t, v216_t, v217_t, v218_t, v220_t, v221_t, v222_t;
+          v206_t = v0_self.v;
+          v221_t = $copy4(v2_span);
+          v208_t = $b.String_new();
+          v207_t.v = v208_t;
+          v209_t = v207_t;
+          $b.String_push(v209_t, "the type `");
+          v211_t = v0_self.v.lw.p;
+          v212_t = show_113(v211_t, v1_t);
+          v213_t = v212_t;
+          v214_t = v213_t;
+          v215_t = v207_t;
+          $b.String_push(v215_t, v214_t);
+          v217_t = v207_t;
+          $b.String_push(v217_t, "`");
+          v219_t = v207_t.v;
+          v220_t = v219_t;
+          unsupported_550(v206_t, v221_t, v220_t);
           v5_t = undefined;
           break L1;
         }
@@ -73389,8 +73460,8 @@ function dropFn_524($1243, $1244, $1245) {
       const v15_t = { v: undefined };
       const v32_t = { v: undefined };
       const v50_body = { v: undefined };
-      const v315_t = { v: undefined };
-      let v5_t, v6_key, v7_t, v8_t, v9_t, v10_t, v11_t, v16_t, v17_t, v18_t, v19_t, v20_t, v21_t, v22_t, v23_name, v24_t, v25_t, v26_t, v27_t, v28_t, v29_t, v30_c, v31_t, v33_t, v34_t, v35_t, v36_t, v37_t, v38_t, v39_t, v40_t, v41_t, v42_t, v43_t, v44_t, v45_t, v46_t, v47_t, v48_t, v49_t, v314_t, v316_t, v317_t, v318_t, v319_t, v320_t, v321_t, v322_t, v323_t, v324_t, v325_t, v326_t, v327_t, v328_t, v329_t, v330_t, v331_t, v332_t, v333_t, v334_t, v335_t, v336_t;
+      const v319_t = { v: undefined };
+      let v5_t, v6_key, v7_t, v8_t, v9_t, v10_t, v11_t, v16_t, v17_t, v18_t, v19_t, v20_t, v21_t, v22_t, v23_name, v24_t, v25_t, v26_t, v27_t, v28_t, v29_t, v30_c, v31_t, v33_t, v34_t, v35_t, v36_t, v37_t, v38_t, v39_t, v40_t, v41_t, v42_t, v43_t, v44_t, v45_t, v46_t, v47_t, v48_t, v49_t, v318_t, v320_t, v321_t, v322_t, v323_t, v324_t, v325_t, v326_t, v327_t, v328_t, v329_t, v330_t, v331_t, v332_t, v333_t, v334_t, v335_t, v336_t, v337_t, v338_t, v339_t, v340_t;
       v5_t = ckey_843(v1_t);
       v6_key = v5_t;
       v7_t = v0_self.v.drops;
@@ -73458,7 +73529,7 @@ function dropFn_524($1243, $1244, $1245) {
       v50_body.v = v49_t;
       L2:
       {
-        let v51_t, v270_t, v276_t, v280_t, v311_t;
+        let v51_t, v274_t, v280_t, v284_t, v315_t;
         v51_t = (v1_t.$tag === "Named");
         if (v51_t)
         {
@@ -73591,327 +73662,341 @@ function dropFn_524($1243, $1244, $1245) {
                     }
                     else
                     {
-                      let v109_t, v110_t, v111_t;
+                      let v109_t, v110_t;
                       v109_t = v0_self.v;
-                      v110_t = namedIs_545(v109_t, v1_t, "Receiver");
-                      v111_t = v110_t;
-                      if (v111_t)
-                      {
-                      }
-                      else
-                      {
-                        let v112_t, v113_t;
-                        v112_t = v0_self.v;
-                        v113_t = namedIs_545(v112_t, v1_t, "Pending");
-                        v111_t = v113_t;
-                      }
-                      if (v111_t)
+                      v110_t = namedIs_545(v109_t, v1_t, "Task");
+                      if (v110_t)
                       {
                         {
-                          let v114_t, v115_t;
-                          v114_t = v50_body;
-                          $b.String_push(v114_t, "  fly_receiver_drop(v);\n");
+                          let v111_t, v112_t;
+                          v111_t = v50_body;
+                          $b.String_push(v111_t, "  fly_task_drop(*v);\n  *v = NULL;\n");
                         }
                       }
                       else
                       {
-                        let v116_t, v117_t;
-                        v116_t = v0_self.v;
-                        v117_t = namedIs_545(v116_t, v1_t, "Mutex");
-                        if (v117_t)
+                        let v113_t, v114_t, v115_t;
+                        v113_t = v0_self.v;
+                        v114_t = namedIs_545(v113_t, v1_t, "Receiver");
+                        v115_t = v114_t;
+                        if (v115_t)
+                        {
+                        }
+                        else
+                        {
+                          let v116_t, v117_t;
+                          v116_t = v0_self.v;
+                          v117_t = namedIs_545(v116_t, v1_t, "Pending");
+                          v115_t = v117_t;
+                        }
+                        if (v115_t)
                         {
                           {
-                            let v118_t, v119_inner, v120_t, v121_t, v122_t, v140_t, v141_t;
-                            v118_t = typeArg_546(v1_t, 0);
-                            v119_inner = v118_t;
-                            v120_t = v0_self.v;
-                            v121_t = v119_inner;
-                            v122_t = needsDrop_553(v120_t, v121_t);
-                            if (v122_t)
-                            {
-                              {
-                                const v124_t = { v: undefined };
-                                let v123_t, v125_t, v126_t, v127_t, v128_t, v129_t, v130_t, v131_t, v132_t, v133_t, v134_t, v135_t, v136_t, v137_t, v138_t, v139_t;
-                                v123_t = v50_body;
-                                v125_t = $b.String_new();
-                                v124_t.v = v125_t;
-                                v126_t = v124_t;
-                                $b.String_push(v126_t, "  if (*v) ");
-                                v129_t = v0_self;
-                                v128_t = v119_inner;
-                                v130_t = dropFn_524(v129_t, v128_t, $copy4(v2_span));
-                                v131_t = v130_t;
-                                v132_t = v131_t;
-                                v133_t = v124_t;
-                                $b.String_push(v133_t, v132_t);
-                                v135_t = v124_t;
-                                $b.String_push(v135_t, "(*v);\n");
-                                v137_t = v124_t.v;
-                                v138_t = v137_t;
-                                $b.String_push(v123_t, v138_t);
-                              }
-                            }
-                            v140_t = v50_body;
-                            $b.String_push(v140_t, "  fly_mutex_free(*v);\n  *v = NULL;\n");
+                            let v118_t, v119_t;
+                            v118_t = v50_body;
+                            $b.String_push(v118_t, "  fly_receiver_drop(v);\n");
                           }
                         }
                         else
                         {
-                          let v142_t, v143_t;
-                          v142_t = v0_self.v;
-                          v143_t = namedIs_545(v142_t, v1_t, "Atomic");
-                          if (v143_t)
+                          let v120_t, v121_t;
+                          v120_t = v0_self.v;
+                          v121_t = namedIs_545(v120_t, v1_t, "Mutex");
+                          if (v121_t)
                           {
                             {
-                              let v144_t, v145_t;
+                              let v122_t, v123_inner, v124_t, v125_t, v126_t, v144_t, v145_t;
+                              v122_t = typeArg_546(v1_t, 0);
+                              v123_inner = v122_t;
+                              v124_t = v0_self.v;
+                              v125_t = v123_inner;
+                              v126_t = needsDrop_553(v124_t, v125_t);
+                              if (v126_t)
+                              {
+                                {
+                                  const v128_t = { v: undefined };
+                                  let v127_t, v129_t, v130_t, v131_t, v132_t, v133_t, v134_t, v135_t, v136_t, v137_t, v138_t, v139_t, v140_t, v141_t, v142_t, v143_t;
+                                  v127_t = v50_body;
+                                  v129_t = $b.String_new();
+                                  v128_t.v = v129_t;
+                                  v130_t = v128_t;
+                                  $b.String_push(v130_t, "  if (*v) ");
+                                  v133_t = v0_self;
+                                  v132_t = v123_inner;
+                                  v134_t = dropFn_524(v133_t, v132_t, $copy4(v2_span));
+                                  v135_t = v134_t;
+                                  v136_t = v135_t;
+                                  v137_t = v128_t;
+                                  $b.String_push(v137_t, v136_t);
+                                  v139_t = v128_t;
+                                  $b.String_push(v139_t, "(*v);\n");
+                                  v141_t = v128_t.v;
+                                  v142_t = v141_t;
+                                  $b.String_push(v127_t, v142_t);
+                                }
+                              }
                               v144_t = v50_body;
-                              $b.String_push(v144_t, "  free(*v);\n  *v = NULL;\n");
+                              $b.String_push(v144_t, "  fly_mutex_free(*v);\n  *v = NULL;\n");
                             }
                           }
                           else
                           {
                             let v146_t, v147_t;
                             v146_t = v0_self.v;
-                            v147_t = namedIs_545(v146_t, v1_t, "HashMap");
+                            v147_t = namedIs_545(v146_t, v1_t, "Atomic");
                             if (v147_t)
                             {
                               {
-                                let v148_t, v149_e, v150_t, v151_t, v152_t, v179_t, v180_t;
-                                v148_t = entryTy_844(v1_t);
-                                v149_e = v148_t;
-                                v150_t = v0_self.v;
-                                v151_t = v149_e;
-                                v152_t = needsDrop_553(v150_t, v151_t);
-                                if (v152_t)
-                                {
-                                  {
-                                    const v162_t = { v: undefined };
-                                    let v153_t, v154_t, v155_t, v156_f, v157_t, v158_t, v159_t, v160_ec, v161_t, v163_t, v164_t, v165_t, v166_t, v167_t, v168_t, v169_t, v170_t, v171_t, v172_t, v173_t, v174_t, v175_t, v176_t, v177_t, v178_t;
-                                    v154_t = v0_self;
-                                    v153_t = v149_e;
-                                    v155_t = dropFn_524(v154_t, v153_t, $copy4(v2_span));
-                                    v156_f = v155_t;
-                                    v158_t = v0_self;
-                                    v157_t = v149_e;
-                                    v159_t = ctype_314(v158_t, v157_t, $copy4(v2_span));
-                                    v160_ec = v159_t;
-                                    v161_t = v50_body;
-                                    v163_t = $b.String_new();
-                                    v162_t.v = v163_t;
-                                    v164_t = v162_t;
-                                    $b.String_push(v164_t, "  for (size_t i = 0; i < v->len; i++) ");
-                                    v166_t = v156_f;
-                                    v167_t = v162_t;
-                                    $b.String_push(v167_t, v166_t);
-                                    v169_t = v162_t;
-                                    $b.String_push(v169_t, "(&((");
-                                    v171_t = v160_ec;
-                                    v172_t = v162_t;
-                                    $b.String_push(v172_t, v171_t);
-                                    v174_t = v162_t;
-                                    $b.String_push(v174_t, "*)v->entries)[i]);\n");
-                                    v176_t = v162_t.v;
-                                    v177_t = v176_t;
-                                    $b.String_push(v161_t, v177_t);
-                                  }
-                                }
-                                v179_t = v50_body;
-                                $b.String_push(v179_t, "  fly_map_free(v);\n");
+                                let v148_t, v149_t;
+                                v148_t = v50_body;
+                                $b.String_push(v148_t, "  free(*v);\n  *v = NULL;\n");
                               }
                             }
                             else
                             {
-                              let v181_t, v182_t;
-                              v181_t = v0_self.v.lw.p;
-                              v182_t = isKnown_168(v181_t, v52_d, "Vec");
-                              if (v182_t)
+                              let v150_t, v151_t;
+                              v150_t = v0_self.v;
+                              v151_t = namedIs_545(v150_t, v1_t, "HashMap");
+                              if (v151_t)
                               {
                                 {
-                                  let v183_t, v184_t, v185_t, v215_t, v216_t;
-                                  v183_t = v53_args;
-                                  v184_t = first_226(v183_t);
-                                  v185_t = v184_t;
-                                  L3:
+                                  let v152_t, v153_e, v154_t, v155_t, v156_t, v183_t, v184_t;
+                                  v152_t = entryTy_844(v1_t);
+                                  v153_e = v152_t;
+                                  v154_t = v0_self.v;
+                                  v155_t = v153_e;
+                                  v156_t = needsDrop_553(v154_t, v155_t);
+                                  if (v156_t)
                                   {
-                                    let v186_t;
-                                    v186_t = (v185_t.$tag === "Some");
-                                    if (v186_t)
                                     {
-                                      let v187_t;
-                                      v187_t = (v185_t.$.$tag === "Ty");
-                                      v186_t = v187_t;
+                                      const v166_t = { v: undefined };
+                                      let v157_t, v158_t, v159_t, v160_f, v161_t, v162_t, v163_t, v164_ec, v165_t, v167_t, v168_t, v169_t, v170_t, v171_t, v172_t, v173_t, v174_t, v175_t, v176_t, v177_t, v178_t, v179_t, v180_t, v181_t, v182_t;
+                                      v158_t = v0_self;
+                                      v157_t = v153_e;
+                                      v159_t = dropFn_524(v158_t, v157_t, $copy4(v2_span));
+                                      v160_f = v159_t;
+                                      v162_t = v0_self;
+                                      v161_t = v153_e;
+                                      v163_t = ctype_314(v162_t, v161_t, $copy4(v2_span));
+                                      v164_ec = v163_t;
+                                      v165_t = v50_body;
+                                      v167_t = $b.String_new();
+                                      v166_t.v = v167_t;
+                                      v168_t = v166_t;
+                                      $b.String_push(v168_t, "  for (size_t i = 0; i < v->len; i++) ");
+                                      v170_t = v160_f;
+                                      v171_t = v166_t;
+                                      $b.String_push(v171_t, v170_t);
+                                      v173_t = v166_t;
+                                      $b.String_push(v173_t, "(&((");
+                                      v175_t = v164_ec;
+                                      v176_t = v166_t;
+                                      $b.String_push(v176_t, v175_t);
+                                      v178_t = v166_t;
+                                      $b.String_push(v178_t, "*)v->entries)[i]);\n");
+                                      v180_t = v166_t.v;
+                                      v181_t = v180_t;
+                                      $b.String_push(v165_t, v181_t);
                                     }
-                                    if (v186_t)
-                                    {
-                                      let v188_t;
-                                      {
-                                        let v189_e, v190_t, v191_t;
-                                        v189_e = v185_t.$.$;
-                                        v190_t = v0_self.v;
-                                        v191_t = needsDrop_553(v190_t, v189_e);
-                                        v188_t = v191_t;
-                                      }
-                                      if (v188_t)
-                                      {
-                                        let v192_e;
-                                        v192_e = v185_t.$.$;
-                                        {
-                                          const v198_t = { v: undefined };
-                                          let v193_t, v194_f, v195_t, v196_ec, v197_t, v199_t, v200_t, v201_t, v202_t, v203_t, v204_t, v205_t, v206_t, v207_t, v208_t, v209_t, v210_t, v211_t, v212_t, v213_t, v214_t;
-                                          v193_t = dropFn_524(v0_self, v192_e, $copy4(v2_span));
-                                          v194_f = v193_t;
-                                          v195_t = ctype_314(v0_self, v192_e, $copy4(v2_span));
-                                          v196_ec = v195_t;
-                                          v197_t = v50_body;
-                                          v199_t = $b.String_new();
-                                          v198_t.v = v199_t;
-                                          v200_t = v198_t;
-                                          $b.String_push(v200_t, "  for (size_t i = 0; i < v->len; i++) ");
-                                          v202_t = v194_f;
-                                          v203_t = v198_t;
-                                          $b.String_push(v203_t, v202_t);
-                                          v205_t = v198_t;
-                                          $b.String_push(v205_t, "(&((");
-                                          v207_t = v196_ec;
-                                          v208_t = v198_t;
-                                          $b.String_push(v208_t, v207_t);
-                                          v210_t = v198_t;
-                                          $b.String_push(v210_t, "*)v->ptr)[i]);\n");
-                                          v212_t = v198_t.v;
-                                          v213_t = v212_t;
-                                          $b.String_push(v197_t, v213_t);
-                                        }
-                                        break L3;
-                                      }
-                                    }
-                                    {
-                                      {
-                                      }
-                                      break L3;
-                                    }
-                                    $rt.panic("no arm matched");
                                   }
-                                  v215_t = v50_body;
-                                  $b.String_push(v215_t, "  fly_vec_free(v);\n");
+                                  v183_t = v50_body;
+                                  $b.String_push(v183_t, "  fly_map_free(v);\n");
                                 }
                               }
                               else
                               {
-                                let v217_t, v218_t;
-                                v217_t = v0_self.v.lw.p;
-                                v218_t = isKnown_168(v217_t, v52_d, "Box");
-                                if (v218_t)
+                                let v185_t, v186_t;
+                                v185_t = v0_self.v.lw.p;
+                                v186_t = isKnown_168(v185_t, v52_d, "Vec");
+                                if (v186_t)
                                 {
                                   {
-                                    let v219_t, v220_t, v221_t, v244_t, v245_t;
-                                    v219_t = v53_args;
-                                    v220_t = first_226(v219_t);
-                                    v221_t = v220_t;
-                                    L4:
+                                    let v187_t, v188_t, v189_t, v219_t, v220_t;
+                                    v187_t = v53_args;
+                                    v188_t = first_226(v187_t);
+                                    v189_t = v188_t;
+                                    L3:
                                     {
-                                      let v222_t;
-                                      v222_t = (v221_t.$tag === "Some");
-                                      if (v222_t)
+                                      let v190_t;
+                                      v190_t = (v189_t.$tag === "Some");
+                                      if (v190_t)
                                       {
-                                        let v223_t;
-                                        v223_t = (v221_t.$.$tag === "Ty");
-                                        v222_t = v223_t;
+                                        let v191_t;
+                                        v191_t = (v189_t.$.$tag === "Ty");
+                                        v190_t = v191_t;
                                       }
-                                      if (v222_t)
+                                      if (v190_t)
                                       {
-                                        let v224_t;
+                                        let v192_t;
                                         {
-                                          let v225_e, v226_t, v227_t;
-                                          v225_e = v221_t.$.$;
-                                          v226_t = v0_self.v;
-                                          v227_t = needsDrop_553(v226_t, v225_e);
-                                          v224_t = v227_t;
+                                          let v193_e, v194_t, v195_t;
+                                          v193_e = v189_t.$.$;
+                                          v194_t = v0_self.v;
+                                          v195_t = needsDrop_553(v194_t, v193_e);
+                                          v192_t = v195_t;
                                         }
-                                        if (v224_t)
+                                        if (v192_t)
                                         {
-                                          let v228_e;
-                                          v228_e = v221_t.$.$;
+                                          let v196_e;
+                                          v196_e = v189_t.$.$;
                                           {
-                                            const v232_t = { v: undefined };
-                                            let v229_t, v230_f, v231_t, v233_t, v234_t, v235_t, v236_t, v237_t, v238_t, v239_t, v240_t, v241_t, v242_t, v243_t;
-                                            v229_t = dropFn_524(v0_self, v228_e, $copy4(v2_span));
-                                            v230_f = v229_t;
-                                            v231_t = v50_body;
-                                            v233_t = $b.String_new();
-                                            v232_t.v = v233_t;
-                                            v234_t = v232_t;
-                                            $b.String_push(v234_t, "  if (*v) ");
-                                            v236_t = v230_f;
-                                            v237_t = v232_t;
-                                            $b.String_push(v237_t, v236_t);
-                                            v239_t = v232_t;
-                                            $b.String_push(v239_t, "(*v);\n");
-                                            v241_t = v232_t.v;
-                                            v242_t = v241_t;
-                                            $b.String_push(v231_t, v242_t);
+                                            const v202_t = { v: undefined };
+                                            let v197_t, v198_f, v199_t, v200_ec, v201_t, v203_t, v204_t, v205_t, v206_t, v207_t, v208_t, v209_t, v210_t, v211_t, v212_t, v213_t, v214_t, v215_t, v216_t, v217_t, v218_t;
+                                            v197_t = dropFn_524(v0_self, v196_e, $copy4(v2_span));
+                                            v198_f = v197_t;
+                                            v199_t = ctype_314(v0_self, v196_e, $copy4(v2_span));
+                                            v200_ec = v199_t;
+                                            v201_t = v50_body;
+                                            v203_t = $b.String_new();
+                                            v202_t.v = v203_t;
+                                            v204_t = v202_t;
+                                            $b.String_push(v204_t, "  for (size_t i = 0; i < v->len; i++) ");
+                                            v206_t = v198_f;
+                                            v207_t = v202_t;
+                                            $b.String_push(v207_t, v206_t);
+                                            v209_t = v202_t;
+                                            $b.String_push(v209_t, "(&((");
+                                            v211_t = v200_ec;
+                                            v212_t = v202_t;
+                                            $b.String_push(v212_t, v211_t);
+                                            v214_t = v202_t;
+                                            $b.String_push(v214_t, "*)v->ptr)[i]);\n");
+                                            v216_t = v202_t.v;
+                                            v217_t = v216_t;
+                                            $b.String_push(v201_t, v217_t);
                                           }
-                                          break L4;
+                                          break L3;
                                         }
                                       }
                                       {
                                         {
                                         }
-                                        break L4;
+                                        break L3;
                                       }
                                       $rt.panic("no arm matched");
                                     }
-                                    v244_t = v50_body;
-                                    $b.String_push(v244_t, "  free(*v);\n  *v = NULL;\n");
+                                    v219_t = v50_body;
+                                    $b.String_push(v219_t, "  fly_vec_free(v);\n");
                                   }
                                 }
                                 else
                                 {
+                                  let v221_t, v222_t;
+                                  v221_t = v0_self.v.lw.p;
+                                  v222_t = isKnown_168(v221_t, v52_d, "Box");
+                                  if (v222_t)
                                   {
-                                    let v246_t, v247_t;
-                                    v246_t = v0_self.v.lw.p;
-                                    v247_t = hasDrop_167(v246_t, v52_d);
-                                    if (v247_t)
                                     {
+                                      let v223_t, v224_t, v225_t, v248_t, v249_t;
+                                      v223_t = v53_args;
+                                      v224_t = first_226(v223_t);
+                                      v225_t = v224_t;
+                                      L4:
                                       {
-                                        const v251_t = { v: undefined };
-                                        let v248_t, v249_call, v250_t, v252_t, v253_t, v254_t, v255_t, v256_t, v257_t, v258_t, v259_t, v260_t, v261_t, v262_t;
-                                        v248_t = dropCall_845(v0_self, v1_t, $copy4(v2_span));
-                                        v249_call = v248_t;
-                                        v250_t = v50_body;
-                                        v252_t = $b.String_new();
-                                        v251_t.v = v252_t;
-                                        v253_t = v251_t;
-                                        $b.String_push(v253_t, "  if (v->live) { v->live = false; fly_unwind_state u_ = fly_cleanup_begin(); ");
-                                        v255_t = v249_call;
-                                        v256_t = v251_t;
-                                        $b.String_push(v256_t, v255_t);
-                                        v258_t = v251_t;
-                                        $b.String_push(v258_t, "; fly_cleanup_end(u_); }\n");
-                                        v260_t = v251_t.v;
-                                        v261_t = v260_t;
-                                        $b.String_push(v250_t, v261_t);
+                                        let v226_t;
+                                        v226_t = (v225_t.$tag === "Some");
+                                        if (v226_t)
+                                        {
+                                          let v227_t;
+                                          v227_t = (v225_t.$.$tag === "Ty");
+                                          v226_t = v227_t;
+                                        }
+                                        if (v226_t)
+                                        {
+                                          let v228_t;
+                                          {
+                                            let v229_e, v230_t, v231_t;
+                                            v229_e = v225_t.$.$;
+                                            v230_t = v0_self.v;
+                                            v231_t = needsDrop_553(v230_t, v229_e);
+                                            v228_t = v231_t;
+                                          }
+                                          if (v228_t)
+                                          {
+                                            let v232_e;
+                                            v232_e = v225_t.$.$;
+                                            {
+                                              const v236_t = { v: undefined };
+                                              let v233_t, v234_f, v235_t, v237_t, v238_t, v239_t, v240_t, v241_t, v242_t, v243_t, v244_t, v245_t, v246_t, v247_t;
+                                              v233_t = dropFn_524(v0_self, v232_e, $copy4(v2_span));
+                                              v234_f = v233_t;
+                                              v235_t = v50_body;
+                                              v237_t = $b.String_new();
+                                              v236_t.v = v237_t;
+                                              v238_t = v236_t;
+                                              $b.String_push(v238_t, "  if (*v) ");
+                                              v240_t = v234_f;
+                                              v241_t = v236_t;
+                                              $b.String_push(v241_t, v240_t);
+                                              v243_t = v236_t;
+                                              $b.String_push(v243_t, "(*v);\n");
+                                              v245_t = v236_t.v;
+                                              v246_t = v245_t;
+                                              $b.String_push(v235_t, v246_t);
+                                            }
+                                            break L4;
+                                          }
+                                        }
+                                        {
+                                          {
+                                          }
+                                          break L4;
+                                        }
+                                        $rt.panic("no arm matched");
                                       }
+                                      v248_t = v50_body;
+                                      $b.String_push(v248_t, "  free(*v);\n  *v = NULL;\n");
                                     }
-                                    L5:
+                                  }
+                                  else
+                                  {
                                     {
-                                      let v263_t;
-                                      v263_t = ($ix(v0_self.v.lw.p.defs, v52_d).kind.$tag === "Enum");
-                                      if (v263_t)
+                                      let v250_t, v251_t;
+                                      v250_t = v0_self.v.lw.p;
+                                      v251_t = hasDrop_167(v250_t, v52_d);
+                                      if (v251_t)
                                       {
-                                        let v264_t, v265_t, v266_t;
-                                        v265_t = v0_self;
-                                        v264_t = v50_body;
-                                        dropTags_846(v265_t, v264_t, v1_t, $copy4(v2_span));
-                                        break L5;
+                                        {
+                                          const v255_t = { v: undefined };
+                                          let v252_t, v253_call, v254_t, v256_t, v257_t, v258_t, v259_t, v260_t, v261_t, v262_t, v263_t, v264_t, v265_t, v266_t;
+                                          v252_t = dropCall_845(v0_self, v1_t, $copy4(v2_span));
+                                          v253_call = v252_t;
+                                          v254_t = v50_body;
+                                          v256_t = $b.String_new();
+                                          v255_t.v = v256_t;
+                                          v257_t = v255_t;
+                                          $b.String_push(v257_t, "  if (v->live) { v->live = false; fly_unwind_state u_ = fly_cleanup_begin(); ");
+                                          v259_t = v253_call;
+                                          v260_t = v255_t;
+                                          $b.String_push(v260_t, v259_t);
+                                          v262_t = v255_t;
+                                          $b.String_push(v262_t, "; fly_cleanup_end(u_); }\n");
+                                          v264_t = v255_t.v;
+                                          v265_t = v264_t;
+                                          $b.String_push(v254_t, v265_t);
+                                        }
                                       }
+                                      L5:
                                       {
-                                        let v267_t, v268_t, v269_t;
-                                        v268_t = v0_self;
-                                        v267_t = v50_body;
-                                        dropFields_847(v268_t, v267_t, v1_t, $copy4(v2_span));
-                                        break L5;
+                                        let v267_t;
+                                        v267_t = ($ix(v0_self.v.lw.p.defs, v52_d).kind.$tag === "Enum");
+                                        if (v267_t)
+                                        {
+                                          let v268_t, v269_t, v270_t;
+                                          v269_t = v0_self;
+                                          v268_t = v50_body;
+                                          dropTags_846(v269_t, v268_t, v1_t, $copy4(v2_span));
+                                          break L5;
+                                        }
+                                        {
+                                          let v271_t, v272_t, v273_t;
+                                          v272_t = v0_self;
+                                          v271_t = v50_body;
+                                          dropFields_847(v272_t, v271_t, v1_t, $copy4(v2_span));
+                                          break L5;
+                                        }
+                                        $rt.panic("no arm matched");
                                       }
-                                      $rt.panic("no arm matched");
                                     }
                                   }
                                 }
@@ -73928,108 +74013,108 @@ function dropFn_524($1243, $1244, $1245) {
           }
           break L2;
         }
-        v270_t = false;
-        if (v270_t)
+        v274_t = false;
+        if (v274_t)
         {
         }
         else
         {
-          let v271_t;
-          v271_t = (v1_t.$tag === "Record");
-          v270_t = v271_t;
+          let v275_t;
+          v275_t = (v1_t.$tag === "Record");
+          v274_t = v275_t;
         }
-        if (v270_t)
+        if (v274_t)
         {
         }
         else
         {
-          let v272_t;
-          v272_t = (v1_t.$tag === "Tuple");
-          v270_t = v272_t;
+          let v276_t;
+          v276_t = (v1_t.$tag === "Tuple");
+          v274_t = v276_t;
         }
-        if (v270_t)
-        {
-          let v273_t, v274_t, v275_t;
-          v274_t = v0_self;
-          v273_t = v50_body;
-          dropFields_847(v274_t, v273_t, v1_t, $copy4(v2_span));
-          break L2;
-        }
-        v276_t = (v1_t.$tag === "Union");
-        if (v276_t)
+        if (v274_t)
         {
           let v277_t, v278_t, v279_t;
           v278_t = v0_self;
           v277_t = v50_body;
-          dropTags_846(v278_t, v277_t, v1_t, $copy4(v2_span));
+          dropFields_847(v278_t, v277_t, v1_t, $copy4(v2_span));
           break L2;
         }
-        v280_t = (v1_t.$tag === "Array");
+        v280_t = (v1_t.$tag === "Union");
         if (v280_t)
         {
-          let v281_e, v282_l;
-          v281_e = v1_t.$[0];
-          v282_l = v1_t.$[1];
+          let v281_t, v282_t, v283_t;
+          v282_t = v0_self;
+          v281_t = v50_body;
+          dropTags_846(v282_t, v281_t, v1_t, $copy4(v2_span));
+          break L2;
+        }
+        v284_t = (v1_t.$tag === "Array");
+        if (v284_t)
+        {
+          let v285_e, v286_l;
+          v285_e = v1_t.$[0];
+          v286_l = v1_t.$[1];
           {
-            let v283_t, v284_t, v285_t;
-            v283_t = v0_self.v;
-            v284_t = v281_e;
-            v285_t = needsDrop_553(v283_t, v284_t);
-            if (v285_t)
+            let v287_t, v288_t, v289_t;
+            v287_t = v0_self.v;
+            v288_t = v285_e;
+            v289_t = needsDrop_553(v287_t, v288_t);
+            if (v289_t)
             {
               {
-                const v295_t = { v: undefined };
-                let v286_t, v287_t, v288_t, v289_f, v290_t, v293_n, v294_t, v296_t, v297_t, v298_t, v299_t, v300_t, v301_t, v302_t, v303_t, v304_t, v305_t, v306_t, v307_t, v308_t, v309_t, v310_t;
-                v287_t = v0_self;
-                v286_t = v281_e;
-                v288_t = dropFn_524(v287_t, v286_t, $copy4(v2_span));
-                v289_f = v288_t;
+                const v299_t = { v: undefined };
+                let v290_t, v291_t, v292_t, v293_f, v294_t, v297_n, v298_t, v300_t, v301_t, v302_t, v303_t, v304_t, v305_t, v306_t, v307_t, v308_t, v309_t, v310_t, v311_t, v312_t, v313_t, v314_t;
+                v291_t = v0_self;
+                v290_t = v285_e;
+                v292_t = dropFn_524(v291_t, v290_t, $copy4(v2_span));
+                v293_f = v292_t;
                 L6:
                 {
-                  let v291_t;
-                  v291_t = (v282_l.$tag === "Known");
-                  if (v291_t)
+                  let v295_t;
+                  v295_t = (v286_l.$tag === "Known");
+                  if (v295_t)
                   {
-                    let v292_n;
-                    v292_n = v282_l.$;
-                    v290_t = v292_n;
+                    let v296_n;
+                    v296_n = v286_l.$;
+                    v294_t = v296_n;
                     break L6;
                   }
                   {
-                    v290_t = 0n;
+                    v294_t = 0n;
                     break L6;
                   }
                   $rt.panic("no arm matched");
                 }
-                v293_n = v290_t;
-                v294_t = v50_body;
-                v296_t = $b.String_new();
-                v295_t.v = v296_t;
-                v297_t = v295_t;
-                $b.String_push(v297_t, "  for (size_t i = 0; i < ");
-                v299_t = v295_t;
-                (v299_t.v += String(v293_n), undefined);
-                v301_t = v295_t;
-                $b.String_push(v301_t, "; i++) ");
-                v303_t = v289_f;
-                v304_t = v295_t;
-                $b.String_push(v304_t, v303_t);
-                v306_t = v295_t;
-                $b.String_push(v306_t, "(&v->data[i]);\n");
-                v308_t = v295_t.v;
-                v309_t = v308_t;
-                $b.String_push(v294_t, v309_t);
+                v297_n = v294_t;
+                v298_t = v50_body;
+                v300_t = $b.String_new();
+                v299_t.v = v300_t;
+                v301_t = v299_t;
+                $b.String_push(v301_t, "  for (size_t i = 0; i < ");
+                v303_t = v299_t;
+                (v303_t.v += String(v297_n), undefined);
+                v305_t = v299_t;
+                $b.String_push(v305_t, "; i++) ");
+                v307_t = v293_f;
+                v308_t = v299_t;
+                $b.String_push(v308_t, v307_t);
+                v310_t = v299_t;
+                $b.String_push(v310_t, "(&v->data[i]);\n");
+                v312_t = v299_t.v;
+                v313_t = v312_t;
+                $b.String_push(v298_t, v313_t);
               }
             }
           }
           break L2;
         }
-        v311_t = (v1_t.$tag === "Fn");
-        if (v311_t)
+        v315_t = (v1_t.$tag === "Fn");
+        if (v315_t)
         {
-          let v312_t, v313_t;
-          v312_t = v50_body;
-          $b.String_push(v312_t, "  if (v->drop) v->drop(v->env);\n  *v = (fly_fn){ 0 };\n");
+          let v316_t, v317_t;
+          v316_t = v50_body;
+          $b.String_push(v316_t, "  if (v->drop) v->drop(v->env);\n  *v = (fly_fn){ 0 };\n");
           break L2;
         }
         {
@@ -74039,29 +74124,29 @@ function dropFn_524($1243, $1244, $1245) {
         }
         $rt.panic("no arm matched");
       }
-      v314_t = new $rt.FieldRef(v0_self.v, "dropCode");
-      v316_t = $b.String_new();
-      v315_t.v = v316_t;
-      v317_t = v315_t;
-      $b.String_push(v317_t, "static void ");
-      v319_t = v23_name;
-      v320_t = v315_t;
-      $b.String_push(v320_t, v319_t);
-      v322_t = v315_t;
-      $b.String_push(v322_t, "(");
-      v324_t = v30_c;
-      v325_t = v315_t;
-      $b.String_push(v325_t, v324_t);
-      v327_t = v315_t;
-      $b.String_push(v327_t, "* v) {\n");
-      v329_t = v50_body.v;
-      v330_t = v315_t;
-      $b.String_push(v330_t, v329_t);
-      v332_t = v315_t;
-      $b.String_push(v332_t, "}\n");
-      v334_t = v315_t.v;
-      v335_t = v334_t;
-      $b.String_push(v314_t, v335_t);
+      v318_t = new $rt.FieldRef(v0_self.v, "dropCode");
+      v320_t = $b.String_new();
+      v319_t.v = v320_t;
+      v321_t = v319_t;
+      $b.String_push(v321_t, "static void ");
+      v323_t = v23_name;
+      v324_t = v319_t;
+      $b.String_push(v324_t, v323_t);
+      v326_t = v319_t;
+      $b.String_push(v326_t, "(");
+      v328_t = v30_c;
+      v329_t = v319_t;
+      $b.String_push(v329_t, v328_t);
+      v331_t = v319_t;
+      $b.String_push(v331_t, "* v) {\n");
+      v333_t = v50_body.v;
+      v334_t = v319_t;
+      $b.String_push(v334_t, v333_t);
+      v336_t = v319_t;
+      $b.String_push(v336_t, "}\n");
+      v338_t = v319_t.v;
+      v339_t = v338_t;
+      $b.String_push(v318_t, v339_t);
       v4_t = v23_name;
     }
     v3_ret = v4_t;
@@ -115657,7 +115742,7 @@ function scalar_858($2017, $2018) {
         v10_t = (v1_t.$tag === "Named");
         if (v10_t)
         {
-          let v11_d, v12_t, v13_t, v14_t, v17_t, v20_t, v23_t, v25_t, v27_t, v29_t, v31_t, v33_t, v35_t, v37_t, v39_t, v41_t, v43_t, v45_t;
+          let v11_d, v12_t, v13_t, v14_t, v17_t, v20_t, v23_t, v25_t, v27_t, v29_t, v31_t, v33_t, v35_t, v37_t, v39_t, v41_t, v43_t, v45_t, v47_t;
           v11_d = v1_t.$[0];
           v12_t = v0_self.lw.p;
           v13_t = isKnown_168(v12_t, v11_d, "Box");
@@ -115814,7 +115899,17 @@ function scalar_858($2017, $2018) {
             v46_t = namedIs_545(v0_self, v1_t, "Db");
             v45_t = v46_t;
           }
-          v4_t = v45_t;
+          v47_t = v45_t;
+          if (v47_t)
+          {
+          }
+          else
+          {
+            let v48_t;
+            v48_t = namedIs_545(v0_self, v1_t, "Task");
+            v47_t = v48_t;
+          }
+          v4_t = v47_t;
           break L1;
         }
         {
@@ -243371,10 +243466,10 @@ function prelude_1725($4219, $4220, $4221, $4222) {
 function tasksLib_1726($4224, $4225, $4226, $4227) {
   let v4_ret;
   {
-    let v0_self, v1_key, v2_c, v3_vs, v5_t, v73_t, v90_t, v97_t, v195_t, v202_t, v234_t, v296_t, v308_t, v330_t, v342_t, v377_t, v409_t, v431_t, v443_t, v468_t, v512_t, v519_t, v609_t, v616_t, v677_t, v689_t, v724_t, v746_t, v758_t, v765_t, v777_t, v784_t, v801_t, v808_t, v815_t, v832_t, v839_t, v856_t, v873_t, v885_t, v900_t, v907_t, v927_t, v934_t, v954_t, v961_t, v981_t, v988_t, v1008_t, v1015_t, v1022_t, v1048_t, v1087_t;
+    let v0_self, v1_key, v2_c, v3_vs, v5_t, v73_t, v90_t, v97_t, v109_t, v126_t, v168_t, v180_t, v278_t, v285_t, v317_t, v379_t, v391_t, v413_t, v425_t, v460_t, v492_t, v514_t, v526_t, v551_t, v595_t, v602_t, v692_t, v699_t, v760_t, v772_t, v807_t, v829_t, v841_t, v848_t, v860_t, v867_t, v884_t, v891_t, v898_t, v915_t, v922_t, v939_t, v956_t, v968_t, v983_t, v990_t, v1010_t, v1017_t, v1037_t, v1044_t, v1064_t, v1071_t, v1091_t, v1098_t, v1105_t, v1131_t, v1170_t;
     v0_self = $4224; v1_key = $4225; v2_c = $4226; v3_vs = $4227; 
     {
-      let v6_t, v7_t, v8_ptys, v9_span, v10_t, v11_t, v12_rt, v13_t, v14_arg, v15_t, v16_t, v17_t, v18_t, v22_t, v27_carried, v28_t, v1109_t;
+      let v6_t, v7_t, v8_ptys, v9_span, v10_t, v11_t, v12_rt, v13_t, v14_arg, v15_t, v16_t, v17_t, v18_t, v22_t, v27_carried, v28_t, v1192_t;
       v6_t = v2_c.params;
       v7_t = clone_83(v6_t);
       v8_ptys = v7_t;
@@ -243448,7 +243543,7 @@ function tasksLib_1726($4224, $4225, $4226, $4227) {
       v27_carried = v18_t;
       L2:
       {
-        let v29_t, v84_t, v103_t, v218_t, v240_t, v285_t, v319_t, v353_t, v398_t, v425_t, v437_t, v449_t, v484_t, v540_t, v632_t, v705_t, v740_t, v752_t, v771_t, v790_t, v826_t, v845_t, v847_t, v867_t, v879_t, v891_t, v918_t, v945_t, v972_t, v999_t, v1033_t, v1074_t;
+        let v29_t, v84_t, v103_t, v115_t, v162_t, v174_t, v186_t, v301_t, v323_t, v368_t, v402_t, v436_t, v481_t, v508_t, v520_t, v532_t, v567_t, v623_t, v715_t, v788_t, v823_t, v835_t, v854_t, v873_t, v909_t, v928_t, v930_t, v950_t, v962_t, v974_t, v1001_t, v1028_t, v1055_t, v1082_t, v1116_t, v1157_t;
         v29_t = (v1_key === "Io_scope");
         if (v29_t)
         {
@@ -243539,1471 +243634,1585 @@ function tasksLib_1726($4224, $4225, $4226, $4227) {
           v99_t = v85_t;
           $b.String_push(v99_t, v98_t);
           v101_t = v85_t;
-          $b.String_push(v101_t, "; fly_spawn(*s_, fly_task_void, fly_box(&f_, sizeof f_), 0); (fly_unit)0; })");
+          $b.String_push(v101_t, "; fly_task_spawn(*s_, fly_box(&f_, sizeof f_)); })");
           v28_t = v85_t.v;
           break L2;
         }
-        v103_t = (v1_key === "Scope_fork");
+        v103_t = (v1_key === "Task_cancel");
         if (v103_t)
         {
-          let v104_t;
+          const v104_t = { v: undefined };
+          let v105_t, v106_t, v107_t, v108_t, v110_t, v111_t, v112_t, v113_t, v114_t;
+          v105_t = $b.String_new();
+          v104_t.v = v105_t;
+          v106_t = v104_t;
+          $b.String_push(v106_t, "({ fly_task_cancel(");
+          v108_t = v14_arg(0);
+          v109_t = v108_t;
+          v110_t = v109_t;
+          v111_t = v104_t;
+          $b.String_push(v111_t, v110_t);
+          v113_t = v104_t;
+          $b.String_push(v113_t, "); (fly_unit)0; })");
+          v28_t = v104_t.v;
+          break L2;
+        }
+        v115_t = (v1_key === "Task_wait");
+        if (v115_t)
+        {
+          let v116_t;
           {
-            const v112_t = { v: undefined };
-            const v190_t = { v: undefined };
-            let v105_t, v106_t, v107_t, v108_t, v109_t, v110_t, v111_tc, v113_t, v114_t, v115_t, v116_t, v117_t, v118_t, v119_t, v120_t, v121_t, v122_entryKey, v123_t, v124_t, v125_t, v126_t, v127_t, v128_t, v189_entry, v191_t, v192_t, v193_t, v194_t, v196_t, v197_t, v198_t, v199_t, v200_t, v201_t, v203_t, v204_t, v205_t, v206_t, v207_t, v208_t, v209_t, v210_t, v211_t, v212_t, v213_t, v214_t, v215_t, v216_t, v217_t;
-            v105_t = v12_rt;
-            v106_t = typeArg_546(v105_t, 0);
-            v107_t = v106_t;
-            v109_t = v0_self;
-            v108_t = v107_t;
-            v110_t = ctype_314(v109_t, v108_t, $copy4(v9_span));
-            v111_tc = v110_t;
-            v113_t = $b.String_new();
-            v112_t.v = v113_t;
-            v114_t = v112_t;
-            $b.String_push(v114_t, "fork:");
-            v116_t = v107_t;
-            v117_t = ckey_843(v116_t);
-            v118_t = v117_t;
-            v119_t = v118_t;
-            v120_t = v112_t;
-            $b.String_push(v120_t, v119_t);
-            v122_entryKey = v112_t.v;
-            v123_t = v0_self.v.helpers;
-            v124_t = v122_entryKey;
-            v125_t = $b.String_asStr(v124_t);
-            v126_t = $b.HashMap_get(v123_t, v125_t);
+            const v121_t = { v: undefined };
+            let v117_t, v118_t, v119_t, v120_tc, v122_t, v123_t, v124_t, v125_t, v127_t, v128_t, v129_t, v130_t, v131_t, v132_t, v133_t, v134_t, v135_t, v136_t, v137_t, v138_t, v139_t, v140_t, v141_t, v142_t, v143_t, v144_t, v145_t, v146_t, v147_t, v148_t, v149_t, v150_t, v151_t, v152_t, v153_t, v154_t, v155_t, v156_t, v157_t, v158_t, v159_t, v160_t, v161_t;
+            v118_t = v0_self;
+            v117_t = v12_rt;
+            v119_t = ctype_314(v118_t, v117_t, $copy4(v9_span));
+            v120_tc = v119_t;
+            v122_t = $b.String_new();
+            v121_t.v = v122_t;
+            v123_t = v121_t;
+            $b.String_push(v123_t, "({ fly_String m_ = { 0 }; int32_t k_ = fly_task_wait(");
+            v125_t = v14_arg(0);
+            v126_t = v125_t;
             v127_t = v126_t;
+            v128_t = v121_t;
+            $b.String_push(v128_t, v127_t);
+            v130_t = v121_t;
+            $b.String_push(v130_t, ", &m_); k_ == FLY_TASK_PANICKED ? ((");
+            v132_t = v120_tc;
+            v133_t = v121_t;
+            $b.String_push(v133_t, v132_t);
+            v135_t = v121_t;
+            $b.String_push(v135_t, "){ .tag = ");
+            v137_t = tagId_868(v0_self, "Panicked");
+            v138_t = v121_t;
+            (v138_t.v += String(v137_t), undefined);
+            v140_t = v121_t;
+            $b.String_push(v140_t, ", .u.Panicked = m_ }) : k_ == FLY_TASK_CANCELLED ? ((");
+            v142_t = v120_tc;
+            v143_t = v121_t;
+            $b.String_push(v143_t, v142_t);
+            v145_t = v121_t;
+            $b.String_push(v145_t, "){ .tag = ");
+            v147_t = tagId_868(v0_self, "Cancelled");
+            v148_t = v121_t;
+            (v148_t.v += String(v147_t), undefined);
+            v150_t = v121_t;
+            $b.String_push(v150_t, " }) : ((");
+            v152_t = v120_tc;
+            v153_t = v121_t;
+            $b.String_push(v153_t, v152_t);
+            v155_t = v121_t;
+            $b.String_push(v155_t, "){ .tag = ");
+            v157_t = tagId_868(v0_self, "Done");
+            v158_t = v121_t;
+            (v158_t.v += String(v157_t), undefined);
+            v160_t = v121_t;
+            $b.String_push(v160_t, " }); })");
+            v116_t = v121_t.v;
+          }
+          v28_t = v116_t;
+          break L2;
+        }
+        v162_t = (v1_key === "Task_any");
+        if (v162_t)
+        {
+          const v163_t = { v: undefined };
+          let v164_t, v165_t, v166_t, v167_t, v169_t, v170_t, v171_t, v172_t, v173_t;
+          v164_t = $b.String_new();
+          v163_t.v = v164_t;
+          v165_t = v163_t;
+          $b.String_push(v165_t, "({ fly_slice s_ = ");
+          v167_t = v14_arg(0);
+          v168_t = v167_t;
+          v169_t = v168_t;
+          v170_t = v163_t;
+          $b.String_push(v170_t, v169_t);
+          v172_t = v163_t;
+          $b.String_push(v172_t, "; fly_task_any((void* const*)s_.ptr, s_.len); })");
+          v28_t = v163_t.v;
+          break L2;
+        }
+        v174_t = (v1_key === "Task_clone");
+        if (v174_t)
+        {
+          const v175_t = { v: undefined };
+          let v176_t, v177_t, v178_t, v179_t, v181_t, v182_t, v183_t, v184_t, v185_t;
+          v176_t = $b.String_new();
+          v175_t.v = v176_t;
+          v177_t = v175_t;
+          $b.String_push(v177_t, "fly_task_clone(");
+          v179_t = v14_arg(0);
+          v180_t = v179_t;
+          v181_t = v180_t;
+          v182_t = v175_t;
+          $b.String_push(v182_t, v181_t);
+          v184_t = v175_t;
+          $b.String_push(v184_t, ")");
+          v28_t = v175_t.v;
+          break L2;
+        }
+        v186_t = (v1_key === "Scope_fork");
+        if (v186_t)
+        {
+          let v187_t;
+          {
+            const v195_t = { v: undefined };
+            const v273_t = { v: undefined };
+            let v188_t, v189_t, v190_t, v191_t, v192_t, v193_t, v194_tc, v196_t, v197_t, v198_t, v199_t, v200_t, v201_t, v202_t, v203_t, v204_t, v205_entryKey, v206_t, v207_t, v208_t, v209_t, v210_t, v211_t, v272_entry, v274_t, v275_t, v276_t, v277_t, v279_t, v280_t, v281_t, v282_t, v283_t, v284_t, v286_t, v287_t, v288_t, v289_t, v290_t, v291_t, v292_t, v293_t, v294_t, v295_t, v296_t, v297_t, v298_t, v299_t, v300_t;
+            v188_t = v12_rt;
+            v189_t = typeArg_546(v188_t, 0);
+            v190_t = v189_t;
+            v192_t = v0_self;
+            v191_t = v190_t;
+            v193_t = ctype_314(v192_t, v191_t, $copy4(v9_span));
+            v194_tc = v193_t;
+            v196_t = $b.String_new();
+            v195_t.v = v196_t;
+            v197_t = v195_t;
+            $b.String_push(v197_t, "fork:");
+            v199_t = v190_t;
+            v200_t = ckey_843(v199_t);
+            v201_t = v200_t;
+            v202_t = v201_t;
+            v203_t = v195_t;
+            $b.String_push(v203_t, v202_t);
+            v205_entryKey = v195_t.v;
+            v206_t = v0_self.v.helpers;
+            v207_t = v205_entryKey;
+            v208_t = $b.String_asStr(v207_t);
+            v209_t = $b.HashMap_get(v206_t, v208_t);
+            v210_t = v209_t;
             L3:
             {
-              let v129_t, v132_t;
-              v129_t = (v127_t.$tag === "Some");
-              if (v129_t)
+              let v212_t, v215_t;
+              v212_t = (v210_t.$tag === "Some");
+              if (v212_t)
               {
-                let v130_n, v131_t;
-                v130_n = v127_t.$;
-                v131_t = $b.String_clone(v130_n);
-                v128_t = v131_t;
+                let v213_n, v214_t;
+                v213_n = v210_t.$;
+                v214_t = $b.String_clone(v213_n);
+                v211_t = v214_t;
                 break L3;
               }
-              v132_t = (v127_t.$tag === "None");
-              if (v132_t)
+              v215_t = (v210_t.$tag === "None");
+              if (v215_t)
               {
-                let v133_t;
+                let v216_t;
                 {
-                  const v134_t = { v: undefined };
-                  const v149_t = { v: undefined };
-                  const v162_t = { v: undefined };
-                  let v135_t, v136_t, v137_t, v138_t, v139_t, v140_t, v141_t, v142_n, v143_t, v144_t, v145_t, v146_t, v147_t, v148_t, v150_t, v151_t, v152_t, v153_t, v154_t, v155_t, v156_t, v157_t, v158_t, v159_t, v160_t, v161_t, v163_t, v164_t, v165_t, v166_t, v167_t, v168_t, v169_t, v170_t, v171_t, v172_t, v173_t, v174_t, v175_t, v176_t, v177_t, v178_t, v179_t, v180_t, v181_t, v182_t, v183_t, v184_t, v185_t, v186_t, v187_t, v188_t;
-                  v135_t = $b.String_new();
-                  v134_t.v = v135_t;
-                  v136_t = v134_t;
-                  $b.String_push(v136_t, "tentry");
-                  v138_t = v0_self.v.helpers;
-                  v139_t = $b.HashMap_len(v138_t);
-                  v140_t = v134_t;
-                  (v140_t.v += String(v139_t), undefined);
-                  v142_n = v134_t.v;
-                  v143_t = new $rt.FieldRef(v0_self.v, "helpers");
-                  v146_t = v122_entryKey;
-                  v144_t = v142_n;
-                  v145_t = $b.String_clone(v144_t);
-                  $b.HashMap_insert(v143_t, v146_t, v145_t);
-                  v148_t = new $rt.FieldRef(v0_self.v, "protos");
-                  v150_t = $b.String_new();
-                  v149_t.v = v150_t;
-                  v151_t = v149_t;
-                  $b.String_push(v151_t, "static void ");
-                  v153_t = v142_n;
-                  v154_t = v149_t;
-                  $b.String_push(v154_t, v153_t);
-                  v156_t = v149_t;
-                  $b.String_push(v156_t, "(void* t, void* c);\n");
-                  v158_t = v149_t.v;
-                  v159_t = v158_t;
-                  $b.String_push(v148_t, v159_t);
-                  v161_t = new $rt.FieldRef(v0_self.v, "dropCode");
-                  v163_t = $b.String_new();
-                  v162_t.v = v163_t;
-                  v164_t = v162_t;
-                  $b.String_push(v164_t, "static void ");
-                  v166_t = v142_n;
-                  v167_t = v162_t;
-                  $b.String_push(v167_t, v166_t);
-                  v169_t = v162_t;
-                  $b.String_push(v169_t, "(void* t, void* c) { fly_fn* f = c; ");
-                  v171_t = v111_tc;
-                  v172_t = v162_t;
-                  $b.String_push(v172_t, v171_t);
-                  v174_t = v162_t;
-                  $b.String_push(v174_t, " v = ((");
-                  v176_t = v111_tc;
-                  v177_t = v162_t;
-                  $b.String_push(v177_t, v176_t);
-                  v179_t = v162_t;
-                  $b.String_push(v179_t, " (*)(void*))f->fn)(f->env); *(");
-                  v181_t = v111_tc;
-                  v182_t = v162_t;
-                  $b.String_push(v182_t, v181_t);
-                  v184_t = v162_t;
-                  $b.String_push(v184_t, "*)fly_task_result(t) = v; if (f->drop) f->drop(f->env); free(f); }\n");
-                  v186_t = v162_t.v;
-                  v187_t = v186_t;
-                  $b.String_push(v161_t, v187_t);
-                  v133_t = v142_n;
+                  const v217_t = { v: undefined };
+                  const v232_t = { v: undefined };
+                  const v245_t = { v: undefined };
+                  let v218_t, v219_t, v220_t, v221_t, v222_t, v223_t, v224_t, v225_n, v226_t, v227_t, v228_t, v229_t, v230_t, v231_t, v233_t, v234_t, v235_t, v236_t, v237_t, v238_t, v239_t, v240_t, v241_t, v242_t, v243_t, v244_t, v246_t, v247_t, v248_t, v249_t, v250_t, v251_t, v252_t, v253_t, v254_t, v255_t, v256_t, v257_t, v258_t, v259_t, v260_t, v261_t, v262_t, v263_t, v264_t, v265_t, v266_t, v267_t, v268_t, v269_t, v270_t, v271_t;
+                  v218_t = $b.String_new();
+                  v217_t.v = v218_t;
+                  v219_t = v217_t;
+                  $b.String_push(v219_t, "tentry");
+                  v221_t = v0_self.v.helpers;
+                  v222_t = $b.HashMap_len(v221_t);
+                  v223_t = v217_t;
+                  (v223_t.v += String(v222_t), undefined);
+                  v225_n = v217_t.v;
+                  v226_t = new $rt.FieldRef(v0_self.v, "helpers");
+                  v229_t = v205_entryKey;
+                  v227_t = v225_n;
+                  v228_t = $b.String_clone(v227_t);
+                  $b.HashMap_insert(v226_t, v229_t, v228_t);
+                  v231_t = new $rt.FieldRef(v0_self.v, "protos");
+                  v233_t = $b.String_new();
+                  v232_t.v = v233_t;
+                  v234_t = v232_t;
+                  $b.String_push(v234_t, "static void ");
+                  v236_t = v225_n;
+                  v237_t = v232_t;
+                  $b.String_push(v237_t, v236_t);
+                  v239_t = v232_t;
+                  $b.String_push(v239_t, "(void* t, void* c);\n");
+                  v241_t = v232_t.v;
+                  v242_t = v241_t;
+                  $b.String_push(v231_t, v242_t);
+                  v244_t = new $rt.FieldRef(v0_self.v, "dropCode");
+                  v246_t = $b.String_new();
+                  v245_t.v = v246_t;
+                  v247_t = v245_t;
+                  $b.String_push(v247_t, "static void ");
+                  v249_t = v225_n;
+                  v250_t = v245_t;
+                  $b.String_push(v250_t, v249_t);
+                  v252_t = v245_t;
+                  $b.String_push(v252_t, "(void* t, void* c) { fly_fn* f = c; ");
+                  v254_t = v194_tc;
+                  v255_t = v245_t;
+                  $b.String_push(v255_t, v254_t);
+                  v257_t = v245_t;
+                  $b.String_push(v257_t, " v = ((");
+                  v259_t = v194_tc;
+                  v260_t = v245_t;
+                  $b.String_push(v260_t, v259_t);
+                  v262_t = v245_t;
+                  $b.String_push(v262_t, " (*)(void*))f->fn)(f->env); *(");
+                  v264_t = v194_tc;
+                  v265_t = v245_t;
+                  $b.String_push(v265_t, v264_t);
+                  v267_t = v245_t;
+                  $b.String_push(v267_t, "*)fly_task_result(t) = v; if (f->drop) f->drop(f->env); free(f); }\n");
+                  v269_t = v245_t.v;
+                  v270_t = v269_t;
+                  $b.String_push(v244_t, v270_t);
+                  v216_t = v225_n;
                 }
-                v128_t = v133_t;
+                v211_t = v216_t;
                 break L3;
               }
               $rt.panic("no arm matched");
             }
-            v189_entry = v128_t;
-            v191_t = $b.String_new();
-            v190_t.v = v191_t;
-            v192_t = v190_t;
-            $b.String_push(v192_t, "({ int* s_ = ");
-            v194_t = v14_arg(0);
-            v195_t = v194_t;
-            v196_t = v195_t;
-            v197_t = v190_t;
-            $b.String_push(v197_t, v196_t);
-            v199_t = v190_t;
-            $b.String_push(v199_t, "; fly_fn f_ = ");
-            v201_t = v14_arg(1);
-            v202_t = v201_t;
-            v203_t = v202_t;
-            v204_t = v190_t;
-            $b.String_push(v204_t, v203_t);
-            v206_t = v190_t;
-            $b.String_push(v206_t, "; int t_ = fly_spawn(*s_, ");
-            v208_t = v189_entry;
-            v209_t = v190_t;
-            $b.String_push(v209_t, v208_t);
-            v211_t = v190_t;
-            $b.String_push(v211_t, ", fly_box(&f_, sizeof f_), sizeof(");
-            v213_t = v111_tc;
-            v214_t = v190_t;
-            $b.String_push(v214_t, v213_t);
-            v216_t = v190_t;
-            $b.String_push(v216_t, ")); t_; })");
-            v104_t = v190_t.v;
+            v272_entry = v211_t;
+            v274_t = $b.String_new();
+            v273_t.v = v274_t;
+            v275_t = v273_t;
+            $b.String_push(v275_t, "({ int* s_ = ");
+            v277_t = v14_arg(0);
+            v278_t = v277_t;
+            v279_t = v278_t;
+            v280_t = v273_t;
+            $b.String_push(v280_t, v279_t);
+            v282_t = v273_t;
+            $b.String_push(v282_t, "; fly_fn f_ = ");
+            v284_t = v14_arg(1);
+            v285_t = v284_t;
+            v286_t = v285_t;
+            v287_t = v273_t;
+            $b.String_push(v287_t, v286_t);
+            v289_t = v273_t;
+            $b.String_push(v289_t, "; int t_ = fly_spawn(*s_, ");
+            v291_t = v272_entry;
+            v292_t = v273_t;
+            $b.String_push(v292_t, v291_t);
+            v294_t = v273_t;
+            $b.String_push(v294_t, ", fly_box(&f_, sizeof f_), sizeof(");
+            v296_t = v194_tc;
+            v297_t = v273_t;
+            $b.String_push(v297_t, v296_t);
+            v299_t = v273_t;
+            $b.String_push(v299_t, ")); t_; })");
+            v187_t = v273_t.v;
           }
-          v28_t = v104_t;
+          v28_t = v187_t;
           break L2;
         }
-        v218_t = (v1_key === "Fiber_join");
-        if (v218_t)
+        v301_t = (v1_key === "Fiber_join");
+        if (v301_t)
         {
-          let v219_t;
+          let v302_t;
           {
-            const v224_t = { v: undefined };
-            let v220_t, v221_t, v222_t, v223_tc, v225_t, v226_t, v227_t, v228_t, v229_t, v230_t, v231_t, v232_t, v233_t, v235_t, v236_t, v237_t, v238_t, v239_t;
-            v221_t = v0_self;
-            v220_t = v12_rt;
-            v222_t = ctype_314(v221_t, v220_t, $copy4(v9_span));
-            v223_tc = v222_t;
-            v225_t = $b.String_new();
-            v224_t.v = v225_t;
-            v226_t = v224_t;
-            $b.String_push(v226_t, "({ ");
-            v228_t = v223_tc;
-            v229_t = v224_t;
-            $b.String_push(v229_t, v228_t);
-            v231_t = v224_t;
-            $b.String_push(v231_t, " r_ = { 0 }; fly_join(");
-            v233_t = v14_arg(0);
-            v234_t = v233_t;
-            v235_t = v234_t;
-            v236_t = v224_t;
-            $b.String_push(v236_t, v235_t);
-            v238_t = v224_t;
-            $b.String_push(v238_t, ", &r_); r_; })");
-            v219_t = v224_t.v;
+            const v307_t = { v: undefined };
+            let v303_t, v304_t, v305_t, v306_tc, v308_t, v309_t, v310_t, v311_t, v312_t, v313_t, v314_t, v315_t, v316_t, v318_t, v319_t, v320_t, v321_t, v322_t;
+            v304_t = v0_self;
+            v303_t = v12_rt;
+            v305_t = ctype_314(v304_t, v303_t, $copy4(v9_span));
+            v306_tc = v305_t;
+            v308_t = $b.String_new();
+            v307_t.v = v308_t;
+            v309_t = v307_t;
+            $b.String_push(v309_t, "({ ");
+            v311_t = v306_tc;
+            v312_t = v307_t;
+            $b.String_push(v312_t, v311_t);
+            v314_t = v307_t;
+            $b.String_push(v314_t, " r_ = { 0 }; fly_join(");
+            v316_t = v14_arg(0);
+            v317_t = v316_t;
+            v318_t = v317_t;
+            v319_t = v307_t;
+            $b.String_push(v319_t, v318_t);
+            v321_t = v307_t;
+            $b.String_push(v321_t, ", &r_); r_; })");
+            v302_t = v307_t.v;
           }
-          v28_t = v219_t;
+          v28_t = v302_t;
           break L2;
         }
-        v240_t = false;
-        if (v240_t)
+        v323_t = false;
+        if (v323_t)
         {
         }
         else
         {
-          let v241_t;
-          v241_t = (v1_key === "channel");
-          v240_t = v241_t;
+          let v324_t;
+          v324_t = (v1_key === "channel");
+          v323_t = v324_t;
         }
-        if (v240_t)
+        if (v323_t)
         {
         }
         else
         {
-          let v242_t;
-          v242_t = (v1_key === "Reply_new");
-          v240_t = v242_t;
+          let v325_t;
+          v325_t = (v1_key === "Reply_new");
+          v323_t = v325_t;
         }
-        if (v240_t)
+        if (v323_t)
         {
-          let v243_t;
+          let v326_t;
           {
-            const v271_t = { v: undefined };
-            let v244_t, v245_t, v246_t, v247_tc, v248_t, v259_msg, v260_t, v261_t, v262_t, v263_t, v270_drop, v272_t, v273_t, v274_t, v275_t, v276_t, v277_t, v278_t, v279_t, v280_t, v281_t, v282_t, v283_t, v284_t;
-            v245_t = v0_self;
-            v244_t = v12_rt;
-            v246_t = ctype_314(v245_t, v244_t, $copy4(v9_span));
-            v247_tc = v246_t;
+            const v354_t = { v: undefined };
+            let v327_t, v328_t, v329_t, v330_tc, v331_t, v342_msg, v343_t, v344_t, v345_t, v346_t, v353_drop, v355_t, v356_t, v357_t, v358_t, v359_t, v360_t, v361_t, v362_t, v363_t, v364_t, v365_t, v366_t, v367_t;
+            v328_t = v0_self;
+            v327_t = v12_rt;
+            v329_t = ctype_314(v328_t, v327_t, $copy4(v9_span));
+            v330_tc = v329_t;
             L4:
             {
-              let v249_t;
-              v249_t = (v12_rt.$tag === "Tuple");
-              if (v249_t)
+              let v332_t;
+              v332_t = (v12_rt.$tag === "Tuple");
+              if (v332_t)
               {
-                let v250_t;
+                let v333_t;
                 {
-                  let v251_ts, v252_t, v253_t, v254_t;
-                  v251_ts = new $rt.FieldRef(v12_rt, "$");
-                  v252_t = v251_ts.v;
-                  v253_t = $b.slice_len(v252_t);
-                  v254_t = (v253_t > 0);
-                  v250_t = v254_t;
+                  let v334_ts, v335_t, v336_t, v337_t;
+                  v334_ts = new $rt.FieldRef(v12_rt, "$");
+                  v335_t = v334_ts.v;
+                  v336_t = $b.slice_len(v335_t);
+                  v337_t = (v336_t > 0);
+                  v333_t = v337_t;
                 }
-                if (v250_t)
+                if (v333_t)
                 {
-                  let v255_ts, v256_t, v257_t;
-                  v255_ts = new $rt.FieldRef(v12_rt, "$");
-                  v256_t = $ix(v255_ts.v, 0);
-                  v257_t = typeArg_546(v256_t, 0);
-                  v248_t = v257_t;
+                  let v338_ts, v339_t, v340_t;
+                  v338_ts = new $rt.FieldRef(v12_rt, "$");
+                  v339_t = $ix(v338_ts.v, 0);
+                  v340_t = typeArg_546(v339_t, 0);
+                  v331_t = v340_t;
                   break L4;
                 }
               }
               {
-                let v258_t;
-                v258_t = { $tag: "Error" };
-                v248_t = v258_t;
+                let v341_t;
+                v341_t = { $tag: "Error" };
+                v331_t = v341_t;
                 break L4;
               }
               $rt.panic("no arm matched");
             }
-            v259_msg = v248_t;
-            v260_t = v0_self.v;
-            v261_t = v259_msg;
-            v262_t = needsDrop_553(v260_t, v261_t);
-            if (v262_t)
+            v342_msg = v331_t;
+            v343_t = v0_self.v;
+            v344_t = v342_msg;
+            v345_t = needsDrop_553(v343_t, v344_t);
+            if (v345_t)
             {
-              let v264_t;
+              let v347_t;
               {
-                let v265_t, v266_t, v267_t;
-                v266_t = v0_self;
-                v265_t = v259_msg;
-                v267_t = anyDropFn_1735(v266_t, v265_t, $copy4(v9_span));
-                v264_t = v267_t;
+                let v348_t, v349_t, v350_t;
+                v349_t = v0_self;
+                v348_t = v342_msg;
+                v350_t = anyDropFn_1735(v349_t, v348_t, $copy4(v9_span));
+                v347_t = v350_t;
               }
-              v263_t = v264_t;
+              v346_t = v347_t;
             }
             else
             {
-              let v268_t;
+              let v351_t;
               {
-                let v269_t;
-                v269_t = $b.str_toString("NULL");
-                v268_t = v269_t;
+                let v352_t;
+                v352_t = $b.str_toString("NULL");
+                v351_t = v352_t;
               }
-              v263_t = v268_t;
+              v346_t = v351_t;
             }
-            v270_drop = v263_t;
-            v272_t = $b.String_new();
-            v271_t.v = v272_t;
-            v273_t = v271_t;
-            $b.String_push(v273_t, "({ fly_chan c_ = fly_channel(");
-            v275_t = v270_drop;
-            v276_t = v271_t;
-            $b.String_push(v276_t, v275_t);
-            v278_t = v271_t;
-            $b.String_push(v278_t, "); (");
-            v280_t = v247_tc;
-            v281_t = v271_t;
-            $b.String_push(v281_t, v280_t);
-            v283_t = v271_t;
-            $b.String_push(v283_t, "){ .f0 = c_, .f1 = c_ }; })");
-            v243_t = v271_t.v;
+            v353_drop = v346_t;
+            v355_t = $b.String_new();
+            v354_t.v = v355_t;
+            v356_t = v354_t;
+            $b.String_push(v356_t, "({ fly_chan c_ = fly_channel(");
+            v358_t = v353_drop;
+            v359_t = v354_t;
+            $b.String_push(v359_t, v358_t);
+            v361_t = v354_t;
+            $b.String_push(v361_t, "); (");
+            v363_t = v330_tc;
+            v364_t = v354_t;
+            $b.String_push(v364_t, v363_t);
+            v366_t = v354_t;
+            $b.String_push(v366_t, "){ .f0 = c_, .f1 = c_ }; })");
+            v326_t = v354_t.v;
           }
-          v28_t = v243_t;
+          v28_t = v326_t;
           break L2;
         }
-        v285_t = (v1_key === "Sender_send");
-        if (v285_t)
+        v368_t = (v1_key === "Sender_send");
+        if (v368_t)
         {
-          let v286_t;
+          let v369_t;
           {
-            const v291_t = { v: undefined };
-            let v287_t, v288_t, v289_t, v290_tc, v292_t, v293_t, v294_t, v295_t, v297_t, v298_t, v299_t, v300_t, v301_t, v302_t, v303_t, v304_t, v305_t, v306_t, v307_t, v309_t, v310_t, v311_t, v312_t, v313_t, v314_t, v315_t, v316_t, v317_t, v318_t;
-            v288_t = v0_self;
-            v287_t = v27_carried;
-            v289_t = ctype_314(v288_t, v287_t, $copy4(v9_span));
-            v290_tc = v289_t;
-            v292_t = $b.String_new();
-            v291_t.v = v292_t;
-            v293_t = v291_t;
-            $b.String_push(v293_t, "({ fly_chan c_ = ");
-            v295_t = v14_arg(0);
-            v296_t = v295_t;
-            v297_t = v296_t;
-            v298_t = v291_t;
-            $b.String_push(v298_t, v297_t);
-            v300_t = v291_t;
-            $b.String_push(v300_t, "; ");
-            v302_t = v290_tc;
-            v303_t = v291_t;
-            $b.String_push(v303_t, v302_t);
-            v305_t = v291_t;
-            $b.String_push(v305_t, " v_ = ");
-            v307_t = v14_arg(1);
-            v308_t = v307_t;
-            v309_t = v308_t;
-            v310_t = v291_t;
-            $b.String_push(v310_t, v309_t);
-            v312_t = v291_t;
-            $b.String_push(v312_t, "; fly_send(c_, &v_, sizeof(");
-            v314_t = v290_tc;
-            v315_t = v291_t;
-            $b.String_push(v315_t, v314_t);
-            v317_t = v291_t;
-            $b.String_push(v317_t, ")); })");
-            v286_t = v291_t.v;
+            const v374_t = { v: undefined };
+            let v370_t, v371_t, v372_t, v373_tc, v375_t, v376_t, v377_t, v378_t, v380_t, v381_t, v382_t, v383_t, v384_t, v385_t, v386_t, v387_t, v388_t, v389_t, v390_t, v392_t, v393_t, v394_t, v395_t, v396_t, v397_t, v398_t, v399_t, v400_t, v401_t;
+            v371_t = v0_self;
+            v370_t = v27_carried;
+            v372_t = ctype_314(v371_t, v370_t, $copy4(v9_span));
+            v373_tc = v372_t;
+            v375_t = $b.String_new();
+            v374_t.v = v375_t;
+            v376_t = v374_t;
+            $b.String_push(v376_t, "({ fly_chan c_ = ");
+            v378_t = v14_arg(0);
+            v379_t = v378_t;
+            v380_t = v379_t;
+            v381_t = v374_t;
+            $b.String_push(v381_t, v380_t);
+            v383_t = v374_t;
+            $b.String_push(v383_t, "; ");
+            v385_t = v373_tc;
+            v386_t = v374_t;
+            $b.String_push(v386_t, v385_t);
+            v388_t = v374_t;
+            $b.String_push(v388_t, " v_ = ");
+            v390_t = v14_arg(1);
+            v391_t = v390_t;
+            v392_t = v391_t;
+            v393_t = v374_t;
+            $b.String_push(v393_t, v392_t);
+            v395_t = v374_t;
+            $b.String_push(v395_t, "; fly_send(c_, &v_, sizeof(");
+            v397_t = v373_tc;
+            v398_t = v374_t;
+            $b.String_push(v398_t, v397_t);
+            v400_t = v374_t;
+            $b.String_push(v400_t, ")); })");
+            v369_t = v374_t.v;
           }
-          v28_t = v286_t;
+          v28_t = v369_t;
           break L2;
         }
-        v319_t = (v1_key === "Reply_send");
-        if (v319_t)
+        v402_t = (v1_key === "Reply_send");
+        if (v402_t)
         {
-          let v320_t;
+          let v403_t;
           {
-            const v325_t = { v: undefined };
-            let v321_t, v322_t, v323_t, v324_tc, v326_t, v327_t, v328_t, v329_t, v331_t, v332_t, v333_t, v334_t, v335_t, v336_t, v337_t, v338_t, v339_t, v340_t, v341_t, v343_t, v344_t, v345_t, v346_t, v347_t, v348_t, v349_t, v350_t, v351_t, v352_t;
-            v322_t = v0_self;
-            v321_t = v27_carried;
-            v323_t = ctype_314(v322_t, v321_t, $copy4(v9_span));
-            v324_tc = v323_t;
-            v326_t = $b.String_new();
-            v325_t.v = v326_t;
-            v327_t = v325_t;
-            $b.String_push(v327_t, "({ fly_chan c_ = ");
-            v329_t = v14_arg(0);
-            v330_t = v329_t;
-            v331_t = v330_t;
-            v332_t = v325_t;
-            $b.String_push(v332_t, v331_t);
-            v334_t = v325_t;
-            $b.String_push(v334_t, "; ");
-            v336_t = v324_tc;
-            v337_t = v325_t;
-            $b.String_push(v337_t, v336_t);
-            v339_t = v325_t;
-            $b.String_push(v339_t, " v_ = ");
-            v341_t = v14_arg(1);
-            v342_t = v341_t;
-            v343_t = v342_t;
-            v344_t = v325_t;
-            $b.String_push(v344_t, v343_t);
-            v346_t = v325_t;
-            $b.String_push(v346_t, "; fly_send(c_, &v_, sizeof(");
-            v348_t = v324_tc;
-            v349_t = v325_t;
-            $b.String_push(v349_t, v348_t);
-            v351_t = v325_t;
-            $b.String_push(v351_t, ")); fly_sender_drop(&c_); (fly_unit)0; })");
-            v320_t = v325_t.v;
+            const v408_t = { v: undefined };
+            let v404_t, v405_t, v406_t, v407_tc, v409_t, v410_t, v411_t, v412_t, v414_t, v415_t, v416_t, v417_t, v418_t, v419_t, v420_t, v421_t, v422_t, v423_t, v424_t, v426_t, v427_t, v428_t, v429_t, v430_t, v431_t, v432_t, v433_t, v434_t, v435_t;
+            v405_t = v0_self;
+            v404_t = v27_carried;
+            v406_t = ctype_314(v405_t, v404_t, $copy4(v9_span));
+            v407_tc = v406_t;
+            v409_t = $b.String_new();
+            v408_t.v = v409_t;
+            v410_t = v408_t;
+            $b.String_push(v410_t, "({ fly_chan c_ = ");
+            v412_t = v14_arg(0);
+            v413_t = v412_t;
+            v414_t = v413_t;
+            v415_t = v408_t;
+            $b.String_push(v415_t, v414_t);
+            v417_t = v408_t;
+            $b.String_push(v417_t, "; ");
+            v419_t = v407_tc;
+            v420_t = v408_t;
+            $b.String_push(v420_t, v419_t);
+            v422_t = v408_t;
+            $b.String_push(v422_t, " v_ = ");
+            v424_t = v14_arg(1);
+            v425_t = v424_t;
+            v426_t = v425_t;
+            v427_t = v408_t;
+            $b.String_push(v427_t, v426_t);
+            v429_t = v408_t;
+            $b.String_push(v429_t, "; fly_send(c_, &v_, sizeof(");
+            v431_t = v407_tc;
+            v432_t = v408_t;
+            $b.String_push(v432_t, v431_t);
+            v434_t = v408_t;
+            $b.String_push(v434_t, ")); fly_sender_drop(&c_); (fly_unit)0; })");
+            v403_t = v408_t.v;
           }
-          v28_t = v320_t;
+          v28_t = v403_t;
           break L2;
         }
-        v353_t = (v1_key === "Receiver_recv");
-        if (v353_t)
+        v436_t = (v1_key === "Receiver_recv");
+        if (v436_t)
         {
-          let v354_t;
+          let v437_t;
           {
-            const v367_t = { v: undefined };
-            let v355_t, v356_t, v357_t, v358_tc, v359_t, v360_t, v361_t, v362_yes, v363_t, v364_t, v365_t, v366_no, v368_t, v369_t, v370_t, v371_t, v372_t, v373_t, v374_t, v375_t, v376_t, v378_t, v379_t, v380_t, v381_t, v382_t, v383_t, v384_t, v385_t, v386_t, v387_t, v388_t, v389_t, v390_t, v391_t, v392_t, v393_t, v394_t, v395_t, v396_t, v397_t;
-            v356_t = v0_self;
-            v355_t = v27_carried;
-            v357_t = ctype_314(v356_t, v355_t, $copy4(v9_span));
-            v358_tc = v357_t;
-            v360_t = v0_self;
-            v359_t = v12_rt;
-            v361_t = some_1687(v360_t, v359_t, "x_", $copy4(v9_span));
-            v362_yes = v361_t;
-            v364_t = v0_self;
-            v363_t = v12_rt;
-            v365_t = none_1688(v364_t, v363_t, $copy4(v9_span));
-            v366_no = v365_t;
-            v368_t = $b.String_new();
-            v367_t.v = v368_t;
-            v369_t = v367_t;
-            $b.String_push(v369_t, "({ ");
-            v371_t = v358_tc;
-            v372_t = v367_t;
-            $b.String_push(v372_t, v371_t);
-            v374_t = v367_t;
-            $b.String_push(v374_t, " x_; bool ok_ = fly_recv(");
-            v376_t = v14_arg(0);
-            v377_t = v376_t;
-            v378_t = v377_t;
-            v379_t = v367_t;
-            $b.String_push(v379_t, v378_t);
-            v381_t = v367_t;
-            $b.String_push(v381_t, ", &x_, sizeof(");
-            v383_t = v358_tc;
-            v384_t = v367_t;
-            $b.String_push(v384_t, v383_t);
-            v386_t = v367_t;
-            $b.String_push(v386_t, ")); ok_ ? ");
-            v388_t = v362_yes;
-            v389_t = v367_t;
-            $b.String_push(v389_t, v388_t);
-            v391_t = v367_t;
-            $b.String_push(v391_t, " : ");
-            v393_t = v366_no;
-            v394_t = v367_t;
-            $b.String_push(v394_t, v393_t);
-            v396_t = v367_t;
-            $b.String_push(v396_t, "; })");
-            v354_t = v367_t.v;
+            const v450_t = { v: undefined };
+            let v438_t, v439_t, v440_t, v441_tc, v442_t, v443_t, v444_t, v445_yes, v446_t, v447_t, v448_t, v449_no, v451_t, v452_t, v453_t, v454_t, v455_t, v456_t, v457_t, v458_t, v459_t, v461_t, v462_t, v463_t, v464_t, v465_t, v466_t, v467_t, v468_t, v469_t, v470_t, v471_t, v472_t, v473_t, v474_t, v475_t, v476_t, v477_t, v478_t, v479_t, v480_t;
+            v439_t = v0_self;
+            v438_t = v27_carried;
+            v440_t = ctype_314(v439_t, v438_t, $copy4(v9_span));
+            v441_tc = v440_t;
+            v443_t = v0_self;
+            v442_t = v12_rt;
+            v444_t = some_1687(v443_t, v442_t, "x_", $copy4(v9_span));
+            v445_yes = v444_t;
+            v447_t = v0_self;
+            v446_t = v12_rt;
+            v448_t = none_1688(v447_t, v446_t, $copy4(v9_span));
+            v449_no = v448_t;
+            v451_t = $b.String_new();
+            v450_t.v = v451_t;
+            v452_t = v450_t;
+            $b.String_push(v452_t, "({ ");
+            v454_t = v441_tc;
+            v455_t = v450_t;
+            $b.String_push(v455_t, v454_t);
+            v457_t = v450_t;
+            $b.String_push(v457_t, " x_; bool ok_ = fly_recv(");
+            v459_t = v14_arg(0);
+            v460_t = v459_t;
+            v461_t = v460_t;
+            v462_t = v450_t;
+            $b.String_push(v462_t, v461_t);
+            v464_t = v450_t;
+            $b.String_push(v464_t, ", &x_, sizeof(");
+            v466_t = v441_tc;
+            v467_t = v450_t;
+            $b.String_push(v467_t, v466_t);
+            v469_t = v450_t;
+            $b.String_push(v469_t, ")); ok_ ? ");
+            v471_t = v445_yes;
+            v472_t = v450_t;
+            $b.String_push(v472_t, v471_t);
+            v474_t = v450_t;
+            $b.String_push(v474_t, " : ");
+            v476_t = v449_no;
+            v477_t = v450_t;
+            $b.String_push(v477_t, v476_t);
+            v479_t = v450_t;
+            $b.String_push(v479_t, "; })");
+            v437_t = v450_t.v;
           }
-          v28_t = v354_t;
+          v28_t = v437_t;
           break L2;
         }
-        v398_t = (v1_key === "Pending_wait");
-        if (v398_t)
+        v481_t = (v1_key === "Pending_wait");
+        if (v481_t)
         {
-          let v399_t;
+          let v482_t;
           {
-            const v404_t = { v: undefined };
-            let v400_t, v401_t, v402_t, v403_tc, v405_t, v406_t, v407_t, v408_t, v410_t, v411_t, v412_t, v413_t, v414_t, v415_t, v416_t, v417_t, v418_t, v419_t, v420_t, v421_t, v422_t, v423_t, v424_t;
-            v401_t = v0_self;
-            v400_t = v12_rt;
-            v402_t = ctype_314(v401_t, v400_t, $copy4(v9_span));
-            v403_tc = v402_t;
-            v405_t = $b.String_new();
-            v404_t.v = v405_t;
-            v406_t = v404_t;
-            $b.String_push(v406_t, "({ fly_chan c_ = ");
-            v408_t = v14_arg(0);
-            v409_t = v408_t;
-            v410_t = v409_t;
-            v411_t = v404_t;
-            $b.String_push(v411_t, v410_t);
-            v413_t = v404_t;
-            $b.String_push(v413_t, "; ");
-            v415_t = v403_tc;
-            v416_t = v404_t;
-            $b.String_push(v416_t, v415_t);
-            v418_t = v404_t;
-            $b.String_push(v418_t, " x_ = { 0 }; bool ok_ = fly_recv(c_, &x_, sizeof(");
-            v420_t = v403_tc;
-            v421_t = v404_t;
-            $b.String_push(v421_t, v420_t);
-            v423_t = v404_t;
-            $b.String_push(v423_t, ")); fly_receiver_drop(&c_); if (!ok_ && !fly_unwinding) fly_panic(\"the reply was dropped unsent\"); x_; })");
-            v399_t = v404_t.v;
-          }
-          v28_t = v399_t;
-          break L2;
-        }
-        v425_t = (v1_key === "Sender_close");
-        if (v425_t)
-        {
-          const v426_t = { v: undefined };
-          let v427_t, v428_t, v429_t, v430_t, v432_t, v433_t, v434_t, v435_t, v436_t;
-          v427_t = $b.String_new();
-          v426_t.v = v427_t;
-          v428_t = v426_t;
-          $b.String_push(v428_t, "({ fly_close(");
-          v430_t = v14_arg(0);
-          v431_t = v430_t;
-          v432_t = v431_t;
-          v433_t = v426_t;
-          $b.String_push(v433_t, v432_t);
-          v435_t = v426_t;
-          $b.String_push(v435_t, "); (fly_unit)0; })");
-          v28_t = v426_t.v;
-          break L2;
-        }
-        v437_t = (v1_key === "Sender_clone");
-        if (v437_t)
-        {
-          const v438_t = { v: undefined };
-          let v439_t, v440_t, v441_t, v442_t, v444_t, v445_t, v446_t, v447_t, v448_t;
-          v439_t = $b.String_new();
-          v438_t.v = v439_t;
-          v440_t = v438_t;
-          $b.String_push(v440_t, "({ fly_chan c_ = ");
-          v442_t = v14_arg(0);
-          v443_t = v442_t;
-          v444_t = v443_t;
-          v445_t = v438_t;
-          $b.String_push(v445_t, v444_t);
-          v447_t = v438_t;
-          $b.String_push(v447_t, "; fly_sender_clone(&c_); })");
-          v28_t = v438_t.v;
-          break L2;
-        }
-        v449_t = (v1_key === "Mutex_new");
-        if (v449_t)
-        {
-          let v450_t;
-          {
-            const v458_t = { v: undefined };
-            let v451_t, v452_t, v453_t, v454_t, v455_t, v456_t, v457_tc, v459_t, v460_t, v461_t, v462_t, v463_t, v464_t, v465_t, v466_t, v467_t, v469_t, v470_t, v471_t, v472_t, v473_t, v474_t, v475_t, v476_t, v477_t, v478_t, v479_t, v480_t, v481_t, v482_t, v483_t;
-            v455_t = v0_self;
-            v451_t = v12_rt;
-            v452_t = typeArg_546(v451_t, 0);
-            v453_t = v452_t;
-            v454_t = v453_t;
-            v456_t = ctype_314(v455_t, v454_t, $copy4(v9_span));
-            v457_tc = v456_t;
-            v459_t = $b.String_new();
-            v458_t.v = v459_t;
-            v460_t = v458_t;
-            $b.String_push(v460_t, "({ ");
-            v462_t = v457_tc;
-            v463_t = v458_t;
-            $b.String_push(v463_t, v462_t);
-            v465_t = v458_t;
-            $b.String_push(v465_t, " v_ = ");
-            v467_t = v14_arg(0);
-            v468_t = v467_t;
-            v469_t = v468_t;
-            v470_t = v458_t;
-            $b.String_push(v470_t, v469_t);
-            v472_t = v458_t;
-            $b.String_push(v472_t, "; (");
-            v474_t = v457_tc;
-            v475_t = v458_t;
-            $b.String_push(v475_t, v474_t);
-            v477_t = v458_t;
-            $b.String_push(v477_t, "*)fly_mutex_new(&v_, sizeof(");
-            v479_t = v457_tc;
-            v480_t = v458_t;
-            $b.String_push(v480_t, v479_t);
-            v482_t = v458_t;
-            $b.String_push(v482_t, ")); })");
-            v450_t = v458_t.v;
-          }
-          v28_t = v450_t;
-          break L2;
-        }
-        v484_t = (v1_key === "Ptr_with");
-        if (v484_t)
-        {
-          let v485_t;
-          {
-            const v507_t = { v: undefined };
-            let v486_t, v487_t, v488_t, v489_tc, v490_t, v491_t, v492_t, v493_t, v506_pc, v508_t, v509_t, v510_t, v511_t, v513_t, v514_t, v515_t, v516_t, v517_t, v518_t, v520_t, v521_t, v522_t, v523_t, v524_t, v525_t, v526_t, v527_t, v528_t, v529_t, v530_t, v531_t, v532_t, v533_t, v534_t, v535_t, v536_t, v537_t, v538_t, v539_t;
-            v487_t = v0_self;
-            v486_t = v12_rt;
-            v488_t = ctype_314(v487_t, v486_t, $copy4(v9_span));
-            v489_tc = v488_t;
-            v490_t = $ix(v8_ptys, 1);
-            v491_t = stripBorrow_307(v490_t);
+            const v487_t = { v: undefined };
+            let v483_t, v484_t, v485_t, v486_tc, v488_t, v489_t, v490_t, v491_t, v493_t, v494_t, v495_t, v496_t, v497_t, v498_t, v499_t, v500_t, v501_t, v502_t, v503_t, v504_t, v505_t, v506_t, v507_t;
+            v484_t = v0_self;
+            v483_t = v12_rt;
+            v485_t = ctype_314(v484_t, v483_t, $copy4(v9_span));
+            v486_tc = v485_t;
+            v488_t = $b.String_new();
+            v487_t.v = v488_t;
+            v489_t = v487_t;
+            $b.String_push(v489_t, "({ fly_chan c_ = ");
+            v491_t = v14_arg(0);
             v492_t = v491_t;
+            v493_t = v492_t;
+            v494_t = v487_t;
+            $b.String_push(v494_t, v493_t);
+            v496_t = v487_t;
+            $b.String_push(v496_t, "; ");
+            v498_t = v486_tc;
+            v499_t = v487_t;
+            $b.String_push(v499_t, v498_t);
+            v501_t = v487_t;
+            $b.String_push(v501_t, " x_ = { 0 }; bool ok_ = fly_recv(c_, &x_, sizeof(");
+            v503_t = v486_tc;
+            v504_t = v487_t;
+            $b.String_push(v504_t, v503_t);
+            v506_t = v487_t;
+            $b.String_push(v506_t, ")); fly_receiver_drop(&c_); if (!ok_ && !fly_unwinding) fly_panic(\"the reply was dropped unsent\"); x_; })");
+            v482_t = v487_t.v;
+          }
+          v28_t = v482_t;
+          break L2;
+        }
+        v508_t = (v1_key === "Sender_close");
+        if (v508_t)
+        {
+          const v509_t = { v: undefined };
+          let v510_t, v511_t, v512_t, v513_t, v515_t, v516_t, v517_t, v518_t, v519_t;
+          v510_t = $b.String_new();
+          v509_t.v = v510_t;
+          v511_t = v509_t;
+          $b.String_push(v511_t, "({ fly_close(");
+          v513_t = v14_arg(0);
+          v514_t = v513_t;
+          v515_t = v514_t;
+          v516_t = v509_t;
+          $b.String_push(v516_t, v515_t);
+          v518_t = v509_t;
+          $b.String_push(v518_t, "); (fly_unit)0; })");
+          v28_t = v509_t.v;
+          break L2;
+        }
+        v520_t = (v1_key === "Sender_clone");
+        if (v520_t)
+        {
+          const v521_t = { v: undefined };
+          let v522_t, v523_t, v524_t, v525_t, v527_t, v528_t, v529_t, v530_t, v531_t;
+          v522_t = $b.String_new();
+          v521_t.v = v522_t;
+          v523_t = v521_t;
+          $b.String_push(v523_t, "({ fly_chan c_ = ");
+          v525_t = v14_arg(0);
+          v526_t = v525_t;
+          v527_t = v526_t;
+          v528_t = v521_t;
+          $b.String_push(v528_t, v527_t);
+          v530_t = v521_t;
+          $b.String_push(v530_t, "; fly_sender_clone(&c_); })");
+          v28_t = v521_t.v;
+          break L2;
+        }
+        v532_t = (v1_key === "Mutex_new");
+        if (v532_t)
+        {
+          let v533_t;
+          {
+            const v541_t = { v: undefined };
+            let v534_t, v535_t, v536_t, v537_t, v538_t, v539_t, v540_tc, v542_t, v543_t, v544_t, v545_t, v546_t, v547_t, v548_t, v549_t, v550_t, v552_t, v553_t, v554_t, v555_t, v556_t, v557_t, v558_t, v559_t, v560_t, v561_t, v562_t, v563_t, v564_t, v565_t, v566_t;
+            v538_t = v0_self;
+            v534_t = v12_rt;
+            v535_t = typeArg_546(v534_t, 0);
+            v536_t = v535_t;
+            v537_t = v536_t;
+            v539_t = ctype_314(v538_t, v537_t, $copy4(v9_span));
+            v540_tc = v539_t;
+            v542_t = $b.String_new();
+            v541_t.v = v542_t;
+            v543_t = v541_t;
+            $b.String_push(v543_t, "({ ");
+            v545_t = v540_tc;
+            v546_t = v541_t;
+            $b.String_push(v546_t, v545_t);
+            v548_t = v541_t;
+            $b.String_push(v548_t, " v_ = ");
+            v550_t = v14_arg(0);
+            v551_t = v550_t;
+            v552_t = v551_t;
+            v553_t = v541_t;
+            $b.String_push(v553_t, v552_t);
+            v555_t = v541_t;
+            $b.String_push(v555_t, "; (");
+            v557_t = v540_tc;
+            v558_t = v541_t;
+            $b.String_push(v558_t, v557_t);
+            v560_t = v541_t;
+            $b.String_push(v560_t, "*)fly_mutex_new(&v_, sizeof(");
+            v562_t = v540_tc;
+            v563_t = v541_t;
+            $b.String_push(v563_t, v562_t);
+            v565_t = v541_t;
+            $b.String_push(v565_t, ")); })");
+            v533_t = v541_t.v;
+          }
+          v28_t = v533_t;
+          break L2;
+        }
+        v567_t = (v1_key === "Ptr_with");
+        if (v567_t)
+        {
+          let v568_t;
+          {
+            const v590_t = { v: undefined };
+            let v569_t, v570_t, v571_t, v572_tc, v573_t, v574_t, v575_t, v576_t, v589_pc, v591_t, v592_t, v593_t, v594_t, v596_t, v597_t, v598_t, v599_t, v600_t, v601_t, v603_t, v604_t, v605_t, v606_t, v607_t, v608_t, v609_t, v610_t, v611_t, v612_t, v613_t, v614_t, v615_t, v616_t, v617_t, v618_t, v619_t, v620_t, v621_t, v622_t;
+            v570_t = v0_self;
+            v569_t = v12_rt;
+            v571_t = ctype_314(v570_t, v569_t, $copy4(v9_span));
+            v572_tc = v571_t;
+            v573_t = $ix(v8_ptys, 1);
+            v574_t = stripBorrow_307(v573_t);
+            v575_t = v574_t;
             L5:
             {
-              let v494_t;
-              v494_t = (v492_t.$tag === "Fn");
-              if (v494_t)
+              let v577_t;
+              v577_t = (v575_t.$tag === "Fn");
+              if (v577_t)
               {
-                let v495_f, v496_t, v497_t, v498_t, v499_t;
-                v495_f = new $rt.FieldRef(v492_t, "$");
-                v496_t = v495_f.v.params;
-                v497_t = first_434(v496_t);
-                v498_t = v497_t;
+                let v578_f, v579_t, v580_t, v581_t, v582_t;
+                v578_f = new $rt.FieldRef(v575_t, "$");
+                v579_t = v578_f.v.params;
+                v580_t = first_434(v579_t);
+                v581_t = v580_t;
                 L6:
                 {
-                  let v500_t, v503_t;
-                  v500_t = (v498_t.$tag === "Some");
-                  if (v500_t)
+                  let v583_t, v586_t;
+                  v583_t = (v581_t.$tag === "Some");
+                  if (v583_t)
                   {
-                    let v501_p, v502_t;
-                    v501_p = v498_t.$;
-                    v502_t = ctype_314(v0_self, v501_p, $copy4(v9_span));
-                    v499_t = v502_t;
+                    let v584_p, v585_t;
+                    v584_p = v581_t.$;
+                    v585_t = ctype_314(v0_self, v584_p, $copy4(v9_span));
+                    v582_t = v585_t;
                     break L6;
                   }
-                  v503_t = (v498_t.$tag === "None");
-                  if (v503_t)
+                  v586_t = (v581_t.$tag === "None");
+                  if (v586_t)
                   {
-                    let v504_t;
-                    v504_t = $b.str_toString("void*");
-                    v499_t = v504_t;
+                    let v587_t;
+                    v587_t = $b.str_toString("void*");
+                    v582_t = v587_t;
                     break L6;
                   }
                   $rt.panic("no arm matched");
                 }
-                v493_t = v499_t;
+                v576_t = v582_t;
                 break L5;
               }
               {
-                let v505_t;
-                v505_t = $b.str_toString("void*");
-                v493_t = v505_t;
+                let v588_t;
+                v588_t = $b.str_toString("void*");
+                v576_t = v588_t;
                 break L5;
               }
               $rt.panic("no arm matched");
             }
-            v506_pc = v493_t;
-            v508_t = $b.String_new();
-            v507_t.v = v508_t;
-            v509_t = v507_t;
-            $b.String_push(v509_t, "({ __auto_type p_ = ");
-            v511_t = v14_arg(0);
-            v512_t = v511_t;
-            v513_t = v512_t;
-            v514_t = v507_t;
-            $b.String_push(v514_t, v513_t);
-            v516_t = v507_t;
-            $b.String_push(v516_t, "; fly_fn f_ = ");
-            v518_t = v14_arg(1);
-            v519_t = v518_t;
-            v520_t = v519_t;
-            v521_t = v507_t;
-            $b.String_push(v521_t, v520_t);
-            v523_t = v507_t;
-            $b.String_push(v523_t, "; ");
-            v525_t = v489_tc;
-            v526_t = v507_t;
-            $b.String_push(v526_t, v525_t);
-            v528_t = v507_t;
-            $b.String_push(v528_t, " r_ = ((");
-            v530_t = v489_tc;
-            v531_t = v507_t;
-            $b.String_push(v531_t, v530_t);
-            v533_t = v507_t;
-            $b.String_push(v533_t, " (*)(void*, ");
-            v535_t = v506_pc;
-            v536_t = v507_t;
-            $b.String_push(v536_t, v535_t);
-            v538_t = v507_t;
-            $b.String_push(v538_t, "))f_.fn)(f_.env, p_); if (f_.drop) f_.drop(f_.env); r_; })");
-            v485_t = v507_t.v;
+            v589_pc = v576_t;
+            v591_t = $b.String_new();
+            v590_t.v = v591_t;
+            v592_t = v590_t;
+            $b.String_push(v592_t, "({ __auto_type p_ = ");
+            v594_t = v14_arg(0);
+            v595_t = v594_t;
+            v596_t = v595_t;
+            v597_t = v590_t;
+            $b.String_push(v597_t, v596_t);
+            v599_t = v590_t;
+            $b.String_push(v599_t, "; fly_fn f_ = ");
+            v601_t = v14_arg(1);
+            v602_t = v601_t;
+            v603_t = v602_t;
+            v604_t = v590_t;
+            $b.String_push(v604_t, v603_t);
+            v606_t = v590_t;
+            $b.String_push(v606_t, "; ");
+            v608_t = v572_tc;
+            v609_t = v590_t;
+            $b.String_push(v609_t, v608_t);
+            v611_t = v590_t;
+            $b.String_push(v611_t, " r_ = ((");
+            v613_t = v572_tc;
+            v614_t = v590_t;
+            $b.String_push(v614_t, v613_t);
+            v616_t = v590_t;
+            $b.String_push(v616_t, " (*)(void*, ");
+            v618_t = v589_pc;
+            v619_t = v590_t;
+            $b.String_push(v619_t, v618_t);
+            v621_t = v590_t;
+            $b.String_push(v621_t, "))f_.fn)(f_.env, p_); if (f_.drop) f_.drop(f_.env); r_; })");
+            v568_t = v590_t.v;
           }
-          v28_t = v485_t;
+          v28_t = v568_t;
           break L2;
         }
-        v540_t = (v1_key === "Mutex_lock");
-        if (v540_t)
+        v623_t = (v1_key === "Mutex_lock");
+        if (v623_t)
         {
-          let v541_t;
+          let v624_t;
           {
-            const v563_t = { v: undefined };
-            const v575_t = { v: undefined };
-            const v587_t = { v: undefined };
-            const v604_t = { v: undefined };
-            let v542_t, v543_t, v544_t, v545_tc, v546_t, v547_t, v548_t, v549_t, v562_pc, v564_t, v565_t, v566_t, v567_t, v568_t, v569_t, v570_t, v571_t, v572_t, v573_t, v574_t, v576_t, v577_t, v578_t, v579_t, v580_t, v581_t, v582_t, v583_t, v584_t, v585_t, v586_t, v588_t, v589_t, v590_t, v591_t, v592_t, v593_t, v594_t, v595_t, v596_t, v597_t, v598_t, v599_t, v600_t, v601_t, v602_t, v603_b, v605_t, v606_t, v607_t, v608_t, v610_t, v611_t, v612_t, v613_t, v614_t, v615_t, v617_t, v618_t, v619_t, v620_t, v621_t, v622_t, v623_t, v624_t, v625_t, v626_t, v627_t, v628_t, v629_t, v630_t, v631_t;
-            v543_t = v0_self;
-            v542_t = v12_rt;
-            v544_t = ctype_314(v543_t, v542_t, $copy4(v9_span));
-            v545_tc = v544_t;
-            v546_t = $ix(v8_ptys, 1);
-            v547_t = stripBorrow_307(v546_t);
-            v548_t = v547_t;
+            const v646_t = { v: undefined };
+            const v658_t = { v: undefined };
+            const v670_t = { v: undefined };
+            const v687_t = { v: undefined };
+            let v625_t, v626_t, v627_t, v628_tc, v629_t, v630_t, v631_t, v632_t, v645_pc, v647_t, v648_t, v649_t, v650_t, v651_t, v652_t, v653_t, v654_t, v655_t, v656_t, v657_t, v659_t, v660_t, v661_t, v662_t, v663_t, v664_t, v665_t, v666_t, v667_t, v668_t, v669_t, v671_t, v672_t, v673_t, v674_t, v675_t, v676_t, v677_t, v678_t, v679_t, v680_t, v681_t, v682_t, v683_t, v684_t, v685_t, v686_b, v688_t, v689_t, v690_t, v691_t, v693_t, v694_t, v695_t, v696_t, v697_t, v698_t, v700_t, v701_t, v702_t, v703_t, v704_t, v705_t, v706_t, v707_t, v708_t, v709_t, v710_t, v711_t, v712_t, v713_t, v714_t;
+            v626_t = v0_self;
+            v625_t = v12_rt;
+            v627_t = ctype_314(v626_t, v625_t, $copy4(v9_span));
+            v628_tc = v627_t;
+            v629_t = $ix(v8_ptys, 1);
+            v630_t = stripBorrow_307(v629_t);
+            v631_t = v630_t;
             L7:
             {
-              let v550_t;
-              v550_t = (v548_t.$tag === "Fn");
-              if (v550_t)
+              let v633_t;
+              v633_t = (v631_t.$tag === "Fn");
+              if (v633_t)
               {
-                let v551_f, v552_t, v553_t, v554_t, v555_t;
-                v551_f = new $rt.FieldRef(v548_t, "$");
-                v552_t = v551_f.v.params;
-                v553_t = first_434(v552_t);
-                v554_t = v553_t;
+                let v634_f, v635_t, v636_t, v637_t, v638_t;
+                v634_f = new $rt.FieldRef(v631_t, "$");
+                v635_t = v634_f.v.params;
+                v636_t = first_434(v635_t);
+                v637_t = v636_t;
                 L8:
                 {
-                  let v556_t, v559_t;
-                  v556_t = (v554_t.$tag === "Some");
-                  if (v556_t)
+                  let v639_t, v642_t;
+                  v639_t = (v637_t.$tag === "Some");
+                  if (v639_t)
                   {
-                    let v557_p, v558_t;
-                    v557_p = v554_t.$;
-                    v558_t = ctype_314(v0_self, v557_p, $copy4(v9_span));
-                    v555_t = v558_t;
+                    let v640_p, v641_t;
+                    v640_p = v637_t.$;
+                    v641_t = ctype_314(v0_self, v640_p, $copy4(v9_span));
+                    v638_t = v641_t;
                     break L8;
                   }
-                  v559_t = (v554_t.$tag === "None");
-                  if (v559_t)
+                  v642_t = (v637_t.$tag === "None");
+                  if (v642_t)
                   {
-                    let v560_t;
-                    v560_t = $b.str_toString("void*");
-                    v555_t = v560_t;
+                    let v643_t;
+                    v643_t = $b.str_toString("void*");
+                    v638_t = v643_t;
                     break L8;
                   }
                   $rt.panic("no arm matched");
                 }
-                v549_t = v555_t;
+                v632_t = v638_t;
                 break L7;
               }
               {
-                let v561_t;
-                v561_t = $b.str_toString("void*");
-                v549_t = v561_t;
+                let v644_t;
+                v644_t = $b.str_toString("void*");
+                v632_t = v644_t;
                 break L7;
               }
               $rt.panic("no arm matched");
             }
-            v562_pc = v549_t;
-            v601_t = v0_self;
-            v564_t = $b.String_new();
-            v563_t.v = v564_t;
-            v565_t = v563_t;
-            $b.String_push(v565_t, "lock:");
-            v567_t = v545_tc;
-            v568_t = v563_t;
-            $b.String_push(v568_t, v567_t);
-            v570_t = v563_t;
-            $b.String_push(v570_t, ":");
-            v572_t = v562_pc;
-            v573_t = v563_t;
-            $b.String_push(v573_t, v572_t);
-            v576_t = $b.String_new();
-            v575_t.v = v576_t;
-            v577_t = v562_pc;
-            v578_t = v575_t;
-            $b.String_push(v578_t, v577_t);
-            v580_t = v575_t;
-            $b.String_push(v580_t, " m; ");
-            v582_t = v545_tc;
-            v583_t = v575_t;
-            $b.String_push(v583_t, v582_t);
-            v585_t = v575_t;
-            $b.String_push(v585_t, " r;");
-            v588_t = $b.String_new();
-            v587_t.v = v588_t;
-            v589_t = v587_t;
-            $b.String_push(v589_t, "x->r = ((");
-            v591_t = v545_tc;
-            v592_t = v587_t;
-            $b.String_push(v592_t, v591_t);
-            v594_t = v587_t;
-            $b.String_push(v594_t, " (*)(void*, ");
-            v596_t = v562_pc;
-            v597_t = v587_t;
-            $b.String_push(v597_t, v596_t);
-            v599_t = v587_t;
-            $b.String_push(v599_t, "))x->f.fn)(x->f.env, x->m);");
-            v602_t = catchBody_1736(v601_t, v563_t.v, v575_t.v, v587_t.v);
-            v603_b = v602_t;
-            v605_t = $b.String_new();
-            v604_t.v = v605_t;
-            v606_t = v604_t;
-            $b.String_push(v606_t, "({ __auto_type m_ = ");
-            v608_t = v14_arg(0);
-            v609_t = v608_t;
-            v610_t = v609_t;
-            v611_t = v604_t;
-            $b.String_push(v611_t, v610_t);
-            v613_t = v604_t;
-            $b.String_push(v613_t, "; fly_fn f_ = ");
-            v615_t = v14_arg(1);
-            v616_t = v615_t;
-            v617_t = v616_t;
-            v618_t = v604_t;
-            $b.String_push(v618_t, v617_t);
-            v620_t = v604_t;
-            $b.String_push(v620_t, "; fly_point(); fly_lock(m_); fly_mutex_check(m_); ");
-            v622_t = v603_b;
-            v623_t = v604_t;
-            $b.String_push(v623_t, v622_t);
-            v625_t = v604_t;
-            $b.String_push(v625_t, "_t x_ = { .f = f_, .m = m_ }; if (fly_try(");
-            v627_t = v603_b;
-            v628_t = v604_t;
-            $b.String_push(v628_t, v627_t);
-            v630_t = v604_t;
-            $b.String_push(v630_t, ", &x_)) { fly_mutex_poison(m_, true); fly_unlock(m_); if (x_.f.drop) x_.f.drop(x_.f.env); fly_unwind_on(); } fly_unlock(m_); if (x_.f.drop) x_.f.drop(x_.f.env); x_.r; })");
-            v541_t = v604_t.v;
+            v645_pc = v632_t;
+            v684_t = v0_self;
+            v647_t = $b.String_new();
+            v646_t.v = v647_t;
+            v648_t = v646_t;
+            $b.String_push(v648_t, "lock:");
+            v650_t = v628_tc;
+            v651_t = v646_t;
+            $b.String_push(v651_t, v650_t);
+            v653_t = v646_t;
+            $b.String_push(v653_t, ":");
+            v655_t = v645_pc;
+            v656_t = v646_t;
+            $b.String_push(v656_t, v655_t);
+            v659_t = $b.String_new();
+            v658_t.v = v659_t;
+            v660_t = v645_pc;
+            v661_t = v658_t;
+            $b.String_push(v661_t, v660_t);
+            v663_t = v658_t;
+            $b.String_push(v663_t, " m; ");
+            v665_t = v628_tc;
+            v666_t = v658_t;
+            $b.String_push(v666_t, v665_t);
+            v668_t = v658_t;
+            $b.String_push(v668_t, " r;");
+            v671_t = $b.String_new();
+            v670_t.v = v671_t;
+            v672_t = v670_t;
+            $b.String_push(v672_t, "x->r = ((");
+            v674_t = v628_tc;
+            v675_t = v670_t;
+            $b.String_push(v675_t, v674_t);
+            v677_t = v670_t;
+            $b.String_push(v677_t, " (*)(void*, ");
+            v679_t = v645_pc;
+            v680_t = v670_t;
+            $b.String_push(v680_t, v679_t);
+            v682_t = v670_t;
+            $b.String_push(v682_t, "))x->f.fn)(x->f.env, x->m);");
+            v685_t = catchBody_1736(v684_t, v646_t.v, v658_t.v, v670_t.v);
+            v686_b = v685_t;
+            v688_t = $b.String_new();
+            v687_t.v = v688_t;
+            v689_t = v687_t;
+            $b.String_push(v689_t, "({ __auto_type m_ = ");
+            v691_t = v14_arg(0);
+            v692_t = v691_t;
+            v693_t = v692_t;
+            v694_t = v687_t;
+            $b.String_push(v694_t, v693_t);
+            v696_t = v687_t;
+            $b.String_push(v696_t, "; fly_fn f_ = ");
+            v698_t = v14_arg(1);
+            v699_t = v698_t;
+            v700_t = v699_t;
+            v701_t = v687_t;
+            $b.String_push(v701_t, v700_t);
+            v703_t = v687_t;
+            $b.String_push(v703_t, "; fly_point(); fly_lock(m_); fly_mutex_check(m_); ");
+            v705_t = v686_b;
+            v706_t = v687_t;
+            $b.String_push(v706_t, v705_t);
+            v708_t = v687_t;
+            $b.String_push(v708_t, "_t x_ = { .f = f_, .m = m_ }; if (fly_try(");
+            v710_t = v686_b;
+            v711_t = v687_t;
+            $b.String_push(v711_t, v710_t);
+            v713_t = v687_t;
+            $b.String_push(v713_t, ", &x_)) { fly_mutex_poison(m_, true); fly_unlock(m_); if (x_.f.drop) x_.f.drop(x_.f.env); fly_unwind_on(); } fly_unlock(m_); if (x_.f.drop) x_.f.drop(x_.f.env); x_.r; })");
+            v624_t = v687_t.v;
           }
-          v28_t = v541_t;
+          v28_t = v624_t;
           break L2;
         }
-        v632_t = (v1_key === "Mutex_reset");
-        if (v632_t)
+        v715_t = (v1_key === "Mutex_reset");
+        if (v715_t)
         {
-          let v633_t;
+          let v716_t;
           {
-            const v667_t = { v: undefined };
-            let v634_t, v635_t, v636_t, v637_t, v643_t, v644_t, v645_t, v646_t, v647_tc, v648_t, v649_t, v650_t, v651_t, v658_t, v666_d, v668_t, v669_t, v670_t, v671_t, v672_t, v673_t, v674_t, v675_t, v676_t, v678_t, v679_t, v680_t, v681_t, v682_t, v683_t, v684_t, v685_t, v686_t, v687_t, v688_t, v690_t, v691_t, v692_t, v693_t, v694_t, v695_t, v696_t, v697_t, v698_t, v699_t, v700_t, v701_t, v702_t, v703_t, v704_t;
-            v634_t = v2_c.argTys;
-            v635_t = get_982(v634_t, 1);
-            v636_t = v635_t;
+            const v750_t = { v: undefined };
+            let v717_t, v718_t, v719_t, v720_t, v726_t, v727_t, v728_t, v729_t, v730_tc, v731_t, v732_t, v733_t, v734_t, v741_t, v749_d, v751_t, v752_t, v753_t, v754_t, v755_t, v756_t, v757_t, v758_t, v759_t, v761_t, v762_t, v763_t, v764_t, v765_t, v766_t, v767_t, v768_t, v769_t, v770_t, v771_t, v773_t, v774_t, v775_t, v776_t, v777_t, v778_t, v779_t, v780_t, v781_t, v782_t, v783_t, v784_t, v785_t, v786_t, v787_t;
+            v717_t = v2_c.argTys;
+            v718_t = get_982(v717_t, 1);
+            v719_t = v718_t;
             L9:
             {
-              let v638_t, v641_t;
-              v638_t = (v636_t.$tag === "Some");
-              if (v638_t)
+              let v721_t, v724_t;
+              v721_t = (v719_t.$tag === "Some");
+              if (v721_t)
               {
-                let v639_t, v640_t;
-                v639_t = v636_t.$;
-                v640_t = stripBorrow_307(v639_t);
-                v637_t = v640_t;
+                let v722_t, v723_t;
+                v722_t = v719_t.$;
+                v723_t = stripBorrow_307(v722_t);
+                v720_t = v723_t;
                 break L9;
               }
-              v641_t = (v636_t.$tag === "None");
-              if (v641_t)
+              v724_t = (v719_t.$tag === "None");
+              if (v724_t)
               {
-                let v642_t;
-                v642_t = { $tag: "Error" };
-                v637_t = v642_t;
+                let v725_t;
+                v725_t = { $tag: "Error" };
+                v720_t = v725_t;
                 break L9;
               }
               $rt.panic("no arm matched");
             }
-            v643_t = v637_t;
-            v645_t = v0_self;
-            v644_t = v643_t;
-            v646_t = ctype_314(v645_t, v644_t, $copy4(v9_span));
-            v647_tc = v646_t;
-            v648_t = v0_self.v;
-            v649_t = v643_t;
-            v650_t = needsDrop_553(v648_t, v649_t);
-            if (v650_t)
+            v726_t = v720_t;
+            v728_t = v0_self;
+            v727_t = v726_t;
+            v729_t = ctype_314(v728_t, v727_t, $copy4(v9_span));
+            v730_tc = v729_t;
+            v731_t = v0_self.v;
+            v732_t = v726_t;
+            v733_t = needsDrop_553(v731_t, v732_t);
+            if (v733_t)
             {
-              let v652_t;
+              let v735_t;
               {
-                const v653_t = { v: undefined };
-                let v654_t, v655_t, v656_t, v657_t, v659_t, v660_t, v661_t, v662_t, v663_t;
-                v654_t = $b.String_new();
-                v653_t.v = v654_t;
-                v656_t = v0_self;
-                v655_t = v643_t;
-                v657_t = dropFn_524(v656_t, v655_t, $copy4(v9_span));
-                v658_t = v657_t;
-                v659_t = v658_t;
-                v660_t = v653_t;
-                $b.String_push(v660_t, v659_t);
-                v662_t = v653_t;
-                $b.String_push(v662_t, "(&o_); ");
-                v652_t = v653_t.v;
+                const v736_t = { v: undefined };
+                let v737_t, v738_t, v739_t, v740_t, v742_t, v743_t, v744_t, v745_t, v746_t;
+                v737_t = $b.String_new();
+                v736_t.v = v737_t;
+                v739_t = v0_self;
+                v738_t = v726_t;
+                v740_t = dropFn_524(v739_t, v738_t, $copy4(v9_span));
+                v741_t = v740_t;
+                v742_t = v741_t;
+                v743_t = v736_t;
+                $b.String_push(v743_t, v742_t);
+                v745_t = v736_t;
+                $b.String_push(v745_t, "(&o_); ");
+                v735_t = v736_t.v;
               }
-              v651_t = v652_t;
+              v734_t = v735_t;
             }
             else
             {
-              let v664_t;
+              let v747_t;
               {
-                let v665_t;
-                v665_t = $b.str_toString("");
-                v664_t = v665_t;
+                let v748_t;
+                v748_t = $b.str_toString("");
+                v747_t = v748_t;
               }
-              v651_t = v664_t;
+              v734_t = v747_t;
             }
-            v666_d = v651_t;
-            v668_t = $b.String_new();
-            v667_t.v = v668_t;
-            v669_t = v667_t;
-            $b.String_push(v669_t, "({ ");
-            v671_t = v647_tc;
-            v672_t = v667_t;
-            $b.String_push(v672_t, v671_t);
-            v674_t = v667_t;
-            $b.String_push(v674_t, "* m_ = ");
-            v676_t = v14_arg(0);
-            v677_t = v676_t;
-            v678_t = v677_t;
-            v679_t = v667_t;
-            $b.String_push(v679_t, v678_t);
-            v681_t = v667_t;
-            $b.String_push(v681_t, "; ");
-            v683_t = v647_tc;
-            v684_t = v667_t;
-            $b.String_push(v684_t, v683_t);
-            v686_t = v667_t;
-            $b.String_push(v686_t, " v_ = ");
-            v688_t = v14_arg(1);
-            v689_t = v688_t;
-            v690_t = v689_t;
-            v691_t = v667_t;
-            $b.String_push(v691_t, v690_t);
-            v693_t = v667_t;
-            $b.String_push(v693_t, "; fly_point(); fly_lock(m_); ");
-            v695_t = v647_tc;
-            v696_t = v667_t;
-            $b.String_push(v696_t, v695_t);
-            v698_t = v667_t;
-            $b.String_push(v698_t, " o_ = *m_; *m_ = v_; fly_mutex_poison(m_, false); fly_unlock(m_); ");
-            v700_t = v666_d;
-            v701_t = v667_t;
-            $b.String_push(v701_t, v700_t);
-            v703_t = v667_t;
-            $b.String_push(v703_t, "(fly_unit)0; })");
-            v633_t = v667_t.v;
+            v749_d = v734_t;
+            v751_t = $b.String_new();
+            v750_t.v = v751_t;
+            v752_t = v750_t;
+            $b.String_push(v752_t, "({ ");
+            v754_t = v730_tc;
+            v755_t = v750_t;
+            $b.String_push(v755_t, v754_t);
+            v757_t = v750_t;
+            $b.String_push(v757_t, "* m_ = ");
+            v759_t = v14_arg(0);
+            v760_t = v759_t;
+            v761_t = v760_t;
+            v762_t = v750_t;
+            $b.String_push(v762_t, v761_t);
+            v764_t = v750_t;
+            $b.String_push(v764_t, "; ");
+            v766_t = v730_tc;
+            v767_t = v750_t;
+            $b.String_push(v767_t, v766_t);
+            v769_t = v750_t;
+            $b.String_push(v769_t, " v_ = ");
+            v771_t = v14_arg(1);
+            v772_t = v771_t;
+            v773_t = v772_t;
+            v774_t = v750_t;
+            $b.String_push(v774_t, v773_t);
+            v776_t = v750_t;
+            $b.String_push(v776_t, "; fly_point(); fly_lock(m_); ");
+            v778_t = v730_tc;
+            v779_t = v750_t;
+            $b.String_push(v779_t, v778_t);
+            v781_t = v750_t;
+            $b.String_push(v781_t, " o_ = *m_; *m_ = v_; fly_mutex_poison(m_, false); fly_unlock(m_); ");
+            v783_t = v749_d;
+            v784_t = v750_t;
+            $b.String_push(v784_t, v783_t);
+            v786_t = v750_t;
+            $b.String_push(v786_t, "(fly_unit)0; })");
+            v716_t = v750_t.v;
           }
-          v28_t = v633_t;
+          v28_t = v716_t;
           break L2;
         }
-        v705_t = (v1_key === "Atomic_new");
-        if (v705_t)
+        v788_t = (v1_key === "Atomic_new");
+        if (v788_t)
         {
-          let v706_t;
+          let v789_t;
           {
-            const v714_t = { v: undefined };
-            let v707_t, v708_t, v709_t, v710_t, v711_t, v712_t, v713_tc, v715_t, v716_t, v717_t, v718_t, v719_t, v720_t, v721_t, v722_t, v723_t, v725_t, v726_t, v727_t, v728_t, v729_t, v730_t, v731_t, v732_t, v733_t, v734_t, v735_t, v736_t, v737_t, v738_t, v739_t;
-            v711_t = v0_self;
-            v707_t = v12_rt;
-            v708_t = typeArg_546(v707_t, 0);
-            v709_t = v708_t;
-            v710_t = v709_t;
-            v712_t = ctype_314(v711_t, v710_t, $copy4(v9_span));
-            v713_tc = v712_t;
-            v715_t = $b.String_new();
-            v714_t.v = v715_t;
-            v716_t = v714_t;
-            $b.String_push(v716_t, "({ ");
-            v718_t = v713_tc;
-            v719_t = v714_t;
-            $b.String_push(v719_t, v718_t);
-            v721_t = v714_t;
-            $b.String_push(v721_t, " x_ = ");
-            v723_t = v14_arg(0);
-            v724_t = v723_t;
-            v725_t = v724_t;
-            v726_t = v714_t;
-            $b.String_push(v726_t, v725_t);
-            v728_t = v714_t;
-            $b.String_push(v728_t, "; (");
-            v730_t = v713_tc;
-            v731_t = v714_t;
-            $b.String_push(v731_t, v730_t);
-            v733_t = v714_t;
-            $b.String_push(v733_t, "*)fly_box(&x_, sizeof(");
-            v735_t = v713_tc;
-            v736_t = v714_t;
-            $b.String_push(v736_t, v735_t);
-            v738_t = v714_t;
-            $b.String_push(v738_t, ")); })");
-            v706_t = v714_t.v;
-          }
-          v28_t = v706_t;
-          break L2;
-        }
-        v740_t = (v1_key === "Atomic_load");
-        if (v740_t)
-        {
-          const v741_t = { v: undefined };
-          let v742_t, v743_t, v744_t, v745_t, v747_t, v748_t, v749_t, v750_t, v751_t;
-          v742_t = $b.String_new();
-          v741_t.v = v742_t;
-          v743_t = v741_t;
-          $b.String_push(v743_t, "({ __auto_type a_ = ");
-          v745_t = v14_arg(0);
-          v746_t = v745_t;
-          v747_t = v746_t;
-          v748_t = v741_t;
-          $b.String_push(v748_t, v747_t);
-          v750_t = v741_t;
-          $b.String_push(v750_t, "; fly_point(); __atomic_load_n(a_, __ATOMIC_SEQ_CST); })");
-          v28_t = v741_t.v;
-          break L2;
-        }
-        v752_t = (v1_key === "Atomic_store");
-        if (v752_t)
-        {
-          const v753_t = { v: undefined };
-          let v754_t, v755_t, v756_t, v757_t, v759_t, v760_t, v761_t, v762_t, v763_t, v764_t, v766_t, v767_t, v768_t, v769_t, v770_t;
-          v754_t = $b.String_new();
-          v753_t.v = v754_t;
-          v755_t = v753_t;
-          $b.String_push(v755_t, "({ __auto_type a_ = ");
-          v757_t = v14_arg(0);
-          v758_t = v757_t;
-          v759_t = v758_t;
-          v760_t = v753_t;
-          $b.String_push(v760_t, v759_t);
-          v762_t = v753_t;
-          $b.String_push(v762_t, "; __auto_type v_ = ");
-          v764_t = v14_arg(1);
-          v765_t = v764_t;
-          v766_t = v765_t;
-          v767_t = v753_t;
-          $b.String_push(v767_t, v766_t);
-          v769_t = v753_t;
-          $b.String_push(v769_t, "; fly_point(); __atomic_store_n(a_, v_, __ATOMIC_SEQ_CST); (fly_unit)0; })");
-          v28_t = v753_t.v;
-          break L2;
-        }
-        v771_t = (v1_key === "Atomic_swap");
-        if (v771_t)
-        {
-          const v772_t = { v: undefined };
-          let v773_t, v774_t, v775_t, v776_t, v778_t, v779_t, v780_t, v781_t, v782_t, v783_t, v785_t, v786_t, v787_t, v788_t, v789_t;
-          v773_t = $b.String_new();
-          v772_t.v = v773_t;
-          v774_t = v772_t;
-          $b.String_push(v774_t, "({ __auto_type a_ = ");
-          v776_t = v14_arg(0);
-          v777_t = v776_t;
-          v778_t = v777_t;
-          v779_t = v772_t;
-          $b.String_push(v779_t, v778_t);
-          v781_t = v772_t;
-          $b.String_push(v781_t, "; __auto_type v_ = ");
-          v783_t = v14_arg(1);
-          v784_t = v783_t;
-          v785_t = v784_t;
-          v786_t = v772_t;
-          $b.String_push(v786_t, v785_t);
-          v788_t = v772_t;
-          $b.String_push(v788_t, "; fly_point(); __atomic_exchange_n(a_, v_, __ATOMIC_SEQ_CST); })");
-          v28_t = v772_t.v;
-          break L2;
-        }
-        v790_t = (v1_key === "Atomic_compareExchange");
-        if (v790_t)
-        {
-          let v791_t;
-          {
-            const v796_t = { v: undefined };
-            let v792_t, v793_t, v794_t, v795_tc, v797_t, v798_t, v799_t, v800_t, v802_t, v803_t, v804_t, v805_t, v806_t, v807_t, v809_t, v810_t, v811_t, v812_t, v813_t, v814_t, v816_t, v817_t, v818_t, v819_t, v820_t, v821_t, v822_t, v823_t, v824_t, v825_t;
-            v793_t = v0_self;
-            v792_t = v12_rt;
-            v794_t = ctype_314(v793_t, v792_t, $copy4(v9_span));
-            v795_tc = v794_t;
-            v797_t = $b.String_new();
-            v796_t.v = v797_t;
-            v798_t = v796_t;
-            $b.String_push(v798_t, "({ __auto_type a_ = ");
-            v800_t = v14_arg(0);
-            v801_t = v800_t;
-            v802_t = v801_t;
-            v803_t = v796_t;
-            $b.String_push(v803_t, v802_t);
-            v805_t = v796_t;
-            $b.String_push(v805_t, "; __auto_type e_ = ");
-            v807_t = v14_arg(1);
+            const v797_t = { v: undefined };
+            let v790_t, v791_t, v792_t, v793_t, v794_t, v795_t, v796_tc, v798_t, v799_t, v800_t, v801_t, v802_t, v803_t, v804_t, v805_t, v806_t, v808_t, v809_t, v810_t, v811_t, v812_t, v813_t, v814_t, v815_t, v816_t, v817_t, v818_t, v819_t, v820_t, v821_t, v822_t;
+            v794_t = v0_self;
+            v790_t = v12_rt;
+            v791_t = typeArg_546(v790_t, 0);
+            v792_t = v791_t;
+            v793_t = v792_t;
+            v795_t = ctype_314(v794_t, v793_t, $copy4(v9_span));
+            v796_tc = v795_t;
+            v798_t = $b.String_new();
+            v797_t.v = v798_t;
+            v799_t = v797_t;
+            $b.String_push(v799_t, "({ ");
+            v801_t = v796_tc;
+            v802_t = v797_t;
+            $b.String_push(v802_t, v801_t);
+            v804_t = v797_t;
+            $b.String_push(v804_t, " x_ = ");
+            v806_t = v14_arg(0);
+            v807_t = v806_t;
             v808_t = v807_t;
-            v809_t = v808_t;
-            v810_t = v796_t;
-            $b.String_push(v810_t, v809_t);
-            v812_t = v796_t;
-            $b.String_push(v812_t, "; __auto_type d_ = ");
-            v814_t = v14_arg(2);
-            v815_t = v814_t;
-            v816_t = v815_t;
-            v817_t = v796_t;
-            $b.String_push(v817_t, v816_t);
-            v819_t = v796_t;
-            $b.String_push(v819_t, "; fly_point(); bool ok_ = __atomic_compare_exchange_n(a_, &e_, d_, false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST); (");
-            v821_t = v795_tc;
-            v822_t = v796_t;
-            $b.String_push(v822_t, v821_t);
-            v824_t = v796_t;
-            $b.String_push(v824_t, "){ .f0 = e_, .f1 = ok_ }; })");
-            v791_t = v796_t.v;
+            v809_t = v797_t;
+            $b.String_push(v809_t, v808_t);
+            v811_t = v797_t;
+            $b.String_push(v811_t, "; (");
+            v813_t = v796_tc;
+            v814_t = v797_t;
+            $b.String_push(v814_t, v813_t);
+            v816_t = v797_t;
+            $b.String_push(v816_t, "*)fly_box(&x_, sizeof(");
+            v818_t = v796_tc;
+            v819_t = v797_t;
+            $b.String_push(v819_t, v818_t);
+            v821_t = v797_t;
+            $b.String_push(v821_t, ")); })");
+            v789_t = v797_t.v;
           }
-          v28_t = v791_t;
+          v28_t = v789_t;
           break L2;
         }
-        v826_t = (v1_key === "Atomic_fetchAdd");
-        if (v826_t)
+        v823_t = (v1_key === "Atomic_load");
+        if (v823_t)
         {
-          const v827_t = { v: undefined };
-          let v828_t, v829_t, v830_t, v831_t, v833_t, v834_t, v835_t, v836_t, v837_t, v838_t, v840_t, v841_t, v842_t, v843_t, v844_t;
-          v828_t = $b.String_new();
-          v827_t.v = v828_t;
-          v829_t = v827_t;
-          $b.String_push(v829_t, "({ __auto_type a_ = ");
-          v831_t = v14_arg(0);
-          v832_t = v831_t;
-          v833_t = v832_t;
-          v834_t = v827_t;
-          $b.String_push(v834_t, v833_t);
-          v836_t = v827_t;
-          $b.String_push(v836_t, "; int64_t v_ = ");
-          v838_t = v14_arg(1);
-          v839_t = v838_t;
-          v840_t = v839_t;
-          v841_t = v827_t;
-          $b.String_push(v841_t, v840_t);
-          v843_t = v827_t;
-          $b.String_push(v843_t, "; fly_point(); fly_atomic_add(a_, v_); })");
-          v28_t = v827_t.v;
+          const v824_t = { v: undefined };
+          let v825_t, v826_t, v827_t, v828_t, v830_t, v831_t, v832_t, v833_t, v834_t;
+          v825_t = $b.String_new();
+          v824_t.v = v825_t;
+          v826_t = v824_t;
+          $b.String_push(v826_t, "({ __auto_type a_ = ");
+          v828_t = v14_arg(0);
+          v829_t = v828_t;
+          v830_t = v829_t;
+          v831_t = v824_t;
+          $b.String_push(v831_t, v830_t);
+          v833_t = v824_t;
+          $b.String_push(v833_t, "; fly_point(); __atomic_load_n(a_, __ATOMIC_SEQ_CST); })");
+          v28_t = v824_t.v;
           break L2;
         }
-        v845_t = (v1_key === "Db_connect");
-        if (v845_t)
+        v835_t = (v1_key === "Atomic_store");
+        if (v835_t)
         {
-          let v846_t;
-          v846_t = $b.str_toString("0");
-          v28_t = v846_t;
+          const v836_t = { v: undefined };
+          let v837_t, v838_t, v839_t, v840_t, v842_t, v843_t, v844_t, v845_t, v846_t, v847_t, v849_t, v850_t, v851_t, v852_t, v853_t;
+          v837_t = $b.String_new();
+          v836_t.v = v837_t;
+          v838_t = v836_t;
+          $b.String_push(v838_t, "({ __auto_type a_ = ");
+          v840_t = v14_arg(0);
+          v841_t = v840_t;
+          v842_t = v841_t;
+          v843_t = v836_t;
+          $b.String_push(v843_t, v842_t);
+          v845_t = v836_t;
+          $b.String_push(v845_t, "; __auto_type v_ = ");
+          v847_t = v14_arg(1);
+          v848_t = v847_t;
+          v849_t = v848_t;
+          v850_t = v836_t;
+          $b.String_push(v850_t, v849_t);
+          v852_t = v836_t;
+          $b.String_push(v852_t, "; fly_point(); __atomic_store_n(a_, v_, __ATOMIC_SEQ_CST); (fly_unit)0; })");
+          v28_t = v836_t.v;
           break L2;
         }
-        v847_t = (v1_key === "Listener_bind");
-        if (v847_t)
+        v854_t = (v1_key === "Atomic_swap");
+        if (v854_t)
         {
-          let v848_t;
+          const v855_t = { v: undefined };
+          let v856_t, v857_t, v858_t, v859_t, v861_t, v862_t, v863_t, v864_t, v865_t, v866_t, v868_t, v869_t, v870_t, v871_t, v872_t;
+          v856_t = $b.String_new();
+          v855_t.v = v856_t;
+          v857_t = v855_t;
+          $b.String_push(v857_t, "({ __auto_type a_ = ");
+          v859_t = v14_arg(0);
+          v860_t = v859_t;
+          v861_t = v860_t;
+          v862_t = v855_t;
+          $b.String_push(v862_t, v861_t);
+          v864_t = v855_t;
+          $b.String_push(v864_t, "; __auto_type v_ = ");
+          v866_t = v14_arg(1);
+          v867_t = v866_t;
+          v868_t = v867_t;
+          v869_t = v855_t;
+          $b.String_push(v869_t, v868_t);
+          v871_t = v855_t;
+          $b.String_push(v871_t, "; fly_point(); __atomic_exchange_n(a_, v_, __ATOMIC_SEQ_CST); })");
+          v28_t = v855_t.v;
+          break L2;
+        }
+        v873_t = (v1_key === "Atomic_compareExchange");
+        if (v873_t)
+        {
+          let v874_t;
           {
-            const v851_t = { v: undefined };
-            let v849_t, v850_raise, v852_t, v853_t, v854_t, v855_t, v857_t, v858_t, v859_t, v860_t, v861_t, v862_t, v863_t, v864_t, v865_t, v866_t;
-            v849_t = ioRaise_1737(v0_self, "-l_");
-            v850_raise = v849_t;
-            v852_t = $b.String_new();
-            v851_t.v = v852_t;
-            v853_t = v851_t;
-            $b.String_push(v853_t, "({ int l_ = fly_listen(");
-            v855_t = v14_arg(0);
-            v856_t = v855_t;
-            v857_t = v856_t;
-            v858_t = v851_t;
-            $b.String_push(v858_t, v857_t);
-            v860_t = v851_t;
-            $b.String_push(v860_t, "); if (l_ < 0) { ");
-            v862_t = v850_raise;
-            v863_t = v851_t;
-            $b.String_push(v863_t, v862_t);
-            v865_t = v851_t;
-            $b.String_push(v865_t, "} l_; })");
-            v848_t = v851_t.v;
+            const v879_t = { v: undefined };
+            let v875_t, v876_t, v877_t, v878_tc, v880_t, v881_t, v882_t, v883_t, v885_t, v886_t, v887_t, v888_t, v889_t, v890_t, v892_t, v893_t, v894_t, v895_t, v896_t, v897_t, v899_t, v900_t, v901_t, v902_t, v903_t, v904_t, v905_t, v906_t, v907_t, v908_t;
+            v876_t = v0_self;
+            v875_t = v12_rt;
+            v877_t = ctype_314(v876_t, v875_t, $copy4(v9_span));
+            v878_tc = v877_t;
+            v880_t = $b.String_new();
+            v879_t.v = v880_t;
+            v881_t = v879_t;
+            $b.String_push(v881_t, "({ __auto_type a_ = ");
+            v883_t = v14_arg(0);
+            v884_t = v883_t;
+            v885_t = v884_t;
+            v886_t = v879_t;
+            $b.String_push(v886_t, v885_t);
+            v888_t = v879_t;
+            $b.String_push(v888_t, "; __auto_type e_ = ");
+            v890_t = v14_arg(1);
+            v891_t = v890_t;
+            v892_t = v891_t;
+            v893_t = v879_t;
+            $b.String_push(v893_t, v892_t);
+            v895_t = v879_t;
+            $b.String_push(v895_t, "; __auto_type d_ = ");
+            v897_t = v14_arg(2);
+            v898_t = v897_t;
+            v899_t = v898_t;
+            v900_t = v879_t;
+            $b.String_push(v900_t, v899_t);
+            v902_t = v879_t;
+            $b.String_push(v902_t, "; fly_point(); bool ok_ = __atomic_compare_exchange_n(a_, &e_, d_, false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST); (");
+            v904_t = v878_tc;
+            v905_t = v879_t;
+            $b.String_push(v905_t, v904_t);
+            v907_t = v879_t;
+            $b.String_push(v907_t, "){ .f0 = e_, .f1 = ok_ }; })");
+            v874_t = v879_t.v;
           }
-          v28_t = v848_t;
+          v28_t = v874_t;
           break L2;
         }
-        v867_t = (v1_key === "Listener_port");
-        if (v867_t)
+        v909_t = (v1_key === "Atomic_fetchAdd");
+        if (v909_t)
         {
-          const v868_t = { v: undefined };
-          let v869_t, v870_t, v871_t, v872_t, v874_t, v875_t, v876_t, v877_t, v878_t;
-          v869_t = $b.String_new();
-          v868_t.v = v869_t;
-          v870_t = v868_t;
-          $b.String_push(v870_t, "fly_listener_port(");
-          v872_t = v14_arg(0);
-          v873_t = v872_t;
-          v874_t = v873_t;
-          v875_t = v868_t;
-          $b.String_push(v875_t, v874_t);
-          v877_t = v868_t;
-          $b.String_push(v877_t, ")");
-          v28_t = v868_t.v;
+          const v910_t = { v: undefined };
+          let v911_t, v912_t, v913_t, v914_t, v916_t, v917_t, v918_t, v919_t, v920_t, v921_t, v923_t, v924_t, v925_t, v926_t, v927_t;
+          v911_t = $b.String_new();
+          v910_t.v = v911_t;
+          v912_t = v910_t;
+          $b.String_push(v912_t, "({ __auto_type a_ = ");
+          v914_t = v14_arg(0);
+          v915_t = v914_t;
+          v916_t = v915_t;
+          v917_t = v910_t;
+          $b.String_push(v917_t, v916_t);
+          v919_t = v910_t;
+          $b.String_push(v919_t, "; int64_t v_ = ");
+          v921_t = v14_arg(1);
+          v922_t = v921_t;
+          v923_t = v922_t;
+          v924_t = v910_t;
+          $b.String_push(v924_t, v923_t);
+          v926_t = v910_t;
+          $b.String_push(v926_t, "; fly_point(); fly_atomic_add(a_, v_); })");
+          v28_t = v910_t.v;
           break L2;
         }
-        v879_t = (v1_key === "Socket_close");
-        if (v879_t)
+        v928_t = (v1_key === "Db_connect");
+        if (v928_t)
         {
-          const v880_t = { v: undefined };
-          let v881_t, v882_t, v883_t, v884_t, v886_t, v887_t, v888_t, v889_t, v890_t;
-          v881_t = $b.String_new();
-          v880_t.v = v881_t;
-          v882_t = v880_t;
-          $b.String_push(v882_t, "({ fly_sock_close(");
-          v884_t = v14_arg(0);
-          v885_t = v884_t;
-          v886_t = v885_t;
-          v887_t = v880_t;
-          $b.String_push(v887_t, v886_t);
-          v889_t = v880_t;
-          $b.String_push(v889_t, "); (fly_unit)0; })");
-          v28_t = v880_t.v;
+          let v929_t;
+          v929_t = $b.str_toString("0");
+          v28_t = v929_t;
           break L2;
         }
-        v891_t = (v1_key === "Socket_connect");
-        if (v891_t)
+        v930_t = (v1_key === "Listener_bind");
+        if (v930_t)
         {
-          let v892_t;
+          let v931_t;
           {
-            const v895_t = { v: undefined };
-            let v893_t, v894_raise, v896_t, v897_t, v898_t, v899_t, v901_t, v902_t, v903_t, v904_t, v905_t, v906_t, v908_t, v909_t, v910_t, v911_t, v912_t, v913_t, v914_t, v915_t, v916_t, v917_t;
-            v893_t = ioRaise_1737(v0_self, "e_");
-            v894_raise = v893_t;
-            v896_t = $b.String_new();
-            v895_t.v = v896_t;
-            v897_t = v895_t;
-            $b.String_push(v897_t, "({ fly_socket s_; int e_ = fly_connect(");
-            v899_t = v14_arg(0);
-            v900_t = v899_t;
-            v901_t = v900_t;
-            v902_t = v895_t;
-            $b.String_push(v902_t, v901_t);
-            v904_t = v895_t;
-            $b.String_push(v904_t, ", ");
-            v906_t = v14_arg(1);
-            v907_t = v906_t;
-            v908_t = v907_t;
-            v909_t = v895_t;
-            $b.String_push(v909_t, v908_t);
-            v911_t = v895_t;
-            $b.String_push(v911_t, ", &s_); if (e_) { ");
-            v913_t = v894_raise;
-            v914_t = v895_t;
-            $b.String_push(v914_t, v913_t);
-            v916_t = v895_t;
-            $b.String_push(v916_t, "} s_; })");
-            v892_t = v895_t.v;
-          }
-          v28_t = v892_t;
-          break L2;
-        }
-        v918_t = (v1_key === "Socket_connectTls");
-        if (v918_t)
-        {
-          let v919_t;
-          {
-            const v922_t = { v: undefined };
-            let v920_t, v921_raise, v923_t, v924_t, v925_t, v926_t, v928_t, v929_t, v930_t, v931_t, v932_t, v933_t, v935_t, v936_t, v937_t, v938_t, v939_t, v940_t, v941_t, v942_t, v943_t, v944_t;
-            v920_t = ioRaise_1737(v0_self, "e_");
-            v921_raise = v920_t;
-            v923_t = $b.String_new();
-            v922_t.v = v923_t;
-            v924_t = v922_t;
-            $b.String_push(v924_t, "({ fly_socket s_; int e_ = fly_connect_tls(");
-            v926_t = v14_arg(0);
-            v927_t = v926_t;
-            v928_t = v927_t;
-            v929_t = v922_t;
-            $b.String_push(v929_t, v928_t);
-            v931_t = v922_t;
-            $b.String_push(v931_t, ", ");
-            v933_t = v14_arg(1);
-            v934_t = v933_t;
-            v935_t = v934_t;
-            v936_t = v922_t;
-            $b.String_push(v936_t, v935_t);
-            v938_t = v922_t;
-            $b.String_push(v938_t, ", &s_); if (e_) { ");
-            v940_t = v921_raise;
-            v941_t = v922_t;
+            const v934_t = { v: undefined };
+            let v932_t, v933_raise, v935_t, v936_t, v937_t, v938_t, v940_t, v941_t, v942_t, v943_t, v944_t, v945_t, v946_t, v947_t, v948_t, v949_t;
+            v932_t = ioRaise_1737(v0_self, "-l_");
+            v933_raise = v932_t;
+            v935_t = $b.String_new();
+            v934_t.v = v935_t;
+            v936_t = v934_t;
+            $b.String_push(v936_t, "({ int l_ = fly_listen(");
+            v938_t = v14_arg(0);
+            v939_t = v938_t;
+            v940_t = v939_t;
+            v941_t = v934_t;
             $b.String_push(v941_t, v940_t);
-            v943_t = v922_t;
-            $b.String_push(v943_t, "} s_; })");
-            v919_t = v922_t.v;
+            v943_t = v934_t;
+            $b.String_push(v943_t, "); if (l_ < 0) { ");
+            v945_t = v933_raise;
+            v946_t = v934_t;
+            $b.String_push(v946_t, v945_t);
+            v948_t = v934_t;
+            $b.String_push(v948_t, "} l_; })");
+            v931_t = v934_t.v;
           }
-          v28_t = v919_t;
+          v28_t = v931_t;
           break L2;
         }
-        v945_t = (v1_key === "Socket_read");
-        if (v945_t)
+        v950_t = (v1_key === "Listener_port");
+        if (v950_t)
         {
-          let v946_t;
-          {
-            const v949_t = { v: undefined };
-            let v947_t, v948_raise, v950_t, v951_t, v952_t, v953_t, v955_t, v956_t, v957_t, v958_t, v959_t, v960_t, v962_t, v963_t, v964_t, v965_t, v966_t, v967_t, v968_t, v969_t, v970_t, v971_t;
-            v947_t = ioRaise_1737(v0_self, "e_");
-            v948_raise = v947_t;
-            v950_t = $b.String_new();
-            v949_t.v = v950_t;
-            v951_t = v949_t;
-            $b.String_push(v951_t, "({ uint64_t n_ = 0; int e_ = fly_sock_read(");
-            v953_t = v14_arg(0);
-            v954_t = v953_t;
-            v955_t = v954_t;
-            v956_t = v949_t;
-            $b.String_push(v956_t, v955_t);
-            v958_t = v949_t;
-            $b.String_push(v958_t, ", ");
-            v960_t = v14_arg(1);
-            v961_t = v960_t;
-            v962_t = v961_t;
-            v963_t = v949_t;
-            $b.String_push(v963_t, v962_t);
-            v965_t = v949_t;
-            $b.String_push(v965_t, ", &n_); if (e_) { ");
-            v967_t = v948_raise;
-            v968_t = v949_t;
-            $b.String_push(v968_t, v967_t);
-            v970_t = v949_t;
-            $b.String_push(v970_t, "} n_; })");
-            v946_t = v949_t.v;
-          }
-          v28_t = v946_t;
+          const v951_t = { v: undefined };
+          let v952_t, v953_t, v954_t, v955_t, v957_t, v958_t, v959_t, v960_t, v961_t;
+          v952_t = $b.String_new();
+          v951_t.v = v952_t;
+          v953_t = v951_t;
+          $b.String_push(v953_t, "fly_listener_port(");
+          v955_t = v14_arg(0);
+          v956_t = v955_t;
+          v957_t = v956_t;
+          v958_t = v951_t;
+          $b.String_push(v958_t, v957_t);
+          v960_t = v951_t;
+          $b.String_push(v960_t, ")");
+          v28_t = v951_t.v;
           break L2;
         }
-        v972_t = (v1_key === "Socket_write");
-        if (v972_t)
+        v962_t = (v1_key === "Socket_close");
+        if (v962_t)
         {
-          let v973_t;
-          {
-            const v976_t = { v: undefined };
-            let v974_t, v975_raise, v977_t, v978_t, v979_t, v980_t, v982_t, v983_t, v984_t, v985_t, v986_t, v987_t, v989_t, v990_t, v991_t, v992_t, v993_t, v994_t, v995_t, v996_t, v997_t, v998_t;
-            v974_t = ioRaise_1737(v0_self, "e_");
-            v975_raise = v974_t;
-            v977_t = $b.String_new();
-            v976_t.v = v977_t;
-            v978_t = v976_t;
-            $b.String_push(v978_t, "({ int e_ = fly_sock_write(");
-            v980_t = v14_arg(0);
-            v981_t = v980_t;
-            v982_t = v981_t;
-            v983_t = v976_t;
-            $b.String_push(v983_t, v982_t);
-            v985_t = v976_t;
-            $b.String_push(v985_t, ", ");
-            v987_t = v14_arg(1);
-            v988_t = v987_t;
-            v989_t = v988_t;
-            v990_t = v976_t;
-            $b.String_push(v990_t, v989_t);
-            v992_t = v976_t;
-            $b.String_push(v992_t, "); if (e_) { ");
-            v994_t = v975_raise;
-            v995_t = v976_t;
-            $b.String_push(v995_t, v994_t);
-            v997_t = v976_t;
-            $b.String_push(v997_t, "} (fly_unit)0; })");
-            v973_t = v976_t.v;
-          }
-          v28_t = v973_t;
+          const v963_t = { v: undefined };
+          let v964_t, v965_t, v966_t, v967_t, v969_t, v970_t, v971_t, v972_t, v973_t;
+          v964_t = $b.String_new();
+          v963_t.v = v964_t;
+          v965_t = v963_t;
+          $b.String_push(v965_t, "({ fly_sock_close(");
+          v967_t = v14_arg(0);
+          v968_t = v967_t;
+          v969_t = v968_t;
+          v970_t = v963_t;
+          $b.String_push(v970_t, v969_t);
+          v972_t = v963_t;
+          $b.String_push(v972_t, "); (fly_unit)0; })");
+          v28_t = v963_t.v;
           break L2;
         }
-        v999_t = (v1_key === "Socket_writeStatus");
-        if (v999_t)
+        v974_t = (v1_key === "Socket_connect");
+        if (v974_t)
         {
-          let v1000_t;
+          let v975_t;
           {
-            const v1003_t = { v: undefined };
-            let v1001_t, v1002_raise, v1004_t, v1005_t, v1006_t, v1007_t, v1009_t, v1010_t, v1011_t, v1012_t, v1013_t, v1014_t, v1016_t, v1017_t, v1018_t, v1019_t, v1020_t, v1021_t, v1023_t, v1024_t, v1025_t, v1026_t, v1027_t, v1028_t, v1029_t, v1030_t, v1031_t, v1032_t;
-            v1001_t = ioRaise_1737(v0_self, "e_");
-            v1002_raise = v1001_t;
-            v1004_t = $b.String_new();
-            v1003_t.v = v1004_t;
-            v1005_t = v1003_t;
-            $b.String_push(v1005_t, "({ int e_ = fly_sock_status(");
-            v1007_t = v14_arg(0);
-            v1008_t = v1007_t;
-            v1009_t = v1008_t;
-            v1010_t = v1003_t;
-            $b.String_push(v1010_t, v1009_t);
-            v1012_t = v1003_t;
-            $b.String_push(v1012_t, ", ");
-            v1014_t = v14_arg(1);
-            v1015_t = v1014_t;
-            v1016_t = v1015_t;
-            v1017_t = v1003_t;
-            $b.String_push(v1017_t, v1016_t);
-            v1019_t = v1003_t;
-            $b.String_push(v1019_t, ", ");
-            v1021_t = v14_arg(2);
-            v1022_t = v1021_t;
-            v1023_t = v1022_t;
-            v1024_t = v1003_t;
+            const v978_t = { v: undefined };
+            let v976_t, v977_raise, v979_t, v980_t, v981_t, v982_t, v984_t, v985_t, v986_t, v987_t, v988_t, v989_t, v991_t, v992_t, v993_t, v994_t, v995_t, v996_t, v997_t, v998_t, v999_t, v1000_t;
+            v976_t = ioRaise_1737(v0_self, "e_");
+            v977_raise = v976_t;
+            v979_t = $b.String_new();
+            v978_t.v = v979_t;
+            v980_t = v978_t;
+            $b.String_push(v980_t, "({ fly_socket s_; int e_ = fly_connect(");
+            v982_t = v14_arg(0);
+            v983_t = v982_t;
+            v984_t = v983_t;
+            v985_t = v978_t;
+            $b.String_push(v985_t, v984_t);
+            v987_t = v978_t;
+            $b.String_push(v987_t, ", ");
+            v989_t = v14_arg(1);
+            v990_t = v989_t;
+            v991_t = v990_t;
+            v992_t = v978_t;
+            $b.String_push(v992_t, v991_t);
+            v994_t = v978_t;
+            $b.String_push(v994_t, ", &s_); if (e_) { ");
+            v996_t = v977_raise;
+            v997_t = v978_t;
+            $b.String_push(v997_t, v996_t);
+            v999_t = v978_t;
+            $b.String_push(v999_t, "} s_; })");
+            v975_t = v978_t.v;
+          }
+          v28_t = v975_t;
+          break L2;
+        }
+        v1001_t = (v1_key === "Socket_connectTls");
+        if (v1001_t)
+        {
+          let v1002_t;
+          {
+            const v1005_t = { v: undefined };
+            let v1003_t, v1004_raise, v1006_t, v1007_t, v1008_t, v1009_t, v1011_t, v1012_t, v1013_t, v1014_t, v1015_t, v1016_t, v1018_t, v1019_t, v1020_t, v1021_t, v1022_t, v1023_t, v1024_t, v1025_t, v1026_t, v1027_t;
+            v1003_t = ioRaise_1737(v0_self, "e_");
+            v1004_raise = v1003_t;
+            v1006_t = $b.String_new();
+            v1005_t.v = v1006_t;
+            v1007_t = v1005_t;
+            $b.String_push(v1007_t, "({ fly_socket s_; int e_ = fly_connect_tls(");
+            v1009_t = v14_arg(0);
+            v1010_t = v1009_t;
+            v1011_t = v1010_t;
+            v1012_t = v1005_t;
+            $b.String_push(v1012_t, v1011_t);
+            v1014_t = v1005_t;
+            $b.String_push(v1014_t, ", ");
+            v1016_t = v14_arg(1);
+            v1017_t = v1016_t;
+            v1018_t = v1017_t;
+            v1019_t = v1005_t;
+            $b.String_push(v1019_t, v1018_t);
+            v1021_t = v1005_t;
+            $b.String_push(v1021_t, ", &s_); if (e_) { ");
+            v1023_t = v1004_raise;
+            v1024_t = v1005_t;
             $b.String_push(v1024_t, v1023_t);
-            v1026_t = v1003_t;
-            $b.String_push(v1026_t, "); if (e_) { ");
-            v1028_t = v1002_raise;
-            v1029_t = v1003_t;
-            $b.String_push(v1029_t, v1028_t);
-            v1031_t = v1003_t;
-            $b.String_push(v1031_t, "} (fly_unit)0; })");
-            v1000_t = v1003_t.v;
+            v1026_t = v1005_t;
+            $b.String_push(v1026_t, "} s_; })");
+            v1002_t = v1005_t.v;
           }
-          v28_t = v1000_t;
+          v28_t = v1002_t;
           break L2;
         }
-        v1033_t = (v1_key === "Db_fetchProfile");
-        if (v1033_t)
+        v1028_t = (v1_key === "Socket_read");
+        if (v1028_t)
         {
-          let v1034_t;
+          let v1029_t;
           {
-            const v1043_t = { v: undefined };
-            let v1035_t, v1036_t, v1037_t, v1038_tc, v1039_t, v1040_timedOut, v1041_t, v1042_notFound, v1044_t, v1045_t, v1046_t, v1047_t, v1049_t, v1050_t, v1051_t, v1052_t, v1053_t, v1054_t, v1055_t, v1056_t, v1057_t, v1058_t, v1059_t, v1060_t, v1061_t, v1062_t, v1063_t, v1064_t, v1065_t, v1066_t, v1067_t, v1068_t, v1069_t, v1070_t, v1071_t, v1072_t, v1073_t;
-            v1036_t = v0_self;
-            v1035_t = v12_rt;
-            v1037_t = ctype_314(v1036_t, v1035_t, $copy4(v9_span));
-            v1038_tc = v1037_t;
-            v1039_t = ioErr_1738(v0_self, "TimedOut");
-            v1040_timedOut = v1039_t;
-            v1041_t = ioErr_1738(v0_self, "NotFound");
-            v1042_notFound = v1041_t;
-            v1044_t = $b.String_new();
-            v1043_t.v = v1044_t;
-            v1045_t = v1043_t;
-            $b.String_push(v1045_t, "({ fly_str u_ = ");
-            v1047_t = v14_arg(1);
-            v1048_t = v1047_t;
-            v1049_t = v1048_t;
-            v1050_t = v1043_t;
-            $b.String_push(v1050_t, v1049_t);
-            v1052_t = v1043_t;
-            $b.String_push(v1052_t, "; fly_str n_; ");
-            v1054_t = v1038_tc;
-            v1055_t = v1043_t;
-            $b.String_push(v1055_t, v1054_t);
-            v1057_t = v1043_t;
-            $b.String_push(v1057_t, " r_ = { 0 }; if (fly_fault()) { ");
-            v1059_t = v1040_timedOut;
-            v1060_t = v1043_t;
-            $b.String_push(v1060_t, v1059_t);
-            v1062_t = v1043_t;
-            $b.String_push(v1062_t, "} else if (!fly_world_profile(u_, &n_)) { ");
-            v1064_t = v1042_notFound;
-            v1065_t = v1043_t;
-            $b.String_push(v1065_t, v1064_t);
-            v1067_t = v1043_t;
-            $b.String_push(v1067_t, "} else r_ = (");
-            v1069_t = v1038_tc;
-            v1070_t = v1043_t;
-            $b.String_push(v1070_t, v1069_t);
-            v1072_t = v1043_t;
-            $b.String_push(v1072_t, "){ .displayName = fly_String_from(n_) }; r_; })");
-            v1034_t = v1043_t.v;
+            const v1032_t = { v: undefined };
+            let v1030_t, v1031_raise, v1033_t, v1034_t, v1035_t, v1036_t, v1038_t, v1039_t, v1040_t, v1041_t, v1042_t, v1043_t, v1045_t, v1046_t, v1047_t, v1048_t, v1049_t, v1050_t, v1051_t, v1052_t, v1053_t, v1054_t;
+            v1030_t = ioRaise_1737(v0_self, "e_");
+            v1031_raise = v1030_t;
+            v1033_t = $b.String_new();
+            v1032_t.v = v1033_t;
+            v1034_t = v1032_t;
+            $b.String_push(v1034_t, "({ uint64_t n_ = 0; int e_ = fly_sock_read(");
+            v1036_t = v14_arg(0);
+            v1037_t = v1036_t;
+            v1038_t = v1037_t;
+            v1039_t = v1032_t;
+            $b.String_push(v1039_t, v1038_t);
+            v1041_t = v1032_t;
+            $b.String_push(v1041_t, ", ");
+            v1043_t = v14_arg(1);
+            v1044_t = v1043_t;
+            v1045_t = v1044_t;
+            v1046_t = v1032_t;
+            $b.String_push(v1046_t, v1045_t);
+            v1048_t = v1032_t;
+            $b.String_push(v1048_t, ", &n_); if (e_) { ");
+            v1050_t = v1031_raise;
+            v1051_t = v1032_t;
+            $b.String_push(v1051_t, v1050_t);
+            v1053_t = v1032_t;
+            $b.String_push(v1053_t, "} n_; })");
+            v1029_t = v1032_t.v;
           }
-          v28_t = v1034_t;
+          v28_t = v1029_t;
           break L2;
         }
-        v1074_t = (v1_key === "Db_checkQuota");
-        if (v1074_t)
+        v1055_t = (v1_key === "Socket_write");
+        if (v1055_t)
         {
-          let v1075_t;
+          let v1056_t;
           {
-            const v1082_t = { v: undefined };
-            let v1076_t, v1077_t, v1078_t, v1079_tc, v1080_t, v1081_timedOut, v1083_t, v1084_t, v1085_t, v1086_t, v1088_t, v1089_t, v1090_t, v1091_t, v1092_t, v1093_t, v1094_t, v1095_t, v1096_t, v1097_t, v1098_t, v1099_t, v1100_t, v1101_t, v1102_t, v1103_t, v1104_t, v1105_t, v1106_t, v1107_t;
-            v1077_t = v0_self;
-            v1076_t = v12_rt;
-            v1078_t = ctype_314(v1077_t, v1076_t, $copy4(v9_span));
-            v1079_tc = v1078_t;
-            v1080_t = ioErr_1738(v0_self, "TimedOut");
-            v1081_timedOut = v1080_t;
-            v1083_t = $b.String_new();
-            v1082_t.v = v1083_t;
-            v1084_t = v1082_t;
-            $b.String_push(v1084_t, "({ fly_str t_ = ");
-            v1086_t = v14_arg(1);
-            v1087_t = v1086_t;
-            v1088_t = v1087_t;
-            v1089_t = v1082_t;
-            $b.String_push(v1089_t, v1088_t);
-            v1091_t = v1082_t;
-            $b.String_push(v1091_t, "; ");
-            v1093_t = v1079_tc;
-            v1094_t = v1082_t;
-            $b.String_push(v1094_t, v1093_t);
-            v1096_t = v1082_t;
-            $b.String_push(v1096_t, " r_ = { 0 }; if (fly_fault()) { ");
-            v1098_t = v1081_timedOut;
-            v1099_t = v1082_t;
-            $b.String_push(v1099_t, v1098_t);
-            v1101_t = v1082_t;
-            $b.String_push(v1101_t, "} else r_ = (");
-            v1103_t = v1079_tc;
-            v1104_t = v1082_t;
-            $b.String_push(v1104_t, v1103_t);
-            v1106_t = v1082_t;
-            $b.String_push(v1106_t, "){ .allowed = fly_world_quota(t_) }; r_; })");
-            v1075_t = v1082_t.v;
+            const v1059_t = { v: undefined };
+            let v1057_t, v1058_raise, v1060_t, v1061_t, v1062_t, v1063_t, v1065_t, v1066_t, v1067_t, v1068_t, v1069_t, v1070_t, v1072_t, v1073_t, v1074_t, v1075_t, v1076_t, v1077_t, v1078_t, v1079_t, v1080_t, v1081_t;
+            v1057_t = ioRaise_1737(v0_self, "e_");
+            v1058_raise = v1057_t;
+            v1060_t = $b.String_new();
+            v1059_t.v = v1060_t;
+            v1061_t = v1059_t;
+            $b.String_push(v1061_t, "({ int e_ = fly_sock_write(");
+            v1063_t = v14_arg(0);
+            v1064_t = v1063_t;
+            v1065_t = v1064_t;
+            v1066_t = v1059_t;
+            $b.String_push(v1066_t, v1065_t);
+            v1068_t = v1059_t;
+            $b.String_push(v1068_t, ", ");
+            v1070_t = v14_arg(1);
+            v1071_t = v1070_t;
+            v1072_t = v1071_t;
+            v1073_t = v1059_t;
+            $b.String_push(v1073_t, v1072_t);
+            v1075_t = v1059_t;
+            $b.String_push(v1075_t, "); if (e_) { ");
+            v1077_t = v1058_raise;
+            v1078_t = v1059_t;
+            $b.String_push(v1078_t, v1077_t);
+            v1080_t = v1059_t;
+            $b.String_push(v1080_t, "} (fly_unit)0; })");
+            v1056_t = v1059_t.v;
           }
-          v28_t = v1075_t;
+          v28_t = v1056_t;
+          break L2;
+        }
+        v1082_t = (v1_key === "Socket_writeStatus");
+        if (v1082_t)
+        {
+          let v1083_t;
+          {
+            const v1086_t = { v: undefined };
+            let v1084_t, v1085_raise, v1087_t, v1088_t, v1089_t, v1090_t, v1092_t, v1093_t, v1094_t, v1095_t, v1096_t, v1097_t, v1099_t, v1100_t, v1101_t, v1102_t, v1103_t, v1104_t, v1106_t, v1107_t, v1108_t, v1109_t, v1110_t, v1111_t, v1112_t, v1113_t, v1114_t, v1115_t;
+            v1084_t = ioRaise_1737(v0_self, "e_");
+            v1085_raise = v1084_t;
+            v1087_t = $b.String_new();
+            v1086_t.v = v1087_t;
+            v1088_t = v1086_t;
+            $b.String_push(v1088_t, "({ int e_ = fly_sock_status(");
+            v1090_t = v14_arg(0);
+            v1091_t = v1090_t;
+            v1092_t = v1091_t;
+            v1093_t = v1086_t;
+            $b.String_push(v1093_t, v1092_t);
+            v1095_t = v1086_t;
+            $b.String_push(v1095_t, ", ");
+            v1097_t = v14_arg(1);
+            v1098_t = v1097_t;
+            v1099_t = v1098_t;
+            v1100_t = v1086_t;
+            $b.String_push(v1100_t, v1099_t);
+            v1102_t = v1086_t;
+            $b.String_push(v1102_t, ", ");
+            v1104_t = v14_arg(2);
+            v1105_t = v1104_t;
+            v1106_t = v1105_t;
+            v1107_t = v1086_t;
+            $b.String_push(v1107_t, v1106_t);
+            v1109_t = v1086_t;
+            $b.String_push(v1109_t, "); if (e_) { ");
+            v1111_t = v1085_raise;
+            v1112_t = v1086_t;
+            $b.String_push(v1112_t, v1111_t);
+            v1114_t = v1086_t;
+            $b.String_push(v1114_t, "} (fly_unit)0; })");
+            v1083_t = v1086_t.v;
+          }
+          v28_t = v1083_t;
+          break L2;
+        }
+        v1116_t = (v1_key === "Db_fetchProfile");
+        if (v1116_t)
+        {
+          let v1117_t;
+          {
+            const v1126_t = { v: undefined };
+            let v1118_t, v1119_t, v1120_t, v1121_tc, v1122_t, v1123_timedOut, v1124_t, v1125_notFound, v1127_t, v1128_t, v1129_t, v1130_t, v1132_t, v1133_t, v1134_t, v1135_t, v1136_t, v1137_t, v1138_t, v1139_t, v1140_t, v1141_t, v1142_t, v1143_t, v1144_t, v1145_t, v1146_t, v1147_t, v1148_t, v1149_t, v1150_t, v1151_t, v1152_t, v1153_t, v1154_t, v1155_t, v1156_t;
+            v1119_t = v0_self;
+            v1118_t = v12_rt;
+            v1120_t = ctype_314(v1119_t, v1118_t, $copy4(v9_span));
+            v1121_tc = v1120_t;
+            v1122_t = ioErr_1738(v0_self, "TimedOut");
+            v1123_timedOut = v1122_t;
+            v1124_t = ioErr_1738(v0_self, "NotFound");
+            v1125_notFound = v1124_t;
+            v1127_t = $b.String_new();
+            v1126_t.v = v1127_t;
+            v1128_t = v1126_t;
+            $b.String_push(v1128_t, "({ fly_str u_ = ");
+            v1130_t = v14_arg(1);
+            v1131_t = v1130_t;
+            v1132_t = v1131_t;
+            v1133_t = v1126_t;
+            $b.String_push(v1133_t, v1132_t);
+            v1135_t = v1126_t;
+            $b.String_push(v1135_t, "; fly_str n_; ");
+            v1137_t = v1121_tc;
+            v1138_t = v1126_t;
+            $b.String_push(v1138_t, v1137_t);
+            v1140_t = v1126_t;
+            $b.String_push(v1140_t, " r_ = { 0 }; if (fly_fault()) { ");
+            v1142_t = v1123_timedOut;
+            v1143_t = v1126_t;
+            $b.String_push(v1143_t, v1142_t);
+            v1145_t = v1126_t;
+            $b.String_push(v1145_t, "} else if (!fly_world_profile(u_, &n_)) { ");
+            v1147_t = v1125_notFound;
+            v1148_t = v1126_t;
+            $b.String_push(v1148_t, v1147_t);
+            v1150_t = v1126_t;
+            $b.String_push(v1150_t, "} else r_ = (");
+            v1152_t = v1121_tc;
+            v1153_t = v1126_t;
+            $b.String_push(v1153_t, v1152_t);
+            v1155_t = v1126_t;
+            $b.String_push(v1155_t, "){ .displayName = fly_String_from(n_) }; r_; })");
+            v1117_t = v1126_t.v;
+          }
+          v28_t = v1117_t;
+          break L2;
+        }
+        v1157_t = (v1_key === "Db_checkQuota");
+        if (v1157_t)
+        {
+          let v1158_t;
+          {
+            const v1165_t = { v: undefined };
+            let v1159_t, v1160_t, v1161_t, v1162_tc, v1163_t, v1164_timedOut, v1166_t, v1167_t, v1168_t, v1169_t, v1171_t, v1172_t, v1173_t, v1174_t, v1175_t, v1176_t, v1177_t, v1178_t, v1179_t, v1180_t, v1181_t, v1182_t, v1183_t, v1184_t, v1185_t, v1186_t, v1187_t, v1188_t, v1189_t, v1190_t;
+            v1160_t = v0_self;
+            v1159_t = v12_rt;
+            v1161_t = ctype_314(v1160_t, v1159_t, $copy4(v9_span));
+            v1162_tc = v1161_t;
+            v1163_t = ioErr_1738(v0_self, "TimedOut");
+            v1164_timedOut = v1163_t;
+            v1166_t = $b.String_new();
+            v1165_t.v = v1166_t;
+            v1167_t = v1165_t;
+            $b.String_push(v1167_t, "({ fly_str t_ = ");
+            v1169_t = v14_arg(1);
+            v1170_t = v1169_t;
+            v1171_t = v1170_t;
+            v1172_t = v1165_t;
+            $b.String_push(v1172_t, v1171_t);
+            v1174_t = v1165_t;
+            $b.String_push(v1174_t, "; ");
+            v1176_t = v1162_tc;
+            v1177_t = v1165_t;
+            $b.String_push(v1177_t, v1176_t);
+            v1179_t = v1165_t;
+            $b.String_push(v1179_t, " r_ = { 0 }; if (fly_fault()) { ");
+            v1181_t = v1164_timedOut;
+            v1182_t = v1165_t;
+            $b.String_push(v1182_t, v1181_t);
+            v1184_t = v1165_t;
+            $b.String_push(v1184_t, "} else r_ = (");
+            v1186_t = v1162_tc;
+            v1187_t = v1165_t;
+            $b.String_push(v1187_t, v1186_t);
+            v1189_t = v1165_t;
+            $b.String_push(v1189_t, "){ .allowed = fly_world_quota(t_) }; r_; })");
+            v1158_t = v1165_t.v;
+          }
+          v28_t = v1158_t;
           break L2;
         }
         {
-          let v1108_t;
-          v1108_t = { $tag: "None" };
-          return v1108_t;
+          let v1191_t;
+          v1191_t = { $tag: "None" };
+          return v1191_t;
           v28_t = undefined;
           break L2;
         }
         $rt.panic("no arm matched");
       }
-      v1109_t = { $tag: "Some", $: v28_t };
-      v5_t = v1109_t;
+      v1192_t = { $tag: "Some", $: v28_t };
+      v5_t = v1192_t;
     }
     v4_ret = v5_t;
   }

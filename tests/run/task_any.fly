@@ -1,0 +1,21 @@
+// `Task.any` waits for the first of its tasks to end, and gives where it is among them.
+// expect: first: 1
+// expect: then: 2
+// expect: once ended, at once: 1
+import { println } from "std/io";
+
+export function main(): void uses Io {
+  Io.scope((s) => {
+    let ts: Vec<Task> = Vec.new();
+    ts.push(s.spawn(() => { Io.sleep(Duration.ms(30)); }));
+    ts.push(s.spawn(() => { Io.sleep(Duration.ms(10)); }));
+    ts.push(s.spawn(() => { Io.sleep(Duration.ms(20)); }));
+    const first = Task.any(ts);
+    println(`first: ${first}`);
+    let rest: Vec<Task> = Vec.new();
+    rest.push(ts[0].clone());
+    rest.push(ts[2].clone());
+    println(`then: ${Task.any(rest) * 2}`);
+    println(`once ended, at once: ${Task.any(ts)}`);
+  });
+}
