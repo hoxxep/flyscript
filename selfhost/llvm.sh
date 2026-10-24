@@ -10,7 +10,7 @@ set -e
 root=$(cd "$(dirname "$0")/.." && pwd)
 bin=${LLVM_BIN:-$(brew --prefix llvm 2>/dev/null)/bin}
 # What every build of the C adds (selfhost/ccflags.sh), and the same to the linker's code generation.
-ccflags=$(sh "$root/selfhost/ccflags.sh" "$bin/clang")
+ccflags=$(sh "$root/selfhost/ccflags.sh" --codegen "$bin/clang")
 ldflags=$(for f in $ccflags; do printf ' -Wl,%s' "$f"; done)
 compiler=$1; program=$2; out=$3
 shift 3
@@ -23,10 +23,11 @@ case "$compiler" in
   *.js) node --stack-size=65500 "$compiler" "$program" "$out.ll" "$root" $mode ;;
   *) "$compiler" "$program" "$out.ll" "$root" $mode ;;
 esac
-# Native code unwinds a panic by the platform's tables, through landing pads (runtime.h): its C has
-# them too. WebAssembly and freestanding programs do not.
+# A panic unwinds through landing pads (runtime.h): natively by the platform's tables, which the C
+# has too; in WebAssembly by its own exceptions. Freestanding programs do not unwind.
 eh="-fexceptions -funwind-tables -DFLY_LANDING_PADS"
-case " $mode " in *--wasm32*|*--freestanding*) eh="" ;; esac
+case " $mode " in *--wasm32*) eh="-fexceptions -fwasm-exceptions -DFLY_LANDING_PADS" ;; esac
+case " $mode " in *--freestanding*) eh="" ;; esac
 # The C is made LLVM IR without optimizing it: the two are optimized once, together.
 "$bin/clang" -std=gnu11 -w -g -O2 $eh -Xclang -disable-llvm-passes -S -emit-llvm "$@" "$out.c" -o "$out.c.ll"
 # The module takes the target the C compiler chose, and its functions the attributes of C's for it,

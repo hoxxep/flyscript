@@ -91,6 +91,13 @@ type Ctx = {
   // each such block, which runs every cleanup of the block and goes on to the label of the block
   // around it; those blocks; and the locals that code reads, which must live in memory.
   unwinds: bool;
+  // The locals declared at the function's top for it (`cleanupReads`).
+  hoist: HashSet<usize>;
+  // Whether the code made now is what a panic goes to.
+  landing: bool;
+  // The C type of the function's `env`, which the code a panic goes to reads through its frame
+  // record: none if it has none.
+  envType: String;
   pblocks: Vec<usize>;
   punw: String;
   pcases: Vec<usize>;
@@ -103,7 +110,7 @@ function newCtx(locals: Vec<Local>, ret: Ty, mode: Mode): Ctx {
     names: HashMap.new(), locals, captures: Vec.new(), decls: String.new(), scopes: Vec.new(), targets: Vec.new(), mode,
     sink: #None, arenas: HashMap.new(), ret: ret.clone(), fnRet: ret, oret: "ret_".toString(), capTys: Vec.new(), out: String.new(),
     hoisted: HashSet.new(), prologue: String.new(), live: HashSet.new(), reachable: true, liveAt: HashMap.new(), direct: false,
-    unwinds: false, pblocks: Vec.new(), punw: String.new(), pcases: Vec.new(), pread: HashSet.new(), declared: HashSet.new(),
+    unwinds: false, landing: false, hoist: HashSet.new(), envType: String.new(), pblocks: Vec.new(), punw: String.new(), pcases: Vec.new(), pread: HashSet.new(), declared: HashSet.new(),
   }
 }
 
@@ -124,6 +131,33 @@ function hasCleanups(b: readonly Block): bool {
     if (found) { return true; }
   }
   false
+}
+
+// What the code a panic goes to may read, in any block of `b`: what the blocks' cleanups drop,
+// the flags of their `defer`s, and what those read. Only these live at the function's top.
+function cleanupReads(b: readonly Block, out: mut HashSet<usize>): void {
+  for (const c of b.cleanups) {
+    match (c) {
+      #Drop(l) | #Arena(l) => { out.insert(l); }
+      #Defer(flag, body) => {
+        out.insert(flag);
+        let u: Uses = { locals: HashSet.new(), captures: HashSet.new() };
+        useBlock(body, mut u);
+        for (const l of u.locals.iter()) { out.insert(l); }
+      }
+    }
+  }
+  for (const s of b.stmts) {
+    match (s) {
+      #If(_, x, y) | #Loop(_, x, y) | #Try(x, _, y) => { cleanupReads(x, mut out); cleanupReads(y, mut out); }
+      #Labeled(_, x) | #Block(x) | #Region(_, _, x) | #ForGen(_, _, _, x) => cleanupReads(x, mut out),
+      #Handle(h) => {
+        cleanupReads(h.body, mut out);
+        for (const a of h.arms) { cleanupReads(a.body, mut out); }
+      }
+      _ => {}
+    }
+  }
 }
 
 // A string as a C literal: printable ASCII as it is, every other byte in octal.
@@ -226,6 +260,8 @@ export struct Cgen {
   apartCode: String;
   aparts: usize;
   tmp: usize;
+  // A freestanding program does not unwind: a panic ends it (§5.7).
+  freestanding: bool;
   // The function being printed.
   cx: Ctx;
   // The module of the function being printed, for its diagnostics.
@@ -532,6 +568,22 @@ impl Cgen {
       self.dropCode.push(`static void ${name}(void* v) { ${d}(v); }\n`);
     }
     name
+  }
+
+  // What a catch point runs under `fly_try`: a closure `f` and what it is given and gives, in a
+  // record `<name>_t` of `fields` after `f`, by `call` of the record `x`.
+  function catchBody(self: mut Self, key: String, fields: String, call: String): String {
+    const k = `catch:${key}`;
+    match (self.helpers.get(k.asStr())) {
+      #Some(n) => n.clone(),
+      #None => {
+        const n = `fly_catch${self.helpers.len()}`;
+        self.helpers.insert(k, n.clone());
+        self.protos.push(`typedef struct { fly_fn f; ${fields} } ${n}_t;\nstatic void ${n}(void* a);\n`);
+        self.dropCode.push(`static void ${n}(void* a) { ${n}_t* x = a; ${call} }\n`);
+        n
+      }
+    }
   }
 
   function dropFields(self: mut Self, body: mut String, t: readonly Ty, span: Span): void uses Fail<Diagnostic> {
@@ -1006,6 +1058,12 @@ impl Cgen {
         const t = self.cx.locals[l].ty.clone();
         if (!self.needsDrop(t)) { return String.new(); }
         const d = self.dropFn(t, span);
+        // As a panic unwinds, a copy is dropped, its frame gone after: the local's address is
+        // never taken, so it may stay in registers (`withLanding`).
+        if (self.cx.landing) {
+          const ct = self.ctype(t, span);
+          return `{ ${ct} c_ = ${self.local(l)}; ${d}(&c_); } `;
+        }
         `${d}(&${self.local(l)}); `
       }
       #Defer(flag, body) => {
@@ -1064,8 +1122,8 @@ impl Cgen {
   }
 
   // The declarations of a block's locals, each zeroed: what owns memory is dead until given a value.
-  // In a C function a panic may unwind, each is declared at the function's top instead, where
-  // the code the panic goes to reaches it, and zeroed here.
+  // In a C function a panic may unwind, what the code the panic goes to reads is declared at the
+  // function's top instead, where its frame record reaches it, and zeroed here.
   function declarations(self: mut Self, b: readonly Block, span: Span): void uses Fail<Diagnostic> {
     for (const l of b.locals) {
       if (self.cx.hoisted.has(l) || self.cx.names.has(l)) { continue; }
@@ -1078,9 +1136,11 @@ impl Cgen {
           self.ctype(t, span)
         }
       };
-      if (self.cx.unwinds) {
+      if (self.cx.unwinds && self.cx.hoist.has(l)) {
+        // Not zeroed: the code a panic goes to reads only the blocks it is in, each of which has
+        // zeroed its locals as it began.
         self.cx.declared.insert(l);
-        self.cx.decls.push(`  ${ct} ${n} = { 0 };\n`);
+        self.cx.decls.push(`  ${ct} ${n};\n`);
         self.line(`${n} = (${ct}){ 0 };`);
       } else {
         self.line(`${ct} ${n} = { 0 };`);
@@ -1104,32 +1164,70 @@ impl Cgen {
         }
       }
     }
+    self.cx.landing = true;
     const code = self.cleanups(cs, all, span);
+    self.cx.landing = false;
     const parent = match (self.cx.pblocks.last()) { #Some(p) => `punw${p}`, #None => "punw_out".toString() };
     self.cx.punw.push(`punw${k}: ${code}goto ${parent};\n`);
     self.cx.pcases.push(k);
   }
 
-  // A C function's body, `code`, with what a panic needs of it if it has cleanups: its record,
-  // taken up as it starts, and the code a panic goes to; and `leave`, what each of its ways out
-  // does first, giving its record back.
-  function withLanding(self: mut Self, code: String): [String, String, String] {
+  // A C function's body, `code`, with what a panic needs of it if it has cleanups, and `leave`,
+  // what each of its ways out does first. The C is compiled with `-fexceptions`, and the function
+  // keeps a frame record, `fr_`, whose cleanup (`__attribute__((cleanup))`) the unwinder runs as a
+  // panic passes through: the code a panic goes to, made a function of its own, which reaches what
+  // it reads through the record — `at`, the block the code was in, and the locals by their
+  // addresses — under their own names. Inlined, as it always is, the record is taken apart again.
+  // Leaving normally, `at` is zero, and the cleanup does nothing.
+  function withLanding(self: mut Self, code: String, span: Span): [String, String, String] uses Fail<Diagnostic> {
     if (self.cx.pcases.len() == 0) { return [String.new(), code, String.new()]; }
-    let start = "  fly_unw unw_;\n  fly_unw_push(&unw_);\n".toString();
-    // What the landing reads is made to live in memory: a value kept in a register would not
-    // be what it is when a panic comes back here.
-    for (const l of self.cx.pread.iter()) {
+    self.aparts += 1;
+    const n = `fly_pad${self.aparts}`;
+    let reads: Vec<usize> = Vec.new();
+    for (const l of self.cx.pread.iter()) { reads.push(l); }
+    reads.sortBy((a, b) => a.cmp(b));
+    let inits = String.new();
+    let defs = String.new();
+    let undefs = String.new();
+    let k: usize = 0;
+    for (const l of reads) {
       if (!self.cx.declared.has(l)) { continue; }
-      if (unitTy(self.cx.locals[l].ty) && match (self.cx.locals[l].kind) { #Arena => false, _ => true }) { continue; }
-      start.push(`  __asm__ volatile("" : : "r"(&${self.local(l)}) : "memory");\n`);
+      const arena = match (self.cx.locals[l].kind) { #Arena => true, _ => false };
+      if (unitTy(self.cx.locals[l].ty) && !arena) { continue; }
+      const name = self.local(l);
+      const lt = self.cx.locals[l].ty.clone();
+      const ct = if (arena) { "fly_arena".toString() } else { self.ctype(lt, span) };
+      inits.push(`  fr_.l[${k}] = &${name};\n`);
+      defs.push(`#define ${name} (*(${ct}*)fr_->l[${k}])\n`);
+      undefs.push(`#undef ${name}\n`);
+      k += 1;
     }
-    start.push("  if (FLY_UNW_CATCH(&unw_)) goto punw_;\n");
-    let land = "punw_: __asm__ volatile(\"\" : : : \"memory\");\n  switch (unw_.at) {\n".toString();
-    for (const k of self.cx.pcases) { land.push(`  case ${k}: goto punw${k};\n`); }
-    land.push("  default: goto punw_out;\n  }\n");
+    // A region's arena, given to the function.
+    let ars: Vec<String> = Vec.new();
+    for (const [_, c] of self.cx.arenas.entries()) { if (!c.includes("->")) { ars.push(c.clone()); } }
+    ars.sortBy((a, b) => a.cmp(b));
+    for (const c of ars) {
+      inits.push(`  fr_.l[${k}] = ${c};\n`);
+      defs.push(`#define ${c} ((fly_arena*)fr_->l[${k}])\n`);
+      undefs.push(`#undef ${c}\n`);
+      k += 1;
+    }
+    if (self.cx.envType.len() > 0) {
+      inits.push("  fr_.env = env;\n");
+      defs.push(`#define env ((${self.cx.envType})fr_->env)\n`);
+      undefs.push("#undef env\n");
+    }
+    self.protos.push(`typedef struct { int32_t at; void* env; void* l[${if (k == 0) { 1 } else { k }}]; } ${n}_t;\nstatic inline __attribute__((always_inline)) void ${n}(${n}_t* fr_);\n`);
+    let land = `static inline __attribute__((always_inline)) void ${n}(${n}_t* fr_) {\n  switch (fr_->at) {\n`;
+    for (const c of self.cx.pcases) { land.push(`  case ${c}: goto punw${c};\n`); }
+    land.push("  default: return;\n  }\n");
+    land.push(defs.asStr());
     land.push(self.cx.punw.asStr());
-    land.push("punw_out: fly_unw_pop(&unw_); fly_unwind_on();\n");
-    [start, code, land]
+    land.push("punw_out: ;\n");
+    land.push(undefs.asStr());
+    land.push("}\n");
+    self.apartCode.push(land.asStr());
+    [`  ${n}_t fr_ __attribute__((cleanup(${n}))) = { 0 };\n${inits}`, code, "fr_.at = 0; ".toString()]
   }
 
   function block(self: mut Self, b: readonly Block, span: Span): void uses Fail<Diagnostic> {
@@ -1150,7 +1248,7 @@ impl Cgen {
     self.cx.targets.push(unw.clone());
     // A panic in the block runs its cleanups (§5.7).
     if (self.cx.unwinds) {
-      self.line(`unw_.at = ${k};`);
+      self.line(`fr_.at = ${k};`);
       self.panicLanding(k, b.cleanups, span);
       self.cx.pblocks.push(k);
     }
@@ -2154,8 +2252,9 @@ impl Cgen {
     #Some(match (key) {
       "Io_scope" => {
         const tc = self.ctype(rt, span);
+        const b = self.catchBody(`scope:${tc}`, `int* s; ${tc} r;`, `x->r = ((${tc} (*)(void*, int*))x->f.fn)(x->f.env, x->s);`);
         // A panic in the body cancels the scope's tasks and goes on once they have finished (§5.7).
-        `({ int sid_ = fly_scope_open(); int s_ = sid_; fly_fn f_ = ${arg(0)}; fly_unw su_; fly_unw_push(&su_); if (FLY_UNW_CATCH(&su_)) { fly_unw_pop(&su_); if (f_.drop) f_.drop(f_.env); fly_scope_panicked(sid_); } ${tc} r_ = ((${tc} (*)(void*, int*))f_.fn)(f_.env, &s_); fly_unw_pop(&su_); if (f_.drop) f_.drop(f_.env); fly_scope_close(sid_, false); r_; })`
+        `({ int sid_ = fly_scope_open(); int s_ = sid_; ${b}_t x_ = { .f = ${arg(0)}, .s = &s_ }; if (fly_try(${b}, &x_)) { if (x_.f.drop) x_.f.drop(x_.f.env); fly_scope_panicked(sid_); } if (x_.f.drop) x_.f.drop(x_.f.env); fly_scope_close(sid_, false); x_.r; })`
       }
       "Scope_spawn" => `({ int* s_ = ${arg(0)}; fly_fn f_ = ${arg(1)}; fly_spawn(*s_, fly_task_void, fly_box(&f_, sizeof f_), 0); (fly_unit)0; })`,
       "Scope_fork" => {
@@ -2218,8 +2317,9 @@ impl Cgen {
       "Mutex_lock" => {
         const tc = self.ctype(rt, span);
         const pc = match (stripBorrow(ptys[1])) { #Fn(f) => match (f.params.first()) { #Some(p) => self.ctype(p, span), #None => "void*".toString() }, _ => "void*".toString() };
+        const b = self.catchBody(`lock:${tc}:${pc}`, `${pc} m; ${tc} r;`, `x->r = ((${tc} (*)(void*, ${pc}))x->f.fn)(x->f.env, x->m);`);
         // A panic while the state is lent poisons the mutex, which keeps the state (§6.2).
-        `({ __auto_type m_ = ${arg(0)}; fly_fn f_ = ${arg(1)}; fly_point(); fly_lock(m_); fly_mutex_check(m_); fly_unw mu_; fly_unw_push(&mu_); if (FLY_UNW_CATCH(&mu_)) { fly_unw_pop(&mu_); fly_mutex_poison(m_, true); fly_unlock(m_); if (f_.drop) f_.drop(f_.env); fly_unwind_on(); } ${tc} r_ = ((${tc} (*)(void*, ${pc}))f_.fn)(f_.env, m_); fly_unw_pop(&mu_); fly_unlock(m_); if (f_.drop) f_.drop(f_.env); r_; })`
+        `({ __auto_type m_ = ${arg(0)}; fly_fn f_ = ${arg(1)}; fly_point(); fly_lock(m_); fly_mutex_check(m_); ${b}_t x_ = { .f = f_, .m = m_ }; if (fly_try(${b}, &x_)) { fly_mutex_poison(m_, true); fly_unlock(m_); if (x_.f.drop) x_.f.drop(x_.f.env); fly_unwind_on(); } fly_unlock(m_); if (x_.f.drop) x_.f.drop(x_.f.env); x_.r; })`
       }
       // A fresh state, the old one dropped and the poison cleared.
       "Mutex_reset" => {
@@ -2518,16 +2618,18 @@ impl Cgen {
     self.defers.insert(`${self.fnName}:${flag}`, call.clone());
     let cx = self.apartCtx(ap, #Prim(#Void), #Defer);
     cx.sink = self.cx.sink.clone();
-    cx.unwinds = hasCleanups(body);
+    cx.unwinds = !self.freestanding && hasCleanups(body);
+    cleanupReads(body, mut cx.hoist);
     const saved = replace(mut self.cx, cx);
     self.block(body, span);
     const code0 = replace(mut self.cx.out, String.new());
-    const [start, code, land] = self.withLanding(code0);
-    const leave = if (land.len() > 0) { "fly_unw_pop(&unw_); " } else { "" };
+    self.cx.envType = `${envT}*`;
+    const [start, code, land] = self.withLanding(code0, span);
+    const leave = land;
     const more = replace(mut self.cx.decls, String.new());
     self.cx = saved;
     self.protos.push(`static void defer_${n}(${envT}* env);\n`);
-    self.apartCode.push(`static void defer_${n}(${envT}* env) {\n  (void)env;\n${more}${start}${code}  goto ret;\nfail: ;\nret: ${leave}return;\n${land}}\n`);
+    self.apartCode.push(`static void defer_${n}(${envT}* env) {\n  (void)env;\n${more}${start}${code}  goto ret;\nfail: ;\nret: ${leave}return;\n}\n`);
     call
   }
 
@@ -2554,7 +2656,8 @@ impl Cgen {
     let cx = self.apartCtx(ap, #Prim(#Bool), #Body);
     cx.oret = "(*env->oret_)".toString();
     if (self.cx.sink.isSome()) { cx.sink = #Some("(*env->y_)".toString()); }
-    cx.unwinds = hasCleanups(body);
+    cx.unwinds = !self.freestanding && hasCleanups(body);
+    cleanupReads(body, mut cx.hoist);
     const saved = replace(mut self.cx, cx);
     const it = self.cx.locals[item].ty.clone();
     const ic = self.ctype(it, span);
@@ -2563,12 +2666,13 @@ impl Cgen {
     self.gen(item);
     self.block(body, span);
     const bodyCode0 = replace(mut self.cx.out, String.new());
-    const [start, bodyCode, land] = self.withLanding(bodyCode0);
-    const leave = if (land.len() > 0) { "fly_unw_pop(&unw_); " } else { "" };
+    self.cx.envType = `${envT}*`;
+    const [start, bodyCode, land] = self.withLanding(bodyCode0, span);
+    const leave = land;
     const more = replace(mut self.cx.decls, String.new());
     self.cx = saved;
     self.protos.push(`static bool body_${n}(void* env_, void* item_);\n`);
-    self.apartCode.push(`static bool body_${n}(void* env_, void* item_) {\n  ${envT}* env = env_; (void)env; (void)item_;\n${more}  bool ret_ = true;\n${start}${bodyCode}  goto ret;\nfail: ${leave}return false;\nret: ${leave}return ret_;\n${land}}\n`);
+    self.apartCode.push(`static bool body_${n}(void* env_, void* item_) {\n  ${envT}* env = env_; (void)env; (void)item_;\n${more}  bool ret_ = true;\n${start}${bodyCode}  goto ret;\nfail: ${leave}return false;\nret: ${leave}return ret_;\n}\n`);
     // The call, the body its yields go to.
     const envv = self.fresh();
     self.cx.decls.push(`  ${envT} ${envv};\n`);
@@ -2674,7 +2778,8 @@ impl Cgen {
     let cx = self.apartCtx(ap, b.clone(), #Fn);
     cx.fnRet = b.clone();
     if (handlesYield) { cx.sink = #Some("y_".toString()); } else if (yields) { cx.sink = #Some("(*env->y_)".toString()); }
-    cx.unwinds = hasCleanups(h.body);
+    cx.unwinds = !self.freestanding && hasCleanups(h.body);
+    cleanupReads(h.body, mut cx.hoist);
     const saved = replace(mut self.cx, cx);
     // The body's value is read once its block has ended.
     let decls = String.new();
@@ -2685,8 +2790,9 @@ impl Cgen {
     if (handlesYield) { decls.push(`  fly_yield y_ = { NULL, hyield_${n} };\n`); }
     self.block(h.body, span);
     const bodyCode0 = replace(mut self.cx.out, String.new());
-    const [bstart, bodyCode, bland] = self.withLanding(bodyCode0);
-    const bleave = if (bland.len() > 0) { "fly_unw_pop(&unw_); " } else { "" };
+    self.cx.envType = `${frame}*`;
+    const [bstart, bodyCode, bland] = self.withLanding(bodyCode0, span);
+    const bleave = bland;
     decls.push(replace(mut self.cx.decls, String.new()).asStr());
     const bodyValue = if (unitTy(b)) { "(fly_unit)0".toString() } else { self.local(h.value) };
     self.cx = saved;
@@ -2694,7 +2800,10 @@ impl Cgen {
     let cx2 = self.apartCtx(ap, b.clone(), #Fn);
     cx2.fnRet = b.clone();
     if (yields) { cx2.sink = #Some("(*env->y_)".toString()); }
-    for (const arm of h.arms) { if (hasCleanups(arm.body)) { cx2.unwinds = true; } }
+    for (const arm of h.arms) {
+      if (!self.freestanding && hasCleanups(arm.body)) { cx2.unwinds = true; }
+      cleanupReads(arm.body, mut cx2.hoist);
+    }
     const saved2 = replace(mut self.cx, cx2);
     let decls2 = String.new();
     for (const a of h.arms) {
@@ -2738,16 +2847,17 @@ impl Cgen {
       self.line(`ret_ = ${av}; goto ret; }`);
     }
     const armsCode0 = replace(mut self.cx.out, String.new());
-    const [astart, armsCode, aland] = self.withLanding(armsCode0);
-    const aleave = if (aland.len() > 0) { "fly_unw_pop(&unw_); " } else { "" };
+    self.cx.envType = `${frame}*`;
+    const [astart, armsCode, aland] = self.withLanding(armsCode0, span);
+    const aleave = aland;
     const more2 = replace(mut self.cx.decls, String.new());
     self.cx = saved2;
     self.protos.push(`static ${bc} hbody_${n}(${frame}* env);\nstatic ${bc} harms_${n}(${frame}* env);\nstatic ${bc} hrun_${n}(${frame}* env);\nstatic void hdrop_${n}(void* f);\n`);
     for (const [oi, _] of ops.iter().enumerate()) {
       self.protos.push(`static ${bc} hres_${n}_${oi}();\n`);
     }
-    self.apartCode.push(`static ${bc} hbody_${n}(${frame}* env) {\n  (void)env;\n${decls}  ${bc} ret_ = { 0 };\n${bstart}${bodyCode}  ${bleave}return ${bodyValue};\nfail: ${bleave}return (${bc}){ 0 };\nret: ${bleave}return ret_;\n${bland}}\n`);
-    self.apartCode.push(`static ${bc} harms_${n}(${frame}* env) {\n${decls2}${more2}  ${bc} ret_ = { 0 };\n${astart}${armsCode}  fly_panic("an operation no arm handles");\nfail: ${aleave}return (${bc}){ 0 };\nret: ${aleave}return ret_;\n${aland}}\n`);
+    self.apartCode.push(`static ${bc} hbody_${n}(${frame}* env) {\n  (void)env;\n${decls}  ${bc} ret_ = { 0 };\n${bstart}${bodyCode}  ${bleave}return ${bodyValue};\nfail: ${bleave}return (${bc}){ 0 };\nret: ${bleave}return ret_;\n}\n`);
+    self.apartCode.push(`static ${bc} harms_${n}(${frame}* env) {\n${decls2}${more2}  ${bc} ret_ = { 0 };\n${astart}${armsCode}  fly_panic("an operation no arm handles");\nfail: ${aleave}return (${bc}){ 0 };\nret: ${aleave}return ret_;\n}\n`);
     self.apartCode.push(`static void hentry_${n}(void* f) { ${frame}* env = f; env->result = hbody_${n}(env); }\n`);
     self.apartCode.push(`static void hrelease_${n}(${frame}* env) { if (--env->refs == 0) { fly_handle_free(&env->h); free(env); } }\n`);
     self.apartCode.push(`static ${bc} hrun_${n}(${frame}* env) { ${bc} v; if (fly_handle_done(&env->h)) { v = env->result; memset(&env->result, 0, sizeof v); } else v = harms_${n}(env); hrelease_${n}(env); return v; }\n`);
@@ -2803,7 +2913,10 @@ impl Cgen {
     let cx = self.apartCtx(ap, #Prim(#Void), #Fn);
     cx.direct = true;
     if (yields) { cx.sink = #Some("(*env->y_)".toString()); }
-    for (const arm of h.arms) { if (hasCleanups(arm.body)) { cx.unwinds = true; } }
+    for (const arm of h.arms) {
+      if (!self.freestanding && hasCleanups(arm.body)) { cx.unwinds = true; }
+      cleanupReads(arm.body, mut cx.hoist);
+    }
     const saved = replace(mut self.cx, cx);
     for (const [i, arm] of h.arms.iter().enumerate()) {
       if (arm.cont.isNone()) {
@@ -2824,12 +2937,13 @@ impl Cgen {
       self.line("goto ret; }");
     }
     const armsCode0 = replace(mut self.cx.out, String.new());
-    const [start, armsCode, land] = self.withLanding(armsCode0);
-    const leave = if (land.len() > 0) { "fly_unw_pop(&unw_); " } else { "" };
+    self.cx.envType = `${frame}*`;
+    const [start, armsCode, land] = self.withLanding(armsCode0, span);
+    const leave = land;
     const more = replace(mut self.cx.decls, String.new());
     self.cx = saved;
     self.protos.push(`static void harm_${n}(void* env_, int op_, void* args_, void* result_);\n`);
-    self.apartCode.push(`static void harm_${n}(void* env_, int op_, void* args_, void* result_) {\n  ${frame}* env = env_; (void)env; (void)args_; (void)result_;\n${more}${start}${armsCode}  fly_panic("an operation no arm handles");\nfail: ;\nret: ${leave}return;\n${land}}\n`);
+    self.apartCode.push(`static void harm_${n}(void* env_, int op_, void* args_, void* result_) {\n  ${frame}* env = env_; (void)env; (void)args_; (void)result_;\n${more}${start}${armsCode}  fly_panic("an operation no arm handles");\nfail: ;\nret: ${leave}return;\n}\n`);
     // The handler, installed for the body.
     const hf = self.fresh();
     const hh = self.fresh();
@@ -2965,14 +3079,15 @@ impl Cgen {
     // The parameters are the outermost block's, given their values as it starts.
     self.cx.prologue = inits.toString();
     for (const l of f.params) { self.gen(l); }
-    self.cx.unwinds = hasCleanups(f.body);
+    self.cx.unwinds = !self.freestanding && hasCleanups(f.body);
+    cleanupReads(f.body, mut self.cx.hoist);
     self.block(f.body, f.span);
     const code0 = replace(mut self.cx.out, String.new());
-    const [start, code, land] = self.withLanding(code0);
-    const leave = if (land.len() > 0) { "fly_unw_pop(&unw_); " } else { "" };
+    const [start, code, land] = self.withLanding(code0, f.span);
+    const leave = land;
     const value = if (unitTy(f.ret)) { "(fly_unit)0".toString() } else { self.local(f.value) };
     const more = replace(mut self.cx.decls, String.new());
-    `${decls}${more}  ${rt} ret_ = { 0 };\n${start}${code}  ${leave}return ${value};\nfail: ${leave}return (${rt}){ 0 };\nret: ${leave}return ret_;\n${land}`
+    `${decls}${more}  ${rt} ret_ = { 0 };\n${start}${code}  ${leave}return ${value};\nfail: ${leave}return (${rt}){ 0 };\nret: ${leave}return ret_;\n`
   }
 
   // Function instance `i`, lowered as `f`.
@@ -3011,6 +3126,7 @@ impl Cgen {
     self.fnName = f.name.clone();
     self.module = f.module;
     self.cx = newCtx(f.locals.clone(), f.ret.clone(), #Fn);
+    self.cx.envType = `env_${k}*`;
     let fields = String.new();
     let owned = String.new();
     for (const [i, [_, t, byValue]] of f.captures.iter().enumerate()) {
@@ -3059,6 +3175,7 @@ impl Cgen {
 
   // The C for a checked program whose entry module is `entry`.
   export function program(self: mut Self, entry: usize, runtime: str, freestanding: bool): String uses Fail<#Failed(String)> {
+    self.freestanding = freestanding;
     const ent = self.lw.entry(entry, freestanding);
     const uncaught = self.uncaught(ent, entry);
     self.drain();
@@ -3069,6 +3186,7 @@ impl Cgen {
   // their instances are lowered and printed again, and whatever they now reach for the first time.
   // What the old bodies made apart — closures, `defer`s, handlers — stays, unreached.
   export function again(self: mut Self, fids: readonly HashSet<usize>, entry: usize, runtime: str, freestanding: bool): String uses Fail<#Failed(String)> {
+    self.freestanding = freestanding;
     for (const i of 0..self.lowered) {
       if (!fids.has(self.lw.insts[i].fid)) { continue; }
       const prefix = `${self.lw.insts[i].name}:`;
@@ -3216,7 +3334,7 @@ export function newCgen(p: Prog): Cgen {
     lw: newLower(p), closuresDone: 0, types: HashMap.new(), defined: HashSet.new(), pending: Vec.new(), typeFwd: String.new(),
     typeDefs: String.new(), tags: HashMap.new(), drops: HashMap.new(), anyDrops: HashSet.new(), dropCode: String.new(), convs: HashMap.new(),
     helpers: HashMap.new(), consts: HashMap.new(), protos: String.new(), fnCode: Vec.new(), lowered: 0, apartCode: String.new(), aparts: 0,
-    tmp: 0, cx: newCtx(Vec.new(), #Prim(#Void), #Fn), module: 0, defers: HashMap.new(), fnName: String.new(),
+    tmp: 0, freestanding: false, cx: newCtx(Vec.new(), #Prim(#Void), #Fn), module: 0, defers: HashMap.new(), fnName: String.new(),
     argPlaces: Vec.new(), glue: String.new(),
   }
 }

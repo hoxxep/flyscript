@@ -135,38 +135,29 @@ _Noreturn void fly_out_of_memory(void);
 
 // ---- panics (§5.7) ----
 
-// A panic unwinds its task as a failure nothing catches would. A function with cleanup to run
-// keeps a record on its fiber's chain while it runs: where to go on with a panic, and which of its
-// blocks it is in, so the code there runs the cleanups of that block and the blocks around it.
-// `fly_panic` goes to the innermost; when its cleanup is done, `fly_unwind_on` goes to the next.
-// What compiled code takes up a record by is the C library's `_setjmp`, which the sanitizers know
-// of; what the code there reads is made to live in memory before the first call that may panic.
+// A panic unwinds its task as a failure nothing catches would, each function it leaves running
+// its cleanups as the platform unwinds it: code made through LLVM by landing pads — natively by
+// the tables, under `fly_personality`, in WebAssembly by its own exceptions (FLY_LANDING_PADS) —
+// and a program's C by each function's frame record, whose cleanup is its own (c.fly's
+// `withLanding`, compiled with -fexceptions: FLY_C_UNWIND). Only catch points take a panic up
+// (`fly_try`). In C, which cannot catch, a catch point keeps a record on its fiber's chain while it
+// runs — where its frame is, and a jump buffer — which a panic's unwinding stops at and jumps to.
 // A freestanding program does not unwind: its panic goes to `fly_os_panic`.
-#ifdef FLY_FREESTANDING
-struct fly_unw { int32_t at; };
-#define FLY_UNW_CATCH(u) 0
-static inline void fly_unw_push(fly_unw* u) { u->at = 0; }
-static inline void fly_unw_pop(fly_unw* u) { (void)u; }
-#else
+#if !defined(FLY_FREESTANDING) && !defined(FLY_LANDING_PADS)
 #include <setjmp.h>
-// LLVM IR reaches its fields as they are laid out here (llvm.fly's records): the block, at 0; the
-// record outside, at 8; where the frame is, at 16; and the jump buffer, at 32, the record taking up
-// FLY_UNW_SIZE bytes.
-//
-// Native code made through LLVM keeps no records of its own: its functions unwind by the
-// platform's tables, through landing pads that run their cleanups (FLY_LANDING_PADS), and only
-// the runtime's catch points — a task's root, a fiber's, `Io.scope`, `Mutex.lock`, `join` —
-// keep a record, and with it where their frame is, which a panic's unwinding stops at.
-struct fly_unw { int32_t at; _Alignas(8) fly_unw* prev; _Alignas(8) uint64_t frame; _Alignas(16) jmp_buf buf; };
-#define FLY_UNW_SIZE 512
+struct fly_unw { fly_unw* prev; uintptr_t frame; jmp_buf buf; };
 #define FLY_UNW_CATCH(u) ((u)->frame = (uintptr_t)__builtin_frame_address(0), _setjmp((u)->buf))
-static inline void fly_unw_push(fly_unw* u) { fly_ctx* c = fly_cx(); u->prev = c->unw; u->at = 0; c->unw = u; }
+static inline void fly_unw_push(fly_unw* u) { fly_ctx* c = fly_cx(); u->prev = c->unw; c->unw = u; }
 static inline void fly_unw_pop(fly_unw* u) { fly_cx()->unw = u->prev; }
 #endif
-// The same, for code made through LLVM, which inlines them.
-void fly_unw_enter(fly_unw* u);
-void fly_unw_leave(fly_unw* u);
+// What a catch point that has taken a panic up does to go on with it.
 _Noreturn void fly_unwind_on(void);
+// A catch point — a task's root, a fiber's, `Io.scope`, `Mutex.lock`, `join`, `main`: runs `f(a)`,
+// and gives whether a panic unwound out of it, which is then the fiber's (`fly_ctx.panic`), for
+// the catch point to take up or to go on with (`fly_unwind_on`). In native code made through
+// LLVM it is the module's own, with a landing pad that catches a panic (llvm.fly); elsewhere it
+// takes up a record.
+bool fly_try(void (*f)(void* a), void* a);
 // The program's root: a panic that unwinds `run` ends the program there.
 void fly_root(void (*run)(void));
 // Bytes to standard output.

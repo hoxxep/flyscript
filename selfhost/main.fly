@@ -154,7 +154,8 @@ function compile(entry: str, out: str, root: str, freestanding: bool, ptr: usize
     const h = readText(`${root}/selfhost/runtime.h`);
     const c = readText(`${root}/selfhost/runtime.c`);
     // A freestanding program's runtime does without the C library.
-    const mode = if (freestanding) { "#define FLY_FREESTANDING 1\n" } else { "" };
+    // A program's whole C unwinds a panic by the platform's tables (runtime.c's FLY_C_UNWIND).
+    const mode = if (freestanding) { "#define FLY_FREESTANDING 1\n" } else if (!toLlvm) { "#define FLY_C_UNWIND 1\n" } else { "" };
     `${mode}${h}\n${c.asStr().replaceAll("#include \"runtime.h\"", "")}`
   } else { readText(`${root}/selfhost/runtime.js`) };
   if (toLlvm) {

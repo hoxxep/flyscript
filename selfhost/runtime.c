@@ -74,6 +74,8 @@ void fly_err_take(void* out, size_t size) {
 }
 
 static _Noreturn void panic_exit(const char* message);
+// Whether the program is ending, every task stopping where it is (§5.7).
+static bool ending;
 
 // What a panic's message is when there is no memory to copy it into.
 static char out_of_memory[] = "out of memory";
@@ -82,7 +84,27 @@ static char out_of_memory[] = "out of memory";
 // every function allocates, which would make nearly every one a function a panic may leave.
 _Noreturn void fly_out_of_memory(void) { panic_exit("out of memory"); }
 
-#if defined(FLY_LANDING_PADS) && !defined(FLY_FREESTANDING)
+// A program's C made by the C back end (FLY_C_UNWIND) unwinds by the tables too: it is compiled
+// with -fexceptions, each function's cleanup a frame record's (c.fly's `withLanding`).
+#if defined(FLY_LANDING_PADS) && defined(FLY_C_UNWIND)
+#undef FLY_C_UNWIND
+#endif
+#if defined(FLY_LANDING_PADS) && defined(__wasm__) && !defined(FLY_FREESTANDING)
+// WebAssembly's exceptions are its own: a landing pad is a funclet that runs whatever is thrown
+// through it, and `fly_try` catches what is thrown with the C++ tag, here the program's own, there
+// being no C++ library to define it. A panic is thrown with nothing in it: what it says is the
+// fiber's (`fly_ctx.panic`).
+__asm__(".globl __cpp_exception\n.tagtype __cpp_exception i32\n__cpp_exception:\n");
+static _Noreturn void raise_panic(void) {
+  static char token;
+  __builtin_wasm_throw(0, &token);
+}
+// What a landing pad asks first: whether what passes is a panic, and not the host's exception by
+// which the program ends (`proc_exit`), which runs no cleanup.
+bool fly_panicking(void) { return !ending && fly_cx_now()->panic; }
+#define FLY_GO_ON(c) raise_panic()
+#define FLY_UNCAUGHT(c) false
+#elif (defined(FLY_LANDING_PADS) || defined(FLY_C_UNWIND)) && !defined(FLY_FREESTANDING)
 #include <unwind.h>
 #if defined(__has_feature)
 #if __has_feature(address_sanitizer)
@@ -95,12 +117,158 @@ _Noreturn void fly_out_of_memory(void) { panic_exit("out of memory"); }
 #ifdef FLY_UNWIND_ASAN
 void __asan_handle_no_return(void);
 #endif
-// The frames between a panic and the innermost catch point unwind by the platform's tables, each
-// frame's landing pad running its cleanups and going on (`resume`); at the catch point's frame the
-// unwinding stops, and goes on there. This is a forced unwind, as a thread's cancellation is: no
-// handler is searched for, so cleanups need only C's personality, and a landing pad runs as the
-// code of its own frame, the unwinder's state in the exception, so a cleanup may wait, letting other
-// fibers run and unwind panics of their own. Each fiber's panic has an exception of its own.
+#endif
+
+#if defined(FLY_LANDING_PADS) && defined(__wasm__)
+#elif defined(FLY_LANDING_PADS) && !defined(FLY_FREESTANDING)
+// A panic is an exception of its own class, raised in two phases as C++'s are: the first finds the
+// innermost catch point (`fly_try`, whose landing pad catches `fly_panic_type`), the second runs
+// the landing pad of each frame on the way, which goes on with `resume`. A landing pad runs as the
+// code of its own frame, the unwinder's state in the exception, so a cleanup may wait, letting
+// other fibers run and raise panics of their own: each has an exception of its own. Foreign
+// exceptions run the cleanups and are caught by no catch point.
+#define FLY_PANIC_CLASS 0x464c590050414e43ull
+const char fly_panic_type = 0;
+
+static uintptr_t read_uleb(const uint8_t** p) {
+  uintptr_t v = 0;
+  unsigned shift = 0;
+  uint8_t b;
+  do { b = *(*p)++; v |= (uintptr_t)(b & 0x7f) << shift; shift += 7; } while (b & 0x80);
+  return v;
+}
+
+static intptr_t read_sleb(const uint8_t** p) {
+  uintptr_t v = 0;
+  unsigned shift = 0;
+  uint8_t b;
+  do { b = *(*p)++; v |= (uintptr_t)(b & 0x7f) << shift; shift += 7; } while (b & 0x80);
+  if ((b & 0x40) && shift < 8 * sizeof v) v |= ~(uintptr_t)0 << shift;
+  return (intptr_t)v;
+}
+
+// A value of the exception tables, in DWARF's encoding `enc`.
+static uintptr_t read_encoded(const uint8_t** pp, uint8_t enc) {
+  const uint8_t* p = *pp;
+  uintptr_t v;
+  switch (enc & 0x0f) {
+    case 0x00: memcpy(&v, p, sizeof v); p += sizeof v; break;
+    case 0x01: v = read_uleb(&p); break;
+    case 0x02: { uint16_t x; memcpy(&x, p, 2); p += 2; v = x; break; }
+    case 0x03: { uint32_t x; memcpy(&x, p, 4); p += 4; v = x; break; }
+    case 0x04: { uint64_t x; memcpy(&x, p, 8); p += 8; v = (uintptr_t)x; break; }
+    case 0x09: v = (uintptr_t)read_sleb(&p); break;
+    case 0x0a: { int16_t x; memcpy(&x, p, 2); p += 2; v = (uintptr_t)(intptr_t)x; break; }
+    case 0x0b: { int32_t x; memcpy(&x, p, 4); p += 4; v = (uintptr_t)(intptr_t)x; break; }
+    case 0x0c: { int64_t x; memcpy(&x, p, 8); p += 8; v = (uintptr_t)x; break; }
+    default: abort();
+  }
+  if (v && (enc & 0x70) == 0x10) v += (uintptr_t)*pp;
+  else if ((enc & 0x70) != 0) abort();
+  if (v && (enc & 0x80)) v = *(const uintptr_t*)v;
+  *pp = p;
+  return v;
+}
+
+static size_t encoded_size(uint8_t enc) {
+  switch (enc & 0x0f) {
+    case 0x02: case 0x0a: return 2;
+    case 0x03: case 0x0b: return 4;
+    case 0x04: case 0x0c: return 8;
+    default: return sizeof(uintptr_t);
+  }
+}
+
+// The personality of Flyscript's functions and its catch points: Itanium's exception tables, read
+// for the landing pad of the call the frame is in, which is a cleanup, a catch of a panic, or both.
+_Unwind_Reason_Code fly_personality(int version, _Unwind_Action actions, uint64_t cls, struct _Unwind_Exception* e,
+                                    struct _Unwind_Context* ctx) {
+  if (version != 1) return _URC_FATAL_PHASE1_ERROR;
+  const uint8_t* p = (const uint8_t*)_Unwind_GetLanguageSpecificData(ctx);
+  if (!p) return _URC_CONTINUE_UNWIND;
+  int before = 0;
+  uintptr_t ip = _Unwind_GetIPInfo(ctx, &before);
+  if (!before) ip--;
+  uintptr_t start = _Unwind_GetRegionStart(ctx);
+  uint8_t enc = *p++;
+  uintptr_t lpstart = enc == 0xff ? start : read_encoded(&p, enc);
+  uint8_t tenc = *p++;
+  const uint8_t* types = NULL;
+  if (tenc != 0xff) {
+    uintptr_t off = read_uleb(&p);
+    types = p + off;
+  }
+  uint8_t csenc = *p++;
+  uintptr_t cslen = read_uleb(&p);
+  const uint8_t* table = p + cslen;
+  uintptr_t pad = 0, action = 0;
+  while (p < table) {
+    uintptr_t s = read_encoded(&p, csenc), l = read_encoded(&p, csenc), lp = read_encoded(&p, csenc), a = read_uleb(&p);
+    if (ip < start + s) break;
+    if (ip < start + s + l) {
+      if (lp) { pad = lpstart + lp; action = a; }
+      break;
+    }
+  }
+  if (!pad) return _URC_CONTINUE_UNWIND;
+  bool ours = cls == FLY_PANIC_CLASS && !(actions & _UA_FORCE_UNWIND);
+  bool cleanup = action == 0;
+  intptr_t handler = 0;
+  if (action) {
+    const uint8_t* ap = table + action - 1;
+    for (;;) {
+      intptr_t filter = read_sleb(&ap);
+      const uint8_t* at = ap;
+      intptr_t next = read_sleb(&ap);
+      if (filter == 0) cleanup = true;
+      else if (filter > 0 && ours && types) {
+        const uint8_t* tp = types - (size_t)filter * encoded_size(tenc);
+        if ((const void*)read_encoded(&tp, tenc) == &fly_panic_type) { handler = filter; break; }
+      }
+      if (!next) break;
+      ap = at + next;
+    }
+  }
+  if (actions & _UA_SEARCH_PHASE) return handler ? _URC_HANDLER_FOUND : _URC_CONTINUE_UNWIND;
+  // Below the frame the search found, a catch is passed by, and only cleanups run.
+  if (!(actions & _UA_HANDLER_FRAME)) handler = 0;
+  if (!handler && !cleanup) return _URC_CONTINUE_UNWIND;
+  _Unwind_SetGR(ctx, __builtin_eh_return_data_regno(0), (uintptr_t)e);
+  _Unwind_SetGR(ctx, __builtin_eh_return_data_regno(1), (uintptr_t)handler);
+  _Unwind_SetIP(ctx, pad);
+  return _URC_INSTALL_CONTEXT;
+}
+
+static void panic_exception_free(_Unwind_Reason_Code r, struct _Unwind_Exception* e) { (void)r; free(e); }
+
+static _Noreturn void raise_panic(void) {
+#ifdef FLY_UNWIND_ASAN
+  // The frames given up without running their epilogues leave nothing poisoned behind.
+  __asan_handle_no_return();
+#endif
+  struct _Unwind_Exception* e = calloc(1, sizeof *e);
+  if (e) {
+    e->exception_class = FLY_PANIC_CLASS;
+    e->exception_cleanup = panic_exception_free;
+    _Unwind_RaiseException(e);
+    free(e);
+  }
+  // Nothing catches it: frames the tables do not cover, or no memory for the exception.
+  fly_ctx* c = fly_cx_now();
+  panic_exit(c->panic ? c->panic : "a panic");
+}
+
+// A catch point's landing pad is done with the exception it caught.
+void fly_caught(void* e) { _Unwind_DeleteException(e); }
+#define FLY_GO_ON(c) raise_panic()
+// Whether nothing would catch a panic, which then ends the program at once.
+#define FLY_UNCAUGHT(c) false
+#elif defined(FLY_C_UNWIND) && !defined(FLY_FREESTANDING)
+#ifndef __EXCEPTIONS
+#error "a program's C is compiled with -fexceptions (selfhost/ccflags.sh), so that a panic runs its cleanups"
+#endif
+// C cannot catch: a panic is a forced unwind, as a thread's cancellation is, which runs each
+// frame's cleanup and stops at the frame of the innermost catch point, whose record it jumps to.
 static _Unwind_Reason_Code unwind_stop(int version, _Unwind_Action actions, _Unwind_Exception_Class cls,
                                        struct _Unwind_Exception* e, struct _Unwind_Context* ctx, void* arg) {
   (void)version; (void)cls; (void)arg;
@@ -113,27 +281,24 @@ static _Unwind_Reason_Code unwind_stop(int version, _Unwind_Action actions, _Unw
 }
 static _Noreturn void unwind_to_catch(void) {
 #ifdef FLY_UNWIND_ASAN
-  // The frames given up without running their epilogues leave nothing poisoned behind.
   __asan_handle_no_return();
 #endif
   struct _Unwind_Exception* e = calloc(1, sizeof *e);
   if (!e) _longjmp(fly_cx_now()->unw->buf, 1);
   e->exception_class = 0x464c590050414e43ull;
   _Unwind_ForcedUnwind(e, unwind_stop, NULL);
-  // Frames the tables do not cover: nothing of them can be cleaned up, so the catch point is all.
   free(e);
   _longjmp(fly_cx_now()->unw->buf, 1);
 }
 #define FLY_GO_ON(c) unwind_to_catch()
-#else
-#define FLY_GO_ON(c) _longjmp((c)->unw->buf, 1)
+#define FLY_UNCAUGHT(c) (!(c)->unw)
+#elif !defined(FLY_FREESTANDING)
+#error "a panic unwinds by landing pads (FLY_LANDING_PADS) or by C's cleanups (FLY_C_UNWIND)"
 #endif
 
-// A panic unwinds the fiber it happens on (§5.7): it goes to the innermost record of a function
-// with cleanup to run, whose code goes on to the next once its cleanup is done (`fly_unwind_on`);
-// or, in native code made through LLVM, to the innermost catch point, the frames between running
-// their cleanups as they unwind. A panic while one unwinds the same fiber ends the program, as
-// does one with nowhere to go.
+// A panic unwinds the fiber it happens on (§5.7), the frames up to the innermost catch point running
+// their cleanups. A panic while one unwinds the same fiber ends the program, as does one with
+// nowhere to go.
 _Noreturn void fly_panic(const char* message) {
 #ifdef FLY_FREESTANDING
   panic_exit(message);
@@ -148,26 +313,37 @@ _Noreturn void fly_panic(const char* message) {
   }
   c->panic = strdup(message);
   if (!c->panic) c->panic = out_of_memory;
-  if (!c->unw) panic_exit(c->panic);
+  if (FLY_UNCAUGHT(c)) panic_exit(c->panic);
   FLY_GO_ON(c);
 #endif
 }
 
-void fly_unw_enter(fly_unw* u) { fly_unw_push(u); }
-void fly_unw_leave(fly_unw* u) { fly_unw_pop(u); }
-#ifndef FLY_FREESTANDING
-_Static_assert(offsetof(fly_unw, at) == 0 && offsetof(fly_unw, prev) == 8 && offsetof(fly_unw, buf) == 32 && sizeof(fly_unw) <= FLY_UNW_SIZE, "a record as LLVM IR reaches it");
-#endif
 
 _Noreturn void fly_unwind_on(void) {
 #ifdef FLY_FREESTANDING
   panic_exit("a panic");
 #else
   fly_ctx* c = fly_cx_now();
-  if (!c->unw) panic_exit(c->panic ? c->panic : "a panic");
+  if (FLY_UNCAUGHT(c)) panic_exit(c->panic ? c->panic : "a panic");
   FLY_GO_ON(c);
 #endif
 }
+
+#if defined(FLY_FREESTANDING)
+bool fly_try(void (*f)(void* a), void* a) { f(a); return false; }
+#elif defined(FLY_C_UNWIND)
+bool fly_try(void (*f)(void* a), void* a) {
+  fly_unw u;
+  fly_unw_push(&u);
+  if (FLY_UNW_CATCH(&u)) {
+    fly_cx_now()->unw = u.prev;
+    return true;
+  }
+  f(a);
+  fly_unw_pop(&u);
+  return false;
+}
+#endif
 
 // The panic a catch point has taken up, which no longer unwinds its fiber; and its message let go.
 static char* panic_take(void) {
@@ -200,24 +376,15 @@ static _Noreturn void panic_again(char* m) {
 
 // Runs half `h`, taking up a panic that unwinds it, whose closure is then dropped: the panic's
 // message, or NULL.
+typedef struct { void (*h)(void* f, void* out); void* f; void* out; } half_t;
+static void half_body(void* a) { half_t* x = a; x->h(x->f, x->out); }
 static char* run_half(void (*h)(void* f, void* out), void* f, void* out) {
-#ifdef FLY_FREESTANDING
-  h(f, out);
-  return NULL;
-#else
-  fly_unw u;
-  fly_unw_push(&u);
-  if (FLY_UNW_CATCH(&u)) {
-    fly_cx_now()->unw = u.prev;
-    char* m = panic_take();
-    fly_fn* fn = f;
-    if (fn->drop) fn->drop(fn->env);
-    return m;
-  }
-  h(f, out);
-  fly_unw_pop(&u);
-  return NULL;
-#endif
+  half_t x = { h, f, out };
+  if (!fly_try(half_body, &x)) return NULL;
+  char* m = panic_take();
+  fly_fn* fn = f;
+  if (fn->drop) fn->drop(fn->env);
+  return m;
 }
 
 static void drop_half(void* f) {
@@ -264,6 +431,7 @@ static _Noreturn void panic_exit(const char* message) {
   // On worker threads, the first to panic reports it; the others wait for the end.
   static int reporting;
   if (__atomic_exchange_n(&reporting, 1, __ATOMIC_ACQ_REL)) for (;;) {}
+  ending = true;
   struct iovec parts[3] = { { "<panic: ", 8 }, { (void*)message, strlen(message) }, { ">\n", 2 } };
   write_out(1, parts, 3);
 #ifndef __wasm__
@@ -818,6 +986,7 @@ void fly_eprintln(fly_str s) { write_line(2, s); }
 
 // The program ends here, with the status asked for: no cleanup runs, as for a panic (§5.7).
 _Noreturn void fly_exit(int32_t code) {
+  ending = true;
 #ifndef __wasm__
   fflush(stdout);
 #endif
@@ -1614,6 +1783,8 @@ static void switch_to(fly_fiber* to) {
   }
 }
 
+static void fiber_body(void* a) { fly_fiber* f = a; f->entry(f->arg); }
+
 void fly_fiber_start(fly_fiber* f) {
 #ifdef FLY_ASAN
   // The first fiber a thread starts is switched to from the thread's own stack, whose bounds the
@@ -1627,15 +1798,7 @@ void fly_fiber_start(fly_fiber* f) {
   }
 #endif
   // A panic that unwinds what the fiber runs goes on in the fiber that resumed it.
-  fly_unw u;
-  fly_unw_push(&u);
-  if (FLY_UNW_CATCH(&u)) {
-    f->back->panic_in = panic_take();
-    fly_cx_now()->unw = NULL;
-  } else {
-    f->entry(f->arg);
-    fly_unw_pop(&u);
-  }
+  if (fly_try(fiber_body, f)) f->back->panic_in = panic_take();
   f->done = true;
   switch_to(f->back);
 }
@@ -2889,20 +3052,17 @@ static void drop_task_closure(void* c) {
 // A task's panic ends it (§5.7): a spawned task's is reported, and its scope goes on; a forked
 // task's ends it as a failure would, its scope cancelled, and goes on in the task that opened the
 // scope once every task in it has finished.
+static void task_body(void* a) { task_t* t = a; t->entry(t, t->closure); }
+
 static void task_main(void* arg) {
   task_t* t = arg;
-  fly_unw u;
-  fly_unw_push(&u);
-  if (FLY_UNW_CATCH(&u)) {
-    fly_cx_now()->unw = NULL;
+  if (fly_try(task_body, t)) {
     char* m = panic_take();
     if (t->entry != main_entry) drop_task_closure(t->closure);
     if (t->forked) t->panic = m;
     else { report_spawned_panic(m); panic_free(m); }
     return;
   }
-  t->entry(t, t->closure);
-  fly_unw_pop(&u);
   if (FLY_FAILED) { t->error = fly_err; fly_err = NULL; }
   fly_unwinding = false;
 }
@@ -2966,16 +3126,11 @@ void fly_sleep(uint64_t nanos) {
 static void main_entry(void* task, void* closure) { (void)task; ((void (*)(void))closure)(); }
 
 // The program's root (§5.7): a panic that unwinds `run` ends here, and with it the program.
+typedef struct { void (*run)(void); } root_t;
+static void root_body(void* a) { ((root_t*)a)->run(); }
 void fly_root(void (*run)(void)) {
-#ifdef FLY_FREESTANDING
-  run();
-#else
-  fly_unw u;
-  fly_unw_push(&u);
-  if (FLY_UNW_CATCH(&u)) panic_exit(fly_cx_now()->panic);
-  run();
-  fly_unw_pop(&u);
-#endif
+  root_t r = { run };
+  if (fly_try(root_body, &r)) panic_exit(fly_cx_now()->panic);
 }
 
 void fly_tasks_run(void (*main)(void)) {
@@ -2986,7 +3141,8 @@ void fly_tasks_run(void (*main)(void)) {
 #endif
   task_t* t0 = new_task(main_entry, (void*)main, 0);
   fly_rt_tasks(world.seed, (uint8_t*)t0);
-  if (t0->panic) panic_again(t0->panic);
+  // The main task's root is the program's: its panic, its cleanup done, ends the program.
+  if (t0->panic) panic_exit(t0->panic);
   if (t0->error) fly_err = t0->error;
 }
 
@@ -3679,20 +3835,17 @@ static void fire_alarms(void) {
 
 // ---- running tasks ----
 
+static void mt_task_body(void* a) { mt_task* t = a; t->entry(t, t->closure); }
+
 static void mt_task_main(void* arg) {
   mt_task* t = arg;
-  fly_unw u;
-  fly_unw_push(&u);
-  if (FLY_UNW_CATCH(&u)) {
-    fly_cx_now()->unw = NULL;
+  if (fly_try(mt_task_body, t)) {
     char* m = panic_take();
     if (t->entry != main_entry) drop_task_closure(t->closure);
     if (t->forked) t->panic = m;
     else { report_spawned_panic(m); panic_free(m); }
     return;
   }
-  t->entry(t, t->closure);
-  fly_unw_pop(&u);
   if (FLY_FAILED) { t->error = fly_err; fly_err = NULL; }
   fly_unwinding = false;
 }
@@ -4167,7 +4320,7 @@ static void mt_run(void (*main)(void), void (*entry)(void* task, void* closure))
   t->entry = entry;
   t->closure = (void*)main;
   t->refs = 1;
-  // Its panic goes on once the workers have stopped, and ends the program.
+  // Its panic, once the workers have stopped, ends the program.
   t->forked = true;
   main_task = t;
   runnable = alive = 1;
@@ -4183,7 +4336,7 @@ static void mt_run(void (*main)(void), void (*entry)(void* task, void* closure))
   }
   pthread_attr_destroy(&attr);
   work(&workers[0]);
-  if (t->panic) panic_again(t->panic);
+  if (t->panic) panic_exit(t->panic);
   if (t->error) fly_err = t->error;
 }
 
