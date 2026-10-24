@@ -9,7 +9,7 @@
 // changed, or a build before that did not compile.
 
 import { Diagnostic, render } from "./diag";
-import { Program } from "./env";
+import { Program, RUNTIME } from "./env";
 import { checkFn } from "./check";
 import { checkOwnership } from "./own";
 import { Cgen, newCgen } from "./c";
@@ -71,7 +71,9 @@ function skeleton(src: str, ast: readonly AstModule): String {
 // The whole program, checked and compiled from its sources; with the sources it read, so that a
 // build that did not compile is not tried again until one changes.
 function cold(entry: str, root: str, runtime: str): [Option<Session>, Built, Vec<[String, String]>] uses Io {
-  let p = Program.load([entry.toString()], `${root}/std`.asStr());
+  let entries: Vec<String> = [entry.toString()];
+  for (const m of RUNTIME) { entries.push(`${root}/selfhost/rt/${m}`); }
+  let p = Program.load(entries, `${root}/std`.asStr());
   // Checking a function may specialize others, which are checked in turn.
   let next: usize = 0;
   while (p.diags.len() == 0 && next < p.fns.len()) {

@@ -161,6 +161,14 @@ bool fly_crypto_equal(fly_slice a, fly_slice b);
 _Noreturn void fly_exit(int32_t code);
 _Noreturn void fly_panicf(const char* fmt, ...);
 
+// ---- the runtime's Flyscript (selfhost/rt), which every native and WebAssembly program has ----
+// A `usize` is 64 bits wide on every target, WebAssembly's too: `uint64_t`, not `size_t`.
+// Numbers as text (rt/format.fly): each writes at `out`, which has room enough, and gives how much.
+uint64_t fly_rt_show_f64(double v, uint8_t* out);
+uint64_t fly_rt_float_fixed(double v, uint32_t places, uint8_t* out);
+bool fly_rt_parse_float(const uint8_t* text, uint64_t len, double* out);
+uint64_t fly_rt_show_int(bool negative, uint64_t high, uint64_t low, uint8_t* out);
+
 // ---- integers ----
 
 _Noreturn void fly_overflow(fly_i128 value, const char* type);

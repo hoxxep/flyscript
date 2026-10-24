@@ -6,7 +6,7 @@
 // the directory that holds `std/` and `selfhost/`.
 
 import { Diagnostic, render, diag } from "./diag";
-import { Program } from "./env";
+import { Program, RUNTIME } from "./env";
 import { checkFn } from "./check";
 import { checkOwnership } from "./own";
 import { cProgram } from "./c";
@@ -103,6 +103,10 @@ function compile(entry: str, out: str, root: str, freestanding: bool, ptr: usize
   // With `--interface`, an entry that is a directory is a package with no program: all of it.
   let entries: Vec<String> = Vec.new();
   if (interfaces && isDir(entry)) { packageFiles(entry, mut entries); } else { entries.push(entry.toString()); }
+  // A native or WebAssembly program has the runtime's Flyscript, which the runtime's C calls.
+  if (!interfaces && core.isNone() && (out.endsWith(".c") || out.endsWith(".ll"))) {
+    for (const m of RUNTIME) { entries.push(`${root}/selfhost/rt/${m}`); }
+  }
   let p = Program.load(entries, `${root}/std`.asStr());
   clock.lap("load");
   if (p.diags.len() == 0) {
