@@ -4367,9 +4367,6 @@ FLY_THREAD_VAR(mt_task*, running, NULL)
 #define running (*running_ref())
 static mt_task* main_task;
 static bool main_done;
-// Tasks queued or running, and tasks begun and not ended: when none can run, and none sleeps, those
-// alive wait for each other forever.
-static long runnable, alive;
 
 // How many workers are asleep for want of work, each on its own condition (`worker.parked`).
 static int idlers;
@@ -4455,7 +4452,6 @@ static mt_task* inbox_pop(worker* w) {
 // A task that waited may run again: on the worker that woke it, if one did, which the data it
 // waited for is warm on; otherwise on the last it ran on. Any idle worker may take it from there.
 static void unpark(mt_task* t) {
-  __atomic_fetch_add(&runnable, 1, __ATOMIC_SEQ_CST);
   worker* w = this_worker;
   if (w && running) {
     // The countdown runs out within a few points, for the scheduler to see whether the waker has
@@ -4484,7 +4480,6 @@ static void flush_next(worker* w) {
 // own ring, and the rest in batches on the shared queue, put in under one lock, for as many
 // workers as they keep busy, who are woken for them.
 static void unpark_all(mt_task* list, size_t n) {
-  __atomic_fetch_add(&runnable, (long)n, __ATOMIC_SEQ_CST);
   worker* me = this_worker;
   for (size_t i = 0; i < BATCH && list; i++) {
     mt_task* next = list->rnext;
@@ -4572,7 +4567,6 @@ static bool wait_at(waitq* q, bool cancellable, bool front) {
     return false;
   }
   t->yielded = false;
-  __atomic_fetch_sub(&runnable, 1, __ATOMIC_SEQ_CST);
   to_worker(t, &q->lock);
   return true;
 }
@@ -4887,12 +4881,8 @@ static void tell_panic(mt_task* t) {
 // panic cancels the scope's body and its other tasks (§6.1).
 static void mt_end(mt_task* t) {
   fly_frames_free(&t->frames);
-  // A task stops being alive before it stops being runnable: the other way round, an idle worker
-  // could see one task alive and none able to run, and take that for a deadlock.
   if (t == main_task) {
     __atomic_store_n(&main_done, true, __ATOMIC_SEQ_CST);
-    __atomic_fetch_sub(&alive, 1, __ATOMIC_SEQ_CST);
-    __atomic_fetch_sub(&runnable, 1, __ATOMIC_SEQ_CST);
     // It may have ended on another worker than the program's thread, which may be asleep.
     notify_all();
     return;
@@ -4945,8 +4935,6 @@ static void mt_end(mt_task* t) {
     }
     spin_unlock(&j->q.lock);
   }
-  __atomic_fetch_sub(&alive, 1, __ATOMIC_SEQ_CST);
-  __atomic_fetch_sub(&runnable, 1, __ATOMIC_SEQ_CST);
   // Its scope no longer refers to it, nor does it to itself.
   task_unref(t);
   task_unref(t);
@@ -5298,6 +5286,19 @@ static bool work_anywhere(worker* w) {
 
 static _Noreturn void mt_deadlock(void) { panic_exit("deadlock: every task is waiting"); }
 
+// Whether every task waits for another, as a worker going to sleep sees it, `asleep` workers
+// asleep with it: every task is running on a worker that is awake, queued, asleep on a timer,
+// waiting for a socket, or waiting for another task; so with every worker asleep, nothing queued,
+// no timer set and no socket waited for, while `main` has not ended, every task waits for another.
+// What a worker queued before it went to sleep is seen here, as it counted itself asleep after.
+static bool deadlocked(worker* w, int asleep, uint64_t due) {
+  if (asleep < nworkers || due || __atomic_load_n(&io_waiting, __ATOMIC_SEQ_CST) || __atomic_load_n(&main_done, __ATOMIC_SEQ_CST)) return false;
+  for (int k = 0; k < nworkers; k++) {
+    if (__atomic_load_n(&workers[k].next, __ATOMIC_SEQ_CST)) return false;
+  }
+  return !work_anywhere(w);
+}
+
 static void idle(worker* w) {
   bool io = __atomic_load_n(&polling, __ATOMIC_ACQUIRE);
   // Under load the next piece of work is microseconds away: looking for it a while costs less than
@@ -5321,7 +5322,7 @@ static void idle(worker* w) {
     // so that work queued after the look below wakes it.
     if (!work_anywhere(w) && !(w == &workers[0] && __atomic_load_n(&main_done, __ATOMIC_SEQ_CST))) {
       uint64_t due = earliest_due();
-      if (!due && __atomic_load_n(&runnable, __ATOMIC_SEQ_CST) == 0 && __atomic_load_n(&alive, __ATOMIC_SEQ_CST) > 0 && __atomic_load_n(&io_waiting, __ATOMIC_SEQ_CST) == 0) mt_deadlock();
+      if (deadlocked(w, __atomic_load_n(&idlers, __ATOMIC_SEQ_CST) + 1, due)) mt_deadlock();
       uint64_t now = now_ns();
       io_poll(due ? (int64_t)(due > now ? due - now : 0) : -1);
     }
@@ -5329,12 +5330,12 @@ static void idle(worker* w) {
     return;
   }
   // Asleep from here: work queued after the look below finds it so, and wakes it.
-  __atomic_fetch_add(&idlers, 1, __ATOMIC_SEQ_CST);
+  int asleep = __atomic_add_fetch(&idlers, 1, __ATOMIC_SEQ_CST) + __atomic_load_n(&pollers, __ATOMIC_SEQ_CST);
   __atomic_store_n(&w->parked, 1, __ATOMIC_SEQ_CST);
   pthread_mutex_lock(&w->park_mu);
   if (!work_anywhere(w) && !(w == &workers[0] && __atomic_load_n(&main_done, __ATOMIC_SEQ_CST))) {
     uint64_t due = earliest_due();
-    if (!due && __atomic_load_n(&runnable, __ATOMIC_SEQ_CST) == 0 && __atomic_load_n(&alive, __ATOMIC_SEQ_CST) > 0 && __atomic_load_n(&io_waiting, __ATOMIC_SEQ_CST) == 0) mt_deadlock();
+    if (deadlocked(w, asleep, due)) mt_deadlock();
     if (due) {
       // The monotonic clock and the condition's clock differ: wait as long as is left.
       uint64_t left = due > now_ns() ? due - now_ns() : 0;
@@ -5450,7 +5451,6 @@ static void mt_run(void (*main)(void**), void (*entry)(void* task, void* closure
   // Its panic, once the workers have stopped, ends the program.
   t->forked = true;
   main_task = t;
-  runnable = alive = 1;
   inbox_push(&workers[0], t);
   // Each worker's stack is FLY_STACK, the first's too: tasks and `par` work run on it.
   pthread_attr_t attr;
@@ -5494,8 +5494,6 @@ static mt_task* mt_start(int scope, void (*entry)(void* task, void* closure, voi
   t->handles = handles;
   __atomic_fetch_add(&sc->nlive, 1, __ATOMIC_ACQ_REL);
   scope_join(sc, t);
-  __atomic_fetch_add(&runnable, 1, __ATOMIC_SEQ_CST);
-  __atomic_fetch_add(&alive, 1, __ATOMIC_SEQ_CST);
   ring_push(&this_worker->run, t);
   notify();
   return t;

@@ -1,0 +1,23 @@
+// expect: waiting
+// expect: <panic: deadlock: every task is waiting>
+// Tasks on every core each waiting for a message no one will send, and `main` for them: once
+// every worker is asleep with nothing queued, no timer set and no socket waited for, the program
+// says so rather than hang (§6.4), however the tasks interleave.
+import { println } from "std/io";
+import { channel, Sender } from "std/sync";
+
+export function main(): void uses Io {
+  const [tx, rx] = channel<u64>();
+  println("waiting");
+  // The tasks' senders are kept, so their channels never end.
+  let senders: Vec<Sender<u64>> = Vec.new();
+  Io.scope((s) => {
+    for (const _ of 0..8) {
+      const [keep, mine] = channel<u64>();
+      senders.push(keep);
+      s.spawn(() => { while (const #Some(_) = mine.recv()) {} });
+    }
+    while (const #Some(_) = rx.recv()) {}
+  });
+  tx.close();
+}
