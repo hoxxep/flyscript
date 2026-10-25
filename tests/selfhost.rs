@@ -204,8 +204,8 @@ export function main(): void uses Io {
     assert!(said.contains("<panic: cryptography needs OpenSSL 3 or later"), "{said}");
 }
 
-/// `std/http` over TLS against a real server, OpenSSL's own `s_server`, whose certificate a CA made
-/// for the test signs: trusted when `SSL_CERT_FILE` names that CA, `#Untrusted` when it does not.
+/// `std/http` over TLS against a real server, Node's, whose certificate a CA made for the test
+/// signs: trusted when `SSL_CERT_FILE` names that CA, `#Untrusted` when it does not.
 #[test]
 fn speaks_https_to_a_real_server() {
     let has_openssl = Command::new("openssl").arg("version").output().is_ok_and(|o| o.status.success());
@@ -223,18 +223,26 @@ fn speaks_https_to_a_real_server() {
     openssl(&["req", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256", "-nodes", "-keyout", "key.pem", "-out", "req.pem", "-subj", "/CN=localhost"]);
     std::fs::write(dir.join("ext.cnf"), "subjectAltName=DNS:localhost,IP:127.0.0.1\nbasicConstraints=CA:FALSE\nextendedKeyUsage=serverAuth\n").unwrap();
     openssl(&["x509", "-req", "-in", "req.pem", "-CA", "ca.pem", "-CAkey", "ca.key", "-CAcreateserial", "-out", "cert.pem", "-days", "2", "-extfile", "ext.cnf"]);
-    let mut server = Command::new("openssl")
-        .args(["s_server", "-accept", "0", "-cert", "cert.pem", "-key", "key.pem", "-www"])
+    // The server is Node's, which reads the whole of a request before it answers, and closes as TLS
+    // says to: `openssl s_server -www` answers having read part of one, and its close may then reset
+    // the connection before the answer is read, now and then.
+    let mut server = Command::new("node")
+        .arg("-e")
+        .arg(r#"const fs = require("node:fs");
+require("node:https").createServer({ key: fs.readFileSync("key.pem"), cert: fs.readFileSync("cert.pem") }, (q, r) => {
+  q.resume();
+  q.on("end", () => r.end("served by s_server's stand-in\n"));
+}).listen(0, function () { console.log(`port ${this.address().port}`); });"#)
         .current_dir(&dir)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
         .spawn()
         .unwrap();
-    // It says the port it took: `ACCEPT [::]:51062`.
+    // It says the port it took.
     let mut lines = std::io::BufRead::lines(std::io::BufReader::new(server.stdout.take().unwrap()));
     let port = loop {
-        let line = lines.next().expect("s_server said no port").unwrap();
-        if let Some(p) = line.strip_prefix("ACCEPT ").and_then(|a| a.rsplit(':').next()) {
+        let line = lines.next().expect("the server said no port").unwrap();
+        if let Some(p) = line.strip_prefix("port ") {
             break p.to_string();
         }
     };
