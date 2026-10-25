@@ -2362,8 +2362,8 @@ impl Lgen {
         ptrs[k] = st;
       }
     }
-    const w = self.transient(8 + 24 + 3 * self.ptr, 8);
-    self.ins(`call void @llvm.memset.p0.i64(ptr ${w}, i8 0, i64 ${8 + 24 + 3 * self.ptr}, i1 false)`);
+    const w = self.transient(waitSize(self.ptr), 8);
+    self.ins(`call void @llvm.memset.p0.i64(ptr ${w}, i8 0, i64 ${waitSize(self.ptr)}, i1 false)`);
     const e = expr.replaceAll(WAIT, `((fly_wait*)a${ptrs.len()})`.asStr());
     ptrs.push(w);
     const res = if (unitTy(c.ret)) { "null".toString() } else { self.transientOf(c.ret, span) };
@@ -2396,7 +2396,7 @@ impl Lgen {
     const sc = self.storage(4, 4);
     const slot = self.storage(self.ptr, self.ptr);
     const panicked = self.storage(1, 1);
-    const w = self.storage(8 + 24 + 3 * self.ptr, 8);
+    const w = self.storage(waitSize(self.ptr), 8);
     const res = if (unitTy(c.ret)) { "null".toString() } else { self.storageOf(c.ret, span) };
     const open = self.glueFn(3, "*(int*)a0 = fly_scope_open(); *(int*)a1 = *(int*)a0; *(void**)a2 = NULL;");
     self.callGlue(open.asStr(), "null", [sid.clone(), sc.clone(), slot.clone()]);
@@ -2411,7 +2411,7 @@ impl Lgen {
     }
     const d = self.glueFn(1, "fly_fn* f_ = a0; if (f_->drop) f_->drop(f_->env);");
     self.callGlue(d.asStr(), "null", [fv]);
-    self.ins(`call void @llvm.memset.p0.i64(ptr ${w}, i8 0, i64 ${8 + 24 + 3 * self.ptr}, i1 false)`);
+    self.ins(`call void @llvm.memset.p0.i64(ptr ${w}, i8 0, i64 ${waitSize(self.ptr)}, i1 false)`);
     const end = self.glueFn(3, "if (*(uint8_t*)a2) fly_scope_panicked(a0, *(int*)a1); else fly_scope_close(a0, *(int*)a1, false);");
     const endArgs: Vec<String> = [w, sid, panicked];
     self.callGlue(end.asStr(), "null", endArgs);
@@ -3968,6 +3968,9 @@ void flyg_free(void* p) { free(p); }
 ";
 
 // Checks of the runtime's layouts the module relies on, for pointers of `ptr` bytes.
+// The size of runtime.h's `fly_wait`: its step and count, two words and two pointers.
+function waitSize(ptr: usize): usize { 8 + 16 + 2 * ptr }
+
 function layoutChecks(ptr: usize): String {
   const p2 = 2 * ptr;
   const p3 = 3 * ptr;
@@ -3979,6 +3982,8 @@ _Static_assert(sizeof(fly_String) == ${p3} && sizeof(fly_vec) == ${p3} && __buil
 _Static_assert(sizeof(fly_fn) == ${p3} && __builtin_offsetof(fly_fn, drop) == ${ptr} && __builtin_offsetof(fly_fn, fn) == ${p2}, \"fly_fn\");
 _Static_assert(sizeof(fly_cont) == ${p3} && __builtin_offsetof(fly_cont, resume) == ${ptr} && __builtin_offsetof(fly_cont, drop) == ${p2}, \"fly_cont\");
 _Static_assert(sizeof(fly_gen) == ${p3} && sizeof(fly_socket) == ${10 * ptr} && sizeof(fly_map) == ${6 * ptr}, \"runtime structs\");
+_Static_assert(sizeof(fly_wait) == ${waitSize(ptr)} && _Alignof(fly_wait) <= 8, \"fly_wait\");
+_Static_assert(sizeof(fly_frames) == ${5 * ptr}, \"fly_frames\");
 _Static_assert(sizeof(fly_arena) == ${ptr} && sizeof(fly_chan) == 4 && sizeof(fly_Hasher) == 8 && _Alignof(fly_i128) == 16, \"runtime scalars\");
 `
 }

@@ -3020,12 +3020,12 @@ int fly_sock_status(fly_wait* w, fly_socket* s, unsigned code, fly_str body) {
     uint8_t* all = fly_alloc((size_t)n + body.len + 1);
     memcpy(all, head, (size_t)n);
     if (body.len) memcpy(all + n, body.ptr, body.len);
-    w->p[2] = all;
+    w->p[1] = all;
     w->a[1] = (int64_t)((size_t)n + body.len);
   }
-  int e = fly_sock_write(w, s, (fly_slice){ w->p[2], (size_t)w->a[1] });
+  int e = fly_sock_write(w, s, (fly_slice){ w->p[1], (size_t)w->a[1] });
   if (fly_cx_now()->pend) return 0;
-  free(w->p[2]);
+  free(w->p[1]);
   return e;
 }
 
@@ -3651,7 +3651,7 @@ fly_chan fly_channel(void (*drop)(void*)) {
 }
 
 // Where a message waits while its task does: in the wait record itself, which is in the task's
-// frame and does not move, if it fits in the record's words, and otherwise on the heap.
+// frame and does not move, if it fits in the record's two words, and otherwise on the heap.
 static void* wait_buffer(fly_wait* w, size_t size) {
   if (size <= sizeof w->a) { w->n = 1; return w->a; }
   w->n = 0;

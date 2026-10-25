@@ -203,7 +203,7 @@ bool fly_try(void (*f)(void* a), void* a);
 // A routine of the runtime's that may wait — for the scheduler, a socket, the clock, other tasks —
 // is a state machine too, of a few steps: its caller keeps this record of where it stopped, zeroed
 // before the first call, and calls it again with it to go on.
-typedef struct { int32_t step; int32_t n; int64_t a[3]; void* p[3]; } fly_wait;
+typedef struct { int32_t step; int32_t n; int64_t a[2]; void* p[2]; } fly_wait;
 // A spawned task's `Task` (§6.1): the task's record, which lasts while it runs or a `Task` refers
 // to it. How it ended is TaskEnd's tags, in their order.
 enum { FLY_TASK_RUNNING = -1, FLY_TASK_DONE = 0, FLY_TASK_CANCELLED = 1, FLY_TASK_PANICKED = 2 };
