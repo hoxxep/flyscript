@@ -244,6 +244,8 @@ No language change is needed. There was no `async` and no `await`, and there sti
 
 ## 17. Portable SIMD
 
+*Done: `std/simd`'s `Simd<T, N>` and `Mask<N>` are the target's vector instructions natively and in WebAssembly, and run a lane at a time elsewhere; the JSON scanner, the UTF-8 check and the line reader use them (spec 0.131, 0.133).*
+
 **Goal.** Close §12.3's first question. `Soa<T>`, `par` and LLVM's auto-vectorizer already handle vertical arithmetic, the same operation on every element. They cannot do horizontal work, where lanes talk to each other: scanning sixteen bytes at a time for a quote or a newline as simdjson does, checking UTF-8, reductions, and shuffles. That work is where the fastest parsers in any language get their speed. It must be portable without an emulation cliff. ARM's NEON has no single instruction for x86's `movemask`, so code written around one is slower on ARM than plain scalar code, unless the API also offers what ARM does well.
 
 `std/simd`: `Simd<T, comptime N>`, `N` lanes of a scalar, and `Mask<comptime N>`, both `Copy` and `Send`, lowered to LLVM's vector types and so to SSE and AVX, NEON, and WebAssembly's 128-bit SIMD. The surface:
@@ -260,6 +262,8 @@ No grammar change is needed; `comptime N` is already in the language. JavaScript
 **Done when:** the JSON scanner, UTF-8 checking and the line reader use it and are measurably faster on x86-64, AArch64 and WebAssembly, and no target is slower than scalar code.
 
 ## 18. FlyNext, order-free and faster
+
+*Done: an element's props may come anywhere in its body, on the server and in the browser alike, and the diff finds an element's span by a lookup and matches a list's children by one hash map.*
 
 **Goal.** FlyNext's architecture is already faster than React's: the server streams HTML straight into a buffer with no tree, and the browser diffs two flat arrays in linear memory instead of a tree of objects the garbage collector must chase. Two things stand between it and a framework without footguns or wasted work.
 
