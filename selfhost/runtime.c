@@ -3650,6 +3650,18 @@ fly_chan fly_channel(void (*drop)(void*)) {
   return (fly_chan){ id };
 }
 
+// Where a message waits while its task does: in the wait record itself, which is in the task's
+// frame and does not move, if it fits in the record's words, and otherwise on the heap.
+static void* wait_buffer(fly_wait* w, size_t size) {
+  if (size <= sizeof w->a) { w->n = 1; return w->a; }
+  w->n = 0;
+  return fly_alloc(size ? size : 1);
+}
+
+static void wait_buffer_free(fly_wait* w) {
+  if (!w->n) free(w->p[0]);
+}
+
 // Whether the message went to the channel: once its receiver is gone, it is dropped instead.
 // The message is the routine's own, copied as it is first called: the scheduler reads it once the
 // task has given way, when the caller's copy may be gone.
@@ -3659,12 +3671,12 @@ bool fly_send(fly_wait* w, fly_chan ch, const void* v, size_t size) {
 #endif
   int64_t r = 0;
   W_BEGIN(w)
-  w->p[0] = fly_alloc(size ? size : 1);
+  w->p[0] = wait_buffer(w, size);
   memcpy(w->p[0], v, size);
   ASK(w, r, REQ_SEND, ch.ch, (int64_t)size, w->p[0], false);
-  if (r) { free(w->p[0]); return true; }
+  if (r) { wait_buffer_free(w); return true; }
   if (chan_drops[ch.ch]) chan_drops[ch.ch](w->p[0]);
-  free(w->p[0]);
+  wait_buffer_free(w);
   ASK(w, r, REQ_POINT, 0, 0, NULL, false);
   W_END
   return false;
@@ -3678,14 +3690,14 @@ bool fly_recv(fly_wait* w, fly_chan ch, void* out, size_t size) {
 #endif
   int64_t r = 0;
   W_BEGIN(w)
-  w->p[0] = fly_alloc(size ? size : 1);
+  w->p[0] = wait_buffer(w, size);
   for (;;) {
     ASK(w, r, REQ_RECV, ch.ch, 0, w->p[0], false);
     if (r != 2 || fly_unwinding) break;
   }
   W_END
   if (r == 1) memcpy(out, w->p[0], size);
-  free(w->p[0]);
+  wait_buffer_free(w);
   return r == 1 && !fly_unwinding;
 }
 
