@@ -8,8 +8,8 @@
 
 import { EffRow } from "./types";
 import { Program } from "./env";
-import { Block, Stmt } from "./ir";
-import { HashSet } from "std/collections";
+import { Block, Stmt, Rvalue, Operand, Place, Uses, useBlock, useStmt, useRvalue, useOperand, usePlace, useCall } from "./ir";
+import { HashMap, HashSet } from "std/collections";
 
 // Whether code performing `row` may suspend: it yields, performs `Io`, whose waits stop the task,
 // or performs an effect a handler takes — anything but failures, regions and raw memory.
@@ -20,37 +20,305 @@ export function pends(p: readonly Program, row: readonly EffRow): bool {
   })
 }
 
-// The locals of `b` and the blocks in it that are declared in a block around a statement at which
-// the code may suspend, `site` says which: each may hold a value as the code suspends, which it
-// reads again when it goes on, so each lives in the frame. Whether `b` holds such a statement.
-// The blocks of a statement that run as part of the code around it count: a direct `handle`'s body
-// runs where the `handle` is; its arms, a `handle`'s body and arms otherwise, and a `defer`'s body
-// are code apart, though a `defer` that may suspend makes its block's ways out such points.
+// The locals of `b`'s code that hold a value the code may read once it goes on from a statement at
+// which it may suspend, `site` says which: each lives in the frame, the rest on the stack, where
+// they are dead across every such statement. Whether `b` holds such a statement. The blocks of a
+// statement that run as part of the code around it count: a direct `handle`'s body runs where the
+// `handle` is; its arms, a `handle`'s body and arms otherwise, and a `defer`'s body are code apart,
+// though a `defer` that may suspend makes its block's ways out such statements.
+//
+// What is live is found backward, as a compiler's liveness is: a value is live where a read of it
+// may follow before it is given another; a loop is gone round until nothing more is; a `break`, a
+// `continue` and a failure caught take what is live where they go. A statement that may suspend
+// reads its own operands again as it goes on. Two kinds of local live in the frame whenever they
+// are in scope at such a statement, live or not: what a block's cleanup reads, which the code zeroes
+// as the block begins, before any point it goes on from; and a local whose address is taken —
+// borrowed, viewed, captured by reference — which may be read through the address wherever it went.
 export function residents(b: readonly Block, site: readonly (s: readonly Stmt) => bool, out: mut HashSet<usize>): bool {
-  let any = false;
-  for (const s of b.stmts) {
-    const here = site(s);
-    const inner = match (s) {
-      #If(_, x, y) | #Loop(_, x, y) | #Try(x, _, y) => {
-        const a = residents(x, site, mut out);
-        residents(y, site, mut out) || a
-      }
-      #Labeled(_, x) | #Block(x) | #Region(_, _, x) | #ForGen(_, _, _, x) => residents(x, site, mut out),
-      #Handle(h) => h.direct && residents(h.body, site, mut out),
-      _ => false,
-    };
-    if (here || inner) { any = true; }
-  }
-  // A `defer` that may suspend makes the block's way out a point the code may stop at, after which
-  // its other cleanups run, and the code around it goes on.
+  let mine: HashSet<usize> = HashSet.new();
+  ownCode(b, mut mine);
+  let lv: Live = { read: HashSet.new(), any: false };
+  const jumps: Jumps = { brk: HashMap.new(), cont: HashMap.new(), caught: HashSet.new() };
+  liveBlock(mut lv, site, b, HashSet.new(), jumps);
+  for (const l of lv.read.iter()) { if (mine.has(l)) { out.insert(l); } }
+  let kept: HashSet<usize> = HashSet.new();
+  lentIn(b, mut kept);
+  let scoped: HashSet<usize> = HashSet.new();
+  inScope(b, site, mut scoped, mut kept);
+  for (const l of kept.iter()) { if (scoped.has(l)) { out.insert(l); } }
+  lv.any
+}
+
+// What the backward walk has found: what is live across a statement that may suspend, and whether
+// there is one.
+type Live = { read: HashSet<usize>; any: bool };
+
+// What is live where the jumps out of the code walked go: the end of each loop or labeled block, by
+// its label; a loop's step, where `continue` goes; and the `catch` around, for a failure.
+type Jumps = { brk: HashMap<usize, HashSet<usize>>; cont: HashMap<usize, HashSet<usize>>; caught: HashSet<usize> };
+impl Clone for Jumps;
+
+// What is live as `b` begins, `after` live as it ends. A `defer` of `b`'s that may suspend reads, as
+// it goes on, what is live wherever the block is left to.
+function liveBlock(lv: mut Live, site: readonly (s: readonly Stmt) => bool, b: readonly Block, after: HashSet<usize>, jumps: readonly Jumps): HashSet<usize> {
   for (const c of b.cleanups) {
     if (const #Defer(_, d) = c) {
-      let own: HashSet<usize> = HashSet.new();
-      if (residents(d, site, mut own)) { any = true; }
+      if (hasSite(d, site)) {
+        lv.any = true;
+        for (const l of after.iter()) { lv.read.insert(l); }
+        for (const l of jumps.caught.iter()) { lv.read.insert(l); }
+        for (const [_, set] of jumps.brk.entries()) { for (const l of set.iter()) { lv.read.insert(l); } }
+        for (const [_, set] of jumps.cont.entries()) { for (const l of set.iter()) { lv.read.insert(l); } }
+      }
     }
   }
-  if (any) { for (const l of b.locals) { out.insert(l); } }
-  any
+  let live = after;
+  let i = b.stmts.len();
+  while (i > 0) {
+    i -= 1;
+    const s = match (b.stmts.get(i)) { #Some(s) => s, #None => break };
+    live = liveStmt(mut lv, site, s, live, jumps);
+  }
+  live
+}
+
+// What is live before `s`, `after` live after it.
+function liveStmt(lv: mut Live, site: readonly (s: readonly Stmt) => bool, s: readonly Stmt, after: HashSet<usize>, jumps: readonly Jumps): HashSet<usize> {
+  if (site(s)) {
+    // What it gives a value as it ends is given in the call that ends it, and read after there.
+    lv.any = true;
+    let given: HashSet<usize> = HashSet.new();
+    defs(s, mut given);
+    for (const l of after.iter()) { if (!given.has(l)) { lv.read.insert(l); } }
+    addUses(s, mut lv.read);
+  }
+  let live = match (s) {
+    #Let(l, rv) => {
+      let x = after;
+      x.remove(l);
+      addRvalue(rv, mut x);
+      x
+    }
+    #Store(p, rv) => {
+      let x = after;
+      // A local given a whole new value held none it is read for; a part of one is read with it.
+      if (p.path.len() == 0 && const #Local(l) = p.root) { x.remove(l); } else { addPlace(p, mut x); }
+      addRvalue(rv, mut x);
+      x
+    }
+    #If(c, x, y) => {
+      let a = liveBlock(mut lv, site, x, after.clone(), jumps);
+      const b = liveBlock(mut lv, site, y, after, jumps);
+      for (const l of b.iter()) { a.insert(l); }
+      addOperand(c, mut a);
+      a
+    }
+    #Loop(l, x, y) => {
+      // Gone round until what is live at its head no longer grows.
+      let head: HashSet<usize> = HashSet.new();
+      let rounds = 0;
+      while (true) {
+        const step = liveBlock(mut lv, site, y, head.clone(), jumps);
+        let inner = jumps.clone();
+        inner.brk.insert(l, after.clone());
+        inner.cont.insert(l, step.clone());
+        const body = liveBlock(mut lv, site, x, step, inner);
+        rounds += 1;
+        if (body.len() == head.len() || rounds > 64) { head = body; break; }
+        head = body;
+      }
+      head
+    }
+    #ForGen(l, c, item, x) => {
+      let head = after.clone();
+      let rounds = 0;
+      while (true) {
+        let inner = jumps.clone();
+        inner.brk.insert(l, after.clone());
+        inner.cont.insert(l, head.clone());
+        let body = liveBlock(mut lv, site, x, head.clone(), inner);
+        body.remove(item);
+        for (const v of after.iter()) { body.insert(v); }
+        rounds += 1;
+        if (body.len() == head.len() || rounds > 64) { head = body; break; }
+        head = body;
+      }
+      let u: Uses = { locals: HashSet.new(), captures: HashSet.new() };
+      useCall(c, mut u);
+      for (const v of u.locals.iter()) { head.insert(v); }
+      head
+    }
+    #Labeled(l, x) => {
+      let inner = jumps.clone();
+      inner.brk.insert(l, after.clone());
+      liveBlock(mut lv, site, x, after, inner)
+    }
+    #Block(x) => liveBlock(mut lv, site, x, after, jumps),
+    #Region(_, a, x) => {
+      let r = liveBlock(mut lv, site, x, after, jumps);
+      r.insert(a);
+      r
+    }
+    #Try(x, e, y) => {
+      let caught = liveBlock(mut lv, site, y, after.clone(), jumps);
+      caught.remove(e);
+      let inner = jumps.clone();
+      inner.caught = caught;
+      liveBlock(mut lv, site, x, after, inner)
+    }
+    // The arms of a direct `handle` are called from its body, wherever the body goes on.
+    #Handle(h) if h.direct => {
+      let around = after;
+      for (const a of h.arms) { addBlockUses(a.body, mut around); }
+      let r = liveBlock(mut lv, site, h.body, around, jumps);
+      for (const a of h.arms) { addBlockUses(a.body, mut r); }
+      r
+    }
+    #Break(l) => match (jumps.brk.get(l)) { #Some(x) => x.clone(), #None => HashSet.new() },
+    #Continue(l) => match (jumps.cont.get(l)) { #Some(x) => x.clone(), #None => HashSet.new() },
+    #Return(op) => {
+      let x: HashSet<usize> = HashSet.new();
+      addOperand(op, mut x);
+      x
+    }
+    #Panic(_) => HashSet.new(),
+    #Perform(_, _, args, r) => {
+      let x = after;
+      x.remove(r);
+      for (const a of args) { addOperand(a, mut x); }
+      x
+    }
+    #Resume(k, arg, r) => {
+      let x = after;
+      x.remove(r);
+      addOperand(k, mut x);
+      if (const #Some(a) = arg) { addOperand(a, mut x); }
+      x
+    }
+    _ => {
+      let x = after;
+      addUses(s, mut x);
+      x
+    }
+  };
+  // Whatever may fail may go to the `catch` around.
+  for (const l of jumps.caught.iter()) { live.insert(l); }
+  live
+}
+
+// The locals `s` gives a whole value, which it read nothing of before.
+function defs(s: readonly Stmt, out: mut HashSet<usize>): void {
+  match (s) {
+    #Let(l, _) | #Perform(_, _, _, l) | #Resume(_, _, l) => { out.insert(l); }
+    #Store(p, _) => { if (p.path.len() == 0) { if (const #Local(l) = p.root) { out.insert(l); } } }
+    _ => {}
+  }
+}
+
+// Whether code of `b`, not apart, may suspend.
+function hasSite(b: readonly Block, site: readonly (s: readonly Stmt) => bool): bool {
+  for (const c of b.cleanups) { if (const #Defer(_, d) = c) { if (hasSite(d, site)) { return true; } } }
+  b.stmts.iter().some((s) => site(s) || match (s) {
+    #If(_, x, y) | #Loop(_, x, y) | #Try(x, _, y) => hasSite(x, site) || hasSite(y, site),
+    #Labeled(_, x) | #Block(x) | #Region(_, _, x) | #ForGen(_, _, _, x) => hasSite(x, site),
+    #Handle(h) => h.direct && hasSite(h.body, site),
+    _ => false,
+  })
+}
+
+function addUses(s: readonly Stmt, into: mut HashSet<usize>): void {
+  let u: Uses = { locals: HashSet.new(), captures: HashSet.new() };
+  useStmt(s, mut u);
+  for (const l of u.locals.iter()) { into.insert(l); }
+}
+
+function addBlockUses(b: readonly Block, into: mut HashSet<usize>): void {
+  let u: Uses = { locals: HashSet.new(), captures: HashSet.new() };
+  useBlock(b, mut u);
+  for (const l of u.locals.iter()) { into.insert(l); }
+}
+
+function addRvalue(rv: readonly Rvalue, into: mut HashSet<usize>): void {
+  let u: Uses = { locals: HashSet.new(), captures: HashSet.new() };
+  useRvalue(rv, mut u);
+  for (const l of u.locals.iter()) { into.insert(l); }
+}
+
+function addOperand(op: readonly Operand, into: mut HashSet<usize>): void {
+  let u: Uses = { locals: HashSet.new(), captures: HashSet.new() };
+  useOperand(op, mut u);
+  for (const l of u.locals.iter()) { into.insert(l); }
+}
+
+function addPlace(p: readonly Place, into: mut HashSet<usize>): void {
+  let u: Uses = { locals: HashSet.new(), captures: HashSet.new() };
+  usePlace(p, mut u);
+  for (const l of u.locals.iter()) { into.insert(l); }
+}
+
+// What leaving `b` reads: what its cleanups drop, the flags of its `defer`s and what those read.
+function cleanupUses(b: readonly Block, into: mut HashSet<usize>): void {
+  for (const c of b.cleanups) {
+    match (c) {
+      #Drop(l) | #Arena(l) => { into.insert(l); }
+      #Defer(f, d) => {
+        into.insert(f);
+        addBlockUses(d, mut into);
+      }
+    }
+  }
+}
+
+// The locals declared in `b` and the blocks in it that are its code, not code apart.
+function ownCode(b: readonly Block, out: mut HashSet<usize>): void {
+  for (const l of b.locals) { out.insert(l); }
+  for (const s of b.stmts) {
+    match (s) {
+      #If(_, x, y) | #Loop(_, x, y) | #Try(x, _, y) => { ownCode(x, mut out); ownCode(y, mut out); }
+      #Labeled(_, x) | #Block(x) | #Region(_, _, x) | #ForGen(_, _, _, x) => ownCode(x, mut out),
+      #Handle(h) => { if (h.direct) { ownCode(h.body, mut out); } }
+      _ => {}
+    }
+  }
+}
+
+// The locals of `b`'s code whose address the code takes.
+function lentIn(b: readonly Block, out: mut HashSet<usize>): void {
+  for (const s of b.stmts) {
+    match (s) {
+      #Let(_, rv) | #Store(_, rv) => lentBy(rv, mut out),
+      #If(_, x, y) | #Loop(_, x, y) | #Try(x, _, y) => { lentIn(x, mut out); lentIn(y, mut out); }
+      #Labeled(_, x) | #Block(x) | #Region(_, _, x) | #ForGen(_, _, _, x) => lentIn(x, mut out),
+      #Handle(h) => { if (h.direct) { lentIn(h.body, mut out); } }
+      _ => {}
+    }
+  }
+}
+
+function lentBy(rv: readonly Rvalue, out: mut HashSet<usize>): void {
+  match (rv) {
+    #Borrow(_, p) | #View(p) | #AddressOf(p) => { if (const #Local(l) = p.root) { out.insert(l); } }
+    #Closure(_, caps, _) => {
+      for (const c of caps) { if (const #Ref(_, p) = c) { if (const #Local(l) = p.root) { out.insert(l); } } }
+    }
+    _ => {}
+  }
+}
+
+// The locals declared in a block of `b`'s around a statement at which the code may suspend, and,
+// into `kept`, what those blocks' cleanups read.
+function inScope(b: readonly Block, site: readonly (s: readonly Stmt) => bool, out: mut HashSet<usize>, kept: mut HashSet<usize>): void {
+  if (!hasSite(b, site)) { return; }
+  for (const l of b.locals) { out.insert(l); }
+  cleanupUses(b, mut kept);
+  for (const s of b.stmts) {
+    match (s) {
+      #If(_, x, y) | #Loop(_, x, y) | #Try(x, _, y) => { inScope(x, site, mut out, mut kept); inScope(y, site, mut out, mut kept); }
+      #Labeled(_, x) | #Block(x) | #Region(_, _, x) | #ForGen(_, _, _, x) => inScope(x, site, mut out, mut kept),
+      #Handle(h) => { if (h.direct) { inScope(h.body, site, mut out, mut kept); } }
+      _ => {}
+    }
+  }
 }
 
 // Whether a block of `b`, walked as `residents` walks them, has a `defer` that may suspend: a

@@ -4746,8 +4746,9 @@ static void mt_run(void (*main)(void**), void (*entry)(void* task, void* closure
 
 // ---- what compiled code calls, without a simulated world ----
 
-// A task started in scope `scope`, which itself and its scope refer to, and `refs` more.
-static mt_task* mt_start(int scope, void (*entry)(void* task, void* closure, void** slot), const fly_fn* f, size_t size, int refs) {
+// A task started in scope `scope`, which itself and its scope refer to, and `refs` more; `handles`
+// `Task`s, set before any other worker can see it.
+static mt_task* mt_start(int scope, void (*entry)(void* task, void* closure, void** slot), const fly_fn* f, size_t size, int refs, int handles) {
   mt_scope* sc = obj_get(scope);
   mt_task* t = fly_alloc(sizeof(mt_task));
   t->entry = entry;
@@ -4759,6 +4760,7 @@ static mt_task* mt_start(int scope, void (*entry)(void* task, void* closure, voi
   t->forked = entry != fly_task_void;
   t->how = FLY_TASK_RUNNING;
   t->refs = 2 + refs;
+  t->handles = handles;
   spin_lock(&sc->q.lock);
   t->snext = sc->live;
   if (sc->live) sc->live->sprev = t;
@@ -4774,7 +4776,7 @@ static mt_task* mt_start(int scope, void (*entry)(void* task, void* closure, voi
 
 static int mt_spawn(fly_wait* w, int scope, void (*entry)(void* task, void* closure, void** slot), const fly_fn* f, size_t size) {
   // A forked task's `Fiber` refers to it too, by its number.
-  if (w->step == 0) w->n = obj_new(mt_start(scope, entry, f, size, 1));
+  if (w->step == 0) w->n = obj_new(mt_start(scope, entry, f, size, 1, 0));
   mt_point(w);
   return w->n;
 }
@@ -4784,9 +4786,7 @@ static int mt_spawn(fly_wait* w, int scope, void (*entry)(void* task, void* clos
 static void* mt_task_spawn(fly_wait* w, int scope, const fly_fn* f) {
   // Its `Task`s share one reference.
   if (w->step == 0) {
-    mt_task* t = mt_start(scope, fly_task_void, f, 0, 1);
-    t->handles = 1;
-    w->p[1] = t;
+    w->p[1] = mt_start(scope, fly_task_void, f, 0, 1, 1);
   }
   mt_point(w);
   return w->p[1];
