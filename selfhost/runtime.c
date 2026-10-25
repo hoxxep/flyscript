@@ -3271,8 +3271,8 @@ static task_t* new_task(void (*entry)(void* task, void* closure, void** slot), v
   task_t* t = fly_alloc(sizeof(task_t));
   t->forked = entry != fly_task_void;
   t->entry = entry;
-  if (f) { t->fn = *f; closure = &t->fn; }
-  t->closure = closure;
+  if (f) t->fn = *f; else t->fn.fn = closure;
+  t->closure = &t->fn;
   t->size = size;
   t->result = size ? fly_alloc(size) : NULL;
   return t;
@@ -3317,7 +3317,7 @@ void fly_sleep(fly_wait* w, uint64_t nanos) {
   W_END
 }
 
-static void main_entry(void* task, void* closure, void** slot) { (void)task; ((void (*)(void**))closure)(slot); }
+static void main_entry(void* task, void* closure, void** slot) { (void)task; ((void (*)(void**))((fly_fn*)closure)->fn)(slot); }
 
 // The program's root (§5.7): a panic that unwinds `run` ends here, and with it the program. With
 // no tasks nothing it does waits.
@@ -3838,38 +3838,22 @@ typedef struct { spin_t lock; mt_task *head, *tail; } waitq;
 
 struct mt_task {
   void (*entry)(void* task, void* closure, void** slot);
-  // What it runs: `main`'s runner, or a closure, kept here (`fn`).
-  void* closure;
+  // What it runs: a closure, or, for `main`, its runner as the function.
   fly_fn fn;
   void* result;
-  size_t size;
   mt_scope* scope;
   worker* home;
   // Its root machine's frame, and the frame arena of what it runs.
   void* slot;
   fly_frames frames;
-  // How it ended: its failure, if it failed; its panic, if it was forked and panicked (§5.7).
+  // How it ended: its failure, if it failed; its panic, if it panicked (§5.7), which while it waits
+  // in cleanup a panic runs is that panic, and the rest of the context is its worker's.
   fly_failure* error;
   char* panic;
-  bool forked;
-  // A spawned task, as its `Task`s see it, which share one reference: how many there are; how it
-  // ended (FLY_TASK_*) with its panic's message; whether that has been told, which whoever tells
-  // it first sets; and those waiting for any of several tasks it is among, under its joiners' lock.
-  int handles;
-  int8_t how;
-  bool told;
-  char* message;
+  // Those waiting for any of several tasks it is among, under its joiners' lock.
   struct mt_any* anys;
-  // Who still refers to it: itself while it lives, its scope while it does, and a forked task's
-  // `Fiber` until it is joined.
-  int refs;
-  // Cancelled by its scope, which may take that back, or by its `Task`, for good (`killed`).
-  bool started, cancelled, killed, yielded;
-  // How deep it is in cleanup, which a cancellation waits for.
-  int cleaning;
   // Its joiners, and whether it has finished, under their queue's lock.
   waitq joiners;
-  bool finished;
   // The queue it waits in, if it waits, and its neighbours there.
   waitq* waiting;
   mt_task *wnext, *wprev;
@@ -3879,11 +3863,20 @@ struct mt_task {
   mt_task* rnext;
   // The lock its worker gives back once it has stopped to wait.
   spin_t* release;
-  // What of the context compiled code reads and sets is its own while it waits — the panic its
-  // cleanup runs for, how deep in destructors it is — kept here; the rest is its worker's.
-  char* unwinding_panic;
-  int destroying;
   uint64_t sleep_gen;
+  uint32_t size;
+  // A spawned task, as its `Task`s see it, which share one reference: how many there are; how it
+  // ended (FLY_TASK_*); whether its panic has been told, which whoever tells it first sets.
+  int handles;
+  // Who still refers to it: itself while it lives, its scope while it does, and a forked task's
+  // `Fiber` until it is joined.
+  int refs;
+  // How deep it is in cleanup, which a cancellation waits for, and in destructors.
+  int cleaning, destroying;
+  int8_t how;
+  bool forked, told, finished;
+  // Cancelled by its scope, which may take that back, or by its `Task`, for good (`killed`).
+  bool started, cancelled, killed, yielded;
 };
 
 // One waiting for any of several tasks, among one of them's: it is told by `fired` and woken in `q`.
@@ -3980,7 +3973,7 @@ static void notify_all(void) {
 
 static void task_unref(mt_task* t) {
   if (__atomic_sub_fetch(&t->refs, 1, __ATOMIC_ACQ_REL) > 0) return;
-  panic_free(t->message);
+  panic_free(t->panic);
   free(t->result);
   free(t);
 }
@@ -4216,15 +4209,15 @@ static void fire_alarms(void) {
 
 // ---- running tasks ----
 
-static void mt_task_body(void* a) { mt_task* t = a; t->entry(t, t->closure, &t->slot); }
+static void mt_task_body(void* a) { mt_task* t = a; t->entry(t, &t->fn, &t->slot); }
 
 // Runs the task's root machine until it ends or waits: whether it ended.
 static bool mt_task_main(mt_task* t) {
   if (fly_try(mt_task_body, t)) {
     char* m = panic_take();
-    if (t->entry != main_entry) drop_task_closure(t->closure);
-    if (t->forked) t->panic = m;
-    else { t->message = m; __atomic_store_n(&t->how, FLY_TASK_PANICKED, __ATOMIC_RELEASE); }
+    if (t->entry != main_entry) drop_task_closure(&t->fn);
+    t->panic = m;
+    if (!t->forked) __atomic_store_n(&t->how, FLY_TASK_PANICKED, __ATOMIC_RELEASE);
     fly_cx_now()->pend = 0;
     return true;
   }
@@ -4241,7 +4234,7 @@ static bool mt_task_main(mt_task* t) {
 // A spawned task's panic no `wait` gave is told once nothing can ask for it: by whichever of its
 // end and its last `Task`'s drop comes second, only once.
 static void tell_panic(mt_task* t) {
-  if (__atomic_load_n(&t->how, __ATOMIC_ACQUIRE) == FLY_TASK_PANICKED && !__atomic_exchange_n(&t->told, true, __ATOMIC_ACQ_REL)) report_spawned_panic(t->message);
+  if (__atomic_load_n(&t->how, __ATOMIC_ACQUIRE) == FLY_TASK_PANICKED && !__atomic_exchange_n(&t->told, true, __ATOMIC_ACQ_REL)) report_spawned_panic(t->panic);
 }
 
 // Task `t` has ended: its outcome goes to its scope, its joiners wake, and the first failure or
@@ -4265,7 +4258,8 @@ static void mt_end(mt_task* t) {
   mt_task** cancels = NULL;
   size_t ncancels = 0;
   spin_lock(&sc->q.lock);
-  bool failed = t->error || t->panic;
+  // A spawned task's panic ends it alone (§5.7).
+  bool failed = t->error || (t->forked && t->panic);
   if (failed && !sc->failer) {
     cancels = fly_alloc((sc->nlive + 1) * sizeof(mt_task*));
     if (!sc->closing && sc->owner) {
@@ -4319,7 +4313,7 @@ static void run_task(worker* w, mt_task* t) {
     // A task cancelled before it began never runs.
     if (is_cancelled(t)) {
       running = NULL;
-      drop_task_closure(t->closure);
+      drop_task_closure(&t->fn);
       if (!t->forked) __atomic_store_n(&t->how, FLY_TASK_CANCELLED, __ATOMIC_RELEASE);
       mt_end(t);
       return;
@@ -4327,11 +4321,13 @@ static void run_task(worker* w, mt_task* t) {
   }
   // The task runs in its worker's context, on its worker's stack, with what is its own.
   fly_ctx* cx = &w->run_ctx;
-  *cx = (fly_ctx){ .frames = &t->frames, .panic = t->unwinding_panic, .destroying = t->destroying, .limit = stack_limit0 };
+  *cx = (fly_ctx){ .frames = &t->frames, .panic = t->panic, .destroying = t->destroying, .limit = stack_limit0 };
   fly_cur = cx;
   bool done = mt_task_main(t);
-  t->unwinding_panic = cx->panic;
-  t->destroying = cx->destroying;
+  if (!done) {
+    t->panic = cx->panic;
+    t->destroying = cx->destroying;
+  }
   // Stopped, the task holds only the frames it is in.
   if (!done) fly_frames_trim(&t->frames);
   fly_cur = w->idle_ctx;
@@ -4729,7 +4725,7 @@ static void mt_run(void (*main)(void**), void (*entry)(void* task, void* closure
   this_worker = &workers[0];
   mt_task* t = fly_alloc(sizeof(mt_task));
   t->entry = entry;
-  t->closure = (void*)main;
+  t->fn.fn = (void*)main;
   t->refs = 1;
   // Its panic, once the workers have stopped, ends the program.
   t->forked = true;
@@ -4760,8 +4756,7 @@ static mt_task* mt_start(int scope, void (*entry)(void* task, void* closure, voi
   mt_task* t = fly_alloc(sizeof(mt_task));
   t->entry = entry;
   t->fn = *f;
-  t->closure = &t->fn;
-  t->size = size;
+  t->size = (uint32_t)size;
   t->result = size ? fly_alloc(size) : NULL;
   t->scope = sc;
   t->forked = entry != fly_task_void;
@@ -4818,7 +4813,7 @@ static int32_t mt_task_wait(fly_wait* w, void* h, fly_String* message) {
   int32_t how = __atomic_load_n(&t->how, __ATOMIC_ACQUIRE);
   if (how == FLY_TASK_PANICKED) {
     __atomic_store_n(&t->told, true, __ATOMIC_RELEASE);
-    *message = fly_String_from(fly_str_lit(t->message, strlen(t->message)));
+    *message = fly_String_from(fly_str_lit(t->panic, strlen(t->panic)));
   }
   return how;
 }
@@ -5084,7 +5079,7 @@ void fly_unlock(const void* state) {
 }
 
 static void* mt_task_result(mt_task* t) { return t->result; }
-static void* mt_task_closure(mt_task* t) { return t->closure; }
+static void* mt_task_closure(mt_task* t) { return &t->fn; }
 
 void fly_par_join(void (*a)(void* f, void* out), void* fa, void* oa, void (*da)(void* out),
                   void (*b)(void* f, void* out), void* fb, void* ob, void (*db)(void* out)) {
