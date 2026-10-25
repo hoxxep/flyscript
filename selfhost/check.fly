@@ -1034,6 +1034,13 @@ impl Checker {
     if (const #Some(#None) = known) {
       const x = match (expected) { #Some(t) => self.show(t), #None => String.new() };
       self.err(span, `\`#${name}\` is not a tag of \`${x}\``.asStr());
+      // Said once: its payload is still checked, and it fits where it is, as an error does.
+      match (args) {
+        #None => {}
+        #Tuple(items) => { for (const it of items) { self.expr(it, #None); } }
+        #Record(fields) => { self.record(#None, fields, #None, span); }
+      }
+      return #Error;
     }
     const payloadExpected: Option<Ty> = match (known) { #Some(#Some(t)) => #Some(t), _ => #None };
     const resolved: Option<Ty> = match (payloadExpected) { #Some(t) => #Some(self.s.resolve(t)), #None => #None };

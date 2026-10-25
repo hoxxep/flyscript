@@ -1093,6 +1093,19 @@ impl<'p> Checker<'p> {
         if let Some(None) = known {
             let x = self.show(expected.expect("known"));
             self.err(span, format!("`#{name}` is not a tag of `{x}`"));
+            // Said once: its payload is still checked, and it fits where it is, as an error does.
+            match args {
+                TagArgs::None => {}
+                TagArgs::Tuple(items) => {
+                    for it in items {
+                        self.expr(it, None);
+                    }
+                }
+                TagArgs::Record(fields) => {
+                    self.record(None, fields, None, span);
+                }
+            }
+            return Ty::Error;
         }
         let payload_expected = known.flatten();
         let whole = match (args, payload_expected.as_ref().map(|t| self.s.resolve(t))) {

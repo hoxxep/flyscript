@@ -986,6 +986,13 @@ impl Program {
         let params = self.type_params(&imp.params, &scope);
         let inner = scope.with_params(&params);
         let target = self.elab_ty(&imp.target, &inner);
+        // A record, a union, a tuple, a slice or a primitive belongs to no module, so only the
+        // standard library gives it functions of its own; other code reaches it through interfaces
+        // (§3.4).
+        if imp.interface.is_none() && !self.modules[m].is_std && !matches!(target, Ty::Named(..) | Ty::Error) {
+            let shown = format!("{}", Show(&target, &*self));
+            self.error(m, imp.target.span, format!("`{shown}` belongs to no module, so only the standard library gives it functions of its own: declare a `struct` or an `enum` for them, or implement an interface for it"));
+        }
         let interface = imp.interface.as_ref().and_then(|t| match &t.kind {
             TypeKind::Path { segments, args } if segments.len() == 1 => match self.lookup(m, &segments[0].name) {
                 Some(Binding::Def(d)) if matches!(self.defs[d].kind, DefKind::Interface { .. }) => {

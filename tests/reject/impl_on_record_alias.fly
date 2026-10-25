@@ -1,0 +1,10 @@
+// error: `{ n: i32; }` belongs to no module, so only the standard library gives it functions of its own
+// A record belongs to no module, so a name for one is not a type an `impl` of its own may give
+// functions to (§3.4): its functions are a `struct`'s, or an interface's.
+type Counter = { n: i32 };
+
+impl Counter {
+  export function make(): Counter { { n: 0 } }
+}
+
+export function main(): void {}

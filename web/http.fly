@@ -8,7 +8,7 @@ export type Header = { name: String; value: String };
 
 // A request: its method, its path and query, its protocol's version, its headers, and its body, as
 // text.
-export type Request = { method: String; path: String; query: String; version: String; headers: Vec<Header>; body: String };
+export struct Request { method: String; path: String; query: String; version: String; headers: Vec<Header>; body: String; }
 
 export type HttpErr = #BadRequest | IoErr;
 
