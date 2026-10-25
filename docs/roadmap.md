@@ -1,6 +1,6 @@
 # Roadmap
 
-Flyscript compiled itself, to JavaScript and to C, when this roadmap was written. Its steps take it from a self-hosted language to a systems platform: one intermediate form under every back end, kernels, LLVM, WebAssembly, every core of the machine, and a web framework that shows what all of it buys. Steps 0 to 19 are done, and each says what was built. Steps 13 to 19 closed what remained between Flyscript and every language it is measured against ([what they were for](#what-steps-13-to-19-are-for)); steps 20 to 23 build the web stack on it ([what they are for](#what-steps-20-to-23-are-for)).
+Flyscript compiled itself, to JavaScript and to C, when this roadmap was written. Its steps take it from a self-hosted language to a systems platform: one intermediate form under every back end, kernels, LLVM, WebAssembly, every core of the machine, and a web framework that shows what all of it buys. Steps 0 to 19 are done, and each says what was built. Steps 13 to 19 closed what remained between Flyscript and every language it is measured against ([what they were for](#what-steps-13-to-19-are-for)); steps 20 to 23 build the web stack on it ([what they are for](#what-steps-20-to-23-are-for)); step 24 extends the proof from the first-order fragment to every program the compiler compiles.
 
 ## 0. One core IR under every back end
 
@@ -354,3 +354,21 @@ Query builders (Kysely, Drizzle, Prisma, Diesel) exist only because TypeScript a
   - the `$1, $2, …` placeholders determine the parameter tuple type, and the binary row decoder is specialized per column at `comptime` with zero runtime reflection or string building.
 
 **Done when:** `examples/todo` runs against Postgres through `flypg` using plain SQL strings, a mistyped column or wrong `$1` parameter type fails at compile time naming the column, a `LEFT JOIN` column is typed `Option<T>`, a `tx` rolls back on both `throw` and `panic`, and rows decode directly from the binary wire protocol into the inferred record type.
+
+## 24. Whole-program certification: every Flyscript program proved in Lean's kernel
+
+**Goal.** Close the last open question in §12.3: take the mechanized proof of λ-fly from certifying first-order test functions (`--core=f`, step 9) to certifying **any safe Flyscript program** — closures, handlers, continuations, generators, regions, tasks, channels, `Mutex`, atomics, arbitrary records and tag unions, and the self-hosted compiler itself — in Lean's kernel, with no `native_decide` and no axiom beyond Lean's standard ones.
+
+Today the soundness theorem in `proof/` (`program_ok_sched`, §9.5) already covers all of λ-fly, panics and every schedule included, while the executable checker (`proof/FlyCore/Check.lean`) and the compiler's translator (`selfhost/core.fly`) handle only the first-order fragment: integers, booleans, boxes, vectors, records of two fields, and failures of one integer, answering `none` for closures, handlers, regions, tasks and generators. Nothing in the metatheory is missing; only the bridge between `selfhost/ir.fly` and `Check.lean` stops short. Completing that bridge makes Flyscript the first systems language whose compiler emits a machine-checked memory-, borrow-, effect- and concurrency-safety certificate for the whole program it compiles.
+
+- **Arbitrary products, sums and strings lowered to λ-fly (`selfhost/core.fly`).** After specialization and `comptime` expansion (`selfhost/ir.fly`), every type is concrete. `core.fly` encodes an $N$-field record or struct as right-nested binary records `(f₁, (f₂, …, fₙ))`, an $N$-tag union or enum as right-nested binary tags `#Tag0(a) | #Tag1(#Tag0(b) | …)`, with field projections and `match` arms translated to chains of binary steps (which the arbitrary-depth field-borrow proof of 0.93 already covers), and `String` and `str` as `Vec<u8>` and `readonly u8[]` slices (proved in 0.92, 0.96 and 0.100). The Lean AST of λ-fly stays small; the encoding is in `core.fly`.
+- **`Check.lean` extended to all of λ-fly (`proof/FlyCore/Check.lean`).** `infer` and its soundness theorem `infer_sound` are extended from the first-order fragment to every remaining constructor already proved in `proof/`:
+  - closures (shared, `mut` and `once`, owning captures and borrowing places, 0.75–0.78);
+  - `handle` and `perform` (abortive arms, resumptive arms, arms that resume in their midst, handlers with `mut` state, and continuations kept as values, 0.71–0.73, 0.85–0.86, 0.98, 0.104–0.106);
+  - `generate` and `next` (generators lent `readonly` and whole bindings `mut`, 0.94, 0.99);
+  - `region`, `alloc`, `Cell` and `RegionList` (0.88–0.91, 0.97);
+  - `scope`, `spawn` and `fork`, with channels, `Mutex` (poisoning included) and `Atomic` as their handlers, and `panic` (0.87, 0.101–0.103, 0.107, 0.118–0.121).
+  Where a typing rule needs a witness that is not syntax-directed — the loans a returned borrow carries, the ownership state at a loop header, or the frame type of a kept continuation — `selfhost/core.fly` writes the witness it already computed into the emitted λ-fly term, and `Check.lean` checks the witness rather than searching for it.
+- **`fly check --certify`.** Emits the whole program (from `main` or a library's exported roots) as a `.lean` module and checks `theorem certified : ProgramOk prog := by rfl` in Lean's kernel. Any `unsafe` block or `extern "C"` call is represented at its boundary signature: the function wrapping it is axiomatized at its declared type, borrow contract and effects, so the certificate states explicitly which `unsafe` boundaries the proof trusts and proves every line of safe code above them.
+
+**Done when:** `Check.lean` has no `none` stubs left for any construct of λ-fly, every test program in `tests/run/` and all eleven appendix programs of `docs/spec.md` pass `fly check --certify` in Lean's kernel, and `selfhost/` certifies its own safe modules.
