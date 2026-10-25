@@ -6,6 +6,8 @@ This proposes what Rust has for that: functions marked `@test`, beside the code 
 
 The examples use today's imports, `import { x } from "m"`. The dotted form being designed separately changes nothing here but spelling: `@only(test) import std.test.{ assertEq };`, and a test's name is its module's dotted path (below), which is the same path that form imports it by.
 
+Attributes in general, and the conditions `@only` takes, are the attribute proposal's: `docs/proposals/attributes.md`, §1.3 for the grammar and §1.9 for conditional compilation (commit e05577f, on the branch `claude/attribute-design-8601e7`). Its `@only(c)` takes a boolean expression over the build's facts — `test`, `native`, `freestanding`, `wasm`, `page`, `js`, `os`, `arch`, `pointerWidth` — and `@only(test)` is the case tests need. This proposal uses that design as it stands and adds `@test` to it.
+
 ## What it looks like
 
 ```ts
@@ -69,9 +71,9 @@ ok   tests/hello
 
 ## The design in brief
 
-1. **`@name(…)` is an attribute**, a syntax `@layout(c)` already has; the grammar makes it one rule, for any declaration, with arguments that are names or `name = e`, `e` evaluated at compile time. An attribute the compiler does not know is an error.
-2. **`@only(test)`** before a declaration, an import, or a braced group of them, keeps them out of every build but a test build. A group is not a scope: what it declares is the module's. Code outside `@only(test)` may not name what is inside it, in any build, so a build without tests cannot break where a test build does not.
-3. **`@test`** before a module's function makes it a test, and implies `@only(test)`. A test takes nothing, returns `void`, and performs at most `Io` and failures — what a task may perform (§6.1) — because each runs as a task.
+1. **Attributes are the attribute proposal's** (its §1.3): `@name(…)` before `export`, an argument a flag or `name = e` with `e` evaluated at compile time, and an attribute that is not declared an error. `@test` is one more of the compiler's attributes.
+2. **`@only(test)`** keeps a declaration, an import, an impl's method, or a braced group of them, to a test build; `@!only(test)` at the top of a file keeps the whole module, a module of fixtures. It is the attribute proposal's `@only(c)` (its §1.9) with the condition `test`, and conditions combine: `@only(test && !wasm)`. A group is not a scope: what it declares is the module's. Code may name what is gated only under a condition that implies the gate, and that is checked across every build, so a build without tests cannot break where a test build does not.
+3. **`@test`** before a module's function makes it a test, and implies `test`: `@test @only(native)` is a test that only native builds have. A test takes nothing, returns `void`, and performs at most `Io` and failures — what a task may perform (§6.1) — because each runs as a task.
 4. **The compiler finds the tests**, when it parses. A test build compiles every module of the package with its test-only code, and an entry module the compiler makes, which names every test, private or not, and gives them to `std/test`'s runner. Nothing searches text.
 5. **One program, linked once**: `target/tests/unit`. It runs each test as a task spawned in one scope, so tests run on every core, a panic ends its test alone (§5.7), and what a test prints is kept with it and shown if it fails.
 6. **A test against a simulated world** (`@test(world = W)`) runs in a run of that same program of its own, `FLY_WORLD` set to `W` and its seed; `seeds = n` runs it under `n` seeds. The program is linked once and run once per world.
@@ -82,7 +84,7 @@ The rest of this section is why, and what else was weighed. The proposed text fo
 
 ## How tests are found
 
-**By the compiler, as it parses.** An attribute is syntax, so `@test` and `@only(test)` are known before a name is resolved or a type is checked. The compiler parses every module of the package — each `.fly` file under its directory but `tests/` and `target/`, which is what `fly build` already checks for a library — drops what is `@only(test)` from every build but a test build, and in a test build collects each `@test` with its module's path and its attribute's arguments. It then makes the entry module, `main` included, and compiles the whole as one program. A test's name is its module's path within the package, `/` written `.` and `.fly` left off, then the function's name: `lexer/token.fly`'s `numbers` is `lexer.token.numbers`.
+**By the compiler, as it parses.** An attribute is syntax, so `@test` and `@only(…)` are known before a name is resolved or a type is checked. The compiler parses every module of the package — each `.fly` file under its directory but `tests/` and `target/`, which is what `fly build` already checks for a library — drops what is under a condition the build does not meet, `test` false in every build but a test build, and in a test build collects each `@test` with its module's path and its attribute's arguments. It then makes the entry module, `main` included, and compiles the whole as one program. A test's name is its module's path within the package, `/` written `.` and `.fly` left off, then the function's name: `lexer/token.fly`'s `numbers` is `lexer.token.numbers`.
 
 The entry module is the one module that may name another's private functions, as a derivation a struct asked for may build its private fields (§7.3): no hand-written module can, and the privacy rules are otherwise unchanged. It is as if it were written:
 
@@ -108,15 +110,15 @@ What was weighed against it:
 
 A dependency is compiled as in every other build: its tests and its test-only code are not in the package's test build. `fly test` tests the package at hand.
 
-## Test-only code: an attribute, not `comptime if`
+## Test-only code: `@only(test)`
 
-`comptime if` already chooses code, and a module-level `comptime if (Build.test) { … }` would seem to be the way law 5 wants. It is rejected because it would choose imports. The import graph is known before `comptime` runs — `comptime` code calls what the module imports, and modules compile in parallel in the order of their imports (§8.1) — so an import that `comptime` code decides would make the graph depend on what it decides. An attribute is syntax: what it keeps out is out before any module's names are resolved, and the graph of a test build and of every other build are each known from the text.
+Test-only code is the attribute proposal's conditional compilation (its §1.9) with the condition `test`, and everything a test needs of it, that design gives:
 
-`@only` takes one condition, `test`. It is written to take others — `@only(native)` for a module's `extern "C"` code, `@only(wasm)` — which this proposal leaves to their own (below).
-
-**Checked in a test build; known in every build.** What is `@only(test)` is parsed in every build, so it is always well formed and its names are known, and it is checked — its names resolved, its types and effects and ownership — only in a test build. Code outside it may not name what is inside, and that is the error it is in every build: `` `sample` exists only in test builds ``, not `unknown name` in one build and nothing in another.
-
-**What a test build adds to the package's face, it adds only for tests.** An `export` inside `@only(test)` is a module's export to the package's other test-only code — a module of fixtures, say — and to no one else: it is not in what a dependent sees, and the lockfile does not list its effects.
+- **An attribute, not `comptime if`.** `comptime if` already chooses code, and a module-level `comptime if (build.test) { … }` would seem to be the way law 5 wants. It is rejected because it would choose imports. The import graph is known before `comptime` runs — `comptime` code calls what the module imports, and modules compile in parallel in the order of their imports (§8.1) — so an import that `comptime` code decides would make the graph depend on what it decides. A condition reads only the build's facts, never a module, so the loader evaluates every one and drops what does not hold before it builds the graph. `comptime if (build.test)` still chooses code inside a body, where an attribute cannot go.
+- **Parsed in every build; checked where it holds.** What is `@only(test)` is always well formed and its names are known, and it is checked — its names resolved, its types and effects and ownership — only in a test build.
+- **A reference needs the gate's condition or a stronger one.** Code under condition A may name what is under B only if A implies B, which the compiler decides by evaluating both in every build it can make. So the error is the same in every build: `` `sample` exists only in builds where `test`; this code is also in builds where it does not hold ``, not `unknown name` in one build and nothing in another.
+- **Conditions accumulate.** A test in an `@only(test && native)` group, or `@test @only(native)`, is a test only native builds have; `fly test --target wasm` leaves it out, and says how many it left out.
+- **A test-only export is the tests' alone.** An `export` under `test` is a module's export to the package's other test-only code — a module of fixtures, `@!only(test)` — and to no one else: a dependency is never built as a test, so it is never in what a dependent sees, and the lockfile does not list its effects.
 
 ## A test is a task
 
@@ -177,8 +179,10 @@ The runner says as each test starts and as it ends. A run that ends before it ha
 - **Native.** The program through LLVM if it is there, else through C, as `fly build` makes one, to `target/tests/unit`. Its tasks run on every core. A world's run is the same executable, with `FLY_WORLD` set.
 - **JavaScript.** The program compiled to JavaScript and run by Node with the runtime the compiler's own JavaScript build uses. The runtime is one thread: tests run as tasks that interleave where they wait, and pure tests one after another. `fly test` runs one run per core, each given a share of the tests (`--shard i/n`, every `n`th test from the `i`th), for the cores. A stack that runs out is a panic, as it is natively (the runtime makes Node's `RangeError` one), so it ends its test alone.
 - **WebAssembly.** The program compiled for WASI and run by `selfhost/wasm.js`, in shards as for JavaScript, since there are no threads (§8.3). A world's run is another instance of the module compiled once, in the same Node, its environment given `FLY_WORLD`: an instance is cheap, and the module is compiled once. A trap ends the instance, and is reported as a test that ended the program.
-- **Freestanding.** A freestanding program has no `main`, no `Io` and no unwinding: its panic goes to `fly_os_panic` (§8.3). Its tests are built for the machine `fly` runs on instead, with the hosted runtime, which the same code compiles for unchanged; code that needs the hardware, an `extern "C"` that only the firmware links, is what `@only(…)` with a target's condition will keep out.
-- **A site.** The tests of an app's modules run natively. A module that declares the page's host functions (`extern "C"`, which `web/flynext.js` gives a page) cannot be linked natively, and its tests are left to the open questions below.
+- **Freestanding.** A freestanding program has no `main`, no `Io` and no unwinding: its panic goes to `fly_os_panic` (§8.3). Its tests are built for the machine `fly` runs on instead, with the hosted runtime, which the same code compiles for unchanged. Code that needs the hardware — an `extern "C"` that only the firmware links — is `@only(freestanding)`, so the host's test build leaves it out, and the tests of what is left run there.
+- **A site.** The tests of an app's modules run natively. A module that declares the page's host functions (`extern "C"`, which `web/flynext.js` gives a page) is `@!only(page)`, so a native test build leaves it out, and its tests with it; how to test it is left to the open questions below.
+
+A build for a target has the tests that target's facts allow: `@test @only(native)` is in `target/tests/unit` and not in the WebAssembly build, and `fly test` counts what a target left out (`3 tests not on wasm`), so a test that never runs anywhere it is asked to is seen.
 
 ## Whole-program tests stay
 
@@ -193,8 +197,8 @@ A file in `tests/` with no `main` is a **module of tests**: its `@test`s join th
 
 For the reviewer's sense of size, not as a plan to follow:
 
-- **Parsing** (`selfhost/parse.fly`, and the reference implementation's `src/syntax/parser.rs`): `layout()` becomes `attrs()`, every item carries its attributes, and `@only(…) { … }` is an item that holds items.
-- **Loading** (the compiler's module loader, both implementations): a `--test` mode, given the package's modules; it drops `@only(test)` items otherwise, checks that no other code names them, collects the tests, and makes the entry module.
+- **Attributes and `@only`** are the attribute proposal's to build (its §1.3 and §1.9): parsing every attribute, groups, evaluating conditions before the import graph, and the check that a reference's condition implies its gate. Tests need only `test` among its facts.
+- **Loading** (the compiler's module loader, both implementations): a `--test` mode, given the package's modules, which makes `test` hold, collects the tests, and makes the entry module.
 - **`std/test`**: `assert`, `assertEq`, `assertNe`, `World`, `withTempDir`, `Case` and `runTests`, in Flyscript.
 - **The runtimes** (`selfhost/runtime.c`, `runtime.js`, and the WebAssembly host): a place each task's output goes, inherited, and a panic a task reports counted against the place.
 - **`fly test`** (`selfhost/fly.fly`): build the program once, ask it for its tests (`--list`), run it and the worlds' runs, read what each says, run again after a run that ended early, and the programs in `tests/` as now, with their headers.
@@ -205,16 +209,15 @@ It is a roadmap step of its own, after the import change, whose module paths it 
 
 1. **Where a panic was.** A panic's message says what, not where; `assertEq(a, b)`'s panic is in `std/test`. Rust's answer is `#[track_caller]`; Flyscript's could be an attribute, `@caller`, by which a function's panics say its caller's line. Until then the report names the test, and `assertEq` takes an optional label.
 2. **A world in the program**, as above, so a world test needs no run of its own and `seeds = 1000` costs a thousand tasks, not a thousand processes.
-3. **`@only` for targets**, `@only(native)`, `@only(wasm)`, `@only(page)`: the same rule for the same reason, and what would let a freestanding package's and a page's test-only code say where it runs.
-4. **Tests of a page's modules**, which need the page's host: a host for tests that answers the DOM's functions in memory, as `std/world` answers a database.
-5. **Compile-time tests.** A module-level `comptime assert` is already a test the compiler runs. A `@test` on a `comptime function`, run in every test build by the compiler's interpreter, would test the code that derivations are made of.
-6. **Benchmarks.** `@bench`, in the same program, timed by the runner: the same finding, the same table, a different runner.
+3. **Tests of a page's modules**, which need the page's host: a host for tests that answers the DOM's functions in memory, as `std/world` answers a database.
+4. **Compile-time tests.** A module-level `comptime assert` is already a test the compiler runs. A `@test` on a `comptime function`, run in every test build by the compiler's interpreter, would test the code that derivations are made of.
+5. **Benchmarks.** `@bench`, in the same program, timed by the runner: the same finding, the same table, a different runner.
 
 ---
 
 # Proposed text
 
-What follows is written to drop into the documents as they are. Each part says where it goes.
+What follows is written to drop into the documents as they are. Each part says where it goes. It assumes the attribute proposal's text has gone into the spec first: its grammar of attributes in §2.3, and its conditional compilation in a section of its own, written §C below until it has a number.
 
 ## `docs/spec.md`
 
@@ -222,32 +225,11 @@ What follows is written to drop into the documents as they are. Each part says w
 
 Version 0.137; at the head of §0.1's list:
 
-> - **Tests beside the code** (0.137): a function marked `@test` is a test, which may reach its module's private items; `@only(test)` keeps a declaration, an import or a group of them to test builds; and a test build compiles every test of a package into one program, each test a task of it, so a panic ends its test alone and tests run on every core. A test given a simulated world runs against it alone (§2.3, §6.4, §8.4).
+> - **Tests beside the code** (0.137): a function marked `@test` is a test, which may reach its module's private items; `@only(test)` keeps a declaration, an import or a group of them to test builds; and a test build compiles every test of a package into one program, each test a task of it, so a panic ends its test alone and tests run on every core. A test given a simulated world runs against it alone (§6.4, §8.4, §C).
 
-### §2.3 Grammar
+### §2.3 Grammar, §3.3
 
-`Module` and `Decl` take attributes; `Layout` becomes one:
-
-```ebnf
-Module      = { Item } ;
-Item        = { Attr } ( Import | Reexport | ["export"] Decl ) | Attr "{" { Item } "}" ;
-Attr        = "@" Ident [ "(" [ AttrArg { "," AttrArg } [ "," ] ] ")" ] ;
-AttrArg     = Ident [ "=" Expr ] ;                  (* the expression evaluated at comptime *)
-
-Struct      = [ "view" ] "struct" Ident [ TypeParams ] "{" … "}" ;   (* @layout is an attribute *)
-Impl        = "impl" [ TypeParams ] Type [ "for" Type ] "{" { { Attr } ["export"] Function | "type" Ident "=" Type ";" } "}"
-            | "impl" Type "for" Type ";" ;
-```
-
-Attributes come before `export`: `@layout(c) export struct Pair`. Today's grammar puts `@layout` after it, inside `Struct`; nothing in the repository exports a struct it lays out, so the order can change now.
-
-And after the rules of the grammar's ambiguities, one more paragraph:
-
-> **Attributes.** `@name(…)` before a declaration says something of it to the compiler: `@layout(c)` how a struct is laid out (§8.2), `@test` and `@only(test)` which builds have it (§8.4). An argument is a name, or `name = e` with `e` evaluated at compile time. An attribute names one of these, and anything else is an error: `@tset` is a mistake, not nothing. Before `{` at a module's top level, an attribute applies to every item in the braces, which are not a scope: what they declare is the module's.
-
-### §3.3, the sentence on `@layout`
-
-> … may carry the attribute `@layout(c)` or `@layout(packed)` (§2.3), …
+Nothing more than the attribute proposal's: its grammar has `@test`'s arguments (`name = e`, flags), its groups, and attributes before `export`, and it rewrites §3.3's sentence on `@layout`.
 
 ### §6.4, after the header lines
 
@@ -268,7 +250,7 @@ And after the rules of the grammar's ambiguities, one more paragraph:
 > @test(panics = "overflow") function digitsPastU32(): void { const _ = Fail.capture(() => digits("99999999999")); }
 > ```
 >
-> **Test-only code.** `@only(test)` before a declaration, an import, or braces of them, keeps them to a *test build* of their package; `@test` implies it. What it keeps is parsed in every build and checked only in a test build, and code that is not test-only may not name it, in any build. An export that is test-only is the package's test-only code's alone. A test build of a package leaves out its dependencies' tests and test-only code, which are built as in any other build. It is an attribute rather than a `comptime if` because it may keep an import, and the graph of a build's imports is known before its `comptime` code runs (§8.1).
+> **Test-only code.** In a *test build* of a package the fact `test` holds (§C), so `@only(test)` keeps a declaration, an import or a group of them to test builds, and `@!only(test)` a module. `@test` implies `test`: `@test @only(native)` is a test only native builds have. A dependency is never built as a test, so a test build of a package leaves out its dependencies' tests and test-only code, and a test-only export is the package's test-only code's alone.
 >
 > **One program.** A test build compiles every module of the package and an entry module the compiler makes, the one module that may name another's private functions, which gives every test to `std/test`'s runner. A test's name is its module's path in the package, its separators `.` and its `.fly` left off, and the function's: `lexer/token.fly`'s `numbers` is `lexer.token.numbers`. The runner spawns each test in one scope, so tests run at once, on every core, and a pure test, which can observe nothing (law 2), cannot be changed by another. A test:
 >
@@ -287,10 +269,12 @@ And after the rules of the grammar's ambiguities, one more paragraph:
 
 > A test build's program runs the same way; with no threads, its tests run as tasks on one, and a trap ends the instance with the test that caused it (§8.4).
 
-### §12.2 Rejected alternatives, three more
+### §12.2 Rejected alternatives, two more
+
+(Gating by `comptime if` is the attribute proposal's to reject, with §C.)
+
 
 > - **Tests found by the build tool**, reading the files for them: it would have to parse Flyscript to find them, and could call only what a module exports, so tests would be part of a package's face. The compiler finds them as it parses (§8.4).
-> - **Test-only code chosen by `comptime if`**: it would choose imports, and the graph of imports is known before `comptime` runs. An attribute is syntax (§8.4).
 > - **A program for each test**: a link each, and a test of a private function impossible. A test of a whole program is still one (`tests/`, [fly.md](fly.md)); a test of a function is a task of one program.
 
 ## `docs/fly.md`
@@ -315,7 +299,7 @@ quickcheck = { git = "https://github.com/example/fly-quickcheck", version = "0.4
 
 and a sentence after the paragraph on dependencies:
 
-> A test dependency is a dependency only of the package's tests: its modules may be imported only by test-only code (`@only(test)`, spec §8.4) and by the programs in `tests/`. It is locked, and held to its lock, as any other, and a dependent of the package does not have it.
+> A test dependency is a dependency only of the package's tests: its modules may be imported only by code under `test` (`@only(test)`, spec §8.4 and §C) and by the programs in `tests/`. It is locked, and held to its lock, as any other, and a dependent of the package does not have it.
 
 ### The lockfile, in the item on effects
 
@@ -361,7 +345,7 @@ and a sentence after the paragraph on dependencies:
 > - `--seed n` runs each test that has a world under seed `n`, and `--seeds n` under `n` seeds.
 > - `--show-output` shows what every test printed, not only a failing one's.
 > - `--timeout s` stops a test that has run for `s` seconds and reports it; a test runs as long as it takes unless it says so, though one running a minute is said to be slow.
-> - `--target js` and `--target wasm` build the program for JavaScript or WebAssembly instead and run it under Node, as many runs as cores, each with a share of the tests, since each runs on one thread.
+> - `--target js` and `--target wasm` build the program for JavaScript or WebAssembly instead and run it under Node, as many runs as cores, each with a share of the tests, since each runs on one thread. A test under a condition the target does not meet, `@test @only(native)`, is not in that build, and `fly test` says how many were left out.
 >
 > A test that ends the program — a deadlock, `exit`, a panic in cleanup a panic is running — is reported as having ended it, and `fly test` runs the tests that had not finished again. `fly test` ends with a failure status if any test failed.
 
