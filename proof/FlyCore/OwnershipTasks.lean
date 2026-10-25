@@ -13,6 +13,25 @@ namespace FlyCore.Ownership
 
 /-! ## A task's body, started -/
 
+/-- A spawned task's root: a panic reaching it ends the task, which dropped what it owned as it
+unwound, and its scope goes on (§5.7); anything else passes. -/
+theorem ret_spawnK (hp : Post F ι O σ0 Ein S Γ env .int r hs res) :
+    Post F ι O σ0 Ein S Γ env .int r hs (ret F O n hs .spawnK res) := by
+  rcases res with ⟨res, σ1⟩
+  cases res with
+  | val v => simp only [ret]; exact hp
+  | abort j k =>
+    cases j with
+    | zero =>
+      simp only [ret]
+      obtain ⟨-, E₁, hI₁, hm₁⟩ := hp
+      exact ⟨E₁, [], hI₁, .int, disj_nil_left, disj_nil_left, hm₁⟩
+    | succ j => simp only [ret]; exact hp
+  | susp j ef vs ls K => simp only [ret]; exact post_frame hp .spawnK
+  | stuck => simp [Post] at hp
+  | timeout => simp [ret, Post]
+  | ended => simp [ret, Post]
+
 /-- A task first given its turn runs its body. -/
 theorem ret_startK [WorldOk F O ι.w] (hE : EvalOk F O n) (hb : Typed F O Γ b τ Γ' r) (hR : Ready O hs r) (hwf : WF σ0)
     (hp : Post F ι O σ0 Ein S Γ env .int r hs res) :

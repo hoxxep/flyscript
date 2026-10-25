@@ -239,12 +239,21 @@ theorem rename_env : ∀ {ns : List Var} {cz : List (Cap Nat)},
   | _ :: _, [] => rfl
   | _ :: ns, _ :: cz => by simp [List.zipWith_cons_cons, rename_env (ns := ns) (cz := cz)]
 
+/-- A spawned task's root, which takes its panic up (§5.7), over the frames of its call. -/
+theorem FramesOk.spawnRoot (sp : Bool) (h : FramesOk F O ι σ K op ⟨Γ, env, .int, S, r⟩ X [] []) :
+    FramesOk F O ι σ ((if sp then [.spawnK] else []) ++ K) op ⟨Γ, env, .int, S, r⟩ X [] [] := by
+  cases sp
+  · simpa using h
+  · have := FramesOk.cons (f := .spawnK) (σf := σ) (A := []) .spawnK (Weaker.refl _) Agree.self
+      (fun _ h => by simp at h) List.nodup_nil disj_nil_left h (fun _ h => by simp at h) (fun _ h => by simp at h)
+    simpa using this
+
 /-- A closure called once, started as a task: what it captured moved to a parameter of its code,
 the task waits to be called with `0`, lent the scope's places; its cells the closure's, those it
 captured moved. -/
-theorem mkTask_ok (hF : FnsOk F O) (hS : ScOk O e eS op opS rT R r τ) (hcz : ScCaps F ι σ cz R S Rc)
+theorem mkTask_ok (sp : Bool) (hF : FnsOk F O) (hS : ScOk O e eS op opS rT R r τ) (hcz : ScCaps F ι σ cz R S Rc)
     (hv : VT F ι σ (.fn .once .int .int rT R) w L) (hwf : WF σ) (hdLS : Disj L S) :
-    ∃ Kt σ' X Γt envt, mkTask F cz σ w = some (Kt, σ') ∧
+    ∃ Kt σ' X Γt envt, mkTask F cz σ sp w = some (Kt, σ') ∧
       FramesOk F O ι σ' Kt op ⟨Γt, envt, .int, Rc, .eff e :: .eff eS :: r⟩ X [] [] ∧ RoCtx Γt ∧
         Moves σ L σ' X [] := by
   cases hv with
@@ -275,7 +284,7 @@ theorem mkTask_ok (hF : FnsOk F O) (hS : ScOk O e eS op opS rT R r τ) (hcz : Sc
     allocAll_ok (names := [pn, xc]) hvs (by simp) hwf1 (by simpa using hvw.nodup)
   have hcells := allocAll_fst (σ.set c none) ([pn, xc].zip [.int 0, w'])
   have hrt := allocAll_rt (σ.set c none) ([pn, xc].zip [.int 0, w'])
-  have hmk : mkTask F cz σ (.clo f c τc) = some ([.callK (((cloFn d xc τc .once).owns.map Prod.snd).zip
+  have hmk : mkTask F cz σ sp (.clo f c τc) = some ((if sp then [.spawnK] else []) ++ [.callK (((cloFn d xc τc .once).owns.map Prod.snd).zip
       ((allocAll (σ.set c none) ([pn, xc].zip [.int 0, w'])).1.map Prod.snd)),
       .startK ((allocAll (σ.set c none) ([pn, xc].zip [.int 0, w'])).1 ++
         ((cloFn d xc τc .once).refs.map Prod.fst).zip (cz.map Cap.loc)) (cloFn d xc τc .once).body],
@@ -322,7 +331,7 @@ theorem mkTask_ok (hF : FnsOk F O) (hS : ScOk O e eS op opS rT R r τ) (hcz : Sc
     (by simpa [cloFn] using hbody) (fun l hl => by simpa using hS.hrT l (by simpa [cloFn, hrow] using hl))
     (by rw [hcells, hown']; rfl) hS.hop hS.hrefs hS.hret (by simpa [cloFn, hrow] using hS.heT) hIp
   rw [show (cloFn d xc τc .once).ret = .int by simp [cloFn, hret]] at hKp
-  refine ⟨_, σ2, Eo, _, _, hmk, hKp, refCtx_ro fun x hx => ?_, ?_⟩
+  refine ⟨_, σ2, Eo, _, _, hmk, FramesOk.spawnRoot sp hKp, refCtx_ro fun x hx => ?_, ?_⟩
   · have : x.2 ∈ d.refs.map Prod.snd := List.mem_map.mpr ⟨x, by simpa [cloFn] using hx, rfl⟩
     rw [hrefs2] at this
     obtain ⟨c', -, hc'⟩ := List.mem_map.mp this
@@ -765,7 +774,7 @@ theorem ret_scB [WorldOk F O ι.w] (hF : FnsOk F O) (hKo : ∀ m, n = m + 1 → 
       cases hrest
       rename_i w Lw
       simp only [List.flatten_cons, List.flatten_nil, List.append_nil] at hm hdLX hdLS hLn
-      obtain ⟨Kt, σ2, Xt, Γk, envk, hmk, hKt, hroT, hmt⟩ := mkTask_ok hF hS (hcz.transfer (agree_S hag1)) hv hwf1 hdLS
+      obtain ⟨Kt, σ2, Xt, Γk, envk, hmk, hKt, hroT, hmt⟩ := mkTask_ok ((O[ef]?.map Op.spawns).getD false) hF hS (hcz.transfer (agree_S hag1)) hv hwf1 hdLS
       obtain ⟨-, -, -, -, -, -, -, -, -, -, -, hXtn, -⟩ := hKt.base_of
       have : ret F O (m + 1) hs (.scB e ef j τ cz Q) (.susp j ef [w] ls K, σ1) =
           ret F O m hs (.scB e ef j τ cz (Q ++ [Kt])) (evalK F O m (.capture e j :: .capture ef j :: hs) σ2 K (.val (.int 0))) := by
@@ -1133,7 +1142,7 @@ theorem ret_scW [WorldOk F O ι.w] (hF : FnsOk F O) (hKo : ∀ m, n = m + 1 → 
       rename_i w Lw
       simp only [List.flatten_cons, List.flatten_nil, List.append_nil] at hm hdLX hdLS hLn hdXL'
       obtain ⟨Kt, σ2, Xt, Γk, envk, hmk, hKt, hroT, hmt⟩ :=
-        mkTask_ok hF hS (hcz.transfer (agree_S hag1)) hv hwf1 fun l h1 h2 => hdXL' l (by simp [h2]) h1
+        mkTask_ok ((O[ef]?.map Op.spawns).getD false) hF hS (hcz.transfer (agree_S hag1)) hv hwf1 fun l h1 h2 => hdXL' l (by simp [h2]) h1
       obtain ⟨-, -, -, -, -, -, -, -, -, -, -, hXtn, -⟩ := hKt.base_of
       have : ret F O (m + 1) hs (.scW e ef j τ cz Kb Q) (.susp j ef [w] ls K, σ1) =
           ret F O m hs (.scW e ef j τ cz Kb (Q ++ [Kt]))
@@ -1486,7 +1495,7 @@ theorem ret_scV [WorldOk F O ι.w] (hfl : FlushOk F ι (flushR F O n)) (hF : Fns
       rename_i w Lw
       simp only [List.flatten_cons, List.flatten_nil, List.append_nil] at hm hdLX hdLS' hLn hdXL'
       obtain ⟨Kt, σ2, Xt, Γk, envk, hmk, hKt, hroT, hmt⟩ :=
-        mkTask_ok hF hS (hcz.transfer (agree_S hag1)) hw hwf1 fun l h1 h2 => hdXL' l (by simp [h2]) h1
+        mkTask_ok ((O[ef]?.map Op.spawns).getD false) hF hS (hcz.transfer (agree_S hag1)) hw hwf1 fun l h1 h2 => hdXL' l (by simp [h2]) h1
       obtain ⟨-, -, -, -, -, -, -, -, -, -, -, hXtn, -⟩ := hKt.base_of
       have : ret F O (m + 1) hs (.scV e ef j τ cz v Q) (.susp j ef [w] ls K, σ1) =
           ret F O m hs (.scV e ef j τ cz v (Q ++ [Kt]))

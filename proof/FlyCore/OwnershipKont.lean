@@ -281,6 +281,8 @@ are the frame's own. -/
       FrameOk F O ι ι σf (.postR C f v env cps) ⟨Γ, env, τ, S, r⟩ ⟨Γ, env, τ, S, r⟩ Lv []
   /-- A task's body, run once the task is first given its turn. -/
   | startK : Typed F O Γ b τ Γ' r → FrameOk F O ι ι σf (.startK env b) ⟨Γ, env, .int, S, r⟩ ⟨Γ', env, τ, S, r⟩ [] []
+  /-- A spawned task's root, which a panic of the task ends at (§5.7). -/
+  | spawnK : FrameOk F O ι ι σf .spawnK ⟨Γ, env, .int, S, r⟩ ⟨Γ, env, .int, S, r⟩ [] []
   /-- A task's call: as its body ends, the parameters it owns are dropped, leaving those it was lent,
   `readonly`. -/
   | taskK : (∀ l ∈ d.row, l ∈ r) →
@@ -484,6 +486,7 @@ theorem FrameOk.mono : FrameOk F O ιi ιo σf f inL outL Xf A → ιo.w.le W �
   | .armK h1 h2 h3 h4 h5 h6, hW => .armK (h1.mono hW) h2 (h3.mono hW) h4 h5 h6
   | .postR h1 h2, hW => .postR h1 (h2.mono hW)
   | .startK h1, _ => .startK h1
+  | .spawnK, _ => .spawnK
   | .taskK h1 h2 h3 h4 h5, _ => .taskK h1 h2 h3 h4 h5
   | .parS h1 h2 h3 h4 h5 h6, hW => .parS (h1.mono hW) h2 h3 h4 h5 (h6.mono hW)
   | .parD h1 h2 h3 h4, hW => .parD (h1.mono hW) h2 h3 (h4.mono hW)

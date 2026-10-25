@@ -719,6 +719,7 @@ theorem ret_ok (hF : FnsOk F O) (hE : EvalOk F O n) (hKs : ∀ m, m < n → Eval
   | capK hH hP hcaps => exact ret_capK (hfl _) hE hKo hH hP hcaps hR hwf hag halloc hnd hd hSa hSd hp
   | armK hH hP hK hro harm hcells => exact ret_armK (hfl _) hKo hH hP hK hro harm hcells hR hA hwf hag halloc hnd hd hSa hSd hp
   | startK hb => simpa using ret_startK hE hb hR hwf (by simpa [Kont.push] using hp)
+  | spawnK => exact ret_spawnK hp
   | taskK hrow hkeys hoc hbody hcells =>
     simpa using ret_taskK (hfl _) hrow hkeys hoc hbody hcells hR hwf (by simpa [Kont.push] using hp)
   | parS hP hroR hroO hSr hSo hK => exact ret_parS (hfl _) hKo hP hroR hroO hSr hSo hK hR hA hwf hag halloc hnd hd hSa hSd hp

@@ -2308,6 +2308,37 @@ example (s p : Nat → Bool) : ∀ n, match eval [tk] scOps n [.abort .fail 0] (
     | (.abort _ _, σ') => ∀ l, σ'.mem l = none :=
   program_ok_sched tk_ok scopeEx_typed s p
 
+/-- `(_) => { yield; 1 / 0 }`, a closure that captured a box `b` and panics once it goes on. -/
+def divTk : Fn :=
+  { owns := [("p", .int)], refs := [], ret := .int, row := [.eff 0], cap := some ("b", .box .int, .once),
+    body := .let_ "u" .int (.perform 0 [] []) (.arith .div (.lit 1) (.lit 0)) }
+/-- `spawn`: a task it starts that panics ends alone (§5.7). -/
+def scSpawnP : Op := { owns := [.fn .once .int .int [.eff 0] .nil], refs := [], ret := .int, spawns := true }
+def spOps : List Op := [scYield, scSpawnP]
+
+/-- `scope((s) => { const b = Box.new(5); s.spawn(() => { yield; 1 / 0 }); const c = Box.new(7);
+s.spawn(() => …c…); yield; yield; 42 })`: a spawned task panics, which ends it alone, its box dropped
+as it unwinds; the other task and the body go on. 42, and nothing left allocated, whichever way
+they interleave. -/
+def spawnPanic : Expr :=
+  .scope 0 1 [] .int
+    (.let_ "b" (.box .int) (.new (.lit 5))
+      (.let_ "k" (.fn .once .int .int [.eff 0] .nil) (.lam 0 (.move "b"))
+        (.let_ "u" .int (.perform 1 [.move "k"] [])
+          (.let_ "c" (.box .int) (.new (.lit 7))
+            (.let_ "k2" (.fn .once .int .int [.eff 0] .nil) (.lam 1 (.move "c"))
+              (.let_ "u2" .int (.perform 1 [.move "k2"] [])
+                (.let_ "y" .int (.perform 0 [] []) (.let_ "y2" .int (.perform 0 [] []) (.atom (.lit 42))))))))))
+
+example : value (eval [divTk, tk] spOps 120 [.abort .fail 0] .empty [] spawnPanic) = some 42 := by
+  run [spawnPanic, divTk, tk, spOps, scYield, scSpawnP, mkTask, cloFn]
+example : freed (eval [divTk, tk] spOps 120 [.abort .fail 0] .empty [] spawnPanic) := by
+  run [spawnPanic, divTk, tk, spOps, scYield, scSpawnP, mkTask, cloFn]
+example : value (eval [divTk, tk] spOps 120 [.abort .fail 0] (Store.sched0 fun _ => false) [] spawnPanic) = some 42 := by
+  run [spawnPanic, divTk, tk, spOps, scYield, scSpawnP, mkTask, cloFn]
+example : freed (eval [divTk, tk] spOps 120 [.abort .fail 0] (Store.sched0 fun _ => false) [] spawnPanic) := by
+  run [spawnPanic, divTk, tk, spOps, scYield, scSpawnP, mkTask, cloFn]
+
 /-- `(_) => { yield; throw 41 }` and `(_) => { yield; *b }`, closures that captured a box each. -/
 def badTk : Fn :=
   { owns := [("p", .int)], refs := [], ret := .int, row := [.eff 0, .fail], cap := some ("b", .box .int, .once),

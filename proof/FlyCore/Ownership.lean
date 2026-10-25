@@ -473,6 +473,9 @@ structure Op where
   /-- An operation by which tasks give way to each other: only the frame of their tasks takes it,
   and a task may be made to give way by it before anything it does, as if it had performed it. -/
   task : Bool := false
+  /-- An operation that starts a task as `spawn` does: a panic of the task ends it alone, its scope
+  and the scope's other tasks going on (§5.7); a task started otherwise fails its scope. -/
+  spawns : Bool := false
   /-- What an operation takes and gives is said of no region: its arm may run regions out from
   where it was performed. -/
   rfree : (owns.all Ty.rfree && refs.all (fun p => p.2.rfree) && ret.rfree) = true := by decide
@@ -573,6 +576,9 @@ inductive Kont where
   | dropK (τ : Ty) (o : Outcome) (d : Nat)
   /-- A task's body, run once the task is first given its turn. -/
   | startK (env : Env) (b : Expr)
+  /-- The root of a spawned task: a panic unwinding it ends the task here, what it owned dropped as
+  it unwound (§5.7), and its scope goes on. -/
+  | spawnK
   /-- Two tasks of types `τa` and `τb`, the one running `side` (the first if `true`), the other
   waiting as `K` where it last gave way; each gives way by performing `e`, handled here as `id`. -/
   | parS (e id : Nat) (τa τb : Ty) (side : Bool) (K : List Kont)
@@ -1050,7 +1056,7 @@ def dropRet (fl : Flush) (τ : Ty) (o : Outcome) (d : Nat) : Res × Store → Re
 
 /-- A task started from a closure called once, `v`: what it captured moved to a parameter of its
 code, which is called with `0` once the task first goes on, lent the places `cz`. -/
-def mkTask (F : List Fn) (cz : List (Cap Nat)) (σ : Store) : Val → Option (List Kont × Store)
+def mkTask (F : List Fn) (cz : List (Cap Nat)) (σ : Store) (sp : Bool := false) : Val → Option (List Kont × Store)
   | .clo f c τc =>
     match F[f]?, σ.mem c with
     | some d, some w =>
@@ -1059,7 +1065,7 @@ def mkTask (F : List Fn) (cz : List (Cap Nat)) (σ : Store) : Val → Option (Li
         let d' := cloFn d xc τc .once
         if 2 = d'.owns.length ∧ d'.refs.length = cz.length then
           let (cells, σ2) := allocAll (σ.set c none) ((d'.owns.map Prod.fst).zip [.int 0, w])
-          some ([.callK ((d'.owns.map Prod.snd).zip (cells.map Prod.snd)),
+          some ((if sp then [.spawnK] else []) ++ [.callK ((d'.owns.map Prod.snd).zip (cells.map Prod.snd)),
             .startK (cells ++ (d'.refs.map Prod.fst).zip (cz.map Cap.loc)) d'.body], σ2)
         else none
       | none => none
@@ -1691,7 +1697,7 @@ def ret (F : List Fn) (O : List Op) (n : Nat) (hs : HS) : Kont → Res × Store 
       if ef = eS then
         match vs with
         | [v] =>
-          match mkTask F cz σ v with
+          match mkTask F cz σ ((O[eS]?.map Op.spawns).getD false) v with
           | some (Kt, σ1) =>
             ret F O m hs (.scB e eS id τ cz (Q ++ [Kt]))
               (evalK F O m (.capture e id :: .capture eS id :: hs) σ1 K (.val (.int 0)))
@@ -1714,7 +1720,7 @@ def ret (F : List Fn) (O : List Op) (n : Nat) (hs : HS) : Kont → Res × Store 
       if ef = eS then
         match vs with
         | [v] =>
-          match mkTask F cz σ v with
+          match mkTask F cz σ ((O[eS]?.map Op.spawns).getD false) v with
           | some (Kt, σ1) =>
             ret F O m hs (.scW e eS id τ cz Kb (Q ++ [Kt]))
               (evalK F O m (.capture e id :: .capture eS id :: hs) σ1 K (.val (.int 0)))
@@ -1734,7 +1740,7 @@ def ret (F : List Fn) (O : List Op) (n : Nat) (hs : HS) : Kont → Res × Store 
       if ef = eS then
         match vs with
         | [w] =>
-          match mkTask F cz σ w with
+          match mkTask F cz σ ((O[eS]?.map Op.spawns).getD false) w with
           | some (Kt, σ1) =>
             ret F O m hs (.scV e eS id τ cz v (Q ++ [Kt]))
               (evalK F O m (.capture e id :: .capture eS id :: hs) σ1 K (.val (.int 0)))
@@ -1918,6 +1924,8 @@ def ret (F : List Fn) (O : List Op) (n : Nat) (hs : HS) : Kont → Res × Store 
   | .dropK τ o d, r => dropRet (flushR F O n) τ o d r
   | .startK env b, (.val _, σ) => eval F O n hs σ env b
   | .startK _ _, (.abort j k, σ) => (.abort j k, σ)
+  | .spawnK, (.abort 0 _, σ) => (.val (.int 0), σ)
+  | .spawnK, r => r
   | .parS e id τa τb side Ko, (.val v, σ) =>
     match n with
     | 0 => (.timeout, σ)
