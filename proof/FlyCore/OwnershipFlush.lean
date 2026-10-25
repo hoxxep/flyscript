@@ -18,14 +18,14 @@ abbrev Dropped (σ : Store) (D : List Nat) (σ' : Store) : Prop := Moves σ D σ
 /-- How dropping continuations that own `D` ended: with them dropped, or out of fuel, or a panic in
 their cleanup. -/
 def FlushGives (x : Res × Store) (σ : Store) (D : List Nat) : Prop :=
-  x.1 = .timeout ∨ x.1 = .panic ∨ ∃ v σ', x = (.val v, σ') ∧ Dropped σ D σ'
+  x.1 = .timeout ∨ x.1 = .ended ∨ ∃ v σ', x = (.val v, σ') ∧ Dropped σ D σ'
 
 /-- `fl` drops continuations as their types say, freeing what they own. -/
 def FlushOk (F : List Fn) (ι : Iota) (fl : Flush) : Prop :=
   ∀ σ vs, WF σ → KontsOk F ι σ vs → FlushGives (fl vs σ) σ (vs.flatMap Val.foot)
 
 theorem FlushGives.bind {P : Res × Store → Prop} (h : FlushGives x σ D)
-    (hk : ∀ σ', Dropped σ D σ' → P (k σ')) (ht : ∀ σ', P (.timeout, σ')) (hp : ∀ σ', P (.panic, σ')) :
+    (hk : ∀ σ', Dropped σ D σ' → P (k σ')) (ht : ∀ σ', P (.timeout, σ')) (hp : ∀ σ', P (.ended, σ')) :
     P (andThen x k) := by
   rcases x with ⟨r, σ1⟩
   rcases h with h | h | ⟨v, σ', h, hd⟩

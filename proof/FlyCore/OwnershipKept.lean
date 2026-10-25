@@ -80,13 +80,15 @@ theorem flush_ok [WorldOk F O ι.w] (hK : EvalKOk F O n) : FlushOk F ι (flush F
         fun l hl => by simp at hl; subst hl; exact ⟨_, by simp [hsDie, find, Frame.handles]; rfl⟩⟩
       (fun a h => by
         rcases List.mem_cons.mp h with rfl | h
-        · exact ⟨.drop, by simp [hsDie]⟩
-        · obtain ⟨rfl, -⟩ := hA a h; exact ⟨.drop, by simp [hsDie]⟩) hwf1 hagS1
+        · exact .inr ⟨.drop, by simp [hsDie]⟩
+        · rcases hA a h with rfl | ⟨rfl, -⟩
+          · exact .inl rfl
+          · exact .inr ⟨.drop, by simp [hsDie]⟩) hwf1 hagS1
       (fun l hl => by
         have hl' := (hX'X l).mp (by simpa using hl)
         rw [← hagS l hl']; exact hXa l hl')
       (hperm.nodup_iff.mp hXn) rfl (fun _ hp => by simp at hp) (by simp [mutCells]) (by simp [mutCells, Disj])
-      (by simp [Disj]) (.inr ⟨σ.fresh.1, 0, rfl, ⟨.drop, by simp [hsDie]⟩, rfl⟩)
+      (by simp [Disj]) (.inr ⟨σ.fresh.1, 0, rfl, .inr ⟨.drop, by simp [hsDie]⟩, rfl⟩)
     simp only [mutCells, List.flatMap_nil, List.append_nil] at hpost
     -- The fiber unwound: what it owned freed.
     have hdone : ∀ σ2, Moves σ.fresh.2 X' σ2 [] [] → Dropped σ (Val.kont (.capV τh e g fa ff B' s' :: K') X).foot σ2 :=
@@ -94,7 +96,7 @@ theorem flush_ok [WorldOk F O ι.w] (hK : EvalKOk F O n) : FlushOk F ι (flush F
         hwf).congr_left fun x => by simp only [Val.foot]; exact hX'X x
     rw [flush]
     simp only [Store.fresh] at hpost hdone ⊢
-    generalize evalK F O n (hsDie g σ.ids) { σ with ids := σ.ids + 1 } (.capD τh e g σ.ids :: K') (.abort σ.ids 0) = res
+    generalize evalK F O n (hsDie g (σ.ids + 1)) { σ with ids := σ.ids + 1 } (.capD τh e g (σ.ids + 1) :: K') (.abort (σ.ids + 1) 0) = res
       at hpost ⊢
     rcases res with ⟨res, σ2⟩
     cases res with
@@ -106,13 +108,16 @@ theorem flush_ok [WorldOk F O ι.w] (hK : EvalKOk F O n) : FlushOk F ι (flush F
     | abort j k =>
       obtain ⟨-, E', hI, hm⟩ := hpost
       obtain ⟨rfl, -⟩ := hI.nil_E
-      exact rest σ2 (hdone σ2 hm)
+      -- A destructor does not unwind: a panic out of the continuation's cleanup ends the program.
+      cases j with
+      | zero => exact .inr (.inl rfl)
+      | succ j => exact rest σ2 (hdone σ2 hm)
     | susp j ef ws ls K2 =>
       obtain ⟨-, -, -, -, -, hc, -⟩ := hpost
       rcases hc with hc | hc <;> simp [hsDie] at hc
     | stuck => simp [Post] at hpost
     | timeout => exact .inl rfl
-    | panic => exact .inr (.inl rfl)
+    | ended => exact .inr (.inl rfl)
 
 /-- Dropping with what fuel is left. -/
 theorem flushR_ok [WorldOk F O ι.w] (hK : ∀ m, n = m + 1 → EvalKOk F O m) : FlushOk F ι (flushR F O n) := by

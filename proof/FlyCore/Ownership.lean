@@ -640,8 +640,8 @@ structure Store where
   /-- A region is named by its arena's cell: a tagged cell, and its region's arena, were allocated. -/
   rtwf : ∀ l a x, rt l = some (a, x) → a < next ∧ l < next := by intro l a x h; simp at h
 
-/-- A fresh name for a handler. -/
-def Store.fresh (σ : Store) : Nat × Store := (σ.ids, { σ with ids := σ.ids + 1 })
+/-- A fresh name for a handler, never `0`, which is the program's root, that a panic unwinds to. -/
+def Store.fresh (σ : Store) : Nat × Store := (σ.ids + 1, { σ with ids := σ.ids + 1 })
 
 def Store.set (σ : Store) (l : Nat) (v : Option Val) : Store :=
   { σ with mem := fun k => if k = l then v else σ.mem k }
@@ -959,8 +959,9 @@ inductive Res where
   | susp (id : Nat) (e : Nat) (vs : List Val) (ls : List Nat) (K : List Kont)
   | stuck
   | timeout
-  /-- The program ends at once, nothing dropped and no cleanup run: an index out of bounds. -/
-  | panic
+  /-- The program ends at once, nothing more dropped and no cleanup run: a panic while a panic
+  unwinds, or one that escapes a destructor (§5.7). -/
+  | ended
 
 /-- The value of a result, if it is one. -/
 def Res.value? : Res → Option Val
@@ -1006,6 +1007,7 @@ def cleanV (fl : Flush) (τ : Ty) (v : Val) : Res × Store → Res × Store
 /-- A body's cleanup ended, the body unwinding to `j`. -/
 def cleanA (j : Nat) (k : Int) : Res × Store → Res × Store
   | (.val (.int _), σ) => (.abort j k, σ)
+  | (.abort 0 _, σ) => if j = 0 then (.ended, σ) else (.abort 0 0, σ)
   | (.susp j' ef vs ls K, σ) => (.susp j' ef vs ls (.deferA j k :: K), σ)
   | (.val _, σ) => (.stuck, σ)
   | r => r
@@ -1017,6 +1019,11 @@ def allocAll (σ : Store) : List (Var × Val) → Env × Store
     let (c, σ1) := σ.alloc v
     let (env, σ2) := allocAll σ1 rest
     ((x, c) :: env, σ2)
+
+/-- Whether cleanup that runs as `o` unwinds, itself unwinding with `r`, panicked as a panic did. -/
+def bothPanic : Res → Outcome → Bool
+  | .abort i _, .abort j _ => i == 0 && j == 0
+  | _, _ => false
 
 def Outcome.res : Outcome → Res
   | .val v => .val v
@@ -1033,7 +1040,7 @@ def dropRet (fl : Flush) (τ : Ty) (o : Outcome) (d : Nat) : Res × Store → Re
       match drop σ τ u with
       | some σ' => andThen (fl (konts σ τ u) σ') fun σ'' => (.abort j k, σ'')
       | none => (.stuck, σ)
-    | .abort _ _ => (.abort j k, σ)
+    | .abort i _ => if i = 0 ∧ j = 0 then (.ended, σ) else (.abort j k, σ)
   | (.val v, σ) =>
     match drop σ τ v with
     | some σ' => andThen (fl (konts σ τ v) σ') fun σ'' => (o.res, σ'')
@@ -1064,7 +1071,7 @@ def callRet (fl : Flush) (cells : List (Ty × Nat)) : Res × Store → Res × St
   | (.susp j ef vs ls K, σ) => (.susp j ef vs ls (.callK cells :: K), σ)
   | (.stuck, σ) => (.stuck, σ)
   | (.timeout, σ) => (.timeout, σ)
-  | (.panic, σ) => (.panic, σ)
+  | (.ended, σ) => (.ended, σ)
   | (r, σ) =>
     match dropCells σ cells with
     | some σ' => andThen (fl (cellsKonts σ cells) σ') fun σ'' => (r, σ'')
@@ -1139,7 +1146,7 @@ def evalS (F : List Fn) (O : List Op) (n : Nat) (hs : HS) (σ : Store) (env : En
         | some (.int y, σ2) =>
           match o.apply x y with
           | some z => (.val (.int z), σ2)
-          | none => (.panic, σ2)
+          | none => (.abort 0 0, σ2)
         | _ => (.stuck, σ1)
       | _ => (.stuck, σ)
     | .new a =>
@@ -1327,8 +1334,8 @@ def evalS (F : List Fn) (O : List Op) (n : Nat) (hs : HS) (σ : Store) (env : En
           if 0 ≤ k then
             match cs[k.toNat]? with
             | some l => ret F O n hs .lendK (eval F O n hs σ ((x, l) :: env) body)
-            | none => (.panic, σ)
-          else (.panic, σ)
+            | none => (.abort 0 0, σ)
+          else (.abort 0 0, σ)
         | _, _ => (.stuck, σ)
       | _, _ => (.stuck, σ)
     | .perform ef owned lent =>
@@ -1514,8 +1521,8 @@ def evalS (F : List Fn) (O : List Op) (n : Nat) (hs : HS) (σ : Store) (env : En
                 match σ.mem l with
                 | some v => (.val v, σ)
                 | none => (.stuck, σ)
-              | none => (.panic, σ)
-            else (.panic, σ)
+              | none => (.abort 0 0, σ)
+            else (.abort 0 0, σ)
           | _ => (.stuck, σ)
         | _, _ => (.stuck, σ)
       | _, _ => (.stuck, σ)
@@ -1545,7 +1552,7 @@ def evalS (F : List Fn) (O : List Op) (n : Nat) (hs : HS) (σ : Store) (env : En
           if 0 ≤ i ∧ i ≤ j ∧ j ≤ cs.length then
             let (a, σ1) := σ.alloc (.vec ((cs.drop i.toNat).take (j.toNat - i.toNat)))
             ret F O n hs (.cloK a) (eval F O n hs σ1 ((x, a) :: env) body)
-          else (.panic, σ)
+          else (.abort 0 0, σ)
         | _, _, _ => (.stuck, σ)
       | _, _, _ => (.stuck, σ)
     | .vpop p =>
@@ -1806,7 +1813,7 @@ def ret (F : List Fn) (O : List Op) (n : Nat) (hs : HS) : Kont → Res × Store 
     | f => (.susp j ef vs ls (f :: K), σ)
   | _, (.stuck, σ) => (.stuck, σ)
   | _, (.timeout, σ) => (.timeout, σ)
-  | _, (.panic, σ) => (.panic, σ)
+  | _, (.ended, σ) => (.ended, σ)
   | .letK x τ env b, (.val v, σ) =>
     let (c, σ2) := σ.alloc v
     leave (flushR F O n) τ c (eval F O n hs σ2 ((x, c) :: env) b)
@@ -1975,7 +1982,7 @@ def ret (F : List Fn) (O : List Op) (n : Nat) (hs : HS) : Kont → Res × Store 
       match drop σ τb u with
       | some σ' => andThen (flushR F O n (konts σ τb u) σ') fun σ'' => (.abort j k, σ'')
       | none => (.stuck, σ)
-    | .abort _ _ => (.abort j k, σ)
+    | .abort i _ => if i = 0 ∧ j = 0 then (.ended, σ) else (.abort j k, σ)
   | .genE τb o _, (.val _, σ) => (o.res, σ)
   | .scB e eS id τ cz Q, (.val v, σ) =>
     match Q, n with
@@ -2022,6 +2029,8 @@ def ret (F : List Fn) (O : List Op) (n : Nat) (hs : HS) : Kont → Res × Store 
           (evalK F O m (.capture e id :: .capture eS id :: .abort .drop d :: hs) σ1 Kt (.abort d 0)))
   | .scX _ _ _, r => r
   | .scE e eS id τ τd o d Q, (r, σ) =>
+    -- A task dropped as a panic unwinds that panics in its own cleanup ends the program (§5.7).
+    if bothPanic r o then (.ended, σ) else
     let next : Option (Outcome × Store × List Val) :=
       match r with
       | .abort j k =>
@@ -2047,7 +2056,8 @@ def ret (F : List Fn) (O : List Op) (n : Nat) (hs : HS) : Kont → Res × Store 
     | some (.arena cs) => (r, (σ.freeAll cs).set a none)
     | _ => (.stuck, σ)
   | .capV _ _ g _ _ _ _, (.abort j k, σ) =>
-    if j = g then
+    -- The body's failure is rethrown around; a panic goes on (§5.7).
+    if j ≠ 0 ∧ j = g then
       match find .fail hs with
       | some (.abort _ j') => (.abort j' k, σ)
       | _ => (.stuck, σ)
@@ -2066,6 +2076,7 @@ def ret (F : List Fn) (O : List Op) (n : Nat) (hs : HS) : Kont → Res × Store 
       let (d, σ1) := σ.fresh
       match evalK F O m (hsDie g d) σ1 (.capD τ e g d :: K) (.abort d 0) with
       | (.val _, σ2) => (.abort j k, σ2)
+      | (.abort 0 _, σ2) => if j = 0 then (.ended, σ2) else (.abort 0 0, σ2)
       | (.abort _ _, σ2) => (.abort j k, σ2)
       | r => r
   | .capD τ _ _ _, (.val v, σ) =>
@@ -2089,6 +2100,7 @@ def flush (F : List Fn) (O : List Op) (n : Nat) : List Val → Store → Res × 
     let (d, σ1) := σ.fresh
     match evalK F O n (hsDie g d) σ1 (.capD τ e g d :: K) (.abort d 0) with
     | (.val _, σ2) => flush F O n vs σ2
+    | (.abort 0 _, σ2) => (.ended, σ2)
     | (.abort _ _, σ2) => flush F O n vs σ2
     | r => r
   | _ :: _, σ => (.stuck, σ)

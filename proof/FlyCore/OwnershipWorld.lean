@@ -19,7 +19,7 @@ where it performed its `handle`'s operation, at the store `σs`, owning the cell
 they are unwinding with aimed at the fiber's own handler. -/
 def Φ (F : List Fn) (O : List Op) (W : World) : World where
   kok σs K τc X := ∃ τ e g fa ff B s K' op ra rf A X', K = .capV τ e g fa ff B s :: K' ∧ τc = .cont op.ret τ ra ∧
-    CapVOk F O e fa op τ ra ∧ FiberRow e ff ra rf ∧ (∀ a ∈ A, a = g ∧ ff = true) ∧
+    CapVOk F O e fa op τ ra ∧ FiberRow e ff ra rf ∧ (∀ a ∈ A, a = 0 ∨ (a = g ∧ ff = true)) ∧
     FramesOk F O ⟨[], W⟩ σs K' op ⟨[], [], τ, [], rf⟩ X' [] A ∧ X.Perm X'
 
 theorem Φ.mono (h : W.le W') : (Φ F O W).le (Φ F O W') := by

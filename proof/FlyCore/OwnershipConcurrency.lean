@@ -22,7 +22,7 @@ macro_rules
       flushR, flush, andThen, konts, kontsK, cellKonts, cellsKonts, evalAtom, evalAtoms, resolve, leave, cleanV,
       cleanA, dropRet, armEnd, callRet, allocAll, dropCells, dropCell, drop, dropK, pick, Store.fresh, Store.alloc, Store.set, find,
       Frame.handles, Kont.push, lookup, Res.done, Outcome.res, Cap.at, Store.empty, Store.sched0, value, freed, freedBelow,
-      Store.tag, Store.freeAll, Store.moveAll, dropCellsWith, fiberHS, hsConv, hsDie, dedupL, cellTree, treeK,
+      Store.tag, Store.freeAll, Store.moveAll, dropCellsWith, fiberHS, hsConv, hsDie, bothPanic, dedupL, cellTree, treeK,
       Val.tree, kfoot, Val.foot, dropAll, kontsAll, isStuck, $xs,*])
 
 /-- A task's closure: `(_) => body`, having captured an integer it ignores. -/
@@ -142,7 +142,7 @@ theorem atomicEx_ok (s p : Nat → Bool) : ∀ n, match eval [incTk] atOps n [.a
     | (.stuck, _) => False
     | (.susp _ _ _ _ _, _) => False
     | (.timeout, _) => True
-    | (.panic, _) => True
+    | (.ended, _) => True
     | (.val v, σ') => ∃ L, VT [incTk] ⟨[], Wstar [incTk] atOps⟩ σ' .int v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
     | (.abort _ _, σ') => ∀ l, σ'.mem l = none :=
   program_ok_sched incTk_ok atomicEx_typed s p
@@ -312,7 +312,7 @@ theorem chanEx_ok (s p : Nat → Bool) : ∀ n, match eval [producer] chOps n [.
     | (.stuck, _) => False
     | (.susp _ _ _ _ _, _) => False
     | (.timeout, _) => True
-    | (.panic, _) => True
+    | (.ended, _) => True
     | (.val v, σ') => ∃ L, VT [producer] ⟨[], Wstar [producer] chOps⟩ σ' .int v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
     | (.abort _ _, σ') => ∀ l, σ'.mem l = none :=
   program_ok_sched producer_ok chanEx_typed s p
@@ -455,7 +455,7 @@ theorem mutexEx_ok (s p : Nat → Bool) : ∀ n, match eval [adder] chOps n [.ab
     | (.stuck, _) => False
     | (.susp _ _ _ _ _, _) => False
     | (.timeout, _) => True
-    | (.panic, _) => True
+    | (.ended, _) => True
     | (.val v, σ') => ∃ L, VT [adder] ⟨[], Wstar [adder] chOps⟩ σ' .int v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
     | (.abort _ _, σ') => ∀ l, σ'.mem l = none :=
   program_ok_sched adder_ok mutexEx_typed s p

@@ -32,7 +32,7 @@ theorem ret_startK [WorldOk F O ι.w] (hE : EvalOk F O n) (hb : Typed F O Γ b �
   | susp j ef vs ls K => simp only [ret]; exact post_frame hp (.startK hb)
   | stuck => simp [Post] at hp
   | timeout => simp [ret, Post]
-  | panic => simp [ret, Post]
+  | ended => simp [ret, Post]
 
 /-! ## Giving way -/
 
@@ -57,8 +57,8 @@ theorem ret_parY [WorldOk F O ι.w] (hKo : ∀ m, n = m + 1 → EvalKOk F O m �
     (hR : Ready O hs r) (hwf : WF σ0) (hag : Agree σf σ0 S) (hSa : ∀ l ∈ S, σ0.mem l ≠ none) (hSd : Disj S Ein)
     (hp : Post F ι O σ0 Ein S Γ env τ (.eff e :: r) (.capture e hid :: hs) res) :
     Post F ι O σ0 Ein S Γ env τ r hs (ret F O n hs (.parY e hid) res) := by
-  have hA : ∀ a, AimedIn a (.capture e hid :: hs) → AimedIn a hs := fun a ⟨l, hl⟩ =>
-    ⟨l, (List.mem_cons.mp hl).resolve_left (by simp)⟩
+  have hA : ∀ a, AimedIn a (.capture e hid :: hs) → AimedIn a hs := fun a h_ =>
+    h_.imp_right fun ⟨l, hl⟩ => ⟨l, (List.mem_cons.mp hl).resolve_left (by simp)⟩
   rcases res with ⟨res, σ1⟩
   have pass : (∀ j ef vs ls K, res = .susp j ef vs ls K → j ≠ hid ∨ ef ≠ e) →
       Post F ι O σ0 Ein S Γ env τ r hs (ret F O n hs (.parY e hid) (res, σ1)) := by
@@ -82,7 +82,7 @@ theorem ret_parY [WorldOk F O ι.w] (hKo : ∀ m, n = m + 1 → EvalKOk F O m �
   | abort j k => exact pass fun _ _ _ _ _ h => by cases h
   | stuck => exact pass fun _ _ _ _ _ h => by cases h
   | timeout => exact pass fun _ _ _ _ _ h => by cases h
-  | panic => exact pass fun _ _ _ _ _ h => by cases h
+  | ended => exact pass fun _ _ _ _ _ h => by cases h
   | susp j ef vs ls K =>
   by_cases hc : j ≠ hid ∨ ef ≠ e
   · exact pass fun _ _ _ _ _ h => by cases h; exact hc
@@ -217,7 +217,7 @@ theorem ret_taskK (hfl : FlushOk F ι (flushR F O n)) {d : Fn} {cells : Env} {ls
     exact ⟨op, X', hos', A, Lv, hc, hop, hR.2, haim, hK', hls, hvs, hn, hdv, hdSv, hm⟩
   | stuck => simp [Post] at hp
   | timeout => simp [ret, Post]
-  | panic => simp [ret, Post]
+  | ended => simp [ret, Post]
 
 /-! ## Frames that pass a suspension on -/
 
@@ -304,7 +304,7 @@ theorem ret_parE (hI : Inv F ι σf Γ₁ env E₁ S) (hro : RoCtx Γo) (hSo : �
       hSd hp
   | stuck => simp [Post] at hp
   | timeout => simp [ret, Post]
-  | panic => simp [ret, Post]
+  | ended => simp [ret, Post]
 
 /-! ## Two values made a pair -/
 
@@ -380,8 +380,8 @@ theorem pair_alloc (hI : Inv F ι σ Γ env E S) (hwf : WF σ) (hv : VT F ι σ 
 
 /-! ## Two tasks, one of them done -/
 
-theorem aimed_uncap : AimedIn a (.capture e hid :: hs) → AimedIn a hs := fun ⟨l, hl⟩ =>
-  ⟨l, (List.mem_cons.mp hl).resolve_left (by simp)⟩
+theorem aimed_uncap : AimedIn a (.capture e hid :: hs) → AimedIn a hs := fun h_ =>
+  h_.imp_right fun ⟨l, hl⟩ => ⟨l, (List.mem_cons.mp hl).resolve_left (by simp)⟩
 
 /-- Two tasks, the one running `side`, the other done with `w`: the running one gives way to no one,
 and once it is done too the pair of what they gave is the value; if it fails, `w` is dropped. -/
@@ -529,7 +529,7 @@ theorem ret_parD [WorldOk F O ι.w] (hfl : FlushOk F ι (flushR F O n)) (hKo : �
     exact post_after ((hm.widen hXa hd).relabel fun x => by simp) hwf h2
   | stuck => simp [Post] at hp
   | timeout => simp [ret, Post]
-  | panic => simp [ret, Post]
+  | ended => simp [ret, Post]
 
 /-! ## Two tasks, both running -/
 
@@ -579,7 +579,7 @@ theorem ret_parS [WorldOk F O ι.w] (hfl : FlushOk F ι (flushR F O n)) (hKo : �
       (FrameOk.parY (F := F) (ι := ι) (σf := σf) (Γ := Γo) (env := envo) (τ := τa) (S := So) (hid := hid) hP.hop hP.howns
         hP.hrefs hP.hret).ready hR
     exact yield_resume (top := ⟨Γo, envo, _, So, .eff e :: r⟩) hKk hP.hop hP.hrefs hP.hret hK hR'
-      (fun a ha => let ⟨l, hl⟩ := hA a ha; ⟨l, List.mem_cons_of_mem _ hl⟩) hwfr
+      (fun a ha => (hA a ha).imp_right fun ⟨l, hl⟩ => ⟨l, List.mem_cons_of_mem _ hl⟩) hwfr
       ((hagr.mono fun l hl => by
         rcases List.mem_append.mp hl with h | h
         · simp [h]
@@ -667,7 +667,7 @@ theorem ret_parS [WorldOk F O ι.w] (hfl : FlushOk F ι (flushR F O n)) (hKo : �
       · exact hE1X.2.2 l h h2
       · exact hSd l h (by simp [h2])
     have h1 := hKk (.capture e hid :: .abort .drop d :: hs) _ σf Ko _ X [] AK σ1.fresh.2 [] (.abort d 0) op [] hK hR3
-      (fun a ha => let ⟨l, hl⟩ := hA a ha; ⟨l, List.mem_cons_of_mem _ (List.mem_cons_of_mem _ hl)⟩) hwf2
+      (fun a ha => (hA a ha).imp_right fun ⟨l, hl⟩ => ⟨l, List.mem_cons_of_mem _ (List.mem_cons_of_mem _ hl)⟩) hwf2
       ((hag2.mono fun l hl => by
         rcases List.mem_append.mp hl with h | h
         · simp [h]
@@ -677,7 +677,7 @@ theorem ret_parS [WorldOk F O ι.w] (hfl : FlushOk F ι (flushR F O n)) (hKo : �
         · exact halloc l (by simp [h])
         · exact hfa l (inES hSo l h)) hE1X.2.1 rfl (fun _ h => by simp at h) (by simp [mutCells])
       (by simp [mutCells, Disj]) (by simpa [mutCells] using hdSoX)
-      (.inr ⟨d, 0, rfl, ⟨.drop, List.mem_cons_of_mem _ (List.mem_cons_self ..)⟩, rfl⟩)
+      (.inr ⟨d, 0, rfl, .inr ⟨.drop, List.mem_cons_of_mem _ (List.mem_cons_self ..)⟩, rfl⟩)
     simp only [mutCells, List.flatMap_nil, List.append_nil] at h1
     have h2 := hRr (.abort .drop d :: hs) _ _ σ1.fresh.2 (.parY e hid) ⟨Γo, envo, _, So, .eff e :: r⟩ ⟨Γo, envo, _, So, r⟩
       [] [] σ1.fresh.2 X _ (.parY hP.hop hP.howns hP.hrefs hP.hret) hR2 (fun _ h => by simp at h) hwf2 Agree.self
@@ -754,7 +754,7 @@ theorem ret_parS [WorldOk F O ι.w] (hfl : FlushOk F ι (flushR F O n)) (hKo : �
           · rw [hag1 l (by simp [h])]; exact halloc l (by simp [h])
           · exact hX'a l h) disj_nil_left hwf |>.relabel fun x => by simp
     have : ret F O (m + 1) hs (.parS e hid τa τb side Ko) (.susp hid e [] ls K, σ1) =
-        if σ1.sched σ1.ids = true then
+        if σ1.sched (σ1.ids + 1) = true then
           ret F O m hs (.parS e hid τa τb side Ko) (evalK F O m (.capture e hid :: hs) σ1.fresh.2 K (.val (.int 0)))
         else
           ret F O m hs (.parS e hid τa τb (!side) K) (evalK F O m (.capture e hid :: hs) σ1.fresh.2 Ko (.val (.int 0))) := by
@@ -805,7 +805,7 @@ theorem ret_parS [WorldOk F O ι.w] (hfl : FlushOk F ι (flushR F O n)) (hKo : �
       exact post_after (hm2.relabel fun x => by simp only [List.mem_append]; grind) hwf h2
   | stuck => simp [Post] at hp
   | timeout => simp [ret, Post]
-  | panic => simp [ret, Post]
+  | ended => simp [ret, Post]
 
 /-! ## Two tasks started -/
 

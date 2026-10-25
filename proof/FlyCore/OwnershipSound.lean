@@ -286,7 +286,7 @@ theorem post_after {r : Res × Store} (hm : Moves σ E σ1 E₁ []) (hwf : WF σ
       (hm.trans hm' disj_nil_left hwf).relabel fun x => by simp⟩
   | stuck => exact h
   | timeout => trivial
-  | panic => trivial
+  | ended => trivial
 
 /-- What an expression may give, said of a context it leaves, holds of one that is weaker. -/
 theorem post_weaken {r : Res × Store} (h : Post F ι O σ E S Γ₁ env τ rw hs r) (w : Weaker Γ' Γ₁) :
@@ -300,7 +300,7 @@ theorem post_weaken {r : Res × Store} (h : Post F ι O σ E S Γ₁ env τ rw h
     exact ⟨op, X, hos, A, Lv, hc, hop, hcov, haim, hK.weaken w, hls, hvs, hn, hd, hdS, hm⟩
   | stuck => exact h
   | timeout => trivial
-  | panic => trivial
+  | ended => trivial
 
 /-- A frame of no cells of its own joins a continuation taken through its construct. -/
 theorem post_frame (h : Post F ι O σ E S Γ₁ env₁ τ₁ r hs (.susp j ef vs ls K, σ'))
@@ -341,7 +341,7 @@ theorem leave_ok {r : Res × Store} (hfl : FlushOk F ι fl) (hτx : τx.complete
     exact post_after hm hwf (post_frame h (.scopeK hx hk hτx))
   | stuck => exact h
   | timeout => simp [leave, Res.done, Post]
-  | panic => simp [leave, Res.done, Post]
+  | ended => simp [leave, Res.done, Post]
 
 /-- Leaving a scope, said of where its code started. -/
 theorem leave_ok' {r : Res × Store} (hfl : FlushOk F ι fl) (hτx : τx.complete = true) (hwf : WF σ) (hx : x ∉ Γ₂.map Prod.fst) (hk : (Γ₂.map Prod.fst).Nodup)
@@ -368,7 +368,7 @@ theorem leave_ok' {r : Res × Store} (hfl : FlushOk F ι fl) (hτx : τx.complet
     exact post_frame h (.scopeK hx hk hτx)
   | stuck => exact h
   | timeout => simp [leave, Res.done, Post]
-  | panic => simp [leave, Res.done, Post]
+  | ended => simp [leave, Res.done, Post]
 
 /-! ## The statements, by fuel -/
 
@@ -426,8 +426,9 @@ theorem find_head : ∃ f, find l (Frame.abort l i :: hs) = some f :=
   ⟨Frame.abort l i, by simp [find, Frame.handles]⟩
 
 theorem AimedIn.push (h : AimedIn a hs) : AimedIn a (Kont.push f hs) := by
-  obtain ⟨l, hl⟩ := h
-  refine ⟨l, ?_⟩
+  rcases h with h | ⟨l, hl⟩
+  · exact .inl h
+  refine .inr ⟨l, ?_⟩
   cases f
   all_goals try first | exact hl | exact List.mem_cons_of_mem _ hl | exact List.mem_cons_of_mem _ (List.mem_cons_of_mem _ hl)
   case catchK l' _ _ _ _ => cases l' <;> simp [Kont.push, hl]
@@ -671,8 +672,7 @@ theorem evalK_ok (hR : RetOk F O n) (hN : NestOk F O n) : EvalKOk F O n := by
       (fun a ha => by
         rcases hA2 a ha with h | h
         · exact (haim a h).push
-        · obtain ⟨l, hl⟩ := h
-          exact ⟨l, Kont.push_mem hl⟩) hwf
+        · exact h.imp_right fun ⟨l, hl⟩ => ⟨l, Kont.push_mem hl⟩) hwf
       (hag.mono fun l hl => by
         rcases List.mem_append.mp hl with h | h
         · exact by simp [h]
@@ -746,14 +746,15 @@ theorem ret_letK [WorldOk F O ι.w] (hfl : FlushOk F ι (flushR F O n)) (hE : Ev
     exact post_frame h (.letK hx hk hb)
   | stuck => simp [Post] at h
   | timeout => simp [ret, Post]
-  | panic => simp [ret, Post]
+  | ended => simp [ret, Post]
 
 /-- Unwinding past a handler named `c`: an unwinding aimed elsewhere is aimed below. -/
 theorem aimed_pop : AimedIn i (.abort l c :: hs) → i ≠ c → AimedIn i hs := by
-  rintro ⟨l', hl⟩ hne
+  rintro (h | ⟨l', hl⟩) hne
+  · exact .inl h
   rcases List.mem_cons.mp hl with h | h
   · cases h; exact absurd rfl hne
-  · exact ⟨l', h⟩
+  · exact .inr ⟨l', h⟩
 
 /-- A continuation taken through a frame putting an unwinding handler named `c` in force: unwindings
 aimed at `c` are the continuation's own. -/
@@ -766,7 +767,7 @@ theorem post_frame_abort (h : Post F ι O σ E S Γ₁ env₁ τ₁ r₁ (.abort
     (fun _ h => by simp at h) List.nodup_nil disj_nil_left hK (fun a ha => List.mem_append.mpr (.inl ha))
     (fun a ha => by
       by_cases hac : a = c
-      · subst hac; exact .inr ⟨l, by simp [hpush]⟩
+      · subst hac; exact .inr (.inr ⟨l, by simp [hpush]⟩)
       · exact .inl (List.mem_append.mpr (.inr (List.mem_filter.mpr ⟨ha, by simpa using hac⟩))))
   simp only [List.nil_append] at hK'
   refine ⟨op, X, hos, Af ++ A.filter (· ≠ c), Lv, hc.of_cons_abort.resolve_left fun h => hlne _ h.1, hop, hcov, fun a ha => ?_, hK', hls, hvs, hn, hd,
@@ -779,12 +780,13 @@ theorem post_frame_abort (h : Post F ι O σ E S Γ₁ env₁ τ₁ r₁ (.abort
 /-- A `try`, or a `handle` whose arm ends it, puts in force a handler that unwinds, which an operation
 of its effect may also reach by being taken: unwindings aimed elsewhere are aimed further out. -/
 theorem aimed_catch (h : AimedIn a ((Kont.catchK l c x env b).push hs)) (hne : a ≠ c) : AimedIn a hs := by
-  obtain ⟨l', hl⟩ := h
+  rcases h with h | ⟨l', hl⟩
+  · exact .inl h
   cases l <;> simp only [Kont.push, List.mem_cons, Frame.abort.injEq, reduceCtorEq, false_or] at hl
   all_goals
     rcases hl with ⟨-, rfl⟩ | hl
     · exact absurd rfl hne
-    · exact ⟨l', hl⟩
+    · exact .inr ⟨l', hl⟩
 
 /-- `try { □ } catch (x) { h }`, or a `handle` whose arm ends it: an unwinding aimed at its handler
 runs `h`, and so does an operation of its effect, taken as the continuation is unwound from it;
@@ -858,7 +860,7 @@ theorem ret_catchK [WorldOk F O ι.w] (hfl : FlushOk F ι (flushR F O n)) (hE : 
           · exact hXa1 l h
           · exact hSa1 l h) hXn rfl (fun _ h => by simp at h) (by simp [mutCells]) (by simp [mutCells, Disj])
         (by simp only [mutCells, List.flatMap_nil, List.append_nil]; exact hdSX)
-        (.inr ⟨j, k, rfl, ⟨.eff ef, by simp [Kont.push]⟩, rfl⟩)
+        (.inr ⟨j, k, rfl, .inr ⟨.eff ef, by simp [Kont.push]⟩, rfl⟩)
       simp only [mutCells, List.flatMap_nil, List.append_nil] at hres
       have h2 := hRr hs ι ι σ1 (.catchK (.eff ef) j x env h) ⟨Γb, env, τ, S, .eff ef :: r⟩ ⟨Γh, env, τ, S, r⟩ [] []
         σ1 X _ (hfr σ1) hR (fun _ h => by simp at h) hwf₁ Agree.self (fun _ h => by simp at h) List.nodup_nil
@@ -876,9 +878,9 @@ theorem ret_catchK [WorldOk F O ι.w] (hfl : FlushOk F ι (flushR F O n)) (hE : 
           · subst hac
             refine .inr ?_
             cases l with
-            | eff e' => exact ⟨.eff e', by simp [Kont.push]⟩
-            | fail => exact ⟨.fail, by simp [Kont.push]⟩
-            | drop => exact ⟨.drop, by simp [Kont.push]⟩
+            | eff e' => exact .inr ⟨.eff e', by simp [Kont.push]⟩
+            | fail => exact .inr ⟨.fail, by simp [Kont.push]⟩
+            | drop => exact .inr ⟨.drop, by simp [Kont.push]⟩
           · exact .inl (List.mem_filter.mpr ⟨ha, by simpa using hac⟩))
       simp only [List.nil_append] at hK'
       refine ⟨op, X, hos, A.filter (· ≠ hid), Lv, ?_, hop, hR.2, fun a ha => ?_, hK', hls, hvs, hn, hd, hdS, hm⟩
@@ -895,7 +897,7 @@ theorem ret_catchK [WorldOk F O ι.w] (hfl : FlushOk F ι (flushR F O n)) (hE : 
         exact aimed_catch (haim a ha) (by simpa using hne)
   | stuck => simp [Post] at hp
   | timeout => simp [ret, Post]
-  | panic => simp [ret, Post]
+  | ended => simp [ret, Post]
 
 /-- A loop's body ended: the loop goes round again. -/
 theorem ret_whileB [WorldOk F O ι.w] (hE : EvalOk F O n) (hc : Typed F O Γ c .int Γ r) (hb : Typed F O Γ b .int Γ r)
@@ -913,7 +915,7 @@ theorem ret_whileB [WorldOk F O ι.w] (hE : EvalOk F O n) (hc : Typed F O Γ c .
   | susp j ef vs ls K => simp only [ret]; exact post_frame hp (.whileB hc hb)
   | stuck => simp [Post] at hp
   | timeout => simp [ret, Post]
-  | panic => simp [ret, Post]
+  | ended => simp [ret, Post]
 
 /-- A loop's condition ended: zero ends the loop; anything else runs the body, and the loop goes
 round again. -/
@@ -946,12 +948,12 @@ theorem ret_whileC [WorldOk F O ι.w] (hE : EvalOk F O n) (hc : Typed F O Γ c .
         | susp j ef vs ls K => exact post_after (by simpa using hm₁) hwf (post_frame h2 (.whileB hc hb))
         | stuck => simp [Post] at h2
         | timeout => simp [Post]
-        | panic => simp [Post]
+        | ended => simp [Post]
   | abort j k => simp only [ret]; exact hp
   | susp j ef vs ls K => simp only [ret]; exact post_frame hp (.whileC hc hb)
   | stuck => simp [Post] at hp
   | timeout => simp [ret, Post]
-  | panic => simp [ret, Post]
+  | ended => simp [ret, Post]
 
 /-! ## Frames that only pass on what their code gives -/
 
@@ -1015,7 +1017,7 @@ theorem post_pass (hf : FrameOk F O ι ι σf f ⟨Γin, envin, τ, Sin, rin⟩ 
     · exact (hm.widen hXa hd).relabel fun x => by simp only [List.mem_append, List.append_assoc]
   | stuck => simp [Post] at hp
   | timeout => simp [passK, Post]
-  | panic => simp [passK, Post]
+  | ended => simp [passK, Post]
 
 /-! ## A closure over a borrow -/
 
@@ -1114,7 +1116,7 @@ theorem ret_cloK (hSin : ∀ l ∈ Sin, l ∈ Xf ∨ l ∈ S) (hSS : ∀ l ∈ S
     · exact (hm.widen hXa hd).relabel fun x => by simp only [List.mem_append, List.append_assoc]
   | stuck => simp [Post] at hp
   | timeout => simp [ret, Post]
-  | panic => simp [ret, Post]
+  | ended => simp [ret, Post]
 
 /-! ## A borrow held for a while -/
 
@@ -1187,7 +1189,7 @@ theorem ret_deferV (hfl : FlushOk F ι fl) (hv : VT F ι σf τ v Lv) (hag : Agr
     · exact (hm.widen hLa hd).relabel fun x => by simp only [List.mem_append, List.append_assoc]
   | stuck => simp [Post] at hp
   | timeout => simp [cleanV, Post]
-  | panic => simp [cleanV, Post]
+  | ended => simp [cleanV, Post]
 
 /-- A cleanup ended as the body unwound to `j`: the unwinding goes on, unless the cleanup unwound
 itself; a continuation taken in the cleanup keeps the unwinding. -/
@@ -1199,7 +1201,19 @@ theorem ret_deferA (haim : AimedIn j hs) (hp : Post F ι O σ0 Ein S Γb env .in
     obtain ⟨E₁, L₁, hI₁, hv₁, -, -, hm₁⟩ := hp
     cases hv₁ with
     | int => simp only [cleanA]; exact ⟨haim, E₁, hI₁, by simpa using hm₁⟩
-  | abort j' k' => simp only [cleanA]; exact hp
+  | abort j' k' =>
+    obtain ⟨haim', E₁, hI₁, hm₁⟩ := hp
+    by_cases h0 : j' = 0
+    · subst h0
+      simp only [cleanA]
+      split
+      · trivial
+      · exact ⟨.inl rfl, E₁, hI₁, hm₁⟩
+    · have : cleanA j k (.abort j' k', σ1) = (.abort j' k', σ1) := by
+        cases j' with
+        | zero => exact absurd rfl h0
+        | succ _ => rfl
+      rw [this]; exact ⟨haim', E₁, hI₁, hm₁⟩
   | susp j' ef vs ls K =>
     obtain ⟨op, X, hos, A, Lw, hc, hop, hcov, haim', hK, hls, hvs, hn, hdw, hdS, hm⟩ := hp
     simp only [cleanA]
@@ -1213,7 +1227,7 @@ theorem ret_deferA (haim : AimedIn j hs) (hp : Post F ι O σ0 Ein S Γb env .in
     · exact haim' a ha
   | stuck => simp [Post] at hp
   | timeout => simp [cleanA, Post]
-  | panic => simp [cleanA, Post]
+  | ended => simp [cleanA, Post]
 
 /-- `{ defer { d }; □ }`: the cleanup runs as the body ends, with a value or unwinding. -/
 theorem ret_deferK [WorldOk F O ι.w] (hfl : FlushOk F ι (flushR F O n)) (hE : EvalOk F O n) (hd : Typed F O Γb d .int Γb r) (hR : Ready O hs r)
@@ -1234,7 +1248,7 @@ theorem ret_deferK [WorldOk F O ι.w] (hfl : FlushOk F ι (flushR F O n)) (hE : 
   | susp j ef vs ls K => simp only [ret]; exact post_frame hp (.deferK hd)
   | stuck => simp [Post] at hp
   | timeout => simp [ret, Post]
-  | panic => simp [ret, Post]
+  | ended => simp [ret, Post]
 
 /-- Code of type `τ` dropped as an arm unwound to `j`: once its unwinding reaches the barrier, the
 arm's goes on. -/
@@ -1256,13 +1270,16 @@ theorem ret_dropK (hfl : FlushOk F ι fl) (haim : AimedIn j hs) (hcov : Covers h
     split
     · exact ⟨haim, E₁, hI₁, hm₁⟩
     · rename_i hne
-      exact ⟨aimed_pop haim' hne, E₁, hI₁, hm₁⟩
+      -- A panic in the dropped code's cleanup, as a panic unwinds, ends the program.
+      split
+      · trivial
+      · exact ⟨aimed_pop haim' hne, E₁, hI₁, hm₁⟩
   | susp j' ef vs ls K =>
     simp only [ret, dropRet]
     exact post_frame_abort hp .dropK (fun _ => rfl) (fun a ha => by simp at ha; subst ha; exact haim) hcov
   | stuck => simp [Post] at hp
   | timeout => simp [dropRet, Post]
-  | panic => simp [dropRet, Post]
+  | ended => simp [dropRet, Post]
 
 /-- An arm ended without resuming, giving `v`, whose cells `Lv` the continuation cannot reach: the
 continuation unwound to its barrier, `v` again; an unwinding past the barrier drops `v` and goes on; a
@@ -1326,7 +1343,7 @@ theorem ret_dropKv (hfl : FlushOk F ι fl) (hv : VT F ι σf τ v Lv) (hcov : Co
         · exact hSE l hl h))))) halloc hnd hdX hK
       (fun _ h => by simp at h) (fun a ha => by
         by_cases had : a = d
-        · subst had; exact .inr ⟨.drop, by simp [Kont.push]⟩
+        · subst had; exact .inr (.inr ⟨.drop, by simp [Kont.push]⟩)
         · exact .inl (List.mem_filter.mpr ⟨ha, by simpa using had⟩))
     refine ⟨op, Lv ++ X, hos, A.filter (· ≠ d), Lw, hc.of_cons_drop, hop, hcov, fun a ha => ?_, hK', hls, hvs, hn, ?_,
       hdS, ?_⟩
@@ -1341,7 +1358,7 @@ theorem ret_dropKv (hfl : FlushOk F ι fl) (hv : VT F ι σf τ v Lv) (hcov : Co
     · exact (hm.widen hLa hd).relabel fun x => by simp only [List.mem_append, List.append_assoc]
   | stuck => simp [Post] at hp
   | timeout => simp [dropRet, Post]
-  | panic => simp [dropRet, Post]
+  | ended => simp [dropRet, Post]
 
 /-! ## Calls -/
 
@@ -1484,7 +1501,7 @@ theorem ret_callK (hfl : FlushOk F (ι.drop k) (flushR F O n)) {d : Fn} {hos : L
     · exact (hm.widen hXa hdX).relabel fun x => by simp only [List.mem_append, List.append_assoc]
   | stuck => simp [Post] at hp
   | timeout => simp [ret, Post]
-  | panic => simp [ret, Post]
+  | ended => simp [ret, Post]
 
 /-! ## Expressions -/
 
@@ -2741,7 +2758,7 @@ theorem ret_callLendK [WorldOk F O ι.w] (hfl : FlushOk F ι (flushR F O n)) {d 
     · exact (hm.widen hXa hdX).relabel fun x => by simp only [List.mem_append, List.append_assoc]
   | stuck => simp [Post] at hp
   | timeout => simp [ret, Post]
-  | panic => simp [ret, Post]
+  | ended => simp [ret, Post]
 
 /-! ## Arms -/
 
@@ -3072,11 +3089,11 @@ theorem ret_armK [WorldOk F O ι.w] (hfl : FlushOk F ι (flushR F O n)) {cells :
             · simp [h])
           have hfS5 : ∀ l ∈ S, σ5.mem l ≠ none := fun l hl => by
             rw [hag45 l (by simp [hl]), hag4 l (List.mem_append.mpr (.inr hl))]; exact hfS l hl
-          have hR' : Ready O (.abort .drop σ5.ids :: hs) r :=
+          have hR' : Ready O (.abort .drop (σ5.ids + 1) :: hs) r :=
             ⟨.abort (by intro e h; cases h) hR.1, fun l hl => covers_cons _ hR.2 l hl⟩
-          have hrs := resume_ok (hs := .abort .drop σ5.ids :: hs) (σr := σ5.fresh.2) (Lv := [])
-            (r0 := .abort σ5.ids 0) (hid := hid) hKk hRr hH hP hK hR'
-            (fun a ha => by obtain ⟨l, hl⟩ := hA a ha; exact ⟨l, List.mem_cons_of_mem _ hl⟩) (hwf5 : WF _)
+          have hrs := resume_ok (hs := .abort .drop (σ5.ids + 1) :: hs) (σr := σ5.fresh.2) (Lv := [])
+            (r0 := .abort (σ5.ids + 1) 0) (hid := hid) hKk hRr hH hP hK hR'
+            (fun a ha => (hA a ha).imp_right fun ⟨l, hl⟩ => ⟨l, List.mem_cons_of_mem _ hl⟩) (hwf5 : WF _)
             (hag5.trans (Agree.of' fun _ _ => rfl)) (fun l hl => by
               rcases List.mem_append.mp hl with h | h
               · exact halloc l h
@@ -3090,7 +3107,7 @@ theorem ret_armK [WorldOk F O ι.w] (hfl : FlushOk F ι (flushR F O n)) {cells :
                     · exact .inr (.inl h'')
                     · exact .inr (.inr (.inl h''))))
             (hcaps5.frame <| Agree.of' fun _ _ => rfl) (by simpa using hN) (fun l h1 h2 => hdN l h1 (by simp only [List.mem_append] at h2 ⊢; grind))
-            (.inr ⟨_, 0, rfl, ⟨.drop, List.mem_cons_self ..⟩, rfl⟩)
+            (.inr ⟨_, 0, rfl, .inr ⟨.drop, List.mem_cons_self ..⟩, rfl⟩)
           simp only [List.append_nil] at hrs
           have hw6 : VT F ι σ5.fresh.2 τ w' R' := hw5.frame <| Agree.of' fun _ _ => rfl
           have hdone := ret_dropKv (σf := σ5.fresh.2) (v := w') hfl hw6 hR.2 Agree.self
@@ -3279,17 +3296,17 @@ theorem ret_armK [WorldOk F O ι.w] (hfl : FlushOk F ι (flushR F O n)) {cells :
       obtain ⟨hKk, hRr⟩ := hKo m rfl
       simp only [List.append_nil] at hm hdN
       dsimp only
-      have hR' : Ready O (.abort .drop σ4.ids :: hs) r :=
+      have hR' : Ready O (.abort .drop (σ4.ids + 1) :: hs) r :=
         ⟨.abort (by intro e h; cases h) hR.1, fun l hl => covers_cons _ hR.2 l hl⟩
-      have hrs := resume_ok (hs := .abort .drop σ4.ids :: hs) (σr := σ4.fresh.2) (Lv := [])
-        (r0 := .abort σ4.ids 0) (hid := hid) hKk hRr hH hP hK hR'
-        (fun a ha => by obtain ⟨l, hl⟩ := hA a ha; exact ⟨l, List.mem_cons_of_mem _ hl⟩) (hwf4 : WF _)
+      have hrs := resume_ok (hs := .abort .drop (σ4.ids + 1) :: hs) (σr := σ4.fresh.2) (Lv := [])
+        (r0 := .abort (σ4.ids + 1) 0) (hid := hid) hKk hRr hH hP hK hR'
+        (fun a ha => (hA a ha).imp_right fun ⟨l, hl⟩ => ⟨l, List.mem_cons_of_mem _ hl⟩) (hwf4 : WF _)
         (hag4.trans (Agree.of' fun _ _ => rfl)) (fun l hl => by
           rcases List.mem_append.mp hl with h | h
           · exact halloc l h
           · exact hfS l h) hnd hSX hps (fun p hp _ => (hlt p hp).frame <| Agree.of' fun _ _ => rfl)
         (hcaps.frame <| Agree.of' fun _ _ => rfl) (by simpa using hN) (by simpa using hdN)
-        (.inr ⟨_, 0, rfl, ⟨.drop, List.mem_cons_self ..⟩, rfl⟩)
+        (.inr ⟨_, 0, rfl, .inr ⟨.drop, List.mem_cons_self ..⟩, rfl⟩)
       simp only [List.append_nil] at hrs
       exact post_after hm hwf (post_after (Moves.freshen hwf4 fun l hl => (hm.alloc l).mpr (.inr (.inl hl))) hwf4
         (ret_dropK hfl haim hR.2 (hwf4 : WF _) hrs))
@@ -3315,7 +3332,7 @@ theorem ret_armK [WorldOk F O ι.w] (hfl : FlushOk F ι (flushR F O n)) {cells :
     · exact (hm.widen hXa hd).relabel fun x => by simp only [List.mem_append, List.append_assoc]
   | stuck => simp [Post] at hp
   | timeout => simp [ret, Post]
-  | panic => simp [ret, Post]
+  | ended => simp [ret, Post]
 
 theorem ret_armK_eq : ret F O n hs (.armK τ cells K post) res =
     armEnd (flushR F O n) τ cells K post
@@ -3380,8 +3397,8 @@ theorem ret_capK [WorldOk F O ι.w] (hfl : FlushOk F ι (flushR F O n)) (hE : Ev
     rcases List.mem_append.mp hl with hl | hl
     · rcases hH.hRc l hl with h | h <;> simp [h]
     · simp [hl]
-  have hA : ∀ a, AimedIn a (.capture e hid :: hs) → AimedIn a hs := fun a ⟨l, hl⟩ =>
-    ⟨l, (List.mem_cons.mp hl).resolve_left (by simp)⟩
+  have hA : ∀ a, AimedIn a (.capture e hid :: hs) → AimedIn a hs := fun a h =>
+    h.imp_right fun ⟨l, hl⟩ => ⟨l, (List.mem_cons.mp hl).resolve_left (by simp)⟩
   rcases res with ⟨res, σ1⟩
   -- What the body gave, but for its handle's operation: the activation is the `handle`'s again.
   have pass : (∀ j ef vs ls K, res = .susp j ef vs ls K → j ≠ hid ∨ ef ≠ e) →
@@ -3407,7 +3424,7 @@ theorem ret_capK [WorldOk F O ι.w] (hfl : FlushOk F ι (flushR F O n)) (hE : Ev
   | abort j k => exact pass fun _ _ _ _ _ h => by cases h
   | stuck => exact pass fun _ _ _ _ _ h => by cases h
   | timeout => exact pass fun _ _ _ _ _ h => by cases h
-  | panic => exact pass fun _ _ _ _ _ h => by cases h
+  | ended => exact pass fun _ _ _ _ _ h => by cases h
   | susp j ef vs ls K =>
   by_cases hc : j ≠ hid ∨ ef ≠ e
   · exact pass fun _ _ _ _ _ h => by cases h; exact hc
@@ -3668,7 +3685,7 @@ theorem handle_core [WorldOk F O ι.w] (hE : EvalOk F O n) (hR : RetOk F O n) (h
     · exact hI.disj l hl (hFz l h)
     · exact hI.disj l hl (hHcE l h)
     · exact hI.disj l hl (hEb l h)
-  have hf := FrameOk.capK (τ := τ) (hid := σ.ids) hH (by rw [← hms, ← hrs']; exact hP) hcok
+  have hf := FrameOk.capK (τ := τ) (hid := σ.ids + 1) hH (by rw [← hms, ← hrs']; exact hP) hcok
   have hpost := hE _ _ _ _ _ _ _ _ _ _ _ hbody hIb.fresh (hwf : WF _) (hf.ready hRdy)
   have h := hR hs _ _ σ _ _ _ (Fz ++ Hc) [] σ.fresh.2 Eb _ hf hRdy (fun _ h => by simp at h) (hwf : WF _)
     (Agree.of' fun _ _ => rfl)
@@ -4013,6 +4030,6 @@ theorem ret_postR [WorldOk F O ι.w] (hfl : FlushOk F ι (flushR F O n)) (hE : E
     · exact (hm.widen hLa hd).relabel fun x => by simp only [List.mem_append, List.append_assoc]
   | stuck => simp [Post] at hp
   | timeout => simp [ret, Post]
-  | panic => simp [ret, Post]
+  | ended => simp [ret, Post]
 
 end FlyCore.Ownership

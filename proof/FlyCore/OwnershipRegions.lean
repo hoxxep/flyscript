@@ -401,7 +401,7 @@ theorem rnth_ok (hp : PlaceTy Γ p (.rref c k (.vec true τ)) w y) (hz : PlaceTy
   simp only [evalS, hres, hlz, hq, hk0, hlc]
   split
   · cases hget : ls[i.toNat]? with
-    | none => simp [Post]
+    | none => exact ⟨.inl rfl, E, hI, Moves.refl hwf hI.alloc⟩
     | some l =>
       have hl : l ∈ ls := List.mem_of_getElem? hget
       obtain ⟨hlcs, htl⟩ := hls l hl
@@ -410,7 +410,7 @@ theorem rnth_ok (hp : PlaceTy Γ p (.rref c k (.vec true τ)) w y) (hz : PlaceTy
       obtain ⟨-, rfl⟩ := Prod.mk.inj (Option.some.inj ht')
       simp only [hv]
       exact ⟨E, [], hI, hrd.toVT hd, disj_nil_left, disj_nil_left, Moves.refl hwf hI.alloc⟩
-  · simp [Post]
+  · exact ⟨.inl rfl, E, hI, Moves.refl hwf hI.alloc⟩
 
 /-- `p.len()` for a list. -/
 theorem rlen_ok (hp : PlaceTy Γ p (.rref c k (.vec true τ)) w y) (hR : lookup R Γ = some s)
@@ -526,7 +526,7 @@ theorem ret_regionK (hR : Ready O hs r) (hwf : WF σ0) (hag : Agree σf σ0 S) (
     exact ⟨op, X, hos, A, Lw, hc, hop, hR.2, haim, hK', hls, hvs.rfree_iota op.owns_rfree, hn, hdw, hdS, hm⟩
   | stuck => simp [Post] at hp
   | timeout => simp [ret, Post]
-  | panic => simp [ret, Post]
+  | ended => simp [ret, Post]
 
 /-! ## Entering a region -/
 

@@ -56,7 +56,7 @@ theorem ret_genY [WorldOk F O ι.w] (hfl : FlushOk F ι (flushR F O n)) (hKo : �
   | abort j k => exact pass fun _ _ _ _ _ h => by cases h
   | stuck => exact pass fun _ _ _ _ _ h => by cases h
   | timeout => exact pass fun _ _ _ _ _ h => by cases h
-  | panic => exact pass fun _ _ _ _ _ h => by cases h
+  | ended => exact pass fun _ _ _ _ _ h => by cases h
   | susp j ef vs ls K =>
   by_cases hc : j ≠ hid ∨ ef ≠ eY
   · exact pass fun _ _ _ _ _ h => by cases h; exact hc
@@ -115,8 +115,8 @@ theorem ret_genY [WorldOk F O ι.w] (hfl : FlushOk F ι (flushR F O n)) (hKo : �
 
 /-! ## A kept continuation being dropped -/
 
-theorem aimed_uncancel : AimedIn a (.cancel g :: hs) → AimedIn a hs := fun ⟨l, hl⟩ =>
-  ⟨l, (List.mem_cons.mp hl).resolve_left (by simp)⟩
+theorem aimed_uncancel : AimedIn a (.cancel g :: hs) → AimedIn a hs := fun h_ =>
+  h_.imp_right fun ⟨l, hl⟩ => ⟨l, (List.mem_cons.mp hl).resolve_left (by simp)⟩
 
 /-- A kept continuation being dropped: every operation its cleanup performs is cancelled, what it
 passes dropped and what it lends given back as it was, the cleanup unwinding from it to `d` — but one
@@ -145,7 +145,7 @@ theorem ret_capD [WorldOk F O ι.w] (hfl : FlushOk F ι (flushR F O n))
     exact ⟨aimed_uncancel haim, E', hI, hm⟩
   | stuck => simp [Post] at hp
   | timeout => simp [ret, Post]
-  | panic => simp [ret, Post]
+  | ended => simp [ret, Post]
   | susp j ef vs ls K =>
   by_cases hc : j ≠ g
   · -- Not its handler: the frame joins the continuation taken.
@@ -234,7 +234,7 @@ theorem ret_capD [WorldOk F O ι.w] (hfl : FlushOk F ι (flushR F O n))
     rw [hr0] at hts
     obtain rfl : hos = [] := List.map_eq_nil_iff.mp hts
     exact hans _ (.inl ⟨_, rfl, by rw [hri]; exact .int, by simp [Disj]⟩)
-  · exact hans _ (.inr ⟨d, 0, rfl, ⟨_, List.mem_cons_of_mem _ hdA.choose_spec⟩, rfl⟩)
+  · exact hans _ (.inr ⟨d, 0, rfl, hdA.imp_right fun ⟨l, hl⟩ => ⟨l, List.mem_cons_of_mem _ hl⟩, rfl⟩)
 
 
 /-- `#Done`, in a cell of its own. -/
@@ -271,7 +271,7 @@ theorem ret_genN [WorldOk F O ι.w] (hKo : ∀ m, n = m + 1 → EvalKOk F O m �
   | abort j k => exact pass fun _ _ _ _ _ h => by cases h
   | stuck => exact pass fun _ _ _ _ _ h => by cases h
   | timeout => exact pass fun _ _ _ _ _ h => by cases h
-  | panic => exact pass fun _ _ _ _ _ h => by cases h
+  | ended => exact pass fun _ _ _ _ _ h => by cases h
   | susp j ef vs ls K =>
   by_cases hc : j ≠ hid ∨ ef ≠ eN
   · exact pass fun _ _ _ _ _ h => by cases h; exact hc
@@ -362,7 +362,7 @@ theorem post_susp_abort (hf : FrameOk F O ι ι σf f ⟨Γin, envin, τin, Sin,
     (fun a ha => List.mem_append.mpr (.inl ha))
     (fun a ha => by
       by_cases hac : a = c
-      · subst hac; exact .inr ⟨l, by simp [hpush]⟩
+      · subst hac; exact .inr (.inr ⟨l, by simp [hpush]⟩)
       · exact .inl (List.mem_append.mpr (.inr (List.mem_filter.mpr ⟨ha, by simpa using hac⟩))))
   refine ⟨op, Xf ++ X, hos, Af ++ A.filter (· ≠ c), Lw, hc.of_cons_abort.resolve_left (fun h => hlne _ h.1), hop, hcov, fun a ha => ?_, hK', hls, hvs, hn,
     ?_, fun l hl h => (hm.apart hwf hSa (fun l hl h => hSd l hl (List.mem_append.mpr (.inr h)))).2 l h hl, ?_⟩
@@ -480,7 +480,11 @@ theorem ret_genE (hfl : FlushOk F ι (flushR F O n)) (hG : GenOk F ι O σf eN e
       cases o with
       | abort j' k' =>
         obtain rfl : Lo = [] := ho
-        exact ⟨haim', E', hIo, hm1.relabel fun x => by simp⟩
+        -- A panic in the producer's cleanup, as a panic unwinds, ends the program.
+        dsimp only
+        by_cases h0 : j' = 0 ∧ j = 0
+        · rw [if_pos h0]; trivial
+        · rw [if_neg h0]; exact ⟨haim', E', hIo, hm1.relabel fun x => by simp⟩
       | val u =>
         have hu : VT F ι σ1 τb u Lo := (show VT F ι σf τb u Lo from ho).frame (hag1.mono fun l hl => by simp [hl])
         obtain ⟨σ2, hdrop, hfg⟩ := dropF hfl hm1.wf hu
@@ -493,7 +497,7 @@ theorem ret_genE (hfl : FlushOk F ι (flushR F O n)) (hG : GenOk F ι O σf eN e
     exact post_susp_abort (.genE hG hIc hdFE hSo ho) (fun _ => rfl) hR.2 hA (fun _ h => by cases h) hwf hag halloc hnd hd hSa hSd hp
   | stuck => simp [Post] at hp
   | timeout => simp [ret, Post]
-  | panic => simp [ret, Post]
+  | ended => simp [ret, Post]
 
 /-! ## The consumer, its producer ended -/
 
@@ -557,7 +561,7 @@ theorem ret_genCd [WorldOk F O ι.w] (hKo : ∀ m, n = m + 1 → EvalKOk F O m �
   | abort j k => exact pass fun _ _ _ _ _ h => by cases h
   | stuck => exact pass fun _ _ _ _ _ h => by cases h
   | timeout => exact pass fun _ _ _ _ _ h => by cases h
-  | panic => exact pass fun _ _ _ _ _ h => by cases h
+  | ended => exact pass fun _ _ _ _ _ h => by cases h
   | susp j ef vs ls K =>
   by_cases hc : j ≠ hid ∨ ef ≠ eN
   · exact pass fun _ _ _ _ _ h => by cases h; exact hc
@@ -688,13 +692,13 @@ theorem ret_genC [WorldOk F O ι.w] (hKo : ∀ m, n = m + 1 → EvalKOk F O m �
       (FrameOk.genY (F := F) (ι := ι) (σf := σf) (Γ := capsLvlΓ cz) (env := capsLvlEnv cz) (τ := .int) (S := So)
         (hid := hid) hG.hopY hG.hYowns hG.hYrefs hG.hYret hG.hcy).ready hR2
     have h1 := hKk (.capture eY hid :: .abort .drop d :: hs) _ σf Kq _ Xp [] AK σ1.fresh.2 [] (.abort d 0) opY [] hK hR3
-      (fun a ha => let ⟨l, hl⟩ := hA a ha; ⟨l, List.mem_cons_of_mem _ (List.mem_cons_of_mem _ hl)⟩) hwf2
+      (fun a ha => (hA a ha).imp_right fun ⟨l, hl⟩ => ⟨l, List.mem_cons_of_mem _ (List.mem_cons_of_mem _ hl)⟩) hwf2
       (hag2.mono fun l hl => by
         rcases List.mem_append.mp hl with h | h
         · simp [h]
         · exact inFS (hSo l h)) hSoa hFX.2.1 rfl (fun _ h => by simp at h) (by simp [mutCells])
       (by simp [mutCells, Disj]) (by simpa [mutCells] using hdSoX)
-      (.inr ⟨d, 0, rfl, ⟨.drop, List.mem_cons_of_mem _ (List.mem_cons_self ..)⟩, rfl⟩)
+      (.inr ⟨d, 0, rfl, .inr ⟨.drop, List.mem_cons_of_mem _ (List.mem_cons_self ..)⟩, rfl⟩)
     simp only [mutCells, List.flatMap_nil, List.append_nil] at h1
     have hSo2 : ∀ l ∈ So, σ1.fresh.2.mem l ≠ none := fun l hl => by
       rw [hag2 l (inFS (hSo l hl))]; exact hfa l (inFS (hSo l hl))
@@ -838,7 +842,7 @@ theorem ret_genC [WorldOk F O ι.w] (hKo : ∀ m, n = m + 1 → EvalKOk F O m �
       (FrameOk.genY (F := F) (ι := ι) (σf := σf) (Γ := capsLvlΓ cz) (env := capsLvlEnv cz) (τ := .int) (S := So)
         (hid := hid) hG.hopY hG.hYowns hG.hYrefs hG.hYret hG.hcy).ready hR
     have hres := yield_resume (top := ⟨capsLvlΓ cz, capsLvlEnv cz, .int, So, .eff eY :: r⟩) hKk hG.hopY hG.hYrefs
-      hG.hYret hK hR3 (fun a ha => let ⟨l, hl⟩ := hA a ha; ⟨l, List.mem_cons_of_mem _ hl⟩) hwf1
+      hG.hYret hK hR3 (fun a ha => (hA a ha).imp_right fun ⟨l, hl⟩ => ⟨l, List.mem_cons_of_mem _ hl⟩) hwf1
       (hag1.mono fun l hl => by
         rcases List.mem_append.mp hl with h | h
         · simp [h]
@@ -870,7 +874,7 @@ theorem ret_genC [WorldOk F O ι.w] (hKo : ∀ m, n = m + 1 → EvalKOk F O m �
     grind
   | stuck => simp [Post] at hp
   | timeout => rw [ret.eq_def]; simp [Post]
-  | panic => rw [ret.eq_def]; simp [Post]
+  | ended => rw [ret.eq_def]; simp [Post]
 
 /-! ## The producer, its consumer waiting -/
 
@@ -920,7 +924,7 @@ theorem ret_genP [WorldOk F O ι.w] (hfl : FlushOk F ι (flushR F O n)) (hKo : �
         (evalK F O m (.capture eN hid :: hs) σ2 Kc (.val w)) := by
     intro m σ2 w Lw hKk hwf2 hag2 hw hdw
     exact value_resume (top := ⟨Γin, env, τb, Sin, .eff eN :: r⟩) hKk hG.hNrefs hKc hRc
-      (fun a ha => let ⟨l, hl⟩ := hA a ha; ⟨l, List.mem_cons_of_mem _ hl⟩) hwf2
+      (fun a ha => (hA a ha).imp_right fun ⟨l, hl⟩ => ⟨l, List.mem_cons_of_mem _ hl⟩) hwf2
       (hag2.mono fun l hl => by
         rcases List.mem_append.mp hl with h | h
         · simp [h]
@@ -1026,13 +1030,13 @@ theorem ret_genP [WorldOk F O ι.w] (hfl : FlushOk F ι (flushR F O n)) (hKo : �
       (FrameOk.genN (F := F) (ι := ι) (σf := σf) (Γ := Γin) (env := env) (τ := τb) (S := Sin) (hid := hid) hG.hopN
         hG.hNowns hG.hNrefs hG.hNret hG.hcy).ready hR2
     have h1 := hKk (.capture eN hid :: .abort .drop d :: hs) _ σf Kc _ Xc [] AK σ1.fresh.2 [] (.abort d 0) opN [] hKc hR3
-      (fun a ha => let ⟨l, hl⟩ := hA a ha; ⟨l, List.mem_cons_of_mem _ (List.mem_cons_of_mem _ hl)⟩) hwf2
+      (fun a ha => (hA a ha).imp_right fun ⟨l, hl⟩ => ⟨l, List.mem_cons_of_mem _ (List.mem_cons_of_mem _ hl)⟩) hwf2
       (hag2.mono fun l hl => by
         rcases List.mem_append.mp hl with h | h
         · simp [h]
         · exact inFS (hG.hSin l h)) hSina hFX.2.1 rfl (fun _ h => by simp at h) (by simp [mutCells])
       (by simp [mutCells, Disj]) (by simpa [mutCells] using hdSinX)
-      (.inr ⟨d, 0, rfl, ⟨.drop, List.mem_cons_of_mem _ (List.mem_cons_self ..)⟩, rfl⟩)
+      (.inr ⟨d, 0, rfl, .inr ⟨.drop, List.mem_cons_of_mem _ (List.mem_cons_self ..)⟩, rfl⟩)
     simp only [mutCells, List.flatMap_nil, List.append_nil] at h1
     have hSin2 : ∀ l ∈ Sin, σ1.fresh.2.mem l ≠ none := fun l hl => by
       rw [hag2 l (inFS (hG.hSin l hl))]; exact hfa l (inFS (hG.hSin l hl))
@@ -1195,7 +1199,7 @@ theorem ret_genP [WorldOk F O ι.w] (hfl : FlushOk F ι (flushR F O n)) (hKo : �
       hwf h2
   | stuck => simp [Post] at hp
   | timeout => rw [ret.eq_def]; simp [Post]
-  | panic => rw [ret.eq_def]; simp [Post]
+  | ended => rw [ret.eq_def]; simp [Post]
 
 
 theorem zip_refs_at : ∀ {caps : List (Cap Place)} {ls : List Nat}, ls.length = caps.length →

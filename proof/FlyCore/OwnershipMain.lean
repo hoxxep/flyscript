@@ -92,7 +92,8 @@ theorem eval_ok_succ (hF : FnsOk F O) (hE : EvalOk F O n) (hR : RetOk F O n) (hK
       split
       · exact post_val hI₂ .int disj_nil_left disj_nil_left
           ((hm₁.trans hm₂ disj_nil_left hwf).relabel (by simp))
-      · simp [Post]
+      · -- A division by zero: a panic, unwinding to the program's root (§5.7).
+        exact ⟨.inl rfl, E₂, hI₂, (hm₁.trans hm₂ disj_nil_left hwf).relabel (by simp)⟩
     | new ha =>
       obtain ⟨v, σ1, E₁, L₁, hev, hI₁, hv₁, hd₁, hdS₁, hm₁⟩ := atom_ok ha hI hwf
       simp only [evalS, hev]
@@ -564,7 +565,7 @@ theorem eval_ok_succ (hF : FnsOk F O) (hE : EvalOk F O n) (hR : RetOk F O n) (hK
       | cancel => simp [Frame.handles] at hh
       | abort l i =>
         simp only [hf]
-        exact ⟨⟨l, find_mem hf⟩, E₁, hI₁, by simpa using hm₁⟩
+        exact ⟨.inr ⟨l, find_mem hf⟩, E₁, hI₁, by simpa using hm₁⟩
     | try_ hx hb hh =>
       simp only [evalS]
       have hk := hI.keys
@@ -605,7 +606,7 @@ theorem eval_ok_succ (hF : FnsOk F O) (hE : EvalOk F O n) (hR : RetOk F O n) (hK
           cases hv with
           | int =>
             simp only [hf]
-            exact ⟨⟨l, find_mem hf⟩, E₁, hI₁, by simpa using hm₁⟩
+            exact ⟨.inr ⟨l, find_mem hf⟩, E₁, hI₁, by simpa using hm₁⟩
       | capture e' i =>
         simp only [Frame.handles, beq_iff_eq] at hh
         subst hh
@@ -786,7 +787,7 @@ theorem program_ok_sched (hF : FnsOk F O) (ht : Typed F O [] e τ Γ' [.fail]) (
     | (.stuck, _) => False
     | (.susp _ _ _ _ _, _) => False
     | (.timeout, _) => True
-    | (.panic, _) => True
+    | (.ended, _) => True
     | (.val v, σ') => ∃ L, VT F ⟨[], Wstar F O⟩ σ' τ v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
     | (.abort _ _, σ') => ∀ l, σ'.mem l = none := by
   have hR : Ready O [.abort .fail 0] [.fail] :=
@@ -801,7 +802,7 @@ theorem program_ok_sched (hF : FnsOk F O) (ht : Typed F O [] e τ Γ' [.fail]) (
   cases r with
   | stuck => exact h
   | timeout => trivial
-  | panic => trivial
+  | ended => trivial
   | susp j ef vs ls K =>
     obtain ⟨-, -, -, -, -, hc, -⟩ := h
     rcases hc with hc | hc | hc <;> simp at hc
@@ -823,7 +824,7 @@ theorem program_ok (hF : FnsOk F O) (ht : Typed F O [] e τ Γ' [.fail]) (n : Na
     | (.stuck, _) => False
     | (.susp _ _ _ _ _, _) => False
     | (.timeout, _) => True
-    | (.panic, _) => True
+    | (.ended, _) => True
     | (.val v, σ') => ∃ L, VT F ⟨[], Wstar F O⟩ σ' τ v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
     | (.abort _ _, σ') => ∀ l, σ'.mem l = none :=
   program_ok_sched hF ht (fun _ => true) (fun _ => false) n

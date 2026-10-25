@@ -132,8 +132,10 @@ theorem takes_hsConv (h : Takes (hsConv hs) j e) : Takes hs j e := by
     · simp only [Frame.cancel.injEq] at h1; subst h1; exact .inr (.inl hj)
   · rcases mem_hsConv h with ⟨e', j', h1, -⟩ | ⟨j', h1, -⟩ <;> cases h1
 
-theorem not_aimed_hsConv (h : AimedIn a (hsConv hs)) : False := by
-  obtain ⟨l, h⟩ := h
+/-- Inside a fiber, nothing of the stack around is aimed at but the program's root. -/
+theorem aimed_hsConv (h : AimedIn a (hsConv hs)) : a = 0 := by
+  rcases h with h | ⟨l, h⟩
+  · exact h
   rcases mem_hsConv h with ⟨e', j', h1, -⟩ | ⟨j', h1, -⟩ <;> cases h1
 
 theorem find_hsConv : ∀ {hs : HS} {e : Nat} {f : Frame}, find (.eff e) hs = some f →
@@ -190,13 +192,15 @@ theorem fiber_ready (hop : O[e]? = some op) (hR : Ready O hs r) (hrow : FiberRow
     · exact covers_cons _ (fun l hl => by simp only [List.mem_singleton] at hl; subst hl; exact ⟨f', hf'⟩)
         (.eff e') (List.mem_singleton_self _)
 
-theorem fiber_aimed (h : AimedIn a (fiberHS e g ff hs)) : a = g ∧ ff = true := by
-  obtain ⟨l, h⟩ := h
+/-- What a fiber's code unwinds to: the program's root, as a panic does; or the fiber's own failure. -/
+theorem fiber_aimed (h : AimedIn a (fiberHS e g ff hs)) : a = 0 ∨ (a = g ∧ ff = true) := by
+  rcases h with h | ⟨l, h⟩
+  · exact .inl h
   simp only [fiberHS, List.mem_cons, reduceCtorEq, false_or, List.mem_append] at h
   rcases h with h | h
   · cases ff <;> simp at h
-    exact ⟨h.2, rfl⟩
-  · exact (not_aimed_hsConv ⟨l, h⟩).elim
+    exact .inr ⟨h.2, rfl⟩
+  · exact .inl (aimed_hsConv (.inr ⟨l, h⟩))
 
 theorem fiber_takes (h : Takes (fiberHS e g ff hs) j ef) : (j = g ∧ ef = e) ∨ Takes hs j ef := by
   simp only [fiberHS] at h
@@ -219,11 +223,11 @@ theorem find_fail (h : find .fail hs = some f) : ∃ j, f = .abort .fail j ∧ A
       | abort l c =>
         simp only [Frame.handles, beq_iff_eq] at hx
         subst hx
-        exact ⟨c, rfl, ⟨.fail, List.mem_cons_self ..⟩⟩
+        exact ⟨c, rfl, .inr ⟨.fail, List.mem_cons_self ..⟩⟩
       | capture => simp [Frame.handles] at hx
       | cancel => simp [Frame.handles] at hx
-    · obtain ⟨j, rfl, l, hl⟩ := ih h
-      exact ⟨j, rfl, l, List.mem_cons_of_mem _ hl⟩
+    · obtain ⟨j, hj, haim⟩ := ih h
+      exact ⟨j, hj, haim.cons⟩
 
 theorem Ty.whole_rfree {τ : Ty} (h : τ.whole = true) (hr : τ.rfree = true) : τ.complete = true := by
   cases τ <;> simp_all [Ty.whole, Ty.rfree]
@@ -277,22 +281,30 @@ theorem ret_capV_ok [WorldOk F O ι.w] (hF : FnsOk F O)
   | abort j k =>
     obtain ⟨haim, E', hI', hm⟩ := hp
     obtain ⟨rfl, -⟩ := hI'.nil_E
-    obtain ⟨rfl, rfl⟩ := fiber_aimed haim
+    by_cases h0 : j = 0
+    · -- A panic of the body: it goes on, what the fiber owned dropped as it unwound.
+      subst h0
+      have hret : ret F O n hs (.capV τ e g fa ff B s) (.abort 0 k, σ') = (.abort 0 k, σ') := by
+        rw [ret.eq_def]; simp
+      rw [hret]
+      obtain ⟨hI1, -, -⟩ := around hm
+      exact ⟨.inl rfl, E₁, hI1, (hm.widen (X := E₁) (fun l hl => hI.alloc l hl) hd).relabel fun x => by simp⟩
+    obtain ⟨rfl, rfl⟩ := (fiber_aimed haim).resolve_left h0
     -- A failure of the body: rethrown to the handler of the code around.
     obtain ⟨f, hf⟩ := hR.2 .fail (hra _ (hrow.2.1 rfl))
     obtain ⟨j', rfl, hj'⟩ := find_fail hf
     have hret : ret F O n hs (.capV τ e j fa true B s) (.abort j k, σ') = (.abort j' k, σ') := by
-      rw [ret.eq_def]; simp [hf]
+      rw [ret.eq_def]; simp [hf, h0]
     rw [hret]
     obtain ⟨hI1, -, -⟩ := around hm
     exact ⟨hj', E₁, hI1, (hm.widen (X := E₁) (fun l hl => hI.alloc l hl) hd).relabel fun x => by simp⟩
   | stuck => simp [Post] at hp
   | timeout => rw [ret.eq_def]; simp [Post]
-  | panic => rw [ret.eq_def]; simp [Post]
+  | ended => rw [ret.eq_def]; simp [Post]
   | susp j ef vs ls K =>
     obtain ⟨op', X, hos, A, Lv, hcap, hop', -, haim, hK, hls, hvs, hLn, hdX, -, hm⟩ := hp
     obtain ⟨ι₁, Γf, envf, Ef, Sf, hIf, hholes, hpw, hts, -, -, hXn, hXM, hw₁⟩ := hK.base_of
-    have hA : ∀ a ∈ A, a = g ∧ ff = true := fun a ha => fiber_aimed (haim a ha)
+    have hA : ∀ a ∈ A, a = 0 ∨ (a = g ∧ ff = true) := fun a ha => fiber_aimed (haim a ha)
     have hfoot := hvs.trees hm.wf
     have hXMn : (X ++ mutCells (olds hos)).Nodup := nodup_append_disj.mpr ⟨hXn, olds_nodup hIf hholes hpw, hXM⟩
     obtain ⟨hperm, hXn'', hXa''⟩ := kfoot_perm hwf hm.wf hm hBE hEB hsn hnew hXMn (fun l h1 h2 => hdX l h1 h2) hfoot
@@ -529,7 +541,7 @@ the answer; dropped, it unwinds, every operation its cleanup performs cancelled.
 theorem nest_core [WorldOk F O ι.w] (hF : FnsOk F O)
     (hKs : ∀ m, m < n → EvalOk F O m ∧ EvalKOk F O m ∧ RetOk F O m)
     (hc : CapVOk F O e fa op τ ra) (hrow : FiberRow e ff ra rf) (hra : ∀ l ∈ ra, l ∈ r)
-    (hAi : ∀ a ∈ Ai, a = g ∧ ff = true)
+    (hAi : ∀ a ∈ Ai, a = 0 ∨ (a = g ∧ ff = true))
     (hKi : FramesOk F O ⟨[], ι.w⟩ σs K op0 ⟨[], [], τ, [], rf⟩ Xi hos Ai)
     (hI : Inv F ι σs Γ₁ env E₁ S) (w : Weaker Γ' Γ₁) (hdE : Disj E₁ (Xi ++ mutCells (olds hos)))
     (hdS' : Disj S (Xi ++ mutCells (olds hos))) (hXrn : Xr.Nodup)
@@ -579,8 +591,9 @@ theorem nest_core [WorldOk F O ι.w] (hF : FnsOk F O)
     have hinner := hKm (fiberHS e g ff hs) ⟨[], ι.w⟩ σs K ⟨[], [], τ, [], rf⟩ Xi hos Ai σr ps (.val v) op0 Lv hKi
       (fiber_ready hc.hop hR hrow hra)
       (fun a ha => by
-        obtain ⟨rfl, rfl⟩ := hAi a ha
-        exact ⟨.fail, by simp [fiberHS]⟩) hwf hagX (fun l hl => hXia l (by simpa using hl)) hEn.2.1 hps hpsι hMn
+        rcases hAi a ha with rfl | ⟨rfl, rfl⟩
+        · exact .inl rfl
+        · exact .inr ⟨.fail, by simp [fiberHS]⟩) hwf hagX (fun l hl => hXia l (by simpa using hl)) hEn.2.1 hps hpsι hMn
       hdXi (fun _ h => by simp at h)
       (.inl ⟨v, rfl, hv.rfree_iota op0.ret_rfree, fun l h1 h2 => hdv l h1 (by
         rcases List.mem_append.mp h2 with h | h
@@ -645,11 +658,13 @@ theorem nest_core [WorldOk F O ι.w] (hF : FnsOk F O)
         fun l hl => by simp at hl; subst hl; exact ⟨_, by simp [hsDie, find, Frame.handles]; rfl⟩⟩
       (fun a h => by
         rcases List.mem_cons.mp h with rfl | h
-        · exact ⟨.drop, by simp [hsDie]⟩
-        · obtain ⟨rfl, -⟩ := hAi a h; exact ⟨.drop, by simp [hsDie]⟩) hwf1
+        · exact .inr ⟨.drop, by simp [hsDie]⟩
+        · rcases hAi a h with rfl | ⟨rfl, -⟩
+          · exact .inl rfl
+          · exact .inr ⟨.drop, by simp [hsDie]⟩) hwf1
       (hagX.trans (Agree.of (fun _ _ => rfl) Store.fresh_rt)) (fun l hl => hXia l (by simpa using hl)) hEn.2.1 hps
       (fun p hp hm => (hpsι p hp hm).frame (Agree.of (fun _ _ => rfl) Store.fresh_rt)) hMn hdXi
-      (fun _ h => by simp at h) (.inr ⟨σr.fresh.1, 0, rfl, ⟨.drop, by simp [hsDie]⟩, rfl⟩)
+      (fun _ h => by simp at h) (.inr ⟨σr.fresh.1, 0, rfl, .inr ⟨.drop, by simp [hsDie]⟩, rfl⟩)
     simp only [List.append_nil] at hpost
     have hE1a : ∀ l ∈ E₁ ++ S, σr.fresh.2.mem l ≠ none := fun l hl => by
       show σr.mem l ≠ none
@@ -668,8 +683,8 @@ theorem nest_core [WorldOk F O ι.w] (hF : FnsOk F O)
       · obtain ⟨p, hp, hlp⟩ := mem_mutCells.mp h
         exact (hnew p hp (Hole.excl_mut hlp).1).alloc l (exclPart_sub hlp)
     -- The fiber unwound: what it owned freed, the code around as it was.
-    have hdone : ∀ σ2, Moves σr.fresh.2 (Xi ++ mutCells ps) σ2 [] [] →
-        Post F ι O σr (E₁ ++ Xi ++ mutCells ps ++ []) S Γ' env τ r hs (.abort a k, σ2) := fun σ2 hm => by
+    have hdone : ∀ σ2 b kb, AimedIn b hs → Moves σr.fresh.2 (Xi ++ mutCells ps) σ2 [] [] →
+        Post F ι O σr (E₁ ++ Xi ++ mutCells ps ++ []) S Γ' env τ r hs (.abort b kb, σ2) := fun σ2 b kb hb hm => by
       have hkeep := hm.keeps hwf1 hE1a hE1d
       have hI2 : Inv F ι σ2 Γ₁ env E₁ S :=
         ⟨hIr.foot.frame ((Agree.of (σ := σr) (σ' := σr.fresh.2) (fun _ _ => rfl) Store.fresh_rt).trans hkeep), hIr.nodup, hIr.disj, hIr.keys⟩
@@ -677,28 +692,35 @@ theorem nest_core [WorldOk F O ι.w] (hF : FnsOk F O)
       have m2 : Moves σr.fresh.2 (E₁ ++ Xi ++ mutCells ps) σ2 E₁ [] :=
         ((hm.widen (X := E₁) (fun l hl => hE1a l (by simp [hl])) (fun l h1 h2 => hE1d l (by simp [h1]) h2)).congr_left
           fun x => by simp [or_assoc]).relabel fun x => by simp
-      exact ⟨ha, E₁, hI2.weaken w, by simpa using (m1.trans m2 disj_nil_left hwf)⟩
+      exact ⟨hb, E₁, hI2.weaken w, by simpa using (m1.trans m2 disj_nil_left hwf)⟩
     rw [ret.eq_def]
     simp only [Store.fresh] at hpost hdone ⊢
-    generalize evalK F O m (hsDie g σr.ids) { σr with ids := σr.ids + 1 } (.capD τ e g σr.ids :: K)
-      (.abort σr.ids 0) = res at hpost ⊢
+    generalize evalK F O m (hsDie g (σr.ids + 1)) { σr with ids := σr.ids + 1 } (.capD τ e g (σr.ids + 1) :: K)
+      (.abort (σr.ids + 1) 0) = res at hpost ⊢
     rcases res with ⟨res, σ2⟩
     cases res with
     | val w' =>
       obtain ⟨E', L, hI', hw', -, -, hm⟩ := hpost
       obtain ⟨rfl, -⟩ := hI'.nil_E
       cases hw'
-      exact hdone σ2 (by simpa using hm)
+      exact hdone σ2 a k ha (by simpa using hm)
     | abort j k' =>
       obtain ⟨-, E', hI', hm⟩ := hpost
       obtain ⟨rfl, -⟩ := hI'.nil_E
-      exact hdone σ2 hm
+      cases j with
+      | zero =>
+        -- A panic in the dying fiber's cleanup outranks the unwinding, or, as a panic unwinds,
+        -- ends the program.
+        by_cases ha0 : a = 0
+        · simp only [ha0, ↓reduceIte]; trivial
+        · simp only [ha0, ↓reduceIte]; exact hdone σ2 0 0 (.inl rfl) hm
+      | succ j => exact hdone σ2 a k ha hm
     | susp j ef ws ls' K2 =>
       obtain ⟨-, -, -, -, -, hc', -⟩ := hpost
       rcases hc' with hc' | hc' <;> simp [hsDie] at hc'
     | stuck => simp [Post] at hpost
     | timeout => simp [Post]
-    | panic => simp [Post]
+    | ended => simp [Post]
 
 /-- A fiber taken through an operation of the code around, answered or dropped: answered, it is
 entered again with the answer, owning what its frames do, what the places it lent `mut` now hold, and
@@ -759,7 +781,10 @@ theorem resumeV_ok [WorldOk F O ι.w] (hF : FnsOk F O) (hKk : EvalKOk F O n)
   -- The fiber's frames, as the world says, entered again with `a`.
   have hres := hKk (fiberHS e g ff hs) ⟨[], ι.w⟩ σs K' ⟨[], [], τ, [], rf⟩ X' [] A' σ2 [] (.val w) op Lw hK'
     (fiber_ready hcv.hop hRdy hrow hra)
-    (fun a ha => by obtain ⟨rfl, rfl⟩ := hA a ha; exact ⟨.fail, by simp [fiberHS]⟩) hwf₂
+    (fun a ha => by
+      rcases hA a ha with rfl | ⟨rfl, rfl⟩
+      · exact .inl rfl
+      · exact .inr ⟨.fail, by simp [fiberHS]⟩) hwf₂
     ((hagS.trans hag12).mono fun l hl => (hX'X l).mp (by simpa using hl))
     (fun l hl => by
       have hl' := (hX'X l).mp (by simpa using hl)

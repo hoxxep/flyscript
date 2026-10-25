@@ -666,7 +666,7 @@ theorem certified (hF : fnsOk F O = true) (he : infer F O [] e none [.fail] = so
     | (.stuck, _) => False
     | (.susp _ _ _ _ _, _) => False
     | (.timeout, _) => True
-    | (.panic, _) => True
+    | (.ended, _) => True
     | (.val v, σ') => ∃ L, VT F ⟨[], Wstar F O⟩ σ' τ v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
     | (.abort _ _, σ') => ∀ l, σ'.mem l = none :=
   program_ok (fnsOk_sound hF) (infer_sound he) n

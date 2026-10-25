@@ -62,7 +62,7 @@ theorem ret_scX [WorldOk F O ι.w] (hfl : FlushOk F ι (flushR F O n)) (hKo : �
   | abort j k => exact pass fun _ _ _ _ _ h => by cases h
   | stuck => exact pass fun _ _ _ _ _ h => by cases h
   | timeout => exact pass fun _ _ _ _ _ h => by cases h
-  | panic => exact pass fun _ _ _ _ _ h => by cases h
+  | ended => exact pass fun _ _ _ _ _ h => by cases h
   | susp j ef vs ls K =>
   by_cases hc : j ≠ hid ∨ (ef ≠ e ∧ ef ≠ eS)
   · exact pass fun _ _ _ _ _ h => by cases h; exact hc
@@ -373,11 +373,11 @@ theorem drop_one [WorldOk F O ι.w] (hKk : EvalKOk F O m) (hRr : RetOk F O m) (h
     rw [hag1 l (List.mem_append.mpr (.inr hl))]; exact hat l (List.mem_append.mpr (.inr hl))
   have hk1 := hKk (.capture e hid :: .capture eS hid :: .abort .drop d :: hs) _ σt Kt ⟨Γt, envt, .int, St,
       .eff e :: .eff eS :: r⟩ X [] AK σ0.fresh.2 [] (.abort d 0) op0 [] hK hR3
-    (fun a ha => let ⟨l, hl⟩ := hA a (List.mem_append.mpr (.inl ha))
+    (fun a ha => (hA a (List.mem_append.mpr (.inl ha))).imp_right fun ⟨l, hl⟩ =>
       ⟨l, List.mem_cons_of_mem _ (List.mem_cons_of_mem _ (List.mem_cons_of_mem _ hl))⟩) hwf1 hag1
     hat (nodup_append_disj.mp hnd).1 rfl (fun _ h => by simp at h) (by simp [mutCells])
     (by simp [mutCells, Disj]) (by simpa [mutCells] using hdSt)
-    (.inr ⟨d, 0, rfl, ⟨.drop, List.mem_cons_of_mem _ (List.mem_cons_of_mem _ (List.mem_cons_self ..))⟩, rfl⟩)
+    (.inr ⟨d, 0, rfl, .inr ⟨.drop, List.mem_cons_of_mem _ (List.mem_cons_of_mem _ (List.mem_cons_self ..))⟩, rfl⟩)
   simp only [mutCells, List.flatMap_nil, List.append_nil] at hk1
   have hk2 := hRr (.abort .drop d :: hs) _ _ σ0.fresh.2 (.scX e eS hid) ⟨Γt, envt, .int, St, .eff e :: .eff eS :: r⟩
     ⟨Γt, envt, .int, St, r⟩ [] [] σ0.fresh.2 X _ (.scX hS.hop hS.howns hS.hrefs hS.hret hS.hopS hS.hSowns hS.hSrefs hS.hSret)
@@ -476,12 +476,16 @@ theorem ret_scEt [WorldOk F O ι.w] (hKo : ∀ m, n = m + 1 → EvalKOk F O m �
     obtain rfl := foot_ro hI'.foot hro
     cases hv
     rw [ret.eq_def]
-    simp only [drop, dropK, Option.map_some, konts_int]
+    simp only [bothPanic, Bool.false_eq_true, ↓reduceIte, drop, dropK, Option.map_some, konts_int]
     exact post_flushR_nil (rest (jj := j) (kk := k) hm (hA j (List.mem_cons_self ..)))
   | abort j' k' =>
     obtain ⟨haim, E', hI', hm⟩ := hp
     obtain rfl := foot_ro hI'.foot hro
     rw [ret.eq_def]
+    -- A task dropped as a panic unwinds that panics in its own cleanup ends the program.
+    by_cases h0 : j' = 0 ∧ j = 0
+    · simp only [bothPanic, h0.1, h0.2, beq_self_eq_true, Bool.and_self, ↓reduceIte]; trivial
+    simp only [bothPanic, Bool.and_eq_true, beq_iff_eq, h0, ↓reduceIte]
     by_cases hj : j' = d
     · simp only [hj, ↓reduceIte]
       exact post_flushR_nil (rest hm (hA j (List.mem_cons_self ..)))
@@ -492,7 +496,7 @@ theorem ret_scEt [WorldOk F O ι.w] (hKo : ∀ m, n = m + 1 → EvalKOk F O m �
     exact post_susp_abort (.scEt hS hI hT hdT hSt hro) (fun _ => rfl) hR.2 hA (fun _ h => by cases h) hwf hag halloc hnd hd hSa hSd hp
   | stuck => simp [Post] at hp
   | timeout => simp [ret, Post]
-  | panic => simp [ret, Post]
+  | ended => simp [ret, Post]
 
 /-- A scope that failed with `abort jj kk`, its activation `Eb` as it ended: its waiting tasks are
 dropped one by one, then the failure goes on. -/
@@ -559,7 +563,7 @@ theorem ret_scEb [WorldOk F O ι.w] (hfl : FlushOk F ι (flushR F O n)) (hKo : �
     have hwf1 := hm.wf
     obtain ⟨σ2', hdrop, hfg⟩ := dropF hfl hwf1 hv
     rw [ret.eq_def]
-    simp only [hdrop, Option.map_some]
+    simp only [bothPanic, Bool.false_eq_true, ↓reduceIte, hdrop, Option.map_some]
     refine hfg.post fun σ2 hd2 => ?_
     have hE'a : ∀ l ∈ E', σ1.mem l ≠ none := fun l hl => (hm.alloc l).mpr (.inr (.inl hl))
     have hI2 : Inv F ι σ2 Γ env E' S := hI'.dropped hd2 hwf1 hdLE hdLS
@@ -570,6 +574,10 @@ theorem ret_scEb [WorldOk F O ι.w] (hfl : FlushOk F ι (flushR F O n)) (hKo : �
   | abort j' k' =>
     obtain ⟨haim, E', hI', hm⟩ := hp
     rw [ret.eq_def]
+    -- A task dropped as a panic unwinds that panics in its own cleanup ends the program.
+    by_cases h0 : j' = 0 ∧ j = 0
+    · simp only [bothPanic, h0.1, h0.2, beq_self_eq_true, Bool.and_self, ↓reduceIte]; trivial
+    simp only [bothPanic, Bool.and_eq_true, beq_iff_eq, h0, ↓reduceIte]
     by_cases hj : j' = d
     · simp only [hj, ↓reduceIte]
       exact post_flushR_nil (rest hI' hm (hA j (List.mem_cons_self ..)))
@@ -580,7 +588,7 @@ theorem ret_scEb [WorldOk F O ι.w] (hfl : FlushOk F ι (flushR F O n)) (hKo : �
     exact post_susp_abort (.scEb hS hT) (fun _ => rfl) hR.2 hA (fun _ h => by cases h) hwf hag halloc hnd hd hSa hSd hp
   | stuck => simp [Post] at hp
   | timeout => simp [ret, Post]
-  | panic => simp [ret, Post]
+  | ended => simp [ret, Post]
 
 /-! ## A scope's body running -/
 
@@ -649,7 +657,7 @@ theorem ret_scB [WorldOk F O ι.w] (hF : FnsOk F O) (hKo : ∀ m, n = m + 1 → 
     have hagtX : Agree σt σ1 (X ++ St) := agree_task hagt hSt (fun l h => List.mem_append.mpr (.inl h)) hag1
     have hdq := nodup_append_disj.mp hnd
     have hres := resume0 (top := ⟨Γt, envt, .int, St, .eff e :: .eff eS :: r⟩) hKk h2 h1 hK hRb
-      (fun a ha => let ⟨l, hl⟩ := hA a (List.mem_append.mpr (.inl ha))
+      (fun a ha => (hA a (List.mem_append.mpr (.inl ha))).imp_right fun ⟨l, hl⟩ =>
         ⟨l, List.mem_cons_of_mem _ (List.mem_cons_of_mem _ hl)⟩) hwf1 hagtX hat hdq.1 hdSt
     have hT1 := hT'.transfer (hag1.mono fun l hl => by
       simp only [List.mem_append] at hl; rcases hl with h | h <;> simp [h])
@@ -880,7 +888,7 @@ theorem ret_scB [WorldOk F O ι.w] (hF : FnsOk F O) (hKo : ∀ m, n = m + 1 → 
         rw [this]; exact bodyOn
       | cons Kt Q' =>
       have : ret F O (m + 1) hs (.scB ef eS j τ cz (Kt :: Q')) (.susp j ef [] ls K, σ1) =
-          if σ1.sched σ1.ids = true then
+          if σ1.sched (σ1.ids + 1) = true then
             ret F O m hs (.scB ef eS j τ cz (Kt :: Q')) (evalK F O m (.capture ef j :: .capture eS j :: hs) σ1.fresh.2 K
               (.val (.int 0)))
           else
@@ -897,7 +905,7 @@ theorem ret_scB [WorldOk F O ι.w] (hF : FnsOk F O) (hKo : ∀ m, n = m + 1 → 
         have hdq := nodup_append_disj.mp hnd
         have hagt2 : Agree σt σ1.fresh.2 (X ++ St) := agree_task hagt hSt (fun l h => List.mem_append.mpr (.inl h)) hag2
         have hres := resume0 (top := ⟨Γt, envt, .int, St, .eff ef :: .eff eS :: r⟩) hKk h2 h1 hK hRb
-          (fun a ha => let ⟨l, hl⟩ := hA a (List.mem_append.mpr (.inl ha))
+          (fun a ha => (hA a (List.mem_append.mpr (.inl ha))).imp_right fun ⟨l, hl⟩ =>
             ⟨l, List.mem_cons_of_mem _ (List.mem_cons_of_mem _ hl)⟩) hwf2 hagt2 hat hdq.1 hdSt
         have hT1 := hT'.transfer (hag1.mono fun l hl => by
           simp only [List.mem_append] at hl; rcases hl with h | h <;> simp [h])
@@ -933,7 +941,7 @@ theorem ret_scB [WorldOk F O ι.w] (hF : FnsOk F O) (hKo : ∀ m, n = m + 1 → 
           hwf (by simpa using h3)
   | stuck => simp [Post] at hp
   | timeout => simp [ret, Post]
-  | panic => simp [ret, Post]
+  | ended => simp [ret, Post]
 
 
 /-! ## A scope's task running, its body waiting -/
@@ -974,7 +982,7 @@ theorem ret_scW [WorldOk F O ι.w] (hF : FnsOk F O) (hKo : ∀ m, n = m + 1 → 
     intro σr m hKk hwfr hagr
     obtain ⟨-, -, -, -, -, -, -, -, -, -, -, hXbn, -⟩ := hKb.base_of
     exact resume0 (top := ⟨Γ, env, τ, S, .eff e :: .eff eS :: r⟩) hKk hbrefs hbr hKb hRb
-      (fun a ha => let ⟨l, hl⟩ := hA a (List.mem_append.mpr (.inl ha))
+      (fun a ha => (hA a (List.mem_append.mpr (.inl ha))).imp_right fun ⟨l, hl⟩ =>
         ⟨l, List.mem_cons_of_mem _ (List.mem_cons_of_mem _ hl)⟩) hwfr
       (hagb.trans (hagr.mono fun l hl => by rcases List.mem_append.mp hl with h | h <;> simp [h])) hab hXbn
       (fun l h1 h2 => hdSb l h1 h2)
@@ -1032,12 +1040,12 @@ theorem ret_scW [WorldOk F O ι.w] (hF : FnsOk F O) (hKo : ∀ m, n = m + 1 → 
     obtain ⟨-, -, -, -, -, -, -, -, -, -, -, hXbn, -⟩ := hKb.base_of
     have hk1 := hKk (.capture e hid :: .capture eS hid :: .abort .drop d :: hs) _ σb Kb _ Xb [] Ab σ1.fresh.2 []
       (.abort d 0) opb [] hKb hR3
-      (fun a ha => let ⟨l, hl⟩ := hA a (List.mem_append.mpr (.inl ha))
+      (fun a ha => (hA a (List.mem_append.mpr (.inl ha))).imp_right fun ⟨l, hl⟩ =>
         ⟨l, List.mem_cons_of_mem _ (List.mem_cons_of_mem _ (List.mem_cons_of_mem _ hl))⟩) hwf2
       (hagb.trans (hag2.mono fun l hl => by rcases List.mem_append.mp hl with h | h <;> simp [h])) hab hXbn rfl
       (fun _ h => by simp at h) (by simp [mutCells]) (by simp [mutCells, Disj])
       (by simpa [mutCells] using hdSb)
-      (.inr ⟨d, 0, rfl, ⟨.drop, List.mem_cons_of_mem _ (List.mem_cons_of_mem _ (List.mem_cons_self ..))⟩, rfl⟩)
+      (.inr ⟨d, 0, rfl, .inr ⟨.drop, List.mem_cons_of_mem _ (List.mem_cons_of_mem _ (List.mem_cons_self ..))⟩, rfl⟩)
     simp only [mutCells, List.flatMap_nil, List.append_nil] at hk1
     have hS2 : ∀ l ∈ S, σ1.fresh.2.mem l ≠ none := fun l hl => by
       show σ1.mem l ≠ none
@@ -1226,7 +1234,7 @@ theorem ret_scW [WorldOk F O ι.w] (hF : FnsOk F O) (hKo : ∀ m, n = m + 1 → 
             · exact hXq1 l h
             · exact hX'a l h) disj_nil_left hwf |>.relabel fun x => by simp
       have : ret F O (m + 1) hs (.scW ef eS j τ cz Kb Q) (.susp j ef [] ls K, σ1) =
-          if σ1.sched σ1.ids = true then
+          if σ1.sched (σ1.ids + 1) = true then
             ret F O m hs (.scW ef eS j τ cz Kb Q) (evalK F O m (.capture ef j :: .capture eS j :: hs) σ1.fresh.2 K
               (.val (.int 0)))
           else
@@ -1283,7 +1291,7 @@ theorem ret_scW [WorldOk F O ι.w] (hF : FnsOk F O) (hKo : ∀ m, n = m + 1 → 
           hwf h3
   | stuck => simp [Post] at hp
   | timeout => simp [ret, Post]
-  | panic => simp [ret, Post]
+  | ended => simp [ret, Post]
 
 
 /-! ## A scope's task running, its body done -/
@@ -1352,7 +1360,7 @@ theorem ret_scV [WorldOk F O ι.w] (hfl : FlushOk F ι (flushR F O n)) (hF : Fns
     have hwf1 := hm.wf
     have hXn := (nodup_append_disj.mp hn3.2.1).1
     have hres := resume0 (top := ⟨Γt0, envt0, .int, St0, .eff e :: .eff eS :: r⟩) hKk h2 h1 hK hRb
-      (fun a ha => let ⟨l, hl⟩ := hA a (List.mem_append.mpr (.inl ha))
+      (fun a ha => (hA a (List.mem_append.mpr (.inl ha))).imp_right fun ⟨l, hl⟩ =>
         ⟨l, List.mem_cons_of_mem _ (List.mem_cons_of_mem _ hl)⟩) hwf1
       (agree_task hagt hSt0 (fun l h => by simp [h]) hag1) hat hXn hdSt0
     have h3 := hRr hs _ _ σf (.scV e eS hid τ cz v Q') ⟨Γt0, envt0, .int, St0, .eff e :: .eff eS :: r⟩ ⟨Γ, env, τ, S, r⟩
@@ -1605,7 +1613,7 @@ theorem ret_scV [WorldOk F O ι.w] (hfl : FlushOk F ι (flushR F O n)) (hF : Fns
         rw [this]; exact taskOn
       | cons Kt Q' =>
       have : ret F O (m + 1) hs (.scV ef eS j τ cz v (Kt :: Q')) (.susp j ef [] ls K, σ1) =
-          if σ1.sched σ1.ids = true then
+          if σ1.sched (σ1.ids + 1) = true then
             ret F O m hs (.scV ef eS j τ cz v (Kt :: Q')) (evalK F O m (.capture ef j :: .capture eS j :: hs) σ1.fresh.2 K
               (.val (.int 0)))
           else
@@ -1622,7 +1630,7 @@ theorem ret_scV [WorldOk F O ι.w] (hfl : FlushOk F ι (flushR F O n)) (hF : Fns
         rename_i σt op0 Γt0 envt0 St0 X AK Xs As
         have hXn := (nodup_append_disj.mp hn3.2.1).1
         have hres := resume0 (top := ⟨Γt0, envt0, .int, St0, .eff ef :: .eff eS :: r⟩) hKk h2 h1 hK hRb
-          (fun a ha => let ⟨l, hl⟩ := hA a (List.mem_append.mpr (.inl ha))
+          (fun a ha => (hA a (List.mem_append.mpr (.inl ha))).imp_right fun ⟨l, hl⟩ =>
             ⟨l, List.mem_cons_of_mem _ (List.mem_cons_of_mem _ hl)⟩) hwf2
           (hagt.trans (Agree.of' (σ := σ1) (σ' := σ1.fresh.2) (L := X ++ St0) fun _ _ => rfl))
           hat hXn hdSt0
@@ -1673,7 +1681,7 @@ theorem ret_scV [WorldOk F O ι.w] (hfl : FlushOk F ι (flushR F O n)) (hF : Fns
           hwf (by simpa using h3)
   | stuck => simp [Post] at hp
   | timeout => simp [ret, Post]
-  | panic => simp [ret, Post]
+  | ended => simp [ret, Post]
 
 
 /-! ## A scope started -/
@@ -1717,9 +1725,9 @@ theorem scope_ok [WorldOk F O ι.w] (hE : EvalOk F O n) (hR : RetOk F O n) (hS :
   have hwf1 : WF σ.fresh.2 := hwf
   have hcz : ScCaps F ι σ.fresh.2 (List.zipWith Cap.at caps ls) R S Rc :=
     ⟨hc.frame (Agree.of' fun _ _ => rfl), hRc, by rw [hRt, hty], hro⟩
-  have hp := hE (.capture e σ.ids :: .capture eS σ.ids :: hs) σ.fresh.2 ι Γ env E S body τ Γb _ hb hI1 hwf1
+  have hp := hE (.capture e (σ.ids + 1) :: .capture eS (σ.ids + 1) :: hs) σ.fresh.2 ι Γ env E S body τ Γb _ hb hI1 hwf1
     (sc_ready hS.hop hS.hopS hRdy.1 hRdy.2)
-  have h2 := hR hs ι ι σ.fresh.2 (.scB e eS σ.ids τ (List.zipWith Cap.at caps ls) []) ⟨Γb, env, τ, S, .eff e :: .eff eS :: r⟩
+  have h2 := hR hs ι ι σ.fresh.2 (.scB e eS (σ.ids + 1) τ (List.zipWith Cap.at caps ls) []) ⟨Γb, env, τ, S, .eff e :: .eff eS :: r⟩
     ⟨Γb, env, τ, S, r⟩ [] [] σ.fresh.2 E _ (.scB hS hcz .nil) hRdy (fun _ h => by simp at h) hwf1 Agree.self
     (fun _ h => by simp at h) List.nodup_nil disj_nil_left (fun l hl => hI.allocS l hl)
     (fun l h1 h2 => hI.disj l h1 (by simpa using h2)) hp

@@ -11,6 +11,16 @@ types keep any from being kept, for a borrow of an element is one of the whole v
 
 namespace FlyCore.Ownership
 
+/-- A panic as code lending a place begins (§5.7): it unwinds to the program's root, and what holds
+now holds of the context the code would have left, which is weaker. -/
+theorem panic_lend (hx : lookup x Γ = none) (hb : Typed F O ((x, sx) :: lendCtx m Γ y) body τb ((x, sx') :: Γb) r)
+    (hI : Inv F ι σ Γ env E S) (hwf : WF σ) :
+    Post F ι O σ E S (thaw Γ [y] Γb) env τb r hs (.abort 0 0, σ) := by
+  have := typed_weaker hb (List.nodup_cons.mpr ⟨by rw [lendCtx_keys]; exact lookup_none_keys hx,
+    by rw [lendCtx_keys]; exact hI.keys⟩)
+  cases this with
+  | cons _ w => exact ⟨.inl rfl, E, hI.weaken (thaw_weaker_lend w), Moves.refl hwf hI.alloc⟩
+
 theorem LT.alloc_lt (h : LT F ι σ a τ L) (hwf : WF σ) : ∀ x ∈ L, x < σ.next :=
   fun x hx => hwf x (h.alloc x hx)
 
@@ -794,8 +804,8 @@ theorem lendIdx_ok [WorldOk F O ι.w] {m : Mode} (hE : EvalOk F O n) (hx : looku
           obtain ⟨P', hP'⟩ := hpa
           rw [hP'] at hreach
           exact lend_mut_sh hE hx ha hsl hLr hreach hso (hexw rfl) hsh haS hslot (hmf rfl) hb hI hwf hR
-    · simp [Post]
-  · simp [Post]
+    · exact panic_lend (m := m) hx hb hI hwf
+  · exact panic_lend (m := m) hx hb hI hwf
 
 
 /-! ## A slice -/
@@ -921,7 +931,7 @@ theorem lendSlice_ok [WorldOk F O ι.w] (hE : EvalOk F O n) (hx : lookup x Γ = 
   obtain ⟨l2, j, hl2, hj⟩ := intOf hhi
   simp only [evalS, hres, hl1, hl2, hcm, hi, hj]
   split
-  case isFalse => simp [Post]
+  case isFalse => exact panic_lend (m := .ro) hx hb hI hwf
   rename_i hbd
   obtain ⟨hi0, hij, hjn⟩ := hbd
   generalize hsub : (cs.drop i.toNat).take (j.toNat - i.toNat) = sub
@@ -1077,7 +1087,7 @@ theorem lendSliceMut_ok [WorldOk F O ι.w] (hE : EvalOk F O n) (hx : lookup x Γ
   obtain ⟨l2, j, hl2, hj⟩ := intOf hhi
   simp only [evalS, hres, hl1, hl2, hcm, hi, hj]
   split
-  case isFalse => simp [Post]
+  case isFalse => exact panic_lend (m := .mut) hx hb hI hwf
   rename_i hbd
   obtain ⟨hi0, hij, hjn⟩ := hbd
   obtain ⟨Os, Rm, hLrp, hRml, hRmel, hjoin⟩ :=

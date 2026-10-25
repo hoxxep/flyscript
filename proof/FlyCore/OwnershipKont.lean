@@ -13,8 +13,12 @@ its own, which nothing changes while it is suspended.
 
 namespace FlyCore.Ownership
 
-/-- An unwinding is aimed at a handler in force. -/
-def AimedIn (id : Nat) (hs : HS) : Prop := ∃ l, Frame.abort l id ∈ hs
+/-- An abort to `id` has somewhere to go: a frame of `hs` that takes it, or the program's root,
+`0`, which a panic unwinds to (§5.7) wherever it is, every fiber and task at once. -/
+def AimedIn (id : Nat) (hs : HS) : Prop := id = 0 ∨ ∃ l, Frame.abort l id ∈ hs
+
+theorem AimedIn.cons (h : AimedIn a hs) : AimedIn a (f :: hs) :=
+  h.imp_right fun ⟨l, hl⟩ => ⟨l, List.mem_cons_of_mem _ hl⟩
 
 /-- Every label of the row has a handler. -/
 def Covers (hs : HS) (r : Row) : Prop := ∀ l ∈ r, ∃ f, find l hs = some f
@@ -387,7 +391,7 @@ inductive FramesOk (F : List Fn) (O : List Op) : Iota → Store → List Kont �
   lends it what the fiber's frames lent: what the fiber performs, the code around may; its frames are
   as they were where it gave way, and own what of `X` the places lent do not hold; the code around
   is as it was where it entered the fiber. -/
-  | nest : CapVOk F O e fa op τ ra → FiberRow e ff ra rf → (∀ l ∈ ra, l ∈ r) → (∀ a ∈ Ai, a = g ∧ ff = true) →
+  | nest : CapVOk F O e fa op τ ra → FiberRow e ff ra rf → (∀ l ∈ ra, l ∈ r) → (∀ a ∈ Ai, a = 0 ∨ (a = g ∧ ff = true)) →
       FramesOk F O ⟨[], ι.w⟩ σs K op0 ⟨[], [], τ, [], rf⟩ Xi hos Ai →
       Inv F ι σs Γ₁ env E₁ S → Weaker Γ' Γ₁ → Disj E₁ (Xi ++ mutCells (olds hos)) →
       Disj S (Xi ++ mutCells (olds hos)) → Xr.Nodup →
@@ -578,7 +582,7 @@ def Post (F : List Fn) (ι : Iota) (O : List Op) (σ : Store) (E S : List Nat) (
     (r : Row) (hs : HS) : Res × Store → Prop
   | (.stuck, _) => False
   | (.timeout, _) => True
-  | (.panic, _) => True
+  | (.ended, _) => True
   | (.val v, σ') => ∃ E' L, Inv F ι σ' Γ' env E' S ∧ VT F ι σ' τ v L ∧ Disj L E' ∧ Disj L S ∧ Moves σ E σ' E' L
   | (.abort id _, σ') => AimedIn id hs ∧ ∃ E', Inv F ι σ' Γ' env E' S ∧ Moves σ E σ' E' []
   | (.susp id e vs ls K, σ') => ∃ op X hos A Lv,
