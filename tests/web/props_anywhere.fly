@@ -1,0 +1,50 @@
+// expect: <ul class="list"><li class="done" title="first">one</li><li id="b">two<b>!</b></li><button form="_fly" formaction="?_fly=0" type="button">go</button></ul>
+// expect: open ul, attr class=list, open li, attr class=done, attr title=first, text one, close, open li, key b, attr id=b, text two, open b, text !, close, close, open button, on click 0, attr form=_fly, attr formaction=?_fly=0, attr type=button, text go, close, close
+// expect: spans 0..23 2..7 7..15 11..14 15..22
+// An element's attributes, key and events may be given after its children: each is the innermost
+// open element's, and the server's HTML puts it in the element's start tag, as the page's program
+// records it among the element's own, before its children (web/ui.fly).
+import { println } from "std/io";
+import { Ui, Op, el, text, cls, attr, key, on, html, record } from "../../web/ui";
+
+type Msg = #Go;
+
+function view(): void uses Ui<Msg> {
+  el("ul", () => {
+    el("li", () => { text("one"); cls("done"); attr("title", "first"); });
+    el("li", () => {
+      text("two");
+      el("b", () => text("!"));
+      key("b");
+      attr("id", "b");
+    });
+    el("button", () => { text("go"); on("click", #Go); attr("type", "button"); });
+    cls("list");
+  });
+}
+
+function show(op: readonly Op): String {
+  match (op) {
+    #Open(tag, _) => `open ${tag}`,
+    #Key(k) => `key ${k}`,
+    #Attr(n, v) => `attr ${n}=${v}`,
+    #On(e, m) => `on ${e} ${m}`,
+    #Text(s) => `text ${s}`,
+    #Close => "close".toString(),
+  }
+}
+
+export function main(): void uses Io {
+  let out = String.new();
+  html(mut out, view);
+  println(out.asStr());
+  const [ops, _] = record(view);
+  let shown: Vec<String> = Vec.new();
+  let spans: Vec<String> = Vec.new();
+  for (const [i, op] of ops.iter().enumerate()) {
+    shown.push(show(op));
+    if (const #Open(_, end) = op) { spans.push(`${i}..${end}`); }
+  }
+  println(shown.join(", ").asStr());
+  println(`spans ${spans.join(" ")}`);
+}

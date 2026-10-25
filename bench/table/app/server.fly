@@ -1,0 +1,9 @@
+// The table's server keeps nothing: each page makes its own rows.
+
+import { Http } from "web/request";
+
+export type State = u32;
+
+export function init(): State uses Io { 0 }
+
+export function provide<T, row E>(s: readonly State, body: once () => T uses Io, Http, ...E): T uses Io, Http, ...E { body() }

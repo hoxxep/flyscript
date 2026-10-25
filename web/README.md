@@ -68,6 +68,8 @@ export function view(m: readonly Model): void uses Ui<Msg> {
 export function update(m: mut Model, msg: Msg, ev: readonly Event): void uses Todos, Page<Model> { … }
 ```
 
+**An element's key, attributes, classes and listeners** may be given anywhere in its body, before its text and children or after them: the server writes an element's opening tag once its body is done, and the program finds them past its children, so the page is the same either way.
+
 **An endpoint** is a route file that exports `handle(req: readonly Request, p: readonly Params): Response`, performing what the app's server handles, rather than a view: it answers any request for its address itself, with JSON, say.
 
 **The request** is an effect too, `Http` (`request.fly`), which the server handles around a page's `load`, an endpoint's `handle`, and its own handlers of the app's effects: `Http.header(name)` and `Http.cookie(name)` read the request, `Http.setCookie(name, value, maxAge)` sets a cookie on the answer, its value percent-encoded where a cookie may not hold a byte (and `Http.cookie` decodes it), `Http.redirect(url)` answers instead by sending the browser to `url` — from a `load`, the page there is shown in its place, whether the browser asked for the page or the program followed a link to it — and `Http.revalidate(path)` drops the page kept for `path`.

@@ -98,9 +98,13 @@ for (const x of shared) owner.delete(x);
 // A symbol named across modules is external, not internal: each module's linker finds the other's.
 // Of default visibility, so that a route reaches what is the core's through the table of offsets
 // the loader fills in, not at an address its compiler assumed.
+// What is hidden — the runtime's `free`, which its allocator defines — is of default visibility too:
+// a route that takes the address of `free` takes it from the core, through the table, which it
+// cannot reach a hidden symbol of another module's through.
 const external = (line) => line
-  .replace(/^define (internal|private) /, "define ")
-  .replace(/^(@\S+ = )(internal|private) /, "$1");
+  .replace(/^define (internal|private|hidden) /, "define ")
+  .replace(/^(@\S+ = )(internal|private|hidden) /, "$1")
+  .replace(/^declare hidden /, "declare ");
 fs.mkdirSync(outDir, { recursive: true });
 const bare = (n) => n.replace(/^"|"$/g, "");
 // The whole module, every symbol named across modules hidden rather than internal, for `llvm-extract`

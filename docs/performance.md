@@ -75,12 +75,16 @@ In the browser, each site's first page is loaded with nothing cached, and a link
 
 A FlyNext page is interactive once its program has taken over the HTML the server rendered: a core of 50 KB, 20 KB compressed, which every page shares, and the page's own module, 3 to 18 KB, which the page names for the browser to fetch beside the core and which the core links in as it shows the page (the roadmap's step 6). The list page downloads a quarter as much as the Next.js page, and is ready sooner. Built as one program for every page it was 146 KB, 41 KB compressed, and ready in 27 milliseconds: splitting it costs nothing to see. Of the core, the C library is 7 KB: the runtime prints and panics with no `printf`, and allocates from its own allocator rather than `dlmalloc` (step 7). Following a link costs both sites a request for the next page's data and a render in place, and FlyNext the next page's module the first time, which it asks for with the data as soon as the link is pointed at.
 
+A page's program redraws by rendering its view again into a flat record of what it shows and diffing that against the last, in its own memory, and changes only what differs. In [bench/table](../bench/table/), a page of a thousand keyed rows, a click that changes one counter is shown in 2.0 milliseconds, and one that reverses the rows in 2.5, timed from the click to the change in the page (`bench/table/diff.js`, the median of thirty). Before each element's record knew where its children end, keyed rows were matched by one lookup, and text went to the page from where it lies in the program's memory, uncopied, the same changes took 2.7 and 7.8 milliseconds.
+
 ## Running them
 
 ```sh
 sh bench/run.sh                        # the programs; results in target/bench/results.md
 sh bench/tasks.sh                      # a million parked tasks, against Rust on tokio
 NODE_PATH=…/node_modules sh bench/web.sh   # the web app, with Playwright where NODE_PATH points
+sh web/flynext build bench/table/app /tmp/table && sh web/flynext start /tmp/table 4317 &
+NODE_PATH=…/node_modules node bench/table/diff.js 4317   # a thousand rows redrawn
 ```
 
 `bench/run.sh` needs clang, rustc, Go, Node and hyperfine; `bench/tasks.sh` clang, LLVM's tools and cargo, with tokio; `bench/web.sh` needs Node and npm for the Next.js build, wrk, and Playwright for the browser part. `RUNS`, `SECS` and `CONNS` change the number of runs, the seconds under load and the connections.

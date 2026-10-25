@@ -56,22 +56,30 @@ node "$root/selfhost/wasm-split.js" "$work/app.opt.ll" "$work" "${prefix}(\\d+)_
 "$bin/llvm-as" "$work/stubs.ll" -o "$work/stubs.bc"
 "$bin/llvm-link" "$work/core0.bc" "$work/stubs.bc" -o "$work/core.bc"
 "$bin/clang" --target=wasm32-wasip1 -O2 $eh -ffunction-sections -fdata-sections -c "$work/core.bc" -o "$work/core.o"
-# The core gives the routes its memory, its table of functions, and what they take of its own.
-take=""
-for s in $(cat "$work/exports.txt") calloc; do take="$take --export-if-defined=$s"; done
-# A route whose landing pads run as a panic passes takes the tag a panic is thrown with, which is
-# the core's (runtime.c).
-for s in $(cat "$work/undefined.txt") __cpp_exception; do take="$take --undefined=$s --export-if-defined=$s"; done
-# shellcheck disable=SC2086
-wasm-ld -m wasm32 $imports $link "$libc" "$work/core.o" -L"$sysroot/lib/wasm32-wasip1" -lc "$builtins" $exports \
-  --export-table --growable-table $take -o "$out"
-manifest="{"
+# The routes are compiled first: what their code generation calls of the compiler's own routines
+# (`__multi3` for a 64-bit multiplication checked for overflow) the core has, and gives them.
 for k in $(cat "$work/routes.txt"); do
   fn=$(grep -oE "^--func=${prefix}${k}_[0-9]+__fly$" "$work/route$k.args" | sed 's/^--func=//')
   "$bin/llvm-extract" $(cat "$work/route$k.args") "$work/all.bc" -o "$work/route$k.0.bc"
   # What is the route's alone is its own: only what is the core's is reached through the loader.
   "$bin/opt" -passes='internalize,globaldce' -internalize-public-api-list="$fn" "$work/route$k.0.bc" -o "$work/route$k.bc"
   "$bin/clang" --target=wasm32-wasip1 -O2 $eh -fPIC -ffunction-sections -fdata-sections -c "$work/route$k.bc" -o "$work/route$k.o"
+done
+# The core gives the routes its memory, its table of functions, and what they take of its own.
+take=""
+for s in $(cat "$work/exports.txt") calloc; do take="$take --export-if-defined=$s"; done
+# A route whose landing pads run as a panic passes takes the tag a panic is thrown with, which is
+# the core's (runtime.c).
+for s in $(cat "$work/undefined.txt") __cpp_exception; do take="$take --undefined=$s --export-if-defined=$s"; done
+for s in $(for k in $(cat "$work/routes.txt"); do "$bin/llvm-nm" -u "$work/route$k.o"; done | awk '{ print $NF }' | grep -E '^__[a-z]' | sort -u); do
+  take="$take --undefined=$s --export-if-defined=$s"
+done
+# shellcheck disable=SC2086
+wasm-ld -m wasm32 $imports $link "$libc" "$work/core.o" -L"$sysroot/lib/wasm32-wasip1" -lc "$builtins" $exports \
+  --export-table --growable-table $take -o "$out"
+manifest="{"
+for k in $(cat "$work/routes.txt"); do
+  fn=$(grep -oE "^--func=${prefix}${k}_[0-9]+__fly$" "$work/route$k.args" | sed 's/^--func=//')
   wasm-ld -m wasm32 --experimental-pic -shared --unresolved-symbols=import-dynamic --strip-all "$work/route$k.o" -o "$work/route$k.wasm"
   hash=$(shasum -a 256 "$work/route$k.wasm" | cut -c1-12)
   cp "$work/route$k.wasm" "$dir/route$k.$hash.wasm"

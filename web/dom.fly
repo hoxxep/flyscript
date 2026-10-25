@@ -9,7 +9,8 @@
 // the program until the page has one for it.
 
 import { parse } from "std/json";
-import { Ui, Event, posting } from "./ui";
+import { Ui, Event, Op, record as recordOps } from "./ui";
+import { HashMap } from "std/collections";
 
 extern "C" function fly_dom_root(): u32;
 extern "C" function fly_dom_child(parent: u32, i: u32): u32;
@@ -39,14 +40,9 @@ extern "C" function fly_arrived(url: u8*, ulen: u32, title: u8*, tlen: u32, desc
 
 // ---- strings across ----
 
-// A string's bytes, where the page can read them.
-function bytes(s: str): Vec<u8> {
-  let v: Vec<u8> = Vec.new();
-  for (const b of s.bytes()) { v.push(b); }
-  // The page reads none of an empty string's, but the address of one byte.
-  if (v.len() == 0) { v.push(0); }
-  v
-}
+// Where a string's bytes are, which the page reads where they are, as many as its length: of an
+// empty one, it reads none.
+function at(s: str): u8* { if (s.len() == 0) { Ptr.at(1) } else { Ptr.fromRef(s.asBytes()[0]) } }
 
 function addr(v: mut Vec<u8>): u8* { Ptr.fromMut(mut v[0]) }
 
@@ -67,17 +63,14 @@ export function initial(): String {
 
 // Asks the server: posts `body` to `url`, and gives what it answers.
 export function fetch(url: str, body: str): String {
-  let u = bytes(url);
-  let b = bytes(body);
-  const n = unsafe { fly_fetch(addr(mut u), url.len() as u32, addr(mut b), body.len() as u32) };
+  const n = unsafe { fly_fetch(at(url), url.len() as u32, at(body), body.len() as u32) };
   take(n)
 }
 
 // Asks the server for what the page at `url` shows: the route that answers it, its title and the
 // state it starts from, as JSON.
 export function get(url: str): String {
-  let u = bytes(url);
-  const n = unsafe { fly_get(addr(mut u), url.len() as u32) };
+  const n = unsafe { fly_get(at(url), url.len() as u32) };
   take(n)
 }
 
@@ -101,56 +94,30 @@ export function arrival(text: str): Arrival {
 
 // The page is now the one at `url`, called `title`, described as `description`.
 export function arrived(url: str, title: str, description: str, push: bool): void {
-  let u = bytes(url);
-  let t = bytes(title);
-  let d = bytes(description);
-  unsafe { fly_arrived(addr(mut u), url.len() as u32, addr(mut t), title.len() as u32, addr(mut d), description.len() as u32, push); }
+  unsafe { fly_arrived(at(url), url.len() as u32, at(title), title.len() as u32, at(description), description.len() as u32, push); }
 }
 
 // ---- the DOM ----
 
-function create(tag: str): u32 {
-  let t = bytes(tag);
-  unsafe { fly_dom_create(addr(mut t), tag.len() as u32) }
-}
+function create(tag: str): u32 { unsafe { fly_dom_create(at(tag), tag.len() as u32) } }
 
-function textNode(s: str): u32 {
-  let t = bytes(s);
-  unsafe { fly_dom_text(addr(mut t), s.len() as u32) }
-}
+function textNode(s: str): u32 { unsafe { fly_dom_text(at(s), s.len() as u32) } }
 
-function setText(node: u32, s: str): void {
-  let t = bytes(s);
-  unsafe { fly_dom_set_text(node, addr(mut t), s.len() as u32); }
-}
+function setText(node: u32, s: str): void { unsafe { fly_dom_set_text(node, at(s), s.len() as u32); } }
 
 function setAttr(node: u32, name: str, value: str): void {
-  let n = bytes(name);
-  let v = bytes(value);
-  unsafe { fly_dom_set_attr(node, addr(mut n), name.len() as u32, addr(mut v), value.len() as u32); }
+  unsafe { fly_dom_set_attr(node, at(name), name.len() as u32, at(value), value.len() as u32); }
 }
 
-function removeAttr(node: u32, name: str): void {
-  let n = bytes(name);
-  unsafe { fly_dom_remove_attr(node, addr(mut n), name.len() as u32); }
-}
+function removeAttr(node: u32, name: str): void { unsafe { fly_dom_remove_attr(node, at(name), name.len() as u32); } }
 
-function listen(node: u32, event: str, msg: usize): void {
-  let e = bytes(event);
-  unsafe { fly_dom_on(node, addr(mut e), event.len() as u32, msg as u32); }
-}
+function listen(node: u32, event: str, msg: usize): void { unsafe { fly_dom_on(node, at(event), event.len() as u32, msg as u32); } }
 
-function isTag(node: u32, tag: str): bool {
-  let t = bytes(tag);
-  unsafe { fly_dom_is(node, addr(mut t), tag.len() as u32) }
-}
+function isTag(node: u32, tag: str): bool { unsafe { fly_dom_is(node, at(tag), tag.len() as u32) } }
 
 // ---- renders ----
 
-export enum Op { #Open(String), #Key(String), #Attr(String, String), #On(String, usize), #Text(String), #Close }
-impl Clone for Op;
-
-// What a render made: its operations, and the node each `#Open` and `#Text` became. It knows
+// What a render made: its operations (`Op`), and the node each `#Open` and `#Text` became. It knows
 // nothing of the page's messages, so the next page's render is diffed against it as any other:
 // what the two show alike — a layout around both — is left as it is.
 export type Render = { ops: Vec<Op>; nodes: Vec<u32> };
@@ -160,24 +127,7 @@ export function nothing(): Render { { ops: Vec.new(), nodes: Vec.new() } }
 
 // Records what `view` does, and the messages its events give, numbered as its `#On`s say.
 export function record<M extends Send & Clone>(view: () => void uses Ui<M>): [Render, Vec<M>] {
-  let ops: Vec<Op> = Vec.new();
-  let msgs: Vec<M> = Vec.new();
-  // The elements open, innermost last: what posts an event's message is as the server rendered it.
-  let open: Vec<String> = Vec.new();
-  handle { view() } with Ui<M> {
-    open(tag) resumes k => { ops.push(#Open(tag.toString())); open.push(tag.toString()); k() }
-    key(s) resumes k => { ops.push(#Key(s.toString())); k() }
-    attr(name, value) resumes k => { ops.push(#Attr(name.toString(), value.toString())); k() }
-    on(event, msg) resumes k => {
-      ops.push(#On(event.toString(), msgs.len()));
-      const tag = match (open.last()) { #Some(t) => t.clone(), #None => String.new() };
-      for (const [name, value] of posting(tag.asStr(), event, msgs.len())) { ops.push(#Attr(name.clone(), value.clone())); }
-      msgs.push(msg.clone());
-      k()
-    }
-    text(s) resumes k => { ops.push(#Text(s.toString())); k() }
-    close() resumes k => { ops.push(#Close); open.pop(); k() }
-  };
+  const [ops, msgs] = recordOps(view);
   let nodes: Vec<u32> = Vec.new();
   for (const _ of 0..ops.len()) { nodes.push(0); }
   [{ ops, nodes }, msgs]
@@ -186,27 +136,9 @@ export function record<M extends Send & Clone>(view: () => void uses Ui<M>): [Re
 // One child of an element in a render: where its operations start and end, and its key.
 type Kid = { start: usize; end: usize; key: Option<String> };
 
-// Where the operations of the child starting at `i` end.
+// Where the operations of the child starting at `i` end: as its `#Open` says, for an element.
 function spanOf(ops: readonly Vec<Op>, i: usize): usize {
-  match (ops[i]) {
-    #Open(_) => {
-      let depth: usize = 0;
-      let j = i;
-      while (j < ops.len()) {
-        match (ops[j]) {
-          #Open(_) => { depth += 1; }
-          #Close => {
-            depth -= 1;
-            if (depth == 0) { return j + 1; }
-          }
-          _ => {}
-        }
-        j += 1;
-      }
-      ops.len()
-    }
-    _ => i + 1,
-  }
+  match (ops[i]) { #Open(_, end) => end, _ => i + 1 }
 }
 
 // The children whose operations start at `from`, up to the `#Close` of the element they are in.
@@ -216,7 +148,7 @@ function kids(ops: readonly Vec<Op>, from: usize): Vec<Kid> {
   while (i < ops.len()) {
     match (ops[i]) {
       #Close => return out,
-      #Open(_) | #Text(_) => {
+      #Open(_, _) | #Text(_) => {
         const end = spanOf(ops, i);
         out.push({ start: i, end, key: keyOf(ops, i) });
         i = end;
@@ -229,7 +161,7 @@ function kids(ops: readonly Vec<Op>, from: usize): Vec<Kid> {
 
 // An element's key, among its own operations, before its children.
 function keyOf(ops: readonly Vec<Op>, i: usize): Option<String> {
-  if (const #Open(_) = ops[i]) {
+  if (const #Open(_, _) = ops[i]) {
     let j = i + 1;
     while (j < ops.len()) {
       match (ops[j]) {
@@ -242,13 +174,9 @@ function keyOf(ops: readonly Vec<Op>, i: usize): Option<String> {
   #None
 }
 
-// Whether two children are the same kind of node: elements of one tag, or texts.
-function sameKind(a: readonly Op, b: readonly Op): bool {
-  match (a) {
-    #Open(x) => match (b) { #Open(y) => x == y, _ => false },
-    #Text(_) => match (b) { #Text(_) => true, _ => false },
-    _ => false,
-  }
+// What kind of node a child is: an element of its tag, or a text.
+function kindOf(op: readonly Op): String {
+  match (op) { #Open(tag, _) => tag.clone(), _ => "#text".toString() }
 }
 
 // An element's attributes and events, as the operations after its `#Open` say.
@@ -276,7 +204,7 @@ function build(f: mut Render, i: usize): u32 {
       f.nodes[i] = node;
       node
     }
-    #Open(tag) => {
+    #Open(tag, _) => {
       const node = create(tag.asStr());
       f.nodes[i] = node;
       const [attrs, events] = props(f.ops, i);
@@ -301,7 +229,7 @@ function adopt(f: mut Render, i: usize, node: u32): bool {
       f.nodes[i] = node;
       true
     }
-    #Open(tag) => {
+    #Open(tag, _) => {
       if (!isTag(node, tag.asStr())) { return false; }
       f.nodes[i] = node;
       const [_, events] = props(f.ops, i);
@@ -349,7 +277,7 @@ function patch(old: readonly Render, oi: usize, new: mut Render, ni: usize): u32
     #Text(s) => {
       if (const #Text(was) = old.ops[oi] && was != s) { setText(node, s.asStr()); }
     }
-    #Open(_) => {
+    #Open(_, _) => {
       const [oa, _] = props(old.ops, oi);
       const [na, ne] = props(new.ops, ni);
       for (const [n, v] of na) {
@@ -371,24 +299,37 @@ function patch(old: readonly Render, oi: usize, new: mut Render, ni: usize): u32
 // Updates the children of `parent`, which `old`'s start at `oi` and `new`'s at `ni`: each new one
 // matched to an old one by key, or in order among those of its kind without one; the rest made,
 // the old ones not matched removed, and all put in order.
+//
+// The old children are found by what matches them: each kind of node's, by key, in order, and a
+// cursor into each kind's without a key, so that a list is matched in time as long as it is.
 export function children(parent: u32, old: readonly Render, oi: usize, new: mut Render, ni: usize): void {
   const was = kids(old.ops, oi);
   const now = kids(new.ops, ni);
   let used: Vec<bool> = Vec.new();
   for (const _ of was) { used.push(false); }
+  // By kind, and key after a zero byte, which no tag has, for a keyed child.
+  let lists: HashMap<String, Vec<usize>> = HashMap.new();
+  for (const [j, w] of was.iter().enumerate()) {
+    const at = match (w.key) { #Some(k) => `${kindOf(old.ops[w.start])}\u{0}${k}`, #None => kindOf(old.ops[w.start]) };
+    match (lists.getMut(at.asStr())) {
+      #Some(v) => v.push(j),
+      #None => { lists.insert(at, [j]); }
+    }
+  }
+  // How far each list has been taken from.
+  let taken: HashMap<String, usize> = HashMap.new();
   let nodes: Vec<u32> = Vec.new();
   for (const kid of now) {
     let found: Option<usize> = #None;
-    for (const [j, w] of was.iter().enumerate()) {
-      if (used[j] || !sameKind(old.ops[w.start], new.ops[kid.start])) { continue; }
-      const fits = match (kid.key) {
-        #Some(k) => match (w.key) { #Some(wk) => wk == k, #None => false },
-        #None => w.key.isNone(),
-      };
-      if (fits) {
-        found = #Some(j);
-        break;
+    const at = match (kid.key) { #Some(k) => `${kindOf(new.ops[kid.start])}\u{0}${k}`, #None => kindOf(new.ops[kid.start]) };
+    if (const #Some(list) = lists.get(at.asStr())) {
+      let t = match (taken.get(at.asStr())) { #Some(t) => t + 0, #None => 0 };
+      while (t < list.len() && used[list[t]]) { t += 1; }
+      if (t < list.len()) {
+        found = #Some(list[t]);
+        t += 1;
       }
+      taken.insert(at.clone(), t);
     }
     const node = match (found) {
       #Some(j) => {

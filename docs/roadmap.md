@@ -234,6 +234,8 @@ No language change is needed. There was no `async` and no `await`, and there sti
 
 - **Stack checks.** The stack checks of step 13 cost the compiler about 6% natively. Derived `Clone`, `Eq`, `Hash` and drop glue recurse on a value's structure, so a long chain recurses once per link and checks each time: iterating along a chain's last field instead would remove most checks and also make a long list cheap to drop. In a cycle of several functions, only a feedback set of them needs to check.
 
+**Progress.** The simulated ping-pong, run as a state machine since step 15, takes 141 to 148 milliseconds to the old C scheduler's 191. The line reader finds a line's end and whether its bytes are ASCII in one pass, eight bytes at a time, and checks only lines that are not ASCII: an ASCII file reads in 1.07 to 1.13 times the old reader's CPU, which checked nothing, and a file of mixed UTF-8 in 1.45 times; either is 19 to 40 percent faster than Rust's `BufRead::lines`. Left: the rest of the gap on mixed UTF-8, for step 17; closures only called; and the stack checks.
+
 **Done when:** the ping-pong and the line reader are within the run-to-run noise of the C they replaced, or faster, and the interleaving test passes on all five implementations for every seed it tries.
 
 ## 17. Portable SIMD
@@ -257,6 +259,8 @@ No grammar change is needed; `comptime N` is already in the language. JavaScript
 
 - **Props anywhere in an element's body.** Today an attribute, class, key or listener given after an element's text or first child is silently wrong. The server writes it into the element's text (`<button>Save class="primary"</button>`) and the browser ignores it. This is a correctness bug that looks like a style rule. Order inside `el(...)` must not matter: the server writes an element's opening tag once its attributes are all known, and the browser reads an element's props past its children.
 - **No wasted work in the diff.** Each recorded `#Open` knows where its element ends, so finding an element's span is a lookup rather than a scan, which removes the quadratic cost on deep pages. Strings go to the DOM as a pointer and a length into the module's memory rather than being copied into a new buffer each time.
+
+**Progress.** Done. An element's props may come anywhere in its body: the server holds an element's opening tag open until its body ends and writes a late attribute into it in order, and the program records each element's props first however they came, so the two agree, which `tests/web/props_anywhere.fly` checks on every back end. Each recorded `#Open` holds where its element ends; the diff matches a list's children by one hash map keyed by kind and key rather than a scan per child; and text goes to the DOM as a pointer and a length into the program's memory. On a thousand keyed rows (`bench/table`), a change to one counter is shown in 2.0 milliseconds rather than 2.7, and reversing the rows in 2.5 rather than 7.8. Writing it found that a page's module that took the address of a function of the C library, or needed one of the compiler's arithmetic helpers, failed to link.
 
 **Done when:** props in any order render identically on the server and in the browser, by test, and diffing a 1,000-row table is measurably faster.
 

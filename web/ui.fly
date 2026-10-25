@@ -5,12 +5,13 @@
 // turns into a new model, and the view shows that.
 
 export effect Ui<M> {
-  // Starts an element, whose attributes, events and children follow, until `close`.
+  // Starts an element, whose attributes, events and children follow, until `close`. Its attributes,
+  // key and events may come in any order with its children: each is the innermost open element's.
   open(tag: str): void;
-  // Who the element just opened is among its siblings, for a list whose items move.
+  // Who the element is among its siblings, for a list whose items move.
   key(k: str): void;
   attr(name: str, value: str): void;
-  // When `event` happens on the element just opened, the program is given `msg`.
+  // When `event` happens on the element, the program is given `msg`.
   on(event: str, msg: M): void;
   text(s: str): void;
   close(): void;
@@ -136,47 +137,52 @@ export function escape(s: str, out: mut String): void {
 // when it takes the page over, as it renders the same view again — but for what posts their
 // messages without it (`posting`).
 export function html<M>(out: mut String, view: () => void uses Ui<M>): void {
-  // Whether a start tag is still open, waiting for its attributes; the elements open, innermost last;
-  // how many messages the events so far give.
+  // Whether a start tag is still open, waiting for its attributes; the elements open, innermost last,
+  // with where each's start tag ends once it has, for an attribute given after its children; how
+  // many messages the events so far give.
   let starting = false;
   let open: Vec<String> = Vec.new();
+  let ends: Vec<usize> = Vec.new();
   let events: usize = 0;
   handle { view() } with Ui<M> {
     open(tag) resumes k => {
-      if (starting) { out.push(">"); }
+      if (starting) { endTag(mut out, mut ends); }
       out.push("<");
       out.push(tag);
       open.push(tag.toString());
+      ends.push(0);
       starting = true;
       k()
     }
     key(_) resumes k => k(),
     attr(name, value) resumes k => {
-      out.push(" ");
-      out.push(name);
-      out.push("=\"");
-      escape(value, mut out);
-      out.push("\"");
+      let a = String.new();
+      a.push(" ");
+      a.push(name);
+      a.push("=\"");
+      escape(value, mut a);
+      a.push("\"");
+      lateAttr(mut out, starting, mut ends, a.asStr());
       k()
     }
     on(event, _) resumes k => {
-      if (starting) {
-        match (open.last()) {
-          #Some(tag) => writePosting(tag.asStr(), event, events, mut out),
-          #None => {}
-        }
+      if (const #Some(tag) = open.last()) {
+        let a = String.new();
+        writePosting(tag.asStr(), event, events, mut a);
+        lateAttr(mut out, starting, mut ends, a.asStr());
       }
       events += 1;
       k()
     }
     text(s) resumes k => {
-      if (starting) { out.push(">"); starting = false; }
+      if (starting) { endTag(mut out, mut ends); starting = false; }
       escape(s, mut out);
       k()
     }
     close() resumes k => {
-      if (starting) { out.push(">"); starting = false; }
+      if (starting) { endTag(mut out, mut ends); starting = false; }
       const tag = match (open.pop()) { #Some(t) => t, #None => String.new() };
+      ends.pop();
       if (!isVoid(tag.asStr())) {
         out.push("</");
         out.push(tag.asStr());
@@ -185,4 +191,142 @@ export function html<M>(out: mut String, view: () => void uses Ui<M>): void {
       k()
     }
   };
+}
+
+// The innermost open element's start tag ends here.
+function endTag(out: mut String, ends: mut Vec<usize>): void {
+  const n = ends.len();
+  if (n > 0) { ends[n - 1] = out.len(); }
+  out.push(">");
+}
+
+// An attribute of the innermost open element: in its start tag, still being written, or put back
+// into it, before its `>`, after those put there before it, once its children have followed it.
+function lateAttr(out: mut String, starting: bool, ends: mut Vec<usize>, a: str): void {
+  if (a.len() == 0) { return; }
+  const n = ends.len();
+  if (starting || n == 0) {
+    out.push(a);
+    return;
+  }
+  const at = ends[n - 1];
+  const rest = out.asStr().slice(at, out.len()).toString();
+  let s = out.asStr().slice(0, at).toString();
+  s.push(a);
+  s.push(rest.asStr());
+  out = s;
+  ends[n - 1] = at + a.len();
+}
+
+// ---- recorded ----
+
+// What a view does, as a flat list: each element's `#Open`, with where its operations end; its
+// attributes, key and events, whatever order the view gave them in; its children; and its `#Close`.
+export enum Op { #Open(String, usize), #Key(String), #Attr(String, String), #On(String, usize), #Text(String), #Close }
+impl Clone for Op;
+
+// The operations `view` does, each element's own before its children, and the messages its events
+// give, numbered as its `#On`s say, with what posts each of them without the page's program.
+export function record<M extends Send & Clone>(view: () => void uses Ui<M>): [Vec<Op>, Vec<M>] {
+  let ops: Vec<Op> = Vec.new();
+  let msgs: Vec<M> = Vec.new();
+  // The elements open, innermost last, and whether each has had a child yet; whether any element's
+  // own came after a child of its.
+  let open: Vec<String> = Vec.new();
+  let fed: Vec<bool> = Vec.new();
+  let late = false;
+  handle { view() } with Ui<M> {
+    open(tag) resumes k => {
+      if (fed.len() > 0) { fed[fed.len() - 1] = true; }
+      ops.push(#Open(tag.toString(), 0));
+      open.push(tag.toString());
+      fed.push(false);
+      k()
+    }
+    key(s) resumes k => {
+      late = late || (fed.len() > 0 && fed[fed.len() - 1]);
+      ops.push(#Key(s.toString()));
+      k()
+    }
+    attr(name, value) resumes k => {
+      late = late || (fed.len() > 0 && fed[fed.len() - 1]);
+      ops.push(#Attr(name.toString(), value.toString()));
+      k()
+    }
+    on(event, msg) resumes k => {
+      late = late || (fed.len() > 0 && fed[fed.len() - 1]);
+      ops.push(#On(event.toString(), msgs.len()));
+      const tag = match (open.last()) { #Some(t) => t.clone(), #None => String.new() };
+      for (const [name, value] of posting(tag.asStr(), event, msgs.len())) { ops.push(#Attr(name.clone(), value.clone())); }
+      msgs.push(msg.clone());
+      k()
+    }
+    text(s) resumes k => {
+      if (fed.len() > 0) { fed[fed.len() - 1] = true; }
+      ops.push(#Text(s.toString()));
+      k()
+    }
+    close() resumes k => {
+      ops.push(#Close);
+      open.pop();
+      fed.pop();
+      k()
+    }
+  };
+  let all = if (late) { ownFirst(ops) } else { ops };
+  spans(mut all);
+  [all, msgs]
+}
+
+// An element's own operations — attributes, key, events — moved before its children.
+function ownFirst(ops: Vec<Op>): Vec<Op> {
+  let all = ops;
+  // For each element open, innermost last: its `#Open`, its own, and its children's so far.
+  let opens: Vec<Op> = Vec.new();
+  let owns: Vec<Vec<Op>> = [Vec.new()];
+  let bodies: Vec<Vec<Op>> = [Vec.new()];
+  for (const op of all.drain()) {
+    match (op) {
+      #Open(_, _) => {
+        opens.push(op);
+        owns.push(Vec.new());
+        bodies.push(Vec.new());
+      }
+      #Key(_) | #Attr(_, _) | #On(_, _) => {
+        const n = owns.len();
+        owns[n - 1].push(op);
+      }
+      #Text(_) => {
+        const n = bodies.len();
+        bodies[n - 1].push(op);
+      }
+      #Close => {
+        const o = match (opens.pop()) { #Some(o) => o, #None => continue };
+        let own = match (owns.pop()) { #Some(v) => v, #None => Vec.new() };
+        let body = match (bodies.pop()) { #Some(v) => v, #None => Vec.new() };
+        const n = bodies.len();
+        bodies[n - 1].push(o);
+        for (const x of own.drain()) { bodies[n - 1].push(x); }
+        for (const x of body.drain()) { bodies[n - 1].push(x); }
+        bodies[n - 1].push(#Close);
+      }
+    }
+  }
+  match (bodies.pop()) { #Some(v) => v, #None => Vec.new() }
+}
+
+// Each `#Open` told where its element's operations end.
+function spans(ops: mut Vec<Op>): void {
+  let open: Vec<usize> = Vec.new();
+  for (const i of 0..ops.len()) {
+    match (ops[i]) {
+      #Open(_, _) => open.push(i),
+      #Close => {
+        if (const #Some(at) = open.pop()) {
+          if (const #Open(tag, _) = ops[at]) { ops[at] = #Open(tag.clone(), i + 1); }
+        }
+      }
+      _ => {}
+    }
+  }
 }

@@ -1,0 +1,46 @@
+// A table of a thousand rows, each keyed, and what changes it: every tenth row's count, or the
+// order of all of them. What the browser does with each change is the diff's.
+
+import { Ui, Event, el, text, attr, on, key } from "web/ui";
+import { Page } from "web/dom";
+
+export type Row = { id: u32; label: String; n: u32 };
+export type Model = { rows: Vec<Row>; ticks: u32 };
+export type Msg = #Tick | #Reverse;
+
+export const title: str = "A thousand rows";
+
+export function load(): Model {
+  let rows: Vec<Row> = Vec.new();
+  for (const i of 0..1000) { rows.push({ id: i as u32, label: `row ${i}`, n: 0 }); }
+  { rows, ticks: 0 }
+}
+
+export function update(m: mut Model, msg: Msg, ev: readonly Event): void uses Page<Model> {
+  match (msg) {
+    #Tick => {
+      m.ticks += 1;
+      let i: usize = 0;
+      while (i < m.rows.len()) {
+        m.rows[i].n += 1;
+        i += 10;
+      }
+    }
+    #Reverse => { m.rows.reverse(); }
+  }
+}
+
+export function view(m: readonly Model): void uses Ui<Msg> {
+  el("button", () => { attr("id", "tick"); on("click", #Tick); text("tick"); });
+  el("button", () => { attr("id", "reverse"); on("click", #Reverse); text("reverse"); });
+  el("p", () => { attr("id", "ticks"); text(`${m.ticks}`.asStr()); });
+  el("table", () => {
+    for (const r of m.rows) {
+      el("tr", () => {
+        key(`${r.id}`.asStr());
+        el("td", () => text(r.label.asStr()));
+        el("td", () => text(`${r.n}`.asStr()));
+      });
+    }
+  });
+}
