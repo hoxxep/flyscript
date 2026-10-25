@@ -1,0 +1,84 @@
+// expect: odd sum 64
+// expect: seen [0, 10, 20, 30], tens ended then after the loop
+// expect: name 0;name 1;name 2;name 3;
+// expect: checked #Err(#Three)
+// expect: first over 50: 8
+// expect: pairs 310
+// Loops over calls of generators, which compiled code runs with the generator's body in place
+// (§11.3), do what a generator pulled item by item does: the loop's `continue` takes the next
+// item and its `break` drops the generator, running its cleanup there and then; a `return` from
+// the loop's body leaves both; a generator's failure leaves the loop; owned items are each dropped
+// once; and a generator looping over another nests.
+import { println } from "std/io";
+
+function upTo(n: u64): void uses Yield<u64> {
+  let i: u64 = 0;
+  while (i < n) {
+    yield i;
+    i += 1;
+  }
+}
+
+function tens(log: mut Vec<String>, n: u64): void uses Yield<u64> {
+  defer log.push("tens ended".toString());
+  for (const i of upTo(n)) { yield i * 10; }
+}
+
+function names(n: u64): void uses Yield<String> {
+  for (const i of upTo(n)) { yield `name ${i}`; }
+}
+
+function checked(n: u64): void uses Yield<u64>, Fail<#Three> {
+  for (const i of upTo(n)) {
+    if (i == 3) { throw #Three; }
+    yield i;
+  }
+}
+
+function firstOver(limit: u64): u64 {
+  for (const t of upTo(100)) {
+    if (t * t > limit) { return t; }
+  }
+  0
+}
+
+export function main(): void uses Io {
+  let odd: u64 = 0;
+  for (const i of upTo(20)) {
+    if (i % 2 == 0) { continue; }
+    if (i > 15) { break; }
+    odd += i;
+  }
+  println(`odd sum ${odd}`);
+
+  let log: Vec<String> = Vec.new();
+  let seen: Vec<u64> = Vec.new();
+  for (const t of tens(mut log, 10)) {
+    if (t == 40) { break; }
+    seen.push(t);
+  }
+  log.push("after the loop".toString());
+  println(`seen ${seen}, ${log.join(" then ")}`);
+
+  let all = String.new();
+  for (const n of names(4)) {
+    all.push(n.asStr());
+    all.push(";");
+  }
+  println(all);
+
+  const got = try {
+    let s: u64 = 0;
+    for (const i of checked(10)) { s += i; }
+    #Ok(s)
+  } catch (e) { #Err(e) };
+  println(`checked ${got}`);
+
+  println(`first over 50: ${firstOver(50)}`);
+
+  let pairs: u64 = 0;
+  for (const a of upTo(5)) {
+    for (const b of upTo(a)) { pairs += a * 10 + b; }
+  }
+  println(`pairs ${pairs}`);
+}

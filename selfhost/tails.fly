@@ -201,9 +201,9 @@ export function maxLabel(b: readonly Block): usize {
 }
 
 // How an inlined body's locals and labels are renumbered.
-type Map = { base: usize; labels: usize };
+export type Map = { base: usize; labels: usize };
 
-function mapBlock(b: readonly Block, m: readonly Map): Block {
+export function mapBlock(b: readonly Block, m: readonly Map): Block {
   let locals: Vec<usize> = Vec.new();
   for (const l of b.locals) { locals.push(m.base + l); }
   let cleanups: Vec<Cleanup> = Vec.new();
@@ -232,6 +232,12 @@ function mapStmt(s: readonly Stmt, m: readonly Map): Stmt {
     #Block(x) => #Block(mapBlock(x, m)),
     #Labeled(l, x) => #Labeled(m.labels + l, mapBlock(x, m)),
     #Arm(f) => #Arm(m.base + f),
+    #Throw(op, t) => #Throw(mapOperand(op, m), t.clone()),
+    #Yield(op, t) => #Yield(mapOperand(op, m), t.clone()),
+    #ForGen(l, c, x, y) => #ForGen(m.labels + l, mapCall(c, m), m.base + x, mapBlock(y, m)),
+    #Panic(_) | #At(_) => s.clone(),
+    // What is never inlined: an inlined body has none of these (`inlinable`, gens.fly's
+    // `genInlinable`).
     _ => s.clone(),
   }
 }
@@ -264,7 +270,7 @@ function mapCall(c: readonly Call, m: readonly Map): Call {
   d
 }
 
-function mapOperand(op: readonly Operand, m: readonly Map): Operand {
+export function mapOperand(op: readonly Operand, m: readonly Map): Operand {
   match (op) {
     #Copy(p) => #Copy(mapPlace(p, m)),
     #Move(p) => #Move(mapPlace(p, m)),

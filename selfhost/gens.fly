@@ -1,0 +1,185 @@
+// Loops over a generator's call with the generator inlined (§5.5, §11.3): `for (const l of
+// f.lines()) { … }` runs `lines`' body in place, the loop's body where it yields, so an item costs
+// what the code making it and the code taking it cost, and no resuming of a generator between them.
+//
+// The generator's body goes in as it is, its locals and labels renumbered, its parameters given the
+// call's arguments, in a block the loop's `break` and the generator's `return` leave — which runs
+// the generator's cleanups, as dropping a generator part way does. Its one `yield` gives the loop's
+// item and runs the loop's body, in a block its `continue` leaves, to go on after the `yield`. A
+// generator that yields in more than one place, or within a `try`, which would catch what the loop's
+// body throws, or that handles, performs or resumes an effect, makes a closure or takes a region,
+// is called as before.
+
+import { Func, Block, Stmt, Rvalue, Operand, Call, Callee, Cleanup, Local, LocalKind } from "./ir";
+import { Map, mapBlock, mapOperand, maxLabel } from "./tails";
+import { HashMap, HashSet } from "std/collections";
+
+// The instances `f` loops over by calling them.
+export function genLoops(f: readonly Func): Vec<usize> {
+  let out: Vec<usize> = Vec.new();
+  loopsIn(f.body, mut out);
+  out
+}
+
+function loopsIn(b: readonly Block, out: mut Vec<usize>): void {
+  for (const c of b.cleanups) { if (const #Defer(_, d) = c) { loopsIn(d, mut out); } }
+  for (const s of b.stmts) {
+    match (s) {
+      #ForGen(_, c, _, x) => {
+        if (const #Inst(g) = c.callee && !out.includes(g)) { out.push(g); }
+        loopsIn(x, mut out);
+      }
+      #If(_, x, y) | #Loop(_, x, y) | #Try(x, _, y) => { loopsIn(x, mut out); loopsIn(y, mut out); }
+      #Block(x) | #Labeled(_, x) | #Region(_, _, x) => loopsIn(x, mut out),
+      #Handle(h) => { loopsIn(h.body, mut out); for (const a of h.arms) { loopsIn(a.body, mut out); } }
+      _ => {}
+    }
+  }
+}
+
+// Whether generator `g` may be inlined in a loop over its call.
+export function genInlinable(g: readonly Func): bool {
+  if (g.yields.isNone() || g.captures.len() > 0 || g.regions.len() > 0) { return false; }
+  let n: usize = 0;
+  let yields: usize = 0;
+  genBlock(g.body, mut n, mut yields) && yields == 1 && n <= 200
+}
+
+function genBlock(b: readonly Block, n: mut usize, yields: mut usize): bool {
+  for (const c of b.cleanups) {
+    match (c) {
+      #Drop(_) => {}
+      #Defer(_, d) => { if (!genBlock(d, mut n, mut yields)) { return false; } }
+      #Arena(_) => return false,
+    }
+  }
+  for (const s of b.stmts) {
+    n += 1;
+    const ok = match (s) {
+      #Let(_, rv) | #Store(_, rv) => match (rv) { #Closure(_, _, _) => false, #Call(c) => c.regions.len() == 0, _ => true },
+      #Yield(_, _) => { yields += 1; true }
+      #Drop(_) | #Break(_) | #Continue(_) | #Return(_) | #Throw(_, _) | #Panic(_) | #Arm(_) | #At(_) => true,
+      #If(_, x, y) | #Loop(_, x, y) => genBlock(x, mut n, mut yields) && genBlock(y, mut n, mut yields),
+      #Block(x) | #Labeled(_, x) => genBlock(x, mut n, mut yields),
+      #ForGen(_, c, _, x) => c.regions.len() == 0 && genBlock(x, mut n, mut yields),
+      _ => false,
+    };
+    if (!ok) { return false; }
+  }
+  true
+}
+
+// `f`'s loops over calls of the generators in `gens` with the generators inlined: once, so that a
+// generator looping over a call of itself is not inlined in itself without end.
+export function inlineGenLoops(f: mut Func, gens: readonly HashMap<usize, Func>): void {
+  let labels = maxLabel(f.body) + 1;
+  let body = replace(mut f.body, { locals: Vec.new(), cleanups: Vec.new(), stmts: Vec.new() });
+  f.body = genLoopsIn(f, body, gens, mut labels);
+}
+
+// `b` with its loops over calls of `gens` inlined, labels from `labels` on given out.
+function genLoopsIn(f: mut Func, b: Block, gens: readonly HashMap<usize, Func>, labels: mut usize): Block {
+  let stmts: Vec<Stmt> = Vec.new();
+  let cleanups: Vec<Cleanup> = Vec.new();
+  for (const c of b.cleanups.drain()) {
+    cleanups.push(match (c) { #Defer(fl, d) => #Defer(fl, genLoopsIn(f, d, gens, mut labels)), _ => c });
+  }
+  for (const s of b.stmts.drain()) {
+    stmts.push(match (s) {
+      #ForGen(l, c, x, body) => {
+        const inner = genLoopsIn(f, body, gens, mut labels);
+        match (c.callee) {
+          #Inst(g) => match (gens.get(g)) {
+            #Some(gen) => inlineGen(f, l, c, x, inner, gen, mut labels),
+            #None => #ForGen(l, c, x, inner),
+          },
+          _ => #ForGen(l, c, x, inner),
+        }
+      }
+      #If(op, x, y) => #If(op, genLoopsIn(f, x, gens, mut labels), genLoopsIn(f, y, gens, mut labels)),
+      #Loop(l, x, y) => #Loop(l, genLoopsIn(f, x, gens, mut labels), genLoopsIn(f, y, gens, mut labels)),
+      #Try(x, e, y) => #Try(genLoopsIn(f, x, gens, mut labels), e, genLoopsIn(f, y, gens, mut labels)),
+      #Block(x) => #Block(genLoopsIn(f, x, gens, mut labels)),
+      #Labeled(l, x) => #Labeled(l, genLoopsIn(f, x, gens, mut labels)),
+      #Region(r, a, x) => #Region(r, a, genLoopsIn(f, x, gens, mut labels)),
+      _ => s,
+    });
+  }
+  { locals: b.locals, cleanups, stmts }
+}
+
+// The loop `label` over call `c` of generator `gen`, its item in `x`, its body `body`, as `gen`'s
+// body inlined.
+function inlineGen(f: mut Func, label: usize, c: readonly Call, x: usize, body: Block, gen: readonly Func, labels: mut usize): Stmt {
+  const base = f.locals.len();
+  for (const l of gen.locals) {
+    const kind: LocalKind = match (l.kind) { #Param => #Binding, _ => l.kind.clone() };
+    f.locals.push({ name: l.name.clone(), ty: l.ty.clone(), kind });
+  }
+  const m: Map = { base, labels };
+  const end = labels + maxLabel(gen.body) + 1;
+  const next = end + 1;
+  labels = next + 1;
+  const item = relabel(body, label, next, end);
+  let g = yieldTo(mapBlock(gen.body, m), x, item, end);
+  let stmts: Vec<Stmt> = Vec.new();
+  for (const [k, p] of gen.params.iter().enumerate()) { stmts.push(#Let(base + p, #Use(c.args[k].clone()))); }
+  for (const s of g.stmts.drain()) { stmts.push(s); }
+  g.stmts = stmts;
+  #Labeled(end, g)
+}
+
+// `b`, a generator's body, its `yield` running the loop's body `item` with the value in `x`, and
+// its `return` leaving the loop, labeled `end`.
+function yieldTo(b: Block, x: usize, item: readonly Block, end: usize): Block {
+  let stmts: Vec<Stmt> = Vec.new();
+  let cleanups: Vec<Cleanup> = Vec.new();
+  for (const c of b.cleanups.drain()) {
+    cleanups.push(match (c) { #Defer(fl, d) => #Defer(fl, yieldTo(d, x, item, end)), _ => c });
+  }
+  for (const s of b.stmts.drain()) {
+    stmts.push(match (s) {
+      #Yield(op, _) => {
+        let run = item.clone();
+        let first: Vec<Stmt> = [#Let(x, #Use(op))];
+        for (const t of run.stmts.drain()) { first.push(t); }
+        run.stmts = first;
+        // `item`'s `continue` leaves the block it is labeled by: the label after `end`.
+        #Labeled(end + 1, run)
+      }
+      #Return(_) => #Break(end),
+      #If(op, y, z) => #If(op, yieldTo(y, x, item, end), yieldTo(z, x, item, end)),
+      #Loop(l, y, z) => #Loop(l, yieldTo(y, x, item, end), yieldTo(z, x, item, end)),
+      #Block(y) => #Block(yieldTo(y, x, item, end)),
+      #Labeled(l, y) => #Labeled(l, yieldTo(y, x, item, end)),
+      #ForGen(l, c, v, y) => #ForGen(l, c, v, yieldTo(y, x, item, end)),
+      _ => s,
+    });
+  }
+  { locals: b.locals, cleanups, stmts }
+}
+
+// The loop's body, its `continue` of loop `label` leaving the block labeled `next` and its `break`
+// the one labeled `end`.
+function relabel(b: Block, label: usize, next: usize, end: usize): Block {
+  let stmts: Vec<Stmt> = Vec.new();
+  let cleanups: Vec<Cleanup> = Vec.new();
+  for (const c of b.cleanups.drain()) {
+    cleanups.push(match (c) { #Defer(fl, d) => #Defer(fl, relabel(d, label, next, end)), _ => c });
+  }
+  for (const s of b.stmts.drain()) {
+    stmts.push(match (s) {
+      #Continue(l) => if (l == label) { #Break(next) } else { #Continue(l) },
+      #Break(l) => if (l == label) { #Break(end) } else { #Break(l) },
+      #If(op, y, z) => #If(op, relabel(y, label, next, end), relabel(z, label, next, end)),
+      #Loop(l, y, z) => #Loop(l, relabel(y, label, next, end), relabel(z, label, next, end)),
+      #Try(y, e, z) => #Try(relabel(y, label, next, end), e, relabel(z, label, next, end)),
+      #Block(y) => #Block(relabel(y, label, next, end)),
+      #Labeled(l, y) => #Labeled(l, relabel(y, label, next, end)),
+      #Region(r, a, y) => #Region(r, a, relabel(y, label, next, end)),
+      #ForGen(l, c, v, y) => #ForGen(l, c, v, relabel(y, label, next, end)),
+      _ => s,
+    });
+  }
+  { locals: b.locals, cleanups, stmts }
+}

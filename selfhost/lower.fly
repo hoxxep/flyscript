@@ -23,6 +23,7 @@ import {
 } from "./ir";
 import { pends } from "./frames";
 import { Site, tailSites, inlinable, inlineAt, onceGiven, awayFromFrame, jumpsFor } from "./tails";
+import { genLoops, genInlinable, inlineGenLoops } from "./gens";
 import { HashMap, HashSet } from "std/collections";
 
 // A function with its generic arguments.
@@ -82,8 +83,11 @@ export struct Lower {
   // (tails.fly); and those that may be inlined where they are called so.
   ahead: HashMap<usize, Option<Func>>;
   inlinables: HashSet<usize>;
-  // For each instance lowered, the instances it calls in tail position.
+  // For each instance lowered, the instances it calls in tail position, and whether it is a
+  // generator that may be inlined in a loop over its call.
   tailCallees: HashMap<usize, Vec<usize>>;
+  genOk: HashMap<usize, bool>;
+  genBodies: HashMap<usize, Func>;
 }
 
 export function newLower(p: Prog): Lower {
@@ -92,7 +96,7 @@ export function newLower(p: Prog): Lower {
     p, insts: Vec.new(), instIndex: HashMap.new(), closures: Vec.new(), fid: 0, map: HashMap.new(), module: 0,
     ret: #Prim(#Void), locals: Vec.new(), frames: Vec.new(), scopes: Vec.new(), loops: Vec.new(), labels: 0,
     captures: Vec.new(), regions: Vec.new(), yields: #None, homes: Vec.new(), lent: Vec.new(), handlesIo,
-    onlyCalled: HashMap.new(), ahead: HashMap.new(), inlinables: HashSet.new(), tailCallees: HashMap.new(),
+    onlyCalled: HashMap.new(), ahead: HashMap.new(), inlinables: HashSet.new(), tailCallees: HashMap.new(), genOk: HashMap.new(), genBodies: HashMap.new(),
   }
 }
 
@@ -3023,12 +3027,53 @@ impl Lower {
   export function func(self: mut Self, i: usize): Option<Func> uses Fail<Diagnostic> {
     const f: Option<Func> = match (self.ahead.remove(i)) { #Some(f) => f, #None => self.lowered(i) };
     match (f) {
-      #Some(g) => {
+      #Some(g0) => {
+        self.noteGen(i, g0);
+        const g = self.genInlined(i, g0);
         const sites = self.noteTails(i, g);
         #Some(self.tails(i, g, sites))
       }
       #None => #None,
     }
+  }
+
+  // `f`, instance `i`, with its loops over calls of generators that may be inlined so inlined
+  // (gens.fly).
+  // Three rounds, so that a generator looping over another is inlined with it, and one looping
+  // over itself is not inlined without end.
+  function genInlined(self: mut Self, i: usize, f: Func): Func uses Fail<Diagnostic> {
+    let h = f;
+    for (const _ of 0..3) {
+      const gens = genLoops(h);
+      if (gens.len() == 0) { break; }
+      let bodies: HashMap<usize, Func> = HashMap.new();
+      for (const g of gens) {
+        if (g == i) { continue; }
+        if (const #Some(b) = self.genBody(g)) { bodies.insert(g, b); }
+      }
+      if (bodies.len() == 0) { break; }
+      inlineGenLoops(mut h, bodies);
+    }
+    h
+  }
+
+  // Generator instance `g`'s body as lowered, if it may be inlined in a loop over its call: lowered
+  // now if it has not been, and kept for when it is asked for.
+  function genBody(self: mut Self, g: usize): Option<Func> uses Fail<Diagnostic> {
+    if (!self.genOk.has(g)) {
+      const f = self.lowered(g);
+      match (f) { #Some(x) => self.noteGen(g, x), #None => { self.genOk.insert(g, false); } }
+      self.ahead.insert(g, f);
+    }
+    match (self.genBodies.get(g)) { #Some(b) => #Some(b.clone()), #None => #None }
+  }
+
+  // Whether instance `i`, lowered as `f`, is a generator that may be inlined in a loop over its
+  // call, its body kept if so: such generators are few and small.
+  function noteGen(self: mut Self, i: usize, f: readonly Func): void {
+    const ok = genInlinable(f);
+    self.genOk.insert(i, ok);
+    if (ok) { self.genBodies.insert(i, f.clone()); }
   }
 
   // The calls in tail position of instance `i`, lowered as `f`: the instances they call kept, and
