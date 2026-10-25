@@ -1117,6 +1117,15 @@ impl Interp {
                     ("!", Value::Bool(b)) => Value::Bool(!b),
                     ("-", Value::Int(i)) => self.checked(-i, e.span)?,
                     ("-", Value::Float(f)) => Value::Float(-f),
+                    // Every bit flipped, at the operand's own width.
+                    ("~", Value::Int(i)) => {
+                        let t = self.ty_of(e.span).map(|t| self.frame_ty(&t));
+                        let name = match t {
+                            Some(Ty::Prim(p)) => p.name(),
+                            _ => "i64",
+                        };
+                        Value::Int(super::builtins::wrap_to(name, !i))
+                    }
                     (_, v) => return Err(panic(format!("bad operand {}", v.show()))),
                 })
             }

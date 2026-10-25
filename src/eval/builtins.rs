@@ -1286,7 +1286,7 @@ fn int_width(ty: &str) -> u32 {
     }
 }
 
-fn wrap_to(ty: &str, i: i128) -> i128 {
+pub(super) fn wrap_to(ty: &str, i: i128) -> i128 {
     match ty {
         "u8" => i & 0xff,
         "u16" => i & 0xffff,
