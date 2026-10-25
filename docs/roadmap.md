@@ -1,6 +1,6 @@
 # Roadmap
 
-Flyscript compiled itself, to JavaScript and to C, when this roadmap was written. Its steps take it from a self-hosted language to a systems platform: one intermediate form under every back end, kernels, LLVM, WebAssembly, every core of the machine, and a web framework that shows what all of it buys. Steps 0 to 12 are done, and each says what was built. Steps 13 to 19 close what remains between Flyscript and every language it is measured against; [what they are for](#what-steps-13-to-19-are-for) comes first.
+Flyscript compiled itself, to JavaScript and to C, when this roadmap was written. Its steps take it from a self-hosted language to a systems platform: one intermediate form under every back end, kernels, LLVM, WebAssembly, every core of the machine, and a web framework that shows what all of it buys. Steps 0 to 19 are done, and each says what was built. Steps 13 to 19 closed what remained between Flyscript and every language it is measured against ([what they were for](#what-steps-13-to-19-are-for)); steps 20 to 23 build the web stack on it ([what they are for](#what-steps-20-to-23-are-for)).
 
 ## 0. One core IR under every back end
 
@@ -286,3 +286,59 @@ No grammar change is needed; `comptime N` is already in the language. JavaScript
 **Progress.** Aliasing is done (spec 0.130): a borrow parameter is `noalias`, and `noalias readonly` if `readonly`. Binary trees run 3% faster through LLVM and the compiler 1%; nbody, fannkuch and spectral norm are unchanged. Loops that cannot panic midway vectorize, with or without it, LLVM checking at run time that the slices do not overlap; one whose bounds check or overflow check may panic midway does not, and cannot, since what the loop did before the panic must have been done. Failures stay where they are, in the task's context, which every function has at hand: measured, the compiler compiling itself, which may fail nearly everywhere, makes 5.3 million checks for a failure after a call, a load and a branch each, in some five billion cycles, so that two registers for every call that may fail, through C and LLVM alike, could gain it under a third of a percent, and the numeric examples, which never fail, nothing.
 
 **Done when:** the compiler benchmark and the numeric examples are measurably faster, and the code LLVM produces for the vectorizable loops is vectorized.
+
+## What steps 20 to 23 are for
+
+Steps 13 to 19 made the language and its runtime the equal of every neighbor it is measured against. Steps 20 to 23 make the stack built on it one a web team would choose over Next.js, React and TypeScript: the tag syntax those programmers already know, without putting XML in the language (step 20); a way to move an existing Next.js application across one route, component or endpoint at a time (step 21); a browser runtime as fast as the fastest fine-grained reactive frameworks (step 22); and a Postgres client in which plain SQL is checked against the schema by the compiler (step 23). Flyscript, FlyNext and Postgres are then a whole stack.
+
+## 20. `.flyx`: JSX syntax as a separate pre-compiler to `.fly`, with exact source spans
+
+**Goal.** Give React and Next.js programmers the XML tag syntax they know (`<div class="card">…</div>`) in `.flyx` files, while keeping the `.fly` language, its specification and its compiler completely free of XML.
+
+`.flyx` is a separate language extension in `web/`, not a feature of `.fly`: a `.flyx` file is translated to `.fly` before the compiler checks it, and a `.fly` file never parses a `<tag>`. Because `Ui<M>` is an effect rather than a tree of virtual-DOM values, `.flyx` is simpler and more regular than TypeScript's `.tsx`: every tag is a block of statements that performs `Ui<M>`, so ordinary `if`, `match` and `for` statements sit directly inside tags without `{cond ? … : null}` ternaries or `.map()` array allocations.
+
+- **A separate pass (`web/flyx.fly`).** Turns each `.flyx` module into a `.fly` module calling `web/ui`:
+  - `<div class="card" key={k} onClick={#Open(id)}>…</div>` becomes `el("div", () => { cls("card"); key(k); on("click", #Open(id)); … })`;
+  - `<a href="/about">About</a>` becomes `link("/about", () => { text("About"); })`;
+  - `<Counter model={m.c} onMsg={(msg) => #Count(msg)} />` becomes `map((msg) => #Count(msg), () => Counter.view(m.c))`;
+  - `{expr}` in child position becomes `text(`${expr}`.asStr())` (or `text(expr)` when `expr` is already a string), and `if`, `match` and `for` inside a tag stay the statements they are.
+- **Compiler errors that point into `.flyx`, not into generated `.fly`.** Every token the `.flyx` translator writes carries its original `.flyx` file name, line and column (through a source-span map the compiler reads, as it already maps expanded `comptime` templates back to their source in §11.1). A mistyped message in `<button onClick={#Typo}>`, a borrow error inside `{…}`, or an unclosed `<div>` reports the exact line and column in `page.flyx` with the `.flyx` source line underlined, never the lowered `el(...)` call.
+
+**Done when:** a site's routes can be written in `.flyx`, `if`/`match`/`for` work directly inside tags, type and borrow errors in `.flyx` files point to the exact `.flyx` line and column by test, and `docs/spec.md` and the `.fly` parser remain untouched.
+
+## 21. Strangling Next.js and React: routes, islands and typed RPC
+
+**Goal.** Let an existing Next.js, React and TypeScript application migrate to FlyNext one route, one component, or one server endpoint at a time, without a rewrite.
+
+- **Route-by-route strangler proxy (`--upstream=http://127.0.0.1:3001`).** In `web/site.fly`, any request whose path matches a `.fly` or `.flyx` route or `public/` file is answered natively by FlyNext; any other path is forwarded (method, headers, cookies and streamed body) to the running Next.js server. In `web/flynext.js`, clicking a link to a FlyNext route transitions in place in WebAssembly, while clicking a link to a route still on Next.js navigates normally.
+- **Islands in both directions.**
+  - *FlyNext inside React:* `web/flynext.js` exports `mountIsland(el, moduleUrl, initialJson)` and a `<FlyIsland>` React wrapper so an existing Next.js page can mount a compiled `.fly`/`.flyx` WebAssembly component inside any `<div>`.
+  - *React inside FlyNext:* `web/ui.fly` adds `react<P extends ToJson, M>(name: str, props: readonly P, onMsg: (e: Event) => M)` (and `<React name="…" props={…} />` in `.flyx`), which renders a mount node that `web/flynext.js` hands to `ReactDOM.createRoot` and leaves untouched across DOM patches unless `props` changes.
+- **Typed TypeScript client from `api.fly`.** `web/flynext.fly` already parses `api.fly`'s effect signatures to build the server and browser handlers. It also writes `api.ts` — a zero-dependency TypeScript client whose functions, types and `#Tag` error unions match `api.fly` — so unmigrated Next.js TypeScript pages can call native Flyscript server effects with full TypeScript checking while the frontend migrates.
+
+**Done when:** an end-to-end test runs a hybrid Next.js + FlyNext site where a Next.js page calls `api.fly` through the generated `api.ts`, mounts a `<FlyIsland>`, follows a link into a native `.flyx` page that embeds a React widget, and shares session cookies across both.
+
+## 22. FlyNext at SolidJS speed: `memo`, template cloning and one call to the page
+
+**Goal.** Match or beat fine-grained reactive frameworks (SolidJS) on both ends of the browser benchmark — updating one cell in ten thousand rows, and creating a thousand rows from scratch — while keeping FlyNext's plain `view(m: readonly Model)` model with no signals or proxies.
+
+- **Subtree skipping (`memo`).** `memo(key: u64, body: () => void uses Ui<M>)` in `web/ui.fly` (and `<memo key={…}>…</memo>` in `.flyx`) records `#Memo(key, end)` around `body`. When `record` meets a `memo(k, body)` whose `k` equals the previous render's `#Memo` key at that slot, it skips calling `body`, copies the previous render's slice of operations and DOM node numbers in place, and `patch` jumps straight to `end` in one step. Updating one row in ten thousand then runs `body` and `patch` for that one row alone.
+- **Template cloning for repeated children.** In `web/dom.fly`, when `children` builds a run of keyed elements of the same shape, the first built is kept by the host as a `<template>`, and each sibling of the same shape is made by `cloneNode(true)` in the browser's C++ engine and given only its differing text, attributes and event numbers.
+- **One call to the page per render (`fly_dom_flush`).** Rather than calling the host per node, `build` and `patch` write their DOM mutations into one command buffer in WebAssembly memory and flush the whole frame to `web/flynext.js` in a single call at the end of the render.
+
+**Done when:** in `bench/table`, updating one counter in 1,000 rows takes under 0.2 milliseconds (and in 10,000 rows under 0.5), building 1,000 rows from empty takes under half of step 18's time, and every existing `web` test passes unchanged.
+
+## 23. `flypg`: naked SQL checked at `comptime`, compiled to the wire
+
+**Goal.** Complete the 2030 stack — Flyscript, FlyNext and Postgres — with a Postgres client (`pg/`) in which you write plain SQL, the compiler checks every table, column, join and `$1` parameter type against the schema at `comptime` and infers the exact structural return record with no running database and no external code generator, and the runtime speaks Postgres's binary wire protocol directly into unboxed structs.
+
+Query builders (Kysely, Drizzle, Prisma, Diesel) exist only because TypeScript and Rust cannot parse SQL against a type at compile time without a running database (`sqlx::query!`). Flyscript's `comptime` (§7) runs ordinary code in the compiler: a small SQL parser and type checker, written in Flyscript over `Type.info(Db)`, checks naked SQL at compile time and leaves behind only the static statement string and a binary row decoder for the exact columns selected. Anyone who wants a builder can write one in twenty lines of `comptime` on top.
+
+- **The wire protocol in Flyscript (`pg/wire.fly`).** Postgres's v3 protocol over `std/net`'s `Socket` and `Socket.connectTls`, with SCRAM-SHA-256 authentication through `std/crypto`, per-connection prepared-statement caching, binary-format parameters and results (`i16`, `i32`, `i64`, `f64`, `bool`, `str`/`String`, `u8[]`, `Timestamp` (`std/time`'s wall-clock time, not the monotonic `Instant`), `Option<T>`, and JSON through `std/json`), pipelined queries, and a connection pool (`PgPool`) over `std/sync` with transactions (`pool.tx((tx) => …)`) that commit on return and roll back on `throw` or `panic`. Because it runs over `Io`, tests run against a real Postgres server or against `FLY_WORLD`'s simulated peers.
+- **A schema is an ordinary type.** A database schema is a record type mapping each table's name to its row type (`type Db = { users: { id: i64; email: String; admin: bool }; todos: { id: i64; user_id: i64; title: String; done: bool } }`), with nullable columns typed `Option<T>`.
+- **Naked SQL, checked and typed at `comptime` (`pg/sql.fly`).** `pg.query<Db, "SELECT u.id, u.email, t.title FROM todos t JOIN users u ON u.id = t.user_id WHERE u.admin = $1">(true)` (along with `pg.one`, `pg.exec` and `pg.stream` yielding rows into a region) parses the SQL string at `comptime` and checks it against `Type.info(Db)`:
+  - every table, alias (`t`, `u`), column, `JOIN … ON` condition, `WHERE` expression, `INSERT`, `UPDATE`, `ON CONFLICT` and `RETURNING` clause is checked at compile time; a mistyped column (`u.emial`) or comparing an `i64` column with a `str` fails compilation naming the column;
+  - the `SELECT` or `RETURNING` list determines the exact structural return record (`{ id: i64; email: String; title: String }`), wrapping columns from a `LEFT JOIN` in `Option<T>` and typing aggregates (`COUNT(*)`: `i64`, `SUM(x)` / `MAX(x)`) from their arguments;
+  - the `$1, $2, …` placeholders determine the parameter tuple type, and the binary row decoder is specialized per column at `comptime` with zero runtime reflection or string building.
+
+**Done when:** `examples/todo` runs against Postgres through `flypg` using plain SQL strings, a mistyped column or wrong `$1` parameter type fails at compile time naming the column, a `LEFT JOIN` column is typed `Option<T>`, a `tx` rolls back on both `throw` and `panic`, and rows decode directly from the binary wire protocol into the inferred record type.
