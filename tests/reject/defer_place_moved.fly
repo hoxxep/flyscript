@@ -1,0 +1,7 @@
+// error: `v` cannot be moved: the `defer` at 5:9 uses it as its block is left
+function take(v: Vec<i32>): void {}
+export function f(): void {
+  let v: Vec<i32> = Vec.new();
+  defer v.push(0);
+  take(v);
+}

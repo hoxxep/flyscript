@@ -1,0 +1,12 @@
+// error: `v` cannot be changed by this `defer`, which runs as its block is left: it is lent `readonly` at 5:9
+export function f(v: mut Vec<i32>, xs: readonly i32[]): usize {
+  let s: readonly i32[] = v[0..0];
+  for (const x of xs) {
+    s = v[0..1];
+    defer v.push(x);
+    if (x > 3) {
+      break;
+    }
+  }
+  s.len()
+}

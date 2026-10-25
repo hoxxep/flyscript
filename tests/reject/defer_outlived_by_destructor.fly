@@ -1,0 +1,11 @@
+// error: `v` cannot be changed by this `defer`, which runs as its block is left: it is lent `readonly` at 9:24
+// `g` is dropped after the `defer` runs, and its destructor reads what it borrows.
+view struct Guard { s: readonly i32[] }
+impl Drop for Guard {
+  function drop(self: mut Self): void { const n = self.s.len(); }
+}
+
+export function f(v: mut Vec<i32>): void {
+  const g = Guard { s: v[0..1] };
+  defer v.truncate(0);
+}

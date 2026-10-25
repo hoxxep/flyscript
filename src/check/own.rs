@@ -53,6 +53,19 @@ struct Var {
     temp: bool,
 }
 
+/// A `defer` of a block being checked. It runs as its block is left, so what it reaches is checked
+/// against what outlives it there, not against what the block does meanwhile (§5.6).
+#[derive(Clone)]
+struct Deferred {
+    /// Each place it reads, changes or lends, and whether it changes it or lends it `mut`.
+    reaches: Vec<(Path, bool, Span)>,
+    /// How many scopes were open where it was registered: it runs as the innermost of them ends.
+    depth: usize,
+    /// How many bindings had been made where it was registered: those made after it are dropped
+    /// before it runs.
+    vars: usize,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 struct Path {
     root: VarId,
@@ -131,6 +144,8 @@ pub fn check_function(p: &mut Program, fid: FnId) {
         next_node: 0,
         temps: Vec::new(),
         deferred: Vec::new(),
+        deferring: None,
+        loop_depths: Vec::new(),
         made: Vec::new(),
         want: None,
         reported: HashSet::new(),
@@ -173,6 +188,8 @@ pub fn check_function(p: &mut Program, fid: FnId) {
         o.next_node = 0;
         o.temps.clear();
         o.deferred.clear();
+        o.deferring = None;
+        o.loop_depths.clear();
         o.made.clear();
         for (i, (name, ty)) in o.typed.params.clone().into_iter().enumerate() {
             let id = o.declare_var(&name, ty.clone(), true, true, usize::MAX - i);
@@ -224,8 +241,12 @@ struct Own<'p> {
     next_node: u32,
     /// Loans held by values being evaluated (arguments in flight, the iterated generator).
     temps: Vec<BTreeSet<LoanId>>,
-    /// Loans held by `defer`s, live to the end of their block (§5.6).
-    deferred: Vec<BTreeSet<LoanId>>,
+    /// The `defer`s of the blocks being checked, innermost last.
+    deferred: Vec<Deferred>,
+    /// While a `defer`'s body is checked, where its own loans start, and what it reaches.
+    deferring: Option<(LoanId, Vec<(Path, bool, Span)>)>,
+    /// How many scopes were open at the start of each loop being checked, innermost last.
+    loop_depths: Vec<usize>,
     /// The temporaries made by the statements being checked, innermost last: each ends with its
     /// statement, or its block's value (§5.6).
     made: Vec<VarId>,
@@ -395,10 +416,9 @@ impl<'p> Own<'p> {
         uses.iter().any(|(upos, uchain)| self.reachable(var, pos, &self.chain, *upos, uchain))
     }
 
-    /// The loans live at `pos`: held by values in flight, by `defer`s, or by a binding that may
-    /// still be used.
+    /// The loans live at `pos`: held by values in flight, or by a binding that may still be used.
     fn live_loans(&self, pos: usize, except: &BTreeSet<LoanId>) -> BTreeSet<LoanId> {
-        let mut live: BTreeSet<LoanId> = self.temps.iter().chain(&self.deferred).flatten().copied().collect();
+        let mut live: BTreeSet<LoanId> = self.temps.iter().flatten().copied().collect();
         for (v, ls) in &self.state.holds {
             if self.live_after(*v, pos) {
                 live.extend(ls.iter().copied());
@@ -416,10 +436,22 @@ impl<'p> Own<'p> {
 
     /// `access`, for an access made at source position `pos`, reported at `at`.
     fn access_from(&mut self, path: &Path, write: bool, at: Span, pos: usize, except: &BTreeSet<LoanId>) {
+        // A `defer` reaches what it uses as its block is left, where `check_deferred` checks it;
+        // here, only against what the `defer` itself borrows.
+        let first = match &mut self.deferring {
+            Some((first, uses)) => {
+                uses.push((path.clone(), write, at));
+                *first
+            }
+            None => 0,
+        };
         if self.collecting {
             return;
         }
         for l in self.live_loans(pos, except) {
+            if l < first {
+                continue;
+            }
             let loan = self.loans[l].clone();
             if loan.external || !loan.path.overlaps(path) {
                 continue;
@@ -446,6 +478,42 @@ impl<'p> Own<'p> {
                 };
                 self.err(at, format!("`{name}` cannot be {what} here: it was {how} at {line}:{col}, and that borrow is still in use{hint}"));
                 return;
+            }
+        }
+    }
+
+    /// Checks the `defer`s that run as code leaves the scopes past the first `depth` at `pos`, what
+    /// it leaves with holding `value`. As one runs, what was made after it has been dropped, so
+    /// what may hold a loan it conflicts with is that value, a binding made before it and used
+    /// after its block, and one whose destructor runs code, which runs after it (§5.6).
+    fn check_deferred(&mut self, depth: usize, pos: usize, value: &BTreeSet<LoanId>) {
+        if self.collecting {
+            return;
+        }
+        for d in self.deferred.clone() {
+            if d.depth <= depth {
+                continue;
+            }
+            let inner: HashSet<VarId> = self.scopes[d.depth - 1].values().copied().collect();
+            let mut outliving = value.clone();
+            for (v, ls) in &self.state.holds {
+                if *v >= d.vars {
+                    continue;
+                }
+                let moved = self.state.moved.iter().any(|m| m.root == *v && m.fields.is_empty());
+                if (!moved && self.drop_runs_code(&self.vars[*v].ty)) || (!inner.contains(v) && self.live_after(*v, pos)) {
+                    outliving.extend(ls.iter().copied());
+                }
+            }
+            for (path, write, at) in &d.reaches {
+                let Some(loan) = outliving.iter().map(|l| &self.loans[*l]).find(|l| !l.external && l.path.overlaps(path) && (l.mutable || *write)) else {
+                    continue;
+                };
+                let name = self.path_name(path);
+                let how = if loan.mutable { "lent `mut`" } else { "lent `readonly`" };
+                let what = if *write { "changed" } else { "used" };
+                let (line, col) = crate::diag::line_col(&self.p.modules[self.module].source, loan.span.start);
+                self.err(*at, format!("`{name}` cannot be {what} by this `defer`, which runs as its block is left: it is {how} at {line}:{col}, and that borrow outlives the block"));
             }
         }
     }
@@ -620,6 +688,11 @@ impl<'p> Own<'p> {
                     } else if !path.fields.is_empty() && self.has_drop_ancestor(&path) {
                         self.err(at, format!("cannot move `{}` out of a value whose type implements `Drop`", self.path_name(&path)));
                     } else if !self.collecting {
+                        // A `defer` reads what it uses as its block is left, so that may not be moved first.
+                        if let Some(&(_, _, du)) = self.deferred.iter().flat_map(|d| &d.reaches).find(|(p, _, _)| p.overlaps(&path) || path.overlaps(p)) {
+                            let (line, col) = crate::diag::line_col(&self.p.modules[self.module].source, du.start);
+                            self.err(at, format!("`{}` cannot be moved: the `defer` at {line}:{col} uses it as its block is left", self.path_name(&path)));
+                        }
                         // A continuation moved may be resumed or dropped wherever it goes.
                         if path.fields.is_empty() {
                             self.check_lent(path.root, at, Some(self.vars[path.root].name.clone()));
@@ -754,12 +827,13 @@ impl<'p> Own<'p> {
                             }
                 }
                 Stmt::Defer(e) => {
-                    // A `defer` holds everything it borrows until the block ends (§5.6).
-                    let first_loan = self.loans.len();
-                    let v = self.expr(e, Use::Read);
-                    let mut held = v.loans;
-                    held.extend(first_loan..self.loans.len());
-                    self.deferred.push(held);
+                    let outer = self.deferring.replace((self.loans.len(), Vec::new()));
+                    self.expr(e, Use::Read);
+                    let (_, reaches) = std::mem::replace(&mut self.deferring, outer).expect("deferring");
+                    if let Some((_, outer)) = &mut self.deferring {
+                        outer.extend(reaches.iter().cloned());
+                    }
+                    self.deferred.push(Deferred { reaches, depth: self.scopes.len(), vars: self.vars.len() });
                 }
                 Stmt::Expr(e) => {
                     self.expr(e, Use::Move);
@@ -778,6 +852,12 @@ impl<'p> Own<'p> {
                 Stmt::Let { span, .. } => self.end_temps(mark, None, span.end, &Val::default(), "is dropped at the end of its statement"),
                 Stmt::Defer(e) | Stmt::Expr(e) => self.end_temps(mark, None, e.span.end, &Val::default(), "is dropped at the end of its statement"),
             }
+            // A failure or a panic may leave the block from here on, running its `defer`s.
+            let end = match stmt {
+                Stmt::Let { span, .. } => span.end,
+                Stmt::Defer(e) | Stmt::Expr(e) => e.span.end,
+            };
+            self.check_deferred(0, end, &BTreeSet::new());
         }
         child += 1;
         self.set_child(child);
@@ -792,6 +872,7 @@ impl<'p> Own<'p> {
             }
             None => Val::default(),
         };
+        self.check_deferred(self.scopes.len() - 1, b.span.end, &v.loans);
         self.deferred.truncate(deferred_depth);
         self.leave();
         // Bindings going out of scope release what they hold, and must not be borrowed by
@@ -1248,6 +1329,7 @@ impl<'p> Own<'p> {
             }
             ExprKind::While { cond, body } => {
                 self.enter(Node::Loop, 0);
+                self.loop_depths.push(self.scopes.len());
                 // Twice: the second iteration sees what the first left behind (§4.1).
                 for _ in 0..2 {
                     let before = self.state.clone();
@@ -1257,6 +1339,7 @@ impl<'p> Own<'p> {
                     self.end_temps(mark, None, body.span.end, &Val::default(), "is dropped at the end of each pass through the loop");
                     self.state.join(&before);
                 }
+                self.loop_depths.pop();
                 self.leave();
                 Val::default()
             }
@@ -1280,6 +1363,7 @@ impl<'p> Own<'p> {
                     });
                 }
                 self.enter(Node::Loop, 0);
+                self.loop_depths.push(self.scopes.len());
                 for _ in 0..2 {
                     let before = self.state.clone();
                     self.scopes.push(HashMap::new());
@@ -1295,6 +1379,7 @@ impl<'p> Own<'p> {
                     }
                     self.state.join(&before);
                 }
+                self.loop_depths.pop();
                 self.leave();
                 self.temps.pop();
                 Val::default()
@@ -1436,10 +1521,18 @@ impl<'p> Own<'p> {
                     self.check_return(&val, v.span);
                     let ret = self.ret_ty.clone();
                     self.check_mode(v, &ret, "returned");
+                    self.check_deferred(0, e.span.end, &val.loans);
+                } else {
+                    self.check_deferred(0, e.span.end, &BTreeSet::new());
                 }
                 Val::default()
             }
-            ExprKind::Break | ExprKind::Continue => Val::default(),
+            ExprKind::Break | ExprKind::Continue => {
+                if let Some(&depth) = self.loop_depths.last() {
+                    self.check_deferred(depth, e.span.end, &BTreeSet::new());
+                }
+                Val::default()
+            }
             ExprKind::Region { body, .. } => self.block_as(body, how, e),
             // `unsafe` vouches for raw pointers and foreign code, not for ownership.
             ExprKind::Unsafe(body) => self.block_as(body, how, e),
@@ -1997,6 +2090,8 @@ impl<'p> Own<'p> {
         let saved_state = self.state.clone();
         let saved_temps = std::mem::take(&mut self.temps);
         let saved_deferred = std::mem::take(&mut self.deferred);
+        let saved_deferring = self.deferring.take();
+        let saved_loops = std::mem::take(&mut self.loop_depths);
         self.scopes.push(HashMap::new());
         let mut param_ids = Vec::new();
         for p in params {
@@ -2022,6 +2117,8 @@ impl<'p> Own<'p> {
         self.scopes.pop();
         self.temps = saved_temps;
         self.deferred = saved_deferred;
+        self.deferring = saved_deferring;
+        self.loop_depths = saved_loops;
         self.state = saved_state;
         let (_, uses) = self.lambdas.pop().expect("lambda frame");
         self.roles.pop();

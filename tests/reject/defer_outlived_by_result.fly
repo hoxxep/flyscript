@@ -1,0 +1,5 @@
+// error: `v` cannot be changed by this `defer`, which runs as its block is left: it is lent `readonly` at 4:10
+export function f(v: mut Vec<i32>): readonly i32[] from v {
+  defer v.truncate(0);
+  return v[0..1];
+}

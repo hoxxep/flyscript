@@ -51,6 +51,22 @@ struct Path { root: usize; fields: Vec<String> }
 impl Clone for Path;
 impl Eq for Path;
 
+// A place a `defer` reads, changes or lends, and whether it changes it or lends it `mut`.
+struct DeferUse { path: Path; write: bool; at: Span }
+impl Clone for DeferUse;
+
+// A `defer` of a block being checked. It runs as its block is left, so what it reaches is checked
+// against what outlives it there, not against what the block does meanwhile (§5.6).
+struct Deferred {
+  reaches: Vec<DeferUse>;
+  // How many scopes were open where it was registered: it runs as the innermost of them ends.
+  depth: usize;
+  // How many bindings had been made where it was registered: those made after it are dropped
+  // before it runs.
+  vars: usize;
+}
+impl Clone for Deferred;
+
 impl Path {
   function overlaps(self: readonly Self, other: readonly Path): bool {
     if (self.root != other.root) { return false; }
@@ -156,8 +172,12 @@ export view struct Own {
   nextNode: u32;
   // Loans held by values being evaluated (arguments in flight, the iterated generator).
   temps: Vec<Vec<usize>>;
-  // Loans held by `defer`s, live to the end of their block (§5.6).
-  deferred: Vec<Vec<usize>>;
+  // The `defer`s of the blocks being checked, innermost last.
+  deferred: Vec<Deferred>;
+  // While a `defer`'s body is checked, where its own loans start, and what it reaches.
+  deferring: Option<[usize, Vec<DeferUse>]>;
+  // How many scopes were open at the start of each loop being checked, innermost last.
+  loopDepths: Vec<usize>;
   // The temporaries made by the statements being checked, innermost last: each ends with its
   // statement (§5.6).
   made: Vec<usize>;
@@ -237,7 +257,7 @@ export function checkOwnership(p: mut Program, fid: usize): void {
   let o = Own {
     p, module, typed, vars: Vec.new(), scopes: [HashMap.new()], useSites: HashMap.new(), resolved: HashMap.new(),
     loans: Vec.new(), state: emptyState(), chain: Vec.new(), nextNode: 0, temps: Vec.new(), deferred: Vec.new(),
-    made: Vec.new(), want: #None, reported: HashSet.new(), lambdas: Vec.new(), escaping: false, resumes: HashMap.new(), contArgs: HashMap.new(),
+    deferring: #None, loopDepths: Vec.new(), made: Vec.new(), want: #None, reported: HashSet.new(), lambdas: Vec.new(), escaping: false, resumes: HashMap.new(), contArgs: HashMap.new(),
     deadArgs: HashMap.new(), lentArgs: HashMap.new(), lambdaParams: HashSet.new(), iterating: false,
     nextRole: #Plain, roles: Vec.new(), taskMoved: HashMap.new(), moveSites: Vec.new(), lendingElement: false, dyingHolds: HashMap.new(), handling: Vec.new(),
     sites: HashMap.new(), bySite: HashMap.new(), retTy, sources, sendParams, collecting: true,
@@ -254,6 +274,8 @@ export function checkOwnership(p: mut Program, fid: usize): void {
     o.nextNode = 0;
     o.temps = Vec.new();
     o.deferred = Vec.new();
+    o.deferring = #None;
+    o.loopDepths = Vec.new();
     o.made = Vec.new();
     const params = o.typed.params.clone();
     for (const [i, [name, ty]] of params.iter().enumerate()) {
@@ -419,12 +441,10 @@ impl Own {
     }
   }
 
-  // The loans live at `pos`: held by values in flight, by `defer`s, or by a binding that may
-  // still be used.
+  // The loans live at `pos`: held by values in flight, or by a binding that may still be used.
   function liveLoans(self: readonly Self, pos: usize, except: readonly Vec<usize>): Vec<usize> {
     let live: Vec<usize> = Vec.new();
     for (const t of self.temps) { addLoans(mut live, t); }
-    for (const d of self.deferred) { addLoans(mut live, d); }
     for (const [v, ls] of self.state.holds.entries()) {
       if (self.liveAfter(v, pos)) { addLoans(mut live, ls); }
     }
@@ -439,8 +459,16 @@ impl Own {
 
   // `access`, for an access made at source position `pos`, reported at `at`.
   function accessFrom(self: mut Self, path: readonly Path, write: bool, at: Span, pos: usize, except: readonly Vec<usize>): void {
+    // A `defer` reaches what it uses as its block is left, where `checkDeferred` checks it; here,
+    // only against what the `defer` itself borrows.
+    let first: usize = 0;
+    if (const #Some(d) = self.deferring) {
+      d[1].push({ path: path.clone(), write, at });
+      first = d[0];
+    }
     if (self.collecting) { return; }
     for (const l of self.liveLoans(pos, except)) {
+      if (l < first) { continue; }
       const loan = self.loans[l].clone();
       if (loan.external || !loan.path.overlaps(path)) { continue; }
       // An arm's parameter holds a loan of itself, by which resuming finds what still uses it;
@@ -461,6 +489,38 @@ impl Own {
         } else { "" };
         self.err(at, `\`${name}\` cannot be ${what} here: it was ${how} at ${line}:${col}, and that borrow is still in use${hint}`.asStr());
         return;
+      }
+    }
+  }
+
+  // Checks the `defer`s that run as code leaves the scopes past the first `depth` at `pos`, what it
+  // leaves with holding `value`. As one runs, what was made after it has been dropped, so what may
+  // hold a loan it conflicts with is that value, a binding made before it and used after its
+  // block, and one whose destructor runs code, which runs after it (§5.6).
+  function checkDeferred(self: mut Self, depth: usize, pos: usize, value: readonly Vec<usize>): void {
+    if (self.collecting) { return; }
+    for (const d of self.deferred.clone()) {
+      if (d.depth <= depth) { continue; }
+      let inner: HashSet<usize> = HashSet.new();
+      for (const [_, v] of self.scopes[d.depth - 1].entries()) { inner.insert(v); }
+      let outliving = value.clone();
+      for (const [v, ls] of self.state.holds.entries()) {
+        if (v >= d.vars) { continue; }
+        const moved = self.state.moved.iter().some((m) => m.root == v && m.fields.len() == 0);
+        if (!moved && self.dropRunsCode(self.vars[v].ty) || !inner.has(v) && self.liveAfter(v, pos)) { addLoans(mut outliving, ls); }
+      }
+      for (const u of d.reaches) {
+        const found = outliving.iter().find((l) => {
+          !self.loans[l].external && self.loans[l].path.overlaps(u.path) && (self.loans[l].mutable || u.write)
+        });
+        if (const #Some(l) = found) {
+          const loan = self.loans[l].clone();
+          const name = self.pathName(u.path);
+          const how = if (loan.mutable) { "lent `mut`" } else { "lent `readonly`" };
+          const what = if (u.write) { "changed" } else { "used" };
+          const [line, col] = self.lineColOf(loan.span.start);
+          self.err(u.at, `\`${name}\` cannot be ${what} by this \`defer\`, which runs as its block is left: it is ${how} at ${line}:${col}, and that borrow outlives the block`.asStr());
+        }
       }
     }
   }
@@ -650,6 +710,18 @@ impl Own {
           } else if (path.fields.len() > 0 && self.hasDropAncestor(path)) {
             self.err(at, `cannot move \`${self.pathName(path)}\` out of a value whose type implements \`Drop\``.asStr());
           } else if (!self.collecting) {
+            // A `defer` reads what it uses as its block is left, so that may not be moved first.
+            let reached: Option<Span> = #None;
+            for (const d of self.deferred) {
+              if (const #Some(u) = d.reaches.iter().find((u) => u.path.overlaps(path) || path.overlaps(u.path))) {
+                reached = #Some(u.at);
+                break;
+              }
+            }
+            if (const #Some(du) = reached) {
+              const [line, col] = self.lineColOf(du.start);
+              self.err(at, `\`${self.pathName(path)}\` cannot be moved: the \`defer\` at ${line}:${col} uses it as its block is left`.asStr());
+            }
             // A continuation moved may be resumed or dropped wherever it goes.
             if (path.fields.len() == 0) {
               const kn = self.vars[path.root].name.clone();
@@ -765,12 +837,13 @@ impl Own {
           }
         }
         #Defer(e) => {
-          // A `defer` holds everything it borrows until the block ends (§5.6).
-          const firstLoan = self.loans.len();
-          const v = self.expr(e, #Read);
-          let held = v.loans;
-          for (const l of firstLoan..self.loans.len()) { addLoan(mut held, l); }
-          self.deferred.push(held);
+          const outer = replace(mut self.deferring, #Some([self.loans.len(), Vec.new()]));
+          self.expr(e, #Read);
+          const reaches: Vec<DeferUse> = match (replace(mut self.deferring, outer)) { #Some(d) => d[1], #None => Vec.new() };
+          if (const #Some(o) = self.deferring) {
+            for (const u of reaches) { o[1].push(u.clone()); }
+          }
+          self.deferred.push({ reaches, depth: self.scopes.len(), vars: self.vars.len() });
         }
         #Expr(e) => { self.expr(e, #Move); }
       }
@@ -790,6 +863,12 @@ impl Own {
         }
         #Defer(e) | #Expr(e) => self.endTemps(mark, #None, e.span.end, { loans: Vec.new() }, "is dropped at the end of its statement"),
       }
+      // A failure or a panic may leave the block from here on, running its `defer`s.
+      const end = match (stmt) {
+        #Let { mutable: _, pat: _, ty: _, init: _, span } => span.end,
+        #Defer(e) | #Expr(e) => e.span.end,
+      };
+      self.checkDeferred(0, end, Vec.new());
     }
     child += 1;
     self.setChild(child);
@@ -801,6 +880,7 @@ impl Own {
       }
       #None => ({ loans: Vec.new() }),
     };
+    self.checkDeferred(self.scopes.len() - 1, b.span.end, v.loans);
     self.deferred.truncate(deferredDepth);
     self.leave();
     // Bindings going out of scope release what they hold, and must not be borrowed by anything
@@ -1154,6 +1234,7 @@ impl Own {
       }
       #While { cond, body } => {
         self.enter(#Loop, 0);
+        self.loopDepths.push(self.scopes.len());
         // Twice: the second iteration sees what the first left behind (§4.1).
         for (const _ of 0..2) {
           const before = self.state.clone();
@@ -1163,6 +1244,7 @@ impl Own {
           self.endTemps(mark, #None, body.span.end, { loans: Vec.new() }, "is dropped at the end of each pass through the loop");
           self.state.join(before);
         }
+        self.loopDepths.pop();
         self.leave();
         { loans: Vec.new() }
       }
@@ -1202,10 +1284,16 @@ impl Own {
           self.checkReturn(val, x.span);
           const ret = self.retTy.clone();
           self.checkMode(x, ret, "returned");
+          self.checkDeferred(0, e.span.end, val.loans);
+        } else {
+          self.checkDeferred(0, e.span.end, Vec.new());
         }
         { loans: Vec.new() }
       }
-      #Break | #Continue => ({ loans: Vec.new() }),
+      #Break | #Continue => {
+        if (const #Some(depth) = self.loopDepths.last()) { self.checkDeferred(depth, e.span.end, Vec.new()); }
+        { loans: Vec.new() }
+      }
       #Region { name: _, body } => self.blockAs(body, how, e),
       // `unsafe` vouches for raw pointers and foreign code, not for ownership.
       #Unsafe(body) => self.blockAs(body, how, e),
@@ -1290,6 +1378,7 @@ impl Own {
       });
     }
     self.enter(#Loop, 0);
+    self.loopDepths.push(self.scopes.len());
     for (const _ of 0..2) {
       const before = self.state.clone();
       self.scopes.push(HashMap.new());
@@ -1303,6 +1392,7 @@ impl Own {
       }
       self.state.join(before);
     }
+    self.loopDepths.pop();
     self.leave();
     self.temps.pop();
     { loans: Vec.new() }
@@ -2137,6 +2227,8 @@ impl Own {
     const savedState = self.state.clone();
     const savedTemps = replace(mut self.temps, Vec.new());
     const savedDeferred = replace(mut self.deferred, Vec.new());
+    const savedDeferring = replace(mut self.deferring, #None);
+    const savedLoops = replace(mut self.loopDepths, Vec.new());
     self.scopes.push(HashMap.new());
     let paramIds: Vec<usize> = Vec.new();
     for (const p of params) {
@@ -2163,6 +2255,8 @@ impl Own {
     self.scopes.pop();
     self.temps = savedTemps;
     self.deferred = savedDeferred;
+    self.deferring = savedDeferring;
+    self.loopDepths = savedLoops;
     self.state = savedState;
     const frame = match (self.lambdas.pop()) { #Some(f) => f, #None => ({ outer: HashSet.new(), captures: HashMap.new() }) };
     self.roles.pop();
