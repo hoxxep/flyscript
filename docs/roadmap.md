@@ -270,11 +270,13 @@ No grammar change is needed; `comptime N` is already in the language. JavaScript
 
 ## 19. What LLVM is told
 
+*Done: a borrow parameter is `noalias`, and `noalias readonly` if `readonly` (spec 0.130); failures returned in registers were measured to be worth too little to change every failing call's convention for.*
+
 **Goal.** Give LLVM everything Flyscript's types already know, so that generated code is as good as hand-written C or Rust, or better, since Rust cannot promise what `readonly` promises.
 
 - **Failures returned in registers.** A function that can fail returns its failure beside its value, in two registers, rather than through memory, so the path that does not fail costs what a plain return costs.
 - **Aliasing.** A `mut` parameter is `noalias`. A `readonly` one is `noalias readonly` wherever nothing in it can change through a `Cell`. LLVM can then vectorize loops and keep values in registers across stores and calls where it could not before.
 
-**Progress.** Aliasing is done (spec 0.130): a borrow parameter is `noalias`, and `noalias readonly` if `readonly`. Binary trees run 3% faster through LLVM and the compiler 1%; nbody, fannkuch and spectral norm are unchanged. Loops that cannot panic midway vectorize, with or without it, LLVM checking at run time that the slices do not overlap; one whose bounds check or overflow check may panic midway does not, and cannot, since what the loop did before the panic must have been done. Left: failures returned in registers.
+**Progress.** Aliasing is done (spec 0.130): a borrow parameter is `noalias`, and `noalias readonly` if `readonly`. Binary trees run 3% faster through LLVM and the compiler 1%; nbody, fannkuch and spectral norm are unchanged. Loops that cannot panic midway vectorize, with or without it, LLVM checking at run time that the slices do not overlap; one whose bounds check or overflow check may panic midway does not, and cannot, since what the loop did before the panic must have been done. Failures stay where they are, in the task's context, which every function has at hand: measured, the compiler compiling itself, which may fail nearly everywhere, makes 5.3 million checks for a failure after a call, a load and a branch each, in some five billion cycles, so that two registers for every call that may fail, through C and LLVM alike, could gain it under a third of a percent, and the numeric examples, which never fail, nothing.
 
 **Done when:** the compiler benchmark and the numeric examples are measurably faster, and the code LLVM produces for the vectorizable loops is vectorized.
