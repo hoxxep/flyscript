@@ -1,0 +1,27 @@
+// A million tasks, each parked two calls deep: a handler, and the helper it waits in.
+import { println } from "std/io";
+import { Atomic } from "std/sync";
+
+function pause(ms: u64, tag: u64): u64 uses Io {
+  const before = tag * 7;
+  Io.sleep(Duration.ms(ms));
+  before + tag
+}
+
+function serve(id: u64): u64 uses Io {
+  const a = id * 3;
+  const got = pause(2000, id);
+  a + got
+}
+
+export function main(): void uses Io {
+  const n: u64 = 1000000;
+  const start = Io.now();
+  const total = Atomic.new(0 as i64);
+  Io.scope((s) => {
+    for (const i of 0..n) {
+      s.spawn(() => { total.fetchAdd(serve(i) as i64); });
+    }
+  });
+  println(`${n} tasks parked and woken in ${Io.now().since(start).toMs()} ms, ${total.load()}`);
+}

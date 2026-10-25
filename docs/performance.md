@@ -34,7 +34,18 @@ Compiled to JavaScript, Flyscript runs 1.3 to 2.4 times as long as the hand-writ
 
 ## The compiler
 
-The compiler is 24,225 lines of Flyscript, plus the standard library it compiles with it. Compiled natively it checks and compiles itself in 0.81 seconds through LLVM and 0.89 through C, in 180 MB; compiled to JavaScript, it does so on Node in 3.9 seconds. It took 4.0 and 11.8 seconds until the changes the roadmap's step 8 describes: the properties of a nominal type that do not depend on its arguments worked out once for the program, a method looked up among the methods of its name, a trial unification undone along a trail rather than by copying every binding, what was copied lent instead, and the runtime's own allocator. With `--watch` it keeps the program between builds, and a change to the body of one of its checker's functions is compiled again in about 100 milliseconds. Built through LLVM on every core, the compiler takes 5.5 seconds from its source to an executable, where one module optimized on one core took 19.
+The compiler is 28,813 lines of Flyscript, plus the standard library it compiles with it. Compiled natively it checks and compiles itself in 1.2 seconds through LLVM and 1.45 through C, in 250 MB; compiled to JavaScript, it does so on Node in 5.2 seconds. It was 24,225 lines compiling itself in 0.81 and 0.89 seconds before a panic ended its task rather than the program (step 13): the unwinding its cleanups need, and the stack checks, cost about a sixth, and the rest is the compiler grown by a fifth. It took 4.0 and 11.8 seconds until the changes the roadmap's step 8 describes: the properties of a nominal type that do not depend on its arguments worked out once for the program, a method looked up among the methods of its name, a trial unification undone along a trail rather than by copying every binding, what was copied lent instead, and the runtime's own allocator. With `--watch` it keeps the program between builds, and a change to the body of one of its checker's functions is compiled again in about 100 milliseconds. Built through LLVM on every core, the compiler takes 5.5 seconds from its source to an executable, where one module optimized on one core took 19.
+
+## Tasks
+
+What a parked task takes, against Rust on tokio (`bench/tasks.sh`): a million tasks parked at once, each on a timer, the peak resident memory and the time to park and wake them all.
+
+| | Flyscript, through LLVM | Rust, tokio |
+| :--- | ---: | ---: |
+| Each parked in its own closure | 413 MB, 2.7 s | 256 MB, 2.4 s |
+| Each parked two calls deep, in a handler and the helper it waits in | 509 MB, 2.5 s | 501 MB, 2.5 s |
+
+A task is a state machine whose frame keeps only what is live across the points it stops at, the frames of the functions it calls directly nested in it, as a Rust future nests the futures it awaits (§11.3); there is no `async`, and nothing to `await`. Parked two calls deep, as a connection handler parks, a task takes what a tokio task takes, within ten bytes. Parked in its own closure, it takes 160 bytes more: its record, kept by its scope and its worker's timer apart from its frame, where a tokio task keeps its timer in its future.
 
 ## A web app
 
@@ -68,7 +79,8 @@ A FlyNext page is interactive once its program has taken over the HTML the serve
 
 ```sh
 sh bench/run.sh                        # the programs; results in target/bench/results.md
+sh bench/tasks.sh                      # a million parked tasks, against Rust on tokio
 NODE_PATH=…/node_modules sh bench/web.sh   # the web app, with Playwright where NODE_PATH points
 ```
 
-`bench/run.sh` needs clang, rustc, Go, Node and hyperfine; `bench/web.sh` needs Node and npm for the Next.js build, wrk, and Playwright for the browser part. `RUNS`, `SECS` and `CONNS` change the number of runs, the seconds under load and the connections.
+`bench/run.sh` needs clang, rustc, Go, Node and hyperfine; `bench/tasks.sh` clang, LLVM's tools and cargo, with tokio; `bench/web.sh` needs Node and npm for the Next.js build, wrk, and Playwright for the browser part. `RUNS`, `SECS` and `CONNS` change the number of runs, the seconds under load and the connections.

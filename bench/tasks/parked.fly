@@ -1,0 +1,13 @@
+// A million tasks, each parked on a timer at once: the memory a parked task takes.
+import { println } from "std/io";
+
+export function main(): void uses Io {
+  const n: u64 = 1000000;
+  const start = Io.now();
+  Io.scope((s) => {
+    for (const i of 0..n) {
+      s.spawn(() => { Io.sleep(Duration.ms(2000)); });
+    }
+  });
+  println(`${n} tasks parked and woken in ${Io.now().since(start).toMs()} ms`);
+}

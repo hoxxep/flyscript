@@ -3729,6 +3729,8 @@ static void spin_lock(spin_t* l) {
 
 static void spin_unlock(spin_t* l) { __atomic_store_n(&l->v, 0, __ATOMIC_RELEASE); }
 
+static bool spin_trylock(spin_t* l) { return !__atomic_load_n(&l->v, __ATOMIC_RELAXED) && !__atomic_exchange_n(&l->v, 1, __ATOMIC_ACQUIRE); }
+
 static uint64_t now_ns(void) {
   struct timespec ts;
   clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -3898,8 +3900,22 @@ struct mt_scope {
 // (rt/mt.fly); and what drops a message it will not deliver.
 typedef struct { waitq q; uint8_t* state; void (*drop)(void*); } mt_chan;
 
+// A task that sleeps waits in the queue of the worker it went to sleep on, when it wakes kept in
+// that worker's heap, under the queue's lock: each worker's own, so that tasks going to sleep on
+// every core at once do not wait for one lock. `due` is the heap's first, or 0. A task woken early —
+// cancelled — leaves its alarm behind, which then wakes nothing. Any worker fires any heap's
+// alarms once they are due, so a worker asleep holds up none.
+typedef struct { uint64_t due, gen; mt_task* task; } alarm_t;
+typedef struct { waitq q; alarm_t* heap; size_t n, cap; uint64_t due; } sleep_timer;
+
 struct worker {
   int index;
+  sleep_timer timer;
+  // Asleep for want of work: `parked` set, waiting under its own lock for whoever has work to clear
+  // it and wake it, so that workers going to sleep and waking do not queue for one lock.
+  pthread_mutex_t park_mu;
+  pthread_cond_t park_cv;
+  int parked;
   // The context of the task running here.
   fly_ctx run_ctx;
   // The context of whatever runs here outside a task: `par` work stolen while idle.
@@ -3928,10 +3944,18 @@ static bool main_done;
 // alive wait for each other forever.
 static long runnable, alive;
 
-// Idle workers sleep here until there is work.
-static pthread_mutex_t idle_mu = PTHREAD_MUTEX_INITIALIZER;
-static pthread_cond_t idle_cv = PTHREAD_COND_INITIALIZER;
+// How many workers are asleep for want of work, each on its own condition (`worker.parked`).
 static int idlers;
+
+// Wakes worker `w` if it is asleep: whether it was.
+static bool unpark_worker(worker* w) {
+  int one = 1;
+  if (!__atomic_compare_exchange_n(&w->parked, &one, 0, false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)) return false;
+  pthread_mutex_lock(&w->park_mu);
+  pthread_cond_signal(&w->park_cv);
+  pthread_mutex_unlock(&w->park_mu);
+  return true;
+}
 
 // Whether an idle worker waits for the kernel's events about sockets, which `poll_wake`
 // interrupts. One at a time: the kernel wakes every thread waiting on a queue for each event.
@@ -3950,13 +3974,12 @@ static void notify(void) {
   // A worker looking for work finds it: none needs waking.
   if (__atomic_load_n(&spinners, __ATOMIC_SEQ_CST) > 0) return;
   if (__atomic_load_n(&idlers, __ATOMIC_SEQ_CST) > 0) {
-    pthread_mutex_lock(&idle_mu);
-    if (idlers > 0) {
-      pthread_cond_signal(&idle_cv);
-      pthread_mutex_unlock(&idle_mu);
-      return;
+    // Starting from a worker of its own, so that those woken spread.
+    worker* me = this_worker;
+    int at = me ? me->index : 0;
+    for (int k = 1; k <= nworkers; k++) {
+      if (unpark_worker(&workers[(at + k) % nworkers])) return;
     }
-    pthread_mutex_unlock(&idle_mu);
   }
   if (__atomic_load_n(&pollers, __ATOMIC_SEQ_CST) > 0) poll_wake();
 }
@@ -3966,9 +3989,7 @@ static void notify_all(void) {
   __atomic_thread_fence(__ATOMIC_SEQ_CST);
   for (long k = __atomic_load_n(&pollers, __ATOMIC_SEQ_CST); k > 0; k--) poll_wake();
   if (__atomic_load_n(&idlers, __ATOMIC_SEQ_CST) == 0) return;
-  pthread_mutex_lock(&idle_mu);
-  pthread_cond_broadcast(&idle_cv);
-  pthread_mutex_unlock(&idle_mu);
+  for (int k = 0; k < nworkers; k++) unpark_worker(&workers[k]);
 }
 
 static void task_unref(mt_task* t) {
@@ -4137,40 +4158,30 @@ static void mt_point(fly_wait* w) {
   W_END
 }
 
-// ---- sleeping ----
+// ---- sleeping: each worker's timer (`sleep_timer`) ----
 
-// ---- sleeping ----
-
-// Sleeping tasks wait in one queue; when each wakes is kept in a heap, under the queue's lock. A
-// task woken early — cancelled — leaves its alarm behind, which then wakes nothing.
-typedef struct { uint64_t due, gen; mt_task* task; } alarm_t;
-static waitq sleepers;
-static alarm_t* alarms;
-static size_t nalarms, capalarms;
-static uint64_t next_due;
-
-static void alarm_push(alarm_t a) {
-  if (nalarms == capalarms) {
-    capalarms = capalarms ? capalarms * 2 : 16;
-    alarms = realloc(alarms, capalarms * sizeof(alarm_t));
+static void alarm_push(sleep_timer* tm, alarm_t a) {
+  if (tm->n == tm->cap) {
+    tm->cap = tm->cap ? tm->cap * 2 : 16;
+    tm->heap = realloc(tm->heap, tm->cap * sizeof(alarm_t));
   }
-  size_t i = nalarms++;
-  while (i > 0 && alarms[(i - 1) / 2].due > a.due) { alarms[i] = alarms[(i - 1) / 2]; i = (i - 1) / 2; }
-  alarms[i] = a;
+  size_t i = tm->n++;
+  while (i > 0 && tm->heap[(i - 1) / 2].due > a.due) { tm->heap[i] = tm->heap[(i - 1) / 2]; i = (i - 1) / 2; }
+  tm->heap[i] = a;
 }
 
-static alarm_t alarm_pop(void) {
-  alarm_t top = alarms[0], last = alarms[--nalarms];
+static alarm_t alarm_pop(sleep_timer* tm) {
+  alarm_t top = tm->heap[0], last = tm->heap[--tm->n];
   size_t i = 0;
   for (;;) {
     size_t c = 2 * i + 1;
-    if (c >= nalarms) break;
-    if (c + 1 < nalarms && alarms[c + 1].due < alarms[c].due) c++;
-    if (alarms[c].due >= last.due) break;
-    alarms[i] = alarms[c];
+    if (c >= tm->n) break;
+    if (c + 1 < tm->n && tm->heap[c + 1].due < tm->heap[c].due) c++;
+    if (tm->heap[c].due >= last.due) break;
+    tm->heap[i] = tm->heap[c];
     i = c;
   }
-  if (nalarms > 0) alarms[i] = last;
+  if (tm->n > 0) tm->heap[i] = last;
   return top;
 }
 
@@ -4178,33 +4189,51 @@ static void mt_sleep(fly_wait* w, uint64_t nanos) {
   mt_task* t = running;
   if (nanos == 0) { mt_point(w); return; }
   W_BEGIN(w)
-  spin_lock(&sleepers.lock);
+  sleep_timer* tm = &this_worker->timer;
+  spin_lock(&tm->q.lock);
   __atomic_fetch_add(&t->refs, 1, __ATOMIC_RELAXED);
-  alarm_push((alarm_t){ now_ns() + nanos, ++t->sleep_gen, t });
-  __atomic_store_n(&next_due, alarms[0].due, __ATOMIC_RELEASE);
-  WAIT_IN(w, &sleepers, true);
+  alarm_push(tm, (alarm_t){ now_ns() + nanos, ++t->sleep_gen, t });
+  __atomic_store_n(&tm->due, tm->heap[0].due, __ATOMIC_RELEASE);
+  WAIT_IN(w, &tm->q, true);
   cancelled_here();
   W_END
 }
 
-// Wakes the tasks whose alarms are due.
-static void fire_alarms(void) {
-  uint64_t due = __atomic_load_n(&next_due, __ATOMIC_ACQUIRE);
-  if (!due || due > now_ns()) return;
-  spin_lock(&sleepers.lock);
-  uint64_t now = now_ns();
-  while (nalarms > 0 && alarms[0].due <= now) {
-    alarm_t a = alarm_pop();
-    mt_task* t = a.task;
-    if (__atomic_load_n(&t->waiting, __ATOMIC_SEQ_CST) == &sleepers && t->sleep_gen == a.gen) {
-      q_remove(&sleepers, t);
-      __atomic_store_n(&t->waiting, NULL, __ATOMIC_SEQ_CST);
-      unpark(t);
-    }
-    task_unref(t);
+// The first of every worker's alarms, or 0.
+static uint64_t earliest_due(void) {
+  uint64_t first = 0;
+  for (int k = 0; k < nworkers; k++) {
+    uint64_t d = __atomic_load_n(&workers[k].timer.due, __ATOMIC_ACQUIRE);
+    if (d && (!first || d < first)) first = d;
   }
-  __atomic_store_n(&next_due, nalarms ? alarms[0].due : 0, __ATOMIC_RELEASE);
-  spin_unlock(&sleepers.lock);
+  return first;
+}
+
+// Wakes the tasks whose alarms are due, on every worker's timer. A timer another worker is firing is
+// passed by: every worker asleep wakes as the first alarm is due, and would otherwise wait for each
+// other's turn at it.
+static void fire_alarms(void) {
+  uint64_t now = 0;
+  for (int k = 0; k < nworkers; k++) {
+    sleep_timer* tm = &workers[k].timer;
+    uint64_t due = __atomic_load_n(&tm->due, __ATOMIC_ACQUIRE);
+    if (!due) continue;
+    if (!now) now = now_ns();
+    if (due > now) continue;
+    if (!spin_trylock(&tm->q.lock)) continue;
+    while (tm->n > 0 && tm->heap[0].due <= now) {
+      alarm_t a = alarm_pop(tm);
+      mt_task* t = a.task;
+      if (__atomic_load_n(&t->waiting, __ATOMIC_SEQ_CST) == &tm->q && t->sleep_gen == a.gen) {
+        q_remove(&tm->q, t);
+        __atomic_store_n(&t->waiting, NULL, __ATOMIC_SEQ_CST);
+        unpark(t);
+      }
+      task_unref(t);
+    }
+    __atomic_store_n(&tm->due, tm->n ? tm->heap[0].due : 0, __ATOMIC_RELEASE);
+    spin_unlock(&tm->q.lock);
+  }
 }
 
 // ---- running tasks ----
@@ -4614,7 +4643,7 @@ static bool work_anywhere(worker* w) {
     if (__atomic_load_n(&workers[k].inhead, __ATOMIC_SEQ_CST)) return true;
     if (dq_size(&workers[k].fresh) > 0 || dq_size(&workers[k].jobs) > 0) return true;
   }
-  uint64_t due = __atomic_load_n(&next_due, __ATOMIC_ACQUIRE);
+  uint64_t due = earliest_due();
   return due && due <= now_ns();
 }
 
@@ -4642,7 +4671,7 @@ static void idle(worker* w) {
     // Asleep in the kernel's wait for events, which work from elsewhere interrupts: counted first,
     // so that work queued after the look below wakes it.
     if (!work_anywhere(w) && !(w == &workers[0] && __atomic_load_n(&main_done, __ATOMIC_SEQ_CST))) {
-      uint64_t due = __atomic_load_n(&next_due, __ATOMIC_ACQUIRE);
+      uint64_t due = earliest_due();
       if (!due && __atomic_load_n(&runnable, __ATOMIC_SEQ_CST) == 0 && __atomic_load_n(&alive, __ATOMIC_SEQ_CST) > 0 && __atomic_load_n(&io_waiting, __ATOMIC_SEQ_CST) == 0) mt_deadlock();
       uint64_t now = now_ns();
       io_poll(due ? (int64_t)(due > now ? due - now : 0) : -1);
@@ -4650,10 +4679,12 @@ static void idle(worker* w) {
     __atomic_store_n(&pollers, 0, __ATOMIC_SEQ_CST);
     return;
   }
-  pthread_mutex_lock(&idle_mu);
+  // Asleep from here: work queued after the look below finds it so, and wakes it.
   __atomic_fetch_add(&idlers, 1, __ATOMIC_SEQ_CST);
+  __atomic_store_n(&w->parked, 1, __ATOMIC_SEQ_CST);
+  pthread_mutex_lock(&w->park_mu);
   if (!work_anywhere(w) && !(w == &workers[0] && __atomic_load_n(&main_done, __ATOMIC_SEQ_CST))) {
-    uint64_t due = __atomic_load_n(&next_due, __ATOMIC_ACQUIRE);
+    uint64_t due = earliest_due();
     if (!due && __atomic_load_n(&runnable, __ATOMIC_SEQ_CST) == 0 && __atomic_load_n(&alive, __ATOMIC_SEQ_CST) > 0 && __atomic_load_n(&io_waiting, __ATOMIC_SEQ_CST) == 0) mt_deadlock();
     if (due) {
       // The monotonic clock and the condition's clock differ: wait as long as is left.
@@ -4663,13 +4694,14 @@ static void idle(worker* w) {
       uint64_t at = (uint64_t)ts.tv_sec * 1000000000u + (uint64_t)ts.tv_nsec + left;
       ts.tv_sec = (time_t)(at / 1000000000u);
       ts.tv_nsec = (long)(at % 1000000000u);
-      pthread_cond_timedwait(&idle_cv, &idle_mu, &ts);
+      if (__atomic_load_n(&w->parked, __ATOMIC_SEQ_CST)) pthread_cond_timedwait(&w->park_cv, &w->park_mu, &ts);
     } else {
-      pthread_cond_wait(&idle_cv, &idle_mu);
+      while (__atomic_load_n(&w->parked, __ATOMIC_SEQ_CST)) pthread_cond_wait(&w->park_cv, &w->park_mu);
     }
   }
+  __atomic_store_n(&w->parked, 0, __ATOMIC_SEQ_CST);
+  pthread_mutex_unlock(&w->park_mu);
   __atomic_fetch_sub(&idlers, 1, __ATOMIC_SEQ_CST);
-  pthread_mutex_unlock(&idle_mu);
 }
 
 static void work(worker* w) {
@@ -4719,6 +4751,8 @@ static void mt_run(void (*main)(void**), void (*entry)(void* task, void* closure
     // The first worker is the program's thread, whose context is the program's outside its tasks.
     w->idle_ctx = k == 0 ? &fly_ctx0 : &w->own_ctx;
     w->rng = 0x9e3779b97f4a7c15u * (uint64_t)(k + 1);
+    pthread_mutex_init(&w->park_mu, NULL);
+    pthread_cond_init(&w->park_cv, NULL);
     w->fresh.buf = dq_buf_new(256, NULL);
     w->jobs.buf = dq_buf_new(256, NULL);
   }
