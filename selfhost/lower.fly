@@ -21,6 +21,8 @@ import {
   Local, LocalKind, Place, Root, Proj, ProjKind, Operand, Constant, Rvalue, Capture, Call, Callee, Stmt, Handle, Arm, Block,
   Cleanup, Func, ConstValue, MainArg, Uses, useStmt,
 } from "./ir";
+import { pends } from "./frames";
+import { Site, tailSites, inlinable, inlineAt, onceGiven, awayFromFrame, jumpsFor } from "./tails";
 import { HashMap, HashSet } from "std/collections";
 
 // A function with its generic arguments.
@@ -76,6 +78,12 @@ export struct Lower {
   handlesIo: bool;
   // By function: which of its parameters it only calls (`onlyCalls`).
   onlyCalled: HashMap<usize, Vec<bool>>;
+  // Instances lowered before they were asked for, to see what they call in tail position
+  // (tails.fly); and those that may be inlined where they are called so.
+  ahead: HashMap<usize, Option<Func>>;
+  inlinables: HashSet<usize>;
+  // For each instance lowered, the instances it calls in tail position.
+  tailCallees: HashMap<usize, Vec<usize>>;
 }
 
 export function newLower(p: Prog): Lower {
@@ -84,7 +92,7 @@ export function newLower(p: Prog): Lower {
     p, insts: Vec.new(), instIndex: HashMap.new(), closures: Vec.new(), fid: 0, map: HashMap.new(), module: 0,
     ret: #Prim(#Void), locals: Vec.new(), frames: Vec.new(), scopes: Vec.new(), loops: Vec.new(), labels: 0,
     captures: Vec.new(), regions: Vec.new(), yields: #None, homes: Vec.new(), lent: Vec.new(), handlesIo,
-    onlyCalled: HashMap.new(),
+    onlyCalled: HashMap.new(), ahead: HashMap.new(), inlinables: HashSet.new(), tailCallees: HashMap.new(),
   }
 }
 
@@ -3011,8 +3019,95 @@ impl Lower {
     substEffs(self.fnEffects(fid), self.map)
   }
 
-  // Function instance `i`, lowered.
+  // Function instance `i`, lowered, its calls of itself in tail position made jumps (tails.fly).
   export function func(self: mut Self, i: usize): Option<Func> uses Fail<Diagnostic> {
+    const f: Option<Func> = match (self.ahead.remove(i)) { #Some(f) => f, #None => self.lowered(i) };
+    match (f) {
+      #Some(g) => {
+        const sites = self.noteTails(i, g);
+        #Some(self.tails(i, g, sites))
+      }
+      #None => #None,
+    }
+  }
+
+  // The calls in tail position of instance `i`, lowered as `f`: the instances they call kept, and
+  // `f` itself if it may be inlined where it is called in tail position and calls one so.
+  function noteTails(self: mut Self, i: usize, f: readonly Func): Vec<Site> {
+    const sites = tailSites(f, unitTy(f.ret));
+    let callees: Vec<usize> = Vec.new();
+    for (const s of sites) { if (const #Inst(j) = s.callee && !callees.includes(j)) { callees.push(j); } }
+    if (callees.len() > 0 && inlinable(f) && !pends(self.p, f.row)) { self.inlinables.insert(i); }
+    self.tailCallees.insert(i, callees);
+    sites
+  }
+
+  // The instances instance `j` calls in tail position, lowering it now if it has not been, kept
+  // for when it is asked for.
+  function tailCalleesOf(self: mut Self, j: usize): Vec<usize> uses Fail<Diagnostic> {
+    if (!self.tailCallees.has(j)) {
+      const f = self.lowered(j);
+      if (const #Some(g) = f) { self.noteTails(j, g); } else { self.tailCallees.insert(j, Vec.new()); }
+      self.ahead.insert(j, f);
+    }
+    match (self.tailCallees.get(j)) { #Some(cs) => cs.clone(), #None => Vec.new() }
+  }
+
+  // Whether instance `j`, called in tail position, comes back to instance `i` through calls in
+  // tail position of functions that may be inlined, in at most `depth` of them.
+  function returnsTo(self: mut Self, j: usize, i: usize, depth: usize): bool uses Fail<Diagnostic> {
+    if (depth == 0) { return false; }
+    const callees = self.tailCalleesOf(j);
+    if (!self.inlinables.has(j)) { return false; }
+    for (const k of callees) {
+      if (k == i || (k != j && self.returnsTo(k, i, depth - 1))) { return true; }
+    }
+    false
+  }
+
+  // `f`, instance `i`, whose calls in tail position are `sites`, with the functions it calls so that
+  // come back to it inlined there, and its calls of itself in tail position made jumps, where
+  // nothing it lends is of its own frame. A function that may suspend is a machine, and is left as
+  // it is.
+  function tails(self: mut Self, i: usize, f0: Func, sites0: Vec<Site>): Func uses Fail<Diagnostic> {
+    let f = f0;
+    if (sites0.len() == 0 || pends(self.p, f.row) || f.yields.isSome() || f.captures.len() > 0) { return f; }
+    const unit = unitTy(f.ret);
+    let sites = sites0;
+    for (const _ of 0..4) {
+      let changed = false;
+      for (const s of sites) {
+        if (const #Inst(j) = s.callee && j != i && self.returnsTo(j, i, 3)) {
+          // Lowered again if it has been given out: an inlinable body makes no closure, and so
+          // lowering it again changes nothing else.
+          const g: Option<Func> = match (self.ahead.get(j)) { #Some(a) => a.clone(), #None => self.lowered(j) };
+          if (const #Some(body) = g) {
+            inlineAt(mut f, s, body);
+            changed = true;
+          }
+        }
+      }
+      if (!changed) { break; }
+      sites = tailSites(f, unit);
+    }
+    if (!sites.iter().some((s) => match (s.callee) { #Inst(j) => j == i, _ => false })) { return f; }
+    const given = onceGiven(f);
+    let jumps: Vec<Site> = Vec.new();
+    for (const s of sites) {
+      if (const #Inst(j) = s.callee && j == i) {
+        let away = true;
+        for (const [k, a] of s.args.iter().enumerate()) {
+          if (!awayFromFrame(f, given, a, s.argTys[k], (t) => self.boxLike(t), 0)) { away = false; }
+        }
+        if (away) { jumps.push(s.clone()); }
+      }
+    }
+    jumpsFor(mut f, jumps);
+    f
+  }
+
+  // Function instance `i`, lowered as it is written.
+  function lowered(self: mut Self, i: usize): Option<Func> uses Fail<Diagnostic> {
     const fid = self.insts[i].fid;
     const decl: FnDecl = match (self.p.fnDecl(fid)) { #Some(d) => d, #None => return #None };
     const body = match (decl.body) { #Some(b) => b.clone(), #None => return #None };

@@ -57,6 +57,7 @@ Versions are pre-1.0 while the language is being designed. The specification was
 
 Each version from 0.55 says in a sentence what it changed, newest first, with the sections of the specification of its day.
 
+- **0.134** makes a function's call of itself as its last act a jump in compiled code, with the functions a recursion passes through on its way back inlined, so derived `Eq`, `Ord` and `Hash` walk a list in constant stack (§11.3).
 - **0.133** adds `Simd.shiftIn`, a vector's lanes moved up with another's last below them, with which `std/io` checks a line's UTF-8 in the pass that finds its end ([std.md](../std.md)).
 - **0.132** says in what order tasks waiting for a `Mutex` get it, and that a scheduling point with nothing to do, an uncontended lock, and a task woken by another running next on its core cost no trip to the scheduler (§6.2, §11.3).
 - **0.131** adds `std/simd`: `Simd<T, N>` and `Mask<N>`, lowered to the target's vector instructions natively and in WebAssembly, and run a lane at a time elsewhere (§11.3, §12.3).

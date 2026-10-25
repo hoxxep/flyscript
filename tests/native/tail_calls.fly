@@ -1,0 +1,63 @@
+// expect: equal true, order #Equal, hashes agree true, a changed link true
+// expect: counted 1000000
+// expect: 10000001 is odd: true
+// expect: filled 1000000
+// expect: fib 832040
+// A recursion whose call of itself is the last thing it does runs in constant stack (§11.3), a
+// million deep: derived `Eq`, `Ord` and `Hash` along a list's last part, through `Option` and
+// `Box`, which are inlined there; a function walking a list itself; two functions calling each
+// other, each inlined in the other; one that gives nothing back and passes on a `mut` borrow. One
+// that lends its own local to the call is a call: what it lends must outlive the call.
+import { println } from "std/io";
+
+struct Node { v: i64; next: Option<Box<Node>>; }
+impl Eq for Node;
+impl Ord for Node;
+impl Hash for Node;
+
+function build(n: i64, last: i64): Option<Box<Node>> {
+  let head: Option<Box<Node>> = #None;
+  for (const i of 0..n) { head = #Some(Box.new(Node { v: if (i == 0) { last } else { i }, next: head })); }
+  head
+}
+
+function count(l: readonly Option<Box<Node>>, acc: u64): u64 {
+  match (l) {
+    #Some(n) => count(n.next, acc + 1),
+    #None => acc,
+  }
+}
+
+function even(n: u64): bool { if (n == 0) { true } else { odd(n - 1) } }
+function odd(n: u64): bool { if (n == 0) { false } else { even(n - 1) } }
+
+function fill(v: mut Vec<u64>, n: u64): void {
+  if (n == 0) { return; }
+  v.push(n);
+  fill(mut v, n - 1)
+}
+
+function fib(a: readonly [u64, u64], n: u64): u64 {
+  if (n == 0) { return a[0]; }
+  const b: [u64, u64] = [a[1], a[0] + a[1]];
+  fib(b, n - 1)
+}
+
+function hashOf(l: readonly Option<Box<Node>>): u64 {
+  let h = Hasher.new();
+  l.hash(mut h);
+  h.finish()
+}
+
+export function main(): void uses Io {
+  const a = build(1000000, 0);
+  const b = build(1000000, 0);
+  const c = build(1000000, 7);
+  println(`equal ${a == b}, order ${a.cmp(b)}, hashes agree ${hashOf(a) == hashOf(b)}, a changed link ${a != c}`);
+  println(`counted ${count(a, 0)}`);
+  println(`10000001 is odd: ${odd(10000001)}`);
+  let v: Vec<u64> = Vec.new();
+  fill(mut v, 1000000);
+  println(`filled ${v.len()}`);
+  println(`fib ${fib([0, 1], 30)}`);
+}

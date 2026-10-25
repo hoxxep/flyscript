@@ -1,0 +1,435 @@
+// Calls in tail position (§11.3): a function's call of itself as the last thing it does — its value
+// the call's, with nothing left to drop or run as it returns, and nothing it lends of its own frame —
+// is a jump, the function's parameters given the call's arguments and its body run again. So a
+// recursion along a list runs in constant stack on every back end, in sanitized builds and in
+// WebAssembly too, where a C compiler's or LLVM's own tail calls do not reach.
+//
+// A recursion through other functions — derived `Eq` along `next: Option<Box<Node>>` goes from
+// `Node.eq` through `Option.eq` and `Box.eq` back to `Node.eq` — becomes one of the function with
+// itself when the functions between are inlined where they are called in tail position: each is
+// small, and none recurses but through the function it returns to. Inlined there, a callee's
+// `return` is its caller's, so its body goes in as it is, its locals and labels renumbered.
+
+import { Ty } from "./types";
+import { Func, Block, Stmt, Rvalue, Operand, Place, Root, Proj, ProjKind, Call, Callee, Cleanup, Capture, Local, LocalKind } from "./ir";
+import { HashMap, HashSet } from "std/collections";
+
+// A call in tail position: the path to its statement — at each level the statement's index and,
+// for one with blocks, which of them — the instance it calls, and the local its result goes to.
+export type Site = { path: Vec<[usize, usize]>; callee: Callee; args: Vec<Operand>; argTys: Vec<Ty>; local: usize };
+impl Clone for Site;
+
+// What follows a statement, as far as the function's result goes: it returns this local's value,
+// or nothing, or something else is done first.
+enum After {
+  #Ret(usize),
+  #Void,
+  #Other,
+}
+impl Clone for After;
+
+// The calls in tail position in `f`, found backward from its end.
+export function tailSites(f: readonly Func, unit: bool): Vec<Site> {
+  let out: Vec<Site> = Vec.new();
+  const end: After = if (unit) { #Void } else { #Ret(f.value) };
+  let breaks: Vec<[usize, After]> = Vec.new();
+  let path: Vec<[usize, usize]> = Vec.new();
+  scanBlock(f.body, end, true, mut breaks, mut path, mut out);
+  out
+}
+
+// `b`'s statements, the last first, `after` what follows the block, `clean` whether leaving the
+// blocks around runs nothing, `breaks` what follows each labeled block it is in, innermost last.
+function scanBlock(b: readonly Block, after: After, clean: bool, breaks: mut Vec<[usize, After]>, path: mut Vec<[usize, usize]>, out: mut Vec<Site>): void {
+  const tidy = clean && b.cleanups.len() == 0;
+  let next = after;
+  let i = b.stmts.len();
+  while (i > 0) {
+    i -= 1;
+    path.push([i, 0]);
+    next = match (b.stmts[i]) {
+      #At(_) => next,
+      #Let(y, #Use(#Copy(p))) | #Let(y, #Use(#Move(p))) => match ([next, single(p)]) {
+        [#Ret(r), #Some(x)] => if (r == y) { #Ret(x) } else { #Other },
+        _ => #Other,
+      },
+      #Let(t, #Call(c)) => {
+        const tail = match (next) { #Ret(r) => r == t, #Void => true, #Other => false };
+        if (tail && tidy) { out.push({ path: path.clone(), callee: c.callee.clone(), args: c.args.clone(), argTys: c.argTys.clone(), local: t }); }
+        #Other
+      }
+      #Return(op) => match (op) {
+        #Copy(p) | #Move(p) => match (single(p)) { #Some(x) => #Ret(x), #None => #Other },
+        #Const(#Unit) => #Void,
+        _ => #Other,
+      },
+      #Break(l) => breakTo(breaks, l),
+      #Labeled(l, x) => {
+        breaks.push([l, next.clone()]);
+        scanBlock(x, next.clone(), tidy, mut breaks, mut path, mut out);
+        breaks.pop();
+        #Other
+      }
+      #Block(x) => {
+        scanBlock(x, next.clone(), tidy, mut breaks, mut path, mut out);
+        #Other
+      }
+      #If(_, x, y) => {
+        scanBlock(x, next.clone(), tidy, mut breaks, mut path, mut out);
+        path.pop();
+        path.push([i, 1]);
+        scanBlock(y, next.clone(), tidy, mut breaks, mut path, mut out);
+        #Other
+      }
+      _ => #Other,
+    };
+    path.pop();
+  }
+}
+
+// What follows the labeled block `l`, the innermost of that label.
+function breakTo(breaks: readonly Vec<[usize, After]>, l: usize): After {
+  let k = breaks.len();
+  while (k > 0) {
+    k -= 1;
+    if (breaks[k][0] == l) { return breaks[k][1].clone(); }
+  }
+  #Other
+}
+
+// The local a place is, if it is one whole.
+function single(p: readonly Place): Option<usize> {
+  if (p.path.len() > 0) { return #None; }
+  match (p.root) { #Local(l) => #Some(l), #Capture(_) => #None }
+}
+
+// ---- inlining ----
+
+// Whether `f` may be inlined where it is called in tail position: it neither fails, suspends,
+// yields nor takes regions, makes no closure, handles nothing, and is small.
+export function inlinable(f: readonly Func): bool {
+  if (f.captures.len() > 0 || f.yields.isSome() || f.fails.isSome() || f.regions.len() > 0) { return false; }
+  let n: usize = 0;
+  simpleBlock(f.body, mut n) && n <= 200
+}
+
+function simpleBlock(b: readonly Block, n: mut usize): bool {
+  for (const c of b.cleanups) {
+    match (c) {
+      #Drop(_) => {}
+      #Defer(_, d) => { if (!simpleBlock(d, mut n)) { return false; } }
+      #Arena(_) => return false,
+    }
+  }
+  for (const s of b.stmts) {
+    n += 1;
+    const ok = match (s) {
+      #Let(_, rv) | #Store(_, rv) => simpleRvalue(rv),
+      #Drop(_) | #Break(_) | #Continue(_) | #Return(_) | #Panic(_) | #Arm(_) | #At(_) => true,
+      #If(_, x, y) | #Loop(_, x, y) => simpleBlock(x, mut n) && simpleBlock(y, mut n),
+      #Block(x) | #Labeled(_, x) => simpleBlock(x, mut n),
+      _ => false,
+    };
+    if (!ok) { return false; }
+  }
+  true
+}
+
+function simpleRvalue(rv: readonly Rvalue): bool {
+  match (rv) {
+    #Closure(_, _, _) => false,
+    #Call(c) => !c.fails && !c.suspends && !c.yields && c.regions.len() == 0,
+    _ => true,
+  }
+}
+
+// `callee` inlined in `f` where `site` calls it: its parameters given the call's arguments, its
+// result put where the call's went.
+export function inlineAt(f: mut Func, site: readonly Site, callee: readonly Func): void {
+  const base = f.locals.len();
+  for (const l of callee.locals) {
+    const kind: LocalKind = match (l.kind) { #Param => #Binding, _ => l.kind.clone() };
+    f.locals.push({ name: l.name.clone(), ty: l.ty.clone(), kind });
+  }
+  const labels = maxLabel(f.body) + 1;
+  const m: Map = { base, labels };
+  let body = mapBlock(callee.body, m);
+  let stmts: Vec<Stmt> = Vec.new();
+  for (const [k, p] of callee.params.iter().enumerate()) { stmts.push(#Let(base + p, #Use(site.args[k].clone()))); }
+  for (const x of body.stmts.drain()) { stmts.push(x); }
+  if (!unitResult(callee)) { stmts.push(#Let(site.local, #Use(#Move({ root: #Local(base + callee.value), path: Vec.new() })))); }
+  body.stmts = stmts;
+  replaceAt(mut f.body, site.path, 0, #Block(body));
+}
+
+// Whether `f` gives no value, which its body then puts in no local (as `unitTy` says).
+export function unitResult(f: readonly Func): bool {
+  match (f.ret) { #Prim(#Void) | #Prim(#Never) | #Error => true, _ => false }
+}
+
+// The statement at `path` in `b`, from its `k`th step on, replaced by `s`.
+function replaceAt(b: mut Block, path: readonly Vec<[usize, usize]>, k: usize, s: Stmt): void {
+  const [i, which] = path[k];
+  if (k + 1 == path.len()) {
+    b.stmts[i] = s;
+    return;
+  }
+  match (b.stmts[i]) {
+    #Block(x) | #Labeled(_, x) => replaceAt(mut x, path, k + 1, s),
+    #If(_, x, y) => if (which == 0) { replaceAt(mut x, path, k + 1, s) } else { replaceAt(mut y, path, k + 1, s) },
+    _ => {}
+  }
+}
+
+// The largest label of a loop or labeled block in `b`.
+export function maxLabel(b: readonly Block): usize {
+  let n: usize = 0;
+  for (const c of b.cleanups) { if (const #Defer(_, d) = c) { n = max(n, maxLabel(d)); } }
+  for (const s of b.stmts) {
+    const m = match (s) {
+      #Loop(l, x, y) => max(l, max(maxLabel(x), maxLabel(y))),
+      #Labeled(l, x) => max(l, maxLabel(x)),
+      #ForGen(l, _, _, x) => max(l, maxLabel(x)),
+      #Block(x) | #Region(_, _, x) => maxLabel(x),
+      #If(_, x, y) | #Try(x, _, y) => max(maxLabel(x), maxLabel(y)),
+      #Break(l) | #Continue(l) => l,
+      _ => 0,
+    };
+    n = max(n, m);
+  }
+  n
+}
+
+// How an inlined body's locals and labels are renumbered.
+type Map = { base: usize; labels: usize };
+
+function mapBlock(b: readonly Block, m: readonly Map): Block {
+  let locals: Vec<usize> = Vec.new();
+  for (const l of b.locals) { locals.push(m.base + l); }
+  let cleanups: Vec<Cleanup> = Vec.new();
+  for (const c of b.cleanups) {
+    cleanups.push(match (c) {
+      #Drop(l) => #Drop(m.base + l),
+      #Defer(f, d) => #Defer(m.base + f, mapBlock(d, m)),
+      #Arena(l) => #Arena(m.base + l),
+    });
+  }
+  let stmts: Vec<Stmt> = Vec.new();
+  for (const s of b.stmts) { stmts.push(mapStmt(s, m)); }
+  { locals, cleanups, stmts }
+}
+
+function mapStmt(s: readonly Stmt, m: readonly Map): Stmt {
+  match (s) {
+    #Let(l, rv) => #Let(m.base + l, mapRvalue(rv, m)),
+    #Store(p, rv) => #Store(mapPlace(p, m), mapRvalue(rv, m)),
+    #Drop(p) => #Drop(mapPlace(p, m)),
+    #If(c, x, y) => #If(mapOperand(c, m), mapBlock(x, m), mapBlock(y, m)),
+    #Loop(l, x, y) => #Loop(m.labels + l, mapBlock(x, m), mapBlock(y, m)),
+    #Break(l) => #Break(m.labels + l),
+    #Continue(l) => #Continue(m.labels + l),
+    #Return(op) => #Return(mapOperand(op, m)),
+    #Block(x) => #Block(mapBlock(x, m)),
+    #Labeled(l, x) => #Labeled(m.labels + l, mapBlock(x, m)),
+    #Arm(f) => #Arm(m.base + f),
+    _ => s.clone(),
+  }
+}
+
+function mapRvalue(rv: readonly Rvalue, m: readonly Map): Rvalue {
+  match (rv) {
+    #Use(op) => #Use(mapOperand(op, m)),
+    #Borrow(mutable, p) => #Borrow(mutable, mapPlace(p, m)),
+    #View(p) => #View(mapPlace(p, m)),
+    #Unary(o, op) => #Unary(o.clone(), mapOperand(op, m)),
+    #Binary(o, a, b) => #Binary(o.clone(), mapOperand(a, m), mapOperand(b, m)),
+    #Cast(op, t) => #Cast(mapOperand(op, m), t.clone()),
+    #IsTag(p, t) => #IsTag(mapPlace(p, m), t.clone()),
+    #Tag(t, vs) => { let ws: Vec<Operand> = Vec.new(); for (const v of vs) { ws.push(mapOperand(v, m)); } #Tag(t.clone(), ws) }
+    #Fields(fs) => { let gs: Vec<[String, Operand]> = Vec.new(); for (const [n, v] of fs) { gs.push([n.clone(), mapOperand(v, m)]); } #Fields(gs) }
+    #List(vs) => { let ws: Vec<Operand> = Vec.new(); for (const v of vs) { ws.push(mapOperand(v, m)); } #List(ws) }
+    #Convert(op) => #Convert(mapOperand(op, m)),
+    #Call(c) => #Call(mapCall(c, m)),
+    #AddressOf(p) => #AddressOf(mapPlace(p, m)),
+    _ => rv.clone(),
+  }
+}
+
+function mapCall(c: readonly Call, m: readonly Map): Call {
+  let d = c.clone();
+  let args: Vec<Operand> = Vec.new();
+  for (const a of c.args) { args.push(mapOperand(a, m)); }
+  d.args = args;
+  if (const #Value(f, consumed) = c.callee) { d.callee = #Value(mapOperand(f, m), consumed); }
+  d
+}
+
+function mapOperand(op: readonly Operand, m: readonly Map): Operand {
+  match (op) {
+    #Copy(p) => #Copy(mapPlace(p, m)),
+    #Move(p) => #Move(mapPlace(p, m)),
+    #Const(_) => op.clone(),
+  }
+}
+
+function mapPlace(p: readonly Place, m: readonly Map): Place {
+  const root: Root = match (p.root) { #Local(l) => #Local(m.base + l), #Capture(k) => #Capture(k) };
+  let path: Vec<Proj> = Vec.new();
+  for (const x of p.path) {
+    const kind: ProjKind = match (x.kind) { #Index(op) => #Index(mapOperand(op, m)), _ => x.kind.clone() };
+    path.push({ kind, ty: x.ty.clone() });
+  }
+  { root, path }
+}
+
+// ---- the jump ----
+
+// What each local of `f` is given, for those given a value once, by a `let`, and never written.
+export function onceGiven(f: readonly Func): HashMap<usize, Rvalue> {
+  let lets: HashMap<usize, Rvalue> = HashMap.new();
+  let many: HashSet<usize> = HashSet.new();
+  givenIn(f.body, mut lets, mut many);
+  for (const l of many.iter()) { lets.remove(l); }
+  lets
+}
+
+function givenIn(b: readonly Block, lets: mut HashMap<usize, Rvalue>, many: mut HashSet<usize>): void {
+  for (const c of b.cleanups) { if (const #Defer(_, d) = c) { givenIn(d, mut lets, mut many); } }
+  for (const s of b.stmts) {
+    match (s) {
+      #Let(l, rv) => { if (lets.has(l)) { many.insert(l); } else { lets.insert(l, rv.clone()); } }
+      #Store(p, _) => { if (const #Local(l) = p.root) { many.insert(l); } }
+      #If(_, x, y) | #Loop(_, x, y) | #Try(x, _, y) => { givenIn(x, mut lets, mut many); givenIn(y, mut lets, mut many); }
+      #Block(x) | #Labeled(_, x) | #Region(_, _, x) | #ForGen(_, _, _, x) => givenIn(x, mut lets, mut many),
+      _ => {}
+    }
+  }
+}
+
+// Whether what `op`, of type `t`, holds is outside the frame of the function `f`: a value passed
+// whole, or a borrow of what is reached through a pointer the function was given, or one it holds
+// to memory of its own — a box's — rather than of a local's. `heap` says which types point to
+// memory of their own.
+export function awayFromFrame(f: readonly Func, given: readonly HashMap<usize, Rvalue>, op: readonly Operand, t: readonly Ty, heap: readonly (t: readonly Ty) => bool, depth: usize): bool {
+  if (!holdsBorrow(t)) { return true; }
+  if (depth > 32) { return false; }
+  match (op) {
+    #Const(_) => true,
+    #Copy(p) | #Move(p) => valueAway(f, given, p, heap, depth + 1),
+  }
+}
+
+// Whether a type is or holds a borrow.
+function holdsBorrow(t: readonly Ty): bool {
+  match (t) {
+    // A function value points at its closure's captures, which may be in the frame.
+    #Borrow(_, _) | #Slice(_) | #Prim(#Str) | #Fn(_) => true,
+    #Tuple(ts) => ts.iter().some((x) => holdsBorrow(x)),
+    #Record(r) => r.labels.iter().some(([_, x]) => holdsBorrow(x)),
+    _ => false,
+  }
+}
+
+// Whether the borrow held at `p` is to memory outside the frame.
+function valueAway(f: readonly Func, given: readonly HashMap<usize, Rvalue>, p: readonly Place, heap: readonly (t: readonly Ty) => bool, depth: usize): bool {
+  const l = match (p.root) { #Local(l) => l, #Capture(_) => return false };
+  if (p.path.len() == 0) {
+    if (const #Param = f.locals[l].kind && f.params.iter().some((q) => q == l)) { return true; }
+    return match (given.get(l)) { #Some(rv) => rvalueAway(f, given, rv, heap, depth), #None => false };
+  }
+  // A borrow held in a tuple, a record or an array the function made: what it was made of.
+  if (p.path.len() == 1) {
+    if (const #Some(rv) = madeOf(given, l, depth)) {
+      const part: Option<Operand> = match (p.path[0].kind) {
+        #Field(n) => match (rv) {
+          #Fields(fs) => match (fs.iter().find(([k, _]) => k == n)) { #Some([_, v]) => #Some(v.clone()), #None => #None },
+          #List(vs) => match (parseIndex(n.asStr())) { #Some(k) => vs.get(k).cloned(), #None => #None },
+          _ => #None,
+        },
+        #Index(#Const(#Int(d, _))) => match (rv) { #List(vs) => match (parseIndex(d.asStr())) { #Some(k) => vs.get(k).cloned(), #None => #None }, _ => #None },
+        _ => #None,
+      };
+      if (const #Some(v) = part) { return awayFromFrame(f, given, v, p.path[0].ty, heap, depth); }
+    }
+  }
+  false
+}
+
+// What made the value local `l` holds, through the locals it was copied or moved from whole.
+function madeOf(given: readonly HashMap<usize, Rvalue>, l: usize, depth: usize): Option<Rvalue> {
+  if (depth > 32) { return #None; }
+  match (given.get(l)) {
+    #Some(#Use(#Copy(p))) | #Some(#Use(#Move(p))) => match (single(p)) { #Some(m) => madeOf(given, m, depth + 1), #None => #None },
+    #Some(rv) => #Some(rv.clone()),
+    #None => #None,
+  }
+}
+
+function parseIndex(s: str): Option<usize> {
+  if (s.len() == 0) { return #None; }
+  let n: usize = 0;
+  for (const c of s.asBytes()) {
+    if (c < 48 || c > 57) { return #None; }
+    n = n * 10 + (c - 48) as usize;
+  }
+  #Some(n)
+}
+
+function rvalueAway(f: readonly Func, given: readonly HashMap<usize, Rvalue>, rv: readonly Rvalue, heap: readonly (t: readonly Ty) => bool, depth: usize): bool {
+  match (rv) {
+    #Use(op) => match (op) { #Const(_) => true, #Copy(p) | #Move(p) => valueAway(f, given, p, heap, depth + 1) },
+    #Borrow(_, p) | #View(p) => placeAway(f, given, p, heap, depth + 1),
+    // What a call lends is of what it was lent.
+    #Call(c) => {
+      for (const [k, a] of c.args.iter().enumerate()) {
+        if (!awayFromFrame(f, given, a, c.argTys[k], heap, depth + 1)) { return false; }
+      }
+      true
+    }
+    _ => false,
+  }
+}
+
+// Whether the memory of place `p` is outside the frame: reached through a pointer that is.
+function placeAway(f: readonly Func, given: readonly HashMap<usize, Rvalue>, p: readonly Place, heap: readonly (t: readonly Ty) => bool, depth: usize): bool {
+  const l = match (p.root) { #Local(l) => l, #Capture(_) => return false };
+  // The last step through a pointer decides: what comes after it is in what it points to.
+  let d = p.path.len();
+  while (d > 0 && !isDeref(p.path[d - 1].kind)) { d -= 1; }
+  if (d == 0) { return false; }
+  const at = d - 1;
+  const base: Ty = if (at == 0) { f.locals[l].ty.clone() } else { p.path[at - 1].ty.clone() };
+  if (heap(base)) { return true; }
+  let path: Vec<Proj> = Vec.new();
+  for (const x of p.path[0..at]) { path.push(x.clone()); }
+  const prefix: Place = { root: p.root.clone(), path };
+  valueAway(f, given, prefix, heap, depth + 1)
+}
+
+function isDeref(k: readonly ProjKind): bool { match (k) { #Deref => true, _ => false } }
+
+// The self calls among `sites` made jumps: `f`'s body run in a loop, which each continues once it
+// has given the parameters the call's arguments, all computed before any is given.
+export function jumpsFor(f: mut Func, sites: readonly Vec<Site>): void {
+  if (sites.len() == 0) { return; }
+  const label = maxLabel(f.body) + 1;
+  for (const s of sites) {
+    let stmts: Vec<Stmt> = Vec.new();
+    let temps: Vec<usize> = Vec.new();
+    for (const [k, a] of s.args.iter().enumerate()) {
+      const t = f.locals.len();
+      f.locals.push({ name: "jump".toString(), ty: s.argTys[k].clone(), kind: #Temp });
+      temps.push(t);
+      stmts.push(#Let(t, #Use(a.clone())));
+    }
+    for (const [k, p] of f.params.iter().enumerate()) {
+      stmts.push(#Store({ root: #Local(p), path: Vec.new() }, #Use(#Move({ root: #Local(temps[k]), path: Vec.new() }))));
+    }
+    stmts.push(#Continue(label));
+    replaceAt(mut f.body, s.path, 0, #Block({ locals: temps.clone(), cleanups: Vec.new(), stmts }));
+  }
+  // The body, once it ends, returns; the parameters are given before it, outside the loop.
+  let inner = replace(mut f.body.stmts, Vec.new());
+  inner.push(#Return(if (unitResult(f)) { #Const(#Unit) } else { #Move({ root: #Local(f.value), path: Vec.new() }) }));
+  f.body.stmts.push(#Loop(label, { locals: Vec.new(), cleanups: Vec.new(), stmts: inner }, { locals: Vec.new(), cleanups: Vec.new(), stmts: Vec.new() }));
+}
