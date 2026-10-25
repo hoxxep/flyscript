@@ -8,5 +8,6 @@ import FlyCore
 #print axioms FlyCore.Ownership.Concurrency.atomicEx_ok
 #print axioms FlyCore.Ownership.Concurrency.chanEx_ok
 #print axioms FlyCore.Ownership.Concurrency.mutexEx_ok
+#print axioms FlyCore.Ownership.Concurrency.poisonEx_ok
 #print axioms FlyCore.Ownership.Check.infer_sound
 #print axioms FlyCore.Ownership.Check.certified

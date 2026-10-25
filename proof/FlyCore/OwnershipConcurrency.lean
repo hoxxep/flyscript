@@ -460,4 +460,217 @@ theorem mutexEx_ok (s p : Nat → Bool) : ∀ n, match eval [adder] chOps n [.ab
     | (.abort _ _, σ') => ∀ l, σ'.mem l = none :=
   program_ok_sched adder_ok mutexEx_typed s p
 
+/-! ## Poisoning
+
+A `Mutex` whose holder panics in its body keeps the state, half changed as the body left it, and is
+poisoned: every `lock` from then on panics (§6.2). The handler's state is the box and `pz`, which is
+1 while the box is out and stays 1 if its holder never completes. A task keeps the box it locked in a
+vector of its own, from which cleanup takes it and gives it back to the handler on every way out of
+the body, a panic too; the body's last step tells the handler it completed. So the state is never
+dropped by the task that panicked, and the task's panic ends it alone, as a spawned task's does. -/
+
+/-- `spawn`, of a task whose panic ends it alone. -/
+def pmSpawn : Op := { owns := [.fn .once .int .int [.eff 0, .eff 2] .nil], refs := [], ret := .int, spawns := true }
+def pmOps : List Op := [scYield, pmSpawn, chMsg]
+
+/-- The arm, lent the state as `st` and `pz`, `mut`. `#Unlock(b)` gives the box back; `#Right(2)`
+says the body completed; `#Right(0)` locks, giving `#Some(b)`, or `#None(0)` while the box is out,
+or `#None(1)` once the mutex is poisoned. -/
+def pmArm : Expr :=
+  .case "m" "y" (.box .int) .int
+    (.let_ "u" .int (.vpush (var "st") (.move "y")) (.inj .int (.box .int) true (.lit 0)))
+    (.ite (.read (var "y"))
+      (.let_ "u" .int (.write (var "pz") (.lit 0)) (.inj .int (.box .int) true (.lit 0)))
+      (.let_ "t" chRetT (.vpop (var "st"))
+        (.case "t" "g" .int (.box .int)
+          (.inj .int (.box .int) true (.lit 0))
+          (.ite (.read (var "pz"))
+            (.let_ "u" .int (.vpush (var "st") (.move "g")) (.inj .int (.box .int) true (.lit 1)))
+            (.let_ "u" .int (.write (var "pz") (.lit 1)) (.inj .int (.box .int) false (.move "g")))))))
+
+/-- Cleanup: `const t = gv.pop(); match t { #None => 0, #Some(h) => { mx.unlock(h); 0 } }`. -/
+def pmGive : Expr :=
+  .let_ "t" chRetT (.vpop (var "gv"))
+    (.case "t" "h" .int (.box .int) (.atom (.lit 0))
+      (.let_ "m3" chMsgT (.inj (.box .int) .int true (.move "h"))
+        (.let_ "r3" chRetT (.perform 2 [.move "m3"] []) (.atom (.lit 0)))))
+
+/-- The body, `x` the locked box lent `mut`: `const v = *x; *x = v + 1000; yield; 1 / z; *x = v + z`,
+then completed. With `z` zero it panics with the state half changed. -/
+def pmBody : Expr :=
+  .let_ "i0" .int (.atom (.lit 0))
+    (.let_ "w" .int
+      (.lendIdx "x" .mut (var "gv") "i0"
+        (.let_ "v" .int (.atom (.read (deref (var "x"))))
+          (.let_ "v2" .int (.add (.read (var "v")) (.lit 1000))
+            (.let_ "u5" .int (.write (deref (var "x")) (.read (var "v2")))
+              (yield_ "y"
+                (.let_ "q" .int (.arith .div (.lit 1) (.read (var "z")))
+                  (.let_ "v3" .int (.add (.read (var "v")) (.read (var "z")))
+                    (.write (deref (var "x")) (.read (var "v3"))))))))))
+      (.let_ "m4" chMsgT (.inj (.box .int) .int false (.lit 2))
+        (.let_ "r4" chRetT (.perform 2 [.move "m4"] []) (.atom (.lit 0)))))
+
+/-- `match mx.lock() { #Busy => yield, #Poisoned => panic, #Some(g) => { const gv = [g];
+defer pmGive; pmBody; want = 0 } }` -/
+def pmStep : Expr :=
+  .let_ "m" chMsgT (.inj (.box .int) .int false (.lit 0))
+    (.let_ "r" chRetT (.perform 2 [.move "m"] [])
+      (.case "r" "g" .int (.box .int)
+        (.ite (.read (var "g")) (.arith .div (.lit 1) (.lit 0)) (yield_ "u" (.atom (.lit 0))))
+        (.let_ "gv" boxes .vnew
+          (.let_ "u" .int (.vpush (var "gv") (.move "g"))
+            (.let_ "d" .int (.defer .int pmGive pmBody) (.write (var "want") (.lit 0)))))))
+
+/-- `(_) => { let want = 1; while (want) pmStep; 0 }`, having captured `z`. -/
+def pmTask : Fn :=
+  { owns := [("p", .int)], refs := [], ret := .int, row := [.eff 0, .eff 2], cap := some ("z", .int, .once),
+    body := .let_ "want" .int (.atom (.lit 1)) (.let_ "w" .int (.while_ (.atom (.read (var "want"))) pmStep) (.atom (.lit 0))) }
+
+def pmScope : Expr :=
+  .scope 0 1 [] .int
+    (.let_ "k" (.fn .once .int .int [.eff 0, .eff 2] .nil) (.lam 0 (.lit 0))
+      (.let_ "s1" .int (.perform 1 [.move "k"] [])
+        (.let_ "k2" (.fn .once .int .int [.eff 0, .eff 2] .nil) (.lam 0 (.lit 5))
+          (.let_ "s2" .int (.perform 1 [.move "k2"] []) (yield_ "y" (.atom (.lit 0)))))))
+
+/-- `const mx = new Mutex(Box.new(0)); scope((s) => { s.spawn(() => body(0)); s.spawn(() => body(5));
+yield; 0 }); mx.poisoned ? *mx.state : -1`: the first task panics in its body, which ends it alone; the
+mutex keeps what the body left, 1000, and is poisoned, so the second task's lock panics, ending it too. -/
+def poisonEx : Expr :=
+  .let_ "st" boxes .vnew
+    (.let_ "b0" (.box .int) (.new (.lit 0))
+      (.let_ "u0" .int (.vpush (var "st") (.move "b0"))
+        (.let_ "pz" .int (.atom (.lit 0))
+          (.let_ "h" .int
+            (.handle .int pmScope 2 [⟨"st", .mut, boxes, var "st"⟩, ⟨"pz", .mut, .int, var "pz"⟩] ["m"] [] pmArm)
+            (.let_ "r" chRetT (.vpop (var "st"))
+              (.case "r" "g" .int (.box .int) (.atom (.lit (-2)))
+                (.ite (.read (var "pz")) (.atom (.read (deref (var "g")))) (.atom (.lit (-1))))))))))
+
+set_option maxHeartbeats 40000000 in
+set_option maxRecDepth 100000 in
+example : value (eval [pmTask] pmOps 600 [] (Store.sched0 fun _ => false) [] poisonEx) = some 1000 := by
+  runLong [poisonEx, pmScope, pmStep, pmBody, pmGive, pmTask, pmArm, pmOps, chMsg, pmSpawn, scYield, yield_, boxes, chMsgT, chRetT, mkTask, cloFn]
+set_option maxHeartbeats 40000000 in
+set_option maxRecDepth 100000 in
+example : freed (eval [pmTask] pmOps 600 [] (Store.sched0 fun _ => false) [] poisonEx) := by
+  runLong [poisonEx, pmScope, pmStep, pmBody, pmGive, pmTask, pmArm, pmOps, chMsg, pmSpawn, scYield, yield_, boxes, chMsgT, chRetT, mkTask, cloFn]
+
+theorem pmArm_typed : Typed F O (armCtx ["m"] [] chMsg [("st", .mut, boxes), ("pz", .mut, .int)]) pmArm chRetT
+    [("m", .own chMsgT false), ("st", .ref .mut boxes), ("pz", .ref .mut .int)] r := by
+  let C : Ctx := [("m", .own chMsgT false), ("st", .ref .mut boxes), ("pz", .ref .mut .int)]
+  refine .case (Γ₁ := C) (Γ₂ := C) (l₁ := false) (l₂ := true) rfl rfl rfl
+    (.let_ (live := true) rfl (.vpush (.move rfl rfl) (.ref (m := .mut) rfl)) (.inj .lit rfl)) ?_ (Weaker.refl _) (Weaker.refl _)
+  refine .ite (.read (.own rfl)) (.let_ (live := true) rfl (.write .lit (.ref (m := .mut) rfl)) (.inj .lit rfl)) ?_
+    (Weaker.refl _) (Weaker.refl _)
+  refine .let_ (live := false) rfl (.vpop (.ref (m := .mut) rfl) rfl) ?_
+  refine .case (Γ₁ := ("t", .own chRetT false) :: ("y", .own .int true) :: C) (Γ₂ := ("t", .own chRetT false) :: ("y", .own .int true) :: C)
+    (l₁ := true) (l₂ := false) rfl rfl rfl (.inj .lit rfl) ?_ (Weaker.refl _) (Weaker.refl _)
+  exact .ite (.read (.ref rfl)) (.let_ (live := true) rfl (.vpush (.move rfl rfl) (.ref (m := .mut) rfl)) (.inj .lit rfl))
+    (.let_ (live := true) rfl (.write .lit (.ref (m := .mut) rfl)) (.inj (.move rfl rfl) rfl)) (Weaker.refl _) (Weaker.refl _)
+
+
+theorem pmStep_typed : Typed [pmTask] pmOps mxLW pmStep .int mxLW [.eff 0, .eff 2] := by
+  refine .let_ (live := false) rfl (.inj .lit rfl) ?_
+  refine .let_ (live := false) rfl (.perform (op := chMsg) rfl (by simp) (.cons (.move rfl rfl) .nil) .nil .nil) ?_
+  refine .case (Γ₁ := ("r", .own chRetT false) :: ("m", .own chMsgT false) :: mxLW)
+    (Γ₂ := ("r", .own chRetT false) :: ("m", .own chMsgT false) :: mxLW) (l₁ := true) (l₂ := false) rfl rfl rfl ?_ ?_
+    (Weaker.refl _) (Weaker.refl _)
+  · exact .ite (.read (.own rfl)) (.add .lit .lit)
+      (.let_ (live := true) rfl (.perform (op := scYield) rfl (by simp) .nil .nil .nil) (.atom .lit)) (Weaker.refl _) (Weaker.refl _)
+  refine .let_ (live := true) rfl (.vnew rfl) ?_
+  refine .let_ (live := true) rfl (.vpush (.move rfl rfl) (.own rfl)) ?_
+  let Γd : Ctx := ("u", .own .int true) :: ("gv", .own boxes true) :: ("g", .own (.box .int) false) ::
+    ("r", .own chRetT false) :: ("m", .own chMsgT false) :: mxLW
+  let Γi : Ctx := ("i0", .own .int true) :: Γd
+  have hIn : Typed [pmTask] pmOps (("x", .ref .mut (.box .int)) :: lendCtx .mut Γi "gv") (.let_ "v" .int (.atom (.read (deref (var "x"))))
+          (.let_ "v2" .int (.add (.read (var "v")) (.lit 1000))
+            (.let_ "u5" .int (.write (deref (var "x")) (.read (var "v2")))
+              (yield_ "y"
+                (.let_ "q" .int (.arith .div (.lit 1) (.read (var "z")))
+                  (.let_ "v3" .int (.add (.read (var "v")) (.read (var "z")))
+                    (.write (deref (var "x")) (.read (var "v3")))))))))
+      .int (("x", .ref .mut (.box .int)) :: lendCtx .mut Γi "gv") [.eff 0, .eff 2] :=
+    .let_ (live := true) rfl (.atom (.read (.deref (.ref rfl))))
+      (.let_ (live := true) rfl (.add (.read (.own rfl)) .lit)
+        (.let_ (live := true) rfl (.write (.read (.own rfl)) (.deref (.ref (m := .mut) rfl)))
+          (.let_ (live := true) rfl (.perform (op := scYield) rfl (by simp) .nil .nil .nil)
+            (.let_ (live := true) rfl (.add .lit (.read (.own rfl)))
+              (.let_ (live := true) rfl (.add (.read (.own rfl)) (.read (.own rfl)))
+                (.write (.read (.own rfl)) (.deref (.ref (m := .mut) rfl))))))))
+  have hIdx : Typed [pmTask] pmOps Γi (.lendIdx "x" .mut (var "gv") "i0" (.let_ "v" .int (.atom (.read (deref (var "x"))))
+          (.let_ "v2" .int (.add (.read (var "v")) (.lit 1000))
+            (.let_ "u5" .int (.write (deref (var "x")) (.read (var "v2")))
+              (yield_ "y"
+                (.let_ "q" .int (.arith .div (.lit 1) (.read (var "z")))
+                  (.let_ "v3" .int (.add (.read (var "v")) (.read (var "z")))
+                    (.write (deref (var "x")) (.read (var "v3"))))))))))
+      .int Γi [.eff 0, .eff 2] := by
+    have := Typed.lendIdx (F := [pmTask]) (O := pmOps) (Γ := Γi) (x := "x") (m := .mut) (y := "gv") (z := "i0")
+      (τ := .box .int) (τb := .int) (r := [.eff 0, .eff 2]) (Γb := lendCtx .mut Γi "gv") rfl (.own rfl) (.own rfl)
+      (fun _ => rfl) (fun _ => rfl) (fun _ _ _ _ h => by simp [Γi, Γd, lookup] at h) hIn
+    simpa [Γi, Γd, thaw, lendCtx, hide, mxLW] using this
+  have hBody : Typed [pmTask] pmOps Γd pmBody .int Γd [.eff 0, .eff 2] := by
+    refine .let_ (live := true) rfl (.atom .lit) (.let_ (live := true) rfl hIdx ?_)
+    refine .let_ (live := false) rfl (.inj .lit rfl) ?_
+    exact .let_ (live := true) rfl (.perform (op := chMsg) rfl (by simp) (.cons (.move rfl rfl) .nil) .nil .nil) (.atom .lit)
+  have hGive : Typed [pmTask] pmOps Γd pmGive .int Γd [.eff 0, .eff 2] := by
+    refine .let_ (live := false) rfl (.vpop (.own rfl) rfl) ?_
+    refine .case (Γ₁ := ("t", .own chRetT false) :: Γd) (Γ₂ := ("t", .own chRetT false) :: Γd)
+      (l₁ := true) (l₂ := false) rfl rfl rfl (.atom .lit) ?_ (Weaker.refl _) (Weaker.refl _)
+    refine .let_ (live := false) rfl (.inj (.move rfl rfl) rfl) ?_
+    exact .let_ (live := true) rfl (.perform (op := chMsg) rfl (by simp) (.cons (.move rfl rfl) .nil) .nil .nil) (.atom .lit)
+  exact .let_ (live := true) rfl (.defer hBody hGive) (.write .lit (.own rfl))
+
+theorem pmTask_ok : FnsOk [pmTask] pmOps := by
+  intro d hd
+  simp only [List.mem_singleton] at hd
+  subst hd
+  refine ⟨by decide, ?_⟩
+  simp only [pmTask, FnOk, fnCtx, cloFn, ownCtx, refCtx]
+  refine ⟨by decide, [("p", .own .int true), ("z", .own .int true)], ?_⟩
+  exact .let_ (live := true) rfl (.atom .lit)
+    (.let_ (live := true) rfl (.while_ (.atom (.read (.own rfl))) pmStep_typed) (.atom .lit))
+
+def pmH : Ctx := [("pz", .lent .int false), ("u0", .own .int true), ("b0", .own (.box .int) false), ("st", .lent boxes false)]
+
+theorem poisonEx_typed : Typed [pmTask] pmOps [] poisonEx .int [] [.fail] := by
+  refine .let_ (live := true) rfl (.vnew rfl) ?_
+  refine .let_ (live := false) rfl (.new .lit) ?_
+  refine .let_ (live := true) rfl (.vpush (.move rfl rfl) (.own rfl)) ?_
+  refine .let_ (live := true) rfl (.atom .lit) ?_
+  have hs : Typed [pmTask] pmOps pmH pmScope .int pmH [.eff 2, .fail] := by
+    refine .scope (op := scYield) (opS := pmSpawn) (rT := [.eff 0, .eff 2]) rfl rfl rfl rfl rfl rfl rfl rfl rfl (by decide)
+      (by simp) (by simp) (by decide) rfl (by simp) ?_
+    refine .let_ (live := false) rfl (.lam (d := pmTask) rfl rfl rfl rfl rfl .lit rfl) ?_
+    refine .let_ (live := true) rfl (.perform (op := pmSpawn) rfl (by simp) (.cons (.move rfl rfl) .nil) .nil .nil) ?_
+    refine .let_ (live := false) rfl (.lam (d := pmTask) rfl rfl rfl rfl rfl .lit rfl) ?_
+    refine .let_ (live := true) rfl (.perform (op := pmSpawn) rfl (by simp) (.cons (.move rfl rfl) .nil) .nil .nil) ?_
+    exact .let_ (live := true) rfl (.perform (op := scYield) rfl (by simp) .nil .nil .nil) (.atom .lit)
+  have hh := Typed.handle (F := [pmTask]) (O := pmOps)
+    (Γ := [("pz", .own .int true), ("u0", .own .int true), ("b0", .own (.box .int) false), ("st", .own boxes true)]) (e := 2)
+    (op := chMsg) (os := ["m"]) (rs := []) (caps := [⟨"st", .mut, boxes, var "st"⟩, ⟨"pz", .mut, .int, var "pz"⟩])
+    (ys := [(.mut, "st"), (.mut, "pz")]) (r := [.fail]) (Γb := pmH) (τ := .int) (arm := pmArm) (body := pmScope)
+    rfl rfl (by simp [chMsg, chMsgT]; rfl) rfl rfl (.mut (.own rfl) rfl rfl (.mut (.own rfl) rfl rfl .nil))
+    (by simp [Exclusive]) (by decide) pmArm_typed hs
+  simp only [thaw, unhideAll, hideAll, hide, roots, Slot.ty, pmH] at hh
+  refine .let_ (live := true) rfl hh ?_
+  refine .let_ (live := false) rfl (.vpop (.own rfl) rfl) ?_
+  let C : Ctx := [("r", .own chRetT false), ("h", .own .int true), ("pz", .own .int true), ("u0", .own .int true),
+    ("b0", .own (.box .int) false), ("st", .own boxes true)]
+  exact .case (Γ₁ := C) (Γ₂ := C) (l₁ := true) (l₂ := true) rfl rfl rfl (.atom .lit)
+    (.ite (.read (.own rfl)) (.atom (.read (.deref (.own rfl)))) (.atom .lit) (Weaker.refl _) (Weaker.refl _))
+    (Weaker.refl _) (Weaker.refl _)
+
+/-- Under any schedule. -/
+theorem poisonEx_ok (s p : Nat → Bool) : ∀ n, match eval [pmTask] pmOps n [.abort .fail 0] (Store.sched0 s p) [] poisonEx with
+    | (.stuck, _) => False
+    | (.susp _ _ _ _ _, _) => False
+    | (.timeout, _) => True
+    | (.ended, _) => True
+    | (.val v, σ') => ∃ L, VT [pmTask] ⟨[], Wstar [pmTask] pmOps⟩ σ' .int v L ∧ ∀ l, σ'.mem l ≠ none ↔ l ∈ L
+    | (.abort _ _, σ') => ∀ l, σ'.mem l = none :=
+  program_ok_sched pmTask_ok poisonEx_typed s p
+
 end FlyCore.Ownership.Concurrency
