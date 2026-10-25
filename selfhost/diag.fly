@@ -43,3 +43,83 @@ export function render(d: readonly Diagnostic, file: str, source: str): String {
   for (const _ of 0..width) { out.push("^"); }
   out
 }
+
+// ---- modules another tool wrote ----
+
+// Which bytes of a written module stand for which of the file it was written from: the `len`
+// bytes at `at` copied from `from`, if `copied`; else written for the `len` bytes there.
+export type Piece = { at: usize; from: usize; len: usize; copied: bool };
+impl Clone for Piece;
+
+// The file a module was written from, `.flyx` to `.fly` say, and its text, and what of the module
+// stands for what of it, its pieces in the module's order.
+export type Origin = { file: String; source: String; pieces: Vec<Piece> };
+impl Clone for Origin;
+
+// The piece a byte of the module is in: the last that starts at it or before.
+function pieceAt(pieces: readonly Vec<Piece>, offset: usize): Option<usize> {
+  let lo: usize = 0;
+  let hi = pieces.len();
+  while (lo < hi) {
+    const mid = (lo + hi) / 2;
+    if (pieces[mid].at <= offset) { lo = mid + 1; } else { hi = mid; }
+  }
+  if (lo == 0) { #None } else { #Some(lo - 1) }
+}
+
+// What a span of the module stands for in its origin: a copied byte its own copy, a written one
+// all of what it was written for.
+export function spanBack(o: readonly Origin, s: Span): Span {
+  const last = if (s.end > s.start) { s.end - 1 } else { s.start };
+  const start = match (pieceAt(o.pieces, s.start)) {
+    #Some(i) => {
+      const p = o.pieces[i];
+      if (p.copied) { p.from + min(s.start - p.at, p.len) } else { p.from }
+    }
+    #None => 0,
+  };
+  const end = match (pieceAt(o.pieces, last)) {
+    #Some(i) => {
+      const p = o.pieces[i];
+      if (p.copied) { p.from + min(last - p.at, p.len) + 1 } else { p.from + p.len }
+    }
+    #None => 0,
+  };
+  { start, end: max(end, start + 1) }
+}
+
+// A diagnostic about a module, said of what it was written from if another tool wrote it.
+export function renderIn(d: readonly Diagnostic, file: str, source: str, origin: readonly Option<Origin>): String {
+  match (origin) {
+    #Some(o) => {
+      const #Diagnostic { span, message } = d;
+      render(diag(spanBack(o, span), message.asStr()), o.file.asStr(), o.source.asStr())
+    }
+    #None => render(d, file, source),
+  }
+}
+
+// An origin's pieces as the file beside a written module holds them: `flyx-map 1`, the file it was
+// written from, then a line a piece, `at from len`, and `c` if copied, `w` if written.
+export function mapText(file: str, pieces: readonly Vec<Piece>): String {
+  let out = `flyx-map 1\n${file}\n`;
+  for (const p of pieces) { out.push(`${p.at} ${p.from} ${p.len} ${if (p.copied) { "c" } else { "w" }}\n`.asStr()); }
+  out
+}
+
+// The pieces and the file a map names, if it is one.
+export function parseMap(text: str): Option<[String, Vec<Piece>]> {
+  const lines = text.split("\n");
+  if (lines.len() < 2 || lines[0] != "flyx-map 1") { return #None; }
+  let pieces: Vec<Piece> = Vec.new();
+  for (const i of 2..lines.len()) {
+    if (lines[i].len() == 0) { continue; }
+    const f = lines[i].asStr().split(" ");
+    if (f.len() != 4) { return #None; }
+    const at = match (parseInt(f[0].asStr())) { #Some(n) => n as usize, #None => return #None };
+    const from = match (parseInt(f[1].asStr())) { #Some(n) => n as usize, #None => return #None };
+    const len = match (parseInt(f[2].asStr())) { #Some(n) => n as usize, #None => return #None };
+    pieces.push({ at, from, len, copied: f[3] == "c" });
+  }
+  #Some([lines[1].clone(), pieces])
+}

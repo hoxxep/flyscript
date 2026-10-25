@@ -14,9 +14,9 @@
 // Code that runs apart — a `defer`'s body, a loop's body over a generator, a `handle`'s body and
 // arms — is a C function of its own, given pointers to the locals it uses of the function around it.
 
-import { Span, Diagnostic, render } from "./diag";
+import { Span, Diagnostic } from "./diag";
 import { Prim, Row, Ty, FnTy, GArg, Len, isInt, isFloat, primName } from "./types";
-import { Program as Prog } from "./env";
+import { Program as Prog, rendered } from "./env";
 import {
   Lower, Entry, newLower, stripBorrow, viewLike, typeArg, entryTy, optionTy, ckey, mangle, unitTy, isVoidTy,
 } from "./lower";
@@ -1032,6 +1032,12 @@ impl Cgen {
           #Slice(_) => {
             const name = self.constArray(items, elem, span);
             `((fly_slice){ (void*)${name}, ${items.len()} })`
+          }
+          #Tuple(ts) => {
+            let vs: Vec<String> = Vec.new();
+            for (const [i, it] of items.iter().enumerate()) { vs.push(self.constInit(it, if (i < ts.len()) { ts[i].clone() } else { #Error }, span)); }
+            const ct = self.ctype(ty, span);
+            `((${ct}){ ${vs.join(", ")} })`
           }
           _ => {
             let vs: Vec<String> = Vec.new();
@@ -4245,7 +4251,7 @@ impl Cgen {
 
   // A diagnostic, rendered in the module it arose in.
   export function failed(self: readonly Self, d: Diagnostic, module: usize): #Failed(String) {
-    #Failed(render(d, self.lw.p.modules[module].file.asStr(), self.lw.p.modules[module].source.asStr()))
+    #Failed(rendered(self.lw.p.modules[module], d))
   }
 
   // The C for a checked program whose entry module is `entry`.

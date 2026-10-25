@@ -1711,11 +1711,40 @@ impl<'p> Checker<'p> {
                 self.coerce(&rt, &self_ty, rspan);
             }
         }
+        if let Some(e) = &inst.effects {
+            self.expect_effects(e);
+        }
         self.check_args(&params, args, span);
         if let Some(e) = &inst.effects {
             self.perform(e, span);
         }
         inst.ret
+    }
+
+    /// The effects allowed where a call is flow into it before its arguments are checked, as an
+    /// effect operation's do (`call_op`): an effect of the call's whose arguments are still to be
+    /// inferred takes those of the one effect of its name allowed here, so `el("li", () =>
+    /// on("click", #Typo))` in a view of `Ui<Msg>` is wrong at `#Typo`, not at the call. Not a
+    /// failure, whose set a call may narrow, nor an effect allowed twice, as a handler's body may
+    /// allow `Ui<A>` and `Ui<B>`.
+    fn expect_effects(&mut self, effects: &EffRow) {
+        let fail = self.known("Fail");
+        let allowed = self.s.expand_effs(&self.allowed.clone());
+        for eff in self.s.expand_effs(effects).effs {
+            if eff.def == fail || eff.args.is_empty() || !eff.args.iter().all(|t| matches!(self.s.resolve(t), Ty::Var(_))) {
+                continue;
+            }
+            let mut same = allowed.effs.iter().filter(|c| c.def == eff.def);
+            let (Some(c), None) = (same.next(), same.next()) else { continue };
+            let mut probe = self.s.clone();
+            let regions = c.regions.len() == eff.regions.len() && c.regions.iter().zip(&eff.regions).all(|(x, y)| probe.unify_region(x, y).is_ok());
+            if c.args.len() != eff.args.len() || !regions {
+                continue;
+            }
+            for (x, y) in eff.args.iter().zip(&c.args) {
+                self.try_unify(x, y);
+            }
+        }
     }
 
     fn has_self(&self, fid: FnId) -> bool {

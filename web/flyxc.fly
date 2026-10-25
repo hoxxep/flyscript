@@ -1,0 +1,29 @@
+// `flyxc page.flyx page.fly`: a `.flyx` module written as `.fly` (flyx.fly), with the map back to
+// it beside it, `page.fly.map`, for a build of its own to name in `FLY_OVERLAY`: a line
+// `path/page.fly<TAB>page.fly<TAB>page.fly.map` there makes the module `path/page.fly` this one, and
+// what the compiler says is wrong with it said of the `.flyx`.
+
+import { println, exit, File, writeFile } from "std/io";
+import { render, mapText } from "../selfhost/diag";
+import { translate } from "./flyx";
+
+export function main(input: str, output: str): void uses Io {
+  const src = try {
+    let f = File.open(input);
+    f.readText()
+  } catch (_) {
+    println(`error: cannot read ${input}`);
+    exit(1)
+  };
+  const w = try { translate(src.asStr()) } catch (d) {
+    println(render(d, input, src.asStr()).asStr());
+    exit(1)
+  };
+  try {
+    writeFile(output, w.code.asStr());
+    writeFile(`${output}.map`.asStr(), mapText(input, w.pieces).asStr());
+  } catch (_) {
+    println(`error: cannot write ${output}`);
+    exit(1);
+  }
+}

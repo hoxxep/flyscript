@@ -8,10 +8,19 @@
 // `flynext-gen app build file...`: `app` the app's directory, `build` what names this build (empty
 // unless in development), and each file a page or layout, by its place under `app/routes`. Run by
 // `web/flynext`. The generated programs, and the app, reach this framework as the package `web`.
+//
+// A module of the app's may be `.flyx` (flyx.fly): it is written as `.fly` into `app/.flynext/flyx`,
+// with the map back to it beside it, and `app/.flynext/overlay` tells the compiler, as
+// `FLY_OVERLAY`, that the module `x.fly` is there, so that what it says is wrong is said of the
+// `.flyx`.
 
 import { println, eprintln, exit, File, writeFile } from "std/io";
+import { walk, createDirAll, removeAll, parent, isDir } from "std/fs";
+import { HashMap } from "std/collections";
 import { parseModule } from "../selfhost/parse";
 import { Module, Item, ItemKind, FnSig } from "../selfhost/ast";
+import { Origin, render, renderIn, mapText } from "../selfhost/diag";
+import { translate } from "./flyx";
 
 // A page, as its module says what it has.
 type Route = {
@@ -62,20 +71,57 @@ function exists(path: str): bool uses Io {
   } catch (_) { false }
 }
 
-// What a module says, or why it says nothing: then the app cannot be built.
-function parsed(path: str, src: str): Module uses Io {
-  try { parseModule(src) } catch (e) {
-    match (e) {
-      #Diagnostic { span, message } => {
-        let line: usize = 1;
-        let col: usize = 1;
-        for (const b of src.slice(0, min(span.start, src.len())).bytes()) {
-          if (b == b'\n') { line += 1; col = 1; } else { col += 1; }
-        }
-        stop(`${path}:${line}:${col}: ${message}`.asStr())
-      }
+// The app's `.flyx` modules, written as `.fly`: by the path the module would have as `.fly`, its
+// code and where it came from.
+type Written = HashMap<String, [String, Origin]>;
+
+// Each `.flyx` module of the app's written as `.fly` into `app/.flynext/flyx`, its map beside it,
+// and `app/.flynext/overlay`, which says where each is, written for the compiler.
+function writeFlyx(app: str): Written uses Io {
+  let out: Written = HashMap.new();
+  let overlay = String.new();
+  let files: Vec<String> = Vec.new();
+  try {
+    if (isDir(`${app}/.flynext/flyx`.asStr())) { removeAll(`${app}/.flynext/flyx`.asStr()); }
+    for (const f of walk(app)) {
+      const rel = f.slice(app.len() + 1, f.len());
+      if (rel.split("/").iter().some((p) => p.asStr().startsWith("."))) { continue; }
+      if (f.asStr().endsWith(".flyx")) { files.push(f.clone()); }
     }
+  } catch (_) { stop(`cannot read ${app}`); }
+  for (const f of files) {
+    const stem = f.slice(0, f.len() - 5);
+    const module = `${stem}.fly`;
+    if (exists(module.asStr())) { stop(`${f}: ${module} is the same module; keep one of them`.asStr()); }
+    const src = read(f.asStr());
+    const w = try { translate(src.asStr()) } catch (d) { stop(render(d, f.asStr(), src.asStr()).asStr()) };
+    const written = `${app}/.flynext/flyx/${stem.slice(app.len() + 1, stem.len())}.fly`;
+    const map = `${written}.map`;
+    try {
+      createDirAll(parent(written.asStr()).asStr());
+      writeFile(written.asStr(), w.code.asStr());
+      writeFile(map.asStr(), mapText(f.asStr(), w.pieces).asStr());
+    } catch (_) { stop(`cannot write ${written}`.asStr()); }
+    overlay.push(`${module}\t${written}\t${map}\n`.asStr());
+    out.insert(module, [w.code.clone(), { file: f.clone(), source: src, pieces: w.pieces.clone() }]);
   }
+  try { writeFile(`${app}/.flynext/overlay`.asStr(), overlay.asStr()); } catch (_) { stop(`cannot write ${app}/.flynext/overlay`.asStr()); }
+  out
+}
+
+// A module's code, written from its `.flyx` if it was, and where it came from then.
+function source(written: readonly Written, path: str): [String, Option<Origin>] uses Io {
+  match (written.get(path)) {
+    #Some([code, origin]) => [code.clone(), #Some(origin.clone())],
+    #None => [read(path), #None],
+  }
+}
+
+function has(written: readonly Written, path: str): bool uses Io { written.has(path) || exists(path) }
+
+// What a module says, or why it says nothing: then the app cannot be built.
+function parsed(path: str, src: str, origin: readonly Option<Origin>): Module uses Io {
+  try { parseModule(src) } catch (d) { stop(renderIn(d, path, src, origin).asStr()) }
 }
 
 // What is wrong with the app, said, and the build stopped.
@@ -140,10 +186,10 @@ function layoutsOf(name: str, all: readonly Vec<String>): Vec<String> {
   out
 }
 
-function route(app: str, name: str, layouts: readonly Vec<String>): Route uses Io {
+function route(app: str, written: readonly Written, name: str, layouts: readonly Vec<String>): Route uses Io {
   const path = `${app}/routes/${name}.fly`;
-  const src = read(path.asStr());
-  const m = parsed(path.asStr(), src.asStr());
+  const [src, origin] = source(written, path.asStr());
+  const m = parsed(path.asStr(), src.asStr(), origin);
   let r: Route = {
     name: name.toString(), pattern: patternOf(name), load: false, loadParams: false, loadFails: false,
     loadMissingOnly: false, loadMissing: false, initial: false,
@@ -189,13 +235,13 @@ function route(app: str, name: str, layouts: readonly Vec<String>): Route uses I
 }
 
 // The effects `api.fly` exports, and every name it exports, which the generated code imports.
-function effects(app: str): [Vec<Effect>, Vec<String>] uses Io {
+function effects(app: str, written: readonly Written): [Vec<Effect>, Vec<String>] uses Io {
   const path = `${app}/api.fly`;
   let out: Vec<Effect> = Vec.new();
   let names: Vec<String> = Vec.new();
-  if (!exists(path.asStr())) { return [out, names]; }
-  const src = read(path.asStr());
-  const m = parsed(path.asStr(), src.asStr());
+  if (!has(written, path.asStr())) { return [out, names]; }
+  const [src, origin] = source(written, path.asStr());
+  const m = parsed(path.asStr(), src.asStr(), origin);
   for (const it of m.items) {
     if (!it.exported) { continue; }
     match (it.kind) {
@@ -611,22 +657,24 @@ export function main(args: readonly String[]): void uses Io {
     const n = f.asStr().trimStart();
     const n = if (n.startsWith("./")) { n.slice(2, n.len()) } else { n };
     if (n.endsWith(".fly")) { names.push(n.slice(0, n.len() - 4).toString()); }
+    if (n.endsWith(".flyx")) { names.push(n.slice(0, n.len() - 5).toString()); }
   }
+  const written = writeFlyx(app);
   let layouts: Vec<String> = Vec.new();
   for (const n of names) {
     if (n == "layout" || n.asStr().endsWith("/layout")) { layouts.push(n.clone()); }
   }
   let rs: Vec<Route> = Vec.new();
-  let sp: Specials = { notFound: false, error: false, loading: false, middleware: exists(`${app}/middleware.fly`.asStr()) };
+  let sp: Specials = { notFound: false, error: false, loading: false, middleware: has(written, `${app}/middleware.fly`.asStr()) };
   for (const n of names) {
     if (layouts.iter().some((l) => l == n)) { continue; }
     if (n == "404") { sp.notFound = true; continue; }
     if (n == "error") { sp.error = true; continue; }
     if (n == "loading") { sp.loading = true; continue; }
-    rs.push(route(app, n.asStr(), layouts));
+    rs.push(route(app, written, n.asStr(), layouts));
   }
   const routes = sorted(rs);
-  const [effs, apiNames] = effects(app);
+  const [effs, apiNames] = effects(app, written);
   const head = if (exists(`${app}/head.html`.asStr())) { read(`${app}/head.html`.asStr()).asStr().trimEnd().toString() } else { "<link rel=\"stylesheet\" href=\"/style.css\">".toString() };
   try {
     writeFile(`${app}/.flynext/server.fly`.asStr(), server(build, head.asStr(), routes, layouts, effs, apiNames, sp).asStr());

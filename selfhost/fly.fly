@@ -479,7 +479,10 @@ function interfaceOf(m: readonly Manifest, deps: readonly Vec<Resolved>, entry: 
   const out = join(m.dir.asStr(), "target/.fly/interface.txt");
   try { createDirAll(parent(out.asStr()).asStr()); } catch (e) { throw #Stop(`cannot make ${out}: ${e}`) };
   const flyc = compiler();
-  compile(deps, strings([flyc.asStr(), entry, out.asStr(), root().asStr(), "--interface"]), "checking the program");
+  let cmd = strings([flyc.asStr(), entry, out.asStr(), root().asStr(), "--interface"]);
+  // A site's `.flyx` modules are where its build wrote them as `.fly` (web/flynext.fly).
+  if (m.kind == "site") { cmd.insert(0, `FLY_OVERLAY=${join(join(m.dir.asStr(), m.app.asStr()).asStr(), ".flynext/overlay")}`); }
+  compile(deps, cmd, "checking the program");
   let mods: Vec<Module> = Vec.new();
   for (const line of readText(out.asStr()).asStr().lines()) {
     if (line.startsWith("module ")) {

@@ -5,8 +5,8 @@
 // runtime, and what the module calls of it — beside it, its name ending in `.c` instead. `root` is
 // the directory that holds `std/` and `selfhost/`.
 
-import { Diagnostic, render, diag } from "./diag";
-import { Program, RUNTIME, FREESTANDING } from "./env";
+import { Diagnostic, diag, renderIn } from "./diag";
+import { Program, RUNTIME, FREESTANDING, rendered } from "./env";
 import { checkFn } from "./check";
 import { checkOwnership } from "./own";
 import { cProgram } from "./c";
@@ -26,7 +26,7 @@ type Stop = #Failed | #Unreadable { path: String };
 function report(p: readonly Program): void uses Io {
   for (const [m, d] of p.diags) {
     if (m < p.modules.len()) {
-      println(render(d, p.modules[m].file.asStr(), p.modules[m].source.asStr()).asStr());
+      println(rendered(p.modules[m], d).asStr());
     } else {
       const #Diagnostic { span: _, message } = d;
       println(`error: ${message}`);
@@ -148,8 +148,9 @@ function compile(entry: str, out: str, root: str, freestanding: bool, ptr: usize
     const m = match (p.modules.iter().findIndex((x) => x.file == file)) { #Some(k) => k, #None => throw #Unreadable { path: file } };
     const name = p.modules[m].file.clone();
     const source = p.modules[m].source.clone();
+    const origin = p.modules[m].origin.clone();
     const text = try { coreProgram(p, m, root.asStr()) } catch (#Outside(span, why)) {
-      println(render(diag(span, why.asStr()), name.asStr(), source.asStr()).asStr());
+      println(renderIn(diag(span, why.asStr()), name.asStr(), source.asStr(), origin).asStr());
       throw #Failed
     };
     try { writeFile(out, text.asStr()); } catch (_) { throw #Unreadable { path: out.toString() } };

@@ -14,9 +14,9 @@
 // a `finally`, however it is left. Only what a destructor can observe is dropped: values of types
 // with a `Drop` of their own, and what holds them.
 
-import { Span, Diagnostic, render } from "./diag";
+import { Span, Diagnostic } from "./diag";
 import { Prim, Row, Ty, FnTy, GArg, Len, EffRow, isInt, isFloat, primName, keyTy } from "./types";
-import { Program as Prog, substParams } from "./env";
+import { Program as Prog, rendered, substParams } from "./env";
 import {
   Lower, Entry, newLower, stripBorrow, viewLike, typeArg, entryTy, optionTy, ckey, unitTy, isVoidTy,
 } from "./lower";
@@ -145,12 +145,15 @@ type Ctx = {
   hoisted: HashSet<usize>;
   // Statements the next block made starts with, after its declarations.
   prologue: String;
+  // What its locals' names begin with: a closure's own, so that none of them is named as a local
+  // of the code around it, which the closure may reach by name.
+  names: String;
 };
 
 function newCtx(locals: Vec<Local>, gen: bool): Ctx {
   {
     locals, own: HashSet.new(), cells: HashSet.new(), captures: Vec.new(), capTys: Vec.new(), gen, inHandle: false,
-    out: String.new(), indent: 1, hoisted: HashSet.new(), prologue: String.new(),
+    out: String.new(), indent: 1, hoisted: HashSet.new(), prologue: String.new(), names: "v".toString(),
   }
 }
 
@@ -446,7 +449,7 @@ impl JsGen {
   }
 
   // A local's name; one in a cell is the cell.
-  function localName(self: readonly Self, l: usize): String { `v${l}_${mangle(self.cx.locals[l].name.asStr())}` }
+  function localName(self: readonly Self, l: usize): String { `${self.cx.names}${l}_${mangle(self.cx.locals[l].name.asStr())}` }
 
   // The JavaScript of what a local holds.
   function local(self: readonly Self, l: usize): String {
@@ -1185,6 +1188,7 @@ impl JsGen {
     cx.captures = self.cx.captures.clone();
     cx.capTys = self.cx.capTys.clone();
     cx.indent = self.cx.indent + 1;
+    cx.names = self.cx.names.clone();
     replace(mut self.cx, cx)
   }
 
@@ -1227,6 +1231,7 @@ impl JsGen {
     cx.captures = captures;
     for (const [_, t, _] of f.captures) { cx.capTys.push(t.clone()); }
     cx.indent = self.cx.indent + 1;
+    cx.names = `c${k}v`;
     const saved = replace(mut self.cx, cx);
     let names: Vec<String> = Vec.new();
     let pro = String.new();
@@ -1313,7 +1318,7 @@ impl JsGen {
   }
 
   function failed(self: readonly Self, d: Diagnostic, module: usize): #Failed(String) {
-    #Failed(render(d, self.lw.p.modules[module].file.asStr(), self.lw.p.modules[module].source.asStr()))
+    #Failed(rendered(self.lw.p.modules[module], d))
   }
 
   export function program(self: mut Self, entry: usize, runtime: str): String uses Fail<#Failed(String)> {

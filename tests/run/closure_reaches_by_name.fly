@@ -1,0 +1,27 @@
+// expect: 1:a:on 2:b:off 3:c:on
+// A closure made in a loop reaches the loop's binding however many values of its own it makes:
+// in JavaScript its own are named apart from those of the code around it.
+import { println } from "std/io";
+
+type T = { id: u32; name: String; on: bool };
+
+function each(f: mut () => void): void { f(); }
+
+export function main(): void uses Io {
+  const ts: Vec<T> = [{ id: 1, name: "a".toString(), on: true }, { id: 2, name: "b".toString(), on: false }, { id: 3, name: "c".toString(), on: true }];
+  let out: Vec<String> = Vec.new();
+  for (const t of ts) {
+    each(() => {
+      let s = String.new();
+      s.push(`${t.id}`.asStr());
+      s.push(":");
+      s.push(t.name.asStr());
+      s.push(":");
+      if (t.on) { s.push("on"); } else { s.push("off"); }
+      const k = `${s}`;
+      const j = k.asStr().toString();
+      out.push(j);
+    });
+  }
+  println(out.join(" "));
+}

@@ -544,7 +544,7 @@ impl Subst {
   }
 
   // Whether `a`'s regions and `b`'s unify, changing nothing.
-  function regionsUnify(self: readonly Self, a: readonly Vec<Region>, b: readonly Vec<Region>): bool {
+  export function regionsUnify(self: readonly Self, a: readonly Vec<Region>, b: readonly Vec<Region>): bool {
     let probe = self.regions.clone();
     try {
       for (const i of 0..min(a.len(), b.len())) { unifyRegionIn(mut probe, a[i], b[i]); }

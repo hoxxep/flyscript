@@ -1,0 +1,89 @@
+// expect: <div class="card" id="c1"><h1>Hello &amp; welcome, Ada!</h1><p>3 &lt; 4 — said “twice” ✓</p></div>
+// expect: <ul class="todos"><li class="done"><span>✓</span><a href="/todos/1" class="title">Write</a></li><li><span></span><a href="/todos/2" class="title">Ship</a></li></ul>
+// expect: <section><b>open</b><i>first</i><br><input value="draft" disabled=""><span class="counter"><button form="_fly" formaction="?_fly=0">−</button><output>5</output><button form="_fly" formaction="?_fly=1">+</button></span></section>
+// expect: <p>Begun, if (this) is mid-line, text; if (that) {&quot;is&quot;} text too</p><p>a b    c,d</p><p class="note">run here</p>
+// A `.flyx` view is the `.fly` it stands for (web/flyx.fly): tags as statements, with `if`, `for`
+// and `match` among their children; JSX's text, its spaces and character references; a link; a
+// component, its messages made the page's; a fragment; a statement's word mid-line as text; and
+// braces of statements, which run where they are.
+import { Ui, html, cls } from "web/ui";
+import { println } from "std/io";
+
+type Todo = { id: u32; title: String; done: bool };
+type Model = { name: String; todos: Vec<Todo>; open: bool; k: #First | #Second; draft: String; c: Counter };
+type Msg = #Toggle(u32) | #Count(CounterMsg);
+
+type CounterMsg = #Up | #Down;
+struct Counter { n: i32; }
+impl Counter {
+  export function view(c: readonly Counter): void uses Ui<CounterMsg> {
+    <span class="counter">
+      <button onClick={#Down}>−</button>
+      <output>{c.n}</output>
+      <button onClick={#Up}>+</button>
+    </span>
+  }
+}
+
+function card(m: readonly Model): void uses Ui<Msg> {
+  <div class="card" id="c1">
+    <h1>
+      Hello &amp; welcome, {m.name}!
+    </h1>
+    <p>3 &lt; 4 &mdash; said &ldquo;twice&rdquo; &#x2713;</p>
+  </div>
+}
+
+function list(m: readonly Model): void uses Ui<Msg> {
+  <ul class="todos">
+    for (const t of m.todos) {
+      <li key={`${t.id}`.asStr()}>
+        if (t.done) { cls("done"); }
+        <span>if (t.done) { <>✓</> }</span>
+        <a href={`/todos/${t.id}`.asStr()} class="title">{t.title}</a>
+      </li>
+    }
+  </ul>
+}
+
+function rest(m: readonly Model): void uses Ui<Msg> {
+  <section>
+    if (m.open) { <b>open</b> } else { <b>closed</b> }
+    match (m.k) {
+      #First => <i>first</i>,
+      #Second => { <i>second</i> }
+    }
+    <><br /></>
+    <input value={m.draft.asStr()} disabled />
+    {/* a component, its messages the page's */}
+    <Counter model={m.c} onMsg={(c) => #Count(c)} />
+  </section>
+}
+
+function words(): void uses Ui<Msg> {
+  <p>Begun, if (this) is mid-line, text; {"if (that) {\"is\"}"} text too</p>
+  <p>
+    a
+    b    c,
+    {"d"}
+  </p>
+  <p>{ cls("note"); }run here</p>
+}
+
+export function main(): void uses Io {
+  const m: Model = {
+    name: "Ada".toString(),
+    todos: [{ id: 1, title: "Write".toString(), done: true }, { id: 2, title: "Ship".toString(), done: false }],
+    open: true, k: #First, draft: "draft".toString(), c: Counter { n: 5 },
+  };
+  for (const v of [0, 1, 2, 3]) {
+    let out = String.new();
+    match (v) {
+      0 => html(mut out, () => card(m)),
+      1 => html(mut out, () => list(m)),
+      2 => html(mut out, () => rest(m)),
+      _ => html(mut out, () => words()),
+    }
+    println(out.asStr());
+  }
+}

@@ -1,0 +1,688 @@
+// `.flyx`: Flyscript with JSX's tags, written as the `.fly` it stands for before the compiler
+// sees it, so that the language itself never parses a tag. A tag is a statement that performs
+// `Ui<M>`, an element and all it holds, so `if`, `match` and `for` go inside one as they are:
+//
+//   <ul class="todos">
+//     for (const t of m.todos) {
+//       <li key={t.key} onClick={#Open(t.id)}>{t.title}</li>
+//     }
+//   </ul>
+//
+// is `el("ul", () => { cls("todos"); for (const t of m.todos) { el("li", () => { key(t.key);
+// on("click", #Open(t.id)); text(`${t.title}`.asStr()); }); } });`, the calls `web/ui` offers.
+//
+// - A tag begins where a statement may, after `{`, `;` or `}`, or as what an arrow gives, after
+//   `=>`: `<` and then the tag's name, or `>` for a fragment, `<>…</>`, which is its children alone.
+// - `class` (or `className`) is `cls`, `key` is `key`, `onClick={msg}` is `on("click", msg)` (the
+//   event the name after `on`, in lower case, `onDoubleClick`'s `dblclick`), and any other
+//   attribute `attr`, `""` its value if it has none. An `<a href=…>` is a `link`, which the page's
+//   program follows without loading the page again.
+// - A tag whose name is capitalized is a component: `<Counter model={m.c} onMsg={(c) => #C(c)} />`
+//   is `map((c) => #C(c), () => Counter.view(m.c))`, its `view` the component's type's, and without
+//   `onMsg` its view is shown as it is, its messages the page's.
+// - Text is JSX's: each line's spaces at its ends dropped but where the text meets a tag on the
+//   same line, empty lines dropped, the rest joined by a space; `&amp;` and the like, and `&#…;`,
+//   stand for their characters. `{expr}` is shown as text, by its `Display`; braces whose code
+//   ends with `;` are statements that run there, `{ every(1000, #Tick); }`, tags and all.
+// - Among a tag's children, a statement — `if`, `for`, `while` or `match` and its `(` — begins
+//   where text would: after the start tag, after a child, or as a line begins. Text that would
+//   begin so is written `{"if (…"}`.
+//
+// What it writes says, piece by piece, what each part of it stands for in the `.flyx` (diag.fly's
+// `Piece`): what it copies byte for byte, and what it writes for a tag or an attribute. So the
+// compiler, told where the written module is by `FLY_OVERLAY`, says what is wrong with it at the
+// line and column of the `.flyx`, and shows that line: a mistyped message at the message, a call
+// it writes for a tag at the tag.
+
+import { Span, Diagnostic, diag, lineCol, Piece } from "../selfhost/diag";
+
+// A `.flyx` module as `.fly`, and what each piece of it stands for.
+export type Written = { code: String; pieces: Vec<Piece> };
+
+// What the calls the translation writes are named, imported from `web/ui` under names no module
+// would give its own.
+const PRELUDE: str = "import { el as __fx_el, text as __fx_text, attr as __fx_attr, cls as __fx_cls, key as __fx_key, on as __fx_on, link as __fx_link, map as __fx_map } from \"web/ui\";\n";
+
+export function translate(src: str): Written uses Fail<Diagnostic> {
+  let w = Translator { src, bytes: src.asBytes(), pos: 0, done: 0, out: String.new(), pieces: Vec.new(), tags: false };
+  w.code(false);
+  w.flush(src.len());
+  if (!w.tags) { return { code: replace(mut w.out, String.new()), pieces: replace(mut w.pieces, Vec.new()) }; }
+  let code = PRELUDE.toString();
+  code.push(w.out.asStr());
+  let pieces: Vec<Piece> = [{ at: 0, from: 0, len: 0, copied: false }];
+  for (const p of w.pieces) { pieces.push({ at: p.at + PRELUDE.len(), from: p.from, len: p.len, copied: p.copied }); }
+  { code, pieces }
+}
+
+// An attribute's value: a string, its text, and the span of it with its quotes; an expression, by
+// its span between the braces; or none.
+enum Value { #Str(String, Span), #Expr(Span), #Bare }
+type Attr = { name: String; span: Span; value: Value };
+
+function isExpr(v: readonly Value): bool { match (v) { #Expr(_) => true, _ => false } }
+
+function isAlpha(c: u8): bool { (c >= b'a' && c <= b'z') || (c >= b'A' && c <= b'Z') || c >= 0x80 }
+function isDigit(c: u8): bool { c >= b'0' && c <= b'9' }
+function isWord(c: u8): bool { isAlpha(c) || isDigit(c) || c == b'_' }
+function isSpace(c: u8): bool { c == b' ' || c == b'\n' || c == b'\t' || c == b'\r' }
+
+// The statements that begin among a tag's children.
+const STATEMENTS: str[] = ["if", "for", "while", "match"];
+
+view struct Translator {
+  src: str;
+  bytes: readonly u8[];
+  pos: usize;
+  // How much of the source the translation has accounted for, copied or written for.
+  done: usize;
+  out: String;
+  pieces: Vec<Piece>;
+  // Whether it wrote a tag, and so needs `web/ui`'s calls.
+  tags: bool;
+}
+
+impl Translator {
+  function at(self: readonly Self, i: usize): u8 { if (i < self.bytes.len()) { self.bytes[i] } else { 0 } }
+  function peek(self: readonly Self): u8 { self.at(self.pos) }
+  function eof(self: readonly Self): bool { self.pos >= self.bytes.len() }
+
+  function err(self: readonly Self, start: usize, end: usize, message: str): Diagnostic {
+    diag({ start, end: max(end, start + 1) }, message)
+  }
+
+  // ---- what it writes ----
+
+  // The source up to `to`, copied as it is.
+  function flush(self: mut Self, to: usize): void {
+    if (to <= self.done) { return; }
+    self.copy(self.done, to);
+    self.done = to;
+  }
+
+  // The source from `from` to `to`, copied as it is.
+  function copy(self: mut Self, from: usize, to: usize): void {
+    if (to <= from) { return; }
+    const at = self.out.len();
+    self.out.push(self.src.slice(from, to));
+    const n = self.pieces.len();
+    const joins = n > 0 && self.pieces[n - 1].copied && self.pieces[n - 1].at + self.pieces[n - 1].len == at && self.pieces[n - 1].from + self.pieces[n - 1].len == from;
+    if (joins) { self.pieces[n - 1].len += to - from; } else { self.pieces.push({ at, from, len: to - from, copied: true }); }
+  }
+
+  // Code written for the source's span `s`.
+  function write(self: mut Self, code: str, s: Span): void {
+    if (code.len() == 0) { return; }
+    self.pieces.push({ at: self.out.len(), from: s.start, len: s.end - s.start, copied: false });
+    self.out.push(code);
+  }
+
+  // A string literal of `text`, written for `s`.
+  function literal(self: mut Self, text: str, s: Span): void {
+    let lit = "\"".toString();
+    const b = text.asBytes();
+    let run: usize = 0;
+    for (const i of 0..b.len()) {
+      const c = b[i];
+      const esc = if (c == b'"') { "\\\"" } else if (c == b'\\') { "\\\\" } else if (c == b'\n') { "\\n" } else if (c == b'\r') { "\\r" } else if (c == b'\t') { "\\t" } else { "" };
+      if (esc.len() > 0) {
+        lit.push(text.slice(run, i));
+        lit.push(esc);
+        run = i + 1;
+      }
+    }
+    lit.push(text.slice(run, b.len()));
+    lit.push("\"");
+    self.write(lit.asStr(), s);
+  }
+
+  // ---- code ----
+
+  // Code, as it is but for its tags, to the end, or to the `}` that closes the block it is in if
+  // `inBlock`, which it stops at.
+  function code(self: mut Self, inBlock: bool): void uses Fail<Diagnostic> {
+    let depth: usize = 0;
+    // Whether a statement may begin here, and whether what is here is what an arrow gives.
+    let begins = true;
+    let arrow = false;
+    while (!self.eof()) {
+      const c = self.peek();
+      const start = self.pos;
+      if (isSpace(c)) { self.pos += 1; continue; }
+      if (c == b'/' && self.at(self.pos + 1) == b'/') {
+        while (!self.eof() && self.peek() != b'\n') { self.pos += 1; }
+        continue;
+      }
+      if (c == b'/' && self.at(self.pos + 1) == b'*') { self.blockComment(); continue; }
+      const n = self.at(self.pos + 1);
+      if (c == b'<' && (begins || arrow) && (isAlpha(n) || n == b'>')) {
+        self.flush(start);
+        self.element(!arrow);
+        self.done = self.pos;
+        // What follows a tag follows a statement, or a call an arrow gives.
+        begins = !arrow;
+        arrow = false;
+        continue;
+      }
+      if (c == b'{') { depth += 1; }
+      if (c == b'}') {
+        if (depth == 0 && inBlock) { return; }
+        if (depth > 0) { depth -= 1; }
+      }
+      arrow = c == b'=' && n == b'>';
+      if (arrow) { self.pos += 2; } else { self.skipToken(); }
+      begins = c == b'{' || c == b'}' || c == b';';
+    }
+  }
+
+  // Past one token of code that is not space: a string, a template, a byte, a word or a byte else.
+  function skipToken(self: mut Self): void uses Fail<Diagnostic> {
+    const c = self.peek();
+    const start = self.pos;
+    if (c == b'"') {
+      self.pos += 1;
+      while (!self.eof() && self.peek() != b'"') { if (self.peek() == b'\\') { self.pos += 1; } self.pos += 1; }
+      if (self.eof()) { throw self.err(start, start + 1, "unterminated string"); }
+      self.pos += 1;
+    } else if (c == b'`') {
+      self.template();
+    } else if (c == b'b' && self.at(self.pos + 1) == b'\'') {
+      self.pos += 2;
+      while (!self.eof() && self.peek() != b'\'') { if (self.peek() == b'\\') { self.pos += 1; } self.pos += 1; }
+      self.pos += 1;
+    } else if (isWord(c)) {
+      while (!self.eof() && isWord(self.peek())) { self.pos += 1; }
+    } else {
+      self.pos += 1;
+    }
+  }
+
+  function blockComment(self: mut Self): void uses Fail<Diagnostic> {
+    const start = self.pos;
+    self.pos += 2;
+    while (!(self.peek() == b'*' && self.at(self.pos + 1) == b'/')) {
+      if (self.eof()) { throw self.err(start, start + 2, "unterminated block comment"); }
+      self.pos += 1;
+    }
+    self.pos += 2;
+  }
+
+  // Past a template literal, its interpolations code that may hold tags.
+  function template(self: mut Self): void uses Fail<Diagnostic> {
+    const start = self.pos;
+    self.pos += 1;
+    while (true) {
+      if (self.eof()) { throw self.err(start, start + 1, "unterminated template literal"); }
+      const c = self.peek();
+      if (c == b'\\') { self.pos += 2; continue; }
+      if (c == b'`') { self.pos += 1; return; }
+      if (c == b'$' && self.at(self.pos + 1) == b'{') {
+        self.pos += 2;
+        self.code(true);
+        if (self.eof()) { throw self.err(start, start + 1, "unterminated template literal"); }
+        self.pos += 1;
+        continue;
+      }
+      self.pos += 1;
+    }
+  }
+
+  // Past the bracket that closes the one here, `(` or `{`, its insides code; where it is.
+  function closing(self: mut Self): usize uses Fail<Diagnostic> {
+    const open = self.peek();
+    const close = if (open == b'(') { b')' } else { b'}' };
+    const start = self.pos;
+    let depth: usize = 0;
+    while (!self.eof()) {
+      const c = self.peek();
+      if (c == b'/' && self.at(self.pos + 1) == b'/') {
+        while (!self.eof() && self.peek() != b'\n') { self.pos += 1; }
+        continue;
+      }
+      if (c == b'/' && self.at(self.pos + 1) == b'*') { self.blockComment(); continue; }
+      if (c == open) { depth += 1; }
+      if (c == close) {
+        depth -= 1;
+        if (depth == 0) {
+          self.pos += 1;
+          return self.pos - 1;
+        }
+      }
+      self.skipToken();
+    }
+    throw self.err(start, start + 1, `this \`${self.src.slice(start, start + 1)}\` is never closed`)
+  }
+
+  // ---- tags ----
+
+  function name(self: mut Self): String {
+    const start = self.pos;
+    while (!self.eof() && (isWord(self.peek()) || self.peek() == b'-' || self.peek() == b':')) { self.pos += 1; }
+    self.src.slice(start, self.pos).toString()
+  }
+
+  function skipSpace(self: mut Self): void {
+    while (!self.eof() && isSpace(self.peek())) { self.pos += 1; }
+  }
+
+  // An element, a component or a fragment, from its `<`, written as a statement, or else as what
+  // an arrow gives.
+  function element(self: mut Self, statement: bool): void uses Fail<Diagnostic> {
+    self.tags = true;
+    const open = self.pos;
+    self.pos += 1;
+    const tag = self.name();
+    const tagSpan: Span = { start: open, end: self.pos };
+    let attrs: Vec<Attr> = Vec.new();
+    let closes = false;
+    while (true) {
+      self.skipSpace();
+      if (self.eof()) { throw self.err(open, tagSpan.end, `\`<${tag}\` is never closed`); }
+      const c = self.peek();
+      if (c == b'/' && self.at(self.pos + 1) == b'>') { self.pos += 2; closes = true; break; }
+      if (c == b'>') { self.pos += 1; break; }
+      if (tag.len() == 0) { throw self.err(self.pos, self.pos + 1, "a fragment, `<>`, has no attributes"); }
+      attrs.push(self.attribute());
+    }
+    if (tag.len() == 0) {
+      self.write("{ ", tagSpan);
+      self.children(tag.asStr(), tagSpan);
+      self.write(" }", tagSpan);
+      return;
+    }
+    if (isAlpha(tag.asBytes()[0]) && tag.asBytes()[0] >= b'A' && tag.asBytes()[0] <= b'Z') {
+      self.component(tag.asStr(), tagSpan, attrs, closes, statement);
+      return;
+    }
+    const href = if (tag == "a") { attrs.iter().findIndex((a) => a.name == "href") } else { #None };
+    match (href) {
+      #Some(i) => {
+        self.write("__fx_link(", tagSpan);
+        self.value(attrs[i].value, attrs[i].span);
+        self.write(", () => { ", tagSpan);
+      }
+      #None => {
+        self.write("__fx_el(", tagSpan);
+        self.literal(tag.asStr(), tagSpan);
+        self.write(", () => { ", tagSpan);
+      }
+    }
+    for (const [i, a] of attrs.iter().enumerate()) {
+      if (href != #Some(i)) { self.give(a); }
+    }
+    if (!closes) { self.children(tag.asStr(), tagSpan); }
+    self.write(if (statement) { "});" } else { "})" }, tagSpan);
+  }
+
+  // One attribute: `name`, `name="text"` or `name={expr}`.
+  function attribute(self: mut Self): Attr uses Fail<Diagnostic> {
+    const start = self.pos;
+    const name = self.name();
+    if (name.len() == 0) { throw self.err(start, start + 1, "expected an attribute's name, `>` or `/>`"); }
+    if (self.peek() != b'=') { return { name, span: { start, end: self.pos }, value: #Bare }; }
+    self.pos += 1;
+    const q = self.peek();
+    const vstart = self.pos;
+    if (q == b'"' || q == b'\'') {
+      self.pos += 1;
+      while (!self.eof() && self.peek() != q) { self.pos += 1; }
+      if (self.eof()) { throw self.err(vstart, vstart + 1, "unterminated attribute value"); }
+      self.pos += 1;
+      const text = entities(self.src.slice(vstart + 1, self.pos - 1));
+      return { name, span: { start, end: self.pos }, value: #Str(text, { start: vstart, end: self.pos }) };
+    }
+    if (q == b'{') {
+      const end = self.closing();
+      return { name, span: { start, end: self.pos }, value: #Expr({ start: vstart + 1, end }) };
+    }
+    throw self.err(vstart, vstart + 1, `expected \`"\` or \`{\` for \`${name}\`'s value`)
+  }
+
+  // An attribute's value as an argument.
+  function value(self: mut Self, v: readonly Value, s: Span): void {
+    match (v) {
+      #Str(text, at) => self.literal(text.asStr(), at),
+      #Expr(e) => self.copy(e.start, e.end),
+      #Bare => self.literal("", s),
+    }
+  }
+
+  // An element's attribute as the call that gives it.
+  function give(self: mut Self, a: readonly Attr): void uses Fail<Diagnostic> {
+    const n = a.name.asStr();
+    if (n == "class" || n == "className") {
+      self.write("__fx_cls(", a.span);
+    } else if (n == "key") {
+      self.write("__fx_key(", a.span);
+    } else if (n.len() > 2 && n.startsWith("on") && n.asBytes()[2] >= b'A' && n.asBytes()[2] <= b'Z') {
+      if (!isExpr(a.value)) { throw self.err(a.span.start, a.span.end, `\`${n}\` is given the message its event sends, as \`${n}={#Msg}\``); }
+      const event = if (n == "onDoubleClick") { "dblclick".toString() } else { n.slice(2, n.len()).toLowerCase() };
+      self.write("__fx_on(", a.span);
+      self.literal(event.asStr(), a.span);
+      self.write(", ", a.span);
+    } else {
+      self.write("__fx_attr(", a.span);
+      self.literal(n, a.span);
+      self.write(", ", a.span);
+    }
+    self.value(a.value, a.span);
+    self.write("); ", a.span);
+  }
+
+  // A component's tag: its type's `view` of `model`, its messages made the page's by `onMsg`.
+  function component(self: mut Self, tag: str, tagSpan: Span, attrs: readonly Vec<Attr>, closes: bool, statement: bool): void uses Fail<Diagnostic> {
+    let model: Option<usize> = #None;
+    let onMsg: Option<usize> = #None;
+    for (const [i, a] of attrs.iter().enumerate()) {
+      if (!isExpr(a.value)) { throw self.err(a.span.start, a.span.end, `a component's \`${a.name}\` is an expression: \`${a.name}={…}\``); }
+      if (a.name == "model") { model = #Some(i); } else if (a.name == "onMsg") { onMsg = #Some(i); } else {
+        throw self.err(a.span.start, a.span.end, `a component takes \`model\` and \`onMsg\`, not \`${a.name}\``);
+      }
+    }
+    if (!closes) { throw self.err(tagSpan.start, tagSpan.end, `a component has no children: \`<${tag} … />\``); }
+    const name: Span = { start: tagSpan.start + 1, end: tagSpan.end };
+    if (const #Some(f) = onMsg) {
+      self.write("__fx_map(", tagSpan);
+      self.value(attrs[f].value, attrs[f].span);
+      self.write(", () => ", tagSpan);
+    }
+    self.copy(name.start, name.end);
+    self.write(".view(", tagSpan);
+    if (const #Some(m) = model) { self.value(attrs[m].value, attrs[m].span); }
+    self.write(")", tagSpan);
+    if (onMsg.isSome()) { self.write(")", tagSpan); }
+    if (statement) { self.write(";", tagSpan); }
+  }
+
+  // What is between a start tag and its end tag: text, `{expr}`s, tags and statements.
+  function children(self: mut Self, tag: str, tagSpan: Span): void uses Fail<Diagnostic> {
+    let text = self.pos;
+    // Whether a statement may begin here: nothing but space since the start tag, a child, or the
+    // line's start.
+    let begins = true;
+    while (true) {
+      if (self.eof()) { throw self.err(tagSpan.start, tagSpan.end, `\`<${tag}>\` is never closed`); }
+      const c = self.peek();
+      if (c == b'<' && self.at(self.pos + 1) == b'/') {
+        self.text(text, self.pos);
+        const close = self.pos;
+        self.pos += 2;
+        const name = self.name();
+        self.skipSpace();
+        if (self.peek() != b'>' || name != tag) {
+          const [line, col] = lineCol(self.src, tagSpan.start);
+          throw self.err(close, self.pos, `expected \`</${tag}>\`, to close the \`<${tag}>\` at ${line}:${col}`);
+        }
+        self.pos += 1;
+        self.done = self.pos;
+        return;
+      }
+      if (c == b'<' && (isAlpha(self.at(self.pos + 1)) || self.at(self.pos + 1) == b'>')) {
+        self.text(text, self.pos);
+        self.element(true);
+        self.done = self.pos;
+        text = self.pos;
+        begins = true;
+        continue;
+      }
+      if (c == b'{') {
+        self.text(text, self.pos);
+        self.shown();
+        text = self.pos;
+        begins = true;
+        continue;
+      }
+      if (begins && self.statementHere()) {
+        self.text(text, self.pos);
+        self.statement();
+        text = self.pos;
+        begins = true;
+        continue;
+      }
+      if (c == b'\n') { begins = true; } else if (!isSpace(c)) { begins = false; }
+      self.pos += 1;
+    }
+  }
+
+  // Whether a statement begins here: one of `STATEMENTS`, then `(`.
+  function statementHere(self: readonly Self): bool {
+    for (const k of STATEMENTS) {
+      const kb = k.asBytes();
+      let i: usize = 0;
+      while (i < kb.len() && self.at(self.pos + i) == kb[i]) { i += 1; }
+      if (i < kb.len() || isWord(self.at(self.pos + i))) { continue; }
+      while (self.at(self.pos + i) == b' ' || self.at(self.pos + i) == b'\t') { i += 1; }
+      if (self.at(self.pos + i) == b'(') { return true; }
+    }
+    false
+  }
+
+  // A statement among a tag's children, copied, the code of its blocks with their tags.
+  function statement(self: mut Self): void uses Fail<Diagnostic> {
+    const start = self.pos;
+    self.done = start;
+    const isMatch = self.src.slice(start, self.bytes.len()).startsWith("match");
+    while (isWord(self.peek())) { self.pos += 1; }
+    self.skipSpace();
+    self.closing();
+    self.block(start);
+    if (isMatch) {
+      self.flush(self.pos);
+      return;
+    }
+    // An `if`'s `else`, and what it has.
+    const after = self.pos;
+    self.skipSpace();
+    if (self.src.slice(self.pos, self.bytes.len()).startsWith("else") && !isWord(self.at(self.pos + 4))) {
+      self.pos += 4;
+      self.skipSpace();
+      if (self.statementHere()) { self.statement(); } else { self.block(start); }
+    } else {
+      self.pos = after;
+    }
+    self.flush(self.pos);
+  }
+
+  // A statement's block, `{ … }`, its code with the tags in it.
+  function block(self: mut Self, start: usize): void uses Fail<Diagnostic> {
+    self.skipSpace();
+    if (self.peek() != b'{') {
+      const word = self.src.slice(start, self.bytes.len()).split("(")[0].trim().toString();
+      throw self.err(start, self.pos, `\`${word} (…)\` here begins a statement, and its block \`{ … }\` follows it; text that begins so is written \`{"${word} (…"}\``.asStr())
+    }
+    const open = self.pos;
+    self.pos += 1;
+    self.code(true);
+    if (self.eof()) { throw self.err(open, open + 1, "this `{` is never closed"); }
+    self.pos += 1;
+  }
+
+  // `{expr}` among children: shown as text.
+  function shown(self: mut Self): void uses Fail<Diagnostic> {
+    const open = self.pos;
+    const close = self.closing();
+    const inner = self.src.slice(open + 1, close);
+    let s = open + 1;
+    let e = close;
+    while (s < e && isSpace(self.bytes[s])) { s += 1; }
+    while (e > s && isSpace(self.bytes[e - 1])) { e -= 1; }
+    const whole: Span = { start: open, end: close + 1 };
+    if (s == e || onlyComments(inner)) { self.done = self.pos; return; }
+    if (self.bytes[e - 1] == b';') {
+      self.done = open;
+      self.pos = open + 1;
+      self.code(true);
+      self.pos += 1;
+      self.flush(self.pos);
+      return;
+    }
+    if (literalAlone(self.src.slice(s, e))) {
+      self.write("__fx_text(", whole);
+      self.copy(s, e);
+      self.write(if (self.bytes[s] == b'`') { ".asStr()); " } else { "); " }, whole);
+    } else {
+      self.write("__fx_text(`${", whole);
+      self.copy(s, e);
+      self.write("}`.asStr()); ", whole);
+    }
+    self.done = self.pos;
+  }
+
+  // Text from `from` to `to` among a tag's children, as JSX makes it.
+  function text(self: mut Self, from: usize, to: usize): void {
+    self.done = max(self.done, from);
+    const shown = entities(jsxText(self.src.slice(from, to)).asStr());
+    if (shown.len() > 0) {
+      let s = from;
+      let e = to;
+      while (s < e && isSpace(self.bytes[s])) { s += 1; }
+      while (e > s && isSpace(self.bytes[e - 1])) { e -= 1; }
+      const span: Span = { start: s, end: e };
+      self.write("__fx_text(", span);
+      self.literal(shown.asStr(), span);
+      self.write("); ", span);
+    } else {
+      self.copy(from, to);
+    }
+    self.done = to;
+  }
+}
+
+// Whether code is nothing but comments and space, as `{/* a note */}` is.
+function onlyComments(code: str): bool {
+  const b = code.asBytes();
+  let i: usize = 0;
+  while (i < b.len()) {
+    if (isSpace(b[i])) { i += 1; continue; }
+    if (b[i] == b'/' && i + 1 < b.len() && b[i + 1] == b'*') {
+      i += 2;
+      while (i + 1 < b.len() && !(b[i] == b'*' && b[i + 1] == b'/')) { i += 1; }
+      i += 2;
+      continue;
+    }
+    if (b[i] == b'/' && i + 1 < b.len() && b[i + 1] == b'/') {
+      while (i < b.len() && b[i] != b'\n') { i += 1; }
+      continue;
+    }
+    return false;
+  }
+  true
+}
+
+// Whether code is one string or template literal and nothing else.
+function literalAlone(code: str): bool {
+  const b = code.asBytes();
+  if (b.len() < 2 || !(b[0] == b'"' || b[0] == b'`')) { return false; }
+  const q = b[0];
+  let i: usize = 1;
+  let depth: usize = 0;
+  while (i < b.len()) {
+    const c = b[i];
+    if (c == b'\\') { i += 2; continue; }
+    if (q == b'`' && c == b'$' && i + 1 < b.len() && b[i + 1] == b'{') { depth += 1; i += 2; continue; }
+    if (depth > 0) {
+      if (c == b'}') { depth -= 1; }
+      i += 1;
+      continue;
+    }
+    if (c == q) { return i == b.len() - 1; }
+    i += 1;
+  }
+  false
+}
+
+// JSX's text: tabs as spaces; each line's leading spaces dropped but the first's, and its trailing
+// ones but the last's; lines left empty dropped; the rest joined by a space.
+export function jsxText(raw: str): String {
+  const lines = raw.replaceAll("\r\n", "\n").replaceAll("\t", " ").split("\n");
+  let lastFull: usize = 0;
+  let any = false;
+  for (const [i, l] of lines.iter().enumerate()) {
+    if (l.asStr().trim().len() > 0) { lastFull = i; any = true; }
+  }
+  let out = String.new();
+  if (!any) { return out; }
+  for (const [i, l] of lines.iter().enumerate()) {
+    let s = l.asStr();
+    if (i > 0) { s = s.trimStart(); }
+    if (i + 1 < lines.len()) { s = s.trimEnd(); }
+    if (s.len() > 0) {
+      out.push(s);
+      if (i != lastFull) { out.push(" "); }
+    }
+  }
+  out
+}
+
+// The characters HTML's named references stand for, of those JSX knows, the ones a page uses.
+const ENTITIES: [str, str][] = [
+  ["amp", "&"], ["lt", "<"], ["gt", ">"], ["quot", "\""], ["apos", "'"], ["nbsp", "\u{a0}"],
+  ["copy", "©"], ["reg", "®"], ["trade", "™"], ["hellip", "…"], ["mdash", "—"], ["ndash", "–"],
+  ["lsquo", "‘"], ["rsquo", "’"], ["ldquo", "“"], ["rdquo", "”"], ["laquo", "«"], ["raquo", "»"],
+  ["bull", "•"], ["middot", "·"], ["times", "×"], ["divide", "÷"], ["minus", "−"], ["plusmn", "±"],
+  ["deg", "°"], ["larr", "←"], ["rarr", "→"], ["uarr", "↑"], ["darr", "↓"], ["harr", "↔"],
+  ["check", "✓"], ["euro", "€"], ["pound", "£"], ["yen", "¥"], ["cent", "¢"], ["sect", "§"],
+  ["para", "¶"], ["dagger", "†"], ["prime", "′"], ["thinsp", "\u{2009}"], ["ensp", "\u{2002}"],
+  ["emsp", "\u{2003}"], ["zwj", "\u{200d}"], ["zwnj", "\u{200c}"], ["shy", "\u{ad}"],
+];
+
+// Text with its character references, `&amp;`, `&#38;` and `&#x26;`, the characters they stand
+// for; one it does not know is left as it is, as JSX leaves it.
+export function entities(s: str): String {
+  const b = s.asBytes();
+  let out = String.new();
+  let i: usize = 0;
+  let run: usize = 0;
+  while (i < b.len()) {
+    if (b[i] != b'&') { i += 1; continue; }
+    let j = i + 1;
+    while (j < b.len() && j - i < 12 && (isWord(b[j]) || b[j] == b'#')) { j += 1; }
+    if (j >= b.len() || b[j] != b';') { i += 1; continue; }
+    const name = s.slice(i + 1, j);
+    const ch: Option<String> = if (name.startsWith("#")) { numeric(name.slice(1, name.len())) } else {
+      match (ENTITIES.iter().find((e) => e[0] == name)) { #Some(e) => #Some(e[1].toString()), #None => #None }
+    };
+    match (ch) {
+      #Some(c) => {
+        out.push(s.slice(run, i));
+        out.push(c.asStr());
+        i = j + 1;
+        run = i;
+      }
+      #None => { i += 1; }
+    }
+  }
+  out.push(s.slice(run, b.len()));
+  out
+}
+
+// `#38`'s and `#x26`'s character, without the `#`.
+function numeric(n: str): Option<String> {
+  const hex = n.startsWith("x") || n.startsWith("X");
+  const digits = if (hex) { n.slice(1, n.len()) } else { n };
+  if (digits.len() == 0) { return #None; }
+  let v: u32 = 0;
+  for (const c of digits.bytes()) {
+    const d: u32 = if (isDigit(c)) { (c - b'0') as u32 } else if (hex && c >= b'a' && c <= b'f') { (c - b'a' + 10) as u32 } else if (hex && c >= b'A' && c <= b'F') { (c - b'A' + 10) as u32 } else { return #None };
+    if (v > 0x10ffff) { return #None; }
+    v = v * (if (hex) { 16 } else { 10 }) + d;
+  }
+  if (v == 0 || v > 0x10ffff || (v >= 0xd800 && v < 0xe000)) { return #None; }
+  let bytes: Vec<u8> = Vec.new();
+  if (v < 0x80) {
+    bytes.push(v as u8);
+  } else if (v < 0x800) {
+    bytes.push((0xc0 | (v >> 6)) as u8);
+    bytes.push((0x80 | (v & 0x3f)) as u8);
+  } else if (v < 0x10000) {
+    bytes.push((0xe0 | (v >> 12)) as u8);
+    bytes.push((0x80 | ((v >> 6) & 0x3f)) as u8);
+    bytes.push((0x80 | (v & 0x3f)) as u8);
+  } else {
+    bytes.push((0xf0 | (v >> 18)) as u8);
+    bytes.push((0x80 | ((v >> 12) & 0x3f)) as u8);
+    bytes.push((0x80 | ((v >> 6) & 0x3f)) as u8);
+    bytes.push((0x80 | (v & 0x3f)) as u8);
+  }
+  String.fromUtf8(bytes)
+}

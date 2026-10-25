@@ -12,7 +12,7 @@ web/flynext start out 3000     # serves a build
 
 ```
 app/
-  routes/            the pages: each file one, its place its address
+  routes/            the pages: each file one, `.fly` or `.flyx`, its place its address
     layout.fly       what every page shows around itself
     index.fly        /
     about.fly        /about
@@ -84,7 +84,25 @@ export function update(m: mut Model, msg: Msg, ev: readonly Event): void uses To
 
 **Links** are ordinary `<a>` elements (`link(href, body)`). Followed within the site, the program shows `loading.fly`'s view inside the outermost layout, if the app has one, asks the server for the next page's data, renders it in place, and moves the history on; what both pages show alike, a layout, is left as it is. The data of a page a link points at is asked for as soon as the pointer is over it. Back and forward render the pages again the same way. Without the program, a link is a link.
 
-**Components** are a model, a view and an update, as a page is. A page shows one by `map`, which makes the component's messages the page's: `map((c) => #Counter(c), () => counter.view(m.counter))`.
+**Components** are a model, a view and an update, as a page is. A page shows one by `map`, which makes the component's messages the page's: `map((c) => #Counter(c), () => Counter.view(m.counter))`.
+
+**Tags.** Any module of an app may be `.flyx` rather than `.fly`: Flyscript with the tags of JSX, `<li class="done">{t.title}</li>`, which the build writes as the `.fly` of calls of `ui.fly` it stands for (`flyx.fly`) before the compiler sees it, so the language never parses a tag. A tag is a statement that performs `Ui<M>`, an element and all it holds, so there are no ternaries and no `.map()`: `if`, `for` and `match` go among a tag's children as they are, each beginning where text would, after a start tag or a child or as a line begins.
+
+```tsx
+export function view(m: readonly Model): void uses Ui<Msg> {
+  <ul class="todos">
+    for (const t of m.todos) {
+      <li key={t.key} onClick={#Toggle(t.id)}>
+        if (t.done) { cls("done"); }
+        <a href={t.url.asStr()}>{t.title}</a>
+      </li>
+    }
+  </ul>
+  <Counter model={m.counter} onMsg={(c) => #Counter(c)} />
+}
+```
+
+`class` is `cls`, `key` is `key`, `onClick={msg}` is `on("click", msg)`, any other attribute `attr`, and an `<a href=…>` is a `link`. A capitalized tag is a component, its type's `view` of `model`, its messages made the page's by `onMsg`. Text is as JSX has it: each line's spaces at its ends dropped, but where the text meets a tag on the same line, and the lines left joined by a space; `&amp;` and `&#x2713;` are their characters. `{expr}` shows `expr` as text; braces whose code ends with `;` are statements that run there, `{ every(1000, #Tick); }`. `<>…</>` is its children alone. What the compiler finds wrong with a `.flyx` module it says at the `.flyx`'s line and column, and shows that line: the build writes, beside each module it writes, a map from each of its bytes to the part of the `.flyx` it stands for, and tells the compiler where the module is by `FLY_OVERLAY`. `flyxc page.flyx page.fly` writes one, with its map, for a build of another's.
 
 **Timers** are events of an element: `every(ms, msg)` gives the page a message every `ms` milliseconds for as long as the element is shown, and `after(ms, msg)` once.
 
@@ -101,7 +119,8 @@ export function update(m: mut Model, msg: Msg, ev: readonly Event): void uses To
 | `dom.fly` | The browser's side of `Ui`, in WebAssembly: a render recorded as the flat list of the view's operations and diffed against the last, keyed children matched by key — across pages too; the first render taking over the server's DOM; and `run`, which waits for an event, gives its message to `update`, and renders again, until a link leads elsewhere. |
 | `router.fly` | Routes: patterns from files, matched against addresses, with their parameters and the query. |
 | `site.fly` | What every site's server does: a page answered whole to a browser, or as its data to the program; pages streamed, and pages kept for a while; `Http` handled from the request; a form posted without the program, replayed through the page's update; the site's files; the build a page in development watches. |
-| `flynext.fly` | The app compiler: it reads the app's pages, layouts and effects, with the compiler's own parser, and writes the server and the program. |
+| `flynext.fly` | The app compiler: it writes the app's `.flyx` modules as `.fly`, reads its pages, layouts and effects with the compiler's own parser, and writes the server and the program. |
+| `flyx.fly` | `.flyx`: a module with tags written as the `.fly` it stands for, with what each piece of it stands for in the `.flyx`; `flyxc.fly`, the command that writes one. |
 | `flynext` | The command that builds, serves, and rebuilds in development. |
 | `flynext.js` | The page's host for the program: WASI as far as a page can, waiting by JavaScript promise integration, the DOM, events, links and the history, the server, and each page's module, linked into the program as WebAssembly's dynamic linking lays it out: its memory and its part of the table of functions given it, and what it takes of the core found among the core's exports. |
 | `http.fly` | HTTP/1.1 over `std/net`: requests with keep-alive and pipelining, whole or chunked responses, and `serve`, which runs each connection in a task of its own. |

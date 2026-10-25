@@ -8,8 +8,8 @@
 // module declares or imports, a body of a template or of `comptime` code, an inferred effect that
 // changed, or a build before that did not compile.
 
-import { Diagnostic, render } from "./diag";
-import { Program, RUNTIME } from "./env";
+import { Diagnostic } from "./diag";
+import { Program, RUNTIME, rendered } from "./env";
 import { checkFn } from "./check";
 import { checkOwnership } from "./own";
 import { Cgen, newCgen } from "./c";
@@ -36,7 +36,7 @@ function readSource(path: str): Option<String> uses Io {
 function report(p: readonly Program): void uses Io {
   for (const [m, d] of p.diags) {
     if (m < p.modules.len()) {
-      eprintln(render(d, p.modules[m].file.asStr(), p.modules[m].source.asStr()).asStr());
+      eprintln(rendered(p.modules[m], d).asStr());
     } else {
       const #Diagnostic { span: _, message } = d;
       eprintln(`error: ${message}`);

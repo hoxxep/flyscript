@@ -1,7 +1,7 @@
 // The list of things to do: rendered by the server, then run by the page, which asks the server
-// to change it. Each title links to its own page.
+// to change it. Each title links to its own page. Written with tags, as `.flyx` (web/flyx.fly).
 
-import { Ui, Event, el, text, cls, attr, on, key, link } from "web/ui";
+import { Ui, Event, cls, attr } from "web/ui";
 import { Page } from "web/dom";
 import { Todo, TodoErr, Todos, add, why } from "../api";
 
@@ -17,42 +17,36 @@ export function load(): Model uses Todos {
 }
 
 export function view(m: readonly Model): void uses Ui<Msg> {
-  el("h1", () => text("Things to do"));
-  el("form", () => {
-    on("submit", #Add);
-    el("input", () => {
-      attr("placeholder", "What needs doing?");
-      attr("value", m.draft.asStr());
-      on("input", #Draft);
-    });
-    el("button", () => {
-      attr("type", "submit");
-      if (m.adding) { attr("disabled", "disabled"); text("Adding…"); } else { text("Add"); }
-    });
-  });
-  if (m.error.len() > 0) {
-    el("p", () => { cls("error"); text(m.error.asStr()); });
-  }
-  el("ul", () => {
-    cls("todos");
-    for (const t of m.todos) {
-      el("li", () => {
-        key(`${t.id}`.asStr());
-        if (t.done) { cls("done"); }
-        el("span", () => { cls("check"); on("click", #Toggle(t.id)); if (t.done) { text("✓"); } });
-        link(`/todos/${t.id}`.asStr(), () => { cls("title"); text(t.title.asStr()); });
-      });
-    }
-  });
   let left: u32 = 0;
   let done: u32 = 0;
   for (const t of m.todos) { if (t.done) { done += 1; } else { left += 1; } }
-  el("footer", () => {
-    el("span", () => text(`${left} left`.asStr()));
-    if (done > 0) {
-      el("button", () => { cls("quiet"); on("click", #ClearDone); text(`Clear ${done} done`.asStr()); });
+  <h1>Things to do</h1>
+  <form onSubmit={#Add}>
+    <input placeholder="What needs doing?" value={m.draft.asStr()} onInput={#Draft} />
+    <button type="submit">
+      if (m.adding) { attr("disabled", "disabled"); <>Adding…</> } else { <>Add</> }
+    </button>
+  </form>
+  if (m.error.len() > 0) {
+    <p class="error">{m.error}</p>
+  }
+  <ul class="todos">
+    for (const t of m.todos) {
+      <li key={`${t.id}`.asStr()}>
+        if (t.done) { cls("done"); }
+        <span class="check" onClick={#Toggle(t.id)}>
+          if (t.done) { <>✓</> }
+        </span>
+        <a href={`/todos/${t.id}`.asStr()} class="title">{t.title}</a>
+      </li>
     }
-  });
+  </ul>
+  <footer>
+    <span>{left} left</span>
+    if (done > 0) {
+      <button class="quiet" onClick={#ClearDone}>Clear {done} done</button>
+    }
+  </footer>
 }
 
 export function update(m: mut Model, msg: Msg, ev: readonly Event): void uses Todos, Page<Model> {

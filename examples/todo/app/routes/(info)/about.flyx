@@ -1,0 +1,40 @@
+// A page whose model is its own, with no data from the server: rendered from `initial`, with a
+// component, a counter, kept in its model, and a timer, which counts the seconds it is open.
+
+import { Ui, Event, every } from "web/ui";
+import { Counter, CounterMsg } from "../../components/counter";
+
+export type Model = { counter: Counter; seconds: u32 };
+export type Msg = #Counter(CounterMsg) | #Tick;
+
+export const title: str = "About";
+
+export function initial(): Model { { counter: Counter.new(), seconds: 0 } }
+
+export function view(m: readonly Model): void uses Ui<Msg> {
+  <h1>About</h1>
+  <p>
+    This site is one Flyscript app: a server compiled to native code, which renders each page and
+    answers what pages ask of it, and one WebAssembly program, which takes over the page the server
+    rendered and from then on renders the pages a link leads to itself.
+  </p>
+  <p>
+    Its views are functions that perform <code>Ui</code>: the server handles it by writing HTML, the
+    page by changing the DOM. What pages ask of the server is an effect too, <code>Todos</code>,
+    which the server handles against its store and the page by asking the server.
+  </p>
+  <p>A component is a view, a model and an update, like a page's:</p>
+  <Counter model={m.counter} onMsg={(c) => #Counter(c)} />
+  <p class="open">
+    { every(1000, #Tick); }
+    Open for {m.seconds} s.
+  </p>
+  <p>This page was at <a href="/old">an older address</a>, which sends you here.</p>
+}
+
+export function update(m: mut Model, msg: Msg, ev: readonly Event): void {
+  match (msg) {
+    #Counter(c) => Counter.update(mut m.counter, c),
+    #Tick => m.seconds += 1,
+  }
+}

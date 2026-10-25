@@ -1,0 +1,30 @@
+// A counter: a component, which is a model, a view and an update like a page's, shown inside a page
+// by its tag, `<Counter model={…} onMsg={…} />`, which makes its messages the page's.
+
+import { Ui } from "web/ui";
+import { ToJson, FromJson } from "std/json";
+
+// Kept in a page's model, which goes to the page as JSON.
+export struct Counter { n: i32; }
+impl ToJson for Counter;
+impl FromJson for Counter;
+export type CounterMsg = #Up | #Down;
+
+impl Counter {
+  export function new(): Counter { Counter { n: 0 } }
+
+  export function view(c: readonly Counter): void uses Ui<CounterMsg> {
+    <span class="counter">
+      <button onClick={#Down}>−</button>
+      <output>{c.n}</output>
+      <button onClick={#Up}>+</button>
+    </span>
+  }
+
+  export function update(c: mut Counter, msg: CounterMsg): void {
+    match (msg) {
+      #Up => { c.n += 1; }
+      #Down => { c.n -= 1; }
+    }
+  }
+}

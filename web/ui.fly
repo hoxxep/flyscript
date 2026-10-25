@@ -263,7 +263,7 @@ export function record<M extends Send & Clone>(view: () => void uses Ui<M>): [Ve
     }
     text(s) resumes k => {
       if (fed.len() > 0) { fed[fed.len() - 1] = true; }
-      ops.push(#Text(s.toString()));
+      addText(mut ops, s);
       k()
     }
     close() resumes k => {
@@ -276,6 +276,20 @@ export function record<M extends Send & Clone>(view: () => void uses Ui<M>): [Ve
   let all = if (late) { ownFirst(ops) } else { ops };
   spans(mut all);
   [all, msgs]
+}
+
+// Text after what is there: text next to text is one text, as HTML parses it, so the page the
+// server rendered is taken over node for node; text of nothing is none.
+function addText(ops: mut Vec<Op>, s: str): void {
+  if (s.len() == 0) { return; }
+  const n = ops.len();
+  if (n > 0) {
+    if (const #Text(t) = ops[n - 1]) {
+      t.push(s);
+      return;
+    }
+  }
+  ops.push(#Text(s.toString()));
 }
 
 // An element's own operations — attributes, key, events — moved before its children.
@@ -296,9 +310,9 @@ function ownFirst(ops: Vec<Op>): Vec<Op> {
         const n = owns.len();
         owns[n - 1].push(op);
       }
-      #Text(_) => {
+      #Text(t) => {
         const n = bodies.len();
-        bodies[n - 1].push(op);
+        addText(mut bodies[n - 1], t.asStr());
       }
       #Close => {
         const o = match (opens.pop()) { #Some(o) => o, #None => continue };

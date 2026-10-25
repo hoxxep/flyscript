@@ -826,6 +826,92 @@ fn threaded_programs_run_as_expected() {
     }
 }
 
+/// `.flyx` (web/flyx.fly) written as `.fly` by `flyxc`, in `dir`, where its module would be as
+/// `.fly`; then compiled by `out`'s name, as JavaScript or C, through `FLY_OVERLAY`, which says
+/// where the written module is. What the compiler says, if it fails, or else nothing.
+fn compile_flyx(dir: &Path, name: &str, out: &Path) -> Option<String> {
+    static FLYXC: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    let flyxc = FLYXC.get_or_init(|| {
+        let js = self::out().join("flyxc.js");
+        compile(&root().join("selfhost/seed.js"), &root().join("web/flyxc.fly"), &js);
+        js
+    });
+    let written = self::out().join("flyx").join(format!("{}-{name}.fly", dir.file_name().unwrap().to_string_lossy()));
+    std::fs::create_dir_all(written.parent().unwrap()).unwrap();
+    let r = Command::new("node").arg(flyxc).arg(format!("{name}.flyx")).arg(&written).current_dir(dir).output().unwrap();
+    if !r.status.success() {
+        return Some(String::from_utf8_lossy(&r.stdout).into_owned());
+    }
+    let overlay = written.with_extension("overlay");
+    std::fs::write(&overlay, format!("{}\t{}\t{}.map\n", dir.join(format!("{name}.fly")).display(), written.display(), written.display())).unwrap();
+    let r = Command::new("node")
+        .arg("--stack-size=65500")
+        .arg(root().join("selfhost/seed.js"))
+        .arg(dir.join(format!("{name}.fly")))
+        .arg(out)
+        .arg(root())
+        .env("FLY_OVERLAY", &overlay)
+        .current_dir(dir)
+        .output()
+        .unwrap();
+    if r.status.success() && r.stdout.is_empty() { None } else { Some(format!("{}{}", String::from_utf8_lossy(&r.stdout), String::from_utf8_lossy(&r.stderr))) }
+}
+
+/// A `.flyx` view is the `.fly` it stands for: tests/flyx/tags.flyx, its tags, statements among
+/// them, text, character references, links, components and fragments, renders as it expects, in
+/// JavaScript and natively.
+#[test]
+fn flyx_views_are_the_fly_they_stand_for() {
+    if !has_node() {
+        return;
+    }
+    let dir = root().join("tests/flyx");
+    let src = std::fs::read_to_string(dir.join("tags.flyx")).unwrap();
+    let expected: String = src.lines().filter_map(|l| l.strip_prefix("// expect: ")).map(|l| format!("{l}\n")).collect();
+    let js = out().join("flyx/tags.js");
+    if let Some(e) = compile_flyx(&dir, "tags", &js) {
+        panic!("{e}");
+    }
+    let r = Command::new("node").arg(&js).output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&r.stdout), expected);
+    if !has_cc() {
+        return;
+    }
+    let c = out().join("flyx/tags.c");
+    if let Some(e) = compile_flyx(&dir, "tags", &c) {
+        panic!("{e}");
+    }
+    let exe = out().join("flyx/tags");
+    let built = cc().args(["-std=gnu11", "-O1", "-w", "-o"]).arg(&exe).arg(&c).arg("-lm").output().unwrap();
+    assert!(built.status.success(), "{}", String::from_utf8_lossy(&built.stderr));
+    let r = Command::new(&exe).output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&r.stdout), expected);
+}
+
+/// What is wrong with a `.flyx` module is said at its line and column, with its line shown: a
+/// mistyped message, a misspelled field and a move out of a borrow inside braces, by the compiler
+/// through the map back from the `.fly` written of it; a tag never closed or closed by another,
+/// by the translation.
+#[test]
+fn flyx_errors_point_into_the_flyx() {
+    if !has_node() {
+        return;
+    }
+    let dir = root().join("tests/flyx/errors");
+    let cases = [
+        ("typo", "typo.flyx:8:22: `#Typo` is not a tag of `#Open | #Pick(String)`\n      <button onClick={#Typo}>Open</button>\n                       ^^^^^"),
+        ("field", "field.flyx:7:17: no field `nmae` on `{ items: Vec<String>; name: String; }`\n    <h1>Hello, {m.nmae}!</h1>\n                  ^^^^"),
+        ("borrow", "borrow.flyx:9:26: cannot move a `String` out of a borrow; it is not `Copy`\n        <li onClick={#Pick(it)}>{it}</li>\n                           ^^"),
+        ("unclosed", "unclosed.flyx:7:3: `<div>` is never closed\n    <div class=\"card\">\n    ^^^^"),
+        ("mismatched", "mismatched.flyx:8:16: expected `</p>`, to close the `<p>` at 8:5\n      <p>{m.name}</div>\n                 ^^^^^"),
+    ];
+    for (name, expected) in cases {
+        let said = compile_flyx(&dir, name, &out().join(format!("flyx/{name}.js"))).unwrap_or_else(|| panic!("{name}.flyx compiled"));
+        let first: Vec<&str> = said.lines().take(3).collect();
+        assert_eq!(first.join("\n"), expected, "{name}.flyx: the compiler said\n{said}");
+    }
+}
+
 /// A server written with web/http.fly, built natively, serves real HTTP on worker threads: each of
 /// several connections, kept alive, gets the answer to each of its requests.
 #[test]

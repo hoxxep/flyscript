@@ -1,0 +1,21 @@
+// expect: amp & / lt <
+// expect: one 1 / two 2
+// expect: 3 tables
+// A module's constant may be a slice of tuples, each element of a type of its own (§8.1).
+import { println } from "std/io";
+
+const ENTITIES: [str, str][] = [["amp", "&"], ["lt", "<"]];
+const NUMBERS: [str, u32][] = [["one", 1], ["two", 2]];
+const NESTED: [str, [u8, bool]][] = [["x", [1, true]], ["y", [2, false]], ["z", [3, true]]];
+
+export function main(): void uses Io {
+  let a: Vec<String> = Vec.new();
+  for (const p of ENTITIES) { a.push(`${p[0]} ${p[1]}`); }
+  println(a.join(" / "));
+  let b: Vec<String> = Vec.new();
+  for (const p of NUMBERS) { b.push(`${p[0]} ${p[1]}`); }
+  println(b.join(" / "));
+  let n: u32 = 0;
+  for (const p of NESTED) { if (p[1][1]) { n += p[1][0] as u32; } }
+  println(`${n - 1} tables`);
+}

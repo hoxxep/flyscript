@@ -7,12 +7,12 @@
 // evaluated in, what a read moves, what a borrow lends, how a pattern is tested and what it binds,
 // which cleanups each way out of a block runs.
 
-import { Span, Diagnostic, render } from "./diag";
+import { Span, Diagnostic } from "./diag";
 import {
   Ident, Block as AstBlock, Stmt as AstStmt, Expr, ExprKind, FieldInit, TagArgs, TemplatePiece, MatchArm, Pattern,
   PatternKind, TagPatArgs, Param, FnDecl, HandlerArm,
 } from "./ast";
-import { Program as Prog, Binding, DefKind, SubstMap, subst, substArg, substEffs, substMap, substParams } from "./env";
+import { Program as Prog, rendered, Binding, DefKind, SubstMap, subst, substArg, substEffs, substMap, substParams } from "./env";
 import { Prim, Row, Tail, Eff, EffRow, FnTy, FnMode, Len, GArg, Ty, pure, isInt, isFloat, primName, labelGet, keyArgs, keyTy } from "./types";
 import { Binds } from "./impls";
 import { checkFn } from "./check";
@@ -1653,10 +1653,14 @@ impl Lower {
       #Unary { op, operand } => #Unary(op.clone(), Box.new(self.constOf(operand, ty)), ty.clone()),
       #Binary { op, lhs, rhs } => #Binary(op.clone(), Box.new(self.constOf(lhs, ty)), Box.new(self.constOf(rhs, ty)), ty.clone()),
       #List(items) => {
-        const elem: Ty = match (stripBorrow(ty)) { #Array(x, _) | #Slice(x) => x.get().clone(), _ => #Error };
+        const whole = stripBorrow(ty);
         let vs: Vec<ConstValue> = Vec.new();
-        for (const it of items) { vs.push(self.constOf(it, elem)); }
-        #List(vs, stripBorrow(ty))
+        for (const [i, it] of items.iter().enumerate()) {
+          // A tuple's elements each have a type of their own.
+          const elem: Ty = match (whole) { #Array(x, _) | #Slice(x) => x.get().clone(), #Tuple(ts) if i < ts.len() => ts[i].clone(), _ => #Error };
+          vs.push(self.constOf(it, elem));
+        }
+        #List(vs, whole)
       }
       #Ident(n) => match (self.p.lookup(self.module, n.asStr())) {
         #Some(#Const(c)) => #Lit(#Named(c, self.p.consts[c].ty.clone())),
@@ -3308,7 +3312,7 @@ impl Lower {
   // A diagnostic as text, in the module of the code lowered when it arose.
   export function render(self: readonly Self, d: Diagnostic): String {
     const m = self.module;
-    render(d, self.p.modules[m].file.asStr(), self.p.modules[m].source.asStr())
+    rendered(self.p.modules[m], d)
   }
 }
 

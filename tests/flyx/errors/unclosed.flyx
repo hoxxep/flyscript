@@ -1,0 +1,9 @@
+import { Ui } from "web/ui";
+
+type Model = { name: String; items: Vec<String> };
+type Msg = #Open | #Pick(String);
+
+export function view(m: readonly Model): void uses Ui<Msg> {
+  <div class="card">
+    <p>{m.name}</p>
+}
