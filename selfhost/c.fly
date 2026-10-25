@@ -2690,7 +2690,7 @@ impl Cgen {
             self.helpers.insert(entryKey, n.clone());
             self.protos.push(`static void ${n}(void* t, void* c, void** slot);\n`);
             // A task's root machine: the forked function, called again to go on as the task does.
-            self.dropCode.push(`static void ${n}(void* t, void* c, void** slot) { fly_fn* f = c; ${tc} v = ((${tc} (*)(void*, void**, void*))f->fn)(f->env, slot, NULL); if (fly_pending || fly_cx()->panicking) return; *(${tc}*)fly_task_result(t) = v; if (f->drop) f->drop(f->env); free(f); }\n`);
+            self.dropCode.push(`static void ${n}(void* t, void* c, void** slot) { fly_fn* f = c; ${tc} v = ((${tc} (*)(void*, void**, void*))f->fn)(f->env, slot, NULL); if (fly_pending || fly_cx()->panicking) return; *(${tc}*)fly_task_result(t) = v; if (f->drop) f->drop(f->env); }\n`);
             n
           }
         };

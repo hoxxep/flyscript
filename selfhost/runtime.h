@@ -110,7 +110,7 @@ typedef struct fly_unw fly_unw;
 // in use again should it be freed while in use, as a panic unwinds out of it.
 typedef struct fly_frame_chunk fly_frame_chunk;
 typedef struct fly_frames fly_frames;
-struct fly_frames { char* top; char* end; fly_frame_chunk* chunk; fly_frames* outer; };
+struct fly_frames { char* top; char* end; fly_frame_chunk* chunk; fly_frames* outer; fly_frame_chunk* spare; };
 // `pend` says why code returned suspended (FLY_PEND_*), and for whom; `frames` is the arena calls
 // take frames from.
 // `panicking` says that the code unwinds by its flag for a panic, which a machine with cleanup
@@ -477,6 +477,8 @@ void fly_frame_pop(void* frame);
 // A machine's frame, from the slot its caller holds: taken from the arena as the machine first starts.
 void* fly_frame_take(void** slot, size_t size);
 void fly_frames_free(fly_frames* a);
+// The chunk an arena keeps for its next, given back: as a task stops.
+void fly_frames_trim(fly_frames* a);
 // Where the arena in use is, kept as a catch point is entered, and given back as it takes up a
 // panic, the frames the panic left behind with it.
 typedef struct { fly_frames* frames; char* top; } fly_frames_mark;

@@ -1833,9 +1833,22 @@ void fly_cont_drop(fly_cont* k) {
 // ---- code that may suspend, as state machines ----
 
 // A chunk of a frame arena: frames are taken from its end, and a chunk too small for the next is
-// followed by another, given back once nothing in it is.
+// followed by another, twice as large, up to FRAME_CHUNK, or as large as the frame. The first is
+// as large as the first frame, so a task whose frames nest in its root's takes no more than it
+// needs. A chunk emptied is kept, the largest one, for the next that would be made, so a call that
+// goes past a chunk's end and returns again and again takes nothing from the allocator; a task
+// that stops gives it back (`fly_frames_trim`), so a task parked holds only the frames it is in.
 struct fly_frame_chunk { fly_frame_chunk* prev; char* end; _Alignas(16) char data[]; };
-enum { FRAME_CHUNK = 4096 };
+enum { FRAME_CHUNK = 16384 };
+
+static size_t chunk_room(const fly_frame_chunk* c) { return (size_t)(c->end - c->data); }
+
+// Chunk `c`, emptied, kept if it is the largest emptied yet.
+static void chunk_spare(fly_frames* a, fly_frame_chunk* c) {
+  if (a->spare && chunk_room(a->spare) >= chunk_room(c)) { free(c); return; }
+  if (a->spare) free(a->spare);
+  a->spare = c;
+}
 
 void* fly_frame_push(size_t size) {
   fly_ctx* cx = fly_cx_now();
@@ -1843,10 +1856,17 @@ void* fly_frame_push(size_t size) {
   fly_frames* a = cx->frames;
   size = (size + 15) & ~(size_t)15;
   if (!a->chunk || (size_t)(a->end - a->top) < size) {
-    size_t n = size > FRAME_CHUNK ? size : FRAME_CHUNK;
-    fly_frame_chunk* c = fly_alloc(sizeof(fly_frame_chunk) + n);
+    size_t n = a->chunk ? 2 * chunk_room(a->chunk) : size;
+    if (n > FRAME_CHUNK) n = FRAME_CHUNK;
+    if (n < size) n = size;
+    fly_frame_chunk* c = a->spare;
+    if (c && chunk_room(c) >= size) {
+      a->spare = NULL;
+    } else {
+      c = fly_alloc(sizeof(fly_frame_chunk) + n);
+      c->end = c->data + n;
+    }
     c->prev = a->chunk;
-    c->end = c->data + n;
     a->chunk = c;
     a->top = c->data;
     a->end = c->end;
@@ -1862,16 +1882,22 @@ void* fly_frame_take(void** slot, size_t size) {
   return *slot;
 }
 
-void fly_frame_pop(void* frame) {
-  fly_frames* a = fly_cx_now()->frames;
-  char* p = frame;
-  while (a->chunk && !(p >= a->chunk->data && p < a->chunk->end)) {
+// The chunks above the one `p` is in, or ends, emptied; `p` the arena's top.
+static void frames_cut(fly_frames* a, char* p) {
+  while (a->chunk && !(p >= a->chunk->data && p <= a->chunk->end)) {
     fly_frame_chunk* c = a->chunk;
     a->chunk = c->prev;
-    free(c);
+    chunk_spare(a, c);
     if (a->chunk) a->end = a->chunk->end;
   }
-  a->top = p;
+  a->top = a->chunk ? p : NULL;
+}
+
+void fly_frame_pop(void* frame) { frames_cut(fly_cx_now()->frames, frame); }
+
+void fly_frames_trim(fly_frames* a) {
+  if (a->spare) free(a->spare);
+  a->spare = NULL;
 }
 
 void fly_frames_free(fly_frames* a) {
@@ -1882,6 +1908,7 @@ void fly_frames_free(fly_frames* a) {
     a->chunk = c->prev;
     free(c);
   }
+  fly_frames_trim(a);
   a->top = a->end = NULL;
 }
 
@@ -1898,16 +1925,7 @@ void fly_frames_keep(fly_frames_mark* m) {
 
 void fly_frames_back(const fly_frames_mark* m) {
   fly_cx_now()->frames = m->frames;
-  fly_frames* a = m->frames;
-  if (!a) return;
-  // A full chunk's top is its end.
-  while (a->chunk && !(m->top >= a->chunk->data && m->top <= a->chunk->end)) {
-    fly_frame_chunk* c = a->chunk;
-    a->chunk = c->prev;
-    free(c);
-    if (a->chunk) a->end = a->chunk->end;
-  }
-  a->top = a->chunk ? m->top : NULL;
+  if (m->frames) frames_cut(m->frames, m->top);
 }
 
 void fly_machine_unwind(void (*call)(void* env, void* frame), void* env, void* frame) {
@@ -3049,7 +3067,9 @@ typedef struct {
   fly_frames frames;
   bool started, done;
   void (*entry)(void* task, void* closure, void** slot);
+  // What it runs: `main`'s runner, or a closure, kept here (`fn`).
   void* closure;
+  fly_fn fn;
   void* result;
   size_t size;
   fly_failure* error;
@@ -3163,7 +3183,6 @@ static void main_entry(void* task, void* closure, void** slot);
 static void drop_task_closure(void* c) {
   fly_fn* f = c;
   if (f->drop) f->drop(f->env);
-  free(f);
 }
 
 // A task's panic ends it (§5.7): a spawned task's is reported, and its scope goes on; a forked
@@ -3227,6 +3246,8 @@ int32_t fly_core_run(int32_t id, bool deadlock, bool cancel) {
   cx->panic = t->unwinding_panic;
   cx->destroying = t->destroying;
   t->done = task_main(t);
+  // Stopped, the task holds only the frames it is in.
+  if (!t->done) fly_frames_trim(&t->frames);
   cx = fly_cx_now();
   cx->frames = frames;
   t->unwinding_panic = cx->panic;
@@ -3237,13 +3258,16 @@ int32_t fly_core_run(int32_t id, bool deadlock, bool cancel) {
   return t->error || t->panic ? 2 : 1;
 }
 
-static task_t* new_task(void (*entry)(void* task, void* closure, void** slot), void* closure, size_t size) {
+// A task of `entry`, given `main`'s runner or a copy of the closure at `f`, and a result of `size`
+// bytes, if it gives one.
+static task_t* new_task(void (*entry)(void* task, void* closure, void** slot), void* closure, const fly_fn* f, size_t size) {
   task_t* t = fly_alloc(sizeof(task_t));
   t->forked = entry != fly_task_void;
   t->entry = entry;
+  if (f) { t->fn = *f; closure = &t->fn; }
   t->closure = closure;
   t->size = size;
-  t->result = fly_alloc(size ? size : 1);
+  t->result = size ? fly_alloc(size) : NULL;
   return t;
 }
 
@@ -3318,7 +3342,7 @@ void fly_tasks_run(void (*main)(void**)) {
 #ifdef FLY_THREADS
   if (!world.simulated) { mt_run(main, main_entry); return; }
 #endif
-  task_t* t0 = new_task(main_entry, (void*)main, 0);
+  task_t* t0 = new_task(main_entry, (void*)main, NULL, 0);
 #ifdef FLY_THREADS
   run_on_big_stack(sim_tasks, t0);
 #else
@@ -3336,7 +3360,7 @@ int fly_spawn(fly_wait* w, int scope, void (*entry)(void* task, void* closure, v
 #endif
   int64_t r = 0;
   W_BEGIN(w)
-  ASK(w, r, REQ_SPAWN, scope, 1, new_task(entry, fly_box(f, sizeof *f), size), 0);
+  ASK(w, r, REQ_SPAWN, scope, 1, new_task(entry, NULL, f, size), 0);
   W_END
   return (int)r;
 }
@@ -3349,7 +3373,7 @@ void* fly_task_spawn(fly_wait* w, int scope, const fly_fn* f) {
 #endif
   int64_t r = 0;
   W_BEGIN(w)
-  w->p[0] = new_task(fly_task_void, fly_box(f, sizeof *f), 0);
+  w->p[0] = new_task(fly_task_void, NULL, f, 0);
   ((task_t*)w->p[0])->how = FLY_TASK_RUNNING;
   ((task_t*)w->p[0])->handles = 1;
   ASK(w, r, REQ_SPAWN, scope, 0, w->p[0], NULL);
@@ -3434,7 +3458,6 @@ void fly_task_void(void* task, void* closure, void** slot) {
   // Stopped, it goes on; ended by a panic, the task's end drops what it was given.
   if (fly_pending || fly_cx_now()->panicking) return;
   if (f->drop) f->drop(f->env);
-  free(f);
 }
 
 void* fly_task_result(void* task) {
@@ -3808,7 +3831,9 @@ typedef struct { spin_t lock; mt_task *head, *tail; } waitq;
 
 struct mt_task {
   void (*entry)(void* task, void* closure, void** slot);
+  // What it runs: `main`'s runner, or a closure, kept here (`fn`).
   void* closure;
+  fly_fn fn;
   void* result;
   size_t size;
   mt_scope* scope;
@@ -3847,8 +3872,10 @@ struct mt_task {
   mt_task* rnext;
   // The lock its worker gives back once it has stopped to wait.
   spin_t* release;
-  // What compiled code reads and sets of it, wherever it runs.
-  fly_ctx ctx;
+  // What of the context compiled code reads and sets is its own while it waits — the panic its
+  // cleanup runs for, how deep in destructors it is — kept here; the rest is its worker's.
+  char* unwinding_panic;
+  int destroying;
   uint64_t sleep_gen;
 };
 
@@ -3873,6 +3900,8 @@ typedef struct { waitq q; uint8_t* state; void (*drop)(void*); } mt_chan;
 
 struct worker {
   int index;
+  // The context of the task running here.
+  fly_ctx run_ctx;
   // The context of whatever runs here outside a task: `par` work stolen while idle.
   fly_ctx own_ctx;
   fly_ctx* idle_ctx;
@@ -4110,6 +4139,8 @@ static void mt_point(fly_wait* w) {
 
 // ---- sleeping ----
 
+// ---- sleeping ----
+
 // Sleeping tasks wait in one queue; when each wakes is kept in a heap, under the queue's lock. A
 // task woken early — cancelled — leaves its alarm behind, which then wakes nothing.
 typedef struct { uint64_t due, gen; mt_task* task; } alarm_t;
@@ -4220,6 +4251,9 @@ static void mt_end(mt_task* t) {
     notify_all();
     return;
   }
+  // A panic no `Task` can ask for is told as the task ends, before its scope sees it end: after, the
+  // scope's body could go on and print before it.
+  if (!t->forked && __atomic_load_n(&t->handles, __ATOMIC_ACQUIRE) == 0) tell_panic(t);
   mt_scope* sc = t->scope;
   mt_task** cancels = NULL;
   size_t ncancels = 0;
@@ -4261,7 +4295,6 @@ static void mt_end(mt_task* t) {
     spin_unlock(&a->q->lock);
   }
   spin_unlock(&t->joiners.lock);
-  if (!t->forked && __atomic_load_n(&t->handles, __ATOMIC_ACQUIRE) == 0) tell_panic(t);
   __atomic_fetch_sub(&alive, 1, __ATOMIC_SEQ_CST);
   __atomic_fetch_sub(&runnable, 1, __ATOMIC_SEQ_CST);
   // Its scope no longer refers to it, nor does it to itself.
@@ -4285,11 +4318,15 @@ static void run_task(worker* w, mt_task* t) {
       return;
     }
   }
-  fly_cur = &t->ctx;
-  t->ctx.frames = &t->frames;
-  // The task runs on this worker's stack, whose limit is its own.
-  t->ctx.limit = stack_limit0;
+  // The task runs in its worker's context, on its worker's stack, with what is its own.
+  fly_ctx* cx = &w->run_ctx;
+  *cx = (fly_ctx){ .frames = &t->frames, .panic = t->unwinding_panic, .destroying = t->destroying, .limit = stack_limit0 };
+  fly_cur = cx;
   bool done = mt_task_main(t);
+  t->unwinding_panic = cx->panic;
+  t->destroying = cx->destroying;
+  // Stopped, the task holds only the frames it is in.
+  if (!done) fly_frames_trim(&t->frames);
   fly_cur = w->idle_ctx;
   running = NULL;
   // Once the lock of what it waits for is given back, the task may be woken and run elsewhere: what
@@ -4710,13 +4747,14 @@ static void mt_run(void (*main)(void**), void (*entry)(void* task, void* closure
 // ---- what compiled code calls, without a simulated world ----
 
 // A task started in scope `scope`, which itself and its scope refer to, and `refs` more.
-static mt_task* mt_start(int scope, void (*entry)(void* task, void* closure, void** slot), void* closure, size_t size, int refs) {
+static mt_task* mt_start(int scope, void (*entry)(void* task, void* closure, void** slot), const fly_fn* f, size_t size, int refs) {
   mt_scope* sc = obj_get(scope);
   mt_task* t = fly_alloc(sizeof(mt_task));
   t->entry = entry;
-  t->closure = closure;
+  t->fn = *f;
+  t->closure = &t->fn;
   t->size = size;
-  t->result = fly_alloc(size ? size : 1);
+  t->result = size ? fly_alloc(size) : NULL;
   t->scope = sc;
   t->forked = entry != fly_task_void;
   t->how = FLY_TASK_RUNNING;
@@ -4736,7 +4774,7 @@ static mt_task* mt_start(int scope, void (*entry)(void* task, void* closure, voi
 
 static int mt_spawn(fly_wait* w, int scope, void (*entry)(void* task, void* closure, void** slot), const fly_fn* f, size_t size) {
   // A forked task's `Fiber` refers to it too, by its number.
-  if (w->step == 0) w->n = obj_new(mt_start(scope, entry, fly_box(f, sizeof *f), size, 1));
+  if (w->step == 0) w->n = obj_new(mt_start(scope, entry, f, size, 1));
   mt_point(w);
   return w->n;
 }
@@ -4746,7 +4784,7 @@ static int mt_spawn(fly_wait* w, int scope, void (*entry)(void* task, void* clos
 static void* mt_task_spawn(fly_wait* w, int scope, const fly_fn* f) {
   // Its `Task`s share one reference.
   if (w->step == 0) {
-    mt_task* t = mt_start(scope, fly_task_void, fly_box(f, sizeof *f), 0, 1);
+    mt_task* t = mt_start(scope, fly_task_void, f, 0, 1);
     t->handles = 1;
     w->p[1] = t;
   }

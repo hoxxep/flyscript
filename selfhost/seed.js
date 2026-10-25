@@ -186384,7 +186384,7 @@ function handle_1389($3322, $3323) {
       v75_t = $usize(v74_bslotAt + v0_self.v.ptr);
       v76_arenaAt = v75_t;
       v78_t = v76_arenaAt;
-      v77_t = $usize(4 * v0_self.v.ptr);
+      v77_t = $usize(5 * v0_self.v.ptr);
       v79_t = $usize(v78_t + v77_t);
       v80_size = v79_t;
       v81_t = $ix(v0_self.v.c.lw.p.defs, v5_d).name;
@@ -256060,7 +256060,7 @@ function tasksLib_1782($4381, $4382, $4383, $4384) {
                   v222_t = v202_t;
                   $b.String_push(v222_t, v221_t);
                   v224_t = v202_t;
-                  $b.String_push(v224_t, "*)fly_task_result(t) = v; if (f->drop) f->drop(f->env); free(f); }\n");
+                  $b.String_push(v224_t, "*)fly_task_result(t) = v; if (f->drop) f->drop(f->env); }\n");
                   v226_t = v202_t.v;
                   v227_t = v226_t;
                   $b.String_push(v201_t, v227_t);

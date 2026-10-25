@@ -2988,7 +2988,7 @@ impl Lgen {
     const yoAt = base + self.slots(ap) * self.ptr;
     const bslotAt = yoAt + self.ptr;
     const arenaAt = bslotAt + self.ptr;
-    const size = arenaAt + 4 * self.ptr;
+    const size = arenaAt + 5 * self.ptr;
     const handlesYield = self.c.lw.p.defs[d].name == "Yield" && self.c.lw.p.modules[self.c.lw.p.defs[d].module].isStd;
     const r = if (match (br) { #Mem => true, _ => false }) { "ptr noalias %r, " } else { "" };
     // The body.
