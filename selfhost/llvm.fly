@@ -69,6 +69,12 @@ type Lctx = {
   // printed now, which going on from a point installs again.
   machine: bool;
   fpk: Packer;
+  // What only one point the machine stops at keeps is dead before the next begins: each point's is
+  // laid out from 0, as the C back end's union (`transient`), the largest of them after the rest of
+  // the frame, where `trSize` and `trAlign` say; `trPk` lays out the point being made.
+  trPk: Packer;
+  trSize: usize;
+  trAlign: usize;
   frameEntry: String;
   startCode: String;
   sites: usize;
@@ -129,7 +135,7 @@ type Lctx = {
 function newCtx(locals: Vec<Local>, ret: Ty, mode: Mode): Lctx {
   {
     locals, addrs: HashMap.new(), outer: HashSet.new(), captures: Vec.new(), capTys: Vec.new(), allocas: String.new(), out: String.new(), open: true, tmp: 0,
-    scopes: Vec.new(), targets: Vec.new(), mode, machine: false, fpk: { at: 0, align: 1 }, frameEntry: String.new(), startCode: String.new(),
+    scopes: Vec.new(), targets: Vec.new(), mode, machine: false, fpk: { at: 0, align: 1 }, trPk: { at: 0, align: 1 }, trSize: 0, trAlign: 1, frameEntry: String.new(), startCode: String.new(),
     sites: 0, cases: String.new(), reenter: Vec.new(), catches: false, catching: false, preenter: Vec.new(), resident: HashSet.new(), yo: #None, yieldEffect: #None, machineDrops: HashMap.new(), deferStore: HashMap.new(),
     arenas: HashMap.new(), ret: ret.clone(), retSlot: String.new(), fnRet: ret, hoisted: HashSet.new(), declared: HashSet.new(), prologue: String.new(), live: HashSet.new(),
     reachable: true, liveAt: HashMap.new(), sp: String.new(), loc: String.new(), direct: false,
@@ -1980,6 +1986,30 @@ impl Lgen {
     self.storage(s.size, s.align)
   }
 
+  // Memory of `size` bytes for the next point the machine may stop at alone, and what follows it
+  // before the next: in a machine, in the frame's part each point lays out from 0, its offset
+  // marked to be put after the rest of the frame (`define`); otherwise an alloca.
+  function transient(self: mut Self, size: usize, align: usize): String {
+    if (!self.cx.machine) { return self.alloca(size, align); }
+    const o = pack(mut self.cx.trPk, max(size, 1), align);
+    self.cx.tmp += 1;
+    const n = `%fs${self.cx.tmp}`;
+    self.cx.frameEntry.push(`  ${n} = getelementptr inbounds i8, ptr %fr, i64 \u{1}t${o}\u{1}\n`);
+    n
+  }
+
+  function transientOf(self: mut Self, t: readonly Ty, span: Span): String uses Fail<Diagnostic> {
+    const s = self.shape(t, span);
+    self.transient(s.size, s.align)
+  }
+
+  // The point being made is done: what it kept may be the next's.
+  function closeGroup(self: mut Self): void {
+    self.cx.trSize = max(self.cx.trSize, self.cx.trPk.at);
+    self.cx.trAlign = max(self.cx.trAlign, self.cx.trPk.align);
+    self.cx.trPk = { at: 0, align: 1 };
+  }
+
   // Whether the task's context says code returned suspended (`fly_pending`).
   function pending(self: mut Self): String {
     const cx = self.val("call ptr @fly_cx()");
@@ -2050,6 +2080,7 @@ impl Lgen {
     self.suspend();
     self.cx.out.push(`d${k}:\n`);
     self.cx.open = true;
+    self.closeGroup();
   }
 }
 
@@ -2160,9 +2191,9 @@ impl Lgen {
         } else {
           // A machine keeps its frame in a slot of the caller's, and is called again to go on, given
           // nothing for its arguments, which it has already.
-          const slot = self.storage(self.ptr, self.ptr);
+          const slot = self.transient(self.ptr, self.ptr);
           self.store("ptr", "null", slot.asStr());
-          const res: Option<String> = match (rr) { #Unit => #None, _ => #Some(self.storageOf(c.ret, span)) };
+          const res: Option<String> = match (rr) { #Unit => #None, _ => #Some(self.transientOf(c.ret, span)) };
           let args: Vec<String> = Vec.new();
           let again: Vec<String> = Vec.new();
           if (const #Mem = rr) {
@@ -2208,7 +2239,7 @@ impl Lgen {
           self.scopeSite(c, span)
         } else if (machine && k == "Gen_next" && self.cx.machine) {
           // Pulled again, a generator that stopped for something else goes on.
-          const res: Option<String> = match (self.rep(c.ret, span)) { #Unit => #None, _ => #Some(self.storageOf(c.ret, span)) };
+          const res: Option<String> = match (self.rep(c.ret, span)) { #Unit => #None, _ => #Some(self.transientOf(c.ret, span)) };
           let this_site: usize = 0;
           for (const pass of 0..2) {
             const v = self.routine(k.asStr(), c, arenas);
@@ -2281,17 +2312,17 @@ impl Lgen {
       for (const [k, a] of c.args.iter().enumerate()) {
         const t = self.operandTy(a);
         if (unitTy(t)) { continue; }
-        const st = self.storageOf(t, span);
+        const st = self.transientOf(t, span);
         const n = self.sizeOf(t, span);
         self.memcpy(st.asStr(), places[k].asStr(), n);
         ptrs[k] = st;
       }
     }
-    const w = self.storage(8 + 24 + 3 * self.ptr, 8);
+    const w = self.transient(8 + 24 + 3 * self.ptr, 8);
     self.ins(`call void @llvm.memset.p0.i64(ptr ${w}, i8 0, i64 ${8 + 24 + 3 * self.ptr}, i1 false)`);
     const e = expr.replaceAll(WAIT, `((fly_wait*)a${ptrs.len()})`.asStr());
     ptrs.push(w);
-    const res = if (unitTy(c.ret)) { "null".toString() } else { self.storageOf(c.ret, span) };
+    const res = if (unitTy(c.ret)) { "null".toString() } else { self.transientOf(c.ret, span) };
     const body = if (unitTy(c.ret)) { `(void)(${e});` } else { `*(${self.c.ctype(c.ret, span)}*)r = ${e};` };
     const g = self.glueFn(ptrs.len(), body.asStr());
     self.callGlue(g.asStr(), res.asStr(), ptrs);
@@ -2402,11 +2433,11 @@ impl Lgen {
     let vs: Vec<String> = Vec.new();
     // The function value, the slot, and where yields go: the glue's first three.
     const fv = if (machine) {
-      const v = self.storage(3 * self.ptr, self.ptr);
+      const v = self.transient(3 * self.ptr, self.ptr);
       self.memcpy(v.asStr(), fp.asStr(), 3 * self.ptr);
       v
     } else { fp };
-    const slot = self.storage(self.ptr, self.ptr);
+    const slot = self.transient(self.ptr, self.ptr);
     self.store("ptr", "null", slot.asStr());
     ptrs.push(fv.clone());
     ptrs.push(slot.clone());
@@ -2437,7 +2468,7 @@ impl Lgen {
     const dropIt = if (isOnce && !machine) { "if (f_.drop) f_.drop(f_.env); " } else { "" };
     const body = `fly_fn f_ = *(fly_fn*)a0; ${rt} c_ = ${callExpr}; (void)c_; ${dropIt}${store}`;
     const g = self.glueFn(ptrs.len(), body.asStr());
-    const res = if (unitTy(c.ret)) { "null".toString() } else if (machine) { self.storageOf(c.ret, span) } else { self.allocaOf(c.ret, span) };
+    const res = if (unitTy(c.ret)) { "null".toString() } else if (machine) { self.transientOf(c.ret, span) } else { self.allocaOf(c.ret, span) };
     self.callGlue(g.asStr(), res.asStr(), ptrs);
     if (machine && self.cx.machine) {
       const k = self.siteStart();
@@ -2465,13 +2496,13 @@ impl Lgen {
     const errTag = self.c.tagId("Err");
     const okTag = self.c.tagId("Ok");
     const fp = self.argPlace(c.args[0], span);
-    const fv = self.storage(3 * self.ptr, self.ptr);
+    const fv = self.transient(3 * self.ptr, self.ptr);
     self.memcpy(fv.asStr(), fp.asStr(), 3 * self.ptr);
-    const slot = self.storage(self.ptr, self.ptr);
+    const slot = self.transient(self.ptr, self.ptr);
     self.store("ptr", "null", slot.asStr());
     const body = `fly_fn* f_ = a0; ${tc} v_ = ((${tc} (*)(void*, void**, void*))f_->fn)(f_->env, (void**)a1, NULL); if (fly_pending) return; if (f_->drop) f_->drop(f_->env); ${rc} r_; if (FLY_FAILED) { ${etc} e_; memset(&e_, 0, sizeof e_); ${take}r_ = (${rc}){ .tag = ${errTag}, .u.Err = e_ }; } else r_ = (${rc}){ .tag = ${okTag}${okInit} }; *(${rc}*)r = r_;`;
     const g = self.glueFn(2, body.asStr());
-    const res = self.storageOf(rt, span);
+    const res = self.transientOf(rt, span);
     self.callGlue(g.asStr(), res.asStr(), [fv.clone(), slot.clone()]);
     if (self.cx.machine) {
       const k = self.siteStart();
@@ -2635,6 +2666,17 @@ impl Lgen {
     // A machine's frame, from its slot, and a jump to where it stopped; the handlers in force as it
     // is called, which it leaves in force as it stops.
     if (self.cx.machine) {
+      // What each point keeps alone goes after the rest.
+      self.closeGroup();
+      const base = roundUp(self.cx.fpk.at, self.cx.trAlign);
+      let entry = String.new();
+      // Every other part is a marked offset, `t` and the offset in its point's part.
+      for (const [k, part] of self.cx.frameEntry.split("\u{1}").iter().enumerate()) {
+        if (k % 2 == 1) { entry.push(`${base + (parseInt(part.slice(1, part.len())) as usize)}`); } else { entry.push(part); }
+      }
+      self.cx.frameEntry = entry;
+      self.cx.fpk.at = base + self.cx.trSize;
+      self.cx.fpk.align = max(self.cx.fpk.align, self.cx.trAlign);
       const size = roundUp(self.cx.fpk.at, self.cx.fpk.align);
       const dl = if (self.cx.entryLoc.len() > 0) { `, !dbg ${self.cx.entryLoc}` } else { String.new() };
       self.cx.allocas.push(`  %fr = call ptr @fly_frame_take(ptr %slot, ${sizeTy(self.ptr)} ${size})${dl}\n  %h0.cx = call ptr @fly_cx()${dl}\n  %h0.at = getelementptr inbounds i8, ptr %h0.cx, i64 ${2 * self.ptr}\n  %h0 = load ptr, ptr %h0.at\n${self.cx.frameEntry}  %state = load i32, ptr %fr\n  switch i32 %state, label %start [ ${self.cx.cases}]\nstart:\n`);
@@ -2873,7 +2915,7 @@ impl Lgen {
     // the frame, in a machine.
     const a = if (tys.len() == 0) { "null".toString() } else {
       const tt: Ty = #Tuple(tys);
-      const at = self.storageOf(tt, span);
+      const at = self.transientOf(tt, span);
       for (const [i, x] of args.iter().enumerate()) {
         const o = self.offsetOf(tt, `${i}`.asStr(), span);
         const p = self.gep(at.asStr(), o);
@@ -2881,7 +2923,7 @@ impl Lgen {
       }
       at
     };
-    const res = self.storageOf(rt, span);
+    const res = self.transientOf(rt, span);
     // An operation the task unwinds from gives nothing, and what it gives is dropped as it unwinds.
     self.zero(res.asStr(), rt, span);
     self.ins(`call void @fly_perform(i32 ${d}, i32 ${op}, ptr ${a}, ptr ${res})`);
@@ -2908,12 +2950,12 @@ impl Lgen {
     const b = self.cx.locals[r].ty.clone();
     // The continuation is kept, with the slot its machine keeps its frame in, for going on.
     const kt = self.temp(k, span);
-    const ks = self.storage(3 * self.ptr, self.ptr);
+    const ks = self.transient(3 * self.ptr, self.ptr);
     self.memcpy(ks.asStr(), kt.asStr(), 3 * self.ptr);
-    const slot = self.storage(self.ptr, self.ptr);
+    const slot = self.transient(self.ptr, self.ptr);
     self.store("ptr", "null", slot.asStr());
     const rr = self.rep(b, span);
-    const res: Option<String> = match (rr) { #Mem => #Some(self.storageOf(b, span)), _ => #None };
+    const res: Option<String> = match (rr) { #Mem => #Some(self.transientOf(b, span)), _ => #None };
     let x: Option<String> = #None;
     let z: Option<String> = #None;
     if (const #Some(a) = arg) {
@@ -3119,9 +3161,9 @@ impl Lgen {
     const rc = self.gep(f0.asStr(), handlerSize(self.ptr));
     self.store("i32", "1", rc.asStr());
     self.fillEnv(ap, f0.asStr(), base);
-    const hf = self.storage(self.ptr, self.ptr);
+    const hf = self.transient(self.ptr, self.ptr);
     self.store("ptr", f0.asStr(), hf.asStr());
-    const hs = self.storage(self.ptr, self.ptr);
+    const hs = self.transient(self.ptr, self.ptr);
     self.store("ptr", "null", hs.asStr());
     const dst = self.local(h.result);
     let site: usize = 0;

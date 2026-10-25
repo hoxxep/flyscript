@@ -127,6 +127,12 @@ type Ctx = {
   // the block's cleanups as code that may stop, and goes on to the block around it's.
   catches: bool;
   cunw: String;
+  // What only one point the machine stops at keeps — its wait record, its callee's slot, what is
+  // moved to it — is dead before the next begins, so every point's is in one union of the frame's
+  // (`t`): the fields of the point being made, which point that is, and the points made before.
+  trFields: String;
+  trGroup: usize;
+  trUnion: String;
 };
 
 function newCtx(locals: Vec<Local>, ret: Ty, mode: Mode): Ctx {
@@ -135,7 +141,7 @@ function newCtx(locals: Vec<Local>, ret: Ty, mode: Mode): Ctx {
     machine: false, frameType: String.new(), fields: String.new(), sites: 0, cases: String.new(), reenter: Vec.new(),
     yo: #None, yieldEffect: #None, resident: HashSet.new(), retC: String.new(), machineDrops: HashMap.new(), deferStore: HashMap.new(), arenas: HashMap.new(), ret: ret.clone(), fnRet: ret, capTys: Vec.new(), out: String.new(),
     hoisted: HashSet.new(), prologue: String.new(), live: HashSet.new(), reachable: true, liveAt: HashMap.new(), direct: false,
-    unwinds: false, landing: false, calls: false, hoist: HashSet.new(), envType: String.new(), pblocks: Vec.new(), punw: String.new(), pcases: Vec.new(), pread: HashSet.new(), declared: HashSet.new(), catches: false, cunw: String.new(),
+    unwinds: false, landing: false, calls: false, hoist: HashSet.new(), envType: String.new(), pblocks: Vec.new(), punw: String.new(), pcases: Vec.new(), pread: HashSet.new(), declared: HashSet.new(), catches: false, cunw: String.new(), trFields: String.new(), trGroup: 0, trUnion: String.new(),
   }
 }
 
@@ -1722,6 +1728,24 @@ impl Cgen {
     self.cx.resident.insert(l);
   }
 
+  // Storage of C type `ct` for the next point the machine may stop at alone: in the frame's union
+  // of what each point keeps, in a machine; otherwise a local at the function's top.
+  function transient(self: mut Self, ct: str): String {
+    if (!self.cx.machine) { return self.storage(ct); }
+    self.tmp += 1;
+    const n = `m${self.tmp}_`;
+    self.cx.trFields.push(`    ${ct} ${n};\n`);
+    `fr->t.g${self.cx.trGroup}.${n}`
+  }
+
+  // The point being made is done: what it kept is in the union, apart from the next point's.
+  function closeGroup(self: mut Self): void {
+    if (self.cx.trFields.len() == 0) { return; }
+    const f = replace(mut self.cx.trFields, String.new());
+    self.cx.trUnion.push(`    struct {\n${f}    } g${self.cx.trGroup};\n`);
+    self.cx.trGroup += 1;
+  }
+
   // Storage of C type `ct` for code at a point of the function being printed: a field of its
   // frame, in a machine, which keeps it across the points the machine stops at; otherwise a local
   // at the function's top.
@@ -1781,6 +1805,14 @@ impl Cgen {
     self.line(`d${k}: ;`);
   }
 
+  // A point, as `site` makes it, and what follows it before the next, which may read what the
+  // point kept; then the point is done.
+  function siteThen(self: mut Self, start: str, again: str, then: str): void {
+    self.site(start, again);
+    if (then.len() > 0) { self.line(then); }
+    self.closeGroup();
+  }
+
   // How a machine starts: its frame, from the slot its caller holds, taken from the frame arena as
   // it first starts; the handlers in force as it is called; and a jump to where it stopped.
   function machineStart(self: readonly Self, slot: str): String {
@@ -1794,7 +1826,9 @@ impl Cgen {
 
   // The frame's type, defined once its fields are known.
   function defineFrame(self: mut Self): void {
-    self.typeDefs.push(`typedef struct {\n  uint32_t state;\n${self.cx.fields}} ${self.cx.frameType};\n`);
+    self.closeGroup();
+    const t = if (self.cx.trUnion.len() > 0) { `  union {\n${self.cx.trUnion}  } t;\n` } else { String.new() };
+    self.typeDefs.push(`typedef struct {\n  uint32_t state;\n${self.cx.fields}${t}} ${self.cx.frameType};\n`);
   }
 
   // `Fail.capture(f)` in a machine: `f` may stop it, and is called again to go on.
@@ -1808,15 +1842,13 @@ impl Cgen {
     const etc = self.ctype(errTy, span);
     const take = self.takeErr("e_", errTy);
     const okInit = if (isVoidTy(t)) { "" } else { ", .u.Ok = v_" };
-    const fv = self.storage("fly_fn");
-    const slot = self.storage("void*");
-    const v = self.storage(tc.asStr());
+    const fv = self.transient("fly_fn");
+    const slot = self.transient("void*");
+    const v = self.transient(tc.asStr());
     const call = `((${tc} (*)(void*, void**, void*))${fv}.fn)(${fv}.env, &${slot}, NULL)`;
-    self.site(`${fv} = ${vs[0]}; ${slot} = NULL; ${v} = ${call};`, `${v} = ${call};`);
-    self.line(`if (${fv}.drop) ${fv}.drop(${fv}.env);`);
     const errTag = self.tagId("Err");
     const okTag = self.tagId("Ok");
-    self.line(`{ ${tc} v_ = ${v}; ${rc} r_; if (FLY_FAILED) { ${etc} e_; memset(&e_, 0, sizeof e_); ${take}r_ = (${rc}){ .tag = ${errTag}, .u.Err = e_ }; } else r_ = (${rc}){ .tag = ${okTag}${okInit} }; ${to}r_; }`);
+    self.siteThen(`${fv} = ${vs[0]}; ${slot} = NULL; ${v} = ${call};`, `${v} = ${call};`, `if (${fv}.drop) ${fv}.drop(${fv}.env); { ${tc} v_ = ${v}; ${rc} r_; if (FLY_FAILED) { ${etc} e_; memset(&e_, 0, sizeof e_); ${take}r_ = (${rc}){ .tag = ${errTag}, .u.Err = e_ }; } else r_ = (${rc}){ .tag = ${okTag}${okInit} }; ${to}r_; }`.asStr());
   }
 
   // `Io.scope(body)`: the body, a machine, runs under a panic's catch, called again to go on; then
@@ -1913,9 +1945,9 @@ impl Cgen {
         if (c.yields) { all.push(yo.clone()); again.push(yo.clone()); }
         if (machine) {
           // A machine keeps its frame in a slot of the caller's, and is called again to go on.
-          const slot = self.storage("void*");
+          const slot = self.transient("void*");
           const s0 = if (all.len() > 0) { ", " } else { "" };
-          self.site(`${slot} = NULL; ${to}${name}(&${slot}${s0}${all.join(", ")});`, `${to}${name}(&${slot}${s0}${again.join(", ")});`);
+          self.siteThen(`${slot} = NULL; ${to}${name}(&${slot}${s0}${all.join(", ")});`, `${to}${name}(&${slot}${s0}${again.join(", ")});`, "");
         } else {
           self.line(`${to}${name}(${all.join(", ")});`);
         }
@@ -1936,15 +1968,15 @@ impl Cgen {
             for (const [i, a] of c.args.iter().enumerate()) {
               if (const #Move(_) = a) {
                 const ct = self.ctype(c.argTys[i], span);
-                const st = self.storage(ct.asStr());
+                const st = self.transient(ct.asStr());
                 moved.push(`${st} = ${vs[i]}; `);
                 held[i] = st;
               }
             }
             const again = if (moved.len() > 0) { self.builtin(k.asStr(), c, held, arenas) } else { expr };
-            const w = self.storage("fly_wait");
+            const w = self.transient("fly_wait");
             const e = again.replaceAll(WAIT, `&${w}`.asStr());
-            self.site(`${w} = (fly_wait){ 0 }; ${moved}${to}${e};`, `${to}${e};`);
+            self.siteThen(`${w} = (fly_wait){ 0 }; ${moved}${to}${e};`, `${to}${e};`, "");
             if (!self.cx.machine) { self.line(`if (fly_pending) fly_panic("a wait where the code cannot stop");`); }
           } else if (machine && k == "Gen_next") {
             // Pulled again, a generator that stopped for something else goes on.
@@ -1963,12 +1995,12 @@ impl Cgen {
         for (const p of c.params) { ptypes.push(self.ctype(p, span)); }
         // Calling a `once` closure consumes it: it is dropped once called.
         if (machine) {
-          const fv = self.storage("fly_fn");
-          const slot = self.storage("void*");
+          const fv = self.transient("fly_fn");
+          const slot = self.transient("void*");
           const call0 = self.fnCall(fv.asStr(), rt.asStr(), ptypes, `&${slot}`.asStr(), yo.asStr(), vs);
           const call1 = self.fnCall(fv.asStr(), rt.asStr(), ptypes, `&${slot}`.asStr(), yo.asStr(), zeros);
-          self.site(`${fv} = ${fv0}; ${slot} = NULL; ${to}${call0};`, `${to}${call1};`);
-          if (isOnce) { self.line(`if (${fv}.drop) ${fv}.drop(${fv}.env);`); }
+          const then = if (isOnce) { `if (${fv}.drop) ${fv}.drop(${fv}.env);` } else { String.new() };
+          self.siteThen(`${fv} = ${fv0}; ${slot} = NULL; ${to}${call0};`, `${to}${call1};`, then.asStr());
         } else {
           const callExpr = self.fnCall("f_", rt.asStr(), ptypes, "(void*[1]){ NULL }", yo.asStr(), vs);
           const expr = if (isOnce) { `({ fly_fn f_ = ${fv0}; ${rt} c_ = ${callExpr}; if (f_.drop) f_.drop(f_.env); c_; })` } else { `({ fly_fn f_ = ${fv0}; ${callExpr}; })` };
@@ -3210,20 +3242,20 @@ impl Cgen {
     }
     // The arguments and the result are where the handler finds them after the body has stopped: in
     // the frame, in a machine.
-    const res = self.storage(rc.asStr());
+    const res = self.transient(rc.asStr());
     let start = String.new();
     let argsAt = "NULL".toString();
     if (tys.len() > 0) {
       const tc = self.ctype(#Tuple(tys), span);
       let inits: Vec<String> = Vec.new();
       for (const [i, v] of vs.iter().enumerate()) { inits.push(`.f${i} = ${v}`); }
-      const a = self.storage(tc.asStr());
+      const a = self.transient(tc.asStr());
       start.push(`${a} = (${tc}){ ${inits.join(", ")} }; `);
       argsAt = `&${a}`;
     }
     start.push(`${res} = (${rc}){ 0 }; fly_perform(${d}, ${op}, ${argsAt}, &${res});`);
-    self.site(start.asStr(), "");
-    if (!unitTy(rt)) { self.line(`${self.local(r)} = ${res};`); }
+    const then = if (!unitTy(rt)) { `${self.local(r)} = ${res};` } else { String.new() };
+    self.siteThen(start.asStr(), "", then.asStr());
     self.dynamicExit();
     // A direct handler's arm, run by the operation, may have failed.
     self.line(`if (fly_unwinding) goto ${self.target()}; if (FLY_FAILED) goto ${self.target()};`);
@@ -3236,19 +3268,19 @@ impl Cgen {
     const kv = self.operand(k, span);
     const dest = if (unitTy(b)) { "".toString() } else { `${self.local(r)} = ` };
     // The continuation is kept, with the slot its machine keeps its frame in, for going on.
-    const ks = self.storage("fly_cont");
-    const slot = self.storage("void*");
+    const ks = self.transient("fly_cont");
+    const slot = self.transient("void*");
     match (arg) {
       #None => {
         const call = `((${bc} (*)(void*, void**))${ks}.resume)(${ks}.frame, &${slot})`;
-        self.site(`${ks} = ${kv}; ${slot} = NULL; ${dest}${call};`, `${dest}${call};`);
+        self.siteThen(`${ks} = ${kv}; ${slot} = NULL; ${dest}${call};`, `${dest}${call};`, "");
       }
       #Some(a) => {
         const at = self.operandTy(a);
         const ac = self.ctype(at, span);
         const av = self.operand(a, span);
         const f = `((${bc} (*)(void*, void**, ${ac}))${ks}.resume)`;
-        self.site(`${ks} = ${kv}; ${slot} = NULL; ${dest}${f}(${ks}.frame, &${slot}, ${av});`, `${dest}${f}(${ks}.frame, &${slot}, (${ac}){ 0 });`);
+        self.siteThen(`${ks} = ${kv}; ${slot} = NULL; ${dest}${f}(${ks}.frame, &${slot}, ${av});`, `${dest}${f}(${ks}.frame, &${slot}, (${ac}){ 0 });`, "");
       }
     }
     self.dynamicExit();
@@ -3408,14 +3440,14 @@ impl Cgen {
     self.apartCode.push(resumes.asStr());
     // The `handle` itself.
     const store = if (unitTy(b)) { "".toString() } else { `${self.local(h.result)} = ` };
-    const hf = self.storage(`${frame}*`.asStr());
+    const hf = self.transient(`${frame}*`.asStr());
     const kept = if (h.kept) { ", .kept = true" } else { "" };
     const sep = if (inits.len() > 0) { ", " } else { "" };
     const init = `${hf} = fly_alloc(sizeof(${frame})); *${hf} = (${frame}){ .refs = 1, .h = { .effect = ${d}${kept} }${sep}${inits.join(", ")} };`;
     const setYo = match (yo) { #Some(y) => `${hf}->yo_ = ${y}; `, #None => String.new() };
     if (outer) {
-      const hs = self.storage("void*");
-      self.site(`${init} ${setYo}${hs} = NULL; ${store}hrun_${n}(&${hs}, ${hf});`, `${setYo}${store}hrun_${n}(&${hs}, ${hf});`);
+      const hs = self.transient("void*");
+      self.siteThen(`${init} ${setYo}${hs} = NULL; ${store}hrun_${n}(&${hs}, ${hf});`, `${setYo}${store}hrun_${n}(&${hs}, ${hf});`, "");
     } else {
       self.line(`${init} ${setYo}${store}hrun_${n}(${hf});`);
     }
