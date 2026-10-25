@@ -220,6 +220,15 @@ function cLayout(c: str, ptr: usize): Option<[usize, usize]> {
   }
 }
 
+// What LLVM is told of a parameter that is a borrow: nothing else reaches what a `mut` one points
+// at while the call runs, and nothing changes what a `readonly` one does, which the function only
+// reads. What a value holds in place cannot change while it is lent `readonly`: whatever can be
+// changed through a shared reference — a `Cell`, a `Mutex`, an atomic, a channel — is a pointer to
+// memory of its own, which a borrow of the value does not reach.
+function lentAttrs(t: readonly Ty): str {
+  match (t) { #Borrow(true, _) => " noalias", #Borrow(false, _) => " noalias readonly", _ => "" }
+}
+
 function primOf(t: readonly Ty): Option<Prim> {
   match (t) { #Prim(p) => #Some(p), #Borrow(_, inner) => primOf(inner), _ => #None }
 }
@@ -3640,6 +3649,7 @@ impl Lgen {
   function params(self: mut Self, f: readonly Func, out: mut Vec<String>, span: Span): void uses Fail<Diagnostic> {
     for (const [k, l] of f.params.iter().enumerate()) {
       const t = f.locals[l].ty.clone();
+      const told = lentAttrs(t);
       // A machine's parameter in its frame is given its value as the machine starts afresh, not as
       // it goes on.
       if (self.cx.resident.has(l)) {
@@ -3647,7 +3657,7 @@ impl Lgen {
           #Unit => {}
           #Scalar(s) => {
             const c = self.c.ctype(t, span);
-            out.push(`${s}${ext(c.asStr())} %p${k}`);
+            out.push(`${s}${ext(c.asStr())}${if (s == "ptr") { told } else { "" }} %p${k}`);
             self.cx.startCode.push(`  store ${s} %p${k}, ptr %fl${l}\n`);
           }
           #Mem => {
@@ -3663,7 +3673,7 @@ impl Lgen {
         #Scalar(s) => {
           // A scalar is kept in memory of its own, given its value as the function starts.
           const c = self.c.ctype(t, span);
-          out.push(`${s}${ext(c.asStr())} %p${k}`);
+          out.push(`${s}${ext(c.asStr())}${if (s == "ptr") { told } else { "" }} %p${k}`);
           const sh = self.shape(t, span);
           self.cx.allocas.push(`  %l${l} = alloca [${sh.size} x i8], align ${sh.align}\n  store ${s} %p${k}, ptr %l${l}\n`);
           self.cx.addrs.insert(l, `%l${l}`);

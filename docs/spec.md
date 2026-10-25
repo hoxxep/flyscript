@@ -1,6 +1,6 @@
 # Flyscript
 
-**Language specification, version 0.129**
+**Language specification, version 0.130**
 
 *Affine values, one row calculus, handlers for everything, and `comptime`: Church on the outside, Turing on the inside.*
 
@@ -20,7 +20,7 @@ The whole language rests on five laws. Every rule in this document is a conseque
 
 ### 0.1 Recent changes
 
-This is version 0.129. Its last revisions made a panic end the task it happens in rather than the program, proved it, and compiled every task, handler and generator to a state machine as small as a Rust future:
+This is version 0.130. Its last revisions made a panic end the task it happens in rather than the program, proved it, and compiled every task, handler and generator to a state machine as small as a Rust future:
 
 - **A panic unwinds its task** (0.114 to 0.117). It runs the task's cleanup, as a failure nothing catches would; a spawned task's panic ends that task alone, so a server survives a connection that hits a bug, and a `Mutex` whose holder panics is poisoned. A `Task` cancels one task and says how it ended, and `std/supervise` restarts what crashed. A stack that runs out is a panic of its task; a panic out of a destructor, or in cleanup that a panic is running, ends the program (§5.7, §6.1, §6.2, §12.3).
 - **The proof covers panics** (0.118 to 0.120): every box is dropped exactly once through a panic, a spawned task's panic ends it alone, and a `Mutex` it poisons keeps its state, under every schedule (§9.5).
@@ -39,6 +39,7 @@ This is version 0.129. Its last revisions made a panic end the task it happens i
 
 - **What a call is given is what it keeps** (0.128): a closure given to a function that only calls it, `once` or not, or bound to a name that is only called, does not escape, and is allocated in its caller's frame, as `with`, `Mutex.lock` and `Io.scope` are given theirs; and a generic call whose result is only a type parameter, where a `str` or a slice is expected, is instantiated as its arguments say, its result owned and lent (§3.6, §11.3).
 - **Deep values drop in bounded stack** (0.129): what a box, a `Vec` or an `Arc` holds of a type that may hold itself, where such drops nest deeply, is dropped after the rest of the value holding it, so dropping a list a million long takes the stack a few nodes do (§4.4).
+- **LLVM is told what borrows promise** (0.130): a `mut` parameter is `noalias`, a `readonly` one `noalias readonly` (§11.3).
 
 Every earlier change, with the reasoning behind it, is in [docs/history](history/).
 
@@ -1149,7 +1150,7 @@ Every property of a type that looks through its parts — `Copy`, `Send`, its cl
 
 ### 11.2 The compiler written in Flyscript
 
-The self-hosted compiler (`selfhost/`) lowers each checked function once, specialized for its type arguments, to a core IR of structured statements in which evaluation order, moves, drops and every way out of a block are explicit, and prints it three ways: as JavaScript, running effects as generators; as C, with handlers, generators and tasks as state machines; and as LLVM IR, whose integer arithmetic is LLVM's own, checked by its overflow intrinsics. The C and LLVM back ends share the runtime and its library routines, which LLVM inlines into the program. What compiled code reads of the running task — the failure being raised, whether it unwinds, its handlers — is the task's own context, which a function computes once a call: the same wherever the task goes on, so a task that waits goes on on whichever worker is free, and the runtime reaches every variable of a thread's afresh as it goes on. Still to come: abortive `Fail` as two-register returns, and emitting `noalias` and `readonly` from `mut` and `readonly`.
+The self-hosted compiler (`selfhost/`) lowers each checked function once, specialized for its type arguments, to a core IR of structured statements in which evaluation order, moves, drops and every way out of a block are explicit, and prints it three ways: as JavaScript, running effects as generators; as C, with handlers, generators and tasks as state machines; and as LLVM IR, whose integer arithmetic is LLVM's own, checked by its overflow intrinsics. The C and LLVM back ends share the runtime and its library routines, which LLVM inlines into the program. What compiled code reads of the running task — the failure being raised, whether it unwinds, its handlers — is the task's own context, which a function computes once a call: the same wherever the task goes on, so a task that waits goes on on whichever worker is free, and the runtime reaches every variable of a thread's afresh as it goes on. LLVM is told that what a `mut` parameter points at is reached through it alone while the call runs (`noalias`), and that what a `readonly` one points at does not change and is only read (`noalias readonly`): what a value holds in place cannot change while it is lent `readonly`, since whatever changes through a shared reference — a `Cell`, a `Mutex`, an atomic — is a pointer to memory of its own. Still to come: abortive `Fail` as two-register returns.
 
 ### 11.3 Performance contracts
 
