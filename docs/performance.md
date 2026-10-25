@@ -12,21 +12,21 @@ An Apple M5 Ultra with 30 cores and 96 GB, on macOS 27.0.1. Apple clang 21 at `-
 
 | Benchmark | Flyscript (C) | Flyscript (LLVM) | Flyscript (JS) | C | Rust | Go | JavaScript |
 | :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| binary-trees, depth 18 | 418 ms | 372 ms | 925 ms | 608 ms | 629 ms | 532 ms | 388 ms |
-| fannkuch-redux, 11 | 1432 ms | 1328 ms | 2814 ms | 1497 ms | 1550 ms | 1404 ms | 1734 ms |
-| n-body, 5 million steps | 137 ms | 126 ms | 488 ms | 134 ms | 139 ms | 144 ms | 218 ms |
-| spectral-norm, 3000 | 323 ms | 217 ms | 774 ms | 265 ms | 216 ms | 287 ms | 385 ms |
-| word frequencies, 3 million words | 96 ms | 99 ms | 765 ms | 162 ms | 84 ms | 111 ms | 587 ms |
+| binary-trees, depth 18 | 421 ms | 367 ms | 966 ms | 654 ms | 647 ms | 527 ms | 382 ms |
+| fannkuch-redux, 11 | 1414 ms | 1329 ms | 2771 ms | 1490 ms | 1512 ms | 1372 ms | 1718 ms |
+| n-body, 5 million steps | 135 ms | 126 ms | 489 ms | 130 ms | 133 ms | 144 ms | 219 ms |
+| spectral-norm, 3000 | 211 ms | 211 ms | 762 ms | 268 ms | 214 ms | 287 ms | 402 ms |
+| word frequencies, 3 million words | 84 ms | 85 ms | 742 ms | 159 ms | 83 ms | 112 ms | 580 ms |
 
 | Peak memory | Flyscript (C) | Flyscript (LLVM) | Flyscript (JS) | C | Rust | Go | JavaScript |
 | :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| binary-trees | 18.2 MB | 18.2 MB | 342 MB | 18.2 MB | 18.4 MB | 43.1 MB | 380 MB |
+| binary-trees | 18.2 MB | 18.2 MB | 362 MB | 18.2 MB | 18.4 MB | 42.4 MB | 392 MB |
 | fannkuch-redux | 2.2 MB | 2.2 MB | 49.5 MB | 2.1 MB | 2.2 MB | 5.0 MB | 46.1 MB |
 | n-body | 2.2 MB | 2.2 MB | 50.9 MB | 2.1 MB | 2.3 MB | 5.0 MB | 48.4 MB |
-| spectral-norm | 3.5 MB | 3.4 MB | 50.1 MB | 2.2 MB | 2.3 MB | 5.1 MB | 48.3 MB |
-| word frequencies | 24.5 MB | 24.4 MB | 531 MB | 24.4 MB | 22.9 MB | 92.5 MB | 421 MB |
+| spectral-norm | 3.5 MB | 3.4 MB | 49.8 MB | 2.2 MB | 2.3 MB | 5.1 MB | 48.2 MB |
+| word frequencies | 24.5 MB | 24.4 MB | 532 MB | 24.4 MB | 22.9 MB | 105 MB | 421 MB |
 
-Through LLVM, Flyscript runs faster than C on every program, and on spectral-norm, where Rust is fastest, in Rust's time, with no garbage collector: every value is freed where ownership says it dies. Natively a program allocates from the runtime's own allocator, which keeps blocks in classes of sizes and lets each thread allocate again what it freed without a lock; it is why binary-trees, which allocates and frees a node at a time, runs in less time than C's, which calls `malloc` and `free`. It does more than the C does: every integer operation is checked for overflow and every index for its bounds, and through LLVM spectral-norm's inner loop runs in Rust's time, checks and all. Through the C back end it takes a fifth longer than C's, though the C it makes has no call left in the loop, and telling the C compiler that borrows are `restrict`, as LLVM is told they are `noalias`, changes nothing.
+Natively, through C or LLVM, Flyscript runs faster than C on every program, and on spectral-norm and word frequencies, where Rust is fastest, in Rust's time, with no garbage collector: every value is freed where ownership says it dies. Natively a program allocates from the runtime's own allocator, which keeps blocks in classes of sizes and lets each thread allocate again what it freed without a lock; it is why binary-trees, which allocates and frees a node at a time, runs in less time than C's, which calls `malloc` and `free`. It does more than the C does: every integer operation is checked for overflow and every index for its bounds, checks and all at C's speed or better. A check leaves only a branch and one call where it is, so that a function with several stays small enough to inline, and small functions are offered to the C compiler and to LLVM to inline.
 
 On binary-trees Flyscript holds the memory C does. A node is an enum, `#Leaf | #Node(Box<Tree>, Box<Tree>)`, laid out as its two boxes, `#Leaf` the first one null, as Rust lays out `Option<Box<T>>` (§11.3): 16 bytes, as C's node of two pointers is. With a tag of its own beside them it took 24, which the allocator rounds to 32, and twice C's memory.
 
