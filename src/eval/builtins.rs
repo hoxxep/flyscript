@@ -1,6 +1,6 @@
 //! The native bodies of the standard library's declarations (`std/*.d.fly`).
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use super::generators::{self as gens_mod, GenKind};
@@ -1222,7 +1222,7 @@ impl Interp {
                     return self.raise(Value::tag("TimedOut", Value::Unit));
                 }
                 match w.profiles.get(&user).cloned() {
-                    Some(name) => Ok(Value::Record([("displayName".to_string(), Value::text(&name))].into_iter().collect::<BTreeMap<_, _>>().into())),
+                    Some(name) => Ok(Value::Record([("displayName".to_string(), Value::text(&name))].into_iter().collect::<Fields>().into())),
                     None => {
                         drop(w);
                         self.raise(Value::tag("NotFound", Value::Unit))
@@ -1237,7 +1237,7 @@ impl Interp {
                     return self.raise(Value::tag("TimedOut", Value::Unit));
                 }
                 let allowed = w.quotas.get(&token).copied().unwrap_or(false);
-                Ok(Value::Record([("allowed".to_string(), Value::Bool(allowed))].into_iter().collect::<BTreeMap<_, _>>().into()))
+                Ok(Value::Record([("allowed".to_string(), Value::Bool(allowed))].into_iter().collect::<Fields>().into()))
             }
             other => Err(panic(format!("no native implementation of `{other}` yet"))),
         }

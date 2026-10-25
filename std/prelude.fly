@@ -43,15 +43,16 @@ impl<comptime T: Type> Eq for T {
       #Int(_) | #Bool | #Str | #Void => self == other,
       // A total equality: `NaN` equals itself, and `-0.0` equals `0.0`, as `Hash` agrees.
       #Float(_) => self == other || self != self && other != other,
+      // The last part is compared last, as the result, so that comparing a chain along it is a loop.
       #Record(fields) | #Struct { fields } => {
-        comptime for (const f of fields) {
-          if (!self.[f.name].eq(other.[f.name])) { return false; }
+        comptime for (const [i, f] of fields.enumerate()) {
+          comptime if (i + 1 < fields.len()) { if (!self.[f.name].eq(other.[f.name])) { return false; } } else { return self.[f.name].eq(other.[f.name]); }
         }
         true
       }
       #Tuple(items) => {
         comptime for (const [i, _] of items.enumerate()) {
-          if (!self[i].eq(other[i])) { return false; }
+          comptime if (i + 1 < items.len()) { if (!self[i].eq(other[i])) { return false; } } else { return self[i].eq(other[i]); }
         }
         true
       }
@@ -124,17 +125,22 @@ impl<comptime T: Type> Ord for T {
         else if (self < other) { #Less } else if (self == other) { #Equal } else { #Greater }
       }
       #Void => #Equal,
+      // The last part is compared last, as the result, so that ordering a chain along it is a loop.
       #Record(fields) | #Struct { fields } => {
-        comptime for (const f of fields) {
-          const c = self.[f.name].cmp(other.[f.name]);
-          if (c != #Equal) { return c; }
+        comptime for (const [i, f] of fields.enumerate()) {
+          comptime if (i + 1 < fields.len()) {
+            const c = self.[f.name].cmp(other.[f.name]);
+            if (c != #Equal) { return c; }
+          } else { return self.[f.name].cmp(other.[f.name]); }
         }
         #Equal
       }
       #Tuple(items) => {
         comptime for (const [i, _] of items.enumerate()) {
-          const c = self[i].cmp(other[i]);
-          if (c != #Equal) { return c; }
+          comptime if (i + 1 < items.len()) {
+            const c = self[i].cmp(other[i]);
+            if (c != #Equal) { return c; }
+          } else { return self[i].cmp(other[i]); }
         }
         #Equal
       }

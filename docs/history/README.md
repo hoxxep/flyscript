@@ -57,6 +57,7 @@ Versions are pre-1.0 while the language is being designed. The specification was
 
 Each version from 0.55 says in a sentence what it changed, newest first, with the sections of the specification of its day.
 
+- **0.129** drops what a box, a `Vec` or an `Arc` holds of a type that may hold itself, where such drops nest deeply, after the rest of the value holding it, so a list or a tree of any depth drops in the stack a few nodes take (§4.4).
 - **0.128** allocates a closure given to a function that only calls it, `once` or not, in its caller's frame, and instantiates a generic call whose result is only a type parameter as its arguments say where a `str` or a slice is expected (§3.6, §11.3).
 - **0.127** adds `trailingZeros`, `leadingZeros` and `countOnes` to every integer type, `readU64Le` to byte slices and `String.fromUtf8Unchecked`, with which `std/io` finds a line's end and whether it is ASCII eight bytes at a time, in one pass ([std.md](../std.md)).
 - **0.126** keeps in a frame only what is live across a point it stops at, gives what each point keeps alone room every point shares, and nests the frame of a function called directly in its caller's unless the callee may call it again, so that a million tasks parked two calls deep take what a million parked Rust futures on tokio take (§11.3).

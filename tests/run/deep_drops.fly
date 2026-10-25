@@ -1,0 +1,51 @@
+// Dropping what holds itself takes the stack a few links take: of a list a million long, through
+// a box, a vector or an `Arc`, what is nested deeply is dropped after the rest. The derived `Eq`,
+// `Ord` and `Hash` take a value's last part last, as their result.
+// expect: equal true
+// expect: ordered #Less
+// expect: hashed true
+// expect: cloned true
+// expect: dropped a list
+// expect: dropped a tree
+// expect: dropped a shared list
+import { println } from "std/io";
+
+struct Node { value: i64; next: Option<Box<Node>> }
+impl Clone for Node;
+impl Eq for Node;
+impl Ord for Node;
+impl Hash for Node;
+
+struct Tree { kids: Vec<Tree> }
+
+struct Shared { next: Option<Arc<Shared>> }
+
+function chain(n: i64, last: i64): Node {
+  let head = Node { value: last, next: #None };
+  for (const i of 1..n) { head = Node { value: i, next: #Some(Box.new(head)) }; }
+  head
+}
+
+function hashOf(n: readonly Node): u64 {
+  let h = Hasher.new();
+  n.hash(mut h);
+  h.finish()
+}
+
+export function main(): void uses Io {
+  const a = chain(1000, 0);
+  println(`equal ${a == chain(1000, 0)}`);
+  println(`ordered ${a.cmp(chain(1000, 1))}`);
+  println(`hashed ${hashOf(a) == hashOf(chain(1000, 0))}`);
+  println(`cloned ${a.clone() == a}`);
+  { const gone = chain(1000000, 0); }
+  println("dropped a list");
+  let t = Tree { kids: Vec.new() };
+  for (const _ of 0..1000000) { t = Tree { kids: [t] }; }
+  { const gone = t; }
+  println("dropped a tree");
+  let s = Shared { next: #None };
+  for (const _ of 0..1000000) { s = Shared { next: #Some(Arc.new(s)) }; }
+  { const gone = s; }
+  println("dropped a shared list");
+}

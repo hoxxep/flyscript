@@ -378,6 +378,8 @@ export struct Cgen {
   tags: HashMap<String, usize>;
   // Drop functions made, by type key; their code.
   drops: HashMap<String, String>;
+  // By type: whether dropping a value of it may drop another of it (`holdsItself`).
+  selfHolding: HashMap<String, bool>;
   // Their forms taking `void*`, for the runtime.
   anyDrops: HashSet<String>;
   dropCode: String;
@@ -649,7 +651,13 @@ impl Cgen {
         } else if (self.lw.p.isKnown(d, "Arc")) {
           const inner = typeArg(t, 0);
           const d2 = if (self.needsDrop(inner)) { `${self.dropFn(inner, span)}(*v); ` } else { "" };
-          body.push(`  if (*v && fly_arc_release(*v)) { ${d2}fly_arc_free(*v); }\n  *v = NULL;\n`);
+          if (self.needsDrop(inner) && self.holdsItself(inner)) {
+            const ct = self.ctype(t, span);
+            const later = self.dropLater(name.asStr(), `${d2}fly_arc_free(*v);`.asStr(), ct.asStr());
+            body.push(`  if (*v && fly_arc_release(*v)) fly_drop_nested(${later}, *v, 0);\n  *v = NULL;\n`);
+          } else {
+            body.push(`  if (*v && fly_arc_release(*v)) { ${d2}fly_arc_free(*v); }\n  *v = NULL;\n`);
+          }
         } else if (self.namedIs(t, "Sender") || self.namedIs(t, "Reply")) {
           body.push("  fly_sender_drop(v);\n");
         } else if (self.namedIs(t, "Task")) {
@@ -670,6 +678,11 @@ impl Cgen {
             body.push(`  for (size_t i = 0; i < v->len; i++) ${f}(&((${ec}*)v->entries)[i]);\n`);
           }
           body.push("  fly_map_free(v);\n");
+        } else if (self.lw.p.isKnown(d, "Vec") && const #Some(#Ty(e)) = args.first() && self.needsDrop(e) && self.holdsItself(e)) {
+          const f = self.dropFn(e, span);
+          const ec = self.ctype(e, span);
+          const later = self.dropLater(name.asStr(), `for (size_t i = 0; i < n; i++) ${f}(&((${ec}*)p)[i]); free(p);`.asStr(), "");
+          body.push(`  if (v->ptr) fly_drop_nested(${later}, v->ptr, v->len);\n  *v = (fly_vec){ 0 };\n`);
         } else if (self.lw.p.isKnown(d, "Vec")) {
           if (const #Some(#Ty(e)) = args.first() && self.needsDrop(e)) {
             const f = self.dropFn(e, span);
@@ -677,6 +690,11 @@ impl Cgen {
             body.push(`  for (size_t i = 0; i < v->len; i++) ${f}(&((${ec}*)v->ptr)[i]);\n`);
           }
           body.push("  fly_vec_free(v);\n");
+        } else if (self.lw.p.isKnown(d, "Box") && const #Some(#Ty(e)) = args.first() && self.needsDrop(e) && self.holdsItself(e)) {
+          const f = self.dropFn(e, span);
+          const ec = self.ctype(e, span);
+          const later = self.dropLater(name.asStr(), `${f}((${ec}*)p); free(p);`.asStr(), "");
+          body.push(`  if (*v) fly_drop_nested(${later}, *v, 0);\n  *v = NULL;\n`);
         } else if (self.lw.p.isKnown(d, "Box")) {
           if (const #Some(#Ty(e)) = args.first() && self.needsDrop(e)) {
             const f = self.dropFn(e, span);
@@ -709,6 +727,60 @@ impl Cgen {
     }
     self.dropCode.push(`static void ${name}(${c}* v) {\n${body}}\n`);
     name
+  }
+
+  // What drop function `name` may leave the runtime to do later (`fly_drop_nested`): `code`, of the
+  // `n` values at `p`, or of `*v`, `p` as a `ct`, if `ct` is given.
+  function dropLater(self: mut Self, name: str, code: str, ct: str): String {
+    const later = `${name}_later`;
+    const bind = if (ct.len() > 0) { `${ct} q_ = p; ${ct}* v = &q_; ` } else { "" };
+    self.protos.push(`static void ${later}(void* p, size_t n);\n`);
+    self.dropCode.push(`static void ${later}(void* p, size_t n) { (void)n; ${bind}${code} }\n`);
+    later
+  }
+
+  // Whether dropping a value of type `t` may drop another value of `t`: through a box, a vector or
+  // an `Arc`, since no type holds itself in place.
+  function holdsItself(self: mut Self, t: readonly Ty): bool {
+    const key = ckey(t);
+    if (const #Some(b) = self.selfHolding.get(key.asStr())) { return b; }
+    let seen: HashSet<String> = HashSet.new();
+    let todo: Vec<Ty> = self.droppedParts(t);
+    let found = false;
+    while (const #Some(x) = todo.pop()) {
+      const k = ckey(x);
+      if (k == key) { found = true; break; }
+      if (!seen.insert(k)) { continue; }
+      for (const y of self.droppedParts(x)) { todo.push(y.clone()); }
+    }
+    self.selfHolding.insert(key, found);
+    found
+  }
+
+  // The parts of a value of `t` that dropping it drops.
+  function droppedParts(self: readonly Self, t: readonly Ty): Vec<Ty> {
+    let out: Vec<Ty> = Vec.new();
+    match (t) {
+      #Named(d, args) => {
+        if (self.lw.p.isKnown(d, "Box") || self.lw.p.isKnown(d, "Vec") || self.lw.p.isKnown(d, "Arc") || self.namedIs(t, "Mutex")) {
+          for (const a of args) { if (const #Ty(x) = a) { out.push(x.clone()); } }
+        } else if (self.namedIs(t, "HashMap")) {
+          out.push(entryTy(t));
+        } else if (!self.lw.p.isKnown(d, "String") && !self.lw.p.isKnown(d, "Cont") && !self.namedIs(t, "Gen")) {
+          match (self.lw.p.defs[d].kind) {
+            #Enum { tags: _ } => { for (const [_, pt] of self.lw.tagsOf(t)) { if (!isVoidTy(pt)) { out.push(self.lw.payloadTy(pt)); } } }
+            #Struct { fields: _ } => { for (const [_, x] of self.lw.fieldsOf(t)) { out.push(x.clone()); } }
+            _ => {}
+          }
+        }
+      }
+      #Record(_) | #Tuple(_) => { for (const [_, x] of self.lw.fieldsOf(t)) { out.push(x.clone()); } }
+      #Union(_) => { for (const [_, pt] of self.lw.tagsOf(t)) { if (!isVoidTy(pt)) { out.push(self.lw.payloadTy(pt)); } } }
+      #Array(e, _) => out.push(e.get().clone()),
+      _ => {}
+    }
+    out.retain((x) => self.needsDrop(x));
+    out
   }
 
   // The drop function of `t` for the runtime, which knows a value only by its address: called
@@ -4077,7 +4149,7 @@ impl Cgen {
 export function newCgen(p: Prog): Cgen {
   Cgen {
     lw: newLower(p), closuresDone: 0, types: HashMap.new(), defined: HashSet.new(), pending: Vec.new(), typeFwd: String.new(),
-    typeDefs: String.new(), tags: HashMap.new(), drops: HashMap.new(), anyDrops: HashSet.new(), dropCode: String.new(), convs: HashMap.new(),
+    typeDefs: String.new(), tags: HashMap.new(), drops: HashMap.new(), selfHolding: HashMap.new(), anyDrops: HashSet.new(), dropCode: String.new(), convs: HashMap.new(),
     helpers: HashMap.new(), consts: HashMap.new(), protos: String.new(), fnCode: Vec.new(), lowered: 0, apartCode: String.new(), aparts: 0,
     tmp: 0, freestanding: false, callees: HashMap.new(), indirect: HashSet.new(), machines: HashSet.new(), frames: HashMap.new(), frameOrder: Vec.new(), nests: Vec.new(), cx: newCtx(Vec.new(), #Prim(#Void), #Fn), module: 0, defers: HashMap.new(), fnName: String.new(),
     argPlaces: Vec.new(), glue: String.new(),

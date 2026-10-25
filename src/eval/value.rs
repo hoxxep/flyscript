@@ -117,9 +117,9 @@ pub enum Value {
     // Compound values are shared and copied on write: a tree-walking interpreter copies values
     // wherever ownership moves or lends them, and a deep copy there made it quadratic.
     Tuple(Arc<Vec<Value>>),
-    Record(Arc<BTreeMap<String, Value>>),
+    Record(Arc<Fields>),
     /// A tag and its payload (`Unit`, a `Tuple` or a `Record`).
-    Tag(Arc<str>, Box<Value>),
+    Tag(Arc<str>, Payload),
     /// Arrays, `Vec`s and slices.
     List(Arc<Vec<Value>>),
     /// A `HashMap`: its entries in insertion order, found by hash.
@@ -138,6 +138,103 @@ pub enum Value {
     Native(&'static str, u64),
 }
 
+// Every value that holds itself does so through a record or a tag, so these two drop what they
+// hold by the outermost drop under way on the thread, one value at a time, rather than inside
+// their own drop: a list a million long is dropped in as much stack as one link, as compiled code
+// drops it (`fly_drop_later`).
+thread_local! {
+    static DRAINING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static PENDING: std::cell::RefCell<Vec<Value>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+fn drop_later(v: Value) {
+    if !matches!(v, Value::Tuple(_) | Value::Record(_) | Value::Tag(_, _) | Value::List(_) | Value::Map(_)) {
+        return;
+    }
+    if DRAINING.with(|d| d.get()) {
+        PENDING.with(|p| p.borrow_mut().push(v));
+        return;
+    }
+    DRAINING.with(|d| d.set(true));
+    drop(v);
+    while let Some(v) = PENDING.with(|p| p.borrow_mut().pop()) {
+        drop(v);
+    }
+    DRAINING.with(|d| d.set(false));
+}
+
+/// A record's fields, by name.
+#[derive(Clone, Default)]
+pub struct Fields(pub BTreeMap<String, Value>);
+
+impl Fields {
+    pub fn into_map(mut self) -> BTreeMap<String, Value> {
+        std::mem::take(&mut self.0)
+    }
+}
+
+impl FromIterator<(String, Value)> for Fields {
+    fn from_iter<I: IntoIterator<Item = (String, Value)>>(i: I) -> Fields {
+        Fields(i.into_iter().collect())
+    }
+}
+
+impl From<BTreeMap<String, Value>> for Fields {
+    fn from(m: BTreeMap<String, Value>) -> Fields {
+        Fields(m)
+    }
+}
+
+impl std::ops::Deref for Fields {
+    type Target = BTreeMap<String, Value>;
+    fn deref(&self) -> &BTreeMap<String, Value> {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for Fields {
+    fn deref_mut(&mut self) -> &mut BTreeMap<String, Value> {
+        &mut self.0
+    }
+}
+
+impl Drop for Fields {
+    fn drop(&mut self) {
+        for v in std::mem::take(&mut self.0).into_values() {
+            drop_later(v);
+        }
+    }
+}
+
+/// A tag's payload.
+#[derive(Clone)]
+pub struct Payload(pub Box<Value>);
+
+impl Payload {
+    pub fn take(&mut self) -> Value {
+        std::mem::replace(&mut *self.0, Value::Unit)
+    }
+}
+
+impl std::ops::Deref for Payload {
+    type Target = Value;
+    fn deref(&self) -> &Value {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for Payload {
+    fn deref_mut(&mut self) -> &mut Value {
+        &mut self.0
+    }
+}
+
+impl Drop for Payload {
+    fn drop(&mut self) {
+        drop_later(self.take());
+    }
+}
+
 impl fmt::Debug for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.show())
@@ -146,7 +243,7 @@ impl fmt::Debug for Value {
 
 impl Value {
     pub fn tag(name: &str, payload: Value) -> Value {
-        Value::Tag(Arc::from(name), Box::new(payload))
+        Value::Tag(Arc::from(name), Payload(Box::new(payload)))
     }
 
     pub fn text(s: &str) -> Value {

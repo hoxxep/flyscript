@@ -357,6 +357,36 @@ void fly_vec_insert(fly_vec* v, size_t i, const void* elem, size_t size);
 void fly_vec_remove(fly_vec* v, size_t i, void* out, size_t size);
 void fly_vec_truncate_raw(fly_vec* v, size_t n);
 void fly_vec_free(fly_vec* v);
+// What a box, a vector or an `Arc` of a type that may hold itself owns, `n` of them at `p`, which
+// `f` drops and frees: dropped at once while the stack has room, and once it has less than
+// `FLY_DROP_ROOM` left, by the outermost such drop under way on the thread, once done with its
+// own, so that a list or a tree of any depth drops without running out of stack. A counter of the
+// nesting would decide the same in an order the stack does not, but costs binary trees 6%. In
+// WebAssembly the stack calls run out of is the engine's, which no address shows, so there it is
+// the counter, `FLY_DROP_DEPTH` deep.
+void fly_drop_later(void (*f)(void*, size_t), void* p, size_t n);
+#ifdef __wasm__
+#define FLY_DROP_DEPTH 32
+extern unsigned fly_drop_depth;
+static inline __attribute__((always_inline)) void fly_drop_nested(void (*f)(void*, size_t), void* p, size_t n) {
+  if (__builtin_expect(fly_drop_depth < FLY_DROP_DEPTH, 1)) {
+    fly_drop_depth++;
+    f(p, n);
+    fly_drop_depth--;
+  } else {
+    fly_drop_later(f, p, n);
+  }
+}
+#else
+#define FLY_DROP_ROOM (1u << 20)
+static inline __attribute__((always_inline)) void fly_drop_nested(void (*f)(void*, size_t), void* p, size_t n) {
+  if (__builtin_expect((uintptr_t)__builtin_frame_address(0) > fly_cx()->limit + FLY_DROP_ROOM, 1)) {
+    f(p, n);
+  } else {
+    fly_drop_later(f, p, n);
+  }
+}
+#endif
 fly_slice fly_vec_slice(const fly_vec* v);
 void* fly_slice_at(fly_slice s, size_t i, size_t size);
 fly_slice fly_slice_range(fly_slice s, size_t lo, size_t hi, size_t size);

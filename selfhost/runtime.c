@@ -1466,6 +1466,51 @@ void fly_vec_free(fly_vec* v) {
   *v = (fly_vec){ 0 };
 }
 
+// A drop never stops its task, so what is left for later is the thread's. A destructor does not
+// unwind (§5.7), so nothing leaves the loop but its end.
+typedef struct { void (*f)(void*, size_t); void* p; size_t n; } fly_later;
+typedef struct { fly_later* at; size_t len, cap; bool on; } fly_laters;
+FLY_THREAD_VAR(fly_laters, laters, { 0 })
+
+#ifdef __wasm__
+unsigned fly_drop_depth;
+#endif
+
+// The drops left for later are run one at a time, low on the stack, each leaving what it holds for
+// later in turn: in WebAssembly, nesting its own drops afresh.
+void fly_drop_later(void (*f)(void*, size_t), void* p, size_t n) {
+  fly_laters* l = laters_ref();
+  if (l->on) {
+    if (l->len == l->cap) {
+      size_t cap = l->cap ? l->cap * 2 : 16;
+      fly_later* at = realloc(l->at, cap * sizeof(fly_later));
+      if (!at) fly_out_of_memory();
+      l->at = at;
+      l->cap = cap;
+    }
+    l->at[l->len++] = (fly_later){ f, p, n };
+    return;
+  }
+  l->on = true;
+#ifdef __wasm__
+  unsigned depth = fly_drop_depth;
+  fly_drop_depth = 0;
+#endif
+  f(p, n);
+  while (l->len > 0) {
+    fly_later x = l->at[--l->len];
+#ifdef __wasm__
+    fly_drop_depth = 0;
+#endif
+    x.f(x.p, x.n);
+  }
+#ifdef __wasm__
+  fly_drop_depth = depth;
+#endif
+  free(l->at);
+  *l = (fly_laters){ 0 };
+}
+
 fly_slice fly_vec_slice(const fly_vec* v) { return (fly_slice){ v->ptr, v->len }; }
 
 void* fly_slice_at(fly_slice s, size_t i, size_t size) {

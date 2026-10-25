@@ -5,7 +5,7 @@
 //! no stack capture. Continuations that must be stored — a `Gen` pulled with `next()` — run the
 //! generator on its own thread, handing control back and forth (see `gen`).
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -476,7 +476,7 @@ impl Interp {
         let now = self.sched.now();
         let mut w = self.world.lock().expect("world");
         Ok(match op {
-            "now" => Value::Record([("nanos".to_string(), Value::Int(now as i128))].into_iter().collect::<BTreeMap<_, _>>().into()),
+            "now" => Value::Record([("nanos".to_string(), Value::Int(now as i128))].into_iter().collect::<Fields>().into()),
             "write" => {
                 let fd = fd_of(args.first());
                 let bytes: Vec<u8> = match args.get(1).map(|b| b.deref()) {
@@ -607,7 +607,7 @@ impl Interp {
                         ("status".to_string(), Value::Int(status as i128)),
                         ("out".to_string(), Value::text(&out)),
                         ("err".to_string(), Value::text(&err)),
-                    ].into_iter().collect::<BTreeMap<_, _>>().into())].into())),
+                    ].into_iter().collect::<Fields>().into())].into())),
                     Err(e) => Value::tag("Err", Value::Tuple(vec![Value::tag(e, Value::Unit)].into())),
                 }
             }
@@ -922,14 +922,14 @@ impl Interp {
                         self.bind(&ps[0], &part(&place, Seg::Payload, (*payload).clone()), None, env)
                     }
                     TagPatArgs::Tuple(ps) => {
-                        let Value::Tuple(items) = *payload else { return false };
+                        let Value::Tuple(items) = &*payload else { return false };
                         ps.iter().enumerate().all(|(i, p)| {
                             let pv = part(&place, Seg::Index(i), items[i].clone());
                             self.bind(p, &pv, None, env)
                         })
                     }
                     TagPatArgs::Record(fields) => {
-                        let Value::Record(fs) = *payload else { return false };
+                        let Value::Record(fs) = &*payload else { return false };
                         fields.iter().all(|(fname, p)| {
                             let fv = part(&place, Seg::Field(fname.name.clone()), fs.get(&fname.name).cloned().unwrap_or(Value::Unit));
                             match p {
@@ -1352,7 +1352,7 @@ impl Interp {
             let want = labels.as_ref().and_then(|ls| ls.get(&f.name.name)).cloned();
             out.insert(f.name.name.clone(), self.held(v, want));
         }
-        Ok(Value::Record(out.into()))
+        Ok(Value::Record(Arc::new(Fields(out))))
     }
 
     /// A value as a literal holds it, as a field of type `want`: a borrow of a `Copy` value where
@@ -1902,7 +1902,7 @@ fn fd_of(v: Option<&Value>) -> u32 {
 }
 
 fn fd_value(n: u32) -> Value {
-    Value::Record([("n".to_string(), Value::Int(n as i128))].into_iter().collect::<BTreeMap<_, _>>().into())
+    Value::Record([("n".to_string(), Value::Int(n as i128))].into_iter().collect::<Fields>().into())
 }
 
 /// What is at a path, as `Io.stat` gives it.
@@ -1911,7 +1911,7 @@ fn stat_value(size: u64, dir: bool, modified: i128) -> Value {
         ("size".to_string(), Value::Int(size as i128)),
         ("dir".to_string(), Value::Bool(dir)),
         ("modified".to_string(), Value::Int(modified)),
-    ].into_iter().collect::<BTreeMap<_, _>>().into())
+    ].into_iter().collect::<Fields>().into())
 }
 
 fn io_err(e: &std::io::Error) -> &'static str {

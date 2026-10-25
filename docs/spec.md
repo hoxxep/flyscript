@@ -1,6 +1,6 @@
 # Flyscript
 
-**Language specification, version 0.128**
+**Language specification, version 0.129**
 
 *Affine values, one row calculus, handlers for everything, and `comptime`: Church on the outside, Turing on the inside.*
 
@@ -20,7 +20,7 @@ The whole language rests on five laws. Every rule in this document is a conseque
 
 ### 0.1 Recent changes
 
-This is version 0.128. Its last revisions made a panic end the task it happens in rather than the program, proved it, and compiled every task, handler and generator to a state machine as small as a Rust future:
+This is version 0.129. Its last revisions made a panic end the task it happens in rather than the program, proved it, and compiled every task, handler and generator to a state machine as small as a Rust future:
 
 - **A panic unwinds its task** (0.114 to 0.117). It runs the task's cleanup, as a failure nothing catches would; a spawned task's panic ends that task alone, so a server survives a connection that hits a bug, and a `Mutex` whose holder panics is poisoned. A `Task` cancels one task and says how it ended, and `std/supervise` restarts what crashed. A stack that runs out is a panic of its task; a panic out of a destructor, or in cleanup that a panic is running, ends the program (§5.7, §6.1, §6.2, §12.3).
 - **The proof covers panics** (0.118 to 0.120): every box is dropped exactly once through a panic, a spawned task's panic ends it alone, and a `Mutex` it poisons keeps its state, under every schedule (§9.5).
@@ -38,6 +38,7 @@ This is version 0.128. Its last revisions made a panic end the task it happens i
 - **Words of bits** (0.127): an integer counts its trailing and leading zeros and its ones, a byte slice reads eight of its bytes as one `u64`, and `String.fromUtf8Unchecked` takes bytes known to be UTF-8 as text, performing `Unsafe` ([std.md](std.md)); `std/io` reads a line eight bytes at a time with them.
 
 - **What a call is given is what it keeps** (0.128): a closure given to a function that only calls it, `once` or not, or bound to a name that is only called, does not escape, and is allocated in its caller's frame, as `with`, `Mutex.lock` and `Io.scope` are given theirs; and a generic call whose result is only a type parameter, where a `str` or a slice is expected, is instantiated as its arguments say, its result owned and lent (§3.6, §11.3).
+- **Deep values drop in bounded stack** (0.129): what a box, a `Vec` or an `Arc` holds of a type that may hold itself, where such drops nest deeply, is dropped after the rest of the value holding it, so dropping a list a million long takes the stack a few nodes do (§4.4).
 
 Every earlier change, with the reasoning behind it, is in [docs/history](history/).
 
@@ -392,7 +393,7 @@ The compiler derives three marker interfaces from structure:
 
 - **`Copy`**: bitwise copyable; no field owns a resource and the type has no `Drop`.
 - **`Send`**: may move to another task, and `readonly T` may be shared with other tasks. `T` is `Send` when it is class 1 and owns no raw pointer or runtime handle (`Cont`, `Fiber`, `Scope`, and so `Gen`, which holds a `Cont`); a type parameter is `Send` when declared `extends Send`. Every function value is `Send`, since an escaping closure owns only `Send` values (§4.3); a closure that holds a borrow carries it as a loan, which a task cannot take (§6.1). Law 2 is what makes one marker enough: every mutation through a shared reference is an effect, and while tasks run no fiber may perform the effect that writes to an outer region (§6.1), so whatever a task can see through a `readonly` value or a `Ref` cannot change.
-- **`Drop`**: user-implemented on nominal types; destructors run in reverse order of construction.
+- **`Drop`**: user-implemented on nominal types; destructors run in reverse order of construction. A value's destructor runs before its parts are dropped. What a box, a `Vec` or an `Arc` holds of a type that may hold itself is dropped in its place, or, where such drops nest deeply, once the rest of the value holding it has been: so a list or a tree of any depth is dropped in the stack a few of its nodes take, where a drop that recursed once per node would overflow it.
 
 ### 4.5 Pointers
 

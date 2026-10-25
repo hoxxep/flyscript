@@ -115,7 +115,7 @@ impl Interp {
                     (DefKind::Enum { tags }, Value::Tag(t, payload)) => {
                         if let Some(pt) = tags.get(&*t) {
                             let pt = subst_params(pt, &self.prog.defs[*d].params, args);
-                            self.drop_payload(*payload, &pt)?;
+                            self.drop_payload((*payload).clone(), &pt)?;
                         }
                     }
                     _ => {
@@ -150,7 +150,7 @@ impl Interp {
             Ty::Union(r) => {
                 if let Value::Tag(t, payload) = v.deref()
                     && let Some(pt) = r.labels.get(&*t) {
-                        return self.drop_payload(*payload, pt);
+                        return self.drop_payload((*payload).clone(), pt);
                     }
                 Ok(())
             }
