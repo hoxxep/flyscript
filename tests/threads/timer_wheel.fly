@@ -1,0 +1,64 @@
+// expect: 3000 sleeps, none early, none late
+// expect: 2000 sleepers cancelled, none woke
+// expect: the long sleeps woke in order
+// Sleeps across every level the timer wheel reaches in a few seconds — under 64 ms, under 4 s, and
+// past it, from 0 to 4.5 s — each wakes once it is due and soon after; sleeps cut short by
+// cancellation leave the wheel, and wake no one later; and sleeps put in at different times wake in
+// the order they are due, as the wheel takes its slots up and moves what they hold down a level.
+import { println } from "std/io";
+import { Mutex, Atomic } from "std/sync";
+
+function next(seed: mut u64): u64 {
+  seed = seed.wrappingMul(6364136223846793005).wrappingAdd(1442695040888963407);
+  seed >> 33
+}
+
+export function main(): void uses Io {
+  // Each sleeps a pseudo-random time; whether it woke before that, or long after.
+  const early = Atomic.new(0 as i64);
+  const late = Atomic.new(0 as i64);
+  let seed: u64 = 24301;
+  Io.scope((s) => {
+    for (const i of 0..3000) {
+      const ms = if (i % 100 == 0) { 4000 + next(mut seed) % 500 } else if (i % 10 == 0) { 64 + next(mut seed) % 2000 } else { next(mut seed) % 64 };
+      s.spawn(() => {
+        const before = Io.now();
+        Io.sleep(Duration.ms(ms));
+        const took = Io.now().since(before).toMs();
+        if (took < ms) { early.fetchAdd(1); }
+        if (took > ms + 1000) { late.fetchAdd(1); }
+      });
+    }
+  });
+  println(`3000 sleeps, ${if (early.load() == 0) { "none early" } else { "some early" }}, ${if (late.load() == 0) { "none late" } else { "some late" }}`);
+
+  // Sleepers cancelled: none wakes later.
+  const woke = Atomic.new(0 as i64);
+  Io.scope((s) => {
+    let ts: Vec<Task> = Vec.new();
+    for (const _ of 0..2000) {
+      ts.push(s.spawn(() => {
+        Io.sleep(Duration.ms(60000));
+        woke.fetchAdd(1);
+      }));
+    }
+    Io.sleep(Duration.ms(20));
+    for (const t of ts) { t.cancel(); }
+  });
+  Io.sleep(Duration.ms(50));
+  println(`2000 sleepers cancelled, ${if (woke.load() == 0) { "none woke" } else { "some woke" }}`);
+
+  // Long sleeps put in at different times wake in the order they are due.
+  const order = Mutex.new(Vec.new() as Vec<u64>);
+  Io.scope((s) => {
+    for (const k of 0..6) {
+      s.spawn(() => {
+        Io.sleep(Duration.ms(k * 30));
+        Io.sleep(Duration.ms(1500 - k * 60));
+        order.lock((v) => { v.push(k as u64); });
+      });
+    }
+  });
+  const got = order.lock((v) => v.clone());
+  println(`the long sleeps woke ${if (got == [5, 4, 3, 2, 1, 0]) { "in order" } else { "out of order" }}`);
+}

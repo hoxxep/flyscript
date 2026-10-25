@@ -115,12 +115,14 @@ typedef struct fly_unw fly_unw;
 // in use again should it be freed while in use, as a panic unwinds out of it.
 typedef struct fly_frame_chunk fly_frame_chunk;
 typedef struct fly_frames fly_frames;
-struct fly_frames { char* top; char* end; fly_frame_chunk* chunk; fly_frames* outer; fly_frame_chunk* spare; };
+struct fly_frames { char* top; char* end; fly_frame_chunk* chunk; fly_frames* outer; };
 // `pend` says why code returned suspended (FLY_PEND_*), and for whom; `frames` is the arena calls
 // take frames from.
 // `panicking` says that the code unwinds by its flag for a panic, which a machine with cleanup
 // that may wait took up from the native unwinding (§5.7), and which a catch point takes up in turn.
-typedef struct fly_ctx { void* err; bool unwinding; uint8_t pend; fly_handler* handlers; fly_unw* unw; char* panic; uintptr_t limit; int destroying; fly_handler* pend_h; fly_frames* frames; bool panicking; } fly_ctx;
+// `spare` is a frame chunk the code has emptied, kept for the next it needs, until it stops.
+typedef struct fly_ctx { void* err; bool unwinding; uint8_t pend; fly_handler* handlers; fly_unw* unw; char* panic; uintptr_t limit; int destroying; fly_handler* pend_h; fly_frames* frames; bool panicking; fly_frame_chunk* spare; } fly_ctx;
+void fly_spare_free(fly_ctx* cx);
 #ifdef FLY_THREADS
 // The context of the task running. Within one call of a function it is always the same, wherever
 // the task goes on, so it is `const`: a compiler may compute it once a call. It is computed afresh
@@ -566,7 +568,6 @@ void* fly_frame_take(void** slot, size_t size);
 void fly_frame_end(void** slot, void* frame);
 void fly_frames_free(fly_frames* a);
 // The chunk an arena keeps for its next, given back: as a task stops.
-void fly_frames_trim(fly_frames* a);
 // Where the arena in use is, kept as a catch point is entered, and given back as it takes up a
 // panic, the frames the panic left behind with it.
 typedef struct { fly_frames* frames; char* top; } fly_frames_mark;

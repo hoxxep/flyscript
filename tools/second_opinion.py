@@ -14,7 +14,7 @@ feedback builds on itself.
 
 Configuration: FLYSCRIPT_VERTEX_PROJECT (default: gcloud's core/project),
 FLYSCRIPT_VERTEX_LOCATION (default: global), FLYSCRIPT_REVIEW_MODEL (default: gemini-4-argon).
-Credentials come from `gcloud auth application-default print-access-token`.
+Credentials are those of the account gcloud is logged in as (`gcloud auth print-access-token`).
 """
 
 from __future__ import annotations
@@ -64,11 +64,11 @@ def project() -> str:
 
 
 def token() -> str:
-    out = subprocess.run(
-        ["gcloud", "auth", "application-default", "print-access-token"], capture_output=True, text=True
-    )
+    # The account gcloud is logged in as, whose roles are the ones managed: the application-default
+    # credentials can be another account's, without access to the model.
+    out = subprocess.run(["gcloud", "auth", "print-access-token"], capture_output=True, text=True)
     if out.returncode != 0:
-        sys.exit("gcloud credentials expired: run `gcloud auth application-default login`\n" + out.stderr)
+        sys.exit("gcloud credentials expired: run `gcloud auth login`\n" + out.stderr)
     return out.stdout.strip()
 
 

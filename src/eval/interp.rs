@@ -1802,7 +1802,7 @@ fn cast(v: &Value, ty: &ast::Type) -> Value {
     let name = segments[0].name.as_str();
     match name {
         "f32" | "f64" => Value::Float(v.as_float()),
-        _ => {
+        "u8" | "u16" | "u32" | "u64" | "u128" | "usize" | "i8" | "i16" | "i32" | "i64" | "i128" | "isize" => {
             let i = match v {
                 Value::Float(f) => *f as i128,
                 other => other.as_int(),
@@ -1819,6 +1819,8 @@ fn cast(v: &Value, ty: &ast::Type) -> Value {
                 _ => i,
             })
         }
+        // Anything else is cast only to its own type (`Vec.new() as Vec<u64>`): it is itself.
+        _ => v.clone(),
     }
 }
 

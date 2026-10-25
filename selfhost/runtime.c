@@ -1880,19 +1880,21 @@ void fly_cont_drop(fly_cont* k) {
 // A chunk of a frame arena: frames are taken from its end, and a chunk too small for the next is
 // followed by another, twice as large, up to FRAME_CHUNK, or as large as the frame. The first is
 // as large as the first frame, so a task whose frames nest in its root's takes no more than it
-// needs. A chunk emptied is kept, the largest one, for the next that would be made, so a call that
-// goes past a chunk's end and returns again and again takes nothing from the allocator; a task
-// that stops gives it back (`fly_frames_trim`), so a task parked holds only the frames it is in.
+// needs. A chunk emptied is kept, the largest one, by the context the code runs in, for the next
+// that would be made, so a call that goes past a chunk's end and returns again and again takes
+// nothing from the allocator; it is freed as the task stops (`fly_spare_free`), so a task parked
+// holds only the frames it is in, and no task is given another's.
 struct fly_frame_chunk { fly_frame_chunk* prev; char* end; _Alignas(16) char data[]; };
 enum { FRAME_CHUNK = 16384 };
 
 static size_t chunk_room(const fly_frame_chunk* c) { return (size_t)(c->end - c->data); }
 
-// Chunk `c`, emptied, kept if it is the largest emptied yet.
-static void chunk_spare(fly_frames* a, fly_frame_chunk* c) {
-  if (a->spare && chunk_room(a->spare) >= chunk_room(c)) { free(c); return; }
-  if (a->spare) free(a->spare);
-  a->spare = c;
+// Chunk `c`, emptied, kept by the running context if it is the largest it has emptied yet.
+static void chunk_spare(fly_frame_chunk* c) {
+  fly_ctx* cx = fly_cx_now();
+  if (cx->spare && chunk_room(cx->spare) >= chunk_room(c)) { free(c); return; }
+  if (cx->spare) free(cx->spare);
+  cx->spare = c;
 }
 
 void* fly_frame_push(size_t size) {
@@ -1904,9 +1906,9 @@ void* fly_frame_push(size_t size) {
     size_t n = a->chunk ? 2 * chunk_room(a->chunk) : size;
     if (n > FRAME_CHUNK) n = FRAME_CHUNK;
     if (n < size) n = size;
-    fly_frame_chunk* c = a->spare;
+    fly_frame_chunk* c = cx->spare;
     if (c && chunk_room(c) >= size) {
-      a->spare = NULL;
+      cx->spare = NULL;
     } else {
       c = fly_alloc(sizeof(fly_frame_chunk) + n);
       c->end = c->data + n;
@@ -1939,7 +1941,7 @@ static void frames_cut(fly_frames* a, char* p) {
   while (a->chunk && !(p >= a->chunk->data && p <= a->chunk->end)) {
     fly_frame_chunk* c = a->chunk;
     a->chunk = c->prev;
-    chunk_spare(a, c);
+    chunk_spare(c);
     if (a->chunk) a->end = a->chunk->end;
   }
   a->top = a->chunk ? p : NULL;
@@ -1947,9 +1949,9 @@ static void frames_cut(fly_frames* a, char* p) {
 
 void fly_frame_pop(void* frame) { frames_cut(fly_cx_now()->frames, frame); }
 
-void fly_frames_trim(fly_frames* a) {
-  if (a->spare) free(a->spare);
-  a->spare = NULL;
+void fly_spare_free(fly_ctx* cx) {
+  if (cx->spare) free(cx->spare);
+  cx->spare = NULL;
 }
 
 void fly_frames_free(fly_frames* a) {
@@ -1960,7 +1962,6 @@ void fly_frames_free(fly_frames* a) {
     a->chunk = c->prev;
     free(c);
   }
-  fly_frames_trim(a);
   a->top = a->end = NULL;
 }
 
@@ -3299,7 +3300,7 @@ int32_t fly_core_run(int32_t id, bool deadlock, bool cancel) {
   cx->destroying = t->destroying;
   t->done = task_main(t);
   // Stopped, the task holds only the frames it is in.
-  if (!t->done) fly_frames_trim(&t->frames);
+  fly_spare_free(cx);
   cx = fly_cx_now();
   cx->frames = frames;
   t->unwinding_panic = cx->panic;
@@ -3895,11 +3896,12 @@ typedef struct worker worker;
 // The tasks waiting for something, in the order they began to, under the queue's lock.
 typedef struct { spin_t lock; mt_task *head, *tail; } waitq;
 
+// A task's record holds what every task needs as it waits; what only some need is apart: a forked
+// task's entry and result follow its record (`mt_fork`), and what waits for it is in a record made
+// by the first to (`mt_join`).
 struct mt_task {
-  void (*entry)(void* task, void* closure, void** slot);
   // What it runs: a closure, or, for `main`, its runner as the function.
   fly_fn fn;
-  void* result;
   mt_scope* scope;
   worker* home;
   // Its root machine's frame, and the frame arena of what it runs.
@@ -3909,10 +3911,8 @@ struct mt_task {
   // in cleanup a panic runs is that panic, and the rest of the context is its worker's.
   fly_failure* error;
   char* panic;
-  // Those waiting for any of several tasks it is among, under its joiners' lock.
-  struct mt_any* anys;
-  // Its joiners, and whether it has finished, under their queue's lock.
-  waitq joiners;
+  // What waits for it, once anything has: set once, and read once `finished` is (`mt_join_of`).
+  struct mt_join* join;
   // The queue it waits in, if it waits, and its neighbours there.
   waitq* waiting;
   mt_task *wnext, *wprev;
@@ -3920,10 +3920,6 @@ struct mt_task {
   mt_task *snext, *sprev;
   // The next task in an inbox.
   mt_task* rnext;
-  // The lock its worker gives back once it has stopped to wait.
-  spin_t* release;
-  uint64_t sleep_gen;
-  uint32_t size;
   // A spawned task, as its `Task`s see it, which share one reference: how many there are; how it
   // ended (FLY_TASK_*); whether its panic has been told, which whoever tells it first sets.
   int handles;
@@ -3941,6 +3937,29 @@ struct mt_task {
 // One waiting for any of several tasks, among one of them's: it is told by `fired` and woken in `q`.
 struct mt_any { struct mt_any* next; waitq* q; bool fired; };
 
+// What waits for a task: its joiners, and those waiting for any of several tasks it is among, under
+// the queue's lock, which `finished` is read under too. It is made by the first to wait, and put
+// in the task by an exchange; a task that ends sets `finished` before it looks for it, and one that
+// waits looks at `finished` after it has put it in, both in one order, so that one sees the other.
+struct mt_join { waitq q; struct mt_any* anys; };
+
+static struct mt_join* mt_join_of(mt_task* t) {
+  struct mt_join* j = __atomic_load_n(&t->join, __ATOMIC_SEQ_CST);
+  if (j) return j;
+  struct mt_join* made = fly_alloc(sizeof(struct mt_join));
+  if (__atomic_compare_exchange_n(&t->join, &j, made, false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)) return made;
+  free(made);
+  return j;
+}
+
+// A forked task's entry, and its result, of `size` bytes, after its record.
+struct mt_fork { void (*entry)(void* task, void* closure, void** slot); uint32_t size; _Alignas(16) char result[]; };
+#define MT_FORK_AT ((sizeof(mt_task) + 15) & ~(size_t)15)
+static struct mt_fork* mt_fork_of(mt_task* t) { return (struct mt_fork*)((char*)t + MT_FORK_AT); }
+
+// A forked task, or `main`, runs its entry; any other its closure, by `fly_task_void`.
+static void (*mt_entry(mt_task* t))(void*, void*, void**) { return t->forked ? mt_fork_of(t)->entry : fly_task_void; }
+
 // A scope: its tasks still alive, and how it fails. Its queue holds its owner while the owner waits
 // for them at the scope's end; the queue's lock guards it all.
 struct mt_scope {
@@ -3957,13 +3976,24 @@ struct mt_scope {
 // (rt/mt.fly); and what drops a message it will not deliver.
 typedef struct { waitq q; uint8_t* state; void (*drop)(void*); } mt_chan;
 
-// A task that sleeps waits in the queue of the worker it went to sleep on, when it wakes kept in
-// that worker's heap, under the queue's lock: each worker's own, so that tasks going to sleep on
-// every core at once do not wait for one lock. `due` is the heap's first, or 0. A task woken early —
-// cancelled — leaves its alarm behind, which then wakes nothing. Any worker fires any heap's
-// alarms once they are due, so a worker asleep holds up none.
-typedef struct { uint64_t due, gen; mt_task* task; } alarm_t;
-typedef struct { waitq q; alarm_t* heap; size_t n, cap; uint64_t due; } sleep_timer;
+// Each worker's timer: a hierarchical timing wheel (Varghese and Lauck, as tokio's), of six levels
+// of 64 slots, a slot of level `k` the 64^k milliseconds whose digits above `k` are the wheel's
+// time's. What is in a slot is the wait records of the sleeps due then, linked through the records
+// themselves, which are in the sleeping tasks' frames: a sleep takes nothing more, and is put in
+// and taken out at once. A sleeping task waits in `q`, under whose lock the wheel is, so that a
+// cancellation finds it as it finds any task that waits; tasks going to sleep on every core at
+// once do not queue for one lock. `due` is when the wheel next has something to do, in the
+// clock's nanoseconds, or 0; any worker does it once it is due, so a worker asleep holds up none.
+enum { WHEEL_LEVELS = 6, WHEEL_SLOTS = 64 };
+typedef struct {
+  waitq q;
+  fly_wait* slot[WHEEL_LEVELS][WHEEL_SLOTS];
+  uint64_t occupied[WHEEL_LEVELS];
+  // The time it has come to, in milliseconds, and how many sleeps are in it.
+  uint64_t now;
+  size_t n;
+  uint64_t due;
+} sleep_timer;
 
 struct worker {
   int index;
@@ -3987,6 +4017,8 @@ struct worker {
   // Tasks the kernel's events woke while this worker took them: the first is its own to run.
   int harvested;
   bool harvesting;
+  // The lock the task running here gives back once it has stopped to wait (`to_worker`).
+  spin_t* release;
 };
 
 static worker* workers;
@@ -4052,7 +4084,7 @@ static void notify_all(void) {
 static void task_unref(mt_task* t) {
   if (__atomic_sub_fetch(&t->refs, 1, __ATOMIC_ACQ_REL) > 0) return;
   panic_free(t->panic);
-  free(t->result);
+  free(t->join);
   free(t);
 }
 
@@ -4122,7 +4154,8 @@ static void wake_all(waitq* q) { while (q->head) wake_one(q); }
 // once the task has stopped, for until then nothing may wake it, which would let another worker
 // resume it while it is still running here.
 static void to_worker(mt_task* t, spin_t* release) {
-  t->release = release;
+  (void)t;
+  this_worker->release = release;
   fly_cx_now()->pend = FLY_PEND_WAIT;
 }
 
@@ -4215,48 +4248,146 @@ static void mt_point(fly_wait* w) {
   W_END
 }
 
-// ---- sleeping: each worker's timer (`sleep_timer`) ----
+// ---- sleeping: each worker's timer wheel (`sleep_timer`) ----
 
-static void alarm_push(sleep_timer* tm, alarm_t a) {
-  if (tm->n == tm->cap) {
-    tm->cap = tm->cap ? tm->cap * 2 : 16;
-    tm->heap = realloc(tm->heap, tm->cap * sizeof(alarm_t));
-  }
-  size_t i = tm->n++;
-  while (i > 0 && tm->heap[(i - 1) / 2].due > a.due) { tm->heap[i] = tm->heap[(i - 1) / 2]; i = (i - 1) / 2; }
-  tm->heap[i] = a;
+// A sleep's wait record, while the sleep is in a wheel: when it is due, in milliseconds (`a[0]`);
+// whose it is (`a[1]`); the records before and after it in its slot (`p[1]`, `p[0]`); and which
+// worker's wheel and slot it is in, or -1 once it is in none (`n`), which the waking worker sets
+// before it wakes the task, and which the task, going on, reads to see whether to take it out.
+#define SLEEP_DUE(w) ((uint64_t)(w)->a[0])
+#define SLEEP_TASK(w) ((mt_task*)(intptr_t)(w)->a[1])
+#define SLEEP_NEXT(w) (*(fly_wait**)&(w)->p[0])
+#define SLEEP_PREV(w) (*(fly_wait**)&(w)->p[1])
+enum { WHEEL_SPAN = WHEEL_LEVELS * 6, WHEEL_CELLS = WHEEL_LEVELS * WHEEL_SLOTS };
+
+static uint64_t now_ms(void) { return now_ns() / 1000000u; }
+
+// The level a time due falls in from the wheel's: that of the highest digit, of six bits, in which
+// the two differ; one past the wheel's reach goes in its last level, and on again from there.
+static int wheel_level(uint64_t now, uint64_t due) {
+  uint64_t differ = (now ^ due) | (WHEEL_SLOTS - 1);
+  if (differ >> WHEEL_SPAN) differ = ((uint64_t)1 << WHEEL_SPAN) - 1;
+  return (63 - __builtin_clzll(differ)) / 6;
 }
 
-static alarm_t alarm_pop(sleep_timer* tm) {
-  alarm_t top = tm->heap[0], last = tm->heap[--tm->n];
-  size_t i = 0;
-  for (;;) {
-    size_t c = 2 * i + 1;
-    if (c >= tm->n) break;
-    if (c + 1 < tm->n && tm->heap[c + 1].due < tm->heap[c].due) c++;
-    if (tm->heap[c].due >= last.due) break;
-    tm->heap[i] = tm->heap[c];
-    i = c;
+static void wheel_link(sleep_timer* tm, int worker, fly_wait* w) {
+  uint64_t due = SLEEP_DUE(w) < tm->now ? tm->now : SLEEP_DUE(w);
+  int k = wheel_level(tm->now, due);
+  int i = (int)((due >> (6 * k)) & (WHEEL_SLOTS - 1));
+  fly_wait** head = &tm->slot[k][i];
+  SLEEP_PREV(w) = NULL;
+  SLEEP_NEXT(w) = *head;
+  if (*head) SLEEP_PREV(*head) = w;
+  *head = w;
+  tm->occupied[k] |= (uint64_t)1 << i;
+  __atomic_store_n(&w->n, worker * WHEEL_CELLS + k * WHEEL_SLOTS + i, __ATOMIC_RELEASE);
+}
+
+static void wheel_unlink(sleep_timer* tm, fly_wait* w) {
+  int cell = w->n % WHEEL_CELLS, k = cell / WHEEL_SLOTS, i = cell % WHEEL_SLOTS;
+  if (SLEEP_PREV(w)) SLEEP_NEXT(SLEEP_PREV(w)) = SLEEP_NEXT(w); else tm->slot[k][i] = SLEEP_NEXT(w);
+  if (SLEEP_NEXT(w)) SLEEP_PREV(SLEEP_NEXT(w)) = SLEEP_PREV(w);
+  if (!tm->slot[k][i]) tm->occupied[k] &= ~((uint64_t)1 << i);
+  __atomic_store_n(&w->n, -1, __ATOMIC_RELEASE);
+}
+
+// When the wheel next has a slot to take up, in milliseconds, and its level, or false: the first
+// level with anything in it, whose slots come before all those of the levels above; in it, the
+// first slot from the wheel's time on — at level 0 that time's own, above it one a whole turn on if
+// its digit is the time's, which a sleep beyond the wheel's reach can be.
+static bool wheel_next(const sleep_timer* tm, uint64_t* at, int* level) {
+  for (int k = 0; k < WHEEL_LEVELS; k++) {
+    uint64_t occ = tm->occupied[k];
+    if (!occ) continue;
+    int shift = 6 * k;
+    unsigned digit = (unsigned)((tm->now >> shift) & (WHEEL_SLOTS - 1));
+    uint64_t rot = (occ >> digit) | (digit ? occ << (64 - digit) : 0);
+    // Above level 0 the time's own slot is a whole turn on, after every other.
+    unsigned ahead = k == 0 ? (unsigned)__builtin_ctzll(rot) : (rot & ~(uint64_t)1) ? (unsigned)__builtin_ctzll(rot & ~(uint64_t)1) : 64;
+    uint64_t span = (uint64_t)1 << shift;
+    *at = (tm->now & ~(span - 1)) + (uint64_t)ahead * span;
+    *level = k;
+    return true;
   }
-  if (tm->n > 0) tm->heap[i] = last;
-  return top;
+  return false;
+}
+
+// The wheel brought to time `until`: each slot due on the way taken up, its sleeps that are due
+// woken, and the rest put in again, lower down. Under the wheel's lock.
+static void wheel_advance(sleep_timer* tm, int worker, uint64_t until) {
+  uint64_t at;
+  int k;
+  while (wheel_next(tm, &at, &k) && at <= until) {
+    tm->now = at;
+    int i = (int)((at >> (6 * k)) & (WHEEL_SLOTS - 1));
+    fly_wait* w = tm->slot[k][i];
+    tm->slot[k][i] = NULL;
+    tm->occupied[k] &= ~((uint64_t)1 << i);
+    while (w) {
+      fly_wait* next = SLEEP_NEXT(w);
+      // Due by the time the wheel is brought to, it wakes now, rather than going down a level first.
+      if (SLEEP_DUE(w) <= until) {
+        __atomic_store_n(&w->n, -1, __ATOMIC_RELEASE);
+        tm->n--;
+        // Its task cannot have gone on past its sleep, for which it takes this lock.
+        mt_task* t = SLEEP_TASK(w);
+        if (__atomic_load_n(&t->waiting, __ATOMIC_SEQ_CST) == &tm->q) {
+          q_remove(&tm->q, t);
+          __atomic_store_n(&t->waiting, NULL, __ATOMIC_SEQ_CST);
+          unpark(t);
+        }
+      } else {
+        wheel_link(tm, worker, w);
+      }
+      w = next;
+    }
+  }
+  if (until > tm->now) tm->now = until;
+}
+
+static void wheel_set_due(sleep_timer* tm) {
+  uint64_t at;
+  int k;
+  uint64_t due = tm->n && wheel_next(tm, &at, &k) ? (at ? at : 1) * 1000000u : 0;
+  __atomic_store_n(&tm->due, due, __ATOMIC_RELEASE);
 }
 
 static void mt_sleep(fly_wait* w, uint64_t nanos) {
   mt_task* t = running;
   if (nanos == 0) { mt_point(w); return; }
   W_BEGIN(w)
-  sleep_timer* tm = &this_worker->timer;
+  worker* me = this_worker;
+  sleep_timer* tm = &me->timer;
   spin_lock(&tm->q.lock);
-  __atomic_fetch_add(&t->refs, 1, __ATOMIC_RELAXED);
-  alarm_push(tm, (alarm_t){ now_ns() + nanos, ++t->sleep_gen, t });
-  __atomic_store_n(&tm->due, tm->heap[0].due, __ATOMIC_RELEASE);
+  // An empty wheel starts again from now, rather than walk from when it was last used.
+  if (!tm->n) tm->now = now_ms();
+  // Due at the first millisecond that is wholly past the sleep, so that it is never cut short.
+  w->a[0] = (int64_t)((now_ns() + nanos + 999999u) / 1000000u);
+  w->a[1] = (int64_t)(intptr_t)t;
+  wheel_link(tm, me->index, w);
+  tm->n++;
+  wheel_set_due(tm);
   WAIT_IN(w, &tm->q, true);
+  // Cancelled before or after it slept, its sleep is taken out of the wheel. Woken by the wheel, it
+  // is out already, which the waking worker marked before waking it: no lock is taken again.
+  {
+    int32_t at = __atomic_load_n(&w->n, __ATOMIC_ACQUIRE);
+    if (at >= 0) {
+      sleep_timer* own = &workers[at / WHEEL_CELLS].timer;
+      spin_lock(&own->q.lock);
+      if (w->n >= 0) {
+        wheel_unlink(own, w);
+        own->n--;
+        wheel_set_due(own);
+      }
+      spin_unlock(&own->q.lock);
+    }
+  }
   cancelled_here();
   W_END
 }
 
-// The first of every worker's alarms, or 0.
+// The first of every worker's wheels' next work, or 0.
 static uint64_t earliest_due(void) {
   uint64_t first = 0;
   for (int k = 0; k < nworkers; k++) {
@@ -4266,9 +4397,8 @@ static uint64_t earliest_due(void) {
   return first;
 }
 
-// Wakes the tasks whose alarms are due, on every worker's timer. A timer another worker is firing is
-// passed by: every worker asleep wakes as the first alarm is due, and would otherwise wait for each
-// other's turn at it.
+// Brings every worker's wheel that has work due to now. A wheel another worker is at is passed by:
+// every worker asleep wakes as the first is due, and would otherwise wait for each other's turn.
 static void fire_alarms(void) {
   uint64_t now = 0;
   for (int k = 0; k < nworkers; k++) {
@@ -4278,30 +4408,21 @@ static void fire_alarms(void) {
     if (!now) now = now_ns();
     if (due > now) continue;
     if (!spin_trylock(&tm->q.lock)) continue;
-    while (tm->n > 0 && tm->heap[0].due <= now) {
-      alarm_t a = alarm_pop(tm);
-      mt_task* t = a.task;
-      if (__atomic_load_n(&t->waiting, __ATOMIC_SEQ_CST) == &tm->q && t->sleep_gen == a.gen) {
-        q_remove(&tm->q, t);
-        __atomic_store_n(&t->waiting, NULL, __ATOMIC_SEQ_CST);
-        unpark(t);
-      }
-      task_unref(t);
-    }
-    __atomic_store_n(&tm->due, tm->n ? tm->heap[0].due : 0, __ATOMIC_RELEASE);
+    wheel_advance(tm, k, now / 1000000u);
+    wheel_set_due(tm);
     spin_unlock(&tm->q.lock);
   }
 }
 
 // ---- running tasks ----
 
-static void mt_task_body(void* a) { mt_task* t = a; t->entry(t, &t->fn, &t->slot); }
+static void mt_task_body(void* a) { mt_task* t = a; mt_entry(t)(t, &t->fn, &t->slot); }
 
 // Runs the task's root machine until it ends or waits: whether it ended.
 static bool mt_task_main(mt_task* t) {
   if (fly_try(mt_task_body, t)) {
     char* m = panic_take();
-    if (t->entry != main_entry) drop_task_closure(&t->fn);
+    if (mt_entry(t) != main_entry) drop_task_closure(&t->fn);
     t->panic = m;
     if (!t->forked) __atomic_store_n(&t->how, FLY_TASK_PANICKED, __ATOMIC_RELEASE);
     fly_cx_now()->pend = 0;
@@ -4372,16 +4493,19 @@ static void mt_end(mt_task* t) {
     task_unref(cancels[i]);
   }
   free(cancels);
-  spin_lock(&t->joiners.lock);
-  t->finished = true;
-  wake_all(&t->joiners);
-  for (struct mt_any* a = t->anys; a; a = a->next) {
-    __atomic_store_n(&a->fired, true, __ATOMIC_SEQ_CST);
-    spin_lock(&a->q->lock);
-    wake_one(a->q);
-    spin_unlock(&a->q->lock);
+  __atomic_store_n(&t->finished, true, __ATOMIC_SEQ_CST);
+  struct mt_join* j = __atomic_load_n(&t->join, __ATOMIC_SEQ_CST);
+  if (j) {
+    spin_lock(&j->q.lock);
+    wake_all(&j->q);
+    for (struct mt_any* a = j->anys; a; a = a->next) {
+      __atomic_store_n(&a->fired, true, __ATOMIC_SEQ_CST);
+      spin_lock(&a->q->lock);
+      wake_one(a->q);
+      spin_unlock(&a->q->lock);
+    }
+    spin_unlock(&j->q.lock);
   }
-  spin_unlock(&t->joiners.lock);
   __atomic_fetch_sub(&alive, 1, __ATOMIC_SEQ_CST);
   __atomic_fetch_sub(&runnable, 1, __ATOMIC_SEQ_CST);
   // Its scope no longer refers to it, nor does it to itself.
@@ -4415,14 +4539,14 @@ static void run_task(worker* w, mt_task* t) {
     t->destroying = cx->destroying;
   }
   // Stopped, the task holds only the frames it is in.
-  if (!done) fly_frames_trim(&t->frames);
+  fly_spare_free(cx);
   fly_cur = w->idle_ctx;
   running = NULL;
   // Once the lock of what it waits for is given back, the task may be woken and run elsewhere: what
   // is needed of it is read first.
   bool yielded = t->yielded;
-  spin_t* release = t->release;
-  t->release = NULL;
+  spin_t* release = w->release;
+  w->release = NULL;
   if (release) spin_unlock(release);
   if (done) {
     mt_end(t);
@@ -4814,8 +4938,8 @@ static void mt_run(void (*main)(void**), void (*entry)(void* task, void* closure
     w->jobs.buf = dq_buf_new(256, NULL);
   }
   this_worker = &workers[0];
-  mt_task* t = fly_alloc(sizeof(mt_task));
-  t->entry = entry;
+  mt_task* t = fly_alloc(MT_FORK_AT + sizeof(struct mt_fork));
+  mt_fork_of(t)->entry = entry;
   t->fn.fn = (void*)main;
   t->refs = 1;
   // Its panic, once the workers have stopped, ends the program.
@@ -4844,13 +4968,15 @@ static void mt_run(void (*main)(void**), void (*entry)(void* task, void* closure
 // `Task`s, set before any other worker can see it.
 static mt_task* mt_start(int scope, void (*entry)(void* task, void* closure, void** slot), const fly_fn* f, size_t size, int refs, int handles) {
   mt_scope* sc = obj_get(scope);
-  mt_task* t = fly_alloc(sizeof(mt_task));
-  t->entry = entry;
+  bool forked = entry != fly_task_void;
+  mt_task* t = fly_alloc(forked ? MT_FORK_AT + sizeof(struct mt_fork) + size : sizeof(mt_task));
+  if (forked) {
+    mt_fork_of(t)->entry = entry;
+    mt_fork_of(t)->size = (uint32_t)size;
+  }
   t->fn = *f;
-  t->size = (uint32_t)size;
-  t->result = size ? fly_alloc(size) : NULL;
   t->scope = sc;
-  t->forked = entry != fly_task_void;
+  t->forked = forked;
   t->how = FLY_TASK_RUNNING;
   t->refs = 2 + refs;
   t->handles = handles;
@@ -4892,14 +5018,17 @@ static void mt_task_cancel(void* h) {
 
 static int32_t mt_task_wait(fly_wait* w, void* h, fly_String* message) {
   mt_task* t = h;
+  struct mt_join* j;
   W_BEGIN(w)
-  spin_lock(&t->joiners.lock);
-  while (!t->finished) {
-    WAIT_IN(w, &t->joiners, true, 0);
+  j = mt_join_of(t);
+  spin_lock(&j->q.lock);
+  while (!__atomic_load_n(&t->finished, __ATOMIC_SEQ_CST)) {
+    WAIT_IN(w, &j->q, true, 0);
     if (cancelled_here()) return FLY_TASK_DONE;
-    spin_lock(&t->joiners.lock);
+    j = t->join;
+    spin_lock(&j->q.lock);
   }
-  spin_unlock(&t->joiners.lock);
+  spin_unlock(&j->q.lock);
   W_END
   int32_t how = __atomic_load_n(&t->how, __ATOMIC_ACQUIRE);
   if (how == FLY_TASK_PANICKED) {
@@ -4925,11 +5054,12 @@ static size_t mt_task_any(fly_wait* w, void* const* ts, size_t n) {
     found = n, k = 0;
     for (; k < n; k++) {
       mt_task* t = ts[k];
-      spin_lock(&t->joiners.lock);
-      if (t->finished) { spin_unlock(&t->joiners.lock); found = k; break; }
-      as[k] = (struct mt_any){ t->anys, qp, false };
-      t->anys = &as[k];
-      spin_unlock(&t->joiners.lock);
+      struct mt_join* j = mt_join_of(t);
+      spin_lock(&j->q.lock);
+      if (__atomic_load_n(&t->finished, __ATOMIC_SEQ_CST)) { spin_unlock(&j->q.lock); found = k; break; }
+      as[k] = (struct mt_any){ j->anys, qp, false };
+      j->anys = &as[k];
+      spin_unlock(&j->q.lock);
     }
     cancelled = false;
     if (found == n) {
@@ -4948,20 +5078,17 @@ static size_t mt_task_any(fly_wait* w, void* const* ts, size_t n) {
       cancelled = cancelled_here();
     }
     for (size_t i = 0; i < k; i++) {
-      mt_task* t = ts[i];
-      spin_lock(&t->joiners.lock);
-      for (struct mt_any** p = &t->anys; *p; p = &(*p)->next) {
+      struct mt_join* j = ((mt_task*)ts[i])->join;
+      spin_lock(&j->q.lock);
+      for (struct mt_any** p = &j->anys; *p; p = &(*p)->next) {
         if (*p == &as[i]) { *p = as[i].next; break; }
       }
-      spin_unlock(&t->joiners.lock);
+      spin_unlock(&j->q.lock);
     }
     if (cancelled) { free(as); free(qp); return 0; }
     for (size_t i = 0; i < n; i++) {
       mt_task* t = ts[i];
-      spin_lock(&t->joiners.lock);
-      bool finished = t->finished;
-      spin_unlock(&t->joiners.lock);
-      if (finished) { free(as); free(qp); return i; }
+      if (__atomic_load_n(&t->finished, __ATOMIC_SEQ_CST)) { free(as); free(qp); return i; }
     }
   }
   W_END
@@ -4973,23 +5100,23 @@ static void mt_task_clone(void* h) { __atomic_fetch_add(&((mt_task*)h)->handles,
 static void mt_task_drop(void* h) {
   mt_task* t = h;
   if (__atomic_sub_fetch(&t->handles, 1, __ATOMIC_ACQ_REL) > 0) return;
-  spin_lock(&t->joiners.lock);
-  bool finished = t->finished;
-  spin_unlock(&t->joiners.lock);
-  if (finished) tell_panic(t);
+  if (__atomic_load_n(&t->finished, __ATOMIC_SEQ_CST)) tell_panic(t);
   task_unref(t);
 }
 
 static void mt_join(fly_wait* w, int task, void* out) {
   mt_task* t = obj_get(task);
+  struct mt_join* j;
   W_BEGIN(w)
-  spin_lock(&t->joiners.lock);
-  while (!t->finished) {
-    WAIT_IN(w, &t->joiners, true);
+  j = mt_join_of(t);
+  spin_lock(&j->q.lock);
+  while (!__atomic_load_n(&t->finished, __ATOMIC_SEQ_CST)) {
+    WAIT_IN(w, &j->q, true);
     if (cancelled_here()) return;
-    spin_lock(&t->joiners.lock);
+    j = t->join;
+    spin_lock(&j->q.lock);
   }
-  spin_unlock(&t->joiners.lock);
+  spin_unlock(&j->q.lock);
   W_END
   if (t->panic) {
     // It panicked, which cancels the scope and the joiner with it; the scope raises the panic.
@@ -4999,7 +5126,7 @@ static void mt_join(fly_wait* w, int task, void* out) {
     fly_err = t->error;
     t->error = NULL;
   } else {
-    memcpy(out, t->result, t->size);
+    memcpy(out, mt_fork_of(t)->result, mt_fork_of(t)->size);
   }
   obj_clear(task);
   task_unref(t);
@@ -5169,7 +5296,7 @@ void fly_unlock(const void* state) {
   fly_rt_mt_unlock((uint8_t*)&m->q, &m->held);
 }
 
-static void* mt_task_result(mt_task* t) { return t->result; }
+static void* mt_task_result(mt_task* t) { return t->forked ? mt_fork_of(t)->result : NULL; }
 static void* mt_task_closure(mt_task* t) { return &t->fn; }
 
 void fly_par_join(void (*a)(void* f, void* out), void* fa, void* oa, void (*da)(void* out),
