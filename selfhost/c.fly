@@ -782,7 +782,7 @@ impl Cgen {
           if (self.lw.p.hasDrop(d)) {
             const call = self.dropCall(t, span);
             // A destructor does not unwind: a panic out of one ends the program (§5.7).
-            body.push(`  if (v->live) { v->live = false; fly_unwind_state u_ = fly_cleanup_begin(); fly_destroy_begin(); ${call}; fly_destroy_end(); fly_cleanup_end(u_); }\n`);
+            body.push(`  if (v->live) { v->live = false; fly_unwind_state u_ = fly_quiet_begin(); fly_destroy_begin(); ${call}; fly_destroy_end(); fly_quiet_end(u_); }\n`);
           }
           match (self.lw.p.defs[d].kind) {
             #Enum { tags: _ } => self.dropTags(mut body, t, span),
@@ -884,8 +884,7 @@ impl Cgen {
         // Among the types, as a machine's frame may hold one.
         self.typeDefs.push(`typedef struct { fly_fn f; ${fields} } ${n}_t;\n`);
         self.protos.push(`static void ${n}(void* a);\n`);
-        // Inlined where it is called directly, as `fly_locked` calls it through LLVM.
-        self.dropCode.push(`__attribute__((always_inline)) static inline void ${n}(void* a) { ${n}_t* x = a; ${call} }\n`);
+        self.dropCode.push(`static void ${n}(void* a) { ${n}_t* x = a; ${call} }\n`);
         n
       }
     }
@@ -1385,7 +1384,7 @@ impl Cgen {
         const f = self.local(flag);
         const env = `(${d.env}){ ${d.inits} }`;
         if (!d.machine) {
-          return `if (${f}) { ${f} = false; fly_unwind_state u_ = fly_cleanup_begin(); { ${d.env} e_ = ${env}; defer_${d.n}(&e_); } fly_cleanup_end(u_); } `;
+          return `if (${f}) { ${f} = false; fly_unwind_state u_ = fly_quiet_begin(); { ${d.env} e_ = ${env}; defer_${d.n}(&e_); } fly_quiet_end(u_); } `;
         }
         // A `defer` that may suspend is a point the code may stop at, where it can.
         if (!self.cx.machine || self.cx.landing) {
@@ -2998,14 +2997,10 @@ impl Cgen {
         const pc = match (stripBorrow(ptys[1])) { #Fn(f) => match (f.params.first()) { #Some(p) => self.ctype(p, span), #None => "void*".toString() }, _ => "void*".toString() };
         `({ __auto_type p_ = ${arg(0)}; fly_fn f_ = ${arg(1)}; ${tc} r_ = ((${tc} (*)(void*, void**, void*, ${pc}))f_.fn)(f_.env, (void*[1]){ NULL }, NULL, p_); fly_panic_again_if(); if (f_.drop) f_.drop(f_.env); r_; })`
       }
-      "Mutex_lock" => {
-        const tc = self.ctype(rt, span);
-        const pc = match (stripBorrow(ptys[1])) { #Fn(f) => match (f.params.first()) { #Some(p) => self.ctype(p, span), #None => "void*".toString() }, _ => "void*".toString() };
-        const b = self.catchBody(`lock:${tc}:${pc}`, `${pc} m; ${tc} r;`, `x->r = ((${tc} (*)(void*, void**, void*, ${pc}))x->f.fn)(x->f.env, (void*[1]){ NULL }, NULL, x->m);`);
-        // A panic while the state is lent poisons the mutex, which keeps the state (§6.2), as it
-        // passes the guard; a task cancelled as it waits drops the body uncalled.
-        `({ __auto_type m_ = ${arg(0)}; fly_fn f_ = ${arg(1)}; ${tc} r_ = (${tc}){ 0 }; if (fly_lock(${WAIT}, m_, false)) { ${b}_t x_ = { .f = f_, .m = m_ }; fly_locked(${b}, &x_, m_, &x_.f); r_ = x_.r; } else if (!fly_pending && f_.drop) f_.drop(f_.env); r_; })`
-      }
+      // `Mutex.lock` as lower.fly makes it: taken, a routine that waits; its state lent; given back.
+      "Mutex_acquire" => `({ (void)fly_lock(${WAIT}, ${arg(0)}, false); (fly_unit)0; })`,
+      "Mutex_state" => arg(0),
+      "Mutex_release" => `({ __auto_type m_ = ${arg(0)}; if (!(${arg(1)})) fly_mutex_poison(m_, true); fly_unlock(m_); (fly_unit)0; })`,
       // A fresh state, the old one dropped and the poison cleared.
       "Mutex_reset" => {
         const t = match (c.argTys.get(1)) { #Some(t) => stripBorrow(t), #None => #Error };
@@ -4478,7 +4473,7 @@ function pointFirst(rc: str, expr: String): String {
 }
 
 // How many statements a block holds, those of blocks within it too.
-function stmtCount(b: readonly Block): usize {
+export function stmtCount(b: readonly Block): usize {
   let n = b.stmts.len();
   for (const c of b.cleanups) { if (const #Defer(_, d) = c) { n += stmtCount(d); } }
   for (const s of b.stmts) {

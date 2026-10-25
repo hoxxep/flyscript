@@ -23,7 +23,7 @@ import {
   Local, LocalKind, Place, Root, Proj, ProjKind, Operand, Constant, Rvalue, Capture, Call, Callee, Stmt, Handle, Arm, Block,
   Cleanup, Func, Uses, ownedIn, useBlock, closuresIn,
 } from "./ir";
-import { Cgen, newCgen, cquote, checking, pruneChecks, reaches, unmark, WAIT } from "./c";
+import { Cgen, newCgen, cquote, checking, pruneChecks, reaches, unmark, WAIT, stmtCount } from "./c";
 import { pends, residents, waitsInCleanup } from "./frames";
 import { HashMap, HashSet } from "std/collections";
 
@@ -1441,11 +1441,11 @@ impl Lgen {
         const [name, ap, machine] = self.deferFn(flag, body, span);
         if (!machine) {
           const u = self.alloca(2 * self.ptr, self.ptr);
-          self.ins(`call void @flyg_cleanup_begin(ptr ${u})`);
+          self.ins(`call void @flyg_quiet_begin(ptr ${u})`);
           const env = self.alloca(max(self.slots(ap), 1) * self.ptr, self.ptr);
           self.fillEnv(ap, env.asStr(), 0);
           self.ins(`call void @${name}(ptr ${env})`);
-          self.ins(`call void @flyg_cleanup_end(ptr ${u})`);
+          self.ins(`call void @flyg_quiet_end(ptr ${u})`);
         } else if (!self.cx.machine || (self.cx.landing && !self.cx.catching)) {
           // Where the code cannot stop, neither may the `defer`.
           const u = self.alloca(2 * self.ptr, self.ptr);
@@ -2538,7 +2538,14 @@ impl Lgen {
       zptrs.push(z);
     }
     const rt = self.c.ctype(c.ret, span);
-    const callExpr = `((${rt} (*)(${ptypes.join(", ")}))f_.fn)(${vs.join(", ")})`;
+    // A closure this function made is called by its name, which inlines as any call does, rather
+    // than through the value's pointer.
+    const known: Option<usize> = match (f) {
+      #Copy(p) | #Move(p) => if (p.path.len() == 0) { match (p.root) { #Local(l) => match (self.c.closureOf.get(l)) { #Some(k) => #Some(k + 0), #None => #None }, #Capture(_) => #None } } else { #None },
+      #Const(_) => #None,
+    };
+    const target = match (known) { #Some(k) => `flyg_lam_${k}`, #None => `((${rt} (*)(${ptypes.join(", ")}))f_.fn)` };
+    const callExpr = `${target}(${vs.join(", ")})`;
     const store = if (unitTy(c.ret)) { "" } else { `*(${rt}*)r = c_; ` };
     // Calling a `once` closure consumes it: it is dropped once called, and once it has ended.
     const dropIt = if (isOnce && !machine) { "if (f_.drop) f_.drop(f_.env); " } else { "" };
@@ -3781,7 +3788,9 @@ impl Lgen {
     }
     self.params(f, mut ps, f.span);
     self.body(f);
-    self.define(`define ${rt} @${f.name}__fly(${ps.join(", ")})`.asStr());
+    // A small function that is no machine is offered to inline, as the C back end offers it (c.fly).
+    const hint = if (!machine && stmtCount(f.body) <= 24) { " inlinehint" } else { "" };
+    self.define(`define ${rt} @${f.name}__fly(${ps.join(", ")})${hint}`.asStr());
     let ptys: Vec<Ty> = Vec.new();
     for (const l of f.params) { ptys.push(f.locals[l].ty.clone()); }
     self.cWrapper(f.name.asStr(), f.name.asStr(), true, false, machine, ptys, f.ret, f.regions, f.yields.isSome(), f.span);
@@ -3922,16 +3931,6 @@ impl Lgen {
     if (self.funclets) {
       ll.push("define zeroext i1 @fly_try(ptr %f, ptr %a) #0 personality ptr @__gxx_wasm_personality_v0 {\nentry:\n  %mk = alloca [2 x ptr]\n  call void @fly_frames_keep(ptr %mk)\n  invoke void %f(ptr %a) to label %ok unwind label %pad\nok:\n  %fl = call zeroext i1 @fly_try_flagged(ptr %mk)\n  ret i1 %fl\npad:\n  %cs = catchswitch within none [label %catch] unwind to caller\ncatch:\n  %cp = catchpad within %cs [ptr null]\n  %p = call zeroext i1 @fly_panicking() [ \"funclet\"(token %cp) ]\n  br i1 %p, label %take, label %pass\npass:\n  call void @llvm.wasm.rethrow() [ \"funclet\"(token %cp) ]\n  unreachable\ntake:\n  catchret from %cp to label %caught\ncaught:\n  call void @fly_frames_back(ptr %mk)\n  ret i1 true\n}\n\n");
     }
-    // A `Mutex`'s body run under its lock (runtime.h's `fly_locked`): a panic passing it poisons the
-    // state and gives the lock back, by a landing pad of Flyscript's own, so that it inlines.
-    if (!self.funclets) {
-      if (self.unwinds) {
-        ll.push("define void @fly_locked(ptr %body, ptr %a, ptr %m, ptr %f) #0 alwaysinline personality ptr @fly_personality {\nentry:\n  invoke void %body(ptr %a) to label %ok unwind label %pad\nok:\n  call void @fly_lock_release(ptr %m, ptr %f, i1 false)\n  ret void\npad:\n  %lp = landingpad { ptr, i32 } cleanup\n  call void @fly_lock_release(ptr %m, ptr %f, i1 true)\n  resume { ptr, i32 } %lp\n}\n\n");
-      } else {
-        ll.push("define void @fly_locked(ptr %body, ptr %a, ptr %m, ptr %f) #0 alwaysinline {\nentry:\n  call void %body(ptr %a)\n  call void @fly_lock_release(ptr %m, ptr %f, i1 false)\n  ret void\n}\n\n");
-      }
-      ll.push("declare void @fly_lock_release(ptr, ptr, i1 zeroext)\n");
-    }
     if (self.unwinds && !self.funclets) {
       ll.push("define zeroext i1 @fly_try(ptr %f, ptr %a) #0 personality ptr @fly_personality {\nentry:\n  %mk = alloca [2 x ptr]\n  call void @fly_frames_keep(ptr %mk)\n  invoke void %f(ptr %a) to label %ok unwind label %pad\nok:\n  %fl = call zeroext i1 @fly_try_flagged(ptr %mk)\n  ret i1 %fl\npad:\n  %lp = landingpad { ptr, i32 } catch ptr @fly_panic_type\n  %e = extractvalue { ptr, i32 } %lp, 0\n  call void @fly_caught(ptr %e)\n  call void @fly_frames_back(ptr %mk)\n  ret i1 true\n}\n\n");
     }
@@ -4007,12 +4006,16 @@ declare zeroext i1 @fly_handle_took(ptr)
 declare void @fly_handle_drop_m(ptr, ptr, ptr, ptr)
 declare void @flyg_cleanup_begin(ptr)
 declare void @flyg_cleanup_end(ptr)
+declare void @flyg_quiet_begin(ptr)
+declare void @flyg_quiet_end(ptr)
 declare void @flyg_free(ptr)
 ";
 
 // The companion's own functions, for what the runtime takes or gives as a struct.
 const GLUE: str = "void flyg_cleanup_begin(fly_unwind_state* s) { *s = fly_cleanup_begin(); }
 void flyg_cleanup_end(fly_unwind_state* s) { fly_cleanup_end(*s); }
+__attribute__((always_inline)) void flyg_quiet_begin(fly_unwind_state* s) { *s = fly_quiet_begin(); }
+__attribute__((always_inline)) void flyg_quiet_end(fly_unwind_state* s) { fly_quiet_end(*s); }
 void flyg_free(void* p) { free(p); }
 ";
 

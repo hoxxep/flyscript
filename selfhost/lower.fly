@@ -1697,6 +1697,7 @@ impl Lower {
     if (const #Some(fid) = fid) {
       if (const #Some(a) = self.addressOf(e, fid, args)) { return a; }
       const c = self.resolved(e, fid, callee, args);
+      if (const #Builtin(k) = c.callee && k == "Mutex_lock") { return self.mutexLock(c); }
       if (c.yields && self.yields.isNone()) { return self.fail(e.span, "a generator is called by `for`, or by a generator"); }
       const ret = c.ret.clone();
       return self.value(#Call(c), ret);
@@ -1729,6 +1730,45 @@ impl Lower {
       regions: Vec.new(), fails: self.mayFail(fty.effects), suspends: self.suspends(fty.effects), yields, row: fty.effects.clone(), targs: Vec.new(), span: e.span,
     };
     self.value(#Call(c), fty.ret)
+  }
+
+  // `m.lock(body)` (§6.2), as code of the function's own: the lock taken, a routine that waits; the
+  // body called with the state lent `mut`; and the lock given back as the block the body is called
+  // in is left, its state poisoned first should a panic leave it before the body returns. So the
+  // body's call is a call like any other, which a back end inlines, and the giving back a `defer`,
+  // which every back end runs on every way out as it runs any.
+  function mutexLock(self: mut Self, c: Call): Operand uses Fail<Diagnostic> {
+    const span = c.span;
+    const mty = c.argTys[0].clone();
+    const fty = stripBorrow(c.argTys[1]);
+    const st: Ty = match (fty) { #Fn(f) => match (f.params.first()) { #Some(p) => p.clone(), #None => #Error }, _ => #Error };
+    const ret = c.ret.clone();
+    const m = self.unownedTemp(mty.clone());
+    self.emit(#Let(m, #Use(c.args[0].clone())));
+    self.value(#Call(lockRoutine(c, "Mutex_acquire", [#Copy(localPlace(m))], [mty.clone()], #Prim(#Void), true)), #Prim(#Void));
+    const res: Option<usize> = if (unitTy(ret)) { #None } else { #Some(self.temp(ret.clone())) };
+    self.push();
+    const done = self.unownedTemp(#Prim(#Bool));
+    self.emit(#Let(done, #Use(#Const(#Bool(false)))));
+    const armed = self.newLocal("armed", #Prim(#Bool), #Flag);
+    self.push();
+    self.value(#Call(lockRoutine(c, "Mutex_release", [#Copy(localPlace(m)), #Copy(localPlace(done))], [mty.clone(), #Prim(#Bool)], #Prim(#Void), false)), #Prim(#Void));
+    const release = self.pop();
+    self.cleanup(#Defer(armed, release));
+    self.emit(#Arm(armed));
+    const lent = self.value(#Call(lockRoutine(c, "Mutex_state", [#Copy(localPlace(m))], [mty.clone()], st.clone(), false)), st.clone());
+    const body: Call = {
+      callee: #Value(c.args[1].clone(), true), args: [lent], params: [st.clone()], argTys: [st.clone()], ret: ret.clone(), regions: Vec.new(),
+      fails: false, suspends: false, yields: false, row: pure(), targs: Vec.new(), span,
+    };
+    match (res) {
+      #Some(r) => self.emit(#Let(r, #Call(body))),
+      #None => { self.value(#Call(body), ret.clone()); }
+    }
+    self.emit(#Store(localPlace(done), #Use(#Const(#Bool(true)))));
+    const inner = self.pop();
+    self.emit(#Block(inner));
+    match (res) { #Some(r) => #Move(localPlace(r)), #None => unitOp() }
   }
 
   // A call of function `fid` — the call `e`, or the implicit call of a `for`'s `Iterable.each` —
@@ -3592,4 +3632,13 @@ function blockNames(b: readonly AstBlock, out: mut Vec<String>): void {
     }
   }
   if (const #Some(t) = b.tail) { freeNames(t, mut out); }
+}
+
+// One of the routines `Mutex.lock` is made of (`Lower.mutexLock`), for the lock's call `c`: one that
+// waits performs what the lock does.
+function lockRoutine(c: readonly Call, key: str, args: Vec<Operand>, tys: Vec<Ty>, r: Ty, waits: bool): Call {
+  {
+    callee: #Builtin(key.toString()), args, params: tys.clone(), argTys: tys, ret: r, regions: Vec.new(), fails: false,
+    suspends: waits, yields: false, row: if (waits) { c.row.clone() } else { pure() }, targs: c.targs.clone(), span: c.span,
+  }
 }

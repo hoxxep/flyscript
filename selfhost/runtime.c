@@ -561,12 +561,6 @@ _Noreturn void fly_overflow_i64(int op, int64_t a, int64_t b, const char* type) 
 _Noreturn void fly_overflow_u64(int op, uint64_t a, uint64_t b, const char* type) { fly_overflow_op(op, a, b, type); }
 _Noreturn void fly_div_zero(void) { fly_panic("division by zero"); }
 
-#if defined(FLY_LANDING_PADS) && !defined(__wasm__)
-void fly_lock_release(const void* m, fly_fn* f, bool panicked) {
-  fly_lock_guard g = { m, f, !panicked };
-  fly_lock_guard_end(&g);
-}
-#endif
 
 // ---- memory ----
 

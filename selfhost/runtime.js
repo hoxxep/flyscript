@@ -974,14 +974,14 @@ const { $rt, $b } = (() => {
     Sender_clone: (s) => { sched.senders.set(s.ch, (sched.senders.get(s.ch) || 0) + 1); return { ch: s.ch }; },
     *Receiver_each(rx) { for (let m = yield* recv(rx.ch); m !== undefined; m = yield* recv(rx.ch)) yield new Yielded(m.v); },
     Mutex_new: (v) => ({ v, poisoned: false }),
-    // A panic while the value is lent may leave it half changed: the mutex keeps it, poisoned, and
-    // no one may lock it until it is reset (§6.2).
-    *Mutex_lock$g(m, f) {
-      yield* point();
-      if (m.poisoned) panic("locked a `Mutex` that a panic left poisoned");
-      try { return yield* body(f, m); }
-      catch (e0) { const e = asPanic(e0); if (e instanceof Panic) m.poisoned = true; throw e; }
-    },
+    // `Mutex.lock` as the compiler makes it: taken, at a scheduling point; its state lent, the mutex
+    // being the box a `mut` borrow is; given back, poisoned if the body did not return, as a panic
+    // while the value is lent may leave it half changed, and no one may lock it until it is reset
+    // (§6.2).
+    Mutex_acquire(m) { if (m.poisoned) panic("locked a `Mutex` that a panic left poisoned"); },
+    *Mutex_acquire$g(m) { yield* point(); $b.Mutex_acquire(m); },
+    Mutex_state: (m) => m,
+    Mutex_release(m, done) { if (!done) m.poisoned = true; },
     // A fresh value, the old one dropped, and the poison cleared.
     Mutex_reset(m, v, drop) { const old = m.v; m.v = v; m.poisoned = false; if (drop) drop(old); },
     *Mutex_reset$g(m, v, drop) { yield* point(); $b.Mutex_reset(m, v, drop); },

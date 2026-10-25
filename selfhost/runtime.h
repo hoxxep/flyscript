@@ -553,6 +553,23 @@ bool fly_handled(uint32_t effect);
 typedef struct { void* err; bool unwinding; bool panicking; } fly_unwind_state;
 fly_unwind_state fly_cleanup_begin(void);
 void fly_cleanup_end(fly_unwind_state s);
+// The same for cleanup that cannot stop — a destructor, which performs nothing, and a `defer` with
+// no point it may stop at: no cancellation reaches it, so the task need not say it is in cleanup,
+// which `fly_cleanup_begin` does by an atomic count; set aside where it is, it is a few moves.
+static inline fly_unwind_state fly_quiet_begin(void) {
+  fly_ctx* cx = fly_cx();
+  fly_unwind_state s = { cx->err, cx->unwinding, cx->panicking };
+  cx->err = NULL;
+  cx->unwinding = false;
+  cx->panicking = false;
+  return s;
+}
+static inline void fly_quiet_end(fly_unwind_state s) {
+  fly_ctx* cx = fly_cx();
+  cx->err = s.err;
+  cx->unwinding = s.unwinding;
+  cx->panicking = s.panicking;
+}
 // A continuation: the frame of the `handle` it resumes, how to resume it with the operation's
 // result, and how to drop it, which unwinds the body.
 typedef struct { void* frame; void* resume; void (*drop)(void* frame); } fly_cont;
@@ -663,42 +680,6 @@ static inline void fly_mutex_poison(const void* state, bool poisoned) {
   if (poisoned) __atomic_fetch_or(fly_mutex_word(state), FLY_POISONED, __ATOMIC_RELAXED);
   else __atomic_fetch_and(fly_mutex_word(state), ~(uint32_t)FLY_POISONED, __ATOMIC_RELAXED);
 }
-// Runs a `lock`'s body, `body(a)`, its closure `f`, the lock `m` held: then gives the lock back and
-// drops the closure, and should the body panic, poisons the state first, as the panic passes — by
-// a cleanup (`__attribute__((cleanup))`), which costs nothing until a panic. In C the function is
-// a frame of its own, so that it is not one whose own cleanups a panic skips, a frame that catches
-// it (FLY_C_UNWIND). WebAssembly's exceptions reach no cleanup of C's: there the body runs under a
-// catch point, which raises the panic again.
-typedef struct { const void* m; fly_fn* f; bool done; } fly_lock_guard;
-static inline void fly_lock_guard_end(fly_lock_guard* g) {
-  if (!g->done) fly_mutex_poison(g->m, true);
-  fly_unlock(g->m);
-  if (g->f->drop) g->f->drop(g->f->env);
-}
-#if defined(FLY_LANDING_PADS) && !defined(__wasm__)
-// Through LLVM natively, the module's own (llvm.fly), its landing pad of Flyscript's personality, so
-// that it inlines into Flyscript's code and the body's call there; `fly_lock_release` ends it.
-void fly_locked(void (*body)(void* a), void* a, const void* m, fly_fn* f);
-void fly_lock_release(const void* m, fly_fn* f, bool panicked);
-#else
-#if defined(FLY_C_UNWIND) && !defined(FLY_LANDING_PADS)
-__attribute__((noinline))
-#else
-inline
-#endif
-static void fly_locked(void (*body)(void* a), void* a, const void* m, fly_fn* f) {
-#ifdef __wasm__
-  bool panicked = fly_try(body, a);
-  fly_lock_guard g = { m, f, !panicked };
-  fly_lock_guard_end(&g);
-  if (panicked) fly_unwind_on();
-#else
-  fly_lock_guard g __attribute__((cleanup(fly_lock_guard_end))) = { m, f, false };
-  body(a);
-  g.done = true;
-#endif
-}
-#endif
 // A panic unwound a scope's body: its tasks are cancelled and waited for, and the panic goes on.
 void fly_scope_panicked(fly_wait* w, int sid);
 // `fetchAdd` of an `Atomic<i64>`: what was there; a sum that overflows panics and changes nothing.
