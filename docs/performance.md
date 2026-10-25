@@ -77,7 +77,16 @@ In the browser, each site's first page is loaded with nothing cached, and a link
 
 A FlyNext page is interactive once its program has taken over the HTML the server rendered: a core of 50 KB, 20 KB compressed, which every page shares, and the page's own module, 3 to 18 KB, which the page names for the browser to fetch beside the core and which the core links in as it shows the page (the roadmap's step 6). The list page downloads a quarter as much as the Next.js page, and is ready sooner. Built as one program for every page it was 146 KB, 41 KB compressed, and ready in 27 milliseconds: splitting it costs nothing to see. Of the core, the C library is 7 KB: the runtime prints and panics with no `printf`, and allocates from its own allocator rather than `dlmalloc` (step 7). Following a link costs both sites a request for the next page's data and a render in place, and FlyNext the next page's module the first time, which it asks for with the data as soon as the link is pointed at.
 
-A page's program redraws by rendering its view again into a flat record of what it shows and diffing that against the last, in its own memory, and changes only what differs. In [bench/table](../bench/table/), a page of a thousand keyed rows, a click that changes one counter is shown in 2.0 milliseconds, and one that reverses the rows in 2.5, timed from the click to the change in the page (`bench/table/diff.js`, the median of thirty). Before each element's record knew where its children end, keyed rows were matched by one lookup, and text went to the page from where it lies in the program's memory, uncopied, the same changes took 2.7 and 7.8 milliseconds.
+A page's program redraws by rendering its view again into a flat record of what it shows and diffing that against the last, in its own memory, and changes only what differs. In [bench/table](../bench/table/), pages of a thousand and of ten thousand keyed rows, each row a memo (`memo(hashOf(row), …)`), each change is timed from the click to the change in the page, ten at a time, divided (`bench/table.sh`, the median of twenty-one):
+
+| Change | 1,000 rows | 10,000 rows |
+| :--- | ---: | ---: |
+| One row's count | 0.04 ms | 0.33 ms |
+| Every tenth row's count | 0.14 ms | |
+| The rows reversed | 0.62 ms | |
+| A thousand rows made from none | 1.5 ms | |
+
+A memo whose key is what it was is kept whole, its body not called and nothing in it diffed, so changing one row of ten thousand costs a loop over the rows' keys and one row's work. What the program does to the page goes to it as commands written into the program's memory, which the page carries out in one call when the program next waits, its nodes numbered by the program; a run of new rows of one shape is made by copying the first, and given only its own text. Before these, the same changes took 1.77, 1.55, 2.57 and 3.45 milliseconds, and one row of ten thousand 14.1: re-recording every row, diffing it, and a call from the program to the page for every node made or changed. Two things the rows' timings found were the runtime's: in WebAssembly a large block freed was kept apart from the blocks beside it, so a page that renders often looked through ever more of them, ever shorter, for one long enough — they are now joined, and kept by their length — and its hash took a byte at a time, where it now takes eight. Before step 18 an element's record did not know where its children end, nor were keyed rows matched by one lookup, and a change to every tenth row and a reversal took 2.7 and 7.8 milliseconds.
 
 ## Running them
 
@@ -85,8 +94,7 @@ A page's program redraws by rendering its view again into a flat record of what 
 sh bench/run.sh                        # the programs; results in target/bench/results.md
 sh bench/tasks.sh                      # parked tasks, messages and locks, against Rust on tokio
 NODE_PATH=…/node_modules sh bench/web.sh   # the web app, with Playwright where NODE_PATH points
-sh web/flynext build bench/table/app /tmp/table && sh web/flynext start /tmp/table 4317 &
-NODE_PATH=…/node_modules node bench/table/diff.js 4317   # a thousand rows redrawn
+FLY_NODE_PATH=…/node_modules sh bench/table.sh       # a thousand rows, and ten thousand, redrawn
 ```
 
 `bench/run.sh` needs clang, rustc, Go, Node and hyperfine; `bench/tasks.sh` clang, LLVM's tools and cargo, with tokio; `bench/web.sh` needs Node and npm for the Next.js build, wrk, and Playwright for the browser part. `RUNS`, `SECS` and `CONNS` change the number of runs, the seconds under load and the connections.

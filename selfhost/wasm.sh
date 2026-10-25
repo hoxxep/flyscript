@@ -26,6 +26,9 @@ if [ "$4" = "--imports" ] || [ "$4" = "--split" ]; then
   opt="-Os -ffunction-sections -fdata-sections $eh"
   link="--gc-sections --strip-all"
 fi
+# `FLY_WASM_NAMES=1` keeps the functions' names, for a profile to say where the time went.
+strip="--strip-all"
+if [ -n "$FLY_WASM_NAMES" ]; then link=$(echo "$link" | sed 's/--strip-all//'); strip=""; fi
 libc="$sysroot/lib/wasm32-wasip1/crt1-command.o"
 exports="--export=__stack_pointer -z stack-size=8388608"
 if [ "$4" != "--split" ]; then
@@ -81,7 +84,7 @@ wasm-ld -m wasm32 $imports $link "$libc" "$work/core.o" -L"$sysroot/lib/wasm32-w
 manifest="{"
 for k in $(cat "$work/routes.txt"); do
   fn=$(grep -oE "^--func=${prefix}${k}_[0-9]+__fly$" "$work/route$k.args" | sed 's/^--func=//')
-  wasm-ld -m wasm32 --experimental-pic -shared --unresolved-symbols=import-dynamic --strip-all "$work/route$k.o" -o "$work/route$k.wasm"
+  wasm-ld -m wasm32 --experimental-pic -shared --unresolved-symbols=import-dynamic $strip "$work/route$k.o" -o "$work/route$k.wasm"
   hash=$(shasum -a 256 "$work/route$k.wasm" | cut -c1-12)
   cp "$work/route$k.wasm" "$dir/route$k.$hash.wasm"
   [ "$manifest" = "{" ] || manifest="$manifest,"

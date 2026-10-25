@@ -1,0 +1,14 @@
+// A table of ten thousand rows, each keyed (rows.fly).
+
+import { Ui, Event } from "web/ui";
+import { Page } from "web/dom";
+import { Model as Rows, Msg as Change, rows, change, table } from "../rows";
+
+export type Model = Rows;
+export type Msg = Change;
+
+export const title: str = "Ten thousand rows";
+
+export function load(): Model { rows(10000) }
+export function update(m: mut Model, msg: Msg, ev: readonly Event): void uses Page<Model> { change(mut m, msg, ev); }
+export function view(m: readonly Model): void uses Ui<Msg> { table(m); }

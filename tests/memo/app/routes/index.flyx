@@ -1,0 +1,66 @@
+// A list whose rows are memos, each with a memo inside it, and what changes it: rows added at
+// either end, one removed, the order reversed or two swapped, one row's count changed, the list
+// emptied. Clicking a row says which it is, whatever has moved around it.
+
+import { Ui, Event, hashOf } from "web/ui";
+import { Page } from "web/dom";
+
+export type Item = { id: u32; label: String; n: u32 };
+export type Model = { items: Vec<Item>; next: u32; clicked: String };
+export type Msg = #Prepend | #Append | #RemoveSecond | #Reverse | #SwapEnds | #Bump | #Clear | #Clicked(u32);
+
+export const title: str = "Memos";
+
+export function initial(): Model {
+  let items: Vec<Item> = Vec.new();
+  for (const i of 0..5) { items.push({ id: i, label: `item ${i}`, n: 0 }); }
+  { items, next: 5, clicked: "none".toString() }
+}
+
+export function update(m: mut Model, msg: Msg, ev: readonly Event): void uses Page<Model> {
+  match (msg) {
+    #Prepend => {
+      m.items.insert(0, { id: m.next, label: `item ${m.next}`, n: 0 });
+      m.next += 1;
+    }
+    #Append => {
+      m.items.push({ id: m.next, label: `item ${m.next}`, n: 0 });
+      m.next += 1;
+    }
+    #RemoveSecond => { if (m.items.len() > 1) { m.items.remove(1); } }
+    #Reverse => { m.items.reverse(); }
+    #SwapEnds => {
+      const last = m.items.len() - 1;
+      if (last > 0) { m.items.swap(0, last); }
+    }
+    #Bump => {
+      const mid = m.items.len() / 2;
+      if (mid < m.items.len()) { m.items[mid].n += 1; }
+    }
+    #Clear => { m.items = Vec.new(); }
+    #Clicked(id) => { m.clicked = `item ${id}`; }
+  }
+}
+
+export function view(m: readonly Model): void uses Ui<Msg> {
+  <nav>
+    <button id="prepend" onClick={#Prepend}>prepend</button>
+    <button id="append" onClick={#Append}>append</button>
+    <button id="remove" onClick={#RemoveSecond}>remove the second</button>
+    <button id="reverse" onClick={#Reverse}>reverse</button>
+    <button id="swap" onClick={#SwapEnds}>swap the ends</button>
+    <button id="bump" onClick={#Bump}>bump the middle</button>
+    <button id="clear" onClick={#Clear}>clear</button>
+  </nav>
+  <p id="clicked">{m.clicked}</p>
+  <ul>
+    for (const it of m.items) {
+      <memo key={hashOf(it)}>
+        <li key={`${it.id}`.asStr()} onClick={#Clicked(it.id)}>
+          {it.label}
+          <memo key={it.n as u64}><b>{it.n}</b></memo>
+        </li>
+      </memo>
+    }
+  </ul>
+}

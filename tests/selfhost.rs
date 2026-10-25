@@ -889,6 +889,31 @@ fn strangles_a_nextjs_app() {
     assert!(r.status.success(), "{}{}", String::from_utf8_lossy(&r.stdout), String::from_utf8_lossy(&r.stderr));
 }
 
+/// Memos in the browser (tests/memo): a list of rows, each a memo with one inside it, changed every
+/// way a list changes — rows added at either end, removed, reversed, swapped, one changed, all gone —
+/// shows what a model of it says after each change, each row whose data is the same the node it
+/// was, and a click on any row gives that row's message, however the rows around it have moved.
+/// Where Playwright is installed (FLY_NODE_PATH).
+#[test]
+fn memos_keep_what_they_showed() {
+    use std::io::{BufRead, BufReader};
+    let Ok(node_path) = std::env::var("FLY_NODE_PATH") else { return };
+    if !has_wasm() || !has_cc() {
+        return;
+    }
+    let dir = out().join("memo");
+    let built = Command::new("sh").arg(root().join("web/flynext")).arg("build").arg(root().join("tests/memo/app")).arg(&dir).output().unwrap();
+    assert!(built.status.success(), "{}{}", String::from_utf8_lossy(&built.stdout), String::from_utf8_lossy(&built.stderr));
+    let mut server = Command::new(dir.join("server")).arg("0").arg(&dir).env_remove("FLY_WORLD").stdout(std::process::Stdio::piped()).spawn().unwrap();
+    let mut first = String::new();
+    BufReader::new(server.stdout.as_mut().unwrap()).read_line(&mut first).unwrap();
+    let port: u16 = first.trim().strip_prefix("listening on ").and_then(|p| p.parse().ok()).unwrap_or_else(|| panic!("the server said {first:?}"));
+    let r = Command::new("node").arg(root().join("tests/memo/e2e.js")).arg(port.to_string()).env("NODE_PATH", node_path).output().unwrap();
+    server.kill().unwrap();
+    server.wait().unwrap();
+    assert!(r.status.success(), "{}{}", String::from_utf8_lossy(&r.stdout), String::from_utf8_lossy(&r.stderr));
+}
+
 /// `.flyx` (web/flyx.fly) written as `.fly` by `flyxc`, in `dir`, where its module would be as
 /// `.fly`; then compiled by `out`'s name, as JavaScript or C, through `FLY_OVERLAY`, which says
 /// where the written module is. What the compiler says, if it fails, or else nothing.

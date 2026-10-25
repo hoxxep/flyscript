@@ -1,0 +1,62 @@
+// The table both pages show, and what changes it: every tenth row's count, one row's, the order of
+// all of them, all of them gone, and as many made again from nothing. What the browser does with
+// each change is the diff's.
+
+import { Ui, Event, el, text, attr, on, key, memo, hashOf } from "web/ui";
+import { Page } from "web/dom";
+
+export type Row = { id: u32; label: String; n: u32 };
+export type Model = { rows: Vec<Row>; size: u32; ticks: u32 };
+export type Msg = #Tick | #One | #Reverse | #Clear | #Create;
+
+export function rows(size: u32): Model {
+  let rows: Vec<Row> = Vec.new();
+  for (const i of 0..size) { rows.push({ id: i, label: `row ${i}`, n: 0 }); }
+  { rows, size, ticks: 0 }
+}
+
+export function change(m: mut Model, msg: Msg, ev: readonly Event): void uses Page<Model> {
+  match (msg) {
+    #Tick => {
+      m.ticks += 1;
+      let i: usize = 0;
+      while (i < m.rows.len()) {
+        m.rows[i].n += 1;
+        i += 10;
+      }
+    }
+    #One => {
+      m.ticks += 1;
+      const mid = m.rows.len() / 2;
+      if (mid < m.rows.len()) { m.rows[mid].n += 1; }
+    }
+    #Reverse => { m.rows.reverse(); }
+    #Clear => { m.rows = Vec.new(); }
+    #Create => {
+      m.ticks += 1;
+      const base = m.ticks * m.size;
+      let rows: Vec<Row> = Vec.new();
+      for (const i of 0..m.size) { rows.push({ id: base + i, label: `row ${i}`, n: 0 }); }
+      m.rows = rows;
+    }
+  }
+}
+
+export function table(m: readonly Model): void uses Ui<Msg> {
+  el("button", () => { attr("id", "tick"); on("click", #Tick); text("tick"); });
+  el("button", () => { attr("id", "one"); on("click", #One); text("one"); });
+  el("button", () => { attr("id", "reverse"); on("click", #Reverse); text("reverse"); });
+  el("button", () => { attr("id", "clear"); on("click", #Clear); text("clear"); });
+  el("button", () => { attr("id", "create"); on("click", #Create); text("create"); });
+  el("p", () => { attr("id", "ticks"); text(`${m.ticks}`.asStr()); });
+  el("table", () => {
+    // Each row shown as it was if its data is what it was.
+    for (const r of m.rows) {
+      memo(hashOf(r), () => el("tr", () => {
+        key(`${r.id}`.asStr());
+        el("td", () => text(r.label.asStr()));
+        el("td", () => text(`${r.n}`.asStr()));
+      }));
+    }
+  });
+}

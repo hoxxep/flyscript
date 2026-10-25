@@ -147,6 +147,11 @@ export async function start(url, root = document.getElementById("app"), options 
 
   // ---- what the program asks of the host, which may suspend it, by promise integration ----
   const fly = {
+    dom_apply: (at, len) => apply(at, len),
+    dom_root: (id) => { nodes[id] = root; },
+    dom_child: (parent, i, id) => { nodes[id] = nodes[parent].childNodes[i]; },
+    dom_children: (parent) => nodes[parent].childNodes.length,
+    dom_is: (node, tag, len) => ((nodes[node]?.nodeName.toLowerCase() ?? "") === str(tag, len) ? 1 : 0),
     // A route's function, from its module, linked into the program the first time: its place in the
     // table of functions the two share, which the program calls it through.
     route: new WebAssembly.Suspending(async (k) => {
@@ -263,17 +268,88 @@ export async function start(url, root = document.getElementById("app"), options 
   };
 
   // ---- the page ----
+  // The page's nodes, by the numbers the program gives them (runtime.c's DOM commands).
   const nodes = [null];
-  const ids = new WeakMap();
-  const idOf = (node) => {
-    if (!node) return 0;
-    let id = ids.get(node);
-    if (id === undefined) {
-      id = nodes.length;
-      nodes.push(node);
-      ids.set(node, id);
+  const names = [null];
+  // Text out of the program's memory: short ASCII, the most of it, without a decoder.
+  const text = (at, len) => {
+    const m = mem();
+    if (len <= 32) {
+      let ascii = true;
+      for (let i = 0; i < len; i++) if (m[at + i] > 127) { ascii = false; break; }
+      if (ascii) return String.fromCharCode.apply(null, m.subarray(at, at + len));
     }
-    return id;
+    return decoder.decode(m.subarray(at, at + len));
+  };
+  // Carries out what the program did to the page since it last waited (runtime.c's `fly_dom_*`).
+  const apply = (at, len) => {
+    const v = view();
+    const end = at + len;
+    while (at < end) {
+      const op = v.getUint8(at);
+      const a = v.getUint32(at + 1, true);
+      at += 5;
+      switch (op) {
+        case 1: { const n = v.getUint32(at, true); names[a] = text(at + 4, n); at += 4 + n; break; }
+        case 2: { nodes[a] = document.createElement(names[v.getUint32(at, true)]); at += 4; break; }
+        case 3: { const n = v.getUint32(at, true); nodes[a] = document.createTextNode(text(at + 4, n)); at += 4 + n; break; }
+        case 4: { const n = v.getUint32(at, true); nodes[a].data = text(at + 4, n); at += 4 + n; break; }
+        case 5: {
+          const el = nodes[a], name = names[v.getUint32(at, true)], n = v.getUint32(at + 4, true), value = text(at + 8, n);
+          at += 8 + n;
+          el.setAttribute(name, value);
+          // What an input shows is its property, which its attribute only starts.
+          if (name === "value" && el.value !== value) el.value = value;
+          if (name === "checked") el.checked = true;
+          break;
+        }
+        case 6: {
+          const el = nodes[a], name = names[v.getUint32(at, true)];
+          at += 4;
+          el.removeAttribute(name);
+          if (name === "checked") el.checked = false;
+          break;
+        }
+        case 7: {
+          const p = nodes[a], n = nodes[v.getUint32(at, true)], b = nodes[v.getUint32(at + 4, true)] ?? null;
+          at += 8;
+          if (n.parentNode !== p || n.nextSibling !== b) p.insertBefore(n, b);
+          break;
+        }
+        case 8: {
+          const n = nodes[a];
+          if (n) {
+            for (const el of mounted) if (n === el || n.contains(el)) unmountReact(el);
+            n.remove();
+          }
+          break;
+        }
+        // A page whose server render was not what its program shows is made afresh: counted, for tests.
+        case 9: nodes[a].replaceChildren(); globalThis.flyRebuilt = (globalThis.flyRebuilt ?? 0) + 1; break;
+        case 10: {
+          const el = nodes[a], type = names[v.getUint32(at, true)], uid = v.getUint32(at + 4, true), msg = v.getUint32(at + 8, true);
+          at += 12;
+          listen(el, type);
+          el.__fly[type] = uid * 4294967296 + msg;
+          break;
+        }
+        case 11: { const el = nodes[a]; if (el.__fly) el.__fly = {}; break; }
+        case 12: nodes[a] = undefined; break;
+        // A copy of a node like the one a child shows, its nodes numbered in the order they come in.
+        case 13: {
+          const count = v.getUint32(at, true);
+          const copy = nodes[a].cloneNode(true);
+          let k = 0;
+          const number = (n) => {
+            nodes[v.getUint32(at + 4 + 4 * k++, true)] = n;
+            for (let c = n.firstChild; c; c = c.nextSibling) number(c);
+          };
+          number(copy);
+          at += 4 + 4 * count;
+          break;
+        }
+      }
+    }
   };
   // What the program takes next: a string it is told the length of, then copies out.
   let pending = new Uint8Array(0);
@@ -366,43 +442,6 @@ export async function start(url, root = document.getElementById("app"), options 
     });
   };
   const env = {
-    fly_dom_root: () => idOf(root),
-    fly_dom_child: (parent, i) => idOf(nodes[parent].childNodes[i]),
-    fly_dom_children: (parent) => nodes[parent].childNodes.length,
-    fly_dom_is: (node, tag, len) => (nodes[node]?.nodeName.toLowerCase() ?? "") === str(tag, len) ? 1 : 0,
-    fly_dom_create: (tag, len) => idOf(document.createElement(str(tag, len))),
-    fly_dom_text: (s, len) => idOf(document.createTextNode(str(s, len))),
-    fly_dom_set_text: (node, s, len) => { nodes[node].data = str(s, len); },
-    fly_dom_set_attr: (node, n, nl, v, vl) => {
-      const el = nodes[node], name = str(n, nl), value = str(v, vl);
-      el.setAttribute(name, value);
-      // What an input shows is its property, which its attribute only starts.
-      if (name === "value" && el.value !== value) el.value = value;
-      if (name === "checked") el.checked = true;
-    },
-    fly_dom_remove_attr: (node, n, nl) => {
-      const el = nodes[node], name = str(n, nl);
-      el.removeAttribute(name);
-      if (name === "checked") el.checked = false;
-    },
-    fly_dom_insert: (parent, node, before) => {
-      const p = nodes[parent], n = nodes[node], b = before ? nodes[before] : null;
-      if (n.parentNode !== p || n.nextSibling !== b) p.insertBefore(n, b);
-    },
-    fly_dom_remove: (node) => {
-      const n = nodes[node];
-      if (!n) return;
-      for (const el of mounted) if (n === el || n.contains(el)) unmountReact(el);
-      n.remove();
-    },
-    // A page whose server render was not what its program shows is made afresh: counted, for tests.
-    fly_dom_clear: (parent) => { nodes[parent].replaceChildren(); globalThis.flyRebuilt = (globalThis.flyRebuilt ?? 0) + 1; },
-    fly_dom_on: (node, e, len, msg) => {
-      const el = nodes[node], type = str(e, len);
-      listen(el, type);
-      el.__fly[type] = msg;
-    },
-    fly_dom_off: (node) => { const el = nodes[node]; if (el.__fly) el.__fly = {}; },
     fly_wait_event: new WebAssembly.Suspending(async () => {
       // A render is done: the React components it shows are mounted, or given their new props.
       syncReact(root);

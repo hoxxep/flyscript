@@ -575,8 +575,12 @@ _Noreturn void fly_div_zero(void) { fly_panic("division by zero"); }
 // apart. Memory freed stays the program's, to allocate again.
 //
 // In WebAssembly, where the allocator is the C library's too, spans are the pages memory grows by,
-// and a larger block is a run of whole pages, which says how many in its first 16 bytes; a run
-// freed is kept, and the first kept that is long enough is used again, its rest kept apart.
+// and a larger block is a run of whole pages, which says how many in its first 16 bytes. A run
+// freed is kept, joined to the kept runs beside it, in a bin by its length — one for each length up
+// to 32 pages, then one for each doubling — and the first kept that is long enough is used again,
+// its rest kept apart; a run grown into a kept run after it is grown in place. Without joining, a
+// page's program, whose renders free and take blocks of every size, would keep runs ever shorter
+// apart and look through ever more of them.
 #define FLY_SPAN ((size_t)64 << 10)
 #define FLY_CLASSES 36
 #define FLY_SMALL_MAX ((size_t)16 << 10)
@@ -660,32 +664,87 @@ static uint8_t* fly_spans(size_t n) {
 
 #ifdef __wasm__
 #define FLY_RUN 0xffffffffu
-// A run of pages: `FLY_RUN`, how many, and the next run kept, in its first 16 bytes.
-typedef struct fly_run { uint32_t mark; uint32_t spans; struct fly_run* next; } fly_run;
-static fly_run* fly_runs;
+#define FLY_KEPT 0xfffffffeu
+// A run of pages: `FLY_RUN` if in use, `FLY_KEPT` if kept free; how many; and, kept, its bin's
+// neighbours, in its first 16 bytes.
+typedef struct fly_run { uint32_t mark; uint32_t spans; struct fly_run* next; struct fly_run* prev; } fly_run;
+#define FLY_BINS 64
+static fly_run* fly_bins[FLY_BINS];
+// For each page, the length of the kept run it ends, if it ends one: what a run freed after it
+// finds to join. Memory has at most 65536 pages.
+static uint32_t fly_ends[65536];
+
+static inline unsigned fly_bin(uint32_t k) { return k <= 32 ? k - 1 : 27 + (31 - (unsigned)__builtin_clz(k)); }
+static inline size_t fly_page(const void* p) { return (size_t)((const uint8_t*)p - fly_heap_lo) / FLY_SPAN; }
+
+static void fly_keep(fly_run* r) {
+  r->mark = FLY_KEPT;
+  fly_run** b = &fly_bins[fly_bin(r->spans)];
+  r->prev = NULL;
+  r->next = *b;
+  if (*b) (*b)->prev = r;
+  *b = r;
+  fly_ends[fly_page(r) + r->spans - 1] = r->spans;
+}
+
+static void fly_unkeep(fly_run* r) {
+  if (r->prev) r->prev->next = r->next; else fly_bins[fly_bin(r->spans)] = r->next;
+  if (r->next) r->next->prev = r->prev;
+  fly_ends[fly_page(r) + r->spans - 1] = 0;
+  r->mark = FLY_RUN;
+}
+
+// The first `k` pages of `r`, which is in use, kept to it; the rest kept apart.
+static void fly_trim(fly_run* r, uint32_t k) {
+  if (r->spans <= k) return;
+  fly_run* rest = (fly_run*)((uint8_t*)r + (size_t)k * FLY_SPAN);
+  rest->spans = r->spans - k;
+  r->spans = k;
+  fly_keep(rest);
+}
 
 static void* fly_large(size_t n) {
-  size_t k = (n + 16 + FLY_SPAN - 1) / FLY_SPAN;
-  fly_run** at = &fly_runs;
-  while (*at && (*at)->spans < k) at = &(*at)->next;
-  fly_run* r = *at;
-  if (r) {
-    *at = r->next;
-    if (r->spans > k) {
-      fly_run* rest = (fly_run*)((uint8_t*)r + k * FLY_SPAN);
-      rest->mark = FLY_RUN;
-      rest->spans = r->spans - (uint32_t)k;
-      rest->next = fly_runs;
-      fly_runs = rest;
-      r->spans = (uint32_t)k;
+  uint32_t k = (uint32_t)((n + 16 + FLY_SPAN - 1) / FLY_SPAN);
+  for (unsigned b = fly_bin(k); b < FLY_BINS; b++) {
+    for (fly_run* r = fly_bins[b]; r; r = r->next) {
+      if (r->spans < k) continue;
+      fly_unkeep(r);
+      fly_trim(r, k);
+      return (uint8_t*)r + 16;
     }
-  } else {
-    r = (fly_run*)fly_spans(k);
-    if (!r) return NULL;
-    r->mark = FLY_RUN;
-    r->spans = (uint32_t)k;
   }
+  fly_run* r = (fly_run*)fly_spans(k);
+  if (!r) return NULL;
+  r->mark = FLY_RUN;
+  r->spans = k;
   return (uint8_t*)r + 16;
+}
+
+// A run freed: kept, joined to the kept runs just after it and just before it.
+static void fly_large_free(fly_run* r) {
+  fly_run* after = (fly_run*)((uint8_t*)r + (size_t)r->spans * FLY_SPAN);
+  if ((uint8_t*)after < fly_heap_hi && after->mark == FLY_KEPT) {
+    fly_unkeep(after);
+    r->spans += after->spans;
+  }
+  size_t at = fly_page(r);
+  if (at > 0 && fly_ends[at - 1]) {
+    fly_run* before = (fly_run*)((uint8_t*)r - (size_t)fly_ends[at - 1] * FLY_SPAN);
+    fly_unkeep(before);
+    before->spans += r->spans;
+    r = before;
+  }
+  fly_keep(r);
+}
+
+// A run grown to `k` pages where it is, if the run after it is kept and long enough.
+static bool fly_large_grow(fly_run* r, uint32_t k) {
+  fly_run* after = (fly_run*)((uint8_t*)r + (size_t)r->spans * FLY_SPAN);
+  if ((uint8_t*)after >= fly_heap_hi || after->mark != FLY_KEPT || r->spans + after->spans < k) return false;
+  fly_unkeep(after);
+  r->spans += after->spans;
+  fly_trim(r, k);
+  return true;
 }
 #else
 static void* fly_large(size_t n) { return fly_sys_malloc(n); }
@@ -782,9 +841,7 @@ void fly_mem_free(void* p) {
 #ifdef __wasm__
   c = fly_class_at(p);
   if (c == FLY_RUN) {
-    fly_run* r = (fly_run*)((uint8_t*)p - 16);
-    r->next = fly_runs;
-    fly_runs = r;
+    fly_large_free((fly_run*)((uint8_t*)p - 16));
     return;
   }
 #else
@@ -812,6 +869,7 @@ void* fly_mem_realloc(void* p, size_t n) {
     fly_run* r = (fly_run*)((uint8_t*)p - 16);
     size_t room = (size_t)r->spans * FLY_SPAN - 16;
     if (n <= room) return p;
+    if (fly_large_grow(r, (uint32_t)((n + 16 + FLY_SPAN - 1) / FLY_SPAN))) return p;
     void* q = fly_mem_alloc(n);
     if (!q) return NULL;
     memcpy(q, p, room);
@@ -1670,26 +1728,264 @@ void fly_map_free(fly_map* m) {
   *m = (fly_map){ 0 };
 }
 
-fly_Hasher fly_Hasher_new(void) { return (fly_Hasher){ 0xcbf29ce484222325ull }; }
+// A hash takes a word at a time: the state and the word, exclusive-or'd, multiplied by an odd
+// constant, its high half then folded into its low, which a table's buckets are told apart by. One
+// multiplication a word, which WebAssembly does in one instruction. Bytes go eight at a time,
+// little end first, the rest a word of their own, then their count. The same in runtime.js and the
+// reference evaluator (src/eval/builtins.rs).
+static inline void hash_word(fly_Hasher* h, uint64_t w) {
+  uint64_t x = (h->h ^ w) * 0x9e3779b97f4a7c15ull;
+  h->h = x ^ (x >> 32);
+}
+fly_Hasher fly_Hasher_new(void) { return (fly_Hasher){ 0x243f6a8885a308d3ull }; }
 static void hash_bytes(fly_Hasher* h, const uint8_t* p, size_t n) {
-  for (size_t i = 0; i < n; i++) h->h = (h->h ^ p[i]) * 0x100000001b3ull;
+  size_t i = 0;
+  for (; i + 8 <= n; i += 8) {
+    uint64_t w;
+    memcpy(&w, p + i, 8);
+    hash_word(h, w);
+  }
+  uint64_t t = 0;
+  for (size_t k = 0; i + k < n; k++) t |= (uint64_t)p[i + k] << (8 * k);
+  hash_word(h, t);
+  hash_word(h, n);
 }
-void fly_Hasher_writeInt(fly_Hasher* h, int64_t v) {
-  uint8_t b[8];
-  for (int k = 0; k < 8; k++) b[k] = (uint8_t)((uint64_t)v >> (8 * k));
-  hash_bytes(h, b, 8);
-}
+void fly_Hasher_writeInt(fly_Hasher* h, int64_t v) { hash_word(h, (uint64_t)v); }
 // A float hashes by its bits, as `Eq` sees it: `-0.0` as `0.0`, every `NaN` as one.
 void fly_Hasher_writeFloat(fly_Hasher* h, double v) {
   if (v == 0) v = 0;
   if (v != v) v = __builtin_nan("");
-  uint8_t b[8];
-  memcpy(b, &v, 8);
-  hash_bytes(h, b, 8);
+  uint64_t w;
+  memcpy(&w, &v, 8);
+  hash_word(h, w);
 }
-void fly_Hasher_writeBool(fly_Hasher* h, bool v) { uint8_t b = v; hash_bytes(h, &b, 1); }
+void fly_Hasher_writeBool(fly_Hasher* h, bool v) { hash_word(h, v); }
 void fly_Hasher_writeStr(fly_Hasher* h, fly_str s) { hash_bytes(h, s.ptr, s.len); }
 uint64_t fly_Hasher_finish(const fly_Hasher* h) { return h->h; }
+
+// ---- a page's DOM, by commands ----
+
+#ifdef __wasm__
+// What a page's program does to the page (web/dom.fly) is written as commands into one buffer, which
+// the page (web/flynext.js's `apply`) carries out in one call when the program waits, or asks the
+// page something: one crossing a render, not one a node. Nodes are numbered by the program as it
+// makes them, a number a node let go of had used again; tag, attribute and event names are each
+// sent once, and named by number after.
+__attribute__((import_module("fly"), import_name("dom_apply"))) void fly_host_dom_apply(const uint8_t* buf, uint32_t len);
+__attribute__((import_module("fly"), import_name("dom_root"))) void fly_host_dom_root(uint32_t id);
+__attribute__((import_module("fly"), import_name("dom_child"))) void fly_host_dom_child(uint32_t parent, uint32_t i, uint32_t id);
+__attribute__((import_module("fly"), import_name("dom_children"))) uint32_t fly_host_dom_children(uint32_t parent);
+__attribute__((import_module("fly"), import_name("dom_is"))) bool fly_host_dom_is(uint32_t node, const uint8_t* tag, uint32_t len);
+
+enum { DOM_NAME = 1, DOM_CREATE, DOM_TEXT, DOM_SET_TEXT, DOM_SET_ATTR, DOM_REMOVE_ATTR, DOM_INSERT, DOM_REMOVE, DOM_CLEAR, DOM_ON, DOM_OFF, DOM_FREE, DOM_CLONE };
+
+static uint8_t* dom_buf;
+static size_t dom_len, dom_cap;
+static uint32_t dom_next = 1;
+static uint32_t* dom_free;
+static size_t dom_nfree, dom_capfree;
+static uint32_t dom_root_id;
+
+static void dom_room(size_t n) {
+  if (dom_len + n <= dom_cap) return;
+  size_t cap = dom_cap ? dom_cap : 4096;
+  while (cap < dom_len + n) cap *= 2;
+  dom_buf = fly_mem_realloc(dom_buf, cap);
+  if (!dom_buf) fly_panic("out of memory");
+  dom_cap = cap;
+}
+static inline void dom_u8(uint8_t v) { dom_buf[dom_len++] = v; }
+static inline void dom_u32(uint32_t v) { memcpy(dom_buf + dom_len, &v, 4); dom_len += 4; }
+static inline void dom_bytes(const uint8_t* p, uint32_t n) { dom_u32(n); if (n) memcpy(dom_buf + dom_len, p, n); dom_len += n; }
+
+// Names, each with its number: a table open-addressed by a hash of the name's bytes.
+typedef struct { uint8_t* bytes; uint32_t len; uint32_t id; } dom_name;
+static dom_name* dom_names;
+static uint32_t dom_nnames, dom_capnames;
+
+static uint32_t dom_hash(const uint8_t* p, uint32_t n) {
+  uint32_t h = 2166136261u;
+  for (uint32_t i = 0; i < n; i++) h = (h ^ p[i]) * 16777619u;
+  return h;
+}
+
+static uint32_t dom_name_of(const uint8_t* p, uint32_t n) {
+  if (dom_nnames * 2 >= dom_capnames) {
+    uint32_t cap = dom_capnames ? dom_capnames * 2 : 64;
+    dom_name* t = fly_mem_calloc(cap, sizeof(dom_name));
+    if (!t) fly_panic("out of memory");
+    for (uint32_t i = 0; i < dom_capnames; i++) {
+      if (!dom_names[i].bytes) continue;
+      uint32_t at = dom_hash(dom_names[i].bytes, dom_names[i].len) & (cap - 1);
+      while (t[at].bytes) at = (at + 1) & (cap - 1);
+      t[at] = dom_names[i];
+    }
+    fly_mem_free(dom_names);
+    dom_names = t;
+    dom_capnames = cap;
+  }
+  uint32_t at = dom_hash(p, n) & (dom_capnames - 1);
+  while (dom_names[at].bytes) {
+    if (dom_names[at].len == n && memcmp(dom_names[at].bytes, p, n) == 0) return dom_names[at].id;
+    at = (at + 1) & (dom_capnames - 1);
+  }
+  uint8_t* copy = fly_mem_alloc(n + 1);
+  if (!copy) fly_panic("out of memory");
+  memcpy(copy, p, n);
+  uint32_t id = ++dom_nnames;
+  dom_names[at] = (dom_name){ copy, n, id };
+  dom_room(9 + n);
+  dom_u8(DOM_NAME);
+  dom_u32(id);
+  dom_bytes(p, n);
+  return id;
+}
+
+static uint32_t dom_id(void) {
+  if (dom_nfree) return dom_free[--dom_nfree];
+  return dom_next++;
+}
+
+// A number for a node the program is about to make.
+uint32_t fly_dom_id(void) { return dom_id(); }
+
+// A deep copy of `source`, its nodes numbered `ids`, in the order they come in (their start tags').
+void fly_dom_clone(uint32_t source, const uint32_t* ids, uint32_t count) {
+  dom_room(9 + 4 * (size_t)count);
+  dom_u8(DOM_CLONE);
+  dom_u32(source);
+  dom_u32(count);
+  memcpy(dom_buf + dom_len, ids, 4 * (size_t)count);
+  dom_len += 4 * (size_t)count;
+}
+
+void fly_dom_flush(void) {
+  if (!dom_len) return;
+  fly_host_dom_apply(dom_buf, (uint32_t)dom_len);
+  dom_len = 0;
+}
+
+uint32_t fly_dom_create(const uint8_t* tag, uint32_t len) {
+  uint32_t name = dom_name_of(tag, len);
+  uint32_t id = dom_id();
+  dom_room(9);
+  dom_u8(DOM_CREATE);
+  dom_u32(id);
+  dom_u32(name);
+  return id;
+}
+
+uint32_t fly_dom_text(const uint8_t* s, uint32_t len) {
+  uint32_t id = dom_id();
+  dom_room(9 + len);
+  dom_u8(DOM_TEXT);
+  dom_u32(id);
+  dom_bytes(s, len);
+  return id;
+}
+
+void fly_dom_set_text(uint32_t node, const uint8_t* s, uint32_t len) {
+  dom_room(9 + len);
+  dom_u8(DOM_SET_TEXT);
+  dom_u32(node);
+  dom_bytes(s, len);
+}
+
+void fly_dom_set_attr(uint32_t node, const uint8_t* n, uint32_t nlen, const uint8_t* v, uint32_t vlen) {
+  uint32_t name = dom_name_of(n, nlen);
+  dom_room(13 + vlen);
+  dom_u8(DOM_SET_ATTR);
+  dom_u32(node);
+  dom_u32(name);
+  dom_bytes(v, vlen);
+}
+
+void fly_dom_remove_attr(uint32_t node, const uint8_t* n, uint32_t nlen) {
+  uint32_t name = dom_name_of(n, nlen);
+  dom_room(9);
+  dom_u8(DOM_REMOVE_ATTR);
+  dom_u32(node);
+  dom_u32(name);
+}
+
+void fly_dom_insert(uint32_t parent, uint32_t node, uint32_t before) {
+  dom_room(13);
+  dom_u8(DOM_INSERT);
+  dom_u32(parent);
+  dom_u32(node);
+  dom_u32(before);
+}
+
+void fly_dom_remove(uint32_t node) {
+  dom_room(5);
+  dom_u8(DOM_REMOVE);
+  dom_u32(node);
+}
+
+// A node's number let go of: the page forgets the node, and the number is used again.
+void fly_dom_free(uint32_t node) {
+  if (!node || node == dom_root_id) return;
+  dom_room(5);
+  dom_u8(DOM_FREE);
+  dom_u32(node);
+  if (dom_nfree == dom_capfree) {
+    size_t cap = dom_capfree ? dom_capfree * 2 : 256;
+    dom_free = fly_mem_realloc(dom_free, cap * sizeof(uint32_t));
+    if (!dom_free) fly_panic("out of memory");
+    dom_capfree = cap;
+  }
+  dom_free[dom_nfree++] = node;
+}
+
+void fly_dom_clear(uint32_t parent) {
+  dom_room(5);
+  dom_u8(DOM_CLEAR);
+  dom_u32(parent);
+}
+
+void fly_dom_on(uint32_t node, const uint8_t* e, uint32_t len, uint32_t uid, uint32_t msg) {
+  uint32_t name = dom_name_of(e, len);
+  dom_room(17);
+  dom_u8(DOM_ON);
+  dom_u32(node);
+  dom_u32(name);
+  dom_u32(uid);
+  dom_u32(msg);
+}
+
+void fly_dom_off(uint32_t node) {
+  dom_room(5);
+  dom_u8(DOM_OFF);
+  dom_u32(node);
+}
+
+// What the program asks of the page waits for what it has done to be done.
+uint32_t fly_dom_root(void) {
+  if (!dom_root_id) {
+    fly_dom_flush();
+    dom_root_id = dom_id();
+    fly_host_dom_root(dom_root_id);
+  }
+  return dom_root_id;
+}
+
+uint32_t fly_dom_child(uint32_t parent, uint32_t i) {
+  fly_dom_flush();
+  uint32_t id = dom_id();
+  fly_host_dom_child(parent, i, id);
+  return id;
+}
+
+uint32_t fly_dom_children(uint32_t parent) {
+  fly_dom_flush();
+  return fly_host_dom_children(parent);
+}
+
+bool fly_dom_is(uint32_t node, const uint8_t* tag, uint32_t len) {
+  fly_dom_flush();
+  return fly_host_dom_is(node, tag, len);
+}
+#endif
 
 // ---- generators ----
 

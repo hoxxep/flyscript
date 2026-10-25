@@ -602,24 +602,37 @@ impl Interp {
             }
             "String.asStr" => Ok(Value::Text(a(0).as_text())),
             "String.clone" => Ok(Value::Text(a(0).as_text())),
-            // A hasher is an FNV-1a state.
-            "Hasher.new" => Ok(Value::Int(0xcbf29ce484222325)),
+            // A hasher takes a word at a time, as runtime.c's does (`hash_word`).
+            "Hasher.new" => Ok(Value::Int(0x243f6a8885a308d3)),
             "Hasher.writeInt" | "Hasher.writeFloat" | "Hasher.writeBool" | "Hasher.writeStr" => {
-                let bytes: Vec<u8> = match a(1).deref() {
-                    Value::Int(i) => (i as i64).to_le_bytes().to_vec(),
-                    // As `Eq` sees floats: `-0.0` is `0.0`, and every `NaN` is one value.
-                    Value::Float(f) => {
-                        let f = if f == 0.0 { 0.0 } else if f.is_nan() { f64::NAN } else { f };
-                        f.to_bits().to_le_bytes().to_vec()
-                    }
-                    Value::Bool(b) => vec![b as u8],
-                    other => other.as_text().as_bytes().to_vec(),
+                let word = |h: u64, w: u64| {
+                    let x = (h ^ w).wrapping_mul(0x9e3779b97f4a7c15);
+                    x ^ (x >> 32)
                 };
                 let p = place_of(&a(0))?;
                 let mut h = get(&p).as_int() as u64;
-                for b in bytes {
-                    h ^= b as u64;
-                    h = h.wrapping_mul(0x100000001b3);
+                match a(1).deref() {
+                    Value::Int(i) => h = word(h, i as i64 as u64),
+                    // As `Eq` sees floats: `-0.0` is `0.0`, and every `NaN` is one value.
+                    Value::Float(f) => {
+                        let f = if f == 0.0 { 0.0 } else if f.is_nan() { f64::NAN } else { f };
+                        h = word(h, f.to_bits());
+                    }
+                    Value::Bool(b) => h = word(h, b as u64),
+                    other => {
+                        let text = other.as_text();
+                        let bytes = text.as_bytes();
+                        let mut chunks = bytes.chunks_exact(8);
+                        for c in &mut chunks {
+                            h = word(h, u64::from_le_bytes(c.try_into().unwrap()));
+                        }
+                        let mut t = 0u64;
+                        for (k, b) in chunks.remainder().iter().enumerate() {
+                            t |= (*b as u64) << (8 * k);
+                        }
+                        h = word(h, t);
+                        h = word(h, bytes.len() as u64);
+                    }
                 }
                 set(&p, Value::Int(h as i128));
                 Ok(Value::Unit)

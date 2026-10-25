@@ -448,10 +448,27 @@ const { $rt, $b } = (() => {
   const none = () => ({ $tag: "None" });
   const some = (v) => ({ $tag: "Some", $: v });
 
+  // A word at a time, as runtime.c's `hash_word` takes them.
   class Hasher {
-    constructor() { this.h = 0xcbf29ce484222325n; }
-    bytes(bs) { for (const b of bs) this.h = BigInt.asUintN(64, (this.h ^ BigInt(b)) * 0x100000001b3n); }
+    constructor() { this.h = 0x243f6a8885a308d3n; }
+    word(w) {
+      const x = BigInt.asUintN(64, (this.h ^ BigInt.asUintN(64, w)) * 0x9e3779b97f4a7c15n);
+      this.h = x ^ (x >> 32n);
+    }
+    bytes(bs) {
+      let i = 0;
+      for (; i + 8 <= bs.length; i += 8) {
+        let w = 0n;
+        for (let k = 7; k >= 0; k--) w = (w << 8n) | BigInt(bs[i + k]);
+        this.word(w);
+      }
+      let t = 0n;
+      for (let k = 0; i + k < bs.length; k++) t |= BigInt(bs[i + k]) << BigInt(8 * k);
+      this.word(t);
+      this.word(BigInt(bs.length));
+    }
   }
+  const floatBits = (f) => { const v = new DataView(new ArrayBuffer(8)); v.setFloat64(0, f === 0 ? 0 : Number.isNaN(f) ? NaN : f, true); return v.getBigUint64(0, true); };
 
   // ---- the simulated world ----
 
@@ -818,9 +835,9 @@ const { $rt, $b } = (() => {
     Ref_get: (v) => v, Ref_clone: (v) => v,
 
     Hasher_new: () => new Hasher(),
-    Hasher_writeInt(r, i) { const b = []; let x = BigInt.asUintN(64, i); for (let k = 0; k < 8; k++) { b.push(Number(x & 255n)); x >>= 8n; } r.v.bytes(b); },
-    Hasher_writeFloat(r, f) { $b.Hasher_writeStr(r, String(f === 0 ? 0 : f)); },
-    Hasher_writeBool(r, b) { r.v.bytes([b ? 1 : 0]); },
+    Hasher_writeInt(r, i) { r.v.word(BigInt(i)); },
+    Hasher_writeFloat(r, f) { r.v.word(floatBits(f)); },
+    Hasher_writeBool(r, b) { r.v.word(b ? 1n : 0n); },
     Hasher_writeStr(r, s) { r.v.bytes(Array.from(s, (c) => c.charCodeAt(0))); },
     Hasher_finish: (h) => h.h,
 

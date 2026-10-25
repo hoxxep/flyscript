@@ -17,6 +17,11 @@ export effect Ui<M> {
   on(event: str, msg: M): void;
   text(s: str): void;
   close(): void;
+  // A part of the view shown as the render before showed it, if `key` is what it was then: false if
+  // the handler has that render's and keeps it, true if the part must be shown afresh, which
+  // `unmemo` ends.
+  memo(key: u64): bool;
+  unmemo(): void;
 }
 
 // What an event says besides its message: the text of the input it happened on, the key pressed,
@@ -66,6 +71,8 @@ export function map<A, B>(f: (a: A) => B, body: () => void uses Ui<A>): void use
     on(event, msg) resumes k => { Ui.on(event, f(msg)); k() }
     text(s) resumes k => { Ui.text(s); k() }
     close() resumes k => { Ui.close(); k() }
+    memo(key) resumes k => k(Ui.memo(key))
+    unmemo() resumes k => { Ui.unmemo(); k() }
   }
 }
 
@@ -79,6 +86,24 @@ export function react<P extends ToJson, M>(name: str, props: readonly P, msg: M)
   Ui.attr("data-fly-props", stringify(props).asStr());
   Ui.on("fly-react", msg);
   Ui.close();
+}
+
+// A part of a view that the page shows as it showed it in the render before, without calling `body`
+// or diffing what it shows, if `key` is what it was then: a row of a table whose data is the same.
+// `key` must change whenever what `body` shows would: `hashOf` of what it shows, say. What `body`
+// shows is one element. On the server, and the first time, `body` is called.
+export function memo<M>(key: u64, body: () => void uses Ui<M>): void uses Ui<M> {
+  if (Ui.memo(key)) {
+    body();
+    Ui.unmemo();
+  }
+}
+
+// A value's hash, as `memo`'s key: what changes whenever the value does, but by chance.
+export function hashOf<T extends Hash>(v: readonly T): u64 {
+  let h = Hasher.new();
+  v.hash(mut h);
+  h.finish()
 }
 
 // ---- without the page's program ----
@@ -120,6 +145,8 @@ export function messages<M extends Send & Clone>(view: () => void uses Ui<M>): V
     }
     text(_) resumes k => k(),
     close() resumes k => k(),
+    memo(_) resumes k => k(true),
+    unmemo() resumes k => k(),
   };
   out
 }
@@ -204,6 +231,8 @@ export function html<M>(out: mut String, view: () => void uses Ui<M>): void {
       }
       k()
     }
+    memo(_) resumes k => k(true),
+    unmemo() resumes k => k(),
   };
 }
 
@@ -236,7 +265,8 @@ function lateAttr(out: mut String, starting: bool, ends: mut Vec<usize>, a: str)
 
 // What a view does, as a flat list: each element's `#Open`, with where its operations end; its
 // attributes, key and events, whatever order the view gave them in; its children; and its `#Close`.
-export enum Op { #Open(String, usize), #Key(String), #Attr(String, String), #On(String, usize), #Text(String), #Close }
+// A memo of the page's program's (web/dom.fly) is `#Memo` and the memo's number: its operations its own.
+export enum Op { #Open(String, usize), #Key(String), #Attr(String, String), #On(String, usize), #Text(String), #Close, #Memo(usize) }
 impl Clone for Op;
 
 // The operations `view` does, each element's own before its children, and the messages its events
@@ -286,6 +316,8 @@ export function record<M extends Send & Clone>(view: () => void uses Ui<M>): [Ve
       fed.pop();
       k()
     }
+    memo(_) resumes k => k(true),
+    unmemo() resumes k => k(),
   };
   let all = if (late) { ownFirst(ops) } else { ops };
   spans(mut all);
@@ -294,7 +326,7 @@ export function record<M extends Send & Clone>(view: () => void uses Ui<M>): [Ve
 
 // Text after what is there: text next to text is one text, as HTML parses it, so the page the
 // server rendered is taken over node for node; text of nothing is none.
-function addText(ops: mut Vec<Op>, s: str): void {
+export function addText(ops: mut Vec<Op>, s: str): void {
   if (s.len() == 0) { return; }
   const n = ops.len();
   if (n > 0) {
@@ -307,7 +339,7 @@ function addText(ops: mut Vec<Op>, s: str): void {
 }
 
 // An element's own operations — attributes, key, events — moved before its children.
-function ownFirst(ops: Vec<Op>): Vec<Op> {
+export function ownFirst(ops: Vec<Op>): Vec<Op> {
   let all = ops;
   // For each element open, innermost last: its `#Open`, its own, and its children's so far.
   let opens: Vec<Op> = Vec.new();
@@ -328,6 +360,10 @@ function ownFirst(ops: Vec<Op>): Vec<Op> {
         const n = bodies.len();
         addText(mut bodies[n - 1], t.asStr());
       }
+      #Memo(_) => {
+        const n = bodies.len();
+        bodies[n - 1].push(op);
+      }
       #Close => {
         const o = match (opens.pop()) { #Some(o) => o, #None => continue };
         let own = match (owns.pop()) { #Some(v) => v, #None => Vec.new() };
@@ -344,7 +380,7 @@ function ownFirst(ops: Vec<Op>): Vec<Op> {
 }
 
 // Each `#Open` told where its element's operations end.
-function spans(ops: mut Vec<Op>): void {
+export function spans(ops: mut Vec<Op>): void {
   let open: Vec<usize> = Vec.new();
   for (const i of 0..ops.len()) {
     match (ops[i]) {

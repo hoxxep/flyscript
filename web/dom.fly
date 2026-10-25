@@ -4,12 +4,14 @@
 // against it, keyed children matched by their keys, the rest in order, and only what changed is
 // done to the page. The first takes over the page the server rendered, if it is the same.
 //
-// The page is reached through functions the host page gives (`web/flynext.js`): nodes by number,
-// strings as bytes in this program's memory. Waiting for an event, or for the server, suspends
-// the program until the page has one for it.
+// The page is reached through functions the runtime gives (runtime.c's `fly_dom_*`), which write
+// what the program does to it as commands, nodes by the numbers the program gives them, strings as
+// bytes; the host page (`web/flynext.js`) carries them out all at once when the program waits for
+// something, which `flush` does. Waiting for an event, or for the server, suspends the program
+// until the page has one for it.
 
 import { parse } from "std/json";
-import { Ui, Event, Op, record as recordOps } from "./ui";
+import { Ui, Event, Op, posting, addText, ownFirst, spans } from "./ui";
 import { HashMap } from "std/collections";
 
 extern "C" function fly_dom_root(): u32;
@@ -24,8 +26,15 @@ extern "C" function fly_dom_remove_attr(node: u32, name: u8*, nlen: u32): void;
 extern "C" function fly_dom_insert(parent: u32, node: u32, before: u32): void;
 extern "C" function fly_dom_remove(node: u32): void;
 extern "C" function fly_dom_clear(parent: u32): void;
-extern "C" function fly_dom_on(node: u32, event: u8*, elen: u32, msg: u32): void;
+// The message an event gives: the number of the render it is in, and its own within it.
+extern "C" function fly_dom_on(node: u32, event: u8*, elen: u32, uid: u32, msg: u32): void;
 extern "C" function fly_dom_off(node: u32): void;
+// What the program has done to the page, carried out; a node's number let go of, to be used again.
+extern "C" function fly_dom_flush(): void;
+extern "C" function fly_dom_free(node: u32): void;
+// A number for a node about to be made; a copy of a node made, its nodes numbered so, in order.
+extern "C" function fly_dom_id(): u32;
+extern "C" function fly_dom_clone(source: u32, ids: u32*, count: u32): void;
 // The next event, waited for; the server's answer to a request; what the server answers for a
 // page's data; the state the server rendered the page with: each a string the page keeps, of the
 // length given, for `fly_take` to copy out.
@@ -61,8 +70,12 @@ export function initial(): String {
   take(n)
 }
 
+// What the program has done to the page, shown before it waits for anything.
+function flush(): void { unsafe { fly_dom_flush(); } }
+
 // Asks the server: posts `body` to `url`, and gives what it answers.
 export function fetch(url: str, body: str): String {
+  flush();
   const n = unsafe { fly_fetch(at(url), url.len() as u32, at(body), body.len() as u32) };
   take(n)
 }
@@ -70,6 +83,7 @@ export function fetch(url: str, body: str): String {
 // Asks the server for what the page at `url` shows: the route that answers it, its title and the
 // state it starts from, as JSON.
 export function get(url: str): String {
+  flush();
   const n = unsafe { fly_get(at(url), url.len() as u32) };
   take(n)
 }
@@ -94,6 +108,7 @@ export function arrival(text: str): Arrival {
 
 // The page is now the one at `url`, called `title`, described as `description`.
 export function arrived(url: str, title: str, description: str, push: bool): void {
+  flush();
   unsafe { fly_arrived(at(url), url.len() as u32, at(title), title.len() as u32, at(description), description.len() as u32, push); }
 }
 
@@ -111,30 +126,310 @@ function setAttr(node: u32, name: str, value: str): void {
 
 function removeAttr(node: u32, name: str): void { unsafe { fly_dom_remove_attr(node, at(name), name.len() as u32); } }
 
-function listen(node: u32, event: str, msg: usize): void { unsafe { fly_dom_on(node, at(event), event.len() as u32, msg as u32); } }
+function listen(node: u32, event: str, uid: u32, msg: usize): void { unsafe { fly_dom_on(node, at(event), event.len() as u32, uid, msg as u32); } }
 
 function isTag(node: u32, tag: str): bool { unsafe { fly_dom_is(node, at(tag), tag.len() as u32) } }
 
 // ---- renders ----
 
-// What a render made: its operations (`Op`), and the node each `#Open` and `#Text` became. It knows
-// nothing of the page's messages, so the next page's render is diffed against it as any other:
-// what the two show alike — a layout around both — is left as it is.
-export type Render = { ops: Vec<Op>; nodes: Vec<u32> };
-
-// A render with nothing in it, the first page's to take the server's over.
-export function nothing(): Render { { ops: Vec.new(), nodes: Vec.new() } }
-
-// Records what `view` does, and the messages its events give, numbered as its `#On`s say.
-export function record<M extends Send & Clone>(view: () => void uses Ui<M>): [Render, Vec<M>] {
-  const [ops, msgs] = recordOps(view);
-  let nodes: Vec<u32> = Vec.new();
-  for (const _ of 0..ops.len()) { nodes.push(0); }
-  [{ ops, nodes }, msgs]
+// What a render made of a view, or of a memo's part of one (`memo`): its operations (`Op`); the
+// node each `#Open`, `#Text` and `#Memo` became; its memos, by number, each kept from the render
+// before or shown afresh — one the render after it keeps is taken from it, and is `#None` here; the
+// memos of the render before, those it did not keep still there, whose nodes the diff removes or
+// diffs what took their place against; the number its events' messages go by; and how many
+// messages its events give, its memos' too, which a posted form's numbers count.
+export struct Render {
+  ops: Vec<Op>;
+  nodes: Vec<u32>;
+  memos: Vec<Option<Memo>>;
+  was: Vec<Option<Memo>>;
+  uid: u32;
+  count: usize;
 }
 
-// One child of an element in a render: where its operations start and end, and its key.
-type Kid = { start: usize; end: usize; key: Option<String> };
+// A memo's render is boxed: keeping a memo moves it from one render to the next, a pointer. One
+// kept says which of the render before's it was.
+export struct Memo { key: u64; render: Box<Render>; kept: bool; from: usize }
+
+// A render with nothing in it, the first page's to take the server's over.
+export function nothing(): Render { Render { ops: Vec.new(), nodes: Vec.new(), memos: Vec.new(), was: Vec.new(), uid: 0, count: 0 } }
+
+// The messages the page's events give, by the number of the render they were recorded in, which
+// an event gives with its own within it: a memo kept keeps its messages, and its elements' events.
+// The view's own render is number 0; a memo's whose events give none has no number, `NONE`.
+export struct Messages<M> { by: Vec<Vec<M>>; free: Vec<u32> }
+
+const NONE: u32 = 0xffffffff;
+
+impl<M> Messages<M> {
+  export function new(): Messages<M> { Messages { by: [Vec.new()], free: Vec.new() } }
+
+  // A number for a render's messages, `ms`, if it has any.
+  function keep(self: mut Self, ms: Vec<M>): u32 {
+    if (ms.len() == 0) { return NONE; }
+    match (self.free.pop()) {
+      #Some(u) => {
+        self.by[u as usize] = ms;
+        u
+      }
+      #None => {
+        self.by.push(ms);
+        (self.by.len() - 1) as u32
+      }
+    }
+  }
+
+  // A render no longer shown: its messages, and its memos', forgotten.
+  function forget(self: mut Self, r: readonly Render): void {
+    if (r.uid != 0 && r.uid != NONE) {
+      self.by[r.uid as usize] = Vec.new();
+      self.free.push(r.uid);
+    }
+    for (const o of r.memos) { if (const #Some(m) = o) { self.forget(m.render); } }
+    for (const o of r.was) { if (const #Some(m) = o) { self.forget(m.render); } }
+  }
+}
+
+// What the `local`th message of the render numbered `uid` is.
+function message<M extends Clone>(msgs: readonly Messages<M>, uid: u32, local: usize): Option<M> {
+  const u = uid as usize;
+  if (u < msgs.by.len() && local < msgs.by[u].len()) { #Some(msgs.by[u][local].clone()) } else { #None }
+}
+
+// A render being recorded: what it has so far; the memos of the render before it, each taken once
+// it is kept, and how far through them in order it has come; past a run of memos not found in
+// order, where each is by key; and, as `ui.record` does, the elements open and whether their own
+// came after a child. A memo's render has its key. Its messages are `record`'s to keep: all else of
+// recording is the same whatever a page's messages are, and is in the core every page's module
+// shares, not in each.
+struct Rec {
+  r: Render;
+  old: Vec<Option<Memo>>;
+  at: usize;
+  byKey: Option<HashMap<u64, Vec<usize>>>;
+  misses: usize;
+  open: Vec<String>;
+  fed: Vec<bool>;
+  late: bool;
+  key: u64;
+}
+
+// Room for `n` more, made at once rather than as it is needed: if there is none, what is pushed panics.
+function room<T>(v: mut Vec<T>, n: usize): void {
+  try { v.tryReserve(n); } catch (_) {}
+}
+
+// How far ahead of where it has come a render looks for a memo by key before looking it up: a few
+// rows removed, or changed, between two kept.
+const AHEAD: usize = 8;
+
+impl Rec {
+  // A render's lists are as long as the render before's, likely: they are made so at once. The
+  // render before's memos are this one's to keep, if `keep`.
+  function of(prev: mut Render, keep: bool, uid: u32, key: u64): Rec {
+    const old: Vec<Option<Memo>> = if (keep) { replace(mut prev.memos, Vec.new()) } else { Vec.new() };
+    let r = Render { ops: Vec.new(), nodes: Vec.new(), memos: Vec.new(), was: Vec.new(), uid, count: 0 };
+    room(mut r.ops, prev.ops.len());
+    room(mut r.memos, old.len());
+    Rec { r, old, at: 0, byKey: #None, misses: 0, open: Vec.new(), fed: Vec.new(), late: false, key }
+  }
+
+  // Where the memo of the render before whose key is `key` is, if one not taken has it: the next in
+  // order, or one a little ahead of it, or, past a run not found so, the one the key finds.
+  function claim(self: mut Self, key: u64): Option<usize> {
+    let j = self.at;
+    while (j < self.old.len() && j < self.at + AHEAD) {
+      if (const #Some(m) = self.old[j] && m.key == key) {
+        self.at = j + 1;
+        self.misses = 0;
+        return #Some(j);
+      }
+      j += 1;
+    }
+    self.misses += 1;
+    if (self.byKey.isNone() && self.misses >= AHEAD) {
+      let by: HashMap<u64, Vec<usize>> = HashMap.new();
+      for (const [i, o] of self.old.iter().enumerate()) {
+        if (const #Some(m) = o) {
+          match (by.getMut(m.key)) {
+            #Some(v) => v.push(i),
+            #None => { by.insert(m.key, [i]); }
+          }
+        }
+      }
+      self.byKey = #Some(by);
+    }
+    let found: Option<usize> = #None;
+    if (const #Some(by) = self.byKey) {
+      if (const #Some(list) = by.get(key)) {
+        for (const i of list) {
+          if (self.old[i].isSome()) {
+            found = #Some(i);
+            break;
+          }
+        }
+      }
+    }
+    found
+  }
+
+  // The memo of the render before at `j`, kept: moved to this render as its next, said to be kept.
+  function keep(self: mut Self, j: usize): usize {
+    const i = self.r.memos.len();
+    self.r.memos.push(replace(mut self.old[j], #None));
+    if (const #Some(m) = self.r.memos[i]) {
+      m.kept = true;
+      m.from = j;
+      self.r.count += m.render.count;
+    }
+    self.r.ops.push(#Memo(i));
+    i
+  }
+
+  // A child of the innermost open element's is here.
+  function feed(self: mut Self): void {
+    if (self.fed.len() > 0) { self.fed[self.fed.len() - 1] = true; }
+  }
+
+  // An element's own operation is here: after a child of its, perhaps.
+  function own(self: mut Self): void {
+    self.late = self.late || (self.fed.len() > 0 && self.fed[self.fed.len() - 1]);
+  }
+
+  // The render recorded: its elements' own operations before their children, where each element's
+  // end is, and the memos of the render before it did not keep.
+  function done(self: Self): Render {
+    let rec = self;
+    let r = replace(mut rec.r, nothing());
+    if (rec.late) { r.ops = ownFirst(replace(mut r.ops, Vec.new())); }
+    spans(mut r.ops);
+    room(mut r.nodes, r.ops.len());
+    for (const _ of 0..r.ops.len()) { r.nodes.push(0); }
+    r.was = replace(mut rec.old, Vec.new());
+    r
+  }
+}
+
+// What each of the view's operations does to the render being recorded, the innermost, `stack`'s
+// last.
+function recOpen(stack: mut Vec<Rec>, tag: str): void {
+  const t = stack.len() - 1;
+  stack[t].feed();
+  stack[t].r.ops.push(#Open(tag.toString(), 0));
+  stack[t].open.push(tag.toString());
+  stack[t].fed.push(false);
+}
+
+function recKey(stack: mut Vec<Rec>, s: str): void {
+  const t = stack.len() - 1;
+  stack[t].own();
+  stack[t].r.ops.push(#Key(s.toString()));
+}
+
+function recAttr(stack: mut Vec<Rec>, name: str, value: str): void {
+  const t = stack.len() - 1;
+  stack[t].own();
+  stack[t].r.ops.push(#Attr(name.toString(), value.toString()));
+}
+
+// An event, its message the `local`th of the render's; `order` how many the view's events have
+// given so far, which a posted form's numbers count.
+function recOn(stack: mut Vec<Rec>, event: str, local: usize, order: mut usize): void {
+  const t = stack.len() - 1;
+  stack[t].own();
+  stack[t].r.ops.push(#On(event.toString(), local));
+  const tag = match (stack[t].open.last()) { #Some(g) => g.clone(), #None => String.new() };
+  for (const [name, value] of posting(tag.asStr(), event, order)) { stack[t].r.ops.push(#Attr(name.clone(), value.clone())); }
+  stack[t].r.count += 1;
+  order += 1;
+}
+
+function recText(stack: mut Vec<Rec>, s: str): void {
+  const t = stack.len() - 1;
+  stack[t].feed();
+  addText(mut stack[t].r.ops, s);
+}
+
+function recClose(stack: mut Vec<Rec>): void {
+  const t = stack.len() - 1;
+  stack[t].r.ops.push(#Close);
+  stack[t].open.pop();
+  stack[t].fed.pop();
+}
+
+// A memo: kept from the render before, or its body to be shown afresh, into a render of its own,
+// which `recUnmemo` ends: whether it is.
+function recMemo(stack: mut Vec<Rec>, key: u64, order: mut usize): bool {
+  const t = stack.len() - 1;
+  stack[t].feed();
+  match (stack[t].claim(key)) {
+    #Some(j) => {
+      const before = stack[t].r.count;
+      stack[t].keep(j);
+      order += stack[t].r.count - before;
+      false
+    }
+    #None => {
+      let none = nothing();
+      stack.push(Rec.of(mut none, false, NONE, key));
+      true
+    }
+  }
+}
+
+// A memo shown afresh, ended: its render, numbered `uid`, the next of the render it is in.
+function recUnmemo(stack: mut Vec<Rec>, uid: u32): void {
+  const rec = match (stack.pop()) { #Some(r) => r, #None => panic("a memo ended that was not begun") };
+  const key = rec.key;
+  let r = rec.done();
+  r.uid = uid;
+  const t = stack.len() - 1;
+  const i = stack[t].r.memos.len();
+  stack[t].r.count += r.count;
+  stack[t].r.memos.push(#Some(Memo { key, render: Box.new(r), kept: false, from: 0 }));
+  stack[t].r.ops.push(#Memo(i));
+}
+
+// Records what `view` does into a render, its messages kept in `msgs`: a memo whose key is what it
+// was in `prev`, the render before, kept as it was, its body not called, if `keep`.
+export function record<M extends Send & Clone>(view: () => void uses Ui<M>, prev: mut Render, msgs: mut Messages<M>, keep: bool): Render {
+  let stack: Vec<Rec> = [Rec.of(mut prev, keep, 0, 0)];
+  // The messages of each render being recorded, as `stack` has them.
+  let given: Vec<Vec<M>> = [Vec.new()];
+  // How many messages the view's events have given so far: what a posted form's numbers count.
+  let order: usize = 0;
+  handle { view() } with Ui<M> {
+    open(tag) resumes k => { recOpen(mut stack, tag); k() }
+    key(s) resumes k => { recKey(mut stack, s); k() }
+    attr(name, value) resumes k => { recAttr(mut stack, name, value); k() }
+    on(event, msg) resumes k => {
+      const t = given.len() - 1;
+      recOn(mut stack, event, given[t].len(), mut order);
+      given[t].push(msg.clone());
+      k()
+    }
+    text(s) resumes k => { recText(mut stack, s); k() }
+    close() resumes k => { recClose(mut stack); k() }
+    memo(key) resumes k => {
+      const fresh = recMemo(mut stack, key, mut order);
+      if (fresh) { given.push(Vec.new()); }
+      k(fresh)
+    }
+    unmemo() resumes k => {
+      const ms = match (given.pop()) { #Some(m) => m, #None => Vec.new() };
+      recUnmemo(mut stack, msgs.keep(ms));
+      k()
+    }
+  };
+  const root = match (stack.pop()) { #Some(r) => r, #None => panic("the view's render was lost") };
+  msgs.by[0] = match (given.pop()) { #Some(m) => m, #None => Vec.new() };
+  root.done()
+}
+
+// ---- the children of an element ----
+
+// One child of an element in a render: where its operations start and end.
+type Kid = { start: usize; end: usize };
 
 // Where the operations of the child starting at `i` end: as its `#Open` says, for an element.
 function spanOf(ops: readonly Vec<Op>, i: usize): usize {
@@ -148,9 +443,9 @@ function kids(ops: readonly Vec<Op>, from: usize): Vec<Kid> {
   while (i < ops.len()) {
     match (ops[i]) {
       #Close => return out,
-      #Open(_, _) | #Text(_) => {
+      #Open(_, _) | #Text(_) | #Memo(_) => {
         const end = spanOf(ops, i);
-        out.push({ start: i, end, key: keyOf(ops, i) });
+        out.push({ start: i, end });
         i = end;
       }
       _ => { i += 1; }
@@ -159,25 +454,434 @@ function kids(ops: readonly Vec<Op>, from: usize): Vec<Kid> {
   out
 }
 
-// An element's key, among its own operations, before its children.
-function keyOf(ops: readonly Vec<Op>, i: usize): Option<String> {
-  if (const #Open(_, _) = ops[i]) {
-    let j = i + 1;
-    while (j < ops.len()) {
-      match (ops[j]) {
-        #Key(k) => return #Some(k.clone()),
-        #Attr(_, _) | #On(_, _) => { j += 1; }
-        _ => return #None,
+function isClose(op: readonly Op): bool { match (op) { #Close => true, _ => false } }
+
+function isChild(op: readonly Op): bool {
+  match (op) { #Open(_, _) | #Text(_) | #Memo(_) => true, _ => false }
+}
+
+// What kind of node the child at `i` of `r` is — an element of its tag, or a text — and its key, a
+// memo's those of what its render shows.
+function kindAt(r: readonly Render, i: usize): str from r {
+  match (r.ops[i]) {
+    #Open(tag, _) => tag.asStr(),
+    #Memo(m) => match (r.memos[m]) { #Some(mm) => kindAt(mm.render, 0), #None => "" },
+    _ => "#text",
+  }
+}
+
+function keyAt(r: readonly Render, i: usize): Option<str> from r {
+  match (r.ops[i]) {
+    #Open(_, _) => {
+      let j = i + 1;
+      while (j < r.ops.len()) {
+        match (r.ops[j]) {
+          #Key(k) => return #Some(k.asStr()),
+          #Attr(_, _) | #On(_, _) => { j += 1; }
+          _ => return #None,
+        }
+      }
+      #None
+    }
+    #Memo(m) => match (r.memos[m]) { #Some(mm) => keyAt(mm.render, 0), #None => #None },
+    _ => #None,
+  }
+}
+
+// What a memo of the render before, `old`, is now: still its own, where the diff of a memo's
+// render finds it; gone from it, in the render after, `new`, to be diffed against or removed; or
+// kept by the render after, and shown there as it was.
+enum Then { #Own, #Gone, #Kept }
+
+function then(old: readonly Render, new: readonly Render, j: usize): Then {
+  if (j < old.memos.len() && old.memos[j].isSome()) { return #Own; }
+  if (j < new.was.len() && new.was[j].isSome()) { return #Gone; }
+  #Kept
+}
+
+// The render a memo of the render before showed, wherever it is.
+function oldMemo(old: readonly Render, new: readonly Render, j: usize): readonly Render from old, new {
+  match (then(old, new, j)) {
+    #Own => match (old.memos[j]) { #Some(m) => m.render, #None => panic("a memo is not where it was") },
+    _ => match (new.was[j]) { #Some(m) => m.render, #None => panic("a memo is not where it was") },
+  }
+}
+
+// Who a child is: a memo the render after kept is that memo, whatever it shows; any other child is
+// what it shows, its kind and key.
+enum Who { #Kept(usize), #Shows(String, Option<String>) }
+
+function oldWho(old: readonly Render, new: readonly Render, i: usize): Who {
+  if (const #Memo(j) = old.ops[i]) {
+    return match (then(old, new, j)) {
+      #Kept => #Kept(j),
+      _ => shows(oldMemo(old, new, j), 0),
+    };
+  }
+  shows(old, i)
+}
+
+function newWho(new: readonly Render, i: usize): Who {
+  if (const #Memo(m) = new.ops[i]) {
+    return match (new.memos[m]) {
+      #Some(mm) => if (mm.kept) { #Kept(mm.from) } else { shows(mm.render, 0) },
+      #None => #Shows(String.new(), #None),
+    };
+  }
+  shows(new, i)
+}
+
+function shows(r: readonly Render, i: usize): Who {
+  #Shows(kindAt(r, i).toString(), match (keyAt(r, i)) { #Some(k) => #Some(k.toString()), #None => #None })
+}
+
+// Whether an old child and a new one are the same, without making anything: the same memo kept, or
+// the same kind of node with the same key, or none.
+function same(old: readonly Render, oi: usize, new: readonly Render, ni: usize): bool {
+  const kept: Option<usize> = match (new.ops[ni]) {
+    #Memo(m) => match (new.memos[m]) { #Some(mm) => if (mm.kept) { #Some(mm.from) } else { #None }, #None => #None },
+    _ => #None,
+  };
+  const was: Option<usize> = match (old.ops[oi]) {
+    #Memo(j) => match (then(old, new, j)) { #Kept => #Some(j + 0), _ => #None },
+    _ => #None,
+  };
+  if (kept.isSome() || was.isSome()) { return kept == was; }
+  if (const #Memo(j) = old.ops[oi]) {
+    const r = oldMemo(old, new, j);
+    return kindAt(r, 0) == kindAt(new, ni) && keyAt(r, 0) == keyAt(new, ni);
+  }
+  kindAt(old, oi) == kindAt(new, ni) && keyAt(old, oi) == keyAt(new, ni)
+}
+
+// Updates the children of `parent`, which `old`'s start at `oi` and `new`'s at `ni`: each new one
+// matched to an old one — the same memo kept, or by key, or in order among those of its kind
+// without one — and patched; the rest made, the old ones not matched removed, and all put in order.
+// A memo kept is shown as it was: its node is the one it had, and nothing in it is looked at.
+export function children(parent: u32, old: mut Render, oi: usize, new: mut Render, ni: usize): void {
+  // The same children as before, in the same order — what most renders find: each patched where it
+  // is as it is found to be, nothing moved, and nothing made to find them. Patching what is then
+  // found not to be so again does what it did again.
+  let a = oi;
+  let b = ni;
+  while (true) {
+    const oc = a < old.ops.len() && !isClose(old.ops[a]);
+    const nc = b < new.ops.len() && !isClose(new.ops[b]);
+    if (!oc || !nc) {
+      if (oc == nc) { return; }
+      break;
+    }
+    // What is not a child is an element's own, which come first.
+    if (!isChild(old.ops[a])) { a += 1; continue; }
+    if (!isChild(new.ops[b])) { b += 1; continue; }
+    if (!same(old, a, new, b)) { break; }
+    patchKid(mut old, a, mut new, b);
+    a = spanOf(old.ops, a);
+    b = spanOf(new.ops, b);
+  }
+  const was = kids(old.ops, oi);
+  const now = kids(new.ops, ni);
+  let used: Vec<bool> = Vec.new();
+  for (const _ of was) { used.push(false); }
+  // By who they are: a kept memo by its number, else by kind and key after a zero byte, which no
+  // tag has, for a keyed child.
+  let lists: HashMap<String, Vec<usize>> = HashMap.new();
+  for (const [j, w] of was.iter().enumerate()) {
+    const at = whoKey(oldWho(old, new, w.start));
+    match (lists.getMut(at.asStr())) {
+      #Some(v) => v.push(j),
+      #None => { lists.insert(at, [j]); }
+    }
+  }
+  // How far each list has been taken from; and, of the children made, one of each shape, to copy.
+  let taken: HashMap<String, usize> = HashMap.new();
+  let shapes: Shapes = HashMap.new();
+  let nodes: Vec<u32> = Vec.new();
+  for (const kid of now) {
+    let found: Option<usize> = #None;
+    const at = whoKey(newWho(new, kid.start));
+    if (const #Some(list) = lists.get(at.asStr())) {
+      let t = match (taken.get(at.asStr())) { #Some(t) => t + 0, #None => 0 };
+      while (t < list.len() && used[list[t]]) { t += 1; }
+      if (t < list.len()) {
+        found = #Some(list[t]);
+        t += 1;
+      }
+      taken.insert(at.clone(), t);
+    }
+    const node = match (found) {
+      #Some(j) => {
+        used[j] = true;
+        patchKid(mut old, was[j].start, mut new, kid.start)
+      }
+      #None => buildKid(mut new, kid.start, mut shapes),
+    };
+    nodes.push(node);
+  }
+  for (const [j, w] of was.iter().enumerate()) {
+    if (used[j]) { continue; }
+    // A memo kept elsewhere is shown there, its node with it.
+    if (const #Kept(_) = oldWho(old, new, w.start)) { continue; }
+    unsafe { fly_dom_remove(old.nodes[w.start]); }
+    letGo(old, new, w.start);
+  }
+  // In order, from the last: each put before the one after it, if it is not there already.
+  let next: u32 = 0;
+  let k = nodes.len();
+  while (k > 0) {
+    k -= 1;
+    unsafe { fly_dom_insert(parent, nodes[k], next); }
+    next = nodes[k];
+  }
+}
+
+// The numbers of the nodes an old child removed showed, let go of: the page forgets them, and they
+// are used again.
+function letGo(old: readonly Render, new: readonly Render, i: usize): void {
+  if (const #Some(j) = memoAt(old.ops, i)) {
+    match (then(old, new, j)) {
+      #Kept => {}
+      _ => { letGoAll(oldMemo(old, new, j)); }
+    }
+    return;
+  }
+  const end = spanOf(old.ops, i);
+  for (const k of i..end) {
+    match (old.ops[k]) {
+      #Memo(m) => match (then(old, new, m)) {
+        #Kept => {}
+        _ => { letGoAll(oldMemo(old, new, m)); }
+      },
+      #Open(_, _) | #Text(_) => unsafe { fly_dom_free(old.nodes[k]); },
+      _ => {}
+    }
+  }
+}
+
+// Every node a render showed, let go of.
+function letGoAll(r: readonly Render): void {
+  for (const k of 0..r.ops.len()) {
+    match (r.ops[k]) {
+      #Memo(m) => match (r.memos[m]) { #Some(mm) => letGoAll(mm.render), #None => {} },
+      #Open(_, _) | #Text(_) => unsafe { fly_dom_free(r.nodes[k]); },
+      _ => {}
+    }
+  }
+}
+
+function whoKey(w: Who): String {
+  match (w) {
+    #Kept(j) => `\u{1}${j}`,
+    #Shows(kind, #Some(k)) => `${kind}\u{0}${k}`,
+    #Shows(kind, #None) => kind,
+  }
+}
+
+// The new child at `ni`, shown where the old one at `oi` was: a memo kept is its node as it was; one
+// shown afresh, or any other child, is patched against what the old child showed, from wherever
+// that is.
+function patchKid(old: mut Render, oi: usize, new: mut Render, ni: usize): u32 {
+  const om: Option<usize> = match (old.ops[oi]) { #Memo(j) => #Some(j + 0), _ => #None };
+  const nm: Option<usize> = match (new.ops[ni]) { #Memo(m) => #Some(m + 0), _ => #None };
+  const kept = match (nm) { #Some(m) => match (new.memos[m]) { #Some(mm) => mm.kept, #None => false }, #None => false };
+  if (kept) {
+    const node = old.nodes[oi];
+    new.nodes[ni] = node;
+    return node;
+  }
+  const state: Then = match (om) { #Some(j) => then(old, new, j), #None => #Own };
+  const node = match ([om, nm, state]) {
+    [#Some(j), _, #Own] => match (nm) {
+      #Some(m) => patchIn(mut old.memos[j], mut new.memos[m]),
+      #None => match (old.memos[j]) { #Some(o) => patch(mut o.render, 0, mut new, ni), #None => 0 },
+    },
+    [#Some(j), _, #Gone] => {
+      // What took its place is diffed against it, which the render after holds.
+      let was = replace(mut new.was[j], #None);
+      const node = match (nm) {
+        #Some(m) => patchIn(mut was, mut new.memos[m]),
+        #None => match (was) { #Some(o) => patch(mut o.render, 0, mut new, ni), #None => 0 },
+      };
+      new.was[j] = was;
+      node
+    }
+    [#Some(_), _, #Kept] => buildIn(mut new, ni),
+    [#None, #Some(m), _] => match (new.memos[m]) { #Some(n) => patch(mut old, oi, mut n.render, 0), #None => 0 },
+    _ => patch(mut old, oi, mut new, ni),
+  };
+  new.nodes[ni] = node;
+  node
+}
+
+// A memo's render shown afresh, patched against an old memo's.
+function patchIn(old: mut Option<Memo>, new: mut Option<Memo>): u32 {
+  if (const #Some(o) = old) {
+    if (const #Some(n) = new) { return patch(mut o.render, 0, mut n.render, 0); }
+  }
+  0
+}
+
+// The number of the memo the operation at `i` is, if it is one.
+function memoAt(ops: readonly Vec<Op>, i: usize): Option<usize> {
+  match (ops[i]) { #Memo(m) => #Some(m), _ => #None }
+}
+
+// The new child at `ni`, made: a memo kept is its node as it was, moved here; one of a shape made
+// before among its siblings, a copy of that one (`clone`).
+function buildKid(new: mut Render, ni: usize, shapes: mut Shapes): u32 {
+  if (const #Some(m) = memoAt(new.ops, ni)) {
+    if (const #Some(mm) = new.memos[m] && mm.kept) {
+      const node = mm.render.nodes[0];
+      new.nodes[ni] = node;
+      return node;
+    }
+  }
+  if (const #Some(node) = clone(mut new, ni, mut shapes)) { return node; }
+  buildIn(mut new, ni)
+}
+
+// ---- made by copying ----
+
+// Of the children made so far, one of each shape: its place among its siblings, and its node.
+type Shapes = HashMap<u64, [usize, u32]>;
+
+// A child's shape: its nodes but for their text, attributes' values and events — what a copy of a
+// child of the same shape becomes by having only those set — and how many nodes it has. A memo's
+// is its render's. A child holding a React component's element has none: React's nodes are React's.
+function shapeOf(r: readonly Render, i: usize): Option<[u64, u32]> {
+  let h = Hasher.new();
+  let n: u32 = 0;
+  const memo = memoAt(r.ops, i).isSome();
+  h.writeBool(memo);
+  if (!shapeInto(r, i, mut h, mut n, memo)) { return #None; }
+  #Some([h.finish(), n])
+}
+
+// A plain child's shape may hold no memo: its copy and it would be the same render's, which a copy
+// is filled in from as it is filled in.
+function shapeInto(r: readonly Render, i: usize, h: mut Hasher, n: mut u32, memos: bool): bool {
+  if (const #Some(m) = memoAt(r.ops, i)) {
+    if (!memos) { return false; }
+    return match (r.memos[m]) { #Some(mm) => shapeInto(mm.render, 0, mut h, mut n, true), #None => false };
+  }
+  const end = spanOf(r.ops, i);
+  for (const k of i..end) {
+    match (r.ops[k]) {
+      #Open(tag, _) => {
+        h.writeInt(1);
+        h.writeStr(tag.asStr());
+        n += 1;
+      }
+      #Text(_) => {
+        h.writeInt(2);
+        n += 1;
+      }
+      #Attr(name, _) => {
+        if (name == "data-fly-react") { return false; }
+        h.writeInt(3);
+        h.writeStr(name.asStr());
+      }
+      #On(e, _) => {
+        h.writeInt(4);
+        h.writeStr(e.asStr());
+      }
+      #Key(_) => h.writeInt(5),
+      #Close => h.writeInt(6),
+      #Memo(m) => {
+        if (!memos) { return false; }
+        const ok = match (r.memos[m]) { #Some(mm) => shapeInto(mm.render, 0, mut h, mut n, true), #None => false };
+        if (!ok) { return false; }
       }
     }
   }
-  #None
+  true
 }
 
-// What kind of node a child is: an element of its tag, or a text.
-function kindOf(op: readonly Op): String {
-  match (op) { #Open(tag, _) => tag.clone(), _ => "#text".toString() }
+// The new child at `ni` made as a copy of one of its shape made before among its siblings, if there
+// is one; else, made as any is, it is the one of its shape to copy.
+function clone(new: mut Render, ni: usize, shapes: mut Shapes): Option<u32> {
+  const [shape, count] = match (shapeOf(new, ni)) { #Some(s) => s, #None => return #None };
+  const [ti, source] = match (shapes.get(shape)) {
+    #Some([t, s]) => [t + 0, s + 0],
+    #None => {
+      const node = buildIn(mut new, ni);
+      shapes.insert(shape, [ni, node]);
+      return #Some(node);
+    }
+  };
+  let ids: Vec<u32> = Vec.new();
+  for (const _ of 0..count) { ids.push(unsafe { fly_dom_id() }); }
+  unsafe { fly_dom_clone(source, Ptr.fromRef(ids[0]), count); }
+  let at: usize = 0;
+  const node = match ([memoAt(new.ops, ti), memoAt(new.ops, ni)]) {
+    // Each a memo: two renders, the copy's filled in from the source's.
+    [#Some(tm), #Some(m)] => {
+      let target = replace(mut new.memos[m], #None);
+      let node: u32 = 0;
+      if (const #Some(f) = target) {
+        if (const #Some(t) = new.memos[tm]) {
+          node = fill(t.render.ops, t.render.memos, 0, f.render.ops, mut f.render.nodes, mut f.render.memos, f.render.uid, 0, ids, mut at);
+        }
+      }
+      new.memos[m] = target;
+      node
+    }
+    _ => {
+      let none: Vec<Option<Memo>> = Vec.new();
+      fill(new.ops, none, ti, new.ops, mut new.nodes, mut new.memos, new.uid, ni, ids, mut at)
+    }
+  };
+  new.nodes[ni] = node;
+  #Some(node)
 }
+
+// A copy of the child at `ti` of the source render, made for the child at `fi` of the copy's, filled
+// in: its nodes' numbers, `ids` from `at`, in order; and its text, attributes' values and events
+// where they are not the source's. Its node.
+function fill(tops: readonly Vec<Op>, tmemos: readonly Vec<Option<Memo>>, ti: usize, fops: readonly Vec<Op>, fnodes: mut Vec<u32>, fmemos: mut Vec<Option<Memo>>, uid: u32, fi: usize, ids: readonly Vec<u32>, at: mut usize): u32 {
+  const end = spanOf(fops, fi);
+  let a = ti;
+  let el: u32 = 0;
+  let first: u32 = 0;
+  for (const b of fi..end) {
+    match (fops[b]) {
+      #Open(_, _) => {
+        el = ids[at + 0];
+        at += 1;
+        fnodes[b] = el;
+        if (first == 0) { first = el; }
+      }
+      #Text(s) => {
+        const id = ids[at + 0];
+        at += 1;
+        fnodes[b] = id;
+        if (first == 0) { first = id; }
+        if (const #Text(was) = tops[a] && was != s) { setText(id, s.asStr()); }
+      }
+      #Attr(n, v) => {
+        if (const #Attr(_, was) = tops[a] && was != v) { setAttr(el, n.asStr(), v.asStr()); }
+      }
+      #On(e, m) => listen(el, e.asStr(), uid, m),
+      #Memo(m) => {
+        let node: u32 = 0;
+        if (const #Some(tm) = memoAt(tops, a)) {
+          if (const #Some(f) = fmemos[m]) {
+            if (const #Some(t) = tmemos[tm]) {
+              node = fill(t.render.ops, t.render.memos, 0, f.render.ops, mut f.render.nodes, mut f.render.memos, f.render.uid, 0, ids, mut at);
+            }
+          }
+        }
+        fnodes[b] = node;
+        if (first == 0) { first = node; }
+      }
+      _ => {}
+    }
+    a += 1;
+  }
+  first
+}
+
+// ---- the DOM ----
 
 // An element's attributes and events, as the operations after its `#Open` say.
 function props(ops: readonly Vec<Op>, i: usize): [Vec<[String, String]>, Vec<[String, usize]>] {
@@ -197,7 +901,12 @@ function props(ops: readonly Vec<Op>, i: usize): [Vec<[String, String]>, Vec<[St
 }
 
 // Makes the node the child at `i` of `f` shows, and its descendants, and records them in `f`.
-function build(f: mut Render, i: usize): u32 {
+function buildIn(f: mut Render, i: usize): u32 {
+  if (const #Some(m) = memoAt(f.ops, i)) {
+    const node = match (f.memos[m]) { #Some(mm) => buildIn(mut mm.render, 0), #None => 0 };
+    f.nodes[i] = node;
+    return node;
+  }
   match (f.ops[i]) {
     #Text(s) => {
       const node = textNode(s.asStr());
@@ -209,9 +918,10 @@ function build(f: mut Render, i: usize): u32 {
       f.nodes[i] = node;
       const [attrs, events] = props(f.ops, i);
       for (const [n, v] of attrs) { setAttr(node, n.asStr(), v.asStr()); }
-      for (const [e, m] of events) { listen(node, e.asStr(), m); }
+      for (const [e, m] of events) { listen(node, e.asStr(), f.uid, m); }
+      let shapes: Shapes = HashMap.new();
       for (const kid of kids(f.ops, i + 1)) {
-        const child = build(mut f, kid.start);
+        const child = buildKid(mut f, kid.start, mut shapes);
         unsafe { fly_dom_insert(node, child, 0); }
       }
       node
@@ -223,6 +933,11 @@ function build(f: mut Render, i: usize): u32 {
 // Takes over the node `node` for the child at `i` of `f`, as the server rendered it: true if it is
 // what the child shows, its descendants too.
 function adopt(f: mut Render, i: usize, node: u32): bool {
+  if (const #Some(m) = memoAt(f.ops, i)) {
+    const ok = match (f.memos[m]) { #Some(mm) => adopt(mut mm.render, 0, node), #None => false };
+    if (ok) { f.nodes[i] = node; }
+    return ok;
+  }
   match (f.ops[i]) {
     #Text(_) => {
       if (!isTag(node, "#text")) { return false; }
@@ -233,7 +948,7 @@ function adopt(f: mut Render, i: usize, node: u32): bool {
       if (!isTag(node, tag.asStr())) { return false; }
       f.nodes[i] = node;
       const [_, events] = props(f.ops, i);
-      for (const [e, m] of events) { listen(node, e.asStr(), m); }
+      for (const [e, m] of events) { listen(node, e.asStr(), f.uid, m); }
       const ks = kids(f.ops, i + 1);
       if (unsafe { fly_dom_children(node) } != ks.len() as u32) { return false; }
       for (const [c, kid] of ks.iter().enumerate()) {
@@ -263,14 +978,14 @@ export function hydrate(root: u32, f: mut Render): void {
   if (!same) {
     unsafe { fly_dom_clear(root); }
     for (const kid of ks) {
-      const child = build(mut f, kid.start);
+      const child = buildIn(mut f, kid.start);
       unsafe { fly_dom_insert(root, child, 0); }
     }
   }
 }
 
 // Updates the node of the child at `oi` of `old`, which the child at `ni` of `new` now shows.
-function patch(old: readonly Render, oi: usize, new: mut Render, ni: usize): u32 {
+function patch(old: mut Render, oi: usize, new: mut Render, ni: usize): u32 {
   const node = old.nodes[oi];
   new.nodes[ni] = node;
   match (new.ops[ni]) {
@@ -278,90 +993,38 @@ function patch(old: readonly Render, oi: usize, new: mut Render, ni: usize): u32
       if (const #Text(was) = old.ops[oi] && was != s) { setText(node, s.asStr()); }
     }
     #Open(_, _) => {
-      const [oa, _] = props(old.ops, oi);
+      const [oa, oe] = props(old.ops, oi);
       const [na, ne] = props(new.ops, ni);
       for (const [n, v] of na) {
-        const same = oa.iter().some(([m, w]) => m == n && w == v);
-        if (!same) { setAttr(node, n.asStr(), v.asStr()); }
+        const kept = oa.iter().some(([m, w]) => m == n && w == v);
+        if (!kept) { setAttr(node, n.asStr(), v.asStr()); }
       }
       for (const [m, _] of oa) {
         if (!na.iter().some(([n, _]) => n == m)) { removeAttr(node, m.asStr()); }
       }
-      unsafe { fly_dom_off(node); }
-      for (const [e, m] of ne) { listen(node, e.asStr(), m); }
-      children(node, old, oi + 1, mut new, ni + 1);
+      // Its events, told the page again only if they are not what they were.
+      if (oe != ne || old.uid != new.uid) {
+        unsafe { fly_dom_off(node); }
+        for (const [e, m] of ne) { listen(node, e.asStr(), new.uid, m); }
+      }
+      children(node, mut old, oi + 1, mut new, ni + 1);
     }
     _ => {}
   }
   node
 }
 
-// Updates the children of `parent`, which `old`'s start at `oi` and `new`'s at `ni`: each new one
-// matched to an old one by key, or in order among those of its kind without one; the rest made,
-// the old ones not matched removed, and all put in order.
-//
-// The old children are found by what matches them: each kind of node's, by key, in order, and a
-// cursor into each kind's without a key, so that a list is matched in time as long as it is.
-export function children(parent: u32, old: readonly Render, oi: usize, new: mut Render, ni: usize): void {
-  const was = kids(old.ops, oi);
-  const now = kids(new.ops, ni);
-  let used: Vec<bool> = Vec.new();
-  for (const _ of was) { used.push(false); }
-  // By kind, and key after a zero byte, which no tag has, for a keyed child.
-  let lists: HashMap<String, Vec<usize>> = HashMap.new();
-  for (const [j, w] of was.iter().enumerate()) {
-    const at = match (w.key) { #Some(k) => `${kindOf(old.ops[w.start])}\u{0}${k}`, #None => kindOf(old.ops[w.start]) };
-    match (lists.getMut(at.asStr())) {
-      #Some(v) => v.push(j),
-      #None => { lists.insert(at, [j]); }
-    }
-  }
-  // How far each list has been taken from.
-  let taken: HashMap<String, usize> = HashMap.new();
-  let nodes: Vec<u32> = Vec.new();
-  for (const kid of now) {
-    let found: Option<usize> = #None;
-    const at = match (kid.key) { #Some(k) => `${kindOf(new.ops[kid.start])}\u{0}${k}`, #None => kindOf(new.ops[kid.start]) };
-    if (const #Some(list) = lists.get(at.asStr())) {
-      let t = match (taken.get(at.asStr())) { #Some(t) => t + 0, #None => 0 };
-      while (t < list.len() && used[list[t]]) { t += 1; }
-      if (t < list.len()) {
-        found = #Some(list[t]);
-        t += 1;
-      }
-      taken.insert(at.clone(), t);
-    }
-    const node = match (found) {
-      #Some(j) => {
-        used[j] = true;
-        patch(old, was[j].start, mut new, kid.start)
-      }
-      #None => build(mut new, kid.start),
-    };
-    nodes.push(node);
-  }
-  for (const [j, w] of was.iter().enumerate()) {
-    if (!used[j]) { unsafe { fly_dom_remove(old.nodes[w.start]); } }
-  }
-  // In order, from the last: each put before the one after it, if it is not there already.
-  let next: u32 = 0;
-  let k = nodes.len();
-  while (k > 0) {
-    k -= 1;
-    unsafe { fly_dom_insert(parent, nodes[k], next); }
-    next = nodes[k];
-  }
-}
-
 // ---- running ----
 
-// What happened in the page: an event, with the number of its message and what it says; or a link
-// followed, or a step back or forward through the history, to the page at an address.
-enum Happened { #Event(usize, Event), #Go(String, bool) }
+// What happened in the page: an event, with the number of its render and of its message within it
+// and what it says; or a link followed, or a step back or forward through the history, to the page
+// at an address.
+enum Happened { #Event(u32, usize, Event), #Go(String, bool) }
 
-// The page's next happening. An event is the message's number and what the event says; going
+// The page's next happening. An event is its message's number and what the event says; going
 // elsewhere is `\u{1}`, the address and whether it is a new step; each part ended by a zero.
 function next(): Happened {
+  flush();
   const n = unsafe { fly_wait_event() };
   const s = take(n);
   const parts = s.asStr().split("\0");
@@ -369,8 +1032,8 @@ function next(): Happened {
   if (field(0) == "\u{1}") {
     return #Go(field(1), field(2) == "1");
   }
-  const index: usize = match (parseInt(field(0).asStr())) { #Some(i) => i as usize, #None => 0 };
-  #Event(index, { text: field(1), key: field(2), checked: field(3) == "true" })
+  const id: u64 = match (parseInt(field(0).asStr())) { #Some(i) => i as u64, #None => 0 };
+  #Event((id >> 32) as u32, (id & 0xffffffff) as usize, { text: field(1), key: field(2), checked: field(3) == "true" })
 }
 
 // What an update may ask of the page besides a new model: to show the model as it is so far, before
@@ -384,6 +1047,20 @@ export effect Page<Model> {
 // Where a page sends the program next: the page at `url`, a new step in the history if `push`.
 export type Go = { url: String; push: bool };
 
+// The view rendered again, diffed against what the page shows, which it now is; the messages of
+// what the page no longer shows forgotten.
+function again<M extends Send & Clone>(root: u32, f: mut Render, msgs: mut Messages<M>, view: () => void uses Ui<M>): void {
+  let g = record(view, mut f, mut msgs, true);
+  children(root, mut f, 0, mut g, 0);
+  forget(mut msgs, mut g);
+  f = g;
+}
+
+// What the render before showed that this one does not: forgotten, its messages too.
+function forget<M>(msgs: mut Messages<M>, g: mut Render): void {
+  for (const o of replace(mut g.was, Vec.new()).drain()) { if (const #Some(m) = o) { msgs.forget(m.render); } }
+}
+
 // Runs a page: `view` of `model` rendered, then each event's message given to `update`, and the
 // view rendered again, until a link is followed or the history stepped through: then where to. The
 // first render is diffed against `shown`, what the page showed before — or, with nothing shown,
@@ -391,24 +1068,23 @@ export type Go = { url: String; push: bool };
 export function run<Model, M extends Send & Clone, row E>(shown: mut Render, model: Model, view: (m: readonly Model) => void uses Ui<M>, update: (m: mut Model, msg: M, ev: readonly Event) => void uses Page<Model>, ...E): Go uses ...E {
   let m = model;
   const root = unsafe { fly_dom_root() };
-  let [f, msgs] = record(() => view(m));
-  if (shown.ops.len() == 0) { hydrate(root, mut f); } else { children(root, shown, 0, mut f, 0); }
+  // The page's messages are its own: what the page before showed is kept by no memo of this one's.
+  let msgs: Messages<M> = Messages.new();
+  let f = record(() => view(m), mut shown, mut msgs, false);
+  if (shown.ops.len() == 0) { hydrate(root, mut f); } else { children(root, mut shown, 0, mut f, 0); }
+  forget(mut msgs, mut f);
   while (true) {
     match (next()) {
       #Go(url, push) => {
         shown = f;
         return { url, push };
       }
-      #Event(i, ev) => {
-        if (i < msgs.len()) {
-          const msg = msgs[i].clone();
+      #Event(uid, i, ev) => {
+        if (const #Some(msg) = message(msgs, uid, i)) {
           let leaving: Option<String> = #None;
           handle { update(mut m, msg, ev) } with Page<Model> {
             show(now) resumes k => {
-              let [g, gm] = record(() => view(now));
-              children(root, f, 0, mut g, 0);
-              f = g;
-              msgs = gm;
+              again(root, mut f, mut msgs, () => view(now));
               k()
             }
             go(url) resumes k => {
@@ -416,10 +1092,7 @@ export function run<Model, M extends Send & Clone, row E>(shown: mut Render, mod
               k()
             }
           };
-          let [g, gm] = record(() => view(m));
-          children(root, f, 0, mut g, 0);
-          f = g;
-          msgs = gm;
+          again(root, mut f, mut msgs, () => view(m));
           if (const #Some(url) = leaving) {
             shown = f;
             return { url, push: true };
@@ -436,8 +1109,10 @@ export function run<Model, M extends Send & Clone, row E>(shown: mut Render, mod
 // `shown` is left what the page shows.
 export function show<M extends Send & Clone>(shown: mut Render, view: () => void uses Ui<M>): void {
   const root = unsafe { fly_dom_root() };
-  let [f, _] = record(view);
-  if (shown.ops.len() == 0) { hydrate(root, mut f); } else { children(root, shown, 0, mut f, 0); }
+  let msgs: Messages<M> = Messages.new();
+  let f = record(view, mut shown, mut msgs, false);
+  if (shown.ops.len() == 0) { hydrate(root, mut f); } else { children(root, mut shown, 0, mut f, 0); }
+  forget(mut msgs, mut f);
   shown = f;
 }
 

@@ -20,7 +20,8 @@
 // - A tag whose name is capitalized is a component: `<Counter model={m.c} onMsg={(c) => #C(c)} />`
 //   is `map((c) => #C(c), () => Counter.view(m.c))`, its `view` the component's type's, and without
 //   `onMsg` its view is shown as it is, its messages the page's. `<React name="Chart" props={p}
-//   onMsg={#Picked} />` is a React component of the page's, `react("Chart", p, #Picked)`.
+//   onMsg={#Picked} />` is a React component of the page's, `react("Chart", p, #Picked)`. `<memo
+//   key={k}>…</memo>` is `memo(k, () => { … })`, what it holds shown as it was while `k` is.
 // - Text is JSX's: each line's spaces at its ends dropped but where the text meets a tag on the
 //   same line, empty lines dropped, the rest joined by a space; `&amp;` and the like, and `&#…;`,
 //   stand for their characters. `{expr}` is shown as text, by its `Display`; braces whose code
@@ -42,7 +43,7 @@ export type Written = { code: String; pieces: Vec<Piece> };
 
 // What the calls the translation writes are named, imported from `web/ui` under names no module
 // would give its own.
-const PRELUDE: str = "import { el as __fx_el, text as __fx_text, attr as __fx_attr, cls as __fx_cls, key as __fx_key, on as __fx_on, link as __fx_link, map as __fx_map, react as __fx_react } from \"web/ui\";\n";
+const PRELUDE: str = "import { el as __fx_el, text as __fx_text, attr as __fx_attr, cls as __fx_cls, key as __fx_key, on as __fx_on, link as __fx_link, map as __fx_map, react as __fx_react, memo as __fx_memo } from \"web/ui\";\n";
 
 export function translate(src: str): Written uses Fail<Diagnostic> {
   let w = Translator { src, bytes: src.asBytes(), pos: 0, done: 0, out: String.new(), pieces: Vec.new(), tags: false };
@@ -293,6 +294,17 @@ impl Translator {
     }
     if (tag == "React") {
       self.reactTag(tagSpan, attrs, closes, statement);
+      return;
+    }
+    if (tag == "memo") {
+      if (attrs.len() != 1 || attrs[0].name != "key" || !isExpr(attrs[0].value)) {
+        throw self.err(tagSpan.start, tagSpan.end, "`<memo>` takes its key, and only that: `<memo key={…}>`");
+      }
+      self.write("__fx_memo(", tagSpan);
+      self.value(attrs[0].value, attrs[0].span);
+      self.write(", () => { ", tagSpan);
+      if (!closes) { self.children(tag.asStr(), tagSpan); }
+      self.write(if (statement) { "});" } else { "})" }, tagSpan);
       return;
     }
     if (isAlpha(tag.asBytes()[0]) && tag.asBytes()[0] >= b'A' && tag.asBytes()[0] <= b'Z') {
