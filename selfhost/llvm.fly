@@ -23,7 +23,7 @@ import {
   Local, LocalKind, Place, Root, Proj, ProjKind, Operand, Constant, Rvalue, Capture, Call, Callee, Stmt, Handle, Arm, Block,
   Cleanup, Func, Uses, ownedIn, useBlock,
 } from "./ir";
-import { Cgen, newCgen, cquote, checking, pruneChecks, WAIT } from "./c";
+import { Cgen, newCgen, cquote, checking, pruneChecks, reaches, unmark, WAIT } from "./c";
 import { pends, residents, waitsInCleanup } from "./frames";
 import { HashMap, HashSet } from "std/collections";
 
@@ -75,6 +75,10 @@ type Lctx = {
   trPk: Packer;
   trSize: usize;
   trAlign: usize;
+  // A call of a machine whose frame may nest in this one's, the last of what the point being made
+  // keeps, by its number (`Lnest`); and each such frame's offset, with its number.
+  nest: Option<usize>;
+  nestAt: Vec<[usize, usize]>;
   frameEntry: String;
   startCode: String;
   sites: usize;
@@ -135,7 +139,7 @@ type Lctx = {
 function newCtx(locals: Vec<Local>, ret: Ty, mode: Mode): Lctx {
   {
     locals, addrs: HashMap.new(), outer: HashSet.new(), captures: Vec.new(), capTys: Vec.new(), allocas: String.new(), out: String.new(), open: true, tmp: 0,
-    scopes: Vec.new(), targets: Vec.new(), mode, machine: false, fpk: { at: 0, align: 1 }, trPk: { at: 0, align: 1 }, trSize: 0, trAlign: 1, frameEntry: String.new(), startCode: String.new(),
+    scopes: Vec.new(), targets: Vec.new(), mode, machine: false, fpk: { at: 0, align: 1 }, trPk: { at: 0, align: 1 }, trSize: 0, trAlign: 1, nest: #None, nestAt: Vec.new(), frameEntry: String.new(), startCode: String.new(),
     sites: 0, cases: String.new(), reenter: Vec.new(), catches: false, catching: false, preenter: Vec.new(), resident: HashSet.new(), yo: #None, yieldEffect: #None, machineDrops: HashMap.new(), deferStore: HashMap.new(),
     arenas: HashMap.new(), ret: ret.clone(), retSlot: String.new(), fnRet: ret, hoisted: HashSet.new(), declared: HashSet.new(), prologue: String.new(), live: HashSet.new(),
     reachable: true, liveAt: HashMap.new(), sp: String.new(), loc: String.new(), direct: false,
@@ -147,6 +151,16 @@ function roundUp(n: usize, a: usize): usize { (n + a - 1) / a * a }
 
 // A struct being laid out: where its next field may start, and its alignment so far.
 type Packer = { at: usize; align: usize };
+
+// A machine's frame: its size, and where the frames of the machines it calls nest in it, each by
+// its call's number, should they.
+type Lframe = { size: usize; nests: Vec<[usize, usize]> };
+impl Clone for Lframe;
+
+// A call of function `callee`, a machine, made by function `caller`'s code: its frame nests in the
+// caller's unless the callee may call the caller again. Its number marks the call: `\u{2}N<id>\u{2}`
+// where its slot is given its first value, `\u{2}Z<id>\u{2}` where a nested frame starts afresh.
+type Lnest = { id: usize; caller: String; callee: String };
 
 // Where a field of `n` bytes aligned to `a` goes, next.
 function pack(p: mut Packer, n: usize, a: usize): usize {
@@ -304,6 +318,10 @@ export struct Lgen {
   // runtime, which may call back. Only a function that may be reached again before it returns —
   // in a cycle of calls, or calling what it cannot see — checks its stack (`pruneChecks`).
   callees: HashMap<String, HashSet<String>>;
+  // Each machine's frame, by its function's symbol, and the calls of machines whose frames may nest
+  // in their caller's, decided as the module is put together.
+  frameInfo: HashMap<String, Lframe>;
+  lnests: Vec<Lnest>;
   indirect: HashSet<String>;
   module: usize;
   cx: Lctx;
@@ -2004,8 +2022,16 @@ impl Lgen {
     self.transient(s.size, s.align)
   }
 
-  // The point being made is done: what it kept may be the next's.
+  // The point being made is done: what it kept may be the next's. The frame of a machine it calls,
+  // nested, comes last, aligned as a frame is.
   function closeGroup(self: mut Self): void {
+    if (const #Some(id) = self.cx.nest) {
+      const off = roundUp(self.cx.trPk.at, 16);
+      self.cx.frameEntry.push(`  %nestz${id} = getelementptr inbounds i8, ptr %fr, i64 \u{1}t${off}\u{1}\n  %nest${id} = getelementptr i8, ptr %fr, i64 \u{1}t${off + 1}\u{1}\n`);
+      self.cx.nestAt.push([off, id]);
+      self.cx.trAlign = max(self.cx.trAlign, 16);
+      self.cx.nest = #None;
+    }
     self.cx.trSize = max(self.cx.trSize, self.cx.trPk.at);
     self.cx.trAlign = max(self.cx.trAlign, self.cx.trPk.align);
     self.cx.trPk = { at: 0, align: 1 };
@@ -2193,7 +2219,14 @@ impl Lgen {
           // A machine keeps its frame in a slot of the caller's, and is called again to go on, given
           // nothing for its arguments, which it has already.
           const slot = self.transient(self.ptr, self.ptr);
-          self.store("ptr", "null", slot.asStr());
+          // Its frame may be nested in this one's, among what this point keeps.
+          if (self.cx.machine) {
+            const id = self.lnests.len() + 1;
+            self.lnests.push({ id, caller: self.fnName.clone(), callee: name.clone() });
+            self.cx.nest = #Some(id);
+            self.store("ptr", `\u{2}N${id}\u{2}`.asStr(), slot.asStr());
+            self.cx.out.push(`\u{2}Z${id}\u{2}`);
+          } else { self.store("ptr", "null", slot.asStr()); }
           const res: Option<String> = match (rr) { #Unit => #None, _ => #Some(self.transientOf(c.ret, span)) };
           let args: Vec<String> = Vec.new();
           let again: Vec<String> = Vec.new();
@@ -2618,11 +2651,8 @@ impl Lgen {
     }
     self.jump("ret");
     self.label("ret");
-    // A machine that ends gives its frame back.
-    if (self.cx.machine) {
-      self.ins("call void @fly_frame_pop(ptr %fr)");
-      self.store("ptr", "null", "%slot");
-    }
+    // A machine that ends gives its frame back, unless it is its caller's.
+    if (self.cx.machine) { self.ins("call void @fly_frame_end(ptr %slot, ptr %fr)"); }
     match (self.cx.mode) {
       #Fn => {
         const t = self.cx.ret.clone();
@@ -2678,7 +2708,14 @@ impl Lgen {
       self.cx.frameEntry = entry;
       self.cx.fpk.at = base + self.cx.trSize;
       self.cx.fpk.align = max(self.cx.fpk.align, self.cx.trAlign);
-      const size = roundUp(self.cx.fpk.at, self.cx.fpk.align);
+      // Its size, with the frames that nest in it, is known once the program is.
+      const own = roundUp(self.cx.fpk.at, self.cx.fpk.align);
+      const key = match (head.indexOf("@")) { #Some(i) => head.slice(i + 1, head.len()), #None => head };
+      const sym = match (key.indexOf("(")) { #Some(j) => key.slice(0, j).toString(), #None => key.toString() };
+      let nests: Vec<[usize, usize]> = Vec.new();
+      for (const [off, id] of self.cx.nestAt) { nests.push([base + off, id]); }
+      self.frameInfo.insert(sym.clone(), { size: own, nests });
+      const size = `\u{2}S${sym}\u{2}`;
       const dl = if (self.cx.entryLoc.len() > 0) { `, !dbg ${self.cx.entryLoc}` } else { String.new() };
       self.cx.allocas.push(`  %fr = call ptr @fly_frame_take(ptr %slot, ${sizeTy(self.ptr)} ${size})${dl}\n  %h0.cx = call ptr @fly_cx()${dl}\n  %h0.at = getelementptr inbounds i8, ptr %h0.cx, i64 ${2 * self.ptr}\n  %h0 = load ptr, ptr %h0.at\n${self.cx.frameEntry}  %state = load i32, ptr %fr\n  switch i32 %state, label %start [ ${self.cx.cases}]\nstart:\n`);
     }
@@ -3804,7 +3841,23 @@ impl Lgen {
     ll.push("\n");
     ll.push(self.globals.asStr());
     ll.push("\n");
-    ll.push(pruneChecks(self.code, checking(self.callees, self.indirect), ";\u{1}sk<", ">\n", ";\u{1}sk.\n").asStr());
+    // Which frames nest in which, and so each frame's size.
+    let marks: HashMap<String, String> = HashMap.new();
+    let on: HashSet<usize> = HashSet.new();
+    for (const n of self.lnests) {
+      const nests = self.frameInfo.has(`${n.callee}__fly`.asStr()) && !reaches(self.callees, n.callee.asStr(), n.caller.asStr());
+      if (nests) { on.insert(n.id); }
+      marks.insert(`N${n.id}`, if (nests) { `%nest${n.id}` } else { "null".toString() });
+      marks.insert(`Z${n.id}`, if (nests) { `  store i32 0, ptr %nestz${n.id}\n` } else { String.new() });
+    }
+    let sizes: HashMap<String, usize> = HashMap.new();
+    let names: Vec<String> = Vec.new();
+    for (const [k, _] of self.frameInfo.entries()) { names.push(k.clone()); }
+    for (const k of names) {
+      const z = self.frameSize(k.asStr(), on, mut sizes);
+      marks.insert(`S${k}`, `${z}`);
+    }
+    ll.push(unmark(pruneChecks(self.code, checking(self.callees, self.indirect), ";\u{1}sk<", ">\n", ";\u{1}sk.\n").asStr(), marks).asStr());
     // The runtime's catch point, which C cannot write: what `f(a)` raises as a panic is caught here;
     // in WebAssembly, what else is thrown — the host's exception by which the program ends — passes.
     if (self.funclets) {
@@ -3823,6 +3876,23 @@ impl Lgen {
       ll.push(self.meta.asStr());
     }
     [ll, cfile]
+  }
+}
+
+impl Lgen {
+  // The size of machine `k`'s frame, with the frames nested in it.
+  function frameSize(self: readonly Self, k: str, on: readonly HashSet<usize>, sizes: mut HashMap<String, usize>): usize {
+    if (const #Some(z) = sizes.get(k)) { return z + 0; }
+    const info = match (self.frameInfo.get(k)) { #Some(i) => i.clone(), #None => return 16 };
+    let z = info.size;
+    for (const [off, id] of info.nests) {
+      if (!on.has(id)) { continue; }
+      const callee = `${self.lnests[id - 1].callee}__fly`;
+      z = max(z, off + self.frameSize(callee.asStr(), on, mut sizes));
+    }
+    z = roundUp(z, 16);
+    sizes.insert(k.toString(), z);
+    z
   }
 }
 
@@ -3854,6 +3924,7 @@ declare void @fly_arena_free(ptr)
 declare void @fly_perform(i32, i32, ptr, ptr)
 declare ptr @fly_frame_take(ptr, SIZE)
 declare void @fly_frame_pop(ptr)
+declare void @fly_frame_end(ptr, ptr)
 declare void @fly_frames_free(ptr)
 declare void @fly_frames_keep(ptr)
 declare void @fly_frames_back(ptr)
@@ -3897,7 +3968,7 @@ export function llvmProgram(p: Prog, entry: usize, runtime: str, freestanding: b
   let g = Lgen {
     c: newCgen(p), ptr, shapes: HashMap.new(), glue: HashMap.new(), glueCode: String.new(), asserts: String.new(),
     declared: HashMap.new(), globals: String.new(), strs: HashMap.new(), code: String.new(), closuresDone: 0, aparts: 0,
-    defers: HashMap.new(), fnName: String.new(), callees: HashMap.new(), indirect: HashSet.new(), module: 0, cx: newCtx(Vec.new(), #Prim(#Void), #Fn), unwinds: !freestanding, funclets: !freestanding && ptr == 4,
+    defers: HashMap.new(), fnName: String.new(), callees: HashMap.new(), frameInfo: HashMap.new(), lnests: Vec.new(), indirect: HashSet.new(), module: 0, cx: newCtx(Vec.new(), #Prim(#Void), #Fn), unwinds: !freestanding, funclets: !freestanding && ptr == 4,
     meta: String.new(), metaN: 0, files: HashMap.new(), lineStarts: HashMap.new(), locs: HashMap.new(), cu: String.new(),
     diTypes: HashMap.new(),
   };

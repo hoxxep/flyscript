@@ -163,6 +163,32 @@ function hasCleanups(b: readonly Block): bool {
   false
 }
 
+// Whether function `from` may call function `to`, through the calls each makes.
+export function reaches(callees: readonly HashMap<String, HashSet<String>>, from: str, to: str): bool {
+  if (from == to) { return true; }
+  let seen: HashSet<String> = HashSet.new();
+  let todo: Vec<String> = [from.toString()];
+  while (const #Some(f) = todo.pop()) {
+    if (f == to) { return true; }
+    if (seen.has(f.asStr())) { continue; }
+    seen.insert(f.clone());
+    if (const #Some(cs) = callees.get(f.asStr())) { for (const c of cs.iter()) { todo.push(c.clone()); } }
+  }
+  false
+}
+
+// `s` with each mark `\u{2}k\u{2}` replaced by what `marks` says for `k`.
+export function unmark(s: str, marks: readonly HashMap<String, String>): String {
+  if (!s.includes("\u{2}")) { return s.toString(); }
+  let out = String.new();
+  for (const [i, part] of s.split("\u{2}").iter().enumerate()) {
+    if (i % 2 == 1) {
+      match (marks.get(part)) { #Some(m) => out.push(m.asStr()), #None => {} }
+    } else { out.push(part); }
+  }
+  out
+}
+
 // The functions that check their stack as they start (runtime.h): those in a cycle of calls, a
 // strongly connected component of more than one or one that calls itself, and those that call what
 // they cannot see. Any other's calls end before the stack can grow without bound.
@@ -378,6 +404,11 @@ export struct Cgen {
   indirect: HashSet<String>;
   // The instances that are machines, by name.
   machines: HashSet<String>;
+  // The machines' frames' types, by name, in the order they were first made; and the calls of
+  // machines whose frames may nest in their caller's (`Nest`), decided as the program is put together.
+  frames: HashMap<String, String>;
+  frameOrder: Vec<String>;
+  nests: Vec<Nest>;
   // The function being printed.
   cx: Ctx;
   // The module of the function being printed, for its diagnostics.
@@ -1816,20 +1847,25 @@ impl Cgen {
 
   // How a machine starts: its frame, from the slot its caller holds, taken from the frame arena as
   // it first starts; the handlers in force as it is called; and a jump to where it stopped.
+  // A slot whose frame is marked, its low bit set, holds a frame nested in the caller's own, which
+  // the machine neither takes from the arena nor gives back to it.
   function machineStart(self: readonly Self, slot: str): String {
     const ft = self.cx.frameType.clone();
-    `  ${ft}* fr = *${slot};\n  if (!fr) { fr = fly_frame_push(sizeof(${ft})); *${slot} = fr; }\n  fly_handler* h0_ = fly_handlers; (void)h0_;\n`
+    `  ${ft}* fr = (${ft}*)((uintptr_t)*${slot} & ~(uintptr_t)1);\n  if (!fr) { fr = fly_frame_push(sizeof(${ft})); *${slot} = fr; }\n  fly_handler* h0_ = fly_handlers; (void)h0_;\n`
   }
 
   function machineDispatch(self: readonly Self): String {
     `  switch (fr->state) { case 0: break; ${self.cx.cases}default: break; }\n`
   }
 
-  // The frame's type, defined once its fields are known.
+  // The frame's type, defined once its fields are known, and put among the types once it is known
+  // which frames nest in it.
   function defineFrame(self: mut Self): void {
     self.closeGroup();
     const t = if (self.cx.trUnion.len() > 0) { `  union {\n${self.cx.trUnion}  } t;\n` } else { String.new() };
-    self.typeDefs.push(`typedef struct {\n  uint32_t state;\n${self.cx.fields}${t}} ${self.cx.frameType};\n`);
+    const name = self.cx.frameType.clone();
+    if (!self.frames.has(name.asStr())) { self.frameOrder.push(name.clone()); }
+    self.frames.insert(name, `typedef struct {\n  uint32_t state;\n${self.cx.fields}${t}} ${self.cx.frameType};\n`);
   }
 
   // `Fail.capture(f)` in a machine: `f` may stop it, and is called again to go on.
@@ -1948,7 +1984,16 @@ impl Cgen {
           // A machine keeps its frame in a slot of the caller's, and is called again to go on.
           const slot = self.transient("void*");
           const s0 = if (all.len() > 0) { ", " } else { "" };
-          self.siteThen(`${slot} = NULL; ${to}${name}(&${slot}${s0}${all.join(", ")});`, `${to}${name}(&${slot}${s0}${again.join(", ")});`, "");
+          // Its frame may be nested in this one's, among what this point keeps.
+          let first = "NULL".toString();
+          if (self.cx.machine) {
+            const id = self.nests.len() + 1;
+            const field = `fr->t.g${self.cx.trGroup}.n${id}`;
+            self.cx.trFields.push(`\u{2}F${id}\u{2}`);
+            self.nests.push({ id, caller: self.fnName.clone(), callee: name.clone(), container: self.cx.frameType.clone(), field });
+            first = `\u{2}N${id}\u{2}`;
+          }
+          self.siteThen(`${slot} = ${first}; ${to}${name}(&${slot}${s0}${all.join(", ")});`, `${to}${name}(&${slot}${s0}${again.join(", ")});`, "");
         } else {
           self.line(`${to}${name}(${all.join(", ")});`);
         }
@@ -3001,6 +3046,13 @@ impl Cgen {
 
 // What a C function made of code apart from its function is given: its environment's fields and
 // their initializers, and how it reaches the locals and captures it uses of the code around it.
+// A call of a function `callee` that is a machine, made in the frame of type `container` of
+// function `caller`'s code: its callee's frame nests in the caller's, at `field` of the caller's
+// frame, unless the callee may call the caller again. Marked `\u{2}F<id>\u{2}` where the field goes,
+// and `\u{2}N<id>\u{2}` where the call's slot is given its first value.
+type Nest = { id: usize; caller: String; callee: String; container: String; field: String };
+impl Clone for Nest;
+
 // A `defer`'s body made a C function: `defer_n`, given an environment of C type `env`, made by
 // `inits`; a machine, if it may suspend.
 type DeferFn = { n: usize; env: String; inits: String; machine: bool };
@@ -3690,9 +3742,9 @@ impl Cgen {
     if (!self.cx.machine) {
       return `${check}${decls}${more}  ${rt} ret_ = { 0 };\n${start}${code}  ${leave}return ${value};\nfail: ${leave}return (${rt}){ 0 };\nret: ${leave}return ret_;\n`;
     }
-    // A machine that ends gives its frame back.
+    // A machine that ends gives its frame back, unless it is its caller's.
     self.defineFrame();
-    const pop = `fly_frame_pop(fr); *${slot} = NULL; `;
+    const pop = `if (!((uintptr_t)*${slot} & 1)) fly_frame_pop(fr); *${slot} = NULL; `;
     `${check}${self.machineStart(slot)}${decls}${more}  ${rt} ret_ = { 0 };\n${start}${self.machineDispatch()}${code}  ${leave}ret_ = ${value};\n  ${pop}return ret_;\nfail: ${leave}${pop}return (${rt}){ 0 };\nret: ${leave}${pop}return ret_;\n`
   }
 
@@ -3899,13 +3951,33 @@ impl Cgen {
     out.push("\n// ---- the program ----\n");
     out.push(self.typeFwd.asStr());
     out.push(self.typeDefs.asStr());
+    // A machine's frame nests the frame of a machine it calls unless that may call it again, and is
+    // defined after it.
+    let marks: HashMap<String, String> = HashMap.new();
+    let needs: HashMap<String, Vec<String>> = HashMap.new();
+    for (const n of self.nests) {
+      const nests = self.frames.has(`${n.callee}_fr`.asStr()) && !reaches(self.callees, n.callee.asStr(), n.caller.asStr());
+      if (nests) {
+        marks.insert(`F${n.id}`, `    ${n.callee}_fr n${n.id};\n`);
+        marks.insert(`N${n.id}`, `(${n.field}.state = 0, (void*)((uintptr_t)&${n.field} | 1))`);
+        match (needs.getMut(n.container.asStr())) {
+          #Some(v) => v.push(`${n.callee}_fr`),
+          #None => { needs.insert(n.container.clone(), [`${n.callee}_fr`]); }
+        }
+      } else {
+        marks.insert(`F${n.id}`, String.new());
+        marks.insert(`N${n.id}`, "NULL".toString());
+      }
+    }
+    let done: HashSet<String> = HashSet.new();
+    for (const f of self.frameOrder) { self.putFrame(f.asStr(), needs, marks, mut done, mut out); }
     out.push(self.protos.asStr());
     out.push(self.dropCode.asStr());
     // Only a function that may be reached again before it returns checks its stack. Its marks
     // begin with a byte no literal of the program's is printed with.
     const keep = checking(self.callees, self.indirect);
-    out.push(pruneChecks(self.apartCode, keep, "/*\u{1}sk<", ">*/", "/*\u{1}sk.*/").asStr());
-    for (const c of self.fnCode) { out.push(pruneChecks(c, keep, "/*\u{1}sk<", ">*/", "/*\u{1}sk.*/").asStr()); }
+    out.push(unmark(pruneChecks(self.apartCode, keep, "/*\u{1}sk<", ">*/", "/*\u{1}sk.*/").asStr(), marks).asStr());
+    for (const c of self.fnCode) { out.push(unmark(pruneChecks(c, keep, "/*\u{1}sk<", ">*/", "/*\u{1}sk.*/").asStr(), marks).asStr()); }
     out.push(self.glue.asStr());
     out.push(exports.asStr());
     const main = match (ent.main) { #Some(m) => self.lw.insts[m].name.clone(), #None => return out };
@@ -3925,6 +3997,14 @@ impl Cgen {
     const run = if (ent.tasks) { "fly_tasks_run(fly_main_run)" } else { "fly_root(fly_main_run)" };
     out.push(`int main(int argc, char** argv) {\n  fly_argc = argc;\n  fly_argv = argv;\n  ${run};\n${uncaught}  return 0;\n}\n`);
     out
+  }
+
+  // Frame `f`'s type, after the frames nested in it.
+  function putFrame(self: readonly Self, f: str, needs: readonly HashMap<String, Vec<String>>, marks: readonly HashMap<String, String>, done: mut HashSet<String>, out: mut String): void {
+    if (done.has(f)) { return; }
+    done.insert(f.toString());
+    if (const #Some(ds) = needs.get(f)) { for (const d of ds) { self.putFrame(d.asStr(), needs, marks, mut done, mut out); } }
+    if (const #Some(t) = self.frames.get(f)) { out.push(unmark(t.asStr(), marks).asStr()); }
   }
 
   // A function C calls: its symbol, calling its instance.
@@ -3960,7 +4040,7 @@ export function newCgen(p: Prog): Cgen {
     lw: newLower(p), closuresDone: 0, types: HashMap.new(), defined: HashSet.new(), pending: Vec.new(), typeFwd: String.new(),
     typeDefs: String.new(), tags: HashMap.new(), drops: HashMap.new(), anyDrops: HashSet.new(), dropCode: String.new(), convs: HashMap.new(),
     helpers: HashMap.new(), consts: HashMap.new(), protos: String.new(), fnCode: Vec.new(), lowered: 0, apartCode: String.new(), aparts: 0,
-    tmp: 0, freestanding: false, callees: HashMap.new(), indirect: HashSet.new(), machines: HashSet.new(), cx: newCtx(Vec.new(), #Prim(#Void), #Fn), module: 0, defers: HashMap.new(), fnName: String.new(),
+    tmp: 0, freestanding: false, callees: HashMap.new(), indirect: HashSet.new(), machines: HashSet.new(), frames: HashMap.new(), frameOrder: Vec.new(), nests: Vec.new(), cx: newCtx(Vec.new(), #Prim(#Void), #Fn), module: 0, defers: HashMap.new(), fnName: String.new(),
     argPlaces: Vec.new(), glue: String.new(),
   }
 }

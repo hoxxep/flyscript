@@ -1877,9 +1877,16 @@ void* fly_frame_push(size_t size) {
   return p;
 }
 
+// A slot whose frame is marked, its low bit set, holds a frame nested in the caller's own, which
+// the machine neither takes from the arena nor gives back to it.
 void* fly_frame_take(void** slot, size_t size) {
   if (!*slot) *slot = fly_frame_push(size);
-  return *slot;
+  return (void*)((uintptr_t)*slot & ~(uintptr_t)1);
+}
+
+void fly_frame_end(void** slot, void* frame) {
+  if (!((uintptr_t)*slot & 1)) fly_frame_pop(frame);
+  *slot = NULL;
 }
 
 // The chunks above the one `p` is in, or ends, emptied; `p` the arena's top.

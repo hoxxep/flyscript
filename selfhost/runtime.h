@@ -476,6 +476,8 @@ void* fly_frame_push(size_t size);
 void fly_frame_pop(void* frame);
 // A machine's frame, from the slot its caller holds: taken from the arena as the machine first starts.
 void* fly_frame_take(void** slot, size_t size);
+// A machine ends: its frame given back, unless it is nested in its caller's.
+void fly_frame_end(void** slot, void* frame);
 void fly_frames_free(fly_frames* a);
 // The chunk an arena keeps for its next, given back: as a task stops.
 void fly_frames_trim(fly_frames* a);
