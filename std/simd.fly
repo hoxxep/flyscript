@@ -197,6 +197,17 @@ impl<T extends Lane, comptime N: usize> Simd<T, N> {
     for (const i of 0..r.lanes.len()) { r.lanes[i] = self.lanes[idx[i]]; }
     r
   }
+
+  // The lanes moved up by `k`, the `k` below them `before`'s last: the two as one vector of `2N`
+  // lanes, `before` first, shifted, as a scan that looks at each lane with those before it needs
+  // across vectors; `k` past `N` gives `before`. One instruction (`ext`, `palignr`,
+  // `i8x16.shuffle`) for a `k` known at compile time.
+  export function shiftIn(self: Self, before: Self, k: usize): Simd<T, N> {
+    let r = self;
+    const n = r.lanes.len();
+    for (const i of 0..n) { r.lanes[i] = if (k >= n) { before.lanes[i] } else if (i < k) { before.lanes[n - k + i] } else { self.lanes[i - k] }; }
+    r
+  }
 }
 
 impl<T extends IntLane, comptime N: usize> Simd<T, N> {

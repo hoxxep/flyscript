@@ -33,6 +33,7 @@
 // expect: u64 [2, 0] 0 #Some(0)
 // expect: 32 #Some(20) 1048576 1
 // expect: lookup [10, 11, 12, 13, 0, 0, 0, 0, 0, 0, 0, 17, 18, 19, 20, 21]
+// expect: shift [10, 0, 1, 2, 3, 100, 127, 128, 129, 200, 250, 255, 7, 8, 9, 10] [7, 9, 8, 11, 10, 0, 1, 2, 3, 100, 127, 128, 129, 200, 250, 255] 0 255 10 [7, 1]
 // expect: store [0, 0, 0, 1, 2, 3, 100, 127, 128, 129, 200, 250, 255, 7, 8, 9, 10, 11]
 // expect: none #None false false 1
 import { println } from "std/io";
@@ -76,6 +77,9 @@ export function main(): void uses Io {
   println(`32 ${m32.firstTrue()} ${m32.bitmask()} ${m32.countTrue()}`);
   const table: Simd<u8, 16> = Simd.fromArray([10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25]);
   println(`lookup ${u.lookupIn(table).toArray()}`);
+  let k: usize = 0;
+  for (const _ of 0..5) { k += 1; }
+  println(`shift ${u.shiftIn(v, 1).toArray()} ${u.shiftIn(v, k).toArray()} ${u.shiftIn(v, 0).at(0)} ${u.shiftIn(v, 16).at(0)} ${u.shiftIn(v, k * 4).at(15)} ${two.shiftIn(Simd.splat(7), 1).toArray()}`);
   let out: u8[] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
   u.store(mut out, 2);
   println(`store ${out}`);

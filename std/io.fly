@@ -68,8 +68,8 @@ impl File {
   export function readLine(self: mut Self): Option<String> uses Io, Fail<IoErr> {
     let line: Vec<u8> = Vec.new();
     let any = false;
-    // Whether every byte of the line is ASCII, which is UTF-8 that need not be checked again.
-    let ascii = true;
+    // Whether the scan found the line well-formed UTF-8, which need not be checked again.
+    let known = true;
     // What is read ahead is looked at before anything more is read.
     while (self.at < self.end || self.fill()) {
       any = true;
@@ -79,18 +79,18 @@ impl File {
         const ahead = self.buf[self.at..self.end];
         const [end, plain] = lineEnd(ahead);
         k = end;
-        ascii = ascii && plain;
+        known = known && plain;
         line.extend(ahead[0..k]);
       }
       k += self.at;
       if (k < self.end) {
         self.at = k + 1;
         if (line.len() > 0 && line[line.len() - 1] == 13) { line.pop(); }
-        return #Some(lineText(line, ascii));
+        return #Some(lineText(line, known));
       }
       self.at = k;
     }
-    if (any && line.len() > 0) { #Some(lineText(line, ascii)) } else { #None }
+    if (any && line.len() > 0) { #Some(lineText(line, known)) } else { #None }
   }
 
   // Each line in turn, as `readLine` reads them.
@@ -192,22 +192,27 @@ export function writeFile(path: str, content: str): void uses Io, Fail<IoErr> {
 
 function text(b: Vec<u8>): String { String.fromUtf8Lossy(b) }
 
-// A line's bytes as text: checked, unless the scan found them ASCII.
-function lineText(b: Vec<u8>, ascii: bool): String {
-  if (ascii) { unsafe { String.fromUtf8Unchecked(b) } } else { text(b) }
+// A line's bytes as text: checked, unless the scan found them well formed.
+function lineText(b: Vec<u8>, known: bool): String {
+  if (known) { unsafe { String.fromUtf8Unchecked(b) } } else { text(b) }
 }
 
-// Where the first `\n` in `bytes` is, or how many there are if none is, and whether every byte
-// before it is ASCII — or, false, some may not be, which only means the line is checked. The first
-// 64 bytes sixteen at a time as two words, each word's bytes that are `\n` found as those its
-// exclusive or with eight of them leaves zero, the first of which is the lowest marked (the marks
-// above it may be wrong), their high bits gathered; past that, sixteen at a time as vectors, which
-// is faster on long lines, while the words answer sooner on short ones, the branch out of the
-// loop resolved without a move out of a vector register; the rest a byte at a time.
+// Where the first `\n` in `bytes` is, or how many there are if none is, and whether the bytes
+// before it are known to be well-formed UTF-8 — or, false, they may not be, which only means the
+// line is checked. The first 64 bytes sixteen at a time as two words, each word's bytes that are
+// `\n` found as those its exclusive or with eight of them leaves zero, the first of which is the
+// lowest marked (the marks above it may be wrong); a block with bytes past ASCII is checked as it
+// is scanned (`utf8Errors`), up to the `\n`, and so is the block after one whose last three bytes
+// may begin a sequence that ends there, so that a short line is checked in the one pass that finds
+// its end. Past that, sixteen at a time as vectors, which is faster on long lines, while the words
+// answer sooner on short ones, the branch out of the loop resolved without a move out of a vector
+// register; a long line is known only if it is ASCII. The rest a byte at a time.
 function lineEnd(bytes: readonly u8[]): [usize, bool] {
   const n = bytes.len();
   let k: usize = 0;
   let high: u64 = 0;
+  let bad = false;
+  let after = false;
   while (k + 16 <= n && k < 64) {
     const w = bytes.readU64Le(k);
     const w2 = bytes.readU64Le(k + 8);
@@ -215,11 +220,12 @@ function lineEnd(bytes: readonly u8[]): [usize, bool] {
     const x2 = w2 ^ 0x0a0a0a0a0a0a0a0a;
     const zero = x.wrappingSub(0x0101010101010101) & ~x & 0x8080808080808080;
     const zero2 = x2.wrappingSub(0x0101010101010101) & ~x2 & 0x8080808080808080;
-    high = high | w | w2;
-    if ((zero | zero2) != 0) {
-      const at = if (zero != 0) { k + (zero.trailingZeros() / 8) as usize } else { k + 8 + (zero2.trailingZeros() / 8) as usize };
-      return [at, (high & 0x8080808080808080) == 0];
-    }
+    const hi = (w | w2) & 0x8080808080808080;
+    high = high | hi;
+    if (hi != 0 || after) { bad = bad || utf8Bad(bytes, k, newlineAt(zero, zero2)); }
+    if ((zero | zero2) != 0) { return [k + newlineAt(zero, zero2), !bad]; }
+    // A sequence its last three bytes begin may end in the next block.
+    after = (w2 & 0x8080800000000000) != 0;
     k += 16;
   }
   const newline: Simd<u8, 16> = Simd.splat(10);
@@ -227,7 +233,7 @@ function lineEnd(bytes: readonly u8[]): [usize, bool] {
   while (k + 16 <= n) {
     const v: Simd<u8, 16> = Simd.load(bytes, k);
     seen = seen.or(v);
-    if (const #Some(i) = v.eq(newline).firstTrue()) { return [k + i, (high & 0x8080808080808080) == 0 && seen.reduceMax() < 0x80]; }
+    if (const #Some(i) = v.eq(newline).firstTrue()) { return [k + i, high == 0 && seen.reduceMax() < 0x80]; }
     k += 16;
   }
   if (seen.reduceMax() >= 0x80) { high = high | 0x80; }
@@ -235,7 +241,46 @@ function lineEnd(bytes: readonly u8[]): [usize, bool] {
     high = high | ((bytes[k] & 0x80) as u64);
     k += 1;
   }
-  [k, (high & 0x8080808080808080) == 0]
+  [k, high == 0]
+}
+
+// Which of sixteen bytes is the first `\n`, from the marks of two words, or 16 if neither has one.
+function newlineAt(zero: u64, zero2: u64): usize {
+  if (zero != 0) { (zero.trailingZeros() / 8) as usize } else if (zero2 != 0) { 8 + (zero2.trailingZeros() / 8) as usize } else { 16 }
+}
+
+// Whether the sixteen bytes at `at` hold a byte where well-formed UTF-8 would not, among the
+// first `upto` and the one after (a `\n`, which a sequence left unfinished before it is wrong at),
+// each byte checked with the three before it, the slice beginning a line.
+function utf8Bad(bytes: readonly u8[], at: usize, upto: usize): bool {
+  const v: Simd<u8, 16> = Simd.load(bytes, at);
+  const prev: Simd<u8, 16> = if (at >= 16) { Simd.load(bytes, at - 16) } else { Simd.splat(0) };
+  const e = utf8Errors(v, prev);
+  if (e.reduceMax() == 0) { return false; }
+  const lanes: u64 = if (upto >= 15) { 0xffff } else { ((2 as u64) << (upto as u64)) - 1 };
+  (e.ne(Simd.splat(0)).bitmask() & lanes) != 0
+}
+
+// Where the bytes of `v`, with those of `prev` before them, are not well-formed UTF-8: nonzero
+// lanes, each byte judged with the three before it (Keiser and Lemire, "Validating UTF-8 in less
+// than one instruction per byte", 2021, as the runtime's own check is). Each pair of a byte and
+// the one before is looked up by the high nibble of each and the low nibble of the first, in three
+// tables whose entries are the errors that nibble allows, and is wrong where the three agree on
+// one; that the third and fourth bytes of a long sequence are continuations is checked apart. The
+// errors, as bits: too short 1, too long 2, an overlong three 4, too large 8, a surrogate 16, an
+// overlong two 32, too large past U+10FFFF or an overlong four 64, two continuations 128.
+function utf8Errors(v: Simd<u8, 16>, prev: Simd<u8, 16>): Simd<u8, 16> {
+  const b1hi: Simd<u8, 16> = Simd.fromArray([2, 2, 2, 2, 2, 2, 2, 2, 128, 128, 128, 128, 33, 1, 21, 73]);
+  const b1lo: Simd<u8, 16> = Simd.fromArray([231, 163, 131, 131, 139, 203, 203, 203, 203, 203, 203, 203, 203, 219, 203, 203]);
+  const b2hi: Simd<u8, 16> = Simd.fromArray([1, 1, 1, 1, 1, 1, 1, 1, 230, 174, 186, 186, 1, 1, 1, 1]);
+  const prev1 = v.shiftIn(prev, 1);
+  const prev2 = v.shiftIn(prev, 2);
+  const prev3 = v.shiftIn(prev, 3);
+  const low: Simd<u8, 16> = Simd.splat(15);
+  const special = prev1.shr(4).lookupIn(b1hi).and(prev1.and(low).lookupIn(b1lo)).and(v.shr(4).lookupIn(b2hi));
+  const third = prev2.saturatingSub(Simd.splat(0xe0 - 0x80));
+  const fourth = prev3.saturatingSub(Simd.splat(0xf0 - 0x80));
+  third.or(fourth).and(Simd.splat(0x80)).xor(special)
 }
 
 // A line to standard output; on threads, each line is written whole.

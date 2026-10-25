@@ -1,6 +1,6 @@
 # Flyscript
 
-**Language specification, version 0.132**
+**Language specification, version 0.133**
 
 *Affine values, one row calculus, handlers for everything, and `comptime`: Church on the outside, Turing on the inside.*
 
@@ -20,7 +20,7 @@ The whole language rests on five laws. Every rule in this document is a conseque
 
 ### 0.1 Recent changes
 
-This is version 0.132. Its last revisions made a panic end the task it happens in rather than the program, proved it, and compiled every task, handler and generator to a state machine as small as a Rust future:
+This is version 0.133. Its last revisions made a panic end the task it happens in rather than the program, proved it, and compiled every task, handler and generator to a state machine as small as a Rust future:
 
 - **A panic unwinds its task** (0.114 to 0.117). It runs the task's cleanup, as a failure nothing catches would; a spawned task's panic ends that task alone, so a server survives a connection that hits a bug, and a `Mutex` whose holder panics is poisoned. A `Task` cancels one task and says how it ended, and `std/supervise` restarts what crashed. A stack that runs out is a panic of its task; a panic out of a destructor, or in cleanup that a panic is running, ends the program (§5.7, §6.1, §6.2, §12.3).
 - **The proof covers panics** (0.118 to 0.120): every box is dropped exactly once through a panic, a spawned task's panic ends it alone, and a `Mutex` it poisons keeps its state, under every schedule (§9.5).
@@ -42,6 +42,7 @@ This is version 0.132. Its last revisions made a panic end the task it happens i
 - **LLVM is told what borrows promise** (0.130): a `mut` parameter is `noalias`, a `readonly` one `noalias readonly` (§11.3).
 - **Portable SIMD** (0.131): `std/simd`'s `Simd<T, N>` and `Mask<N>`, which `std/io`'s line reader and `std/json` use, are the target's vector instructions (§11.3, §12.3, [std.md](std.md)).
 - **Scheduling points inline** (0.132): a point with nothing to do is a test the code makes itself, an uncontended `Mutex.lock` is that test and one atomic operation more, and a task woken by the one running runs next on its core; tasks waiting for a `Mutex` get it in the order they began to wait (§6.2, §11.3).
+- **Vectors shifted across** (0.133): `Simd.shiftIn(before, k)` moves a vector's lanes up by `k`, another's last `k` below them, one instruction for a `k` known at compile time, so a scan can look at each byte with those before it across vectors; `std/io` checks a short line's UTF-8 with it in the pass that finds its end ([std.md](std.md)).
 
 Every earlier change, with the reasoning behind it, is in [docs/history](history/).
 

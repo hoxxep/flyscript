@@ -3865,6 +3865,7 @@ impl Cgen {
       "saturatingAdd" | "saturatingSub" => !isMask && !float && w <= 8,
       "any" | "all" | "countTrue" | "bitmask" | "firstTrue" => isMask,
       "lookupIn" => !isMask && w == 1 && n == 16,
+      "shiftIn" => !isMask && n <= 32,
       _ => false,
     };
     if (ok) { #Some(`simd:${name}:${i}`) } else { #None }
@@ -3993,6 +3994,17 @@ impl Cgen {
         `({ ${types} __auto_type x_ = ${arg(0)}; ${mask("m_", "x_")} ${find} i_ >= 0 ? ${yes} : ${no}; })`
       }
       "lookupIn" => `({ __auto_type x_ = ${arg(0)}; __auto_type t_ = ${arg(1)}; ${rt} r_; fly_lookup16(r_.lanes.data, ${lanes("x_")}, ${lanes("t_")}); r_; })`,
+      // A shuffle of the two, `before` first, from lane `n - k` on: one for each `k`, which a `k`
+      // known at compile time picks.
+      "shiftIn" => {
+        let cases = String.new();
+        for (const k of 0..n + 1) {
+          let idx: Vec<String> = Vec.new();
+          for (const i of 0..n) { idx.push(`${n - k + i}`); }
+          cases.push(`case ${k}: v_ = __builtin_shufflevector(b_, a_, ${idx.join(", ")}); break; `);
+        }
+        `({ ${types} __auto_type x_ = ${arg(0)}; __auto_type y_ = ${arg(1)}; uint64_t k_ = ${arg(2)}; ${vec("a_", "x_")} ${vec("b_", "y_")} V_ v_; switch (k_ < ${n} ? k_ : ${n}) { ${cases}default: v_ = b_; } ${give("v_")} })`
+      }
       _ => self.fail(span, "no such vector routine"),
     }
   }
