@@ -1713,7 +1713,8 @@ impl Cgen {
 
   // Local `l` of the machine being printed lives in its frame.
   function makeResident(self: mut Self, l: usize, span: Span): void uses Fail<Diagnostic> {
-    if (self.cx.resident.has(l)) { return; }
+    // A local of the code around code apart is reached through the code's environment, where it is.
+    if (self.cx.resident.has(l) || self.cx.names.has(l)) { return; }
     const n = `v${l}_${self.cx.locals[l].name}`;
     const ct = match (self.cx.locals[l].kind) {
       #Arena => "fly_arena".toString(),
@@ -1961,17 +1962,17 @@ impl Cgen {
           const expr = self.builtin(k.asStr(), c, vs.clone(), arenas.clone());
           if (expr.includes(WAIT)) {
             // A routine that waits keeps its wait record in the frame, and is called again with
-            // it to go on, given what it was given again: what is moved to it is moved once, to
-            // the frame.
+            // it to go on, given what it was given first: kept with it, in the frame, so that
+            // where it came from need not be.
             let moved = String.new();
             let held = vs.clone();
             for (const [i, a] of c.args.iter().enumerate()) {
-              if (const #Move(_) = a) {
-                const ct = self.ctype(c.argTys[i], span);
-                const st = self.transient(ct.asStr());
-                moved.push(`${st} = ${vs[i]}; `);
-                held[i] = st;
-              }
+              if (const #Const(_) = a) { continue; }
+              const ct = self.ctype(c.argTys[i], span);
+              if (unitTy(c.argTys[i])) { continue; }
+              const st = self.transient(ct.asStr());
+              moved.push(`${st} = ${vs[i]}; `);
+              held[i] = st;
             }
             const again = if (moved.len() > 0) { self.builtin(k.asStr(), c, held, arenas) } else { expr };
             const w = self.transient("fly_wait");
@@ -3668,7 +3669,10 @@ impl Cgen {
     let decls = String.new();
     if (!unitTy(f.ret)) {
       self.cx.hoisted.insert(f.value);
-      if (self.cx.machine) { self.makeResident(f.value, f.span); } else { decls.push(`  ${rt} ${self.local(f.value)} = { 0 };\n`); }
+      // In a machine, in the frame if it is live across a point it stops at, as it is across a
+      // `defer` that may stop it, run once it is given.
+      const kept = self.cx.resident.has(f.value) || (self.cx.machine && waitsInCleanup(f.body, (s) => self.isSite(s)));
+      if (kept) { self.makeResident(f.value, f.span); } else { decls.push(`  ${rt} ${self.local(f.value)} = { 0 };\n`); }
     }
     // The parameters are the outermost block's, given their values as it starts.
     self.cx.prologue = inits.toString();

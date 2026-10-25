@@ -1953,7 +1953,8 @@ impl Lgen {
 
   // Local `l` of the machine being printed lives in its frame.
   function makeResident(self: mut Self, l: usize, span: Span): void uses Fail<Diagnostic> {
-    if (self.cx.resident.has(l)) { return; }
+    // A local of the code around code apart is reached through the code's environment, where it is.
+    if (self.cx.resident.has(l) || self.cx.outer.has(l)) { return; }
     const t = self.cx.locals[l].ty.clone();
     const [size, align] = match (self.cx.locals[l].kind) {
       #Arena | #Machine => [self.ptr, self.ptr],
@@ -2697,6 +2698,15 @@ impl Lgen {
   }
 
   // A hoisted local: the value of a function, or of a `handle`'s part, read once its blocks end.
+  function hoistOnStack(self: mut Self, l: usize, span: Span): void uses Fail<Diagnostic> {
+    const t = self.cx.locals[l].ty.clone();
+    if (unitTy(t)) { return; }
+    self.cx.hoisted.insert(l);
+    const s = self.shape(t, span);
+    self.cx.allocas.push(`  %l${l} = alloca [${s.size} x i8], align ${s.align}\n`);
+    self.zero(`%l${l}`.asStr(), t, span);
+  }
+
   function hoist(self: mut Self, l: usize, span: Span): void uses Fail<Diagnostic> {
     const t = self.cx.locals[l].ty.clone();
     if (unitTy(t)) { return; }
@@ -3638,7 +3648,10 @@ impl Lgen {
     // A machine's parameters in its frame are given their values once its outermost block has zeroed
     // its locals, as the block begins.
     self.cx.prologue = replace(mut self.cx.startCode, String.new());
-    self.hoist(f.value, f.span);
+    // In a machine, in the frame if it is live across a point it stops at, as it is across a
+    // `defer` that may stop it, run once it is given.
+    const kept = self.cx.resident.has(f.value) || waitsInCleanup(f.body, (s) => self.c.isSite(s));
+    if (self.cx.machine && !kept) { self.hoistOnStack(f.value, f.span); } else { self.hoist(f.value, f.span); }
     for (const l of f.params) { self.gen(l); }
     self.block(f.body, f.span);
     if (self.cx.open) { self.giveLocal(f.value, f.span); }
