@@ -4183,7 +4183,11 @@ impl Cgen {
     }
     const rt = self.ctype(f.ret, f.span);
     const b = self.body(f, inits.asStr(), "slot_");
-    const sig = `static ${rt} ${f.name}(${if (params.len() == 0) { "void".toString() } else { params.join(", ") }})`;
+    // A small function that is no machine is offered to the C compiler to inline, as LLVM inlines it
+    // through the LLVM back end: a function with checked arithmetic, whose every check keeps a call
+    // to the failure where it is, otherwise costs more than C compilers inline unasked.
+    const hint = if (!machine && stmtCount(f.body) <= 24) { "inline " } else { "" };
+    const sig = `static ${hint}${rt} ${f.name}(${if (params.len() == 0) { "void".toString() } else { params.join(", ") }})`;
     while (self.fnCode.len() <= i) { self.fnCode.push(String.new()); }
     if (self.fnCode[i].len() == 0) { self.protos.push(`${sig};\n`); }
     self.fnCode[i] = `${sig} {\n${b}}\n`;
@@ -4470,4 +4474,19 @@ export const WAIT: str = "\u{1}w";
 // is done as the code goes on from the point.
 function pointFirst(rc: str, expr: String): String {
   `({ fly_point(${WAIT}); fly_pending ? (${rc}){ 0 } : ${expr}; })`
+}
+
+// How many statements a block holds, those of blocks within it too.
+function stmtCount(b: readonly Block): usize {
+  let n = b.stmts.len();
+  for (const c of b.cleanups) { if (const #Defer(_, d) = c) { n += stmtCount(d); } }
+  for (const s of b.stmts) {
+    match (s) {
+      #If(_, x, y) | #Loop(_, x, y) | #Try(x, _, y) => { n += stmtCount(x) + stmtCount(y); }
+      #Block(x) | #Labeled(_, x) | #Region(_, _, x) | #ForGen(_, _, _, x) => { n += stmtCount(x); }
+      #Handle(h) => { n += stmtCount(h.body); for (const a of h.arms) { n += stmtCount(a.body); } }
+      _ => {}
+    }
+  }
+  n
 }

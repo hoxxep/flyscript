@@ -554,6 +554,11 @@ fly_i128 fly_mul128(fly_i128 a, fly_i128 b) {
   if (__builtin_mul_overflow(a, b, &r)) fly_panic("arithmetic overflow");
   return r;
 }
+_Noreturn void fly_overflow_op(int op, fly_i128 a, fly_i128 b, const char* type) {
+  fly_overflow(op == '+' ? fly_add128(a, b) : op == '-' ? fly_sub128(a, b) : fly_mul128(a, b), type);
+}
+_Noreturn void fly_overflow_i64(int op, int64_t a, int64_t b, const char* type) { fly_overflow_op(op, a, b, type); }
+_Noreturn void fly_overflow_u64(int op, uint64_t a, uint64_t b, const char* type) { fly_overflow_op(op, a, b, type); }
 _Noreturn void fly_div_zero(void) { fly_panic("division by zero"); }
 
 // ---- memory ----

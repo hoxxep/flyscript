@@ -305,10 +305,17 @@ void fly_mon_wake_all(uint8_t* m) FLY_SYMBOL(fly_mon_wake_all);
 _Noreturn void fly_overflow(fly_i128 value, const char* type);
 #define FLY_CHECK(T, NAME, LO, HI, X) ({ fly_i128 fly_v_ = (X); if (fly_v_ < (fly_i128)(LO) || fly_v_ > (fly_i128)(HI)) fly_overflow(fly_v_, NAME); (T)fly_v_; })
 // Checked arithmetic at the type's own width: the builtins compute the exact result and say whether
-// a `T` holds it. Only when it does not is the result made again, in 128 bits, for the message.
-#define FLY_ADD(T, NAME, X, Y) ({ T fly_r_; if (__builtin_add_overflow((X), (Y), &fly_r_)) fly_overflow(fly_add128((fly_i128)(X), (fly_i128)(Y)), NAME); fly_r_; })
-#define FLY_SUB(T, NAME, X, Y) ({ T fly_r_; if (__builtin_sub_overflow((X), (Y), &fly_r_)) fly_overflow(fly_sub128((fly_i128)(X), (fly_i128)(Y)), NAME); fly_r_; })
-#define FLY_MUL(T, NAME, X, Y) ({ T fly_r_; if (__builtin_mul_overflow((X), (Y), &fly_r_)) fly_overflow(fly_mul128((fly_i128)(X), (fly_i128)(Y)), NAME); fly_r_; })
+// a `T` holds it. Only when it does not is the result made again, in 128 bits, for the message, by
+// the runtime (`fly_overflow_op`, `op` '+', '-' or '*'): the code a check leaves where it is is one
+// call, which keeps a function with checks small enough for a C compiler to inline.
+// A type of 64 bits or fewer is given in a register of 64, as signed or not.
+_Noreturn void fly_overflow_op(int op, fly_i128 a, fly_i128 b, const char* type);
+_Noreturn void fly_overflow_i64(int op, int64_t a, int64_t b, const char* type);
+_Noreturn void fly_overflow_u64(int op, uint64_t a, uint64_t b, const char* type);
+#define FLY_OVERFLOWED(OP, T, X, Y, NAME) (sizeof(T) > 8 ? fly_overflow_op(OP, (fly_i128)(X), (fly_i128)(Y), NAME) : (T)-1 < (T)0 ? fly_overflow_i64(OP, (int64_t)(X), (int64_t)(Y), NAME) : fly_overflow_u64(OP, (uint64_t)(X), (uint64_t)(Y), NAME))
+#define FLY_ADD(T, NAME, X, Y) ({ T fly_r_; if (__builtin_add_overflow((X), (Y), &fly_r_)) FLY_OVERFLOWED('+', T, X, Y, NAME); fly_r_; })
+#define FLY_SUB(T, NAME, X, Y) ({ T fly_r_; if (__builtin_sub_overflow((X), (Y), &fly_r_)) FLY_OVERFLOWED('-', T, X, Y, NAME); fly_r_; })
+#define FLY_MUL(T, NAME, X, Y) ({ T fly_r_; if (__builtin_mul_overflow((X), (Y), &fly_r_)) FLY_OVERFLOWED('*', T, X, Y, NAME); fly_r_; })
 fly_i128 fly_add128(fly_i128 a, fly_i128 b);
 fly_i128 fly_sub128(fly_i128 a, fly_i128 b);
 fly_i128 fly_mul128(fly_i128 a, fly_i128 b);
