@@ -710,7 +710,7 @@ To give the reviewer a sense of size, not as a plan to follow. Everything here c
 
 - **`std/codec`** (new): `Encode`, `Decode`, `Encoder`, `Decoder`, `Key`, `Value`, the derivations, `wire`, the adapters and `transcode`.
 - **`Default`** in the prelude, derived.
-- **The values of section 7**: `Bytes`, and `std/uuid`'s `Uuid`, both new; `Encode` and `Decode` for `std/time`'s `Timestamp` and `Duration`; the adapters (`Hex`, `Base64`, `Base64Url`, `Rfc3339`, `UnixSeconds`, `UnixMillis`, `ExactTime`, `Packed`, `Always`); `Text`, `Binary` and `Fallback`. `std/time`'s `DateTime` is a record, and a record cannot carry an encoding of its own, so it would become a struct and be written as RFC 3339 with its offset.
+- **The values of section 7**: `Bytes`, and `std/uuid`'s `Uuid`, both new; `Encode` and `Decode` for `std/time`'s `Timestamp` and `Duration`; the adapters (`Hex`, `Base64`, `Base64Url`, `Rfc3339`, `UnixSeconds`, `UnixMillis`, `ExactTime`, `Packed`, `Always`); `Text`, `Binary` and `Fallback`. `std/time`'s `DateTime` is a record, and a record cannot carry an encoding of its own. The time design (`2026-10-25-time-design.md`) moves it, as a struct, to the `calendar` package, and adds the data-model values for dates, times and zoned instants that its types need.
 - **`std/json`** on `std/codec`, with paths, limits and duplicate keys.
 - **Reflection**: comptime parameters on interface methods, specialized (section 6, item 6).
 - **Docs**: spec §7.5 and A.9, std.md §16, and a new section for `std/codec`.
