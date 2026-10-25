@@ -225,14 +225,17 @@ fn speaks_https_to_a_real_server() {
     openssl(&["x509", "-req", "-in", "req.pem", "-CA", "ca.pem", "-CAkey", "ca.key", "-CAcreateserial", "-out", "cert.pem", "-days", "2", "-extfile", "ext.cnf"]);
     // The server is Node's, which reads the whole of a request before it answers, and closes as TLS
     // says to: `openssl s_server -www` answers having read part of one, and its close may then reset
-    // the connection before the answer is read, now and then.
+    // the connection before the answer is read, now and then. It listens on 127.0.0.1, not on
+    // Node's default of `::`: on macOS a port taken for IPv6 may be another process's for IPv4, and
+    // then connections to 127.0.0.1 are that process's, so now and then another program's plain
+    // server answered the handshake ("wrong version number").
     let mut server = Command::new("node")
         .arg("-e")
         .arg(r#"const fs = require("node:fs");
 require("node:https").createServer({ key: fs.readFileSync("key.pem"), cert: fs.readFileSync("cert.pem") }, (q, r) => {
   q.resume();
   q.on("end", () => r.end("served by s_server's stand-in\n"));
-}).listen(0, function () { console.log(`port ${this.address().port}`); });"#)
+}).listen(0, "127.0.0.1", function () { console.log(`port ${this.address().port}`); });"#)
         .current_dir(&dir)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())

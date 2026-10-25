@@ -3,7 +3,8 @@
 # and time: a million tasks parked at once, each on a timer — `parked` in its own closure,
 # `parked_deep` two calls deep, in a handler and the helper it waits in, as a connection handler
 # parks — and two tasks answering each other over channels (`ping_pong`), and a lock no other task
-# contends (`locks`). Needs clang and llvm-link (as selfhost/llvm.sh does) and cargo, with
+# contends (`locks`), against Rust's `std::sync::Mutex`, which never suspends, and tokio's, which
+# may, as `Mutex.lock` may. Needs clang and llvm-link (as selfhost/llvm.sh does) and cargo, with
 # tokio fetched or cached. `bench/tasks.sh`.
 set -e
 here=$(cd "$(dirname "$0")" && pwd)
@@ -24,4 +25,5 @@ for b in parked parked_deep ping_pong locks; do
   echo "$b: Flyscript $(peak "$out/$b"), Rust $(peak "$out/rust/release/$b")"
   "$out/$b"
   "$out/rust/release/$b"
+  if [ $b = locks ]; then "$out/rust/release/async_locks"; fi
 done

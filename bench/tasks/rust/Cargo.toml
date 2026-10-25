@@ -21,3 +21,7 @@ path = "src/ping_pong.rs"
 [[bin]]
 name = "locks"
 path = "src/locks.rs"
+
+[[bin]]
+name = "async_locks"
+path = "src/async_locks.rs"
