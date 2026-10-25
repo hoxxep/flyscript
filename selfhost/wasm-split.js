@@ -6,8 +6,8 @@
 // their code — goes into the route's module; everything else, what two routes share among it, stays
 // in the core. In the core each route's function becomes a stub of the same type that asks the host
 // for the route's module (`fly.route(k)`), which loads it the first time, and calls the function
-// there through the function table the two share: a call from WebAssembly to WebAssembly, so a fiber
-// suspends through it as through any call. The program is the same; only where its code is changes.
+// there through the function table the two share: a call from WebAssembly to WebAssembly, so the
+// program suspends through it as through any call. The program is the same; only where its code is changes.
 //
 // The module is expected internalized around its true roots, the routes' functions among them, and
 // optimized, those kept from being inlined. Writes `all.ll`, the module with every symbol named

@@ -657,6 +657,29 @@ fn tasks_link_and_run_through_split_llvm() {
     }
 }
 
+/// Programs that panic, built through LLVM as `fly build` builds them, unwind as they do under the
+/// sanitizers, which build one module: every cleanup runs, waiting ones too, and catch points take
+/// the panic up. Linked by ThinLTO, each function keeps its unwind entry, and so its landing pads.
+#[test]
+fn panics_unwind_through_split_llvm() {
+    if !has_llvm() {
+        return;
+    }
+    let dir = out().join("split-panics");
+    std::fs::create_dir_all(&dir).unwrap();
+    for name in ["panic_runs_cleanup", "fork_panic", "panic_in_a_generator", "panic_cleanup_waits"] {
+        let program = root().join(format!("tests/run/{name}.fly"));
+        let exe = dir.join(name);
+        let built = Command::new("sh").arg(root().join("selfhost/llvm.sh")).arg(root().join("selfhost/seed.js")).arg(&program).arg(&exe).output().unwrap();
+        assert!(built.status.success(), "{name}: {}{}", String::from_utf8_lossy(&built.stdout), String::from_utf8_lossy(&built.stderr));
+        let want: String = std::fs::read_to_string(&program).unwrap().lines().filter_map(|l| l.strip_prefix("// expect: ")).map(|l| format!("{l}\n")).collect();
+        let r = Command::new(&exe).env("FLY_WORLD", "{}").output().unwrap();
+        // The panic that ends it, last, is on standard error.
+        let got = format!("{}{}", String::from_utf8_lossy(&r.stdout), String::from_utf8_lossy(&r.stderr));
+        assert_eq!(got, want, "{name}");
+    }
+}
+
 /// The compiler, compiled through LLVM, compiles itself to the LLVM module, the C beside it, and
 /// the JavaScript the seed makes of it.
 #[test]

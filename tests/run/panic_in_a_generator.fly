@@ -1,4 +1,4 @@
-// A panic on a fiber (a generator's, or under a handler) unwinds the task as one anywhere does:
+// A panic in a generator's producer unwinds the task as one anywhere does:
 // the generator's own cleanup runs, then the task that pulled from it unwinds.
 // expect: #Some(1) #Some(2)
 // expect: the generator cleans up

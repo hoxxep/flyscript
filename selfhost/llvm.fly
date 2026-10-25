@@ -23,8 +23,8 @@ import {
   Local, LocalKind, Place, Root, Proj, ProjKind, Operand, Constant, Rvalue, Capture, Call, Callee, Stmt, Handle, Arm, Block,
   Cleanup, Func, Uses, ownedIn, useBlock,
 } from "./ir";
-import { Cgen, newCgen, cquote, checking, pruneChecks } from "./c";
-import { pends, residents } from "./frames";
+import { Cgen, newCgen, cquote, checking, pruneChecks, WAIT } from "./c";
+import { pends, residents, waitsInCleanup } from "./frames";
 import { HashMap, HashSet } from "std/collections";
 
 // What the code being printed is part of, as in the C back end.
@@ -74,6 +74,12 @@ type Lctx = {
   sites: usize;
   cases: String;
   reenter: Vec<String>;
+  // A machine whose cleanup may wait takes a panic up in its landing pads, which run the cleanups
+  // as code that may stop and go on unwinding by the flag (§5.7); `catching` while one is printed.
+  // How many of the direct handlers in `reenter` are around each block in `pblocks`.
+  catches: bool;
+  catching: bool;
+  preenter: Vec<usize>;
   resident: HashSet<usize>;
   // In a generator, where its yields put their item; under a `handle` of `Yield`, the effect a
   // yield performs instead.
@@ -124,7 +130,7 @@ function newCtx(locals: Vec<Local>, ret: Ty, mode: Mode): Lctx {
   {
     locals, addrs: HashMap.new(), outer: HashSet.new(), captures: Vec.new(), capTys: Vec.new(), allocas: String.new(), out: String.new(), open: true, tmp: 0,
     scopes: Vec.new(), targets: Vec.new(), mode, machine: false, fpk: { at: 0, align: 1 }, frameEntry: String.new(), startCode: String.new(),
-    sites: 0, cases: String.new(), reenter: Vec.new(), resident: HashSet.new(), yo: #None, yieldEffect: #None, machineDrops: HashMap.new(), deferStore: HashMap.new(),
+    sites: 0, cases: String.new(), reenter: Vec.new(), catches: false, catching: false, preenter: Vec.new(), resident: HashSet.new(), yo: #None, yieldEffect: #None, machineDrops: HashMap.new(), deferStore: HashMap.new(),
     arenas: HashMap.new(), ret: ret.clone(), retSlot: String.new(), fnRet: ret, hoisted: HashSet.new(), declared: HashSet.new(), prologue: String.new(), live: HashSet.new(),
     reachable: true, liveAt: HashMap.new(), sp: String.new(), loc: String.new(), direct: false,
     pblocks: Vec.new(), calls: false, entryLoc: String.new(), landing: false, pcleanups: Vec.new(), pspan: #None, lpads: HashMap.new(), lpadCode: String.new(), ptok: String.new(),
@@ -1389,7 +1395,7 @@ impl Lgen {
           self.fillEnv(ap, env.asStr(), 0);
           self.ins(`call void @${name}(ptr ${env})`);
           self.ins(`call void @flyg_cleanup_end(ptr ${u})`);
-        } else if (!self.cx.machine || self.cx.landing) {
+        } else if (!self.cx.machine || (self.cx.landing && !self.cx.catching)) {
           // Where the code cannot stop, neither may the `defer`.
           const u = self.alloca(2 * self.ptr, self.ptr);
           self.ins(`call void @flyg_cleanup_begin(ptr ${u})`);
@@ -1519,6 +1525,7 @@ impl Lgen {
       self.cx.pcleanups.push(b.cleanups.clone());
       self.cx.pspan = #Some(span);
       self.cx.pblocks.push(k.clone());
+      self.cx.preenter.push(self.cx.reenter.len());
     }
     for (const s of b.stmts) { self.stmt(s, span); }
     self.cx.targets.pop();
@@ -1545,6 +1552,7 @@ impl Lgen {
     if (self.unwinds) {
       self.cx.pblocks.pop();
       self.cx.pcleanups.pop();
+      self.cx.preenter.pop();
     }
     for (const l of b.locals) { self.cx.live.remove(l); }
   }
@@ -1574,6 +1582,15 @@ impl Lgen {
     self.cx.open = false;
     self.cx.landing = true;
     const ptok = replace(mut self.cx.ptok, String.new());
+    if (self.cx.catches && self.cx.machine) {
+      self.catchingPad(name.asStr(), live, span);
+      self.cx.ptok = ptok;
+      const code = replace(mut self.cx.out, saved);
+      self.cx.open = open;
+      self.cx.landing = landing;
+      self.cx.lpadCode.push(code.asStr());
+      return name;
+    }
     if (self.funclets) {
       // What the host throws as the program ends passes on, its cleanup not run (§5.7).
       self.declare("fly_panicking", "declare zeroext i1 @fly_panicking()");
@@ -1602,6 +1619,37 @@ impl Lgen {
     self.cx.landing = landing;
     self.cx.lpadCode.push(code.asStr());
     name
+  }
+
+  // A landing pad of a machine whose cleanup may wait: it takes the panic up, and runs the cleanups
+  // of each block around, innermost first, with the direct handlers around that block, as code that
+  // may stop; then the machine unwinds on by the flag, as a cancellation does.
+  function catchingPad(self: mut Self, name: str, live: readonly HashSet<usize>, span: Span): void uses Fail<Diagnostic> {
+    if (self.funclets) {
+      self.declare("fly_panicking", "declare zeroext i1 @fly_panicking()");
+      self.declare("llvm.wasm.rethrow", "declare void @llvm.wasm.rethrow() noreturn");
+      const dl = if (self.cx.loc.len() > 0) { `, !dbg ${self.cx.loc}` } else { String.new() };
+      self.cx.out.push(`${name}:\n  %${name}.cs = catchswitch within none [label %${name}.c] unwind to caller\n${name}.c:\n  %${name}.cp = catchpad within %${name}.cs [ptr null]\n  %${name}.p = call zeroext i1 @fly_panicking() [ "funclet"(token %${name}.cp) ]${dl}\n  br i1 %${name}.p, label %${name}.take, label %${name}.pass\n${name}.pass:\n  call void @llvm.wasm.rethrow() [ "funclet"(token %${name}.cp) ]\n  unreachable\n${name}.take:\n  catchret from %${name}.cp to label %${name}.run\n${name}.run:\n`);
+    } else {
+      self.cx.out.push(`${name}:\n  %${name}.v = landingpad { ptr, i32 } catch ptr @fly_panic_type\n  %${name}.e = extractvalue { ptr, i32 } %${name}.v, 0\n`);
+    }
+    self.cx.open = true;
+    if (!self.funclets) { self.ins(`call void @fly_caught(ptr %${name}.e)`.asStr()); }
+    self.ins("call void @fly_panic_flag()");
+    const catching = self.cx.catching;
+    self.cx.catching = true;
+    let i = self.cx.pcleanups.len();
+    while (i > 0) {
+      i -= 1;
+      const ha = self.cxField("fly_handlers");
+      self.store("ptr", "%h0", ha.asStr());
+      const n = self.cx.preenter[i];
+      self.reinstallFirst(n);
+      const cs = self.cx.pcleanups[i].clone();
+      self.cleanups(cs, live, span);
+    }
+    self.cx.catching = catching;
+    if (self.cx.open) { self.jump("fail"); }
   }
 
   function stmt(self: mut Self, s: readonly Stmt, span: Span): void uses Fail<Diagnostic> {
@@ -1888,6 +1936,7 @@ impl Lgen {
     let res: HashSet<usize> = HashSet.new();
     for (const b of blocks) { residents(b, (s) => self.c.isSite(s), mut res); }
     self.cx.machine = true;
+    self.cx.catches = self.unwinds && blocks.iter().some((b) => waitsInCleanup(b, (s) => self.c.isSite(s)));
     self.cx.fpk = { at: 0, align: 8 };
     pack(mut self.cx.fpk, 4, 4);
     let ls: Vec<usize> = Vec.new();
@@ -1958,7 +2007,15 @@ impl Lgen {
 
   // What going on from a point sets up again: the direct handlers around it, outermost first.
   function reinstall(self: mut Self): void {
-    for (const hh of self.cx.reenter.clone()) {
+    const n = self.cx.reenter.len();
+    self.reinstallFirst(n);
+  }
+
+  // The handlers in force as the machine was called, and the first `n` direct handlers around.
+  function reinstallFirst(self: mut Self, n: usize): void {
+    const rs = self.cx.reenter.clone();
+    for (const i of 0..n) {
+      const hh = rs[i].clone();
       const ha = self.cxField("fly_handlers");
       const cur = self.load("ptr", ha.asStr());
       const oa = self.gep(hh.asStr(), handlerOuter(self.ptr));
@@ -2207,7 +2264,7 @@ impl Lgen {
     self.c.argPlaces = vs.clone();
     const expr = self.c.builtin(key, c, vs, ars);
     self.c.argPlaces = Vec.new();
-    if (expr.includes("FLY_W")) { return self.waitRoutine(expr, c, places, ptrs); }
+    if (expr.includes(WAIT)) { return self.waitRoutine(expr, c, places, ptrs); }
     const res = if (unitTy(c.ret)) { "null".toString() } else { self.allocaOf(c.ret, span) };
     const body = if (unitTy(c.ret)) { `(void)(${expr});` } else { `*(${self.c.ctype(c.ret, span)}*)r = ${expr};` };
     const g = self.glueFn(ptrs.len(), body.asStr());
@@ -2232,7 +2289,7 @@ impl Lgen {
     }
     const w = self.storage(8 + 24 + 3 * self.ptr, 8);
     self.ins(`call void @llvm.memset.p0.i64(ptr ${w}, i8 0, i64 ${8 + 24 + 3 * self.ptr}, i1 false)`);
-    const e = expr.replaceAll("FLY_W", `((fly_wait*)a${ptrs.len()})`.asStr());
+    const e = expr.replaceAll(WAIT, `((fly_wait*)a${ptrs.len()})`.asStr());
     ptrs.push(w);
     const res = if (unitTy(c.ret)) { "null".toString() } else { self.storageOf(c.ret, span) };
     const body = if (unitTy(c.ret)) { `(void)(${e});` } else { `*(${self.c.ctype(c.ret, span)}*)r = ${e};` };
@@ -2706,6 +2763,7 @@ impl Lgen {
       self.cx.pcleanups.push(cleanups.clone());
       self.cx.pspan = #Some(span);
       self.cx.pblocks.push(k.clone());
+      self.cx.preenter.push(self.cx.reenter.len());
     }
     self.store("ptr", "null", gs.asStr());
     self.ins(`call ${callTy} @${name}__fly(${args.join(", ")})`);
@@ -2801,6 +2859,7 @@ impl Lgen {
     if (self.unwinds) {
       self.cx.pblocks.pop();
       self.cx.pcleanups.pop();
+      self.cx.preenter.pop();
     }
   }
 
@@ -3694,9 +3753,9 @@ impl Lgen {
     // The runtime's catch point, which C cannot write: what `f(a)` raises as a panic is caught here;
     // in WebAssembly, what else is thrown — the host's exception by which the program ends — passes.
     if (self.funclets) {
-      ll.push("define zeroext i1 @fly_try(ptr %f, ptr %a) #0 personality ptr @__gxx_wasm_personality_v0 {\nentry:\n  %mk = alloca [2 x ptr]\n  call void @fly_frames_keep(ptr %mk)\n  invoke void %f(ptr %a) to label %ok unwind label %pad\nok:\n  ret i1 false\npad:\n  %cs = catchswitch within none [label %catch] unwind to caller\ncatch:\n  %cp = catchpad within %cs [ptr null]\n  %p = call zeroext i1 @fly_panicking() [ \"funclet\"(token %cp) ]\n  br i1 %p, label %take, label %pass\npass:\n  call void @llvm.wasm.rethrow() [ \"funclet\"(token %cp) ]\n  unreachable\ntake:\n  catchret from %cp to label %caught\ncaught:\n  call void @fly_frames_back(ptr %mk)\n  ret i1 true\n}\n\n");
+      ll.push("define zeroext i1 @fly_try(ptr %f, ptr %a) #0 personality ptr @__gxx_wasm_personality_v0 {\nentry:\n  %mk = alloca [2 x ptr]\n  call void @fly_frames_keep(ptr %mk)\n  invoke void %f(ptr %a) to label %ok unwind label %pad\nok:\n  %fl = call zeroext i1 @fly_try_flagged(ptr %mk)\n  ret i1 %fl\npad:\n  %cs = catchswitch within none [label %catch] unwind to caller\ncatch:\n  %cp = catchpad within %cs [ptr null]\n  %p = call zeroext i1 @fly_panicking() [ \"funclet\"(token %cp) ]\n  br i1 %p, label %take, label %pass\npass:\n  call void @llvm.wasm.rethrow() [ \"funclet\"(token %cp) ]\n  unreachable\ntake:\n  catchret from %cp to label %caught\ncaught:\n  call void @fly_frames_back(ptr %mk)\n  ret i1 true\n}\n\n");
     } else if (self.unwinds) {
-      ll.push("define zeroext i1 @fly_try(ptr %f, ptr %a) #0 personality ptr @fly_personality {\nentry:\n  %mk = alloca [2 x ptr]\n  call void @fly_frames_keep(ptr %mk)\n  invoke void %f(ptr %a) to label %ok unwind label %pad\nok:\n  ret i1 false\npad:\n  %lp = landingpad { ptr, i32 } catch ptr @fly_panic_type\n  %e = extractvalue { ptr, i32 } %lp, 0\n  call void @fly_caught(ptr %e)\n  call void @fly_frames_back(ptr %mk)\n  ret i1 true\n}\n\n");
+      ll.push("define zeroext i1 @fly_try(ptr %f, ptr %a) #0 personality ptr @fly_personality {\nentry:\n  %mk = alloca [2 x ptr]\n  call void @fly_frames_keep(ptr %mk)\n  invoke void %f(ptr %a) to label %ok unwind label %pad\nok:\n  %fl = call zeroext i1 @fly_try_flagged(ptr %mk)\n  ret i1 %fl\npad:\n  %lp = landingpad { ptr, i32 } catch ptr @fly_panic_type\n  %e = extractvalue { ptr, i32 } %lp, 0\n  call void @fly_caught(ptr %e)\n  call void @fly_frames_back(ptr %mk)\n  ret i1 true\n}\n\n");
     }
     ll.push("!0 = !{!\"branch_weights\", i32 1, i32 2000}\n");
     // What the target is, the build adds: the C compiler's, so the two inline into each other.
@@ -3743,6 +3802,8 @@ declare void @fly_frame_pop(ptr)
 declare void @fly_frames_free(ptr)
 declare void @fly_frames_keep(ptr)
 declare void @fly_frames_back(ptr)
+declare zeroext i1 @fly_try_flagged(ptr)
+declare void @fly_panic_flag()
 declare void @fly_machine_unwind(ptr, ptr, ptr)
 declare void @fly_handle_enter(ptr, ptr, ptr)
 declare void @fly_handle_leave(ptr, ptr)

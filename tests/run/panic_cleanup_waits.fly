@@ -1,0 +1,39 @@
+// expect: closing at 1 ms
+// expect: closed at 11 ms
+// expect: the task panicked: index 3 out of bounds (length 3)
+// expect: closing at 12 ms
+// expect: <panic: index 3 out of bounds (length 3)>
+// A panic runs cleanup to its end (§5.6, §5.7), cleanup that waits included: the task's `defer`
+// sleeps and sends as the panic unwinds it, the scope waiting for it, and only then does the panic
+// go on to whoever waits for the task.
+import { println } from "std/io";
+import { channel, Sender } from "std/sync";
+
+function at(start: Instant): u64 uses Io { Io.now().since(start).toMs() }
+
+function work(start: Instant, done: Sender<String>): void uses Io {
+  defer {
+    println(`closing at ${at(start)} ms`);
+    Io.sleep(Duration.ms(10));
+    done.send(`closed at ${at(start)} ms`);
+  };
+  Io.sleep(Duration.ms(1));
+  const xs: Vec<u32> = [1, 2, 3];
+  println(`${xs[xs.len()]}`);
+}
+
+export function main(): void uses Io {
+  const start = Io.now();
+  const [tx, rx] = channel<String>();
+  const end = Io.scope((s) => {
+    const t = s.spawn(() => work(start, tx));
+    t.wait()
+  });
+  match (rx.recv()) { #Some(m) => println(m), #None => println("no word") }
+  match (end) {
+    #Panicked(m) => println(`the task panicked: ${m}`),
+    _ => println("the task ended"),
+  }
+  // Unwinding through a function that waits in its cleanup, on the task itself.
+  work(start, channel<String>()[0]);
+}

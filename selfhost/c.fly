@@ -24,7 +24,7 @@ import {
   Local, LocalKind, Place, Root, Proj, ProjKind, Operand, Constant, Rvalue, Capture, Call, Callee, Stmt, Handle, Arm, Block,
   Cleanup, Func, ConstValue, MainArg, Uses, ownedIn, useBlock,
 } from "./ir";
-import { pends, residents } from "./frames";
+import { pends, residents, waitsInCleanup } from "./frames";
 import { HashMap, HashSet } from "std/collections";
 
 // What the code being printed is part of: a function of the program's, or code run apart from one.
@@ -122,6 +122,11 @@ type Ctx = {
   pcases: Vec<usize>;
   pread: HashSet<usize>;
   declared: HashSet<usize>;
+  // A machine whose cleanup may wait takes a panic up, as it reaches the machine, by a catch record
+  // of its own, and unwinds on by its flag (§5.7): from the code of each block, `cunw`, which runs
+  // the block's cleanups as code that may stop, and goes on to the block around it's.
+  catches: bool;
+  cunw: String;
 };
 
 function newCtx(locals: Vec<Local>, ret: Ty, mode: Mode): Ctx {
@@ -130,7 +135,7 @@ function newCtx(locals: Vec<Local>, ret: Ty, mode: Mode): Ctx {
     machine: false, frameType: String.new(), fields: String.new(), sites: 0, cases: String.new(), reenter: Vec.new(),
     yo: #None, yieldEffect: #None, resident: HashSet.new(), retC: String.new(), machineDrops: HashMap.new(), deferStore: HashMap.new(), arenas: HashMap.new(), ret: ret.clone(), fnRet: ret, capTys: Vec.new(), out: String.new(),
     hoisted: HashSet.new(), prologue: String.new(), live: HashSet.new(), reachable: true, liveAt: HashMap.new(), direct: false,
-    unwinds: false, landing: false, calls: false, hoist: HashSet.new(), envType: String.new(), pblocks: Vec.new(), punw: String.new(), pcases: Vec.new(), pread: HashSet.new(), declared: HashSet.new(),
+    unwinds: false, landing: false, calls: false, hoist: HashSet.new(), envType: String.new(), pblocks: Vec.new(), punw: String.new(), pcases: Vec.new(), pread: HashSet.new(), declared: HashSet.new(), catches: false, cunw: String.new(),
   }
 }
 
@@ -1302,6 +1307,15 @@ impl Cgen {
     const parent = match (self.cx.pblocks.last()) { #Some(p) => `punw${p}`, #None => "punw_out".toString() };
     self.cx.punw.push(`punw${k}: ${code}goto ${parent};\n`);
     self.cx.pcases.push(k);
+    if (self.cx.catches) {
+      // The same cleanups, by the flag: in force are the handlers around the block.
+      const up = match (self.cx.pblocks.last()) { #Some(p) => `cunw${p}`, #None => "cunw_out".toString() };
+      self.cx.pblocks.push(k);
+      const again = self.reenterCode();
+      const flagged = self.cleanups(cs, all, span);
+      self.cx.pblocks.pop();
+      self.cx.cunw.push(`cunw${k}: fly_handlers = h0_; ${again}${flagged}goto ${up};\n`);
+    }
   }
 
   // A C function's body, `code`, with what a panic needs of it if it has cleanups, and `leave`,
@@ -1356,8 +1370,10 @@ impl Cgen {
       defs.push(`#define fr ((${self.cx.frameType}*)fr_->mfr)\n`);
       undefs.push("#undef fr\n");
     }
-    self.protos.push(`typedef struct { int32_t at; void* env; void* mfr; void* l[${if (k == 0) { 1 } else { k }}]; } ${n}_t;\nstatic inline __attribute__((always_inline)) void ${n}(${n}_t* fr_);\n`);
-    let land = `static inline __attribute__((always_inline)) void ${n}(${n}_t* fr_) {\n  switch (fr_->at) {\n`;
+    self.protos.push(`typedef struct { int32_t at; void* env; void* mfr; void* cu; void* l[${if (k == 0) { 1 } else { k }}]; } ${n}_t;\nstatic inline __attribute__((always_inline)) void ${n}(${n}_t* fr_);\n`);
+    // A panic unwinds to a machine that takes it up past the machine's own frame (the unwinder
+    // stops at a frame above the catch record's), whose cleanups the machine runs by its flag.
+    let land = `static inline __attribute__((always_inline)) void ${n}(${n}_t* fr_) {\n  if (fr_->cu && fly_cx()->unw == fr_->cu) return;\n  switch (fr_->at) {\n`;
     for (const c of self.cx.pcases) { land.push(`  case ${c}: goto punw${c};\n`); }
     land.push("  default: return;\n  }\n");
     land.push(defs.asStr());
@@ -1366,7 +1382,16 @@ impl Cgen {
     land.push(undefs.asStr());
     land.push("}\n");
     self.apartCode.push(land.asStr());
-    [`  ${n}_t fr_ __attribute__((cleanup(${n}))) = { 0 };\n${inits}`, code, "fr_.at = 0; ".toString()]
+    const record = `  ${n}_t fr_ __attribute__((cleanup(${n}))) = { 0 };\n${inits}`;
+    if (!self.cx.catches) { return [record, code, "fr_.at = 0; ".toString()]; }
+    // A panic that reaches the machine is taken up here, wherever it stopped last, and unwinds on
+    // from the block the record says the code is in.
+    let cases = String.new();
+    for (const c of self.cx.pcases) { cases.push(`case ${c}: goto cunw${c}; `); }
+    const catch_ = `  fly_unw cu_;\n  fly_unw_push(&cu_);\n  fr_.cu = &cu_;\n  if (FLY_UNW_CATCH(&cu_)) {\n    fly_cx()->unw = cu_.prev;\n    fly_panic_flag();\n    switch (FLY_AT) { ${cases}default: goto cunw_out; }\n  }\n`;
+    const flagged = replace(mut self.cx.cunw, String.new());
+    const all = `${code}  goto cunw_end;\n${flagged}cunw_out: goto fail;\ncunw_end: ;\n`;
+    [`${record}${catch_}`, all, "FLY_AT = 0; fly_unw_pop(&cu_); ".toString()]
   }
 
   function block(self: mut Self, b: readonly Block, span: Span): void uses Fail<Diagnostic> {
@@ -1387,7 +1412,7 @@ impl Cgen {
     self.cx.targets.push(unw.clone());
     // A panic in the block runs its cleanups (§5.7).
     if (self.cx.unwinds) {
-      self.line(`fr_.at = ${k};`);
+      self.line(`${self.atField()} = ${k};`);
       self.panicLanding(k, b.cleanups, span);
       self.cx.pblocks.push(k);
     }
@@ -1671,6 +1696,9 @@ impl Cgen {
     for (const b of blocks) { residents(b, (s) => self.isSite(s), mut res); }
     self.cx.machine = true;
     self.cx.frameType = frameType;
+    self.cx.catches = !self.freestanding && blocks.iter().some((b) => waitsInCleanup(b, (s) => self.isSite(s)));
+    // Taken up by a `longjmp`, the code reads what its cleanups drop in memory, where it is.
+    if (self.cx.catches) { for (const b of blocks) { residents(b, (_) => true, mut res); } }
     let ls: Vec<usize> = Vec.new();
     for (const l of res.iter()) { ls.push(l); }
     ls.sortBy((a, b) => a.cmp(b));
@@ -1711,16 +1739,22 @@ impl Cgen {
   // What a machine does as it stops: the handlers in force as it was called are in force again,
   // and it returns nothing.
   function suspendCode(self: readonly Self): String {
-    const at = if (self.cx.unwinds) { "fr_.at = 0; " } else { "" };
-    `fly_handlers = h0_; ${at}return (${self.cx.retC}){ 0 };`
+    const at = if (self.cx.unwinds) { `${self.atField()} = 0; ` } else { String.new() };
+    const cu = if (self.cx.catches) { "fly_unw_pop(&cu_); " } else { "" };
+    `fly_handlers = h0_; ${at}${cu}return (${self.cx.retC}){ 0 };`
   }
+
+  // The panic record's block, as the code says which it is in. A machine that takes a panic up
+  // reads it after a `longjmp`, which may give back any copy of it a register held: in memory, each
+  // time.
+  function atField(self: readonly Self): str { if (self.cx.catches) { "FLY_AT" } else { "fr_.at" } }
 
   // What going on from a point sets up again: the block the panic record says the code is in, and
   // the direct handlers around it, outermost first.
   function reenterCode(self: readonly Self): String {
     let out = String.new();
     if (self.cx.unwinds) {
-      if (const #Some(k) = self.cx.pblocks.last()) { out.push(`fr_.at = ${k}; `); }
+      if (const #Some(k) = self.cx.pblocks.last()) { out.push(`${self.atField()} = ${k}; `); }
     }
     for (const r of self.cx.reenter) { out.push(r.asStr()); }
     out
@@ -1893,7 +1927,7 @@ impl Cgen {
           self.scopeSite(to.asStr(), c, vs);
         } else {
           const expr = self.builtin(k.asStr(), c, vs.clone(), arenas.clone());
-          if (expr.includes("FLY_W")) {
+          if (expr.includes(WAIT)) {
             // A routine that waits keeps its wait record in the frame, and is called again with
             // it to go on, given what it was given again: what is moved to it is moved once, to
             // the frame.
@@ -1909,7 +1943,7 @@ impl Cgen {
             }
             const again = if (moved.len() > 0) { self.builtin(k.asStr(), c, held, arenas) } else { expr };
             const w = self.storage("fly_wait");
-            const e = again.replaceAll("FLY_W", `&${w}`.asStr());
+            const e = again.replaceAll(WAIT, `&${w}`.asStr());
             self.site(`${w} = (fly_wait){ 0 }; ${moved}${to}${e};`, `${to}${e};`);
             if (!self.cx.machine) { self.line(`if (fly_pending) fly_panic("a wait where the code cannot stop");`); }
           } else if (machine && k == "Gen_next") {
@@ -2137,7 +2171,7 @@ impl Cgen {
       "Listener_next" => {
         const yes = self.some(rt, "x_", span);
         const no = self.none(rt, span);
-        `({ fly_socket x_; fly_accept(FLY_W, ${arg(0)}, &x_) ? ${yes} : ${no}; })`
+        `({ fly_socket x_; fly_accept(${WAIT}, ${arg(0)}, &x_) ? ${yes} : ${no}; })`
       }
       "RegionList_at" => {
         const ec = self.ctype(stripBorrow(rt), span);
@@ -2260,7 +2294,7 @@ impl Cgen {
     const rc = self.ctype(c.ret, c.span);
     match (op) {
       // Sleeping waits for the virtual clock, which is its scheduling point.
-      "sleep" => `({ __auto_type d_ = ${vs[0]}; fly_sleep(FLY_W, d_.nanos); (fly_unit)0; })`,
+      "sleep" => `({ __auto_type d_ = ${vs[0]}; fly_sleep(${WAIT}, d_.nanos); (fly_unit)0; })`,
       "park" => "((fly_unit)0)".toString(),
       _ => pointFirst(rc.asStr(), self.ioDone(op, c, vs)),
     }
@@ -2370,7 +2404,7 @@ impl Cgen {
     const n = `half${self.helpers.len()}`;
     self.helpers.insert(key, n.clone());
     self.protos.push(`static void ${n}(void* f, void* out);\n`);
-    self.dropCode.push(`static void ${n}(void* f, void* out) { fly_fn* fn = f; ${tc} v = ((${tc} (*)(void*, void**, void*))fn->fn)(fn->env, (void*[1]){ NULL }, NULL); *(${tc}*)out = v; if (fn->drop) fn->drop(fn->env); }\n`);
+    self.dropCode.push(`static void ${n}(void* f, void* out) { fly_fn* fn = f; ${tc} v = ((${tc} (*)(void*, void**, void*))fn->fn)(fn->env, (void*[1]){ NULL }, NULL); fly_panic_again_if(); *(${tc}*)out = v; if (fn->drop) fn->drop(fn->env); }\n`);
     n
   }
 
@@ -2496,7 +2530,7 @@ impl Cgen {
             const n = `sortcmp${self.helpers.len()}`;
             self.helpers.insert(sortKey, n.clone());
             self.protos.push(`static int ${n}(void* ctx, const void* a, const void* b);\n`);
-            self.dropCode.push(`static int ${n}(void* ctx, const void* a, const void* b) { fly_fn* f = ctx; ${oc} o = ((${oc} (*)(void*, void**, void*, ${pc}, ${pc}))f->fn)(f->env, (void*[1]){ NULL }, NULL, ${at}(${ec}*)a, ${at}(${ec}*)b); return o.tag == ${less} ? -1 : o.tag == ${greater} ? 1 : 0; }\n`);
+            self.dropCode.push(`static int ${n}(void* ctx, const void* a, const void* b) { fly_fn* f = ctx; ${oc} o = ((${oc} (*)(void*, void**, void*, ${pc}, ${pc}))f->fn)(f->env, (void*[1]){ NULL }, NULL, ${at}(${ec}*)a, ${at}(${ec}*)b); fly_panic_again_if(); return o.tag == ${less} ? -1 : o.tag == ${greater} ? 1 : 0; }\n`);
             n
           }
         };
@@ -2509,7 +2543,7 @@ impl Cgen {
         const pc = self.ctype(pt, span);
         const x = if (self.pointerBorrow(pt)) { "x_" } else { "*x_" };
         const d = if (self.needsDrop(elem)) { `else ${self.dropFn(elem, span)}(x_); ` } else { "" };
-        `({ fly_vec* v_ = ${arg(0)}; fly_fn f_ = ${arg(1)}; size_t j_ = 0; for (size_t i_ = 0; i_ < v_->len; i_++) { ${ec}* x_ = &((${ec}*)v_->ptr)[i_]; if (((bool (*)(void*, void**, void*, ${pc}))f_.fn)(f_.env, (void*[1]){ NULL }, NULL, ${x})) { ((${ec}*)v_->ptr)[j_++] = *x_; } ${d}} v_->len = j_; (fly_unit)0; })`
+        `({ fly_vec* v_ = ${arg(0)}; fly_fn f_ = ${arg(1)}; size_t j_ = 0; for (size_t i_ = 0; i_ < v_->len; i_++) { ${ec}* x_ = &((${ec}*)v_->ptr)[i_]; bool k_ = ((bool (*)(void*, void**, void*, ${pc}))f_.fn)(f_.env, (void*[1]){ NULL }, NULL, ${x}); fly_panic_again_if(); if (k_) { ((${ec}*)v_->ptr)[j_++] = *x_; } ${d}} v_->len = j_; (fly_unit)0; })`
       }
       "Fd_release" => `({ fly_fd_release((${arg(0)}).n); (fly_unit)0; })`,
       // `std/crypto`: OpenSSL's libcrypto, or the host's under WebAssembly.
@@ -2610,7 +2644,7 @@ impl Cgen {
         const etc = self.ctype(errTy, span);
         const take = self.takeErr("e_", errTy);
         const okInit = if (isVoidTy(t)) { "" } else { ", .u.Ok = v_" };
-        `({ fly_fn f_ = ${arg(0)}; ${tc} v_ = ((${tc} (*)(void*, void**, void*))f_.fn)(f_.env, (void*[1]){ NULL }, NULL); if (f_.drop) f_.drop(f_.env); ${rc} r_; if (FLY_FAILED) { ${etc} e_; memset(&e_, 0, sizeof e_); ${take}r_ = (${rc}){ .tag = ${self.tagId("Err")}, .u.Err = e_ }; } else r_ = (${rc}){ .tag = ${self.tagId("Ok")}${okInit} }; r_; })`
+        `({ fly_fn f_ = ${arg(0)}; ${tc} v_ = ((${tc} (*)(void*, void**, void*))f_.fn)(f_.env, (void*[1]){ NULL }, NULL); fly_panic_again_if(); if (f_.drop) f_.drop(f_.env); ${rc} r_; if (FLY_FAILED) { ${etc} e_; memset(&e_, 0, sizeof e_); ${take}r_ = (${rc}){ .tag = ${self.tagId("Err")}, .u.Err = e_ }; } else r_ = (${rc}){ .tag = ${self.tagId("Ok")}${okInit} }; r_; })`
       }
       "Fail_map" => {
         const tc = self.ctype(rt, span);
@@ -2621,7 +2655,7 @@ impl Cgen {
         const ftc = self.ctype(wrapTy.ret, span);
         const take = self.takeErr("e_", errTy);
         const boxed = self.boxErr("w_", wrapTy.ret);
-        `({ fly_fn f_ = ${arg(0)}; fly_fn w0_ = ${arg(1)}; ${tc} v_ = ((${tc} (*)(void*, void**, void*))f_.fn)(f_.env, (void*[1]){ NULL }, NULL); if (f_.drop) f_.drop(f_.env); if (FLY_FAILED) { ${etc} e_; memset(&e_, 0, sizeof e_); ${take}${ftc} w_ = ((${ftc} (*)(void*, void**, void*, ${etc}))w0_.fn)(w0_.env, (void*[1]){ NULL }, NULL, e_); ${boxed}} if (w0_.drop) w0_.drop(w0_.env); v_; })`
+        `({ fly_fn f_ = ${arg(0)}; fly_fn w0_ = ${arg(1)}; ${tc} v_ = ((${tc} (*)(void*, void**, void*))f_.fn)(f_.env, (void*[1]){ NULL }, NULL); fly_panic_again_if(); if (f_.drop) f_.drop(f_.env); if (FLY_FAILED) { ${etc} e_; memset(&e_, 0, sizeof e_); ${take}${ftc} w_ = ((${ftc} (*)(void*, void**, void*, ${etc}))w0_.fn)(w0_.env, (void*[1]){ NULL }, NULL, e_); fly_panic_again_if(); ${boxed}} if (w0_.drop) w0_.drop(w0_.env); v_; })`
       }
       _ => return #None,
     })
@@ -2637,13 +2671,13 @@ impl Cgen {
     // The type of what a channel's end carries.
     const carried = match (c.argTys.first()) { #Some(t) => typeArg(stripBorrow(t), 0), #None => #Error };
     #Some(match (key) {
-      "Scope_spawn" => `({ int* s_ = ${arg(0)}; fly_fn f_ = ${arg(1)}; fly_task_spawn(FLY_W, *s_, &f_); })`,
+      "Scope_spawn" => `({ int* s_ = ${arg(0)}; fly_fn f_ = ${arg(1)}; fly_task_spawn(${WAIT}, *s_, &f_); })`,
       "Task_cancel" => `({ fly_task_cancel(${arg(0)}); (fly_unit)0; })`,
       "Task_wait" => {
         const tc = self.ctype(rt, span);
-        `({ fly_String m_ = { 0 }; int32_t k_ = fly_task_wait(FLY_W, ${arg(0)}, &m_); k_ == FLY_TASK_PANICKED ? ((${tc}){ .tag = ${self.tagId("Panicked")}, .u.Panicked = m_ }) : k_ == FLY_TASK_CANCELLED ? ((${tc}){ .tag = ${self.tagId("Cancelled")} }) : ((${tc}){ .tag = ${self.tagId("Done")} }); })`
+        `({ fly_String m_ = { 0 }; int32_t k_ = fly_task_wait(${WAIT}, ${arg(0)}, &m_); k_ == FLY_TASK_PANICKED ? ((${tc}){ .tag = ${self.tagId("Panicked")}, .u.Panicked = m_ }) : k_ == FLY_TASK_CANCELLED ? ((${tc}){ .tag = ${self.tagId("Cancelled")} }) : ((${tc}){ .tag = ${self.tagId("Done")} }); })`
       }
-      "Task_any" => `({ fly_slice s_ = ${arg(0)}; fly_task_any(FLY_W, (void* const*)s_.ptr, s_.len); })`,
+      "Task_any" => `({ fly_slice s_ = ${arg(0)}; fly_task_any(${WAIT}, (void* const*)s_.ptr, s_.len); })`,
       "Task_clone" => `fly_task_clone(${arg(0)})`,
       "Scope_fork" => {
         const t = typeArg(rt, 0);
@@ -2656,15 +2690,15 @@ impl Cgen {
             self.helpers.insert(entryKey, n.clone());
             self.protos.push(`static void ${n}(void* t, void* c, void** slot);\n`);
             // A task's root machine: the forked function, called again to go on as the task does.
-            self.dropCode.push(`static void ${n}(void* t, void* c, void** slot) { fly_fn* f = c; ${tc} v = ((${tc} (*)(void*, void**, void*))f->fn)(f->env, slot, NULL); if (fly_pending) return; *(${tc}*)fly_task_result(t) = v; if (f->drop) f->drop(f->env); free(f); }\n`);
+            self.dropCode.push(`static void ${n}(void* t, void* c, void** slot) { fly_fn* f = c; ${tc} v = ((${tc} (*)(void*, void**, void*))f->fn)(f->env, slot, NULL); if (fly_pending || fly_cx()->panicking) return; *(${tc}*)fly_task_result(t) = v; if (f->drop) f->drop(f->env); free(f); }\n`);
             n
           }
         };
-        `({ int* s_ = ${arg(0)}; fly_fn f_ = ${arg(1)}; int t_ = fly_spawn(FLY_W, *s_, ${entry}, &f_, sizeof(${tc})); t_; })`
+        `({ int* s_ = ${arg(0)}; fly_fn f_ = ${arg(1)}; int t_ = fly_spawn(${WAIT}, *s_, ${entry}, &f_, sizeof(${tc})); t_; })`
       }
       "Fiber_join" => {
         const tc = self.ctype(rt, span);
-        `({ ${tc} r_ = { 0 }; fly_join(FLY_W, ${arg(0)}, &r_); r_; })`
+        `({ ${tc} r_ = { 0 }; fly_join(${WAIT}, ${arg(0)}, &r_); r_; })`
       }
       "channel" | "Reply_new" => {
         const tc = self.ctype(rt, span);
@@ -2675,24 +2709,24 @@ impl Cgen {
       }
       "Sender_send" => {
         const tc = self.ctype(carried, span);
-        `({ fly_chan c_ = ${arg(0)}; ${tc} v_ = ${arg(1)}; fly_send(FLY_W, c_, &v_, sizeof(${tc})); })`
+        `({ fly_chan c_ = ${arg(0)}; ${tc} v_ = ${arg(1)}; fly_send(${WAIT}, c_, &v_, sizeof(${tc})); })`
       }
       // A reply sent is done with: its channel's sending end is gone.
       "Reply_send" => {
         const tc = self.ctype(carried, span);
-        `({ fly_chan c_ = ${arg(0)}; ${tc} v_ = ${arg(1)}; fly_send(FLY_W, c_, &v_, sizeof(${tc})); if (!fly_pending) fly_sender_drop(&c_); (fly_unit)0; })`
+        `({ fly_chan c_ = ${arg(0)}; ${tc} v_ = ${arg(1)}; fly_send(${WAIT}, c_, &v_, sizeof(${tc})); if (!fly_pending) fly_sender_drop(&c_); (fly_unit)0; })`
       }
       "Receiver_recv" => {
         const tc = self.ctype(carried, span);
         const yes = self.some(rt, "x_", span);
         const no = self.none(rt, span);
-        `({ ${tc} x_; bool ok_ = fly_recv(FLY_W, ${arg(0)}, &x_, sizeof(${tc})); ok_ ? ${yes} : ${no}; })`
+        `({ ${tc} x_; bool ok_ = fly_recv(${WAIT}, ${arg(0)}, &x_, sizeof(${tc})); ok_ ? ${yes} : ${no}; })`
       }
       "Pending_wait" => {
         const tc = self.ctype(rt, span);
-        `({ fly_chan c_ = ${arg(0)}; ${tc} x_ = { 0 }; bool ok_ = fly_recv(FLY_W, c_, &x_, sizeof(${tc})); if (!fly_pending) { fly_receiver_drop(&c_); if (!ok_ && !fly_unwinding) fly_panic("the reply was dropped unsent"); } x_; })`
+        `({ fly_chan c_ = ${arg(0)}; ${tc} x_ = { 0 }; bool ok_ = fly_recv(${WAIT}, c_, &x_, sizeof(${tc})); if (!fly_pending) { fly_receiver_drop(&c_); if (!ok_ && !fly_unwinding) fly_panic("the reply was dropped unsent"); } x_; })`
       }
-      "Sender_close" => `({ fly_close(FLY_W, ${arg(0)}); (fly_unit)0; })`,
+      "Sender_close" => `({ fly_close(${WAIT}, ${arg(0)}); (fly_unit)0; })`,
       "Sender_clone" => `({ fly_chan c_ = ${arg(0)}; fly_sender_clone(&c_); })`,
       "Mutex_new" => {
         const tc = self.ctype(typeArg(rt, 0), span);
@@ -2701,7 +2735,7 @@ impl Cgen {
       "Ptr_with" => {
         const tc = self.ctype(rt, span);
         const pc = match (stripBorrow(ptys[1])) { #Fn(f) => match (f.params.first()) { #Some(p) => self.ctype(p, span), #None => "void*".toString() }, _ => "void*".toString() };
-        `({ __auto_type p_ = ${arg(0)}; fly_fn f_ = ${arg(1)}; ${tc} r_ = ((${tc} (*)(void*, void**, void*, ${pc}))f_.fn)(f_.env, (void*[1]){ NULL }, NULL, p_); if (f_.drop) f_.drop(f_.env); r_; })`
+        `({ __auto_type p_ = ${arg(0)}; fly_fn f_ = ${arg(1)}; ${tc} r_ = ((${tc} (*)(void*, void**, void*, ${pc}))f_.fn)(f_.env, (void*[1]){ NULL }, NULL, p_); fly_panic_again_if(); if (f_.drop) f_.drop(f_.env); r_; })`
       }
       "Mutex_lock" => {
         const tc = self.ctype(rt, span);
@@ -2740,24 +2774,24 @@ impl Cgen {
       "Socket_close" => `({ fly_sock_close(${arg(0)}); (fly_unit)0; })`,
       "Socket_connect" => {
         const raise = self.ioRaise("e_");
-        `({ fly_socket s_; int e_ = fly_connect(FLY_W, ${arg(0)}, ${arg(1)}, &s_); if (e_) { ${raise}} s_; })`
+        `({ fly_socket s_; int e_ = fly_connect(${WAIT}, ${arg(0)}, ${arg(1)}, &s_); if (e_) { ${raise}} s_; })`
       }
       "Socket_connectTls" => {
         const raise = self.ioRaise("e_");
-        `({ fly_socket s_; int e_ = fly_connect_tls(FLY_W, ${arg(0)}, ${arg(1)}, &s_); if (e_) { ${raise}} s_; })`
+        `({ fly_socket s_; int e_ = fly_connect_tls(${WAIT}, ${arg(0)}, ${arg(1)}, &s_); if (e_) { ${raise}} s_; })`
       }
       "Socket_read" => {
         const raise = self.ioRaise("e_");
-        `({ uint64_t n_ = 0; int e_ = fly_sock_read(FLY_W, ${arg(0)}, ${arg(1)}, &n_); if (e_) { ${raise}} n_; })`
+        `({ uint64_t n_ = 0; int e_ = fly_sock_read(${WAIT}, ${arg(0)}, ${arg(1)}, &n_); if (e_) { ${raise}} n_; })`
       }
       "Socket_write" => {
         const raise = self.ioRaise("e_");
-        `({ int e_ = fly_sock_write(FLY_W, ${arg(0)}, ${arg(1)}); if (e_) { ${raise}} (fly_unit)0; })`
+        `({ int e_ = fly_sock_write(${WAIT}, ${arg(0)}, ${arg(1)}); if (e_) { ${raise}} (fly_unit)0; })`
       }
       // The simulated client's transcript doubles as the program's output.
       "Socket_writeStatus" => {
         const raise = self.ioRaise("e_");
-        `({ int e_ = fly_sock_status(FLY_W, ${arg(0)}, ${arg(1)}, ${arg(2)}); if (e_) { ${raise}} (fly_unit)0; })`
+        `({ int e_ = fly_sock_status(${WAIT}, ${arg(0)}, ${arg(1)}, ${arg(2)}); if (e_) { ${raise}} (fly_unit)0; })`
       }
       "Db_fetchProfile" => {
         const tc = self.ctype(rt, span);
@@ -2898,7 +2932,7 @@ impl Cgen {
         `({ fly_gen g_ = ${arg(0)}; fly_vec v_ = { 0 }; ${tc} x_; while (g_.next(g_.st, &x_)) fly_vec_push(&v_, &x_, sizeof(${tc})); fly_gen_drop(&g_); if (FLY_FAILED) ${d}(&v_); v_; })`
       }
       "Gen_map" => {
-        const st = self.step(`map:${tc}:${oc}`, "fly_gmap", `${tc} x; if (!s->in.next(s->in.st, &x)) return false; *(${oc}*)o_ = ((${oc} (*)(void*, void**, void*, ${tc}))s->f.fn)(s->f.env, (void*[1]){ NULL }, NULL, x); return !FLY_FAILED;`.asStr());
+        const st = self.step(`map:${tc}:${oc}`, "fly_gmap", `${tc} x; if (!s->in.next(s->in.st, &x)) return false; *(${oc}*)o_ = ((${oc} (*)(void*, void**, void*, ${tc}))s->f.fn)(s->f.env, (void*[1]){ NULL }, NULL, x); fly_panic_again_if(); return !FLY_FAILED;`.asStr());
         `((fly_gen){ fly_gmap_new(${arg(0)}, ${arg(1)}), ${st}, fly_gmap_drop })`
       }
       "Gen_filter" => {
@@ -2906,7 +2940,7 @@ impl Cgen {
         const pc = self.ctype(pt, span);
         // An item that is a borrow already is lent as it is: a borrow of a borrow is the borrow.
         const x = if (self.pointerBorrow(pt) && !match (t) { #Borrow(_, _) => true, _ => false }) { "&x" } else { "x" };
-        const st = self.step(`filter:${tc}`, "fly_gmap", `${tc} x; while (s->in.next(s->in.st, &x)) { if (((bool (*)(void*, void**, void*, ${pc}))s->f.fn)(s->f.env, (void*[1]){ NULL }, NULL, ${x})) { *(${tc}*)o_ = x; return !FLY_FAILED; } ${dropT}if (FLY_FAILED) return false; } return false;`.asStr());
+        const st = self.step(`filter:${tc}`, "fly_gmap", `${tc} x; while (s->in.next(s->in.st, &x)) { bool k_ = ((bool (*)(void*, void**, void*, ${pc}))s->f.fn)(s->f.env, (void*[1]){ NULL }, NULL, ${x}); fly_panic_again_if(); if (k_) { *(${tc}*)o_ = x; return !FLY_FAILED; } ${dropT}if (FLY_FAILED) return false; } return false;`.asStr());
         `((fly_gen){ fly_gmap_new(${arg(0)}, ${arg(1)}), ${st}, fly_gmap_drop })`
       }
       "Gen_take" => {
@@ -3098,7 +3132,7 @@ impl Cgen {
     self.cx.scopes.push(#Cleanups(cleanups.clone()));
     self.cx.targets.push(unwL.clone());
     if (self.cx.unwinds) {
-      self.line(`fr_.at = ${k};`);
+      self.line(`${self.atField()} = ${k};`);
       self.panicLanding(k, cleanups, span);
       self.cx.pblocks.push(k);
     }
@@ -3901,8 +3935,12 @@ export function cProgram(p: Prog, entry: usize, runtime: str, freestanding: bool
   c.program(entry, runtime, freestanding)
 }
 
+// Where the code of a routine that waits takes its wait record (runtime.h's `fly_wait`), which the
+// call fills in: a byte C's literals never hold as it is (`cquote`).
+export const WAIT: str = "\u{1}w";
+
 // A routine that is a scheduling point first, which a machine may stop at: `expr`, of C type `rc`,
 // is done as the code goes on from the point.
 function pointFirst(rc: str, expr: String): String {
-  `({ fly_point(FLY_W); fly_pending ? (${rc}){ 0 } : ${expr}; })`
+  `({ fly_point(${WAIT}); fly_pending ? (${rc}){ 0 } : ${expr}; })`
 }

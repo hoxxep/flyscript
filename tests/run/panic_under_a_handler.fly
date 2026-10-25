@@ -3,7 +3,7 @@
 // expect: main cleans up
 // expect: <panic: division by zero>
 // A panic in a handled body unwinds through the `handle` as one anywhere does (§5.7): the arm here
-// adds to what its resumption gives, so the body runs on a fiber of its own; one whose arm only
+// adds to what its resumption gives, so the body's frame is the `handle`'s own; one whose arm only
 // resumes runs where the `handle` is.
 import { println } from "std/io";
 effect Ask { ask(): u32; }

@@ -94,7 +94,7 @@ _Noreturn void fly_out_of_memory(void) { panic_exit("out of memory"); }
 // WebAssembly's exceptions are its own: a landing pad is a funclet that runs whatever is thrown
 // through it, and `fly_try` catches what is thrown with the C++ tag, here the program's own, there
 // being no C++ library to define it. A panic is thrown with nothing in it: what it says is the
-// fiber's (`fly_ctx.panic`).
+// task's (`fly_ctx.panic`).
 __asm__(".globl __cpp_exception\n.tagtype __cpp_exception i32\n__cpp_exception:\n");
 static _Noreturn void raise_panic(void) {
   static char token;
@@ -124,9 +124,8 @@ void __asan_handle_no_return(void);
 #elif defined(FLY_LANDING_PADS) && !defined(FLY_FREESTANDING)
 // A panic is an exception of its own class, raised in two phases as C++'s are: the first finds the
 // innermost catch point (`fly_try`, whose landing pad catches `fly_panic_type`), the second runs
-// the landing pad of each frame on the way, which goes on with `resume`. A landing pad runs as the
-// code of its own frame, the unwinder's state in the exception, so a cleanup may wait, letting
-// other fibers run and raise panics of their own: each has an exception of its own. Foreign
+// the landing pad of each frame on the way, which goes on with `resume`, or, in a machine whose
+// cleanup may wait, catches it, the machine unwinding on by its flag (`fly_panic_flag`). Foreign
 // exceptions run the cleanups and are caught by no catch point.
 #define FLY_PANIC_CLASS 0x464c590050414e43ull
 const char fly_panic_type = 0;
@@ -297,8 +296,8 @@ static _Noreturn void unwind_to_catch(void) {
 #error "a panic unwinds by landing pads (FLY_LANDING_PADS) or by C's cleanups (FLY_C_UNWIND)"
 #endif
 
-// A panic unwinds the fiber it happens on (§5.7), the frames up to the innermost catch point running
-// their cleanups. A panic while one unwinds the same fiber ends the program, as does one with
+// A panic unwinds the task it happens in (§5.7), the frames up to the innermost catch point running
+// their cleanups. A panic while one unwinds the same task ends the program, as does one with
 // nowhere to go.
 _Noreturn void fly_panic(const char* message) {
 #ifdef FLY_FREESTANDING
@@ -352,11 +351,11 @@ bool fly_try(void (*f)(void* a), void* a) {
   }
   f(a);
   fly_unw_pop(&u);
-  return false;
+  return fly_try_flagged(&m);
 }
 #endif
 
-// The panic a catch point has taken up, which no longer unwinds its fiber; and its message let go.
+// The panic a catch point has taken up, which no longer unwinds its task; and its message let go.
 static void stack_restore(void);
 static char* panic_take(void) {
   stack_restore();
@@ -369,7 +368,7 @@ static char* panic_take(void) {
   return m;
 }
 static void panic_free(char* m) { if (m && m != out_of_memory) free(m); }
-// A panic taken up raised again, on the fiber running now.
+// A panic taken up raised again, in the task running now.
 static _Noreturn void panic_again(char* m) {
 #ifdef FLY_FREESTANDING
   panic_exit(m ? m : "a panic");
@@ -736,6 +735,26 @@ static void fly_flush(fly_cache* t, unsigned c) {
   k->free = first;
   fly_spin_unlock(&k->lock);
 }
+
+#ifdef FLY_THREADS
+// A thread that ends gives every block it keeps back to the classes'.
+static void fly_cache_release(void) {
+  fly_cache* t = fly_cache_ref();
+  for (unsigned c = 0; c < FLY_CLASSES; c++) {
+    void* first = t->head[c];
+    if (!first) continue;
+    void* last = first;
+    while (*(void**)last) last = *(void**)last;
+    fly_central* k = &fly_centrals[c];
+    fly_spin_lock(&k->lock);
+    *(void**)last = k->free;
+    k->free = first;
+    fly_spin_unlock(&k->lock);
+    t->head[c] = NULL;
+    t->n[c] = 0;
+  }
+}
+#endif
 
 static inline bool fly_small(const void* p) { return (const uint8_t*)p >= fly_heap_lo && (const uint8_t*)p < fly_heap_hi; }
 static inline unsigned fly_class_at(const void* p) { return *(const uint32_t*)((uintptr_t)p & ~(uintptr_t)(FLY_SPAN - 1)); }
@@ -1645,75 +1664,16 @@ void fly_gmap_drop(void* s) { fly_gen_drop(&((fly_gmap*)s)->in); free(s); }
 void fly_gcount_drop(void* s) { fly_gen_drop(&((fly_gcount*)s)->in); free(s); }
 void fly_gzip_drop(void* s) { fly_gen_drop(&((fly_gzip*)s)->a); fly_gen_drop(&((fly_gzip*)s)->b); free(s); }
 
-// ---- fibers ----
+// ---- the stack ----
 
-// Switching saves the callee-saved registers on the stack being left, and its stack pointer in
-// the fiber being left, then restores the other's. A new fiber's stack holds a frame that returns
-// into fly_fiber_trampoline, with the fiber where the restore puts it.
+// A thread's stack: every task runs on the stack of the thread running it, as far as it may until
+// it stops, and code that suspends keeps what it needs in frames of its own, not on the stack.
 
-#if defined(__has_feature)
-#if __has_feature(address_sanitizer)
-#define FLY_ASAN 1
-#endif
-#endif
-#if defined(__SANITIZE_ADDRESS__)
-#define FLY_ASAN 1
-#endif
-#ifdef FLY_ASAN
-void __sanitizer_start_switch_fiber(void** fake_stack_save, const void* bottom, size_t size);
-void __sanitizer_finish_switch_fiber(void* fake_stack_save, const void** bottom_old, size_t* size_old);
-#endif
-// The thread sanitizer follows fibers as threads of its own.
-#if defined(__has_feature)
-#if __has_feature(thread_sanitizer)
-#define FLY_TSAN 1
-#endif
-#endif
-#if defined(__SANITIZE_THREAD__)
-#define FLY_TSAN 1
-#endif
-#ifdef FLY_TSAN
-void* __tsan_get_current_fiber(void);
-void* __tsan_create_fiber(unsigned flags);
-void __tsan_destroy_fiber(void* fiber);
-void __tsan_switch_to_fiber(void* fiber, unsigned flags);
-#endif
+// The limit of the stack of the thread running (runtime.h): none if its bounds are not to be had.
+FLY_THREAD_VAR(uintptr_t, stack_limit0, 0)
+#define stack_limit0 (*stack_limit0_ref())
 
-struct fly_fiber {
-  // Whether it is a thread's own stack, which a panic cannot leave.
-  bool base;
-  void* sp;
-  void* stack;
-  size_t size;
-  void (*entry)(void* arg);
-  void* arg;
-  // The stack limit (runtime.h): what it is now, lowered as a panic for an overflow unwinds the
-  // fiber, and what it is otherwise; and how deep in destructors it is, while another fiber runs.
-  uintptr_t limit, limit0;
-  int destroying;
-  fly_fiber* back;
-  fly_handler* handlers;
-  // Its records and the panic unwinding it, while another fiber runs (runtime.h); and a panic that
-  // unwound a fiber it resumed, to go on with in it.
-  fly_unw* unw;
-  char* panic;
-  char* panic_in;
-  bool done;
-  // The frame arena of what runs on it, made as it is first wanted.
-  fly_frames* frames;
-#ifdef FLY_TSAN
-  void* tsan;
-#endif
-};
-
-static fly_fiber main_fiber = { .base = true };
-// The fiber running on this thread.
-FLY_THREAD_VAR(fly_fiber*, cur_fiber, &main_fiber)
-#define cur_fiber (*cur_fiber_ref())
-
-// The limit of the stack of the thread running, which `base` stands for: none if its bounds are
-// not to be had.
-static void thread_stack_limit(fly_fiber* base) {
+static void thread_stack_limit(void) {
   uintptr_t low = 0;
 #if defined(FLY_FREESTANDING)
 #elif defined(__wasm__)
@@ -1731,210 +1691,52 @@ static void thread_stack_limit(fly_fiber* base) {
     pthread_attr_destroy(&a);
   }
 #endif
-  base->limit = base->limit0 = low ? low + FLY_HEADROOM : 0;
+  stack_limit0 = low ? low + FLY_HEADROOM : 0;
 }
 
 __attribute__((constructor)) static void main_stack_limit(void) {
-  thread_stack_limit(&main_fiber);
-  fly_ctx0.limit = main_fiber.limit;
+  thread_stack_limit();
+  fly_ctx0.limit = stack_limit0;
 }
 
-// Half the headroom is the cleanups' as the panic unwinds the fiber, until a catch point takes it
+// Half the headroom is the cleanups' as the panic unwinds the task, until a catch point takes it
 // up (`stack_restore`).
 _Noreturn void fly_stack_overflow(void) {
-  fly_fiber* f = cur_fiber;
-  if (f->limit == f->limit0) f->limit = f->limit0 - FLY_HEADROOM / 2;
-  fly_cx_now()->limit = f->limit;
+  fly_ctx* cx = fly_cx_now();
+  if (cx->limit == stack_limit0) cx->limit = stack_limit0 - FLY_HEADROOM / 2;
   fly_panic("stack overflow");
 }
 
 // The check, for code made through LLVM, which inlines it.
 void fly_stack_at(uintptr_t sp) { fly_stack_check(sp); }
 
-static void stack_restore(void) {
-  fly_fiber* f = cur_fiber;
-  f->limit = f->limit0;
-  fly_cx_now()->limit = f->limit;
-}
+static void stack_restore(void) { fly_cx_now()->limit = stack_limit0; }
 
-void fly_switch(void** save, void* to);
-void fly_fiber_trampoline(void);
-void fly_fiber_start(fly_fiber* f);
-
-#ifdef __APPLE__
-#define FLY_SYM(x) "_" #x
-#else
-#define FLY_SYM(x) #x
-#endif
-
-#if defined(__aarch64__) || defined(__arm64__)
-__asm__(
-  ".text\n.p2align 2\n.globl " FLY_SYM(fly_switch) "\n" FLY_SYM(fly_switch) ":\n"
-  "  sub sp, sp, #160\n"
-  "  stp x19, x20, [sp, #0]\n  stp x21, x22, [sp, #16]\n  stp x23, x24, [sp, #32]\n"
-  "  stp x25, x26, [sp, #48]\n  stp x27, x28, [sp, #64]\n  stp x29, x30, [sp, #80]\n"
-  "  stp d8, d9, [sp, #96]\n  stp d10, d11, [sp, #112]\n  stp d12, d13, [sp, #128]\n  stp d14, d15, [sp, #144]\n"
-  "  mov x9, sp\n  str x9, [x0]\n  mov sp, x1\n"
-  "  ldp x19, x20, [sp, #0]\n  ldp x21, x22, [sp, #16]\n  ldp x23, x24, [sp, #32]\n"
-  "  ldp x25, x26, [sp, #48]\n  ldp x27, x28, [sp, #64]\n  ldp x29, x30, [sp, #80]\n"
-  "  ldp d8, d9, [sp, #96]\n  ldp d10, d11, [sp, #112]\n  ldp d12, d13, [sp, #128]\n  ldp d14, d15, [sp, #144]\n"
-  "  add sp, sp, #160\n  ret\n"
-  ".globl " FLY_SYM(fly_fiber_trampoline) "\n" FLY_SYM(fly_fiber_trampoline) ":\n"
-  "  mov x0, x19\n  bl " FLY_SYM(fly_fiber_start) "\n  brk #0\n");
-enum { FRAME_WORDS = 20, FRAME_FIBER = 0, FRAME_RETURN = 11 };
-#elif defined(__x86_64__)
-__asm__(
-  ".text\n.globl " FLY_SYM(fly_switch) "\n" FLY_SYM(fly_switch) ":\n"
-  "  pushq %rbp\n  pushq %rbx\n  pushq %r12\n  pushq %r13\n  pushq %r14\n  pushq %r15\n"
-  "  movq %rsp, (%rdi)\n  movq %rsi, %rsp\n"
-  "  popq %r15\n  popq %r14\n  popq %r13\n  popq %r12\n  popq %rbx\n  popq %rbp\n  ret\n"
-  ".globl " FLY_SYM(fly_fiber_trampoline) "\n" FLY_SYM(fly_fiber_trampoline) ":\n"
-  "  movq %rbx, %rdi\n  call " FLY_SYM(fly_fiber_start) "\n  ud2\n");
-enum { FRAME_WORDS = 8, FRAME_FIBER = 4, FRAME_RETURN = 6 };
-#elif defined(__wasm__)
-// WebAssembly cannot switch stacks itself: the host does, with JavaScript promise integration.
-// Each fiber runs as a call of `fly_fiber_run` of its own, on a shadow stack of its own in linear
-// memory, so what a suspended fiber lent stays where it is. Switching suspends the fiber leaving
-// and resumes, or starts, the other; the host keeps each fiber's stack pointer meanwhile.
-__attribute__((import_module("fly"), import_name("switch"))) void fly_host_switch(fly_fiber* from, fly_fiber* to);
-__attribute__((import_module("fly"), import_name("free"))) void fly_host_free(fly_fiber* f);
-__attribute__((export_name("fly_fiber_run"))) void fly_fiber_run(fly_fiber* f) { fly_fiber_start(f); }
-__attribute__((export_name("fly_fiber_top"))) uintptr_t fly_fiber_top(fly_fiber* f);
-#else
-#error "fibers need arm64, x86-64 or WebAssembly"
-#endif
-
-static void switch_to(fly_fiber* to) {
-  fly_fiber* from = cur_fiber;
-  fly_ctx* cx = fly_cx_now();
-  from->handlers = cx->handlers;
-  cx->handlers = to->handlers;
-  from->unw = cx->unw;
-  cx->unw = to->unw;
-  from->panic = cx->panic;
-  cx->panic = to->panic;
-  from->destroying = cx->destroying;
-  cx->destroying = to->destroying;
-  from->frames = cx->frames;
-  cx->frames = to->frames;
-  cur_fiber = to;
-  cx->limit = to->limit;
-#if defined(FLY_ASAN)
-  void* fake = NULL;
-  __sanitizer_start_switch_fiber(from->done ? NULL : &fake, to->stack, to->size);
-  fly_switch(&from->sp, to->sp);
-  __sanitizer_finish_switch_fiber(fake, NULL, NULL);
-#elif defined(FLY_TSAN)
-  if (!from->tsan) from->tsan = __tsan_get_current_fiber();
-  __tsan_switch_to_fiber(to->tsan, 0);
-  fly_switch(&from->sp, to->sp);
-#elif defined(__wasm__)
-  fly_host_switch(from, to);
-#else
-  fly_switch(&from->sp, to->sp);
-#endif
-  if (from->panic_in) {
-    char* m = from->panic_in;
-    from->panic_in = NULL;
-    panic_again(m);
-  }
-}
-
-static void fiber_body(void* a) { fly_fiber* f = a; f->entry(f->arg); }
-
-void fly_fiber_start(fly_fiber* f) {
-#ifdef FLY_ASAN
-  // The first fiber a thread starts is switched to from the thread's own stack, whose bounds the
-  // sanitizer reports here: what switching back to it says.
-  const void* bottom;
-  size_t size;
-  __sanitizer_finish_switch_fiber(NULL, &bottom, &size);
-  if (f->back->base && !f->back->stack) {
-    f->back->stack = (void*)bottom;
-    f->back->size = size;
-  }
-#endif
-  // A panic that unwinds what the fiber runs goes on in the fiber that resumed it.
-  if (fly_try(fiber_body, f)) f->back->panic_in = panic_take();
-  f->done = true;
-  switch_to(f->back);
-}
-
-#if defined(FLY_FREESTANDING) || defined(__wasm__)
-// Stacks come from the program's memory, whole.
-#define FLY_STACK (256u << 10)
-static void* stack_new(size_t size) {
-  void* p = malloc(size);
-  if (!p) fly_out_of_memory();
-  return p;
-}
-static void stack_free(void* p, size_t size) { (void)size; free(p); }
-#else
-// Stacks are reserved large and committed as they are touched. A thread keeps a few it is done
-// with, for the fibers it starts next.
+#ifdef FLY_THREADS
+// The stack tasks run on: as large as a thread is given, committed as it is touched, so that a
+// task may go as deep on one thread as on another, the program's own included.
 #define FLY_STACK (64u << 20)
-// The sanitizers keep what they knew of a stack's last frames, so under them none is kept.
-#if defined(FLY_ASAN) || defined(FLY_TSAN)
-enum { STACK_POOL = 0 };
-#else
-enum { STACK_POOL = 16 };
+typedef struct { void* (*run)(void*); void* arg; } big_stack_t;
+static void* on_big_stack(void* a) {
+  big_stack_t* b = a;
+  thread_stack_limit();
+  void* r = b->run(b->arg);
+#ifdef FLY_MALLOC
+  fly_cache_release();
 #endif
-typedef struct { void* stacks[STACK_POOL + 1]; int n; } stack_pool_t;
-FLY_THREAD_VAR(stack_pool_t, stack_pool, { 0 })
-#define stack_pool (*stack_pool_ref())
-// Below each stack, a guard no page of which is mapped: Flyscript code checks its stack's limit
-// (§5.7), but C it calls does not, and one that runs past the stack faults here instead of
-// writing over what is mapped below. A multiple of every page size.
-#define FLY_GUARD (64u << 10)
-static void* stack_new(size_t size) {
-  if (stack_pool.n > 0) return stack_pool.stacks[--stack_pool.n];
-  char* p = mmap(NULL, size + FLY_GUARD, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON | MAP_NORESERVE, -1, 0);
-  if (p == MAP_FAILED || mprotect(p, FLY_GUARD, PROT_NONE) != 0) fly_out_of_memory();
-  return p + FLY_GUARD;
+  return r;
 }
-static void stack_free(void* p, size_t size) {
-  if (stack_pool.n < STACK_POOL) stack_pool.stacks[stack_pool.n++] = p;
-  else munmap((char*)p - FLY_GUARD, size + FLY_GUARD);
+// Runs `run(arg)` on a thread of its own, of FLY_STACK, the program's thread waiting for it.
+static void run_on_big_stack(void* (*run)(void*), void* arg) {
+  big_stack_t b = { run, arg };
+  pthread_attr_t attr;
+  pthread_attr_init(&attr);
+  pthread_attr_setstacksize(&attr, FLY_STACK);
+  pthread_t th;
+  if (pthread_create(&th, &attr, on_big_stack, &b) != 0) fly_panic("cannot start the scheduler's thread");
+  pthread_attr_destroy(&attr);
+  pthread_join(th, NULL);
 }
-#endif
-
-static fly_fiber* fiber_new(void (*entry)(void*), void* arg, fly_handler* handlers) {
-  fly_fiber* f = fly_alloc(sizeof(fly_fiber));
-  f->size = FLY_STACK;
-  f->stack = stack_new(f->size);
-  f->limit = f->limit0 = (uintptr_t)f->stack + FLY_HEADROOM;
-  f->entry = entry;
-  f->arg = arg;
-  f->handlers = handlers;
-#ifdef FLY_TSAN
-  f->tsan = __tsan_create_fiber(0);
-#endif
-#ifndef __wasm__
-  // Otherwise the host starts it at the top of its stack.
-  uintptr_t top = ((uintptr_t)f->stack + f->size) & ~(uintptr_t)15;
-  void** frame = (void**)(top - FRAME_WORDS * sizeof(void*));
-  memset(frame, 0, FRAME_WORDS * sizeof(void*));
-  frame[FRAME_FIBER] = f;
-  frame[FRAME_RETURN] = (void*)fly_fiber_trampoline;
-  f->sp = frame;
-#endif
-  return f;
-}
-
-static void fiber_free(fly_fiber* f) {
-#ifdef __wasm__
-  fly_host_free(f);
-#endif
-#ifdef FLY_TSAN
-  __tsan_destroy_fiber(f->tsan);
-#endif
-  stack_free(f->stack, f->size);
-  if (f->frames) { fly_frames_free(f->frames); free(f->frames); }
-  free(f);
-}
-
-#ifdef __wasm__
-uintptr_t fly_fiber_top(fly_fiber* f) { return ((uintptr_t)f->stack + f->size) & ~(uintptr_t)15; }
 #endif
 
 // ---- handlers ----
@@ -1986,16 +1788,41 @@ static void cleaning(int d);
 // the task's first scheduling point after it (§5.6).
 fly_unwind_state fly_cleanup_begin(void) {
   cleaning(1);
-  fly_unwind_state s = { fly_err, fly_unwinding };
-  fly_err = NULL;
-  fly_unwinding = false;
+  fly_ctx* cx = fly_cx_now();
+  fly_unwind_state s = { cx->err, cx->unwinding, cx->panicking };
+  cx->err = NULL;
+  cx->unwinding = false;
+  cx->panicking = false;
   return s;
 }
 
 void fly_cleanup_end(fly_unwind_state s) {
   cleaning(-1);
-  fly_err = s.err;
-  fly_unwinding = s.unwinding;
+  fly_ctx* cx = fly_cx_now();
+  cx->err = s.err;
+  cx->unwinding = s.unwinding;
+  cx->panicking = s.panicking;
+}
+
+void fly_panic_flag(void) {
+  fly_ctx* cx = fly_cx_now();
+  cx->unwinding = true;
+  cx->panicking = true;
+}
+
+_Noreturn void fly_panic_again(void) {
+  fly_ctx* cx = fly_cx_now();
+  cx->panicking = false;
+  cx->unwinding = false;
+  fly_unwind_on();
+}
+
+bool fly_try_flagged(const fly_frames_mark* m) {
+  fly_ctx* cx = fly_cx_now();
+  if (!cx->panicking) return false;
+  cx->panicking = false;
+  fly_frames_back(m);
+  return true;
 }
 
 void fly_cont_drop(fly_cont* k) {
@@ -2085,13 +1912,16 @@ void fly_frames_back(const fly_frames_mark* m) {
 
 void fly_machine_unwind(void (*call)(void* env, void* frame), void* env, void* frame) {
   fly_ctx* cx = fly_cx_now();
-  fly_unwind_state saved = { cx->err, cx->unwinding };
+  fly_unwind_state saved = { cx->err, cx->unwinding, cx->panicking };
   cx->err = NULL;
   cx->unwinding = true;
+  cx->panicking = false;
   call(env, frame);
+  fly_panic_again_if();
   cx = fly_cx_now();
   cx->err = saved.err;
   cx->unwinding = saved.unwinding;
+  cx->panicking = saved.panicking;
 }
 
 void fly_handle_enter(fly_handler* h, fly_frames* arena, fly_frames** saved) {
@@ -2120,9 +1950,10 @@ bool fly_handle_took(fly_handler* h) {
 
 fly_unwind_state fly_handle_drop_begin(fly_handler* h) {
   fly_ctx* cx = fly_cx_now();
-  fly_unwind_state saved = { cx->err, cx->unwinding };
+  fly_unwind_state saved = { cx->err, cx->unwinding, cx->panicking };
   cx->err = NULL;
   cx->unwinding = true;
+  cx->panicking = false;
   if (h->kept) h->dying = true;
   for (fly_handler* x = h->from; x && x != h; x = x->outer) {
     if (x->kept && x->waiting) x->dying = true;
@@ -2131,9 +1962,11 @@ fly_unwind_state fly_handle_drop_begin(fly_handler* h) {
 }
 
 void fly_handle_drop_end(fly_unwind_state s) {
+  fly_panic_again_if();
   fly_ctx* cx = fly_cx_now();
   cx->err = s.err;
   cx->unwinding = s.unwinding;
+  cx->panicking = s.panicking;
 }
 
 void fly_handle_drop_m(fly_handler* h, fly_frames* arena, void** bslot, void (*run)(void* h)) {
@@ -2167,6 +2000,7 @@ static bool generated_m_next(void* st, void* out) {
   ((producer_m)g->producer.fn)(g->producer.env, &g->frame, out);
   cx = fly_cx_now();
   cx->frames = saved;
+  fly_panic_again_if();
   if (cx->pend == FLY_PEND_YIELD) {
     cx->pend = 0;
     return true;
@@ -3202,11 +3036,12 @@ static void* mt_task_result(mt_task* t);
 static void* mt_task_closure(mt_task* t);
 #endif
 
-// The scheduler of a simulated world is the runtime's Flyscript (rt/sched.fly), on the program's
-// own stack: what is here is what it runs on. Each task is a record of what compiled code gave
-// it — its entry, closure and result — its fiber, and how deep it is in cleanup; it asks the
-// scheduler for anything that touches another task, a scope, a channel or the clock, by a request
-// it leaves here and a switch to the scheduler's stack (`ask`), and is resumed with the answer.
+// The scheduler of a simulated world is the runtime's Flyscript (rt/sched.fly): what is here is
+// what it runs on. Each task is a record of what compiled code gave it — its entry, closure and
+// result — its root machine's frame, and how deep it is in cleanup; it asks the scheduler for
+// anything that touches another task, a scope, a channel or the clock, by a request it leaves
+// here (`ASK`): answered at once, or the task stops, its machines returning to the scheduler, and
+// is run again, its answer here, to go on from where it stopped.
 
 typedef struct {
   // Its root machine's frame, and the frame arena of what it runs.
@@ -3234,6 +3069,10 @@ typedef struct {
   // the task's own, for others ask while it waits.
   bool deliver_cancel, deliver_deadlock;
   int64_t reply;
+  // What of the context the tasks share is the task's own while it waits: the panic its cleanup
+  // runs for, and how deep in destructors it is.
+  char* unwinding_panic;
+  int destroying;
 } task_t;
 
 bool fly_tasks_on = false;
@@ -3361,7 +3200,7 @@ static void task_release(task_t* t) {
   free(t);
 }
 
-// Task `id` has ended, having run or not (cancelled before it began): its fiber is let go, and a
+// Task `id` has ended, having run or not (cancelled before it began): its frames are let go, and a
 // spawned task's number, which the scheduler gives out again.
 void fly_core_end(int32_t id, bool ran) {
   task_t* t = core_tasks[id];
@@ -3385,8 +3224,15 @@ int32_t fly_core_run(int32_t id, bool deadlock, bool cancel) {
   fly_ctx* cx = fly_cx_now();
   fly_frames* frames = cx->frames;
   cx->frames = &t->frames;
+  cx->panic = t->unwinding_panic;
+  cx->destroying = t->destroying;
   t->done = task_main(t);
-  fly_cx_now()->frames = frames;
+  cx = fly_cx_now();
+  cx->frames = frames;
+  t->unwinding_panic = cx->panic;
+  t->destroying = cx->destroying;
+  cx->panic = NULL;
+  cx->destroying = 0;
   if (!t->done) return 0;
   return t->error || t->panic ? 2 : 1;
 }
@@ -3455,6 +3301,17 @@ void fly_root(void (*run)(void**)) {
   if (fly_try(root_body, &r)) panic_exit(fly_cx_now()->panic);
 }
 
+#ifdef FLY_THREADS
+// The simulated world's tasks, on the program's context, from the thread they run on.
+static void* sim_tasks(void* t0) {
+  uintptr_t limit = fly_ctx0.limit;
+  fly_ctx0.limit = stack_limit0;
+  fly_rt_tasks(world.seed, (uint8_t*)t0);
+  fly_ctx0.limit = limit;
+  return NULL;
+}
+#endif
+
 void fly_tasks_run(void (*main)(void**)) {
   fly_tasks_on = true;
   world_load();
@@ -3462,7 +3319,11 @@ void fly_tasks_run(void (*main)(void**)) {
   if (!world.simulated) { mt_run(main, main_entry); return; }
 #endif
   task_t* t0 = new_task(main_entry, (void*)main, 0);
+#ifdef FLY_THREADS
+  run_on_big_stack(sim_tasks, t0);
+#else
   fly_rt_tasks(world.seed, (uint8_t*)t0);
+#endif
   // The main task's root is the program's: its panic, its cleanup done, ends the program.
   if (t0->panic) panic_exit(t0->panic);
   if (t0->error) fly_err = t0->error;
@@ -3570,7 +3431,8 @@ void fly_task_void(void* task, void* closure, void** slot) {
   (void)task;
   fly_fn* f = closure;
   ((fly_unit (*)(void*, void**, void*))f->fn)(f->env, slot, NULL);
-  if (fly_pending) return;
+  // Stopped, it goes on; ended by a panic, the task's end drops what it was given.
+  if (fly_pending || fly_cx_now()->panicking) return;
   if (f->drop) f->drop(f->env);
   free(f);
 }
@@ -4011,8 +3873,6 @@ typedef struct { waitq q; uint8_t* state; void (*drop)(void*); } mt_chan;
 
 struct worker {
   int index;
-  fly_fiber own;
-  fly_fiber* base;
   // The context of whatever runs here outside a task: `par` work stolen while idle.
   fly_ctx own_ctx;
   fly_ctx* idle_ctx;
@@ -4427,6 +4287,8 @@ static void run_task(worker* w, mt_task* t) {
   }
   fly_cur = &t->ctx;
   t->ctx.frames = &t->frames;
+  // The task runs on this worker's stack, whose limit is its own.
+  t->ctx.limit = stack_limit0;
   bool done = mt_task_main(t);
   fly_cur = w->idle_ctx;
   running = NULL;
@@ -4796,9 +4658,8 @@ static void* worker_thread(void* arg) {
   worker* w = arg;
   this_worker = w;
   fly_cur = w->idle_ctx;
-  cur_fiber = w->base;
-  thread_stack_limit(w->base);
-  fly_cur->limit = w->base->limit;
+  thread_stack_limit();
+  fly_cur->limit = stack_limit0;
   work(w);
   return NULL;
 }
@@ -4815,8 +4676,6 @@ static void mt_run(void (*main)(void**), void (*entry)(void* task, void* closure
   for (int k = 0; k < nworkers; k++) {
     worker* w = &workers[k];
     w->index = k;
-    w->own.base = true;
-    w->base = k == 0 ? &main_fiber : &w->own;
     // The first worker is the program's thread, whose context is the program's outside its tasks.
     w->idle_ctx = k == 0 ? &fly_ctx0 : &w->own_ctx;
     w->rng = 0x9e3779b97f4a7c15u * (uint64_t)(k + 1);
@@ -4833,7 +4692,7 @@ static void mt_run(void (*main)(void**), void (*entry)(void* task, void* closure
   main_task = t;
   runnable = alive = 1;
   inbox_push(&workers[0], t);
-  // Each worker's stack is as large as a fiber's: `par` work runs on it.
+  // Each worker's stack is FLY_STACK, the first's too: tasks and `par` work run on it.
   pthread_attr_t attr;
   pthread_attr_init(&attr);
   pthread_attr_setstacksize(&attr, FLY_STACK);
@@ -4843,7 +4702,7 @@ static void mt_run(void (*main)(void**), void (*entry)(void* task, void* closure
     pthread_detach(th);
   }
   pthread_attr_destroy(&attr);
-  work(&workers[0]);
+  run_on_big_stack(worker_thread, &workers[0]);
   if (t->panic) panic_exit(t->panic);
   if (t->error) fly_err = t->error;
 }

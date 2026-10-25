@@ -60,7 +60,17 @@ split=true
 case "$out" in *.o) split=false ;; esac
 case " $* " in *--target=*|*-fsanitize=*) split=false ;; esac
 lld() { [ -x "$bin/$1" ] || command -v "$1" > /dev/null 2>&1; }
-[ "$jobs" -gt 1 ] && [ -x "$bin/llvm-split" ] && { lld ld64.lld || lld ld.lld; } || split=false
+# On macOS the system's linker links, running ThinLTO through LLVM's own libLTO: ld64.lld keeps
+# none of the DWARF unwind entries of the code ThinLTO makes, and so none of their landing pads'
+# personality, and no panic is caught.
+lto="$bin/../lib/libLTO.dylib"
+if [ "$(uname)" = Darwin ] && [ -f "$lto" ]; then
+  linker="-fuse-ld=ld -Wl,-lto_library,$lto"
+else
+  linker="-fuse-ld=lld -Wl,--thinlto-jobs=$jobs"
+  { lld ld64.lld || lld ld.lld; } || split=false
+fi
+[ "$jobs" -gt 1 ] && [ -x "$bin/llvm-split" ] || split=false
 if $split; then
   parts="$out.parts"
   # Emptied first: a build that failed leaves its parts, which the link below would take too.
@@ -68,7 +78,8 @@ if $split; then
   mkdir -p "$parts"
   "$bin/llvm-split" -j "$jobs" -o "$parts/p" "$out.bc"
   ls "$parts"/p* | xargs -P "$jobs" -I{} "$bin/clang" -x ir -g -O2 -flto=thin $ccflags "$@" -c {} -o {}.o
-  "$bin/clang" -g -O2 -flto=thin -fuse-ld=lld -Wl,--thinlto-jobs="$jobs" $ldflags "$@" "$parts"/p*.o -o "$out" -lm
+  # shellcheck disable=SC2086
+  "$bin/clang" -g -O2 -flto=thin $linker $ldflags "$@" "$parts"/p*.o -o "$out" -lm
   rm -f "$parts"/p*
   rmdir "$parts"
 else

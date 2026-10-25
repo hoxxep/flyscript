@@ -52,3 +52,20 @@ export function residents(b: readonly Block, site: readonly (s: readonly Stmt) =
   if (any) { for (const l of b.locals) { out.insert(l); } }
   any
 }
+
+// Whether a block of `b`, walked as `residents` walks them, has a `defer` that may suspend: a
+// panic unwinding the code must then run it where the code can stop, by the code's flag.
+export function waitsInCleanup(b: readonly Block, site: readonly (s: readonly Stmt) => bool): bool {
+  for (const c of b.cleanups) {
+    if (const #Defer(_, d) = c) {
+      let own: HashSet<usize> = HashSet.new();
+      if (residents(d, site, mut own)) { return true; }
+    }
+  }
+  b.stmts.iter().some((s) => match (s) {
+    #If(_, x, y) | #Loop(_, x, y) | #Try(x, _, y) => waitsInCleanup(x, site) || waitsInCleanup(y, site),
+    #Labeled(_, x) | #Block(x) | #Region(_, _, x) | #ForGen(_, _, _, x) => waitsInCleanup(x, site),
+    #Handle(h) => h.direct && waitsInCleanup(h.body, site),
+    _ => false,
+  })
+}

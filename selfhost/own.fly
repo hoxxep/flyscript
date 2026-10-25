@@ -2187,7 +2187,7 @@ impl Own {
     }
   }
 
-  // Whether binding `v` may be owned by something that leaves this function's fiber: an escaping
+  // Whether binding `v` may be owned by something that leaves this function's task: an escaping
   // closure (`mut` borrows, which it holds alone, allowed) or a task (§4.3, §6.1).
   function sendable(self: readonly Self, v: usize, mutOk: bool): bool {
     const ty = self.vars[v].ty.clone();

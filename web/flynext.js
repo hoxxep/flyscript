@@ -1,5 +1,5 @@
 // The page's side of a Flyscript program compiled to WebAssembly (web/dom.fly): it gives the program
-// what WASI would, fibers by JavaScript promise integration, and the page — its nodes by number,
+// what WASI would, and the page — its nodes by number,
 // its events, the server — through functions that may suspend the program until there is an
 // answer. `start(url)` runs the program at `url` in the page's element `#app`. Following a link
 // within the site, or stepping through the history, is an event too: the program asks the server
@@ -72,27 +72,8 @@ export async function start(url, root = document.getElementById("app")) {
   };
   const wasiImports = new Proxy(wasi, { get: (t, k) => t[k] ?? (() => ENOSYS) });
 
-  // ---- fibers: each runs as a call of its own, on a stack of its own, switched by the host ----
-  const waiting = new Map();
-  const saved = new Map();
-  let runFiber;
+  // ---- what the program asks of the host, which may suspend it, by promise integration ----
   const fly = {
-    switch: new WebAssembly.Suspending(async (from, to) => {
-      const sp = exports.__stack_pointer;
-      saved.set(from, sp.value);
-      const back = new Promise((resolve) => waiting.set(from, resolve));
-      const resume = waiting.get(to);
-      if (resume) {
-        waiting.delete(to);
-        resume();
-      } else {
-        sp.value = exports.fly_fiber_top(to);
-        runFiber(to).catch(ended);
-      }
-      await back;
-      sp.value = saved.get(from);
-    }),
-    free: (f) => { waiting.delete(f); saved.delete(f); },
     // A route's function, from its module, linked into the program the first time: its place in the
     // table of functions the two share, which the program calls it through.
     route: new WebAssembly.Suspending(async (k) => {
@@ -368,7 +349,6 @@ export async function start(url, root = document.getElementById("app")) {
   const ended = (e) => { if (!(e instanceof Exit)) console.error(e); };
   const instance = await WebAssembly.instantiate(module, { wasi_snapshot_preview1: wasiImports, fly, env });
   exports = instance.exports;
-  runFiber = WebAssembly.promising(exports.fly_fiber_run);
   // The program runs for as long as the page is open, waiting for its events.
   return WebAssembly.promising(exports._start)().catch(ended);
 }

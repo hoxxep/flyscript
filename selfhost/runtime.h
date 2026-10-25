@@ -101,9 +101,9 @@ typedef struct fly_unw fly_unw;
 // whether the task unwinds, a computation whose continuation was dropped; whether a generator
 // stops; the handlers in force, innermost first; and, for a panic (§5.7), the records of the
 // functions it would unwind, innermost first, and the message of the panic unwinding them, if one
-// is. The last two are each fiber's own.
-// And the limit of the stack it runs on now (below), and how deep in destructors it is, from which
-// a panic does not unwind (§5.7): each fiber's own, as the panic is.
+// is. And the limit of the stack it runs on now (below), and how deep in destructors it is, from
+// which a panic does not unwind (§5.7). Each is the task's own: on threads each task has a context
+// of its own, and against a simulated world the scheduler keeps what lasts while a task waits.
 // A frame arena (§11.3): the frames of calls of code that may suspend whose frame is not nested in
 // their caller's, each taken as the call starts and given back as it ends, last first. A
 // generator's or a `handle`'s own arena keeps the one in use as it was entered, `outer`, which is
@@ -113,7 +113,9 @@ typedef struct fly_frames fly_frames;
 struct fly_frames { char* top; char* end; fly_frame_chunk* chunk; fly_frames* outer; };
 // `pend` says why code returned suspended (FLY_PEND_*), and for whom; `frames` is the arena calls
 // take frames from.
-typedef struct fly_ctx { void* err; bool unwinding; uint8_t pend; fly_handler* handlers; fly_unw* unw; char* panic; uintptr_t limit; int destroying; fly_handler* pend_h; fly_frames* frames; } fly_ctx;
+// `panicking` says that the code unwinds by its flag for a panic, which a machine with cleanup
+// that may wait took up from the native unwinding (§5.7), and which a catch point takes up in turn.
+typedef struct fly_ctx { void* err; bool unwinding; uint8_t pend; fly_handler* handlers; fly_unw* unw; char* panic; uintptr_t limit; int destroying; fly_handler* pend_h; fly_frames* frames; bool panicking; } fly_ctx;
 #ifdef FLY_THREADS
 // The context of the task running. Within one call of a function it is always the same, wherever
 // the task goes on, so it is `const`: a compiler may compute it once a call. It is computed afresh
@@ -170,20 +172,25 @@ _Noreturn void fly_out_of_memory(void);
 // the tables, under `fly_personality`, in WebAssembly by its own exceptions (FLY_LANDING_PADS) —
 // and a program's C by each function's frame record, whose cleanup is its own (c.fly's
 // `withLanding`, compiled with -fexceptions: FLY_C_UNWIND). Only catch points take a panic up
-// (`fly_try`). In C, which cannot catch, a catch point keeps a record on its fiber's chain while it
-// runs — where its frame is, and a jump buffer — which a panic's unwinding stops at and jumps to.
+// (`fly_try`), and machines whose cleanup may wait (`fly_panic_flag`). In C, which cannot catch, a
+// catch point keeps a record on its task's chain while it runs — where its frame is, and a jump
+// buffer — which a panic's unwinding stops at, past the frame, and jumps to.
 // A freestanding program does not unwind: its panic goes to `fly_os_panic`.
 #if !defined(FLY_FREESTANDING) && !defined(FLY_LANDING_PADS)
 #include <setjmp.h>
 struct fly_unw { fly_unw* prev; uintptr_t frame; jmp_buf buf; };
 #define FLY_UNW_CATCH(u) ((u)->frame = (uintptr_t)__builtin_frame_address(0), _setjmp((u)->buf))
+// The block a function's panic record says the code is in, in a function a `longjmp` returns to.
+#define FLY_AT (*(volatile int32_t*)&fr_.at)
 static inline void fly_unw_push(fly_unw* u) { fly_ctx* c = fly_cx(); u->prev = c->unw; c->unw = u; }
 static inline void fly_unw_pop(fly_unw* u) { fly_cx()->unw = u->prev; }
 #endif
+_Noreturn void fly_panic_again(void);
+static inline void fly_panic_again_if(void) { if (__builtin_expect(fly_cx()->panicking, 0)) fly_panic_again(); }
 // What a catch point that has taken a panic up does to go on with it.
 _Noreturn void fly_unwind_on(void);
-// A catch point — a task's root, a fiber's, `Io.scope`, `Mutex.lock`, `join`, `main`: runs `f(a)`,
-// and gives whether a panic unwound out of it, which is then the fiber's (`fly_ctx.panic`), for
+// A catch point — a task's root, `Io.scope`, `Mutex.lock`, `join`, `main`: runs `f(a)`, and gives
+// whether a panic unwound out of it, which is then the task's (`fly_ctx.panic`), for
 // the catch point to take up or to go on with (`fly_unwind_on`). In native code made through
 // LLVM it is the module's own, with a landing pad that catches a panic (llvm.fly); elsewhere it
 // takes up a record.
@@ -418,10 +425,8 @@ bool fly_arc_release(void* p);
 void fly_arc_free(void* p);
 void* fly_box(const void* value, size_t size);
 
-// ---- fibers and handlers ----
+// ---- handlers ----
 
-// A fiber: a stack of its own, which runs until it suspends and is resumed where it left off.
-typedef struct fly_fiber fly_fiber;
 // A `handle`: the effect it handles, the operation the body performed (-1 for none), where the body
 // keeps that operation's arguments and wants its result, and the handlers around it.
 struct fly_handler {
@@ -449,7 +454,7 @@ bool fly_handled(uint32_t effect);
 // Cleanup — a `defer`, a destructor — runs to its end however its block is left: what is
 // unwinding past it is set aside while it runs, so its own failures, loops and handlers work,
 // and then goes on.
-typedef struct { void* err; bool unwinding; } fly_unwind_state;
+typedef struct { void* err; bool unwinding; bool panicking; } fly_unwind_state;
 fly_unwind_state fly_cleanup_begin(void);
 void fly_cleanup_end(fly_unwind_state s);
 // A continuation: the frame of the `handle` it resumes, how to resume it with the operation's
@@ -477,6 +482,12 @@ void fly_frames_free(fly_frames* a);
 typedef struct { fly_frames* frames; char* top; } fly_frames_mark;
 void fly_frames_keep(fly_frames_mark* m);
 void fly_frames_back(const fly_frames_mark* m);
+// A machine whose cleanup may wait takes a panic up from the native unwinding, and unwinds on by
+// its flag (`fly_panic_flag`), so that its cleanup may stop it as any code of its may. Whatever is
+// not a machine and is returned to unwinding so raises the panic again, natively
+// (`fly_panic_again_if`); a catch point takes it up (`fly_try_flagged`, given its mark).
+void fly_panic_flag(void);
+bool fly_try_flagged(const fly_frames_mark* m);
 // A suspended machine whose frame is `frame`, dropped: called again unwinding, it runs its
 // cleanup for where it stopped. `call` calls it.
 void fly_machine_unwind(void (*call)(void* env, void* frame), void* env, void* frame);

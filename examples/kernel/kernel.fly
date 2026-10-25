@@ -206,7 +206,8 @@ export extern "C" function kmain(): void {
     println(`scratch: ${a.get() + b.get()}`);
   }
 
-  // An effect handled by code that resumes the work: the work runs on a fiber of its own.
+  // An effect handled by code that resumes the work: the work is a state machine, its frame the
+  // `handle`'s own.
   const started = handle {
     bootTasks(3)
   } with Log {

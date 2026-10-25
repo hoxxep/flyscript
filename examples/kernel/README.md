@@ -8,7 +8,7 @@ A small kernel for QEMU's AArch64 `virt` board, written in Flyscript, compiled w
 - Allocation that can fail says so: asking for more memory than there is fails with `#OutOfMemory`, which the kernel catches and goes on.
 - A spinlock built from `compareExchange` and `storeRelease` is released by `defer`, however its block is left.
 - Scratch memory comes from a region, given back all at once.
-- An effect handler resumes work that logs through it: the work runs on a fiber of its own, inside the kernel.
+- An effect handler resumes work that logs through it: the work is a state machine whose frame the `handle` keeps, on the kernel's own heap.
 
 The code an interrupt runs is a function C calls, which performs nothing: the compiler rejects a call to anything that may sleep from it (see `tests/reject/interrupt_cannot_sleep.fly`).
 

@@ -475,7 +475,8 @@ impl Lower {
     #None
   }
 
-  // Whether code performing a row may suspend: it performs an effect handled on a fiber.
+  // Whether code performing a row may come back unwinding: it performs `Io`, which a cancellation
+  // reaches, or an effect a handler takes, whose continuation may be dropped.
   export function suspends(self: readonly Self, row: readonly EffRow): bool {
     row.effs.iter().some((e) => {
       const name = self.p.defs[e.def].name.asStr();

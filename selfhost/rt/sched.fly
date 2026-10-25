@@ -1,9 +1,9 @@
 // The scheduler of a simulated world (§6.4), for the native runtime: which task runs, when one
 // waits and what wakes it, scopes and their failures, cancellation, the virtual clock, and
-// channels. It runs on the program's own stack and owns all of that as values of its own; each
-// task runs on a fiber of its own and asks it for what it needs (runtime.c's `ask`), as a handler
-// is asked, so that the code that decides is Flyscript, checked as any program is. The C beneath
-// switches between fibers and runs what compiled code gives it: entries, destructors, results.
+// channels. It owns all of that as values of its own; each task, a state machine, asks it for what
+// it needs (runtime.c's `ASK`), as a handler is asked, and stops until it is answered, so that the
+// code that decides is Flyscript, checked as any program is. The C beneath runs the tasks and what
+// compiled code gives it: entries, destructors, results.
 //
 // A seed decides, at every scheduling point, which ready task runs next, by the same generator
 // and in the same order as the JavaScript runtime and the reference interpreter, so that a seed

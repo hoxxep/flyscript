@@ -26,7 +26,7 @@ if [ "$4" = "--imports" ] || [ "$4" = "--split" ]; then
   link="--gc-sections --strip-all"
 fi
 libc="$sysroot/lib/wasm32-wasip1/crt1-command.o"
-exports="--export=__stack_pointer --export=fly_fiber_run --export=fly_fiber_top -z stack-size=8388608"
+exports="--export=__stack_pointer -z stack-size=8388608"
 if [ "$4" != "--split" ]; then
   # shellcheck disable=SC2086
   sh "$root/selfhost/llvm.sh" "$1" "$2" "$out.o" --target=wasm32-wasip1 --sysroot="$sysroot" $opt
@@ -48,7 +48,7 @@ sh "$root/selfhost/llvm.sh" "$1" "$2" "$work/app.bc" --target=wasm32-wasip1 --sy
 routes=$(grep -oE "^define [^@]*@${prefix}[0-9]+_[0-9]+__fly\(" "$work/app.ll" | grep -oE "@[^(]*" | tr -d @ | sort -u | paste -sd, -)
 sed -E "s/^(define [^@]*@${prefix}[0-9]+_[0-9]+__fly\(.*\)) (#[0-9]+)/\1 noinline \2/" "$work/app.ll" > "$work/app.kept.ll"
 "$bin/opt" -strip-debug -passes='internalize,name-anon-globals,default<O2>' \
-  -internalize-public-api-list='_start,__main_void,__main_argc_argv,malloc,free,calloc,realloc,fly_fiber_run,fly_fiber_top' \
+  -internalize-public-api-list='_start,__main_void,__main_argc_argv,malloc,free,calloc,realloc' \
   -internalize-public-api-list="$routes" "$work/app.kept.ll" -S -o "$work/app.opt.ll"
 node "$root/selfhost/wasm-split.js" "$work/app.opt.ll" "$work" "${prefix}(\\d+)_"
 "$bin/llvm-as" "$work/all.ll" -o "$work/all.bc"

@@ -658,7 +658,7 @@ impl Gen {
                 let k = self.rng.below(5) + 2;
                 let arm = match self.rng.below(4) {
                     0 | 1 => format!("ask(n) resumes k => k((n * {k}) % 1009)"),
-                    // Work after the resumption: the body runs on a fiber of its own.
+                    // Work after the resumption: the body's frame is the `handle`'s own.
                     2 => format!("ask(n) resumes k => {{ const r = k((n + {k}) % 1009); (r * 2 + 1) % 1009 }}"),
                     _ => format!("ask(n) => (n + {k}) % 1009"),
                 };

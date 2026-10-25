@@ -2059,7 +2059,7 @@ impl<'p> Own<'p> {
         }
     }
 
-    /// Whether binding `v` may be owned by something that leaves this function's fiber: an
+    /// Whether binding `v` may be owned by something that leaves this function's task: an
     /// escaping closure (`mut` borrows, which it holds alone, allowed) or a task (§4.3, §6.1).
     fn sendable(&self, v: VarId, mut_ok: bool) -> bool {
         let ty = &self.vars[v].ty;
