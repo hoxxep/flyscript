@@ -1,0 +1,59 @@
+// A closure given `once` to a function that only calls it lives in the caller's frame: what it
+// holds is dropped once, whether its body moves it out or not, and whether the call waits.
+// expect: held hello
+// expect: moved hello world
+// expect: locked 3 hi
+// expect: scoped 4
+// expect: not called
+// expect: waited 7 x
+// expect: kept 5
+// expect: bound b 1
+// expect: bound b 2
+// expect: escaped 42
+import { println } from "std/io";
+import { Mutex } from "std/sync";
+
+function run<T>(f: once () => T): T { f() }
+function passOn<T>(f: once () => T): T { run(f) }
+function maybe(go: bool, f: once () => void uses Io): void uses Io { if (go) { f(); } }
+function later(f: once () => void uses Io): void uses Io { Io.sleep(Duration.ms(1)); f(); }
+function keep(f: once () => i64): Option<once () => i64> { #Some(f) }
+
+function waits(tag: i64): void uses Io {
+  const s = "x".toString();
+  later(() => { Io.sleep(Duration.ms(1)); println(`waited ${tag} ${s}`); });
+}
+
+// A closure bound to a name that is only called is lent to it, in the frame of a machine too.
+function bound(): void uses Io {
+  const s = "b".toString();
+  const show = (k: i64) => { Io.sleep(Duration.ms(1)); println(`bound ${s} ${k}`); };
+  show(1);
+  show(2);
+}
+
+function escapes(n: i64): () => i64 { () => n + 1 }
+
+export function main(): void uses Io {
+  const a = "hello".toString();
+  println(run(() => `held ${a}`));
+  const b = "hello".toString();
+  const c = " world".toString();
+  const moved = passOn(() => { let t = b; t.push(c.asStr()); t });
+  println(`moved ${moved}`);
+  const m = Mutex.new(3);
+  const h = "hi".toString();
+  println(m.lock((v) => `locked ${v} ${h}`));
+  const n = "four".toString();
+  Io.scope((sc) => { println(`scoped ${n.len()}`); });
+  const d = "dropped".toString();
+  maybe(false, () => println(d));
+  println("not called");
+  Io.scope((sc) => { sc.spawn(() => waits(7)); });
+  const k = 5;
+  match (keep(() => k)) { #Some(g) => println(`kept ${g()}`), #None => {} }
+  bound();
+  const e = escapes(41);
+  const stored = #Some(e);
+  match (stored) { #Some(f) => println(`escaped ${f()}`), #None => {} }
+}

@@ -1581,12 +1581,12 @@ impl Checker {
         }
       }
     }
-    // Expected types flow into calls before the arguments are checked (§3.6) — except a borrow
-    // expected of a result that is only a type variable: whether that is owned is the arguments'
-    // to say, and lending fits an owned result to a borrow afterwards. Nor of a method's result
-    // that is only a type variable: its receiver says what it is.
+    // Expected types flow into calls before the arguments are checked (§3.6) — except a borrow or
+    // a view (`str`, a slice) expected of a result that is only a type variable: whether that is
+    // owned is the arguments' to say, and lending fits an owned result to it afterwards. Nor of a
+    // method's result that is only a type variable: its receiver says what it is.
     const retVar = match (self.s.resolve(inst.ret)) { #Var(_) => true, _ => false };
-    const lentVar = (retVar && match (expected) { #Some(x) => match (self.s.resolve(x)) { #Borrow(false, _) => true, _ => false }, #None => false })
+    const lentVar = (retVar && match (expected) { #Some(x) => match (self.normalize(self.s.resolve(x))) { #Borrow(false, _) | #Prim(#Str) | #Slice(_) => true, _ => false }, #None => false })
       || (recv.isSome() && retVar);
     if (const #Some(x) = expected && !lentVar) {
       const ret = inst.ret.clone();

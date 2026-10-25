@@ -74,6 +74,8 @@ export struct Lower {
   // Whether the program handles `Io` anywhere: then each of `Io`'s operations asks whether one of
   // its handlers is around it, and every other program pays nothing for them.
   handlesIo: bool;
+  // By function: which of its parameters it only calls (`onlyCalls`).
+  onlyCalled: HashMap<usize, Vec<bool>>;
 }
 
 export function newLower(p: Prog): Lower {
@@ -82,6 +84,7 @@ export function newLower(p: Prog): Lower {
     p, insts: Vec.new(), instIndex: HashMap.new(), closures: Vec.new(), fid: 0, map: HashMap.new(), module: 0,
     ret: #Prim(#Void), locals: Vec.new(), frames: Vec.new(), scopes: Vec.new(), loops: Vec.new(), labels: 0,
     captures: Vec.new(), regions: Vec.new(), yields: #None, homes: Vec.new(), lent: Vec.new(), handlesIo,
+    onlyCalled: HashMap.new(),
   }
 }
 
@@ -1705,7 +1708,7 @@ impl Lower {
     const fty: FnTy = match (ft) { #Fn(f) => f.get().clone(), _ => return self.unsupported(e.span, "calling this") };
     const f0 = self.valueOf(callee);
     const atF = self.mark();
-    const vs = self.args(#None, args, fty.params);
+    const vs = self.args(#None, args, fty.params, #None);
     const f = self.settle([[f0, ft.clone(), atF]])[0].clone();
     const yields = self.yieldsOf(fty.effects).isSome();
     if (yields && self.yields.isNone()) { return self.fail(e.span, "a closure that yields is called by a generator"); }
@@ -1748,7 +1751,7 @@ impl Lower {
     const c = self.callee(fid, cargs.clone(), span);
     let targs: Vec<Ty> = Vec.new();
     for (const a of cargs) { if (const #Ty(t) = a) { targs.push(t.clone()); } }
-    const vs = self.args(recv, rest, ptys);
+    const vs = self.args(recv, rest, ptys, #Some(fid));
     let argTys: Vec<Ty> = Vec.new();
     let ids: Vec<usize> = Vec.new();
     if (const #Some(r) = recv) { ids.push(r.id); }
@@ -1765,25 +1768,31 @@ impl Lower {
     }
   }
 
-  // Arguments as the parameters take them, evaluated in order.
-  function args(self: mut Self, recv: Option<readonly Expr>, rest: readonly Vec<Expr>, ptys: readonly Vec<Ty>): Vec<Operand> uses Fail<Diagnostic> {
+  // Arguments as the parameters of `fid`, if it is known, take them, evaluated in order.
+  function args(self: mut Self, recv: Option<readonly Expr>, rest: readonly Vec<Expr>, ptys: readonly Vec<Ty>, fid: Option<usize>): Vec<Operand> uses Fail<Diagnostic> {
     let ops: Vec<[Operand, Ty, usize]> = Vec.new();
-    if (const #Some(a) = recv) { self.argInto(mut ops, a, ptys); }
-    for (const a of rest) { self.argInto(mut ops, a, ptys); }
+    if (const #Some(a) = recv) { self.argInto(mut ops, a, ptys, fid); }
+    for (const a of rest) { self.argInto(mut ops, a, ptys, fid); }
     self.settle(ops)
   }
 
-  function argInto(self: mut Self, ops: mut Vec<[Operand, Ty, usize]>, a: readonly Expr, ptys: readonly Vec<Ty>): void uses Fail<Diagnostic> {
-    const pt: Ty = match (ptys.get(ops.len())) { #Some(t) => t.clone(), #None => self.exprTy(a.id) };
-    const v = self.argAs(a, pt);
+  function argInto(self: mut Self, ops: mut Vec<[Operand, Ty, usize]>, a: readonly Expr, ptys: readonly Vec<Ty>, fid: Option<usize>): void uses Fail<Diagnostic> {
+    const i = ops.len();
+    const pt: Ty = match (ptys.get(i)) { #Some(t) => t.clone(), #None => self.exprTy(a.id) };
+    const only = match (fid) { #Some(f) => self.onlyCalls(f, i), #None => false };
+    const v = self.argAs(a, pt, only);
     ops.push([v, pt, self.mark()]);
   }
 
   // An argument as the parameter takes it. A closure made only to be lent — to a parameter that
-  // does not call it `once` — is the block's, which drops it after the call.
-  function argAs(self: mut Self, e: readonly Expr, pt: readonly Ty): Operand uses Fail<Diagnostic> {
-    if (const #Fn(f) = stripBorrow(pt) && f.mode != #Once) {
-      if (const #Lambda { params, body } = e.kind) {
+  // does not call it `once` — is the block's, which drops it after the call. One given `once` to a
+  // function that only calls it is the callee's to drop, but can no more outlive the call: both
+  // are lent, and live in the caller's frame rather than on the heap.
+  function argAs(self: mut Self, e: readonly Expr, pt: readonly Ty, onlyCalled: bool): Operand uses Fail<Diagnostic> {
+    if (const #Fn(f) = stripBorrow(pt) && const #Lambda { params, body } = e.kind) {
+      if (f.mode == #Once) {
+        if (onlyCalled) { return self.lambda(e, params, body, true); }
+      } else {
         const v = self.lambda(e, params, body, true);
         const t = self.temp(self.exprTy(e.id));
         self.emit(#Let(t, #Use(v)));
@@ -1793,13 +1802,75 @@ impl Lower {
     self.exAs(e, pt)
   }
 
+  // Whether function `fid` only calls what its parameter `i` is given: calls it, or gives it to a
+  // parameter of a function that only calls its own, and does nothing else with it — keeps it,
+  // returns it, or captures it in a closure — so that it cannot outlive the call.
+  function onlyCalls(self: mut Self, fid: usize, i: usize): bool {
+    if (!self.onlyCalled.has(fid)) {
+      const n = self.p.fns[fid].scheme.params.len();
+      // Assumed of none while worked out, so that functions passing it among themselves are
+      // decided only by what each does with it.
+      self.onlyCalled.insert(fid, Vec.new());
+      const found = self.whichOnlyCalled(fid, n);
+      self.onlyCalled.insert(fid, found);
+    }
+    match (self.onlyCalled.get(fid)) { #Some(v) => i < v.len() && v[i], #None => false }
+  }
+
+  // Whether the function being lowered only calls what it binds to `name`, wherever it binds it.
+  function bindingOnlyCalled(self: mut Self, name: str): bool {
+    const decl: FnDecl = match (self.p.fnDecl(self.fid)) { #Some(d) => d, #None => return false };
+    const body = match (decl.body) { #Some(b) => b, #None => return false };
+    let given: Vec<[usize, usize]> = Vec.new();
+    const ok = match (self.p.typed.get(self.fid)) {
+      #Some(t) => blockCallsOnly(self.p, t.calls, body, name, mut given),
+      #None => false,
+    };
+    if (!ok) { return false; }
+    for (const [g, j] of given) { if (!self.onlyCalls(g, j)) { return false; } }
+    true
+  }
+
+  function whichOnlyCalled(self: mut Self, fid: usize, n: usize): Vec<bool> {
+    let out: Vec<bool> = Vec.new();
+    for (const _ of 0..n) { out.push(false); }
+    // The library's routines that call what they are given before they return, and keep nothing.
+    if (!self.p.fns[fid].hasBody) {
+      if (!self.p.modules[self.p.fns[fid].module].isStd || self.p.fns[fid].foreign) { return out; }
+      const [lo, hi] = match (self.builtinKey(fid).asStr()) {
+        "Io_scope" | "Fail_capture" => [0, 1],
+        "Fail_map" | "join" => [0, 2],
+        "Ptr_with" | "Mutex_lock" => [1, 2],
+        _ => [0, 0],
+      };
+      for (const k of lo..hi) { if (k < n) { out[k] = true; } }
+      return out;
+    }
+    const decl: FnDecl = match (self.p.fnDecl(fid)) { #Some(d) => d, #None => return out };
+    const body = match (decl.body) { #Some(b) => b, #None => return out };
+    for (const [k, prm] of decl.sig.params.iter().enumerate()) {
+      if (k >= n) { break; }
+      match (stripBorrow(self.p.fns[fid].scheme.params[k][1])) { #Fn(_) => {}, _ => continue }
+      // Where the body gives it on: the calls, and the argument it is in each.
+      let given: Vec<[usize, usize]> = Vec.new();
+      const ok = match (self.p.typed.get(fid)) {
+        #Some(t) => blockCallsOnly(self.p, t.calls, body, prm.name.name.asStr(), mut given),
+        #None => false,
+      };
+      let all = ok;
+      for (const [g, j] of given) { if (all && !self.onlyCalls(g, j)) { all = false; } }
+      out[k] = all;
+    }
+    out
+  }
+
   // `Eff.op(args)`: the body suspends until it is resumed with the result, or unwound.
   function perform(self: mut Self, e: readonly Expr, d: usize, op: str, args: readonly Vec<Expr>): Operand uses Fail<Diagnostic> {
     let tys: Vec<Ty> = Vec.new();
     for (const a of args) { tys.push(match (self.slotTy(a.id)) { #Some(t) => t, #None => self.exprTy(a.id) }); }
     let ops: Vec<[Operand, Ty, usize]> = Vec.new();
     for (const [i, a] of args.iter().enumerate()) {
-      const v = self.argAs(a, tys[i]);
+      const v = self.argAs(a, tys[i], false);
       ops.push([v, tys[i].clone(), self.mark()]);
     }
     const vs = self.settle(ops);
@@ -1896,11 +1967,14 @@ impl Lower {
 
   function statement(self: mut Self, st: readonly AstStmt): void uses Fail<Diagnostic> {
     match (st) {
-      #Let { mutable: _, pat, ty: _, init, span: _ } => {
+      #Let { mutable: _, pat, ty, init, span: _ } => {
         match (pat.kind) {
           #Bind(n) => {
             const want = self.bindingTy(pat.id);
-            const v = self.exAs(init, want);
+            // A closure bound to a name the function only calls is lent to the binding.
+            const v = if (const #Lambda { params, body } = init.kind && ty.isNone() && self.bindingOnlyCalled(n.asStr())) {
+              self.lambda(init, params, body, true)
+            } else { self.exAs(init, want) };
             const l = self.declare(n.asStr(), want, #Binding);
             self.emit(#Let(l, #Use(v)));
             self.bind(n.asStr(), l);
@@ -3268,6 +3342,59 @@ function childExprs(e: readonly Expr, out: mut Vec<Expr>): void {
     #Handle { body, effect: _, arms } => { push(body, mut out); for (const a of arms) { push(a.body, mut out); } }
     _ => {}
   }
+}
+
+// Whether code uses `name` only by calling it, or by giving it, as a whole argument, to a call of
+// a known function — each such call and argument added to `given` — so that it cannot outlive it.
+function callsOnly(p: readonly Prog, calls: readonly HashMap<usize, usize>, e: readonly Expr, name: str, given: mut Vec<[usize, usize]>): bool {
+  match (e.kind) {
+    #Ident(n) => n != name,
+    #Call { callee, typeArgs: _, args } => {
+      const direct = if (const #Ident(n) = callee.kind) { n == name } else { false };
+      if (!direct && !callsOnly(p, calls, callee, name, mut given)) { return false; }
+      const fid = calls.get(e.id);
+      const self0 = match (fid) {
+        #Some(f) => match (p.fns[f].scheme.params.first()) { #Some([n, _]) => if (n == "self") { 1 } else { 0 }, #None => 0 },
+        #None => 0,
+      };
+      for (const [j, a] of args.iter().enumerate()) {
+        if (const #Ident(n) = a.kind && n == name) {
+          match (fid) { #Some(f) => given.push([f, j + self0]), #None => return false }
+        } else if (!callsOnly(p, calls, a, name, mut given)) { return false; }
+      }
+      true
+    }
+    // A closure that names it captures it.
+    #Lambda { params: _, body } => {
+      let free: Vec<String> = Vec.new();
+      freeNames(body, mut free);
+      !free.iter().some((x) => x == name)
+    }
+    #Field { target: _, name: _ } | #Index { target: _, index: _ } | #Unary { op: _, operand: _ } | #Binary { op: _, lhs: _, rhs: _ }
+      | #Cast { expr: _, ty: _ } | #Throw(_) | #Yield(_) | #Comptime(_) | #Return(_) | #Template(_) | #List(_) | #Tag { name: _, args: _ }
+      | #Record { name: _, fields: _ } | #Block(_) | #Unsafe(_) | #Region { name: _, body: _ } | #If { cond: _, then: _, otherwise: _ }
+      | #While { cond: _, body: _ } | #For { mutable: _, pat: _, iter: _, body: _ } | #Match { scrutinee: _, arms: _ }
+      | #Try { body: _, pat: _, handler: _ } | #Handle { body: _, effect: _, arms: _ } => {
+      let parts: Vec<Expr> = Vec.new();
+      childExprs(e, mut parts);
+      for (const x of parts) { if (!callsOnly(p, calls, x, name, mut given)) { return false; } }
+      true
+    }
+    // Anything else that names it uses it otherwise.
+    _ => {
+      let free: Vec<String> = Vec.new();
+      freeNames(e, mut free);
+      !free.iter().some((x) => x == name)
+    }
+  }
+}
+
+function blockCallsOnly(p: readonly Prog, calls: readonly HashMap<usize, usize>, b: readonly AstBlock, name: str, given: mut Vec<[usize, usize]>): bool {
+  for (const s of b.stmts) {
+    const x = match (s) { #Let { mutable: _, pat: _, ty: _, init, span: _ } => init, #Defer(x) | #Expr(x) => x };
+    if (!callsOnly(p, calls, x, name, mut given)) { return false; }
+  }
+  match (b.tail) { #Some(t) => callsOnly(p, calls, t, name, mut given), #None => true }
 }
 
 // The names an expression uses, in order, each once.

@@ -1,0 +1,22 @@
+// A closure lent to a call that waits lives in the frame of the function lending it, which keeps
+// it while the function is stopped.
+// expect: x 11
+// expect: x 21
+// expect: x 12
+// expect: 12
+// expect: x 22
+// expect: 22
+import { println } from "std/io";
+
+function twice(f: mut () => void uses Io): void uses Io { f(); f(); }
+
+function work(tag: i64): void uses Io {
+  let n = tag;
+  const s = "x".toString();
+  twice(() => { Io.sleep(Duration.ms(5)); n += 1; println(`${s} ${n}`); });
+  println(`${n}`);
+}
+
+export function main(): void uses Io {
+  Io.scope((sc) => { sc.spawn(() => work(10)); Io.sleep(Duration.ms(1)); sc.spawn(() => work(20)); });
+}

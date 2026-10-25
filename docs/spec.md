@@ -1,6 +1,6 @@
 # Flyscript
 
-**Language specification, version 0.127**
+**Language specification, version 0.128**
 
 *Affine values, one row calculus, handlers for everything, and `comptime`: Church on the outside, Turing on the inside.*
 
@@ -20,7 +20,7 @@ The whole language rests on five laws. Every rule in this document is a conseque
 
 ### 0.1 Recent changes
 
-This is version 0.127. Its last revisions made a panic end the task it happens in rather than the program, proved it, and compiled every task, handler and generator to a state machine as small as a Rust future:
+This is version 0.128. Its last revisions made a panic end the task it happens in rather than the program, proved it, and compiled every task, handler and generator to a state machine as small as a Rust future:
 
 - **A panic unwinds its task** (0.114 to 0.117). It runs the task's cleanup, as a failure nothing catches would; a spawned task's panic ends that task alone, so a server survives a connection that hits a bug, and a `Mutex` whose holder panics is poisoned. A `Task` cancels one task and says how it ended, and `std/supervise` restarts what crashed. A stack that runs out is a panic of its task; a panic out of a destructor, or in cleanup that a panic is running, ends the program (§5.7, §6.1, §6.2, §12.3).
 - **The proof covers panics** (0.118 to 0.120): every box is dropped exactly once through a panic, a spawned task's panic ends it alone, and a `Mutex` it poisons keeps its state, under every schedule (§9.5).
@@ -33,9 +33,11 @@ This is version 0.127. Its last revisions made a panic end the task it happens i
 
 - **Tasks as state machines** (0.125): a task that waits keeps only what it reads again, in frames of its own, and no stack; the runtime's waits are calls made again to go on, and native code has no fibers left. Cleanup that waits may run as a panic unwinds, as it may on any other way out (§5.7, §8.2, §8.3, §11.3, §12.1).
 
+- **Frames as small as a future's** (0.126): a frame keeps only what is live across a point it stops at, what one point keeps alone shares room with every other point's, and the frame of a function called directly nests in its caller's unless the callee may call it again, so a parked task takes what a parked Rust future does (§11.3).
+
 - **Words of bits** (0.127): an integer counts its trailing and leading zeros and its ones, a byte slice reads eight of its bytes as one `u64`, and `String.fromUtf8Unchecked` takes bytes known to be UTF-8 as text, performing `Unsafe` ([std.md](std.md)); `std/io` reads a line eight bytes at a time with them.
 
-- **Frames as small as a future's** (0.126): a frame keeps only what is live across a point it stops at, what one point keeps alone shares room with every other point's, and the frame of a function called directly nests in its caller's unless the callee may call it again, so a parked task takes what a parked Rust future does (§11.3).
+- **What a call is given is what it keeps** (0.128): a closure given to a function that only calls it, `once` or not, or bound to a name that is only called, does not escape, and is allocated in its caller's frame, as `with`, `Mutex.lock` and `Io.scope` are given theirs; and a generic call whose result is only a type parameter, where a `str` or a slice is expected, is instantiated as its arguments say, its result owned and lent (§3.6, §11.3).
 
 Every earlier change, with the reasoning behind it, is in [docs/history](history/).
 
@@ -302,7 +304,7 @@ Type checking happens after `comptime` evaluation and uses bidirectional local i
 - A method's result that is only a type variable takes its type from the receiver and the arguments, not from what is expected of it; what is expected is then met by lending or copying (`map.get(k).unwrap()`).
 - Region arguments are unification variables solved over the whole body. An allocation whose region the types leave undetermined goes to the **innermost enclosing region it does not escape from**: when a `region` block ends, each such allocation is placed in it unless that would let the data outlive the block (through the block's value or a variable declared outside it), in which case it is offered to the next enclosing region. A region argument left unconstrained outside every region defaults to the heap, where region allocation is an error, so a stray `alloc` is caught.
 - **Recursion.** A function that is called again while its effects are being inferred — itself, or through others — is assumed pure there; if its body then performs an effect, it must state its effects with `uses`.
-- **Expected types flow inward**: into blocks and their last expression, into the branches of `if`, `match`, `try`, `region` and `handle`, into a lambda's body from the function type expected of it, and into calls. A call checked against an expected type unifies the callee's instantiated return type with it *before* checking the arguments. This is how `alloc({ user, token })` in a function returning `Ref<Request>` builds a `Request` rather than an anonymous record.
+- **Expected types flow inward**: into blocks and their last expression, into the branches of `if`, `match`, `try`, `region` and `handle`, into a lambda's body from the function type expected of it, and into calls. A call checked against an expected type unifies the callee's instantiated return type with it *before* checking the arguments. This is how `alloc({ user, token })` in a function returning `Ref<Request>` builds a `Request` rather than an anonymous record. A result that is only a type parameter is the exception where a borrow or a view (`str`, a slice) is expected, or the call is a method's: then the arguments, or the receiver, say what it is, and an owned result is lent where it is used. So ``println(run(() => `${n} items`))``, with `run<T>(f: () => T): T`, instantiates `run` at `String`, not at a `str` of a string the closure would drop as it returns.
 - With nothing expected — or only a type variable, as a closure's result is — the branches of an `if` or `match` after the first are checked against the first's type, and branches whose value is a bare tag (`#Leaf`, `#A(x)`) go last, so they are built as the other branches' type: `(t) => match (m) { #Some(_) => #Wrap(Box.new(t)), _ => t }` builds `#Wrap` as the type of `t`.
 - `break`, `continue`, `return` and `throw` have type `never`, which fits any expected type. So does a `while (true)` loop with no `break` of its own: it is left only by `return` or a failure, so it may end a function that returns a value, as in TypeScript. A type nothing constrains is `never` too: the result type of a closure that only throws, or of a call of one, is that of a value never made.
 - There is no global Hindley–Milner inference: errors stay local, and `comptime`, regions and interfaces stay decidable.
@@ -1159,7 +1161,7 @@ What follows is no part of a program's meaning — no program can observe it —
 - **`join`.** Native code offers the second closure to idle cores while the first runs and takes it back if none took it, so splitting where no core is free costs little more than a call. Elsewhere — the reference evaluator, JavaScript, a simulated world — the two run in order.
 - **Locks and channels.** A `Mutex` is a word and a queue of its own, and a channel a ring of messages; waiting on either gives the core to others.
 - **Panics.** A panic costs nothing until one happens but its check — a compare and a branch to a cold call — and, where cleanup is live, a call that may unwind: through LLVM, natively and in WebAssembly, unwinding runs from tables, and a call with nothing to clean up stays a plain call. The C back end's cleanups cover a whole function, so every call in a function with cleanups may unwind. A function whose cleanup may wait takes a panic up as it reaches it, and unwinds on by its flag, so that its cleanup may stop it as any of its code may: through C it keeps a catch record as it starts, through LLVM its landing pads catch. Checking for a stack overflow costs a compare as a function that may be reached again before it returns starts (§5.7).
-- **Allocation.** Memory is allocated where a value is boxed, a collection or a string grows, a closure escapes, a failure is thrown, a task starts, a `handle` that is not direct runs, a region allocates, or code that may suspend needs more frames than its arena holds, and nowhere else.
+- **Allocation.** Memory is allocated where a value is boxed, a collection or a string grows, a closure escapes — is returned, stored, or given to a function that may keep it, as `spawn` and `generate` do, rather than one that only calls it — a failure is thrown, a task starts, a `handle` that is not direct runs, a region allocates, or code that may suspend needs more frames than its arena holds, and nowhere else.
 
 ## 12. Design notes
 

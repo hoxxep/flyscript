@@ -3702,12 +3702,20 @@ impl Cgen {
       }
     }
     if (inits.len() == 0) { return `((fly_fn){ NULL, NULL, (void*)lam_${k} })`; }
-    if (held || !lent) {
+    if (!lent) {
       return `({ env_${k}* e_ = fly_alloc(sizeof(env_${k})); *e_ = (env_${k}){ ${inits.join(", ")} }; (fly_fn){ e_, envdrop_${k}, (void*)lam_${k} }; })`;
     }
-    const env = self.fresh();
-    self.cx.decls.push(`  env_${k} ${env};\n`);
-    `({ ${env} = (env_${k}){ ${inits.join(", ")} }; (fly_fn){ &${env}, NULL, (void*)lam_${k} }; })`
+    // Lent, it is the caller's, in its frame in a machine, since the call may stop the machine and
+    // go on; dropping it drops what it holds and frees nothing.
+    const env = self.storage(`env_${k}`.asStr());
+    const drop = if (held && self.ownsCaptures(k)) { `envfini_${k}` } else { "NULL".toString() };
+    `({ ${env} = (env_${k}){ ${inits.join(", ")} }; (fly_fn){ &${env}, ${drop}, (void*)lam_${k} }; })`
+  }
+
+  // Whether closure `k` holds a value that needs dropping.
+  export function ownsCaptures(self: readonly Self, k: usize): bool {
+    for (const [_, t, byValue] of self.lw.closures[k].captures) { if (byValue && self.needsDrop(t)) { return true; } }
+    false
   }
 
   // A function instance as a value: a closure with no environment.
@@ -3842,6 +3850,10 @@ impl Cgen {
     self.typeDefs.push(`typedef struct {\n${fields}} env_${k};\n`);
     self.protos.push(`static void envdrop_${k}(void* p);\n`);
     self.apartCode.push(`static void envdrop_${k}(void* p) { env_${k}* e = p; ${owned}free(e); }\n`);
+    if (owned.len() > 0) {
+      self.protos.push(`static void envfini_${k}(void* p);\n`);
+      self.apartCode.push(`static void envfini_${k}(void* p) { env_${k}* e = p; ${owned}}\n`);
+    }
     let pcs: Vec<String> = Vec.new();
     let inits = String.new();
     for (const [i, l] of f.params.iter().enumerate()) {

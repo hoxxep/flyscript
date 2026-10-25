@@ -1,0 +1,12 @@
+// A generic call whose result is only a type parameter, where a view is expected, is instantiated
+// as its arguments say: the result is owned, and lent where it is used (§3.6).
+// expect: x hello
+// expect: y hello
+import { println } from "std/io";
+function id<T>(x: T): T { x }
+function run<T>(f: () => T): T { f() }
+export function main(): void uses Io {
+  const a = "hello".toString();
+  println(id(`x ${a}`));
+  println(run(() => `y ${a}`));
+}

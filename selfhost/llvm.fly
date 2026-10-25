@@ -3509,13 +3509,22 @@ impl Lgen {
     const fa = self.gep(dest, 2 * self.ptr);
     self.store("ptr", `@flyg_lam_${k}`.asStr(), fa.asStr());
     if (caps.len() == 0 && arenas.len() == 0) { return; }
-    const env = if (held || !lent) {
+    // Lent, it is the caller's, in its frame in a machine, since the call may stop the machine and
+    // go on; dropping it drops what it holds and frees nothing.
+    const env = if (!lent) {
       self.declare(`flyg_envdrop_${k}`.asStr(), `declare void @flyg_envdrop_${k}(ptr)`.asStr());
       const e = self.val(`call ptr @fly_alloc(${sizeTy(self.ptr)} ${size})`);
       const da = self.gep(dest, self.ptr);
       self.store("ptr", `@flyg_envdrop_${k}`.asStr(), da.asStr());
       e
-    } else { self.alloca(size, align) };
+    } else {
+      if (held && self.c.ownsCaptures(k)) {
+        self.declare(`flyg_envfini_${k}`.asStr(), `declare void @flyg_envfini_${k}(ptr)`.asStr());
+        const da = self.gep(dest, self.ptr);
+        self.store("ptr", `@flyg_envfini_${k}`.asStr(), da.asStr());
+      }
+      self.storage(size, align)
+    };
     for (const [i, c] of caps.iter().enumerate()) {
       const at = self.gep(env.asStr(), offsets[i]);
       match (c) {
@@ -3763,6 +3772,7 @@ impl Lgen {
       self.cx.arenas.insert(r, `%envar${r}`);
     }
     self.glueCode.push(`void flyg_envdrop_${k}(void* p) { ${drops}free(p); }\n`);
+    if (drops.len() > 0) { self.glueCode.push(`void flyg_envfini_${k}(void* p) { ${drops}}\n`); }
     let ps: Vec<String> = Vec.new();
     const rt = self.retDecl(f.ret, mut ps, f.span);
     // Every closure is given a slot for its frame, which one that may suspend keeps it in, and where
