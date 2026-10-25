@@ -1,0 +1,19 @@
+// expect: 650777868590383874 1 4 14
+// expect: 64 8 32 4 128 0
+// expect: 1 31 1
+// expect: <panic: readU64Le: 8 bytes from 2 of 9>
+// Counting a word's bits — its trailing and leading zeros, its ones — at its own width, zero
+// included, and reading eight bytes of a byte slice as one `u64`, little-endian: what scanning
+// eight bytes at a time is made of.
+import { println } from "std/io";
+
+export function main(): void uses Io {
+  const b: Vec<u8> = [1, 2, 3, 4, 5, 6, 7, 8, 9];
+  const w = b[0..9].readU64Le(1);
+  println(`${w} ${w.trailingZeros()} ${w.leadingZeros()} ${w.countOnes()}`);
+  const big: i128 = -1;
+  println(`${(0 as u64).trailingZeros()} ${(0 as u8).leadingZeros()} ${(-1 as i32).countOnes()} ${(16 as u16).trailingZeros()} ${big.countOnes()} ${big.leadingZeros()}`);
+  const one: usize = 1;
+  println(`${one.countOnes()} ${(1 as i32).leadingZeros()} ${(-2 as i8).trailingZeros()}`);
+  println(`${b[0..9].readU64Le(2)}`);
+}

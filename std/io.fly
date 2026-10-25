@@ -66,24 +66,29 @@ impl File {
   export function readLine(self: mut Self): Option<String> uses Io, Fail<IoErr> {
     let line: Vec<u8> = Vec.new();
     let any = false;
-    while (self.fill()) {
+    // Whether every byte of the line is ASCII, which is UTF-8 that need not be checked again.
+    let ascii = true;
+    // What is read ahead is looked at before anything more is read.
+    while (self.at < self.end || self.fill()) {
       any = true;
       // Scanned as a slice of its own, so the scan reads nothing else.
       let k: usize = 0;
       {
         const ahead = self.buf[self.at..self.end];
-        while (k < ahead.len() && ahead[k] != 10) { k += 1; }
+        const [end, plain] = lineEnd(ahead);
+        k = end;
+        ascii = ascii && plain;
         line.extend(ahead[0..k]);
       }
       k += self.at;
       if (k < self.end) {
         self.at = k + 1;
         if (line.len() > 0 && line[line.len() - 1] == 13) { line.pop(); }
-        return #Some(text(line));
+        return #Some(lineText(line, ascii));
       }
       self.at = k;
     }
-    if (any && line.len() > 0) { #Some(text(line)) } else { #None }
+    if (any && line.len() > 0) { #Some(lineText(line, ascii)) } else { #None }
   }
 
   // Each line in turn, as `readLine` reads them.
@@ -184,6 +189,39 @@ export function writeFile(path: str, content: str): void uses Io, Fail<IoErr> {
 }
 
 function text(b: Vec<u8>): String { String.fromUtf8Lossy(b) }
+
+// A line's bytes as text: checked, unless the scan found them ASCII.
+function lineText(b: Vec<u8>, ascii: bool): String {
+  if (ascii) { unsafe { String.fromUtf8Unchecked(b) } } else { text(b) }
+}
+
+// Where the first `\n` in `bytes` is, or how many there are if none is, and whether every byte
+// before it is ASCII: eight bytes at a time, each word's bytes that are `\n` found as those its
+// exclusive or with eight of them leaves zero, the first of which is the lowest marked (the marks
+// above it may be wrong), and its high bits gathered; the rest a byte at a time.
+function lineEnd(bytes: readonly u8[]): [usize, bool] {
+  const n = bytes.len();
+  let k: usize = 0;
+  let high: u64 = 0;
+  while (k + 8 <= n) {
+    const w = bytes.readU64Le(k);
+    const x = w ^ 0x0a0a0a0a0a0a0a0a;
+    const zero = x.wrappingSub(0x0101010101010101) & ~x & 0x8080808080808080;
+    if (zero != 0) {
+      // The bytes below the first `\n`, whose bits are below its mark.
+      const below = (zero & (~zero).wrappingAdd(1)).wrappingSub(1);
+      high = high | (w & below & 0x8080808080808080);
+      return [k + (zero.trailingZeros() / 8) as usize, high == 0];
+    }
+    high = high | (w & 0x8080808080808080);
+    k += 8;
+  }
+  while (k < n && bytes[k] != 10) {
+    high = high | ((bytes[k] & 0x80) as u64);
+    k += 1;
+  }
+  [k, high == 0]
+}
 
 // A line to standard output; on threads, each line is written whole.
 export function println(s: str): void uses Io;

@@ -732,6 +732,7 @@ const { $rt, $b } = (() => {
       return some(b.toString("latin1"));
     },
     String_fromUtf8Lossy: (bytes) => Buffer.from(Buffer.from(itemsOf(bytes)).toString("utf8"), "utf8").toString("latin1"),
+    String_fromUtf8Unchecked: (bytes) => Buffer.from(itemsOf(bytes)).toString("latin1"),
     str_slice: (s, i, j) => slice(s, i, j),
     str_len: (s) => (s.length),
     str_toString: (s) => s,
@@ -787,6 +788,13 @@ const { $rt, $b } = (() => {
     Vec_new: () => [],
     Vec_push(r, x) { r.v.push(x); },
     Vec_extend(r, items) { const v = r.v, s = itemsOf(items); for (let i = 0; i < s.length; i++) v.push(s[i]); },
+    slice_readU64Le(a, at) {
+      const n = Number(at);
+      if (n > a.length || a.length - n < 8) panic(`readU64Le: 8 bytes from ${n} of ${a.length}`);
+      let w = 0n;
+      for (let j = 7; j >= 0; j--) w = (w << 8n) | BigInt(idx(a, n + j));
+      return w;
+    },
     slice_copyFrom(r, src) {
       const a = r.v, s = itemsOf(src);
       if (a.length !== s.length) panic(`copyFrom: ${s.length} elements in place of ${a.length}`);
@@ -1274,6 +1282,15 @@ const { $rt, $b } = (() => {
     $b[t + "_wrappingSub"] = (a, b) => wrap(a - b);
     // The product of two 32-bit numbers can exceed 53 bits: multiplied as BigInts.
     $b[t + "_wrappingMul"] = (a, b) => wrap(Number(BigInt.asIntN(64, BigInt(a) * BigInt(b))));
+  }
+  // Bits of a value of a type of `w` bits, numbers and BigInts alike; `usize` and `isize` have 64,
+  // as natively.
+  const BITS = { i8: 8, u8: 8, i16: 16, u16: 16, i32: 32, u32: 32, isize: 64, usize: 64, i64: 64, u64: 64, i128: 128 };
+  for (const [t, w] of Object.entries(BITS)) {
+    const bits = (x) => BigInt.asUintN(w, BigInt(x)).toString(2);
+    $b[t + "_trailingZeros"] = (x) => { const v = BigInt.asUintN(w, BigInt(x)); return v === 0n ? w : (v & -v).toString(2).length - 1; };
+    $b[t + "_leadingZeros"] = (x) => { const v = BigInt.asUintN(w, BigInt(x)); return v === 0n ? w : w - v.toString(2).length; };
+    $b[t + "_countOnes"] = (x) => bits(x).split("").filter((c) => c === "1").length;
   }
   for (const t of Object.keys(BIGINTS)) {
     const wrap = wraps["wrap_" + t];

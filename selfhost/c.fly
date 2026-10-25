@@ -2525,7 +2525,33 @@ impl Cgen {
       const op = if (key.endsWith("Add")) { "+" } else if (key.endsWith("Sub")) { "-" } else { "*" };
       return #Some(`((${c})(${u})((${u})(${arg(0)}) ${op} (${u})(${arg(1)})))`);
     }
+    // Bits, counted on the unsigned type of the same width.
+    if (key.endsWith("_trailingZeros") || key.endsWith("_leadingZeros") || key.endsWith("_countOnes")) {
+      const t = match (key.indexOf("_")) { #Some(i) => key.slice(0, i), #None => key };
+      const [u, w] = match (t) {
+        "i8" | "u8" => ["uint8_t", 8], "i16" | "u16" => ["uint16_t", 16], "i32" | "u32" => ["uint32_t", 32],
+        "i128" | "u128" => ["unsigned __int128", 128], _ => ["uint64_t", 64],
+      };
+      const x = arg(0);
+      if (w == 128) {
+        return #Some(if (key.endsWith("_trailingZeros")) {
+          `({ unsigned __int128 v_ = (unsigned __int128)(${x}); uint64_t lo_ = (uint64_t)v_, hi_ = (uint64_t)(v_ >> 64); lo_ ? (uint32_t)__builtin_ctzll(lo_) : hi_ ? 64u + (uint32_t)__builtin_ctzll(hi_) : 128u; })`
+        } else if (key.endsWith("_leadingZeros")) {
+          `({ unsigned __int128 v_ = (unsigned __int128)(${x}); uint64_t lo_ = (uint64_t)v_, hi_ = (uint64_t)(v_ >> 64); hi_ ? (uint32_t)__builtin_clzll(hi_) : lo_ ? 64u + (uint32_t)__builtin_clzll(lo_) : 128u; })`
+        } else {
+          `({ unsigned __int128 v_ = (unsigned __int128)(${x}); (uint32_t)(__builtin_popcountll((uint64_t)v_) + __builtin_popcountll((uint64_t)(v_ >> 64))); })`
+        });
+      }
+      return #Some(if (key.endsWith("_trailingZeros")) {
+        `({ uint64_t v_ = (uint64_t)(${u})(${x}); v_ ? (uint32_t)__builtin_ctzll(v_) : ${w}u; })`
+      } else if (key.endsWith("_leadingZeros")) {
+        `({ uint64_t v_ = (uint64_t)(${u})(${x}); v_ ? (uint32_t)__builtin_clzll(v_) - ${64 - w}u : ${w}u; })`
+      } else {
+        `((uint32_t)__builtin_popcountll((uint64_t)(${u})(${x})))`
+      });
+    }
     #Some(match (key) {
+      "slice_readU64Le" => `({ fly_slice s_ = ${arg(0)}; uint64_t at_ = ${arg(1)}; if (at_ > s_.len || s_.len - at_ < 8) fly_panicf("readU64Le: 8 bytes from %llu of %llu", (unsigned long long)at_, (unsigned long long)s_.len); uint64_t w_; memcpy(&w_, (const uint8_t*)s_.ptr + at_, 8); w_; })`,
       "str_asBytes" => `({ fly_str s_ = ${arg(0)}; (fly_slice){ (void*)s_.ptr, s_.len }; })`,
       "str_includes" => `({ uint64_t i_; fly_str_find(${arg(0)}, ${arg(1)}, &i_); })`,
       "str_startsWith" => `fly_str_starts(${arg(0)}, ${arg(1)})`,
@@ -2547,6 +2573,7 @@ impl Cgen {
         `({ fly_vec b_ = ${arg(0)}; fly_utf8_valid((fly_slice){ b_.ptr, b_.len }) ? ${yes} : ({ fly_vec_free(&b_); ${no}; }); })`
       }
       "String_fromUtf8Lossy" => `fly_utf8_lossy(${arg(0)})`,
+      "String_fromUtf8Unchecked" => `({ fly_vec b_ = ${arg(0)}; (fly_String){ (uint8_t*)b_.ptr, b_.len, b_.cap }; })`,
       "parseInt" => {
         const yes = self.some(rt, "v_", span);
         const no = self.none(rt, span);

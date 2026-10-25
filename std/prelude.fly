@@ -407,17 +407,17 @@ impl f32 {
 }
 
 // ---- Integers: arithmetic that wraps instead of panicking on overflow (§5.7) ----
-impl i8 { export function wrappingAdd(self: Self, b: Self): Self; export function wrappingSub(self: Self, b: Self): Self; export function wrappingMul(self: Self, b: Self): Self; }
-impl i16 { export function wrappingAdd(self: Self, b: Self): Self; export function wrappingSub(self: Self, b: Self): Self; export function wrappingMul(self: Self, b: Self): Self; }
-impl i32 { export function wrappingAdd(self: Self, b: Self): Self; export function wrappingSub(self: Self, b: Self): Self; export function wrappingMul(self: Self, b: Self): Self; }
-impl i128 { export function wrappingAdd(self: Self, b: Self): Self; export function wrappingSub(self: Self, b: Self): Self; export function wrappingMul(self: Self, b: Self): Self; }
-impl i64 { export function wrappingAdd(self: Self, b: Self): Self; export function wrappingSub(self: Self, b: Self): Self; export function wrappingMul(self: Self, b: Self): Self; }
-impl isize { export function wrappingAdd(self: Self, b: Self): Self; export function wrappingSub(self: Self, b: Self): Self; export function wrappingMul(self: Self, b: Self): Self; }
-impl u8 { export function wrappingAdd(self: Self, b: Self): Self; export function wrappingSub(self: Self, b: Self): Self; export function wrappingMul(self: Self, b: Self): Self; }
-impl u16 { export function wrappingAdd(self: Self, b: Self): Self; export function wrappingSub(self: Self, b: Self): Self; export function wrappingMul(self: Self, b: Self): Self; }
-impl u32 { export function wrappingAdd(self: Self, b: Self): Self; export function wrappingSub(self: Self, b: Self): Self; export function wrappingMul(self: Self, b: Self): Self; }
-impl u64 { export function wrappingAdd(self: Self, b: Self): Self; export function wrappingSub(self: Self, b: Self): Self; export function wrappingMul(self: Self, b: Self): Self; }
-impl usize { export function wrappingAdd(self: Self, b: Self): Self; export function wrappingSub(self: Self, b: Self): Self; export function wrappingMul(self: Self, b: Self): Self; }
+impl i8 { export function wrappingAdd(self: Self, b: Self): Self; export function wrappingSub(self: Self, b: Self): Self; export function wrappingMul(self: Self, b: Self): Self; export function trailingZeros(self: Self): u32; export function leadingZeros(self: Self): u32; export function countOnes(self: Self): u32; }
+impl i16 { export function wrappingAdd(self: Self, b: Self): Self; export function wrappingSub(self: Self, b: Self): Self; export function wrappingMul(self: Self, b: Self): Self; export function trailingZeros(self: Self): u32; export function leadingZeros(self: Self): u32; export function countOnes(self: Self): u32; }
+impl i32 { export function wrappingAdd(self: Self, b: Self): Self; export function wrappingSub(self: Self, b: Self): Self; export function wrappingMul(self: Self, b: Self): Self; export function trailingZeros(self: Self): u32; export function leadingZeros(self: Self): u32; export function countOnes(self: Self): u32; }
+impl i128 { export function wrappingAdd(self: Self, b: Self): Self; export function wrappingSub(self: Self, b: Self): Self; export function wrappingMul(self: Self, b: Self): Self; export function trailingZeros(self: Self): u32; export function leadingZeros(self: Self): u32; export function countOnes(self: Self): u32; }
+impl i64 { export function wrappingAdd(self: Self, b: Self): Self; export function wrappingSub(self: Self, b: Self): Self; export function wrappingMul(self: Self, b: Self): Self; export function trailingZeros(self: Self): u32; export function leadingZeros(self: Self): u32; export function countOnes(self: Self): u32; }
+impl isize { export function wrappingAdd(self: Self, b: Self): Self; export function wrappingSub(self: Self, b: Self): Self; export function wrappingMul(self: Self, b: Self): Self; export function trailingZeros(self: Self): u32; export function leadingZeros(self: Self): u32; export function countOnes(self: Self): u32; }
+impl u8 { export function wrappingAdd(self: Self, b: Self): Self; export function wrappingSub(self: Self, b: Self): Self; export function wrappingMul(self: Self, b: Self): Self; export function trailingZeros(self: Self): u32; export function leadingZeros(self: Self): u32; export function countOnes(self: Self): u32; }
+impl u16 { export function wrappingAdd(self: Self, b: Self): Self; export function wrappingSub(self: Self, b: Self): Self; export function wrappingMul(self: Self, b: Self): Self; export function trailingZeros(self: Self): u32; export function leadingZeros(self: Self): u32; export function countOnes(self: Self): u32; }
+impl u32 { export function wrappingAdd(self: Self, b: Self): Self; export function wrappingSub(self: Self, b: Self): Self; export function wrappingMul(self: Self, b: Self): Self; export function trailingZeros(self: Self): u32; export function leadingZeros(self: Self): u32; export function countOnes(self: Self): u32; }
+impl u64 { export function wrappingAdd(self: Self, b: Self): Self; export function wrappingSub(self: Self, b: Self): Self; export function wrappingMul(self: Self, b: Self): Self; export function trailingZeros(self: Self): u32; export function leadingZeros(self: Self): u32; export function countOnes(self: Self): u32; }
+impl usize { export function wrappingAdd(self: Self, b: Self): Self; export function wrappingSub(self: Self, b: Self): Self; export function wrappingMul(self: Self, b: Self): Self; export function trailingZeros(self: Self): u32; export function leadingZeros(self: Self): u32; export function countOnes(self: Self): u32; }
 
 // A span of time: `Io.sleep(Duration.ms(250))`.
 export struct Duration { private nanos: u64 }
@@ -601,6 +601,8 @@ impl String {
   export function fromUtf8(bytes: Vec<u8>): Option<String>;
   // The bytes as text, each maximal part of them that begins no UTF-8 sequence U+FFFD.
   export function fromUtf8Lossy(bytes: Vec<u8>): String;
+  // The bytes as text, which they must be: UTF-8, as nothing checks.
+  export function fromUtf8Unchecked(bytes: Vec<u8>): String uses Unsafe;
 }
 impl str {
   // Bytes `lo` to `hi`, which must fall on character boundaries.
@@ -725,6 +727,11 @@ impl<T extends Eq> T[] {
 impl<T extends Copy> T[] {
   // `src`'s elements in place of these, which panics unless there are as many.
   export function copyFrom(self: mut Self, src: readonly T[]): void;
+}
+impl u8[] {
+  // The eight bytes from `at`, as a `u64` little-endian: the first the lowest. Panics unless there
+  // are eight.
+  export function readU64Le(self: readonly Self, at: usize): u64;
 }
 impl<T extends Show> T[] {
   // Each element shown, with `sep` between them: `["a", "b"].join(", ")` is `"a, b"`.

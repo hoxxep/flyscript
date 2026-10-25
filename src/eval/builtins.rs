@@ -625,7 +625,8 @@ impl Interp {
                 Ok(Value::Unit)
             }
             "Hasher.finish" => Ok(Value::Int(a(0).deref().as_int() as u64 as i128)),
-            "String.fromUtf8Lossy" => {
+            // Unchecked natively; here, where text must be UTF-8 to be held at all, checked.
+            "String.fromUtf8Lossy" | "String.fromUtf8Unchecked" => {
                 let bytes: Vec<u8> = with_list(&a(0), |vs| vs.iter().map(|v| v.deref().as_int() as u8).collect());
                 Ok(Value::text(&String::from_utf8_lossy(&bytes)))
             }
@@ -836,6 +837,28 @@ impl Interp {
                     }
                 });
                 Ok(Value::Unit)
+            }
+            "slice.readU64Le" => {
+                let at = a(1).as_int() as usize;
+                let bytes: Vec<u8> = with_list(&a(0), |vs| vs.iter().skip(at).take(8).map(|v| v.as_int() as u8).collect());
+                if bytes.len() < 8 {
+                    let n = with_list(&a(0), |vs| vs.len());
+                    return Err(panic(format!("readU64Le: 8 bytes from {at} of {n}")));
+                }
+                let mut w = [0u8; 8];
+                w.copy_from_slice(&bytes);
+                Ok(Value::Int(u64::from_le_bytes(w) as i128))
+            }
+            k if k.ends_with(".trailingZeros") || k.ends_with(".leadingZeros") || k.ends_with(".countOnes") => {
+                let (ty, op) = k.split_once('.').expect("a method key");
+                let width = int_width(ty);
+                let x = (a(0).as_int() as u128) & if width == 128 { u128::MAX } else { (1u128 << width) - 1 };
+                let r = match op {
+                    "trailingZeros" => x.trailing_zeros().min(width),
+                    "leadingZeros" => x.leading_zeros() - (128 - width),
+                    _ => x.count_ones(),
+                };
+                Ok(Value::Int(r as i128))
             }
             "slice.copyFrom" => {
                 let p = place_of(&a(0))?;
@@ -1252,6 +1275,17 @@ fn merge_sort(it: &mut Interp, v: Vec<Value>, cmp: &Value) -> Result<Vec<Value>,
 }
 
 /// Wraps an integer into the range of the named type, two's complement.
+/// The bits of an integer type.
+fn int_width(ty: &str) -> u32 {
+    match ty {
+        "u8" | "i8" => 8,
+        "u16" | "i16" => 16,
+        "u32" | "i32" => 32,
+        "u128" | "i128" => 128,
+        _ => 64,
+    }
+}
+
 fn wrap_to(ty: &str, i: i128) -> i128 {
     match ty {
         "u8" => i & 0xff,

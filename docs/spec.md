@@ -1,6 +1,6 @@
 # Flyscript
 
-**Language specification, version 0.126**
+**Language specification, version 0.127**
 
 *Affine values, one row calculus, handlers for everything, and `comptime`: Church on the outside, Turing on the inside.*
 
@@ -20,7 +20,7 @@ The whole language rests on five laws. Every rule in this document is a conseque
 
 ### 0.1 Recent changes
 
-This is version 0.126. Its last revisions made a panic end the task it happens in rather than the program, proved it, and compiled every task, handler and generator to a state machine as small as a Rust future:
+This is version 0.127. Its last revisions made a panic end the task it happens in rather than the program, proved it, and compiled every task, handler and generator to a state machine as small as a Rust future:
 
 - **A panic unwinds its task** (0.114 to 0.117). It runs the task's cleanup, as a failure nothing catches would; a spawned task's panic ends that task alone, so a server survives a connection that hits a bug, and a `Mutex` whose holder panics is poisoned. A `Task` cancels one task and says how it ended, and `std/supervise` restarts what crashed. A stack that runs out is a panic of its task; a panic out of a destructor, or in cleanup that a panic is running, ends the program (§5.7, §6.1, §6.2, §12.3).
 - **The proof covers panics** (0.118 to 0.120): every box is dropped exactly once through a panic, a spawned task's panic ends it alone, and a `Mutex` it poisons keeps its state, under every schedule (§9.5).
@@ -32,6 +32,8 @@ This is version 0.126. Its last revisions made a panic end the task it happens i
 - **Handlers and generators as state machines** (0.124): a handler's body that its arm does more after resuming, and a generator, keep across a suspension only what they read again, in a frame of their own, and need no stack of their own; a loop over a generator pulls it item by item (§8.3, §11.3).
 
 - **Tasks as state machines** (0.125): a task that waits keeps only what it reads again, in frames of its own, and no stack; the runtime's waits are calls made again to go on, and native code has no fibers left. Cleanup that waits may run as a panic unwinds, as it may on any other way out (§5.7, §8.2, §8.3, §11.3, §12.1).
+
+- **Words of bits** (0.127): an integer counts its trailing and leading zeros and its ones, a byte slice reads eight of its bytes as one `u64`, and `String.fromUtf8Unchecked` takes bytes known to be UTF-8 as text, performing `Unsafe` ([std.md](std.md)); `std/io` reads a line eight bytes at a time with them.
 
 - **Frames as small as a future's** (0.126): a frame keeps only what is live across a point it stops at, what one point keeps alone shares room with every other point's, and the frame of a function called directly nests in its caller's unless the callee may call it again, so a parked task takes what a parked Rust future does (§11.3).
 

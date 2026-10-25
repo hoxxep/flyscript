@@ -688,6 +688,85 @@ fn panics_unwind_through_split_llvm() {
     }
 }
 
+/// `File.lines` reads lines as splitting on `\n` reads them, one `\r` before it dropped and each
+/// line's bytes made text as Rust's `from_utf8_lossy` makes them, eight bytes at a time or not:
+/// through C, under the sanitizers, and through LLVM, on random lines of every length, of ASCII,
+/// of every width of UTF-8 sequence, of bytes that begin none or end one early, and on a line
+/// longer than what is read ahead, and one without a newline at the end.
+#[test]
+fn reads_lines_as_they_split() {
+    if !has_node() || !has_cc() {
+        return;
+    }
+    let dir = out().join("lines");
+    std::fs::create_dir_all(&dir).unwrap();
+    let pieces: [&[u8]; 13] = [b"a", b"bc", "é".as_bytes(), "€".as_bytes(), "😀".as_bytes(), b"\r", b"\xff", b"\xc3", b"\x80", b"xxxxxxx", b"yyyyyyyy", b"zzzzzzzzz", b"\t"];
+    let mut state: u64 = 11;
+    let mut next = |n: u64| {
+        state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        (state >> 33) % n
+    };
+    let mut data: Vec<u8> = Vec::new();
+    for _ in 0..20000 {
+        for _ in 0..next(24) {
+            data.extend_from_slice(pieces[next(pieces.len() as u64) as usize]);
+        }
+        data.extend_from_slice(if next(5) == 0 { b"\r\n" } else { b"\n" });
+    }
+    data.extend(std::iter::repeat_n(b'q', 70000));
+    data.extend_from_slice("é\ntail without a newline ".as_bytes());
+    data.extend_from_slice(b"\xe2\x82");
+    let path = dir.join("data.txt");
+    std::fs::write(&path, &data).unwrap();
+    let mut lines: Vec<&[u8]> = data.split(|b| *b == b'\n').collect();
+    if lines.last().is_some_and(|l| l.is_empty()) {
+        lines.pop();
+    }
+    let (mut total, mut h) = (0u64, 0u64);
+    for l in &lines {
+        let l = l.strip_suffix(b"\r").unwrap_or(l);
+        let text = String::from_utf8_lossy(l);
+        total += text.len() as u64;
+        for b in text.bytes() {
+            h = (h * 31 + b as u64) % 1_000_000_007;
+        }
+    }
+    let want = format!("{} {total} {h}\n", lines.len());
+    let program = dir.join("lines.fly");
+    std::fs::write(&program, r#"import { println, File } from "std/io";
+export function main(path: str): void uses Io {
+  try {
+    let f = File.open(path);
+    let n: u64 = 0;
+    let total: u64 = 0;
+    let h: u64 = 0;
+    for (const l of f.lines()) {
+      n += 1;
+      total += l.len() as u64;
+      for (const b of l.asStr().bytes()) { h = (h * 31 + b as u64) % 1000000007; }
+    }
+    println(`${n} ${total} ${h}`);
+  } catch (e) { println("failed"); }
+}
+"#).unwrap();
+    let c = dir.join("lines.c");
+    compile(&root().join("selfhost/seed.js"), &program, &c);
+    let exe = dir.join("lines");
+    let built = cc().args(["-std=gnu11", "-O1", "-w", "-fsanitize=address,undefined", "-o"]).arg(&exe).arg(&c).arg("-lm").output().unwrap();
+    assert!(built.status.success(), "{}", String::from_utf8_lossy(&built.stderr));
+    let mut builds = vec![exe];
+    if has_llvm() {
+        let exe = dir.join("lines-llvm");
+        let built = Command::new("sh").arg(root().join("selfhost/llvm.sh")).arg(root().join("selfhost/seed.js")).arg(&program).arg(&exe).output().unwrap();
+        assert!(built.status.success(), "{}{}", String::from_utf8_lossy(&built.stdout), String::from_utf8_lossy(&built.stderr));
+        builds.push(exe);
+    }
+    for exe in builds {
+        let r = Command::new(&exe).arg(&path).env_remove("FLY_WORLD").output().unwrap();
+        assert_eq!(String::from_utf8_lossy(&r.stdout), want, "{}: {}", exe.display(), String::from_utf8_lossy(&r.stderr));
+    }
+}
+
 /// The compiler, compiled through LLVM, compiles itself to the LLVM module, the C beside it, and
 /// the JavaScript the seed makes of it.
 #[test]

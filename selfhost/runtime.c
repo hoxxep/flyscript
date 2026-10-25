@@ -24,13 +24,13 @@
 #endif
 #endif
 
-// A variable of the thread's. On threads it is reached through a call the compiler may neither
-// inline nor reuse: a task may go on on another thread after a call that switched away, and an
-// address computed before the switch would be the old thread's.
+// A variable of the thread's. A call of a function runs on one thread to its end, a task that stops
+// returning from every function it is in and calling them again as it goes on (§11.3), so the
+// variable's address may be computed once in a function and kept.
 #ifdef FLY_THREADS
 #define FLY_THREAD_VAR(T, name, init) \
   static FLY_LOCAL T name##_tls = init; \
-  static __attribute__((noinline)) T* name##_ref(void) { T* p = &name##_tls; __asm__ volatile("" : "+r"(p)); return p; }
+  static inline T* name##_ref(void) { return &name##_tls; }
 #else
 #define FLY_THREAD_VAR(T, name, init) \
   static T name##_tls = init; \
@@ -43,7 +43,7 @@
 static fly_ctx fly_ctx0;
 FLY_THREAD_VAR(fly_ctx*, fly_cur, &fly_ctx0)
 #define fly_cur (*fly_cur_ref())
-__attribute__((noinline)) fly_ctx* fly_cx(void) { return fly_cur; }
+fly_ctx* fly_cx(void) { return fly_cur; }
 // The context as the thread's pointer has it now, for the scheduler, which changes that pointer
 // between tasks: unlike `fly_cx`, never one computed before.
 #define fly_cx_now() (fly_cur)
@@ -5260,11 +5260,13 @@ fly_String fly_utf8_lossy(fly_vec b) {
 }
 
 // Well-formed UTF-8: no overlong forms, surrogates, or code points past U+10FFFF.
+// Each sequence by its first byte, as RFC 3629's table has it: the range its second byte may take,
+// which rules out overlong forms, surrogates and what is past U+10FFFF, and continuation bytes for
+// the rest. ASCII is taken eight bytes at a time.
 bool fly_utf8_valid(fly_slice b) {
   const uint8_t* p = b.ptr;
   size_t i = 0, n = b.len;
   while (i < n) {
-    // Eight bytes of ASCII at a time.
     while (i + 8 <= n) {
       uint64_t w;
       memcpy(&w, p + i, 8);
@@ -5273,20 +5275,29 @@ bool fly_utf8_valid(fly_slice b) {
     }
     if (i >= n) break;
     uint8_t c = p[i];
-    size_t k;
-    uint32_t cp;
     if (c < 0x80) { i++; continue; }
-    else if ((c & 0xe0) == 0xc0) { k = 1; cp = c & 0x1f; }
-    else if ((c & 0xf0) == 0xe0) { k = 2; cp = c & 0x0f; }
-    else if ((c & 0xf8) == 0xf0) { k = 3; cp = c & 0x07; }
-    else return false;
-    if (i + k >= n) return false;
-    for (size_t j = 1; j <= k; j++) {
-      if ((p[i + j] & 0xc0) != 0x80) return false;
-      cp = (cp << 6) | (p[i + j] & 0x3f);
+    if (c >= 0xc2 && c <= 0xdf) {
+      if (i + 1 >= n || (p[i + 1] & 0xc0) != 0x80) return false;
+      i += 2;
+      continue;
     }
-    if ((k == 1 && cp < 0x80) || (k == 2 && cp < 0x800) || (k == 3 && cp < 0x10000)) return false;
-    if (cp > 0x10ffff || (cp >= 0xd800 && cp <= 0xdfff)) return false;
+    size_t k;
+    uint8_t lo = 0x80, hi = 0xbf;
+    if (c >= 0xe0 && c <= 0xef) {
+      k = 2;
+      if (c == 0xe0) lo = 0xa0;
+      else if (c == 0xed) hi = 0x9f;
+    } else if (c >= 0xf0 && c <= 0xf4) {
+      k = 3;
+      if (c == 0xf0) lo = 0x90;
+      else if (c == 0xf4) hi = 0x8f;
+    } else {
+      return false;
+    }
+    if (n - i <= k) return false;
+    if (p[i + 1] < lo || p[i + 1] > hi) return false;
+    if ((p[i + 2] & 0xc0) != 0x80) return false;
+    if (k == 3 && (p[i + 3] & 0xc0) != 0x80) return false;
     i += k + 1;
   }
   return true;
