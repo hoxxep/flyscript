@@ -2374,15 +2374,11 @@ impl Cgen {
         const v = arg(1);
         match (p) {
           #Str => `({ fly_String_push(${arg(0)}, ${v}); (fly_unit)0; })`,
-          _ => {
-            const shown = match (p) {
-              #Bool => `fly_show_bool(${v})`,
-              #F32 | #F64 => `fly_show_f64(${v})`,
-              #U64 | #Usize => `fly_show_u128(${v})`,
-              _ => `fly_show_i128(${v})`,
-            };
-            `({ fly_String n_ = ${shown}; fly_String_push(${arg(0)}, fly_String_as_str(&n_)); fly_String_drop(&n_); (fly_unit)0; })`
-          }
+          #Bool => `({ fly_String_push(${arg(0)}, (${v}) ? fly_str_lit("true", 4) : fly_str_lit("false", 5)); (fly_unit)0; })`,
+          // A number made on the stack, then pushed: nothing allocated but what the string grows by.
+          #F32 | #F64 => `({ fly_push_f64(${arg(0)}, ${v}); (fly_unit)0; })`,
+          #U64 | #Usize => `({ fly_push_u128(${arg(0)}, ${v}); (fly_unit)0; })`,
+          _ => `({ fly_push_i128(${arg(0)}, ${v}); (fly_unit)0; })`,
         }
       }
       "String_asStr" => `fly_String_as_str(${arg(0)})`,

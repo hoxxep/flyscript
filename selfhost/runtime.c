@@ -989,6 +989,25 @@ bool fly_parse_float(fly_str t, double* out) { return fly_rt_parse_float(t.ptr, 
 
 fly_String fly_show_bool(bool v) { return fly_String_from(v ? fly_str_lit("true", 4) : fly_str_lit("false", 5)); }
 
+// A number shown at the end of `s`, as `fly_show_*` shows it, made on the stack first: a template's
+// `${n}` allocates nothing but what the string it is pushed to grows by.
+void fly_push_i128(fly_String* s, fly_i128 v) {
+  uint8_t buf[48];
+  unsigned __int128 m = v < 0 ? (unsigned __int128)0 - (unsigned __int128)v : (unsigned __int128)v;
+  size_t n = (size_t)fly_rt_show_int(v < 0, (uint64_t)(m >> 64), (uint64_t)m, buf);
+  fly_String_push(s, (fly_str){ buf, n });
+}
+void fly_push_u128(fly_String* s, unsigned __int128 v) {
+  uint8_t buf[48];
+  size_t n = (size_t)fly_rt_show_int(false, (uint64_t)(v >> 64), (uint64_t)v, buf);
+  fly_String_push(s, (fly_str){ buf, n });
+}
+void fly_push_f64(fly_String* s, double v) {
+  uint8_t buf[400];
+  size_t n = (size_t)fly_rt_show_f64(v, buf);
+  fly_String_push(s, (fly_str){ buf, n });
+}
+
 #ifndef FLY_FREESTANDING
 // A line written whole, under the stream's lock, so lines from tasks on other cores never mix.
 static void write_line(int fd, fly_str s) {
