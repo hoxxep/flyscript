@@ -193,6 +193,8 @@ A panic inside a `Drop`, or while a panic is already unwinding, ends the program
 
 ## 14. The spec brought up to date
 
+*Done: §0.1 fits on a screen, the full record of revisions is in `docs/history/`, every fragment of code in the spec parses on every build (`tests/examples.rs`), every library signature it quotes is the standard library's, and re-exports work on every back end (`tests/run/reexport.fly`). The audit found the spec's foreign calls running on "a growable segment", which no stack is: a native task's stack is a fixed reservation, and it now has a guard below it, so C that runs past it faults rather than writing over what is mapped below.*
+
 **Goal.** The spec is the product as much as the compiler is, and it should be the clearest statement of a language anyone has written: short where things are simple, exact where they are not, and with nothing that is no longer true. Every claim it makes about what is proved, what is open and what Flyscript gives up should be current.
 
 - `generate` and `next`, primitives since 0.106, in the core calculus of §9.1.

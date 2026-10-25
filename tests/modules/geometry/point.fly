@@ -1,0 +1,10 @@
+export struct Point { x: i64; y: i64; }
+
+impl Point {
+  export function new(x: i64, y: i64): Point { Point { x, y } }
+  export function norm1(self: readonly Self): i64 { abs(self.x) + abs(self.y) }
+}
+
+function abs(n: i64): i64 { if (n < 0) { -n } else { n } }
+
+export function origin(): Point { Point.new(0, 0) }

@@ -171,6 +171,10 @@ impl Parser {
     const start = self.span();
     const exported = self.eatKw("export");
     const kind: ItemKind = if (self.atKw("import") && !exported) {
+      self.bump();
+      self.importItem()
+    } else if (self.at("{") && exported) {
+      // `export { a, b as c } from "m";`, a re-export (§8.1).
       self.importItem()
     } else if (self.at("@")) {
       const [layout, align] = self.layout();
@@ -226,8 +230,8 @@ impl Parser {
     { exported, kind, span: self.since(start) }
   }
 
+  // What follows `import` or a re-export's `export`: `{ a, b as c } from "m";`.
   function importItem(self: mut Self): ItemKind uses Fail<Diagnostic> {
-    self.expectKw("import");
     self.expect("{");
     let names: Vec<[Ident, Ident]> = Vec.new();
     while (!self.at("}")) {

@@ -1,0 +1,16 @@
+// expect: 7
+// expect: 0
+// expect: 12 0
+// A module presents the declarations of the files behind it as its own (§8.1).
+import { println } from "std/io";
+import { Point, zero } from "../modules/geometry";
+import { Shape, area as areaOf } from "../modules/shapes";
+
+export function main(): void uses Io {
+  const p = Point.new(3, -4);
+  println(`${p.norm1()}`);
+  println(`${zero().norm1()}`);
+  const r: Shape = #Rect { w: 3, h: 4 };
+  const d: Shape = #Dot(p);
+  println(`${areaOf(r)} ${areaOf(d)}`);
+}

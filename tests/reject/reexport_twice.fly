@@ -1,0 +1,3 @@
+// error: `zero` is exported twice
+export { origin as zero } from "../modules/geometry/point";
+export function zero(): i64 { 0 }

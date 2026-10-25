@@ -1,0 +1,4 @@
+// error: unknown name `origin`
+// A re-export makes a name the module's export, not a name in its scope: import it to use it.
+export { origin } from "../modules/geometry/point";
+export function f(): i64 { origin().x }

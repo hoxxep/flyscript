@@ -343,6 +343,19 @@ impl Program {
         p
     }
 
+    /// The module an import of module `m` from `from` names.
+    fn import_target(&self, m: usize, from: &str) -> Option<usize> {
+        if is_relative(from) {
+            let dir = Path::new(&self.modules[m].name).parent().unwrap_or(Path::new("")).to_path_buf();
+            self.module_named(&normalize(&dir.join(from)).to_string_lossy())
+        } else if from.starts_with("std/") {
+            self.module_named(from)
+        } else {
+            // A package's module is known by its file, however it was reached.
+            self.module_named(&normalize(&package_file(from)).to_string_lossy())
+        }
+    }
+
     fn add_module(&mut self, name: String, file: String, source: String, is_std: bool, declarations: bool) -> usize {
         let parsed = if declarations { parse_declarations(&source) } else { parse_module(&source) };
         let idx = self.modules.len();
@@ -533,7 +546,29 @@ impl Program {
                 self.known.insert(name, *d);
             }
         }
-        // Pass 2: imports and the prelude.
+        // Pass 2: re-exports, then imports and the prelude. A module exports what it re-exports,
+        // which may be another's re-export in turn, so re-exports are followed until nothing more
+        // is found; the import graph is acyclic, so that ends (§8.1).
+        loop {
+            let mut found = false;
+            for m in 0..self.modules.len() {
+                for item in self.modules[m].ast.items.clone() {
+                    let ItemKind::Import { names, from } = &item.kind else { continue };
+                    let (true, Some(target)) = (item.exported, self.import_target(m, from)) else { continue };
+                    for (n, as_) in names {
+                        if let Some(b) = self.modules[target].exports.get(&n.name).copied()
+                            && !self.modules[m].exports.contains_key(&as_.name)
+                        {
+                            self.modules[m].exports.insert(as_.name.clone(), b);
+                            found = true;
+                        }
+                    }
+                }
+            }
+            if !found {
+                break;
+            }
+        }
         let prelude = self.module_named("std/prelude").expect("prelude");
         let prelude_exports = self.modules[prelude].exports.clone();
         for m in 0..self.modules.len() {
@@ -545,21 +580,18 @@ impl Program {
             let items = self.modules[m].ast.items.clone();
             for item in &items {
                 let ItemKind::Import { names, from } = &item.kind else { continue };
-                let target = if is_relative(from) {
-                    let dir = Path::new(&self.modules[m].name).parent().unwrap_or(Path::new("")).to_path_buf();
-                    self.module_named(&normalize(&dir.join(from)).to_string_lossy())
-                } else if from.starts_with("std/") {
-                    self.module_named(from)
-                } else {
-                    // A package's module is known by its file, however it was reached.
-                    self.module_named(&normalize(&package_file(from)).to_string_lossy())
-                };
-                let Some(target) = target else {
+                let Some(target) = self.import_target(m, from) else {
                     self.error(m, item.span, format!("no module `{from}`"));
                     continue;
                 };
                 for (n, local) in names {
                     match self.modules[target].exports.get(&n.name).copied() {
+                        // A re-exported name is the module's export, not a name in its scope.
+                        Some(b) if item.exported => {
+                            if self.modules[m].exports.get(&local.name) != Some(&b) {
+                                self.error(m, local.span, format!("`{}` is exported twice", local.name));
+                            }
+                        }
                         Some(b) => {
                             self.modules[m].scope.insert(local.name.clone(), b);
                         }

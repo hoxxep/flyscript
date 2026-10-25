@@ -1,0 +1,7 @@
+import { Point } from "./point";
+
+export enum Shape { #Dot(Point), #Rect { w: i64; h: i64 } }
+
+export function area(s: readonly Shape): i64 {
+  match (s) { #Dot(_) => 0, #Rect { w, h } => w * h }
+}

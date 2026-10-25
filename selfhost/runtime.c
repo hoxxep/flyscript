@@ -1888,15 +1888,19 @@ enum { STACK_POOL = 16 };
 typedef struct { void* stacks[STACK_POOL + 1]; int n; } stack_pool_t;
 FLY_THREAD_VAR(stack_pool_t, stack_pool, { 0 })
 #define stack_pool (*stack_pool_ref())
+// Below each stack, a guard no page of which is mapped: Flyscript code checks its stack's limit
+// (§5.7), but C it calls does not, and one that runs past the stack faults here instead of
+// writing over what is mapped below. A multiple of every page size.
+#define FLY_GUARD (64u << 10)
 static void* stack_new(size_t size) {
   if (stack_pool.n > 0) return stack_pool.stacks[--stack_pool.n];
-  void* p = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON | MAP_NORESERVE, -1, 0);
-  if (p == MAP_FAILED) fly_out_of_memory();
-  return p;
+  char* p = mmap(NULL, size + FLY_GUARD, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON | MAP_NORESERVE, -1, 0);
+  if (p == MAP_FAILED || mprotect(p, FLY_GUARD, PROT_NONE) != 0) fly_out_of_memory();
+  return p + FLY_GUARD;
 }
 static void stack_free(void* p, size_t size) {
   if (stack_pool.n < STACK_POOL) stack_pool.stacks[stack_pool.n++] = p;
-  else munmap(p, size);
+  else munmap((char*)p - FLY_GUARD, size + FLY_GUARD);
 }
 #endif
 

@@ -1,0 +1,2 @@
+// error: module `../modules/geometry/point` does not export `abs`
+export { Point, abs } from "../modules/geometry/point";

@@ -1,0 +1,2 @@
+// A re-export of a re-export.
+export { Shape, area } from "./geometry";

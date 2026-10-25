@@ -1,0 +1,3 @@
+// The public face of the files under geometry/: what they export, re-exported, one renamed.
+export { Point, origin as zero } from "./geometry/point";
+export { Shape, area } from "./geometry/shape";

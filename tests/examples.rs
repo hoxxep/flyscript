@@ -1,9 +1,10 @@
-//! Every program in docs/spec.md is mirrored in examples/, and every example must parse.
+//! Every program in docs/spec.md is mirrored in examples/, every example must parse, and so must
+//! every fragment of code the spec shows.
 
 use std::fs;
 use std::path::Path;
 
-use flyscript::syntax::parse_module;
+use flyscript::syntax::{parse_declarations, parse_module};
 
 /// Spec section heading prefix → example file. The appendix and §10.2 are complete modules.
 const PROGRAMS: &[(&str, &str)] = &[
@@ -60,4 +61,38 @@ fn examples_parse() {
             }
         }
     }
+}
+
+/// A fragment parses as a module, as declarations (signatures ending in `;`, as `.d.fly` files are
+/// written), as statements, or as declarations followed by statements: what the spec shows of a
+/// library and then a use of it. `…` marks what a fragment leaves out.
+fn fragment_parses(code: &str) -> bool {
+    let code = code.replace('…', "");
+    let stmts = |s: &str| parse_module(&format!("function f(): void {{\n{s}\n}}\n")).is_ok();
+    let decls = |s: &str| parse_declarations(s).is_ok() || parse_declarations(&format!("{s};")).is_ok();
+    if parse_module(&code).is_ok() || decls(&code) || stmts(&code) {
+        return true;
+    }
+    let lines: Vec<&str> = code.lines().collect();
+    (1..lines.len()).any(|k| decls(&lines[..k].join("\n")) && stmts(&lines[k..].join("\n")))
+}
+
+#[test]
+fn spec_fragments_parse() {
+    let spec = fs::read_to_string(root().join("docs/spec.md")).unwrap();
+    let lines: Vec<&str> = spec.lines().collect();
+    let mut bad = Vec::new();
+    let mut i = 0;
+    while i < lines.len() {
+        if lines[i] == "```ts" {
+            let close = i + 1 + lines[i + 1..].iter().position(|l| *l == "```").expect("closing fence");
+            let code = lines[i + 1..close].join("\n");
+            if !fragment_parses(&code) {
+                bad.push(format!("docs/spec.md:{}", i + 1));
+            }
+            i = close;
+        }
+        i += 1;
+    }
+    assert!(bad.is_empty(), "these fragments do not parse:\n{}", bad.join("\n"));
 }

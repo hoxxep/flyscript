@@ -268,7 +268,12 @@ impl<'a> Parser<'a> {
         let start = self.span();
         let exported = self.eat_kw(Kw::Export);
         let kind = match self.tok() {
-            Tok::Kw(Kw::Import) if !exported => self.import()?,
+            Tok::Kw(Kw::Import) if !exported => {
+                self.bump();
+                self.import()?
+            }
+            // `export { a, b as c } from "m";`, a re-export (§8.1).
+            Tok::Punct("{") if exported => self.import()?,
             Tok::Punct("@") => {
                 let (layout, align) = self.layout()?;
                 let view = self.eat_word("view");
@@ -321,8 +326,8 @@ impl<'a> Parser<'a> {
         Ok(Item { exported, kind, span: self.since(start) })
     }
 
+    /// What follows `import` or a re-export's `export`: `{ a, b as c } from "m";`.
     fn import(&mut self) -> PResult<ItemKind> {
-        self.expect_kw(Kw::Import)?;
         self.expect("{")?;
         let mut names = Vec::new();
         while !self.at("}") {
