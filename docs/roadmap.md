@@ -219,6 +219,8 @@ A panic inside a `Drop`, or while a panic is already unwinding, ends the program
 
 No language change is needed. There was no `async` and no `await`, and there still is none. JavaScript already runs effects as generators, and WebAssembly no longer needs stack switching from its host.
 
+**Progress.** The design is `docs/reviews/2026-10-25-step15-design.md`. Phase A is done (spec 0.124): a `handle`'s body whose arm does more after resuming, and a generator, are state machines on every native back end, with no fiber; suspension is one protocol, a call returning with the task's context pending; every function value takes a slot for its frame and where its yields go, whatever it is; and a loop over a generator pulls it item by item. On the compiler compiling itself it costs nothing, through C or LLVM. Writing it found that the reference and JavaScript never dropped what a generator adapter pulls from once `collect` consumed it, that a loop over a `Gen` value ignored what its producer performs and raises, and that the reference forwarded nothing a `generate`'s producer performs to the code pulling it, nor unwound a body suspended under an arm that panicked. Left for phase B: a `defer` that waits on a handler (now a panic, as no test does), and library routines given code that may suspend other than `Fail.capture` and a generator's `next`.
+
 **Done when:** a parked connection handler costs what the equivalent Rust future costs, within tens of bytes, measured; a million parked tasks fit in the memory a million Rust futures take; nothing that does not suspend runs slower; fibers are gone from the native runtime; and §8.2, §8.3, §11.3 and §12.1 say so.
 
 ## 16. Parity with the runtime it replaced

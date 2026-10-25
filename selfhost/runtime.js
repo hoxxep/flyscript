@@ -217,6 +217,9 @@ const { $rt, $b } = (() => {
     [Symbol.iterator]() { return this; }
   }
   const genOf = (items) => new Gen(new ListOps(items));
+  // A generator done with, by an adapter that has given all it will or by what consumed it: one
+  // left suspended unwinds, running its cleanup (§5.5).
+  function closeGen(g) { if (g.it.return) $b.destructor(() => g.it.return()); }
   // The next item of a generator, or `undefined` once it is done.
   function step(g) {
     const r = g.it.next();
@@ -846,12 +849,12 @@ const { $rt, $b } = (() => {
     *RegionList_each(l) { for (const x of l) yield new Yielded(x); },
 
     Gen_next(r) { const s = step(r.v); return s === undefined ? none() : some(s.item); },
-    Gen_map: (g, f) => new Gen((function* () { for (let s = step(g); s !== undefined; s = step(g)) yield new Yielded(f(s.item)); })()),
-    Gen_filter: (g, keep) => new Gen((function* () { for (let s = step(g); s !== undefined; s = step(g)) if (keep(s.item)) yield s; })()),
-    Gen_take: (g, n) => new Gen((function* () { let i = 0; if (i >= n) return; for (let s = step(g); s !== undefined; s = step(g)) { yield s; if (++i >= n) return; } })()),
-    Gen_zip: (g, h) => new Gen((function* () { for (let s = step(g); s !== undefined; s = step(g)) { const t = step(h); if (t === undefined) return; yield new Yielded([s.item, t.item]); } })()),
-    Gen_enumerate: (g) => new Gen((function* () { let i = 0; for (let s = step(g); s !== undefined; s = step(g)) yield new Yielded([i++, s.item]); })()),
-    Gen_collect(g) { const out = []; for (let s = step(g); s !== undefined; s = step(g)) out.push(s.item); return out; },
+    Gen_map: (g, f) => new Gen((function* () { try { for (let s = step(g); s !== undefined; s = step(g)) yield new Yielded(f(s.item)); } finally { closeGen(g); } })()),
+    Gen_filter: (g, keep) => new Gen((function* () { try { for (let s = step(g); s !== undefined; s = step(g)) if (keep(s.item)) yield s; } finally { closeGen(g); } })()),
+    Gen_take: (g, n) => new Gen((function* () { try { let i = 0; if (i >= n) return; for (let s = step(g); s !== undefined; s = step(g)) { yield s; if (++i >= n) return; } } finally { closeGen(g); } })()),
+    Gen_zip: (g, h) => new Gen((function* () { try { for (let s = step(g); s !== undefined; s = step(g)) { const t = step(h); if (t === undefined) return; yield new Yielded([s.item, t.item]); } } finally { closeGen(g); closeGen(h); } })()),
+    Gen_enumerate: (g) => new Gen((function* () { try { let i = 0; for (let s = step(g); s !== undefined; s = step(g)) yield new Yielded([i++, s.item]); } finally { closeGen(g); } })()),
+    Gen_collect(g) { const out = []; try { for (let s = step(g); s !== undefined; s = step(g)) out.push(s.item); } finally { closeGen(g); } return out; },
     *Gen_each(g) { yield* g.it; },
     Gen_drop(r) { if (r.v.it.return) $b.destructor(() => r.v.it.return()); },
     // A destructor does not unwind (§5.7): a panic that escapes one — a `Drop` impl, or the cleanup
@@ -1213,9 +1216,9 @@ const { $rt, $b } = (() => {
       else answer = yield s.value;
     }
   }
-  $b.Gen_map$g = (g, f) => new Gen(items$g(g, function* (x) { yield new Yielded(yield* body(f, x)); }));
-  $b.Gen_filter$g = (g, keep) => new Gen(items$g(g, function* (x) { if (yield* body(keep, x)) yield new Yielded(x); }));
-  $b.Gen_collect$g = function* (g) { const out = []; yield* items$g(g, function* (x) { out.push(x); }); return out; };
+  $b.Gen_map$g = (g, f) => new Gen((function* () { try { yield* items$g(g, function* (x) { yield new Yielded(yield* body(f, x)); }); } finally { closeGen(g); } })());
+  $b.Gen_filter$g = (g, keep) => new Gen((function* () { try { yield* items$g(g, function* (x) { if (yield* body(keep, x)) yield new Yielded(x); }); } finally { closeGen(g); } })());
+  $b.Gen_collect$g = function* (g) { const out = []; try { yield* items$g(g, function* (x) { out.push(x); }); } finally { closeGen(g); } return out; };
   // Any other builtin, called where its caller may suspend, is the same as a generator.
   for (const k of Object.keys($b)) {
     const f = $b[k];

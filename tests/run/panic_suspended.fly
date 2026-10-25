@@ -1,0 +1,52 @@
+// expect: the generator cleans up
+// expect: <panic in a spawned task: division by zero>
+// expect: the body cleans up
+// expect: <panic in a spawned task: division by zero>
+// expect: main goes on
+// A panic while a generator is suspended in the loop pulling it, or while a handler's body is
+// suspended at an operation its arm runs for, unwinds what is suspended too: its cleanup runs, and
+// nothing is left (§5.7). Each panic ends its spawned task alone.
+import { println } from "std/io";
+
+effect Ask { ask(): i32; }
+
+function items(): void uses Yield<i32>, Io {
+  defer println("the generator cleans up");
+  let held: Vec<String> = Vec.new();
+  held.push("held".toString());
+  yield 1;
+  yield 2;
+}
+
+function pulling(): void uses Io {
+  for (const x of items()) {
+    if (x == 1) {
+      const zero = 0;
+      println(`${10 / zero}`);
+    }
+  }
+}
+
+function asking(): void uses Io {
+  const v = handle {
+    defer println("the body cleans up");
+    let held: Vec<String> = Vec.new();
+    held.push("held".toString());
+    Ask.ask() + Ask.ask()
+  } with Ask {
+    ask() resumes k => {
+      const zero = 0;
+      const r = 1 / zero;
+      k(1) + r
+    }
+  };
+  println(`${v}`);
+}
+
+export function main(): void uses Io {
+  Io.scope((s) => {
+    s.spawn(() => pulling());
+    s.spawn(() => asking());
+  });
+  println("main goes on");
+}

@@ -57,6 +57,7 @@ Versions are pre-1.0 while the language is being designed. The specification was
 
 Each version from 0.55 says in a sentence what it changed, newest first, with the sections of the specification of its day.
 
+- **0.124** compiles a handler's body whose arm does more after resuming, and a generator, to state machines: each keeps across a suspension only what it reads again, in a frame of its own, with no stack of its own, and a loop over a generator pulls it item by item; and drops what a generator adapter pulls from once it is done with it, in the reference and JavaScript as natively (§8.3, §11.3).
 - **0.123** adds re-exports, `export { a, b as c } from "./m";`, by which a package presents one public face over the files behind it (§8.1); moves this record out of §0.1; has every fragment of code in the specification parsed on every build; puts `generate` and `next` in λ-fly's terms (§9.1); says in §12.3 what remains open beyond λ-fly, all of which is proved; and puts a guard below a native task's stack, against C that runs past it (§8.2).
 - **0.122** checks a `defer` where it runs: the block may use what the `defer` uses meanwhile, `mut` included, and what outlives the `defer` as it runs may not hold a borrow it conflicts with, which also rejects a `defer` that replaced what a returned borrow borrows, accepted before (§5.6).
 - **0.121** brings λ-fly's terms and rules up to date with panics that unwind: `panic` is a term, a `defer` runs on a panic's exit too, and a spawned task's panic ends it alone (§9.1, §9.3, §9.4).

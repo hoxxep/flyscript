@@ -33,6 +33,9 @@ export enum LocalKind {
   #Flag,
   // A region's arena.
   #Arena,
+  // The frame of a generator a loop pulls, which the loop's body runs while it is suspended: a
+  // back end makes it, and dropping it unwinds the generator.
+  #Machine,
 }
 
 // A place: a local, or a closure's capture, and the path from it.

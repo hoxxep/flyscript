@@ -1,0 +1,108 @@
+// expect: doubled 36
+// expect: stepped to 6, seeing 6
+// expect: nested 60, noted 1: from inside the inner handle
+// expect: chatty 203, said 2
+// expect: asked gave 10
+// expect: asked gave 20
+// expect: pulled 1
+// expect: pulled 2
+// expect: made 2
+// A handler whose arms do more once they have resumed runs its body as a state machine (§5.3): the
+// body stops at an operation, wherever in the calls it makes, keeping what each call holds, and goes
+// on when its continuation is resumed, which may be after the `handle` has returned.
+import { println } from "std/io";
+
+effect Ask { ask(q: i32): i32; }
+effect Note { note(s: String): void; }
+effect Tick { tick(i: i32): void; }
+
+// An operation deep in calls, each holding something across it.
+function depth(n: i32): i32 uses Ask {
+  if (n == 0) { return 0; }
+  const mine = `level ${n}`;
+  const got = Ask.ask(n);
+  const below = depth(n - 1);
+  mine.len() as i32 + got + below
+}
+
+// The arm adds to what resuming gives, so it runs after the body has gone on.
+function doubled(n: i32): i32 {
+  handle { depth(n) } with Ask { ask(q) resumes k => k(q * 2) + 1 }
+}
+
+// A continuation kept as a value, resumed after its `handle` has returned.
+enum Steps { #Done(i32), #More(i32, Cont<void, Steps, []>) }
+function stepper(): Steps {
+  handle {
+    let total = 0;
+    let i = 1;
+    while (i <= 3) {
+      total += i;
+      Tick.tick(i);
+      i += 1;
+    }
+    #Done(total)
+  } with Tick { tick(i) resumes k => #More(i, k) }
+}
+
+// A body under one handler performing what a handler around takes.
+function nested(): i32 uses Note {
+  handle {
+    Note.note("from inside the inner handle".toString());
+    Ask.ask(5)
+  } with Ask { ask(q) resumes k => { const r = k(q + 1); r * 10 } }
+}
+
+// An arm performing what a handler around takes.
+function chatty(): i32 uses Note {
+  handle { Ask.ask(1) + Ask.ask(2) } with Ask {
+    ask(q) resumes k => {
+      Note.note(`asked ${q}`);
+      const v = k(q);
+      v + 100
+    }
+  }
+}
+
+// A generator whose body runs under a handler: its yields go to the loop pulling it.
+function asked(): void uses Yield<i32> {
+  handle {
+    yield Ask.ask(1);
+    yield Ask.ask(2);
+  } with Ask { ask(q) resumes k => { const r = k(q * 10); r } }
+}
+
+export function main(): void uses Io {
+  println(`doubled ${doubled(3)}`);
+
+  let s = stepper();
+  let seen = 0;
+  while (true) {
+    match (s) {
+      #Done(t) => { println(`stepped to ${t}, seeing ${seen}`); break; }
+      #More(i, k) => { seen += i; s = k(); }
+    }
+  }
+
+  let notes: Vec<String> = Vec.new();
+  const n = handle { nested() } with Note { note(m) resumes k => { const r = k(); notes.push(m); r } };
+  println(`nested ${n}, noted ${notes.len()}: ${notes[0]}`);
+
+  let said: Vec<String> = Vec.new();
+  const c = handle { chatty() } with Note { note(m) resumes k => { said.push(m); const r = k(); r } };
+  println(`chatty ${c}, said ${said.len()}`);
+
+  for (const x of asked()) { println(`asked gave ${x}`); }
+
+  let made: Vec<String> = Vec.new();
+  handle {
+    const g = generate(() => {
+      for (const i of [1, 2]) {
+        Note.note(`making ${i}`);
+        yield i;
+      }
+    });
+    for (const x of g) { println(`pulled ${x}`); }
+  } with Note { note(m) resumes k => { const r = k(); made.push(m); r } };
+  println(`made ${made.len()}`);
+}

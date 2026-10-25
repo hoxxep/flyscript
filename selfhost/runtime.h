@@ -104,7 +104,13 @@ typedef struct fly_unw fly_unw;
 // is. The last two are each fiber's own.
 // And the limit of the stack it runs on now (below), and how deep in destructors it is, from which
 // a panic does not unwind (§5.7): each fiber's own, as the panic is.
-typedef struct fly_ctx { void* err; bool unwinding, stopping; fly_handler* handlers; fly_unw* unw; char* panic; uintptr_t limit; int destroying; } fly_ctx;
+// A frame arena (§11.3): the frames of calls of code that may suspend whose frame is not nested in
+// their caller's, each taken as the call starts and given back as it ends, last first.
+typedef struct fly_frame_chunk fly_frame_chunk;
+typedef struct { char* top; char* end; fly_frame_chunk* chunk; } fly_frames;
+// `pend` says why code returned suspended (FLY_PEND_*), and for whom; `nopend` how deep in code
+// that cannot suspend — cleanup — the task is; `frames` is the arena calls take frames from.
+typedef struct fly_ctx { void* err; bool unwinding; uint8_t pend; fly_handler* handlers; fly_unw* unw; char* panic; uintptr_t limit; int destroying; fly_handler* pend_h; fly_frames* frames; int nopend; } fly_ctx;
 #ifdef FLY_THREADS
 // The context of the task running. Within one call of a function it is always the same, wherever
 // the task goes on, so it is `const`: a compiler may compute it once a call. It is computed afresh
@@ -119,8 +125,8 @@ fly_ctx* (fly_cx)(void);
 #endif
 #define fly_err (fly_cx()->err)
 #define fly_unwinding (fly_cx()->unwinding)
-#define fly_stopping (fly_cx()->stopping)
 #define fly_handlers (fly_cx()->handlers)
+#define fly_pending (fly_cx()->pend)
 #define FLY_FAILED (fly_err != NULL)
 
 // ---- failure ----
@@ -374,11 +380,6 @@ uint64_t fly_Hasher_finish(const fly_Hasher* h);
 
 // ---- generators ----
 
-// What a generator function yields to: a loop's body, called with a pointer to each item, which
-// says whether it wants another. One that does not makes the generator stop: it sets
-// `fly_stopping` and unwinds, and the loop that started it clears it.
-typedef struct { void* env; bool (*fn)(void* env, void* item); } fly_yield;
-
 // A generator pulled for its items: its state, what makes its next item (false at the end), and
 // what drops it. The compiler makes `next` for each kind of item.
 typedef struct { void* st; bool (*next)(void* st, void* out); void (*drop)(void* st); } fly_gen;
@@ -413,17 +414,14 @@ void* fly_box(const void* value, size_t size);
 
 // A fiber: a stack of its own, which runs until it suspends and is resumed where it left off.
 typedef struct fly_fiber fly_fiber;
-// A `handle` running its body on a fiber: the effect it handles, the operation the body performed
-// (-1 for none), where the body keeps that operation's arguments and wants its result, the
-// handlers around it, and the fiber the body is suspended in. A direct one (§5.3) has no fiber.
+// A `handle`: the effect it handles, the operation the body performed (-1 for none), where the body
+// keeps that operation's arguments and wants its result, and the handlers around it.
 struct fly_handler {
   uint32_t effect;
   int op;
   void* args;
   void* result;
   fly_handler* outer;
-  fly_fiber* fiber;
-  fly_fiber* suspended;
   // A direct handler's arms: its body runs where it is, and each operation calls them, given its
   // frame, and returns with the result they give.
   void (*direct)(void* frame, int op, void* args, void* result);
@@ -434,34 +432,57 @@ struct fly_handler {
   bool dying;
   // An arm lets its continuation leave it: the body, dropped, is cut off.
   bool kept;
+  // Its body, a state machine, is suspended by an operation of its own.
+  bool waiting;
 };
 void fly_perform(uint32_t effect, int op, void* args, void* result);
-// Says that an arm of the handler lets its continuation leave it.
-void fly_handle_keep(fly_handler* h);
 // Whether a `handle` of `effect` is around the running code.
 bool fly_handled(uint32_t effect);
 // Cleanup — a `defer`, a destructor — runs to its end however its block is left: what is
 // unwinding past it is set aside while it runs, so its own failures, loops and handlers work,
 // and then goes on.
-typedef struct { void* err; bool unwinding, stopping; } fly_unwind_state;
+typedef struct { void* err; bool unwinding; } fly_unwind_state;
 fly_unwind_state fly_cleanup_begin(void);
 void fly_cleanup_end(fly_unwind_state s);
-// Starts `h`'s body, `entry(arg)`, on a fiber of its own; runs it until it performs `h`'s effect or
-// finishes, as resuming does.
-void fly_handle_start(fly_handler* h, void (*entry)(void*), void* arg);
-void fly_handle_resume(fly_handler* h);
-bool fly_handle_done(const fly_handler* h);
-// Unwinds a suspended body, running its cleanup.
-void fly_handle_unwind(fly_handler* h);
-void fly_handle_free(fly_handler* h);
-
 // A continuation: the frame of the `handle` it resumes, how to resume it with the operation's
 // result, and how to drop it, which unwinds the body.
 typedef struct { void* frame; void* resume; void (*drop)(void* frame); } fly_cont;
 void fly_cont_drop(fly_cont* k);
 
-// `generate(f)`: a generator pulled by running `f` on a fiber until it yields.
-fly_gen fly_generate(fly_fn producer, size_t size);
+
+// ---- code that may suspend, as state machines (§11.3) ----
+// A call that suspends returns with the task's context pending: `pend` says why — an item yielded
+// to what pulls the generator, an operation performed for the handler `pend_h` — and every
+// function between it and the code that takes the suspension returns too, its frame saying where
+// it stopped. Called again with its frame, each goes on from there. A function's frame is nested
+// in its caller's when the caller can say what it is; otherwise the callee takes it from the
+// task's frame arena as it starts, keeping it in a slot its caller holds, and gives it back as it
+// ends.
+enum { FLY_PEND_YIELD = 1, FLY_PEND_PERFORM = 2 };
+void* fly_frame_push(size_t size);
+void fly_frame_pop(void* frame);
+// A machine's frame, from the slot its caller holds: taken from the arena as the machine first starts.
+void* fly_frame_take(void** slot, size_t size);
+void fly_frames_free(fly_frames* a);
+// A suspended machine whose frame is `frame`, dropped: called again unwinding, it runs its
+// cleanup for where it stopped. `call` calls it.
+void fly_machine_unwind(void (*call)(void* env, void* frame), void* env, void* frame);
+// A handler's body runs under it, with the frames of what it calls indirectly in its own arena,
+// for its continuation may outlive the code that started it (§5.3).
+void fly_handle_enter(fly_handler* h, fly_frames* arena, fly_frames** saved);
+void fly_handle_leave(fly_handler* h, fly_frames* saved);
+// Whether the code that returned performed an operation of `h`'s: then it is `h`'s to run.
+bool fly_handle_took(fly_handler* h);
+// A suspended body, dropped, runs its cleanup: what the code dropping it is in the middle of is
+// set aside meanwhile, and a body whose continuation could leave its arm is cut off from every
+// handler (§5.3).
+fly_unwind_state fly_handle_drop_begin(fly_handler* h);
+void fly_handle_drop_end(fly_unwind_state s);
+// The same, for code that passes only pointers: drops `h`'s body, its frame in the slot `bslot`, by
+// calling `run(h)`, under `h` and with the arena of what the body calls, if the body is suspended.
+void fly_handle_drop_m(fly_handler* h, fly_frames* arena, void** bslot, void (*run)(void* h));
+// `generate(f)` over a producer made a state machine: it runs until it yields, and is pulled.
+fly_gen fly_generate_m(fly_fn producer);
 
 // ---- the simulated world and tasks (§6.4) ----
 

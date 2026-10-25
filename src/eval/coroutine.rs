@@ -259,5 +259,13 @@ fn arm(it: &mut Interp, co: u64, name: &str, args: Vec<Value>) -> R {
     let saved = std::mem::replace(&mut it.lex, lex);
     let r = it.home(|i| i.block(&arm.body, &aenv));
     it.lex = saved;
+    // An arm a panic leaves drops its continuation, which cannot have left it: the body, suspended,
+    // unwinds, its cleanup running (§5.7).
+    if let Err(Ctl::Panic(_)) = &r {
+        let held = it.cos.drivers.lock().expect("cos").get(&co).is_some_and(|c| !c.kept);
+        if held {
+            let _ = drop_cont(it, co);
+        }
+    }
     r
 }

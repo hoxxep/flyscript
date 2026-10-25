@@ -1,0 +1,100 @@
+// expect: inner held 3
+// expect: inner cleans up
+// expect: framed sum 0
+// expect: early 0
+// expect: early 1
+// expect: early cleans up
+// expect: search cleans up
+// expect: first over 3: 4
+// expect: failing cleans up
+// expect: stopped at 4
+// expect: got 1
+// expect: broken cleans up
+// expect: broken
+// expect: nested held 2
+// expect: nested cleans up
+// expect: nested held 2
+// expect: nested cleans up
+// expect: nested held 2
+// expect: nested cleans up
+// expect: outer held 3
+// expect: outer cleans up
+// expect: pairs 63
+// expect: pulled cleans up
+// expect: took 3
+// A generator runs until it yields, and goes on when its next item is wanted: whatever it holds
+// across a yield it keeps, and a loop that leaves it suspended — by `break`, `return`, a failure —
+// unwinds it, running its cleanup (§5.5).
+import { println } from "std/io";
+
+function count(from: i32, to: i32, label: str): void uses Yield<i32>, Io {
+  defer println(`${label} cleans up`);
+  let held: Vec<String> = Vec.new();
+  let i = from;
+  while (i < to) {
+    held.push(`${label}${i}`);
+    yield i;
+    i += 1;
+  }
+  println(`${label} held ${held.len()}`);
+}
+
+// Yields what another yields, between its own.
+function framed(n: i32): void uses Yield<i32>, Io {
+  yield -1;
+  count(0, n, "inner");
+  yield -2;
+}
+
+function firstOver(limit: i32): i32 uses Io {
+  for (const x of count(0, 10, "search")) {
+    if (x > limit) { return x; }
+  }
+  -1
+}
+
+function failsAt(n: i32): void uses Io, Fail<#Stop(i32)> {
+  for (const x of count(0, 10, "failing")) {
+    if (x == n) { throw #Stop(x); }
+  }
+}
+
+function brokenGen(): void uses Yield<i32>, Io, Fail<#Broken> {
+  defer println("broken cleans up");
+  yield 1;
+  throw #Broken;
+}
+
+export function main(): void uses Io {
+  let sum = 0;
+  for (const x of framed(3)) { sum += x; }
+  println(`framed sum ${sum}`);
+
+  for (const x of count(0, 5, "early")) {
+    if (x == 2) { break; }
+    println(`early ${x}`);
+  }
+
+  println(`first over 3: ${firstOver(3)}`);
+
+  match (Fail.capture(() => failsAt(4))) {
+    #Ok(_) => println("not stopped"),
+    #Err(#Stop(n)) => println(`stopped at ${n}`),
+  }
+
+  match (Fail.capture(() => { for (const x of brokenGen()) { println(`got ${x}`); } })) {
+    #Ok(_) => println("not broken"),
+    #Err(#Broken) => println("broken"),
+  }
+
+  // Nested loops, each over a generator of its own.
+  let pairs = 0;
+  for (const a of count(0, 3, "outer")) {
+    for (const b of count(0, 2, "nested")) { pairs += a * 10 + b; }
+  }
+  println(`pairs ${pairs}`);
+
+  // A generator made a value, pulled for some of its items and dropped.
+  const g = generate(() => count(100, 200, "pulled"));
+  println(`took ${g.take(3).collect().len()}`);
+}

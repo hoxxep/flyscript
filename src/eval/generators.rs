@@ -16,10 +16,15 @@ use super::value::*;
 
 pub enum Cmd {
     Next,
+    // What an operation the producer performed gave, performed by the consumer.
+    Reply(Value),
 }
 
 pub enum Evt {
     Item(Value),
+    // An operation the producer performed that nothing in it handles: the consumer's handlers take
+    // it, as those around each `next()` do (§5.5).
+    Perform(usize, String, Vec<Value>),
     Done,
     Failed(Value),
     Panicked(String),
@@ -107,7 +112,25 @@ pub fn hand_over(it: &mut Interp, generator: u64, v: Value) -> Result<Value, Ctl
     to.send(Evt::Item(v)).map_err(|_| panic(CANCELLED))?;
     match from.lock().expect("rx").recv() {
         Ok(Cmd::Next) => Ok(Value::Unit),
+        Ok(Cmd::Reply(_)) => Err(panic("a generator was answered where it yielded")),
         // The consumer dropped the generator: unwind it, running its cleanup.
+        Err(_) => Err(panic(CANCELLED)),
+    }
+}
+
+/// On a generator's thread: an operation nothing in the producer handles is the consumer's to
+/// perform; one performed as the producer unwinds after its generator was dropped has no consumer,
+/// and is cancelled, the cleanup unwinding from it (§5.3).
+pub fn forward_perform(it: &mut Interp, generator: u64, effect: usize, op: &str, args: Vec<Value>) -> Result<Value, Ctl> {
+    let (to, from) = {
+        let producers = it.gens.producers.lock().expect("gens");
+        let p = producers.get(&generator).ok_or_else(|| panic("generator gone"))?;
+        (p.to.clone(), p.from.clone())
+    };
+    to.send(Evt::Perform(effect, op.to_string(), args)).map_err(|_| panic(CANCELLED))?;
+    match from.lock().expect("rx").recv() {
+        Ok(Cmd::Reply(v)) => Ok(v),
+        Ok(Cmd::Next) => Err(panic("a generator was pulled where it performed an operation")),
         Err(_) => Err(panic(CANCELLED)),
     }
 }
@@ -129,7 +152,7 @@ pub fn drop_gen(it: &mut Interp, id: u64) {
             drop(to);
             if started {
                 // The producer unwinds on its own thread; wait until it has finished.
-                while let Ok(Evt::Item(_)) = from.lock().expect("rx").recv() {}
+                while let Ok(Evt::Item(_) | Evt::Perform(..)) = from.lock().expect("rx").recv() {}
             }
         }
         Some(GenKind::Map { inner, .. } | GenKind::Filter { inner, .. } | GenKind::Take { inner, .. } | GenKind::Enumerate { inner, .. }) => {
@@ -162,9 +185,19 @@ fn step(it: &mut Interp, kind: &mut GenKind) -> Result<Option<Value>, Ctl> {
                 *kind = GenKind::Done;
                 return Ok(None);
             }
-            let evt = from.lock().expect("rx").recv();
+            let mut evt = from.lock().expect("rx").recv();
+            // What the producer performs on the way to its next item, the consumer performs.
+            while let Ok(Evt::Perform(effect, op, args)) = evt {
+                let v = it.perform_op(effect, &op, args)?;
+                if to.send(Cmd::Reply(v)).is_err() {
+                    *kind = GenKind::Done;
+                    return Ok(None);
+                }
+                evt = from.lock().expect("rx").recv();
+            }
             match evt {
                 Ok(Evt::Item(v)) => Ok(Some(v)),
+                Ok(Evt::Perform(..)) => unreachable!(),
                 Ok(Evt::Done) | Err(_) => {
                     *kind = GenKind::Done;
                     Ok(None)

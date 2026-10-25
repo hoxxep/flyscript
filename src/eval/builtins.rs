@@ -1012,13 +1012,20 @@ impl Interp {
             "Gen.take" => Ok(gens_mod::new_gen(self, GenKind::Take { inner: gens_mod::gen_id(&a(0))?, left: a(1).as_int() as usize })),
             "Gen.zip" => Ok(gens_mod::new_gen(self, GenKind::Zip { a: gens_mod::gen_id(&a(0))?, b: gens_mod::gen_id(&a(1))? })),
             "Gen.enumerate" => Ok(gens_mod::new_gen(self, GenKind::Enumerate { inner: gens_mod::gen_id(&a(0))?, n: 0 })),
+            // Collecting consumes the generator: once it has given its last item, or failed, what
+            // it pulls from is dropped, running a suspended producer's cleanup (§5.5).
             "Gen.collect" => {
                 let id = gens_mod::gen_id(&a(0))?;
                 let mut out = Vec::new();
-                while let Some(v) = gens_mod::next(self, id)? {
-                    out.push(v);
-                }
-                Ok(Value::List(out.into()))
+                let pulled = loop {
+                    match gens_mod::next(self, id) {
+                        Ok(Some(v)) => out.push(v),
+                        Ok(None) => break Ok(()),
+                        Err(e) => break Err(e),
+                    }
+                };
+                gens_mod::drop_gen(self, id);
+                pulled.map(|()| Value::List(out.into()))
             }
             "Gen.each" => {
                 let id = gens_mod::gen_id(&a(0))?;

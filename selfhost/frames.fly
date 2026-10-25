@@ -1,0 +1,46 @@
+// What the native back ends need to compile code that may suspend as state machines (§11.3,
+// docs/reviews/2026-10-25-step15-design.md): which code may suspend, and which of its locals live
+// in its frame across the points it may suspend at.
+//
+// A C function the back ends make — a function instance, a closure, code made apart — that may
+// suspend is a machine: called, it runs until it ends, or returns with its task's context pending,
+// its frame saying where it stopped, and called again with the frame it goes on from there.
+
+import { EffRow } from "./types";
+import { Program } from "./env";
+import { Block, Stmt } from "./ir";
+import { HashSet } from "std/collections";
+
+// Whether code performing `row` may suspend: it yields, or performs an effect a handler takes —
+// anything but failures, regions and raw memory, and, for now, `Io`, which waits on the task's fiber.
+export function pends(p: readonly Program, row: readonly EffRow): bool {
+  row.effs.iter().some((e) => {
+    const name = p.defs[e.def].name.asStr();
+    !(p.modules[p.defs[e.def].module].isStd && (name == "Fail" || name == "Region" || name == "Unsafe" || name == "Io"))
+  })
+}
+
+// The locals of `b` and the blocks in it that are declared in a block around a statement at which
+// the code may suspend, `site` says which: each may hold a value as the code suspends, which it
+// reads again when it goes on, so each lives in the frame. Whether `b` holds such a statement.
+// The blocks of a statement that run as part of the code around it count: a direct `handle`'s body
+// runs where the `handle` is; its arms, a `handle`'s body and arms otherwise, and a `defer`'s body
+// are code apart.
+export function residents(b: readonly Block, site: readonly (s: readonly Stmt) => bool, out: mut HashSet<usize>): bool {
+  let any = false;
+  for (const s of b.stmts) {
+    const here = site(s);
+    const inner = match (s) {
+      #If(_, x, y) | #Loop(_, x, y) | #Try(x, _, y) => {
+        const a = residents(x, site, mut out);
+        residents(y, site, mut out) || a
+      }
+      #Labeled(_, x) | #Block(x) | #Region(_, _, x) | #ForGen(_, _, _, x) => residents(x, site, mut out),
+      #Handle(h) => h.direct && residents(h.body, site, mut out),
+      _ => false,
+    };
+    if (here || inner) { any = true; }
+  }
+  if (any) { for (const l of b.locals) { out.insert(l); } }
+  any
+}

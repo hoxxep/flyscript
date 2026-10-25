@@ -577,6 +577,12 @@ impl Lower {
     out
   }
 
+  // What instance `i` performs.
+  export function instRow(self: readonly Self, i: usize): EffRow {
+    const fid = self.insts[i].fid;
+    substEffs(self.fnEffects(fid), substMap(self.p.fns[fid].scheme.tparams, self.insts[i].args))
+  }
+
   export function concreteRet(self: readonly Self, fid: usize, args: readonly Vec<GArg>): Ty {
     self.resolveAssoc(subst(self.p.fns[fid].scheme.ret, substMap(self.p.fns[fid].scheme.tparams, args)))
   }
@@ -2407,14 +2413,21 @@ impl Lower {
       const g = self.temp(it.clone());
       self.emit(#Let(g, #Use(v)));
       const itemTy = typeArg(it, 0);
-      const errTy = typeArg(it, 1);
-      const fails = match (errTy) { #Union(r) => r.labels.len() > 0 || r.tail != #Closed, #Prim(#Never) | #Error => false, _ => true };
+      // What pulling it performs: what its producer does besides yielding (§5.5).
+      const row: EffRow = match (stripBorrow(it)) {
+        #Named(_, args) => match (args.get(1)) { #Some(#Row(r)) => substEffs(r, self.map), _ => pure() },
+        _ => pure(),
+      };
       self.loops.push({ label: l });
       self.push();
       const gb: Ty = #Borrow(true, Box.new(it.clone()));
       const gp = self.value(#Borrow(true, localPlace(g)), gb.clone());
       const ot = optionTy(itemTy.clone());
-      const o = self.builtinCall("Gen_next", [gp], [gb], ot.clone(), fails, iter.span);
+      const pull: Call = {
+        callee: #Builtin("Gen_next".toString()), args: [gp], params: [gb.clone()], argTys: [gb], ret: ot.clone(), regions: Vec.new(),
+        fails: self.mayFail(row), suspends: self.suspends(row), yields: false, row, targs: Vec.new(), span: iter.span,
+      };
+      const o = self.value(#Call(pull), ot.clone());
       self.nextItem(l, pat, o, ot, itemTy, body);
       const loopBody = self.pop();
       self.loops.pop();

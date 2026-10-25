@@ -53,7 +53,7 @@ fly_ctx* (fly_cx)(void) { return &fly_ctx0; }
 #define fly_cx_now() (&fly_ctx0)
 #endif
 // As LLVM IR reaches its fields (llvm.fly's `cxField`).
-_Static_assert(offsetof(fly_ctx, unwinding) == sizeof(void*) && offsetof(fly_ctx, stopping) == sizeof(void*) + 1 && offsetof(fly_ctx, handlers) == 2 * sizeof(void*), "fly_ctx as LLVM IR reaches it");
+_Static_assert(offsetof(fly_ctx, unwinding) == sizeof(void*) && offsetof(fly_ctx, pend) == sizeof(void*) + 1 && offsetof(fly_ctx, handlers) == 2 * sizeof(void*), "fly_ctx as LLVM IR reaches it");
 
 typedef struct { uint32_t tag; size_t size; uint8_t data[]; } fly_failure;
 
@@ -1709,6 +1709,8 @@ struct fly_fiber {
   char* panic;
   char* panic_in;
   bool done;
+  // The frame arena of what runs on it, made as it is first wanted.
+  fly_frames* frames;
 #ifdef FLY_TSAN
   void* tsan;
 #endif
@@ -1823,6 +1825,8 @@ static void switch_to(fly_fiber* to) {
   cx->panic = to->panic;
   from->destroying = cx->destroying;
   cx->destroying = to->destroying;
+  from->frames = cx->frames;
+  cx->frames = to->frames;
   cur_fiber = to;
   cx->limit = to->limit;
 #if defined(FLY_ASAN)
@@ -1935,6 +1939,7 @@ static void fiber_free(fly_fiber* f) {
   __tsan_destroy_fiber(f->tsan);
 #endif
   stack_free(f->stack, f->size);
+  if (f->frames) { fly_frames_free(f->frames); free(f->frames); }
   free(f);
 }
 
@@ -1964,12 +1969,15 @@ void fly_perform(uint32_t effect, int op, void* args, void* result) {
     cx->handlers = inner;
     return;
   }
+  // The body returns, each of its frames saying where it stopped, to the `handle`'s own code.
   h->op = op;
   h->args = args;
   h->result = result;
   h->from = inner;
-  h->suspended = cur_fiber;
-  switch_to(h->fiber->back);
+  if (cx->nopend) fly_panic("cleanup performs an operation whose handler would suspend it");
+  h->waiting = true;
+  cx->pend = FLY_PEND_PERFORM;
+  cx->pend_h = h;
 }
 
 bool fly_handled(uint32_t effect) {
@@ -1977,55 +1985,6 @@ bool fly_handled(uint32_t effect) {
     if (h->effect == effect) return true;
   }
   return false;
-}
-
-void fly_handle_keep(fly_handler* h) { h->kept = true; }
-
-void fly_handle_start(fly_handler* h, void (*entry)(void*), void* arg) {
-  h->outer = fly_handlers;
-  h->dying = false;
-  h->op = -1;
-  h->fiber = fiber_new(entry, arg, h);
-  h->fiber->back = cur_fiber;
-  switch_to(h->fiber);
-}
-
-// The handler is deep: what else the body performs goes to the handlers around the resumption.
-void fly_handle_resume(fly_handler* h) {
-  h->fiber->back = cur_fiber;
-  h->outer = fly_handlers;
-  h->op = -1;
-  switch_to(h->suspended);
-}
-
-bool fly_handle_done(const fly_handler* h) { return h->fiber->done; }
-
-// Unwinds a suspended body: what the code dropping it is in the middle of — a failure it raises,
-// an unwinding of its own — is set aside meanwhile, so the body's cleanup cannot take it for its
-// own, and then goes on.
-void fly_handle_unwind(fly_handler* h) {
-  if (!h->fiber || h->fiber->done) return;
-  fly_ctx* cx = fly_cx_now();
-  fly_unwind_state saved = { cx->err, cx->unwinding, cx->stopping };
-  cx->err = NULL;
-  cx->unwinding = true;
-  cx->stopping = false;
-  // A body whose continuation could leave its arm, dropped, is cut off from every handler; so is
-  // such a body suspended in this one, taken through an operation of it (§5.3).
-  if (h->kept) h->dying = true;
-  for (fly_handler* x = h->from; x && x != h; x = x->outer) {
-    if (x->kept && x->fiber) x->dying = true;
-  }
-  fly_handle_resume(h);
-  cx = fly_cx_now();
-  cx->err = saved.err;
-  cx->unwinding = saved.unwinding;
-  cx->stopping = saved.stopping;
-}
-
-void fly_handle_free(fly_handler* h) {
-  if (h->fiber) fiber_free(h->fiber);
-  h->fiber = NULL;
 }
 
 #ifdef FLY_FREESTANDING
@@ -2038,18 +1997,18 @@ static void cleaning(int d);
 // the task's first scheduling point after it (§5.6).
 fly_unwind_state fly_cleanup_begin(void) {
   cleaning(1);
-  fly_unwind_state s = { fly_err, fly_unwinding, fly_stopping };
+  fly_cx_now()->nopend++;
+  fly_unwind_state s = { fly_err, fly_unwinding };
   fly_err = NULL;
   fly_unwinding = false;
-  fly_stopping = false;
   return s;
 }
 
 void fly_cleanup_end(fly_unwind_state s) {
   cleaning(-1);
+  fly_cx_now()->nopend--;
   fly_err = s.err;
   fly_unwinding = s.unwinding;
-  fly_stopping = s.stopping;
 }
 
 void fly_cont_drop(fly_cont* k) {
@@ -2057,64 +2016,185 @@ void fly_cont_drop(fly_cont* k) {
   *k = (fly_cont){ 0 };
 }
 
-// ---- `generate` ----
+// ---- code that may suspend, as state machines ----
 
-// The producer runs under a handler of nothing, whose outer handlers are those around each
-// `next()`, so what else it performs goes to them.
+// A chunk of a frame arena: frames are taken from its end, and a chunk too small for the next is
+// followed by another, given back once nothing in it is.
+struct fly_frame_chunk { fly_frame_chunk* prev; char* end; _Alignas(16) char data[]; };
+enum { FRAME_CHUNK = 4096 };
+
+void* fly_frame_push(size_t size) {
+  fly_ctx* cx = fly_cx_now();
+  if (!cx->frames) cx->frames = calloc(1, sizeof(fly_frames));
+  fly_frames* a = cx->frames;
+  size = (size + 15) & ~(size_t)15;
+  if (!a->chunk || (size_t)(a->end - a->top) < size) {
+    size_t n = size > FRAME_CHUNK ? size : FRAME_CHUNK;
+    fly_frame_chunk* c = fly_alloc(sizeof(fly_frame_chunk) + n);
+    c->prev = a->chunk;
+    c->end = c->data + n;
+    a->chunk = c;
+    a->top = c->data;
+    a->end = c->end;
+  }
+  void* p = a->top;
+  a->top += size;
+  *(uint32_t*)p = 0;
+  return p;
+}
+
+void* fly_frame_take(void** slot, size_t size) {
+  if (!*slot) *slot = fly_frame_push(size);
+  return *slot;
+}
+
+void fly_frame_pop(void* frame) {
+  fly_frames* a = fly_cx_now()->frames;
+  char* p = frame;
+  while (a->chunk && !(p >= a->chunk->data && p < a->chunk->end)) {
+    fly_frame_chunk* c = a->chunk;
+    a->chunk = c->prev;
+    free(c);
+    if (a->chunk) a->end = a->chunk->end;
+  }
+  a->top = p;
+}
+
+void fly_frames_free(fly_frames* a) {
+  while (a->chunk) {
+    fly_frame_chunk* c = a->chunk;
+    a->chunk = c->prev;
+    free(c);
+  }
+  a->top = a->end = NULL;
+}
+
+void fly_machine_unwind(void (*call)(void* env, void* frame), void* env, void* frame) {
+  fly_ctx* cx = fly_cx_now();
+  fly_unwind_state saved = { cx->err, cx->unwinding };
+  cx->err = NULL;
+  cx->unwinding = true;
+  call(env, frame);
+  cx = fly_cx_now();
+  cx->err = saved.err;
+  cx->unwinding = saved.unwinding;
+}
+
+void fly_handle_enter(fly_handler* h, fly_frames* arena, fly_frames** saved) {
+  fly_ctx* cx = fly_cx_now();
+  h->outer = cx->handlers;
+  h->op = -1;
+  h->waiting = false;
+  cx->handlers = h;
+  *saved = cx->frames;
+  cx->frames = arena;
+}
+
+void fly_handle_leave(fly_handler* h, fly_frames* saved) {
+  fly_ctx* cx = fly_cx_now();
+  cx->handlers = h->outer;
+  cx->frames = saved;
+}
+
+bool fly_handle_took(fly_handler* h) {
+  fly_ctx* cx = fly_cx_now();
+  if (cx->pend != FLY_PEND_PERFORM || cx->pend_h != h) return false;
+  cx->pend = 0;
+  cx->pend_h = NULL;
+  return true;
+}
+
+fly_unwind_state fly_handle_drop_begin(fly_handler* h) {
+  fly_ctx* cx = fly_cx_now();
+  fly_unwind_state saved = { cx->err, cx->unwinding };
+  cx->err = NULL;
+  cx->unwinding = true;
+  if (h->kept) h->dying = true;
+  for (fly_handler* x = h->from; x && x != h; x = x->outer) {
+    if (x->kept && x->waiting) x->dying = true;
+  }
+  return saved;
+}
+
+void fly_handle_drop_end(fly_unwind_state s) {
+  fly_ctx* cx = fly_cx_now();
+  cx->err = s.err;
+  cx->unwinding = s.unwinding;
+}
+
+void fly_handle_drop_m(fly_handler* h, fly_frames* arena, void** bslot, void (*run)(void* h)) {
+  if (!*bslot) return;
+  fly_unwind_state u = fly_handle_drop_begin(h);
+  fly_frames* saved;
+  fly_handle_enter(h, arena, &saved);
+  run(h);
+  fly_handle_leave(h, saved);
+  fly_handle_drop_end(u);
+}
+
+// `generate(f)`, its producer a state machine: its frame, and the frames of what it calls
+// indirectly, are the generator's own, in an arena of its own, for the generator outlives the
+// code pulling it at any one time.
 typedef struct {
-  fly_handler h;
   fly_fn producer;
-  size_t size;
-  void* out;
-  bool started;
-  uint8_t item[];
-} fly_generated;
+  void* frame;
+  fly_frames arena;
+  bool done;
+} fly_generated_m;
 
-static bool generated_yield(void* env, void* item) {
-  fly_generated* g = env;
-  memcpy(g->out, item, g->size);
-  g->h.suspended = cur_fiber;
-  g->h.op = 0;
-  switch_to(g->h.fiber->back);
-  return !fly_unwinding;
-}
+typedef fly_unit (*producer_m)(void* env, void** slot, void* out);
 
-static void generated_run(void* arg) {
-  fly_generated* g = arg;
-  ((fly_unit (*)(void*, fly_yield))g->producer.fn)(g->producer.env, (fly_yield){ g, generated_yield });
-}
-
-static bool generated_next(void* st, void* out) {
-  fly_generated* g = st;
-  if (g->started && g->h.fiber->done) return false;
-  g->out = out;
-  g->h.op = -1;
-  if (!g->started) {
-    g->started = true;
-    g->h.effect = UINT32_MAX;
-    fly_handle_start(&g->h, generated_run, g);
-  } else {
-    fly_handle_resume(&g->h);
+static bool generated_m_next(void* st, void* out) {
+  fly_generated_m* g = st;
+  if (g->done) return false;
+  fly_ctx* cx = fly_cx_now();
+  fly_frames* saved = cx->frames;
+  cx->frames = &g->arena;
+  ((producer_m)g->producer.fn)(g->producer.env, &g->frame, out);
+  cx = fly_cx_now();
+  cx->frames = saved;
+  if (cx->pend == FLY_PEND_YIELD) {
+    cx->pend = 0;
+    return true;
   }
-  return !g->h.fiber->done;
+  // Suspended for something else, which goes on to the code pulling it; or ended.
+  if (cx->pend) return false;
+  g->done = true;
+  return false;
 }
 
-static void generated_drop(void* st) {
-  fly_generated* g = st;
-  if (g->started) {
-    fly_handle_unwind(&g->h);
-    fly_handle_free(&g->h);
+static void generated_m_unwind(void* env, void* frame) {
+  fly_generated_m* g = env;
+  (void)frame;
+  ((producer_m)g->producer.fn)(g->producer.env, &g->frame, NULL);
+}
+
+static void generated_m_drop(void* st) {
+  fly_generated_m* g = st;
+  if (g->frame) {
+    // A generator dropped is cut off from every handler: what its cleanup performs is cancelled,
+    // the cleanup unwinding from it (§5.3).
+    fly_ctx* cx = fly_cx_now();
+    fly_handler barrier = { .effect = UINT32_MAX, .dying = true, .outer = cx->handlers };
+    fly_handler* outer = cx->handlers;
+    cx->handlers = &barrier;
+    fly_frames* saved = cx->frames;
+    cx->frames = &g->arena;
+    fly_machine_unwind(generated_m_unwind, g, g->frame);
+    cx = fly_cx_now();
+    cx->frames = saved;
+    cx->handlers = outer;
   }
+  fly_frames_free(&g->arena);
   fly_fn* f = &g->producer;
   if (f->drop) f->drop(f->env);
   free(g);
 }
 
-fly_gen fly_generate(fly_fn producer, size_t size) {
-  fly_generated* g = fly_alloc(sizeof(fly_generated) + size);
-  g->producer = producer;
-  g->size = size;
-  return (fly_gen){ g, generated_next, generated_drop };
+fly_gen fly_generate_m(fly_fn producer) {
+  fly_generated_m* g = fly_alloc(sizeof(fly_generated_m));
+  *g = (fly_generated_m){ .producer = producer };
+  return (fly_gen){ g, generated_m_next, generated_m_drop };
 }
 
 #ifndef FLY_FREESTANDING
@@ -3334,7 +3414,8 @@ void fly_task_drop(void* h) {
 void fly_task_void(void* task, void* closure) {
   (void)task;
   fly_fn* f = closure;
-  ((fly_unit (*)(void*))f->fn)(f->env);
+  void* slot = NULL;
+  ((fly_unit (*)(void*, void**, void*))f->fn)(f->env, &slot, NULL);
   if (f->drop) f->drop(f->env);
   free(f);
 }

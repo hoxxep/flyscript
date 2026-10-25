@@ -635,6 +635,11 @@ impl Interp {
             if self.prog.known.get("Io") == Some(&effect) {
                 return self.root_io(op, args);
             }
+            // On a generator's thread, the effect is the consumer's (§5.5).
+            if let Some(Handler::GenYield { generator }) = self.handlers.first() {
+                let generator = *generator;
+                return super::generators::forward_perform(self, generator, effect, op, args);
+            }
             return Err(panic(format!("unhandled effect `{}`", self.prog.defs[effect].name)));
         };
         let Handler::User { id, arms, env, lex, .. } = self.handlers[pos].clone() else { unreachable!() };
