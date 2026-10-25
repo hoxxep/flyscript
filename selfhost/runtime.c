@@ -3085,8 +3085,8 @@ static void mt_run(void (*main)(void**), void (*entry)(void* task, void* closure
 static void mt_point(fly_wait* w);
 static void mt_cleaning(int d);
 static void mt_sleep(fly_wait* w, uint64_t nanos);
-static int mt_spawn(fly_wait* w, int scope, void (*entry)(void* task, void* closure, void** slot), const fly_fn* f, size_t size);
-static void* mt_task_spawn(fly_wait* w, int scope, const fly_fn* f);
+static int mt_spawn(fly_wait* w, int scope, void (*entry)(void* task, void* closure, void** slot), const fly_fn* f, size_t size, size_t frame);
+static void* mt_task_spawn(fly_wait* w, int scope, const fly_fn* f, size_t frame);
 static void mt_task_cancel(void* h);
 static int32_t mt_task_wait(fly_wait* w, void* h, fly_String* message);
 static size_t mt_task_any(fly_wait* w, void* const* ts, size_t n);
@@ -3406,11 +3406,13 @@ void fly_tasks_run(void (*main)(void**)) {
   if (t0->error) fly_err = t0->error;
 }
 
-// Starts a task of `entry`, given a copy of the closure at `f`, made as it is first called.
-int fly_spawn(fly_wait* w, int scope, void (*entry)(void* task, void* closure, void** slot), const fly_fn* f, size_t size) {
+// Starts a task of `entry`, given a copy of the closure at `f`, made as it is first called; its
+// root frame is `frame` bytes, if that is known, or 0 (`mt_start`).
+int fly_spawn(fly_wait* w, int scope, void (*entry)(void* task, void* closure, void** slot), const fly_fn* f, size_t size, size_t frame) {
 #ifdef FLY_THREADS
-  if (threads) return mt_spawn(w, scope, entry, f, size);
+  if (threads) return mt_spawn(w, scope, entry, f, size, frame);
 #endif
+  (void)frame;
   int64_t r = 0;
   W_BEGIN(w)
   ASK(w, r, REQ_SPAWN, scope, 1, new_task(entry, NULL, f, size), 0);
@@ -3420,10 +3422,11 @@ int fly_spawn(fly_wait* w, int scope, void (*entry)(void* task, void* closure, v
 
 // ---- `Task` (§6.1): a spawned task's record, which its `Task`s refer to ----
 
-void* fly_task_spawn(fly_wait* w, int scope, const fly_fn* f) {
+void* fly_task_spawn(fly_wait* w, int scope, const fly_fn* f, size_t frame) {
 #ifdef FLY_THREADS
-  if (threads) return mt_task_spawn(w, scope, f);
+  if (threads) return mt_task_spawn(w, scope, f, frame);
 #endif
+  (void)frame;
   int64_t r = 0;
   W_BEGIN(w)
   w->p[0] = new_task(fly_task_void, NULL, f, 0);
@@ -3951,6 +3954,10 @@ static struct mt_join* mt_join_of(mt_task* t) {
   free(made);
   return j;
 }
+
+// The largest root frame a task's allocation holds; a larger one is taken from its arena, so that a
+// `Task` kept long after its task has ended does not keep a large frame with it.
+#define FLY_FRAME_INLINE 1024
 
 // A forked task's entry, and its result, of `size` bytes, after its record.
 struct mt_fork { void (*entry)(void* task, void* closure, void** slot); uint32_t size; _Alignas(16) char result[]; };
@@ -4965,11 +4972,18 @@ static void mt_run(void (*main)(void**), void (*entry)(void* task, void* closure
 // ---- what compiled code calls, without a simulated world ----
 
 // A task started in scope `scope`, which itself and its scope refer to, and `refs` more; `handles`
-// `Task`s, set before any other worker can see it.
-static mt_task* mt_start(int scope, void (*entry)(void* task, void* closure, void** slot), const fly_fn* f, size_t size, int refs, int handles) {
+// `Task`s, set before any other worker can see it. A forked task's tail (`mt_fork`) follows its
+// record, and then, if its size is known, its root machine's frame, as one allocation: its slot
+// says so by its low bit, as a frame nested in its caller's does, so that the machine neither takes
+// it from the arena nor gives it back (`fly_frame_take`).
+static mt_task* mt_start(int scope, void (*entry)(void* task, void* closure, void** slot), const fly_fn* f, size_t size, size_t frame, int refs, int handles) {
   mt_scope* sc = obj_get(scope);
   bool forked = entry != fly_task_void;
-  mt_task* t = fly_alloc(forked ? MT_FORK_AT + sizeof(struct mt_fork) + size : sizeof(mt_task));
+  size_t own = forked ? MT_FORK_AT + sizeof(struct mt_fork) + size : sizeof(mt_task);
+  if (frame > FLY_FRAME_INLINE) frame = 0;
+  size_t at = frame ? (own + 15) & ~(size_t)15 : own;
+  mt_task* t = fly_alloc(at + frame);
+  if (frame) t->slot = (void*)((uintptr_t)((char*)t + at) | 1);
   if (forked) {
     mt_fork_of(t)->entry = entry;
     mt_fork_of(t)->size = (uint32_t)size;
@@ -4993,19 +5007,19 @@ static mt_task* mt_start(int scope, void (*entry)(void* task, void* closure, voi
   return t;
 }
 
-static int mt_spawn(fly_wait* w, int scope, void (*entry)(void* task, void* closure, void** slot), const fly_fn* f, size_t size) {
+static int mt_spawn(fly_wait* w, int scope, void (*entry)(void* task, void* closure, void** slot), const fly_fn* f, size_t size, size_t frame) {
   // A forked task's `Fiber` refers to it too, by its number.
-  if (w->step == 0) w->n = obj_new(mt_start(scope, entry, f, size, 1, 0));
+  if (w->step == 0) w->n = obj_new(mt_start(scope, entry, f, size, frame, 1, 0));
   mt_point(w);
   return w->n;
 }
 
 // ---- `Task`, with threads ----
 
-static void* mt_task_spawn(fly_wait* w, int scope, const fly_fn* f) {
+static void* mt_task_spawn(fly_wait* w, int scope, const fly_fn* f, size_t frame) {
   // Its `Task`s share one reference.
   if (w->step == 0) {
-    w->p[1] = mt_start(scope, fly_task_void, f, 0, 1, 1);
+    w->p[1] = mt_start(scope, fly_task_void, f, 0, frame, 1, 1);
   }
   mt_point(w);
   return w->p[1];

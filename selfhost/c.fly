@@ -22,7 +22,7 @@ import {
 } from "./lower";
 import {
   Local, LocalKind, Place, Root, Proj, ProjKind, Operand, Constant, Rvalue, Capture, Call, Callee, Stmt, Handle, Arm, Block,
-  Cleanup, Func, ConstValue, MainArg, Uses, ownedIn, useBlock,
+  Cleanup, Func, ConstValue, MainArg, Uses, ownedIn, useBlock, closuresIn,
 } from "./ir";
 import { pends, residents, waitsInCleanup } from "./frames";
 import { HashMap, HashSet } from "std/collections";
@@ -391,6 +391,11 @@ export struct Cgen {
   drops: HashMap<String, String>;
   // By type: whether dropping a value of it may drop another of it (`holdsItself`).
   selfHolding: HashMap<String, bool>;
+  // The locals of the function being printed that are given a closure as it is made, and which
+  // (`closuresIn`); and whether a machine's frame size is written as the mark the LLVM back end
+  // fills in once the program is put together (`rootFrame`), for code of its companion C.
+  closureOf: HashMap<usize, usize>;
+  frameMarks: bool;
   // Their forms taking `void*`, for the runtime.
   anyDrops: HashSet<String>;
   dropCode: String;
@@ -2861,7 +2866,7 @@ impl Cgen {
     // The type of what a channel's end carries.
     const carried = match (c.argTys.first()) { #Some(t) => typeArg(stripBorrow(t), 0), #None => #Error };
     #Some(match (key) {
-      "Scope_spawn" => `({ int* s_ = ${arg(0)}; fly_fn f_ = ${arg(1)}; fly_task_spawn(${WAIT}, *s_, &f_); })`,
+      "Scope_spawn" => `({ int* s_ = ${arg(0)}; fly_fn f_ = ${arg(1)}; fly_task_spawn(${WAIT}, *s_, &f_, ${self.rootFrame(c.args[1])}); })`,
       "Task_cancel" => `({ fly_task_cancel(${arg(0)}); (fly_unit)0; })`,
       "Task_wait" => {
         const tc = self.ctype(rt, span);
@@ -2884,7 +2889,7 @@ impl Cgen {
             n
           }
         };
-        `({ int* s_ = ${arg(0)}; fly_fn f_ = ${arg(1)}; int t_ = fly_spawn(${WAIT}, *s_, ${entry}, &f_, sizeof(${tc})); t_; })`
+        `({ int* s_ = ${arg(0)}; fly_fn f_ = ${arg(1)}; int t_ = fly_spawn(${WAIT}, *s_, ${entry}, &f_, sizeof(${tc}), ${self.rootFrame(c.args[1])}); t_; })`
       }
       "Fiber_join" => {
         const tc = self.ctype(rt, span);
@@ -3990,6 +3995,18 @@ impl Cgen {
     }
   }
 
+  // The size of the frame of the closure a task is started with, which the task's allocation then
+  // holds, if it is known here — the closure was made in this function, as `s.spawn(() => …)`
+  // makes it — and the closure is a machine; or 0, and its frame is taken as it first runs.
+  export function rootFrame(self: readonly Self, op: readonly Operand): String {
+    const p = match (op) { #Move(p) | #Copy(p) => p, _ => return "0".toString() };
+    if (p.path.len() > 0) { return "0".toString(); }
+    const l = match (p.root) { #Local(l) => l, _ => return "0".toString() };
+    const k = match (self.closureOf.get(l)) { #Some(k) => k + 0, #None => return "0".toString() };
+    if (!pends(self.lw.p, self.lw.closures[k].row)) { return "0".toString(); }
+    if (self.frameMarks) { `\u{2}Slam_${k}__fly\u{2}` } else { `sizeof(lam_${k}_fr)` }
+  }
+
   // A function instance as a value: a closure with no environment.
   function fnValue(self: mut Self, i: usize, span: Span): String uses Fail<Diagnostic> {
     const fid = self.lw.insts[i].fid;
@@ -4058,6 +4075,8 @@ impl Cgen {
   // Function instance `i`, lowered as `f`.
   function emit(self: mut Self, i: usize, f: Func): void uses Fail<Diagnostic> {
     self.fnName = f.name.clone();
+    self.closureOf = HashMap.new();
+    closuresIn(f.body, mut self.closureOf);
     self.cx = newCtx(f.locals.clone(), f.ret.clone(), #Fn);
     let params: Vec<String> = Vec.new();
     let inits = String.new();
@@ -4096,6 +4115,8 @@ impl Cgen {
   function emitClosure(self: mut Self, k: usize): void uses Fail<Diagnostic> {
     const f = self.lw.closures[k].clone();
     self.fnName = f.name.clone();
+    self.closureOf = HashMap.new();
+    closuresIn(f.body, mut self.closureOf);
     self.module = f.module;
     self.cx = newCtx(f.locals.clone(), f.ret.clone(), #Fn);
     self.cx.envType = `env_${k}*`;
@@ -4349,7 +4370,7 @@ impl Cgen {
 export function newCgen(p: Prog): Cgen {
   Cgen {
     lw: newLower(p), closuresDone: 0, types: HashMap.new(), defined: HashSet.new(), pending: Vec.new(), typeFwd: String.new(),
-    typeDefs: String.new(), tags: HashMap.new(), drops: HashMap.new(), selfHolding: HashMap.new(), anyDrops: HashSet.new(), dropCode: String.new(), convs: HashMap.new(),
+    typeDefs: String.new(), tags: HashMap.new(), drops: HashMap.new(), selfHolding: HashMap.new(), closureOf: HashMap.new(), frameMarks: false, anyDrops: HashSet.new(), dropCode: String.new(), convs: HashMap.new(),
     helpers: HashMap.new(), consts: HashMap.new(), protos: String.new(), fnCode: Vec.new(), lowered: 0, apartCode: String.new(), aparts: 0,
     tmp: 0, freestanding: false, callees: HashMap.new(), indirect: HashSet.new(), machines: HashSet.new(), frames: HashMap.new(), frameOrder: Vec.new(), nests: Vec.new(), cx: newCtx(Vec.new(), #Prim(#Void), #Fn), module: 0, defers: HashMap.new(), fnName: String.new(),
     argPlaces: Vec.new(), glue: String.new(),

@@ -280,6 +280,24 @@ export function ownedIn(b: readonly Block, out: mut HashSet<usize>): void {
   }
 }
 
+// The locals a block, or a block in it, gives a closure as it is made, and the closure each holds:
+// what a call it is given to may know of its code, a task's root frame among it.
+export function closuresIn(b: readonly Block, out: mut HashMap<usize, usize>): void {
+  for (const c of b.cleanups) { if (const #Defer(_, d) = c) { closuresIn(d, mut out); } }
+  for (const s of b.stmts) {
+    match (s) {
+      #Let(l, #Closure(k, _, _)) => { out.insert(l, k); }
+      #If(_, x, y) => { closuresIn(x, mut out); closuresIn(y, mut out); }
+      #Loop(_, x, y) => { closuresIn(x, mut out); closuresIn(y, mut out); }
+      #Labeled(_, x) | #Block(x) | #Region(_, _, x) => closuresIn(x, mut out),
+      #Try(x, _, y) => { closuresIn(x, mut out); closuresIn(y, mut out); }
+      #ForGen(_, _, _, x) => closuresIn(x, mut out),
+      #Handle(h) => { closuresIn(h.body, mut out); for (const a of h.arms) { closuresIn(a.body, mut out); } }
+      _ => {}
+    }
+  }
+}
+
 // The locals and captures code uses.
 export type Uses = { locals: HashSet<usize>; captures: HashSet<usize> };
 

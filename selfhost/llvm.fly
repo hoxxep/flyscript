@@ -21,7 +21,7 @@ import { Program as Prog } from "./env";
 import { Entry, stripBorrow, typeArg, ckey, mangle, unitTy, isVoidTy } from "./lower";
 import {
   Local, LocalKind, Place, Root, Proj, ProjKind, Operand, Constant, Rvalue, Capture, Call, Callee, Stmt, Handle, Arm, Block,
-  Cleanup, Func, Uses, ownedIn, useBlock,
+  Cleanup, Func, Uses, ownedIn, useBlock, closuresIn,
 } from "./ir";
 import { Cgen, newCgen, cquote, checking, pruneChecks, reaches, unmark, WAIT } from "./c";
 import { pends, residents, waitsInCleanup } from "./frames";
@@ -3735,6 +3735,8 @@ impl Lgen {
   function emit(self: mut Self, i: usize, f: Func): void uses Fail<Diagnostic> {
     self.fnName = f.name.clone();
     self.cx = newCtx(f.locals.clone(), f.ret.clone(), #Fn);
+    self.c.closureOf = HashMap.new();
+    closuresIn(f.body, mut self.c.closureOf);
     const shown = self.c.lw.p.fns[self.c.lw.insts[i].fid].name.clone();
     self.subprogram(shown.asStr(), `${f.name}__fly`.asStr(), f.span);
     let ps: Vec<String> = Vec.new();
@@ -3760,6 +3762,8 @@ impl Lgen {
   function emitClosure(self: mut Self, k: usize): void uses Fail<Diagnostic> {
     const f = self.c.lw.closures[k].clone();
     self.fnName = f.name.clone();
+    self.c.closureOf = HashMap.new();
+    closuresIn(f.body, mut self.c.closureOf);
     self.module = f.module;
     const [offsets, _, _] = self.envLayout(k, f.span);
     self.cx = newCtx(f.locals.clone(), f.ret.clone(), #Fn);
@@ -3841,7 +3845,7 @@ impl Lgen {
     glue.push(self.glueCode.asStr());
     glue.push(self.asserts.asStr());
     self.c.glue = glue;
-    const cfile = self.c.assemble(ent, uncaught, runtime);
+    const cfile0 = self.c.assemble(ent, uncaught, runtime);
     let ll = "; The program's code, as LLVM IR: linked with its companion C file before it is optimized.\n\n".toString();
     // `SIZE` is C's `size_t`.
     ll.push(DECLS.replaceAll("SIZE", sizeTy(self.ptr)).asStr());
@@ -3880,6 +3884,8 @@ impl Lgen {
       marks.insert(`S${k}`, `${z}`);
     }
     ll.push(unmark(pruneChecks(self.code, checking(self.callees, self.indirect), ";\u{1}sk<", ">\n", ";\u{1}sk.\n").asStr(), marks).asStr());
+    // The companion C names frame sizes too: a task's root frame, which its allocation holds.
+    const cfile = unmark(cfile0.asStr(), marks);
     // The runtime's catch point, which C cannot write: what `f(a)` raises as a panic is caught here;
     // in WebAssembly, what else is thrown — the host's exception by which the program ends — passes.
     if (self.funclets) {
@@ -3999,6 +4005,7 @@ export function llvmProgram(p: Prog, entry: usize, runtime: str, freestanding: b
     meta: String.new(), metaN: 0, files: HashMap.new(), lineStarts: HashMap.new(), locs: HashMap.new(), cu: String.new(),
     diTypes: HashMap.new(),
   };
+  g.c.frameMarks = true;
   g.program(entry, runtime, freestanding)
 }
 

@@ -209,7 +209,7 @@ typedef struct { int32_t step; int32_t n; int64_t a[2]; void* p[2]; } fly_wait;
 // A spawned task's `Task` (§6.1): the task's record, which lasts while it runs or a `Task` refers
 // to it. How it ended is TaskEnd's tags, in their order.
 enum { FLY_TASK_RUNNING = -1, FLY_TASK_DONE = 0, FLY_TASK_CANCELLED = 1, FLY_TASK_PANICKED = 2 };
-void* fly_task_spawn(fly_wait* w, int scope, const fly_fn* f);
+void* fly_task_spawn(fly_wait* w, int scope, const fly_fn* f, size_t frame);
 void fly_task_cancel(void* t);
 int32_t fly_task_wait(fly_wait* w, void* t, fly_String* message);
 size_t fly_task_any(fly_wait* w, void* const* ts, size_t n);
@@ -639,7 +639,7 @@ void fly_unlock(const void* state);
 void fly_par_join(void (*a)(void* f, void* out), void* fa, void* oa, void (*da)(void* out),
                   void (*b)(void* f, void* out), void* fb, void* ob, void (*db)(void* out));
 // A task's outcome: its value (`size` bytes), or its failure.
-int fly_spawn(fly_wait* w, int scope, void (*entry)(void* task, void* closure, void** slot), const fly_fn* f, size_t size);
+int fly_spawn(fly_wait* w, int scope, void (*entry)(void* task, void* closure, void** slot), const fly_fn* f, size_t size, size_t frame);
 void* fly_task_result(void* task);
 void* fly_task_closure(void* task);
 void fly_join(fly_wait* w, int task, void* out);
