@@ -32,7 +32,8 @@ for b in $all; do
   echo "== $b $n"
   # Built every way.
   node --stack-size=65500 "$compiler" "$here/fly/$b.fly" "$out/$b.fly.c" "$root"
-  cc -std=gnu11 -O2 -w -o "$out/$b.fly-c" "$out/$b.fly.c" -lm
+  # shellcheck disable=SC2046
+  cc -std=gnu11 -O2 -w $(sh "$root/selfhost/ccflags.sh") -o "$out/$b.fly-c" "$out/$b.fly.c" -lm
   sh "$root/selfhost/llvm.sh" "$compiler" "$here/fly/$b.fly" "$out/$b.fly-llvm" > /dev/null
   node --stack-size=65500 "$compiler" "$here/fly/$b.fly" "$out/$b.fly.js" "$root"
   cc -O2 -w -o "$out/$b.c" "$here/c/$b.c" -lm

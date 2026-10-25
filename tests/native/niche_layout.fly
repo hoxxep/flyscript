@@ -1,0 +1,84 @@
+// expect: Option<Box<u64>> 8, Option<readonly Point> 8, Tree 16, Node 16, Result<void, Box<u64>> 8
+// expect: kept tags: Option<String> 32, Option<Option<Box<u64>>> 16, Guard 16
+// expect: list 1000 sum 499500, took 999, head now #None
+// expect: widened #Some(5) #None #Other
+// expect: results #Err(3) #Ok
+// expect: guards #Empty #Full(4)
+// expect: tree of depth 10 has 1023 nodes
+// A union of a tag with a payload that starts with a pointer never null, and a tag with none, is
+// laid out as the payload alone, the empty tag its pointer null (§11.3): one pointer for an
+// `Option` of a box or a borrow, two for a tree's node. It matches, takes and widens into a union
+// with a tag as any union does. A `String` may hold no pointer, a union uses its null, and a union
+// with a `Drop` of its own must tell an empty value from a moved one, so all of those keep a tag.
+import { println } from "std/io";
+
+struct Point { x: i64; y: i64; }
+enum Tree { #Leaf, #Node(Box<Tree>, Box<Tree>) }
+struct Node { v: u64; next: Option<Box<Node>>; }
+
+enum Guard { #Empty, #Full(Box<u64>) }
+impl Drop for Guard {
+  function drop(self: mut Self): void {}
+}
+
+function build(d: u32): Tree {
+  if (d == 0) { #Leaf } else { #Node(Box.new(build(d - 1)), Box.new(build(d - 1))) }
+}
+
+function count(t: readonly Tree): u64 {
+  match (t) {
+    #Leaf => 0,
+    #Node(l, r) => 1 + count(l) + count(r),
+  }
+}
+
+type Wide = #Some(Box<u64>) | #None | #Other;
+
+function widen(o: Option<Box<u64>>): Wide {
+  match (o) { #Some(b) => #Some(b), #None => #None }
+}
+
+function shown(r: readonly Result<void, Box<u64>>): String {
+  match (r) { #Err(b) => `#Err(${b})`, #Ok => "#Ok".toString() }
+}
+
+function walk(l: readonly Option<Box<Node>>, n: u64, sum: u64): [u64, u64] {
+  match (l) {
+    #Some(b) => walk(b.next, n + 1, sum + b.v),
+    #None => [n, sum],
+  }
+}
+
+function guard(g: readonly Guard): String {
+  match (g) { #Empty => "#Empty".toString(), #Full(b) => `#Full(${b})` }
+}
+
+export function main(): void uses Io {
+  println(`Option<Box<u64>> ${sizeOf<Option<Box<u64>>>()}, Option<readonly Point> ${sizeOf<Option<readonly Point>>()}, Tree ${sizeOf<Tree>()}, Node ${sizeOf<Node>()}, Result<void, Box<u64>> ${sizeOf<Result<void, Box<u64>>>()}`);
+  println(`kept tags: Option<String> ${sizeOf<Option<String>>()}, Option<Option<Box<u64>>> ${sizeOf<Option<Option<Box<u64>>>>()}, Guard ${sizeOf<Guard>()}`);
+
+  let head: Option<Box<Node>> = #None;
+  for (const i of 0..1000) { head = #Some(Box.new(Node { v: i, next: head })); }
+  const [n, sum] = walk(head, 0, 0);
+  const first = match (head.take()) { #Some(b) => b.v, #None => 0 };
+  const now = match (head) { #Some(_) => "#Some", #None => "#None" };
+  println(`list ${n} sum ${sum}, took ${first}, head now ${now}`);
+
+  const a = widen(#Some(Box.new(5)));
+  const b = widen(#None);
+  const c: Wide = #Other;
+  const ws = [a, b, c];
+  let out: Vec<String> = Vec.new();
+  for (const w of ws) { out.push(match (w) { #Some(x) => `#Some(${x})`, #None => "#None".toString(), #Other => "#Other".toString() }); }
+  println(`widened ${out.join(" ")}`);
+
+  const e: Result<void, Box<u64>> = #Err(Box.new(3));
+  const o: Result<void, Box<u64>> = #Ok;
+  println(`results ${shown(e)} ${shown(o)}`);
+
+  const g1: Guard = #Empty;
+  const g2: Guard = #Full(Box.new(4));
+  println(`guards ${guard(g1)} ${guard(g2)}`);
+
+  println(`tree of depth 10 has ${count(build(10))} nodes`);
+}

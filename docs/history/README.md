@@ -57,6 +57,7 @@ Versions are pre-1.0 while the language is being designed. The specification was
 
 Each version from 0.55 says in a sentence what it changed, newest first, with the sections of the specification of its day.
 
+- **0.136** lays a union of a tag with a payload that starts with a pointer never null, and a tag with none, out as the payload alone, the other tag the pointer null: `Option<Box<T>>` is one pointer (§11.3).
 - **0.135** runs a loop over a call of a small generator that yields in one place with the generator's body in place, the loop's body where it yields (§11.3).
 - **0.134** makes a function's call of itself as its last act a jump in compiled code, with the functions a recursion passes through on its way back inlined, so derived `Eq`, `Ord` and `Hash` walk a list in constant stack (§11.3).
 - **0.133** adds `Simd.shiftIn`, a vector's lanes moved up with another's last below them, with which `std/io` checks a line's UTF-8 in the pass that finds its end ([std.md](../std.md)).

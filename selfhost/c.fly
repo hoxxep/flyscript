@@ -374,6 +374,10 @@ function wideLit(n: str): String {
   `((fly_i128)(((unsigned __int128)(uint64_t)INT64_C(${hi}) << 64) | UINT64_C(${lo})))`
 }
 
+// A union laid out as its one payload (`Cgen.niche`): the payload's tag, the other, and the path in C
+// from the payload to the pointer that is null for the other.
+export type Niche = { full: String; empty: String; path: String };
+
 export struct Cgen {
   lw: Lower;
   // Closures printed so far.
@@ -622,9 +626,66 @@ impl Cgen {
     i
   }
 
+  // A union laid out as its one payload, in a niche (§11.3): of two tags, one has a payload whose
+  // first word is a pointer that is never null — a `Box`, an `Arc`, a `Ref`, a borrow that is a
+  // pointer, or a tuple, record or struct whose first field is one — and the other has none, and is
+  // that pointer null. `Option<Box<T>>` is one pointer, and `#Leaf | #Node(Box<T>, Box<T>)` two. A
+  // type with a `Drop` of its own keeps its tag, which tells a live value of the empty tag from one
+  // moved out; so does any other union, a niche union among them, whose null is taken. The payload's
+  // tag, the other, and the path in C from the payload to its pointer.
+  export function niche(self: readonly Self, t: readonly Ty): Option<Niche> {
+    if (!self.lw.tagged(t) || self.liveByte(t)) { return #None; }
+    const tags = self.lw.tagsOf(t);
+    if (tags.len() != 2) { return #None; }
+    const [k0, p0] = tags[0].clone();
+    const [k1, p1] = tags[1].clone();
+    const [full, empty, pt] = if (isVoidTy(p0) && !isVoidTy(p1)) { [k1, k0, p1] } else if (isVoidTy(p1) && !isVoidTy(p0)) { [k0, k1, p0] } else { return #None };
+    const payload = self.lw.payloadTy(pt);
+    if (self.neverNull(payload)) { return #Some({ full, empty, path: String.new() }); }
+    match (payload) {
+      #Tuple(_) | #Record(_) => {}
+      #Named(d, _) => { if (!(match (self.lw.p.defs[d].kind) { #Struct { fields: #Some(_) } => true, _ => false }) || self.liveByte(payload)) { return #None; } }
+      _ => return #None,
+    }
+    match (self.cfields(payload).first()) {
+      #Some([f, ft]) => if (self.neverNull(ft)) { #Some({ full, empty, path: `.${f}` }) } else { #None },
+      #None => #None,
+    }
+  }
+
+  // Whether a value of the type is a pointer that is never null.
+  function neverNull(self: readonly Self, t: readonly Ty): bool {
+    match (t) {
+      #Named(d, _) => self.lw.p.isKnown(d, "Box") || self.lw.p.isKnown(d, "Ref") || self.lw.p.isKnown(d, "Arc"),
+      #Borrow(_, _) => self.pointerBorrow(t),
+      _ => false,
+    }
+  }
+
+  // The tag number of `x`, a value of union `t`, in C.
+  export function tagOf(self: mut Self, t: readonly Ty, x: str): String {
+    match (self.niche(t)) {
+      #Some(n) => `((${x}).u.${mangle(n.full.asStr())}${n.path} ? ${self.tagId(n.full.asStr())} : ${self.tagId(n.empty.asStr())})`,
+      #None => `(${x}).tag`,
+    }
+  }
+
+  // What a value of union `t` with tag `tag` is made with, in C, before its payload: its tag, unless
+  // its pointer says it.
+  export function tagInit(self: mut Self, t: readonly Ty, tag: str): String {
+    if (self.niche(t).isSome()) { return String.new(); }
+    `.tag = ${self.tagId(tag)}, `
+  }
+
   function unionType(self: mut Self, t: readonly Ty, span: Span): String uses Fail<Diagnostic> {
     const name = self.typeName(t);
     if (!self.defined.insert(ckey(t))) { return name; }
+    for (const [tag, _] of self.lw.tagsOf(t)) { self.tagId(tag.asStr()); }
+    if (const #Some(n) = self.niche(t)) {
+      const c = self.ctype(self.lw.payloadTy(self.lw.payloadOf(t, n.full.asStr())), span);
+      self.typeDefs.push(`struct ${name} {\n  union {\n    ${c} ${mangle(n.full.asStr())};\n  } u;\n};\n`);
+      return name;
+    }
     let members = String.new();
     for (const [tag, pt] of self.lw.tagsOf(t)) {
       self.tagId(tag.asStr());
@@ -838,15 +899,17 @@ impl Cgen {
     }
   }
 
+  // A union in a niche is dead once its pointer is null, as its other tag is, which drops nothing.
   function dropTags(self: mut Self, body: mut String, t: readonly Ty, span: Span): void uses Fail<Diagnostic> {
+    const read = self.tagOf(t, "(*v)");
     for (const [tag, pt] of self.lw.tagsOf(t)) {
       if (!isVoidTy(pt) && self.needsDrop(pt)) {
         const id = self.tagId(tag.asStr());
         const d = self.dropFn(self.lw.payloadTy(pt), span);
-        body.push(`  if (v->tag == ${id}) ${d}(&v->u.${mangle(tag.asStr())});\n`);
+        body.push(`  if (${read} == ${id}) ${d}(&v->u.${mangle(tag.asStr())});\n`);
       }
     }
-    body.push("  v->tag = 0;\n");
+    body.push(if (self.niche(t).isSome()) { "  memset(v, 0, sizeof *v);\n" } else { "  v->tag = 0;\n" });
   }
 
   // A call of the type's `Drop.drop` on `*v`.
@@ -875,10 +938,12 @@ impl Cgen {
     for (const [tag, pt] of self.lw.tagsOf(from)) {
       if (!into.iter().some(([k, _]) => k == tag)) { continue; }
       const id = self.tagId(tag.asStr());
-      if (isVoidTy(pt)) { body.push(`  if (v.tag == ${id}) return (${b}){ .tag = ${id} };\n`); }
+      const read = self.tagOf(from, "v");
+      const init = self.tagInit(to, tag.asStr());
+      if (isVoidTy(pt)) { body.push(`  if (${read} == ${id}) return (${b}){ ${init} };\n`); }
       else {
         const m = mangle(tag.asStr());
-        body.push(`  if (v.tag == ${id}) return (${b}){ .tag = ${id}, .u.${m} = v.u.${m} };\n`);
+        body.push(`  if (${read} == ${id}) return (${b}){ ${init}.u.${m} = v.u.${m} };\n`);
       }
     }
     body.push(`  return (${b}){ 0 };\n`);
@@ -890,11 +955,11 @@ impl Cgen {
   // An `Option` of type `t`: `#Some(v)`, or `#None`.
   function some(self: mut Self, t: readonly Ty, v: str, span: Span): String uses Fail<Diagnostic> {
     const c = self.ctype(t, span);
-    `((${c}){ .tag = ${self.tagId("Some")}, .u.Some = ${v} })`
+    `((${c}){ ${self.tagInit(t, "Some")}.u.Some = ${v} })`
   }
   function none(self: mut Self, t: readonly Ty, span: Span): String uses Fail<Diagnostic> {
     const c = self.ctype(t, span);
-    `((${c}){ .tag = ${self.tagId("None")} })`
+    `((${c}){ ${self.tagInit(t, "None")} })`
   }
 
   // ---- constants ----
@@ -1166,18 +1231,19 @@ impl Cgen {
       }
       #IsTag(p, tag) => {
         const lv = self.lvalue(p, span);
-        `((${lv}).tag == ${self.tagId(tag.asStr())})`
+        const pt = self.placeTy(p);
+        `(${self.tagOf(pt, lv.asStr())} == ${self.tagId(tag.asStr())})`
       }
       #Tag(name, vs) => {
         const ct = self.ctype(ty, span);
-        const id = self.tagId(name.asStr());
+        const init = self.tagInit(ty, name.asStr());
         const live = if (self.liveByte(ty)) { ".live = true, " } else { "" };
         match (vs.first()) {
-          #None => `((${ct}){ ${live}.tag = ${id} })`,
-          #Some(_) if (isVoidTy(self.lw.payloadOf(ty, name.asStr()))) => `((${ct}){ ${live}.tag = ${id} })`,
+          #None => `((${ct}){ ${live}${init} })`,
+          #Some(_) if (isVoidTy(self.lw.payloadOf(ty, name.asStr()))) => `((${ct}){ ${live}${init} })`,
           #Some(v) => {
             const x = self.operand(v, span);
-            `((${ct}){ ${live}.tag = ${id}, .u.${mangle(name.asStr())} = ${x} })`
+            `((${ct}){ ${live}${init}.u.${mangle(name.asStr())} = ${x} })`
           }
         }
       }
@@ -1787,12 +1853,13 @@ impl Cgen {
 
   // Statements raising the failure `v`, a `t`: boxed by its tag, so a `catch` of a wider or a
   // narrower union of tags takes it out as its own.
-  function boxErr(self: readonly Self, v: str, t: readonly Ty): String {
-    if (self.tagged(t)) { `fly_err_box(${v}.tag, &${v}.u, sizeof(${v}.u)); ` } else { `fly_err_box(0, &${v}, sizeof(${v})); ` }
+  function boxErr(self: mut Self, v: str, t: readonly Ty): String {
+    if (self.tagged(t)) { `fly_err_box(${self.tagOf(t, v)}, &${v}.u, sizeof(${v}.u)); ` } else { `fly_err_box(0, &${v}, sizeof(${v})); ` }
   }
 
-  // Statements taking the failure raised into `lv`, a `t`.
-  export function takeErr(self: readonly Self, lv: str, t: readonly Ty): String {
+  // Statements taking the failure raised into `lv`, a `t`; one in a niche is told by its pointer.
+  export function takeErr(self: mut Self, lv: str, t: readonly Ty): String {
+    if (self.niche(t).isSome()) { return `(void)fly_err_tag(); fly_err_take(&${lv}.u, sizeof(${lv}.u)); `; }
     if (self.tagged(t)) { `${lv}.tag = fly_err_tag(); fly_err_take(&${lv}.u, sizeof(${lv}.u)); ` } else { `fly_err_take(&${lv}, sizeof(${lv})); ` }
   }
 }
@@ -1966,14 +2033,16 @@ impl Cgen {
     const rc = self.ctype(rt, span);
     const etc = self.ctype(errTy, span);
     const take = self.takeErr("e_", errTy);
-    const okInit = if (isVoidTy(t)) { "" } else { ", .u.Ok = v_" };
+    const okInit = if (isVoidTy(t)) { "" } else { ".u.Ok = v_" };
     const fv = self.transient("fly_fn");
     const slot = self.transient("void*");
     const v = self.transient(tc.asStr());
     const call = `((${tc} (*)(void*, void**, void*))${fv}.fn)(${fv}.env, &${slot}, NULL)`;
     const errTag = self.tagId("Err");
     const okTag = self.tagId("Ok");
-    self.siteThen(`${fv} = ${vs[0]}; ${slot} = NULL; ${v} = ${call};`, `${v} = ${call};`, `if (${fv}.drop) ${fv}.drop(${fv}.env); { ${tc} v_ = ${v}; ${rc} r_; if (FLY_FAILED) { ${etc} e_; memset(&e_, 0, sizeof e_); ${take}r_ = (${rc}){ .tag = ${errTag}, .u.Err = e_ }; } else r_ = (${rc}){ .tag = ${okTag}${okInit} }; ${to}r_; }`.asStr());
+    const errInit = self.tagInit(rt, "Err");
+    const okTagInit = self.tagInit(rt, "Ok");
+    self.siteThen(`${fv} = ${vs[0]}; ${slot} = NULL; ${v} = ${call};`, `${v} = ${call};`, `if (${fv}.drop) ${fv}.drop(${fv}.env); { ${tc} v_ = ${v}; ${rc} r_; if (FLY_FAILED) { ${etc} e_; memset(&e_, 0, sizeof e_); ${take}r_ = (${rc}){ ${errInit}.u.Err = e_ }; } else r_ = (${rc}){ ${okTagInit}${okInit} }; ${to}r_; }`.asStr());
   }
 
   // `Io.scope(body)`: the body, a machine, runs under a panic's catch, called again to go on; then
@@ -2355,9 +2424,9 @@ impl Cgen {
       "Vec_pop" => {
         const ec = self.ctype(elem, span);
         const oc = self.ctype(rt, span);
-        const some = self.tagId("Some");
-        const none = self.tagId("None");
-        `({ ${ec} x_; fly_vec_pop(${arg(0)}, &x_, sizeof(${ec})) ? (${oc}){ .tag = ${some}, .u.Some = x_ } : (${oc}){ .tag = ${none} }; })`
+        const yes = self.some(rt, "x_", span);
+        const no = self.none(rt, span);
+        `({ ${ec} x_; fly_vec_pop(${arg(0)}, &x_, sizeof(${ec})) ? ${yes} : ${no}; })`
       }
       "Vec_truncate" => {
         if (self.needsDrop(elem)) {
@@ -2798,7 +2867,7 @@ impl Cgen {
       }
       "Option_isSome" => {
         const o = if (self.pointerBorrow(ptys[0])) { `(*${arg(0)})` } else { arg(0) };
-        `((${o}).tag == ${self.tagId("Some")})`
+        `(${self.tagOf(stripBorrow(ptys[0]), o.asStr())} == ${self.tagId("Some")})`
       }
       "Option_take" => {
         const c = self.ctype(rt, span);
@@ -2809,7 +2878,7 @@ impl Cgen {
         const c = self.ctype(rt, span);
         const oc = self.ctype(stripBorrow(ptys[0]), span);
         const d = if (self.needsDrop(rt)) { `${self.dropFn(rt, span)}(&d_); ` } else { "" };
-        `({ ${oc} o_ = ${arg(0)}; ${c} d_ = ${arg(1)}; ${c} r_; if (o_.tag == ${self.tagId("Some")}) { r_ = o_.u.Some; ${d}} else r_ = d_; r_; })`
+        `({ ${oc} o_ = ${arg(0)}; ${c} d_ = ${arg(1)}; ${c} r_; if (${self.tagOf(stripBorrow(ptys[0]), "o_")} == ${self.tagId("Some")}) { r_ = o_.u.Some; ${d}} else r_ = d_; r_; })`
       }
       "Option_cloned" => {
         const t = self.lw.payloadOf(rt, "Some");
@@ -2819,7 +2888,7 @@ impl Cgen {
         const call = self.ifaceCall("Clone", "clone", t, [p.toString()], span);
         const yes = self.some(rt, call.asStr(), span);
         const no = self.none(rt, span);
-        `({ ${oc} o_ = ${arg(0)}; o_.tag == ${self.tagId("Some")} ? ${yes} : ${no}; })`
+        `({ ${oc} o_ = ${arg(0)}; ${self.tagOf(stripBorrow(ptys[0]), "o_")} == ${self.tagId("Some")} ? ${yes} : ${no}; })`
       }
       "Result_unwrap" => {
         const c = self.ctype(stripBorrow(ptys[0]), span);
@@ -2829,7 +2898,7 @@ impl Cgen {
         const okTy = self.lw.payloadOf(stripBorrow(ptys[0]), "Ok");
         const oc = self.ctype(okTy, span);
         const okRead = if (isVoidTy(okTy)) { "{}" } else { "o_ = r_.u.Ok" };
-        `({ ${c} r_ = ${arg(0)}; ${oc} o_ = { 0 }; if (r_.tag == ${self.tagId("Err")}) { ${ec2} e_ = r_.u.Err; ${boxed}} else ${okRead}; o_; })`
+        `({ ${c} r_ = ${arg(0)}; ${oc} o_ = { 0 }; if (${self.tagOf(stripBorrow(ptys[0]), "r_")} == ${self.tagId("Err")}) { ${ec2} e_ = r_.u.Err; ${boxed}} else ${okRead}; o_; })`
       }
       "Fail_capture" => {
         const t = self.lw.payloadOf(rt, "Ok");
@@ -2838,8 +2907,8 @@ impl Cgen {
         const rc = self.ctype(rt, span);
         const etc = self.ctype(errTy, span);
         const take = self.takeErr("e_", errTy);
-        const okInit = if (isVoidTy(t)) { "" } else { ", .u.Ok = v_" };
-        `({ fly_fn f_ = ${arg(0)}; ${tc} v_ = ((${tc} (*)(void*, void**, void*))f_.fn)(f_.env, (void*[1]){ NULL }, NULL); fly_panic_again_if(); if (f_.drop) f_.drop(f_.env); ${rc} r_; if (FLY_FAILED) { ${etc} e_; memset(&e_, 0, sizeof e_); ${take}r_ = (${rc}){ .tag = ${self.tagId("Err")}, .u.Err = e_ }; } else r_ = (${rc}){ .tag = ${self.tagId("Ok")}${okInit} }; r_; })`
+        const okInit = if (isVoidTy(t)) { "" } else { ".u.Ok = v_" };
+        `({ fly_fn f_ = ${arg(0)}; ${tc} v_ = ((${tc} (*)(void*, void**, void*))f_.fn)(f_.env, (void*[1]){ NULL }, NULL); fly_panic_again_if(); if (f_.drop) f_.drop(f_.env); ${rc} r_; if (FLY_FAILED) { ${etc} e_; memset(&e_, 0, sizeof e_); ${take}r_ = (${rc}){ ${self.tagInit(rt, "Err")}.u.Err = e_ }; } else r_ = (${rc}){ ${self.tagInit(rt, "Ok")}${okInit} }; r_; })`
       }
       "Fail_map" => {
         const tc = self.ctype(rt, span);

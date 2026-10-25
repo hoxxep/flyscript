@@ -391,7 +391,13 @@ impl Lgen {
       offsets.insert("live".toString(), pack(mut pk, 1, 1));
       names.push(["live".toString(), "live".toString()]);
     }
-    if (self.c.lw.tagged(t)) {
+    if (const #Some(nc) = self.c.niche(t)) {
+      // In a niche: its payload, the union, and no tag (`Cgen.niche`).
+      const s = self.shape(self.c.lw.payloadTy(self.c.lw.payloadOf(t, nc.full.asStr())), span);
+      uSize = roundUp(s.size, s.align);
+      offsets.insert("u".toString(), pack(mut pk, uSize, s.align));
+      names.push(["u".toString(), "u".toString()]);
+    } else if (self.c.lw.tagged(t)) {
       offsets.insert("tag".toString(), pack(mut pk, 4, 4));
       names.push(["tag".toString(), "tag".toString()]);
       let us: usize = 1;
@@ -1179,11 +1185,20 @@ impl Lgen {
       #IsTag(p, tag) => {
         const pt = self.placeTy(p);
         const a = self.addr(p, span);
-        const o = self.offsetOf(pt, "tag", span);
-        const at = self.gep(a.asStr(), o);
-        const t = self.load("i32", at.asStr());
-        const id = self.c.tagId(tag.asStr());
-        const c = self.val(`icmp eq i32 ${t}, ${id}`);
+        const c = match (self.c.niche(pt)) {
+          // The pointer at the payload's start says which.
+          #Some(nc) => {
+            const q = self.load("ptr", a.asStr());
+            self.val(`icmp ${if (tag == nc.full) { "ne" } else { "eq" }} ptr ${q}, null`)
+          }
+          #None => {
+            const o = self.offsetOf(pt, "tag", span);
+            const at = self.gep(a.asStr(), o);
+            const t = self.load("i32", at.asStr());
+            const id = self.c.tagId(tag.asStr());
+            self.val(`icmp eq i32 ${t}, ${id}`)
+          }
+        };
         self.boolOf(c.asStr())
       }
       #AddressOf(p) => self.addr(p, span),
@@ -1224,10 +1239,12 @@ impl Lgen {
         const n = self.sizeOf(ty, span);
         self.memzero(dest, n);
         if (self.c.liveByte(ty)) { self.store("i8", "1", dest); }
-        const id = self.c.tagId(name.asStr());
-        const to = self.offsetOf(ty, "tag", span);
-        const at = self.gep(dest, to);
-        self.store("i32", `${id}`.asStr(), at.asStr());
+        if (self.c.niche(ty).isNone()) {
+          const id = self.c.tagId(name.asStr());
+          const to = self.offsetOf(ty, "tag", span);
+          const at = self.gep(dest, to);
+          self.store("i32", `${id}`.asStr(), at.asStr());
+        }
         const voidPayload = isVoidTy(self.c.lw.payloadOf(ty, name.asStr()));
         if (const #Some(v) = vs.first()) {
           if (voidPayload) { return; }
@@ -1930,9 +1947,20 @@ impl Lgen {
   // tags takes it out as its own.
   function raise(self: mut Self, e: str, t: readonly Ty, span: Span): void uses Fail<Diagnostic> {
     if (self.c.tagged(t)) {
-      const to = self.offsetOf(t, "tag", span);
-      const ta = self.gep(e, to);
-      const tag = self.load("i32", ta.asStr());
+      const tag = match (self.c.niche(t)) {
+        #Some(nc) => {
+          const q = self.load("ptr", e);
+          const full = self.val(`icmp ne ptr ${q}, null`);
+          const yes = self.c.tagId(nc.full.asStr());
+          const no = self.c.tagId(nc.empty.asStr());
+          self.val(`select i1 ${full}, i32 ${yes}, i32 ${no}`)
+        }
+        #None => {
+          const to = self.offsetOf(t, "tag", span);
+          const ta = self.gep(e, to);
+          self.load("i32", ta.asStr())
+        }
+      };
       const uo = self.offsetOf(t, "u", span);
       const u = self.gep(e, uo);
       const n = self.shape(t, span).uSize;
@@ -1947,9 +1975,12 @@ impl Lgen {
   function takeErr(self: mut Self, e: str, t: readonly Ty, span: Span): void uses Fail<Diagnostic> {
     if (self.c.tagged(t)) {
       const tag = self.val("call i32 @fly_err_tag()");
-      const to = self.offsetOf(t, "tag", span);
-      const ta = self.gep(e, to);
-      self.store("i32", tag.asStr(), ta.asStr());
+      // One in a niche is told by its pointer, which the payload brings back.
+      if (self.c.niche(t).isNone()) {
+        const to = self.offsetOf(t, "tag", span);
+        const ta = self.gep(e, to);
+        self.store("i32", tag.asStr(), ta.asStr());
+      }
       const uo = self.offsetOf(t, "u", span);
       const u = self.gep(e, uo);
       const n = self.shape(t, span).uSize;
@@ -4170,8 +4201,10 @@ impl Lgen {
       }
       const u32t = self.basicTy("u32", 32, "DW_ATE_unsigned");
       const tagT = self.node(`!DICompositeType(tag: DW_TAG_enumeration_type, baseType: ${u32t}, size: 32, elements: !{${names.join(", ")}})`.asStr());
-      const to = self.offsetOf(t, "tag", span);
-      members.push(self.member(n.asStr(), "tag", tagT.asStr(), 32, to));
+      if (self.c.niche(t).isNone()) {
+        const to = self.offsetOf(t, "tag", span);
+        members.push(self.member(n.asStr(), "tag", tagT.asStr(), 32, to));
+      }
       const un = self.reserve();
       let cases: Vec<String> = Vec.new();
       for (const [tag, pt] of self.c.lw.tagsOf(t)) {
