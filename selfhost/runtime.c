@@ -863,8 +863,9 @@ void* fly_box(const void* value, size_t size) {
   return p;
 }
 
-// A `Mutex`'s state follows a header of its own: its lock, and the tasks waiting for it.
-#define MUTEX_HEADER 48
+// A `Mutex`'s state follows a header of its own: its lock, and whether a panic poisoned it, in a
+// size that keeps the state as aligned as an allocation is.
+#define MUTEX_HEADER 16
 
 void* fly_mutex_new(const void* value, size_t size) {
   uint8_t* p = fly_alloc(MUTEX_HEADER + size);
@@ -3768,8 +3769,26 @@ fly_chan fly_sender_clone(const fly_chan* ch) {
 
 static bool threads = false;
 
-// A lock held for a few instructions at a time.
+// A lock held for a few instructions at a time: taken by spinning a little, and past that by
+// sleeping in the kernel on its word until it is let go, so that a holder that the system has put
+// off its core does not keep every other core spinning, as it does when cores are shared. Its word
+// is 0 when free, 1 when held, 2 when held and someone may sleep waiting for it, which only then
+// makes letting it go wake one (Drepper, "Futexes Are Tricky", mutex 2).
 typedef struct { int v; } spin_t;
+
+#if defined(__APPLE__) && defined(__MAC_OS_X_VERSION_MIN_REQUIRED) && __MAC_OS_X_VERSION_MIN_REQUIRED >= 140400
+#include <os/os_sync_wait_on_address.h>
+static void lock_sleep(int* w, int seen) { os_sync_wait_on_address(w, (uint64_t)(uint32_t)seen, sizeof(int), OS_SYNC_WAIT_ON_ADDRESS_NONE); }
+static void lock_wake(int* w) { os_sync_wake_by_address_any(w, sizeof(int), OS_SYNC_WAKE_BY_ADDRESS_NONE); }
+#elif defined(__linux__)
+#include <linux/futex.h>
+#include <sys/syscall.h>
+static void lock_sleep(int* w, int seen) { syscall(SYS_futex, w, FUTEX_WAIT_PRIVATE, seen, NULL, NULL, 0); }
+static void lock_wake(int* w) { syscall(SYS_futex, w, FUTEX_WAKE_PRIVATE, 1, NULL, NULL, 0); }
+#else
+static void lock_sleep(int* w, int seen) { (void)w; (void)seen; sched_yield(); }
+static void lock_wake(int* w) { (void)w; }
+#endif
 
 static inline void relax(void) {
 #if defined(__aarch64__) || defined(__arm64__)
@@ -3779,18 +3798,24 @@ static inline void relax(void) {
 #endif
 }
 
-static void spin_lock(spin_t* l) {
-  unsigned n = 0;
-  while (__atomic_exchange_n(&l->v, 1, __ATOMIC_ACQUIRE)) {
-    while (__atomic_load_n(&l->v, __ATOMIC_RELAXED)) {
-      if (++n < 128) relax(); else sched_yield();
-    }
-  }
+static bool spin_trylock(spin_t* l) {
+  int free = 0;
+  return !__atomic_load_n(&l->v, __ATOMIC_RELAXED) && __atomic_compare_exchange_n(&l->v, &free, 1, false, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED);
 }
 
-static void spin_unlock(spin_t* l) { __atomic_store_n(&l->v, 0, __ATOMIC_RELEASE); }
+static void spin_lock(spin_t* l) {
+  if (spin_trylock(l)) return;
+  for (unsigned n = 0; n < 100; n++) {
+    relax();
+    if (spin_trylock(l)) return;
+  }
+  // Held still: marked as waited for, and slept on until it is let go.
+  while (__atomic_exchange_n(&l->v, 2, __ATOMIC_ACQUIRE) != 0) lock_sleep(&l->v, 2);
+}
 
-static bool spin_trylock(spin_t* l) { return !__atomic_load_n(&l->v, __ATOMIC_RELAXED) && !__atomic_exchange_n(&l->v, 1, __ATOMIC_ACQUIRE); }
+static void spin_unlock(spin_t* l) {
+  if (__atomic_exchange_n(&l->v, 0, __ATOMIC_RELEASE) == 2) lock_wake(&l->v);
+}
 
 static uint64_t now_ns(void) {
   struct timespec ts;
@@ -3896,6 +3921,23 @@ typedef struct mt_task mt_task;
 typedef struct mt_scope mt_scope;
 typedef struct worker worker;
 
+// Each worker's tasks to run: a ring of RING (tokio's and Go's local run queue). Its owner pushes at
+// `tail` with no atomic exchange; `head` packs two counters, where the next task is taken from
+// (`real`) and how far a thief has copied (`steal`, which differs from `real` only while one does),
+// so that the owner taking one and a thief taking half each move `real` by one exchange, and a
+// second thief sees one already at it by a load and goes elsewhere. A full ring moves half its
+// tasks, as one batch, to the queue every worker shares (`inject`).
+enum { RING = 256, RING_MASK = RING - 1, BATCH = RING / 2 };
+// `head`, which thieves move, and `tail`, which the owner does, are a cache line apart, and the owner
+// remembers the last `steal` it read (`seen`), reading `head` again only when the ring looks full to
+// it: pushing then leaves alone the line thieves are at.
+typedef struct {
+  _Alignas(128) uint64_t head;
+  _Alignas(128) uint32_t tail;
+  uint32_t seen;
+  _Alignas(128) mt_task* buf[RING];
+} fly_ring;
+
 // The tasks waiting for something, in the order they began to, under the queue's lock.
 typedef struct { spin_t lock; mt_task *head, *tail; } waitq;
 
@@ -3937,6 +3979,144 @@ struct mt_task {
   // Cancelled by its scope, which may take that back, or by its `Task`, for good (`killed`).
   bool started, cancelled, killed, yielded;
 };
+
+static uint64_t ring_pack(uint32_t steal, uint32_t real) { return (uint64_t)steal << 32 | real; }
+static uint32_t ring_steal_of(uint64_t h) { return (uint32_t)(h >> 32); }
+static uint32_t ring_real_of(uint64_t h) { return (uint32_t)h; }
+
+static uint32_t ring_len(fly_ring* r) {
+  uint64_t h = __atomic_load_n(&r->head, __ATOMIC_ACQUIRE);
+  return __atomic_load_n(&r->tail, __ATOMIC_ACQUIRE) - ring_real_of(h);
+}
+
+// The queue of batches every worker shares: batches of tasks linked by `rnext`, the batches by their
+// first task's `wnext` (a task waiting to run waits in no queue); a batch is put in or taken out by
+// one step under the lock, however many tasks it holds.
+static struct { spin_t lock; mt_task *first, *last; long batches; } inject;
+
+static void inject_batch(mt_task* head) {
+  head->wnext = NULL;
+  spin_lock(&inject.lock);
+  if (inject.last) inject.last->wnext = head; else inject.first = head;
+  inject.last = head;
+  __atomic_fetch_add(&inject.batches, 1, __ATOMIC_RELEASE);
+  spin_unlock(&inject.lock);
+}
+
+static mt_task* inject_take(void) {
+  if (!__atomic_load_n(&inject.batches, __ATOMIC_ACQUIRE)) return NULL;
+  spin_lock(&inject.lock);
+  mt_task* b = inject.first;
+  if (b) {
+    inject.first = b->wnext;
+    if (!inject.first) inject.last = NULL;
+    __atomic_fetch_sub(&inject.batches, 1, __ATOMIC_RELEASE);
+  }
+  spin_unlock(&inject.lock);
+  return b;
+}
+
+// The owner's: `t` at the ring's end; full, the half next to run goes to the shared queue, with `t`.
+static void ring_push(fly_ring* r, mt_task* t) {
+  uint32_t tail = r->tail;
+  if (tail - r->seen < RING) {
+    __atomic_store_n(&r->buf[tail & RING_MASK], t, __ATOMIC_RELAXED);
+    __atomic_store_n(&r->tail, tail + 1, __ATOMIC_RELEASE);
+    return;
+  }
+  for (;;) {
+    uint64_t h = __atomic_load_n(&r->head, __ATOMIC_ACQUIRE);
+    uint32_t steal = ring_steal_of(h), real = ring_real_of(h);
+    r->seen = steal;
+    if (tail - steal < RING) {
+      __atomic_store_n(&r->buf[tail & RING_MASK], t, __ATOMIC_RELAXED);
+      __atomic_store_n(&r->tail, tail + 1, __ATOMIC_RELEASE);
+      return;
+    }
+    // A thief is copying from it: what is pushed now goes to the shared queue alone.
+    if (steal != real) {
+      t->rnext = NULL;
+      inject_batch(t);
+      return;
+    }
+    // Half of it taken back from the thieves, by moving where the next is taken from past it.
+    uint64_t next = ring_pack(real + BATCH, real + BATCH);
+    if (!__atomic_compare_exchange_n(&r->head, &h, next, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) continue;
+    mt_task* first = __atomic_load_n(&r->buf[real & RING_MASK], __ATOMIC_RELAXED);
+    mt_task* prev = first;
+    for (uint32_t i = 1; i < BATCH; i++) {
+      mt_task* x = __atomic_load_n(&r->buf[(real + i) & RING_MASK], __ATOMIC_RELAXED);
+      prev->rnext = x;
+      prev = x;
+    }
+    prev->rnext = t;
+    t->rnext = NULL;
+    inject_batch(first);
+    return;
+  }
+}
+
+// The owner's: the next task, or NULL.
+static mt_task* ring_pop(fly_ring* r) {
+  uint64_t h = __atomic_load_n(&r->head, __ATOMIC_ACQUIRE);
+  for (;;) {
+    uint32_t steal = ring_steal_of(h), real = ring_real_of(h);
+    if (real == r->tail) return NULL;
+    uint32_t nreal = real + 1, nsteal = steal == real ? nreal : steal;
+    if (__atomic_compare_exchange_n(&r->head, &h, ring_pack(nsteal, nreal), false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+      return __atomic_load_n(&r->buf[real & RING_MASK], __ATOMIC_RELAXED);
+    }
+  }
+}
+
+// A thief's: half of `src`'s tasks moved to its own ring `dst`, the last of them given back to run,
+// or NULL if it had fewer than `least`, `dst` had no room, or another thief was at `src`.
+static mt_task* ring_steal(fly_ring* src, fly_ring* dst, uint32_t least) {
+  uint32_t dtail = dst->tail;
+  if (dtail - ring_steal_of(__atomic_load_n(&dst->head, __ATOMIC_ACQUIRE)) > RING / 2) return NULL;
+  uint64_t h = __atomic_load_n(&src->head, __ATOMIC_ACQUIRE);
+  uint32_t first, n;
+  for (;;) {
+    uint32_t steal = ring_steal_of(h), real = ring_real_of(h);
+    if (steal != real) return NULL;
+    uint32_t stail = __atomic_load_n(&src->tail, __ATOMIC_ACQUIRE);
+    n = stail - real;
+    if (n < least || n == 0) return NULL;
+    n -= n / 2;
+    if (n > RING / 2) n = RING / 2;
+    if (__atomic_compare_exchange_n(&src->head, &h, ring_pack(steal, real + n), false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+      first = real;
+      break;
+    }
+  }
+  for (uint32_t i = 0; i < n; i++) {
+    mt_task* x = __atomic_load_n(&src->buf[(first + i) & RING_MASK], __ATOMIC_RELAXED);
+    __atomic_store_n(&dst->buf[(dtail + i) & RING_MASK], x, __ATOMIC_RELAXED);
+  }
+  // Copied: what it took may be pushed over again.
+  for (;;) {
+    uint32_t real = ring_real_of(h);
+    if (__atomic_compare_exchange_n(&src->head, &h, ring_pack(real, real), false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) break;
+  }
+  n--;
+  mt_task* run = __atomic_load_n(&dst->buf[(dtail + n) & RING_MASK], __ATOMIC_RELAXED);
+  if (n) __atomic_store_n(&dst->tail, dtail + n, __ATOMIC_RELEASE);
+  return run;
+}
+
+// A batch from the shared queue, into this worker's ring if it has room for it: its first task to run.
+static mt_task* take_batch(fly_ring* r) {
+  if (r->tail - ring_steal_of(__atomic_load_n(&r->head, __ATOMIC_ACQUIRE)) > RING - BATCH - 1) return NULL;
+  mt_task* b = inject_take();
+  if (!b) return NULL;
+  mt_task* run = b;
+  for (mt_task* x = b->rnext; x; ) {
+    mt_task* next = x->rnext;
+    ring_push(r, x);
+    x = next;
+  }
+  return run;
+}
 
 // One waiting for any of several tasks, among one of them's: it is told by `fired` and woken in `q`.
 struct mt_any { struct mt_any* next; waitq* q; bool fired; };
@@ -4105,8 +4285,21 @@ struct worker {
   // Tasks to resume here, from any thread.
   spin_t inlock;
   mt_task *inhead, *intail;
-  // Tasks started here that have not begun, and `par` work: either is any worker's to take.
-  deque_t fresh, jobs;
+  // Tasks to run here, which other workers may steal half of (`fly_ring`), and `par` work, which
+  // they take one at a time.
+  fly_ring run;
+  deque_t jobs;
+  // The task the one running here woke last, which runs here next (Go's `runnext`): a task that
+  // wakes another and goes on to wait for its answer hands the core over to it, and the two run on
+  // one core by turns, with no other worker woken. Once the waker passes a few scheduling points
+  // without waiting (`next_at`), it is in the ring, for anyone; a thief takes it only after a
+  // grace in which a waker about to wait would have run it (`steal_next`). Run from here at most
+  // 32 times in a row (`nexts`), so that two tasks handing over to each other do not keep the
+  // ring's waiting.
+  mt_task* next;
+  unsigned next_at, nexts;
+  // Scheduling points the task running here has passed since it began to run (`mt_point`).
+  unsigned points;
   uint64_t rng;
   // Tasks the kernel's events woke while this worker took them: the first is its own to run.
   int harvested;
@@ -4147,6 +4340,8 @@ static int pollers;
 // queues, and a crowd looking would slow the workers whose queues they are. While one looks,
 // work queued wakes no one: it finds it.
 static int spinners;
+// Workers looking in others' rings now (`steal_task`), at most half of them, as tokio has.
+static int searchers;
 static void poll_wake(void);
 
 // There is work: one idle worker wakes to take it, from wherever it is, for each piece of work
@@ -4154,8 +4349,9 @@ static void poll_wake(void);
 // One asleep wakes before the one waiting for events, which events need.
 static void notify(void) {
   __atomic_thread_fence(__ATOMIC_SEQ_CST);
-  // A worker looking for work finds it: none needs waking.
-  if (__atomic_load_n(&spinners, __ATOMIC_SEQ_CST) > 0) return;
+  // A worker looking for work finds it: none needs waking. One that looked and found none looks
+  // again once it has said it is idle, before it sleeps.
+  if (__atomic_load_n(&spinners, __ATOMIC_SEQ_CST) > 0 || __atomic_load_n(&searchers, __ATOMIC_SEQ_CST) > 0) return;
   if (__atomic_load_n(&idlers, __ATOMIC_SEQ_CST) > 0) {
     // Starting from a worker of its own, so that those woken spread.
     worker* me = this_worker;
@@ -4208,46 +4404,57 @@ static mt_task* inbox_pop(worker* w) {
 static void unpark(mt_task* t) {
   __atomic_fetch_add(&runnable, 1, __ATOMIC_SEQ_CST);
   worker* w = this_worker;
-  inbox_push(w ? w : t->home, t);
+  if (w && running) {
+    w->next_at = w->points;
+    mt_task* old = __atomic_exchange_n(&w->next, t, __ATOMIC_ACQ_REL);
+    if (!old) return;
+    t = old;
+  }
+  if (w) ring_push(&w->run, t); else inbox_push(t->home, t);
   // A worker that took the kernel's events runs the first task they woke itself: another is woken
   // only for those after it.
   if (w && w->harvesting && w->harvested++ == 0) return;
   notify();
 }
 
-// Tasks woken together, a list of `n` by `rnext`, run again, dealt out: as many as there are
-// workers or more, a share to every worker, awake or asleep, appended to its inbox at once, an
-// asleep one woken; fewer, one each to workers asleep. The rest are kept here, on the waking
-// worker's own deque. Left where they were woken, every worker would steal them one at a time.
+// The task woken last here, put in the ring for anyone.
+static void flush_next(worker* w) {
+  mt_task* n = __atomic_exchange_n(&w->next, NULL, __ATOMIC_ACQ_REL);
+  if (n) { ring_push(&w->run, n); notify(); }
+}
+
+// Tasks woken together, a list of `n` by `rnext`, run again: a batch here, on the waking worker's
+// own ring, and the rest in batches on the shared queue, put in under one lock, for as many
+// workers as they keep busy, who are woken for them.
 static void unpark_all(mt_task* list, size_t n) {
   __atomic_fetch_add(&runnable, (long)n, __ATOMIC_SEQ_CST);
   worker* me = this_worker;
-  bool all = n >= (size_t)nworkers;
-  size_t share = all ? n / (size_t)nworkers : 1;
-  {
-    for (int k = 1; k < nworkers && list; k++) {
-      worker* v = &workers[(me->index + k) % nworkers];
-      bool asleep = __atomic_load_n(&v->parked, __ATOMIC_SEQ_CST);
-      if (!all && !asleep) continue;
-      mt_task* head = list;
-      mt_task* tail = list;
-      for (size_t i = 1; i < share && tail->rnext; i++) tail = tail->rnext;
-      list = tail->rnext;
-      tail->rnext = NULL;
-      spin_lock(&v->inlock);
-      if (v->intail) v->intail->rnext = head;
-      else __atomic_store_n(&v->inhead, head, __ATOMIC_RELAXED);
-      v->intail = tail;
-      spin_unlock(&v->inlock);
-      if (asleep) unpark_worker(v);
-    }
-  }
-  while (list) {
+  for (size_t i = 0; i < BATCH && list; i++) {
     mt_task* next = list->rnext;
-    dq_push(&me->fresh, list);
+    ring_push(&me->run, list);
     list = next;
   }
-  notify();
+  mt_task *first = NULL, *last = NULL;
+  int batches = 0;
+  while (list) {
+    mt_task* head = list;
+    mt_task* tail = list;
+    for (size_t i = 1; i < BATCH && tail->rnext; i++) tail = tail->rnext;
+    list = tail->rnext;
+    tail->rnext = NULL;
+    head->wnext = NULL;
+    if (last) last->wnext = head; else first = head;
+    last = head;
+    batches++;
+  }
+  if (first) {
+    spin_lock(&inject.lock);
+    if (inject.last) inject.last->wnext = first; else inject.first = first;
+    inject.last = last;
+    __atomic_fetch_add(&inject.batches, batches, __ATOMIC_RELEASE);
+    spin_unlock(&inject.lock);
+  }
+  for (int i = 0; i <= batches && i < nworkers; i++) notify();
 }
 
 static bool is_cancelled(mt_task* t) {
@@ -4323,8 +4530,6 @@ void fly_mon_lock(uint8_t* m) { spin_lock(&((waitq*)m)->lock); }
 void fly_mon_unlock(uint8_t* m) { spin_unlock(&((waitq*)m)->lock); }
 void fly_mon_wake_one(uint8_t* m) { wake_one((waitq*)m); }
 void fly_mon_wake_all(uint8_t* m) { wake_all((waitq*)m); }
-void fly_core_relax(void) { relax(); }
-void fly_core_yield(void) { sched_yield(); }
 
 // A task waiting is woken to see that it is cancelled; one in cleanup is left to finish it.
 static void wake_cancelled(mt_task* t);
@@ -4363,12 +4568,18 @@ static void mt_cleaning(int d) {
   if (t) __atomic_fetch_add(&t->cleaning, d, __ATOMIC_SEQ_CST);
 }
 
-// A scheduling point: a cancellation is delivered, and the worker's other tasks get a turn.
-static void mt_point(fly_wait* w) {
+// A scheduling point: a cancellation is delivered, and the worker's other tasks get a turn: those
+// woken from another thread, and, once the task has passed 64 points since it began to run, any.
+// Starting a task counts for none (`budget` false): making work is not taking a turn, and a loop
+// that starts many would otherwise queue behind them.
+static void mt_point_as(fly_wait* w, bool budget) {
   mt_task* t = running;
   W_BEGIN(w)
   if (!t || cancelled_here()) return;
-  if (__atomic_load_n(&this_worker->inhead, __ATOMIC_RELAXED)) {
+  worker* me = this_worker;
+  if (budget) me->points++;
+  if (__atomic_load_n(&me->next, __ATOMIC_RELAXED) && me->points - me->next_at >= 4) flush_next(me);
+  if (__atomic_load_n(&me->inhead, __ATOMIC_RELAXED) || (budget && me->points >= 64 && ring_len(&me->run) > 0)) {
     t->yielded = true;
     to_worker(t, NULL);
     W_SUSPEND(w);
@@ -4376,6 +4587,8 @@ static void mt_point(fly_wait* w) {
   }
   W_END
 }
+
+static void mt_point(fly_wait* w) { mt_point_as(w, true); }
 
 // ---- sleeping: each worker's timer wheel (`sleep_timer`) ----
 
@@ -4654,6 +4867,7 @@ static void mt_end(mt_task* t) {
 // elsewhere after: what it reads of itself is its own context, which this thread now points to.
 static void run_task(worker* w, mt_task* t) {
   running = t;
+  w->points = 0;
   t->home = w;
   if (!t->started) {
     t->started = true;
@@ -4688,7 +4902,7 @@ static void run_task(worker* w, mt_task* t) {
   if (done) {
     mt_end(t);
   } else if (yielded) {
-    inbox_push(w, t);
+    ring_push(&w->run, t);
   }
 }
 
@@ -4903,12 +5117,15 @@ static job_t* steal_job(worker* w) {
 }
 
 // Another worker's: a task not yet begun, then one woken there that waits for its worker.
-static mt_task* steal_task(worker* w) {
+static int max_searchers(void) { return (nworkers + 1) / 2; }
+
+// Half of another worker's ring that holds at least `least` tasks, or a task from its inbox.
+static mt_task* steal_task(worker* w, uint32_t least) {
   int start = (int)(worker_rand(w) % (uint64_t)nworkers);
   for (int k = 0; k < nworkers; k++) {
     worker* v = &workers[(start + k) % nworkers];
     if (v == w) continue;
-    mt_task* t = dq_steal(&v->fresh);
+    mt_task* t = ring_steal(&v->run, &w->run, least);
     if (t) return t;
   }
   for (int k = 0; k < nworkers; k++) {
@@ -4916,6 +5133,23 @@ static mt_task* steal_task(worker* w) {
     if (v == w) continue;
     mt_task* t = inbox_pop(v);
     if (t) return t;
+  }
+  return NULL;
+}
+
+// Another worker's next task, if it is still there after a grace far longer than a waker takes to
+// wait, so that it runs where it was woken unless that worker has gone on without it (Go's
+// `runqsteal` of `runnext`, 3 µs).
+static mt_task* steal_next(worker* w) {
+  int start = (int)(worker_rand(w) % (uint64_t)nworkers);
+  for (int k = 0; k < nworkers; k++) {
+    worker* v = &workers[(start + k) % nworkers];
+    if (v == w) continue;
+    mt_task* n = __atomic_load_n(&v->next, __ATOMIC_ACQUIRE);
+    if (!n) continue;
+    uint64_t until = now_ns() + 3000;
+    while (__atomic_load_n(&v->next, __ATOMIC_RELAXED) == n && now_ns() < until) relax();
+    if (__atomic_compare_exchange_n(&v->next, &n, NULL, false, __ATOMIC_ACQ_REL, __ATOMIC_RELAXED)) return n;
   }
   return NULL;
 }
@@ -4956,11 +5190,12 @@ static void par_join(void (*a)(void*, void*), void* fa, void* oa, void (*da)(voi
 // ---- workers ----
 
 static bool work_anywhere(worker* w) {
-  (void)w;
+  if (__atomic_load_n(&w->next, __ATOMIC_SEQ_CST)) return true;
   for (int k = 0; k < nworkers; k++) {
     if (__atomic_load_n(&workers[k].inhead, __ATOMIC_SEQ_CST)) return true;
-    if (dq_size(&workers[k].fresh) > 0 || dq_size(&workers[k].jobs) > 0) return true;
+    if (ring_len(&workers[k].run) > 0 || dq_size(&workers[k].jobs) > 0) return true;
   }
+  if (__atomic_load_n(&inject.batches, __ATOMIC_ACQUIRE)) return true;
   uint64_t due = earliest_due();
   return due && due <= now_ns();
 }
@@ -5033,18 +5268,42 @@ static void work(worker* w) {
     if (turn % 32 == 0 && __atomic_load_n(&polling, __ATOMIC_ACQUIRE)) io_take();
     // Tasks woken here and tasks begun here take turns: either kind always first would leave the
     // other waiting for as long as the first kind keeps coming, as a busy server's connections do.
-    mt_task* t;
-    if (turn % 2) { t = inbox_pop(w); if (!t) t = dq_pop(&w->fresh); }
-    else { t = dq_pop(&w->fresh); if (!t) t = inbox_pop(w); }
+    // The shared queue now and then, so that its tasks are not left while this worker's keep coming;
+    // then this worker's own, woken from elsewhere and in its ring by turns; then the shared queue.
+    mt_task* t = turn % 61 == 0 ? take_batch(&w->run) : NULL;
+    if (!t && __atomic_load_n(&w->next, __ATOMIC_RELAXED)) {
+      if (w->nexts < 32) { t = __atomic_exchange_n(&w->next, NULL, __ATOMIC_ACQ_REL); if (t) w->nexts++; }
+      else w->nexts = 0;
+    } else w->nexts = 0;
+    if (!t) {
+      if (turn % 2) { t = inbox_pop(w); if (!t) t = ring_pop(&w->run); }
+      else { t = ring_pop(&w->run); if (!t) t = inbox_pop(w); }
+    }
+    if (!t) t = take_batch(&w->run);
     if (!t) {
       fire_alarms();
-      t = dq_pop(&w->fresh);
+      t = ring_pop(&w->run);
       if (!t) t = inbox_pop(w);
     }
     if (!t) {
       job_t* j = steal_job(w);
       if (j) { run_job(j); continue; }
-      t = steal_task(w);
+      // A few at a time look in others' rings (tokio's searching workers): every idle worker
+      // looking would keep the busy one's ring all but empty, each steal taking one or two tasks,
+      // and that ring's counters moving between every core.
+      // In a few rounds, a little apart, the first ones taking only from rings with a batch worth
+      // the taking: a task making many, its ring filling, is then taken from by halves, not by
+      // ones, and a single task waits a microsecond at most.
+      if (__atomic_add_fetch(&searchers, 1, __ATOMIC_SEQ_CST) <= max_searchers()) {
+        for (unsigned round = 0; round < 4 && !t; round++) {
+          for (unsigned i = 0; i < (round ? 16u << round : 0u); i++) relax();
+          t = steal_task(w, round < 3 ? 8 : 1);
+          if (!t && round == 3) t = steal_next(w);
+          if (!t) t = take_batch(&w->run);
+        }
+      }
+      // The last to look found work: another may look, so that it goes on spreading.
+      if (__atomic_sub_fetch(&searchers, 1, __ATOMIC_SEQ_CST) == 0 && t) notify();
     }
     if (t) { run_task(w, t); continue; }
     idle(w);
@@ -5078,7 +5337,7 @@ static void mt_run(void (*main)(void**), void (*entry)(void* task, void* closure
     w->rng = 0x9e3779b97f4a7c15u * (uint64_t)(k + 1);
     pthread_mutex_init(&w->park_mu, NULL);
     pthread_cond_init(&w->park_cv, NULL);
-    w->fresh.buf = dq_buf_new(256, NULL);
+
     w->jobs.buf = dq_buf_new(256, NULL);
   }
   this_worker = &workers[0];
@@ -5135,7 +5394,7 @@ static mt_task* mt_start(int scope, void (*entry)(void* task, void* closure, voi
   scope_join(sc, t);
   __atomic_fetch_add(&runnable, 1, __ATOMIC_SEQ_CST);
   __atomic_fetch_add(&alive, 1, __ATOMIC_SEQ_CST);
-  dq_push(&this_worker->fresh, t);
+  ring_push(&this_worker->run, t);
   notify();
   return t;
 }
@@ -5143,7 +5402,7 @@ static mt_task* mt_start(int scope, void (*entry)(void* task, void* closure, voi
 static int mt_spawn(fly_wait* w, int scope, void (*entry)(void* task, void* closure, void** slot), const fly_fn* f, size_t size, size_t frame) {
   // A forked task's `Fiber` refers to it too, by its number.
   if (w->step == 0) w->n = obj_new(mt_start(scope, entry, f, size, frame, 1, 0));
-  mt_point(w);
+  mt_point_as(w, false);
   return w->n;
 }
 
@@ -5154,7 +5413,7 @@ static void* mt_task_spawn(fly_wait* w, int scope, const fly_fn* f, size_t frame
   if (w->step == 0) {
     w->p[1] = mt_start(scope, fly_task_void, f, 0, frame, 1, 1);
   }
-  mt_point(w);
+  mt_point_as(w, false);
   return w->p[1];
 }
 
@@ -5419,23 +5678,23 @@ static void mt_sender_clone(fly_chan ch) {
   fly_rt_mt_sender_clone((uint8_t*)&c->q, c->state);
 }
 
-// A `Mutex`'s monitor and whether it is held, in the header before its state; how it is taken and
-// given back is the runtime's Flyscript's (rt/mt.fly).
-typedef struct { waitq q; int32_t held; } mt_mutex;
+// A `Mutex`'s lock, in the header before its state. Its body performs nothing (§6.2), so it is held
+// for a moment, never across a scheduling point, by a task running on a core: one that finds it
+// held spins, and sleeps on it only should the holder's thread be off its core. Taking it and
+// giving it back are one atomic operation each.
+typedef struct { spin_t lock; } mt_mutex;
 _Static_assert(sizeof(mt_mutex) < MUTEX_HEADER, "a mutex's header holds its lock, and its poison after");
 
 static mt_mutex* mutex_of(const void* state) { return (mt_mutex*)((uint8_t*)state - MUTEX_HEADER); }
 
 void fly_lock(const void* state) {
   if (!threads) return;
-  mt_mutex* m = mutex_of(state);
-  fly_rt_mt_lock((uint8_t*)&m->q, &m->held);
+  spin_lock(&mutex_of(state)->lock);
 }
 
 void fly_unlock(const void* state) {
   if (!threads || !state) return;
-  mt_mutex* m = mutex_of(state);
-  fly_rt_mt_unlock((uint8_t*)&m->q, &m->held);
+  spin_unlock(&mutex_of(state)->lock);
 }
 
 static void* mt_task_result(mt_task* t) { return t->forked ? mt_fork_of(t)->result : NULL; }
@@ -5459,8 +5718,6 @@ void fly_mon_lock(uint8_t* m) { (void)m; no_threads(); }
 void fly_mon_unlock(uint8_t* m) { (void)m; no_threads(); }
 void fly_mon_wake_one(uint8_t* m) { (void)m; no_threads(); }
 void fly_mon_wake_all(uint8_t* m) { (void)m; no_threads(); }
-void fly_core_relax(void) {}
-void fly_core_yield(void) {}
 #endif
 void fly_lock(const void* state) { (void)state; }
 void fly_unlock(const void* state) { (void)state; }
