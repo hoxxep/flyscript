@@ -3919,7 +3919,7 @@ struct mt_task {
   // The queue it waits in, if it waits, and its neighbours there.
   waitq* waiting;
   mt_task *wnext, *wprev;
-  // Its neighbours among its scope's tasks still alive.
+  // Its neighbours among its scope's tasks still alive, in the list of them it is in (`mt_shard`).
   mt_task *snext, *sprev;
   // The next task in an inbox.
   mt_task* rnext;
@@ -3933,6 +3933,7 @@ struct mt_task {
   int cleaning, destroying;
   int8_t how;
   bool forked, told, finished;
+  uint8_t shard;
   // Cancelled by its scope, which may take that back, or by its `Task`, for good (`killed`).
   bool started, cancelled, killed, yielded;
 };
@@ -3969,15 +3970,101 @@ static void (*mt_entry(mt_task* t))(void*, void*, void**) { return t->forked ? m
 
 // A scope: its tasks still alive, and how it fails. Its queue holds its owner while the owner waits
 // for them at the scope's end; the queue's lock guards it all.
+// A scope's tasks still alive are in lists each under a lock of its own: one in the scope, until it
+// has had SCOPE_SHARDED at once, and then SCOPE_SHARDS more as well, a cache line apart, which a
+// task joins by its address, so that tasks ending together on every core take different locks
+// (a task started by one task, as a server's are, would all go to one list if they were by worker).
+// How many are alive is counted apart: a task that ends counts down without a lock, unless it is
+// the last, which counts down under the scope's lock and wakes its closer there, so that the closer,
+// which reads the count under that lock, cannot free the scope while the last is still at it.
+enum { SCOPE_SHARDED = 64, SCOPE_SHARDS = 64 };
+static void wake_all(waitq* q);
+typedef struct { spin_t lock; mt_task* head; } mt_shard;
+typedef struct { spin_t lock; mt_task* head; } __attribute__((aligned(64))) mt_padded_shard;
 struct mt_scope {
   waitq q;
   mt_task* owner;
-  mt_task* live;
   size_t nlive;
   bool closing;
   // The task whose failure the scope raises, unless a join raises it first.
   mt_task* failer;
+  mt_shard live;
+  mt_padded_shard* more;
+  void* more_block;
 };
+
+static mt_shard* scope_shard(mt_scope* sc, uint8_t k) {
+  return k == 0 ? &sc->live : (mt_shard*)&__atomic_load_n(&sc->more, __ATOMIC_ACQUIRE)[k - 1];
+}
+
+// Task `t` joins a list of the scope's: the scope's own, or, once it has been busy, one by its address.
+static void scope_join(mt_scope* sc, mt_task* t) {
+  mt_padded_shard* more = __atomic_load_n(&sc->more, __ATOMIC_ACQUIRE);
+  if (!more && __atomic_load_n(&sc->nlive, __ATOMIC_RELAXED) >= SCOPE_SHARDED) {
+    spin_lock(&sc->q.lock);
+    more = sc->more;
+    if (!more) {
+      sc->more_block = fly_alloc(SCOPE_SHARDS * sizeof(mt_padded_shard) + 64);
+      more = (mt_padded_shard*)(((uintptr_t)sc->more_block + 63) & ~(uintptr_t)63);
+      __atomic_store_n(&sc->more, more, __ATOMIC_RELEASE);
+    }
+    spin_unlock(&sc->q.lock);
+  }
+  // Above the bits allocation aligns, mixed with higher ones, which slabs of tasks share.
+  uintptr_t mix = ((uintptr_t)t >> 8) ^ ((uintptr_t)t >> 14);
+  t->shard = more ? (uint8_t)(1 + mix % SCOPE_SHARDS) : 0;
+  mt_shard* h = scope_shard(sc, t->shard);
+  spin_lock(&h->lock);
+  t->sprev = NULL;
+  t->snext = h->head;
+  if (h->head) h->head->sprev = t;
+  h->head = t;
+  spin_unlock(&h->lock);
+}
+
+static void scope_leave(mt_scope* sc, mt_task* t) {
+  mt_shard* h = scope_shard(sc, t->shard);
+  spin_lock(&h->lock);
+  if (t->sprev) t->sprev->snext = t->snext; else h->head = t->snext;
+  if (t->snext) t->snext->sprev = t->sprev;
+  spin_unlock(&h->lock);
+}
+
+// One task fewer alive; the last wakes whoever waits for the scope to empty.
+static void scope_count_down(mt_scope* sc) {
+  size_t n = __atomic_load_n(&sc->nlive, __ATOMIC_ACQUIRE);
+  while (n > 1) {
+    if (__atomic_compare_exchange_n(&sc->nlive, &n, n - 1, true, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) return;
+  }
+  spin_lock(&sc->q.lock);
+  if (__atomic_sub_fetch(&sc->nlive, 1, __ATOMIC_ACQ_REL) == 0) wake_all(&sc->q);
+  spin_unlock(&sc->q.lock);
+}
+
+// The scope's tasks alive, but `except`, each with a reference taken, in a list of `*n`.
+static mt_task** scope_alive(mt_scope* sc, mt_task* except, size_t* n) {
+  size_t cap = 16, k = 0;
+  mt_task** out = fly_alloc(cap * sizeof(mt_task*));
+  mt_padded_shard* more = __atomic_load_n(&sc->more, __ATOMIC_ACQUIRE);
+  for (int i = 0; i <= (more ? SCOPE_SHARDS : 0); i++) {
+    mt_shard* h = i == 0 ? &sc->live : (mt_shard*)&more[i - 1];
+    spin_lock(&h->lock);
+    for (mt_task* o = h->head; o; o = o->snext) {
+      if (o == except) continue;
+      if (k == cap) {
+        cap *= 2;
+        mt_task** grown = realloc(out, cap * sizeof(mt_task*));
+        if (!grown) fly_out_of_memory();
+        out = grown;
+      }
+      __atomic_fetch_add(&o->refs, 1, __ATOMIC_RELAXED);
+      out[k++] = o;
+    }
+    spin_unlock(&h->lock);
+  }
+  *n = k;
+  return out;
+}
 
 // A channel: its monitor, the receivers waiting under it; what it holds, the runtime's Flyscript's
 // (rt/mt.fly); and what drops a message it will not deliver.
@@ -4125,6 +4212,41 @@ static void unpark(mt_task* t) {
   // A worker that took the kernel's events runs the first task they woke itself: another is woken
   // only for those after it.
   if (w && w->harvesting && w->harvested++ == 0) return;
+  notify();
+}
+
+// Tasks woken together, a list of `n` by `rnext`, run again, dealt out: as many as there are
+// workers or more, a share to every worker, awake or asleep, appended to its inbox at once, an
+// asleep one woken; fewer, one each to workers asleep. The rest are kept here, on the waking
+// worker's own deque. Left where they were woken, every worker would steal them one at a time.
+static void unpark_all(mt_task* list, size_t n) {
+  __atomic_fetch_add(&runnable, (long)n, __ATOMIC_SEQ_CST);
+  worker* me = this_worker;
+  bool all = n >= (size_t)nworkers;
+  size_t share = all ? n / (size_t)nworkers : 1;
+  {
+    for (int k = 1; k < nworkers && list; k++) {
+      worker* v = &workers[(me->index + k) % nworkers];
+      bool asleep = __atomic_load_n(&v->parked, __ATOMIC_SEQ_CST);
+      if (!all && !asleep) continue;
+      mt_task* head = list;
+      mt_task* tail = list;
+      for (size_t i = 1; i < share && tail->rnext; i++) tail = tail->rnext;
+      list = tail->rnext;
+      tail->rnext = NULL;
+      spin_lock(&v->inlock);
+      if (v->intail) v->intail->rnext = head;
+      else __atomic_store_n(&v->inhead, head, __ATOMIC_RELAXED);
+      v->intail = tail;
+      spin_unlock(&v->inlock);
+      if (asleep) unpark_worker(v);
+    }
+  }
+  while (list) {
+    mt_task* next = list->rnext;
+    dq_push(&me->fresh, list);
+    list = next;
+  }
   notify();
 }
 
@@ -4320,8 +4442,11 @@ static bool wheel_next(const sleep_timer* tm, uint64_t* at, int* level) {
 }
 
 // The wheel brought to time `until`: each slot due on the way taken up, its sleeps that are due
-// woken, and the rest put in again, lower down. Under the wheel's lock.
-static void wheel_advance(sleep_timer* tm, int worker, uint64_t until) {
+// taken out and their tasks claimed — out of the queue a cancellation looks in, so that nothing
+// else wakes them — in a list by `rnext` that is given back, to be woken once the lock is let go;
+// and the rest put in again, lower down. Under the wheel's lock.
+static mt_task* wheel_advance(sleep_timer* tm, int worker, uint64_t until, size_t* claimed) {
+  mt_task* woken = NULL;
   uint64_t at;
   int k;
   while (wheel_next(tm, &at, &k) && at <= until) {
@@ -4341,7 +4466,9 @@ static void wheel_advance(sleep_timer* tm, int worker, uint64_t until) {
         if (__atomic_load_n(&t->waiting, __ATOMIC_SEQ_CST) == &tm->q) {
           q_remove(&tm->q, t);
           __atomic_store_n(&t->waiting, NULL, __ATOMIC_SEQ_CST);
-          unpark(t);
+          t->rnext = woken;
+          woken = t;
+          (*claimed)++;
         }
       } else {
         wheel_link(tm, worker, w);
@@ -4350,6 +4477,7 @@ static void wheel_advance(sleep_timer* tm, int worker, uint64_t until) {
     }
   }
   if (until > tm->now) tm->now = until;
+  return woken;
 }
 
 static void wheel_set_due(sleep_timer* tm) {
@@ -4415,9 +4543,11 @@ static void fire_alarms(void) {
     if (!now) now = now_ns();
     if (due > now) continue;
     if (!spin_trylock(&tm->q.lock)) continue;
-    wheel_advance(tm, k, now / 1000000u);
+    size_t n = 0;
+    mt_task* woken = wheel_advance(tm, k, now / 1000000u, &n);
     wheel_set_due(tm);
     spin_unlock(&tm->q.lock);
+    if (woken) unpark_all(woken, n);
   }
 }
 
@@ -4471,30 +4601,30 @@ static void mt_end(mt_task* t) {
   mt_scope* sc = t->scope;
   mt_task** cancels = NULL;
   size_t ncancels = 0;
-  spin_lock(&sc->q.lock);
-  // A spawned task's panic ends it alone (§5.7).
+  mt_task* owner = NULL;
+  // A spawned task's panic ends it alone (§5.7). The first failure cancels the scope's others, and
+  // its body, unless the scope is closing, when the body waits for them already.
   bool failed = t->error || (t->forked && t->panic);
-  if (failed && !sc->failer) {
-    cancels = fly_alloc((sc->nlive + 1) * sizeof(mt_task*));
-    if (!sc->closing && sc->owner) {
-      __atomic_fetch_add(&sc->owner->refs, 1, __ATOMIC_RELAXED);
-      cancels[ncancels++] = sc->owner;
+  if (failed) {
+    spin_lock(&sc->q.lock);
+    bool first = !sc->failer;
+    if (first) {
+      __atomic_fetch_add(&t->refs, 1, __ATOMIC_RELAXED);
+      sc->failer = t;
+      if (!sc->closing && sc->owner) {
+        __atomic_fetch_add(&sc->owner->refs, 1, __ATOMIC_RELAXED);
+        owner = sc->owner;
+      }
     }
-    for (mt_task* o = sc->live; o; o = o->snext) {
-      if (o == t) continue;
-      __atomic_fetch_add(&o->refs, 1, __ATOMIC_RELAXED);
-      cancels[ncancels++] = o;
-    }
+    spin_unlock(&sc->q.lock);
+    if (first) cancels = scope_alive(sc, t, &ncancels);
   }
-  if (failed && !sc->failer) {
-    __atomic_fetch_add(&t->refs, 1, __ATOMIC_RELAXED);
-    sc->failer = t;
+  scope_leave(sc, t);
+  scope_count_down(sc);
+  if (owner) {
+    cancel_task(owner);
+    task_unref(owner);
   }
-  if (t->sprev) t->sprev->snext = t->snext; else sc->live = t->snext;
-  if (t->snext) t->snext->sprev = t->sprev;
-  sc->nlive--;
-  if (sc->nlive == 0) wake_all(&sc->q);
-  spin_unlock(&sc->q.lock);
   for (size_t i = 0; i < ncancels; i++) {
     cancel_task(cancels[i]);
     task_unref(cancels[i]);
@@ -4895,7 +5025,9 @@ static void idle(worker* w) {
 static void work(worker* w) {
   for (unsigned turn = 1;; turn++) {
     if (w == &workers[0] && __atomic_load_n(&main_done, __ATOMIC_SEQ_CST)) return;
-    fire_alarms();
+    // A busy worker looks at the timers now and then, an idle one before it looks for work, so that
+    // the clock is not read for every task run.
+    if (turn % 64 == 0) fire_alarms();
     // A worker that always has work still takes the kernel's events now and then, for the tasks
     // waiting for sockets while every worker is busy.
     if (turn % 32 == 0 && __atomic_load_n(&polling, __ATOMIC_ACQUIRE)) io_take();
@@ -4904,6 +5036,11 @@ static void work(worker* w) {
     mt_task* t;
     if (turn % 2) { t = inbox_pop(w); if (!t) t = dq_pop(&w->fresh); }
     else { t = dq_pop(&w->fresh); if (!t) t = inbox_pop(w); }
+    if (!t) {
+      fire_alarms();
+      t = dq_pop(&w->fresh);
+      if (!t) t = inbox_pop(w);
+    }
     if (!t) {
       job_t* j = steal_job(w);
       if (j) { run_job(j); continue; }
@@ -4994,12 +5131,8 @@ static mt_task* mt_start(int scope, void (*entry)(void* task, void* closure, voi
   t->how = FLY_TASK_RUNNING;
   t->refs = 2 + refs;
   t->handles = handles;
-  spin_lock(&sc->q.lock);
-  t->snext = sc->live;
-  if (sc->live) sc->live->sprev = t;
-  sc->live = t;
-  sc->nlive++;
-  spin_unlock(&sc->q.lock);
+  __atomic_fetch_add(&sc->nlive, 1, __ATOMIC_ACQ_REL);
+  scope_join(sc, t);
   __atomic_fetch_add(&runnable, 1, __ATOMIC_SEQ_CST);
   __atomic_fetch_add(&alive, 1, __ATOMIC_SEQ_CST);
   dq_push(&this_worker->fresh, t);
@@ -5169,7 +5302,7 @@ static void mt_scope_close(fly_wait* w, int id) {
   // Every task started in it is waited for. Cancelled while it waits, the task cancels them, once,
   // and waits on.
   w->a[1] = w->a[0] || w->p[0];
-  while (sc->nlive > 0) {
+  while (__atomic_load_n(&sc->nlive, __ATOMIC_ACQUIRE) > 0) {
     if (!w->a[1] && is_cancelled(me)) {
       w->a[1] = true;
       spin_unlock(&sc->q.lock);
@@ -5191,6 +5324,7 @@ static void mt_scope_close(fly_wait* w, int id) {
   bool unwound = unwinding && !failer;
   if (failer) __atomic_store_n(&me->cancelled, false, __ATOMIC_SEQ_CST);
   obj_clear(id);
+  free(sc->more_block);
   free(sc);
   char* panic = NULL;
   if (unwound) {
@@ -5213,14 +5347,8 @@ static void mt_scope_close(fly_wait* w, int id) {
 // A panic unwound scope `id`'s body: its tasks still alive are cancelled.
 static void mt_scope_cancel(int id) {
   mt_scope* sc = obj_get(id);
-  spin_lock(&sc->q.lock);
-  mt_task** cancels = fly_alloc((sc->nlive + 1) * sizeof(mt_task*));
   size_t n = 0;
-  for (mt_task* o = sc->live; o; o = o->snext) {
-    __atomic_fetch_add(&o->refs, 1, __ATOMIC_RELAXED);
-    cancels[n++] = o;
-  }
-  spin_unlock(&sc->q.lock);
+  mt_task** cancels = scope_alive(sc, NULL, &n);
   for (size_t i = 0; i < n; i++) {
     cancel_task(cancels[i]);
     task_unref(cancels[i]);
