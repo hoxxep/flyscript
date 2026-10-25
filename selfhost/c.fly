@@ -192,6 +192,17 @@ export function unmark(s: str, marks: readonly HashMap<String, String>): String 
 // The functions that check their stack as they start (runtime.h): those in a cycle of calls, a
 // strongly connected component of more than one or one that calls itself, and those that call what
 // they cannot see. Any other's calls end before the stack can grow without bound.
+// The bytes of a lane of the scalar, for `std/simd`: none for one whose width varies by target.
+function primBytes(p: Prim): u64 {
+  match (p) {
+    #I8 | #U8 | #Bool => 1,
+    #I16 | #U16 => 2,
+    #I32 | #U32 | #F32 => 4,
+    #I64 | #U64 | #F64 => 8,
+    _ => 0,
+  }
+}
+
 export function checking(callees: readonly HashMap<String, HashSet<String>>, indirect: readonly HashSet<String>): HashSet<String> {
   let t = Tarjan { index: HashMap.new(), low: HashMap.new(), stack: Vec.new(), on: HashSet.new(), next: 0, cyclic: HashSet.new() };
   let names: Vec<String> = Vec.new();
@@ -2003,7 +2014,8 @@ impl Cgen {
 impl Cgen {
   // A call: its value put in `dest`, if there is one; then where a failure, an unwinding, or a
   // stop it reports goes.
-  function call(self: mut Self, dest: Option<String>, c: readonly Call): void uses Fail<Diagnostic> {
+  function call(self: mut Self, dest: Option<String>, c0: readonly Call): void uses Fail<Diagnostic> {
+    const c = self.vectorized(c0);
     const span = c.span;
     let vs: Vec<String> = Vec.new();
     for (const a of c.args) { vs.push(self.operand(a, span)); }
@@ -2274,6 +2286,7 @@ impl Cgen {
       return match (self.lw.p.knownDef("Io")) { #Some(d) => `fly_handled(${d})`, #None => "false".toString() };
     }
     if (key.startsWith("extern:")) { return self.foreignCall(key.slice(7, key.len()), c, vs.clone()); }
+    if (key.startsWith("simd:")) { return self.simdCall(key, c, vs.clone()); }
     if (const #Some(r) = self.memory(key, c, vs.clone())) { return r; }
     match (key) {
       "println" => `({ fly_println(${arg(0)}); (fly_unit)0; })`,
@@ -3788,6 +3801,193 @@ impl Cgen {
   export function ownsCaptures(self: readonly Self, k: usize): bool {
     for (const [_, t, byValue] of self.lw.closures[k].captures) { if (byValue && self.needsDrop(t)) { return true; } }
     false
+  }
+
+  // ---- std/simd ----
+
+  // The lanes of a `Simd<T, N>` or a `Mask<N>`: their scalar, `bool` for a mask's, and how many.
+  function lanesOf(self: readonly Self, t: readonly Ty): Option<[Prim, u64]> {
+    match (stripBorrow(t)) {
+      #Named(d, args) => {
+        if (self.lw.p.modules[self.lw.p.defs[d].module].name != "std/simd") { return #None; }
+        const name = self.lw.p.defs[d].name.asStr();
+        if (name == "Simd" && args.len() == 2 && const #Ty(#Prim(p)) = args[0] && const #Len(#Known(n)) = args[1]) { return #Some([p, n]); }
+        if (name == "Mask" && args.len() == 1 && const #Len(#Known(n)) = args[0]) { return #Some([#Bool, n]); }
+        #None
+      }
+      _ => #None,
+    }
+  }
+
+  // The call `c`, or, if it is of a method of `std/simd` that is lowered to vector instructions
+  // here, of its routine.
+  export function vectorized(self: readonly Self, c: readonly Call): Call {
+    match (self.simdKey(c)) {
+      #Some(k) => {
+        let v = c.clone();
+        v.callee = #Builtin(k);
+        v
+      }
+      #None => c.clone(),
+    }
+  }
+
+  // The call of a method of `std/simd` that is lowered to the target's vector instructions, as the
+  // routine `simd:<method>`, rather than run a lane at a time as its body is: one at a lane type and
+  // count that fill a vector of 2 to 64 bytes, and whose meaning vector instructions keep.
+  export function simdKey(self: readonly Self, c: readonly Call): Option<String> {
+    const i = match (c.callee) { #Inst(i) => i, _ => return #None };
+    const fid = self.lw.insts[i].fid;
+    if (self.lw.p.modules[self.lw.p.fns[fid].module].name != "std/simd") { return #None; }
+    const name = self.lw.p.fns[fid].name.asStr();
+    const of: Option<Ty> = match (name) {
+      "splat" | "load" => #Some(c.ret.clone()),
+      "select" => match (c.argTys.get(1)) { #Some(t) => #Some(t.clone()), #None => #None },
+      _ => match (c.argTys.first()) { #Some(t) => #Some(t.clone()), #None => #None },
+    };
+    const [p, n] = match (of) { #Some(t) => match (self.lanesOf(t)) { #Some(x) => x, #None => return #None }, #None => return #None };
+    const w = primBytes(p);
+    if (w == 0 || n < 2 || n > 64 || (n & (n - 1)) != 0 || n * w > 64) { return #None; }
+    const float = match (p) { #F32 | #F64 => true, _ => false };
+    const isMask = match (p) { #Bool => true, _ => false };
+    const ok = match (name) {
+      "splat" => !isMask,
+      "load" | "store" | "add" | "sub" | "mul" | "eq" | "ne" | "lt" | "le" | "gt" | "ge" | "select" => !isMask,
+      "and" | "or" | "not" => true,
+      "xor" | "min" | "max" | "shl" | "shr" | "sum" | "reduceMin" | "reduceMax" => !isMask && !float,
+      "saturatingAdd" | "saturatingSub" => !isMask && !float && w <= 8,
+      "any" | "all" | "countTrue" | "bitmask" | "firstTrue" => isMask,
+      "lookupIn" => !isMask && w == 1 && n == 16,
+      _ => false,
+    };
+    if (ok) { #Some(`simd:${name}:${i}`) } else { #None }
+  }
+
+  // A call of the routine `simd:<method>:<instance>`: a function of its own, whose body is vector
+  // code where the C compiler is clang, whose vector extensions it is written in, and elsewhere
+  // the method's own body, run a lane at a time.
+  function simdCall(self: mut Self, key: str, c: readonly Call, vs: Vec<String>): String uses Fail<Diagnostic> {
+    const span = c.span;
+    const parts = key.split(":");
+    const name = parts[1].clone();
+    const inst = match (parseInt(parts[2].asStr())) { #Some(n) => n as usize, #None => return self.fail(span, "a vector routine of no method") };
+    const fnName = self.lw.insts[inst].name.clone();
+    const hk = `${key}`;
+    const helper = match (self.helpers.get(hk.asStr())) {
+      #Some(h) => h.clone(),
+      #None => {
+        const h = `fly_simd${self.helpers.len()}`;
+        self.helpers.insert(hk, h.clone());
+        let ps: Vec<String> = Vec.new();
+        let names: Vec<String> = Vec.new();
+        for (const [k, t] of c.argTys.iter().enumerate()) {
+          ps.push(`${self.ctype(t, span)} a${k}`);
+          names.push(`a${k}`);
+        }
+        const rt = self.ctype(c.ret, span);
+        const sig = `static inline ${rt} ${h}(${if (ps.len() == 0) { "void".toString() } else { ps.join(", ") }})`;
+        const expr = self.simdOp(name.asStr(), c, names.clone());
+        self.protos.push(`${sig};\n`);
+        self.dropCode.push(`${sig} {\n#if defined(__clang__)\n  return ${expr};\n#else\n  return ${fnName}(${names.join(", ")});\n#endif\n}\n`);
+        h
+      }
+    };
+    `${helper}(${vs.join(", ")})`
+  }
+
+  // A `std/simd` routine (`simdKey`), in C's vector extensions, which clang lowers to the target's
+  // vector instructions: `V_` the vector of the lanes, `U_` of unsigned lanes as wide, in which
+  // integers wrap, and `M_` of a mask's lanes, one byte each, 0 or 1 as its `bool`s are.
+  function simdOp(self: mut Self, name: str, c: readonly Call, vs: Vec<String>): String uses Fail<Diagnostic> {
+    const span = c.span;
+    const arg = (i: usize) => if (i < vs.len()) { vs[i].clone() } else { "0".toString() };
+    const of: Ty = match (name) {
+      "splat" | "load" => c.ret.clone(),
+      "select" => stripBorrow(c.argTys[1]),
+      _ => stripBorrow(c.argTys[0]),
+    };
+    const [p, n] = match (self.lanesOf(of)) { #Some(x) => x, #None => return self.fail(span, "not a vector") };
+    const w = primBytes(p);
+    const bytes = n * w;
+    const et = self.ctype(#Prim(p), span);
+    const ut = match (w) { 1 => "uint8_t", 2 => "uint16_t", 4 => "uint32_t", _ => "uint64_t" };
+    const it = match (w) { 1 => "int8_t", 2 => "int16_t", 4 => "int32_t", _ => "int64_t" };
+    const float = match (p) { #F32 | #F64 => true, _ => false };
+    const signed = match (p) { #I8 | #I16 | #I32 | #I64 | #Isize => true, _ => false };
+    const types = if (match (p) { #Bool => true, _ => false }) {
+      `typedef int8_t M_ __attribute__((vector_size(${n})));`
+    } else {
+      `typedef ${et} V_ __attribute__((vector_size(${bytes}))); typedef ${ut} U_ __attribute__((vector_size(${bytes}))); typedef ${it} I_ __attribute__((vector_size(${bytes}))); typedef int8_t M_ __attribute__((vector_size(${n})));`
+    };
+    const rt = self.ctype(c.ret, span);
+    const lanes = (x: str) => `(${x}).lanes.data`;
+    const vec = (v: str, x: str) => `V_ ${v}; memcpy(&${v}, ${lanes(x)}, ${bytes});`;
+    const mask = (v: str, x: str) => `M_ ${v}; memcpy(&${v}, ${lanes(x)}, ${n});`;
+    const give = (v: str) => `${rt} r_; memcpy(r_.lanes.data, &${v}, ${bytes}); r_;`;
+    const giveMask = (v: str) => `${rt} r_; M_ o_ = ${v}; memcpy(r_.lanes.data, &o_, ${n}); r_;`;
+    const two = (op: str) => {
+      const r = if (float) { `a_ ${op} b_` } else { `(V_)((U_)a_ ${op} (U_)b_)` };
+      `({ ${types} __auto_type x_ = ${arg(0)}; __auto_type y_ = ${arg(1)}; ${vec("a_", "x_")} ${vec("b_", "y_")} V_ v_ = ${r}; ${give("v_")} })`
+    };
+    const cmp = (e: str) => `({ ${types} __auto_type x_ = ${arg(0)}; __auto_type y_ = ${arg(1)}; ${vec("a_", "x_")} ${vec("b_", "y_")} ${giveMask(e)} })`;
+    const conv = (e: str) => `(__builtin_convertvector(${e}, M_) & 1)`;
+    // Bit `i` of `bits_` set where lane `i` of the mask `m_` is: a vector of `bool` is a bit a lane,
+    // and what follows the last lane in its last byte is not to be read.
+    const bits = `typedef _Bool B_ __attribute__((ext_vector_type(${n}))); B_ b_ = __builtin_convertvector(m_, B_); uint64_t bits_ = 0; memcpy(&bits_, &b_, ${(n + 7) / 8});${if (n < 64) { ` bits_ &= UINT64_C(${(1 << n) - 1});` } else { "" }}`;
+    const outOfBounds = `fly_panicf("%llu lanes from %llu are out of bounds (length %llu)", (unsigned long long)${n}, (unsigned long long)at_, (unsigned long long)s_.len)`;
+    match (name) {
+      "splat" => `({ ${types} V_ v_ = (V_){ 0 } + (${et})(${arg(0)}); ${give("v_")} })`,
+      "load" => `({ fly_slice s_ = ${arg(0)}; uint64_t at_ = ${arg(1)}; if (at_ > s_.len || s_.len - at_ < ${n}) ${outOfBounds}; ${rt} r_; memcpy(r_.lanes.data, (const char*)s_.ptr + at_ * ${w}, ${bytes}); r_; })`,
+      "store" => `({ __auto_type x_ = ${arg(0)}; fly_slice s_ = ${arg(1)}; uint64_t at_ = ${arg(2)}; if (at_ > s_.len || s_.len - at_ < ${n}) ${outOfBounds}; memcpy((char*)s_.ptr + at_ * ${w}, ${lanes("x_")}, ${bytes}); (fly_unit)0; })`,
+      "add" => two("+"),
+      "sub" => two("-"),
+      "mul" => two("*"),
+      "and" | "or" if match (p) { #Bool => true, _ => false } => {
+        const op = if (name == "and") { "&" } else { "|" };
+        `({ ${types} __auto_type x_ = ${arg(0)}; __auto_type y_ = ${arg(1)}; ${mask("a_", "x_")} ${mask("b_", "y_")} ${giveMask(`a_ ${op} b_`)} })`
+      }
+      "not" if match (p) { #Bool => true, _ => false } => `({ ${types} __auto_type x_ = ${arg(0)}; ${mask("a_", "x_")} ${giveMask("a_ ^ 1")} })`,
+      "and" => two("&"),
+      "or" => two("|"),
+      "xor" => two("^"),
+      "not" => `({ ${types} __auto_type x_ = ${arg(0)}; ${vec("a_", "x_")} V_ v_ = ~a_; ${give("v_")} })`,
+      "min" | "max" => `({ ${types} __auto_type x_ = ${arg(0)}; __auto_type y_ = ${arg(1)}; ${vec("a_", "x_")} ${vec("b_", "y_")} V_ v_ = __builtin_elementwise_${name}(a_, b_); ${give("v_")} })`,
+      "saturatingAdd" | "saturatingSub" => {
+        const op = if (name == "saturatingAdd") { "add" } else { "sub" };
+        `({ ${types} __auto_type x_ = ${arg(0)}; __auto_type y_ = ${arg(1)}; ${vec("a_", "x_")} ${vec("b_", "y_")} V_ v_ = __builtin_elementwise_${op}_sat(a_, b_); ${give("v_")} })`
+      }
+      // Shifting by the lane's width or more gives zero, or, rightward in a signed lane, its sign.
+      "shl" | "shr" => {
+        const bitsW = w * 8;
+        const far = if (name == "shl" || !signed) { "(V_){ 0 }".toString() } else { `a_ >> (${et})${bitsW - 1}` };
+        const op = if (name == "shl") { "<<" } else { ">>" };
+        `({ ${types} __auto_type x_ = ${arg(0)}; uint32_t k_ = ${arg(1)}; ${vec("a_", "x_")} V_ v_ = k_ >= ${bitsW} ? ${far} : a_ ${op} (${et})k_; ${give("v_")} })`
+      }
+      "eq" => cmp(conv("a_ == b_").asStr()),
+      "ne" => cmp(conv("a_ != b_").asStr()),
+      "lt" => cmp(conv("a_ < b_").asStr()),
+      "gt" => cmp(conv("b_ < a_").asStr()),
+      // `le` is not `>`, which a NaN lane makes true, as the lane-at-a-time body does.
+      "le" => cmp(`(${conv("b_ < a_")} ^ 1)`.asStr()),
+      "ge" => cmp(`(${conv("a_ < b_")} ^ 1)`.asStr()),
+      "sum" => `({ ${types} __auto_type x_ = ${arg(0)}; ${vec("a_", "x_")} (${et})__builtin_reduce_add((U_)a_); })`,
+      "reduceMin" => `({ ${types} __auto_type x_ = ${arg(0)}; ${vec("a_", "x_")} (${et})__builtin_reduce_min(a_); })`,
+      "reduceMax" => `({ ${types} __auto_type x_ = ${arg(0)}; ${vec("a_", "x_")} (${et})__builtin_reduce_max(a_); })`,
+      // A mask's lanes widened to all ones or all zeros as wide as a lane, to blend by.
+      "select" => `({ ${types} __auto_type m0_ = ${arg(0)}; __auto_type x_ = ${arg(1)}; __auto_type y_ = ${arg(2)}; ${mask("m_", "m0_")} ${vec("a_", "x_")} ${vec("b_", "y_")} I_ k_ = -__builtin_convertvector(m_, I_); V_ v_ = (V_)(((I_)a_ & k_) | ((I_)b_ & ~k_)); ${give("v_")} })`,
+      "any" => `({ ${types} __auto_type x_ = ${arg(0)}; ${mask("m_", "x_")} __builtin_reduce_or(m_) != 0; })`,
+      "all" => `({ ${types} __auto_type x_ = ${arg(0)}; ${mask("m_", "x_")} __builtin_reduce_and(m_) != 0; })`,
+      "bitmask" => `({ ${types} __auto_type x_ = ${arg(0)}; ${mask("m_", "x_")} ${bits} bits_; })`,
+      "countTrue" => `({ ${types} __auto_type x_ = ${arg(0)}; ${mask("m_", "x_")} ${bits} (uint32_t)__builtin_popcountll(bits_); })`,
+      "firstTrue" => {
+        const yes = self.some(c.ret, "(uint64_t)i_", span);
+        const no = self.none(c.ret, span);
+        const find = if (n == 16) { `int64_t i_ = fly_first16((const uint8_t*)&m_);` } else { `${bits} int64_t i_ = bits_ ? (int64_t)__builtin_ctzll(bits_) : -1;` };
+        `({ ${types} __auto_type x_ = ${arg(0)}; ${mask("m_", "x_")} ${find} i_ >= 0 ? ${yes} : ${no}; })`
+      }
+      "lookupIn" => `({ __auto_type x_ = ${arg(0)}; __auto_type t_ = ${arg(1)}; ${rt} r_; fly_lookup16(r_.lanes.data, ${lanes("x_")}, ${lanes("t_")}); r_; })`,
+      _ => self.fail(span, "no such vector routine"),
+    }
   }
 
   // A function instance as a value: a closure with no environment.

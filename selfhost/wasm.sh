@@ -16,7 +16,8 @@ builtins=${WASI_BUILTINS:-$(ls "$(brew --prefix wasi-runtimes 2>/dev/null)"/shar
 out=$3
 imports=""
 # A panic unwinds through landing pads, by WebAssembly's exceptions (runtime.h).
-eh="-fwasm-exceptions"
+# 128-bit SIMD, which every engine in use has, for std/simd and the runtime's scans.
+eh="-fwasm-exceptions -msimd128"
 opt="-O2 $eh"
 link=""
 # A page's program is downloaded: it is made small, and its names left out.

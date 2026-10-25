@@ -1,0 +1,44 @@
+// UTF-8 checking agrees with every other implementation on a hundred thousand strings of up to 30
+// code points, the boundary ones among them, half of them then corrupted by one byte that decides
+// UTF-8 — a lead, a continuation, an overlong, surrogate or too-large edge — or cut short, so that
+// every kind of error is met at every place in a sixteen-byte block.
+// expect: 100000 valid 64369 hash 612959185
+import { println } from "std/io";
+
+const EDGES: u8[] = [0x00, 0x41, 0x7F, 0x80, 0x8F, 0x90, 0x9F, 0xA0, 0xBF, 0xC0, 0xC1, 0xC2, 0xDF, 0xE0, 0xE1, 0xED, 0xEE, 0xEF, 0xF0, 0xF1, 0xF3, 0xF4, 0xF5, 0xFF];
+const POINTS: u32[] = [0x41, 0x7F, 0x80, 0xE9, 0x7FF, 0x800, 0x4E2D, 0xD7FF, 0xE000, 0xFFFD, 0xFFFF, 0x10000, 0x1F600, 0x10FFFF];
+
+function next(seed: mut u64): u64 {
+  seed = seed.wrappingMul(6364136223846793005).wrappingAdd(1442695040888963407);
+  seed >> 33
+}
+
+function encode(out: mut Vec<u8>, cp: u32): void {
+  if (cp < 0x80) { out.push(cp as u8); }
+  else if (cp < 0x800) { out.push((0xC0 | (cp >> 6)) as u8); out.push((0x80 | (cp & 0x3F)) as u8); }
+  else if (cp < 0x10000) { out.push((0xE0 | (cp >> 12)) as u8); out.push((0x80 | ((cp >> 6) & 0x3F)) as u8); out.push((0x80 | (cp & 0x3F)) as u8); }
+  else { out.push((0xF0 | (cp >> 18)) as u8); out.push((0x80 | ((cp >> 12) & 0x3F)) as u8); out.push((0x80 | ((cp >> 6) & 0x3F)) as u8); out.push((0x80 | (cp & 0x3F)) as u8); }
+}
+
+export function main(): void uses Io {
+  let seed: u64 = 24301;
+  let valid: u64 = 0;
+  let h: u64 = 0;
+  for (const c of 0..100000) {
+    let b: Vec<u8> = Vec.new();
+    const n = next(mut seed) % 31;
+    for (const _ of 0..n) {
+      const r = next(mut seed);
+      if (r % 3 == 0) { encode(mut b, POINTS[((r / 3) % 14) as usize]); } else { b.push((0x61 + r % 26) as u8); }
+    }
+    if (next(mut seed) % 2 == 0 && b.len() > 0) {
+      const at = (next(mut seed) % (b.len() as u64)) as usize;
+      const how = next(mut seed);
+      if (how % 5 == 0) { b.truncate(at); } else { b[at] = EDGES[(how % 24) as usize]; }
+    }
+    const ok = String.fromUtf8(b).isSome();
+    if (ok) { valid += 1; }
+    h = (h * 3 + (if (ok) { 1 } else { 0 }) + c as u64) % 1000000007;
+  }
+  println(`100000 valid ${valid} hash ${h}`);
+}

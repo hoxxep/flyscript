@@ -1,6 +1,6 @@
 # Flyscript
 
-**Language specification, version 0.130**
+**Language specification, version 0.131**
 
 *Affine values, one row calculus, handlers for everything, and `comptime`: Church on the outside, Turing on the inside.*
 
@@ -20,7 +20,7 @@ The whole language rests on five laws. Every rule in this document is a conseque
 
 ### 0.1 Recent changes
 
-This is version 0.130. Its last revisions made a panic end the task it happens in rather than the program, proved it, and compiled every task, handler and generator to a state machine as small as a Rust future:
+This is version 0.131. Its last revisions made a panic end the task it happens in rather than the program, proved it, and compiled every task, handler and generator to a state machine as small as a Rust future:
 
 - **A panic unwinds its task** (0.114 to 0.117). It runs the task's cleanup, as a failure nothing catches would; a spawned task's panic ends that task alone, so a server survives a connection that hits a bug, and a `Mutex` whose holder panics is poisoned. A `Task` cancels one task and says how it ended, and `std/supervise` restarts what crashed. A stack that runs out is a panic of its task; a panic out of a destructor, or in cleanup that a panic is running, ends the program (§5.7, §6.1, §6.2, §12.3).
 - **The proof covers panics** (0.118 to 0.120): every box is dropped exactly once through a panic, a spawned task's panic ends it alone, and a `Mutex` it poisons keeps its state, under every schedule (§9.5).
@@ -40,6 +40,7 @@ This is version 0.130. Its last revisions made a panic end the task it happens i
 - **What a call is given is what it keeps** (0.128): a closure given to a function that only calls it, `once` or not, or bound to a name that is only called, does not escape, and is allocated in its caller's frame, as `with`, `Mutex.lock` and `Io.scope` are given theirs; and a generic call whose result is only a type parameter, where a `str` or a slice is expected, is instantiated as its arguments say, its result owned and lent (§3.6, §11.3).
 - **Deep values drop in bounded stack** (0.129): what a box, a `Vec` or an `Arc` holds of a type that may hold itself, where such drops nest deeply, is dropped after the rest of the value holding it, so dropping a list a million long takes the stack a few nodes do (§4.4).
 - **LLVM is told what borrows promise** (0.130): a `mut` parameter is `noalias`, a `readonly` one `noalias readonly` (§11.3).
+- **Portable SIMD** (0.131): `std/simd`'s `Simd<T, N>` and `Mask<N>`, which `std/io`'s line reader and `std/json` use, are the target's vector instructions (§11.3, §12.3, [std.md](std.md)).
 
 Every earlier change, with the reasoning behind it, is in [docs/history](history/).
 
@@ -1161,6 +1162,7 @@ What follows is no part of a program's meaning — no program can observe it —
 - **Regions.** Allocating in a region bumps a pointer; ending a region releases its arena at once, whatever it holds (§4.6).
 - **Tasks.** A task is a state machine, as a `handle`'s body is: waiting, it keeps what it reads again after the wait in frames of its own, the size of what they keep, and no stack; a wait in the runtime — for the clock, a socket, a channel, a lock, another task, a scope's end — is a call that returns as the task stops and is made again as it goes on. A frame keeps only the values live across a point the function may stop at, with what each such point keeps alone for itself — its wait record, its callee's slot — in room every point shares; the frame of a function it calls directly, unless that function may call it again, is nested in its own, so a task whose calls are all of that kind has one frame, of a size the compiler knows, made as the task starts. Any other frame — of a call through a function value, or within a cycle of calls — comes from its task's arena of frames, which grows by chunks and never moves, so what is lent from a frame stays where it is while the task waits; a task that stops keeps no more of the arena than its frames. Native code runs tasks on a worker thread for each core: a task that waits gives its core to others, and an idle core takes waiting work from a busy one, so tasks that wake together spread over the cores.
 - **`join`.** Native code offers the second closure to idle cores while the first runs and takes it back if none took it, so splitting where no core is free costs little more than a call. Elsewhere — the reference evaluator, JavaScript, a simulated world — the two run in order.
+- **SIMD.** A method of `std/simd`'s `Simd<T, N>` or `Mask<N>`, at a lane type and count that fill a vector of 2 to 64 bytes, is the target's vector instructions natively and in WebAssembly, not its body run a lane at a time: a comparison is one instruction, a mask's `firstTrue` two on ARM (a narrowing shift and a count of trailing zeros) as on x86 (`pmovmskb` and the count), and a byte lookup one where the target has one (`tbl`, `pshufb`, `i8x16.swizzle`). Where the C compiler is not clang, whose vector extensions the C is written in, each runs its body.
 - **Locks and channels.** A `Mutex` is a word and a queue of its own, and a channel a ring of messages; waiting on either gives the core to others.
 - **Panics.** A panic costs nothing until one happens but its check — a compare and a branch to a cold call — and, where cleanup is live, a call that may unwind: through LLVM, natively and in WebAssembly, unwinding runs from tables, and a call with nothing to clean up stays a plain call. The C back end's cleanups cover a whole function, so every call in a function with cleanups may unwind. A function whose cleanup may wait takes a panic up as it reaches it, and unwinds on by its flag, so that its cleanup may stop it as any of its code may: through C it keeps a catch record as it starts, through LLVM its landing pads catch. Checking for a stack overflow costs a compare as a function that may be reached again before it returns starts (§5.7).
 - **Allocation.** Memory is allocated where a value is boxed, a collection or a string grows, a closure escapes — is returned, stored, or given to a function that may keep it, as `spawn` and `generate` do, rather than one that only calls it — a failure is thrown, a task starts, a `handle` that is not direct runs, a region allocates, or code that may suspend needs more frames than its arena holds, and nowhere else.
@@ -1194,7 +1196,7 @@ What follows is no part of a program's meaning — no program can observe it —
 
 ### 12.3 Open questions
 
-1. **Portable SIMD.** `Soa` and `par` cover vertical arithmetic. Horizontal operations (shuffles, mask extraction) need a `Simd<T, N>` surface that lowers well to both NEON/SVE and AVX2/AVX-512.
+1. **Portable SIMD.** Answered, as a library: `std/simd`'s `Simd<T, N>` and `Mask<N>` do the horizontal work — comparisons to masks, a mask's first true lane and bitmask, reductions, shuffles, byte lookup — that `Soa` and `par`'s vertical arithmetic does not, and lower to NEON, SSE and AVX, and WebAssembly's 128-bit SIMD, with no target slower than scalar code (§11.3).
 2. **Supervision beyond scopes.** Answered, as a library: a `Task` cancels one task and says how it ended (§6.1), and `std/supervise` restarts children by Erlang's strategies within a limit on restarts, panicking to its own supervisor past it.
 3. **The rest of the core, mechanized.** Answered for λ-fly, all of which is proved (§9.5): ownership and effects together, handlers and the continuations they resume, drop or keep as values, generators, regions, a scope's tasks under every schedule with the channels, `Mutex` and atomics through which they synchronize, and panics. What is open lies beyond λ-fly. A semantic model in the manner of RustBelt would say what `unsafe` code and foreign functions must uphold; and where a certified checker now checks the test suite's programs as the compiler elaborates them, a proof that the compiler preserves what λ-fly means would cover every program.
 

@@ -391,6 +391,18 @@ Data parallelism over pure closures (spec §6.5).
 - `parReduce(c, zero, one, both)` folds every element with `one` and combines partial results with `both`, which must be associative; `zero` is the result for no elements.
 - `ParSplit` is implemented by slices, arrays, `Vec`s and `Soa`s: `len`, `slice`, `split`, `viewAt`, `readAt`, and the types `Slice`, `View` and `ReadView`.
 
+## 13b. `std/simd`
+
+Portable SIMD: the horizontal work, where lanes talk to each other, that vectorizing compilers do not find — scanning for a byte, checking UTF-8, reductions and lookups. Natively and in WebAssembly each method below is the target's vector instructions; the reference evaluator and JavaScript run it a lane at a time, with the same result.
+
+- `Lane` is a scalar a lane holds, an integer or a float, and `IntLane` an integer lane; both are derived for the primitives. Integer arithmetic wraps, as vector instructions do.
+- `Simd<T extends Lane, comptime N: usize>`: `N` lanes of `T`. `splat(v)`, `fromArray(a)`, `load(s, at)` and `store(s, at)` (bounds-checked once for all lanes), `toArray()`, `at(i)`, `len()`; lane-wise `add`, `sub`, `mul`, `min` and `max`; comparisons `eq`, `ne`, `lt`, `le`, `gt` and `ge`, which give a `Mask<N>` (`le` and `ge` are not `gt` and `lt` reversed where a float lane is NaN); reductions `sum` (wrapping, and in lane order for floats), `reduceMin` and `reduceMax`; `shuffle(idx)`, lane `i` of the result lane `idx[i]` of the vector, one instruction for indices known at compile time.
+- For `T extends IntLane`: `and`, `or`, `xor`, `not`, `shl(k)` and `shr(k)` (by `k` the lane's width or more, zero, or rightward in a signed lane its sign), `saturatingAdd` and `saturatingSub`.
+- For `Simd<u8, N>`: `lookupIn(table)`, lane `i` the lane of the sixteen-byte `table` that lane `i` of the vector names, or zero for an index of 16 or more: one instruction (`tbl`, `pshufb`, `i8x16.swizzle`), as classifying bytes needs.
+- `Mask<comptime N: usize>`: `splat`, `fromArray`, `at`; `select(a, b)`, lane `i` of `a` where lane `i` is true and of `b` where not; `and`, `or`, `not`; `any`, `all`, `countTrue`; `bitmask()`, bit `i` set where lane `i` is true, of at most 64 lanes; and `firstTrue()`, the first lane that is true. On ARM, which has no `movemask`, a sixteen-lane `firstTrue` is a narrowing shift and a count of trailing zeros, so finding the first match costs there what it does on x86.
+
+`std/io` finds a line's end with it, past a line's first 64 bytes, which two words at a time answer sooner; `std/json` finds the next quote or backslash, and control character when it writes, sixteen bytes at a time. The runtime's UTF-8 check is vector code too, by the lookup of each byte pair's nibbles in three sixteen-byte tables (Keiser and Lemire).
+
 ---
 
 ## 13a. `std/supervise`

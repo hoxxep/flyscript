@@ -5308,7 +5308,86 @@ fly_String fly_utf8_lossy(fly_vec b) {
 // Each sequence by its first byte, as RFC 3629's table has it: the range its second byte may take,
 // which rules out overlong forms, surrogates and what is past U+10FFFF, and continuation bytes for
 // the rest. ASCII is taken eight bytes at a time.
+// In clang's vector extensions, where the target has a byte lookup.
+#if defined(__clang__) && (defined(__aarch64__) || defined(__SSSE3__) || defined(__wasm_simd128__))
+#define FLY_UTF8_VECTORS 1
+typedef uint8_t fly_v16 __attribute__((vector_size(16)));
+
+static inline fly_v16 utf8_lookup(fly_v16 table, fly_v16 idx) {
+  fly_v16 r;
+  fly_lookup16((uint8_t*)&r, (const uint8_t*)&idx, (const uint8_t*)&table);
+  return r;
+}
+
+// Sixteen bytes checked with the sixteen before them (Keiser and Lemire, "Validating UTF-8 in
+// less than one instruction per byte", 2021): each pair of a byte and the one before it is looked
+// up by the high nibble of each and the low nibble of the first, three tables whose entries are the
+// errors that nibble allows, and a pair is wrong where the three agree on one; that the third and
+// fourth bytes of a long sequence are continuations is checked apart. The errors, as bits.
+enum { U8_TOO_SHORT = 1 << 0, U8_TOO_LONG = 1 << 1, U8_OVERLONG_3 = 1 << 2, U8_TOO_LARGE = 1 << 3,
+  U8_SURROGATE = 1 << 4, U8_OVERLONG_2 = 1 << 5, U8_TOO_LARGE_1000 = 1 << 6, U8_OVERLONG_4 = 1 << 6,
+  U8_TWO_CONTS = 1 << 7, U8_CARRY = U8_TOO_SHORT | U8_TOO_LONG | U8_TWO_CONTS };
+
+static inline fly_v16 utf8_block_errors(fly_v16 input, fly_v16 prev) {
+  const fly_v16 b1hi = { U8_TOO_LONG, U8_TOO_LONG, U8_TOO_LONG, U8_TOO_LONG, U8_TOO_LONG, U8_TOO_LONG, U8_TOO_LONG, U8_TOO_LONG,
+    U8_TWO_CONTS, U8_TWO_CONTS, U8_TWO_CONTS, U8_TWO_CONTS, U8_TOO_SHORT | U8_OVERLONG_2, U8_TOO_SHORT,
+    U8_TOO_SHORT | U8_OVERLONG_3 | U8_SURROGATE, U8_TOO_SHORT | U8_TOO_LARGE | U8_TOO_LARGE_1000 | U8_OVERLONG_4 };
+  const uint8_t big = U8_CARRY | U8_TOO_LARGE | U8_TOO_LARGE_1000;
+  const fly_v16 b1lo = { U8_CARRY | U8_OVERLONG_3 | U8_OVERLONG_2 | U8_OVERLONG_4, U8_CARRY | U8_OVERLONG_2, U8_CARRY, U8_CARRY,
+    U8_CARRY | U8_TOO_LARGE, big, big, big, big, big, big, big, big, big | U8_SURROGATE, big, big };
+  const uint8_t cont8 = U8_TOO_LONG | U8_OVERLONG_2 | U8_TWO_CONTS | U8_OVERLONG_3 | U8_TOO_LARGE_1000 | U8_OVERLONG_4;
+  const uint8_t cont9 = U8_TOO_LONG | U8_OVERLONG_2 | U8_TWO_CONTS | U8_OVERLONG_3 | U8_TOO_LARGE;
+  const uint8_t contA = U8_TOO_LONG | U8_OVERLONG_2 | U8_TWO_CONTS | U8_SURROGATE | U8_TOO_LARGE;
+  const fly_v16 b2hi = { U8_TOO_SHORT, U8_TOO_SHORT, U8_TOO_SHORT, U8_TOO_SHORT, U8_TOO_SHORT, U8_TOO_SHORT, U8_TOO_SHORT, U8_TOO_SHORT,
+    cont8, cont9, contA, contA, U8_TOO_SHORT, U8_TOO_SHORT, U8_TOO_SHORT, U8_TOO_SHORT };
+  fly_v16 prev1 = __builtin_shufflevector(prev, input, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30);
+  fly_v16 prev2 = __builtin_shufflevector(prev, input, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29);
+  fly_v16 prev3 = __builtin_shufflevector(prev, input, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28);
+  fly_v16 special = utf8_lookup(b1hi, prev1 >> 4) & utf8_lookup(b1lo, prev1 & 0x0F) & utf8_lookup(b2hi, input >> 4);
+  // Where a byte must be a third or fourth: after a lead of three bytes two back, or of four three back.
+  fly_v16 third = __builtin_elementwise_sub_sat(prev2, (fly_v16){ 0 } + (uint8_t)(0xE0 - 0x80));
+  fly_v16 fourth = __builtin_elementwise_sub_sat(prev3, (fly_v16){ 0 } + (uint8_t)(0xF0 - 0x80));
+  fly_v16 must = (third | fourth) & 0x80;
+  return must ^ special;
+}
+
+// Whether the last bytes of a block begin a sequence the block does not end.
+static inline fly_v16 utf8_incomplete(fly_v16 input) {
+  const fly_v16 max = { 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 0xF0 - 1, 0xE0 - 1, 0xC0 - 1 };
+  return __builtin_elementwise_sub_sat(input, max);
+}
+
+static inline bool utf8_any(fly_v16 v) { return __builtin_reduce_or(v) != 0; }
+#endif
+
 bool fly_utf8_valid(fly_slice b) {
+#ifdef FLY_UTF8_VECTORS
+  // Sixteen bytes or more: the last block is the last sixteen, which may overlap the one before,
+  // as checking a byte with the one before it again changes nothing. Fewer are checked below.
+  if (b.len >= 16) {
+    const uint8_t* p = b.ptr;
+    size_t i = 0, n = b.len;
+    fly_v16 prev = { 0 }, err = { 0 }, incomplete = { 0 };
+    for (;;) {
+      fly_v16 v;
+      memcpy(&v, p + i, 16);
+      // Sixteen ASCII bytes are well formed, if nothing before them was left unfinished.
+      if (__builtin_reduce_max(v) < 0x80) err |= incomplete;
+      else err |= utf8_block_errors(v, prev);
+      incomplete = utf8_incomplete(v);
+      if (i + 16 == n) break;
+      i = i + 32 <= n ? i + 16 : n - 16;
+      // The sixteen bytes before the block, nothing before the first byte counted as ASCII.
+      if (i >= 16) {
+        memcpy(&prev, p + i - 16, 16);
+      } else {
+        prev = (fly_v16){ 0 };
+        memcpy((uint8_t*)&prev + (16 - i), p, i);
+      }
+    }
+    return !utf8_any(err | incomplete);
+  }
+#endif
   const uint8_t* p = b.ptr;
   size_t i = 0, n = b.len;
   while (i < n) {

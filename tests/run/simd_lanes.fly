@@ -1,0 +1,42 @@
+// std/simd: lane-wise arithmetic, wrapping and saturating; comparisons to masks; reductions,
+// shuffles, byte lookup; a mask's select, bitmask and first true lane; and a scan for a newline
+// sixteen bytes at a time.
+// expect: [11, 12, 13, 14]
+// expect: [250, 0, 10, 1]
+// expect: [127, -128]
+// expect: 50 10 40
+// expect: [false, true, false, true]
+// expect: 10 #Some(1) 2
+// expect: [1, 20, 3, 40]
+// expect: [4, 3, 2, 1]
+// expect: [0, 0, 6, 0]
+// expect: newline at 21
+import { println } from "std/io";
+import { Simd, Mask } from "std/simd";
+
+export function main(): void uses Io {
+  const a: Simd<i32, 4> = Simd.fromArray([1, 2, 3, 4]);
+  const ten: Simd<i32, 4> = Simd.splat(10);
+  println(`${a.add(ten).toArray()}`);
+  const b: Simd<u8, 4> = Simd.fromArray([250, 3, 0, 1]);
+  println(`${b.saturatingAdd(Simd.splat(10)).saturatingSub(Simd.fromArray([5, 13, 0, 10])).add(Simd.fromArray([0, 0, 0, 0])).toArray()}`);
+  const c: Simd<i8, 2> = Simd.fromArray([100, -100]);
+  println(`${c.saturatingAdd(Simd.fromArray([100, -100])).toArray()}`);
+  const d: Simd<i64, 4> = Simd.fromArray([10, 20, 30, 40]);
+  println(`${d.add(Simd.splat(0)).sum() - 50} ${d.reduceMin()} ${d.reduceMax()}`);
+  const m = d.gt(Simd.fromArray([20, 10, 40, 30]));
+  println(`${m.lanes}`);
+  println(`${m.bitmask()} ${m.firstTrue()} ${m.countTrue()}`);
+  println(`${m.select(d, Simd.fromArray([1, 2, 3, 4])).toArray()}`);
+  println(`${a.shuffle([3, 2, 1, 0]).toArray()}`);
+  const t: Simd<u8, 16> = Simd.fromArray([0, 0, 6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+  const idx: Simd<u8, 4> = Simd.fromArray([0, 17, 2, 3]);
+  println(`${idx.lookupIn(t).toArray()}`);
+  const text = "a line that is long, \nand another".asBytes();
+  let at: usize = 0;
+  while (at + 16 <= text.len()) {
+    const v: Simd<u8, 16> = Simd.load(text, at);
+    if (const #Some(i) = v.eq(Simd.splat(10)).firstTrue()) { println(`newline at ${at + i}`); break; }
+    at += 16;
+  }
+}

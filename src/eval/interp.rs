@@ -1645,6 +1645,15 @@ impl Interp {
 
     /// The array length a call's result is expected to have (for `repeat`).
     pub fn expected_len(&self) -> Option<usize> {
+        // A builtin runs with its own generic arguments, in its caller's terms already; its length
+        // parameter, if it has one, is the length. The type recorded at the call is the caller's,
+        // and generic there.
+        if let Some(n) = self.lex.tenv.values().find_map(|a| match a {
+            GArg::Len(Len::Known(n)) => Some(*n as usize),
+            _ => None,
+        }) {
+            return Some(n);
+        }
         match self.call_span.and_then(|s| self.ty_of(s)) {
             Some(Ty::Array(_, Len::Known(n))) => Some(n as usize),
             _ => None,

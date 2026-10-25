@@ -2,6 +2,8 @@
 // into a buffer, what is written goes to the descriptor as it is written, unless through a
 // `Writer`, which gathers it until it is flushed.
 
+import { Simd } from "std/simd";
+
 // A file open for reading or for writing.
 export struct File {
   private fd: Fd;
@@ -196,31 +198,44 @@ function lineText(b: Vec<u8>, ascii: bool): String {
 }
 
 // Where the first `\n` in `bytes` is, or how many there are if none is, and whether every byte
-// before it is ASCII: eight bytes at a time, each word's bytes that are `\n` found as those its
+// before it is ASCII — or, false, some may not be, which only means the line is checked. The first
+// 64 bytes sixteen at a time as two words, each word's bytes that are `\n` found as those its
 // exclusive or with eight of them leaves zero, the first of which is the lowest marked (the marks
-// above it may be wrong), and its high bits gathered; the rest a byte at a time.
+// above it may be wrong), their high bits gathered; past that, sixteen at a time as vectors, which
+// is faster on long lines, while the words answer sooner on short ones, the branch out of the
+// loop resolved without a move out of a vector register; the rest a byte at a time.
 function lineEnd(bytes: readonly u8[]): [usize, bool] {
   const n = bytes.len();
   let k: usize = 0;
   let high: u64 = 0;
-  while (k + 8 <= n) {
+  while (k + 16 <= n && k < 64) {
     const w = bytes.readU64Le(k);
+    const w2 = bytes.readU64Le(k + 8);
     const x = w ^ 0x0a0a0a0a0a0a0a0a;
+    const x2 = w2 ^ 0x0a0a0a0a0a0a0a0a;
     const zero = x.wrappingSub(0x0101010101010101) & ~x & 0x8080808080808080;
-    if (zero != 0) {
-      // The bytes below the first `\n`, whose bits are below its mark.
-      const below = (zero & (~zero).wrappingAdd(1)).wrappingSub(1);
-      high = high | (w & below & 0x8080808080808080);
-      return [k + (zero.trailingZeros() / 8) as usize, high == 0];
+    const zero2 = x2.wrappingSub(0x0101010101010101) & ~x2 & 0x8080808080808080;
+    high = high | w | w2;
+    if ((zero | zero2) != 0) {
+      const at = if (zero != 0) { k + (zero.trailingZeros() / 8) as usize } else { k + 8 + (zero2.trailingZeros() / 8) as usize };
+      return [at, (high & 0x8080808080808080) == 0];
     }
-    high = high | (w & 0x8080808080808080);
-    k += 8;
+    k += 16;
   }
+  const newline: Simd<u8, 16> = Simd.splat(10);
+  let seen: Simd<u8, 16> = Simd.splat(0);
+  while (k + 16 <= n) {
+    const v: Simd<u8, 16> = Simd.load(bytes, k);
+    seen = seen.or(v);
+    if (const #Some(i) = v.eq(newline).firstTrue()) { return [k + i, (high & 0x8080808080808080) == 0 && seen.reduceMax() < 0x80]; }
+    k += 16;
+  }
+  if (seen.reduceMax() >= 0x80) { high = high | 0x80; }
   while (k < n && bytes[k] != 10) {
     high = high | ((bytes[k] & 0x80) as u64);
     k += 1;
   }
-  [k, high == 0]
+  [k, (high & 0x8080808080808080) == 0]
 }
 
 // A line to standard output; on threads, each line is written whole.

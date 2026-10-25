@@ -226,6 +226,8 @@ export view struct Own {
   sources: Vec<String>;
   // Type parameters declared `extends Send`, by symbol id.
   sendParams: Vec<u32>;
+  // The type parameters bounded by `Copy`.
+  copyParams: Vec<u32>;
   collecting: bool;
   // Each closure's mode, by its span, with the capture that decided it; and the mode of bindings
   // initialized with a closure.
@@ -254,13 +256,14 @@ export function checkOwnership(p: mut Program, fid: usize): void {
   const retTy = p.fns[fid].scheme.ret.clone();
   const sources = resultSources(p, p.fns[fid].scheme);
   const sendParams = sendParamsOf(p, p.fns[fid].scheme.tparams);
+  const copyParams = boundedBy(p, p.fns[fid].scheme.tparams, "Copy");
   let o = Own {
     p, module, typed, vars: Vec.new(), scopes: [HashMap.new()], useSites: HashMap.new(), resolved: HashMap.new(),
     loans: Vec.new(), state: emptyState(), chain: Vec.new(), nextNode: 0, temps: Vec.new(), deferred: Vec.new(),
     deferring: #None, loopDepths: Vec.new(), made: Vec.new(), want: #None, reported: HashSet.new(), lambdas: Vec.new(), escaping: false, resumes: HashMap.new(), contArgs: HashMap.new(),
     deadArgs: HashMap.new(), lentArgs: HashMap.new(), lambdaParams: HashSet.new(), iterating: false,
     nextRole: #Plain, roles: Vec.new(), taskMoved: HashMap.new(), moveSites: Vec.new(), lendingElement: false, dyingHolds: HashMap.new(), handling: Vec.new(),
-    sites: HashMap.new(), bySite: HashMap.new(), retTy, sources, sendParams, collecting: true,
+    sites: HashMap.new(), bySite: HashMap.new(), retTy, sources, sendParams, copyParams, collecting: true,
     closureModes: HashMap.new(), varModes: HashMap.new(), moves: HashMap.new(), capturedMoves: HashMap.new(),
     armBinds: HashMap.new(), armMoves: HashSet.new(), lending: false, lentArms: HashSet.new(),
   };
@@ -327,6 +330,9 @@ function instParams(s: readonly Scheme, targs: Option<readonly Vec<GArg>>): Vec<
 const PARAM_SITES: usize = 1 << 51;
 
 impl Own {
+  // Whether a value of the type is copied rather than moved, here.
+  function copies(self: readonly Self, t: readonly Ty): bool { self.p.isCopyGiven(t, self.copyParams) }
+
   function err(self: mut Self, span: Span, msg: str): void {
     if (self.collecting) { return; }
     const key = `${span.start}:${span.end}:${msg}`;
@@ -614,7 +620,7 @@ impl Own {
   function recordCapture(self: mut Self, root: usize, how0: Use, at: Span): void {
     const ty = self.vars[root].ty.clone();
     // A by-value use of a `Copy` (or borrowed) value reads it: closures capture by reference.
-    const how: Use = if (how0 == #Move && (self.p.isCopy(ty) || isBorrow(ty))) { #Read } else { how0 };
+    const how: Use = if (how0 == #Move && (self.copies(ty) || isBorrow(ty))) { #Read } else { how0 };
     const n = self.lambdas.len();
     if (n == 0) { return; }
     const known: Option<[Use, Span]> = match (self.lambdas[n - 1].captures.get(root)) { #Some(e) => #Some(e.clone()), #None => #None };
@@ -664,8 +670,8 @@ impl Own {
       // The closure owns what it moved in, so a move inside its body is the closure's to record,
       // for its drop flags.
       const varTy = self.vars[path.root].ty.clone();
-      const owned = how == #Move && !self.p.isCopy(varTy) && !isBorrow(varTy);
-      if (owned && !self.collecting && !self.p.isCopy(ty)) { self.moves.insert(at, path.fields.clone()); }
+      const owned = how == #Move && !self.copies(varTy) && !isBorrow(varTy);
+      if (owned && !self.collecting && !self.copies(ty)) { self.moves.insert(at, path.fields.clone()); }
       if (owned && self.collecting) {
         if (const #Some(arm) = self.armBinds.get(path.root)) { self.armMoves.insert(arm); }
       }
@@ -701,7 +707,7 @@ impl Own {
     const held = self.holdsOf(path.root);
     match (how) {
       #Move => {
-        const copy = self.p.isCopy(ty);
+        const copy = self.copies(ty);
         self.access(path, !copy, at, none);
         if (!copy) {
           if (self.behindReference(e)) {
@@ -1158,13 +1164,17 @@ impl Own {
         const ranged = match (index.kind) { #Range { lo: _ } => true, _ => false };
         const baseHow: Use = if (how == #Mut) { #Mut } else { #Read };
         const outer = replace(mut self.lendingElement, how == #Mut);
-        const v = self.expr(target, baseHow);
+        const fresh = self.loans.len();
+        let v = self.expr(target, baseHow);
         self.lendingElement = outer;
         if (how == #Move && !ranged) {
           const ty = self.tyOf(e);
-          if (!self.p.isCopy(ty)) {
+          if (!self.copies(ty)) {
             const shown = self.show(ty);
             self.err(e.span, `cannot move a \`${shown}\` out of an indexed place; it is not \`Copy\``.asStr());
+          } else {
+            // A copy of an element holds what the list held, not a borrow of the list.
+            v.loans.retain((l) => l < fresh);
           }
         }
         v
@@ -1691,7 +1701,7 @@ impl Own {
     let ids: Vec<usize> = Vec.new();
     bindIds(p, mut ids);
     ids.iter().some((id) => match (self.typed.bindings.get(id)) {
-      #Some(t) => !self.p.isCopy(t) && !isShared(t) && !isBorrow(t),
+      #Some(t) => !self.copies(t) && !isShared(t) && !isBorrow(t),
       #None => true,
     })
   }
@@ -1866,7 +1876,7 @@ impl Own {
       // A borrow of a `Copy` value, where the slot holds the value, is read through: the literal
       // holds a copy.
       #Some(t) => match (ty) {
-        #Borrow(_, inner) if self.p.isCopy(inner.get()) && !isBorrow(t) => #Read,
+        #Borrow(_, inner) if self.copies(inner.get()) && !isBorrow(t) => #Read,
         // A borrow put where the slot holds one is lent on, as an argument is.
         #Borrow(_, _) if isBorrow(t) => self.argUse(t, ty),
         _ => if (isBorrow(ty) || isShared(ty)) { #Move } else { self.argUse(t, ty) },
@@ -2047,7 +2057,7 @@ impl Own {
         self.checkMode(a, pt, "passed");
       }
       // An owned parameter fed from a borrow of a non-`Copy` type is a move out of the borrow.
-      if (const #Some([_, p]) = params.get(i) && const #Borrow(_, inner) = at && !isBorrow(p) && !isShared(p) && !self.p.isCopy(inner) && !self.p.isCopy(at) && self.p.class(p) == 1) {
+      if (const #Some([_, p]) = params.get(i) && const #Borrow(_, inner) = at && !isBorrow(p) && !isShared(p) && !self.copies(inner) && !self.copies(at) && self.p.class(p) == 1) {
         const shown = self.show(inner);
         self.err(a.span, `cannot move a \`${shown}\` out of a borrow; it is not \`Copy\``.asStr());
       }
@@ -2266,7 +2276,7 @@ impl Own {
     for (const [v, [how, _]] of frame.captures.entries()) {
       const name = self.vars[v].name.clone();
       const ty = self.vars[v].ty.clone();
-      if (how == #Move && !self.p.isCopy(ty) && !isBorrow(ty)) {
+      if (how == #Move && !self.copies(ty) && !isBorrow(ty)) {
         mode = [#Once, name];
       } else if (how == #Mut && mode[0] == #Shared) {
         mode = [#Mut, name];
@@ -2555,6 +2565,16 @@ function sendParamsOf(p: readonly Program, tparams: readonly Vec<GParam>): Vec<u
       _ => false,
     });
     if (isSend) { out.push(g.sym.id); }
+  }
+  out
+}
+
+// Type parameters bounded by the marker interface `name`, directly or through one that extends it.
+function boundedBy(p: readonly Program, tparams: readonly Vec<GParam>, name: str): Vec<u32> {
+  let out: Vec<u32> = Vec.new();
+  const want = p.knownDef(name);
+  for (const g of tparams) {
+    if (g.bounds.iter().some((b) => match (b) { #Named(d, _) => p.ifaceClosure(d).iter().some((i) => #Some(i) == want), _ => false })) { out.push(g.sym.id); }
   }
   out
 }

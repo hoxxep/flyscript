@@ -8,6 +8,11 @@
 // it is all zero bits: a move zeroes what it moves from, and a drop does nothing to a dead value,
 // so every way out of a scope may drop all it owns.
 
+// glibc declares what finds a thread's stack (`pthread_getattr_np`) only to GNU code.
+#if defined(__linux__) && !defined(_GNU_SOURCE)
+#define _GNU_SOURCE 1
+#endif
+
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -357,6 +362,57 @@ void fly_vec_insert(fly_vec* v, size_t i, const void* elem, size_t size);
 void fly_vec_remove(fly_vec* v, size_t i, void* out, size_t size);
 void fly_vec_truncate_raw(fly_vec* v, size_t n);
 void fly_vec_free(fly_vec* v);
+// ---- std/simd ----
+
+// The first of 16 mask lanes, each 0 or 1, that is 1, or -1. On ARM, which has no `movemask`, the
+// lanes are narrowed to four bits each (`shrn`), so that it costs what x86's does. In clang's
+// vector extensions, as the code that calls it is (`simdCall`).
+#if defined(__clang__)
+static inline int64_t fly_first16(const uint8_t* m) {
+  typedef uint8_t V16 __attribute__((vector_size(16)));
+  V16 v;
+  memcpy(&v, m, 16);
+#if defined(__aarch64__)
+  typedef uint16_t H8 __attribute__((vector_size(16)));
+  typedef uint8_t N8 __attribute__((vector_size(8)));
+  N8 n = __builtin_convertvector((H8)(v * (uint8_t)0xFF) >> 4, N8);
+  uint64_t w;
+  memcpy(&w, &n, 8);
+  return w ? (int64_t)(__builtin_ctzll(w) >> 2) : -1;
+#else
+  typedef _Bool B16 __attribute__((ext_vector_type(16)));
+  B16 b = __builtin_convertvector(v, B16);
+  uint16_t w = 0;
+  memcpy(&w, &b, 2);
+  return w ? (int64_t)__builtin_ctz(w) : -1;
+#endif
+}
+#endif
+
+// `out[i]` is `table[idx[i]]`, or 0 where `idx[i]` is 16 or more: one instruction where the target
+// has it (`tbl`, `pshufb`, `i8x16.swizzle`).
+#if defined(__aarch64__)
+#include <arm_neon.h>
+#elif defined(__SSSE3__)
+#include <tmmintrin.h>
+#elif defined(__wasm_simd128__)
+#include <wasm_simd128.h>
+#endif
+static inline void fly_lookup16(uint8_t* out, const uint8_t* idx, const uint8_t* table) {
+#if defined(__aarch64__)
+  vst1q_u8(out, vqtbl1q_u8(vld1q_u8(table), vld1q_u8(idx)));
+#elif defined(__SSSE3__)
+  __m128i i = _mm_loadu_si128((const __m128i*)idx);
+  // An index of 16 or more is given its top bit, for which `pshufb` gives zero.
+  i = _mm_adds_epu8(i, _mm_set1_epi8(0x70));
+  _mm_storeu_si128((__m128i*)out, _mm_shuffle_epi8(_mm_loadu_si128((const __m128i*)table), i));
+#elif defined(__wasm_simd128__)
+  wasm_v128_store(out, wasm_i8x16_swizzle(wasm_v128_load(table), wasm_v128_load(idx)));
+#else
+  for (int k = 0; k < 16; k++) out[k] = idx[k] < 16 ? table[idx[k]] : 0;
+#endif
+}
+
 // What a box, a vector or an `Arc` of a type that may hold itself owns, `n` of them at `p`, which
 // `f` drops and frees: dropped at once while the stack has room, and once it has less than
 // `FLY_DROP_ROOM` left, by the outermost such drop under way on the thread, once done with its

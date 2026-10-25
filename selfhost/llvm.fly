@@ -2166,7 +2166,8 @@ impl Lgen {
   }
 
   // What a call gives, before it is put where it goes: a scalar, or a pointer to it.
-  function call(self: mut Self, c: readonly Call): Option<String> uses Fail<Diagnostic> {
+  function call(self: mut Self, c0: readonly Call): Option<String> uses Fail<Diagnostic> {
+    const c = self.c.vectorized(c0);
     const span = c.span;
     self.at(span);
     let arenas: Vec<String> = Vec.new();

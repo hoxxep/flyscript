@@ -59,16 +59,22 @@ impl Program {
   // `Copy`: copying the bits is the whole meaning of a copy (§4.4). Expects a zonked type.
   export function isCopy(self: readonly Self, t: readonly Ty): bool {
     let seen: HashSet<String> = HashSet.new();
-    self.copyIn(t, mut seen)
+    self.copyIn(t, [], mut seen)
   }
 
-  function copyIn(self: readonly Self, t: readonly Ty, seen: mut HashSet<String>): bool {
+  // `Copy` in generic code, where the type parameters `copies` are bounded by it.
+  export function isCopyGiven(self: readonly Self, t: readonly Ty, copies: readonly Vec<u32>): bool {
+    let seen: HashSet<String> = HashSet.new();
+    self.copyIn(t, copies, mut seen)
+  }
+
+  function copyIn(self: readonly Self, t: readonly Ty, copies: readonly Vec<u32>, seen: mut HashSet<String>): bool {
     match (t) {
       #Prim(_) => true,
       #Borrow(m, _) => !m,
-      #Tuple(ts) => ts.iter().every((x) => self.copyIn(x, mut seen)),
-      #Record(r) | #Union(r) => r.labels.iter().every(([_, x]) => self.copyIn(x, mut seen)),
-      #Array(e, _) => self.copyIn(e, mut seen),
+      #Tuple(ts) => ts.iter().every((x) => self.copyIn(x, copies, mut seen)),
+      #Record(r) | #Union(r) => r.labels.iter().every(([_, x]) => self.copyIn(x, copies, mut seen)),
+      #Array(e, _) => self.copyIn(e, copies, mut seen),
       #Slice(_) => true,
       #Named(d, args) => {
         // Region references and region handles are `Copy` (§4.6).
@@ -77,12 +83,13 @@ impl Program {
         if (self.hasDrop(d)) { return false; }
         if (!seen.insert(keyTy(t))) { return true; }
         match (self.components(d, args)) {
-          #Some(cs) => cs.iter().every((c) => self.copyIn(c, mut seen)),
+          #Some(cs) => cs.iter().every((c) => self.copyIn(c, copies, mut seen)),
           // Opaque library types own resources unless declared otherwise.
           #None => self.defNamed(d, ["Hasher"]),
         }
       }
-      #Param(_) | #Var(_) | #Fn(_) | #Assoc(_, _) => false,
+      #Param(s) => copies.iter().some((c) => c == s.id),
+      #Var(_) | #Fn(_) | #Assoc(_, _) => false,
       #Error => true,
     }
   }

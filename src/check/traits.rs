@@ -47,7 +47,12 @@ impl Program {
 
     /// `Copy`: copying the bits is the whole meaning of a copy (§4.4). Expects a zonked type.
     pub fn is_copy(&self, t: &Ty) -> bool {
-        self.copy_in(t, &mut Vec::new())
+        self.copy_in(t, &[], &mut Vec::new())
+    }
+
+    /// `Copy` in generic code, where the type parameters `copies` are bounded by it.
+    pub fn is_copy_given(&self, t: &Ty, copies: &[u32]) -> bool {
+        self.copy_in(t, copies, &mut Vec::new())
     }
 
     // Each walk below keeps the nominal types it has visited: recursion goes through them (§3.3).
@@ -55,13 +60,13 @@ impl Program {
     // about, so meeting a visited type again — on a cycle, or on another path to it — adds
     // nothing, and is decided as the property's neutral value. Keeping only the current path
     // instead would revisit a type once per path to it: exponential in mutually recursive types.
-    fn copy_in(&self, t: &Ty, inside: &mut Vec<Ty>) -> bool {
+    fn copy_in(&self, t: &Ty, copies: &[u32], inside: &mut Vec<Ty>) -> bool {
         match t {
             Ty::Prim(_) => true,
             Ty::Borrow(m, _) => !m,
-            Ty::Tuple(ts) => ts.iter().all(|t| self.copy_in(t, inside)),
-            Ty::Record(r) | Ty::Union(r) => r.labels.values().all(|t| self.copy_in(t, inside)),
-            Ty::Array(e, _) => self.copy_in(e, inside),
+            Ty::Tuple(ts) => ts.iter().all(|t| self.copy_in(t, copies, inside)),
+            Ty::Record(r) | Ty::Union(r) => r.labels.values().all(|t| self.copy_in(t, copies, inside)),
+            Ty::Array(e, _) => self.copy_in(e, copies, inside),
             Ty::Slice(_) => true,
             Ty::Named(d, args) => {
                 // Region references and region handles are `Copy` (§4.6), as is a raw pointer (§8.2).
@@ -76,12 +81,13 @@ impl Program {
                 }
                 inside.push(t.clone());
                 match self.components(*d, args) {
-                    Some(cs) => cs.iter().all(|c| self.copy_in(c, inside)),
+                    Some(cs) => cs.iter().all(|c| self.copy_in(c, copies, inside)),
                     // Opaque library types own resources unless declared otherwise.
                     None => self.def_named(*d, &["Hasher"]),
                 }
             }
-            Ty::Param(_) | Ty::Var(_) | Ty::Fn(_) | Ty::Assoc(..) => false,
+            Ty::Param(s) => copies.contains(&s.id),
+            Ty::Var(_) | Ty::Fn(_) | Ty::Assoc(..) => false,
             Ty::Error => true,
         }
     }

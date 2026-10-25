@@ -2,6 +2,8 @@
 // unions get them by derivation over `Type.info`, and a struct asks for them with
 // `impl ToJson for User;`. Nothing here is known to the compiler.
 
+import { Simd } from "std/simd";
+
 export type JsonError = #BadJson(usize) | #MissingField(String) | #UnknownTag(String) | #OutOfRange(usize);
 
 export interface ToJson {
@@ -34,23 +36,38 @@ export function parse<T extends FromJson>(text: str): T uses Fail<JsonError> {
 
 const HEX: str = "0123456789abcdef";
 
-// Writes `s` as a JSON string, escaping quotes, backslashes and control characters.
+// Writes `s` as a JSON string, escaping quotes, backslashes and control characters, the runs
+// between them copied whole.
 export function writeString(s: str, out: mut String): void {
   const bytes = s.asBytes();
   out.push("\"");
   let start: usize = 0;
-  let i: usize = 0;
-  while (i < bytes.len()) {
-    const b = bytes[i];
-    if (b == b'"' || b == b'\\' || b < 32) {
-      out.push(s.slice(start, i));
-      escape(b, mut out);
-      start = i + 1;
-    }
-    i += 1;
+  while (true) {
+    const i = special(bytes, start, true);
+    out.push(s.slice(start, i));
+    if (i == bytes.len()) { break; }
+    escape(bytes[i], mut out);
+    start = i + 1;
   }
-  out.push(s.slice(start, bytes.len()));
   out.push("\"");
+}
+
+// Where the first quote or backslash at or after `from` is — or control character too, if
+// `control` — or the length if there is none: sixteen bytes at a time, as vectors.
+function special(b: readonly u8[], from: usize, control: bool): usize {
+  let k = from;
+  const quote: Simd<u8, 16> = Simd.splat(b'"');
+  const backslash: Simd<u8, 16> = Simd.splat(b'\\');
+  const space: Simd<u8, 16> = Simd.splat(32);
+  while (k + 16 <= b.len()) {
+    const v: Simd<u8, 16> = Simd.load(b, k);
+    let hit = v.eq(quote).or(v.eq(backslash));
+    if (control) { hit = hit.or(v.lt(space)); }
+    if (const #Some(i) = hit.firstTrue()) { return k + i; }
+    k += 16;
+  }
+  while (k < b.len() && b[k] != b'"' && b[k] != b'\\' && !(control && b[k] < 32)) { k += 1; }
+  k
 }
 
 function escape(b: u8, out: mut String): void {
@@ -289,14 +306,14 @@ impl JsonParser {
     self.expect(b'"');
     let out: Vec<u8> = Vec.new();
     while (true) {
+      // What runs to the next quote or backslash is taken whole.
+      const end = special(self.bytes, self.pos, false);
+      out.extend(self.bytes[self.pos..end]);
+      self.pos = end;
       if (self.pos >= self.bytes.len()) { throw #BadJson(self.pos); }
       const b = self.bytes[self.pos];
       self.pos += 1;
       if (b == b'"') { break; }
-      if (b != b'\\') {
-        out.push(b);
-        continue;
-      }
       if (self.pos >= self.bytes.len()) { throw #BadJson(self.pos); }
       const e = self.bytes[self.pos];
       self.pos += 1;

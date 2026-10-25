@@ -29,6 +29,7 @@ const STD: &[(&str, &str)] = &[
     ("std/crypto.d.fly", include_str!("../../std/crypto.d.fly")),
     ("std/http.fly", include_str!("../../std/http.fly")),
     ("std/supervise.fly", include_str!("../../std/supervise.fly")),
+    ("std/simd.fly", include_str!("../../std/simd.fly")),
 ];
 
 pub struct Module {
@@ -851,9 +852,10 @@ impl Program {
                 self.defs[id].private =
                     s.fields.iter().flatten().filter(|f| f.private).map(|f| f.name.name.clone()).collect();
                 // A struct with a type parameter that is `comptime`, or `comptime` code among its
-                // fields, is a template: its fields are computed for each instance.
+                // fields, is a template: its fields are computed for each instance. A length is no
+                // type, and `T[N]` is a field's type for every `N`.
                 let generated = s.fields.iter().flatten().any(|f| f.generate.is_some() || f.computed.is_some());
-                if generated || gparams.iter().any(|g| g.comptime) {
+                if generated || gparams.iter().any(|g| g.comptime && matches!(g.kind, PKind::Type)) {
                     self.defs[id].template_fields = s.fields.clone();
                     self.defs[id].kind = DefKind::Struct { fields: Some(Vec::new()) };
                     return;

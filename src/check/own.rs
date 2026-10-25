@@ -130,6 +130,7 @@ pub fn check_function(p: &mut Program, fid: FnId) {
     let ret_ty = p.fns[fid].scheme.ret.clone();
     let sources = result_sources(p, &p.fns[fid].scheme);
     let send_params = send_params(p, &p.fns[fid].scheme.tparams);
+    let copy_params = bounded_by(p, &p.fns[fid].scheme.tparams, "Copy");
     let mut o = Own {
         p,
         module,
@@ -168,6 +169,7 @@ pub fn check_function(p: &mut Program, fid: FnId) {
         ret_ty,
         sources,
         send_params,
+        copy_params,
         collecting: true,
         closure_modes: HashMap::new(),
         var_modes: HashMap::new(),
@@ -299,6 +301,8 @@ struct Own<'p> {
     sources: Vec<String>,
     /// Type parameters declared `extends Send`, by symbol id.
     send_params: Vec<u32>,
+    /// The type parameters bounded by `Copy`.
+    copy_params: Vec<u32>,
     collecting: bool,
     /// Each closure's mode, by its span, from what its body does with its captures (§4.3), with
     /// the capture that decided it; and the mode of bindings initialized with a closure.
@@ -319,6 +323,11 @@ struct Own<'p> {
 }
 
 impl<'p> Own<'p> {
+    /// Whether a value of the type is copied rather than moved, here.
+    fn copies(&self, t: &Ty) -> bool {
+        self.p.is_copy_given(t, &self.copy_params)
+    }
+
     fn err(&mut self, span: Span, msg: impl Into<String>) {
         if self.collecting {
             return;
@@ -615,7 +624,7 @@ impl<'p> Own<'p> {
         };
         let ty = self.vars[root].ty.clone();
         // A by-value use of a `Copy` (or borrowed) value reads it: closures capture by reference.
-        let how = if how == Use::Move && (self.p.is_copy(&ty) || matches!(ty, Ty::Borrow(..))) { Use::Read } else { how };
+        let how = if how == Use::Move && (self.copies(&ty) || matches!(ty, Ty::Borrow(..))) { Use::Read } else { how };
         if let Some((_, uses)) = self.lambdas.last_mut() {
             let entry = uses.entry(root).or_insert((how, at));
             if rank(how) > rank(entry.0) {
@@ -642,10 +651,10 @@ impl<'p> Own<'p> {
             // The closure owns what it moved in, so a move inside its body is the closure's to
             // record, for its drop flags.
             let var_ty = self.vars[path.root].ty.clone();
-            if how == Use::Move && !self.collecting && !self.p.is_copy(&var_ty) && !matches!(var_ty, Ty::Borrow(..)) && !self.p.is_copy(&ty) {
+            if how == Use::Move && !self.collecting && !self.copies(&var_ty) && !matches!(var_ty, Ty::Borrow(..)) && !self.copies(&ty) {
                 self.moves.insert(at, path.fields.clone());
             }
-            if how == Use::Move && self.collecting && !self.p.is_copy(&var_ty) && !matches!(var_ty, Ty::Borrow(..))
+            if how == Use::Move && self.collecting && !self.copies(&var_ty) && !matches!(var_ty, Ty::Borrow(..))
                 && let Some(arm) = self.arm_binds.get(&path.root)
             {
                 self.arm_moves.insert(*arm);
@@ -679,7 +688,7 @@ impl<'p> Own<'p> {
         let held: BTreeSet<LoanId> = self.state.holds.get(&path.root).cloned().unwrap_or_default();
         match how {
             Use::Move => {
-                let copy = self.p.is_copy(&ty);
+                let copy = self.copies(&ty);
                 self.access(&path, !copy, at, &none);
                 if !copy {
                     if self.behind_reference(e) {
@@ -1196,13 +1205,17 @@ impl<'p> Own<'p> {
                 let ranged = matches!(index.kind, ExprKind::Range { .. });
                 let base_how = if how == Use::Mut { Use::Mut } else { Use::Read };
                 let outer = std::mem::replace(&mut self.lending_element, how == Use::Mut);
-                let v = self.expr(target, base_how);
+                let fresh = self.loans.len();
+                let mut v = self.expr(target, base_how);
                 self.lending_element = outer;
                 if how == Use::Move && !ranged {
                     let ty = self.ty_of(e);
-                    if !self.p.is_copy(&ty) {
+                    if !self.copies(&ty) {
                         let shown = self.show(&ty);
                         self.err(e.span, format!("cannot move a `{shown}` out of an indexed place; it is not `Copy`"));
+                    } else {
+                        // A copy of an element holds what the list held, not a borrow of the list.
+                        v.loans.retain(|l| *l < fresh);
                     }
                 }
                 v
@@ -1735,7 +1748,7 @@ impl<'p> Own<'p> {
         match self.typed.slots.get(&e.span) {
             // A borrow of a `Copy` value, where the slot holds the value, is read through: the
             // literal holds a copy.
-            Some(t) if matches!(&ty, Ty::Borrow(_, inner) if self.p.is_copy(inner)) && !matches!(t, Ty::Borrow(..)) => Use::Read,
+            Some(t) if matches!(&ty, Ty::Borrow(_, inner) if self.copies(inner)) && !matches!(t, Ty::Borrow(..)) => Use::Read,
             // A borrow put where the slot holds one is lent on, as an argument is.
             Some(t) if matches!(t, Ty::Borrow(..)) && matches!(ty, Ty::Borrow(..)) => self.arg_use(t, &ty),
             Some(t) if !matches!(ty, Ty::Borrow(..) | Ty::Slice(_) | Ty::Prim(Prim::Str)) => self.arg_use(t, &ty),
@@ -1923,7 +1936,7 @@ impl<'p> Own<'p> {
             // accept owned arguments by lending; nothing to do. An owned parameter fed from a
             // borrow of a non-Copy type is a move out of the borrow.
             if let (Some((_, p)), Ty::Borrow(_, inner)) = (params.get(i), &at)
-                && !matches!(p, Ty::Borrow(..) | Ty::Slice(_) | Ty::Prim(Prim::Str)) && !self.p.is_copy(inner) && !self.p.is_copy(&at)
+                && !matches!(p, Ty::Borrow(..) | Ty::Slice(_) | Ty::Prim(Prim::Str)) && !self.copies(inner) && !self.copies(&at)
                     && self.p.class(p) == 1 {
                         let shown = self.show(inner);
                         self.err(a.span, format!("cannot move a `{shown}` out of a borrow; it is not `Copy`"));
@@ -2129,7 +2142,7 @@ impl<'p> Own<'p> {
             let name = self.vars[*v].name.clone();
             let ty = self.vars[*v].ty.clone();
             match how {
-                Use::Move if !self.p.is_copy(&ty) && !matches!(ty, Ty::Borrow(..)) => mode = (FnMode::Once, name),
+                Use::Move if !self.copies(&ty) && !matches!(ty, Ty::Borrow(..)) => mode = (FnMode::Once, name),
                 Use::Mut if mode.0 == FnMode::Shared => mode = (FnMode::Mut, name),
                 _ => {}
             }
@@ -2559,7 +2572,7 @@ impl Own<'_> {
         let mut names = Vec::new();
         bind_spans(p, &mut names);
         names.iter().any(|span| match self.typed.bindings.get(span) {
-            Some(t) => !self.p.is_copy(t) && !matches!(t, Ty::Borrow(..) | Ty::Slice(_) | Ty::Prim(Prim::Str)),
+            Some(t) => !self.copies(t) && !matches!(t, Ty::Borrow(..) | Ty::Slice(_) | Ty::Prim(Prim::Str)),
             None => true,
         })
     }
@@ -2639,6 +2652,16 @@ fn pattern_binds(p: &Pattern) -> bool {
 /// continuations and generators, and type parameters (§4.2).
 /// Type parameters that are `Send`, directly or through an interface that extends it
 /// (`T extends FromJson`): they range over class-1 types, so they hide no borrow (§4.4).
+/// Type parameters bounded by the marker interface `name`, directly or through one that extends it.
+fn bounded_by(p: &Program, tparams: &[super::env::GParam], name: &str) -> Vec<u32> {
+    let want = p.known.get(name).copied();
+    tparams
+        .iter()
+        .filter(|g| g.bounds.iter().any(|b| matches!(b, Ty::Named(d, _) if p.iface_closure(*d).iter().any(|i| Some(*i) == want))))
+        .map(|g| g.sym.id)
+        .collect()
+}
+
 fn send_params(p: &Program, tparams: &[super::env::GParam]) -> Vec<u32> {
     let send = p.known.get("Send").copied();
     tparams

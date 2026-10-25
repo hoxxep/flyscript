@@ -57,6 +57,7 @@ Versions are pre-1.0 while the language is being designed. The specification was
 
 Each version from 0.55 says in a sentence what it changed, newest first, with the sections of the specification of its day.
 
+- **0.131** adds `std/simd`: `Simd<T, N>` and `Mask<N>`, lowered to the target's vector instructions natively and in WebAssembly, and run a lane at a time elsewhere (§11.3, §12.3).
 - **0.130** tells LLVM that a `mut` parameter is `noalias` and a `readonly` one `noalias readonly` (§11.3).
 - **0.129** drops what a box, a `Vec` or an `Arc` holds of a type that may hold itself, where such drops nest deeply, after the rest of the value holding it, so a list or a tree of any depth drops in the stack a few nodes take (§4.4).
 - **0.128** allocates a closure given to a function that only calls it, `once` or not, in its caller's frame, and instantiates a generic call whose result is only a type parameter as its arguments say where a `str` or a slice is expected (§3.6, §11.3).
