@@ -863,31 +863,20 @@ void* fly_box(const void* value, size_t size) {
   return p;
 }
 
-// A `Mutex`'s state follows a header of its own: its lock, and whether a panic poisoned it, in a
-// size that keeps the state as aligned as an allocation is.
-#define MUTEX_HEADER 16
-
+// A `Mutex`'s state follows a header of its own (runtime.h): its lock word, and on threads the
+// tasks waiting for it, in a size that keeps the state as aligned as an allocation is.
 void* fly_mutex_new(const void* value, size_t size) {
-  uint8_t* p = fly_alloc(MUTEX_HEADER + size);
-  memset(p, 0, MUTEX_HEADER);
-  memcpy(p + MUTEX_HEADER, value, size);
-  return p + MUTEX_HEADER;
+  uint8_t* p = fly_alloc(FLY_MUTEX_HEADER + size);
+  memset(p, 0, FLY_MUTEX_HEADER);
+  memcpy(p + FLY_MUTEX_HEADER, value, size);
+  return p + FLY_MUTEX_HEADER;
 }
 
 void fly_mutex_free(void* state) {
-  if (state) free((uint8_t*)state - MUTEX_HEADER);
+  if (state) free((uint8_t*)state - FLY_MUTEX_HEADER);
 }
 
-// Whether a panic left a `Mutex`'s state while lending it (§6.2): the last byte of its header,
-// read and written under its lock. Locking a poisoned mutex gives the lock back and panics.
-static uint8_t* poison_of(const void* state) { return (uint8_t*)state - 1; }
-void fly_mutex_check(const void* state) {
-  if (*poison_of(state)) {
-    fly_unlock(state);
-    fly_panic("locked a `Mutex` that a panic left poisoned");
-  }
-}
-void fly_mutex_poison(const void* state, bool poisoned) { *poison_of(state) = poisoned; }
+static _Noreturn void mutex_poisoned(void) { fly_panic("locked a `Mutex` that a panic left poisoned"); }
 
 int64_t fly_atomic_add(int64_t* a, int64_t v) {
   int64_t old = __atomic_load_n(a, __ATOMIC_SEQ_CST), sum;
@@ -1743,6 +1732,8 @@ static void thread_stack_limit(void) {
 __attribute__((constructor)) static void main_stack_limit(void) {
   thread_stack_limit();
   fly_ctx0.limit = stack_limit0;
+  // Until the first point says whether there are tasks, every point is the scheduler's.
+  fly_ctx0.attn = 1;
 }
 
 // Half the headroom is the cleanups' as the panic unwinds the task, until a catch point takes it
@@ -3325,16 +3316,58 @@ static task_t* new_task(void (*entry)(void* task, void* closure, void** slot), v
   return t;
 }
 
-void fly_point(fly_wait* w) {
+// A point the inline test did not pass (runtime.h's `fly_point`). With no tasks, nothing is to be
+// done at any point: the test passes from then on.
+void fly_point_slow(fly_wait* w) {
 #ifdef FLY_THREADS
   if (threads) { mt_point(w); return; }
 #endif
-  if (!fly_tasks_on) return;
+  if (!fly_tasks_on) {
+    fly_cx_now()->attn = 0;
+    fly_cx_now()->budget = UINT32_MAX;
+    return;
+  }
   W_BEGIN(w)
   int64_t r;
   ASK(w, r, REQ_POINT, 0, 0, NULL);
   (void)r;
   W_END
+}
+
+// A `Mutex` taken where no other thread may hold it — with one thread, or against a simulated
+// world — at its scheduling point, whose cancellation it does not wait out; its body cannot stop,
+// so no other task holds it either.
+#ifdef FLY_THREADS
+static bool mt_lock(fly_wait* w, const void* state, bool any);
+static void mt_unlock(const void* state);
+#endif
+bool fly_lock_slow(fly_wait* w, const void* state, bool any) {
+#ifdef FLY_THREADS
+  if (threads) return mt_lock(w, state, any);
+#endif
+  uint32_t* word = fly_mutex_word(state);
+  if (fly_tasks_on) {
+    W_BEGIN(w)
+    w->n = fly_unwinding;
+    int64_t r;
+    ASK(w, r, REQ_POINT, 0, 0, NULL, false);
+    (void)r;
+    if (fly_unwinding && !w->n) return false;
+    W_END
+  } else {
+    fly_cx_now()->attn = 0;
+    fly_cx_now()->budget = UINT32_MAX;
+  }
+  if ((*word & FLY_POISONED) && !any) mutex_poisoned();
+  *word |= FLY_LOCKED;
+  return true;
+}
+
+void fly_unlock_slow(const void* state) {
+#ifdef FLY_THREADS
+  if (threads) { mt_unlock(state); return; }
+#endif
+  *fly_mutex_word(state) &= ~(uint32_t)FLY_LOCKED;
 }
 
 static void cleaning(int d) {
@@ -3392,6 +3425,7 @@ static void* sim_tasks(void* t0) {
 
 void fly_tasks_run(void (*main)(void**)) {
   fly_tasks_on = true;
+  fly_ctx0.attn = 1;
   world_load();
 #ifdef FLY_THREADS
   if (!world.simulated) { mt_run(main, main_entry); return; }
@@ -3726,7 +3760,7 @@ void fly_receiver_drop(fly_chan* ch) {
 
 void fly_close(fly_wait* w, fly_chan ch) {
 #ifdef FLY_THREADS
-  if (threads) { if (w->step == 0) mt_sender_gone(ch); mt_point(w); return; }
+  if (threads) { if (w->step == 0) mt_sender_gone(ch); fly_point(w); return; }
 #endif
   int64_t r;
   W_BEGIN(w)
@@ -3976,8 +4010,11 @@ struct mt_task {
   int8_t how;
   bool forked, told, finished;
   uint8_t shard;
-  // Cancelled by its scope, which may take that back, or by its `Task`, for good (`killed`).
-  bool started, cancelled, killed, yielded;
+  // Cancelled by its scope, which may take that back, or by its `Task`, for good: two bits of one
+  // byte (`CANCEL_*`), so that the record stays within the size class a task's allocation with its
+  // root frame falls in (below).
+  bool started, yielded;
+  uint8_t cancelled;
 };
 
 static uint64_t ring_pack(uint32_t steal, uint32_t real) { return (uint64_t)steal << 32 | real; }
@@ -4142,6 +4179,11 @@ static struct mt_join* mt_join_of(mt_task* t) {
 
 // A forked task's entry, and its result, of `size` bytes, after its record.
 struct mt_fork { void (*entry)(void* task, void* closure, void** slot); uint32_t size; _Alignas(16) char result[]; };
+enum { CANCEL_BY_SCOPE = 1, CANCEL_BY_TASK = 2 };
+// A task's record is 176 bytes: with the root frame of a task parked two calls deep, as those of
+// bench/tasks/parked_deep.fly are, its allocation fills the allocator's 256-byte class, and a byte
+// more would take it to the 320-byte one.
+_Static_assert(sizeof(mt_task) <= 176, "a task's record fits its size class");
 #define MT_FORK_AT ((sizeof(mt_task) + 15) & ~(size_t)15)
 static struct mt_fork* mt_fork_of(mt_task* t) { return (struct mt_fork*)((char*)t + MT_FORK_AT); }
 
@@ -4269,26 +4311,31 @@ typedef struct {
   uint64_t due;
 } sleep_timer;
 
+// A worker's fields are laid out by who writes them: what it alone writes, on lines no other thread
+// reads, and each part other threads write or read on lines of its own, so that a worker's writes
+// at every task and every scheduling point take no line from the others, nor theirs from it. Lines
+// are 128 bytes, as on Apple's cores; elsewhere this is two lines of 64.
+#define FLY_LINE __attribute__((aligned(128)))
 struct worker {
+  // Its own, and what it was given once.
   int index;
-  sleep_timer timer;
-  // Asleep for want of work: `parked` set, waiting under its own lock for whoever has work to clear
-  // it and wake it, so that workers going to sleep and waking do not queue for one lock.
-  pthread_mutex_t park_mu;
-  pthread_cond_t park_cv;
-  int parked;
-  // The context of the task running here.
-  fly_ctx run_ctx;
-  // The context of whatever runs here outside a task: `par` work stolen while idle.
-  fly_ctx own_ctx;
   fly_ctx* idle_ctx;
-  // Tasks to resume here, from any thread.
-  spin_t inlock;
-  mt_task *inhead, *intail;
-  // Tasks to run here, which other workers may steal half of (`fly_ring`), and `par` work, which
-  // they take one at a time.
-  fly_ring run;
-  deque_t jobs;
+  // Scheduling points the task running here has passed since it began to run (`mt_point`), as of
+  // when the context's countdown (`fly_ctx.budget`) was last set, to `armed`.
+  unsigned points, armed;
+  // When the task in `next` was put there, in points, and how many in a row have run from it.
+  unsigned next_at, nexts;
+  uint64_t rng;
+  // Tasks the kernel's events woke while this worker took them: the first is its own to run.
+  int harvested;
+  bool harvesting;
+  // The lock the task running here gives back once it has stopped to wait (`to_worker`).
+  spin_t* release;
+  // The context of the task running here: the code running reads and writes it at every
+  // scheduling point, and other threads only ask it to look (`fly_ctx.attn`).
+  fly_ctx run_ctx FLY_LINE;
+  // The context of whatever runs here outside a task: `par` work stolen while idle.
+  fly_ctx own_ctx FLY_LINE;
   // The task the one running here woke last, which runs here next (Go's `runnext`): a task that
   // wakes another and goes on to wait for its answer hands the core over to it, and the two run on
   // one core by turns, with no other worker woken. Once the waker passes a few scheduling points
@@ -4296,16 +4343,20 @@ struct worker {
   // grace in which a waker about to wait would have run it (`steal_next`). Run from here at most
   // 32 times in a row (`nexts`), so that two tasks handing over to each other do not keep the
   // ring's waiting.
-  mt_task* next;
-  unsigned next_at, nexts;
-  // Scheduling points the task running here has passed since it began to run (`mt_point`).
-  unsigned points;
-  uint64_t rng;
-  // Tasks the kernel's events woke while this worker took them: the first is its own to run.
-  int harvested;
-  bool harvesting;
-  // The lock the task running here gives back once it has stopped to wait (`to_worker`).
-  spin_t* release;
+  mt_task* next FLY_LINE;
+  // Tasks to resume here, from any thread.
+  spin_t inlock FLY_LINE;
+  mt_task *inhead, *intail;
+  // Asleep for want of work: `parked` set, waiting under its own lock for whoever has work to clear
+  // it and wake it, so that workers going to sleep and waking do not queue for one lock.
+  pthread_mutex_t park_mu FLY_LINE;
+  pthread_cond_t park_cv;
+  int parked;
+  // Tasks to run here, which other workers may steal half of (`fly_ring`), and `par` work, which
+  // they take one at a time.
+  fly_ring run;
+  deque_t jobs FLY_LINE;
+  sleep_timer timer FLY_LINE;
 };
 
 static worker* workers;
@@ -4385,6 +4436,8 @@ static void inbox_push(worker* w, mt_task* t) {
   else __atomic_store_n(&w->inhead, t, __ATOMIC_RELAXED);
   w->intail = t;
   spin_unlock(&w->inlock);
+  // The task running there gives it a turn at its next point.
+  __atomic_store_n(&w->run_ctx.attn, 1, __ATOMIC_RELEASE);
 }
 
 static mt_task* inbox_pop(worker* w) {
@@ -4405,7 +4458,11 @@ static void unpark(mt_task* t) {
   __atomic_fetch_add(&runnable, 1, __ATOMIC_SEQ_CST);
   worker* w = this_worker;
   if (w && running) {
-    w->next_at = w->points;
+    // The countdown runs out within a few points, for the scheduler to see whether the waker has
+    // gone on past this task without waiting.
+    fly_ctx* cx = &w->run_ctx;
+    if (cx->budget > 4) { w->armed -= cx->budget - 4; cx->budget = 4; }
+    w->next_at = w->points + (w->armed - cx->budget);
     mt_task* old = __atomic_exchange_n(&w->next, t, __ATOMIC_ACQ_REL);
     if (!old) return;
     t = old;
@@ -4457,9 +4514,7 @@ static void unpark_all(mt_task* list, size_t n) {
   for (int i = 0; i <= batches && i < nworkers; i++) notify();
 }
 
-static bool is_cancelled(mt_task* t) {
-  return __atomic_load_n(&t->cancelled, __ATOMIC_ACQUIRE) || __atomic_load_n(&t->killed, __ATOMIC_ACQUIRE);
-}
+static bool is_cancelled(mt_task* t) { return __atomic_load_n(&t->cancelled, __ATOMIC_ACQUIRE) != 0; }
 
 static void q_append(waitq* q, mt_task* t) {
   t->wnext = NULL;
@@ -4498,9 +4553,17 @@ static void to_worker(mt_task* t, spin_t* release) {
 // The running task waits in `q`, whose lock is held, until something wakes it: true, and it
 // suspends, the lock released once it has; a cancellation wakes it too, unless it waits for its
 // scope's tasks, which it must. Cancelled already, it does not wait: false, the lock released.
-static bool wait_in(waitq* q, bool cancellable) {
+static void q_prepend(waitq* q, mt_task* t) {
+  t->wprev = NULL;
+  t->wnext = q->head;
+  if (q->head) q->head->wprev = t; else q->tail = t;
+  q->head = t;
+}
+
+// The same, first in `q` if `front`.
+static bool wait_at(waitq* q, bool cancellable, bool front) {
   mt_task* t = running;
-  q_append(q, t);
+  if (front) q_prepend(q, t); else q_append(q, t);
   __atomic_store_n(&t->waiting, q, __ATOMIC_SEQ_CST);
   if (cancellable && is_cancelled(t) && !__atomic_load_n(&t->cleaning, __ATOMIC_SEQ_CST)) {
     q_remove(q, t);
@@ -4513,6 +4576,7 @@ static bool wait_in(waitq* q, bool cancellable) {
   to_worker(t, &q->lock);
   return true;
 }
+static bool wait_in(waitq* q, bool cancellable) { return wait_at(q, cancellable, false); }
 #define WAIT_IN(w, q, cancellable, ...) do { if (wait_in((q), (cancellable))) W_SUSPEND(w, __VA_ARGS__); } while (0)
 
 // Whether the running task has been cancelled: it unwinds from here (§6.1).
@@ -4535,13 +4599,22 @@ void fly_mon_wake_all(uint8_t* m) { wake_all((waitq*)m); }
 static void wake_cancelled(mt_task* t);
 
 // Cancels a task: one running or queued sees it at its next scheduling point; one waiting is woken.
+// A task running, or about to, sees its cancellation at its next point: the worker it runs on is
+// asked to look (`run_task` sets where it runs before it looks for itself).
+static void ask_home(mt_task* t) {
+  worker* h = __atomic_load_n(&t->home, __ATOMIC_SEQ_CST);
+  if (h) __atomic_store_n(&h->run_ctx.attn, 1, __ATOMIC_RELEASE);
+}
+
 static void cancel_task(mt_task* t) {
-  __atomic_store_n(&t->cancelled, true, __ATOMIC_SEQ_CST);
+  __atomic_fetch_or(&t->cancelled, CANCEL_BY_SCOPE, __ATOMIC_SEQ_CST);
+  ask_home(t);
   wake_cancelled(t);
 }
 
 static void kill_task(mt_task* t) {
-  __atomic_store_n(&t->killed, true, __ATOMIC_SEQ_CST);
+  __atomic_fetch_or(&t->cancelled, CANCEL_BY_TASK, __ATOMIC_SEQ_CST);
+  ask_home(t);
   wake_cancelled(t);
 }
 
@@ -4568,18 +4641,34 @@ static void mt_cleaning(int d) {
   if (t) __atomic_fetch_add(&t->cleaning, d, __ATOMIC_SEQ_CST);
 }
 
-// A scheduling point: a cancellation is delivered, and the worker's other tasks get a turn: those
-// woken from another thread, and, once the task has passed 64 points since it began to run, any.
-// Starting a task counts for none (`budget` false): making work is not taking a turn, and a loop
-// that starts many would otherwise queue behind them.
-static void mt_point_as(fly_wait* w, bool budget) {
+// Whether the task running here gives the worker's other tasks a turn, at a point the inline test
+// did not pass: those woken from another thread, and, once it has passed 64 points since it began
+// to run, any. The points the countdown went through are counted, and it is set again: to the
+// task's 64th point, or the next 64th, and to the 4th since it woke the task in `next`, which then
+// goes in the ring if it is still there. Starting a task counts for none (`counted` false):
+// making work is not taking a turn, and a loop that starts many would otherwise queue behind them.
+// What another thread asked for (`attn`) is let go of before it is looked at, so that one asked
+// for meanwhile is seen at the next point.
+static bool turn_up(worker* me, bool counted) {
+  fly_ctx* cx = &me->run_ctx;
+  if (__atomic_load_n(&cx->attn, __ATOMIC_RELAXED)) __atomic_exchange_n(&cx->attn, 0, __ATOMIC_ACQ_REL);
+  me->points += me->armed - cx->budget;
+  bool next = __atomic_load_n(&me->next, __ATOMIC_RELAXED) != NULL;
+  if (next && me->points - me->next_at >= 4) { flush_next(me); next = false; }
+  bool yield = __atomic_load_n(&me->inhead, __ATOMIC_RELAXED) || (counted && me->points >= 64 && ring_len(&me->run) > 0);
+  unsigned n = 64 - me->points % 64;
+  if (next && me->next_at + 4 - me->points < n) n = me->next_at + 4 - me->points;
+  me->armed = cx->budget = n;
+  return yield;
+}
+
+// A scheduling point: a cancellation is delivered, and the worker's other tasks may get a turn
+// (`turn_up`).
+static void mt_point_as(fly_wait* w, bool counted) {
   mt_task* t = running;
   W_BEGIN(w)
   if (!t || cancelled_here()) return;
-  worker* me = this_worker;
-  if (budget) me->points++;
-  if (__atomic_load_n(&me->next, __ATOMIC_RELAXED) && me->points - me->next_at >= 4) flush_next(me);
-  if (__atomic_load_n(&me->inhead, __ATOMIC_RELAXED) || (budget && me->points >= 64 && ring_len(&me->run) > 0)) {
+  if (turn_up(this_worker, counted)) {
     t->yielded = true;
     to_worker(t, NULL);
     W_SUSPEND(w);
@@ -4702,7 +4791,7 @@ static void wheel_set_due(sleep_timer* tm) {
 
 static void mt_sleep(fly_wait* w, uint64_t nanos) {
   mt_task* t = running;
-  if (nanos == 0) { mt_point(w); return; }
+  if (nanos == 0) { fly_point(w); return; }
   W_BEGIN(w)
   worker* me = this_worker;
   sleep_timer* tm = &me->timer;
@@ -4867,8 +4956,9 @@ static void mt_end(mt_task* t) {
 // elsewhere after: what it reads of itself is its own context, which this thread now points to.
 static void run_task(worker* w, mt_task* t) {
   running = t;
-  w->points = 0;
-  t->home = w;
+  // Where it runs is set before it looks whether it is cancelled (`ask_home`).
+  __atomic_store_n(&t->home, w, __ATOMIC_SEQ_CST);
+  __atomic_thread_fence(__ATOMIC_SEQ_CST);
   if (!t->started) {
     t->started = true;
     // A task cancelled before it began never runs.
@@ -4881,8 +4971,14 @@ static void run_task(worker* w, mt_task* t) {
     }
   }
   // The task runs in its worker's context, on its worker's stack, with what is its own.
+  // Its first point looks at everything: what other threads ask for (`attn`) is theirs to set at
+  // any time, and so is not overwritten with the rest.
   fly_ctx* cx = &w->run_ctx;
-  *cx = (fly_ctx){ .frames = &t->frames, .panic = t->panic, .destroying = t->destroying, .limit = stack_limit0 };
+  fly_ctx fresh = { .frames = &t->frames, .panic = t->panic, .destroying = t->destroying, .limit = stack_limit0 };
+  memcpy(cx, &fresh, offsetof(fly_ctx, budget));
+  w->points = 0;
+  w->armed = cx->budget = 64;
+  __atomic_store_n(&cx->attn, 1, __ATOMIC_RELAXED);
   fly_cur = cx;
   bool done = mt_task_main(t);
   if (!done) {
@@ -5328,12 +5424,18 @@ static void mt_run(void (*main)(void**), void (*entry)(void* task, void* closure
   const char* n = getenv("FLY_THREADS");
   long cores = n && *n ? strtol(n, NULL, 10) : sysconf(_SC_NPROCESSORS_ONLN);
   nworkers = cores > 0 ? (int)cores : 1;
-  workers = fly_alloc((size_t)nworkers * sizeof(worker));
+  // On lines of their own, as their fields that one thread writes and others read are (`fly_ring`).
+  workers = aligned_alloc(_Alignof(worker), (size_t)nworkers * sizeof(worker));
+  if (!workers) fly_out_of_memory();
+  memset(workers, 0, (size_t)nworkers * sizeof(worker));
   for (int k = 0; k < nworkers; k++) {
     worker* w = &workers[k];
     w->index = k;
     // The first worker is the program's thread, whose context is the program's outside its tasks.
     w->idle_ctx = k == 0 ? &fly_ctx0 : &w->own_ctx;
+    // Points outside a task are the scheduler's to look at, as is a task's first.
+    w->own_ctx.attn = 1;
+    w->run_ctx.attn = 1;
     w->rng = 0x9e3779b97f4a7c15u * (uint64_t)(k + 1);
     pthread_mutex_init(&w->park_mu, NULL);
     pthread_cond_init(&w->park_cv, NULL);
@@ -5581,7 +5683,7 @@ static void mt_scope_close(fly_wait* w, int id) {
   // task waited.
   mt_task* failer = sc->failer;
   bool unwound = unwinding && !failer;
-  if (failer) __atomic_store_n(&me->cancelled, false, __ATOMIC_SEQ_CST);
+  if (failer) __atomic_fetch_and(&me->cancelled, (uint8_t)~CANCEL_BY_SCOPE, __ATOMIC_SEQ_CST);
   obj_clear(id);
   free(sc->more_block);
   free(sc);
@@ -5647,7 +5749,7 @@ static bool mt_send(fly_wait* w, fly_chan ch, const void* v, size_t size) {
     w->n = fly_rt_mt_send((uint8_t*)&c->q, c->state, (uint8_t*)v, size);
     if (!w->n && c->drop) c->drop((void*)v);
   }
-  mt_point(w);
+  fly_point(w);
   return w->n;
 }
 
@@ -5678,23 +5780,78 @@ static void mt_sender_clone(fly_chan ch) {
   fly_rt_mt_sender_clone((uint8_t*)&c->q, c->state);
 }
 
-// A `Mutex`'s lock, in the header before its state. Its body performs nothing (§6.2), so it is held
-// for a moment, never across a scheduling point, by a task running on a core: one that finds it
-// held spins, and sleeps on it only should the holder's thread be off its core. Taking it and
-// giving it back are one atomic operation each.
-typedef struct { spin_t lock; } mt_mutex;
-_Static_assert(sizeof(mt_mutex) < MUTEX_HEADER, "a mutex's header holds its lock, and its poison after");
+// A `Mutex` on threads: its lock word (runtime.h), and the tasks waiting for it. Its body performs
+// nothing (§6.2), so it is held for a moment, by a task running on a core, never across a
+// scheduling point: one that finds it held spins a little, and then waits without its core, in
+// the order the waiting began, and is woken in turn (§6.2). A task running may take it before one
+// woken has, which then waits again at the front: lock words are never handed from task to task,
+// which would hold a lock free for as long as the woken task takes to run. Whether any wait
+// (`FLY_WAITED`) changes only under the queue's lock, so that giving it back without it set wakes
+// no one and is one atomic operation; a task woken that finds it held again sets it once more.
+typedef struct { uint32_t word; waitq q; } mt_mutex;
+_Static_assert(sizeof(mt_mutex) <= FLY_MUTEX_HEADER && offsetof(mt_mutex, word) == 0, "a mutex's header holds its word first, and its queue");
 
-static mt_mutex* mutex_of(const void* state) { return (mt_mutex*)((uint8_t*)state - MUTEX_HEADER); }
-
-void fly_lock(const void* state) {
-  if (!threads) return;
-  spin_lock(&mutex_of(state)->lock);
+static bool lock_free(uint32_t* word, bool any) {
+  uint32_t s = __atomic_load_n(word, __ATOMIC_RELAXED);
+  if ((s & FLY_POISONED) && !any) mutex_poisoned();
+  return !(s & FLY_LOCKED) && __atomic_compare_exchange_n(word, &s, s | FLY_LOCKED, false, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED);
 }
 
-void fly_unlock(const void* state) {
-  if (!threads || !state) return;
-  spin_unlock(&mutex_of(state)->lock);
+static bool mt_lock(fly_wait* w, const void* state, bool any) {
+  mt_mutex* m = (mt_mutex*)fly_mutex_word(state);
+  mt_task* t = running;
+  W_BEGIN(w)
+  // The point, first.
+  if (t) {
+    if (cancelled_here()) return false;
+    if (turn_up(this_worker, true)) {
+      t->yielded = true;
+      to_worker(t, NULL);
+      W_SUSPEND(w, false);
+      if (cancelled_here()) return false;
+    }
+  }
+  for (unsigned n = 0; n < 100; n++) {
+    if (lock_free(&m->word, any)) return true;
+    relax();
+  }
+  spin_lock(&m->q.lock);
+  for (;;) {
+    {
+      uint32_t s = __atomic_load_n(&m->word, __ATOMIC_RELAXED);
+      if ((s & FLY_POISONED) && !any) { spin_unlock(&m->q.lock); mutex_poisoned(); }
+      if (!(s & FLY_LOCKED)) {
+        uint32_t to = (s & FLY_POISONED) | FLY_LOCKED | (m->q.head ? FLY_WAITED : 0);
+        if (__atomic_compare_exchange_n(&m->word, &s, to, false, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) { spin_unlock(&m->q.lock); return true; }
+        continue;
+      }
+      if (!(s & FLY_WAITED) && !__atomic_compare_exchange_n(&m->word, &s, s | FLY_WAITED, false, __ATOMIC_RELAXED, __ATOMIC_RELAXED)) continue;
+    }
+    // A task woken that found it taken waits again first (`w->n`).
+    if (!wait_at(&m->q, true, w->n)) { cancelled_here(); return false; }
+    W_SUSPEND(w, false);
+    w->n = 1;
+    spin_lock(&m->q.lock);
+    // Cancelled, it does not take its turn; one woken by `unlock` gives it to the next.
+    if (is_cancelled(t) && !__atomic_load_n(&t->cleaning, __ATOMIC_SEQ_CST)) {
+      if (!(__atomic_load_n(&m->word, __ATOMIC_RELAXED) & FLY_LOCKED)) wake_one(&m->q);
+      spin_unlock(&m->q.lock);
+      cancelled_here();
+      return false;
+    }
+  }
+  W_END
+  return false;
+}
+
+static void mt_unlock(const void* state) {
+  mt_mutex* m = (mt_mutex*)fly_mutex_word(state);
+  spin_lock(&m->q.lock);
+  uint32_t s = __atomic_load_n(&m->word, __ATOMIC_RELAXED);
+  mt_task* first = m->q.head;
+  __atomic_store_n(&m->word, (s & FLY_POISONED) | (first && first->wnext ? FLY_WAITED : 0), __ATOMIC_RELEASE);
+  wake_one(&m->q);
+  spin_unlock(&m->q.lock);
 }
 
 static void* mt_task_result(mt_task* t) { return t->forked ? mt_fork_of(t)->result : NULL; }
@@ -5709,8 +5866,8 @@ void fly_par_join(void (*a)(void* f, void* out), void* fa, void* oa, void (*da)(
 
 #endif
 
-// Without threads, a `Mutex` is never contended, and `join` runs its two in order; the monitors
-// the runtime's Flyscript has for threads are never reached.
+// Without threads, `join` runs its two in order, and the monitors the runtime's Flyscript has for
+// threads are never reached.
 #ifndef FLY_THREADS
 #ifndef FLY_FREESTANDING
 static _Noreturn void no_threads(void) { fly_panic("a monitor without threads"); }
@@ -5719,8 +5876,6 @@ void fly_mon_unlock(uint8_t* m) { (void)m; no_threads(); }
 void fly_mon_wake_one(uint8_t* m) { (void)m; no_threads(); }
 void fly_mon_wake_all(uint8_t* m) { (void)m; no_threads(); }
 #endif
-void fly_lock(const void* state) { (void)state; }
-void fly_unlock(const void* state) { (void)state; }
 void fly_par_join(void (*a)(void* f, void* out), void* fa, void* oa, void (*da)(void* out),
                   void (*b)(void* f, void* out), void* fb, void* ob, void (*db)(void* out)) {
   join_in_order(a, fa, oa, da, b, fb, ob, db);

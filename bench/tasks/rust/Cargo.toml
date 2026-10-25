@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-tokio = { version = "1", features = ["rt-multi-thread", "time", "macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "time", "macros", "sync"] }
 
 [[bin]]
 name = "parked"
@@ -13,3 +13,11 @@ path = "src/parked.rs"
 [[bin]]
 name = "parked_deep"
 path = "src/parked_deep.rs"
+
+[[bin]]
+name = "ping_pong"
+path = "src/ping_pong.rs"
+
+[[bin]]
+name = "locks"
+path = "src/locks.rs"

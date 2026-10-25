@@ -121,7 +121,9 @@ struct fly_frames { char* top; char* end; fly_frame_chunk* chunk; fly_frames* ou
 // `panicking` says that the code unwinds by its flag for a panic, which a machine with cleanup
 // that may wait took up from the native unwinding (§5.7), and which a catch point takes up in turn.
 // `spare` is a frame chunk the code has emptied, kept for the next it needs, until it stops.
-typedef struct fly_ctx { void* err; bool unwinding; uint8_t pend; fly_handler* handlers; fly_unw* unw; char* panic; uintptr_t limit; int destroying; fly_handler* pend_h; fly_frames* frames; bool panicking; fly_frame_chunk* spare; } fly_ctx;
+// `budget` and `attn` make a scheduling point a test inline (`fly_point`): the points the code may
+// pass before the scheduler looks again, and whether another thread wants it to look at once.
+typedef struct fly_ctx { void* err; bool unwinding; uint8_t pend; fly_handler* handlers; fly_unw* unw; char* panic; uintptr_t limit; int destroying; fly_handler* pend_h; fly_frames* frames; bool panicking; fly_frame_chunk* spare; uint32_t budget; uint8_t attn; } fly_ctx;
 void fly_spare_free(fly_ctx* cx);
 #ifdef FLY_THREADS
 // The context of the task running. Within one call of a function it is always the same, wherever
@@ -612,24 +614,78 @@ bool fly_world_quota(fly_str token);
 // as the first task, on the main stack's behalf.
 extern bool fly_tasks_on;
 void fly_tasks_run(void (*main)(void**));
-void fly_point(fly_wait* w);
+// A scheduling point. Most pass with nothing to do: the task's turn is not up, no task was woken
+// for its worker from elsewhere, it is not cancelled, and it is not going on from a wait here. A
+// context that is not a worker's for its task, and one against a simulated world, whose every
+// point is the scheduler's, keep `attn` set.
+static inline bool fly_point_passes(const fly_wait* w) {
+  fly_ctx* cx = fly_cx();
+  return __builtin_expect(--cx->budget != 0 && !__atomic_load_n(&cx->attn, __ATOMIC_RELAXED) && w->step == 0, 1);
+}
+void fly_point_slow(fly_wait* w);
+static inline void fly_point(fly_wait* w) { if (!fly_point_passes(w)) fly_point_slow(w); }
 void fly_sleep(fly_wait* w, uint64_t nanos);
 // The time: the simulated world's clock, or the machine's monotonic one, in nanoseconds.
 uint64_t fly_now(void);
-// A `Mutex`: its state on the heap after a header holding its lock, which `fly_lock` takes by the
-// state's address. The body it guards performs nothing, so it holds no other lock and does not
-// suspend while it holds this one.
+// A `Mutex`: its state on the heap after a header whose first word is its lock: held, waited for,
+// and poisoned by a panic that left the state while it was lent (§6.2), which taking it panics
+// over. The body it guards performs nothing, so it holds no other lock and does not suspend while
+// it holds this one. Taking it is a scheduling point and, free, one atomic operation more; giving
+// it back with no one waiting, one. `fly_lock` is a routine that waits: whether the lock is now
+// the task's, and not if it suspended or was cancelled; with `any`, poisoned or not.
+enum { FLY_MUTEX_HEADER = 32, FLY_LOCKED = 1, FLY_WAITED = 2, FLY_POISONED = 4 };
+static inline uint32_t* fly_mutex_word(const void* state) { return (uint32_t*)((uint8_t*)state - FLY_MUTEX_HEADER); }
 void* fly_mutex_new(const void* value, size_t size);
 void fly_mutex_free(void* state);
-void fly_lock(const void* state);
-// Whether a panic left the state while it was lent, which locking it again panics over (§6.2).
-void fly_mutex_check(const void* state);
-void fly_mutex_poison(const void* state, bool poisoned);
+bool fly_lock_slow(fly_wait* w, const void* state, bool any);
+void fly_unlock_slow(const void* state);
+static inline bool fly_lock(fly_wait* w, const void* state, bool any) {
+  uint32_t free = 0;
+  if (fly_point_passes(w) && __atomic_compare_exchange_n(fly_mutex_word(state), &free, FLY_LOCKED, false, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) return true;
+  return fly_lock_slow(w, state, any);
+}
+static inline void fly_unlock(const void* state) {
+  uint32_t held = FLY_LOCKED;
+  if (!__atomic_compare_exchange_n(fly_mutex_word(state), &held, 0, false, __ATOMIC_RELEASE, __ATOMIC_RELAXED)) fly_unlock_slow(state);
+}
+// The state is poisoned, or no longer is: done holding the lock.
+static inline void fly_mutex_poison(const void* state, bool poisoned) {
+  if (poisoned) __atomic_fetch_or(fly_mutex_word(state), FLY_POISONED, __ATOMIC_RELAXED);
+  else __atomic_fetch_and(fly_mutex_word(state), ~(uint32_t)FLY_POISONED, __ATOMIC_RELAXED);
+}
+// Runs a `lock`'s body, `body(a)`, its closure `f`, the lock `m` held: then gives the lock back and
+// drops the closure, and should the body panic, poisons the state first, as the panic passes — by
+// a cleanup (`__attribute__((cleanup))`), which costs nothing until a panic. In C the function is
+// a frame of its own, so that it is not one whose own cleanups a panic skips, a frame that catches
+// it (FLY_C_UNWIND). WebAssembly's exceptions reach no cleanup of C's: there the body runs under a
+// catch point, which raises the panic again.
+typedef struct { const void* m; fly_fn* f; bool done; } fly_lock_guard;
+static inline void fly_lock_guard_end(fly_lock_guard* g) {
+  if (!g->done) fly_mutex_poison(g->m, true);
+  fly_unlock(g->m);
+  if (g->f->drop) g->f->drop(g->f->env);
+}
+#if defined(FLY_C_UNWIND) && !defined(FLY_LANDING_PADS)
+__attribute__((noinline))
+#else
+inline
+#endif
+static void fly_locked(void (*body)(void* a), void* a, const void* m, fly_fn* f) {
+#ifdef __wasm__
+  bool panicked = fly_try(body, a);
+  fly_lock_guard g = { m, f, !panicked };
+  fly_lock_guard_end(&g);
+  if (panicked) fly_unwind_on();
+#else
+  fly_lock_guard g __attribute__((cleanup(fly_lock_guard_end))) = { m, f, false };
+  body(a);
+  g.done = true;
+#endif
+}
 // A panic unwound a scope's body: its tasks are cancelled and waited for, and the panic goes on.
 void fly_scope_panicked(fly_wait* w, int sid);
 // `fetchAdd` of an `Atomic<i64>`: what was there; a sum that overflows panics and changes nothing.
 int64_t fly_atomic_add(int64_t* a, int64_t v);
-void fly_unlock(const void* state);
 // `join(a, b)` of `std/par`: both run, maybe at once on two cores, each putting its result where
 // its `out` points; each is pure, so the order cannot be seen.
 void fly_par_join(void (*a)(void* f, void* out), void* fa, void* oa, void (*da)(void* out),

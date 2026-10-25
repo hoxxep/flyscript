@@ -1,0 +1,15 @@
+// Twenty million `Mutex.lock`s no other task contends: what taking a lock and giving it back costs.
+import { println } from "std/io";
+import { Mutex } from "std/sync";
+
+export function main(): void uses Io {
+  const n: u64 = 20000000;
+  const m = Mutex.new(0 as u64);
+  const start = Io.now();
+  Io.scope((s) => {
+    s.spawn(() => {
+      for (const _ of 0..n) { m.lock((v) => { v += 1; }); }
+    });
+  });
+  println(`${m.lock((v) => { const r: u64 = v; r })} locks in ${Io.now().since(start).toMs()} ms`);
+}

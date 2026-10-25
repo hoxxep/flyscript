@@ -1,8 +1,9 @@
 #!/bin/sh
-# What a parked task takes: a million tasks parked at once, each on a timer, in Flyscript built
-# through LLVM and in Rust on tokio, by peak resident memory and time. `parked` parks each task in
-# its own closure; `parked_deep`, two calls deep, in a handler and the helper it waits in, as a
-# connection handler parks. Needs clang and llvm-link (as selfhost/llvm.sh does) and cargo, with
+# What a task costs, in Flyscript built through LLVM and in Rust on tokio, by peak resident memory
+# and time: a million tasks parked at once, each on a timer — `parked` in its own closure,
+# `parked_deep` two calls deep, in a handler and the helper it waits in, as a connection handler
+# parks — and two tasks answering each other over channels (`ping_pong`), and a lock no other task
+# contends (`locks`). Needs clang and llvm-link (as selfhost/llvm.sh does) and cargo, with
 # tokio fetched or cached. `bench/tasks.sh`.
 set -e
 here=$(cd "$(dirname "$0")" && pwd)
@@ -18,7 +19,7 @@ peak() {
     /usr/bin/time -v "$@" 2>&1 >/dev/null | awk -F: '/Maximum resident/ { printf "%d MB", $2 / 1024 }'
   fi
 }
-for b in parked parked_deep; do
+for b in parked parked_deep ping_pong locks; do
   sh "$root/selfhost/llvm.sh" "$compiler" "$here/tasks/$b.fly" "$out/$b" > /dev/null
   echo "$b: Flyscript $(peak "$out/$b"), Rust $(peak "$out/rust/release/$b")"
   "$out/$b"

@@ -1,0 +1,43 @@
+// expect: 100 tasks waited for a held lock
+// expect: the 50 not cancelled took it; every task took it once or was cancelled without it
+// Tasks that find a lock held for long wait for it without a core (§6.2), and half of them are
+// cancelled as they wait (§6.1): a cancelled waiter leaves its place, or, woken for its turn, gives
+// it to the next, so that every task not cancelled takes the lock, none waits for ever, and none
+// takes it twice.
+import { println } from "std/io";
+import { Mutex, Atomic } from "std/sync";
+
+export function main(): void uses Io {
+  const counter = Mutex.new(0 as u64);
+  const done = Atomic.new(0 as i64);
+  const kept = Atomic.new(0 as i64);
+  Io.scope((s) => {
+    s.spawn(() => {
+      const r = counter.lock((c) => {
+        let x: u32 = c as u32 + 1;
+        for (const _ of 0..3000000) { x = x.wrappingMul(1664525).wrappingAdd(1013904223); }
+        x
+      });
+      if (r == 12345) { println("unlikely"); }
+    });
+    Io.sleep(Duration.ms(2));
+    let ts: Vec<Task> = Vec.new();
+    for (const _ of 0..100) { ts.push(s.spawn(() => { counter.lock((c) => { c += 1; }); })); }
+    Io.sleep(Duration.ms(2));
+    println("100 tasks waited for a held lock");
+    for (const [i, t] of ts.iter().enumerate()) { if (i % 2 == 0) { t.cancel(); } }
+    for (const [i, t] of ts.iter().enumerate()) {
+      match (t.wait()) {
+        #Done => {
+          done.fetchAdd(1);
+          if (i % 2 == 1) { kept.fetchAdd(1); }
+        },
+        _ => {},
+      }
+    }
+  });
+  const n = counter.lock((c) => { const r: u64 = c; r });
+  const all = if (kept.load() == 50) { "the 50 not cancelled took it" } else { "some not cancelled did not" };
+  const each = if (n as i64 == done.load()) { "every task took it once or was cancelled without it" } else { "a count is off" };
+  println(`${all}; ${each}`);
+}

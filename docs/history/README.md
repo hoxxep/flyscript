@@ -57,6 +57,7 @@ Versions are pre-1.0 while the language is being designed. The specification was
 
 Each version from 0.55 says in a sentence what it changed, newest first, with the sections of the specification of its day.
 
+- **0.132** says in what order tasks waiting for a `Mutex` get it, and that a scheduling point with nothing to do, an uncontended lock, and a task woken by another running next on its core cost no trip to the scheduler (§6.2, §11.3).
 - **0.131** adds `std/simd`: `Simd<T, N>` and `Mask<N>`, lowered to the target's vector instructions natively and in WebAssembly, and run a lane at a time elsewhere (§11.3, §12.3).
 - **0.130** tells LLVM that a `mut` parameter is `noalias` and a `readonly` one `noalias readonly` (§11.3).
 - **0.129** drops what a box, a `Vec` or an `Arc` holds of a type that may hold itself, where such drops nest deeply, after the rest of the value holding it, so a list or a tree of any depth drops in the stack a few nodes take (§4.4).

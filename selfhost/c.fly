@@ -2936,15 +2936,17 @@ impl Cgen {
         const tc = self.ctype(rt, span);
         const pc = match (stripBorrow(ptys[1])) { #Fn(f) => match (f.params.first()) { #Some(p) => self.ctype(p, span), #None => "void*".toString() }, _ => "void*".toString() };
         const b = self.catchBody(`lock:${tc}:${pc}`, `${pc} m; ${tc} r;`, `x->r = ((${tc} (*)(void*, void**, void*, ${pc}))x->f.fn)(x->f.env, (void*[1]){ NULL }, NULL, x->m);`);
-        // A panic while the state is lent poisons the mutex, which keeps the state (§6.2).
-        pointFirst(tc.asStr(), `({ __auto_type m_ = ${arg(0)}; fly_fn f_ = ${arg(1)}; fly_lock(m_); fly_mutex_check(m_); ${b}_t x_ = { .f = f_, .m = m_ }; if (fly_try(${b}, &x_)) { fly_mutex_poison(m_, true); fly_unlock(m_); if (x_.f.drop) x_.f.drop(x_.f.env); fly_unwind_on(); } fly_unlock(m_); if (x_.f.drop) x_.f.drop(x_.f.env); x_.r; })`)
+        // A panic while the state is lent poisons the mutex, which keeps the state (§6.2), as it
+        // passes the guard; a task cancelled as it waits drops the body uncalled.
+        `({ __auto_type m_ = ${arg(0)}; fly_fn f_ = ${arg(1)}; ${tc} r_ = (${tc}){ 0 }; if (fly_lock(${WAIT}, m_, false)) { ${b}_t x_ = { .f = f_, .m = m_ }; fly_locked(${b}, &x_, m_, &x_.f); r_ = x_.r; } else if (!fly_pending && f_.drop) f_.drop(f_.env); r_; })`
       }
       // A fresh state, the old one dropped and the poison cleared.
       "Mutex_reset" => {
         const t = match (c.argTys.get(1)) { #Some(t) => stripBorrow(t), #None => #Error };
         const tc = self.ctype(t, span);
         const d = if (self.needsDrop(t)) { `${self.dropFn(t, span)}(&o_); ` } else { "" };
-        pointFirst("fly_unit", `({ ${tc}* m_ = ${arg(0)}; ${tc} v_ = ${arg(1)}; fly_lock(m_); ${tc} o_ = *m_; *m_ = v_; fly_mutex_poison(m_, false); fly_unlock(m_); ${d}(fly_unit)0; })`)
+        const dv = if (self.needsDrop(t)) { `else if (!fly_pending) ${self.dropFn(t, span)}(&v_); ` } else { "" };
+        `({ ${tc}* m_ = ${arg(0)}; ${tc} v_ = ${arg(1)}; if (fly_lock(${WAIT}, m_, true)) { ${tc} o_ = *m_; *m_ = v_; fly_mutex_poison(m_, false); fly_unlock(m_); ${d}} ${dv}(fly_unit)0; })`
       }
       // An atomic is a word on the heap, shared by the tasks that borrow it; each operation is a
       // scheduling point, then one sequentially consistent access.

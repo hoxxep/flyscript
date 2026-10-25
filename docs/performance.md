@@ -38,14 +38,16 @@ The compiler is 28,813 lines of Flyscript, plus the standard library it compiles
 
 ## Tasks
 
-What a parked task takes, against Rust on tokio (`bench/tasks.sh`): a million tasks parked at once, each on a timer, the peak resident memory and the time to park and wake them all.
+What a task costs, against Rust on tokio (`bench/tasks.sh`): a million tasks parked at once, each on a timer, by the peak resident memory and the time to park and wake them all; and two tasks' messages, and a lock, by time.
 
 | | Flyscript, through LLVM | Rust, tokio |
 | :--- | ---: | ---: |
-| Each parked in its own closure | 413 MB, 2.7 s | 256 MB, 2.4 s |
-| Each parked two calls deep, in a handler and the helper it waits in | 509 MB, 2.5 s | 501 MB, 2.5 s |
+| A million tasks, each parked in its own closure | 248 MB, 2.5 s | 256 MB, 2.4 s |
+| A million tasks, each parked two calls deep, in a handler and the helper it waits in | 324 MB, 2.6 s | 501 MB, 2.5 s |
+| Half a million round trips between two tasks over channels | 47 ms | 68 ms |
+| Twenty million locks of a `Mutex` no other task contends | 121 ms | 92 ms (`std::sync::Mutex`) |
 
-A task is a state machine whose frame keeps only what is live across the points it stops at, the frames of the functions it calls directly nested in it, as a Rust future nests the futures it awaits (§11.3); there is no `async`, and nothing to `await`. Parked two calls deep, as a connection handler parks, a task takes what a tokio task takes, within ten bytes. Parked in its own closure, it takes 160 bytes more: its record, kept by its scope and its worker's timer apart from its frame, where a tokio task keeps its timer in its future.
+A task is a state machine whose frame keeps only what is live across the points it stops at, the frames of the functions it calls directly nested in it, as a Rust future nests the futures it awaits (§11.3); there is no `async`, and nothing to `await`. Its record is 176 bytes, and its timer is the wait record in its frame, as tokio keeps a task's timer in its future. Parked two calls deep, as a connection handler parks, a task takes two thirds of what a tokio task takes. A task woken by the one running runs next on the same core, so two tasks answering each other take turns there without waking another worker. Each lock is also a scheduling point, at which a cancellation would be delivered and other tasks given a turn, which Rust's lock is not: the point with nothing to do, and the lock free, are a test and one atomic operation inline.
 
 ## A web app
 
@@ -81,7 +83,7 @@ A page's program redraws by rendering its view again into a flat record of what 
 
 ```sh
 sh bench/run.sh                        # the programs; results in target/bench/results.md
-sh bench/tasks.sh                      # a million parked tasks, against Rust on tokio
+sh bench/tasks.sh                      # parked tasks, messages and locks, against Rust on tokio
 NODE_PATH=…/node_modules sh bench/web.sh   # the web app, with Playwright where NODE_PATH points
 sh web/flynext build bench/table/app /tmp/table && sh web/flynext start /tmp/table 4317 &
 NODE_PATH=…/node_modules node bench/table/diff.js 4317   # a thousand rows redrawn

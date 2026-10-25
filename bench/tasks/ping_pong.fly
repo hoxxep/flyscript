@@ -1,0 +1,24 @@
+// Two tasks answering each other over channels, half a million round trips: what a message costs
+// when the task it wakes is waiting for it.
+import { println } from "std/io";
+import { channel } from "std/sync";
+
+export function main(): void uses Io {
+  const n: u64 = 500000;
+  const [atx, arx] = channel<u64>();
+  const [btx, brx] = channel<u64>();
+  const start = Io.now();
+  let total: u64 = 0;
+  Io.scope((s) => {
+    s.spawn(() => {
+      while (const #Some(v) = arx.recv()) { btx.send(v); }
+      btx.close();
+    });
+    for (const i of 0..n) {
+      atx.send(i);
+      if (const #Some(v) = brx.recv()) { total += v; }
+    }
+    atx.close();
+  });
+  println(`${n} round trips in ${Io.now().since(start).toMs()} ms (${total})`);
+}
