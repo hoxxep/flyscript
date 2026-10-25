@@ -9,13 +9,14 @@ Examples use today's imports, `import { x } from "m"`. The dotted form being des
 ## The design in brief
 
 1. **An attribute is data attached to a declaration.** `@name(…)` holds a compile-time constant for the declaration that follows it. It runs nothing and rewrites nothing. The compiler reads its own attributes, and any other is read by `comptime` code through reflection. Attributes are never macros.
-2. **One grammar:** `@name`, `@name(flag)`, `@name(key = e, …)` and `@a.b(…)` for a namespaced one. A bare name is a flag (`key = true`). A value is an expression evaluated at compile time. There are no positional values.
+2. **One grammar:** `@name`, `@name(flag)`, `@name(key = e, …)` and `@a.b(…)` for a namespaced one. A bare name is a flag (`key = true`). A value is an expression evaluated at compile time. The only unnamed value is an attribute's one declared *main* argument, which comes first: `@only(test && !wasm)`.
 3. **They go on declarations and their members:** items and imports, struct fields, enum tags and the fields of a tag's record, functions in impls and interfaces, and effect operations. They do not go on expressions, statements, parameters or structural types. `@!name(…)` goes on the module, at the top of the file.
 4. **A library declares an attribute as a struct**, marked `@attribute(on = […])`. Its fields are the attribute's arguments, and it is imported and namespaced like any other name. The compiler's own attributes are declared the same way, in the prelude.
-5. **An attribute that is not declared is an error**, and so is an argument the attribute lacks, a value of the wrong type, or an attribute in a place it does not allow.
-6. **`@!script(package = {…}, dependencies = {…})`** takes `fly.toml`'s tables with `fly.toml`'s keys, written as Flyscript records of literal data. `fly` reads it with the compiler's parser before anything is compiled, and the compiler checks only its shape.
-7. **Encoding gets one data model.** A type is encoded through `Encode` and decoded through `Decode`, each derived once over reflection. A format implements `Encoder` and `Decoder`. Field and tag names reach the format as compile-time constants, so JSON escapes a key once, in the compiler, and matches keys without allocating.
-8. **`@wire(…)`** on structs, enums, fields and tags covers `rename`, `renameAll`, `alias`, `skip`, `default`, `flatten`, `omitNone`, `tag`/`content`/`untagged` and `denyUnknown`. JSON's output for an unannotated type is unchanged.
+5. **Conditional compilation is `@only(c)`.** `c` is a boolean expression (`!`, `&&`, `||`, `==`, `!=`) over a closed set of build facts: `test`, `native`, `freestanding`, `wasm`, `page`, `js`, `os`, `arch` and `pointerWidth`. It is decided before names are resolved. Code may name what is gated only under a condition that implies the gate, and that is checked across every build, so the error is the same in every build.
+6. **An attribute that is not declared is an error**, and so is an argument the attribute lacks, a value of the wrong type, or an attribute in a place it does not allow.
+7. **`@!script(package = {…}, dependencies = {…})`** takes `fly.toml`'s tables with `fly.toml`'s keys, written as Flyscript records of literal data. `fly` reads it with the compiler's parser before anything is compiled, and the compiler checks only its shape.
+8. **Encoding gets one data model.** A type is encoded through `Encode` and decoded through `Decode`, each derived once over reflection. A format implements `Encoder` and `Decoder`. Field and tag names reach the format as compile-time constants, so JSON escapes a key once, in the compiler, and matches keys without allocating.
+9. **`@wire(…)`** on structs, enums, fields and tags covers `rename`, `renameAll`, `alias`, `skip`, `default`, `flatten`, `omitNone`, `tag`/`content`/`untagged` and `denyUnknown`. JSON's output for an unannotated type is unchanged.
 
 ---
 
@@ -62,7 +63,8 @@ ModuleAttr  = "@!" AttrBody ;                           (* `@` and `!` with noth
 Item        = { Attr } ( Import | Reexport | ["export"] Decl ) | { Attr } Attr "{" { Item } "}" ;
 Attr        = "@" AttrBody ;
 AttrBody    = Ident { "." Ident } [ "(" [ AttrArg { "," AttrArg } [ "," ] ] ")" ] ;
-AttrArg     = Name [ "=" Expr ] ;                       (* a name alone is a flag, `name = true` *)
+AttrArg     = Name [ "=" Expr ] | Expr ;                (* a name alone is a flag, `name = true`; an unnamed value, *)
+                                                        (* first, is the attribute's main argument (§1.4)          *)
 
 Struct      = [ "view" ] "struct" Ident [ TypeParams ] "{" { { Attr } [ "private" ] Field | "comptime" Expr ";" } "}" ;
 Enum        = [ "view" ] "enum" Ident [ TypeParams ] "{" { Attr } EnumTag { "," { Attr } EnumTag } [ "," ] "}" ;
@@ -79,12 +81,14 @@ Some notes on the grammar:
 - **The shebang** is the lexer's only new rule: `#!` at byte 0 runs to the end of the line and is skipped. `#` begins a tag anywhere else, and a tag never starts a file.
 - **Module attributes come first.** An `@!` after an import or a declaration is an error that names the rule: ``a module attribute goes at the top of the file, before its imports``. Comments may come before and between module attributes.
 - **A braced group** (`@only(test) { … }`) belongs to the test proposal. It is not a scope, and what it declares belongs to the module. The grammar allows a group after any attribute, but only an attribute declared to allow groups may have one (`@attribute(group)`, §1.5), and today that is `@only`.
-- **No ambiguity is added.** `@` is not an operator anywhere else in the language, and attributes appear only where a declaration or member begins.
+- **No ambiguity is added.** `@` is not an operator anywhere else in the language, and attributes appear only where a declaration or member begins. Inside the parentheses, an argument is named if it begins with a name followed by `=` (not `==`), is a flag if it is a name alone, and is otherwise an unnamed expression.
 - **In generated fields**, an attribute may be written inside a `comptime for` over a struct's fields. Its arguments may then use the loop's constants: `comptime for (const f of fieldsOf(T)) { @wire(rename = f.name) [f.name]: Option<f.type>; }`.
 
 ## 1.4 Arguments
 
-An argument is `name = e` or a bare `name`. The bare form is a flag, which means `name = true` and is allowed only for a `bool` argument. There are no positional arguments. Every value says what it is where it is written, a new argument never shifts the others, and the one rule covers `@layout(c)`, `@only(test)`, `@wire(skip)` and `@test(world = ADA, seeds = 50)`.
+An argument is `name = e` or a bare `name`. The bare form is a flag, which means `name = true` and is allowed only for a `bool` argument. Every value says what it is where it is written, a new argument never shifts the others, and the one rule covers `@layout(c)`, `@wire(skip)` and `@test(world = ADA, seeds = 50)`.
+
+**One argument may go unnamed.** An attribute may declare a *main* argument (`@attribute(main = "when")`, §1.5), which may be written first without its name: `@only(test && !wasm)` means `@only(when = test && !wasm)`. A lone name is a flag when the attribute has a `bool` argument of that name, and is the main argument otherwise. So `@only(test)` is the condition `test`. The only attribute with a main argument today is `@only`, whose single argument is a condition, and a condition is clearer without a name.
 
 **A value is an expression, evaluated at compile time** in the scope where the attribute is written. That is the module's scope, so the value may name the module's constants and imports. Inside a `comptime for` that generates fields, the loop's constants are in scope too. The value is checked against the declared type of the argument, as a module `const` is checked against its type, and it is then a constant: what reflection returns is that constant, not the expression.
 
@@ -97,12 +101,10 @@ The following are all well formed:
 struct Contact { @wire(alias = ["e-mail", "mail"]) email: String; }
 ```
 
-**Literal data** is the subset of values that needs no names. It is strings (not templates), integers, booleans, payload-less tags (`#SnakeCase`), and lists and records of these. Two kinds of attribute are limited to literal data:
+**Literal data** is the subset of values that needs no names. It is strings (not templates), integers, booleans, payload-less tags (`#SnakeCase`), and lists and records of these. Some values must be known before anything is resolved:
 
-- an attribute that decides **what is compiled** (`@only`), because it is acted on before names are resolved;
-- an attribute that **a tool reads without compiling** (`@!script`), because `fly` reads it with the parser alone.
-
-`@attribute(literal)` marks an attribute as one of these kinds (§1.5). Any name, call or template inside such an attribute is an error at the value: ``an argument of `@!script` is literal data: `fly` reads it before anything is compiled``.
+- an attribute that **a tool reads without compiling** (`@!script`) is limited to literal data, because `fly` reads it with the parser alone. `@attribute(literal)` marks such an attribute (§1.5);
+- an attribute that decides **what is compiled** (`@only`) takes a *condition*, which reads the build's facts and nothing else (§1.9). That is the prelude type `Cond`, and only `@only` takes one. Any name, call or template inside such an attribute is an error at the value: ``an argument of `@!script` is literal data: `fly` reads it before anything is compiled``.
 
 ## 1.5 Declaring an attribute
 
@@ -136,7 +138,8 @@ The rules:
   - `on`, the places it may go: `#Module`, `#Item` (any item), `#Struct`, `#Enum`, `#Field`, `#Tag`, `#Function`, `#Impl`, `#Import`, `#Member`;
   - `repeat`, which allows it more than once on one declaration;
   - `group`, which allows it before braces of items;
-  - `literal`, which limits its values to literal data (§1.4).
+  - `literal`, which limits its values to literal data (§1.4);
+  - `main`, the one argument that may be written first without its name (§1.4).
 - **Names.** An attribute is written by the name it is imported under, `@wire(…)`, or through a module imported whole, `@codec.wire(…)`. Two libraries can both declare an attribute named `wire`, and a module that imports both uses at least one through its module's name, as it would for any other clash. Reflection finds an attribute by its declaration, never by its spelling (§1.10).
 - **Attribute structs are named in lowercase**, as they are written. This is the one place a Flyscript type is named that way. It reads `@wire(skip)` rather than `@Wire(skip)`, and it matches Rust and the attributes the language already has.
 
@@ -151,7 +154,12 @@ export struct attribute {
   repeat: bool;
   group: bool;
   literal: bool;
+  main: Option<str>;
 }
+
+// Kept to the builds where `when` holds (§1.9).
+@attribute(on = [#Module, #Item, #Import, #Member], group, main = "when")
+export struct only { when: Cond; }
 
 // Laid out as C lays it out (§8.2), or packed; `align`, a power of two.
 @attribute(on = [#Struct])
@@ -178,6 +186,9 @@ Each of these is an error, at the attribute or argument where the problem is:
 | `@wire(rename = "a") function f()` | `` @wire goes on structs, enums, fields and tags, not functions `` |
 | `@wire(skip) @wire(flatten) x: T;` | `` @wire is given twice; write its arguments in one: `@wire(skip, flatten)` `` |
 | `import { x } from "m"; @!script(…)` | `` a module attribute goes at the top of the file, before its imports `` |
+| `@only(os == "lunix")` | `` `lunix` is not an os fly builds for: linux, macos, windows, none, wasi, browser, node `` |
+| `@only(debug)` | `` `debug` is not a build fact; a condition reads test, native, freestanding, wasm, page, js, os, arch, pointerWidth `` |
+| `sample()`, in code with no condition, of `@only(test) function sample()` | `` `sample` exists only in builds where `test`; this code is also in builds where it does not hold `` |
 
 An attribute that is declared but never read is not an error, because a type may carry `@wire` long before anything encodes it. Checks of meaning that the struct's types cannot state, such as `flatten` on a field that is not a struct or `tag` together with `untagged`, are made by the code that reads the attribute when it reads it. That code reports the error at the attribute, not inside the derivation (§1.10).
 
@@ -191,9 +202,9 @@ A dependency's attributes are checked the same way. They are syntax and types, w
 | `@attribute(on = […], repeat, group, literal)` | struct | The struct is an attribute (§1.5). |
 | `@!script(…)` | module | The file is a program of its own (§1.8). |
 | `@test`, `@test(world = W, seeds = n, panics = "…")` | function | A test, in the test proposal. |
-| `@only(test)`, `@only(test) { … }` | item, import, group, member | Kept to test builds, in the test proposal. |
+| `@only(c)`, `@only(c) { … }`, `@!only(c)` | item, import, group, member, module | Kept to the builds where `c` holds (§1.9). `@only(test)` is the test proposal's. |
 
-Other attributes the compiler might take later, such as `@deprecated(note = "…")`, a `@caller` for panics that name the caller's line (raised in the test proposal), `@only(native)` and `@inline`, fit the same grammar. None of them is proposed here.
+Other attributes the compiler might take later, such as `@deprecated(note = "…")`, a `@caller` for panics that name the caller's line (raised in the test proposal), and `@inline`, fit the same grammar. None of them is proposed here.
 
 ## 1.8 `@!script`: a file that is its own package
 
@@ -259,13 +270,58 @@ function readScript(file: str): Manifest uses Io, Fail<Stop> {
 
 **Its lock and its build.** A script's dependencies are held to a lock like any package's. `fly.lock`'s purpose is to hold a dependency to the commit, files and effects it was accepted with, and a script is no exception. The lock is written beside the script, as `deploy.fly.lock`, only when the script has a dependency from git. The build goes to `$FLY_HOME/scripts/<hash of the script's absolute path>/`. It is rebuilt when the script's content hash, its lock or the compiler changes, so the second run of `./deploy.fly` starts as fast as the program does.
 
-## 1.9 Tests
+## 1.9 Conditional compilation: `@only`
 
-The test proposal's grammar (`Attr = "@" Ident [ "(" [ AttrArg … ] ")" ]`, `AttrArg = Ident [ "=" Expr ]`, groups, attributes before `export`, unknown attributes as errors) is a subset of §1.3, and its meanings are untouched:
+`@only(c)` keeps what follows it to the builds where the condition `c` holds. That can be a declaration, an import, a member of an impl, interface or effect, or a braced group of items, and `@!only(c)` does the same for a whole module. The test proposal's `@only(test)` is the simplest case. A condition is a boolean expression over the build's facts. It is written as Flyscript writes booleans, rather than with Rust's `any(…)`, `all(…)` and `not(…)`:
 
-- `@test` is a function attribute. `@test(world = ADA, seeds = 50, panics = "overflow")` uses `name = e`, and `ADA` is a module constant, evaluated at compile time (§1.4).
-- `@only(test)` is a flag, and `@only` is declared `literal` and `group`. The compiler can therefore drop what it keeps out before resolving any name, imports included. That is the reason the test proposal gives for gating with an attribute rather than with `comptime if`, and §1.4's rule is what guarantees it.
-- A module made only of fixtures can be marked whole: `@!only(test)` at its top, if the test proposal wants that. It needs only `#Module` among `@only`'s places.
+```ts
+@only(test) import { assertEq } from "std/test";
+
+@only(native && os == "linux") extern "C" function epoll_create1(flags: i32): i32;
+
+// One `now` for each kind of target; code with no condition calls either.
+@only(wasm || js) function now(): u64 { … }
+@only(!(wasm || js)) function now(): u64 { … }
+
+@only(test && !freestanding) {
+  import { World } from "std/test";
+  const ADA: World = World.empty().profile("ada", "Ada Lovelace");
+}
+```
+
+**The facts** are a closed set, and they are fixed when the build starts:
+
+| Fact | Type | Holds, or is |
+| :--- | :--- | :--- |
+| `test` | `bool` | A test build of the package being tested. A dependency is never compiled as one. |
+| `native` | `bool` | A hosted native program (§8.3). |
+| `freestanding` | `bool` | A kernel or firmware, with no operating system and no `main`. |
+| `wasm` | `bool` | WebAssembly, for WASI or for a page. |
+| `page` | `bool` | A FlyNext page's program. This implies `wasm`. |
+| `js` | `bool` | JavaScript, as the compiler's own JavaScript build is. |
+| `os` | `str` | `"linux"`, `"macos"` or `"windows"` natively; `"none"` freestanding; `"wasi"`; `"browser"` for a page; `"node"` for JavaScript. |
+| `arch` | `str` | `"x86_64"`, `"aarch64"`, `"wasm32"` or `"js"`. |
+| `pointerWidth` | `u32` | `64`; `32` for WebAssembly; `53` for JavaScript, whose integers are exact to that width (§3.1). |
+
+Exactly one of `native`, `freestanding`, `wasm` and `js` holds.
+
+**A condition** is made of the facts, `true` and `false`, `!`, `&&`, `||`, parentheses, and `==` or `!=` between a fact and a literal. Precedence is the language's own. Nothing else may appear, so a condition names no module, calls nothing, and reads no constant. Each fact's values are a closed set, so `os == "lunix"` is an error at the condition, a typo that Rust's cfg let through for years (§1.6).
+
+**It is decided before names are resolved.** The facts come from the build, not from any module. The loader therefore evaluates every condition first and drops what does not hold, imports included, before it builds the import graph that §8.1 fixes before any `comptime` code runs. This is why gating is an attribute and not a `comptime if`, as the test proposal argues.
+
+**Parsed always, checked where it holds.** Gated code is parsed in every build, so it is always well formed and its names are known. Its names, types, effects and ownership are checked only in builds where its condition holds.
+
+**A reference needs the same condition or a stronger one.** Code under condition A may name a declaration under condition B only if A implies B, that is, if B holds in every build where A holds. Code with no condition is under `true`. The compiler decides implication exactly, by evaluating both conditions in every build it can make: each target it knows, with and without `test`. That is a few dozen assignments, so the check costs nothing, and it is made from the text, not from the build at hand. The error is therefore the same in every build: `` `sample` exists only in builds where `test`; this code is also in builds where it does not hold ``. It is never "unknown name" in one build and fine in another.
+
+**Conditions accumulate.** An item in a group is under the group's condition and its own, joined with `&&`, and a module's `@!only` adds to everything in it. `@test` on a function implies `test`, so `@test @only(native)` is a test that runs only natively.
+
+**Alternatives.** Two declarations of one name in one module are allowed when no build has both, which is checked the same way. A reference under A then needs A to imply at least one of them. That is how `now` above is written once for each kind of target and called by code with no condition. Each alternative is checked in its own builds.
+
+**Exports.** A gated export is part of the package's face only in the builds where it holds. A dependent may name it only under a condition that implies it. A dependency is never built as a test, so a `test` export never reaches a dependent, and the lockfile never lists its effects.
+
+**The same facts in code.** The facts are also the fields of the prelude's constant `build`, so `comptime if (build.pointerWidth == 64) { … }` chooses code inside a function body, where an attribute cannot go. `comptime if` can never choose an import.
+
+`@test` and the rest of the test proposal sit inside this unchanged. `@test(world = ADA, seeds = 50, panics = "overflow")` uses `name = e`, and `ADA` is a module constant evaluated at compile time (§1.4). The proposal's grammar (`Attr = "@" Ident [ "(" [ AttrArg … ] ")" ]`, groups, attributes before `export`, unknown attributes as errors) is a subset of §1.3. A module made only of fixtures is `@!only(test)`.
 
 ## 1.10 Reading attributes
 
@@ -324,7 +380,8 @@ comptime function checked(f: Field): wire {
 ## 1.11 What was weighed
 
 - **Macros.** Rust's derive macros and attribute macros are a second language over tokens. `comptime` already does what they do here, with types, so an attribute only has to be data.
-- **Positional values** (`@rename("id")`, `@deprecated("use x")`). They are shorter, but every attribute would then need an order, and adding an argument would break what was written before. `name = value` is what `@layout(align = …)` and serde both use.
+- **Positional values** (`@rename("id")`, `@deprecated("use x")`). They are shorter, but every attribute would then need an order, and adding an argument would break what was written before. `name = value` is what `@layout(align = …)` and serde both use. The one exception, a declared main argument, exists for `@only`, whose single argument is a condition.
+- **Rust's `cfg(any(…), all(…), not(…))`.** It is a second boolean syntax beside the language's own. `&&`, `||` and `!` read as every TypeScript programmer already reads them, and because a condition may contain only facts and literals, it can still be decided before anything is resolved.
 - **Attributes on structural types.** Rejected because two equal types would differ by an annotation (§1.2).
 - **A declaration form of its own**, `attribute wire { … }`. A struct already has fields, types and the reflection over them. One meta-attribute is a smaller addition to the language than one more kind of declaration.
 - **Arguments as tokens that the reader interprets**, as in Rust. Then `@wire(renam = "x")` would be an error only if a derivation happened to read it, and nothing would type it. Typed fields catch the mistake where it is written.
@@ -779,4 +836,6 @@ It would be two roadmap steps, attributes and `@!script` first, then the codec, 
 5. **A format's view of a type**: a `Duration` as `"1.5s"` in JSON but as nanoseconds in CBOR (serde's `is_human_readable`). Is this a method of `Encoder` that hand-written impls consult, or do formats get attributes of their own (`@cbor(…)`) that the derivation passes through?
 6. **The script lock**: `deploy.fly.lock` beside the script, as proposed, or inside the cache, out of sight but lost when the script is copied? And should a script run by its shebang be allowed without `.fly` (`/usr/local/bin/deploy`)?
 7. **`fly add` for a script**, which would rewrite `@!script`'s text the way it now appends to `fly.toml`. Should it, or should a script's dependencies be edited by hand?
-8. **Attributes in template structs**: should `Partial<T>` be able to copy each field's attributes (`@...f.attrs [f.name]: Option<f.type>;`), so that a partial update decodes under the same keys as the whole?
+8. **More build facts.** Should `fly.toml` grow features (Cargo's), read as `features.tls`? Should there be a `debug` fact for a build with assertions or sanitizers? And should alternatives (`@only(wasm) function now` and `@only(!wasm) function now`) be required to have one signature, so that a library's face is the same on every target?
+9. **The lockfile and target-gated exports.** Test-only exports never appear in the lock. Should an export that exists only on some targets be listed with its condition, or should the lock list only what every target exports?
+10. **Attributes in template structs**: should `Partial<T>` be able to copy each field's attributes (`@...f.attrs [f.name]: Option<f.type>;`), so that a partial update decodes under the same keys as the whole?
