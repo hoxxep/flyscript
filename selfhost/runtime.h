@@ -105,12 +105,15 @@ typedef struct fly_unw fly_unw;
 // And the limit of the stack it runs on now (below), and how deep in destructors it is, from which
 // a panic does not unwind (§5.7): each fiber's own, as the panic is.
 // A frame arena (§11.3): the frames of calls of code that may suspend whose frame is not nested in
-// their caller's, each taken as the call starts and given back as it ends, last first.
+// their caller's, each taken as the call starts and given back as it ends, last first. A
+// generator's or a `handle`'s own arena keeps the one in use as it was entered, `outer`, which is
+// in use again should it be freed while in use, as a panic unwinds out of it.
 typedef struct fly_frame_chunk fly_frame_chunk;
-typedef struct { char* top; char* end; fly_frame_chunk* chunk; } fly_frames;
-// `pend` says why code returned suspended (FLY_PEND_*), and for whom; `nopend` how deep in code
-// that cannot suspend — cleanup — the task is; `frames` is the arena calls take frames from.
-typedef struct fly_ctx { void* err; bool unwinding; uint8_t pend; fly_handler* handlers; fly_unw* unw; char* panic; uintptr_t limit; int destroying; fly_handler* pend_h; fly_frames* frames; int nopend; } fly_ctx;
+typedef struct fly_frames fly_frames;
+struct fly_frames { char* top; char* end; fly_frame_chunk* chunk; fly_frames* outer; };
+// `pend` says why code returned suspended (FLY_PEND_*), and for whom; `frames` is the arena calls
+// take frames from.
+typedef struct fly_ctx { void* err; bool unwinding; uint8_t pend; fly_handler* handlers; fly_unw* unw; char* panic; uintptr_t limit; int destroying; fly_handler* pend_h; fly_frames* frames; } fly_ctx;
 #ifdef FLY_THREADS
 // The context of the task running. Within one call of a function it is always the same, wherever
 // the task goes on, so it is `const`: a compiler may compute it once a call. It is computed afresh
@@ -185,17 +188,22 @@ _Noreturn void fly_unwind_on(void);
 // LLVM it is the module's own, with a landing pad that catches a panic (llvm.fly); elsewhere it
 // takes up a record.
 bool fly_try(void (*f)(void* a), void* a);
+// A routine of the runtime's that may wait — for the scheduler, a socket, the clock, other tasks —
+// is a state machine too, of a few steps: its caller keeps this record of where it stopped, zeroed
+// before the first call, and calls it again with it to go on.
+typedef struct { int32_t step; int32_t n; int64_t a[3]; void* p[3]; } fly_wait;
 // A spawned task's `Task` (§6.1): the task's record, which lasts while it runs or a `Task` refers
 // to it. How it ended is TaskEnd's tags, in their order.
 enum { FLY_TASK_RUNNING = -1, FLY_TASK_DONE = 0, FLY_TASK_CANCELLED = 1, FLY_TASK_PANICKED = 2 };
-void* fly_task_spawn(int scope, void* closure);
+void* fly_task_spawn(fly_wait* w, int scope, const fly_fn* f);
 void fly_task_cancel(void* t);
-int32_t fly_task_wait(void* t, fly_String* message);
-size_t fly_task_any(void* const* ts, size_t n);
+int32_t fly_task_wait(fly_wait* w, void* t, fly_String* message);
+size_t fly_task_any(fly_wait* w, void* const* ts, size_t n);
 void* fly_task_clone(void* t);
 void fly_task_drop(void* t);
-// The program's root: a panic that unwinds `run` ends the program there.
-void fly_root(void (*run)(void));
+// The program's root: a panic that unwinds `run` ends the program there. `run` is the root
+// machine of the program's one task, given the slot it keeps its frame in.
+void fly_root(void (*run)(void**));
 // Bytes to standard output.
 void fly_out(fly_str s);
 
@@ -267,7 +275,7 @@ void fly_core_free(uint8_t* p) FLY_SYMBOL(fly_core_free);
 uint8_t* fly_rt_mt_channel(void) FLY_SYMBOL(fly_rt_mt_channel);
 void fly_rt_mt_free(uint8_t* state) FLY_SYMBOL(fly_rt_mt_free);
 bool fly_rt_mt_send(uint8_t* m, uint8_t* state, uint8_t* v, uint64_t size) FLY_SYMBOL(fly_rt_mt_send);
-int32_t fly_rt_mt_recv(uint8_t* m, uint8_t* state, uint8_t* out) FLY_SYMBOL(fly_rt_mt_recv);
+int32_t fly_rt_mt_take(uint8_t* state, uint8_t* out) FLY_SYMBOL(fly_rt_mt_take);
 bool fly_rt_mt_deafen(uint8_t* m, uint8_t* state, uint8_t** items, uint64_t* n, uint64_t* size) FLY_SYMBOL(fly_rt_mt_deafen);
 bool fly_rt_mt_sender_gone(uint8_t* m, uint8_t* state) FLY_SYMBOL(fly_rt_mt_sender_gone);
 void fly_rt_mt_sender_clone(uint8_t* m, uint8_t* state) FLY_SYMBOL(fly_rt_mt_sender_clone);
@@ -275,10 +283,10 @@ void fly_rt_mt_lock(uint8_t* m, int32_t* held) FLY_SYMBOL(fly_rt_mt_lock);
 void fly_rt_mt_unlock(uint8_t* m, int32_t* held) FLY_SYMBOL(fly_rt_mt_unlock);
 void fly_mon_lock(uint8_t* m) FLY_SYMBOL(fly_mon_lock);
 void fly_mon_unlock(uint8_t* m) FLY_SYMBOL(fly_mon_unlock);
-bool fly_mon_wait(uint8_t* m, bool cancellable) FLY_SYMBOL(fly_mon_wait);
 void fly_mon_wake_one(uint8_t* m) FLY_SYMBOL(fly_mon_wake_one);
 void fly_mon_wake_all(uint8_t* m) FLY_SYMBOL(fly_mon_wake_all);
 void fly_core_relax(void) FLY_SYMBOL(fly_core_relax);
+void fly_core_yield(void) FLY_SYMBOL(fly_core_yield);
 
 // ---- integers ----
 
@@ -458,12 +466,17 @@ void fly_cont_drop(fly_cont* k);
 // in its caller's when the caller can say what it is; otherwise the callee takes it from the
 // task's frame arena as it starts, keeping it in a slot its caller holds, and gives it back as it
 // ends.
-enum { FLY_PEND_YIELD = 1, FLY_PEND_PERFORM = 2 };
+enum { FLY_PEND_YIELD = 1, FLY_PEND_PERFORM = 2, FLY_PEND_WAIT = 3 };
 void* fly_frame_push(size_t size);
 void fly_frame_pop(void* frame);
 // A machine's frame, from the slot its caller holds: taken from the arena as the machine first starts.
 void* fly_frame_take(void** slot, size_t size);
 void fly_frames_free(fly_frames* a);
+// Where the arena in use is, kept as a catch point is entered, and given back as it takes up a
+// panic, the frames the panic left behind with it.
+typedef struct { fly_frames* frames; char* top; } fly_frames_mark;
+void fly_frames_keep(fly_frames_mark* m);
+void fly_frames_back(const fly_frames_mark* m);
 // A suspended machine whose frame is `frame`, dropped: called again unwinding, it runs its
 // cleanup for where it stopped. `call` calls it.
 void fly_machine_unwind(void (*call)(void* env, void* frame), void* env, void* frame);
@@ -500,9 +513,9 @@ bool fly_world_quota(fly_str token);
 // interleaving. Otherwise they run on a worker thread for each core. `fly_tasks_run` runs `main`
 // as the first task, on the main stack's behalf.
 extern bool fly_tasks_on;
-void fly_tasks_run(void (*main)(void));
-void fly_point(void);
-void fly_sleep(uint64_t nanos);
+void fly_tasks_run(void (*main)(void**));
+void fly_point(fly_wait* w);
+void fly_sleep(fly_wait* w, uint64_t nanos);
 // The time: the simulated world's clock, or the machine's monotonic one, in nanoseconds.
 uint64_t fly_now(void);
 // A `Mutex`: its state on the heap after a header holding its lock, which `fly_lock` takes by the
@@ -515,7 +528,7 @@ void fly_lock(const void* state);
 void fly_mutex_check(const void* state);
 void fly_mutex_poison(const void* state, bool poisoned);
 // A panic unwound a scope's body: its tasks are cancelled and waited for, and the panic goes on.
-_Noreturn void fly_scope_panicked(int sid);
+void fly_scope_panicked(fly_wait* w, int sid);
 // `fetchAdd` of an `Atomic<i64>`: what was there; a sum that overflows panics and changes nothing.
 int64_t fly_atomic_add(int64_t* a, int64_t v);
 void fly_unlock(const void* state);
@@ -524,12 +537,12 @@ void fly_unlock(const void* state);
 void fly_par_join(void (*a)(void* f, void* out), void* fa, void* oa, void (*da)(void* out),
                   void (*b)(void* f, void* out), void* fb, void* ob, void (*db)(void* out));
 // A task's outcome: its value (`size` bytes), or its failure.
-int fly_spawn(int scope, void (*entry)(void* task, void* closure), void* closure, size_t size);
+int fly_spawn(fly_wait* w, int scope, void (*entry)(void* task, void* closure, void** slot), const fly_fn* f, size_t size);
 void* fly_task_result(void* task);
 void* fly_task_closure(void* task);
-void fly_join(int task, void* out);
+void fly_join(fly_wait* w, int task, void* out);
 int fly_scope_open(void);
-void fly_scope_close(int scope, bool body_failed);
+void fly_scope_close(fly_wait* w, int scope, bool body_failed);
 void fly_panic_deadlock(void);
 
 typedef struct { int ch; } fly_chan;
@@ -545,23 +558,23 @@ enum { FLY_IO_OK, FLY_IO_RESET, FLY_IO_TIMED_OUT, FLY_IO_BROKEN_PIPE, FLY_IO_NOT
 int fly_listen(uint16_t port);
 uint16_t fly_listener_port(int listener);
 // The next connection, or none, ever: the world has no more, or the listener failed.
-bool fly_accept(int listener, fly_socket* out);
+bool fly_accept(fly_wait* w, int listener, fly_socket* out);
 // A connection to `host` on `port`, or what connecting failed with.
-int fly_connect(fly_str host, uint16_t port, fly_socket* out);
+int fly_connect(fly_wait* w, fly_str host, uint16_t port, fly_socket* out);
 // A connection over TLS: the peer's certificate verified, for `host`, against the system's roots.
-int fly_connect_tls(fly_str host, uint16_t port, fly_socket* out);
-int fly_sock_read(fly_socket* s, fly_slice buf, uint64_t* n);
-int fly_sock_write(fly_socket* s, fly_slice bytes);
+int fly_connect_tls(fly_wait* w, fly_str host, uint16_t port, fly_socket* out);
+int fly_sock_read(fly_wait* w, fly_socket* s, fly_slice buf, uint64_t* n);
+int fly_sock_write(fly_wait* w, fly_socket* s, fly_slice bytes);
 // A whole HTTP response of `code`, with `body`: in a simulated world, a line of the output.
-int fly_sock_status(fly_socket* s, unsigned code, fly_str body);
+int fly_sock_status(fly_wait* w, fly_socket* s, unsigned code, fly_str body);
 void fly_sock_close(fly_socket* s);
 // A task running a closure that gives nothing: it calls it, then drops it.
-void fly_task_void(void* task, void* closure);
+void fly_task_void(void* task, void* closure, void** slot);
 // A channel, given what drops a message of its, if anything must.
 fly_chan fly_channel(void (*drop)(void*));
-bool fly_send(fly_chan c, const void* v, size_t size);
-bool fly_recv(fly_chan c, void* out, size_t size);
-void fly_close(fly_chan c);
+bool fly_send(fly_wait* w, fly_chan c, const void* v, size_t size);
+bool fly_recv(fly_wait* w, fly_chan c, void* out, size_t size);
+void fly_close(fly_wait* w, fly_chan c);
 void fly_sender_drop(fly_chan* c);
 void fly_receiver_drop(fly_chan* c);
 fly_chan fly_sender_clone(const fly_chan* c);

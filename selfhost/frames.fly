@@ -11,12 +11,12 @@ import { Program } from "./env";
 import { Block, Stmt } from "./ir";
 import { HashSet } from "std/collections";
 
-// Whether code performing `row` may suspend: it yields, or performs an effect a handler takes —
-// anything but failures, regions and raw memory, and, for now, `Io`, which waits on the task's fiber.
+// Whether code performing `row` may suspend: it yields, performs `Io`, whose waits stop the task,
+// or performs an effect a handler takes — anything but failures, regions and raw memory.
 export function pends(p: readonly Program, row: readonly EffRow): bool {
   row.effs.iter().some((e) => {
     const name = p.defs[e.def].name.asStr();
-    !(p.modules[p.defs[e.def].module].isStd && (name == "Fail" || name == "Region" || name == "Unsafe" || name == "Io"))
+    !(p.modules[p.defs[e.def].module].isStd && (name == "Fail" || name == "Region" || name == "Unsafe"))
   })
 }
 
@@ -25,7 +25,7 @@ export function pends(p: readonly Program, row: readonly EffRow): bool {
 // reads again when it goes on, so each lives in the frame. Whether `b` holds such a statement.
 // The blocks of a statement that run as part of the code around it count: a direct `handle`'s body
 // runs where the `handle` is; its arms, a `handle`'s body and arms otherwise, and a `defer`'s body
-// are code apart.
+// are code apart, though a `defer` that may suspend makes its block's ways out such points.
 export function residents(b: readonly Block, site: readonly (s: readonly Stmt) => bool, out: mut HashSet<usize>): bool {
   let any = false;
   for (const s of b.stmts) {
@@ -40,6 +40,14 @@ export function residents(b: readonly Block, site: readonly (s: readonly Stmt) =
       _ => false,
     };
     if (here || inner) { any = true; }
+  }
+  // A `defer` that may suspend makes the block's way out a point the code may stop at, after which
+  // its other cleanups run, and the code around it goes on.
+  for (const c of b.cleanups) {
+    if (const #Defer(_, d) = c) {
+      let own: HashSet<usize> = HashSet.new();
+      if (residents(d, site, mut own)) { any = true; }
+    }
   }
   if (any) { for (const l of b.locals) { out.insert(l); } }
   any

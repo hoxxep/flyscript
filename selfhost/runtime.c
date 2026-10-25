@@ -342,9 +342,12 @@ bool fly_try(void (*f)(void* a), void* a) { f(a); return false; }
 #elif defined(FLY_C_UNWIND)
 bool fly_try(void (*f)(void* a), void* a) {
   fly_unw u;
+  fly_frames_mark m;
+  fly_frames_keep(&m);
   fly_unw_push(&u);
   if (FLY_UNW_CATCH(&u)) {
     fly_cx_now()->unw = u.prev;
+    fly_frames_back(&m);
     return true;
   }
   f(a);
@@ -1043,7 +1046,6 @@ static char* io_path(fly_str s) {
 }
 
 int fly_io_stat(fly_str path, uint64_t* size, bool* dir, int64_t* modified) {
-  fly_point();
   char* p = io_path(path);
   struct stat st;
   int r = stat(p, &st);
@@ -1068,7 +1070,6 @@ static int io_name_cmp(const void* a, const void* b) {
 }
 
 int fly_io_list(fly_str path, fly_vec* names) {
-  fly_point();
   char* p = io_path(path);
   DIR* d = opendir(p);
   free(p);
@@ -1087,7 +1088,6 @@ int fly_io_list(fly_str path, fly_vec* names) {
 }
 
 int fly_io_mkdir(fly_str path) {
-  fly_point();
   char* p = io_path(path);
   int r = mkdir(p, 0777);
   free(p);
@@ -1095,7 +1095,6 @@ int fly_io_mkdir(fly_str path) {
 }
 
 int fly_io_remove(fly_str path) {
-  fly_point();
   char* p = io_path(path);
   struct stat st;
   int r = lstat(p, &st);
@@ -1106,7 +1105,6 @@ int fly_io_remove(fly_str path) {
 }
 
 int fly_io_rename(fly_str from, fly_str to) {
-  fly_point();
   char* a = io_path(from);
   char* b = io_path(to);
   int r = rename(a, b);
@@ -1119,7 +1117,6 @@ int fly_io_rename(fly_str from, fly_str to) {
 // Files by descriptor (std/io), the standard streams among them: written, standard output and
 // error go where `println` and `eprintln` write, in order with them.
 int fly_io_open(fly_str path, uint8_t mode, uint32_t* fd) {
-  fly_point();
   char* p = io_path(path);
   int flags = mode == 0 ? O_RDONLY : mode == 1 ? (O_WRONLY | O_CREAT | O_TRUNC) : (O_WRONLY | O_CREAT | O_APPEND);
 #ifdef O_CLOEXEC
@@ -1134,7 +1131,6 @@ int fly_io_open(fly_str path, uint8_t mode, uint32_t* fd) {
 }
 
 int fly_io_read(uint32_t fd, fly_slice buf, uint64_t* n) {
-  fly_point();
   for (;;) {
     ssize_t k = read((int)fd, buf.ptr, buf.len);
     if (k >= 0) { *n = (uint64_t)k; return 0; }
@@ -1143,7 +1139,6 @@ int fly_io_read(uint32_t fd, fly_slice buf, uint64_t* n) {
 }
 
 int fly_io_write(uint32_t fd, fly_slice buf, uint64_t* n) {
-  fly_point();
   if (fd == 1 || fd == 2) {
     struct iovec part = { buf.ptr, buf.len };
     write_out((int)fd, &part, 1);
@@ -1158,7 +1153,6 @@ int fly_io_write(uint32_t fd, fly_slice buf, uint64_t* n) {
 }
 
 void fly_io_close(uint32_t fd) {
-  fly_point();
   if (fd > 2) close((int)fd);
 }
 
@@ -1166,7 +1160,6 @@ void fly_io_close(uint32_t fd) {
 void fly_fd_release(uint32_t fd) { if (fd > 2) close((int)fd); }
 
 bool fly_io_env(fly_str name, fly_String* value) {
-  fly_point();
   char* n = io_path(name);
   const char* v = getenv(n);
   free(n);
@@ -1176,21 +1169,18 @@ bool fly_io_env(fly_str name, fly_String* value) {
 }
 
 fly_String fly_io_cwd(void) {
-  fly_point();
   char buf[4096];
   if (!getcwd(buf, sizeof buf)) return fly_String_from(fly_str_lit("/", 1));
   return fly_String_from((fly_str){ (const uint8_t*)buf, strlen(buf) });
 }
 
 int64_t fly_io_wall(void) {
-  fly_point();
   struct timespec t;
   clock_gettime(CLOCK_REALTIME, &t);
   return (int64_t)t.tv_sec * 1000000000 + t.tv_nsec;
 }
 
 int fly_io_run(fly_str program, fly_slice args, fly_str input, int32_t* status, fly_String* out, fly_String* err) {
-  fly_point();
 #ifdef __wasm__
   (void)program; (void)args; (void)input; (void)status; (void)out; (void)err;
   return 5;
@@ -1974,7 +1964,6 @@ void fly_perform(uint32_t effect, int op, void* args, void* result) {
   h->args = args;
   h->result = result;
   h->from = inner;
-  if (cx->nopend) fly_panic("cleanup performs an operation whose handler would suspend it");
   h->waiting = true;
   cx->pend = FLY_PEND_PERFORM;
   cx->pend_h = h;
@@ -1997,7 +1986,6 @@ static void cleaning(int d);
 // the task's first scheduling point after it (§5.6).
 fly_unwind_state fly_cleanup_begin(void) {
   cleaning(1);
-  fly_cx_now()->nopend++;
   fly_unwind_state s = { fly_err, fly_unwinding };
   fly_err = NULL;
   fly_unwinding = false;
@@ -2006,7 +1994,6 @@ fly_unwind_state fly_cleanup_begin(void) {
 
 void fly_cleanup_end(fly_unwind_state s) {
   cleaning(-1);
-  fly_cx_now()->nopend--;
   fly_err = s.err;
   fly_unwinding = s.unwinding;
 }
@@ -2061,12 +2048,39 @@ void fly_frame_pop(void* frame) {
 }
 
 void fly_frames_free(fly_frames* a) {
+  fly_ctx* cx = fly_cx_now();
+  if (cx->frames == a) cx->frames = a->outer;
   while (a->chunk) {
     fly_frame_chunk* c = a->chunk;
     a->chunk = c->prev;
     free(c);
   }
   a->top = a->end = NULL;
+}
+
+// Arena `a` in use. Still in use, as a panic left it, it keeps the one it was entered from.
+static void frames_enter(fly_ctx* cx, fly_frames* a) {
+  if (cx->frames != a) a->outer = cx->frames;
+  cx->frames = a;
+}
+
+void fly_frames_keep(fly_frames_mark* m) {
+  fly_frames* a = fly_cx_now()->frames;
+  *m = (fly_frames_mark){ a, a ? a->top : NULL };
+}
+
+void fly_frames_back(const fly_frames_mark* m) {
+  fly_cx_now()->frames = m->frames;
+  fly_frames* a = m->frames;
+  if (!a) return;
+  // A full chunk's top is its end.
+  while (a->chunk && !(m->top >= a->chunk->data && m->top <= a->chunk->end)) {
+    fly_frame_chunk* c = a->chunk;
+    a->chunk = c->prev;
+    free(c);
+    if (a->chunk) a->end = a->chunk->end;
+  }
+  a->top = a->chunk ? m->top : NULL;
 }
 
 void fly_machine_unwind(void (*call)(void* env, void* frame), void* env, void* frame) {
@@ -2087,7 +2101,7 @@ void fly_handle_enter(fly_handler* h, fly_frames* arena, fly_frames** saved) {
   h->waiting = false;
   cx->handlers = h;
   *saved = cx->frames;
-  cx->frames = arena;
+  frames_enter(cx, arena);
 }
 
 void fly_handle_leave(fly_handler* h, fly_frames* saved) {
@@ -2149,7 +2163,7 @@ static bool generated_m_next(void* st, void* out) {
   if (g->done) return false;
   fly_ctx* cx = fly_cx_now();
   fly_frames* saved = cx->frames;
-  cx->frames = &g->arena;
+  frames_enter(cx, &g->arena);
   ((producer_m)g->producer.fn)(g->producer.env, &g->frame, out);
   cx = fly_cx_now();
   cx->frames = saved;
@@ -2179,7 +2193,7 @@ static void generated_m_drop(void* st) {
     fly_handler* outer = cx->handlers;
     cx->handlers = &barrier;
     fly_frames* saved = cx->frames;
-    cx->frames = &g->arena;
+    frames_enter(cx, &g->arena);
     fly_machine_unwind(generated_m_unwind, g, g->frame);
     cx = fly_cx_now();
     cx->frames = saved;
@@ -2366,13 +2380,26 @@ uint64_t fly_now(void) {
   return (uint64_t)ts.tv_sec * 1000000000u + (uint64_t)ts.tv_nsec;
 }
 
+// A runtime routine that waits is a leaf of the machine that calls it: called first, with its
+// wait record zeroed, it makes its request and, unless it is answered at once, stops, the task's
+// context pending; called again with the same record, it goes on from where it stopped, its
+// locals whatever it kept in the record. `W_SUSPEND` stops it, returning what follows, and is
+// where it goes on.
+#define W_BEGIN(w) switch ((w)->step) { case 0:;
+#define W_END }
+#define W_SUSPEND(w, ...) do { (w)->step = __LINE__; return __VA_ARGS__; case __LINE__:; } while (0)
+
 // ---- sockets ----
 
 #if defined(FLY_THREADS)
-// On worker threads a socket does not block: a task waits for it to be ready (below).
-static bool io_wait(int fd, bool write);
+// On worker threads a socket does not block: a task waits for it to be ready (below), by
+// `IO_WAIT`, after which it sees whether it was cancelled meanwhile.
+static bool io_wait_begin(int fd, bool write);
+static void io_wait_end(void);
+static bool cancelled_here(void);
 static void io_register(int fd);
 static bool threads;
+#define IO_WAIT(w, fd, write, ...) do { if (io_wait_begin((fd), (write))) { W_SUSPEND(w, __VA_ARGS__); io_wait_end(); } } while (0)
 #endif
 
 static int io_error(int e) {
@@ -2444,7 +2471,7 @@ uint16_t fly_listener_port(int listener) {
 #endif
 }
 
-bool fly_accept(int listener, fly_socket* out) {
+bool fly_accept(fly_wait* w, int listener, fly_socket* out) {
   world_load();
   if (world.simulated) {
     fly_str input;
@@ -2453,10 +2480,12 @@ bool fly_accept(int listener, fly_socket* out) {
     return true;
   }
 #ifdef __wasm__
+  (void)w;
   (void)listener;
   (void)out;
   return false;
 #else
+  W_BEGIN(w)
   for (;;) {
     int fd = accept(listener - 1, NULL, NULL);
     if (fd >= 0) {
@@ -2474,12 +2503,15 @@ bool fly_accept(int listener, fly_socket* out) {
     if (errno == EINTR || errno == ECONNABORTED) continue;
 #ifdef FLY_THREADS
     if ((errno == EAGAIN || errno == EWOULDBLOCK) && nonblocking()) {
-      if (!io_wait(listener - 1, false)) return false;
+      IO_WAIT(w, listener - 1, false, false);
+      if (cancelled_here()) return false;
       continue;
     }
 #endif
     return false;
   }
+  W_END
+  return false;
 #endif
 }
 
@@ -2494,7 +2526,6 @@ static uint64_t random_rng;
 // Against a simulated world, bytes of its seed, so that a run replays (§6.4); else the system's
 // generator, which never fails once the system has seeded it.
 void fly_io_random(fly_slice buf) {
-  fly_point();
   world_load();
   uint8_t* p = buf.ptr;
   if (world.simulated) {
@@ -2784,14 +2815,15 @@ static void tls_load(void) {
 // SSL_ERROR_SYSCALL, SSL_ERROR_ZERO_RETURN.
 enum { TLS_FAILED = 1, TLS_WANT_READ = 2, TLS_WANT_WRITE = 3, TLS_SYSCALL = 5, TLS_CLOSED = 6 };
 
-// Waits until the socket can go on as libssl asks; false if the task was cancelled meanwhile.
-static bool tls_wait(int fd, int err) {
+// Waits until the socket can go on as libssl asks, after which `tls_cancelled` says whether the
+// task was cancelled meanwhile.
 #ifdef FLY_THREADS
-  if (nonblocking()) return io_wait(fd, err == TLS_WANT_WRITE);
+#define TLS_WAIT(w, fd, err, ...) do { if (nonblocking()) IO_WAIT(w, (fd), (err) == TLS_WANT_WRITE, __VA_ARGS__); } while (0)
+static bool tls_cancelled(void) { return nonblocking() && cancelled_here(); }
+#else
+#define TLS_WAIT(w, fd, err, ...) ((void)0)
+static bool tls_cancelled(void) { return false; }
 #endif
-  (void)fd; (void)err;
-  return true;
-}
 
 static bool is_address(const char* name) {
   for (const char* p = name; *p; p++) if (*p == ':') return true;
@@ -2800,15 +2832,36 @@ static bool is_address(const char* name) {
 }
 #endif
 
-int fly_connect_tls(fly_str host, uint16_t port, fly_socket* out) {
-  int e = fly_connect(host, port, out);
+// It connects first, by a wait record of its own, and keeps the socket in the record until the
+// handshake is done: what it was given to write to is written only as it ends.
+int fly_connect_tls(fly_wait* w, fly_str host, uint16_t port, fly_socket* out) {
+  fly_wait* inner;
+  fly_socket* sock;
+  W_BEGIN(w)
+  w->p[0] = fly_alloc(sizeof(fly_wait));
+  w->p[1] = fly_alloc(sizeof(fly_socket));
+  *(fly_wait*)w->p[0] = (fly_wait){ 0 };
+  for (;;) {
+    w->n = fly_connect(w->p[0], host, port, w->p[1]);
+    if (!fly_cx_now()->pend) break;
+    W_SUSPEND(w, 0);
+  }
+  inner = w->p[0];
+  sock = w->p[1];
+  free(inner);
   // A simulated world's peers answer in the clear, as if TLS were there.
-  if (e || !out->fd) return e;
+  if (w->n || !sock->fd) {
+    *out = *sock;
+    free(sock);
+    return w->n;
+  }
 #ifdef __wasm__
+  free(sock);
+  *out = (fly_socket){ 0 };
   return FLY_IO_PERMISSION_DENIED;
 #else
   tls_load();
-  int fd = out->fd - 1;
+  int fd = sock->fd - 1;
   char name[256];
   memcpy(name, host.ptr, host.len);
   name[host.len] = 0;
@@ -2822,25 +2875,38 @@ int fly_connect_tls(fly_str host, uint16_t port, fly_socket* out) {
     tls.SSL_ctrl(s, 55, 0, name);
     tls.SSL_set1_host(s, name);
   }
+  sock->tls = s;
   for (;;) {
-    int r = tls.SSL_connect(s);
+    sock = w->p[1];
+    int r = tls.SSL_connect(sock->tls);
     if (r == 1) break;
-    int err = tls.SSL_get_error(s, r);
-    if ((err == TLS_WANT_READ || err == TLS_WANT_WRITE) && tls_wait(fd, err)) continue;
-    bool cancelled = err == TLS_WANT_READ || err == TLS_WANT_WRITE;
+    int err = tls.SSL_get_error(sock->tls, r);
+    bool cancelled = false;
+    if (err == TLS_WANT_READ || err == TLS_WANT_WRITE) {
+      TLS_WAIT(w, sock->fd - 1, err, 0);
+      sock = w->p[1];
+      if (!tls_cancelled()) continue;
+      cancelled = true;
+    }
     // X509_V_OK is 0: anything else is a certificate the system does not trust for this host.
-    int k = cancelled ? FLY_IO_OK : tls.SSL_get_verify_result(s) != 0 ? FLY_IO_UNTRUSTED : err == TLS_SYSCALL && errno ? io_error(errno) : FLY_IO_RESET;
-    tls.SSL_free(s);
-    close(fd);
+    int k = cancelled ? FLY_IO_OK : tls.SSL_get_verify_result(sock->tls) != 0 ? FLY_IO_UNTRUSTED : err == TLS_SYSCALL && errno ? io_error(errno) : FLY_IO_RESET;
+    tls.SSL_free(sock->tls);
+    close(sock->fd - 1);
+    free(sock);
     *out = (fly_socket){ 0 };
     return k;
   }
-  out->tls = s;
+  *out = *(fly_socket*)w->p[1];
+  free(w->p[1]);
   return FLY_IO_OK;
 #endif
+  W_END
+  return 0;
 }
 
-int fly_connect(fly_str host, uint16_t port, fly_socket* out) {
+// What it has found of the name, the address it is trying and the failure so far are kept in the
+// record while it waits for an address to answer.
+int fly_connect(fly_wait* w, fly_str host, uint16_t port, fly_socket* out) {
   world_load();
   *out = (fly_socket){ 0 };
   if (world.simulated) {
@@ -2857,8 +2923,11 @@ int fly_connect(fly_str host, uint16_t port, fly_socket* out) {
     return FLY_IO_REFUSED;
   }
 #ifdef __wasm__
+  (void)w;
   return FLY_IO_PERMISSION_DENIED;
 #else
+  int fd, r;
+  W_BEGIN(w)
   signal(SIGPIPE, SIG_IGN);
   char name[256], service[8];
   if (host.len >= sizeof name) return FLY_IO_NOT_FOUND;
@@ -2869,11 +2938,13 @@ int fly_connect(fly_str host, uint16_t port, fly_socket* out) {
   hints.ai_family = AF_UNSPEC;
   hints.ai_socktype = SOCK_STREAM;
   if (getaddrinfo(name, service, &hints, &found) != 0) return FLY_IO_NOT_FOUND;
-  int failure = FLY_IO_REFUSED;
+  w->p[0] = found;
+  w->a[0] = FLY_IO_REFUSED;
   // Each address the name has, in the order the resolver gives them, until one answers.
-  for (struct addrinfo* a = found; a; a = a->ai_next) {
-    int fd = socket(a->ai_family, a->ai_socktype, a->ai_protocol);
-    if (fd < 0) { failure = io_error(errno); continue; }
+  for (w->p[1] = found; w->p[1]; w->p[1] = ((struct addrinfo*)w->p[1])->ai_next) {
+    struct addrinfo* a = w->p[1];
+    fd = socket(a->ai_family, a->ai_socktype, a->ai_protocol);
+    if (fd < 0) { w->a[0] = io_error(errno); continue; }
     bool waits = nonblocking();
     if (waits) {
       fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK);
@@ -2881,13 +2952,15 @@ int fly_connect(fly_str host, uint16_t port, fly_socket* out) {
       io_register(fd);
 #endif
     }
-    int r;
     do { r = connect(fd, a->ai_addr, a->ai_addrlen); } while (r != 0 && errno == EINTR);
 #ifdef FLY_THREADS
     if (r != 0 && errno == EINPROGRESS && waits) {
       // Connected, or refused, once the descriptor may be written. A task cancelled meanwhile
       // unwinds, with a socket of nothing.
-      if (!io_wait(fd, true)) { close(fd); freeaddrinfo(found); return FLY_IO_OK; }
+      w->n = fd;
+      IO_WAIT(w, fd, true, 0);
+      fd = w->n;
+      if (cancelled_here()) { close(fd); freeaddrinfo(w->p[0]); return FLY_IO_OK; }
       int e = 0;
       socklen_t n = sizeof e;
       getsockopt(fd, SOL_SOCKET, SO_ERROR, &e, &n);
@@ -2898,19 +2971,21 @@ int fly_connect(fly_str host, uint16_t port, fly_socket* out) {
     if (r == 0) {
       int one = 1;
       setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
-      freeaddrinfo(found);
+      freeaddrinfo(w->p[0]);
       out->fd = fd + 1;
       return FLY_IO_OK;
     }
-    failure = io_error(errno);
+    w->a[0] = io_error(errno);
     close(fd);
   }
-  freeaddrinfo(found);
-  return failure;
+  freeaddrinfo(w->p[0]);
+  return (int)w->a[0];
+  W_END
+  return 0;
 #endif
 }
 
-int fly_sock_read(fly_socket* s, fly_slice buf, uint64_t* n) {
+int fly_sock_read(fly_wait* w, fly_socket* s, fly_slice buf, uint64_t* n) {
   *n = 0;
   if (!s->fd) {
     if (fly_fault()) return FLY_IO_TIMED_OUT;
@@ -2922,17 +2997,20 @@ int fly_sock_read(fly_socket* s, fly_slice buf, uint64_t* n) {
     return FLY_IO_OK;
   }
 #ifdef __wasm__
+  (void)w;
   return FLY_IO_PERMISSION_DENIED;
 #else
+  W_BEGIN(w)
   if (s->tls) {
-    int len = buf.len > 0x40000000 ? 0x40000000 : (int)buf.len;
     for (;;) {
+      int len = buf.len > 0x40000000 ? 0x40000000 : (int)buf.len;
       int k = tls.SSL_read(s->tls, buf.ptr, len);
       if (k > 0) { *n = (uint64_t)k; return FLY_IO_OK; }
       int err = tls.SSL_get_error(s->tls, k);
       if (err == TLS_CLOSED) return FLY_IO_OK;
       if (err == TLS_WANT_READ || err == TLS_WANT_WRITE) {
-        if (!tls_wait(s->fd - 1, err)) return FLY_IO_OK;
+        TLS_WAIT(w, s->fd - 1, err, 0);
+        if (tls_cancelled()) return FLY_IO_OK;
         continue;
       }
       if (err == TLS_SYSCALL && errno == EINTR) continue;
@@ -2945,16 +3023,20 @@ int fly_sock_read(fly_socket* s, fly_slice buf, uint64_t* n) {
     if (errno == EINTR) continue;
 #ifdef FLY_THREADS
     if ((errno == EAGAIN || errno == EWOULDBLOCK) && nonblocking()) {
-      if (!io_wait(s->fd - 1, false)) return FLY_IO_OK;
+      IO_WAIT(w, s->fd - 1, false, 0);
+      if (cancelled_here()) return FLY_IO_OK;
       continue;
     }
 #endif
     return io_error(errno);
   }
+  W_END
+  return 0;
 #endif
 }
 
-int fly_sock_write(fly_socket* s, fly_slice bytes) {
+// How much it has written is kept in the record.
+int fly_sock_write(fly_wait* w, fly_socket* s, fly_slice bytes) {
   if (!s->fd) {
     if (fly_fault()) return FLY_IO_BROKEN_PIPE;
     if (!s->out.ptr) s->out = fly_String_new();
@@ -2962,9 +3044,12 @@ int fly_sock_write(fly_socket* s, fly_slice bytes) {
     return FLY_IO_OK;
   }
 #ifdef __wasm__
+  (void)w;
   return FLY_IO_PERMISSION_DENIED;
 #else
-  size_t done = 0;
+#define done (*(size_t*)&w->a[0])
+  W_BEGIN(w)
+  done = 0;
   // libssl writes all it is given, or nothing; after it asks to wait, it is given the same again.
   while (s->tls && done < bytes.len) {
     size_t left = bytes.len - done;
@@ -2973,7 +3058,8 @@ int fly_sock_write(fly_socket* s, fly_slice bytes) {
     if (k > 0) { done += (size_t)k; continue; }
     int err = tls.SSL_get_error(s->tls, k);
     if (err == TLS_WANT_READ || err == TLS_WANT_WRITE) {
-      if (!tls_wait(s->fd - 1, err)) return FLY_IO_OK;
+      TLS_WAIT(w, s->fd - 1, err, 0);
+      if (tls_cancelled()) return FLY_IO_OK;
       continue;
     }
     if (err == TLS_SYSCALL && errno == EINTR) continue;
@@ -2985,12 +3071,15 @@ int fly_sock_write(fly_socket* s, fly_slice bytes) {
     if (errno == EINTR) continue;
 #ifdef FLY_THREADS
     if ((errno == EAGAIN || errno == EWOULDBLOCK) && nonblocking()) {
-      if (!io_wait(s->fd - 1, true)) return FLY_IO_OK;
+      IO_WAIT(w, s->fd - 1, true, 0);
+      if (cancelled_here()) return FLY_IO_OK;
       continue;
     }
 #endif
     return io_error(errno);
   }
+  W_END
+#undef done
   return FLY_IO_OK;
 #endif
 }
@@ -3014,16 +3103,26 @@ static void sim_line(fly_str peer, long code, fly_str text) {
   fly_String_drop(&line);
 }
 
-int fly_sock_status(fly_socket* s, unsigned code, fly_str body) {
+// The response is made once, into memory the record keeps, and written by the record's write.
+int fly_sock_status(fly_wait* w, fly_socket* s, unsigned code, fly_str body) {
   if (!s->fd) {
     if (fly_fault()) return FLY_IO_BROKEN_PIPE;
     sim_line(fly_str_lit("", 0), code, body);
     return FLY_IO_OK;
   }
-  char head[96];
-  int n = fmt_text(head, sizeof head, "HTTP/1.1 %u %s\r\nContent-Length: %zu\r\nConnection: close\r\n\r\n", code, code < 400 ? "OK" : "Error", body.len);
-  int e = fly_sock_write(s, (fly_slice){ head, (size_t)n });
-  return e ? e : fly_sock_write(s, (fly_slice){ (void*)body.ptr, body.len });
+  if (w->step == 0) {
+    char head[96];
+    int n = fmt_text(head, sizeof head, "HTTP/1.1 %u %s\r\nContent-Length: %zu\r\nConnection: close\r\n\r\n", code, code < 400 ? "OK" : "Error", body.len);
+    uint8_t* all = fly_alloc((size_t)n + body.len + 1);
+    memcpy(all, head, (size_t)n);
+    if (body.len) memcpy(all + n, body.ptr, body.len);
+    w->p[2] = all;
+    w->a[1] = (int64_t)((size_t)n + body.len);
+  }
+  int e = fly_sock_write(w, s, (fly_slice){ w->p[2], (size_t)w->a[1] });
+  if (fly_cx_now()->pend) return 0;
+  free(w->p[2]);
+  return e;
 }
 
 // Closing a simulated connection shows what was written to it, `\r\n` as a line break.
@@ -3077,25 +3176,25 @@ bool fly_world_quota(fly_str token) {
 // The scheduler on every core, below: what the functions compiled code calls turn to without a
 // simulated world.
 static bool threads;
-static void mt_run(void (*main)(void), void (*entry)(void* task, void* closure));
-static void mt_point(void);
+static void mt_run(void (*main)(void**), void (*entry)(void* task, void* closure, void** slot));
+static void mt_point(fly_wait* w);
 static void mt_cleaning(int d);
-static void mt_sleep(uint64_t nanos);
-static int mt_spawn(int scope, void (*entry)(void* task, void* closure), void* closure, size_t size);
-static void* mt_task_spawn(int scope, void* closure);
+static void mt_sleep(fly_wait* w, uint64_t nanos);
+static int mt_spawn(fly_wait* w, int scope, void (*entry)(void* task, void* closure, void** slot), const fly_fn* f, size_t size);
+static void* mt_task_spawn(fly_wait* w, int scope, const fly_fn* f);
 static void mt_task_cancel(void* h);
-static int32_t mt_task_wait(void* h, fly_String* message);
-static size_t mt_task_any(void* const* ts, size_t n);
+static int32_t mt_task_wait(fly_wait* w, void* h, fly_String* message);
+static size_t mt_task_any(fly_wait* w, void* const* ts, size_t n);
 static void mt_task_clone(void* h);
 static void mt_task_drop(void* h);
-static void mt_join(int task, void* out);
+static void mt_join(fly_wait* w, int task, void* out);
 static int mt_scope_open(void);
-static void mt_scope_close(int scope);
+static void mt_scope_close(fly_wait* w, int scope);
 static void mt_scope_cancel(int scope);
 static fly_chan mt_channel(void (*drop)(void*));
 static void mt_receiver_gone(fly_chan ch);
-static bool mt_send(fly_chan ch, const void* v, size_t size);
-static bool mt_recv(fly_chan ch, void* out, size_t size);
+static bool mt_send(fly_wait* w, fly_chan ch, const void* v, size_t size);
+static bool mt_recv(fly_wait* w, fly_chan ch, void* out, size_t size);
 static void mt_sender_gone(fly_chan ch);
 static void mt_sender_clone(fly_chan ch);
 typedef struct mt_task mt_task;
@@ -3110,9 +3209,11 @@ static void* mt_task_closure(mt_task* t);
 // it leaves here and a switch to the scheduler's stack (`ask`), and is resumed with the answer.
 
 typedef struct {
-  fly_fiber* fiber;
-  fly_fiber* suspended;
-  void (*entry)(void* task, void* closure);
+  // Its root machine's frame, and the frame arena of what it runs.
+  void* slot;
+  fly_frames frames;
+  bool started, done;
+  void (*entry)(void* task, void* closure, void** slot);
   void* closure;
   void* result;
   size_t size;
@@ -3156,26 +3257,42 @@ void fly_panic_deadlock(void) { fly_panic("deadlock: every task is waiting"); }
 static uint8_t* core_sched;
 void fly_core_sched(uint8_t* state) { core_sched = state; }
 
-static int64_t ask(int kind, int64_t a, int64_t b, void* p) {
+// A request of the scheduler's. What needs no choice of who runs next is answered here, at once,
+// at `out`; anything else the task waits for: it suspends, false, and is resumed with the answer.
+static bool ask_begin(int kind, int64_t a, int64_t b, void* p, int64_t* out) {
   req.kind = kind;
   req.a[0] = a;
   req.a[1] = b;
   req.p = p;
-  // What needs no choice of who runs next is answered here, without a switch.
   if (kind != REQ_POINT && kind != REQ_SLEEP && kind != REQ_SPAWN && kind != REQ_CLOSE) {
     int64_t r = fly_rt_answer(core_sched, kind);
-    if (r != FLY_LATER) return r;
+    if (r != FLY_LATER) { *out = r; return false; }
   }
+  core_cur->reply = 0;
+  fly_cx_now()->pend = FLY_PEND_WAIT;
+  return true;
+}
+
+// The answer a waiting task is resumed with, and what the scheduler delivers with it.
+static int64_t ask_answer(void) {
   task_t* me = core_cur;
-  me->reply = 0;
-  me->suspended = cur_fiber;
-  switch_to(&main_fiber);
   if (me->deliver_deadlock) fly_panic_deadlock();
   if (me->deliver_cancel) {
     me->deliver_cancel = false;
     fly_unwinding = true;
   }
   return me->reply;
+}
+
+
+// Asks, at a step of routine `w`, which returns `...` meanwhile if it must wait; the answer at `r`.
+#define ASK(w, r, kind, a, b, p, ...) do { if (ask_begin((kind), (a), (b), (p), &(r))) { W_SUSPEND(w, __VA_ARGS__); (r) = ask_answer(); } } while (0)
+
+// What is always answered at once, asked by code that cannot wait: a destructor, the runtime.
+static int64_t ask_now(int kind, int64_t a, int64_t b, void* p) {
+  int64_t r = 0;
+  if (ask_begin(kind, a, b, p, &r)) fly_panic("the runtime waited where it cannot");
+  return r;
 }
 
 int32_t fly_core_kind(void) { return req.kind; }
@@ -3200,7 +3317,7 @@ void fly_core_adopt(int32_t id, uint8_t* record) {
   core_tasks[id] = (task_t*)record;
 }
 
-static void main_entry(void* task, void* closure);
+static void main_entry(void* task, void* closure, void** slot);
 
 // A task's closure, boxed, which its entry drops once it has run: dropped here if a panic ended it
 // first.
@@ -3213,20 +3330,26 @@ static void drop_task_closure(void* c) {
 // A task's panic ends it (§5.7): a spawned task's is reported, and its scope goes on; a forked
 // task's ends it as a failure would, its scope cancelled, and goes on in the task that opened the
 // scope once every task in it has finished.
-static void task_body(void* a) { task_t* t = a; t->entry(t, t->closure); }
+static void task_body(void* a) { task_t* t = a; t->entry(t, t->closure, &t->slot); }
 
-static void task_main(void* arg) {
-  task_t* t = arg;
+// Runs the task's root machine until it ends or waits: whether it ended.
+static bool task_main(task_t* t) {
   if (fly_try(task_body, t)) {
     char* m = panic_take();
     if (t->entry != main_entry) drop_task_closure(t->closure);
     if (t->forked) t->panic = m;
     else { t->how = FLY_TASK_PANICKED; t->message = m; }
-    return;
+    fly_cx_now()->pend = 0;
+    return true;
+  }
+  if (fly_cx_now()->pend) {
+    fly_cx_now()->pend = 0;
+    return false;
   }
   if (FLY_FAILED) { t->error = fly_err; fly_err = NULL; }
   if (!t->forked) t->how = fly_unwinding ? FLY_TASK_CANCELLED : FLY_TASK_DONE;
   fly_unwinding = false;
+  return true;
 }
 
 // A spawned task's record is let go once it has ended and no `Task` refers to it, its panic, if no
@@ -3246,29 +3369,29 @@ void fly_core_end(int32_t id, bool ran) {
     drop_task_closure(t->closure);
     if (!t->forked) t->how = FLY_TASK_CANCELLED;
   }
-  if (t->fiber) { fiber_free(t->fiber); t->fiber = NULL; }
+  fly_frames_free(&t->frames);
   if (t->forked) return;
   core_tasks[id] = NULL;
   if (t->handles == 0) task_release(t);
 }
 
 // Runs task `id` until it asks again, 0, or ends, 1, or ends failing, 2.
+// The task runs on the program's own stack, its frames in its own arena, until it ends or waits.
 int32_t fly_core_run(int32_t id, bool deadlock, bool cancel) {
   task_t* t = core_tasks[id];
-  if (!t->fiber) {
-    t->fiber = fiber_new(task_main, t, NULL);
-    t->suspended = t->fiber;
-  }
   t->deliver_deadlock = deadlock;
   t->deliver_cancel = cancel;
-  t->fiber->back = &main_fiber;
   core_cur = t;
-  switch_to(t->suspended);
-  if (!t->fiber->done) return 0;
+  fly_ctx* cx = fly_cx_now();
+  fly_frames* frames = cx->frames;
+  cx->frames = &t->frames;
+  t->done = task_main(t);
+  fly_cx_now()->frames = frames;
+  if (!t->done) return 0;
   return t->error || t->panic ? 2 : 1;
 }
 
-static task_t* new_task(void (*entry)(void* task, void* closure), void* closure, size_t size) {
+static task_t* new_task(void (*entry)(void* task, void* closure, void** slot), void* closure, size_t size) {
   task_t* t = fly_alloc(sizeof(task_t));
   t->forked = entry != fly_task_void;
   t->entry = entry;
@@ -3278,11 +3401,16 @@ static task_t* new_task(void (*entry)(void* task, void* closure), void* closure,
   return t;
 }
 
-void fly_point(void) {
+void fly_point(fly_wait* w) {
 #ifdef FLY_THREADS
-  if (threads) { mt_point(); return; }
+  if (threads) { mt_point(w); return; }
 #endif
-  if (fly_tasks_on) ask(REQ_POINT, 0, 0, NULL);
+  if (!fly_tasks_on) return;
+  W_BEGIN(w)
+  int64_t r;
+  ASK(w, r, REQ_POINT, 0, 0, NULL);
+  (void)r;
+  W_END
 }
 
 static void cleaning(int d) {
@@ -3294,9 +3422,9 @@ static void cleaning(int d) {
 
 // Sleeping waits for the virtual clock, which passes only when no task can run; without a
 // simulated world, for the machine's.
-void fly_sleep(uint64_t nanos) {
+void fly_sleep(fly_wait* w, uint64_t nanos) {
 #ifdef FLY_THREADS
-  if (threads) { mt_sleep(nanos); return; }
+  if (threads) { mt_sleep(w, nanos); return; }
 #endif
   world_load();
   if (!world.simulated) {
@@ -3305,20 +3433,29 @@ void fly_sleep(uint64_t nanos) {
     return;
   }
   if (!fly_tasks_on) { fly_clock += nanos; return; }
-  ask(REQ_SLEEP, (int64_t)nanos, 0, NULL);
+  W_BEGIN(w)
+  int64_t r;
+  ASK(w, r, REQ_SLEEP, (int64_t)nanos, 0, NULL);
+  (void)r;
+  W_END
 }
 
-static void main_entry(void* task, void* closure) { (void)task; ((void (*)(void))closure)(); }
+static void main_entry(void* task, void* closure, void** slot) { (void)task; ((void (*)(void**))closure)(slot); }
 
-// The program's root (§5.7): a panic that unwinds `run` ends here, and with it the program.
-typedef struct { void (*run)(void); } root_t;
-static void root_body(void* a) { ((root_t*)a)->run(); }
-void fly_root(void (*run)(void)) {
+// The program's root (§5.7): a panic that unwinds `run` ends here, and with it the program. With
+// no tasks nothing it does waits.
+typedef struct { void (*run)(void**); } root_t;
+static void root_body(void* a) {
+  void* slot = NULL;
+  ((root_t*)a)->run(&slot);
+  if (fly_pending) fly_panic("the program waited with no tasks to wait for");
+}
+void fly_root(void (*run)(void**)) {
   root_t r = { run };
   if (fly_try(root_body, &r)) panic_exit(fly_cx_now()->panic);
 }
 
-void fly_tasks_run(void (*main)(void)) {
+void fly_tasks_run(void (*main)(void**)) {
   fly_tasks_on = true;
   world_load();
 #ifdef FLY_THREADS
@@ -3331,24 +3468,33 @@ void fly_tasks_run(void (*main)(void)) {
   if (t0->error) fly_err = t0->error;
 }
 
-int fly_spawn(int scope, void (*entry)(void* task, void* closure), void* closure, size_t size) {
+// Starts a task of `entry`, given a copy of the closure at `f`, made as it is first called.
+int fly_spawn(fly_wait* w, int scope, void (*entry)(void* task, void* closure, void** slot), const fly_fn* f, size_t size) {
 #ifdef FLY_THREADS
-  if (threads) return mt_spawn(scope, entry, closure, size);
+  if (threads) return mt_spawn(w, scope, entry, f, size);
 #endif
-  return (int)ask(REQ_SPAWN, scope, 1, new_task(entry, closure, size));
+  int64_t r = 0;
+  W_BEGIN(w)
+  ASK(w, r, REQ_SPAWN, scope, 1, new_task(entry, fly_box(f, sizeof *f), size), 0);
+  W_END
+  return (int)r;
 }
 
 // ---- `Task` (§6.1): a spawned task's record, which its `Task`s refer to ----
 
-void* fly_task_spawn(int scope, void* closure) {
+void* fly_task_spawn(fly_wait* w, int scope, const fly_fn* f) {
 #ifdef FLY_THREADS
-  if (threads) return mt_task_spawn(scope, closure);
+  if (threads) return mt_task_spawn(w, scope, f);
 #endif
-  task_t* t = new_task(fly_task_void, closure, 0);
-  t->how = FLY_TASK_RUNNING;
-  t->handles = 1;
-  t->id = (int32_t)ask(REQ_SPAWN, scope, 0, t);
-  return t;
+  int64_t r = 0;
+  W_BEGIN(w)
+  w->p[0] = new_task(fly_task_void, fly_box(f, sizeof *f), 0);
+  ((task_t*)w->p[0])->how = FLY_TASK_RUNNING;
+  ((task_t*)w->p[0])->handles = 1;
+  ASK(w, r, REQ_SPAWN, scope, 0, w->p[0], NULL);
+  ((task_t*)w->p[0])->id = (int32_t)r;
+  W_END
+  return w->p[0];
 }
 
 void fly_task_cancel(void* h) {
@@ -3356,19 +3502,23 @@ void fly_task_cancel(void* h) {
   if (threads) { mt_task_cancel(h); return; }
 #endif
   task_t* t = h;
-  if (t->how == FLY_TASK_RUNNING) ask(REQ_TASK_KILL, t->id, 0, NULL);
+  if (t->how == FLY_TASK_RUNNING) ask_now(REQ_TASK_KILL, t->id, 0, NULL);
 }
 
 // How the task ended, once it has: FLY_TASK_*, a panic's message written at `message`.
-int32_t fly_task_wait(void* h, fly_String* message) {
+int32_t fly_task_wait(fly_wait* w, void* h, fly_String* message) {
 #ifdef FLY_THREADS
-  if (threads) return mt_task_wait(h, message);
+  if (threads) return mt_task_wait(w, h, message);
 #endif
   task_t* t = h;
+  int64_t r;
+  W_BEGIN(w)
   while (t->how == FLY_TASK_RUNNING) {
-    ask(REQ_JOIN_WAIT, t->id, 0, NULL);
+    ASK(w, r, REQ_JOIN_WAIT, t->id, 0, NULL, 0);
     if (fly_unwinding) return FLY_TASK_DONE;
   }
+  W_END
+  (void)r;
   if (t->how == FLY_TASK_PANICKED) {
     t->told = true;
     *message = fly_String_from(fly_str_lit(t->message, strlen(t->message)));
@@ -3377,21 +3527,26 @@ int32_t fly_task_wait(void* h, fly_String* message) {
 }
 
 // The index of the first of `ts` to have ended, once one has.
-size_t fly_task_any(void* const* ts, size_t n) {
+size_t fly_task_any(fly_wait* w, void* const* ts, size_t n) {
   if (n == 0) fly_panic("waited for any of no tasks");
 #ifdef FLY_THREADS
-  if (threads) return mt_task_any(ts, n);
+  if (threads) return mt_task_any(w, ts, n);
 #endif
-  int32_t* ids = fly_alloc(n * sizeof(int32_t));
+  int64_t r;
+  W_BEGIN(w)
+  w->p[0] = fly_alloc(n * sizeof(int32_t));
   for (;;) {
     for (size_t i = 0; i < n; i++) {
       task_t* t = ts[i];
-      if (t->how != FLY_TASK_RUNNING) { free(ids); return i; }
-      ids[i] = t->id;
+      if (t->how != FLY_TASK_RUNNING) { free(w->p[0]); return i; }
+      ((int32_t*)w->p[0])[i] = t->id;
     }
-    ask(REQ_TASK_ANY, (int64_t)n, 0, ids);
-    if (fly_unwinding) { free(ids); return 0; }
+    ASK(w, r, REQ_TASK_ANY, (int64_t)n, 0, w->p[0], 0);
+    if (fly_unwinding) { free(w->p[0]); return 0; }
   }
+  W_END
+  (void)r;
+  return 0;
 }
 
 void* fly_task_clone(void* h) {
@@ -3411,11 +3566,11 @@ void fly_task_drop(void* h) {
   if (--t->handles == 0 && t->how != FLY_TASK_RUNNING) task_release(t);
 }
 
-void fly_task_void(void* task, void* closure) {
+void fly_task_void(void* task, void* closure, void** slot) {
   (void)task;
   fly_fn* f = closure;
-  void* slot = NULL;
-  ((fly_unit (*)(void*, void**, void*))f->fn)(f->env, &slot, NULL);
+  ((fly_unit (*)(void*, void**, void*))f->fn)(f->env, slot, NULL);
+  if (fly_pending) return;
   if (f->drop) f->drop(f->env);
   free(f);
 }
@@ -3434,17 +3589,21 @@ void* fly_task_closure(void* task) {
 }
 
 // A forked task's value, or its failure, raised.
-void fly_join(int task, void* out) {
+void fly_join(fly_wait* w, int task, void* out) {
 #ifdef FLY_THREADS
-  if (threads) { mt_join(task, out); return; }
+  if (threads) { mt_join(w, task, out); return; }
 #endif
-  ask(REQ_JOIN_WAIT, task, 0, NULL);
+  int64_t r;
+  W_BEGIN(w)
+  ASK(w, r, REQ_JOIN_WAIT, task, 0, NULL);
+  W_END
+  (void)r;
   if (fly_unwinding) return;
   task_t* t = core_tasks[task];
   // It panicked, which cancels the scope and the joiner with it.
   if (t->panic) { fly_unwinding = true; return; }
   if (t->error) {
-    ask(REQ_JOIN_TAKE, task, 0, NULL);
+    ask_now(REQ_JOIN_TAKE, task, 0, NULL);
     fly_err = t->error;
     t->error = NULL;
     return;
@@ -3456,67 +3615,79 @@ int fly_scope_open(void) {
 #ifdef FLY_THREADS
   if (threads) return mt_scope_open();
 #endif
-  return (int)ask(REQ_SCOPE_OPEN, 0, 0, NULL);
+  return (int)ask_now(REQ_SCOPE_OPEN, 0, 0, NULL);
 }
 
 // The end of a scope's body, however it ended: every task started in it is waited for, then
-// the scope fails as its body or its first failed task did (§6.1).
-// Waits until every task started in scope `sid` has finished. Cancelled while it waits, the task
-// cancels them, and waits on.
-static void scope_wait(int sid) {
-  for (;;) {
-    int64_t more = ask(REQ_SCOPE_WAIT, sid, 0, NULL);
-    if (fly_unwinding) {
-      fly_unwinding = false;
-      ask(REQ_SCOPE_CANCEL, sid, 0, NULL);
-    } else if (!more) {
-      return;
-    }
-  }
-}
-
-void fly_scope_close(int sid, bool body_failed) {
+// the scope fails as its body or its first failed task did (§6.1). Cancelled while it waits, the
+// task cancels them, and waits on. What it found as the body ended is kept in the record.
+void fly_scope_close(fly_wait* w, int sid, bool body_failed) {
   (void)body_failed;
 #ifdef FLY_THREADS
-  if (threads) { mt_scope_close(sid); return; }
+  if (threads) { mt_scope_close(w, sid); return; }
 #endif
+  int64_t more;
+  W_BEGIN(w)
   // The body left by unwinding — a failure, a cancellation — cancels the scope's tasks (§6.1).
-  bool unwinding = fly_unwinding;
+  w->n = fly_unwinding;
   fly_unwinding = false;
-  void* err = fly_err;
+  w->p[0] = fly_err;
   fly_err = NULL;
-  if (unwinding || err) ask(REQ_SCOPE_CANCEL, sid, 0, NULL);
-  scope_wait(sid);
+  if (w->n || w->p[0]) ask_now(REQ_SCOPE_CANCEL, sid, 0, NULL);
+  for (;;) {
+    ASK(w, more, REQ_SCOPE_WAIT, sid, 0, NULL);
+    if (fly_unwinding) {
+      fly_unwinding = false;
+      ask_now(REQ_SCOPE_CANCEL, sid, 0, NULL);
+    } else if (!more) {
+      break;
+    }
+  }
+  W_END
+  bool unwinding = w->n;
+  void* err = w->p[0];
   // The body unwound because a task failed: the scope raises that instead, the cancellation its
   // failure made over. Otherwise one from outside — its own scope's, or its `Task`'s — goes on,
   // whether it came in the body or as the task waited.
-  bool failed_scope = ask(REQ_SCOPE_FAILED, sid, 0, NULL);
+  bool failed_scope = ask_now(REQ_SCOPE_FAILED, sid, 0, NULL);
   if (unwinding && !failed_scope) { fly_unwinding = true; if (err) free(err); return; }
-  if (failed_scope) ask(REQ_UNCANCEL, 0, 0, NULL);
+  if (failed_scope) ask_now(REQ_UNCANCEL, 0, 0, NULL);
   if (err) { fly_err = err; return; }
-  int64_t failed = ask(REQ_SCOPE_TAKE, sid, 0, NULL);
+  int64_t failed = ask_now(REQ_SCOPE_TAKE, sid, 0, NULL);
   if (failed >= 0 && core_tasks[failed]->panic) {
     char* m = core_tasks[failed]->panic;
     core_tasks[failed]->panic = NULL;
     panic_again(m);
   }
   if (failed >= 0) { fly_err = core_tasks[failed]->error; core_tasks[failed]->error = NULL; return; }
-  if (ask(REQ_IS_CANCELLED, 0, 0, NULL)) fly_unwinding = true;
+  if (ask_now(REQ_IS_CANCELLED, 0, 0, NULL)) fly_unwinding = true;
 }
 
-// A panic unwound the body of scope `sid` (§5.7): its tasks are cancelled, as a failure would
-// cancel them, and once every one has finished the panic goes on.
-_Noreturn void fly_scope_panicked(int sid) {
-  char* m = panic_take();
+// A panic unwound the body of scope `sid` (§5.7), caught where the scope is: its tasks are
+// cancelled, as a failure would cancel them, and once every one has finished the panic goes on.
+void fly_scope_panicked(fly_wait* w, int sid) {
 #ifdef FLY_THREADS
-  if (threads) { mt_scope_cancel(sid); mt_scope_close(sid); panic_again(m); }
+  if (threads) {
+    if (w->step == 0) { w->p[0] = panic_take(); mt_scope_cancel(sid); }
+    mt_scope_close(w, sid);
+    if (fly_pending) return;
+    panic_again(w->p[0]);
+  }
 #endif
-  ask(REQ_SCOPE_CANCEL, sid, 0, NULL);
-  scope_wait(sid);
-  ask(REQ_UNCANCEL, 0, 0, NULL);
-  int64_t failed = ask(REQ_SCOPE_TAKE, sid, 0, NULL);
+  int64_t more;
+  W_BEGIN(w)
+  w->p[0] = panic_take();
+  ask_now(REQ_SCOPE_CANCEL, sid, 0, NULL);
+  for (;;) {
+    ASK(w, more, REQ_SCOPE_WAIT, sid, 0, NULL);
+    if (fly_unwinding) fly_unwinding = false;
+    else if (!more) break;
+  }
+  W_END
+  ask_now(REQ_UNCANCEL, 0, 0, NULL);
+  int64_t failed = ask_now(REQ_SCOPE_TAKE, sid, 0, NULL);
   if (failed >= 0) { panic_free(core_tasks[failed]->panic); core_tasks[failed]->panic = NULL; free(core_tasks[failed]->error); core_tasks[failed]->error = NULL; }
-  panic_again(m);
+  panic_again(w->p[0]);
 }
 
 // ---- channels ----
@@ -3531,7 +3702,7 @@ fly_chan fly_channel(void (*drop)(void*)) {
 #ifdef FLY_THREADS
   if (threads) return mt_channel(drop);
 #endif
-  int id = (int)ask(REQ_CHANNEL, 0, 0, NULL);
+  int id = (int)ask_now(REQ_CHANNEL, 0, 0, NULL);
   if ((size_t)id >= chan_cap) {
     size_t cap = chan_cap ? chan_cap : 16;
     while (cap <= (size_t)id) cap *= 2;
@@ -3543,27 +3714,42 @@ fly_chan fly_channel(void (*drop)(void*)) {
 }
 
 // Whether the message went to the channel: once its receiver is gone, it is dropped instead.
-bool fly_send(fly_chan ch, const void* v, size_t size) {
+// The message is the routine's own, copied as it is first called: the scheduler reads it once the
+// task has given way, when the caller's copy may be gone.
+bool fly_send(fly_wait* w, fly_chan ch, const void* v, size_t size) {
 #ifdef FLY_THREADS
-  if (threads) return mt_send(ch, v, size);
+  if (threads) return mt_send(w, ch, v, size);
 #endif
-  if (ask(REQ_SEND, ch.ch, (int64_t)size, (void*)v)) return true;
-  if (chan_drops[ch.ch]) chan_drops[ch.ch]((void*)v);
-  fly_point();
+  int64_t r = 0;
+  W_BEGIN(w)
+  w->p[0] = fly_alloc(size ? size : 1);
+  memcpy(w->p[0], v, size);
+  ASK(w, r, REQ_SEND, ch.ch, (int64_t)size, w->p[0], false);
+  if (r) { free(w->p[0]); return true; }
+  if (chan_drops[ch.ch]) chan_drops[ch.ch](w->p[0]);
+  free(w->p[0]);
+  ASK(w, r, REQ_POINT, 0, 0, NULL, false);
+  W_END
   return false;
 }
 
-// The next message, or false once the channel is closed and drained (or the task unwinds).
-bool fly_recv(fly_chan ch, void* out, size_t size) {
+// The next message, or false once the channel is closed and drained (or the task unwinds). The
+// scheduler puts it where the routine keeps it, which the caller's copy is filled from.
+bool fly_recv(fly_wait* w, fly_chan ch, void* out, size_t size) {
 #ifdef FLY_THREADS
-  if (threads) return mt_recv(ch, out, size);
+  if (threads) return mt_recv(w, ch, out, size);
 #endif
-  (void)size;
+  int64_t r = 0;
+  W_BEGIN(w)
+  w->p[0] = fly_alloc(size ? size : 1);
   for (;;) {
-    int64_t r = ask(REQ_RECV, ch.ch, 0, out);
-    if (r != 2) return r == 1;
-    if (fly_unwinding) return false;
+    ASK(w, r, REQ_RECV, ch.ch, 0, w->p[0], false);
+    if (r != 2 || fly_unwinding) break;
   }
+  W_END
+  if (r == 1) memcpy(out, w->p[0], size);
+  free(w->p[0]);
+  return r == 1 && !fly_unwinding;
 }
 
 // The receiving end dropped: what is sent from now on is dropped, and the channel freed once its
@@ -3576,19 +3762,23 @@ void fly_receiver_drop(fly_chan* ch) {
   if (!ch->ch) return;
   int id = ch->ch;
   ch->ch = 0;
-  int64_t held = ask(REQ_DEAFEN, id, 0, NULL);
+  int64_t held = ask_now(REQ_DEAFEN, id, 0, NULL);
   size_t n = (size_t)(held >> 32), size = (size_t)(held & 0xffffffff);
   uint8_t* items = fly_alloc(n * size + 1);
-  ask(REQ_TAKE_ITEMS, id, 0, items);
+  ask_now(REQ_TAKE_ITEMS, id, 0, items);
   if (chan_drops[id]) for (size_t i = 0; i < n; i++) chan_drops[id](items + i * size);
   free(items);
 }
 
-void fly_close(fly_chan ch) {
+void fly_close(fly_wait* w, fly_chan ch) {
 #ifdef FLY_THREADS
-  if (threads) { mt_sender_gone(ch); mt_point(); return; }
+  if (threads) { if (w->step == 0) mt_sender_gone(ch); mt_point(w); return; }
 #endif
-  ask(REQ_CLOSE, ch.ch, 0, NULL);
+  int64_t r;
+  W_BEGIN(w)
+  ASK(w, r, REQ_CLOSE, ch.ch, 0, NULL);
+  (void)r;
+  W_END
 }
 
 // A destructor does not suspend: a sender dropped closes its channel then and there.
@@ -3596,7 +3786,7 @@ void fly_sender_drop(fly_chan* ch) {
 #ifdef FLY_THREADS
   if (threads) { if (ch->ch) mt_sender_gone(*ch); ch->ch = 0; return; }
 #endif
-  if (ch->ch) ask(REQ_SENDER_DROP, ch->ch, 0, NULL);
+  if (ch->ch) ask_now(REQ_SENDER_DROP, ch->ch, 0, NULL);
   ch->ch = 0;
 }
 
@@ -3604,7 +3794,7 @@ fly_chan fly_sender_clone(const fly_chan* ch) {
 #ifdef FLY_THREADS
   if (threads) { mt_sender_clone(*ch); return *ch; }
 #endif
-  ask(REQ_SENDER_CLONE, ch->ch, 0, NULL);
+  ask_now(REQ_SENDER_CLONE, ch->ch, 0, NULL);
   return *ch;
 }
 
@@ -3755,14 +3945,15 @@ typedef struct worker worker;
 typedef struct { spin_t lock; mt_task *head, *tail; } waitq;
 
 struct mt_task {
-  void (*entry)(void* task, void* closure);
+  void (*entry)(void* task, void* closure, void** slot);
   void* closure;
   void* result;
   size_t size;
   mt_scope* scope;
   worker* home;
-  fly_fiber* fiber;
-  fly_fiber* suspended;
+  // Its root machine's frame, and the frame arena of what it runs.
+  void* slot;
+  fly_frames frames;
   // How it ended: its failure, if it failed; its panic, if it was forked and panicked (§5.7).
   fly_failure* error;
   char* panic;
@@ -3792,7 +3983,7 @@ struct mt_task {
   mt_task *snext, *sprev;
   // The next task in an inbox.
   mt_task* rnext;
-  // The lock its worker gives back once it has switched away to wait.
+  // The lock its worker gives back once it has stopped to wait.
   spin_t* release;
   // What compiled code reads and sets of it, wherever it runs.
   fly_ctx ctx;
@@ -3959,18 +4150,19 @@ static void wake_one(waitq* q) {
 
 static void wake_all(waitq* q) { while (q->head) wake_one(q); }
 
-// The running task gives its worker up, until it is resumed. A task that waits holds the lock of
-// what it waits for until then: its worker gives the lock back once the task has switched away,
-// for until then nothing may wake it, which would let another worker resume it half switched.
+// The running task gives its worker up, until it is resumed: it returns to the worker, suspended.
+// A task that waits holds the lock of what it waits for until then: its worker gives the lock back
+// once the task has stopped, for until then nothing may wake it, which would let another worker
+// resume it while it is still running here.
 static void to_worker(mt_task* t, spin_t* release) {
   t->release = release;
-  t->suspended = cur_fiber;
-  switch_to(this_worker->base);
+  fly_cx_now()->pend = FLY_PEND_WAIT;
 }
 
-// The running task waits in `q`, whose lock is held, until something wakes it; a cancellation
-// wakes it too, unless it waits for its scope's tasks, which it must. The lock is released.
-static void wait_in(waitq* q, bool cancellable) {
+// The running task waits in `q`, whose lock is held, until something wakes it: true, and it
+// suspends, the lock released once it has; a cancellation wakes it too, unless it waits for its
+// scope's tasks, which it must. Cancelled already, it does not wait: false, the lock released.
+static bool wait_in(waitq* q, bool cancellable) {
   mt_task* t = running;
   q_append(q, t);
   __atomic_store_n(&t->waiting, q, __ATOMIC_SEQ_CST);
@@ -3978,12 +4170,14 @@ static void wait_in(waitq* q, bool cancellable) {
     q_remove(q, t);
     __atomic_store_n(&t->waiting, NULL, __ATOMIC_SEQ_CST);
     spin_unlock(&q->lock);
-    return;
+    return false;
   }
   t->yielded = false;
   __atomic_fetch_sub(&runnable, 1, __ATOMIC_SEQ_CST);
   to_worker(t, &q->lock);
+  return true;
 }
+#define WAIT_IN(w, q, cancellable, ...) do { if (wait_in((q), (cancellable))) W_SUSPEND(w, __VA_ARGS__); } while (0)
 
 // Whether the running task has been cancelled: it unwinds from here (§6.1).
 static bool cancelled_here(void) {
@@ -3995,18 +4189,13 @@ static bool cancelled_here(void) {
   return false;
 }
 
-// A monitor, for the runtime's Flyscript (rt/mt.fly): a wait queue and its lock. Waiting gives the
-// lock up while the task waits and, if `cancellable`, says whether it was cancelled meanwhile, from
-// which it unwinds; the lock is not held after.
+// A monitor, for the runtime's Flyscript (rt/mt.fly): a wait queue and its lock.
 void fly_mon_lock(uint8_t* m) { spin_lock(&((waitq*)m)->lock); }
 void fly_mon_unlock(uint8_t* m) { spin_unlock(&((waitq*)m)->lock); }
-bool fly_mon_wait(uint8_t* m, bool cancellable) {
-  wait_in((waitq*)m, cancellable);
-  return cancellable && cancelled_here();
-}
 void fly_mon_wake_one(uint8_t* m) { wake_one((waitq*)m); }
 void fly_mon_wake_all(uint8_t* m) { wake_all((waitq*)m); }
 void fly_core_relax(void) { relax(); }
+void fly_core_yield(void) { sched_yield(); }
 
 // A task waiting is woken to see that it is cancelled; one in cleanup is left to finish it.
 static void wake_cancelled(mt_task* t);
@@ -4046,14 +4235,17 @@ static void mt_cleaning(int d) {
 }
 
 // A scheduling point: a cancellation is delivered, and the worker's other tasks get a turn.
-static void mt_point(void) {
+static void mt_point(fly_wait* w) {
   mt_task* t = running;
+  W_BEGIN(w)
   if (!t || cancelled_here()) return;
   if (__atomic_load_n(&this_worker->inhead, __ATOMIC_RELAXED)) {
     t->yielded = true;
     to_worker(t, NULL);
+    W_SUSPEND(w);
     cancelled_here();
   }
+  W_END
 }
 
 // ---- sleeping ----
@@ -4091,15 +4283,17 @@ static alarm_t alarm_pop(void) {
   return top;
 }
 
-static void mt_sleep(uint64_t nanos) {
+static void mt_sleep(fly_wait* w, uint64_t nanos) {
   mt_task* t = running;
-  if (nanos == 0) { mt_point(); return; }
+  if (nanos == 0) { mt_point(w); return; }
+  W_BEGIN(w)
   spin_lock(&sleepers.lock);
   __atomic_fetch_add(&t->refs, 1, __ATOMIC_RELAXED);
   alarm_push((alarm_t){ now_ns() + nanos, ++t->sleep_gen, t });
   __atomic_store_n(&next_due, alarms[0].due, __ATOMIC_RELEASE);
-  wait_in(&sleepers, true);
+  WAIT_IN(w, &sleepers, true);
   cancelled_here();
+  W_END
 }
 
 // Wakes the tasks whose alarms are due.
@@ -4124,20 +4318,26 @@ static void fire_alarms(void) {
 
 // ---- running tasks ----
 
-static void mt_task_body(void* a) { mt_task* t = a; t->entry(t, t->closure); }
+static void mt_task_body(void* a) { mt_task* t = a; t->entry(t, t->closure, &t->slot); }
 
-static void mt_task_main(void* arg) {
-  mt_task* t = arg;
+// Runs the task's root machine until it ends or waits: whether it ended.
+static bool mt_task_main(mt_task* t) {
   if (fly_try(mt_task_body, t)) {
     char* m = panic_take();
     if (t->entry != main_entry) drop_task_closure(t->closure);
     if (t->forked) t->panic = m;
     else { t->message = m; __atomic_store_n(&t->how, FLY_TASK_PANICKED, __ATOMIC_RELEASE); }
-    return;
+    fly_cx_now()->pend = 0;
+    return true;
+  }
+  if (fly_cx_now()->pend) {
+    fly_cx_now()->pend = 0;
+    return false;
   }
   if (FLY_FAILED) { t->error = fly_err; fly_err = NULL; }
   if (!t->forked) __atomic_store_n(&t->how, fly_unwinding ? FLY_TASK_CANCELLED : FLY_TASK_DONE, __ATOMIC_RELEASE);
   fly_unwinding = false;
+  return true;
 }
 
 // A spawned task's panic no `wait` gave is told once nothing can ask for it: by whichever of its
@@ -4149,7 +4349,7 @@ static void tell_panic(mt_task* t) {
 // Task `t` has ended: its outcome goes to its scope, its joiners wake, and the first failure or
 // panic cancels the scope's body and its other tasks (§6.1).
 static void mt_end(mt_task* t) {
-  if (t->fiber) { fiber_free(t->fiber); t->fiber = NULL; }
+  fly_frames_free(&t->frames);
   // A task stops being alive before it stops being runnable: the other way round, an idle worker
   // could see one task alive and none able to run, and take that for a deadlock.
   if (t == main_task) {
@@ -4224,17 +4424,15 @@ static void run_task(worker* w, mt_task* t) {
       mt_end(t);
       return;
     }
-    t->fiber = fiber_new(mt_task_main, t, NULL);
-    t->suspended = t->fiber;
   }
   fly_cur = &t->ctx;
-  t->fiber->back = w->base;
-  switch_to(t->suspended);
+  t->ctx.frames = &t->frames;
+  bool done = mt_task_main(t);
   fly_cur = w->idle_ctx;
   running = NULL;
   // Once the lock of what it waits for is given back, the task may be woken and run elsewhere: what
   // is needed of it is read first.
-  bool done = t->fiber->done, yielded = t->yielded;
+  bool yielded = t->yielded;
   spin_t* release = t->release;
   t->release = NULL;
   if (release) spin_unlock(release);
@@ -4405,21 +4603,24 @@ static void io_register(int fd) {
 #endif
 }
 
-// The running task waits until `fd` may be read, or written: false if it was cancelled.
-static bool io_wait(int fd, bool write) {
+// The running task waits until `fd` may be read, or written: true if it suspends, to go on with
+// `io_wait_end` as it is woken; false if it is ready at once, or the task is cancelled.
+static bool io_wait_begin(int fd, bool write) {
   io_obj* o = io_of(fd);
   int d = write ? 1 : 0;
   spin_lock(&o->q[d].lock);
   if (o->ready[d]) {
     o->ready[d] = false;
     spin_unlock(&o->q[d].lock);
-    return !cancelled_here();
+    return false;
   }
   __atomic_fetch_add(&io_waiting, 1, __ATOMIC_SEQ_CST);
-  wait_in(&o->q[d], true);
+  if (wait_in(&o->q[d], true)) return true;
   __atomic_fetch_sub(&io_waiting, 1, __ATOMIC_SEQ_CST);
-  return !cancelled_here();
+  return false;
 }
+
+static void io_wait_end(void) { __atomic_fetch_sub(&io_waiting, 1, __ATOMIC_SEQ_CST); }
 
 // ---- `par` ----
 
@@ -4602,7 +4803,7 @@ static void* worker_thread(void* arg) {
   return NULL;
 }
 
-static void mt_run(void (*main)(void), void (*entry)(void* task, void* closure)) {
+static void mt_run(void (*main)(void**), void (*entry)(void* task, void* closure, void** slot)) {
   threads = true;
   // A program whose tasks run on threads may run for long, a server: what it prints goes out a
   // line at a time.
@@ -4650,7 +4851,7 @@ static void mt_run(void (*main)(void), void (*entry)(void* task, void* closure))
 // ---- what compiled code calls, without a simulated world ----
 
 // A task started in scope `scope`, which itself and its scope refer to, and `refs` more.
-static mt_task* mt_start(int scope, void (*entry)(void* task, void* closure), void* closure, size_t size, int refs) {
+static mt_task* mt_start(int scope, void (*entry)(void* task, void* closure, void** slot), void* closure, size_t size, int refs) {
   mt_scope* sc = obj_get(scope);
   mt_task* t = fly_alloc(sizeof(mt_task));
   t->entry = entry;
@@ -4674,22 +4875,24 @@ static mt_task* mt_start(int scope, void (*entry)(void* task, void* closure), vo
   return t;
 }
 
-static int mt_spawn(int scope, void (*entry)(void* task, void* closure), void* closure, size_t size) {
+static int mt_spawn(fly_wait* w, int scope, void (*entry)(void* task, void* closure, void** slot), const fly_fn* f, size_t size) {
   // A forked task's `Fiber` refers to it too, by its number.
-  mt_task* t = mt_start(scope, entry, closure, size, 1);
-  int id = obj_new(t);
-  mt_point();
-  return id;
+  if (w->step == 0) w->n = obj_new(mt_start(scope, entry, fly_box(f, sizeof *f), size, 1));
+  mt_point(w);
+  return w->n;
 }
 
 // ---- `Task`, with threads ----
 
-static void* mt_task_spawn(int scope, void* closure) {
+static void* mt_task_spawn(fly_wait* w, int scope, const fly_fn* f) {
   // Its `Task`s share one reference.
-  mt_task* t = mt_start(scope, fly_task_void, closure, 0, 1);
-  t->handles = 1;
-  mt_point();
-  return t;
+  if (w->step == 0) {
+    mt_task* t = mt_start(scope, fly_task_void, fly_box(f, sizeof *f), 0, 1);
+    t->handles = 1;
+    w->p[1] = t;
+  }
+  mt_point(w);
+  return w->p[1];
 }
 
 static void mt_task_cancel(void* h) {
@@ -4697,15 +4900,17 @@ static void mt_task_cancel(void* h) {
   if (__atomic_load_n(&t->how, __ATOMIC_ACQUIRE) == FLY_TASK_RUNNING) kill_task(t);
 }
 
-static int32_t mt_task_wait(void* h, fly_String* message) {
+static int32_t mt_task_wait(fly_wait* w, void* h, fly_String* message) {
   mt_task* t = h;
+  W_BEGIN(w)
   spin_lock(&t->joiners.lock);
   while (!t->finished) {
-    wait_in(&t->joiners, true);
+    WAIT_IN(w, &t->joiners, true, 0);
     if (cancelled_here()) return FLY_TASK_DONE;
     spin_lock(&t->joiners.lock);
   }
   spin_unlock(&t->joiners.lock);
+  W_END
   int32_t how = __atomic_load_n(&t->how, __ATOMIC_ACQUIRE);
   if (how == FLY_TASK_PANICKED) {
     __atomic_store_n(&t->told, true, __ATOMIC_RELEASE);
@@ -4714,26 +4919,42 @@ static int32_t mt_task_wait(void* h, fly_String* message) {
   return how;
 }
 
-static size_t mt_task_any(void* const* ts, size_t n) {
-  struct mt_any* as = fly_alloc(n * sizeof(struct mt_any));
+// What it waits in, and the records each task tells it by, are the routine's own, in the heap.
+static size_t mt_task_any(fly_wait* w, void* const* ts, size_t n) {
+  struct mt_any* as;
+  waitq* qp;
+  size_t found, k;
+  bool cancelled;
+  W_BEGIN(w)
+  w->p[0] = fly_alloc(n * sizeof(struct mt_any));
+  w->p[1] = fly_alloc(sizeof(waitq));
   for (;;) {
-    waitq q = { 0 };
-    size_t found = n, k = 0;
+    as = w->p[0];
+    qp = w->p[1];
+    *qp = (waitq){ 0 };
+    found = n, k = 0;
     for (; k < n; k++) {
       mt_task* t = ts[k];
       spin_lock(&t->joiners.lock);
       if (t->finished) { spin_unlock(&t->joiners.lock); found = k; break; }
-      as[k] = (struct mt_any){ t->anys, &q, false };
+      as[k] = (struct mt_any){ t->anys, qp, false };
       t->anys = &as[k];
       spin_unlock(&t->joiners.lock);
     }
-    bool cancelled = false;
+    cancelled = false;
     if (found == n) {
       // A task that ends from here on sets `fired` before it takes the lock this one holds.
-      spin_lock(&q.lock);
+      spin_lock(&qp->lock);
       bool fired = false;
       for (size_t i = 0; i < n; i++) fired = fired || __atomic_load_n(&as[i].fired, __ATOMIC_SEQ_CST);
-      if (fired) spin_unlock(&q.lock); else wait_in(&q, true);
+      if (fired) spin_unlock(&qp->lock);
+      else {
+        w->n = (int32_t)k;
+        WAIT_IN(w, qp, true, 0);
+        as = w->p[0];
+        qp = w->p[1];
+        k = (size_t)w->n;
+      }
       cancelled = cancelled_here();
     }
     for (size_t i = 0; i < k; i++) {
@@ -4744,15 +4965,17 @@ static size_t mt_task_any(void* const* ts, size_t n) {
       }
       spin_unlock(&t->joiners.lock);
     }
-    if (cancelled) { free(as); return 0; }
+    if (cancelled) { free(as); free(qp); return 0; }
     for (size_t i = 0; i < n; i++) {
       mt_task* t = ts[i];
       spin_lock(&t->joiners.lock);
       bool finished = t->finished;
       spin_unlock(&t->joiners.lock);
-      if (finished) { free(as); return i; }
+      if (finished) { free(as); free(qp); return i; }
     }
   }
+  W_END
+  return 0;
 }
 
 static void mt_task_clone(void* h) { __atomic_fetch_add(&((mt_task*)h)->handles, 1, __ATOMIC_RELAXED); }
@@ -4767,15 +4990,17 @@ static void mt_task_drop(void* h) {
   task_unref(t);
 }
 
-static void mt_join(int task, void* out) {
+static void mt_join(fly_wait* w, int task, void* out) {
   mt_task* t = obj_get(task);
+  W_BEGIN(w)
   spin_lock(&t->joiners.lock);
   while (!t->finished) {
-    wait_in(&t->joiners, true);
+    WAIT_IN(w, &t->joiners, true);
     if (cancelled_here()) return;
     spin_lock(&t->joiners.lock);
   }
   spin_unlock(&t->joiners.lock);
+  W_END
   if (t->panic) {
     // It panicked, which cancels the scope and the joiner with it; the scope raises the panic.
     fly_unwinding = true;
@@ -4796,32 +5021,38 @@ static int mt_scope_open(void) {
   return obj_new(sc);
 }
 
-static void mt_scope_close(int id) {
+// What it found as the body ended is kept in the record: whether it unwound, its failure, and
+// whether it has spread a cancellation to the scope's tasks.
+static void mt_scope_close(fly_wait* w, int id) {
   mt_scope* sc = obj_get(id);
   mt_task* me = running;
-  bool unwinding = fly_unwinding;
+  W_BEGIN(w)
+  w->a[0] = fly_unwinding;
   fly_unwinding = false;
-  void* err = fly_err;
+  w->p[0] = fly_err;
   fly_err = NULL;
   // The body left by unwinding — a failure, a cancellation — cancels the scope's tasks (§6.1).
-  if (unwinding || err) mt_scope_cancel(id);
+  if (w->a[0] || w->p[0]) mt_scope_cancel(id);
   spin_lock(&sc->q.lock);
   sc->closing = true;
   // Every task started in it is waited for. Cancelled while it waits, the task cancels them, once,
   // and waits on.
-  bool spread = unwinding || err;
+  w->a[1] = w->a[0] || w->p[0];
   while (sc->nlive > 0) {
-    if (!spread && is_cancelled(me)) {
-      spread = true;
+    if (!w->a[1] && is_cancelled(me)) {
+      w->a[1] = true;
       spin_unlock(&sc->q.lock);
       mt_scope_cancel(id);
       spin_lock(&sc->q.lock);
       continue;
     }
-    wait_in(&sc->q, !spread);
+    WAIT_IN(w, &sc->q, !w->a[1]);
     spin_lock(&sc->q.lock);
   }
   spin_unlock(&sc->q.lock);
+  W_END
+  bool unwinding = w->a[0];
+  void* err = w->p[0];
   // The body unwound because a task failed: the scope raises that instead, the cancellation its
   // failure made over. Otherwise one from outside goes on, whether it came in the body or as the
   // task waited.
@@ -4892,18 +5123,31 @@ static void mt_receiver_gone(fly_chan ch) {
   free(items);
 }
 
-static bool mt_send(fly_chan ch, const void* v, size_t size) {
+static bool mt_send(fly_wait* w, fly_chan ch, const void* v, size_t size) {
   mt_chan* c = obj_get(ch.ch);
-  bool sent = fly_rt_mt_send((uint8_t*)&c->q, c->state, (uint8_t*)v, size);
-  if (!sent && c->drop) c->drop((void*)v);
-  mt_point();
-  return sent;
+  if (w->step == 0) {
+    w->n = fly_rt_mt_send((uint8_t*)&c->q, c->state, (uint8_t*)v, size);
+    if (!w->n && c->drop) c->drop((void*)v);
+  }
+  mt_point(w);
+  return w->n;
 }
 
-static bool mt_recv(fly_chan ch, void* out, size_t size) {
+// The next message: it waits under the channel's monitor while there is none, and is put at `out`
+// by the call that finds one.
+static bool mt_recv(fly_wait* w, fly_chan ch, void* out, size_t size) {
   (void)size;
   mt_chan* c = obj_get(ch.ch);
-  return fly_rt_mt_recv((uint8_t*)&c->q, c->state, out) == 1;
+  W_BEGIN(w)
+  for (;;) {
+    spin_lock(&c->q.lock);
+    int32_t r = fly_rt_mt_take(c->state, out);
+    if (r != 2) { spin_unlock(&c->q.lock); return r == 1; }
+    WAIT_IN(w, &c->q, true, false);
+    if (cancelled_here()) return false;
+  }
+  W_END
+  return false;
 }
 
 static void mt_sender_gone(fly_chan ch) {
@@ -4954,10 +5198,10 @@ void fly_par_join(void (*a)(void* f, void* out), void* fa, void* oa, void (*da)(
 static _Noreturn void no_threads(void) { fly_panic("a monitor without threads"); }
 void fly_mon_lock(uint8_t* m) { (void)m; no_threads(); }
 void fly_mon_unlock(uint8_t* m) { (void)m; no_threads(); }
-bool fly_mon_wait(uint8_t* m, bool c) { (void)m; (void)c; no_threads(); }
 void fly_mon_wake_one(uint8_t* m) { (void)m; no_threads(); }
 void fly_mon_wake_all(uint8_t* m) { (void)m; no_threads(); }
 void fly_core_relax(void) {}
+void fly_core_yield(void) {}
 #endif
 void fly_lock(const void* state) { (void)state; }
 void fly_unlock(const void* state) { (void)state; }

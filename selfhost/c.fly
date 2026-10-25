@@ -77,6 +77,9 @@ type Ctx = {
   retC: String;
   // What unwinds each generator a loop pulls, by its local (`#Machine`).
   machineDrops: HashMap<usize, String>;
+  // Where a `defer` that may suspend keeps, in the frame, what its call needs as it goes on, by
+  // its flag: the unwinding it set aside, its environment, and its frame's slot.
+  deferStore: HashMap<usize, Vec<String>>;
   // How the code reaches each region's arena, by the region's symbol.
   arenas: HashMap<u32, String>;
   // The C function's return type; the Flyscript function's, and where a `return` of it puts its
@@ -125,7 +128,7 @@ function newCtx(locals: Vec<Local>, ret: Ty, mode: Mode): Ctx {
   {
     names: HashMap.new(), locals, captures: Vec.new(), decls: String.new(), scopes: Vec.new(), targets: Vec.new(), mode,
     machine: false, frameType: String.new(), fields: String.new(), sites: 0, cases: String.new(), reenter: Vec.new(),
-    yo: #None, yieldEffect: #None, resident: HashSet.new(), retC: String.new(), machineDrops: HashMap.new(), arenas: HashMap.new(), ret: ret.clone(), fnRet: ret, capTys: Vec.new(), out: String.new(),
+    yo: #None, yieldEffect: #None, resident: HashSet.new(), retC: String.new(), machineDrops: HashMap.new(), deferStore: HashMap.new(), arenas: HashMap.new(), ret: ret.clone(), fnRet: ret, capTys: Vec.new(), out: String.new(),
     hoisted: HashSet.new(), prologue: String.new(), live: HashSet.new(), reachable: true, liveAt: HashMap.new(), direct: false,
     unwinds: false, landing: false, calls: false, hoist: HashSet.new(), envType: String.new(), pblocks: Vec.new(), punw: String.new(), pcases: Vec.new(), pread: HashSet.new(), declared: HashSet.new(),
   }
@@ -362,12 +365,14 @@ export struct Cgen {
   // (`checking`).
   callees: HashMap<String, HashSet<String>>;
   indirect: HashSet<String>;
+  // The instances that are machines, by name.
+  machines: HashSet<String>;
   // The function being printed.
   cx: Ctx;
   // The module of the function being printed, for its diagnostics.
   module: usize;
-  // The `defer`s made functions of their own, by function and flag: the statement calling each.
-  defers: HashMap<String, String>;
+  // The `defer`s made functions of their own, by function and flag.
+  defers: HashMap<String, DeferFn>;
   fnName: String;
   // Where a routine's arguments are, by index, when it is printed apart from the code calling it.
   argPlaces: Vec<String>;
@@ -678,14 +683,16 @@ impl Cgen {
 
   // What a catch point runs under `fly_try`: a closure `f` and what it is given and gives, in a
   // record `<name>_t` of `fields` after `f`, by `call` of the record `x`.
-  function catchBody(self: mut Self, key: String, fields: String, call: String): String {
+  export function catchBody(self: mut Self, key: String, fields: String, call: String): String {
     const k = `catch:${key}`;
     match (self.helpers.get(k.asStr())) {
       #Some(n) => n.clone(),
       #None => {
         const n = `fly_catch${self.helpers.len()}`;
         self.helpers.insert(k, n.clone());
-        self.protos.push(`typedef struct { fly_fn f; ${fields} } ${n}_t;\nstatic void ${n}(void* a);\n`);
+        // Among the types, as a machine's frame may hold one.
+        self.typeDefs.push(`typedef struct { fly_fn f; ${fields} } ${n}_t;\n`);
+        self.protos.push(`static void ${n}(void* a);\n`);
         self.dropCode.push(`static void ${n}(void* a) { ${n}_t* x = a; ${call} }\n`);
         n
       }
@@ -1177,9 +1184,30 @@ impl Cgen {
         `${d}(&${self.local(l)}); `
       }
       #Defer(flag, body) => {
-        const call = self.deferCall(flag, body, span);
+        const d = self.deferCall(flag, body, span);
         const f = self.local(flag);
-        `if (${f}) { ${f} = false; fly_unwind_state u_ = fly_cleanup_begin(); ${call} fly_cleanup_end(u_); } `
+        const env = `(${d.env}){ ${d.inits} }`;
+        if (!d.machine) {
+          return `if (${f}) { ${f} = false; fly_unwind_state u_ = fly_cleanup_begin(); { ${d.env} e_ = ${env}; defer_${d.n}(&e_); } fly_cleanup_end(u_); } `;
+        }
+        // A `defer` that may suspend is a point the code may stop at, where it can.
+        if (!self.cx.machine || self.cx.landing) {
+          return `if (${f}) { ${f} = false; fly_unwind_state u_ = fly_cleanup_begin(); { ${d.env} e_ = ${env}; void* s_ = NULL; defer_${d.n}(&s_, &e_); if (fly_pending) fly_panic("a \`defer\` waited where the code cannot stop"); } fly_cleanup_end(u_); } `;
+        }
+        const st = match (self.cx.deferStore.get(flag)) {
+          #Some(v) => v.clone(),
+          #None => {
+            const v: Vec<String> = [self.storage("fly_unwind_state"), self.storage(d.env.asStr()), self.storage("void*")];
+            self.cx.deferStore.insert(flag, v.clone());
+            v
+          }
+        };
+        self.cx.sites += 1;
+        const k = self.cx.sites;
+        self.cx.cases.push(`case ${k}: goto r${k}; `);
+        const susp = self.suspendCode();
+        const call = `defer_${d.n}(&${st[2]}, &${st[1]});`;
+        `if (${f}) { ${f} = false; ${st[0]} = fly_cleanup_begin(); ${st[1]} = ${env}; ${st[2]} = NULL; ${call} if (fly_pending) { fr->state = ${k}; ${susp} } goto d${k}; r${k}: ${self.reenterCode()}${call} if (fly_pending) { ${susp} } d${k}: fly_cleanup_end(${st[0]}); } `
       }
       #Arena(l) => `fly_arena_free(&${self.local(l)}); `,
     }
@@ -1364,9 +1392,9 @@ impl Cgen {
       self.cx.pblocks.push(k);
     }
     for (const s of b.stmts) { self.stmt(s, span); }
-    if (self.cx.unwinds) { self.cx.pblocks.pop(); }
     self.cx.targets.pop();
     self.cx.scopes.pop();
+    // As the block's cleanups run, the panic record is still in it.
     if (self.cx.reachable) {
       const live = self.cx.live.clone();
       const c = self.cleanups(b.cleanups, live, span);
@@ -1387,6 +1415,7 @@ impl Cgen {
       self.cx.liveAt.insert(parent.clone(), set);
       self.line(`end${k}: ;`);
     }
+    if (self.cx.unwinds) { self.cx.pblocks.pop(); }
     for (const l of b.locals) { self.cx.live.remove(l); }
     self.line("}");
   }
@@ -1756,6 +1785,27 @@ impl Cgen {
     self.line(`{ ${tc} v_ = ${v}; ${rc} r_; if (FLY_FAILED) { ${etc} e_; memset(&e_, 0, sizeof e_); ${take}r_ = (${rc}){ .tag = ${errTag}, .u.Err = e_ }; } else r_ = (${rc}){ .tag = ${okTag}${okInit} }; ${to}r_; }`);
   }
 
+  // `Io.scope(body)`: the body, a machine, runs under a panic's catch, called again to go on; then
+  // the scope's tasks are waited for. A panic in the body cancels them and goes on once they have
+  // finished (§5.7).
+  function scopeSite(self: mut Self, to: str, c: readonly Call, vs: readonly Vec<String>): void uses Fail<Diagnostic> {
+    const tc = self.ctype(c.ret, c.span);
+    const b = self.catchBody(`scope:${tc}`, `int* s; void** slot; ${tc} r;`, `x->r = ((${tc} (*)(void*, void**, void*, int*))x->f.fn)(x->f.env, x->slot, NULL, x->s);`);
+    const sid = self.storage("int");
+    const sc = self.storage("int");
+    const slot = self.storage("void*");
+    const x = self.storage(`${b}_t`.asStr());
+    const panicked = self.storage("bool");
+    const w = self.storage("fly_wait");
+    const run = `${panicked} = fly_try(${b}, &${x});`;
+    self.site(`${sid} = fly_scope_open(); ${sc} = ${sid}; ${slot} = NULL; ${x} = (${b}_t){ .f = ${vs[0]}, .s = &${sc}, .slot = &${slot} }; ${run}`, run.asStr());
+    self.line(`if (${x}.f.drop) ${x}.f.drop(${x}.f.env);`);
+    const end = `if (${panicked}) fly_scope_panicked(&${w}, ${sid}); else fly_scope_close(&${w}, ${sid}, false);`;
+    self.site(`${w} = (fly_wait){ 0 }; ${end}`, end.asStr());
+    if (!self.cx.machine) { self.line(`if (fly_pending) fly_panic("a wait where the code cannot stop");`); }
+    self.line(`${to}${x}.r;`);
+  }
+
   // A local of nothing, for what a yield under a `handle` of `Yield` gives back.
   function yieldResult(self: mut Self): usize {
     self.cx.locals.push({ name: "yr".toString(), ty: #Prim(#Void), kind: #Temp });
@@ -1839,9 +1889,30 @@ impl Cgen {
       #Builtin(k) => {
         if (machine && k == "Fail_capture") {
           self.captureSite(to.asStr(), c, vs);
+        } else if (k == "Io_scope") {
+          self.scopeSite(to.asStr(), c, vs);
         } else {
-          const expr = self.builtin(k.asStr(), c, vs, arenas);
-          if (machine && k == "Gen_next") {
+          const expr = self.builtin(k.asStr(), c, vs.clone(), arenas.clone());
+          if (expr.includes("FLY_W")) {
+            // A routine that waits keeps its wait record in the frame, and is called again with
+            // it to go on, given what it was given again: what is moved to it is moved once, to
+            // the frame.
+            let moved = String.new();
+            let held = vs.clone();
+            for (const [i, a] of c.args.iter().enumerate()) {
+              if (const #Move(_) = a) {
+                const ct = self.ctype(c.argTys[i], span);
+                const st = self.storage(ct.asStr());
+                moved.push(`${st} = ${vs[i]}; `);
+                held[i] = st;
+              }
+            }
+            const again = if (moved.len() > 0) { self.builtin(k.asStr(), c, held, arenas) } else { expr };
+            const w = self.storage("fly_wait");
+            const e = again.replaceAll("FLY_W", `&${w}`.asStr());
+            self.site(`${w} = (fly_wait){ 0 }; ${moved}${to}${e};`, `${to}${e};`);
+            if (!self.cx.machine) { self.line(`if (fly_pending) fly_panic("a wait where the code cannot stop");`); }
+          } else if (machine && k == "Gen_next") {
             // Pulled again, a generator that stopped for something else goes on.
             self.site(`${to}${expr};`, `${to}${expr};`);
           } else {
@@ -2066,7 +2137,7 @@ impl Cgen {
       "Listener_next" => {
         const yes = self.some(rt, "x_", span);
         const no = self.none(rt, span);
-        `({ fly_socket x_; fly_accept(${arg(0)}, &x_) ? ${yes} : ${no}; })`
+        `({ fly_socket x_; fly_accept(FLY_W, ${arg(0)}, &x_) ? ${yes} : ${no}; })`
       }
       "RegionList_at" => {
         const ec = self.ctype(stripBorrow(rt), span);
@@ -2183,14 +2254,22 @@ impl Cgen {
     }
   }
 
-  // `Io`'s operations: the runtime's, against the simulated world. Each is a scheduling point.
+  // `Io`'s operations: the runtime's, against the simulated world. Each is a scheduling point,
+  // made before the operation, which is done as the code goes on from it.
   function ioOp(self: mut Self, op: str, c: readonly Call, vs: Vec<String>): String uses Fail<Diagnostic> {
     const rc = self.ctype(c.ret, c.span);
     match (op) {
-      "now" => `({ fly_point(); (${rc}){ .nanos = fly_now() }; })`,
       // Sleeping waits for the virtual clock, which is its scheduling point.
-      "sleep" => `({ __auto_type d_ = ${vs[0]}; fly_sleep(d_.nanos); (fly_unit)0; })`,
+      "sleep" => `({ __auto_type d_ = ${vs[0]}; fly_sleep(FLY_W, d_.nanos); (fly_unit)0; })`,
       "park" => "((fly_unit)0)".toString(),
+      _ => pointFirst(rc.asStr(), self.ioDone(op, c, vs)),
+    }
+  }
+
+  function ioDone(self: mut Self, op: str, c: readonly Call, vs: Vec<String>): String uses Fail<Diagnostic> {
+    const rc = self.ctype(c.ret, c.span);
+    match (op) {
+      "now" => `((${rc}){ .nanos = fly_now() })`,
       // A descriptor's bytes: standard output and error go where `println` and `eprintln` do.
       "write" => self.ioResult(c, "uint64_t n_ = 0;", `fly_io_write((${vs[0]}).n, ${vs[1]}, &n_)`, "n_"),
       "read" => self.ioResult(c, "uint64_t n_ = 0;", `fly_io_read((${vs[0]}).n, ${vs[1]}, &n_)`, "n_"),
@@ -2221,7 +2300,7 @@ impl Cgen {
       }
       _ => {
         const ok = self.tagId("Ok");
-        `({ fly_point(); (${rc}){ .tag = ${ok}, .u.Ok = 0 }; })`
+        `((${rc}){ .tag = ${ok}, .u.Ok = 0 })`
       }
     }
   }
@@ -2558,19 +2637,13 @@ impl Cgen {
     // The type of what a channel's end carries.
     const carried = match (c.argTys.first()) { #Some(t) => typeArg(stripBorrow(t), 0), #None => #Error };
     #Some(match (key) {
-      "Io_scope" => {
-        const tc = self.ctype(rt, span);
-        const b = self.catchBody(`scope:${tc}`, `int* s; ${tc} r;`, `x->r = ((${tc} (*)(void*, void**, void*, int*))x->f.fn)(x->f.env, (void*[1]){ NULL }, NULL, x->s);`);
-        // A panic in the body cancels the scope's tasks and goes on once they have finished (§5.7).
-        `({ int sid_ = fly_scope_open(); int s_ = sid_; ${b}_t x_ = { .f = ${arg(0)}, .s = &s_ }; if (fly_try(${b}, &x_)) { if (x_.f.drop) x_.f.drop(x_.f.env); fly_scope_panicked(sid_); } if (x_.f.drop) x_.f.drop(x_.f.env); fly_scope_close(sid_, false); x_.r; })`
-      }
-      "Scope_spawn" => `({ int* s_ = ${arg(0)}; fly_fn f_ = ${arg(1)}; fly_task_spawn(*s_, fly_box(&f_, sizeof f_)); })`,
+      "Scope_spawn" => `({ int* s_ = ${arg(0)}; fly_fn f_ = ${arg(1)}; fly_task_spawn(FLY_W, *s_, &f_); })`,
       "Task_cancel" => `({ fly_task_cancel(${arg(0)}); (fly_unit)0; })`,
       "Task_wait" => {
         const tc = self.ctype(rt, span);
-        `({ fly_String m_ = { 0 }; int32_t k_ = fly_task_wait(${arg(0)}, &m_); k_ == FLY_TASK_PANICKED ? ((${tc}){ .tag = ${self.tagId("Panicked")}, .u.Panicked = m_ }) : k_ == FLY_TASK_CANCELLED ? ((${tc}){ .tag = ${self.tagId("Cancelled")} }) : ((${tc}){ .tag = ${self.tagId("Done")} }); })`
+        `({ fly_String m_ = { 0 }; int32_t k_ = fly_task_wait(FLY_W, ${arg(0)}, &m_); k_ == FLY_TASK_PANICKED ? ((${tc}){ .tag = ${self.tagId("Panicked")}, .u.Panicked = m_ }) : k_ == FLY_TASK_CANCELLED ? ((${tc}){ .tag = ${self.tagId("Cancelled")} }) : ((${tc}){ .tag = ${self.tagId("Done")} }); })`
       }
-      "Task_any" => `({ fly_slice s_ = ${arg(0)}; fly_task_any((void* const*)s_.ptr, s_.len); })`,
+      "Task_any" => `({ fly_slice s_ = ${arg(0)}; fly_task_any(FLY_W, (void* const*)s_.ptr, s_.len); })`,
       "Task_clone" => `fly_task_clone(${arg(0)})`,
       "Scope_fork" => {
         const t = typeArg(rt, 0);
@@ -2581,16 +2654,17 @@ impl Cgen {
           #None => {
             const n = `tentry${self.helpers.len()}`;
             self.helpers.insert(entryKey, n.clone());
-            self.protos.push(`static void ${n}(void* t, void* c);\n`);
-            self.dropCode.push(`static void ${n}(void* t, void* c) { fly_fn* f = c; ${tc} v = ((${tc} (*)(void*, void**, void*))f->fn)(f->env, (void*[1]){ NULL }, NULL); *(${tc}*)fly_task_result(t) = v; if (f->drop) f->drop(f->env); free(f); }\n`);
+            self.protos.push(`static void ${n}(void* t, void* c, void** slot);\n`);
+            // A task's root machine: the forked function, called again to go on as the task does.
+            self.dropCode.push(`static void ${n}(void* t, void* c, void** slot) { fly_fn* f = c; ${tc} v = ((${tc} (*)(void*, void**, void*))f->fn)(f->env, slot, NULL); if (fly_pending) return; *(${tc}*)fly_task_result(t) = v; if (f->drop) f->drop(f->env); free(f); }\n`);
             n
           }
         };
-        `({ int* s_ = ${arg(0)}; fly_fn f_ = ${arg(1)}; int t_ = fly_spawn(*s_, ${entry}, fly_box(&f_, sizeof f_), sizeof(${tc})); t_; })`
+        `({ int* s_ = ${arg(0)}; fly_fn f_ = ${arg(1)}; int t_ = fly_spawn(FLY_W, *s_, ${entry}, &f_, sizeof(${tc})); t_; })`
       }
       "Fiber_join" => {
         const tc = self.ctype(rt, span);
-        `({ ${tc} r_ = { 0 }; fly_join(${arg(0)}, &r_); r_; })`
+        `({ ${tc} r_ = { 0 }; fly_join(FLY_W, ${arg(0)}, &r_); r_; })`
       }
       "channel" | "Reply_new" => {
         const tc = self.ctype(rt, span);
@@ -2601,24 +2675,24 @@ impl Cgen {
       }
       "Sender_send" => {
         const tc = self.ctype(carried, span);
-        `({ fly_chan c_ = ${arg(0)}; ${tc} v_ = ${arg(1)}; fly_send(c_, &v_, sizeof(${tc})); })`
+        `({ fly_chan c_ = ${arg(0)}; ${tc} v_ = ${arg(1)}; fly_send(FLY_W, c_, &v_, sizeof(${tc})); })`
       }
       // A reply sent is done with: its channel's sending end is gone.
       "Reply_send" => {
         const tc = self.ctype(carried, span);
-        `({ fly_chan c_ = ${arg(0)}; ${tc} v_ = ${arg(1)}; fly_send(c_, &v_, sizeof(${tc})); fly_sender_drop(&c_); (fly_unit)0; })`
+        `({ fly_chan c_ = ${arg(0)}; ${tc} v_ = ${arg(1)}; fly_send(FLY_W, c_, &v_, sizeof(${tc})); if (!fly_pending) fly_sender_drop(&c_); (fly_unit)0; })`
       }
       "Receiver_recv" => {
         const tc = self.ctype(carried, span);
         const yes = self.some(rt, "x_", span);
         const no = self.none(rt, span);
-        `({ ${tc} x_; bool ok_ = fly_recv(${arg(0)}, &x_, sizeof(${tc})); ok_ ? ${yes} : ${no}; })`
+        `({ ${tc} x_; bool ok_ = fly_recv(FLY_W, ${arg(0)}, &x_, sizeof(${tc})); ok_ ? ${yes} : ${no}; })`
       }
       "Pending_wait" => {
         const tc = self.ctype(rt, span);
-        `({ fly_chan c_ = ${arg(0)}; ${tc} x_ = { 0 }; bool ok_ = fly_recv(c_, &x_, sizeof(${tc})); fly_receiver_drop(&c_); if (!ok_ && !fly_unwinding) fly_panic("the reply was dropped unsent"); x_; })`
+        `({ fly_chan c_ = ${arg(0)}; ${tc} x_ = { 0 }; bool ok_ = fly_recv(FLY_W, c_, &x_, sizeof(${tc})); if (!fly_pending) { fly_receiver_drop(&c_); if (!ok_ && !fly_unwinding) fly_panic("the reply was dropped unsent"); } x_; })`
       }
-      "Sender_close" => `({ fly_close(${arg(0)}); (fly_unit)0; })`,
+      "Sender_close" => `({ fly_close(FLY_W, ${arg(0)}); (fly_unit)0; })`,
       "Sender_clone" => `({ fly_chan c_ = ${arg(0)}; fly_sender_clone(&c_); })`,
       "Mutex_new" => {
         const tc = self.ctype(typeArg(rt, 0), span);
@@ -2634,14 +2708,14 @@ impl Cgen {
         const pc = match (stripBorrow(ptys[1])) { #Fn(f) => match (f.params.first()) { #Some(p) => self.ctype(p, span), #None => "void*".toString() }, _ => "void*".toString() };
         const b = self.catchBody(`lock:${tc}:${pc}`, `${pc} m; ${tc} r;`, `x->r = ((${tc} (*)(void*, void**, void*, ${pc}))x->f.fn)(x->f.env, (void*[1]){ NULL }, NULL, x->m);`);
         // A panic while the state is lent poisons the mutex, which keeps the state (§6.2).
-        `({ __auto_type m_ = ${arg(0)}; fly_fn f_ = ${arg(1)}; fly_point(); fly_lock(m_); fly_mutex_check(m_); ${b}_t x_ = { .f = f_, .m = m_ }; if (fly_try(${b}, &x_)) { fly_mutex_poison(m_, true); fly_unlock(m_); if (x_.f.drop) x_.f.drop(x_.f.env); fly_unwind_on(); } fly_unlock(m_); if (x_.f.drop) x_.f.drop(x_.f.env); x_.r; })`
+        pointFirst(tc.asStr(), `({ __auto_type m_ = ${arg(0)}; fly_fn f_ = ${arg(1)}; fly_lock(m_); fly_mutex_check(m_); ${b}_t x_ = { .f = f_, .m = m_ }; if (fly_try(${b}, &x_)) { fly_mutex_poison(m_, true); fly_unlock(m_); if (x_.f.drop) x_.f.drop(x_.f.env); fly_unwind_on(); } fly_unlock(m_); if (x_.f.drop) x_.f.drop(x_.f.env); x_.r; })`)
       }
       // A fresh state, the old one dropped and the poison cleared.
       "Mutex_reset" => {
         const t = match (c.argTys.get(1)) { #Some(t) => stripBorrow(t), #None => #Error };
         const tc = self.ctype(t, span);
         const d = if (self.needsDrop(t)) { `${self.dropFn(t, span)}(&o_); ` } else { "" };
-        `({ ${tc}* m_ = ${arg(0)}; ${tc} v_ = ${arg(1)}; fly_point(); fly_lock(m_); ${tc} o_ = *m_; *m_ = v_; fly_mutex_poison(m_, false); fly_unlock(m_); ${d}(fly_unit)0; })`
+        pointFirst("fly_unit", `({ ${tc}* m_ = ${arg(0)}; ${tc} v_ = ${arg(1)}; fly_lock(m_); ${tc} o_ = *m_; *m_ = v_; fly_mutex_poison(m_, false); fly_unlock(m_); ${d}(fly_unit)0; })`)
       }
       // An atomic is a word on the heap, shared by the tasks that borrow it; each operation is a
       // scheduling point, then one sequentially consistent access.
@@ -2649,14 +2723,14 @@ impl Cgen {
         const tc = self.ctype(typeArg(rt, 0), span);
         `({ ${tc} x_ = ${arg(0)}; (${tc}*)fly_box(&x_, sizeof(${tc})); })`
       }
-      "Atomic_load" => `({ __auto_type a_ = ${arg(0)}; fly_point(); __atomic_load_n(a_, __ATOMIC_SEQ_CST); })`,
-      "Atomic_store" => `({ __auto_type a_ = ${arg(0)}; __auto_type v_ = ${arg(1)}; fly_point(); __atomic_store_n(a_, v_, __ATOMIC_SEQ_CST); (fly_unit)0; })`,
-      "Atomic_swap" => `({ __auto_type a_ = ${arg(0)}; __auto_type v_ = ${arg(1)}; fly_point(); __atomic_exchange_n(a_, v_, __ATOMIC_SEQ_CST); })`,
+      "Atomic_load" => pointFirst(self.ctype(rt, span).asStr(), `({ __auto_type a_ = ${arg(0)}; __atomic_load_n(a_, __ATOMIC_SEQ_CST); })`),
+      "Atomic_store" => pointFirst("fly_unit", `({ __auto_type a_ = ${arg(0)}; __auto_type v_ = ${arg(1)}; __atomic_store_n(a_, v_, __ATOMIC_SEQ_CST); (fly_unit)0; })`),
+      "Atomic_swap" => pointFirst(self.ctype(rt, span).asStr(), `({ __auto_type a_ = ${arg(0)}; __auto_type v_ = ${arg(1)}; __atomic_exchange_n(a_, v_, __ATOMIC_SEQ_CST); })`),
       "Atomic_compareExchange" => {
         const tc = self.ctype(rt, span);
-        `({ __auto_type a_ = ${arg(0)}; __auto_type e_ = ${arg(1)}; __auto_type d_ = ${arg(2)}; fly_point(); bool ok_ = __atomic_compare_exchange_n(a_, &e_, d_, false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST); (${tc}){ .f0 = e_, .f1 = ok_ }; })`
+        pointFirst(tc.asStr(), `({ __auto_type a_ = ${arg(0)}; __auto_type e_ = ${arg(1)}; __auto_type d_ = ${arg(2)}; bool ok_ = __atomic_compare_exchange_n(a_, &e_, d_, false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST); (${tc}){ .f0 = e_, .f1 = ok_ }; })`)
       }
-      "Atomic_fetchAdd" => `({ __auto_type a_ = ${arg(0)}; int64_t v_ = ${arg(1)}; fly_point(); fly_atomic_add(a_, v_); })`,
+      "Atomic_fetchAdd" => pointFirst("int64_t", `({ __auto_type a_ = ${arg(0)}; int64_t v_ = ${arg(1)}; fly_atomic_add(a_, v_); })`),
       "Db_connect" => "0".toString(),
       "Listener_bind" => {
         const raise = self.ioRaise("-l_");
@@ -2666,24 +2740,24 @@ impl Cgen {
       "Socket_close" => `({ fly_sock_close(${arg(0)}); (fly_unit)0; })`,
       "Socket_connect" => {
         const raise = self.ioRaise("e_");
-        `({ fly_socket s_; int e_ = fly_connect(${arg(0)}, ${arg(1)}, &s_); if (e_) { ${raise}} s_; })`
+        `({ fly_socket s_; int e_ = fly_connect(FLY_W, ${arg(0)}, ${arg(1)}, &s_); if (e_) { ${raise}} s_; })`
       }
       "Socket_connectTls" => {
         const raise = self.ioRaise("e_");
-        `({ fly_socket s_; int e_ = fly_connect_tls(${arg(0)}, ${arg(1)}, &s_); if (e_) { ${raise}} s_; })`
+        `({ fly_socket s_; int e_ = fly_connect_tls(FLY_W, ${arg(0)}, ${arg(1)}, &s_); if (e_) { ${raise}} s_; })`
       }
       "Socket_read" => {
         const raise = self.ioRaise("e_");
-        `({ uint64_t n_ = 0; int e_ = fly_sock_read(${arg(0)}, ${arg(1)}, &n_); if (e_) { ${raise}} n_; })`
+        `({ uint64_t n_ = 0; int e_ = fly_sock_read(FLY_W, ${arg(0)}, ${arg(1)}, &n_); if (e_) { ${raise}} n_; })`
       }
       "Socket_write" => {
         const raise = self.ioRaise("e_");
-        `({ int e_ = fly_sock_write(${arg(0)}, ${arg(1)}); if (e_) { ${raise}} (fly_unit)0; })`
+        `({ int e_ = fly_sock_write(FLY_W, ${arg(0)}, ${arg(1)}); if (e_) { ${raise}} (fly_unit)0; })`
       }
       // The simulated client's transcript doubles as the program's output.
       "Socket_writeStatus" => {
         const raise = self.ioRaise("e_");
-        `({ int e_ = fly_sock_status(${arg(0)}, ${arg(1)}, ${arg(2)}); if (e_) { ${raise}} (fly_unit)0; })`
+        `({ int e_ = fly_sock_status(FLY_W, ${arg(0)}, ${arg(1)}, ${arg(2)}); if (e_) { ${raise}} (fly_unit)0; })`
       }
       "Db_fetchProfile" => {
         const tc = self.ctype(rt, span);
@@ -2860,6 +2934,11 @@ impl Cgen {
 
 // What a C function made of code apart from its function is given: its environment's fields and
 // their initializers, and how it reaches the locals and captures it uses of the code around it.
+// A `defer`'s body made a C function: `defer_n`, given an environment of C type `env`, made by
+// `inits`; a machine, if it may suspend.
+type DeferFn = { n: usize; env: String; inits: String; machine: bool };
+impl Clone for DeferFn;
+
 type Apart = { fields: String; inits: Vec<String>; names: HashMap<usize, String>; captures: Vec<String>; arenas: HashMap<u32, String> };
 
 impl Cgen {
@@ -2917,31 +2996,46 @@ impl Cgen {
     cx
   }
 
-  // A `defer`'s body, made a C function of its own: the statement calling it here.
-  function deferCall(self: mut Self, flag: usize, body: readonly Block, span: Span): String uses Fail<Diagnostic> {
-    if (const #Some(c) = self.defers.get(`${self.fnName}:${flag}`.asStr())) { return c.clone(); }
+  // A `defer`'s body, made a C function of its own, given its environment: pointers to what it
+  // reads of the code around it. One that may suspend is a machine, its frame in a slot its
+  // caller holds.
+  function deferCall(self: mut Self, flag: usize, body: readonly Block, span: Span): DeferFn uses Fail<Diagnostic> {
+    if (const #Some(d) = self.defers.get(`${self.fnName}:${flag}`.asStr())) { return d.clone(); }
     self.aparts += 1;
     const n = self.aparts;
     const ap = self.apart([body.clone()], span);
     const envT = `denv_${n}`;
     const fields = if (ap.fields.len() == 0) { "  fly_unit empty;\n".toString() } else { ap.fields.clone() };
     self.typeDefs.push(`typedef struct {\n${fields}} ${envT};\n`);
-    const call = `{ ${envT} e_ = { ${ap.inits.join(", ")} }; defer_${n}(&e_); }`;
-    self.defers.insert(`${self.fnName}:${flag}`, call.clone());
+    let probe: HashSet<usize> = HashSet.new();
+    const machine = residents(body, (s) => self.isSite(s), mut probe);
+    const d: DeferFn = { n, env: envT.clone(), inits: ap.inits.join(", "), machine };
+    self.defers.insert(`${self.fnName}:${flag}`, d.clone());
     let cx = self.apartCtx(ap, #Prim(#Void), #Defer);
     cx.unwinds = !self.freestanding && hasCleanups(body);
     cleanupReads(body, mut cx.hoist);
     const saved = replace(mut self.cx, cx);
+    if (machine) {
+      self.becomeMachine(`defer_${n}_fr`, [body.clone()], span);
+      self.cx.retC = "fly_unit".toString();
+    }
     self.block(body, span);
     const code0 = replace(mut self.cx.out, String.new());
     self.cx.envType = `${envT}*`;
     const [start, code, land] = self.withLanding(code0, span);
     const leave = land;
     const more = replace(mut self.cx.decls, String.new());
+    if (machine) {
+      self.defineFrame();
+      const pop = "fly_frame_pop(fr); *slot_ = NULL; ";
+      self.protos.push(`static fly_unit defer_${n}(void** slot_, ${envT}* env);\n`);
+      self.apartCode.push(`static fly_unit defer_${n}(void** slot_, ${envT}* env) {\n  (void)env;\n${self.machineStart("slot_")}${more}${start}${self.machineDispatch()}${code}  goto ret;\nfail: ;\nret: ${leave}${pop}return (fly_unit)0;\n}\n`);
+    } else {
+      self.protos.push(`static void defer_${n}(${envT}* env);\n`);
+      self.apartCode.push(`static void defer_${n}(${envT}* env) {\n  (void)env;\n${more}${start}${code}  goto ret;\nfail: ;\nret: ${leave}return;\n}\n`);
+    }
     self.cx = saved;
-    self.protos.push(`static void defer_${n}(${envT}* env);\n`);
-    self.apartCode.push(`static void defer_${n}(${envT}* env) {\n  (void)env;\n${more}${start}${code}  goto ret;\nfail: ;\nret: ${leave}return;\n}\n`);
-    call
+    d
   }
 
   // `for` over a generator: the generator runs until it yields an item, which the body is run
@@ -3046,7 +3140,6 @@ impl Cgen {
     // The generator may have failed, or the code be unwinding.
     self.dynamicExit();
     self.line(`if (fly_unwinding) goto ${unwL}; if (FLY_FAILED) goto ${unwL};`);
-    if (self.cx.unwinds) { self.cx.pblocks.pop(); }
     self.cx.targets.pop();
     self.cx.scopes.pop();
     const c0 = self.cleanups(cleanups, self.cx.live.clone(), span);
@@ -3061,6 +3154,7 @@ impl Cgen {
       self.cx.liveAt.insert(parent.clone(), set);
       self.line(`end${k}: ;`);
     }
+    if (self.cx.unwinds) { self.cx.pblocks.pop(); }
     self.line("}");
   }
 
@@ -3543,6 +3637,7 @@ impl Cgen {
     if (machine) {
       params.push("void** slot_".toString());
       self.becomeMachine(`${f.name}_fr`, [f.body.clone()], f.span);
+      self.machines.insert(f.name.clone());
     }
     for (const [k, l] of f.params.iter().enumerate()) {
       const pc = self.ctype(f.locals[l].ty, f.span);
@@ -3744,7 +3839,18 @@ impl Cgen {
     out.push(self.glue.asStr());
     out.push(exports.asStr());
     const main = match (ent.main) { #Some(m) => self.lw.insts[m].name.clone(), #None => return out };
-    out.push(`static void fly_main_run(void) { ${lists}${main}(${args.join(", ")});${frees} }\n`);
+    // `main` is the first task's root machine, if it is one: called again to go on, with the
+    // lists it was lent first.
+    if (self.machines.has(main.asStr())) {
+      let statics = String.new();
+      for (const [k, a] of ent.args.iter().enumerate()) {
+        if (const #Strings | #Strs = a) { statics.push(`static fly_slice a${k};\n`); }
+      }
+      const s0 = if (args.len() > 0) { ", " } else { "" };
+      out.push(`${statics}static void fly_main_run(void** slot_) {\n  static bool started_;\n  if (!started_) { started_ = true; ${lists.replaceAll("fly_slice ", "")}}\n  ${main}(slot_${s0}${args.join(", ")});\n  if (fly_pending) return;\n ${frees}\n}\n`);
+    } else {
+      out.push(`static void fly_main_run(void** slot_) { (void)slot_; ${lists}${main}(${args.join(", ")});${frees} }\n`);
+    }
     // A program that starts tasks, or makes channels or locks, runs `main` as the first task.
     const run = if (ent.tasks) { "fly_tasks_run(fly_main_run)" } else { "fly_root(fly_main_run)" };
     out.push(`int main(int argc, char** argv) {\n  fly_argc = argc;\n  fly_argv = argv;\n  ${run};\n${uncaught}  return 0;\n}\n`);
@@ -3784,7 +3890,7 @@ export function newCgen(p: Prog): Cgen {
     lw: newLower(p), closuresDone: 0, types: HashMap.new(), defined: HashSet.new(), pending: Vec.new(), typeFwd: String.new(),
     typeDefs: String.new(), tags: HashMap.new(), drops: HashMap.new(), anyDrops: HashSet.new(), dropCode: String.new(), convs: HashMap.new(),
     helpers: HashMap.new(), consts: HashMap.new(), protos: String.new(), fnCode: Vec.new(), lowered: 0, apartCode: String.new(), aparts: 0,
-    tmp: 0, freestanding: false, callees: HashMap.new(), indirect: HashSet.new(), cx: newCtx(Vec.new(), #Prim(#Void), #Fn), module: 0, defers: HashMap.new(), fnName: String.new(),
+    tmp: 0, freestanding: false, callees: HashMap.new(), indirect: HashSet.new(), machines: HashSet.new(), cx: newCtx(Vec.new(), #Prim(#Void), #Fn), module: 0, defers: HashMap.new(), fnName: String.new(),
     argPlaces: Vec.new(), glue: String.new(),
   }
 }
@@ -3793,4 +3899,10 @@ export function newCgen(p: Prog): Cgen {
 export function cProgram(p: Prog, entry: usize, runtime: str, freestanding: bool): String uses Fail<#Failed(String)> {
   let c = newCgen(p);
   c.program(entry, runtime, freestanding)
+}
+
+// A routine that is a scheduling point first, which a machine may stop at: `expr`, of C type `rc`,
+// is done as the code goes on from the point.
+function pointFirst(rc: str, expr: String): String {
+  `({ fly_point(FLY_W); fly_pending ? (${rc}){ 0 } : ${expr}; })`
 }

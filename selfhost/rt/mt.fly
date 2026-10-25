@@ -5,17 +5,17 @@
 // parking a task and waking one (runtime.c's monitors). Every function here runs with the lock of
 // what it works on held whenever it reads or changes what is behind the pointer it was given.
 
-// The C core: a monitor's lock; waiting under it, which gives the lock up while the task waits and
-// says whether it was cancelled meanwhile, the lock then not held; waking the first waiter, or
-// every one, the lock held; memory; spinning a moment; and a message's destructor run.
+// The C core: a monitor's lock; waking the first task that waits under it, or every one, the lock
+// held; memory; and spinning a moment. Waiting is the C core's own, in the routine that waits,
+// which stops the task there and is called again as it is woken.
 extern "C" function fly_mon_lock(m: u8*): void;
 extern "C" function fly_mon_unlock(m: u8*): void;
-extern "C" function fly_mon_wait(m: u8*, cancellable: bool): bool;
 extern "C" function fly_mon_wake_one(m: u8*): void;
 extern "C" function fly_mon_wake_all(m: u8*): void;
 extern "C" function fly_core_alloc(size: usize): u8*;
 extern "C" function fly_core_free(p: u8*): void;
 extern "C" function fly_core_relax(): void;
+extern "C" function fly_core_yield(): void;
 
 // A channel: the messages not yet received, one after another, `size` bytes each, from byte
 // `head`; its senders; whether every sender is gone, and whether its receiver is.
@@ -57,13 +57,11 @@ export extern "C" function fly_rt_mt_send(m: u8*, state: u8*, v: u8*, size: usiz
   }
 }
 
-// The next message, at `out`: 1; 0 once the channel is closed and drained, or the task is
-// cancelled while it waits, from which it unwinds.
-export extern "C" function fly_rt_mt_recv(m: u8*, state: u8*, out: u8*): i32 {
+// The next message, at `out`, its monitor's lock held: 1; 0 once the channel is closed and
+// drained; 2 if there is none yet, for which the receiver waits under the monitor.
+export extern "C" function fly_rt_mt_take(state: u8*, out: u8*): i32 {
   unsafe {
-    fly_mon_lock(m);
-    while (true) {
-      const r = state.cast<Chan>().with((c) => {
+    state.cast<Chan>().with((c) => {
         if (c.head < c.items.len()) {
           for (const i of 0..c.size) { out.add(i).write(c.items[c.head + i]); }
           c.head += c.size;
@@ -79,15 +77,7 @@ export extern "C" function fly_rt_mt_recv(m: u8*, state: u8*, out: u8*): i32 {
           return 1;
         }
         if (c.closed) { 0 } else { 2 }
-      });
-      if (r != 2) {
-        fly_mon_unlock(m);
-        return r;
-      }
-      if (fly_mon_wait(m, true)) { return 0; }
-      fly_mon_lock(m);
-    }
-    0
+    })
   }
 }
 
@@ -145,22 +135,15 @@ export extern "C" function fly_rt_mt_sender_clone(m: u8*, state: u8*): void {
 // ---- `Mutex` ----
 
 // Takes a `Mutex`, whose monitor is `m` and whose flag `held` says whether it is taken. Its body
-// performs nothing, so it is held briefly and never across a scheduling point: a task that finds
-// it held spins a little, then waits under its monitor, giving its core to others, and is woken in
-// turn.
+// performs nothing, so it is held briefly, by a task running on another core, never across a
+// scheduling point: a task that finds it held spins until it is free, giving its thread up between
+// tries once it has spun a while, should the holder's thread not be running.
 export extern "C" function fly_rt_mt_lock(m: u8*, held: i32*): void {
   unsafe {
-    for (const _ of 0..64) {
-      if (held.loadAcquire() == 0 && tryLock(m, held)) { return; }
-      fly_core_relax();
+    let tries = 0;
+    while (!(held.loadAcquire() == 0 && tryLock(m, held))) {
+      if (tries < 64) { tries += 1; fly_core_relax(); } else { fly_core_yield(); }
     }
-    fly_mon_lock(m);
-    while (held.read() != 0) {
-      fly_mon_wait(m, false);
-      fly_mon_lock(m);
-    }
-    held.storeRelease(1);
-    fly_mon_unlock(m);
   }
 }
 
