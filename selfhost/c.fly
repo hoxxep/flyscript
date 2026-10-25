@@ -884,7 +884,8 @@ impl Cgen {
         // Among the types, as a machine's frame may hold one.
         self.typeDefs.push(`typedef struct { fly_fn f; ${fields} } ${n}_t;\n`);
         self.protos.push(`static void ${n}(void* a);\n`);
-        self.dropCode.push(`static void ${n}(void* a) { ${n}_t* x = a; ${call} }\n`);
+        // Inlined where it is called directly, as `fly_locked` calls it through LLVM.
+        self.dropCode.push(`__attribute__((always_inline)) static inline void ${n}(void* a) { ${n}_t* x = a; ${call} }\n`);
         n
       }
     }

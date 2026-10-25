@@ -675,6 +675,12 @@ static inline void fly_lock_guard_end(fly_lock_guard* g) {
   fly_unlock(g->m);
   if (g->f->drop) g->f->drop(g->f->env);
 }
+#if defined(FLY_LANDING_PADS) && !defined(__wasm__)
+// Through LLVM natively, the module's own (llvm.fly), its landing pad of Flyscript's personality, so
+// that it inlines into Flyscript's code and the body's call there; `fly_lock_release` ends it.
+void fly_locked(void (*body)(void* a), void* a, const void* m, fly_fn* f);
+void fly_lock_release(const void* m, fly_fn* f, bool panicked);
+#else
 #if defined(FLY_C_UNWIND) && !defined(FLY_LANDING_PADS)
 __attribute__((noinline))
 #else
@@ -692,6 +698,7 @@ static void fly_locked(void (*body)(void* a), void* a, const void* m, fly_fn* f)
   g.done = true;
 #endif
 }
+#endif
 // A panic unwound a scope's body: its tasks are cancelled and waited for, and the panic goes on.
 void fly_scope_panicked(fly_wait* w, int sid);
 // `fetchAdd` of an `Atomic<i64>`: what was there; a sum that overflows panics and changes nothing.

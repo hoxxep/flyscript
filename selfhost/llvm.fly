@@ -646,7 +646,7 @@ impl Lgen {
     const name = `flyg_${self.glue.len()}`;
     let ps: Vec<String> = ["void* r".toString()];
     for (const i of 0..n) { ps.push(`void* a${i}`); }
-    self.glueCode.push(`void ${name}(${ps.join(", ")}) { (void)r; ${body} }\n`);
+    self.glueCode.push(`__attribute__((always_inline)) void ${name}(${ps.join(", ")}) { (void)r; ${body} }\n`);
     let lps: Vec<String> = ["ptr".toString()];
     for (const _ of 0..n) { lps.push("ptr".toString()); }
     self.declare(name.asStr(), `declare void @${name}(${lps.join(", ")})`);
@@ -3921,7 +3921,18 @@ impl Lgen {
     // in WebAssembly, what else is thrown — the host's exception by which the program ends — passes.
     if (self.funclets) {
       ll.push("define zeroext i1 @fly_try(ptr %f, ptr %a) #0 personality ptr @__gxx_wasm_personality_v0 {\nentry:\n  %mk = alloca [2 x ptr]\n  call void @fly_frames_keep(ptr %mk)\n  invoke void %f(ptr %a) to label %ok unwind label %pad\nok:\n  %fl = call zeroext i1 @fly_try_flagged(ptr %mk)\n  ret i1 %fl\npad:\n  %cs = catchswitch within none [label %catch] unwind to caller\ncatch:\n  %cp = catchpad within %cs [ptr null]\n  %p = call zeroext i1 @fly_panicking() [ \"funclet\"(token %cp) ]\n  br i1 %p, label %take, label %pass\npass:\n  call void @llvm.wasm.rethrow() [ \"funclet\"(token %cp) ]\n  unreachable\ntake:\n  catchret from %cp to label %caught\ncaught:\n  call void @fly_frames_back(ptr %mk)\n  ret i1 true\n}\n\n");
-    } else if (self.unwinds) {
+    }
+    // A `Mutex`'s body run under its lock (runtime.h's `fly_locked`): a panic passing it poisons the
+    // state and gives the lock back, by a landing pad of Flyscript's own, so that it inlines.
+    if (!self.funclets) {
+      if (self.unwinds) {
+        ll.push("define void @fly_locked(ptr %body, ptr %a, ptr %m, ptr %f) #0 alwaysinline personality ptr @fly_personality {\nentry:\n  invoke void %body(ptr %a) to label %ok unwind label %pad\nok:\n  call void @fly_lock_release(ptr %m, ptr %f, i1 false)\n  ret void\npad:\n  %lp = landingpad { ptr, i32 } cleanup\n  call void @fly_lock_release(ptr %m, ptr %f, i1 true)\n  resume { ptr, i32 } %lp\n}\n\n");
+      } else {
+        ll.push("define void @fly_locked(ptr %body, ptr %a, ptr %m, ptr %f) #0 alwaysinline {\nentry:\n  call void %body(ptr %a)\n  call void @fly_lock_release(ptr %m, ptr %f, i1 false)\n  ret void\n}\n\n");
+      }
+      ll.push("declare void @fly_lock_release(ptr, ptr, i1 zeroext)\n");
+    }
+    if (self.unwinds && !self.funclets) {
       ll.push("define zeroext i1 @fly_try(ptr %f, ptr %a) #0 personality ptr @fly_personality {\nentry:\n  %mk = alloca [2 x ptr]\n  call void @fly_frames_keep(ptr %mk)\n  invoke void %f(ptr %a) to label %ok unwind label %pad\nok:\n  %fl = call zeroext i1 @fly_try_flagged(ptr %mk)\n  ret i1 %fl\npad:\n  %lp = landingpad { ptr, i32 } catch ptr @fly_panic_type\n  %e = extractvalue { ptr, i32 } %lp, 0\n  call void @fly_caught(ptr %e)\n  call void @fly_frames_back(ptr %mk)\n  ret i1 true\n}\n\n");
     }
     ll.push("!0 = !{!\"branch_weights\", i32 1, i32 2000}\n");

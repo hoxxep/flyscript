@@ -19062,7 +19062,7 @@ function program_126($301, $302, $303, $304) {
       const v130_on = { v: undefined };
       const v203_sizes = { v: undefined };
       const v205_names = { v: undefined };
-      let v6_t, v7_t, v8_ent, v9_t, v10_t, v11_t, v12_uncaught, v13_next, v63_t, v65_t, v66_t, v67_t, v68_t, v69_t, v70_t, v71_t, v72_t, v73_t, v74_t, v75_t, v76_t, v77_t, v78_t, v79_t, v80_t, v81_t, v82_t, v83_t, v84_t, v85_t, v86_t, v87_cfile0, v88_t, v90_t, v91_t, v92_t, v93_t, v94_t, v95_t, v96_t, v97_t, v98_t, v119_t, v120_t, v121_t, v122_t, v123_t, v124_t, v125_t, v126_t, v127_t, v129_t, v202_t, v204_t, v247_t, v248_t, v249_t, v250_t, v251_t, v252_t, v253_t, v254_t, v255_t, v256_t, v257_t, v258_t, v259_t, v260_t, v261_t, v262_t, v263_t, v264_t, v265_t, v266_t, v267_t, v268_cfile, v273_t, v274_t, v275_t, v276_t, v279_t, v280_t, v281_t, v282_t, v314_t;
+      let v6_t, v7_t, v8_ent, v9_t, v10_t, v11_t, v12_uncaught, v13_next, v63_t, v65_t, v66_t, v67_t, v68_t, v69_t, v70_t, v71_t, v72_t, v73_t, v74_t, v75_t, v76_t, v77_t, v78_t, v79_t, v80_t, v81_t, v82_t, v83_t, v84_t, v85_t, v86_t, v87_cfile0, v88_t, v90_t, v91_t, v92_t, v93_t, v94_t, v95_t, v96_t, v97_t, v98_t, v119_t, v120_t, v121_t, v122_t, v123_t, v124_t, v125_t, v126_t, v127_t, v129_t, v202_t, v204_t, v247_t, v248_t, v249_t, v250_t, v251_t, v252_t, v253_t, v254_t, v255_t, v256_t, v257_t, v258_t, v259_t, v260_t, v261_t, v262_t, v263_t, v264_t, v265_t, v266_t, v267_t, v268_cfile, v271_t, v278_t, v282_t, v283_t, v284_t, v285_t, v288_t, v289_t, v290_t, v291_t, v323_t;
       v6_t = new $rt.FieldRef(v0_self.v.c, "lw");
       v7_t = entry_131(v6_t, v1_entry, v3_freestanding);
       v8_ent = v7_t;
@@ -19649,80 +19649,109 @@ function program_126($301, $302, $303, $304) {
           $b.String_push(v269_t, "define zeroext i1 @fly_try(ptr %f, ptr %a) #0 personality ptr @__gxx_wasm_personality_v0 {\nentry:\n  %mk = alloca [2 x ptr]\n  call void @fly_frames_keep(ptr %mk)\n  invoke void %f(ptr %a) to label %ok unwind label %pad\nok:\n  %fl = call zeroext i1 @fly_try_flagged(ptr %mk)\n  ret i1 %fl\npad:\n  %cs = catchswitch within none [label %catch] unwind to caller\ncatch:\n  %cp = catchpad within %cs [ptr null]\n  %p = call zeroext i1 @fly_panicking() [ \"funclet\"(token %cp) ]\n  br i1 %p, label %take, label %pass\npass:\n  call void @llvm.wasm.rethrow() [ \"funclet\"(token %cp) ]\n  unreachable\ntake:\n  catchret from %cp to label %caught\ncaught:\n  call void @fly_frames_back(ptr %mk)\n  ret i1 true\n}\n\n");
         }
       }
-      else
+      v271_t = (!v0_self.v.funclets);
+      if (v271_t)
       {
-        if (v0_self.v.unwinds)
         {
+          let v276_t, v277_t;
+          if (v0_self.v.unwinds)
           {
-            let v271_t, v272_t;
-            v271_t = v89_ll;
-            $b.String_push(v271_t, "define zeroext i1 @fly_try(ptr %f, ptr %a) #0 personality ptr @fly_personality {\nentry:\n  %mk = alloca [2 x ptr]\n  call void @fly_frames_keep(ptr %mk)\n  invoke void %f(ptr %a) to label %ok unwind label %pad\nok:\n  %fl = call zeroext i1 @fly_try_flagged(ptr %mk)\n  ret i1 %fl\npad:\n  %lp = landingpad { ptr, i32 } catch ptr @fly_panic_type\n  %e = extractvalue { ptr, i32 } %lp, 0\n  call void @fly_caught(ptr %e)\n  call void @fly_frames_back(ptr %mk)\n  ret i1 true\n}\n\n");
+            {
+              let v272_t, v273_t;
+              v272_t = v89_ll;
+              $b.String_push(v272_t, "define void @fly_locked(ptr %body, ptr %a, ptr %m, ptr %f) #0 alwaysinline personality ptr @fly_personality {\nentry:\n  invoke void %body(ptr %a) to label %ok unwind label %pad\nok:\n  call void @fly_lock_release(ptr %m, ptr %f, i1 false)\n  ret void\npad:\n  %lp = landingpad { ptr, i32 } cleanup\n  call void @fly_lock_release(ptr %m, ptr %f, i1 true)\n  resume { ptr, i32 } %lp\n}\n\n");
+            }
           }
+          else
+          {
+            {
+              let v274_t, v275_t;
+              v274_t = v89_ll;
+              $b.String_push(v274_t, "define void @fly_locked(ptr %body, ptr %a, ptr %m, ptr %f) #0 alwaysinline {\nentry:\n  call void %body(ptr %a)\n  call void @fly_lock_release(ptr %m, ptr %f, i1 false)\n  ret void\n}\n\n");
+            }
+          }
+          v276_t = v89_ll;
+          $b.String_push(v276_t, "declare void @fly_lock_release(ptr, ptr, i1 zeroext)\n");
         }
       }
-      v273_t = v89_ll;
-      $b.String_push(v273_t, "!0 = !{!\"branch_weights\", i32 1, i32 2000}\n");
-      v275_t = v89_ll;
+      v278_t = v0_self.v.unwinds;
+      if (v278_t)
+      {
+        let v279_t;
+        v279_t = (!v0_self.v.funclets);
+        v278_t = v279_t;
+      }
+      if (v278_t)
+      {
+        {
+          let v280_t, v281_t;
+          v280_t = v89_ll;
+          $b.String_push(v280_t, "define zeroext i1 @fly_try(ptr %f, ptr %a) #0 personality ptr @fly_personality {\nentry:\n  %mk = alloca [2 x ptr]\n  call void @fly_frames_keep(ptr %mk)\n  invoke void %f(ptr %a) to label %ok unwind label %pad\nok:\n  %fl = call zeroext i1 @fly_try_flagged(ptr %mk)\n  ret i1 %fl\npad:\n  %lp = landingpad { ptr, i32 } catch ptr @fly_panic_type\n  %e = extractvalue { ptr, i32 } %lp, 0\n  call void @fly_caught(ptr %e)\n  call void @fly_frames_back(ptr %mk)\n  ret i1 true\n}\n\n");
+        }
+      }
+      v282_t = v89_ll;
+      $b.String_push(v282_t, "!0 = !{!\"branch_weights\", i32 1, i32 2000}\n");
+      v284_t = v89_ll;
       if (v0_self.v.unwinds)
       {
-        let v277_t;
+        let v286_t;
         {
-          v277_t = "attributes #0 = { uwtable }\n";
+          v286_t = "attributes #0 = { uwtable }\n";
         }
-        v276_t = v277_t;
+        v285_t = v286_t;
       }
       else
       {
-        let v278_t;
+        let v287_t;
         {
-          v278_t = "attributes #0 = { nounwind }\n";
+          v287_t = "attributes #0 = { nounwind }\n";
         }
-        v276_t = v278_t;
+        v285_t = v287_t;
       }
-      $b.String_push(v275_t, v276_t);
-      v280_t = v0_self.v.cu;
-      v281_t = $b.String_len(v280_t);
-      v282_t = (v281_t > 0);
-      if (v282_t)
+      $b.String_push(v284_t, v285_t);
+      v289_t = v0_self.v.cu;
+      v290_t = $b.String_len(v289_t);
+      v291_t = (v290_t > 0);
+      if (v291_t)
       {
         {
-          const v288_t = { v: undefined };
-          let v283_t, v284_a, v285_t, v286_b, v287_t, v289_t, v290_t, v291_t, v292_t, v293_t, v294_t, v295_t, v296_t, v297_t, v298_t, v299_t, v300_t, v301_t, v302_t, v303_t, v304_t, v305_t, v306_t, v307_t, v308_t, v309_t, v310_t, v311_t, v312_t, v313_t;
-          v283_t = node_311(v0_self, "!{i32 7, !\"Dwarf Version\", i32 5}");
-          v284_a = v283_t;
-          v285_t = node_311(v0_self, "!{i32 2, !\"Debug Info Version\", i32 3}");
-          v286_b = v285_t;
-          v287_t = v89_ll;
-          v289_t = $b.String_new();
-          v288_t.v = v289_t;
-          v290_t = v288_t;
-          $b.String_push(v290_t, "!llvm.dbg.cu = !{");
-          v292_t = v0_self.v.cu;
-          v293_t = v288_t;
-          $b.String_push(v293_t, v292_t);
-          v295_t = v288_t;
-          $b.String_push(v295_t, "}\n!llvm.module.flags = !{");
-          v297_t = v284_a;
-          v298_t = v288_t;
-          $b.String_push(v298_t, v297_t);
-          v300_t = v288_t;
-          $b.String_push(v300_t, ", ");
-          v302_t = v286_b;
-          v303_t = v288_t;
-          $b.String_push(v303_t, v302_t);
-          v305_t = v288_t;
-          $b.String_push(v305_t, "}\n");
-          v307_t = v288_t.v;
-          v308_t = v307_t;
-          $b.String_push(v287_t, v308_t);
-          v310_t = v89_ll;
-          v311_t = v0_self.v.meta;
-          v312_t = $b.String_asStr(v311_t);
-          $b.String_push(v310_t, v312_t);
+          const v297_t = { v: undefined };
+          let v292_t, v293_a, v294_t, v295_b, v296_t, v298_t, v299_t, v300_t, v301_t, v302_t, v303_t, v304_t, v305_t, v306_t, v307_t, v308_t, v309_t, v310_t, v311_t, v312_t, v313_t, v314_t, v315_t, v316_t, v317_t, v318_t, v319_t, v320_t, v321_t, v322_t;
+          v292_t = node_311(v0_self, "!{i32 7, !\"Dwarf Version\", i32 5}");
+          v293_a = v292_t;
+          v294_t = node_311(v0_self, "!{i32 2, !\"Debug Info Version\", i32 3}");
+          v295_b = v294_t;
+          v296_t = v89_ll;
+          v298_t = $b.String_new();
+          v297_t.v = v298_t;
+          v299_t = v297_t;
+          $b.String_push(v299_t, "!llvm.dbg.cu = !{");
+          v301_t = v0_self.v.cu;
+          v302_t = v297_t;
+          $b.String_push(v302_t, v301_t);
+          v304_t = v297_t;
+          $b.String_push(v304_t, "}\n!llvm.module.flags = !{");
+          v306_t = v293_a;
+          v307_t = v297_t;
+          $b.String_push(v307_t, v306_t);
+          v309_t = v297_t;
+          $b.String_push(v309_t, ", ");
+          v311_t = v295_b;
+          v312_t = v297_t;
+          $b.String_push(v312_t, v311_t);
+          v314_t = v297_t;
+          $b.String_push(v314_t, "}\n");
+          v316_t = v297_t.v;
+          v317_t = v316_t;
+          $b.String_push(v296_t, v317_t);
+          v319_t = v89_ll;
+          v320_t = v0_self.v.meta;
+          v321_t = $b.String_asStr(v320_t);
+          $b.String_push(v319_t, v321_t);
         }
       }
-      v314_t = [v89_ll.v, v268_cfile];
-      v5_t = v314_t;
+      v323_t = [v89_ll.v, v268_cfile];
+      v5_t = v323_t;
     }
     v4_ret = v5_t;
   }
@@ -232260,7 +232289,7 @@ function glueFn_1626($3883, $3884, $3885) {
       v50_t = $b.String_new();
       v49_t.v = v50_t;
       v51_t = v49_t;
-      $b.String_push(v51_t, "void ");
+      $b.String_push(v51_t, "__attribute__((always_inline)) void ");
       v53_t = v30_name;
       v54_t = v49_t;
       $b.String_push(v54_t, v53_t);
@@ -266867,7 +266896,7 @@ function catchBody_1830($4484, $4485, $4486, $4487) {
             v72_t = $b.String_new();
             v71_t.v = v72_t;
             v73_t = v71_t;
-            $b.String_push(v73_t, "static void ");
+            $b.String_push(v73_t, "__attribute__((always_inline)) static inline void ");
             v75_t = v33_n;
             v76_t = v71_t;
             $b.String_push(v76_t, v75_t);
