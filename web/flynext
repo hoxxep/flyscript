@@ -2,9 +2,12 @@
 # Builds and runs an app made with the web framework:
 #
 #   web/flynext build [app] [out]   the server, natively, and the pages' program, as WebAssembly
-#   web/flynext start [out] [port]  serves a build
-#   web/flynext dev [app] [port]    builds, serves, and builds again whenever the app changes;
-#                                   pages open in a browser reload themselves
+#   web/flynext start [out] [port] [--upstream=URL]  serves a build
+#   web/flynext dev [app] [port] [--upstream=URL]    builds, serves, and builds again whenever the
+#                                   app changes; pages open in a browser reload themselves
+#
+# With `--upstream=http://host:port`, what no route of the app answers is forwarded to the app at
+# that address, which the app is replacing a route at a time, and its answer relayed.
 #
 # `app` is the app's directory (by default `app`), with its pages in `routes/`, each `.fly` or
 # `.flyx`, the effects pages ask the server for in `api.fly`, how the server answers them in
@@ -29,7 +32,7 @@ flyc() {
 gen() {
   bin="$root/target/flynext/flynext-gen"
   mkdir -p "$root/target/flynext"
-  if [ ! -x "$bin" ] || [ -n "$(find "$web/flynext.fly" "$web/flyx.fly" "$root/selfhost/parse.fly" "$root/selfhost/ast.fly" "$root/selfhost/lex.fly" "$root/selfhost/diag.fly" "$compiler" -newer "$bin" 2>/dev/null)" ]; then
+  if [ ! -x "$bin" ] || [ -n "$(find "$web/flynext.fly" "$web/flyx.fly" "$web/typescript.fly" "$root/selfhost/parse.fly" "$root/selfhost/ast.fly" "$root/selfhost/lex.fly" "$root/selfhost/diag.fly" "$compiler" -newer "$bin" 2>/dev/null)" ]; then
     flyc "$web/flynext.fly" "$bin.c" "$root"
     cc -std=gnu11 -O2 -w $(sh "$root/selfhost/ccflags.sh") -o "$bin" "$bin.c" -lm
     rm -f "$bin.c"
@@ -54,11 +57,17 @@ build() {
   # The pages' program: a core, and each page's own code a module of its own, loaded as it is shown.
   rm -rf "$out/_fly/routes"
   sh "$root/selfhost/wasm.sh" "$compiler" "$app/.flynext/client.fly" "$out/_fly/app.wasm" --split "$out/_fly/routes" flyRoute || return 1
-  { cat "$web/flynext.js"; printf 'const ROUTES = { names: %s, modules: %s };\n' "$(cat "$app/.flynext/routes.json")" "$(cat "$out/_fly/routes/routes.json")"; } > "$out/_fly/flynext.js"
+  { cat "$web/flynext.js"; printf 'const ROUTES = { names: %s, modules: %s, patterns: %s };\n' "$(cat "$app/.flynext/routes.json")" "$(cat "$out/_fly/routes/routes.json")" "$(cat "$app/.flynext/patterns.json")"; } > "$out/_fly/flynext.js"
   # The server names each page's module in the page, for the browser to fetch beside the program.
   node -e 'const [names, mods] = process.argv.slice(1).map((f) => JSON.parse(require("fs").readFileSync(f, "utf8"))); for (const [n, k] of Object.entries(names)) if (mods[k]) console.log(`${n} ${mods[k].file}`);' \
     "$app/.flynext/routes.json" "$out/_fly/routes/routes.json" > "$out/_fly/routes/modules.txt"
   rm -f "$out/_fly/routes/routes.json"
+  # Each island, a program of its own, which a page of another app shows (`mountIsland`).
+  rm -rf "$out/_fly/islands"
+  mkdir -p "$out/_fly/islands"
+  while read -r n; do
+    if [ -n "$n" ]; then sh "$root/selfhost/wasm.sh" "$compiler" "$app/.flynext/islands/$n.fly" "$out/_fly/islands/$n.wasm" --imports || return 1; fi
+  done < "$app/.flynext/islands.txt"
   if [ -d "$app/public" ]; then cp -R "$app/public/." "$out/"; fi
 }
 
@@ -70,11 +79,14 @@ case "$cmd" in
     ;;
   start)
     out=${2:-app/.flynext/build}
-    exec "$out/server" "${3:-3000}" "$out"
+    port=${3:-3000}
+    shift $(( $# < 3 ? $# : 3 ))
+    exec "$out/server" "$port" "$out" "$@"
     ;;
   dev)
     app=${2:-app}
     port=${3:-3000}
+    shift $(( $# < 3 ? $# : 3 ))
     out="$app/.flynext/dev"
     stamp="$app/.flynext/stamp"
     pid=""
@@ -85,7 +97,7 @@ case "$cmd" in
       touch "$stamp"
       if build "$app" "$out" "$(date +%s%N)"; then
         stop
-        "$out/server" "$port" "$out" &
+        "$out/server" "$port" "$out" "$@" &
         pid=$!
         echo "serving http://localhost:$port"
       else

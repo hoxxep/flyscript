@@ -826,6 +826,69 @@ fn threaded_programs_run_as_expected() {
     }
 }
 
+/// A Next.js app replaced a route at a time (examples/hybrid): the FlyNext server in front of it
+/// answers its own routes and forwards the rest, and in a browser a Next.js page calls the FlyNext
+/// server through the `api.ts` its build writes, shows one of its islands, and links to one of its
+/// pages, which shows a React component, both apps reading the session cookie the Next.js app sets.
+/// Needs Playwright (FLY_NODE_PATH) and pnpm, which installs the Next.js app's packages.
+#[test]
+fn strangles_a_nextjs_app() {
+    use std::io::{BufRead, BufReader, Read, Write};
+    let has_pnpm = Command::new("pnpm").arg("--version").output().is_ok_and(|o| o.status.success());
+    let Ok(node_path) = std::env::var("FLY_NODE_PATH") else { return };
+    if !has_wasm() || !has_cc() || !has_pnpm {
+        return;
+    }
+    // A copy of the example, so that its build and the packages it installs stay out of the tree.
+    let dir = out().join("hybrid");
+    let _ = std::fs::remove_dir_all(&dir);
+    let copied = Command::new("rsync")
+        .args(["-a", "--exclude", "node_modules", "--exclude", ".next", "--exclude", "fly", "--exclude", ".flynext", "--exclude", "next-env.d.ts"])
+        .arg(format!("{}/", root().join("examples/hybrid").display()))
+        .arg(&dir)
+        .output()
+        .unwrap();
+    assert!(copied.status.success(), "{}", String::from_utf8_lossy(&copied.stderr));
+    let installed = Command::new("pnpm").args(["install", "--prefer-offline", "--frozen-lockfile"]).current_dir(dir.join("next")).output().unwrap();
+    assert!(installed.status.success(), "{}{}", String::from_utf8_lossy(&installed.stdout), String::from_utf8_lossy(&installed.stderr));
+    let build = dir.join("build");
+    let built = Command::new("sh").arg(dir.join("build.sh")).arg(&build).env("FLY_ROOT", root()).output().unwrap();
+    assert!(built.status.success(), "{}{}", String::from_utf8_lossy(&built.stdout), String::from_utf8_lossy(&built.stderr));
+    let free = || std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let up = free();
+    let mut next = Command::new("node")
+        .arg("node_modules/next/dist/bin/next")
+        .args(["start", "-H", "127.0.0.1", "-p", &up.to_string()])
+        .current_dir(dir.join("next"))
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut server = Command::new(build.join("server")).arg("0").arg(&build).arg(format!("--upstream=http://127.0.0.1:{up}")).env_remove("FLY_WORLD").stdout(std::process::Stdio::piped()).spawn().unwrap();
+    let mut first = String::new();
+    BufReader::new(server.stdout.as_mut().unwrap()).read_line(&mut first).unwrap();
+    let port: u16 = first.trim().strip_prefix("listening on ").and_then(|p| p.parse().ok()).unwrap_or_else(|| panic!("the server said {first:?}"));
+    // The Next.js app answers once it has started.
+    let answers = || {
+        let Ok(mut s) = std::net::TcpStream::connect(("127.0.0.1", up)) else { return false };
+        let _ = s.write_all(b"GET / HTTP/1.1\r\nHost: here\r\nConnection: close\r\n\r\n");
+        let mut all = Vec::new();
+        let _ = s.read_to_end(&mut all);
+        all.starts_with(b"HTTP/1.1 200")
+    };
+    let started = std::time::Instant::now();
+    while !answers() {
+        assert!(started.elapsed() < std::time::Duration::from_secs(60), "the Next.js app did not start");
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    let r = Command::new("node").arg(dir.join("e2e.js")).arg(port.to_string()).env("NODE_PATH", node_path).output().unwrap();
+    server.kill().unwrap();
+    server.wait().unwrap();
+    next.kill().unwrap();
+    next.wait().unwrap();
+    assert!(r.status.success(), "{}{}", String::from_utf8_lossy(&r.stdout), String::from_utf8_lossy(&r.stderr));
+}
+
 /// `.flyx` (web/flyx.fly) written as `.fly` by `flyxc`, in `dir`, where its module would be as
 /// `.fly`; then compiled by `out`'s name, as JavaScript or C, through `FLY_OVERLAY`, which says
 /// where the written module is. What the compiler says, if it fails, or else nothing.
@@ -969,13 +1032,14 @@ fn todo_site_serves_and_runs() {
     let dir = out().join("todo");
     let built = Command::new("sh").arg(root().join("web/flynext")).arg("build").arg(root().join("examples/todo/app")).arg(&dir).output().unwrap();
     assert!(built.status.success(), "{}{}", String::from_utf8_lossy(&built.stdout), String::from_utf8_lossy(&built.stderr));
-    let start = || {
-        let mut server = Command::new(dir.join("server")).arg("0").arg(&dir).env_remove("FLY_WORLD").stdout(std::process::Stdio::piped()).spawn().unwrap();
+    let start_with = |args: &[String]| {
+        let mut server = Command::new(dir.join("server")).arg("0").arg(&dir).args(args).env_remove("FLY_WORLD").stdout(std::process::Stdio::piped()).spawn().unwrap();
         let mut first = String::new();
         BufReader::new(server.stdout.as_mut().unwrap()).read_line(&mut first).unwrap();
         let port: u16 = first.trim().strip_prefix("listening on ").and_then(|p| p.parse().ok()).unwrap_or_else(|| panic!("the server said {first:?}"));
         (server, port)
     };
+    let start = || start_with(&[]);
     let ask = |port: u16, request: String| {
         let mut s = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
         s.write_all(request.as_bytes()).unwrap();
@@ -1056,6 +1120,82 @@ fn todo_site_serves_and_runs() {
     let wasm = get(port, "/_fly/app.wasm");
     let at = wasm.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
     assert!(wasm.starts_with(b"HTTP/1.1 200") && wasm[at..].starts_with(b"\0asm"), "the page's program is not served as WebAssembly");
+    server.kill().unwrap();
+    server.wait().unwrap();
+    // In front of an app it is replacing (`--upstream`), what no route answers is forwarded to that
+    // app and its answer relayed: the request's headers, cookies and body, byte for byte, sent in
+    // chunks or not; the answer as it comes, chunk by chunk, or until the app closes, with its
+    // cookies and the site's; and where the app redirects, if it names itself, here.
+    let mut upstream = Command::new("node")
+        .arg("-e")
+        .arg(r#"require("node:http").createServer((q, r) => {
+  const body = [];
+  q.on("data", (c) => body.push(c));
+  q.on("end", () => {
+    const b = Buffer.concat(body);
+    if (q.url === "/chunky") {
+      r.writeHead(200, { "Content-Type": "text/plain", "Set-Cookie": ["a=1; Path=/", "b=2; Path=/"] });
+      r.write("one,");
+      setTimeout(() => { r.write("two,"); setTimeout(() => r.end("three"), 30); }, 30);
+    } else if (q.url === "/raw") {
+      r.socket.end("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\nuntil it closes");
+    } else if (q.url === "/away") {
+      r.writeHead(307, { Location: `http://localhost:${q.socket.localPort}/there?x=1` });
+      r.end();
+    } else {
+      r.writeHead(200, { "Content-Type": "application/json" });
+      r.end(JSON.stringify({ method: q.method, url: q.url, host: q.headers.host, forwarded: q.headers["x-forwarded-host"], cookie: q.headers.cookie ?? null, length: b.length, sum: b.reduce((a, x) => a + x, 0) }));
+    }
+  });
+}).listen(0, "127.0.0.1", function () { console.log(`port ${this.address().port}`); });"#)
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut said = String::new();
+    BufReader::new(upstream.stdout.as_mut().unwrap()).read_line(&mut said).unwrap();
+    let up: u16 = said.trim().strip_prefix("port ").and_then(|p| p.parse().ok()).unwrap_or_else(|| panic!("the upstream said {said:?}"));
+    let (mut server, port) = start_with(&[format!("--upstream=http://127.0.0.1:{up}")]);
+    let echoed = String::from_utf8(ask(port, "GET /elsewhere?x=1 HTTP/1.1\r\nHost: front\r\nCookie: session=s1\r\nConnection: close\r\n\r\n".to_string())).unwrap();
+    assert!(echoed.starts_with("HTTP/1.1 200") && echoed.contains(r#""url":"/elsewhere?x=1","host":"front","forwarded":"front","cookie":"session=s1","length":0"#), "{echoed}");
+    let chunky = String::from_utf8(get(port, "/chunky")).unwrap();
+    assert!(chunky.contains("Transfer-Encoding: chunked\r\n") && chunky.contains("Set-Cookie: a=1; Path=/\r\n") && chunky.contains("Set-Cookie: b=2; Path=/\r\n") && chunky.contains("4\r\none,\r\n4\r\ntwo,\r\n5\r\nthree\r\n0\r\n\r\n"), "{chunky}");
+    let raw = String::from_utf8(get(port, "/raw")).unwrap();
+    assert!(raw.contains("Transfer-Encoding: chunked\r\n") && raw.ends_with("f\r\nuntil it closes\r\n0\r\n\r\n"), "{raw}");
+    let away = String::from_utf8(get(port, "/away")).unwrap();
+    assert!(away.starts_with("HTTP/1.1 307") && away.contains("\r\nLocation: /there?x=1\r\n"), "{away}");
+    // Bytes that are not text, with their length given and in chunks.
+    let mut seed: u32 = 7;
+    let bytes: Vec<u8> = (0..100_000).map(|_| { seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12_345); (seed >> 16) as u8 }).collect();
+    let sum: u64 = bytes.iter().map(|&b| b as u64).sum();
+    let mut sized = format!("POST /upload HTTP/1.1\r\nHost: front\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", bytes.len()).into_bytes();
+    sized.extend_from_slice(&bytes);
+    let mut chunked = b"POST /upload HTTP/1.1\r\nHost: front\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n".to_vec();
+    for part in bytes.chunks(30_000) {
+        chunked.extend_from_slice(format!("{:x}\r\n", part.len()).as_bytes());
+        chunked.extend_from_slice(part);
+        chunked.extend_from_slice(b"\r\n");
+    }
+    chunked.extend_from_slice(b"0\r\n\r\n");
+    for request in [sized, chunked] {
+        let mut s = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+        s.write_all(&request).unwrap();
+        let mut all = Vec::new();
+        s.read_to_end(&mut all).unwrap();
+        let all = String::from_utf8(all).unwrap();
+        assert!(all.contains(&format!(r#""length":100000,"sum":{sum}"#)), "{all}");
+    }
+    // The site's own routes and files are its own; Next.js's router, asking for one of its pages, is
+    // told it is not Next's.
+    assert!(String::from_utf8(get(port, "/")).unwrap().contains("Write the language"), "the site's page was forwarded");
+    assert!(String::from_utf8(get(port, "/_fly/nothing")).unwrap().starts_with("HTTP/1.1 404"), "the site's own address was forwarded");
+    let rsc = String::from_utf8(ask(port, "GET /about HTTP/1.1\r\nHost: front\r\nRSC: 1\r\nConnection: close\r\n\r\n".to_string())).unwrap();
+    assert!(rsc.starts_with("HTTP/1.1 204"), "{rsc}");
+    // Cookies the site's middleware sets go with the app's answer.
+    let both = String::from_utf8(get(port, "/elsewhere?from=x")).unwrap();
+    assert!(both.contains("\r\nSet-Cookie: from=x;") && both.contains(r#""url":"/elsewhere?from=x""#), "{both}");
+    upstream.kill().unwrap();
+    upstream.wait().unwrap();
+    assert!(String::from_utf8(get(port, "/elsewhere")).unwrap().starts_with("HTTP/1.1 502"), "an app that does not answer is not a 502");
     server.kill().unwrap();
     server.wait().unwrap();
     // In a browser, against a server with its store as it starts.

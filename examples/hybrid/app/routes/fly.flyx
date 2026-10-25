@@ -1,0 +1,36 @@
+// A page of this app's, in the browser where the Next.js app's pages link to it: rendered by the
+// server, its notes and who is signed in read from the cookie the Next.js app set, and a React
+// component of the page's in it, whose rating it keeps.
+
+import { Ui, Event } from "web/ui";
+import { Http } from "web/request";
+import { Note, Notes } from "../api";
+
+export type Model = { notes: Vec<Note>; who: String; stars: u32 };
+export type Msg = #Rated;
+
+export const title: str = "Notes, in Flyscript";
+
+export function load(): Model uses Notes, Http {
+  const who = match (Http.cookie("session")) { #Some(w) => w, #None => "no one".toString() };
+  { notes: Notes.list(), who, stars: 0 }
+}
+
+export function view(m: readonly Model): void uses Ui<Msg> {
+  <h1>Notes, in Flyscript</h1>
+  <p class="who">Signed in as {m.who}</p>
+  <ul class="notes">
+    for (const n of m.notes) {
+      <li key={`${n.id}`.asStr()}>{n.text}</li>
+    }
+  </ul>
+  <React name="Stars" props={{ count: m.stars }} onMsg={#Rated} />
+  <p class="rating">Rated {m.stars} of 5</p>
+  <a href="/">Back to the Next.js app</a>
+}
+
+export function update(m: mut Model, msg: Msg, ev: readonly Event): void {
+  match (msg) {
+    #Rated => { m.stars = match (parseInt(ev.text.asStr())) { #Some(n) => n as u32, #None => m.stars }; }
+  }
+}

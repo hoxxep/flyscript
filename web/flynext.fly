@@ -15,12 +15,13 @@
 // `.flyx`.
 
 import { println, eprintln, exit, File, writeFile } from "std/io";
-import { walk, createDirAll, removeAll, parent, isDir } from "std/fs";
+import { walk, createDirAll, removeAll, parent, isDir, listDir } from "std/fs";
 import { HashMap } from "std/collections";
 import { parseModule } from "../selfhost/parse";
 import { Module, Item, ItemKind, FnSig } from "../selfhost/ast";
 import { Origin, render, renderIn, mapText } from "../selfhost/diag";
 import { translate } from "./flyx";
+import { apiTs, flyIslandTsx, Modules } from "./typescript";
 
 // A page, as its module says what it has.
 type Route = {
@@ -313,7 +314,7 @@ function imports(out: mut String, routes: readonly Vec<Route>, layouts: readonly
   out.push("import { stringify, parse, FromJson, JsonError } from \"std/json\";\n");
   out.push("import { serve, Handler, Request, Response, Conn } from \"web/http\";\n");
   out.push(`import { Params, matches } from "web/router";\n`.asStr());
-  out.push(`import { Shell, Loaded, Fixed, Cache, newCache, kept, keep, answerKept, stream, respond, fixed, answerFixed, document, arrival, file, withHttp, redirect, setCookies, fields, postedMessage, submitted, modulesIn } from "web/site";\n`.asStr());
+  out.push(`import { Shell, Loaded, Fixed, Cache, newCache, kept, keep, answerKept, stream, respond, fixed, answerFixed, document, arrival, file, withHttp, redirect, setCookies, fields, postedMessage, submitted, modulesIn, Upstream, upstreamIn, upstream, forNextsRouter, notNexts } from "web/site";\n`.asStr());
   out.push(`import { Http } from "web/request";\n`.asStr());
   out.push("import { State, init, provide } from \"../server\";\n");
   if (names.len() > 0) {
@@ -399,7 +400,7 @@ function server(build: str, head: str, routes: readonly Vec<Route>, layouts: rea
   imports(mut out, routes, layouts, names, sp);
   out.push(`\nconst BUILD: str = ${quoted(build)};\nconst HEAD: str = ${quoted(head)};\n\n`.asStr());
   // The pages rendered once, at their own addresses, by route.
-  out.push("struct Site { state: State; dir: String; shell: Shell; fixed: Vec<Fixed>; cache: Cache }\n\n");
+  out.push("struct Site { state: State; dir: String; shell: Shell; fixed: Vec<Fixed>; cache: Cache; upstream: Option<Upstream> }\n\n");
   out.push("impl Handler for Site {\n  function handle(self: readonly Self, req: readonly Request, conn: mut Conn): void uses Io {\n    // A client that went away is no one to answer.\n    try { self.route(req, mut conn); } catch (_) {}\n  }\n}\n\n");
   out.push("impl Site {\n  function route(self: readonly Self, req: readonly Request, conn: mut Conn): void uses Io, Fail<IoErr> {\n");
   out.push("    const url = if (req.query.len() > 0) { `${req.path}?${req.query}` } else { req.path.clone() };\n");
@@ -417,10 +418,10 @@ function server(build: str, head: str, routes: readonly Vec<Route>, layouts: rea
       out.push(`    if (const #Some(p) = matches(${quoted(r.pattern.asStr())}, url.asStr())) { return self.endpoint${i}(req, mut conn, mut set, p); }\n`.asStr());
     }
   }
-  out.push("    if (req.method == \"GET\") {\n");
+  out.push("    if (req.method == \"GET\") {\n      const fromNext = forNextsRouter(req);\n");
   for (const [i, r] of routes.iter().enumerate()) {
     if (!r.endpoint) {
-      out.push(`      if (const #Some(p) = matches(${quoted(r.pattern.asStr())}, url.asStr())) { return self.page${i}(req, mut conn, mut set, url.asStr(), p); }\n`.asStr());
+      out.push(`      if (const #Some(p) = matches(${quoted(r.pattern.asStr())}, url.asStr())) { return if (fromNext) { notNexts(mut conn) } else { self.page${i}(req, mut conn, mut set, url.asStr(), p) }; }\n`.asStr());
     }
   }
   // A form a page posted without its program, to the page.
@@ -430,7 +431,11 @@ function server(build: str, head: str, routes: readonly Vec<Route>, layouts: rea
       out.push(`      if (const #Some(p) = matches(${quoted(r.pattern.asStr())}, req.path.asStr())) { return self.post${i}(req, mut conn, mut set, k, p); }\n`.asStr());
     }
   }
-  out.push("    }\n    if (file(mut conn, req, self.dir.asStr(), set)) { return; }\n    self.notFound(req, mut conn, set, url.asStr());\n  }\n\n");
+  // What no route answers: a file of the site's, or else the app the site is replacing, if there is
+  // one, or else the page saying it is not found.
+  out.push("    }\n    if (file(mut conn, req, self.dir.asStr(), set)) { return; }\n");
+  out.push("    if (const #Some(up) = self.upstream && !req.path.startsWith(\"/_fly/\")) { return upstream(mut conn, req, up, set); }\n");
+  out.push("    self.notFound(req, mut conn, set, url.asStr());\n  }\n\n");
   for (const [i, r] of routes.iter().enumerate()) {
     if (r.endpoint) {
       // An endpoint: its answer, with the cookies it set, or where it sent the browser.
@@ -479,7 +484,7 @@ function server(build: str, head: str, routes: readonly Vec<Route>, layouts: rea
     if (r.update) {
       // The same page, posted to: its update run on the server, and the browser sent on.
       out.push(`  function post${i}(self: readonly Self, req: readonly Request, conn: mut Conn, set: mut Vec<String>, k: usize, p: readonly Params): void uses Io, Fail<IoErr> {\n`.asStr());
-      out.push("    const posted = fields(req.body.asStr());\n    const url = req.path.asStr();\n");
+      out.push("    const posted = fields(req.text().asStr());\n    const url = req.path.asStr();\n");
       out.push(`    let read = false;\n    const got: Result<Loaded<String>, String> = withHttp(req, mut set, mut read, self.cache, () => match (${whole}) {\n`.asStr());
       out.push(`      #Page(m) => #Page(provide(self.state, () => submitted(m, k, posted, url, view${i}, update${i}))),\n      #Missing => #Missing,\n      #Broken => #Broken,\n    });\n`.asStr());
       out.push("    match (got) {\n      #Ok(#Page(to)) => redirect(mut conn, to.asStr(), set),\n      #Ok(#Missing) => self.notFound(req, mut conn, set, url),\n      #Ok(#Broken) => self.failed(req, mut conn, set, url),\n      #Err(to) => redirect(mut conn, to.asStr(), set),\n    }\n  }\n\n");
@@ -506,7 +511,7 @@ function server(build: str, head: str, routes: readonly Vec<Route>, layouts: rea
   // Calls.
   out.push("  function call(self: readonly Self, req: readonly Request, conn: mut Conn, set: mut Vec<String>): void uses Io, Fail<IoErr> {\n");
   out.push("    const op = req.path.asStr().slice(10, req.path.len());\n");
-  out.push("    let read = false;\n    const r = withHttp(req, mut set, mut read, self.cache, () => try { #Ok(provide(self.state, () => answer(op, req.body.asStr()))) } catch (_) { #Err(#BadCall) });\n");
+  out.push("    let read = false;\n    const r = withHttp(req, mut set, mut read, self.cache, () => try { #Ok(provide(self.state, () => answer(op, req.text().asStr()))) } catch (_) { #Err(#BadCall) });\n");
   out.push("    match (r) {\n      #Ok(#Ok(json)) => {\n        let r = Response.json(json);\n        setCookies(mut r, set);\n        conn.write(r);\n      }\n");
   out.push("      #Ok(#Err(_)) => {\n        let r = Response.text(400, \"bad call\\n\");\n        setCookies(mut r, set);\n        conn.write(r);\n      }\n      #Err(to) => redirect(mut conn, to.asStr(), set),\n    }\n  }\n}\n\n");
   // The answers to calls.
@@ -542,7 +547,8 @@ function server(build: str, head: str, routes: readonly Vec<Route>, layouts: rea
   out.push("  const port: u16 = if (args.len() > 0) { match (parseInt(args[0].asStr())) { #Some(n) => n as u16, #None => 3000 } } else { 3000 };\n");
   out.push("  const dir = if (args.len() > 1) { args[1].clone() } else { \".\".toString() };\n");
   out.push("  try {\n    let l = Listener.bind(port);\n    println(`listening on ${l.port()}`);\n");
-  out.push("    const shell: Shell = { head: HEAD.toString(), build: BUILD.toString(), modules: modulesIn(dir.asStr()) };\n");
+  out.push("    const up = upstreamIn(args);\n");
+  out.push("    const shell: Shell = { head: HEAD.toString(), build: BUILD.toString(), modules: modulesIn(dir.asStr()), strangling: up.isSome() };\n");
   // The pages that are the same for every request, rendered once.
   out.push("    let rendered: Vec<Fixed> = Vec.new();\n");
   for (const [i, r] of routes.iter().enumerate()) {
@@ -552,7 +558,7 @@ function server(build: str, head: str, routes: readonly Vec<Route>, layouts: rea
       out.push("    rendered.push({ doc: String.new(), data: String.new() });\n");
     }
   }
-  out.push("    serve(mut l, Site { state: init(), dir, shell, fixed: rendered, cache: newCache() });\n");
+  out.push("    serve(mut l, Site { state: init(), dir, shell, fixed: rendered, cache: newCache(), upstream: up });\n");
   out.push("  } catch (e) { println(`cannot serve: ${e}`); }\n}\n");
   out
 }
@@ -577,19 +583,7 @@ function client(routes: readonly Vec<Route>, layouts: readonly Vec<String>, effs
     out.push(`import { layout as layout${i} } from "../routes/${l}";\n`.asStr());
   }
   // What the pages perform, asked of the server.
-  out.push("\nfunction call<R extends FromJson>(op: str, args: String): R {\n  const text = fetch(`/_fly/rpc/${op}`.asStr(), args.asStr());\n  try { parse(text.asStr()) } catch (_) { panic(`the server's answer to \\`${op}\\` was not what it should be`) }\n}\n\n");
-  let row: Vec<String> = Vec.new();
-  for (const e of effs) { row.push(e.name.clone()); }
-  row.push("Io".toString());
-  out.push(`// Runs \`body\` with what it performs of the server's asked of it.\nfunction server<T>(body: once () => T uses ${row.join(", ")}): T uses Io {\n`.asStr());
-  let close = String.new();
-  for (const e of effs) {
-    out.push("  handle {\n");
-    close = `  } with ${e.name} {\n${arms(e)}  }\n${close}`;
-  }
-  out.push("  body()\n");
-  out.push(close.asStr());
-  out.push("}\n\n");
+  out.push(rpc(effs).asStr());
   // Each page's own code, a function of its own, which a page build loads as a module of its own the
   // first time the page is shown (selfhost/wasm-split.js).
   for (const [i, r] of routes.iter().enumerate()) {
@@ -623,6 +617,92 @@ function client(routes: readonly Vec<Route>, layouts: readonly Vec<String>, effs
   out.push("    arrived(at.url.asStr(), at.title.asStr(), at.description.asStr(), go.push);\n  }\n}\n\n");
   out.push("function state<M extends FromJson>(json: str): M {\n  try { parse(json) } catch (_) { panic(\"the page's state is not what it should be\") }\n}\n");
   out
+}
+
+// What a program in the browser performs of the server's effects, asked of the server: `call`, and
+// `server`, which runs a body with each effect handled by calls.
+function rpc(effs: readonly Vec<Effect>): String {
+  let out = "\nfunction call<R extends FromJson>(op: str, args: String): R {\n  const text = fetch(`/_fly/rpc/${op}`.asStr(), args.asStr());\n  try { parse(text.asStr()) } catch (_) { panic(`the server's answer to \\`${op}\\` was not what it should be`) }\n}\n\n".toString();
+  let row: Vec<String> = Vec.new();
+  for (const e of effs) { row.push(e.name.clone()); }
+  row.push("Io".toString());
+  out.push(`// Runs \`body\` with what it performs of the server's asked of it.\nfunction server<T>(body: once () => T uses ${row.join(", ")}): T uses Io {\n`.asStr());
+  let close = String.new();
+  for (const e of effs) {
+    out.push("  handle {\n");
+    close = `  } with ${e.name} {\n${arms(e)}  }\n${close}`;
+  }
+  out.push("  body()\n");
+  out.push(close.asStr());
+  out.push("}\n\n");
+  out
+}
+
+// An island's program: the island's view run in the element the page gives it (web/flynext.js's
+// `mountIsland`), from the model the page gives it as JSON, or else its `initial`, what it performs
+// of the server's effects asked of the server, as a page's program does.
+function island(name: str, m: readonly Module, effs: readonly Vec<Effect>, apiNames: readonly Vec<String>): String {
+  const update = fnOf(m, "update").isSome();
+  const init = fnOf(m, "initial").isSome();
+  let out = "// Made by flynext from the app: change the app, not this.\n\n".toString();
+  out.push("import { stringify, parse, FromJson } from \"std/json\";\n");
+  out.push("import { run, nothing, initial as given, fetch, arrived, still } from \"web/dom\";\n");
+  if (apiNames.len() > 0) { out.push(`import { ${apiNames.join(", ")} } from "../../api";\n`.asStr()); }
+  let own: Vec<String> = ["Model".toString(), "view".toString()];
+  if (update) { own.push("update".toString()); }
+  if (init) { own.push("initial".toString()); }
+  out.push(`import { ${own.join(", ")} } from "../../islands/${name}";\n`.asStr());
+  out.push(rpc(effs).asStr());
+  out.push("export function main(): void uses Io {\n  let shown = nothing();\n  const json = given();\n");
+  const made = if (init) { "initial()" } else { "panic(\"this island has no `initial`: give it its model\")" };
+  out.push(`  const m: Model = if (json.len() > 0) { try { parse(json.asStr()) } catch (_) { panic("the island's model is not what it should be") } } else { ${made} };\n`.asStr());
+  out.push(`  const go = server(() => run(mut shown, m, (m) => view(m), ${if (update) { "update" } else { "still" }}));\n`.asStr());
+  out.push("  if (go.url.len() > 0) { arrived(go.url.asStr(), \"\", \"\", true); }\n}\n");
+  out
+}
+
+// `app/.flynext/next`: the app's server effects and islands for an app in TypeScript beside it
+// (typescript.fly), `api.ts` and `FlyIsland.tsx`. A type of theirs that cannot be sent to TypeScript
+// is said, and the files left unwritten: an app with no TypeScript beside it needs neither.
+function typescript(app: str, written: readonly Written, islands: readonly Vec<[String, Module]>): void uses Io {
+  let mods: Modules = HashMap.new();
+  let queue: Vec<String> = [`${app}/api.fly`];
+  let named: Vec<[String, String]> = Vec.new();
+  for (const [n, _] of islands) {
+    const path = `${app}/islands/${n}.fly`;
+    queue.push(path.clone());
+    named.push([n.clone(), path]);
+  }
+  // Each module, and those it imports of the app's, by their paths.
+  while (const #Some(path) = queue.pop()) {
+    if (mods.has(path.asStr()) || !has(written, path.asStr())) { continue; }
+    const [src, origin] = source(written, path.asStr());
+    const m = parsed(path.asStr(), src.asStr(), origin);
+    for (const it of m.items) {
+      if (const #Import { names: _, from } = it.kind && from.asStr().startsWith(".")) {
+        queue.push(normalPath(`${parent(path.asStr())}/${from}.fly`.asStr()));
+      }
+    }
+    mods.insert(path, m);
+  }
+  const ts = try { apiTs(`${app}/api.fly`.asStr(), mods, named) } catch (#Unsendable(why)) {
+    eprintln(`not writing api.ts, for an app in TypeScript beside this one: ${why}`.asStr());
+    return;
+  };
+  try {
+    createDirAll(`${app}/.flynext/next`.asStr());
+    writeFile(`${app}/.flynext/next/api.ts`.asStr(), ts.asStr());
+    writeFile(`${app}/.flynext/next/FlyIsland.tsx`.asStr(), flyIslandTsx().asStr());
+  } catch (_) { stop(`cannot write ${app}/.flynext/next`.asStr()); }
+}
+
+// `a/b/../c` as `a/c`.
+function normalPath(path: str): String {
+  let parts: Vec<String> = Vec.new();
+  for (const p of path.split("/")) {
+    if (p == ".." && parts.len() > 0 && parts[parts.len() - 1] != "..") { parts.pop(); } else if (p != ".") { parts.push(p.clone()); }
+  }
+  parts.join("/")
 }
 
 // The arms of the client's handler of `e`: each operation a call of the server's.
@@ -675,6 +755,18 @@ export function main(args: readonly String[]): void uses Io {
   }
   const routes = sorted(rs);
   const [effs, apiNames] = effects(app, written);
+  // The app's islands, each a component a page of another app shows, as a program of its own.
+  let islands: Vec<[String, Module]> = Vec.new();
+  if (isDir(`${app}/islands`.asStr())) {
+    let files: Vec<String> = try { listDir(`${app}/islands`.asStr()) } catch (_) { Vec.new() };
+    files.sort();
+    for (const f of files) {
+      const stem = if (f.asStr().endsWith(".flyx")) { f.slice(0, f.len() - 5) } else if (f.asStr().endsWith(".fly")) { f.slice(0, f.len() - 4) } else { continue };
+      const path = `${app}/islands/${stem}.fly`;
+      const [src, origin] = source(written, path.asStr());
+      islands.push([stem.toString(), parsed(path.asStr(), src.asStr(), origin)]);
+    }
+  }
   const head = if (exists(`${app}/head.html`.asStr())) { read(`${app}/head.html`.asStr()).asStr().trimEnd().toString() } else { "<link rel=\"stylesheet\" href=\"/style.css\">".toString() };
   try {
     writeFile(`${app}/.flynext/server.fly`.asStr(), server(build, head.asStr(), routes, layouts, effs, apiNames, sp).asStr());
@@ -683,6 +775,20 @@ export function main(args: readonly String[]): void uses Io {
     let names: Vec<String> = Vec.new();
     for (const [i, r] of routes.iter().enumerate()) { if (!r.endpoint) { names.push(`${quoted(r.name.asStr())}: ${i}`); } }
     writeFile(`${app}/.flynext/routes.json`.asStr(), `{ ${names.join(", ")} }\n`.asStr());
+    // The addresses the pages answer, for a page's program to tell a link to one of them from one to
+    // the app the site is replacing (web/flynext.js).
+    let patterns: Vec<String> = Vec.new();
+    for (const r of routes) { if (!r.endpoint) { patterns.push(quoted(r.pattern.asStr())); } }
+    writeFile(`${app}/.flynext/patterns.json`.asStr(), `[${patterns.join(", ")}]\n`.asStr());
+    // Each island's program, and their names, for `web/flynext` to build.
+    createDirAll(`${app}/.flynext/islands`.asStr());
+    let listed = String.new();
+    for (const [n, m] of islands) {
+      writeFile(`${app}/.flynext/islands/${n}.fly`.asStr(), island(n.asStr(), m, effs, apiNames).asStr());
+      listed.push(`${n}\n`.asStr());
+    }
+    writeFile(`${app}/.flynext/islands.txt`.asStr(), listed.asStr());
   } catch (e) { stop(`cannot write ${app}/.flynext: ${e}`.asStr()); }
-  println(`${routes.len()} pages, ${layouts.len()} layouts, ${effs.len()} server effects`);
+  typescript(app, written, islands);
+  println(`${routes.len()} pages, ${layouts.len()} layouts, ${effs.len()} server effects, ${islands.len()} islands`);
 }

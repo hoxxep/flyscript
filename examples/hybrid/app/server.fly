@@ -1,0 +1,33 @@
+// The server's notes, shared by every connection's task under a lock; and who is signed in, from
+// the session cookie, whichever app set it.
+
+import { Mutex } from "std/sync";
+import { Http } from "web/request";
+import { Note, NoteErr, Notes } from "./api";
+
+type Store = { notes: Vec<Note>; next: u32 };
+export type State = Mutex<Store>;
+
+export function init(): State uses Io {
+  Mutex.new({ notes: [{ id: 1, text: "Written in Flyscript".toString() }], next: 2 })
+}
+
+function addTo(s: mut Store, text: String): Result<Vec<Note>, NoteErr> {
+  const t = text.asStr().trim();
+  if (t.len() == 0) { return #Err(#Empty); }
+  if (t.len() > 140) { return #Err(#TooLong(140)); }
+  s.notes.push({ id: s.next, text: t.toString() });
+  s.next += 1;
+  #Ok(s.notes.clone())
+}
+
+export function provide<T, row E>(db: readonly State, body: once () => T uses Notes, Io, Http, ...E): T uses Io, Http, ...E {
+  handle { body() } with Notes {
+    list() resumes k => k(db.lock((s) => s.notes.clone())),
+    add(text) resumes k => {
+      const t = text.clone();
+      k(db.lock((s) => addTo(mut s, t)))
+    }
+    whoami() resumes k => k(Http.cookie("session")),
+  }
+}

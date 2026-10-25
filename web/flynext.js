@@ -4,14 +4,86 @@
 // answer. `start(url)` runs the program at `url` in the page's element `#app`. Following a link
 // within the site, or stepping through the history, is an event too: the program asks the server
 // for what the next page shows, and renders it, the module and its state kept.
+//
+// `start(url, root, { strangling: true })` follows only links to the site's own routes, an app it
+// is replacing answering the rest. `mountIsland(el, url, json)` runs an island, a component built
+// as a program of its own (`app/islands`), in an element of any page, a React app's say, its model
+// `json`; it follows no links. `registerReact({ createRoot, createElement }, components)` lets a
+// view show React components (web/ui.fly's `react`), each mounted where the view puts it.
 
 const ENOSYS = 52;
 const EBADF = 8;
 
-export async function start(url, root = document.getElementById("app")) {
+// Each program compiled once, however many times it runs: an island shown twenty times.
+const compiled = new Map();
+const compile = (url) => {
+  const key = new URL(url, location.href).href;
+  if (!compiled.has(key)) compiled.set(key, fetch(key).then((r) => r.arrayBuffer()).then((b) => WebAssembly.compile(b)));
+  return compiled.get(key);
+};
+
+// ---- React components a view shows ----
+
+const react = { lib: null, components: {} };
+// The elements a React root is mounted in, on every program's page.
+const mounted = new Set();
+
+export function registerReact(lib, components) {
+  react.lib = lib;
+  Object.assign(react.components, components);
+  syncReact(document);
+}
+
+// Mounts, or renders again with new props, each React component under `scope` the views show, and
+// unmounts those whose element is gone, so their effects are cleaned up.
+function syncReact(scope) {
+  if (react.lib) for (const el of scope.querySelectorAll?.("[data-fly-react]") ?? []) renderReact(el);
+  for (const el of mounted) if (!el.isConnected) unmountReact(el);
+}
+
+function renderReact(el) {
+  const C = react.components[el.getAttribute("data-fly-react")];
+  if (!C) return;
+  const props = el.getAttribute("data-fly-props") ?? "{}";
+  let st = el.__flyReact;
+  if (st && st.props === props && st.C === C) return;
+  if (!st) {
+    st = el.__flyReact = { root: react.lib.createRoot(el) };
+    mounted.add(el);
+  }
+  st.props = props;
+  st.C = C;
+  // What the component says back is an event of its element's, its text what it emits.
+  const emit = (text) => el.__flyEmit?.(typeof text === "string" ? text : JSON.stringify(text));
+  st.root.render(react.lib.createElement(C, { ...JSON.parse(props), emit }));
+}
+
+function unmountReact(el) {
+  el.__flyReact?.root.unmount();
+  el.__flyReact = undefined;
+  mounted.delete(el);
+}
+
+// An island: what `start` runs in a page's `#app`, run in `el` instead, its model `json` (or what
+// its `initial` makes, if none), following no links. `unmount` stops it, and empties `el`.
+export function mountIsland(el, url, json = "") {
+  const island = { stopped: false };
+  start(url, el, { island: true, initial: typeof json === "string" ? json : JSON.stringify(json), handle: island });
+  return {
+    unmount() {
+      island.stopped = true;
+      for (const r of mounted) if (el.contains(r)) unmountReact(r);
+      el.replaceChildren();
+    },
+  };
+}
+
+export async function start(url, root = document.getElementById("app"), options = {}) {
   if (!WebAssembly.Suspending || !WebAssembly.promising) {
     throw new Error("this browser has no WebAssembly promise integration (JSPI)");
   }
+  const island = !!options.island;
+  const handle = options.handle ?? { stopped: false };
   // Each page's own code is a module of its own (selfhost/wasm-split.js), fetched as soon as the page
   // is known: this one's at once, beside the program's.
   const base = new URL(url, location.href);
@@ -25,8 +97,9 @@ export async function start(url, root = document.getElementById("app")) {
   const routeOf = (name) => (typeof ROUTES === "undefined" ? undefined : ROUTES.names[name]);
   // A page as the server describes it starts with the name of its route (web/dom.fly's `arrival`).
   const routeIn = (text) => routeOf(text.slice(0, (text.indexOf("\n") + 1 || text.length + 1) - 1));
-  { const k = routeIn(document.getElementById("fly-page")?.textContent ?? ""); if (k !== undefined) moduleOf(k); }
-  const module = await WebAssembly.compile(await (await fetch(url)).arrayBuffer());
+  if (!island) { const k = routeIn(document.getElementById("fly-page")?.textContent ?? ""); if (k !== undefined) moduleOf(k); }
+  const module = await compile(url);
+  if (handle.stopped) return;
   let exports;
   const mem = () => new Uint8Array(exports.memory.buffer);
   const view = () => new DataView(exports.memory.buffer);
@@ -212,16 +285,20 @@ export async function start(url, root = document.getElementById("app")) {
     events.push(e);
     if (wake) { const w = wake; wake = null; w(); }
   };
-  // A link within the site, followed by a plain click, is the program's to follow.
-  const ours = (a) => a && a.href && a.origin === location.origin && !a.target && !a.hasAttribute("download");
-  document.addEventListener("click", (ev) => {
-    if (ev.defaultPrevented || ev.button !== 0 || ev.metaKey || ev.ctrlKey || ev.shiftKey || ev.altKey) return;
-    const a = ev.target.closest?.("a");
-    if (!ours(a)) return;
-    ev.preventDefault();
-    happened(`\u0001\0${a.pathname}${a.search}\0${1}`);
-  });
-  addEventListener("popstate", () => happened(`\u0001\0${location.pathname}${location.search}\0${0}`));
+  // A link within the site, followed by a plain click, is the program's to follow: if the site is
+  // replacing an app, only a link to one of its own routes.
+  const routed = (path) => (typeof ROUTES === "undefined" ? [] : ROUTES.patterns ?? []).some((p) => matchRoute(p, path));
+  const ours = (a) => a && a.href && a.origin === location.origin && !a.target && !a.hasAttribute("download") && (!options.strangling || routed(a.pathname));
+  if (!island) {
+    document.addEventListener("click", (ev) => {
+      if (ev.defaultPrevented || ev.button !== 0 || ev.metaKey || ev.ctrlKey || ev.shiftKey || ev.altKey) return;
+      const a = ev.target.closest?.("a");
+      if (!ours(a)) return;
+      ev.preventDefault();
+      happened(`\u0001\0${a.pathname}${a.search}\0${1}`);
+    });
+    addEventListener("popstate", () => happened(`\u0001\0${location.pathname}${location.search}\0${0}`));
+  }
   // The head's description of the page, as the server writes it (web/site.fly): what a search engine
   // or a link preview shows of it.
   const describe = (title, description) => {
@@ -253,10 +330,17 @@ export async function start(url, root = document.getElementById("app")) {
       setTimeout(() => prefetched.delete(url), 10000);
     }
   };
-  document.addEventListener("mouseover", prefetch);
-  document.addEventListener("touchstart", prefetch, { passive: true });
+  if (!island) {
+    document.addEventListener("mouseover", prefetch);
+    document.addEventListener("touchstart", prefetch, { passive: true });
+  }
   const listen = (node, type) => {
     node.__fly ??= {};
+    // What a React component the view shows emits, its event's text.
+    if (type === "fly-react") {
+      node.__flyEmit = (text) => { const msg = node.__fly?.[type]; if (msg !== undefined) happened(`${msg}\0${text}\0\0false`); };
+      return;
+    }
     // One listener for each kind of event, which looks up the message the last render gave it.
     if (node.__flyListens?.has(type)) return;
     (node.__flyListens ??= new Set()).add(type);
@@ -305,7 +389,12 @@ export async function start(url, root = document.getElementById("app")) {
       const p = nodes[parent], n = nodes[node], b = before ? nodes[before] : null;
       if (n.parentNode !== p || n.nextSibling !== b) p.insertBefore(n, b);
     },
-    fly_dom_remove: (node) => { nodes[node]?.remove(); },
+    fly_dom_remove: (node) => {
+      const n = nodes[node];
+      if (!n) return;
+      for (const el of mounted) if (n === el || n.contains(el)) unmountReact(el);
+      n.remove();
+    },
     // A page whose server render was not what its program shows is made afresh: counted, for tests.
     fly_dom_clear: (parent) => { nodes[parent].replaceChildren(); globalThis.flyRebuilt = (globalThis.flyRebuilt ?? 0) + 1; },
     fly_dom_on: (node, e, len, msg) => {
@@ -315,7 +404,9 @@ export async function start(url, root = document.getElementById("app")) {
     },
     fly_dom_off: (node) => { const el = nodes[node]; if (el.__fly) el.__fly = {}; },
     fly_wait_event: new WebAssembly.Suspending(async () => {
-      while (events.length === 0) await new Promise((resolve) => { wake = resolve; });
+      // A render is done: the React components it shows are mounted, or given their new props.
+      syncReact(root);
+      while (events.length === 0 || handle.stopped) await new Promise((resolve) => { wake = resolve; });
       return keep(events.shift());
     }),
     fly_fetch: new WebAssembly.Suspending(async (u, ul, b, bl) => {
@@ -334,6 +425,8 @@ export async function start(url, root = document.getElementById("app")) {
     }),
     fly_arrived: (u, ul, t, tl, d, dl, push) => {
       const url = str(u, ul);
+      // An island going to another page goes there as a link would, the page loaded.
+      if (island) { location.assign(url); return; }
       // What happened on the page before is not the new page's: its messages are numbered anew.
       for (let i = events.length - 1; i >= 0; i--) if (!events[i].startsWith("\u0001")) events.splice(i, 1);
       const title = str(t, tl);
@@ -342,7 +435,7 @@ export async function start(url, root = document.getElementById("app")) {
       if (push) { history.pushState(null, "", url); scrollTo(0, 0); }
       globalThis.flyArrivals = (globalThis.flyArrivals ?? 0) + 1;
     },
-    fly_initial: () => keep(document.getElementById("fly-page")?.textContent ?? ""),
+    fly_initial: () => keep(island ? options.initial ?? "" : document.getElementById("fly-page")?.textContent ?? ""),
     fly_take: (out, len) => { mem().set(pending.subarray(0, len), out); },
   };
 
@@ -355,4 +448,20 @@ export async function start(url, root = document.getElementById("app")) {
 
 class Exit {
   constructor(code) { this.code = code; }
+}
+
+// Whether a route's pattern, `/todos/[id]` or `/docs/[...path]` (web/router.fly), answers `path`.
+function matchRoute(pattern, path) {
+  const want = pattern.split("/").filter((s) => s.length > 0);
+  const have = path.split("/").filter((s) => s.length > 0);
+  const last = want[want.length - 1] ?? "";
+  const optional = last.startsWith("[[...") && last.endsWith("]]");
+  const rest = optional || (last.startsWith("[...") && last.endsWith("]"));
+  const fixed = rest ? want.length - 1 : want.length;
+  if (rest ? have.length < fixed || (!optional && have.length === fixed) : want.length !== have.length) return false;
+  for (let i = 0; i < fixed; i++) {
+    const w = want[i];
+    if (!(w.startsWith("[") && w.endsWith("]")) && w !== have[i]) return false;
+  }
+  return true;
 }

@@ -1,0 +1,35 @@
+// An island: a component of this app's that a page of the Next.js app shows (`<FlyIsland
+// name="counter" model={…} />`), run by a program of its own, which asks this server for what it
+// performs, as any page of this app's does.
+
+import { Ui, Event } from "web/ui";
+import { Page } from "web/dom";
+import { Note, Notes } from "../api";
+
+export type Model = { n: i32; saved: u32 };
+export type Msg = #Up | #Down | #Save;
+
+export function initial(): Model { { n: 0, saved: 0 } }
+
+export function view(m: readonly Model): void uses Ui<Msg> {
+  <div class="island">
+    <button class="down" onClick={#Down}>−</button>
+    <output>{m.n}</output>
+    <button class="up" onClick={#Up}>+</button>
+    <button class="save" onClick={#Save}>Save as a note</button>
+    if (m.saved > 0) { <span class="saved">{m.saved} notes</span> }
+  </div>
+}
+
+export function update(m: mut Model, msg: Msg, ev: readonly Event): void uses Notes, Page<Model> {
+  match (msg) {
+    #Up => { m.n += 1; }
+    #Down => { m.n -= 1; }
+    #Save => {
+      match (Notes.add(`The island counted to ${m.n}`)) {
+        #Ok(all) => { m.saved = all.len() as u32; }
+        #Err(_) => {}
+      }
+    }
+  }
+}

@@ -6,9 +6,9 @@ import { Listener, Socket } from "std/net";
 
 export type Header = { name: String; value: String };
 
-// A request: its method, its path and query, its protocol's version, its headers, and its body, as
-// text.
-export struct Request { method: String; path: String; query: String; version: String; headers: Vec<Header>; body: String; }
+// A request: its method, its path and query, its protocol's version, its headers, and its body, its
+// bytes as they came.
+export struct Request { method: String; path: String; query: String; version: String; headers: Vec<Header>; body: Vec<u8>; }
 
 export type HttpErr = #BadRequest | IoErr;
 
@@ -20,6 +20,9 @@ impl Request {
     }
     #None
   }
+
+  // The body as text, any bytes that are not UTF-8 each U+FFFD.
+  export function text(self: readonly Self): String { String.fromUtf8Lossy(self.body.clone()) }
 }
 
 // A whole response.
@@ -129,20 +132,47 @@ impl Conn {
       headers.push({ name: l.asStr().slice(0, colon).trim().toString(), value: l.asStr().slice(colon + 1, l.len()).trim().toString() });
     }
     const version = if (parts.len() > 2) { parts[2].clone() } else { "HTTP/1.0".toString() };
-    let req: Request = { method: parts[0].clone(), path, query, version, headers, body: String.new() };
+    let req: Request = { method: parts[0].clone(), path, query, version, headers, body: Vec.new() };
     // HTTP/1.1 keeps a connection open unless asked not to; HTTP/1.0 closes it unless asked not to.
     const asked = match (req.header("connection")) { #Some(v) => v.toLowerCase(), #None => String.new() };
     self.old = req.version == "HTTP/1.0";
     self.keep = if (self.old) { asked == "keep-alive" } else { asked != "close" };
+    // A body sent in chunks is read whole, and is then as if its length had been given.
+    const chunked = match (req.header("transfer-encoding")) { #Some(v) => v.toLowerCase().asStr().includes("chunked"), #None => false };
+    if (chunked) {
+      req.body = self.chunks();
+      req.headers.retain((h) => h.name.asStr().toLowerCase() != "transfer-encoding");
+      req.headers.push({ name: "Content-Length".toString(), value: `${req.body.len()}` });
+      return #Some(req);
+    }
     const length: usize = match (req.header("content-length")) {
       #Some(v) => match (parseInt(v)) { #Some(n) => if (n >= 0) { n as usize } else { throw #BadRequest }, #None => throw #BadRequest },
       #None => 0,
     };
     if (length > 0) {
-      const bytes = match (self.take(length)) { #Some(b) => b, #None => throw #BadRequest };
-      req.body = match (String.fromUtf8(bytes)) { #Some(s) => s, #None => throw #BadRequest };
+      req.body = match (self.take(length)) { #Some(b) => b, #None => throw #BadRequest };
     }
     #Some(req)
+  }
+
+  // A body sent in chunks (RFC 9112 §7.1): each a length in hexadecimal and its bytes, until one of
+  // none, after which come trailers, which are dropped.
+  function chunks(self: mut Self): Vec<u8> uses Io, Fail<HttpErr> {
+    let body: Vec<u8> = Vec.new();
+    while (true) {
+      const l = match (self.line()) { #Some(l) => l, #None => throw #BadRequest };
+      const size = match (parseHex(match (l.asStr().indexOf(";")) { #Some(k) => l.asStr().slice(0, k), #None => l.asStr() }.trim())) { #Some(n) => n, #None => throw #BadRequest };
+      if (size == 0) {
+        while (true) {
+          const t = match (self.line()) { #Some(t) => t, #None => throw #BadRequest };
+          if (t.len() == 0) { return body; }
+        }
+      }
+      const bytes = match (self.take(size)) { #Some(b) => b, #None => throw #BadRequest };
+      body.extend(bytes);
+      match (self.line()) { #Some(e) if e.len() == 0 => {}, _ => throw #BadRequest }
+    }
+    body
   }
 
   // ---- writing ----
@@ -197,10 +227,31 @@ impl Conn {
 
   export function close(self: mut Self): void uses Io { self.socket.close(); }
 
+  // Up to `max` bytes of what the other end sends, as they come: none once it has sent all.
+  function some(self: mut Self, max: usize): Vec<u8> uses Io, Fail<IoErr> {
+    if (self.pos >= self.buf.len() && !self.fill()) { return Vec.new(); }
+    const end = min(self.buf.len(), self.pos + max);
+    let out: Vec<u8> = Vec.new();
+    out.extend(self.buf[self.pos..end]);
+    self.pos = end;
+    out
+  }
+
   // What the response says of the connection: closed after it, or, to HTTP/1.0, kept open.
   function connection(self: readonly Self): String {
     if (!self.keep) { "Connection: close\r\n".toString() } else if (self.old) { "Connection: keep-alive\r\n".toString() } else { String.new() }
   }
+}
+
+// A length in hexadecimal, as a chunk gives it; none if it is not one, or is too long to be one.
+function parseHex(s: str): Option<usize> {
+  if (s.len() == 0 || s.len() > 15) { return #None; }
+  let n: usize = 0;
+  for (const c of s.bytes()) {
+    const d: usize = if (c >= b'0' && c <= b'9') { (c - b'0') as usize } else if (c >= b'a' && c <= b'f') { (c - b'a' + 10) as usize } else if (c >= b'A' && c <= b'F') { (c - b'A' + 10) as usize } else { return #None };
+    n = n * 16 + d;
+  }
+  #Some(n)
 }
 
 function hex(n: usize): String {
@@ -219,6 +270,151 @@ function hex(n: usize): String {
     out.push(digits.slice(rev[i], rev[i] + 1));
   }
   out
+}
+
+// ---- forwarding ----
+
+// Headers that are about one connection, not the request or the response (RFC 9110 §7.6.1): a
+// proxy drops them, and says what it needs of each connection itself.
+const HOP: str[] = ["connection", "keep-alive", "proxy-connection", "proxy-authenticate", "proxy-authorization", "te", "trailer", "transfer-encoding", "upgrade"];
+
+function hop(name: str): bool { HOP.includes(name.toLowerCase().asStr()) }
+
+// Forwards `req` to the server at `host` and `port`, `extra` headers added, and relays its answer to
+// `conn` as it comes, `cookies` set on it besides its own: a body of a given length copied, one in chunks relayed chunk by chunk, and one
+// that ends when the server closes its connection sent on in chunks, so `conn` may stay open. An
+// answer to `HEAD`, or of a status that has no body, has none. A request to switch protocols, a
+// WebSocket, is answered 501: the connection is not relayed both ways.
+export function forward(conn: mut Conn, req: readonly Request, host: str, port: u16, extra: readonly Vec<Header>, cookies: readonly Vec<String>): void uses Io, Fail<IoErr> {
+  const upgrade = match (req.header("upgrade")) { #Some(_) => true, #None => false };
+  if (upgrade) {
+    conn.write(Response.text(501, "this server does not relay a connection that switches protocols\n"));
+    return;
+  }
+  // An app that cannot be reached is a gateway's failure to answer, whatever kept it from answering.
+  let up = match (try { #Ok(Socket.connect(host, port)) } catch (e) { #Err(e) }) {
+    #Ok(s) => Conn.new(s),
+    #Err(_) => {
+      conn.write(Response.text(502, `the app at ${host}:${port} does not answer\n`.asStr()));
+      return;
+    }
+  };
+  const target = if (req.query.len() > 0) { `${req.path}?${req.query}` } else { req.path.clone() };
+  let head = `${req.method} ${target} HTTP/1.1\r\n`;
+  for (const h of req.headers) {
+    if (!hop(h.name.asStr()) && h.name.asStr().toLowerCase() != "content-length") { head.push(`${h.name}: ${h.value}\r\n`.asStr()); }
+  }
+  for (const h of extra) { head.push(`${h.name}: ${h.value}\r\n`.asStr()); }
+  if (req.body.len() > 0 || req.method == "POST" || req.method == "PUT" || req.method == "PATCH") { head.push(`Content-Length: ${req.body.len()}\r\n`.asStr()); }
+  head.push("Connection: close\r\n\r\n");
+  up.socket.write(head.asStr().asBytes());
+  if (req.body.len() > 0) { up.socket.write(req.body); }
+  // The answer's status line and headers, 1xx answers before it skipped.
+  let status: u16 = 0;
+  let statusLine = String.new();
+  let headers: Vec<Header> = Vec.new();
+  while (status < 200) {
+    statusLine = match (up.line()) { #Some(l) => l, #None => { conn.write(Response.text(502, "the upstream server closed the connection\n")); up.close(); return; } };
+    const parts = statusLine.asStr().split(" ");
+    status = if (parts.len() > 1) { match (parseInt(parts[1].asStr())) { #Some(n) => n as u16, #None => 0 } } else { 0 };
+    if (status == 0) { conn.write(Response.text(502, "the upstream server's answer is not HTTP\n")); up.close(); return; }
+    headers = Vec.new();
+    while (true) {
+      const l = match (up.line()) { #Some(l) => l, #None => { conn.write(Response.text(502, "the upstream server closed the connection\n")); up.close(); return; } };
+      if (l.len() == 0) { break; }
+      if (const #Some(c) = l.asStr().indexOf(":")) { headers.push({ name: l.asStr().slice(0, c).trim().toString(), value: l.asStr().slice(c + 1, l.len()).trim().toString() }); }
+    }
+  }
+  const find = (name: str) => match (headers.iter().find((h) => h.name.asStr().toLowerCase() == name)) { #Some(h) => #Some(h.value.clone()), #None => #None };
+  const none = req.method == "HEAD" || status == 204 || status == 304;
+  const chunked = match (find("transfer-encoding")) { #Some(v) => v.toLowerCase().asStr().includes("chunked"), #None => false };
+  const length: Option<usize> = match (find("content-length")) { #Some(v) => match (parseInt(v.asStr())) { #Some(n) => #Some(n as usize), #None => #None }, #None => #None };
+  // The status line as the server gave it, but for the version, which is this connection's.
+  const reasonAt = match (statusLine.asStr().indexOf(" ")) { #Some(k) => k + 1, #None => statusLine.len() };
+  let out = `HTTP/1.1 ${statusLine.asStr().slice(reasonAt, statusLine.len())}\r\n`;
+  for (const h of headers) {
+    const name = h.name.asStr().toLowerCase();
+    if (hop(h.name.asStr()) || name == "content-length") { continue; }
+    // Where the server sends the browser, if it names the server itself, is here: the browser came
+    // here, and cannot reach the server.
+    const value = if (name == "location") { local(h.value.asStr(), host, port) } else { h.value.clone() };
+    out.push(`${h.name}: ${value}\r\n`.asStr());
+  }
+  for (const c of cookies) { out.push(`Set-Cookie: ${c}\r\n`.asStr()); }
+  out.push(conn.connection().asStr());
+  if (none) {
+    if (const #Some(n) = length) { out.push(`Content-Length: ${n}\r\n`.asStr()); }
+    out.push("\r\n");
+    conn.socket.write(out.asStr().asBytes());
+  } else if (chunked) {
+    out.push("Transfer-Encoding: chunked\r\n\r\n");
+    conn.socket.write(out.asStr().asBytes());
+    relayChunks(mut up, mut conn);
+  } else if (const #Some(n) = length) {
+    out.push(`Content-Length: ${n}\r\n\r\n`.asStr());
+    conn.socket.write(out.asStr().asBytes());
+    let left = n;
+    while (left > 0) {
+      const bytes = up.some(min(left, 65536));
+      if (bytes.len() == 0) { break; }
+      conn.socket.write(bytes);
+      left -= bytes.len();
+    }
+    // An answer shorter than it said cannot be finished: the connection must end with it.
+    if (left > 0) { conn.keep = false; }
+  } else {
+    out.push("Transfer-Encoding: chunked\r\n\r\n");
+    conn.socket.write(out.asStr().asBytes());
+    while (true) {
+      const bytes = up.some(65536);
+      if (bytes.len() == 0) { break; }
+      conn.socket.write(`${hex(bytes.len())}\r\n`.asStr().asBytes());
+      conn.socket.write(bytes);
+      conn.socket.write("\r\n".asBytes());
+    }
+    conn.socket.write("0\r\n\r\n".asBytes());
+  }
+  up.close();
+}
+
+// An address the server at `host` and `port` gave, as the browser should follow it here: its path,
+// if it names that server — by its host, or as `localhost` or `127.0.0.1`, which is how a server
+// behind another names itself — and else as it is.
+function local(url: str, host: str, port: u16): String {
+  const rest = if (url.startsWith("http://")) { url.slice(7, url.len()) } else if (url.startsWith("https://")) { url.slice(8, url.len()) } else { return url.toString() };
+  const slash = match (rest.indexOf("/")) { #Some(k) => k, #None => rest.len() };
+  const authority = rest.slice(0, slash);
+  const at = match (authority.lastIndexOf(":")) { #Some(c) => [authority.slice(0, c), authority.slice(c + 1, authority.len())], #None => [authority, "80"] };
+  const named = at[0] == host || at[0] == "localhost" || at[0] == "127.0.0.1";
+  if (!named || parseInt(at[1]) != #Some(port as i64)) { return url.toString(); }
+  const path = rest.slice(slash, rest.len());
+  if (path.len() == 0) { "/".toString() } else { path.toString() }
+}
+
+// A body in chunks, relayed from `up` to `conn` a chunk at a time as each comes, its trailers too.
+function relayChunks(up: mut Conn, conn: mut Conn): void uses Io, Fail<IoErr> {
+  while (true) {
+    const l = match (up.line()) { #Some(l) => l, #None => { conn.keep = false; return; } };
+    const size = match (parseHex(match (l.asStr().indexOf(";")) { #Some(k) => l.asStr().slice(0, k), #None => l.asStr() }.trim())) { #Some(n) => n, #None => { conn.keep = false; return; } };
+    conn.socket.write(`${hex(size)}\r\n`.asStr().asBytes());
+    if (size == 0) {
+      // The trailers, and the blank line that ends them.
+      while (true) {
+        const t = match (up.line()) { #Some(t) => t, #None => { conn.socket.write("\r\n".asBytes()); return; } };
+        conn.socket.write(`${t}\r\n`.asStr().asBytes());
+        if (t.len() == 0) { return; }
+      }
+    }
+    let left = size;
+    while (left > 0) {
+      const bytes = up.some(min(left, 65536));
+      if (bytes.len() == 0) { conn.keep = false; return; }
+      conn.socket.write(bytes);
+      left -= bytes.len();
+    }
+    match (up.line()) { #Some(_) => {}, #None => { conn.keep = false; return; } }
+    conn.socket.write("\r\n".asBytes());
+  }
 }
 
 // ---- serving ----

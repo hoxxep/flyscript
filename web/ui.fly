@@ -4,6 +4,8 @@
 // page's DOM in the browser. An event gives the program a message, an `M`, which its `update`
 // turns into a new model, and the view shows that.
 
+import { stringify, ToJson } from "std/json";
+
 export effect Ui<M> {
   // Starts an element, whose attributes, events and children follow, until `close`. Its attributes,
   // key and events may come in any order with its children: each is the innermost open element's.
@@ -65,6 +67,18 @@ export function map<A, B>(f: (a: A) => B, body: () => void uses Ui<A>): void use
     text(s) resumes k => { Ui.text(s); k() }
     close() resumes k => { Ui.close(); k() }
   }
+}
+
+// A React component of the page's, `name` as the page registered it (web/flynext.js's
+// `registerReact`), shown with `props` and rendered again when they change: an element its own, which
+// a render leaves as React made it. What it emits is an event giving `msg`, the event's text what it
+// emitted, a string or JSON. On the server, and before React has loaded, the element is empty.
+export function react<P extends ToJson, M>(name: str, props: readonly P, msg: M): void uses Ui<M> {
+  Ui.open("div");
+  Ui.attr("data-fly-react", name);
+  Ui.attr("data-fly-props", stringify(props).asStr());
+  Ui.on("fly-react", msg);
+  Ui.close();
 }
 
 // ---- without the page's program ----

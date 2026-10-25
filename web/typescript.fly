@@ -1,0 +1,284 @@
+// An app's types and server effects as TypeScript, for an app in TypeScript beside it — a Next.js
+// app a FlyNext app is replacing a route at a time — to call the server's effects with its types
+// checked: `api.ts`, each operation of `api.fly`'s effects a function that asks the server for it,
+// as a page's program does, and each type it takes or gives as `std/json` writes it:
+//
+//   numbers `number`, `bool` `boolean`, `String` and `str` `string`; `Vec<T>`, slices and arrays
+//   `T[]`, tuples tuples; records and structs objects; `Option<T>` `T | null`; and a tag `"Name"`
+//   without a payload — `void` is none, so `#Ok` of a `Result<void, E>` is `"Ok"` — `{ Name: T }`
+//   with one, `{ Name: [A, B] }` with several, `{ Name: { … } }` with fields.
+//
+// What JSON cannot carry to TypeScript as it is, it refuses, saying why: a 128-bit integer, which a
+// JavaScript number cannot hold; an `Option` of an `Option`, whose `#None` and `#Some(#None)` are
+// both `null`; and what has no JSON at all, a function or a pointer.
+
+import { Module, Item, ItemKind, Type, TypeKind, TagDecl, TagPayload, Field, TypeParam } from "../selfhost/ast";
+import { HashMap } from "std/collections";
+
+// Why a type cannot be sent to TypeScript.
+export type Unsendable = #Unsendable(String);
+
+// The modules the types are found in, by path: the app's, which `api.fly` and its islands import.
+export type Modules = HashMap<String, Module>;
+
+// What declares a type: an alias, a struct, or an enum, with its parameters.
+enum Decl { #Alias(Vec<TypeParam>, Type), #Struct(Vec<TypeParam>, Vec<Field>), #Enum(Vec<TypeParam>, Vec<TagDecl>) }
+
+// The TypeScript being written: each named type declared once, by its name, from the module that
+// declares it.
+view struct Writer {
+  mods: readonly Modules;
+  // Each type declared, by name: the module it is from, and its declaration, once written.
+  declared: HashMap<String, String>;
+  decls: Vec<String>;
+}
+
+function dirOf(path: str): str {
+  match (path.lastIndexOf("/")) { #Some(k) => path.slice(0, k), #None => "" }
+}
+
+// `a/b/../c` as `a/c`.
+function normal(path: str): String {
+  let parts: Vec<String> = Vec.new();
+  for (const p of path.split("/")) {
+    if (p == "..") { if (parts.len() > 0 && parts[parts.len() - 1] != "..") { parts.pop(); } else { parts.push(p.clone()); } } else if (p != ".") { parts.push(p.clone()); }
+  }
+  parts.join("/")
+}
+
+const INTS: str[] = ["i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "isize", "usize", "f32", "f64"];
+
+impl Writer {
+  // Where `name` is declared, seen from `module`: there, or in the module it is imported from.
+  function find(self: readonly Self, module: str, name: str): Option<[String, Decl]> {
+    const m = match (self.mods.get(module)) { #Some(m) => m, #None => return #None };
+    for (const it of m.items) {
+      match (it.kind) {
+        #TypeAlias(a) if a.name.name == name => return #Some([module.toString(), #Alias(a.params.clone(), a.ty.clone())]),
+        #Struct(s) if s.name.name == name => match (s.fields) {
+          #Some(fs) => return #Some([module.toString(), #Struct(s.params.clone(), fs.clone())]),
+          #None => return #None,
+        },
+        #Enum(e) if e.name.name == name => return #Some([module.toString(), #Enum(e.params.clone(), e.tags.clone())]),
+        _ => {}
+      }
+    }
+    for (const it of m.items) {
+      if (const #Import { names, from } = it.kind && from.asStr().startsWith(".")) {
+        for (const [orig, local] of names) {
+          if (local.name == name) {
+            const there = normal(`${dirOf(module)}/${from}.fly`.asStr());
+            return self.find(there.asStr(), orig.name.asStr());
+          }
+        }
+      }
+    }
+    #None
+  }
+
+  // `t`, seen from `module`, as TypeScript; `params` the type parameters in scope.
+  function ts(self: mut Self, module: str, t: readonly Type, params: readonly Vec<String>): String uses Fail<Unsendable> {
+    match (t.kind) {
+      #Readonly(inner) | #Mut(inner) => self.ts(module, inner, params),
+      #Tuple(items) => {
+        let out: Vec<String> = Vec.new();
+        for (const x of items) { out.push(self.ts(module, x, params)); }
+        `[${out.join(", ")}]`
+      }
+      #Array { elem, len: _ } => `${wrap(self.ts(module, elem, params).asStr())}[]`,
+      #Record { fields, rest: _ } => self.fields(module, fields, params),
+      #Union { tags, includes, rest: _ } => {
+        let out: Vec<String> = Vec.new();
+        for (const tag of tags) { out.push(self.tag(module, tag, params)); }
+        for (const inc of includes) { out.push(self.ts(module, inc, params)); }
+        if (out.len() == 0) { "never".toString() } else { out.join(" | ") }
+      }
+      #Path { segments, args } => {
+        if (segments.len() != 1) {
+          let path: Vec<String> = Vec.new();
+          for (const s of segments) { path.push(s.name.clone()); }
+          throw #Unsendable(`\`${path.join(".")}\` cannot be sent as JSON`)
+        }
+        const name = segments[0].name.asStr();
+        if (params.iter().some((p) => p == name)) { return name.toString(); }
+        if (INTS.includes(name)) { return "number".toString(); }
+        match (name) {
+          "bool" => return "boolean".toString(),
+          "String" | "str" => return "string".toString(),
+          "void" => return "null".toString(),
+          "never" => return "never".toString(),
+          "i128" | "u128" => throw #Unsendable(`\`${name}\` cannot be sent to TypeScript: a JavaScript number holds integers of 53 bits`),
+          "Vec" if args.len() == 1 => return `${wrap(self.ts(module, args[0], params).asStr())}[]`,
+          "Option" if args.len() == 1 => {
+            if (const #Path { segments: inner, args: _ } = args[0].kind && inner.len() == 1 && inner[0].name == "Option") {
+              throw #Unsendable("an `Option` of an `Option` cannot be sent as JSON, whose `#None` and `#Some(#None)` are both `null`: give the two a tag union of their own".toString())
+            }
+            return `${self.ts(module, args[0], params)} | null`;
+          }
+          "Result" if args.len() == 2 => {
+            const ok = if (isVoid(args[0])) { "\"Ok\"".toString() } else { `{ Ok: ${self.ts(module, args[0], params)} }` };
+            const err = if (isVoid(args[1])) { "\"Err\"".toString() } else { `{ Err: ${self.ts(module, args[1], params)} }` };
+            return `${ok} | ${err}`;
+          }
+          _ => {}
+        }
+        // A type of the app's, declared once, with its arguments.
+        const [home, decl] = match (self.find(module, name)) { #Some(d) => d, #None => throw #Unsendable(`\`${name}\` cannot be sent as JSON: it is not a type of the app's that JSON can carry`) };
+        self.declare(home.asStr(), name, decl);
+        if (args.len() == 0) { return name.toString(); }
+        let shown: Vec<String> = Vec.new();
+        for (const a of args) { shown.push(self.ts(module, a, params)); }
+        `${name}<${shown.join(", ")}>`
+      }
+      _ => throw #Unsendable("a function, a pointer or `dyn` cannot be sent as JSON".toString()),
+    }
+  }
+
+  function fields(self: mut Self, module: str, fields: readonly Vec<Field>, params: readonly Vec<String>): String uses Fail<Unsendable> {
+    let out: Vec<String> = Vec.new();
+    for (const f of fields) {
+      if (f.private) { continue; }
+      out.push(`${f.name.name}: ${self.ts(module, f.ty, params)}`);
+    }
+    if (out.len() == 0) { "{}".toString() } else { `{ ${out.join("; ")} }` }
+  }
+
+  function tag(self: mut Self, module: str, tag: readonly TagDecl, params: readonly Vec<String>): String uses Fail<Unsendable> {
+    const name = tag.name.name.asStr();
+    match (tag.payload) {
+      #None => `"${name}"`,
+      #Tuple(ts) if ts.len() == 1 && isVoid(ts[0]) => `"${name}"`,
+      #Tuple(ts) if ts.len() == 1 => `{ ${name}: ${self.ts(module, ts[0], params)} }`,
+      #Tuple(ts) => {
+        let out: Vec<String> = Vec.new();
+        for (const t of ts) { out.push(self.ts(module, t, params)); }
+        `{ ${name}: [${out.join(", ")}] }`
+      }
+      #Record(fs) => `{ ${name}: ${self.fields(module, fs, params)} }`,
+    }
+  }
+
+  // A type of the app's, declared under its name, once.
+  function declare(self: mut Self, module: str, name: str, decl: readonly Decl): void uses Fail<Unsendable> {
+    match (self.declared.get(name)) {
+      #Some(from) => {
+        if (from != module) { throw #Unsendable(`two types are called \`${name}\`, in ${from} and in ${module}: TypeScript would see one`) }
+        return;
+      }
+      #None => {}
+    }
+    self.declared.insert(name.toString(), module.toString());
+    const tparams = match (decl) { #Alias(ps, _) | #Struct(ps, _) | #Enum(ps, _) => typeParams(ps) };
+    const head = if (tparams.len() == 0) { name.toString() } else { `${name}<${tparams.join(", ")}>` };
+    const body = match (decl) {
+      #Alias(_, t) => self.ts(module, t, tparams),
+      #Struct(_, fs) => self.fields(module, fs, tparams),
+      #Enum(_, tags) => {
+        let out: Vec<String> = Vec.new();
+        for (const t of tags) { out.push(self.tag(module, t, tparams)); }
+        out.join(" | ")
+      }
+    };
+    self.decls.push(`export type ${head} = ${body};\n`);
+  }
+}
+
+// A union in brackets, before `[]`.
+function wrap(t: str): String { if (t.includes(" | ")) { `(${t})` } else { t.toString() } }
+
+function typeParams(ps: readonly Vec<TypeParam>): Vec<String> {
+  let out: Vec<String> = Vec.new();
+  for (const p of ps) { if (const #Type { name, bounds: _, default: _ } = p) { out.push(name.name.clone()); } }
+  out
+}
+
+function isVoid(t: readonly Type): bool {
+  match (t.kind) { #Path { segments, args: _ } => segments.len() == 1 && segments[0].name == "void", _ => false }
+}
+
+// `api.ts`: the types of `api.fly`'s effects' operations, and each operation a function of
+// `client(…)`'s, the effects of a client asking the server at `baseUrl` (the page's own, by
+// default), with `headers` — a request's cookies, from a server component — and its `fetch`.
+// `islands` are the islands' models, by name, each its module's path, for `FlyIsland`'s `model`.
+export function apiTs(api: str, mods: readonly Modules, islands: readonly Vec<[String, String]>): String uses Fail<Unsendable> {
+  let w = Writer { mods, declared: HashMap.new(), decls: Vec.new() };
+  let effects = String.new();
+  let names: Vec<String> = Vec.new();
+  if (const #Some(m) = mods.get(api)) {
+    for (const it of m.items) {
+      if (!it.exported) { continue; }
+      if (const #Effect(e) = it.kind) {
+        names.push(e.name.name.clone());
+        effects.push(`    ${e.name.name}: {\n`.asStr());
+        for (const op of e.ops) {
+          let ps: Vec<String> = Vec.new();
+          let keys: Vec<String> = Vec.new();
+          for (const p of op.params) {
+            const ty = match (p.ty) { #Some(t) => w.ts(api, t, Vec.new()), #None => "unknown".toString() };
+            ps.push(`${p.name.name}: ${ty}`);
+            keys.push(p.name.name.clone());
+          }
+          const ret = w.ts(api, op.ret.ty, Vec.new());
+          const args = if (keys.len() == 0) { "{}".toString() } else { `{ ${keys.join(", ")} }` };
+          effects.push(`      ${op.name.name}: (${ps.join(", ")}): Promise<${ret}> => call(o, "${e.name.name}.${op.name.name}", ${args}),\n`.asStr());
+        }
+        effects.push("    },\n");
+      }
+    }
+  }
+  let models = String.new();
+  for (const [name, path] of islands) {
+    const ty = match (w.find(path.asStr(), "Model")) {
+      #Some([home, decl]) => {
+        const own = `${pascal(name.asStr())}Model`;
+        // An island's model, under a name of its own: each island's is called `Model`.
+        let body = match (decl) {
+          #Alias(_, t) => w.ts(home.asStr(), t, Vec.new()),
+          #Struct(_, fs) => w.fields(home.asStr(), fs, Vec.new()),
+          #Enum(_, tags) => {
+            let out: Vec<String> = Vec.new();
+            for (const t of tags) { out.push(w.tag(home.asStr(), t, Vec.new())); }
+            out.join(" | ")
+          }
+        };
+        w.decls.push(`export type ${own} = ${body};\n`);
+        own
+      }
+      #None => "unknown".toString(),
+    };
+    models.push(`  ${quote(name.asStr())}: ${ty};\n`.asStr());
+  }
+  let out = "// Made by flynext from the app's api.fly: change the app, not this.\n\n".toString();
+  for (const d of w.decls) { out.push(d.asStr()); }
+  out.push("\n// The model each island of the app's is shown with (`FlyIsland`).\nexport type Islands = {\n");
+  out.push(models.asStr());
+  out.push("};\n\n");
+  out.push("// Where a client asks the server: its own page's, by default; and with what headers and `fetch`.\nexport type Options = { baseUrl?: string; headers?: HeadersInit; fetch?: typeof fetch };\n\n");
+  out.push("// The server's answer to a call that was not what the call should get.\nexport class CallError extends Error {\n  constructor(readonly op: string, readonly status: number, readonly body: string) {\n    super(`${op}: the server answered ${status}`);\n  }\n}\n\n");
+  out.push("async function call<T>(o: Options, op: string, args: object): Promise<T> {\n  const headers = new Headers(o.headers);\n  headers.set(\"Content-Type\", \"application/json\");\n  const res = await (o.fetch ?? fetch)(`${o.baseUrl ?? \"\"}/_fly/rpc/${op}`, { method: \"POST\", headers, body: JSON.stringify(args), credentials: \"same-origin\" });\n  if (!res.ok) throw new CallError(op, res.status, await res.text());\n  return (await res.json()) as T;\n}\n\n");
+  out.push("// The server's effects, asked of the server `o` says.\nexport function client(o: Options = {}) {\n  return {\n");
+  out.push(effects.asStr());
+  out.push("  };\n}\n\n");
+  if (names.len() > 0) { out.push(`export const { ${names.join(", ")} } = client();\n`.asStr()); }
+  out
+}
+
+// `FlyIsland.tsx`: a React component showing an island of the app's, its model typed as `api.ts`
+// says.
+export function flyIslandTsx(): String {
+  "// Made by flynext: change the app, not this.\n\"use client\";\n\nimport { useEffect, useRef } from \"react\";\nimport type { Islands } from \"./api\";\n\n// An island of the app's (`app/islands/<name>`), shown in this element and run by its own program,\n// from the FlyNext server this page came through, with `model`, or what its `initial` makes.\nexport function FlyIsland<N extends keyof Islands>({ name, model, className }: { name: N; model?: Islands[N]; className?: string }) {\n  const el = useRef<HTMLDivElement>(null);\n  const json = model === undefined ? \"\" : JSON.stringify(model);\n  useEffect(() => {\n    let island: { unmount(): void } | undefined;\n    let gone = false;\n    const host = \"/_fly/flynext.js\";\n    import(/* webpackIgnore: true */ /* turbopackIgnore: true */ host).then((m: { mountIsland(el: Element, url: string, json: string): { unmount(): void } }) => {\n      if (!gone && el.current) island = m.mountIsland(el.current, `/_fly/islands/${String(name)}.wasm`, json);\n    });\n    return () => {\n      gone = true;\n      island?.unmount();\n    };\n  }, [name, json]);\n  return <div ref={el} className={className} />;\n}\n".toString()
+}
+
+// `top-list` as `TopList`.
+function pascal(s: str): String {
+  let out: Vec<u8> = Vec.new();
+  let up = true;
+  for (const c of s.bytes()) {
+    if (c == b'-' || c == b'_') { up = true; continue; }
+    out.push(if (up && c >= b'a' && c <= b'z') { c - 32 } else { c });
+    up = false;
+  }
+  String.fromUtf8Lossy(out)
+}
+
+function quote(s: str): String { `"${s.replaceAll("\\", "\\\\").replaceAll("\"", "\\\"")}"` }

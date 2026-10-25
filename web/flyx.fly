@@ -19,7 +19,8 @@
 //   program follows without loading the page again.
 // - A tag whose name is capitalized is a component: `<Counter model={m.c} onMsg={(c) => #C(c)} />`
 //   is `map((c) => #C(c), () => Counter.view(m.c))`, its `view` the component's type's, and without
-//   `onMsg` its view is shown as it is, its messages the page's.
+//   `onMsg` its view is shown as it is, its messages the page's. `<React name="Chart" props={p}
+//   onMsg={#Picked} />` is a React component of the page's, `react("Chart", p, #Picked)`.
 // - Text is JSX's: each line's spaces at its ends dropped but where the text meets a tag on the
 //   same line, empty lines dropped, the rest joined by a space; `&amp;` and the like, and `&#…;`,
 //   stand for their characters. `{expr}` is shown as text, by its `Display`; braces whose code
@@ -41,7 +42,7 @@ export type Written = { code: String; pieces: Vec<Piece> };
 
 // What the calls the translation writes are named, imported from `web/ui` under names no module
 // would give its own.
-const PRELUDE: str = "import { el as __fx_el, text as __fx_text, attr as __fx_attr, cls as __fx_cls, key as __fx_key, on as __fx_on, link as __fx_link, map as __fx_map } from \"web/ui\";\n";
+const PRELUDE: str = "import { el as __fx_el, text as __fx_text, attr as __fx_attr, cls as __fx_cls, key as __fx_key, on as __fx_on, link as __fx_link, map as __fx_map, react as __fx_react } from \"web/ui\";\n";
 
 export function translate(src: str): Written uses Fail<Diagnostic> {
   let w = Translator { src, bytes: src.asBytes(), pos: 0, done: 0, out: String.new(), pieces: Vec.new(), tags: false };
@@ -290,6 +291,10 @@ impl Translator {
       self.write(" }", tagSpan);
       return;
     }
+    if (tag == "React") {
+      self.reactTag(tagSpan, attrs, closes, statement);
+      return;
+    }
     if (isAlpha(tag.asBytes()[0]) && tag.asBytes()[0] >= b'A' && tag.asBytes()[0] <= b'Z') {
       self.component(tag.asStr(), tagSpan, attrs, closes, statement);
       return;
@@ -392,6 +397,30 @@ impl Translator {
     self.write(")", tagSpan);
     if (onMsg.isSome()) { self.write(")", tagSpan); }
     if (statement) { self.write(";", tagSpan); }
+  }
+
+  // `<React name="Chart" props={p} onMsg={#Picked} />`: a React component of the page's.
+  function reactTag(self: mut Self, tagSpan: Span, attrs: readonly Vec<Attr>, closes: bool, statement: bool): void uses Fail<Diagnostic> {
+    let name: Option<usize> = #None;
+    let props: Option<usize> = #None;
+    let msg: Option<usize> = #None;
+    for (const [i, a] of attrs.iter().enumerate()) {
+      if (a.name == "name") { name = #Some(i); } else if (a.name == "props") { props = #Some(i); } else if (a.name == "onMsg") { msg = #Some(i); } else {
+        throw self.err(a.span.start, a.span.end, `\`<React>\` takes \`name\`, \`props\` and \`onMsg\`, not \`${a.name}\``.asStr());
+      }
+    }
+    if (!closes) { throw self.err(tagSpan.start, tagSpan.end, "`<React>` has no children: `<React name=\"…\" props={…} onMsg={…} />`"); }
+    const [n, p, m] = match ([name, props, msg]) {
+      [#Some(n), #Some(p), #Some(m)] => [n, p, m],
+      _ => throw self.err(tagSpan.start, tagSpan.end, "`<React>` needs the component's `name`, its `props` and the message it gives, `onMsg`"),
+    };
+    self.write("__fx_react(", tagSpan);
+    self.value(attrs[n].value, attrs[n].span);
+    self.write(", ", tagSpan);
+    self.value(attrs[p].value, attrs[p].span);
+    self.write(", ", tagSpan);
+    self.value(attrs[m].value, attrs[m].span);
+    self.write(if (statement) { ");" } else { ")" }, tagSpan);
   }
 
   // What is between a start tag and its end tag: text, `{expr}`s, tags and statements.

@@ -6,15 +6,17 @@ import { File } from "std/io";
 import { Mutex } from "std/sync";
 import { HashMap } from "std/collections";
 import { stringify, ToJson } from "std/json";
-import { Request, Response, Conn } from "./http";
+import { Request, Response, Conn, Header, forward } from "./http";
 import { Ui, Event, html, escape, messages } from "./ui";
 import { Page } from "./dom";
 import { decode } from "./router";
 import { Http } from "./request";
 
 // What every page of the site has around what it shows: what goes in its `<head>`; in development,
-// the build it was made by; and the file of each route's own module (web/flynext.js), by route.
-export type Shell = { head: String; build: String; modules: HashMap<String, String> };
+// the build it was made by; the file of each route's own module (web/flynext.js), by route; and
+// whether the site answers only some addresses, an app it is replacing the rest, so that its
+// program follows only links to its own routes.
+export type Shell = { head: String; build: String; modules: HashMap<String, String>; strangling: bool };
 
 // The routes' modules, as a build lists them in `_fly/routes/modules.txt`: a route and its file a line.
 export function modulesIn(dir: str): HashMap<String, String> uses Io {
@@ -89,7 +91,8 @@ function closing(out: mut String, shell: readonly Shell, route: str, url: str, t
   // The form a button posts its message with, without the page's program (web/ui.fly's `posting`).
   out.push("<form id=\"_fly\" method=\"post\" hidden></form><script type=\"text/plain\" id=\"fly-page\">");
   out.push(arrival(route, url, title, description, state).asStr().replaceAll("</", "<\\/").asStr());
-  out.push("</script><script type=\"module\">import { start } from \"/_fly/flynext.js\"; start(\"/_fly/app.wasm\");</script>");
+  const how = if (shell.strangling) { ", undefined, { strangling: true }" } else { "" };
+  out.push(`</script><script type="module">import { start } from "/_fly/flynext.js"; start("/_fly/app.wasm"${how});</script>`.asStr());
   if (shell.build.len() > 0) {
     // In development a page reloads once the server answers for another build.
     out.push("<script>(async () => { const was = ");
@@ -324,6 +327,50 @@ export function file(conn: mut Conn, req: readonly Request, dir: str, cookies: r
     }
     #None => false,
   }
+}
+
+// ---- strangling ----
+
+// A page of the site's asked for by Next.js's client router, following a link from a page of the app
+// the site is replacing (`RSC: 1`): answered with nothing, which that router takes to mean the page
+// is not its own, and loads as a browser does. Its prefetches cost no page's `load` either.
+export function forNextsRouter(req: readonly Request): bool { req.header("rsc").isSome() }
+
+export function notNexts(conn: mut Conn): void uses Io, Fail<IoErr> {
+  let r = Response.new(204, "text/plain", String.new());
+  r.header("Cache-Control", "no-store");
+  conn.write(r);
+}
+
+// The app a site is replacing a route at a time, which answers what no route of the site does: its
+// server's host and port, as `--upstream=http://host:port` names it.
+export type Upstream = { host: String; port: u16 };
+
+// The upstream the server's arguments name, if they name one.
+export function upstreamIn(args: readonly String[]): Option<Upstream> {
+  for (const a of args) {
+    if (!a.asStr().startsWith("--upstream=")) { continue; }
+    let rest = a.asStr().slice(11, a.len());
+    if (rest.startsWith("http://")) { rest = rest.slice(7, rest.len()); }
+    if (const #Some(slash) = rest.indexOf("/")) { rest = rest.slice(0, slash); }
+    return match (rest.lastIndexOf(":")) {
+      #Some(c) => match (parseInt(rest.slice(c + 1, rest.len()))) {
+        #Some(p) => #Some({ host: rest.slice(0, c).toString(), port: p as u16 }),
+        #None => #None,
+      },
+      #None => #Some({ host: rest.toString(), port: 80 }),
+    };
+  }
+  #None
+}
+
+// A request no route of the site answers, answered by the app the site is replacing: forwarded as
+// it came, saying where it came to, and its answer relayed, with the cookies the site set.
+export function upstream(conn: mut Conn, req: readonly Request, up: readonly Upstream, cookies: readonly Vec<String>): void uses Io, Fail<IoErr> {
+  let extra: Vec<Header> = Vec.new();
+  if (const #Some(h) = req.header("host") && req.header("x-forwarded-host").isNone()) { extra.push({ name: "X-Forwarded-Host".toString(), value: h.toString() }); }
+  if (req.header("x-forwarded-proto").isNone()) { extra.push({ name: "X-Forwarded-Proto".toString(), value: "http".toString() }); }
+  forward(mut conn, req, up.host.asStr(), up.port, extra, cookies);
 }
 
 // ---- forms, without the page's program ----

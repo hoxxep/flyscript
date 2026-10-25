@@ -1,0 +1,13 @@
+// Notes, and who is signed in: what both apps ask the server for — the Next.js app's pages through
+// `api.ts`, which the build writes from this module, and this app's pages and islands as any
+// FlyNext page does.
+
+export type Note = { id: u32; text: String };
+export type NoteErr = #Empty | #TooLong(u32);
+
+export effect Notes {
+  list(): Vec<Note>;
+  add(text: String): Result<Vec<Note>, NoteErr>;
+  // The name the session cookie says, which the Next.js app set.
+  whoami(): Option<String>;
+}
